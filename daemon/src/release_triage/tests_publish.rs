@@ -168,7 +168,35 @@ case "$1 $2" in
     printf '%s\n' "$@" > "$D/last_create.txt"
     n=$(cat "$D/n" 2>/dev/null || echo 100); n=$((n+1)); echo $n > "$D/n"
     echo "https://github.com/o/r/issues/$n";;
-  "issue comment") printf '%s\n' "$@" > "$D/last_comment.txt"; exit 0;;
+  "issue comment")
+    printf '%s\n' "$@" > "$D/last_comment.txt"
+    shift 2; number=$1; shift; body=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--body" ]; then body=$2; break; fi
+      shift
+    done
+    marker=$(printf '%s\n' "$body" | sed -n 's/^.*<!-- \(release-triage: .* -->\).*$/\1/p')
+    [ -n "$marker" ] && printf '%s\n' "$marker" >> "$D/comment-markers-$number.log"
+    exit 0;;
+  "api "*)
+    paginated=0; path=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --paginate) paginated=1; shift;;
+        --jq) shift 2;;
+        *) path=$1; shift;;
+      esac
+    done
+    number=$(printf '%s\n' "$path" | sed -n 's|.*/issues/\([0-9][0-9]*\)/comments$|\1|p')
+    comments="$D/comment-markers-$number.log"
+    if [ ! -f "$comments" ]; then echo '[]'; exit 0; fi
+    if [ "$paginated" -eq 1 ]; then
+      while IFS= read -r marker; do printf '[{"body":"%s"}]\n' "$marker"; done < "$comments"
+    else
+      IFS= read -r marker < "$comments"
+      printf '[{"body":"%s"}]\n' "$marker"
+    fi
+    exit 0;;
   *) exit 2;;
 esac
 "#;
@@ -430,6 +458,59 @@ async fn duplicate_of_only_comments_and_does_not_count_against_caps() {
     assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), 0);
     let r = row(&p).await;
     assert_eq!((r.issues[0].number, r.issues[0].comment), (102, true));
+}
+
+#[tokio::test]
+async fn a_comment_whose_ledger_write_failed_is_found_before_retrying_the_side_effect() {
+    let p = pool().await;
+    let gh = FakeGh::new("comment-crash-window");
+    seed(&p, &[("guard", &[0], Some(102))]).await;
+    // Put the operation marker on a later API page to make sure the full comment history is searched.
+    std::fs::write(
+        gh.dir.join("comment-markers-102.log"),
+        "release-triage: old@0#one -->\nrelease-triage: old@0#two -->\n",
+    )
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_publish_ledger BEFORE UPDATE OF issue_numbers_json ON release_triage
+         BEGIN SELECT RAISE(ABORT, 'injected ledger write failure'); END",
+    )
+    .execute(&p)
+    .await
+    .unwrap();
+
+    let cfg = gh.cfg(true);
+    let first = issue::publish_version(&p, &cfg, "claude", "2.1.277").await;
+    assert!(first.is_err(), "the injected ledger failure must be visible: {first:?}; calls={:?}", gh.calls());
+    assert_eq!(gh.count("issue comment"), 1, "the first external comment succeeded; result={first:?}; calls={:?}", gh.calls());
+    assert!(row(&p).await.issues.is_empty(), "the failed ledger commit left no IssueRef");
+
+    sqlx::query("DROP TRIGGER fail_publish_ledger").execute(&p).await.unwrap();
+    let retry = issue::publish_version(&p, &cfg, "claude", "2.1.277").await.unwrap();
+    assert!(matches!(retry, Outcome::Published { commented: 1, .. }), "{retry:?}");
+    assert_eq!(gh.count("issue comment"), 1, "retry must recognize the marker on the paginated comment history");
+    assert_eq!(gh.count("api --paginate"), 2, "the initial call and retry both check the complete comment history");
+    let r = row(&p).await;
+    assert_eq!((r.issues.len(), r.issues[0].number, r.issues[0].comment), (1, 102, true));
+}
+
+#[tokio::test]
+async fn a_comment_is_not_posted_when_its_durable_intent_cannot_be_written() {
+    let p = pool().await;
+    let gh = FakeGh::new("comment-intent-failure");
+    seed(&p, &[("guard", &[0], Some(102))]).await;
+    sqlx::query(
+        "CREATE TRIGGER fail_publish_intent BEFORE INSERT ON release_triage_publish_intents
+         BEGIN SELECT RAISE(ABORT, 'injected intent write failure'); END",
+    )
+    .execute(&p)
+    .await
+    .unwrap();
+
+    let result = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.277").await;
+    assert!(result.is_err(), "failed intent persistence must fail closed: {result:?}");
+    assert_eq!(gh.count("issue comment"), 0, "GitHub must not be mutated without a durable intent");
+    assert_eq!(gh.count("api --paginate"), 0, "intent must be durable before checking whether to post");
 }
 
 #[tokio::test]

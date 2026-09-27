@@ -3,8 +3,9 @@
 //! 這條管線唯一的外部寫入就是 `gh issue create`／`gh issue comment`。全部走可注入的 `gh` 路徑
 //! （`[release_triage] gh_bin`），測試餵假腳本；`publish = false`（預設）時**完全不會**啟動 gh。
 //!
-//! 重試安全：開之前先查帳本、再用 `gh issue list --state all --search` 查隱藏標記——`--state all`，
-//! 已關掉的（做完或判定不做）不復活；每開一張立刻寫回帳本，中途掛掉重跑不會開出第二張。
+//! 重試安全：外部副作用前先把 marker/action 寫進 durable intent；重試先查遠端 marker，再決定要不要重做。
+//! issue 用 `gh issue list` 查隱藏標記（`--state all`，已關的不復活），comment 用 `gh api --paginate`
+//! 查目標 issue 的完整留言；結果之後才收斂到 `issue_numbers_json`。
 //! gh 失敗時列停在 `judged`（verdict 已存），下一輪只重試 publish、不重派模型。
 //!
 //! [`preflight`] 是唯一在 `publish = false` 時也會啟動 gh 的路徑：它由人明確觸發（`--dry-run`），
@@ -345,6 +346,14 @@ async fn find_existing(gh: &Gh, remote: &Remote, mk: &str, title: &str) -> Resul
         .and_then(|v| Some((v.get("number")?.as_i64()?, v.get("url")?.as_str()?.to_string()))))
 }
 
+/// A duplicate comment's marker lives in the comment body, not the issue body. Paginate all comments
+/// so a successful post remains discoverable after later comments have pushed it off the first page.
+async fn comment_marker_exists(gh: &Gh, number: i64, mk: &str) -> Result<bool, String> {
+    let endpoint = format!("repos/{}/issues/{number}/comments", gh.repo);
+    let out = gh.run(&["api", "--paginate", &endpoint]).await?;
+    Ok(out.contains(&format!("release-triage: {mk} -->")))
+}
+
 /// 把一個 `judged` 版本的提案開成 issue。冪等，可重複呼叫。
 pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &str, version: &str) -> Result<Outcome> {
     if !cfg.publish {
@@ -427,8 +436,15 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
             PlanAction::Comment => {
                 let dup = p.duplicate_of.expect("Comment 就是有 duplicate_of");
                 let body = render_comment(kind, version, &row.entries, p);
-                if let Err(e) = gh.run(&["issue", "comment", &dup.to_string(), "--repo", &gh.repo, "--body", &body]).await {
-                    return record_err(&issues, e).await;
+                ledger::ensure_publish_intent(pool, kind, version, &mk, ledger::PublishAction::Comment, Some(dup)).await?;
+                let already_posted = match comment_marker_exists(&gh, dup, &mk).await {
+                    Ok(found) => found,
+                    Err(e) => return record_err(&issues, e).await,
+                };
+                if !already_posted {
+                    if let Err(e) = gh.run(&["issue", "comment", &dup.to_string(), "--repo", &gh.repo, "--body", &body]).await {
+                        return record_err(&issues, e).await;
+                    }
                 }
                 issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number: dup, url: String::new(), created_at: ledger::now_ts(), comment: true });
                 ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
