@@ -1629,6 +1629,8 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
   收尾推 `cli_update_done`，帶 `recovered:true`：到了 `target_version` 就改通知成「已安裝，重啟套用」、`ok:true`，但 `restart:null`＋`restart_error`
   （按下去的那一刻隔了一次重啟，不自動開批次，按一般的 ⌃⌃ 重啟）；沒到就是 `ok:false` `interrupted`，要裝再按一次（照常先讀版本，已經裝好就不再裝）。
 - 結果（`ok`／`reason`／版本）在推 `cli_update_done` **之前**寫進那一列（`status` `done`／`failed`），之後那台才能再開一次。
+  終態寫入失敗時列保持 `running`，先盡力把 `phase` 記成 `finishing`，目前 daemon 以 1 秒起、上限 60 秒的退避持續重試；期間 host slot 保持佔用，且不送 done。
+  DB 讀寫恢復後，終態 commit 成功才送事件。條件更新影響 1 列時送本次結果；影響 0 列時回讀已提交的終態並送儲存結果，若列已消失或被非終態狀態取代則不送本地舊結果；回讀失敗也保留重試債務。
 - `ok:true` 的 `restart` 是 §10.3a 的計畫（範圍只限那台的 codex），之後照 `bots_restart_progress`／`bots_restart_done` 走；
   `restart_status` 說重啟交到哪了（#566）：`started`（開了這台 codex 的一批）、`already_covered`（正在跑的那一批確實還排著這台每一顆該重啟的 codex，
   `restart.batch_id` 是那一批）、`deferred`（正在跑的那一批沒涵蓋，排在它後面：`restart.batch_id:null`、`restart.behind_batch_id`＝那一批，
