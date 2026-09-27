@@ -2025,8 +2025,19 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   async loadQuota() {
+    const epoch = ++quotaEpoch
     try {
-      set({ quota: await api.fetchQuota() })
+      const snap = await api.fetchQuota()
+      // 較新的一次 loadQuota 已經出發：這份快照整份丟掉。
+      if (epoch !== quotaEpoch) return
+      set((s) => {
+        const quota = { ...snap }
+        // 請求期間 WS 已寫過的 key 留 frame 的值，其餘才用快照（含 daemon 刪掉的 key）。
+        for (const [key, at] of quotaDirty) {
+          if (at >= epoch && Object.prototype.hasOwnProperty.call(s.quota, key)) quota[key] = s.quota[key]
+        }
+        return { quota }
+      })
     } catch {
       /* keep what it had */
     }
@@ -2046,14 +2057,22 @@ export const useStore = create<StoreState>((set, get) => {
     const cached = get().models[key]
     // issue #26：失敗不是永久的，null 只擋 MODELS_RETRY_MS。
     if (!shouldFetchModels(cached, get().modelsFailedAt[key], Date.now())) return cached ?? null
+    const gen = (modelsReq.get(key) ?? 0) + 1
+    modelsReq.set(key, gen)
+    const hostName = host || 'local'
+    const hostEpoch = hostModelsEpoch.get(hostName) ?? 0
+    const stillCurrent = () => modelsReq.get(key) === gen && (hostModelsEpoch.get(hostName) ?? 0) === hostEpoch
     try {
       const list = await api.fetchModels(kind, host, identity)
+      if (!stillCurrent()) return get().models[key] ?? null
       set((s) => {
         const { [key]: _gone, ...failed } = s.modelsFailedAt
         return { models: { ...s.models, [key]: list }, modelsFailedAt: failed }
       })
       return list
     } catch {
+      // 過期的失敗（主機重連已清快取、或已有較新的請求）不能寫 null，否則 30 秒只剩靜態清單（#651）。
+      if (!stillCurrent()) return get().models[key] ?? null
       set((s) => ({
         models: { ...s.models, [key]: null },
         modelsFailedAt: { ...s.modelsFailedAt, [key]: Date.now() },
@@ -2063,6 +2082,8 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   dropHostModels(host) {
+    const hostName = host || 'local'
+    hostModelsEpoch.set(hostName, (hostModelsEpoch.get(hostName) ?? 0) + 1)
     set((s) => ({
       models: dropHostModels(s.models, host),
       modelsFailedAt: dropHostModels(s.modelsFailedAt, host),
@@ -2589,6 +2610,17 @@ let openedOnce = false
 let seenSeq = 0
 let quotaSweep: ReturnType<typeof setInterval> | null = null
 const QUOTA_SWEEP_MS = 5 * 60_000
+/** `loadQuota` 的請求世代；只套用最新一次的快照（#651）。 */
+let quotaEpoch = 0
+/** key → 收到 `quota_updated` 時的世代。快照回來時，世代不早於該次請求的 key 留著。 */
+const quotaDirty = new Map<string, number>()
+/** `loadModels`：每個快取 key 的請求世代，與每台主機的清快取世代。 */
+const modelsReq = new Map<string, number>()
+const hostModelsEpoch = new Map<string, number>()
+
+function noteQuotaDirty(keys: string[]) {
+  for (const key of keys) if (key) quotaDirty.set(key, quotaEpoch)
+}
 
 /** 回合還沒結束：頁面快照可以覆寫。終態被舊的 in_flight／queued 蓋回去會把輸入框鎖死（#649）。 */
 function turnStillOpen(status: Turn['status']): boolean {
@@ -2969,13 +3001,16 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       if (!isRec(data)) return
       const kinds = pick(data, 'kinds')
       if (isRec(kinds)) {
+        const entries = Object.entries(kinds).map(([k, v]) => [k, toKindQuota(v, k)] as const)
+        noteQuotaDirty(entries.map(([k]) => k))
         set((s) => ({
-          quota: { ...s.quota, ...Object.fromEntries(Object.entries(kinds).map(([k, v]) => [k, toKindQuota(v, k)])) },
+          quota: { ...s.quota, ...Object.fromEntries(entries) },
         }))
         return
       }
       const kind = str(pick(data, 'kind'))
       if (!kind) return
+      noteQuotaDirty([kind])
       set((s) => ({ quota: { ...s.quota, [kind]: toKindQuota(pick(data, 'quota'), kind) } }))
       return
     }
