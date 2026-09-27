@@ -111,3 +111,11 @@ export function pruneSaved(saved: PatchBotInput, bot: BotFormBase): PatchBotInpu
   }
   return next ?? saved
 }
+
+/**
+ * 換身分後的「立即重啟」要帶 `resume=native`。`pruneSaved` 在 store 追上後會把 `identity`
+ * 從 `saved` 拿掉，所以這個旗標要另外留著，不能只看當下的 `saved`（#658）。
+ */
+export function restartWantsNativeResume(saved: PatchBotInput, identityRestartPending: boolean): boolean {
+  return identityRestartPending || 'identity' in saved
+}
