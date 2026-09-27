@@ -995,8 +995,13 @@ fn parse_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// - 讀數的窗在撞限**之前**就結束了（`resets_at ≤ hit.at`）：那是上一個窗的讀數（閒置的 5h 窗，`/usage` 照樣回上一個
 ///   重置時間），說不出這次撞限的事，不動——拿它取 `min`，撞限會被拉到過去、當場作廢（#236）。
 ///
-/// 沒有桶名（codex 的 credits 用完、開機回填的格子）一律不動：那種撞限只有橫幅說得準。
+/// 沒有桶名（codex 的 credits 用完、開機回填的格子）原則上不動：那種撞限只有橫幅說得準。例外：新讀數的
+/// **5h 與 7d 兩個窗都是撞限之後才開的**——兩桶同時重開只會是整個帳號重置（提早重置券、或週窗本身到期），
+/// 撞限作廢（2026-09-27 使用者：codex 提早重置後額度全滿，還掛著「被擋、下午 02:14 恢復」）。
 fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
+    if hit.bucket.is_none() {
+        return if both_windows_opened_after(&hit, fresh) { None } else { Some(hit) };
+    }
     let (window, len) = match hit.bucket.as_deref() {
         Some("five_hour") => (fresh.five_hour.as_ref(), chrono::Duration::hours(5)),
         Some("seven_day") => (fresh.seven_day.as_ref(), chrono::Duration::days(7)),
@@ -1018,6 +1023,15 @@ fn recalibrate_limit_hit(mut hit: LimitHit, fresh: &Quota) -> Option<LimitHit> {
         hit.until = Some(crate::db::iso_at(resets));
     }
     Some(hit)
+}
+
+/// 5h 與 7d 的窗都在撞限之後才開（`resets_at − 窗長 ≥ hit.at`）。任一桶讀不到就不算。
+fn both_windows_opened_after(hit: &LimitHit, fresh: &Quota) -> bool {
+    let Some(at) = parse_utc(&hit.at) else { return false };
+    let opened_after = |w: Option<&Window>, len: chrono::Duration| {
+        w.and_then(|w| w.resets_at.as_deref()).and_then(parse_utc).is_some_and(|r| r - len >= at)
+    };
+    opened_after(fresh.five_hour.as_ref(), chrono::Duration::hours(5)) && opened_after(fresh.seven_day.as_ref(), chrono::Duration::days(7))
 }
 
 /// 沒寫時間的一律**不**過期，只能靠 [`clear_limit_hit`]。
@@ -2560,6 +2574,32 @@ mod tests {
         let mut later = reading.clone();
         later.five_hour.as_mut().unwrap().resets_at = Some(iso(at + chrono::Duration::hours(6)));
         assert_eq!(recalibrate_limit_hit(hit(Some("five_hour")), &later), None);
+    }
+
+    /// 2026-09-27：codex 撞限（沒有桶名）之後提早重置，新讀數 5h 與 7d 兩個窗都是撞限之後才開的——整個帳號重置過了，撞限作廢。
+    /// 只有一桶重開（5h 自然滾動）不算：credits 用完的撞限量表看不到，不能靠 5h 重開就放行。
+    #[test]
+    fn a_bucketless_hit_is_void_once_both_windows_reopened_after_it() {
+        let now = chrono::Utc::now();
+        let at = now - chrono::Duration::days(1);
+        let hit = LimitHit {
+            message: "You've hit your usage limit ... try again at Sep 28th".into(),
+            until: Some(iso(now + chrono::Duration::days(1))),
+            at: iso(at),
+            bucket: None,
+        };
+        let mut both = codex_q("codex-app-server", None);
+        both.five_hour = Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some(iso(now + chrono::Duration::hours(5))) });
+        both.seven_day = Some(Window { observed_at: None, used_pct: 0.0, resets_at: Some(iso(now + chrono::Duration::days(7))) });
+        assert_eq!(recalibrate_limit_hit(hit.clone(), &both), None, "兩桶都在撞限後重開：作廢");
+
+        let mut only_5h = both.clone();
+        only_5h.seven_day = Some(Window { observed_at: None, used_pct: 100.0, resets_at: Some(iso(now + chrono::Duration::days(1))) });
+        assert_eq!(recalibrate_limit_hit(hit.clone(), &only_5h), Some(hit.clone()), "只有 5h 重開：照擋");
+
+        let mut no_7d = both.clone();
+        no_7d.seven_day = None;
+        assert_eq!(recalibrate_limit_hit(hit.clone(), &no_7d), Some(hit), "讀不到 7d 不猜");
     }
 
     /// #236：窗在撞限**之前**就結束的讀數（閒置的 5h 窗：`/usage` 照樣回上一個重置時間）說不出這次撞限的事——
