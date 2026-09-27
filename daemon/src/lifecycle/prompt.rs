@@ -705,7 +705,7 @@ async fn prompt_inner(
     // Resolve the client before committing: must stay a retryable 502, not a stuck `pending` turn.
     let client = client_for_run(app, &run).await?;
     if let Some(expect) = clear_draft {
-        super::composer_draft::clear(&client, &run, &bot, expect, interrupted.is_some()).await?;
+        super::composer_draft::clear(app, &client, &run, &bot, expect, interrupted.is_some()).await?;
     }
     // Decide how it will be delivered before a turn exists: a prompt that cannot be sent right now
     // (box busy, no way to prove it) must never become an in-flight turn nobody can release

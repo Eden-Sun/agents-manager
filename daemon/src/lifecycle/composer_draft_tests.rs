@@ -128,6 +128,7 @@ async fn idle(kind: &str, composer: &[&str], transcript: bool) -> Fx {
         tt::LivePane {
             composer: composer.iter().map(|s| s.to_string()).collect(),
             width: Some(120),
+            revision: 1,
             transcript_file: log,
             codex: kind == "codex",
             boxed: kind == "grok",
@@ -222,6 +223,81 @@ async fn an_unseen_long_suffix_change_blocks_clear_even_when_the_prefix_matches(
     assert_eq!(f.turns().await, 0);
 }
 
+/// The post-commit reread must stop stale Enter on both transcript-backed and Unverified paths.
+#[tokio::test]
+async fn submit_rechecks_the_composer_after_commit_and_retracts_before_enter() {
+    for (kind, transcript) in [("claude", true), ("grok", false)] {
+        let f = idle(kind, &["draft A"], transcript).await;
+        let old_token = current_draft_token(&f, "observe").await;
+        let live = f.env.herdr.live.clone();
+        super::super::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
+            let mut live = live.lock().unwrap();
+            let pane = live.get_mut("pane-d").unwrap();
+            pane.composer = vec!["draft B".into()];
+            pane.revision = pane.revision.max(1) + 1;
+        });
+
+        let body = conflict(submit(&f.env.app, &f.bot_id, &old_token, "stale-submit").await);
+        assert_eq!(body["reason"], "draft_changed", "{kind}: {body}");
+        assert_eq!(body["draft"], "draft B", "{kind}: {body}");
+        assert_ne!(body["draft_token"], old_token, "{kind}: changed draft has a new token");
+        assert!(f.keys().is_empty(), "{kind}: changed composer must receive no Enter");
+        assert_eq!(f.composer(), ["draft B"], "{kind}");
+        assert_eq!(f.turns().await, 0, "{kind}: provisional A turn must be retracted");
+
+        let next_token = body["draft_token"].as_str().unwrap();
+        let out = submit(&f.env.app, &f.bot_id, next_token, "confirmed-submit").await.unwrap_or_else(|e| panic!("{kind}: {e:?}"));
+        assert!(out.delivery == "ok" || out.delivery == "unverified", "{kind}: {}", out.delivery);
+        assert_eq!(f.keys(), [json!(["Enter"])], "{kind}: only the explicitly retried B gets Enter");
+        assert_eq!(f.user_message().await, "draft B", "{kind}");
+        assert_eq!(f.turns().await, 1, "{kind}: B is recorded once");
+    }
+}
+
+/// A revision change also fences Enter when the visible composer text happens to be identical.
+#[tokio::test]
+async fn submit_rejects_a_revision_change_even_when_the_draft_text_matches() {
+    let f = idle("grok", &["draft A"], false).await;
+    let token = current_draft_token(&f, "observe").await;
+    let live = f.env.herdr.live.clone();
+    super::super::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
+        let mut live = live.lock().unwrap();
+        let pane = live.get_mut("pane-d").unwrap();
+        pane.revision = pane.revision.max(1) + 1;
+    });
+
+    let body = conflict(submit(&f.env.app, &f.bot_id, &token, "revision-submit").await);
+    assert_eq!(body["reason"], "draft_changed", "{body}");
+    assert_eq!(body["draft"], "draft A", "{body}");
+    assert_eq!(body["draft_token"], token, "content identity is unchanged");
+    assert!(f.keys().is_empty(), "a changed pane revision must receive no Enter");
+    assert_eq!(f.composer(), ["draft A"]);
+    assert_eq!(f.turns().await, 0);
+}
+
+/// Session identity is part of the authorization fence, not just the composer contents.
+#[tokio::test]
+async fn submit_rejects_a_session_change_before_enter() {
+    let f = idle("claude", &["draft A"], true).await;
+    let token = current_draft_token(&f, "observe").await;
+    let app = f.env.app.clone();
+    let bot_id = f.bot_id.clone();
+    super::super::race_point::arm("draft_before_enter", &f.bot_id, move || async move {
+        sqlx::query("UPDATE runs SET native_session_id='replaced-session' WHERE bot_id=? AND state='running'")
+            .bind(bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    });
+
+    let body = conflict(submit(&f.env.app, &f.bot_id, &token, "session-submit").await);
+    assert_eq!(body["reason"], "draft_changed", "{body}");
+    assert_eq!(body["draft"], "draft A", "{body}");
+    assert!(f.keys().is_empty(), "changed session must receive no Enter");
+    assert_eq!(f.composer(), ["draft A"]);
+    assert_eq!(f.turns().await, 0);
+}
+
 /// 清掉再送我這則：按一次清框鍵、重讀是空框，才照一般流程打字送出；框裡只剩（送出去的）我這則。
 #[tokio::test]
 async fn clearing_the_confirmed_draft_then_sends_the_prompt() {
@@ -247,6 +323,75 @@ async fn a_draft_that_changed_is_neither_cleared_nor_typed_over() {
     assert_eq!(body["draft"], "別人剛打的另一段", "{body}");
     assert!(f.keys().is_empty() && f.typed() == 0);
     assert_eq!(f.composer(), ["別人剛打的另一段"]);
+    assert_eq!(f.turns().await, 0);
+}
+
+/// A race between clear validation and Ctrl+C leaves B untouched and returns B for confirmation.
+#[tokio::test]
+async fn clear_rechecks_the_composer_after_validation_and_preserves_a_new_draft() {
+    let f = idle("claude", &["draft A"], false).await;
+    let old_token = current_draft_token(&f, "observe").await;
+    let live = f.env.herdr.live.clone();
+    super::super::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
+        let mut live = live.lock().unwrap();
+        let pane = live.get_mut("pane-d").unwrap();
+        pane.composer = vec!["draft B".into()];
+        pane.revision = pane.revision.max(1) + 1;
+    });
+
+    let body = conflict(f.send("my prompt", "stale-clear", Some(&old_token)).await);
+    assert_eq!(body["reason"], "draft_changed", "{body}");
+    assert_eq!(body["draft"], "draft B", "{body}");
+    assert_ne!(body["draft_token"], old_token);
+    assert!(f.keys().is_empty(), "changed composer must receive no Ctrl+C");
+    assert_eq!(f.composer(), ["draft B"]);
+    assert_eq!(f.typed(), 0);
+    assert_eq!(f.turns().await, 0);
+}
+
+/// The clear revision fence rejects a changed pane even if the composer text is unchanged.
+#[tokio::test]
+async fn clear_rejects_a_revision_change_even_when_the_draft_text_matches() {
+    let f = idle("claude", &["draft A"], false).await;
+    let token = current_draft_token(&f, "observe").await;
+    let live = f.env.herdr.live.clone();
+    super::super::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
+        let mut live = live.lock().unwrap();
+        let pane = live.get_mut("pane-d").unwrap();
+        pane.revision = pane.revision.max(1) + 1;
+    });
+
+    let body = conflict(f.send("my prompt", "revision-clear", Some(&token)).await);
+    assert_eq!(body["reason"], "draft_changed", "{body}");
+    assert_eq!(body["draft"], "draft A", "{body}");
+    assert_eq!(body["draft_token"], token, "content identity is unchanged");
+    assert!(f.keys().is_empty(), "changed pane revision must receive no Ctrl+C");
+    assert_eq!(f.composer(), ["draft A"]);
+    assert_eq!(f.typed(), 0);
+    assert_eq!(f.turns().await, 0);
+}
+
+/// Clear must not act through a run that is no longer active, even if its pane text is unchanged.
+#[tokio::test]
+async fn clear_rejects_a_run_that_stopped_before_ctrl_c() {
+    let f = idle("claude", &["draft A"], false).await;
+    let token = current_draft_token(&f, "observe").await;
+    let app = f.env.app.clone();
+    let bot_id = f.bot_id.clone();
+    super::super::race_point::arm("draft_before_clear_key", &f.bot_id, move || async move {
+        sqlx::query("UPDATE runs SET state='stopping' WHERE bot_id=? AND state='running'")
+            .bind(bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    });
+
+    let body = conflict(f.send("my prompt", "stopped-clear", Some(&token)).await);
+    assert_eq!(body["reason"], "draft_changed", "{body}");
+    assert_eq!(body["draft"], "draft A", "{body}");
+    assert!(f.keys().is_empty(), "a stopped run must receive no Ctrl+C");
+    assert_eq!(f.composer(), ["draft A"]);
+    assert_eq!(f.typed(), 0);
     assert_eq!(f.turns().await, 0);
 }
 
@@ -372,7 +517,7 @@ async fn a_running_turn_never_gets_the_clear_key() {
     let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
     let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
     let client = app.herdr_for_run(&run).await.unwrap();
-    let body = match clear(&client, &run, &bot, "一段留在框裡的假草稿", true).await {
+    let body = match clear(&f.env.app, &client, &run, &bot, "一段留在框裡的假草稿", true).await {
         Err(LcError::Conflict(v)) => v,
         other => panic!("expected a 409, got {other:?}"),
     };
