@@ -226,15 +226,46 @@ equals "新的一段紅：再開一張" "$(creates)" "2"
 check "新的一段紅：新 request-id" "\-\-request-id ci-red-sha8" "$AGM_DIR/calls.log"
 teardown
 
-# 6. 狀態檔遺失但 issue 還開著：不重開、不重派，接手。
+# 6. 狀態檔遺失但 issue 還開著：不重開，但要留言並用這段的 sha 再派（#644）。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
 echo 77 > "$GHDIR/issues.txt"
 bash "$SCRIPT"
 equals "狀態檔遺失：不重開" "$(creates)" "0"
-equals "狀態檔遺失：不重派" "$(assigns)" "0"
+equals "狀態檔遺失：要再派一次" "$(assigns)" "1"
 equals "接手現成的 issue" "$(state issue)" "77"
-check "有記 log" "已有開著的 ci-red issue #77" "$AGM_DIR/ci-watch.log"
+check "接手要留言" "COMMENT 77 :: 新的一段紅" "$GHDIR/comments.log"
+check "接手的 request-id 是這段的 sha" "\-\-request-id ci-red-sha5" "$AGM_DIR/calls.log"
+teardown
+
+# 6b. 上一段轉綠後 issue 還開著、狀態已清：新的一段紅不能默默接手（#644 情境 A）。
+setup
+mk_runs 5:failure 4:success; mk_log 5 mod::a
+bash "$SCRIPT"
+mk_runs 6:success 5:failure 4:success
+bash "$SCRIPT"
+echo 100 > "$GHDIR/issues.txt"
+mk_runs 8:failure 7:success; mk_log 8 mod::z
+bash "$SCRIPT"
+equals "新的一段不另開（接手既有票）" "$(creates)" "1"
+equals "新的一段要再派" "$(assigns)" "2"
+check "在舊票留言這次 run" "COMMENT 100 :: 新的一段紅" "$GHDIR/comments.log"
+check "留言點名新的 sha" "sha8" "$GHDIR/comments.log"
+check "再派的 request-id 是新 sha" "\-\-request-id ci-red-sha8" "$AGM_DIR/calls.log"
+teardown
+
+# 6c. 兩輪之間先綠後紅、腳本沒看過 latest=green、舊狀態還在（#644 情境 B）：補轉綠留言並另開。
+setup
+mk_runs 5:failure 4:success; mk_log 5 mod::a
+bash "$SCRIPT"
+echo 100 > "$GHDIR/issues.txt"
+mk_runs 8:failure 7:success 5:failure 4:success; mk_log 8 mod::a
+bash "$SCRIPT"
+equals "中間轉過綠：另開一張" "$(creates)" "2"
+equals "中間轉過綠：再派一次" "$(assigns)" "2"
+check "舊票補記轉綠" "COMMENT 100 :: sha7 起恢復綠" "$GHDIR/comments.log"
+check "新票的 request-id" "\-\-request-id ci-red-sha8" "$AGM_DIR/calls.log"
+equals "狀態指到新票" "$(state issue)" "101"
 teardown
 
 # 7. gh 失敗（rate limit）：什麼都不做、不改狀態、記一行 log。
