@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useEnterCommit } from '../hooks/useEnterCommit'
+import { isImeEnter } from '../lib/ime'
 import { useStore } from '../store/store'
 import './projectNameField.css'
 
@@ -71,6 +72,7 @@ export function ProjectNameField({
           // Stop here: ↑/↓ switch bot and Esc closes dialogs further up the tree.
           e.stopPropagation()
           if (e.key === 'Enter') {
+            if (isImeEnter(e.nativeEvent)) return
             e.preventDefault()
             commit()
           } else if (e.key === 'Escape') {

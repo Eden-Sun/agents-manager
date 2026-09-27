@@ -3,6 +3,7 @@ import type { ClipboardEvent as ReactClipboardEvent, KeyboardEvent as ReactKeybo
 import * as api from '../api'
 import { herdrKeyFromEvent, useShellKeys } from '../hooks/usePaneKeys'
 import { keySyncActive, shellForbidden, shellStateUnknown } from '../lib/shellAccess'
+import { isImeEnter } from '../lib/ime'
 import { ApiError } from '../api/types'
 import type { TerminalSnapshot, TerminalSource } from '../api/types'
 import { useStore } from '../store/store'
@@ -315,7 +316,7 @@ export function HostShellPanel({
   }
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (e.nativeEvent.isComposing) return
+    if (isImeEnter(e.nativeEvent)) return
     if (e.key === 'Enter') {
       e.preventDefault()
       if (!sending) void run(text)
