@@ -353,6 +353,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   - **批次重啟只收「已安裝」的 codex**（§6.9）：重啟一顆沒裝新版的 codex 換不到任何東西，「需安裝」的是候選但跳過（`needs_manual_install`）。
     header 一鍵安裝（`cli_update`）裝好、驗過版本之後，把那台 codex run 的「需安裝」直接改成「已安裝，重啟套用」（跑著的版本取記憶體裡看過的 → 通知寫的起點 → 安裝前的磁碟版本），
     並丟掉那台 `codex --version` 的 5 分鐘快取，不等下一輪巡邏。巡邏自己也把「需安裝」通知寫的起點當成跑著的版本（啟動畫面早被推掉時），磁碟追上就變「已安裝」，不會卡住。
+  - cli-update 的範圍重啟會把安裝時捕捉的主機 fence 帶過候選選取、重啟與 #566 deferred follow-up；每次選候選、輪到 bot 重啟前，以及實際送 stop／`agent.start` RPC 時都驗 fence，RPC 與同主機設定切換序列化。主機被移除或同名改指時，該筆以 `superseded` 跳過並記 log，不能按目前設定把同名 host 的 bot 改投到新主機。`already_covered` 只有在正在跑的範圍批次與請求持有同一主機 authority 時才算涵蓋；name-only 呼叫仍沿用 #566 原有的涵蓋規則。
 
 ### 3.2 前端
 

@@ -173,7 +173,7 @@ pub trait Runner: Send + Sync {
     /// 那台主機現在的 `codex --version` 原文。
     fn version<'a>(&'a self, app: &'a Arc<App>, host: &'a str) -> BoxFuture<'a, anyhow::Result<String>>;
     /// 開那台主機 codex 的一鍵重啟，回計畫（`POST /api/bots/restart-idle` 同一份形狀）。
-    fn restart<'a>(&'a self, app: &'a Arc<App>, scope: Scope) -> BoxFuture<'a, anyhow::Result<Value>>;
+    fn restart<'a>(&'a self, app: &'a Arc<App>, scope: Scope, fence: &'a HostFence) -> BoxFuture<'a, anyhow::Result<Value>>;
 }
 
 pub struct Real;
@@ -232,8 +232,8 @@ impl Runner for Real {
         Box::pin(crate::changelog::installed_version(app, host, "codex"))
     }
 
-    fn restart<'a>(&'a self, app: &'a Arc<App>, scope: Scope) -> BoxFuture<'a, anyhow::Result<Value>> {
-        Box::pin(async move { crate::bulk_restart::spawn_scoped(app, Some(&scope)).await })
+    fn restart<'a>(&'a self, app: &'a Arc<App>, scope: Scope, fence: &'a HostFence) -> BoxFuture<'a, anyhow::Result<Value>> {
+        Box::pin(async move { crate::bulk_restart::spawn_scoped_fenced(app, &scope, fence).await })
     }
 }
 
@@ -666,13 +666,28 @@ async fn run_with_fence(
     if !app.hosts.is_current(&fence).await {
         return finish(superseded("開重啟批次", json!({"from": before, "to": after, "notices_updated": notices}))).await;
     }
-    let restart = runner.restart(app, Scope { kind: "codex".into(), host: host.to_string() }).await;
+    let restart = runner.restart(app, Scope { kind: "codex".into(), host: host.to_string() }, &fence).await;
     let v = match restart {
         // `restart_status` 照批次那邊講的（#566）：`started` 開了這台 codex 的一批；`already_covered` 正在跑的那一批
         // 確實還排著這台每一顆該重啟的 codex；`deferred` 那一批沒涵蓋，排在它後面、它結束時自己接著開。
         // 不能再把「剛好有一批在跑」（`already_running`）當成重啟已經交出去。
         Ok(plan) => {
             let status = plan["restart_status"].as_str().unwrap_or("started").to_string();
+            if status == "superseded" {
+                let error = format!("主機 {host} 的設定已改變；這次安裝留在原主機，但沒有把任何 bot 的重啟改投到新主機");
+                tracing::warn!(host, update_id, "codex install succeeded but its scoped restart authority was superseded");
+                log_line(app, &format!("[{update_id}] 重啟作廢：{error}"));
+                return finish(done(true, json!({
+                    "from": before,
+                    "to": after,
+                    "already_installed": already,
+                    "notices_updated": notices,
+                    "restart": null,
+                    "restart_status": status,
+                    "restart_error": error,
+                })))
+                .await;
+            }
             log_line(app, &format!("[{update_id}] 重啟：{status} {}", plan["batch_id"]));
             done(true, json!({"from": before, "to": after, "already_installed": already, "notices_updated": notices,
                 "restart": plan, "restart_status": status}))
@@ -1267,7 +1282,7 @@ mod tests {
                 }
             })
         }
-        fn restart<'a>(&'a self, app: &'a Arc<App>, scope: Scope) -> BoxFuture<'a, anyhow::Result<Value>> {
+        fn restart<'a>(&'a self, app: &'a Arc<App>, scope: Scope, fence: &'a HostFence) -> BoxFuture<'a, anyhow::Result<Value>> {
             Box::pin(async move {
                 self.restarts.lock().unwrap().push((scope.kind.clone(), scope.host.clone()));
                 let gate = self.restart_gate.lock().unwrap().take();
@@ -1275,7 +1290,7 @@ mod tests {
                     gate.await.ok();
                 }
                 if self.real_restart {
-                    return crate::bulk_restart::spawn_scoped(app, Some(&scope)).await;
+                    return crate::bulk_restart::spawn_scoped_fenced(app, &scope, fence).await;
                 }
                 Ok(json!({"batch_id": "b-1", "total": 1, "planned": [{"bot_id": "x", "name": "cx"}], "skipped": []}))
             })
@@ -1346,6 +1361,58 @@ mod tests {
         BotHostRead,
         NoticeWrite,
         CompareAndSwapLost,
+    }
+
+    /// H is repointed after run_with_fence's last pre-dispatch check, while the restart runner is gated.
+    /// The real scoped dispatcher must reject A's stale fence and return an explicit superseded result.
+    #[tokio::test]
+    async fn a_repoint_between_restart_check_and_dispatch_is_reported_superseded() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = "cli-update-repoint";
+        let host_cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_for_test(host_cfg("target-a")).await;
+        let fence = app.hosts.fence(host).await.expect("A is configured");
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let (bot, run) = codex_bot_with_notice(&env, "cx-repoint", &pending).await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=(SELECT project_id FROM bots WHERE id=?)")
+            .bind(host)
+            .bind(&bot)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        seed_running(&app, "u-repoint", host, "0.157.0").await;
+
+        let fake = Arc::new(Fake {
+            real_restart: true,
+            ..Arc::try_unwrap(Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("installed on A"))).ok().unwrap()
+        });
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *fake.restart_gate.lock().unwrap() = Some(gate);
+        let mut rx = app.subscribe();
+        let (app_task, runner, host_task, fence_task) = (app.clone(), fake.clone(), host.to_string(), fence.clone());
+        let task = tokio::spawn(async move {
+            run_with_fence(&app_task, runner.as_ref(), &host_task, "u-repoint", "0.157.0", Some(fence_task)).await
+        });
+        assert!(crate::testing::eventually!(fake.restarts().len() == 1), "the dispatch gate is after the final pre-dispatch fence check");
+
+        app.hosts.replace_remote_for_test(&app, host_cfg("target-b")).await;
+        release.send(()).unwrap();
+        let result = task.await.unwrap();
+
+        assert_eq!(result["ok"], true, "the install on A succeeded: {result}");
+        assert_eq!(result["restart_status"], "superseded", "the stale restart must not be reported as handed to B: {result}");
+        assert!(result["restart"].is_null(), "no batch belongs to B: {result}");
+        assert!(result["restart_error"].as_str().unwrap().contains("沒有把任何 bot 的重啟改投到新主機"), "explain the skipped handoff: {result}");
+        assert_eq!(db::active_run(&app.db, &bot).await.unwrap().map(|r| r.id), Some(run), "B's bot stays running");
+        assert_eq!(done_events(&mut rx).len(), 1, "the durable update result remains visible");
     }
 
     async fn install_waits_for_mark_installed_recovery(failure: MarkInstalledFailure) {
@@ -2267,8 +2334,9 @@ mod tests {
             &'a self,
             app: &'a Arc<App>,
             scope: Scope,
+            fence: &'a HostFence,
         ) -> BoxFuture<'a, anyhow::Result<Value>> {
-            self.inner.restart(app, scope)
+            self.inner.restart(app, scope, fence)
         }
     }
 

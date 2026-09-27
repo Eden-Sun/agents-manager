@@ -10,6 +10,7 @@ use crate::state::App;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -138,6 +139,12 @@ pub struct HostConn {
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Bumped on every explicit reconnect so a stale supervisor exits.
     generation: std::sync::atomic::AtomicU64,
+    /// Set under `HostManager::conns` before a config replacement/shutdown makes this
+    /// connection unavailable for new fenced work.
+    retiring: AtomicBool,
+    /// Serializes authority retirement with host-side destructive RPCs without holding the
+    /// manager-wide connection map while network I/O is in flight.
+    authority_gate: tokio::sync::RwLock<()>,
     /// [`HostFence`] tickets handed out / the newest ticket whose result was published (issue #347).
     fence_tickets: std::sync::atomic::AtomicU64,
     fence_published: std::sync::atomic::AtomicU64,
@@ -158,6 +165,8 @@ impl HostConn {
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
+            retiring: AtomicBool::new(false),
+            authority_gate: tokio::sync::RwLock::new(()),
             fence_tickets: std::sync::atomic::AtomicU64::new(0),
             fence_published: std::sync::atomic::AtomicU64::new(0),
             instance: None,
@@ -176,6 +185,8 @@ impl HostConn {
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
+            retiring: AtomicBool::new(false),
+            authority_gate: tokio::sync::RwLock::new(()),
             fence_tickets: std::sync::atomic::AtomicU64::new(0),
             fence_published: std::sync::atomic::AtomicU64::new(0),
             instance,
@@ -709,6 +720,11 @@ impl HostFence {
         &self.conn
     }
 
+    /// Tickets from the same connection generation represent the same host authority.
+    pub(crate) fn same_authority(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.conn, &other.conn) && self.generation == other.generation
+    }
+
     /// Call while holding the lock of the state being published: true once per ticket, and never for a ticket
     /// older than one that already published.
     pub fn claim_publish(&self) -> bool {
@@ -738,6 +754,9 @@ impl HostManager {
     /// Capture the current authority for `name` (see [`HostFence`]); `None` = no such host.
     pub async fn fence(&self, name: &str) -> Option<HostFence> {
         let conn = self.get(name).await?;
+        if conn.retiring.load(Ordering::SeqCst) {
+            return None;
+        }
         let generation = conn.generation.load(Ordering::SeqCst);
         let ticket = conn.fence_tickets.fetch_add(1, Ordering::SeqCst) + 1;
         Some(HostFence { conn, generation, ticket })
@@ -745,14 +764,37 @@ impl HostManager {
 
     pub async fn is_current(&self, f: &HostFence) -> bool {
         let same = self.conns.lock().await.get(&f.conn.name).is_some_and(|c| Arc::ptr_eq(c, &f.conn));
-        same && f.conn.generation.load(Ordering::SeqCst) == f.generation
+        same && !f.conn.retiring.load(Ordering::SeqCst) && f.conn.generation.load(Ordering::SeqCst) == f.generation
+    }
+
+    /// Run one host-side operation while its captured connection remains the configured authority.
+    /// Config replacement/removal and reconnect generation changes take the write side of this
+    /// connection's gate, so they linearize before this operation (then it is rejected) or after
+    /// it (then the whole RPC stays on the original connection).
+    pub async fn run_if_current<F: Future>(&self, fence: &HostFence, operation: F) -> Option<F::Output> {
+        let _authority = fence.conn.authority_gate.read().await;
+        let current = {
+            let conns = self.conns.lock().await;
+            conns.get(&fence.conn.name).is_some_and(|c| Arc::ptr_eq(c, &fence.conn))
+                && !fence.conn.retiring.load(Ordering::SeqCst)
+                && fence.conn.generation.load(Ordering::SeqCst) == fence.generation
+        };
+        if !current {
+            return None;
+        }
+        Some(operation.await)
     }
 
     /// Test seam: register a remote host without starting a supervisor (a reconfigure replaces it, like `apply_config`).
     #[cfg(test)]
     pub(crate) async fn insert_remote_for_test(&self, cfg: HostCfg) -> Arc<HostConn> {
         let conn = HostConn::remote(cfg, None);
-        self.conns.lock().await.insert(conn.name.clone(), conn.clone());
+        if let Some(old) = self.get(&conn.name).await {
+            let _authority = old.authority_gate.write().await;
+            self.conns.lock().await.insert(conn.name.clone(), conn.clone());
+        } else {
+            self.conns.lock().await.insert(conn.name.clone(), conn.clone());
+        }
         conn
     }
 
@@ -760,7 +802,12 @@ impl HostManager {
     #[cfg(test)]
     pub(crate) async fn replace_remote_for_test(&self, app: &Arc<App>, cfg: HostCfg) -> Arc<HostConn> {
         let conn = HostConn::remote(cfg, app.instance());
-        self.install_conn(app, conn.clone()).await;
+        if let Some(old) = self.get(&conn.name).await {
+            let _authority = old.authority_gate.write().await;
+            self.install_conn(app, conn.clone()).await;
+        } else {
+            self.install_conn(app, conn.clone()).await;
+        }
         conn
     }
 
@@ -826,7 +873,14 @@ impl HostManager {
             }
             changed_hosts.insert(h.name.clone());
             if let Some(c) = cur {
-                c.generation.fetch_add(1, Ordering::SeqCst);
+                let _authority = c.authority_gate.write().await;
+                {
+                    let conns = self.conns.lock().await;
+                    if conns.get(&c.name).is_some_and(|current| Arc::ptr_eq(current, &c)) {
+                        c.retiring.store(true, Ordering::SeqCst);
+                        c.generation.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
                 if let Some(t) = c.supervisor.lock().await.take() {
                     t.abort();
                 }
@@ -843,8 +897,23 @@ impl HostManager {
     }
 
     pub async fn remove(&self, app: &Arc<App>, name: &str) {
-        let Some(c) = self.conns.lock().await.remove(name) else { return };
-        c.generation.fetch_add(1, Ordering::SeqCst);
+        let Some(c) = self.get(name).await else { return };
+        let _authority = c.authority_gate.write().await;
+        let Some(c) = ({
+            let mut conns = self.conns.lock().await;
+            if !conns.get(name).is_some_and(|current| Arc::ptr_eq(current, &c)) {
+                None
+            } else {
+                let removed = conns.remove(name);
+                if let Some(c) = &removed {
+                    c.retiring.store(true, Ordering::SeqCst);
+                    c.generation.fetch_add(1, Ordering::SeqCst);
+                }
+                removed
+            }
+        }) else {
+            return;
+        };
         if let Some(t) = c.supervisor.lock().await.take() {
             t.abort();
         }
@@ -868,7 +937,14 @@ impl HostManager {
             crate::state::emit_host_changed(app, &conn).await;
             return Some((ok, conn.error_string().await));
         }
-        conn.generation.fetch_add(1, Ordering::SeqCst);
+        let _authority = conn.authority_gate.write().await;
+        {
+            let conns = self.conns.lock().await;
+            if !conns.get(name).is_some_and(|current| Arc::ptr_eq(current, &conn)) || conn.retiring.load(Ordering::SeqCst) {
+                return None;
+            }
+            conn.generation.fetch_add(1, Ordering::SeqCst);
+        }
         if let Some(t) = conn.supervisor.lock().await.take() {
             t.abort();
         }
@@ -878,6 +954,7 @@ impl HostManager {
         let gen = conn.generation.load(Ordering::SeqCst);
         let t = spawn_supervisor(app.clone(), conn.clone(), gen);
         *conn.supervisor.lock().await = Some(t);
+        drop(_authority);
         self.wait_for_connection(conn).await
     }
 
@@ -902,7 +979,14 @@ impl HostManager {
             if c.is_local() {
                 continue;
             }
-            c.generation.fetch_add(1, Ordering::SeqCst);
+            let _authority = c.authority_gate.write().await;
+            {
+                let conns = self.conns.lock().await;
+                if conns.get(&c.name).is_some_and(|current| Arc::ptr_eq(current, &c)) {
+                    c.retiring.store(true, Ordering::SeqCst);
+                    c.generation.fetch_add(1, Ordering::SeqCst);
+                }
+            }
             if let Some(t) = c.supervisor.lock().await.take() {
                 t.abort();
             }
@@ -1000,6 +1084,40 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_fenced_host_operation_holds_its_authority_until_completion() {
+        let env = crate::testing::env().await;
+        let host = "authority-gate-test";
+        let cfg = HostCfg {
+            name: host.into(),
+            ssh: "target-a".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        env.app.hosts.insert_remote_for_test(cfg).await;
+        let fence = env.app.hosts.fence(host).await.unwrap();
+        let app = env.app.clone();
+        let fence_for_task = fence.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            app.hosts
+                .run_if_current(&fence_for_task, async move {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.await;
+                    "original authority"
+                })
+                .await
+        });
+        entered_rx.await.unwrap();
+        assert!(fence.conn.authority_gate.try_write().is_err(), "repoint/reconnect must wait while the RPC is in flight");
+        release_tx.send(()).unwrap();
+        assert_eq!(task.await.unwrap(), Some("original authority"));
+        assert!(fence.conn.authority_gate.try_write().is_ok(), "the authority gate releases after the operation");
+    }
 
     #[test]
     fn remote_path_is_one_quoted_path_entry() {
