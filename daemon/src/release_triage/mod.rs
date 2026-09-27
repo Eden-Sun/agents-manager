@@ -278,7 +278,8 @@ pub async fn check(pool: &SqlitePool, kind: &str, all: &[Section], installed: Op
 /// 磁碟上的版本（本機）：跟 `changelog::installed_version` 的本機分支同一段 login-shell 探測。
 async fn local_installed_version(kind: &str) -> Result<String> {
     let script = format!(
-        r#"p=$( "${{SHELL:-/bin/sh}}" -lic "command -v {kind}" 2>/dev/null | tail -1 ); [ -n "$p" ] || p=$(command -v {kind} 2>/dev/null); [ -n "$p" ] && "$p" --version 2>/dev/null </dev/null | head -1 | tr -d '\r'"#
+        "{}; [ -n \"$p\" ] && \"$p\" --version 2>/dev/null </dev/null | head -1 | tr -d '\\r'",
+        crate::tools::login_abs_sh(kind)
     );
     let o = tokio::time::timeout(
         std::time::Duration::from_secs(20),

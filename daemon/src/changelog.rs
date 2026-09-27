@@ -116,7 +116,8 @@ pub fn pick_sections(all: &[Section], from: Option<&str>, to: &str) -> Vec<Secti
 /// **磁碟上**的版本；跑著的 process 可能還是舊的，`update_watch` 靠這個差判斷有更新。
 pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result<String> {
     let script = format!(
-        r#"p=$( "${{SHELL:-/bin/sh}}" -lic "command -v {kind}" 2>/dev/null | tail -1 ); [ -n "$p" ] || p=$(command -v {kind} 2>/dev/null); [ -n "$p" ] && "$p" --version 2>/dev/null </dev/null | head -1 | tr -d '\r'"#
+        "{}; [ -n \"$p\" ] && \"$p\" --version 2>/dev/null </dev/null | head -1 | tr -d '\\r'",
+        crate::tools::login_abs_sh(kind).trim_end()
     );
     let out = if host == LOCAL_HOST {
         let o = tokio::time::timeout(

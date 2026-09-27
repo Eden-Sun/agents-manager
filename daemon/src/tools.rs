@@ -98,10 +98,18 @@ pub const ALIAS_SH: &str = alias_sh!();
 /// Lines are `AM_<WHAT> <kind> <value>`. `security` without `-w` needs no unlock but a
 /// non-interactive session can still be refused — reported as unknown, not "not logged in".
 pub const PROBE_SH: &str = concat!(r#"
+# Login-shell `command -v` prints `alias claude=...` when the rc defines one. That string is
+# non-empty, so the fallback was skipped and the case wiped it — the tool looked missing (#666).
+# Only an absolute path counts; anything else is cleared before the non-interactive fallback.
+am_abs() {
+  _p=$( "${SHELL:-/bin/sh}" -lic "command -v $1" 2>/dev/null | tail -1 )
+  case "$_p" in /*) ;; *) _p="" ;; esac
+  [ -n "$_p" ] || _p=$(command -v "$1" 2>/dev/null)
+  case "$_p" in /*) ;; *) _p="" ;; esac
+  printf '%s' "$_p"
+}
 for k in claude codex grok; do
-  p=$( "${SHELL:-/bin/sh}" -lic "command -v $k" 2>/dev/null | tail -1 )
-  [ -n "$p" ] || p=$(command -v "$k" 2>/dev/null)
-  case "$p" in /*) ;; *) p="" ;; esac
+  p=$(am_abs "$k")
   printf 'AM_PATH %s %s\n' "$k" "$p"
   if [ -n "$p" ]; then
     v=$( "$p" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )
@@ -121,8 +129,7 @@ else
 fi
 if [ -f "${CODEX_HOME:-$HOME/.codex}/auth.json" ]; then printf 'AM_LOGIN codex 1\n'; else printf 'AM_LOGIN codex 0\n'; fi
 printf 'AM_TZ %s\n' "$(date +%z 2>/dev/null)"
-hp=$( "${SHELL:-/bin/sh}" -lic "command -v herdr" 2>/dev/null | tail -1 )
-[ -n "$hp" ] || hp=$(command -v herdr 2>/dev/null)
+hp=$(am_abs herdr)
 case "$hp" in /*) printf 'AM_HERDR %s\n' "$( "$hp" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )" ;; esac
 GH="${GROK_HOME:-$HOME/.grok}"
 if [ -f "$GH/auth.json" ] || ls "$GH"/auth* >/dev/null 2>&1; then printf 'AM_LOGIN grok 1\n'; else printf 'AM_LOGIN grok 0\n'; fi
@@ -145,9 +152,23 @@ pub fn parse_utc_offset(out: &str) -> Option<i32> {
 
 /// 只問 `herdr --version`（比整套 [`PROBE_SH`] 便宜，定期重探用，#254）。
 const HERDR_CLI_SH: &str = r#"hp=$( "${SHELL:-/bin/sh}" -lic "command -v herdr" 2>/dev/null | tail -1 )
+case "$hp" in /*) ;; *) hp="" ;; esac
 [ -n "$hp" ] || hp=$(command -v herdr 2>/dev/null)
+case "$hp" in /*) ;; *) hp="" ;; esac
 case "$hp" in /*) printf 'AM_HERDR %s\n' "$( "$hp" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )" ;; esac
 "#;
+
+/// `command -v` through a login shell, then the current PATH. An alias line is not a path (#666).
+pub fn login_abs_sh(name: &str) -> String {
+    let name = if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        name
+    } else {
+        ""
+    };
+    format!(
+        "p=$( \"${{SHELL:-/bin/sh}}\" -lic \"command -v {name}\" 2>/dev/null | tail -1 ); case \"$p\" in /*) ;; *) p=\"\" ;; esac; [ -n \"$p\" ] || p=$(command -v \"{name}\" 2>/dev/null); case \"$p\" in /*) ;; *) p=\"\" ;; esac"
+    )
+}
 
 /// 重探那台的 herdr CLI 版本；連不上或讀不到＝None（不沿用舊值）。
 pub async fn probe_herdr_cli(app: &Arc<App>, host: &str) -> Option<String> {
@@ -1541,5 +1562,80 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(herdr_b.calls_to("pane.close").is_empty(), "B 上同 id 的 pane 不能被關：{:?}", herdr_b.methods());
         assert!(herdr_b.calls_to("pane.process_info").is_empty(), "連看都不該去看 B 的 pane：{:?}", herdr_b.methods());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// #666：登入 shell 回 `alias claude=...` 時不能當成沒安裝，備援要找到 PATH 上的真執行檔。
+#[cfg(test)]
+mod alias_path_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn bin(dir: &std::path::Path, name: &str, body: &str) {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn sh(script: &str, shell: &std::path::Path, path: &str) -> String {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("SHELL", shell)
+            .env("PATH", path)
+            .env("HOME", "/tmp")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn macos_local_alias_from_the_login_shell_does_not_hide_the_binary() {
+        let root = std::env::temp_dir().join(format!("am-alias-{}", crate::db::ulid()));
+        let bindir = root.join("bin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        bin(&bindir, "claude", "#!/bin/sh\necho 'claude 2.1.0'\n");
+        bin(&bindir, "codex", "#!/bin/sh\necho 'codex-cli 0.120.0'\n");
+        bin(&bindir, "herdr", "#!/bin/sh\necho 'herdr 0.9.1'\n");
+        // `$2` is the `command -v <name>` string the probe passes to `sh -lic`.
+        bin(
+            &root,
+            "login-sh",
+            "#!/bin/sh\ncase \"$2\" in *claude*) echo \"alias claude='claude --flag'\" ;; *codex*) echo \"alias codex='codex --yolo'\" ;; *) ;; esac\n",
+        );
+        let path = format!("{}:/usr/bin:/bin", bindir.display());
+        let shell = root.join("login-sh");
+        let out = sh(PROBE_SH, &shell, &path);
+        let path_of = |kind: &str| {
+            out.lines()
+                .find_map(|l| l.strip_prefix(&format!("AM_PATH {kind} ")))
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        assert_eq!(path_of("claude"), bindir.join("claude").to_string_lossy());
+        assert_eq!(path_of("codex"), bindir.join("codex").to_string_lossy());
+        assert!(out.contains("AM_VER claude claude 2.1.0"), "{out}");
+        assert!(out.contains("AM_HERDR herdr 0.9.1"), "{out}");
+
+        let ver = sh(
+            &format!("{}; [ -n \"$p\" ] && \"$p\" --version", login_abs_sh("claude")),
+            &shell,
+            &path,
+        );
+        assert!(ver.contains("claude 2.1.0"), "changelog 探測不能去執行 alias 那行：{ver}");
+
+        let herdr = sh(HERDR_CLI_SH, &shell, &path);
+        assert!(herdr.contains("AM_HERDR herdr 0.9.1"), "{herdr}");
+
+        // 登入 shell 給 alias、PATH 上也沒有：要空，不能把 alias 字串留著。
+        let bare = std::env::temp_dir().join(format!("am-alias-bare-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&bare).unwrap();
+        let out = sh(PROBE_SH, &shell, "/usr/bin:/bin");
+        assert!(out.lines().any(|l| l.trim() == "AM_PATH claude"), "沒有執行檔就要是空路徑：{out}");
+        assert!(!out.contains("alias"), "alias 字串不能出現在探測結果：{out}");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 }
