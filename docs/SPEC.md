@@ -1488,9 +1488,9 @@ parent 算出來是 0，連字尾都取不到，退而用完整 herdr agent name
 哪顆 bot 剛開的」這個事實排在血緣前面，繞過整個「同 tab 就算」的推斷，從根本上不讓鏈條長出來。三條都沒中就跳過。
 
 **spawn hint 從哪來**：頂層 bot 自己的 `PostToolUse` hook（`matcher: "Bash"`，issue #94）——它自己的 Bash 工具跑
-`herdr pane split`／`agent start` 時，那條指令的 stdout 就是 herdr 自己回的 JSON-RPC 回應（`{"id":"cli:pane:split",
+`herdr pane split`／`agent start` 時，那條指令的 stdout 是 herdr 自己回的一個或多個 JSON-RPC 回應（`{"id":"cli:pane:split",
 "result":{"pane":{"pane_id":...}}}` 或 `{"id":"cli:agent:start","result":{"agent":{"pane_id":...}}}`，`daemon/src/spawn_hints.rs`
-對照真的 herdr 0.8.2 驗過）。**只信這兩個 `id`**：`pane:get`／`pane:current`／`pane:list` 回的是同一種 `{"pane":{...}}` 形狀，
+對照真的 herdr 0.8.2 驗過）；Bash loop 的多個回應都逐一解析並記成 hint。**只信這兩個 `id`**：`pane:get`／`pane:current`／`pane:list` 回的是同一種 `{"pane":{...}}` 形狀，
 只看 `type` 會把「看一眼」也當成「剛創造」。記進 `spawn_hints(pane_id 唯一, host, bot_id, created_at)`，10 分鐘沒被用到就當
 過期（`prune_stale`，每次 `reconcile_host` 開頭跑一次）；被拿去認領成功就刪掉，重複跑不會重複建立。這條**只影響「這個 pane
 歸誰」，不影響「pane 裡到底有沒有 agent」**——`adopt_child` 認領前仍然要求那個 pane_id 在 `agent.list` 裡真的有一個沒被認領的

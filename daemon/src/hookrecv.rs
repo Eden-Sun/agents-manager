@@ -138,10 +138,10 @@ enum HookKind {
         agent_type: Option<String>,
         transcript_path: Option<String>,
     },
-    /// issue #94：`PostToolUse` on the Bash tool whose stdout was herdr's own `pane:split` /
-    /// `agent:start` response — this bot's own tool call just created `pane_id`. Recorded as a
-    /// spawn hint for `reconcile::adopt_child`; never touches a Turn.
-    SpawnHint { pane_id: String },
+    /// issue #94: `PostToolUse` on the Bash tool whose stdout contained herdr's own `pane:split` /
+    /// `agent:start` responses — this bot's own tool call just created these pane IDs. Recorded as
+    /// spawn hints for `reconcile::adopt_child`; never touches a Turn.
+    SpawnHint { pane_ids: Vec<String> },
     Ignore(String),
 }
 
@@ -365,11 +365,15 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                     transcript_path: s("agent_transcript_path"),
                 },
                 // issue #94：`matcher: "Bash"` already scopes this to shell commands; the actual
-                // "was this herdr creating a pane" decision is `crate::spawn_hints::extract_pane_id`.
-                "PostToolUse" => match crate::spawn_hints::extract_pane_id(p) {
-                    Some(pane_id) => HookKind::SpawnHint { pane_id },
-                    None => HookKind::Ignore("PostToolUse (not a herdr spawn)".into()),
-                },
+                // "was this herdr creating a pane" decision is `crate::spawn_hints::extract_pane_ids`.
+                "PostToolUse" => {
+                    let pane_ids = crate::spawn_hints::extract_pane_ids(p);
+                    if pane_ids.is_empty() {
+                        HookKind::Ignore("PostToolUse (not a herdr spawn)".into())
+                    } else {
+                        HookKind::SpawnHint { pane_ids }
+                    }
+                }
                 other => HookKind::Ignore(other.to_string()),
             }
         }
@@ -1005,8 +1009,10 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         // issue #94：這顆 bot 自己剛剛用 `herdr pane split`／`agent start` 開出 `pane_id`——記下來給
         // `reconcile::adopt_child` 當比同 tab 更早、更精確的線索。純粹記錄一個事實，不查任何 bot／pane
         // 現在的狀態，也不需要活著的 run（這是這顆 bot 自己的行程剛做的事，不是它的 Turn 的事）。
-        HookKind::SpawnHint { pane_id } => {
-            crate::spawn_hints::record(app, &bot.id, &pane_id).await?;
+        HookKind::SpawnHint { pane_ids } => {
+            for pane_id in pane_ids {
+                crate::spawn_hints::record(app, &bot.id, &pane_id).await?;
+            }
             Ok(())
         }
         HookKind::Identity { session_id, transcript_path } => {
@@ -3243,7 +3249,7 @@ mod external_claim_tests {
             "tool_response": {"stdout": r#"{"id":"cli:agent:start","result":{"agent":{"pane_id":"w1:p2"}}}"#, "stderr": ""},
         });
         match classify("claude", &v) {
-            HookKind::SpawnHint { pane_id } => assert_eq!(pane_id, "w1:p2"),
+            HookKind::SpawnHint { pane_ids } => assert_eq!(pane_ids, ["w1:p2"]),
             other => panic!("expected SpawnHint, got {other:?}"),
         }
 
@@ -3281,6 +3287,41 @@ mod external_claim_tests {
         let recorded: Option<String> =
             sqlx::query_scalar("SELECT bot_id FROM spawn_hints WHERE pane_id = 'w1:p2'").fetch_optional(&env.app.db).await.unwrap();
         assert_eq!(recorded.as_deref(), Some(bot.id.as_str()));
+    }
+
+    /// issue #634: a single Bash `PostToolUse` hook records every herdr response against its caller.
+    #[tokio::test]
+    async fn a_bash_loop_spawn_records_every_hint() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let stdout = format!(
+            "{}\n{}\n{}\n",
+            json!({"id": "cli:agent:start", "result": {"agent": {"pane_id": "w1:p2"}}}),
+            json!({"id": "cli:pane:split", "result": {"pane": {"pane_id": "w1:p3"}}}),
+            json!({"id": "cli:agent:start", "result": {"agent": {"pane_id": "w1:p4"}}}),
+        );
+
+        process(
+            &env.app,
+            &stop_failure(
+                &bot.id,
+                json!({
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "for n in a b c; do herdr agent start $n --kind claude; done"},
+                    "tool_response": {"stdout": stdout, "stderr": ""},
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let recorded: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM spawn_hints WHERE bot_id = ? ORDER BY pane_id")
+            .bind(&bot.id)
+            .fetch_all(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(recorded, ["w1:p2", "w1:p3", "w1:p4"]);
     }
 
     /// claude 的 Stop 沒帶使用者訊息：從 transcript 尾巴讀。對不上一樣不認領；讀不到（沒有 transcript）就照舊認領。
