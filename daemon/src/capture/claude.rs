@@ -187,9 +187,10 @@ fn is_zone_busy(s: &str) -> bool {
     is_live_spinner(s) || is_legacy_spinner(s)
 }
 
-/// 還在跑的活動列：`<Verb>… (3s · …)` 或帶 `esc to interrupt`。項目符號 `· 下載中…` 不是。
+/// 還在跑的活動列：`<Verb>… (3s · … tokens)`。`esc to interrupt` 單獨出現不算
+/// （codex 的 `• Working (🤖 • esc to interrupt)` 不是經過時間，不能在這裡判忙）。
 fn is_live_spinner(s: &str) -> bool {
-    super::is_activity_shape(s) || s.contains("esc to interrupt")
+    super::is_activity_shape(s)
 }
 
 /// 沒有輸入框時的舊 spinner（`⠦ Thinking… 52s`）。`·` 與 `*` 留給 [`is_live_spinner`] 的括號形狀。
@@ -418,5 +419,7 @@ mod reply_boundary_tests {
         assert!(ClaudeCapture.still_busy(&busy), "輸入框正上方的活動列應該算還在跑");
         let baking = "❯ Reply with PONG\n✢ Baking… (3s · esc to interrupt)\n──────\n❯\n";
         assert!(ClaudeCapture.still_busy(baking));
+        // codex 的中斷提示沒有經過時間，不是 claude 的活動列。
+        assert!(!ClaudeCapture.still_busy("• Working (🤖 • esc to interrupt)"));
     }
 }
