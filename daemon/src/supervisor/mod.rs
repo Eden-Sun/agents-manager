@@ -614,7 +614,7 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
         .bind(&b.id)
         .fetch_one(&app.db)
         .await
-        .unwrap_or(0);
+        .map_err(up)?;
         out.push(json!({
             "id": b.id,
             "project_id": b.project_id,
@@ -669,4 +669,56 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
         "open_incidents": store::open_incidents(&app.db).await.map_err(up)?
             .iter().map(store::Incident::to_json).collect::<Vec<_>>(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitized_state;
+    use std::sync::Arc;
+
+    fn queued_turns(state: &serde_json::Value, bot_id: &str) -> i64 {
+        state["bots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|bot| bot["id"] == bot_id)
+            .unwrap_or_else(|| panic!("missing bot {bot_id}: {state}"))["queued_turns"]
+            .as_i64()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_queued_turn_count_fails_the_snapshot_and_recovers() {
+        let e = crate::testing::env().await;
+        let app: Arc<crate::state::App> = e.app.clone();
+        let bot_id = "queue-count-owner";
+        let now = crate::db::now();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, hook_token, created_at)
+             VALUES (?, ?, 'queue-count-owner', 'claude', 'token', ?)",
+        )
+        .bind(bot_id)
+        .bind(&e.project_id)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conversation_id = crate::db::conversation_id(&app.db, bot_id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, created_at)
+             VALUES ('queued-count-test', ?, 'web', 'queued', ?)",
+        )
+        .bind(conversation_id)
+        .bind(&now)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        assert_eq!(queued_turns(&sanitized_state(&app).await.unwrap(), bot_id), 1, "test setup has queued work");
+        crate::testing::make_table_unreadable(&app, "turns").await;
+        let result = sanitized_state(&app).await;
+        crate::testing::make_table_readable(&app, "turns").await;
+        assert!(result.is_err(), "an unreadable queued-turn count must not publish a false idle snapshot: {result:?}");
+        assert_eq!(queued_turns(&sanitized_state(&app).await.unwrap(), bot_id), 1, "after DB recovery the real count is visible");
+    }
 }
