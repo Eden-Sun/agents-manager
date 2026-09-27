@@ -11,14 +11,18 @@ use crate::state::App;
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 const GH_TIMEOUT: Duration = Duration::from_secs(40);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(15);
+const DEVICE_TRANSIENT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Public GitHub CLI OAuth app (`cli/cli` `internal/authflow/flow.go`). The secret is
 /// documented there as safe to embed — we only use it so the resulting token is one `gh`
@@ -609,6 +613,7 @@ enum TokenPoll {
     SlowDown,
     Denied,
     Expired,
+    OAuthError(String),
     Token(String),
 }
 
@@ -633,22 +638,48 @@ async fn exchange_token(device_code: &str) -> Result<TokenPoll> {
         .send()
         .await
         .map_err(|e| anyhow!("github access_token: {e}"))?;
-    let text = resp.text().await.unwrap_or_default();
-    let parsed: TokenResponse = serde_json::from_str(&text).unwrap_or(TokenResponse {
-        access_token: None,
-        error: None,
-        error_description: None,
-    });
-    if let Some(token) = parsed.access_token.filter(|s| !s.is_empty()) {
-        return Ok(TokenPoll::Token(token));
-    }
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| anyhow!("github access_token response: {e}"))?;
+    parse_token_response(status, &text)
+}
+
+fn parse_token_response(status: reqwest::StatusCode, text: &str) -> Result<TokenPoll> {
+    let parsed = serde_json::from_str::<TokenResponse>(text).map_err(|_| {
+        anyhow!(
+            "github access_token: invalid response (HTTP {})",
+            status.as_u16()
+        )
+    })?;
     match parsed.error.as_deref() {
         Some("authorization_pending") => Ok(TokenPoll::Pending),
         Some("slow_down") => Ok(TokenPoll::SlowDown),
         Some("access_denied") => Ok(TokenPoll::Denied),
         Some("expired_token") => Ok(TokenPoll::Expired),
-        Some(other) => anyhow::bail!("{}", parsed.error_description.unwrap_or_else(|| other.to_string())),
-        None => anyhow::bail!("github access_token: empty response"),
+        Some(other) => Ok(TokenPoll::OAuthError(
+            parsed
+                .error_description
+                .unwrap_or_else(|| other.to_string()),
+        )),
+        None => {
+            if status.is_server_error() {
+                return Err(anyhow!(
+                    "github access_token: temporary HTTP {}",
+                    status.as_u16()
+                ));
+            }
+            if status.is_success() {
+                if let Some(token) = parsed.access_token.filter(|s| !s.is_empty()) {
+                    return Ok(TokenPoll::Token(token));
+                }
+            }
+            Err(anyhow!(
+                "github access_token: empty response (HTTP {})",
+                status.as_u16()
+            ))
+        }
     }
 }
 
@@ -673,13 +704,65 @@ async fn set_device_error(app: &Arc<App>, host: &str, device_code: &str, msg: St
     }
 }
 
-async fn poll_device(app: Arc<App>, host: String, device_code: String, expires_at: Instant, mut interval: Duration) {
+type ExchangeFuture = Pin<Box<dyn Future<Output = Result<TokenPoll>> + Send>>;
+
+fn exchange_token_owned(device_code: String) -> ExchangeFuture {
+    Box::pin(async move { exchange_token(&device_code).await })
+}
+
+async fn poll_device(
+    app: Arc<App>,
+    host: String,
+    device_code: String,
+    expires_at: Instant,
+    interval: Duration,
+) {
+    poll_device_with_exchange(
+        app,
+        host,
+        device_code,
+        expires_at,
+        interval,
+        exchange_token_owned,
+    )
+    .await;
+}
+
+async fn poll_device_with_exchange<F>(
+    app: Arc<App>,
+    host: String,
+    device_code: String,
+    expires_at: Instant,
+    mut interval: Duration,
+    mut exchange: F,
+) where
+    F: FnMut(String) -> ExchangeFuture + Send,
+{
+    interval = interval.max(Duration::from_secs(1));
+    let mut retry_interval = interval;
     loop {
-        if Instant::now() >= expires_at {
-            set_device_error(&app, &host, &device_code, "裝置碼已過期，請再點一次登入".into()).await;
+        let remaining = expires_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            set_device_error(
+                &app,
+                &host,
+                &device_code,
+                "裝置碼已過期，請再點一次登入".into(),
+            )
+            .await;
             return;
         }
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(retry_interval.min(remaining)).await;
+        if Instant::now() >= expires_at {
+            set_device_error(
+                &app,
+                &host,
+                &device_code,
+                "裝置碼已過期，請再點一次登入".into(),
+            )
+            .await;
+            return;
+        }
         {
             let g = app.gh_device.lock().await;
             match g.get(&host) {
@@ -687,15 +770,24 @@ async fn poll_device(app: Arc<App>, host: String, device_code: String, expires_a
                 _ => return,
             }
         }
-        match exchange_token(&device_code).await {
-            Ok(TokenPoll::Pending) => {}
-            Ok(TokenPoll::SlowDown) => interval += Duration::from_secs(5),
+        match exchange(device_code.clone()).await {
+            Ok(TokenPoll::Pending) => retry_interval = interval,
+            Ok(TokenPoll::SlowDown) => {
+                interval = interval.saturating_add(Duration::from_secs(5));
+                retry_interval = interval;
+            }
             Ok(TokenPoll::Denied) => {
                 set_device_error(&app, &host, &device_code, "GitHub 拒絕授權".into()).await;
                 return;
             }
             Ok(TokenPoll::Expired) => {
-                set_device_error(&app, &host, &device_code, "裝置碼已過期，請再點一次登入".into()).await;
+                set_device_error(
+                    &app,
+                    &host,
+                    &device_code,
+                    "裝置碼已過期，請再點一次登入".into(),
+                )
+                .await;
                 return;
             }
             Ok(TokenPoll::Token(token)) => {
@@ -715,9 +807,15 @@ async fn poll_device(app: Arc<App>, host: String, device_code: String, expires_a
                 }
                 return;
             }
-            Err(e) => {
-                set_device_error(&app, &host, &device_code, e.to_string()).await;
+            Ok(TokenPoll::OAuthError(error)) => {
+                set_device_error(&app, &host, &device_code, error).await;
                 return;
+            }
+            Err(_) => {
+                retry_interval = retry_interval
+                    .saturating_mul(2)
+                    .min(DEVICE_TRANSIENT_MAX_BACKOFF)
+                    .max(interval)
             }
         }
     }
@@ -801,5 +899,139 @@ mod tests {
     fn url_encode_device_code() {
         assert_eq!(url_encode("abc-XYZ_~."), "abc-XYZ_~.");
         assert_eq!(url_encode("a b"), "a%20b");
+    }
+
+    #[test]
+    fn malformed_and_server_responses_are_transient_but_oauth_errors_are_explicit() {
+        assert!(
+            parse_token_response(reqwest::StatusCode::BAD_GATEWAY, "<html>bad gateway</html>")
+                .is_err()
+        );
+        assert!(parse_token_response(reqwest::StatusCode::OK, "<html>not json</html>").is_err());
+        assert!(matches!(
+            parse_token_response(reqwest::StatusCode::OK, r#"{"error":"access_denied"}"#),
+            Ok(TokenPoll::Denied)
+        ));
+        assert!(matches!(
+            parse_token_response(reqwest::StatusCode::OK, r#"{"error":"expired_token"}"#),
+            Ok(TokenPoll::Expired)
+        ));
+        assert!(matches!(
+            parse_token_response(reqwest::StatusCode::OK, r#"{"error":"unsupported_grant_type"}"#),
+            Ok(TokenPoll::OAuthError(error)) if error == "unsupported_grant_type"
+        ));
+        assert!(matches!(
+            parse_token_response(reqwest::StatusCode::OK, r#"{"error":"server_error"}"#),
+            Ok(TokenPoll::OAuthError(_))
+        ));
+        assert!(matches!(
+            parse_token_response(
+                reqwest::StatusCode::BAD_GATEWAY,
+                r#"{"error":"server_error"}"#
+            ),
+            Ok(TokenPoll::OAuthError(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn transient_device_poll_errors_retry_with_backoff_until_expiration() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        tokio::time::pause();
+        let host = "github.com".to_string();
+        let device_code = "test-device-code".to_string();
+        let expires_at = Instant::now() + Duration::from_secs(20);
+        app.gh_device.lock().await.insert(
+            host.clone(),
+            DeviceSession {
+                user_code: "ABCD-EFGH".into(),
+                verification_uri: "https://github.com/login/device".into(),
+                verification_uri_complete: None,
+                expires_at,
+                error: None,
+                device_code: device_code.clone(),
+                poll: None,
+            },
+        );
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let exchange = move |_device_code: String| {
+            let calls = Arc::clone(&observed_calls);
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(anyhow!("temporary network failure"))
+            }) as ExchangeFuture
+        };
+
+        poll_device_with_exchange(
+            app.clone(),
+            host.clone(),
+            device_code,
+            expires_at,
+            Duration::from_secs(1),
+            exchange,
+        )
+        .await;
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "transient failures retry with backoff until expiry"
+        );
+        let devices = app.gh_device.lock().await;
+        assert_eq!(
+            devices[&host].error.as_deref(),
+            Some("裝置碼已過期，請再點一次登入")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_oauth_error_stops_device_polling() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        tokio::time::pause();
+        let host = "github.com".to_string();
+        let device_code = "test-device-code".to_string();
+        let expires_at = Instant::now() + Duration::from_secs(60);
+        app.gh_device.lock().await.insert(
+            host.clone(),
+            DeviceSession {
+                user_code: "ABCD-EFGH".into(),
+                verification_uri: "https://github.com/login/device".into(),
+                verification_uri_complete: None,
+                expires_at,
+                error: None,
+                device_code: device_code.clone(),
+                poll: None,
+            },
+        );
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_calls = Arc::clone(&calls);
+        let exchange = move |_device_code: String| {
+            let calls = Arc::clone(&observed_calls);
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(TokenPoll::OAuthError("unsupported_grant_type".into()))
+            }) as ExchangeFuture
+        };
+
+        poll_device_with_exchange(
+            app.clone(),
+            host.clone(),
+            device_code,
+            expires_at,
+            Duration::from_secs(1),
+            exchange,
+        )
+        .await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let devices = app.gh_device.lock().await;
+        assert_eq!(
+            devices[&host].error.as_deref(),
+            Some("unsupported_grant_type")
+        );
     }
 }
