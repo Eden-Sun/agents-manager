@@ -44,13 +44,13 @@ impl Default for KindProbeHook {
 
 /// 先問使用者的登入 shell（`~/.zshrc` 之類才有 PATH 的那種安裝），再退回目前行程的 PATH。
 pub fn probe_command(kind: &str) -> String {
-    format!("( \"${{SHELL:-/bin/sh}}\" -lic 'command -v {kind}' 2>/dev/null || command -v {kind} 2>/dev/null ) | tail -1")
+    format!("{}; printf '%s\\n' \"$p\"", crate::tools::login_abs_sh(kind))
 }
 
 /// 探測結果的判讀：`None`（查不了）不擋；空字串＝確定沒有＝拒絕，並講清楚是哪台機器缺什麼。
 pub fn verdict(host: &str, kind: &str, found: Option<String>) -> Result<(), String> {
     match found {
-        Some(path) if path.is_empty() => {
+        Some(path) if path.is_empty() || !path.starts_with('/') => {
             let where_ = if host == crate::config::LOCAL_HOST { "本機".to_string() } else { format!("主機 {host}") };
             Err(format!(
                 "{where_}上找不到 `{kind}` 執行檔（用登入 shell 檢查 `command -v {kind}` 沒有結果）。請先在該主機安裝 {kind}，或確認它在登入 shell 的 PATH 中；遠端主機也可在主機設定的 remote_path 補上路徑。"

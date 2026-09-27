@@ -68,7 +68,7 @@ async fn codex_rpc_local(exe: &str, lines: &[String], id: u64) -> Result<Value> 
     let exe = if exe.contains('/') {
         exe.to_string()
     } else {
-        let probe = format!("( \"${{SHELL:-/bin/sh}}\" -lic 'command -v {exe}' 2>/dev/null || command -v {exe} 2>/dev/null ) | tail -1");
+        let probe = format!("{}; printf '%s\\n' \"$p\"", crate::tools::login_abs_sh(exe));
         let o = tokio::process::Command::new("/bin/sh").arg("-c").arg(&probe).output().await?;
         let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
         if p.is_empty() {
