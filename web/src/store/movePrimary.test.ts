@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { sortPinned } from '../lib/pinnedOrder.ts'
 import { setOrderSaveSignalForTest, useStore } from './store.ts'
 
 type Bot = ReturnType<typeof useStore.getState>['bots'][number]
@@ -25,19 +26,23 @@ function stubFetch(status: number, body: unknown) {
  */
 const settle = () => new Promise((r) => setTimeout(r, 0))
 const positions = () => Object.fromEntries(useStore.getState().bots.map((b) => [b.id, b.primary_position]))
+/** 跟畫面同一套：`primary_position === 0` 是「還沒排過」，排最後。 */
+const shown = () =>
+  sortPinned(useStore.getState().bots.filter((b) => b.primary).map((b, index) => ({ id: b.id, position: b.primary_position, index }))).map((b) => b.id)
 
 /** 2026-09-20 使用者：拖了順序沒存起來，重整後回到原本的順序。放開就要 POST /api/order {primary}，整份順序。 */
 test('拖完立刻把整份主力順序送給 daemon，畫面先套用', async () => {
   useStore.setState({ bots: [bot('a', 0), bot('b', 0), bot('c', 0)] })
   const calls = stubFetch(200, { ok: true })
   useStore.getState().movePrimary(['c', 'a', 'b'])
-  assert.deepEqual(positions(), { c: 0, a: 1, b: 2 }, '樂觀套用')
+  assert.deepEqual(positions(), { c: 1, a: 2, b: 3 }, '樂觀套用，位置從 1 起算（0 會被 sortPinned 排到最後）')
+  assert.deepEqual(shown(), ['c', 'a', 'b'], '拖到第一位的晶片要留在第一位')
   await settle()
   const post = calls.find((c) => c.url === '/api/order')
   assert.ok(post, `沒有送出：${JSON.stringify(calls)}`)
   assert.equal(post.method, 'POST')
   assert.deepEqual(post.body, { primary: ['c', 'a', 'b'] })
-  assert.deepEqual(positions(), { c: 0, a: 1, b: 2 }, '成功就維持')
+  assert.deepEqual(positions(), { c: 1, a: 2, b: 3 }, '成功就維持')
 })
 
 test('daemon 拒絕（舊版不認得 primary → 400）：回捲，並把原因講出來，不是只說「沒收到」', async () => {
@@ -125,7 +130,8 @@ test('兩次主力排序請求亂序完成時，較新的順序不能被舊請�
   await drain(server)
   assert.deepEqual(server.order, ['b', 'c', 'a'], `daemon 最後要是較新的順序；抵達序 ${JSON.stringify(server.arrived)}`)
   assert.equal(server.maxWaiting, 1, '同一範圍一次只能有一個 POST 在路上')
-  assert.deepEqual(positions(), { b: 0, c: 1, a: 2 }, '畫面維持較新的順序')
+  assert.deepEqual(positions(), { b: 1, c: 2, a: 3 }, '畫面維持較新的順序')
+  assert.deepEqual(shown(), ['b', 'c', 'a'])
   assert.equal(useStore.getState().notices.filter((x) => x.kind === 'error').length, 0, '兩次都成功，不該有錯誤通知')
 })
 
@@ -137,7 +143,8 @@ test('兩次主力排序、較舊的失敗而較新的成功：不回捲、不�
   useStore.getState().movePrimary(['b', 'c', 'a'])
   await drain(server)
   assert.deepEqual(server.order, ['b', 'c', 'a'])
-  assert.deepEqual(positions(), { b: 0, c: 1, a: 2 }, '較新的樂觀順序已經落庫，不能被舊失敗回捲')
+  assert.deepEqual(positions(), { b: 1, c: 2, a: 3 }, '較新的樂觀順序已經落庫，不能被舊失敗回捲')
+  assert.deepEqual(shown(), ['b', 'c', 'a'])
   assert.equal(useStore.getState().notices.filter((x) => x.kind === 'error').length, 0)
 })
 
@@ -148,7 +155,8 @@ test('兩次主力排序、較舊的成功而較新的失敗：回到 daemon 存
   useStore.getState().movePrimary(['b', 'c', 'a'])
   await drain(server)
   assert.deepEqual(server.order, ['c', 'a', 'b'])
-  assert.deepEqual(positions(), { c: 0, a: 1, b: 2 }, '畫面要跟 daemon 存的一致')
+  assert.deepEqual(positions(), { c: 1, a: 2, b: 3 }, '畫面要跟 daemon 存的一致')
+  assert.deepEqual(shown(), ['c', 'a', 'b'])
   const notice = useStore.getState().notices.find((x) => x.kind === 'error')
   assert.ok(notice, '要跳錯誤通知')
   assert.match(notice.text, /主力順序沒存起來.*daemon rebuilding/)
@@ -168,7 +176,8 @@ test('前一個主力排序 POST 永遠不回：逾時後中止它、送出下�
     await drain(server)
     assert.deepEqual(server.order, ['b', 'c', 'a'], `逾時後要送出下一個；抵達序 ${JSON.stringify(server.arrived)}`)
     assert.equal(server.signals[0]?.aborted, true, '卡住的那個要真的中止，不然它晚到一樣會蓋掉新順序')
-    assert.deepEqual(positions(), { b: 0, c: 1, a: 2 })
+    assert.deepEqual(positions(), { b: 1, c: 2, a: 3 })
+    assert.deepEqual(shown(), ['b', 'c', 'a'])
     assert.equal(useStore.getState().notices.filter((x) => x.kind === 'error').length, 0, '較舊的逾時被較新的成功取代，不跳錯誤')
   } finally {
     setOrderSaveSignalForTest(null)
