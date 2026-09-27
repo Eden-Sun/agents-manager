@@ -845,7 +845,12 @@ async fn read_composer(client: &HerdrClient, pane: &str) -> anyhow::Result<Strin
 /// A pane read with styling kept (`format: ansi`), falling back to the plain read on a herdr without
 /// it. Every check of "is there something in the input box" reads this way: only styling tells the
 /// TUI's own hint from typed text ([`plain_without_hints`]).
-pub(crate) async fn read_styled(client: &HerdrClient, pane: &str, source: &str, lines: u32) -> anyhow::Result<String> {
+pub(crate) async fn read_styled_snapshot(
+    client: &HerdrClient,
+    pane: &str,
+    source: &str,
+    lines: u32,
+) -> anyhow::Result<crate::herdr::PaneRead> {
     match client.pane_read_ansi(pane, source, lines).await {
         Ok(r) => {
             // A herdr that ignores the parameter answers `format: text`: the read is still usable
@@ -853,16 +858,21 @@ pub(crate) async fn read_styled(client: &HerdrClient, pane: &str, source: &str, 
             if r.format != "ansi" && should_warn_plain_for_ansi(pane) {
                 tracing::warn!(pane, format = %r.format, "asked herdr for a styled read and got plain text; placeholders will read as busy");
             }
-            Ok(r.text)
+            Ok(r)
         }
         Err(e) if ansi_unsupported(&e) => {
             if should_warn_plain_for_ansi(pane) {
                 tracing::warn!(pane, error = %e, "herdr has no styled pane.read; using the plain read");
             }
-            Ok(client.pane_read(pane, source, lines).await?.text)
+            Ok(client.pane_read(pane, source, lines).await?)
         }
         Err(e) => Err(e),
     }
+}
+
+/// Read styled screen text for checks that do not need pane revision metadata.
+pub(crate) async fn read_styled(client: &HerdrClient, pane: &str, source: &str, lines: u32) -> anyhow::Result<String> {
+    Ok(read_styled_snapshot(client, pane, source, lines).await?.text)
 }
 
 /// `agent.prompt` on an agent herdr has no session bound to answered ok while the text never

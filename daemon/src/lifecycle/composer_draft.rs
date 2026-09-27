@@ -6,7 +6,8 @@
 //!
 //! 兩件事都先確認框裡**還是使用者看到的那一段**（`expect_draft_token`＝409 回的 `draft_token`）：token 綁完整草稿、run
 //! 與 pane；畫面用的 `draft` 仍可截短。框在這之間換了字（有人在終端打字、CLI 自己放回一段），就回 409 `draft_changed`
-//! 帶新的草稿與 token，一個鍵都不按。
+//! 帶新的草稿與 token，一個鍵都不按。按鍵前再檢查 pane revision、完整草稿和 run/session；Herdr 尚無條件按鍵 API，最後重讀
+//! 到 key 實際送達之間仍留有一個很短、無法原子封閉的窗口。
 
 use super::*;
 use sha2::{Digest, Sha256};
@@ -86,11 +87,32 @@ fn pane_of(run: &db::Run) -> Option<String> {
 }
 
 /// 框的狀態＋框裡的字（跟送 prompt 前的檢查同一種讀法：帶樣式，TUI 自己畫的提示不算字）。
-async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Result<(BoxState, Option<String>)> {
-    let screen = read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?;
-    let state = box_state(kind, &screen);
-    let text = (state == BoxState::NonEmpty).then(|| composer_text(kind, &screen)).flatten();
-    Ok((state, text))
+async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Result<(BoxState, Option<String>, u64)> {
+    let read = super::delivery::read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?;
+    if read.pane_id != pane {
+        anyhow::bail!("pane.read returned pane {} while reading {pane}", read.pane_id);
+    }
+    let state = box_state(kind, &read.text);
+    let text = (state == BoxState::NonEmpty).then(|| composer_text(kind, &read.text)).flatten();
+    Ok((state, text, read.revision))
+}
+
+/// Recheck that the action still targets the active run, pane and native session it planned against.
+async fn planned_authority_matches(app: &Arc<App>, run: &db::Run, proof: Option<&Proof>) -> bool {
+    let Ok(Some(current)) = db::active_run(&app.db, &run.bot_id).await else { return false };
+    let same_binding = current.id == run.id
+        && current.state == "running"
+        && current.pane_id == run.pane_id
+        && current.herdr_session == run.herdr_session
+        && current.native_session_id == run.native_session_id
+        && current.transcript_path == run.transcript_path;
+    if !same_binding {
+        return false;
+    }
+    match proof {
+        Some(proof) => super::delivery::same_session(app, &run.id, proof).await,
+        None => true,
+    }
 }
 
 fn refusal(reason: &str, run: &db::Run, retryable: bool, kind: &str, draft: Option<&str>) -> LcError {
@@ -113,7 +135,7 @@ pub(crate) async fn with_draft(client: &HerdrClient, run: &db::Run, bot: &db::Bo
         return LcError::Conflict(body);
     }
     let draft = match pane_of(run) {
-        Some(pane) => read_draft(client, &pane, &bot.kind).await.ok().and_then(|(_, d)| d),
+        Some(pane) => read_draft(client, &pane, &bot.kind).await.ok().and_then(|(_, d, _)| d),
         None => None,
     };
     if let (Some(o), Some(f)) = (body.as_object_mut(), draft_fields(&bot.kind, run, draft.as_deref()).as_object()) {
@@ -124,7 +146,14 @@ pub(crate) async fn with_draft(client: &HerdrClient, run: &db::Run, bot: &db::Bo
 
 /// 清掉框裡使用者確認過的那段（`expect_token`），**重讀畫面確認框是空的**才回 `Ok`；清不掉就回錯，呼叫端一個字都不打。
 /// 框本來就空了＝沒有東西要清。`busy`＝有回合在跑（插隊送出）：`ctrl+c` 會打斷它，不按。
-pub(crate) async fn clear(client: &HerdrClient, run: &db::Run, bot: &db::Bot, expect_token: &str, busy: bool) -> LcResult<()> {
+pub(crate) async fn clear(
+    app: &Arc<App>,
+    client: &HerdrClient,
+    run: &db::Run,
+    bot: &db::Bot,
+    expect_token: &str,
+    busy: bool,
+) -> LcResult<()> {
     let Some(keys) = clear_keys(&bot.kind) else {
         return Err(refusal("draft_clear_unsupported", run, false, &bot.kind, None));
     };
@@ -132,7 +161,7 @@ pub(crate) async fn clear(client: &HerdrClient, run: &db::Run, bot: &db::Bot, ex
         return Err(LcError::conflict("draft_clear_while_busy", json!({"run_id": run.id, "retryable": true, "sent": false})));
     }
     let Some(pane) = pane_of(run) else { return Ok(()) };
-    let (state, now) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
+    let (state, now, revision) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
     match state {
         BoxState::Empty => return Ok(()),
         BoxState::Unready => return Err(unreadable(run)),
@@ -140,6 +169,22 @@ pub(crate) async fn clear(client: &HerdrClient, run: &db::Run, bot: &db::Bot, ex
     }
     if !now.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d)) {
         return Err(refusal("draft_changed", run, true, &bot.kind, now.as_deref()));
+    }
+    #[cfg(test)]
+    super::race_point::hit("draft_before_clear_key", &bot.id).await;
+    // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized revision,
+    // reread immediately before Ctrl+C, and fail closed on any visible change. A change after this
+    // last read but before Herdr applies the key remains a narrow, non-atomic window.
+    let (fresh_state, fresh, fresh_revision) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
+    if fresh_state == BoxState::Unready {
+        return Err(unreadable(run));
+    }
+    let unchanged = fresh_state == BoxState::NonEmpty
+        && fresh_revision == revision
+        && fresh.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d));
+    let same_run = planned_authority_matches(app, run, None).await;
+    if !unchanged || !same_run {
+        return Err(refusal("draft_changed", run, true, &bot.kind, fresh.as_deref()));
     }
     if let Err(e) = client.pane_send_keys(&pane, keys).await {
         tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "herdr refused the key that clears the composer; not typing");
@@ -149,11 +194,11 @@ pub(crate) async fn clear(client: &HerdrClient, run: &db::Run, bot: &db::Bot, ex
     super::race_point::hit("draft_after_clear_key", &bot.id).await;
     tokio::time::sleep(std::time::Duration::from_millis(CLEAR_SETTLE_MS)).await;
     match read_draft(client, &pane, &bot.kind).await {
-        Ok((BoxState::Empty, _)) => {
+        Ok((BoxState::Empty, _, _)) => {
             tracing::info!(run = %run.id, bot = %bot.name, "cleared the draft the user confirmed; the composer reads empty");
             Ok(())
         }
-        Ok((_, left)) => {
+        Ok((_, left, _)) => {
             tracing::warn!(run = %run.id, bot = %bot.name, "the composer is not empty after clearing; not typing");
             Err(refusal("draft_uncleared", run, false, &bot.kind, left.as_deref()))
         }
@@ -264,6 +309,15 @@ async fn record_exact_text(app: &Arc<App>, turn_id: &str, msg_id: &str, text: &s
     Ok(())
 }
 
+/// Remove the provisional DB turn if the last pre-key fence decides nothing was submitted.
+async fn withdraw_unsubmitted(app: &Arc<App>, bot_id: &str, run: &db::Run, turn_id: &str, msg_id: &str, rejection: LcError) -> LcResult<PromptOut> {
+    match retract_unsent_turn(app, bot_id, turn_id, msg_id).await {
+        Ok(Retraction::Withdrawn) => Err(rejection),
+        Ok(Retraction::AlreadySettled) => answer_for_turn_id(app, turn_id).await,
+        Err(u) => Err(u.answer(&run.id, turn_id, msg_id, "the draft was not submitted and its turn could not be withdrawn")),
+    }
+}
+
 /// `POST /bots/{id}/prompt` 帶 `submit_draft`：送出框裡那段。跟一般 prompt 同一套前提（冪等、維護窗口、回合在飛、
 /// 接回未驗證、畫面上開著的選單、unknown 回合）；差別只在不打字、改按 Enter，訊息內容是框裡那段。
 pub async fn submit(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> LcResult<PromptOut> {
@@ -326,14 +380,14 @@ pub async fn submit(app: &Arc<App>, bot_id: &str, expect_token: &str, client_req
     let Some(pane) = pane_of(&run) else {
         return Err(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));
     };
-    let (state, now) = read_draft(&client, &pane, &bot.kind).await.map_err(|_| unreadable(&run))?;
+    let (state, now, authorized_revision) = read_draft(&client, &pane, &bot.kind).await.map_err(|_| unreadable(&run))?;
     match state {
         BoxState::Empty => return Err(refusal("draft_gone", &run, false, &bot.kind, None)),
         BoxState::Unready => return Err(unreadable(&run)),
         BoxState::NonEmpty => {}
     }
     let Some(draft) = now.filter(|d| same_draft(expect_token, &run.id, &pane, d)) else {
-        let fresh = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d)| d);
+        let fresh = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d, _)| d);
         return Err(refusal("draft_changed", &run, true, &bot.kind, fresh.as_deref()));
     };
     let proof = draft_proof(app, &client, &run, &bot, &pane, &draft).await?;
@@ -384,20 +438,37 @@ pub async fn submit(app: &Arc<App>, bot_id: &str, expect_token: &str, client_req
             .map(|_| not_attempted_error(&run.id, Delivered::NotAttempted { reason: "pane_typed_unwritable", retry: true }))
     };
     if let Some(refusal) = before_key {
-        return match retract_unsent_turn(app, bot_id, &turn_id, &msg_id).await {
-            Ok(Retraction::Withdrawn) => Err(refusal),
-            Ok(Retraction::AlreadySettled) => answer_for_turn_id(app, &turn_id).await,
-            Err(u) => Err(u.answer(&run.id, &turn_id, &msg_id, "the draft was not submitted and its turn could not be withdrawn")),
-        };
+        return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, refusal).await;
     }
 
     #[cfg(test)]
     super::race_point::hit("draft_before_enter", bot_id).await;
+    // Herdr has no conditional `pane.send_keys` revision parameter. Preserve the authorized revision,
+    // reread immediately before Enter, and fail closed on any visible change. A change after this
+    // last read but before Herdr applies the key remains a narrow, non-atomic window.
+    let (final_state, fresh, final_revision) = match read_draft(&client, &pane, &bot.kind).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, unreadable(&run)).await,
+    };
+    if final_state == BoxState::Unready {
+        return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, unreadable(&run)).await;
+    }
+    if final_state == BoxState::Empty {
+        let gone = refusal("draft_gone", &run, false, &bot.kind, None);
+        return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, gone).await;
+    }
+    let same_composer = final_revision == authorized_revision
+        && fresh.as_deref().is_some_and(|d| same_draft(expect_token, &run.id, &pane, d));
+    let same_authority = planned_authority_matches(app, &run, Some(&proof)).await;
+    if !same_composer || !same_authority {
+        let changed = refusal("draft_changed", &run, true, &bot.kind, fresh.as_deref());
+        return withdraw_unsubmitted(app, bot_id, &run, &turn_id, &msg_id, changed).await;
+    }
     let res = match client.pane_send_keys(&pane, Submit::Enter.keys()).await {
         Ok(()) => confirm(app, &client, &run, &bot, &pane, &proof, offset, &draft).await,
         Err(e) => {
             // herdr 沒收下 Enter：框裡還是那一段＝沒送出去，撤回這一筆。看不出來才記成 unknown。
-            let still = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d)| d);
+            let still = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d, _)| d);
             if still.as_deref() == Some(draft.as_str()) {
                 return match retract_unsent_turn(app, bot_id, &turn_id, &msg_id).await {
                     Ok(Retraction::Withdrawn) => Err(LcError::Upstream(format!("herdr refused the Enter key; the draft is still in the composer: {e}"))),

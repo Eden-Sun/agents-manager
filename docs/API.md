@@ -388,7 +388,7 @@ prompt 改成打字進 pane 並以無損證據確認。**一個字都沒打時�
 | `{"submit_draft":true,"expect_draft_token","client_request_id"}` | **送出框裡那段**：對 pane 按 Enter（不重打字），照一般 prompt 開回合、證明送達；`text` 不用帶，user 訊息的內容是框裡那段（有 session log 證據時換成 log 裡那一則的原文）。回應同一般 prompt（`delivery` 為 `ok`／`unverified`／`unknown`）。不收 `attachments`／`send_now`／`start_if_stopped`／`clear_draft`（400）。 |
 | `{"text","clear_draft":true,"expect_draft_token","client_request_id",…}` | **清掉再送我這則**：先按清框鍵、重讀畫面確認框是空的，才照一般流程打 `text`。框本來就空了就不按鍵、直接送。 |
 
-兩者都要帶 `expect_draft_token`＝409 給的 `draft_token`（沒帶是 400）；顯示用的 `draft` 不能當授權值，token 會比對完整草稿且綁定原 run/pane；bot 轉送的（`relay_from`）不收（400）。一個字都沒送時的 409：
+兩者都要帶 `expect_draft_token`＝409 給的 `draft_token`（沒帶是 400）；顯示用的 `draft` 不能當授權值，token 會比對完整草稿且綁定原 run/pane；bot 轉送的（`relay_from`）不收（400）。按 Enter 或 Ctrl+C 前會重讀 composer，要求內容、pane revision 與 active run/session 都跟原先授權時相同；任何不同都不按鍵，submit 會撤回剛建立的 turn。Herdr 目前沒有帶 `expected_revision` 的條件式 `pane.send_keys`，所以最後一次重讀到 key 實際作用之間仍有一個短暫、非原子的競態窗口。這些拒絕是一個字都沒送時的 409：
 
 | reason | 意思 |
 |---|---|

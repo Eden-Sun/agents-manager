@@ -80,6 +80,8 @@ pub struct LivePane {
     pub transcript: Vec<String>,
     pub composer: Vec<String>,
     pub reads: u32,
+    /// Revision returned by fake `pane.read`; race tests can bump it without changing composer text.
+    pub revision: u64,
     /// A TUI that eats the Enter: the text stays in the box.
     pub swallow_enter: bool,
     /// A TUI that throws the typed text away without submitting it (the 2026-09-14 incident).
@@ -509,16 +511,16 @@ impl MockHerdr {
                         }
                         "pane.read" => {
                             let pid = wid_of("pane_id");
-                            let live_text = {
+                            let live_read = {
                                 let mut live = st.live.lock().unwrap();
                                 live.get_mut(&pid).map(|p| {
                                     p.reads += 1;
-                                    p.render()
+                                    (p.render(), p.revision.max(1))
                                 })
                             };
-                            let text = live_text.unwrap_or_else(|| {
+                            let (text, revision) = live_read.unwrap_or_else(|| {
                                 let screens = st.screens.lock().unwrap();
-                                screens.get(&pid).cloned().or_else(|| screens.get("*").cloned()).unwrap_or_default()
+                                (screens.get(&pid).cloned().or_else(|| screens.get("*").cloned()).unwrap_or_default(), 1)
                             });
                             // A screen set to this marker answers like a broken pane: the caller
                             // must treat a read failure as an error, never as an empty screen.
@@ -529,7 +531,7 @@ impl MockHerdr {
                                 let format = if asked_ansi && !st.ignore_ansi.load(std::sync::atomic::Ordering::SeqCst) { "ansi" } else { "text" };
                                 json!({"id": id, "result": {"type": "pane_read", "read": {
                                     "pane_id": pid, "source": params.get("source").cloned().unwrap_or(json!("recent_unwrapped")),
-                                    "format": format, "text": text, "revision": 1, "truncated": false}}})
+                                    "format": format, "text": text, "revision": revision, "truncated": false}}})
                             }
                         }
                         "pane.process_info" => {
