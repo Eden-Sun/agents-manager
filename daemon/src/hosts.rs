@@ -575,6 +575,7 @@ async fn run_with_stdin(
 /// SPEC §11.3.4.
 fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let Some(fence) = app.hosts.fence_for_generation(&conn, generation).await else { return };
         let mut backoff = BACKOFF_MIN;
         loop {
             if conn.generation.load(Ordering::SeqCst) != generation {
@@ -592,7 +593,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     backoff = BACKOFF_MIN;
                     conn.connected.store(true, Ordering::SeqCst);
                     *conn.error.lock().await = None;
-                    crate::state::emit_host_changed(&app, &conn).await;
+                    crate::state::emit_host_changed(&app, &fence).await;
 
                     let reconciled = match crate::reconcile::reconcile_host(&app, &conn.name).await {
                         Ok(()) => true,
@@ -636,7 +637,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     }
                     conn.connected.store(false, Ordering::SeqCst);
                     conn.kill_master().await;
-                    crate::state::emit_host_changed(&app, &conn).await;
+                    crate::state::emit_host_changed(&app, &fence).await;
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
@@ -646,7 +647,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     }
                     conn.connected.store(false, Ordering::SeqCst);
                     *conn.error.lock().await = Some(msg);
-                    crate::state::emit_host_changed(&app, &conn).await;
+                    crate::state::emit_host_changed(&app, &fence).await;
                 }
             }
 
@@ -761,12 +762,19 @@ impl HostManager {
     /// Capture the current authority for `name` (see [`HostFence`]); `None` = no such host.
     pub async fn fence(&self, name: &str) -> Option<HostFence> {
         let conn = self.get(name).await?;
-        if conn.retiring.load(Ordering::SeqCst) {
+        let generation = conn.generation.load(Ordering::SeqCst);
+        self.fence_for_generation(&conn, generation).await
+    }
+
+    /// Bind a supervisor to its original connection generation. A stale task must not look up a
+    /// fresh fence by name after replacement, or it could publish old state under the new host.
+    pub(crate) async fn fence_for_generation(&self, conn: &Arc<HostConn>, generation: u64) -> Option<HostFence> {
+        let current = self.conns.lock().await.get(&conn.name).is_some_and(|c| Arc::ptr_eq(c, conn));
+        if !current || conn.retiring.load(Ordering::SeqCst) || conn.generation.load(Ordering::SeqCst) != generation {
             return None;
         }
-        let generation = conn.generation.load(Ordering::SeqCst);
         let ticket = conn.fence_tickets.fetch_add(1, Ordering::SeqCst) + 1;
-        Some(HostFence { conn, generation, ticket })
+        Some(HostFence { conn: conn.clone(), generation, ticket })
     }
 
     pub async fn is_current(&self, f: &HostFence) -> bool {
@@ -965,13 +973,14 @@ impl HostManager {
 
     /// Returns `(connected, error)`.
     pub async fn reconnect(&self, app: &Arc<App>, name: &str) -> Option<(bool, Option<String>)> {
-        let conn = self.get(name).await?;
+        let fence = self.fence(name).await?;
+        let conn = fence.conn().clone();
         if conn.is_local() {
             let ok = conn.client.ping().await.is_ok();
             conn.connected.store(ok, Ordering::SeqCst);
             app.connected.store(ok, Ordering::SeqCst);
             *conn.error.lock().await = if ok { None } else { Some("local herdr ping failed".into()) };
-            crate::state::emit_host_changed(app, &conn).await;
+            crate::state::emit_host_changed(app, &fence).await;
             return Some((ok, conn.error_string().await));
         }
         let _authority = conn.authority_gate.write().await;
@@ -1121,6 +1130,66 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A captured old host must not publish its state or combine it with the replacement's tools cache.
+    #[tokio::test]
+    async fn a_repointed_host_cannot_publish_the_old_connection_snapshot() {
+        let env = crate::testing::env().await;
+        let host = "host-changed-fence-test";
+        let cfg = |ssh: &str| HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        let old = env.app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        *old.error.lock().await = Some("server A error".into());
+        let old_fence = env.app.hosts.fence(host).await.unwrap();
+        let app = env.app.clone();
+        let stale_fence = old_fence.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (publish_tx, publish_rx) = tokio::sync::oneshot::channel();
+        let stale_emit = tokio::spawn(async move {
+            let _ = ready_tx.send(());
+            let _ = publish_rx.await;
+            crate::state::emit_host_changed(&app, &stale_fence).await;
+        });
+        ready_rx.await.unwrap();
+
+        let new = env.app.hosts.replace_remote_for_test(&env.app, cfg("target-b")).await;
+        new.connected.store(true, Ordering::SeqCst);
+        env.app.tools.lock().await.insert(
+            host.into(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![],
+                utc_offset_secs: None,
+                herdr_cli: Some("herdr 0.9.7".into()),
+                checked_at: crate::db::now(),
+            },
+        );
+        let mut events = env.app.subscribe();
+
+        // Replacement wins before publish; A's connected/error must not be paired with B's tools.
+        publish_tx.send(()).unwrap();
+        stale_emit.await.unwrap();
+        assert!(
+            matches!(events.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)),
+            "the superseded A connection must publish no host_changed or daemon_status event"
+        );
+
+        let new_fence = env.app.hosts.fence(host).await.unwrap();
+        crate::state::emit_host_changed(&env.app, &new_fence).await;
+        let current = events.try_recv().unwrap();
+        assert_eq!(current.kind, "host_changed");
+        assert_eq!(current.data["name"], host);
+        assert_eq!(current.data["connected"], true);
+        assert_eq!(current.data["error"], serde_json::Value::Null);
+        assert_eq!(current.data["herdr"]["cli_version"], "0.9.7");
+    }
 
     #[tokio::test]
     async fn a_fenced_host_operation_holds_its_authority_until_completion() {

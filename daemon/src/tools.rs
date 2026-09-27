@@ -894,6 +894,14 @@ async fn run_local(script: &str, budget: Duration) -> Result<String> {
 /// 寫進 `app.tools` 前確認它還是這台主機的權威，不是就整個丟掉（[`Superseded`]）——舊機器的事實不能覆寫新機器的。
 pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    detect_with_fence(app, host, &fence).await
+}
+
+/// Run detection and retain the authority token so its caller can publish the matching snapshot.
+pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence) -> Result<HostTools> {
+    if fence.conn().name != host {
+        anyhow::bail!("host fence for `{}` cannot detect `{host}`", fence.conn().name);
+    }
     let out = if host == LOCAL_HOST {
         run_local(PROBE_SH, PROBE_TIMEOUT).await?
     } else {
@@ -905,7 +913,7 @@ pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
     let utc_offset_secs = parse_utc_offset(&out);
     let herdr_cli = parse_herdr_cli(&out);
     let ht = HostTools { tools, identities, shell_identities, utc_offset_secs, herdr_cli, checked_at: crate::db::now() };
-    if !install_host_tools_fenced(app, host, ht.clone(), &fence).await {
+    if !install_host_tools_fenced(app, host, ht.clone(), fence).await {
         return Err(anyhow::Error::new(Superseded { host: host.to_string() }));
     }
     tracing::info!(
@@ -963,11 +971,10 @@ async fn follow_up_host_tools(app: &Arc<App>, host: &str) {
 
 pub fn spawn_detect(app: Arc<App>, host: String) {
     tokio::spawn(async move {
-        match detect(&app, &host).await {
+        let Some(fence) = app.hosts.fence(&host).await else { return };
+        match detect_with_fence(&app, &host, &fence).await {
             Ok(_) => {
-                if let Some(conn) = app.hosts.get(&host).await {
-                    crate::state::emit_host_changed(&app, &conn).await;
-                }
+                crate::state::emit_host_changed(&app, &fence).await;
             }
             Err(e) if e.is::<Superseded>() => tracing::info!(host, "{e}"),
             Err(e) => tracing::warn!(host, error = %e, "tool detection failed"),

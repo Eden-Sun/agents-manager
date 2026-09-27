@@ -923,7 +923,7 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
         anyhow::bail!("host `{host}` was superseded before the Claude quota refresh completed");
     }
     if touched {
-        crate::state::emit_host_changed(app, fence.conn()).await;
+        crate::state::emit_host_changed(app, &fence).await;
     }
     if saw_missing && !any {
         return Ok(false);
@@ -978,7 +978,7 @@ pub async fn force_probe(app: &Arc<App>, host: &str, account: Option<&str>) -> R
         return Err(ForceProbeError::Failed(format!("host `{host}` was superseded before the Claude quota result could be applied")));
     }
     if touched {
-        crate::state::emit_host_changed(app, fence.conn()).await;
+        crate::state::emit_host_changed(app, &fence).await;
     }
     let Some(q) = o.quota else {
         return Err(ForceProbeError::Failed(format!("claude `/usage` reported no plan lines (logged_in = {:?})", o.logged_in)));

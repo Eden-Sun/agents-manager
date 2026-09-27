@@ -53,7 +53,7 @@ pub async fn refresh_with_fence(app: &std::sync::Arc<crate::state::App>, host: &
     };
     if before != after {
         tracing::info!(host, ?before, ?after, "herdr version changed");
-        crate::state::emit_host_changed(app, &conn).await;
+        crate::state::emit_host_changed(app, fence).await;
     }
 }
 

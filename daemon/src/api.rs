@@ -2229,13 +2229,9 @@ async fn reconnect_host(State(app): State<Arc<App>>, Path(name): Path<String>) -
 }
 
 async fn refresh_tools(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
-    if app.hosts.get(&name).await.is_none() {
-        return Err(LcError::NotFound("host".into()));
-    }
-    let ht = crate::tools::detect(&app, &name).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
-    if let Some(conn) = app.hosts.get(&name).await {
-        crate::state::emit_host_changed(&app, &conn).await;
-    }
+    let fence = app.hosts.fence(&name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+    let ht = crate::tools::detect_with_fence(&app, &name, &fence).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    crate::state::emit_host_changed(&app, &fence).await;
     Ok((
         StatusCode::OK,
         Json(json!({
