@@ -110,6 +110,8 @@ pub struct App {
     pub kind_probe: crate::kind_probe::KindProbeHook,
 
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Child pane creation permits and the short fence used while a bot credential rotates.
+    pub credential_spawn_gate: std::sync::Mutex<crate::credential_spawn::Gate>,
     bus: broadcast::Sender<WsEvent>,
     /// Internal turn-completion bus (the supervisor controller subscribes).
     turn_bus: broadcast::Sender<TurnEvent>,
@@ -224,6 +226,7 @@ impl App {
             proc_env: Default::default(),
             kind_probe: Default::default(),
             locks: Mutex::new(HashMap::new()),
+            credential_spawn_gate: std::sync::Mutex::new(crate::credential_spawn::Gate::default()),
             bus,
             turn_bus,
             seq: AtomicU64::new(0),

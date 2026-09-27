@@ -9,7 +9,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
    開發版（`allow_lan`，見 SPEC §7.1）這兩項都直接放行：同網段誰都拿得到 token——這是使用者裁示保留的風險（`e7392dd`）。
 2. 其餘 `/api/*` 接受一種身分：User 的 `X-AM-Token`、Bot 的 `X-AM-Bot-Id`＋`X-AM-Bot-Token`、或範圍受限的 service `X-AM-Service-Id`＋`X-AM-Service-Token`。出現 Bot／service header 就表示要用該 principal；欄位不完整、token 不符、或混帶其他 principal 都拒絕，不降級成 User。沒有 Bot／service header 且 token 有效的請求是 User；這符合使用者裁示接受共用 UI token 的風險。
 3. WebSocket：`/ws?token=<token>[&since=<seq>]`。
-4. `/hook/*`、`/relay/announce`、`/relay/pane` 仍用 per-bot 的 `X-AM-Bot-Token`。Bot pane 一律注入 `AM_BOT_TOKEN`；hook 開關只控制 `AM_HOOK_TOKEN`。兩者目前是同一個 `bots.hook_token`。User 可用 `POST /bots/{id}/credential/rotate` 立即輪替：舊值立刻失效，執行中的 bot 會重啟以取得新值，停止中的 bot 下次啟動時取得。若有任何仍活著的 child／grandchild pane 繼承該母 bot 的憑證，回 `409 {"reason":"live_children_use_credential","children":[...]}` 且不改 token、不重啟，待後代 pane 都停止後再重試。`/hook/{provider}` 的 provider 還必須等於那顆 bot 的 `kind`，否則 `409 {"error":"provider_mismatch","bot_kind","provider"}`：bot pane 裡起的別種 CLI 子行程（例如 claude bot 裡跑 `codex exec -c notify=…`）繼承了 `AM_BOT_ID`／token，不擋就會把自己的 session id 記成這顆 bot 的（2026-09-22）。
+4. `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/*` 仍用 per-bot 的 `X-AM-Bot-Token`。Bot pane 一律注入 `AM_BOT_TOKEN`；hook 開關只控制 `AM_HOOK_TOKEN`。兩者目前是同一個 `bots.hook_token`。User 可用 `POST /bots/{id}/credential/rotate` 立即輪替：舊值立刻失效，執行中的 bot 會重啟以取得新值，停止中的 bot 下次啟動時取得。若有任何仍活著的 child／grandchild pane 繼承該母 bot 的憑證，回 `409 {"reason":"live_children_use_credential","children":[...]}` 且不改 token、不重啟，待後代 pane 都停止後再重試。`/hook/{provider}` 的 provider 還必須等於那顆 bot 的 `kind`，否則 `409 {"error":"provider_mismatch","bot_kind","provider"}`：bot pane 裡起的別種 CLI 子行程（例如 claude bot 裡跑 `codex exec -c notify=…`）繼承了 `AM_BOT_ID`／token，不擋就會把自己的 session id 記成這顆 bot 的（2026-09-22）。
 
 Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daemon 不檢查 `Host`；proxy 從本機連過來，對端就是 loopback。
 
@@ -43,7 +43,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | C | `POST /bots/{id}/restore`、`/identities`、`DELETE /identities/{name}`、`POST /order`、`PATCH /bots/{id}`、`PATCH /projects/{id}`、start／stop／restart／fork／promote／rewind 等其餘寫入 | 網頁、`agm` | UI token（各自的狀態機檢查） | 本機設定與行程，改得回來 | 維持 |
 | D | `POST /supervisor/herdr-maintenance/open`／`end`、`/supervisor/inbox/{id}/ack`、lease `force` 接管 | AGM 角色 pane 裡的 `agm` | `require_role`／`actor_role`（沒角色 403） | — | 已有 |
 | D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；人在一般 shell 跑的 `agm`（不帶身分，只剩 deny／revoke） | `approve` 要 `require_role`（沒角色 403）；`deny`／`revoke` 只有 UI token | 核准換版窗口 | 已有（#447） |
-| E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
+| E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/relay/spawn/*`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
 | F | `POST /mem/processes/kill` | 只有網頁 | `memproc::kill` 只殺 herdr 樹內、非 herdr、非 bot 的行程 | — | 維持 |
 
 ### Service principals
@@ -702,6 +702,11 @@ bot 或 active Run 不存在 404。
 只記用途：pane 還沒被掃到就先建一列，**已經有 owner 的不會被改寫**（歸屬永遠由掃描時的 `AM_BOT_ID` 決定）。
 token 不對 401；其他失敗照樣回 200（`recorded:false`），少一個用途字串不該讓 bot 開 pane 失敗。
 
+### `POST /relay/spawn/begin` 與 `POST /relay/spawn/finish`（表單，bot shim 專用）
+pane split／tab create／workspace create 與 `agent start` 在呼叫 herdr 前，shim 以 `X-AM-Bot-Token` 送 `begin` 的 `bot_id`；daemon 回 `200 {"permit_id":"…"}` 才可繼續。credential rotation 進行中回 `409 credential_rotation_pending`，Bot proof 或 DB 讀取失敗回 401／503；shim 一律不呼叫 herdr。
+
+herdr 成功後，shim 以 `X-AM-Bot-Token` 送 `finish` 的 `bot_id,permit_id,pane_id,purpose?`。daemon 先把非母 bot pane 登記到 `panes` inventory，再釋放 permit 並回 `200 {"pane_id":"…","registered":true}`。缺 pane id、permit 無效、DB／pane 登記失敗會回非 200，permit 保持佔用，shim 以 retryable failure 結束；這避免在登記狀態未知時讓舊憑證輪替。輪替在 descendants 快照前建立 fence，已有 permit 時回 `409 child_spawn_in_progress`，fence 存在時新的 `begin` 被拒；token 交易提交或中止後 fence 才清除。
+
 ### `GET /api/panes?unowned=1`
 全機的非 agent pane（列的形狀同上）；`unowned=1` 只回 `owned_by="none"`（連 cwd 都對不到專案）的那些，同一台的 scratch 排第一。
 - `scratch: true`：這台那顆固定的 scratch（daemon 選的，規則見 SPEC §6.5e；前端不要自己重算）。其餘是「多出來的」。
@@ -1268,7 +1273,8 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 
 ### 10.3b `POST /api/bots/{id}/credential/rotate`
 只接受 User principal。停止中的 bot 會在 SQLite transaction 內替該 bot 換掉 `bots.hook_token`；執行中的 bot 會在同一 transaction 先建立 `credential_rotation` restart intent，再替換 token。交易失敗時舊 token 保持有效；提交後舊 token 立刻失效，intent 讓 daemon 重啟後接續重啟 bot，將新 `AM_BOT_TOKEN` 帶進 pane。成功回 `200 {"credential_rotated":true,"restarted":bool,"run_id":string|null}`，不回傳新 token。提交後重啟未完成回 `409 {"reason":"restart_pending","credential_rotated":true,"restart_pending":true,"intent_id", "detail"}`，保留 intent 並安排重試；終止失敗回應仍會標 `credential_rotated:true`。Bot／service principal 呼叫回 403。
-- child bot → `409 {"reason":"child_uses_parent_credential","parent_bot_id"}`：child 的 pane 是母 bot 開的，繼承的是**母 bot 的** `AM_BOT_ID`／token（herdr shim），daemon 原地重啟 child 不重建 env，換了也送不進去。母 bot 有活著的 child／grandchild pane 時也回 `409 live_children_use_credential` 並列出依賴的後代；先讓所有這些 pane 停止，再輪替母 bot。之後新開的 child pane 會繼承新 token。
+- child bot → `409 {"reason":"child_uses_parent_credential","parent_bot_id"}`：child 的 pane 是母 bot 開的，繼承的是**母 bot 的** `AM_BOT_ID`／token（herdr shim），daemon 原地重啟 child 不重建那份環境，換了也送不進去。母 bot 有活著的 child／grandchild run 或已登記 pane 時也回 `409 live_children_use_credential` 並列出依賴的後代／pane；先讓所有這些 pane 停止，再輪替母 bot。
+- rotate 先立起和 spawn shim 共用的 fence，再讀遞迴 descendants 與 pane inventory。已有 spawn permit 時回 `409 child_spawn_in_progress`；fence 期間新的 pane／child-agent 建立被 shim fail closed。只有 token 更新 transaction 提交後，或任何前置檢查失敗回滾後，才解除 fence；因此 pane 不會在 SQLite 快照之後帶著舊 proof 出現。之後新開的 child pane 會繼承新 token。
 - 只要 transaction 已提交，即使立即重啟失敗，回應也包含 `credential_rotated:true`；intent 保留並重試，開機 recovery 依舊 run 是否已被新 run 取代來冪等續做，不會重啟兩次。
 
 ### 10.3c `GET /api/capabilities`

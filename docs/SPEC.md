@@ -2384,7 +2384,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   daemon 原地重啟 child 也不重建 env，所以對 child 輪替回 409 `child_uses_parent_credential`；若母 bot 有仍活著的 child／grandchild 後代 pane 繼承憑證，輪替亦回 409 `live_children_use_credential` 並列出依賴後代，不改 token、不重啟。child 以母 bot 的名義呼叫 API（跟它本來就能替母 bot 做事同一條界線）。Service token 在 `<data_dir>/service-tokens/` 建立（目錄 0700、token 檔 0600），重啟保持不變；`/api/capabilities` 的
   `service_principals` 標記代表 launchd clients 不得在憑證遺失時退回 User。service scope 與固定維運 route 見 API.md。
   開發版（`App::allow_lan`，跟 bind `0.0.0.0` 同一個判斷）對端與 `Origin` 都直接放行，同網段誰都拿得到 token：使用者裁示保留（`e7392dd` 撤掉配對碼時記明）。
-- `/hook/*`、`/relay/announce`、`/relay/pane` 驗 **per-bot** `X-AM-Bot-Token`。
+- `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/begin`、`/relay/spawn/finish` 驗 **per-bot** `X-AM-Bot-Token`。
+  shim 在建立會繼承 bot proof 的 pane／child agent 前取得 spawn permit；輪替在讀 descendants 前立起同 daemon 共用的 fence。permit 未完成時輪替回 409，fence 存在時 shim 不呼叫 herdr；pane 成功後先登記到 `panes` inventory 才釋放 permit。Bot 或 DB 讀取失敗時 spawn／rotation 都 fail closed。
 
 ### 7.3 WebSocket `/ws`
 - 事件帶遞增 `seq`（記憶體，daemon 重啟從 0）。客戶端帶 `?since=`；daemon 保留最近 200 則，補不齊或 seq 倒退 → `{"type":"resync","seq":<現在的 seq>}`（lag 掉的那條也一樣帶 seq），客戶端重新 `GET /state` 與訊息。

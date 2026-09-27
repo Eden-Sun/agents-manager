@@ -265,6 +265,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/ws", get(ws_handler))
         .route("/hook/{provider}", post(crate::hookrecv::receive))
         .route("/relay/announce", post(relay_announce))
+        // Credential-bearing pane creation is fenced against concurrent credential rotation.
+        .route("/relay/spawn/begin", post(crate::credential_spawn::begin))
+        .route("/relay/spawn/finish", post(crate::credential_spawn::finish))
         // §6.5e：bot 開完 pane 後回報用途（歸屬另外從行程環境推斷）。
         .route("/relay/pane", post(relay_pane))
         // issue #90：cargo shim 用（bot 的 hook token，或人工 host shell 的一般 X-AM-Token）。
@@ -3303,6 +3306,27 @@ async fn rotate_bot_credential(
             json!({"reason": "child_uses_parent_credential", "bot_id": id, "parent_bot_id": bot.parent_bot_id}),
         ));
     }
+    // herdr creates panes outside SQLite and bot_lock. The shim's spawn permit shares this gate:
+    // once the fence is visible, new pane / child-agent creation fails closed; an operation already
+    // in herdr makes this rotation refuse before touching the proof.
+    let rotation_fence = match crate::credential_spawn::RotationFence::begin(&app, &id) {
+        Ok(fence) => fence,
+        Err(crate::credential_spawn::FenceError::AlreadyRotating) => {
+            return Err(LcError::conflict("credential rotation is already checking child panes", json!({"reason": "credential_rotation_pending", "bot_id": id})));
+        }
+        Err(crate::credential_spawn::FenceError::SpawnsInFlight(count)) => {
+            return Err(LcError::conflict(
+                "a child pane is being created with the current credential; retry rotation after it finishes",
+                json!({"reason": "child_spawn_in_progress", "bot_id": id, "active_spawns": count}),
+            ));
+        }
+    };
+    let host: String = sqlx::query_scalar("SELECT p.host FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=?")
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(any_err)?
+        .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     // Child panes carry the environment of the bot that opened them. Refuse before changing the
     // parent's proof while any live descendant still depends on it; follow the full parent chain
     // because a grandchild can retain the same inherited AM_BOT_ID/token pair.
@@ -3320,10 +3344,27 @@ async fn rotate_bot_credential(
     .fetch_all(&mut *tx)
     .await
     .map_err(any_err)?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("credential_rotation_after_descendant_query", &id).await;
     if !live_descendants.is_empty() {
         return Err(LcError::conflict(
             "live descendants still use the parent's credential; stop them before rotating",
             json!({"reason": "live_children_use_credential", "bot_id": id, "children": live_descendants}),
+        ));
+    }
+    // Bare panes opened with `herdr pane split` are not bots yet, so they do not appear in runs.
+    // The shim registers each successful pane creation in the existing pane inventory before
+    // releasing its permit; keep the old credential until those live siblings are gone too.
+    let inherited_panes: Vec<String> = sqlx::query_scalar("SELECT pane_id FROM panes WHERE host=? AND owner_bot_id=? ORDER BY pane_id")
+        .bind(&host)
+        .bind(&id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(any_err)?;
+    if !inherited_panes.is_empty() {
+        return Err(LcError::conflict(
+            "live panes created by this bot still carry its credential; close them before rotating",
+            json!({"reason": "live_children_use_credential", "bot_id": id, "child_panes": inherited_panes}),
         ));
     }
     let active = sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE bot_id=? AND state IN ('starting','running','stopping') LIMIT 1")
@@ -3355,14 +3396,6 @@ async fn rotate_bot_credential(
                 json!({"reason": "restart_in_progress", "bot_id": id, "intent_id": intent_id}),
             ));
         }
-        let host: String = sqlx::query_scalar(
-            "SELECT p.host FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=?",
-        )
-        .bind(&id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(any_err)?
-        .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
         let payload = json!({
             "credential_rotation": true,
             "opts": lifecycle::StartOpts::default(),
@@ -3397,6 +3430,7 @@ async fn rotate_bot_credential(
         return Err(LcError::NotFound("bot".into()));
     }
     tx.commit().await.map_err(any_err)?;
+    rotation_fence.committed();
     drop(lock_guard);
     app.emit("bot_changed", json!({"bot_id": id})).await;
     let Some(intent_id) = intent_id else {
@@ -5972,6 +6006,34 @@ mod per_principal_auth_tests {
         out
     }
 
+    async fn spawn_begin(app: Arc<App>, bot_id: &str, token: &str) -> String {
+        let body = format!("bot_id={bot_id}");
+        raw(
+            app,
+            format!(
+                "POST /relay/spawn/begin HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Token: {token}\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await
+    }
+
+    async fn spawn_finish(app: Arc<App>, bot_id: &str, token: &str, permit_id: &str, pane_id: &str) -> String {
+        let body = format!("bot_id={bot_id}&permit_id={permit_id}&pane_id={pane_id}&purpose=child");
+        raw(
+            app,
+            format!(
+                "POST /relay/spawn/finish HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Token: {token}\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await
+    }
+
+    fn response_json(response: &str) -> Value {
+        serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap_or("{}")).unwrap()
+    }
+
     async fn state(app: Arc<App>, headers: &[(&str, &str)]) -> String {
         let extra: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
         raw(
@@ -6443,6 +6505,79 @@ mod per_principal_auth_tests {
         assert!(response.starts_with("HTTP/1.1 200"), "retired descendants do not hold the credential: {response}");
         let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&parent.id).fetch_one(&e.app.db).await.unwrap();
         assert_ne!(current, parent.hook_token, "the parent can rotate once all dependent panes are gone");
+    }
+
+    #[tokio::test]
+    async fn a_child_spawn_permit_blocks_rotation_and_the_registered_pane_keeps_the_old_proof() {
+        let e = crate::testing::env().await;
+        let parent = distinct_bot(&e, "rotate-parent-with-spawn-permit").await;
+        let old = parent.hook_token.clone();
+        let begin = spawn_begin(e.app.clone(), &parent.id, &old).await;
+        assert!(begin.starts_with("HTTP/1.1 200"), "the parent may reserve before opening a child pane: {begin}");
+        let permit = response_json(&begin)["permit_id"].as_str().unwrap().to_string();
+
+        let rotate = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                parent.id, e.app.ui_token
+            ),
+        )
+        .await;
+        assert!(rotate.starts_with("HTTP/1.1 409") && rotate.contains("child_spawn_in_progress"), "an in-flight external spawn must prevent rotation: {rotate}");
+        assert_eq!(db::bot(&e.app.db, &parent.id).await.unwrap().unwrap().hook_token, old, "refusal keeps the old proof valid");
+
+        let finish = spawn_finish(e.app.clone(), &parent.id, &old, &permit, "w1:p-unadopted-child").await;
+        assert!(finish.starts_with("HTTP/1.1 200"), "successful pane creation must be registered before releasing its permit: {finish}");
+        let rotate = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                parent.id, e.app.ui_token
+            ),
+        )
+        .await;
+        assert!(rotate.starts_with("HTTP/1.1 409") && rotate.contains("w1:p-unadopted-child"), "an unadopted sibling pane still carries the old credential: {rotate}");
+        assert_eq!(db::bot(&e.app.db, &parent.id).await.unwrap().unwrap().hook_token, old, "the sibling pane keeps a valid proof until closed");
+    }
+
+    #[tokio::test]
+    async fn the_spawn_gate_refuses_a_child_created_after_the_descendant_snapshot() {
+        let e = crate::testing::env().await;
+        let parent = distinct_bot(&e, "rotate-parent-spawn-race").await;
+        let old = parent.hook_token.clone();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let app = e.app.clone();
+        let bot_id = parent.id.clone();
+        let token = old.clone();
+        crate::lifecycle::race_point::arm("credential_rotation_after_descendant_query", &parent.id, move || async move {
+            // This is the shim's pre-herdr request. A 409 means it will not invoke herdr and no
+            // inherited-credential pane can appear between the descendant snapshot and UPDATE.
+            let response = spawn_begin(app, &bot_id, &token).await;
+            let _ = send.send(response);
+        });
+        let app = e.app.clone();
+        let bot_id = parent.id.clone();
+        let ui_token = app.ui_token.clone();
+        let rotation = tokio::spawn(async move {
+            raw(
+                app,
+                format!(
+                    "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                    bot_id, ui_token
+                ),
+            )
+            .await
+        });
+        let spawn_response = receive.await.unwrap();
+        let rotation_response = rotation.await.unwrap();
+
+        assert!(spawn_response.starts_with("HTTP/1.1 409") && spawn_response.contains("credential_rotation_pending"), "shim must refuse the spawn while the fence is visible: {spawn_response}");
+        assert!(rotation_response.starts_with("HTTP/1.1 200"), "with no dependent pane, rotation can commit after the fence check: {rotation_response}");
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&parent.id).fetch_one(&e.app.db).await.unwrap();
+        assert_ne!(current, old, "only the fenced rotation may invalidate the old proof");
+        let stale_spawn = spawn_begin(e.app.clone(), &parent.id, &old).await;
+        assert!(stale_spawn.starts_with("HTTP/1.1 401"), "a delayed shim call cannot spawn with the revoked proof: {stale_spawn}");
     }
 }
 
