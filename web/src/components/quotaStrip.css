@@ -139,12 +139,15 @@
   background: transparent;
 }
 
-/* 桌機也要標出「畫面在哪顆 bot」（2026-09-21 使用者：桌機板也要同手機板）。只在底部畫一條 accent 線、
-   不鋪底色：紅框（limit_hit）與這條線不同軸，兩個同時出現也讀得出來，不會互相蓋。 */
+/* 桌機也要標出「畫面在哪顆 bot」（2026-09-21 使用者：桌機板也要同手機板）。底部一條 accent 線＋淡 accent 底色
+   （2026-09-28 使用者：「focus 不夠明顯」——只有細線看不出來）。仍不用邊框：紅框（limit_hit）是邊框，
+   focus 是底色＋底線，兩個同時出現也讀得出來，不會互相蓋。 */
 
 @media (width > 640px) {
   .quota-hp.focused {
     position: relative;
+    background: var(--accent-soft);
+    border-radius: 7px;
   }
 
   .quota-hp.focused::after {
@@ -153,8 +156,8 @@
     left: 4px;
     right: 4px;
     bottom: -2px;
-    height: 2px;
-    border-radius: 1px;
+    height: 3px;
+    border-radius: 2px;
     background: var(--accent);
   }
 }
