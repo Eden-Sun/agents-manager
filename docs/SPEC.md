@@ -879,7 +879,7 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
 
 直接送出的 prompt 在建立 turn **之前**先規劃（路徑、證據、空框），`NotAttempted` 不建 turn：可重試的回 409（AGM 交辦
 維持 queued 退避），不可能的回 422。規劃後、打第一個字前框才被填上的極小競態，把剛建的 turn 與 user 訊息刪回去再回
-409，讓同一個 request id 能重送。排隊中的 prompt 的重試規則見下方「排隊中的 prompt 重試」。
+409，讓同一個 request id 能重送。turn 寫入以同一筆 SQLite 條件確認規劃時的 run 仍在跑、delivery authority/session 相同；若 `mark_run_exited` 先完成，回可重試的 409 `run_ended`（`sent:false`），不留 turn 或 user message，也不呼叫 delivery。turn 先寫入時，之後的 run exit 正常收尾該回合。排隊中的 prompt 的重試規則見下方「排隊中的 prompt 重試」。
 
 第一次貼字前會重讀輸入框；若回合結束時 Codex 把未送出的提問答案放回 composer（0.157 起），daemon 保留該答案、回可重試的 `409 composer_busy`，不把新 prompt 接在後面。自動替 TUI 選答案的操作（數字、`y`，以及方向鍵後的 Enter）會在送鍵前重讀畫面並辨認仍開著的目標提示及選項；認不出來就不按。
 
