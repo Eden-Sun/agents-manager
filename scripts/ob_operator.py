@@ -76,6 +76,14 @@ def journal_for(store, ident):
     return store.root / (ident + ".browser.json")
 
 
+# 真正送出去之後才算「可能已送出」。opened／preparing 是送出前的紀錄（#643）。
+SENT_PHASES = ("dispatching", "sent")
+
+
+def journal_may_have_sent(progress):
+    return isinstance(progress, dict) and progress.get("phase") in SENT_PHASES
+
+
 def journal_state(store, ident):
     path = journal_for(store, ident)
     try:
@@ -126,7 +134,7 @@ def browser_consult(store, ident, config, collect=False, token=None):
         progress = journal_state(store, ident)
         if progress and progress.get("phase") == "done":
             return store.finish(ident, progress["answer"], progress["url"], token)
-        if progress and not collect:
+        if progress and not collect and journal_may_have_sent(progress):
             raise OBError("delivery_unknown：不可再次送出，請 collect")
         project = store.project(job["project_id"])
         # 一個 project 一串，但那一串會輪替（SPEC：OB）。決定在派送前做完並記在列上：
@@ -241,8 +249,11 @@ def operate(store, job, config):
         if progress:
             if progress.get("phase") == "done":
                 store.finish(ident, progress["answer"], progress["url"], token)
-            else:
+            elif journal_may_have_sent(progress):
                 store.fail(ident, "unknown", "可能已送出；用 collect 取回，不可重送", token)
+            else:
+                # opened／preparing：一個字都還沒送，可 retry，不能把同 project 佇列卡成 unknown。
+                store.fail(ident, "failed", "還沒送出就失敗（journal 停在送出前）；檢查登入後 retry", token)
         elif quota_error(out):
             store.fail(ident, "waiting_quota", "Sonnet 額度不足；30 分鐘後重試，不換帳號或模型", token)
         elif BUSY_MARK in (out or ""):
@@ -255,7 +266,12 @@ def operate(store, job, config):
             store.fail(ident, "failed", "Sonnet 未取得瀏覽器收據；檢查登入、CLI 與 MCP，再 retry", token)
     except Exception as e:
         if store.get(ident)["status"] != "done":
-            store.fail(ident, "unknown" if journal_for(store, ident).exists() else "failed", type(e).__name__, token)
+            try:
+                sent = journal_may_have_sent(journal_state(store, ident))
+            except Exception:
+                # 讀不到的 journal 不能當成「沒送出」再重送。
+                sent = journal_for(store, ident).exists()
+            store.fail(ident, "unknown" if sent else "failed", type(e).__name__, token)
 
 
 def recover_under_lock(store):

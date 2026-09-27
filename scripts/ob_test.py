@@ -386,6 +386,21 @@ class OperatorTests(unittest.TestCase):
             operator.operate(self.s, job, self.config())
         self.assertEqual(self.s.get(job["id"])["status"], "done")
 
+    def test_opened_journal_before_send_is_failed_and_does_not_block_the_project(self):
+        """首題／換串在 dispatch 前失敗：journal 停在 opened，不能標 unknown 把佇列卡死（#643）。"""
+        self.ask()
+        job = self.s.claim()
+        def run(*a, **kw):
+            operator.journal_for(self.s, job["id"]).write_text('{"phase":"opened","url":null}')
+            raise subprocess.TimeoutExpired("claude", 900)
+        with patch.object(operator, "run_process", side_effect=run):
+            operator.operate(self.s, job, self.config())
+        self.assertEqual(self.s.get(job["id"])["status"], "failed")
+        self.s.submit(A, "AM", "q2", "same project must stay claimable")
+        nxt = self.s.claim()
+        self.assertIsNotNone(nxt)
+        self.assertNotEqual(nxt["id"], job["id"])
+
     def test_timeout_after_dispatch_is_unknown_not_retryable(self):
         self.ask()
         job = self.s.claim()
