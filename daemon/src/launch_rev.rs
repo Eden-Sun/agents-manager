@@ -35,7 +35,14 @@ pub fn is_stale(bot: &db::Bot, run: &db::Run) -> bool {
 
 /// 記下這個 run 載入的版本（PATCH 當場套用成功、或補記舊 run）。
 pub async fn stamp(pool: &SqlitePool, run_id: &str, rev: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE runs SET launch_rev = ? WHERE id = ?").bind(rev).bind(run_id).execute(pool).await?;
+    let updated = sqlx::query("UPDATE runs SET launch_rev = ? WHERE id = ?")
+        .bind(rev)
+        .bind(run_id)
+        .execute(pool)
+        .await?;
+    if updated.rows_affected() != 1 {
+        return Err(sqlx::Error::RowNotFound);
+    }
     Ok(())
 }
 
@@ -72,5 +79,12 @@ mod tests {
         b.autostart = 1;
         b.is_primary = 1;
         assert_eq!(of(&b), rev, "名字、autostart、釘選不需要重啟");
+    }
+
+    #[tokio::test]
+    async fn stamp_reports_a_missing_run_instead_of_claiming_success() {
+        let e = tt::env().await;
+        let result = stamp(&e.app.db, "missing-run-for-launch-stamp", "0123456789abcdef").await;
+        assert!(matches!(result, Err(sqlx::Error::RowNotFound)), "missing target rows must not be reported as a successful stamp: {result:?}");
     }
 }

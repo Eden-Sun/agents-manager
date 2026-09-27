@@ -1517,6 +1517,8 @@ async fn patch_bot(
     Json(mut b): Json<PatchBot>,
 ) -> Result<Response, LcError> {
     let active = db::active_run(&app.db, &id).await.map_err(any_err)?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("patch_after_active_snapshot", &id).await;
     if let Some(n) = &b.name {
         if !valid_bot_name(n) {
             return Err(LcError::Bad(format!("bot name: {}", crate::config::BOT_NAME_RE)));
@@ -1708,34 +1710,39 @@ async fn patch_bot(
     };
     // 失敗要說得出哪一步（2026-09-13 使用者：codex 改 effort 靜默落回重啟）。只在真的試過時才出現。
     let live = if needs_restart && !live_fields.is_empty() {
-        Some(lifecycle::apply_live_setting(&app, &id, &live_fields).await)
+        Some(lifecycle::apply_live_setting_with_run(&app, &id, &live_fields).await)
     } else {
         None
     };
     // codex 的 fast（也含 model／effort）忙的時候不重啟：記下來，下一次 idle 再套（#393，lifecycle/deferred_live.rs）。
     let deferred = kind == "codex"
-        && matches!(&live, Some(Some(why)) if lifecycle::is_busy_reason(why));
+        && matches!(&live, Some(lifecycle::LiveApplyOutcome::Failed(why)) if lifecycle::is_busy_reason(why));
     if deferred {
         lifecycle::defer_live(&id, &live_fields);
     }
     let needs_restart = match &live {
-        Some(reason) => reason.is_some(),
+        Some(lifecycle::LiveApplyOutcome::Applied { .. }) => false,
+        Some(lifecycle::LiveApplyOutcome::Failed(_)) => true,
         None => needs_restart,
     };
     // 當場套用成功：執行中的 CLI 已經載入新值，這個 run 的版本跟著更新，不然會被誤判成過期（#353）。
-    if matches!(&live, Some(None)) {
-        if let (Some(r), Ok(Some(now_bot))) = (&active, db::bot(&app.db, &id).await) {
-            if let Err(e) = crate::launch_rev::stamp(&app.db, &r.id, &crate::launch_rev::of(&now_bot)).await {
+    if let Some(lifecycle::LiveApplyOutcome::Applied { run_id }) = &live {
+        if let Ok(Some(now_bot)) = db::bot(&app.db, &id).await {
+            if let Err(e) = crate::launch_rev::stamp(&app.db, run_id, &crate::launch_rev::of(&now_bot)).await {
                 tracing::warn!(bot = %id, error = %e, "could not record the launch revision after a live apply");
             }
         }
     }
     let mut out = json!({"needs_restart": needs_restart});
     if let Some(value) = remapped { out["remapped"] = value; }
-    if let Some(reason) = live {
+    if let Some(outcome) = live {
+        let (applied, reason) = match outcome {
+            lifecycle::LiveApplyOutcome::Applied { .. } => (true, None),
+            lifecycle::LiveApplyOutcome::Failed(why) => (false, Some(why)),
+        };
         out["live_apply"] = json!({
             "fields": live_fields,
-            "applied": reason.is_none(),
+            "applied": applied,
             "deferred": deferred,
             "reason": reason,
         });
@@ -5613,6 +5620,7 @@ mod started_json_tests {
 #[cfg(test)]
 mod instruction_files_tests {
     use super::*;
+    use crate::testing as tt;
     use crate::testing::{env, Env};
 
     /// `testing::env` 只種 DB 那一列；bot 要從 config.toml 進來，所以先把專案寫進 config。
@@ -5858,6 +5866,68 @@ mod instruction_files_tests {
         assert_eq!(stored(&e, &id).await, (Some("claude-md-and-agents-md".into()), Some("claude-md-and-agents-md".into())), "retry stamps A before committing B");
         let launch_rev: Option<String> = sqlx::query_scalar("SELECT launch_rev FROM runs WHERE id = ?").bind(&run_id).fetch_one(&e.app.db).await.unwrap();
         assert_eq!(launch_rev.as_deref(), Some(old_rev.as_str()), "retry must stamp the revision from config A before committing config B");
+    }
+
+    #[tokio::test]
+    async fn live_apply_stamps_the_run_selected_after_the_patch_snapshot() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "run-bound", "kind": "claude", "model": "claude-sonnet-4-5"})).await.unwrap();
+        let run_a = tt::fake_run(&e.app, &id).await;
+        let old_rev = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
+        sqlx::query("UPDATE runs SET launch_rev = ?, runtime_model = 'claude-sonnet-4-5' WHERE id = ?")
+            .bind(&old_rev)
+            .bind(&run_a)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        let run_b = db::ulid();
+        let pane_b = format!("pane-{run_b}");
+        e.herdr.set_screen(&pane_b, "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n");
+        let screens = e.herdr.screens.clone();
+        let pane_after_answer = pane_b.clone();
+        crate::lifecycle::race_point::arm("slash_after_answer_before_read", &pane_b, move || async move {
+            screens.lock().unwrap().insert(pane_after_answer, "Claude Code\n❯\n".into());
+        });
+
+        let app = e.app.clone();
+        let bot_for_rollover = id.clone();
+        let run_a_for_rollover = run_a.clone();
+        let run_b_for_rollover = run_b.clone();
+        let pane_for_rollover = pane_b.clone();
+        let baseline = old_rev.clone();
+        crate::lifecycle::race_point::arm("patch_after_active_snapshot", &id, move || async move {
+            sqlx::query("UPDATE runs SET state = 'exited', ended_at = ? WHERE id = ?")
+                .bind(db::now())
+                .bind(&run_a_for_rollover)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at, launch_rev, runtime_model)
+                 VALUES (?, ?, 'running', 'idle', ?, ?, ?, 'claude-sonnet-4-5')",
+            )
+            .bind(&run_b_for_rollover)
+            .bind(&bot_for_rollover)
+            .bind(&pane_for_rollover)
+            .bind(db::now())
+            .bind(&baseline)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        });
+
+        let out = patch(&e, &id, json!({"model": "claude-opus-5-5"})).await.unwrap();
+        assert_eq!(out["live_apply"]["applied"], json!(true), "the replacement run accepted the live model: {out}");
+        assert_eq!(out["needs_restart"], json!(false), "the run receiving the live apply must not keep a false restart badge");
+        let a_rev: Option<String> = sqlx::query_scalar("SELECT launch_rev FROM runs WHERE id = ?").bind(&run_a).fetch_one(&e.app.db).await.unwrap();
+        let b_rev: Option<String> = sqlx::query_scalar("SELECT launch_rev FROM runs WHERE id = ?").bind(&run_b).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(a_rev.as_deref(), Some(old_rev.as_str()), "bookkeeping must not stamp the stale PATCH snapshot");
+        assert_eq!(b_rev.as_deref(), Some(crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap()).as_str()), "bookkeeping must stamp the actual live target run");
+        let state = state_json(&e.app).await.unwrap();
+        let needs_restart = state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == json!(id)).unwrap()["needs_restart"].clone();
+        assert_eq!(needs_restart, json!(false));
     }
 
     /// 值不在 CLI 的選項裡（CLI 會當成它自己的預設＝改讀 AGENTS.md）、非 claude 的 bot、child bot 都是 400，而且什麼都不改。

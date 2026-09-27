@@ -59,20 +59,20 @@ pub(crate) fn schedule_deferred_live(app: &Arc<App>, bot_id: &str) {
         if fields.is_empty() {
             return;
         }
-        match super::apply_live_setting(&app, &bot_id, &fields).await {
-            None => {
+        match super::apply_live_setting_with_run(&app, &bot_id, &fields).await {
+            super::LiveApplyOutcome::Applied { run_id } => {
                 // 同 PATCH：套成功就把這個 run 的啟動版本蓋成現在的設定，否則會被誤判成過期（#353）。
-                if let (Ok(Some(run)), Ok(Some(bot))) = (db::active_run(&app.db, &bot_id).await, db::bot(&app.db, &bot_id).await) {
-                    if let Err(e) = crate::launch_rev::stamp(&app.db, &run.id, &crate::launch_rev::of(&bot)).await {
+                if let Ok(Some(bot)) = db::bot(&app.db, &bot_id).await {
+                    if let Err(e) = crate::launch_rev::stamp(&app.db, &run_id, &crate::launch_rev::of(&bot)).await {
                         tracing::warn!(bot = %bot_id, error = %e, "could not record the launch revision after a deferred live apply");
                     }
                 }
             }
-            Some(why) if is_busy_reason(&why) => {
+            super::LiveApplyOutcome::Failed(why) if is_busy_reason(&why) => {
                 // 剛閒下來又被新回合搶走：再排一次。
                 defer_live(&bot_id, &fields);
             }
-            Some(why) => tracing::info!(bot = %bot_id, ?fields, reason = %why, "deferred live apply failed; the restart badge stays"),
+            super::LiveApplyOutcome::Failed(why) => tracing::info!(bot = %bot_id, ?fields, reason = %why, "deferred live apply failed; the restart badge stays"),
         }
         app.emit("bot_changed", serde_json::json!({"bot_id": bot_id})).await;
     });
