@@ -37,6 +37,11 @@ pub async fn send_text(app: &Arc<App>, bot_id: &str, text: &str, enter: bool, ex
         .ok_or_else(|| LcError::NotFound("pane".into()))?
         .to_string();
     let client = client_for_run(app, &run).await?;
+    // 併送也是 daemon 直接打進 pane（#648）。沒先記下的話，下一則 prompt 仍走 agent.prompt，
+    // 那條路會回 ok 但字沒進去。寫不進去就不打。
+    if !text.is_empty() || enter {
+        mark_pane_typed(app, &run.id).await.map_err(LcError::Upstream)?;
+    }
     if !text.is_empty() {
         client.pane_send_text(&pane_id, text).await.map_err(up)?;
     }
@@ -947,5 +952,56 @@ mod login_slash_tests {
         assert_eq!(SlashBlocked::AgentBusy.reason(), "agent_busy");
         assert_eq!(SlashBlocked::TurnInFlight.reason(), "turn_in_flight");
         assert_eq!(SlashBlocked::NoPane.reason(), "no_pane");
+    }
+}
+
+#[cfg(test)]
+mod send_text_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// #648：併送直接打進 pane，必須先記下 pane_typed，之後的 prompt 才不會走 agent.prompt。
+    #[tokio::test]
+    async fn typing_text_into_the_pane_marks_it_so_later_prompts_are_typed() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "text-mark").await;
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        let transcript = env.dir.join("text-mark.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        sqlx::query("UPDATE runs SET native_session_id='sess-1', transcript_path=? WHERE id=?")
+            .bind(transcript.to_str().unwrap())
+            .bind(&run_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        env.herdr.live_pane(&pane, tt::LivePane::default());
+        env.herdr.set_agent("agent", &pane, true);
+
+        send_text(&env.app, &bot.id, "併送一句", true, None).await.unwrap();
+        assert!(crate::db::pane_typed(&env.app.db, &run_id).await.unwrap());
+
+        let run = crate::db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let bot = crate::db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let client = super::super::client_for_run(&env.app, &run).await.unwrap();
+        let planned = super::super::plan_delivery(&env.app, &client, &run, &bot, "下一則", false, false).await.unwrap();
+        assert!(matches!(planned, Ok(Plan::Type { .. })), "併送之後不能再走 agent.prompt：{planned:?}");
+    }
+
+    /// 記號寫不進去就不打（跟 /login 同一條）。
+    #[tokio::test]
+    async fn text_is_not_typed_when_pane_typed_cannot_be_recorded() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "text-unwritable").await;
+        tt::fake_run(&env.app, &bot.id).await;
+        sqlx::query("CREATE TRIGGER no_pane_typed BEFORE UPDATE OF pane_typed ON runs BEGIN SELECT RAISE(ABORT, 'disk hiccup'); END")
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let err = send_text(&env.app, &bot.id, "不要打", true, None).await.unwrap_err();
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        assert!(env.herdr.calls_to("pane.send_text").is_empty(), "寫不進去就不打");
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty());
     }
 }
