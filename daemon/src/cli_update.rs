@@ -42,27 +42,32 @@ pub const LOG_FILE: &str = "cli-update.log";
 /// 失敗時回給畫面的輸出只留尾巴，全文在 log。
 const TAIL_CHARS: usize = 1500;
 
-/// 主機端的安裝鎖（#564、#580）：`$HOME` 底下一條 symlink，目標是安裝 helper 的 pid 與唯一 nonce。
+/// 主機端的安裝鎖（#564、#580）：`$HOME` 底下一條 symlink，目標是專用安裝 process group 的 id 與唯一 nonce。
 ///
 /// DB 那一列只擋得住**同一個資料目錄**的 daemon；daemon 被砍掉時遠端的 `curl | sh` 不會跟著停（逾時也只砍得掉本機的
-/// ssh），隔離實例也會對同一台開安裝。所以安裝 helper 在主機端持鎖並等待完整的安裝指令；外層 SSH wrapper 離開不會帶走
-/// helper。`ln -s` 原子地寫入 `pid:nonce`；probe 只有在該 PID 的命令列仍帶同一個 nonce 時才算忙，避免 PID 重用假裝安裝還活著。
-/// 沒有 nonce 的舊版 PID 鎖無法驗明 owner，視為過期回收。鎖忙時不裝、印 [`LOCKED_MARK`] 退出 [`LOCKED_EXIT`]；
-/// owner 已退出時可回收。不分實例：換掉的是同一顆 codex。
+/// ssh），隔離實例也會對同一台開安裝。所以安裝 helper 在主機端建立專用 process group 並持鎖、等待完整安裝指令；外層 SSH
+/// wrapper 離開不會帶走安裝。`ln -s` 原子地寫入 `process-group-id:nonce`；probe 查該 group 的存活行程是否仍帶同一個 nonce，
+/// 因此 helper 被 SIGKILL 後，只要 installer 子行程還活著就仍算忙，也不會把重用的 PID 誤認成 owner。沒有 nonce 的舊版 PID 鎖
+/// 無法驗明 owner，視為過期回收。鎖忙時不裝、印 [`LOCKED_MARK`] 退出 [`LOCKED_EXIT`]；group 內已無 owner 時可回收。
+/// 不分實例：換掉的是同一顆 codex。
 pub const INSTALL_LOCK: &str = "$HOME/.agents-manager-codex-install.lock";
 const LOCKED_EXIT: i32 = 75;
 const LOCKED_MARK: &str = "AM_CODEX_INSTALL_LOCKED";
 
-/// 識別新式 `pid:nonce` owner；舊版單 PID symlink 沒有足夠資料驗明身份，視為過期。
+/// 識別新式 `process-group-id:nonce` owner；舊版單 PID symlink 沒有足夠資料驗明身份，視為過期。
 fn lock_owner_check() -> &'static str {
     r#"lock_owner_alive() {
   owner=$1
-  case "$owner" in *:*) pid=${owner%%:*}; nonce=${owner#*:} ;; *) return 1 ;; esac
+  case "$owner" in *:*) pgid=${owner%%:*}; nonce=${owner#*:} ;; *) return 1 ;; esac
   case "$nonce" in ''|*:* ) return 1 ;; esac
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
-  cmd=$(ps -p "$pid" -o command= 2>/dev/null) || return 1
-  case "$cmd" in *"$nonce"*) return 0 ;; *) return 1 ;; esac
+  case "$pgid" in ''|0|*[!0-9]*) return 1 ;; esac
+  kill -0 "-$pgid" 2>/dev/null || return 1
+  members=$(ps -A -o pid= -o pgid= 2>/dev/null | awk -v pgid="$pgid" '$2 == pgid { print $1 }') || return 1
+  for member in $members; do
+    cmd=$(ps eww -p "$member" -o command= 2>/dev/null) || continue
+    case "$cmd" in *"AM_CODEX_INSTALL_OWNER=$nonce"*) return 0 ;; esac
+  done
+  return 1
 }"#
 }
 
@@ -84,21 +89,23 @@ fn locked_script(lock: &str, inner: &str) -> String {
 L={lock}
 OUT=$2
 PARENT_PID=$1
+GROUP_ID=$(ps -p "$$" -o pgid= 2>/dev/null | tr -d '[:space:]')
+[ "$GROUP_ID" = "$$" ] || {{ echo "Could not isolate installer process group" >&2; exit 70; }}
+AM_CODEX_INSTALL_OWNER=$LOCK_NONCE
+export AM_CODEX_INSTALL_OWNER
 {owner_check}
 cleanup() {{
-  [ "$(readlink "$L" 2>/dev/null)" = "$$:$LOCK_NONCE" ] && rm -f "$L"
+  [ "$(readlink "$L" 2>/dev/null)" = "$GROUP_ID:$LOCK_NONCE" ] && rm -f "$L"
   kill -0 "$PARENT_PID" 2>/dev/null || rm -f "$OUT"
 }}
 trap cleanup EXIT
 trap '' HUP INT TERM
-if ! ln -s "$$:$LOCK_NONCE" "$L" 2>/dev/null; then
+if ! ln -s "$GROUP_ID:$LOCK_NONCE" "$L" 2>/dev/null; then
   p=$(readlink "$L" 2>/dev/null)
   if [ -n "$p" ] && lock_owner_alive "$p"; then echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; fi
   rm -f "$L"
-  ln -s "$$:$LOCK_NONCE" "$L" 2>/dev/null || {{ p=$(readlink "$L" 2>/dev/null); echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; }}
+  ln -s "$GROUP_ID:$LOCK_NONCE" "$L" 2>/dev/null || {{ p=$(readlink "$L" 2>/dev/null); echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; }}
 fi
-AM_CODEX_INSTALL_OWNER=$LOCK_NONCE
-export AM_CODEX_INSTALL_OWNER
 eval {inner}
 "#,
         owner_check = lock_owner_check(),
@@ -109,7 +116,12 @@ eval {inner}
 LOCK_NONCE='{nonce}'
 OUT=$(mktemp "${{TMPDIR:-/tmp}}/am-codex-install.XXXXXX") || exit 70
 umask 077
-nohup /bin/sh -c {worker} am-codex-install "$$" "$OUT" > "$OUT" 2>&1 < /dev/null &
+if command -v setsid >/dev/null 2>&1; then
+  AM_CODEX_INSTALL_OWNER="$LOCK_NONCE" nohup setsid /bin/sh -c {worker} am-codex-install "$$" "$OUT" > "$OUT" 2>&1 < /dev/null &
+else
+  set -m
+  AM_CODEX_INSTALL_OWNER="$LOCK_NONCE" nohup /bin/sh -c {worker} am-codex-install "$$" "$OUT" > "$OUT" 2>&1 < /dev/null &
+fi
 worker_pid=$!
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -1711,6 +1723,77 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Killing the process that created the lock must not release it while an installer child survives.
+    #[tokio::test]
+    async fn remote_install_lock_survives_helper_sigkill_until_installer_exits() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let dir = std::env::temp_dir().join(format!("am-cli-lock-helper-kill-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("codex-install.lock").display().to_string();
+        let installer_pid_file = dir.join("installer.pid");
+        let second_ran = dir.join("second-ran");
+        let inner = format!("sleep 3 & echo $! > '{}'; wait", installer_pid_file.display());
+
+        let mut control = tokio::process::Command::new("/bin/sh")
+            .arg("-s")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = control.stdin.take().unwrap();
+        input.write_all(locked_script(&lock, &inner).as_bytes()).await.unwrap();
+        drop(input);
+        for _ in 0..200 {
+            if installer_pid_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let installer_pid: u32 = match std::fs::read_to_string(&installer_pid_file) {
+            Ok(pid) => pid.trim().parse().unwrap(),
+            Err(error) => {
+                let output = control.wait_with_output().await.unwrap();
+                panic!("fake installer did not start: {error}; stdout={:?}; stderr={:?}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            }
+        };
+        let owner = std::fs::read_link(&lock).unwrap().to_string_lossy().into_owned();
+        let helper_pid: i32 = owner.split(':').next().unwrap().parse().unwrap();
+        assert_ne!(helper_pid, control.id().unwrap() as i32, "the lock helper is separate from the SSH control shell");
+
+        assert_eq!(unsafe { libc::kill(installer_pid as i32, 0) }, 0, "fake installer is alive before killing the helper");
+        assert_eq!(unsafe { libc::kill(helper_pid, libc::SIGKILL) }, 0, "kill the actual lock helper, not the outer control shell");
+        control.wait().await.unwrap();
+        let installer_survived = unsafe { libc::kill(installer_pid as i32, 0) } == 0;
+
+        let probe = local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap();
+        let busy = parse_probe(&probe).unwrap();
+        let second = local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(5)).await;
+        let second_was_excluded = second.as_ref().is_err_and(|err| err.contains(LOCKED_MARK) && err.contains("75"));
+        let second_did_not_run = !second_ran.exists();
+
+        for _ in 0..500 {
+            if unsafe { libc::kill(installer_pid as i32, 0) } != 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let installer_finished = unsafe { libc::kill(installer_pid as i32, 0) } != 0;
+        let released = !parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap();
+        let reacquired = local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(5)).await.is_ok();
+        let second_ran_after_release = second_ran.exists();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(installer_survived, "SIGKILL of the lock helper must leave the installer child alive");
+        assert!(busy, "helper death must not make the live installer's lock stale: {probe}");
+        assert!(second_was_excluded, "a contender must stay out while the installer survives: {second:?}");
+        assert!(second_did_not_run, "the contender must not enter its install section");
+        assert!(installer_finished, "the fake installer should eventually finish");
+        assert!(released, "a dead install group must make its abandoned lock stale");
+        assert!(reacquired && second_ran_after_release, "a new installer can acquire the lock after the old installer exits");
+    }
+
     /// A stale PID can be reused by an unrelated process. PID liveness without the lock owner's identity is not enough.
     #[tokio::test]
     async fn a_reused_pid_does_not_keep_a_stale_host_install_lock_busy() {
@@ -1738,6 +1821,40 @@ mod tests {
         drop(unrelated_stdin);
         unrelated.wait().await.unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_reused_process_group_id_does_not_keep_a_stale_host_install_lock_busy() {
+        let dir = std::env::temp_dir().join(format!("am-cli-lock-pgid-reuse-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("codex-install.lock").display().to_string();
+        let marker = dir.join("installer-ran");
+
+        let mut unrelated = tokio::process::Command::new("setsid")
+            .arg("/bin/sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let unrelated_pgid = unrelated.id().unwrap();
+        std::os::unix::fs::symlink(format!("{unrelated_pgid}:old-owner-nonce"), &lock).unwrap();
+
+        let probe = local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap();
+        let busy = parse_probe(&probe).unwrap();
+        let contender = local_sh(&locked_script(&lock, &format!("touch '{}'", marker.display())), Duration::from_secs(5)).await;
+        let acquired = contender.is_ok();
+        let installer_ran = marker.exists();
+
+        unrelated.start_kill().unwrap();
+        unrelated.wait().await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(!busy, "a live but unrelated process group must not match an abandoned lock's nonce: {probe}");
+        assert!(acquired, "a stale group ID must be reclaimable: {contender:?}");
+        assert!(installer_ran, "the replacement installer should run");
     }
 
     /// 真的 `/bin/sh` 跑鎖的腳本（裡面的指令換成 sleep／echo，絕不跑 curl）：拿著的時候第二個不跑、退 75；
