@@ -93,6 +93,18 @@ import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
 const sendMissionRequest = missionRequests(api.newClientRequestId)
 const missionLoads = new Map<string, () => Promise<void>>()
 const missionListLoads = new Map<string, () => Promise<void>>()
+/** 整頁重抓成功後遞增；跨過重抓的較早頁回應不能再接到新的時間軸前面。 */
+const messagePageGenerations = new Map<string, number>()
+
+function messagePageGeneration(kind: 'bot' | 'group', id: string): number {
+  return messagePageGenerations.get(`${kind}:${id}`) ?? 0
+}
+
+function advanceMessagePageGeneration(kind: 'bot' | 'group', id: string): void {
+  const key = `${kind}:${id}`
+  messagePageGenerations.set(key, (messagePageGenerations.get(key) ?? 0) + 1)
+}
+
 /**
  * 已結案（done／cancelled）各抓最近幾筆；進行中的另外抓、不跟它們搶名額。
  * 以前一次 `status=all&limit=50`：專案又開了 50 筆任務之後，停著等你回答的那筆就掉出清單，卡片跟回答框一起消失（review3 c1 M6）。
@@ -1066,6 +1078,7 @@ export const useStore = create<StoreState>((set, get) => ({
       const startedAt = new Date().toISOString()
       const page = await api.fetchProjectMessages(projectId)
       noteGroupPrompts(page.messages)
+      advanceMessagePageGeneration('group', projectId)
       set((s) => {
         // 同 `loadMessages`：請求飛在半路時進來的 `message_added` 不能被舊的那一頁蓋掉。
         const kept = keptAfterPage(s.groupMessages[projectId] ?? [], page.messages, startedAt)
@@ -1088,10 +1101,12 @@ export const useStore = create<StoreState>((set, get) => ({
     const s0 = get()
     const oldest = s0.groupMessages[projectId]?.[0]
     if (!oldest || s0.loadingMore[projectId]) return
+    const generation = messagePageGeneration('group', projectId)
     set((s) => ({ loadingMore: { ...s.loadingMore, [projectId]: true } }))
     try {
       const page = await api.fetchProjectMessages(projectId, PAGE_SIZE, oldest.id)
       set((s) => {
+        if (generation !== messagePageGeneration('group', projectId)) return {}
         const have = new Set((s.groupMessages[projectId] ?? []).map((m) => m.id))
         const older = page.messages.filter((m) => !have.has(m.id))
         const merged = [...older, ...(s.groupMessages[projectId] ?? [])]
@@ -1237,6 +1252,7 @@ export const useStore = create<StoreState>((set, get) => ({
       const startedAt = new Date().toISOString()
       const page = await api.fetchMessages(botId)
       noteGroupPrompts(page.messages)
+      advanceMessagePageGeneration('bot', botId)
       set((s) => {
         const kept = keptAfterPage(s.messages[botId] ?? [], page.messages, startedAt)
         const turns: Record<string, Turn> = {}
@@ -1263,10 +1279,12 @@ export const useStore = create<StoreState>((set, get) => ({
     const s0 = get()
     const oldest = s0.messages[botId]?.[0]
     if (!oldest || s0.loadingMore[botId]) return
+    const generation = messagePageGeneration('bot', botId)
     set((s) => ({ loadingMore: { ...s.loadingMore, [botId]: true } }))
     try {
       const page = await api.fetchMessages(botId, PAGE_SIZE, oldest.id)
       set((s) => {
+        if (generation !== messagePageGeneration('bot', botId)) return {}
         const have = new Set((s.messages[botId] ?? []).map((m) => m.id))
         const older = page.messages.filter((m) => !have.has(m.id))
         const merged = [...older, ...(s.messages[botId] ?? [])]

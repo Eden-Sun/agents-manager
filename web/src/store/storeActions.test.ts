@@ -1240,3 +1240,83 @@ test('#457：群組時間軸走同一條規則', async () => {
   assert.equal(s.messageCapFloors.p1, MESSAGE_CAP + 200 + MESSAGE_CAP)
   assert.equal(capWouldTrim(s.groupMessages.p1, 'p1'), false)
 })
+
+test('#624：較早頁晚於整頁重抓回來時丟棄舊邊界，下一頁仍能補齊 bot 對話', async () => {
+  seed()
+  const page = (from: number, count: number, extra: Record<string, unknown> = {}) =>
+    json({ messages: Array.from({ length: count }, (_, i) => ({ ...capMsg(from + i), ...extra })), turns: [], has_more: true }, 200)
+  useStore.setState({
+    messages: { b1: Array.from({ length: 150 }, (_, i) => capMsg(i + 1)) },
+    loadedBots: { b1: true },
+    moreMessages: { b1: true },
+  })
+  let resolveEarlier!: (response: Response) => void
+  const earlierResponse = new Promise<Response>((resolve) => {
+    resolveEarlier = resolve
+  })
+  routeDaemon((r) => {
+    const before = new URL(r.path, 'http://x').searchParams.get('before')
+    if (before === capMsg(1).id) return earlierResponse
+    if (before === capMsg(101).id) return page(1, 100)
+    if (before) return page(-99, 50)
+    return page(101, 50)
+  })
+
+  const earlier = useStore.getState().loadEarlierMessages('b1')
+  await settle()
+  await useStore.getState().loadMessages('b1')
+  resolveEarlier(page(-49, 50))
+  await earlier
+
+  assert.deepEqual(useStore.getState().messages.b1.map((m) => m.id), Array.from({ length: 50 }, (_, i) => capMsg(i + 101).id))
+  await useStore.getState().loadEarlierMessages('b1')
+  assert.deepEqual(
+    useStore.getState().messages.b1.map((m) => m.id),
+    Array.from({ length: 150 }, (_, i) => capMsg(i + 1).id),
+    '下一次載入要從重抓後的最舊訊息開始，補上中間缺少的一段',
+  )
+  assert.equal(
+    new URL(requests.filter((r) => r.path.includes('/bots/b1/messages') && r.path.includes('before=')).at(-1)!.path, 'http://x').searchParams.get('before'),
+    capMsg(101).id,
+  )
+})
+
+test('#624：群組較早頁晚於整頁重抓回來時丟棄舊邊界，下一頁仍能補齊', async () => {
+  seed()
+  const groupPage = (from: number, count: number) =>
+    json({ messages: Array.from({ length: count }, (_, i) => ({ ...capMsg(from + i), bot_id: 'b1', bot_name: 'b1' })), has_more: true }, 200)
+  useStore.setState({
+    groupMessages: { p1: Array.from({ length: 150 }, (_, i) => ({ ...capMsg(i + 1), bot_id: 'b1', bot_name: 'b1' })) as never },
+    loadedProjects: { p1: true },
+    moreMessages: { p1: true },
+  })
+  let resolveEarlier!: (response: Response) => void
+  const earlierResponse = new Promise<Response>((resolve) => {
+    resolveEarlier = resolve
+  })
+  routeDaemon((r) => {
+    const before = new URL(r.path, 'http://x').searchParams.get('before')
+    if (before === capMsg(1).id) return earlierResponse
+    if (before === capMsg(101).id) return groupPage(1, 100)
+    if (before) return groupPage(-99, 50)
+    return groupPage(101, 50)
+  })
+
+  const earlier = useStore.getState().loadEarlierGroupMessages('p1')
+  await settle()
+  await useStore.getState().loadGroupMessages('p1')
+  resolveEarlier(groupPage(-49, 50))
+  await earlier
+
+  assert.deepEqual(useStore.getState().groupMessages.p1.map((m) => m.id), Array.from({ length: 50 }, (_, i) => capMsg(i + 101).id))
+  await useStore.getState().loadEarlierGroupMessages('p1')
+  assert.deepEqual(
+    useStore.getState().groupMessages.p1.map((m) => m.id),
+    Array.from({ length: 150 }, (_, i) => capMsg(i + 1).id),
+    '下一次載入要從重抓後的最舊訊息開始，補上中間缺少的一段',
+  )
+  assert.equal(
+    new URL(requests.filter((r) => r.path.includes('/projects/p1/messages') && r.path.includes('before=')).at(-1)!.path, 'http://x').searchParams.get('before'),
+    capMsg(101).id,
+  )
+})
