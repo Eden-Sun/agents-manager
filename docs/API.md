@@ -1083,6 +1083,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | `device` | daemon 向 GitHub 要裝置碼、立刻回 `pending {user_code, verification_uri, verification_uri_complete, expires_in}`；背景輪詢，授權後同樣 `--with-token` 餵給該主機 |
 
 回應同 GET 外加實際 `mode`；前端每 ~2 秒 GET，`logged_in:true` 完成、`error` 有字失敗。token、`device_code` 絕不出現在 JSON 或 log。
+裝置碼輪詢中的暫時網路／回應解析錯誤與 HTTP 5xx 會以退避重試到 `expires_at`；期間仍呈現 `pending`，期限到了才回過期錯誤。`authorization_pending` 照原間隔等、`slow_down` 依 GitHub 要求加長間隔；明確 OAuth 錯誤（`access_denied`、`expired_token`，或其他非 pending／slow_down 的 OAuth `error` 欄位）會停止輪詢並回 `error`。
 錯誤：host 不存在 404；`mode` 不合法 400；`copy` 打在 `local` 400；`copy` 但本機未登入 `409 {"reason":"local_gh_not_logged_in"}`；沒有可切的帳號 400；上游失敗 502（message 已打碼）。
 
 `POST /api/hosts/{name}/gh/cancel` → 放棄裝置碼，回應同 GET（`mode:"cancel"`、`pending:null`）。
