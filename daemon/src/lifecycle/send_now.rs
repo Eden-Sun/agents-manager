@@ -112,6 +112,7 @@ pub(crate) async fn deliver(
             tracing::warn!(bot = %bot.name, error = %e, "插隊送出：herdr 拒收打字，一個字都沒進去");
             return Outcome::NotAttempted(Delivered::NotAttempted { reason: "pane_send_refused", retry: true });
         }
+        // 前幾段已經在框裡（#647）：不是 NotAttempted。送出鍵沒按，字留在框裡，跟「打字沒回應」同一條。
         Err(e) => {
             tracing::warn!(bot = %bot.name, error = %e, "插隊送出：打字沒有回應，不按送出鍵");
             return Outcome::NotSent("typing_unanswered");

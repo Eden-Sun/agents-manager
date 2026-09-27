@@ -2373,6 +2373,27 @@ mod send_now_tests {
         assert_eq!(turns, 1, "新的那一則沒有留下任何列");
     }
 
+    /// #647：長文字拆段，第 1 段已進框、第 2 段被拒。不能回「一個字都沒進去」的可重試 409。
+    #[tokio::test]
+    async fn a_send_now_whose_later_paste_chunk_was_refused_is_not_told_that_nothing_landed() {
+        let f = fixture("claude", Some("2.1.275")).await;
+        let app = f.env.app.clone();
+        let running = busy(&f).await;
+        f.env.herdr.fail_after("pane.send_text", 1, tt::Fault::Refuse);
+        let text = "x".repeat(1500);
+
+        let out = prompt_send_now(&app, &f.bot_id, &text, "sn-partial", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("not_sent"), "{out:?}");
+        assert_eq!(out.delivery, "failed", "{out:?}");
+        assert_eq!(send_now_presses(&f), 0, "半段留在框裡就不按送出鍵");
+        assert_eq!(f.env.herdr.calls_to("pane.send_text").len(), 2, "第 1 段送出、第 2 段被拒");
+        let box_rows = f.env.herdr.pane("pane-sn").unwrap().composer;
+        assert_eq!(box_rows, vec!["x".repeat(1000)], "前 1000 字留在框裡：{box_rows:?}");
+        assert_eq!(status_of(&f, &running).await, "in_flight");
+        assert_eq!(status_of(&f, &out.turn_id).await, "failed");
+        assert!(notes_on(&f, &out.turn_id).await.iter().any(|n| n.contains("輸入框")));
+    }
+
     /// 同一條，但這次 `pane.send_text` 的結果**不知道**（送出去之後連線斷了、沒回）。打字從來不會打斷 claude，
     /// 送出鍵也沒有按——舊回合照樣還在跑；新的那一則沒送出（字可能還留在框裡），說清楚、不按鍵。
     #[tokio::test]

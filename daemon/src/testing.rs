@@ -47,6 +47,8 @@ pub struct MockHerdr {
     pub agents: Arc<StdMutex<Vec<Value>>>,
     /// 下一次（或下幾次）呼叫某個方法時要出的狀況，見 [`MockHerdr::fail_next`]。
     faults: Arc<StdMutex<Vec<(String, Fault)>>>,
+    /// 先讓這個方法成功 `skip` 次，再套用 fault（#647 分段貼上的第 2 段）。
+    defer: Arc<StdMutex<Vec<(String, usize, Fault)>>>,
     /// `agent.list` 回空陣列，但 `agent.get` 仍看得到 `agents`：模擬「清單暫時是空的、agent 其實還在」。
     pub hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
     /// `ping` 的回答 `(version, protocol)`；測 live-handoff 後版本變了（#254）。
@@ -219,6 +221,7 @@ struct MockState {
     pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     shell_pids: Arc<StdMutex<BTreeMap<String, i64>>>,
     faults: Arc<StdMutex<Vec<(String, Fault)>>>,
+    defer: Arc<StdMutex<Vec<(String, usize, Fault)>>>,
     hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
     pong: Arc<StdMutex<(String, u32)>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
@@ -287,6 +290,7 @@ impl MockHerdr {
             pids: Default::default(),
             shell_pids: Default::default(),
             faults: Default::default(),
+            defer: Default::default(),
             hide_agent_list: Default::default(),
             pong: Arc::new(StdMutex::new(("mock".into(), 20))),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -304,6 +308,7 @@ impl MockHerdr {
         let reject_ansi = state.reject_ansi.clone();
         let ignore_ansi = state.ignore_ansi.clone();
         let faults = state.faults.clone();
+        let defer = state.defer.clone();
         let hide_agent_list = state.hide_agent_list.clone();
         let pong = state.pong.clone();
         let handle = tokio::spawn(async move {
@@ -321,6 +326,17 @@ impl MockHerdr {
                     let method = req.get("method").and_then(Value::as_str).unwrap_or("").to_string();
                     let params = req.get("params").cloned().unwrap_or(json!({}));
                     st.calls.lock().unwrap().push((method.clone(), params.clone()));
+                    {
+                        let mut d = st.defer.lock().unwrap();
+                        if let Some(i) = d.iter().position(|(m, _, _)| m == &method) {
+                            if d[i].1 == 0 {
+                                let (_, _, fault) = d.remove(i);
+                                st.faults.lock().unwrap().insert(0, (method.clone(), fault));
+                            } else {
+                                d[i].1 -= 1;
+                            }
+                        }
+                    }
                     let fault = {
                         let mut f = st.faults.lock().unwrap();
                         f.iter().position(|(m, _)| *m == method).map(|i| f.remove(i).1)
@@ -736,12 +752,17 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, screen_revisions, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, hide_agent_list, pong, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, screen_revisions, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, defer, hide_agent_list, pong, handle }
     }
 
     /// 接下來第一次呼叫 `method` 時照 `fault` 壞一次（排幾次就壞幾次，依序）。呼叫一樣記在 `calls` 裡。
     pub fn fail_next(&self, method: &str, fault: Fault) {
         self.faults.lock().unwrap().push((method.to_string(), fault));
+    }
+
+    /// 這個方法先成功 `skip` 次，下一次才套 `fault`。`skip = 1` 是「第 2 次才壞」。
+    pub fn fail_after(&self, method: &str, skip: usize, fault: Fault) {
+        self.defer.lock().unwrap().push((method.to_string(), skip, fault));
     }
 
     /// 同 [`MockHerdr::fail_next`]，但拿得進 `race_point` 的 `'static` 閉包：要在某一瞬間之後才壞的時候用（#157）。
