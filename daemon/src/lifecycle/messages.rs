@@ -106,8 +106,13 @@ pub async fn insert_message_full(
     group_id: Option<&str>,
     relay_from: Option<&str>,
 ) -> anyhow::Result<db::Message> {
+    let mut tx = app.db.begin().await?;
+    let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
+        .bind(conversation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("conversation {conversation_id} has no owner"))?;
     let id = db::ulid();
-
     let now = db::now();
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, incomplete, terminal_snapshot, group_id, relay_from, created_at)
@@ -124,17 +129,13 @@ pub async fn insert_message_full(
     .bind(group_id)
     .bind(relay_from)
     .bind(&now)
-    .execute(&app.db)
+    .execute(&mut *tx)
     .await?;
     let m = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id = ?")
         .bind(&id)
-        .fetch_one(&app.db)
+        .fetch_one(&mut *tx)
         .await?;
-    let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
-        .bind(conversation_id)
-        .fetch_one(&app.db)
-        .await
-        .unwrap_or_default();
+    tx.commit().await?;
     app.emit("message_added", json!({ "bot_id": bot_id, "message": m })).await;
     Ok(m)
 }
@@ -244,6 +245,46 @@ mod tests {
     use super::*;
     use crate::testing as tt;
     use tokio::sync::broadcast::error::TryRecvError;
+
+    #[tokio::test]
+    async fn unreadable_message_owner_does_not_persist_or_publish_until_retry() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "message-owner-retry").await;
+        let conversation_id = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let mut events = app.subscribe();
+
+        tt::make_table_unreadable(&app, "conversations").await;
+        let first = insert_message(&app, &conversation_id, None, "assistant", "reply", "hook", false, None).await;
+        tt::make_table_readable(&app, "conversations").await;
+
+        assert!(first.is_err(), "owner lookup failure must be returned for retry: {first:?}");
+        let failed_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=?")
+            .bind(&conversation_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(failed_rows, 0, "the failed attempt must not leave an unrouteable durable message");
+        assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)), "an unverified owner cannot be published");
+
+        let retried = insert_message(&app, &conversation_id, None, "assistant", "reply", "hook", false, None)
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events.recv().await {
+                    Ok(event) if event.kind == "message_added" && event.data["message"]["id"] == retried.id => break event,
+                    Ok(_) => continue,
+                    Err(error) => panic!("event bus closed before message retry: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("the retry should publish its message");
+        assert_eq!(event.data["bot_id"], bot.id);
+        assert_eq!(event.data["message"]["id"], retried.id);
+        assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)), "the retry emits exactly one message event");
+    }
 
     #[tokio::test]
     async fn unreadable_turn_owner_does_not_publish_an_empty_owner_and_recovers() {
