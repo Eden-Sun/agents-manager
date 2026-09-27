@@ -250,22 +250,20 @@ pub fn parse_claude_usage(screen: &str, now: DateTime<Local>, account: Option<&s
 
 /// Local uses the dedicated `am-quota` session (SPEC §12.6); a remote host has only one
 /// forwarded socket (the daemon's session), and the probe workspace isn't in the DB so reconcile ignores it.
-async fn client_for(app: &Arc<App>, host: &str) -> Result<HerdrClient> {
+async fn client_for_fence(host: &str, fence: &crate::hosts::HostFence) -> Result<HerdrClient> {
     if host == LOCAL_HOST {
         return probe_client().await;
     }
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    let conn = fence.conn();
     if !conn.is_connected() {
         return Err(anyhow!("host `{host}` is not connected"));
     }
-    app.herdr_for(host).await.ok_or_else(|| anyhow!("no herdr client for `{host}`"))
+    Ok(conn.client.clone())
 }
 
-async fn host_home(app: &Arc<App>, host: &str) -> String {
-    if let Some(conn) = app.hosts.get(host).await {
-        if let Ok(h) = conn.home().await {
-            return h;
-        }
+async fn host_home_for_fence(fence: &crate::hosts::HostFence) -> String {
+    if let Ok(h) = fence.conn().home().await {
+        return h;
     }
     dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "/tmp".into())
 }
@@ -355,6 +353,16 @@ pub(crate) struct ProbeOutcome {
     pub email: Option<String>,
     pub plan: Option<String>,
     pub quota: Option<Quota>,
+}
+
+async fn record_probe_identity(
+    app: &Arc<App>,
+    host: &str,
+    name: &str,
+    outcome: &ProbeOutcome,
+    fence: &crate::hosts::HostFence,
+) -> bool {
+    crate::tools::record_identity_login_fenced(app, host, name, fence, outcome.logged_in, outcome.email.clone(), outcome.plan.clone()).await
 }
 
 /// `env` is spelled out before each call too, so the line is self-contained when read off screen.
@@ -528,26 +536,35 @@ async fn run_probe_pane(
 async fn refresh_claude_account(
     app: &Arc<App>,
     host: &str,
+    home: &str,
     base_key: &str,
     account: Option<&str>,
     env: BTreeMap<String, String>,
     with_usage: bool,
+    fence: &crate::hosts::HostFence,
 ) -> Result<Option<ProbeOutcome>> {
-    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    if !app.hosts.is_current(fence).await {
+        anyhow::bail!("host `{host}` was superseded before the Claude probe started");
+    }
     if !app.tools.lock().await.contains_key(host) {
         crate::tools::detect(app, host).await?;
+    }
+    if !app.hosts.is_current(fence).await {
+        anyhow::bail!("host `{host}` was superseded during Claude tool detection");
     }
     let Some(bin) = crate::tools::cached_path(app, host, "claude").await else {
         return Ok(None);
     };
 
-    let client = client_for(app, host).await?;
+    let client = client_for_fence(host, fence).await?;
+    if !app.hosts.is_current(fence).await {
+        anyhow::bail!("host `{host}` was superseded before the Claude probe started");
+    }
     // A sane cwd keeps the session's project files out of `/`.
-    let home = host_home(app, host).await;
     let cwd = if host == LOCAL_HOST {
-        std::env::current_dir().ok().map(|p| p.display().to_string()).unwrap_or(home)
+        std::env::current_dir().ok().map(|p| p.display().to_string()).unwrap_or_else(|| home.to_string())
     } else {
-        home
+        home.to_string()
     };
     let label = match account {
         Some(a) if !a.is_empty() => format!("{PROBE_LABEL_PREFIX}-{a}"),
@@ -562,7 +579,7 @@ async fn refresh_claude_account(
         }
     };
     // 探測幾十秒，期間同名主機可能已換成另一台（#347）：整個結果作廢，不回登入狀態也不寫額度。
-    if !app.hosts.is_current(&fence).await {
+    if !app.hosts.is_current(fence).await {
         return Err(anyhow!("host `{host}` was reconnected/reconfigured during the claude probe; stale result discarded"));
     }
     let (logged_in, email, plan) = crate::tools::read_login_answer("claude", &auth);
@@ -573,7 +590,7 @@ async fn refresh_claude_account(
     let parsed = parse_claude_usage_report(&usage, account).or_else(|| parse_claude_usage(&usage, Local::now(), account));
     if let Some(mut q) = parsed {
         q.plan = plan;
-        crate::quota::set_fenced(app, host, base_key, q.clone(), &fence).await?;
+        crate::quota::set_fenced(app, host, base_key, q.clone(), fence).await?;
         out.quota = Some(q);
     } else {
         tracing::debug!(host, account = ?account, logged_in = ?out.logged_in, usage = %usage.trim(), "claude `/usage` reported no plan lines");
@@ -824,8 +841,9 @@ fn plan_targets(i: &PlanInput, cooling: impl Fn(&str, bool, bool) -> bool) -> Ve
 
 pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let _guard = crate::quota::probe_lock(host).await;
+    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     // `~` expands against the *probed* host's home, not the daemon's.
-    let home = host_home(app, host).await;
+    let home = host_home_for_fence(&fence).await;
     // `ccN` are per host (SPEC §16): cc1 on m4p is a different account than here.
     let identities = crate::tools::identities_for_host(app, host).await;
     let logins = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
@@ -836,6 +854,9 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let unnamed_running = unnamed_claude_running(app, host).await;
     let statusline_keys: std::collections::BTreeSet<String> =
         app.quotas.lock().await.iter().filter(|(_, q)| q.source == "statusline").map(|(k, _)| k.clone()).collect();
+    if !app.hosts.is_current(&fence).await {
+        anyhow::bail!("host `{host}` was superseded while preparing the Claude quota probe");
+    }
     let targets = plan_targets(
         &PlanInput { host, home: &home, identities: &identities, logins: &logins, live: &live, off: &off, unnamed_running, statusline_keys: &statusline_keys },
         cooling_down,
@@ -845,6 +866,9 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     let mut saw_missing = false;
     let mut touched = false;
     for t in targets {
+        if !app.hosts.is_current(&fence).await {
+            anyhow::bail!("host `{host}` was superseded during the Claude quota refresh");
+        }
         let full = crate::quota::quota_key(host, &t.key);
         // `/usage` answered within USAGE_REFRESH = skip (many `ccN` per host, SPEC §16, would queue
         // probes), unless we've never had a login answer for it — that rides on the probe.
@@ -856,11 +880,18 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
             any = true;
             continue;
         }
-        match refresh_claude_account(app, host, &t.key, t.account.as_deref(), t.env, !t.login_only).await {
+        let probe = refresh_claude_account(app, host, &home, &t.key, t.account.as_deref(), t.env, !t.login_only, &fence).await;
+        if !app.hosts.is_current(&fence).await {
+            anyhow::bail!("host `{host}` was superseded before the Claude quota result could be applied");
+        }
+        match probe {
             Ok(None) => saw_missing = true,
             Ok(Some(o)) => {
                 for name in &t.names {
-                    touched |= crate::tools::record_identity_login(app, host, name, o.logged_in, o.email.clone(), o.plan.clone()).await;
+                    touched |= record_probe_identity(app, host, name, &o, &fence).await;
+                }
+                if !app.hosts.is_current(&fence).await {
+                    anyhow::bail!("host `{host}` was superseded while recording Claude identity state");
                 }
                 if t.login_only {
                     if o.logged_in.is_some() {
@@ -888,10 +919,11 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
             }
         }
     }
+    if !app.hosts.is_current(&fence).await {
+        anyhow::bail!("host `{host}` was superseded before the Claude quota refresh completed");
+    }
     if touched {
-        if let Some(conn) = app.hosts.get(host).await {
-            crate::state::emit_host_changed(app, &conn).await;
-        }
+        crate::state::emit_host_changed(app, fence.conn()).await;
     }
     if saw_missing && !any {
         return Ok(false);
@@ -923,25 +955,30 @@ fn forced_target(targets: Vec<Target>, account: Option<&str>) -> Option<Target> 
 /// 給人手動校正 cache 用：不看失敗退避、不看「statusLine 很新就跳過」、停用的身分照探。回 `(quota key, 寫進去的那份)`。
 pub async fn force_probe(app: &Arc<App>, host: &str, account: Option<&str>) -> Result<(String, Quota), ForceProbeError> {
     let _guard = crate::quota::probe_lock(host).await;
-    let home = host_home(app, host).await;
+    let fence = app.hosts.fence(host).await.ok_or_else(|| ForceProbeError::Failed(format!("unknown host `{host}`")))?;
+    let home = host_home_for_fence(&fence).await;
     let identities = crate::tools::identities_for_host(app, host).await;
     let (logins, live, statusline_keys) = (BTreeMap::new(), Default::default(), Default::default());
     let input = PlanInput { host, home: &home, identities: &identities, logins: &logins, live: &live, off: &[], unnamed_running: true, statusline_keys: &statusline_keys };
     let t = forced_target(plan_targets(&input, |_, _, _| false), account).ok_or(ForceProbeError::UnknownAccount)?;
     let full = crate::quota::quota_key(host, &t.key);
-    let o = match refresh_claude_account(app, host, &t.key, t.account.as_deref(), t.env, true).await {
+    if !app.hosts.is_current(&fence).await {
+        return Err(ForceProbeError::Failed(format!("host `{host}` was superseded while preparing the Claude quota probe")));
+    }
+    let o = match refresh_claude_account(app, host, &home, &t.key, t.account.as_deref(), t.env, true, &fence).await {
         Ok(Some(o)) => o,
         Ok(None) => return Err(ForceProbeError::NotInstalled),
         Err(e) => return Err(ForceProbeError::Failed(e.to_string())),
     };
     let mut touched = false;
     for name in &t.names {
-        touched |= crate::tools::record_identity_login(app, host, name, o.logged_in, o.email.clone(), o.plan.clone()).await;
+        touched |= record_probe_identity(app, host, name, &o, &fence).await;
+    }
+    if !app.hosts.is_current(&fence).await {
+        return Err(ForceProbeError::Failed(format!("host `{host}` was superseded before the Claude quota result could be applied")));
     }
     if touched {
-        if let Some(conn) = app.hosts.get(host).await {
-            crate::state::emit_host_changed(app, &conn).await;
-        }
+        crate::state::emit_host_changed(app, fence.conn()).await;
     }
     let Some(q) = o.quota else {
         return Err(ForceProbeError::Failed(format!("claude `/usage` reported no plan lines (logged_in = {:?})", o.logged_in)));
@@ -1486,6 +1523,54 @@ AM_USAGE_DONE=0
         assert_eq!(pick(Some("cc1")), Some(("claude:cc1".into(), false, 1)));
         assert_eq!(pick(Some("api")), Some(("claude".into(), false, 0)), "額度在裸 claude：探預設帳號的 /usage，不是只問登入");
         assert_eq!(pick(Some("cc9")), None);
+    }
+
+    /// #347: a completed Claude probe on A must not update the same-named identity after a repoint to B.
+    #[tokio::test]
+    async fn a_superseded_claude_probe_cannot_overwrite_the_new_hosts_identity() {
+        let app = crate::testing::env().await.app.clone();
+        let host = "claude-identity-347";
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let old_fence = app.hosts.fence(host).await.unwrap();
+        app.hosts.replace_remote_for_test(&app, cfg("target-b")).await;
+
+        let identity = crate::tools::IdentityInfo {
+            name: "cc1".into(),
+            kind: "claude".into(),
+            logged_in: Some(true),
+            reason: None,
+            account: Some("b@example.test".into()),
+            plan: Some("B plan".into()),
+            source: crate::tools::SOURCE_CONFIG,
+            config_dir: None,
+        };
+        app.tools.lock().await.insert(
+            host.into(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: [("cc1".into(), identity)].into_iter().collect(),
+                shell_identities: vec![],
+                utc_offset_secs: None,
+                herdr_cli: None,
+                checked_at: crate::db::now(),
+            },
+        );
+
+        let stale = ProbeOutcome { logged_in: Some(false), email: Some("a@example.test".into()), plan: Some("A plan".into()), quota: None };
+        assert!(!record_probe_identity(&app, host, "cc1", &stale, &old_fence).await, "舊 probe 不應有任何寫入");
+        let tools = app.tools.lock().await;
+        let current = &tools[host].identities["cc1"];
+        assert_eq!(current.logged_in, Some(true));
+        assert_eq!(current.account.as_deref(), Some("b@example.test"));
+        assert_eq!(current.plan.as_deref(), Some("B plan"));
     }
 
     /// 沒這個身分：什麼都不探、不開 pane，直接回 `UnknownAccount`（API 404）。

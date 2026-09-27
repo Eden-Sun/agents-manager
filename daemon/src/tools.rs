@@ -393,29 +393,18 @@ fn with_identity_env(cmd: &str, env: &BTreeMap<String, String>) -> String {
 }
 
 /// Returns whether anything changed, so the caller only pushes `host_changed` when needed.
-pub async fn record_identity_login(
+/// The authority must be captured before the observation that produced these values (#347).
+pub(crate) async fn record_identity_login_fenced(
     app: &Arc<App>,
     host: &str,
     name: &str,
-    logged_in: Option<bool>,
-    account: Option<String>,
-    plan: Option<String>,
-) -> bool {
-    record_identity_login_fenced(app, host, name, None, logged_in, account, plan).await
-}
-
-/// `fence` 給了就只在它仍是這台主機的權威時寫（#347）；檢查與寫入在同一把 `app.tools` 鎖裡。
-async fn record_identity_login_fenced(
-    app: &Arc<App>,
-    host: &str,
-    name: &str,
-    fence: Option<&crate::hosts::HostFence>,
+    fence: &crate::hosts::HostFence,
     logged_in: Option<bool>,
     account: Option<String>,
     plan: Option<String>,
 ) -> bool {
     let mut all = app.tools.lock().await;
-    if !still_current(app, fence).await {
+    if !app.hosts.is_current(fence).await {
         return false;
     }
     let Some(ht) = all.get_mut(host) else { return false };
@@ -459,7 +448,7 @@ pub(crate) fn logout_result(recheck: Option<bool>) -> Option<bool> {
 /// 記下「這個身分已登出」：`account`／`plan` 一起清掉，否則列上會是「未登入」配著上一個帳號。
 async fn record_identity_logged_out(app: &Arc<App>, host: &str, name: &str, reason: &str, fence: &crate::hosts::HostFence) -> bool {
     let mut all = app.tools.lock().await;
-    if !still_current(app, Some(fence)).await {
+    if !app.hosts.is_current(fence).await {
         return false;
     }
     let Some(ht) = all.get_mut(host) else { return false };
@@ -475,18 +464,25 @@ async fn record_identity_logged_out(app: &Arc<App>, host: &str, name: &str, reas
 /// The poller parks a logged-out identity for 30 min, so after a login the cache stays stale;
 /// `start_bot` rechecks before warning.
 pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> Option<bool> {
-    recheck_identity_login_fenced(app, host, name, None).await
+    let fence = app.hosts.fence(host).await?;
+    recheck_identity_login_fenced(app, host, name, &fence).await
 }
 
-/// `fence` 給了而主機已經換掉：問到的答案（可能是新機器的）不寫進快取、也不解除停放，回 `None`（#347）。
-async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, fence: Option<&crate::hosts::HostFence>) -> Option<bool> {
+/// The same host authority is used for the probe and its cache write (#347).
+async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, fence: &crate::hosts::HostFence) -> Option<bool> {
+    if !app.hosts.is_current(fence).await {
+        return None;
+    }
     let idn = identity_for_host(app, host, name).await?;
+    if !app.hosts.is_current(fence).await {
+        return None;
+    }
     let args: Vec<&str> = match idn.kind.as_str() {
         "claude" => CLAUDE_LOGIN_ARGS.to_vec(),
         k => login_status_args(k)?.to_vec(),
     };
     let bin = cached_path(app, host, &idn.kind).await.unwrap_or_else(|| idn.kind.clone());
-    let home = host_home(app, host).await;
+    let home = fence.conn().home().await.ok().or_else(|| dirs::home_dir().map(|p| p.display().to_string())).unwrap_or_else(|| "/tmp".into());
     let mut script = String::new();
     for (k, v) in &idn.env {
         if valid_env_name(k) {
@@ -497,7 +493,7 @@ async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, f
     let out = if host == LOCAL_HOST {
         run_local(&script, Duration::from_secs(20)).await.ok()?
     } else {
-        app.hosts.get(host).await?.ssh_exec_path(&script).await.ok()?
+        fence.conn().ssh_exec_path(&script).await.ok()?
     };
     let (logged_in, account, plan) = read_login_answer(&idn.kind, &out);
     let logged_in = logged_in?;
@@ -505,20 +501,13 @@ async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, f
     if record_identity_login_fenced(app, host, name, fence, Some(to_cache), account, plan).await {
         app.emit("host_changed", serde_json::json!({"host": host})).await;
     }
-    if !still_current(app, fence).await {
+    if !app.hosts.is_current(fence).await {
         return None;
     }
     if logged_in && idn.kind == "claude" {
         crate::quota_claude::unpark_identity(host, name);
     }
     Some(logged_in)
-}
-
-async fn still_current(app: &Arc<App>, fence: Option<&crate::hosts::HostFence>) -> bool {
-    match fence {
-        Some(f) => app.hosts.is_current(f).await,
-        None => true,
-    }
 }
 
 /// Never copies the login pane's terminal output anywhere else.
@@ -543,17 +532,17 @@ pub fn spawn_identity_login_watch(
         let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(12);
         let mut saw_cli = false;
         let close = || async {
-            if still_current(&app, Some(&fence)).await {
+            if app.hosts.is_current(&fence).await {
                 let _ = crate::api::shell::close(&app, &host, &pane_id).await;
             }
         };
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            if !still_current(&app, Some(&fence)).await {
+            if !app.hosts.is_current(&fence).await {
                 tracing::info!(%host, %pane_id, identity = %name, "host was reconnected/reconfigured; login watcher gives up on the old connection");
                 return;
             }
-            let Some((client, _)) = crate::api::shell::client_for(&app, &host).await.ok() else { return };
+            let client = fence.conn().client.clone();
             let Ok(processes) = client.pane_process_info(&pane_id).await else {
                 if tokio::time::Instant::now() >= deadline {
                     close().await;
@@ -568,7 +557,7 @@ pub fn spawn_identity_login_watch(
             });
             saw_cli |= cli_active;
             if (saw_cli && !cli_active) || (!saw_cli && tokio::time::Instant::now() >= startup_deadline) {
-                let after = recheck_identity_login_fenced(&app, &host, &name, Some(&fence)).await;
+                let after = recheck_identity_login_fenced(&app, &host, &name, &fence).await;
                 if logout && logout_result(after) == Some(false) {
                     let changed =
                         record_identity_logged_out(&app, &host, &name, "剛剛在這台主機登出（重驗問不出來時照登出算）", &fence).await;
