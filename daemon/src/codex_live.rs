@@ -163,19 +163,37 @@ fn pct_after(line: &str, label: &str) -> Option<f64> {
     None
 }
 
-/// Digit for the row whose **label** contains `needle`. The description after the two-space gap
-/// is excluded, else `Max` would match `More reasoning…  Max and Ultra …`.
+/// Digit for the one row whose **label** exactly matches `needle`. Descriptions are excluded;
+/// current/default markers are matched separately, and duplicate labels are ambiguous.
 pub fn picker_number(screen: &str, needle: &str) -> Option<u32> {
+    if needle.is_empty() {
+        return None;
+    }
+    let mut found = None;
     for raw in screen.lines() {
         let line = raw.trim_start().trim_start_matches('›').trim_start();
         let Some((num, rest)) = line.split_once('.') else { continue };
         let Ok(n) = num.trim().parse::<u32>() else { continue };
         let label = rest.trim_start().split("  ").next().unwrap_or("").trim();
-        if label.contains(needle) {
-            return Some(n);
+        let (plain_label, marker) = if let Some(label) = label.strip_suffix(" (current)") {
+            (label, Some("(current)"))
+        } else if let Some(label) = label.strip_suffix(" (default)") {
+            (label, Some("(default)"))
+        } else {
+            (label, None)
+        };
+        let matches = match needle {
+            "(current)" | "(default)" => marker == Some(needle),
+            _ => plain_label == needle,
+        };
+        if matches {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(n);
         }
     }
-    None
+    found
 }
 
 async fn read(client: &HerdrClient, pane_id: &str) -> Result<String, ()> {
@@ -336,11 +354,11 @@ async fn apply_model_and_effort(
         return Ok(false);
     }
     let screen = if is_nested_effort(want) && picker_number(&screen, &needle).is_none() {
-        let Some(more) = picker_number(&screen, "More reasoning") else {
+        let Some(more) = picker_number(&screen, "More reasoning…") else {
             let _ = close_picker_checked(client, pane_id).await;
             return Ok(false);
         };
-        if !press_number(client, pane_id, more, "More reasoning").await? {
+        if !press_number(client, pane_id, more, "More reasoning…").await? {
             return Ok(false);
         }
         read(client, pane_id).await?
@@ -746,7 +764,7 @@ mod tests {
         assert_eq!(picker_number(MODEL_MENU, "(current)"), Some(4));
         assert_eq!(picker_number(EFFORT_MENU, "Extra high"), Some(4));
         assert_eq!(picker_number(EFFORT_MENU, "(default)"), Some(1));
-        assert_eq!(picker_number(EFFORT_MENU, "More reasoning"), Some(5));
+        assert_eq!(picker_number(EFFORT_MENU, "More reasoning…"), Some(5));
         // `Max` / `Ultra` only appear in row 5's *description*; matching that would press the
         // submenu row as if it were the level itself.
         assert_eq!(picker_number(EFFORT_MENU, "Max"), None, "max / ultra are one menu deeper");
@@ -818,6 +836,31 @@ mod tests {
         assert!(!picker_choice_matches(COMPOSER, "gpt-5.6-sol", 2), "a stale selection cannot target the composer");
     }
 
+    #[tokio::test]
+    async fn missing_or_ambiguous_picker_rows_do_not_authorize_number_entry() {
+        let env = crate::testing::env().await;
+        const SCREEN: &str = "\
+  Select Model and Effort
+
+  1. gpt-5.5     First duplicate
+  2. gpt-5.5     Second duplicate
+
+  Press enter to confirm or esc to go back
+";
+        for (pane, needle) in [
+            ("pane-codex-ambiguous-picker", "gpt-5.5"),
+            ("pane-codex-missing-picker", "gpt-6-astra"),
+        ] {
+            env.herdr.set_screen(pane, SCREEN);
+            assert_eq!(press_number(&env.app.herdr, pane, 1, needle).await, Ok(false), "{needle}");
+        }
+        assert!(env.herdr.calls_to("pane.send_text").is_empty(), "an ambiguous row must not receive a numeric choice");
+        assert!(
+            env.herdr.calls_to("pane.send_keys").iter().all(|call| call["keys"] == serde_json::json!(["Escape"])),
+            "the picker may only be escaped, never assigned an ambiguous row number"
+        );
+    }
+
     /// Real composer, codex 0.154.0 (2026-09-10) — nothing in the way.
     const COMPOSER: &str = "\
 ─ Worked for 1m 17s ────────────────────────────────────
@@ -887,7 +930,7 @@ mod tests {
         assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("medium")), Some(2));
         assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("high")), Some(3));
         assert_eq!(picker_number(EFFORT_MENU_0154, effort_menu_label("xhigh")), Some(4));
-        assert_eq!(picker_number(EFFORT_MENU_0154, "More reasoning"), Some(5));
+        assert_eq!(picker_number(EFFORT_MENU_0154, "More reasoning…"), Some(5));
         assert!(picker_number(EFFORT_MENU_0154, effort_menu_label("max")).is_none(), "max 藏在下一層");
         // `(default)` 那一列不能被 `Extra high` 的描述文字搶走（描述在兩格空白之後）。
         assert_eq!(picker_number(EFFORT_MENU_0154, "(default)"), Some(1));
