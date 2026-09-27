@@ -348,10 +348,14 @@ OFF=$(wc -c < "$DLOG" 2>/dev/null || echo 0)
 # 沒有 id 的列退回用名字比（`name:` 開頭，也就不可能被當成刻意刪除）。
 # SWAP_T0 是換版窗口的起點，格式跟 daemon 的 db::now() 一樣（RFC3339、毫秒、Z），才能在 SQL 裡直接比字串；
 # 取整到秒只會讓窗口往前多算不到一秒。
-bot_rows() { agm state | "$PYTHON" -c 'import json,sys
+bot_rows() { set -o pipefail; agm state | "$PYTHON" -c 'import json,sys
 print("\n".join(sorted("%s\t%s" % (b.get("id") or "name:%s" % b.get("name"), b.get("name")) for b in json.load(sys.stdin).get("bots") or [])))'; }
 SWAP_T0=$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')
-BEFORE_ROWS=$(bot_rows)
+if ! BEFORE_ROWS=$(bot_rows) || [ -z "$BEFORE_ROWS" ]; then
+    log "ABORT: 換版前 agm state 讀取失敗或 bot 名單為空；不換 binary"
+    release_window "換版前 bot 名單不可用" || true
+    exit 3
+fi
 
 # ── 4. 換 binary 並重啟 ──────────────────────────────────────────────────────
 # 啟動一律經過 launchd：pane 忙的時候會被 renice 到 5，子行程繼承後降不回去
@@ -443,12 +447,31 @@ RELEASE_FAILED=0
 [ "$HELD_AFTER" = True ] && { release_window "daemon 沒有自動放掉，手動交還" || RELEASE_FAILED=1; }
 
 sleep "$SETTLE"
-SUP=$(agm supervisor | "$PYTHON" -c 'import json,sys
-d = json.load(sys.stdin); print(d.get("status") or (d.get("supervisor") or {}).get("status"))')
+read_supervisor_status() {
+    set -o pipefail
+    agm supervisor | "$PYTHON" -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+status = d.get("status")
+if not isinstance(status, str):
+    sup = d.get("supervisor")
+    status = sup.get("status") if isinstance(sup, dict) else None
+if not isinstance(status, str) or not status.strip():
+    raise SystemExit(1)
+print(status.strip())'
+}
+if ! SUP=$(read_supervisor_status); then rollback "agm supervisor 讀取失敗"; fi
 log "supervisor status: $SUP"
-[ "$SUP" = stopped ] && rollback "supervisor 停了"
+case "$SUP" in
+    starting|idle|busy) ;;
+    *) rollback "supervisor status 不健康或未知（${SUP:-空}）" ;;
+esac
 
-AFTER_ROWS=$(bot_rows)
+if ! AFTER_ROWS=$(bot_rows) || [ -z "$AFTER_ROWS" ]; then
+    rollback "新版後 agm state 讀取失敗或 bot 名單為空"
+fi
 # 窗口內**刻意刪掉**的 bot 不算重啟弄丟的（2026-09-24 22:53 ca9a0330：父 bot 在這 45 秒裡刪了 child i263，
 # 整趟被誤判回滾）。「刻意」只認刪除 API 留下的 intent：DELETE /api/bots|projects 在定案前先寫一筆
 # delete_bot／delete_project（payload 帶當時的子孫 id），done 之後保留 24 小時。光有 deleted_at 不夠——

@@ -63,6 +63,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_ACQUIRE_EMPTY_WORKING=""   # 設了：那幾次 409 的 working 名單是空的
   export STUB_PROBE_INFLIGHT_TIMES=0     # 前幾次 lease safety 裡自測對象還在 in_flight
   export SWAP_PROBE_SETTLE_TRIES=5 SWAP_PROBE_SETTLE_WAIT_SECS=0
+  export STUB_AGM_STATE_FAIL="" STUB_AGM_SUPERVISOR_FAIL=""
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
   export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep" HERDR_BIN="$ROOT/bin/herdr"
   export SWAP_PROBE_TRIES=2 SWAP_PROBE_BOT=bot-probe
@@ -153,8 +154,10 @@ case "$sub:$op" in
       [ -n "${STUB_RELEASE_FAIL:-}" ] && { printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"fence_mismatch"}}'; exit 1; }
       printf '{"released":true}' ;;
   health:*)      [ -n "$STUB_HEALTH_OK" ] || exit 1; printf '{"status":"healthy"}' ;;
-  supervisor:*)  printf '{"status":"%s"}' "$STUB_SUPERVISOR" ;;
-  state:*)       if [ -e "$AGM_DIR/started" ]; then names="$STUB_NAMES_AFTER"; else names="$STUB_NAMES_BEFORE"; fi
+  supervisor:*)  if [ -n "$STUB_AGM_SUPERVISOR_FAIL" ]; then printf '{"status":"idle"}'; exit 1; fi
+                 printf '{"status":"%s"}' "$STUB_SUPERVISOR" ;;
+  state:*)       if [ -e "$AGM_DIR/started" ]; then phase=after; names="$STUB_NAMES_AFTER"; else phase=before; names="$STUB_NAMES_BEFORE"; fi
+                 [ "$STUB_AGM_STATE_FAIL" != "$phase" ] || { printf '{}'; exit 1; }
                  printf '{"bots":['; sep=""
                  for n in $(printf '%s' "$names" | tr -d '[]"' | tr ',' ' '); do printf '%s{"id":"id-%s","name":"%s"}' "$sep" "$n" "$n"; sep=","; done
                  printf ']}' ;;
@@ -234,7 +237,16 @@ STUB
 teardown() { rm -rf "$ROOT"; }
 seed_audit() { "$REAL_SQLITE" "$ROOT/audit.sqlite3" "$1"; }   # 換版後腳本唯讀查的那份 DB（bots／intents）
 
-run() { bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1; echo $?; }
+run() {
+  # These tests assert decisions, not wall-clock waits; keep recovery cases quick without changing
+  # the separate daemon-start process test below.
+  (
+    sleep() { :; }
+    export -f sleep
+    bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
+  )
+  echo $?
+}
 
 # 1. 一般情形（schema 沒升）：換 binary、重啟、驗證、寫 .built。
 setup 10 10
@@ -323,6 +335,57 @@ check_eq "複查不安全就中止（rc=4）" "4" "$rc"
 check "窗口要交還" "lease release restart" "$AGM_DIR/calls.log"
 check_no "沒有重啟" "submit" "$AGM_DIR/launchctl.log"
 teardown
+
+# 9a. 換版前的 bot 名單讀取失敗或空名單不能被當成「沒有 bot 需要保護」。
+setup 10 10
+export STUB_AGM_STATE_FAIL=before
+rc=$(run)
+check_eq "換版前 agm state 失敗要中止（rc=3）" "3" "$rc"
+check "明講換版前名單不可用" "換版前 agm state 讀取失敗或 bot 名單為空" "$SWAP_LOG"
+check "中止前歸還 restart lease" "lease release restart" "$AGM_DIR/calls.log"
+check_no "名單讀不到時不能換 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+setup 10 10
+export STUB_NAMES_BEFORE='[]'
+rc=$(run)
+check_eq "換版前空名單要中止（rc=3）" "3" "$rc"
+check_no "空名單不能放行換版" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+# 9b. 換版後 state 失敗與 supervisor 非健康／未知狀態都必須 rollback。
+setup 10 10
+export STUB_AGM_STATE_FAIL=after
+rc=$(run)
+check_eq "換版後 agm state 失敗要 rollback（rc=7）" "7" "$rc"
+check "明講新版後名單不可用" "新版後 agm state 讀取失敗或 bot 名單為空" "$SWAP_LOG"
+check_eq "失敗後還原舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+setup 10 10
+export STUB_AGM_SUPERVISOR_FAIL=1
+rc=$(run)
+check_eq "agm supervisor 失敗要 rollback（rc=7）" "7" "$rc"
+check "命令回錯時不能接受它輸出的 idle" "agm supervisor 讀取失敗" "$SWAP_LOG"
+check_eq "supervisor 讀取失敗後還原舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+setup 10 10
+export STUB_SUPERVISOR=""
+rc=$(run)
+check_eq "空 supervisor status 要 rollback（rc=7）" "7" "$rc"
+check "空 status 要當成讀取失敗" "agm supervisor 讀取失敗" "$SWAP_LOG"
+check_eq "空 status 後還原舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+for status in waiting_quota unknown; do
+  setup 10 10
+  export STUB_SUPERVISOR="$status"
+  rc=$(run)
+  check_eq "supervisor status=${status:-空} 要 rollback（rc=7）" "7" "$rc"
+  check "拒絕 supervisor 非健康／未知狀態" "supervisor status 不健康或未知" "$SWAP_LOG"
+  teardown
+done
 
 # 10. DB 備份讀不回來：不換版（不然回滾時沒有可用的備份）。
 setup 10 10
