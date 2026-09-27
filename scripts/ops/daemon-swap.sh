@@ -199,6 +199,15 @@ case "$HEAD_SHA" in
     *) log "ABORT: checkout HEAD=$HEAD_SHA 不是 $SHA"; exit 3 ;;
 esac
 [ -x "$NEWBIN" ] || { log "ABORT: 找不到新 binary $NEWBIN"; exit 3; }
+# 線上 (--old) 必須是要換上的 commit 的祖先或同一顆。無法證明不是降版就拒絕（#638）。
+if ! git -C "$CHECKOUT" cat-file -e "${OLD}^{commit}" 2>/dev/null; then
+    log "ABORT: 線上版本 $OLD 不在 checkout 裡，無法確認不是降版"
+    exit 3
+fi
+if ! git -C "$CHECKOUT" merge-base --is-ancestor "$OLD" "$SHA" 2>/dev/null; then
+    log "ABORT: 線上 $OLD 不是要換上的 $SHA 的祖先或同一顆，無法確認不是降版"
+    exit 3
+fi
 
 cd "$AGM_REPO" || { log "ABORT: 進不去 $AGM_REPO"; exit 3; }
 BAK="target/release/agents-managerd.bak-$OLD"
@@ -332,6 +341,14 @@ case "$SAFE" in
        release_window "3a 複查不安全" || true
        exit 4 ;;
 esac
+
+# 前置的祖先檢查與備份發生在拿窗口之前。拿到 restart 窗口後，確認正式 binary 沒在等待期間被另一趟換掉。
+LIVEHASH=$(shasum -a 256 target/release/agents-managerd 2>/dev/null | cut -c1-16)
+if [ -z "$LIVEHASH" ] || [ "$LIVEHASH" != "$OLDHASH" ]; then
+    log "ABORT: 取得 restart 窗口後線上 binary 已改變（原版本 ${OLD}、目前 sha256=${LIVEHASH:-unknown}），重新讀取 live 版本後再試"
+    release_window "線上 binary 已改變" || true
+    exit 3
+fi
 
 # ── 3. 備份 DB 與舊 binary ───────────────────────────────────────────────────
 DBB="$DB.bak-$(date +%Y%m%d-%H%M)"

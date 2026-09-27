@@ -983,6 +983,17 @@ check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
 check_eq "請求收掉" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
 now_teardown
 
+# N6b. 已建出的正式版比立即部署核准的 target 更新：不派工，避免準備降版（#638）。
+now_setup
+echo newer >> "$AGM_REPO/daemon/main.rs"
+( cd "$AGM_REPO" && /usr/bin/git add daemon/main.rs && /usr/bin/git commit -qm newer )
+/usr/bin/git -C "$AGM_REPO" rev-parse --short HEAD > "$AGM_DIR/daemon-update.built"
+bash "$SCRIPT"
+check "live 較新就喊明原因" "ops-alert.*now_target_older" "$AGM_DIR/calls.log"
+check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
+check_eq "降版請求收掉" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+now_teardown
+
 # N7. commit 不在 origin/main 上：不做。
 now_setup 0123456789abcdef0123456789abcdef01234567
 bash "$SCRIPT"

@@ -271,6 +271,11 @@ if [ -f "$BUILT" ]; then
   "$GIT" -C "$REPO" cat-file -e "${BUILT_SHA}^{commit}" 2>/dev/null || BUILT_SHA=""
 fi
 if [ -n "$BUILT_SHA" ]; then
+  # 立即模式不能建出比已正式上線版本舊的 target；daemon-swap 取得窗口後還會再驗一次（#638）。
+  if [ "$NOW" = 1 ] && ! "$GIT" -C "$REPO" merge-base --is-ancestor "$BUILT_SHA" "$NOW_SHA" 2>/dev/null; then
+    alert now_target_older "已建入正式 binary 的線上版本 ${BUILT_SHA} 不是立即部署目標 ${NOW_SHA} 的祖先或同一顆，這趟拒絕降版"
+    drop_now "target older than live"; exit 0
+  fi
   # shellcheck disable=SC2086  # PATHS 是刻意要拆成多個參數的
   if "$GIT" -C "$REPO" diff --quiet "$BUILT_SHA" "$DIFF_TO" -- $PATHS; then
     if [ "$NOW" = 1 ]; then

@@ -1939,7 +1939,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   **只給 UI**：有效 Bot principal（`X-AM-Bot-Id`＋自己的 `X-AM-Bot-Token`）一律 `403 {"reason":"ui_only"}`；缺值、錯 token、非 UTF-8、只帶一半或跟 `X-AM-Token` 混帶的 Bot 標頭由 `/api` 中介層回 401，不能降級成使用者（#339、#556）。bot 要重建照 §18.10 申請核准。兩個 bot 標頭都沒帶時，共用 UI token 持有者依 #556 使用者裁示視為使用者；不做真人證明，接受本機／`allow_lan` 取得 UI token 的風險（使用者原話「沒關系lan開放」，[裁示留言](https://github.com/Eden-Sun/agents-manager/issues/556#issuecomment-5833272486)）。
   做的事：開一筆 `requester=daemon-update-kick`、`purpose=rebuild`、`target_commit=<sha>`、有效 6 小時的核准並**當場以 `user(立即部署)` 核准**（不推 `approval_requested`，同 requester 的 pending 照 #421 自動取代），寫 `supervisor/AGM/daemon-update.now.json`，再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`；留一筆 `deploy_now` note。
   - `409 deploy_in_progress {running,log_path}`：上面 `running` 的三種任一，什麼都不寫。
-  - `409 nothing_to_deploy`（線上到那顆只動到不進 binary 的檔）、`409 target_not_on_main`（不是 origin/main 的祖先）、`409 unknown_commit`、`409 status_unknown`（說不出落後多少）。
+  - `409 nothing_to_deploy`（線上到那顆只動到不進 binary 的檔）、`409 target_not_on_main`（不是 origin/main 的祖先）、`409 target_older_than_live`（線上不是目標的祖先或同一顆，拒絕降版，`message` 說明原因）、`409 unknown_commit`、`409 status_unknown`（說不出落後多少）。
   - `503 kick_not_installed`／`kick_outdated`：kick 沒裝或還不認得立即模式（檔裡沒有 `daemon-update.now.json`），先 install，什麼都不寫。
   - `503 kick_start_failed`／`request_write_failed`：已開的核准改成 `revoked`、請求檔刪掉，可以直接重按。
   同一時間只受理一次（連點兩下第二下是 409）。

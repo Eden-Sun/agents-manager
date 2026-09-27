@@ -62,6 +62,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_ACQUIRE_FAIL_TIMES=0   # 前幾次 acquire 回 409（模擬瞬間有人在跑）
   export STUB_ACQUIRE_EMPTY_WORKING=""   # 設了：那幾次 409 的 working 名單是空的
   export STUB_PROBE_INFLIGHT_TIMES=0     # 前幾次 lease safety 裡自測對象還在 in_flight
+  export STUB_SWAP_BINARY_ON_ACQUIRE="" # 測試窗口等待期間正式 binary 被另一趟換掉
   export SWAP_PROBE_SETTLE_TRIES=5 SWAP_PROBE_SETTLE_WAIT_SECS=0
   export STUB_AGM_STATE_FAIL="" STUB_AGM_SUPERVISOR_FAIL=""
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
@@ -82,9 +83,10 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   printf 'new-binary\n' > "$CHECKOUT/target/release/agents-managerd"; chmod +x "$CHECKOUT/target/release/agents-managerd"
   /usr/bin/git init -q "$CHECKOUT"
   ( cd "$CHECKOUT" && /usr/bin/git config user.email t@t && /usr/bin/git config user.name t \
-      && /usr/bin/git add -A && /usr/bin/git commit -qm init ) >/dev/null 2>&1
+      && /usr/bin/git add -A && /usr/bin/git commit -qm live \
+      && /usr/bin/git commit -q --allow-empty -m target ) >/dev/null 2>&1
   export SHA=$(/usr/bin/git -C "$CHECKOUT" rev-parse HEAD)
-  export OLD=oldsha
+  export OLD=$(/usr/bin/git -C "$CHECKOUT" rev-parse HEAD~1)
 
   # 假 repo：線上那顆 binary（回滾點的內容）。
   printf 'old-binary\n' > "$AGM_REPO/target/release/agents-managerd"; chmod +x "$AGM_REPO/target/release/agents-managerd"
@@ -137,6 +139,10 @@ case "$sub:$op" in
           printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","escalates_at":"2026-09-21T01:31:00Z","safety":{"working":[{"name":"busy-bot"}]}}}'
         fi
         exit 1
+      fi
+      if [ -n "${STUB_SWAP_BINARY_ON_ACQUIRE:-}" ] && [ ! -e "$AGM_DIR/changed-live" ]; then
+        printf 'newer-live-binary\n' > "$AGM_REPO/target/release/agents-managerd"
+        : > "$AGM_DIR/changed-live"
       fi
       printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1"}' "$STUB_ACQUIRE_HELD" ;;
   lease:safety)  n=$(grep -cE "lease (safety|acquire restart)" "$AGM_DIR/calls.log"); fl=""
@@ -261,6 +267,29 @@ check "有換上新 binary" "new-binary" "$AGM_DIR/started-binary.log"
 check_eq ".built 寫的是這次的 sha" "$(echo "$SHA" | cut -c1-8)" "$(cat "$AGM_DIR/daemon-update.built")"
 check "啟動走 launchd（nice 0）" "submit -l am-daemon-swap" "$AGM_DIR/launchctl.log"
 check_no "不是在 pane 裡直接背景起" "nohup" "$SCRIPT"
+teardown
+
+# 1c. 線上版本比目標新：在任何備份或重啟前拒絕（#638）。
+setup 10 10
+NEWER=$(/usr/bin/git -C "$CHECKOUT" commit -q --allow-empty -m newer && /usr/bin/git -C "$CHECKOUT" rev-parse HEAD)
+/usr/bin/git -C "$CHECKOUT" checkout -q "$SHA"
+export OLD="$NEWER"
+rc=$(run)
+check_eq "目標較舊時 swap rc=3" "3" "$rc"
+check "說明不會降版" "不是要換上的 $SHA 的祖先或同一顆，無法確認不是降版" "$SWAP_LOG"
+check_no "沒有切換 binary" "new-binary" "$AGM_DIR/started-binary.log"
+check_file "沒有備份正式 binary" no "$AGM_REPO/target/release/agents-managerd.bak-$OLD"
+teardown
+
+# 1d. restart 窗口前另一趟已換過 live：拿窗口後用 hash 重驗。
+setup 10 10
+export STUB_SWAP_BINARY_ON_ACQUIRE=1
+rc=$(run)
+check_eq "窗口前 live 改變時 swap rc=3" "3" "$rc"
+check "說明 live 已改變並重讀" "取得 restart 窗口後線上 binary 已改變" "$SWAP_LOG"
+check "歸還 restart 窗口" "restart 窗口已交還（線上 binary 已改變）" "$SWAP_LOG"
+check_no "沒有啟動較舊 binary" "new-binary" "$AGM_DIR/started-binary.log"
+check_eq "保留取得窗口時的 live" "newer-live-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
 # 2. 這批升了 schema：預期版本要跟著 checkout 走（11），migrate 後的 11 不能被當成失敗。
