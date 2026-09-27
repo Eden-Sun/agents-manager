@@ -234,6 +234,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (25, "62482003005235be"),
     // issue #347：`cli_updates.host_target` pins recovery to the host authority where the update started.
     (26, "4631f4f3433fc553"),
+    // issue #611：`release_triage_publish_intents`（GitHub create/comment 副作用前的 durable marker）。
+    (27, "ec6860a3b46abdd7"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

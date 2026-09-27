@@ -44,7 +44,112 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS release_triage_publish_intents (
+           kind TEXT NOT NULL,
+           version TEXT NOT NULL,
+           marker TEXT NOT NULL,
+           action TEXT NOT NULL CHECK (action IN ('create','comment')),
+           target_number INTEGER,
+           created_at TEXT NOT NULL,
+           PRIMARY KEY (kind, version, marker),
+           CHECK ((action = 'create' AND target_number IS NULL) OR (action = 'comment' AND target_number IS NOT NULL))
+         )",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
+}
+
+/// A durable intention to make one marker-bearing GitHub side effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishAction {
+    Create,
+    Comment,
+}
+
+impl PublishAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Comment => "comment",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "create" => Ok(Self::Create),
+            "comment" => Ok(Self::Comment),
+            other => Err(anyhow!("帳本裡有不認得的 publish intent `{other}`")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishIntent {
+    pub action: PublishAction,
+    pub target_number: Option<i64>,
+}
+
+#[derive(FromRow)]
+struct RawPublishIntent {
+    action: String,
+    target_number: Option<i64>,
+}
+
+impl TryFrom<RawPublishIntent> for PublishIntent {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: RawPublishIntent) -> Result<Self> {
+        let action = PublishAction::parse(&raw.action)?;
+        if (action == PublishAction::Create) != raw.target_number.is_none() {
+            return Err(anyhow!("帳本裡的 publish intent action 與 target 不一致"));
+        }
+        Ok(Self { action, target_number: raw.target_number })
+    }
+}
+
+/// Persist the marker and its intended side effect before calling GitHub. A marker cannot silently
+/// change from create to comment (or move to a different duplicate target) on a retry.
+pub async fn ensure_publish_intent(
+    pool: &SqlitePool,
+    kind: &str,
+    version: &str,
+    marker: &str,
+    action: PublishAction,
+    target_number: Option<i64>,
+) -> Result<PublishIntent> {
+    if (action == PublishAction::Create) != target_number.is_none() {
+        return Err(anyhow!("publish intent action 與 target 不一致"));
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO release_triage_publish_intents (kind, version, marker, action, target_number, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (kind, version, marker) DO NOTHING",
+    )
+    .bind(kind)
+    .bind(version)
+    .bind(marker)
+    .bind(action.as_str())
+    .bind(target_number)
+    .bind(now_ts())
+    .execute(&mut *tx)
+    .await?;
+    let raw = sqlx::query_as::<_, RawPublishIntent>(
+        "SELECT action, target_number FROM release_triage_publish_intents WHERE kind = ? AND version = ? AND marker = ?",
+    )
+    .bind(kind)
+    .bind(version)
+    .bind(marker)
+    .fetch_one(&mut *tx)
+    .await?;
+    let intent = PublishIntent::try_from(raw)?;
+    if intent.action != action || intent.target_number != target_number {
+        return Err(anyhow!("publish intent `{marker}` conflicts with its recorded action or target"));
+    }
+    tx.commit().await?;
+    Ok(intent)
 }
 
 pub fn now_ts() -> String {
