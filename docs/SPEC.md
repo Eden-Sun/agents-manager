@@ -2077,9 +2077,9 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   `GET /api/state` 的 `cli_updates` 列出還沒收尾的，前端靠它對帳（同 #492）。
   **「同一台只跑一個」不能只記在行程裡**（#564）：daemon 被砍掉時遠端的 `curl | sh` 不會跟著停，以前重啟後 map 空了、再按一次就疊出第二個安裝。
   所以兩層：(a) 開跑前先寫 `cli_updates` 一列（部分唯一索引：每台最多一筆 `running`），終態寫入失敗時保留 `running`／host slot、盡力標成 `finishing`，以有上限退避在目前 daemon 持續重試；只有終態 commit 後才推 `cli_update_done`。CAS 更新 0 列時回讀並發布已存結果，絕不發布舊的本地結果；開機時上一顆行程
-  （`boot` 不同）留下的 `running` 列由 `recover_at_startup` 接手——等那台的安裝鎖放掉再讀版本收尾，不重跑安裝、不自動開重啟（隔了一次重啟，閒著的 bot 已經不是當時那份），
-  到了目標就改通知讓一般的重啟收得到。啟動列舉遇到暫時 DB 錯誤時用有上限的退避重試，之後每 5 分鐘持續掃描；同一 update id 同時只跑一個接手 worker。(b) 主機端以 `nohup` helper 等待完整安裝指令，鎖是 `$HOME` 下的 symlink，目標記 `helper PID:nonce`；外層 SSH wrapper 或 daemon 中斷不會放掉 helper 的鎖。探測只有在 PID 存活且命令列仍含同一 nonce 時才判定忙；helper 正常結束時清除鎖，owner 已退出或身份不符時遺留鎖可回收；舊版純 PID 鎖沒有可驗證的身份，視為過期。
-  這把鎖擋的是 DB 擋不到的：隔離實例對同一台開的安裝，以及重啟後等主機端安裝完成的接手列。開機接手沿用同一探測語意，只有確認新式 helper 鎖仍忙才等待其釋放後讀版本收尾；不重跑安裝、不自動開重啟（隔了一次重啟，閒著的 bot 已經不是當時那份），等待到上限仍忙才放掉那一列。多台都有「需安裝」時一次一台，裝完 chip 自然換到下一台。
+  （`boot` 不同）留下的 `running` 列由 `recover_at_startup` 接手——等那台的安裝鎖不再忙再讀版本收尾，不重跑安裝、不自動開重啟（隔了一次重啟，閒著的 bot 已經不是當時那份），
+  到了目標就改通知讓一般的重啟收得到。啟動列舉遇到暫時 DB 錯誤時用有上限的退避重試，之後每 5 分鐘持續掃描；同一 update id 同時只跑一個接手 worker。(b) 主機端以 `nohup` helper 等待完整安裝指令，先建立專用 process group；鎖是 `$HOME` 下的 symlink，目標記 `process-group-id:nonce`。安裝 pipeline 的後代留在該 group，並繼承 owner nonce；外層 SSH wrapper、daemon 或持鎖 helper 被中斷／SIGKILL，都不會讓仍存活的 installer group 被判成過期。探測只有在 group 仍有帶同一 nonce 的存活行程時才判定忙，避免把重用的 PID／group ID 認成 owner；helper 正常結束時清除鎖，group 已無 owner 或身份不符時遺留鎖可回收；舊版純 PID 鎖沒有可驗證的身份，視為過期。
+  這把鎖擋的是 DB 擋不到的：隔離實例對同一台開的安裝，以及重啟後等主機端安裝完成的接手列。開機接手沿用同一 group/nonce 探測語意，只有確認安裝 group 仍忙才等待它結束，再讀版本收尾；不重跑安裝、不自動開重啟（隔了一次重啟，閒著的 bot 已經不是當時那份），等待到上限仍忙才放掉那一列。多台都有「需安裝」時一次一台，裝完 chip 自然換到下一台。
   手機（≤640px）兩顆都要出現時合成一顆只留圖示的 ⌃⌃，點開兩項選單各自開原本的確認框（名字行放不下兩顆，UI-DECISIONS）。
   已經有一批重啟在跑時（#566）：那一批的清單早就定了，裝好之前的 codex 是「需安裝」、不在裡面，所以**不能**只憑「有一批在跑」就當成重啟交出去了。
   那一批還沒輪到的目標涵蓋這台每一顆該重啟的 codex 才算 `already_covered`；否則 `deferred`——記在那一批上，它放掉那一格時自動開這台 codex 的一批
