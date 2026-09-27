@@ -11,7 +11,7 @@ use tokio::process::Command;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Failure {
-    /// 機器碼：`dirty_worktree` | `fetch_failed` | `not_fast_forward` | `nothing_to_deliver` | `push_failed` | `pr_failed`
+    /// 機器碼：`dirty_worktree` | `fetch_failed` | `not_fast_forward` | `nothing_to_deliver` | `push_failed` | `branch_moved` | `pr_failed`
     pub code: &'static str,
     pub detail: String,
 }
@@ -230,11 +230,7 @@ pub(crate) async fn open_pr_with(
     let (head, upstream) = preflight(dir, remote, base).await?;
     let in_base = is_ancestor(dir, &head, &upstream).await;
     if !in_base {
-        let refspec = format!("HEAD:refs/heads/{branch}");
-        let (ok, out) = git(dir, &["push", remote, &refspec]).await?;
-        if !ok {
-            return Err(fail("push_failed", out));
-        }
+        push_mission_branch(dir, remote, branch, &head).await?;
     }
     // 先看有沒有 PR：重試時 `gh pr create` 會因為「已經有一個」失敗，但事情早就做完了（review3 c1 M11）。
     // 只有**開著的**才算；合併過的只在 HEAD 已經在 base 裡時算（合併之後才重試）。被關掉的、或合併之後又有新
@@ -259,6 +255,71 @@ pub(crate) async fn open_pr_with(
     }
     let url = String::from_utf8_lossy(&out.stdout).trim().lines().last().unwrap_or_default().to_string();
     Ok(Opened { url, sha: head, existing: false })
+}
+
+/// 更新任務專屬分支 `mission/<id>`。
+///
+/// rebase 之後 HEAD 不是遠端那條分支的後代，一般 push 會 non-fast-forward，任務卡在 `pr_failed`。
+/// 這條分支是任務自己的：遠端 tip 若只是這次 rebase 改寫掉的舊 commit（`git cherry` 全是 `-`），
+/// 用 `--force-with-lease=<剛 fetch 到的 sha>` 更新。遠端有對不上的新 commit（別人推上去的）就
+/// `branch_moved`，遠端維持原樣。lease 對不上（fetch 之後又被推過）也拒絕，不蓋。
+async fn push_mission_branch(dir: &Path, remote: &str, branch: &str, head: &str) -> Result<(), Failure> {
+    let dst = format!("refs/remotes/{remote}/{branch}");
+    let spec = format!("refs/heads/{branch}:{dst}");
+    let (ok, out) = git(dir, &["fetch", remote, &spec]).await?;
+    let missing = !ok && out.contains("couldn't find remote ref");
+    if !ok && !missing {
+        return Err(fail("fetch_failed", out));
+    }
+    let tip = if missing {
+        None
+    } else {
+        match git(dir, &["rev-parse", &dst]).await? {
+            (true, sha) => Some(sha.lines().next().unwrap_or("").trim().to_string()),
+            (false, detail) => return Err(fail("fetch_failed", detail)),
+        }
+    };
+    let refspec = format!("HEAD:refs/heads/{branch}");
+    let lease_ref = format!("refs/heads/{branch}");
+    let (lease, rewritten) = match tip.as_deref() {
+        None => (Some(format!("--force-with-lease={lease_ref}:")), false),
+        Some(tip) if tip == head => return Ok(()),
+        Some(tip) if is_ancestor(dir, tip, head).await => (None, false),
+        Some(tip) => {
+            if !remote_tip_is_only_rewritten(dir, tip, head).await? {
+                return Err(fail(
+                    "branch_moved",
+                    format!("遠端 {branch}（{tip}）有這次 rebase 對不上的 commit，不覆蓋"),
+                ));
+            }
+            (Some(format!("--force-with-lease={lease_ref}:{tip}")), true)
+        }
+    };
+    let mut args: Vec<String> = vec!["push".into()];
+    if let Some(flag) = lease {
+        args.push(flag);
+    }
+    args.push(remote.into());
+    args.push(refspec);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (ok, out) = git(dir, &arg_refs).await?;
+    if !ok {
+        let code = if rewritten || out.contains("stale info") { "branch_moved" } else { "push_failed" };
+        return Err(fail(code, out));
+    }
+    Ok(())
+}
+
+/// 遠端 tip 上、不在 HEAD 裡的 commit 是不是都能在 HEAD 找到同樣的 patch（rebase 改寫）。
+async fn remote_tip_is_only_rewritten(dir: &Path, tip: &str, head: &str) -> Result<bool, Failure> {
+    let (ok, out) = git(dir, &["cherry", head, tip]).await?;
+    if !ok {
+        return Err(fail("push_failed", out));
+    }
+    Ok(out.lines().all(|l| {
+        let l = l.trim();
+        l.is_empty() || l.starts_with('-')
+    }))
 }
 
 #[cfg(test)]
@@ -479,5 +540,59 @@ mod tests {
         commit(&work, "b");
         std::fs::write(work.join("scratch"), "x").unwrap();
         assert_eq!(push_main(&work, "origin", "main", false).await.unwrap_err().code, "dirty_worktree");
+    }
+
+    fn fake_gh(root: &Path) -> std::path::PathBuf {
+        let gh = root.join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\necho https://example.invalid/pull/9\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gh
+    }
+
+    /// #667：任務分支已存在，main 前進、執行者 rebase 之後，重新交付要更新那條分支，不能 non-ff 被拒。
+    #[tokio::test]
+    async fn a_rebased_mission_branch_is_updated_with_the_lease_of_the_old_tip() {
+        let (root, seed, work) = fixture();
+        let gh = fake_gh(root.path());
+        commit(&work, "b");
+        sh(&work, &["push", "-q", "origin", "HEAD:mission/x"]);
+        let (_, old_tip) = git(&work, &["rev-parse", "HEAD"]).await.unwrap();
+        commit(&seed, "main-moved");
+        sh(&seed, &["push", "-q", "origin", "main"]);
+        sh(&work, &["fetch", "-q", "origin", "main"]);
+        sh(&work, &["rebase", "-q", "origin/main"]);
+        let opened = open_pr_with(&gh, &work, "origin", "main", "mission/x", "重交", "body").await.expect("rebase 後要交得出去");
+        let (_, remote) = git(&work, &["ls-remote", "origin", "refs/heads/mission/x"]).await.unwrap();
+        assert!(remote.starts_with(&opened.sha), "遠端任務分支要是 rebase 後的 HEAD");
+        assert_ne!(opened.sha, old_tip.trim());
+    }
+
+    /// 遠端任務分支在我們看過之後多了對不上的 commit：不能用 force 蓋掉。
+    #[tokio::test]
+    async fn a_mission_branch_with_someone_elses_commit_is_not_overwritten() {
+        let (root, seed, work) = fixture();
+        let gh = fake_gh(root.path());
+        commit(&work, "b");
+        sh(&work, &["push", "-q", "origin", "HEAD:mission/x"]);
+        let other = root.path().join("other");
+        StdCommand::new("git").args(["clone", "-q"]).arg(root.path().join("origin.git")).arg(&other).status().unwrap();
+        sh(&other, &["fetch", "-q", "origin", "mission/x:mission/x"]);
+        sh(&other, &["checkout", "-q", "mission/x"]);
+        commit(&other, "theirs");
+        sh(&other, &["push", "-q", "origin", "mission/x"]);
+        let (_, theirs) = git(&other, &["rev-parse", "HEAD"]).await.unwrap();
+        commit(&seed, "main-moved");
+        sh(&seed, &["push", "-q", "origin", "main"]);
+        sh(&work, &["fetch", "-q", "origin", "main"]);
+        sh(&work, &["rebase", "-q", "origin/main"]);
+        let err = open_pr_with(&gh, &work, "origin", "main", "mission/x", "重交", "body").await.unwrap_err();
+        assert_eq!(err.code, "branch_moved");
+        let (_, remote) = git(&work, &["ls-remote", "origin", "refs/heads/mission/x"]).await.unwrap();
+        assert!(remote.starts_with(theirs.trim()), "別人的 commit 還在遠端：{remote}");
     }
 }

@@ -432,7 +432,7 @@ impl Flow<'_> {
                 let hint = if matches!(reason, "push_main_failed" | "pr_failed") {
                     // 交付失敗是唯一一種「停著也要 AGM 自己動手」的：not_fast_forward 照 then 重做（rebase → 重驗 → 交付），
                     // 交付成功會自動解除暫停；其他失敗才問人（§18.14 第 5、10 步）。
-                    format!("交付失敗（{reason}）：not_fast_forward 就照 `then` 派執行者 rebase、重驗、再交付（成功會自動解除暫停）；其他原因在群組問使用者")
+                    format!("交付失敗（{reason}）：push_main 的 not_fast_forward 照 `then` 派執行者 rebase、重驗、再交付（成功會自動解除暫停）。PR 模式 rebase 後再交付會用 force-with-lease 更新任務分支，只在遠端 tip 是這次改寫掉的舊 commit 時才更新；遠端有對不上的 commit（branch_moved）不覆蓋，在群組問使用者。其他原因也問使用者")
                 } else {
                     format!("任務停在 {reason}：在群組問使用者一個具體問題，放行（answer／resume）之後照 `then` 接續")
                 };
