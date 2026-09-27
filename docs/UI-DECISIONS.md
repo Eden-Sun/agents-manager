@@ -488,6 +488,7 @@ bot 的終端輸入框裡留著一段沒送出的字（claude 的「Edit prompt 
 - **常駐，不是 toast**：409 帶了 `draft`（SPEC §4.4a「框裡卡著草稿」）就在輸入列上方放一條（`ComposerDraftBar`，黃底），顯示框裡那段（等寬、最多約四行可捲，daemon 截過 500 字時註明），留到使用者選了動作、按「取消」、或之後任何一則送成功為止。有這一條就不另跳 toast；舊 daemon 沒帶 `draft` 照舊只跳那一句。
 - **三個動作**：「送出框裡那段」（主按鈕；daemon 對 pane 按 Enter、照一般 prompt 開回合，自己輸入框裡的字不動，之後照常送）、「清掉再送我這則」（輸入框裡沒有自己的字時停用）、「取消」（只收起這一條，框裡的字不動）。daemon 沒給的動作不顯示（沒驗過的 kind、讀不出字）；一個都沒有時說明要到「終端」分頁處理。
 - **按下去之後**：按鈕鎖住、主按鈕顯示「送出中…」／「清除中…」。框裡換了字（`draft_changed`）＝這一條換成新的內容並說一聲、等使用者再確認，不會替使用者送出或清掉沒看過的字；清不掉（`draft_uncleared`）＝這一條留著剩下的字、通知指向終端；框已經空了（`draft_gone`）＝收掉這一條。
+- 草稿動作遇到 `503 delivery_state_uncommitted` 時也要解鎖：`sent:false` 保留草稿列並清掉 busy，`sent:true`／`null` 則收掉草稿列，避免使用者對已送出或送達不明的字再按一次。
 - 截圖：`docs/screenshots/composer-draft/`（mock：`__amMock.composerDraft('<bot>', '<字>')`）。
 
 ## herdr 版本顯示在 hosts 面板（2026-09-19）
