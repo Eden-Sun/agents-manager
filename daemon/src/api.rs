@@ -268,6 +268,7 @@ pub fn router(app: Arc<App>) -> Router {
         // Credential-bearing pane creation is fenced against concurrent credential rotation.
         .route("/relay/spawn/begin", post(crate::credential_spawn::begin))
         .route("/relay/spawn/finish", post(crate::credential_spawn::finish))
+        .route("/relay/spawn/abort", post(crate::credential_spawn::abort))
         // §6.5e：bot 開完 pane 後回報用途（歸屬另外從行程環境推斷）。
         .route("/relay/pane", post(relay_pane))
         // issue #90：cargo shim 用（bot 的 hook token，或人工 host shell 的一般 X-AM-Token）。
@@ -6713,6 +6714,36 @@ mod per_principal_auth_tests {
         .await;
         assert!(rotate.starts_with("HTTP/1.1 409") && rotate.contains("w1:p-unadopted-child"), "an unadopted sibling pane still carries the old credential: {rotate}");
         assert_eq!(db::bot(&e.app.db, &parent.id).await.unwrap().unwrap().hook_token, old, "the sibling pane keeps a valid proof until closed");
+    }
+
+    /// #664：shim 回報 herdr 沒開出 pane 時，abort 放開 permit，輪替不再 409。
+    #[tokio::test]
+    async fn aborting_a_spawn_permit_lets_rotation_proceed() {
+        let e = crate::testing::env().await;
+        let parent = distinct_bot(&e, "rotate-after-abort").await;
+        let old = parent.hook_token.clone();
+        let begin = spawn_begin(e.app.clone(), &parent.id, &old).await;
+        assert!(begin.starts_with("HTTP/1.1 200"), "{begin}");
+        let permit = response_json(&begin)["permit_id"].as_str().unwrap().to_string();
+        let body = format!("bot_id={}&permit_id={permit}", parent.id);
+        let abort = raw(
+            e.app.clone(),
+            format!(
+                "POST /relay/spawn/abort HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Token: {old}\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        assert!(abort.starts_with("HTTP/1.1 200") && abort.contains("\"released\":true"), "{abort}");
+        let rotate = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                parent.id, e.app.ui_token
+            ),
+        )
+        .await;
+        assert!(rotate.starts_with("HTTP/1.1 200"), "abort 之後輪替不再被 child_spawn_in_progress 擋住：{rotate}");
     }
 
     #[tokio::test]

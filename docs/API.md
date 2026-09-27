@@ -240,7 +240,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 | POST | `/api/bots/{id}/interrupt` | `{"turn_id"?}` | `200 {}`（送 `esc`，in-flight Turn 標 failed）；herdr 拒收 `esc` → 502，Turn 維持 in-flight；`esc` 送出但 herdr 沒回：本機 claude／codex 的 log 裡已經有這次的中斷紀錄 → 照 `200 {}`（#223：claude 2.1.276+ 按 Esc 不送任何 hook），還看不到 → `409 {"reason":"interrupt_unconfirmed","turn_id","esc_sent":"unknown","retryable":true}`，Turn 維持 in-flight、等 log 裡的中斷紀錄（或回聲）；`esc` 生效但 Turn 狀態寫不進去 → `503 {"error":"interrupt_state_uncommitted","run_id","turn_id","esc_sent":true,"retryable":true}`（daemon 自己補，重試不再按 `esc`）；帶 `turn_id` 而那一筆已不在飛 → `409 {"reason":"turn_not_in_flight","turn_id","in_flight_turn_id","esc_sent":false}`，不按 `esc`。見 SPEC §6.4 |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}`，見 §4.2 |
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?}` | `200 {}`；`expect_run_id` 不符 409 |
-| POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?}` | `200 {}`；沒有 pane 404；`expect_run_id` 不符 409 |
+| POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?}` | `200 {}`；沒有 pane 404；`expect_run_id` 不符 409。打字前先寫 `runs.pane_typed`（#648），寫不進去 502、一個字都不打 |
 | POST | `/api/turns/{id}/abandon` | — | `200 {}`；只有 `in_flight`（含 `delivery=unknown`）可放棄，其餘在 per-bot lock 內 CAS 判定為 `409 {"reason":"turn is neither in-flight nor of unknown delivery","turn_id"}`（不新增 system message） |
 | POST | `/api/turns/{id}/withdraw` | — | `200 {}`；撤回一則還沒送出的 `queued`——標 `failed`＋一則 system 說明，不送。只收兩種：bot 沒在跑時送、還在等它起來的（`awaits_start:1`，issue #122），以及 daemon 自己排的通知（`client_request_id` 前綴 `child-blocked:`／`resume-nudge:`，issue #562：擋在佇列頭時讓使用者的訊息先走）。其他（已被佇列領走、使用者排的訊息、AGM 的派工…）一律 `409 {"reason":"turn is not waiting for its bot to start","turn_id","status"}`、原樣不動（已經打進去的不能假裝沒送） |
 | POST | `/api/bots/{id}/login` | — | `200 {"run_id","kind","command":"/login"}`，見 §4.1 |
@@ -702,10 +702,12 @@ bot 或 active Run 不存在 404。
 只記用途：pane 還沒被掃到就先建一列，**已經有 owner 的不會被改寫**（歸屬永遠由掃描時的 `AM_BOT_ID` 決定）。
 token 不對 401；其他失敗照樣回 200（`recorded:false`），少一個用途字串不該讓 bot 開 pane 失敗。
 
-### `POST /relay/spawn/begin` 與 `POST /relay/spawn/finish`（表單，bot shim 專用）
+### `POST /relay/spawn/begin`、`POST /relay/spawn/finish` 與 `POST /relay/spawn/abort`（表單，bot shim 專用）
 pane split／tab create／workspace create 與 `agent start` 在呼叫 herdr 前，shim 以 `X-AM-Bot-Token` 送 `begin` 的 `bot_id`；daemon 回 `200 {"permit_id":"…"}` 才可繼續。credential rotation 進行中回 `409 credential_rotation_pending`，Bot proof 或 DB 讀取失敗回 401／503；shim 一律不呼叫 herdr。
 
-herdr 成功後，shim 以 `X-AM-Bot-Token` 送 `finish` 的 `bot_id,permit_id,pane_id,purpose?`。daemon 先把非母 bot pane 登記到 `panes` inventory，再釋放 permit 並回 `200 {"pane_id":"…","registered":true}`。缺 pane id、permit 無效、DB／pane 登記失敗會回非 200，permit 保持佔用，shim 以 retryable failure 結束；這避免在登記狀態未知時讓舊憑證輪替。輪替在 descendants 快照前建立 fence，已有 permit 時回 `409 child_spawn_in_progress`，fence 存在時新的 `begin` 被拒；token 交易提交或中止後 fence 才清除。
+herdr 成功後，shim 以 `X-AM-Bot-Token` 送 `finish` 的 `bot_id,permit_id,pane_id,purpose?`。daemon 先把非母 bot pane 登記到 `panes` inventory，再釋放 permit 並回 `200 {"pane_id":"…","registered":true}`。缺 pane id、permit 無效、DB／pane 登記失敗會回非 200，permit 保持佔用，shim 以 retryable failure 結束；這避免在登記狀態未知時讓舊憑證輪替。輪替在 descendants 快照前建立 fence，已有**未過期** permit 時回 `409 child_spawn_in_progress`，fence 存在時新的 `begin` 被拒；token 交易提交或中止後 fence 才清除。
+
+herdr 回非 0 且輸出沒有 pane id，或 shim 被中斷時，送 `abort` 的 `bot_id,permit_id`（#664）。daemon 驗 bot token 後釋放 permit，回 `200 {"released":true}`；permit 已經不在也回 200（`released:false`）。permit 自 `begin` 起 60 秒沒 finish／abort 就不再算 in-flight（curl 逾時但 daemon 已 reserve、以及沒跑到 abort 的 Ctrl-C）。過期不擋輪替。
 
 ### `GET /api/panes?unowned=1`
 全機的非 agent pane（列的形狀同上）；`unowned=1` 只回 `owned_by="none"`（連 cwd 都對不到專案）的那些，同一台的 scratch 排第一。
