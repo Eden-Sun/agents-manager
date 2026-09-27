@@ -52,30 +52,37 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
         tracing::warn!(error = %e, "could not sweep finished intents");
     }
     let open = match intents::open(&app.db).await {
-        Ok(v) => {
-            // 過期被收掉的、或別人收尾的：它們的開機 hold 不用再留（#378）。
-            lifecycle::restart_hold::retain_open(app, &v.iter().map(|i| i.id.clone()).collect());
-            v
-        }
+        Ok(v) => v,
         Err(e) => {
-            // 讀不到不等於沒有：稍後整輪重來。
+            // 讀不到不等於沒有：intent id 還沒讀出來，沒有 per-intent retry worker 可以接手，
+            // 所以 discovery 本身必須一直欠著；只有拿到 id 後才由 drive_once 的 MAX_ATTEMPTS 收斂。
             tracing::warn!(error = %e, host, "cannot list open intents yet; will retry");
             let (app, host) = (app.clone(), host.to_string());
             tokio::spawn(async move {
-                for attempt in 0..intents::MAX_ATTEMPTS as usize {
+                let mut attempt = 0usize;
+                loop {
                     tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
-                    if let Ok(v) = intents::open(&app.db).await {
-                        for i in v.into_iter().filter(|i| i.kind == "restart" && i.host == host) {
-                            drive(&app, &i.id).await;
+                    match intents::open(&app.db).await {
+                        Ok(open) => {
+                            recover_open(&app, &host, open).await;
+                            return;
                         }
-                        return;
+                        Err(e) => {
+                            attempt = attempt.saturating_add(1);
+                            tracing::warn!(error = %e, host, attempt, "open intents are still unreadable; discovery remains scheduled");
+                        }
                     }
                 }
-                tracing::error!(host, "open intents stayed unreadable; giving up this recovery pass");
             });
             return;
         }
     };
+    recover_open(app, host, open).await;
+}
+
+async fn recover_open(app: &Arc<App>, host: &str, open: Vec<Intent>) {
+    // 過期被收掉的、或別人收尾的：它們的開機 hold 不用再留（#378）。
+    lifecycle::restart_hold::retain_open(app, &open.iter().map(|i| i.id.clone()).collect());
     for i in open.into_iter().filter(|i| i.kind == "restart" && i.host == host) {
         if let Outcome::Retry(why) = drive_once(app, &i.id).await {
             tracing::warn!(intent = %i.id, bot = %i.subject_id, error = %why, "interrupted restart could not be completed yet; retrying in the background");
@@ -101,14 +108,6 @@ async fn retry_loop(app: &Arc<App>, id: &str) {
 pub fn retry_later(app: &Arc<App>, id: &str) {
     let (app, id) = (app.clone(), id.to_string());
     tokio::spawn(async move { retry_loop(&app, &id).await });
-}
-
-async fn drive(app: &Arc<App>, id: &str) {
-    if let Outcome::Retry(_) = drive_once(app, id).await {
-        retry_loop(app, id).await;
-    } else {
-        lifecycle::restart_hold::release_intent(app, id);
-    }
 }
 
 /// 認領一次並補一輪。認領不到（別的行程／已收尾）＝ `Finished`。
@@ -442,5 +441,57 @@ mod tests {
         recover_host(&app2, LOCAL_HOST).await;
         tokio::join!(recover_host(&app2, LOCAL_HOST), recover_host(&app2, LOCAL_HOST));
         assert_eq!(runs_of(&app2, &bot.id).await, 2, "recovery is idempotent after the replacement run exists");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_intent_list_remains_discovery_debt_until_the_database_recovers() {
+        let e = tt::env().await;
+        let (bot, run1) = running_bot(&e, "rotation-discovery-retry").await;
+        let token = crate::projection::new_token();
+        let intent_id = db::ulid();
+        let now = db::now();
+        let expires = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let payload = json!({"credential_rotation": true, "opts": {}, "from_run_id": run1, "bot_name": bot.name});
+        let mut tx = e.app.db.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, created_at, updated_at, expires_at)
+             VALUES (?, 'restart', ?, ?, ?, 'pending', ?, ?, ?)",
+        )
+        .bind(&intent_id)
+        .bind(&bot.id)
+        .bind(LOCAL_HOST)
+        .bind(payload.to_string())
+        .bind(&now)
+        .bind(&now)
+        .bind(expires)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(&token).bind(&bot.id).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let app2 = tt::restart_app(&e).await;
+        tt::make_table_unreadable(&app2, "intents").await;
+        recover_host(&app2, LOCAL_HOST).await;
+
+        // In tests, discovery uses the same 20 ms delay as other recovery loops. Keep the table
+        // unreadable past the old five-attempt window (100 ms), then restore it with this daemon
+        // still running and without another reconcile or herdr event.
+        tokio::time::sleep(crate::reconcile::recovery_retry_delay(intents::MAX_ATTEMPTS as usize) * 7).await;
+        tt::make_table_readable(&app2, "intents").await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if intent_status(&app2, &bot.id).await == vec!["done"] {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("discovery must resume after SQLite becomes readable without a daemon restart");
+        let run2 = db::active_run(&app2.db, &bot.id).await.unwrap().expect("the stale run must be replaced");
+        assert_ne!(run2.id, run1);
+        assert_eq!(runs_of(&app2, &bot.id).await, 2, "recovery must restart the credential-rotation run once");
     }
 }
