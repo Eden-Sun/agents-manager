@@ -9,7 +9,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
    開發版（`allow_lan`，見 SPEC §7.1）這兩項都直接放行：同網段誰都拿得到 token——這是使用者裁示保留的風險（`e7392dd`）。
 2. 其餘 `/api/*` 接受一種身分：User 的 `X-AM-Token`、Bot 的 `X-AM-Bot-Id`＋`X-AM-Bot-Token`、或範圍受限的 service `X-AM-Service-Id`＋`X-AM-Service-Token`。出現 Bot／service header 就表示要用該 principal；欄位不完整、token 不符、或混帶其他 principal 都拒絕，不降級成 User。沒有 Bot／service header 且 token 有效的請求是 User；這符合使用者裁示接受共用 UI token 的風險。
 3. WebSocket：`/ws?token=<token>[&since=<seq>]`。
-4. `/hook/*`、`/relay/announce`、`/relay/pane` 仍用 per-bot 的 `X-AM-Bot-Token`。Bot pane 一律注入 `AM_BOT_TOKEN`；hook 開關只控制 `AM_HOOK_TOKEN`。兩者目前是同一個 `bots.hook_token`。User 可用 `POST /bots/{id}/credential/rotate` 立即輪替：舊值立刻失效，執行中的 bot 會重啟以取得新值，停止中的 bot 下次啟動時取得。`/hook/{provider}` 的 provider 還必須等於那顆 bot 的 `kind`，否則 `409 {"error":"provider_mismatch","bot_kind","provider"}`：bot pane 裡起的別種 CLI 子行程（例如 claude bot 裡跑 `codex exec -c notify=…`）繼承了 `AM_BOT_ID`／token，不擋就會把自己的 session id 記成這顆 bot 的（2026-09-22）。
+4. `/hook/*`、`/relay/announce`、`/relay/pane` 仍用 per-bot 的 `X-AM-Bot-Token`。Bot pane 一律注入 `AM_BOT_TOKEN`；hook 開關只控制 `AM_HOOK_TOKEN`。兩者目前是同一個 `bots.hook_token`。User 可用 `POST /bots/{id}/credential/rotate` 立即輪替：舊值立刻失效，執行中的 bot 會重啟以取得新值，停止中的 bot 下次啟動時取得。若有任何仍活著的 child／grandchild pane 繼承該母 bot 的憑證，回 `409 {"reason":"live_children_use_credential","children":[...]}` 且不改 token、不重啟，待後代 pane 都停止後再重試。`/hook/{provider}` 的 provider 還必須等於那顆 bot 的 `kind`，否則 `409 {"error":"provider_mismatch","bot_kind","provider"}`：bot pane 裡起的別種 CLI 子行程（例如 claude bot 裡跑 `codex exec -c notify=…`）繼承了 `AM_BOT_ID`／token，不擋就會把自己的 session id 記成這顆 bot 的（2026-09-22）。
 
 Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daemon 不檢查 `Host`；proxy 從本機連過來，對端就是 loopback。
 
@@ -31,7 +31,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | A | `POST /hosts/{name}/tools/install` | 只有網頁 | UI token | 叫 `via_bot_id` 那顆 agent 去裝 CLI（跟 `/bots/{id}/prompt` 等價） | 同 `/bots/{id}/prompt` |
 | A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 在那台跑 codex 官方安裝指令、換掉所有 codex bot 共用的 binary，再重啟那台閒置的 codex | 維持（網頁已有確認框） |
 | A | `POST /bots/{id}/prompt`、`/text`、`/keys` | 網頁、`scripts/remote-loop-test.sh`、`scripts/hook-timing-test.sh`；Bot pane 內的 `agm`／shim | 網頁與測試腳本用 User `X-AM-Token`；Bot 用成對 Bot headers；`relay_from` 不能覆蓋已驗身分；寫給 AGM 的排進 inbox | 驅動任一顆 agent | 網頁維持 User；Bot principal 按 caller 身分驗證 |
-| A | `POST /bots/{id}/credential/rotate` | 只有網頁／User `agm` | User `X-AM-Token`；立即換 per-bot hook token，舊值失效並重啟執行中的 bot；不回傳新值 | 使該 bot 的舊 hook/API proof 失效 | User-only，Bot／service principal 403 |
+| A | `POST /bots/{id}/credential/rotate` | 只有網頁／User `agm` | User `X-AM-Token`；立即換 per-bot hook token，舊值失效並重啟執行中的 bot；live child／grandchild 仍繼承時先回 `409 live_children_use_credential`，不改 token；不回傳新值 | 使該 bot 的舊 hook/API proof 失效 | User-only，Bot／service principal 403 |
 | A | `PUT /build/remote`、`POST /build/remote/install-toolchain` | 只有網頁 | UI token | 改外部編譯主機＝之後的 cargo 送到哪台機器跑 | 待裁示 |
 | B | `POST /projects/{id}/git/push` | 只有網頁 | UI token；一般 `git push`（沒有 `--force`） | 推到遠端 repo，撤回要另外動作 | 待裁示（確認或維持） |
 | B | `POST /projects/{id}/git/commit`、`/git/pull` | 只有網頁 | UI token；pull 固定 `--rebase --no-autostash` | 本機 git 歷史 | 維持 |
@@ -282,7 +282,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 { "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<自己的 bot id>", "attachments"?: ["<attachment id>"], "send_now"?: true, "start_if_stopped"?: true }
 ```
 
-  - Bot principal 一定要帶成對 `X-AM-Bot-Id`、`X-AM-Bot-Token`，且不能混帶 `X-AM-Token`。`AM_BOT_TOKEN` 是每個 bot 都注入的 API 憑證；目前重用 `bots.hook_token`，可由 User 用 credential rotation 立即失效並重啟該 bot。`AM_HOOK_TOKEN` 只在 hook-enabled pane 注入。網頁沒有 Bot headers，仍以共用 UI token 作 User principal。
+  - Bot principal 一定要帶成對 `X-AM-Bot-Id`、`X-AM-Bot-Token`，且不能混帶 `X-AM-Token`。`AM_BOT_TOKEN` 是每個 bot 都注入的 API 憑證；目前重用 `bots.hook_token`，可由 User 用 credential rotation 立即失效並重啟該 bot。若任一活著的後代 pane 還繼承母 bot 的 token，輪替先以 `409 live_children_use_credential` 拒絕，不撤舊值。`AM_HOOK_TOKEN` 只在 hook-enabled pane 注入。網頁沒有 Bot headers，仍以共用 UI token 作 User principal。
   - `relay_from` 是來源標記，不能覆蓋 principal。省略時：User 請求記為使用者；Bot 請求由 daemon 補成已驗證的 `X-AM-Bot-Id`。Bot 若提供 `relay_from`，只能是自己的 id，否則 403 `relay_from_mismatch`。User 呼叫端仍有 #339 的未驗證相容期：不帶任何 Bot 身分 header 時，`relay_from` bot 才會標 `relay_unverified = 1`；移除條件見 #410。
 
   | principal／`relay_from` | 回應 |

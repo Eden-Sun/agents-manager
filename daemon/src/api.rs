@@ -3294,6 +3294,29 @@ async fn rotate_bot_credential(
             json!({"reason": "child_uses_parent_credential", "bot_id": id, "parent_bot_id": bot.parent_bot_id}),
         ));
     }
+    // Child panes carry the environment of the bot that opened them. Refuse before changing the
+    // parent's proof while any live descendant still depends on it; follow the full parent chain
+    // because a grandchild can retain the same inherited AM_BOT_ID/token pair.
+    let live_descendants: Vec<String> = sqlx::query_scalar(
+        "WITH RECURSIVE descendants(id) AS (
+             SELECT id FROM bots WHERE parent_bot_id = ?
+             UNION
+             SELECT b.id FROM bots b JOIN descendants d ON b.parent_bot_id = d.id
+         )
+         SELECT DISTINCT d.id FROM descendants d
+         JOIN runs r ON r.bot_id = d.id AND r.state IN ('starting','running','stopping')
+         ORDER BY d.id",
+    )
+    .bind(&id)
+    .fetch_all(&app.db)
+    .await
+    .map_err(any_err)?;
+    if !live_descendants.is_empty() {
+        return Err(LcError::conflict(
+            "live descendants still use the parent's credential; stop them before rotating",
+            json!({"reason": "live_children_use_credential", "bot_id": id, "children": live_descendants}),
+        ));
+    }
     let token = crate::projection::new_token();
     let changed = sqlx::query("UPDATE bots SET hook_token=? WHERE id=? AND deleted_at IS NULL")
         .bind(&token)
@@ -6134,6 +6157,84 @@ mod per_principal_auth_tests {
         assert_ne!(current, old, "old bot credential is invalidated immediately");
         let stale = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &old)]).await;
         assert!(stale.starts_with("HTTP/1.1 401"), "the old proof must already be unusable: {stale}");
+    }
+
+    #[tokio::test]
+    async fn rotation_refuses_a_live_grandchild_that_inherited_the_parent_credential() {
+        let e = crate::testing::env().await;
+        let parent = distinct_bot(&e, "rotate-parent-with-live-descendants").await;
+        let child = distinct_bot(&e, "rotate-child-with-live-descendant").await;
+        let grandchild = distinct_bot(&e, "rotate-grandchild").await;
+        for (id, parent_id) in [(&child.id, &parent.id), (&grandchild.id, &child.id)] {
+            sqlx::query("UPDATE bots SET managed_by='child', parent_bot_id=?, hook_token=? WHERE id=?")
+                .bind(parent_id)
+                .bind(&parent.hook_token)
+                .bind(id)
+                .execute(&e.app.db)
+                .await
+                .unwrap();
+        }
+        let parent_run = crate::testing::fake_run(&e.app, &parent.id).await;
+        let child_run = crate::testing::fake_run(&e.app, &child.id).await;
+        let grandchild_run = crate::testing::fake_run(&e.app, &grandchild.id).await;
+
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                parent.id, e.app.ui_token
+            ),
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 409"), "rotation must be refused while an inherited credential is live: {response}");
+        assert!(response.contains("live_children_use_credential"), "the conflict must identify the credential dependency: {response}");
+        assert!(response.contains(&child.id) && response.contains(&grandchild.id), "the live descendant set must include both levels: {response}");
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&parent.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(current, parent.hook_token, "a refused rotation must leave the old token valid");
+        let old_proof = state(e.app.clone(), &[("X-AM-Bot-Id", &parent.id), ("X-AM-Bot-Token", &parent.hook_token)]).await;
+        assert!(old_proof.starts_with("HTTP/1.1 200"), "the refusal must keep the inherited proof usable: {old_proof}");
+        for (bot_id, run_id) in [(&parent.id, &parent_run), (&child.id, &child_run), (&grandchild.id, &grandchild_run)] {
+            assert_eq!(crate::db::active_run(&e.app.db, bot_id).await.unwrap().unwrap().id, *run_id, "refusal must not restart or touch any dependent pane");
+        }
+    }
+
+    #[tokio::test]
+    async fn stopped_or_deleted_children_without_live_runs_do_not_block_parent_rotation() {
+        let e = crate::testing::env().await;
+        let parent = distinct_bot(&e, "rotate-parent-with-stopped-child").await;
+        let stopped = distinct_bot(&e, "rotate-stopped-child").await;
+        let deleted = distinct_bot(&e, "rotate-deleted-child").await;
+        for child in [&stopped, &deleted] {
+            sqlx::query("UPDATE bots SET managed_by='child', parent_bot_id=?, hook_token=? WHERE id=?")
+                .bind(&parent.id)
+                .bind(&parent.hook_token)
+                .bind(&child.id)
+                .execute(&e.app.db)
+                .await
+                .unwrap();
+        }
+        let stopped_run = crate::testing::fake_run(&e.app, &stopped.id).await;
+        sqlx::query("UPDATE runs SET state='stopped', ended_at=? WHERE id=?")
+            .bind(crate::db::now())
+            .bind(&stopped_run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(crate::db::now()).bind(&deleted.id).execute(&e.app.db).await.unwrap();
+
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                parent.id, e.app.ui_token
+            ),
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 200"), "retired descendants do not hold the credential: {response}");
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&parent.id).fetch_one(&e.app.db).await.unwrap();
+        assert_ne!(current, parent.hook_token, "the parent can rotate once all dependent panes are gone");
     }
 }
 

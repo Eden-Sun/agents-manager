@@ -2378,7 +2378,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   這保留使用者接受的 LAN／共用 token 風險，不做額外人類證明。`/ws` 維持 `?token=`；`Origin` 存在時主機須為本機。
   Bot proof 重用 `bots.hook_token`；pane 一律注入 `AM_BOT_TOKEN`，hooks 開啟時另注入 `AM_HOOK_TOKEN`。User 用 `POST /api/bots/{id}/credential/rotate` 輪替，舊值即刻失效，
   活 bot 重啟取得新值、停止 bot 下次啟動取得。child 不是獨立 principal：它的 pane 由母 bot 開、herdr shim 帶下的是**母 bot 的** `AM_BOT_ID`／token，
-  daemon 原地重啟 child 也不重建 env，所以對 child 輪替回 409 `child_uses_parent_credential`；child 以母 bot 的名義呼叫 API（跟它本來就能替母 bot 做事同一條界線）。Service token 在 `<data_dir>/service-tokens/` 建立（目錄 0700、token 檔 0600），重啟保持不變；`/api/capabilities` 的
+  daemon 原地重啟 child 也不重建 env，所以對 child 輪替回 409 `child_uses_parent_credential`；若母 bot 有仍活著的 child／grandchild 後代 pane 繼承憑證，輪替亦回 409 `live_children_use_credential` 並列出依賴後代，不改 token、不重啟。child 以母 bot 的名義呼叫 API（跟它本來就能替母 bot 做事同一條界線）。Service token 在 `<data_dir>/service-tokens/` 建立（目錄 0700、token 檔 0600），重啟保持不變；`/api/capabilities` 的
   `service_principals` 標記代表 launchd clients 不得在憑證遺失時退回 User。service scope 與固定維運 route 見 API.md。
   開發版（`App::allow_lan`，跟 bind `0.0.0.0` 同一個判斷）對端與 `Origin` 都直接放行，同網段誰都拿得到 token：使用者裁示保留（`e7392dd` 撤掉配對碼時記明）。
 - `/hook/*`、`/relay/announce`、`/relay/pane` 驗 **per-bot** `X-AM-Bot-Token`。
