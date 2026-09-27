@@ -2513,7 +2513,7 @@ label = "foo@m4p"
 | `statusline` | stdin | 不報 | 不進 spool（§11.4.5） |
 
 - **腳本不做語意判斷**：只用最粗的字串比對決定要不要報 idle，其餘照寫 spool，分類只在 `hookrecv::classify`。遠端腳本沒有測試；漏報最多晚一點被掃到，錯分類會吃掉訊息。
-- **先寫 spool，再 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated, run_id}`；`run_id` 取 `AM_RUN_ID`、只留 `[A-Za-z0-9_-]`，沒有就是空字串）。每一則寫進 `hook-spool.d/` 底下自己的檔（暫存檔寫完再 `mv` 成 `*.json`）；drain 只讀 `*.json`，寫到一半的 `.tmp.*` 碰不到。舊的 `hook-spool.jsonl` 只留給還沒換腳本的那一輪，drain 仍會收。
+- **先寫 spool，再 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated, run_id}`；`run_id` 取 `AM_RUN_ID`、只留 `[A-Za-z0-9_-]`，沒有就是空字串）。每一則寫進 `hook-spool.d/` 底下自己的檔（暫存檔寫完再 `mv` 成 `*.json`）；drain 只讀 `*.json`，寫到一半的 `.tmp.*` 碰不到。超過 1 MiB 被截斷時 payload 不再原樣嵌進去（半截物件仍以 `{` 開頭，整行會變無效 JSON）：改包成 `{"raw":"..."}`，`truncated` 仍是 `true`（#653）。舊的 `hook-spool.jsonl` 只留給還沒換腳本的那一輪，drain 仍會收。
 - `report-agent` 欄位：`$HERDR_PANE_ID`（沒有就跳過上報）；`--source agents-manager:<bot_id>`；`--agent <kind>`；`--state` 只送 `idle`（`working` 交給終端偵測，硬報會互蓋）；
   `--seq` 有 `python3` 用 `time.time_ns()`，否則 `date +%s`×1000 + `$DIR/hook-seq` 計數；`--agent-session-id`／`--agent-session-path` 有才帶；`--message` 不填。
 - 找 herdr：`${AM_REAL_HERDR:-}` → `command -v herdr`；都沒有就只寫 spool、記 `hook.log`、exit 0（30 秒掃描會補）。`HERDR_SESSION` 有值時帶 `--session`。

@@ -99,7 +99,9 @@ am_raw() {
   printf '{"raw":"%s"}' "$ESC"
 }
 case "$PAYLOAD" in
-  '{'*) ;;
+  '{'*)
+    if [ "$TRUNC" = true ]; then PAYLOAD=$(am_raw "$PAYLOAD"); fi
+    ;;
   '') PAYLOAD=null ;;
   *) PAYLOAD=$(am_raw "$PAYLOAD") ;;
 esac
@@ -1639,6 +1641,24 @@ mod remote_hook_tests {
         }
         let live = sb.bot_dir().join("hook-spool.jsonl");
         assert!(!live.exists(), "新的 hook 不再追加同一個 jsonl");
+    }
+
+    /// #653：截斷後仍以 `{` 開頭。原樣嵌進 JSON 整行無效，`truncated` 沒人讀得到。
+    #[test]
+    fn macos_local_truncated_object_is_wrapped_so_the_line_parses() {
+        let sb = Sandbox::new(false);
+        let mut payload = String::from(r#"{"hook_event_name":"Stop","blob":""#);
+        payload.push_str(&"a".repeat(1_100_000));
+        let (_, ok) = sb.run(&["claude", &sb.bot, "-"], &payload);
+        assert!(ok);
+        let text = sb.read("hook-spool.jsonl");
+        let line = text.lines().next().expect("要有一則");
+        let body: crate::hookrecv::HookBody = serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: 行長 {}", line.len()));
+        assert!(body.truncated, "超過 1 MiB 要標 truncated");
+        let raw = body.payload["raw"].as_str().unwrap_or_else(|| panic!("截斷的物件要包成 raw：{body:?}"));
+        assert!(raw.starts_with('{'), "原文還在");
+        assert!(raw.contains("hook_event_name"));
+        assert!(raw.len() <= 1_048_576 + 8, "head -c 之後不該比上限長一截：{}", raw.len());
     }
 
     fn mode_of(p: &std::path::Path) -> u32 {
