@@ -13,7 +13,7 @@
 //! no hooks at all (§4.3, `inject_hooks = 0`), so a child spawning a grandchild still goes through
 //! the same blood-line path this issue does not touch.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -45,13 +45,37 @@ fn pane_id_from_herdr_json(v: &Value) -> Option<String> {
     pane.as_str().map(String::from)
 }
 
+fn append_pane_ids(output: &str, pane_ids: &mut Vec<String>, seen: &mut HashSet<String>) {
+    let mut stream = serde_json::Deserializer::from_str(output).into_iter::<Value>();
+    while let Some(Ok(value)) = stream.next() {
+        if let Some(pane_id) = pane_id_from_herdr_json(&value) {
+            if seen.insert(pane_id.clone()) {
+                pane_ids.push(pane_id);
+            }
+        }
+    }
+
+    // If shell output surrounds the JSON stream, still accept valid JSON Lines after/between it.
+    // This also recovers responses after one unrelated line without treating that line as a hint.
+    for line in output.lines() {
+        if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+            if let Some(pane_id) = pane_id_from_herdr_json(&value) {
+                if seen.insert(pane_id.clone()) {
+                    pane_ids.push(pane_id);
+                }
+            }
+        }
+    }
+}
+
 /// The Bash tool's `PostToolUse` payload: `tool_response` is normally `{stdout, stderr, ...}`, but
 /// a hook implementation may flatten it to a bare string — try both shapes, and both streams
 /// (herdr prints its JSON envelope to stdout in every case observed, but nothing here assumes it
-/// never lands on stderr).
-pub(crate) fn extract_pane_id(payload: &Value) -> Option<String> {
+/// never lands on stderr). Bash loops can emit several JSON values, each of which may contain a
+/// spawn response.
+pub(crate) fn extract_pane_ids(payload: &Value) -> Vec<String> {
     if payload.get("tool_name").and_then(|v| v.as_str()) != Some("Bash") {
-        return None;
+        return Vec::new();
     }
     let mut candidates: Vec<&str> = Vec::new();
     if let Some(s) = payload.get("tool_response").and_then(|v| v.as_str()) {
@@ -63,7 +87,12 @@ pub(crate) fn extract_pane_id(payload: &Value) -> Option<String> {
     if let Some(s) = payload.pointer("/tool_response/stderr").and_then(|v| v.as_str()) {
         candidates.push(s);
     }
-    candidates.into_iter().find_map(|s| serde_json::from_str::<Value>(s.trim()).ok().as_ref().and_then(pane_id_from_herdr_json))
+    let mut pane_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for output in candidates {
+        append_pane_ids(output, &mut pane_ids, &mut seen);
+    }
+    pane_ids
 }
 
 /// Record (or replace) which bot's own tool call just produced `pane_id`. One row per pane —
@@ -126,10 +155,26 @@ mod tests {
     #[test]
     fn agent_start_and_pane_split_both_yield_the_pane_id() {
         let start = bash_result("cli:agent:start", json!({"agent": {"pane_id": "w1:p2", "name": "parent-kid"}}));
-        assert_eq!(extract_pane_id(&start).as_deref(), Some("w1:p2"));
+        assert_eq!(extract_pane_ids(&start), ["w1:p2"]);
 
         let split = bash_result("cli:pane:split", json!({"pane": {"pane_id": "w1:p3", "tab_id": "w1:t1"}}));
-        assert_eq!(extract_pane_id(&split).as_deref(), Some("w1:p3"));
+        assert_eq!(extract_pane_ids(&split), ["w1:p3"]);
+    }
+
+    #[test]
+    fn several_json_responses_yield_every_distinct_spawned_pane() {
+        let payload = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_response": {"stdout": format!(
+                "{}\n{}\n{}\n{}\n",
+                json!({"id": "cli:agent:start", "result": {"agent": {"pane_id": "w1:p2"}}}),
+                json!({"id": "cli:agent:start", "result": {"agent": {"pane_id": "w1:p2"}}}),
+                json!({"id": "cli:pane:split", "result": {"pane": {"pane_id": "w1:p3"}}}),
+                json!({"id": "cli:agent:start", "result": {"agent": {"pane_id": "w1:p4"}}}),
+            ), "stderr": ""},
+        });
+        assert_eq!(extract_pane_ids(&payload), ["w1:p2", "w1:p3", "w1:p4"]);
     }
 
     /// `pane:get`／`pane:current`／`pane:list` return the exact same `{"pane": {...}}` shape as
@@ -139,7 +184,7 @@ mod tests {
     fn merely_inspecting_a_pane_is_not_a_spawn() {
         for id in ["cli:pane:get", "cli:pane:current", "cli:pane:list", "cli:agent:get", "cli:agent:list"] {
             let v = bash_result(id, json!({"pane": {"pane_id": "w1:p2"}}));
-            assert_eq!(extract_pane_id(&v), None, "{id} must not be treated as a spawn");
+            assert!(extract_pane_ids(&v).is_empty(), "{id} must not be treated as a spawn");
         }
     }
 
@@ -153,7 +198,7 @@ mod tests {
             "tool_input": {"command": "herdr agent start kid --kind claude --pane w1:p2"},
             "tool_response": {"stdout": r#"{"error":{"code":"agent_pane_busy","message":"..."},"id":"cli:agent:start"}"#, "stderr": ""},
         });
-        assert_eq!(extract_pane_id(&v), None);
+        assert!(extract_pane_ids(&v).is_empty());
     }
 
     #[test]
@@ -164,7 +209,7 @@ mod tests {
             "tool_input": {"command": "ls -la"},
             "tool_response": {"stdout": "total 0\ndrwxr-xr-x  2 x  x  64 Jan  1 00:00 .\n", "stderr": ""},
         });
-        assert_eq!(extract_pane_id(&ls), None, "plain command output is not JSON at all");
+        assert!(extract_pane_ids(&ls).is_empty(), "plain command output is not JSON at all");
 
         let not_bash = json!({
             "hook_event_name": "PostToolUse",
@@ -172,7 +217,7 @@ mod tests {
             "tool_input": {"file_path": "/tmp/x"},
             "tool_response": {"stdout": r#"{"id":"cli:agent:start","result":{"agent":{"pane_id":"w1:p2"}}}"#},
         });
-        assert_eq!(extract_pane_id(&not_bash), None, "only the Bash tool is trusted");
+        assert!(extract_pane_ids(&not_bash).is_empty(), "only the Bash tool is trusted");
     }
 
     /// A hook implementation that flattens `tool_response` to a bare string instead of `{stdout,
@@ -185,7 +230,7 @@ mod tests {
             "tool_input": {"command": "herdr agent start kid --kind claude --pane w1:p2"},
             "tool_response": r#"{"id":"cli:agent:start","result":{"agent":{"pane_id":"w1:p2"}}}"#,
         });
-        assert_eq!(extract_pane_id(&v).as_deref(), Some("w1:p2"));
+        assert_eq!(extract_pane_ids(&v), ["w1:p2"]);
     }
 
     #[tokio::test]
