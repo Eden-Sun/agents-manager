@@ -1375,12 +1375,16 @@ mod tests {
     #[test]
     fn a_long_name_is_cut_to_herdrs_32_characters() {
         let s = Sandbox::new();
-        let (out, _) = s.run(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "start", &"x".repeat(40)]);
-        assert!(out[2].len() <= 32, "{}", out[2]);
-        assert!(out[2].starts_with("proj-abc123-"), "{}", out[2]);
-        assert_ne!(out[2], "proj-abc123");
-        let (other, _) = s.run(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "start", &"y".repeat(40)]);
-        assert_ne!(out[2], other[2], "不同字尾不能截成同一個名字");
+        let parent = "proj-abc123";
+        // POSIX cksum(40 個 x) % 1_000_000 = 320016；40 個 y → 890150。放不下就用這個尾碼，不是截前綴。
+        let (out, _) = s.run(&[("AM_AGENT_NAME", parent)], &["agent", "start", &"x".repeat(40)]);
+        assert_eq!(out[2], "proj-abc123-320016");
+        assert_ne!(out[2], parent);
+        assert!(out[2].len() <= 32);
+        let (other, _) = s.run(&[("AM_AGENT_NAME", parent)], &["agent", "start", &"y".repeat(40)]);
+        assert_eq!(other[2], "proj-abc123-890150");
+        assert_ne!(other[2], parent);
+        assert!(other[2].len() <= 32);
     }
 
     #[test]
