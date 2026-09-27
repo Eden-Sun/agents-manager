@@ -100,6 +100,18 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
     }
     let Some((prev, epoch)) = forced().lock().unwrap().get(&run.id).map(|f| (f.prev.clone(), f.epoch)) else { return };
     tracing::info!(run = %run.id, bot = %run.bot_id, "Session paused 選單關掉了");
+    // 在還原 idle 與叫醒 queued flush 之前取回選單所屬的 turn；沒有 in-flight 就不排會影響未來回合的 timer。
+    let paused_turn = if prev == "idle" {
+        match db::in_flight_turn(&app.db, &run.id).await {
+            Ok(turn) => turn,
+            Err(e) => {
+                tracing::warn!(run = %run.id, error = %e, "Session paused 選單關閉時讀取 in-flight turn 失敗，不排快關計時器");
+                None
+            }
+        }
+    } else {
+        None
+    };
     // 只還我們自己標的那個 blocked：這段期間 herdr 已經報了別的狀態就是它的，不蓋。
     let restored = sqlx::query("UPDATE runs SET agent_status=? WHERE id=? AND agent_status='blocked'")
         .bind(&prev)
@@ -111,8 +123,8 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
             retire(&run.id, epoch);
             app.emit_bot_status(&run.bot_id).await;
             crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
-            if prev == "idle" {
-                close_paused_turn_later(app, &run.id);
+            if let Some(turn) = paused_turn {
+                close_paused_turn_later(app, &run.id, &turn.id);
             }
         }
         // 已經不是 blocked（herdr／別的路徑改過）或 run 不在了：被取代，補標記沒有要還的東西了。
@@ -123,14 +135,14 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
 }
 
 /// 選單關掉後多久再看一次：選「換模型重試」的話 claude 會接著跑同一回合，herdr 要一點時間報 working。
-const AFTER_CLOSE: Duration = if cfg!(test) { Duration::from_millis(50) } else { Duration::from_secs(5) };
+const AFTER_CLOSE: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(5) };
 
-/// 選單關掉、還原成 idle 之後：等一下，run 仍 idle 就把那筆沒有回覆的 in-flight 收掉（不等 5 分鐘閒置門檻）。
-fn close_paused_turn_later(app: &Arc<App>, run_id: &str) {
-    let (app, run_id) = (app.clone(), run_id.to_string());
+/// 選單關掉、還原成 idle 之後：等一下，只檢查選單關閉時捕捉的 turn（不等 5 分鐘閒置門檻）。
+fn close_paused_turn_later(app: &Arc<App>, run_id: &str, turn_id: &str) {
+    let (app, run_id, turn_id) = (app.clone(), run_id.to_string(), turn_id.to_string());
     tokio::spawn(async move {
         tokio::time::sleep(AFTER_CLOSE).await;
-        if let Some(turn) = crate::lifecycle::close_after_session_paused(&app, &run_id).await {
+        if let Some(turn) = crate::lifecycle::close_after_session_paused(&app, &run_id, &turn_id).await {
             tracing::info!(run = %run_id, turn = %turn, "Session paused 選單關掉、沒有回覆：直接收掉這個回合");
         }
     });
@@ -233,6 +245,79 @@ mod tests {
         for m in ["pane.send_keys", "pane.send_text", "agent.prompt"] {
             assert!(e.herdr.calls_to(m).is_empty(), "不能替使用者按：{m}");
         }
+    }
+
+    /// #575：選單關閉時捕捉 T1；延遲 Stop hook 正常收掉 T1 後，佇列已開始 T2、run 狀態事件仍未到，舊 timer 不能收 T2。
+    #[tokio::test]
+    async fn a_delayed_stop_hook_and_next_turn_make_the_paused_timer_stale() {
+        let _serial = serial().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "paused-next-turn").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let t1_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&t1_id)
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        observe_screen(&app, &run_of(&app, &run_id).await, SESSION_PAUSED).await;
+        observe_screen(&app, &run_of(&app, &run_id).await, IDLE_CLAUDE).await;
+        assert_eq!(
+            crate::lifecycle::turn_controller::set_status(&app.db, &t1_id, "in_flight", "completed", "Stop hook").await.unwrap(),
+            crate::lifecycle::turn_controller::Outcome::Applied,
+            "延遲到達的 Stop hook 正常收掉 T1"
+        );
+
+        let t2_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&t2_id)
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(run_status, "idle", "T2 已開始，但 herdr 的 working 事件還沒到");
+
+        tokio::time::sleep(AFTER_CLOSE + Duration::from_millis(50)).await;
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&t2_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "in_flight", "T1 的快關 timer 到期後不可誤關 T2");
+        let t1_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&t1_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(t1_status, "completed", "T1 維持 Stop hook 的正常終態");
+    }
+
+    /// 選單關閉當下沒有 in-flight turn，就不該替未來送出的 turn 排快關 timer。
+    #[tokio::test]
+    async fn closing_the_menu_without_a_turn_does_not_arm_a_future_closer() {
+        let _serial = serial().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "paused-no-turn").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        observe_screen(&app, &run_of(&app, &run_id).await, SESSION_PAUSED).await;
+        observe_screen(&app, &run_of(&app, &run_id).await, IDLE_CLAUDE).await;
+
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let later_turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&later_turn)
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(AFTER_CLOSE + Duration::from_millis(50)).await;
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&later_turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "in_flight", "選單關閉時沒有 turn，不可建立 run-scoped 的未來 closer");
     }
 
     /// herdr 自己判成 blocked 的不補標、不還原；補標後 herdr 報了別的狀態（使用者選完開始 working），還原不蓋掉它。
