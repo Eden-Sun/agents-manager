@@ -171,9 +171,23 @@ pub struct HerdrUnreachable {
     pub source: std::io::Error,
 }
 
+/// 分段貼上已經有前段進了 pane，後面某一段才失敗（#647）。外層是這個型別時，**不能**再當成
+/// 「一個字都沒進去」——就算 source 是 [`HerdrError`]。
+#[derive(Debug, thiserror::Error)]
+#[error("partial paste: {sent_bytes} bytes already reached the pane")]
+pub struct PartialPaste {
+    pub sent_bytes: usize,
+    #[source]
+    pub source: anyhow::Error,
+}
+
 /// herdr **確定沒有執行**這個請求：它自己回了錯誤（herdr 先驗參數、找 pane，失敗就不動 pane），或根本連不上。
 /// 其餘的失敗——逾時、送出後連線斷了沒回、回應讀不懂——都是**不知道**它做了沒有（#120、#147）。
+/// 分段貼上已經寫進前幾段（[`PartialPaste`]）也不是「確定沒做」。
 pub fn never_applied(e: &anyhow::Error) -> bool {
+    if e.downcast_ref::<PartialPaste>().is_some() {
+        return false;
+    }
     e.downcast_ref::<HerdrError>().is_some() || e.downcast_ref::<HerdrUnreachable>().is_some()
 }
 
@@ -479,8 +493,15 @@ impl HerdrClient {
     /// Literal text, no Enter. Used by the grok quota probe (SPEC §12.4).
     /// 一次 `pane.send_text` 超過約 1024 B，herdr 0.9.1 會丟掉最前面的 1024 B（#382），所以拆成小段依序送。
     pub async fn pane_send_text(&self, pane_id: &str, text: &str) -> Result<()> {
+        let mut sent = 0usize;
         for piece in split_paste(text, SEND_TEXT_CHUNK) {
-            self.call("pane.send_text", json!({"pane_id": pane_id, "text": piece})).await?;
+            if let Err(e) = self.call("pane.send_text", json!({"pane_id": pane_id, "text": piece})).await {
+                if sent > 0 {
+                    return Err(PartialPaste { sent_bytes: sent, source: e }.into());
+                }
+                return Err(e);
+            }
+            sent += piece.len();
         }
         Ok(())
     }
@@ -858,6 +879,14 @@ mod split_paste_tests {
             }
         }
         assert!(split_paste("", SEND_TEXT_CHUNK).is_empty());
+    }
+
+    #[test]
+    fn a_partial_paste_is_not_never_applied_even_when_herdr_refused_the_later_chunk() {
+        let refused = anyhow::Error::from(super::HerdrError { code: "pane_not_found".into(), message: "gone".into() });
+        assert!(super::never_applied(&refused));
+        let partial = anyhow::Error::from(super::PartialPaste { sent_bytes: 1000, source: refused });
+        assert!(!super::never_applied(&partial));
     }
 
     /// 在換行之後切：不把一行數字從中間剖開（放得進一段的行不被切）。
