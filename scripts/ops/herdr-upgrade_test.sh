@@ -109,5 +109,20 @@ check_no "不打通用 start" "start?resume" "$SCRIPT"
 check_no "不讀含 env 的 /api/state" '/api/state"' "$SCRIPT"
 check_no "service token 不放 curl 參數" "curl -s -m 20 -H \"X-AM-Service-Token" "$SCRIPT"
 
+# #671：行首 ANSI 不能讓 5 分鐘內的 ERROR 被算成 0。先去色再比時間。
+LOGF="$ROOT/daemon.log"
+CUTOFF="2026-09-27T00:05:00"
+{
+  printf '\033[2m2026-09-27T00:06:00Z\033[0m ERROR boom\n'
+  printf '2026-09-27T00:06:01Z \033[31mERROR\033[0m plain-marker\n'
+  printf '2026-09-27T00:01:00Z ERROR too-old\n'
+} > "$LOGF"
+# 第二行色碼包住 ERROR、前後沒有空格時，比對用的是「 ERROR 」這個帶空格的片段；補上空格才算同一種 log。
+# 上面第二行是 `Z \033[31mERROR\033[0m`，去掉色碼後是 `Z ERROR `。
+awk '/^count_daemon_errors\(\)/,/^}/' "$SCRIPT" > "$ROOT/count.sh"
+printf '\ncount_daemon_errors "$1" "$2"\n' >> "$ROOT/count.sh"
+got=$(bash "$ROOT/count.sh" "$LOGF" "$CUTOFF")
+check_eq "ANSI 行與純文字行都算，太舊的不算" "2" "$got"
+
 echo "herdr-upgrade_test: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" = 0 ]

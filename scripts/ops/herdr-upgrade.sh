@@ -210,7 +210,15 @@ sqlite3 -readonly "$HOME/.config/agents-manager/agents-manager.sqlite3" \
 MISSING=$(comm -23 <(cut -d'|' -f2 "$SNAP/running.tsv" | sort) <(cut -d'|' -f2 "$SNAP/running-after.tsv" | sort) | tr '\n' ' ')
 SID_CHANGED=$(join -t'|' -j1 <(awk -F'|' '{print $1"|"$2"|"$8}' "$SNAP/running.tsv" | sort) <(awk -F'|' '{print $1"|"$8}' "$SNAP/running-after.tsv" | sort) \
   | awk -F'|' '$3!="" && $4!="" && $3!=$4 {print $2}' | tr '\n' ' ')
-ERRORS=$(awk -v t="$(date -u -v-5M +%FT%T)" '$0 >= t' "$HOME/.config/agents-manager/daemon.log" | sed 's/\x1b\[[0-9;]*m//g' | grep -c ' ERROR ')
+# 先去掉 ANSI 再比時間與 ` ERROR `。色碼在行首時 ESC 比數字小，awk 會把每一行都濾掉（#671）。
+count_daemon_errors() { # <logfile> <cutoff UTC YYYY-MM-DDTHH:MM:SS>
+  awk -v t="$2" '
+    { gsub(/\033\[[0-9;]*[[:alpha:]]/, "") }
+    index($0, " ERROR ") && $0 >= t { c++ }
+    END { print c + 0 }
+  ' "$1"
+}
+ERRORS=$(count_daemon_errors "$HOME/.config/agents-manager/daemon.log" "$(date -u -v-5M +%FT%T)")
 log "after: $(wc -l < "$SNAP/running-after.tsv") running; missing: ${MISSING:-none}; session changed: ${SID_CHANGED:-none}; daemon ERROR (5m): $ERRORS"
 [ -z "$MISSING" ] || finish FAIL "升級完成但有 bot 沒接回：$MISSING"
 finish OK "herdr 0.9.0 上線；running $(wc -l < "$SNAP/running.tsv")→$(wc -l < "$SNAP/running-after.tsv")，session 換掉的：${SID_CHANGED:-無}，daemon ERROR $ERRORS"
