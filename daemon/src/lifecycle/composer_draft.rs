@@ -145,7 +145,7 @@ pub(crate) async fn with_draft(client: &HerdrClient, run: &db::Run, bot: &db::Bo
 }
 
 /// 清掉框裡使用者確認過的那段（`expect_token`），**重讀畫面確認框是空的**才回 `Ok`；清不掉就回錯，呼叫端一個字都不打。
-/// 框本來就空了＝沒有東西要清。`busy`＝有回合在跑（插隊送出）：`ctrl+c` 會打斷它，不按。
+/// 框本來就空了＝token 已失效，合併的「清掉再送」不能退化成一般送出。`busy`＝有回合在跑（插隊送出）：`ctrl+c` 會打斷它，不按。
 pub(crate) async fn clear(
     app: &Arc<App>,
     client: &HerdrClient,
@@ -160,10 +160,12 @@ pub(crate) async fn clear(
     if busy {
         return Err(LcError::conflict("draft_clear_while_busy", json!({"run_id": run.id, "retryable": true, "sent": false})));
     }
-    let Some(pane) = pane_of(run) else { return Ok(()) };
+    let Some(pane) = pane_of(run) else {
+        return Err(refusal("draft_gone", run, true, &bot.kind, None));
+    };
     let (state, now, revision) = read_draft(client, &pane, &bot.kind).await.map_err(|_| unreadable(run))?;
     match state {
-        BoxState::Empty => return Ok(()),
+        BoxState::Empty => return Err(refusal("draft_gone", run, true, &bot.kind, None)),
         BoxState::Unready => return Err(unreadable(run)),
         BoxState::NonEmpty => {}
     }
