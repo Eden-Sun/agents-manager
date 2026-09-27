@@ -2831,7 +2831,9 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         const key = idleEdgeCompletionKey(botId, run.id, latest ? map[latest] : null)
         if (key) {
           noteTurnDone(set, get, botId, key)
-          noteGroupCompletion(set, get, botId, latest, key, latest ? map[latest] : null)
+          // `run:` 開頭是終端直接輸入的新回合，latest 仍是上一筆（多半是群組回合）。
+          // 拿那個舊 id 去記群組未讀，每個終端回合都會 +1（#650）。
+          if (latest && key === latest) noteGroupCompletion(set, get, botId, latest, key, map[latest])
         }
       }
       return
