@@ -933,8 +933,10 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 之後每則都 409 `composer_unreadable`，網頁也拿不到清草稿的動作。現在（`delivery::composer_tail`，只限 claude）範圍內找不到時，從底部 24 列裡
 最下面那條全寬分隔線（框底）往上找第一條分隔線（框頂），框頂正下方那列開頭是 `❯` 才把範圍延伸到那裡；`box_state`、`plain_without_hints`、
 `poller::composer_text` 共用同一個範圍，所以這種框判成有草稿（`composer_busy` 帶草稿與動作）。框裡有一整列 `─`、或框頂下方不是 `❯` 就照舊 `Unready`。
-網頁 Esc 與強制中止之後的清框（`stop::clear_restored_prompt`）改用跟送出前同一種讀法（`recent_unwrapped` 400 列），按完 `ctrl+c` 重讀一次，
-框沒空只記 warn、不再按（空框的 `ctrl+c` 是「再按一次離開」）。真畫面：`fixtures/claude-2.1.281-tall-draft-after-interrupt.ansi`。
+網頁 Esc 與強制中止之後的清框（`stop::clear_restored_prompt`）只在這筆被中斷 Turn 有可讀 `prompt_text`，而且 composer parser 從 `recent_unwrapped` 400 列讀到的完整內容
+（還原 CLI 貼上標記後）與該 prompt 逐字相同時才按 `ctrl+c`；不清任意非空草稿。只有原 prompt 含 Tab 時才另試 TUI 吃掉 Tab 的候選，普通空白與硬換行維持原樣。
+讀到候選後立刻重讀，要求 pane id、revision、內容及 active run/pane/session 都相同；空框、不同／編輯過的字、讀取失敗或身分改變都不按。按完重讀一次，
+框沒空只記 warn、不再按（空框的 `ctrl+c` 是「再按一次離開」）；Herdr 尚無條件 revision/CAS 按鍵，最後重讀到按鍵實際送達仍有窄競態。真畫面：`fixtures/claude-2.1.281-tall-draft-after-interrupt.ansi`。
 
 **誰會建 `queued` turn**（2026-09-16 AGM 裁示）：對方**回合中**時，**只有 AGM 的派工／通知**這條路
 （`supervisor::controller::dispatch` → `lifecycle::prompt::prompt_relayed_queueable`）；另外 bot **沒在跑**時帶 `start_if_stopped` 的送出
