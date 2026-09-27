@@ -279,10 +279,17 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
 
     // A distinct name so reconcile and the bot list can never confuse it with a real bot.
     let name = format!("amquota{}", ulid::Ulid::new().to_string()[20..].to_ascii_lowercase());
-    client.agent_start(&name, "grok", &pane_id, &[], 60_000).await?;
-    client
-        .agent_wait(&name, &[AgentStatus::Idle, AgentStatus::Working, AgentStatus::Blocked], 60_000)
-        .await?;
+    // grok 1.0.41 起 herdr 常在啟動當下就把名字從 pane 上拿掉（`agent_name_not_found`：named agent … no longer owns
+    // the target terminal），之後用名字 `agent_wait` 回 `agent_not_running`——grok 其實好好開著，額度卻從 09-23 起
+    // 大多數輪都讀不到（2026-09-28 使用者：「grok children 跑了一陣子，usage 沒更新」）。探測只需要 pane：
+    // 名字掉了不算失敗，改看 pane 自己的 agent／狀態。
+    if let Err(e) = client.agent_start(&name, "grok", &pane_id, &[], 60_000).await {
+        if !name_lost(&e) {
+            return Err(e);
+        }
+        tracing::debug!(host, pane = %pane_id, "grok probe: herdr dropped the agent name at start; waiting on the pane instead");
+    }
+    wait_for_grok_pane(&client, &pane_id, Duration::from_secs(60)).await?;
     // The TUI accepts a slash command only once its input line is drawn.
     tokio::time::sleep(Duration::from_secs(3)).await;
     client.pane_send_text(&pane_id, "/usage").await?;
@@ -304,6 +311,32 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     drop(probe);
     tracing::debug!(host, screen = %last, "grok /usage did not render a limit row");
     Err(anyhow!("grok `/usage` on {host} did not report a limit within {DIALOG_TIMEOUT:?}"))
+}
+
+/// herdr 回的是「名字已經不在那個 pane 上」——agent 本身可能好好的。
+fn name_lost(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::herdr::HerdrError>().is_some_and(|h| h.code == "agent_name_not_found")
+}
+
+/// pane 上是 grok、而且已經在 idle／working／blocked（TUI 起來了）。
+fn grok_pane_ready(info: Option<&crate::herdr::PaneInfo>) -> bool {
+    info.is_some_and(|p| {
+        p.agent.as_deref() == Some("grok")
+            && matches!(p.agent_status, Some(AgentStatus::Idle | AgentStatus::Working | AgentStatus::Blocked))
+    })
+}
+
+async fn wait_for_grok_pane(client: &HerdrClient, pane_id: &str, limit: Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        if grok_pane_ready(client.pane_get(pane_id).await?.as_ref()) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!("grok did not come up in the probe pane {pane_id} within {limit:?}"));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// Backoff (SPEC §16.4): a grok that can't draw `/usage` otherwise costs a full probe every 30 s forever.
@@ -410,6 +443,37 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Local> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Local)
+    }
+
+    /// 2026-09-28：herdr 在啟動當下把名字拿掉只算「名字不見」，不算探測失敗；其他錯照舊是失敗。
+    #[test]
+    fn a_dropped_agent_name_is_not_a_failed_probe() {
+        let lost: anyhow::Error = crate::herdr::HerdrError { code: "agent_name_not_found".into(), message: "named agent amquota no longer owns the target terminal".into() }.into();
+        assert!(name_lost(&lost));
+        let other: anyhow::Error = crate::herdr::HerdrError { code: "pane_not_found".into(), message: "x".into() }.into();
+        assert!(!name_lost(&other));
+        assert!(!name_lost(&anyhow::anyhow!("socket closed")));
+    }
+
+    #[test]
+    fn the_probe_pane_is_ready_once_grok_is_up_on_it() {
+        let pane = |agent: Option<&str>, st: Option<AgentStatus>| crate::herdr::PaneInfo {
+            pane_id: "w1:p1".into(),
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+            cwd: None,
+            foreground_cwd: None,
+            agent: agent.map(String::from),
+            agent_status: st,
+            revision: 0,
+            scroll: None,
+        };
+        assert!(grok_pane_ready(Some(&pane(Some("grok"), Some(AgentStatus::Idle)))));
+        assert!(grok_pane_ready(Some(&pane(Some("grok"), Some(AgentStatus::Blocked)))));
+        assert!(!grok_pane_ready(Some(&pane(None, None))), "還在 shell");
+        assert!(!grok_pane_ready(Some(&pane(Some("grok"), Some(AgentStatus::Unknown)))), "還沒畫完");
+        assert!(!grok_pane_ready(Some(&pane(Some("claude"), Some(AgentStatus::Idle)))));
+        assert!(!grok_pane_ready(None));
     }
 
     #[test]
