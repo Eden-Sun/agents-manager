@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use serde_json::Value;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 
 /// 補做失敗最多試幾次就放棄（使用者 2026-09-20 裁示：重試幾次就放棄、不無限重試）。
 pub const MAX_ATTEMPTS: i64 = 5;
@@ -85,6 +85,37 @@ pub async fn insert(pool: &SqlitePool, kind: &str, subject_id: &str, host: &str,
         },
         Err(e) => Err(e.into()),
     }
+}
+
+/// Insert an open intent using a caller's transaction. Use when the intent and another irreversible
+/// database change must become visible together. The caller checks for equivalent open intents
+/// while holding its operation lock.
+pub async fn insert_pending_on(
+    conn: &mut SqliteConnection,
+    kind: &str,
+    subject_id: &str,
+    host: &str,
+    payload: &Value,
+    ttl_secs: i64,
+) -> Result<String> {
+    let now = crate::db::now();
+    let expires = (chrono::Utc::now() + chrono::Duration::seconds(ttl_secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let id = crate::db::ulid();
+    sqlx::query(
+        "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, created_at, updated_at, expires_at)
+         VALUES (?,?,?,?,?,'pending',?,?,?)",
+    )
+    .bind(&id)
+    .bind(kind)
+    .bind(subject_id)
+    .bind(host)
+    .bind(payload.to_string())
+    .bind(&now)
+    .bind(&now)
+    .bind(expires)
+    .execute(conn)
+    .await?;
+    Ok(id)
 }
 
 /// 一件**當下就做完**的動作留下的紀錄：直接寫 `done`，不經 `pending`／`running`，也沒有補做這回事——存在只是為了

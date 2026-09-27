@@ -3287,7 +3287,16 @@ async fn rotate_bot_credential(
     if principal != RequestPrincipal::User {
         return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
     }
-    let bot = db::bot(&app.db, &id).await.map_err(any_err)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let lock = app.bot_lock(&id).await;
+    let lock_guard = lock.lock().await;
+    let mut tx = app.db.begin().await.map_err(any_err)?;
+    let bot = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE id=?")
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(any_err)?
+        .filter(|b| b.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.managed_by == "child" {
         return Err(LcError::conflict(
             "a child agent runs on its parent's credential; rotate the parent bot",
@@ -3308,7 +3317,7 @@ async fn rotate_bot_credential(
          ORDER BY d.id",
     )
     .bind(&id)
-    .fetch_all(&app.db)
+    .fetch_all(&mut *tx)
     .await
     .map_err(any_err)?;
     if !live_descendants.is_empty() {
@@ -3317,31 +3326,139 @@ async fn rotate_bot_credential(
             json!({"reason": "live_children_use_credential", "bot_id": id, "children": live_descendants}),
         ));
     }
+    let active = sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE bot_id=? AND state IN ('starting','running','stopping') LIMIT 1")
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(any_err)?;
+    let intent_id = if let Some(run) = &active {
+        let open_restart: Option<(String, String)> = sqlx::query_as(
+            "SELECT id, payload_json FROM intents WHERE kind='restart' AND subject_id=? AND status IN ('pending','running') LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(any_err)?;
+        if let Some((intent_id, payload_json)) = open_restart {
+            let already_rotated = serde_json::from_str::<Value>(&payload_json)
+                .ok()
+                .and_then(|payload| payload.get("credential_rotation").and_then(Value::as_bool))
+                .unwrap_or(false);
+            if already_rotated {
+                return Err(LcError::conflict(
+                    "credential rotation is already committed and its restart is pending",
+                    json!({"reason": "restart_pending", "credential_rotated": true, "restart_pending": true, "bot_id": id, "intent_id": intent_id}),
+                ));
+            }
+            return Err(LcError::conflict(
+                "a restart is already pending for this bot",
+                json!({"reason": "restart_in_progress", "bot_id": id, "intent_id": intent_id}),
+            ));
+        }
+        let host: String = sqlx::query_scalar(
+            "SELECT p.host FROM bots b JOIN projects p ON p.id=b.project_id WHERE b.id=?",
+        )
+        .bind(&id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(any_err)?
+        .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
+        let payload = json!({
+            "credential_rotation": true,
+            "opts": lifecycle::StartOpts::default(),
+            "from_run_id": run.id,
+            "bot_name": bot.name,
+        });
+        Some(
+            crate::intents::insert_pending_on(
+                &mut tx,
+                "restart",
+                &id,
+                &host,
+                &payload,
+                crate::restart_intents::ROTATION_INTENT_TTL_SECS,
+            )
+            .await
+            .map_err(any_err)?,
+        )
+    } else {
+        None
+    };
     let token = crate::projection::new_token();
-    let changed = sqlx::query("UPDATE bots SET hook_token=? WHERE id=? AND deleted_at IS NULL")
+    let changed = sqlx::query("UPDATE bots SET hook_token=? WHERE id=? AND hook_token=? AND deleted_at IS NULL")
         .bind(&token)
         .bind(&id)
-        .execute(&app.db)
+        .bind(&bot.hook_token)
+        .execute(&mut *tx)
         .await
         .map_err(any_err)?
         .rows_affected();
     if changed == 0 {
         return Err(LcError::NotFound("bot".into()));
     }
-    let active = db::active_run(&app.db, &id).await.map_err(any_err)?;
-    let run_id = match active {
-        None => None,
-        // The old token is already dead; a failed restart leaves the pane unable to authenticate,
-        // so say so instead of pretending the rotation finished.
-        Some(_) => Some(lifecycle::restart_bot(&app, &id).await.map_err(|e| {
-            LcError::conflict(
-                "credential rotated, but restarting the bot failed; restart it to hand it the new token",
-                json!({"reason": "restart_failed", "credential_rotated": true, "bot_id": id, "detail": format!("{e:?}")}),
-            )
-        })?),
-    };
+    tx.commit().await.map_err(any_err)?;
+    drop(lock_guard);
     app.emit("bot_changed", json!({"bot_id": id})).await;
-    Ok((StatusCode::OK, Json(json!({"credential_rotated": true, "restarted": run_id.is_some(), "run_id": run_id}))).into_response())
+    let Some(intent_id) = intent_id else {
+        return Ok((StatusCode::OK, Json(json!({"credential_rotated": true, "restarted": false, "run_id": null}))).into_response());
+    };
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("credential_rotation_committed", &id).await;
+
+    let pending_error = |detail: String| {
+        LcError::conflict(
+            "credential rotated, but restarting the bot is still pending",
+            json!({"reason": "restart_pending", "credential_rotated": true, "restart_pending": true, "bot_id": id, "intent_id": intent_id, "detail": detail}),
+        )
+    };
+    if let crate::restart_intents::Outcome::Retry(why) = crate::restart_intents::drive_once(&app, &intent_id).await {
+        crate::restart_intents::retry_later(&app, &intent_id);
+        return Err(pending_error(why));
+    }
+    let intent = match crate::intents::get(&app.db, &intent_id).await {
+        Ok(Some(intent)) => intent,
+        Ok(None) => {
+            crate::restart_intents::retry_later(&app, &intent_id);
+            return Err(pending_error("restart intent could not be read after credential commit".into()));
+        }
+        Err(e) => {
+            crate::restart_intents::retry_later(&app, &intent_id);
+            return Err(pending_error(format!("restart intent could not be read after credential commit: {e:#}")));
+        }
+    };
+    if intent.status != "done" {
+        let open = matches!(intent.status.as_str(), "pending" | "running");
+        if intent.status == "pending" {
+            crate::restart_intents::retry_later(&app, &intent_id);
+        }
+        return Err(LcError::conflict(
+            "credential rotated, but restarting the bot did not finish",
+            json!({
+                "reason": if open { "restart_pending" } else { "restart_failed" },
+                "credential_rotated": true,
+                "restart_pending": open,
+                "bot_id": id,
+                "intent_id": intent_id,
+                "detail": intent.last_error,
+            }),
+        ));
+    }
+    let run_id = match db::active_run(&app.db, &id).await {
+        Ok(Some(run)) => run.id,
+        Ok(None) => {
+            return Err(LcError::conflict(
+                "credential rotated, but no active run was found after restart",
+                json!({"reason": "restart_result_unreadable", "credential_rotated": true, "restart_pending": false, "bot_id": id, "intent_id": intent_id}),
+            ));
+        }
+        Err(e) => {
+            return Err(LcError::conflict(
+                "credential rotated, but the active run could not be read",
+                json!({"reason": "restart_result_unreadable", "credential_rotated": true, "restart_pending": false, "bot_id": id, "intent_id": intent_id, "detail": format!("{e:#}")}),
+            ));
+        }
+    };
+    Ok((StatusCode::OK, Json(json!({"credential_rotated": true, "restarted": true, "run_id": run_id}))).into_response())
 }
 
 fn require_service(principal: &RequestPrincipal, expected: &str) -> Result<(), LcError> {
@@ -6157,6 +6274,97 @@ mod per_principal_auth_tests {
         assert_ne!(current, old, "old bot credential is invalidated immediately");
         let stale = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &old)]).await;
         assert!(stale.starts_with("HTTP/1.1 401"), "the old proof must already be unusable: {stale}");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_intents_table_does_not_commit_credential_rotation() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "rotate-read-failure").await;
+        crate::testing::fake_run(&e.app, &bot.id).await;
+        let old = bot.hook_token.clone();
+        crate::testing::make_table_unreadable(&e.app, "intents").await;
+
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                bot.id, e.app.ui_token
+            ),
+        )
+        .await;
+
+        assert!(!response.starts_with("HTTP/1.1 200"), "an unreadable intent table must fail before rotation: {response}");
+        crate::testing::make_table_readable(&e.app, "intents").await;
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(current, old, "failed preflight must leave the old credential valid");
+        assert!(!response.contains("\"credential_rotated\":true"), "a pre-commit failure must not claim the credential changed: {response}");
+        let old_proof = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &old)]).await;
+        assert!(old_proof.starts_with("HTTP/1.1 200"), "old credential must still authenticate: {old_proof}");
+    }
+
+    #[tokio::test]
+    async fn a_postcommit_restart_failure_reports_rotation_and_keeps_recovery_intent() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "rotate-restart-failure").await;
+        crate::lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        sqlx::query("UPDATE bots SET identity='no-such-identity' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        let old = bot.hook_token.clone();
+
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                bot.id, e.app.ui_token
+            ),
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 409"), "restart failure must be reported after rotation: {response}");
+        assert!(response.contains("\"credential_rotated\":true"), "post-commit errors must say the old credential is invalid: {response}");
+        assert!(response.contains("restart_pending"), "the caller needs to know recovery remains scheduled: {response}");
+        assert!(!response.contains(&old), "the response must not disclose the old proof");
+        let payload: String = sqlx::query_scalar("SELECT payload_json FROM intents WHERE kind='restart' AND subject_id=? ORDER BY created_at DESC LIMIT 1")
+            .bind(&bot.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert!(payload.contains("\"credential_rotation\":true"), "the restart intent must preserve its rotation-specific recovery rule: {payload}");
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        assert_ne!(current, old, "the token update is durable even though the restart must be retried");
+    }
+
+    #[tokio::test]
+    async fn rotating_a_live_bot_restarts_it_and_completes_its_durable_intent() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "rotate-live").await;
+        let old_run = crate::lifecycle::start_bot(&e.app, &bot.id).await.unwrap();
+        let old_token = bot.hook_token.clone();
+
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                bot.id, e.app.ui_token
+            ),
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 200"), "live credential rotation should restart successfully: {response}");
+        assert!(response.contains("\"credential_rotated\":true") && response.contains("\"restarted\":true"), "success response must report rotation and restart: {response}");
+        assert!(!response.contains(&old_token), "the response must not disclose the old credential");
+        let new_token: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        assert_ne!(new_token, old_token, "the bot token is rotated");
+        let stale = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &old_token)]).await;
+        assert!(stale.starts_with("HTTP/1.1 401"), "old proof is invalid after commit: {stale}");
+        let fresh = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &new_token)]).await;
+        assert!(fresh.starts_with("HTTP/1.1 200"), "new proof is available to the restarted run: {fresh}");
+        assert_ne!(db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap().id, old_run, "the pane was restarted");
+        let payload: String = sqlx::query_scalar("SELECT payload_json FROM intents WHERE kind='restart' AND subject_id=? ORDER BY created_at DESC LIMIT 1")
+            .bind(&bot.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert!(payload.contains("\"credential_rotation\":true"), "completed restart keeps its rotation semantics in the intent");
     }
 
     #[tokio::test]

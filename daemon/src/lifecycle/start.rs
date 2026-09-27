@@ -2883,6 +2883,11 @@ mod grok_startup_effort_tests {
     }
 }
 
+/// Continue a credential-rotation restart while the caller holds the bot lock.
+pub(crate) async fn resume_credential_rotation_locked(app: &Arc<App>, bot_id: &str, opts: StartOpts, from_run: &str) -> LcResult<String> {
+    restart_stop_and_start(app, bot_id, opts, Some(from_run.to_string())).await
+}
+
 /// 開機補完被打斷的重啟（#355 P2）：呼叫端持 bot 鎖，已經決定要往前補。stop 做到一半（`stopping`）先補完它；
 /// 剛停掉的舊 run 由 `stopped`（使用者要它停）改標 `exited`；再照原本的選項 start（不再要求閒置——使用者要的是它回來）。
 pub(crate) async fn resume_restart_locked(app: &Arc<App>, bot_id: &str, opts: StartOpts, from_run: Option<&str>) -> LcResult<String> {

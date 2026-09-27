@@ -20,6 +20,9 @@ use crate::lifecycle::{self, LcError, StartOpts};
 use crate::state::App;
 use std::sync::Arc;
 
+/// Keep the immediately committed credential rotation recoverable for the same window as restarts.
+pub const ROTATION_INTENT_TTL_SECS: i64 = 15 * 60;
+
 /// 一次補做的結果。
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -94,6 +97,12 @@ async fn retry_loop(app: &Arc<App>, id: &str) {
     }
 }
 
+/// Keep a just-committed restart intent moving if its synchronous attempt could not finish.
+pub fn retry_later(app: &Arc<App>, id: &str) {
+    let (app, id) = (app.clone(), id.to_string());
+    tokio::spawn(async move { retry_loop(&app, &id).await });
+}
+
 async fn drive(app: &Arc<App>, id: &str) {
     if let Outcome::Retry(_) = drive_once(app, id).await {
         retry_loop(app, id).await;
@@ -145,6 +154,7 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     let payload = intent.payload();
     let opts: StartOpts = serde_json::from_value(payload.get("opts").cloned().unwrap_or_default()).unwrap_or_default();
     let from_run = payload.get("from_run_id").and_then(|v| v.as_str());
+    let credential_rotation = payload.get("credential_rotation").and_then(|v| v.as_bool()).unwrap_or(false);
     let s = |e: anyhow::Error| format!("db: {e:#}");
 
     let bot = db::bot(&app.db, bot_id).await.map_err(s)?;
@@ -155,6 +165,18 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     match db::active_run(&app.db, bot_id).await.map_err(s)? {
         // 已經有新的 run（不是 intent 記的那顆）：bot 回來了。
         Some(run) if Some(run.id.as_str()) != from_run => {
+            intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
+            return Ok(());
+        }
+        // A credential rotation commits while the pane is still running with its old token. That
+        // state means the restart has not started yet, but unlike an ordinary restart intent it
+        // must keep going: the old proof is already invalid and boot recovery must replace the pane.
+        Some(run) if credential_rotation && Some(run.id.as_str()) == from_run && run.state != "stopping" => {
+            match lifecycle::resume_credential_rotation_locked(app, bot_id, opts, &run.id).await {
+                Ok(_) => {}
+                Err(LcError::Uncommitted(v)) if v.get("start_error").is_none() => {}
+                Err(e) => return Err(format!("{e:?}")),
+            }
             intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
             return Ok(());
         }
@@ -382,5 +404,43 @@ mod tests {
         let run2 = lifecycle::restart_bot_with(&e.app, &bot.id, StartOpts::default()).await.unwrap();
         assert_ne!(run1, run2);
         assert_eq!(intent_status(&e.app, &bot.id).await, vec!["done"]);
+    }
+
+    #[tokio::test]
+    async fn a_credential_rotation_intent_restarts_the_old_live_run_once_on_boot() {
+        let e = tt::env().await;
+        let (bot, run1) = running_bot(&e, "rotation-recovery").await;
+        let token = crate::projection::new_token();
+        let intent_id = db::ulid();
+        let now = db::now();
+        let expires = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let payload = json!({"credential_rotation": true, "opts": {}, "from_run_id": run1, "bot_name": bot.name});
+        let mut tx = e.app.db.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, created_at, updated_at, expires_at)
+             VALUES (?, 'restart', ?, ?, ?, 'pending', ?, ?, ?)",
+        )
+        .bind(&intent_id)
+        .bind(&bot.id)
+        .bind(LOCAL_HOST)
+        .bind(payload.to_string())
+        .bind(&now)
+        .bind(&now)
+        .bind(expires)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(&token).bind(&bot.id).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let app2 = tt::restart_app(&e).await;
+        recover_host(&app2, LOCAL_HOST).await;
+        let run2 = db::active_run(&app2.db, &bot.id).await.unwrap().expect("recovery must restart the bot with the rotated credential");
+        assert_ne!(run2.id, run1, "the pane using the revoked credential must be replaced");
+        assert_eq!(intent_status(&app2, &bot.id).await, vec!["done"]);
+
+        recover_host(&app2, LOCAL_HOST).await;
+        tokio::join!(recover_host(&app2, LOCAL_HOST), recover_host(&app2, LOCAL_HOST));
+        assert_eq!(runs_of(&app2, &bot.id).await, 2, "recovery is idempotent after the replacement run exists");
     }
 }
