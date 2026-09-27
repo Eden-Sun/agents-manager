@@ -189,14 +189,12 @@ pub async fn existing_for(app: &Arc<App>, kind: &str, to: &str) -> anyhow::Resul
 /// 2026-09-19 上線後實測：按鈕回 409 `request_mismatch`——crid 被 18:27 那次 kick 的 bot_request
 /// 佔住，正文不同（我們多一句「使用者按了…」）所以指紋對不上。對使用者來說那就是「已經派過」，
 /// 不是錯誤，所以這裡也要算進去。
-pub async fn inbox_event_for(app: &Arc<App>, kind: &str, to: &str) -> Option<String> {
+pub async fn inbox_event_for(app: &Arc<App>, kind: &str, to: &str) -> anyhow::Result<Option<String>> {
     let like = format!("%:crid:{}", request_id(kind, to));
-    sqlx::query_scalar::<_, String>("SELECT id FROM supervisor_inbox WHERE event_key LIKE ? ORDER BY created_at DESC LIMIT 1")
+    Ok(sqlx::query_scalar::<_, String>("SELECT id FROM supervisor_inbox WHERE event_key LIKE ? ORDER BY created_at DESC LIMIT 1")
         .bind(like)
         .fetch_optional(&app.db)
-        .await
-        .ok()
-        .flatten()
+        .await?)
 }
 
 /// kick 用的識別碼。使用者按鈕用 [`ui_request_id`]，兩邊分開。claude 的字串跟以前一樣（kick 與既有交辦都靠它）。
@@ -209,20 +207,26 @@ pub fn request_id(kind: &str, to: &str) -> String {
 /// 等於什麼都沒送出去（issue #394 的重按沒反應）。這時候：①換一個沒人用過的 crid（`-r2`、`-r3`…）；
 /// ②把新的一筆接在死路的鏈尾之後（`follow_up_of`）——不這樣接的話，下次 [`review_state`] 沿舊 crid 找
 /// 還是只會走到那條死路，看不到新派的這筆（換 crid 不等於換得到「查得到」）。
-async fn redispatch_target(app: &Arc<App>, kind: &str, to: &str) -> (String, Option<String>) {
+async fn redispatch_target(app: &Arc<App>, kind: &str, to: &str) -> Result<(String, Option<String>), LcError> {
     let base = ui_request_id(kind, to);
-    let Some(head) = crate::supervisor::store::assignment_by_crid(&app.db, &base).await.ok().flatten() else {
-        return (base, None);
+    let head = crate::supervisor::store::assignment_by_crid(&app.db, &base)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let Some(head) = head else {
+        return Ok((base, None));
     };
-    let tail = latest_in_chain(app, head).await;
+    let tail = latest_in_chain(app, head).await?;
     for n in 2..1000 {
         let candidate = format!("{base}-r{n}");
-        if crate::supervisor::store::assignment_by_crid(&app.db, &candidate).await.ok().flatten().is_none() {
-            return (candidate, Some(tail.id));
+        let existing = crate::supervisor::store::assignment_by_crid(&app.db, &candidate)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+        if existing.is_none() {
+            return Ok((candidate, Some(tail.id)));
         }
     }
     // 一千次重派？不會真的發生；有個終點比 panic 或死迴圈安全。
-    (format!("{base}-r{}", crate::db::now()), Some(tail.id))
+    Ok((format!("{base}-r{}", crate::db::now()), Some(tail.id)))
 }
 
 /// 使用者按鈕派的那一筆。
@@ -250,45 +254,54 @@ pub struct ReviewState {
 /// 沿 `followup_assignment_id` 一路走到鏈尾（沒有 followup 的那一筆）。重試（換手、撞限接回）
 /// 都是同一個 `client_request_id` 建一筆新的、把舊的標成 `superseded` 並用這個欄位指過去
 /// （`supervisor::store::review_with_followup`）；鏈可能好幾層（`-ui` → `-ui-f1` → `-ui-f2`…）。
-async fn latest_in_chain(app: &Arc<App>, a: crate::supervisor::store::Assignment) -> crate::supervisor::store::Assignment {
+async fn latest_in_chain(
+    app: &Arc<App>,
+    a: crate::supervisor::store::Assignment,
+) -> Result<crate::supervisor::store::Assignment, LcError> {
     let mut cur = a;
     // 鏈本身沒有理論上限，用個保守的圈數擋掉萬一寫壞的環（不讓這支請求掛住）。
     for _ in 0..50 {
         let Some(next_id) = cur.followup_assignment_id.clone() else { break };
-        match crate::supervisor::store::assignment(&app.db, &next_id).await {
-            Ok(Some(next)) => cur = next,
-            _ => break,
+        match crate::supervisor::store::assignment(&app.db, &next_id)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?
+        {
+            Some(next) => cur = next,
+            None => break,
         }
     }
-    cur
+    Ok(cur)
 }
 
 /// assignment 這條路能不能給出一個 [`ReviewState`]：`completed` → `done`；還活著（`OPEN_STATES`）→
 /// `pending`；其餘（`superseded`／`failed`／`cancelled`…鏈尾走到這裡就是真的死路）→ `None`，
 /// 呼叫端當「這一版還沒有能用的交辦」，允許重派。
-async fn state_from_assignment(app: &Arc<App>, a: &crate::supervisor::store::Assignment) -> Option<ReviewState> {
-    let target_bot_name = crate::db::bot(&app.db, &a.target_bot_id).await.ok().flatten().map(|x| x.name);
+async fn state_from_assignment(app: &Arc<App>, a: &crate::supervisor::store::Assignment) -> Result<Option<ReviewState>, LcError> {
+    let target_bot_name = crate::db::bot(&app.db, &a.target_bot_id)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?
+        .map(|x| x.name);
     if a.status == "completed" {
-        return Some(ReviewState {
+        return Ok(Some(ReviewState {
             state: "done",
             assignment_id: Some(a.id.clone()),
             target_bot_name,
             asked_at: Some(a.created_at.clone()),
             answered_at: a.completed_at.clone(),
             result: a.result.clone(),
-        });
+        }));
     }
     if crate::supervisor::store::OPEN_STATES.contains(&a.status.as_str()) {
-        return Some(ReviewState {
+        return Ok(Some(ReviewState {
             state: "pending",
             assignment_id: Some(a.id.clone()),
             target_bot_name,
             asked_at: Some(a.created_at.clone()),
             answered_at: None,
             result: None,
-        });
+        }));
     }
-    None
+    Ok(None)
 }
 
 /// 讀這一版的解析狀態。`GET /api/claude-update/review` 與 POST 的回應都用它。
@@ -298,12 +311,17 @@ async fn state_from_assignment(app: &Arc<App>, a: &crate::supervisor::store::Ass
 /// AGM 角色）根本不會有那則事件，永遠回 `none`；重按也被舊的（已 superseded）那筆擋住冪等，
 /// 派不出新的（issue #394）。assignment 找不到能用的（都是 superseded／failed，或整個沒派過）
 /// 才退回收件匣那條路：派給 AGM 角色的工作走交接佇列，沒有 assignment，結論在那個回合的訊息裡。
-pub async fn review_state(app: &Arc<App>, kind: &str, to: &str) -> ReviewState {
+pub async fn review_state(app: &Arc<App>, kind: &str, to: &str) -> Result<ReviewState, LcError> {
     for crid in [ui_request_id(kind, to), request_id(kind, to)] {
-        let Ok(Some(a)) = crate::supervisor::store::assignment_by_crid(&app.db, &crid).await else { continue };
-        let latest = latest_in_chain(app, a).await;
-        if let Some(state) = state_from_assignment(app, &latest).await {
-            return state;
+        let Some(a) = crate::supervisor::store::assignment_by_crid(&app.db, &crid)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?
+        else {
+            continue;
+        };
+        let latest = latest_in_chain(app, a).await?;
+        if let Some(state) = state_from_assignment(app, &latest).await? {
+            return Ok(state);
         }
     }
     // 自己派的那筆優先；沒有就看 kick 派的（同一版，結論一樣算數）。
@@ -316,24 +334,23 @@ pub async fn review_state(app: &Arc<App>, kind: &str, to: &str) -> ReviewState {
         .bind(format!("%:crid:{crid}"))
         .fetch_optional(&app.db)
         .await
-        .ok()
-        .flatten();
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
         if row.is_some() {
             break;
         }
     }
     let Some((event_id, bot_id, notify_turn_id, asked_at)) = row else {
-        return ReviewState { state: "none", assignment_id: None, target_bot_name: None, asked_at: None, answered_at: None, result: None };
+        return Ok(ReviewState { state: "none", assignment_id: None, target_bot_name: None, asked_at: None, answered_at: None, result: None });
     };
     let target_bot_name = match bot_id.as_deref() {
-        Some(b) => crate::db::bot(&app.db, b).await.ok().flatten().map(|x| x.name),
+        Some(b) => crate::db::bot(&app.db, b).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|x| x.name),
         None => None,
     };
     let answer = match notify_turn_id.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        Some(turn) => answer_of_turn(app, turn).await,
+        Some(turn) => answer_of_turn(app, turn).await?,
         None => None,
     };
-    match answer {
+    Ok(match answer {
         Some((text, at)) => ReviewState {
             state: "done",
             assignment_id: Some(event_id),
@@ -350,11 +367,11 @@ pub async fn review_state(app: &Arc<App>, kind: &str, to: &str) -> ReviewState {
             answered_at: None,
             result: None,
         },
-    }
+    })
 }
 
 /// 那個回合裡對方講的話（最後一則 assistant 訊息）。空白或還沒講就是 `None`。
-async fn answer_of_turn(app: &Arc<App>, turn_id: &str) -> Option<(String, String)> {
+async fn answer_of_turn(app: &Arc<App>, turn_id: &str) -> Result<Option<(String, String)>, LcError> {
     let row = sqlx::query_as::<_, (String, String)>(
         "SELECT content, created_at FROM messages
           WHERE turn_id = ? AND role = 'assistant' ORDER BY created_at DESC, rowid DESC LIMIT 1",
@@ -362,10 +379,10 @@ async fn answer_of_turn(app: &Arc<App>, turn_id: &str) -> Option<(String, String
     .bind(turn_id)
     .fetch_optional(&app.db)
     .await
-    .ok()
-    .flatten()?;
+    .map_err(|e| LcError::Upstream(e.to_string()))?;
+    let Some(row) = row else { return Ok(None) };
     let text = row.0.trim().to_string();
-    (!text.is_empty()).then_some((text, row.1))
+    Ok((!text.is_empty()).then_some((text, row.1)))
 }
 
 /// `GET /api/claude-update/review`：這一版的解析到哪了（視窗一打開就讀，結論直接顯示在框裡）。
@@ -379,7 +396,7 @@ pub async fn get_review(State(app): State<Arc<App>>, axum::extract::Query(q): ax
     if to.trim().is_empty() {
         return Ok(Json(json!({"kind": kind, "version": null, "review": ReviewState { state: "none", assignment_id: None, target_bot_name: None, asked_at: None, answered_at: None, result: None }})));
     }
-    Ok(Json(json!({"kind": kind, "version": to, "review": review_state(&app, kind, &to).await})))
+    Ok(Json(json!({"kind": kind, "version": to, "review": review_state(&app, kind, &to).await?})))
 }
 
 #[derive(Debug, Deserialize)]
@@ -428,7 +445,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
     // 各的，assignment 完成了視窗卻還在說「還沒派」）。全部都是 superseded／failed（鏈走到死路）才重派——
     // `post_assignment` 對「同一個 crid、不同正文」是 409 `text_mismatch`，而 kick 與這顆按鈕的正文本來
     // 就差一句觸發來源，不短路的話會變成錯誤而不是「已經派過」（協調者 2026-09-19）。
-    let state = review_state(&app, kind, &to).await;
+    let state = review_state(&app, kind, &to).await?;
     if state.state != "none" {
         return Ok(Json(json!({
             "kind": kind,
@@ -439,7 +456,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
             "sections": reply.sections.len(),
         })));
     }
-    let (crid, follow_up_of) = redispatch_target(&app, kind, &to).await;
+    let (crid, follow_up_of) = redispatch_target(&app, kind, &to).await?;
     let text = task_text(
         &task_md,
         &to,
@@ -473,7 +490,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
         "target_bot_id": target.id,
         "target_bot_name": target.name,
         "duplicate": false,
-        "review": review_state(&app, kind, &to).await,
+        "review": review_state(&app, kind, &to).await?,
         "sections": reply.sections.len(),
     })))
 }
@@ -620,7 +637,7 @@ mod tests {
         .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
         let conv = crate::db::conversation_id(&app.db, "resp1").await.unwrap();
 
-        assert_eq!(review_state(&app, "claude", "2.1.278").await.state, "none", "還沒派");
+        assert_eq!(review_state(&app, "claude", "2.1.278").await.unwrap().state, "none", "還沒派");
 
         // 派出去了：收件匣有這筆，還沒有回合。
         let key = crate::supervisor::bot_requests::event_key("AGM", Some(&ui_request_id("claude", "2.1.278")), "fp", 0);
@@ -628,7 +645,7 @@ mod tests {
             .await
             .unwrap()
             .expect("收件匣要有這一筆");
-        let pending = review_state(&app, "claude", "2.1.278").await;
+        let pending = review_state(&app, "claude", "2.1.278").await.unwrap();
         assert_eq!(pending.state, "pending");
         assert_eq!(pending.target_bot_name.as_deref(), Some("AGM-responder"));
         assert!(pending.result.is_none());
@@ -641,14 +658,14 @@ mod tests {
         sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?, 't-1','assistant', ?, 'hook', ?)")
             .bind(crate::db::ulid()).bind(&conv).bind("2.1.278 沒有值得 AG Man 跟進的改動。").bind(&now)
             .execute(&app.db).await.unwrap();
-        let done = review_state(&app, "claude", "2.1.278").await;
+        let done = review_state(&app, "claude", "2.1.278").await.unwrap();
         assert_eq!(done.state, "done");
         assert_eq!(done.result.as_deref(), Some("2.1.278 沒有值得 AG Man 跟進的改動。"), "結論原樣帶出去給框顯示");
         assert!(done.answered_at.is_some());
 
         // 只有空白的回覆不算結論。
         sqlx::query("UPDATE messages SET content='   ' WHERE turn_id='t-1'").execute(&app.db).await.unwrap();
-        assert_eq!(review_state(&app, "claude", "2.1.278").await.state, "pending");
+        assert_eq!(review_state(&app, "claude", "2.1.278").await.unwrap().state, "pending");
 
         // kick 派的那筆（不帶 -ui）也讀得到：同一版的結論一樣算數。
         let kick_key = crate::supervisor::bot_requests::event_key("AGM", Some(&request_id("claude", "2.1.279")), "fp2", 0);
@@ -661,7 +678,7 @@ mod tests {
         sqlx::query("UPDATE supervisor_inbox SET notify_turn_id='t-2' WHERE event_key=?").bind(&kick_key).execute(&app.db).await.unwrap();
         sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?, 't-2','assistant','kick 那輪的結論','hook', ?)")
             .bind(crate::db::ulid()).bind(&conv).bind(&now).execute(&app.db).await.unwrap();
-        assert_eq!(review_state(&app, "claude", "2.1.279").await.result.as_deref(), Some("kick 那輪的結論"));
+        assert_eq!(review_state(&app, "claude", "2.1.279").await.unwrap().result.as_deref(), Some("kick 那輪的結論"));
     }
 
     /// kick 是透過**協調者的收件匣**派的，那一步還沒有 assignment：同一個 crid 已經在收件匣裡時，
@@ -670,16 +687,16 @@ mod tests {
     async fn a_version_already_in_the_inbox_counts_as_a_duplicate() {
         let e = crate::testing::env().await;
         let app = e.app.clone();
-        assert!(inbox_event_for(&app, "claude", "2.1.277").await.is_none(), "還沒派過");
+        assert!(inbox_event_for(&app, "claude", "2.1.277").await.unwrap().is_none(), "還沒派過");
 
         let key = crate::supervisor::bot_requests::event_key("kick", Some(&request_id("claude", "2.1.277")), "fp-1", 0);
         let id = crate::supervisor::store::push_inbox(&app.db, &key, "bot_request", None, Some("kick"), None, &json!({"fingerprint": "fp-1"}))
             .await
             .unwrap()
             .expect("收件匣裡要有這一筆");
-        assert_eq!(inbox_event_for(&app, "claude", "2.1.277").await.as_deref(), Some(id.as_str()));
+        assert_eq!(inbox_event_for(&app, "claude", "2.1.277").await.unwrap().as_deref(), Some(id.as_str()));
         // 別的版本不受影響。
-        assert!(inbox_event_for(&app, "claude", "2.1.278").await.is_none());
+        assert!(inbox_event_for(&app, "claude", "2.1.278").await.unwrap().is_none());
     }
 
     /// bots 資料表插一顆最基本的 claude bot，供這幾條測試建 assignment 用。
@@ -704,7 +721,7 @@ mod tests {
         sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
             .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
 
-        assert_eq!(review_state(&app, "claude", "2.1.280").await.state, "none");
+        assert_eq!(review_state(&app, "claude", "2.1.280").await.unwrap().state, "none");
 
         crate::supervisor::assign(
             &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None, None,
@@ -712,7 +729,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let pending = review_state(&app, "claude", "2.1.280").await;
+        let pending = review_state(&app, "claude", "2.1.280").await.unwrap();
         assert_eq!(pending.state, "pending");
         assert_eq!(pending.target_bot_name.as_deref(), Some("resp1"));
         assert!(pending.result.is_none());
@@ -723,10 +740,182 @@ mod tests {
         sqlx::query("UPDATE supervisor_assignments SET status='completed', result=?, completed_at=? WHERE id=?")
             .bind("2.1.280 沒有值得跟進的東西。").bind(crate::db::now()).bind(&mine.id)
             .execute(&app.db).await.unwrap();
-        let done = review_state(&app, "claude", "2.1.280").await;
+        let done = review_state(&app, "claude", "2.1.280").await.unwrap();
         assert_eq!(done.state, "done");
         assert_eq!(done.result.as_deref(), Some("2.1.280 沒有值得跟進的東西。"));
         assert_eq!(done.assignment_id.as_deref(), Some(mine.id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn get_review_fails_closed_when_assignment_rows_are_unreadable() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        a_bot(&app, &e.project_id, "resp1").await;
+        a_bot(&app, &e.project_id, "patrol1").await;
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
+            .bind(crate::supervisor::store::SUPERVISOR_ID)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::supervisor::assign(
+            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.281"), None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+
+        crate::testing::make_table_unreadable(&app, "supervisor_assignments").await;
+        let result = get_review(
+            State(app.clone()),
+            axum::extract::Query(ReviewQuery { kind: Some("claude".into()), host: None, to: Some("2.1.281".into()) }),
+        )
+        .await;
+        crate::testing::make_table_readable(&app, "supervisor_assignments").await;
+
+        assert!(matches!(result, Err(LcError::Upstream(_))), "DB 讀取失敗不能回 review.state=none：{result:?}");
+    }
+
+    #[tokio::test]
+    async fn get_review_fails_closed_when_inbox_rows_are_unreadable() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        crate::testing::make_table_unreadable(&app, "supervisor_inbox").await;
+        let result = get_review(
+            State(app.clone()),
+            axum::extract::Query(ReviewQuery { kind: Some("claude".into()), host: None, to: Some("2.1.281".into()) }),
+        )
+        .await;
+        crate::testing::make_table_readable(&app, "supervisor_inbox").await;
+
+        assert!(matches!(result, Err(LcError::Upstream(_))), "收件匣讀取失敗不能回 review.state=none：{result:?}");
+    }
+
+    /// 巡檢 patrol1、協調者 resp1，並把 runtime.json／任務檔／CHANGELOG 快取都備好，讓 POST 真的走得到派工。
+    async fn review_fixture(app: &Arc<App>, project_id: &str) {
+        a_bot(app, project_id, "resp1").await;
+        a_bot(app, project_id, "patrol1").await;
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
+            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+        let dir = agm_dir(app);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("runtime.json"), r#"{"release_bot_id":"resp1"}"#).unwrap();
+        std::fs::write(dir.join(task_file("claude")), TASK).unwrap();
+        app.changelog.seed("claude", "# Changelog\n\n## 2.1.282\n\n- thing\n").await;
+    }
+
+    async fn counts(app: &Arc<App>) -> (i64, i64) {
+        let a = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM supervisor_assignments").fetch_one(&app.db).await.unwrap();
+        let i = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM supervisor_inbox").fetch_one(&app.db).await.unwrap();
+        (a, i)
+    }
+
+    /// 讓這一列 assignment 讀不到（`text` 塞一個不是 UTF-8 的 BLOB，decode 失敗），回傳原文供還原。
+    async fn corrupt(app: &Arc<App>, id: &str) -> String {
+        let text = sqlx::query_scalar::<_, String>("SELECT text FROM supervisor_assignments WHERE id=?")
+            .bind(id).fetch_one(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET text=CAST(x'ff' AS BLOB) WHERE id=?")
+            .bind(id).execute(&app.db).await.unwrap();
+        text
+    }
+
+    fn post_body() -> ReviewIn {
+        ReviewIn { kind: Some("claude".into()), host: None, from: None, to: Some("2.1.282".into()) }
+    }
+
+    /// issue #609：這一版已經有活著的交辦，查它的時候 DB 讀失敗——POST 要回可重試的錯、什麼都不派；
+    /// 讀得到之後重試回 `duplicate:true` 指向原本那筆。以前讀失敗被當成「沒有」，就會重派。
+    #[tokio::test]
+    async fn post_review_dispatches_nothing_when_the_live_assignment_is_unreadable() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        crate::supervisor::assign(
+            &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.282"), None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let live = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.282")).await.unwrap().unwrap();
+        let before = counts(&app).await;
+        let dispatch_calls_before = e.herdr.methods().len();
+
+        let text = corrupt(&app, &live.id).await;
+        let r = post_review(State(app.clone()), Json(post_body())).await;
+        assert!(matches!(r, Err(LcError::Upstream(_))), "讀不到要回可重試的 5xx：{r:?}");
+        assert_eq!(counts(&app).await, before, "讀不到時不能多出任何交辦或收件匣事件");
+        assert_eq!(e.herdr.methods().len(), dispatch_calls_before, "DB 讀取失敗前後不能有 dispatch side effect");
+
+        sqlx::query("UPDATE supervisor_assignments SET text=? WHERE id=?").bind(&text).bind(&live.id).execute(&app.db).await.unwrap();
+        let Json(v) = post_review(State(app.clone()), Json(post_body())).await.expect("讀得到之後重試");
+        assert_eq!(v["duplicate"], json!(true), "{v}");
+        assert_eq!(v["review"]["assignment_id"].as_str(), Some(live.id.as_str()), "{v}");
+        assert_eq!(counts(&app).await, before);
+    }
+
+    /// issue #609：`-r2` 已經存在但這次讀失敗——不能把它當成「沒人用過」選來重派。
+    #[tokio::test]
+    async fn redispatch_never_picks_a_candidate_it_could_not_read() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        let base = ui_request_id("claude", "2.1.282");
+        crate::supervisor::assign(
+            &app, "resp1", "解析一下", &base, None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let head = crate::supervisor::store::assignment_by_crid(&app.db, &base).await.unwrap().unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?").bind(&head.id).execute(&app.db).await.unwrap();
+        let r2 = format!("{base}-r2");
+        crate::supervisor::assign(
+            &app, "resp1", "重新解析", &r2, None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let r2_row = crate::supervisor::store::assignment_by_crid(&app.db, &r2).await.unwrap().unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?").bind(&r2_row.id).execute(&app.db).await.unwrap();
+
+        corrupt(&app, &r2_row.id).await;
+        let r = redispatch_target(&app, "claude", "2.1.282").await;
+        assert!(matches!(r, Err(LcError::Upstream(_))), "讀不到的 -r2 不能當成可用：{r:?}");
+    }
+
+    /// issue #609：鏈上下一筆讀失敗，不能把目前這筆（已死）當鏈尾，進而宣稱「還沒派」。
+    #[tokio::test]
+    async fn an_unreadable_chain_link_is_an_error_not_the_end_of_the_chain() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        let base = ui_request_id("claude", "2.1.282");
+        crate::supervisor::assign(
+            &app, "resp1", "解析一下", &base, None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let head = crate::supervisor::store::assignment_by_crid(&app.db, &base).await.unwrap().unwrap();
+        let leaf_crid = format!("{base}-f1");
+        crate::supervisor::assign(
+            &app, "resp1", "解析一下（接續）", &leaf_crid, None, &[], Some(&head.id), true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let leaf = crate::supervisor::store::assignment_by_crid(&app.db, &leaf_crid).await.unwrap().unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='superseded', followup_assignment_id=? WHERE id=?")
+            .bind(&leaf.id).bind(&head.id).execute(&app.db).await.unwrap();
+
+        corrupt(&app, &leaf.id).await;
+        let r = review_state(&app, "claude", "2.1.282").await;
+        assert!(matches!(r, Err(LcError::Upstream(_))), "鏈尾讀不到不能回 none：{r:?}");
+        let before = counts(&app).await;
+        let p = post_review(State(app.clone()), Json(post_body())).await;
+        assert!(matches!(p, Err(LcError::Upstream(_))), "{p:?}");
+        assert_eq!(counts(&app).await, before, "什麼都不派");
     }
 
     /// issue #394 情境 2：`-ui` 被 supersede 成 `-ui-f1`（不同 crid，靠 `followup_assignment_id` 串起來），
@@ -766,7 +955,7 @@ mod tests {
             .bind("2.1.280 -ui-f1 的結論").bind(crate::db::now()).bind(&leaf.id)
             .execute(&app.db).await.unwrap();
 
-        let state = review_state(&app, "claude", "2.1.280").await;
+        let state = review_state(&app, "claude", "2.1.280").await.unwrap();
         assert_eq!(state.state, "done");
         assert_eq!(state.assignment_id.as_deref(), Some(leaf.id.as_str()), "要回鏈尾那一筆，不是已經 superseded 的原筆");
         assert_eq!(state.result.as_deref(), Some("2.1.280 -ui-f1 的結論"));
@@ -794,13 +983,13 @@ mod tests {
         // 鏈尾是 failed（不是 completed）：整條路都死了，不是「還活著」也不是「有結論」。
         sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?").bind(&head.id).execute(&app.db).await.unwrap();
 
-        let state = review_state(&app, "claude", "2.1.280").await;
+        let state = review_state(&app, "claude", "2.1.280").await.unwrap();
         assert_eq!(state.state, "none", "全部都死了，等同沒派過，允許重按");
 
         // 重派：換一個沒人用過的 crid，原本那個 `-ui` 已經被死掉的那筆佔住，沿用它只會被 `assign()`
         // 的 crid 冪等擋住、悄悄回那筆死的（issue #394 的重按沒反應）；而且要接在死路的鏈尾之後，
         // 不然下次 review_state 沿舊 crid 找還是只走到那條死路，看不到新派的這筆。
-        let (crid, follow_up_of) = redispatch_target(&app, "claude", "2.1.280").await;
+        let (crid, follow_up_of) = redispatch_target(&app, "claude", "2.1.280").await.unwrap();
         assert_ne!(crid, ui_request_id("claude", "2.1.280"));
         assert_eq!(crid, format!("{}-r2", ui_request_id("claude", "2.1.280")));
         assert_eq!(follow_up_of.as_deref(), Some(head.id.as_str()), "接在死路的鏈尾之後");
@@ -812,7 +1001,7 @@ mod tests {
         )
         .await
         .expect("要能真的派出新的一筆");
-        let after = review_state(&app, "claude", "2.1.280").await;
+        let after = review_state(&app, "claude", "2.1.280").await.unwrap();
         assert_eq!(after.state, "pending", "沿著原本的 crid 就找得到新派的這筆（接在鏈尾之後）");
         assert_eq!(after.assignment_id.as_deref(), Some(crate::supervisor::store::assignment_by_crid(&app.db, &crid).await.unwrap().unwrap().id.as_str()));
     }
@@ -869,8 +1058,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(review_state(&app, "codex", "0.157.0").await.state, "pending");
-        assert_eq!(review_state(&app, "claude", "0.157.0").await.state, "none", "claude 那邊沒派過");
+        assert_eq!(review_state(&app, "codex", "0.157.0").await.unwrap().state, "pending");
+        assert_eq!(review_state(&app, "claude", "0.157.0").await.unwrap().state, "none", "claude 那邊沒派過");
 
         crate::release_triage::ledger::insert_baseline(&app.db, "codex", "0.155.1").await.unwrap();
         crate::release_triage::ledger::insert_baseline(&app.db, "codex", "0.157.0").await.unwrap();
