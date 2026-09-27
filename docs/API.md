@@ -2031,6 +2031,8 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
     （`bot has no active run`、`a turn is already in flight`、`needs_login: …`），`next_attempt_at` 下次重試時間，controller 依 15/30/60/120/300 秒退避、沿用同一 crid。delivery `unknown` 只對帳不重送。
   - 送出的 user message 寫入時帶 `relay_from` = 總管 bot id（驗收角色是已建立的協調者時為協調者 id）；daemon 自己送給 AGM 的通知帶 `daemon`。
   - `review_role`：回報進哪個角色的 inbox。省略 = 呼叫的角色（`X-AM-Bot-Id`+`X-AM-Bot-Token` 驗證）；沒有角色 token = 協調者。followup 沿用。
+    驗證過的 bot 角色查詢若遇 DB 錯誤，回可重試的 server error；不建立交辦，也不把角色錯誤記成 UI／使用者。
+    派送時讀不到目標角色或 responder 歸屬資料，交辦留在 `queued`、不計 attempts、不送 prompt；只有查詢成功且 responder 未設定時才回退到巡檢歸屬。
   - **目標是另一個角色 bot** → 這是交接不是交辦：不建交辦列、不開回合，回 `{kind:"handover",routed,queued,duplicate,wake,inbox_event_id,delivery:"queued",turn_id:null}`（同下方 bot 申請的形狀）。對自己的角色 400。
   - `source_turn_id` 只能是**呼叫的那個角色自己**的回合（帶 bot token 時）；沒帶 token 的呼叫端可以指兩個角色之一的回合。
     省略時只認呼叫者自己在跑的回合，認不出呼叫者就記 `assignment_text_fallback`（不猜另一個角色的回合）。
@@ -2038,6 +2040,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `mission_id` 指到的任務被**使用者**暫停時 409 `mission_paused`（daemon 自己設的暫停——`max_rounds`、`no_fable_for_verifier`、`push_main_failed`／`pr_failed`、`clarify`——不擋，runbook 要 AGM 在那些狀態下繼續處理）。
 - `POST /api/supervisor/assignments/{id}/review {decision,actor?,source?,reason?,evidence?,followup_text?,followup_request_id?,followup_bot_id?,ownership?}` → 更新後的 assignment（`followup` 時另含 `followup`）。
   `actor` 同 `approvals/{id}/decide`：驗過角色才寫得出 `AGM:<role>`，其餘記 `user` 或 `user(<自稱>)`（issue #414）。
+  已驗證 bot 的角色查詢若遇 DB 錯誤，回可重試的 server error，且不更新 assignment、不留下 review/audit 列；重試時保留驗證出的角色歸屬。
   **唯一的結案路徑**。`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`、`followup`→原本 `superseded` 並以 `followup_request_id` 另開 `follow_up_of` 的新交辦（不改寫已送出的 text）。
   同 decision 重送冪等；followup 重送須同 request ID、文字與目標，不同 409 `followup_mismatch`。`followup_request_id` 已經是別件交辦的 → 409 `followup_request_id_taken`（`{client_request_id,assignment_id}`，換一個 id）。
   續作沿用父交辦的 `expects_review`（通知的續作仍是通知）、`review_role` 與任務連結。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
