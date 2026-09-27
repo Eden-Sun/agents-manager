@@ -74,3 +74,39 @@ test('loadMessages：請求期間 WS 已完成的回合，不被較舊頁蓋回 
   assert.equal(cs.queued, false)
   assert.equal(cs.inFlightTurnId, null)
 })
+
+test('終端回合不拿上一筆群組回合的 id 去加群組未讀', async () => {
+  seed()
+  routeDaemon(() => json({ messages: [], turns: [], has_more: false }))
+  dispatchFrameForTest({
+    type: 'message_added',
+    data: {
+      bot_id: 'b1',
+      message: {
+        id: 'm1',
+        conversation_id: 'c',
+        turn_id: 't-g',
+        role: 'user',
+        content: 'hi',
+        source: 'web',
+        group_id: 'g1',
+        created_at: '2026-09-15T10:00:00Z',
+      },
+    },
+  })
+  dispatchFrameForTest({ type: 'turn_updated', data: { bot_id: 'b1', turn: rawTurn('t-g', 'completed') } })
+  await settle()
+  assert.equal(useStore.getState().groupUnread.p1, 1, '群組回合本身算一次')
+  const edge = (status: 'working' | 'idle') =>
+    dispatchFrameForTest({
+      type: 'bot_status',
+      data: { bot_id: 'b1', connected: true, run: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: status } },
+    })
+  edge('working')
+  edge('idle')
+  edge('working')
+  edge('idle')
+  await settle()
+  await settle()
+  assert.equal(useStore.getState().groupUnread.p1, 1, '兩個終端回合不再各 +1')
+})
