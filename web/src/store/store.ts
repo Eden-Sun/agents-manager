@@ -824,7 +824,15 @@ function resetStateSeq() {
   appliedStateSeq = 0
 }
 
-export const useStore = create<StoreState>((set, get) => ({
+type SetFn = (partial: Partial<StoreState> | ((s: StoreState) => Partial<StoreState>)) => void
+type GetFn = () => StoreState
+let boundSet: SetFn | null = null
+let boundGet: GetFn | null = null
+
+export const useStore = create<StoreState>((set, get) => {
+  boundSet = set
+  boundGet = get
+  return {
   ready: false,
   bootError: null,
   socket: 'connecting',
@@ -1261,7 +1269,15 @@ export const useStore = create<StoreState>((set, get) => ({
         for (const t of Object.values(s.turns[botId] ?? {})) {
           if (t.status === 'in_flight' && t.created_at >= startedAt) turns[t.id] = t
         }
-        for (const t of page.turns) turns[t.id] = t
+        for (const t of page.turns) {
+          // 請求在路上時 WS 可能已把這筆推成終態；舊頁的 in_flight／queued 不准蓋回去（#649）。
+          const have = s.turns[botId]?.[t.id]
+          if (have && !turnStillOpen(have.status) && turnStillOpen(t.status)) {
+            turns[t.id] = have
+            continue
+          }
+          turns[t.id] = t
+        }
         return {
           messages: { ...s.messages, [botId]: kept.length > 0 ? sortByTime([...page.messages, ...kept]) : page.messages },
           turns: { ...s.turns, [botId]: turns },
@@ -2477,7 +2493,8 @@ export const useStore = create<StoreState>((set, get) => ({
       return null
     }
   },
-}))
+}
+})
 
 /** 任務不在了：從已載入的清單裡拿掉，沒載過的專案不動。 */
 function dropMission(map: Record<string, Mission[]>, missionId: string): Record<string, Mission[]> {
@@ -2531,9 +2548,6 @@ useStore.subscribe((s) => {
   writeSelection(lastSelection)
 })
 
-type SetFn = (partial: Partial<StoreState> | ((s: StoreState) => Partial<StoreState>)) => void
-type GetFn = () => StoreState
-
 function reportStateRefreshError(set: SetFn, get: GetFn, e: unknown) {
   const text = `同步狀態失敗：${errText(e)}`
   set({ stateStale: true })
@@ -2575,6 +2589,17 @@ let openedOnce = false
 let seenSeq = 0
 let quotaSweep: ReturnType<typeof setInterval> | null = null
 const QUOTA_SWEEP_MS = 5 * 60_000
+
+/** 回合還沒結束：頁面快照可以覆寫。終態被舊的 in_flight／queued 蓋回去會把輸入框鎖死（#649）。 */
+function turnStillOpen(status: Turn['status']): boolean {
+  return status === 'in_flight' || status === 'queued'
+}
+
+/** 測試直接送一幀，不必先把 WebSocket 接起來。 */
+export function dispatchFrameForTest(frame: { seq?: number; type: string; data?: unknown }) {
+  if (!boundSet || !boundGet) throw new Error('store 還沒建立')
+  handleFrame(boundSet, boundGet, frame)
+}
 
 function connectSocket(set: SetFn, get: GetFn) {
   disconnect?.()
