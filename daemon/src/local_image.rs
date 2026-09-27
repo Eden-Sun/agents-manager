@@ -138,7 +138,7 @@ pub async fn get(
     let root = PathBuf::from(project.path);
     let cwd = cwd.map(Path::to_path_buf);
     let requested = requested.clone();
-    let (mut file, mime) = run_in_blocking_pool(move || resolve(&root, cwd.as_deref(), &requested))
+    let (file, mime) = run_in_blocking_pool(move || resolve(&root, cwd.as_deref(), &requested))
         .await
         .flatten()
         .ok_or_else(not_found)?;
@@ -146,14 +146,11 @@ pub async fn get(
     if meta.len() > MAX_BYTES {
         return Err(not_found());
     }
-    let data = tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut buf = Vec::with_capacity(meta.len() as usize);
-        file.read_to_end(&mut buf).map(|_| buf)
-    })
-    .await
-    .map_err(|_| not_found())?
-    .map_err(|_| not_found())?;
+    let read = tokio::task::spawn_blocking(move || trusted_open::read_limited(file, MAX_BYTES)).await.map_err(|_| not_found())?;
+    let data = match read {
+        Ok(data) => data,
+        Err(_) => return Err(not_found()),
+    };
     Ok((StatusCode::OK, [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, no-cache")], data).into_response())
 }
 

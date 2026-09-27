@@ -293,19 +293,19 @@ pub async fn file(
     .await
     .ok()
     .flatten();
-    let Some((mut f, name)) = opened else { return Err(not_found()) };
+    let Some((f, name)) = opened else { return Err(not_found()) };
     let meta = f.metadata().map_err(|_| not_found())?;
     if meta.len() > MAX_BYTES {
         return Err(LcError::conflict("file_too_large", json!({"reason": "file_too_large", "size": meta.len(), "max": MAX_BYTES})));
     }
-    let data = tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut buf = Vec::with_capacity(meta.len() as usize);
-        f.read_to_end(&mut buf).map(|_| buf)
-    })
-    .await
-    .map_err(|_| not_found())?
-    .map_err(|_| not_found())?;
+    let read = tokio::task::spawn_blocking(move || trusted_open::read_limited(f, MAX_BYTES)).await.map_err(|_| not_found())?;
+    let data = match read {
+        Ok(data) => data,
+        Err(trusted_open::BoundedReadError::TooLarge { observed }) => {
+            return Err(LcError::conflict("file_too_large", json!({"reason": "file_too_large", "size": observed, "max": MAX_BYTES})));
+        }
+        Err(trusted_open::BoundedReadError::Io) => return Err(not_found()),
+    };
     if content_is_withheld(&data) {
         return Err(not_found());
     }

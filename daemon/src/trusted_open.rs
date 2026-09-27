@@ -15,7 +15,7 @@
 
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::io::{AsRawFd, FromRawFd as _};
@@ -133,6 +133,25 @@ where
     Ok(file)
 }
 
+pub(crate) enum BoundedReadError {
+    TooLarge { observed: u64 },
+    Io,
+}
+
+/// Read at most `max_bytes + 1` bytes so a file that grows after its metadata check cannot
+/// bypass the limit. The extra byte is enough to reject it without reading the rest.
+pub(crate) fn read_limited<R: Read>(reader: R, max_bytes: u64) -> Result<Vec<u8>, BoundedReadError> {
+    let Some(read_limit) = max_bytes.checked_add(1) else {
+        return Err(BoundedReadError::TooLarge { observed: max_bytes });
+    };
+    let mut bytes = Vec::new();
+    reader.take(read_limit).read_to_end(&mut bytes).map_err(|_| BoundedReadError::Io)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(BoundedReadError::TooLarge { observed: bytes.len() as u64 });
+    }
+    Ok(bytes)
+}
+
 /// 一個目錄項目：名字、是不是一般檔案（符號連結／目錄／其他都是 `false`）、大小、mtime。
 pub(crate) struct BoundEntry {
     pub name: OsString,
@@ -218,6 +237,25 @@ mod tests {
         let mut got = String::new();
         std::io::Read::read_to_string(&mut f, &mut got).unwrap();
         assert_eq!(got, "hi");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn macos_local_bounded_read_stops_at_limit_plus_one_after_append() {
+        let base = scratch("bounded-read-race");
+        let path = base.join("growing.txt");
+        std::fs::write(&path, b"a").unwrap();
+        let file = File::open(&path).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 1);
+
+        let mut append = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut append, b"bcdefgh").unwrap();
+
+        match read_limited(file, 4) {
+            Err(BoundedReadError::TooLarge { observed }) => assert_eq!(observed, 5),
+            Err(BoundedReadError::Io) => panic!("bounded read failed"),
+            Ok(bytes) => panic!("growing file unexpectedly fit the limit: {} bytes", bytes.len()),
+        }
         std::fs::remove_dir_all(&base).unwrap();
     }
 
