@@ -27,7 +27,8 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::Write as _;
-use std::sync::{Arc, OnceLock};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// codex 自己的升級提示寫的那一句（`Run sh -c '…' to update.`）。只有這一條，不收參數。
@@ -183,6 +184,11 @@ fn tail(s: &str) -> String {
 const RECOVER_POLL: Duration = Duration::from_secs(5);
 /// 那台的安裝不受 [`INSTALL_TIMEOUT`] 管（逾時只砍得掉本機的 ssh），所以給寬一點；再久就寫成「中斷」交給人。
 const RECOVER_MAX: Duration = Duration::from_secs(15 * 60);
+/// SQLite 啟動時暫時讀不到時先快重試，連續失敗再逐步拉長。
+const RECOVER_ENUM_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const RECOVER_ENUM_RETRY_MAX: Duration = Duration::from_secs(60);
+/// DB 恢復後仍低頻巡查，讓稍後可讀的未收尾列也能在這次 daemon 執行期間被接手。
+const RECOVER_ENUM_SWEEP: Duration = Duration::from_secs(5 * 60);
 
 /// 這顆 daemon 行程的識別。`cli_updates.boot` 不是它的 `running` 列＝上一顆留下的孤兒（#564）。
 fn boot() -> &'static str {
@@ -518,29 +524,93 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
     finish(v).await
 }
 
-/// 開機時接手上一顆 daemon 沒收尾的安裝（#564）。那一列還是 `running`，所以這台照樣 409、`GET /api/state` 照樣列著；
-/// 每一筆背景等那台的安裝鎖放掉，再讀一次版本收尾。
-pub async fn recover_at_startup(app: &Arc<App>) {
-    let rows: Vec<(String, String, String, Option<String>)> = match sqlx::query_as(
-        "SELECT id, host, target_version, from_version FROM cli_updates WHERE status = 'running' AND boot != ?",
-    )
-    .bind(boot())
-    .fetch_all(&app.db)
-    .await
-    {
-        Ok(r) => r,
+type RecoveryRow = (String, String, String, Option<String>);
+
+/// 同一列可能在多輪掃描中一直是 `running`；同一個 daemon 只讓一個 worker 對它做遠端探測與收尾。
+static ACTIVE_RECOVERIES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn active_recoveries() -> &'static Mutex<HashSet<String>> {
+    ACTIVE_RECOVERIES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+struct RecoveryWorkerGuard(String);
+
+impl Drop for RecoveryWorkerGuard {
+    fn drop(&mut self) {
+        active_recoveries().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+fn spawn_recovery_worker(app: &Arc<App>, runner: &Arc<dyn Runner>, row: RecoveryRow) {
+    let (id, host, target, from) = row;
+    let claimed = active_recoveries().lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone());
+    if !claimed {
+        return;
+    }
+    let (app, runner, id) = (app.clone(), runner.clone(), id.clone());
+    let guard = RecoveryWorkerGuard(id.clone());
+    tokio::spawn(async move {
+        let _guard = guard;
+        tracing::warn!(update_id = %id, host = %host, "codex 升級在 daemon 重啟前還沒收尾，接手確認那台的安裝");
+        recover(&app, runner.as_ref(), &id, &host, &target, from.as_deref(), RECOVER_POLL, RECOVER_MAX).await;
+    });
+}
+
+async fn unfinished_updates(app: &App) -> Result<Vec<RecoveryRow>, sqlx::Error> {
+    sqlx::query_as("SELECT id, host, target_version, from_version FROM cli_updates WHERE status = 'running' AND boot != ?")
+        .bind(boot())
+        .fetch_all(&app.db)
+        .await
+}
+
+/// 啟動時立即掃描；不論成功與否都保留低頻掃描器。讀取錯誤先以有上限的退避重試，成功後每隔一段時間繼續巡查。
+async fn start_recovery_sweeper(
+    app: &Arc<App>,
+    runner: Arc<dyn Runner>,
+    retry_initial: Duration,
+    retry_max: Duration,
+    sweep_interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    let retry_initial = retry_initial.min(retry_max);
+    let (mut wait, mut retry_delay) = match unfinished_updates(app).await {
+        Ok(rows) => {
+            for row in rows {
+                spawn_recovery_worker(app, &runner, row);
+            }
+            (sweep_interval, retry_initial)
+        }
         Err(e) => {
-            tracing::warn!(error = %e, "could not read unfinished cli updates; they stay locked until the next restart");
-            return;
+            tracing::warn!(error = %e, "could not read unfinished cli updates; startup recovery will retry");
+            (retry_initial, retry_initial.saturating_mul(2).min(retry_max))
         }
     };
-    for (id, host, target, from) in rows {
-        tracing::warn!(update_id = %id, host = %host, "codex 升級在 daemon 重啟前還沒收尾，接手確認那台的安裝");
-        let app = app.clone();
-        tokio::spawn(async move {
-            recover(&app, &Real, &id, &host, &target, from.as_deref(), RECOVER_POLL, RECOVER_MAX).await;
-        });
-    }
+    let app = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(wait).await;
+            match unfinished_updates(&app).await {
+                Ok(rows) => {
+                    for row in rows {
+                        spawn_recovery_worker(&app, &runner, row);
+                    }
+                    wait = sweep_interval;
+                    retry_delay = retry_initial;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not read unfinished cli updates; startup recovery will retry");
+                    wait = retry_delay;
+                    retry_delay = retry_delay.saturating_mul(2).min(retry_max);
+                }
+            }
+        }
+    })
+}
+
+/// 開機時接手上一顆 daemon 沒收尾的安裝（#564）。那一列還是 `running`，所以這台照樣 409、`GET /api/state` 照樣列著；
+/// 每一筆背景等那台的安裝鎖放掉，再讀一次版本收尾。啟動讀取失敗不會丟掉接手工作：退避重試後持續低頻掃描，
+/// 同一 update id 在這顆 daemon 裡最多只有一個 recovery worker。
+pub async fn recover_at_startup(app: &Arc<App>) {
+    let _sweeper = start_recovery_sweeper(app, Arc::new(Real), RECOVER_ENUM_RETRY_INITIAL, RECOVER_ENUM_RETRY_MAX, RECOVER_ENUM_SWEEP).await;
 }
 
 /// 接手一筆孤兒安裝：等那台的安裝鎖沒有活著的主人（上一顆 daemon 開的 `curl | sh` 跑完或死了），讀版本收尾。
@@ -684,10 +754,12 @@ mod tests {
     /// 假執行器：版本照順序吐、安裝照設定成功或失敗、批次只記下被叫了幾次。**不碰真的 codex**。
     struct Fake {
         versions: Mutex<Vec<anyhow::Result<String>>>,
+        version_reads: Mutex<usize>,
         install: Result<String, InstallError>,
         /// `installer_busy` 照順序吐；吐完就是「沒人拿著」。
         busy: Mutex<Vec<bool>>,
         probes: Mutex<usize>,
+        probe_hold: Duration,
         installs: Mutex<usize>,
         restarts: Mutex<Vec<(String, String)>>,
         /// 安裝卡住多久（測並發用）。
@@ -702,9 +774,11 @@ mod tests {
         fn new(versions: &[&str], install: Result<&str, &str>) -> Arc<Self> {
             Arc::new(Self {
                 versions: Mutex::new(versions.iter().map(|v| Ok(v.to_string())).collect()),
+                version_reads: Mutex::new(0),
                 install: install.map(str::to_string).map_err(|e| InstallError::Failed(e.to_string())),
                 busy: Mutex::new(Vec::new()),
                 probes: Mutex::new(0),
+                probe_hold: Duration::ZERO,
                 installs: Mutex::new(0),
                 restarts: Mutex::new(Vec::new()),
                 hold: Duration::ZERO,
@@ -724,6 +798,9 @@ mod tests {
         fn installer_busy<'a>(&'a self, _app: &'a Arc<App>, _host: &'a str, _fence: &'a HostFence) -> BoxFuture<'a, anyhow::Result<bool>> {
             Box::pin(async move {
                 *self.probes.lock().unwrap() += 1;
+                if !self.probe_hold.is_zero() {
+                    tokio::time::sleep(self.probe_hold).await;
+                }
                 let mut b = self.busy.lock().unwrap();
                 Ok(if b.is_empty() { false } else { b.remove(0) })
             })
@@ -743,6 +820,7 @@ mod tests {
         }
         fn version<'a>(&'a self, _app: &'a Arc<App>, _host: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
             Box::pin(async move {
+                *self.version_reads.lock().unwrap() += 1;
                 let mut v = self.versions.lock().unwrap();
                 if v.is_empty() {
                     Err(anyhow::anyhow!("no more versions"))
@@ -1127,6 +1205,66 @@ mod tests {
         start(&env.app, &ui, "local", Some("codex"), Some("0.158.0"), again.clone()).await.expect("收尾之後可以再裝");
         assert!(crate::testing::eventually!(running_list(&env.app).await.is_empty()));
         assert_eq!(again.installs(), 1);
+    }
+
+    /// #564 reopened: a transient failure during the first startup enumeration must not strand the durable row until another restart.
+    #[tokio::test]
+    async fn a_failed_startup_enumeration_is_retried_after_the_db_recovers() {
+        let env = crate::testing::env().await;
+        let orphan = orphan_row(&env.app, "local", "0.157.0", "installing", None).await;
+        let mut rx = env.app.subscribe();
+        let fake = Arc::new(Fake {
+            probe_hold: Duration::from_millis(80),
+            ..Arc::try_unwrap(Fake::new(&["codex-cli 0.157.0"], Ok("already installed"))).ok().unwrap()
+        });
+
+        // Make the startup SELECT fail while keeping the row intact, then restore the table without restarting the app.
+        sqlx::query("ALTER TABLE cli_updates RENAME TO cli_updates_unavailable")
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let sweeper = start_recovery_sweeper(
+            &env.app,
+            fake.clone(),
+            Duration::from_millis(2),
+            Duration::from_millis(8),
+            Duration::from_millis(2),
+        )
+        .await;
+        sqlx::query("ALTER TABLE cli_updates_unavailable RENAME TO cli_updates")
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let terminal = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if row_status(&env.app, &orphan).await.0 != "running" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        sweeper.abort();
+        assert!(terminal.is_ok(), "a recovered database must be re-enumerated in the same daemon boot");
+        assert_ne!(row_status(&env.app, &orphan).await.0, "running");
+        assert_eq!(done_events(&mut rx).len(), 1, "one update id must have exactly one recovery worker");
+        assert_eq!(*fake.probes.lock().unwrap(), 1, "overlapping sweeps must not start duplicate recovery workers");
+        assert_eq!(*fake.version_reads.lock().unwrap(), 1, "the recovered update must only be reconciled once");
+        assert!(running_list(&env.app).await.is_empty(), "terminal recovery must release the host slot");
+        let now = db::now();
+        sqlx::query(
+            "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, boot, started_at, updated_at)
+             VALUES (?, 'local', 'codex', '0.158.0', 'running', 'starting', ?, ?, ?)",
+        )
+        .bind(db::ulid())
+        .bind(boot())
+        .bind(&now)
+        .bind(&now)
+        .execute(&env.app.db)
+        .await
+        .expect("the host slot must accept a later update after recovery commits");
     }
 
     /// #564：裝好之後、確認版本／重啟之前 daemon 死掉。接手時讀到已經是目標版本：直接認，不先重跑一次安裝。
