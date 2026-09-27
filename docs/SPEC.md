@@ -3572,7 +3572,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
    `ask_user` 只會出現在驗證者。
 3. **reviewer**：執行者回合結束並 `review accept` 後，`mission pick --role reviewer --exclude <執行者身分>`；
    `no_independent_reviewer` → 跳過 reviewer、記 `note`「執行者自審＋驗證者把關」。reviewer 只讀 diff，回 `am-review`
-   （`approve|changes`＋findings）。先 `review accept` reviewer 那件（它的工作做完了），`changes` → `mission round`
+   （`approve|changes`＋findings）。先 `review accept` reviewer 那件（它的工作做完了），`changes` → `mission round --request-id <這次退回的穩定鍵>`
    （409 `max_rounds` 就停，任務已 `paused`，在群組問人）→ `next` 變成 `assign executor`（`rework:true`）：**新開**一件
    `assign --mission --role executor`，文字帶 findings——執行者那件早就 accept 了，已結案的交辦不能 followup。
 4. **驗證者**：`mission pick --role verifier`；Fable 還有額度、只是 5h 窗撞限時回 `wait`（時間是 5h 的，不是 Fable 的下週），
@@ -3580,11 +3580,11 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
    或改用非 Fable，**不自行降級**。`use` → 臨時 bot 在乾淨 worktree 跑 repo 規定的驗證（本 repo：`cargo test`、
    `tsc -p tsconfig.app.json`、oxlint、build、UI 截圖），回 `am-verify`；通過 → `mission event --kind verified --worktree <驗過的工作樹>`
    （或 `--sha <驗過的 commit>`；帶數字與截圖路徑）——daemon 記下**驗的是哪個 commit**，沒帶就 400；
-   失敗 → `mission round` → 新開一件執行者交辦退回重做（同第 3 步）。驗證者的**交辦**沒做完（bot 掛了、撞限放棄）是另一回事：
+   失敗 → `mission round --request-id <這次退回的穩定鍵>`（逾時重送沿用同一個鍵；這一代還沒派執行者時再呼叫是 409 `round_not_due`，不扣輪）→ 新開一件執行者交辦退回重做（同第 3 步）。驗證者的**交辦**沒做完（bot 掛了、撞限放棄）是另一回事：
    `review fail`／`cancel` 那件，`next` 會是同一個角色再派（`retry_of`），不算一輪。
 5. **交付**：`mission deliver --worktree <執行者 worktree>`。工作樹必須是這個專案的 repo，**HEAD 必須就是最新一則 `verified` 記的 commit**。
    409 `not_verified`／`verified_without_sha`／`verification_stale`／`head_not_verified` 代表流程漏了第 4 步（或驗完又改過、又退回過），任務**不會**停下來，回第 4 步重驗這個 commit；
-   其餘 409 任務已 `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人，**不 force、不自己 rebase 後硬推**。
+   其餘 409 任務已 `paused`（`push_main_failed`／`pr_failed`，`reason` 是機器碼），在群組貼原因問人。**不 force 推 main**。PR 模式可以派執行者 rebase 後再交付：daemon 只在遠端任務分支的 tip 是這次改寫掉的舊 commit 時，用 `--force-with-lease` 綁那個 sha 更新 `mission/<id>`；`branch_moved`（遠端有對不上的 commit）不覆蓋。
    之後交付成功，daemon 會自動解除這兩種暫停（記一則 `resumed`）。
    交付含 daemon／agm.py／persona 改動時，正式 daemon 照 §18.2 例行更新，不另開重啟。
 6. **回報與收尾**：`mission complete <id> --text …`（或 `--text-file`；內容是結果摘要：commit／PR、驗證證據、輪數），

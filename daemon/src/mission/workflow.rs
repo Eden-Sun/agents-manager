@@ -443,7 +443,7 @@ mod tests {
         assert!(ensure_can_assign(&env.app, &id, "verifier").await.is_ok());
 
         // 退回：新的一代，又回到只能派執行者。走真的入口寫 round（錨點由它記）。
-        let _ = crate::mission::api::post_round(axum::extract::State(env.app.clone()), axum::extract::Path(id.clone())).await.unwrap();
+        let _ = crate::mission::api::post_round(axum::extract::State(env.app.clone()), axum::extract::Path(id.clone()), None).await.unwrap();
         let events = crate::mission::store::events(&env.app.db, &id).await.unwrap();
         let round: Value = serde_json::from_str(&events.iter().find(|e| e.kind == "round").unwrap().payload_json).unwrap();
         let last = store::mission_assignments(&env.app.db, &id).await.unwrap().last().unwrap().id.clone();

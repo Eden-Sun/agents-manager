@@ -1160,17 +1160,37 @@ pub async fn post_complete(
 ///
 /// 退回＝新的一代（`flow`）：事件記下當時最後一件交辦（`flow::ANCHOR`），之後派的才算這一代，
 /// 之前的驗證與交付都不再放行。用掉一輪與 `round` 事件是同一個交易（`store::spend_round`，issue #74 重開）。
-pub async fn post_round(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Json<Value>, LcError> {
+#[derive(Deserialize, Default)]
+pub struct RoundIn {
+    #[serde(default)]
+    client_request_id: Option<String>,
+}
+
+pub async fn post_round(State(app): State<Arc<App>>, Path(id): Path<String>, body: Option<Json<RoundIn>>) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
+    let crid = body.as_ref().and_then(|b| b.client_request_id.as_deref()).map(str::trim).filter(|s| !s.is_empty());
     #[cfg(test)]
     crate::lifecycle::race_point::hit("mission_round_before_write", &id).await;
-    match store::spend_round(&app.db, &id).await.map_err(up)? {
+    match store::spend_round(&app.db, &id, crid).await.map_err(up)? {
         store::Round::Spent => {
             let m = load(&app, &id).await?;
             emit(&app, &m).await;
             Ok(Json(m.json()))
         }
+        store::Round::Replayed => {
+            let mut out = load(&app, &id).await?.json();
+            out["replayed"] = json!(true);
+            Ok(Json(out))
+        }
+        store::Round::NotDue => Err(LcError::conflict(
+            "round_not_due",
+            json!({"mission_id": id, "hint": "上一輪之後還沒有新的交辦，這一代還在等執行者，不再扣一輪"}),
+        )),
+        store::Round::Mismatch => Err(LcError::conflict(
+            "client_request_id",
+            json!({"mission_id": id, "detail": "same client_request_id, different request"}),
+        )),
         // 請求途中任務被關掉了：那不是輪數用完，照實說任務已經關了（issue #130）。
         store::Round::Closed => Err(closed_now(&app, &id).await),
         store::Round::AtLimit { used, max } => {
@@ -1876,7 +1896,7 @@ mod tests {
                 .await
                 .unwrap();
             let pending = match path {
-                "round" => tokio::spawn(post_round(State(app.clone()), Path(id.clone()))),
+                "round" => tokio::spawn(post_round(State(app.clone()), Path(id.clone()), None)),
                 "pick" => {
                     let q = HashMap::from([("role".to_string(), "verifier".to_string())]);
                     tokio::spawn(get_pick(State(app.clone()), Path(id.clone()), Query(q)))
@@ -2013,7 +2033,7 @@ mod tests {
             crate::lifecycle::race_point::arm("mission_complete_after_snapshot", &id, move || async move {
                 match cut_in {
                     "round" => {
-                        let _ = post_round(State(app2), Path(id2)).await.expect("退回要成功");
+                        let _ = post_round(State(app2), Path(id2), None).await.expect("退回要成功");
                     }
                     "verified" => {
                         let _ = post_event(State(app2), Path(id2), HeaderMap::new(), Json(verified(Some(&wt2), None))).await.expect("驗證要記得下來");
@@ -2054,7 +2074,7 @@ mod tests {
                 if cut_in == "cancel" {
                     let _ = post_cancel(State(app2), Path(id2), HeaderMap::new()).await.expect("取消要成功");
                 } else {
-                    let _ = post_round(State(app2), Path(id2)).await.expect("退回要成功");
+                    let _ = post_round(State(app2), Path(id2), None).await.expect("退回要成功");
                 }
             });
             let res = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&env.repo), None))).await;
@@ -2090,7 +2110,7 @@ mod tests {
         crate::lifecycle::race_point::arm("mission_round_before_write", &id, move || async move {
             let _ = post_cancel(State(app2), Path(id2), HeaderMap::new()).await.expect("取消要成功");
         });
-        let res = post_round(State(app.clone()), Path(id.clone())).await;
+        let res = post_round(State(app.clone()), Path(id.clone()), None).await;
         let mut problems = Vec::new();
         let written = (events_of("round", &app, &id).await, rounds_used(id.clone()).await);
         let reason = match res {
@@ -2107,15 +2127,41 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        let failed = post_round(State(app.clone()), Path(id.clone())).await.is_err();
+        let failed = post_round(State(app.clone()), Path(id.clone()), None).await.is_err();
         sqlx::query("DROP TRIGGER test_round_event_fails").execute(&app.db).await.unwrap();
         let written = (events_of("round", &app, &id).await, rounds_used(id.clone()).await);
         if !failed || written != (0, 0) {
             problems.push(format!("事件寫不進去：回 {}、(round 事件, rounds_used) = {written:?}（該是錯誤、(0, 0)）", if failed { "錯誤" } else { "200" }));
         }
         assert!(problems.is_empty(), "用掉一輪與記下退回不是同一個寫入：\n{}", problems.join("\n"));
-        let _ = post_round(State(app.clone()), Path(id.clone())).await.expect("重試要成功");
+        let _ = post_round(State(app.clone()), Path(id.clone()), None).await.expect("重試要成功");
         assert_eq!((events_of("round", &app, &id).await, rounds_used(id.clone()).await), (1, 1), "重試只算一輪");
+    }
+
+    /// #668：同一個冪等鍵重送只算一次；上一輪之後還沒派執行者，換一個鍵也不再扣。
+    #[tokio::test]
+    async fn a_repeated_round_does_not_spend_another_turn() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("round-idem", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let round = |crid: &str| {
+            post_round(
+                State(app.clone()),
+                Path(id.clone()),
+                Some(Json(RoundIn { client_request_id: Some(crid.into()) })),
+            )
+        };
+        let Json(first) = round("same").await.unwrap();
+        assert_eq!(first["rounds_used"].as_i64(), Some(1));
+        let Json(again) = round("same").await.unwrap();
+        assert_eq!(again["replayed"], json!(true));
+        assert_eq!(again["rounds_used"].as_i64(), Some(1));
+        assert_eq!(events_of("round", &app, &id).await, 1);
+
+        let err = round("other").await.unwrap_err();
+        assert_eq!(conflict_reason(err), "round_not_due");
+        assert_eq!(load(&app, &id).await.unwrap().rounds_used, 1, "還沒派執行者不能再扣一輪");
     }
 
     /// 完成的任務可以被追問，而追問**不能**改變任何交付事實。這是「已完成清單不可覆寫」的底線。
@@ -2483,10 +2529,11 @@ mod tests {
         let Json(p) = get_pick(State(app.clone()), Path(id.clone()), Query(q("executor"))).await.unwrap();
         assert_eq!(p["pick"]["identity"], "cc1");
 
-        // 輪數上限：兩輪之後第三輪停下來。
-        let _ = post_round(State(app.clone()), Path(id.clone())).await.unwrap();
-        let _ = post_round(State(app.clone()), Path(id.clone())).await.unwrap();
-        let err = post_round(State(app.clone()), Path(id.clone())).await.unwrap_err();
+        // 輪數上限：兩輪之後第三輪停下來。中間要有新交辦，否則第二輪是 round_not_due。
+        let _ = post_round(State(app.clone()), Path(id.clone()), None).await.unwrap();
+        let _ = mission_assignment(&app, &id, "cap-exec", "executor", "completed").await;
+        let _ = post_round(State(app.clone()), Path(id.clone()), None).await.unwrap();
+        let err = post_round(State(app.clone()), Path(id.clone()), None).await.unwrap_err();
         assert_eq!(conflict_reason(err), "max_rounds");
         let Json(cur) = get_mission(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(cur["paused_reason"], "max_rounds");
@@ -2801,7 +2848,7 @@ mod tests {
 
         // 驗過 A 之後退回：HEAD 還是 A，但那是上一代的驗證。
         let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
-        let _ = post_round(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_round(State(app.clone()), Path(id.clone()), None).await.unwrap();
         assert_eq!(stale_because(deliver().await.unwrap_err()), ("verification_stale".into(), "round".into()));
 
         // 這一代重驗之後，又派了執行者（rebase／補改）：它還沒動 HEAD 也一樣，要重驗。
@@ -2995,10 +3042,17 @@ mod tests {
         let app = env.app.clone();
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("rounds", "pr"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
-        let round = || post_round(State(app.clone()), Path(id.clone()));
-        let _ = round().await.unwrap();
-        let _ = round().await.unwrap();
-        assert_eq!(conflict_reason(round().await.unwrap_err()), "max_rounds");
+        let round = |crid: &str| {
+            post_round(
+                State(app.clone()),
+                Path(id.clone()),
+                Some(Json(RoundIn { client_request_id: Some(crid.into()) })),
+            )
+        };
+        let _ = round("r1").await.unwrap();
+        let _ = mission_assignment(&app, &id, "grant-exec-1", "executor", "completed").await;
+        let _ = round("r2").await.unwrap();
+        assert_eq!(conflict_reason(round("r3").await.unwrap_err()), "max_rounds");
         let m = load(&app, &id).await.unwrap();
         assert_eq!((m.paused_reason.as_deref(), m.rounds_used, m.max_rounds), (Some("max_rounds"), 2, 2));
 
@@ -3006,9 +3060,10 @@ mod tests {
         let Json(out) = post_answer(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ans("再改一輪：把標題也換掉", "a1"))).await.unwrap();
         assert_eq!(out["resumed"], true);
         assert_eq!(load(&app, &id).await.unwrap().max_rounds, 3);
-        let Json(third) = round().await.unwrap();
+        let _ = mission_assignment(&app, &id, "grant-exec-2", "executor", "completed").await;
+        let Json(third) = round("r4").await.unwrap();
         assert_eq!((third["rounds_used"].as_i64(), third["status"].as_str()), (Some(3), Some("open")));
-        assert_eq!(conflict_reason(round().await.unwrap_err()), "max_rounds", "加的是一輪，不是無上限");
+        assert_eq!(conflict_reason(round("r5").await.unwrap_err()), "max_rounds", "加的是一輪，不是無上限");
 
         // 「不回答直接繼續」也算放行，一樣多給一輪；事件說得出來。
         let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();

@@ -1125,6 +1125,12 @@ pub async fn complete_checked<E>(
 pub enum Round {
     /// 用掉了一輪，`round` 事件同一個交易寫下。
     Spent,
+    /// 同一個 `client_request_id` 已經記過一輪，沒有再扣。
+    Replayed,
+    /// 上一輪之後還沒有新的交辦（還在等執行者），不再扣。
+    NotDue,
+    /// 同一個冪等鍵已經用在別種事件上。
+    Mismatch,
     /// 已經到上限：呼叫端把任務停下來問人。
     AtLimit { used: i64, max: i64 },
     /// 任務不存在或已結案。
@@ -1136,11 +1142,21 @@ pub enum Round {
 /// 以前是兩次：`rounds_used` 先加、事件另外寫。中間任務被關掉，已取消的任務多一則 `round`、還回 200；
 /// 事件寫不進去，輪數用掉了、代卻沒換（`flow` 的代只看事件），上一代的驗證照樣放行。
 /// 錨點（[`super::flow::ANCHOR`]）也在這個交易裡取：寫下那一刻最後一件交辦。
-pub async fn spend_round(pool: &SqlitePool, id: &str) -> Result<Round> {
+pub async fn spend_round(pool: &SqlitePool, id: &str, crid: Option<&str>) -> Result<Round> {
+    let crid = crid.map(str::trim).filter(|s| !s.is_empty());
     let Some((mut tx, s)) = open_snapshot(pool, id).await? else { return Ok(Round::Closed) };
+    if let Some(crid) = crid {
+        if let Some(existing) = s.events.iter().find(|e| e.client_request_id.as_deref() == Some(crid)) {
+            return Ok(if existing.kind == "round" { Round::Replayed } else { Round::Mismatch });
+        }
+    }
     let (used, max) = (s.mission.rounds_used + 1, s.mission.max_rounds);
     if used > max {
         return Ok(Round::AtLimit { used: s.mission.rounds_used, max });
+    }
+    // 上一則 round 之後還沒有新交辦：這一代還在等執行者，再呼叫一次不能多扣（#668）。
+    if !round_is_due(&s) {
+        return Ok(Round::NotDue);
     }
     sqlx::query("UPDATE missions SET rounds_used = ?, updated_at = ? WHERE id = ?")
         .bind(used)
@@ -1149,9 +1165,42 @@ pub async fn spend_round(pool: &SqlitePool, id: &str) -> Result<Round> {
         .execute(&mut *tx)
         .await?;
     let payload = serde_json::json!({"rounds_used": used, super::flow::ANCHOR: s.assignments.last().map(|a| a.id.clone())});
-    insert_event(&mut tx, id, "round", &format!("第 {used} 輪退回（上限 {max}）"), Some(crate::agent_relay::DAEMON_SENDER), &payload, None, None).await?;
+    let inserted = insert_event(
+        &mut tx,
+        id,
+        "round",
+        &format!("第 {used} 輪退回（上限 {max}）"),
+        Some(crate::agent_relay::DAEMON_SENDER),
+        &payload,
+        None,
+        crid,
+    )
+    .await;
+    if let Err(e) = inserted {
+        drop(tx);
+        if let Some(crid) = crid {
+            if let Some(existing) = event_by_crid(pool, id, crid).await? {
+                return Ok(if existing.kind == "round" { Round::Replayed } else { Round::Mismatch });
+            }
+        }
+        return Err(e);
+    }
     tx.commit().await?;
     Ok(Round::Spent)
+}
+
+/// 沒有上一則 `round` 就可以扣。有的話，錨點之後要已經有新的交辦。
+fn round_is_due(s: &Snapshot) -> bool {
+    let Some(last) = s.events.iter().rev().find(|e| e.kind == "round") else {
+        return true;
+    };
+    let anchor = serde_json::from_str::<serde_json::Value>(&last.payload_json)
+        .ok()
+        .and_then(|p| p.get(super::flow::ANCHOR).and_then(|v| v.as_str()).map(str::to_string));
+    match anchor {
+        None => !s.assignments.is_empty(),
+        Some(id) => s.assignments.iter().position(|a| a.id == id).is_some_and(|i| s.assignments.len() > i + 1),
+    }
 }
 
 pub async fn has_event(pool: &SqlitePool, mission_id: &str, kind: &str) -> Result<bool> {
@@ -1578,12 +1627,12 @@ mod tests {
     async fn rounds_stop_at_the_cap_and_closed_missions_do_not_change() {
         let pool = pool().await;
         let (m, _) = create(&pool, &new("r1")).await.unwrap();
-        let spend = || async { spend_round(&pool, &m.id).await.unwrap() };
+        let spend = || async { spend_round(&pool, &m.id, None).await.unwrap() };
         assert!(matches!(spend().await, Round::Spent));
-        assert!(matches!(spend().await, Round::Spent));
-        assert!(matches!(spend().await, Round::AtLimit { used: 2, max: 2 }), "上限到了不能再加");
-        assert_eq!(get(&pool, &m.id).await.unwrap().unwrap().rounds_used, 2);
-        assert_eq!(events(&pool, &m.id).await.unwrap().iter().filter(|e| e.kind == "round").count(), 2, "用掉幾輪就記幾則退回");
+        // 上一輪之後沒有新交辦：不能再扣（#668）。上限那條在 api 測試裡，中間有交辦。
+        assert!(matches!(spend().await, Round::NotDue));
+        assert_eq!(get(&pool, &m.id).await.unwrap().unwrap().rounds_used, 1);
+        assert_eq!(events(&pool, &m.id).await.unwrap().iter().filter(|e| e.kind == "round").count(), 1);
 
         assert!(pause(&pool, &m.id, "max_rounds", None).await.unwrap());
         assert_eq!(get(&pool, &m.id).await.unwrap().unwrap().status(), "paused");

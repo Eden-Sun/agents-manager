@@ -1533,8 +1533,13 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
         if args.detail:
             body["detail"] = args.detail
         return client.post(f"{base}/pause", body)
-    if op in ("resume", "cancel", "round"):
+    if op in ("resume", "cancel"):
         return client.post(f"{base}/{op}", {})
+    if op == "round":
+        # 逾時重送要沿用同一個鍵，daemon 才不會多扣一輪。
+        if not args.request_id:
+            raise AgmError("bad_args", "mission round 需要 --request-id（穩定的冪等鍵，重送沿用同一個）", 2)
+        return client.post(f"{base}/round", {"client_request_id": args.request_id})
     if op in ("question", "answer", "revise"):
         # 三個都要冪等鍵：重送回同一筆，不會變成第二個問題／第二輪續作。
         if not (args.text or args.text_file):
