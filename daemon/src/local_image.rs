@@ -11,7 +11,7 @@
 //! 指到界線外的符號連結）。
 
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Path as UrlPath, Query, State};
@@ -114,6 +114,14 @@ pub(crate) fn resolve(root: &Path, cwd: Option<&Path>, requested: &str) -> Optio
     None
 }
 
+async fn run_in_blocking_pool<T, F>(work: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(work).await.ok()
+}
+
 pub async fn get(
     State(app): State<Arc<App>>,
     UrlPath(id): UrlPath<String>,
@@ -127,7 +135,13 @@ pub async fn get(
         return Err(not_found());
     }
     let cwd = bot.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(Path::new);
-    let (mut file, mime) = resolve(Path::new(&project.path), cwd, requested).ok_or_else(not_found)?;
+    let root = PathBuf::from(project.path);
+    let cwd = cwd.map(Path::to_path_buf);
+    let requested = requested.clone();
+    let (mut file, mime) = run_in_blocking_pool(move || resolve(&root, cwd.as_deref(), &requested))
+        .await
+        .flatten()
+        .ok_or_else(not_found)?;
     let meta = file.metadata().map_err(|_| not_found())?;
     if meta.len() > MAX_BYTES {
         return Err(not_found());
@@ -255,5 +269,23 @@ mod tests {
 
         assert!(resolve(&root, None, "docs/a.png").is_none(), "換成符號連結之後不能再讀到任何內容");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn macos_local_image_resolution_does_not_block_the_tokio_worker() {
+        use std::thread;
+        use std::time::Duration;
+
+        let work = run_in_blocking_pool(|| {
+            thread::sleep(Duration::from_millis(150));
+            42
+        });
+        tokio::pin!(work);
+        tokio::select! {
+            biased;
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            result = &mut work => panic!("blocking image resolution finished on the tokio worker: {result:?}"),
+        }
+        assert_eq!(work.await, Some(42));
     }
 }

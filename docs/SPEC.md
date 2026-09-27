@@ -1877,6 +1877,8 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   直接交給 `trusted_open::read_dir_bound`（`fdopendir`／`readdir`／`fstatat`），連內容判斷（`content_is_withheld`）也用
   同一個 fd 底下的 `trusted_open::open_entry_in` 打開；可信檢查跟真正列舉是同一次 `list()` 呼叫裡同一個 `spawn_blocking`
   用的同一個 fd，全程不再用任何路徑重新解析，沒有殘餘窗口。
+- **拒絕 FIFO 且不阻塞（issue #620）**：打開最後一段前先以 `fstatat(AT_SYMLINK_NOFOLLOW)` 確認是一般檔案；`openat` 再帶
+  `O_NONBLOCK | O_NOFOLLOW`，並在已開啟的 fd 上重查一般檔案後清掉 `O_NONBLOCK`。若名字在檢查與開啟之間被換成 FIFO，開啟仍會立即返回，且 fd 的種類檢查會拒絕它。local-image 的 canonicalize／逐層開檔也放在 `spawn_blocking`，不佔 tokio worker。
 
 ### 6.5g build scheduler：全機 cargo/rustc 併發（issue #90）
 
