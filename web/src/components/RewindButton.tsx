@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import type { Bot, Message } from '../api/types'
-import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { canOfferRewind, rewindBlocked } from '../lib/rewind'
 import { rewindAndRefill } from '../store/rewindAction'
 import { useStore } from '../store/store'
@@ -12,10 +11,9 @@ import './rewind.css'
  * 這則的原文放回輸入框。daemon 在終端驅動 claude 自己的 `/rewind`（不重啟、同一段對話分支）。一定先確認：這則之後的問答會從它的
  * 對話脈絡裡拿掉（紀錄還留著、收成「已倒回」）。
  * 群組發言（`group_id`）不給：那一則同時送給好幾顆，從這裡倒只會倒掉其中一顆，對不上群組的時間線。
- * **只在手機畫**：桌機是輸入列旁那顆「⟲ 倒回」（`RewindBar`，使用者 2026-09-24：滑過才出現的按鈕找不到）。
+ * 桌機手機都畫、常駐不必滑過（使用者 2026-09-28：「rewind 還是綁在對話上比較合適，而不是多一個倒回鍵」——取代 09-24 輸入列旁的「⟲ 倒回」）。
  */
 export function RewindButton({ msg }: { msg: Message }) {
-  const phone = useMediaQuery(PHONE_QUERY)
   const botId = msg.bot_id ?? null
   const bot = useStore((s) => (botId ? (s.bots.find((b) => b.id === botId) ?? null) : null))
   const blocked = useStore((s) => (botId ? rewindBlocked(s.runs[botId]) : null))
@@ -25,7 +23,6 @@ export function RewindButton({ msg }: { msg: Message }) {
     const i = list.findIndex((m) => m.id === msg.id)
     return i < 0 ? 0 : list.slice(i + 1).filter((m) => m.role !== 'system' && !m.rewound_at).length
   })
-  if (!phone) return null
   return <RewindControl msg={msg} bot={bot} blocked={blocked} after={after} />
 }
 
@@ -60,7 +57,7 @@ export function RewindControl({ msg, bot, blocked, after }: { msg: Message; bot:
   )
 }
 
-/** 確認框：手機每則的按鈕與桌機的「⟲ 倒回」共用。`after`＝那一則之後還會一起拿掉幾則。 */
+/** 確認框。`after`＝那一則之後還會一起拿掉幾則。 */
 export function RewindConfirm({
   open,
   name,

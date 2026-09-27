@@ -599,16 +599,15 @@ bot 的終端輸入框裡留著一段沒送出的字（claude 的「Edit prompt 
   自己 idle 時只有這個圖示（idle 燈照補充 3 不畫），自己 working 又有子在跑就兩個都看得到。`title` 與 sr-only 文字都加「N 個子 agent 在跑」（`lib/chipStateText.ts::kidsText`，有測試）。
   有未讀的晶片是 accent 底，圖示改跟字同色。截圖：`docs/screenshots/primary-order/kids-1-desktop.png`、`kids-2-mobile.png`。
 
-## 對話倒回：桌機是輸入列旁一顆「⟲ 倒回」，手機是每則上的按鈕（2026-09-23，issue #405；桌機 2026-09-24 改）
-- **桌機：輸入列旁一顆常駐的「⟲ 倒回」**（`components/RewindBar.tsx`，貼在附加檔案鈕右邊、同高）。使用者 2026-09-24：「沒看見 pc 版做成一顆按鈕在對話下方」——
-  原本每則使用者訊息滑過才出現的按鈕找不到。有字的按鈕，不是只有圖示（圖示一樣會被忽略）。按下去是清單：還沒倒掉的使用者訊息、新到舊、每則前兩行＋時間，
-  預設選最新一則（最常見的是「剛剛那句問錯了」），「下一步」才進確認框。不能按時照樣畫但 disabled，title 講原因：不是 claude、default session、沒在跑／正在跑／卡提問、還沒有可以倒的訊息。
-- **手機：每則使用者訊息上常駐的「↶ 倒回這裡」**（`components/RewindButton.tsx`）——手機沒有滑過，每則常駐本來就看得到；桌機不畫這顆。codex／grok、default session、回覆、群組發言不畫（子 agent 有）。
-- **一定先確認**（兩個入口共用 `RewindConfirm`）：倒回會拿掉這則之後的問答，按錯代價大。確認框寫出會拿掉幾則、在終端用 claude 的 /rewind（不重啟）、檔案不還原；確認鈕用 danger 樣式。
+## 對話倒回：每則使用者訊息上常駐的「↶ 倒回這裡」（2026-09-23，issue #405；2026-09-28 使用者改）
+- **綁在那則訊息上，桌機手機都一樣、常駐**（`components/RewindButton.tsx`）。使用者 2026-09-28：「rewind 還是綁在對話上比較合適，而不是多一個倒回鍵」——
+  取代 09-24 做的輸入列旁「⟲ 倒回」＋挑一則的清單（那顆與 `RewindBar` 已拿掉）。09-24 的起因是桌機「滑過才出現」找不到，所以這次桌機也常駐、不靠 hover。
+  codex／grok、default session、回覆、群組發言不畫（子 agent 有）。不能按時照樣畫但 disabled，title 講原因（沒在跑／正在跑／卡提問）。
+- **一定先確認**（`RewindConfirm`）：倒回會拿掉這則之後的問答，按錯代價大。確認框寫出會拿掉幾則、在終端用 claude 的 /rewind（不重啟）、檔案不還原；確認鈕用 danger 樣式。
 - **被倒掉的不藏、收成淡色＋「已倒回」**：紀錄要能回頭看（例如想起來那一輪其實有用的一段）；藏起來會讓人以為訊息不見了。
 - **原文接回網頁輸入框最前面**，不覆蓋原本打到一半的字（沿用 `prependDraft`）。CLI 也會把原文放回終端的輸入列，那一份 daemon 清掉——兩邊都留會讓下一則接在它後面；清不掉時通知叫人去終端清。
 - 截圖：`docs/screenshots/rewind/`（`scripts/rewind-shots.mjs`，mock 模式；`MOBILE=1` 出手機那組）。
-  ![桌機的「⟲ 倒回」](screenshots/rewind/1-bar-button.png) ![清單](screenshots/rewind/2-pick-list.png) ![確認](screenshots/rewind/3-confirm.png) ![倒回後](screenshots/rewind/4-after-rewound-and-refilled.png) ![手機倒回後](screenshots/rewind/m3-after.png)
+  ![桌機每則上的「↶ 倒回這裡」](screenshots/rewind/1-button.png) ![確認](screenshots/rewind/3-confirm.png) ![倒回後](screenshots/rewind/4-after-rewound-and-refilled.png) ![手機倒回後](screenshots/rewind/m3-after.png)
 
 ## 刪 AGM 的 bot 要第二次確認（2026-09-24，issue #406）
 
