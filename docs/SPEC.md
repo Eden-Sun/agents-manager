@@ -1186,7 +1186,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
 3. 先做不需要 pane 的準備（hook 注入檔、CLI 參數；遠端可能 ssh 上傳）與執行檔 preflight。失敗 → Run `exited`，**不建 tab／pane**。
 4. 取得 pane：workspace 剛建立 → 用 `root_pane`；否則 `tab.create {workspace_id, cwd, label: tab_label(bot), focus:false, env}` 取 `root_pane`。
    **一個 bot 一個 tab**，不 `pane.split`——共用 tab 會把 pane 越切越窄，窄到 TUI 一列一個字時備援完全讀不出東西（§4.3）。
-   `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷）、`AM_PORT`、`AM_BOT_TOKEN`（一律注入，作為每 bot 的 API 身分；目前重用 `bots.hook_token`）、`AM_HOOK_TOKEN`（只在 `inject_hooks=true` 時給 hook）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。User 透過 `POST /api/bots/{id}/credential/rotate` 立即輪替：舊值立即失效，執行中的 bot 重啟取得新值，停止中的 bot 下次啟動時取得。
+   `env`：`AM_BOT_ID`、`AM_RUN_ID`（診斷）、`AM_PORT`、`AM_BOT_TOKEN`（一律注入，作為每 bot 的 API 身分；目前重用 `bots.hook_token`）、`AM_HOOK_TOKEN`（只在 `inject_hooks=true` 時給 hook）、`CLAUDE_CODE_CHILD_SESSION=""`、`CLAUDECODE=""`。User 透過 `POST /api/bots/{id}/credential/rotate` 立即輪替：執行中的 bot 先把 credential-rotation restart intent 與新 token 放進同一 SQLite transaction；交易失敗舊值仍有效，提交後舊值立即失效並由 restart intent 重啟 bot。daemon 在提交後當機會於下次 recovery 冪等補完，停止中的 bot 下次啟動時取得新值。
    失敗 → Run `exited`、回 502。
 5. 更新 Run 的 `workspace_id`／`pane_id`／`tab_id`；先寫 `runs.agent_name`，再 `agent.start {name, kind, pane_id, args: injected ++ bot.args, timeout_ms: 60000}`
    （立即回 `launch_pending`）。之後所有 herdr 目標一律用 `run.agent_name`。pane 建好到 start 成功之間任何失敗 → Run `exited` + 盡力關 pane（tab 空了一併關）。
@@ -2376,7 +2376,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   其餘 `/api/*` 接受 User `X-AM-Token`、Bot 成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，或路徑限定的 service 成對 `X-AM-Service-Id`＋`X-AM-Service-Token`；
   出現 Bot／service header 即選該身分，缺欄、錯誤或混帶其他 principal 一律拒絕，不降級成 User。沒帶 Bot／service header 且帶有效共用 UI token 就是 User，
   這保留使用者接受的 LAN／共用 token 風險，不做額外人類證明。`/ws` 維持 `?token=`；`Origin` 存在時主機須為本機。
-  Bot proof 重用 `bots.hook_token`；pane 一律注入 `AM_BOT_TOKEN`，hooks 開啟時另注入 `AM_HOOK_TOKEN`。User 用 `POST /api/bots/{id}/credential/rotate` 輪替，舊值即刻失效，
+  Bot proof 重用 `bots.hook_token`；pane 一律注入 `AM_BOT_TOKEN`，hooks 開啟時另注入 `AM_HOOK_TOKEN`。User 用 `POST /api/bots/{id}/credential/rotate` 輪替；執行中的 bot 將 restart intent 與新 token 同 transaction 提交，交易失敗不改舊值，提交後舊值即刻失效，
   活 bot 重啟取得新值、停止 bot 下次啟動取得。child 不是獨立 principal：它的 pane 由母 bot 開、herdr shim 帶下的是**母 bot 的** `AM_BOT_ID`／token，
   daemon 原地重啟 child 也不重建 env，所以對 child 輪替回 409 `child_uses_parent_credential`；若母 bot 有仍活著的 child／grandchild 後代 pane 繼承憑證，輪替亦回 409 `live_children_use_credential` 並列出依賴後代，不改 token、不重啟。child 以母 bot 的名義呼叫 API（跟它本來就能替母 bot 做事同一條界線）。Service token 在 `<data_dir>/service-tokens/` 建立（目錄 0700、token 檔 0600），重啟保持不變；`/api/capabilities` 的
   `service_principals` 標記代表 launchd clients 不得在憑證遺失時退回 User。service scope 與固定維運 route 見 API.md。

@@ -31,7 +31,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | A | `POST /hosts/{name}/tools/install` | 只有網頁 | UI token | 叫 `via_bot_id` 那顆 agent 去裝 CLI（跟 `/bots/{id}/prompt` 等價） | 同 `/bots/{id}/prompt` |
 | A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 在那台跑 codex 官方安裝指令、換掉所有 codex bot 共用的 binary，再重啟那台閒置的 codex | 維持（網頁已有確認框） |
 | A | `POST /bots/{id}/prompt`、`/text`、`/keys` | 網頁、`scripts/remote-loop-test.sh`、`scripts/hook-timing-test.sh`；Bot pane 內的 `agm`／shim | 網頁與測試腳本用 User `X-AM-Token`；Bot 用成對 Bot headers；`relay_from` 不能覆蓋已驗身分；寫給 AGM 的排進 inbox | 驅動任一顆 agent | 網頁維持 User；Bot principal 按 caller 身分驗證 |
-| A | `POST /bots/{id}/credential/rotate` | 只有網頁／User `agm` | User `X-AM-Token`；立即換 per-bot hook token，舊值失效並重啟執行中的 bot；live child／grandchild 仍繼承時先回 `409 live_children_use_credential`，不改 token；不回傳新值 | 使該 bot 的舊 hook/API proof 失效 | User-only，Bot／service principal 403 |
+| A | `POST /bots/{id}/credential/rotate` | 只有網頁／User `agm` | User `X-AM-Token`；執行中的 bot 先在同一 SQLite transaction 記錄可恢復的 restart intent，再輪替 token；舊值失效並重啟，daemon 重啟會接續；live child／grandchild 仍繼承時先回 `409 live_children_use_credential`，不改 token；不回傳新值 | 使該 bot 的舊 hook/API proof 失效 | User-only，Bot／service principal 403 |
 | A | `PUT /build/remote`、`POST /build/remote/install-toolchain` | 只有網頁 | UI token | 改外部編譯主機＝之後的 cargo 送到哪台機器跑 | 待裁示 |
 | B | `POST /projects/{id}/git/push` | 只有網頁 | UI token；一般 `git push`（沒有 `--force`） | 推到遠端 repo，撤回要另外動作 | 待裁示（確認或維持） |
 | B | `POST /projects/{id}/git/commit`、`/git/pull` | 只有網頁 | UI token；pull 固定 `--rebase --no-autostash` | 本機 git 歷史 | 維持 |
@@ -1267,9 +1267,9 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 停掉了卻沒能開回來時，舊 Run 改標 `exited`；改標寫不進 DB 回 `503 {"error":"restart_state_uncommitted","run_id":<舊 Run>,"retryable":true,"message","detail","start_error"}`（`start_error` 是 start 那一半的錯），已排重試（SPEC §6.4）。
 
 ### 10.3b `POST /api/bots/{id}/credential/rotate`
-只接受 User principal。立刻替該 bot 換掉 `bots.hook_token`；舊 token 從資料庫更新後即失效。執行中的 bot 會重啟，讓新 run 拿到 `AM_BOT_TOKEN`；停止中的 bot 下次啟動時取得新值。回 `200 {"credential_rotated":true,"restarted":bool,"run_id":string|null}`，不回傳新 token。Bot／service principal 呼叫回 403。
-- child bot → `409 {"reason":"child_uses_parent_credential","parent_bot_id"}`：child 的 pane 是母 bot 開的，繼承的是**母 bot 的** `AM_BOT_ID`／token（herdr shim），daemon 原地重啟 child 不重建 env，換了也送不進去；要換就換母 bot（它的 child 繼承的是舊值，要等 child 重開才會拿到新的）。
-- 已換新但重啟失敗 → `409 {"reason":"restart_failed","credential_rotated":true,"detail"}`：舊 token 已死，那顆要手動重啟才能再驗身分。
+只接受 User principal。停止中的 bot 會在 SQLite transaction 內替該 bot 換掉 `bots.hook_token`；執行中的 bot 會在同一 transaction 先建立 `credential_rotation` restart intent，再替換 token。交易失敗時舊 token 保持有效；提交後舊 token 立刻失效，intent 讓 daemon 重啟後接續重啟 bot，將新 `AM_BOT_TOKEN` 帶進 pane。成功回 `200 {"credential_rotated":true,"restarted":bool,"run_id":string|null}`，不回傳新 token。提交後重啟未完成回 `409 {"reason":"restart_pending","credential_rotated":true,"restart_pending":true,"intent_id", "detail"}`，保留 intent 並安排重試；終止失敗回應仍會標 `credential_rotated:true`。Bot／service principal 呼叫回 403。
+- child bot → `409 {"reason":"child_uses_parent_credential","parent_bot_id"}`：child 的 pane 是母 bot 開的，繼承的是**母 bot 的** `AM_BOT_ID`／token（herdr shim），daemon 原地重啟 child 不重建 env，換了也送不進去。母 bot 有活著的 child／grandchild pane 時也回 `409 live_children_use_credential` 並列出依賴的後代；先讓所有這些 pane 停止，再輪替母 bot。之後新開的 child pane 會繼承新 token。
+- 只要 transaction 已提交，即使立即重啟失敗，回應也包含 `credential_rotated:true`；intent 保留並重試，開機 recovery 依舊 run 是否已被新 run 取代來冪等續做，不會重啟兩次。
 
 ### 10.3c `GET /api/capabilities`
 `200 {"capabilities":["resume_native_start","herdr_maintenance","service_principals"]}`。會停 herdr server 的腳本先確認這裡有 `resume_native_start` 才動手；`service_principals` 表示 launchd service token 已支援，缺少 service token 檔時不得退回 User。
