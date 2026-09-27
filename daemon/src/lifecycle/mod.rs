@@ -175,3 +175,22 @@ async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<HerdrClient> 
         .await
         .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))
 }
+
+async fn client_for_run_with_host_fence(app: &Arc<App>, run: &db::Run, fence: &crate::hosts::HostFence) -> LcResult<HerdrClient> {
+    let host = db::bot_host(&app.db, &run.bot_id).await.map_err(up)?;
+    let stale = || LcError::conflict("host_superseded", json!({"bot_id": run.bot_id, "host": fence.conn().name}));
+    if host != fence.conn().name || !app.hosts.is_current(fence).await {
+        return Err(stale());
+    }
+    let session = if let Some(session) = run.herdr_session.as_deref().filter(|s| !s.is_empty()) {
+        session.to_string()
+    } else {
+        let bot = db::bot(&app.db, &run.bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+        app.session_for_bot_with_host_fence(&bot, &host, fence).await.ok_or_else(stale)?
+    };
+    let client = app.herdr_for_host_fence(fence, &session).await.ok_or_else(stale)?;
+    if db::bot_host(&app.db, &run.bot_id).await.map_err(up)? != host || !app.hosts.is_current(fence).await {
+        return Err(stale());
+    }
+    Ok(client)
+}

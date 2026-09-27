@@ -59,6 +59,10 @@ fn not_idle(bot_id: &str, why: &str) -> LcError {
     LcError::conflict("not_idle", json!({"bot_id": bot_id, "busy": why}))
 }
 
+fn host_superseded(bot_id: &str, host: &str) -> LcError {
+    LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": host}))
+}
+
 pub async fn start_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
     start_bot_with(app, bot_id, StartOpts::default()).await
 }
@@ -70,6 +74,15 @@ pub async fn start_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> Lc
 }
 
 pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
+    start_bot_locked_with_host_fence(app, bot_id, opts, None).await
+}
+
+async fn start_bot_locked_with_host_fence(
+    app: &Arc<App>,
+    bot_id: &str,
+    opts: StartOpts,
+    fence: Option<&crate::hosts::HostFence>,
+) -> LcResult<String> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
@@ -96,10 +109,21 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::NotFound("project".into()))?;
-    let session = app
-        .session_for_bot(&bot, &project.host)
-        .await
-        .ok_or_else(|| LcError::Upstream(format!("host `{}` is not configured", project.host)))?;
+    let session = match fence {
+        Some(fence) => app
+            .session_for_bot_with_host_fence(&bot, &project.host, fence)
+            .await
+            .ok_or_else(|| host_superseded(bot_id, &project.host))?,
+        None => app
+            .session_for_bot(&bot, &project.host)
+            .await
+            .ok_or_else(|| LcError::Upstream(format!("host `{}` is not configured", project.host)))?,
+    };
+    if let Some(fence) = fence {
+        if project.host != fence.conn().name || !app.hosts.is_current(fence).await {
+            return Err(host_superseded(bot_id, &project.host));
+        }
+    }
     // An unknown identity would silently run as the host's default login (m4p: `cc1` bot answered
     // as cc0). Refuse; a confirmed-logged-out explicit identity fails closed the same way instead of
     // falling back to the host's default account (GH #83: it used to just warn and start anyway,
@@ -197,7 +221,7 @@ pub async fn start_bot_locked_with(app: &Arc<App>, bot_id: &str, opts: StartOpts
     }
     app.emit_bot_status(bot_id).await;
 
-    match start_inner(app, &bot, &project, &run_id, opts.clone()).await {
+    match start_inner(app, &bot, &project, &run_id, &session, opts.clone(), fence).await {
         Ok(()) => {
             if let Some(busy) = nudge {
                 super::resume_nudge::arm(app, &bot, &run_id, busy).await;
@@ -633,18 +657,26 @@ async fn start_inner(
     bot: &db::Bot,
     project: &db::Project,
     run_id: &str,
+    session: &str,
     opts: StartOpts,
+    fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<()> {
     let host = project.host.clone();
-    let session = app
-        .session_for_bot(bot, &host)
-        .await
-        .ok_or_else(|| LcError::Upstream(format!("host `{host}` is not configured")))?;
-    let client = app
-        .herdr_for_session(&host, &session)
-        .await
-        .ok_or_else(|| LcError::Upstream(format!("Herdr session `{session}` for host `{host}` is not configured")))?;
-    if !app.session_connected(&host, &session).await {
+    let client = match fence {
+        Some(fence) => app
+            .herdr_for_host_fence(fence, session)
+            .await
+            .ok_or_else(|| host_superseded(&bot.id, &host))?,
+        None => app
+            .herdr_for_session(&host, session)
+            .await
+            .ok_or_else(|| LcError::Upstream(format!("Herdr session `{session}` for host `{host}` is not configured")))?,
+    };
+    let connected = match fence {
+        Some(fence) => app.session_connected_with_host_fence(fence, session).await,
+        None => app.session_connected(&host, session).await,
+    };
+    if !connected {
         return Err(LcError::Upstream(format!("host `{host}` is not connected")));
     }
     // 1b. preflight: a missing CLI would sit in `launch_pending` for the full 60 s silently.
@@ -723,7 +755,7 @@ async fn start_inner(
     let mut fresh_root: Option<(crate::herdr::PaneInfo, &str)> = None;
     // `projects.workspace_id` is the configured session's; an imported bot in `default` must not
     // overwrite it (the next reconcile would clear it).
-    let workspace_id = match (session.as_str() != "default", project.workspace_id.as_deref()) {
+    let workspace_id = match (session != "default", project.workspace_id.as_deref()) {
         (true, Some(ws)) if client.workspace_get(ws).await.map_err(up)?.is_some() => ws.to_string(),
         _ => {
             let (ws, root) = client.workspace_create(&project.path, &project.label, env.clone()).await.map_err(up)?;
@@ -801,8 +833,34 @@ async fn start_inner(
         }
     }
     let mut started = false;
+    #[cfg(test)]
+    let mut first_agent_start = true;
     for attempt in 0..10u32 {
-        match client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000).await {
+        #[cfg(test)]
+        if first_agent_start {
+            super::race_point::hit("restart_before_agent_start", &bot.id).await;
+        }
+        #[cfg(test)]
+        {
+            first_agent_start = false;
+        }
+        if let Some(fence) = fence {
+            if host != fence.conn().name || !app.hosts.is_current(fence).await {
+                pane_guard.cleanup().await;
+                return Err(host_superseded(&bot.id, &host));
+            }
+        }
+        let launch = match fence {
+            Some(fence) => match app.hosts.run_if_current(fence, client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000)).await {
+                Some(result) => result,
+                None => {
+                    pane_guard.cleanup().await;
+                    return Err(host_superseded(&bot.id, &host));
+                }
+            },
+            None => client.agent_start(&agent, &bot.kind, &pane_id, &args, 60_000).await,
+        };
+        match launch {
             Ok(_) => {
                 started = true;
                 break;
@@ -824,7 +882,7 @@ async fn start_inner(
     pane_guard.disarm();
 
     // 6. per-run status subscription
-    crate::events::watch_pane_on_session(app, &host, &session, &pane_id).await;
+    crate::events::watch_pane_on_session(app, &host, session, &pane_id).await;
 
     // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
@@ -923,10 +981,36 @@ pub async fn restart_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
 /// agent in between (2026-09-10 23:02, `restart-idle`: AGM + three bots down 5.5 h).
 /// If a run whose pane is gone still blocks the start, it is ended and the start retried once.
 pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
+    restart_bot_with_authority(app, bot_id, opts, None).await
+}
+
+/// The scoped update restart must still belong to the host connection that installed the update.
+/// Recheck after taking the bot lock so a queued restart cannot resolve a repointed host name.
+pub(crate) async fn restart_bot_with_host_fence(
+    app: &Arc<App>,
+    bot_id: &str,
+    opts: StartOpts,
+    fence: &crate::hosts::HostFence,
+) -> LcResult<String> {
+    restart_bot_with_authority(app, bot_id, opts, Some(fence)).await
+}
+
+async fn restart_bot_with_authority(
+    app: &Arc<App>,
+    bot_id: &str,
+    opts: StartOpts,
+    fence: Option<&crate::hosts::HostFence>,
+) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    if let Some(fence) = fence {
+        ensure_current_host_fence(app, bot_id, fence).await?;
+    }
     // Checked before the stop, or the user's agent gets ctrl+c for nothing.
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    if let Some(fence) = fence {
+        ensure_current_host_fence(app, bot_id, fence).await?;
+    }
     refuse_default_session(&bot)?;
     // 子 agent 的 pane 是父 agent 開的，daemon 重建不了它的環境：這條 stop + start 會把 pane 關掉再開一個不一樣的（#188）。
     // 走哪條路由呼叫端先分類，分錯或誤呼不能靠約定——鎖裡讀到 child 就拒絕，什麼都還沒停。
@@ -953,6 +1037,9 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     // 持久 intent（#355 P2）：在第一個不可逆步驟（記 `stopping`）**之前**先 commit，daemon 在 stop 與 start 之間死掉的話，
     // 開機由 `restart_intents::recover_host` 往前補完。寫不進去＝什麼都還沒動，不能開始（fail closed）。
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
+    if let Some(fence) = fence {
+        ensure_current_host_fence(app, bot_id, fence).await?;
+    }
     let payload = json!({"opts": opts, "from_run_id": stopping, "bot_name": bot.name});
     let intent_id = match crate::intents::insert(&app.db, "restart", bot_id, &host, &payload, RESTART_INTENT_TTL_SECS).await {
         // 已經有一件開著：上一個行程留下的（我們持著 bot 鎖、這次自己來做同一件事），沿用它。
@@ -961,13 +1048,24 @@ pub async fn restart_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> 
     };
     #[cfg(test)]
     super::race_point::hit("restart_after_intent", bot_id).await;
-    let res = restart_stop_and_start(app, bot_id, opts, stopping).await;
+    let res = restart_stop_and_start(app, bot_id, opts, stopping, fence).await;
     settle_restart_intent(app, &intent_id, &res).await;
     // 不在這裡佔佇列。接回驗證且閒置滿 10 秒、尾巴仍是被砍的工具，才由 `resume_nudge` 送一次（#424）。
     if let (Ok(run_id), Some(busy)) = (&res, nudge) {
         super::resume_nudge::arm(app, &bot, run_id, busy).await;
     }
     res
+}
+
+async fn ensure_current_host_fence(app: &Arc<App>, bot_id: &str, fence: &crate::hosts::HostFence) -> LcResult<()> {
+    let host = fence.conn().name.as_str();
+    if !app.hosts.is_current(fence).await {
+        return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": host})));
+    }
+    if db::bot_host(&app.db, bot_id).await.map_err(up)? != host || !app.hosts.is_current(fence).await {
+        return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": host})));
+    }
+    Ok(())
 }
 
 /// 重啟的 intent 放置多久還沒補完就放棄（`failed`＋通知）。
@@ -991,10 +1089,24 @@ async fn settle_restart_intent(app: &Arc<App>, intent_id: &str, res: &LcResult<S
 }
 
 /// 停 → 起（原本 `restart_bot_with` 鎖裡的後半段，行為不變）。
-async fn restart_stop_and_start(app: &Arc<App>, bot_id: &str, opts: StartOpts, stopping: Option<String>) -> LcResult<String> {
+async fn restart_stop_and_start(
+    app: &Arc<App>,
+    bot_id: &str,
+    opts: StartOpts,
+    stopping: Option<String>,
+    fence: Option<&crate::hosts::HostFence>,
+) -> LcResult<String> {
     // 停到起之間沒有 active run，但 bot 馬上就回來：排著的派工不是孤兒（issue #106，`restart_hold`）。
     let restarting = super::restart_hold::begin(bot_id);
-    let stopped = if opts.require_idle { super::stop::stop_for_restart_if_idle_locked(app, bot_id).await } else { stop_for_restart_locked(app, bot_id).await };
+    if let Some(fence) = fence {
+        ensure_current_host_fence(app, bot_id, fence).await?;
+    }
+    let stopped = match (opts.require_idle, fence) {
+        (true, Some(fence)) => super::stop::stop_for_restart_if_idle_locked_with_host_fence(app, bot_id, fence).await,
+        (false, Some(fence)) => super::stop::stop_for_restart_locked_with_host_fence(app, bot_id, fence).await,
+        (true, None) => super::stop::stop_for_restart_if_idle_locked(app, bot_id).await,
+        (false, None) => stop_for_restart_locked(app, bot_id).await,
+    };
     match stopped {
         Ok(_) => {}
         // 鎖裡看過閒置之後、記 `stopping` 之前它開始忙了（#346）：什麼都沒動，照 `busy` 對回 `not_idle`。
@@ -1006,7 +1118,10 @@ async fn restart_stop_and_start(app: &Arc<App>, bot_id: &str, opts: StartOpts, s
     }
     #[cfg(test)]
     super::race_point::hit("restart_after_stop", bot_id).await;
-    let started = restart_start(app, bot_id, opts).await;
+    if let Some(fence) = fence {
+        ensure_current_host_fence(app, bot_id, fence).await?;
+    }
+    let started = restart_start(app, bot_id, opts, fence).await;
     drop(restarting);
     match started {
         // 排著的交給新的 run：`--resume` 起的 claude 由 `resume_gate` 等驗證，其他照常送。
@@ -1069,11 +1184,16 @@ pub(crate) async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &
     }
 }
 
-pub(crate) async fn restart_start(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
-    match start_bot_locked_with(app, bot_id, opts.clone()).await {
+pub(crate) async fn restart_start(
+    app: &Arc<App>,
+    bot_id: &str,
+    opts: StartOpts,
+    fence: Option<&crate::hosts::HostFence>,
+) -> LcResult<String> {
+    match start_bot_locked_with_host_fence(app, bot_id, opts.clone(), fence).await {
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => {
             let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
-                return start_bot_locked_with(app, bot_id, opts.clone()).await;
+                return start_bot_locked_with_host_fence(app, bot_id, opts.clone(), fence).await;
             };
             let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
             if run_alive(app, &run, &bot).await {
@@ -1081,7 +1201,7 @@ pub(crate) async fn restart_start(app: &Arc<App>, bot_id: &str, opts: StartOpts)
             }
             tracing::warn!(bot = %bot.name, run = %run.id, pane = ?run.pane_id, "restart found a run with no live pane in its way; ending it and starting again");
             mark_run_exited(app, &run.id, "its pane was gone when the bot restarted").await;
-            start_bot_locked_with(app, bot_id, opts).await
+            start_bot_locked_with_host_fence(app, bot_id, opts, fence).await
         }
         other => other,
     }
@@ -2885,7 +3005,7 @@ mod grok_startup_effort_tests {
 
 /// Continue a credential-rotation restart while the caller holds the bot lock.
 pub(crate) async fn resume_credential_rotation_locked(app: &Arc<App>, bot_id: &str, opts: StartOpts, from_run: &str) -> LcResult<String> {
-    restart_stop_and_start(app, bot_id, opts, Some(from_run.to_string())).await
+    restart_stop_and_start(app, bot_id, opts, Some(from_run.to_string()), None).await
 }
 
 /// 開機補完被打斷的重啟（#355 P2）：呼叫端持 bot 鎖，已經決定要往前補。stop 做到一半（`stopping`）先補完它；
@@ -2900,7 +3020,7 @@ pub(crate) async fn resume_restart_locked(app: &Arc<App>, bot_id: &str, opts: St
         left_down_by_restart(app, bot_id, run_id).await.map_err(up)?;
     }
     let restarting = super::restart_hold::begin(bot_id);
-    let started = restart_start(app, bot_id, StartOpts { require_idle: false, ..opts }).await;
+    let started = restart_start(app, bot_id, StartOpts { require_idle: false, ..opts }, None).await;
     drop(restarting);
     if started.is_ok() {
         schedule_flush_queued(app, bot_id);

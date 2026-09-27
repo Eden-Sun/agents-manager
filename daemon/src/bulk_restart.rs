@@ -54,6 +54,8 @@ pub enum Skip {
     NoLongerPending,
     /// 輪到它時 DB 讀不到它的狀態（一時忙、I/O 錯）：不知道≠不用重啟，這次先不動，更新還在等（#188）。
     StateUnreadable,
+    /// scoped restart 的原主機連線已被移除或改指，不能用相同名字改重啟新主機上的 bot。
+    HostSuperseded,
 }
 
 impl Skip {
@@ -69,6 +71,7 @@ impl Skip {
             Skip::NeedsManualInstall => "needs_manual_install",
             Skip::NoLongerPending => "no_longer_pending",
             Skip::StateUnreadable => "state_unreadable",
+            Skip::HostSuperseded => "superseded",
         }
     }
 
@@ -84,6 +87,7 @@ impl Skip {
             Skip::NeedsManualInstall => "新版還沒裝，要先手動安裝（見更新提示裡的指令）才能重啟套用",
             Skip::NoLongerPending => "排到它時已經不用重啟了（更新套用過或 run 不在了）",
             Skip::StateUnreadable => "讀不到它的狀態，這次沒動它；更新還在等，稍後再按一次",
+            Skip::HostSuperseded => "主機設定已改變，沒有重啟新主機上的 bot",
         }
     }
 }
@@ -159,6 +163,29 @@ pub struct Scope {
     pub host: String,
 }
 
+/// A scoped request may only select and restart bots while its original host authority remains current.
+#[derive(Clone)]
+struct ScopedRestart {
+    scope: Scope,
+    fence: Option<crate::hosts::HostFence>,
+}
+
+fn same_authority(left: &ScopedRestart, right: &ScopedRestart) -> bool {
+    left.scope == right.scope
+        && match (&left.fence, &right.fence) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.same_authority(b),
+            _ => false,
+        }
+}
+
+async fn authority_is_current(app: &Arc<App>, request: &ScopedRestart) -> bool {
+    match request.fence.as_ref() {
+        Some(fence) => fence.conn().name == request.scope.host && app.hosts.is_current(fence).await,
+        None => true,
+    }
+}
+
 pub async fn candidates(app: &Arc<App>, scope: Option<&Scope>) -> anyhow::Result<Vec<Cand>> {
     let mut out = Vec::new();
     for run in db::all_active_runs(&app.db).await? {
@@ -215,14 +242,16 @@ fn running_batches() -> &'static std::sync::Mutex<std::collections::HashMap<Stri
 }
 
 /// 佔著那一格的批次。
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Running {
     batch_id: String,
     /// 還沒輪到的目標（輪到時就拿掉，不管結果）。範圍批次要**證明**被這一批涵蓋才不另開（#566）：
     /// 定清單之前是空的——那時的判斷一律是「沒涵蓋」。
     remaining: std::collections::HashSet<String>,
     /// 排在這一批後面的範圍批次：這一批放掉那一格時接著開（#566）。
-    followups: Vec<Scope>,
+    followups: Vec<ScopedRestart>,
+    /// Authority of the batch whose candidates were selected at admission time.
+    request: Option<ScopedRestart>,
 }
 
 /// 這個 daemon 現在有沒有一批在跑；有的話是哪一批（`GET /api/state` 的 `restart_batch`，issue #492）。
@@ -256,18 +285,24 @@ impl Drop for BatchSlot {
 }
 
 /// 一個一個開；第一個佔住那一格之後，後面的照同一條規則排到它後面（或證明已被涵蓋）。
-fn run_followups(app: Arc<App>, followups: Vec<Scope>) -> futures::future::BoxFuture<'static, ()> {
+fn run_followups(app: Arc<App>, followups: Vec<ScopedRestart>) -> futures::future::BoxFuture<'static, ()> {
     Box::pin(async move {
         let mut seen = Vec::new();
-        for scope in followups {
-            if seen.contains(&scope) {
+        for request in followups {
+            if seen.iter().any(|old| same_authority(old, &request)) {
                 continue;
             }
-            match spawn_scoped(&app, Some(&scope)).await {
-                Ok(plan) => tracing::info!(kind = %scope.kind, host = %scope.host, status = %plan["restart_status"], batch = %plan["batch_id"], "deferred scoped restart started"),
-                Err(e) => tracing::warn!(kind = %scope.kind, host = %scope.host, error = %format!("{e:#}"), "deferred scoped restart could not start"),
+            match spawn_scoped_request(&app, Some(request.clone())).await {
+                Ok(plan) if plan["restart_status"] == "superseded" => tracing::warn!(
+                    kind = %request.scope.kind,
+                    host = %request.scope.host,
+                    status = "superseded",
+                    "deferred scoped restart dropped because its host authority changed"
+                ),
+                Ok(plan) => tracing::info!(kind = %request.scope.kind, host = %request.scope.host, status = %plan["restart_status"], batch = %plan["batch_id"], "deferred scoped restart started"),
+                Err(e) => tracing::warn!(kind = %request.scope.kind, host = %request.scope.host, error = %format!("{e:#}"), "deferred scoped restart could not start"),
             }
-            seen.push(scope);
+            seen.push(request);
         }
     })
 }
@@ -298,6 +333,38 @@ pub async fn spawn(app: &Arc<App>) -> anyhow::Result<serde_json::Value> {
 /// 記在那一批上，它放掉那一格時接著開這個範圍的一批（到時候重新挑，已經被重啟過的不再是候選）。
 /// 結果都帶 `restart_status`：`started` / `already_covered` / `deferred`。
 pub async fn spawn_scoped(app: &Arc<App>, scope: Option<&Scope>) -> anyhow::Result<serde_json::Value> {
+    spawn_scoped_request(app, scope.cloned().map(|scope| ScopedRestart { scope, fence: None })).await
+}
+
+/// Scoped restart used by `cli_update`: keep the host authority through admission, execution and #566 follow-ups.
+pub async fn spawn_scoped_fenced(
+    app: &Arc<App>,
+    scope: &Scope,
+    fence: &crate::hosts::HostFence,
+) -> anyhow::Result<serde_json::Value> {
+    spawn_scoped_request(app, Some(ScopedRestart { scope: scope.clone(), fence: Some(fence.clone()) })).await
+}
+
+fn superseded_plan(request: &ScopedRestart) -> serde_json::Value {
+    json!({
+        "batch_id": null,
+        "total": 0,
+        "planned": [],
+        "skipped": [],
+        "restart_status": "superseded",
+        "reason": "superseded",
+        "host": request.scope.host,
+        "kind": request.scope.kind,
+    })
+}
+
+async fn spawn_scoped_request(app: &Arc<App>, request: Option<ScopedRestart>) -> anyhow::Result<serde_json::Value> {
+    if let Some(request) = &request {
+        if !authority_is_current(app, request).await {
+            tracing::warn!(kind = %request.scope.kind, host = %request.scope.host, "scoped restart dropped because its host authority was superseded before candidate selection");
+            return Ok(superseded_plan(request));
+        }
+    }
     let slot_key = app.data_dir.display().to_string();
     let batch_id = db::ulid();
     loop {
@@ -306,35 +373,67 @@ pub async fn spawn_scoped(app: &Arc<App>, scope: Option<&Scope>) -> anyhow::Resu
             match running.get(&slot_key) {
                 Some(r) => r.batch_id.clone(),
                 None => {
-                    running.insert(slot_key.clone(), Running { batch_id: batch_id.clone(), ..Default::default() });
+                    running.insert(
+                        slot_key.clone(),
+                        Running { batch_id: batch_id.clone(), request: request.clone(), ..Default::default() },
+                    );
                     break;
                 }
             }
         };
-        let Some(scope) = scope else {
+        let Some(request) = &request else {
             // 不限範圍的再按一次＝接回那一批看進度（#492）；這裡不宣稱涵蓋了什麼，所以不帶 `restart_status`。
             return Ok(json!({"batch_id": existing, "total": 0, "planned": [], "skipped": [], "already_running": true}));
         };
-        let cands = candidates(app, Some(scope)).await?;
+        let cands = candidates(app, Some(&request.scope)).await?;
+        if !authority_is_current(app, request).await {
+            tracing::warn!(kind = %request.scope.kind, host = %request.scope.host, "scoped restart dropped because its host authority changed during candidate selection");
+            return Ok(superseded_plan(request));
+        }
         let (go, _) = plan(&cands);
         let wanted: Vec<serde_json::Value> = go.iter().map(|c| json!({"bot_id": c.bot_id, "name": c.name})).collect();
         let mut running = running_batches().lock().unwrap();
         // 挑候選的期間那一批結束了：那一格空出來，重來一次（這次多半自己開）。
         let Some(r) = running.get_mut(&slot_key) else { continue };
-        if !go.is_empty() && go.iter().all(|c| r.remaining.contains(&c.bot_id)) {
+        // A fence-bound request can only join a batch whose targets were selected under that same authority.
+        // Keep the historical #566 coverage rule unchanged for name-only callers.
+        let coverage_authority_matches = request.fence.is_none()
+            || r.request.as_ref().is_some_and(|running| same_authority(running, request));
+        if coverage_authority_matches && !go.is_empty() && go.iter().all(|c| r.remaining.contains(&c.bot_id)) {
             return Ok(json!({"batch_id": r.batch_id, "total": 0, "planned": [], "skipped": [], "already_running": true,
                              "restart_status": "already_covered", "covered": wanted}));
         }
-        if !r.followups.contains(scope) {
-            r.followups.push(scope.clone());
+        if !r.followups.iter().any(|old| same_authority(old, request)) {
+            r.followups.push(request.clone());
         }
         return Ok(json!({"batch_id": null, "total": 0, "planned": [], "skipped": [], "restart_status": "deferred",
                          "behind_batch_id": r.batch_id, "deferred": wanted}));
     }
     let slot = BatchSlot { key: slot_key.clone(), app: app.clone() };
-    let cands = candidates(app, scope).await?;
+    if let Some(request) = &request {
+        if !authority_is_current(app, request).await {
+            tracing::warn!(kind = %request.scope.kind, host = %request.scope.host, "scoped restart dropped because its host authority changed before candidate selection");
+            drop(slot);
+            return Ok(superseded_plan(request));
+        }
+    }
+    let cands = candidates(app, request.as_ref().map(|r| &r.scope)).await?;
+    if let Some(request) = &request {
+        if !authority_is_current(app, request).await {
+            tracing::warn!(kind = %request.scope.kind, host = %request.scope.host, "scoped restart dropped because its host authority changed during candidate selection");
+            drop(slot);
+            return Ok(superseded_plan(request));
+        }
+    }
     let (go, skipped) = plan(&cands);
     let supervisor = supervisor_bot_id(app).await?;
+    if let Some(request) = &request {
+        if !authority_is_current(app, request).await {
+            tracing::warn!(kind = %request.scope.kind, host = %request.scope.host, "scoped restart dropped because its host authority changed before dispatch");
+            drop(slot);
+            return Ok(superseded_plan(request));
+        }
+    }
     let targets = supervisor_last(go.iter().map(|c| (c.bot_id.clone(), c.name.clone())).collect(), supervisor.as_deref());
     let planned: Vec<serde_json::Value> = targets.iter().map(|(id, name)| json!({"bot_id": id, "name": name})).collect();
     let skipped_json: Vec<serde_json::Value> = skipped.iter().map(|(c, w)| skip_json(c, *w)).collect();
@@ -349,9 +448,10 @@ pub async fn spawn_scoped(app: &Arc<App>, scope: Option<&Scope>) -> anyhow::Resu
         let app2 = app.clone();
         let bid = batch_id.clone();
         let skipped_for_task = skipped_json.clone();
+        let authority = request.as_ref().and_then(|r| r.fence.clone());
         tokio::spawn(async move {
             let _slot = slot;
-            run_batch(&app2, &bid, targets, skipped_for_task, supervisor).await
+            run_batch_with_authority(&app2, &bid, targets, skipped_for_task, supervisor, authority).await
         });
     } else {
         drop(slot);
@@ -373,12 +473,24 @@ pub async fn spawn_scoped(app: &Arc<App>, scope: Option<&Scope>) -> anyhow::Resu
 }
 
 /// 一顆失敗不中斷整批。
+#[cfg(test)]
 async fn run_batch(
     app: &Arc<App>,
     batch_id: &str,
     targets: Vec<(String, String)>,
     skipped: Vec<serde_json::Value>,
     supervisor: Option<String>,
+) {
+    run_batch_with_authority(app, batch_id, targets, skipped, supervisor, None).await;
+}
+
+async fn run_batch_with_authority(
+    app: &Arc<App>,
+    batch_id: &str,
+    targets: Vec<(String, String)>,
+    skipped: Vec<serde_json::Value>,
+    supervisor: Option<String>,
+    authority: Option<crate::hosts::HostFence>,
 ) {
     let total = targets.len();
     let mut ok: Vec<serde_json::Value> = Vec::new();
@@ -396,6 +508,15 @@ async fn run_batch(
                             "status": "skipped", "reason": why.code(), "reason_label": why.label()});
             (row, ev)
         };
+        if let Some(fence) = authority.as_ref() {
+            if !app.hosts.is_current(fence).await {
+                tracing::warn!(bot = %name, host = %fence.conn().name, reason = Skip::HostSuperseded.code(), "skipped at restart time because the scoped host authority changed");
+                let (row, ev) = skip_now(Skip::HostSuperseded);
+                app.emit("bots_restart_progress", ev).await;
+                skipped.push(row);
+                continue;
+            }
+        }
         if let Some(why) = recheck(app, &bot_id).await {
             tracing::info!(bot = %name, reason = why.code(), "skipped at restart time: its state changed after the plan");
             let (row, ev) = skip_now(why);
@@ -403,18 +524,40 @@ async fn run_batch(
             skipped.push(row);
             continue;
         }
+        if let Some(fence) = authority.as_ref() {
+            if !app.hosts.is_current(fence).await {
+                tracing::warn!(bot = %name, host = %fence.conn().name, reason = Skip::HostSuperseded.code(), "skipped after rechecking bot state because the scoped host authority changed");
+                let (row, ev) = skip_now(Skip::HostSuperseded);
+                app.emit("bots_restart_progress", ev).await;
+                skipped.push(row);
+                continue;
+            }
+        }
         app.emit(
             "bots_restart_progress",
             json!({"batch_id": batch_id, "index": index, "total": total,
                    "bot_id": bot_id, "name": name, "status": "restarting"}),
         )
         .await;
-        let res = restart_resuming(app, &bot_id).await;
+        if let Some(fence) = authority.as_ref() {
+            if !app.hosts.is_current(fence).await {
+                tracing::warn!(bot = %name, host = %fence.conn().name, reason = Skip::HostSuperseded.code(), "skipped before restart because the scoped host authority changed");
+                let (row, ev) = skip_now(Skip::HostSuperseded);
+                app.emit("bots_restart_progress", ev).await;
+                skipped.push(row);
+                continue;
+            }
+        }
+        let res = restart_resuming_with_authority(app, &bot_id, authority.as_ref()).await;
         match res {
             // recheck 之後、拿到 bot 鎖之前它忙起來了：跟上面一樣是跳過，不是失敗——不推 bot_restart_failed、
             // 也不做失敗收尾（它的 run 沒被動過）。
             Restarted::Busy(why) => {
-                tracing::info!(bot = %name, reason = why.code(), "skipped under the bot lock: it got busy after the recheck");
+                if why == Skip::HostSuperseded {
+                    tracing::warn!(bot = %name, reason = why.code(), "skipped under the bot lock because the scoped host authority changed");
+                } else {
+                    tracing::info!(bot = %name, reason = why.code(), "skipped under the bot lock: it got busy after the recheck");
+                }
                 let (row, ev) = skip_now(why);
                 app.emit("bots_restart_progress", ev).await;
                 skipped.push(row);
@@ -472,7 +615,16 @@ enum Restarted {
     Failed(anyhow::Error),
 }
 
+#[cfg(test)]
 async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> Restarted {
+    restart_resuming_with_authority(app, bot_id, None).await
+}
+
+async fn restart_resuming_with_authority(
+    app: &Arc<App>,
+    bot_id: &str,
+    authority: Option<&crate::hosts::HostFence>,
+) -> Restarted {
     // 走哪一條是破壞性的決定（一般路徑會把 pane 關掉），所以要由一次**讀得到**的 bot 決定：讀不到就這顆失敗、什麼都不動，
     // 絕不猜成一般 bot（#188）。`restart_bot_with` 自己也會拒絕 child，這裡是第一道、那裡是最後一道。
     #[cfg(test)]
@@ -489,8 +641,17 @@ async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> Restarted {
         Ok(None) => return Restarted::Busy(Skip::NoLongerPending),
         Err(e) => return Restarted::Failed(anyhow::anyhow!("讀不到 bot 的類別，這次沒有動它（重啟要靠它決定走哪一條路）：{e:#}")),
     }
+    if let Some(fence) = authority {
+        if !app.hosts.is_current(fence).await {
+            return Restarted::Busy(Skip::HostSuperseded);
+        }
+    }
     // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
-    let res = lifecycle::restart_bot_with(app, bot_id, StartOpts { resume_native: true, require_idle: true, ..Default::default() }).await;
+    let opts = StartOpts { resume_native: true, require_idle: true, ..Default::default() };
+    let res = match authority {
+        Some(fence) => lifecycle::restart_bot_with_host_fence(app, bot_id, opts, fence).await,
+        None => lifecycle::restart_bot_with(app, bot_id, opts).await,
+    };
     match res {
         Ok(run_id) => Restarted::Ok(run_id),
         Err(e) => match busy_skip(&e) {
@@ -503,9 +664,11 @@ async fn restart_resuming(app: &Arc<App>, bot_id: &str) -> Restarted {
 /// 鎖內那一次閒置判斷擋下來的（409 `not_idle`），照 `busy` 對回跳過的理由。其他錯誤不是「忙」。
 fn busy_skip(e: &LcError) -> Option<Skip> {
     let LcError::Conflict(v) = e else { return None };
-    if v.get("reason").and_then(|x| x.as_str()) != Some("not_idle") {
-        return None;
+    let reason = v.get("reason").and_then(|x| x.as_str());
+    if reason == Some("host_superseded") {
+        return Some(Skip::HostSuperseded);
     }
+    if reason != Some("not_idle") { return None; }
     Some(match v.get("busy").and_then(|x| x.as_str()).unwrap_or_default() {
         "working" => Skip::Working,
         "blocked" => Skip::Blocked,
@@ -882,6 +1045,64 @@ mod tests {
         assert_eq!(names(candidates(&app, None).await.unwrap()).len(), 3, "不限範圍的照舊全收");
         let plan = spawn_scoped(&app, Some(&Scope { kind: "codex".into(), host: "nowhere".into() })).await.unwrap();
         assert_eq!(plan["total"], 0, "那台沒有 codex：空批次");
+    }
+
+    /// A deferred cli-update restart must keep the authority captured on A. Repointing the same
+    /// host name to B before the follow-up runs must not select B's bot.
+    #[tokio::test]
+    async fn a_deferred_scoped_restart_does_not_follow_a_repointed_host() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = "restart-repoint";
+        let host_cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_for_test(host_cfg("target-a")).await;
+        let original_fence = app.hosts.fence(host).await.expect("A is configured");
+        assert!(app.hosts.is_current(&original_fence).await);
+
+        let project_id = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/repoint', 'repoint', ?, ?)")
+            .bind(&project_id)
+            .bind(host)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let bot = crate::testing::claude_bot(&app, &project_id, "codex-on-b").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET herdr_session='test', update_notice='codex update installed; restart to apply' WHERE id=?")
+            .bind(&run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let scope = Scope { kind: "codex".into(), host: host.into() };
+        let key = app.data_dir.display().to_string();
+        running_batches().lock().unwrap().insert(
+            key.clone(),
+            Running { batch_id: "batch-before-repoint".into(), ..Default::default() },
+        );
+        let queued = spawn_scoped_fenced(&app, &scope, &original_fence).await.unwrap();
+        assert_eq!(queued["restart_status"], "deferred", "前一批要先佔住重啟名額：{queued}");
+
+        app.hosts.replace_remote_for_test(&app, host_cfg("target-b")).await;
+        assert!(!app.hosts.is_current(&original_fence).await, "H 現在指向 B，A 的 fence 已失效");
+        let followups = running_batches().lock().unwrap().remove(&key).expect("前一批仍佔著名額").followups;
+        assert_eq!(followups.len(), 1, "#566 deferred 保留一份同範圍 follow-up");
+        assert_eq!(followups[0].scope, scope);
+        assert!(followups[0].fence.as_ref().is_some_and(|f| f.same_authority(&original_fence)), "deferred follow-up must retain A's authority");
+        run_followups(app.clone(), followups).await;
+
+        let followup_batch = running_batches().lock().unwrap().get(&key).map(|r| r.batch_id.clone());
+        assert!(followup_batch.is_none(), "已失效的 A fence 不得用 H 名稱替 B 開批次，得到 {followup_batch:?}");
+        assert_eq!(db::active_run(&app.db, &bot.id).await.unwrap().map(|r| r.id), Some(run), "B 的 bot 不可被 A 的 deferred restart 停掉");
     }
 
     /// 34d24f0 讓 restart 在 bot 鎖內再判一次閒置、不閒置回 409 `not_idle`。那是「輪到它時忙起來了」，

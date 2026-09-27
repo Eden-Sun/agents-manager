@@ -296,6 +296,59 @@ impl App {
         }
     }
 
+    /// Session configured on the connection captured by a host fence. Never resolve a replaced
+    /// host name through the current host map.
+    pub async fn session_for_bot_with_host_fence(
+        &self,
+        bot: &crate::db::Bot,
+        host: &str,
+        fence: &crate::hosts::HostFence,
+    ) -> Option<String> {
+        if host != fence.conn().name || !self.hosts.is_current(fence).await {
+            return None;
+        }
+        if fence.conn().is_local() {
+            Some(bot.herdr_session.clone().unwrap_or_else(|| self.herdr_session.clone()))
+        } else {
+            fence.conn().cfg.as_ref().map(|cfg| cfg.herdr_session.clone())
+        }
+    }
+
+    /// Resolve a session against the fenced connection itself. A repointed host can never supply
+    /// the client returned here, even if it replaces the name immediately after this check.
+    pub async fn herdr_for_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> Option<HerdrClient> {
+        if !self.hosts.is_current(fence).await {
+            return None;
+        }
+        if fence.conn().is_local() {
+            if session == "default" {
+                Some(self.default_herdr.clone())
+            } else if session == self.herdr_session {
+                Some(self.herdr.clone())
+            } else {
+                None
+            }
+        } else {
+            let expected = fence.conn().cfg.as_ref()?.herdr_session.as_str();
+            (expected == session).then(|| fence.conn().client.clone())
+        }
+    }
+
+    pub async fn session_connected_with_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> bool {
+        if !self.hosts.is_current(fence).await {
+            return false;
+        }
+        if fence.conn().is_local() {
+            if session == "default" {
+                self.default_connected.load(Ordering::SeqCst)
+            } else {
+                session == self.herdr_session && self.connected.load(Ordering::SeqCst)
+            }
+        } else {
+            fence.conn().cfg.as_ref().is_some_and(|cfg| cfg.herdr_session == session) && fence.conn().is_connected()
+        }
+    }
+
     pub async fn session_connected(&self, host: &str, session: &str) -> bool {
         if host == LOCAL_HOST {
             if session == "default" {

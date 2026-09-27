@@ -28,7 +28,7 @@ pub(crate) fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
 
 /// [`stop_bot`] with the lock already held, so a restart stops and starts under one guard.
 pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, false, false).await
+    stop_locked(app, bot_id, false, false, None).await
 }
 
 /// 閒置回收用的 [`stop_bot_locked`]：記 `stopping` 的那一步同時是**收機許可**（issue #144）——`agent_status` 還是
@@ -39,19 +39,35 @@ pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
 /// 同一句 UPDATE 裡，跟那一句寫入由 SQLite 排序：它先落地，這裡 0 rows 不停；這裡先落地，run 已經是 `stopping`，
 /// `begin_external_turn`（在鎖裡看 `state == running`）就不會替一個正在關的 pane 開回合。
 pub async fn stop_bot_locked_if_idle(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, false, true).await
+    stop_locked(app, bot_id, false, true, None).await
 }
 
 /// 重啟那一半的 stop。差別只在 `stopped` 寫不進去之後的重試：重啟沒把 bot 開回來不是「使用者要它停」
 /// （同 `left_down_by_restart`），所以交給對帳照證據收成 `exited`，不補記 `stopped`。
 pub(crate) async fn stop_for_restart_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, false).await
+    stop_locked(app, bot_id, true, false, None).await
+}
+
+pub(crate) async fn stop_for_restart_locked_with_host_fence(
+    app: &Arc<App>,
+    bot_id: &str,
+    fence: &crate::hosts::HostFence,
+) -> LcResult<bool> {
+    stop_locked(app, bot_id, true, false, Some(fence)).await
 }
 
 /// 一鍵重啟（`require_idle`）那一半的 stop：記 `stopping` 的那一步同時是**「還是閒著才准停」的許可**（#346，同 [`stop_bot_locked_if_idle`]），
 /// 使用者剛在 pane 裡打字（`handle_status` 不拿鎖）落在鎖裡看過閒置之後，這一句 UPDATE 輸了、什麼都不動，回 409 `no_longer_idle`。
 pub(crate) async fn stop_for_restart_if_idle_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, true).await
+    stop_locked(app, bot_id, true, true, None).await
+}
+
+pub(crate) async fn stop_for_restart_if_idle_locked_with_host_fence(
+    app: &Arc<App>,
+    bot_id: &str,
+    fence: &crate::hosts::HostFence,
+) -> LcResult<bool> {
+    stop_locked(app, bot_id, true, true, Some(fence)).await
 }
 
 /// ctrl+c（必要時關 pane）之後，外面的 agent 到底怎麼了（#146）。只有前兩種能記成 `stopped`。
@@ -67,15 +83,38 @@ enum StopOutcome {
     Unknown,
 }
 
-async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_idle: bool) -> LcResult<bool> {
+async fn stop_locked(
+    app: &Arc<App>,
+    bot_id: &str,
+    for_restart: bool,
+    only_if_idle: bool,
+    host_fence: Option<&crate::hosts::HostFence>,
+) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
         // agent 自己退了、預覽還掛著的話也一併收（§6.12）。
-        crate::preview::stop_for_bot(app, bot_id).await;
+        match host_fence {
+            Some(fence) => {
+                #[cfg(test)]
+                super::race_point::hit("restart_before_no_run_preview_cleanup", bot_id).await;
+                if app.hosts.run_if_current(fence, crate::preview::stop_for_bot(app, bot_id)).await.is_none() {
+                    tracing::warn!(bot = %bot.name, host = %fence.conn().name, reason = "superseded", "skipped preview cleanup because the scoped host authority changed");
+                    return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": fence.conn().name})));
+                }
+            }
+            None => {
+                crate::preview::stop_for_bot(app, bot_id).await;
+            }
+        }
         return Ok(false);
     };
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
-    let client = client_for_run(app, &run).await?;
+    #[cfg(test)]
+    super::race_point::hit("restart_before_stop_client_lookup", bot_id).await;
+    let client = match host_fence {
+        Some(fence) => client_for_run_with_host_fence(app, &run, fence).await?,
+        None => client_for_run(app, &run).await?,
+    };
     // 讀完 active run、還沒記 `stopping` 的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。
     #[cfg(test)]
     {
@@ -109,17 +148,45 @@ async fn stop_locked(app: &Arc<App>, bot_id: &str, for_restart: bool, only_if_id
         }
     }
     app.emit_bot_status(bot_id).await;
-    // 在飛的那一筆先收，收不成就一步都不動外面（#156）：這時 agent 還沒被打斷，那一回合真的還在跑。
-    if let Err(e) = fail_in_flight(app, &run.id, "run stopped by user").await {
-        return Err(turn_unwritable(app, bot_id, &run.id, "停", e).await);
+    let target = db::run_target(&run, &bot);
+    // Close the in-flight turn and send ctrl+c as one fenced external handoff. Config replacement
+    // uses the same per-host authority gate: it either wins first and this does nothing, or waits
+    // while the RPC runs on the captured A client. It cannot resolve H to B in the middle of stop.
+    let stop_signal = async {
+        if let Err(e) = fail_in_flight(app, &run.id, "run stopped by user").await {
+            return Err(turn_unwritable(app, bot_id, &run.id, "停", e).await);
+        }
+        for _ in 0..2 {
+            let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Ok(())
+    };
+    let stop_signal = match host_fence {
+        Some(fence) => app.hosts.run_if_current(fence, stop_signal).await,
+        None => Some(stop_signal.await),
+    };
+    match stop_signal {
+        Some(Ok(())) => {}
+        Some(Err(e)) => return Err(e),
+        None => {
+            back_to_running(app, &run.id).await;
+            app.emit_bot_status(bot_id).await;
+            return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": host_fence.unwrap().conn().name})));
+        }
     }
 
-    // 預覽的 pane 跟 agent 同一個 tab：先收，agent 的 pane 關掉時那個 tab 才會是空的（§6.12）。
-    crate::preview::stop_for_bot(app, bot_id).await;
-    let target = db::run_target(&run, &bot);
-    for _ in 0..2 {
-        let _ = client.agent_send_keys(&target, &["ctrl+c".to_string()]).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    // Preview shutdown resolves its session by host name too, so keep the same authority gate
+    // while it closes its pane; a repoint cannot turn this into cleanup on B.
+    match host_fence {
+        Some(fence) => {
+            if app.hosts.run_if_current(fence, crate::preview::stop_for_bot(app, bot_id)).await.is_none() {
+                tracing::info!(bot = %bot.name, host = %host, "skipped preview cleanup after the scoped host authority was superseded");
+            }
+        }
+        None => {
+            crate::preview::stop_for_bot(app, bot_id).await;
+        }
     }
     // 只認 herdr 明確說「不在」：RPC 失敗不是退出的證據。
     let mut gone = false;
@@ -1140,6 +1207,122 @@ mod stop_commit_tests {
         assert_eq!(state(&app, &far_run).await, "stopped");
         assert!(!rs::watched(&app, &key("remote1")).await, "拆的是遠端那一個");
         assert!(rs::watched(&app, &key(LOCAL_HOST)).await, "本機同名的那顆照舊收得到狀態事件");
+    }
+
+    /// The host can be repointed after the restart's fence check but before stop resolves the run's
+    /// session. That lookup must use the captured authority (or fail closed), never H's new client.
+    #[tokio::test]
+    async fn a_fenced_restart_does_not_send_stop_to_a_repointed_host() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let host = "restart-stop-repoint";
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let fence = app.hosts.fence(host).await.expect("A is configured");
+
+        let a_socket = crate::hosts::short_dir(None).join(format!("{host}.sock"));
+        std::fs::create_dir_all(a_socket.parent().unwrap()).unwrap();
+        let _a_herdr = tt::MockHerdr::start(a_socket);
+        let b_instance = format!("restart-stop-{}", db::ulid());
+        app.set_instance(Some(b_instance.clone()));
+        let b_socket = crate::hosts::short_dir(Some(&b_instance)).join(format!("{host}.sock"));
+        std::fs::create_dir_all(b_socket.parent().unwrap()).unwrap();
+        let b_herdr = tt::MockHerdr::start(b_socket);
+
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(&app.db).await.unwrap();
+        let bot = tt::claude_bot(&app, &env.project_id, "fenced-stop").await;
+        let run = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle','ws-a','pane-a','tab-a','proj-fenced-stop','test',?)",
+        )
+        .bind(&run)
+        .bind(&bot.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let app_to_repoint = app.clone();
+        let replacement = cfg("target-b");
+        super::super::race_point::arm("restart_before_stop_client_lookup", &bot.id, move || async move {
+            app_to_repoint.hosts.replace_remote_for_test(&app_to_repoint, replacement).await;
+        });
+
+        let result = crate::lifecycle::restart_bot_with_host_fence(
+            &app,
+            &bot.id,
+            StartOpts { resume_native: true, require_idle: true, ..Default::default() },
+            &fence,
+        )
+        .await;
+
+        assert!(matches!(result, Err(LcError::Conflict(ref value)) if value["reason"] == "host_superseded"), "stale A authority must be reported as superseded: {result:?}");
+        assert!(!b_herdr.methods().iter().any(|method| method == "agent.send_keys"), "B's bot must never receive A's stop: {:?}", b_herdr.methods());
+        assert_eq!(db::run(&app.db, &run).await.unwrap().unwrap().state, "running", "a stale authority must not stop B's active run");
+    }
+
+    /// The no-run cleanup path can still have a preview pane. If H is repointed before that
+    /// cleanup, it must not resolve H to B and close a pane there.
+    #[tokio::test]
+    async fn a_fenced_restart_does_not_clean_a_preview_on_a_repointed_host() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let host = "restart-preview-repoint";
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.into(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let fence = app.hosts.fence(host).await.expect("A is configured");
+
+        let a_socket = crate::hosts::short_dir(None).join(format!("{host}.sock"));
+        std::fs::create_dir_all(a_socket.parent().unwrap()).unwrap();
+        let _a_herdr = tt::MockHerdr::start(a_socket);
+        let b_instance = format!("restart-preview-{}", db::ulid());
+        app.set_instance(Some(b_instance.clone()));
+        let b_socket = crate::hosts::short_dir(Some(&b_instance)).join(format!("{host}.sock"));
+        std::fs::create_dir_all(b_socket.parent().unwrap()).unwrap();
+        let b_herdr = tt::MockHerdr::start(b_socket);
+
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(&app.db).await.unwrap();
+        let bot = tt::claude_bot(&app, &env.project_id, "fenced-preview").await;
+        sqlx::query(
+            "INSERT INTO bot_previews (bot_id, host, pane_id, port, dir, status, updated_at, source)
+             VALUES (?, ?, 'preview-pane', 5173, '/project', 'running', ?, 'spawned')",
+        )
+        .bind(&bot.id)
+        .bind(host)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let app_to_repoint = app.clone();
+        let replacement = cfg("target-b");
+        super::super::race_point::arm("restart_before_no_run_preview_cleanup", &bot.id, move || async move {
+            app_to_repoint.hosts.replace_remote_for_test(&app_to_repoint, replacement).await;
+        });
+
+        let lock = app.bot_lock(&bot.id).await;
+        let _bot_guard = lock.lock().await;
+        let result = stop_for_restart_locked_with_host_fence(&app, &bot.id, &fence).await;
+
+        assert!(!b_herdr.methods().iter().any(|method| method == "pane.close"), "B's preview pane must not be touched: {:?}", b_herdr.methods());
+        assert!(matches!(result, Err(LcError::Conflict(ref value)) if value["reason"] == "host_superseded"), "stale authority must report superseded: {result:?}");
+        let preview = crate::preview::row(&app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(preview.status, "running", "the stale request must leave B's preview row alone");
     }
 
     /// #208（同檔同類）：強制中止讀不到在飛的那一筆——以前 esc 已經送出去了，讀錯又當成「沒有」，打斷的紀錄沒記，
