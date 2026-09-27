@@ -3344,6 +3344,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - **申請可以帶穩定的 `request_id`**（AGM 裁示 2026-09-16）：2026-09-16 04:05 k8bw2f 對同一顆 `ca7b22d` 送了兩筆一模一樣的 restart 申請（它解析回應時取錯欄位，以為沒送成功），AGM 只能核一筆、駁一筆。
   現在同一個 supervisor 下同一個 `request_id` 再送回**原本那一筆**（`created:false`），不新增也不重推 inbox；**已經裁示的也回它本人**——重送的人要看到的是「這件事已經有裁示了」。
   同一個 id 換了 purpose／scope／commit 是兩件事共用一個 id：回 409 `approval_request_mismatch`，不回舊的也不覆寫。`expires_in_secs` 不參與比對。不帶就是舊行為。
+  有帶 `expires_in_secs` 時必須是 1 秒到 7 天（604800）；0、負數與更大的值回 400，不會建出一開始就過期的核准，也不會把 handler 打崩（#655）。
   欄位是 additive 的 `client_request_id`（既有列留白，唯一鍵只約束有值的列），`approval list` 會帶出來對帳。
 - 租約有只增不減的 `fence`；過期被接手後舊 fence 的 renew／release 一律失敗。到期自動釋放。acquire 與 renew 取「要求到期」與「核准到期」較早者，renew 重驗核准狀態。
 - **憑證**（AGM 裁示 2026-09-16）：`acquire` 的回應多一個一次性的 `lease_token`（隨機 32 字元）。`renew`／`release` 必須帶對的 token，否則 **403**（`lease_token_required`／`lease_token_mismatch`），租約一個字都不動並留一行 warn。

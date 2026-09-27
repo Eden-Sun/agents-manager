@@ -642,7 +642,11 @@ pub fn now() -> String {
 /// 以前總管、看門狗、維護、API 各有一份一模一樣、卻寫到**秒**的 `iso_in`，於是
 /// `notify_next_at`（秒）跟 `db::now()`（毫秒）在 SQL 裡比大小會差不到一秒（issue #101）。
 pub fn iso_in(secs: i64) -> String {
-    iso_at(chrono::Utc::now() + chrono::Duration::seconds(secs))
+    // `+` panics when the instant leaves chrono's range (`expires_in_secs` 曾把 handler 打崩，#655)。
+    // 加不出來就停在現在：到期判斷會當成已經過期，不會變成幾萬年後的核准。
+    let now = chrono::Utc::now();
+    let Some(delta) = chrono::Duration::try_seconds(secs) else { return iso_at(now) };
+    iso_at(now.checked_add_signed(delta).unwrap_or(now))
 }
 
 /// 把一個時刻寫成 [`now`] 的格式。外面來的時間（CLI 橫幅的重置時刻等）先 parse 再用這支正規化。
