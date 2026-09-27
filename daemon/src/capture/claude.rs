@@ -6,7 +6,16 @@ pub struct ClaudeCapture;
 
 impl Capture for ClaudeCapture {
     fn still_busy(&self, screen: &str) -> bool {
-        screen.lines().any(is_spinner_line)
+        let lines: Vec<&str> = screen.lines().collect();
+        if let Some(cut) = composer_top(&lines) {
+            let zone = status_zone_start(&lines, cut);
+            return lines[zone..cut].iter().any(|l| is_zone_busy(l.trim()));
+        }
+        // 沒有輸入框（測試給的單行 spinner）：只認活動列形狀。`·`／`*` 要有 `(… tokens)` 那種形狀才算。
+        lines.iter().any(|l| {
+            let s = l.trim();
+            is_live_spinner(s) || is_legacy_spinner(s)
+        })
     }
 
     fn awaits_input(&self, screen: &str) -> bool {
@@ -25,20 +34,17 @@ impl Capture for ClaudeCapture {
                 .iter()
                 .rposition(|l| l.trim_start().starts_with(marker))?;
         let mut out: Vec<String> = Vec::new();
-        for line in &lines[start..] {
+        // 回覆收到輸入框上緣為止。框的位置用真畫面：規則線夾著 `❯`（`claude-2.1.281-feedback-survey.txt`）。
+        // 緊貼上緣的那幾行是狀態列（spinner／done），不是回覆。框以上的 `│`、`---`、⚠ 都是內容。
+        let cut = composer_top(&lines).filter(|i| *i > start).unwrap_or(lines.len());
+        let keep_until = status_zone_start(&lines, cut);
+        for line in &lines[start..keep_until] {
             let t = line.trim_end();
             let s = t.trim_start();
-            if s.starts_with('╭') || s.starts_with('│') || s.starts_with('╰') || s.starts_with('▔')
-            {
+            if s.starts_with('╭') || s.starts_with('╰') || s.starts_with('▔') {
                 break;
             }
-            if !s.is_empty()
-                && s.chars()
-                    .all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_')
-            {
-                break;
-            }
-            if spinner_led(s) || self.noise_line(s) {
+            if is_update_banner(s) || is_agents_md_notice(s) {
                 continue;
             }
             let cleaned = s.strip_prefix(marker).unwrap_or(t).to_string();
@@ -112,13 +118,87 @@ pub fn is_spinner_glyph(c: char) -> bool {
     "✻✽✶✳✢✣✤✥✦✧✩✪✫✬✭✮✯✰✱✲✴✵✷✸✹✺✻✼✾❋·∗*".contains(c) || ('\u{2800}'..='\u{28FF}').contains(&c)
 }
 
-fn is_spinner_line(s: &str) -> bool {
+/// 輸入框上緣。只接受畫面底部那個框：`❯` 後面只剩規則線與狀態列
+/// （`claude-2.1.281-feedback-survey.txt`：`────` / `❯` / `────` / 狀態列 / `⏵⏵`）。
+/// 回覆上面的 `❯ 使用者句子` 後面還有內容，不是框。
+fn composer_top(lines: &[&str]) -> Option<usize> {
+    let prompt_at = lines.iter().rposition(|l| l.trim_start().starts_with('❯'))?;
+    let footer = lines[prompt_at + 1..].iter().all(|l| {
+        let s = l.trim();
+        s.is_empty() || is_full_rule(s) || is_status_chrome(s)
+    });
+    if !footer {
+        return None;
+    }
+    let mut i = prompt_at;
+    while i > 0 && lines[i - 1].trim().is_empty() {
+        i -= 1;
+    }
+    if i > 0 && is_full_rule(lines[i - 1]) {
+        return Some(i - 1);
+    }
+    Some(prompt_at)
+}
+
+fn is_full_rule(s: &str) -> bool {
     let s = s.trim();
+    s.chars().count() >= 3
+        && s.chars()
+            .all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_')
+}
+
+/// 緊貼輸入框上緣、中間沒有空行的狀態列。空行以上是回覆，不掃。
+fn status_zone_start(lines: &[&str], cut: usize) -> usize {
+    let mut zone = cut;
+    while zone > 0 {
+        let s = lines[zone - 1].trim();
+        if s.is_empty() || !(is_status_chrome(s) || is_zone_busy(s)) {
+            break;
+        }
+        zone -= 1;
+    }
+    zone
+}
+
+fn is_done_row(s: &str) -> bool {
+    let Some(c) = s.chars().next() else {
+        return false;
+    };
+    is_spinner_glyph(c) && (s.contains("· done") || s.contains(" for "))
+}
+
+fn is_status_chrome(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    super::is_activity_shape(s)
+        || is_done_row(s)
+        || is_update_banner(s)
+        || s.starts_with("⏵⏵")
+        || s.starts_with("Tip:")
+        || s.starts_with("⎿")
+        || s.contains("shift+tab to cycle")
+        || s.contains("Auto-update failed")
+        || (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
+        || (s.contains(" · ") && s.contains("% left"))
+}
+
+fn is_zone_busy(s: &str) -> bool {
+    is_live_spinner(s) || is_legacy_spinner(s)
+}
+
+/// 還在跑的活動列：`<Verb>… (3s · …)` 或帶 `esc to interrupt`。項目符號 `· 下載中…` 不是。
+fn is_live_spinner(s: &str) -> bool {
+    super::is_activity_shape(s) || s.contains("esc to interrupt")
+}
+
+/// 沒有輸入框時的舊 spinner（`⠦ Thinking… 52s`）。`·` 與 `*` 留給 [`is_live_spinner`] 的括號形狀。
+fn is_legacy_spinner(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {
         return false;
     };
-    if !is_spinner_glyph(first) {
+    if first == '·' || first == '*' || first == '∗' || !is_spinner_glyph(first) {
         return false;
     }
     let rest = chars.as_str().trim_start();
@@ -277,5 +357,66 @@ mod loose_noise_tests {
         assert!(is_noise("* Cooking… (3s · ↓ 1.0k tokens)"));
         assert!(is_noise("· Philosophising… (33m 33s · ↓ 94.9k tokens)"));
         assert!(is_noise("✻ Crunched for 9s · done 11:35 PM"));
+    }
+}
+
+#[cfg(test)]
+mod reply_boundary_tests {
+    use super::*;
+
+    /// 2.1.x 輸入框（`claude-2.1.281-feedback-survey.txt`）：規則線夾著空的 `❯`，底下才是狀態列。
+    const COMPOSER: &str = "\
+────────────────────────────────
+❯
+────────────────────────────────
+  hunta | survey-cwd | HAI4.5 | 5h:80% | 7d:70%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+";
+
+    /// #661：markdown 表格的 `│` 列與回覆裡的 `---` 不是輸入框上緣。
+    #[test]
+    fn a_markdown_table_and_a_horizontal_rule_stay_in_the_reply() {
+        let screen = format!(
+            "❯ 分支狀態？\n⏺ 以下是分支狀態：\n\n  ┌──────────┬────────┐\n  │ 分支     │ 狀態   │\n  │ feat/a   │ 過期   │\n  └──────────┴────────┘\n\n  第一部分：結論\n  ---\n  第二部分：細節很重要\n建議刪掉 feat/a。\n{COMPOSER}"
+        );
+        let reply = ClaudeCapture.extract_reply(&screen).unwrap();
+        assert!(reply.contains("│ feat/a   │ 過期   │"), "表格列被截掉：{reply}");
+        assert!(reply.contains("第二部分：細節很重要"), "水平線後面被截掉：{reply}");
+        assert!(reply.contains("建議刪掉 feat/a。"), "結論被截掉：{reply}");
+        assert!(!reply.contains("bypass permissions"), "輸入框以下的 chrome 不能進回覆：{reply}");
+        assert!(!reply.contains("5h:"), "狀態列不能進回覆：{reply}");
+    }
+
+    /// #662：回覆區塊裡的警告符號與 `Tip:` 是內容。chrome 只認輸入框底下的真狀態列。
+    #[test]
+    fn warning_lines_inside_the_reply_are_kept() {
+        let screen = format!(
+            "❯ 可以 force push 嗎？\n⏺ 可以，但注意：\n  ⚠️ 這會刪掉所有未推送的 commit\n  Tip: 先備份\n  ✗ 不要用 --force\n  ✘ 遠端也會被改寫\n  ⏵ 先看 git status\n  其餘沒問題。\n{COMPOSER}"
+        );
+        let reply = ClaudeCapture.extract_reply(&screen).unwrap();
+        assert!(reply.contains("⚠️ 這會刪掉所有未推送的 commit"), "{reply}");
+        assert!(reply.contains("Tip: 先備份"), "{reply}");
+        assert!(reply.contains("✗ 不要用 --force"), "{reply}");
+        assert!(reply.contains("✘ 遠端也會被改寫"), "{reply}");
+        assert!(reply.contains("⏵ 先看 git status"), "{reply}");
+        assert!(reply.contains("其餘沒問題。"), "{reply}");
+        assert!(!reply.contains("bypass permissions"), "{reply}");
+    }
+
+    /// #663：舊回覆裡的 `·`／`*` 不是 spinner。活的 spinner 只認輸入框正上方的活動列。
+    #[test]
+    fn an_old_dot_line_above_a_finished_reply_is_not_busy() {
+        let screen = format!(
+            "❯ 下載？\n⏺ 先前：\n  · 下載中… 還沒好\n  * Loading…\n  已經好了。\n{COMPOSER}"
+        );
+        assert!(!ClaudeCapture.still_busy(&screen), "舊回覆的項目符號被當成還在跑");
+        let reply = ClaudeCapture.extract_reply(&screen).unwrap();
+        assert!(reply.contains("· 下載中… 還沒好"), "{reply}");
+        assert!(reply.contains("已經好了。"), "{reply}");
+
+        let busy = format!("❯ 下載？\n⏺ 開始了\n· Philosophising… (33m 33s · ↓ 94.9k tokens)\n{COMPOSER}");
+        assert!(ClaudeCapture.still_busy(&busy), "輸入框正上方的活動列應該算還在跑");
+        let baking = "❯ Reply with PONG\n✢ Baking… (3s · esc to interrupt)\n──────\n❯\n";
+        assert!(ClaudeCapture.still_busy(baking));
     }
 }

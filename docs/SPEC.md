@@ -528,6 +528,10 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   一直沒人選就走 §4.3b（blocked 的不收；herdr 判 idle 的照 §4.3b 寫系統說明收尾，不存畫面）。
 - **執行**：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`，成功才 `agent.read {source: recent_unwrapped, lines: 200}`，
   取游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 抽回覆：Claude `⏺ ` 開頭、Codex `• ` 開頭；grok 無標記（§12.3）。
+- **Claude 回覆與 chrome 的邊界**（#661／#662／#663）：輸入框以真畫面為準（`────`／`❯`／`────`，狀態列與 `⏵⏵ bypass permissions` 在框下）。
+  回覆收到框的上緣為止；緊貼上緣、中間沒有空行的活動列／完成列才是狀態區。框以上的 markdown 表格（`│`）、水平線（`---`）、
+  以及 `⚠`／`✗`／`✘`／`⏵`／`Tip:` 開頭的句子都留在回覆裡。`still_busy` 只看這個狀態區（沒有輸入框時才退回單行活動列）；
+  舊回覆裡的 `· 下載中…` 或 `* Loading…` 不算還在跑。
 - **沒有回覆標記**時用 `clean_screen`：取最後一行 prompt 回音之後的內容，去掉 banner、方框、分隔線、狀態列、spinner、`⚠` 行，保留 `⎿` 工具結果行。
 - **回音剝除**：畫面上只有 `❯ <第一行>` 算回音，多行 prompt 的其餘行逐行比對去掉。極窄 pane 下 TUI 會一列一個字、逐行比對必失敗，
   所以另有**去空白比對**後備：兩邊拿掉所有空白再比，候選開頭須是 prompt 的一段結尾（≥ 8 字元）。
