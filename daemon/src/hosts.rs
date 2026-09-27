@@ -723,6 +723,20 @@ pub struct HostFence {
     ticket: u64,
 }
 
+/// Weak cache identity for one fenced host generation. Keeping this in a process-wide cache must not pin a retired
+/// [`HostConn`] (its supervisor and client resources); the weak pointer still distinguishes replaced connections.
+#[derive(Clone)]
+pub(crate) struct HostAuthorityKey {
+    conn: std::sync::Weak<HostConn>,
+    generation: u64,
+}
+
+impl HostAuthorityKey {
+    pub(crate) fn matches(&self, fence: &HostFence) -> bool {
+        self.generation == fence.generation && self.conn.ptr_eq(&Arc::downgrade(&fence.conn))
+    }
+}
+
 impl HostFence {
     pub fn conn(&self) -> &Arc<HostConn> {
         &self.conn
@@ -731,6 +745,10 @@ impl HostFence {
     /// Tickets from the same connection generation represent the same host authority.
     pub(crate) fn same_authority(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.conn, &other.conn) && self.generation == other.generation
+    }
+
+    pub(crate) fn authority_key(&self) -> HostAuthorityKey {
+        HostAuthorityKey { conn: Arc::downgrade(&self.conn), generation: self.generation }
     }
 
     /// Call while holding the lock of the state being published: true once per ticket, and never for a ticket
