@@ -161,6 +161,8 @@ pub struct App {
     pub gh_device: Mutex<HashMap<String, crate::gh_auth::DeviceSession>>,
     /// 這個 daemon 開過的主機 shell。只放記憶體：它同時是送鍵的白名單，重啟不該繼承。
     pub host_shells: crate::api::shell::Registry,
+    /// Per-host serialization for shell opens: the cap check stays exclusive through pane creation and registration.
+    pub host_shell_open_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
     pub pane_live: crate::api::shell::LiveCache,
     /// 預覽（`preview.rs`）的行程／port 查詢，測試換成假貨；正式是 herdr＋本機 TCP。
@@ -250,6 +252,7 @@ impl App {
             submodules_cache: Mutex::new(HashMap::new()),
             gh_device: Mutex::new(HashMap::new()),
             host_shells: Default::default(),
+            host_shell_open_locks: Mutex::new(HashMap::new()),
             #[cfg(test)]
             preview_env: Default::default(),
             pane_live: Default::default(),
