@@ -215,9 +215,19 @@ pub async fn dispatch(app: &Arc<App>, assignment_id: &str) {
     // about a person from a failed read. Retrying a few seconds later costs nothing; a prompt
     // wearing the user's face cannot be taken back.
     // 驗收角色是協調者、而協調者存在時，派工訊息標成協調者送的：bot 回話才會找對人。
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("dispatch_before_responder_attribution", &a.id).await;
     let responder = match a.review_role.as_deref() {
         Some("patrol") => None,
-        _ => super::roles::responder_bot(&app.db).await.ok().flatten().map(|b| b.id),
+        _ => match super::roles::responder_bot(&app.db).await {
+            Ok(responder) => responder.map(|b| b.id),
+            Err(e) => {
+                let until = iso_in(super::maintenance::UNREADABLE_RETRY_SECS);
+                let _ = store::hold(&app.db, &a.id, &until, &format!("cannot read responder attribution: {e:#}")).await;
+                tracing::warn!(assignment = %a.id, until, error = ?e, "assignment held: responder attribution cannot be read");
+                return;
+            }
+        },
     };
     let from = match store::get_or_init(&app.db).await {
         Ok(sup) => responder.or(sup.bot_id),
@@ -5182,5 +5192,120 @@ mod role_dispatch_read_failure_tests {
         let handed_off = store::assignment(&app.db, &assignment_id).await.unwrap().unwrap();
         assert_eq!(handed_off.status, "awaiting_review", "讀回 responder 身分後改走角色 handoff");
         assert!(env.herdr.calls_to("pane.send_text").iter().all(|p| p["pane_id"] != pane), "角色 handoff 不得 prompt 進角色 pane");
+    }
+}
+
+#[cfg(test)]
+mod responder_attribution_read_failure_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    async fn assignment_fixture(name: &str, configure_responder: bool) -> (tt::Env, String, String, String, Option<String>) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let manager = tt::claude_bot(&app, &env.project_id, &format!("{name}-manager")).await;
+        let supervisor = store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
+            .bind(&manager.id)
+            .bind(&supervisor.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        super::super::roles::get(&app.db, super::super::roles::Role::Responder).await.unwrap();
+        let responder = if configure_responder {
+            let responder = tt::claude_bot(&app, &env.project_id, &format!("{name}-responder")).await;
+            sqlx::query("UPDATE supervisor_roles SET bot_id=? WHERE role='responder'")
+                .bind(&responder.id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            Some(responder.id)
+        } else {
+            None
+        };
+        let worker = tt::claude_bot(&app, &env.project_id, &format!("{name}-worker")).await;
+        let assignment = store::insert_assignment_linked(
+            &app.db,
+            None,
+            &worker.id,
+            name,
+            "做 X",
+            &[],
+            None,
+            true,
+            None,
+            Some("responder"),
+        )
+        .await
+        .unwrap();
+        let pane = format!("pane-{name}");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-attribution',?,?,'test',1,?)",
+        )
+        .bind(crate::db::ulid())
+        .bind(&worker.id)
+        .bind(&pane)
+        .bind(format!("{name}-agent"))
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        env.herdr.live_pane(&pane, tt::LivePane { width: Some(120), ..Default::default() });
+        (env, assignment.id, pane, manager.id, responder)
+    }
+
+    async fn relay_from_for_turn(app: &Arc<App>, turn_id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT relay_from FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at LIMIT 1")
+            .bind(turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_configured_responder_never_falls_back_to_patrol_attribution() {
+        let (env, assignment_id, pane, manager_id, responder_id) = assignment_fixture("attribution-read-607", true).await;
+        let responder_id = responder_id.expect("fixture configured responder");
+        let app = env.app.clone();
+        let fault_app = app.clone();
+        crate::lifecycle::race_point::arm("dispatch_before_responder_attribution", &assignment_id, move || async move {
+            crate::testing::make_table_unreadable(&fault_app, "supervisor_roles").await;
+        });
+
+        {
+            let _guard = super::super::lock().await;
+            dispatch(&app, &assignment_id).await;
+        }
+        let held = store::assignment(&app.db, &assignment_id).await.unwrap().unwrap();
+        assert_eq!(held.status, "queued", "responder 身分讀不到時不可送出");
+        assert_eq!(held.attempts, 0, "歸屬查詢故障不花派送次數");
+        assert!(held.next_attempt_at.is_some(), "讀取失敗後要安排重試");
+        assert!(env.herdr.calls_to("pane.send_text").iter().all(|p| p["pane_id"] != pane), "不可把 patrol attribution 送進 worker pane");
+
+        crate::testing::make_table_readable(&app, "supervisor_roles").await;
+        {
+            let _guard = super::super::lock().await;
+            dispatch(&app, &assignment_id).await;
+        }
+        let delivered = store::assignment(&app.db, &assignment_id).await.unwrap().unwrap();
+        assert_eq!(delivered.status, "delivered");
+        let turn_id = delivered.turn_id.expect("successful dispatch records a turn");
+        assert_eq!(relay_from_for_turn(&app, &turn_id).await.as_deref(), Some(responder_id.as_str()));
+        assert_ne!(responder_id, manager_id, "the fixture must distinguish responder from patrol");
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_responder_keeps_the_patrol_attribution_fallback() {
+        let (env, assignment_id, _pane, manager_id, responder_id) = assignment_fixture("attribution-empty-607", false).await;
+        assert!(responder_id.is_none());
+        let app = env.app.clone();
+        {
+            let _guard = super::super::lock().await;
+            dispatch(&app, &assignment_id).await;
+        }
+        let delivered = store::assignment(&app.db, &assignment_id).await.unwrap().unwrap();
+        let turn_id = delivered.turn_id.expect("successful dispatch records a turn");
+        assert_eq!(relay_from_for_turn(&app, &turn_id).await.as_deref(), Some(manager_id.as_str()));
     }
 }
