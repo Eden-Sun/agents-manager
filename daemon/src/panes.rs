@@ -407,7 +407,6 @@ pub(crate) async fn record_scan(
             continue;
         };
 
-        let kind = classify(f.foreground.as_deref(), ports);
         let (prev_bound, prev_owner) = prev.as_ref().map(|p| (p.3.clone(), p.4.clone())).unwrap_or_default();
         let env_bot = f.bot_ids.first().cloned();
         let owner = env_bot.clone();
@@ -419,17 +418,63 @@ pub(crate) async fn record_scan(
         //   4. 都對不到才是沒歸屬（scratch 的候選）。
         // 綁定（1、2）以讀得到的環境為準；這一輪讀不到這顆 pane 的環境（macOS 讀不到閒著的 `-zsh`）就沿用上一輪記下的，
         // 不然專案一刪、綁定跟著蒸發，孤兒就掉成「沒歸屬」去搶 scratch（review 2026-09-16 core 2）。
-        let bound = if f.env_seen {
-            match f.project_ids.iter().find(|id| !id.trim().is_empty()).cloned() {
-                Some(id) => Some(id),
-                None => match &env_bot {
-                    Some(b) => crate::db::bot(&app.db, b).await.ok().flatten().map(|b| b.project_id),
-                    None => None,
+        let env_project = if f.env_seen { f.project_ids.iter().find(|id| !id.trim().is_empty()).cloned() } else { None };
+        let bot_project = if f.env_seen && env_project.is_none() {
+            match &env_bot {
+                Some(b) => match crate::db::bot(&app.db, b).await {
+                    Ok(bot) => bot.map(|bot| bot.project_id),
+                    Err(e) => {
+                        // An unreadable authority lookup is not evidence that this pane is unbound.
+                        // Keep existing classification untouched; a first-seen pane gets a safe placeholder
+                        // that cannot enter scratch/GC/unowned handling before the next scan retries.
+                        complete = false;
+                        tracing::warn!(host, pane_id, bot_id = %b, error = ?e, "pane bot project lookup failed; deferring classification");
+                        if prev.is_some() {
+                            sqlx::query(
+                                "UPDATE panes SET workspace_id=?, tab_id=?, cwd=?, label=?, last_revision=?, last_output_at=?, last_seen=?
+                                  WHERE host=? AND pane_id=?",
+                            )
+                            .bind(p.get("workspace_id").and_then(Value::as_str))
+                            .bind(p.get("tab_id").and_then(Value::as_str))
+                            .bind(p.get("cwd").and_then(Value::as_str))
+                            .bind(label)
+                            .bind(revision)
+                            .bind(&last_output_at)
+                            .bind(&now)
+                            .bind(host)
+                            .bind(pane_id)
+                            .execute(&app.db)
+                            .await?;
+                        } else {
+                            sqlx::query(
+                                "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, label, kind, owner_bot_id, project_id,
+                                                    last_revision, last_output_at, first_seen, last_seen, owned_by, bound_project_id)
+                                 VALUES (?,?,?,?,?,?,'service',?,NULL,?,?,?,?,'bot',NULL)",
+                            )
+                            .bind(pane_id)
+                            .bind(host)
+                            .bind(p.get("workspace_id").and_then(Value::as_str))
+                            .bind(p.get("tab_id").and_then(Value::as_str))
+                            .bind(p.get("cwd").and_then(Value::as_str))
+                            .bind(label)
+                            .bind(b)
+                            .bind(revision)
+                            .bind(&last_output_at)
+                            .bind(&first_seen)
+                            .bind(&now)
+                            .execute(&app.db)
+                            .await?;
+                        }
+                        continue;
+                    }
                 },
+                None => None,
             }
         } else {
-            prev_bound
+            None
         };
+        let bound = if f.env_seen { env_project.or(bot_project) } else { prev_bound };
+        let kind = classify(f.foreground.as_deref(), ports);
         // 擁有它的 bot 被刪（或根本不在這顆 DB）也是孤兒。DB 讀不到就不下結論。
         let owner_bot = if f.env_seen { env_bot.clone() } else { prev_owner };
         let bot_gone = match &owner_bot {
@@ -987,6 +1032,76 @@ mod tests {
         assert_eq!(ws, "w2", "位置照樣更新");
         let new_row = row(&app, "w1:pNew").await;
         assert_eq!((new_row.0.as_str(), new_row.1.as_str()), ("service", "none"), "新列先當 service，不會被 GC 當成閒置 shell");
+        std::fs::remove_dir_all(&app.data_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_bot_lookup_error_keeps_existing_ownership_and_defers_first_seen_panes() {
+        let app = app().await;
+        project_and_bot(&app).await;
+        let existing = json!({
+            "pane_id": "w1:pExisting", "workspace_id": "w1", "tab_id": "t1", "cwd": "/elsewhere", "revision": 1
+        });
+        let existing_facts = HashMap::from([("w1:pExisting".to_string(), observed(None, Some("b1"), None, &[]))]);
+        let first = record_scan(&app, "local", std::slice::from_ref(&existing), &existing_facts, &crate::db::now()).await.unwrap();
+        assert!(first.complete);
+        let before: (String, String, Option<String>, Option<String>, Option<String>, bool, bool) = sqlx::query_as(
+            "SELECT kind, owned_by, project_id, owner_bot_id, bound_project_id, orphaned, scratch FROM panes WHERE host='local' AND pane_id='w1:pExisting'",
+        )
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(before, ("shell".into(), "bot".into(), Some("p1".into()), Some("b1".into()), Some("p1".into()), false, false));
+
+        let first_seen = json!({
+            "pane_id": "w1:pNew", "workspace_id": "w1", "tab_id": "t2", "cwd": "/elsewhere", "revision": 1
+        });
+        let snapshot = [existing, first_seen];
+        let facts = HashMap::from([
+            ("w1:pExisting".to_string(), observed(None, Some("b1"), None, &[])),
+            ("w1:pNew".to_string(), observed(Some("next dev"), Some("b1"), None, &[3010])),
+        ]);
+
+        // Make bot authority unreadable while leaving project discovery and pane writes available.
+        sqlx::query("ALTER TABLE bots RENAME TO bots_unavailable").execute(&app.db).await.unwrap();
+        let errored = record_scan(&app, "local", &snapshot, &facts, &crate::db::now()).await;
+        sqlx::query("ALTER TABLE bots_unavailable RENAME TO bots").execute(&app.db).await.unwrap();
+        let scan = errored.unwrap();
+
+        assert!(!scan.complete, "an unreadable bot lookup leaves this scan incomplete");
+        assert_eq!(scan.rename_scratch, None, "an incomplete scan must not select or rename scratch");
+        let after: (String, String, Option<String>, Option<String>, Option<String>, bool, bool) = sqlx::query_as(
+            "SELECT kind, owned_by, project_id, owner_bot_id, bound_project_id, orphaned, scratch FROM panes WHERE host='local' AND pane_id='w1:pExisting'",
+        )
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(after, before, "a known pane keeps its last authoritative classification and owner");
+
+        let new: (String, String, Option<String>, Option<String>, Option<String>, bool, bool) = sqlx::query_as(
+            "SELECT kind, owned_by, project_id, owner_bot_id, bound_project_id, orphaned, scratch FROM panes WHERE host='local' AND pane_id='w1:pNew'",
+        )
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(new, ("service".into(), "bot".into(), None, Some("b1".into()), None, false, false));
+
+        let recovered = record_scan(&app, "local", &snapshot, &facts, &crate::db::now()).await.unwrap();
+        assert!(recovered.complete, "the next scan retries the bot lookup");
+        let existing_after_recovery: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT kind, owned_by, project_id, bound_project_id FROM panes WHERE host='local' AND pane_id='w1:pExisting'",
+        )
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        let new_after_recovery: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT kind, owned_by, project_id, bound_project_id FROM panes WHERE host='local' AND pane_id='w1:pNew'",
+        )
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(existing_after_recovery, ("shell".into(), "bot".into(), Some("p1".into()), Some("p1".into())));
+        assert_eq!(new_after_recovery, ("service".into(), "bot".into(), Some("p1".into()), Some("p1".into())));
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
