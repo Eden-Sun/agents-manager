@@ -253,7 +253,7 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // 2026-09-28：`messages.sent_via`（插隊／補充送出的訊息，泡泡上標出來）。
     (28, "a713484136f43301"),
     // issues #598/#603: persist runtime readback debt and launch-stamp retry proof.
-    (29, "PENDING"),
+    (29, "bfd0564e8c1a8d5e"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

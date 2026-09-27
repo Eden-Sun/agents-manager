@@ -1241,11 +1241,11 @@ AGM CLI 可用 `agm bot set <bot_id> [--model M] [--effort E] [--identity I]` �
 `bot_missing` / `no_active_run` / `slash_gate: <not_running|agent_busy|turn_in_flight|no_pane>` /
 `no_herdr_client` / `<field>_cleared_to_default` / `no_slash_command_for_<field>` / `slash_send_failed` /
 `not_a_single_field`，codex 另有 `codex: <picker_failed|fast_toggle_failed|no_status_line|
-readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`。以前失敗是**靜默**的：
-只回 `needs_restart: true`、log 也沒寫，「codex 改 effort 明明不用重啟，為什麼又重啟」查不出來。`applied: true` 只代表 TUI readback、runtime snapshot 的 DB 寫入與可安全完成的 revision 收尾都成功；若 TUI 已套用但 runtime 寫入失敗，回 `applied: false`、`pending_bookkeeping: true`、`needs_restart: true`，daemon 持久化 readback snapshot 並只重試 DB 寫入，不重送指令。
+readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`；DB-only recovery 另有 `live_runtime_debt_store_failed`、`live_runtime_write_failed` 與 `live_bookkeeping_still_pending`。以前失敗是**靜默**的：
+只回 `needs_restart: true`、log 也沒寫，「codex 改 effort 明明不用重啟，為什麼又重啟」查不出來。`applied: true` 代表 TUI readback 與 runtime snapshot 已寫入同一個目標 run；若後續 `launch_rev` stamp 失敗，`live_rev` marker 會留在該 run，避免假的 restart badge，背景只重試 stamp。若 runtime 寫入失敗，回 `applied: false`、`pending_bookkeeping: true`、`needs_restart: true`，daemon 持久化 readback snapshot 並只重試 DB 寫入，不重送指令。
 
-**codex 忙的時候（#393）**：`reason` 是 `slash_gate: agent_busy` 或 `slash_gate: turn_in_flight` 時，`live_apply.deferred: true`——daemon 把要套的欄位記在記憶體，
-等這顆 bot 下一次 `pane_agent_status_changed → idle` 再走同一條 `apply_live_setting`（成功會蓋 `launch_rev` 並推 `bot_changed`，失敗就留著「需重啟」）。
+**codex 忙的時候（#393）**：`reason` 是 `slash_gate: agent_busy` 或 `slash_gate: turn_in_flight` 時，`live_apply.deferred: true`——daemon 把要套的欄位與 revision 基準記在記憶體，
+等這顆 bot 下一次 `pane_agent_status_changed → idle` 再走同一條 `apply_live_setting`（成功後收斂 runtime、`live_rev` 與 `launch_rev` 並推 `bot_changed`；daemon 重啟時未套用的 TUI 工作仍需使用者再次套用，已讀回的 bookkeeping debt 則會自動恢復）。
 `needs_restart` 在那之前仍是 `true`。記憶體裡的排程 daemon 重啟就沒了，UI 的落差徽章仍在，再按一次「當場套用」（重送同一個 `fast`，冪等）即可。
 codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast_tier`）：見 SPEC §4.4a。
 

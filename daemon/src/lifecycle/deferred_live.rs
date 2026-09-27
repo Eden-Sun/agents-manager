@@ -4,7 +4,8 @@
 //! 但 `/fast` 是一個鍵就能切的東西，不值得打斷回合。這裡記下「這顆 bot 有欄位等著套」，
 //! 等 `pane_agent_status_changed` 的 idle 邊（events.rs）再走同一條 `apply_live_setting`；套不上才留下重啟徽章。
 //!
-//! 只記在記憶體：daemon 重啟後這份就沒了，這時 UI 的落差徽章仍在，使用者再按一次「當場套用」即可。
+//! 尚未套用的 TUI 工作只記在記憶體；readback 成功後會先把 runtime snapshot 寫進 durable
+//! bookkeeping debt，因此 daemon 重啟只需補 DB，不會重送 slash 或 picker 操作。
 
 use crate::state::App;
 use std::collections::HashMap;
@@ -68,28 +69,31 @@ pub(crate) fn schedule_deferred_live(app: &Arc<App>, bot_id: &str) {
     let (app, bot_id) = (app.clone(), bot_id.to_string());
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(1500)).await;
-        apply_deferred_once(&app, &bot_id).await;
+        let _ = apply_deferred_once(&app, &bot_id).await;
     });
 }
 
 /// Apply the current pending item without the production idle-edge delay. Kept as a helper so the
 /// retry path can be tested at the exact handoff point without sleeping through a scheduler timer.
-pub(crate) async fn apply_deferred_once(app: &Arc<App>, bot_id: &str) {
+pub(crate) async fn apply_deferred_once(
+    app: &Arc<App>,
+    bot_id: &str,
+) -> Option<super::LiveApplyOutcome> {
     let Some(queued) = take(bot_id) else {
-        return;
+        return None;
     };
     let fields: Vec<&str> = queued.fields.iter().copied().collect();
-    match super::apply_live_setting_with_revision(
+    let outcome = super::apply_live_setting_with_revision(
         app,
         bot_id,
         &fields,
         &queued.baseline_rev,
         &queued.target_rev,
     )
-    .await
-    {
+    .await;
+    match &outcome {
         super::LiveApplyOutcome::Applied { .. } => {}
-        super::LiveApplyOutcome::Failed(why) if is_busy_reason(&why) => {
+        super::LiveApplyOutcome::Failed(why) if is_busy_reason(why) => {
             // 剛閒下來又被新回合搶走：再排一次。
             defer_live(
                 bot_id,
@@ -106,6 +110,7 @@ pub(crate) async fn apply_deferred_once(app: &Arc<App>, bot_id: &str) {
         }
     }
     app.emit("bot_changed", serde_json::json!({"bot_id": bot_id})).await;
+    Some(outcome)
 }
 
 #[cfg(test)]
