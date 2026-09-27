@@ -1542,10 +1542,30 @@ async fn patch_bot(
         || b.auto_approve.is_some()
         || b.inject_hooks.is_some();
     // 改設定之前：active run 還沒記啟動版本就用「改之前」的補記，改完才看得出過期（#353）。
+    // 這是設定提交的 admission prerequisite；任何讀取或補記不確定都不可以繼續寫 TOML／DB。
     if restart_relevant {
-        if let (Some(r), Ok(Some(before))) = (&active, db::bot(&app.db, &id).await) {
+        if let Some(r) = &active {
+            let before = match db::bot(&app.db, &id).await {
+                Ok(Some(bot)) => bot,
+                Ok(None) => return Err(LcError::NotFound("bot".into())),
+                Err(e) => {
+                    return Err(LcError::Unavailable(json!({
+                        "reason": "launch_revision_baseline_unreadable",
+                        "message": format!("configuration was not changed; retry PATCH: {e}"),
+                        "retryable": true,
+                        "config_unchanged": true,
+                        "retry_after_secs": 5,
+                    })));
+                }
+            };
             if let Err(e) = crate::launch_rev::stamp_if_missing(&app.db, r, &before).await {
-                tracing::warn!(bot = %id, error = %e, "could not record the launch revision before a config change");
+                return Err(LcError::Unavailable(json!({
+                    "reason": "launch_revision_baseline_failed",
+                    "message": format!("configuration was not changed; retry PATCH: {e}"),
+                    "retryable": true,
+                    "config_unchanged": true,
+                    "retry_after_secs": 5,
+                })));
             }
         }
     }
@@ -5805,6 +5825,39 @@ mod instruction_files_tests {
         assert_eq!(needs(&e, id.clone()).await, json!(false), "沒記版本＝不誤報");
         let _ = patch(&e, &id, json!({"persona": "換一份人設"})).await.unwrap();
         assert_eq!(needs(&e, id.clone()).await, json!(true), "舊 run 也在改設定的那刻開始被追蹤");
+    }
+
+    #[tokio::test]
+    async fn patch_does_not_commit_when_the_old_launch_revision_cannot_be_recorded() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "baseline", "kind": "claude", "instruction_files": "managed-only"})).await.unwrap();
+        let run_id = lifecycle::start_bot(&e.app, &id).await.unwrap();
+        let old_rev = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
+        sqlx::query("UPDATE runs SET launch_rev = NULL WHERE id = ?").bind(&run_id).execute(&e.app.db).await.unwrap();
+        sqlx::query(&format!(
+            "CREATE TRIGGER refuse_launch_baseline BEFORE UPDATE OF launch_rev ON runs
+             WHEN OLD.id = '{}' AND OLD.launch_rev IS NULL AND NEW.launch_rev IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+            run_id
+        ))
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+        let before = stored(&e, &id).await;
+        let err = patch(&e, &id, json!({"instruction_files": "claude-md-and-agents-md"})).await.unwrap_err();
+        assert!(matches!(err, LcError::Unavailable(ref v) if v["reason"] == "launch_revision_baseline_failed"), "expected retryable refusal: {err:?}");
+        assert_eq!(stored(&e, &id).await, before, "failed baseline write must leave TOML and DB projection unchanged");
+        let launch_rev: Option<String> = sqlx::query_scalar("SELECT launch_rev FROM runs WHERE id = ?").bind(&run_id).fetch_one(&e.app.db).await.unwrap();
+        assert!(launch_rev.is_none(), "the failed stamp must not manufacture a baseline");
+
+        sqlx::query("DROP TRIGGER refuse_launch_baseline").execute(&e.app.db).await.unwrap();
+        let retried = patch(&e, &id, json!({"instruction_files": "claude-md-and-agents-md"})).await.unwrap();
+        assert_eq!(retried["needs_restart"], json!(true));
+        assert_eq!(stored(&e, &id).await, (Some("claude-md-and-agents-md".into()), Some("claude-md-and-agents-md".into())), "retry stamps A before committing B");
+        let launch_rev: Option<String> = sqlx::query_scalar("SELECT launch_rev FROM runs WHERE id = ?").bind(&run_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(launch_rev.as_deref(), Some(old_rev.as_str()), "retry must stamp the revision from config A before committing config B");
     }
 
     /// 值不在 CLI 的選項裡（CLI 會當成它自己的預設＝改讀 AGENTS.md）、非 claude 的 bot、child bot 都是 400，而且什麼都不改。
