@@ -76,6 +76,7 @@ export function deployNowNotice(result: { short?: string; log_path?: string } | 
     const msg = typeof b.message === 'string' && b.message ? b.message : error.message
     if (error.status === 409 && b.reason === 'deploy_in_progress') return { level: 'error', text: `沒有再開一趟：${msg}` }
     if (error.status === 409 && b.reason === 'nothing_to_deploy') return { level: 'info', text: `不用部署：${msg}` }
+    if (error.status === 409 && b.reason === 'target_older_than_live') return { level: 'error', text: `部署已拒絕：${msg}` }
     if (error.status === 403) return { level: 'error', text: `不能從這裡部署：${msg}` }
     return { level: 'error', text: `立即部署沒有開始：${msg}` }
   }

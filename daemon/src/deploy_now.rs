@@ -355,6 +355,19 @@ pub async fn start(app: &Arc<App>, ctx: &Ctx, sha: Option<&str>, launcher: &dyn 
         return Err(LcError::conflict("target_not_on_main", json!({"sha": target, "origin_main": head,
             "message": "要部署的 commit 不在 origin/main 上"})));
     }
+    // 舊分頁可能在 daemon 更新後才按下確認。線上版本必須是 target 的祖先或同一顆，才不會降版。
+    let live_is_ancestor = git(&ctx.repo, &["merge-base", "--is-ancestor", &live_full, &target]).await.map_err(LcError::Upstream)?;
+    match live_is_ancestor.status.code() {
+        Some(0) => {}
+        Some(1) => {
+            return Err(LcError::conflict("target_older_than_live", json!({"sha": target, "live_sha": ctx.live_sha,
+                "message": format!("線上版本 {live_full} 不是要部署的 {target} 的祖先或同一顆，無法保證不是降版；請重新載入後確認。")})));
+        }
+        _ => {
+            return Err(LcError::Upstream(format!("git merge-base --is-ancestor {live_full} {target}: {}",
+                String::from_utf8_lossy(&live_is_ancestor.stderr).trim())));
+        }
+    }
     if !code_changed(&ctx.repo, &live_full, &target).await.map_err(LcError::Upstream)? {
         return Err(LcError::conflict("nothing_to_deploy", json!({"sha": target, "live_sha": ctx.live_sha,
             "message": "線上那顆到這個 commit 之間只動到不進 binary 的檔，不用重建"})));
@@ -636,6 +649,22 @@ mod tests {
         assert!(matches!(&e, LcError::Conflict(v) if v["reason"] == "target_not_on_main"), "{e:?}");
         assert_eq!(kick.calls.load(Ordering::SeqCst), 0);
         assert!(store::approvals(&f.env.app.db, 100).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_refuses_a_target_older_than_the_live_binary() {
+        let mut f = fixture().await;
+        // An old page confirms `code` after a newer code commit is already live.
+        let newer = commit(&f.ctx.repo, "daemon/src/b.rs", "newer live");
+        run(&f.ctx.repo, &["update-ref", "refs/remotes/origin/main", &newer]);
+        f.ctx.live_sha = newer[..8].to_string();
+        let kick = fake(None);
+        let e = start(&f.env.app, &f.ctx, Some(&f.code), &kick).await.unwrap_err();
+        assert!(matches!(&e, LcError::Conflict(v) if v["reason"] == "target_older_than_live"), "{e:?}");
+        assert!(matches!(&e, LcError::Conflict(v) if v["message"].as_str().unwrap_or("").contains("降版")), "{e:?}");
+        assert_eq!(kick.calls.load(Ordering::SeqCst), 0);
+        assert!(store::approvals(&f.env.app.db, 100).await.unwrap().is_empty());
+        assert!(!f.ctx.agm_dir.join(REQUEST_FILE).exists());
     }
 
     #[tokio::test]
