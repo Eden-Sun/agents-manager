@@ -113,7 +113,7 @@ async fn stop_locked(
     super::race_point::hit("restart_before_stop_client_lookup", bot_id).await;
     let client = match host_fence {
         Some(fence) => client_for_run_with_host_fence(app, &run, fence).await?,
-        None => client_for_run(app, &run).await?,
+        None => client_for_run(app, &run).await?.client,
     };
     // 讀完 active run、還沒記 `stopping` 的那一瞬（測試在這裡插進不拿 bot 鎖的 pane-exit 事件）。
     #[cfg(test)]
@@ -739,7 +739,7 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
             Ok(c) => match c.agent_send_keys(&target, &["esc".to_string()]).await {
                 Ok(()) => {
                     keys_sent = true;
-                    client = Some(c);
+                    client = Some(c.client.clone());
                 }
                 Err(e) => key_error = Some(format!("{e:#}")),
             },

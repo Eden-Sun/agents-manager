@@ -376,11 +376,16 @@ fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> 
 /// Last read-only fence for the `agent.prompt` route, which otherwise bypasses the pane composer.
 pub(crate) async fn final_agent_prompt_guard(
     app: &Arc<App>,
-    client: &HerdrClient,
+    client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
     target: &str,
 ) -> Result<(), &'static str> {
+    // Read authority before any final run/pane inspection; these reads and the eventual RPC use the
+    // client captured from this exact HostConn, never a fresh lookup by host name.
+    if !app.hosts.is_current(&client.fence).await {
+        return Err("host_changed");
+    }
     let current = match db::active_run(&app.db, &run.bot_id).await {
         Ok(Some(current)) => current,
         _ => return Err("run_unreadable"),
@@ -1979,6 +1984,200 @@ mod prompt_tests {
         assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
     }
 
+    #[tokio::test]
+    async fn agent_prompt_is_refused_when_host_generation_changes_after_client_capture() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        let conn = app.hosts.get(crate::config::LOCAL_HOST).await.unwrap();
+        let calls = f.env.herdr.calls.clone();
+        let guard_reads_before = Arc::new(std::sync::Mutex::new(None));
+        let reads_before = guard_reads_before.clone();
+        super::super::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+            let counts = {
+                let calls = calls.lock().unwrap();
+                (
+                    calls
+                        .iter()
+                        .filter(|(method, _)| method == "agent.get")
+                        .count(),
+                    calls
+                        .iter()
+                        .filter(|(method, _)| method == "pane.read")
+                        .count(),
+                )
+            };
+            *reads_before.lock().unwrap() = Some(counts);
+            conn.bump_generation_for_test();
+        });
+
+        let result = prompt(
+            &app,
+            &f.bot_id,
+            "這句不能送到失效世代",
+            "stale-host-generation",
+        )
+        .await;
+        let Err(LcError::Conflict(body)) = result else {
+            panic!("a prompt bound to a superseded host generation must be retryable: {result:?}");
+        };
+        assert_eq!(body["reason"], "host_changed", "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert_eq!(body["sent"], false, "{body}");
+        assert_eq!(
+            turn_count(&app, &f.conv).await,
+            0,
+            "an unsent direct turn is withdrawn"
+        );
+        assert!(
+            f.env.herdr.calls_to("agent.prompt").is_empty(),
+            "the stale client must not receive the prompt"
+        );
+        let (gets_before, reads_before) = guard_reads_before
+            .lock()
+            .unwrap()
+            .expect("race point captured baseline");
+        let calls = f.env.herdr.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, _)| method == "agent.get")
+                .count(),
+            gets_before,
+            "a stale fence blocks final-guard RPCs"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, _)| method == "pane.read")
+                .count(),
+            reads_before,
+            "a stale fence blocks final-guard RPCs"
+        );
+    }
+
+    /// A same-name remote repoint must leave the captured RPC bound to A, but reject it before
+    /// either A or B sees a request. Once reconcile publishes a run on the new authority, retry works.
+    #[tokio::test]
+    async fn a_repointed_remote_host_receives_no_prompt_from_the_superseded_generation() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        let host = format!("prompt-repoint-{}", db::ulid());
+        let host_cfg = |ssh: &str| crate::config::HostCfg {
+            name: host.clone(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        let socket_a = f.env.dir.join("herdr-a.sock");
+        let socket_b = f.env.dir.join("herdr-b.sock");
+        let herdr_a = tt::MockHerdr::start(socket_a.clone());
+        let herdr_b = tt::MockHerdr::start(socket_b.clone());
+        for herdr in [&herdr_a, &herdr_b] {
+            herdr.set_agent("prompt-test", "pane-prompt-test", true);
+            herdr.set_screen("pane-prompt-test", "Claude Code\n❯\n");
+        }
+        let client_b = crate::herdr::HerdrClient::new(socket_b);
+        app.hosts
+            .insert_remote_with_client_for_test(
+                host_cfg("target-a"),
+                crate::herdr::HerdrClient::new(socket_a),
+            )
+            .await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=?")
+            .bind(&host)
+            .bind(&f.env.project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let calls_at_repoint = Arc::new(std::sync::Mutex::new(None));
+        let captured_calls = calls_at_repoint.clone();
+        let app_to_repoint = app.clone();
+        let replacement = host_cfg("target-b");
+        let run_id = f.run_id.clone();
+        let a_calls = herdr_a.calls.clone();
+        let b_calls = herdr_b.calls.clone();
+        super::super::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+            assert!(
+                db::in_flight_turn(&app_to_repoint.db, &run_id).await.unwrap().is_some(),
+                "the direct turn already exists"
+            );
+            *captured_calls.lock().unwrap() = Some((a_calls.lock().unwrap().len(), b_calls.lock().unwrap().len()));
+            app_to_repoint
+                .hosts
+                .replace_remote_with_client_for_test(&app_to_repoint, replacement, client_b)
+                .await;
+        });
+
+        let result = prompt(&app, &f.bot_id, "同名主機改指後不能沿用舊 client", "remote-host-repoint").await;
+        let Err(LcError::Conflict(body)) = result else {
+            panic!("a repointed host generation must refuse delivery: {result:?}");
+        };
+        assert_eq!(body["reason"], "host_changed", "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert_eq!(body["sent"], false, "{body}");
+        assert_eq!(turn_count(&app, &f.conv).await, 0, "the unsent direct turn is retracted");
+        let (a_before, b_before) = calls_at_repoint
+            .lock()
+            .unwrap()
+            .expect("captured the A/B baseline");
+        assert_eq!(herdr_a.methods().len(), a_before, "the superseded operation sends no more RPCs to A");
+        assert_eq!(herdr_b.methods().len(), b_before, "the superseded operation never switches over to B");
+        assert!(herdr_a.calls_to("agent.prompt").is_empty());
+        assert!(herdr_b.calls_to("agent.prompt").is_empty());
+
+        // Model reconcile publishing a fresh active run against the now-authoritative B connection.
+        assert_eq!(mark_run_exited(&app, &f.run_id, "host repointed").await, RunExit::Recorded);
+        let new_run = db::ulid();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, herdr_session, started_at) VALUES (?, ?, 'running', 'idle', 'test', ?)")
+            .bind(&new_run)
+            .bind(&f.bot_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let retry = prompt(&app, &f.bot_id, "同名主機改指後不能沿用舊 client", "remote-host-repoint").await.unwrap();
+        // The test mock deliberately does not implement agent.prompt, so a received call is
+        // recorded as unknown. What matters here is that the explicit retry reaches only B.
+        assert_eq!(retry.delivery, "unknown", "the retry reaches B after the new run exists");
+        assert!(herdr_a.calls_to("agent.prompt").is_empty(), "the old physical host remains untouched");
+        assert_eq!(herdr_b.calls_to("agent.prompt").len(), 1, "only the newly authoritative host gets the retry");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_rechecks_host_generation_after_final_guard() {
+        let f = fixture("claude", "test").await;
+        let app = f.env.app.clone();
+        let conn = app.hosts.get(crate::config::LOCAL_HOST).await.unwrap();
+        super::super::race_point::arm("agent_prompt_after_guard", &f.bot_id, move || async move {
+            conn.bump_generation_for_test();
+        });
+
+        let result = prompt(
+            &app,
+            &f.bot_id,
+            "這句不能送到失效世代",
+            "stale-host-after-guard",
+        )
+        .await;
+        let Err(LcError::Conflict(body)) = result else {
+            panic!("a generation superseded during the final reads must be retryable: {result:?}");
+        };
+        assert_eq!(body["reason"], "host_changed", "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert_eq!(body["sent"], false, "{body}");
+        assert_eq!(
+            turn_count(&app, &f.conv).await,
+            0,
+            "an unsent direct turn is withdrawn"
+        );
+        assert!(
+            f.env.herdr.calls_to("agent.prompt").is_empty(),
+            "the stale client must not receive the prompt"
+        );
+    }
 }
 
 #[cfg(test)]

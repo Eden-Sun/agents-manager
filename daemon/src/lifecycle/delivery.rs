@@ -997,7 +997,7 @@ pub(crate) async fn same_session(app: &Arc<App>, run_id: &str, proof: &Proof) ->
 /// give-up is `Unproven`. Read failures are errors, never empty screens.
 pub(crate) async fn execute_delivery(
     app: &Arc<App>,
-    client: &HerdrClient,
+    client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
     text: &str,
@@ -1080,7 +1080,7 @@ pub(crate) async fn prepare_delivery(
 /// [`execute_delivery`] 準備完成後的派送。`type_text` 貼字前仍會重讀 composer；那一刻看到草稿還是 `NotAttempted`。
 pub(crate) async fn type_prepared(
     app: &Arc<App>,
-    client: &HerdrClient,
+    client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
     text: &str,
@@ -1122,7 +1122,7 @@ fn typed_tail(text: &str) -> usize {
 /// 打字、看框（必要時重貼一次），停在送出鍵之前。插隊送出要在送出鍵上判斷有沒有打斷（#120），所以跟按鍵分開。
 pub(crate) async fn type_text(
     app: &Arc<App>,
-    client: &HerdrClient,
+    client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
     text: &str,
@@ -1132,12 +1132,33 @@ pub(crate) async fn type_text(
         Ready::AgentPrompt { target } => {
             #[cfg(test)]
             super::race_point::hit("agent_prompt_before_rpc", &run.bot_id).await;
-            if let Err(reason) = super::prompt::final_agent_prompt_guard(app, client, run, bot, &target).await {
+            if let Err(reason) =
+                super::prompt::final_agent_prompt_guard(app, client, run, bot, &target).await
+            {
                 tracing::warn!(run = %run.id, reason, "agent.prompt final pane fence refused delivery");
-                return Ok(Typing::Done(Delivered::NotAttempted { reason, retry: true }));
+                return Ok(Typing::Done(Delivered::NotAttempted {
+                    reason,
+                    retry: true,
+                }));
+            }
+            #[cfg(test)]
+            super::race_point::hit("agent_prompt_after_guard", &run.bot_id).await;
+            // The guard performs read-only RPCs which can yield. Recheck the same generation at the
+            // last point before submission; there is no client re-resolution between this check and
+            // invoking agent.prompt, so a replacement connection can never inherit this request.
+            if !app.hosts.is_current(&client.fence).await {
+                return Ok(Typing::Done(Delivered::NotAttempted {
+                    reason: "host_changed",
+                    retry: true,
+                }));
             }
             client
-                .call_timeout("agent.prompt", json!({"target": target, "text": text}), Duration::from_secs(10))
+                .client
+                .call_timeout(
+                    "agent.prompt",
+                    json!({"target": target, "text": text}),
+                    Duration::from_secs(10),
+                )
                 .await?;
             return Ok(Typing::Done(Delivered::Handed));
         }
@@ -1334,7 +1355,7 @@ impl SentProof {
 /// Plan and execute in one go, for callers that have no turn to hold back (queue flush, resend).
 pub(crate) async fn deliver_prompt(
     app: &Arc<App>,
-    client: &HerdrClient,
+    client: &super::RunClient,
     run: &db::Run,
     bot: &db::Bot,
     text: &str,

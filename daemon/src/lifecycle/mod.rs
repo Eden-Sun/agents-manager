@@ -4,12 +4,28 @@ use crate::capture::Capture;
 use crate::config::{valid_id, ID_RE, LOCAL_HOST};
 use crate::db;
 use crate::herdr::{AgentStatus, HerdrClient, HerdrError};
-use crate::hosts::{sh_quote, HostConn};
+use crate::hosts::{sh_quote, HostConn, HostFence};
 use crate::state::App;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+/// Client and host authority captured together for one run. Resolving the host name again later
+/// could silently substitute a replacement connection after a repoint or reconnect.
+#[derive(Clone)]
+pub(crate) struct RunClient {
+    pub(crate) client: HerdrClient,
+    pub(crate) fence: HostFence,
+}
+
+impl std::ops::Deref for RunClient {
+    type Target = HerdrClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
 
 mod messages;
 pub(crate) mod relay_watch;
@@ -170,26 +186,79 @@ fn pane_not_ready(e: &anyhow::Error) -> bool {
     s.contains("agent_pane_busy") || s.contains("not an available shell")
 }
 
-async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<HerdrClient> {
-    app.herdr_for_run(run)
+async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<RunClient> {
+    let no_client = || {
+        LcError::Upstream(format!(
+            "no Herdr session is available for run `{}`",
+            run.id
+        ))
+    };
+    let host = db::bot_host(&app.db, &run.bot_id).await.map_err(up)?;
+    let fence = app.hosts.fence(&host).await.ok_or_else(no_client)?;
+    // Reuse #594's exact-fence resolver: it verifies the run still names this host before and after
+    // session selection and gets the client from the captured HostConn. Do not look it up again by name.
+    let client = client_for_run_with_host_fence(app, run, &fence)
         .await
-        .ok_or_else(|| LcError::Upstream(format!("no Herdr session is available for run `{}`", run.id)))
+        .map_err(|error| match error {
+            LcError::Conflict(body)
+                if body.get("reason").and_then(Value::as_str) == Some("host_superseded") =>
+            {
+                LcError::conflict(
+                    "host_changed",
+                    json!({"run_id": run.id, "retryable": true, "sent": false}),
+                )
+            }
+            other => other,
+        })?;
+    Ok(RunClient { client, fence })
 }
 
-async fn client_for_run_with_host_fence(app: &Arc<App>, run: &db::Run, fence: &crate::hosts::HostFence) -> LcResult<HerdrClient> {
+async fn client_for_run_with_host_fence(
+    app: &Arc<App>,
+    run: &db::Run,
+    fence: &crate::hosts::HostFence,
+) -> LcResult<HerdrClient> {
     let host = db::bot_host(&app.db, &run.bot_id).await.map_err(up)?;
-    let stale = || LcError::conflict("host_superseded", json!({"bot_id": run.bot_id, "host": fence.conn().name}));
+    let stale = || {
+        LcError::conflict(
+            "host_superseded",
+            json!({"bot_id": run.bot_id, "host": fence.conn().name}),
+        )
+    };
     if host != fence.conn().name || !app.hosts.is_current(fence).await {
         return Err(stale());
     }
     let session = if let Some(session) = run.herdr_session.as_deref().filter(|s| !s.is_empty()) {
         session.to_string()
     } else {
-        let bot = db::bot(&app.db, &run.bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-        app.session_for_bot_with_host_fence(&bot, &host, fence).await.ok_or_else(stale)?
+        let bot = db::bot(&app.db, &run.bot_id)
+            .await
+            .map_err(up)?
+            .ok_or_else(|| LcError::NotFound("bot".into()))?;
+        app.session_for_bot_with_host_fence(&bot, &host, fence)
+            .await
+            .ok_or_else(stale)?
     };
-    let client = app.herdr_for_host_fence(fence, &session).await.ok_or_else(stale)?;
-    if db::bot_host(&app.db, &run.bot_id).await.map_err(up)? != host || !app.hosts.is_current(fence).await {
+    let client = match app.herdr_for_host_fence(fence, &session).await {
+        Some(client) => client,
+        None => {
+            // A configured fence with an unusable run session is the old upstream failure, not
+            // evidence that this host generation was superseded. Recheck authority so a stale
+            // fence still wins when the client lookup raced a reconnect or repoint.
+            if db::bot_host(&app.db, &run.bot_id).await.map_err(up)? == host
+                && app.hosts.is_current(fence).await
+            {
+                return Err(LcError::Upstream(format!(
+                    "no Herdr session is available for run `{}`",
+                    run.id
+                )));
+            }
+            return Err(stale());
+        }
+    };
+    if db::bot_host(&app.db, &run.bot_id).await.map_err(up)? != host
+        || !app.hosts.is_current(fence).await
+    {
         return Err(stale());
     }
     Ok(client)
