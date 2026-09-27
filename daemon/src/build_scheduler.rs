@@ -82,8 +82,11 @@ fn now_str() -> String {
     crate::db::now()
 }
 
-fn expires_at_after(cfg: &crate::config::BuildCfg) -> String {
-    (chrono::Utc::now() + chrono::Duration::seconds(cfg.lease_ttl() as i64)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+fn expires_at_after(cfg: &crate::config::BuildCfg) -> Result<String> {
+    let secs = cfg.lease_ttl().map_err(anyhow::Error::msg)?;
+    let delta = chrono::Duration::try_seconds(secs).ok_or_else(|| anyhow::anyhow!("lease_ttl_secs {secs} is out of range"))?;
+    let at = chrono::Utc::now().checked_add_signed(delta).ok_or_else(|| anyhow::anyhow!("lease_ttl_secs {secs} overflows the clock"))?;
+    Ok(crate::db::iso_at(at))
 }
 
 /// 收掉過期沒 renew 的 held 列。回傳收掉幾列——由呼叫端（acquire／sweep）決定要不要記 log。
@@ -179,7 +182,7 @@ pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose
         let someone_is_ahead = ahead.is_some_and(|(ahead_since, ahead_holder)| (ahead_since.as_str(), ahead_holder.as_str()) < (my_since.as_str(), holder));
         if !someone_is_ahead {
             let token = crate::db::ulid();
-            let expires_at = expires_at_after(&cfg);
+            let expires_at = expires_at_after(&cfg)?;
             sqlx::query(
                 "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, last_seen, expires_at)
                  VALUES (?,?,?,?,?, 'held', ?, ?, ?)
@@ -230,7 +233,7 @@ pub async fn renew(app: &Arc<App>, holder: &str, token: &str) -> Result<Result<S
     if row.token != token {
         return Ok(Err(RenewErr::TokenMismatch));
     }
-    let expires_at = expires_at_after(&cfg);
+    let expires_at = expires_at_after(&cfg)?;
     sqlx::query("UPDATE build_slots SET expires_at = ?, last_seen = ? WHERE holder = ? AND token = ?")
         .bind(&expires_at)
         .bind(&now)
@@ -305,7 +308,7 @@ pub async fn status(app: &Arc<App>) -> Result<Value> {
     Ok(json!({
         "max_concurrent": cfg.max_concurrent(),
         "cargo_jobs": cfg.cargo_jobs,
-        "lease_ttl_secs": cfg.lease_ttl(),
+        "lease_ttl_secs": cfg.lease_ttl().map_err(anyhow::Error::msg)?,
         "active": active,
         "slots": slots,
         "remote": remote_json(&cfg.remote, &app.data_dir),
@@ -403,7 +406,7 @@ pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(
     match acquire(&app, body.holder.trim(), bot_id.as_deref(), body.purpose.trim(), body.host.trim()).await.map_err(up)? {
         Acquired::Granted { token, expires_at } => {
             let cfg = app.cfg.get().await.build;
-            Ok(Json(json!({"granted": true, "token": token, "expires_at": expires_at, "cargo_jobs": cfg.cargo_jobs, "lease_ttl_secs": cfg.lease_ttl()})))
+            Ok(Json(json!({"granted": true, "token": token, "expires_at": expires_at, "cargo_jobs": cfg.cargo_jobs, "lease_ttl_secs": cfg.lease_ttl().map_err(LcError::Bad)?})))
         }
         Acquired::Waiting { active, since } => {
             let cfg = app.cfg.get().await.build;
@@ -471,15 +474,22 @@ mod tests {
             .unwrap();
     }
 
-    /// #322：lease_ttl_secs=0 不能讓名額一建立就過期、被下一個 acquire 收掉——那樣 max_concurrent 就形同虛設。
+    /// #322／#639：0 與超大的 lease_ttl_secs 都不能寫進設定。0 會讓名額立刻過期；u64::MAX 用 `as i64` 變 -1，更大的值讓時鐘加法 panic。
     #[tokio::test]
-    async fn a_zero_lease_ttl_does_not_let_everyone_in() {
+    async fn a_lease_ttl_outside_the_range_is_rejected_and_does_not_panic() {
         let env = tt::env().await;
         let app = env.app.clone();
         set_max_concurrent(&app, 1).await;
-        app.cfg.update(|cfg| { cfg.build.lease_ttl_secs = 0; Ok(()) }).await.unwrap();
+        for bad in [0_u64, u64::MAX, 10_000_000_000_000] {
+            let err = app.cfg.update(|cfg| { cfg.build.lease_ttl_secs = bad; Ok(()) }).await.unwrap_err().to_string();
+            assert!(err.contains("lease_ttl_secs") && err.contains("未變更"), "{bad}: {err}");
+        }
+        assert_eq!(app.cfg.get().await.build.lease_ttl().unwrap(), 180);
         assert!(matches!(acquire(&app, "A:1", None, "test", "local").await.unwrap(), Acquired::Granted { .. }));
-        assert!(matches!(acquire(&app, "B:2", None, "test", "local").await.unwrap(), Acquired::Waiting { .. }), "TTL 0 不能讓第二個也拿到名額");
+        assert!(matches!(acquire(&app, "B:2", None, "test", "local").await.unwrap(), Acquired::Waiting { .. }));
+        let huge = crate::config::BuildCfg { lease_ttl_secs: u64::MAX, ..crate::config::BuildCfg::default() };
+        let err = expires_at_after(&huge).unwrap_err().to_string();
+        assert!(err.contains("lease_ttl_secs"), "{err}");
     }
 
     /// #327：release 的 DB 寫失敗不能回 released:true（名額會佔到 TTL 而呼叫端以為已放）。

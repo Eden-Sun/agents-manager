@@ -214,6 +214,8 @@ pub fn validate(cfg: &crate::config::ConfigFile) -> Result<()> {
 pub struct ConfigInvalid(pub String);
 
 fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
+    // #639：超大的 lease_ttl_secs 會在 acquire 時 `as i64` 變負數或讓 DateTime 加法 panic。
+    crate::config::checked_build_lease_ttl(cfg.build.lease_ttl_secs).map_err(anyhow::Error::msg)?;
     // `[[hosts]]` 以前完全沒驗（issue #506）：`create_host` 擋的四件事只擋得住 API，手改 TOML
     // 這條全部放行。最要命的是 `name = "local"`——`hosts::apply_config` 會照著它把本機那顆
     // `HostConn` 換成 `HostConn::remote`，socket 指到一個沒人在聽的 `<instance>/local.sock`、
