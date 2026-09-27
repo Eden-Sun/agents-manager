@@ -270,13 +270,16 @@ impl Caps {
 
     fn note(&mut self, action: PlanAction) {
         match action {
-            PlanAction::Create => {
-                self.in_row += 1;
-                self.created_today += 1;
-            }
+            PlanAction::Create => self.note_created(),
             PlanAction::DeferredDailyLimit => self.deferred_hit = true,
             _ => {}
         }
+    }
+
+    /// Count a new issue, including a remote create recovered after its ledger write was lost.
+    fn note_created(&mut self) {
+        self.in_row += 1;
+        self.created_today += 1;
     }
 }
 
@@ -422,13 +425,18 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
             Ok(f) => f,
             Err(e) => return record_err(&issues, e).await,
         };
+        let intent = ledger::publish_intent(pool, kind, version, &mk).await?;
+        let recovered_create = found.is_some() && intent.as_ref().is_some_and(|i| i.action == ledger::PublishAction::Create);
         // 排序、上限、`duplicate_of` 不佔名額的判斷全在 `Caps::plan`，乾跑叫的是同一份。
         let action = caps.plan(p, found.as_ref());
         caps.note(action);
+        if recovered_create {
+            caps.note_created();
+        }
         match action {
             PlanAction::Existing => {
                 let (number, url) = found.expect("Existing 就是查到了");
-                issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number, url, created_at: ledger::now_ts(), comment: true });
+                issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number, url, created_at: ledger::now_ts(), comment: !recovered_create });
                 ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
                 existing += 1;
                 continue;
@@ -471,6 +479,7 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
             args.push("--label");
             args.push(l);
         }
+        ledger::ensure_publish_intent(pool, kind, version, &mk, ledger::PublishAction::Create, None).await?;
         let out = match gh.run(&args).await {
             Ok(o) => o,
             Err(e) => return record_err(&issues, e).await,
@@ -587,6 +596,7 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                     Err(e) => remote_err = Some(e),
                 }
             }
+            let mut recovered_create = false;
             let action = if already(p, &issues) {
                 PlanAction::AlreadyLogged
             } else if !can_ask {
@@ -602,6 +612,11 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                         PlanAction::RemoteUnknown
                     }
                     Ok(found) => {
+                        if found.is_some() {
+                            recovered_create = ledger::publish_intent(pool, &row.kind, &row.version, &mk)
+                                .await?
+                                .is_some_and(|i| i.action == ledger::PublishAction::Create);
+                        }
                         let a = caps.plan(p, found.as_ref());
                         match (&a, &found) {
                             (PlanAction::Existing, Some((number, url))) => {
@@ -616,6 +631,9 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                 }
             };
             caps.note(action);
+            if recovered_create {
+                caps.note_created();
+            }
             // 真跑會把 existing／comment／create 都寫進帳本的 issue 清單，下一個提案的 `already` 看得到它。
             if matches!(action, PlanAction::Existing | PlanAction::Comment | PlanAction::Create) {
                 issues.push(IssueRef {
@@ -624,7 +642,7 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                     number: plan["number"].as_i64().unwrap_or(0),
                     url: String::new(),
                     created_at: ledger::now_ts(),
-                    comment: action != PlanAction::Create,
+                    comment: action != PlanAction::Create && !recovered_create,
                 });
             }
             match action {

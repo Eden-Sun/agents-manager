@@ -3062,7 +3062,7 @@ codex 的新版還沒裝，兩個版本都從 `update_notice` 讀。
 daemon 驗過才收（每個 kept／unmatched 都有 verdict、提案只引用 guard／adopt、同一 entry 只進一張、文字不得含去重標記）。**`## 來源` 的引用由 daemon 從帳本原文貼**，模型的字只進 `## 目標`／`## 建議`／`## 驗收`。
 標題 `<kind> <version>: <一句話>（提防｜採用）`（前綴由 daemon 貼；模型的 `title` 自己又寫了同一版的前綴時剝掉，不然會變成兩層），標籤 `release-triage`、`upstream:<kind>`、`triage:guard|adopt`，結尾 `<!-- release-triage: <kind>@<version>#<id>[,<id>] -->`。
 提案帶 `duplicate_of` 時只在那張 issue 留言，不另開。
-`gh issue comment` 前先持久寫入 marker、動作與目標 issue 的 publish intent；每次留言前用 `gh api --paginate repos/<repo>/issues/<number>/comments` 查完整留言，只有找不到相同 marker 才送出留言，之後才把 comment `IssueRef` 寫回帳本。intent 寫不進去時不呼叫 GitHub。
+`gh issue create`／`gh issue comment` 前都先持久寫入 marker 與動作的 publish intent（comment 另帶目標 issue）；intent 寫不進去時不呼叫 GitHub。create 重試先查遠端 issue marker，再決定建立或恢復：找到 marker 且 intent 是 create 時，把 recovered `IssueRef` 記成 `comment:false` 並計入每版／每日上限；遠端 existing 沒有 create intent 時才記 `comment:true`。comment 每次留言前用 `gh api --paginate repos/<repo>/issues/<number>/comments` 查完整留言，只有找不到相同 marker 才送出留言，之後才把 comment `IssueRef` 寫回帳本。create／comment 的結果都在遠端副作用之後寫入 `issue_numbers_json`；重試用 intent 加遠端 marker 找回結果，不以該帳本欄位是否已提交判斷副作用有沒有成功。
 
 **publish**（`[release_triage]`）：`publish = false`（**預設**）只寫帳本、自動路徑（verdict 進來、kick 每輪的重試）**完全不啟動 gh**（例外只有下面人工觸發的乾跑）；`gh_bin`（省略＝PATH 上的 `gh`，daemon 補 Homebrew 路徑）、`repo`（`owner/name`，publish 開啟時必填）。
 開之前帳本＋遠端雙重去重（**已關的不復活**）。遠端那一道用 `gh issue list --state all --label release-triage`（repo 的 issues 列表，對剛建立的 issue **立即一致**）抓一次、在本地比對隱藏標記；

@@ -152,6 +152,19 @@ pub async fn ensure_publish_intent(
     Ok(intent)
 }
 
+/// Read the durable side-effect intent used to recover provenance after a lost ledger write.
+pub async fn publish_intent(pool: &SqlitePool, kind: &str, version: &str, marker: &str) -> Result<Option<PublishIntent>> {
+    let raw = sqlx::query_as::<_, RawPublishIntent>(
+        "SELECT action, target_number FROM release_triage_publish_intents WHERE kind = ? AND version = ? AND marker = ?",
+    )
+    .bind(kind)
+    .bind(version)
+    .bind(marker)
+    .fetch_optional(pool)
+    .await?;
+    raw.map(PublishIntent::try_from).transpose()
+}
+
 pub fn now_ts() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
