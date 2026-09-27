@@ -2,7 +2,7 @@
 
 use crate::config::{valid_id, ConfigStore, ID_RE, LOCAL_HOST};
 use crate::herdr::HerdrClient;
-use crate::hosts::{HostConn, HostManager};
+use crate::hosts::HostManager;
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -564,29 +564,41 @@ pub async fn set_default_connected(app: &Arc<App>, connected: bool) {
     }
 }
 
-/// Push `host_changed` plus a refreshed `daemon_status`, and re-lamp that host's bots.
-pub async fn emit_host_changed(app: &Arc<App>, conn: &HostConn) {
-    let connected = if conn.is_local() { app.connected.load(Ordering::SeqCst) } else { conn.is_connected() };
-    // Carry the detection cache along: `spawn_detect` emits this event precisely because the
-    // tools / identity answers just changed, and the UI has no other push for them.
-    let detected = app.tools.lock().await.get(&conn.name).cloned();
-    let mut ev = serde_json::Map::new();
-    ev.insert("name".into(), json!(conn.name));
-    ev.insert("connected".into(), json!(connected));
-    ev.insert("error".into(), json!(conn.error_string().await));
-    ev.insert("herdr".into(), crate::herdr_version::for_host(conn, connected, detected.as_ref()));
-    // Absent, not null: a client treats a present-but-empty `tools` as "nothing installed".
-    if let Some(d) = detected {
-        ev.insert("tools".into(), json!(d.tools));
-        ev.insert("identities".into(), json!(d.identities));
-        ev.insert("shell_identities".into(), json!(d.shell_identities));
-        ev.insert("tools_checked_at".into(), json!(d.checked_at));
+/// Publish one consistent host snapshot only while its captured connection generation still has
+/// authority. Keep the fence gate through the event and dependent status frames so a repoint or
+/// reconnect cannot split an old host snapshot from the current name-keyed caches.
+pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) -> bool {
+    let published = app
+        .hosts
+        .run_if_current(fence, async {
+            let conn = fence.conn();
+            let connected = if conn.is_local() { app.connected.load(Ordering::SeqCst) } else { conn.is_connected() };
+            // Carry detection from this still-current host authority, never a replacement connection's cache.
+            let detected = app.tools.lock().await.get(&conn.name).cloned();
+            let mut ev = serde_json::Map::new();
+            ev.insert("name".into(), json!(conn.name));
+            ev.insert("connected".into(), json!(connected));
+            ev.insert("error".into(), json!(conn.error_string().await));
+            ev.insert("herdr".into(), crate::herdr_version::for_host(conn, connected, detected.as_ref()));
+            // Absent, not null: a client treats a present-but-empty `tools` as "nothing installed".
+            if let Some(d) = detected {
+                ev.insert("tools".into(), json!(d.tools));
+                ev.insert("identities".into(), json!(d.identities));
+                ev.insert("shell_identities".into(), json!(d.shell_identities));
+                ev.insert("tools_checked_at".into(), json!(d.checked_at));
+            }
+            app.emit("host_changed", Value::Object(ev)).await;
+            emit_daemon_status(app).await;
+            for b in crate::db::live_bots_on_host(&app.db, &conn.name).await.unwrap_or_default() {
+                app.emit_bot_status(&b.id).await;
+            }
+        })
+        .await
+        .is_some();
+    if !published {
+        tracing::debug!(host = %fence.conn().name, "host_changed snapshot superseded; discarded");
     }
-    app.emit("host_changed", Value::Object(ev)).await;
-    emit_daemon_status(app).await;
-    for b in crate::db::live_bots_on_host(&app.db, &conn.name).await.unwrap_or_default() {
-        app.emit_bot_status(&b.id).await;
-    }
+    published
 }
 
 /// 丟掉 `Child` 不會 wait：行程結束後在 daemon 存活期間留 zombie（#287）。另起 thread 等它，結束就收掉。
