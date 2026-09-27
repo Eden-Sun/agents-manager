@@ -1364,6 +1364,21 @@ fn claim_script(bot_id: &str, root: &str) -> Result<String> {
          if [ -f \"$f\" ] && [ ! -f \"$f.claim\" ]; then mv \"$f\" \"$f.claim\" && am_fold; fi\n\
          if [ -f \"$f.claim\" ]; then printf '{stuck} %s\\n' \"$(wc -c < \"$f.claim\" | tr -d ' ')\"; fi\n\
          if [ -f \"$f.replaying\" ]; then cat \"$f.replaying\"; fi\n\
+         sd=\"$d/hook-spool.d\"\n\
+         rd=\"$d/hook-spool.replaying\"\n\
+         mkdir -p \"$rd\" 2>/dev/null || printf '{stuck} %s\\n' 0\n\
+         if [ -d \"$sd\" ]; then\n\
+         for g in \"$sd\"/*.json; do\n\
+         [ -f \"$g\" ] || continue\n\
+         mv \"$g\" \"$rd/\" || printf '{stuck} %s\\n' \"$(wc -c < \"$g\" | tr -d ' ')\";\n\
+         done\n\
+         fi\n\
+         if [ -d \"$rd\" ]; then\n\
+         for g in \"$rd\"/*.json; do\n\
+         [ -f \"$g\" ] || continue\n\
+         cat \"$g\"\n\
+         done\n\
+         fi\n\
          s=\"$d/hook-status.json\"\n\
          if [ -f \"$s\" ]; then printf '\\n{marker}\\n'; cat \"$s\"; rm -f \"$s\"; fi\n",
         marker = STATUS_MARKER,
@@ -1374,7 +1389,16 @@ fn claim_script(bot_id: &str, root: &str) -> Result<String> {
 /// 第二趟：本機已經把那些行 commit 進 `hook_events` 了，這時候才准刪遠端那份。
 fn ack_script(bot_id: &str, root: &str) -> Result<String> {
     let dir = bots_dir(bot_id, root)?;
-    Ok(format!("d={dir}\nrm -f \"$d/hook-spool.jsonl.replaying\"\n"))
+    Ok(format!(
+        "d={dir}\n\
+         rm -f \"$d/hook-spool.jsonl.replaying\"\n\
+         if [ -d \"$d/hook-spool.replaying\" ]; then\n\
+         for g in \"$d/hook-spool.replaying\"/*.json; do\n\
+         [ -f \"$g\" ] || continue\n\
+         rm -f \"$g\"\n\
+         done\n\
+         fi\n"
+    ))
 }
 
 fn status_body(bot_id: &str, raw: &str) -> Option<HookBody> {
@@ -1498,10 +1522,20 @@ pub fn spawn_spool_scanner(app: Arc<App>) {
 /// 掃遠端還有誰欠著 spool。根目錄跟著實例走（`App::instance`）。
 fn scan_script(root: &str) -> String {
     format!(
-        "for d in \"$HOME/{root}/bots\"/*/; do \
-     [ -d \"$d\" ] || continue; b=$(basename \"$d\"); \
-     if [ -f \"$d/hook-spool.jsonl\" ] || [ -f \"$d/hook-spool.jsonl.replaying\" ] || [ -f \"$d/hook-status.json\" ]; \
-     then echo \"$b\"; fi; done\n",
+        "am_pending() {{\n\
+         [ -f \"$1hook-spool.jsonl\" ] && return 0\n\
+         [ -f \"$1hook-spool.jsonl.replaying\" ] && return 0\n\
+         [ -f \"$1hook-status.json\" ] && return 0\n\
+         for g in \"$1hook-spool.d\"/*.json \"$1hook-spool.replaying\"/*.json; do\n\
+         [ -f \"$g\" ] && return 0\n\
+         done\n\
+         return 1\n\
+         }}\n\
+         for d in \"$HOME/{root}/bots\"/*/; do\n\
+         [ -d \"$d\" ] || continue\n\
+         b=$(basename \"$d\")\n\
+         if am_pending \"$d\"; then echo \"$b\"; fi\n\
+         done\n",
     )
 }
 
@@ -4313,6 +4347,47 @@ mod spool_claim_window_tests {
         let out = r.sh(&claim_script("botX", root).unwrap());
         assert!(out.contains("STRANDED"), "上一輪留下的 .claim 要收進來：{out}");
         assert!(!r.spool.with_extension("jsonl.claim").exists(), "併完就不留");
+    }
+
+    /// #652：一則一檔。claim 把已經寫好的 `*.json` 搬進 replaying 再讀；ack 才刪。
+    /// claim 展開 glob 之後才出現的檔留在 `hook-spool.d`，下一輪才收。
+    #[test]
+    fn macos_local_per_file_spool_is_claimed_then_acked() {
+        let r = Remote::new();
+        let root = crate::startup::REMOTE_ROOT;
+        let dir = r.spool.parent().unwrap();
+        let sd = dir.join("hook-spool.d");
+        std::fs::create_dir_all(&sd).unwrap();
+        std::fs::write(sd.join("100-1.json"), "ONE\n").unwrap();
+        std::fs::write(sd.join("200-2.json"), "TWO\n").unwrap();
+        let out = r.sh(&claim_script("botX", root).unwrap());
+        assert!(out.contains("ONE") && out.contains("TWO"), "{out}");
+        assert!(!sd.join("100-1.json").exists(), "摘下來的不留在 live 目錄");
+        let rd = dir.join("hook-spool.replaying");
+        assert!(rd.join("100-1.json").exists() && rd.join("200-2.json").exists());
+        std::fs::write(sd.join("300-3.json"), "LATE\n").unwrap();
+        r.sh(&ack_script("botX", root).unwrap());
+        assert!(!rd.join("100-1.json").exists(), "ack 才刪已收下的");
+        assert_eq!(std::fs::read_to_string(sd.join("300-3.json")).unwrap(), "LATE\n");
+        let again = r.sh(&claim_script("botX", root).unwrap());
+        assert!(again.contains("LATE"), "{again}");
+        assert!(!again.contains("ONE"), "ack 過的不能再出現：{again}");
+    }
+
+    /// 掃描要看得到只有一則一檔、還沒 claim 的 bot（舊 jsonl 不在時也要）。
+    #[test]
+    fn macos_local_scan_sees_a_per_file_spool() {
+        let r = Remote::new();
+        let root = crate::startup::REMOTE_ROOT;
+        let dir = r.spool.parent().unwrap();
+        let sd = dir.join("hook-spool.d");
+        std::fs::create_dir_all(&sd).unwrap();
+        std::fs::write(sd.join("1-1.json"), "{}\n").unwrap();
+        let out = r.sh(&scan_script(root));
+        assert!(out.lines().any(|l| l.trim() == "botX"), "有檔就要被掃到：{out:?}");
+        std::fs::remove_file(sd.join("1-1.json")).unwrap();
+        let empty = r.sh(&scan_script(root));
+        assert!(!empty.lines().any(|l| l.trim() == "botX"), "空目錄不是欠著：{empty:?}");
     }
 
     /// `.replaying` 尾巴沒有換行（崩在一行寫到一半）時，併進來的第一行不能跟它黏成一行（#302 的遠端版）。

@@ -91,12 +91,17 @@ if [ "$PROVIDER" != "codex" ] && [ "$LEN" -ge "$LIMIT" ]; then TRUNC=true; else 
 # The payload is spliced into JSON verbatim, so it must BE valid JSON: empty stdin becomes
 # null and anything that is not an object is wrapped as a string, otherwise the daemon would
 # reject the body and the line would sit in the spool forever.
+# A cut-off object still starts with `{`. Splicing it raw makes the whole spool line invalid
+# JSON, and drain drops it — `truncated:true` never gets read (#653). Same wrap as a non-object.
+am_raw() {
+  ESC=$(printf '%s' "$1" | tr -d '\015' | tr '\011' ' ' | tr -d '\000-\010\013\014\016-\037' \
+       | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk '{printf "%s\\n", $0}')
+  printf '{"raw":"%s"}' "$ESC"
+}
 case "$PAYLOAD" in
   '{'*) ;;
   '') PAYLOAD=null ;;
-  *) ESC=$(printf '%s' "$PAYLOAD" | tr -d '\015' | tr '\011' ' ' | tr -d '\000-\010\013\014\016-\037' \
-       | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk '{printf "%s\\n", $0}')
-     PAYLOAD=$(printf '{"raw":"%s"}' "$ESC") ;;
+  *) PAYLOAD=$(am_raw "$PAYLOAD") ;;
 esac
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # The run this CLI process was started for: `--resume` makes an old and a new process report the
@@ -106,7 +111,25 @@ RUN=$(printf '%s' "${AM_RUN_ID:-}" | tr -cd 'A-Za-z0-9_-')
 BODY=$(printf '{"bot_id":"%s","provider":"%s","payload":%s,"received_at":"%s","truncated":%s,"run_id":"%s"}' "$BOT" "$PROVIDER" "$PAYLOAD" "$NOW" "$TRUNC" "$RUN")
 # Spool FIRST: the daemon reads this file the moment it sees the state change below, so the
 # line has to be there before herdr is told anything.
-printf '%s\n' "$BODY" >> "$DIR/hook-spool.jsonl"
+# One file per event (#652). `printf >> jsonl` is several write()s once the line passes ~4 KiB
+# (bash) or splits the newline off (dash). O_APPEND only makes a single write atomic, so two
+# hooks interleave and drain drops both lines. A private temp plus rename is one event or none.
+SD="$DIR/hook-spool.d"
+mkdir -p "$SD" 2>/dev/null
+TMP=$(mktemp "$SD/.tmp.XXXXXX" 2>/dev/null) || TMP=""
+if [ -n "$TMP" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    ID=$(python3 -c 'import time,os; print("%d-%d" % (time.time_ns(), os.getpid()))' 2>/dev/null)
+  else
+    ID=""
+  fi
+  [ -n "$ID" ] || ID="$(date +%s)-$$-$(basename "$TMP")"
+  if printf '%s\n' "$BODY" > "$TMP" 2>/dev/null; then
+    mv -f "$TMP" "$SD/$ID.json" 2>/dev/null || rm -f "$TMP"
+  else
+    rm -f "$TMP"
+  fi
+fi
 
 # ---- tell this host's herdr what the agent is doing (SPEC §11.4.2)
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
@@ -1284,6 +1307,32 @@ mod remote_hook_tests {
         }
     }
 
+    /// 遠端 hook 一則一檔（`hook-spool.d/*.json`）。舊的 jsonl 還在就接在後面，升級當下沒掃完的不會不見。
+    fn spool_events(bot_dir: &std::path::Path) -> String {
+        let mut out = String::new();
+        let mut files = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(bot_dir.join("hook-spool.d")) {
+            for ent in rd.flatten() {
+                let p = ent.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("json") {
+                    files.push(p);
+                }
+            }
+        }
+        files.sort();
+        for p in files {
+            let mut s = std::fs::read_to_string(&p).unwrap_or_default();
+            if !s.is_empty() && !s.ends_with('\n') {
+                s.push('\n');
+            }
+            out.push_str(&s);
+        }
+        if let Ok(legacy) = std::fs::read_to_string(bot_dir.join("hook-spool.jsonl")) {
+            out.push_str(&legacy);
+        }
+        out
+    }
+
     fn write_exec(path: &std::path::Path, body: &str) {
         let mut f = std::fs::File::create(path).unwrap();
         f.write_all(body.as_bytes()).unwrap();
@@ -1318,6 +1367,9 @@ mod remote_hook_tests {
         }
 
         fn read(&self, name: &str) -> String {
+            if name == "hook-spool.jsonl" {
+                return spool_events(&self.bot_dir());
+            }
             std::fs::read_to_string(self.bot_dir().join(name)).unwrap_or_default()
         }
 
@@ -1375,12 +1427,12 @@ mod remote_hook_tests {
             let sb = Sandbox::with_root(false, &root);
             let (_, ok) = sb.run(&["claude", &sb.bot, "-"], STOP);
             assert!(ok);
-            let spool = sb.dir.join(&root).join("bots").join(&sb.bot).join("hook-spool.jsonl");
-            let line = std::fs::read_to_string(&spool).unwrap_or_else(|_| panic!("{slug:?}: 沒寫到 {}", spool.display()));
-            assert!(line.contains("\"Stop\""), "{line}");
+            let bot_dir = sb.dir.join(&root).join("bots").join(&sb.bot);
+            let line = spool_events(&bot_dir);
+            assert!(line.contains("\"Stop\""), "{slug:?}: 沒寫到 {}: {line}", bot_dir.display());
             if slug.is_some() {
-                let prod = sb.dir.join(".config/agents-manager/bots").join(&sb.bot).join("hook-spool.jsonl");
-                assert!(!prod.exists(), "隔離實例的事件跑進了正式 spool");
+                let prod = sb.dir.join(".config/agents-manager/bots").join(&sb.bot);
+                assert!(spool_events(&prod).is_empty(), "隔離實例的事件跑進了正式 spool");
             }
         }
     }
@@ -1553,6 +1605,42 @@ mod remote_hook_tests {
         assert!(sb.read("hook.log").contains("herdr not found; spooled only"));
     }
 
+    /// #652：大行並行寫進同一個 jsonl 會交錯，drain 兩則都丟。一則一檔之後每一則都是完整 JSON。
+    #[test]
+    fn macos_local_parallel_large_hooks_stay_one_json_each() {
+        let sb = Sandbox::new(false);
+        let blob = "y".repeat(20_000);
+        let payload = format!(r#"{{"hook_event_name":"PostToolUse","blob":"{blob}"}}"#);
+        let mut kids = Vec::new();
+        for i in 0..24 {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg(sb.dir.join("hook.sh"));
+            cmd.args(["claude", &sb.bot, "-"]);
+            cmd.env_clear();
+            cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+            cmd.env("HOME", &sb.dir);
+            cmd.env("AM_RUN_ID", format!("r{i}"));
+            cmd.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+            let mut ch = cmd.spawn().unwrap();
+            ch.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+            kids.push(ch);
+        }
+        for ch in kids {
+            assert!(ch.wait_with_output().unwrap().status.success());
+        }
+        let text = sb.read("hook-spool.jsonl");
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 24, "24 支 hook 要留下 24 則，實際 {}", lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            let body: crate::hookrecv::HookBody = serde_json::from_str(line).unwrap_or_else(|e| panic!("第 {i} 則壞了：{e}"));
+            assert_eq!(body.payload["hook_event_name"], "PostToolUse");
+            assert_eq!(body.payload["blob"].as_str().map(str::len), Some(20_000));
+            assert!(!body.truncated);
+        }
+        let live = sb.bot_dir().join("hook-spool.jsonl");
+        assert!(!live.exists(), "新的 hook 不再追加同一個 jsonl");
+    }
+
     fn mode_of(p: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
@@ -1585,7 +1673,15 @@ mod remote_hook_tests {
         let ok = ch.wait_with_output().unwrap().status.success();
         assert!(ok);
         assert_eq!(mode_of(&sb.bot_dir()), 0o700, "bot 目錄只給自己");
-        assert_eq!(mode_of(&sb.bot_dir().join("hook-spool.jsonl")), 0o600, "spool 只給自己");
+        let spool_dir = sb.bot_dir().join("hook-spool.d");
+        assert_eq!(mode_of(&spool_dir), 0o700, "一則一檔的目錄只給自己");
+        let file = std::fs::read_dir(&spool_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .expect("spool 檔要在");
+        assert_eq!(mode_of(&file), 0o600, "spool 只給自己");
         assert_eq!(mode_of(&sb.dir.join(".config/agents-manager/bots")), 0o700, "中間層也是");
     }
 

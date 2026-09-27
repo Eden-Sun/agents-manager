@@ -377,8 +377,16 @@ mod tests {
             .unwrap();
         ch.stdin.take().unwrap().write_all(br#"{"hook_event_name":"SessionStart","session_id":"s-far","source":"resume"}"#).unwrap();
         assert!(ch.wait().unwrap().success());
-        let spool = home.join(crate::startup::REMOTE_ROOT).join("bots").join(&bot.id).join("hook-spool.jsonl");
-        let line = std::fs::read_to_string(&spool).unwrap();
+        let bot_dir = home.join(crate::startup::REMOTE_ROOT).join("bots").join(&bot.id);
+        let mut files: Vec<_> = std::fs::read_dir(bot_dir.join("hook-spool.d"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+            .collect();
+        files.sort();
+        let line = std::fs::read_to_string(files.first().expect("hook 沒寫進 spool")).unwrap();
+        assert!(!line.is_empty(), "hook 沒寫進 {}", bot_dir.display());
         let body: crate::hookrecv::HookBody = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(body.run_id.as_deref(), Some(run.id.as_str()));
 
