@@ -1216,7 +1216,8 @@ export const useStore = create<StoreState>((set, get) => ({
   movePrimary: (order) => {
     const s = get()
     const prev = new Map(s.bots.map((b) => [b.id, b.primary_position]))
-    const pos = new Map(order.map((id, i) => [id, i]))
+    // daemon 的 primary_position 從 1 起算；0 是 sortPinned 的「還沒排過」，排到最後（#660）。
+    const pos = new Map(order.map((id, i) => [id, i + 1]))
     if (order.every((id) => prev.get(id) === pos.get(id))) return
     set({ bots: s.bots.map((b) => (pos.has(b.id) ? { ...b, primary_position: pos.get(b.id)! } : b)) })
     saveOrderTracked('primary', { primary: order }, (e) => {
