@@ -19,10 +19,14 @@ fn mention_char(c: char) -> bool {
 }
 
 /// 名字裡有空白的成員（2026-09-19 使用者：「bot name should be able to include space」）：`@my bot` 在第一個空白就被
-/// `mention_char` 切斷，只剩 `my`。`@` 後面若正好接著某個成員的**整個**名字（不分大小寫）、而且名字後面是結尾或
-/// 非名字字元，就算提到它。最長的先比，`@my bot 2` 不會被 `my bot` 搶走。回 `(成員索引, 名字結束位置)`。
+/// `mention_char` 切斷，只剩 `my`。`@` 後面若正好接著某個成員的**整個**名字、而且名字後面是結尾或
+/// 非名字字元，就算提到它。最長的先比，`@my bot 2` 不會被 `my bot` 搶走。
+/// 大小寫完全相同的優先；沒有完全相同、而且摺完只有一顆時才不分大小寫。兩顆只差大小寫時，
+/// `@Claude` 與 `@claude` 各打各的，摺過的 `@CLAUDE` 兩顆都不算（#657）。回 `(成員索引, 名字結束位置)`。
 fn spaced_member_at(chars: &[char], start: usize, members: &[Member]) -> Option<(usize, usize)> {
-    let mut best: Option<(usize, usize)> = None;
+    let mut best_exact: Option<(usize, usize)> = None;
+    let mut best_fold: Option<(usize, usize)> = None;
+    let mut fold_tie = false;
     for (idx, m) in members.iter().enumerate() {
         if !m.name.contains(' ') {
             continue;
@@ -32,15 +36,47 @@ fn spaced_member_at(chars: &[char], start: usize, members: &[Member]) -> Option<
         if end > chars.len() {
             continue;
         }
-        let same = chars[start..end].iter().zip(&name).all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()));
-        if !same || (end < chars.len() && mention_char(chars[end]) && !matches!(chars[end], '-' | '_')) {
+        if end < chars.len() && mention_char(chars[end]) && !matches!(chars[end], '-' | '_') {
             continue;
         }
-        if best.is_none_or(|(_, e)| end > e) {
-            best = Some((idx, end));
+        let exact = chars[start..end].iter().copied().eq(name.iter().copied());
+        let folded = chars[start..end].iter().zip(&name).all(|(a, b)| a.to_lowercase().eq(b.to_lowercase()));
+        if exact {
+            if best_exact.is_none_or(|(_, e)| end > e) {
+                best_exact = Some((idx, end));
+            }
+        } else if folded {
+            match best_fold {
+                Some((_, e)) if end > e => {
+                    best_fold = Some((idx, end));
+                    fold_tie = false;
+                }
+                Some((_, e)) if end == e => fold_tie = true,
+                None => best_fold = Some((idx, end)),
+                _ => {}
+            }
         }
     }
-    best
+    best_exact.or(if fold_tie { None } else { best_fold })
+}
+
+/// 沒有空白的 `@token`。`@all` 不分大小寫。其餘先對大小寫完全相同的名字；沒有時，
+/// 摺成小寫後恰好一顆才算。兩顆只差大小寫時，對不上的寫法誰都不算（#657）。
+fn token_member(raw: &str, members: &[Member]) -> Option<usize> {
+    if let Some(idx) = members.iter().position(|m| m.name == raw) {
+        return Some(idx);
+    }
+    let folded = raw.to_ascii_lowercase();
+    let mut hit = None;
+    for (idx, m) in members.iter().enumerate() {
+        if m.name.to_ascii_lowercase() == folded {
+            if hit.is_some() {
+                return None;
+            }
+            hit = Some(idx);
+        }
+    }
+    hit
 }
 
 /// SPEC §13.2. A `@` only counts after a non-word character, so `me@example.com` is not a mention.
@@ -73,16 +109,17 @@ pub fn parse_mentions(text: &str, members: &[Member]) -> Vec<Member> {
         if !boundary || end == start {
             continue;
         }
-        let raw: String = chars[start..end].iter().collect::<String>().to_ascii_lowercase();
+        let raw: String = chars[start..end].iter().collect();
         // `@name,` is already cut at the comma; `@name-` / `@name_` (trailing joiners) are
         // retried without them when the full token matches nobody.
-        let candidates = [raw.clone(), raw.trim_end_matches(['-', '_']).to_string()];
-        for cand in candidates.iter().filter(|c| !c.is_empty()) {
-            if cand == "all" {
+        let trimmed = raw.trim_end_matches(['-', '_']).to_string();
+        let candidates = [raw.as_str(), trimmed.as_str()];
+        for cand in candidates.iter().copied().filter(|c| !c.is_empty()) {
+            if cand.eq_ignore_ascii_case("all") {
                 all = true;
                 break;
             }
-            if let Some(idx) = members.iter().position(|m| m.name.to_ascii_lowercase() == *cand) {
+            if let Some(idx) = token_member(cand, members) {
                 if !hit.contains(&idx) {
                     hit.push(idx);
                 }
@@ -118,14 +155,12 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
                 end += 1;
             }
             if end > start {
-                let raw: String = chars[start..end].iter().collect::<String>().to_ascii_lowercase();
+                let raw: String = chars[start..end].iter().collect();
                 let trimmed = raw.trim_end_matches(['-', '_']).to_string();
-                let known = raw == "all"
-                    || trimmed == "all"
-                    || members.iter().any(|m| {
-                        let n = m.name.to_ascii_lowercase();
-                        n == raw || n == trimmed
-                    });
+                let known = raw.eq_ignore_ascii_case("all")
+                    || trimmed.eq_ignore_ascii_case("all")
+                    || token_member(&raw, members).is_some()
+                    || token_member(&trimmed, members).is_some();
                 if known {
                     let mut skip_to = end;
                     if skip_to < chars.len() && matches!(chars[skip_to], ',' | ':' | ';' | '，' | '：' | '；' | '、') {
@@ -385,6 +420,25 @@ mod tests {
         assert!(names("@nobody here").is_empty());
         assert!(names("mail me@g-claude now").is_empty(), "an email-like @ is not a mention");
         assert!(names("@").is_empty());
+    }
+
+    /// #657：名字唯一性分大小寫。兩顆都在時，`@Claude` 與 `@claude` 各打各的；只剩一顆時仍不分大小寫。
+    #[test]
+    fn case_differing_names_are_addressed_exactly() {
+        let both = vec![
+            Member { id: "1".into(), name: "Claude".into() },
+            Member { id: "2".into(), name: "claude".into() },
+        ];
+        let pick = |t: &str| parse_mentions(t, &both).into_iter().map(|m| m.name).collect::<Vec<_>>();
+        assert_eq!(pick("@Claude look"), vec!["Claude".to_string()]);
+        assert_eq!(pick("@claude look"), vec!["claude".to_string()]);
+        assert!(pick("@CLAUDE look").is_empty(), "兩顆都摺得成 claude，這個寫法分不出是誰");
+        assert_eq!(strip_mentions("@Claude, 看一下", &both), "看一下");
+        assert_eq!(strip_mentions("@CLAUDE 看一下", &both), "@CLAUDE 看一下");
+
+        let only = vec![Member { id: "1".into(), name: "Claude".into() }];
+        assert_eq!(parse_mentions("@claude look", &only).len(), 1);
+        assert_eq!(parse_mentions("@Claude look", &only)[0].name, "Claude");
     }
 }
 
