@@ -696,6 +696,8 @@ function Composer({
   const abandonTurn = useStore((s) => s.abandonTurn)
   const interruptBot = useStore((s) => s.interruptBot)
   const abortBot = useStore((s) => s.abortBot)
+  // 插隊／補充是 claude 專屬（使用者 2026-09-27）：send-now 鍵與「打進 pane 併進這一輪」只在 claude 上驗過。
+  const isClaude = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'claude')
   const aborting = useStore((s) => Boolean(s.busy[`abort:${botId}`]))
   const queueSend = useStore((s) => s.queueSend)
   const startBot = useStore((s) => s.startBot)
@@ -765,23 +767,8 @@ function Composer({
 
   const pending = queued?.text ?? text
 
-  // 中止再送，分兩步：等 `abortBot` 確認解鎖才送，否則新 prompt 會撞上未清的 in-flight turn。
-  const abortAndSend = async () => {
-    const body = pending.trim()
-    const ids = queued ? queued.attachments : files.ids
-    if (!body && ids.length === 0) return
-    const wasQueued = queued
-    if (wasQueued) cancelQueuedSend(botId)
-    setSending(true)
-    // esc 沒送進終端就別送新的；排隊的放回去。
-    const stopped = await abortBot(botId)
-    const ok = stopped && (await sendPrompt(botId, body, ids))
-    setSending(false)
-    settleComposerSend({ setText, clearFiles: files.clear, restoreQueuedSend }, botId, wasQueued, ok)
-  }
-
   // 插隊送出（issue #103）：照舊建一個新回合，但由 CLI 自己的 send-now 鍵打斷當下那一輪。
-  // 跟「中止並取代」的差別是不必先等中止確認——CLI 自己決定怎麼收掉那一回合，比我們從外面送 esc 再貼字準。
+  // 「中止並取代」拿掉了（使用者 2026-09-27：要換題會先按 ESC 中斷）。
   const sendNow = async () => {
     const body = pending.trim()
     const ids = queued ? queued.attachments : files.ids
@@ -879,38 +866,28 @@ function Composer({
               ESC 中斷
             </button>
           ) : null}
-          {state.inFlightTurnId && pending.trim() ? (
+          {isClaude && state.inFlightTurnId && pending.trim() ? (
             <>
-              <button
-                type="button"
-                className="mini-btn"
-                disabled={aborting || sending}
-                title={`中止目前這一輪，然後立刻送出：${pending.slice(0, 40)}${pending.length > 40 ? '…' : ''}`}
-                onClick={() => void abortAndSend()}
-              >
-                中止並取代
-              </button>
               {/* 插隊＝CLI 自己的 send-now 鍵（claude 2.1.275 起）：它打斷目前那一輪、收掉它，再收下這句。
-                  不是 claude 或 CLI 太舊時 daemon 回 409 並說原因，這裡照原樣顯示。 */}
+                  CLI 太舊時 daemon 回 409 並說原因，這裡照原樣顯示。 */}
               <button
                 type="button"
                 className="mini-btn"
                 disabled={aborting || sending}
-                title={`打斷目前這一輪並立刻送出（需要 claude 2.1.275 以上）：${pending.slice(0, 40)}${pending.length > 40 ? '…' : ''}`}
+                title={`打斷目前這一輪，改送這一句（需要 claude 2.1.275 以上）：${pending.slice(0, 40)}${pending.length > 40 ? '…' : ''}`}
                 onClick={() => void sendNow()}
               >
-                {/* 手機的鎖條剛好塞滿一行（390px）；多一顆四個字就換行，短標籤留在一行內。 */}
-                {phone ? '插隊' : '立刻送出'}
+                插隊
               </button>
-              {/* 併行＝直接打進 pane，不是第二輪：daemon 一次只認一個 turn（SPEC §2）。 */}
+              {/* 補充＝直接打進 pane，不是第二輪：daemon 一次只認一個 turn（SPEC §2）。 */}
               <button
                 type="button"
                 className="mini-btn"
                 disabled={sending}
-                title="不建立新回合，直接把文字打進終端（等同你自己在 pane 裡輸入）。回覆會併在目前這一輪，不會單獨成為一則訊息。"
+                title="補充一句給正在跑的這一輪：不建立新回合，直接打進終端，它邊做邊看到。回覆併在目前這一輪，不會單獨成為一則訊息。"
                 onClick={() => void sendAlongside()}
               >
-                併行送入
+                補充
               </button>
             </>
           ) : null}
