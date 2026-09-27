@@ -178,8 +178,12 @@ pub fn picker_number(screen: &str, needle: &str) -> Option<u32> {
     None
 }
 
-async fn read(client: &HerdrClient, pane_id: &str) -> String {
-    client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default()
+async fn read(client: &HerdrClient, pane_id: &str) -> Result<String, ()> {
+    client
+        .pane_read(pane_id, "visible", 60)
+        .await
+        .map(|r| r.text)
+        .map_err(|_| ())
 }
 
 async fn key(client: &HerdrClient, pane_id: &str, k: &str) -> bool {
@@ -240,40 +244,47 @@ fn picker_choice_matches(screen: &str, needle: &str, n: u32) -> bool {
 
 /// Escapes until no picker is left. One Escape is not enough: from the level menu it only goes
 /// back to the model menu, and anything typed next would land in it.
-pub async fn close_picker(client: &HerdrClient, pane_id: &str) -> bool {
+async fn close_picker_checked(client: &HerdrClient, pane_id: &str) -> Result<bool, ()> {
     for _ in 0..PICKER_ESCAPES {
-        let screen = read(client, pane_id).await;
+        let screen = read(client, pane_id).await?;
         if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) {
-            return false;
+            return Ok(false);
         }
         if !picker_open(&screen) {
-            return true;
+            return Ok(true);
         }
         if !key(client, pane_id, "Escape").await {
-            return false;
+            return Ok(false);
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
-    !picker_open(&read(client, pane_id).await)
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("codex_picker_before_final_read", pane_id).await;
+    Ok(!picker_open(&read(client, pane_id).await?))
+}
+
+pub async fn close_picker(client: &HerdrClient, pane_id: &str) -> bool {
+    matches!(close_picker_checked(client, pane_id).await, Ok(true))
 }
 
 /// Two levels + nested `More reasoning…` + one spare.
 const PICKER_ESCAPES: u32 = 4;
 
 /// A failed send leaves the menu open, so back out before reporting failure.
-async fn press_number(client: &HerdrClient, pane_id: &str, n: u32, needle: &str) -> bool {
+async fn press_number(client: &HerdrClient, pane_id: &str, n: u32, needle: &str) -> Result<bool, ()> {
     // A picker can close or change while the caller is deciding which row to choose. Re-read and
     // verify both the picker and the intended row immediately before typing the one-digit choice.
-    if !picker_choice_matches(&read(client, pane_id).await, needle, n) {
-        close_picker(client, pane_id).await;
-        return false;
+    let screen = read(client, pane_id).await?;
+    if !picker_choice_matches(&screen, needle, n) {
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
     }
     if !text(client, pane_id, &n.to_string()).await {
-        close_picker(client, pane_id).await;
-        return false;
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
     }
     tokio::time::sleep(Duration::from_millis(700)).await;
-    true
+    Ok(true)
 }
 
 /// `model: None` → `(current)` row; `effort: None` → `(default)` row. Any unexpected menu returns
@@ -283,64 +294,68 @@ async fn apply_model_and_effort(
     pane_id: &str,
     model: Option<&str>,
     effort: Option<&str>,
-) -> bool {
+) -> Result<bool, ()> {
     if !text(client, pane_id, "/model").await {
-        close_picker(client, pane_id).await;
-        return false;
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
     }
     tokio::time::sleep(Duration::from_millis(600)).await;
     if !key(client, pane_id, "Enter").await {
-        close_picker(client, pane_id).await;
-        return false;
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
     }
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
-    let screen = read(client, pane_id).await;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("codex_apply_before_model_picker_read", pane_id).await;
+    let screen = read(client, pane_id).await?;
     if !screen.contains("Select Model") {
-        close_picker(client, pane_id).await;
-        return false;
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
     }
     let needle = model.map(str::to_string).unwrap_or_else(|| "(current)".to_string());
     let Some(n) = picker_number(&screen, &needle) else {
-        close_picker(client, pane_id).await;
-        return false;
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
     };
-    if !press_number(client, pane_id, n, &needle).await {
-        return false;
+    if !press_number(client, pane_id, n, &needle).await? {
+        return Ok(false);
     }
 
-    let screen = read(client, pane_id).await;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("codex_apply_before_effort_picker_read", pane_id).await;
+    let screen = read(client, pane_id).await?;
     if !screen.contains("Select Reasoning Level") {
-        close_picker(client, pane_id).await;
-        return false;
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
     }
     let want = effort.unwrap_or("");
     let needle = if want.is_empty() { "(default)".to_string() } else { effort_menu_label(want).to_string() };
     if needle.is_empty() {
-        close_picker(client, pane_id).await;
-        return false;
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
     }
     let screen = if is_nested_effort(want) && picker_number(&screen, &needle).is_none() {
         let Some(more) = picker_number(&screen, "More reasoning") else {
-            close_picker(client, pane_id).await;
-            return false;
+            let _ = close_picker_checked(client, pane_id).await;
+            return Ok(false);
         };
-        if !press_number(client, pane_id, more, "More reasoning").await {
-            return false;
+        if !press_number(client, pane_id, more, "More reasoning").await? {
+            return Ok(false);
         }
-        read(client, pane_id).await
+        read(client, pane_id).await?
     } else {
         screen
     };
     let Some(n) = picker_number(&screen, &needle) else {
-        close_picker(client, pane_id).await;
-        return false;
+        let _ = close_picker_checked(client, pane_id).await;
+        return Ok(false);
     };
-    if !press_number(client, pane_id, n, &needle).await {
-        return false;
+    if !press_number(client, pane_id, n, &needle).await? {
+        return Ok(false);
     }
     // Should be closed now; if not, the next prompt would be typed into it.
-    close_picker(client, pane_id).await
+    close_picker_checked(client, pane_id).await
 }
 
 async fn toggle_fast(client: &HerdrClient, pane_id: &str) -> bool {
@@ -391,20 +406,25 @@ pub async fn apply(
 ) -> Result<CodexRuntime, &'static str> {
     // The startup migration and rate-limit suggestion both require a user choice. Do not type into
     // either screen or dismiss it with Escape while applying a setting.
-    if !close_picker(client, pane_id).await {
-        return Err("picker_open");
+    match close_picker_checked(client, pane_id).await {
+        Ok(true) => {}
+        Ok(false) => return Err("picker_open"),
+        Err(()) => return Err("pane_read_failed"),
     }
     if fields.iter().any(|f| *f == "model" || *f == "effort") {
         let model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let effort = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        if !apply_model_and_effort(client, pane_id, model, effort).await {
-            return Err("picker_failed");
+        match apply_model_and_effort(client, pane_id, model, effort).await {
+            Ok(true) => {}
+            Ok(false) => return Err("picker_failed"),
+            Err(()) => return Err("pane_read_failed"),
         }
     }
     if fields.contains(&"fast") {
         let want = bot.fast != 0;
         // The screen is the truth about the tier right now; `runs.runtime_fast` may be stale.
-        let now = parse_status_line(&read(client, pane_id).await).map(|r| r.fast).or(was_fast);
+        let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+        let now = parse_status_line(&screen).map(|r| r.fast).or(was_fast);
         match fast_plan(now, want) {
             FastPlan::Keep => {}
             FastPlan::Toggle => {
@@ -417,7 +437,8 @@ pub async fn apply(
                     return Err("fast_toggle_failed");
                 }
                 tokio::time::sleep(Duration::from_millis(900)).await;
-                let seen = parse_status_line(&read(client, pane_id).await).map(|r| r.fast);
+                let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+                let seen = parse_status_line(&screen).map(|r| r.fast);
                 if needs_second_toggle(seen, want) && !toggle_fast(client, pane_id).await {
                     return Err("fast_toggle_failed");
                 }
@@ -426,7 +447,8 @@ pub async fn apply(
     }
     // Read-back (SPEC §4.4a).
     tokio::time::sleep(Duration::from_millis(900)).await;
-    let Some(seen) = parse_status_line(&read(client, pane_id).await) else { return Err("no_status_line") };
+    let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+    let Some(seen) = parse_status_line(&screen) else { return Err("no_status_line") };
     let want_model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
     if let Some(m) = want_model {
         if seen.model != m {
@@ -510,6 +532,113 @@ mod tests {
             assert!(!close_picker(&client, pane).await, "{name} requires the user's choice");
         }
         assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "Escape must not dismiss either choice");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_migration_or_rate_limit_preflight_does_not_touch_a_user_choice_screen() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "unreadable-picker").await;
+        sqlx::query("UPDATE bots SET kind='codex', model='gpt-6-astra', effort='high' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        for (pane, screen) in [
+            ("pane-codex-unreadable-migration", include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt")),
+            ("pane-codex-unreadable-rate-limit", include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt")),
+        ] {
+            env.herdr.set_screen(pane, screen);
+            env.herdr.fail_next("pane.read", crate::testing::Fault::Refuse);
+
+            assert!(apply(&env.app.herdr, pane, &bot, Some(false), &["model"]).await.is_err(), "{pane}");
+            assert!(env.herdr.calls_to("pane.send_text").is_empty(), "an unreadable preflight cannot authorize /model: {pane}");
+            assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "an unreadable preflight cannot authorize Enter or Escape: {pane}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_ordinary_model_picker_does_not_choose_a_setting() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "unreadable-model-menu").await;
+        sqlx::query("UPDATE bots SET kind='codex', model='gpt-6-astra', effort='high' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let pane = "pane-codex-unreadable-model-menu";
+        env.herdr.set_screen(pane, COMPOSER);
+        let screens = env.herdr.screens.clone();
+        let fail = env.herdr.fail_later();
+        crate::lifecycle::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
+            screens.lock().unwrap().insert(pane.into(), MODEL_MENU.into());
+            fail("pane.read", crate::testing::Fault::Refuse);
+        });
+
+        assert_eq!(apply(&env.app.herdr, pane, &bot, Some(false), &["model"]).await, Err("pane_read_failed"));
+        assert_eq!(
+            env.herdr.calls_to("pane.send_text").iter().map(|v| v["text"].as_str()).collect::<Vec<_>>(),
+            vec![Some("/model")],
+            "a readable initial composer may open the ordinary picker, but unreadable picker state cannot authorize a setting choice"
+        );
+        assert_eq!(
+            env.herdr.calls_to("pane.send_keys").iter().map(|v| v["keys"].clone()).collect::<Vec<_>>(),
+            vec![serde_json::json!(["Enter"])],
+            "no numeric choice or cleanup key is safe until the picker can be read"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_final_picker_check_is_not_treated_as_closed() {
+        let env = crate::testing::env().await;
+        let pane = "pane-codex-final-picker-read";
+        env.herdr.set_screen(pane, MODEL_MENU);
+        let fail = env.herdr.fail_later();
+        crate::lifecycle::race_point::arm("codex_picker_before_final_read", pane, move || async move {
+            fail("pane.read", crate::testing::Fault::Refuse);
+        });
+
+        assert!(close_picker_checked(&env.app.herdr, pane).await.is_err(), "a failed final read is not proof the picker closed");
+        assert_eq!(
+            env.herdr.calls_to("pane.send_keys").len(),
+            4,
+            "the read failure after the Escape budget cannot grant a safe-to-type result"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_readable_empty_composer_allows_a_verified_model_and_effort_apply() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "readable-model-menu").await;
+        sqlx::query("UPDATE bots SET kind='codex', model='gpt-6-astra', effort='high' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let pane = "pane-codex-readable-model-menu";
+        let screens = env.herdr.screens.clone();
+        env.herdr.set_screen(pane, COMPOSER);
+        let model_screens = screens.clone();
+        crate::lifecycle::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
+            model_screens.lock().unwrap().insert(pane.into(), MODEL_MENU.into());
+        });
+        let effort_screens = screens.clone();
+        crate::lifecycle::race_point::arm("codex_apply_before_effort_picker_read", pane, move || async move {
+            effort_screens.lock().unwrap().insert(pane.into(), EFFORT_MENU.into());
+        });
+        crate::lifecycle::race_point::arm("codex_picker_before_final_read", pane, move || async move {
+            screens.lock().unwrap().insert(pane.into(), COMPOSER.into());
+        });
+
+        let seen = apply(&env.app.herdr, pane, &bot, Some(false), &["model"]).await.unwrap();
+        assert_eq!(seen, CodexRuntime { model: "gpt-6-astra".into(), effort: Some("high".into()), fast: false });
+        assert_eq!(
+            env.herdr.calls_to("pane.send_text").iter().map(|v| v["text"].as_str()).collect::<Vec<_>>(),
+            vec![Some("/model"), Some("1"), Some("3")],
+            "a readable composer opens the picker and the verified requested rows are selected"
+        );
     }
 
     async fn run_with_runtime(env: &crate::testing::Env, fast: i64) -> String {
