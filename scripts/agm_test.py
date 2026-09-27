@@ -2119,13 +2119,15 @@ class OpsSyncTest(CliCase):
 # GH_FAIL=<子命令> 讓那一個子命令失敗；GH_NO_LABEL=1 模擬 label 還不存在（`issue edit --add-label` 先失敗）。
 # 真的 gh 不可達：PATH 只留這個目錄與 /usr/bin:/bin，而且這支 stub 不認得的子命令一律 exit 2。
 FAKE_GH = r"""#!/usr/bin/env python3
-import json, os, sys
+import datetime, json, os, re, sys
 state = os.environ["GH_STATE"]
 argv = sys.argv[1:]
 with open(os.path.join(state, "calls.log"), "a") as f:
     f.write(json.dumps(argv) + "\n")   # 一行一筆 JSON：--body 裡有換行也不會把記錄切斷
 sub = " ".join(argv[:2])
-if os.environ.get("GH_FAIL") == sub:
+fail = os.environ.get("GH_FAIL")
+if fail in (sub, argv[0]) or (fail == "api_after_comment" and argv[0] == "api"
+                               and os.path.exists(os.path.join(state, "comment-written"))):
     sys.stderr.write("gh: boom\n")
     sys.exit(1)
 if sub == "issue view":
@@ -2135,10 +2137,36 @@ if sub == "issue view":
     except FileNotFoundError:
         sys.stderr.write("gh: no issue %s\n" % n)
         sys.exit(1)
+elif argv[0] == "api":
+    path = next((a for a in argv if "/issues/" in a and "/comments" in a), "")
+    match = re.search(r"/issues/(\d+)/comments", path)
+    if not match:
+        sys.stderr.write("gh: unsupported api path\n")
+        sys.exit(2)
+    raw = json.load(open(os.path.join(state, "issue-%s.json" % match.group(1))))
+    sys.stdout.write(json.dumps(raw.get("comments", [])))
 elif sub in ("issue comment", "issue edit", "label create"):
     if sub == "label create" and os.environ.get("GH_NO_LABEL"):
         sys.stderr.write("gh: label already exists\n")
         sys.exit(1)
+    if sub == "issue comment":
+        n = argv[2]
+        path = os.path.join(state, "issue-%s.json" % n)
+        raw = json.load(open(path))
+        comments = raw.setdefault("comments", [])
+        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        next_id = max((int(c.get("id", 0)) for c in comments), default=100) + 1
+        injected = os.environ.get("GH_INJECT_COMPETITOR")
+        if injected and not os.path.exists(os.path.join(state, "injected")):
+            payload = {"bot": injected, "at": now, "claim_id": "race-competitor"}
+            comments.append({"id": next_id, "created_at": now, "body": "<!-- agm:issue-claim %s -->" % json.dumps(payload)})
+            next_id += 1
+            open(os.path.join(state, "injected"), "w").close()
+        body = argv[argv.index("--body") + 1]
+        comments.append({"id": next_id, "created_at": now, "body": body})
+        raw["updatedAt"] = now
+        json.dump(raw, open(path, "w"))
+        open(os.path.join(state, "comment-written"), "w").close()
     sys.stdout.write("ok\n")
 else:
     sys.stderr.write("gh: unknown %s\n" % sub)
@@ -2155,7 +2183,7 @@ def _iso(delta_secs: float) -> str:
 class IssueClaimTest(unittest.TestCase):
     """`agm issue claim/release` 不連 daemon，只跟 gh 說話。"""
 
-    ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_NO_LABEL", "AM_AGENT_NAME", "AM_BOT_ID", "AGM_RUNTIME_DIR")
+    ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_NO_LABEL", "GH_INJECT_COMPETITOR", "AM_AGENT_NAME", "AM_BOT_ID", "AGM_RUNTIME_DIR")
 
     def setUp(self):
         # 先存原值再改：PATH 指向的是等一下會被刪掉的暫存目錄，收尾一定要還原。
@@ -2185,6 +2213,8 @@ class IssueClaimTest(unittest.TestCase):
     # --- 造題 ---
 
     def issue(self, number: int, *, labels=(), comments=(), updated: str | None = None, title="某張票"):
+        comments = [dict(c, id=c.get("id", 100 + i), created_at=c.get("created_at", c.get("createdAt")))
+                    for i, c in enumerate(comments)]
         body = {
             "number": number, "title": title, "state": "OPEN", "url": f"https://x/{number}",
             "labels": [{"name": n} for n in labels],
@@ -2246,7 +2276,55 @@ class IssueClaimTest(unittest.TestCase):
         edit = [c for c in self.calls() if c[:2] == ["issue", "edit"]]
         self.assertEqual(edit[0][-2:], ["--add-label", "wip"], edit)
         for call in self.calls():
-            self.assertEqual(call[call.index("-R") + 1], "o/r", f"--repo 要傳給每一次 gh：{call}")
+            if call[0] == "api":
+                self.assertTrue(any(a.startswith("repos/o/r/issues/425/comments?") for a in call),
+                                f"gh api 要把 repo 放進 endpoint：{call}")
+            else:
+                self.assertEqual(call[call.index("-R") + 1], "o/r", f"--repo 要傳給每一次 gh：{call}")
+
+    def test_same_second_claims_are_ordered_by_comment_id_and_first_claim_wins(self):
+        stamp = _iso(-10)
+        comments = [
+            {"id": 202, "created_at": stamp, "body": '<!-- agm:issue-claim {"bot":"second"} -->'},
+            {"id": 201, "created_at": stamp, "body": '<!-- agm:issue-claim {"bot":"first"} -->'},
+        ]
+        claim = agm.current_claim({"comments": comments, "updatedAt": stamp})
+        self.assertEqual(claim["bot"], "first")
+
+    def test_first_claim_after_release_wins_the_new_claim_epoch(self):
+        stamp = _iso(-10)
+        comments = [
+            {"id": 301, "created_at": _iso(-40), "body": '<!-- agm:issue-claim {"bot":"old"} -->'},
+            {"id": 302, "created_at": _iso(-30), "body": '<!-- agm:issue-release {"bot":"old"} -->'},
+            {"id": 304, "created_at": stamp, "body": '<!-- agm:issue-claim {"bot":"second"} -->'},
+            {"id": 303, "created_at": stamp, "body": '<!-- agm:issue-claim {"bot":"first"} -->'},
+        ]
+        claim = agm.current_claim({"comments": comments, "updatedAt": stamp})
+        self.assertEqual(claim["bot"], "first")
+
+    def test_claim_rereads_comments_and_loser_releases_its_claim_with_exit_3(self):
+        self.issue(425)
+        os.environ["GH_INJECT_COMPETITOR"] = "race-winner"
+        code, _out, err = self.run_cli("issue", "claim", "425")
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(err)["claimed_by"], "race-winner")
+        calls = self.calls()
+        self.assertGreaterEqual(sum(call[0] == "api" for call in calls), 2, "認領前後都要讀留言")
+        bodies = [call[call.index("--body") + 1] for call in calls if call[:2] == ["issue", "comment"]]
+        self.assertEqual(len(bodies), 2, "輸家要追加交回標記")
+        self.assertIn("agm:issue-release", bodies[-1])
+        self.assertIn('"claim_id"', bodies[-1])
+        issue = json.loads((self.state / "issue-425.json").read_text())
+        self.assertEqual(agm.current_claim(issue)["bot"], "race-winner", "輸家的交回不可清掉勝者")
+
+    def test_claim_readback_failure_never_reports_success(self):
+        self.issue(425)
+        os.environ["GH_FAIL"] = "api_after_comment"
+        code, _out, err = self.run_cli("issue", "claim", "425")
+        self.assertNotEqual(code, 0, err)
+        bodies = [call[call.index("--body") + 1] for call in self.calls() if call[:2] == ["issue", "comment"]]
+        self.assertEqual(len(bodies), 2, "回讀失敗後要用 nonce 追加補償交回標記")
+        self.assertIn("agm:issue-release", bodies[-1])
 
     def test_claim_taken_by_another_bot_exits_3_and_names_it(self):
         self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=600, child="life")])
@@ -2302,6 +2380,7 @@ class IssueClaimTest(unittest.TestCase):
         self.assertTrue(json.loads(out)["released"])
         body = [c for c in self.calls() if c[:2] == ["issue", "comment"]][0][-1]
         self.assertIn("agm:issue-release", body)
+        self.assertIn('"claim_id"', body)
         self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]], [["--remove-label", "wip"]])
 
     def test_release_does_not_take_someone_elses_issue_off(self):

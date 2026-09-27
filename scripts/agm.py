@@ -31,6 +31,7 @@ import socket
 import stat
 import subprocess
 import sys
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1658,20 +1659,12 @@ def mark_of(body: str) -> tuple[str, dict] | None:
     return (m.group(1), payload) if isinstance(payload, dict) else None
 
 
-# `gh issue view --json comments` 一次最多給這麼多則（底層是 GraphQL 的 `comments(first: 100)`）。
-INLINE_COMMENT_CAP = 100
-
-
-def all_comments(args, number: int, inline: list) -> list:
+def all_comments(args, number: int) -> list:
     """這張票的所有留言。
 
-    `gh issue view --json comments` 只給**最舊**的 100 則，而現在的持有者由**最新**一個標記
-    決定（交回的標記＝沒人認領）。討論長一點的票上，交回那一則正好是被截掉的那一端：
-    `agm issue claim` 會一直看到一筆早就放掉的認領而 exit 3，沒有任何辦法繞過。
-    沒滿 100 則就直接用剛剛那一份（一次呼叫就夠）；滿了才用 REST 翻完。
+    GraphQL 的 inline comments 沒有可排序的數字留言 ID；REST 留言有數字 ID，可在同秒時
+    決定競爭順序。也要讀完所有頁，避免最新的認領／交回標記落在 inline 的 100 則以外。
     """
-    if len(inline) < INLINE_COMMENT_CAP:
-        return inline
     repo = getattr(args, "repo", None)
     # `gh api` 不吃 `-R`；沒指定 repo 時用 gh 自己的 `{owner}`／`{repo}` 佔位符從 cwd 推。
     path = f"repos/{repo}/issues/{number}/comments" if repo else f"repos/{{owner}}/{{repo}}/issues/{number}/comments"
@@ -1698,36 +1691,76 @@ def read_issue(args, number: int) -> dict:
 
 
 def current_claim(issue: dict) -> dict | None:
-    """目前的認領狀態：由**最新**一個標記決定（交回的標記就是「沒人認領」）。
+    """目前的認領狀態：每個認領期的第一則有效認領勝出，交回標記會結束認領期。
 
     回 `{"bot", "child", "worktree", "branch", "at", "last_activity", "stale"}`，沒人認領回 `None`。
     「有動靜」取「認領留言的時間」與「這張票最後被動到的時間」裡比較晚的那個：認領的人還在留言、
     改 label、推 commit 關聯，都算它還活著。
     """
-    latest = None
-    for c in issue.get("comments") or []:
-        parsed = mark_of(c.get("body") or "")
-        if not parsed:
+    ordered = []
+    for index, c in enumerate(issue.get("comments") or []):
+        if not isinstance(c, dict):
             continue
-        # `gh issue view --json` 是 `createdAt`，REST（`gh api`）是 `created_at`。
         at = parse_iso(c.get("createdAt") or c.get("created_at"))
         if at is None:
             continue
-        if latest is None or at > latest[0]:
-            latest = (at, parsed)
-    if latest is None:
-        return None
-    at, (kind, payload) = latest
-    if kind == RELEASE_MARK:
+        raw_id = c.get("id")
+        try:
+            numeric_id = int(raw_id)
+        except (TypeError, ValueError):
+            numeric_id = None
+        # REST IDs are monotonically assigned. API order is the fallback only for legacy/test data
+        # without IDs; production comment reads always use REST via all_comments().
+        order_id = (0, numeric_id) if numeric_id is not None else (1, index)
+        ordered.append((at, order_id, index, c, mark_of(c.get("body") or "")))
+    ordered.sort(key=lambda row: (row[0], row[1], row[2]))
+
+    active = None
+    for at, _order_id, index, comment, parsed in ordered:
+        if parsed and parsed[0] == CLAIM_MARK:
+            _kind, payload = parsed
+            if active is not None:
+                observed = parse_iso(payload.get("observed_updated_at"))
+                prior_activity = max(active["last_activity"], observed) if observed and observed < at else active["last_activity"]
+                # A later claim can start a new epoch only after the previous claim had already gone
+                # stale at the time it was attempted. Near-simultaneous claims remain ordered by REST ID.
+                if (at - prior_activity).total_seconds() <= CLAIM_STALE_SECS:
+                    active["last_activity"] = max(active["last_activity"], at)
+                    continue
+            raw_id = comment.get("id")
+            claim_id = payload.get("claim_id") or (str(raw_id) if raw_id is not None else str(index))
+            active = {
+                "payload": payload,
+                "claim_id": str(claim_id),
+                "at": at,
+                "last_activity": at,
+            }
+            continue
+
+        if parsed and parsed[0] == RELEASE_MARK:
+            _kind, payload = parsed
+            target = payload.get("claim_id")
+            if target is None or (active is not None and str(target) == active["claim_id"]):
+                active = None
+            elif active is not None:
+                active["last_activity"] = max(active["last_activity"], at)
+            continue
+        if active is not None:
+            active["last_activity"] = max(active["last_activity"], at)
+
+    if active is None:
         return None
     updated = parse_iso(issue.get("updatedAt"))
-    last = max([t for t in (at, updated) if t is not None])
+    at = active["at"]
+    last = max([t for t in (active["last_activity"], updated) if t is not None])
+    payload = active["payload"]
     now = datetime.datetime.now(datetime.timezone.utc)
     return {
         "bot": payload.get("bot"),
         "child": payload.get("child"),
         "worktree": payload.get("worktree"),
         "branch": payload.get("branch"),
+        "claim_id": active["claim_id"],
         "at": at.isoformat(),
         "last_activity": last.isoformat(),
         "stale": (now - last).total_seconds() > CLAIM_STALE_SECS,
@@ -1758,8 +1791,8 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     number = args.number
     me = claiming_bot(args)
     issue = read_issue(args, number)
-    # 留言滿 100 則就代表可能被截掉，而截掉的是決定持有者的那一端（見 `all_comments`）。
-    issue["comments"] = all_comments(args, number, issue.get("comments") or [])
+    # 認領判定要讀 REST 的全部留言，取數字 ID 排序並避免 GraphQL inline comments 截斷。
+    issue["comments"] = all_comments(args, number)
     claim = current_claim(issue)
     blocker = held_by_other(claim, me)
     if blocker is not None:
@@ -1781,7 +1814,10 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
         if claim is None and CLAIM_LABEL not in labels:
             out["already"] = True
             return out
-        body = f"{me} 交回 #{number}。\n\n<!-- {RELEASE_MARK} {json.dumps({'bot': me, 'at': now}, ensure_ascii=False, sort_keys=True)} -->"
+        release_payload = {"bot": me, "at": now}
+        if claim and claim.get("claim_id"):
+            release_payload["claim_id"] = claim["claim_id"]
+        body = f"{me} 交回 #{number}。\n\n<!-- {RELEASE_MARK} {json.dumps(release_payload, ensure_ascii=False, sort_keys=True)} -->"
         gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
         if CLAIM_LABEL in labels:
             gh(["issue", "edit", str(number), *repo_args(args), "--remove-label", CLAIM_LABEL])
@@ -1793,7 +1829,9 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
             gh(["issue", "edit", str(number), *repo_args(args), "--add-label", CLAIM_LABEL])
         return {"issue": number, "title": issue.get("title"), "claimed": True, "already": True, "bot": me, "claim": claim}
 
-    payload = {"bot": me, "at": now}
+    payload = {"bot": me, "at": now, "claim_id": uuid.uuid4().hex}
+    if issue.get("updatedAt"):
+        payload["observed_updated_at"] = issue["updatedAt"]
     for key in ("child", "worktree", "branch"):
         val = getattr(args, key, None)
         if val:
@@ -1814,6 +1852,51 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     # label 不存在時 `--add-label` 會失敗，先建一次（已存在會失敗，無妨；同 ci-watch-kick 的做法）。
     gh(["label", "create", CLAIM_LABEL, *repo_args(args), "--color", "FBCA04", "--description", "有 bot 正在做（agm issue claim）"], allow_fail=True)
     gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
+
+    def release_unconfirmed_claim() -> None:
+        released_at = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        release_payload = {"bot": me, "at": released_at, "claim_id": payload["claim_id"]}
+        release_body = (
+            f"{me} 交回 #{number} 的未確認認領。\n\n"
+            f"<!-- {RELEASE_MARK} {json.dumps(release_payload, ensure_ascii=False, sort_keys=True)} -->"
+        )
+        gh(["issue", "comment", str(number), *repo_args(args), "--body", release_body])
+
+    confirmed = dict(issue)
+    try:
+        confirmed["comments"] = all_comments(args, number)
+    except AgmError as read_error:
+        try:
+            release_unconfirmed_claim()
+        except AgmError as release_error:
+            raise AgmError(
+                "gh_failed",
+                f"認領留言可能已寫入，但回讀與交回標記都失敗；不可派工（回讀：{read_error.message}；交回：{release_error.message}）",
+                1,
+                issue=number,
+            )
+        raise AgmError(
+            "gh_failed",
+            f"認領留言可能已寫入，但回讀失敗；已追加交回標記，不可派工：{read_error.message}",
+            1,
+            issue=number,
+        )
+
+    winner = current_claim(confirmed)
+    if winner is None or winner.get("claim_id") != payload["claim_id"]:
+        try:
+            release_unconfirmed_claim()
+        except AgmError as release_error:
+            raise AgmError(
+                "gh_failed",
+                f"回讀確認這次認領沒有勝出，但交回標記寫入失敗；不可派工：{release_error.message}",
+                1,
+                issue=number,
+            )
+        if winner is not None:
+            raise claim_conflict(number, winner)
+        raise AgmError("issue_claimed", f"#{number} 的認領回讀沒有確認本次標記；已交回，不可派工", 3, issue=number)
+
     gh(["issue", "edit", str(number), *repo_args(args), "--add-label", CLAIM_LABEL])
     out = {"issue": number, "title": issue.get("title"), "claimed": True, "already": False, "bot": me, "label": CLAIM_LABEL}
     out.update({k: v for k, v in payload.items() if k in ("child", "worktree", "branch")})
