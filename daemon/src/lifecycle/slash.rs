@@ -268,9 +268,7 @@ async fn apply_live_setting_inner(
     if bot.kind == "codex" {
         // `/fast` 是開關：不知道現在狀態就不能按。
         let was_fast = run.runtime_fast.map(|v| v != 0);
-        if let Err(why) = mark_pane_typed(app, &run.id).await {
-            return Err(why);
-        }
+        mark_pane_typed(app, &run.id).await?;
         let seen = match crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await {
             Ok(seen) => seen,
             Err(why) => return Err(format!("codex: {why}")),
@@ -303,9 +301,7 @@ async fn apply_live_setting_inner(
         return Err(format!("no_slash_command_for_{field}"));
     };
     // 不管套用成不成功，pane 都被直接打過字了。
-    if let Err(why) = mark_pane_typed(app, &run.id).await {
-        return Err(why);
-    }
+    mark_pane_typed(app, &run.id).await?;
     if let Err(e) = send_slash_line(&client, &pane_id, &line).await {
         return Err(format!("slash_send_failed: {e:?}"));
     }
@@ -630,7 +626,7 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
     let pane_id = slash_gate(&run, in_flight)
         .map_err(|b| LcError::conflict(b.reason(), json!({"bot_id": bot_id, "run_id": run.id})))?;
     let client = client_for_run(app, &run).await?;
-    mark_pane_typed(app, &run.id).await.map_err(|why| LcError::Upstream(why))?;
+    mark_pane_typed(app, &run.id).await.map_err(LcError::Upstream)?;
     send_slash_line(&client, &pane_id, line).await?;
     tracing::info!(bot_id, kind = %bot.kind, line, "sent login slash command");
     Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() })

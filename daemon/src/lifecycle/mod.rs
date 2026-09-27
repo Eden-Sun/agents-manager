@@ -121,6 +121,7 @@ pub(crate) async fn recover_live_apply_debts(app: &Arc<App>) {
     live_apply_debt::recover(app).await;
 }
 
+#[cfg(test)]
 pub(crate) use live_apply_debt::retry_once as retry_live_apply_bookkeeping_once;
 pub(crate) use delivery::*;
 pub(crate) use start::*;
