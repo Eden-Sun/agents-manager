@@ -42,39 +42,96 @@ pub const LOG_FILE: &str = "cli-update.log";
 /// 失敗時回給畫面的輸出只留尾巴，全文在 log。
 const TAIL_CHARS: usize = 1500;
 
-/// 主機端的安裝鎖（#564）：`$HOME` 底下一條 symlink，目標是持鎖那支 shell 的 pid。
+/// 主機端的安裝鎖（#564、#580）：`$HOME` 底下一條 symlink，目標是安裝 helper 的 pid 與唯一 nonce。
 ///
 /// DB 那一列只擋得住**同一個資料目錄**的 daemon；daemon 被砍掉時遠端的 `curl | sh` 不會跟著停（逾時也只砍得掉本機的
-/// ssh），隔離實例也會對同一台開安裝。所以安裝指令本身包在這把鎖裡：`ln -s` 是原子的，建立的同時就寫好了 pid，
-/// 沒有「目錄建好了、pid 還沒寫」的空窗會被誤判成過期。已經有人拿著而且 pid 還活著就不裝、印 [`LOCKED_MARK`] 退出
-/// [`LOCKED_EXIT`]；pid 死了（被 SIGKILL，沒跑到 trap）就當過期拿走。不分實例：換掉的是同一顆 codex。
+/// ssh），隔離實例也會對同一台開安裝。所以安裝 helper 在主機端持鎖並等待完整的安裝指令；外層 SSH wrapper 離開不會帶走
+/// helper。`ln -s` 原子地寫入 `pid:nonce`；probe 只有在該 PID 的命令列仍帶同一個 nonce 時才算忙，避免 PID 重用假裝安裝還活著。
+/// 沒有 nonce 的舊版 PID 鎖無法驗明 owner，視為過期回收。鎖忙時不裝、印 [`LOCKED_MARK`] 退出 [`LOCKED_EXIT`]；
+/// owner 已退出時可回收。不分實例：換掉的是同一顆 codex。
 pub const INSTALL_LOCK: &str = "$HOME/.agents-manager-codex-install.lock";
 const LOCKED_EXIT: i32 = 75;
 const LOCKED_MARK: &str = "AM_CODEX_INSTALL_LOCKED";
 
+/// 識別新式 `pid:nonce` owner；舊版單 PID symlink 沒有足夠資料驗明身份，視為過期。
+fn lock_owner_check() -> &'static str {
+    r#"lock_owner_alive() {
+  owner=$1
+  case "$owner" in *:*) pid=${owner%%:*}; nonce=${owner#*:} ;; *) return 1 ;; esac
+  case "$nonce" in ''|*:* ) return 1 ;; esac
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd=$(ps -p "$pid" -o command= 2>/dev/null) || return 1
+  case "$cmd" in *"$nonce"*) return 0 ;; *) return 1 ;; esac
+}"#
+}
+
+fn shell_lock_path(lock: &str) -> String {
+    match lock.strip_prefix("$HOME/") {
+        Some(path) => format!("\"$HOME/{}\"", path.replace('\\', "\\\\").replace('$', "\\$").replace('`', "\\`").replace('"', "\\\"")),
+        None => crate::hosts::sh_quote(lock),
+    }
+}
+
 /// 把 `inner` 包進主機端的安裝鎖（POSIX sh：遠端是 `ssh … /bin/sh -s`，本機是 `/bin/sh -c`）。
 /// 鎖被佔走的訊息寫到 stderr：遠端失敗時 `ssh_exec` 只帶 stderr 回來。
 fn locked_script(lock: &str, inner: &str) -> String {
-    format!(
-        r#"L="{lock}"
-if ! ln -s "$$" "$L" 2>/dev/null; then
+    let nonce = crate::db::ulid();
+    let lock = shell_lock_path(lock);
+    let inner = crate::hosts::sh_quote(inner);
+    let worker = format!(
+        r#"LOCK_NONCE='{nonce}'
+L={lock}
+OUT=$2
+PARENT_PID=$1
+{owner_check}
+cleanup() {{
+  [ "$(readlink "$L" 2>/dev/null)" = "$$:$LOCK_NONCE" ] && rm -f "$L"
+  kill -0 "$PARENT_PID" 2>/dev/null || rm -f "$OUT"
+}}
+trap cleanup EXIT
+trap '' HUP INT TERM
+if ! ln -s "$$:$LOCK_NONCE" "$L" 2>/dev/null; then
   p=$(readlink "$L" 2>/dev/null)
-  if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "{LOCKED_MARK} pid=$p" >&2; exit {LOCKED_EXIT}; fi
+  if [ -n "$p" ] && lock_owner_alive "$p"; then echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; fi
   rm -f "$L"
-  ln -s "$$" "$L" 2>/dev/null || {{ echo "{LOCKED_MARK} pid=?" >&2; exit {LOCKED_EXIT}; }}
+  ln -s "$$:$LOCK_NONCE" "$L" 2>/dev/null || {{ p=$(readlink "$L" 2>/dev/null); echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; }}
 fi
-trap '[ "$(readlink "$L" 2>/dev/null)" = "$$" ] && rm -f "$L"' EXIT
+AM_CODEX_INSTALL_OWNER=$LOCK_NONCE
+export AM_CODEX_INSTALL_OWNER
+eval {inner}
+"#,
+        owner_check = lock_owner_check(),
+    );
+    let worker = crate::hosts::sh_quote(&worker);
+    format!(
+        r#"L={lock}
+LOCK_NONCE='{nonce}'
+OUT=$(mktemp "${{TMPDIR:-/tmp}}/am-codex-install.XXXXXX") || exit 70
+umask 077
+nohup /bin/sh -c {worker} am-codex-install "$$" "$OUT" > "$OUT" 2>&1 < /dev/null &
+worker_pid=$!
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-{inner}
-"#
+wait "$worker_pid"
+status=$?
+cat "$OUT"
+rm -f "$OUT"
+exit "$status"
+"#,
+        lock = lock,
+        worker = worker,
     )
 }
 
 /// 那台的安裝鎖現在有沒有活著的主人：印 `busy <pid>` 或 `free`。
 fn probe_script(lock: &str) -> String {
-    format!(r#"L="{lock}"; p=$(readlink "$L" 2>/dev/null); if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "busy $p"; else echo free; fi"#)
+    format!(
+        r#"L={lock}; {owner_check}; p=$(readlink "$L" 2>/dev/null); if [ -n "$p" ] && lock_owner_alive "$p"; then echo "busy ${{p%%:*}}"; else echo free; fi"#,
+        lock = shell_lock_path(lock),
+        owner_check = lock_owner_check(),
+    )
 }
 
 fn parse_probe(out: &str) -> anyhow::Result<bool> {
@@ -1328,6 +1385,102 @@ mod tests {
         assert!(v["error"].as_str().unwrap().contains("pid=4242"), "{v}");
         assert!(fake.restarts().is_empty());
         assert_eq!(notice_of(&env.app, &run).await, Some(pending));
+    }
+
+    #[test]
+    fn the_host_lock_path_keeps_home_expansion_in_the_remote_shell() {
+        assert_eq!(shell_lock_path(INSTALL_LOCK), "\"$HOME/.agents-manager-codex-install.lock\"");
+        assert_eq!(shell_lock_path("/tmp/a'b"), "'/tmp/a'\\''b'");
+    }
+
+    /// The `/bin/sh` process here stands in for the remote command shell started by SSH.
+    /// Killing that control process must not release the host lock while its fake installer lives.
+    #[tokio::test]
+    async fn remote_install_lock_survives_control_disconnect_until_installer_exits() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let dir = std::env::temp_dir().join(format!("am-cli-lock-disconnect-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("codex-install.lock").display().to_string();
+        let installer_pid_file = dir.join("installer.pid");
+        let second_ran = dir.join("second-ran");
+        let inner = format!("sleep 2 & echo $! > '{}'; wait", installer_pid_file.display());
+
+        let mut control = tokio::process::Command::new("/bin/sh")
+            .arg("-s")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = control.stdin.take().unwrap();
+        input.write_all(locked_script(&lock, &inner).as_bytes()).await.unwrap();
+        drop(input);
+        for _ in 0..200 {
+            if installer_pid_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let installer_pid: u32 = std::fs::read_to_string(&installer_pid_file).expect("fake installer started").trim().parse().unwrap();
+
+        control.start_kill().unwrap(); // Unix `start_kill` uses SIGKILL; do not run the wrapper's EXIT trap.
+        control.wait().await.unwrap();
+        assert_eq!(unsafe { libc::kill(installer_pid as i32, 0) }, 0, "the fake installer outlives the SSH control shell");
+
+        let probe = local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap();
+        assert!(parse_probe(&probe).unwrap(), "a dropped SSH control process must not make the live installer lock stale: {probe}");
+        let second = local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(5)).await;
+        let err = second.expect_err("a second install stays excluded while the fake remote installer lives");
+        assert!(err.contains(LOCKED_MARK) && err.contains("75"), "{err}");
+        assert!(!second_ran.exists(), "the contender must not enter its install section");
+
+        for _ in 0..300 {
+            if unsafe { libc::kill(installer_pid as i32, 0) } != 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_ne!(unsafe { libc::kill(installer_pid as i32, 0) }, 0, "fake installer should finish");
+        for _ in 0..200 {
+            if !parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap(), "lock becomes recoverable after the installer exits");
+        local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(5)).await.expect("a completed installer must release the lock");
+        assert!(second_ran.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A stale PID can be reused by an unrelated process. PID liveness without the lock owner's identity is not enough.
+    #[tokio::test]
+    async fn a_reused_pid_does_not_keep_a_stale_host_install_lock_busy() {
+        let dir = std::env::temp_dir().join(format!("am-cli-lock-pid-reuse-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("codex-install.lock").display().to_string();
+        let marker = dir.join("installer-ran");
+
+        let mut unrelated = tokio::process::Command::new("/bin/sh")
+            .arg("-s")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let unrelated_pid = unrelated.id().unwrap();
+        let unrelated_stdin = unrelated.stdin.take().unwrap();
+        std::os::unix::fs::symlink(unrelated_pid.to_string(), &lock).unwrap();
+        let probe = local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap();
+        assert!(!parse_probe(&probe).unwrap(), "an unrelated live `sh -s` reusing a legacy PID must not pin the lock: {probe}");
+        local_sh(&locked_script(&lock, &format!("touch '{}'", marker.display())), Duration::from_secs(5)).await.expect("an unrelated process reusing the old PID must not pin the stale lock");
+        assert!(marker.exists());
+        assert!(std::fs::symlink_metadata(&lock).is_err());
+        drop(unrelated_stdin);
+        unrelated.wait().await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// 真的 `/bin/sh` 跑鎖的腳本（裡面的指令換成 sleep／echo，絕不跑 curl）：拿著的時候第二個不跑、退 75；
