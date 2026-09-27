@@ -81,14 +81,20 @@ pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -
 async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> Option<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return Some("bot_missing".into()) };
-    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return Some("no_active_run".into()) };
+    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else {
+        return Some("bot_missing".into());
+    };
+    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else {
+        return Some("no_active_run".into());
+    };
     let in_flight = !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None));
     let pane_id = match slash_gate(&run, in_flight) {
         Ok(p) => p,
         Err(why) => return Some(format!("slash_gate: {}", why.reason())),
     };
-    let Ok(client) = client_for_run(app, &run).await else { return Some("no_herdr_client".into()) };
+    let Ok(client) = client_for_run(app, &run).await else {
+        return Some("no_herdr_client".into());
+    };
 
     if bot.kind == "codex" {
         // `/fast` 是開關：不知道現在狀態就不能按。
@@ -101,19 +107,23 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
             Err(why) => return Some(format!("codex: {why}")),
         };
         // 回讀的狀態列才是 runtime 的定義（SPEC §4.4a）。
-        let _ = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
-            .bind(&seen.model)
-            .bind(&seen.effort)
-            .bind(i64::from(seen.fast))
-            .bind(&run.id)
-            .execute(&app.db)
-            .await;
+        let _ = sqlx::query(
+            "UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?",
+        )
+        .bind(&seen.model)
+        .bind(&seen.effort)
+        .bind(i64::from(seen.fast))
+        .bind(&run.id)
+        .execute(&app.db)
+        .await;
         app.emit_bot_status(bot_id).await;
         tracing::info!(bot_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast, "codex applied live");
         return None;
     }
 
-    let [field] = fields else { return Some("not_a_single_field".into()) };
+    let [field] = fields else {
+        return Some("not_a_single_field".into());
+    };
     let value = match *field {
         "effort" => bot.effort.as_deref(),
         "model" => bot.model.as_deref(),
@@ -130,12 +140,50 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
     if let Err(why) = mark_pane_typed(app, &run.id).await {
         return Some(why);
     }
-    if send_slash_line(&client, &pane_id, &line).await.is_err() {
-        return Some("slash_send_failed".into());
+    if let Err(e) = send_slash_line(&client, &pane_id, &line).await {
+        return Some(format!("slash_send_failed: {e:?}"));
     }
     // 還握著 bot 鎖：`prompt_grouped` 拿同一把鎖，所以下一則 prompt 一定排在 TUI 回到輸入列之後。
-    if !wait_for_composer_settled(&client, &pane_id, &bot.kind).await {
-        tracing::warn!(bot_id, line, "TUI did not settle back to an empty composer after the slash command");
+    let settled_screen = match wait_for_composer_settled(&client, &pane_id, &bot.kind).await {
+        Ok(Some(screen)) => screen,
+        Ok(None) => return Some("slash_composer_not_settled".into()),
+        Err(e) => return Some(format!("slash_settle_read_failed: {e:?}")),
+    };
+    // Grok prints its active model and effort in the status frame. Use that read-back before
+    // clearing the drift marker; a closed picker alone does not prove the requested value landed.
+    if bot.kind == "grok" {
+        let expected_model = bot
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if *field == "model" {
+            let expected = expected_model.map(|m| crate::models::canonical_model("grok", m));
+            if expected.is_some_and(|want| {
+                grok_model_from_screen(&settled_screen).as_deref() != Some(want)
+            }) {
+                return Some("grok_model_readback_mismatch".into());
+            }
+        }
+        let expected_effort = if *field == "effort" {
+            bot.effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        } else if *field == "model" {
+            bot.effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        if expected_effort.is_some_and(|want| {
+            crate::models::grok_effort_from_screen(&settled_screen).as_deref()
+                != Some(want.to_ascii_lowercase().as_str())
+        }) {
+            return Some("grok_effort_readback_mismatch".into());
+        }
     }
     // SPEC §4.4a: clear the drift marker only for the field sent (`/model` doesn't touch effort).
     let col = match *field {
@@ -148,7 +196,12 @@ async fn apply_live_setting_inner(app: &Arc<App>, bot_id: &str, fields: &[&str])
         .execute(&app.db)
         .await;
     if *field == "model" && bot.kind == "grok" {
-        if let Some(e) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(e) = bot
+            .effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             let _ = sqlx::query("UPDATE runs SET runtime_effort = ? WHERE id = ?")
                 .bind(e.to_ascii_lowercase())
                 .bind(&run.id)
@@ -174,17 +227,35 @@ pub(crate) async fn apply_grok_startup_effort(
     if bot.kind != "grok" {
         return Ok(());
     }
-    let Some(wanted) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()) else {
+    let Some(wanted) = bot
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+    else {
         return Ok(());
     };
-    let screen = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+    let screen = client
+        .pane_read(pane_id, "visible", 60)
+        .await
+        .map_err(|e| format!("pane_read_failed: {e:#}"))?
+        .text;
     if crate::models::grok_effort_from_screen(&screen).as_deref() == Some(wanted.as_str()) {
         return Ok(());
     }
     let line = format!("/effort {wanted}");
     mark_pane_typed(app, run_id).await?;
-    send_slash_line(client, pane_id, &line).await.map_err(|e| format!("{e:?}"))?;
-    let _ = wait_for_composer_settled(client, pane_id, "grok").await;
+    send_slash_line(client, pane_id, &line)
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let settled = wait_for_composer_settled(client, pane_id, "grok")
+        .await
+        .map_err(|e| format!("settle_read_failed: {e:?}"))?
+        .ok_or_else(|| "composer_not_settled".to_string())?;
+    if crate::models::grok_effort_from_screen(&settled).as_deref() != Some(wanted.as_str()) {
+        return Err("effort_readback_mismatch".into());
+    }
     let _ = sqlx::query("UPDATE runs SET runtime_effort = ? WHERE id = ?")
         .bind(&wanted)
         .bind(run_id)
@@ -242,30 +313,58 @@ fn slash_gate(run: &db::Run, turn_in_flight: bool) -> Result<String, SlashBlocke
 async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcResult<()> {
     client.pane_send_text(pane_id, line).await.map_err(up)?;
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-    client.pane_send_keys(pane_id, &["Enter"]).await.map_err(up)?;
+    client
+        .pane_send_keys(pane_id, &["Enter"])
+        .await
+        .map_err(up)?;
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-    let screen = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("slash_after_enter_before_read", pane_id).await;
+    let screen = client
+        .pane_read(pane_id, "visible", 60)
+        .await
+        .map_err(up)?
+        .text;
     if !crate::tui_prompts::is_switch_model_dialog(&screen) {
         return Ok(());
     }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("slash_confirm_before_answer", pane_id).await;
-    let latest = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+    let latest = client
+        .pane_read(pane_id, "visible", 60)
+        .await
+        .map_err(up)?
+        .text;
     if !crate::tui_prompts::is_switch_model_dialog(&latest) {
         return Ok(());
     }
-    tracing::info!(pane_id, line, "claude asked to confirm the model switch; answering Yes");
+    tracing::info!(
+        pane_id,
+        line,
+        "claude asked to confirm the model switch; answering Yes"
+    );
     client.pane_send_keys(pane_id, &["1"]).await.map_err(up)?;
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-    let screen = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("slash_after_answer_before_read", pane_id).await;
+    let screen = client
+        .pane_read(pane_id, "visible", 60)
+        .await
+        .map_err(up)?
+        .text;
     if !crate::tui_prompts::is_switch_model_dialog(&screen) {
         return Ok(());
     }
     let _ = client.pane_send_keys(pane_id, &["Escape"]).await;
-    tracing::warn!(pane_id, line, "model-switch confirmation would not close; backed out with Esc");
-    Err(up(anyhow::anyhow!("claude 的換模型確認框沒有關掉，已按 Esc 退出")))
+    tracing::warn!(
+        pane_id,
+        line,
+        "model-switch confirmation would not close; backed out with Esc"
+    );
+    Err(up(anyhow::anyhow!(
+        "claude 的換模型確認框沒有關掉，已按 Esc 退出"
+    )))
 }
-
 
 /// 記下「daemon 直接對這個 run 的 pane 打過字」（當場套用設定、codex 選單、`/login`）。
 ///
@@ -291,20 +390,38 @@ const SLASH_SETTLE_POLL_MS: u64 = 500;
 /// 等 TUI 回到空輸入列，且連續兩次讀到的畫面一模一樣才算穩（2026-09-14 w1HJ:pH：`/effort max`
 /// 當場套用後緊接的 prompt 沒進 pane，12 秒後 stall）。握著 bot 鎖等，下一則 prompt 自然排在後面。
 /// 等不到回 `false`，呼叫端只記 log——套用本身已經成功，送達的保險在 stall watchdog 的自動重送。
-async fn wait_for_composer_settled(client: &HerdrClient, pane_id: &str, kind: &str) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(SLASH_SETTLE_MAX_MS);
+async fn wait_for_composer_settled(
+    client: &HerdrClient,
+    pane_id: &str,
+    kind: &str,
+) -> LcResult<Option<String>> {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(SLASH_SETTLE_MAX_MS);
     let mut prev: Option<String> = None;
     loop {
-        let screen = client.pane_read(pane_id, "visible", 60).await.map(|r| r.text).unwrap_or_default();
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("slash_before_settle_read", pane_id).await;
+        let screen = client
+            .pane_read(pane_id, "visible", 60)
+            .await
+            .map_err(up)?
+            .text;
         if composer_settled(kind, prev.as_deref(), &screen) {
-            return true;
+            return Ok(Some(screen));
         }
         if std::time::Instant::now() >= deadline {
-            return false;
+            return Ok(None);
         }
         prev = Some(screen);
         tokio::time::sleep(std::time::Duration::from_millis(SLASH_SETTLE_POLL_MS)).await;
     }
+}
+
+fn grok_model_from_screen(screen: &str) -> Option<String> {
+    screen.lines().rev().find_map(|line| {
+        let idx = line.find("Grok ").or_else(|| line.find("grok "))?;
+        crate::models::grok_title_model_effort(&line[idx..]).0
+    })
 }
 
 /// 純函式：這一次讀到的畫面是空輸入列，而且跟上一次讀到的一樣。
@@ -358,6 +475,285 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
 mod live_slash_tests {
     use super::{composer_settled, live_slash_command};
     use crate::testing as tt;
+
+    const SWITCH_MODEL: &str = "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n";
+
+    async fn model_apply_fixture(
+        env: &tt::Env,
+        name: &str,
+        field: &str,
+    ) -> (String, String, String) {
+        let bot = tt::claude_bot(&env.app, &env.project_id, name).await;
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let pane = format!("pane-{name}");
+        let (setting_column, runtime_column, setting_value, old_value) = match field {
+            "model" => (
+                "model",
+                "runtime_model",
+                "claude-opus-5-5",
+                "claude-sonnet-4-5",
+            ),
+            "effort" => ("effort", "runtime_effort", "max", "low"),
+            _ => unreachable!(),
+        };
+        sqlx::query(&format!("UPDATE bots SET {setting_column}=? WHERE id=?"))
+            .bind(setting_value)
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        sqlx::query(&format!(
+            "UPDATE runs SET pane_id=?, {runtime_column}=? WHERE id=?"
+        ))
+        .bind(&pane)
+        .bind(old_value)
+        .bind(&run_id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        (bot.id, run_id, pane)
+    }
+
+    #[tokio::test]
+    async fn unreadable_confirmation_reads_never_write_the_requested_runtime_value() {
+        let env = tt::env().await;
+        for (name, field, runtime_column, desired, command) in [
+            (
+                "model-read-error",
+                "model",
+                "runtime_model",
+                "claude-opus-5-5",
+                "/model claude-opus-5-5",
+            ),
+            (
+                "effort-read-error",
+                "effort",
+                "runtime_effort",
+                "max",
+                "/effort max",
+            ),
+        ] {
+            let (bot_id, run_id, pane) = model_apply_fixture(&env, name, field).await;
+            env.herdr.set_screen(&pane, "Claude Code\n❯\n");
+            let screens = env.herdr.screens.clone();
+            let fail = env.herdr.fail_later();
+            let pane_for_hook = pane.clone();
+            super::super::race_point::arm(
+                "slash_after_enter_before_read",
+                &pane,
+                move || async move {
+                    screens
+                        .lock()
+                        .unwrap()
+                        .insert(pane_for_hook, SWITCH_MODEL.into());
+                    fail("pane.read", tt::Fault::Refuse);
+                },
+            );
+
+            let reason = super::apply_live_setting(&env.app, &bot_id, &[field]).await;
+            assert!(
+                reason.is_some(),
+                "a failed dialog read cannot be reported as a live apply"
+            );
+            assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|why| why.starts_with("slash_send_failed")),
+                "the failed authority read must be reported directly: {reason:?}"
+            );
+            let runtime: Option<String> =
+                sqlx::query_scalar(&format!("SELECT {runtime_column} FROM runs WHERE id=?"))
+                    .bind(&run_id)
+                    .fetch_one(&env.app.db)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                runtime.as_deref(),
+                Some(if field == "model" {
+                    "claude-sonnet-4-5"
+                } else {
+                    "low"
+                })
+            );
+            assert_eq!(
+                env.herdr
+                    .calls_to("pane.send_text")
+                    .last()
+                    .and_then(|v| v["text"].as_str()),
+                Some(command)
+            );
+            let keys = env.herdr.calls_to("pane.send_keys");
+            assert_eq!(
+                keys.last().map(|v| v["keys"].clone()),
+                Some(serde_json::json!(["Enter"]))
+            );
+            assert!(!keys.iter().any(|v| v["keys"] == serde_json::json!(["1"])
+                || v["keys"] == serde_json::json!(["Escape"])));
+            assert!(desired != runtime.as_deref().unwrap_or_default());
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_reread_before_answer_does_not_press_yes() {
+        let env = tt::env().await;
+        let pane = "pane-before-answer";
+        env.herdr.set_screen(pane, SWITCH_MODEL);
+        let fail = env.herdr.fail_later();
+        super::super::race_point::arm("slash_confirm_before_answer", pane, move || async move {
+            fail("pane.read", tt::Fault::Refuse);
+        });
+
+        assert!(
+            super::send_slash_line(&env.app.herdr, pane, "/model claude-opus-5-5")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            env.herdr
+                .calls_to("pane.send_keys")
+                .iter()
+                .map(|v| v["keys"].clone())
+                .collect::<Vec<_>>(),
+            vec![serde_json::json!(["Enter"])]
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_read_after_answer_is_unknown_and_is_not_cleaned_up_with_escape() {
+        let env = tt::env().await;
+        let pane = "pane-after-answer";
+        env.herdr.set_screen(pane, SWITCH_MODEL);
+        let fail = env.herdr.fail_later();
+        super::super::race_point::arm("slash_after_answer_before_read", pane, move || async move {
+            fail("pane.read", tt::Fault::Refuse);
+        });
+
+        assert!(
+            super::send_slash_line(&env.app.herdr, pane, "/model claude-opus-5-5")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            env.herdr
+                .calls_to("pane.send_keys")
+                .iter()
+                .map(|v| v["keys"].clone())
+                .collect::<Vec<_>>(),
+            vec![serde_json::json!(["Enter"]), serde_json::json!(["1"]),]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsettled_composer_does_not_write_runtime_model() {
+        let env = tt::env().await;
+        let (bot_id, run_id, pane) = model_apply_fixture(&env, "unsettled", "model").await;
+        env.herdr
+            .set_screen(&pane, "Claude Code\nworking on a task\n");
+
+        let reason = super::apply_live_setting(&env.app, &bot_id, &["model"]).await;
+        assert!(
+            reason.is_some(),
+            "settle timeout must fall back to restart/unknown"
+        );
+        let runtime: Option<String> =
+            sqlx::query_scalar("SELECT runtime_model FROM runs WHERE id=?")
+                .bind(run_id)
+                .fetch_one(&env.app.db)
+                .await
+                .unwrap();
+        assert_eq!(runtime.as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_settle_read_does_not_write_runtime_model() {
+        let env = tt::env().await;
+        let (bot_id, run_id, pane) = model_apply_fixture(&env, "settle-read-error", "model").await;
+        env.herdr.set_screen(&pane, "Claude Code\n❯\n");
+        let fail = env.herdr.fail_later();
+        super::super::race_point::arm("slash_before_settle_read", &pane, move || async move {
+            fail("pane.read", tt::Fault::Refuse);
+        });
+
+        let reason = super::apply_live_setting(&env.app, &bot_id, &["model"]).await;
+        assert!(
+            reason.is_some(),
+            "a failed settle read cannot be counted as a stable composer"
+        );
+        let runtime: Option<String> =
+            sqlx::query_scalar("SELECT runtime_model FROM runs WHERE id=?")
+                .bind(run_id)
+                .fetch_one(&env.app.db)
+                .await
+                .unwrap();
+        assert_eq!(runtime.as_deref(), Some("claude-sonnet-4-5"));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_grok_startup_effort_screen_does_not_send_or_mark_runtime() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "grok-startup-read-error").await;
+        sqlx::query("UPDATE bots SET kind='grok', effort='high' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        let pane = "pane-grok-startup-read-error";
+        sqlx::query("UPDATE runs SET pane_id=?, runtime_effort='low' WHERE id=?")
+            .bind(pane)
+            .bind(&run_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        env.herdr.set_screen(pane, "__READ_ERROR__");
+        let bot = crate::db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+
+        assert!(
+            super::apply_grok_startup_effort(&env.app, &bot, &run_id, pane, &env.app.herdr)
+                .await
+                .is_err()
+        );
+        assert!(env.herdr.calls_to("pane.send_text").is_empty());
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty());
+        let runtime: Option<String> =
+            sqlx::query_scalar("SELECT runtime_effort FROM runs WHERE id=?")
+                .bind(run_id)
+                .fetch_one(&env.app.db)
+                .await
+                .unwrap();
+        assert_eq!(runtime.as_deref(), Some("low"));
+    }
+
+    #[tokio::test]
+    async fn a_readable_closed_confirmation_and_settled_composer_can_be_applied() {
+        let env = tt::env().await;
+        let (bot_id, run_id, pane) = model_apply_fixture(&env, "confirmed", "model").await;
+        env.herdr.set_screen(&pane, SWITCH_MODEL);
+        let screens = env.herdr.screens.clone();
+        let pane_for_hook = pane.clone();
+        super::super::race_point::arm(
+            "slash_after_answer_before_read",
+            &pane,
+            move || async move {
+                screens
+                    .lock()
+                    .unwrap()
+                    .insert(pane_for_hook, "Claude Code\n❯\n".into());
+            },
+        );
+
+        assert_eq!(
+            super::apply_live_setting(&env.app, &bot_id, &["model"]).await,
+            None
+        );
+        let runtime: Option<String> =
+            sqlx::query_scalar("SELECT runtime_model FROM runs WHERE id=?")
+                .bind(run_id)
+                .fetch_one(&env.app.db)
+                .await
+                .unwrap();
+        assert_eq!(runtime.as_deref(), Some("claude-opus-5-5"));
+    }
 
     /// 2026-09-14 w1HJ:pH 在 `/effort max` 之後的真實畫面（使用者名稱換掉）。
     const EFFORT_MAX_SETTLED: &str = "✻ Sautéed for 15m 9s · done 2:18 PM
