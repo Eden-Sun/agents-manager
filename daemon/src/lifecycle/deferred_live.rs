@@ -6,15 +6,22 @@
 //!
 //! 只記在記憶體：daemon 重啟後這份就沒了，這時 UI 的落差徽章仍在，使用者再按一次「當場套用」即可。
 
-use crate::db;
 use crate::state::App;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-/// bot id → 等著套的欄位（`model`／`effort`／`fast` 的子集）。
-fn pending() -> &'static Mutex<HashMap<String, Vec<&'static str>>> {
-    static P: OnceLock<Mutex<HashMap<String, Vec<&'static str>>>> = OnceLock::new();
+/// A queued TUI change keeps the first pre-patch revision and the latest target revision together
+/// with its fields. This lets the eventual live receipt clear only the drift covered by that TUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingLive {
+    fields: Vec<&'static str>,
+    baseline_rev: String,
+    target_rev: String,
+}
+
+fn pending() -> &'static Mutex<HashMap<String, PendingLive>> {
+    static P: OnceLock<Mutex<HashMap<String, PendingLive>>> = OnceLock::new();
     P.get_or_init(Default::default)
 }
 
@@ -23,9 +30,15 @@ pub(crate) fn is_busy_reason(reason: &str) -> bool {
     reason == "slash_gate: agent_busy" || reason == "slash_gate: turn_in_flight"
 }
 
-pub(crate) fn defer_live(bot_id: &str, fields: &[&str]) {
+pub(crate) fn defer_live(bot_id: &str, fields: &[&str], baseline_rev: &str, target_rev: &str) {
     let mut m = pending().lock().unwrap_or_else(|e| e.into_inner());
-    let e = m.entry(bot_id.to_string()).or_default();
+    let e = m.entry(bot_id.to_string()).or_insert_with(|| PendingLive {
+        fields: Vec::new(),
+        baseline_rev: baseline_rev.to_string(),
+        target_rev: target_rev.to_string(),
+    });
+    // A later PATCH supersedes the desired config but must preserve the original loaded baseline.
+    e.target_rev = target_rev.to_string();
     for f in fields {
         let f: &'static str = match *f {
             "model" => "model",
@@ -33,8 +46,8 @@ pub(crate) fn defer_live(bot_id: &str, fields: &[&str]) {
             "fast" => "fast",
             _ => continue,
         };
-        if !e.contains(&f) {
-            e.push(f);
+        if !e.fields.contains(&f) {
+            e.fields.push(f);
         }
     }
 }
@@ -43,8 +56,8 @@ pub(crate) fn is_deferred(bot_id: &str) -> bool {
     pending().lock().unwrap_or_else(|e| e.into_inner()).contains_key(bot_id)
 }
 
-fn take(bot_id: &str) -> Vec<&'static str> {
-    pending().lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id).unwrap_or_default()
+fn take(bot_id: &str) -> Option<PendingLive> {
+    pending().lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id)
 }
 
 /// idle 邊叫一次：沒有排著的東西就什麼都不做。等一小段讓回合收尾（Stop hook、回讀狀態列）再套。
@@ -55,27 +68,44 @@ pub(crate) fn schedule_deferred_live(app: &Arc<App>, bot_id: &str) {
     let (app, bot_id) = (app.clone(), bot_id.to_string());
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(1500)).await;
-        let fields = take(&bot_id);
-        if fields.is_empty() {
-            return;
-        }
-        match super::apply_live_setting_with_run(&app, &bot_id, &fields).await {
-            super::LiveApplyOutcome::Applied { run_id } => {
-                // 同 PATCH：套成功就把這個 run 的啟動版本蓋成現在的設定，否則會被誤判成過期（#353）。
-                if let Ok(Some(bot)) = db::bot(&app.db, &bot_id).await {
-                    if let Err(e) = crate::launch_rev::stamp(&app.db, &run_id, &crate::launch_rev::of(&bot)).await {
-                        tracing::warn!(bot = %bot_id, error = %e, "could not record the launch revision after a deferred live apply");
-                    }
-                }
-            }
-            super::LiveApplyOutcome::Failed(why) if is_busy_reason(&why) => {
-                // 剛閒下來又被新回合搶走：再排一次。
-                defer_live(&bot_id, &fields);
-            }
-            super::LiveApplyOutcome::Failed(why) => tracing::info!(bot = %bot_id, ?fields, reason = %why, "deferred live apply failed; the restart badge stays"),
-        }
-        app.emit("bot_changed", serde_json::json!({"bot_id": bot_id})).await;
+        apply_deferred_once(&app, &bot_id).await;
     });
+}
+
+/// Apply the current pending item without the production idle-edge delay. Kept as a helper so the
+/// retry path can be tested at the exact handoff point without sleeping through a scheduler timer.
+pub(crate) async fn apply_deferred_once(app: &Arc<App>, bot_id: &str) {
+    let Some(queued) = take(bot_id) else {
+        return;
+    };
+    let fields: Vec<&str> = queued.fields.iter().copied().collect();
+    match super::apply_live_setting_with_revision(
+        app,
+        bot_id,
+        &fields,
+        &queued.baseline_rev,
+        &queued.target_rev,
+    )
+    .await
+    {
+        super::LiveApplyOutcome::Applied { .. } => {}
+        super::LiveApplyOutcome::Failed(why) if is_busy_reason(&why) => {
+            // 剛閒下來又被新回合搶走：再排一次。
+            defer_live(
+                bot_id,
+                &fields,
+                &queued.baseline_rev,
+                &queued.target_rev,
+            );
+        }
+        super::LiveApplyOutcome::BookkeepingPending { reason, .. } => {
+            tracing::warn!(bot = %bot_id, ?fields, reason, "deferred live apply is waiting for DB-only bookkeeping");
+        }
+        super::LiveApplyOutcome::Failed(why) => {
+            tracing::info!(bot = %bot_id, ?fields, reason = %why, "deferred live apply failed; the restart badge stays")
+        }
+    }
+    app.emit("bot_changed", serde_json::json!({"bot_id": bot_id})).await;
 }
 
 #[cfg(test)]
@@ -94,11 +124,19 @@ mod tests {
     fn deferring_collects_known_fields_once_and_take_empties_it() {
         let id = "test-deferred-live-bot";
         assert!(!is_deferred(id));
-        defer_live(id, &["fast", "bogus", "fast"]);
-        defer_live(id, &["effort"]);
+        defer_live(id, &["fast", "bogus", "fast"], "baseline-a", "target-a");
+        defer_live(id, &["effort"], "baseline-b", "target-b");
         assert!(is_deferred(id));
-        assert_eq!(take(id), vec!["fast", "effort"]);
+        assert_eq!(
+            take(id),
+            Some(PendingLive {
+                fields: vec!["fast", "effort"],
+                baseline_rev: "baseline-a".into(),
+                target_rev: "target-b".into(),
+            }),
+            "coalescing retains the first loaded baseline and newest requested revision"
+        );
         assert!(!is_deferred(id), "take 之後就沒了：不會套兩次");
-        assert!(take(id).is_empty());
+        assert!(take(id).is_none());
     }
 }

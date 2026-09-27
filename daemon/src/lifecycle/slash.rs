@@ -119,6 +119,7 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
 pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> Option<String> {
     match apply_live_setting_with_run(app, bot_id, fields).await {
         LiveApplyOutcome::Applied { .. } => None,
+        LiveApplyOutcome::BookkeepingPending { reason, .. } => Some(reason),
         LiveApplyOutcome::Failed(why) => Some(why),
     }
 }
@@ -126,22 +127,116 @@ pub async fn apply_live_setting(app: &Arc<App>, bot_id: &str, fields: &[&str]) -
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LiveApplyOutcome {
     Applied { run_id: String },
+    BookkeepingPending { run_id: String, reason: String },
     Failed(String),
 }
 
+struct LiveApplyReceipt {
+    run_id: String,
+    bot_id: String,
+    snapshot: RuntimeSnapshot,
+}
+
+#[derive(Default)]
+struct RuntimeSnapshot {
+    model: Option<String>,
+    effort: Option<String>,
+    fast: Option<i64>,
+}
+
 /// 帶回實際執行 slash/picker 的 run；呼叫端的 PATCH 快照可能已經過時。
-pub(crate) async fn apply_live_setting_with_run(app: &Arc<App>, bot_id: &str, fields: &[&str]) -> LiveApplyOutcome {
-    let mut applied_run_id = None;
-    let result = match apply_live_setting_inner(app, bot_id, fields, &mut applied_run_id).await {
-        Some(why) => LiveApplyOutcome::Failed(why),
-        None => match applied_run_id {
-            Some(run_id) => LiveApplyOutcome::Applied { run_id },
-            None => LiveApplyOutcome::Failed("live_apply_missing_run_receipt".into()),
-        },
+async fn apply_live_setting_with_run(
+    app: &Arc<App>,
+    bot_id: &str,
+    fields: &[&str],
+) -> LiveApplyOutcome {
+    let lock = app.bot_lock(bot_id).await;
+    let _guard = lock.lock().await;
+    let bot = match db::bot(&app.db, bot_id).await {
+        Ok(Some(bot)) => bot,
+        Ok(None) => return LiveApplyOutcome::Failed("bot_missing".into()),
+        Err(error) => return LiveApplyOutcome::Failed(format!("bot_read_failed: {error}")),
+    };
+    let target_rev = crate::launch_rev::of(&bot);
+    // 呼叫端沒有「改設定前」的版本：不知道 run 原本的落差是不是只來自這次的欄位，所以只落 runtime，
+    // 不寫 `live_rev` 豁免（SPEC §4.4a 第 4 點）。空字串不會等於任何 `launch_rev`。
+    apply_live_setting_locked(app, bot_id, fields, "", &target_rev).await
+}
+
+pub(crate) async fn apply_live_setting_with_revision(
+    app: &Arc<App>,
+    bot_id: &str,
+    fields: &[&str],
+    baseline_rev: &str,
+    target_rev: &str,
+) -> LiveApplyOutcome {
+    let lock = app.bot_lock(bot_id).await;
+    let _guard = lock.lock().await;
+    apply_live_setting_locked(app, bot_id, fields, baseline_rev, target_rev).await
+}
+
+async fn apply_live_setting_locked(
+    app: &Arc<App>,
+    bot_id: &str,
+    fields: &[&str],
+    baseline_rev: &str,
+    target_rev: &str,
+) -> LiveApplyOutcome {
+    match db::active_run(&app.db, bot_id).await {
+        Ok(Some(run)) => {
+            if let Err(error) = super::live_apply_debt::retry_once(app, &run.id).await {
+                return LiveApplyOutcome::BookkeepingPending {
+                    run_id: run.id,
+                    reason: format!("live_bookkeeping_still_pending: {error}"),
+                };
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return LiveApplyOutcome::Failed(format!("active_run_read_failed: {error}"));
+        }
+    }
+    let result = match apply_live_setting_inner(app, bot_id, fields, target_rev).await {
+        Err(why) => LiveApplyOutcome::Failed(why),
+        Ok(receipt) => {
+            let debt = super::live_apply_debt::RuntimeDebt {
+                run_id: receipt.run_id.clone(),
+                bot_id: receipt.bot_id,
+                baseline_rev: baseline_rev.to_string(),
+                target_rev: target_rev.to_string(),
+                runtime_model: receipt.snapshot.model,
+                runtime_effort: receipt.snapshot.effort,
+                runtime_fast: receipt.snapshot.fast,
+                created_at: db::now(),
+            };
+            match super::live_apply_debt::persist_and_commit(app, debt).await {
+                Ok(()) => {
+                    app.emit_bot_status(bot_id).await;
+                    LiveApplyOutcome::Applied {
+                        run_id: receipt.run_id,
+                    }
+                }
+                Err(reason) => LiveApplyOutcome::BookkeepingPending {
+                    run_id: receipt.run_id,
+                    reason,
+                },
+            }
+        }
     };
     match &result {
-        LiveApplyOutcome::Failed(why) => tracing::info!(bot_id, ?fields, reason = %why, "設定沒能當場套用，改用重啟"),
-        LiveApplyOutcome::Applied { run_id } => tracing::info!(bot_id, ?fields, run_id, "設定已當場套用，不需要重啟"),
+        LiveApplyOutcome::Failed(why) => {
+            tracing::info!(bot_id, ?fields, reason = %why, "設定沒能當場套用，改用重啟")
+        }
+        LiveApplyOutcome::BookkeepingPending { run_id, reason } => tracing::warn!(
+            bot_id,
+            ?fields,
+            run_id,
+            reason,
+            "live apply readback succeeded but runtime bookkeeping is pending"
+        ),
+        LiveApplyOutcome::Applied { run_id, .. } => {
+            tracing::info!(bot_id, ?fields, run_id, "設定已當場套用，不需要重啟")
+        }
     }
     result
 }
@@ -150,53 +245,50 @@ async fn apply_live_setting_inner(
     app: &Arc<App>,
     bot_id: &str,
     fields: &[&str],
-    applied_run_id: &mut Option<String>,
-) -> Option<String> {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    target_rev: &str,
+) -> Result<LiveApplyReceipt, String> {
     let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else {
-        return Some("bot_missing".into());
+        return Err("bot_missing".into());
     };
+    if crate::launch_rev::of(&bot) != target_rev {
+        return Err("live_target_revision_changed".into());
+    }
     let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else {
-        return Some("no_active_run".into());
+        return Err("no_active_run".into());
     };
     let in_flight = !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None));
     let pane_id = match slash_gate(&run, in_flight) {
         Ok(p) => p,
-        Err(why) => return Some(format!("slash_gate: {}", why.reason())),
+        Err(why) => return Err(format!("slash_gate: {}", why.reason())),
     };
     let Ok(client) = client_for_run(app, &run).await else {
-        return Some("no_herdr_client".into());
+        return Err("no_herdr_client".into());
     };
 
     if bot.kind == "codex" {
         // `/fast` 是開關：不知道現在狀態就不能按。
         let was_fast = run.runtime_fast.map(|v| v != 0);
         if let Err(why) = mark_pane_typed(app, &run.id).await {
-            return Some(why);
+            return Err(why);
         }
         let seen = match crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await {
             Ok(seen) => seen,
-            Err(why) => return Some(format!("codex: {why}")),
+            Err(why) => return Err(format!("codex: {why}")),
         };
-        // 回讀的狀態列才是 runtime 的定義（SPEC §4.4a）。
-        let _ = sqlx::query(
-            "UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?",
-        )
-        .bind(&seen.model)
-        .bind(&seen.effort)
-        .bind(i64::from(seen.fast))
-        .bind(&run.id)
-        .execute(&app.db)
-        .await;
-        app.emit_bot_status(bot_id).await;
         tracing::info!(bot_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast, "codex applied live");
-        *applied_run_id = Some(run.id.clone());
-        return None;
+        return Ok(LiveApplyReceipt {
+            run_id: run.id,
+            bot_id: bot_id.to_string(),
+            snapshot: RuntimeSnapshot {
+                model: Some(seen.model),
+                effort: seen.effort,
+                fast: Some(i64::from(seen.fast)),
+            },
+        });
     }
 
     let [field] = fields else {
-        return Some("not_a_single_field".into());
+        return Err("not_a_single_field".into());
     };
     let value = match *field {
         "effort" => bot.effort.as_deref(),
@@ -205,23 +297,23 @@ async fn apply_live_setting_inner(
     };
     // `/effort`、`/model` 都一定要帶值，清成「不指定」沒有 slash 指令。
     let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Some(format!("{field}_cleared_to_default"));
+        return Err(format!("{field}_cleared_to_default"));
     };
     let Some(line) = live_slash_command(&bot.kind, field, value, bot.effort.as_deref()) else {
-        return Some(format!("no_slash_command_for_{field}"));
+        return Err(format!("no_slash_command_for_{field}"));
     };
     // 不管套用成不成功，pane 都被直接打過字了。
     if let Err(why) = mark_pane_typed(app, &run.id).await {
-        return Some(why);
+        return Err(why);
     }
     if let Err(e) = send_slash_line(&client, &pane_id, &line).await {
-        return Some(format!("slash_send_failed: {e:?}"));
+        return Err(format!("slash_send_failed: {e:?}"));
     }
     // 還握著 bot 鎖：`prompt_grouped` 拿同一把鎖，所以下一則 prompt 一定排在 TUI 回到輸入列之後。
     let settled_screen = match wait_for_composer_settled(&client, &pane_id, &bot.kind).await {
         Ok(Some(screen)) => screen,
-        Ok(None) => return Some("slash_composer_not_settled".into()),
-        Err(e) => return Some(format!("slash_settle_read_failed: {e:?}")),
+        Ok(None) => return Err("slash_composer_not_settled".into()),
+        Err(e) => return Err(format!("slash_settle_read_failed: {e:?}")),
     };
     // Grok prints its active model and effort in the status frame. Use that read-back before
     // clearing the drift marker; a closed picker alone does not prove the requested value landed.
@@ -236,7 +328,7 @@ async fn apply_live_setting_inner(
             if expected.is_some_and(|want| {
                 grok_model_from_screen(&settled_screen).as_deref() != Some(want)
             }) {
-                return Some("grok_model_readback_mismatch".into());
+                return Err("grok_model_readback_mismatch".into());
             }
         }
         let expected_effort = if *field == "effort" {
@@ -256,19 +348,19 @@ async fn apply_live_setting_inner(
             crate::models::grok_effort_from_screen(&settled_screen).as_deref()
                 != Some(want.to_ascii_lowercase().as_str())
         }) {
-            return Some("grok_effort_readback_mismatch".into());
+            return Err("grok_effort_readback_mismatch".into());
         }
     }
-    // SPEC §4.4a: clear the drift marker only for the field sent (`/model` doesn't touch effort).
-    let col = match *field {
-        "effort" => "runtime_effort",
-        _ => "runtime_model",
+    let mut snapshot = RuntimeSnapshot {
+        model: run.runtime_model.clone(),
+        effort: run.runtime_effort.clone(),
+        fast: run.runtime_fast,
     };
-    let _ = sqlx::query(&format!("UPDATE runs SET {col} = ? WHERE id = ?"))
-        .bind(value)
-        .bind(&run.id)
-        .execute(&app.db)
-        .await;
+    match *field {
+        "effort" => snapshot.effort = Some(value.to_string()),
+        "model" => snapshot.model = Some(value.to_string()),
+        _ => return Err("not_a_single_field".into()),
+    }
     if *field == "model" && bot.kind == "grok" {
         if let Some(e) = bot
             .effort
@@ -276,17 +368,15 @@ async fn apply_live_setting_inner(
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let _ = sqlx::query("UPDATE runs SET runtime_effort = ? WHERE id = ?")
-                .bind(e.to_ascii_lowercase())
-                .bind(&run.id)
-                .execute(&app.db)
-                .await;
+            snapshot.effort = Some(e.to_ascii_lowercase());
         }
     }
-    app.emit_bot_status(bot_id).await;
     tracing::info!(bot_id, line, "applied live via slash command");
-    *applied_run_id = Some(run.id.clone());
-    None
+    Ok(LiveApplyReceipt {
+        run_id: run.id,
+        bot_id: bot_id.to_string(),
+        snapshot,
+    })
 }
 
 /// #215：grok TUI 不理啟動參數 `--reasoning-effort`（也不理 `default_reasoning_effort`）。
@@ -948,6 +1038,7 @@ mod login_slash_tests {
             agent_status_since: None,
             subagent_json: None,
             launch_rev: None,
+            live_rev: None,
         }
     }
 
