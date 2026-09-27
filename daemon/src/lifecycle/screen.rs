@@ -307,7 +307,8 @@ pub(crate) fn is_codex_duration(d: &str) -> bool {
     let parts: Vec<&str> = d.split(' ').collect();
     parts.len() <= 3
         && parts.iter().all(|p| {
-            let (n, unit) = p.split_at(p.len().saturating_sub(1));
+            let Some((i, _)) = p.char_indices().next_back() else { return false };
+            let (n, unit) = p.split_at(i);
             !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) && matches!(unit, "h" | "m" | "s")
         })
 }
@@ -2231,6 +2232,41 @@ mod codex_0155_screen_tests {
             "The job was done 3:24 PM",
         ] {
             assert!(!is_codex_completion_line(not), "{not}");
+        }
+    }
+
+    #[test]
+    fn non_ascii_codex_duration_tokens_are_rejected_without_panicking() {
+        for duration in ["2m 見說明", "2m 🤖"] {
+            match std::panic::catch_unwind(|| is_codex_duration(duration)) {
+                Ok(false) => {}
+                Ok(true) => panic!("非 ASCII duration 不應有效：{duration}"),
+                Err(_) => panic!("解析非 ASCII duration 不應 panic：{duration}"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_ascii_codex_completion_durations_are_rejected_without_panicking() {
+        for line in ["Worked for 兩個小時 on it", "Worked for 2m 🤖 on it"] {
+            match std::panic::catch_unwind(|| is_codex_completion_line(line)) {
+                Ok(false) => {}
+                Ok(true) => panic!("非 ASCII completion duration 不應有效：{line}"),
+                Err(_) => panic!("解析非 ASCII completion duration 不應 panic：{line}"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_ascii_codex_working_elapsed_tokens_do_not_panic_the_busy_check() {
+        use crate::lifecycle::poller::pane_still_busy;
+
+        for screen in ["• 已修好 (見說明 • 細節) 完成", "• Working (🤖 • esc to interrupt)"] {
+            match std::panic::catch_unwind(|| pane_still_busy(screen)) {
+                Ok(false) => {}
+                Ok(true) => panic!("非 duration 行不應被判成 busy：{screen}"),
+                Err(_) => panic!("pane_still_busy 不應因非 ASCII token panic：{screen}"),
+            }
         }
     }
 
