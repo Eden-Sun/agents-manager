@@ -880,8 +880,8 @@ pub async fn notify(app: &Arc<App>) {
     }
     let ids: Vec<String> = due.iter().map(|e| e.id.clone()).collect();
     let attempt = due.iter().map(|e| e.notify_attempts).max().unwrap_or(0);
-    let last = ids.last().cloned().unwrap_or_default();
-    let crid = if attempt == 0 { format!("agm-responder-inbox-{last}") } else { format!("agm-responder-inbox-{last}-r{attempt}") };
+    let batch: Vec<(&str, i64)> = due.iter().map(|e| (e.id.as_str(), e.notify_attempts)).collect();
+    let crid = super::inbox_notify_crid("agm-responder-inbox-", &batch);
     let defer = |why: String| async move {
         let wait = backoff_secs(attempt, cap) as i64;
         let next = crate::db::iso_in(wait);

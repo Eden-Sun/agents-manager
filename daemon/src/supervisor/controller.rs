@@ -1585,10 +1585,8 @@ async fn notify(app: &Arc<App>) {
     // own suffix so a *known-failed* send is not forever answered out of the dedupe cache —
     // `lifecycle::prompt` would hand back the dead turn instead of sending anything.
     let attempt = pending.iter().map(|e| e.notify_attempts).max().unwrap_or(0);
-    let crid = match attempt {
-        0 => format!("agm-inbox-{}", ids.last().cloned().unwrap_or_default()),
-        n => format!("agm-inbox-{}-r{n}", ids.last().cloned().unwrap_or_default()),
-    };
+    let batch: Vec<(&str, i64)> = pending.iter().map(|e| (e.id.as_str(), e.notify_attempts)).collect();
+    let crid = super::inbox_notify_crid("agm-inbox-", &batch);
     // The digest is the daemon talking, not the user. Without the sentinel it lands in AGM's
     // conversation as a blue bubble indistinguishable from an instruction somebody typed.
     // 送出去了、結果還沒寫進 DB（#149）照 `unknown` 綁在那一筆回合上：換新的 crid 重送會讓 AGM 收到兩份。

@@ -796,6 +796,7 @@ label = "foo"
 - `[supervisor] notify_interval_secs`（預設 600）：事件照舊即時寫入 `supervisor_inbox`；被節流的只有「喚醒總管」——每 ≥ 這個秒數一次，
   把累積的未 ack 事件彙整成一則 `[AG Man 通知]`。health 偵測、watchdog、控制器 TICK 不受影響。總管 busy 時延後，送成功才開始下一個視窗。
   `0` = 不節流。上次喚醒時間存 `supervisors.last_notify_at`。改值要重啟 daemon。只管巡檢；協調者見 §18.15。
+  這一批的 `client_request_id` 是前綴加上「每個事件 id 與其 `notify_attempts`」的雜湊（#642）：同一批當機重送沿用同一個 id；換了成員或某筆的次數就是另一個 id，不會跟上一批的最後一筆撞號。
 - `[build] lease_ttl_secs` 必須是 10..=86400（#639）。更小會讓名額一建立就過期，`u64` 上限用 `as i64` 會變成負數，再大的值讓時鐘加法 panic。超出範圍的設定在載入／寫入時拒絕，config 不改。
 - `[supervisor] responder_batch_secs`（預設 15）、`responder_max_backoff_secs`（預設 300）：協調者的短窗批次與重試上限（§18.15）。
   `responder_max_backoff_secs` 與 `notify_max_attempts`（預設 5）**在解析設定時就夾下限**（Refs #504，跟 `panes.idle_close_secs`、
