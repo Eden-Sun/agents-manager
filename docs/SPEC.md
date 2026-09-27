@@ -3754,6 +3754,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 - **角色之間的交接**：`assign` 的目標是另一個角色 bot 時，**不是交辦**——不建交辦列、不開回合，而是走同一條佇列
   （回 `{kind:"handover", routed, queued, duplicate, wake, inbox_event_id}`），批次、節流與「回覆不再叫醒對方」只有一份規則。
   對自己的角色下交辦仍是 400。排隊中的交辦若目標在期間變成角色 bot，`dispatch` 停手並記 `dispatch_failed`，不直接打進對方 pane。
+  **角色／歸屬查詢的 DB 錯誤 fail closed**：派送讀不到目標角色或 responder 歸屬時，交辦留在 `queued`、不計 attempts、不送 prompt；只有查詢成功的「沒有角色」才視為一般 bot，只有 responder 查詢成功且未設定時才回退巡檢。錯誤不能併成 `None`，否則會把角色 pane 當一般 bot 直接 prompt，或把巡檢記成錯誤的 responder。
 - **升級時舊事件歸誰**：第一次加 `claimed_by` 欄時，與回填**同一個 transaction**（回填失敗連欄位一起回滾，重啟會再做一次）。
   只有送達痕跡（`notify_turn_id`、`delivered_at`、`state='delivered'`）的舊事件記給巡檢；`notify_attempts>0` 不算——
   `defer_notify` 在完全送不出去時也會加一。先前版本曾把「只有嘗試次數」的 pending 誤記給巡檢；migrate 每次都會把
@@ -3773,6 +3774,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   兩個角色同時決定只有一個成功，後到的回 409 `already_decided`（對方已經寫進去了）或 `decided_concurrently`（還是 pending，但這一句沒寫到）；交辦驗收本來就是條件寫入。
 - **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`），常數時間比對。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
   驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算——**沒驗過就記 `user`／`user(<自稱>)`，寫不出 `AGM` 開頭的身分**（issue #414；以前沒驗過時直接採信 body，預設還填 `AGM`）。
+  已驗證 bot 的角色查詢若遇 DB 錯誤，assignment 建立／review 回可重試的 server error，且不寫 assignment、裁示或 audit；不得降成 `user`／`None`。恢復後原請求可重試，review owner 與 audit actor 保留驗證出的角色。
   `relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
   **Bot／service 身分標頭不完整、token 空／非 UTF-8／對不上，或混帶 principal，一律由 `/api` 全域中介層回 401，不退回 User**（issue #415、#556）：使用者權限在 `inbox` ack 上比角色權限大（跨角色也結得掉），
   當成「沒帶」等於把驗證失敗變成提權。

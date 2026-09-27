@@ -2997,3 +2997,100 @@ mod desired_running_tests {
         assert_eq!(wanted(&app).await, 0);
     }
 }
+
+#[cfg(test)]
+mod verified_actor_role_read_failure_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    async fn fixture(name: &str) -> (tt::Env, HeaderMap, String, String) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let manager = tt::claude_bot(&app, &env.project_id, &format!("{name}-manager")).await;
+        let supervisor = store::get_or_init(&app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
+            .bind(&manager.id)
+            .bind(&supervisor.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let responder = tt::claude_bot(&app, &env.project_id, &format!("{name}-responder")).await;
+        crate::supervisor::roles::get(&app.db, crate::supervisor::roles::Role::Responder).await.unwrap();
+        sqlx::query("UPDATE supervisor_roles SET bot_id=? WHERE role='responder'")
+            .bind(&responder.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let worker = tt::claude_bot(&app, &env.project_id, &format!("{name}-worker")).await;
+        let mut headers = HeaderMap::new();
+        headers.insert("X-AM-Bot-Id", responder.id.parse().unwrap());
+        headers.insert("X-AM-Bot-Token", "tok".parse().unwrap());
+        (env, headers, worker.id, responder.id)
+    }
+
+    fn fail_role_lookup_once(app: &Arc<App>, bot_id: &str) {
+        let make_unreadable = app.clone();
+        crate::lifecycle::race_point::arm("actor_role_before_lookup", bot_id, move || async move {
+            crate::testing::make_table_unreadable(&make_unreadable, "supervisor_roles").await;
+        });
+        let restore = app.clone();
+        crate::lifecycle::race_point::arm("actor_role_after_lookup", bot_id, move || async move {
+            crate::testing::make_table_readable(&restore, "supervisor_roles").await;
+        });
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_actor_role_does_not_create_an_assignment_or_lose_its_default_owner() {
+        let (env, headers, target_bot_id, responder_id) = fixture("actor-assignment-615").await;
+        let app = env.app.clone();
+        let body: AssignIn = serde_json::from_value(json!({
+            "target_bot_id": target_bot_id,
+            "text": "做 X",
+            "client_request_id": "actor-role-615",
+        }))
+        .unwrap();
+
+        fail_role_lookup_once(&app, &responder_id);
+        let result = post_assignment(State(app.clone()), headers.clone(), Json(body)).await;
+        assert!(matches!(result, Err(LcError::Upstream(_))), "讀取錯誤必須回 5xx，不能降成 UI 身分：{result:?}");
+        assert!(store::assignment_by_crid(&app.db, "actor-role-615").await.unwrap().is_none(), "actor 不可讀時不能建立 durable assignment");
+
+        let body: AssignIn = serde_json::from_value(json!({
+            "target_bot_id": target_bot_id,
+            "text": "做 X",
+            "client_request_id": "actor-role-615",
+        }))
+        .unwrap();
+        let _ = post_assignment(State(app.clone()), headers, Json(body)).await.expect("恢復後可以重試");
+        let assignment = store::assignment_by_crid(&app.db, "actor-role-615").await.unwrap().unwrap();
+        assert_eq!(assignment.review_role.as_deref(), Some("responder"), "預設驗收 owner 必須保留已驗證的角色");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_actor_role_does_not_write_a_review_decision_as_a_user() {
+        let (env, headers, target_bot_id, responder_id) = fixture("actor-review-615").await;
+        let app = env.app.clone();
+        let assignment = store::insert_assignment(&app.db, None, &target_bot_id, "actor-review-615", "做 X", &[], None, true)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='awaiting_review' WHERE id=?")
+            .bind(&assignment.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        fail_role_lookup_once(&app, &responder_id);
+        let body: ReviewIn = serde_json::from_value(json!({"decision": "accept", "actor": "AGM:patrol"})).unwrap();
+        let result = post_review(State(app.clone()), Path(assignment.id.clone()), headers.clone(), Json(body)).await;
+        assert!(matches!(result, Err(LcError::Upstream(_))), "讀取錯誤必須回 5xx：{result:?}");
+        assert!(store::reviews(&app.db, &assignment.id).await.unwrap().is_empty(), "actor 不可讀時不能留下 user audit");
+        assert_eq!(store::assignment(&app.db, &assignment.id).await.unwrap().unwrap().status, "awaiting_review");
+
+        let body: ReviewIn = serde_json::from_value(json!({"decision": "accept", "actor": "AGM:patrol"})).unwrap();
+        let _ = post_review(State(app.clone()), Path(assignment.id.clone()), headers, Json(body)).await.expect("恢復後可以重試");
+        let reviews = store::reviews(&app.db, &assignment.id).await.unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0]["actor"], format!("{}:responder", store::SUPERVISOR_ID), "成功重試以已驗證的 responder 為裁示者，不信任 body 自稱");
+    }
+}
