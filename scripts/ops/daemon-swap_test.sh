@@ -105,8 +105,12 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_RESTART_HELD=false
   export REAL_SQLITE="${REAL_SQLITE:-$(command -v sqlite3)}"
   "$REAL_SQLITE" "$ROOT/audit.sqlite3" "CREATE TABLE bots (id TEXT PRIMARY KEY, name TEXT, project_id TEXT, deleted_at TEXT);
+    ALTER TABLE bots ADD COLUMN managed_by TEXT;
+    ALTER TABLE bots ADD COLUMN parent_bot_id TEXT;
+    ALTER TABLE bots ADD COLUMN created_at TEXT;
     CREATE TABLE intents (id TEXT PRIMARY KEY, kind TEXT, subject_id TEXT, payload_json TEXT NOT NULL DEFAULT '{}',
-      status TEXT NOT NULL DEFAULT 'done', created_at TEXT NOT NULL);"
+      status TEXT NOT NULL DEFAULT 'done', created_at TEXT NOT NULL);
+    CREATE TABLE runs (bot_id TEXT NOT NULL, state TEXT NOT NULL);"
 
   cat > "$ROOT/bin/agm" <<'STUB'
 #!/bin/bash
@@ -598,7 +602,7 @@ teardown
 #     deleted_at 在窗口內 → 不是重啟弄丟的，不回滾。時間用 2099 年代表「比換版起點晚」。
 setup 10 10
 export STUB_NAMES_BEFORE='["a","b","kid"]' STUB_NAMES_AFTER='["a","b"]'
-seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
   INSERT INTO intents VALUES ('it1','delete_bot','id-kid','{\"bots\":[],\"requested_by\":\"agm\"}','done','2099-01-01T00:00:00.000Z');"
 rc=$(run)
 check_eq "窗口內刻意刪掉的不回滾（rc=0）" "0" "$rc"
@@ -610,7 +614,7 @@ teardown
 # 28. 母 bot 被刪、child 跟著走：child 的 id 在母 bot 那筆 intent 的 payload 快照裡 → 一樣不回滾。
 setup 10 10
 export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a"]'
-seed_audit "INSERT INTO bots VALUES ('id-mom','mom','p1','2099-01-01T00:00:01.000Z'), ('id-kid','kid','p1','2099-01-01T00:00:02.000Z');
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-mom','mom','p1','2099-01-01T00:00:01.000Z'), ('id-kid','kid','p1','2099-01-01T00:00:02.000Z');
   INSERT INTO intents VALUES ('it1','delete_bot','id-mom','{\"bots\":[{\"id\":\"id-kid\",\"managed_by\":\"child\"}]}','done','2099-01-01T00:00:00.000Z');"
 rc=$(run)
 check_eq "連帶刪掉的 child 也不回滾（rc=0）" "0" "$rc"
@@ -621,7 +625,7 @@ teardown
 #     → 照樣回滾。這條不能放寬。
 setup 10 10
 export STUB_NAMES_BEFORE='["a","b","kid"]' STUB_NAMES_AFTER='["a","b"]'
-seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');"
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "沒有刪除紀錄就回滾（rc=7）" "7" "$rc"
 check "log 講是沒有刪除紀錄" "有 bot 不見了（沒有刪除紀錄）：kid" "$SWAP_LOG"
@@ -631,7 +635,7 @@ teardown
 # 30. 刪除紀錄是換版之前的舊帳（例如之前刪過又還原），這次不見的原因不是它 → 照樣回滾。
 setup 10 10
 export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
-seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
   INSERT INTO intents VALUES ('it0','delete_bot','id-kid','{}','done','2000-01-01T00:00:00.000Z');"
 rc=$(run)
 check_eq "窗口外的刪除紀錄不算（rc=7）" "7" "$rc"
@@ -642,7 +646,7 @@ teardown
 #     herdr 報過關閉事件、當下 pane 也不在（cause=pane_closed）→ 刻意收掉的，不回滾。promote 收掉的 child 一樣。
 setup 10 10
 export STUB_NAMES_BEFORE='["a","kid","pro"]' STUB_NAMES_AFTER='["a"]'
-seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z'), ('id-pro','pro','p1','2099-01-01T00:00:02.000Z');
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z'), ('id-pro','pro','p1','2099-01-01T00:00:02.000Z');
   INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_run_already_ended\",\"cause\":\"pane_closed\"}','done','2099-01-01T00:00:01.000Z'),
     ('it2','retire_child','id-pro','{\"why\":\"promoted\",\"cause\":\"promoted\"}','done','2099-01-01T00:00:02.000Z');"
 rc=$(run)
@@ -657,7 +661,7 @@ teardown
 for c in agent_missing unconfirmed herdr_restarted; do
   setup 10 10
   export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
-  seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+  seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
     INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"$c\"}','done','2099-01-01T00:00:01.000Z');"
   rc=$(run)
   check_eq "cause=${c} 的退役照樣回滾（rc=7）" "7" "$rc"
@@ -668,12 +672,38 @@ done
 # 33. retire_child 紀錄在換版窗口之前（舊帳），或 subject 是別顆（payload 裡提到它只是 parent_bot_id）→ 不算，回滾。
 setup 10 10
 export STUB_NAMES_BEFORE='["a","kid"]' STUB_NAMES_AFTER='["a"]'
-seed_audit "INSERT INTO bots VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
   INSERT INTO intents VALUES ('it0','retire_child','id-kid','{\"cause\":\"pane_closed\"}','done','2000-01-01T00:00:00.000Z'),
     ('it1','retire_child','id-grandkid','{\"cause\":\"pane_closed\",\"parent_bot_id\":\"id-kid\"}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "窗口外、或別顆的退役紀錄都不算（rc=7）" "7" "$rc"
 check "log 講是沒有刪除紀錄" "有 bot 不見了（沒有刪除紀錄）：kid" "$SWAP_LOG"
+teardown
+
+# 34. child 雖是 unconfirmed，但父 bot 仍有 active run、且窗口內已收編同一父 bot 的新 child：不是遺失。
+setup 10 10
+export STUB_NAMES_BEFORE='["mom","kid"]' STUB_NAMES_AFTER='["mom","new-kid"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-mom','mom','p1',NULL), ('id-kid','kid','p1','2099-01-01T00:00:01.000Z');
+  UPDATE bots SET managed_by='child', parent_bot_id='id-mom' WHERE id='id-kid';
+  INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-new-kid','new-kid','p1',NULL,'child','id-mom','2099-01-01T00:00:02.000Z');
+  INSERT INTO runs VALUES ('id-mom','running');
+  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+rc=$(run)
+check_eq "父 bot 活著且有窗口內 successor 的 unconfirmed child 不回滾（rc=0）" "0" "$rc"
+check_no "有 successor 時不回滾" "ROLLBACK" "$SWAP_LOG"
+teardown
+
+# 35. rollback 還原 DB 前要辨認窗口中新 daemon 收編的 child，並在還原後明確警示它仍有 live pane。
+setup 10 10
+export STUB_NAMES_BEFORE='["mom","kid"]' STUB_NAMES_AFTER='["mom","new-kid"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-mom','mom','p1',NULL), ('id-kid','kid','p1',NULL);
+  INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-new-kid','new-kid','p1',NULL,'child','id-mom','2099-01-01T00:00:02.000Z');"
+rc=$(run)
+check_eq "舊 child 無明確 successor 退役證據仍回滾（rc=7）" "7" "$rc"
+check "DB 還原前記下的新收編 child 在回滾後有警示" "WARN: rollback restored the DB but these newly adopted children may still have live panes: new-kid (id-new-kid)" "$SWAP_LOG"
+check_eq "binary 照常還原" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
 echo "$PASS passed, $FAIL failed"
