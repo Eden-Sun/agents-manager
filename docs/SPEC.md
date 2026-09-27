@@ -2888,7 +2888,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 
 - 位址 `http://<本機>:5173`，`--strictPort`（使用者手機書籤寫死，搶不到就失敗，不換 port）。
 - **來源是只跟 origin/main 的乾淨 worktree** `/Users/m4p/project/agents-manager-main`（detached HEAD）。看門狗每輪 `git fetch && git reset --hard origin/main`（那棵樹沒有任何人的 WIP）；
-  `web/bun.lock` 變了才 `bun install` 並重啟 vite，原始碼變動靠 HMR。**5173 看到的 = 已合併進 origin/main 的事實。** 共用工作樹不再被 5173 使用（它永遠有別人的 WIP、pull 不了）。
+  `web/bun.lock` 變了才 `bun install` 並重啟 vite；install 失敗不砍還在跑的 vite，並留下待安裝標記，之後每輪重試到成功。原始碼變動靠 HMR。**5173 看到的 = 已合併進 origin/main 的事實。** 共用工作樹不再被 5173 使用（它永遠有別人的 WIP、pull 不了）。
 - **bot 驗自己未提交的改動用自己的 port**（例如 5188、`VITE_MOCK=1`），自己起自己收。5173 是使用者的視窗。其他 port 不歸看門狗管。
 - **runtime 是 node 不是 bun**：`node web/node_modules/vite/bin/vite.js`。bun 的 upgrade socket 沒有 `destroySoon`，daemon 一重啟代理斷線 vite 就 crash。bun 只用來 build 與裝套件。
 - **必綁 `--host 0.0.0.0`**（手機／LAN／Tailscale）；`vite.config.ts` 也設 `server.host: true`，手動起的也對外。代理把 `Origin` 改寫成 daemon 位址。

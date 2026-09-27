@@ -28,7 +28,7 @@
 //   bot 要驗自己未提交的改動，用自己的 port（5188/VITE_MOCK 慣例），不要靠 5173。
 //   web/bun.lock 變了就 bun install 並重啟 vite；只有原始碼變的話 vite 自己 HMR，不重啟。
 
-import { appendFileSync, existsSync, openSync } from 'node:fs'
+import { appendFileSync, existsSync, openSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const REPO = '/Users/m4p/project/agents-manager-main' // git worktree，detached，只跟 origin/main
@@ -36,6 +36,7 @@ const PORT = 5173
 const URL = `http://127.0.0.1:${PORT}/`
 const DIR = dirname(import.meta.dir) // supervisor/AGM
 const LOG = join(DIR, 'dev-server.log')
+const PENDING = join(DIR, 'dev-server.pending-install')
 const VITE = join(REPO, 'web/node_modules/vite/bin/vite.js')
 
 const ts = () => new Date().toLocaleString('sv-SE').replace('T', ' ')
@@ -109,12 +110,20 @@ async function syncMain(): Promise<boolean> {
     await git('fetch', '-q', 'origin', 'main')
     await git('reset', '-q', '--hard', 'origin/main')
     const after = await git('rev-parse', 'HEAD')
-    if (before === after) return false
     const lockAfter = await git('rev-parse', 'HEAD:web/bun.lock').catch(() => '')
-    log(`== ${ts()} 5173 同步到 origin/main ${before.slice(0, 7)}..${after.slice(0, 7)}`)
-    if (lockBefore === lockAfter) return false
+    if (before !== after) log(`== ${ts()} 5173 同步到 origin/main ${before.slice(0, 7)}..${after.slice(0, 7)}`)
+    const pending = existsSync(PENDING)
+    if (before === after && !pending) return false
+    if (lockBefore === lockAfter && !pending) return false
     const p = Bun.spawn(['bun', 'install', '--frozen-lockfile'], { cwd: join(REPO, 'web'), stdout: 'ignore', stderr: 'ignore' })
-    log(`${ts()} web/bun.lock 變了，bun install 結束碼 ${await p.exited}，重啟 vite`)
+    const code = await p.exited
+    if (code !== 0) {
+      writeFileSync(PENDING, `${lockAfter}\n`)
+      log(`${ts()} web/bun.lock 的 bun install 結束碼 ${code}，不重啟還在跑的 vite，下一輪重試`)
+      return false
+    }
+    if (pending) unlinkSync(PENDING)
+    log(`${ts()} web/bun.lock 變了，bun install 結束碼 0，重啟 vite`)
     return true
   } catch (e) {
     log(`== ${ts()} 同步 origin/main 失敗，沿用現有樹：${e}`)
