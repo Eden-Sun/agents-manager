@@ -197,6 +197,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   刪除 API 另記 WARN `bot delete requested` 並把同一段呼叫端寫進 delete intent 的 `requested_by`（DB 裡查得到）。13:28Z 那次就是只有投影那行 `soft-deleted`，最後只能從 `intents` 表反推是刪除 API，呼叫端至今不明。mtime 只作為變更觀測，不能當唯一重讀條件，因為檔案系統可能保留或降低 mtime 精度。
   驗不過就直接回錯誤，**config.toml 一個字都不動**，
   記憶體裡那份也不變；錯誤訊息保留原因並附「（config.toml 未變更）」，recovery path 就是改個合法的值再送一次。
+  落盤之後投影失敗（例如撞上 child 才占著的 `(project_id, name)`）要把這次寫進去的 TOML 退回寫入前的內容（#654）。新增 bot 的重名檢查同時看 config 與 DB 裡還活著的名字（含 child）。
   以前只在投影當下驗，而投影跑在 config 已經落盤之後：一筆會被擋的修改先把 TOML 改壞，API 回了錯，現場卻已經變了，
   daemon 下次啟動才爆。`validate` 是純函式（bot／專案 id 格式、bot 名字、kind、identity 綁定與 kind 相符、identity 名字與 kind，
   以及 `[[hosts]]` 的名字不得是保留的 `local`、要合 slug 規則、`ssh` 不得為空、不得同名重複——issue #506：這四條以前只擋得住
