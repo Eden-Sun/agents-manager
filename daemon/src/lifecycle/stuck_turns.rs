@@ -178,10 +178,11 @@ pub(crate) enum CloseWhy {
     SessionPaused,
 }
 
-/// Session paused 選單關掉之後：run 還是 idle、還有一筆 in-flight 就馬上收，不等 5 分鐘的閒置門檻
-/// （2026-09-26 使用者：「判斷為等待中，實際上並沒有再輸出」）。選了「換模型重試」的話 claude 會接著跑同一回合、
-/// herdr 報 working，這裡在鎖內重讀看到不是 idle 就不動。回傳收掉的 turn id。
-pub(crate) async fn close_after_session_paused(app: &Arc<App>, run_id: &str) -> Option<String> {
+/// Session paused 選單關掉之後：run 還是 idle、選單關閉時捕捉的 turn 仍是這個 run 的 in-flight，才馬上收，
+/// 不等 5 分鐘的閒置門檻（2026-09-26 使用者：「判斷為等待中，實際上並沒有再輸出」）。選了「換模型重試」的話
+/// claude 會接著跑同一回合、herdr 報 working，這裡在鎖內重讀看到不是 idle 就不動。舊 turn 已結束或 turn id 改變也不動。
+/// 回傳收掉的 turn id。
+pub(crate) async fn close_after_session_paused(app: &Arc<App>, run_id: &str, expected_turn_id: &str) -> Option<String> {
     let run = db::run(&app.db, run_id).await.ok()??;
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
@@ -190,6 +191,9 @@ pub(crate) async fn close_after_session_paused(app: &Arc<App>, run_id: &str) -> 
         return None;
     }
     let turn = db::in_flight_turn(&app.db, run_id).await.ok()??;
+    if turn.id != expected_turn_id {
+        return None;
+    }
     match close_locked(app, &run, &turn, CloseWhy::SessionPaused).await {
         Ok(true) => {
             if let Err(e) = flush_queued_locked(app, &run.bot_id).await {
@@ -474,11 +478,11 @@ mod tests {
     async fn a_turn_left_open_by_a_closed_session_paused_menu_is_closed_right_away() {
         let f = stuck("被暫停的那則").await;
         let app = f.env.app.clone();
-        assert_eq!(close_after_session_paused(&app, &f.run_id).await.as_deref(), Some(f.turn_id.as_str()));
+        assert_eq!(close_after_session_paused(&app, &f.run_id, &f.turn_id).await.as_deref(), Some(f.turn_id.as_str()));
         assert_eq!(turn(&app, &f.turn_id).await.status, "completed_fallback");
         let msgs = messages(&app, &f.turn_id).await;
         assert!(msgs.iter().any(|(role, _, c)| role == "system" && c.contains("Session paused")), "{msgs:?}");
-        assert_eq!(close_after_session_paused(&app, &f.run_id).await, None, "已經收掉就不再動");
+        assert_eq!(close_after_session_paused(&app, &f.run_id, &f.turn_id).await, None, "已經收掉就不再動");
     }
 
     /// 選了「換模型重試」：claude 接著跑同一回合（herdr 報 working），不能收。
@@ -487,9 +491,47 @@ mod tests {
         let f = stuck("換模型重試那則").await;
         let app = f.env.app.clone();
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
-        assert_eq!(close_after_session_paused(&app, &f.run_id).await, None);
+        assert_eq!(close_after_session_paused(&app, &f.run_id, &f.turn_id).await, None);
         assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
         let _ = &f.bot_id;
+    }
+
+    /// #575：選單關掉時的 T1 已正常收尾，下一個 T2 已 in-flight，但 herdr 還沒把 run 從 idle 改成 working。
+    /// T1 的舊計時器必須只看 T1，不能把同一 run 上現在的 T2 當成它要收的回合。
+    #[tokio::test]
+    async fn a_stale_session_paused_close_does_not_close_the_next_turn() {
+        let f = stuck("被暫停的舊回合").await;
+        let app = f.env.app.clone();
+
+        assert_eq!(
+            super::super::turn_controller::set_status(&app.db, &f.turn_id, "in_flight", "completed", "Stop hook").await.unwrap(),
+            super::super::turn_controller::Outcome::Applied,
+            "T1 由正常 Stop hook 路徑先收尾"
+        );
+
+        let conversation_id = db::conversation_id(&app.db, &f.bot_id).await.unwrap();
+        let next_turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at)
+             VALUES (?,?,?,'web','in_flight','ok',?)",
+        )
+        .bind(&next_turn_id)
+        .bind(&conversation_id)
+        .bind(&f.run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run_status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?")
+            .bind(&f.run_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(run_status, "idle", "T2 已在 DB 開始，herdr working 事件尚未到");
+
+        assert_eq!(close_after_session_paused(&app, &f.run_id, &f.turn_id).await, None, "T1 的舊計時器只能對 T1 做 no-op");
+        assert_eq!(turn(&app, &f.turn_id).await.status, "completed", "正常收尾的 T1 保持終態");
+        assert_eq!(turn(&app, &next_turn_id).await.status, "in_flight", "舊計時器不得誤關 T2");
     }
 
     async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
