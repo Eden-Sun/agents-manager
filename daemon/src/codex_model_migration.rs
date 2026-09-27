@@ -18,6 +18,8 @@ const CLOSED_NOTE: &str = "Codex 模型升級提示已關閉，排隊的訊息�
 struct Episode {
     /// 由這裡補標成 `blocked` 之前的狀態；`None` = herdr 自己判的。
     forced_from: Option<String>,
+    /// Only one observer may finish the episode while it awaits a database restore.
+    closing: bool,
 }
 
 fn open() -> &'static Mutex<HashMap<String, Episode>> {
@@ -79,9 +81,52 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
         return;
     }
 
-    let Some(episode) = open().lock().unwrap().remove(&run.id) else {
-        return;
+    let forced_from = {
+        let mut episodes = open().lock().unwrap();
+        let Some(episode) = episodes.get_mut(&run.id) else {
+            return;
+        };
+        if episode.closing {
+            return;
+        }
+        episode.closing = true;
+        episode.forced_from.clone()
     };
+    let (resolved, status_changed) = if let Some(previous) = &forced_from {
+        match sqlx::query("UPDATE runs SET agent_status=? WHERE id=? AND state='running' AND agent_status='blocked'")
+            .bind(previous)
+            .bind(&run.id)
+            .execute(&app.db)
+            .await
+        {
+            Ok(result) if result.rows_affected() == 1 => (true, true),
+            Ok(_) => match sqlx::query_as::<_, (String, String)>("SELECT state, agent_status FROM runs WHERE id=?")
+                .bind(&run.id)
+                .fetch_optional(&app.db)
+                .await
+            {
+                Ok(Some((state, status))) => (state != "running" || status != "blocked", false),
+                Ok(None) => (true, false),
+                Err(error) => {
+                    tracing::warn!(run = %run.id, error = ?error, "could not verify synthetic Codex migration blocked status");
+                    (false, false)
+                }
+            },
+            Err(error) => {
+                tracing::warn!(run = %run.id, error = ?error, "could not restore synthetic Codex migration blocked status");
+                (false, false)
+            }
+        }
+    } else {
+        (true, false)
+    };
+    if !resolved {
+        if let Some(episode) = open().lock().unwrap().get_mut(&run.id) {
+            episode.closing = false;
+        }
+        return;
+    }
+    open().lock().unwrap().remove(&run.id);
     tracing::info!(run = %run.id, bot = %run.bot_id, "Codex 模型升級提示已關閉");
     if let Ok(conversation) = db::conversation_id(&app.db, &run.bot_id).await {
         let _ = crate::lifecycle::insert_message(
@@ -96,18 +141,7 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
         )
         .await;
     }
-    let mut restored = false;
-    if let Some(previous) = episode.forced_from {
-        restored =
-            sqlx::query("UPDATE runs SET agent_status=? WHERE id=? AND agent_status='blocked'")
-                .bind(previous)
-                .bind(&run.id)
-                .execute(&app.db)
-                .await
-                .map(|result| result.rows_affected() == 1)
-                .unwrap_or(false);
-    }
-    if restored {
+    if status_changed {
         app.emit_bot_status(&run.bot_id).await;
     }
     crate::child_alerts::forget(&run.bot_id);
@@ -120,7 +154,7 @@ async fn notify_once(app: &Arc<App>, run: &db::Run) {
         if episodes.contains_key(&run.id) {
             return;
         }
-        episodes.insert(run.id.clone(), Episode { forced_from: None });
+        episodes.insert(run.id.clone(), Episode { forced_from: None, closing: false });
     }
     tracing::warn!(run = %run.id, bot = %run.bot_id, "Codex model migration prompt is waiting for a user choice");
     match db::conversation_id(&app.db, &run.bot_id).await {
@@ -199,5 +233,119 @@ mod tests {
         assert_eq!(env.herdr.calls_to("pane.send_keys").len(), 0);
         let messages = system_messages(&env.app, &bot.id).await;
         assert_eq!(messages, [WAITING_HINT, CLOSED_NOTE]);
+    }
+
+    #[tokio::test]
+    async fn a_newer_herdr_status_supersedes_the_synthetic_block_before_queue_release() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "codex-migration-superseded").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let migration = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt");
+        observe_screen(&app, &run_of(&app, &run_id).await, migration).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?")
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::lifecycle::take_scheduled_flush_count(&bot.id);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "working", "do not overwrite herdr's newer state");
+        assert!(!is_open(&run_id), "the newer status authoritatively superseded our marker");
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 1);
+    }
+
+    #[tokio::test]
+    async fn an_ended_run_releases_the_synthetic_blocked_episode() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "codex-migration-ended").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let migration = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt");
+        observe_screen(&app, &run_of(&app, &run_id).await, migration).await;
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?")
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::lifecycle::take_scheduled_flush_count(&bot.id);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+
+        let run = run_of(&app, &run_id).await;
+        assert_eq!(run.state, "exited");
+        assert_eq!(run.agent_status, "blocked", "don't rewrite an ended run");
+        assert!(!is_open(&run_id), "the ended run authoritatively resolves the restore debt");
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 1);
+    }
+
+    /// The restore marker is owed until SQLite commits it. A later patrol must retry before it
+    /// writes the close note or wakes the prompt queue.
+    #[tokio::test]
+    async fn a_failed_restore_keeps_the_episode_until_a_later_patrol_succeeds() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "codex-migration-restore").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let migration = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt");
+        observe_screen(&app, &run_of(&app, &run_id).await, migration).await;
+        let conversation = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,'web','queued','pending','next prompt',?)",
+        )
+        .bind(db::ulid())
+        .bind(&conversation)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        crate::lifecycle::take_scheduled_flush_count(&bot.id);
+        sqlx::query(
+            "CREATE TRIGGER refuse_codex_migration_restore BEFORE UPDATE OF agent_status ON runs
+             WHEN OLD.agent_status='blocked' AND NEW.agent_status='idle' BEGIN SELECT RAISE(ABORT, 'database is locked'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "restore did not commit");
+        assert!(is_open(&run_id), "the patrol needs the retained episode to retry");
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT]);
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 0, "don't wake the queue yet");
+
+        sqlx::query("DROP TRIGGER refuse_codex_migration_restore")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "idle");
+        assert!(!is_open(&run_id));
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 1);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+        assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE], "closure note is written once");
+        assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 0, "resolved episode wakes the queue once");
     }
 }
