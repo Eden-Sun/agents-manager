@@ -72,10 +72,12 @@ export function acquirePreload(key: string, start: StartPreload, onProgress?: Pr
 /** 「重新讀取」：換新的一份；舊持有者的 promise 不變。 */
 export function restartPreload(key: string, start: StartPreload, onProgress?: Progress): PreloadHandle {
   const old = entries.get(key)
-  if (old?.drop !== null && old?.drop !== undefined) clearTimeout(old.drop)
+  if (old?.drop !== null && old?.drop !== undefined) {
+    clearTimeout(old.drop)
+    old.drop = null
+  }
   const entry = begin(key, start)
-  // 搬計數：舊持有者放掉時不該把新的丟掉。
-  if (old) entry.refs = old.refs
+  // Handles keep releasing the entry they attached to; the replacement only counts new handles.
   return attach(key, entry, onProgress)
 }
 

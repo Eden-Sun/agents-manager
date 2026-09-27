@@ -104,6 +104,34 @@ test('「重新讀取」換一份新的；舊持有者放掉不會把新的丟�
   assert.equal(s1.calls, 1)
 })
 
+test('#633：重新讀取後舊 prefetch 與新 modal 都放掉，下一份同 key 問卷必須重新預載', async () => {
+  const key = 'b1:ScopeTestsSubmit'
+  const staleDraft = { pages: [{ question: 'old questionnaire' }] } as unknown as Draft
+  const restartedDraft = { pages: [{ question: 'restarted questionnaire' }] } as unknown as Draft
+  const nextDraft = { pages: [{ question: 'next questionnaire' }] } as unknown as Draft
+  const oldStart = starter(staleDraft)
+  const prefetch = acquirePreload(key, oldStart.start)
+  const oldModal = acquirePreload(key, oldStart.start)
+
+  // BlockedDraft cleanup runs before restartPreload; the independent prefetch still holds old entry.
+  oldModal.release()
+  const restart = starter(restartedDraft)
+  const modal = restartPreload(key, restart.start)
+  assert.notEqual(modal.job, prefetch.job)
+
+  prefetch.release()
+  modal.release()
+  await tick()
+  assert.equal(hasPreload(key), false, 'released old and new handles must leave no entry behind')
+
+  const next = starter(nextDraft)
+  const nextHandle = acquirePreload(key, next.start)
+  assert.equal(next.calls, 1, 'same bot and tab labels on a later questionnaire must invoke preload again')
+  assert.notEqual(nextHandle.job, modal.job)
+  next.finish()
+  assert.equal(await nextHandle.job, nextDraft)
+})
+
 test('不同 bot 或不同問卷各跑各的', () => {
   const s = starter()
   acquirePreload('b1:q1', s.start)
