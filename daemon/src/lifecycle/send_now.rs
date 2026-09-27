@@ -101,7 +101,7 @@ pub(crate) async fn deliver(
         Ok(r) => r,
         Err(not) => return Outcome::NotAttempted(not),
     };
-    let typed = match type_text(client, run, bot, text, ready).await {
+    let typed = match type_text(app, client, run, bot, text, ready).await {
         Ok(Typing::Ready(t)) => t,
         Ok(Typing::Done(not @ Delivered::NotAttempted { .. })) => return Outcome::NotAttempted(not),
         // 證據在按送出鍵之前就長出來了：不是我們按的鍵送的，舊回合怎樣了不知道。

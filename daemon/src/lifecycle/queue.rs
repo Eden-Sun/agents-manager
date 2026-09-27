@@ -2166,6 +2166,26 @@ mod flush_queue_tests {
         assert_eq!(hints, 1);
     }
 
+    #[tokio::test]
+    async fn a_queued_prompt_stays_queued_when_its_dialog_preflight_is_unreadable() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.set_agent("agent", "pane-1", true);
+        f.env.herdr.set_screen("pane-1", crate::tui_prompts::screens::DANGEROUS_RM);
+        f.env.herdr.fail_next("pane.read", tt::Fault::Refuse);
+        f.env.herdr.fail_next("pane.read", tt::Fault::Refuse);
+        forget_queue_retry_timer(&f.bot_id);
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.run_id.as_deref()), ("queued", None), "the claimed prompt is put back");
+        assert!(t.next_flush_at.is_some() && queue_retry_timer_armed(&f.bot_id), "pane uncertainty schedules another check");
+        for method in ["agent.prompt", "pane.send_text", "pane.send_keys"] {
+            assert!(f.env.herdr.calls_to(method).is_empty(), "unreadable preflight must not call {method}");
+        }
+    }
+
     /// 之後讓放回佇列（寫 `flush_retries`）或收成 failed 的寫入失敗（SQLite 這一刻寫不進去）；認領那一句照常。
     async fn lose(app: &Arc<App>, name: &str, what: &str) {
         let on = if what == "failed" { "status ON turns WHEN NEW.status = 'failed'" } else { "flush_retries ON turns" };
