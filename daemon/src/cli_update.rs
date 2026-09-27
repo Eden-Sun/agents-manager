@@ -26,8 +26,8 @@ use axum::Json;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Write as _;
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -643,34 +643,88 @@ pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &st
 
 type RecoveryRow = (String, String, String, Option<String>);
 
-/// 同一列可能在多輪掃描中一直是 `running`；同一個 daemon 只讓一個 worker 對它做遠端探測與收尾。
-static ACTIVE_RECOVERIES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+/// 同一列可能在多輪掃描中一直是 `running`。Processed tombstones 必須保留到 daemon 結束：某一輪掃描
+/// 可能在 worker 終結前讀到舊 row，稍後才把那份結果送來 admission；只記錄 active worker 會重新啟動它。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryWorkerState {
+    Active,
+    Processed,
+}
 
-fn active_recoveries() -> &'static Mutex<HashSet<String>> {
-    ACTIVE_RECOVERIES.get_or_init(|| Mutex::new(HashSet::new()))
+static ACTIVE_RECOVERIES: OnceLock<Mutex<HashMap<String, RecoveryWorkerState>>> = OnceLock::new();
+
+fn active_recoveries() -> &'static Mutex<HashMap<String, RecoveryWorkerState>> {
+    ACTIVE_RECOVERIES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn recovery_worker_active(id: &str) -> bool {
+    active_recoveries()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        == Some(&RecoveryWorkerState::Active)
 }
 
 struct RecoveryWorkerGuard(String);
 
-impl Drop for RecoveryWorkerGuard {
-    fn drop(&mut self) {
-        active_recoveries().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+impl RecoveryWorkerGuard {
+    fn mark_processed(&self) {
+        let mut recoveries = active_recoveries()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if recoveries.get(&self.0) == Some(&RecoveryWorkerState::Active) {
+            recoveries.insert(self.0.clone(), RecoveryWorkerState::Processed);
+        }
     }
 }
 
-fn spawn_recovery_worker(app: &Arc<App>, runner: &Arc<dyn Runner>, row: RecoveryRow) {
+impl Drop for RecoveryWorkerGuard {
+    fn drop(&mut self) {
+        let mut recoveries = active_recoveries()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if recoveries.get(&self.0) == Some(&RecoveryWorkerState::Active) {
+            recoveries.remove(&self.0);
+        }
+    }
+}
+
+fn spawn_recovery_worker(app: &Arc<App>, runner: &Arc<dyn Runner>, row: RecoveryRow) -> bool {
     let (id, host, target, from) = row;
-    let claimed = active_recoveries().lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone());
+    let claimed = {
+        let mut recoveries = active_recoveries()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if recoveries.contains_key(&id) {
+            false
+        } else {
+            recoveries.insert(id.clone(), RecoveryWorkerState::Active);
+            true
+        }
+    };
     if !claimed {
-        return;
+        return false;
     }
     let (app, runner, id) = (app.clone(), runner.clone(), id.clone());
     let guard = RecoveryWorkerGuard(id.clone());
     tokio::spawn(async move {
         let _guard = guard;
         tracing::warn!(update_id = %id, host = %host, "codex 升級在 daemon 重啟前還沒收尾，接手確認那台的安裝");
-        recover(&app, runner.as_ref(), &id, &host, &target, from.as_deref(), RECOVER_POLL, RECOVER_MAX).await;
+        recover_with_registry(
+            &app,
+            runner.as_ref(),
+            &id,
+            &host,
+            &target,
+            from.as_deref(),
+            RECOVER_POLL,
+            RECOVER_MAX,
+            Some(&_guard),
+        )
+        .await;
     });
+    true
 }
 
 async fn unfinished_updates(app: &App) -> Result<Vec<RecoveryRow>, sqlx::Error> {
@@ -739,7 +793,31 @@ pub async fn recover_at_startup(app: &Arc<App>) {
 ///
 /// 絕對不跑安裝指令。
 #[allow(clippy::too_many_arguments)]
-pub async fn recover(app: &Arc<App>, runner: &dyn Runner, update_id: &str, host: &str, target: &str, from: Option<&str>, poll: Duration, max: Duration) -> Value {
+pub async fn recover(
+    app: &Arc<App>,
+    runner: &dyn Runner,
+    update_id: &str,
+    host: &str,
+    target: &str,
+    from: Option<&str>,
+    poll: Duration,
+    max: Duration,
+) -> Value {
+    recover_with_registry(app, runner, update_id, host, target, from, poll, max, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_with_registry(
+    app: &Arc<App>,
+    runner: &dyn Runner,
+    update_id: &str,
+    host: &str,
+    target: &str,
+    from: Option<&str>,
+    poll: Duration,
+    max: Duration,
+    registry_guard: Option<&RecoveryWorkerGuard>,
+) -> Value {
     let log_path = app.data_dir.join(LOG_FILE);
     let base = json!({"update_id": update_id, "host": host, "kind": "codex", "target_version": target, "log_path": log_path, "recovered": true});
     let done = |ok: bool, extra: Value| {
@@ -753,9 +831,15 @@ pub async fn recover(app: &Arc<App>, runner: &dyn Runner, update_id: &str, host:
     };
     let finish = |v: Value| async move {
         let Some(v) = finish_row(app, update_id, &v).await else {
+            if let Some(guard) = registry_guard {
+                guard.mark_processed();
+            }
             return json!({"update_id": update_id, "host": host, "kind": "codex", "target_version": target,
                 "recovered": true, "ok": false, "reason": "superseded", "error": "終態列已不存在或已被其他流程取代；沒有發布本地結果"});
         };
+        if let Some(guard) = registry_guard {
+            guard.mark_processed();
+        }
         log_line(app, &format!("[{update_id}] 重啟後接手收尾：ok={} {} {}", v["ok"], v["reason"], v["error"]));
         app.emit("cli_update_done", v.clone()).await;
         v
@@ -1588,6 +1672,138 @@ mod tests {
         .execute(&env.app.db)
         .await
         .expect("the host slot must accept a later update after recovery commits");
+    }
+
+    struct ProbeBarrier {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    struct ProbeGatedRunner {
+        inner: Arc<Fake>,
+        barrier: Arc<ProbeBarrier>,
+    }
+
+    impl Runner for ProbeGatedRunner {
+        fn installer_busy<'a>(
+            &'a self,
+            _app: &'a Arc<App>,
+            _host: &'a str,
+            _fence: &'a HostFence,
+        ) -> BoxFuture<'a, anyhow::Result<bool>> {
+            Box::pin(async move {
+                let probe = {
+                    let mut probes = self.inner.probes.lock().unwrap();
+                    *probes += 1;
+                    *probes
+                };
+                if probe == 1 {
+                    self.barrier.entered.notify_one();
+                    self.barrier.release.notified().await;
+                }
+                let mut busy = self.inner.busy.lock().unwrap();
+                Ok(if busy.is_empty() {
+                    false
+                } else {
+                    busy.remove(0)
+                })
+            })
+        }
+
+        fn install<'a>(
+            &'a self,
+            app: &'a Arc<App>,
+            host: &'a str,
+            fence: &'a HostFence,
+        ) -> BoxFuture<'a, Result<String, InstallError>> {
+            self.inner.install(app, host, fence)
+        }
+
+        fn version<'a>(
+            &'a self,
+            app: &'a Arc<App>,
+            host: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<String>> {
+            self.inner.version(app, host)
+        }
+
+        fn restart<'a>(
+            &'a self,
+            app: &'a Arc<App>,
+            scope: Scope,
+        ) -> BoxFuture<'a, anyhow::Result<Value>> {
+            self.inner.restart(app, scope)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_recovery_enumeration_cannot_spawn_after_its_worker_finishes() {
+        let env = crate::testing::env().await;
+        let orphan = orphan_row(&env.app, "local", "0.157.0", "installing", None).await;
+        let mut rx = env.app.subscribe();
+        let barrier = Arc::new(ProbeBarrier {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let fake = Fake::new(&["codex-cli 0.157.0"], Ok("already installed"));
+        let runner: Arc<dyn Runner> = Arc::new(ProbeGatedRunner {
+            inner: fake.clone(),
+            barrier: barrier.clone(),
+        });
+        let first_row = unfinished_updates(&env.app)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(spawn_recovery_worker(&env.app, &runner, first_row));
+        tokio::time::timeout(Duration::from_secs(5), barrier.entered.notified())
+            .await
+            .expect("the first worker must reach its controlled probe");
+
+        // This is the exact result a sweep can hold after SELECT returns and before it dispatches its rows.
+        let stale_row = unfinished_updates(&env.app)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(stale_row.0, orphan);
+        barrier.release.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let terminal = row_status(&env.app, &orphan).await.0 != "running";
+                let active = recovery_worker_active(&orphan);
+                if terminal && !active {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the first worker must finish and release its active claim");
+
+        let stale_dispatch_started_worker = spawn_recovery_worker(&env.app, &runner, stale_row);
+        assert!(
+            !stale_dispatch_started_worker,
+            "a stale enumeration must not restart a worker after the row has been processed"
+        );
+        assert_eq!(
+            *fake.probes.lock().unwrap(),
+            1,
+            "one update id must only be probed once"
+        );
+        assert_eq!(
+            *fake.version_reads.lock().unwrap(),
+            1,
+            "one update id must only be reconciled once"
+        );
+        assert_eq!(
+            done_events(&mut rx).len(),
+            1,
+            "a stale sweep must not emit a second completion"
+        );
     }
 
     /// #564：裝好之後、確認版本／重啟之前 daemon 死掉。接手時讀到已經是目標版本：直接認，不先重跑一次安裝。
