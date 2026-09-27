@@ -535,11 +535,11 @@ pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&s
             match super::interruption::unconfirmed(app, bot_id, &run.id, &t.id, super::interruption::INTERRUPT_NOTE, esc_at).await {
                 Ok(false) => {}
                 Ok(true) => {
-                    clear_restored_prompt(&client, &run, &bot).await;
+                    clear_restored_prompt(app, &client, &run, &bot, in_flight.as_ref().and_then(|t| t.prompt_text.as_deref())).await;
                     return Ok(());
                 }
                 Err(e) => {
-                    clear_restored_prompt(&client, &run, &bot).await;
+                    clear_restored_prompt(app, &client, &run, &bot, in_flight.as_ref().and_then(|t| t.prompt_text.as_deref())).await;
                     return Err(super::interruption::uncommitted(&run.id, &t.id, Some(&e)));
                 }
             }
@@ -554,28 +554,45 @@ pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&s
     if let Some(t) = in_flight.as_ref() {
         if let Err(e) = super::interruption::interrupted(app, bot_id, &run.id, &t.id, super::interruption::INTERRUPT_NOTE).await {
             // Esc 確實進去了：框照樣要清。
-            clear_restored_prompt(&client, &run, &bot).await;
+            clear_restored_prompt(app, &client, &run, &bot, in_flight.as_ref().and_then(|t| t.prompt_text.as_deref())).await;
             return Err(super::interruption::uncommitted(&run.id, &t.id, Some(&e)));
         }
     }
-    clear_restored_prompt(&client, &run, &bot).await;
+    clear_restored_prompt(app, &client, &run, &bot, in_flight.as_ref().and_then(|t| t.prompt_text.as_deref())).await;
     Ok(())
 }
 
 /// claude 在吐出第一個字前被 `esc` 打斷，會把 prompt 放回輸入框（2026-09-08 實測），下一則
-/// 貼上會黏在後面。中斷後 composer 有字就 `ctrl+c` 清掉（有字時只清不退出）。只做 claude，失敗不報錯。
+/// 貼上會黏在後面。只清這筆被中斷回合的 prompt；草稿不同、讀不到或 run/pane/session/revision 改變就不動。只做 claude，失敗不報錯。
 ///
 /// 讀法跟送出前的檢查一樣（#581）：以前讀 `visible` 80 列、放回來的長 prompt 撐高的框找不到框頂，
 /// 判成「框是空的」沒按，框就一直卡著那段字。按完重讀一次，框沒空就留一筆 log（不再按：空框的 `ctrl+c` 是「再按一次離開」）。
-async fn clear_restored_prompt(client: &HerdrClient, run: &db::Run, bot: &db::Bot) {
-    use super::delivery::{box_state, read_styled, BoxState, DELIVER_SCAN_LINES, SCAN_SOURCE};
+async fn clear_restored_prompt(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &db::Bot, expected_prompt: Option<&str>) {
+    use super::delivery::{box_state, read_styled, read_styled_snapshot, BoxState, DELIVER_SCAN_LINES, SCAN_SOURCE};
     if bot.kind != "claude" {
         return;
     }
-    let Some(pane) = run.pane_id.as_deref() else { return };
+    let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) else { return };
+    let Some(expected_prompt) = expected_prompt.filter(|p| !p.trim().is_empty()) else { return };
     tokio::time::sleep(Duration::from_millis(400)).await;
-    let Ok(screen) = read_styled(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else { return };
-    if composer_text(&bot.kind, &screen).is_none() {
+    if !abort_binding_is_current(app, run).await {
+        return;
+    }
+    let Ok(candidate) = read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else { return };
+    if candidate.pane_id != pane || !restored_prompt_matches(&bot.kind, &candidate.text, expected_prompt) {
+        return;
+    }
+    #[cfg(test)]
+    super::race_point::hit("abort_before_clear_key", &bot.id).await;
+
+    // Herdr has no conditional-key revision parameter. Re-read the complete composer and authority
+    // immediately before Ctrl+C; a change after this read remains a narrow non-atomic window.
+    let Ok(fresh) = read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await else { return };
+    if fresh.pane_id != pane
+        || fresh.revision != candidate.revision
+        || !restored_prompt_matches(&bot.kind, &fresh.text, expected_prompt)
+        || !abort_binding_is_current(app, run).await
+    {
         return;
     }
     if let Err(e) = client.pane_send_keys(pane, &["ctrl+c"]).await {
@@ -588,6 +605,33 @@ async fn clear_restored_prompt(client: &HerdrClient, run: &db::Run, bot: &db::Bo
         Ok(BoxState::Empty) => tracing::info!(run = %run.id, "interrupt put the prompt back into the composer; cleared it"),
         other => tracing::warn!(run = %run.id, state = ?other.ok(), "cleared the restored prompt but the composer did not read back empty"),
     }
+}
+
+/// A clear is authorized only by the exact prompt captured from this run's in-flight turn.
+/// `recent_unwrapped` and the composer parser handle TUI framing; only try a tab-removed candidate
+/// when the original prompt actually had a tab (the known Claude TUI tab-loss behavior).
+fn restored_prompt_matches(kind: &str, screen: &str, expected: &str) -> bool {
+    let Some(actual) = super::poller::composer_text(kind, screen) else { return false };
+    same_restored_prompt(&actual, expected)
+}
+
+fn same_restored_prompt(actual: &str, expected: &str) -> bool {
+    let actual = super::pasted_content::original(actual.trim());
+    let expected = super::pasted_content::original(expected.trim());
+    if actual == expected {
+        return true;
+    }
+    expected.contains('\t') && actual == expected.replace('\t', "")
+}
+
+async fn abort_binding_is_current(app: &Arc<App>, run: &db::Run) -> bool {
+    let Ok(Some(current)) = db::active_run(&app.db, &run.bot_id).await else { return false };
+    current.id == run.id
+        && current.state == "running"
+        && current.pane_id == run.pane_id
+        && current.herdr_session == run.herdr_session
+        && current.native_session_id == run.native_session_id
+        && current.transcript_path == run.transcript_path
 }
 
 /// 強制中止在對話裡留的那一則：一次收好幾筆時帶筆數（#581）。
@@ -662,7 +706,7 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
             }
         }
         if let Some(c) = client.as_ref() {
-            clear_restored_prompt(c, r, &bot).await;
+            clear_restored_prompt(app, c, r, &bot, in_flight.as_ref().and_then(|t| t.prompt_text.as_deref())).await;
         }
     }
     // Unknown-delivery turns live on the bot, not a run: a stopped run can leave one behind.

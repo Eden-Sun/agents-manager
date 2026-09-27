@@ -104,11 +104,22 @@ impl Fx {
     }
 }
 
+async fn bind_turn_prompt(f: &Fx, turn_id: &str, prompt: &str) {
+    sqlx::query("UPDATE turns SET prompt_text=? WHERE id=?")
+        .bind(prompt)
+        .bind(turn_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+}
+
 /// 根因：打斷之後 claude 放回框裡的長 prompt 要清掉——以前框頂出了範圍就判成空框、不按，框從此卡著那段字。
 #[tokio::test]
 async fn a_force_abort_clears_a_restored_prompt_taller_than_the_default_tail() {
-    let f = claude_with(tall_draft()).await;
-    run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    let draft = tall_draft();
+    let f = claude_with(draft.clone()).await;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, &draft.join("\n")).await;
     assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer.len(), DRAFT_ROWS, "中止前：框裡是放回來的那段");
 
     abort_turns(&f.env.app, &f.bot_id).await.unwrap();
@@ -122,11 +133,161 @@ async fn a_force_abort_clears_a_restored_prompt_taller_than_the_default_tail() {
 /// 網頁的 Esc（`interrupt_turn`）走同一步清框。
 #[tokio::test]
 async fn an_interrupt_clears_a_restored_prompt_taller_than_the_default_tail() {
-    let f = claude_with(tall_draft()).await;
-    run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    let draft = tall_draft();
+    let f = claude_with(draft.clone()).await;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, &draft.join("\n")).await;
     let _ = interrupt_turn(&f.env.app, &f.bot_id, None).await;
     assert!(f.cleared(), "{:?}", f.env.herdr.calls_to("pane.send_keys"));
     assert!(f.env.herdr.pane("pane-a").unwrap().composer.is_empty());
+}
+
+/// A new draft typed during the 400 ms settle belongs to the user and survives the abort cleanup.
+#[tokio::test]
+async fn a_force_abort_preserves_a_new_draft_typed_during_the_settle_window() {
+    let f = claude_with(vec!["aborted prompt A".into()]).await;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, "aborted prompt A").await;
+    let live = f.env.herdr.live.clone();
+    let edit = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let mut live = live.lock().unwrap();
+        let pane = live.get_mut("pane-a").unwrap();
+        pane.composer = vec!["user draft B".into()];
+        pane.revision += 1;
+    });
+
+    abort_turns(&f.env.app, &f.bot_id).await.unwrap();
+    edit.await.unwrap();
+
+    assert!(!f.cleared(), "new user draft must receive no Ctrl+C: {:?}", f.env.herdr.calls_to("pane.send_keys"));
+    assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["user draft B"]);
+}
+
+/// The composer can change after the candidate read; a final revision/content check must catch it.
+#[tokio::test]
+async fn a_force_abort_rechecks_the_composer_before_clearing_it() {
+    let f = claude_with(vec!["aborted prompt A".into()]).await;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, "aborted prompt A").await;
+    let live = f.env.herdr.live.clone();
+    super::super::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
+        let mut live = live.lock().unwrap();
+        let pane = live.get_mut("pane-a").unwrap();
+        pane.composer = vec!["user draft B".into()];
+        pane.revision += 1;
+    });
+
+    abort_turns(&f.env.app, &f.bot_id).await.unwrap();
+
+    assert!(!f.cleared(), "changed composer must receive no Ctrl+C: {:?}", f.env.herdr.calls_to("pane.send_keys"));
+    assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["user draft B"]);
+}
+
+/// An unchanged string still loses authority if the pane revision changed after the candidate read.
+#[tokio::test]
+async fn a_force_abort_rejects_a_revision_change_with_the_same_composer_text() {
+    let f = claude_with(vec!["aborted prompt A".into()]).await;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, "aborted prompt A").await;
+    let live = f.env.herdr.live.clone();
+    super::super::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
+        let mut live = live.lock().unwrap();
+        let pane = live.get_mut("pane-a").unwrap();
+        pane.revision = pane.revision.max(1) + 1;
+    });
+
+    abort_turns(&f.env.app, &f.bot_id).await.unwrap();
+
+    assert!(!f.cleared(), "a revised pane must receive no Ctrl+C: {:?}", f.env.herdr.calls_to("pane.send_keys"));
+    assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["aborted prompt A"]);
+}
+
+/// No composer text is authorized when the aborted turn has no known restored prompt.
+#[tokio::test]
+async fn a_force_abort_leaves_an_empty_composer_alone() {
+    let f = claude_with(Vec::new()).await;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, "aborted prompt A").await;
+
+    abort_turns(&f.env.app, &f.bot_id).await.unwrap();
+
+    assert!(!f.cleared(), "empty composer must receive no key");
+}
+
+/// A replacement run and pane during the settle window are outside this abort's authority.
+#[tokio::test]
+async fn a_force_abort_does_not_clear_after_its_run_and_pane_are_replaced() {
+    let f = claude_with(vec!["aborted prompt A".into()]).await;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, "aborted prompt A").await;
+    let app = f.env.app.clone();
+    let bot_id = f.bot_id.clone();
+    let old_run = f.run_id.clone();
+    let live = f.env.herdr.live.clone();
+    let replace = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?")
+            .bind(old_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (? ,?,'running','idle','ws-1','pane-b','abort-bot','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        live.lock().unwrap().insert("pane-b".into(), tt::LivePane::default());
+    });
+
+    abort_turns(&f.env.app, &f.bot_id).await.unwrap();
+    replace.await.unwrap();
+
+    assert!(!f.cleared(), "replacement run must receive no key: {:?}", f.env.herdr.calls_to("pane.send_keys"));
+    assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["aborted prompt A"]);
+}
+
+/// Even the same run and pane lose cleanup authority when their native session changes.
+#[tokio::test]
+async fn a_force_abort_does_not_clear_after_its_native_session_changes() {
+    let f = claude_with(vec!["aborted prompt A".into()]).await;
+    let turn = run_state::a_turn(&f.env.app, &f.bot_id, Some(&f.run_id), "in_flight").await;
+    bind_turn_prompt(&f, &turn, "aborted prompt A").await;
+    sqlx::query("UPDATE runs SET native_session_id='session-A' WHERE id=?")
+        .bind(&f.run_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+    let app = f.env.app.clone();
+    let run_id = f.run_id.clone();
+    let replace_session = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        sqlx::query("UPDATE runs SET native_session_id='session-B' WHERE id=?")
+            .bind(run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    });
+
+    abort_turns(&f.env.app, &f.bot_id).await.unwrap();
+    replace_session.await.unwrap();
+
+    assert!(!f.cleared(), "new native session must receive no key: {:?}", f.env.herdr.calls_to("pane.send_keys"));
+    assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["aborted prompt A"]);
+}
+
+#[test]
+fn restored_prompt_identity_preserves_word_boundaries_and_only_allows_known_tab_loss() {
+    assert!(same_restored_prompt("echo a b", "echo a b"));
+    assert!(!same_restored_prompt("echo\n  a b", "echo a b"), "hard line breaks remain part of the prompt");
+    assert!(!same_restored_prompt("echo ab", "echo a b"), "ordinary spaces separate tokens");
+    assert!(same_restored_prompt("進貨單每張", "進貨單\t每張"), "the Claude TUI is known to drop a literal Tab");
+    assert!(!same_restored_prompt("進貨單每張", "進貨單 每張"), "ordinary spaces are not dropped");
 }
 
 /// 止血：框真的卡著一段高過預設範圍的字（不管怎麼來的），送出回的是 `composer_busy` 帶草稿與動作，
