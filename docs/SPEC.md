@@ -2490,7 +2490,7 @@ label = "foo@m4p"
 | 走什麼 | 用什麼 | 為什麼 |
 |---|---|---|
 | 狀態（idle、native session id） | 遠端 hook 呼叫 `herdr pane report-agent` | 事件經 herdr socket 回到 daemon |
-| 內容（完整事件 JSON） | 追加到遠端 `~/.config/agents-manager/bots/<bot_id>/hook-spool.jsonl` | herdr 事件不帶 hook payload，內容只能落地再讀 |
+| 內容（完整事件 JSON） | 一則一檔寫進遠端 `~/.config/agents-manager/bots/<bot_id>/hook-spool.d/<id>.json`（先寫暫存再 `mv`） | herdr 事件不帶 hook payload，內容只能落地再讀。追加進同一個 jsonl 時大行會被切成多次 `write`，並行 hook 互相交錯、兩行都解不開（#652） |
 
 本機 bot 仍走 `agents-managerd hook <provider>` → HTTP（§4.4）。
 
@@ -2513,7 +2513,7 @@ label = "foo@m4p"
 | `statusline` | stdin | 不報 | 不進 spool（§11.4.5） |
 
 - **腳本不做語意判斷**：只用最粗的字串比對決定要不要報 idle，其餘照寫 spool，分類只在 `hookrecv::classify`。遠端腳本沒有測試；漏報最多晚一點被掃到，錯分類會吃掉訊息。
-- **先寫 spool，再 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated, run_id}`；`run_id` 取 `AM_RUN_ID`、只留 `[A-Za-z0-9_-]`，沒有就是空字串），`O_APPEND`。
+- **先寫 spool，再 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated, run_id}`；`run_id` 取 `AM_RUN_ID`、只留 `[A-Za-z0-9_-]`，沒有就是空字串）。每一則寫進 `hook-spool.d/` 底下自己的檔（暫存檔寫完再 `mv` 成 `*.json`）；drain 只讀 `*.json`，寫到一半的 `.tmp.*` 碰不到。舊的 `hook-spool.jsonl` 只留給還沒換腳本的那一輪，drain 仍會收。
 - `report-agent` 欄位：`$HERDR_PANE_ID`（沒有就跳過上報）；`--source agents-manager:<bot_id>`；`--agent <kind>`；`--state` 只送 `idle`（`working` 交給終端偵測，硬報會互蓋）；
   `--seq` 有 `python3` 用 `time.time_ns()`，否則 `date +%s`×1000 + `$DIR/hook-seq` 計數；`--agent-session-id`／`--agent-session-path` 有才帶；`--message` 不填。
 - 找 herdr：`${AM_REAL_HERDR:-}` → `command -v herdr`；都沒有就只寫 spool、記 `hook.log`、exit 0（30 秒掃描會補）。`HERDR_SESSION` 有值時帶 `--session`。
@@ -2532,13 +2532,14 @@ label = "foo@m4p"
 1. 照舊更新 `agent_status`、推 WS。
 2. host ≠ local 且（`working → idle` 或 `→ blocked`）→ **drain**，**兩趟 ssh**：
    - **claim**：把 `hook-spool.jsonl` **`mv` 成 `.claim`**（rename，原子）→ 併進 `.replaying`（尾巴沒換行先補一個）→ 刪 `.claim` → `cat .replaying`。**不刪 spool 本身**。
+     `hook-spool.d/*.json` 各自 `mv` 進 `hook-spool.replaying/` 再 `cat`（同樣不刪；檔名排序）。claim 進行中新寫好的檔不在這次展開的 glob 裡，留到下一輪。
      上一輪的 `.claim` 還在（併不進去）時**這一輪不摘新的 spool**：腳本沒有 `set -e`，直接 `mv` 會把那份唯一的副本無聲蓋掉（#500）。
      這種時候 claim 會多印一行 `AM_FOLD_STUCK <bytes>`（#501 複看）：腳本仍然 exit 0、收到的行數是 0，
      沒有這個標記的話 daemon 這邊一行 log 都不會有，而「hook 不再進來」跟「這顆 bot 很閒」長得一模一樣。
      daemon 每看到一次就 `warn!` 並累計，連續 3 輪開 `remote_spool_stuck` incident（`resource` 是 `<host>/<bot_id>`）；
      併回去的那一輪把計數清掉。資料沒丟——`.claim` 還在，空間一回來下一輪整份補上。
    - daemon 逐行寫進 `hook_events` 並 commit（§4.4b）。
-   - **ack**：`rm -f .replaying`。
+   - **ack**：`rm -f hook-spool.jsonl.replaying`，並刪掉 `hook-spool.replaying/*.json`。
    遠端那份是唯一的副本，所以刪它的唯一時機是本機已經 commit 之後；以前 `cat` 完就 `rm`，位元組還沒落地就沒了。
    摘下來一定走 rename：`cat` 完再 `rm -f` 那個 live spool 的話，兩支指令之間 hook 附加進來的行會被連檔刪掉（#493）。
    `.claim` 是「摘下來、還沒併進 `.replaying`」的中繼，崩在中間下一輪會接著併。
