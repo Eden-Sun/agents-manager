@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import * as api from '../api'
 import { KeyQueue } from '../lib/keyQueue'
+import { isImeEnter } from '../lib/ime'
 import { useStore } from '../store/store'
 
 /** blocked 小面板與全畫面視窗共用，兩邊答案才一致。鍵名原樣送 herdr，daemon 不翻譯。 */
@@ -20,7 +21,7 @@ export const KEYPAD: { label: string; keys: string[]; title: string }[] = [
  * ⌘ 不攔：要能 ⌘C 複製、⌘R 重整。
  */
 export function herdrKeyFromEvent(e: KeyboardEvent): string | null {
-  if (e.metaKey || e.isComposing) return null
+  if (e.metaKey || isImeEnter(e)) return null
 
   const named: Record<string, string> = {
     Enter: 'enter',

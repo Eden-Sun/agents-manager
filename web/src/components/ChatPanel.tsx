@@ -17,6 +17,7 @@ import { SentViaTag } from './SentViaTag'
 import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
 import { startingSend, startingSendLabel } from '../store/startingSend'
 import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
+import { isImeEnter } from '../lib/ime'
 import { herdrJumpCommand } from '../lib/herdrJump'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { HerdrAgentName } from './HerdrAgentName'
@@ -934,7 +935,7 @@ function Composer({
             files.add(pasted)
           }}
           onKeyDown={(e) => {
-            if (enterToSend.enterSends && e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (enterToSend.enterSends && e.key === 'Enter' && !e.shiftKey && !isImeEnter(e.nativeEvent)) {
               e.preventDefault()
               submit()
             }

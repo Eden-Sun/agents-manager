@@ -9,6 +9,7 @@ import { useEnterToSend } from '../hooks/useEnterToSend'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useComposerFocus } from '../hooks/useComposerFocus'
 import { mentionComboAttrs, mentionOptionId } from '../lib/mentionCombo'
+import { isImeEnter } from '../lib/ime'
 import { useRefocusAfterSend } from '../hooks/useRefocusAfterSend'
 import { AttachButton } from './AttachButton'
 import { AttachPicker, AttachTray, DropVeil } from './Attachments'
@@ -492,7 +493,7 @@ function GroupComposer({
           }}
           onKeyUp={syncCaret}
           onKeyDown={(e) => {
-            if (e.nativeEvent.isComposing) return
+            if (isImeEnter(e.nativeEvent)) return
             if (showPop) {
               if (e.key === 'ArrowDown') {
                 e.preventDefault()

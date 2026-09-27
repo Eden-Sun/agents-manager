@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
+import { isImeEnter } from '../lib/ime'
 import type { ReactNode } from 'react'
 import { useEnterCommit } from '../hooks/useEnterCommit'
 import { useStore } from '../store/store'
@@ -80,6 +81,7 @@ export function BotNameField({
           // Stop here: ↑/↓ switch bot and Esc closes dialogs further up the tree.
           e.stopPropagation()
           if (e.key === 'Enter') {
+            if (isImeEnter(e.nativeEvent)) return
             e.preventDefault()
             commit()
           } else if (e.key === 'Escape') {

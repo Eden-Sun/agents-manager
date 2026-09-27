@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { listDirs } from '../api'
 import { createLatestOnly } from '../lib/latestOnly'
+import { isImeEnter } from '../lib/ime'
 import type { DirListing } from '../api/types'
 import './dirPicker.css'
 
@@ -133,6 +134,7 @@ export function DirPicker({
       return
     }
     if (e.key === 'Enter') {
+      if (isImeEnter(e.nativeEvent)) return
       e.preventDefault()
       // ⌘/Ctrl+Enter takes the highlighted folder without walking into it.
       if (e.metaKey || e.ctrlKey || !selected) onPick(target)
