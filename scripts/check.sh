@@ -6,6 +6,7 @@
 #   scripts/check.sh daemon     # cargo test -p agents-managerd（要先有 web/dist）
 #   scripts/check.sh ops        # shell 變數寫法的 lint，加上 scripts/*_test.sh 與 scripts/ops/*_test.sh（shell 腳本的隔離測試，假 agm／假 gh／假 sccache，不碰正式環境）
 #   scripts/check.sh ob         # 沒有被追蹤的 bytecode；OB queue/operator 與瀏覽器契約（隔離，不用登入）
+#   scripts/check.sh macos-local # shell／行程／signal 的原生 macOS 測試（不走 cargo shim）
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
 #   scripts/check.sh all        # 以上全部
@@ -50,6 +51,60 @@ check_daemon() {
     fi
     step "daemon: cargo test -p agents-managerd"
     env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p agents-managerd --locked
+}
+
+check_macos_local() {
+    local local_cargo local_rustc local_rustdoc path_cargo filter output found_tests=0
+    if [ "$(uname -s)" != Darwin ]; then
+        echo "macos-local tests only run on macOS; use the CI macOS runner elsewhere" >&2
+        return 2
+    fi
+    if ! command -v rustup >/dev/null 2>&1; then
+        echo "macos-local tests need rustup to resolve the native macOS toolchain" >&2
+        return 2
+    fi
+
+    # Bypass the managed PATH cargo shim. Resolve every compiler tool from rustup so both Cargo and
+    # the test binary are built for this Mac instead of silently offloading to the Linux worker.
+    local_cargo="$(rustup which cargo)"
+    local_rustc="$(rustup which rustc)"
+    local_rustdoc="$(rustup which rustdoc)"
+    path_cargo="$(command -v cargo || true)"
+    for tool in "$local_cargo" "$local_rustc" "$local_rustdoc"; do
+        if [ ! -x "$tool" ]; then
+            printf 'macos-local could not resolve an executable rustup tool: %s\n' "$tool" >&2
+            return 2
+        fi
+    done
+    if [ "$local_cargo" = "$path_cargo" ]; then
+        echo "macos-local refused: rustup resolved the PATH cargo shim instead of native Cargo" >&2
+        return 2
+    fi
+    step "macOS native Cargo: $local_cargo"
+
+    # cli_update::tests is the existing process-lock suite (#455/#591); it is selected as a module
+    # because its tests may not be renamed here. cargo_shim::tests covers process trees and signals.
+    # New platform-sensitive tests in other modules use the macos_local_ function-name prefix.
+    # These selectors are serial, disjoint cohorts: no repeated tests and no long per-test allowlist.
+    local filters=("cli_update::tests" "cargo_shim::tests" "macos_local_")
+    for filter in "${filters[@]}"; do
+        step "macOS tests: $filter"
+        if output="$(env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u CARGO_BUILD_TARGET \
+            RUSTC="$local_rustc" RUSTDOC="$local_rustdoc" \
+            "$local_cargo" test --color never --locked -j 1 -p agents-managerd "$filter" -- --test-threads=1 2>&1)"; then
+            printf '%s\n' "$output"
+        else
+            printf '%s\n' "$output" >&2
+            return 1
+        fi
+        if printf '%s\n' "$output" | grep -Eq '^test result: ok\. [1-9][0-9]* passed;'; then
+            found_tests=1
+        fi
+    done
+    if [ "$found_tests" -ne 1 ]; then
+        echo "macos-local selected no tests; check the module filters and macos_local_ naming convention" >&2
+        return 1
+    fi
 }
 
 check_ob() {
@@ -139,6 +194,7 @@ check_clippy() {
 case "${1:-default}" in
     web) check_web ;;
     daemon) check_daemon ;;
+    macos-local) check_macos_local ;;
     ob) check_ob ;;
     ops) check_ops ;;
     fmt) check_fmt ;;
@@ -153,5 +209,5 @@ case "${1:-default}" in
         check_fmt || echo "!! fmt 不乾淨（不擋）"
         check_clippy || echo "!! clippy 不乾淨（不擋）"
         ;;
-    *) echo "用法：scripts/check.sh [web|daemon|ob|ops|fmt|clippy|all]" >&2; exit 2 ;;
+    *) echo "用法：scripts/check.sh [web|daemon|macos-local|ob|ops|fmt|clippy|all]" >&2; exit 2 ;;
 esac
