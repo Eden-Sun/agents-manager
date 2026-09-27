@@ -27,6 +27,39 @@ pub mod store;
 pub mod timing;
 pub mod watchdog;
 
+/// 這一批通知的 `client_request_id`。同一組 id 與各自的 `notify_attempts` 重送要同一個 id
+/// （當機重送不該再打一次）；換了成員或某筆的 attempts 就必須是另一個 id。
+/// 只拿「最後一筆 id + 最大 attempts」會跟上一批撞號，冪等檢查回 409 `text_mismatch`（#642）。
+pub fn inbox_notify_crid(prefix: &str, batch: &[(&str, i64)]) -> String {
+    let mut rows: Vec<(&str, i64)> = batch.to_vec();
+    rows.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    for (id, attempts) in rows {
+        hasher.update(id.as_bytes());
+        hasher.update([0xff]);
+        hasher.update(attempts.to_le_bytes());
+    }
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("{prefix}{hex}")
+}
+
+#[cfg(test)]
+mod notify_crid_tests {
+    use super::inbox_notify_crid;
+
+    /// #642：上一批 [e1 attempts=1, e2 attempts=0] 與下一批只剩 [e2 attempts=1] 的「最後一筆＋最大 attempts」相同，crid 不能相同。
+    #[test]
+    fn a_later_batch_that_shares_the_last_id_and_max_attempts_gets_its_own_crid() {
+        let first = inbox_notify_crid("agm-inbox-", &[("e1", 1), ("e2", 0)]);
+        let second = inbox_notify_crid("agm-inbox-", &[("e2", 1)]);
+        assert_ne!(first, second, "撞號會讓下一批吃到 409 text_mismatch");
+        assert_eq!(inbox_notify_crid("agm-inbox-", &[("e2", 0), ("e1", 1)]), first, "同一批重送要同一個 id");
+        assert_ne!(inbox_notify_crid("agm-responder-inbox-", &[("e2", 1)]), second);
+    }
+}
+
 use crate::lifecycle::LcError;
 use crate::state::App;
 use serde_json::{json, Value};
