@@ -27,6 +27,8 @@ pub struct MockHerdr {
     pub tabs: Arc<StdMutex<Vec<MockTab>>>,
     /// `pane.read` answers, per pane id.
     pub screens: Arc<StdMutex<BTreeMap<String, String>>>,
+    /// `pane.read` revisions for static screens; race tests can bump a revision without changing text.
+    screen_revisions: Arc<StdMutex<BTreeMap<String, u64>>>,
     /// `pane.process_info` argv, per pane id.
     pub argvs: Arc<StdMutex<BTreeMap<String, Vec<String>>>>,
     /// `pane.process_info` pid (default 1); only tests reading the process's account (SPEC §16.6) need it.
@@ -209,6 +211,7 @@ struct MockState {
     calls: Arc<StdMutex<Vec<(String, Value)>>>,
     agents: Arc<StdMutex<Vec<Value>>>,
     screens: Arc<StdMutex<BTreeMap<String, String>>>,
+    screen_revisions: Arc<StdMutex<BTreeMap<String, u64>>>,
     live: Arc<StdMutex<BTreeMap<String, LivePane>>>,
     reject_ansi: Arc<std::sync::atomic::AtomicBool>,
     ignore_ansi: Arc<std::sync::atomic::AtomicBool>,
@@ -276,6 +279,7 @@ impl MockHerdr {
             calls: Default::default(),
             agents: Default::default(),
             screens: Default::default(),
+            screen_revisions: Default::default(),
             live: Default::default(),
             reject_ansi: Default::default(),
             ignore_ansi: Default::default(),
@@ -289,7 +293,13 @@ impl MockHerdr {
         };
         let (workspaces, tabs, calls, agents) =
             (state.workspaces.clone(), state.tabs.clone(), state.calls.clone(), state.agents.clone());
-        let (screens, argvs, pids, shell_pids) = (state.screens.clone(), state.argvs.clone(), state.pids.clone(), state.shell_pids.clone());
+        let (screens, screen_revisions, argvs, pids, shell_pids) = (
+            state.screens.clone(),
+            state.screen_revisions.clone(),
+            state.argvs.clone(),
+            state.pids.clone(),
+            state.shell_pids.clone(),
+        );
         let live = state.live.clone();
         let reject_ansi = state.reject_ansi.clone();
         let ignore_ansi = state.ignore_ansi.clone();
@@ -520,7 +530,10 @@ impl MockHerdr {
                             };
                             let (text, revision) = live_read.unwrap_or_else(|| {
                                 let screens = st.screens.lock().unwrap();
-                                (screens.get(&pid).cloned().or_else(|| screens.get("*").cloned()).unwrap_or_default(), 1)
+                                let text = screens.get(&pid).cloned().or_else(|| screens.get("*").cloned()).unwrap_or_default();
+                                let revisions = st.screen_revisions.lock().unwrap();
+                                let revision = revisions.get(&pid).or_else(|| revisions.get("*")).copied().unwrap_or(1);
+                                (text, revision)
                             });
                             // A screen set to this marker answers like a broken pane: the caller
                             // must treat a read failure as an error, never as an empty screen.
@@ -723,7 +736,7 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, hide_agent_list, pong, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, screen_revisions, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, hide_agent_list, pong, handle }
     }
 
     /// 接下來第一次呼叫 `method` 時照 `fault` 壞一次（排幾次就壞幾次，依序）。呼叫一樣記在 `calls` 裡。
@@ -778,6 +791,28 @@ impl MockHerdr {
 
     pub fn set_screen(&self, pane_id: &str, text: &str) {
         self.screens.lock().unwrap().insert(pane_id.to_string(), text.to_string());
+    }
+
+    /// Capture-safe screen replacement for a race point; changing the screen also advances its revision.
+    pub fn set_screen_later(&self) -> impl Fn(&str, &str) + Send + Sync + 'static {
+        let screens = self.screens.clone();
+        let revisions = self.screen_revisions.clone();
+        move |pane_id, text| {
+            screens.lock().unwrap().insert(pane_id.to_string(), text.to_string());
+            let mut revisions = revisions.lock().unwrap();
+            let revision = revisions.entry(pane_id.to_string()).or_insert(1);
+            *revision = (*revision).saturating_add(1);
+        }
+    }
+
+    /// Simulate a pane redraw that preserves its visible text but advances the revision.
+    pub fn bump_screen_revision_later(&self) -> impl Fn(&str) + Send + Sync + 'static {
+        let revisions = self.screen_revisions.clone();
+        move |pane_id| {
+            let mut revisions = revisions.lock().unwrap();
+            let revision = revisions.entry(pane_id.to_string()).or_insert(1);
+            *revision = (*revision).saturating_add(1);
+        }
     }
 
     pub fn set_argv(&self, pane_id: &str, argv: &[&str]) {

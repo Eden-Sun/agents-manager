@@ -298,6 +298,10 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   叫出）與 `claude-2.1.281-feedback-survey-quoted.txt`。單按 `0` 就收掉；`0` 若其實落進輸入列（`❯ 0`），畫面隨即不再算問卷，
   不補 Enter、下一輪也不再按。已知的殘留：`showTurnDuration` 關掉（沒有 `✻ … · done`）且回覆**以**逐字照抄的問卷結尾時仍會誤認，
   最壞是在空的輸入列留下一個 `0`。
+  每個自動按鍵前都要重讀：run 仍是同一個 running run、pane／有效 Herdr host/session/socket 未換、pane id 相同，且畫面仍是
+  同 revision、同文字的問卷並有空閒 composer；第二階段 Enter 以按過 `0` 後新讀到的 revision／文字為基準再做同一檢查。
+  權限或 pane 讀取有任何錯誤、截斷或不連續都不按，並清掉相符的 survey 去重 revision，讓後續巡檢重新判斷。
+  Herdr 尚無帶 `expected_revision` 的條件式 `send_keys`，最後一次成功讀取到按鍵 RPC 之間仍有極窄的非原子窗口；#485 接受以按鍵前重讀縮小此窗口，未來有 CAS 時應改用。
   自動送 `0` 由 `PRESS_KEYS_ON_SURVEY` 控制（目前開著）；關掉時問卷自動改算成「該吵父 agent」的畫面
   （§10 的 `alertable_question` 跟著 `daemon_dismisses_survey()` 走），不會變成沒人按也沒人知道的靜默停擺。
 - **claude 2.1.281 的防誤刪框（Dangerous rm）不按、要人核准**（`dangerous_rm`，辨識在 `tui_prompts::dangerous_rm_prompt`）：`rm -rf $(…)`、`$VAR`、頂層目錄這類目標，
@@ -1507,7 +1511,8 @@ child 轉成 `blocked` 並且**穩定 8 秒**（daemon 自己按掉的對話框�
 - 只有 `managed_by = 'child'`、未刪、`parent_bot_id` 有值的 bot 會觸發；
 - 父 agent 沒有活著的 run 就不送（沒有 pane 收得下，UI 徽章仍在）；
 - daemon 自己會按掉的畫面不算：`/model`／`/effort` 確認框（§3.1、`tui_prompts`）；滿意度問卷則**跟著 daemon 現在按不按鍵走**
-  （`daemon_dismisses_survey()`，issue #485：目前會按，所以不吵；關掉按鍵的期間要吵，否則靜默停擺）；
+  （`daemon_dismisses_survey()`，issue #485：目前會按，所以不吵；關掉按鍵的期間要吵，否則靜默停擺；每次按鍵前的 run／session／pane
+  revision／內容與 idle composer fence 見 §3.1）；
 - 同一個問題只講一次：指紋取畫面尾段，statusLine 與 `⏵⏵ bypass permissions` 這類每回合都在變的行先濾掉；
   child 離開 `blocked` 就把指紋忘掉，同一個問題再出現才會再講；
 - **節流**：同一顆 child 兩則之間至少 10 分鐘。指紋去重擋「同一個問題」，節流擋「畫面一直重畫、

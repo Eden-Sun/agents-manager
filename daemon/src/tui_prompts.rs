@@ -7,6 +7,7 @@
 //! 認畫面不認狀態：權限確認、trust 對話框等原封不動留給使用者。
 
 use crate::db;
+use crate::herdr::{HerdrClient, PaneRead};
 use crate::state::App;
 use std::sync::Arc;
 use std::time::Duration;
@@ -525,14 +526,81 @@ pub fn daemon_dismisses_survey() -> bool {
     PRESS_KEYS_ON_SURVEY
 }
 
+/// The pane and herdr authority that were current when the survey was recognized.
+struct SurveyTarget {
+    run: db::Run,
+    pane: String,
+    host: String,
+    session: String,
+    socket_path: std::path::PathBuf,
+    client: HerdrClient,
+}
+
+fn same_survey_run(expected: &db::Run, current: &db::Run) -> bool {
+    current.state == "running"
+        && current.id == expected.id
+        && current.bot_id == expected.bot_id
+        && current.pane_id == expected.pane_id
+        && current.herdr_session == expected.herdr_session
+        && current.native_session_id == expected.native_session_id
+        && current.transcript_path == expected.transcript_path
+}
+
+async fn current_survey_target(app: &Arc<App>, expected: &db::Run) -> Option<SurveyTarget> {
+    let current = db::active_run(&app.db, &expected.bot_id).await.ok()??;
+    if !same_survey_run(expected, &current) {
+        return None;
+    }
+    let pane = current.pane_id.clone()?;
+    let host = db::bot_host(&app.db, &current.bot_id).await.ok()?;
+    let session = app.session_for_run(&current).await?;
+    let client = app.herdr_for_session(&host, &session).await?;
+    let socket_path = client.socket_path().to_path_buf();
+    Some(SurveyTarget { run: current, pane, host, session, socket_path, client })
+}
+
+async fn survey_target_is_current(app: &Arc<App>, target: &SurveyTarget) -> bool {
+    let Some(current) = current_survey_target(app, &target.run).await else { return false };
+    current.host == target.host
+        && current.session == target.session
+        && current.socket_path == target.socket_path
+        && current.pane == target.pane
+}
+
+fn survey_composer_is_idle(screen: &str) -> bool {
+    let kept: Vec<&str> = screen.lines().filter(|line| !flatten(line).is_empty()).collect();
+    let from = kept.len().saturating_sub(SURVEY_TAIL_LINES);
+    composer_is_idle(&kept[from..])
+}
+
+async fn read_actionable_survey(target: &SurveyTarget, expected: Option<&PaneRead>) -> Option<PaneRead> {
+    let read = target.client.pane_read(&target.pane, "visible", 80).await.ok()?;
+    if read.pane_id != target.pane || read.source != "visible" || read.revision == 0 || read.truncated {
+        return None;
+    }
+    if !is_feedback_survey(&read.text) || !survey_composer_is_idle(&read.text) {
+        return None;
+    }
+    if let Some(expected) = expected {
+        if read.revision != expected.revision || read.text != expected.text {
+            return None;
+        }
+    }
+    Some(read)
+}
+
+async fn release_survey_revision(app: &Arc<App>, run_id: &str, revision: u64) {
+    let mut revisions = app.survey_revisions.lock().await;
+    if revisions.get(run_id) == Some(&revision) {
+        revisions.remove(run_id);
+    }
+}
+
 /// 停在問卷上就按 `0`；回傳是否真的按了。[`PRESS_KEYS_ON_SURVEY`] 關著時只記一行 warn 就回 `false`。
 pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
-    let Some(pane) = run.pane_id.clone() else { return false };
-    let Some(client) = app.herdr_for_run(run).await else { return false };
-    let Ok(read) = client.pane_read(&pane, "visible", 80).await else { return false };
-    if !is_feedback_survey(&read.text) {
-        return false;
-    }
+    let Some(target) = current_survey_target(app, run).await else { return false };
+    let Some(read) = read_actionable_survey(&target, None).await else { return false };
+    let pane = target.pane.as_str();
     let first_for_this_run = {
         let mut revisions = app.survey_revisions.lock().await;
         if revisions.get(&run.id) == Some(&read.revision) {
@@ -562,19 +630,43 @@ pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
         return false;
     }
     tracing::info!(run = %run.id, bot = %run.bot_id, "claude 滿意度問卷：自動選 0（Dismiss）");
-    if let Err(e) = client.pane_send_keys(&pane, &["0"]).await {
-        let mut revisions = app.survey_revisions.lock().await;
-        if revisions.get(&run.id) == Some(&read.revision) {
-            revisions.remove(&run.id);
-        }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("survey_before_first_key", &run.id).await;
+    // The classification read only authorizes this exact pane revision and content, under the
+    // same run/session authority. There is no conditional send_keys CAS in Herdr yet.
+    let still_current = survey_target_is_current(app, &target).await;
+    let final_read = if still_current { read_actionable_survey(&target, Some(&read)).await } else { None };
+    let still_current = final_read.is_some() && survey_target_is_current(app, &target).await;
+    if !still_current {
+        release_survey_revision(app, &run.id, read.revision).await;
+        return false;
+    }
+    if let Err(e) = target.client.pane_send_keys(pane, &["0"]).await {
+        release_survey_revision(app, &run.id, read.revision).await;
         tracing::warn!(run = %run.id, error = %e, "問卷送 0 失敗");
         return false;
     }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("survey_after_zero", &run.id).await;
     tokio::time::sleep(SETTLE).await;
-    // 有的版本要再按 Enter；只在仍是問卷時補，免得落進後面真正等人回答的框。
-    // 別用 run.agent_status 守衛：事件路徑的 Run 是 DB 更新前的複本（過期的 idle）。
-    if matches!(client.pane_read(&pane, "visible", 80).await, Ok(r) if is_feedback_survey(&r.text)) {
-        let _ = client.pane_send_keys(&pane, &["enter"]).await;
+    // The post-0 read is a new authorization basis for versions that also need Enter.
+    if survey_target_is_current(app, &target).await {
+        if let Some(second_stage) = read_actionable_survey(&target, None).await {
+            app.survey_revisions.lock().await.insert(run.id.clone(), second_stage.revision);
+            #[cfg(test)]
+            crate::lifecycle::race_point::hit("survey_before_enter", &run.id).await;
+            let still_current = survey_target_is_current(app, &target).await;
+            let final_read = if still_current {
+                read_actionable_survey(&target, Some(&second_stage)).await
+            } else {
+                None
+            };
+            if final_read.is_some() && survey_target_is_current(app, &target).await {
+                let _ = target.client.pane_send_keys(pane, &["enter"]).await;
+            } else {
+                release_survey_revision(app, &run.id, second_stage.revision).await;
+            }
+        }
     }
     true
 }
@@ -767,6 +859,154 @@ mod tests {
  │    2. No, and tell Claude what to do │
  ╰──────────────────────────────────────╯
 "#;
+
+    async fn survey_test_env() -> (crate::testing::Env, crate::db::Run) {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "survey").await;
+        let run_id = crate::testing::fake_run(&env.app, &bot.id).await;
+        let run = crate::db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(run.id, run_id);
+        env.herdr.set_screen(run.pane_id.as_deref().unwrap(), screens::FEEDBACK_SURVEY);
+        (env, run)
+    }
+
+    async fn assert_no_survey_key_after_race<F, Fut>(mutate: F)
+    where
+        F: FnOnce(std::sync::Arc<crate::state::App>, crate::db::Run) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (env, run) = survey_test_env().await;
+        let app = env.app.clone();
+        let hook_run = run.clone();
+        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || mutate(app, hook_run));
+
+        assert!(!dismiss_if_survey(&env.app, &run).await, "changed authority must not count as a dismissal");
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "a changed authority receives no key");
+    }
+
+    #[tokio::test]
+    async fn a_replaced_dialog_receives_no_survey_zero() {
+        let (env, run) = survey_test_env().await;
+        let pane = run.pane_id.clone().unwrap();
+        let replace = env.herdr.set_screen_later();
+        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
+            replace(&pane, PERMISSION);
+        });
+
+        assert!(!dismiss_if_survey(&env.app, &run).await);
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "a permission dialog must receive no stale 0");
+        assert!(!env.app.survey_revisions.lock().await.contains_key(&run.id), "uncertain screen must re-arm dedupe");
+    }
+
+    #[tokio::test]
+    async fn a_revision_change_with_identical_survey_text_receives_no_zero() {
+        let (env, run) = survey_test_env().await;
+        let pane = run.pane_id.clone().unwrap();
+        let bump = env.herdr.bump_screen_revision_later();
+        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
+            bump(&pane);
+        });
+
+        assert!(!dismiss_if_survey(&env.app, &run).await);
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "same text at another revision is not the authorized read");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_final_survey_read_receives_no_zero() {
+        let (env, run) = survey_test_env().await;
+        let fail = env.herdr.fail_later();
+        crate::lifecycle::race_point::arm("survey_before_first_key", &run.id, move || async move {
+            fail("pane.read", crate::testing::Fault::Refuse);
+        });
+
+        assert!(!dismiss_if_survey(&env.app, &run).await);
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "an unreadable last-moment pane is uncertain");
+    }
+
+    #[tokio::test]
+    async fn classifier_match_without_an_idle_composer_receives_no_zero() {
+        let (env, run) = survey_test_env().await;
+        env.herdr.set_screen(run.pane_id.as_deref().unwrap(), SURVEY);
+        assert!(is_feedback_survey(SURVEY), "the classifier fixture is recognized");
+        assert!(!composer_is_idle(&SURVEY.lines().collect::<Vec<_>>()), "the cursor shape is not an idle composer");
+
+        assert!(!dismiss_if_survey(&env.app, &run).await);
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "composer uncertainty fails closed");
+    }
+
+    #[tokio::test]
+    async fn an_active_run_replacement_receives_no_survey_zero() {
+        assert_no_survey_key_after_race(|app, run| async move {
+            sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run.id).execute(&app.db).await.unwrap();
+            crate::testing::fake_run(&app, &run.bot_id).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_pane_replacement_receives_no_survey_zero() {
+        assert_no_survey_key_after_race(|app, run| async move {
+            sqlx::query("UPDATE runs SET pane_id='pane-replaced' WHERE id=?").bind(&run.id).execute(&app.db).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_herdr_session_replacement_receives_no_survey_zero() {
+        assert_no_survey_key_after_race(|app, run| async move {
+            sqlx::query("UPDATE runs SET herdr_session='default' WHERE id=?").bind(&run.id).execute(&app.db).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_native_session_replacement_receives_no_survey_zero() {
+        assert_no_survey_key_after_race(|app, run| async move {
+            sqlx::query("UPDATE runs SET native_session_id='native-replaced' WHERE id=?").bind(&run.id).execute(&app.db).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn one_stage_survey_dismissal_does_not_press_enter() {
+        let (env, run) = survey_test_env().await;
+        let pane = run.pane_id.clone().unwrap();
+        let replace = env.herdr.set_screen_later();
+        crate::lifecycle::race_point::arm("survey_after_zero", &run.id, move || async move {
+            replace(&pane, screens::IDLE_CLAUDE);
+        });
+
+        assert!(dismiss_if_survey(&env.app, &run).await, "the authorized 0 key was sent");
+        let keys: Vec<serde_json::Value> = env.herdr.calls_to("pane.send_keys").iter().map(|call| call["keys"].clone()).collect();
+        assert_eq!(keys, [serde_json::json!(["0"])]);
+    }
+
+    #[tokio::test]
+    async fn a_changed_second_stage_receives_no_stale_enter() {
+        let (env, run) = survey_test_env().await;
+        let pane = run.pane_id.clone().unwrap();
+        let replace = env.herdr.set_screen_later();
+        crate::lifecycle::race_point::arm("survey_before_enter", &run.id, move || async move {
+            replace(&pane, PERMISSION);
+        });
+
+        assert!(dismiss_if_survey(&env.app, &run).await, "the first 0 was authorized");
+        let keys: Vec<serde_json::Value> = env.herdr.calls_to("pane.send_keys").iter().map(|call| call["keys"].clone()).collect();
+        assert_eq!(keys, [serde_json::json!(["0"])]);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_final_second_stage_read_receives_no_enter() {
+        let (env, run) = survey_test_env().await;
+        let fail = env.herdr.fail_later();
+        crate::lifecycle::race_point::arm("survey_before_enter", &run.id, move || async move {
+            fail("pane.read", crate::testing::Fault::Refuse);
+        });
+
+        assert!(dismiss_if_survey(&env.app, &run).await, "the first 0 was authorized");
+        let keys: Vec<serde_json::Value> = env.herdr.calls_to("pane.send_keys").iter().map(|call| call["keys"].clone()).collect();
+        assert_eq!(keys, [serde_json::json!(["0"])]);
+    }
 
     #[test]
     fn survey_is_recognised_even_when_wrapped() {
