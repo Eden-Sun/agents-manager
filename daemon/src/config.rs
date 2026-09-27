@@ -513,11 +513,23 @@ pub const MIN_BUILD_MAX_CONCURRENT: usize = 1;
 
 /// 名額租約 TTL 的下限（#322）：0 會讓每個 held 列一建立就過期，下一個 acquire 把它收掉，`max_concurrent` 形同虛設。
 pub const MIN_BUILD_LEASE_TTL_SECS: u64 = 10;
+/// 上限（#639）：`u64::MAX` 用 `as i64` 會變成 -1，名額立刻過期；更大的秒數讓 `Duration`／`DateTime` 加法 panic。
+pub const MAX_BUILD_LEASE_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// 設定檔的 TTL 轉成可以加到現在的秒數。超出 [`MIN_BUILD_LEASE_TTL_SECS`]..=[`MAX_BUILD_LEASE_TTL_SECS`] 就拒絕。
+pub fn checked_build_lease_ttl(secs: u64) -> Result<i64, String> {
+    if !(MIN_BUILD_LEASE_TTL_SECS..=MAX_BUILD_LEASE_TTL_SECS).contains(&secs) {
+        return Err(format!(
+            "[build] lease_ttl_secs must be {MIN_BUILD_LEASE_TTL_SECS}..={MAX_BUILD_LEASE_TTL_SECS}, got {secs}"
+        ));
+    }
+    i64::try_from(secs).map_err(|_| format!("[build] lease_ttl_secs {secs} does not fit in i64"))
+}
 
 impl BuildCfg {
-    /// 實際使用的租約 TTL（秒）：設定檔的值夾到 [`MIN_BUILD_LEASE_TTL_SECS`] 以上。
-    pub fn lease_ttl(&self) -> u64 {
-        self.lease_ttl_secs.max(MIN_BUILD_LEASE_TTL_SECS)
+    /// 實際使用的租約 TTL（秒）。超出範圍是設定錯誤，呼叫端要拒絕，不能夾成負數。
+    pub fn lease_ttl(&self) -> Result<i64, String> {
+        checked_build_lease_ttl(self.lease_ttl_secs)
     }
 
     /// 環境變數覆寫（`AM_BUILD_MAX_CONCURRENT`）；看不懂、0 一律不採用，回設定檔的值，設定檔也離譜才回預設。
