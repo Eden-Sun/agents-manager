@@ -1754,8 +1754,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   （手動關走 `POST /api/panes/{id}/close`，自動關走 GC 並記 log）。agent 不得繞過這條自己開一顆沒人知道的 pane，
   也不得隨手關掉不是自己開的 pane。
 - daemon 重啟後靠同一輪掃描重建 `panes`，不留記憶體狀態。
+- **`AM_BOT_ID` → bot → project 的 DB 查詢失敗也屬於讀不到 authority**：`Err` 不等於 bot 不存在。既有列只更新位置與掃描時間，保留原有 kind／owner／project binding；first-seen 暫存為 `service`，記下環境提供的 bot id，但不推斷 project binding。這會使整輪掃描不完整，跳過 scratch 重選、GC 與通知；下一輪再查。只有 `Ok(None)` 才依 bot 不存在的 orphan 規則處理。
 - **讀不到事實的那一輪不猜**（行程 dump 失敗、遠端 ssh 抖一下、herdr 沒回 `process_info`）：那顆 pane 的既有列只更新
-  workspace／tab／cwd／revision／`last_seen`，`kind`／歸屬／前景／port 沿用上一輪；新列先當 `service`、歸屬只靠 cwd。
+  workspace／tab／cwd／revision／`last_output_at`／`last_seen`，`kind`／歸屬／前景／port 沿用上一輪；新列先當 `service`、歸屬只靠 cwd。
   只要有一顆讀不到，這一輪就**不跑 GC 與通知**——不然 dev server 會被改寫成 shell、bot 的 pane 會收到不實的 `pane_unowned`。
 
 #### 側欄進入與權限（G 步；使用者 2026-09-16：「這 shell pane 要在 menu 可點選進入」）
