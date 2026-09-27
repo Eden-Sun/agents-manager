@@ -2097,10 +2097,10 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 `issue`（`claim`／`release <n>`，見下）；輸出一律 JSON。
 
 `agm issue claim <n> [--repo owner/name] [--bot 名] [--child 名] [--worktree p] [--branch b]`（issue #425）**不經 daemon、不讀 `runtime.json`**，只呼叫 `gh`：
-在票上留一則「派給 …」並加 label `wip`，留言尾端帶機器讀的標記 `<!-- agm:issue-claim {"bot","child","worktree","branch","at"} -->`。
+在票上留一則「派給 …」並加 label `wip`，留言尾端帶機器讀的認領標記 `<!-- agm:issue-claim {"bot","claim_id","child","worktree","branch","at"} -->`。留言寫入後會用 REST 讀回全部留言確認結果；讀回失敗不回報成功，會追加指向本次標記的交回留言。
 認領人省略時取 `AM_AGENT_NAME`，再退 `AM_BOT_ID`，都沒有就 `no_identity`／exit 2。票已被**別的** bot 認領且最後動靜在 24 小時內 → `issue_claimed`／**exit 3**，
 輸出 `claimed_by` 與那筆認領，且不寫任何東西；超過 24 小時沒動靜就接手並在留言裡寫明。自己重跑是 no-op（`already:true`，不留第二則，label 掉了會補回去）。
-`agm issue release <n>` 拿掉 label 並留 `<!-- agm:issue-release … -->`；別人還按著的票同樣 exit 3。目前的持有者由**最新**一個標記決定，交回的標記＝沒人認領。
+`agm issue release <n>` 拿掉 label 並留 `<!-- agm:issue-release … -->`；別人還按著的票同樣 exit 3。每次交回只結束它指向的認領；每個認領期由 REST 數字留言 ID 最小的第一則認領勝出（同秒也照此排序），輸家會追加自己的交回標記並 exit 3。過期認領允許新認領開始下一期。
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, responder_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id, remote_name}`（巡檢目錄的 `responder_bot_id` 在沒有協調者時是 `null`）；一般 shell CLI 執行期 `GET /api/session` 取 User token；`daemon_url` 只接受 loopback。
 `role` 缺省＝`patrol`。Bot pane（有 `AM_BOT_ID`）裡的 `agm` API client 一律以那顆 bot 的身分請求：帶 `X-AM-Bot-Id`／`X-AM-Bot-Token`（`AM_BOT_TOKEN`；舊 pane 回退 `AM_HOOK_TOKEN`），不帶共用 UI token；缺 token 就送半套讓 daemon 回 401，不降級成 User。角色仍由 daemon 比對已驗證的 bot id（不是巡檢／協調者的 bot 照樣拿不到角色權限）。沒有 `AM_BOT_ID` 的一般 shell 才用共用 User token；`AM_SERVICE_ID`＋`AM_SERVICE_TOKEN_FILE` 一起設時改用 service principal（`daemon-swap.sh` 這樣呼叫）。mission 的 `relay_from` 由 authenticated bot id 推導或必須與它相同。
 
