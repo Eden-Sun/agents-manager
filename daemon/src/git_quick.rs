@@ -121,16 +121,31 @@ pub async fn commit(app: &Arc<App>, id: &str, message: &str) -> Result<Value, Lc
     done("commit", out)
 }
 
+const UPSTREAM_PROBE_ARGS: &[&str] = &["status", "--porcelain=v2", "--branch"];
+const PUSH_ARGS: &[&str] = &["push"];
+const FIRST_PUSH_ARGS: &[&str] = &["push", "-u", "origin", "HEAD"];
+
+async fn push_with_runner<F, Fut>(mut run_git: F) -> Result<Value, LcError>
+where
+    F: FnMut(&'static [&'static str], std::time::Duration) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::git_sh::Out>>,
+{
+    let status = run_git(UPSTREAM_PROBE_ARGS, GIT_TIMEOUT)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?;
+    if !status.ok() {
+        return Err(LcError::Upstream(status.message()));
+    }
+    let has_upstream = parse_summary(&status.stdout, "").upstream.is_some();
+    let args = if has_upstream { PUSH_ARGS } else { FIRST_PUSH_ARGS };
+    let out = run_git(args, PUSH_TIMEOUT).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    done("push", out)
+}
+
 /// `git push`; a branch with no upstream gets `-u origin HEAD` so the first push just works.
 pub async fn push(app: &Arc<App>, id: &str) -> Result<Value, LcError> {
     let p = project(app, id).await?;
-    let has_upstream = git(app, &p.host, &p.path, &["rev-parse", "--abbrev-ref", "@{upstream}"], GIT_TIMEOUT)
-        .await
-        .map(|o| o.ok())
-        .unwrap_or(false);
-    let args: &[&str] = if has_upstream { &["push"] } else { &["push", "-u", "origin", "HEAD"] };
-    let out = git(app, &p.host, &p.path, args, PUSH_TIMEOUT).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    done("push", out)
+    push_with_runner(|args, timeout| git(app, &p.host, &p.path, args, timeout)).await
 }
 
 /// `git pull --rebase --no-autostash` — the repo rule (CLAUDE.md): never stash other agents' work.
@@ -142,7 +157,15 @@ pub async fn pull(app: &Arc<App>, id: &str) -> Result<Value, LcError> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_summary;
+    use super::{parse_summary, push_with_runner, FIRST_PUSH_ARGS, PUSH_ARGS, UPSTREAM_PROBE_ARGS};
+    use crate::git_sh::Out;
+    use crate::lifecycle::LcError;
+    use std::collections::VecDeque;
+    use std::future::ready;
+
+    fn out(code: i32, stdout: &str, stderr: &str) -> anyhow::Result<Out> {
+        Ok(Out { code, stdout: stdout.into(), stderr: stderr.into() })
+    }
 
     #[test]
     fn parses_status_and_shortstat() {
@@ -161,5 +184,75 @@ mod tests {
         let s = parse_summary("# branch.oid abc\n# branch.head (detached)\n", "");
         assert_eq!(s.branch, None);
         assert_eq!((s.changed, s.insertions, s.deletions), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn an_upstream_probe_transport_error_never_runs_push() {
+        let mut calls = Vec::new();
+        let mut replies = VecDeque::from([
+            Err(anyhow::anyhow!("SSH transport disconnected")),
+            out(0, "pushed", ""),
+        ]);
+        let result = push_with_runner(|args, _| {
+            calls.push(args.to_vec());
+            ready(replies.pop_front().expect("unexpected git invocation"))
+        })
+        .await;
+
+        let err = result.expect_err("an unreadable upstream probe must fail without pushing");
+        assert!(matches!(&err, LcError::Upstream(message) if message.contains("SSH transport disconnected")), "wrong error: {err:?}");
+        assert_eq!(calls, vec![UPSTREAM_PROBE_ARGS.to_vec()], "transport failure must not trigger either push form");
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_git_probe_failure_never_runs_first_push() {
+        let mut calls = Vec::new();
+        let mut replies = VecDeque::from([
+            out(128, "", "fatal: detected dubious ownership in repository"),
+            out(0, "pushed", ""),
+        ]);
+        let result = push_with_runner(|args, _| {
+            calls.push(args.to_vec());
+            ready(replies.pop_front().expect("unexpected git invocation"))
+        })
+        .await;
+
+        let err = result.expect_err("an arbitrary git failure must not be treated as no upstream");
+        assert!(matches!(&err, LcError::Upstream(message) if message.contains("dubious ownership")), "wrong error: {err:?}");
+        assert_eq!(calls, vec![UPSTREAM_PROBE_ARGS.to_vec()], "a failed probe must not trigger first-push setup");
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_missing_upstream_uses_first_push_args() {
+        let mut calls = Vec::new();
+        let mut replies = VecDeque::from([
+            out(0, "# branch.oid abc\n# branch.head feature\n", ""),
+            out(0, "pushed", ""),
+        ]);
+        let result = push_with_runner(|args, _| {
+            calls.push(args.to_vec());
+            ready(replies.pop_front().expect("unexpected git invocation"))
+        })
+        .await;
+
+        assert!(result.is_ok(), "confirmed missing upstream should allow first push: {result:?}");
+        assert_eq!(calls, vec![UPSTREAM_PROBE_ARGS.to_vec(), FIRST_PUSH_ARGS.to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn an_existing_upstream_uses_plain_push() {
+        let mut calls = Vec::new();
+        let mut replies = VecDeque::from([
+            out(0, "# branch.oid abc\n# branch.head feature\n# branch.upstream origin/feature\n", ""),
+            out(0, "pushed", ""),
+        ]);
+        let result = push_with_runner(|args, _| {
+            calls.push(args.to_vec());
+            ready(replies.pop_front().expect("unexpected git invocation"))
+        })
+        .await;
+
+        assert!(result.is_ok(), "existing upstream should allow push: {result:?}");
+        assert_eq!(calls, vec![UPSTREAM_PROBE_ARGS.to_vec(), PUSH_ARGS.to_vec()]);
     }
 }

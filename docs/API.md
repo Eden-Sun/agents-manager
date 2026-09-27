@@ -1778,7 +1778,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 - `GET /api/projects/{id}/git` → `{"git":true,"branch":"main","upstream":"origin/main","ahead":0,"behind":0,"changed":7,"untracked":3,"insertions":246,"deletions":9}`。
   `git:false`（其他欄位省略）= 不是 git repo；`changed` 來自 `status --porcelain=v2`，行數來自 `diff --shortstat HEAD`（未追蹤檔不算）；detached HEAD 時 `branch` 為 `null`。
 - `POST /api/projects/{id}/git/commit {"message"}`：`git add -A && git commit -m`。`200 {"ok":true,"output"}`；空訊息 400；沒有變更 `409 nothing_to_commit`；失敗 `409 {"reason":"git_commit_failed","output"}`。
-- `POST …/git/push`：有 upstream `git push`，否則 `git push -u origin HEAD`。`POST …/git/pull`：`git pull --rebase --no-autostash`。回應同 commit（`git_push_failed` / `git_pull_failed`），逾時 180 秒。
+- `POST …/git/push`：`status --porcelain=v2 --branch` 成功且回報有 upstream 才跑 `git push`；成功但沒有 upstream 才跑 `git push -u origin HEAD`。探測 transport error 或 git non-zero 回 502，不執行 push。`POST …/git/pull`：`git pull --rebase --no-autostash`。回應同 commit（`git_push_failed` / `git_pull_failed`），逾時 180 秒。
 
 ## 更新的 changelog `GET /api/changelog?kind=&host=&from=&to=`
 
