@@ -13,6 +13,7 @@ import { useScrollTail } from '../hooks/useScrollTail'
 import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
+import { SentViaTag } from './SentViaTag'
 import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
 import { startingSend, startingSendLabel } from '../store/startingSend'
 import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
@@ -164,6 +165,7 @@ export const Bubble = memo(function Bubble({
             </span>
           ) : null}
           {daemonNotice ? <span className="src-tag daemon" title="daemon 自動通知，不是使用者直接輸入">daemon 通知</span> : null}
+          <SentViaTag msg={msg} />
           {notice === 'warn' ? (
             <span className="src-tag fallback" title={DELIVERY_WARN_TEXT}>
               未驗證送達
@@ -883,7 +885,7 @@ function Composer({
                 type="button"
                 className="mini-btn"
                 disabled={sending}
-                title="補充一句給正在跑的這一輪：不建立新回合，直接打進終端，它邊做邊看到。回覆併在目前這一輪，不會單獨成為一則訊息。"
+                title="補充一句給正在跑的這一輪：不建立新回合，直接打進終端，它邊做邊看到。這句會記在對話裡（標「補充」），回覆併在目前這一輪。"
                 onClick={() => void sendAlongside()}
               >
                 補充

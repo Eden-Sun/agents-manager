@@ -3893,11 +3893,15 @@ struct TextIn {
     /// 預設 true。
     enter: Option<bool>,
     expect_run_id: Option<String>,
+    /// true＝網頁的「補充」：打字成功後記成進行中回合的一則使用者訊息（API.md）。
+    record: Option<bool>,
 }
 
 async fn text_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<TextIn>) -> Result<Response, LcError> {
-    lifecycle::send_text(&app, &id, &b.text, b.enter.unwrap_or(true), b.expect_run_id).await?;
-    Ok((StatusCode::OK, Json(json!({}))).into_response())
+    let record = b.record.unwrap_or(false);
+    let m = lifecycle::send_text_recorded(&app, &id, &b.text, b.enter.unwrap_or(true), b.expect_run_id, record).await?;
+    let body = if record { json!({ "message_id": m.map(|m| m.id) }) } else { json!({}) };
+    Ok((StatusCode::OK, Json(body)).into_response())
 }
 
 /// issue #122：撤回一則 bot 沒在跑時送、還在等它起來的訊息。已經送出去的撤不回來（409）。

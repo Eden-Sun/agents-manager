@@ -240,7 +240,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 | POST | `/api/bots/{id}/interrupt` | `{"turn_id"?}` | `200 {}`（送 `esc`，in-flight Turn 標 failed）；herdr 拒收 `esc` → 502，Turn 維持 in-flight；`esc` 送出但 herdr 沒回：本機 claude／codex 的 log 裡已經有這次的中斷紀錄 → 照 `200 {}`（#223：claude 2.1.276+ 按 Esc 不送任何 hook），還看不到 → `409 {"reason":"interrupt_unconfirmed","turn_id","esc_sent":"unknown","retryable":true}`，Turn 維持 in-flight、等 log 裡的中斷紀錄（或回聲）；`esc` 生效但 Turn 狀態寫不進去 → `503 {"error":"interrupt_state_uncommitted","run_id","turn_id","esc_sent":true,"retryable":true}`（daemon 自己補，重試不再按 `esc`）；帶 `turn_id` 而那一筆已不在飛 → `409 {"reason":"turn_not_in_flight","turn_id","in_flight_turn_id","esc_sent":false}`，不按 `esc`。見 SPEC §6.4 |
 | POST | `/api/bots/{id}/abort` | — | `200 {"aborted":["<turn_id>",…],"keys_sent":true,"key_error":null}`，見 §4.2 |
 | POST | `/api/bots/{id}/keys` | `{"keys":["y"],"expect_run_id"?}` | `200 {}`；`expect_run_id` 不符 409 |
-| POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?}` | `200 {}`；沒有 pane 404；`expect_run_id` 不符 409。打字前先寫 `runs.pane_typed`（#648），寫不進去 502、一個字都不打 |
+| POST | `/api/bots/{id}/text` | `{"text":"多行\n也可以","enter"?:true,"expect_run_id"?,"record"?:false}` | `200 {}`（帶 `record:true` 時 `200 {"message_id"}`）；沒有 pane 404；`expect_run_id` 不符 409。打字前先寫 `runs.pane_typed`（#648），寫不進去 502、一個字都不打 |
 | POST | `/api/turns/{id}/abandon` | — | `200 {}`；只有 `in_flight`（含 `delivery=unknown`）可放棄，其餘在 per-bot lock 內 CAS 判定為 `409 {"reason":"turn is neither in-flight nor of unknown delivery","turn_id"}`（不新增 system message） |
 | POST | `/api/turns/{id}/withdraw` | — | `200 {}`；撤回一則還沒送出的 `queued`——標 `failed`＋一則 system 說明，不送。只收兩種：bot 沒在跑時送、還在等它起來的（`awaits_start:1`，issue #122），以及 daemon 自己排的通知（`client_request_id` 前綴 `child-blocked:`／`resume-nudge:`，issue #562：擋在佇列頭時讓使用者的訊息先走）。其他（已被佇列領走、使用者排的訊息、AGM 的派工…）一律 `409 {"reason":"turn is not waiting for its bot to start","turn_id","status"}`、原樣不動（已經打進去的不能假裝沒送） |
 | POST | `/api/bots/{id}/login` | — | `200 {"run_id","kind","command":"/login"}`，見 §4.1 |
@@ -248,6 +248,10 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 - `keys` 的鍵名由 herdr 驗證，常用 `enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。
 - **文字用 `/text` 不用 `/keys`**：`\n` 不是鍵名。`/text` 走 `pane.send_text`（herdr 眼中的貼上，換行保留），`enter`（預設 true）後另送 `enter` 鍵才是送出。
   不看 `agent_status`（用途就是回合中途補一句）。
+- **`record: true`＝網頁的「補充」**（使用者 2026-09-28）：打字（含 Enter）成功後，在同一把 bot 鎖裡把 `text` 記成這個 run 進行中回合的
+  user Message（`source=web`、`sent_via=supplement`、掛那一筆的 `turn_id`）並推 `message_added`，回它的 `message_id`。沒有進行中的回合、`text` 是空白、
+  或打完了才寫不進去 → `message_id: null`（不記；沒回合時 CLI 會開新的一輪，hook 記外部回合時自己存那句）。打字失敗照原本的錯誤回、一則都不記。
+  回答選單、草稿之類的打字不帶。
 
 ### 4.1 登入 / 切換帳號
 把登入 slash 指令打進**正在跑的** bot 的 TUI；之後 agent 停在登入畫面，使用者完成前不能工作。登入結果由 `POST /api/hosts/{name}/tools/refresh` 重新偵測。
@@ -438,7 +442,8 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
       "attachments": [],
       "created_at": "2026-09-05T15:31:00.000Z",
       "updated_at": null,
-      "rewound_at": null
+      "rewound_at": null,
+      "sent_via": null | "send_now" | "supplement"
     }
   ],
   "turns": [
@@ -458,6 +463,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 `turns` 為最近 `limit+1` 筆（時間倒序），用來判斷回合是否還在跑與 delivery 警示。
 UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終端備援 · 可能不完整」；`system` 灰字系統列。
 `rewound_at`：被對話倒回（§6.1）拿掉的時間，`null`＝還在 CLI 的對話脈絡裡。標記不刪，UI 收成淡色＋「已倒回」。
+`sent_via`：user 訊息回合中送出的方式——`send_now`＝插隊送出且真的打斷了一個回合、`supplement`＝`/text` 帶 `record` 的補充；`null`＝一般送出。UI 在泡泡上標「插隊」「補充」。
 
 ### 6.1 對話倒回 `POST /api/bots/{id}/rewind`（SPEC §6.13，issue #405）
 `{"message_id": "<messages.id>"}`：在 bot 的終端驅動 claude 自己的 `/rewind`，把對話倒回到這則**使用者訊息送出之前**——這則與之後的問答都不在 CLI 的 context 裡，

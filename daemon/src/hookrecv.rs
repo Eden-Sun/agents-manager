@@ -581,6 +581,22 @@ fn answers_another_prompt(prompt: Option<&str>, hook_user: Option<&str>) -> bool
     !prompt_texts_match(p, u)
 }
 
+/// [`answers_another_prompt`]，對一整組這一回合送出去的字：一句都對不上才算「回答的是別句」。
+/// `None`＝這一回合沒有 prompt 可比（沒有證據，不下判斷）。
+fn answers_none_of(prompts: Option<&[String]>, hook_user: Option<&str>) -> bool {
+    let Some(ps) = prompts.filter(|ps| !ps.is_empty()) else { return false };
+    ps.iter().all(|p| answers_another_prompt(Some(p), hook_user))
+}
+
+/// 這一回合送出去的字：`prompt` 再加上回合中補充進去的每一句（使用者 2026-09-28）。補充之後 transcript 最後一則
+/// 使用者訊息是補充的那句，只拿 prompt 比就會被當成「回答的是別句」、開外部回合。沒有 prompt 就是 `None`，照舊不下判斷。
+async fn with_supplements(app: &Arc<App>, turn_id: &str, prompt: Option<&str>) -> Result<Option<Vec<String>>> {
+    let Some(p) = prompt.filter(|p| !p.trim().is_empty()) else { return Ok(None) };
+    let mut all = vec![p.to_string()];
+    all.extend(db::turn_supplements(&app.db, turn_id).await?);
+    Ok(Some(all))
+}
+
 fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
     if incoming.trim().is_empty() {
         return false;
@@ -1055,7 +1071,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             let (target, user) = match target {
                 Some(t) if t.delivery == "unknown" => {
                     let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
-                    if answers_another_prompt(t.prompt_text.as_deref(), seen.as_deref()) {
+                    let sent = with_supplements(app, &t.id, t.prompt_text.as_deref()).await?;
+                    if answers_none_of(sent.as_deref(), seen.as_deref()) {
                         tracing::info!(turn = %t.id, bot = %bot.id, "hook 的使用者訊息不是這一筆 unknown 的 prompt：不認領，記成外部回合");
                         (None, user.or(seen))
                     } else {
@@ -1069,11 +1086,12 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     if let Some(r) = &run {
                         if let Some(late) = recent_fallback_turn(app, &r.id).await? {
                             let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
-                            let late_prompt = turn_prompt(app, &late).await?;
-                            if answers_another_prompt(t.prompt_text.as_deref(), seen.as_deref())
+                            let ours = with_supplements(app, &t.id, t.prompt_text.as_deref()).await?;
+                            let late_prompt = with_supplements(app, &late.id, turn_prompt(app, &late).await?.as_deref()).await?;
+                            if answers_none_of(ours.as_deref(), seen.as_deref())
                                 && seen.is_some()
                                 && late_prompt.is_some()
-                                && !answers_another_prompt(late_prompt.as_deref(), seen.as_deref())
+                                && !answers_none_of(late_prompt.as_deref(), seen.as_deref())
                             {
                                 tracing::info!(turn = %t.id, late = %late.id, bot = %bot.id, "遲到 hook 回答的是備援關掉的那一回合，不是現在 in-flight 的：補回那一回合");
                                 fill_or_drop_late_hook(app, &late, &assistant.clone().unwrap_or_default(), &session_id, &turn_id).await?;
@@ -1151,8 +1169,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     // （使用者改到 pane 裡直接打、herdr 卡 working 沒開外部回合），答案屬於那一句，不能補進 T1、
                     // 更不能把 T1 標成 completed。對不上就往下記成外部回合；看不到使用者訊息時照舊補。
                     let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
-                    let prompt = turn_prompt(app, &t).await?;
-                    if answers_another_prompt(prompt.as_deref(), seen.as_deref()) {
+                    let prompt = with_supplements(app, &t.id, turn_prompt(app, &t).await?.as_deref()).await?;
+                    if answers_none_of(prompt.as_deref(), seen.as_deref()) {
                         tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
                         user = user.or(seen);
                     } else {
@@ -3302,6 +3320,93 @@ mod external_claim_tests {
         assert!(!answers_another_prompt(Some("跑一次測試"), None), "讀不到就不下判斷");
         assert!(!answers_another_prompt(None, Some("x")));
         assert!(answers_another_prompt(Some("跑一次測試"), Some("算了")));
+    }
+
+    /// 使用者 2026-09-28：回合中「補充」的那句被 claude 記成 transcript 最後一則使用者訊息。記下的補充要算成這一回合的 prompt：
+    /// 照常認領（unknown 升 ok）、不開外部回合、也不多一則重複的使用者訊息。
+    #[tokio::test]
+    async fn a_supplement_typed_mid_turn_does_not_steal_the_turns_reply() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", "跑一次測試").await;
+        sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'user','跑一次測試','web',?)")
+            .bind(db::ulid())
+            .bind(&conv)
+            .bind(&turn_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.live_pane("pane-1", tt::LivePane::default());
+        let supp = crate::lifecycle::send_text_recorded(&app, &bot_id, "順便把 log 也貼上來", true, None, true)
+            .await
+            .unwrap()
+            .expect("記成這一回合的訊息");
+        assert_eq!(supp.turn_id.as_deref(), Some(turn_id.as_str()));
+
+        let transcript = app.data_dir.join(format!("t-{}.jsonl", db::ulid()));
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n",
+                json!({"type": "user", "message": {"role": "user", "content": "跑一次測試"}}),
+                json!({"type": "user", "message": {"role": "user", "content": "順便把 log 也貼上來"}}),
+            ),
+        )
+        .unwrap();
+        let stop = HookBody {
+            bot_id: bot_id.clone(),
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": "s-supp",
+                "prompt_id": db::ulid(),
+                "transcript_path": transcript.to_string_lossy(),
+                "last_assistant_message": "測試過了，log 在這",
+            }),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        process(&app, &stop).await.unwrap();
+
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((turn.status.as_str(), turn.delivery.as_str()), ("completed", "ok"), "補充之後照常認領");
+        let external: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=? AND origin='external'")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(external, 0, "不開外部回合");
+        let rows: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT role, content, turn_id FROM messages WHERE conversation_id=? ORDER BY created_at, rowid")
+                .bind(&conv)
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        let t = Some(turn_id.clone());
+        assert_eq!(
+            rows,
+            vec![
+                ("user".to_string(), "跑一次測試".to_string(), t.clone()),
+                ("user".to_string(), "順便把 log 也貼上來".to_string(), t.clone()),
+                ("assistant".to_string(), "測試過了，log 在這".to_string(), t),
+            ],
+            "兩則使用者訊息各一則、回覆掛在原回合"
+        );
+    }
+
+    /// 沒記下的一句（使用者在終端手打）照舊分得出來：補充只放寬「這一回合記過的字」。
+    #[tokio::test]
+    async fn only_recorded_supplements_count_as_the_turns_prompt() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_bot_id, _conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", "跑一次測試").await;
+        let sent = with_supplements(&app, &turn_id, Some("跑一次測試")).await.unwrap();
+        assert!(answers_none_of(sent.as_deref(), Some("順便把 log 也貼上來")));
+        assert!(!answers_none_of(sent.as_deref(), Some("跑一次測試")));
+        assert!(!answers_none_of(None, Some("x")), "沒有 prompt 不下判斷");
+        assert!(!answers_none_of(sent.as_deref(), None), "讀不到使用者訊息不下判斷");
     }
 
     /// 2026-09-27 wits-pro：貼上的 prompt 帶 Tab，送進 TUI 時 Tab 被吃掉；只在原文有 Tab 時試去 Tab 候選。
