@@ -54,7 +54,7 @@ check_daemon() {
 }
 
 check_macos_local() {
-    local local_cargo local_rustc local_rustdoc path_cargo filter output found_tests=0
+    local local_cargo local_rustc local_rustdoc path_cargo filter output
     if [ "$(uname -s)" != Darwin ]; then
         echo "macos-local tests only run on macOS; use the CI macOS runner elsewhere" >&2
         return 2
@@ -82,10 +82,11 @@ check_macos_local() {
     fi
     step "macOS native Cargo: $local_cargo"
 
-    # cli_update::tests is the existing process-lock suite (#455/#591); it is selected as a module
-    # because its tests may not be renamed here. cargo_shim::tests covers process trees and signals.
-    # New platform-sensitive tests in other modules use the macos_local_ function-name prefix.
-    # These selectors are serial, disjoint cohorts: no repeated tests and no long per-test allowlist.
+    # cli_update::tests is the existing process-lock suite (#455/#591); cargo_shim::tests covers
+    # process trees and signals. shell::tests has a real ps/lsof smoke test under the macos_local_
+    # prefix; future platform-sensitive tests in other modules use that prefix too. Every cohort
+    # is required and checked independently so a stale selector cannot hide behind another's tests.
+    # These selectors are serial and disjoint: no repeated tests or long per-test allowlist.
     local filters=("cli_update::tests" "cargo_shim::tests" "macos_local_")
     for filter in "${filters[@]}"; do
         step "macOS tests: $filter"
@@ -97,14 +98,11 @@ check_macos_local() {
             printf '%s\n' "$output" >&2
             return 1
         fi
-        if printf '%s\n' "$output" | grep -Eq '^test result: ok\. [1-9][0-9]* passed;'; then
-            found_tests=1
+        if ! printf '%s\n' "$output" | grep -Eq '^test result: ok\. [1-9][0-9]* passed;'; then
+            printf 'macos-local required cohort %s selected zero tests\n' "$filter" >&2
+            return 1
         fi
     done
-    if [ "$found_tests" -ne 1 ]; then
-        echo "macos-local selected no tests; check the module filters and macos_local_ naming convention" >&2
-        return 1
-    fi
 }
 
 check_ob() {

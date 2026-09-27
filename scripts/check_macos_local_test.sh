@@ -43,7 +43,18 @@ cat >"$native/cargo" <<'SH'
     printf 'AM_EFFORT:%s\n' "${AM_EFFORT:-}"
     printf 'AM_DATA_DIR:%s\n' "${AM_DATA_DIR:-}"
 } >>"$AM_TEST_LOCAL_CARGO_LOG"
-if [ "${AM_TEST_ZERO_TESTS:-0}" = 1 ]; then
+zero=0
+if [ "$AM_TEST_ZERO_TESTS" = 1 ]; then
+    zero=1
+elif [ -n "$AM_TEST_ZERO_SELECTOR" ]; then
+    for arg in "$@"; do
+        if [ "$arg" = "$AM_TEST_ZERO_SELECTOR" ]; then
+            zero=1
+            break
+        fi
+    done
+fi
+if [ "$zero" = 1 ]; then
     printf 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s\n'
 else
     printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n'
@@ -119,11 +130,22 @@ if [[ -e "$AM_TEST_REMOTE_CARGO" ]]; then
     exit 1
 fi
 
+for selector in 'cli_update::tests' 'cargo_shim::tests' 'macos_local_'; do
+    if output="$(AM_TEST_UNAME=Darwin AM_TEST_ZERO_SELECTOR="$selector" "$ROOT/scripts/check.sh" macos-local 2>&1)"; then
+        printf 'macos-local must reject an empty required cohort: %s\n' "$selector" >&2
+        exit 1
+    fi
+    if [[ "$output" != *"required cohort $selector selected zero tests"* ]]; then
+        printf 'unexpected empty required-cohort failure for %s: %s\n' "$selector" "$output" >&2
+        exit 1
+    fi
+done
+
 if output="$(AM_TEST_UNAME=Darwin AM_TEST_ZERO_TESTS=1 "$ROOT/scripts/check.sh" macos-local 2>&1)"; then
     echo "macos-local must reject an empty test selection" >&2
     exit 1
 fi
-if [[ "$output" != *"selected no tests"* ]]; then
+if [[ "$output" != *"required cohort cli_update::tests selected zero tests"* ]]; then
     printf 'unexpected empty-selection failure: %s\n' "$output" >&2
     exit 1
 fi
