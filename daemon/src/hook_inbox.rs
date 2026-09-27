@@ -28,6 +28,7 @@ use crate::hookrecv::HookBody;
 use crate::state::App;
 use anyhow::Result;
 use sqlx::SqlitePool;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -95,34 +96,63 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
 
 /// 這則 hook 的身分：**同一則重送要得到同一把鑰匙，兩則不同的事件不可以撞在一起。**
 ///
-/// 刻意不用雜湊：鑰匙本身在 DB 裡看得懂是哪一則，出事時查得動；payload 可以到 1 MiB，也不該整包進索引。
+/// 主體不把整個 payload 放進索引（可到 1 MiB）；只有缺少事件 ID 的幾種 hook 會附固定長度的 payload 指紋。
 ///
-/// 組成是「送端蓋的時間 ＋ 事件名 ＋ session ＋ turn」。重送的是同一份 body，四項全同；兩則不同的
-/// 事件至少會差在時間或 turn id 上（同一個 `prompt_id` 就是同一回合，不會是兩件事）。
+/// 一般事件用「送端蓋的時間 ＋ 事件名 ＋ session ＋ turn」。`PostToolUse` 再帶 `tool_use_id`，
+/// `SubagentStart`／`SubagentStop` 再帶 `agent_id`，因為同一秒、同一回合可以有多個這類事件。
+/// 舊版或手寫 body 缺少這些 ID 時，以完整 payload 的 SHA-256 指紋作區別；原 body 重送仍得到同一把鑰匙。
 ///
 /// `received_at` 是送端蓋的（`hook_cmd` 到毫秒、遠端 `hook.sh` 到秒），不是收到的時間——用收到的時間
 /// 當鑰匙，重送就永遠是新的一列，去重會完全失效。
-pub fn dedupe_key(body: &HookBody) -> Option<String> {
-    let p = &body.payload;
-    let pick = |keys: &[&str]| -> String {
-        for k in keys {
-            if let Some(v) = p.get(*k).and_then(|v| v.as_str()) {
-                if !v.is_empty() {
-                    return v.to_string();
-                }
+fn string_field(payload: &serde_json::Value, keys: &[&str]) -> String {
+    for k in keys {
+        if let Some(v) = payload.get(*k).and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                return v.to_string();
             }
         }
-        String::new()
-    };
+    }
+    String::new()
+}
+
+/// 舊版 key 格式。`accept` 用它比對升級前已收進來的目標事件，避免把舊列的重送再處理一次。
+fn legacy_dedupe_key(body: &HookBody) -> Option<String> {
+    let p = &body.payload;
     let received = body.received_at.as_deref().unwrap_or("");
     // 認不出時間的 body（手寫、舊版）一律收下：寧可多一列，也不要把兩則不同的事件併成一則。
     if received.is_empty() {
         return None;
     }
-    let event = pick(&["hook_event_name", "hookEventName", "type"]);
-    let session = pick(&["session_id", "sessionId", "thread-id"]);
-    let turn = pick(&["prompt_id", "promptId", "turn-id", "turnId"]);
+    let event = string_field(p, &["hook_event_name", "hookEventName", "type"]);
+    let session = string_field(p, &["session_id", "sessionId", "thread-id"]);
+    let turn = string_field(p, &["prompt_id", "promptId", "turn-id", "turnId"]);
     Some(format!("{}|{}|{}|{}|{}", body.provider, received, event, session, turn))
+}
+
+fn event_discriminator(body: &HookBody) -> Option<String> {
+    let p = &body.payload;
+    let event = string_field(p, &["hook_event_name", "hookEventName", "type"]);
+    let (label, keys) = match event.as_str() {
+        "PostToolUse" => ("tool_use_id", &["tool_use_id", "toolUseId"][..]),
+        "SubagentStart" | "SubagentStop" => ("agent_id", &["agent_id", "agentId"][..]),
+        _ => return None,
+    };
+    let id = string_field(p, keys);
+    if !id.is_empty() {
+        return Some(format!("{label}:{id}"));
+    }
+    // Some older hook versions omit the event ID. A stable digest still separates distinct payloads
+    // while exact replays of the same body remain deduped.
+    let payload = serde_json::to_vec(p).ok()?;
+    Some(format!("payload-sha256:{:x}", Sha256::digest(payload)))
+}
+
+pub fn dedupe_key(body: &HookBody) -> Option<String> {
+    let base = legacy_dedupe_key(body)?;
+    Some(match event_discriminator(body) {
+        Some(discriminator) => format!("{base}|{discriminator}"),
+        None => base,
+    })
 }
 
 /// 收下的結果。
@@ -146,6 +176,25 @@ impl Accepted {
 /// 因為那則事件的確已經在收件匣裡。
 pub async fn accept(pool: &SqlitePool, body: &HookBody, source: Source) -> Result<Accepted> {
     let key = dedupe_key(body);
+    // Before this key format, all same-second same-turn PostToolUse/Subagent events shared one key.
+    // Compare that legacy row's stored body before accepting the new scoped key: exact redeliveries
+    // remain duplicates, but a different event that collided with the old coarse key is kept.
+    if let (Some(legacy_key), Some(discriminator)) = (legacy_dedupe_key(body), event_discriminator(body)) {
+        let old_body: Option<String> = sqlx::query_scalar(
+            "SELECT body_json FROM hook_events WHERE bot_id = ? AND dedupe_key = ?",
+        )
+        .bind(&body.bot_id)
+        .bind(legacy_key)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(old_body) = old_body {
+            if let Ok(old_event) = serde_json::from_str::<HookBody>(&old_body) {
+                if event_discriminator(&old_event).as_deref() == Some(discriminator.as_str()) {
+                    return Ok(Accepted::Duplicate);
+                }
+            }
+        }
+    }
     let res = sqlx::query(
         "INSERT OR IGNORE INTO hook_events
            (id, bot_id, provider, source, dedupe_key, body_json, received_at, attempts)
@@ -322,15 +371,19 @@ mod tests {
         p
     }
 
-    fn body(prompt_id: &str, at: &str) -> HookBody {
+    fn body_with_payload(payload: serde_json::Value, at: &str) -> HookBody {
         HookBody {
             bot_id: "b1".into(),
             provider: "claude".into(),
-            payload: json!({"hook_event_name": "Stop", "session_id": "s1", "prompt_id": prompt_id}),
+            payload,
             received_at: Some(at.into()),
             truncated: false,
             run_id: None,
         }
+    }
+
+    fn body(prompt_id: &str, at: &str) -> HookBody {
+        body_with_payload(json!({"hook_event_name": "Stop", "session_id": "s1", "prompt_id": prompt_id}), at)
     }
 
     #[tokio::test]
@@ -367,6 +420,127 @@ mod tests {
         accept(&p, &body("p1", "2026-09-17T12:00:01.000Z"), Source::Http).await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events").fetch_one(&p).await.unwrap();
         assert_eq!(n, 3);
+    }
+
+    #[tokio::test]
+    async fn same_second_post_tool_use_ids_do_not_collide_and_redeliveries_dedupe() {
+        let p = pool().await;
+        let at = "2026-09-27T12:30:00Z";
+        let post_tool_use = |tool_use_id: &str| {
+            body_with_payload(
+                json!({
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "s1",
+                    "prompt_id": "turn-1",
+                    "tool_use_id": tool_use_id,
+                    "tool_name": "Bash"
+                }),
+                at,
+            )
+        };
+        let first = post_tool_use("tool-use-1");
+        let second = post_tool_use("tool-use-2");
+
+        assert_eq!(accept(&p, &first, Source::Remote).await.unwrap(), Accepted::Stored);
+        assert_eq!(accept(&p, &first, Source::Spool).await.unwrap(), Accepted::Duplicate, "同一事件重播");
+        assert_eq!(accept(&p, &second, Source::Remote).await.unwrap(), Accepted::Stored, "同秒同回合的另一個 tool_use");
+        assert_eq!(accept(&p, &second, Source::Spool).await.unwrap(), Accepted::Duplicate, "另一事件重播");
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events").fetch_one(&p).await.unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
+    async fn same_second_post_tool_use_payloads_without_ids_are_distinguished() {
+        let p = pool().await;
+        let at = "2026-09-27T12:30:00Z";
+        let post_tool_use = |command: &str| {
+            body_with_payload(
+                json!({
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "s1",
+                    "prompt_id": "turn-1",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": command}
+                }),
+                at,
+            )
+        };
+        let first = post_tool_use("herdr pane split");
+        let second = post_tool_use("ls");
+
+        assert_eq!(accept(&p, &first, Source::Remote).await.unwrap(), Accepted::Stored);
+        assert_eq!(accept(&p, &first, Source::Spool).await.unwrap(), Accepted::Duplicate, "缺 ID 時原 body 重播仍去重");
+        assert_eq!(accept(&p, &second, Source::Remote).await.unwrap(), Accepted::Stored, "不同 payload 不能被同秒合併");
+        assert_eq!(accept(&p, &second, Source::Spool).await.unwrap(), Accepted::Duplicate);
+    }
+
+    #[tokio::test]
+    async fn same_second_redelivery_matches_a_legacy_coarse_key_row() {
+        let p = pool().await;
+        let at = "2026-09-27T12:30:00Z";
+        let post_tool_use = |tool_use_id: &str| {
+            body_with_payload(
+                json!({
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "s1",
+                    "prompt_id": "turn-1",
+                    "tool_use_id": tool_use_id,
+                    "tool_name": "Bash"
+                }),
+                at,
+            )
+        };
+        let old_event = post_tool_use("legacy-tool-use");
+        let old_key = legacy_dedupe_key(&old_event).unwrap();
+        sqlx::query(
+            "INSERT INTO hook_events (id, bot_id, provider, source, dedupe_key, body_json, received_at, attempts)
+             VALUES ('legacy-event', ?, ?, 'remote', ?, ?, ?, 0)",
+        )
+        .bind(&old_event.bot_id)
+        .bind(&old_event.provider)
+        .bind(old_key)
+        .bind(serde_json::to_string(&old_event).unwrap())
+        .bind(at)
+        .execute(&p)
+        .await
+        .unwrap();
+
+        assert_eq!(accept(&p, &old_event, Source::Spool).await.unwrap(), Accepted::Duplicate, "升級前已收下的事件重播");
+        assert_eq!(accept(&p, &post_tool_use("new-tool-use"), Source::Remote).await.unwrap(), Accepted::Stored);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events").fetch_one(&p).await.unwrap();
+        assert_eq!(n, 2, "舊 key 的事件與新同秒事件都保留，舊事件重播未新增");
+    }
+
+    #[tokio::test]
+    async fn same_second_subagent_ids_do_not_collide_and_redeliveries_dedupe() {
+        let p = pool().await;
+        let at = "2026-09-27T12:30:00Z";
+
+        for event in ["SubagentStart", "SubagentStop"] {
+            let subagent = |agent_id: &str| {
+                body_with_payload(
+                    json!({
+                        "hook_event_name": event,
+                        "session_id": "s1",
+                        "prompt_id": "turn-1",
+                        "agent_id": agent_id,
+                        "agent_type": "general-purpose"
+                    }),
+                    at,
+                )
+            };
+            let first = subagent("agent-1");
+            let second = subagent("agent-2");
+
+            assert_eq!(accept(&p, &first, Source::Remote).await.unwrap(), Accepted::Stored, "{event}");
+            assert_eq!(accept(&p, &first, Source::Spool).await.unwrap(), Accepted::Duplicate, "{event} 重播");
+            assert_eq!(accept(&p, &second, Source::Remote).await.unwrap(), Accepted::Stored, "{event} 同秒的另一 agent");
+            assert_eq!(accept(&p, &second, Source::Spool).await.unwrap(), Accepted::Duplicate, "{event} 另一事件重播");
+        }
+
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_events").fetch_one(&p).await.unwrap();
+        assert_eq!(n, 4);
     }
 
     /// 認不出時間的 body 不參加去重：寧可多一列，也不要把兩則不同的事件併掉。

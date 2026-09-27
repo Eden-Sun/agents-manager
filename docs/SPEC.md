@@ -673,7 +673,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 | 欄位 | 意思 |
 |---|---|
-| `dedupe_key` | 事件身分＝`provider\|received_at\|事件名\|session\|turn`。同一則重送得到同一把鑰匙，`(bot_id, dedupe_key)` 是 partial unique index。`received_at` 是**送端**蓋的：用收到的時間當鑰匙，重送永遠是新的一列，去重會失效。認不出時間的 body 不參加去重（寧可多一列，也不要把兩則不同的事件併掉）。 |
+| `dedupe_key` | 一般事件身分＝`provider\|received_at\|事件名\|session\|turn`；`PostToolUse` 再帶 `tool_use_id`，`SubagentStart`／`SubagentStop` 再帶 `agent_id`，避免遠端送端時間只到秒時同回合不同事件相撞。缺少事件 ID 的舊版 body 以 payload 的 SHA-256 指紋區分。`(bot_id, dedupe_key)` 是 partial unique index。`received_at` 是**送端**蓋的：用收到的時間當鑰匙，重送永遠是新的一列，去重會失效。認不出時間的 body 不參加去重（寧可多一列，也不要把兩則不同的事件併掉）。升級前的粗 key 會連同已存 body 比對，保留原事件重送的去重，同時放行曾與它撞 key 的另一事件。 |
 | `processed_at` | NULL ＝還沒處理完。daemon 重啟後就是靠它把上一輪沒做完的補回來。 |
 | `attempts` / `last_error` / `next_attempt_at` | 處理失敗時列留著、記原因、退避 1s→2s→4s…上限 256 秒後再試。解不開的 body 記下原因收掉（再試也一樣），不無限佔住佇列。 |
 
