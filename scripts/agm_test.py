@@ -1694,12 +1694,15 @@ class MissionCommandTest(CliCase):
         self.assertEqual(self.bad("mission", "pause", "m1")["error"], "bad_args")
         self.ok("mission", "pause", "m1", "--reason", "waiting_user", "--detail", "等使用者選交付方式")
         self.assertEqual(self.posts("/api/missions/m1/pause")[0]["body"], {"reason": "waiting_user", "detail": "等使用者選交付方式"})
-        for op in ("resume", "cancel", "round"):
+        for op in ("resume", "cancel"):
             self.assertEqual(self.ok("mission", op, "m1")["status"], op)
+        self.assertEqual(self.bad("mission", "round", "m1")["error"], "bad_args")
+        self.assertEqual(self.ok("mission", "round", "m1", "--request-id", "rnd-1")["status"], "round")
+        self.assertEqual(self.posts("/api/missions/m1/round")[0]["body"], {"client_request_id": "rnd-1"})
 
     def test_round_over_the_cap_surfaces_the_conflict(self):
         FakeDaemon.routes["POST /api/missions/m1/round"] = (409, {"error": "conflict", "reason": "max_rounds", "rounds_used": 2})
-        err = self.bad("mission", "round", "m1")
+        err = self.bad("mission", "round", "m1", "--request-id", "rnd-cap")
         self.assertEqual(err["status"], 409)
         self.assertEqual(err["detail"]["reason"], "max_rounds")
 
