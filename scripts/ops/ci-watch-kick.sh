@@ -255,6 +255,23 @@ dispatch() { # dispatch <issue-number> → 0 派成功
       --request-id "ci-red-${FIRST_SHA}" >> "$LOG" 2>&1
 }
 
+# 4a0. 狀態還停在上一段紅，但 run 清單裡中間已經有一個綠、這一段的起點換了：
+# 那輪綠我們沒看到（kick 比 push 疏），不能把新的紅默默併進舊狀態（#644）。
+# 先在舊 issue 補轉綠留言，再往下當新的一段開票；舊 issue 還開著也不准被 4b 接手。
+SKIP_ADOPT=""
+if [ -n "$S_SHA" ] && [ -n "$PREV_GREEN" ] && [ "$FIRST_SHA" != "$S_SHA" ]; then
+  S_ISSUE=$(state_get issue)
+  if [ -n "$S_ISSUE" ]; then
+    if ! gh issue comment "$S_ISSUE" --body "${PREV_GREEN} 起恢復綠（中間那輪沒看到，這輪才補記）。run ${RUN_ID}（\`${FIRST_SHA}\`）起是新的一段紅，會另外開票。這張 issue 不會自動關，請修的人確認後關掉。" >> "$LOG" 2>&1; then
+      fail_run "issue #${S_ISSUE} 補記轉綠失敗，狀態先留著，下一輪再試"
+    fi
+  fi
+  SKIP_ADOPT="${S_ISSUE:-}"
+  log "上一段紅（${S_SHA:0:8}）中間轉過綠（${PREV_GREEN:0:8}），這段從 ${FIRST_SHA:0:8} 另開"
+  rm -f "$STATE"
+  S_SHA=""
+fi
+
 # 4a. 還在同一段紅裡：不重開、不重派；清單多了新的測試才在同一張 issue 留言一次。
 if [ -n "$S_SHA" ]; then
   S_ISSUE=$(state_get issue); S_ASSIGNED=$(state_get assigned); S_FAILS=$(state_get failures); [ -n "$S_FAILS" ] || S_FAILS="[]"
@@ -285,9 +302,27 @@ fi
 if ! EXISTING=$(gh issue list --label "$LABEL" --state open --json number --limit 1 -q '.[0].number // empty' 2> "$WORK/err"); then
   fail_run "gh issue list 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
 fi
+# 剛補過轉綠的那張還開著：那是上一段，不能再默默接手（#644）。
+# 剛補過轉綠的那張還開著：那是上一段，不能再默默接手（#644）。
+if [ -n "$EXISTING" ] && [ "$EXISTING" = "${SKIP_ADOPT:-}" ]; then
+  EXISTING=""
+fi
 if [ -n "$EXISTING" ]; then
-  state_write "$FIRST_SHA" "$FIRST_RUN" "$EXISTING" true "$FAILURES"
-  ran_ok; log "已有開著的 ${LABEL} issue #${EXISTING}，接手這一段紅（${FIRST_SHA:0:8}），不重開、不重派"
+  # 狀態檔遺失，或上一段的 issue 還沒關、這段又紅了：不另開，但一定要留言並用新的 request-id 再派。
+  # 同 sha 的 request-id daemon 會去重；留言失敗就先不寫狀態，下一輪再來。
+  if ! gh issue comment "$EXISTING" --body "$(printf '新的一段紅，接手既有 issue #%s（不另開）。\n\n- run %s（`%s`）\n%s\n\n失敗的測試：\n%s\n' \
+      "$EXISTING" "$RUN_ID" "$FIRST_SHA" "${RUN_URL}" "$(fail_lines "$FAILURES")")" >> "$LOG" 2>&1; then
+    fail_run "issue #${EXISTING} 留言失敗，這輪不寫狀態，下一輪再試"
+  fi
+  ASSIGNED=false
+  if dispatch "$EXISTING"; then
+    ASSIGNED=true
+    log "接手既有 ${LABEL} issue #${EXISTING}（${FIRST_SHA:0:8}），已留言並派工"
+  else
+    log "接手既有 ${LABEL} issue #${EXISTING}（${FIRST_SHA:0:8}），已留言，派工失敗，下一輪補派"
+  fi
+  state_write "$FIRST_SHA" "$FIRST_RUN" "$EXISTING" "$ASSIGNED" "$FAILURES"
+  ran_ok
   exit 0
 fi
 
