@@ -617,6 +617,38 @@ async fn a_rewind_marks_that_message_and_later_and_returns_its_text() {
     assert_eq!(reason(call(&r, &r.ids[2], &tui).await.unwrap_err()), "already_rewound");
 }
 
+/// #656：第二次倒回在第一次還握著鎖、還沒標記時就通過了鎖外的檢查。進鎖後必須重讀，不能再按一次 Restore。
+#[tokio::test]
+async fn a_second_rewind_of_the_same_message_does_not_drive_the_pane_again() {
+    let r = rig().await;
+    let tui = FakeTui::new(&[A, SECOND, C], Faults::default());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let app = r.e.app.clone();
+    let bot = r.bot.clone();
+    let msg = r.ids[2].clone();
+    let racing = tui.clone();
+    let locked_key = bot.clone();
+    lifecycle::race_point::arm("rewind_locked", &locked_key, move || async move {
+        let (gone, saw) = tokio::sync::oneshot::channel();
+        let before_key = bot.clone();
+        lifecycle::race_point::arm("rewind_before_lock", &before_key, move || async move {
+            let _ = gone.send(());
+        });
+        let app2 = app.clone();
+        let bot2 = bot.clone();
+        let msg2 = msg.clone();
+        tokio::spawn(async move {
+            let out = rewind(&app2, &bot2, &msg2, Some(racing.clone() as Arc<dyn Pane>)).await;
+            let _ = tx.send(out);
+        });
+        let _ = saw.await;
+    });
+    call(&r, &r.ids[2], &tui).await.unwrap();
+    let second = rx.await.expect("第二次有跑完");
+    assert_eq!(reason(second.unwrap_err()), "already_rewound");
+    assert_eq!(tui.restored(), Some(1), "只 Restore 了一次");
+}
+
 /// 確認頁對不上：409、訊息一則都不標。
 #[tokio::test]
 async fn a_failed_rewind_marks_nothing() {

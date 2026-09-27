@@ -468,6 +468,16 @@ pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option
     // 使用者自己 default session 的 pane 只觀察、不代打（SPEC §6.5.1）。
     lifecycle::refuse_default_session(&bot)?;
     let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
+
+    // 持 bot 鎖到打完字：`prompt` 拿同一把，期間不會有新的 prompt 打進這個 pane。
+    // already_rewound 與 skip 都在鎖裡重讀。鎖外算過的話，第二次請求會在第一次標記之前
+    // 就決定要倒，進鎖後照樣再按一次 Restore（#656）。
+    #[cfg(test)]
+    lifecycle::race_point::hit("rewind_before_lock", bot_id).await;
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    #[cfg(test)]
+    lifecycle::race_point::hit("rewind_locked", bot_id).await;
     let msg: db::Message = sqlx::query_as("SELECT * FROM messages WHERE id = ? AND conversation_id = ?")
         .bind(message_id)
         .bind(&conv)
@@ -499,9 +509,6 @@ pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option
     .map_err(up)?;
     let skip = later.iter().filter(|c| same_first_line(c, &target)).count();
 
-    // 持 bot 鎖到打完字：`prompt` 拿同一把，期間不會有新的 prompt 打進這個 pane。
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| conflict("not_running", "bot 沒在跑。"))?;
     if let Some(why) = busy_reason(app, bot_id, &run).await? {
         return Err(LcError::conflict("not_idle", json!({"busy": why, "message": "它正在忙，等這一回合結束再倒回。"})));
