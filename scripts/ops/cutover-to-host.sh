@@ -54,6 +54,7 @@ SRC_REPO="${CUTOVER_SRC_REPO:-/Users/m4p/project/agents-manager}"
 DST_REPO="${CUTOVER_DST_REPO:-/home/ubuntu/project/agents-manager}"
 SRC_DATA="${CUTOVER_SRC_DATA:-$HOME/.config/agents-manager}"
 DST_DATA="${CUTOVER_DST_DATA:-/home/ubuntu/.config/agents-manager}"
+DST_HOME="${CUTOVER_DST_HOME:-/home/ubuntu}"
 SRC_API="${CUTOVER_SRC_API:-http://127.0.0.1:7788}"
 DST_API="${CUTOVER_DST_API:-http://127.0.0.1:7788}"   # 在目標上看的位址（helper 經 ssh 在目標跑）
 PORT="${CUTOVER_PORT:-7788}"
@@ -356,8 +357,18 @@ do_transcripts() {
             x "$PY" "$TT" --bundle "$(bundle_of "$id")" --out "$(moved_of "$id")" --target "$TARGET" "${margs[@]}"
         fi
     done
-    # 協調者的工作目錄（persona、handoff.md、log）。部署檔（CLAUDE.md、runtime.json、bin/agm）由 resume 的 setup 用目標路徑重寫。
-    x "$RSYNC" -a --exclude '*.lease-token.*' --exclude '*.lock' "$SRC_DATA/supervisor/" "$TARGET:$DST_DATA/supervisor/"
+    # 角色目錄照 SPEC §11.9b 只帶 handoff.md 與 reports/（CLAUDE.md、runtime.json、persona.md 由 resume 的 setup 產生，
+    # setup 不覆蓋已存在的 handoff.md；log、lease、核准檔、*.bak 不帶），到目標後把來源路徑換掉。
+    local role rmaps=()
+    for m in "${MAPS[@]}"; do rmaps+=(--map "$m"); done
+    rmaps+=(--map "$HOME=$DST_HOME")
+    for role in AGM AGM-responder; do
+        [ -f "$SRC_DATA/supervisor/$role/handoff.md" ] || [ -d "$SRC_DATA/supervisor/$role/reports" ] || continue
+        x rsh "mkdir -p $(q "$DST_DATA/supervisor/$role")"
+        [ -f "$SRC_DATA/supervisor/$role/handoff.md" ] && x "$RSYNC" -a "$SRC_DATA/supervisor/$role/handoff.md" "$TARGET:$DST_DATA/supervisor/$role/handoff.md"
+        [ -d "$SRC_DATA/supervisor/$role/reports" ] && x "$RSYNC" -a "$SRC_DATA/supervisor/$role/reports/" "$TARGET:$DST_DATA/supervisor/$role/reports/"
+    done
+    x rhelper rewrite-paths --dir "$DST_DATA/supervisor" "${rmaps[@]}"
 }
 
 RSTATE_REL="cutover"
@@ -395,6 +406,13 @@ for w in json.load(open(sys.argv[1])).get("warnings") or []:
             allowed=$(cat "$STATE/transcripts-allowed-$id" 2>/dev/null || echo 0)
             [ -n "$gone" ] && [ "$gone" -gt "$allowed" ] \
                 && die "import --dry-run ${id}：目標有 ${gone} 段 transcript 不在，對話搬移只放行 ${allowed} 段舊 session：$STATE/import-dry-${id}.json"
+            if [ "$id" = "$sup_id" ]; then
+                # 協調者資料是合併（SPEC §11.9b）：先看 dry-run 的 supervisor 那一段，撞唯一索引跳過的列要有人知道。
+                "$PY" -c 'import json, sys
+s = json.load(open(sys.argv[1])).get("supervisor") or {}
+print("    supervisor（dry-run）：singletons", s.get("singletons"), "inbox_parked", s.get("inbox_parked"), "skipped_unique", len(s.get("skipped_unique") or []))
+sys.exit(1 if s.get("skipped_unique") else 0)' "$STATE/import-dry-$id.json" || warn "協調者資料有撞唯一索引被跳過的列：$STATE/import-dry-${id}.json 的 supervisor.skipped_unique"
+            fi
             rsh "$cmd" > "$STATE/import-$id.json" || die "import $id 失敗：看 $STATE/import-$id.json"
             echo "$id" >> "$STATE/imports.txt"
         else

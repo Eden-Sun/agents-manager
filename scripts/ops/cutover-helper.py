@@ -11,6 +11,7 @@
   lock-free  <資料目錄>                             daemon.lock 拿得到（daemon 停了）→0，拿不到→1
   verify     --snapshot F --running F --map A=B …   目標 daemon 的 state 對不對得上來源快照
   transcript-gate --bundle F --report F --running F transcript-transfer 回 2 時：只有舊 session 找不到才放行，印出段數
+  rewrite-paths --dir D --map A=B …                 目錄底下的 .md 檔內路徑換成目標的（協調者的 handoff／reports，SPEC §11.9b）
   drill-verify --db F --config F --bundle F --map A=B …   演練：直接讀匯入後的 DB 複本與 config
 """
 
@@ -214,6 +215,30 @@ def cmd_transcript_gate(args):
     return 1 if bad else 0
 
 
+def cmd_rewrite_paths(args):
+    """只換完整的路徑段（前後不是路徑字元），最長的 map 先配；內容沒變的檔不寫。"""
+    import re
+    pairs = parse_maps(args.map)
+    pats = [(re.compile(rf"(?<![A-Za-z0-9._-]){re.escape(a)}(?![A-Za-z0-9._-])"), b) for a, b in pairs]
+    changed = 0
+    for d, _, names in os.walk(args.dir):
+        for n in names:
+            if not n.endswith(".md"):
+                continue
+            p = os.path.join(d, n)
+            with open(p, encoding="utf-8", errors="surrogateescape") as f:
+                text = f.read()
+            new = text
+            for pat, b in pats:
+                new = pat.sub(lambda _m, b=b: b, new)
+            if new != text:
+                with open(p, "w", encoding="utf-8", errors="surrogateescape") as f:
+                    f.write(new)
+                changed += 1
+    print(f"改寫 {changed} 個檔")
+    return 0
+
+
 def cmd_verify(args):
     """目標 daemon 起來、接回之後：專案在、本機、path 換過、user bot 一顆不少、在跑名單都活著。"""
     src = load(args.snapshot)["projects"]
@@ -344,6 +369,9 @@ def main():
     s.add_argument("--snapshot", required=True)
     s.add_argument("--running", required=True)
     s.add_argument("--map", action="append", default=[])
+    s = sub.add_parser("rewrite-paths")
+    s.add_argument("--dir", required=True)
+    s.add_argument("--map", action="append", default=[])
     s = sub.add_parser("transcript-gate")
     s.add_argument("--bundle", required=True)
     s.add_argument("--report", required=True)
@@ -356,6 +384,7 @@ def main():
     args = ap.parse_args()
     fn = {"api": cmd_api, "snapshot": cmd_snapshot, "active": cmd_active, "wait-idle": cmd_wait_idle,
           "lock-free": cmd_lock_free, "verify": cmd_verify, "transcript-gate": cmd_transcript_gate,
+          "rewrite-paths": cmd_rewrite_paths,
           "drill-verify": cmd_drill_verify}[args.cmd]
     sys.exit(fn(args))
 

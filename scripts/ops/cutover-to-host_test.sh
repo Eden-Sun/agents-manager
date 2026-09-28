@@ -137,7 +137,11 @@ setup() {
     mkdir -p "$HOME/Library/LaunchAgents" "$SRC_REPO" "$DST_REPO/target/release" "$DST_REPO/scripts/ops" \
         "$SRC_DATA/supervisor/AGM" "$DST_DATA" "$ROOT/bin" "$ROOT/rbin"
     echo tok-src > "$SRC_DATA/ui-token"; echo tok-dst > "$DST_DATA/ui-token"
-    echo "x" > "$SRC_DATA/supervisor/AGM/handoff.md"
+    mkdir -p "$SRC_DATA/supervisor/AGM-responder/reports"
+    printf 'repo %s/src/x.rs, data %s/outbox, home %s/notes, other /Users/m4px\n' "$SRC_REPO" "$SRC_DATA" "$HOME" > "$SRC_DATA/supervisor/AGM/handoff.md"
+    echo "noise" > "$SRC_DATA/supervisor/AGM/daemon-update.log"
+    echo "{}" > "$SRC_DATA/supervisor/AGM/runtime.json"
+    printf 'see %s/a\n' "$SRC_REPO" > "$SRC_DATA/supervisor/AGM-responder/reports/r1.md"
     : > "$DST_DATA/agents-manager.sqlite3"; echo '[server]' > "$DST_DATA/config.toml"
     printf '[server]\n[judge]\nenabled = true\n' > "$SRC_DATA/config.toml"
     printf 'line\n' > "$DST_DATA/daemon.log"
@@ -230,7 +234,9 @@ n_gone = os.environ.get("PT_WARN_TRANSCRIPT") if "PAM-moved" in a[a.index("--bun
 warn = [f"{n_gone} 段原生對話的 transcript 不在這台（例：/x）"] if dry and n_gone else []
 cfg = a[a.index("--config") + 1]
 n = "1" if "PAM-moved" in a[a.index("--bundle") + 1] else "2"   # 每次 import 各有一份備份：1＝第一次（切換前）
-print(json.dumps({"dry_run": dry, "backups": [] if dry else [cfg.replace("config.toml", "agents-manager.sqlite3") + ".pre-transfer-" + n, cfg + ".pre-transfer-" + n],
+sup = {"singletons": {"supervisors:AGM": "updated"}, "inbox_parked": 0,
+       "skipped_unique": [{"table": "supervisor_inbox", "key": "k"}] if os.environ.get("PT_SKIPPED_UNIQUE") else []} if "--with-supervisor" in a else None
+print(json.dumps({"dry_run": dry, "supervisor": sup, "backups": [] if dry else [cfg.replace("config.toml", "agents-manager.sqlite3") + ".pre-transfer-" + n, cfg + ".pre-transfer-" + n],
                   "warnings": warn}))
 EOF
     cat > "$ROOT/bin/transcript-transfer" <<'EOF'
@@ -254,10 +260,10 @@ EOF
     export SSH_BIN="$ROOT/bin/ssh" RSYNC_BIN="$ROOT/bin/rsync" LAUNCHCTL_BIN="$ROOT/bin/launchctl" LSOF_BIN="$ROOT/bin/lsof" CURL_BIN="$ROOT/bin/curl"
     export PROJECT_TRANSFER="$ROOT/bin/pt-stub" TRANSCRIPT_TRANSFER="$ROOT/bin/transcript-transfer"
     export CUTOVER_TARGET=fake@target CUTOVER_SRC_REPO="$SRC_REPO" CUTOVER_DST_REPO="$DST_REPO"
-    export CUTOVER_SRC_DATA="$SRC_DATA" CUTOVER_DST_DATA="$DST_DATA" DST_DATA_T="$DST_DATA"
+    export CUTOVER_SRC_DATA="$SRC_DATA" CUTOVER_DST_DATA="$DST_DATA" DST_DATA_T="$DST_DATA" CUTOVER_DST_HOME="$ROOT/dsthome"
     export CUTOVER_SRC_API="http://127.0.0.1:$SRC_PORT" CUTOVER_DST_API="http://127.0.0.1:$DST_PORT"
     export CUTOVER_DAEMON_WAIT_SECS=5 CUTOVER_STOP_WAIT_SECS=10
-    unset CUTOVER_DETACHED PT_OLD PT_WARN_TRANSCRIPT TT_RC TT_MISSING TT_CONFLICT DST_ERROR_AFTER_START
+    unset CUTOVER_DETACHED PT_OLD PT_WARN_TRANSCRIPT TT_RC TT_MISSING TT_CONFLICT DST_ERROR_AFTER_START PT_SKIPPED_UNIQUE
 }
 
 teardown() {
@@ -321,7 +327,12 @@ check "只有協調者專案 export 帶 --with-supervisor" "project PAGM .*--wit
 check_no "Agents Manager 不帶 --with-supervisor" "project PAM .*--with-supervisor" "$ROOT/pt.log"
 check "對話搬移的 map 含 repo" "--map $SRC_REPO=$DST_REPO" "$ROOT/tt.log"
 check "對話搬移的 map 含資料目錄" "--map $SRC_DATA=$DST_DATA" "$ROOT/tt.log"
-check "supervisor 目錄 rsync 到目標" "$SRC_DATA/supervisor/ fake@target:$DST_DATA/supervisor/" "$ROOT/rsync.log"
+check_eq "handoff.md 帶過去、路徑換成目標的" "repo $DST_REPO/src/x.rs, data $DST_DATA/outbox, home $ROOT/dsthome/notes, other /Users/m4px" "$(cat "$DST_DATA/supervisor/AGM/handoff.md" 2>&1)"
+check_eq "responder 的 reports 帶過去、路徑換掉" "see $DST_REPO/a" "$(cat "$DST_DATA/supervisor/AGM-responder/reports/r1.md" 2>&1)"
+[ -e "$DST_DATA/supervisor/AGM/daemon-update.log" ]; check_eq "log 不帶（SPEC §11.9b）" 1 $?
+[ -e "$DST_DATA/supervisor/AGM/runtime.json" ]; check_eq "runtime.json 不帶（由 setup 產生）" 1 $?
+check "印出協調者 dry-run 摘要" "supervisor（dry-run）：singletons" "$ROOT/out"
+check_no "沒有撞唯一索引就不警告" "skipped_unique" "$ROOT/out"
 compgen -G "$ROOT/src-data/cutover/*/*.json.gz" > /dev/null; check_eq "Mac 上的 bundle 傳完就刪" 1 $?
 kill -0 "$DST_PID" 2>/dev/null; check_eq "目標 daemon 停過" 1 $?
 check_before "import 先 --dry-run" "import .*PAM-moved.json.gz.*--dry-run" "import .*PAM-moved.json.gz --host local .*config.toml *$" "$ROOT/pt.log"
@@ -345,6 +356,14 @@ check "記下每步耗時" "	import	" "$(ls -d "$ROOT"/src-data/cutover/*)/timin
 teardown
 
 # ---------------------------------------------------------------- 閘門
+
+echo "# 協調者資料撞唯一索引：警告、照樣做"
+setup
+export PT_SKIPPED_UNIQUE=1
+run "$ROOT/out" cutover --execute --foreground
+check_eq "結束碼 0" 0 "$(cat "$ROOT/out.rc")"
+check "警告 skipped_unique" "WARN: 協調者資料有撞唯一索引被跳過的列" "$ROOT/out"
+teardown
 
 echo "# 閘門：#720 還沒進來就不做"
 setup
