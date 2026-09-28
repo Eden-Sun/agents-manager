@@ -123,7 +123,7 @@ print(d.get("release_bot_id") or d.get("responder_bot_id") or "")
 fi
 [ -n "$BOT" ] || { note_fail "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
 
-BODY=$(mktemp -t agm-claude-release)
+BODY=$(mktemp "${TMPDIR:-/tmp}/agm-claude-release.XXXXXX")
 {
   cat "$TASK"
   printf '\n\n---\n本次：舊版 %s → 新版 %s\n' "$OLD" "$NEW"
