@@ -62,10 +62,18 @@ export function runtimeKnown(run: Run | null): boolean {
   return runtimeSettingsKnown(run) || runtimeIdentity(run) !== undefined
 }
 
+/**
+ * 模型不分大小寫比：codex 0.157 的狀態列印顯示名（`GPT-6-Luna`），daemon 讀回的 runtime 在修正前原樣記下，
+ * 跟設定的 id `gpt-6-luna` 逐字比就多出一行假的「模型」差異，fast 也因此不算「只有 fast」而走重啟（#712）。
+ */
+function sameModel(running: string | null | undefined, configured: string | null | undefined): boolean {
+  return (running ?? '').toLowerCase() === (configured ?? '').toLowerCase()
+}
+
 export function runtimeDrift(bot: Bot | null, run: Run | null): RuntimeDriftField[] {
   if (!bot || !run || !runtimeKnown(run)) return []
   const out: RuntimeDriftField[] = []
-  if (runtimeSettingsKnown(run) && (run.runtime_model ?? null) !== (bot.model ?? null)) {
+  if (runtimeSettingsKnown(run) && !sameModel(run.runtime_model, bot.model)) {
     out.push({
       field: 'model',
       label: '模型',

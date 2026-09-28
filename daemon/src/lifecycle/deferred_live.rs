@@ -27,12 +27,20 @@ fn pending() -> &'static Mutex<HashMap<String, PendingLive>> {
 }
 
 /// 這個 live 套用失敗的理由，是不是「bot 現在忙」——那種才值得等下一次 idle。
+/// `codex: busy_not_ready`：回合中切 fast 時輸入框有字或選單開著（#712），一樣等回合結束。
 pub(crate) fn is_busy_reason(reason: &str) -> bool {
-    reason == "slash_gate: agent_busy" || reason == "slash_gate: turn_in_flight"
+    reason == "slash_gate: agent_busy"
+        || reason == "slash_gate: turn_in_flight"
+        || reason.strip_prefix("codex: ") == Some(crate::codex_live::BUSY_NOT_READY)
 }
 
-pub(crate) fn defer_live(bot_id: &str, fields: &[&str], baseline_rev: &str, target_rev: &str) {
+/// 排到下一次 idle。回 `false`＝沒排（呼叫端照舊回需重啟）：`single_field` 的 kind（claude／grok 的 slash 指令一次一個值）
+/// 已經排著**別的**欄位時不合併——合併後 idle 那次會以 `not_a_single_field` 失敗，而且被合進去的前一個也跟著丟掉。
+pub(crate) fn defer_live(bot_id: &str, fields: &[&str], baseline_rev: &str, target_rev: &str, single_field: bool) -> bool {
     let mut m = pending().lock().unwrap_or_else(|e| e.into_inner());
+    if single_field && m.get(bot_id).is_some_and(|e| e.fields.iter().any(|f| !fields.contains(f))) {
+        return false;
+    }
     let e = m.entry(bot_id.to_string()).or_insert_with(|| PendingLive {
         fields: Vec::new(),
         baseline_rev: baseline_rev.to_string(),
@@ -51,6 +59,7 @@ pub(crate) fn defer_live(bot_id: &str, fields: &[&str], baseline_rev: &str, targ
             e.fields.push(f);
         }
     }
+    true
 }
 
 pub(crate) fn is_deferred(bot_id: &str) -> bool {
@@ -93,11 +102,13 @@ pub(crate) async fn apply_deferred_once(
         super::LiveApplyOutcome::Applied { .. } => {}
         super::LiveApplyOutcome::Failed(why) if is_busy_reason(why) => {
             // 剛閒下來又被新回合搶走：再排一次。
+            // 同一組欄位放回去（`take` 已清空），不會被 single_field 擋。
             defer_live(
                 bot_id,
                 &fields,
                 &queued.baseline_rev,
                 &queued.target_rev,
+                false,
             );
         }
         super::LiveApplyOutcome::BookkeepingPending { reason, .. } => {
@@ -119,6 +130,8 @@ mod tests {
     fn only_a_busy_bot_is_worth_waiting_for() {
         assert!(is_busy_reason("slash_gate: agent_busy"));
         assert!(is_busy_reason("slash_gate: turn_in_flight"));
+        assert!(is_busy_reason("codex: busy_not_ready"), "回合中切 fast 但輸入框有字：等回合結束");
+        assert!(!is_busy_reason("busy_not_ready"), "只認 codex 路徑包出來的那一個");
         assert!(!is_busy_reason("slash_gate: not_running"));
         assert!(!is_busy_reason("codex: readback_fast_mismatch"));
     }
@@ -127,8 +140,8 @@ mod tests {
     fn deferring_collects_known_fields_once_and_take_empties_it() {
         let id = "test-deferred-live-bot";
         assert!(!is_deferred(id));
-        defer_live(id, &["fast", "bogus", "fast"], "baseline-a", "target-a");
-        defer_live(id, &["effort"], "baseline-b", "target-b");
+        assert!(defer_live(id, &["fast", "bogus", "fast"], "baseline-a", "target-a", false));
+        assert!(defer_live(id, &["effort"], "baseline-b", "target-b", false));
         assert!(is_deferred(id));
         assert_eq!(
             take(id),
@@ -141,5 +154,20 @@ mod tests {
         );
         assert!(!is_deferred(id), "take 之後就沒了：不會套兩次");
         assert!(take(id).is_none());
+    }
+
+    /// claude／grok 的 slash 指令一次一個值：已經排著 model，再排 effort 不合併（合併了 idle 那次整批失敗）。
+    #[test]
+    fn a_single_field_kind_does_not_merge_a_second_field() {
+        let id = "test-deferred-live-single";
+        assert!(defer_live(id, &["model"], "base", "t1", true));
+        assert!(defer_live(id, &["model"], "base", "t2", true), "同一個欄位再改：更新目標版本");
+        assert!(!defer_live(id, &["effort"], "base", "t3", true), "別的欄位：不排，回需重啟");
+        assert_eq!(
+            take(id),
+            Some(PendingLive { fields: vec!["model"], baseline_rev: "base".into(), target_rev: "t2".into() })
+        );
+        assert!(defer_live(id, &["effort"], "base", "t4", true), "清空後新的一筆照排");
+        take(id);
     }
 }

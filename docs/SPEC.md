@@ -131,6 +131,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     **機制 B：啟動版本（#353）**：`needs_restart` 從資料算——`launch_rev::of(bot)`（啟動相關設定正規化後的雜湊）在 run 啟動時記進 `runs.launch_rev`，
     bot 目前的版本對不上 active run 記的＝過期，`GET /api/state` 的 bot 帶 `needs_restart`；PATCH 當場套用（slash）成功就更新該 run 的版本、沒記版本的舊 run 在改設定那刻補記「改之前」的版本；
     web 的 Bot 設定面板開著時也顯示「需重啟」。`bots.launch_rev` 欄位 v13 一併加了但不用（現在的版本隨時可算）。
+    排到回合結束才套的 live 欄位（§4.4a「忙的時候不重啟」）不算需重啟：state 的 `needs_restart` 為 false、另帶 `live_apply_deferred`；真正套用失敗才顯示需重啟。
   - **什麼時候升 `SCHEMA_VERSION`**：migrate 建出來的任何 schema 物件變了就升——`db::SCHEMA`、ALTER 名單或任何一個
     子模組的 migrate，表、欄位、型別、預設值、約束、索引、trigger 內容（含由轉移表產生的守衛）都算；排版與 `--` 註解
     不算。不靠人記：`db::schema_guard` 的測試拿全新 DB 的 schema 指紋跟 `db::SCHEMA_HISTORY` 最後一行比，對不上就紅，
@@ -737,7 +738,7 @@ Codex 0.157.0 以舊模型啟動時可能顯示模型遷移選單（例如 `Meet
 
 因此各失敗點的狀態固定如下：舊版本補記失敗＝設定未提交；TUI/readback 失敗＝設定已提交、runtime 未證實、需重啟；runtime DB 寫入失敗＝設定已提交、readback snapshot 留給 DB-only retry、仍需重啟；runtime 與 `live_rev` 已提交但 launch stamp 失敗＝live apply 可回報成功、marker 保留 stamp debt，state 不顯示假的 restart badge；完整成功＝runtime、`live_rev` 與 `launch_rev` 收斂到同一個 run/revision。
 
-`PATCH /api/bots/{id}` 只在**真的送不進去**（agent 忙、回合在飛、沒 pane、選單不對、回讀對不上）才回 `needs_restart: true`；此時 UI 不可顯示新設定。
+`PATCH /api/bots/{id}` 只在**真的送不進去**（沒 pane、選單不對、回讀對不上，或 agent 忙但這次改的欄位排不進回合結束的待套用）才回 `needs_restart: true`；此時 UI 不可顯示新設定。agent 忙／回合在飛本身不算：見下面「忙的時候不重啟」。
 
 - **daemon 記 runtime**：`start_inner` 在 `agent.start` 前用 `models::model_effort_from_argv` 從最終 argv 讀回，存 `runs.runtime_model/effort/fast`
   （讀 argv 而非抄 bots：`effort_checked` 會丟掉模型不收的等級，`bot.args` 也可能自帶 `-m`）。slash 指令套用成功就同步改。
@@ -746,7 +747,8 @@ Codex 0.157.0 以舊模型啟動時可能顯示模型遷移選單（例如 `Meet
 - **收編的 pane**三欄是 NULL = 不知道，UI 不比也不標。codex 例外：它把三個值印在狀態列上，reconcile 讀那行補 NULL（`reconcile::fill_codex_runtime`）——
   否則 UI 會拿 bots 頂上，而 `/fast` 是開關，不知道的 tier 等於切不掉。
   **之後也持續校正**（`codex_live::sync_runtime`，跟 `update_watch` 同一個 30 秒巡邏、拿 bot 鎖）：狀態列讀得到就以它為準，有 `fast` 字樣＝開，整行讀得到卻沒有＝關（codex 關掉時省略那個字）；
-  讀不到（選單開著、畫面被清）什麼都不動，不把讀不到當成 fast=false。使用者在 TUI 手打 `/fast`／`/model`，或當場套用中途失敗，都不會讓標題列的 fast 與「需重啟」chip 卡在啟動時的舊值。
+  讀不到（選單開著、畫面被清）什麼都不動，不把讀不到當成 fast=false。0.157 起狀態列印顯示名（`GPT-6-Luna`）而不是 id：讀進來一律轉小寫，讀回驗證的模型比對也不分大小寫
+  （#712：以前大小寫不同就 `readback_model_mismatch`，連閒著只切 fast 都退回重啟，web 也多列一行假的「模型」落差）。使用者在 TUI 手打 `/fast`／`/model`，或當場套用中途失敗，都不會讓標題列的 fast 與「需重啟」chip 卡在啟動時的舊值。
 - **身份也記 runtime**：`runs.runtime_identity` 的空字串是已知的本機預設帳號，`NULL` 是收編 pane／舊列而不知道，前端只在有值時拿它與 `bot.identity` 比；身份不同時身份徽章顯示實際值，設定值放在 drift 說明。
 - **UI 一律顯示 runtime**；設定 ≠ runtime 時多一顆「需重啟」chip（`POST /api/bots/{id}/restart`）。不准靜靜顯示還沒生效的值。
 - **codex 的 fast 兩個方向都送**：少送 `service_tier` 等於「聽 `~/.codex/config.toml`」，而那裡常寫著 `fast`。所以一律帶 `-c service_tier="priority"`（勾）或
@@ -758,7 +760,17 @@ Codex 0.157.0 以舊模型啟動時可能顯示模型遷移選單（例如 `Meet
 - `/fast` 是開關，PATCH 的 live 欄位閘門要把 `fast` 算進去。**`/fast on`／`/fast off` 不是 slash 形式**（2026-09-22，0.154.0，隔離的 `CODEX_HOME` 實測）：
   裸 `/fast` 回 `Service tier set to priority`／`… default`（狀態列 `fast` 字樣隨之出現／消失），而 `/fast on` 會被當一般 prompt 送給模型、模型跑去查文件。
   所以目標 tier 一律靠「先讀狀態列（沒有再用 `runtime_fast`）→ 不同才按一下」（`codex_live::fast_plan`）；兩者都讀不到（以前直接拒絕 `unknown_fast_tier`）就按一下、讀回、方向錯才按回來（`needs_second_toggle`）；最後照舊讀回驗證。
-- **忙的時候不重啟**（#393）：bot 在 working／blocked／有回合在飛，`PATCH` 不回退成重啟，而是把欄位、PATCH 前版本與目標版本記進 `lifecycle/deferred_live.rs`（排程本身在記憶體），下一次 idle 邊（`events.rs`）再套；套成功走上面的 runtime／`live_rev`／`launch_rev` 收斂流程並推 `bot_changed`，套不上才留下重啟徽章。已成功的 TUI 操作若 DB 收尾失敗，只保留 bookkeeping 債務，不再送第二次操作；一旦 readback snapshot 進入 `live_apply_debts`，daemon 重啟後也會做 DB-only recovery。
+- **回合中只切 fast：當場送**（#712）：codex 0.157.1 的 `/fast`（service tier 指令）是 `available_during_task`，回合跑著照樣生效、回合不中斷
+  （原始碼 `tui/src/bottom_pane/slash_commands.rs` 的 `ServiceTier(_) => true`；2026-09-28 隔離 herdr session 實測 `sleep 40` 的回合中兩個方向都切得過，
+  `• Service tier set to priority`／`default`、狀態列 `fast` 立刻出現／消失、回合照常跑完）。所以 codex 只改 fast、agent `working` 或回合在飛時
+  `slash::live_gate` 放行，走 `codex_live::apply_fast_during_turn`：**絕不按 Esc**（回合中 Esc＝中斷），選單／選擇畫面開著或輸入框不是空的
+  （帶樣式讀 `box_state`；使用者的草稿後面接 `/fast` 再 Enter 會把整段送出）就不碰，回 `codex: busy_not_ready` 走下面的排隊。`blocked` 照舊不碰。
+  model／effort 要開選單，回合中不送。
+- **忙的時候不重啟**（#393、#712）：碰不得的時候（上面以外的忙：working／blocked／有回合在飛），`PATCH` 不回退成重啟，而是把欄位、PATCH 前版本與目標版本記進 `lifecycle/deferred_live.rs`（排程本身在記憶體），
+  等 idle 邊（`events.rs`：working→idle，以及 blocked／unknown→idle）或回合收掉（`messages::emit_turn`：agent 早已 idle、只剩回合紀錄在飛時不會再有 idle 邊）再套；
+  排著的期間 `PATCH` 回 `needs_restart:false`、`live_apply.deferred:true`，state 的 bot 帶 `live_apply_deferred:true` 且 `needs_restart:false`。
+  claude／grok 一樣排，但它們的 slash 指令一次一個值：已經排著別的欄位時不合併（合併了 idle 那次整批 `not_a_single_field`），照舊回需重啟。
+  套成功走上面的 runtime／`live_rev`／`launch_rev` 收斂流程並推 `bot_changed`，套不上才留下重啟徽章。已成功的 TUI 操作若 DB 收尾失敗，只保留 bookkeeping 債務，不再送第二次操作；一旦 readback snapshot 進入 `live_apply_debts`，daemon 重啟後也會做 DB-only recovery。
 - **子 agent 的 fast 從 argv 補**（#393）：收編的 codex 子 agent 若 argv 有 `-c service_tier="priority"`，`bots.fast` 記成 1，UI 就不會平白亮「fast 需重啟」。`sync_pane_model` 原本只在 model／effort 為 NULL 時才看 argv，
   model／effort 已有值（例如 fork 時帶入）的子 agent 永遠補不到；現在**收編後 10 分鐘內**也補 fast。刻意限縮在窗口內：`bots.fast=0` 分不出「沒設」與「使用者關掉了」，窗口外補會把使用者之後關掉的 fast 蓋回去。
 - **選單一律用讀的**：號碼、順序、`(default)`/`(current)` 會跑；每步回讀 pane，比對「號碼後到兩個空白為止」的 label（說明文字會含別的模型名）。

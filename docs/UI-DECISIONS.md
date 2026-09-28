@@ -72,6 +72,12 @@
 - **codex fast 在 logo 上疊閃電**（2026-09-22 使用者）：正在跑的 codex 是 fast（priority tier）時，kind logo 右下（手機右上，右下會被額度列蓋掉）疊一個琥珀色 ⚡，
   來源跟 model chip 的「· fast」同一份（`status.fast_mode`，實際在跑的，不是設定值）。fast 額度燒得快，只寫在 chip 尾巴太容易漏看。
 - 更新 chip 只寫 `${kind} 有更新`；額度列的更新 chip 有列到當前 bot（閒置或在忙那組都算）就不畫，免得同一個 ⌃⌃ 出現兩次（2026-09-19 使用者：「logo 重工了」）；只剩非 claude 的會畫。這顆自己要套用走 context bar 版本號旁的「升級」。
+- **忙的時候改 fast 不問重啟**（#712，2026-09-28 使用者：「codex 的 fast 切換根本不用重啟」）：codex 回合中照樣吃 `/fast`，所以只差 fast 時徽章是「⟳ fast 當場套用」，
+  忙也直接切、不跳重啟確認框；輸入框有字（打 `/fast` 會接在草稿後面一起送出）或改到 model／effort 才排到回合結束，徽章變 `⏳ fast待套用`（按不動，tooltip 寫「回合結束後自動套用」），
+  設定卡片寫「已儲存，回合結束後自動套用。」。回合結束仍套不上才出現重啟。
+  落差清單照 runtime 比設定：codex 0.157 狀態列印顯示名 `GPT-6-Luna`，模型不分大小寫比——以前多列一行「換成模型 gpt-6-luna」，也讓只差 fast 的落差被當成要重啟。
+  重啟確認框寫「重啟後換成設定的值：fast 開 → 關」（實際 → 設定），不寫成沒改過的欄位也要改。
+  ![修正前：多列模型、跳重啟框](screenshots/issue-712/before-restart-dialog.png) ![修正後：只差 fast](screenshots/issue-712/after-busy-fast-only.png) ![有草稿時待套用](screenshots/issue-712/after-deferred-draft.png)
 - 「回合被 API 中斷」：側欄紅記號＋標題列紅 chip（點開原文＋「重送上一則」，走一般送出路徑）；沒有「知道了」。
 - context bar：不顯示花費；版本貼右；commit／push／pull 桌機 hover 才彈出、打 commit 訊息時常駐；CLI 可升級時版本旁出現「⌃⌃ 升級」。
 

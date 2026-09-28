@@ -605,6 +605,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         // 剛起來（`unknown`）或對話框剛關掉（`blocked`）就閒下來：排著的也該送了——bot 沒在跑時收下的那一則
         // （issue #122）正是等這一刻，不然要等退避的 timer（最少 15 秒）。flush 自己的閘門照舊把關。
         crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
+        crate::lifecycle::schedule_deferred_live(app, &run.bot_id);
     }
 }
 

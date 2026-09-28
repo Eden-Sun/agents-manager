@@ -59,6 +59,7 @@ import type { QueuedSend, RestoreResult } from './queuedSend'
 /** `patchBot` 的結果：要不要重啟，以及 daemon 有沒有把送進去的停用模型換掉（issue #539）。 */
 export interface PatchBotOutcome {
   needsRestart: boolean
+  deferred: boolean
   remappedModel: ModelRemap | null
 }
 import { laterMark, serverUnread } from './sharedUnread'
@@ -1856,11 +1857,11 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   async patchBot(botId, input) {
-    if (Object.keys(input).length === 0) return { needsRestart: false, remappedModel: null }
+    if (Object.keys(input).length === 0) return { needsRestart: false, deferred: false, remappedModel: null }
     let out: PatchBotOutcome | null = null
     await guarded(set, get, `patch:${botId}`, async () => {
       const res = await api.patchBot(botId, input)
-      out = { needsRestart: res.needs_restart, remappedModel: res.remapped_model }
+      out = { needsRestart: res.needs_restart, deferred: res.live_apply?.deferred === true, remappedModel: res.remapped_model }
       // 停用的模型別名會被 daemon 換掉再存（API.md「停用模型的回應」）：不講的話，使用者以為自己選的生效了，
       // 而畫面上那一欄還停在他送出的值（issue #539）。三個送出入口共用這一句。
       if (res.remapped_model) {

@@ -176,6 +176,8 @@ pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
     // Schedule after publishing so the next prompt cannot race the completion event.
     if should_flush_queue {
         schedule_flush_queued(app, &bot_id);
+        // 回合收掉是「回合在飛」那種延後在等的邊：agent 早已 idle 時不會再有 idle 邊（#712）。
+        super::schedule_deferred_live(app, &bot_id);
     }
 }
 
