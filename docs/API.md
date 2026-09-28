@@ -656,7 +656,7 @@ bot 或 active Run 不存在 404。
 port 存活探測同時連 `127.0.0.1` 與 `::1`，因此只綁 IPv6 loopback 的 dev server 仍會回報為存活。
 
 ### `POST /api/bots/{id}/preview`
-冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port；`failed` 先關掉它留下的 pane，關不掉回 409 `preview_stop_failed`）。body 可省略，或：
+冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port；`failed` 先清掉舊 pane。若 pane ID 已重用，保留目前的 pane 後重試；身分檢查讀取失敗則回 409 `preview_stop_failed`）。body 可省略，或：
 
 ```json
 {"mode": "auto | attach | spawn", "port": 5173, "dir": "/path/to/apps/site", "pid": 4242}
@@ -682,11 +682,11 @@ port 存活探測同時連 `127.0.0.1` 與 `::1`，因此只綁 IPv6 loopback �
 | `no_free_port` | 5180 起的 100 顆都被佔了 |
 | `not_vite` | `mode=attach` 的 `port` 不是掃到的 dev server（body 帶 `port`） |
 | `stale_selection` | `mode=attach` 帶的 `pid`／`dir` 跟現在佔著那個 `port` 的行程對不上（body 帶現在的 `pid`／`dir`） |
-| `preview_stop_failed` | 預覽 pane 關不掉（`DELETE`、`failed` 重試、明確換預覽時）；列維持原狀態 |
+| `preview_stop_failed` | 預覽 pane 關不掉或無法確認 pane 身分（`DELETE`、`failed` 重試、明確換預覽時）；列維持原狀態 |
 
 ### `DELETE /api/bots/{id}/preview`
-`spawned` 關 pane、放掉 port；`attached` **只斷開，絕不動對方的 server**。回 `{"status":"off"}`；沒開過也是。
-`spawned` 的 pane 關不掉（讀不到 run、拿不到 session 的 client、關指令失敗）回 409 `preview_stop_failed`，列維持原狀態，不謊報 `off`。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
+`spawned` 關 pane、放掉 port；關前檢查同 host 活躍 run 和 `panes.first_seen`，確定 pane ID 已重用時保留目前的 pane，只清除舊預覽列。`attached` **只斷開，絕不動對方的 server**。回 `{"status":"off"}`；沒開過也是。
+`spawned` 的 pane 關不掉（讀不到 run 或身分檢查、拿不到 session 的 client、關指令失敗）回 409 `preview_stop_failed`，列維持原狀態，不謊報 `off`。bot 被停止／重啟／刪除、§6.11 閒置收 bot 時 daemon 也會做同一件事。
 每次狀態變動推 WS `preview_changed`。
 
 ## 非 agent 的 pane（SPEC §6.5e）
