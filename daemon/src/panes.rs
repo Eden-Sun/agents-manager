@@ -228,12 +228,15 @@ pub async fn scan_snapshot(app: &Arc<App>, host: &str, snapshot: &Value) -> Resu
         .filter(|w| is_daemon_probe_workspace(label_of(w)))
         .filter_map(|w| w.get("workspace_id").and_then(Value::as_str))
         .collect();
+    // #708：移交出去的專案的 pane（它的 workspace／tab／活著的 run 的 pane）不歸這顆 daemon：不記、不 GC、不通知。
+    let handed_off = crate::handoff::footprint(&app.db, host).await?;
     let panes: Vec<Value> = snapshot
         .get("panes")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|p| !p.get("workspace_id").and_then(Value::as_str).is_some_and(|w| probe_ws.contains(w)))
+        .filter(|p| !handed_off.covers_pane(p))
         .cloned()
         .collect();
     scan_host(app, host, &panes).await

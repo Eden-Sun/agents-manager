@@ -22,6 +22,7 @@ import { herdrJumpCommand } from '../lib/herdrJump'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { HerdrAgentName } from './HerdrAgentName'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
+import { handedOffTo } from '../lib/handoff'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments } from './Attachments'
 import { useAttachments, useDropTarget } from './attachmentsHelpers'
 import { BlockedBadge } from './BlockedBadge'
@@ -1180,6 +1181,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const messagesLoaded = useStore((s) => (botId ? Boolean(s.loadedBots[botId]) : false))
   const chatEmpty = messagesLoaded && (messages?.length ?? 0) === 0
   const composerReason = useStore((s) => (botId ? composerState(s, botId).reason : ''))
+  // #708：專案移交出去了，daemon 不替它開 pane；「啟動」鈕停用，理由在 composerReason。
+  const handedOff = useStore((s) => handedOffTo(s.projects, s.bots.find((b) => b.id === botId)?.project_id) != null)
   // issue #122：有一則交給 daemon、在等 bot 起來——輸入框上方那一條已經講了狀態、給了重新啟動／取消，這裡不再重複一條「啟動」。
   const waitingForStart = useStore((s) => (botId ? startingSend(s.turns[botId], s.messages[botId]) !== null : false))
 
@@ -1464,7 +1467,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               <button
                 type="button"
                 className="btn primary"
-                disabled={Boolean(busy[`start:${botId}`])}
+                disabled={Boolean(busy[`start:${botId}`]) || handedOff}
                 onClick={() => void startBot(botId)}
               >
                 啟動 {bot.name}
@@ -1491,7 +1494,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               <button
                 type="button"
                 className="mini-btn primary"
-                disabled={Boolean(busy[`start:${botId}`])}
+                disabled={Boolean(busy[`start:${botId}`]) || handedOff}
                 title={`啟動 ${bot.name}`}
                 onClick={() => void startBot(botId)}
               >

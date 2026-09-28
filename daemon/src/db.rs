@@ -16,7 +16,9 @@ CREATE TABLE IF NOT EXISTS projects (
   workspace_id TEXT,
   deleted_at TEXT, created_at TEXT NOT NULL,
   -- 同 `bots.position`：側欄順序，來自 config.toml 的陣列位置。
-  position INTEGER NOT NULL DEFAULT 0
+  position INTEGER NOT NULL DEFAULT 0,
+  -- #708：已移交給哪一台主機的 daemon（config.toml 的 `handed_off_to` 投影過來）；NULL＝這顆 daemon 管。
+  handed_off_to TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS bots (
@@ -256,6 +258,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (29, "bfd0564e8c1a8d5e"),
     // issue #635: spawn hints are unique by host and pane id, not by pane id globally.
     (30, "db1edd18d6bf4693"),
+    // issue #708：`projects.handed_off_to`（專案移交給另一台主機的 daemon）。
+    (31, "4aa40b8a872df7d8"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -446,6 +450,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
             "ALTER TABLE messages ADD COLUMN sent_via TEXT CHECK (sent_via IN ('send_now','supplement'))",
         ),
         ("runs", "live_rev", "ALTER TABLE runs ADD COLUMN live_rev TEXT"),
+        // #708：專案已移交給另一台主機的 daemon；NULL＝本機管。
+        ("projects", "handed_off_to", "ALTER TABLE projects ADD COLUMN handed_off_to TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
@@ -852,6 +858,8 @@ pub struct Project {
     pub workspace_id: Option<String>,
     pub deleted_at: Option<String>,
     pub created_at: String,
+    /// #708：已移交給這台主機的 daemon；`None`＝這顆 daemon 管。
+    pub handed_off_to: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -1540,7 +1548,7 @@ mod tests {
         assert_eq!(cross_host_rows, 2);
 
         let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&current).await.unwrap();
-        assert_eq!(version, 30);
+        assert_eq!(version, SCHEMA_VERSION, "migrated v29 DB must be stamped with the current version");
         schema_guard::check_drift(&current).await.expect("migrated v29 DB must match schema_guard");
         current.close().await;
         let _ = std::fs::remove_dir_all(&dir);

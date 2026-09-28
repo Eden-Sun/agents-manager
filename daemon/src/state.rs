@@ -382,6 +382,10 @@ impl App {
     }
 
     pub async fn herdr_for_run(&self, run: &crate::db::Run) -> Option<HerdrClient> {
+        // #708：移交出去的專案沒有 client（survey、update_watch、child_alerts、閒置回收……都經過這裡）；讀不到也不給。
+        if !matches!(crate::handoff::bot_handed_off_to(&self.db, &run.bot_id).await, Ok(None)) {
+            return None;
+        }
         let host = crate::db::bot_host(&self.db, &run.bot_id).await.ok()?;
         let session = self.session_for_run(run).await?;
         self.herdr_for_session(&host, &session).await

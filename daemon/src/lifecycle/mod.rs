@@ -203,6 +203,8 @@ async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<RunClient> {
             run.id
         ))
     };
+    // #708：移交出去的專案一個 pane RPC 都不打（keys／text／interrupt／login／搬 tab……都經過這裡）。
+    crate::handoff::refuse(&app.db, &run.bot_id).await?;
     let host = db::bot_host(&app.db, &run.bot_id).await.map_err(up)?;
     let fence = app.hosts.fence(&host).await.ok_or_else(no_client)?;
     // Reuse #594's exact-fence resolver: it verifies the run still names this host before and after

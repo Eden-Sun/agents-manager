@@ -215,6 +215,8 @@ interface MockProject {
   host: string
   /** null = not a GitHub project */
   github: { owner: string; repo: string; url: string } | null
+  /** #708 */
+  handed_off_to?: string | null
   created_at: string
 }
 
@@ -2268,6 +2270,11 @@ export class MockTransport implements Transport {
       const label = String(b.label ?? '').trim()
       if (!label) throw new ApiError(400, { reason: 'project label must not be empty' }, 'bad_request')
       p.label = label
+    }
+    if (b.handed_off_to !== undefined) {
+      const to = b.handed_off_to === null ? null : String(b.handed_off_to).trim()
+      if (to === '') throw new ApiError(400, { reason: 'handed_off_to must be a non-empty host name or null' }, 'bad_request')
+      p.handed_off_to = to
     }
     this.emit('project_changed', { project_id: id })
     return { project_id: id, needs_restart: false }

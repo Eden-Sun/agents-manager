@@ -118,7 +118,8 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
            JOIN runs r ON r.id = t.run_id
            JOIN bots b ON b.id = r.bot_id
            JOIN projects p ON p.id = b.project_id
-          WHERE t.status = 'in_flight' AND r.state = 'running' AND (? IS NULL OR p.host = ?)",
+          WHERE t.status = 'in_flight' AND r.state = 'running' AND (? IS NULL OR p.host = ?)
+            AND p.handed_off_to IS NULL",
     )
     .bind(host)
     .bind(host)
@@ -373,6 +374,35 @@ pub(crate) fn codex_reply_after(log: &str, sent: &[String]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::testing as tt;
+
+    /// #708：移交出去的專案，in-flight 回合是對方 daemon 的：巡邏不收；收回之後照常收。
+    #[tokio::test]
+    async fn the_sweep_leaves_a_handed_off_projects_turn_alone() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let conv = crate::db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn = crate::db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,?,'web','in_flight','ok','x',?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(&run)
+            .bind(crate::db::iso_in(-3600))
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let status = |app: Arc<App>, turn: String| async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM turns WHERE id = ?").bind(turn).fetch_one(&app.db).await.unwrap()
+        };
+        sqlx::query("UPDATE projects SET handed_off_to = 'agm-host' WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        sweep_at(&app, None, Instant::now(), Duration::ZERO).await;
+        assert_eq!(status(app.clone(), turn.clone()).await, "in_flight");
+
+        sqlx::query("UPDATE projects SET handed_off_to = NULL WHERE id = ?").bind(&env.project_id).execute(&app.db).await.unwrap();
+        sweep_at(&app, None, Instant::now(), Duration::ZERO).await;
+        assert_ne!(status(app.clone(), turn.clone()).await, "in_flight", "收回之後照常收");
+    }
 
     #[test]
     fn a_bad_threshold_falls_back_to_five_minutes() {

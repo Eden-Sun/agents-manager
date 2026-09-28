@@ -229,6 +229,7 @@ pub async fn ensure_env(
                 Some(i) => i,
                 None => {
                     cfg.projects.push(ProjectCfg {
+                        handed_off_to: None,
                         id: Some(fresh_project.clone()),
                         path: p2.clone(),
                         label: BOT_NAME.to_string(),
@@ -1062,6 +1063,7 @@ mod tests {
 
     fn cfg_project(id: &str, path: &std::path::Path, label: &str, bots: Vec<BotCfg>) -> ProjectCfg {
         ProjectCfg {
+            handed_off_to: None,
             id: Some(id.into()),
             path: crate::config::canonical_path(&path.to_string_lossy()).unwrap(),
             label: label.into(),

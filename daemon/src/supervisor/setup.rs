@@ -222,6 +222,7 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
                 Some(i) => i,
                 None => {
                     cfg.projects.push(ProjectCfg {
+                        handed_off_to: None,
                         id: Some(fresh_project.clone()),
                         path: p2.clone(),
                         label: BOT_NAME.to_string(),

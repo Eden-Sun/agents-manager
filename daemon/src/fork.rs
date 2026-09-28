@@ -277,6 +277,7 @@ mod tests {
                 .update(move |cfg| {
                     if cfg.projects.is_empty() {
                         cfg.projects.push(crate::config::ProjectCfg {
+                            handed_off_to: None,
                             id: Some(pid),
                             path: repo,
                             label: "proj".into(),

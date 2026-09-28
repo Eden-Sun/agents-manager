@@ -619,7 +619,12 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
         })
         .unwrap_or_default();
 
-    for p in db::live_projects(&app.db).await?.into_iter().filter(|p| p.host == host) {
+    let projects: Vec<db::Project> = db::live_projects(&app.db).await?.into_iter().filter(|p| p.host == host).collect();
+    // #708：移交出去的專案整個不碰——workspace 映射、run、child、pane 都歸接手的 daemon。
+    let handed_off: std::collections::HashSet<&str> =
+        projects.iter().filter(|p| p.handed_off_to.is_some()).map(|p| p.id.as_str()).collect();
+    let handed_off_footprint = crate::handoff::footprint(&app.db, host).await?;
+    for p in projects.iter().filter(|p| p.handed_off_to.is_none()) {
         if let Some(ws) = p.workspace_id.as_deref() {
             if !live_ws.contains(&ws.to_string()) {
                 sqlx::query("UPDATE projects SET workspace_id=NULL WHERE id=?").bind(&p.id).execute(&app.db).await?;
@@ -639,6 +644,9 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
     let mut parents: Vec<Parent> = Vec::new();
     for bot in bots {
         let mut bot = bot;
+        if handed_off.contains(bot.project_id.as_str()) {
+            continue;
+        }
         // Default-session bots are default_session::sync's; absent from our agent.list ≠ exited.
         if bot.herdr_session.as_deref().map(|s| s != session).unwrap_or(false) {
             continue;
@@ -971,6 +979,10 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
         if claimed.contains(name) {
             continue;
         }
+        // #708：移交出去的專案的 agent（名字、pane、tab、workspace 對得上）不是誰的新 child。
+        if handed_off_footprint.covers_agent(agent) {
+            continue;
+        }
         let by_hint = hints.get(&agent.pane_id).and_then(|bid| parents.iter().find(|p| &p.bot.id == bid));
         let by_tab = parents
             .iter()
@@ -1024,6 +1036,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
     let dead: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT DISTINCT r.pane_id, r.tab_id, r.workspace_id FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
          WHERE r.pane_id IS NOT NULL AND p.host = ? AND r.state IN ('exited','stopped')
+         AND p.handed_off_to IS NULL
          AND COALESCE(r.herdr_session, ?) = ?
          AND NOT EXISTS (
            SELECT 1 FROM panes pn WHERE pn.host = ? AND pn.pane_id = r.pane_id AND pn.first_seen > r.ended_at)
@@ -1209,6 +1222,7 @@ async fn fill_codex_runtime(app: &Arc<App>, host: &str, client: &crate::herdr::H
     let rows: Vec<(String, String)> = match sqlx::query_as(
         "SELECT r.id, r.pane_id FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
          WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
+         AND p.handed_off_to IS NULL
          AND r.runtime_model IS NULL AND r.runtime_effort IS NULL AND r.runtime_fast IS NULL",
     )
     .bind(host)
@@ -2002,6 +2016,7 @@ mod compat_tests {
                 let b: crate::config::BotCfg =
                     toml::from_str(&format!("id = '{alfa}'\nname = 'alfa'\nkind = 'claude'\n")).unwrap();
                 cfg.projects = vec![crate::config::ProjectCfg {
+                    handed_off_to: None,
                     id: Some(pid),
                     path,
                     label: "proj".into(),

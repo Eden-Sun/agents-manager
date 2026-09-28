@@ -658,6 +658,8 @@ async fn prompt_inner(
     super::race_point::hit("prompt_before_bot_lock", bot_id).await;
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    // #708：移交出去的專案不收 prompt（也不排隊）：送到了也是另一顆 daemon 的回合。
+    crate::handoff::refuse(&app.db, bot_id).await?;
     // 這顆如果是 AGM 因為閒置收起來的（§6.11），先用 `--resume` 把它叫醒再送——「下次要用再叫醒」
     // 的那個「下次要用」就是這裡。**在鎖裡**做（issue #123）：巡邏收機器也在同一把鎖裡判斷＋寫標記＋停機，
     // 叫醒放在鎖外的話，會夾在「叫醒檢查過、沒睡」與「拿到鎖」之間被收掉，接著只會看到 409 沒有 active run。

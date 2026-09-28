@@ -118,7 +118,7 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
     }
 }
 
-async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event) {
+pub(crate) async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event) {
     let name = norm(&ev.event);
     match name.as_str() {
         "pane_exited" | "pane_closed" => {
@@ -267,7 +267,8 @@ async fn close_workspace_try(app: &Arc<App>, host: &str, session: &str, ws: &str
         }
     }
     if app.session_for_host(host).await.as_deref() == Some(session) {
-        match sqlx::query("UPDATE projects SET workspace_id = NULL WHERE workspace_id = ? AND host = ?").bind(ws).bind(host).execute(&app.db).await {
+        // #708：移交出去的專案的映射不動。
+        match sqlx::query("UPDATE projects SET workspace_id = NULL WHERE workspace_id = ? AND host = ? AND handed_off_to IS NULL").bind(ws).bind(host).execute(&app.db).await {
             Ok(_) => app.emit("project_changed", json!({})).await,
             Err(e) => {
                 tracing::warn!(host, workspace_id = ws, error = ?e, "could not clear the closed workspace's project binding");
@@ -511,6 +512,16 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     let Some(run) = runs.into_iter().next() else {
         return;
     };
+    // #708：移交出去的專案，狀態、外部回合、備援、通知 parent 都歸接手的 daemon。讀不到就照「讀不到 run」重放。
+    match crate::handoff::bot_handed_off_to(&app.db, &run.bot_id).await {
+        Ok(None) => {}
+        Ok(Some(_)) => return,
+        Err(e) => {
+            tracing::warn!(host, pane_id, status = %status, error = ?e, "could not tell whether a pane's project was handed off; replaying it shortly");
+            replay_status_later(app, host, session, ev, key, seq, attempt);
+            return;
+        }
+    }
     let prev = run.agent_status.clone();
     // 卡住的 turn 要「持續」idle 才收：每個狀態事件都記，閃一下 working 就重算。
     crate::lifecycle::observe_agent_status(&run.id, &status);

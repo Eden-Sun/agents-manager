@@ -91,6 +91,8 @@ async fn stop_locked(
     host_fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    // #708：移交出去的 bot 不停（閒置回收、批次重啟、codex 升級後的重啟都走這裡）。
+    crate::handoff::refuse(&app.db, bot_id).await?;
     let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
         // agent 自己退了、預覽還掛著的話也一併收（§6.12）。
         match host_fence {

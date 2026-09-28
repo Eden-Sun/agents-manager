@@ -66,6 +66,8 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
         .await?
         .into_iter()
         .filter(|p| p.host == LOCAL_HOST)
+        // #708：移交出去的專案不從 default session 匯入 agent。
+        .filter(|p| p.handed_off_to.is_none())
         .collect();
     let mut seen_bots = HashSet::new();
 

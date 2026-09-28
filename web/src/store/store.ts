@@ -90,6 +90,7 @@ import { fetchSupervisor } from '../api/supervisor'
 import { IN_MOBILE_PREVIEW, writeShared } from './mobilePreview'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
+import { handedOffReason, handedOffTo } from '../lib/handoff'
 
 const sendMissionRequest = missionRequests(api.newClientRequestId)
 const missionLoads = new Map<string, () => Promise<void>>()
@@ -3511,6 +3512,8 @@ export function composerState(state: StoreState, botId: string | null): Composer
   const base: ComposerState = { disabled: true, reason: '', queued: false, inFlightTurnId: null, unknownTurnId: null }
   if (!botId) return { ...base, reason: '請先在左側選擇一個 Bot' }
   const bot = state.bots.find((b) => b.id === botId)
+  const handedOff = bot ? handedOffTo(state.projects, bot.project_id) : null
+  if (handedOff) return { ...base, reason: handedOffReason(handedOff) }
   const hostName = bot ? projectHostName(state, bot.project_id) : 'local'
   if (hostName !== 'local') {
     const host = hostOfBot(state, botId)
