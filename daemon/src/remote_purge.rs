@@ -104,6 +104,11 @@ pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
     if host == crate::config::LOCAL_HOST {
         return (0, 0);
     }
+    // #709：共用 session 的主機上，遠端資料目錄可能就是另一顆 daemon 自己的：回收區與 bot 目錄一律不動。
+    if crate::shared_host::is_shared(app, host).await {
+        tracing::debug!(host, "shared-session host: remote bot directories and trash left alone");
+        return (0, 0);
+    }
     crate::remote_trash::gc_host(app, host).await;
     let ids = match pending(&app.db, host).await {
         Ok(v) => v,
@@ -209,7 +214,7 @@ mod tests {
     /// 專案在遠端主機 `host`、主機連線物件有家目錄（不必真的 ssh），ssh 換成記錄腳本的假貨。
     async fn remote(host: &str) -> Remote {
         let env = tt::env().await;
-        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new() };
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/home/x".into());
         sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();

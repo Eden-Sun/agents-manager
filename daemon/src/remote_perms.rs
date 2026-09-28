@@ -192,6 +192,7 @@ mod tests {
             .app
             .hosts
             .insert_remote_for_test(crate::config::HostCfg {
+                shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),
                 ssh_port: 22,

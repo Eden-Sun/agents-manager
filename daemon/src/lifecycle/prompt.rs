@@ -2125,6 +2125,7 @@ mod prompt_tests {
         let app = f.env.app.clone();
         let host = format!("prompt-repoint-{}", db::ulid());
         let host_cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.clone(),
             ssh: ssh.into(),
             ssh_port: 22,

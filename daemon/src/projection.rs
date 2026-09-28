@@ -827,6 +827,7 @@ mod tests {
     fn hand_edited_hosts_are_validated_like_the_api_validates_them() {
         use crate::config::{ConfigFile, HostCfg};
         let host = |name: &str, ssh: &str| HostCfg {
+            shared_session: false,
             name: name.into(),
             ssh: ssh.into(),
             ssh_port: 22,

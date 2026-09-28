@@ -1993,6 +1993,7 @@ mod resume_args_tests {
             let pm = claude_bot(&e.app, &e.project_id, "pm").await;
             let host = format!("resume-home-616-{}", db::ulid().to_ascii_lowercase());
             let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
+                shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),
                 ssh_port: 22,
@@ -2035,6 +2036,7 @@ mod resume_args_tests {
             drop(listener); // 沒有人在聽這個 port 了：接下來連過去是 connection refused，快速失敗。
 
             let host_cfg = crate::config::HostCfg {
+                shared_session: false,
                 name: "unreachable-box".into(),
                 ssh: "127.0.0.1".into(),
                 ssh_port: port,

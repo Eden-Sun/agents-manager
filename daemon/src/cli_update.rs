@@ -1390,6 +1390,7 @@ mod tests {
         let app = env.app.clone();
         let host = "cli-update-repoint";
         let host_cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
@@ -1884,6 +1885,7 @@ mod tests {
         let env = crate::testing::env().await;
         let host = "cx-347";
         let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
@@ -1930,6 +1932,7 @@ mod tests {
         let app = env.app.clone();
         let host = "cli-update-notice-repoint";
         let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
@@ -1991,6 +1994,7 @@ mod tests {
         let env = crate::testing::env().await;
         let host = "start-authority-347";
         let cfg = crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: "target-a".into(),
             ssh_port: 2222,
@@ -2227,6 +2231,7 @@ mod tests {
         let env = crate::testing::env().await;
         let host = "recover-347";
         let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
@@ -2409,6 +2414,7 @@ mod tests {
         let env = crate::testing::env().await;
         let host = "recover-fence-347";
         let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
