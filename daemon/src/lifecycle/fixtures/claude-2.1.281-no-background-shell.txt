@@ -1,0 +1,55 @@
+
+
+✻ Worked for 1s · done 9:28 AM
+
+⏺ Usage limit reset · continuing automatically
+
+  Ran 2 shell commands
+  ⎿  1 skill available
+
+⏺ The 12-minute cap hit again: 2751/2911 ok, 0 failed, and every test I touched plus the upstream pane_identity test passed. The documented response to exit 124 is a rerun, so I'm retrying once:
+
+  Ran 1 shell command
+
+⏺ Waiting for the retry.
+
+✻ Crunched for 19s · done 12:01 PM
+
+⏺ Background command "scripts/check.sh daemon > /private/tmp/claude-501/-Users-m4p-project-agents-manager/7ec66b7e-1ca6-42d0-818b-fdc8d18d1f00/scratchpad/checkd4.log 2>&1; echo exit=$?" completed (exit code 0)
+
+  Ran 1 shell command
+
+⏺ Hit the time cap again since the full test suite runs too long on a loaded host. I'll split it into two disjoint runs on the warm build—one targeting supervisor/lifecycle/mission, the other skipping
+  those—together covering everything.
+
+  Ran 2 shell commands
+
+⏺ Post-rebase, on Linux: 1307 + 1604 = 2911/2911 passed, 0 failed. Pushing the branch:
+
+  Pushed to feat/676-linux, ran 1 shell command
+
+⏺ Comment posted. Now releasing the claim and removing my worktree:
+
+  Ran 1 shell command
+
+⏺ #676 完成：commit 2820e95d，分支 feat/676-linux，已 rebase 到 5ce6d6a1 並推上去，issue 已留言、release，worktree 已移除。
+
+  - 改了什麼：Ubuntu server 不保證有 lsof，所以 Linux 上的 listen port 和 cwd 改讀 /proc（新檔 linux_proc.rs，輸出跟 lsof 同格式，解析共用），macOS 照舊用 lsof。另外 judge.rs 送畫面給 Jev 前會多遮
+    /home/<名>，hookrecv.rs 的提示補上 Linux 憑證位置。docs/SPEC.md 新增 §19「Linux 主機」，列出每一處只在 macOS 成立的地方和處理方式。其餘各處原本就有執行期偵測，不用改。
+  - 怎麼驗的：rebase 後在遠端 Linux 跑整樹測試，2911/2911 通過。整樹 check.sh daemon 因遠端排隊三次撞 12 分鐘上限（被截斷前都是 0 failed），所以最後是在同一份 build 上拆成兩段不重疊的過濾跑（1307 + 1604）；rebase
+    前整樹一次跑完 2899/2899。Linux release profile 用 cargo check --release 驗過；cargo build 會留在本機，所以沒在遠端跑。Mac 原生 check.sh macos-local 41+42+13 通過。反向變異：改壞位元組順序有 3 條測試變紅，拿掉
+    /home/ 遮罩有 1 條變紅。我原本以為 Linux 的 ps -axo 有 bug，實測不是，所以沒改那條指令，只補了測試。
+  - 沒動的：deploy_now.rs 的 launchctl kickstart 歸 #677。在 Linux 上它叫不起來時，會照原本的錯誤處理回 kick_start_failed，不改任何狀態。
+  - 需要遠端確認（沒有 ssh key，無法驗）：
+    a. herdr 在 Linux 的 socket 是否仍在 ~/.config/herdr/sessions/<s>/herdr.sock。
+    b. daemon 若用 systemd user service 跑，要先 loginctl enable-linger，不然登出就被收掉。
+    c. 搬過去後那台本身就是編譯主機，[build.remote] 要拿掉，否則 cargo shim 會 ssh 回自己。
+    d. claude／codex／grok 的憑證都要是檔案（Linux 沒有 Keychain）。
+
+✻ Churned for 10m 8s · done 12:23 PM
+                                                                                                                                                                             new task? /clear to save 205.8k tokens
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  eddie | agents-manager-k8bw2f-linux | OP5.5 H 20% | 5h:97%(rst 3h 36m) | 7d:2%(rst 2d 21h)
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

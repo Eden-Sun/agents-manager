@@ -724,3 +724,16 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - 設定／收回旗標目前只走 API（`PATCH /api/projects/{id}`），不另做開關：這是一次性的搬家動作，按錯的代價是兩顆 daemon 搶同一批 pane。
 
 ![桌機](screenshots/handoff/handoff-dark.png) ![手機](screenshots/handoff/handoff-mobile-dark.png)
+
+## 回合結束、背景還在跑：「背景執行中（N）」（2026-09-28，issue #714）
+
+使用者：child 把遠端 cargo 丟到背景後回合結束，UI 顯示閒置，「沒看到在動」。
+
+- **只在閒著時標**：run `running` 且 `agent_status = idle` 才畫；回合中燈號已經是「執行中」，不重複。
+- **不當成出錯**：用 accent 色＋慢速脈動圓點（還在動），不用 warn／danger；`prefers-reduced-motion` 不動。
+- **三個地方都看得到**：側欄那格「閒置」換成「背景 N」（那格原本只放兩個字，「背景執行中（N）」會被截成「背景執」；名字很長的列
+  連數字也會被擠掉，完整說明在 tooltip）、標題列第二行 chip「背景執行中（N）」、輸入框上方一條說明（claude 說 shell、codex 說終端，
+  並講明現在也可以照常送訊息）。
+- 驗證：mock 起前端，把 run 的 `background_jobs` 設成 1／2。
+
+![桌機](screenshots/background-jobs/bg-light.png) ![手機](screenshots/background-jobs/bg-mobile-dark.png)

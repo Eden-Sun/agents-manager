@@ -19,6 +19,7 @@ mod deploy_now;
 mod launch_rev;
 mod promote_intents;
 mod assets;
+mod background_jobs;
 mod attach;
 mod bulk_restart;
 mod changelog;

@@ -47,6 +47,7 @@ import { MemBadge } from './MemBadge'
 import { ThemeToggle } from './ThemeToggle'
 import { ProjectMemBadge } from './ProjectMemBadge'
 import { HandedOffBadge } from './HandedOffBadge'
+import { BackgroundJobsBadge } from './BackgroundJobs'
 import { RebuildBadge } from './RebuildBadge'
 import { DeployNowBadge } from './DeployNowBadge'
 import { TabsBadge } from './TabsBadge'
@@ -369,7 +370,12 @@ function BotRow({
                 ⚠ 中斷
               </span>
             ) : null}
-            {showTitle || compact ? null : <span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>}
+            {/* #714：回合結束但背景工作還在跑，「閒置」換成「背景執行中（N）」；精簡的 child 列沒有狀態字，給個小記號。 */}
+            {showTitle ? null : compact ? (
+              <BackgroundJobsBadge botId={botId} variant="mini" />
+            ) : (
+              <BackgroundJobsBadge botId={botId} variant="state" fallback={<span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>} />
+            )}
           </BotNameField>
         </span>
         {hit ? (
