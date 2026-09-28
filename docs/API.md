@@ -1078,14 +1078,14 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
   "mode": null, "pending": null, "error": null }
 ```
 
-- `logged_in`：**作用中**帳號的 `gh auth status --json` 為 success 才 true。`pending` 是進行中的裝置碼（不含 `device_code`、token）。
+- `logged_in`：`true|false|null`。新版以 `gh auth status --json hosts` 判斷；不支援 JSON 的舊版改用 `gh api user --jq .login` 確認作用中帳號。兩者都無法確認時是 `null`（未知），不當成未登入。`pending` 是進行中的裝置碼（不含 `device_code`、token）。
 - host 不存在 404；ssh 失敗 502；沒裝 gh → `installed:false`（仍 200）。
 
 `POST /api/hosts/{name}/gh/login {"mode"?: "auto", "user"?: null}`：
 
 | mode | 行為 |
 |---|---|
-| `auto` | 已可用 → 原樣回；有有效但非 active 的帳號 → `switch`；遠端且本機已登入 → `copy`；其餘 → `device` |
+| `auto` | 已可用 → 原樣回；有有效但非 active 的帳號 → `switch`；狀態未知 → `device`；遠端狀態明確且未登入、本機已登入 → `copy`；其餘 → `device` |
 | `switch` | `gh auth switch --hostname github.com --user <user>`（沒給 user 切到第一個有效的非 active 帳號） |
 | `copy` | 本機 `gh auth token` 經 ssh **stdin** 餵給遠端 `gh auth login --with-token --insecure-storage`（token 不進 argv、log）；只適用遠端 |
 | `device` | daemon 向 GitHub 要裝置碼、立刻回 `pending {user_code, verification_uri, verification_uri_complete, expires_in}`；背景輪詢，授權後同樣 `--with-token` 餵給該主機 |

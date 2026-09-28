@@ -64,12 +64,17 @@ pub struct GhAccount {
 pub struct GhStatus {
     pub installed: bool,
     pub path: Option<String>,
+    pub login_status: Option<bool>,
     pub accounts: Vec<GhAccount>,
 }
 
 impl GhStatus {
     pub fn logged_in(&self) -> bool {
-        self.accounts.iter().any(|a| a.active && a.ok)
+        self.login_status == Some(true)
+    }
+
+    pub fn status_known(&self) -> bool {
+        self.login_status.is_some()
     }
 
     pub fn account(&self) -> Option<&str> {
@@ -93,7 +98,7 @@ impl GhStatus {
             "name": name,
             "installed": self.installed,
             "path": self.path,
-            "logged_in": self.logged_in(),
+            "logged_in": self.login_status,
             "account": self.account(),
             "accounts": self.accounts.iter().map(|a| json!({
                 "login": a.login,
@@ -173,6 +178,7 @@ fn lc_msg(e: &LcError) -> String {
 pub fn parse_probe(out: &str) -> GhStatus {
     let mut path = None;
     let mut json_buf = String::new();
+    let mut api_login = None;
     let mut in_json = false;
     for line in out.lines() {
         if let Some(rest) = line.strip_prefix("AM_PATH ") {
@@ -191,28 +197,42 @@ pub fn parse_probe(out: &str) -> GhStatus {
             in_json = false;
             continue;
         }
+        if let Some(login) = line.strip_prefix("AM_API_LOGIN ") {
+            let login = login.trim();
+            if !login.is_empty() {
+                api_login = Some(login.to_string());
+            }
+        }
         if in_json {
             json_buf.push_str(line);
             json_buf.push('\n');
         }
     }
-    let accounts = parse_accounts(&json_buf);
-    GhStatus { installed: path.is_some(), path, accounts }
+    let (accounts, login_status) = match parse_accounts(&json_buf) {
+        Some(accounts) => {
+            let logged_in = accounts.iter().any(|a| a.active && a.ok);
+            (accounts, Some(logged_in))
+        }
+        None => match api_login {
+            Some(login) => (
+                vec![GhAccount { login, active: true, ok: true }],
+                Some(true),
+            ),
+            None => (Vec::new(), None),
+        },
+    };
+    GhStatus { installed: path.is_some(), path, login_status, accounts }
 }
 
-pub fn parse_accounts(raw: &str) -> Vec<GhAccount> {
-    let v: Value = serde_json::from_str(raw.trim()).unwrap_or(json!({}));
-    let Some(hosts) = v.get("hosts").and_then(|h| h.as_object()) else {
-        return Vec::new();
-    };
+pub fn parse_accounts(raw: &str) -> Option<Vec<GhAccount>> {
+    let v: Value = serde_json::from_str(raw.trim()).ok()?;
+    let hosts = v.get("hosts")?.as_object()?;
     let mut accounts = Vec::new();
     // Prefer github.com; if the key is missing, take the first host.
-    let list = hosts
-        .get("github.com")
-        .or_else(|| hosts.values().next())
-        .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let list = match hosts.get("github.com").or_else(|| hosts.values().next()) {
+        Some(v) => v.as_array()?.clone(),
+        None => Vec::new(),
+    };
     for a in list {
         let login = a.get("login").and_then(|x| x.as_str()).unwrap_or("").trim();
         if login.is_empty() {
@@ -223,7 +243,7 @@ pub fn parse_accounts(raw: &str) -> Vec<GhAccount> {
         let active = a.get("active").and_then(|x| x.as_bool()).unwrap_or(false);
         accounts.push(GhAccount { login: login.to_string(), active, ok });
     }
-    accounts
+    Some(accounts)
 }
 
 // ---------------------------------------------------------------- run on host
@@ -272,11 +292,14 @@ fn status_script() -> String {
         "{PATH_FIX}\
          p=$(command -v gh 2>/dev/null)\n\
          printf 'AM_PATH %s\\n' \"$p\"\n\
-         printf 'AM_JSON_BEGIN\\n'\n\
          if [ -n \"$p\" ]; then\n\
-           gh auth status --hostname github.com --json hosts 2>/dev/null || true\n\
+           if out=$(gh auth status --hostname github.com --json hosts 2>/dev/null) && [ -n \"$out\" ]; then\n\
+             printf 'AM_JSON_BEGIN\\n%s\\nAM_JSON_END\\n' \"$out\"\n\
+           else\n\
+             login=$(GH_HOST=github.com gh api user --jq .login 2>/dev/null) || login=\n\
+             if [ -n \"$login\" ]; then printf 'AM_API_LOGIN %s\\n' \"$login\"; fi\n\
+           fi\n\
          fi\n\
-         printf '\\nAM_JSON_END\\n'\n\
          exit 0\n"
     )
 }
@@ -417,6 +440,11 @@ async fn login_auto(app: &Arc<App>, host: &str) -> Result<Value, LcError> {
     if !st.installed {
         return Err(LcError::Upstream("gh 未安裝（brew install gh）".into()));
     }
+    if !st.status_known() {
+        // Unsupported status output or an inconclusive fallback is not proof of logout.
+        // A device flow is safe; copying the local token could silently replace a remote account.
+        return login_device(app, host).await;
+    }
     if st.logged_in() {
         abort_device(app, host).await;
         return Ok(st.to_json(host, Some("auto"), None, None));
@@ -442,12 +470,16 @@ async fn login_auto(app: &Arc<App>, host: &str) -> Result<Value, LcError> {
     }
     if host != LOCAL_HOST {
         if let Ok(local) = read_status(app, LOCAL_HOST).await {
-            if local.logged_in() {
+            if should_auto_copy(host, st.status_known(), local.logged_in()) {
                 return login_copy(app, host).await;
             }
         }
     }
     login_device(app, host).await
+}
+
+fn should_auto_copy(host: &str, remote_status_known: bool, local_logged_in: bool) -> bool {
+    host != LOCAL_HOST && remote_status_known && local_logged_in
 }
 
 async fn login_switch(app: &Arc<App>, host: &str, user: Option<&str>) -> Result<Value, LcError> {
@@ -878,6 +910,41 @@ mod tests {
         assert!(st.logged_in());
         assert_eq!(st.account(), Some("Eden-Sun"));
         assert!(st.switchable().is_none());
+    }
+
+    #[test]
+    fn parse_legacy_api_user_fallback_as_active_account() {
+        let st = parse_probe("AM_PATH /usr/bin/gh\nAM_API_LOGIN work-bot\n");
+        assert!(st.logged_in(), "the old-gh fallback proves the active account works");
+        assert_eq!(st.account(), Some("work-bot"));
+    }
+
+    #[test]
+    fn malformed_status_is_unknown_instead_of_logged_out() {
+        let st = parse_probe("AM_PATH /usr/bin/gh\nAM_JSON_BEGIN\n\nAM_JSON_END\n");
+        assert_eq!(st.login_status, None);
+        assert_eq!(st.to_json("m4p", None, None, None)["logged_in"], Value::Null);
+    }
+
+    #[test]
+    fn valid_empty_status_is_known_logged_out() {
+        let raw = r#"{"hosts":{"github.com":[]}}"#;
+        let st = parse_probe(&format!("AM_PATH /usr/bin/gh\nAM_JSON_BEGIN\n{raw}\nAM_JSON_END\n"));
+        assert_eq!(st.login_status, Some(false));
+    }
+
+    #[test]
+    fn auto_copy_requires_a_known_remote_status() {
+        assert!(!should_auto_copy("m4p", false, true));
+        assert!(should_auto_copy("m4p", true, true));
+        assert!(!should_auto_copy(LOCAL_HOST, true, true));
+    }
+
+    #[test]
+    fn status_script_falls_back_to_api_user_when_json_status_fails() {
+        let script = status_script();
+        assert!(script.contains("GH_HOST=github.com gh api user --jq .login"));
+        assert!(!script.contains("--json hosts 2>/dev/null || true"));
     }
 
     #[test]

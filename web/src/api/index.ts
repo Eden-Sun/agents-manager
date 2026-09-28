@@ -840,7 +840,7 @@ function toGhStatus(raw: unknown, fallbackName: string): GhStatus {
     name: str(pick(o, 'name'), fallbackName),
     installed: o.installed === true,
     path: optStr(pick(o, 'path')),
-    logged_in: o.logged_in === true,
+    logged_in: typeof o.logged_in === 'boolean' ? o.logged_in : null,
     account: optStr(pick(o, 'account')),
     accounts: arr(o.accounts)
       .filter(isRec)

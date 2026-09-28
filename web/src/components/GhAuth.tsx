@@ -92,19 +92,25 @@ export function GhHostStatus({ host }: { host: string }) {
   if (!st) return null
   const label = !st.installed
     ? 'gh 未安裝'
-    : st.logged_in
+    : st.logged_in === true
       ? `gh · ${st.account ?? '已登入'}`
-      : st.account
-        ? `gh · ${st.account}（未登入）`
-        : 'gh 未登入'
+      : st.logged_in === null
+        ? 'gh · 狀態未知'
+        : st.account
+          ? `gh · ${st.account}（未登入）`
+          : 'gh 未登入'
+  const authState = !st.installed ? 'missing' : st.logged_in === true ? 'ok' : st.logged_in === false ? 'out' : 'unknown'
   return (
-    <span className={`gh-auth${st.logged_in ? ' ok' : st.installed ? ' out' : ' missing'}`}>
-      <span className="gh-auth-label" title={st.path ?? 'gh'}>
+    <span className={`gh-auth ${authState}`}>
+      <span
+        className="gh-auth-label"
+        title={st.logged_in === null ? '登入狀態無法確認；按登入會改用裝置碼，不會複製本機憑證' : st.path ?? 'gh'}
+      >
         {label}
       </span>
       {st.logged_in || !st.installed ? null : (
         <button type="button" className="mini-btn" disabled={busy || Boolean(st.pending)} onClick={() => void login()}>
-          {busy ? '登入中…' : st.pending ? '等待授權…' : '登入'}
+          {busy ? '登入中…' : st.pending ? '等待授權…' : st.logged_in === null ? '裝置碼登入' : '登入'}
         </button>
       )}
       {st.pending || st.error ? (
