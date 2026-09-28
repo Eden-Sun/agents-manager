@@ -377,7 +377,7 @@ async fn relay_announce(
     let relay_run = if body.text.trim().is_empty() {
         None
     } else {
-        match crate::lifecycle::relay_watch::resolve(&app, &body.to_agent).await {
+        match crate::lifecycle::relay_watch::resolve(&app, &body.bot_id, &body.to_agent).await {
             Ok(run) => run,
             Err(e) => {
                 tracing::warn!(to = %body.to_agent, error = ?e, "relay watch admission failed; refusing direct prompt so the shim can retry");
