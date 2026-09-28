@@ -52,6 +52,7 @@ mod git_sh;
 mod github;
 mod group;
 mod handoff;
+mod shared_host;
 mod herdr;
 mod herdr_shim;
 mod herdr_maintenance;

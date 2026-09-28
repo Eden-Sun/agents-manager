@@ -1507,6 +1507,7 @@ agent，hint 錯了或指到不存在的 agent，最多就是這一顆這一輪�
 hint 可用，退回規則 2／3——這條沒有、也不打算改掉子代 hookless 這件事。
 
 三條都沒中的照舊只退回血緣／前綴（規則 2、3）。
+**共用 session 的主機**（§11.9）上三條都只看落在自己 workspace／tab／pane 裡的 agent；**已移交的專案**（§6.5h）的 agent 一律不認領，它的 bot 也不當父候選。
 **hint 讀不到不等於沒有 hint**（#94 重開）：`spawn_hints` 這一輪 SELECT 失敗（busy／I/O）時，hint 可能好好地在表裡——退回規則 2、3
 正好會把新 tab 裡的一排子代理串回鏈。所以這一輪**一顆都不認領**，排一輪 15 秒後的補跑對帳（同 §6.5.2 第 2 條的延後機制）；
 讀到空的（`Ok`、沒有列）才是真的沒有，照舊退回規則 2、3。認領：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run；同一父 bot 底下同名的 live child 直接重用。
@@ -2631,10 +2632,32 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
   送出一律走同一個佇列（`keyQueue`）：同一時間只有一個請求在路上，否則抵達順序不保證，打 `ls` 可能變成 `sl`。
 
 ### 11.7 不做
-密碼／互動認證、跳板（交給 ssh_config 的 ProxyJump）、遠端 transcript 回補、多 daemon。
+密碼／互動認證、跳板（交給 ssh_config 的 ProxyJump）、遠端 transcript 回補、多 daemon（同一台主機給兩顆 daemon 共用 session 的例外見 §11.9）。
 
 ### 11.8 開發測試
 `scripts/dev-sshd.sh` 以使用者權限起 127.0.0.1:2222 的 sshd，`host = "loop"`（session `am-loop`）。
+
+### 11.9 共用 herdr session 的主機（#709，使用者 2026-09-28）
+
+移交（§6.5h）時，接手的 daemon 以遠端主機連回原機器，`herdr_session` 用的是原機器 daemon **自己的本機 session**（例：
+agm-host 的 daemon 以 `m4p` 接手 Mac 的專案，session 都是 `agents-manager`）。兩顆 daemon 看得到同一批 pane，所以要在接手那顆的
+`[[hosts]]` 明確寫 `shared_session = true`（預設 `false`；不自動推導——設定裡沒有任何東西認得出對方 daemon）。旗標讀**當下的設定**，
+改了不重連就生效（`cfg_differs` 不看它）；`POST /api/hosts` 沒帶這個欄位就沿用舊值，不因為一次只改 ssh 的更新悄悄關掉。
+
+開著時這顆 daemon 在這台**只碰自己的東西**。「自己的」＝本 daemon 專案（沒移交出去的）在這台的 `projects.workspace_id`、
+它們 bot 活著的 run 的 workspace／tab／pane、`spawn_hints` 記的 pane、預覽 pane、自己開的 host shell（`shared_host::owned`，每輪重算）：
+
+- **子 agent 認領**（§6.5a）：陌生 agent 要落在自己的 workspace／tab／pane 裡才看 hint／血緣／前綴；開在別人 workspace 裡、名字剛好是
+  `<我的 bot>-<字尾>` 的不收。逐 bot 迴圈照舊以名字找自己 bot 的 agent（接手時就是靠這條把對方開好的 agent 收編過來）。
+- **孤兒 pane**（§6.5 第 4 步）：結束的 run 的 pane id 只有在 snapshot 裡那顆 pane 仍在自己的 workspace／tab 裡才關——pane id 也會被對方的新 pane 用到。
+- **pane 掃描**（§6.5e）：別人的 pane 不進 `panes`，所以不 GC、不推 `pane_unowned`／`pane_orphaned`、不當 scratch、不改名。
+- **連線**（§11.3 第 1 步）：session 在跑就原樣沿用（`AM_MODE=shared-running`），絕不 `herdr server stop`、不改交給 launchd——
+  那是對方的 server（Mac 的 daemon 用 `herdr --session … server` 直接起，launchd 查不到它，以前這條會把它整個停掉）。沒在跑才照舊起。
+- **額度探測**（§12.6）：遠端探測借主 session 開 workspace，label 加上本 daemon 的標記 `…@<tag>`（資料目錄的 `daemon-tag`，第一次用到時隨機產生、
+  重啟不變）；開機清殘留與每輪開探測前清殘留，都只清帶自己標記的。不共用的主機 label 與清法照舊。
+- **遠端 bot 目錄**：遠端資料根目錄（`~/.config/agents-manager`）可能就是對方 daemon 自己的資料目錄，所以 `remote_purge` 的掃描、刪除當下那一趟
+  與回收區清理在這台一律不做（不記成欠著）；已移交專案的 bot 目錄在原機器那邊也不刪（§6.5h）。shim 補版與 spool 只處理本 daemon DB 裡
+  這台的 bot，本來就不碰別人的。
 
 ## 12. grok 支援
 

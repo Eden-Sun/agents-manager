@@ -285,22 +285,17 @@ async fn probe_client() -> Result<HerdrClient> {
 }
 
 pub async fn sweep_stale(app: &Arc<App>) {
-    let mut clients = Vec::new();
     if let Ok(c) = probe_client().await {
-        clients.push(c);
+        sweep_probes(&c, None, "stale").await;
     }
+    sweep_stale_on_hosts(app).await;
+}
+
+/// 主 session 上的探測殘留（遠端主機的探測借它開）。共用 session 的主機只清帶本 daemon 標記的（#709）。
+async fn sweep_stale_on_hosts(app: &Arc<App>) {
     for host in crate::quota::pollable_hosts(app).await {
         if let Some(c) = app.herdr_for(&host).await {
-            clients.push(c);
-        }
-    }
-    for c in clients {
-        let Ok(list) = c.workspace_list().await else { continue };
-        for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(is_probe_label)) {
-            match c.workspace_close(&ws.workspace_id).await {
-                Ok(()) => tracing::info!(workspace = %ws.workspace_id, "closed a stale claude quota probe"),
-                Err(e) => tracing::warn!(workspace = %ws.workspace_id, error = %e, "stale claude probe not closed"),
-            }
+            sweep_probes(&c, crate::shared_host::probe_tag(app, &host).await.as_deref(), "stale").await;
         }
     }
 }
@@ -457,7 +452,12 @@ async fn send_line(client: &HerdrClient, pane_id: &str, line: &str) -> Result<()
 /// 上一輪 `workspace.close` 失敗（ssh 斷一下）留下的 claude 探測 workspace：開新的之前先收，
 /// 不然要等 daemon 重啟的 [`sweep_stale`] 才收，中間每一輪都可能再多留一個（#408）。
 /// 呼叫端握著這台的 `probe_lock`，同一台同時只有一個 claude 探測在跑，所以此刻同前綴的一定是殘留。
-async fn sweep_leftovers(client: &HerdrClient) {
+async fn sweep_leftovers(client: &HerdrClient, label: &str) {
+    // #709：這一輪的 label 帶 `@<標記>`＝共用 session 的主機，只清同一個標記的（別顆 daemon 的探測可能正在跑）。
+    sweep_probes(client, label.rsplit_once('@').map(|(_, tag)| tag), "leftover").await
+}
+
+async fn sweep_probes(client: &HerdrClient, own_tag: Option<&str>, what: &str) {
     let list = match client.workspace_list().await {
         Ok(l) => l,
         Err(e) => {
@@ -465,11 +465,23 @@ async fn sweep_leftovers(client: &HerdrClient) {
             return;
         }
     };
-    for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(is_probe_label)) {
+    for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(|l| crate::shared_host::sweepable(l, own_tag, is_probe_label))) {
         match client.workspace_close(&ws.workspace_id).await {
-            Ok(()) => tracing::info!(workspace = %ws.workspace_id, "closed a leftover claude quota probe"),
-            Err(e) => tracing::warn!(workspace = %ws.workspace_id, error = %e, "leftover claude probe not closed"),
+            Ok(()) => tracing::info!(workspace = %ws.workspace_id, what, "closed a claude quota probe left behind"),
+            Err(e) => tracing::warn!(workspace = %ws.workspace_id, what, error = %e, "claude probe left behind not closed"),
         }
+    }
+}
+
+/// 探測 workspace 的 label；共用 session 的主機上帶本 daemon 的標記（#709），清殘留時才分得出是誰的。
+async fn probe_label(app: &Arc<App>, host: &str, account: Option<&str>) -> String {
+    let base = match account {
+        Some(a) if !a.is_empty() => format!("{PROBE_LABEL_PREFIX}-{a}"),
+        _ => PROBE_LABEL_PREFIX.to_string(),
+    };
+    match crate::shared_host::probe_tag(app, host).await {
+        Some(tag) => crate::shared_host::tagged_label(&base, &tag),
+        None => base,
     }
 }
 
@@ -494,7 +506,7 @@ async fn run_probe_pane(
     cmd: &str,
     timeout: Duration,
 ) -> Result<PaneRun> {
-    sweep_leftovers(client).await;
+    sweep_leftovers(client, label).await;
     let (ws, pane) = client.workspace_create(cwd, label, env_json).await?;
     let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone(), closed: false };
     let pane_id = pane.pane_id.clone();
@@ -559,10 +571,7 @@ async fn refresh_claude_account(
     } else {
         home.to_string()
     };
-    let label = match account {
-        Some(a) if !a.is_empty() => format!("{PROBE_LABEL_PREFIX}-{a}"),
-        _ => PROBE_LABEL_PREFIX.to_string(),
-    };
+    let label = probe_label(app, host, account).await;
     let env_json = Value::Object(env.iter().map(|(k, v)| (k.clone(), json!(v))).collect());
     let cmd = probe_command(&bin, &env, with_usage);
     let (auth, usage) = match run_probe_pane(&client, &cwd, &label, env_json, &cmd, PROBE_TIMEOUT).await? {
@@ -1115,6 +1124,18 @@ mod tests {
             std::fs::remove_dir_all(dir).ok();
         }
 
+        /// #709：這一輪的 label 帶 `@<標記>`（共用 session 的主機）：只清同一個標記的殘留，別顆 daemon 的不動。
+        #[tokio::test]
+        async fn a_tagged_probe_sweeps_only_leftovers_with_its_own_tag() {
+            let (h, c, dir) = herdr();
+            c.workspace_create("/tmp", "am-quota-claude@mine", json!({})).await.unwrap();
+            c.workspace_create("/tmp", "am-quota-claude@other", json!({})).await.unwrap();
+            h.set_screen("*", &finished_screen());
+            run_probe_pane(&c, "/tmp", "am-quota-claude-cc1@mine", json!({}), "true", Duration::from_secs(5)).await.unwrap();
+            assert_eq!(open_labels(&h, 1).await, vec!["am-quota-claude@other"]);
+            std::fs::remove_dir_all(dir).ok();
+        }
+
         #[test]
         fn the_probe_labels_are_the_ones_the_pane_scan_leaves_out() {
             assert!(crate::panes::is_daemon_probe_workspace(Some(PROBE_LABEL_PREFIX)));
@@ -1530,6 +1551,7 @@ AM_USAGE_DONE=0
         let app = crate::testing::env().await.app.clone();
         let host = "claude-identity-347";
         let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
@@ -1585,6 +1607,7 @@ AM_USAGE_DONE=0
         let conn = app
             .hosts
             .insert_remote_for_test(crate::config::HostCfg {
+                shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),
                 ssh_port: 22,
@@ -1731,5 +1754,37 @@ AM_USAGE_DONE=0
         assert!(!cooling_down(&k, false, false));
         park(&k, false);
         assert!(!cooling_down_at(&k, false, false, std::time::Instant::now() + RETRY_AFTER_FAILURE), "a cool-down in the past is over");
+    }
+}
+
+#[cfg(test)]
+mod shared_session_tests {
+    //! #709：共用 session 的主機上，額度探測 workspace 帶本 daemon 的標記，清殘留時只清自己的。
+    use crate::shared_host::tests::{set_shared, shared_host, HOST};
+    use serde_json::json;
+
+    async fn labels(c: &crate::herdr::HerdrClient) -> Vec<String> {
+        let mut v: Vec<String> = c.workspace_list().await.unwrap().into_iter().filter_map(|w| w.label).collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn a_shared_host_labels_and_sweeps_only_this_daemons_probes() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sh = shared_host(&env, true).await;
+        let tag = crate::shared_host::probe_tag(&app, HOST).await.unwrap();
+        assert_eq!(super::probe_label(&app, HOST, Some("cc1")).await, format!("am-quota-claude-cc1@{tag}"));
+        for l in [format!("am-quota-claude@{tag}"), format!("am-quota-claude-cc1@{tag}"), "am-quota-claude@other".into(), "am-quota-claude".into(), "proj".into()] {
+            sh.client.workspace_create("/tmp", &l, json!({})).await.unwrap();
+        }
+        super::sweep_stale_on_hosts(&app).await;
+        assert_eq!(labels(&sh.client).await, ["am-quota-claude", "am-quota-claude@other", "proj"], "別顆 daemon 的（含沒標記的）不動");
+
+        set_shared(&app, false).await;
+        assert_eq!(super::probe_label(&app, HOST, Some("cc1")).await, "am-quota-claude-cc1");
+        super::sweep_stale_on_hosts(&app).await;
+        assert_eq!(labels(&sh.client).await, ["proj"], "不共用時照舊全清");
     }
 }

@@ -973,6 +973,8 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
                 (HashMap::new(), &[][..])
             }
         };
+    // #709：共用 session 的主機上只認領自己 workspace／tab／pane 裡的（連名字前綴也不算），別顆 daemon 的 agent 不收。
+    let owned = if crate::shared_host::is_shared(app, host).await { Some(crate::shared_host::owned(app, host).await?) } else { None };
     let mut new_children = 0usize;
     for agent in strangers.iter() {
         let Some(name) = agent.name.as_deref() else { continue };
@@ -981,6 +983,9 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
         }
         // #708：移交出去的專案的 agent（名字、pane、tab、workspace 對得上）不是誰的新 child。
         if handed_off_footprint.covers_agent(agent) {
+            continue;
+        }
+        if owned.as_ref().is_some_and(|o| !o.covers_agent(agent)) {
             continue;
         }
         let by_hint = hints.get(&agent.pane_id).and_then(|bid| parents.iter().find(|p| &p.bot.id == bid));
@@ -1054,8 +1059,16 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
     .bind(&session)
     .fetch_all(&app.db)
     .await?;
+    // #709：共用 session 上 pane id 也會被別顆 daemon 的新 pane 用到：只關還在自己 workspace／tab 裡的。
+    let not_ours = |pane: &str| {
+        owned.as_ref().is_some_and(|o| {
+            !snapshot.get("panes").and_then(|v| v.as_array()).into_iter().flatten().any(|p| {
+                p.get("pane_id").and_then(|s| s.as_str()) == Some(pane) && o.covers_pane(p)
+            })
+        })
+    };
     for (pane, tab, ws) in dead {
-        if live_panes.contains(&pane) && !panes_with_agent.contains(&pane) {
+        if live_panes.contains(&pane) && !panes_with_agent.contains(&pane) && !not_ours(&pane) {
             tracing::info!(host, pane_id = %pane, "reconcile: closing orphan pane");
             crate::lifecycle::close_pane_and_tab(&client, ws.as_deref(), tab.as_deref(), &pane).await;
         }

@@ -636,6 +636,7 @@ mod remote_tests {
         let home = env.dir.join("remote-home");
         std::fs::create_dir_all(&home).unwrap();
         let cfg = crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: host.into(),
             ssh_port: 22,

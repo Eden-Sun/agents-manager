@@ -233,24 +233,36 @@ async fn probe_client() -> Result<HerdrClient> {
 
 /// Probe workspaces orphaned by a daemon that died mid-probe still hold a live grok process.
 pub async fn sweep_stale(app: &Arc<App>) {
-    let mut clients = Vec::new();
     if let Ok(c) = probe_client().await {
-        clients.push(c);
+        sweep_probes(&c, None).await;
     }
-    // Remote probes live in the remote session by design — see [`client_for`].
+    sweep_stale_on_hosts(app).await;
+}
+
+/// Remote probes live in the remote session by design — see [`client_for`]. 共用 session 的主機只清帶本 daemon 標記的（#709）。
+async fn sweep_stale_on_hosts(app: &Arc<App>) {
     for host in crate::quota::pollable_hosts(app).await {
         if let Some(c) = app.herdr_for(&host).await {
-            clients.push(c);
+            sweep_probes(&c, crate::shared_host::probe_tag(app, &host).await.as_deref()).await;
         }
     }
-    for c in clients {
-        let Ok(list) = c.workspace_list().await else { continue };
-        for ws in list.iter().filter(|w| w.label.as_deref() == Some(PROBE_LABEL)) {
-            match c.workspace_close(&ws.workspace_id).await {
-                Ok(()) => tracing::info!(workspace = %ws.workspace_id, "closed a stale grok quota probe"),
-                Err(e) => tracing::warn!(workspace = %ws.workspace_id, error = %e, "stale probe not closed"),
-            }
+}
+
+async fn sweep_probes(c: &HerdrClient, own_tag: Option<&str>) {
+    let Ok(list) = c.workspace_list().await else { return };
+    for ws in list.iter().filter(|w| w.label.as_deref().is_some_and(|l| crate::shared_host::sweepable(l, own_tag, |l| l == PROBE_LABEL))) {
+        match c.workspace_close(&ws.workspace_id).await {
+            Ok(()) => tracing::info!(workspace = %ws.workspace_id, "closed a stale grok quota probe"),
+            Err(e) => tracing::warn!(workspace = %ws.workspace_id, error = %e, "stale probe not closed"),
         }
+    }
+}
+
+/// 共用 session 的主機上 label 帶本 daemon 的標記（#709）。
+async fn probe_label(app: &Arc<App>, host: &str) -> String {
+    match crate::shared_host::probe_tag(app, host).await {
+        Some(tag) => crate::shared_host::tagged_label(PROBE_LABEL, &tag),
+        None => PROBE_LABEL.to_string(),
     }
 }
 
@@ -304,7 +316,7 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
         return Ok(false);
     }
     let client = client_for_fence(app, &fence).await?;
-    let (ws, pane) = client.workspace_create(&cwd, PROBE_LABEL, json!({})).await?;
+    let (ws, pane) = client.workspace_create(&cwd, &probe_label(app, host).await, json!({})).await?;
     let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone() };
     let pane_id = pane.pane_id.clone();
 
@@ -465,6 +477,7 @@ mod tests {
         let app = crate::testing::env().await.app.clone();
         let host = format!("grok-home-618-{}", crate::db::ulid().to_ascii_lowercase());
         let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
             ssh_port: 22,
@@ -642,5 +655,37 @@ mod tests {
         assert!(parse_grok_usage("Context usage  Usage limit\n  Loading…", Local::now()).is_none());
         // The context-usage tab has a percentage but no limit header.
         assert!(parse_grok_usage("  Context: ████░░  62%", Local::now()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod shared_session_tests {
+    //! #709：同 `quota_claude` 那一條，grok 的探測。
+    use crate::shared_host::tests::{set_shared, shared_host, HOST};
+    use serde_json::json;
+
+    async fn labels(c: &crate::herdr::HerdrClient) -> Vec<String> {
+        let mut v: Vec<String> = c.workspace_list().await.unwrap().into_iter().filter_map(|w| w.label).collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn a_shared_host_labels_and_sweeps_only_this_daemons_probes() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sh = shared_host(&env, true).await;
+        let tag = crate::shared_host::probe_tag(&app, HOST).await.unwrap();
+        assert_eq!(super::probe_label(&app, HOST).await, format!("am-quota-grok@{tag}"));
+        for l in [format!("am-quota-grok@{tag}"), "am-quota-grok@other".into(), "am-quota-grok".into(), "proj".into()] {
+            sh.client.workspace_create("/tmp", &l, json!({})).await.unwrap();
+        }
+        super::sweep_stale_on_hosts(&app).await;
+        assert_eq!(labels(&sh.client).await, ["am-quota-grok", "am-quota-grok@other", "proj"]);
+
+        set_shared(&app, false).await;
+        assert_eq!(super::probe_label(&app, HOST).await, "am-quota-grok");
+        super::sweep_stale_on_hosts(&app).await;
+        assert_eq!(labels(&sh.client).await, ["proj"]);
     }
 }

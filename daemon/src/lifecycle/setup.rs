@@ -1796,6 +1796,7 @@ mod pane_env_tests {
 
     async fn remote_home(app: &Arc<App>, host: &str, home: &str) {
         let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: "unused".into(),
             ssh_port: 22,
@@ -1911,6 +1912,7 @@ mod pane_env_tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener); // 沒人在聽：連線一定失敗，不會碰到真的主機。
         let host_cfg = crate::config::HostCfg {
+            shared_session: false,
             name: "box".into(),
             ssh: "127.0.0.1".into(),
             ssh_port: port,
@@ -1937,6 +1939,7 @@ mod pane_env_tests {
         let app = &env.app;
         let host = format!("pane-home-616-{}", crate::db::ulid().to_ascii_lowercase());
         let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
             ssh_port: 22,
@@ -2204,6 +2207,7 @@ mod remote_install_permission_tests {
             .app
             .hosts
             .insert_remote_for_test(HostCfg {
+                shared_session: false,
                 name: host.clone(),
                 ssh: "unused".into(),
                 ssh_port: 22,

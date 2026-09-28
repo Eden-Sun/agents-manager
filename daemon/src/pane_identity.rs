@@ -334,6 +334,7 @@ mod tests {
         let app = env.app.clone();
         let host = format!("child-home-616-{}", crate::db::ulid().to_ascii_lowercase());
         let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
             ssh_port: 22,

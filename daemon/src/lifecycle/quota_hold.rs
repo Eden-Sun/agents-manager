@@ -686,6 +686,7 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let cfg = |name: &str, ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: name.into(),
             ssh: ssh.into(),
             ssh_port: 22,

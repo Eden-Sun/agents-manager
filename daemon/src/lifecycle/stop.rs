@@ -447,6 +447,10 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
         if !matches!(deleted, Some(Some(_))) {
             continue;
         }
+        // #708：移交出去的專案的 bot 目錄不刪（接手的 daemon 可能在用；讀不到也不刪）。
+        if !matches!(crate::handoff::bot_handed_off_to(&app.db, &id).await, Ok(None)) {
+            continue;
+        }
         match db::active_run(&app.db, &id).await {
             Ok(None) => {}
             Ok(Some(_)) => continue,
@@ -477,6 +481,11 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
         tracing::warn!(host, bot = %bot_id, "invalid bot id; bot config dir left in place");
         return false;
     }
+    // #708／#709：移交出去的專案，bot 目錄是接手那顆 daemon 在用的（遠端資料目錄可能就是這裡）：兩邊都不刪。讀不到也不刪。
+    if !matches!(crate::handoff::bot_handed_off_to(&app.db, bot_id).await, Ok(None)) {
+        tracing::info!(host, bot = %bot_id, "bot of a handed-off project (or unreadable); bot config dir left in place");
+        return false;
+    }
     // 附件的 daemon 端副本（`attachments/<id>/`）不分本機／遠端都在這台（遠端 bot 也留一份做縮圖）。
     // 以前刪 bot 完全沒人動它：沒有 TTL、沒有總量上限、也沒有任何程式碼路徑會再看它一眼（#465）。
     // 一起搬進 `bots-trash`，就跟 `bots/<id>/` 受同一套 7 天＋總量上限，restore 也搬得回來。
@@ -501,6 +510,11 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
                 false
             }
         };
+    }
+    // #709：共用 session 的主機上，遠端資料目錄可能是另一顆 daemon 的：不搬，也不記成欠著。
+    if crate::shared_host::is_shared(app, host).await {
+        tracing::info!(host, bot = %bot_id, "shared-session host; remote bot dir left in place");
+        return false;
     }
     let Some(conn) = app.hosts.get(host).await else {
         tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir left in place");
@@ -1219,6 +1233,7 @@ mod stop_commit_tests {
         let app = env.app.clone();
         let host = "restart-stop-repoint";
         let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
@@ -1279,6 +1294,7 @@ mod stop_commit_tests {
         let app = env.app.clone();
         let host = "restart-preview-repoint";
         let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
