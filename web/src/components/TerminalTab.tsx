@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useScrollTail } from '../hooks/useScrollTail'
 import { movePaneToTab } from '../api'
 import type { TerminalSnapshot } from '../api/types'
@@ -10,12 +10,15 @@ import './terminalTab.css'
 /** Below this many columns a TUI agent's output is fragmented beyond repair (31-column grok pane, 2026-09-06). */
 const READABLE_COLUMNS = 60
 
+/** 自動刷新間隔（2026-09-28 使用者）。分頁在背景（`document.hidden`）時不抓。 */
+const AUTO_REFRESH_MS = 3000
+
 /** Collapse runs of blank rows. A narrow pane is mostly padding — 22 rows, 13 of them empty. */
 function squeeze(text: string): string {
   return text.replace(/\n[ \t]*(?:\n[ \t]*)+/g, '\n\n')
 }
 
-/** SPEC §3.2: read-only `recent_unwrapped` snapshot with a manual refresh (no xterm.js). */
+/** SPEC §3.2: read-only `recent_unwrapped` snapshot, auto-refreshed every 3s plus a manual button (no xterm.js). */
 export function TerminalTab({ botId }: { botId: string }) {
   const readTerminal = useStore((s) => s.readTerminal)
   const [snap, setSnap] = useState<TerminalSnapshot | null>(null)
@@ -29,20 +32,30 @@ export function TerminalTab({ botId }: { botId: string }) {
   const [moveErr, setMoveErr] = useState<{ botId: string; text: string } | null>(null)
   const wrap = useTermWrap()
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
+  /** 一次只抓一份：上一趟還沒回來時，自動那趟就跳過，不疊請求。 */
+  const inFlight = useRef(false)
+  /** `quiet`：自動刷新不切「刷新中…」，按鈕不會每 3 秒閃一次。 */
+  const refresh = useCallback(async (quiet = false) => {
+    if (quiet && inFlight.current) return
+    inFlight.current = true
+    if (!quiet) setLoading(true)
     try {
       setSnap(await readTerminal(botId, 'recent_unwrapped', lines))
       setErr(null)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
     } finally {
-      setLoading(false)
+      inFlight.current = false
+      if (!quiet) setLoading(false)
     }
   }, [botId, lines, readTerminal])
 
   useEffect(() => {
     void refresh()
+    const id = window.setInterval(() => {
+      if (!document.hidden) void refresh(true)
+    }, AUTO_REFRESH_MS)
+    return () => window.clearInterval(id)
   }, [refresh])
 
   const move = useCallback(async () => {
@@ -104,13 +117,13 @@ export function TerminalTab({ botId }: { botId: string }) {
           <input type="checkbox" checked={tight} onChange={(e) => setTight(e.target.checked)} />
           壓縮空行
         </label>
-        {/* 手機預設折行（390px 看不到 185 欄的右半邊），桌機預設不折；按過就記在 localStorage。 */}
+        {/* 預設折行（2026-09-28 使用者，桌機也折）；按過就記在 localStorage。 */}
         <label className="conn" title="折行後 TUI 畫的框線與對齊會跑掉，但整行讀得到；不折行則維持原樣，靠橫捲看右半邊。">
           <input type="checkbox" checked={wrap} onChange={(e) => setTermWrap(e.target.checked)} />
           換行
         </label>
         <span className="spacer" />
-        <span className="hint term-bar-note">唯讀快照，按「刷新」更新</span>
+        <span className="hint term-bar-note">唯讀快照，每 3 秒自動更新</span>
       </div>
       {narrow ? (
         <div className="term-warn" role="status">
