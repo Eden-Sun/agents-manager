@@ -582,14 +582,25 @@ fn mask_word(word: &str) -> String {
     if looks_random(bare) || looks_jwt(bare) {
         return REDACTED.to_string();
     }
-    match word.find("/Users/") {
-        Some(i) => {
-            let rest = &word[i + "/Users/".len()..];
+    match home_prefix(word) {
+        Some((i, n)) => {
+            let rest = &word[i + n..];
             let end = rest.find('/').unwrap_or(rest.len());
             format!("{}~{}", &word[..i], &rest[end..])
         }
         None => word.to_string(),
     }
+}
+
+/// 家目錄前綴的位置與長度：macOS 的 `/Users/<名>`、Linux 的 `/home/<名>`（SPEC「Linux 主機」）。
+/// `/home/` 也是常見的網址路徑（`https://x.com/home/…`），前一個字是網域或路徑段的一部分就不算。
+fn home_prefix(word: &str) -> Option<(usize, usize)> {
+    let users = word.find("/Users/").map(|i| (i, "/Users/".len()));
+    let home = word.match_indices("/home/").map(|(i, _)| i).find(|&i| {
+        !word[..i].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    });
+    let home = home.map(|i| (i, "/home/".len()));
+    [users, home].into_iter().flatten().min()
 }
 
 /// query string 裡的憑據：`https://h/api?token=abc&page=2` → 只把 `token` 的值換掉，其餘原樣。
@@ -680,6 +691,9 @@ mod tests {
         assert_eq!(m("DB_PASSWORD=hunter2"), format!("DB_PASSWORD={REDACTED}"));
         assert_eq!(m("mail someone@example.com now"), format!("mail {REDACTED} now"));
         assert_eq!(m("  gpt-5.6-luna xhigh · /Users/m4p/project/agents-manager"), "  gpt-5.6-luna xhigh · ~/project/agents-manager");
+        assert_eq!(m("  gpt-6-luna max · /home/ubuntu/project/agents-manager"), "  gpt-6-luna max · ~/project/agents-manager");
+        assert_eq!(m("cd:/home/ubuntu"), "cd:~");
+        assert_eq!(m("see https://example.com/home/feed"), "see https://example.com/home/feed", "網址的 /home/ 不是家目錄");
         assert_eq!(m("token 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"), format!("token {REDACTED}"));
         assert_eq!(m("a\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA\n-----END OPENSSH PRIVATE KEY-----\nz"), format!("a\n{REDACTED}\nz"));
         // 撞限橫幅與一般程式碼原樣通過——遮掉了 Jev 就沒東西可判。
