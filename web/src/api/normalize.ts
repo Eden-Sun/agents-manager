@@ -384,6 +384,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     status_line: optStr(pick(v, 'status_line')),
     status: toStatusInfo(pick(v, 'status_json')),
     update_notice: optStr(pick(v, 'update_notice')),
+    background_jobs: Math.max(0, Math.floor(num(pick(v, 'background_jobs')))),
     turn_error: optStr(pick(v, 'turn_error')),
     // SPEC §4.4a：null = daemon 不知道，不能當 false
     runtime_model: optStr(pick(v, 'runtime_model')),

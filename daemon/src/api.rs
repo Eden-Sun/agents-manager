@@ -716,7 +716,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "live_apply_deferred": crate::lifecycle::is_deferred(&b.id),
                 "cwd": b.cwd,
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
-                "run": run,
+                // #714：`run.background_jobs`＝回合結束後畫面上還標著的背景工作數（記憶體裡的，不在 DB）。
+                "run": crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str())),
                 // §6.11：停著是因為 AGM 收起來省 RAM，不是壞掉也不是使用者關的；下次要用會自動
                 // 用 `--resume` 叫醒。`null` = 不是這種停。
                 // 預覽模式（§6.12）：`{status, port}`；沒開（或 off）是 `null`。

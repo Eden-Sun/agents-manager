@@ -292,6 +292,8 @@ export interface Run {
   status: StatusInfo | null
   /** `Update installed · Restart to update` 那句；null = 沒有更新在等 */
   update_notice: string | null
+  /** #714：畫面底部標著還在跑的背景工作數（claude 的 shell、codex 的背景終端）；0＝沒有。沒帶當 0。 */
+  background_jobs?: number
   /**
    * 上一回合被 API 斷線截斷的那行原文；hook 與 herdr 都會報成 done，所以要看這格。
    * null = 正常收尾；下一回合開始時清掉。

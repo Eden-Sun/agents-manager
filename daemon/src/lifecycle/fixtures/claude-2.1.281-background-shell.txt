@@ -1,0 +1,53 @@
+     … +77 lines (ctrl+o to expand)
+
+⏺ 兩個分支都在 §11.9 新增了不同內容，屬純文件衝突，我打算保留 #710 的 11.9，把 #709 改為 11.10，並檢查 #709 裡是否有引用到「§11.9」需要一併修正。
+
+⏺ Bash(git show c374bfa1 | grep -n "§11\.9\|11\.9" | head; git grep -n "§11\.9" -- daemon web docs scripts | head)
+  ⎿  14:    POST /api/hosts keeps it when omitted). On such a host (SPEC §11.9):
+     203:+    /// #709：另一顆 daemon 也在用這台的 `herdr_session`（SPEC §11.9）。開著時這顆 daemon 在這台只碰自己的
+     994:+//! 共用 herdr session 的遠端主機（#709，SPEC §11.9）：`[[hosts]] shared_session = true`＝另一顆 daemon 也在用這個
+     … +12 lines (ctrl+o to expand)
+
+⏺ #709 有 6 處指到 §11.9（config.rs、shared_host.rs、API.md 兩處、SPEC 兩處），連同 commit 訊息一起改成 §11.10；scripts/ops/README.md 那處是 #710 的，維持不動：
+
+⏺ Bash(SP=/private/tmp/claude-501/-Users-m4p-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad
+      python3 - <<'EOF'…)
+  ⎿  daemon/src/config.rs:262:    /// #709：另一顆 daemon 也在用這台的 `herdr_session`（SPEC §11.10）。開著時這顆 daemon 在這台只碰自己的
+     daemon/src/shared_host.rs:1://! 共用 herdr session 的遠端主機（#709，SPEC §11.10）：`[[hosts]] shared_session = true`＝另一顆 daemon 也在用這個
+     docs/API.md:1022:- `hosts[].shared_session`（#709，SPEC §11.10）：這台的 herdr session 也被另一顆 daemon 用著；讀當下的設定（改了不必重連）。`local` 一律 `false`。
+     … +6 lines (ctrl+o to expand)
+
+⏺ Bash(SP=/private/tmp/claude-501/-Users-m4p-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad
+      git show c374bfa1 --stat | grep -E "db|schema" ; gi…)
+  ⎿  10:POST /api/hosts keeps it when omitted). On such a host (SPEC §11.10):
+     Successfully rebased and updated refs/heads/feat/708-709-rebased.
+     ## feat/708-709-rebased...origin/feat/708-handoff-flag [ahead 10, behind 2]
+     … +4 lines (ctrl+o to expand)
+
+⏺ Rebase 完成：033f9117（#708）、72b09b09（#709）。接著驗證。先確認整樹 check 的名額包法：
+
+  Listed 1 directory (ctrl+o to expand)
+
+⏺ 名額腳本已不在；派工者說外部編譯主機是空的，依序跑一份。build → clippy → 相關測試 → 整樹 check.sh daemon，全部串在一個背景工作：
+
+⏺ Bash(SP=/private/tmp/claude-501/-Users-m4p-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad; L=$SP/v708.log; : > $L
+      E="env -u AM_MODEL -u AM_EF…)
+  ⎿  Running in the background (↓ to manage)
+
+⏺ 同時在本機跑 check.sh web（#708 動了 web，main 這段期間也改過 web；不佔編譯名額）：
+
+⏺ Bash(scripts/check.sh web > /private/tmp/claude-501/-Users-m4p-project-agents-manager/9e214d59-5fce-4c85-9008-0d941fb1b7c9/scratchpad/v708-web.log 2>&1; echo rc=$?;…)
+  ⎿  rc=0
+      0 fail
+     Ran 716 tests across 128 files. [9.14s]
+  ⎿  (timeout 10m)
+
+⏺ check.sh web 綠（716 tests，0 fail）。daemon 那串還在跑，等通知。
+
+✻ Brewed for 1m 15s · done 1:36 PM · 1 shell still running
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  hunta | agents-manager-k8bw2f-transfer | OP5.5 H 26% | 5h:98%(rst 3h 43m) | 7d:54%(rst 4d 0h)
+  ⏵⏵ bypass permissions on · 1 shell · ← for agents
