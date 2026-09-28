@@ -205,6 +205,12 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
             intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
             return Ok(());
         }
+        // The old pane is already gone. Rotation only needs to replace a pane still using the
+        // revoked token; restarting here would undo a user stop and create a fresh run.
+        None if credential_rotation => {
+            intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
+            return Ok(());
+        }
         // 舊 run 還好好的、`stopping` 從沒記過：承諾點之前就死了，世界沒變。
         Some(run) if run.state != "stopping" => {
             intents::abandon(&app.db, &intent.id, "the stop never began").await.map_err(|e| format!("{e:#}"))?;
@@ -470,6 +476,44 @@ mod tests {
         recover_host(&app2, LOCAL_HOST).await;
         tokio::join!(recover_host(&app2, LOCAL_HOST), recover_host(&app2, LOCAL_HOST));
         assert_eq!(runs_of(&app2, &bot.id).await, 2, "recovery is idempotent after the replacement run exists");
+    }
+
+    #[tokio::test]
+    async fn a_credential_rotation_retry_does_not_revive_a_run_stopped_by_the_user() {
+        let e = tt::env().await;
+        let (bot, run1) = running_bot(&e, "rotation-user-stop").await;
+        let token = crate::projection::new_token();
+        let intent_id = db::ulid();
+        let now = db::now();
+        let expires = (chrono::Utc::now() + chrono::Duration::minutes(15)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let payload = json!({"credential_rotation": true, "opts": {}, "from_run_id": run1, "bot_name": bot.name});
+        let mut tx = e.app.db.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, created_at, updated_at, expires_at)
+             VALUES (?, 'restart', ?, ?, ?, 'pending', ?, ?, ?)",
+        )
+        .bind(&intent_id)
+        .bind(&bot.id)
+        .bind(LOCAL_HOST)
+        .bind(payload.to_string())
+        .bind(&now)
+        .bind(&now)
+        .bind(expires)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?").bind(&token).bind(&bot.id).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert!(lifecycle::stop_bot(&e.app, &bot.id).await.unwrap());
+        assert_eq!(run_state(&e.app, &run1).await, "stopped", "the user stop must stay recorded");
+        assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none());
+
+        assert_eq!(drive_once(&e.app, &intent_id).await, Outcome::Finished);
+        assert_eq!(runs_of(&e.app, &bot.id).await, 1, "a rotation retry must not start another run");
+        assert_eq!(run_state(&e.app, &run1).await, "stopped", "a rotation retry must not rewrite the user stop");
+        assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none());
+        assert_eq!(intent_status(&e.app, &bot.id).await, vec!["done"]);
     }
 
     #[tokio::test]
