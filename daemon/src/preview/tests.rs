@@ -1531,3 +1531,15 @@ async fn others_carry_the_kind_and_a_server_in_the_project_dir_is_same_dir_even_
         off["others"].as_array().unwrap().iter().map(|o| (o["kind"].as_str().unwrap(), o["relation"].as_str().unwrap())).collect();
     assert_eq!(got, vec![("next", "same_dir"), ("storybook", "other")]);
 }
+
+/// 真的 `ps`：命令列那一趟要列到**沒有終端**的行程（測試行程本身就是，背景的 dev server 也是）。
+/// macOS（`check.sh macos-local`）與 Linux（外部編譯主機）都要看得到自己。
+#[tokio::test]
+async fn macos_local_ps_commands_lists_this_process() {
+    let o = crate::hosts::sh_local(PS_COMMANDS, std::time::Duration::from_secs(10)).await.unwrap().expect("ps 逾時");
+    let cmds = parse_ps_commands(&String::from_utf8_lossy(&o.stdout));
+    let me = i32::try_from(std::process::id()).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let name = exe.file_name().unwrap().to_str().unwrap();
+    assert!(cmds.get(&me).is_some_and(|c| c.contains(name)), "ps 列不到自己（{me}，{name}）：{:?}", cmds.get(&me));
+}

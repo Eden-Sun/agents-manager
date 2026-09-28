@@ -1871,7 +1871,7 @@ w168 那四個空 zsh（p61／p4W／p5Y／p64）**很可能是使用者手開的
 inbox 的 key 是 `<kind>:<host>:<pane_id>:<first_seen>`：herdr 重開後 pane id 會重用，舊 pane 用掉的 key 不能擋住新 pane 的通知。
 `GET /api/projects/{id}/panes`、`POST /api/panes/{id}/close`、`POST /api/panes/{id}/adopt`（補 owner／purpose，人工修正用）。
 `GET /api/panes?unowned=1` 列出對不到專案的那些（那顆固定的 `scratch` 也在裡面，標出來）。
-listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LISTEN`）；遠端主機這一欄留空並標明「遠端不判斷」，
+listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LISTEN`；Linux 讀 `/proc`，見 §19）；遠端主機這一欄留空並標明「遠端不判斷」，
 不要為了它多開 ssh 往返。
 
 #### 邊界
@@ -2349,7 +2349,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   `target`、`dist`、`build`、`worktrees`、`vendor`（別份 checkout 不是這顆 bot 的工作樹）；不跟 symlink。都沒有 409
   `no_vite_config`（名字沿用），`tried` 列出試過的路徑。`candidate_info` 是每個候選會跑的那一行。專案層的指令覆寫不在 v1。
 - **本機有哪些 dev server**（`others`，只在沒有預覽在用時掃）：掃本機**在 listen 的行程**（`ps` 命令列、`lsof` 全機 listen 的 port、
-  再問那些 pid 的 cwd），符合**任一**條才列：
+  再問那些 pid 的 cwd；Linux 後兩項讀 `/proc`，見 §19），符合**任一**條才列：
   1. 命令列對得上已知的 dev server（`kind`）：`vite`、`next`（`next-server`、`next dev|start`）、`webpack`（`webpack`／`webpack-dev-server`）、
      `astro`、`remix`、`storybook`、`nuxt`（`nuxt`／`nuxi`）、`rsbuild`、`parcel`、`angular`（`ng serve`）、`react-scripts`、`bun`（`bun --hot`）；
      看的是命令列每個字的檔名部分，所以 `vitest`、`vitepress`、`next build` 不算；
@@ -4071,6 +4071,39 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   協調者已經併回巡檢的專案（見上方「一顆總管、一個專案」），所以 web 的「剛跑完」晶片列排除 `GET /api/supervisor` 的 `project_id` 時兩個角色一起排除。
 - **部署**（合入 main 後由 AGM 安排，不在程式裡自動做）：`agm responder setup` → 同步兩份 persona（§18.11，協調者走 `PUT /api/supervisor/responder/persona`）→
   `agm responder start`。回滾到舊 binary：新欄位是 additive，舊 binary 忽略 `role`／`wake`，所有事件回到巡檢收；先停協調者。DB 版本已升的話要一併還原備份（§18.13）。
+
+## 19. Linux 主機（issue #676）
+
+daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#675）當**本機**跑。原則：同一支程式、同一套解析；
+平台差異收在最小的地方——能在執行期偵測的（遠端 shell 片段）用 `uname -s`／檔案存在與否分流，只有本機 Rust 才用 `cfg(target_os)`。
+整樹測試本來就在外部編譯主機（Linux）跑，所以每條 Linux 路徑都有在 Linux 上實跑的測試：兩個平台都要成立的用 `macos_local_` 開頭（`check.sh macos-local` 也會在 macOS 跑），只在 Linux 成立的用 `linux_` 開頭加 `cfg(target_os = "linux")`。
+
+| 地方 | macOS | Linux | 位置 |
+|---|---|---|---|
+| 本機 listen port（打字前複查、預覽綁定檢查、`others` 掃描） | `lsof -nP -iTCP -sTCP:LISTEN -Fpn` | 讀 `/proc/net/tcp`、`tcp6` 的 LISTEN（st=`0A`）inode，對 `/proc/<pid>/fd` 的 `socket:[inode]`。Ubuntu server 不保證裝 `lsof`，沒裝就整片「讀不到」。輸出成跟 `lsof -Fpn` 同格式（萬用位址寫 `*`、IPv6 包 `[]`），解析共用 | `linux_proc.rs` |
+| 本機行程 cwd（`others` 掃描） | `lsof -a -d cwd -Fpn` | `readlink /proc/<pid>/cwd` | `linux_proc.rs` |
+| 本機行程命令列（`others` 掃描） | `ps -axo pid=,command=` | 同左：procps 也列到沒有終端的行程（`macos_local_ps_commands_lists_this_process` 在 Linux 實跑） | `preview.rs` |
+| 行程樹／RSS（§15） | `ps -Awwo pid=,ppid=,rss=,args=`、`lstart` | 同左（procps 認同一組旗標） | `memstat.rs`、`memproc.rs` |
+| 行程環境（§15.2 的 owner 判斷） | `ps -Ewwo pid=,args=` | `/proc/<pid>/environ`（同使用者才讀得到，正是要的範圍），執行期 `uname -s` 分流 | `memproc.rs` |
+| child 身分（`CLAUDE_CONFIG_DIR` 等） | `ps eww -p <pid>` | 同左（procps 接受 BSD `e` 混 `-p`） | `pane_identity.rs` |
+| 整機記憶體（§15.1a） | `sysctl -n hw.memsize`＋`vm_stat` | `/proc/meminfo` 的 `MemTotal`／`MemAvailable`（先試這個，失敗才走 macOS） | `memstat.rs` |
+| claude 登入狀態 | 先看 `$CLAUDE_CONFIG_DIR/.credentials.json`，沒有再問 Keychain `security find-generic-password` | 只有檔案（沒有 `security` 指令就判未登入）；Linux 的 claude 本來就把憑證寫在 `~/.claude/.credentials.json` | `tools.rs` `PROBE_SH` |
+| 「身分沒登入、會退回 cc0」提示 | Keychain | `~/.claude/.credentials.json`（文案兩者都寫） | `hookrecv.rs` |
+| 送 Jev 判讀前遮家目錄 | `/Users/<名>` → `~` | 另遮 `/home/<名>`（前一個字是網域／路徑段的一部分就不算，`https://x.com/home/…` 不動） | `judge.rs` |
+| 遠端主機起 herdr server（§11.3.1） | console 使用者是自己就用 launchd GUI domain（讀得到 Keychain） | `uname -s` 不是 Darwin 就走 `trap '' HUP` 背景起，不需要 launchd | `hosts.rs` |
+| `stat` 權限、`readlink -f` 等 shell 片段 | BSD 旗標 | GNU 旗標先試、BSD 退回（原本就雙寫） | `trust.rs`、`lifecycle/start.rs` |
+| `PATH` 補 `/opt/homebrew/bin` | 需要 | 不存在的目錄留在 PATH 無害，不另分支 | `github.rs`、`git_sh.rs`、`release_triage/issue.rs` |
+| `/private/tmp` 正規化 | `/tmp` 是 `/private/tmp` 的 symlink | 沒有 `/private`，規則不會命中 | `pane_identity.rs` |
+| `.app` bundle 偵測 | `scripts/package-dmg.sh` 的 `Contents/MacOS` | 不會命中，照一般執行檔處理 | `main.rs` |
+
+**不在這一節（別的子項）**：`立即部署` 的 `launchctl kickstart com.agm.daemon-update`（`deploy_now.rs`）、`daemon-swap.sh`、
+`daemon-start.py` 與 `com.agm.*` 例行 job 的 systemd 版屬 #677；DB／設定搬家與絕對路徑改寫屬 #678。
+`deploy_now.rs` 在 Linux 上仍會叫 `launchctl`，叫不起就照原本的錯誤路徑回 `kick_start_failed`、不改狀態，等 #677 換成 `systemctl --user`。
+
+**要在遠端主機確認的事**（沒有 ssh key 前無法驗）：herdr 在 Linux 的 socket 仍在 `~/.config/herdr/sessions/<s>/herdr.sock`（沒有改走
+`$XDG_RUNTIME_DIR`）；daemon 以 systemd user service 跑時要 `loginctl enable-linger`，否則登出就被收掉；搬過去之後本機就是編譯主機，
+`[build.remote]` 要拿掉（不然 cargo shim 會 ssh 回自己）；claude／codex／grok 的憑證都要是檔案（`~/.claude*/.credentials.json`、
+`~/.codex/auth.json`、`~/.grok/auth*`）。
 
 ## 附錄 A：herdr socket（0.8.2 / protocol 20）
 
