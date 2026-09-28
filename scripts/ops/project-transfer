@@ -29,6 +29,7 @@ import fcntl
 import gzip
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -194,12 +195,8 @@ def collect(conn, project_id):
 
 
 def load_toml(path):
-    try:
-        import tomllib
-    except ImportError:
-        die("需要 python 3.11 以上（tomllib）")
     with open(path, "rb") as f:
-        return tomllib.load(f)
+        return tomllib_loads(f.read().decode())
 
 
 def data_dir_for(config_path, cfg):
@@ -237,6 +234,41 @@ def toml_block(project, bots, host):
         if env:
             out += ["", "[projects.bots.env]"] + [f"{tq(k)} = {tq(v)}" for k, v in sorted(env.items())]
     return "\n".join(out) + "\n"
+
+
+def tomllib_loads(text):
+    try:
+        import tomllib
+    except ImportError:
+        die("需要 python 3.11 以上（tomllib）")
+    return tomllib.loads(text)
+
+
+# daemon 在專案清單為空時序列化成頂層的 `projects = []`（在第一個表頭之前）。接著再 append `[[projects]]`
+# 就是 TOML 的 duplicate key，daemon 整顆起不來（智選hub 實測，2026-09-28）。
+EMPTY_PROJECTS = re.compile(r"^\s*projects\s*=\s*\[\s*\]\s*(#.*)?$")
+
+
+def compose_config(text, block):
+    """回傳 (新的 config 文字, 它該解析成的樣子)。組出來的不等於「原本的 config 多一個專案」就丟 RuntimeError。"""
+    old = tomllib_loads(text)
+    lines = text.split("\n")
+    if not old.get("projects"):
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("["):
+                break
+            if EMPTY_PROJECTS.match(line):
+                del lines[i]
+                break
+    new_text = "\n".join(lines).rstrip("\n") + "\n" + block
+    want = {**old, "projects": list(old.get("projects") or []) + tomllib_loads(block)["projects"]}
+    try:
+        got = tomllib_loads(new_text)
+    except Exception as e:
+        raise RuntimeError(f"追加專案後的 config.toml 解析不了（{e}）；目標 config 的 projects 寫法不是 [[projects]]，請手動處理")
+    if got != want:
+        raise RuntimeError("追加專案後的 config.toml 解析結果跟「原本多一個專案」不符；請手動處理")
+    return new_text, want
 
 
 def atomic_write(path, text):
@@ -439,14 +471,23 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
             key=lambda b: (b.get("position") or 0, b["id"]),
         )
         config_written = False
+        if existing is None:
+            with open(config_path) as f:
+                text = f.read()
+            # dry-run 也組一次、驗一次：寫出去會讓 daemon 起不來的 config 在 dry-run 就該看得到。
+            new_text, want = compose_config(text, toml_block(t["projects"][0], live_user_bots, args.host))
         if existing is None and not args.dry_run:
             cfg_backup = f"{config_path}.pre-transfer-{stamp()}"
             shutil.copy2(os.path.realpath(config_path), cfg_backup)
             backups.append(cfg_backup)
-            with open(config_path) as f:
-                text = f.read()
-            atomic_write(config_path, text.rstrip("\n") + "\n" + toml_block(t["projects"][0], live_user_bots, args.host))
+            atomic_write(config_path, new_text)
             config_written = True
+            try:
+                if load_toml(config_path) != want:
+                    raise RuntimeError("config.toml 寫完重讀，內容跟預期不符，已還原")
+            except Exception as e:
+                shutil.copy2(cfg_backup, os.path.realpath(config_path))
+                raise e if isinstance(e, RuntimeError) else RuntimeError(f"config.toml 寫完重讀失敗（{e}），已還原")
         if args.dry_run:
             conn.execute("ROLLBACK")
         else:
