@@ -7,6 +7,7 @@ import { useStore } from '../store/store'
 import { humanBytes } from './memFormat'
 import { browsersLine, TABS_WARN, tabsTotal } from '../lib/browserMem'
 import { MemPaneModal } from './MemPaneModal'
+import { useClipped } from '../hooks/useClipped'
 import './memPopover.css'
 
 /**
@@ -92,6 +93,8 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
   const wrap = useRef<HTMLDivElement>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
+  // 標題列擠的時候這顆先讓（memPopover.css），裁到放不下就整顆藏起來。
+  const clipped = useClipped(wrap, btnRef)
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
   const row = useStore((s) => s.mem?.hosts.find((h) => h.host === host) ?? null)
 
@@ -247,7 +250,7 @@ export function MemPopover({ host = LOCAL_HOST, children }: { host?: string; chi
   ) : null
 
   return (
-    <div className="mem-wrap" ref={wrap}>
+    <div className={`mem-wrap${clipped ? ' clipped' : ''}`} ref={wrap}>
       <button
         ref={btnRef}
         type="button"
