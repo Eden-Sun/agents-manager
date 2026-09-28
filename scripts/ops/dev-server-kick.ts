@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 // 確保開發用 dev server（web/ 的 vite，port 5173，綁 0.0.0.0 供手機/LAN 存取）一直在跑。
-// 由 launchd `com.agm.dev-server`（`~/Library/LaunchAgents/com.agm.dev-server.plist`，
-// `StartInterval 60` ＋ `RunAtLoad`）每 60 秒跑一次；有回應就什麼都不做。
+// 由排程每 60 秒跑一次；有回應就什麼都不做。macOS 是 launchd `com.agm.dev-server`
+//（`~/Library/LaunchAgents/com.agm.dev-server.plist`，`StartInterval 60` ＋ `RunAtLoad`），
+// Linux 是 systemd user timer `com.agm.dev-server.timer`（issue #677）。
 // 規則見 docs/SPEC.md §18.1，安裝方式見 scripts/ops/README.md。
 //
 // 這份是**來源檔**：改行為改這裡再 install 到
@@ -9,7 +10,7 @@
 //（issue #418：這支在 2026-09-24 之前只存在於安裝目錄，沒有版控也沒有測試）。
 //
 // 為什麼「看門狗用 bun、vite 用 node」不矛盾：
-//   看門狗只做 fetch / lsof / spawn，不當 HTTP 代理，bun 的 socket 差異碰不到。
+//   看門狗只做 fetch / lsof（Linux 是 ss）/ spawn，不當 HTTP 代理，bun 的 socket 差異碰不到。
 //   vite 不行：bun 1.3.14 交給 HTTP upgrade handler 的 socket 沒有 Node 的 destroySoon，
 //   vite 代理在 upgrade 回應結束時會呼叫它（proxyRes.on('end') → socket.destroySoon()），
 //   於是正式 daemon 一重啟、代理目標斷線，vite 整個 crash
@@ -22,6 +23,8 @@
 // 5188 那類 VITE_MOCK=1 實例是各 bot 自己的測試環境，不歸這支管，絕不碰。
 //
 // 5173 吃的是一棵**只跟 origin/main 的乾淨 worktree**（REPO），不是大家共用的 ~/project/agents-manager：
+//   位置由共用樹推導：`${AGM_REPO:-~/project/agents-manager}-main`（跟其他 kick 同一個 `AGM_REPO` 慣例，
+//   #676：以前寫死 /Users/m4p/…，換到 Linux 主機就找不到），`AGM_DEV_REPO` 可以整個指定。
 //   共用樹 HEAD 落後、又有 20+ 個別人未提交的 WIP，永遠追不上 origin/main，使用者在手機上
 //   永遠看不到剛推的東西（2026-09-12 使用者裁示：5173＝已合併的事實）。
 //   每輪先 `git fetch && git reset --hard origin/main`——那棵樹沒有任何人的 WIP，reset 是安全的。
@@ -29,10 +32,16 @@
 //   web/bun.lock 變了就 bun install 並重啟 vite；只有原始碼變的話 vite 自己 HMR，不重啟。
 
 import { appendFileSync, existsSync, openSync, unlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-const REPO = '/Users/m4p/project/agents-manager-main' // git worktree，detached，只跟 origin/main
+const HOME = process.env.HOME || homedir()
+const SHARED_REPO = process.env.AGM_REPO || join(HOME, 'project', 'agents-manager')
+const REPO = process.env.AGM_DEV_REPO || `${SHARED_REPO}-main` // git worktree，detached，只跟 origin/main
 const PORT = 5173
+// 誰在聽 port：macOS 用 lsof；Linux 用 iproute2 的 ss——Ubuntu server 不保證裝了 lsof（#676）。
+// `AGM_DEV_LISTEN_TOOL` 只給測試在另一個平台上跑同一套情境。
+const LISTEN_TOOL = process.env.AGM_DEV_LISTEN_TOOL || (process.platform === 'linux' ? 'ss' : 'lsof')
 const URL = `http://127.0.0.1:${PORT}/`
 const DIR = dirname(import.meta.dir) // supervisor/AGM
 const LOG = join(DIR, 'dev-server.log')
@@ -61,17 +70,38 @@ async function sh(cmd: string[]): Promise<string> {
 
 type Listener = { pid: string; addrs: string[]; cmd: string; ppid: string }
 
-/** 5173 上的 LISTEN 程序，依 pid 收攏（同一顆 vite 常同時有 IPv4／IPv6 兩筆）。 */
-async function listeners(): Promise<Listener[]> {
-  // -Fpn = 機器可讀：`p<pid>` 一行、`n<位址>` 一行。人類格式的最後一欄是 `(LISTEN)` 不是位址，
-  // 照欄位切會把每顆都誤判成 loopback-only（2026-09-12 踩過，健康的那顆被當孤兒收掉）。
-  const out = await sh(['lsof', '-nP', `-iTCP:${PORT}`, '-sTCP:LISTEN', '-Fpn'])
+/** `lsof -Fpn`：`p<pid>` 一行、`n<位址>` 一行。 */
+function parseLsof(out: string): Map<string, string[]> {
   const byPid = new Map<string, string[]>()
   let cur = ''
   for (const line of out.split('\n')) {
     if (line.startsWith('p')) cur = line.slice(1)
     else if (line.startsWith('n') && cur) byPid.set(cur, [...(byPid.get(cur) ?? []), line.slice(1)])
   }
+  return byPid
+}
+
+/** `ss -Hltnp`：`LISTEN 0 511 0.0.0.0:5173 0.0.0.0:* users:(("node",pid=12,fd=21),…)`，第 4 欄是本地位址。
+ *  沒有 `pid=` 的列（別的使用者的 socket，ss 不給看）略過——跟 lsof 對別人的行程一樣看不到。 */
+function parseSs(out: string): Map<string, string[]> {
+  const byPid = new Map<string, string[]>()
+  for (const line of out.split('\n')) {
+    const cols = line.trim().split(/\s+/)
+    const addr = cols[3]
+    if (!addr) continue
+    for (const m of line.matchAll(/pid=(\d+)/g)) byPid.set(m[1]!, [...(byPid.get(m[1]!) ?? []), addr])
+  }
+  return byPid
+}
+
+/** 5173 上的 LISTEN 程序，依 pid 收攏（同一顆 vite 常同時有 IPv4／IPv6 兩筆）。 */
+async function listeners(): Promise<Listener[]> {
+  // lsof 一律用 -Fpn（機器可讀）。人類格式的最後一欄是 `(LISTEN)` 不是位址，
+  // 照欄位切會把每顆都誤判成 loopback-only（2026-09-12 踩過，健康的那顆被當孤兒收掉）。
+  const byPid =
+    LISTEN_TOOL === 'ss'
+      ? parseSs(await sh(['ss', '-Hltnp', `sport = :${PORT}`]))
+      : parseLsof(await sh(['lsof', '-nP', `-iTCP:${PORT}`, '-sTCP:LISTEN', '-Fpn']))
   const res: Listener[] = []
   for (const [pid, addrs] of byPid) {
     const ps = await sh(['ps', '-o', 'ppid=,command=', '-p', pid])
@@ -82,8 +112,8 @@ async function listeners(): Promise<Listener[]> {
   return res
 }
 
-/** 綁在萬用位址（`*:5173` / `0.0.0.0:5173`）才是 LAN 上的手機連得到的。 */
-const reachable = (l: Listener) => l.addrs.some(a => a.startsWith('*:') || a.startsWith('0.0.0.0:'))
+/** 綁在萬用位址（`*:5173` / `0.0.0.0:5173`，ss 的 IPv6 萬用是 `[::]:5173`）才是 LAN 上的手機連得到的。 */
+const reachable = (l: Listener) => l.addrs.some(a => a.startsWith('*:') || a.startsWith('0.0.0.0:') || a.startsWith('[::]:'))
 const isVite = (l: Listener) => /vite/.test(l.cmd)
 /** ppid=1：起它的程序已經結束，沒有 bot 還在用它——可以收。 */
 const orphan = (l: Listener) => l.ppid === '1'
@@ -132,7 +162,7 @@ async function syncMain(): Promise<boolean> {
 }
 
 async function nodeBin(): Promise<string | null> {
-  const pinned = '/Users/m4p/.local/bin/node'
+  const pinned = join(HOME, '.local/bin/node')
   if (existsSync(pinned)) return pinned
   const found = await sh(['which', 'node'])
   return found ? found.split('\n')[0]! : null
@@ -200,6 +230,7 @@ const child = Bun.spawn([node, VITE, '--host', '0.0.0.0', '--port', String(PORT)
   stdout: fd,
   stderr: fd,
   // launchd 會在這支腳本結束後收掉整個 job 的程序群；detached + unref 讓 vite 活下去。
+  //（systemd 看的是 cgroup，detached 不夠，靠 unit 的 KillMode=process。）
   detached: true,
 })
 child.unref()

@@ -34,8 +34,7 @@ PY3="$(command -v python3 || true)"
 [ -n "$BUN" ] || { echo "skip - 沒有 bun，跳過 dev-server-kick.ts 的測試"; echo "0 passed, 0 failed"; exit 0; }
 [ -n "$PY3" ] || { echo "skip - 沒有 python3（測試用它當假的 HTTP server）"; echo "0 passed, 0 failed"; exit 0; }
 
-for pat in "const REPO = '/Users/m4p/project/agents-manager-main'" 'const PORT = 5173' \
-           "const pinned = '/Users/m4p/.local/bin/node'"; do
+for pat in 'const PORT = 5173' "const pinned = join(HOME, '.local/bin/node')"; do
   grep -q -- "${pat}" "${SRC}" || { echo "FAIL - 原腳本找不到 '${pat}'，測試的替換要更新"; exit 1; }
 done
 
@@ -53,9 +52,9 @@ setup() {
   LOG="$ROOT/agm/dev-server.log"; : > "$LOG"
   : > "$FIX/spawned"; : > "$FIX/lsof.txt"; : > "$FIX/calls.log"
   SCRIPT="$ROOT/agm/bin/dev-server-kick.ts"
-  sed -e "s#const REPO = '/Users/m4p/project/agents-manager-main'#const REPO = '${REPO}'#" \
-      -e "s#const PORT = 5173#const PORT = ${PORT}#" \
-      -e "s#const pinned = '/Users/m4p/.local/bin/node'#const pinned = '${BIN}/node'#" \
+  # REPO 不改原始碼：跑的時候由 AGM_DEV_REPO 指到暫存目錄（run()），推導規則另外測（第 12 組）。
+  sed -e "s#const PORT = 5173#const PORT = ${PORT}#" \
+      -e "s#const pinned = join(HOME, '.local/bin/node')#const pinned = '${BIN}/node'#" \
       "$SRC" > "$SCRIPT"
 
   # 假 lsof：只回報 fix/lsof.txt 裡、而且「還活著且是測試自己 spawn 的」pid。
@@ -68,6 +67,19 @@ while read -r pid addr; do
   kill -0 "\$pid" 2>/dev/null || continue
   echo "p\$pid"
   echo "n\$addr"
+done < "${FIX}/lsof.txt"
+exit 0
+STUB
+  # 假 ss（Linux 路徑，#676）：同一份 fix/lsof.txt、同一條硬守衛，輸出成 `ss -Hltnp` 的格式。
+  # lsof 的 `*:<port>` 在 ss 是 `0.0.0.0:<port>`（IPv4 萬用）。
+  cat > "$BIN/ss" <<STUB
+#!/bin/bash
+while read -r pid addr; do
+  [ -n "\$pid" ] || continue
+  grep -qx "\$pid" "${FIX}/spawned" || continue
+  kill -0 "\$pid" 2>/dev/null || continue
+  case "\$addr" in '*:'*) addr="0.0.0.0:\${addr#*:}" ;; esac
+  echo "LISTEN 0      511    \$addr      0.0.0.0:*    users:((\"node\",pid=\$pid,fd=21))"
 done < "${FIX}/lsof.txt"
 exit 0
 STUB
@@ -108,6 +120,8 @@ echo \$\$ >> "${FIX}/spawned"
 exec "${PY3}" -m http.server "${PORT}" --bind 127.0.0.1 --directory "${ROOT}"
 STUB
   chmod 755 "$BIN"/*
+  # 情境迴圈裡只留當輪的那一支：腳本選錯工具就叫不到，測試才看得出來。
+  case "${TOOL:-}" in lsof) rm -f "$BIN/ss" ;; ss) rm -f "$BIN/lsof" ;; esac
   echo "aaaaaaa" > "$FIX/head"; echo "lock1" > "$FIX/lock"
   : > "$REPO/web/node_modules/vite/bin/vite.js"
   ( cd "$REPO" && mkdir -p .git )
@@ -141,7 +155,7 @@ wait_ready() {
   echo "      （等不到測試用的 HTTP server 在 ${PORT} 上回應）" >&2
   return 1
 }
-run() { ( cd "$ROOT" && PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1; echo $? ); }
+run() { ( cd "$ROOT" && AGM_DEV_LISTEN_TOOL="$TOOL" AGM_DEV_REPO="$REPO" PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1; echo $? ); }
 
 # 0. 安全前提：副本裡不准再有 5173，假 lsof 只回報自己 spawn 的 pid。
 setup
@@ -151,10 +165,15 @@ equals "副本的 const PORT 換成測試 port" "$(grep -c "^const PORT = ${PORT
 equals "副本裡沒有 const PORT = 5173" "$(grep -c '^const PORT = 5173$' "$SCRIPT")" "0"
 equals "副本裡剩下的 5173 都不是可執行的 port（只在註解與 log 字串）" \
   "$(grep -n '5173' "$SCRIPT" | grep -vE ':[[:space:]]*(//|/\*\*|\*)' | grep -vc 'log(`')" "0"
-equals "副本的 REPO 指到暫存目錄" "$(grep -c "const REPO = '${REPO}'" "$SCRIPT")" "1"
+equals "副本裡沒有寫死的 /Users 路徑" "$(grep -v '^ *//' "$SCRIPT" | grep -c '/Users/')" "0"
 echo "99999" > "$FIX/lsof.txt"   # 沒登記、也不存在的 pid
 equals "假 lsof 不回報沒登記的 pid" "$(PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BIN/lsof" -nP -iTCP:"$PORT" -sTCP:LISTEN -Fpn | wc -l | tr -d ' ')" "0"
+equals "假 ss 不回報沒登記的 pid" "$(PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BIN/ss" -Hltnp | wc -l | tr -d ' ')" "0"
 teardown
+
+# 取 port 的工具兩種各跑一次整套情境：lsof（macOS）與 ss（Linux，#676）。
+for TOOL in lsof ss; do
+echo "# listen tool: ${TOOL}"
 
 # 1. 健康（綁 *、有 HTTP 回應、HEAD 沒變）→ 什麼都不做、log 不寫。
 setup
@@ -193,6 +212,16 @@ check "記下收掉孤兒 loopback-only vite" "收掉孤兒 loopback-only vite p
 sleep 1
 equals "孤兒 vite 真的被殺掉" "$(kill -0 "$PID" 2>/dev/null && echo alive || echo gone)" "gone"
 check "接著用 node 拉起 vite" "用 node v22.0.0 拉起 vite" "$LOG"
+teardown
+
+# 4b. loopback-only 的孤兒 vite 本機有 HTTP 回應也不算健康（手機連不到）→ 照樣收掉。
+#     這組讓「位址欄讀錯」（例如把 ss 的對端欄 `0.0.0.0:*` 當成本地位址）看得出來。
+setup
+echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
+PID=$(fake_listener "127.0.0.1:${PORT}" 1 "node /x/vite.js")
+serve >/dev/null; wait_ready
+run >/dev/null
+check "本機有回應的 loopback-only 孤兒也收掉" "收掉孤兒 loopback-only vite pid ${PID}" "$LOG"
 teardown
 
 # 5. 缺依賴：找不到 node → 明確放棄這輪，不拿 bun 代跑。
@@ -266,6 +295,23 @@ rm -f "$FIX/install-fail"
 run >/dev/null
 equals "HEAD 沒變也再裝一次" "$(grep -c 'bun install --frozen-lockfile' "$FIX/calls.log")" "2"
 [ ! -f "$ROOT/agm/dev-server.pending-install" ] && { echo "ok   - 裝成功就清標記"; PASS=$((PASS + 1)); } || { echo "FAIL - 裝成功就清標記"; FAIL=$((FAIL + 1)); }
+teardown
+
+# 12. REPO 由共用樹推導：沒有 AGM_DEV_REPO 時是 `${AGM_REPO}-main`（#676：以前寫死 /Users/m4p/…）。
+setup
+( cd "$ROOT" && AGM_DEV_LISTEN_TOOL="$TOOL" AGM_REPO="$ROOT/shared" PATH="$BIN:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" "$BUN" "$SCRIPT" >/dev/null 2>&1 )
+check "REPO＝AGM_REPO 旁邊的 -main" "$ROOT/shared-main 不是 git worktree" "$LOG"
+check_no "沒指定時不會去碰測試 REPO" "git -C $REPO" "$FIX/calls.log"
+teardown
+done
+
+# 13. ss 的 IPv6 萬用位址 `[::]:<port>` 也算對外可達（健康，不動它）。
+TOOL=ss; setup
+echo "aaaaaaa" > "$FIX/head.after"; echo "lock1" > "$FIX/lock.after"
+fake_listener "[::]:${PORT}" 1 "node /x/vite.js --host ::" >/dev/null
+serve >/dev/null; wait_ready
+equals "[::] 健康時 exit 0" "$(run)" "0"
+equals "[::] 健康時不寫 log" "$(wc -c < "$LOG" | tr -d ' ')" "0"
 teardown
 
 echo "$PASS passed, $FAIL failed"

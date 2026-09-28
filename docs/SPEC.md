@@ -3025,17 +3025,17 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 ### 18.1 開發用 dev server（5173）
 
 - 位址 `http://<本機>:5173`，`--strictPort`（使用者手機書籤寫死，搶不到就失敗，不換 port）。
-- **來源是只跟 origin/main 的乾淨 worktree** `/Users/m4p/project/agents-manager-main`（detached HEAD）。看門狗每輪 `git fetch && git reset --hard origin/main`（那棵樹沒有任何人的 WIP）；
+- **來源是只跟 origin/main 的乾淨 worktree** `${AGM_REPO:-~/project/agents-manager}-main`（detached HEAD；共用樹旁邊那棵，`AGM_DEV_REPO` 可整個指定，#676）。看門狗每輪 `git fetch && git reset --hard origin/main`（那棵樹沒有任何人的 WIP）；
   `web/bun.lock` 變了才 `bun install` 並重啟 vite；install 失敗不砍還在跑的 vite，並留下待安裝標記，之後每輪重試到成功。原始碼變動靠 HMR。**5173 看到的 = 已合併進 origin/main 的事實。** 共用工作樹不再被 5173 使用（它永遠有別人的 WIP、pull 不了）。
 - **bot 驗自己未提交的改動用自己的 port**（例如 5188、`VITE_MOCK=1`），自己起自己收。5173 是使用者的視窗。其他 port 不歸看門狗管。
 - **runtime 是 node 不是 bun**：`node web/node_modules/vite/bin/vite.js`。bun 的 upgrade socket 沒有 `destroySoon`，daemon 一重啟代理斷線 vite 就 crash。bun 只用來 build 與裝套件。
 - **必綁 `--host 0.0.0.0`**（手機／LAN／Tailscale）；`vite.config.ts` 也設 `server.host: true`，手動起的也對外。代理把 `Origin` 改寫成 daemon 位址。
   代價：同網段裝置都能透過 5173 的 `/api` 代理打到 7788。
-- **看門狗** launchd `com.agm.dev-server`：`StartInterval 60`（使用者指示；推上去後最多一分鐘可見）、`RunAtLoad`，跑 `bun run supervisor/AGM/bin/dev-server-kick.ts`（來源檔是 `scripts/ops/dev-server-kick.ts`，手動 install，見 §18.2a 與 `scripts/ops/README.md`），
+- **看門狗** launchd `com.agm.dev-server`（Linux 是 systemd user timer，§18.2e）：`StartInterval 60`（使用者指示；推上去後最多一分鐘可見）、`RunAtLoad`，跑 `bun run supervisor/AGM/bin/dev-server-kick.ts`（來源檔是 `scripts/ops/dev-server-kick.ts`，手動 install，見 §18.2a 與 `scripts/ops/README.md`），
   plist 的 `PATH` 要含 `/opt/homebrew/bin` 與 `~/.local/bin`（launchd 不給登入 shell 的 PATH）。行為：
-  1. **健康 = 對外可達**：`lsof -nP -iTCP:5173 -sTCP:LISTEN -Fpn`（要用 `-F` 機器格式）綁 `*`／`0.0.0.0` 且 curl 127.0.0.1 有回應 → exit 0、不寫 log。只綁 loopback 的是**錯誤實例**。
+  1. **健康 = 對外可達**：`lsof -nP -iTCP:5173 -sTCP:LISTEN -Fpn`（要用 `-F` 機器格式；Linux 用 `ss -Hltnp 'sport = :5173'` 的本地位址欄，Ubuntu server 不保證有 lsof，#676）綁 `*`／`0.0.0.0`／`[::]` 且 curl 127.0.0.1 有回應 → exit 0、不寫 log。只綁 loopback 的是**錯誤實例**。
   2. 錯誤實例：vite 且 `ppid=1`（孤兒）→ kill、等 port 放開（≤ 5 秒）再拉起；vite 但父程序活著 → 只記錄「需人工處理」；非 vite → 只記錄 pid 與 command。
-  3. 找不到 node 或 `vite.js` → 記 log 跳過，**不拿 bun 代跑**。node 先取寫死的 `~/.local/bin/node`，沒有才退回 `which node`；兩個都沒有才算找不到。
+  3. 找不到 node 或 `vite.js` → 記 log 跳過，**不拿 bun 代跑**。node 先取 `$HOME/.local/bin/node`，沒有才退回 `which node`；兩個都沒有才算找不到。
   4. 沒人聽 → `node vite.js --host 0.0.0.0 --port 5173 --strictPort`，用 `Bun.spawn` 的 `detached` ＋ `unref()` 脫離（**不是 `nohup`**；launchd 會在 kick 結束後收掉整個 job 的程序群），stdout／stderr 以附加模式接到 `dev-server.log`；≤ 15 秒複驗；失敗交下一輪，不在腳本內重試。
   5. 健康檢查的 `fetch` 有 3 秒逾時。「健康」還要求這一輪沒有因為 `web/bun.lock` 變動而需要重啟；需要重啟、但占用 port 的不是孤兒 vite 時不搶，留給下一輪。
   log：`supervisor/AGM/dev-server.log`、`dev-server.launchd.log`。
@@ -4077,10 +4077,10 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 | `PATH` 補 `/opt/homebrew/bin` | 需要 | 不存在的目錄留在 PATH 無害，不另分支 | `github.rs`、`git_sh.rs`、`release_triage/issue.rs` |
 | `/private/tmp` 正規化 | `/tmp` 是 `/private/tmp` 的 symlink | 沒有 `/private`，規則不會命中 | `pane_identity.rs` |
 | `.app` bundle 偵測 | `scripts/package-dmg.sh` 的 `Contents/MacOS` | 不會命中，照一般執行檔處理 | `main.rs` |
+| 5173 看門狗：誰在聽 port、worktree 與 node 位置（§18.1） | `lsof -Fpn`；以前寫死 `/Users/m4p/…` | `ss -Hltnp 'sport = :5173'`（取本地位址欄，IPv6 萬用 `[::]` 也算對外）；worktree＝`${AGM_REPO:-~/project/agents-manager}-main`、node＝`$HOME/.local/bin/node`，兩個平台同一套 | `scripts/ops/dev-server-kick.ts` |
 
 **不在這一節（別的子項）**：`立即部署` 的 `launchctl kickstart com.agm.daemon-update`（`deploy_now.rs`）、`daemon-swap.sh`、
-`daemon-start.py` 與 `com.agm.*` 例行 job 的 systemd 版屬 #677；DB／設定搬家與絕對路徑改寫屬 #678。
-`deploy_now.rs` 在 Linux 上仍會叫 `launchctl`，叫不起就照原本的錯誤路徑回 `kick_start_failed`、不改狀態，等 #677 換成 `systemctl --user`。
+`daemon-start.py` 與 `com.agm.*` 例行 job 的 systemd 版屬 #677（§18.2e）；DB／設定搬家與絕對路徑改寫屬 #678。
 
 **要在遠端主機確認的事**（沒有 ssh key 前無法驗）：herdr 在 Linux 的 socket 仍在 `~/.config/herdr/sessions/<s>/herdr.sock`（沒有改走
 `$XDG_RUNTIME_DIR`）；daemon 以 systemd user service 跑時要 `loginctl enable-linger`，否則登出就被收掉；搬過去之後本機就是編譯主機，
