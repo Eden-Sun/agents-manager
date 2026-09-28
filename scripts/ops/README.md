@@ -545,7 +545,15 @@ install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/superv
 
 單一專案從一顆 daemon 移交到另一顆（例：Mac → agm-host，以遠端主機 `m4p` 接手）。不安裝，從 checkout 跑；
 流程、改寫規則與拒絕條件見 SPEC §11.9。`export` 只讀來源 DB（先做 backup 快照、讀完刪）；`import` 要**目標 daemon 停著**
-（拿同一把 `daemon.lock`），先 `--dry-run` 看摘要。隔離測試：`scripts/ops/project-transfer_test.sh`（假 DB，schema 從 `daemon/src/db.rs` 抽）。
+（拿同一把 `daemon.lock`），先 `--dry-run` 看摘要。專案改在目標本機跑：`--host local --path-map /來源=/目標`，原生對話先用下面的 transcript-transfer 搬（SPEC §11.9a）。
+隔離測試：`scripts/ops/project-transfer_test.sh`（假 DB，schema 從 `daemon/src/db.rs` 抽）。
+
+## transcript-transfer（issue #717）
+
+專案改在接手那台本機跑時，把 bot 的原生對話檔（claude／codex／grok）搬到那台並改寫路徑，讓 `start?resume=native` 接得回。
+在來源機器跑、接在 `project-transfer export` 之後，輸出改好 `runs.transcript_path` 的新 bundle 給 `import --host local --path-map …`。
+不安裝，從 checkout 跑；實測結果與 runbook 見 SPEC §11.9a。先 `--dry-run`；結束碼 2＝有找不到／拒絕／衝突。
+隔離測試：`scripts/ops/transcript-transfer_test.sh`（假的來源 $HOME 與目標目錄，不 ssh）。
 
 ## 已安裝版與 repo 的落差（issue #418 稽核，2026-09-24）
 
