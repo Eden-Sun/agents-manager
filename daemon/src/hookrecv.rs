@@ -230,7 +230,7 @@ fn claude_account_from_tools(
     match (identity, info) {
         (Some(name), Some(i)) if i.logged_in == Some(false) => (
             None,
-            Some(format!("身份 {name} 在 {host} 沒有登入：claude 會退回這台機器 Keychain 裡預設（cc0）的帳號執行。請在這個 Bot 按「登入 / 切換帳號」。")),
+            Some(format!("身份 {name} 在 {host} 沒有登入：claude 會退回這台機器預設（cc0）的帳號執行（macOS 存在 Keychain、Linux 存在 ~/.claude/.credentials.json）。請在這個 Bot 按「登入 / 切換帳號」。")),
         ),
         (_, Some(i)) if i.logged_in != Some(false) && i.account.is_some() => (i.account.clone(), None),
         _ => (None, None),
