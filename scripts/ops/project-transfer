@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """單一專案移交到另一顆 daemon（issue #710，#678 的子集）。
 
-  project-transfer export --db <來源 agents-manager.sqlite3> --project <專案 id> --out <bundle.json.gz>
+  project-transfer export --db <來源 agents-manager.sqlite3> --project <專案 id> --out <bundle.json.gz> \
+      [--with-supervisor [--inbox-days 7]]
   project-transfer import --bundle <bundle.json.gz> --host <目標 daemon 上的主機名，或 local> \
       [--path-map /來源/路徑=/目標/路徑 …] [--config ~/.config/agents-manager/config.toml] [--dry-run]
 
 export 先對來源 DB 做 SQLite online backup（唯讀開來源，快照放暫存目錄、讀完當下刪），
 從快照取出專案、它活著的 bot（含 child；已軟刪的 bot 與它的一切都不帶）、conversations、runs、turns、messages、
-attachments（連同 daemon 讀得到的位元組）與 bot_reads，寫成一個 gzip JSON。來源 DB 一個字都不寫。
+attachments（連同 daemon 讀得到的位元組）、bot_reads 與該專案的群組任務（missions／mission_events，#720），
+寫成一個 gzip JSON。來源 DB 一個字都不寫。`--with-supervisor` 另帶協調者（AGM）的資料，import 也加同一個旗標時
+在同一個交易裡合併進目標（規則見下方「協調者」一節與 SPEC §11.9b）。
 
 import 是「目標 daemon 停著」的離線路徑：目標 daemon 沒有匯入對話歷史的 API，而 Project／Bot
 的權威是 config.toml（SPEC §3.1），所以 config.toml 與 SQLite 要在同一個停機窗口一起寫：
@@ -40,8 +43,15 @@ import tempfile
 
 FORMAT = "agm-project-transfer/1"
 DB_NAME = "agents-manager.sqlite3"
-# 插入順序＝外鍵順序。`bot_reads` 是子模組的表，舊 DB 可能沒有。
-TABLES = ["projects", "bots", "conversations", "runs", "turns", "messages", "attachments", "bot_reads"]
+# 插入順序＝外鍵順序。`bot_reads`、`missions`／`mission_events` 是子模組的表，舊 DB 可能沒有。
+TABLES = ["projects", "bots", "conversations", "runs", "turns", "messages", "attachments", "bot_reads",
+          "missions", "mission_events"]
+OPTIONAL_TABLES = {"bot_reads", "missions", "mission_events"}
+# 撞到唯一索引就跳過並列進報告（#720，使用者 2026-09-28），不整批中止：這些表的 client_request_id／event_key
+# 在兩顆 daemon 各自產生，碰巧同名不代表是同一筆。專案本體（projects／bots／對話）照舊撞了就整批回滾。
+SKIP_ON_UNIQUE = {"missions", "mission_events"}
+# 父列被跳過時，子列一起跳過（不留孤兒）：子表 → (指向父列的欄位, 父表)。
+FOLLOWS_PARENT = {"mission_events": ("mission_id", "missions"), "supervisor_reviews": ("assignment_id", "supervisor_assignments")}
 ACTIVE_RUN = ("starting", "running", "stopping")
 OPEN_TURN = ("queued", "in_flight")
 EXIT_REASON = "project transfer"
@@ -110,6 +120,10 @@ def export(args):
             src.close()
         try:
             bundle = collect(snap, args.project)
+            if args.with_supervisor:
+                bots = {dec(r["id"]) for r in bundle["tables"]["bots"]["rows"]}
+                bundle["supervisor"] = collect_supervisor(snap, args.inbox_days, bots)
+                bundle["warnings"] += bundle["supervisor"].pop("warnings")
         finally:
             snap.close()
     finally:
@@ -164,6 +178,14 @@ def collect(conn, project_id):
         )
     data["attachments"] = by_bot("attachments")
     data["bot_reads"] = by_bot("bot_reads") if has_table(conn, "bot_reads") else []
+    # 群組任務跟著專案走（#720）：以前沒帶，專案搬過去群組任務的歷史就不見了。
+    data["missions"] = (rows(conn, "SELECT * FROM missions WHERE project_id = ? ORDER BY rowid", (project_id,))
+                        if has_table(conn, "missions") else [])
+    mission_ids = [m["id"] for m in data["missions"]]
+    data["mission_events"] = (
+        rows(conn, f"SELECT * FROM mission_events WHERE mission_id IN ({in_list(mission_ids)}) ORDER BY rowid", mission_ids)
+        if mission_ids and has_table(conn, "mission_events") else []
+    )
 
     files, missing = {}, []
     for a in data["attachments"]:
@@ -177,7 +199,7 @@ def collect(conn, project_id):
 
     tables = {}
     for t in TABLES:
-        if t == "bot_reads" and not has_table(conn, t):
+        if t in OPTIONAL_TABLES and not has_table(conn, t):
             continue
         tables[t] = {"columns": columns(conn, t), "rows": data[t]}
     return {
@@ -191,6 +213,191 @@ def collect(conn, project_id):
         "missing_files": missing,
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------- 協調者（AGM）的資料（#720）
+#
+# `--with-supervisor`：跟著專案一起搬協調者的執行期資料，在同一個停機窗口、同一份備份、同一個交易裡寫進目標。
+# 每一列的 supervisor_id 都是寫死的 'AGM'（supervisor/store.rs `SUPERVISOR_ID`），目標開機就有自己那一列，
+# 所以這是**合併**：`supervisors`／`supervisor_roles` 更新目標那一列的長期欄位（Mac 的 AGM 成為唯一的協調者），
+# 其他表只插目標沒有的 id，撞唯一索引就跳過列報告；搬了哪些 id 另寫一筆 `supervisor_notes(kind='transfer')`，
+# 合併後分不出來源時靠它回溯。取捨見 SPEC §11.9b。
+
+SUP_TABLES = ["supervisor_requests", "supervisor_assignments", "supervisor_reviews", "supervisor_notes",
+              "supervisor_incidents", "supervisor_approvals", "supervisor_inbox"]
+# 會搬的表各挑哪些列。沒列的表（leases、bot_sleeps、intents、spawn_hints、judge_shadow、fork_ops）是這顆 daemon
+# 自己的執行期狀態，不搬。
+SUP_WHERE = {
+    "supervisor_requests": "1",
+    "supervisor_assignments": "1",  # 未結案的照原狀搬：turn 不在目標上的，reconcile 會收成 turn_missing 送驗收
+    "supervisor_reviews": "1",
+    "supervisor_notes": "kind NOT LIKE 'child_retirement_%'",  # 10 分鐘的退役守衛，綁來源的 bot
+    "supervisor_incidents": "status = 'resolved'",  # 開著的由目標自己的探測重新判定
+    "supervisor_approvals": "status NOT IN ('pending', 'approved')",  # 還有效的核准授權的是來源那台的動作
+}
+# 事件時間可能是舊版的秒格式：正規化成毫秒再比（同 db.rs `ts_sql`）。
+TS = "COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', {c}), {c})"
+# 單例表：更新目標那一列，只帶長期欄位；執行期欄位重設成「還沒跑過」（bot 也是 autostart=false，接手後才打開）。
+SINGLETONS = {
+    "supervisors": ("id", {
+        "durable": ["bot_id", "project_id", "cwd", "identity", "effort", "active_model", "summary", "summary_version",
+                    "persona_text", "persona_version", "persona_hash", "persona_source", "persona_updated_at",
+                    "persona_seed_hash"],
+        "reset": {"status": "", "status_detail": None, "fallback_tries": 0, "cooldown_until": None,
+                  "quota_reset_at": None, "desired_running": 0, "watchdog_attempts": 0, "watchdog_next_at": None,
+                  "watchdog_gave_up_at": None, "watchdog_last_error": None, "last_notify_at": None,
+                  "remote_status": "unknown", "remote_url": None, "remote_source": None, "remote_observed_at": None,
+                  "remote_session_id": None, "remote_actor": None, "remote_evidence": None},
+    }),
+    "supervisor_roles": ("role", {
+        "durable": ["bot_id", "project_id", "cwd", "identity", "model", "effort", "wakes", "events_delivered",
+                    "duplicates", "merged", "last_wake_at", "last_wake_reason", "persona_text", "persona_version",
+                    "persona_hash", "persona_source", "persona_updated_at", "persona_seed_hash"],
+        "reset": {"desired_running": 0, "status": "", "status_detail": None, "quota_reset_at": None,
+                  "watchdog_attempts": 0, "watchdog_next_at": None, "watchdog_gave_up_at": None,
+                  "watchdog_last_error": None, "last_notify_at": None, "notify_next_at": None, "waiting_since": None},
+    }),
+}
+PARKED = "transferred (#720): not re-notified on the new host"
+
+
+def collect_supervisor(conn, inbox_days, project_bots):
+    if not has_table(conn, "supervisors"):
+        die("來源 DB 沒有 supervisors 表：沒有協調者資料可搬")
+    cutoff = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=inbox_days)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    tables, warnings = {}, []
+    for t in ["supervisors", "supervisor_roles"] + SUP_TABLES:
+        if not has_table(conn, t):
+            continue
+        if t in SINGLETONS:
+            got = rows(conn, f"SELECT * FROM {t} ORDER BY rowid")
+        elif t == "supervisor_inbox":
+            got = inbox_rows(conn, cutoff)
+        else:
+            got = rows(conn, f"SELECT * FROM {t} WHERE {SUP_WHERE[t]} ORDER BY rowid")
+        tables[t] = {"columns": columns(conn, t), "rows": got}
+    for t in SINGLETONS:
+        for r in tables.get(t, {}).get("rows", []):
+            if r.get("bot_id") and r["bot_id"] not in project_bots:
+                warnings.append(f"{t} {r.get('id') or r.get('role')} 的 bot {r['bot_id']} 不在這個專案裡：先把它的專案也搬過去，"
+                                f"否則目標上的協調者指到不存在的 bot")
+    return {"inbox_days": inbox_days, "inbox_cutoff": cutoff, "tables": tables, "warnings": warnings}
+
+
+def inbox_rows(conn, cutoff):
+    """沒處理完的＋最近 N 天的，再補上它們 `merged_into` 指到的（不然合併過的事件在目標上指到不存在的列）。"""
+    got = rows(conn, f"SELECT * FROM supervisor_inbox WHERE state <> 'handled' OR {TS.format(c='created_at')} >= ? ORDER BY rowid",
+               (cutoff,))
+    have = {r["id"] for r in got}
+    todo = [r["merged_into"] for r in got if r.get("merged_into") and r["merged_into"] not in have]
+    while todo:
+        more = rows(conn, f"SELECT * FROM supervisor_inbox WHERE id IN ({in_list(todo)})", todo)
+        todo = []
+        for r in more:
+            if r["id"] not in have:
+                have.add(r["id"])
+                got.append(r)
+                if r.get("merged_into") and r["merged_into"] not in have:
+                    todo.append(r["merged_into"])
+    return got
+
+
+ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def ulid():
+    n = (int(_dt.datetime.now(_dt.timezone.utc).timestamp() * 1000) << 80) | int.from_bytes(secrets.token_bytes(10), "big")
+    return "".join(ULID_ALPHABET[(n >> (5 * i)) & 31] for i in reversed(range(26)))
+
+
+def import_supervisor(conn, sup, maps, source_host, now):
+    """在呼叫端的交易裡合併；回傳報告。"""
+    report = {"singletons": {}, "inserted": {}, "skipped_existing": {}, "skipped_unique": [], "inbox_parked": 0,
+              "transfer_note": None}
+    imported = {}
+    for t, (key, spec) in SINGLETONS.items():
+        if t not in sup["tables"] or not has_table(conn, t):
+            continue
+        cols = set(columns(conn, t))
+        for r in [{k: dec(v) for k, v in r.items()} for r in sup["tables"][t]["rows"]]:
+            if r.get("cwd"):
+                r["cwd"] = map_path(r["cwd"], maps)
+            vals = {c: r[c] for c in spec["durable"] if c in r and c in cols}
+            vals.update({c: v for c, v in spec["reset"].items() if c in cols})
+            if "updated_at" in cols:
+                vals["updated_at"] = now
+            before = row_dict(conn, t, key, r[key])
+            if before is None:
+                row = {c: v for c, v in r.items() if c in cols}
+                row.update(vals)
+                conn.execute(f"INSERT INTO {t} ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", list(row.values()))
+                report["singletons"][f"{t}:{r[key]}"] = "inserted"
+            elif any(before.get(c) != v for c, v in vals.items() if c != "updated_at"):
+                conn.execute(f"UPDATE {t} SET {', '.join(f'{c} = ?' for c in vals)} WHERE {key} = ?",
+                             [*vals.values(), r[key]])
+                report["singletons"][f"{t}:{r[key]}"] = "updated"
+            else:
+                report["singletons"][f"{t}:{r[key]}"] = "unchanged"
+    for t in SUP_TABLES:
+        if t not in sup["tables"]:
+            continue
+        if not has_table(conn, t):
+            if sup["tables"][t]["rows"]:
+                die(f"目標 DB 沒有 {t} 表：目標 daemon 版本太舊，先升級")
+            continue
+        cols = set(columns(conn, t))
+        ins = skp = 0
+        for r in [{k: dec(v) for k, v in r.items()} for r in sup["tables"][t]["rows"]]:
+            if conn.execute(f"SELECT 1 FROM {t} WHERE id = ?", (r["id"],)).fetchone():
+                skp += 1
+                continue
+            if parent_skipped(t, r, report["skipped_unique"]):
+                continue
+            if t == "supervisor_inbox" and r.get("state") in ("pending", "delivered"):
+                # 使用者 2026-09-28：搬過去的未處理事件不再通知一次。`gave_up`＝還沒結案、協調者看得到、daemon 不再推；
+                # 直接寫成 gave_up 不會觸發「放棄補送就叫醒另一個角色」（那只在 delivered→gave_up 的當下發生）。
+                r.update(state="gave_up", notify_next_at=None, notify_error=PARKED)
+                report["inbox_parked"] += 1
+            row = {c: v for c, v in r.items() if c in cols}
+            try:
+                conn.execute(f"INSERT INTO {t} ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", list(row.values()))
+            except sqlite3.IntegrityError as e:
+                if "UNIQUE" not in str(e):
+                    raise RuntimeError(f"插入 {t} id={r['id']} 失敗：{e}") from e
+                report["skipped_unique"].append({"table": t, "id": r["id"], "error": str(e)})
+                if t == "supervisor_inbox" and r.get("state") == "gave_up" and r.get("notify_error") == PARKED:
+                    report["inbox_parked"] -= 1
+                continue
+            ins += 1
+            imported.setdefault(t, []).append(r["id"])
+        report["inserted"][t], report["skipped_existing"][t] = ins, skp
+    touched = any(imported.values()) or any(v in ("inserted", "updated") for v in report["singletons"].values())
+    if touched and has_table(conn, "supervisor_notes"):
+        note = {"issue": 720, "source_host": source_host, "inbox_days": sup["inbox_days"],
+                "inbox_cutoff": sup["inbox_cutoff"], "singletons": report["singletons"], "imported": imported,
+                "skipped_unique": report["skipped_unique"]}
+        nid = ulid()
+        conn.execute("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,?,?)",
+                     (nid, "AGM", "transfer", json.dumps(note, ensure_ascii=False), 1, now))
+        report["transfer_note"] = nid
+    return report
+
+
+def parent_skipped(table, r, skips):
+    """父列這次撞唯一索引被跳過的話，這一列也跳過並記一筆（`skips` 就地加）。"""
+    if table not in FOLLOWS_PARENT:
+        return False
+    col, parent = FOLLOWS_PARENT[table]
+    if r.get(col) and any(x["table"] == parent and x["id"] == r[col] for x in skips):
+        skips.append({"table": table, "id": r["id"], "error": f"{parent} {r[col]} 被跳過，跟著跳過"})
+        return True
+    return False
+
+
+def row_dict(conn, table, key, value):
+    cur = conn.execute(f"SELECT * FROM {table} WHERE {key} = ?", (value,))
+    r = cur.fetchone()
+    return None if r is None else dict(zip([d[0] for d in cur.description], r))
 
 
 # ---------------------------------------------------------------- import
@@ -415,6 +622,8 @@ def import_(args):
     if not os.path.isfile(db_path):
         die(f"找不到目標 DB {db_path}：目標 daemon 要先起過一次（建好 schema）再停下來 import")
 
+    if args.with_supervisor and "supervisor" not in bundle:
+        die("--with-supervisor 但這份 bundle 沒有協調者資料：export 時也要加 --with-supervisor")
     lock = take_lock(data_dir)
     try:
         # 拿到鎖之後重讀：拿鎖前那一刻 daemon 可能剛寫過 config。
@@ -468,7 +677,7 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
         dst.close()
         backups.append(b)
 
-    inserted, skipped = {}, {}
+    inserted, skipped, unique_skips, sup_report = {}, {}, [], None
     conn.execute("BEGIN IMMEDIATE")
     try:
         # bot_reads 的主鍵是 bot_id，不是 id。
@@ -481,16 +690,26 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
                 if conn.execute(f"SELECT 1 FROM {name} WHERE {key} = ?", (r[key],)).fetchone():
                     skp += 1
                     continue
+                if parent_skipped(name, r, unique_skips):
+                    continue
                 cols = [c for c in r if c in target_cols[name]]
                 try:
                     conn.execute(
                         f"INSERT INTO {name} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                         [r[c] for c in cols],
                     )
+                except sqlite3.IntegrityError as e:
+                    if name in SKIP_ON_UNIQUE and "UNIQUE" in str(e):
+                        unique_skips.append({"table": name, "id": r[key], "error": str(e)})
+                        continue
+                    raise RuntimeError(f"插入 {name} {key}={r[key]} 失敗：{e}") from e
                 except sqlite3.DatabaseError as e:
                     raise RuntimeError(f"插入 {name} {key}={r[key]} 失敗：{e}") from e
                 ins += 1
             inserted[name], skipped[name] = ins, skp
+        if args.with_supervisor:
+            sup_report = import_supervisor(conn, bundle["supervisor"], parse_path_maps(args.path_map),
+                                           bundle["source_host"], now)
         bad = conn.execute("PRAGMA foreign_key_check").fetchall()
         if bad:
             raise RuntimeError(f"外鍵檢查沒過：{bad[:10]}")
@@ -549,6 +768,8 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
         "host": args.host,
         "inserted": inserted,
         "skipped_existing": skipped,
+        "skipped_unique": unique_skips,
+        "supervisor": sup_report,
         "config": "already present" if existing is not None else ("would append" if args.dry_run else "appended"),
         "config_bots": [b["name"] for b in live_user_bots],
         "attachment_files_written": written,
@@ -593,6 +814,9 @@ def main():
     e.add_argument("--db", required=True, help="來源 agents-manager.sqlite3（只讀，先做 backup 快照）")
     e.add_argument("--project", required=True, help="專案 id")
     e.add_argument("--out", required=True, help="輸出的 bundle（.json.gz，含對話內容，權限 600）")
+    e.add_argument("--with-supervisor", action="store_true",
+                   help="一起帶協調者（AGM）的資料：交辦、驗收、inbox（未處理＋最近 --inbox-days 天）等，SPEC §11.9b")
+    e.add_argument("--inbox-days", type=int, default=7, help="supervisor_inbox 帶最近幾天（未處理的一律帶），預設 7")
     i = sub.add_parser("import", help="寫進停著的目標 daemon（config.toml＋SQLite）")
     i.add_argument("--bundle", required=True)
     i.add_argument("--host", required=True,
@@ -601,6 +825,8 @@ def main():
                    help="/來源路徑=/目標路徑（可重複）：改寫專案 path、bot cwd、附件 agent_path")
     i.add_argument("--config", default="~/.config/agents-manager/config.toml", help="目標 daemon 的 config.toml")
     i.add_argument("--dry-run", action="store_true", help="整套跑完但回滾，不寫 config／附件、不備份")
+    i.add_argument("--with-supervisor", action="store_true",
+                   help="合併 bundle 裡的協調者資料（export 也要加）：目標的 AGM 長期欄位換成來源的，SPEC §11.9b")
     args = ap.parse_args()
     if args.cmd == "export":
         export(args)

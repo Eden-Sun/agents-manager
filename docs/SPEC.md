@@ -2671,7 +2671,7 @@ config 是在原文後面追加 `[[projects]]` 區塊，不整份重寫（標準
 `projects = []`，追加前先拿掉那一行，否則 duplicate key 會讓 daemon 起不來。組好的文字先用 `tomllib` 解析，必須**正好等於「原本的 config 多一個專案」**
 才寫（dry-run 也驗），寫完再重讀比一次，不符就還原 config、回滾 DB；`projects` 是別種寫法（inline 陣列等）一律拒絕、請人手動處理。
 
-**搬什麼**：`projects` 一列、該專案活著的 `bots`（`deleted_at IS NULL`，含 child；**已軟刪的 bot 與它的一切都不帶**）、它們的 `conversations`／`runs`／`turns`／`messages`／`attachments`／`bot_reads`，
+**搬什麼**：`projects` 一列、該專案活著的 `bots`（`deleted_at IS NULL`，含 child；**已軟刪的 bot 與它的一切都不帶**）、它們的 `conversations`／`runs`／`turns`／`messages`／`attachments`／`bot_reads`、該專案的群組任務 `missions`／`mission_events`（#720；撞 `client_request_id` 唯一索引就跳過並列進 `skipped_unique`，事件跟著它的任務跳過），
 照來源的 rowid 順序插（`last_native_session` 挑最後一個 run 的第二鍵是 rowid，#461）；附件位元組一起打包（來源讀不到的列在 `missing_files`）。
 export 先對來源 DB 做 SQLite online backup 到暫存目錄、從快照讀、讀完當下刪快照，來源 DB 一個字都不寫；bundle 權限 600（內含對話）。
 不搬：憑證與身分（`identity` 只帶名字，B 要自己有同名身分或 A 機的 alias 認得，import 會列警告）、supervisor／mission／spawn hint／預覽等執行期表、
@@ -2737,6 +2737,38 @@ B 已有同一個檔：內容一樣跳過（重跑冪等），不一樣＝B 那�
    （先 `--dry-run`；結束碼 2＝有 missing／refused／conflicts，看報告再決定）。把 `am-moved.json.gz` 傳到 B、刪 A 上兩份 bundle。
 4. B：停 B 的 daemon；`project-transfer import --bundle am-moved.json.gz --host local --path-map …`（先 `--dry-run`，warnings 不該有 transcript 那條）。
    身分用 B 自己的（B 上 cc0／cc1／cc2 是 `~/.claude`、`~/.claude-cc1`、`~/.claude-cc2`，跟 A 同名同位置）。之後照 §11.9 第 5 步接回，只是現在是 B 本機。
+
+### 11.9b 協調者（AGM）的資料一起搬（#720，使用者 2026-09-28）
+
+AGM-DM-GRUP 專案（AGM、AGM-responder 等 bot）搬到 agm-host 本機跑時，協調者的執行期資料要跟著走，保留脈絡：
+`project-transfer export … --with-supervisor [--inbox-days 7]` 與 `import … --with-supervisor`，跟專案在**同一個停機窗口、同一份備份、同一個交易**裡寫進目標。
+
+**這是合併，不是還原**：每一列的 `supervisor_id` 都是寫死的 `'AGM'`（`supervisor/store.rs` `SUPERVISOR_ID`），目標開機就會有自己那一列
+（2026-09-28 agm-host：`supervisors` 1 筆預設、inbox 1 則、交辦 0），`supervisor_roles` 的主鍵是 `patrol`／`responder`。
+除了 `spawn_hints`，這些表都沒有宣告外鍵，參照全是約定（`target_bot_id`、`turn_id`、`assignment_id`、`merged_into`…）。
+
+| 表 | 怎麼搬 |
+|---|---|
+| `supervisors`（`AGM`）、`supervisor_roles` | **不插新列**，更新目標那一列（沒有才插）：來源的長期欄位（bot、專案、`cwd` 照 `--path-map` 換、身分／model／effort、`summary`、`persona_*`，角色另帶喚醒統計）蓋掉目標的——Mac 的 AGM 成為唯一的協調者。執行期欄位重設成「還沒跑過」（`status`、看門狗、冷卻、`remote_*`，`desired_running = 0`，跟 bot 的 `autostart = false` 同理，接手後再打開）；`generation` 保留目標的（controller 的世代守衛） |
+| `supervisor_requests`、`supervisor_assignments`、`supervisor_reviews` | 全搬。未結案的交辦照原狀：turn 或目標 bot 不在這台的，reconcile 會收成 `turn_missing` 送驗收 |
+| `supervisor_notes` | 全搬，`child_retirement_*`（綁來源 bot 的 10 分鐘退役守衛）除外 |
+| `supervisor_incidents` | 只搬 `resolved`；開著的由目標自己的探測重新判定 |
+| `supervisor_approvals` | 只搬已結案的；`pending`／`approved` 授權的是來源那台的動作 |
+| `supervisor_inbox`（Mac 上約 96 MB，daemon 不清） | 沒處理完的（`state <> 'handled'`）＋最近 `--inbox-days` 天（`created_at` 先正規化成毫秒格式再比，舊版寫的秒格式才比得對），再補 `merged_into` 指到的。**搬過去的未處理事件不再通知**：寫成 `gave_up`（還沒結案、協調者看得到、daemon 不再推；直接寫成 gave_up 不會觸發「放棄補送就叫醒另一個角色」，那只發生在 delivered→gave_up 的當下），`notify_error` 註明是搬過來的 |
+| 不搬 | `supervisor_leases`（開機會強制釋放、帶 token）、`bot_sleeps`、`intents`、`spawn_hints`、`judge_shadow`、`fork_ops`：這顆 daemon 自己的執行期狀態 |
+
+**撞唯一索引**（交辦／核准／任務的 `client_request_id`、inbox 的 `event_key`——`persona:{版本}:changed`、`ops_alert:…:{小時}` 這類兩邊可能同名、requests 的 `source_key`）：
+跳過那一筆、列進報告的 `skipped_unique`，不整批中止；被跳過的交辦，它的驗收一起跳過。已存在的 id 照舊跳過，所以重跑冪等（重跑什麼都沒變就不再寫 transfer 那筆）。
+合併後兩邊的列都掛 `'AGM'`、分不出來源，所以另寫一筆 `supervisor_notes(kind = 'transfer')`：來源主機、inbox 截止時間、單例表更新了哪幾列、每張表匯入的 id、被跳過的。要回溯或手動回滾靠它。
+
+**角色目錄**（`~/.config/agents-manager/supervisor/AGM`、`AGM-responder`）：目標上沒有（agm-host 2026-09-28 確認），不搬整個目錄——
+`CLAUDE.md`、`runtime.json`（supervisor_id、bot id、`data_dir`、port）、`persona.md` 由 import 後在目標跑 `agm supervisor-setup`／`responder setup` 重新產生（persona 以 DB 為準），`bin/agm` 目標開機自己寫。
+`handoff.md`（manager 自己維護；DB 的 `summary` 與 `handoff` notes 另有權威副本）與 `AGM-responder/reports/` 手動帶過去，裡面的 `/Users/m4p` 換成目標路徑。
+log、`bin/agm.bak-*`、`.lease-*.json`、`daemon-update.approval.json`／lease token、`*.bak` 不帶；`*-task.md` 與排程走 #675 的 systemd 安裝。
+
+**runbook** 接 §11.9a：第 3 步 export 加 `--with-supervisor`（`--path-map` 要涵蓋 `/Users/m4p/.config/agents-manager`，例如直接 `/Users/m4p=/home/ubuntu`）；
+第 4 步 import 加 `--with-supervisor`，先 `--dry-run` 看 `supervisor` 那一段（`singletons`、`inbox_parked`、`skipped_unique`）；
+import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 `handoff.md` 放進去；接回 AGM 與 responder 之後才打開 `desired_running`／autostart。
 
 ### 11.10 共用 herdr session 的主機（#709，使用者 2026-09-28）
 
