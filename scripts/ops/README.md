@@ -541,6 +541,12 @@ herdr 全機重啟：bootout 兩個 herdr launchd job → 殺掉所有 herdr ser
 install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/supervisor/AGM/bin/
 ```
 
+## project-transfer（issue #710）
+
+單一專案從一顆 daemon 移交到另一顆（例：Mac → agm-host，以遠端主機 `m4p` 接手）。不安裝，從 checkout 跑；
+流程、改寫規則與拒絕條件見 SPEC §11.9。`export` 只讀來源 DB（先做 backup 快照、讀完刪）；`import` 要**目標 daemon 停著**
+（拿同一把 `daemon.lock`），先 `--dry-run` 看摘要。隔離測試：`scripts/ops/project-transfer_test.sh`（假 DB，schema 從 `daemon/src/db.rs` 抽）。
+
 ## 已安裝版與 repo 的落差（issue #418 稽核，2026-09-24）
 
 這些檔沒有自動同步，所以會漂。2026-09-24 的逐支比對（`git hash-object` 對 `origin/main` 的 blob）結論：

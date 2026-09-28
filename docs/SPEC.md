@@ -2619,6 +2619,41 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 ### 11.8 開發測試
 `scripts/dev-sshd.sh` 以使用者權限起 127.0.0.1:2222 的 sshd，`host = "loop"`（session `am-loop`）。
 
+### 11.9 專案移交到另一顆 daemon（issue #710，#678 的單一專案子集）
+一個專案從 A 機的 daemon（例：Mac，專案 `host = local`）交給 B 機的 daemon（例：agm-host），B 以遠端主機（例：`m4p`）接手；
+專案的 `path` 不變，檔案與 agent 仍在 A 機上。工具是 `scripts/ops/project-transfer`（python 3.11+，只用標準函式庫）。
+
+**為什麼 import 要停 B 的 daemon**：B 沒有匯入對話歷史的 API，而 Project／Bot 的權威是 config.toml（§3.1）——只寫 DB 的專案會被下一次投影軟刪，
+只寫 config 的 bot 會被投影補成一顆沒有歷史、新 conversation id 的空 bot。所以 import 在同一個停機窗口裡把兩邊一起寫：
+對 B 資料目錄的 `daemon.lock` 拿 flock（跟 daemon 同一把；拿不到＝daemon 還在跑，什麼都不動，拿著的期間 daemon 也起不來）→
+B 的 DB 與 config.toml 各備份一份（`*.pre-transfer-<時間>`）→ 一個交易裡插列、外鍵檢查 → 原子寫 config.toml → COMMIT
+（config 寫不進去就回滾 DB，COMMIT 失敗就還原 config）。
+
+**搬什麼**：`projects` 一列、該專案全部 `bots`（含 child 與已軟刪的）、它們的 `conversations`／`runs`／`turns`／`messages`／`attachments`／`bot_reads`，
+照來源的 rowid 順序插（`last_native_session` 挑最後一個 run 的第二鍵是 rowid，#461）；附件位元組一起打包（來源讀不到的列在 `missing_files`）。
+export 先對來源 DB 做 SQLite online backup 到暫存目錄、從快照讀、讀完當下刪快照，來源 DB 一個字都不寫；bundle 權限 600（內含對話）。
+不搬：憑證與身分（`identity` 只帶名字，B 要自己有同名身分或 A 機的 alias 認得，import 會列警告）、supervisor／mission／spawn hint／預覽等執行期表、
+掛在這個專案 bot 底下卻屬於別的專案的 child（列警告）。
+
+**改寫**：專案與附件的 `host` → `--host`；`path`、`agent_path`、`native_session_id`、`transcript_path` 不變（接回用）；
+每顆 bot 的 `hook_token` 重新產生；附件的 `local_path` 改成 B 資料目錄的 `attachments/<bot_id>/` 副本（遠端 bot 的附件本來就這樣放）；
+還在跑的 run 收成 `exited`（`exit_reason = project transfer`）、`queued`／`in_flight` 的 turn 收成 `failed`；
+`handed_off_to`（#708）清掉；config.toml 只寫活著的 user bot（child 與已刪的只在 DB，投影本來就不碰 child），一律 `autostart = false`
+——A 的 agent 還在跑時 B 開機不能自己再起一份，接手完再由使用者打開。
+
+**冪等與拒絕**：已存在的 id 跳過、config 裡已有這個專案 id 就不再追加，所以同一份 bundle 重跑 import 不會多列、不換 token。
+下列情況在寫入前就拒絕、什麼都不動：B 的 config 沒有 `[[hosts]] name = <--host>`；B 已有別的專案佔著同一個 `(host, path)`；
+B 的表少了 bundle 裡的欄位（來源比目標新，先升 B）；`--host local`。插到一半撞約束（例如 `turns_native` 重號）整批回滾。
+`--dry-run` 整套跑完再回滾，不寫 config／附件、不備份。
+
+**runbook**（A＝Mac，B＝agm-host）：
+1. A：在該專案設 `handed_off_to = "agm-host"`（#708），A 從此不再對帳、送 prompt、收 hook。
+2. A：`scripts/ops/project-transfer export --db ~/.config/agents-manager/agents-manager.sqlite3 --project <id> --out hub.json.gz`，把 bundle 傳到 B（內含對話，不放 outbox／scratchpad；hook token 在 export 時就清掉了；傳完刪 A 上那份）。
+3. B：確認 config 有 `[[hosts]] name = "m4p"` 且連得上；停 B 的 daemon；`--dry-run` 看摘要；再正式跑
+   `scripts/ops/project-transfer import --bundle hub.json.gz --host m4p`；起 B 的 daemon。確認無誤後刪 bundle 與 `*.pre-transfer-*` 備份。
+4. 逐顆 bot：A 停掉那顆的 agent（`POST /api/bots/{id}/stop`；旗標下 A 不再操作這個專案時，就在 pane 裡直接結束 agent）→ B `POST /api/bots/{id}/start?resume=native` 接回同一段對話（B 用 ssh 到 A 機檢查 `transcript_path`）→ 確認 B 側收得到回覆，再做下一顆。同一段 session 不能同時有兩個 agent 在寫。
+   child 由母 agent 開，不在 B 上單獨接回。全部接完後需要的 bot 在 B 打開 autostart。
+
 ## 12. grok 支援
 
 `kind = "grok"`：xAI grok CLI（`~/.grok/bin/grok`）。herdr 內建 `grok` agent manifest，`agent.start {kind: "grok"}` 直接可用，狀態偵測靠 OSC title / OSC 9;4 progress / 畫面規則（附錄 F）。
