@@ -1220,6 +1220,84 @@ test('resync 重抓把回合改成 completed 後，也送出排隊的下一則�
   assert.equal(useStore.getState().queuedSends.b1, undefined)
 })
 
+test('resync 也重抓未載入 bot 的進行中回合，清掉已結束的 stale turn（#696）', async () => {
+  seed()
+  useStore.setState({
+    loadedBots: { b1: true },
+    runs: {
+      b1: { id: 'r1', state: 'running', agent_status: 'idle' } as never,
+      b2: { id: 'r2', state: 'running', agent_status: 'idle' } as never,
+    },
+    turns: {
+      b2: {
+        t2: {
+          id: 't2',
+          run_id: 'r2',
+          status: 'in_flight',
+          delivery: 'ok',
+          origin: 'web',
+          created_at: '2000-01-01T00:00:00Z',
+        } as never,
+      },
+    },
+  })
+  routeDaemon((r) => {
+    if (r.path.endsWith('/state')) {
+      return json(
+        {
+          daemon_seq: 1,
+          projects: [project()],
+          bots: [bot('b1'), bot('b2')],
+          runs: [
+            { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' },
+            { id: 'r2', bot_id: 'b2', state: 'running', agent_status: 'idle' },
+          ],
+          turns: [],
+        },
+        200,
+      )
+    }
+    if (r.path.includes('/bots/') && r.path.includes('/messages')) return json({ messages: [], turns: [], has_more: false }, 200)
+    return json({}, 200)
+  })
+
+  const { composerState, dispatchFrameForTest } = await import('./store.ts')
+  dispatchFrameForTest({ type: 'resync', seq: 1 })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+
+  assert.ok(requests.some((r) => r.path.includes('/bots/b2/messages')), '未載入但有 in_flight 的 b2 必須重抓')
+  assert.equal(composerState(useStore.getState(), 'b2').inFlightTurnId, null)
+  assert.equal(composerState(useStore.getState(), 'b2').queued, false)
+})
+
+test('重連也重抓未載入 bot 的進行中回合，清掉已結束的 stale turn（#696）', async () => {
+  seed()
+  useStore.setState({
+    loadedBots: { b1: true },
+    runs: { b2: { id: 'r2', state: 'running', agent_status: 'idle' } as never },
+    turns: {
+      b2: {
+        t2: {
+          id: 't2',
+          run_id: 'r2',
+          status: 'in_flight',
+          delivery: 'ok',
+          origin: 'web',
+          created_at: '2000-01-01T00:00:00Z',
+        } as never,
+      },
+    },
+  })
+  routeDaemon((r) => r.path.includes('/bots/') && r.path.includes('/messages') ? json({ messages: [], turns: [], has_more: false }, 200) : json({}, 200))
+
+  const { composerState, reloadLoadedConversations } = await import('./store.ts')
+  await reloadLoadedConversations(useStore.getState)
+
+  assert.ok(requests.some((r) => r.path.includes('/bots/b2/messages')), '未載入但有 in_flight 的 b2 必須重抓')
+  assert.equal(composerState(useStore.getState(), 'b2').inFlightTurnId, null)
+  assert.equal(composerState(useStore.getState(), 'b2').queued, false)
+})
+
 test('連不上 daemon／代理回空的 502：通知講人話，不是 Failed to fetch 或 HTTP 路徑（#370）', async () => {
   seed()
   routeDaemon(() => {

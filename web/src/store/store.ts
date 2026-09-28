@@ -2668,6 +2668,14 @@ function loadedBotIdsOf(get: GetFn): string[] {
   return Object.keys(get().loadedBots).filter((botId) => get().loadedBots[botId])
 }
 
+function botIdsNeedingConversationReload(get: GetFn): string[] {
+  const botIds = new Set(loadedBotIdsOf(get))
+  for (const [botId, turns] of Object.entries(get().turns)) {
+    if (Object.values(turns).some((turn) => turnStillOpen(turn.status))) botIds.add(botId)
+  }
+  return [...botIds]
+}
+
 /** A refreshed turn may be the only completion signal received while the socket was disconnected. */
 function flushQueuedSends(get: GetFn) {
   for (const botId of Object.keys(get().queuedSends)) flushQueued(botId)
@@ -2676,10 +2684,10 @@ function flushQueuedSends(get: GetFn) {
 /**
  * 斷線重連後補訊息（#368）：daemon 重啟沒有世代標記，重連時新 daemon 的 seq 若已超過我們記的 `lastSeq`，
  * 它會當成「只差幾則」照補，舊 daemon 尾巴那段訊息永遠不會來，也不會 `resync`。`refreshState` 只補狀態不補訊息，
- * 所以重連（不是第一次連上）時已載入的對話一律重抓。
+ * 所以重連（不是第一次連上）時已載入的對話與本地還有開啟回合的對話一律重抓；後者可能是群組成員未點開、漏了終態幀的回合。
  */
 export async function reloadLoadedConversations(get: GetFn): Promise<void> {
-  for (const botId of loadedBotIdsOf(get)) await get().loadMessages(botId)
+  for (const botId of botIdsNeedingConversationReload(get)) await get().loadMessages(botId)
   flushQueuedSends(get)
   const proj = get().selectedProjectId
   if (proj) await get().loadGroupMessages(proj)
@@ -2691,10 +2699,9 @@ const resyncTrigger = (() => {
     const { set, get } = ctx!
     resetStateSeq()
     try {
-      const loadedBotIds = loadedBotIdsOf(get)
       await get().refreshState()
       await get().loadQuota()
-      for (const botId of loadedBotIds) await get().loadMessages(botId)
+      for (const botId of botIdsNeedingConversationReload(get)) await get().loadMessages(botId)
       flushQueuedSends(get)
       const proj = get().selectedProjectId
       if (proj) await get().loadGroupMessages(proj)
