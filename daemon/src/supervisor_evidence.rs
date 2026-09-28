@@ -26,6 +26,8 @@ struct Evidence {
     bot_deleted: bool,
     turn_id: Option<String>,
     role: String,
+    relay_from: Option<String>,
+    relay_unverified: bool,
     content: String,
     source: String,
     incomplete: bool,
@@ -51,6 +53,7 @@ async fn query(pool: &SqlitePool, q: EvidenceQuery) -> Result<Value, LcError> {
         r#"SELECT m.id, b.id AS bot_id, b.name AS bot_name,
                   p.id AS project_id, p.label AS project_label,
                   b.deleted_at IS NOT NULL AS bot_deleted, m.turn_id, m.role,
+                  m.relay_from, m.relay_unverified != 0 AS relay_unverified,
                   m.content, m.source, m.incomplete, m.created_at
            FROM messages m JOIN conversations c ON c.id=m.conversation_id
            JOIN bots b ON b.id=c.bot_id JOIN projects p ON p.id=b.project_id
@@ -85,6 +88,8 @@ mod tests {
     async fn seed() -> SqlitePool {
         let db = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
         sqlx::raw_sql(crate::db::SCHEMA).execute(&db).await.unwrap();
+        sqlx::query("ALTER TABLE messages ADD COLUMN relay_unverified INTEGER NOT NULL DEFAULT 0")
+            .execute(&db).await.unwrap();
         sqlx::raw_sql("INSERT INTO projects(id,path,label,created_at) VALUES ('p','/p','專案','now');
             INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','新名字','claude','x','now');
             INSERT INTO bots(id,project_id,name,kind,hook_token,created_at,deleted_at) VALUES ('old','p','舊bot','claude','y','now','later');
@@ -100,14 +105,20 @@ mod tests {
     #[tokio::test]
     async fn history_preserves_deleted_bots_and_pages_tied_timestamps() {
         let db = seed().await;
+        sqlx::query("UPDATE messages SET relay_from='manager', relay_unverified=1 WHERE id='m1'")
+            .execute(&db).await.unwrap();
         let page = query(&db, EvidenceQuery { q:"遠端登入".into(), limit:Some(2), ..Default::default() }).await.unwrap();
         assert_eq!(page["messages"][0]["id"], "m3");
         assert_eq!(page["messages"][0]["bot_deleted"], true);
         assert_eq!(page["messages"][1]["bot_name"], "新名字");
+        assert_eq!(page["messages"][1]["relay_from"], serde_json::Value::Null);
+        assert_eq!(page["messages"][1]["relay_unverified"], false);
         assert_eq!(page["has_more"], true);
         let next = query(&db, EvidenceQuery { q:"遠端登入".into(), before:Some(page["next_cursor"].as_str().unwrap().into()), limit:Some(2), ..Default::default() }).await.unwrap();
         assert_eq!(next["messages"].as_array().unwrap().len(), 1);
         assert_eq!(next["messages"][0]["id"], "m1");
+        assert_eq!(next["messages"][0]["relay_from"], "manager");
+        assert_eq!(next["messages"][0]["relay_unverified"], true);
         assert_eq!(next["has_more"], false);
     }
 
