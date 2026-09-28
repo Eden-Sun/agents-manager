@@ -3704,6 +3704,16 @@ export class MockTransport implements Transport {
     run.update_notice = notice
     this.emitBotStatus(botId)
   }
+
+  /** 截圖用：推一則 `upstream_update`（issue #707，上游有新版、磁碟上還沒有）。 */
+  emitUpstreamUpdate(kind: string, latest: string, disk: string) {
+    const how = kind === 'codex' ? '需先安裝，裝好才會出現「重啟套用」' : 'claude 還沒下載，重啟也換不到；等它自己背景更新或在那台跑 `claude update`，下載好才會出現「重啟套用」'
+    this.emit('upstream_update', {
+      kind, latest_version: latest, has_update: true, error: null, notify: 'update', notified_version: latest,
+      hosts: [{ host: 'local', installed_version: disk, error: null, behind: true }],
+      text: `${kind} 上游有新版 ${latest}（local 磁碟上是 ${disk}）：${how}`,
+    })
+  }
 }
 
 function sleep(ms: number) {
@@ -3737,6 +3747,8 @@ function installDevHelpers(mock: MockTransport) {
     // 更新框：清掉某個 kind 的分診帳本（演「尚未分析」）、給 bot 掛更新通知
     triageOff: (kind: string) => mock.releaseTriage.triageOff(kind),
     updateNotice: (botIdOrName: string, notice: string | null) => mock.setUpdateNotice(mock.botIdByName(botIdOrName) ?? botIdOrName, notice),
+    // 上游有新版、磁碟上還沒有的通知（issue #707）：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`
+    upstreamUpdate: (kind: string, latest: string, disk: string) => mock.emitUpstreamUpdate(kind, latest, disk),
     // 截圖用：改名（演長名字在手機標題列被擠的情況）
     rename: (botIdOrName: string, name: string) =>
       mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, { name }),

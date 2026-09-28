@@ -185,7 +185,7 @@ pub(crate) fn codex_releases_to_md(json: &str) -> Result<String> {
     Ok(out)
 }
 
-async fn fetch_changelog(app: &Arc<App>, kind: &str) -> Result<String> {
+pub(crate) async fn fetch_changelog(app: &Arc<App>, kind: &str) -> Result<String> {
     {
         let g = app.changelog.inner.lock().await;
         if let Some((at, text)) = g.get(kind) {

@@ -337,6 +337,14 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。
   畫面上讀不到那句時退到版本比對：statusLine 的 `version`（process 在跑的）對 `claude --version`（磁碟上的），磁碟較新才算；磁碟版本每台主機快取 5 分鐘。
+- **上游有新版**（issue #707，2026-09-28 使用者：npm 已是 2.1.283、磁碟停在 2.1.281，AG Man 什麼都沒說）：上面兩條都只看**磁碟**，
+  上游出了新版而 claude 還沒自己下載、codex 還沒裝時沒有任何提示。`daemon/src/upstream_update.rs` 每 10 分鐘比一次「上游最新正式版」對
+  「每台有裝的主機磁碟上的 `--version`」：claude 問 npm registry 的 `latest`，codex 沿用 changelog 那份 GitHub releases 快取；上游結果快取
+  1 小時、失敗不快取。上游較新＝推 WS `upstream_update`（`notify:"update"`），網頁跳一則通知（「還沒下載，重啟也換不到」／「需先安裝」），
+  **不寫 `runs.update_notice`、不進批次重啟**——跟「已下載，重啟套用」是兩件事、並存。同一個上游版本只通知一次（`<data_dir>/upstream-update.last.json`，
+  仿 herdr 的 `herdr-update.last`；只在比上次通知的更新時才推）。網頁另記每個瀏覽器看過的版本，開機讀 `GET /api/upstream-updates` 補上錯過的那則。
+  抓不到上游不是「沒有新版」：快照帶 `error`，從正常變成抓不到那一輪推 `notify:"error"` 跳錯誤通知。跟 #204 分診（§18.2c）的分工：分診回答
+  「新版改了什麼、要不要處理」、這裡只回答「有沒有比磁碟新的版本可裝」；codex 兩邊讀同一份 releases 快取。
 - **codex 更新通知**（issue #388，2026-09-21 使用者截圖：codex 畫面有 `✨ Update available! 0.154.0 -> 0.155.1` 卻沒有任何徽章）：`update_watch`
   同一支巡邏也巡 running 的 codex run（`daemon/src/codex_update.rs`）。**跟 claude 相反：claude 是新版已經下載好、重啟就換；codex 是新版還沒安裝**，
   要先跑安裝指令再重啟——所以通知文字寫明「需安裝後重啟」，**安裝本身不自動跑**：只在使用者按 header 的 codex chip 並確認時才跑（§6.9「codex 需安裝」，
