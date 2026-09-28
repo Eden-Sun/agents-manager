@@ -1046,6 +1046,37 @@ async fn close_row_pane(app: &Arc<App>, r: &Row) -> bool {
         return true;
     }
     let Some(pane) = r.pane_id.as_deref() else { return true };
+    // Herdr can reuse a pane ID after restart. A failed preview is not refreshed, so its old ID
+    // may now identify a different pane; never close one claimed by a live run or first seen
+    // after this preview row was last updated.
+    let reused: bool = match sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM runs r2
+           JOIN bots b2 ON b2.id = r2.bot_id
+           JOIN projects p2 ON p2.id = b2.project_id
+           WHERE p2.host = ? AND r2.pane_id = ? AND r2.state IN ('starting','running','stopping')
+         ) OR EXISTS(
+           SELECT 1 FROM panes pn WHERE pn.host = ? AND pn.pane_id = ? AND pn.first_seen > ?
+         )",
+    )
+    .bind(&r.host)
+    .bind(pane)
+    .bind(&r.host)
+    .bind(pane)
+    .bind(&r.updated_at)
+    .fetch_one(&app.db)
+    .await
+    {
+        Ok(reused) => reused,
+        Err(e) => {
+            tracing::warn!(bot = %r.bot_id, pane, error = %e, "preview: cannot verify whether the pane ID was reused; leaving the preview unchanged");
+            return false;
+        }
+    };
+    if reused {
+        tracing::info!(bot = %r.bot_id, pane, "preview: pane ID has been reused; leaving the current pane untouched");
+        return true;
+    }
     let env = match db::active_run(&app.db, &r.bot_id).await {
         Ok(Some(run)) => env_for(app, &run).await.ok(),
         Ok(None) => env_for_bot(app, &r.bot_id).await,

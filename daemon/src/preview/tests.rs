@@ -545,6 +545,80 @@ async fn retry_closes_a_failed_preview_pane_before_spawning_again() {
 }
 
 #[tokio::test]
+async fn stopping_a_failed_preview_does_not_close_a_pane_reused_by_another_active_bot() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    let other = running_bot(&r, "bravo").await;
+    let first = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    let reused_pane = first["pane_id"].as_str().unwrap().to_string();
+    let old = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query("UPDATE bot_previews SET started_at = ? WHERE bot_id = ?")
+        .bind(old)
+        .bind(&bot)
+        .execute(&r.e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "failed");
+
+    // Herdr restarted and gave the old preview pane ID to another bot's live agent pane.
+    sqlx::query("UPDATE runs SET pane_id = ? WHERE bot_id = ?")
+        .bind(&reused_pane)
+        .bind(&other)
+        .execute(&r.e.app.db)
+        .await
+        .unwrap();
+    assert!(stop_for_bot(&r.e.app, &bot).await);
+
+    assert!(r.fake.closed.lock().unwrap().is_empty(), "a stale preview ID must not close the other bot's pane");
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "off");
+}
+
+#[tokio::test]
+async fn retrying_a_failed_preview_does_not_close_a_pane_seen_after_the_preview_row() {
+    let r = rig().await;
+    let bot = running_bot(&r, "alfa").await;
+    let first = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+    let reused_pane = first["pane_id"].as_str().unwrap().to_string();
+    let old = (chrono::Utc::now() - chrono::Duration::seconds(61)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    sqlx::query("UPDATE bot_previews SET started_at = ? WHERE bot_id = ?")
+        .bind(old)
+        .bind(&bot)
+        .execute(&r.e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "failed");
+    let preview_updated_at: String = sqlx::query_scalar("SELECT updated_at FROM bot_previews WHERE bot_id = ?")
+        .bind(&bot)
+        .fetch_one(&r.e.app.db)
+        .await
+        .unwrap();
+    let first_seen = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let host: String = sqlx::query_scalar("SELECT host FROM bot_previews WHERE bot_id = ?")
+        .bind(&bot)
+        .fetch_one(&r.e.app.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO panes (pane_id, host, kind, last_output_at, first_seen, last_seen) VALUES (?, ?, 'shell', ?, ?, ?)",
+    )
+    .bind(&reused_pane)
+    .bind(host)
+    .bind(&first_seen)
+    .bind(&first_seen)
+    .bind(&first_seen)
+    .execute(&r.e.app.db)
+    .await
+    .unwrap();
+    assert!(first_seen > preview_updated_at, "test pane must be newer than the failed preview row");
+
+    let retry = start(&r.e.app, &bot, StartReq::default()).await.unwrap();
+
+    assert!(r.fake.closed.lock().unwrap().is_empty(), "a later first_seen marks a reused pane ID");
+    assert_ne!(retry["pane_id"], reused_pane);
+    assert_eq!(status(&retry), "starting");
+}
+
+#[tokio::test]
 async fn a_running_preview_whose_vite_died_fails_and_one_whose_pane_was_closed_goes_off() {
     let r = rig().await;
     let bot = running_bot(&r, "alfa").await;

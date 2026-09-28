@@ -2431,7 +2431,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | `running` | pane 在、port 不再 listen | `failed`（server 自己掛了；`attached` 是 `off`） |
 
   herdr 沒回答（`pane_alive` 問不到）當「沒變」，不當「不在」。`failed` 之後再 `POST` 就是重試：server 掛了 pane 可能還停在 shell，所以先關掉 `failed` 那列的 pane 再起新的、port 重挑；
-  關不掉就 409 `preview_stop_failed`、不起新的（否則舊 pane 變成沒人管的孤兒）。
+  關不掉就 409 `preview_stop_failed`、不起新的（否則舊 pane 變成沒人管的孤兒）。pane ID 重用時的保護與查詢失敗處理見「收掉」。
 - **誰在看**（#260）：預覽在 `starting`／`running` 期間有一個常駐監看（一顆 bot 一個，登記在 `gate` 裡，重複的 `POST`／`GET`／開機對帳不會多掛）：
   `starting` 每秒、`running` 每 5 秒對一次帳（pane 還在不在＋port 有沒有在 listen），離開這兩個狀態（`off`／`failed`／這列沒了）才結束。
   port 存活探測同時連 `127.0.0.1` 與 `::1`；只綁 IPv6 loopback 的 dev server 也算存活（issue #689）。
@@ -2446,6 +2446,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   只有讀到 `Ok(None)` 才確定沒有 run（才跟著收），這時關 pane 用 **bot 自己設定的 session**（`session_for_bot`），不猜管理 session。
   **權威不明一律不動作**（#257）：讀 run 失敗、拿不到那個 session 的 herdr client、關 pane 的指令失敗或事後 `pane_get` 仍看得到它，都不標 `off`——
   `PreviewEnv::close_pane` 回 `bool`（`true`＝關掉了或確定本來就不在），標 `off` 以它為準，否則 pane 與 port 變成沒人管的孤兒；列原樣留著等下次對帳。
+  Herdr 重啟後 pane ID 可能重用：關閉前若同 host 的活躍 run 正用該 ID，或 `panes.first_seen` 晚於預覽列的 `updated_at`，只清除舊預覽列、不動目前的 pane；檢查 DB 失敗則保留原列。
   同理 `refresh_locked` 拿不到 client 時回**原列**而不是 `None`，watcher 只在「確定沒有這一列」或離開 `starting` 時才結束，暫時性的讀不到會重試。
 - **鎖**：預覽操作共用一把全域鎖，**不拿 bot 鎖**（停機、刪除是在 bot 鎖裡呼叫進來的，再拿會自己等自己）。
 - **測試**：行程與 port 查詢走 `PreviewEnv`，測試注入決定性的假貨，不碰真 herdr、真行程、真 port（#211）。
