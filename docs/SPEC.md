@@ -2114,7 +2114,7 @@ daemon 另外唯讀觀察本機 Herdr `default` session（`~/.config/herdr/herdr
 2. agent 的 `foreground_cwd`（沒有用 `cwd`）與既有 local Project 的 canonical path **完全相等**才配對；不自動建 Project、不採用普通 shell pane。
 3. 有採用紀錄就更新 Run；否則建 `herdr_session = "default"` 的 Bot 設定（寫回 config.toml）與 `adopted = 1` 的 active Run。
 4. default workspace 不寫 `projects.workspace_id`；default pane 消失只結束 Run，不回收使用者 pane。`stop` 只送 ctrl+c、不 `pane.close`；
-   `start`/`restart` 回 409 `default_session`；§6.9 批次重啟跳過。
+   `start`/`restart`/credential rotate 回 409 `default_session`；credential rotate 不改 token、不建 restart intent，§6.9 批次重啟跳過。credential-rotation intent 恢復也須在送 ctrl+c 前拒絕 default-session bot。
 
 default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 default socket；沒 hook 的 agent 靠 pane status 與終端備援更新對話。
 

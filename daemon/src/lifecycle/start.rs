@@ -3076,6 +3076,8 @@ mod grok_startup_effort_tests {
 
 /// Continue a credential-rotation restart while the caller holds the bot lock.
 pub(crate) async fn resume_credential_rotation_locked(app: &Arc<App>, bot_id: &str, opts: StartOpts, from_run: &str) -> LcResult<String> {
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    refuse_default_session(&bot)?;
     restart_stop_and_start(app, bot_id, opts, Some(from_run.to_string()), None).await
 }
 
