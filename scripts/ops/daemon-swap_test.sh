@@ -161,7 +161,7 @@ case "$sub:$op" in
         [ "$a" = "--lease-token-file" ] && nxt=1
       done
       if [ -n "$tf" ]; then
-        printf '%s mode=%s token=%s\n' "$tf" "$(stat -f '%Lp' "$tf" 2>/dev/null || stat -c '%a' "$tf")" "$(cat "$tf")" \
+        printf '%s mode=%s token=%s\n' "$tf" "$(stat -c '%a' "$tf" 2>/dev/null || stat -f '%Lp' "$tf")" "$(cat "$tf")" \
           >> "$AGM_DIR/tokenfile.log"
       fi
       [ -n "${STUB_RELEASE_FAIL:-}" ] && { printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"fence_mismatch"}}'; exit 1; }

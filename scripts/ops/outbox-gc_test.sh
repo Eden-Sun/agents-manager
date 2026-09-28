@@ -58,7 +58,7 @@ teardown
 
 # 2. 保留期邊界與覆寫：30 分鐘的檔在 60 分鐘期限內留著；OUTBOX_MAX_AGE_MIN=5 就刪。
 setup
-mkdir -p "$OB/b"; echo x > "$OB/b/f.txt"; touch -t $(date -v-30M +%Y%m%d%H%M) "$OB/b/f.txt"
+mkdir -p "$OB/b"; echo x > "$OB/b/f.txt"; touch -t "$(date -v-30M +%Y%m%d%H%M 2>/dev/null || date -d '30 minutes ago' +%Y%m%d%H%M)" "$OB/b/f.txt"
 run >/dev/null
 exists "30 分鐘的檔在預設 60 分鐘內不刪" "$OB/b/f.txt"
 check_no "沒刪東西就不寫 log" "清掉" "$LOG"

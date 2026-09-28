@@ -623,7 +623,7 @@ check_no "正文不叫 child 把 token 攤回 argv" 'cat .*daemon-update.lease-t
 check_no "派工正文沒有 token 本身" "tok-abc123" "$AGM_DIR/assign-body.txt"
 check_no "log 裡也沒有" "tok-abc123" "$AGM_DIR/daemon-update.log"
 check "token 檔的內容" "^tok-abc123$" "$TOKF"
-if [ "$(stat -f %Lp "$TOKF" 2>/dev/null || stat -c %a "$TOKF")" = "600" ]; then
+if [ "$(stat -c %a "$TOKF" 2>/dev/null || stat -f %Lp "$TOKF")" = "600" ]; then
   echo "ok   - token 檔只有本人讀得到"; PASS=$((PASS + 1))
 else
   echo "FAIL - token 檔權限不是 600"; FAIL=$((FAIL + 1))
