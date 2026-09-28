@@ -557,3 +557,18 @@ install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/superv
   `bash scripts/ops/herdr-lan-check.sh /opt/homebrew/bin/herdr`，所以沒裝不影響升級流程；
   要嘛補裝、要嘛把那行 install 拿掉，兩邊挑一個對齊。
 - `daemon-swap.sh`、`daemon-start.py`、`herdr-upgrade-runbook.md` 本來就不裝（從 checkout 跑），不是缺口。
+
+## ubuntu 背景完整 CI（issue #716）
+
+main 的每個 push 不再等 GitHub Actions：agm-host 上的 systemd user timer 每分鐘叫一次 `scripts/ops/ubuntu-ci.sh`，
+只驗最新的 main HEAD（同時一輪、中間的 sha 不補跑），跑整樹 `scripts/check.sh`，結果寫成 commit status `ubuntu-ci`、
+`~/.cache/agents-manager/ci/status.json` 與 `logs/<sha>.log`。安裝（agm-host，需 `loginctl enable-linger ubuntu`）：
+
+```sh
+git clone git@github.com:Eden-Sun/agents-manager.git ~/.cache/agents-manager/ci/repo
+mkdir -p ~/.config/systemd/user
+cp ~/.cache/agents-manager/ci/repo/scripts/ops/ci/ubuntu-ci.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now ubuntu-ci.timer
+```
+
+runner 用的是常駐 clone 裡**當下 checkout 的** `ubuntu-ci.sh`，所以腳本本身的修改會在下一輪自動生效。

@@ -1,4 +1,4 @@
-# push 到 main 與每個 PR 都跑。本地收尾前跑同一組：scripts/check.sh（見該檔用法）。
+# PR、每日排程與手動觸發時跑（main 的 push 由 ubuntu-ci 驗，見下方 on:）。本地收尾前跑同一組：scripts/check.sh（見該檔用法）。
 #
 # 擋 merge 的：web（bun install --frozen-lockfile → tsc → oxlint → bun test → vite build）與
 # daemon（cargo test -p agents-managerd）。
@@ -12,10 +12,12 @@
 # 跑在 macOS：daemon 主要跑在 macOS（desktop 打的是 dmg），測試也以 macOS 為準。
 name: CI
 
+# issue #716（使用者 2026-09-28）：main 的每個 push 改由 agm-host 的 scripts/ops/ubuntu-ci.sh 在背景驗
+# （commit status `ubuntu-ci`），這裡只留 PR、每日一次的 macOS 全量與手動觸發。
 on:
-  push:
-    branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 18 * * *"   # 台北 02:00
   workflow_dispatch:
 
 # PR 上新的 push 取消舊的；main 上每個 commit 各跑各的（多個 agent 連續推，

@@ -10,6 +10,7 @@
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
 #   scripts/check.sh all        # 以上全部
+#   scripts/check.sh changed [base] # 只跑改到的部分（跟 base，預設 origin/main 比），daemon 只 cargo check；issue #716
 #
 # 注意：
 # - web 的型別檢查一定要 `tsc -p tsconfig.app.json`；根目錄的 tsconfig.json 只有
@@ -189,7 +190,37 @@ check_clippy() {
     cargo clippy -p agents-managerd --all-targets --locked -- -D warnings
 }
 
+# 只跑改到的部分（issue #716）：跟 base（預設 origin/main）比的 commit 差異＋工作樹還沒提交的改動。
+# daemon 只做 `cargo check --all-targets`（`#[cfg(test)]` 被非測試路徑用到也抓得到）；要跑測試就用
+# CHECK_TESTS=<過濾字串>。全量測試交給 ubuntu 背景 CI，不在收尾時等。
+check_changed() {
+    local base="${1:-origin/main}" parts
+    parts="$({ git diff --name-only "${base}...HEAD"; git diff --name-only HEAD; git ls-files --others --exclude-standard; } | sort -u | bash scripts/ci-changed-parts.sh)"
+    if [ -z "$parts" ]; then
+        echo "changed: 只有文件類改動，不用跑"
+        return 0
+    fi
+    echo "changed（base ${base}）：$(echo "$parts" | tr '\n' ' ')"
+    if echo "$parts" | grep -qx full; then
+        check_ob; check_ops; check_web; check_daemon
+        return
+    fi
+    if echo "$parts" | grep -qx ob; then check_ob; fi
+    if echo "$parts" | grep -qx ops; then check_ops; fi
+    if echo "$parts" | grep -qx web; then check_web; fi
+    if echo "$parts" | grep -qx daemon; then
+        [ -f web/dist/index.html ] || check_web
+        step "daemon: cargo check --all-targets"
+        env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
+        if [ -n "${CHECK_TESTS:-}" ]; then
+            step "daemon: cargo test ${CHECK_TESTS}"
+            env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p agents-managerd --locked "${CHECK_TESTS}"
+        fi
+    fi
+}
+
 case "${1:-default}" in
+    changed) check_changed "${2:-origin/main}" ;;
     web) check_web ;;
     daemon) check_daemon ;;
     macos-local) check_macos_local ;;
@@ -207,5 +238,5 @@ case "${1:-default}" in
         check_fmt || echo "!! fmt 不乾淨（不擋）"
         check_clippy || echo "!! clippy 不乾淨（不擋）"
         ;;
-    *) echo "用法：scripts/check.sh [web|daemon|macos-local|ob|ops|fmt|clippy|all]" >&2; exit 2 ;;
+    *) echo "用法：scripts/check.sh [changed [base]|web|daemon|macos-local|ob|ops|fmt|clippy|all]" >&2; exit 2 ;;
 esac
