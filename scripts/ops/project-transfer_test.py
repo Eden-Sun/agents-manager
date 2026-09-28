@@ -22,6 +22,8 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 TOOL = os.path.join(HERE, "project-transfer")
 PID, OTHER = "01PROJTRANSFER0000000000P1", "01PROJTRANSFER0000000000Q1"
 B1, B2, C1, QB = "01BOT000000000000000000B01", "01BOT000000000000000000B02", "01BOT000000000000000000C01", "01BOT000000000000000000Q01"
+D1 = "01BOT000000000000000000D01"  # 已軟刪的 child
+DELETED_ROWS = {"r-dead", "r-dead-kid", "t-dead", "m-dead", "m-dead-kid", "a-dead", B2, D1, "cv-" + B2, "cv-" + D1}
 
 
 def schema_statements():
@@ -64,8 +66,9 @@ def seed_source(conn, att_file):
             json.dumps({"FOO": "1", "中文": "值"}), "user", None, "a" * 32, None, T0, 0))
     x(bot, (B2, PID, "hub-old", "codex", None, "[]", 0, None, "{}", "user", None, "b" * 32, T0, T0, 1))
     x(bot, (C1, PID, "hub-main-kid", "claude", None, "[]", 0, None, "{}", "child", B1, "c" * 32, None, T0, 0))
+    x(bot, (D1, PID, "hub-main-kid2", "claude", None, "[]", 0, None, "{}", "child", B1, "e" * 32, T0, T0, 0))
     x(bot, (QB, OTHER, "other-bot", "claude", None, "[]", 0, None, "{}", "user", None, "d" * 32, None, T0, 0))
-    for bid in (B1, B2, C1, QB):
+    for bid in (B1, B2, C1, D1, QB):
         x("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)", ("cv-" + bid, bid, T0))
     run = ("INSERT INTO runs (id, bot_id, state, native_session_id, transcript_path, pane_id, started_at, ended_at)"
            " VALUES (?,?,?,?,?,?,?,?)")
@@ -73,23 +76,30 @@ def seed_source(conn, att_file):
     x(run, ("r-z-old", B1, "exited", "sess-old", "/t/old.jsonl", "p1", T0, T0))
     x(run, ("r-a-new", B1, "running", "sess-new", "/t/new.jsonl", "p2", T0, None))
     x(run, ("r-kid", C1, "running", "sess-kid", None, "p3", T0, None))
+    x(run, ("r-dead", B2, "exited", "sess-dead", None, "p4", T0, T0))
+    x(run, ("r-dead-kid", D1, "exited", "sess-dead-kid", None, "p5", T0, T0))
     x(run, ("r-q", QB, "running", "sess-q", None, "p9", T0, None))
     turn = ("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, native_session_id, created_at, completed_at)"
             " VALUES (?,?,?,?,?,?,?,?,?)")
     x(turn, ("t-done", "cv-" + B1, "r-z-old", "web", "completed", "ok", "sess-old", T0, T0))
     x(turn, ("t-fly", "cv-" + B1, "r-a-new", "web", "in_flight", "ok", "sess-new", T0, None))
     x(turn, ("t-queue", "cv-" + B1, None, "web", "queued", "pending", None, T0, None))
+    x(turn, ("t-dead", "cv-" + B2, "r-dead", "web", "completed", "ok", "sess-dead", T0, T0))
     x(turn, ("t-q", "cv-" + QB, "r-q", "web", "completed", "ok", None, T0, T0))
     msg = "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,?,?,?,?)"
     x(msg, ("m1", "cv-" + B1, "t-done", "user", "你好", "web", T0))
     x(msg, ("m2", "cv-" + B1, "t-done", "assistant", "hi", "hook", T0))
     x(msg, ("m3", "cv-" + C1, None, "assistant", "kid", "hook", T0))
+    x(msg, ("m-dead", "cv-" + B2, "t-dead", "user", "deleted bot history", "web", T0))
+    x(msg, ("m-dead-kid", "cv-" + D1, None, "assistant", "deleted kid", "hook", T0))
     x(msg, ("m-q", "cv-" + QB, "t-q", "user", "secret of other project", "web", T0))
     att = ("INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, message_id, state, created_at)"
            " VALUES (?,?,?,?,?,?,?,?,?,?,?)")
     x(att, ("a-ok", B1, "shot.png", "image/png", 4, att_file, att_file, "local", "m1", "ready", T0))
     x(att, ("a-gone", B1, "gone.png", "image/png", 4, "/nonexistent/gone.png", "/nonexistent/gone.png", "local", "m1", "ready", T0))
+    x(att, ("a-dead", B2, "dead.png", "image/png", 4, att_file, att_file, "local", "m-dead", "ready", T0))
     x("INSERT INTO bot_reads (bot_id, read_at, message_id) VALUES (?,?,?)", (B1, T0, "m2"))
+    x("INSERT INTO bot_reads (bot_id, read_at, message_id) VALUES (?,?,?)", (B2, T0, "m-dead"))
     conn.commit()
 
 
@@ -184,7 +194,9 @@ class ProjectTransferTest(unittest.TestCase):
         b = json.loads(gzip.decompress(slurp(self.bundle)))
         ids = {t: [r.get("id", r.get("bot_id")) for r in spec["rows"]] for t, spec in b["tables"].items()}
         self.assertEqual(ids["projects"], [PID])
-        self.assertEqual(sorted(ids["bots"]), sorted([B1, B2, C1]))
+        self.assertEqual(sorted(ids["bots"]), sorted([B1, C1]), "只帶活著的 bot（含 live child）")
+        for table, got in ids.items():
+            self.assertEqual(DELETED_ROWS & set(got), set(), f"{table} 帶到了已刪 bot 的列")
         self.assertEqual(ids["runs"], ["r-z-old", "r-a-new", "r-kid"], "照 rowid 順序")
         self.assertNotIn("t-q", ids["turns"])
         self.assertNotIn("m-q", ids["messages"])
@@ -195,7 +207,7 @@ class ProjectTransferTest(unittest.TestCase):
     def test_import_rewrites_and_keeps_foreign_keys(self):
         self.export()
         out = json.loads(self.imp().stdout)
-        self.assertEqual(out["inserted"], {"projects": 1, "bots": 3, "conversations": 3, "runs": 3, "turns": 3,
+        self.assertEqual(out["inserted"], {"projects": 1, "bots": 2, "conversations": 2, "runs": 3, "turns": 3,
                                            "messages": 3, "attachments": 2, "bot_reads": 1})
         self.assertEqual(out["autostart_turned_off"], ["hub-main"])
         self.assertEqual((out["runs_closed"], out["turns_failed"]), (2, 2))
@@ -208,7 +220,7 @@ class ProjectTransferTest(unittest.TestCase):
         p = c.execute("SELECT * FROM projects WHERE id = ?", (PID,)).fetchone()
         self.assertEqual((p["host"], p["path"], p["label"]), ("m4p", "/Users/m4p/project/hub", "智選hub"))
         src = sqlite3.connect(self.src_path)
-        for bid in (B1, B2, C1):
+        for bid in (B1, C1):
             old = src.execute("SELECT hook_token FROM bots WHERE id = ?", (bid,)).fetchone()[0]
             b = c.execute("SELECT * FROM bots WHERE id = ?", (bid,)).fetchone()
             self.assertNotEqual(b["hook_token"], old, "hook token 要重新產生")
@@ -233,6 +245,10 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual(a["local_path"], os.path.join(self.tgt_dir, "attachments", B1, "shot.png"))
         self.assertEqual(slurp(a["local_path"]), b"\x89PNG")
         self.assertEqual(c.execute("SELECT COUNT(*) FROM messages WHERE id = 'm-q'").fetchone()[0], 0)
+        for table in ("bots", "conversations", "runs", "turns", "messages", "attachments"):
+            got = {r[0] for r in c.execute(f"SELECT id FROM {table}")}
+            self.assertEqual(DELETED_ROWS & got, set(), f"目標 {table} 有已刪 bot 的列")
+        self.assertEqual([r[0] for r in c.execute("SELECT bot_id FROM bot_reads")], [B1])
 
         cfg = tomllib.loads(slurp(self.cfg, "r"))
         self.assertEqual(cfg["panes"], {"idle_close_secs": 600}, "既有的表不能被接到別處")
@@ -240,7 +256,7 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual(set(projs), {"01TARGETPROJ00000000000R01", PID})
         hub = projs[PID]
         self.assertEqual((hub["host"], hub["path"], hub["label"]), ("m4p", "/Users/m4p/project/hub", "智選hub"))
-        self.assertEqual([b["id"] for b in hub["bots"]], [B1], "只寫活著的 user bot；child 與已刪的只在 DB")
+        self.assertEqual([b["id"] for b in hub["bots"]], [B1], "只寫 user bot；child 只在 DB")
         b = hub["bots"][0]
         self.assertEqual((b["name"], b["kind"], b["model"], b["identity"], b["autostart"]),
                          ("hub-main", "claude", "claude-opus-5-5", "cc1", False))
@@ -330,7 +346,39 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual(counts(c), before)
         self.assertEqual(digest(self.cfg), cfg0)
 
+    def add_legacy_team_columns(self, team_id):
+        # 已移除的 Team 功能留在舊 DB 的欄位（db.rs：`teams`／`team_*` may exist; nothing reads them）。
+        s = sqlite3.connect(self.src_path)
+        s.execute("ALTER TABLE bots ADD COLUMN team_id TEXT")
+        s.execute("ALTER TABLE bots ADD COLUMN team_role TEXT")
+        s.execute("UPDATE bots SET team_id = ?", (team_id,))
+        s.commit()
+        s.close()
+
+    def test_skips_source_only_columns_that_are_all_null(self):
+        self.add_legacy_team_columns(None)
+        self.export()
+        out = json.loads(self.imp().stdout)
+        self.assertEqual(out["inserted"]["bots"], 2)
+        self.assertTrue(any("team_id" in w and "team_role" in w for w in out["warnings"]), out["warnings"])
+        c = self.tgt()
+        self.assertNotIn("team_id", [r[1] for r in c.execute("PRAGMA table_info(bots)")])
+
+    def test_refuses_source_only_columns_with_values(self):
+        self.add_legacy_team_columns("team-1")
+        self.export()
+        db0, cfg0 = digest(self.tgt_path), digest(self.cfg)
+        p = self.imp(check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("team_id", p.stderr)
+        self.assertNotIn("team_role", p.stderr, "只點名真的有值的欄")
+        self.assertEqual((digest(self.tgt_path), digest(self.cfg)), (db0, cfg0))
+
     def test_refuses_target_missing_columns(self):
+        s = sqlite3.connect(self.src_path)
+        s.execute("UPDATE messages SET sent_via = 'send_now' WHERE id = 'm1'")
+        s.commit()
+        s.close()
         self.export()
         c = self.tgt()
         c.execute("ALTER TABLE messages DROP COLUMN sent_via")

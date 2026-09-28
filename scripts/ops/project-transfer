@@ -6,7 +6,7 @@
       [--config ~/.config/agents-manager/config.toml] [--dry-run]
 
 export 先對來源 DB 做 SQLite online backup（唯讀開來源，快照放暫存目錄、讀完當下刪），
-從快照取出專案、它的 bot（含 child 與已軟刪的）、conversations、runs、turns、messages、
+從快照取出專案、它活著的 bot（含 child；已軟刪的 bot 與它的一切都不帶）、conversations、runs、turns、messages、
 attachments（連同 daemon 讀得到的位元組）與 bot_reads，寫成一個 gzip JSON。來源 DB 一個字都不寫。
 
 import 是「目標 daemon 停著」的離線路徑：目標 daemon 沒有匯入對話歷史的 API，而 Project／Bot
@@ -130,7 +130,8 @@ def collect(conn, project_id):
     if proj[0].get("deleted_at"):
         die(f"專案 {project_id} 已軟刪（deleted_at={proj[0]['deleted_at']}），不移交已刪的專案")
     data = {"projects": proj}
-    data["bots"] = rows(conn, "SELECT * FROM bots WHERE project_id = ? ORDER BY rowid", (project_id,))
+    # 已軟刪的 bot 不移交：列本身與它的對話、run、附件都留在來源（使用者 2026-09-28）。
+    data["bots"] = rows(conn, "SELECT * FROM bots WHERE project_id = ? AND deleted_at IS NULL ORDER BY rowid", (project_id,))
     for b in data["bots"]:
         # 來源的 token 在 A 機上仍然有效，不帶出去；import 一律重產。
         b["hook_token"] = ""
@@ -376,7 +377,7 @@ def import_(args):
 def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, now):
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 10000")
-    target_cols = {}
+    target_cols, col_warnings = {}, []
     for name in t:
         if not has_table(conn, name):
             if t[name]:
@@ -384,8 +385,13 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
             continue
         target_cols[name] = set(columns(conn, name))
         missing = [c for c in bundle["tables"][name]["columns"] if c not in target_cols[name] and c not in PROJECT_RESET]
+        # 來源有、目標沒有的欄位，整批都是 NULL 就沒有資料會丟：多半是已移除功能的舊欄（db.rs：`teams`／`team_*`
+        # 還留在舊 DB 裡、沒人讀），新建的目標 DB 本來就沒有。有任何非 NULL 值才是「來源比目標新」。
+        carrying = [c for c in missing if any(r.get(c) is not None for r in t[name])]
+        if carrying:
+            die(f"目標 DB 的 {name} 少了欄位 {carrying}（來源有非 NULL 值）：來源比目標新，先把目標 daemon 升到同版以上")
         if missing:
-            die(f"目標 DB 的 {name} 少了欄位 {missing}：來源比目標新，先把目標 daemon 升到同版以上")
+            col_warnings.append(f"{name} 的欄位 {missing} 目標 DB 沒有，來源這批全是 NULL，略過")
     live = conn.execute(
         "SELECT id FROM projects WHERE host = ? AND path = ? AND deleted_at IS NULL AND id <> ?",
         (args.host, t["projects"][0]["path"], t["projects"][0]["id"]),
@@ -481,7 +487,7 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
         "turns_failed": len(notes["turns_failed"]),
         "autostart_turned_off": notes["autostart_off"],
         "backups": backups,
-        "warnings": bundle["warnings"] + config_warnings(cfg, live_user_bots, args.host),
+        "warnings": bundle["warnings"] + col_warnings + config_warnings(cfg, live_user_bots, args.host),
     }
 
 
