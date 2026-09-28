@@ -209,9 +209,9 @@ mod tests {
     async fn offset_and_precision_variants_of_the_same_instant_compare_equal() {
         let (pool, dir) = pool().await;
         seed(&pool).await;
-        let m = mark(&pool, "b", "2026-09-15T10:00:00+08:00", "a1-t2").await.unwrap();
+        let m = mark(&pool, "b", "2026-09-15T10:00:00+08:00", "a0-t2").await.unwrap();
         assert_eq!(m.at, "2026-09-15T02:00:00.000Z");
-        assert_eq!(unread(&pool).await, Some(2), "a0-t2 + t3 未讀，t3 不因 +08:00 字串較大被吃掉");
+        assert_eq!(unread(&pool).await, Some(2), "a1-t2 + t3 未讀，t3 不因 +08:00 字串較大被吃掉");
         let m = mark(&pool, "b", "2026-09-15T03:30:00Z", "").await.unwrap();
         assert_eq!(m.at, "2026-09-15T03:30:00.000Z", "後送的較新 UTC 標記要能前推");
         assert_eq!(unread(&pool).await, None);
@@ -219,9 +219,9 @@ mod tests {
         assert_eq!(m.at, "2026-09-15T03:30:00.000Z", "較舊（03Z）的離線標記不倒退，即使字串看起來比較大");
 
         sqlx::query("DELETE FROM bot_reads").execute(&pool).await.unwrap();
-        mark(&pool, "b", "2026-09-15T02:00:00Z", "a1-t2").await.unwrap();
-        assert_eq!(unread(&pool).await, Some(2), "無毫秒的 02Z 與訊息的 .000Z 同一刻，不能把 a0-t2 算已讀");
-        mark(&pool, "b", "2026-09-15T02:00:00.000999Z", "a1-t2").await.unwrap();
+        mark(&pool, "b", "2026-09-15T02:00:00Z", "a0-t2").await.unwrap();
+        assert_eq!(unread(&pool).await, Some(2), "無毫秒的 02Z 與訊息的 .000Z 同一刻，不能把 a1-t2 算已讀");
+        mark(&pool, "b", "2026-09-15T02:00:00.000999Z", "a0-t2").await.unwrap();
         assert_eq!(unread(&pool).await, Some(2), "次毫秒精度截到毫秒，不前推也不改變結果");
         assert!(mark(&pool, "b", "yesterday", "").await.is_err());
         std::fs::remove_dir_all(dir).ok();
