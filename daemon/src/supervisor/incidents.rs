@@ -354,7 +354,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // 判定在 `role_faults::refresh`（同一拍、`sweep` 之前跑），這裡只把結論變成 incident。
     // `resource` 從 bot_id 換成角色名：兩顆各自一筆，而且換 bot 不會留下關不掉的孤兒。
     for role in super::role_faults::WATCHED {
-        let row = match super::roles::get(&app.db, role).await {
+        let row = match super::roles::record(&app.db, role).await {
             Err(e) => {
                 tracing::warn!(role = role.as_str(), error = ?e, "role unavailable probe failed");
                 probed.failed.push(ROLE_UNAVAILABLE_KIND);

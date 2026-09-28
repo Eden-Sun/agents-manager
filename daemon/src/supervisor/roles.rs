@@ -315,6 +315,16 @@ pub struct RoleRow {
     pub updated_at: String,
 }
 
+/// The status-bearing record for a role. Patrol is stored in `supervisors`; Responder is stored
+/// in `supervisor_roles`.
+#[derive(Debug, Clone)]
+pub struct RoleRecord {
+    pub bot_id: Option<String>,
+    pub status: String,
+    pub status_detail: Option<String>,
+    pub waiting_since: Option<String>,
+}
+
 impl RoleRow {
     pub fn stats_json(&self) -> Value {
         json!({
@@ -542,6 +552,32 @@ pub async fn bot_for(pool: &SqlitePool, role: Role) -> Result<Option<String>> {
         Role::Patrol => super::store::get_or_init(pool).await?.bot_id,
         Role::Responder => get(pool, Role::Responder).await?.bot_id,
     })
+}
+
+/// Read the authoritative configured bot and availability status for either role.
+pub async fn record(pool: &SqlitePool, role: Role) -> Result<RoleRecord> {
+    match role {
+        Role::Patrol => {
+            let row = super::store::get_or_init(pool).await?;
+            Ok(RoleRecord {
+                bot_id: row.bot_id,
+                status: row.status,
+                status_detail: row.status_detail,
+                // Patrol has no `waiting_since` column; faults detected by the health tick carry
+                // their own in-memory `since` timestamp.
+                waiting_since: None,
+            })
+        }
+        Role::Responder => {
+            let row = get(pool, role).await?;
+            Ok(RoleRecord {
+                bot_id: row.bot_id,
+                status: row.status,
+                status_detail: row.status_detail,
+                waiting_since: row.waiting_since,
+            })
+        }
+    }
 }
 
 // ---------------------------------------------------------------- per-role inbox

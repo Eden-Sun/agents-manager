@@ -61,11 +61,11 @@ pub async fn responder_state(app: &Arc<App>) -> RoleState {
 /// 在**送不出去時**看一次（結論落在 `supervisor_roles.status`，#420），以及 health 的 30 秒 tick
 /// 對兩個角色各看一次（結論落在 `App.role_faults`，#427——巡檢只有這一條路看得到）。
 pub async fn role_state(app: &Arc<App>, role: crate::supervisor::roles::Role) -> RoleState {
-    let row = match crate::supervisor::roles::get(&app.db, role).await {
+    let row = match crate::supervisor::roles::record(&app.db, role).await {
         Ok(row) => row,
         // 讀不到不是「它好了」，也不是「它壞了」。
         Err(e) => {
-            tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到角色那一列");
+            tracing::warn!(role = role.as_str(), error = ?e, "role_state：讀不到角色狀態");
             return RoleState::Unknown;
         }
     };
