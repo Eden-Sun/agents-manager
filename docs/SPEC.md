@@ -450,6 +450,11 @@ resend／排隊機制決定（`stuck_turns.rs`），不讓 CLI 自己另開一�
 而 §4.4a 的 context／額度判斷都假設環境由 daemon 決定；而且帳號是共用的（cc0／cc1／cc2…），一個人在網站上開一個 skill 會
 同時改掉所有用那個帳號的 bot。這只寫進 daemon 注入的 `--settings`，使用者自己終端的 `~/.claude*/settings.json` 不受影響；
 子 agent（`managed_by='child'`）目前沒有 `--settings`，管不到，那是另一個題目。
+還有 `tui: "default"` 與 `permissions.defaultMode`（issue #722，claude **2.1.283**）：`tui` 沒設時，回合結束會跳
+「Try the new fullscreen renderer?」選單（herdr 判 blocked、daemon 不認），使用者在同一個設定目錄試過還會把 `tui: "fullscreen"`
+寫進 `~/.claude/settings.json`；畫面辨識（`tui_prompts`、§4.3 備援、回音剝除）都照一般渲染寫，所以 bot 一律釘 `default`
+（`--settings` 優先，且 `tui` 有值那個選單就不跳）。同一版的「Make auto mode your default permission mode?」（游標預設 Yes）
+只在較高層設定沒寫 `permissions.defaultMode` 時才跳，所以照 bot 的 `auto_approve` 寫 `bypassPermissions`／`default`，不放大權限。
 還有 `pluginConfigs: {"agents-md@builtin": {"options": {"instructionFiles": "claude-md"}}}`（issue #206，claude **2.1.277** 起）：
 2.1.277 起，專案沒有 CLAUDE.md 時 claude 會改讀 AGENTS.md——內建 plugin `agents-md` 的 `instructionFiles`（`/config` 的「Project instructions」），
 可選 `claude-md`／`claude-md-or-agents-md`（**預設**）／`claude-md-and-agents-md`／`managed-only`。開不開由伺服器端旗標 `tengu_agents_md_mod`
