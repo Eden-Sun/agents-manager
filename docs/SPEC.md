@@ -109,7 +109,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   - **持久 intent 與啟動版本（v13，#355）**：`intents` 表記「已承諾、可能只做了一半」的多步驟動作（restart／delete_bot／delete_project／promote；另有當下做完、只留紀錄的 retire_child），
     daemon 中途死掉後開機由 `intents.rs` 接續（設計與階段見 #355）；同一目標同一種動作同時只能有一件開著（partial unique index `intents_one_open`），
     認領用 CAS（`owner_boot`），補做失敗最多 5 次就 `failed`。`bots.launch_rev`／`runs.launch_rev` 是啟動相關設定的版本雜湊（NULL＝沒記，不誤報需重啟）。
-    **已接線：`restart`**（`restart_bot_with`，含一鍵重啟每顆各一件）：記 `stopping` 之前先 commit intent（寫不進去就不重啟）；正常完成標 `done`、
+    **已接線：`restart`**（`restart_bot_with`，含一鍵重啟每顆各一件）：記 `stopping` 之前先 commit intent（寫不進去就不重啟）；reconcile 遇到仍有對應開啟 intent 的 `stopping` run 時保留狀態，讓後續 recovery 能完成重啟；正常完成標 `done`、
     拒絕（沒動任何東西）標 `abandoned`、失敗標 `failed`（不推 AGM，呼叫端已拿到錯誤）。**開機／主機重連對帳成功之後、autostart 判斷之前**
     （`restart_intents::recover_host`）讀還開著的 restart intent 檢查世界：有新 run＝`done`；舊 run 還 running／starting＝`abandoned`（`stopping` 從沒記過）；
     舊 run `stopping`＝補完停；沒有 active run＝舊 run 由 `stopped` 改標 `exited`（不是使用者要它停）並照原選項 start（`autostart=0` 也補）。
