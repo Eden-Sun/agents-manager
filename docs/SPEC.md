@@ -3124,7 +3124,7 @@ pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內�
 
 `POST …/logout` 走同一條路（同一個臨時 pane、同一組 env 前綴），指令換成 `claude auth logout`、`codex logout` 或 `grok logout`。
 環境前綴與登入共用同一段程式：少帶 `CLAUDE_CONFIG_DIR` 就會登出別的帳號。清掉的是那個身份設定目錄裡的憑證——執行中的 bot 不受影響，下次啟動才會停在登入畫面，所以 UI 先問一次並說明有幾顆 bot 綁著它。
-CLI 結束後重驗一次登入狀態並寫回快取：**登出**的 pane 在重驗問不出來時（遠端 claude 一律問不出來）直接記未登入並清掉 `account`／`plan`，不然列上會一直顯示「已登入」、登出鈕也還按得下去。
+CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前的 HostFence 推標準 `host_changed` 主機快照，讓 UI 立即更新身份狀態（API §8）。**登出**的 pane 在重驗問不出來時（遠端 claude 一律問不出來）直接記未登入並清掉 `account`／`plan`，不然列上會一直顯示「已登入」、登出鈕也還按得下去。
 重驗說「還登著」就照實記（登出沒成功）。
 
 **回合因為沒登入收尾時的一鍵登入**（網頁 `lib/authFailure.ts`）：對話裡「這一回合失敗收尾（帳號或授權）：…」這則系統訊息（hook `StopFailure` 分類成 `FailureReason::Auth`，§6.7），引用 `Not logged in · Please run /login`（或 `Run /login`）的系統訊息，以及**整則只有那一行**的 agent 回覆，底下出現「立即登入」與「登入好了，重試」。只掛在最後一則，之後有正常回覆就收起來；bot 在回報裡引用那句話不算。「立即登入」：bot 綁了身份就打本節的 `…/identities/{identity}/login`（env 由 daemon 照該主機偵測到的設定組，alias 換了設定目錄也跟著換），沒綁身份（預設帳號）就開主機 shell 打不帶 env 的 `claude auth login`——兩條都不碰 bot 自己的 pane。「重試」先 `POST /api/hosts/{name}/tools/refresh`，身份確定仍未登入就只提示、不重送；否則重送對話裡最後一則使用者訊息（agent 忙時不給按）。已經在跑的 claude 要不要重啟才讀得到新憑證沒有驗過，重送後還是 `Not logged in` 就重啟那顆 bot。

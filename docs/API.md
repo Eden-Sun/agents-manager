@@ -531,7 +531,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `bot_changed` | `{"bot_id"}` |
 | `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port", "source"}`（SPEC §6.12） |
 | `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?}}}` |
-| `host_changed` | `{"name","connected","error"?,"herdr"}`（`herdr` 見 §12.6b） |
+| `host_changed` | `{"name","connected","error"?,"herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上） |
 | `quota_updated` | 見 §12.5 |
 | `mem_updated` | 與 `GET /api/mem` 同形 |
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
@@ -1211,6 +1211,7 @@ claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並�
 同一條路、同一組 env，只是指令換成 `claude auth logout` / `codex logout` / `grok logout`（回應與錯誤與 login 相同）。
 env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR` 會登出**別的**帳號。
 清掉的是該身份設定目錄裡的憑證：正在跑的 bot 不受影響，之後重新啟動會停在登入畫面。
+登入／登出重驗改變身份快取時推標準 `host_changed` 主機快照（含 `name` 與更新後的 `identities`）；前端收到只帶 `host` 的舊版通知時重讀 `/api/state`。
 
 ## 10. Bot 欄位、編輯、重啟、刪除
 
