@@ -2629,7 +2629,7 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 B 的 DB 與 config.toml 各備份一份（`*.pre-transfer-<時間>`）→ 一個交易裡插列、外鍵檢查 → 原子寫 config.toml → COMMIT
 （config 寫不進去就回滾 DB，COMMIT 失敗就還原 config）。
 
-**搬什麼**：`projects` 一列、該專案全部 `bots`（含 child 與已軟刪的）、它們的 `conversations`／`runs`／`turns`／`messages`／`attachments`／`bot_reads`，
+**搬什麼**：`projects` 一列、該專案活著的 `bots`（`deleted_at IS NULL`，含 child；**已軟刪的 bot 與它的一切都不帶**）、它們的 `conversations`／`runs`／`turns`／`messages`／`attachments`／`bot_reads`，
 照來源的 rowid 順序插（`last_native_session` 挑最後一個 run 的第二鍵是 rowid，#461）；附件位元組一起打包（來源讀不到的列在 `missing_files`）。
 export 先對來源 DB 做 SQLite online backup 到暫存目錄、從快照讀、讀完當下刪快照，來源 DB 一個字都不寫；bundle 權限 600（內含對話）。
 不搬：憑證與身分（`identity` 只帶名字，B 要自己有同名身分或 A 機的 alias 認得，import 會列警告）、supervisor／mission／spawn hint／預覽等執行期表、
@@ -2638,12 +2638,12 @@ export 先對來源 DB 做 SQLite online backup 到暫存目錄、從快照讀�
 **改寫**：專案與附件的 `host` → `--host`；`path`、`agent_path`、`native_session_id`、`transcript_path` 不變（接回用）；
 每顆 bot 的 `hook_token` 重新產生；附件的 `local_path` 改成 B 資料目錄的 `attachments/<bot_id>/` 副本（遠端 bot 的附件本來就這樣放）；
 還在跑的 run 收成 `exited`（`exit_reason = project transfer`）、`queued`／`in_flight` 的 turn 收成 `failed`；
-`handed_off_to`（#708）清掉；config.toml 只寫活著的 user bot（child 與已刪的只在 DB，投影本來就不碰 child），一律 `autostart = false`
+`handed_off_to`（#708）清掉；config.toml 只寫 user bot（child 只在 DB，投影本來就不碰 child），一律 `autostart = false`
 ——A 的 agent 還在跑時 B 開機不能自己再起一份，接手完再由使用者打開。
 
 **冪等與拒絕**：已存在的 id 跳過、config 裡已有這個專案 id 就不再追加，所以同一份 bundle 重跑 import 不會多列、不換 token。
 下列情況在寫入前就拒絕、什麼都不動：B 的 config 沒有 `[[hosts]] name = <--host>`；B 已有別的專案佔著同一個 `(host, path)`；
-B 的表少了 bundle 裡的欄位（來源比目標新，先升 B）；`--host local`。插到一半撞約束（例如 `turns_native` 重號）整批回滾。
+B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先升 B；整批都是 NULL 的來源獨有欄——例如已移除 Team 功能留下的 `bots.team_id`／`team_role`——略過並列進 warnings）；`--host local`。插到一半撞約束（例如 `turns_native` 重號）整批回滾。
 `--dry-run` 整套跑完再回滾，不寫 config／附件、不備份。
 
 **runbook**（A＝Mac，B＝agm-host）。順序的關鍵：`handed_off_to`（#708，DB 的 `projects.handed_off_to` 與 config.toml `[[projects]]` 同名）
