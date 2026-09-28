@@ -989,6 +989,43 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
   "source_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md", "error": null }
 ```
 
+## Herdr 自己的版本 `GET /api/herdr/updates`
+
+環境設定的「Herdr 版本」卡。跟 `GET /api/changelog`（agent CLI 的更新）是兩件事：這支追的是我們賴以管 pane 的 **herdr 本身**，daemon 端在 `herdr_updates.rs`。
+
+- **只讀**：沒有下載、`herdr update`、`server stop/restart`。升級要停 server、會中斷正在跑的 pane，走 AGM 的既有運維流程。回應固定帶 `read_only: true`。
+- 三個版本分開，**任一個未知就不能說「已是最新」**：`hosts[].server`（那台跑著的 herdr server，來自 herdr `ping` 的 `version`/`protocol`）、`hosts[].disk`（那台磁碟上的 `herdr --version`）、`latest`（官方 stable）。
+- `standing`：`unknown`（任一邊不知道）| `latest` | `behind` | `ahead`（本機比官方 stable 新，例如跑 prerelease）。
+- 來源固定 `https://herdr.dev/latest.json`（不可設定）。真實 schema：頂層 `version` / `protocol` / `endpoint_generation` / `notes`，加一份 `releases`（版本 → `{notes, protocol, endpoint_generation, …}`）。**最新**取頂層與 `releases` 裡最大的 **stable**，prerelease 不推薦。啟動查一次、之後每 6 小時；body 上限 2 MiB、timeout 20 秒、不執行抓回來的內容。
+- 抓失敗只更新 `latest.checked_at` 與 `latest.error`，`version` / `fetched_at` / release notes 都留著上次成功的值；太久沒查成功時 `stale: true`（值照顯示，但不能講成剛確認過）。離線主機保留上次讀到的版本並帶 `error`，**不拿本機版本冒充**。
+- `hosts[].restart_pending`：磁碟比跑著的 server 新 = 新版已裝好、換 server 才生效。只有一邊知道版本時固定 `false`。
+- `notes` 是 `from`（不含）到 `to`（含）的官方 release notes，新的在前，**每段標自己的版本號**。`complete: false` = `from` 那一版不在官方清單裡，中間可能還有沒列出來的版本，`gap` 是照抄給使用者的一句話；`missing_notes` 是清單裡有、但官方沒附說明的版本。不會拿最新那段頂替整段跨版內容。
+- **永遠 200**，錯誤與「不知道」都寫在 payload 裡。
+
+```json
+{ "latest": { "version": "0.9.0", "protocol": 22, "endpoint_generation": 1,
+              "fetched_at": "…", "checked_at": "…", "stale": false, "error": null,
+              "source_url": "https://herdr.dev/latest.json",
+              "releases_url": "https://github.com/herdrdev/herdr/releases" },
+  "hosts": [{ "host": "local", "connected": true, "checked_at": "…",
+              "server": { "version": "0.8.2", "protocol": 20, "at": "…", "error": null, "standing": "behind" },
+              "disk":   { "version": "0.8.2", "at": "…", "error": null, "standing": "behind" },
+              "restart_pending": false }],
+  "behind_hosts": ["local"], "unknown_hosts": [],
+  "notes": { "from": "0.8.2", "to": "0.9.0", "complete": true, "gap": null, "missing_notes": [],
+             "sections": [{ "version": "0.9.0", "notes": "### Added\n- …" }] },
+  "notice": { "version": "0.9.0", "notified_at": "…", "seen_at": null },
+  "unread": true, "read_only": true }
+```
+
+- `POST /api/herdr/updates/refresh`：手動重查，回同一份快照。60 秒內的第二次呼叫（含併發）**不會**再打官方站，直接回目前快照——不是錯誤。
+- `POST /api/herdr/updates/seen {"version":"0.9.0"}`：按掉這一版的未讀提示，回同一份快照。`version` 解不出版本號回 400。只影響 `unread`，不影響已經送給 AGM 的那筆事件。
+
+### 通知 AGM
+有**已知落後**的主機時（未知不算、沒更新不叫醒模型），推一筆 `herdr_update_available` 進 `supervisor_inbox`，`event_key` 為 `herdr_update:<version>`，payload 帶 `latest_version` / `behind_hosts` / `source_url` / `releases_url` / `notes_complete`。走既有巡檢路由與 notify 節流。
+
+該表的 `(supervisor_id, event_key)` 唯一索引就是去重標記，所以「送出」與「標記已通知」是同一個原子動作：一個 release 最多一筆合併事件，daemon 重啟或一台主機開十個 pane 都不會再叫醒一次；寫失敗則什麼都沒留下、下一輪重試，不會出現「沒送出卻永久 seen」。
+
 ## 總管 AGM（SPEC §18）
 
 全部走 `X-AM-Token`。未部署的 daemon 對這些路徑回 404（前端用 404 判斷「這台不支援」）。
