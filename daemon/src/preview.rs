@@ -17,6 +17,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -178,10 +180,10 @@ impl PreviewEnv for RealEnv {
         })
     }
     fn port_listening(&self, port: u16) -> BoxFuture<'_, bool> {
-        Box::pin(async move {
-            let c = tokio::net::TcpStream::connect(("127.0.0.1", port));
+        Box::pin(loopback_port_listening(port, |addr| async move {
+            let c = tokio::net::TcpStream::connect(addr);
             matches!(tokio::time::timeout(Duration::from_millis(400), c).await, Ok(Ok(_)))
-        })
+        }))
     }
     fn scan_servers<'a>(&'a self, roots: &'a [String]) -> BoxFuture<'a, Option<Vec<ViteProc>>> {
         Box::pin(scan_real(roots))
@@ -208,6 +210,15 @@ impl PreviewEnv for RealEnv {
             parse_repo_key(dir, &String::from_utf8_lossy(&common.stdout), &String::from_utf8_lossy(&origin.stdout))
         })
     }
+}
+
+async fn loopback_port_listening<F, Fut>(port: u16, connect: F) -> bool
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let addresses = [SocketAddr::from(([127, 0, 0, 1], port)), SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port))];
+    futures::future::join_all(addresses.into_iter().map(connect)).await.into_iter().any(|listening| listening)
 }
 
 /// 每個 pid 的命令列。Linux 的 procps 也認這組旗標、一樣列到沒有終端的行程（測試在外部編譯主機實跑）。
