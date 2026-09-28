@@ -2816,7 +2816,11 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     case 'host_changed': {
       if (!isRec(data)) return
       const name = str(pick(data, 'name'))
-      if (!name) return
+      if (!name) {
+        // Old identity-login watchers sent `{host}`; recover from the authoritative snapshot instead of dropping the frame.
+        if (str(pick(data, 'host'))) void get().refreshState()
+        return
+      }
       // issue #26: a host that just came back may now answer `GET /api/models`.
       const wasConnected = name === 'local'
         ? get().connected

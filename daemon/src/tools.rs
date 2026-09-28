@@ -529,7 +529,7 @@ async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, f
     let logged_in = logged_in?;
     let to_cache = login_answer_to_cache(host == LOCAL_HOST, &idn.kind, logged_in)?;
     if record_identity_login_fenced(app, host, name, fence, Some(to_cache), account, plan).await {
-        app.emit("host_changed", serde_json::json!({"host": host})).await;
+        crate::state::emit_host_changed(app, fence).await;
     }
     if !app.hosts.is_current(fence).await {
         return None;
@@ -592,7 +592,7 @@ pub fn spawn_identity_login_watch(
                     let changed =
                         record_identity_logged_out(&app, &host, &name, "剛剛在這台主機登出（重驗問不出來時照登出算）", &fence).await;
                     if changed {
-                        app.emit("host_changed", serde_json::json!({"host": host})).await;
+                        crate::state::emit_host_changed(&app, &fence).await;
                     }
                 }
                 close().await;
@@ -1594,6 +1594,51 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(herdr_b.calls_to("pane.close").is_empty(), "B 上同 id 的 pane 不能被關：{:?}", herdr_b.methods());
         assert!(herdr_b.calls_to("pane.process_info").is_empty(), "連看都不該去看 B 的 pane：{:?}", herdr_b.methods());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn identity_login_recheck_publishes_the_standard_host_snapshot() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = "build1";
+        let conn = app.hosts.insert_remote_for_test(host_cfg("target-login-698")).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.cfg
+            .update(|cfg| {
+                cfg.identities.push(crate::config::IdentityCfg {
+                    name: "cx1".into(),
+                    kind: "codex".into(),
+                    host: Some(host.into()),
+                    env: Default::default(),
+                    args: vec![],
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut cx1 = IdentityInfo::shell("cx1", "codex", None);
+        cx1.logged_in = Some(false);
+        let mut tools = ht_marked("codex");
+        tools.identities.insert("cx1".into(), cx1);
+        app.tools.lock().await.insert(host.into(), tools);
+        crate::hosts::set_ssh_fake(host, |script| {
+            if script == r#"printf '%s' "$HOME""# {
+                Ok("/home/remote".into())
+            } else {
+                Ok("Logged in using ChatGPT\n".into())
+            }
+        });
+        let mut events = app.subscribe();
+
+        assert_eq!(recheck_identity_login(&app, host, "cx1").await, Some(true));
+        let event = loop {
+            let event = events.try_recv().expect("重驗改變登入狀態後應推 host_changed");
+            if event.kind == "host_changed" {
+                break event;
+            }
+        };
+        assert_eq!(event.data["name"], host);
+        assert_eq!(event.data["identities"]["cx1"]["logged_in"], true);
     }
 
     #[tokio::test]
