@@ -162,6 +162,9 @@ setup() {
 # 假 ssh：最後一個參數是遠端指令，在本機跑（PATH 前面是遠端才有的 stub）。
 args=("$@"); last="${args[$((${#args[@]} - 1))]}"
 printf '%s\n' "$last" >> "$ROOT/ssh.log"
+# check.sh 的 destructive-canary 把 systemd-run／systemctl 匯出成 bash 函式（優先於 PATH），rbin 的 stub 會被蓋掉；
+# 這裡拿掉函式，PATH 上的 canary shim 仍在（rbin 沒 stub 的照樣擋）。
+unset -f systemd-run systemctl 2>/dev/null
 PATH="$ROOT/rbin:$PATH" exec bash -c "$last"
 EOF
     cat > "$ROOT/bin/rsync" <<'EOF'
@@ -201,6 +204,11 @@ EOF
 echo "systemd-run $*" >> "$ROOT/systemd-run.log"
 [ -n "${DST_ERROR_AFTER_START:-}" ] && printf '2026-09-28T00:00:00Z ERROR boom\n' >> "$DST_DATA_T/daemon.log"
 exit 0
+EOF
+    # preflight 只用 `systemctl --user cat herdr@.service` 看有沒有裝，當作有裝。
+    cat > "$ROOT/rbin/systemctl" <<'EOF'
+#!/bin/bash
+echo "systemctl $*" >> "$ROOT/systemctl.log"; exit 0
 EOF
     cp "$ROOT/bin/curl" "$ROOT/rbin/curl"
     # stub 故意不叫 project-transfer：傳到目標要改成固定檔名，import 才叫得到。
