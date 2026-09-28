@@ -865,6 +865,7 @@ shim 轉遠端要 pane 裡有 `AM_DAEMON_EXE`、`AM_CONFIG_PATH`（`AM_DAEMON_EX
 ### `GET /api/build/remote` / `PUT /api/build/remote`
 `{enabled, host, user, ssh_port, remote_root, cargo_jobs, test_threads, timeout_secs, shared_idle_hours, max_shared_dirs, max_concurrent, password_set}`。PUT 另收 `password`
 （省略＝沿用現在的密碼，換主機也一樣；`""`＝清掉改用 SSH key/agent；其他＝新密碼）——不進 config、不回前端。`host`／`user` 空字串又要 `enabled` → 400。
+`host` 可填 IPv6 literal；SSH 使用原 host，rsync 目的地會自動把含 `:` 的 host 包成方括號，以符合 `user@[addr]:path` 語法。
 **設定與密碼一起提交（issue #104）**：新密碼先寫成一份還沒人指到的 `<data-dir>/remote-cargo-password.<16 hex>`（open(2) 時就是 0600，不是事後 chmod；寫完 fsync 才從
 `.tmp` rename 成正式檔名），再把 config.toml 一次換成「新設定＋`[build.remote] password_id` 指向新檔」——唯一的提交點是 config.toml 的 rename；最後才刪掉沒有設定指到的舊密碼檔。
 任何一步失敗或行程死掉，重讀磁碟只會是「舊設定＋舊密碼」或「新設定＋新密碼」，不會出現新主機配舊密碼（舊密碼被送去新主機）或權限比 0600 寬的密碼檔；

@@ -2020,6 +2020,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   **來源樹在同步途中被改動不算失敗（2026-09-25 am-lead）**：共用主樹的 `web/dist` 會被別的 bot 的 `bun run build` 整批換掉（hash 檔名），
   rsync 列完檔案清單後舊檔消失就回 23（`open (2)`／`No such file or directory`）或 24（vanished）。這兩種才重送（最多共 3 次、中間等 1.5 秒，仍受整體上限與訊號管；
   重送一次就是新的一致狀態，`--delete` 順便清掉遠端的舊 hash 檔），仍失敗就 126、訊息講明「來源樹在同步時一直被改動（多半是別的 bot 正在 build web）」。
+  rsync 的目的地 host 含 `:` 時（IPv6 literal）會加方括號，如 `user@[fd7a:115c:a1e0::5]:/dir/`；SSH 目的地維持 `user@fd7a:115c:a1e0::5`。
   其他 rsync 錯誤（權限、協定、連線）照舊立刻失敗，不重試。不對 `web/dist` 做快照：多一份複製換不到比重送更多的東西。
   這時才去 acquire、才受本機名額管。缺環境變數而沒轉成的（issue #138）也是落到本機、照本機名額排。`build`／`run`／…本來就不轉，照舊排。
   **`AM_DATA_DIR` 不是轉遠端的前提**（issue #417）：`scripts/check.sh` 為了不讓 daemon 測試吃到正式資料目錄會 `env -u AM_DATA_DIR`，

@@ -1552,6 +1552,11 @@ pub fn source_changed_during_sync(code: Option<i32>, stderr: &str) -> bool {
 const SYNC_ATTEMPTS: u32 = 3;
 const SYNC_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(1500);
 
+fn rsync_destination(remote: &BuildRemoteCfg, dir: &str) -> String {
+    let host = if remote.host.contains(':') { format!("[{}]", remote.host) } else { remote.host.clone() };
+    format!("{}@{}:{}/", remote.user, host, dir.trim_end_matches('/'))
+}
+
 fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, deadline: &Deadline) -> anyhow::Result<()> {
     if !has_program(&rsync_program()) {
         anyhow::bail!("remote Cargo requires `rsync` on the daemon host");
@@ -1564,7 +1569,7 @@ fn sync_source(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, dir: &str, 
     };
     let ssh = rsync_rsh(remote, pw.is_some(), matches!(mode, Some(PwMode::Askpass(_))));
     let source = format!("{}/", cwd.to_string_lossy().trim_end_matches('/'));
-    let dest = format!("{}@{}:{}/", remote.user, remote.host, dir.trim_end_matches('/'));
+    let dest = rsync_destination(remote, dir);
     let command = || {
         let mut cmd = match &mode {
             Some(PwMode::Sshpass) => {
@@ -1796,6 +1801,14 @@ fn run_offload(remote: &BuildRemoteCfg, data_dir: &Path, cwd: &Path, args: &[Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rsync_destination_brackets_ipv6_hosts() {
+        let mut r = remote();
+        r.host = "fd7a:115c:a1e0::5".into();
+        assert_eq!(rsync_destination(&r, "/home/u/shared/"), "me@[fd7a:115c:a1e0::5]:/home/u/shared/");
+        assert_eq!(rsync_destination(&remote(), "/home/u/shared/"), "me@build-host:/home/u/shared/");
+    }
+
     /// #328：同步的排除規則不能濾掉名叫 target 的原始碼目錄，但根目錄的 target 仍不送。
     #[test]
     fn the_rsync_excludes_keep_source_dirs_named_target() {
