@@ -57,6 +57,7 @@ export function Modal({
       <div
         className="modal"
         ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
