@@ -54,3 +54,6 @@ scripts/ops/systemd/com.agm.outbox-gc.service       systemd/com.agm.outbox-gc.se
 scripts/ops/systemd/com.agm.outbox-gc.timer         systemd/com.agm.outbox-gc.timer         linux
 scripts/ops/systemd/com.agm.release-triage.service  systemd/com.agm.release-triage.service  linux
 scripts/ops/systemd/com.agm.release-triage.timer    systemd/com.agm.release-triage.timer    linux
+# herdr server 的看管者（issue #677、#676 待決 2）：不是排程，沒有 .timer，也沒有 launchd 對應檔——macOS 那份
+# launchd job 由 daemon 自己寫（hosts.rs）。daemon 在 Linux 上用 `systemctl --user start herdr@<session>.service` 起 server。
+scripts/ops/systemd/herdr@.service                  systemd/herdr@.service                  linux

@@ -1,0 +1,22 @@
+# 來源檔（issue #677）：Linux 主機上 herdr server 的看管者，一個 session 一個實例（`herdr@<session>.service`）。
+# 改這裡再照 scripts/ops/README.md install 到 ~/.config/systemd/user/（agm ops-sync 比對）。
+#
+# 對應 macOS 由 daemon 寫的 launchd job `dev.agents-manager.herdr-<session>`（KeepAlive）。daemon 在 Linux 上要起
+# session 時先 `systemctl --user start herdr@<session>.service`，叫不到 user bus 或沒裝這個檔才退回直接 spawn——
+# 看管者只有 systemd 一個，不會跟 daemon 各起一顆搶同一個 socket（SPEC §19）。不 enable：什麼時候起由 daemon 決定。
+#
+# KillMode=process：只收 herdr server 本身，跟 launchd 一樣不去掃 pane 裡的行程。預設的 control-group 會在
+# server 掛掉、Restart 之前把整個 cgroup（每個 pane 的 agent）一起殺掉。
+[Unit]
+Description=herdr server（session %i）
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h
+ExecStart=/usr/bin/env herdr --session %i server
+Restart=always
+RestartSec=2
+KillMode=process
+StandardOutput=append:/tmp/herdr-%i.log
+StandardError=append:/tmp/herdr-%i.log

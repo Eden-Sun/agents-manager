@@ -582,9 +582,14 @@ herdr 全機重啟：bootout 兩個 herdr launchd job → 殺掉所有 herdr ser
   就夠，跟 `ensure_session` 同一款），`$!` 取的是 server 本身，而且要 `herdr session list` 看到
   `default running` 才記 `default server up`，等不到就寫 FAIL 並以 rc=1 結束。
 - 路徑與 uid（`gui/501`）寫死成這台開發機的值，是收進 repo 時保留的既有行為。
+- **Linux 主機**（issue #677）走檔案開頭那段：herdr server 由 systemd user unit `herdr@<session>.service`
+  （`scripts/ops/systemd/herdr@.service`，跟 `com.agm.*` 一起由 ops-sync 對照安裝）看管。記下原本 active 的
+  `herdr@*.service` → 先 stop 再殺殘留 server → 清 `$HOME/.config/herdr` 的 socket → start 回同一批、`is-active`
+  沒回來就 rc=1；default 原本在跑才補起。路徑一律從 `$HOME` 推，沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`。
+- `herdr-upgrade.sh` 只適用 macOS（brew 換 binary、靠 keg 回滾），在 Linux 一開始就 exit 2、什麼都不動。
 
-隔離測試：`bash scripts/ops/herdr-full-restart_test.sh`（`launchctl`／`pkill`／`pgrep`／`sleep`／`herdr`
-全部用**注入的 shell 函式**攔截，不靠 PATH；socket 與 plist 都在暫存目錄）。
+隔離測試：`bash scripts/ops/herdr-full-restart_test.sh`（`launchctl`／`systemctl`／`pkill`／`pgrep`／`sleep`／`herdr`／`uname`
+全部用**注入的 shell 函式**攔截，不靠 PATH；socket 與 plist 都在暫存目錄；macOS 與 Linux 兩段各有一組情境）。
 
 安裝（**需要 AGM 核准**）：
 
