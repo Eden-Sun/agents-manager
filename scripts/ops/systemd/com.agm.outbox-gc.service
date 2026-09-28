@@ -1,0 +1,10 @@
+# 來源檔（issue #677）：改這裡再照 scripts/ops/README.md install 到 ~/.config/systemd/user/。
+# 對應 macOS 的 scripts/ops/launchd/com.agm.outbox-gc.plist，排程與指令兩邊要一致（agm_test.py 釘住）。
+[Unit]
+Description=AGM outbox-gc：清掉 outbox 超過 1 小時的檔案
+
+[Service]
+Type=oneshot
+ExecStart=/bin/zsh %h/.config/agents-manager/supervisor/AGM/bin/outbox-gc.sh
+StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/outbox-gc.systemd.log
+StandardError=append:%h/.config/agents-manager/supervisor/AGM/outbox-gc.systemd.log

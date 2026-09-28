@@ -25,6 +25,9 @@ AGM_BIN="${AGM_BIN:-$AGM_DIR/bin/agm}"
 SQLITE="${SQLITE_BIN:-sqlite3}"
 CURL="${CURL_BIN:-curl}"
 LAUNCHCTL="${LAUNCHCTL_BIN:-launchctl}"
+SYSTEMD_RUN="${SYSTEMD_RUN_BIN:-systemd-run}"
+# darwin／linux：決定重啟走 launchd 還是 systemd（issue #677）。AGM_OPS_PLATFORM 只給測試蓋掉。
+PLATFORM="${AGM_OPS_PLATFORM:-$(uname -s | tr 'A-Z' 'a-z')}"
 PGREP="${PGREP_BIN:-pgrep}"
 PYTHON="${PYTHON_BIN:-python3}"
 HERDR="${HERDR_BIN:-herdr}"
@@ -378,8 +381,28 @@ fi
 # 啟動一律經過 launchd：pane 忙的時候會被 renice 到 5，子行程繼承後降不回去
 # （非 root 不能降 nice）。launchd 跑的啟動器是 nice 0，啟動器 fork+setsid 後結束，
 # daemon 就是 ppid=1、nice 0 的獨立行程；job 自己結束後 remove 不會殺到它。
+#
+# Linux（issue #677）：同一件事交給 systemd user manager（nice 0），`systemd-run --user` 就是
+# `launchctl submit` 的對應——一次性的 transient unit，不必另外安裝 unit 檔，AGM_REPO／DAEMON_LOG
+# 照樣從這裡傳。兩個屬性缺一不可：
+#   - `Type=forking`：啟動器 fork 之後父行程就結束，systemd 把留下來的 daemon 認成 main PID；
+#     預設的 simple 會在啟動器一結束就判定 unit 結束。
+#   - `KillMode=process`：systemd 收 unit 時看的是整個 cgroup，不是程序群，setsid 脫離不了；
+#     預設 control-group 會在 daemon 停下時連它起的子行程一起殺。只殺 main PID 才跟 macOS 一樣。
+# unit 名每次不同（`-$START_N`）：往前修／回滾時上一顆的 unit 可能還沒被 `--collect` 收掉。
+START_N=0
+START_PY="$(cd "$(dirname "$0")" && pwd)/daemon-start.py"   # transient unit 的 cwd 是 ${HOME}，相對路徑會找不到
 start() {
     L="am-daemon-swap-$$"
+    if [ "$PLATFORM" = linux ]; then
+        START_N=$((START_N + 1))
+        # 不是從登入 session 叫起來（沒有 pam_systemd）就沒有 XDG_RUNTIME_DIR，systemd-run --user 連不到 user bus。
+        [ -n "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+        # 直譯器寫成絕對路徑：transient unit 的 PATH 是 user manager 的，不是這個 pane 的。
+        "$SYSTEMD_RUN" --user --collect --unit="$L-$START_N" -p Type=forking -p KillMode=process \
+            -- "$(command -v "$PYTHON" || echo "$PYTHON")" "$START_PY" "$AGM_REPO" "$DLOG" >> "$LOG" 2>&1 || log "WARN: systemd-run rc=${?}（下面的 /api/session 驗證會接手判斷）"
+        return
+    fi
     "$LAUNCHCTL" remove "$L" 2>/dev/null
     "$LAUNCHCTL" submit -l "$L" -- "$PYTHON" "$(dirname "$0")/daemon-start.py" "$AGM_REPO" "$DLOG"
     sleep 2

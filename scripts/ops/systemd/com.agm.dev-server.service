@@ -1,0 +1,14 @@
+# 來源檔（issue #677）：改這裡再照 scripts/ops/README.md install 到 ~/.config/systemd/user/。
+# 對應 macOS 的 scripts/ops/launchd/com.agm.dev-server.plist，排程與指令兩邊要一致（agm_test.py 釘住）。
+[Unit]
+Description=AGM dev-server：5173 dev server 看門狗
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=%h/.bun/bin/bun run %h/.config/agents-manager/supervisor/AGM/bin/dev-server-kick.ts
+StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/dev-server.systemd.log
+StandardError=append:%h/.config/agents-manager/supervisor/AGM/dev-server.systemd.log
+# kick 用 detached 拉起的 vite 留在這個 unit 的 cgroup 裡；預設 control-group 會在 kick 結束時連 vite 一起收掉
+#（launchd 那邊靠 detached＋unref 脫離程序群，systemd 看的是 cgroup，要另外講）。
+KillMode=process
