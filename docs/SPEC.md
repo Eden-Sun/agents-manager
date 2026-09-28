@@ -362,6 +362,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   - 認得兩種畫面寫法，都是同一句 `✨ Update available! <a> -> <b>`（`->`／`→`／`=>`，窄 pane 折行也讀得到），而且**緊接著要有**：
     ① 啟動時的**互動選單**（`1. Update now (…)`＋`2. Skip`，還有 `3. Skip until next version`），或 ② **非互動方框**（`Run sh -c '…install.sh…' to update.`）。
     光有那句（對話裡引用、不在行首）不算。方框印在 session 開頭，之後會被對話推出畫面。
+  - Blocked UI 對互動選單才顯示 1／2／3 回答鈕；非互動方框最多顯示版本與 changelog 入口，仍照常解析畫面底下真正開著的其他選單。送鍵前重讀快照，比對版本與 `parseChoiceMenu` 解析出的選項文字（1 是 `Update now`、2 是 `Skip`；3 是 `Skip until next version`），不符就不送。
   - `runs.update_notice` 的字：`codex 有新版 <a> → <b>，需安裝後重啟`（`a` 讀不到時省略）；磁碟上已經是新版、這個 run 還跑舊的：
     `codex 有新版 <disk>（這個 run 跑的是 <running>），已安裝，重啟套用`。一律以 `codex 有新版` 開頭。
   - **版本比對補位**（畫面被推掉時）：磁碟版本 = `codex --version`（每台主機快取 5 分鐘）；跑著的版本 = 啟動畫面 `OpenAI Codex (v…)` 或提示句的 `<a>`，
