@@ -54,6 +54,8 @@ pub const ROTATION_INTENT_TTL_SECS: i64 = 15 * 60;
 pub enum Outcome {
     /// intent 已經收尾（done／abandoned／被別人收了／已 failed）。
     Finished,
+    /// 同一個 daemon boot 的另一條 recovery 已認領且仍在處理這件 intent。
+    InProgress,
     /// 這次沒補成（原因在裡面），下一輪再試；已用完次數的話已經 failed＋通知。
     Retry(String),
 }
@@ -110,12 +112,16 @@ async fn recover_open(app: &Arc<App>, host: &str, open: Vec<Intent>) {
     // 過期被收掉的、或別人收尾的：它們的開機 hold 不用再留（#378）。
     lifecycle::restart_hold::retain_open(app, &open.iter().map(|i| i.id.clone()).collect());
     for i in open.into_iter().filter(|i| i.kind == "restart" && i.host == host) {
-        if let Outcome::Retry(why) = drive_once(app, &i.id).await {
-            tracing::warn!(intent = %i.id, bot = %i.subject_id, error = %why, "interrupted restart could not be completed yet; retrying in the background");
-            let (app, id) = (app.clone(), i.id.clone());
-            tokio::spawn(async move { retry_loop(&app, &id).await });
-        } else {
-            lifecycle::restart_hold::release_intent(app, &i.id);
+        match drive_once(app, &i.id).await {
+            Outcome::Finished => lifecycle::restart_hold::release_intent(app, &i.id),
+            Outcome::InProgress => {
+                tracing::debug!(intent = %i.id, bot = %i.subject_id, "restart intent is already being recovered by this daemon boot");
+            }
+            Outcome::Retry(why) => {
+                tracing::warn!(intent = %i.id, bot = %i.subject_id, error = %why, "interrupted restart could not be completed yet; retrying in the background");
+                let (app, id) = (app.clone(), i.id.clone());
+                tokio::spawn(async move { retry_loop(&app, &id).await });
+            }
         }
     }
 }
@@ -123,9 +129,14 @@ async fn recover_open(app: &Arc<App>, host: &str, open: Vec<Intent>) {
 async fn retry_loop(app: &Arc<App>, id: &str) {
     for attempt in 0.. {
         tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
-        if drive_once(app, id).await == Outcome::Finished {
-            lifecycle::restart_hold::release_intent(app, id);
-            return;
+        match drive_once(app, id).await {
+            Outcome::Finished => {
+                lifecycle::restart_hold::release_intent(app, id);
+                return;
+            }
+            // The owner (or its retry worker) will release the hold when it finishes.
+            Outcome::InProgress => return,
+            Outcome::Retry(_) => {}
         }
     }
 }
@@ -136,11 +147,26 @@ pub fn retry_later(app: &Arc<App>, id: &str) {
     tokio::spawn(async move { retry_loop(&app, &id).await });
 }
 
-/// 認領一次並補一輪。認領不到（別的行程／已收尾）＝ `Finished`。
+/// 認領一次並補一輪。同 boot 的另一條 recovery 已認領＝ `InProgress`；已收尾／不存在＝ `Finished`。
 pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     match intents::claim(&app.db, id, &app.boot_id).await {
         Ok(true) => {}
-        Ok(false) => return Outcome::Finished,
+        Ok(false) => {
+            return match intents::get(&app.db, id).await {
+                Ok(Some(intent))
+                    if intent.status == "running" && intent.owner_boot.as_deref() == Some(app.boot_id.as_str()) =>
+                {
+                    Outcome::InProgress
+                }
+                Ok(Some(intent))
+                    if intent.status == "pending" && intent.owner_boot.as_deref() == Some(app.boot_id.as_str()) =>
+                {
+                    Outcome::Retry("restart recovery on this boot just returned the intent for retry".into())
+                }
+                Ok(_) => Outcome::Finished,
+                Err(e) => Outcome::Retry(format!("cannot inspect an unclaimed intent: {e:#}")),
+            };
+        }
         Err(e) => return Outcome::Retry(format!("cannot claim the intent: {e:#}")),
     }
     let intent = match intents::get(&app.db, id).await {
@@ -330,6 +356,74 @@ mod tests {
         assert!(db::active_run(&app2.db, &bot.id).await.unwrap().is_some(), "recovery 把 bot 補起來");
         assert!(!lifecycle::restart_hold::in_progress(&bot.id), "intent 收尾後 hold 放掉");
         assert_ne!(st(turn.clone()).await, "failed", "排著的派工留給新 run，沒有被撤");
+    }
+
+    #[tokio::test]
+    async fn concurrent_recovery_keeps_the_adopted_hold_until_the_restart_finishes() {
+        let e = tt::env().await;
+        let (bot, run1) = running_bot(&e, "concurrent-recovery").await;
+        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','派工',?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET state='stopped' WHERE id=?").bind(&run1).execute(&e.app.db).await.unwrap();
+        let inserted = crate::intents::insert(
+            &e.app.db,
+            "restart",
+            &bot.id,
+            LOCAL_HOST,
+            &json!({"opts": {}, "from_run_id": run1}),
+            900,
+        )
+        .await
+        .unwrap();
+        let app2 = tt::restart_app(&e).await;
+        lifecycle::restart_hold::adopt_open_intents(&app2).await;
+        assert!(lifecycle::restart_hold::in_progress(&bot.id));
+
+        // Hold the bot lock so the first recovery has claimed the intent but cannot finish.
+        let lock = app2.bot_lock(&bot.id).await;
+        let guard = lock.lock().await;
+        let first_app = app2.clone();
+        let first = tokio::spawn(async move { recover_host(&first_app, LOCAL_HOST).await });
+        let intent_id = match inserted {
+            crate::intents::Inserted::New(i) | crate::intents::Inserted::AlreadyOpen(i) => i.id,
+        };
+        let status = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let status = sqlx::query_scalar::<_, String>("SELECT status FROM intents WHERE id=?")
+                    .bind(&intent_id)
+                    .fetch_one(&app2.db)
+                    .await
+                    .unwrap();
+                if status == "running" {
+                    break status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("第一條 recovery 已認領並在 bot 鎖上等待");
+        assert_eq!(status, "running");
+
+        recover_host(&app2, LOCAL_HOST).await;
+        let hold_after_second = lifecycle::restart_hold::in_progress(&bot.id);
+        let revoked = lifecycle::revoke_all_orphaned_queued_turns(&app2).await;
+        let queued_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&turn).fetch_one(&app2.db).await.unwrap();
+
+        drop(guard);
+        first.await.unwrap();
+
+        assert!(hold_after_second, "第二條 recovery 不得釋放第一條仍在執行的 restart hold");
+        assert!(revoked.is_empty(), "sweeper 不得撤銷尚待 restart 接手的派工");
+        assert_eq!(queued_status, "queued");
+        assert!(db::active_run(&app2.db, &bot.id).await.unwrap().is_some(), "第一條 recovery 完成 restart");
+        assert!(!lifecycle::restart_hold::in_progress(&bot.id), "intent 收尾後才釋放 hold");
     }
 
     /// 另一個 DB 的 `recover_host`（測試共用行程；也就是「別人的 intent 表」）不能把我們接回的 hold 放掉：
