@@ -2464,6 +2464,23 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - **標記**：`messages.rewound_at`——那則與之後的（同一個 conversation、rowid 不小於它）標上時間，**不刪**；對話加一則 system 說明。推 WS `messages_rewound`。
 - **不做的**：`Summarize from here／up to here`、還原程式碼（`--rewind-files`）、codex／grok。
 
+### 6.14 回合結束、背景工作還在跑（issue #714，使用者 2026-09-28）
+
+child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 idle、可以收訊息，但只顯示「閒置」會被當成停了。CLI 自己在畫面底部
+標著還有幾個背景工作，daemon 從既有的畫面巡邏（`update_watch`，30 秒一輪，同一份 `pane.read visible`）順便讀出來，**不另開輪詢**：
+
+- claude（2.1.281 真機，fixture `claude-2.1.281-background-shell.txt`）：模式列那一段 `· N shell(s) ·`
+  （`⏵⏵ bypass permissions on · 1 shell · ← for agents`）。回合收尾那行 `done 1:30 PM · 1 shell still running` **不算**：
+  它留在捲動區，背景早就跑完了還在（實測同一個 pane 前一天的那行還在）；`Ran 1 shell command` 也不算。
+- codex（0.157.1 真機，fixture `codex-0.157-background-*.txt`）：`N background terminal(s) running`，閒著時是輸入框上方
+  `1 background terminal running · /ps to view · /stop to close`，回合中併在 `• Working (…) · 2 background terminals running · …`。`/stop` 後整行消失。
+- 只看畫面最底下 8 個非空行，對話內容裡引用到的同一句不算。
+- 數字記在記憶體、以 run 為鍵（`background_jobs.rs`）：屬於這個 process，新 run 自然歸零；run 結束那一輪就丟掉；daemon 重啟後
+  等下一輪巡邏補上。數字變了才推 `bot_status`。背景跑完到畫面更新之間最多晚一輪（30 秒）。
+- 投影：`run.background_jobs`（`GET /api/state` 與 `bot_status` 的 run 物件）。**不改排隊／送 prompt 的語意**——agent 本身確實 idle。
+- 網頁只在 run `running` 且 `agent_status = idle` 時標（回合中燈號已經說了）：側欄那格「閒置」換成「背景 N」、標題列 chip
+  「背景執行中（N）」、輸入框上方一條說明（claude 說 shell、codex 說終端）。
+
 ## 7. API
 
 完整契約在 `API.md`；這裡只記存取控制與 WS 語意。

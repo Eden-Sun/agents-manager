@@ -23,6 +23,7 @@ import { herdrIdentity } from '../lib/herdrIdentity'
 import { HerdrAgentName } from './HerdrAgentName'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { handedOffTo } from '../lib/handoff'
+import { BackgroundJobsBadge, BackgroundJobsBar } from './BackgroundJobs'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments } from './Attachments'
 import { useAttachments, useDropTarget } from './attachmentsHelpers'
 import { BlockedBadge } from './BlockedBadge'
@@ -1293,11 +1294,13 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               ) : null}
               <span className="mobile-bot-ver">{statusInfo?.version?.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? statusInfo?.version ?? '—'}</span>
               <BlockedBadge botId={botId} onOpen={openBlockedFull} />
+              <BackgroundJobsBadge botId={botId} variant="chip" />
               <TurnErrorBadge botId={botId} />
             </div>
           ) : <div className="main-title-sub">
             {/* 放第二行：名字列在 1440px＋側欄時放不下 chip，會剪掉 ⚙（實測）；pane id 讓位（blockedBadge.css）。 */}
             <BlockedBadge botId={botId} onOpen={openBlockedFull} />
+            <BackgroundJobsBadge botId={botId} variant="chip" />
             {/* 同理：名字列會整顆剪掉，使用者「額度用盡卻沒看到任何提示」（2026-09-12）。 */}
             <TurnErrorBadge botId={botId} />
             <KindTag kind={bot.kind} fast={codexFast} />
@@ -1502,6 +1505,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               </button>
             </div>
           ) : null}
+          <BackgroundJobsBar botId={botId} />
           <Composer botId={botId} inputRef={composerRef} hideLock={!active} forceFocus={chatEmpty && active} files={files} />
           {settingsOpen ? <BotSettingsPanel key={botId} botId={botId} /> : null}
         </div>

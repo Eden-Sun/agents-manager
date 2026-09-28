@@ -79,6 +79,7 @@ fn version_notice(disk: &str, running: &str) -> Option<String> {
 
 async fn sweep(app: &Arc<App>) {
     let runs = db::all_active_runs(&app.db).await.unwrap_or_default();
+    crate::background_jobs::retain_runs(app, &runs.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
     for run in runs.into_iter().filter(|r| r.state == "running") {
         let kind = match db::bot(&app.db, &run.bot_id).await {
             Ok(Some(b)) if b.kind == "claude" || b.kind == "codex" => b.kind,
@@ -88,6 +89,8 @@ async fn sweep(app: &Arc<App>) {
         let Some(client) = app.herdr_for_run(&run).await else { continue };
         // 讀不到畫面就跳過，不要把已經看到的通知清掉。
         let Ok(read) = client.pane_read(&pane, "visible", 80).await else { continue };
+        // #714：同一份畫面順便看底部標的背景工作數（不另開輪詢）。
+        crate::background_jobs::observe(app, &run, &kind, &read.text).await;
         if kind == "codex" {
             // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。
             crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane).await;
@@ -274,6 +277,31 @@ mod tests {
 
         assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2, "B 必須在 TTL 到期前重新讀版本");
         assert_eq!(notice_of(&e.app, &run).await, None, "B 的舊版本不可沿用 A 的 update_notice");
+    }
+
+    /// #714：同一輪巡邏順便讀出背景工作數、推 `bot_status`；run 結束之後不留帳。
+    #[tokio::test]
+    async fn the_sweep_reads_background_jobs_off_the_same_screen() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "bg").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let screen = std::fs::read_to_string(format!(
+            "{}/src/lifecycle/fixtures/claude-2.1.281-background-shell.txt",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        e.herdr.set_screen(&format!("pane-{}", bot.id), &screen);
+        let mut rx = e.app.subscribe();
+
+        sweep(&e.app).await;
+        assert_eq!(crate::background_jobs::get(&e.app, &run), 1);
+        let frame = std::iter::from_fn(|| rx.try_recv().ok()).find(|f| f.kind == "bot_status").expect("推 bot_status");
+        assert_eq!(frame.data["run"]["background_jobs"], 1);
+
+        sqlx::query("UPDATE runs SET state = 'exited' WHERE id = ?").bind(&run).execute(&e.app.db).await.unwrap();
+        sweep(&e.app).await;
+        assert_eq!(crate::background_jobs::get(&e.app, &run), 0, "結束的 run 不留帳");
     }
 
     #[tokio::test]

@@ -161,6 +161,8 @@ pub struct App {
     pub gh_device: Mutex<HashMap<String, crate::gh_auth::DeviceSession>>,
     /// 這個 daemon 開過的主機 shell。只放記憶體：它同時是送鍵的白名單，重啟不該繼承。
     pub host_shells: crate::api::shell::Registry,
+    /// #714：畫面底部標著的背景工作數，以 run 為鍵（`background_jobs.rs`）。
+    pub background_jobs: crate::background_jobs::Counts,
     /// Per-host serialization for shell opens: the cap check stays exclusive through pane creation and registration.
     pub host_shell_open_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
@@ -252,6 +254,7 @@ impl App {
             submodules_cache: Mutex::new(HashMap::new()),
             gh_device: Mutex::new(HashMap::new()),
             host_shells: Default::default(),
+            background_jobs: Default::default(),
             host_shell_open_locks: Mutex::new(HashMap::new()),
             #[cfg(test)]
             preview_env: Default::default(),
@@ -530,7 +533,7 @@ impl App {
             "bot_status",
             json!({
                 "bot_id": bot.id,
-                "run": run,
+                "run": crate::background_jobs::run_json(self, &run, run.as_ref().map(|r| r.id.as_str())),
                 "host": host,
                 "herdr_session": bot.herdr_session,
                 "connected": self.bot_connected(bot_id).await,
