@@ -67,6 +67,25 @@
   min-width: 0;
 }
 
+/* 本機＋遠端（@m4p）各一顆（2026-09-28 使用者）：並排放不下（側欄 288px 時第二顆被裁掉），
+   改成上下疊、每顆一行（已用＋剩），總高跟單顆兩行差不多。 */
+.head-ram.multi {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.sidebar-head .head-ram.multi .mem-badge {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+}
+
+.sidebar-head .head-ram.multi .mem-free {
+  flex: none;
+  margin-left: auto;
+}
+
 /* 側欄放不下「已連線」（會切成「已連」），燈＋title 就夠。 */
 
 .sidebar-head .conn-label {
