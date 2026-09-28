@@ -4,6 +4,7 @@
 schema 直接從 daemon/src/db.rs 的 `SCHEMA` 與 additive ALTER 名單抽出來建，daemon 加欄時這裡跟著變。
 """
 
+import datetime
 import fcntl
 import gzip
 import hashlib
@@ -33,10 +34,29 @@ def schema_statements():
     stmts = [s.strip() for s in body.split(";\n") if s.strip()]
     alters = re.findall(r'"(ALTER TABLE \w+ ADD COLUMN [^"]+)"', src)
     assert len(alters) > 20, "抽不到 db.rs 的 ALTER 名單，正則要跟著改"
-    return stmts + alters + [
+    return stmts + alters + module_statements() + [
         "CREATE TABLE IF NOT EXISTS bot_reads (bot_id TEXT PRIMARY KEY, read_at TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '')",
         "PRAGMA user_version = 29",
     ]
+
+
+# 協調者與群組任務的表（#720）：各模組自己的 `DDL` 常數＋migrate 裡的 ALTER／額外索引。
+# 先建表、再補欄、最後建索引（有些索引用到 ALTER 才加的欄，例如 supervisor_inbox.role）。
+MODULES = ["daemon/src/supervisor/store.rs", "daemon/src/supervisor/roles.rs", "daemon/src/mission/store.rs"]
+
+
+def module_statements():
+    tables, alters, indexes = [], [], []
+    for rel in MODULES:
+        with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+            src = f.read()
+        body = re.search(r'const DDL: &str = r#"(.*?)"#;', src, re.S).group(1)
+        for st in (x.strip() for x in body.split(";\n") if x.strip()):
+            (indexes if re.match(r"CREATE (UNIQUE )?INDEX", st) else tables).append(st.rstrip(";"))
+        alters += re.findall(r'"(ALTER TABLE \w+ ADD COLUMN [^"]+)"', src)
+        indexes += [re.sub(r"\s+", " ", x) for x in re.findall(r'"(CREATE (?:UNIQUE )?INDEX IF NOT EXISTS [^"]+)"', src)]
+    assert len(tables) >= 12 and len(alters) >= 40, (len(tables), len(alters))
+    return tables + alters + indexes
 
 
 def make_db(path):
@@ -100,6 +120,70 @@ def seed_source(conn, att_file):
     x(att, ("a-dead", B2, "dead.png", "image/png", 4, att_file, att_file, "local", "m-dead", "ready", T0))
     x("INSERT INTO bot_reads (bot_id, read_at, message_id) VALUES (?,?,?)", (B1, T0, "m2"))
     x("INSERT INTO bot_reads (bot_id, read_at, message_id) VALUES (?,?,?)", (B2, T0, "m-dead"))
+    mission = ("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit,"
+               " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+    x(mission, ("ms-hub", PID, "crid-ms-hub", "修 bug", "auto", "codex", "wait", T0, T0))
+    x(mission, ("ms-other", OTHER, "crid-ms-other", "別的專案", "auto", "codex", "wait", T0, T0))
+    ev = "INSERT INTO mission_events (id, mission_id, kind, text, created_at) VALUES (?,?,?,?,?)"
+    x(ev, ("me-hub", "ms-hub", "instruction", "開工", T0))
+    x(ev, ("me-other", "ms-other", "instruction", "別的", T0))
+    conn.commit()
+
+
+def ago(days):
+    t = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+AGM_CWD = "/Users/m4p/.config/agents-manager/supervisor/AGM"
+
+
+def seed_supervisor(conn):
+    """協調者（#720）：每一種挑選規則各一筆要搬、一筆不搬的。"""
+    x = conn.execute
+    now, old = ago(0), ago(30)
+    x("INSERT INTO supervisors (id, bot_id, project_id, cwd, persona_text, persona_version, summary, summary_version, generation,"
+      " status, desired_running, watchdog_attempts, remote_status, remote_url, created_at, updated_at)"
+      " VALUES ('AGM',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      (B1, PID, AGM_CWD, "我是 AGM", 3, "交接摘要", 2, 9, "failed", 1, 4, "connected", "https://remote", T0, T0))
+    role = "INSERT INTO supervisor_roles (role, bot_id, project_id, cwd, wakes, persona_text, desired_running, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
+    x(role, ("patrol", None, None, None, 12, None, 0, "", T0, T0))
+    x(role, ("responder", C1, PID, AGM_CWD + "-responder", 7, "我是 responder", 1, "waiting_quota", T0, T0))
+    x("INSERT INTO supervisor_requests (id, supervisor_id, text, created_at) VALUES ('rq1','AGM','幫我修',?)", (T0,))
+    asg = ("INSERT INTO supervisor_assignments (id, supervisor_id, request_id, target_bot_id, client_request_id, text, status,"
+           " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+    x(asg, ("as-done", "AGM", "rq1", QB, "agm-crid-done", "做完了", "completed", T0, T0))
+    x(asg, ("as-open", "AGM", "rq1", QB, "agm-crid-open", "做到一半", "delivered", T0, T0))
+    x(asg, ("as-crid", "AGM", "rq1", QB, "agm-crid-dup", "目標也有這個 crid", "completed", T0, T0))
+    review = ("INSERT INTO supervisor_reviews (id, supervisor_id, assignment_id, decision, from_status, to_status, actor, created_at)"
+              " VALUES (?,'AGM',?,'accept','awaiting_review','completed','AGM',?)")
+    x(review, ("rv1", "as-done", T0))
+    x(review, ("rv-dup", "as-crid", T0))
+    note = "INSERT INTO supervisor_notes (id, supervisor_id, kind, body, created_at) VALUES (?,?,?,?,?)"
+    x(note, ("n-handoff", "AGM", "handoff", "交接", T0))
+    x(note, ("n-retire", B1, "child_retirement_hold", "{}", T0))
+    inc = "INSERT INTO supervisor_incidents (id, supervisor_id, kind, resource, status, first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?)"
+    x(inc, ("ic-open", "AGM", "host_disconnected", "m4p", "open", T0, T0))
+    x(inc, ("ic-done", "AGM", "host_disconnected", "m4p", "resolved", T0, T0))
+    apv = "INSERT INTO supervisor_approvals (id, supervisor_id, requester, purpose, scope, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)"
+    for aid, st in (("ap-pending", "pending"), ("ap-approved", "approved"), ("ap-consumed", "consumed"), ("ap-denied", "denied")):
+        x(apv, (aid, "AGM", "fixer", "rebuild", "daemon", st, T0, T0))
+    x("INSERT INTO supervisor_leases (resource, owner, fence, lease_token) VALUES ('restart','fixer',3,'SECRET-TOKEN')")
+    x("INSERT INTO bot_sleeps (bot_id, slept_at) VALUES (?,?)", (B1, T0))
+    inbox = ("INSERT INTO supervisor_inbox (id, supervisor_id, event_key, kind, state, merged_into, notify_attempts, notify_next_at,"
+             " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    x(inbox, ("i-old-handled", "AGM", "k-old-handled", "bot_turn_done", "handled", None, 1, None, old, old))
+    x(inbox, ("i-old-target", "AGM", "k-old-target", "bot_turn_done", "handled", None, 1, None, old, old))
+    # 舊版寫的秒格式：跟毫秒格式比要先正規化，不然字串比較會把它當成「比 cutoff 新」。
+    x(inbox, ("i-old-seconds", "AGM", "k-old-seconds", "bot_turn_done", "handled", None, 1, None, old[:19] + "Z", old))
+    # SQLite `datetime()` 的空白格式、落在截止那一天但晚於截止時刻：直接比字串的話空白排在 `T` 前面，會被當成比較舊而漏掉。
+    edge = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7, hours=-1)).strftime("%Y-%m-%d %H:%M:%S")
+    x(inbox, ("i-edge-space", "AGM", "k-edge-space", "bot_turn_done", "handled", None, 1, None, edge, edge))
+    x(inbox, ("i-old-pending", "AGM", "k-old-pending", "bot_turn_done", "pending", None, 2, now, old, old))
+    x(inbox, ("i-new-handled", "AGM", "k-new-handled", "bot_turn_done", "handled", None, 1, None, now, now))
+    x(inbox, ("i-new-delivered", "AGM", "k-new-delivered", "bot_turn_done", "delivered", None, 1, None, now, now))
+    x(inbox, ("i-new-merged", "AGM", "k-new-merged", "bot_turn_done", "handled", "i-old-target", 1, None, now, now))
+    x(inbox, ("i-collide", "AGM", "persona:3:changed", "persona_changed", "pending", None, 0, None, now, now))
     conn.commit()
 
 
@@ -208,7 +292,9 @@ class ProjectTransferTest(unittest.TestCase):
         self.export()
         out = json.loads(self.imp().stdout)
         self.assertEqual(out["inserted"], {"projects": 1, "bots": 2, "conversations": 2, "runs": 3, "turns": 3,
-                                           "messages": 3, "attachments": 2, "bot_reads": 1})
+                                           "messages": 3, "attachments": 2, "bot_reads": 1,
+                                           "missions": 1, "mission_events": 1}, "群組任務跟著專案走，別的專案的不帶")
+        self.assertIsNone(out["supervisor"], "沒加 --with-supervisor 就不碰協調者")
         self.assertEqual(out["autostart_turned_off"], ["hub-main"])
         self.assertEqual((out["runs_closed"], out["turns_failed"]), (2, 2))
         self.assertTrue(any("cc1" in w for w in out["warnings"]), out["warnings"])
@@ -366,6 +452,135 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual(len(w), 1, out["warnings"])
         self.assertIn("2 段", w[0])  # r-kid 沒記 transcript_path：沒得看
         self.assertIn("transcript-transfer", w[0])
+
+    # ------------------------------------------------ #720 協調者
+
+    def sup_export(self):
+        src = sqlite3.connect(self.src_path)
+        seed_supervisor(src)
+        src.close()
+        before = digest(self.src_path)
+        run("export", "--db", self.src_path, "--project", PID, "--out", self.bundle, "--with-supervisor", env=self.env)
+        self.assertEqual(digest(self.src_path), before, "export 不能寫來源 DB")
+        return json.loads(gzip.decompress(slurp(self.bundle)))
+
+    def sup_target(self):
+        """目標開機過：有自己的 AGM 那一列與 responder，外加會撞唯一索引的 inbox、交辦與群組任務。"""
+        c = self.tgt()
+        c.execute("INSERT INTO supervisors (id, generation, status, created_at, updated_at) VALUES ('AGM', 5, 'failed', ?, ?)", (T0, T0))
+        c.execute("INSERT INTO supervisor_roles (role, bot_id, wakes, created_at, updated_at) VALUES ('responder','old-bot',1,?,?)", (T0, T0))
+        c.execute("INSERT INTO supervisor_inbox (id, supervisor_id, event_key, kind, state, created_at, updated_at)"
+                  " VALUES ('t-inbox','AGM','persona:3:changed','persona_changed','pending',?,?)", (T0, T0))
+        c.execute("INSERT INTO supervisor_assignments (id, supervisor_id, target_bot_id, client_request_id, text, status, created_at, updated_at)"
+                  " VALUES ('t-asg','AGM','x','agm-crid-dup','target own','completed',?,?)", (T0, T0))
+        c.execute("INSERT INTO supervisor_leases (resource, owner, fence) VALUES ('restart', 'target-owner', 1)")
+        c.commit()
+        c.close()
+
+    def sup_import(self, *extra, check=True):
+        return run("import", "--bundle", self.bundle, "--host", "local", "--config", self.cfg, "--with-supervisor",
+                   "--path-map", "/Users/m4p=/home/u", *extra, env=self.env, check=check)
+
+    def test_export_with_supervisor_picks_only_what_moves(self):
+        b = self.sup_export()["supervisor"]
+        ids = {t: {r.get("id") or r.get("role") for r in spec["rows"]} for t, spec in b["tables"].items()}
+        self.assertNotIn("supervisor_leases", ids, "租約是這顆 daemon 自己的，不搬")
+        self.assertNotIn("bot_sleeps", ids)
+        self.assertEqual(ids["supervisors"], {"AGM"})
+        self.assertEqual(ids["supervisor_roles"], {"patrol", "responder"})
+        self.assertEqual(ids["supervisor_assignments"], {"as-done", "as-open", "as-crid"}, "未結案的也照原狀搬")
+        self.assertEqual(ids["supervisor_notes"], {"n-handoff"}, "child_retirement_* 是 10 分鐘的執行期守衛")
+        self.assertEqual(ids["supervisor_incidents"], {"ic-done"}, "開著的 incident 由目標重新判定")
+        self.assertEqual(ids["supervisor_approvals"], {"ap-consumed", "ap-denied"}, "還有效的核准不搬")
+        self.assertEqual(ids["supervisor_inbox"],
+                         {"i-old-pending", "i-new-handled", "i-new-delivered", "i-new-merged", "i-old-target", "i-collide",
+                          "i-edge-space"},
+                         "未處理的＋最近 7 天的，外加 merged_into 指到的舊事件；秒格式的舊事件照樣算舊")
+
+    def test_import_with_supervisor_merges_into_the_targets_agm(self):
+        self.sup_export()
+        self.sup_target()
+        out = json.loads(self.sup_import().stdout)
+        sup = out["supervisor"]
+        c = self.tgt()
+        agm = c.execute("SELECT * FROM supervisors WHERE id='AGM'").fetchone()
+        self.assertEqual((agm["bot_id"], agm["project_id"], agm["cwd"]), (B1, PID, "/home/u/.config/agents-manager/supervisor/AGM"))
+        self.assertEqual((agm["persona_text"], agm["persona_version"], agm["summary"], agm["summary_version"]), ("我是 AGM", 3, "交接摘要", 2))
+        self.assertEqual(agm["generation"], 5, "generation 是目標 controller 的守衛，不能被來源的蓋掉")
+        self.assertEqual((agm["status"], agm["desired_running"], agm["watchdog_attempts"], agm["remote_status"], agm["remote_url"]),
+                         ("", 0, 0, "unknown", None), "執行期欄位重設：接手後才打開")
+        resp = c.execute("SELECT * FROM supervisor_roles WHERE role='responder'").fetchone()
+        self.assertEqual((resp["bot_id"], resp["cwd"], resp["wakes"], resp["status"], resp["desired_running"]),
+                         (C1, "/home/u/.config/agents-manager/supervisor/AGM-responder", 7, "", 0))
+        self.assertEqual(sup["singletons"], {"supervisors:AGM": "updated", "supervisor_roles:patrol": "inserted",
+                                             "supervisor_roles:responder": "updated"})
+        inbox = {r["id"]: r for r in c.execute("SELECT * FROM supervisor_inbox")}
+        self.assertEqual(inbox["i-old-pending"]["state"], "gave_up", "未處理的不再通知：停在 gave_up")
+        self.assertEqual(inbox["i-new-delivered"]["state"], "gave_up")
+        self.assertIsNone(inbox["i-old-pending"]["notify_next_at"])
+        self.assertIn("#720", inbox["i-old-pending"]["notify_error"])
+        self.assertEqual(inbox["i-new-handled"]["state"], "handled", "處理過的照原樣")
+        self.assertNotIn("i-collide", inbox, "event_key 撞到目標既有的：跳過")
+        self.assertEqual(sup["inbox_parked"], 2)
+        self.assertEqual({(x["table"], x["id"]) for x in sup["skipped_unique"]},
+                         {("supervisor_inbox", "i-collide"), ("supervisor_assignments", "as-crid"),
+                          ("supervisor_reviews", "rv-dup")}, "被跳過的交辦，它的驗收也跟著跳過")
+        self.assertEqual([r[0] for r in c.execute("SELECT id FROM supervisor_reviews")], ["rv1"])
+        asg = dict(c.execute("SELECT id, status FROM supervisor_assignments").fetchall())
+        self.assertEqual(asg, {"t-asg": "completed", "as-done": "completed", "as-open": "delivered"})
+        self.assertEqual(c.execute("SELECT owner, fence FROM supervisor_leases").fetchall()[0][:], ("target-owner", 1), "目標的租約不動")
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM bot_sleeps").fetchone()[0], 0)
+        self.assertEqual(set(r[0] for r in c.execute("SELECT id FROM supervisor_approvals")), {"ap-consumed", "ap-denied"})
+        note = c.execute("SELECT * FROM supervisor_notes WHERE kind='transfer'").fetchall()
+        self.assertEqual(len(note), 1)
+        body = json.loads(note[0]["body"])
+        self.assertEqual(note[0]["id"], sup["transfer_note"])
+        self.assertEqual(set(body["imported"]["supervisor_inbox"]),
+                         {"i-old-pending", "i-new-handled", "i-new-delivered", "i-new-merged", "i-old-target", "i-edge-space"})
+        self.assertEqual(body["skipped_unique"], sup["skipped_unique"])
+        self.assertRegex(note[0]["id"], r"^[0-9A-HJKMNP-TV-Z]{26}$", "ULID，跟 daemon 的 id 同一種")
+
+    def test_reimport_with_supervisor_changes_nothing(self):
+        self.sup_export()
+        self.sup_target()
+        self.sup_import()
+        c = self.tgt()
+        before = {t: c.execute(f"SELECT * FROM {t} ORDER BY rowid").fetchall() for t in
+                  ("supervisors", "supervisor_roles", "supervisor_inbox", "supervisor_notes", "supervisor_assignments")}
+        c.close()
+        sup = json.loads(self.sup_import().stdout)["supervisor"]
+        self.assertEqual(set(sup["singletons"].values()), {"unchanged"})
+        self.assertEqual(sum(sup["inserted"].values()), 0)
+        self.assertIsNone(sup["transfer_note"], "什麼都沒搬就不再寫一筆 transfer")
+        c = self.tgt()
+        for t, rows_ in before.items():
+            self.assertEqual([tuple(r) for r in c.execute(f"SELECT * FROM {t} ORDER BY rowid")], [tuple(r) for r in rows_], t)
+
+    def test_supervisor_import_needs_it_in_the_bundle_and_dry_run_writes_nothing(self):
+        self.export()
+        p = self.sup_import(check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--with-supervisor", p.stderr)
+        self.sup_export()
+        self.sup_target()
+        db0, cfg0 = digest(self.tgt_path), digest(self.cfg)
+        out = json.loads(self.sup_import("--dry-run").stdout)
+        self.assertTrue(out["dry_run"])
+        self.assertEqual(out["supervisor"]["inbox_parked"], 2)
+        self.assertEqual((digest(self.tgt_path), digest(self.cfg)), (db0, cfg0))
+
+    def test_a_mission_crid_collision_is_skipped_and_reported(self):
+        self.export()
+        c = self.tgt()
+        c.execute("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit,"
+                  " created_at, updated_at) VALUES ('t-ms', ?, 'crid-ms-hub', 'x', 'auto', 'codex', 'wait', ?, ?)", (PID, T0, T0))
+        c.commit()
+        c.close()
+        out = json.loads(self.imp().stdout)
+        self.assertEqual((out["inserted"]["missions"], out["inserted"]["mission_events"]), (0, 0))
+        self.assertEqual([(x["table"], x["id"]) for x in out["skipped_unique"]],
+                         [("missions", "ms-hub"), ("mission_events", "me-hub")], "任務被跳過，它的事件也不留孤兒")
+        self.assertEqual(out["inserted"]["projects"], 1, "撞到的只跳過那一筆，專案照樣搬")
 
     def test_failed_insert_rolls_back_db_and_config(self):
         self.export()
