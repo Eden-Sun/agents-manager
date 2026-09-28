@@ -1294,7 +1294,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               ) : null}
               <span className="mobile-bot-ver">{statusInfo?.version?.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/)?.[0] ?? statusInfo?.version ?? '—'}</span>
               <BlockedBadge botId={botId} onOpen={openBlockedFull} />
-              <BackgroundJobsBadge botId={botId} variant="chip" />
+              {/* 手機不放「背景執行中」chip（2026-09-28 使用者：多餘）：輸入框上方那條說明已經講了。 */}
               <TurnErrorBadge botId={botId} />
             </div>
           ) : <div className="main-title-sub">
