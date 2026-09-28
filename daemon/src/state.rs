@@ -15,6 +15,13 @@ use tokio::sync::{broadcast, Mutex};
 
 pub const WS_RING: usize = 200;
 
+/// A host's autostart pass is either running or fully judged. Missing hosts have not run yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutostartHostStatus {
+    InProgress,
+    Done,
+}
+
 /// 這種幀不進重播環（issue #482）：過期即無用，補送舊的沒有意義，而且它的頻率會把耐久事件擠掉。
 /// 判斷放這裡而不是散在呼叫端：`emit` 是唯一的入口，加新的即時幀時只改這一個名單。
 ///
@@ -170,8 +177,10 @@ pub struct App {
     pub preview_env: crate::preview::EnvOverride,
     /// 行程 dump 與 listen port 的來源；正式是 `ps`／`lsof`，測試可換成決定性的假貨（`pane_probe`）。
     pub pane_probe: std::sync::Mutex<Arc<dyn crate::pane_probe::PaneProbe>>,
-    /// 這顆 daemon 已經跑過 autostart 的主機（§6.1 第 6 步：每台主機一生一次，`reconcile::autostart_after_reconcile`）。
-    pub autostarted_hosts: Mutex<std::collections::HashSet<String>>,
+    /// §6.1 autostart pass 的主機狀態；被取消的 pass 由 guard 清掉 InProgress，允許下次成功對帳重試。
+    pub autostart_hosts: std::sync::Mutex<HashMap<String, AutostartHostStatus>>,
+    /// 各主機首次 autostart pass 的時間；未完成／被取消的 pass 重試時沿用，保護期間手動停止的 bot。
+    pub autostart_since: std::sync::Mutex<HashMap<String, String>>,
     /// hook 收件匣有新列時叫醒 worker（`hook_inbox`）。commit 完才 notify，所以 worker 一醒來
     /// 一定看得到那一列；沒有它就只剩輪詢，本機 hook 的處理延遲會從「幾毫秒」變成「幾秒」。
     pub hook_inbox_wake: tokio::sync::Notify,
@@ -258,7 +267,8 @@ impl App {
             preview_env: Default::default(),
             pane_live: Default::default(),
             pane_probe: std::sync::Mutex::new(Arc::new(crate::pane_probe::Real)),
-            autostarted_hosts: Default::default(),
+            autostart_hosts: Default::default(),
+            autostart_since: Default::default(),
             hook_inbox_wake: tokio::sync::Notify::new(),
             build_slot_lock: Mutex::new(()),
         })

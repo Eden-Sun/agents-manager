@@ -154,7 +154,7 @@ pub(crate) async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev:
     }
 }
 
-/// 訂閱（重）建後的對帳；成功且 `autostart` 才補跑欠著的 autostart（#259）。`autostarted_hosts` 保證每台主機一生只跑一次：
+/// 訂閱（重）建後的對帳；成功且 `autostart` 才補跑欠著的 autostart（#259）。`autostart_hosts` 保證每台主機只完成一次 autostart pass：
 /// 之後的重連不會把使用者停掉的 bot 再開起來。
 async fn reconcile_and_autostart(app: &Arc<App>, host: &str, autostart: bool) -> bool {
     match crate::reconcile::reconcile_host(app, host).await {
@@ -707,7 +707,7 @@ mod tests {
 
         e.herdr.fail_next("session.snapshot", tt::Fault::Refuse);
         assert!(!reconcile_and_autostart(app, LOCAL_HOST, true).await, "對帳失敗");
-        assert!(!active().await && app.autostarted_hosts.lock().await.is_empty(), "失敗不算數：沒起、主機沒記成跑過");
+        assert!(!active().await && app.autostart_hosts.lock().unwrap().is_empty(), "失敗不算數：沒起、主機沒記成跑過");
 
         assert!(reconcile_and_autostart(app, LOCAL_HOST, true).await, "之後對帳成功");
         assert!(crate::testing::eventually!(active().await), "欠著的 autostart 在這補上");
