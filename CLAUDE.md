@@ -38,11 +38,11 @@
 - daemon 個別指令：`cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`、`cargo clippy -p agents-managerd`（目前既有 32 個 warning，暫不加 `-D warnings`）。
 - web 個別指令：`cd web && bunx tsc -p tsconfig.app.json --noEmit && bunx oxlint src && bun run build`（既有 warning 不算，新增的要清）。
 - shell 腳本裡變數後面接全形標點一律寫 `${VAR}`：macOS 的 bash 3.2 會把標點併進變數名，`set -u` 下直接 unbound variable 而中止。`scripts/ops/lint-shell-vars.sh`（`scripts/check.sh ops` 與 CI 的 ops job 都會跑）會擋住。
-- 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時，要在 Mac 上跑 `scripts/check.sh macos-local`（GitHub Actions 不再每次 push 跑，要 macOS runner 就 `gh workflow run ci.yml --ref <分支>`）。新測試若散在其他模組，函式名加 `macos_local_` 前綴，讓入口自動納入。
+- 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時，要在 Mac 本機跑 `scripts/check.sh macos-local`；不要為了驗證去等或觸發 GitHub Actions（使用者 2026-09-28：CI 一律在 agm-host 或 Mac 本機跑）。新測試若散在其他模組，函式名加 `macos_local_` 前綴，讓入口自動納入。
 - 工作樹裡別人的 WIP 讓編譯掛掉時，對**你 staged 的內容**驗：`git archive` 出來或用 `git stash --keep-index` 以外的方式，總之不能碰別人的檔。
 - UI 改動要看真畫面：`OUT=/tmp/shots node scripts/ui-goal-shots.mjs`（headless Chrome 七張）或 ego-browser；截圖放 `docs/screenshots/<feature>/`。
 - daemon 在 `127.0.0.1:7788`，token 在 `~/.config/agents-manager/ui-token`，header `X-AM-Token`。
-- **完整 CI 在 ubuntu 背景跑，不要等**（issue #716，使用者 2026-09-28）：agm-host 上的 `scripts/ops/ubuntu-ci.sh` 每分鐘撿最新的 main HEAD 跑整樹 `scripts/check.sh`（同時只跑一輪、中間的 sha 不補跑），結果寫成 commit status `ubuntu-ci`。推完就去做下一件事；之後用 `gh api repos/Eden-Sun/agents-manager/commits/<sha>/status -q '.statuses[]|select(.context=="ubuntu-ci")'` 看結果。GitHub Actions 只在 PR、每日排程與手動觸發時跑。
+- **完整 CI 在 ubuntu 背景跑，不要等**（issue #716，使用者 2026-09-28）：agm-host 上的 `scripts/ops/ubuntu-ci.sh` 每分鐘撿最新的 main HEAD 跑整樹 `scripts/check.sh`（同時只跑一輪、中間的 sha 不補跑），結果寫成 commit status `ubuntu-ci`。推完就去做下一件事；之後用 `gh api repos/Eden-Sun/agents-manager/commits/<sha>/status -q '.statuses[]|select(.context=="ubuntu-ci")'` 看結果。GitHub Actions 只剩 PR 與每日排程，**任何收尾、驗收、restart 判斷都不等它**（使用者 2026-09-28）。
 
 ## 提交
 - 只在自己的 worktree 改與 commit；只 `git add` 自己改的檔案與 hunk（混檔用 `git apply --cached` 過濾），一個功能一個 commit。
