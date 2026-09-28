@@ -30,6 +30,10 @@ scripts/ops/relay-compat-warnings.sh [~/.config/agents-manager/daemon.log]
 | `missing` | 對照表有、安裝端沒有 |
 | `extra` | `bin/` 裡有、對照表沒有（沒有版控的腳本；`agm` 與 `*.bak*` 不算） |
 
+對照表可選的第三欄 `darwin`／`linux` 表示只在那個平台裝（省略＝兩邊都裝）。另一個平台的列放在報告的
+`skipped`、不算落差；`platform` 欄寫這次是用哪一邊判斷的。排程列一定要標對（`LaunchAgents/…` 標 `darwin`、
+`systemd/…` 標 `linux`），標錯是 `bad_manifest`（exit 2），不會變成一堆 `missing`。
+
 一致 exit 0；有落差 exit 1，加 `--alert` 另推一則 `ops_alert`（`source=ops-sync`、`reason=installed_out_of_sync`，同一小時一則）。
 巡檢每天跑一次 `bin/agm ops-sync --check --alert` 就會被叫醒；它不會替你 install。
 `--check` 另外唯讀比對 **`bin/agm`**（issue #532）：`installed` 段是「安裝的不是這顆 binary 內嵌的那份」——加 `--refresh-cli` 就地換掉（`POST /api/supervisor/cli`，不必等 daemon 重啟）；`binary` 段是「binary 內嵌的落後 repo」——那要重建 binary **並重啟 daemon**，這支動不了。daemon 問不到時 `cli.state` 是 `unknown`，不影響 ops 腳本那半邊的結論。
@@ -57,6 +61,46 @@ XML 文字檔，launchd 只讀不回寫；當時看到的「鍵順序不同」�
 路徑與 `gui/501` 寫死成這台開發機的值，跟 `herdr-full-restart.sh` 同一個處理方式。
 
 **這裡只管版控與比對，不負責 install／`launchctl`**（部署另外走）。
+
+### Linux 主機：systemd user unit（issue #677）
+
+搬到 Linux 主機（#675）後，同一批 job 由 systemd user manager 排程：`scripts/ops/systemd/com.agm.<名字>.service`
+（`Type=oneshot`，跑同一支安裝好的 kick）＋`.timer`，對照表以 `systemd/…` 列出（解析成 `~/.config/systemd/user/`，
+有 `XDG_CONFIG_HOME` 就跟著它）。對應規則，`scripts/agm_test.py` 的 `SystemdParityTest` 釘住、改一邊忘了另一邊會紅：
+
+| launchd | systemd |
+| --- | --- |
+| `ProgramArguments` | `ExecStart=`（直譯器同名，`/Users/<人>/` 寫成 `%h/`；bun 在 Linux 是 `%h/.bun/bin/bun`） |
+| `StartInterval N` | `.timer` 的 `OnUnitActiveSec=Ns`，第一次 `OnActiveSec=Ns`（launchd 也是載入後隔一個間隔才第一次） |
+| `RunAtLoad` | `OnActiveSec=1s`（timer 一啟動就跑一次） |
+| `StandardOutPath`／`StandardErrorPath` | `StandardOutput=`／`StandardError=append:…/<名字>.systemd.log` |
+| `EnvironmentVariables` | `Environment=`（變數名要一樣；值是這台機器的，`ops-sync` 不比） |
+| 同一個 job 不會疊 | 同一個 unit 還在跑時 timer 不會再起一個 |
+
+systemd 多一件 launchd 不必講的事：**收 unit 時看的是 cgroup，不是程序群**。`dev-server` 的 kick 用 detached 拉起
+vite，launchd 那邊脫離程序群就活著；systemd 預設 `KillMode=control-group` 會在 kick 一結束就把 vite 一起收掉，
+所以那支 unit 要 `KillMode=process`。
+
+`ops-sync` 比 unit 用 parse 過的「段.鍵 → 值（依出現順序）」：註解、空行、行尾 `\` 接續都不算，**除了
+`Environment=` 的值以外全部都比**（鍵要在，理由同 plist）。Linux 上掃的是 `~/.config/systemd/user/com.agm.*`，
+不掃 `~/Library/LaunchAgents`。
+
+**browser-gc 在 Linux 不裝**：它喚醒的 child 操作 ego-browser（圖形介面瀏覽器），Linux 主機沒有桌面，裝了只會
+每 30 分鐘叫醒一顆找不到瀏覽器的 bot。所以 systemd 那組沒有它，`browser-gc-kick.sh`／`browser-gc-task.md`／plist
+在對照表都標 `darwin`；Linux 的 `bin/` 裡出現 `browser-gc-kick.sh` 會報成 `extra`。有了圖形瀏覽器（或 OB 另訂方案，#675）
+再補 unit 與對照表的列。
+
+安裝（**需要 AGM 核准**，同 macOS；`<名字>` 是對照表列出的那七支）：
+
+```sh
+install -m 644 scripts/ops/systemd/com.agm.<名字>.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now com.agm.<名字>.timer
+loginctl enable-linger "$USER"   # 沒登入也要跑（一次就好；沒開的話登出後整個 user manager 會停）
+```
+
+`Environment=` 的 PATH 是 `%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`，
+`AGM_BUILD_BOT` 沿用搬家前的建置 child id（DB 整份搬過去，id 不變）；新主機的工具不在這些位置就改安裝那份，`ops-sync` 不會報。
 
 **四個觸發條件**：整點的例行檢查（launchd 每 5 分鐘跑一次，分鐘 < 5 的那一輪）、
 **重建申請集滿門檻**（`AGM_REBUILD_THRESHOLD`，預設 3；使用者 2026-09-14 訂 5、2026-09-16 降成 3）、
@@ -110,7 +154,9 @@ approval，所以 approval 表就是唯一真相。數不出來（端點壞了�
 ### 立即部署（使用者 2026-09-25，SPEC §18.2）
 
 網頁左上角按「立即部署」時，daemon（`POST /api/deploy/now`）以使用者的名義核准一筆 rebuild（requester＝`daemon-update-kick`），
-寫 `daemon-update.now.json`（`{approval_id,sha,live_sha,requested_at,requested_by}`），再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`。
+寫 `daemon-update.now.json`（`{approval_id,sha,live_sha,requested_at,requested_by}`），再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`
+（Linux：`systemctl --user start --no-block com.agm.daemon-update.service`——`--no-block` 是因為 oneshot 的 start 會等 kick 整輪跑完；
+daemon 沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`，issue #677）。
 kick 讀到這個檔就走立即模式：
 
 - **略過**：觸發條件、`daemon-update.last`（同一顆已派過）、申請／等 AGM 裁示 rebuild。
@@ -207,6 +253,10 @@ launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 3
 - 升過 schema 的失敗**預設往前修**（沿用新 binary，exit 6），只有新 binary 起不來才還原 binary＋DB（exit 7）。
 - 啟動走 `launchctl submit` ＋ `daemon-start.py`（fork + setsid）：daemon 是 ppid=1、nice 0。
   在 pane 裡直接背景起會繼承 pane 忙碌時的 nice 5，非 root 降不回去。
+  Linux（issue #677）走 `systemd-run --user --collect --unit=am-daemon-swap-<pid>-<第幾次> -p Type=forking -p KillMode=process`
+  跑同一支 `daemon-start.py`：transient unit 對應 `launchctl submit`，不必另外裝 unit 檔。`Type=forking` 讓 systemd 把 fork 出來的
+  daemon 認成 main PID；`KillMode=process` 是因為 systemd 收 unit 時看 cgroup，setsid 脫離不了，預設會連 daemon 起的子行程一起殺。
+  平台看 `uname -s`（測試用 `AGM_OPS_PLATFORM` 蓋掉），沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`。
 - 換 binary 前必須讀到非空的 `agm state` bot 名單；命令失敗或名單空白會 exit 3 並交還 restart lease。
 - 重啟後比對 bot 名單（看 id）：少了就回滾，**只有**換版窗口內刻意刪掉的不算——deleted_at 在窗口起點之後、
   而且有刪除 API 留下的 `delete_bot`／`delete_project` intent（subject 是它、它的專案，或 payload 快照裡有它），DB 唯讀查。

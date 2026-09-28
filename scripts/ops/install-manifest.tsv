@@ -1,7 +1,8 @@
-# 已安裝的 ops 檔對照表（issue #418、#487）：「repo 來源」與「安裝位置（相對 AGM 目錄，
-# ~/.config/agents-manager/supervisor/AGM）」兩欄，空白分隔。`agm ops-sync --check` 讀這一份比對；
+# 已安裝的 ops 檔對照表（issue #418、#487、#677）：「repo 來源」與「安裝位置（相對 AGM 目錄，
+# ~/.config/agents-manager/supervisor/AGM）」兩欄，空白分隔；可選的第三欄 `darwin`／`linux` 表示只在那個平台裝，
+# 省略＝兩邊都裝。`agm ops-sync --check` 讀這一份比對，另一個平台的列報成 `skipped`、不算落差；
 # 新增／移除要安裝的檔就改這裡，照 README.md install。bin/agm 由 daemon 部署，不在這裡。
-scripts/ops/browser-gc-kick.sh      bin/browser-gc-kick.sh
+scripts/ops/browser-gc-kick.sh      bin/browser-gc-kick.sh      darwin
 scripts/ops/ci-watch-kick.sh        bin/ci-watch-kick.sh
 scripts/ops/claude-release-kick.sh  bin/claude-release-kick.sh
 scripts/ops/daemon-update-kick.sh   bin/daemon-update-kick.sh
@@ -12,22 +13,44 @@ scripts/ops/herdr-full-restart.sh   bin/herdr-full-restart.sh
 scripts/ops/outbox-gc.sh            bin/outbox-gc.sh
 scripts/ops/pane-gc.sh              bin/pane-gc.sh
 scripts/ops/release-triage-kick.sh  bin/release-triage-kick.sh
-scripts/ops/browser-gc-task.md      browser-gc-task.md
+scripts/ops/browser-gc-task.md      browser-gc-task.md          darwin
 scripts/ops/ci-watch-task.md        ci-watch-task.md
 scripts/ops/claude-release-task.md  claude-release-task.md
 scripts/ops/daemon-update-task.md   daemon-update-task.md
 scripts/ops/release-triage-task.md  release-triage-task.md
 
+# browser-gc 只在 macOS 裝：它喚醒的 child 操作 ego-browser（圖形介面瀏覽器），Linux 主機沒有桌面，
+# 裝了只會每 30 分鐘叫醒一顆找不到瀏覽器的 bot（issue #677）。所以上面兩列與下面的 plist 都標 darwin，
+# systemd 那組也沒有它；Linux 有了圖形瀏覽器再補 unit 與這裡的列。
+#
 # launchd 排程（issue #487、#499）：安裝位置以 `LaunchAgents/` 開頭的，解析成 `~/Library/LaunchAgents/`。
 # 比的是 plistlib parse 過的 dict（所以鍵的順序不影響），**除了 EnvironmentVariables 以外全部都比**——
 # 包括 StandardOutPath／StandardErrorPath，那是 log 的落點，漂掉卻報同步等於證據來源斷了還顯示綠燈。
 # EnvironmentVariables 不比：裡面是這台機器的 PATH 與 bot id，每台不同；repo 這份留著它是為了
 # install 之後 job 還跑得起來。
-scripts/ops/launchd/com.agm.browser-gc.plist      LaunchAgents/com.agm.browser-gc.plist
-scripts/ops/launchd/com.agm.ci-watch.plist        LaunchAgents/com.agm.ci-watch.plist
-scripts/ops/launchd/com.agm.claude-release.plist  LaunchAgents/com.agm.claude-release.plist
-scripts/ops/launchd/com.agm.daemon-update.plist   LaunchAgents/com.agm.daemon-update.plist
-scripts/ops/launchd/com.agm.dev-server.plist      LaunchAgents/com.agm.dev-server.plist
-scripts/ops/launchd/com.agm.herdr-update.plist    LaunchAgents/com.agm.herdr-update.plist
-scripts/ops/launchd/com.agm.outbox-gc.plist       LaunchAgents/com.agm.outbox-gc.plist
-scripts/ops/launchd/com.agm.release-triage.plist  LaunchAgents/com.agm.release-triage.plist
+scripts/ops/launchd/com.agm.browser-gc.plist      LaunchAgents/com.agm.browser-gc.plist  darwin
+scripts/ops/launchd/com.agm.ci-watch.plist        LaunchAgents/com.agm.ci-watch.plist  darwin
+scripts/ops/launchd/com.agm.claude-release.plist  LaunchAgents/com.agm.claude-release.plist  darwin
+scripts/ops/launchd/com.agm.daemon-update.plist   LaunchAgents/com.agm.daemon-update.plist  darwin
+scripts/ops/launchd/com.agm.dev-server.plist      LaunchAgents/com.agm.dev-server.plist  darwin
+scripts/ops/launchd/com.agm.herdr-update.plist    LaunchAgents/com.agm.herdr-update.plist  darwin
+scripts/ops/launchd/com.agm.outbox-gc.plist       LaunchAgents/com.agm.outbox-gc.plist  darwin
+scripts/ops/launchd/com.agm.release-triage.plist  LaunchAgents/com.agm.release-triage.plist  darwin
+
+# systemd user unit（issue #677，Linux 主機）：安裝位置以 `systemd/` 開頭的，解析成 `~/.config/systemd/user/`。
+# 每支 launchd job 對應一組 .service（Type=oneshot，跑同一支 kick）＋.timer（StartInterval → OnUnitActiveSec）。
+# 比的是 parse 過的「段.鍵 → 值」（註解、空白不算），**除了 Environment= 的值以外全部都比**，理由同 plist。
+scripts/ops/systemd/com.agm.ci-watch.service        systemd/com.agm.ci-watch.service        linux
+scripts/ops/systemd/com.agm.ci-watch.timer          systemd/com.agm.ci-watch.timer          linux
+scripts/ops/systemd/com.agm.claude-release.service  systemd/com.agm.claude-release.service  linux
+scripts/ops/systemd/com.agm.claude-release.timer    systemd/com.agm.claude-release.timer    linux
+scripts/ops/systemd/com.agm.daemon-update.service   systemd/com.agm.daemon-update.service   linux
+scripts/ops/systemd/com.agm.daemon-update.timer     systemd/com.agm.daemon-update.timer     linux
+scripts/ops/systemd/com.agm.dev-server.service      systemd/com.agm.dev-server.service      linux
+scripts/ops/systemd/com.agm.dev-server.timer        systemd/com.agm.dev-server.timer        linux
+scripts/ops/systemd/com.agm.herdr-update.service    systemd/com.agm.herdr-update.service    linux
+scripts/ops/systemd/com.agm.herdr-update.timer      systemd/com.agm.herdr-update.timer      linux
+scripts/ops/systemd/com.agm.outbox-gc.service       systemd/com.agm.outbox-gc.service       linux
+scripts/ops/systemd/com.agm.outbox-gc.timer         systemd/com.agm.outbox-gc.timer         linux
+scripts/ops/systemd/com.agm.release-triage.service  systemd/com.agm.release-triage.service  linux
+scripts/ops/systemd/com.agm.release-triage.timer    systemd/com.agm.release-triage.timer    linux

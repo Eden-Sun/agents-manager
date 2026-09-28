@@ -21,7 +21,9 @@
 set -euo pipefail
 
 # `bootout` 不在內：它是 `launchctl` 的子命令、不是可執行檔，放進來只會讓清單看起來涵蓋得比實際多。
-CANARY_CMDS="launchctl pkill killall ssh scp shutdown reboot am-canary-probe"
+# `systemctl`／`systemd-run` 是 Linux 主機上的 launchctl（issue #677）：daemon-swap.sh 在那邊用 systemd-run
+# 起 daemon，測試漏擋一個替身就是在正式主機上真的起一顆。
+CANARY_CMDS="launchctl systemctl systemd-run pkill killall ssh scp shutdown reboot am-canary-probe"
 
 # `rm` 不能整支做成 stub：測試本來就要清自己的暫存目錄，擋掉就全部壞掉。
 # 要擋的只有「刪到暫存目錄以外」——#422 明列的那一條，2026-09-23 的事故類型之一。

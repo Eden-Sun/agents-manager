@@ -1253,17 +1253,81 @@ LAUNCHD_PREFIX = "LaunchAgents/"
 PLIST_IGNORED_KEYS = ("EnvironmentVariables",)
 
 
+#: Linux 主機的排程是 systemd user unit（issue #677）：安裝位置以 `systemd/` 開頭的解析成 `~/.config/systemd/user/`。
+SYSTEMD_PREFIX = "systemd/"
+#: unit 比對**只忽略這些鍵的值**，理由同 [`PLIST_IGNORED_KEYS`]：`Environment=` 是這台機器的 PATH 與 bot id。
+UNIT_IGNORED_KEYS = ("Environment",)
+#: 對照表第三欄（可省略＝每個平台都裝）。排程列一定要標：plist 只在 macOS、unit 只在 Linux 有意義。
+OPS_PLATFORMS = ("darwin", "linux")
+_PREFIX_PLATFORM = {LAUNCHD_PREFIX: "darwin", SYSTEMD_PREFIX: "linux"}
+
+
+def _ops_platform() -> str:
+    """這台是哪個平台（對照表第三欄的值）；`AGM_OPS_PLATFORM` 只給測試蓋掉。"""
+    override = os.environ.get("AGM_OPS_PLATFORM", "").strip()
+    if override:
+        return override
+    return "linux" if sys.platform.startswith("linux") else sys.platform
+
+
 def _launch_agents_dir() -> Path:
     """`~/Library/LaunchAgents`；`AGM_LAUNCHAGENTS_DIR` 只給測試蓋掉（不要讓測試讀到真的 plist）。"""
     override = os.environ.get("AGM_LAUNCHAGENTS_DIR", "").strip()
     return pathlib.Path(override) if override else pathlib.Path.home() / "Library" / "LaunchAgents"
 
 
+def _systemd_user_dir() -> Path:
+    """systemd 讀 user unit 的目錄（`$XDG_CONFIG_HOME/systemd/user`）；`AGM_SYSTEMD_USER_DIR` 只給測試蓋掉。"""
+    override = os.environ.get("AGM_SYSTEMD_USER_DIR", "").strip()
+    if override:
+        return pathlib.Path(override)
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return (pathlib.Path(xdg) if xdg else pathlib.Path.home() / ".config") / "systemd" / "user"
+
+
 def _install_path(agm_dir: Path, target: str) -> Path:
-    """對照表的安裝位置：預設相對 AGM 目錄，`LaunchAgents/` 開頭的走 [`_launch_agents_dir`]（issue #487）。"""
+    """對照表的安裝位置：預設相對 AGM 目錄，`LaunchAgents/` 開頭的走 [`_launch_agents_dir`]（issue #487），
+    `systemd/` 開頭的走 [`_systemd_user_dir`]（issue #677）。"""
     if target.startswith(LAUNCHD_PREFIX):
         return _launch_agents_dir() / target[len(LAUNCHD_PREFIX):]
+    if target.startswith(SYSTEMD_PREFIX):
+        return _systemd_user_dir() / target[len(SYSTEMD_PREFIX):]
     return agm_dir / target
+
+
+def _unit_semantics(raw: bytes) -> dict:
+    """systemd unit 的語意：`{"<Section>.<Key>": [值, …]}`，註解、空行、行尾 `\\` 接續都攤平（issue #677）。
+
+    同一個鍵出現幾次、什麼順序都算（`ExecStart=` 可以有好幾行，順序就是執行順序）；
+    [`UNIT_IGNORED_KEYS`] 只忽略值、留存在標記，跟 [`_plist_semantics`] 同一個道理。
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        return {"_error": f"{type(e).__name__}: {e}"}
+    out: dict = {}
+    section = ""
+    pending = ""
+    for n, line in enumerate(text.splitlines(), 1):
+        line = pending + line.strip()
+        pending = ""
+        if line.endswith("\\"):
+            pending = line[:-1] + " "
+            continue
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        key, eq, value = line.partition("=")
+        if not eq or not section:
+            return {"_error": f"第 {n} 行看不懂：{line}"}
+        key = f"{section}.{key.strip()}"
+        out.setdefault(key, []).append(value.strip())
+    for k in list(out):
+        if k.split(".", 1)[1] in UNIT_IGNORED_KEYS:
+            out[k] = "<ignored>"
+    return out
 
 
 def _git_bytes(repo: Path, ref: str, source: str) -> bytes:
@@ -1291,17 +1355,29 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
     `extra`（`bin/` 裡有、對照表沒有——沒有版控的腳本）。
     """
     manifest = _git(repo, "show", f"{ref}:{OPS_MANIFEST}")
+    platform = _ops_platform()
     entries = []
+    skipped = []
     for line in manifest.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         parts = line.split()
-        if len(parts) != 2:
-            raise AgmError("bad_manifest", f"{OPS_MANIFEST} 這行看不懂（要「來源 安裝位置」兩欄）：{line}", 2)
+        if len(parts) not in (2, 3) or (len(parts) == 3 and parts[2] not in OPS_PLATFORMS):
+            raise AgmError("bad_manifest", f"{OPS_MANIFEST} 這行看不懂（要「來源 安裝位置 [darwin|linux]」）：{line}", 2)
+        only = parts[2] if len(parts) == 3 else None
+        # 排程列標錯平台（plist 標 linux、unit 沒標）不是「這台不裝」而是對照表寫錯：一律拒絕，
+        # 否則 Linux 上會去 `~/Library/LaunchAgents` 找 plist、報一堆 missing（issue #677）。
+        for prefix, want in _PREFIX_PLATFORM.items():
+            if parts[1].startswith(prefix) and only != want:
+                raise AgmError("bad_manifest", f"{OPS_MANIFEST}：{prefix}… 只在 {want} 上有意義，第三欄要寫 {want}：{line}", 2)
+        if only is not None and only != platform:
+            skipped.append({"source": parts[0], "target": parts[1], "platform": only})
+            continue
         entries.append((parts[0], parts[1]))
     report: dict = {"ref": ref, "commit": _git(repo, "rev-parse", "--short", ref), "agm_dir": str(agm_dir),
-                    "ok": [], "behind": [], "drift": [], "missing": [], "extra": []}
+                    "platform": platform, "ok": [], "behind": [], "drift": [], "missing": [], "extra": [],
+                    "skipped": skipped}
     for source, target in entries:
         path = _install_path(agm_dir, target)
         row: dict = {"source": source, "target": target}
@@ -1310,9 +1386,12 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
             continue
         # plist 不按 blob 比（issue #487、#499）：比的是 `plistlib` parse 過的 dict，
         # 所以同樣內容換個鍵序不算 drift。忽略的只有 `PLIST_IGNORED_KEYS`。
-        if target.startswith(LAUNCHD_PREFIX):
-            want = _plist_semantics(_git_bytes(repo, ref, source))
-            got = _plist_semantics(path.read_bytes())
+        # systemd unit 同理：比 `_unit_semantics`，註解與空白不算（issue #677）。
+        semantics = _plist_semantics if target.startswith(LAUNCHD_PREFIX) else (
+            _unit_semantics if target.startswith(SYSTEMD_PREFIX) else None)
+        if semantics is not None:
+            want = semantics(_git_bytes(repo, ref, source))
+            got = semantics(path.read_bytes())
             if want == got:
                 report["ok"].append(row)
             else:
@@ -1338,10 +1417,14 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
     # `agm` 本身由 daemon 部署（內嵌在 binary 裡），備份檔與快取不算。
     listed = {t for _, t in entries}
     # 沒有列進對照表的 `com.agm.*` job：那就是「沒有版控的排程」，正是 #487 要抓的那種。
-    agents = _launch_agents_dir()
-    if agents.is_dir():
-        for f in sorted(agents.glob("com.agm.*.plist")):
-            rel = f"{LAUNCHD_PREFIX}{f.name}"
+    # 只掃這個平台的排程目錄（issue #677）：另一邊的目錄本來就不該存在，也不歸這台管。
+    if platform == "linux":
+        sched_dir, prefix, globs = _systemd_user_dir(), SYSTEMD_PREFIX, ("com.agm.*.service", "com.agm.*.timer")
+    else:
+        sched_dir, prefix, globs = _launch_agents_dir(), LAUNCHD_PREFIX, ("com.agm.*.plist",)
+    if sched_dir.is_dir():
+        for f in sorted(p for g in globs for p in sched_dir.glob(g)):
+            rel = f"{prefix}{f.name}"
             if rel not in listed:
                 report["extra"].append({"target": rel})
     bin_dir = agm_dir / "bin"

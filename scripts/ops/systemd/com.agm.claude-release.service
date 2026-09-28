@@ -1,0 +1,10 @@
+# 來源檔（issue #677）：改這裡再照 scripts/ops/README.md install 到 ~/.config/systemd/user/。
+# 對應 macOS 的 scripts/ops/launchd/com.agm.claude-release.plist，排程與指令兩邊要一致（agm_test.py 釘住）。
+[Unit]
+Description=AGM claude-release：Claude Code 換版就派人解析（唯讀）
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/.config/agents-manager/supervisor/AGM/bin/claude-release-kick.sh
+StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/claude-release.systemd.log
+StandardError=append:%h/.config/agents-manager/supervisor/AGM/claude-release.systemd.log
