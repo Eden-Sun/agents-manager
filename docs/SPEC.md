@@ -2787,6 +2787,63 @@ log、`bin/agm.bak-*`、`.lease-*.json`、`daemon-update.approval.json`／lease 
 第 4 步 import 加 `--with-supervisor`，先 `--dry-run` 看 `supervisor` 那一段（`singletons`、`inbox_parked`、`skipped_unique`）；
 import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 `handoff.md` 放進去；接回 AGM 與 responder 之後才打開 `desired_running`／autostart。
 
+### 11.9c 整套切到 agm-host：切換腳本與 runbook（#721，#675 的最後一段，使用者 2026-09-28）
+
+剩下的 `Agents Manager` 與 `AGM-DM-GRUP` 改在 agm-host **本機**跑，之後 Mac 的 daemon 不再開；已移交的 hub 專案（§11.9，`host = "m4p"`）不動，
+它們的 agent 仍在 Mac 的 herdr（`dev.agents-manager.herdr-*` launchd job）裡跑，所以那幾個 herdr job 不停。
+工具是 `scripts/ops/cutover-to-host.sh`（在 Mac 跑；輔助 `cutover-helper.py` 在兩邊跑，到目標是經 ssh 從 stdin 餵原始碼），把 §11.9／§11.9a 的步驟串起來。
+
+**預設 dry-run**：唯讀的檢查照做（GET、ssh 看一眼），會改東西的每一步只印出來；`--execute` 才真的做。真的做時自己脫離成背景行程
+（`setsid`＋`nohup`，log 在狀態目錄的 `run.log`）——`stop-bots` 會停掉這兩個專案的每一顆 bot，從 bot 的 pane 叫起來的腳本會跟著被收掉；
+確定不會被收掉（一般終端機）才用 `--foreground`。狀態目錄 `~/.config/agents-manager/cutover/<時間>/`（700）放快照、在跑名單、每步耗時與 import 摘要；
+中途失敗修好後 `--from <步驟> --state-dir <同一個>` 接著做（`preflight` 唯讀、每次都跑）。
+
+| 步驟 | 在哪 | 做什麼 |
+|---|---|---|
+| `preflight` | 兩邊 | 兩個專案各剛好一個、都還沒設 `handed_off_to`（設了＝上一次沒做完，要 `--from` 或 rollback）；project-transfer 要有 `--with-supervisor`（#720，`--execute` 沒有就拒絕）；目標 python ≥ 3.11、有 DB／config、release binary、`daemon-start.py`、`systemd-run`。只警告：在跑的 child、目標沒裝 `herdr@.service`（#677）、目標 checkout 不含這支腳本的版本（先 pull＋build，否則 import 可能因欄位不足被拒）、Mac 各 worktree 沒推的 commit／沒提交的改動（目標看不到）、Mac config 有而目標沒有的段落（例如 `[judge]`，import 只搬 `[[projects]]`，要手動補）、目標 config 已有這些專案 id |
+| `freeze` | Mac | `launchctl bootout` 載入中的 `com.agm.*`（換版 kick 不能在切換中途換 binary 或把 daemon 拉起來），記在 `launchd.txt` 給回滾 |
+| `record` | Mac | 快照兩個專案；**在跑名單**＝run 活著的 user bot（child 不單獨接回，由母 bot 重開；`CUTOVER_NO_RESUME` 預設排除 `agm-pxf2pv-browser-gc`——它操作 ego-browser，Linux 主機沒有桌面，§18.2e），加上協調者／巡檢原本是否在跑 |
+| `stop-bots` | Mac | 先 `POST /api/supervisor/stop`、`…/responder/stop` 把「不要它跑」寫進去（不然看門狗會把它們拉回來，§18.9），再逐顆 `POST /api/bots/{id}/stop`（child 先、parent 後），等 run 全部結束（預設 180 秒）。停機窗口從這裡起算 |
+| `hand-off` | Mac | 兩個專案 `PATCH handed_off_to = "agm-host"`：Mac daemon 萬一被拉起來也不會動它們（§6.5h） |
+| `stop-src` | Mac | 7788 的 listener 是 `agents-managerd` 才 `kill`，等 `daemon.lock` 放開 |
+| `export` | Mac | `project-transfer export`，協調者專案加 `--with-supervisor` |
+| `transcripts` | Mac→目標 | `transcript-transfer --target ubuntu@agm-host`，map：repo（`/Users/m4p/project/agents-manager`→`/home/ubuntu/project/agents-manager`）與資料目錄（`~/.config/agents-manager`→`/home/ubuntu/.config/agents-manager`，AGM-DM-GRUP 的 path 與協調者 cwd 在這底下）；角色目錄照 §11.9b 只帶 `AGM`／`AGM-responder` 的 `handoff.md` 與 `reports/`，到目標後把裡面的來源路徑照同一組 map（再加 `$HOME`）換掉——`CLAUDE.md`、`runtime.json`、`persona.md` 由 `resume` 的 setup 產生（setup 不覆蓋已存在的 `handoff.md`），log、lease、核准檔、`*.bak` 不帶。結束碼 2 時只擋 conflicts／refused 與「在跑名單裡的 bot 最後一段對話找不到」；更早的舊 session 在 Mac 上已經沒有檔（例：協調者專案 3 段）的只警告、記下個數給 import 的閘門 |
+| `ship` | Mac→目標 | 改好路徑的 bundle、project-transfer、helper、快照、在跑名單 `rsync` 到目標 `~/.config/agents-manager/cutover/<時間>/`（700），刪 Mac 上的 bundle（回滾靠的是 Mac 沒動過的 DB，不是 bundle） |
+| `stop-dst` | 目標 | 7788 的 listener（`ss`）是 `agents-managerd` 才殺，等 `daemon.lock` 放開。hub 專案在這之後到 `start-dst` 之間也暫停 |
+| `import` | 目標 | 每個 bundle 先 `--dry-run`：transcript 不在的段數多於上一步記下的舊 session 數就停（對話沒搬到）；協調者專案（`--with-supervisor`，§11.9b）印出 `supervisor` 那一段、`skipped_unique` 不是空的就警告；再正式 `import --host local --path-map …`，摘要（含 `*.pre-transfer-*` 備份路徑）存回 Mac 的狀態目錄 |
+| `start-dst` | 目標 | 記下 `daemon.log` 行數，`systemd-run --user --collect -p Type=forking -p KillMode=process daemon-start.py`（§18.2e 同一套；沒有 `XDG_RUNTIME_DIR` 補 `/run/user/<uid>`），等 `/api/session` |
+| `resume` | 目標 | `POST /api/supervisor/setup`、`…/responder/setup` 用目標路徑產生角色目錄（`CLAUDE.md`、`runtime.json`、`persona.md`，§11.9b）→ 在跑名單逐顆 `start?resume=native`（一次一顆）→ 原本在跑的協調者／巡檢 `…/start`（已經被接回的 409 也算好：要的是 `desired_running = 1`）。停機窗口到這裡結束 |
+| `verify` | 兩邊 | 兩個專案在目標 `host = local`、path 換過、沒有 `handed_off_to`、user bot 一顆不少、在跑名單都有活著的 run；`daemon.log` 起來之後沒有 `ERROR` 級的行（先去 ANSI 色碼、只看時間戳後的等級欄）；Mac 的 7788 沒人聽。沒過就停，提示 rollback |
+| `timers` | 目標 | `systemctl --user enable --now ~/.config/systemd/user/com.agm.*.timer`（#677 的 unit 要先由 `agm ops-sync` 裝好，沒有就警告） |
+
+**回滾**（`cutover-to-host.sh rollback --state-dir <同一個>`，同樣預設 dry-run）：停目標 daemon → 把**第一次** import 前的 DB／config 備份放回
+（`import-<第一個專案>.json` 的 `backups`；同時刪 `-wal`／`-shm`）→ 起目標 daemon（hub 繼續跑）→ Mac 用 `launchctl submit` 跑 `daemon-start.py`（同 `daemon-swap.sh`）→
+清兩個專案的 `handed_off_to` → 在跑名單在 Mac `start?resume=native`、協調者／巡檢標回要跑 → `launchctl bootstrap` 回 `launchd.txt` 裡的 `com.agm.*`。
+切換後在目標長出來的對話不會帶回 Mac（Mac 從切換前那一刻接回）；目標上搬過去的 transcript 與 supervisor 目錄留著不刪。
+
+**演練**（`cutover-to-host.sh drill`）：兩顆正式 daemon 都不停、不起第二顆、**不碰目標的 `~/.config/agents-manager`**。Mac 的 DB 只經 `project-transfer export`
+的唯讀快照；目標在 `~/agm-drill-<時間>/` 另開資料目錄，放正式 DB 的 `sqlite3 .backup` 複本與 config 複本（config 有 `[server] data_dir` 就拒絕——複本會寫回正式目錄）；
+transcript 經一個把遠端 `HOME` 換成演練目錄的 ssh 包裝器寫進假 `$HOME`（先確認包裝器真的換掉 `HOME` 才搬，正式的 `~/.claude` 一個檔都不寫）；
+import 進複本、`cutover-helper.py drill-verify` 直接讀複本（專案 host／path、活著的 bot 數、cwd 沒留來源路徑、外鍵、integrity、每顆 bot 最後一段對話的 transcript 在不在、config 的專案與 `autostart = false`），
+做完不論成敗當下刪掉整個演練目錄與 Mac 上的 bundle。
+
+**2026-09-28 演練結果**（Mac → agm-host，兩顆 daemon 照跑；project-transfer 用 #720 的版本，帶協調者資料）：
+
+| 步驟 | 秒 | 量 |
+|---|---|---|
+| export | 6 | Agents Manager 61 MB（11 bot、102 run、2786 turn、4480 message、232 附件——2 個附件檔已不在——、2 mission）；AGM-DM-GRUP 24 MB（5 bot、112 run、3474 turn、1 mission，加協調者資料） |
+| transcripts | 60 | 41 段、72 個檔、436 MB（逐檔兩趟 ssh）；協調者專案 3 段舊 session 在 Mac 上已經沒有檔（build／triage／responder 更早的 session，不是任何 bot 的最後一段，閘門放行） |
+| ship | 1 | |
+| import（兩個專案各 dry-run＋正式） | 15 | 全數插入；協調者：`supervisors`／兩個角色更新，requests 1355、assignments 1550、reviews 1145、notes 1116、incidents 79、approvals 492、inbox 1606 列；Team 舊欄位整批 NULL 略過；身分警告是誤報——目標認得自己 shell 的 `cc0`／`cc1` alias（都已登入；`cc2` 沒登入，這兩個專案沒人用） |
+| verify | 3 | 兩個專案都過（每顆 bot 最後一段對話都在） |
+
+沒量到、要在正式切換時看的：停 17 顆 bot（每顆 ctrl+c ×2、逾時關 pane）、兩邊 daemon 停／起、6 顆 `resume=native`。
+估計停機窗口約 3～5 分鐘，其中搬對話與接回佔大半；hub 專案只在目標 daemon 停／起那段（約半分鐘）暫停。
+
+**切換前要備妥**（演練找到的缺口）：目標 `~/project/agents-manager` pull 到含 #720、#677 的 main 並 build release（在停機窗口之外做），
+`agm ops-sync` 裝好 `herdr@.service` 與 `com.agm.*` 的 systemd unit；Mac 各 worktree 的 WIP 推上去或放棄、在跑的 child 收尾；
+目標 config 補 Mac 的 `[judge]`；`browser-gc`／OB 在 Linux 沒有圖形瀏覽器，留在 Mac 或另訂（§18.2e、#675）。
+
 ### 11.10 共用 herdr session 的主機（#709，使用者 2026-09-28）
 
 移交（§6.5h）時，接手的 daemon 以遠端主機連回原機器，`herdr_session` 用的是原機器 daemon **自己的本機 session**（例：

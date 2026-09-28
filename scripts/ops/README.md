@@ -612,6 +612,13 @@ install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/superv
 不安裝，從 checkout 跑；實測結果與 runbook 見 SPEC §11.9a。先 `--dry-run`；結束碼 2＝有找不到／拒絕／衝突。
 隔離測試：`scripts/ops/transcript-transfer_test.sh`（假的來源 $HOME 與目標目錄，不 ssh）。
 
+## cutover-to-host.sh（issue #721）
+
+`Agents Manager` 與 `AGM-DM-GRUP` 整套從 Mac 切到 agm-host 本機跑（#675）。在 Mac 從 checkout 跑，不安裝；步驟、閘門、回滾與演練結果見 SPEC §11.9c。
+`cutover` 預設 dry-run（唯讀檢查＋列出會做的事），`--execute` 才做、並自己脫離成背景（log 在 `~/.config/agents-manager/cutover/<時間>/run.log`）；
+`rollback --state-dir <同一個>` 還原；`drill` 在目標另開目錄用 DB 複本演練、做完當下刪。輔助 `cutover-helper.py`（兩邊都跑）。
+隔離測試：`scripts/ops/cutover-to-host_test.sh`（兩顆假 daemon、假 ssh／rsync／launchctl，不碰正式環境）。
+
 ## 已安裝版與 repo 的落差（issue #418 稽核，2026-09-24）
 
 這些檔沒有自動同步，所以會漂。2026-09-24 的逐支比對（`git hash-object` 對 `origin/main` 的 blob）結論：
