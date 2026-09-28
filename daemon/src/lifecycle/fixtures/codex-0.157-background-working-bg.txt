@@ -1,0 +1,55 @@
+╭─────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.157.1)                              │
+│                                                         │
+│ model:       GPT-6-Sol low   /model to change           │
+│ directory:   /private/tmp/claude-501/…/scratchpad/cx714 │
+│ permissions: YOLO mode                                  │
+╰─────────────────────────────────────────────────────────╯
+
+⚠ Heads up, you have less than 50% of your 5h limit left. Run /status for a breakdown.
+
+
+› Start `sleep 600` as a background terminal (do not wait for it), then end your turn immediately with one short sentence.
+
+
+• Started sleep 600 in the background.
+
+  1:42 PM
+
+
+› Run `sleep 20` in the foreground and wait for it, then reply "ok".
+
+
+• I’ll run sleep 20 and wait for it to finish.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+• Working (8s • esc to interrupt) · 2 background terminals running · /ps to view · /stop to close
+
+                                                                                                                                                                 ⚠ 5h limit: 50% left · resets at 4:20 PM · /status
+
+› Ask Codex to do anything
+
+  GPT-6-Sol low · /…/cx714 · Context 1% used · 5h 50% left · weekly 28% left
+  ? for shortcuts                                                                                                                                                                         ⚠ 3 warnings · f2 to view
