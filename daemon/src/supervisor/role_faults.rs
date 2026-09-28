@@ -323,11 +323,17 @@ mod tests {
 
     /// 畫面讀不到、但 notify 已經連續 [`NOTIFY_STALL_LIMIT`] 次沒完成：這是**另一個**訊號，
     /// 不依賴畫面，所以照樣要判不可用（#420 現場就是「看起來 idle、但每個回合都失敗」）。
+    ///
+    /// 「讀不到畫面」要用**有 active run、但 pane 不見了**來造：#685 起「成功查到沒有 run」是已知的
+    /// `no_run`、不算 `probe_failed`，不能再拿沒有 run 來冒充。pane_id 清空會在 `probe_role` 讀 pane
+    /// 之前就回 `None`，不碰 herdr，CI 與本機都穩定。
     #[tokio::test]
     async fn notify_stalling_is_a_fault_even_when_the_screen_cannot_be_read() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         configure(&app, RESPONDER).await;
+        let run = crate::testing::fake_run(&app, "bot-responder").await;
+        sqlx::query("UPDATE runs SET pane_id = NULL WHERE id = ?").bind(&run).execute(&app.db).await.unwrap();
 
         note_notify_round(&app, "responder", turns(&["t1", "t2"]), false).await;
         refresh(&app).await;
