@@ -22,6 +22,7 @@ AGM 定期交辦：正式 daemon（`target/release/agents-managerd serve`，監�
    `sqlite3 ~/.config/agents-manager/agents-manager.sqlite3 ".backup ~/.config/agents-manager/agents-manager.sqlite3.bak-<YYYYmmdd-HHMM>"`
    （正式檔是 `.sqlite3`；`agents-manager.db`／`am.db` 是 0 byte 空檔，不要備那個），回報路徑與大小。備份後對備份檔跑 `sqlite3 <備份檔> "PRAGMA integrity_check"`（要 `ok`）並記下 `PRAGMA user_version`。**回滾 binary 時 DB 一定要連備份一起還原**（先停 daemon、移走 -wal/-shm、還原後再 integrity_check）：這批若升了 `SCHEMA_VERSION`，只換回 .bak binary 會被版本閘拒絕啟動。細節見 docs/SPEC.md §18.13。
 5. 重啟後 30 秒內驗 `/api/session` 與 `bin/agm health`；60 秒內確認 `bin/agm supervisor` 的 status 不是 stopped、`bin/agm state` 沒有 bot 被無故 pane_closed。任一不正常就用 .bak 回滾並回報。
+   全部驗證成功後，`daemon-swap.sh` 會保留這趟 DB 快照並清除同一 DB 的舊 `.bak-*`；部署失敗或回滾時會保留備份，不要自行提前刪除。
 6. 重啟期間不要同時觸發「claude 更新重啟」對其他 bot 動手（已知競態：2026-09-10 23:02Z 把 AGM 等 4 顆 bot 殺掉沒拉回）。
 
 6a. **建置與測試一律在回合內前景跑完，不准丟背景後結束回合。**（2026-09-18 事故）當天 06:09:36 這份任務

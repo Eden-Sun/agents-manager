@@ -3800,6 +3800,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 2. 需要回滾：先停 daemon（不要在它還開著 DB 時覆蓋檔案）→ 把 `agents-managerd.bak` 換回 → 用備份檔還原 `agents-manager.sqlite3`
    （同時移走殘留的 `-wal`／`-shm`）→ 對還原後的檔案再跑一次 `PRAGMA integrity_check` 與 `PRAGMA user_version`，版本要 ≤ 舊 binary 的 `SCHEMA_VERSION` → 才啟動。
 3. 備份到回滾之間新寫入的資料（新 run、訊息、交辦）會隨還原消失；能不回滾就往前修。
+4. `daemon-swap.sh` 完成部署驗證後，保留這趟建立的 DB 快照，刪除同一正式 DB 的其他 `.bak-*`；部署失敗或回滾時不清理，讓本次與既有備份都可供復原。
 `db::migrate` 升版**中途失敗**時版本號不會被蓋（戳記在全部子模組 migrate 與漂移核對之後才寫，#289），那種情況換回舊 binary 即可，不必還原 DB。
 **升版成功之後就不是那樣了**：`user_version` 已經是新的，舊 binary 一律被 #72 的版本閘擋在門外，
 所以回滾一定要連 DB 備份一起還原（上面第 2 步）。**指紋跟前一版相同也不例外**——那只代表全新 DB 的 schema 沒變

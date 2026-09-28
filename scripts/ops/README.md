@@ -250,6 +250,7 @@ launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 3
 
 - 預期 schema 版本從 checkout 的 `SCHEMA_HISTORY` 讀，不寫死；讀不到就中止。
 - 回滾還原 DB 前先停 daemon、清掉 `-wal`／`-shm`，還原後自驗 `user_version` 與 `integrity_check`。
+- 所有部署驗證成功後，保留這趟 DB 備份並清除同一 DB 的舊 `.bak-*`；abort／rollback 不清理備份。
 - 升過 schema 的失敗**預設往前修**（沿用新 binary，exit 6），只有新 binary 起不來才還原 binary＋DB（exit 7）。
 - 啟動走 `launchctl submit` ＋ `daemon-start.py`（fork + setsid）：daemon 是 ppid=1、nice 0。
   在 pane 裡直接背景起會繼承 pane 忙碌時的 nice 5，非 root 降不回去。
