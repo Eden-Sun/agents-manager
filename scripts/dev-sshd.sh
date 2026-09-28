@@ -32,12 +32,15 @@ is_running() {
 }
 
 ensure_material() {
-  mkdir -p "$DIR"
-  chmod 700 "$DIR"
-  [ -f "$HOSTKEY" ] || ssh-keygen -q -t ed25519 -N '' -C am-dev-sshd-host -f "$HOSTKEY"
-  [ -f "$CLIENTKEY" ] || ssh-keygen -q -t ed25519 -N '' -C am-dev-sshd-client -f "$CLIENTKEY"
-  cp "$CLIENTKEY.pub" "$AUTHKEYS"
-  chmod 600 "$AUTHKEYS" "$HOSTKEY" "$CLIENTKEY"
+  # 呼叫端是 `ensure_material || …`，那裡 set -e 不作用；每一步都要自己 return。
+  # 不然 dash（Linux 的 sh）會一路跑到下面 `: > "$KNOWN"`——特殊內建指令的重導向失敗
+  # 會讓整支 shell 直接退出，呼叫端的錯誤訊息印不出來（ubuntu-ci 首輪抓到，#716）。
+  mkdir -p "$DIR" || return 1
+  chmod 700 "$DIR" || return 1
+  [ -f "$HOSTKEY" ] || ssh-keygen -q -t ed25519 -N '' -C am-dev-sshd-host -f "$HOSTKEY" || return 1
+  [ -f "$CLIENTKEY" ] || ssh-keygen -q -t ed25519 -N '' -C am-dev-sshd-client -f "$CLIENTKEY" || return 1
+  cp "$CLIENTKEY.pub" "$AUTHKEYS" || return 1
+  chmod 600 "$AUTHKEYS" "$HOSTKEY" "$CLIENTKEY" || return 1
   cat > "$CFG" <<EOF
 Port $PORT
 ListenAddress 127.0.0.1
