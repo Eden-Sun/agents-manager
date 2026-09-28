@@ -10,11 +10,18 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     let conv = match db::conversation_id(&app.db, bot_id).await {
         Ok(conv) => conv,
         Err(error) => {
-            tracing::warn!(error = ?error, bot = %bot_id, "could not get conversation for queued prompt flush");
+            retry_flush_after_db_read_error(app, bot_id, "conversation_id", &error);
             return Ok(());
         }
     };
-    let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
+    let turn = match db::queued_turn(&app.db, &conv).await {
+        Ok(turn) => turn,
+        Err(error) => {
+            retry_flush_after_db_read_error(app, bot_id, "queued_turn", &error);
+            return Ok(());
+        }
+    };
+    let Some(turn) = turn else { return Ok(()) };
     // 交辦已經不要了（cancel／superseded／failed）：撤銷，不送。API 做決定的當下已經撤過一次，這裡是保險——
     // 繞過 API 改了狀態、或決定 commit 之後還沒撤就重啟，都不能讓一則已取消的指令在錯的時機送到（AGM 2026-09-16）。
     if let Some(why) = withdrawn_assignment_reason(app, &turn.id).await {
@@ -36,16 +43,37 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         }
     }
     // One turn at a time, per SPEC §2: a queued prompt waits for the previous one to finish.
-    let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
+    let run = match db::active_run(&app.db, bot_id).await {
+        Ok(run) => run,
+        Err(error) => {
+            retry_flush_after_db_read_error(app, bot_id, "active_run", &error);
+            return Ok(());
+        }
+    };
+    let Some(run) = run else { return Ok(()) };
     // `working` holds the queue too: a prompt pasted while claude is still drawing loses its
     // Enter and stalls (2026-09-07 11:21). The `working -> idle` edge re-schedules this flush.
     if run.state != "running" || run.agent_status == "blocked" || run.agent_status == "working" {
         return Ok(());
     }
-    if db::in_flight_turn(&app.db, &run.id).await?.is_some() {
+    let in_flight = match db::in_flight_turn(&app.db, &run.id).await {
+        Ok(turn) => turn,
+        Err(error) => {
+            retry_flush_after_db_read_error(app, bot_id, "in_flight_turn", &error);
+            return Ok(());
+        }
+    };
+    if in_flight.is_some() {
         return Ok(());
     }
-    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
+    let bot = match db::bot(&app.db, bot_id).await {
+        Ok(bot) => bot,
+        Err(error) => {
+            retry_flush_after_db_read_error(app, bot_id, "bot", &error);
+            return Ok(());
+        }
+    };
+    let Some(bot) = bot else { return Ok(()) };
     // 維護窗口握著：排隊的這一筆**留在佇列**，不要送進一個正要被重啟的 session（issue #86）。
     // 不算重試、不動 `flush_retries`——擋住它的不是 bot 的狀態，是我們自己開的窗口，不該花掉它的額度。
     // 掛一個到窗口到期為止的 timer：窗口提早 release 時 `drain_queue` 會叫醒 flush，沒有人來收的話
@@ -200,6 +228,9 @@ pub(crate) fn rollout_wait_key(run: &db::Run) -> String {
 /// Backoff for a queued prompt that could not be typed yet: 15 s, doubling, capped at 5 min.
 const QUEUE_RETRY_BASE_SECS: u64 = 15;
 const QUEUE_RETRY_MAX_SECS: u64 = 300;
+/// A transient pre-claim database read must wake the queue again: the lifecycle edge that first
+/// called flush may already be gone, and an idle bot has no later edge to rescue the prompt.
+const QUEUE_DB_READ_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(QUEUE_RETRY_BASE_SECS);
 /// After this many put-backs the prompt is failed with an explanation (about 40 minutes of a box
 /// that never emptied), so it cannot sit in the queue forever.
 pub(crate) const QUEUE_RETRY_LIMIT: i64 = 12;
@@ -207,6 +238,11 @@ pub(crate) const QUEUE_RETRY_LIMIT: i64 = 12;
 pub(crate) fn queue_retry_delay(retries: i64) -> std::time::Duration {
     let shift = retries.clamp(0, 16) as u32;
     std::time::Duration::from_secs(QUEUE_RETRY_BASE_SECS.saturating_mul(1u64 << shift).min(QUEUE_RETRY_MAX_SECS))
+}
+
+fn retry_flush_after_db_read_error<E: std::fmt::Debug>(app: &Arc<App>, bot_id: &str, read: &str, error: &E) {
+    tracing::warn!(error = ?error, bot = %bot_id, read, retry_in_s = QUEUE_DB_READ_RETRY_DELAY.as_secs(), "queued prompt flush database read failed; retrying");
+    schedule_flush_retry(app, bot_id, QUEUE_DB_READ_RETRY_DELAY);
 }
 
 /// Put a claimed turn back on the queue with its retry count and next attempt time, or — past the
@@ -790,6 +826,38 @@ mod flush_queue_tests {
         assert!(queue_retry_timer_armed(&f.bot_id), "早退也要留下一個 timer，否則沒有人會再來送");
         let left = queue_retry_timer_left(&f.bot_id).expect("timer 掛著");
         assert!(left <= std::time::Duration::from_secs(5), "掛的是剩下的退避時間，不是整輪重來：{left:?}");
+    }
+
+    /// A lifecycle edge can be consumed while SQLite is briefly unavailable. The next flush must
+    /// still be scheduled, otherwise an idle bot has no later edge to wake its queued prompt.
+    #[tokio::test]
+    async fn a_transient_queue_read_failure_is_retried_and_then_delivers() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        forget_queue_retry_timer(&f.bot_id);
+
+        // Make the first conversation lookup fail deterministically, then restore the table before
+        // the retry attempt. This models a transient database/schema read failure without changing
+        // the durable queued turn.
+        sqlx::query("ALTER TABLE conversations RENAME TO conversations_unavailable")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, &f.turn_id).await.status, "queued", "the failed read must not claim the turn");
+        assert!(queue_retry_timer_armed(&f.bot_id), "a failed lifecycle wake-up must arm a retry");
+
+        sqlx::query("ALTER TABLE conversations_unavailable RENAME TO conversations")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        assert_eq!(turn(&app, &f.turn_id).await.status, "in_flight");
+        let pane = f.env.herdr.pane("pane-1").unwrap();
+        assert!(pane.transcript.iter().any(|line| line.contains("ping")), "retry should deliver the queued prompt: {:?}", pane.transcript);
     }
 
     async fn turn(app: &Arc<App>, id: &str) -> db::Turn {
@@ -1651,4 +1719,3 @@ mod flush_queue_tests {
         assert!(db::queued_turn(&app.db, &f.conv).await.unwrap().is_none());
     }
 }
-

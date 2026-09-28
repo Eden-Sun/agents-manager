@@ -415,6 +415,24 @@ fn continuation_row(row: &str) -> bool {
         && !row.trim_start().starts_with(['⏺', '✻', '⎿', '●', '─', '│'])
 }
 
+/// Peel TUI chrome so a grok boxed history row (`│ ❯ text          4:18 PM █│`) compares
+/// as `❯ text`. Claude's unboxed `❯ text` is unchanged. False negatives lock grok's composer
+/// as `delivery=unknown` while the agent is already thinking (2026-09-19).
+pub(crate) fn echo_row_payload(kind: &str, row: &str) -> String {
+    let stripped;
+    let raw = if kind == "grok" {
+        stripped = strip_grok_decor(row);
+        stripped.as_str()
+    } else {
+        row
+    };
+    let t = raw.trim();
+    if let Some(inner) = t.strip_prefix('│').and_then(|r| r.strip_suffix('│').or(Some(r))) {
+        return inner.trim().to_string();
+    }
+    t.to_string()
+}
+
 /// How many single, un-continued echo rows above the composer say exactly `text`.
 pub(crate) fn echo_row_hits(kind: &str, screen: &str, text: &str) -> usize {
     let lines: Vec<&str> = screen.lines().collect();
@@ -422,8 +440,8 @@ pub(crate) fn echo_row_hits(kind: &str, screen: &str, text: &str) -> usize {
     let markers = echo_markers(kind);
     (0..end)
         .filter(|&i| {
-            let row = lines[i];
-            let exact = markers.iter().any(|m| row.strip_prefix(m) == Some(text));
+            let payload = echo_row_payload(kind, lines[i]);
+            let exact = markers.iter().any(|m| payload.strip_prefix(m) == Some(text));
             let continued = i + 1 < end && continuation_row(lines[i + 1]);
             exact && !continued
         })
@@ -1113,6 +1131,18 @@ mod tests {
         assert_eq!(echo_row_hits("claude", &screen(&["❯  Reply with PONG"], &[]), "Reply with PONG"), 0, "多一個空白");
         // 回覆若以兩格縮排的純文字開頭，會被當成續行 → 假陰性（Unproven），不會假陽性。
         assert_eq!(echo_row_hits("claude", &screen(&["❯ ab", "  plain reply text"], &[]), "ab"), 0);
+    }
+
+    #[test]
+    fn grok_boxed_history_rows_count_as_one_echo() {
+        let boxed = "│ ❯ 修readme 以符合最近設計                                    │\n\
+╰── Grok 4.6 (low) · always-approve ──────────────────────────╯\n\
+│ ❯                                                             │\n";
+        assert_eq!(echo_row_hits("grok", boxed, "修readme 以符合最近設計"), 1);
+        let clock = "│ ❯ 修readme 以符合最近設計          4:18 PM █│\n│ ❯  │\n";
+        assert_eq!(echo_row_hits("grok", clock, "修readme 以符合最近設計"), 1);
+        assert_eq!(echo_row_hits("grok", boxed, "別的話"), 0);
+        assert_eq!(echo_row_hits("claude", &screen(&["❯ 修readme 以符合最近設計"], &[]), "修readme 以符合最近設計"), 1);
     }
 
     fn user_entry(content: Value) -> String {

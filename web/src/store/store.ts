@@ -27,7 +27,7 @@ import { ApiError } from '../api/types'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, restartProgress } from './restartBatch'
-import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
+import { dropHostModels, modelsKey, modelsKeyHost, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { acceptStateSeq, singleFlight } from './singleFlight'
 import { quotaForIdentity } from './quotaLookup'
@@ -590,6 +590,21 @@ let appliedStateSeq = 0
 let supervisorProjectAsked = false
 let identityPrefsAsked = false
 let lastRefreshError: string | null = null
+/** 只有同一個 cache epoch 的 models 回應可以寫回；refreshTools 會淘汰舊的 in-flight 回應。 */
+const modelCacheEpochs = new Map<string, number>()
+function nextModelCacheEpoch(key: string): number {
+  const epoch = (modelCacheEpochs.get(key) ?? 0) + 1
+  modelCacheEpochs.set(key, epoch)
+  return epoch
+}
+
+function invalidateModelCacheEpochs(host: string) {
+  const target = host || 'local'
+  for (const key of modelCacheEpochs.keys()) {
+    if (modelsKeyHost(key) === target) nextModelCacheEpoch(key)
+  }
+}
+
 /**
  * 送不出去的已讀。2026-09-15 改成「未讀數以 daemon 為準」之後，這個 POST 就不再是 fire-and-forget：
  * 失敗代表下一次 `refreshState` 會拿 daemon 的舊數字把本機剛清掉的徽章點回來（剛讀完的 bot 又亮
@@ -929,9 +944,7 @@ export const useStore = create<StoreState>((set, get) => ({
         }
         return { turns }
       })
-      if (res.sent.some((x) => x.delivery === 'unknown')) {
-        get().notify('error', '部分訊息送達狀態未知（delivery=unknown），該 bot 需先放棄該回合才能再送。')
-      }
+      // 真正卡住時 composer 會出黃條；這裡再 toast 會蓋住右側 outbox（grok 單行回音證不出時特別常見）。
       if (res.skipped.length > 0) {
         get().notify('info', `未送達：${res.skipped.map((x) => `@${x.bot_name}（${x.detail || x.reason}）`).join('、')}`)
       }
@@ -1152,6 +1165,10 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   async loginBot(botId) {
+    const bot = get().bots.find((b) => b.id === botId)
+    if (bot?.kind === 'claude' && bot.identity) {
+      return identityAuth(set, get, projectHostName(get(), bot.project_id), bot.identity, 'login')
+    }
     const key = `login:${botId}`
     if (get().busy[key]) return false
     set((s) => ({ busy: { ...s.busy, [key]: true } }))
@@ -1216,9 +1233,7 @@ export const useStore = create<StoreState>((set, get) => ({
       if (sendNow && res.send_now && res.send_now !== 'interrupted' && res.send_now !== 'idle') {
         get().notify('info', '沒有插隊：這顆 bot 的 claude 還沒有 send-now 鍵（2.1.275 起），訊息照一般方式送出。')
       }
-      if (res.delivery === 'unknown') {
-        get().notify('error', '訊息已送出但送達狀態未知（delivery=unknown），需先放棄該回合才能再送。')
-      }
+      // 真正卡住時 composer 會出黃條；toast 與黃條重複，還會蓋住 grok 窗右側的 outbox。
       if (res.delivery === 'failed') {
         // REVIEW B10: turn already failed; seeding a local in_flight turn would lock the composer.
         get().notify('error', '訊息未送達（delivery=failed），請確認 agent 狀態後重試。')
@@ -1633,14 +1648,17 @@ export const useStore = create<StoreState>((set, get) => ({
     const cached = get().models[key]
     // issue #26：失敗不是永久的，null 只擋 MODELS_RETRY_MS。
     if (!shouldFetchModels(cached, get().modelsFailedAt[key], Date.now())) return cached ?? null
+    const epoch = nextModelCacheEpoch(key)
     try {
       const list = await api.fetchModels(kind, host, identity)
+      if (modelCacheEpochs.get(key) !== epoch) return list
       set((s) => {
         const { [key]: _gone, ...failed } = s.modelsFailedAt
         return { models: { ...s.models, [key]: list }, modelsFailedAt: failed }
       })
       return list
     } catch {
+      if (modelCacheEpochs.get(key) !== epoch) return null
       set((s) => ({
         models: { ...s.models, [key]: null },
         modelsFailedAt: { ...s.modelsFailedAt, [key]: Date.now() },
@@ -1650,6 +1668,7 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   dropHostModels(host) {
+    invalidateModelCacheEpochs(host)
     set((s) => ({
       models: dropHostModels(s.models, host),
       modelsFailedAt: dropHostModels(s.modelsFailedAt, host),
@@ -2851,8 +2870,13 @@ export function inFlightTurn(state: StoreState, botId: string): Turn | null {
  * API.md §5：只有**還在飛**的 `delivery=unknown` 才擋下一則。已經 completed／failed 的 unknown
  * 是 RPC 逾時但 Stop hook 先把回合推成終態的殘影，不該把 composer 鎖成「送達狀態未知」——
  * 那時「放棄該回合」打 abandon 只會拿 409，只能重整。
+ *
+ * grok 單行回音常包在 `│ ❯ … │` 裡，證不出來也會標 unknown，但 agent 已經 `working`：
+ * 字進了，再鎖輸入框只會讓人以為卡死。那種當一般 in-flight（可排隊），不要擋。
  */
 export function unknownDeliveryTurn(state: StoreState, botId: string): Turn | null {
+  const run = state.runs[botId]
+  if (run?.agent_status === 'working') return null
   const map = state.turns[botId] ?? {}
   for (const t of Object.values(map)) {
     if (t.delivery === 'unknown' && t.status === 'in_flight') return t

@@ -657,7 +657,7 @@ tab 已被回收視為完成，`tab.list` 失敗不猜。沒有 `tab_id` 的 Run
    不在框裡、畫面上也找不到 → `auto_resend=1` 的自動重送一次（本章開頭：讀 `prompt_text`、打字前被擋退還額度再試一次、按過鍵證明不了記 `unknown`）；
    都沒用才讀 `visible` 快照 → Turn `failed` + system Message，
    中性敘述並原樣引用含 `Not logged in`／`/login`／`unlock-keychain`／`usage limit`／`limit` 的行（提示 ssh 下 macOS Keychain 可能讀不到）。
-8. 請求可帶 `relay_from`（bot id 或 `"daemon"`），記下這則是誰轉述的，UI 據此不把它算成使用者發言。
+8. 請求可帶 `relay_from`（bot id 或 `"daemon"`），記下這則是誰轉述的，UI 據此不把它算成使用者發言；帶 bot id 時須同時以該 bot 的 `X-AM-Bot-Token` 證明來源，不能只靠 UI token 自稱。
 9. **插隊送出**（issue #103，請求帶 `send_now: true`）：對方回合中時**打斷它**，而不是回 409。前提是這一顆 run 認得
    claude 2.1.275 的 send-now 鍵——CLI 自己決定怎麼收掉當下那一回合，比 daemon 從外面送 `esc` 再貼字準。
    - **閘門**（`lifecycle::send_now::supported`）：`kind = claude`，且 `runs.status_json.version`（statusLine 回報的**跑著的**

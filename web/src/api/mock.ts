@@ -1211,7 +1211,7 @@ export class MockTransport implements Transport {
     const shell = this.openShell(host, '')
     const pane = this.shell(host, shell.pane_id)
     const dir = st.config_dir ? `CLAUDE_CONFIG_DIR='${st.config_dir}' ` : ''
-    const command = st.kind === 'claude' ? `${dir}claude /login` : `${dir}${st.kind} login`
+    const command = st.kind === 'claude' ? `${dir}claude auth login` : `${dir}${st.kind} login`
     pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, '請在瀏覽器完成登入：', 'https://example.test/device?code=AM-MOCK', '登入完成，正在重新偵測…', '')
     st.logged_in = true
     st.account = st.account ?? 'mock@example.com'
@@ -1228,7 +1228,7 @@ export class MockTransport implements Transport {
     const shell = this.openShell(host, '')
     const pane = this.shell(host, shell.pane_id)
     const dir = st.config_dir ? `CLAUDE_CONFIG_DIR='${st.config_dir}' ` : ''
-    const command = st.kind === 'claude' ? `${dir}claude /logout` : `${dir}${st.kind} logout`
+    const command = st.kind === 'claude' ? `${dir}claude auth logout` : `${dir}${st.kind} logout`
     pane.lines.push(`${pane.cwd.split('/').pop() ?? '~'} % ${command}`, '已登出，憑證已清除。', '')
     st.logged_in = false
     st.account = undefined
