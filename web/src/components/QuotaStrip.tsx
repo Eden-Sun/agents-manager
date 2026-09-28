@@ -1,4 +1,5 @@
-import { quotaCollapsed } from '../lib/quotaLayout'
+import { QUOTA_FIT_START, nextQuotaFit } from '../lib/quotaLayout'
+import type { QuotaFitState } from '../lib/quotaLayout'
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { BotKind, Identity, KindQuota, QuotaLimitHit, QuotaMap, QuotaResetCredits, QuotaWindow } from '../api/types'
@@ -796,6 +797,44 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   )
 }
 
+/** 顯示中的子節點（`display: none` 的漢堡鈕、spacer 不算，也不吃 gap）。 */
+function shownChildren(el: Element): HTMLElement[] {
+  return [...el.children].filter((c): c is HTMLElement => c instanceof HTMLElement && c.getClientRects().length > 0)
+}
+
+/**
+ * 額度區能拿到的寬：標題列扣掉內距、gap 與其他東西。遠端記憶體（`.mem-wrap`）會自己縮到 0（收縮優先序在量表前面），
+ * 所以它的寬算在可用裡；它的 gap 還是扣掉，縮到 0 時那 10px 照樣在。
+ */
+function quotaAvail(head: HTMLElement, strip: HTMLElement): number {
+  const cs = getComputedStyle(head)
+  const kids = shownChildren(head)
+  let used = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) + (parseFloat(cs.columnGap) || 0) * Math.max(0, kids.length - 1)
+  for (const k of kids) {
+    if (k !== strip && !k.classList.contains('mem-wrap')) used += k.getBoundingClientRect().width
+  }
+  return head.clientWidth - used
+}
+
+/**
+ * 額度列照內容排開要多寬：量第一格到最後一格的外框（不用 scrollWidth：停用方塊的提示是絕對定位，會把它撐大）。
+ * 格子平常會 flex-grow 填滿，量的當下暫時關掉，量到的才是「需要」而不是「分到」；同步量完就還原，不會畫出來。
+ */
+function quotaContent(row: HTMLElement): number {
+  const kids = shownChildren(row)
+  if (kids.length === 0) return 0
+  for (const k of kids) k.style.flexGrow = '0'
+  const first = kids[0]
+  const last = kids[kids.length - 1]
+  const cs = getComputedStyle(row)
+  const width =
+    last.getBoundingClientRect().right - first.getBoundingClientRect().left
+    + (parseFloat(getComputedStyle(first).marginLeft) || 0) + (parseFloat(getComputedStyle(last).marginRight) || 0)
+    + (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0)
+  for (const k of kids) k.style.flexGrow = ''
+  return width
+}
+
 export function QuotaStrip({
   focusKind,
   focusIdentity,
@@ -812,9 +851,9 @@ export function QuotaStrip({
   // 身份清單跟著該主機（SPEC §16）：遠端 cc1 可能是不同帳號。
   const idStatus = useStore((s) => identityStatusOfHost(s, host))
   const identities = useMemo(() => identitiesOfHost(configured, idStatus, host ?? 'local'), [configured, idStatus, host])
-  // 量父節點（標題列）寬而非 window.innerWidth（少算側欄與暫存欄約 500px，2026-09-11 分頁被推出畫面）；
-  // 不量 wrap 自己：`.quota-strip` 是 `flex: none`，會來回震盪。
-  const [avail, setAvail] = useState<number | null>(null)
+  // 桌機讓位階段（`lib/quotaLayout.ts`）：量標題列扣掉其他東西後的寬，不是 window.innerWidth（少算側欄與暫存欄約 500px，
+  // 2026-09-11 分頁被推出畫面）。格子或主機一換就從頭量。
+  const [fitState, setFitState] = useState<{ key: string; s: QuotaFitState }>({ key: '', s: QUOTA_FIT_START })
   const [open, setOpen] = useState(false)
   // 手機點某一格只看那一格（2026-09-09 使用者）。
   const [only, setOnly] = useState<string | null>(null)
@@ -858,32 +897,41 @@ export function QuotaStrip({
     )
   }, [quota, configured, idStatus, host, disabledIdentities])
 
-  // layout effect：首次繪製前量到，避免開頁先閃一次全部攤開。
+  const remote = host !== LOCAL_HOST
+  const fitKey = `${host}|${ordered.map(entryReactKey).join(',')}`
+  const fit = fitState.key === fitKey ? fitState.s : QUOTA_FIT_START
+
+  // layout effect：首次繪製前量到並收斂（每換一階段就同步重畫、再量），不會先閃一次全部攤開或疊字。
   // 沒有任何額度時整條不畫（`wrap` 是 null）；deps 要跟著「有沒有畫」走，不然額度晚到時永遠不會開始量寬度。
+  // 格子變寬（倒數字變長）、標題列或旁邊的分頁變寬都要重量，所以連同它們一起觀察。
   const drawn = ordered.length > 0
   useLayoutEffect(() => {
-    const box = wrap.current?.parentElement
-    if (!drawn || !box) return
-    setAvail(box.clientWidth)
+    const strip = wrap.current
+    const head = strip?.parentElement
+    const row = strip?.querySelector<HTMLElement>('.quota-open')
+    if (!drawn || phone || !strip || !head || !row) return
+    const remeasure = () => {
+      const next = nextQuotaFit(fit, quotaAvail(head, strip), quotaContent(row), remote)
+      if (next !== fit) setFitState({ key: fitKey, s: next })
+    }
+    remeasure()
     if (typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(() => setAvail(box.clientWidth))
-    ro.observe(box)
+    const ro = new ResizeObserver(remeasure)
+    for (const el of [head, ...head.children, ...row.children]) ro.observe(el)
     return () => ro.disconnect()
-  }, [drawn])
+  }, [drawn, phone, fit, fitKey, remote])
 
   const popEntries = ordered
 
   if (ordered.length === 0) return null
 
-  const remote = host !== LOCAL_HOST
   const freshest = popEntries
     .map((e) => quota[e.fullKey]?.updated_at ?? null)
     .filter((x): x is string => Boolean(x))
     .sort()
     .pop()
 
-  const box = avail ?? 1416
-  const collapsed = quotaCollapsed(box, ordered.length)
+  const collapsed = !phone && fit.level === 2
   /** CSS 也是 640px 那條線。 */
   const compact = phone
   // 全部帳號都畫完整量表（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
@@ -894,8 +942,8 @@ export function QuotaStrip({
       <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
         {/* 更新 chip 放最左邊，避免夾在兩個 kind 間被誤認（2026-09-11 使用者）。手機搬到標題列 ★ 左邊（ChatPanel，2026-09-19 使用者）。 */}
         {phone ? null : <UpdateQuotaChip />}
-        {/* 遠端才掛主機名。 */}
-        {remote ? (
+        {/* 遠端才掛主機名；桌機擠的時候先收（標題列左邊已有 `@host` 徽章），量表最後才讓。 */}
+        {remote && (phone || fit.level === 0) ? (
           <span className="quota-host" aria-hidden="true">
             {host}
           </span>

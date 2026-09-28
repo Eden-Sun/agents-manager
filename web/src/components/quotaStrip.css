@@ -1018,6 +1018,13 @@
    放不下的尾巴直接裁掉（明細點開看）；`clip` 不是 `auto`——後者會把往下開的提示（停用方塊）一起裁掉。
    以前收合只少一條窗口、寬度不變，百分比照樣疊到下一格的身分名（#314）。 */
 @media (width > 640px) {
+  /* 完整量表的格子也不縮到比內容小（2026-09-28 使用者截圖：遠端主機時五格互相疊字）：放不下由
+     `nextQuotaFit` 量到後先收主機名牌、再收合，不再靠格子擠壓把字疊到下一格。 */
+  .main-head .quota-open:not(.collapsed) .quota-hp {
+    /* 不是 min-content：格內的 grid 項目是 `min-width: 0`，min-content 會算成比條加數字還窄（實測 90 vs 118px）。 */
+    min-width: max-content;
+  }
+
   .main-head .quota-open.collapsed {
     overflow-x: clip;
   }
@@ -1033,5 +1040,15 @@
   .main-head .quota-open.collapsed .quota-bar-wrap {
     flex: 0 0 24px;
     min-width: 24px;
+  }
+}
+
+/* 桌機名字那塊固定寬（>1024）。沒收合時額度區不拿內容寬當基準（max-content 比完整量表寬，會把旁邊的
+   遠端記憶體白白擠掉），而是分剩下的、保底是完整量表的內容寬；不夠時遠端記憶體先讓（shrink 1000），還不夠才收合。
+   收合後照內容寬當基準，一樣是遠端記憶體先讓，裁掉的格子才會最少。 */
+@media (width > 1024px) {
+  .main-head > .quota-strip:has(> .quota-open:not(.collapsed)) {
+    flex-basis: 0;
+    min-width: min-content;
   }
 }

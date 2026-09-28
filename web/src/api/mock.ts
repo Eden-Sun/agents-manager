@@ -1669,6 +1669,25 @@ export class MockTransport implements Transport {
     return this.hosts.map((h) => h.name)
   }
 
+  /** 截圖用：遠端主機＋專案＋一顆在跑的 bot，額度五格都有（cc0／cc1／cc2／codex／grok），重現遠端標題列最擠的情況。回 bot id。 */
+  async remoteDemo(host = 'm4p'): Promise<string> {
+    if (!this.hosts.some((h) => h.name === host)) await this.request('POST', '/hosts', { name: host, ssh: `me@${host}` })
+    const h = this.hosts.find((x) => x.name === host)
+    if (h) {
+      this.quota[`${host}/grok`] = { five_hour: { used_pct: 12, resets_at: inHours(0.2) }, seven_day: { used_pct: 55, resets_at: inHours(80) }, plan: 'SuperGrok', updated_at: now(), host }
+      h.tools.grok = { ...TOOLS_ALL_OK.grok }
+      this.emit('quota_updated', { kind: 'grok', host, quota: this.quota[`${host}/grok`] })
+    }
+    const path = `/Users/me/project/hermes-agents/${host}-hub`
+    const pid = this.projects.find((p) => p.path === path)?.id
+      ?? ((await this.request('POST', '/projects', { path, host, label: '智選hub' })) as { project_id: string }).project_id
+    const name = `${host}-ops`
+    const bid = this.botIdByName(name)
+      ?? ((await this.request('POST', `/projects/${pid}/bots`, { name, kind: 'claude', model: 'opus', identity: 'cc0' })) as { bot_id: string }).bot_id
+    if (!this.activeRun(bid)) await this.request('POST', `/bots/${bid}/start`, {})
+    return bid
+  }
+
   // 群組任務
 
   private missionStatus(m: MockMission): string {
@@ -3738,6 +3757,8 @@ function installDevHelpers(mock: MockTransport) {
     hostDown: (name: string) => mock.setHostConnected(name, false),
     hostUp: (name: string) => mock.setHostConnected(name, true),
     hosts: () => mock.hostNames(),
+    // 遠端主機＋專案＋在跑的 bot、五格額度（截圖用，重現遠端標題列最擠的情況）。回 bot id。
+    remoteDemo: (host?: string) => mock.remoteDemo(host),
     // 窄 pane / 移到自己的分頁
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
     // 下一個符合的請求回錯：`__amMock.failNext('POST', 'identities/.*/login', 409, {reason: '…', message: '…'})`
