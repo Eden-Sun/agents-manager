@@ -12,7 +12,7 @@ AGM 定期交辦：main 的 GitHub CI 紅了（`ci-watch-kick.sh` 偵測到並�
 - 同一段紅只有這一張 issue；後面又多的失敗會在同一張留言。**不要另開新的**。
 
 ## 收尾
-- 推完用 `gh run list --branch main --commit <sha>` 找到那次 run，`gh run watch <id>` 盯到跑完，確認你負責的那幾條不在失敗清單裡。還在就繼續修。
-- 紅的不是你造成、也修不了：在 issue 留言指出哪一條、哪個 run，回報派工者。
-- 全綠後在 issue 留言驗證用的 run id，**由你關 issue**（盯哨不會自動關）。
+- 驗證不等 GitHub Actions（使用者 2026-09-28）：修的那幾條先在本機（Linux 限定的就在 agm-host，macOS 限定的在 Mac 跑 `scripts/check.sh macos-local`）跑到綠再推；推完看 commit status `ubuntu-ci`（`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`，log 在 agm-host `~/.cache/agents-manager/ci/logs/<sha>.log`），你負責的那幾條還在就繼續修。
+- 紅的不是你造成、也修不了：在 issue 留言指出哪一條、哪個 sha，回報派工者。
+- `ubuntu-ci` 轉綠後在 issue 留言驗證用的 sha，**由你關 issue**（盯哨不會自動關）。
 - 全程繁體中文；遵守 repo 的 `CLAUDE.md`（自己的 worktree、不重啟 daemon、只 add 自己的檔）。

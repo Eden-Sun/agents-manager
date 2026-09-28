@@ -418,7 +418,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.release-triage.p
 
 ## ci-watch-kick.sh
 
-main 的 GitHub CI 盯哨（issue #211）。2026-09-16 起 main 的 CI 連紅好幾天沒人發現——規則只要求跑本機 `check.sh`，沒人看 GitHub 的結果。
+main 的 CI 盯哨（issue #211）。issue #716 起預設看 commit status `ubuntu-ci`（`AGM_CI_SOURCE=ubuntu-ci`，失敗 log 本機 `AGM_CI_LOG_DIR` 有就讀、否則 ssh `AGM_CI_HOST` 取），下面的 `gh run …` 是 `AGM_CI_SOURCE=actions` 的舊行為。2026-09-16 起 main 的 CI 連紅好幾天沒人發現——規則只要求跑本機 `check.sh`，沒人看 GitHub 的結果。
 launchd `com.agm.ci-watch` 每 10 分鐘跑一次；只開 issue、留言、派工，**不改程式、不重啟、不關 issue**。形狀比照 `release-triage-kick.sh`（鎖與殘留回收、開頭自補 PATH、缺依賴走 `ops-alert`、無事不寫 log）。
 
 - 每輪 `gh run list --branch main --workflow CI -L 20`，只看**已完成**的 run：success 算綠，failure／timed_out／startup_failure 算紅，cancelled／skipped／進行中當沒看到。
