@@ -479,20 +479,38 @@ pub fn backoff_secs(attempts: i64, cap: u64) -> u64 {
     base.min(cap.max(15))
 }
 
-/// 協調者現在能不能跑：`Some(reset_at)` = 等額度（`None` 表示不知道何時回來）。
-async fn quota_wait(app: &Arc<App>, bot: &crate::db::Bot) -> Option<Option<String>> {
-    // **只看這個身分自己的讀數。** `limit_hit_for_bot` / `next_reset_for_bot` 會退回裸 `claude`
-    // 那一把（實務上是 cc0 的數字），對一顆 cc1／cc2 的協調者來說那是別人的帳號：照著它等，
-    // 等的是別人的重置時間。讀不到自己的就是「不知道」，不知道不等於見底。
-    let identity = bot.identity.clone().unwrap_or_default();
-    if identity.is_empty() {
-        return None;
-    }
-    let host = crate::db::bot_host(&app.db, &bot.id).await.unwrap_or_else(|_| crate::config::LOCAL_HOST.to_string());
-    let key = crate::quota::quota_key(&host, &crate::quota::quota_base(&bot.kind, Some(&identity)));
+/// 協調者的額度現在是什麼狀態。三態，不是兩態：**讀不到**跟**有額度**不一樣。
+///
+/// 把「沒有讀數」當成恢復，就會在完全沒有證據的情況下把 `waiting_quota` 清掉並對人說「額度已恢復」
+/// ——那是謊報。`Unknown` 只代表不知道：已知的等待不解除，但到期時允許一次有界重試，只在取得
+/// 可用讀數後才算恢復（見 `notify`）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum QuotaState {
+    /// 這個身分沒有任何讀數（還沒探到、或探不到）。
+    Unknown,
+    /// 有讀數，而且還能用。
+    Available,
+    /// 撞限或共用視窗見底；`Some(t)` = 已知的重置時間。
+    Blocked(Option<String>),
+}
+
+/// 這顆 bot 的額度要查哪一把 key。
+///
+/// `quota_base_for_host`：身分的 env 是空的（`cc0` 這種「就是預設帳號」的 alias）時，讀數其實寫在
+/// **裸 `claude`** 那一把——所以固定拼 `claude:<identity>` 的協調者永遠讀不到自己的額度，也就永遠
+/// 不知道自己撞限了。反過來，有自己 env 的身分（cc1／cc2）只讀自己那把，不借用 cc0 的數字。
+async fn quota_key_for(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
+    let identity = bot.identity.clone().filter(|s| !s.trim().is_empty())?;
+    let host = crate::db::bot_host(&app.db, &bot.id).await.ok()?;
+    let base = crate::quota::quota_base_for_host(app, &host, &bot.kind, Some(&identity)).await;
+    Some(crate::quota::quota_key(&host, &base))
+}
+
+pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
+    let Some(key) = quota_key_for(app, bot).await else { return QuotaState::Unknown };
     let now = chrono::Utc::now();
     let q = app.quotas.lock().await;
-    let quota = q.get(&key)?;
+    let Some(quota) = q.get(&key) else { return QuotaState::Unknown };
     // CLI 明說被擋住（還沒過期）：等它說的時間，沒說就等最近的視窗重置。
     if let Some(hit) = quota.limit_hit.clone().filter(|h| !crate::quota::limit_hit_expired(Some(h))) {
         let soonest = [&quota.five_hour, &quota.seven_day, &quota.fable]
@@ -500,17 +518,22 @@ async fn quota_wait(app: &Arc<App>, bot: &crate::db::Bot) -> Option<Option<Strin
             .flatten()
             .filter_map(|w| w.resets_at.clone())
             .min();
-        return Some(hit.until.clone().or(soonest));
+        return QuotaState::Blocked(hit.until.clone().or(soonest));
     }
     let critical: Vec<&crate::quota::Window> = [&quota.five_hour, &quota.seven_day]
         .into_iter()
         .flatten()
         .filter(|w| w.critical() && !w.resets_at.as_deref().is_some_and(|t| super::policy::past(t, now)))
         .collect();
-    if critical.is_empty() {
-        return None;
+    if !critical.is_empty() {
+        return QuotaState::Blocked(critical.iter().filter_map(|w| w.resets_at.clone()).min());
     }
-    Some(critical.iter().filter_map(|w| w.resets_at.clone()).min())
+    // Partial readings cannot prove that both shared limits recovered.
+    if quota.five_hour.is_some() && quota.seven_day.is_some() {
+        QuotaState::Available
+    } else {
+        QuotaState::Unknown
+    }
 }
 
 fn digest(events: &[store::InboxEvent]) -> String {
@@ -581,30 +604,43 @@ pub async fn notify(app: &Arc<App>) {
     let now_iso = crate::db::now();
     // 額度狀態**每個 tick 都算一次**，跟「現在有沒有待辦」無關：只在有事要送時才重算的話，
     // 佇列清空後 `waiting_quota` 會永遠掛著——看門狗把它當成「不是故障」，協調者就再也不會被拉起來。
-    let blocked = quota_wait(app, &bot).await;
-    if let Some(reset) = blocked {
-        let retry = watchdog::iso_in(cap);
-        let next = match reset.as_deref() {
-            Some(t) if t < retry.as_str() && !watchdog::past(t) => t.to_string(),
-            _ => retry,
-        };
-        let detail = format!(
-            "{} 的額度見底；協調事件留在 inbox，{next} 再試，不會改由巡檢處理",
-            bot.identity.as_deref().unwrap_or("(身分不明)")
-        );
-        if row.status != "waiting_quota" || row.notify_next_at.as_deref() != Some(next.as_str()) {
+    let waiting = row.status == "waiting_quota";
+    // 送出去之前要等到的時間（額度或退避），隨下面的判斷更新。
+    let mut next_at = row.notify_next_at.clone();
+    match quota_state(app, &bot).await {
+        QuotaState::Blocked(reset) => {
+            // 已經在等、時間還沒到、讀數也沒變 → **什麼都不寫**。每個 tick 重算 `iso_in(cap)` 會
+            // 讓重試時間永遠往後飄（而且每 10 秒寫一次 DB、推一次 SSE），看起來像在等一個永遠不到的點。
+            let due_now = row.notify_next_at.as_deref().is_none_or(watchdog::past);
+            let reset_changed = row.quota_reset_at.as_deref() != reset.as_deref();
+            if waiting && !due_now && !reset_changed {
+                return;
+            }
+            let retry = watchdog::iso_in(cap);
+            let next = match reset.as_deref() {
+                Some(t) if t < retry.as_str() && !watchdog::past(t) => t.to_string(),
+                _ => retry,
+            };
+            let detail = format!(
+                "{} 的額度見底；協調事件留在 inbox，{next} 再試，不會改由巡檢處理",
+                bot.identity.as_deref().unwrap_or("(身分不明)")
+            );
             let _ = roles::set_status(&app.db, Role::Responder, "waiting_quota", Some(&detail), reset.as_deref()).await;
             let _ = roles::set_notify_next(&app.db, Role::Responder, Some(&next)).await;
             app.emit("supervisor_changed", json!({"responder": "waiting_quota", "retry_at": next})).await;
+            return;
         }
-        return;
+        QuotaState::Available if waiting => {
+            let _ = roles::set_status(&app.db, Role::Responder, "", Some("額度已恢復"), None).await;
+            let _ = roles::set_notify_next(&app.db, Role::Responder, None).await;
+            next_at = None;
+            app.emit("supervisor_changed", json!({"responder": "quota_resumed"})).await;
+        }
+        // 讀不到：不宣稱恢復、也不新增等待。已排定的重試時間到了就照常試一次（送達不等於額度已恢復）。
+        QuotaState::Unknown | QuotaState::Available => {}
     }
-    if row.status == "waiting_quota" {
-        let _ = roles::set_status(&app.db, Role::Responder, "", Some("額度已恢復"), None).await;
-        let _ = roles::set_notify_next(&app.db, Role::Responder, None).await;
-        app.emit("supervisor_changed", json!({"responder": "quota_resumed"})).await;
-    } else if row.notify_next_at.as_deref().is_some_and(|t| !watchdog::past(t)) {
-        // 上一次送不出去的有界退避還沒到。
+    // 還沒到下一次可以試的時間（上一次送不出去的退避，或讀不到額度時仍在等的那個點）。
+    if next_at.as_deref().is_some_and(|t| !watchdog::past(t)) {
         return;
     }
     let Ok(due) = roles::due_for(&app.db, Role::Responder, true, &now_iso, 0).await else { return };
@@ -631,6 +667,7 @@ pub async fn notify(app: &Arc<App>) {
                 .await
                 .unwrap_or(0);
             let _ = roles::record_wake(&app.db, Role::Responder, n, &roles::wake_reason(&due)).await;
+            // A queued/delivered prompt is not evidence that the provider accepted it.
             app.emit("supervisor_changed", json!({"responder": "woken", "events": n})).await;
         }
         Err(e) => defer(format!("{e:?}")).await,
@@ -777,6 +814,15 @@ mod flow_tests {
         }
     }
 
+    fn available() -> Quota {
+        let mut q = blocked();
+        q.limit_hit = None;
+        let w = crate::quota::Window { used_pct: 10.0, resets_at: Some("2999-01-01T00:00:00Z".into()) };
+        q.five_hour = Some(w.clone());
+        q.seven_day = Some(w);
+        q
+    }
+
     async fn age_everything(app: &Arc<App>) {
         sqlx::query("UPDATE supervisor_inbox SET created_at='2026-01-01T00:00:00Z'").execute(&app.db).await.unwrap();
     }
@@ -839,6 +885,7 @@ mod flow_tests {
         fx::configure_responder(&app).await;
         roles::set_status(&app.db, Role::Responder, "waiting_quota", Some("撞限"), Some("2999-01-01T00:00:00Z")).await.unwrap();
         roles::set_notify_next(&app.db, Role::Responder, Some("2999-01-01T00:00:00Z")).await.unwrap();
+        app.quotas.lock().await.insert("claude:cc0".into(), available());
         let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox").fetch_one(&app.db).await.unwrap();
         assert_eq!(events, 0, "佇列是空的");
 

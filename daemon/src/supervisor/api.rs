@@ -858,7 +858,7 @@ pub async fn post_approval_decision(
             break;
         }
     }
-    let Some(a) = decided else {
+    let Some((a, note)) = decided else {
         let now = store::approval(&app.db, &id).await.map_err(up)?;
         let status_now = now.as_ref().map(|n| n.status.clone());
         let reason = if status_now.as_deref() == Some("pending") { "decided_concurrently" } else { "already_decided" };
@@ -874,7 +874,6 @@ pub async fn post_approval_decision(
             }),
         ));
     };
-    let note = store::add_approval_decision(&app.db, &id, from_status, status, &actor, b.reason.as_deref()).await.map_err(up)?;
     app.emit("supervisor_changed", json!({"approval": a.to_json()})).await;
     let mut out = a.to_json();
     out["audit_note_id"] = json!(note);
