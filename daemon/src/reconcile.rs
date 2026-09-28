@@ -394,7 +394,7 @@ async fn refresh_child_kind(app: &Arc<App>, bot: &mut db::Bot, pane_id: &str, ki
         return Ok(());
     }
     sqlx::query(
-        "UPDATE runs SET runtime_model = NULL, runtime_effort = NULL, runtime_fast = NULL
+        "UPDATE runs SET runtime_model = NULL, runtime_effort = NULL, runtime_fast = NULL, runtime_identity = NULL
          WHERE bot_id = ? AND state IN ('starting','running','stopping')",
     )
     .bind(&bot.id)
@@ -3190,6 +3190,8 @@ mod compat_tests {
             .unwrap();
         assert_eq!(first.kind, "claude", "前提：第一輪沒有 kind／argv，只能暫時退回 parent");
         assert_eq!(first.identity.as_deref(), Some("cc1"));
+        // As if the first pass had read a Claude account off the pane: a kind change must drop it.
+        sqlx::query("UPDATE runs SET runtime_identity = 'cc1' WHERE bot_id = ?").bind(&first.id).execute(&app.db).await.unwrap();
 
         let argv = codex_argv();
         env.herdr.set_argv(&child_pane.pane_id, &argv);
@@ -3219,6 +3221,7 @@ mod compat_tests {
             .unwrap();
         assert_eq!(child.kind, "codex");
         assert_eq!(child.identity.as_deref(), Some("cx1"));
+        assert_eq!(run_of(&app, &child.id).await.unwrap().runtime_identity.as_deref(), Some("cx1"), "the run follows the new kind's account");
         assert_eq!(child.model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(child.effort.as_deref(), Some("max"));
         assert_eq!(child.fast, 1);
@@ -3324,6 +3327,7 @@ mod compat_tests {
         let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
         let head = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
         let lost = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let same = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
 
         let parent = a_bot(&env, "alfa").await;
         sqlx::query("UPDATE bots SET identity = 'cc1' WHERE id = ?")
@@ -3352,18 +3356,22 @@ mod compat_tests {
                    "workspace_id": ws.workspace_id, "tab_id": head.tab_id, "pane_id": head.pane_id, "cwd": "/tmp/p"}),
             json!({"name": format!("{parent_agent}-lost"), "agent": "claude", "agent_status": "idle",
                    "workspace_id": ws.workspace_id, "tab_id": lost.tab_id, "pane_id": lost.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": format!("{parent_agent}-same"), "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": same.tab_id, "pane_id": same.pane_id, "cwd": "/tmp/p"}),
         ];
-        for pane in [&root.pane_id, &head.pane_id, &lost.pane_id] {
+        for pane in [&root.pane_id, &head.pane_id, &lost.pane_id, &same.pane_id] {
             env.herdr.set_argv(pane, &["claude", "--dangerously-skip-permissions", "--model", "opus"]);
         }
         env.herdr.set_pid(&head.pane_id, 4924);
         env.herdr.set_pid(&lost.pane_id, 4925);
+        env.herdr.set_pid(&same.pane_id, 4926);
         // The parent's pane says `cc2` too, and must never be read: user config.
         let fake = Arc::new(FakeProcEnv {
             envs: std::collections::BTreeMap::from([
                 (1, claude_env(&format!("{home}/.claude-cc2"))),
                 (4924, claude_env(&format!("{home}/.claude-cc2/"))),
                 (4925, claude_env("/tmp/an-account-nobody-configured")),
+                (4926, claude_env(&format!("{home}/.claude-ccompany"))),
             ]),
             asked: std::sync::Mutex::new(Vec::new()),
         });
@@ -3390,12 +3398,24 @@ mod compat_tests {
         // An unclaimed directory is no answer: the inherited value stays.
         assert_eq!(kid("lost").await.identity.as_deref(), Some("cc1"));
 
+        // The run records what was actually read off the pane — also when it equals the inherited
+        // value — and stays NULL (UI: 未知) when nothing was: the inherited `cc1` is only a guess.
+        let run_identity = |name: &'static str| {
+            let app = app.clone();
+            let kid = kid(name);
+            async move { run_of(&app, &kid.await.id).await.expect("adopted run").runtime_identity }
+        };
+        assert_eq!(run_identity("head").await.as_deref(), Some("cc2"));
+        assert_eq!(kid("same").await.identity.as_deref(), Some("cc1"));
+        assert_eq!(run_identity("same").await.as_deref(), Some("cc1"), "detected, not merely inherited");
+        assert_eq!(run_identity("lost").await, None, "an unclaimed account is still unknown");
+
         let p = db::bot(&app.db, &parent).await.unwrap().unwrap();
         assert_eq!(p.identity.as_deref(), Some("cc1"), "a user bot's account is configuration, never scraped");
 
         // Once per child, never the parent: a per-pass `ps` is an ssh storm on remote hosts.
         super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
-        assert_eq!(*fake.asked.lock().unwrap(), vec![4924, 4925]);
+        assert_eq!(*fake.asked.lock().unwrap(), vec![4924, 4925, 4926]);
         assert_eq!(kid("head").await.identity.as_deref(), Some("cc2"));
     }
 

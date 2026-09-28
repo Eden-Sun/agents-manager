@@ -232,10 +232,13 @@ pub async fn sync_child_identity(
         return;
     };
     let dir = dir.unwrap_or("");
-    if bot.identity.as_deref() == Some(name.as_str()) {
+    if !app.hosts.is_current(&fence).await {
         return;
     }
-    if !app.hosts.is_current(&fence).await {
+    // The run remembers the account it was actually read off (`runs.runtime_identity`), even when
+    // it matches the inherited value: NULL there means "nobody knows", and the UI says so.
+    stamp_run_identity(app, bot, pane_id, &name).await;
+    if bot.identity.as_deref() == Some(name.as_str()) {
         return;
     }
     // `managed_by` in WHERE too: a race with the TOML projection must never write a user bot.
@@ -251,6 +254,25 @@ pub async fn sync_child_identity(
     tracing::info!(host, bot = %bot.name, pane = %pane_id, was = ?bot.identity, now = %name, %dir,
                    "reconcile: the child is on its own account, not the one it was adopted with");
     app.emit("bot_changed", json!({"bot_id": bot.id})).await;
+}
+
+/// Fills only an unrecorded run: a run the daemon started already carries the identity it was
+/// launched with (`lifecycle::start`). A kind change clears it (`reconcile::refresh_child_kind`).
+async fn stamp_run_identity(app: &Arc<App>, bot: &crate::db::Bot, pane_id: &str, name: &str) {
+    let stamped = sqlx::query(
+        "UPDATE runs SET runtime_identity = ?
+          WHERE bot_id = ? AND pane_id = ? AND state IN ('starting','running','stopping') AND runtime_identity IS NULL",
+    )
+    .bind(name)
+    .bind(&bot.id)
+    .bind(pane_id)
+    .execute(&app.db)
+    .await;
+    match stamped {
+        Ok(r) if r.rows_affected() > 0 => app.emit_bot_status(&bot.id).await,
+        Ok(_) => {}
+        Err(e) => tracing::warn!(bot = %bot.name, error = ?e, "cannot record the account on the child's run"),
+    }
 }
 
 #[cfg(test)]

@@ -2970,7 +2970,11 @@ CLI 結束後重驗一次登入狀態並寫回快取：**登出**的 pane 在重
 
 1. 補 model/effort 的同一次 `pane.process_info` 挑出 CLI 行程的 `pid`。
 2. `ps eww -p <pid>`（遠端走 `ssh_exec`）取 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME`（依 kind）。
-3. 比對 `identities_for_host(host)`（config 優先）；比對前用那台的 `$HOME` 展開 `~`/`$HOME`，正規化結尾斜線與 macOS `/private` 前綴。對得上寫回 `bots.identity`。
+3. 比對 `identities_for_host(host)`（config 優先）；比對前用那台的 `$HOME` 展開 `~`/`$HOME`，正規化結尾斜線與 macOS `/private` 前綴。對得上寫回 `bots.identity`，
+   並把同一個名字補進這個 pane 的 active run 的 `runs.runtime_identity`——**跟抄來的值相同也要補**：收編的 run 沒有啟動紀錄，
+   `runtime_identity` 是 NULL，側欄就標「未知」；偵測到了就是實際值，不再是推測。只補 NULL（daemon 自己起的 run 已經記著啟動時的身分）；
+   kind 被改正時連同 `runtime_model` 等一起清成 NULL，下一輪依新 kind 重新偵測。讀不到、沒人認領的維持 NULL，UI 照舊說「未知」
+   （`bots.identity` 那個抄來的值只是推測，不拿來冒充）。
 
 - **只動 `managed_by='child'`**（其他 bot 的 identity 是使用者設定、會投影回 config.toml；SQL `WHERE` 也帶著）。
 - model/effort 只補不改（argv 看不到之後打的 `/model`）；identity 補也改（那是收編時抄錯的值）。
