@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import socket
 import socketserver
 import subprocess
@@ -1880,6 +1881,13 @@ class OpsSyncTest(CliCase):
         self.agents.mkdir(parents=True, exist_ok=True)
         os.environ["AGM_LAUNCHAGENTS_DIR"] = str(self.agents)
         self.addCleanup(os.environ.pop, "AGM_LAUNCHAGENTS_DIR", None)
+        # Linux 那一邊（issue #677）同理：systemd user 目錄也指到暫存目錄，平台預設 darwin——
+        # 既有的 plist 測試寫的是 macOS 的行為，不能因為換到 Linux 機器跑就變成「plist 列被略過」。
+        self.units = Path(self.dir.name) / "systemd-user"
+        self.units.mkdir(parents=True, exist_ok=True)
+        for var, val in (("AGM_SYSTEMD_USER_DIR", str(self.units)), ("AGM_OPS_PLATFORM", "darwin")):
+            os.environ[var] = val
+            self.addCleanup(os.environ.pop, var, None)
         self.repo_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.repo_dir.cleanup)
         self.repo = Path(self.repo_dir.name)
@@ -1976,7 +1984,7 @@ class OpsSyncTest(CliCase):
         """對照表多一列 plist（`self.agents` 在 setUp 已經指到暫存目錄）。"""
         self.put("scripts/ops/install-manifest.tsv",
                  "scripts/ops/a.sh bin/a.sh\nscripts/ops/b.sh bin/b.sh\nscripts/ops/c.sh bin/c.sh\nscripts/ops/t.md t.md\n"
-                 "scripts/ops/launchd/com.agm.x.plist LaunchAgents/com.agm.x.plist\n")
+                 "scripts/ops/launchd/com.agm.x.plist LaunchAgents/com.agm.x.plist darwin\n")
         self.put("scripts/ops/launchd/com.agm.x.plist",
                  self.plist("com.agm.x", 1800,
                             extra="<key>StandardOutPath</key><string>/tmp/x.log</string>"
@@ -2112,8 +2120,170 @@ class OpsSyncTest(CliCase):
         repo = Path(__file__).resolve().parent.parent
         for line in (repo / agm.OPS_MANIFEST).read_text(encoding="utf-8").splitlines():
             if line.strip() and not line.startswith("#"):
-                source, _target = line.split()
+                source = line.split()[0]
                 self.assertTrue((repo / source).is_file(), f"對照表指到不存在的來源：{source}")
+
+    # ── systemd user unit（issue #677，Linux 主機）──────────────────────────────
+    SERVICE = (
+        "# 註解不算語意\n[Unit]\nDescription=x\n\n[Service]\nType=oneshot\n"
+        "Environment=PATH=/opt/repo\nExecStart=/bin/bash %h/AGM/bin/x.sh\n"
+        "StandardOutput=append:%h/AGM/x.systemd.log\n"
+    )
+    TIMER = "[Unit]\nDescription=x\n\n[Timer]\nOnActiveSec={0}s\nOnUnitActiveSec={0}s\n\n[Install]\nWantedBy=timers.target\n"
+
+    def with_units(self):
+        """對照表同時有 plist（darwin）、unit（linux）與一支只在 darwin 裝的腳本，平台切到 linux。"""
+        os.environ["AGM_OPS_PLATFORM"] = "linux"
+        self.put("scripts/ops/install-manifest.tsv",
+                 "scripts/ops/a.sh bin/a.sh\nscripts/ops/b.sh bin/b.sh\nscripts/ops/c.sh bin/c.sh darwin\n"
+                 "scripts/ops/t.md t.md\n"
+                 "scripts/ops/launchd/com.agm.x.plist LaunchAgents/com.agm.x.plist darwin\n"
+                 "scripts/ops/systemd/com.agm.x.service systemd/com.agm.x.service linux\n"
+                 "scripts/ops/systemd/com.agm.x.timer systemd/com.agm.x.timer linux\n")
+        self.put("scripts/ops/launchd/com.agm.x.plist", self.plist("com.agm.x", 1800))
+        self.put("scripts/ops/systemd/com.agm.x.service", self.SERVICE)
+        self.put("scripts/ops/systemd/com.agm.x.timer", self.TIMER.format(1800))
+        self.git("add", "-A")
+        self.git("commit", "-qam", "加 unit")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.install("bin/a.sh", "a v3\n")
+        self.install("bin/b.sh", "b v1\n")
+        self.install("t.md", "task\n")
+
+    def test_linux_compares_units_and_skips_the_darwin_rows(self):
+        """Linux 上只看 unit 與不分平台的列：plist 與 `darwin` 列報成 skipped、不是 missing。
+        unit 的註解、空行、`Environment=` 的值都不算落差（安裝端 PATH 是那台機器的）。"""
+        self.with_units()
+        (self.units / "com.agm.x.service").write_text(
+            self.SERVICE.replace("# 註解不算語意\n", "").replace("PATH=/opt/repo", "PATH=/home/u/.local/bin:/usr/bin")
+            .replace("[Service]\n", "\n[Service]\n; 另一種註解\n"), encoding="utf-8")
+        (self.units / "com.agm.x.timer").write_text(self.TIMER.format(1800), encoding="utf-8")
+        r = self.ok("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertTrue(r["in_sync"], r)
+        self.assertEqual(r["platform"], "linux")
+        self.assertEqual(sorted(x["target"] for x in r["ok"]),
+                         ["bin/a.sh", "bin/b.sh", "systemd/com.agm.x.service", "systemd/com.agm.x.timer", "t.md"])
+        self.assertEqual(sorted(x["target"] for x in r["skipped"]), ["LaunchAgents/com.agm.x.plist", "bin/c.sh"])
+
+    def test_linux_unit_interval_and_dropped_environment_are_drift(self):
+        """#487 的本體換到 systemd：間隔改掉要講出兩邊的值；`Environment=` 整行掉了（job 少了 PATH）也是落差。"""
+        self.with_units()
+        (self.units / "com.agm.x.service").write_text(
+            self.SERVICE.replace("Environment=PATH=/opt/repo\n", ""), encoding="utf-8")
+        (self.units / "com.agm.x.timer").write_text(self.TIMER.format(600), encoding="utf-8")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        r = json.loads(out)
+        rows = {x["target"]: x["diff"] for x in r["drift"]}
+        self.assertEqual(rows["systemd/com.agm.x.timer"]["Timer.OnUnitActiveSec"], {"repo": ["1800s"], "installed": ["600s"]})
+        self.assertEqual(rows["systemd/com.agm.x.service"]["Service.Environment"], {"repo": "<ignored>", "installed": None})
+
+    def test_linux_reports_unlisted_agm_units_and_darwin_only_scripts_as_extra(self):
+        """Linux 上沒版控的 `com.agm.*` unit＝extra；`~/Library/LaunchAgents` 不掃（那不是這台的排程）。
+        只在 darwin 裝的 browser-gc 腳本出現在 Linux 的 bin/，也算 extra——它不該被裝在這裡。"""
+        self.with_units()
+        (self.units / "com.agm.x.service").write_text(self.SERVICE, encoding="utf-8")
+        (self.units / "com.agm.x.timer").write_text(self.TIMER.format(1800), encoding="utf-8")
+        (self.units / "com.agm.ghost.timer").write_text(self.TIMER.format(60), encoding="utf-8")
+        (self.units / "other.service").write_text(self.SERVICE, encoding="utf-8")
+        (self.agents / "com.agm.ghost.plist").write_text(self.plist("com.agm.ghost", 60), encoding="utf-8")
+        self.install("bin/c.sh", "c v1\n")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        self.assertEqual(sorted(x["target"] for x in json.loads(out)["extra"]), ["bin/c.sh", "systemd/com.agm.ghost.timer"])
+
+    def test_an_unreadable_unit_is_drift_not_a_crash(self):
+        self.with_units()
+        (self.units / "com.agm.x.service").write_text("ExecStart=before any section\n", encoding="utf-8")
+        (self.units / "com.agm.x.timer").write_text(self.TIMER.format(1800), encoding="utf-8")
+        code, out, _ = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        [row] = [x for x in json.loads(out)["drift"] if x["target"] == "systemd/com.agm.x.service"]
+        self.assertIn("_error", row["diff"])
+
+    def test_a_scheduler_row_on_the_wrong_platform_is_a_bad_manifest(self):
+        """plist 沒標 darwin、unit 標成 darwin 都是對照表寫錯，不是「這台不裝」：拒絕，別報一堆 missing。"""
+        for line in ("scripts/ops/launchd/com.agm.x.plist LaunchAgents/com.agm.x.plist\n",
+                     "scripts/ops/systemd/com.agm.x.timer systemd/com.agm.x.timer darwin\n",
+                     "scripts/ops/a.sh bin/a.sh windows\n"):
+            with self.subTest(line=line):
+                self.put("scripts/ops/install-manifest.tsv", line)
+                self.git("commit", "-qam", f"壞對照表 {line}")
+                self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+                code, _out, err = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+                self.assertEqual(code, 2, err)
+                self.assertIn("bad_manifest", err)
+
+
+class SystemdParityTest(unittest.TestCase):
+    """issue #677：repo 裡每支 launchd job 都有等價的 systemd .service＋.timer（browser-gc 例外，寫明原因）。
+
+    「等價」＝跑同一支安裝好的 kick（直譯器同名、路徑把 `/Users/<人>/` 換成 `%h/`）、同一個間隔、
+    RunAtLoad 對到「timer 啟動後馬上跑」、plist 有 EnvironmentVariables 的 unit 也要有同一組變數名。
+    改了其中一邊忘了另一邊，這裡就紅。
+    """
+
+    REPO = Path(__file__).resolve().parent.parent
+    #: 只在 macOS 裝的 job 與原因（同 install-manifest.tsv 的註解）。
+    DARWIN_ONLY = {"browser-gc": "喚醒的 child 操作 ego-browser（圖形介面），Linux 主機沒有桌面"}
+    #: 只有 systemd 需要講的屬性。dev-server 的 kick 用 detached 拉起 vite：launchd 看程序群，脫離了就活著；
+    #: systemd 看 cgroup，預設 KillMode=control-group 會在 kick 一結束就把 vite 一起收掉。
+    SYSTEMD_ONLY = {"dev-server": {"Service.KillMode": ["process"]}}
+
+    @staticmethod
+    def home_relative(arg: str) -> str:
+        return re.sub(r"^/Users/[^/]+/", "%h/", arg)
+
+    def units(self, name: str) -> tuple[dict, dict]:
+        d = self.REPO / "scripts/ops/systemd"
+        return (agm._unit_semantics((d / f"com.agm.{name}.service").read_bytes()),
+                agm._unit_semantics((d / f"com.agm.{name}.timer").read_bytes()))
+
+    def test_every_launchd_job_has_an_equivalent_unit_pair(self):
+        import plistlib
+        plists = sorted((self.REPO / "scripts/ops/launchd").glob("com.agm.*.plist"))
+        self.assertEqual(len(plists), 8)
+        for p in plists:
+            name = p.name[len("com.agm."):-len(".plist")]
+            with self.subTest(job=name):
+                if name in self.DARWIN_ONLY:
+                    self.assertFalse((self.REPO / f"scripts/ops/systemd/com.agm.{name}.service").exists())
+                    continue
+                pl = plistlib.loads(p.read_bytes())
+                svc, tmr = self.units(name)
+                self.assertEqual(svc["Service.Type"], ["oneshot"])
+                [exec_start] = svc["Service.ExecStart"]
+                want = [self.home_relative(a) for a in pl["ProgramArguments"]]
+                got = exec_start.split()
+                # 直譯器在兩個平台的位置不同（Homebrew 的 bun vs ~/.bun/bin），比名字；其餘逐字。
+                self.assertEqual(Path(got[0]).name, Path(want[0]).name)
+                self.assertEqual(got[1:], want[1:])
+                self.assertEqual(tmr["Timer.OnUnitActiveSec"], [f"{pl['StartInterval']}s"])
+                self.assertEqual(tmr["Timer.OnActiveSec"], ["1s" if pl.get("RunAtLoad") else f"{pl['StartInterval']}s"])
+                self.assertEqual(tmr["Install.WantedBy"], ["timers.target"])
+                log = self.home_relative(pl["StandardOutPath"]).replace(".launchd.log", ".systemd.log")
+                self.assertEqual(svc["Service.StandardOutput"], [f"append:{log}"])
+                self.assertEqual(svc["Service.StandardError"], [f"append:{log}"])
+                # 值被 `_unit_semantics` 忽略了，這裡直接讀原文比變數名。
+                raw = (self.REPO / f"scripts/ops/systemd/com.agm.{name}.service").read_text(encoding="utf-8")
+                env = sorted(m.split("=", 1)[0] for m in re.findall(r"^Environment=(\S+)", raw, re.M))
+                self.assertEqual(env, sorted(pl.get("EnvironmentVariables", {})))
+                for key, want_value in self.SYSTEMD_ONLY.get(name, {}).items():
+                    self.assertEqual(svc.get(key), want_value, key)
+
+    def test_every_unit_is_in_the_manifest_as_linux_and_darwin_only_rows_are_marked(self):
+        rows = {}
+        for line in (self.REPO / agm.OPS_MANIFEST).read_text(encoding="utf-8").splitlines():
+            if line.strip() and not line.startswith("#"):
+                parts = line.split()
+                rows[parts[0]] = parts[2] if len(parts) == 3 else None
+        for u in sorted((self.REPO / "scripts/ops/systemd").iterdir()):
+            with self.subTest(unit=u.name):
+                self.assertEqual(rows.get(f"scripts/ops/systemd/{u.name}"), "linux")
+        for name in self.DARWIN_ONLY:
+            for src in (f"scripts/ops/{name}-kick.sh", f"scripts/ops/{name}-task.md", f"scripts/ops/launchd/com.agm.{name}.plist"):
+                with self.subTest(src=src):
+                    self.assertEqual(rows.get(src), "darwin")
 
 
 # ------------------------------------------------------------- issue 認領（#425）
