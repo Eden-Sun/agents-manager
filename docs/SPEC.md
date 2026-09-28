@@ -4112,6 +4112,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   在 `incidents::sweep` **之前**對兩個角色各讀一次畫面（`supervisor::role_faults::refresh`），結論放**記憶體**
   （`App.role_faults`，同 §18.9「計時在記憶體，重啟重算」）；`role_state` 只讀記憶體，不在 API 路徑上抓 pane
   （`/api/supervisor/health` 與 `/api/supervisor/responder` 都會被 UI 高頻輪詢）。
+  巡檢的 bot 與黏著狀態一律讀 `supervisors`（正式 setup 寫入的來源）；協調者讀 `supervisor_roles`。沒有 `supervisor_roles.patrol.bot_id` 不代表巡檢未設定，巡檢故障的 `since` 由這張記憶體結論提供。
   **判定要兩個訊號同時成立**：回覆槽那一行（`tui_prompts::is_not_logged_in_reply`，同上一段），
   **加上** daemon 自己那份額度讀數是空的或陳舊的（key 不在 `App.quotas`、或還在 `App.quota_stale` 裡、或兩個視窗都沒有數字）。
   上一段的單一訊號在「只有送失敗才看」的前提下是安全的，改成每拍都看就不成立——一顆登入好好的 bot 只要在回報裡引用那句話

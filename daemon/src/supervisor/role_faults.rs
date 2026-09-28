@@ -144,8 +144,8 @@ pub async fn note_notify_round(
 /// 這個角色建立過沒有（有登記的 bot_id）。讀不到就當成「有」——當成沒有會把已經開著的 incident
 /// 誤關掉，而 `role_state` 那邊讀不到 DB 本來就會回 `Unknown`。
 async fn is_configured(app: &Arc<App>, role: Role) -> bool {
-    match crate::supervisor::roles::get(&app.db, role).await {
-        Ok(row) => row.bot_id.is_some(),
+    match crate::supervisor::roles::bot_for(&app.db, role).await {
+        Ok(bot_id) => bot_id.is_some(),
         Err(_) => true,
     }
 }
@@ -165,8 +165,7 @@ async fn is_configured(app: &Arc<App>, role: Role) -> bool {
 /// 於是真的登出也偵測不到，而且測試照不出來（i407 review 2026-09-24）。daemon 自己那份是 claude 的
 /// StatusLine hook 送進來的 `rate_limits`（`/api/quota` 同一個來源），登入不了就不會有新的讀數。
 async fn probe_role(app: &Arc<App>, role: Role) -> Option<bool> {
-    let row = crate::supervisor::roles::get(&app.db, role).await.ok()?;
-    let bot_id = row.bot_id?;
+    let bot_id = crate::supervisor::roles::bot_for(&app.db, role).await.ok()??;
     // claude 以外的 CLI 沒有這個畫面，不要拿別人的版面去猜——但那不是「讀不到」，是「不是這個問題」。
     let bot = crate::db::bot(&app.db, &bot_id).await.ok().flatten()?;
     if bot.kind != "claude" {
@@ -312,6 +311,38 @@ mod tests {
         refresh(&app).await;
         assert!(snapshot(&app, RESPONDER).await.unwrap().probe_failed, "畫面仍然讀不到");
         assert_eq!(reason(&app, RESPONDER).await, None);
+    }
+
+    /// Production setup stores the patrol bot in `supervisors`, without a `supervisor_roles`
+    /// patrol bot id. The health tick, health state, and incident probe must all use that source.
+    #[tokio::test]
+    async fn patrol_faults_use_the_bot_registered_by_supervisor_setup() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "AGM-patrol").await;
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        crate::supervisor::store::set_env(&app.db, &bot.id, &env.project_id, "/tmp").await.unwrap();
+        crate::testing::fake_run(&app, &bot.id).await;
+
+        note_notify_round(&app, "patrol", turns(&["t1", "t2", "t3"]), false).await;
+        refresh(&app).await;
+
+        let fault = snapshot(&app, Role::Patrol).await.expect("configured patrol must be watched");
+        assert_eq!(fault.reason, Some(REASON_NOTIFY_STALLED));
+        assert_eq!(
+            crate::supervisor::health::role_state(&app, Role::Patrol).await,
+            crate::supervisor::health::RoleState::Unavailable(REASON_NOTIFY_STALLED),
+        );
+
+        let thresholds = crate::supervisor::incidents::Thresholds::from_cfg(&app.cfg.get().await.supervisor);
+        let probed = crate::supervisor::incidents::observe(&app, &thresholds).await;
+        let patrol_incident = probed.seen.iter().find(|observation| {
+            observation.kind == crate::supervisor::incidents::ROLE_UNAVAILABLE_KIND
+                && observation.resource == Role::Patrol.as_str()
+        }).expect("patrol fault must appear in the incident probe");
+        let detail: serde_json::Value = serde_json::from_str(&patrol_incident.detail).unwrap();
+        assert_eq!(detail["bot_id"], bot.id);
+        assert_eq!(detail["reason"], REASON_NOTIFY_STALLED);
     }
 
     /// 沒建立的角色**整個不留項目**：留著會讓 `incidents::observe` 每一拍把這個 kind 算成
