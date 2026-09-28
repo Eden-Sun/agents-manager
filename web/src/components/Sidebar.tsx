@@ -7,6 +7,7 @@ import { MOCK_MODE } from '../api'
 import type { Bot, BotKind, Lamp, MessageHit } from '../api/types'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
+import { eventIsFromCurrentTarget, eventTargetIsInsideCurrentTarget } from '../lib/domEvents'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import {
   adjacentBotId,
@@ -270,8 +271,12 @@ function BotRow({
       data-bot-id={botId}
       tabIndex={0}
       draggable={!compact}
-      onClick={() => selectBot(botId)}
+      onClick={(e) => {
+        if (!eventTargetIsInsideCurrentTarget(e)) return
+        selectBot(botId)
+      }}
       onKeyDown={(e) => {
+        if (!eventIsFromCurrentTarget(e)) return
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
           selectBot(botId)

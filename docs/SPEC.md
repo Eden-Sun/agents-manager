@@ -50,6 +50,8 @@ origin:   web | external                     （external = 非本系統送出、
 
 燈號：disconnected 灰；stopped/exited 離線；starting 黃閃；stopping 黃；running+idle 綠；+working 藍動畫；+blocked 紅；+unknown 灰黃。
 
+側欄 bot 列可由列本身取得焦點後按 Enter／Space 選取；列內選單與按鈕保留各自的鍵盤操作。確認框由 portal 顯示時，其點擊不切換目前 bot；點列內一般內容仍可選取 bot。
+
 **「跑了多久」的起點（issue #93）**：`runs.agent_status_since`，`agent_status` 真的改變時由 DB trigger
 （`runs_agent_status_since`）蓋成當下時間，同值重寫（同一行 pane 狀態重複出現）不算改變。取捨：
 沒有另外做一套獨立的 pane 文字解析（`✻ Cooked for …`）當權威來源——`agent_status` 本身已經是
