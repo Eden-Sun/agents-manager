@@ -2771,7 +2771,9 @@ UI：左上格「已用 · 剩 N」，剩餘 < 15% 轉警示色；明細第一�
 ### 15.2 展開看程序 / 砍程序
 **owner 判定讀 process 環境變數，不讀我們的帳本**：daemon 起 bot 注入 `AM_BOT_ID`，herdr 對每個 pane 注入 `HERDR_PANE_ID`，子孫繼承——連 daemon 開機前就在跑的也判得對。
 **被 init 收養的孤兒也算在內**（#529）：父行程死掉之後 ppid 接不回 herdr 樹，但環境是繼承來的，所以帶 `HERDR_PANE_ID`／`AM_BOT_ID` 的照樣收進清單——不然它們佔著 RAM 卻從清單消失、`kill` 還一律回「不在樹裡」。
-macOS `ps -Ewwo pid=,args=`，Linux `/proc/<pid>/environ`。
+macOS `ps -Ewwo pid=,args=`，Linux `/proc/<pid>/environ`。Linux 輸出按 pid 將 environ bytes 以 base64 傳輸，
+解析時再依 NUL 切分，環境值內的換行不當成新 pid；讀取或解析失敗的 pid 沒有可用環境，砍程序端點回 502、不送訊號。
+macOS 的 `ps -E` 會把環境值中的換行印成字面 `\012`，不切斷 pid 記錄。
 
 | owner | 條件 | UI |
 |---|---|---|

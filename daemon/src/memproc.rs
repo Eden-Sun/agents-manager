@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -15,6 +16,7 @@ use crate::state::App;
 /// Tree and environments in one round trip. macOS has `ps -E`; Linux needs `/proc/<pid>/environ`
 /// (same-user only, which is exactly the scope we want).
 const MARKER: &str = "---AM-ENV---";
+const LINUX_ENV_MARKER: &str = "---AM-LINUX-ENV---";
 /// #526：送訊號那一趟要確認「這個 pid 還是剛才篩過的那一顆」，靠的是起始時間。獨立一段是因為
 /// `lstart` 本身含空白（`Wed Sep 24 10:11:12 2026`），混進主表會把 `parse_ps` 的 argv 欄切壞。
 const START_MARKER: &str = "---AM-START---";
@@ -23,10 +25,13 @@ echo '---AM-START---'
 ps -Awwo pid=,lstart= 2>/dev/null
 echo '---AM-ENV---'
 if [ "$(uname -s)" = Linux ]; then
+  printf '%s\n' '---AM-LINUX-ENV---'
   for f in /proc/[0-9]*/environ; do
     p=${f%/environ}; p=${p#/proc/}
-    e=$(tr '\0' ' ' < "$f" 2>/dev/null) || continue
-    printf '%s %s\n' "$p" "$e"
+    b=$(base64 < "$f" 2>/dev/null) || continue
+    e=$(printf '%s' "$b" | tr -d '\n') || continue
+    [ -n "$e" ] || continue
+    printf '%s NUL:%s\n' "$p" "$e"
   done
 else
   ps -Ewwo pid=,args= 2>/dev/null
@@ -77,7 +82,12 @@ struct Raw {
 /// `daemon` 壓過其他所有判斷（#529）：daemon 自己（與它開的 ssh master、remote-cargo helper…）是
 /// 從某顆 pane 起來的，環境裡帶著 `HERDR_PANE_ID`，甚至 `AM_BOT_ID`。以前它被 init 收養之後就掉出
 /// herdr 樹、怎麼樣都殺不到；孤兒也收進來之後不擋就會變成「用釋放記憶體的端點把 daemon 自己關掉」。
-fn owner_of(is_daemon: bool, is_herdr_proc: bool, bot_id: Option<&str>, pane_id: Option<&str>) -> &'static str {
+fn owner_of(
+    is_daemon: bool,
+    is_herdr_proc: bool,
+    bot_id: Option<&str>,
+    pane_id: Option<&str>,
+) -> &'static str {
     if is_daemon {
         "daemon"
     } else if is_herdr_proc {
@@ -91,21 +101,110 @@ fn owner_of(is_daemon: bool, is_herdr_proc: bool, bot_id: Option<&str>, pane_id:
     }
 }
 
-fn env_value(blob: &str, key: &str) -> Option<String> {
-    let want = format!("{key}=");
-    blob.split_whitespace()
-        .find_map(|t| t.strip_prefix(want.as_str()))
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_string())
+#[derive(Debug, Clone)]
+enum ProcessEnv {
+    NulDelimited(HashMap<String, String>),
+    PsText(String),
 }
 
-fn parse_env(section: &str) -> HashMap<i32, String> {
+fn env_value(env: &ProcessEnv, key: &str) -> Option<String> {
+    let want = format!("{key}=");
+    match env {
+        ProcessEnv::NulDelimited(values) => values.get(key).filter(|v| !v.is_empty()).cloned(),
+        ProcessEnv::PsText(blob) => blob
+            .split_whitespace()
+            .find_map(|t| t.strip_prefix(want.as_str()))
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+    }
+}
+
+/// Decode one Linux /proc environ payload. Invalid data leaves this pid without a readable env.
+fn parse_linux_environ(encoded: &str) -> Option<ProcessEnv> {
+    if encoded.is_empty() {
+        return None;
+    }
+    let bytes = STANDARD.decode(encoded).ok()?;
+    if bytes.is_empty() || bytes.last() != Some(&0) {
+        return None;
+    }
+
+    let mut values = HashMap::new();
+    let entries = &bytes[..bytes.len() - 1];
+    if !entries.is_empty() {
+        for entry in entries.split(|byte| *byte == 0) {
+            if entry.is_empty() {
+                return None;
+            }
+            let separator = entry.iter().position(|byte| *byte == b'=')?;
+            if separator == 0 {
+                return None;
+            }
+            let entry_key = &entry[..separator];
+            let key = if entry_key == b"AM_BOT_ID" {
+                "AM_BOT_ID"
+            } else if entry_key == b"AM_PROJECT_ID" {
+                "AM_PROJECT_ID"
+            } else if entry_key == b"HERDR_PANE_ID" {
+                "HERDR_PANE_ID"
+            } else if entry_key == b"HERDR_SOCKET_PATH" {
+                "HERDR_SOCKET_PATH"
+            } else {
+                continue;
+            };
+            let value = std::str::from_utf8(&entry[separator + 1..])
+                .ok()?
+                .to_string();
+            if values.insert(key.to_string(), value).is_some() {
+                return None;
+            }
+        }
+    }
+    Some(ProcessEnv::NulDelimited(values))
+}
+
+fn parse_linux_env(section: &str) -> HashMap<i32, ProcessEnv> {
+    let mut m = HashMap::new();
+    let mut seen = HashSet::new();
+    for line in section.lines() {
+        let line = line.trim_start();
+        let Some((pid, rest)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<i32>() else {
+            continue;
+        };
+        if !seen.insert(pid) {
+            m.remove(&pid);
+            continue;
+        }
+        let Some(encoded) = rest.trim_start().strip_prefix("NUL:") else {
+            continue;
+        };
+        if let Some(env) = parse_linux_environ(encoded) {
+            m.insert(pid, env);
+        }
+    }
+    m
+}
+
+fn parse_env(section: &str) -> HashMap<i32, ProcessEnv> {
+    let mut lines = section.splitn(2, '\n');
+    let first = lines.next().unwrap_or_default().trim_end_matches('\r');
+    if first == LINUX_ENV_MARKER {
+        return parse_linux_env(lines.next().unwrap_or_default());
+    }
+
     let mut m = HashMap::new();
     for line in section.lines() {
         let line = line.trim_start();
-        let Some((pid, rest)) = line.split_once(char::is_whitespace) else { continue };
-        let Ok(pid) = pid.parse::<i32>() else { continue };
-        m.insert(pid, rest.to_string());
+        let Some((pid, rest)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<i32>() else {
+            continue;
+        };
+        m.insert(pid, ProcessEnv::PsText(rest.to_string()));
     }
     m
 }
@@ -141,8 +240,12 @@ fn parse_start(section: &str) -> HashMap<i32, String> {
     let mut m = HashMap::new();
     for line in section.lines() {
         let line = line.trim();
-        let Some((pid, rest)) = line.split_once(char::is_whitespace) else { continue };
-        let Ok(pid) = pid.parse::<i32>() else { continue };
+        let Some((pid, rest)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<i32>() else {
+            continue;
+        };
         let started = rest.split_whitespace().collect::<Vec<_>>().join(" ");
         if !started.is_empty() {
             m.insert(pid, started);
@@ -180,7 +283,9 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
         if seen.contains(&p.pid) {
             continue;
         }
-        let Some(blob) = envs.get(&p.pid) else { continue };
+        let Some(blob) = envs.get(&p.pid) else {
+            continue;
+        };
         if env_value(blob, "HERDR_PANE_ID").is_none() && env_value(blob, "AM_BOT_ID").is_none() {
             continue;
         }
@@ -212,8 +317,21 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
         let bot_id = blob.and_then(|b| env_value(b, "AM_BOT_ID"));
         let pane_id = blob.and_then(|b| env_value(b, "HERDR_PANE_ID"));
         let socket_path = blob.and_then(|b| env_value(b, "HERDR_SOCKET_PATH"));
-        let owner = owner_of(daemons.contains(&pid), is_herdr(p), bot_id.as_deref(), pane_id.as_deref());
-        raws.push(Raw { p_index: i, pane_id, socket_path, bot_id, owner, subtree_bytes: bytes, children: kids });
+        let owner = owner_of(
+            daemons.contains(&pid),
+            is_herdr(p),
+            bot_id.as_deref(),
+            pane_id.as_deref(),
+        );
+        raws.push(Raw {
+            p_index: i,
+            pane_id,
+            socket_path,
+            bot_id,
+            owner,
+            subtree_bytes: bytes,
+            children: kids,
+        });
     }
     (procs, raws)
 }
@@ -223,7 +341,11 @@ fn scan(out: &str) -> (Vec<Proc>, Vec<Raw>) {
 /// 只在本機成立，而這支函式同一份碼要用在每一台。
 fn daemon_pids(procs: &[Proc], children: &HashMap<i32, Vec<i32>>) -> HashSet<i32> {
     let mut out: HashSet<i32> = HashSet::new();
-    let mut stack: Vec<i32> = procs.iter().filter(|p| exe_name(&p.argv) == DAEMON_EXE).map(|p| p.pid).collect();
+    let mut stack: Vec<i32> = procs
+        .iter()
+        .filter(|p| exe_name(&p.argv) == DAEMON_EXE)
+        .map(|p| p.pid)
+        .collect();
     while let Some(pid) = stack.pop() {
         if !out.insert(pid) {
             continue;
@@ -261,7 +383,11 @@ fn listed(procs: &[Proc], raws: &[Raw]) -> Vec<MemProcess> {
             }
         })
         .collect();
-    rows.sort_by(|a, b| b.subtree_bytes.cmp(&a.subtree_bytes).then(a.pid.cmp(&b.pid)));
+    rows.sort_by(|a, b| {
+        b.subtree_bytes
+            .cmp(&a.subtree_bytes)
+            .then(a.pid.cmp(&b.pid))
+    });
     rows
 }
 
@@ -283,7 +409,9 @@ pub struct PaneFacts {
     pub env_seen: bool,
 }
 
-const SHELLS: &[&str] = &["bash", "zsh", "sh", "fish", "dash", "ksh", "login", "-zsh", "-bash"];
+const SHELLS: &[&str] = &[
+    "bash", "zsh", "sh", "fish", "dash", "ksh", "login", "-zsh", "-bash",
+];
 
 /// 以 herdr 報的 shell pid 為根，沿 `ps -A` 的 ppid 樹把**全部子孫**算進這顆 pane（§6.5e 的 GC 守門）。
 ///
@@ -328,7 +456,10 @@ pub fn pane_facts_for_shell(out: &str, pane_id: &str, shell_pid: i32) -> Option<
             continue;
         }
         f.env_seen = true;
-        for (key, into) in [("AM_BOT_ID", &mut f.bot_ids), ("AM_PROJECT_ID", &mut f.project_ids)] {
+        for (key, into) in [
+            ("AM_BOT_ID", &mut f.bot_ids),
+            ("AM_PROJECT_ID", &mut f.project_ids),
+        ] {
             if let Some(v) = env_value(blob, key) {
                 if !into.contains(&v) {
                     into.push(v);
@@ -347,7 +478,9 @@ pub fn bot_totals_from_dump(out: &str) -> HashMap<String, (u64, HashSet<String>)
     let (procs, raws) = scan(out);
     let mut by_bot: HashMap<String, (u64, HashSet<String>)> = HashMap::new();
     for r in &raws {
-        let Some(bot) = r.bot_id.clone() else { continue };
+        let Some(bot) = r.bot_id.clone() else {
+            continue;
+        };
         if r.owner != "bot" {
             continue;
         }
@@ -367,7 +500,11 @@ pub fn processes_from_dump(out: &str) -> Vec<MemProcess> {
 }
 
 pub(crate) async fn dump(app: &Arc<App>, host: &str) -> anyhow::Result<String> {
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    let conn = app
+        .hosts
+        .get(host)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     if conn.is_local() {
         let o = crate::local_sh::output(PS_TREE_ENV).await?;
         if !o.status.success() {
@@ -402,7 +539,13 @@ pub async fn processes(app: &Arc<App>, host: &str) -> anyhow::Result<Value> {
 
 /// `GET /api/mem/processes/pane` (SPEC §15.2). Any pane herdr knows is readable (no registration
 /// check, unlike `shell::read`), but only the last `lines` visible rows as plain text — never keys or input.
-pub async fn pane_preview(app: &Arc<App>, host: &str, pane_id: &str, socket: Option<&str>, lines: u32) -> crate::lifecycle::LcResult<Value> {
+pub async fn pane_preview(
+    app: &Arc<App>,
+    host: &str,
+    pane_id: &str,
+    socket: Option<&str>,
+    lines: u32,
+) -> crate::lifecycle::LcResult<Value> {
     use crate::lifecycle::LcError;
     // Another local herdr session's socket: same user's socket, no wider than `herdr` in their shell.
     let client = match socket.filter(|s| !s.is_empty()) {
@@ -412,10 +555,17 @@ pub async fn pane_preview(app: &Arc<App>, host: &str, pane_id: &str, socket: Opt
             }
             crate::herdr::HerdrClient::new(path)
         }
-        Some(_) => return Err(LcError::Bad("遠端主機只能讀它設定的那個 herdr session".into())),
+        Some(_) => {
+            return Err(LcError::Bad(
+                "遠端主機只能讀它設定的那個 herdr session".into(),
+            ))
+        }
         None => crate::api::shell::client_for(app, host).await?.0,
     };
-    let read = client.pane_read(pane_id, "visible", lines).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    let read = client
+        .pane_read(pane_id, "visible", lines)
+        .await
+        .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     let (columns, rows) = match client.pane_size(pane_id).await {
         Ok(Some((w, h))) => (Some(w), Some(h)),
         _ => (None, None),
@@ -480,7 +630,9 @@ fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<Target, KillDenied>
     }
     for member in &set {
         // 子孫不在 herdr 樹裡（讀不到環境、`env -i` 起的）時 `raws` 沒有它：沒有歸屬就沒有理由擋。
-        let Some(r) = owner_of_pid.get(member) else { continue };
+        let Some(r) = owner_of_pid.get(member) else {
+            continue;
+        };
         match r.owner {
             "herdr" => return Ok(Err(KillDenied::Herdr)),
             "daemon" => return Ok(Err(KillDenied::Daemon)),
@@ -497,14 +649,25 @@ fn screen_kill(out: &str, pid: i32) -> anyhow::Result<Result<Target, KillDenied>
     };
     // 深的先收：父行程先死的話，子孫會被 init 收養，之後只能靠環境認回來。
     set.reverse();
-    Ok(Ok(Target { pid, exe: exe_name(&procs[raw.p_index].argv).to_string(), freed: raw.subtree_bytes, set, started }))
+    Ok(Ok(Target {
+        pid,
+        exe: exe_name(&procs[raw.p_index].argv).to_string(),
+        freed: raw.subtree_bytes,
+        set,
+        started,
+    }))
 }
 
 /// 確認與送訊號放進**同一趟**指令（#526）：兩趟之間 pid 被回收的話，訊號會打在別人身上，
 /// 而回報還是被篩選那一顆的 exe 與大小。對不上就什麼都不送。
 fn kill_script(target: &Target, sig: &str) -> String {
     let pid = target.pid;
-    let set = target.set.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
+    let set = target
+        .set
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
         "s=$(ps -o lstart= -p {pid} 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//')\n\
          [ \"$s\" = {started} ] || {{ printf 'AM_PID_CHANGED\\n'; exit 0; }}\n\
@@ -519,19 +682,36 @@ fn kill_script(target: &Target, sig: &str) -> String {
 
 /// Re-samples instead of trusting the caller's list: pids are recycled, and a stale row must
 /// never let a `kill` escape the herdr trees.
-pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow::Result<Result<Value, KillDenied>> {
+pub async fn kill(
+    app: &Arc<App>,
+    host: &str,
+    pid: i32,
+    signal: &str,
+) -> anyhow::Result<Result<Value, KillDenied>> {
     let out = dump(app, host).await?;
     let target = match screen_kill(&out, pid)? {
         Ok(t) => t,
         Err(d) => return Ok(Err(d)),
     };
-    let sig = if signal.eq_ignore_ascii_case("KILL") { "KILL" } else { "TERM" };
+    let sig = if signal.eq_ignore_ascii_case("KILL") {
+        "KILL"
+    } else {
+        "TERM"
+    };
     let cmd = kill_script(&target, sig);
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    let conn = app
+        .hosts
+        .get(host)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     let stdout = if conn.is_local() {
         let o = crate::local_sh::output(&cmd).await?;
         if !o.status.success() {
-            anyhow::bail!("kill exited {}: {}", o.status, String::from_utf8_lossy(&o.stderr).trim());
+            anyhow::bail!(
+                "kill exited {}: {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
         }
         String::from_utf8_lossy(&o.stdout).into_owned()
     } else {
@@ -548,19 +728,26 @@ pub async fn kill(app: &Arc<App>, host: &str, pid: i32, signal: &str) -> anyhow:
     // Update the badge now rather than up to 15s later.
     let snap = crate::memstat::sample(app).await;
     app.emit("mem_updated", json!(snap)).await;
-    Ok(Ok(json!({"host": host, "pid": pid, "signal": sig, "exe": exe, "freed_bytes": freed})))
+    Ok(Ok(
+        json!({"host": host, "pid": pid, "signal": sig, "exe": exe, "freed_bytes": freed}),
+    ))
 }
 
 /// 測試用：跑一段 sh 並回 stdout。放在這裡是因為 `kill_script` 的驗證要真的執行腳本。
 #[cfg(test)]
 fn run_sh(script: &str) -> String {
-    let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().expect("sh");
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("sh");
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD;
 
     const DUMP: &str = "\
   400     1  48000 /opt/homebrew/bin/herdr --session agents-manager
@@ -596,6 +783,56 @@ mod tests {
         rows.iter().find(|r| r.pid == pid).expect("row present")
     }
 
+    fn linux_env_dump(record: &str) -> String {
+        let (tree, _) = DUMP.split_once("---AM-ENV---\n").unwrap();
+        format!("{tree}---AM-ENV---\n---AM-LINUX-ENV---\n{record}\n")
+    }
+
+    #[test]
+    fn linux_environ_newlines_do_not_hide_bot_identity_or_allow_kill() {
+        // This matches `/proc/<pid>/environ`: entries are NUL-separated, and a value may contain
+        // newlines that look like another pid and an environment assignment.
+        let environ =
+            b"BASH_FUNC_x%%=() {\n  500 AM_BOT_ID=spoof\n}\0HERDR_PANE_ID=w1:p1\0AM_BOT_ID=b1\0";
+        let record = format!("  402 NUL:{}", STANDARD.encode(environ));
+        let dump = linux_env_dump(&record);
+        assert!(
+            !parse_env(split_sections(&dump).1).contains_key(&500),
+            "embedded numeric line is not a pid record"
+        );
+
+        let rows = processes_from_dump(&dump);
+        assert_eq!(row(&rows, 402).owner, "bot");
+        assert_eq!(row(&rows, 402).bot_id.as_deref(), Some("b1"));
+        let totals = bot_totals_from_dump(&dump);
+        assert!(
+            totals.contains_key("b1"),
+            "the bot's process remains accounted"
+        );
+        assert!(
+            !totals.contains_key("spoof"),
+            "a numeric line in a value is not a pid record"
+        );
+        match screen_kill(&dump, 402).unwrap() {
+            Err(KillDenied::Bot(id)) => assert_eq!(id, "b1"),
+            other => panic!("the process belongs to bot b1 and must not be killable: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_linux_environ_is_treated_as_unreadable_for_kill() {
+        let invalid_rows = [
+            "  402 NUL:not-base64!".to_string(),
+            format!("  402 NUL:{}", STANDARD.encode(b"not-an-assignment\0")),
+            format!("  402 NUL:{}", STANDARD.encode(b"AM_BOT_ID=b1")),
+        ];
+        for row in invalid_rows {
+            let dump = linux_env_dump(&row);
+            let err = screen_kill(&dump, 402).unwrap_err().to_string();
+            assert!(err.contains("環境"), "{row}: {err}");
+        }
+    }
+
     #[test]
     fn owner_comes_from_the_environment() {
         let rows = processes_from_dump(DUMP);
@@ -617,7 +854,10 @@ mod tests {
         let totals = bot_totals_from_dump(&dump);
         assert_eq!(totals.len(), 1, "只有 b1 帶 AM_BOT_ID");
         let (bytes, panes) = &totals["b1"];
-        assert_eq!(*bytes, (30_000 + 820_000 + 40_000 + 50_000 + 200_000) * 1024);
+        assert_eq!(
+            *bytes,
+            (30_000 + 820_000 + 40_000 + 50_000 + 200_000) * 1024
+        );
         assert_eq!(panes.len(), 2);
     }
 
@@ -625,7 +865,10 @@ mod tests {
     fn subtree_folds_children_in() {
         let rows = processes_from_dump(DUMP);
         // zsh 30M + claude 820M + node 40M.
-        assert_eq!(row(&rows, 401).subtree_bytes, (30_000 + 820_000 + 40_000) * 1024);
+        assert_eq!(
+            row(&rows, 401).subtree_bytes,
+            (30_000 + 820_000 + 40_000) * 1024
+        );
         assert_eq!(row(&rows, 401).children, 2);
         assert_eq!(row(&rows, 402).subtree_bytes, (820_000 + 40_000) * 1024);
         assert_eq!(row(&rows, 402).children, 1);
@@ -639,7 +882,8 @@ mod tests {
         // herdr itself is not offered as a row.
         assert!(rows.iter().all(|r| r.exe != "herdr"));
         // Anything under 8 MiB is folded away.
-        let small = processes_from_dump("  400     1  48000 herdr\n  401   400   100 /bin/zsh -l\n");
+        let small =
+            processes_from_dump("  400     1  48000 herdr\n  401   400   100 /bin/zsh -l\n");
         assert!(small.is_empty());
     }
 
@@ -685,19 +929,30 @@ mod tests {
         assert!(!nested.shell_only);
         assert_eq!(nested.foreground, None, "巢狀 shell 不算前景程式");
         assert_eq!(nested.pids, vec![401, 402]);
-        assert_eq!((nested.bot_ids.as_slice(), nested.project_ids.as_slice()), (&["b1".to_string()][..], &["p1".to_string()][..]));
+        assert_eq!(
+            (nested.bot_ids.as_slice(), nested.project_ids.as_slice()),
+            (&["b1".to_string()][..], &["p1".to_string()][..])
+        );
 
         // 讀不到環境的子行程照樣是這顆 pane 的。
         let no_env = pane_facts_for_shell(dump, "w1:p2", 403).unwrap();
         assert!(!no_env.shell_only);
-        assert!(no_env.foreground.as_deref().unwrap().contains("http.server"));
+        assert!(no_env
+            .foreground
+            .as_deref()
+            .unwrap()
+            .contains("http.server"));
 
         // 環境裡的 pane id 是別人的（別的 herdr session 同號、或繼承來的）：行程算這顆，歸屬不算。
         let foreign = pane_facts_for_shell(dump, "w1:p3", 405).unwrap();
         assert!(!foreign.shell_only);
         assert!(foreign.bot_ids.is_empty(), "{foreign:?}");
 
-        assert_eq!(pane_facts_for_shell(dump, "w1:p4", 999), None, "不在樹裡就判不出來");
+        assert_eq!(
+            pane_facts_for_shell(dump, "w1:p4", 999),
+            None,
+            "不在樹裡就判不出來"
+        );
     }
 
     #[test]
@@ -718,18 +973,35 @@ mod tests {
     #[test]
     fn the_kill_script_stops_at_the_check_when_the_pid_changed() {
         let me = std::process::id() as i32;
-        let started = super::run_sh(&format!("ps -o lstart= -p {me} 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//'"));
+        let started = super::run_sh(&format!(
+            "ps -o lstart= -p {me} 2>/dev/null | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//'"
+        ));
         let started = started.trim().to_string();
-        assert!(!started.is_empty(), "這台機器的 ps 讀不到自己的 lstart，測不了");
+        assert!(
+            !started.is_empty(),
+            "這台機器的 ps 讀不到自己的 lstart，測不了"
+        );
 
         // 對得上：走到送訊號那一段（`set` 空的，`kill` 沒有對象）。
-        let same = Target { pid: me, exe: "x".into(), freed: 1, set: vec![], started: started.clone() };
+        let same = Target {
+            pid: me,
+            exe: "x".into(),
+            freed: 1,
+            set: vec![],
+            started: started.clone(),
+        };
         let out = super::run_sh(&kill_script(&same, "TERM"));
         assert!(out.contains("AM_KILLED"), "{out:?}");
         assert!(!out.contains("AM_PID_CHANGED"), "{out:?}");
 
         // 對不上（pid 被回收成別的行程）：什麼都不送。
-        let other = Target { pid: me, exe: "x".into(), freed: 1, set: vec![], started: "Wed Sep 24 10:00:05 2026".into() };
+        let other = Target {
+            pid: me,
+            exe: "x".into(),
+            freed: 1,
+            set: vec![],
+            started: "Wed Sep 24 10:00:05 2026".into(),
+        };
         let out = super::run_sh(&kill_script(&other, "TERM"));
         assert!(out.contains("AM_PID_CHANGED"), "{out:?}");
         assert!(!out.contains("AM_KILLED"), "{out:?}");
@@ -742,14 +1014,24 @@ mod tests {
             Ok(t) => t,
             Err(d) => panic!("404 是 pane 的 shell，應該放行：{d:?}"),
         };
-        assert_eq!(t.set, vec![405, 404], "深的先收：父先死的話子孫會被 init 收養");
+        assert_eq!(
+            t.set,
+            vec![405, 404],
+            "深的先收：父先死的話子孫會被 init 收養"
+        );
         let script = kill_script(&t, "TERM");
         let check = script.find("AM_PID_CHANGED").expect("要有比對那一段");
         let first_kill = script.find("kill -").expect("要有送訊號那一段");
         assert!(check < first_kill, "比對必須在送訊號之前：{script}");
-        assert!(script.contains("kill -STOP 405 404"), "先凍住整棵，不然它還會 fork：{script}");
+        assert!(
+            script.contains("kill -STOP 405 404"),
+            "先凍住整棵，不然它還會 fork：{script}"
+        );
         assert!(script.contains("kill -TERM 405 404"), "{script}");
-        assert!(script.contains("kill -CONT 405 404"), "凍住之後要放開才收得了尾：{script}");
+        assert!(
+            script.contains("kill -CONT 405 404"),
+            "凍住之後要放開才收得了尾：{script}"
+        );
     }
 
     /// 沒有起始時間（那台的 `ps` 不吃 `lstart`、或輸出被截斷）＝確認不了同一顆行程，寧可不送。
@@ -764,10 +1046,15 @@ mod tests {
     #[test]
     fn a_subtree_that_contains_a_bot_is_refused_as_a_bot() {
         // 404（pane 的 shell，自己不是 bot）底下掛一顆別人的 bot。
-        let dump = DUMP
-            .replace("---AM-START---\n", "  410   404 300000 claude --resume\n---AM-START---\n")
-            .replace("---AM-ENV---\n", "  410 Wed Sep 24 10:00:09 2026\n---AM-ENV---\n")
-            + "  410 claude HERDR_PANE_ID=w2:p1 AM_BOT_ID=b9\n";
+        let dump =
+            DUMP.replace(
+                "---AM-START---\n",
+                "  410   404 300000 claude --resume\n---AM-START---\n",
+            )
+            .replace(
+                "---AM-ENV---\n",
+                "  410 Wed Sep 24 10:00:09 2026\n---AM-ENV---\n",
+            ) + "  410 claude HERDR_PANE_ID=w2:p1 AM_BOT_ID=b9\n";
         match screen_kill(&dump, 404).unwrap() {
             Err(KillDenied::Bot(id)) => assert_eq!(id, "b9"),
             other => panic!("子孫裡有 bot 就不能放行：{other:?}"),
@@ -797,13 +1084,29 @@ mod tests {
   910 claude --resume
 ";
         let rows = processes_from_dump(dump);
-        let orphan = rows.iter().find(|r| r.pid == 900).expect("被收養的孤兒要回到清單上");
+        let orphan = rows
+            .iter()
+            .find(|r| r.pid == 900)
+            .expect("被收養的孤兒要回到清單上");
         assert_eq!(orphan.owner, "pane");
-        assert_eq!(orphan.subtree_bytes, (512_000 + 64_000) * 1024, "它自己的子樹照算");
+        assert_eq!(
+            orphan.subtree_bytes,
+            (512_000 + 64_000) * 1024,
+            "它自己的子樹照算"
+        );
         // 環境裡完全沒有我們的變數：那是別人的行程，不歸我們管。
-        assert!(rows.iter().all(|r| r.pid != 910), "沒有 AM_*／HERDR_* 的不收進來");
-        assert!(matches!(screen_kill(dump, 900), Ok(Ok(_))), "認回來了就殺得掉");
-        assert!(matches!(screen_kill(dump, 910), Ok(Err(KillDenied::NotInTree))));
+        assert!(
+            rows.iter().all(|r| r.pid != 910),
+            "沒有 AM_*／HERDR_* 的不收進來"
+        );
+        assert!(
+            matches!(screen_kill(dump, 900), Ok(Ok(_))),
+            "認回來了就殺得掉"
+        );
+        assert!(matches!(
+            screen_kill(dump, 910),
+            Ok(Err(KillDenied::NotInTree))
+        ));
     }
 
     /// #529：daemon 自己（與它開的 ssh master、helper）也是從某顆 pane 起來的，環境裡帶著
@@ -852,6 +1155,9 @@ mod tests {
         assert!(err.contains("環境"), "{err}");
         // 讀得到、真的沒主人：照舊放行；bot 照舊 409。
         assert!(matches!(screen_kill(DUMP, 407), Ok(Ok(_))));
-        assert!(matches!(screen_kill(DUMP, 402), Ok(Err(KillDenied::Bot(_)))));
+        assert!(matches!(
+            screen_kill(DUMP, 402),
+            Ok(Err(KillDenied::Bot(_)))
+        ));
     }
 }
