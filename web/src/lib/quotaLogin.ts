@@ -12,6 +12,11 @@ export function canLoginInSession(kind: BotKind): boolean {
   return kind === 'claude' || kind === 'grok'
 }
 
+/** 額度列選了身份就走 daemon 的 host-aware 登入；只有預設帳號留在主機 shell／TUI 登入。 */
+export function shouldUseIdentityLogin(identity: string | null): identity is string {
+  return identity !== null
+}
+
 /**
  * 「未登入」的 `/login` 要送進哪個活著的同 host／kind／身份 bot；沒有回 null（按鈕 disabled）。
  * 回 id 不回物件：當 selector 用，新物件會讓 useSyncExternalStore 每輪都判定變了。
