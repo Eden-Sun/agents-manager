@@ -1645,6 +1645,34 @@ fn notify_backoff(attempts: i64) -> Duration {
     Duration::from_secs(RETRY_BACKOFF[i])
 }
 
+/// An acknowledged notify disappears from the recovery work list. Keep using it as recovery
+/// evidence only when its completed turn is newer than this role's tracked failed turns.
+async fn handled_notify_completed_after_failures(
+    app: &Arc<App>,
+    role: &str,
+    failed_turns: &std::collections::BTreeSet<String>,
+) -> bool {
+    if failed_turns.is_empty() {
+        return false;
+    }
+    let ids = std::iter::repeat("?").take(failed_turns.len()).collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT EXISTS (
+            SELECT 1 FROM supervisor_inbox i JOIN turns t ON t.id=i.notify_turn_id
+             WHERE i.supervisor_id=? AND i.state='handled' AND COALESCE(i.claimed_by,i.role)=?
+               AND t.status IN ('completed','completed_fallback')
+               AND t.rowid > COALESCE((SELECT MAX(rowid) FROM turns WHERE id IN ({ids})), 0)
+        )"
+    );
+    let mut query = sqlx::query_scalar::<_, i64>(&sql)
+        .bind(store::SUPERVISOR_ID)
+        .bind(role);
+    for id in failed_turns {
+        query = query.bind(id);
+    }
+    query.fetch_one(&app.db).await.is_ok_and(|found| found != 0)
+}
+
 /// Delivered, but never answered.
 ///
 /// Three different things end up here and they are not the same: the notify turn failed or was
@@ -1737,6 +1765,25 @@ async fn recover_unacked(app: &Arc<App>) {
         }
         if store::requeue_inbox(&app.db, &e.id, why).await.unwrap_or(false) {
             tracing::warn!(event = %e.id, attempts = e.notify_attempts, why, "re-queueing an unanswered notification");
+        }
+    }
+    // #684：照協調者 persona 在回合中 ack 之後，成功回合的事件已是 handled，不在上面的重送清單裡。
+    // 仍把「最後一個失敗回合之後」已完成的 handled notify turn 當成通路恢復證據；較舊的成功回合
+    // 不會清掉後來累積的失敗。
+    for role in super::role_faults::WATCHED {
+        let key = role.as_str().to_string();
+        if notify_rounds.get(&key).is_some_and(|round| round.1) {
+            continue;
+        }
+        let mut failed = super::role_faults::snapshot(app, role)
+            .await
+            .map(|fault| fault.failed_turns)
+            .unwrap_or_default();
+        if let Some((this_round, _)) = notify_rounds.get(&key) {
+            failed.extend(this_round.iter().cloned());
+        }
+        if handled_notify_completed_after_failures(app, role.as_str(), &failed).await {
+            notify_rounds.entry(key).or_default().1 = true;
         }
     }
     for (role, (failed, any_completed)) in notify_rounds {
@@ -2589,6 +2636,59 @@ mod tests {
             super::super::role_faults::snapshot(&app, Role::Responder).await.is_none_or(|f| f.failed_turns.is_empty()),
             "協調者一次都沒送過這一則，不能算它不可用"
         );
+    }
+
+    /// #684: the responder may ack its notification before the turn completes. Once handled,
+    /// `delivered_inbox` no longer returns it, but a completed post-failure turn must still clear
+    /// the notify-stalled fault.
+    #[tokio::test]
+    async fn an_acked_completed_notify_turn_clears_notify_stalled() {
+        use super::super::bot_requests::flow_tests;
+        use super::super::roles::{self, Role};
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('r-r','resp','running','idle',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-r','resp',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+
+        let mut failed = std::collections::BTreeSet::new();
+        for i in 0..super::super::role_faults::NOTIFY_STALL_LIMIT {
+            let turn = format!("t-fail-{i}");
+            sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES (?,'c-r','r-r','web','failed',?)")
+                .bind(&turn).bind(&now).execute(&app.db).await.unwrap();
+            failed.insert(turn);
+        }
+        super::super::role_faults::note_notify_round(&app, "responder", failed, false).await;
+        super::super::role_faults::refresh(&app).await;
+        assert_eq!(
+            super::super::role_faults::reason(&app, Role::Responder).await,
+            Some(super::super::role_faults::REASON_NOTIFY_STALLED)
+        );
+
+        let id = store::push_inbox(&app.db, "approval_requested:a684", "approval_requested", None, None, None, &json!({}))
+            .await.unwrap().unwrap();
+        roles::classify(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES ('t-ok','c-r','r-r','web','in_flight',?)")
+            .bind(crate::db::now()).execute(&app.db).await.unwrap();
+        roles::mark_delivered(&app.db, std::slice::from_ref(&id), Role::Responder, "t-ok", "ok").await.unwrap();
+        assert_eq!(
+            roles::ack(&app.db, &id, Role::Responder, true).await.unwrap(),
+            roles::AckOutcome::Acked,
+            "the responder acks during the turn"
+        );
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id='t-ok'")
+            .bind(crate::db::now()).execute(&app.db).await.unwrap();
+
+        recover_unacked(&app).await;
+        super::super::role_faults::refresh(&app).await;
+        assert_eq!(
+            super::super::role_faults::reason(&app, Role::Responder).await,
+            None,
+            "the completed acknowledged turn is proof that notifications work again"
+        );
+        assert!(super::super::role_faults::snapshot(&app, Role::Responder).await.unwrap().failed_turns.is_empty());
     }
 
     /// 放棄補送（`gave_up`）與喊另一個角色的 `inbox_gave_up` 同一個交易：通知寫不進去，事件就不轉 `gave_up`、留在

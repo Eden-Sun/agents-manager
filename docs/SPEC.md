@@ -4129,7 +4129,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   已計入的回合 id 存成**集合**（不是計數器——`recover_unacked` 是
   逐筆掃 inbox 事件的，同一角色一輪裡可以有好幾筆不同的 `notify_turn_id`，用「上一個算過的 id」去重時兩個壞回合兩輪就會
   湊到 3）。這一輪只要有任何回合真的跑完就整個歸零；集合大小達到 `NOTIFY_STALL_LIMIT`（3）就併進 `role_state` 的不可用原因
-  `notify_stalled`。這跟 `responder_undeliverable`（根本送不出去）是兩件事：這一項是「送出去了、
+  `notify_stalled`。已 ack 的事件不在重送清單，但仍會看它關聯的 notify 回合；最後一個失敗之後有回合完成就歸零，較早的成功回合不會清掉後來的失敗（issue #684）。這跟 `responder_undeliverable`（根本送不出去）是兩件事：這一項是「送出去了、
   但回合沒跑完」，#420 現場那四筆最後都是 `notify turn did not complete`，被送了 66／43／18／6 次才 gave_up。
   不可用原因字串（對外契約）：`needs_login`／`waiting_quota`／`notify_stalled`／`no_run`。
 - **唯讀面板要看得到這個結論**（issue #454）：`GET /api/supervisor` 的 `responder` 與 `GET /api/supervisor/health` 的
