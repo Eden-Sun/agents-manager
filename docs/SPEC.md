@@ -150,6 +150,13 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     pre-v2 的 `bot_previews` 缺 `REFERENCES bots(id)`，migrate 會重建表補回去，所以不再需要例外）；
     **欄位層級的 `PRIMARY KEY` 不比**，那一項已經由欄位的主鍵序管到了。
     標準答案裡沒有的東西（已移除功能留下的表、索引）不管。
+  - **`spawn_hints` v29 → v30（issue #635）**：正式 v29 定義是
+    `CREATE TABLE spawn_hints (pane_id TEXT PRIMARY KEY, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id), created_at TEXT NOT NULL)`；
+    `host` 原本就非 NULL，migration 原值保留，不補預設值。重建成 `(host, pane_id)` 主鍵時，同一組鍵若有多列，按 `created_at` 留最新一列，
+    時間相同則留 `rowid` 較大的一列；較舊列丟棄並記 warn。相同 pane id 在不同 host 上都保留。無法成為新表有效列的 NULL pane id 也丟棄並記 warn。
+    建新表、`INSERT … SELECT` 去重、DROP、RENAME 與還原原表明寫 index／trigger 都在同一交易；失敗整批 rollback。新表保留
+    `REFERENCES bots(id)`。正式 v29 沒有額外明寫的 `spawn_hints` index／trigger；PK 自動索引由新主鍵重建，migration 仍會保存並還原
+    `sqlite_master` 裡任何明寫的 index／trigger，避免有資料的舊庫靜靜丟失物件。
 - **到期動作不靠行程內的 timer 當唯一真相**（issue #75）：每一種「等一下再做」的到期時間都**存在 DB 的擁有者那一列**上——
   排隊 prompt 的重試 `turns.next_flush_at`、交辦重送 `supervisor_assignments.next_attempt_at`、等額度 `…resume_at`、
   協調者補送 `supervisor_inbox.notify_next_at`、總管看門狗 `supervisors.watchdog_next_at`、hook 事件 `hook_events.next_attempt_at`。
@@ -1484,7 +1491,7 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 
 一個 bot 一個 tab。對帳的逐 bot 迴圈走完後，`agent.list` 裡**沒有 bot 認領**的 agent 依序試三條線索：
 
-1. **spawn hint（issue #94，最優先）**：`spawn_hints` 表裡 `pane_id` 對得上的那筆 → hint 記的那顆 bot（見下方）。
+1. **spawn hint（issue #94，最優先）**：`spawn_hints` 表裡 `(host, pane_id)` 對得上的那筆 → hint 記的那顆 bot（見下方）。
 2. **血緣**：它的 `tab_id` 等於某 bot 活動 run 的 `tab_id` → 那顆 bot 的子 agent（子 pane 從父 pane split 出來，必然在父的 tab 裡，不需要 agent 配合）。
    同一 tab 有多顆 bot（父 + 已認領的子）時取名字前綴最長者，平手取非 `child`——孫代因此掛在子代下面。
 3. **名字前綴**：`<某 bot 的 agent 名>-<字尾>`，取最長匹配。跨 tab 只有這條。
@@ -1499,8 +1506,8 @@ parent 算出來是 0，連字尾都取不到，退而用完整 herdr agent name
 `herdr pane split`／`agent start` 時，那條指令的 stdout 是 herdr 自己回的一個或多個 JSON-RPC 回應（`{"id":"cli:pane:split",
 "result":{"pane":{"pane_id":...}}}` 或 `{"id":"cli:agent:start","result":{"agent":{"pane_id":...}}}`，`daemon/src/spawn_hints.rs`
 對照真的 herdr 0.8.2 驗過）；Bash loop 的多個回應都逐一解析並記成 hint。**只信這兩個 `id`**：`pane:get`／`pane:current`／`pane:list` 回的是同一種 `{"pane":{...}}` 形狀，
-只看 `type` 會把「看一眼」也當成「剛創造」。記進 `spawn_hints(pane_id 唯一, host, bot_id, created_at)`，10 分鐘沒被用到就當
-過期（`prune_stale`，每次 `reconcile_host` 開頭跑一次）；被拿去認領成功就刪掉，重複跑不會重複建立。這條**只影響「這個 pane
+只看 `type` 會把「看一眼」也當成「剛創造」。記進 `spawn_hints((host, pane_id) 唯一, bot_id, created_at)`；pane ID 只在各自的 host 內唯一，
+不同 host 的同號 pane 各自保留。10 分鐘沒被用到就當過期（`prune_stale`，每次 `reconcile_host` 開頭跑一次）；被拿去認領成功只刪掉該 host 的 hint，重複跑不會重複建立。這條**只影響「這個 pane
 歸誰」，不影響「pane 裡到底有沒有 agent」**——`adopt_child` 認領前仍然要求那個 pane_id 在 `agent.list` 裡真的有一個沒被認領的
 agent，hint 錯了或指到不存在的 agent，最多就是這一顆這一輪沒被認領，不會憑空冒出 bot。
 **child 沒有這條路**：`managed_by='child'` 的 bot 一律沒有 hook（§4.3），沒有 Bash 工具事件流可看，子代自己開孫代時完全沒有

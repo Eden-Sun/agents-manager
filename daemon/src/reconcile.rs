@@ -993,7 +993,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
             Ok(bot_id) => {
                 claimed.insert(name.to_string());
                 if by_hint.is_some() {
-                    crate::spawn_hints::consume(app, &agent.pane_id).await;
+                    crate::spawn_hints::consume(app, host, &agent.pane_id).await;
                 }
                 app.emit("bot_changed", json!({"bot_id": bot_id})).await;
                 app.emit_bot_status(&bot_id).await;

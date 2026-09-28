@@ -144,10 +144,10 @@ CREATE INDEX IF NOT EXISTS attachments_msg ON attachments(message_id);
 -- issue #94：一顆 bot 自己的 Bash 工具跑 `herdr pane split`／`agent start`，那條指令的 stdout 就是
 -- herdr 自己回的 JSON——直接告訴 daemon「這個 pane_id 是我剛剛開的」，比 §6.5a 的同 tab／名字前綴推斷
 -- 更早、更精確。`reconcile::adopt_child` 認領前先查這裡；查不到才退回原本的血緣／前綴推斷（見
--- `daemon/src/spawn_hints.rs`）。`pane_id` 在同一個 herdr session 裡唯一，一顆 pane 只會被合法建立一次。
+-- `daemon/src/spawn_hints.rs`）。pane ID 只在各自的 host 內唯一。
 CREATE TABLE IF NOT EXISTS spawn_hints (
-  pane_id TEXT PRIMARY KEY, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
-  created_at TEXT NOT NULL
+  pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
+  created_at TEXT NOT NULL, PRIMARY KEY(host, pane_id)
 );
 -- 預覽模式（issue #253）：頂層 bot 的專案起的 vite dev server。一顆 bot 一列；`status` 是 off／starting／running／failed，
 -- `pane_id` 是放在該 bot 那個 tab 裡的 service pane，`off` 時是 NULL、`port` 也不再算被佔用。
@@ -254,6 +254,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (28, "a713484136f43301"),
     // issues #598/#603: persist runtime readback debt and launch-stamp retry proof.
     (29, "bfd0564e8c1a8d5e"),
+    // issue #635: spawn hints are unique by host and pane id, not by pane id globally.
+    (30, "db1edd18d6bf4693"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -338,6 +340,15 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
 ///
 /// 不含最後的漂移核對：`schema_guard` 拿它在全新的 in-memory DB 上跑一次，當 schema 的標準答案。
 async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
+    apply_migrations_inner(pool, false).await
+}
+
+#[cfg(test)]
+async fn apply_migrations_failing_after_spawn_hints_drop(pool: &SqlitePool) -> Result<()> {
+    apply_migrations_inner(pool, true).await
+}
+
+async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: bool) -> Result<()> {
     let mut tx = pool.begin().await?;
     let stored_version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&mut *tx).await?;
     anyhow::ensure!(
@@ -352,6 +363,9 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
         }
         sqlx::query(s).execute(&mut *tx).await.with_context(|| format!("apply schema: {s}"))?;
     }
+    // issue #635: pane ids are allocated independently by each herdr host. v29 keyed this
+    // table globally by pane_id; rebuild transactionally so same-id hints on different hosts coexist.
+    rebuild_spawn_hints_host_key(&mut tx, fail_after_spawn_hints_drop).await?;
     // Additive columns for databases created before they existed.
     for (table, col, ddl) in [
         // 2026-09-14: daemon 對這個 pane 直接打過字（當場套用 slash、codex 選單、/login）。之後這個
@@ -488,6 +502,107 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
     crate::release_triage::ledger::migrate(pool).await?;
     crate::judge::migrate(pool).await?;
     crate::cli_update::migrate(pool).await?;
+    Ok(())
+}
+
+/// issue #635：正式 v29 的 `spawn_hints` 已有 `host TEXT NOT NULL`，所以重建時照原值保留，無須補 host；
+/// 它只把 `pane_id` 設成全域主鍵，但 herdr 只保證每台 host 內唯一。重建為 `(host, pane_id)` 時，
+/// 若舊表有同一組鍵的重複列，留 `created_at` 最新的一列（時間相同取 rowid 較大的），其餘丟棄並記 warn。
+/// 同 pane id 在不同 host 的列會都留下。新表、資料搬移、DROP、RENAME 和還原明寫索引／trigger
+/// 都在 `apply_migrations` 的同一交易內；失敗會回滾整批，daemon 不會帶著半套 schema 啟動。
+async fn rebuild_spawn_hints_host_key(conn: &mut sqlx::SqliteConnection, fail_after_drop: bool) -> Result<()> {
+    let primary_key: Vec<(String, i64)> =
+        sqlx::query_as("SELECT name, pk FROM pragma_table_info('spawn_hints') WHERE pk > 0 ORDER BY pk")
+            .fetch_all(&mut *conn)
+            .await
+            .context("read spawn_hints primary key")?;
+    let wanted = vec![("host".to_string(), 1), ("pane_id".to_string(), 2)];
+    if primary_key == wanted {
+        return Ok(());
+    }
+    anyhow::ensure!(primary_key.is_empty() || primary_key == vec![("pane_id".to_string(), 1)],
+        "spawn_hints primary key is unexpected: {primary_key:?}; expected v29 pane_id, unconstrained legacy data, or v30 (host, pane_id)");
+
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spawn_hints")
+        .fetch_one(&mut *conn)
+        .await
+        .context("count v29 spawn_hints rows")?;
+    let extras: Vec<(String,)> = sqlx::query_as(
+        "SELECT sql FROM sqlite_master
+          WHERE tbl_name='spawn_hints' AND type IN ('index','trigger') AND sql IS NOT NULL
+          ORDER BY name",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .context("read spawn_hints indexes and triggers")?;
+    sqlx::query(
+        "CREATE TABLE spawn_hints_new (
+           pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id),
+           created_at TEXT NOT NULL, PRIMARY KEY(host, pane_id)
+         )",
+    )
+    .execute(&mut *conn)
+    .await
+    .context("create rebuilt spawn_hints table")?;
+    sqlx::query(
+        "INSERT INTO spawn_hints_new (pane_id, host, bot_id, created_at)
+         SELECT pane_id, host, bot_id, created_at FROM (
+           SELECT pane_id, host, bot_id, created_at,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY host, pane_id
+                    ORDER BY julianday(created_at) DESC, created_at DESC, rowid DESC
+                  ) AS collision_rank
+           FROM spawn_hints
+           WHERE pane_id IS NOT NULL
+         ) WHERE collision_rank = 1",
+    )
+    .execute(&mut *conn)
+    .await
+    .context("copy and deduplicate spawn_hints by host and pane id")?;
+    sqlx::query("DROP TABLE spawn_hints").execute(&mut *conn).await.context("drop old spawn_hints table")?;
+    if fail_after_drop {
+        anyhow::bail!("injected failure after dropping old spawn_hints table");
+    }
+    sqlx::query("ALTER TABLE spawn_hints_new RENAME TO spawn_hints")
+        .execute(&mut *conn)
+    .await
+    .context("rename rebuilt spawn_hints table")?;
+    for (sql,) in &extras {
+        sqlx::query(sql).execute(&mut *conn).await.with_context(|| format!("restore spawn_hints object: {sql}"))?;
+    }
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spawn_hints")
+        .fetch_one(&mut *conn)
+        .await
+        .context("count rebuilt spawn_hints rows")?;
+    anyhow::ensure!(after <= before, "spawn_hints rebuild created rows ({before} before, {after} after)");
+    if after < before {
+        tracing::warn!(
+            rows_before = before,
+            rows_kept = after,
+            rows_dropped = before - after,
+            "spawn_hints rebuild dropped rows with a NULL pane id or older duplicate (host, pane_id) keys"
+        );
+    }
+    let restored_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE tbl_name='spawn_hints' AND type IN ('index','trigger') AND sql IS NOT NULL",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .context("count restored spawn_hints indexes and triggers")?;
+    anyhow::ensure!(restored_count == extras.len() as i64, "spawn_hints rebuild restored {restored_count} explicit indexes/triggers, expected {}", extras.len());
+    let primary_key: Vec<(String, i64)> =
+        sqlx::query_as("SELECT name, pk FROM pragma_table_info('spawn_hints') WHERE pk > 0 ORDER BY pk")
+            .fetch_all(&mut *conn)
+            .await
+            .context("verify rebuilt spawn_hints primary key")?;
+    anyhow::ensure!(primary_key == wanted, "spawn_hints rebuild produced an unexpected primary key: {primary_key:?}");
+    let foreign_keys: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('spawn_hints')",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .context("verify rebuilt spawn_hints foreign key")?;
+    anyhow::ensure!(foreign_keys == [("bots".into(), "bot_id".into(), "id".into())], "spawn_hints rebuild lost its bots(id) foreign key: {foreign_keys:?}");
     Ok(())
 }
 
@@ -1249,6 +1364,251 @@ mod tests {
             .fetch_all(pool)
             .await
             .unwrap()
+    }
+
+    /// issue #635: migrate the official v29 DDL, including its bots foreign key, rows and
+    /// explicit sqlite_master objects, to a host-scoped key.
+    #[tokio::test]
+    async fn opening_v29_rebuilds_spawn_hints_key_with_host_scope() {
+        let dir = tmp_dir();
+        let path = dir.join("spawn-hints.sqlite3");
+        let old = open(&path).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp/p','p',?)")
+            .bind(now())
+            .execute(&old)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','b','claude','t',?)")
+            .bind(now())
+            .execute(&old)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b2','p','b2','claude','t2',?)")
+            .bind(now())
+            .execute(&old)
+            .await
+            .unwrap();
+
+        // This is the exact official v29 definition. It has host already, but its pane_id-only
+        // primary key means a valid v29 DB cannot yet hold the same pane id on two hosts.
+        sqlx::query("DROP TABLE spawn_hints").execute(&old).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE spawn_hints (pane_id TEXT PRIMARY KEY, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id), created_at TEXT NOT NULL)",
+        )
+        .execute(&old)
+        .await
+        .unwrap();
+        let rows = [
+            ("w1:p2", "local", "b", "2026-09-20T10:00:00.000Z"),
+            ("w2:p2", "remote-a", "b2", "2026-09-20T10:01:00.000Z"),
+            ("w3:p3", "remote-b", "b", "2026-09-20T10:02:00.000Z"),
+        ];
+        for (pane_id, host, bot_id, created_at) in rows {
+            sqlx::query("INSERT INTO spawn_hints (pane_id, host, bot_id, created_at) VALUES (?, ?, ?, ?)")
+                .bind(pane_id)
+                .bind(host)
+                .bind(bot_id)
+                .bind(created_at)
+                .execute(&old)
+                .await
+                .unwrap();
+        }
+        // Official v29 has no explicit spawn_hints index or trigger. Synthetic objects prove the
+        // rebuild restores any objects that a future or operator-managed v29 database may have.
+        sqlx::query("CREATE INDEX spawn_hints_test_host_created ON spawn_hints(host, created_at)")
+            .execute(&old)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER spawn_hints_test_insert AFTER INSERT ON spawn_hints BEGIN SELECT 1; END",
+        )
+        .execute(&old)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA user_version = 29").execute(&old).await.unwrap();
+
+        // Fail in the middle of the transactional rebuild, immediately after DROP. Reopening a
+        // raw pool must still show the complete committed v29 table and all its data/objects.
+        let err = apply_migrations_failing_after_spawn_hints_drop(&old).await.expect_err("injected failure should abort migration");
+        assert!(err.to_string().contains("injected failure after dropping old spawn_hints table"), "{err}");
+        old.close().await;
+
+        let inspect_opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display())).unwrap()
+            .create_if_missing(false)
+            .foreign_keys(true);
+        let inspect = SqlitePoolOptions::new().max_connections(1).connect_with(inspect_opts).await.unwrap();
+        let old_ddl: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='table' AND name='spawn_hints'")
+            .fetch_one(&inspect)
+            .await
+            .unwrap();
+        assert_eq!(
+            old_ddl,
+            "CREATE TABLE spawn_hints (pane_id TEXT PRIMARY KEY, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id), created_at TEXT NOT NULL)"
+        );
+        let rollback_rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT pane_id, host, bot_id, created_at FROM spawn_hints ORDER BY pane_id",
+        )
+        .fetch_all(&inspect)
+        .await
+        .unwrap();
+        assert_eq!(rollback_rows, rows.map(|(pane_id, host, bot_id, created_at)| {
+            (pane_id.into(), host.into(), bot_id.into(), created_at.into())
+        }));
+        let rollback_objects: Vec<(String, String)> = sqlx::query_as(
+            "SELECT type, name FROM sqlite_master WHERE tbl_name='spawn_hints' AND type IN ('index','trigger') ORDER BY type, name",
+        )
+        .fetch_all(&inspect)
+        .await
+        .unwrap();
+        assert_eq!(
+            rollback_objects,
+            [
+                ("index".into(), "spawn_hints_test_host_created".into()),
+                ("index".into(), "sqlite_autoindex_spawn_hints_1".into()),
+                ("trigger".into(), "spawn_hints_test_insert".into()),
+            ]
+        );
+        let rollback_fk: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('spawn_hints')",
+        )
+        .fetch_all(&inspect)
+        .await
+        .unwrap();
+        assert_eq!(rollback_fk, [("bots".into(), "bot_id".into(), "id".into())]);
+        let leftover_new_table: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='spawn_hints_new'",
+        )
+        .fetch_one(&inspect)
+        .await
+        .unwrap();
+        assert_eq!(leftover_new_table, 0);
+        let rollback_version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&inspect).await.unwrap();
+        assert_eq!(rollback_version, 29);
+        inspect.close().await;
+
+        let current = open(&path).await.expect("v29 DB should migrate on open");
+        let pk: Vec<(String, i64)> = sqlx::query_as("SELECT name, pk FROM pragma_table_info('spawn_hints') WHERE pk > 0 ORDER BY pk")
+            .fetch_all(&current)
+            .await
+            .unwrap();
+        assert_eq!(pk, [("host".into(), 1), ("pane_id".into(), 2)]);
+        let actual_rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT pane_id, host, bot_id, created_at FROM spawn_hints ORDER BY pane_id",
+        )
+            .fetch_all(&current)
+            .await
+            .unwrap();
+        assert_eq!(actual_rows, rows.map(|(pane_id, host, bot_id, created_at)| {
+            (pane_id.into(), host.into(), bot_id.into(), created_at.into())
+        }));
+        let fks: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('spawn_hints')",
+        )
+        .fetch_all(&current)
+        .await
+        .unwrap();
+        assert_eq!(fks, [("bots".into(), "bot_id".into(), "id".into())]);
+        let objects: Vec<(String, String)> = sqlx::query_as(
+            "SELECT type, name FROM sqlite_master WHERE tbl_name='spawn_hints' AND type IN ('index','trigger') ORDER BY type, name",
+        )
+        .fetch_all(&current)
+        .await
+        .unwrap();
+        assert_eq!(
+            objects,
+            [
+                ("index".into(), "spawn_hints_test_host_created".into()),
+                ("index".into(), "sqlite_autoindex_spawn_hints_1".into()),
+                ("trigger".into(), "spawn_hints_test_insert".into()),
+            ]
+        );
+
+        // Same pane ids on different hosts now coexist after migrating the official v29 fixture.
+        for (host, bot_id) in [("local", "b2"), ("remote-a", "b")] {
+            sqlx::query("INSERT INTO spawn_hints (pane_id, host, bot_id, created_at) VALUES ('same:pane', ?, ?, ?)")
+                .bind(host)
+                .bind(bot_id)
+                .bind("2026-09-20T11:00:00.000Z")
+                .execute(&current)
+                .await
+                .unwrap();
+        }
+        let cross_host_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM spawn_hints WHERE pane_id='same:pane'")
+            .fetch_one(&current)
+            .await
+            .unwrap();
+        assert_eq!(cross_host_rows, 2);
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&current).await.unwrap();
+        assert_eq!(version, 30);
+        schema_guard::check_drift(&current).await.expect("migrated v29 DB must match schema_guard");
+        current.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The official v29 PK prevents duplicate pane ids, but salvage duplicate-shaped legacy data
+    /// defensively: retain the newest row per (host, pane_id), while preserving same ids on other hosts.
+    #[tokio::test]
+    async fn opening_unconstrained_v29_spawn_hints_deduplicates_by_host_and_keeps_newest() {
+        let dir = tmp_dir();
+        let path = dir.join("spawn-hints-duplicates.sqlite3");
+        let old = open(&path).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp/p','p',?)")
+            .bind(now())
+            .execute(&old)
+            .await
+            .unwrap();
+        for (id, token) in [("b", "t"), ("b2", "t2")] {
+            sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?, 'p', ?, 'claude', ?, ?)")
+                .bind(id)
+                .bind(id)
+                .bind(token)
+                .bind(now())
+                .execute(&old)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DROP TABLE spawn_hints").execute(&old).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE spawn_hints (pane_id TEXT NOT NULL, host TEXT NOT NULL, bot_id TEXT NOT NULL REFERENCES bots(id), created_at TEXT NOT NULL)",
+        )
+        .execute(&old)
+        .await
+        .unwrap();
+        for (pane_id, host, bot_id, created_at) in [
+            ("same:pane", "local", "b", "2026-09-20T10:00:00.000Z"),
+            ("same:pane", "local", "b2", "2026-09-20T10:02:00.000Z"),
+            ("same:pane", "remote-a", "b", "2026-09-20T10:01:00.000Z"),
+        ] {
+            sqlx::query("INSERT INTO spawn_hints (pane_id, host, bot_id, created_at) VALUES (?, ?, ?, ?)")
+                .bind(pane_id)
+                .bind(host)
+                .bind(bot_id)
+                .bind(created_at)
+                .execute(&old)
+                .await
+                .unwrap();
+        }
+        sqlx::query("PRAGMA user_version = 29").execute(&old).await.unwrap();
+        old.close().await;
+
+        let current = open(&path).await.expect("duplicate rows must be deduplicated, not abort migration");
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT pane_id, host, bot_id, created_at FROM spawn_hints ORDER BY host",
+        )
+        .fetch_all(&current)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("same:pane".into(), "local".into(), "b2".into(), "2026-09-20T10:02:00.000Z".into()),
+                ("same:pane".into(), "remote-a".into(), "b".into(), "2026-09-20T10:01:00.000Z".into()),
+            ]
+        );
+        schema_guard::check_drift(&current).await.expect("deduplicated migration must match schema_guard");
+        current.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 往 `SCHEMA` 加欄位卻忘了補 ALTER 名單：以前在開發者機器上一律是綠的（每個測試都開新 DB），
