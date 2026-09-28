@@ -13,10 +13,10 @@ import { quotaBaseKey } from '../store/quotaLookup'
 import { KindIcon } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
 import { QuotaLoginShell } from './QuotaLoginShell'
-import { QuotaLoginSlash } from './QuotaLoginSlash'
+import { IdentityCliLogin, QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { RULE_5H, RULE_WEEKLY, resetBadge } from '../lib/quotaReset'
-import { cliLoginCommand, identityEnv } from '../lib/quotaLogin'
+import { cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
 import { carriedOverAt } from '../lib/quotaWindowAge'
 import './quotaStrip.css'
@@ -634,9 +634,12 @@ function StripDisableToggle({ entry, host }: { entry: QuotaEntry; host: string }
   )
 }
 
-/** codex 沒有 `/login`，一律開 shell 跑 `codex login`。 */
+/** Codex 預設帳號開 shell 登入；命名身份走 daemon 展開該主機的設定。 */
 function CodexShellLogin({ host, identity }: { host: string; identity: string | null }) {
   const command = useStore((s) => cliLoginCommand('codex', identityEnv(s, host, 'codex', identity)))
+  if (shouldUseIdentityLogin(identity)) {
+    return <IdentityCliLogin kind="codex" host={host} hostLabel={hostLabel(host)} identity={identity} />
+  }
   return <QuotaLoginShell host={host} hostLabel={hostLabel(host)} kind="codex" command={command} />
 }
 

@@ -259,7 +259,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 
 ### 4.1 登入 / 切換帳號
 把登入 slash 指令打進**正在跑的** bot 的 TUI；之後 agent 停在登入畫面，使用者完成前不能工作。登入結果由 `POST /api/hosts/{name}/tools/refresh` 重新偵測。
-網頁的 claude 已經不走這條（UI-DECISIONS「claude 用 CLI 登入、不佔 bot 的 pane」）：改用下面主機層的 `…/identities/{identity}/login`；端點本身照舊，grok 還在用。
+網頁額度列有命名身份時，各 kind 都改用下面主機層的 `…/identities/{identity}/login`，讓 daemon 在該主機展開設定；預設身份仍走原路：claude 開主機 shell、codex 開主機 shell、grok 有執行中 bot 時送 `/login`，沒有時開主機 shell。
 
 | kind | 指令 |
 |---|---|
