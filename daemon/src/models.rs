@@ -590,6 +590,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let cfg = crate::config::HostCfg {
+            shared_session: false,
             name: "unreachable-box".into(),
             ssh: "127.0.0.1".into(),
             ssh_port: port,
@@ -606,6 +607,7 @@ mod tests {
         let e = crate::testing::env().await;
         let host = format!("model-home-616-{}", crate::db::ulid().to_ascii_lowercase());
         let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
             ssh_port: 22,
@@ -666,6 +668,7 @@ mod tests {
         let e = crate::testing::env().await;
         let host = "models-347";
         let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
