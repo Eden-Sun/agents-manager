@@ -549,13 +549,14 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
 5173 dev server 的看門狗。**2026-09-24 之前只存在於 `AGM/bin/`**：`docs/SPEC.md` §18.1 把行為寫得很細，
 程式碼卻沒有版控、沒有 review、沒有測試，而且它會 `kill` 占用 port 的行程。現在 repo 是來源檔。
 
-- launchd `com.agm.dev-server`：`StartInterval 60`、`RunAtLoad`，跑 `bun run …/AGM/bin/dev-server-kick.ts`。
+- launchd `com.agm.dev-server`（Linux：systemd user timer 同名）：`StartInterval 60`、`RunAtLoad`，跑 `bun run …/AGM/bin/dev-server-kick.ts`。
+- 5173 的 worktree＝`${AGM_REPO:-~/project/agents-manager}-main`（`AGM_DEV_REPO` 可整個指定）；誰在聽 port：macOS `lsof`、Linux `ss`（#676）。
 - 行為與判斷順序見 `docs/SPEC.md` §18.1（健康＝綁 `*`／`0.0.0.0` 且本機 curl 有回應；只收孤兒 vite；
   找不到 node 或 `vite.js` 寧可這輪不起，也不拿 bun 代跑）。
 - **看門狗用 bun、vite 一律用 node**：bun 的 upgrade socket 沒有 `destroySoon`，daemon 一重啟代理斷線 vite 會 crash。
 
-隔離測試：`bash scripts/ops/dev-server-kick_test.sh`（假 `lsof`／`ps`／`git`／`bun`／`node`，副本的 `PORT` 換成
-測試 port，假 `lsof` 只回報測試自己 spawn 的 pid；**不會碰真的 5173 或真的 vite**）。沒有 bun／python3 會自己 skip。
+隔離測試：`bash scripts/ops/dev-server-kick_test.sh`（假 `lsof`／`ss`／`ps`／`git`／`bun`／`node`，副本的 `PORT` 換成
+測試 port，假 `lsof`／`ss` 只回報測試自己 spawn 的 pid，整套情境 lsof 與 ss 各跑一次；**不會碰真的 5173 或真的 vite**）。沒有 bun／python3 會自己 skip。
 
 安裝（**需要 AGM 核准**）：
 
