@@ -180,9 +180,10 @@ pub(crate) fn echo_verdict(
     if stamped > pending.at + slack {
         return EchoVerdict::NotEcho("在 Esc 之後才擷取");
     }
-    // 此刻在飛的是 Esc 之後才開的回合：擷取時間不早於它開始，就是它自己的事。
+    // 此刻在飛的是 Esc 之後才開的回合。送端時間可能只有秒精度，視為 [stamped, stamped + 1s)：
+    // 這個區間只要碰到新回合開始時間，就不能證明它是 Esc 的回聲。
     if let Some((_, Some(began))) = in_flight {
-        if began > pending.at && stamped >= began {
+        if began > pending.at && stamped + chrono::Duration::seconds(1) > began {
             return EchoVerdict::NotEcho("在新回合開始之後才擷取");
         }
     }
@@ -606,6 +607,24 @@ mod tests {
         assert!(!is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-b"), Some(t0 + s(40))), Some(("b", Some(t0 - s(60)))))));
         // 就算 B 快到在寬容的那幾秒內開始又失敗：擷取在 B 開始之後，就是 B 自己的事。
         assert!(!is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-b"), Some(t0 + s(2))), Some(("b", Some(t0 + s(1)))))));
+        // 遠端 hook 的秒級 stamp 代表整秒區間；B 在該秒稍後開始時，不能把 B 的失敗當成回聲。
+        let second = t0 - chrono::Duration::nanoseconds(t0.timestamp_subsec_nanos() as i64);
+        let pending_subsecond = InterruptedTurn {
+            run_id: "run-1".into(),
+            turn_id: Some("a".into()),
+            session_id: None,
+            prompt_id: None,
+            at: second + chrono::Duration::milliseconds(100),
+        };
+        assert_eq!(
+            echo_verdict(
+                &pending_subsecond,
+                "run-1",
+                &ev(None, Some("p-b"), Some(second)),
+                Some(("b", Some(second + chrono::Duration::milliseconds(600)))),
+            ),
+            NotEcho("在新回合開始之後才擷取"),
+        );
         // 沒有擷取時間：證不出來，不算。
         assert!(!is_echo(echo_verdict(&pending(None, Some("a")), "run-1", &ev(None, Some("p-b"), None), Some(("b", Some(t0 + s(1)))))));
     }
