@@ -1,0 +1,9 @@
+# issue #716：ubuntu 背景完整 CI（一次一輪，由 timer 叫）。安裝見 scripts/ops/README.md。
+[Unit]
+Description=agents-manager ubuntu background CI (latest main HEAD)
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/bash %h/.cache/agents-manager/ci/repo/scripts/ops/ubuntu-ci.sh
+Nice=5

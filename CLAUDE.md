@@ -33,20 +33,20 @@
 - **新增／修改資料表、欄位、索引、trigger（含各子模組的 `migrate`）＝升 `SCHEMA_VERSION`**：在 `daemon/src/db.rs` 的 `SCHEMA_HISTORY` 最後加一行 `(N+1, "<指紋>")`（指紋照 `schema_guard` 測試失敗訊息給的值），不准改既有那幾行。沒升版＝pin 測試紅，而且舊 binary 會照開一個它不懂的 schema。已合流的別人的 schema 變更沒升版時，以主幹現況重算、併進同一版，不要只顧自己那一行。
 
 ## 驗證（收尾前必跑）
-- 先跑一鍵檢查：`scripts/check.sh`。只驗單一側可用 `web` 或 `daemon` 參數。
+- 收尾跑 `scripts/check.sh changed`（issue #716）：只跑改到的部分（跟 `origin/main` 比），daemon 只做 `cargo check --all-targets`；要跑指定測試加 `CHECK_TESTS=<過濾字串>`。改動範圍大、或改到共用基礎時再跑整樹 `scripts/check.sh`。
 - 整樹測試「單跑都綠、整樹偶發紅」：`scripts/flaky-sweep.sh -n 5 -c 2`（高並行連跑 N 輪、可同時開多份製造負載，列出紅過的測試與次數、有紅 exit 1、一輪都沒跑到或少跑 exit 2）；修完要用它連跑證明不再紅。**本機預設禁跑**（協調者 2026-09-24 裁示）：它繞過 cargo shim、開高 `--test-threads` 又同時開好幾份，要驗 flaky 走遠端編譯主機或 CI；真的要在本機跑得在命令列加 `--i-know`（唯一的同意方式，沒有環境變數繞法）並先跟協調者講一聲。
 - daemon 個別指令：`cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`、`cargo clippy -p agents-managerd`（目前既有 32 個 warning，暫不加 `-D warnings`）。
 - web 個別指令：`cd web && bunx tsc -p tsconfig.app.json --noEmit && bunx oxlint src && bun run build`（既有 warning 不算，新增的要清）。
 - shell 腳本裡變數後面接全形標點一律寫 `${VAR}`：macOS 的 bash 3.2 會把標點併進變數名，`set -u` 下直接 unbound variable 而中止。`scripts/ops/lint-shell-vars.sh`（`scripts/check.sh ops` 與 CI 的 ops job 都會跑）會擋住。
-- 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時，要跑 `scripts/check.sh macos-local`；不能本機跑時，等 CI 的 macOS runner 綠了才算驗過。新測試若散在其他模組，函式名加 `macos_local_` 前綴，讓入口自動納入。
+- 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時，要在 Mac 上跑 `scripts/check.sh macos-local`（GitHub Actions 不再每次 push 跑，要 macOS runner 就 `gh workflow run ci.yml --ref <分支>`）。新測試若散在其他模組，函式名加 `macos_local_` 前綴，讓入口自動納入。
 - 工作樹裡別人的 WIP 讓編譯掛掉時，對**你 staged 的內容**驗：`git archive` 出來或用 `git stash --keep-index` 以外的方式，總之不能碰別人的檔。
 - UI 改動要看真畫面：`OUT=/tmp/shots node scripts/ui-goal-shots.mjs`（headless Chrome 七張）或 ego-browser；截圖放 `docs/screenshots/<feature>/`。
 - daemon 在 `127.0.0.1:7788`，token 在 `~/.config/agents-manager/ui-token`，header `X-AM-Token`。
-- **本機綠不等於 CI 綠**：runner 是 macOS、`TZ=Asia/Taipei`、claude／codex／grok 是空殼、沒有 herdr、沒有 `AM_*`、沒有真的 pane 行程。推完要用 `gh run list --branch main --commit <sha>` 找到這次 push 的 run，`gh run watch <id>` 盯到跑完，看結果（issue #211：CI 曾連紅好幾天沒人發現）。
+- **完整 CI 在 ubuntu 背景跑，不要等**（issue #716，使用者 2026-09-28）：agm-host 上的 `scripts/ops/ubuntu-ci.sh` 每分鐘撿最新的 main HEAD 跑整樹 `scripts/check.sh`（同時只跑一輪、中間的 sha 不補跑），結果寫成 commit status `ubuntu-ci`。推完就去做下一件事；之後用 `gh api repos/Eden-Sun/agents-manager/commits/<sha>/status -q '.statuses[]|select(.context=="ubuntu-ci")'` 看結果。GitHub Actions 只在 PR、每日排程與手動觸發時跑。
 
 ## 提交
 - 只在自己的 worktree 改與 commit；只 `git add` 自己改的檔案與 hunk（混檔用 `git apply --cached` 過濾），一個功能一個 commit。
-- **推完不算完成**：確認這次 push 的 CI 結果（`gh run list --branch main --commit <sha>`／`gh run watch <id>`）。紅的是你造成的就修到綠；不是你造成的就回報派工者，指出**哪一條測試、哪個 run**。不能只看本機 `check.sh`。
+- **推完不必等 CI**：`scripts/check.sh changed` 綠了就推、繼續做事。`ubuntu-ci` 之後回報紅燈時，紅的是你造成的就修；不是就回報派工者，指出**哪一條測試、哪個 sha**（log 在 agm-host 的 `~/.cache/agents-manager/ci/logs/<sha>.log`）。
 - 訊息：`feat(scope): …` / `fix(scope): …` / `perf` / `docs` / `chore`，scope 用 `daemon` / `web` / `hosts` / `quota` / `mission` 等，第一行說**為什麼**。
 - 回報 commit hash，讓派工者在主樹只做 `git -C <主樹> merge --ff-only <你的分支>`；需要 rebase 時在自己的 worktree 做完再推自己的分支，禁止在主樹 stash、`checkout --` 或 autostash。
 - 不要 push 編不過的 HEAD（別人的半成品被你的 commit 依賴到時，把那部分一起帶上並在訊息裡註明）。整合完成後移除自己的 worktree：`git worktree remove .claude/worktrees/<你的 agent 名>`。
@@ -62,7 +62,7 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 - **派任何 issue 之前先認領**（#425）：`python3 scripts/agm.py issue claim <n> --child <子 agent 名> --worktree <path> --branch <b>`（部署過的總管用 `bin/agm issue claim …`）。回 exit 3 就是別的 bot 正在做——**不要派**，看它印出的 `claimed_by` 去協調。24 小時都沒動靜的認領才可以接手（它會自己判斷並在留言裡講）。child 收尾（或你決定不做了）時 `agm issue release <n>`；票關掉就不用。
 - 名稱一律 `<你的 agent 名>-<字尾>`（`$AM_AGENT_NAME` 有值；PATH 上的 `herdr` shim 會自動補前綴），daemon 才會把它掛在你底下。
 - 子 pane 用 `herdr pane split --pane $HERDR_PANE_ID`，帳號與 hook 環境會繼承。
-- 子 agent 一樣要遵守本檔；派工 prompt 必須帶上：「先 `git worktree list` 找自己的 `.claude/worktrees/<你的 agent 名>`，沒有就 `git worktree add .claude/worktrees/<你的 agent 名>-<字尾> -b <分支>`；只在自己的 worktree 改與 commit，禁止在主樹 `git stash` / `--autostash` / `git checkout --`，只 `git add` 自己的檔案，收尾前跑 `scripts/check.sh`，推完用 `gh run list --branch main --commit <sha>`／`gh run watch <id>` 確認這次 push 的 CI 結果（紅的是你造成的就修，不是就回報派工者哪一條、哪個 run，不能只看本機 check.sh），完成後移除自己的 worktree。」
+- 子 agent 一樣要遵守本檔；派工 prompt 必須帶上：「先 `git worktree list` 找自己的 `.claude/worktrees/<你的 agent 名>`，沒有就 `git worktree add .claude/worktrees/<你的 agent 名>-<字尾> -b <分支>`；只在自己的 worktree 改與 commit，禁止在主樹 `git stash` / `--autostash` / `git checkout --`，只 `git add` 自己的檔案，收尾前跑 `scripts/check.sh changed`，推完不等 CI（完整驗證由 ubuntu-ci 背景跑，commit status `ubuntu-ci` 紅了再處理），完成後移除自己的 worktree。」
 - 做完的子 agent 關掉 pane（`herdr pane close`），不要留一堆 done 的 pane。
 
 ## OB（網頁 GPT 外腦，使用者 2026-09-15）
