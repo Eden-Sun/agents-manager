@@ -2646,13 +2646,18 @@ export 先對來源 DB 做 SQLite online backup 到暫存目錄、從快照讀�
 B 的表少了 bundle 裡的欄位（來源比目標新，先升 B）；`--host local`。插到一半撞約束（例如 `turns_native` 重號）整批回滾。
 `--dry-run` 整套跑完再回滾，不寫 config／附件、不備份。
 
-**runbook**（A＝Mac，B＝agm-host）：
-1. A：在該專案設 `handed_off_to = "agm-host"`（#708），A 從此不再對帳、送 prompt、收 hook。
-2. A：`scripts/ops/project-transfer export --db ~/.config/agents-manager/agents-manager.sqlite3 --project <id> --out hub.json.gz`，把 bundle 傳到 B（內含對話，不放 outbox／scratchpad；hook token 在 export 時就清掉了；傳完刪 A 上那份）。
-3. B：確認 config 有 `[[hosts]] name = "m4p"` 且連得上；停 B 的 daemon；`--dry-run` 看摘要；再正式跑
-   `scripts/ops/project-transfer import --bundle hub.json.gz --host m4p`；起 B 的 daemon。確認無誤後刪 bundle 與 `*.pre-transfer-*` 備份。
-4. 逐顆 bot：A 停掉那顆的 agent（`POST /api/bots/{id}/stop`；旗標下 A 不再操作這個專案時，就在 pane 裡直接結束 agent）→ B `POST /api/bots/{id}/start?resume=native` 接回同一段對話（B 用 ssh 到 A 機檢查 `transcript_path`）→ 確認 B 側收得到回覆，再做下一顆。同一段 session 不能同時有兩個 agent 在寫。
-   child 由母 agent 開，不在 B 上單獨接回。全部接完後需要的 bot 在 B 打開 autostart。
+**runbook**（A＝Mac，B＝agm-host）。順序的關鍵：`handed_off_to`（#708，DB 的 `projects.handed_off_to` 與 config.toml `[[projects]]` 同名）
+設下去之後 A 就不再操作這個專案，**連 stop 也擋**，所以 A 的停機要在設旗標之前做完：
+1. A：逐顆停掉該專案的 bot（`POST /api/bots/{id}/stop`；這時旗標還沒設，A 仍在管）。停完 run 都已結束，
+   native session 定格，export 拿到的就是最後一段；同一段 session 不能同時有兩個 agent 在寫。
+2. A：在該專案設 `handed_off_to = "agm-host"`，A 從此不再對帳、送 prompt、收 hook、也不會替它 autostart。
+3. A：`scripts/ops/project-transfer export --db ~/.config/agents-manager/agents-manager.sqlite3 --project <id> --out hub.json.gz`，
+   把 bundle 傳到 B（內含對話，不放 outbox／scratchpad；hook token 在 export 時就清掉了；傳完刪 A 上那份）。
+4. B：確認 config 有 `[[hosts]] name = "m4p"` 且連得上；停 B 的 daemon；`--dry-run` 看摘要；再正式跑
+   `scripts/ops/project-transfer import --bundle hub.json.gz --host m4p`（`handed_off_to` 在 B 上清成 NULL，由 B 管）。
+5. B：起 B 的 daemon，逐顆 `POST /api/bots/{id}/start?resume=native` 接回同一段對話（B 用 ssh 到 A 機檢查 `transcript_path`），
+   確認 B 側收得到回覆再做下一顆。child 由母 agent 開，不在 B 上單獨接回。全部接完後需要的 bot 在 B 打開 autostart。
+   確認無誤後刪 bundle 與 B 上的 `*.pre-transfer-*` 備份。
 
 ## 12. grok 支援
 
