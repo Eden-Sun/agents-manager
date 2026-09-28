@@ -750,6 +750,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
       className={`quota-pop-row${off ? ' off' : ''}`}
       // 點卡片＝切換 checkbox；控制項自己的點擊放行，免得切兩下或吃掉登入鈕。
       onClick={(e) => {
+        if (!e.currentTarget.contains(e.target as Node)) return
         if ((e.target as HTMLElement).closest('input, button, a, select, textarea')) return
         toggle()
       }}
