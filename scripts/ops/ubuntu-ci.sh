@@ -49,9 +49,20 @@ status pending "ubuntu 完整 CI 執行中"
 git checkout -q --detach -f "${sha}"
 git clean -q -fdx -e target -e web/node_modules
 
+# 四段各自跑完再彙總：一段紅了（例如只在 Linux 紅的 ops 腳本）也照樣拿得到其他段的結果。
 rc=0
-timeout "${TIMEOUT}" env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u AM_DAEMON_EXE -u AM_CONFIG_PATH \
-    bash scripts/check.sh > "${log}" 2>&1 || rc=$?
+failed=""
+: > "${log}"
+for part in ob ops web daemon; do
+    prc=0
+    timeout "${TIMEOUT}" env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u AM_DAEMON_EXE -u AM_CONFIG_PATH \
+        bash scripts/check.sh "${part}" >> "${log}" 2>&1 || prc=$?
+    printf '\n==> [ubuntu-ci] %s rc=%s\n' "${part}" "${prc}" >> "${log}"
+    if [ "${prc}" != 0 ]; then
+        rc="${prc}"
+        failed="${failed}${failed:+,}${part}"
+    fi
+done
 
 finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if [ "${rc}" = 0 ]; then
@@ -59,9 +70,9 @@ if [ "${rc}" = 0 ]; then
     desc="ob+ops+web+daemon 全綠"
 else
     state=failure
-    # 最後一個 step 標題＝死在哪一段；GitHub description 上限 140 字。
-    step_line="$(grep -E '^==> ' "${log}" | tail -1 | sed 's/^==> //')"
-    desc="$(printf 'rc=%s 停在：%s' "${rc}" "${step_line}" | cut -c1-120)"
+    # 紅的段落＋第一個紅段死掉前的最後一個 step 標題；GitHub description 上限 140 字。
+    first="$(awk '/^==> \[ubuntu-ci\] .* rc=[1-9]/ {print last; exit} /^==> / {last=substr($0, 5)}' "${log}")"
+    desc="$(printf '紅：%s（%s）' "${failed}" "${first}" | cut -c1-120)"
 fi
 status "${state}" "${desc}"
 printf '{"sha":"%s","state":"%s","rc":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
