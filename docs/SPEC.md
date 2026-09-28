@@ -1058,6 +1058,7 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 失敗時「沒能啟動（原因），還沒送出」＋重新啟動（`POST /start`，起來後照樣由 flush 送）／取消；有這一條時不再另外顯示「啟動」列。
 `queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。
 **回合中**的 bot 仍由瀏覽器暫存下一則（`queuedSends`），那條的語意沒有改（使用者對回合中的 bot `POST /prompt` 仍 409）。
+重連或 `resync` 重抓已載入對話時，若快照才補出回合已完成，也要在重抓後檢查並 flush `queuedSends`；不能只等遺漏的 `turn_updated` 或後續 `bot_status` 幀。
 **重啟不是停**（issue #106，`lifecycle::restart_hold`）：`restart_bot_with`（換身分、`?resume=native`、一鍵重啟）先停舊 run 再起新 run，
 中間那一段沒有 active run，但 bot 馬上就回來。重啟在 bot 鎖裡宣告「進行中」，這段期間任何撤孤兒的路徑——stop 自己、
 `restart_start` 收掉擋路 run 的 `mark_run_exited`、不拿 bot 鎖的 pane-exit 事件、定時掃描——都不撤；新 run 起來就叫醒 flush

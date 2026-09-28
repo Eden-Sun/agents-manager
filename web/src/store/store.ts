@@ -2668,6 +2668,11 @@ function loadedBotIdsOf(get: GetFn): string[] {
   return Object.keys(get().loadedBots).filter((botId) => get().loadedBots[botId])
 }
 
+/** A refreshed turn may be the only completion signal received while the socket was disconnected. */
+function flushQueuedSends(get: GetFn) {
+  for (const botId of Object.keys(get().queuedSends)) flushQueued(botId)
+}
+
 /**
  * 斷線重連後補訊息（#368）：daemon 重啟沒有世代標記，重連時新 daemon 的 seq 若已超過我們記的 `lastSeq`，
  * 它會當成「只差幾則」照補，舊 daemon 尾巴那段訊息永遠不會來，也不會 `resync`。`refreshState` 只補狀態不補訊息，
@@ -2675,6 +2680,7 @@ function loadedBotIdsOf(get: GetFn): string[] {
  */
 export async function reloadLoadedConversations(get: GetFn): Promise<void> {
   for (const botId of loadedBotIdsOf(get)) await get().loadMessages(botId)
+  flushQueuedSends(get)
   const proj = get().selectedProjectId
   if (proj) await get().loadGroupMessages(proj)
 }
@@ -2689,6 +2695,7 @@ const resyncTrigger = (() => {
       await get().refreshState()
       await get().loadQuota()
       for (const botId of loadedBotIds) await get().loadMessages(botId)
+      flushQueuedSends(get)
       const proj = get().selectedProjectId
       if (proj) await get().loadGroupMessages(proj)
       await get().refreshLoadedMissions()

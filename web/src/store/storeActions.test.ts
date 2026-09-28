@@ -1134,6 +1134,92 @@ test('斷線重連後：已載入的對話要重抓訊息，不能只補狀態�
   assert.ok(requests.some((r) => r.path.includes('/bots/b1/messages')))
 })
 
+test('重連重抓把回合改成 completed 後，送出排隊的下一則（#697）', async () => {
+  seed()
+  useStore.setState({
+    loadedBots: { b1: true },
+    runs: { b1: { id: 'r1', state: 'running', agent_status: 'idle' } as never },
+    turns: {
+      b1: {
+        t1: {
+          id: 't1',
+          run_id: 'r1',
+          status: 'in_flight',
+          delivery: 'ok',
+          origin: 'web',
+          created_at: '2026-09-28T00:00:00Z',
+        } as never,
+      },
+    },
+    queuedSends: { b1: { text: 'next question', attachments: [] } },
+  })
+  routeDaemon((r) => {
+    if (r.path.includes('/bots/b1/messages')) {
+      return json({ messages: [], turns: [{ id: 't1', run_id: 'r1', status: 'completed', delivery: 'ok' }], has_more: false }, 200)
+    }
+    if (r.path.endsWith('/prompt')) return json({ turn_id: 't2', message_id: 'm2', delivery: 'ok' }, 200)
+    return json({}, 200)
+  })
+
+  const { reloadLoadedConversations } = await import('./store.ts')
+  await reloadLoadedConversations(useStore.getState)
+  await new Promise((resolve) => setTimeout(resolve, 500))
+
+  const prompts = requests.filter((r) => r.path.endsWith('/prompt'))
+  assert.equal(prompts.length, 1)
+  assert.equal((prompts[0].body as { text: string }).text, 'next question')
+  assert.equal(useStore.getState().queuedSends.b1, undefined)
+})
+
+test('resync 重抓把回合改成 completed 後，也送出排隊的下一則（#697）', async () => {
+  seed()
+  useStore.setState({
+    loadedBots: { b1: true },
+    runs: { b1: { id: 'r1', state: 'running', agent_status: 'idle' } as never },
+    turns: {
+      b1: {
+        t1: {
+          id: 't1',
+          run_id: 'r1',
+          status: 'in_flight',
+          delivery: 'ok',
+          origin: 'web',
+          created_at: '2026-09-28T00:00:00Z',
+        } as never,
+      },
+    },
+    queuedSends: { b1: { text: 'next question', attachments: [] } },
+  })
+  routeDaemon((r) => {
+    if (r.path.endsWith('/state')) {
+      return json(
+        {
+          daemon_seq: 1,
+          projects: [project()],
+          bots: [bot('b1')],
+          runs: [{ id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' }],
+          turns: [],
+        },
+        200,
+      )
+    }
+    if (r.path.includes('/bots/b1/messages')) {
+      return json({ messages: [], turns: [{ id: 't1', run_id: 'r1', status: 'completed', delivery: 'ok' }], has_more: false }, 200)
+    }
+    if (r.path.endsWith('/prompt')) return json({ turn_id: 't2', message_id: 'm2', delivery: 'ok' }, 200)
+    return json({}, 200)
+  })
+
+  const { dispatchFrameForTest } = await import('./store.ts')
+  dispatchFrameForTest({ type: 'resync', seq: 1 })
+  await new Promise((resolve) => setTimeout(resolve, 500))
+
+  const prompts = requests.filter((r) => r.path.endsWith('/prompt'))
+  assert.equal(prompts.length, 1)
+  assert.equal((prompts[0].body as { text: string }).text, 'next question')
+  assert.equal(useStore.getState().queuedSends.b1, undefined)
+})
+
 test('連不上 daemon／代理回空的 502：通知講人話，不是 Failed to fetch 或 HTTP 路徑（#370）', async () => {
   seed()
   routeDaemon(() => {
