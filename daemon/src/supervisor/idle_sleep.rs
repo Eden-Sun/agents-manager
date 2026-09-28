@@ -22,9 +22,11 @@
 //! * 它開的子 agent 還在跑——父 bot 分完工就結束回合等回報，看起來是閒著，但子 agent 做完要
 //!   `herdr agent prompt` 回報給它、卡住時 `child_alerts` 要通知它；收掉就沒人收（issue #172）。
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::db;
 use crate::lifecycle::{self, LcError, StartOpts};
@@ -35,6 +37,8 @@ use serde_json::json;
 pub const DEFAULT_IDLE_MINUTES: i64 = 90;
 /// 兩次巡邏之間至少隔這麼久——控制迴圈每 10 秒跑一次，但這件事不必那麼勤。
 const SWEEP_EVERY_SECS: i64 = 60;
+/// 整輪閒置回收的上限：20 顆 bot、每顆最多 30 秒檢查加 10 秒停止，留 15 分鐘讓整批完成。
+const SWEEP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// 門檻，`AM_IDLE_SLEEP_MINUTES` 可覆寫；**設成 0 就整個關掉**（要留一個不必改程式的退場方式：
 /// 這個功能會在使用者沒看著的時候動他的 bot）。
@@ -760,6 +764,37 @@ pub async fn wake_locked(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Res
 static SWEEPING: AtomicBool = AtomicBool::new(false);
 static LAST_SWEEP: AtomicI64 = AtomicI64::new(0);
 
+struct SweepGuard;
+
+impl SweepGuard {
+    fn take() -> Option<Self> {
+        (!SWEEPING.swap(true, Ordering::SeqCst)).then_some(Self)
+    }
+}
+
+impl Drop for SweepGuard {
+    fn drop(&mut self) {
+        SWEEPING.store(false, Ordering::SeqCst);
+    }
+}
+
+async fn run_sweep_task<F>(guard: SweepGuard, round: F, timeout: Duration) -> bool
+where
+    F: Future<Output = ()>,
+{
+    let _guard = guard;
+    match tokio::time::timeout(timeout, round).await {
+        Ok(()) => false,
+        Err(_) => {
+            tracing::warn!(
+                timeout_seconds = timeout.as_secs(),
+                "idle sweep round timed out; cancelling this round and retrying later"
+            );
+            true
+        }
+    }
+}
+
 /// 控制迴圈每一拍呼叫一次。真正的巡邏最多每分鐘一次，而且丟到背景跑——一顆 `stop_bot` 最久要等
 /// agent 十秒，二十顆就是三分多鐘，同步做完會把 dispatch／notify 這些也一起卡住。
 pub fn tick(app: &Arc<App>) {
@@ -774,14 +809,18 @@ pub fn tick(app: &Arc<App>) {
     if now - LAST_SWEEP.load(Ordering::SeqCst) < SWEEP_EVERY_SECS {
         return;
     }
-    if SWEEPING.swap(true, Ordering::SeqCst) {
+    let Some(guard) = SweepGuard::take() else {
         return;
-    }
+    };
     LAST_SWEEP.store(now, Ordering::SeqCst);
     let app = app.clone();
     tokio::spawn(async move {
-        sweep(&app, threshold).await;
-        SWEEPING.store(false, Ordering::SeqCst);
+        run_sweep_task(
+            guard,
+            async move { sweep(&app, threshold).await },
+            SWEEP_TIMEOUT,
+        )
+        .await;
     });
 }
 
@@ -848,6 +887,8 @@ async fn sweep(app: &Arc<App>, threshold: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static SWEEP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn cand() -> Cand {
         Cand {
@@ -1869,5 +1910,90 @@ mod tests {
         sweep(&env.app, 90).await;
         assert!(asleep(&env.app, &bot).await.is_some(), "證明沒有背景工作，照常收");
         assert!(db::active_run(&env.app.db, &bot).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn idle_sweep_releases_its_guard_when_the_round_panics() {
+        let _serial = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SWEEPING.store(false, Ordering::SeqCst);
+        let guard = SweepGuard::take().expect("first sweep should acquire the guard");
+        let task = tokio::spawn(run_sweep_task(
+            guard,
+            async { panic!("injected idle-sweep panic") },
+            SWEEP_TIMEOUT,
+        ));
+
+        let join_error = task
+            .await
+            .expect_err("injected panic should reach the join handle");
+        assert!(join_error.is_panic());
+        let released_after_panic = !SWEEPING.load(Ordering::SeqCst);
+        let can_start_next_round = SweepGuard::take().is_some();
+        SWEEPING.store(false, Ordering::SeqCst);
+
+        assert!(released_after_panic, "panic left SWEEPING set forever");
+        assert!(can_start_next_round, "a later idle sweep could not acquire the guard");
+    }
+
+    #[tokio::test]
+    async fn idle_sweep_releases_its_guard_when_the_round_returns_early() {
+        let _serial = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SWEEPING.store(false, Ordering::SeqCst);
+        let guard = SweepGuard::take().expect("first sweep should acquire the guard");
+
+        let timed_out = run_sweep_task(guard, async {}, SWEEP_TIMEOUT).await;
+        let released_after_return = !SWEEPING.load(Ordering::SeqCst);
+        let can_start_next_round = SweepGuard::take().is_some();
+        SWEEPING.store(false, Ordering::SeqCst);
+
+        assert!(!timed_out, "an early return should finish the round normally");
+        assert!(released_after_return, "early return left SWEEPING set");
+        assert!(can_start_next_round, "a later idle sweep could not acquire the guard");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_sweep_cancels_a_stuck_round_and_releases_its_guard() {
+        let _serial = SWEEP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SWEEPING.store(false, Ordering::SeqCst);
+        let guard = SweepGuard::take().expect("first sweep should acquire the guard");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_sweep_task(
+            guard,
+            async move {
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            },
+            SWEEP_TIMEOUT,
+        ));
+        started_rx.await.expect("stuck sweep should start");
+
+        tokio::time::advance(SWEEP_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let completed = task.is_finished();
+        let timed_out = if completed {
+            task.await.ok()
+        } else {
+            task.abort();
+            let _ = task.await;
+            None
+        };
+        let released_after_timeout = !SWEEPING.load(Ordering::SeqCst);
+        let can_start_next_round = SweepGuard::take().is_some();
+        SWEEPING.store(false, Ordering::SeqCst);
+
+        assert!(completed, "the stuck sweep exceeded its overall timeout");
+        assert_eq!(
+            timed_out,
+            Some(true),
+            "the stuck sweep was not reported as timed out"
+        );
+        assert!(released_after_timeout, "timeout left SWEEPING set");
+        assert!(can_start_next_round, "a later idle sweep could not acquire the guard");
     }
 }
