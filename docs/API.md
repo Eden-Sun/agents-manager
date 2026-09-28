@@ -1884,6 +1884,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   兩條判定路徑一起看：DB 的 `supervisor_roles.status`（`notify` 送不出去那一次看畫面寫的，issue #420），
   以及每 30 秒 health tick 的記憶體結論（每拍看畫面＋notify 連續 3 個回合沒完成，issue #427）。
   **`notify_stalled` 只有這一欄帶得出來**：那個值從來不會被寫進 DB，`status` 當下仍是 `idle`／`busy`（issue #454）。
+  收到事件後先 ack 的正常回合完成時也會解除 `notify_stalled`，即使該事件已是 `handled`、不在重送清單中（issue #684）。
   `status` 只在 `needs_login` 與其他原因（`unavailable`）時被原因改寫；`waiting_quota` 與 `no_run` 維持既有值（`stopped`／`missing`／`not_configured` 比籠統的 `unavailable` 好懂）。
   **`supervisor_roles.status` 那一欄本身一個字都沒被這條路改過**：它是 `notify` 與看門狗的憑據，寫進去會讓撞限的協調者被一直重啟。
   `configured` 是「登記過」，`bot_present` 才是「那顆 bot 還在」：路由只看前者。`model`／`effort` 是設定值，
