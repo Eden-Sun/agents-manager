@@ -782,13 +782,14 @@ mod tests {
         let e = crate::testing::env().await;
         let app = e.app.clone();
         let (_parent, _conv, kid) = family(&e, "stale").await;
+        let replay_done = crate::events::arm_status_replay_barrier(crate::config::LOCAL_HOST, "test", &format!("pane-{kid}"), 1);
         sqlx::query("ALTER TABLE projects RENAME TO projects_unreadable").execute(&app.db).await.unwrap();
         crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "blocked")).await;
         sqlx::query("ALTER TABLE projects_unreadable RENAME TO projects").execute(&app.db).await.unwrap();
 
         // 重放之前，同一個 pane 來了新的一則（child 已經被回答）。
         crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &status_event(&kid, "idle")).await;
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        replay_done.await.expect("stale status replay completed");
         assert_eq!(stored_status(&app, &kid).await, "idle", "舊的那一則不再算數");
     }
 
