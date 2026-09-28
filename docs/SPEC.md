@@ -2530,7 +2530,9 @@ label = "foo@m4p"
 每個 host 一個 `HostConn`：
 1. **ensure remote session**：遠端是 macOS 且 ssh 使用者就是 `/dev/console` 擁有者時，寫 `~/Library/LaunchAgents/dev.agents-manager.herdr-<session>.plist`
    （`herdr --session <session> server`、`KeepAlive`、`RunAtLoad`、`ProcessType Interactive`、PATH 含 `remote_path`）並 `launchctl bootstrap gui/<uid>`；已載入就沿用；
-   原本有 nohup 起的 server 先 `server stop` 再交給 launchd。其他情況退回 `( trap '' HUP; herdr --session <session> server & )`。
+   原本有 nohup 起的 server 先 `server stop` 再交給 launchd。遠端是 Linux、而且 `systemctl --user cat herdr@<session>.service` 找得到（§19）時交給 systemd：
+   server 沒在跑就 `systemctl --user start herdr@<session>.service`（`AM_MODE=systemd`），**在跑就不動**（`systemd-existing`，不管誰起的，停它會收掉每個 pane），
+   start 失敗退回 nohup（`nohup-fallback systemctl: …`）；沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`。其他情況退回 `( trap '' HUP; herdr --session <session> server & )`。
    理由：非互動 ssh 讀不到登入 Keychain（errSecInteractionNotAllowed），在那底下起的 Claude Code 會「Not logged in」；GUI 網域的 LaunchAgent 在桌面工作階段裡，Keychain 已解鎖，
    而且當掉會被 launchd 拉起。
 2. **master 連線**：`ssh -N -M -S <ctl> -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes -L <local.sock>:<remote herdr.sock> <target>`。
@@ -3109,6 +3111,8 @@ AG Man 搬到 Linux 主機（#675）後，`com.agm.*` 例行 job 由 systemd use
   對應：`StartInterval N` → `OnUnitActiveSec=Ns`，第一次 `OnActiveSec=Ns`（`RunAtLoad` 則 `1s`）；log 落在 `supervisor/AGM/<名字>.systemd.log`；
   `EnvironmentVariables` → `Environment=`（同名變數）。`scripts/agm_test.py` 的 `SystemdParityTest` 逐支比對 plist 與 unit。
 - **cgroup**：systemd 收 unit 時殺整個 cgroup，不是程序群。kick 自己 detached 拉起的長駐行程（`dev-server` 的 vite）要 `KillMode=process` 才活得過 kick 結束。
+- **herdr server 也交給 systemd**：`scripts/ops/systemd/herdr@.service`（不是排程、沒有 .timer、不 enable），daemon 要起 session 時
+  `systemctl --user start herdr@<session>.service`，只有 systemd 一個看管者；細節與退回條件見 §19。
 - **browser-gc 在 Linux 不裝**：它喚醒的 child 操作 ego-browser（圖形介面），Linux 主機沒有桌面。對照表把它的 kick、task 與 plist 標成 `darwin`，systemd 那組沒有它（§18.4 只在 macOS 成立）。
 - **對照表依平台選組**：`install-manifest.tsv` 可選第三欄 `darwin`／`linux`；`agm ops-sync --check` 只比這台平台的列，另一邊的放進 `skipped`。
   排程列必須標對（`LaunchAgents/…`＝`darwin`、`systemd/…`＝`linux`），否則 `bad_manifest`。Linux 上掃 `~/.config/systemd/user/com.agm.*` 找沒版控的 unit（`extra`），
@@ -4072,7 +4076,10 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 | claude 登入狀態 | 先看 `$CLAUDE_CONFIG_DIR/.credentials.json`，沒有再問 Keychain `security find-generic-password` | 只有檔案（沒有 `security` 指令就判未登入）；Linux 的 claude 本來就把憑證寫在 `~/.claude/.credentials.json` | `tools.rs` `PROBE_SH` |
 | 「身分沒登入、會退回 cc0」提示 | Keychain | `~/.claude/.credentials.json`（文案兩者都寫） | `hookrecv.rs` |
 | 送 Jev 判讀前遮家目錄 | `/Users/<名>` → `~` | 另遮 `/home/<名>`（前一個字是網域／路徑段的一部分就不算，`https://x.com/home/…` 不動） | `judge.rs` |
-| 遠端主機起 herdr server（§11.3.1） | console 使用者是自己就用 launchd GUI domain（讀得到 Keychain） | `uname -s` 不是 Darwin 就走 `trap '' HUP` 背景起，不需要 launchd | `hosts.rs` |
+| 遠端主機起 herdr server（§11.3.1） | console 使用者是自己就用 launchd GUI domain（讀得到 Keychain） | 裝了 `herdr@.service` 就 `systemctl --user start herdr@<s>.service`（已在跑不動、失敗退回），沒裝才 `trap '' HUP` 背景起 | `hosts.rs` |
+| 本機起 herdr server（`ensure_session`，socket 連不到時） | 直接 spawn `herdr --session <s> server`（process group 0） | **看管者只有 systemd 一個**（使用者 2026-09-28 選定）：先 `systemctl --user start herdr@<s>.service`（缺 `XDG_RUNTIME_DIR` 補 `/run/user/<uid>`），成功就不再 spawn——socket 慢是那顆還在開，再起一顆就兩顆搶同一個 socket；叫不到 user bus、沒裝 unit、名字不能原樣當實例名（`systemd-escape` 會改寫的字元）才退回直接 spawn。直接 spawn 的 server 與 pane 會落在 daemon 的 cgroup，daemon 以一般 service 跑時停 daemon 就全陪葬，unit 是自己的 cgroup | `herdr_unit.rs`、`state.rs` |
+| herdr server 的 unit | —（launchd job 由 daemon 寫，§11.3.1） | `scripts/ops/systemd/herdr@.service`（`agm ops-sync` 對照安裝）：`ExecStart=/usr/bin/env herdr --session %i server`、`Restart=always`、`KillMode=process`（只收 server 本身，跟 launchd 一樣不掃 pane；預設 control-group 會在 Restart 前把每個 pane 的 agent 一起殺掉）；不 enable，何時起由 daemon 決定 | `scripts/ops/systemd/` |
+| 全機重啟 herdr | `herdr-full-restart.sh` 的 launchd 段（bootout／bootstrap `dev.agents-manager.herdr-*`） | 同一支的 Linux 段：記下 active 的 `herdr@*.service` → stop → 殺殘留 server → 清 `$HOME` 下的 socket → start 回同一批並檢查 `is-active`；default 原本在跑才補起。`herdr-upgrade.sh` **只適用 macOS**（brew keg 回滾），Linux 一開始就 exit 2 | `scripts/ops/herdr-full-restart.sh`、`herdr-upgrade.sh` |
 | `stat` 權限、`readlink -f` 等 shell 片段 | BSD 旗標 | GNU 旗標先試、BSD 退回（原本就雙寫） | `trust.rs`、`lifecycle/start.rs` |
 | `PATH` 補 `/opt/homebrew/bin` | 需要 | 不存在的目錄留在 PATH 無害，不另分支 | `github.rs`、`git_sh.rs`、`release_triage/issue.rs` |
 | `/private/tmp` 正規化 | `/tmp` 是 `/private/tmp` 的 symlink | 沒有 `/private`，規則不會命中 | `pane_identity.rs` |
