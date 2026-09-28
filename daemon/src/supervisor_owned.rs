@@ -164,6 +164,7 @@ mod tests {
                 match cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) {
                     Some(p) => p.bots.push(bot),
                     None => cfg.projects.push(crate::config::ProjectCfg {
+                        handed_off_to: None,
                         id: Some(pid),
                         path: repo,
                         label: "proj".into(),

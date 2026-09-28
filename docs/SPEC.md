@@ -2046,6 +2046,30 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
   換成讀記憶體不需要動呼叫端）。
 - **沒有 UI 面板**：現況只到 `GET /api/build-slots` 這個 API，前端顯示留給下一步。
 
+### 6.5h 已移交的專案（#708，使用者 2026-09-28）
+
+專案可以整個交給另一台主機的 daemon 管（例：Mac 上的專案改由 agm-host 的 daemon 以遠端主機接手，§11）。
+`[[projects]] handed_off_to = "<接手主機>"`（`PATCH /api/projects/{id}` 設／清，投影成 `projects.handed_off_to`；沒有這個 key＝本機管，
+空字串不合法）。有值時這顆 daemon 對這個專案的 bot／pane **一律不動**：
+
+- **對帳**（§6.5）：逐 bot 迴圈整顆跳過——不建 run、不收編、不結束 run、不退役 child；不清它的 `projects.workspace_id`；
+  結束的 run 留下的 pane 不當孤兒關。它的 agent（名字、活著的 run 的 pane／tab、它的 workspace 對得上）**不是任何 bot 的
+  新 child**（§6.5a），它自己也不當父候選。`workspace.closed` 事件同樣不清它的映射；pane 狀態事件整則略過（狀態、外部回合、
+  備援、通知 parent 都不做）。
+- **收口的寫入**：`mark_run_exited` 對它回 `AlreadyEnded`（什麼都不寫；pane 關閉事件、dead-pane 巡邏、default session 都經過它），
+  `child_retire` 的隱式退役回 `HandedOff`（不軟刪）。
+- **不操作**：start／stop／restart 與 prompt 回 409 `handed_off`（閒置回收、一鍵重啟、codex 升級後的重啟都經過 stop／start，
+  一起擋下）；佇列原樣留著、一則都不送（收回後照常送）；`client_for_run`／`App::herdr_for_run` 不給 client，所以 keys／text／
+  interrupt／login 與背景巡邏（survey、update watch、child alerts……）一個 pane RPC 都不打，連讀畫面都不讀；直接拿主機 client 的
+  codex 額度讀狀態列、對帳補 codex runtime 也把它排除。卡住回合的巡邏（§6.6）不收它的 in-flight 回合。
+- **pane**（§6.5e）：它的 workspace、活著的 run 的 tab／pane 裡的 pane 不進 `panes`——不 GC、不推 `pane_unowned`／`pane_orphaned`、
+  不當 scratch。
+- **hook**：`process_locked` 記一行 `hook for a handed-off project; ignored` 就丟（spool 重播、spawn hint 也一樣）。
+- default session（§6.5.1）不把 agent 匯入它。
+- 設定當下**不停也不關任何東西**：agent 繼續跑，交給對方接。清掉旗標＝收回，當場排一輪對帳，照 §6.5 接手（run 還在的沿用、
+  不在的收編）。刪除專案照舊要求「沒有 active run」，所以移交中的專案刪不掉，要先收回。
+- UI：側欄專案標題標「由 <host> 管理」，輸入框鎖住並寫明原因，bot 選單的「啟動」停用。
+
 ### 6.5.1 採用使用者的 Herdr `default` session
 
 daemon 另外唯讀觀察本機 Herdr `default` session（`~/.config/herdr/herdr.sock`），不替它啟動 server。啟動、事件重連與定期輪詢時：

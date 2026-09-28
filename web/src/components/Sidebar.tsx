@@ -46,6 +46,7 @@ import { ProjectNameField } from './ProjectNameField'
 import { MemBadge } from './MemBadge'
 import { ThemeToggle } from './ThemeToggle'
 import { ProjectMemBadge } from './ProjectMemBadge'
+import { HandedOffBadge } from './HandedOffBadge'
 import { RebuildBadge } from './RebuildBadge'
 import { DeployNowBadge } from './DeployNowBadge'
 import { TabsBadge } from './TabsBadge'
@@ -801,6 +802,7 @@ function ProjectTitle({
         </span>
       ) : null}
       <HostBadge host={host} connected={hostUp} />
+      <HandedOffBadge projectId={projectId} />
       <ProjectMemBadge projectId={projectId} />
       <span className="project-path" title={path}>
         {shortPath(path, 36)}

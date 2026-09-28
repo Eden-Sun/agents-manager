@@ -51,6 +51,7 @@ mod git_quick;
 mod git_sh;
 mod github;
 mod group;
+mod handoff;
 mod herdr;
 mod herdr_shim;
 mod herdr_maintenance;
