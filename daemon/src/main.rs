@@ -65,6 +65,7 @@ mod hookrecv;
 mod hosts;
 mod kind_probe;
 mod lifecycle;
+mod linux_proc;
 mod local_image;
 mod local_sh;
 mod memproc;
