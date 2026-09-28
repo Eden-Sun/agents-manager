@@ -544,7 +544,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 1. `GET /api/session` 取 token（只存記憶體）。
 2. `GET /api/state` 畫 sidebar。
-3. 開 `/ws`：`bot_status` 更新燈號，`message_added` / `turn_updated` 更新聊天；`project_changed` / `bot_changed` / `resync` → 重拉 state。`resync` 重抓已載入對話後若才確認回合完成，也要 flush 瀏覽器暫存的 queued prompt（SPEC §6）。
+3. 開 `/ws`：`bot_status` 更新燈號，`message_added` / `turn_updated` 更新聊天；`project_changed` / `bot_changed` / `resync` → 重拉 state 與已載入或本地仍有開啟回合的 bot 對話。`resync` 重抓後若才確認回合完成，也要 flush 瀏覽器暫存的 queued prompt（SPEC §6）。
 4. 選 bot 時 `GET /api/bots/{id}/messages?limit=100`。
 5. `POST /api/bots/{id}/prompt`（自帶 `client_request_id`）；user 氣泡經 `message_added` 推回，用 `message.id` 去重，不做本地暫存氣泡。
 
