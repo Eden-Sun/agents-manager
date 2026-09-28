@@ -3029,7 +3029,7 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 - macOS：`sysctl -n hw.memsize`；可用 = `vm_stat` 的 free + inactive + speculative + purgeable × page size（inactive／purgeable 是可回收快取）。
 
 `available` 不是 `total − 我們用掉的`（還有瀏覽器與系統）。認不出輸出就回 `null`，UI 只顯示已用量——不猜。
-UI：左上格「已用 · 剩 N」，剩餘 < 15% 轉警示色；明細第一行「這台機器 剩 N / 共 M（已用 …，其中 herdr 樹 …）」。
+UI：左上格「已用 · 剩 N」，本機與每台遠端各一顆（`@m4p`）；剩餘 < 15% 轉警示色；明細第一行「這台機器 剩 N / 共 M（已用 …，其中 herdr 樹 …）」。
 
 ### 15.1b 每個專案佔多少（2026-09-15）
 

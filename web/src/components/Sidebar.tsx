@@ -43,7 +43,7 @@ import { HostBadge, HostsPanel } from './HostsPanel'
 import { KeepAwakeToggle } from './KeepAwakeToggle'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
-import { MemBadge } from './MemBadge'
+import { HeadMemBadges } from './HeadMemBadges'
 import { ThemeToggle } from './ThemeToggle'
 import { ProjectMemBadge } from './ProjectMemBadge'
 import { HandedOffBadge } from './HandedOffBadge'
@@ -1087,9 +1087,7 @@ export function Sidebar() {
             <ConnBadge socket={socket} connected={connected} />
           </div>
         </div>
-        <div className="head-ram">
-          <MemBadge />
-        </div>
+        <HeadMemBadges />
         <div className="head-right">
           <TabsBadge />
         </div>
