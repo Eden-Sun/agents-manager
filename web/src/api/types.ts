@@ -184,7 +184,7 @@ export interface GhStatus {
   name: string
   installed: boolean
   path: string | null
-  logged_in: boolean
+  logged_in: boolean | null
   account: string | null
   accounts: GhAccount[]
   mode: string | null

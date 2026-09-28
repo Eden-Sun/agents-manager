@@ -21,6 +21,10 @@
   font-weight: 600;
 }
 
+.gh-auth.unknown .gh-auth-label {
+  color: var(--text-dim);
+}
+
 .gh-login-cta {
   display: grid;
   gap: 8px;

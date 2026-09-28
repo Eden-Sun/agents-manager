@@ -2677,6 +2677,7 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 - **herdr 版本**（`hosts[].herdr`，API §12.6b）：server 版本與 protocol 取自 ping、CLI 版本取自工具偵測的 `herdr --version`；兩者不同或 protocol 未驗證時 hosts 面板用警告色標出，讀不到顯示「未知」。訂閱重建成功後與每 60 秒重 ping／重探 CLI，有變就推 `host_changed`，讀不到即 `null`（#254）。
 - `GET /api/state` 帶 `hosts: [{name, ssh, herdr_session, connected, error?}]`、`projects[].host`；`POST /api/hosts`、`DELETE /api/hosts/:name`（需無 project 使用）、`POST /api/hosts/:name/reconnect`；
   `POST /api/projects` 可帶 `host`。WS `daemon_status {herdr_connected, hosts}`、`host_changed`。細節見 `API.md`。
+- GitHub CLI 登入狀態是 `true`／`false`／`null`：JSON 探測不支援時以 `gh api user` 確認作用中帳號，仍無法判定就保留未知。未知不等於登出；`auto` 走裝置碼，不複製本機 token。只有遠端狀態明確且未登入、且本機登入狀態確認可用時，`auto` 才能把本機 token 複製到遠端。
 - UI：sidebar Project 標題顯示 host 徽章（本機不顯示）；新增 Project 表單有主機下拉，目錄選擇器跟著切換；主機管理表單列出連線狀態與重連；host 斷線時其 bot 燈號灰。
 - **shell 的鍵盤直通**（使用者 2026-09-16；2026-09-17 改成預設開、改名）：shell 面板打開就是「鍵盤直通」，終端本身收鍵盤，每一下按鍵原樣送進那個 pane（`…/shells/{pane}/keys`），
   貼上走 `…/text` 且 `enter:false`（不拆成鍵——換行會變成 Enter 直接執行）。輪詢從 1 秒加快到 0.25 秒。直通時沒有指令列也沒有虛擬鍵；關掉直通才出現「打一行、Enter 送出」的指令列。
