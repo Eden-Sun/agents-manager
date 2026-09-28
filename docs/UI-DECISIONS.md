@@ -698,3 +698,15 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - 驗證：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`。
 
 ![桌機](screenshots/upstream-update/desktop-1440-dark.png) ![手機](screenshots/upstream-update/phone-390-light.png)
+
+## 已移交的專案：標「由 <host> 管理」、輸入框鎖住（2026-09-28，issue #708）
+
+使用者要把專案交給另一台主機的 daemon 接手；這顆 daemon 對它的 bot 一律不動（SPEC §6.5h）。
+
+- **專案標題一個徽章**「由 agm-host 管理」，跟 RAM 徽章同一種外觀、放在它前面；hover 說明這裡不啟動、停止或送訊息。
+- **bot 列照最後的狀態凍結顯示**，不另外灰掉整列：run 還是那時候的樣子，是事實，不是錯誤。
+- **輸入框鎖住**，理由列寫「由 <host> 管理：這裡不送訊息，也不啟動或停止這顆 Bot」；不提供「送出＝啟動」。
+  「啟動」鈕（bot 選單、停著那一條、終端空畫面）一律停用。daemon 本來就回 409 `handed_off`，UI 先擋是為了不讓人按了才被拒。
+- 設定／收回旗標目前只走 API（`PATCH /api/projects/{id}`），不另做開關：這是一次性的搬家動作，按錯的代價是兩顆 daemon 搶同一批 pane。
+
+![桌機](screenshots/handoff/handoff-dark.png) ![手機](screenshots/handoff/handoff-mobile-dark.png)

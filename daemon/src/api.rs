@@ -729,6 +729,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         out.push(json!({
             "id": p.id, "path": p.path, "label": p.label, "host": p.host,
             "workspace_id": p.workspace_id,
+            "handed_off_to": p.handed_off_to,
             "github": crate::github::cached(app, &p.id).await,
             "bots": bl,
         }));
@@ -938,6 +939,7 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
             anyhow::bail!("duplicate");
         }
         cfg.projects.push(crate::config::ProjectCfg {
+            handed_off_to: None,
             id: Some(id.clone()),
             path: path.clone(),
             label: label.clone(),
@@ -1038,6 +1040,9 @@ async fn get_issue(
 #[derive(Deserialize)]
 struct PatchProject {
     label: Option<String>,
+    /// #708：字串＝移交給那台主機的 daemon，`null`＝收回，不帶＝不動。
+    #[serde(default)]
+    handed_off_to: Option<Value>,
 }
 
 /// Never blocked by a live run: herdr identity derives from the bot id, so `needs_restart: false`.
@@ -1056,6 +1061,12 @@ async fn patch_project(
             Some(l.to_string())
         }
     };
+    let handed_off_to = match &b.handed_off_to {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(h)) if !h.trim().is_empty() => Some(Some(h.trim().to_string())),
+        Some(_) => return Err(LcError::Bad("handed_off_to must be a non-empty host name or null".into())),
+    };
     crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
         let p = cfg
             .projects
@@ -1065,10 +1076,27 @@ async fn patch_project(
         if let Some(l) = &label {
             p.label = l.clone();
         }
+        if let Some(h) = &handed_off_to {
+            p.handed_off_to = h.clone();
+        }
         Ok(())
     })
     .await
     .map_err(|e| if e.to_string() == "no-project" { LcError::NotFound("project".into()) } else { projection_err(e) })?;
+    if let Some(h) = &handed_off_to {
+        tracing::warn!(project_id = %id, handed_off_to = ?h, http = %crate::config_audit::http_caller(), "project handoff changed");
+        // 收回：下一輪對帳照常接手，不等下一個 herdr 事件。
+        if h.is_none() {
+            if let Ok(Some(p)) = db::project(&app.db, &id).await {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::reconcile::reconcile_host(&app, &p.host).await {
+                        tracing::warn!(host = %p.host, error = ?e, "reconcile after taking a project back failed");
+                    }
+                });
+            }
+        }
+    }
     app.emit("project_changed", json!({"project_id": id})).await;
     Ok((StatusCode::OK, Json(json!({"project_id": id, "needs_restart": false}))).into_response())
 }
@@ -2494,6 +2522,7 @@ mod identity_auth_error_tests {
         // 這台上放一個活著的專案。
         crate::projection::update_and_project(&e.app.cfg, &e.app.db, |cfg| {
             cfg.projects.push(crate::config::ProjectCfg {
+                handed_off_to: None,
                 id: Some("01PROJZZ92".into()),
                 path: "/srv/work".into(),
                 label: "work".into(),
@@ -2756,6 +2785,7 @@ mod project_tests {
         app.cfg
             .update(|cfg| {
                 cfg.projects.push(crate::config::ProjectCfg {
+                    handed_off_to: None,
                     id: Some(pid.clone()),
                     path: e.repo.to_string_lossy().to_string(),
                     label: "proj".into(),
@@ -2770,7 +2800,7 @@ mod project_tests {
         let res = patch_project(
             State(app.clone()),
             Path(pid.clone()),
-            Json(PatchProject { label: Some("  改過的名字  ".into()) }),
+            Json(PatchProject { label: Some("  改過的名字  ".into()), handed_off_to: None }),
         )
         .await
         .unwrap();
@@ -2779,16 +2809,63 @@ mod project_tests {
         assert_eq!(p.label, "改過的名字", "the label is trimmed and projected into the db");
         assert!(app.cfg.get().await.projects.iter().any(|x| x.label == "改過的名字"), "and written to config.toml");
 
-        let err = patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("   ".into()) }))
+        let err = patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("   ".into()), handed_off_to: None }))
             .await
             .unwrap_err();
         assert!(matches!(err, LcError::Bad(_)), "blank label is a 400, got {err:?}");
         assert_eq!(db::project(&app.db, &pid).await.unwrap().unwrap().label, "改過的名字");
 
-        let err = patch_project(State(app), Path("nope".into()), Json(PatchProject { label: Some("x".into()) }))
+        let err = patch_project(State(app), Path("nope".into()), Json(PatchProject { label: Some("x".into()), handed_off_to: None }))
             .await
             .unwrap_err();
         assert!(matches!(err, LcError::NotFound(_)), "unknown project is a 404, got {err:?}");
+    }
+
+    /// #708：`handed_off_to` 設得上、清得掉，寫進 config.toml、投影進 DB、`GET /api/state` 看得到；空字串與非字串是 400。
+    #[tokio::test]
+    async fn patch_hands_a_project_off_and_takes_it_back() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (e.app.clone(), e.project_id.clone());
+        let path = e.repo.to_string_lossy().to_string();
+        app.cfg
+            .update(move |cfg| {
+                cfg.projects.push(crate::config::ProjectCfg {
+                    id: Some(pid.clone()),
+                    path,
+                    label: "proj".into(),
+                    host: "local".into(),
+                    bots: vec![],
+                    handed_off_to: None,
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let pid = e.project_id.clone();
+        let patch = |v: Value| PatchProject { label: None, handed_off_to: Some(v) };
+        let state_flag = |app: Arc<App>| async move {
+            let s = state_json(&app).await.unwrap();
+            s["projects"].as_array().unwrap()[0]["handed_off_to"].clone()
+        };
+
+        patch_project(State(app.clone()), Path(pid.clone()), Json(patch(json!(" agm-host ")))).await.unwrap();
+        assert_eq!(db::project(&app.db, &pid).await.unwrap().unwrap().handed_off_to.as_deref(), Some("agm-host"));
+        assert_eq!(app.cfg.get().await.projects[0].handed_off_to.as_deref(), Some("agm-host"), "written to config.toml");
+        assert_eq!(state_flag(app.clone()).await, json!("agm-host"));
+
+        for bad in [json!("  "), json!(3)] {
+            let err = patch_project(State(app.clone()), Path(pid.clone()), Json(patch(bad))).await.unwrap_err();
+            assert!(matches!(err, LcError::Bad(_)), "got {err:?}");
+        }
+        patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("renamed".into()), handed_off_to: None }))
+            .await
+            .unwrap();
+        assert_eq!(state_flag(app.clone()).await, json!("agm-host"), "a label-only patch leaves the handoff alone");
+
+        patch_project(State(app.clone()), Path(pid.clone()), Json(patch(Value::Null))).await.unwrap();
+        assert!(db::project(&app.db, &pid).await.unwrap().unwrap().handed_off_to.is_none());
+        assert!(app.cfg.get().await.projects[0].handed_off_to.is_none());
+        assert_eq!(state_flag(app.clone()).await, Value::Null);
     }
 
     /// issue #73 reopen：需要 DB 才判得出來的大量軟刪閘門，現在也在**落盤之前**擋下非刪除的 mutation。
@@ -2808,6 +2885,7 @@ mod project_tests {
         app.cfg
             .update(|cfg| {
                 cfg.projects.push(crate::config::ProjectCfg {
+                    handed_off_to: None,
                     id: Some(pid.clone()),
                     path: repo.clone(),
                     label: "proj".into(),
@@ -2850,7 +2928,7 @@ mod project_tests {
         std::fs::write(&app.cfg.path, &reduced).unwrap();
         app.cfg.update(|_| Ok(())).await.unwrap();
 
-        let err = patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("renamed".into()) }))
+        let err = patch_project(State(app.clone()), Path(pid.clone()), Json(PatchProject { label: Some("renamed".into()), handed_off_to: None }))
             .await
             .unwrap_err();
         match err {
@@ -4633,6 +4711,7 @@ mod delete_bot_tests {
             .cfg
             .update(move |cfg| {
                 cfg.projects = vec![crate::config::ProjectCfg {
+                    handed_off_to: None,
                     id: Some(pid),
                     path: repo,
                     label: "proj".into(),
@@ -5785,6 +5864,7 @@ mod instruction_files_tests {
             .cfg
             .update(move |cfg| {
                 cfg.projects.push(crate::config::ProjectCfg {
+                    handed_off_to: None,
                     id: Some(pid),
                     path: repo,
                     label: "proj".into(),
@@ -7196,6 +7276,7 @@ mod caller_audit_tests {
                 match cfg.projects.iter_mut().find(|p| p.id.as_deref() == Some(pid.as_str())) {
                     Some(p) => p.bots.push(entry),
                     None => cfg.projects.push(crate::config::ProjectCfg {
+                        handed_off_to: None,
                         id: Some(pid),
                         path: repo,
                         label: "proj".into(),
@@ -7373,7 +7454,7 @@ mod mixed_store_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await
@@ -7448,7 +7529,7 @@ mod create_bot_idempotency_tests {
         e.app
             .cfg
             .update(move |cfg| {
-                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await

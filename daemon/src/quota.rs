@@ -1351,7 +1351,7 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
                 COALESCE((SELECT MAX(COALESCE(t.completed_at, t.created_at)) FROM turns t WHERE t.run_id = r.id), r.started_at)
            FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
           WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
-            AND b.deleted_at IS NULL
+            AND b.deleted_at IS NULL AND p.handed_off_to IS NULL
           ORDER BY COALESCE((SELECT MAX(t.created_at) FROM turns t WHERE t.run_id = r.id), r.started_at) DESC",
     )
     .bind(host)

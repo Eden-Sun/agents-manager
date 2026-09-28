@@ -7,6 +7,19 @@ use super::*;
 /// the turn queued; after the claim, any give-up must put it back or fail it — `in_flight` +
 /// `delivery='pending'` has no other way out. 那一句寫不進去就記成欠著（`owed_delivery`），回 `Err`（#158）。
 pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
+    // #708：移交出去的專案，佇列原樣留著（收回後照常送），這裡一則都不送。讀不到也留在佇列（不認領、不花重試），稍後再看。
+    match crate::handoff::bot_handed_off_to(&app.db, bot_id).await {
+        Ok(None) => {}
+        Ok(Some(to)) => {
+            tracing::info!(bot = %bot_id, handed_off_to = %to, "queued prompts held: the project was handed off");
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::warn!(bot = %bot_id, error = %e, "讀不到專案是否已移交：排著的 prompt 留在佇列，稍後重新判斷");
+            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(crate::supervisor::maintenance::UNREADABLE_RETRY_SECS as u64));
+            return Ok(());
+        }
+    }
     let conv = match db::conversation_id(&app.db, bot_id).await {
         Ok(conv) => conv,
         Err(error) => {
@@ -659,6 +672,18 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
     };
     if !super::run_state::LIVE.contains(&run.state.as_str()) {
         return RunExit::AlreadyEnded;
+    }
+    // #708：專案移交出去了，run 的結束歸接手的 daemon 記；這裡一樣都不寫（讀不到就不動）。
+    match crate::handoff::bot_handed_off_to(&app.db, &run.bot_id).await {
+        Ok(None) => {}
+        Ok(Some(to)) => {
+            tracing::info!(run = run_id, reason, handed_off_to = %to, "run exit ignored: the project was handed off");
+            return RunExit::AlreadyEnded;
+        }
+        Err(e) => {
+            tracing::warn!(run = run_id, reason, error = %e, "run exit not recorded: could not tell whether the project was handed off");
+            return RunExit::NotRecorded;
+        }
     }
     // 讀完狀態、還沒寫 exited 的那一瞬（測試在這裡插進使用者 stop 的收尾寫入）。
     #[cfg(test)]

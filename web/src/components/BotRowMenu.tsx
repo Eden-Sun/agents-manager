@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { anchorOf, useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HeadMoreMenu } from './HeadMoreMenu'
+import { handedOffReason, handedOffTo } from '../lib/handoff'
 
 /**
  * bot 列尾端的動作收成一顆固定寬的 `⋯`：hover 浮出的 icon 會蓋名字、觸控裝置又得另寫一套。
@@ -14,6 +15,8 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
     return r != null && r.state !== 'stopped' && r.state !== 'exited'
   })
   const busyStart = useStore((s) => Boolean(s.busy[`start:${botId}`]))
+  // #708：專案移交出去了，daemon 會回 409 handed_off；這裡先停用並說明由誰管。
+  const handedOff = useStore((s) => handedOffTo(s.projects, s.bots.find((b) => b.id === botId)?.project_id))
   const busyClone = useStore((s) => Boolean(s.busy[`clone:${botId}`]))
   const busyFork = useStore((s) => Boolean(s.busy[`fork:${botId}`]))
   // 接續得了才給 fork：daemon 取的是最近一次記到的 native session，這裡用最近一個 run 當提示。
@@ -46,7 +49,8 @@ export function BotRowMenu({ botId, compact }: { botId: string; compact?: boolea
             type="button"
             className="head-menu-item"
             role="menuitem"
-            disabled={busyStart}
+            disabled={busyStart || handedOff != null}
+            title={handedOff ? handedOffReason(handedOff) : undefined}
             onClick={() => void startBot(botId)}
           >
             啟動

@@ -272,6 +272,10 @@ pub struct ProjectCfg {
     pub host: String,
     #[serde(default, rename = "bots")]
     pub bots: Vec<BotCfg>,
+    /// #708：已移交給另一台主機的 daemon 管（值＝接手主機的顯示名）。有值時這顆 daemon 對這個專案的
+    /// bot／pane 一律不動（SPEC §6.5h）；清掉＝收回，下一輪對帳照常接手。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handed_off_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

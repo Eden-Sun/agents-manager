@@ -95,6 +95,7 @@ async fn start_bot_locked_with_host_fence(
         ));
     }
     refuse_default_session(&bot)?;
+    crate::handoff::refuse(&app.db, bot_id).await?;
     if let Some(existing) = db::active_run(&app.db, bot_id).await.map_err(up)? {
         return Err(LcError::conflict("active run already exists", json!({"run_id": existing.id})));
     }

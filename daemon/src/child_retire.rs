@@ -38,6 +38,8 @@ pub(crate) enum Outcome {
     Refused,
     /// 讀不到誰是 AGM 的：這一輪不退役，晚一點再看。
     Unreadable,
+    /// 專案已移交給另一台主機的 daemon（#708）：不退役，什麼都沒寫。
+    HandedOff,
 }
 
 /// 退役 `bot_id` 這顆 child。DB 寫不進去回 `Err`（呼叫端各自決定重試或回滾）；守衛擋下、讀不到擁有關係不是錯誤。
@@ -48,6 +50,13 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
         let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(Outcome::AlreadyGone) };
         if bot.deleted_at.is_some() {
             return Ok(Outcome::AlreadyGone);
+        }
+        // #708：移交出去的專案，child 在不在歸接手的 daemon 判斷；這裡不退役。
+        if mode == Mode::Implicit {
+            if let Some(to) = crate::handoff::bot_handed_off_to(&app.db, &bot.id).await? {
+                tracing::info!(bot = %bot.name, bot_id = %bot.id, why, handed_off_to = %to, "child not retired: the project was handed off");
+                return Ok(Outcome::HandedOff);
+            }
         }
         if mode == Mode::Implicit {
             match agm_guard(app, &bot, why).await {

@@ -27,6 +27,8 @@ export interface Project {
   host: string
   /** null = 非 GitHub 專案 */
   github: ProjectGithub | null
+  /** #708：已移交給這台主機的 daemon 管；null／沒有＝這顆 daemon 管。 */
+  handed_off_to?: string | null
   created_at: string
 }
 
@@ -582,6 +584,8 @@ export interface NewProjectInput {
 
 export interface PatchProjectInput {
   label?: string
+  /** #708：字串＝移交，`null`＝收回。 */
+  handed_off_to?: string | null
 }
 
 export interface DirEntry {

@@ -120,6 +120,7 @@ daemon 重啟前開始、正在接手確認的那筆也在，`recovered:true`、
       "path": "/Users/me/project/agents-manager",
       "label": "agents-manager",
       "workspace_id": null,
+      "handed_off_to": null,
       "bots": [
         {
           "id": "01M1S2SQPSYMQ8B1VQ50R963B9",
@@ -147,6 +148,7 @@ daemon 重啟前開始、正在接手確認的那筆也在，`recovered:true`、
 ```
 
 - `queued_turn`：排在下一個要送的 Turn（`status = "queued"`，§5），沒有就 `null`；前端據此把輸入框畫成「已排隊」。**生產者兩個**：對方回合中時 AGM 的派工（2026-09-16），與 bot 沒在跑時帶 `start_if_stopped` 的送出（issue #122，turn 帶 `awaits_start:1`）。使用者對**回合中**的 bot 送 `/prompt` 仍是 409，見 SPEC §4.4a。
+- `handed_off_to`（#708）：專案已移交給這台主機的 daemon 管（SPEC §6.5h），`null`＝這顆 daemon 管。有值時這個專案的 bot 列照最後的狀態凍結顯示，start／stop／restart／prompt／keys 一律 409 `handed_off`（帶 `bot_id`、`handed_off_to`、`message`）。
 - `unread` 固定 `0`（未讀由前端算）。
 - 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/instruction_files/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
 
@@ -203,7 +205,7 @@ daemon 重啟前開始、正在接手確認的那筆也在，`recovered:true`、
 |---|---|---|---|
 | POST | `/api/projects` | `{"path":"/abs/or/~/path","label"?:"foo","host"?:"m4p"}`（`label` 預設目錄名） | `200 {"project_id"}`；路徑不存在 400；重複 409 |
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 active Run → 409 |
-| PATCH | `/api/projects/{id}` | `{"label":"新名字"}` | `200 {"project_id","needs_restart":false}`；trim 後為空 400。不擋 active run（agent 身分取自 bot id，label 只影響**下次啟動**的 `agent_name` slug） |
+| PATCH | `/api/projects/{id}` | `{"label"?:"新名字","handed_off_to"?:"agm-host"\|null}` | `200 {"project_id","needs_restart":false}`；label trim 後為空 400。不擋 active run（agent 身分取自 bot id，label 只影響**下次啟動**的 `agent_name` slug）。`handed_off_to`（#708，SPEC §6.5h）：字串＝移交給那台主機的 daemon（trim 後寫進 config.toml），`null`＝收回（當場排一輪對帳接手），不帶＝不動；空字串或非字串 400。設定當下不停、不關任何 pane |
 | POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, instruction_files?, auto_approve?, client_request_id?}` | `200 {"bot_id","name"}`；名稱重複 409，`instruction_files` 不合法 400（§12.8b），但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的）。提交已禁用模型時仍成功，並回 `remapped`（見下）。**`client_request_id`（冪等鍵，1..128 個 `[A-Za-z0-9-_.:]`，#352）**：同一個專案裡同一個鍵＋同樣的請求內容重送（回應遺失後重試），回第一次建好的那顆 `{"bot_id","name","replayed":true}`，不再建第二顆；同一個鍵換了請求內容（`name_auto:true` 時 `name` 只是提示、不算內容）回 409 `request_id_reused`（帶原本那顆的 `bot_id`）；沒帶＝照舊每次都建。鍵記在 config.toml 該 bot 的 `create_request_id`／`create_fingerprint`（daemon 持久，bot 刪除即失效） |
 | PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}`；提交已禁用模型時另帶 `remapped` |
 | POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
