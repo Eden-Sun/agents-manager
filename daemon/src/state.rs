@@ -8,8 +8,6 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, VecDeque};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -627,27 +625,17 @@ pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrCli
     if session == "default" {
         anyhow::bail!("herdr default session is not running; refusing to start the user's session")
     }
-    tracing::info!(session, socket = %sock.display(), "herdr socket not reachable; spawning server");
-    std::fs::create_dir_all(log_dir).ok();
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("herdr-server.log"))?;
-    let errlog = log.try_clone()?;
-    let mut cmd = std::process::Command::new("herdr");
-    cmd.args(["--session", session, "server"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(log))
-        .stderr(std::process::Stdio::from(errlog));
-    // Detach: the herdr server outlives the daemon and is not part of its terminal's
-    // foreground process group.
-    #[cfg(unix)]
-    cmd.process_group(0);
-    reap_in_background(cmd.spawn()?);
+    tracing::info!(session, socket = %sock.display(), "herdr socket not reachable; starting server");
+    // Linux 交給 systemd user unit，macOS／沒裝 unit 才直接 spawn（issue #677，`herdr_unit`）。
+    let unit = crate::herdr_unit::UnitStart::for_this_host(session);
+    let how = crate::herdr_unit::start_server(session, log_dir, unit.as_ref(), "herdr")?;
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         if client.ping().await.is_ok() {
             return Ok(client);
         }
     }
-    anyhow::bail!("herdr session `{session}` did not come up within 10s")
+    anyhow::bail!("herdr session `{session}` did not come up within 10s (started via {how})")
 }
 
 #[cfg(test)]
