@@ -399,12 +399,23 @@ am_sweep_stale_leases() {
 # `cargo run` 起來的程式也繼承到「忽略 SIGINT」），stdin 也會被換成 /dev/null。
 _guard_sh='printf "%s" "$$" > "$1" 2>/dev/null; shift; exec "$@"'
 
+# 叫 shim 的那一端（呼叫端）還在不在。`$PPID` 是 shell 啟動那一刻的父行程：呼叫端在 shim 起來之前就走了的話，
+# 那已經是**收養者**——launchd／init（pid 1，非 root 對它 `kill -0` 回 EPERM，碰巧判成「不在」），或 Linux 的
+# `systemd --user`（child subreaper、同一個使用者，`kill -0` 會成功）。以前在 systemd 底下 shim 就這樣把收養者
+# 當成呼叫端、永遠等名額（issue #676）。收養者一律當成沒有呼叫端；認的是名字，因為 subreaper 旗標從外面讀不到。
+am_caller_gone() {
+    [ "${_parent:-0}" -gt 1 ] 2>/dev/null || return 0
+    case "${_parent_comm##*/}" in systemd | launchd | init) return 0 ;; esac
+    ! kill -0 "$_parent" 2>/dev/null
+}
+
 am_cargo() {
     # 遞迴保險絲：萬一 `am_is_shim` 認不出某一份 shim（被改過檔頭、或別的專案裝了同名 wrapper），
     # 兩份 shim 會互相把對方當成真 cargo 一路 fork 下去。寧可大聲失敗，也不要 fork 到機器躺平。
     AM_SHIM_DEPTH=$((${AM_SHIM_DEPTH:-0} + 1))
     export AM_SHIM_DEPTH
     _parent=$PPID
+    _parent_comm=$(ps -o comm= -p "$_parent" 2>/dev/null)
     if [ "$AM_SHIM_DEPTH" -gt 4 ]; then
         printf 'agents-manager: cargo shim 遞迴 %s 層——PATH 上有多份 shim 而且認不出來。把真 cargo 放進 AM_REAL_CARGO 再跑一次。\n' "$AM_SHIM_DEPTH" >&2
         exit 127
@@ -521,7 +532,7 @@ am_cargo() {
                         printf 'agents-manager: 全機的 cargo 名額滿了，等一個空出來（waiting_for_build_slot）……\n' >&2
                     fi
                     # 呼叫端（叫我們的 shell／agent）已經不在了：沒有人在等這次建置，不要留一個永遠在等名額的孤兒。
-                    if ! kill -0 "$_parent" 2>/dev/null; then
+                    if am_caller_gone; then
                         printf 'agents-manager: 呼叫端已經結束，不再等 cargo 名額\n' >&2
                         exit 1
                     fi
@@ -557,7 +568,7 @@ am_cargo() {
         if [ "$_down" = 1 ]; then
             printf 'agents-manager: build scheduler %s；受管的 bot 不會在沒有名額時跑 cargo，每 3 秒重試、最多等 %s 秒……\n' "$_bad" "$_wait" >&2
         fi
-        if ! kill -0 "$_parent" 2>/dev/null; then
+        if am_caller_gone; then
             printf 'agents-manager: 呼叫端已經結束，不再等 build scheduler\n' >&2
             exit 1
         fi
@@ -2005,7 +2016,12 @@ esac"#,
         let (mut outer, _, err_path) = s.start_group(&mut cmd, false);
         let group = outer.id() as i32;
         assert!(outer.wait().unwrap().success());
-        // 整組（含 shim）要自己收掉。外層已經被收走，從這一刻起 shim 只要再問一輪 acquire 就該發現呼叫端不在了：
+        assert_shim_gives_up_once_caller_is_gone(&s, group, &err_path);
+    }
+
+    /// 呼叫端不在之後，shim 最多再問 `MAX_ROUNDS_AFTER_GONE` 輪 acquire 就要自己講一句並退出。
+    fn assert_shim_gives_up_once_caller_is_gone(s: &Sandbox, group: i32, err_path: &std::path::Path) {
+        // 從這一刻起 shim 只要再問一輪 acquire 就該發現呼叫端不在了：
         // 判準是「之後又問了幾輪」（事件驅動、跟機器忙不忙無關），不是「等了幾秒」。牆鐘只留一個給真正卡死的後盾：
         // 這麼久**一輪都沒有進展**、也沒退出，才算卡住。
         let rounds = || std::fs::read_to_string(s.dir.join("acquire.log")).map(|t| t.lines().count()).unwrap_or(0);
@@ -2029,10 +2045,72 @@ esac"#,
         }
         let left = group_members(group);
         s.kill_group_if_ours(group);
-        let said = std::fs::read_to_string(&err_path).unwrap_or_default();
+        let said = std::fs::read_to_string(err_path).unwrap_or_default();
         assert!(left.is_empty(), "呼叫端不在了，shim 還在等名額（{}）：{left:?}\n{said}", verdict.unwrap_or_default());
         // 光看「行程消失了」不夠（機器上可能有別的東西在清孤兒）：shim 要**自己**講一句並退出，才是它自己發現的。
         assert!(said.contains("呼叫端已經結束"), "shim 要自己發現呼叫端不在了，而不是被別人殺掉：{said}");
+    }
+
+    /// issue #676：在 systemd --user 底下（Linux 搬家後 daemon 與 pane 都在它底下），呼叫端走掉之後 shim 被
+    /// **收養者** `systemd --user` 收養：它是 child subreaper、跟 shim 同一個使用者，`$PPID` 指到它、`kill -0` 會成功，
+    /// shim 以前就把它當成呼叫端、永遠等名額（ubuntu-ci 在 systemd timer 底下穩定紅，ssh shell 底下綠）。
+    /// 這裡不需要真的 systemd：外層換成一個設了 `PR_SET_CHILD_SUBREAPER`、`comm` 叫 `systemd` 的 python 行程，
+    /// 它起完 `sh -c '<shim> & …'` 之後留著當收養者，直到 shim 走了才結束。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shim_adopted_by_a_systemd_subreaper_stops_waiting_for_a_slot() {
+        let s = Sandbox::new();
+        s.install_fake_curl(&format!(
+            r#"case "$*" in
+  *acquire*) echo x >> '{}'; printf '{{"granted":false,"active":2,"retry_after_secs":0}}' ;;
+  *) printf '{{}}' ;;
+esac"#,
+            s.dir.join("acquire.log").display()
+        ));
+        let env = lease_env(&s);
+        // 子 shell 先睡一下再 exec 成 shim：外層 sh 一定已經走了，shim 啟動時的 `$PPID` **必定**是收養者（不靠時序運氣）。
+        let inner = format!("( sleep 0.3; exec '{}' build ) & echo $! > '{}'", s.dir.join("bin/cargo").display(), s.dir.join("shim.pid").display());
+        let marker = s.dir.join("inner.done");
+        // PR_SET_CHILD_SUBREAPER=36、PR_SET_NAME=15（comm 就是 ps -o comm= 看到的名字）。收養來的 shim 結束後由這裡收屍，
+        // 沒有子行程了（ChildProcessError）就結束；最多撐 300 秒，測試失敗時也不會留下它。
+        let py = r#"import ctypes, os, subprocess, sys, time
+libc = ctypes.CDLL(None, use_errno=True)
+assert libc.prctl(36, 1, 0, 0, 0) == 0, "PR_SET_CHILD_SUBREAPER"
+libc.prctl(15, b"systemd", 0, 0, 0)
+subprocess.run(["sh", "-c", sys.argv[1]], check=True)
+open(sys.argv[2], "w").close()
+end = time.time() + 300
+while time.time() < end:
+    try:
+        os.waitpid(-1, os.WNOHANG)
+    except ChildProcessError:
+        break
+    time.sleep(0.05)
+"#;
+        let mut cmd = Command::new("python3");
+        cmd.arg("-c")
+            .arg(py)
+            .arg(inner)
+            .arg(&marker)
+            .env("PATH", format!("{}:{}:/usr/bin:/bin", s.dir.join("bin").display(), s.dir.join("real").display()))
+            .env("HOME", s.dir.join("fake-home"));
+        for (key, _) in std::env::vars() {
+            if key.starts_with("AM_") {
+                cmd.env_remove(key);
+            }
+        }
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        let (outer, _, err_path) = s.start_group(&mut cmd, false);
+        let group = outer.id() as i32;
+        // 等外層的 `sh -c` 結束（shim 從這一刻起是孤兒、被那顆「systemd」收養）。
+        let t0 = std::time::Instant::now();
+        while !marker.exists() {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(60), "外層的 sh -c 60 秒內沒結束");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_shim_gives_up_once_caller_is_gone(&s, group, &err_path);
     }
 
     /// issue #151（也是 #128 的延伸）：shim 自己被 `SIGKILL`（`trap` 沒機會跑、名額沒人放）時，背景的續約迴圈
