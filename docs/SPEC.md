@@ -2036,7 +2036,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   - cargo 維持**前景**執行（背景會讓非互動 shell 忽略 SIGINT、換掉 stdin），pid 由 `exec` 包裝寫給守衛。建不出暫存目錄（沒地方放 pid 與失效標記）就不拿名額、放回去（受管的 bot 到此為止 exit 75，人工 shell 才不排程直接跑）；
   - 守衛只罩**本機**的 cargo（名額是本機的）；名額在 cargo 起來之前就失效，就不起它。
 - **shim 不留孤兒行程（issue #151）**：行程數是全機共用的資源（曾被塞到 2661／2666，其他 bot 的 `fork` 全失敗）。三件事：
-  等名額的迴圈每輪確認呼叫端（`$PPID`）還在，不在了就自己印一行退出，不留永遠在等的孤兒；續約守衛的 `sleep` 放背景、用 `wait` 等，
+  等名額的迴圈每輪確認呼叫端（`$PPID`）還在，不在了就自己印一行退出，不留永遠在等的孤兒（`$PPID` 是 shell 啟動那一刻的父行程：呼叫端先走了，那就是收養者——pid 1、`launchd`／`init`，或 Linux 的 child subreaper `systemd --user`，後者同一個使用者、`kill -0` 會成功，所以名字是 `systemd`／`launchd`／`init` 的父行程一律當成沒有呼叫端，#676）；續約守衛的 `sleep` 放背景、用 `wait` 等，
   收到 TERM 先殺掉手上的 sleep 再結束（否則每次 cargo 都留一顆 `sleep 60` 的孤兒，最久 TTL/3 秒）——**兩個縫也要補上（issue #189）**：TERM 落在
   `sleep &` 與記下它的 pid 之間時 handler 只記旗標、縫過了再由 `am_lease_sleep` 殺掉退出；殺 sleep 一律用 `KILL`（剛 fork 還沒 exec 的 sleep 仍帶著守衛的
   TERM handler，TERM 會被吞掉）；shim 自己被 `SIGKILL`（`trap` 沒機會跑）時，
