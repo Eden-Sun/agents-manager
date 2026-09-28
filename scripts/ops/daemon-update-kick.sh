@@ -279,6 +279,7 @@ if [ -n "$BUILT_SHA" ]; then
   # shellcheck disable=SC2086  # PATHS 是刻意要拆成多個參數的
   if "$GIT" -C "$REPO" diff --quiet "$BUILT_SHA" "$DIFF_TO" -- $PATHS; then
     if [ "$NOW" = 1 ]; then
+      echo "$NOW_SHA" > "$STATE"
       drop_now "${BUILT_SHA} 到 ${NOW_SHA} 只動到不進 binary 的檔，已經是最新"; exit 0
     fi
     log "$BUILT_SHA 之後只動到不進 binary 的檔，跳過（origin/main ${HEAD_SHA}）"
@@ -737,8 +738,10 @@ fi
 
 case "$ASSIGN_RESULT" in
   confirmed)
-    # 「已派過」記的是這次實際建出來的東西：DEFERRED 時記核准的 commit，下一輪才會看到 HEAD 還沒建（記 HEAD 會讓它被當成已派過）。
-    if [ "$DEFERRED" = 1 ]; then echo "$APPR_COMMIT" > "$STATE"; else echo "$HEAD_SHA" > "$STATE"; fi
+    # 「已派過」記的是這輪處理的 target：立即部署用 NOW_SHA，例行延後用核准 commit，其餘例行用 HEAD。
+    if [ "$NOW" = 1 ]; then echo "$NOW_SHA" > "$STATE"
+    elif [ "$DEFERRED" = 1 ]; then echo "$APPR_COMMIT" > "$STATE"
+    else echo "$HEAD_SHA" > "$STATE"; fi
     log "已派工 ${CRID}（origin/main ${HEAD_SHA}）"
     [ "$NOW" = 1 ] && drop_now "已派工 ${CRID}"
     ;;

@@ -1061,14 +1061,26 @@ check "log 寫明留下一趟" "立即部署 ${NOW_SHA} 之後 origin/main ${H} 
 check "已派過記按下的那顆，不是 HEAD" "^$NOW_SHA$" "$AGM_DIR/daemon-update.last"
 now_teardown
 
-# N13. 使用者按下之後 main 只多了 docs：正文照實寫沒有動到 binary，不寫留下一趟。
+# N13. #715：使用者按下之後 main 只多了 docs：正文照實寫沒有動到 binary，已派過仍記實際 target。
 now_setup
 bump_docs d1
 H=$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)
 bash "$SCRIPT"
 check "正文寫只動到不進 binary 的檔" "多出來的 commit 只動到不進 binary 的檔；仍然 checkout $NOW_SHA 來建" "$AGM_DIR/assign-body.txt"
 check_no "正文不寫留下一趟" "留下一趟" "$AGM_DIR/assign-body.txt"
-check "已派過記 HEAD（沒有要留的）" "^$H$" "$AGM_DIR/daemon-update.last"
+check "已派過記立即 target，不提前記 HEAD" "^$NOW_SHA$" "$AGM_DIR/daemon-update.last"
+now_teardown
+
+# N14. #715：立即 target 已在正式 binary，main 只多了 docs；收請求時也不能把 HEAD 記成已派過。
+now_setup
+bump_docs d1
+H=$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)
+echo "$H" > "$AGM_DIR/daemon-update.last"
+echo "$NOW_SHA" > "$AGM_DIR/daemon-update.built"
+bash "$SCRIPT"
+check "target 已建好時已派過記 target，不記較新的 HEAD" "^$NOW_SHA$" "$AGM_DIR/daemon-update.last"
+check_no "target 已建好時不另派建置" "assign --bot" "$AGM_DIR/calls.log"
+check_eq "target 已建好時收掉立即請求" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
 now_teardown
 
 echo "$PASS passed, $FAIL failed"
