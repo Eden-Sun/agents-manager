@@ -259,6 +259,10 @@ pub struct HostCfg {
     /// A non-interactive ssh shell's PATH is missing things; prefixed to the remote PATH.
     #[serde(default)]
     pub remote_path: String,
+    /// #709：另一顆 daemon 也在用這台的 `herdr_session`（SPEC §11.9）。開著時這顆 daemon 在這台只碰自己的
+    /// pane／tab／workspace、絕不 `herdr server stop`、不搬遠端的 bot 目錄。執行時讀當下的設定，改了不必重連。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_session: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1022,6 +1026,7 @@ mod v40_tests {
 
     fn host(port: u16) -> HostCfg {
         HostCfg {
+            shared_session: false,
             name: "m4p".into(),
             ssh: "m4p@100.112.229.82".into(),
             ssh_port: port,

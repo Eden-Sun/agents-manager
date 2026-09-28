@@ -1055,6 +1055,7 @@ mod tests {
         let app = env.app.clone();
         let host = "restart-repoint";
         let host_cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,

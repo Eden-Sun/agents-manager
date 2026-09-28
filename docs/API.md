@@ -1019,6 +1019,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 - `projects[].host` 永遠存在（本機 `"local"`）；sidebar 徽章在 `host !== "local"` 時才顯示。
 - host 斷線時其下所有 bot 的 `lamp` 一律 `"disconnected"`。
 - 另有 `hosts[].tools`、`identities`、`shell_identities`、`attach_command`（§12、身份一節）。
+- `hosts[].shared_session`（#709，SPEC §11.9）：這台的 herdr session 也被另一顆 daemon 用著；讀當下的設定（改了不必重連）。`local` 一律 `false`。
 
 ### `POST /api/hosts`
 新增或更新遠端主機，寫回 `[[hosts]]`，**同步等第一次連線結果**（ensure session + ssh master + ping，最長約 35 秒）才回應。
@@ -1035,6 +1036,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | `herdr_session` | | `"agents-manager"` |
 | `remote_path` | | `""`（前置到遠端 PATH）。以 `:` 分項、每項各自 quote；項目開頭的 `$HOME`／`${HOME}`／`~` 展開成遠端 home，其他 `$`、`;` 都是字面（#241） |
 | `ssh_opts` | | `[]`，原樣附加到每個 ssh 指令 |
+| `shared_session` | | 新主機 `false`；更新時不帶＝沿用舊值。`true`＝這個 session 也是另一顆 daemon 的（SPEC §11.9），這顆只碰自己的 pane、絕不 `herdr server stop`。改它不觸發重連 |
 
 回 `200 {"name","connected","error"}`；連不上仍 200（設定已寫入）。名稱不合法或為 `local` 400。同名視為更新（先斷舊連線）。
 同一組規則（保留字 `local`、slug 格式、`ssh` 不得為空、不得同名重複）從 issue #506 起也由 `projection::validate` 把關，

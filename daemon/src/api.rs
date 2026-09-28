@@ -653,6 +653,8 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             "ssh_opts": c.cfg.as_ref().map(|x| x.ssh_opts.clone()).unwrap_or_default(),
             "herdr_session": c.cfg.as_ref().map(|x| x.herdr_session.clone()).unwrap_or_else(|| app.herdr_session.clone()),
             "remote_path": c.cfg.as_ref().map(|x| x.remote_path.clone()),
+            // #709：讀當下的設定（改了不重連，連線上的快照會是舊的）。
+            "shared_session": crate::shared_host::is_shared(app, &c.name).await,
             "connected": connected,
             "error": c.error_string().await,
             "attach_command": crate::config::attach_command(c.cfg.as_ref(), &app.herdr_session),
@@ -2182,6 +2184,8 @@ struct NewHost {
     ssh_opts: Option<Vec<String>>,
     herdr_session: Option<String>,
     remote_path: Option<String>,
+    /// #709：不帶＝沿用既有那一筆的值（新主機是 false）。
+    shared_session: Option<bool>,
 }
 
 /// 這次更新會不會改變「這個名字指到哪台機器」。`remote_path`／`ssh_opts` 只影響在同一台上怎麼跑，
@@ -2209,6 +2213,8 @@ async fn create_host(
     if b.ssh.trim().is_empty() {
         return Err(LcError::Bad("ssh target must not be empty".into()));
     }
+    // 共用 session 是安全開關（#709）：沒帶就沿用，不因為一次只改 ssh 的更新而悄悄關掉。
+    let prev_shared = app.cfg.get().await.hosts.iter().any(|h| h.name == b.name && h.shared_session);
     let cfg = HostCfg {
         name: b.name.clone(),
         ssh: b.ssh.trim().to_string(),
@@ -2221,6 +2227,7 @@ async fn create_host(
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| crate::config::DEFAULT_HERDR_SESSION.to_string()),
         remote_path: b.remote_path.unwrap_or_default(),
+        shared_session: b.shared_session.unwrap_or(prev_shared),
     };
     // 這支同時是新增與**更新**（docs/API.md）。更新到「指去另一台機器」時要跟 `delete_host` 一樣先確認
     // 主機上沒有活著的專案（issue #544）：`apply_config` 會把連線整個換掉，但 `runs` 一列都不動——
@@ -2443,6 +2450,7 @@ mod identity_auth_error_tests {
         let e = crate::testing::env().await;
         let host = format!("identity-api-home-616-{}", crate::db::ulid().to_ascii_lowercase());
         let conn = e.app.hosts.insert_remote_for_test(HostCfg {
+            shared_session: false,
             name: host.clone(),
             ssh: "unused".into(),
             ssh_port: 22,
@@ -2495,6 +2503,7 @@ mod identity_auth_error_tests {
             ssh_opts: None,
             herdr_session: None,
             remote_path: None,
+            shared_session: None,
         };
         let mk = |h: &NewHost| NewHost {
             name: h.name.clone(),
@@ -2503,11 +2512,13 @@ mod identity_auth_error_tests {
             ssh_opts: h.ssh_opts.clone(),
             herdr_session: h.herdr_session.clone(),
             remote_path: h.remote_path.clone(),
+            shared_session: h.shared_session,
         };
         // 先把主機寫進 config（不必等它真的連上：這條測的是閘門，不是連線）。
         e.app.cfg
             .update(move |f| {
                 f.hosts.push(HostCfg {
+                    shared_session: false,
                     name: "zz92".into(),
                     ssh: "old-box".into(),
                     ssh_port: 22,
@@ -2819,6 +2830,32 @@ mod project_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LcError::NotFound(_)), "unknown project is a 404, got {err:?}");
+    }
+
+    /// #709：`GET /api/hosts` 的 `shared_session` 讀當下的設定；`POST /api/hosts` 沒帶這個欄位就沿用，不悄悄關掉。
+    #[tokio::test]
+    async fn the_shared_session_flag_is_listed_live_and_kept_when_a_host_update_omits_it() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        crate::shared_host::tests::shared_host(&e, true).await;
+        let flag = |app: Arc<App>| async move {
+            hosts_list(&app).await.into_iter().find(|h| h["name"] == "sh1").unwrap()["shared_session"].clone()
+        };
+        assert_eq!(flag(app.clone()).await, json!(true));
+
+        let update = |shared: Option<bool>| NewHost {
+            name: "sh1".into(),
+            ssh: "sh1.invalid".into(),
+            ssh_port: None,
+            ssh_opts: None,
+            herdr_session: Some("test".into()),
+            remote_path: None,
+            shared_session: shared,
+        };
+        create_host(State(app.clone()), Query(DeleteQuery::default()), Json(update(None))).await.unwrap();
+        assert!(app.cfg.get().await.hosts.iter().any(|h| h.name == "sh1" && h.shared_session), "沒帶就沿用");
+        create_host(State(app.clone()), Query(DeleteQuery::default()), Json(update(Some(false)))).await.unwrap();
+        assert_eq!(flag(app.clone()).await, json!(false));
     }
 
     /// #708：`handed_off_to` 設得上、清得掉，寫進 config.toml、投影進 DB、`GET /api/state` 看得到；空字串與非字串是 400。

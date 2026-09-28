@@ -353,12 +353,11 @@ impl HostConn {
         Ok(h)
     }
 
-    /// SPEC §11.3.1. On macOS herdr runs as a launchd GUI-domain agent, not `nohup` from ssh:
-    /// an ssh-spawned process can't read the login Keychain, so Claude Code inside reports
-    /// "Not logged in". Falls back to `nohup` when not macOS / no console owner / launchctl refuses.
-    async fn ensure_remote_session(&self) -> Result<String> {
-        let cfg = self.cfg.as_ref().unwrap();
+    /// [`Self::ensure_remote_session`] 在遠端跑的腳本。`shared`（#709）＝這個 session 也是別顆 daemon 的：
+    /// server 在跑就原樣沿用，絕不 `server stop`、不改交給 launchd。
+    fn remote_session_script(cfg: &HostCfg, shared: bool) -> String {
         let sess = &cfg.herdr_session;
+        let shared = u8::from(shared);
         let q = sh_quote(sess);
         // The plist is XML: `&`, `<`, `>` in a path would break the whole file, not just PATH.
         let path_prefix = if cfg.remote_path.trim().is_empty() {
@@ -369,13 +368,18 @@ impl HostConn {
         let script = format!(
             r#"printf 'AM_HOME=%s\n' "$HOME"
 S={q}
+SHARED={shared}
 SOCK="$HOME/.config/herdr/sessions/$S/herdr.sock"
 LABEL="dev.agents-manager.herdr-$S"
 running() {{ herdr session list 2>/dev/null | grep -q "^$S[[:space:]].*running"; }}
 HERDR_BIN=$(command -v herdr 2>/dev/null)
 CONSOLE_USER=$(stat -f %Su /dev/console 2>/dev/null || true)
 MODE=nohup
-if [ "$(uname -s)" = Darwin ] && [ -n "$HERDR_BIN" ] && [ "$CONSOLE_USER" = "$(id -un)" ] && command -v launchctl >/dev/null 2>&1; then
+if [ "$SHARED" = 1 ] && running; then
+  # #709：這個 session 也是別顆 daemon 的（共用），server 在跑就一點都不碰：不 stop、不交給 launchd。
+  MODE=shared
+  printf 'AM_MODE=shared-running\n'
+elif [ "$(uname -s)" = Darwin ] && [ -n "$HERDR_BIN" ] && [ "$CONSOLE_USER" = "$(id -un)" ] && command -v launchctl >/dev/null 2>&1; then
   MODE=launchd
 fi
 if [ "$MODE" = launchd ]; then
@@ -429,6 +433,16 @@ printf 'AM_SOCK=%s\n' "$SOCK"
 herdr session list 2>&1 | sed 's/^/AM_LIST /'
 "#
         );
+        script
+    }
+
+    /// SPEC §11.3.1. On macOS herdr runs as a launchd GUI-domain agent, not `nohup` from ssh:
+    /// an ssh-spawned process can't read the login Keychain, so Claude Code inside reports
+    /// "Not logged in". Falls back to `nohup` when not macOS / no console owner / launchctl refuses.
+    async fn ensure_remote_session(&self, shared: bool) -> Result<String> {
+        let cfg = self.cfg.as_ref().unwrap();
+        let sess = &cfg.herdr_session;
+        let script = Self::remote_session_script(cfg, shared);
         let out = self.ssh_exec_path(&script).await?;
         let mut home = None;
         let mut sock = None;
@@ -582,7 +596,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                 return; // superseded by a reconnect / config change
             }
             let attempt = async {
-                let sock = conn.ensure_remote_session().await?;
+                let sock = conn.ensure_remote_session(crate::shared_host::is_shared(&app, &conn.name).await).await?;
                 conn.start_master(&sock).await?;
                 Ok::<_, anyhow::Error>(())
             }
@@ -1165,6 +1179,7 @@ mod tests {
         let env = crate::testing::env().await;
         let host = "host-changed-fence-test";
         let cfg = |ssh: &str| HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: ssh.into(),
             ssh_port: 22,
@@ -1224,6 +1239,7 @@ mod tests {
         let env = crate::testing::env().await;
         let host = "authority-gate-test";
         let cfg = HostCfg {
+            shared_session: false,
             name: host.into(),
             ssh: "target-a".into(),
             ssh_port: 22,
@@ -1363,6 +1379,7 @@ mod tests {
 
     fn cfg() -> HostCfg {
         HostCfg {
+            shared_session: false,
             name: "m4p".into(),
             ssh: "m4p@100.112.229.82".into(),
             ssh_port: 22,
@@ -1472,5 +1489,65 @@ mod tests {
         if let Some(task) = task {
             task.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_session_script_tests {
+    //! #709：連上共用 session 的主機時，對方的 herdr server 在跑就一點都不碰（絕不 `server stop`）。
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fake(bin: &std::path::Path, name: &str, body: &str) {
+        let p = bin.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// 假的 macOS：herdr 說 session 在跑（nohup 起的，launchd 沒有它）——正是以前會 `server stop` 交給 launchd 的形狀。
+    fn run(shared: bool) -> (String, String) {
+        let root = std::path::PathBuf::from(format!("/tmp/am-rs-{}", &crate::db::ulid()[18..]));
+        let (bin, home, log) = (root.join("bin"), root.join("home"), root.join("log"));
+        std::fs::create_dir_all(&bin).unwrap();
+        let sock_dir = home.join(".config/herdr/sessions/test");
+        std::fs::create_dir_all(&sock_dir).unwrap();
+        let _sock = std::os::unix::net::UnixListener::bind(sock_dir.join("herdr.sock")).unwrap();
+        fake(&bin, "herdr", r#"echo "herdr $*" >> "$AM_LOG"; [ "$1" = session ] && [ "$2" = list ] && echo "test running"; exit 0"#);
+        fake(&bin, "uname", "echo Darwin");
+        fake(&bin, "stat", "id -un");
+        fake(&bin, "launchctl", r#"echo "launchctl $*" >> "$AM_LOG"; [ "$1" = print ] && exit 1; exit 0"#);
+        fake(&bin, "sleep", "exit 0");
+        let cfg = HostCfg {
+            name: "sh1".into(),
+            ssh: "sh1.invalid".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+            shared_session: shared,
+        };
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(HostConn::remote_session_script(&cfg, shared))
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HOME", &home)
+            .env("AM_LOG", &log)
+            .output()
+            .unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        std::fs::remove_dir_all(&root).ok();
+        (String::from_utf8_lossy(&out.stdout).to_string(), calls)
+    }
+
+    #[test]
+    fn a_running_shared_session_is_never_stopped_or_handed_to_launchd() {
+        let (out, calls) = run(true);
+        assert!(out.contains("AM_MODE=shared-running") && out.contains("AM_OK=1"), "{out}");
+        assert!(!calls.contains("server stop"), "{calls}");
+        assert!(!calls.contains("launchctl bootstrap"), "{calls}");
+
+        let (out, calls) = run(false);
+        assert!(calls.contains("server stop"), "不共用時照舊交給 launchd（對照組）：{calls}\n{out}");
     }
 }
