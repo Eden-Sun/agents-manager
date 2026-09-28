@@ -86,6 +86,41 @@
   margin-left: auto;
 }
 
+.head-mem-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.head-mem-row > .mem-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 每台的 pane 數只在手機 menu 出現（2026-09-28 使用者：menu 上方還空）；桌機左邊已有 pane 總數。 */
+.sidebar-head .head-ram .head-host-panes {
+  display: none;
+}
+
+@media (width <= 640px) {
+  .sidebar-head .head-ram.multi .head-host-panes {
+    display: inline-flex;
+    padding: 0 4px;
+    font-size: 10px;
+    line-height: 1.45;
+  }
+
+  /* 手機點擊區預設 40px（styles.css），兩台疊起來中間空一大段；疊放時每列 28px，整列都能點。 */
+  .head-ram.multi .mem-open {
+    min-height: 28px;
+  }
+
+  /* 分主機的數字已經在 RAM 旁邊，總數那顆收掉，不讓 24／20／4 三個數字並列。 */
+  .sidebar-head:has(.head-ram.multi) .head-brand-meta > .pane-badge {
+    display: none;
+  }
+}
+
 /* 側欄放不下「已連線」（會切成「已連」），燈＋title 就夠。 */
 
 .sidebar-head .conn-label {
