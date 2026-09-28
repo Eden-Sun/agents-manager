@@ -59,6 +59,18 @@ done
 
 LOG="${SWAP_LOG:-$AGM_DIR/daemon-swap.log}"
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+prune_old_db_backups() {
+    local backup
+    for backup in "$DB".bak-*; do
+        [ -f "$backup" ] || continue
+        [ "$backup" = "$DBB" ] && continue
+        if rm -f "$backup"; then
+            log "removed old DB backup $backup"
+        else
+            log "WARN: could not remove old DB backup $backup"
+        fi
+    done
+}
 service_capability() {
     "$PYTHON" - "$PORT" <<'PY'
 import json, sys, urllib.error, urllib.request
@@ -581,6 +593,7 @@ ERRS=$(tail -c "+$((OFF + 1))" "$DLOG" 2>/dev/null | grep -cE '\bERROR\b|drift')
 log "daemon.log since restart: ERROR/drift lines=$ERRS"
 
 echo "$SHORT" > "$AGM_DIR/daemon-update.built"
+prune_old_db_backups
 log "DONE .built=$SHORT pid=$(dpid) db_backup=$DBB"
 # 換版成功、但窗口沒交還：下一個人拿不到窗口，要看得出來（issue #477）。
 [ "$RELEASE_FAILED" = 0 ] || { log "EXIT 8: 換版成功，但 restart 窗口沒有交還成功（見上面的 rc）"; exit 8; }

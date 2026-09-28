@@ -52,6 +52,20 @@ check_eq() { # check_eq <描述> <期望> <實際>
   fi
 }
 
+db_backup_count() {
+  n=0
+  for f in "$DAEMON_DB".bak-*; do
+    [ -f "$f" ] || continue
+    case "$f" in *.uv) continue ;; esac
+    n=$((n + 1))
+  done
+  echo "$n"
+}
+
+logged_db_backup() {
+  sed -n 's/.*db backup \(.*\) integrity=.*/\1/p' "$SWAP_LOG" | tail -1
+}
+
 setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   ROOT=$(mktemp -d); export ROOT
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" CHECKOUT="$ROOT/checkout"
@@ -275,6 +289,8 @@ run() {
 
 # 1. 一般情形（schema 沒升）：換 binary、重啟、驗證、寫 .built。
 setup 10 10
+printf 'old-backup-1\n' > "$DAEMON_DB.bak-20000101-0000"
+printf 'old-backup-2\n' > "$DAEMON_DB.bak-20010101-0000"
 rc=$(run)
 check_eq "順利時 rc=0" "0" "$rc"
 check "預期版本從 checkout 讀出來" "checkout SCHEMA_VERSION=10, db user_version=10, bumped=no" "$SWAP_LOG"
@@ -282,6 +298,10 @@ check "有換上新 binary" "new-binary" "$AGM_DIR/started-binary.log"
 check_eq ".built 寫的是這次的 sha" "$(echo "$SHA" | cut -c1-8)" "$(cat "$AGM_DIR/daemon-update.built")"
 check "啟動走 launchd（nice 0）" "submit -l am-daemon-swap" "$AGM_DIR/launchctl.log"
 check_no "不是在 pane 裡直接背景起" "nohup" "$SCRIPT"
+check_file "成功後保留這趟 DB 備份" yes "$(logged_db_backup)"
+check_file "成功後刪除較舊 DB 備份" no "$DAEMON_DB.bak-20000101-0000"
+check_file "成功後刪除另一份較舊 DB 備份" no "$DAEMON_DB.bak-20010101-0000"
+check_eq "成功後只保留一份 DB 備份" "1" "$(db_backup_count)"
 teardown
 
 # 1c. 線上版本比目標新：在任何備份或重啟前拒絕（#638）。
@@ -341,11 +361,15 @@ teardown
 
 # 5. 沒升 schema 時出事：照舊直接回滾，不繞往前修那條路。
 setup 10 10
+printf 'older-backup\n' > "$DAEMON_DB.bak-20000101-0000"
 export STUB_SUPERVISOR=stopped
 rc=$(run)
 check_eq "沒升 schema 的失敗走回滾（rc=7）" "7" "$rc"
 check_no "不會講往前修" "forward-fix" "$SWAP_LOG"
 check_eq "binary 換回舊的" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_file "回滾後保留這趟 DB 備份" yes "$(logged_db_backup)"
+check_file "回滾後保留舊 DB 備份" yes "$DAEMON_DB.bak-20000101-0000"
+check_eq "回滾後保留新舊兩份 DB 備份" "2" "$(db_backup_count)"
 check_file "-wal 一樣要清掉" no "$DAEMON_DB-wal"
 teardown
 
