@@ -47,22 +47,38 @@ pub(crate) enum Step {
     GaveUp,
 }
 
-/// 這個名字對到哪顆在跑的 run：agent 名、pane id、或 bot 名。對不到（例如目標是使用者手開的 pane）就不管。
-pub(crate) async fn resolve(app: &Arc<App>, to_agent: &str) -> anyhow::Result<Option<db::Run>> {
+/// Resolve a herdr target only among runs on the sender's host and session. Pane IDs are local to
+/// a herdr server/session, so an ambiguous target is ignored instead of guessed by start time.
+pub(crate) async fn resolve(app: &Arc<App>, from_bot: &str, to_agent: &str) -> anyhow::Result<Option<db::Run>> {
     let to = to_agent.trim();
     if to.is_empty() {
         return Ok(None);
     }
-    let id: Option<String> = sqlx::query_scalar(
-        "SELECT r.id FROM runs r JOIN bots b ON b.id = r.bot_id
-          WHERE r.state = 'running' AND b.deleted_at IS NULL AND (r.agent_name = ?1 OR r.pane_id = ?1 OR b.name = ?1)
-          ORDER BY r.started_at DESC LIMIT 1",
+    let host = db::bot_host(&app.db, from_bot).await?;
+    let Some(fallback_session) = app.session_for_host(&host).await else { return Ok(None) };
+    let sender_run = db::active_run(&app.db, from_bot).await?;
+    let session = sender_run
+        .as_ref()
+        .and_then(|run| run.herdr_session.as_deref())
+        .filter(|session| !session.trim().is_empty())
+        .unwrap_or(&fallback_session);
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT r.id FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
+          WHERE r.state = 'running' AND b.deleted_at IS NULL AND p.host = ?1
+            AND COALESCE(r.herdr_session, ?2) = ?3 AND (r.agent_name = ?4 OR r.pane_id = ?4)
+          LIMIT 2",
     )
+    .bind(&host)
+    .bind(&fallback_session)
+    .bind(session)
     .bind(to)
-    .fetch_optional(&app.db)
+    .fetch_all(&app.db)
     .await?;
-    let Some(id) = id else { return Ok(None) };
-    db::run(&app.db, &id).await
+    if ids.len() != 1 {
+        return Ok(None);
+    }
+    let id = &ids[0];
+    db::run(&app.db, id).await
 }
 
 /// 開進行中的回合。已經有回合在飛（收件方正忙，字會排在它後面）就不開，UI 本來就看得到。寫不進去只記 log，不擋補 Enter。
@@ -286,9 +302,64 @@ mod tests {
         assert_eq!((content.as_str(), from.as_deref()), (TEXT, Some(sender.id.as_str())));
         assert!(open_turn(&app, &run, &sender.id, "第二句").await.is_none(), "已經有回合在飛：不重開");
 
-        assert_eq!(resolve(&app, "agent").await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "agent 名對得到");
-        assert_eq!(resolve(&app, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "pane id 對得到");
-        assert!(resolve(&app, "沒有這個人").await.unwrap().is_none());
+        assert_eq!(resolve(&app, &sender.id, "agent").await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "agent 名對得到");
+        assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "pane id 對得到");
+        assert!(resolve(&app, &sender.id, "沒有這個人").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_uses_the_sender_host_and_session_and_rejects_bot_names() {
+        let f = fixture("local-target").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "relay-sender").await;
+        tt::fake_run(&app, &sender.id).await;
+
+        let remote_project = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, 'remote', 'mac2', ?)")
+            .bind(&remote_project)
+            .bind(format!("{}/remote", f.env.dir.display()))
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let remote = tt::claude_bot(&app, &remote_project, "remote-collision").await;
+        let remote_run = tt::fake_run(&app, &remote.id).await;
+        sqlx::query("UPDATE runs SET pane_id = ?, started_at = '9999' WHERE id = ?")
+            .bind(&f.pane)
+            .bind(&remote_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let other_session = tt::claude_bot(&app, &f.env.project_id, "session-collision").await;
+        let other_session_run = tt::fake_run(&app, &other_session.id).await;
+        sqlx::query("UPDATE runs SET pane_id = ?, herdr_session = 'default', started_at = '9998' WHERE id = ?")
+            .bind(&f.pane)
+            .bind(&other_session_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()));
+        assert!(resolve(&app, &sender.id, "local-target").await.unwrap().is_none(), "herdr does not resolve a bot's DB name");
+    }
+
+    #[tokio::test]
+    async fn resolve_returns_none_when_multiple_runs_match_in_the_sender_scope() {
+        let f = fixture("ambiguous-target").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "ambiguity-sender").await;
+        tt::fake_run(&app, &sender.id).await;
+        let second = tt::claude_bot(&app, &f.env.project_id, "ambiguous-second").await;
+        let second_run = tt::fake_run(&app, &second.id).await;
+        sqlx::query("UPDATE runs SET pane_id = ?, started_at = '9999' WHERE id = ?")
+            .bind(&f.pane)
+            .bind(&second_run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        assert!(resolve(&app, &sender.id, &f.pane).await.unwrap().is_none(), "do not choose by started_at when multiple recipients match");
     }
 
     /// 2026-09-21 實機：字卡在輸入列、agent idle。超過 N 秒補一次 Enter，字進 transcript；沒到 N 秒不動。
@@ -467,7 +538,7 @@ mod tests {
         let app = f.env.app.clone();
         let sender = tt::claude_bot(&app, &f.env.project_id, "dead-sender").await;
         close_pane(&f);
-        let run = resolve(&app, "agent").await.unwrap();
+        let run = resolve(&app, &sender.id, "agent").await.unwrap();
         on_resolved_announce(&app, &sender.id, TEXT, run).await;
         assert_eq!(run_state(&f).await, "exited");
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE run_id=?").bind(&f.run_id).fetch_one(&app.db).await.unwrap();

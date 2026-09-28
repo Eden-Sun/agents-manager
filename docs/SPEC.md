@@ -1698,8 +1698,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 3. 回音從 hook 回來時用 run 的 `agent_name` 認領：忽略所有空白（TUI 任意折行），長度取兩邊較短者且至少 12 字元；更短就要完全一樣。
    認到就在**插入當下**寫 `relay_from`（事後補的話 `message_added` 已經推出去了）。
 4. 認不出來維持 NULL = 使用者自己打的。寧可少標，不把使用者的話說成別人送的。
-5. **announce 之後盯收件方**（#380，`lifecycle::relay_watch`）：`to_agent`（agent 名、pane id、bot 名）對得到一顆在跑的 bot 時，
-   daemon 立刻開一個進行中的 `external` 回合（使用者訊息帶 `relay_from`；收件方已有回合在飛就不開），側欄與標題列看得出在跑，
+5. **announce 之後盯收件方**（#380、#680，`lifecycle::relay_watch`）：`to_agent`（herdr agent 名或 pane id）只在寄件 bot 所在的 host 與 herdr session 解析；
+   舊 run 沒記 session 時以該 host 的設定為準。只有唯一一顆 running run 符合才盯梢；bot 的資料庫名稱不是 herdr 目標，多筆相符時略過、不猜一筆。
+   找到目標時，daemon 立刻開一個進行中的 `external` 回合（使用者訊息帶 `relay_from`；收件方已有回合在飛就不開），側欄與標題列看得出在跑，
    收尾照既有 hook／終端備援。同時背景每 2 秒看一次那顆 pane：宣告的字還留在輸入列（`composer_holds_prompt`，比對文字）、
    agent 仍 idle 滿 4 秒就補一次 Enter（最多 2 次；使用者自己打的字不是宣告的那句，不動）；agent 開始 working 或回合被收掉就收工；
    補 Enter 前先確認 pane 還在（`pane.get` 回 `pane_not_found`＝收件方死了：收掉那顆 run、不重試、announce 時也不開回合）；
