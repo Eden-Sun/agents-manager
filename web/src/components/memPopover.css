@@ -55,6 +55,13 @@
   }
 }
 
+/* 手機（2026-09-28 使用者）：標題列不放遠端記憶體，只佔版面；要看就開側欄，左上角 RAM 格本機與遠端都有。 */
+@media (width <= 640px) {
+  .main-head > .mem-wrap {
+    display: none;
+  }
+}
+
 .mem-open {
   padding: 0;
   border: 0;
