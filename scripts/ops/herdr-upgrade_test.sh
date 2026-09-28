@@ -56,6 +56,15 @@ while [ "$SECONDS" -lt "$deadline" ]; do
 done
 [ -n "$up" ] || { echo "FAIL - 假 daemon 30 秒內連不上"; sed 's/^/      /' "$ROOT/server.err"; exit 1; }
 
+# issue #677：只適用 macOS。只跑開頭到 `R=` 之前那段（守衛就在裡面），平台由假 uname 決定——
+# 不執行升級流程本身；守衛被拿掉時這段只會正常結束，測試就看得出來。
+sed -n '1,/^R=/p' "$SCRIPT" | sed '$d' > "$ROOT/guard.sh"
+mkdir -p "$ROOT/fakebin"; printf '#!/bin/sh\necho "$AM_FAKE_UNAME"\n' > "$ROOT/fakebin/uname"; chmod 755 "$ROOT/fakebin/uname"
+guard_rc() { AM_FAKE_UNAME="$1" PATH="$ROOT/fakebin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}/usr/bin:/bin" bash "$ROOT/guard.sh" 2>"$ROOT/guard.err"; echo $?; }
+check_eq "Linux 上一開始就拒絕（exit 2）" "2" "$(guard_rc Linux)"
+if grep -q "只適用 macOS" "$ROOT/guard.err"; then ok "拒絕時說明原因"; else bad "拒絕時說明原因（stderr：$(cat "$ROOT/guard.err")）"; fi
+check_eq "macOS 照常往下（守衛放行）" "0" "$(guard_rc Darwin)"
+
 # 從腳本抽出 svc／svc_code（到下一個頂層 `}` 為止），不執行升級流程本身。
 sed -n '/^svc() {$/,/^}$/p; /^svc_code() /p' "$SCRIPT" > "$ROOT/svc.sh"
 grep -q '^svc() {' "$ROOT/svc.sh" || { echo "FAIL - 抽不到 svc()"; exit 1; }

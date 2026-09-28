@@ -60,6 +60,8 @@ setup() {
 7459" > "$FIX/servers"
   echo 0 > "$FIX/launchctl.rc"
   echo running > "$FIX/default.status"
+  echo Darwin > "$FIX/uname"
+  : > "$FIX/units"; echo 0 > "$FIX/active.rc"
   {
     echo '#!/bin/bash'
     # 危險指令的攔截器。全部只記錄，rc 由 fixture 決定；真的 binary 一次都碰不到。
@@ -68,6 +70,10 @@ setup() {
     echo 'pkill() { echo "pkill $*" >> "$FIX/calls.log"; case "$1" in -TERM) : > "$FIX/servers" ;; esac; return 0; }'
     echo 'pgrep() { case "$*" in *-fl*) awk "{print \$1\" /opt/homebrew/bin/herdr server\"}" "$FIX/servers" ;; *) cat "$FIX/servers" ;; esac; }'
     echo 'sleep() { :; }'
+    # 平台由 fixture 決定（issue #677）：Darwin 走原本的 launchd 段，Linux 走 systemd 段。
+    echo 'uname() { cat "$FIX/uname"; }'
+    # systemctl 同樣只記錄：list-units 吐 fixture 的 unit、is-active 的 rc 由 fixture 決定。
+    echo 'systemctl() { echo "systemctl $* XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}" >> "$FIX/calls.log"; case "$2" in list-units) cat "$FIX/units" ;; is-active) return "$(cat "$FIX/active.rc")" ;; esac; return 0; }'
     # `session list` 的狀態由 fixture 決定：#455 之後腳本要靠它判斷 default 到底起來了沒有，
     # 兩個方向（running／stopped）都要測得到。
     echo 'herdr() { echo "herdr $*" >> "$FIX/calls.log"; case "$*" in "session list") echo "default              $(cat "$FIX/default.status")" ;; esac; return 0; }'
@@ -93,7 +99,8 @@ equals "副本裡 pkill 已被函式攔截" "$(grep -c '^pkill() {' "$SCRIPT")" 
 # canary-gap: 這一行是**斷言字串**，不是指派——它在檢查副本裡被改寫成的 PATH 長什麼樣。
 # 這支測試本來就不靠 PATH 擋（檔頭寫了理由）：launchctl／pkill／pgrep／herdr 都用注入的
 # shell 函式攔，函式優先於 PATH 查找，被測腳本自己 `export PATH=` 也蓋不掉。
-equals "副本的 PATH 只指到測試用的 fakebin" "$(grep '^export PATH=' "$SCRIPT")" "export PATH=${BIN}:/usr/bin:/bin"
+equals "副本的 PATH（macOS 與 Linux 兩段）都只指到測試用的 fakebin" "$(grep '^export PATH=' "$SCRIPT" | sort -u)" "export PATH=${BIN}:/usr/bin:/bin"
+equals "副本裡 systemctl 已被函式攔截" "$(grep -c '^systemctl() {' "$SCRIPT")" "1"
 # nohup 看不到函式，所以那一行必須指到檔案樁，不能留真 binary 的路徑。
 equals "nohup 起 server 那行指到測試樁" "$(grep -c "^nohup ${BIN}/herdr server" "$SCRIPT")" "1"
 # issue #455：macOS 沒有 setsid，`nohup setsid …` 是 nohup 找不到 setsid 直接失敗、herdr 從沒被執行。
@@ -180,6 +187,60 @@ check "log 寫明是 FAIL" "FAIL: default server 沒起來" "$LOG"
 check "log 說明 pid 不代表起來了" "只代表 fork 成功" "$LOG"
 check_no "不能同時又說 up" "default server up pid=" "$LOG"
 check "收尾仍然標明結束" "== done (failed)" "$LOG"
+teardown
+
+# ---------------------------------------------------------------- Linux（issue #677）
+# herdr server 由 systemd user unit 看管：路徑從 $HOME 推，停 unit → 殺殘留 → 清 socket → 起回原本 active 的 unit。
+LHOME=""
+setup_linux() {
+  setup
+  echo Linux > "$FIX/uname"
+  printf 'herdr@agents-manager.service loaded active running herdr server\nherdr@am-attach-remote.service loaded active running herdr server\n' > "$FIX/units"
+  LHOME="$ROOT/home"
+  mkdir -p "$LHOME/.config/herdr/sessions/a"
+  LLOG="$LHOME/.config/agents-manager/supervisor/AGM/herdr-full-restart.log"
+}
+run_linux() { ( unset XDG_RUNTIME_DIR; HOME="$LHOME" bash "$SCRIPT"; echo $? ) | tail -1; }
+
+# L1. 正常路徑：先停 unit 再殺 server、起回同一批 unit、default 原本在跑就補起；launchctl 一次都不叫。
+setup_linux
+mksock "$LHOME/.config/herdr/sessions/a/herdr.sock"
+mksock "$LHOME/.config/herdr/keep.sock"
+equals "Linux 正常跑 exit 0" "$(run_linux)" "0"
+check "log 在 HOME 底下、標明 linux" "== full restart start (linux)" "$LLOG"
+check "記下原本 active 的 unit" "units before: herdr@agents-manager.service herdr@am-attach-remote.service" "$LLOG"
+check "停 unit" "systemctl --user stop herdr@agents-manager.service" "$FIX/calls.log"
+check "起回 unit" "systemctl --user start herdr@am-attach-remote.service" "$FIX/calls.log"
+check "沒有登入 session 也補上 runtime dir" "XDG_RUNTIME_DIR=/run/user/" "$FIX/calls.log"
+check_no "Linux 不碰 launchctl" "launchctl" "$FIX/calls.log"
+equals "stop 排在 pkill 前面、start 排在 pkill 後面" \
+  "$(grep -E '^(systemctl --user (stop|start)|pkill)' "$FIX/calls.log" | awk '{print $1 $3}' | tr '\n' ',')" \
+  "systemctlstop,systemctlstop,pkill-f,pkill-f,systemctlstart,systemctlstart,"
+gone   "HOME 底下 session 的 herdr.sock 被清掉" "$LHOME/.config/herdr/sessions/a/herdr.sock"
+exists "清單外的 socket 不刪" "$LHOME/.config/herdr/keep.sock"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  grep -q 'herdr server' "$FIX/calls.log" && break
+  sleep 0.1
+done
+check "default 原本在跑就補起" "default server up pid=" "$LLOG"
+check "log 有結尾" "== done" "$LLOG"
+teardown
+
+# L2. default 原本沒在跑就不補起（Linux 主機多半沒人用它）。
+setup_linux
+echo stopped > "$FIX/default.status"
+equals "default 沒在跑也 exit 0" "$(run_linux)" "0"
+check "log 說明不補起" "default 原本沒在跑（stopped），不補起" "$LLOG"
+sleep 0.3
+check_no "沒有起 default" "herdr server" "$FIX/calls.log"
+teardown
+
+# L3. unit 沒回到 active：非零退出，log 點名是哪一個。
+setup_linux
+echo 3 > "$FIX/active.rc"
+equals "unit 起不回來要非零退出" "$(run_linux)" "1"
+check "log 點名沒回來的 unit" "FAIL: herdr@agents-manager.service 沒回到 active" "$LLOG"
+check "收尾標明失敗" "== done (failed)" "$LLOG"
 teardown
 
 echo "$PASS passed, $FAIL failed"

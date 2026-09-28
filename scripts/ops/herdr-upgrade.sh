@@ -18,6 +18,9 @@
 # `/api/services/herdr-upgrade/notify`（只送協調者、來源固定 daemon）。憑證缺、不安全或回 401／403 就停，
 # 不向 daemon 要共用 UI token、也不退回它。
 set -u
+# 只適用 macOS（issue #677）：brew 換 binary、靠 0.8.2 keg 回滾、launchd job 拉起新 server。Linux 主機的 herdr
+# 由 systemd user unit 看管（SPEC §19），這支在那邊跑下去只會半途失敗，一開始就拒絕，什麼都不動。
+[ "$(uname -s)" = Darwin ] || { echo "herdr-upgrade.sh 只適用 macOS；Linux 主機見 SPEC §19（herdr@.service）" >&2; exit 2; }
 R="$HOME/.config/agents-manager/ops/herdr-upgrade"
 TS=$(date +%Y%m%d-%H%M%S)
 LOG="$R/logs/upgrade-$TS.log"
