@@ -46,7 +46,8 @@ pub struct RoleFault {
     /// 跟「連續三個**不同的**回合」不符，而這個數字直接餵 `role_state` → `is_unavailable()` →
     /// #421 的改派閘門（i407 review 2026-09-24）。
     pub failed_turns: std::collections::BTreeSet<String>,
-    /// 這一拍連畫面都讀不到（沒有 run、herdr 沒回、pane 不見了）。**不是故障**——
+    /// 有 active run 但畫面讀不到（herdr 沒回、pane 不見了）。沒有 active run 是已知的 `no_run`，不算 blind。
+    /// **probe_failed 不是故障**——
     /// 沒有證據不能當成「它壞了」（#421 的不變量），incident 那邊用它決定不開也不關。
     pub probe_failed: bool,
     /// 第一次看到這個 `reason` 的時間，給 incident 的 detail 用。
@@ -171,7 +172,11 @@ async fn probe_role(app: &Arc<App>, role: Role) -> Option<bool> {
     if bot.kind != "claude" {
         return Some(false);
     }
-    let run = crate::db::active_run(&app.db, &bot_id).await.ok().flatten()?;
+    let run = crate::db::active_run(&app.db, &bot_id).await.ok()?;
+    let Some(run) = run else {
+        // `role_state` 已明確回報 no_run；已成功查到沒有 run，不是探針讀取失敗。
+        return Some(false);
+    };
     let pane = run.pane_id.clone()?;
     let client = app.herdr_for_run(&run).await?;
     let read = client.pane_read(&pane, "visible", 80).await.ok()?;
@@ -273,19 +278,47 @@ mod tests {
         assert!(snapshot(&app, Role::Patrol).await.is_none());
     }
 
-    /// #421 的不變量：**讀不到畫面不能變成「它壞了」**。沒有 active run 時探針回不了答案，
-    /// 這一拍只記 `probe_failed`，`reason` 仍然是 `None`——`role_state` 因此維持原本只看 DB 的行為。
+    /// 已知沒有 active run 時是 `no_run`，不是探針失敗；因此不會讓同一 kind 的其他角色 incident 卡在 blind。
     #[tokio::test]
-    async fn a_probe_that_cannot_read_the_screen_is_not_a_fault() {
+    async fn a_configured_role_without_an_active_run_is_not_blind_and_resolves_incidents() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         configure(&app, RESPONDER).await;
 
+        for resource in ["responder", "patrol"] {
+            crate::supervisor::store::open_incident(
+                &app.db,
+                crate::supervisor::incidents::ROLE_UNAVAILABLE_KIND,
+                resource,
+                "degraded",
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        }
+
         refresh(&app).await;
         let f = snapshot(&app, RESPONDER).await.expect("建立過的角色要有項目");
-        assert!(f.probe_failed, "沒有 active run＝這一拍沒有證據");
-        assert_eq!(f.reason, None, "沒有證據不能宣告故障");
+        assert!(!f.probe_failed, "沒有 active run 是已知的 no_run 狀態");
+        assert_eq!(f.reason, None, "no_run 不會變成畫面探針故障原因");
         assert_eq!(reason(&app, RESPONDER).await, None);
+        assert_eq!(
+            crate::supervisor::health::role_state(&app, RESPONDER).await,
+            crate::supervisor::health::RoleState::Unavailable(crate::supervisor::health::REASON_NO_RUN),
+        );
+
+        let mut detector = crate::supervisor::incidents::Detector::default();
+        crate::supervisor::incidents::sweep(&app, &mut detector).await;
+        let open = crate::supervisor::store::open_incidents(&app.db).await.unwrap();
+        assert!(
+            open.iter().all(|i| i.kind != crate::supervisor::incidents::ROLE_UNAVAILABLE_KIND),
+            "no_run must allow both role incidents to resolve"
+        );
+        let health = crate::supervisor::incidents::system_health(&app).await;
+        assert!(
+            !health["blind_probes"].as_array().unwrap().iter().any(|v| v == crate::supervisor::incidents::ROLE_UNAVAILABLE_KIND),
+            "a known no_run state must not be reported as blind"
+        );
     }
 
     /// 畫面讀不到、但 notify 已經連續 [`NOTIFY_STALL_LIMIT`] 次沒完成：這是**另一個**訊號，

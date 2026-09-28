@@ -4142,7 +4142,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   嚴重度兩個面板對齊：`needs_login` 在 incident 與 health 都是 **critical**（要人動手、不會自己好），
   `notify_stalled`／`no_run` 是 degraded，撞限維持 degraded（等得到）。
   **讀不到畫面不是故障**：那一拍只記 `probe_failed`，原因維持上一拍的結論，incident 不開也不解——沒有證據就宣告故障，
-  等於把核准從一顆其實健康的協調者手上搬走。同理，daemon 剛重啟、第一拍還沒跑時記憶體是空的，那是「還沒有結論」，不是故障。
+  等於把核准從一顆其實健康的協調者手上搬走。成功查詢到沒有 active run 是已知的 `no_run`，不算 `probe_failed`；只有 active-run 查詢失敗，或有 run 但 pane／herdr 畫面讀不到才是 blind。同理，daemon 剛重啟、第一拍還沒跑時記憶體是空的，那是「還沒有結論」，不是故障。
 - **核准會改派，其他種類不會**（issue #421，使用者 2026-09-24 裁示；`supervisor/failover.rs`）。上面那條「不倒回巡檢」對
   `bot_request` 與 `mission_*` 仍然成立——那些是「請協調者處理一件事」，換人做沒有意義。**`approval_requested` 是例外**：
   它是一道閘門，卡住的不是協調者的工作，而是別人的部署。

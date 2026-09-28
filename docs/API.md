@@ -1913,6 +1913,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 ### 健康與 incident
 - `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、（另有 `release_triage`：`publish = true` 時帶 `repo`／`gh_auth_ok`／`gh_auth_error`／`repo_ok`／`repo_error`／`viewer_permission`／`can_write`／`issues_enabled`／`labels_missing[]`，否則 `null`；auth 綠不等於開得出 issue，repo 看不到、只有 READ、或標籤少一個都會讓 `gh issue create` 硬失敗）
   `awaiting_review`、`inbox_open`（三者分開不相加）；`manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents,blind_probes}`（`blind_probes` 非空＝那幾類探針上一輪查詢失敗，`status` 至少是 `unknown`），頂層 `status` 取兩者較嚴重者。
+  `role_unavailable` 探針成功查到角色沒有 active run 時是已知的 `no_run`，不列為 blind，也不會阻擋同 kind incidents 收斂。
   daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在巡檢或協調者的嚴重度（`manager_health.status`／`responder_health.status`）或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。
   `responder_health{status,responder_status,unavailable_reason,inbox_open,wake_pending,retry_at}` 單獨一格，**也併進**頂層 `status`（取較嚴重者）。
   `timing`（issue #473，**只是量測，不進 `status`**）：`{"window_secs":3600,"stats":{"<key>":{"count","p50_ms","p95_ms","max_ms"}}}`。
