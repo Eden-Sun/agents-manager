@@ -407,6 +407,29 @@ fn status_seq() -> &'static std::sync::Mutex<std::collections::HashMap<PaneKey, 
     M.get_or_init(Default::default)
 }
 
+#[cfg(test)]
+fn replay_barriers() -> &'static std::sync::Mutex<std::collections::HashMap<(PaneKey, u64), tokio::sync::oneshot::Sender<()>>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(PaneKey, u64), tokio::sync::oneshot::Sender<()>>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// Arm a completion barrier for one replay attempt. Tests use this instead of sleeping long enough
+/// to hope that the spawned replay task has run.
+#[cfg(test)]
+pub(crate) fn arm_status_replay_barrier(host: &str, session: &str, pane_id: &str, seq: u64) -> tokio::sync::oneshot::Receiver<()> {
+    let key = ((host.to_string(), session.to_string(), pane_id.to_string()), seq);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    replay_barriers().lock().unwrap().insert(key, tx);
+    rx
+}
+
+#[cfg(test)]
+fn complete_status_replay(key: &PaneKey, seq: u64) {
+    if let Some(tx) = replay_barriers().lock().unwrap().remove(&(key.clone(), seq)) {
+        let _ = tx.send(());
+    }
+}
+
 /// 讀不到 run 的狀態事件隔多久重放一次；用完就交給 `child_alerts::sweep` 的定時安全網。
 const STATUS_REPLAY: [Duration; 4] = [Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(15), Duration::from_secs(30)];
 const STATUS_REPLAY_IN_TESTS: [Duration; 20] = [Duration::from_millis(100); 20];
@@ -421,6 +444,8 @@ fn status_replay_delays() -> &'static [Duration] {
 
 fn replay_status_later(app: &Arc<App>, host: &str, session: &str, ev: &crate::herdr::Event, key: PaneKey, seq: u64, attempt: usize) {
     let Some(wait) = status_replay_delays().get(attempt).copied() else {
+        #[cfg(test)]
+        complete_status_replay(&key, seq);
         tracing::warn!(host, pane = %key.2, "gave up replaying a pane status event; the periodic child-alert sweep is the safety net");
         return;
     };
@@ -429,9 +454,13 @@ fn replay_status_later(app: &Arc<App>, host: &str, session: &str, ev: &crate::he
         tokio::time::sleep(wait).await;
         // 這個 pane 之後又來過事件：那一則比這一則新，這一則不再算數。
         if status_seq().lock().unwrap().get(&key) != Some(&seq) {
+            #[cfg(test)]
+            complete_status_replay(&key, seq);
             return;
         }
         handle_status_try(&app, &host, &session, &ev, attempt + 1, Some(seq)).await;
+        #[cfg(test)]
+        complete_status_replay(&key, seq);
     });
 }
 
