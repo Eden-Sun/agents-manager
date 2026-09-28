@@ -93,6 +93,7 @@ export function ConfirmDialog({
       <div
         className="confirm-dialog"
         ref={dialogRef}
+        tabIndex={-1}
         role="alertdialog"
         aria-modal="true"
         aria-labelledby={titleId}
