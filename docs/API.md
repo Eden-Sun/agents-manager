@@ -1292,6 +1292,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 
 ### 10.3b `POST /api/bots/{id}/credential/rotate`
 只接受 User principal。停止中的 bot 會在 SQLite transaction 內替該 bot 換掉 `bots.hook_token`；執行中的 bot 會在同一 transaction 先建立 `credential_rotation` restart intent，再替換 token。交易失敗時舊 token 保持有效；提交後舊 token 立刻失效，intent 讓 daemon 重啟後接續重啟 bot，將新 `AM_BOT_TOKEN` 帶進 pane。成功回 `200 {"credential_rotated":true,"restarted":bool,"run_id":string|null}`，不回傳新 token。提交後重啟未完成回 `409 {"reason":"restart_pending","credential_rotated":true,"restart_pending":true,"intent_id", "detail"}`，保留 intent 並安排重試；終止失敗回應仍會標 `credential_rotated:true`。Bot／service principal 呼叫回 403。
+- 從使用者 default session 匯入的 bot 回 `409 {"reason":"default_session"}`，不輪替 token、不建 restart intent；daemon 只觀察、不重啟該 pane（SPEC §6.5.1）。
 - child bot → `409 {"reason":"child_uses_parent_credential","parent_bot_id"}`：child 的 pane 是母 bot 開的，繼承的是**母 bot 的** `AM_BOT_ID`／token（herdr shim），daemon 原地重啟 child 不重建那份環境，換了也送不進去。母 bot 有活著的 child／grandchild run 或已登記 pane 時也回 `409 live_children_use_credential` 並列出依賴的後代／pane；先讓所有這些 pane 停止，再輪替母 bot。
 - rotate 先立起和 spawn shim 共用的 fence，再讀遞迴 descendants 與 pane inventory。已有 spawn permit 時回 `409 child_spawn_in_progress`；fence 期間新的 pane／child-agent 建立被 shim fail closed。只有 token 更新 transaction 提交後，或任何前置檢查失敗回滾後，才解除 fence；因此 pane 不會在 SQLite 快照之後帶著舊 proof 出現。之後新開的 child pane 會繼承新 token。
 - 只要 transaction 已提交，即使立即重啟失敗，回應也包含 `credential_rotated:true`；intent 保留並重試，開機 recovery 依舊 run 是否已被新 run 取代來冪等續做，不會重啟兩次。

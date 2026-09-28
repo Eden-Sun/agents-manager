@@ -3603,6 +3603,7 @@ async fn rotate_bot_credential(
             json!({"reason": "child_uses_parent_credential", "bot_id": id, "parent_bot_id": bot.parent_bot_id}),
         ));
     }
+    lifecycle::refuse_default_session(&bot)?;
     // herdr creates panes outside SQLite and bot_lock. The shim's spawn permit shares this gate:
     // once the fence is visible, new pane / child-agent creation fails closed; an operation already
     // in herdr makes this rotation refuse before touching the proof.
@@ -7193,6 +7194,49 @@ mod per_principal_auth_tests {
         assert_ne!(current, old, "old bot credential is invalidated immediately");
         let stale = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &old)]).await;
         assert!(stale.starts_with("HTTP/1.1 401"), "the old proof must already be unusable: {stale}");
+    }
+
+    #[tokio::test]
+    async fn rotating_a_default_session_bot_is_refused_before_changing_or_stopping_it() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "rotate-default-session").await;
+        sqlx::query("UPDATE bots SET herdr_session='default' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        let run_id = crate::testing::fake_run(&e.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET herdr_session='default' WHERE id=?").bind(&run_id).execute(&e.app.db).await.unwrap();
+
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                bot.id, e.app.ui_token
+            ),
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 409") && response.contains("\"reason\":\"default_session\""), "{response}");
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(current, bot.hook_token, "default-session credentials are not rotated");
+        assert_eq!(db::run(&e.app.db, &run_id).await.unwrap().unwrap().state, "running", "the imported pane is untouched");
+        let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM intents WHERE kind='restart' AND subject_id=?").bind(&bot.id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(intents, 0, "a default-session rotation cannot leave a restart intent");
+        assert!(e.herdr.calls_to("agent.send_keys").is_empty(), "the user's pane must not receive ctrl+c");
+    }
+
+    #[tokio::test]
+    async fn resuming_credential_rotation_refuses_default_session_before_sending_keys() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "resume-rotate-default-session").await;
+        sqlx::query("UPDATE bots SET herdr_session='default' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        let run_id = crate::testing::fake_run(&e.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET herdr_session='default' WHERE id=?").bind(&run_id).execute(&e.app.db).await.unwrap();
+
+        let lock = e.app.bot_lock(&bot.id).await;
+        let _guard = lock.lock().await;
+        let result = lifecycle::resume_credential_rotation_locked(&e.app, &bot.id, lifecycle::StartOpts::default(), &run_id).await;
+
+        assert!(matches!(result, Err(LcError::Conflict(ref body)) if body["reason"] == "default_session"));
+        assert_eq!(db::run(&e.app.db, &run_id).await.unwrap().unwrap().state, "running", "recovery must leave the imported run active");
+        assert!(e.herdr.calls_to("agent.send_keys").is_empty(), "the user's pane must not receive ctrl+c");
     }
 
     #[tokio::test]
