@@ -479,7 +479,7 @@ mod tests {
                     env: [("CLAUDE_CONFIG_DIR".to_string(), d.clone())].into(),
                     args: vec![],
                 });
-                c.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![] });
+                c.projects.push(crate::config::ProjectCfg { id: Some(pid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
                 Ok(())
             })
             .await

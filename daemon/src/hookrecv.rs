@@ -764,6 +764,16 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         tracing::info!(bot = %bot.name, "hook for a deleted bot; ignored");
         return Ok(());
     }
+    // #708：移交出去的專案，hook 的事歸接手的 daemon；記一行就丟（spool 重播、spawn hint 也一樣）。
+    // 讀不到＝`projects` 那一列讀不到：往下走，後面讀主機的那幾步照它們自己的規則 fail closed（欠著的撞限、收件匣重試）。
+    match crate::handoff::bot_handed_off_to(&app.db, &bot.id).await {
+        Ok(None) => {}
+        Ok(Some(to)) => {
+            tracing::info!(bot = %bot.name, provider = %body.provider, handed_off_to = %to, "hook for a handed-off project; ignored");
+            return Ok(());
+        }
+        Err(e) => tracing::warn!(bot = %bot.name, error = %e, "could not tell whether the hook's project was handed off; handling it as ours"),
+    }
     // spool 重播的那條路也要擋（`receive` 已經擋過一次，但舊 spool 裡可能還躺著別種 provider 的）。
     if !provider_matches_kind(&body.provider, &bot.kind) {
         tracing::warn!(bot = %bot.name, kind = %bot.kind, provider = %body.provider, "hook from another provider; ignored");

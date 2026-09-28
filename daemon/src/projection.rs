@@ -256,6 +256,10 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
                 bail!("invalid project id `{id}` for project `{}` (must match {})", p.label, ID_RE);
             }
         }
+        // #708：空字串不是「本機管」也不是任何一台主機；要收回就整個拿掉這個 key。
+        if p.handed_off_to.as_deref().is_some_and(|h| h.trim().is_empty()) {
+            bail!("project `{}` has an empty handed_off_to (remove the key to manage it here)", p.label);
+        }
         for b in &p.bots {
             if let Some(id) = b.id.as_deref() {
                 if !valid_id(id) {
@@ -479,9 +483,9 @@ async fn project_inner(
     for (p_at, p) in cfg.projects.iter().enumerate() {
         let pid = p.id.clone().unwrap();
         sqlx::query(
-            "INSERT INTO projects (id, path, label, host, position, created_at) VALUES (?,?,?,?,?,?)
+            "INSERT INTO projects (id, path, label, host, position, handed_off_to, created_at) VALUES (?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET path=excluded.path, label=excluded.label,
-               host=excluded.host, position=excluded.position, deleted_at=NULL",
+               host=excluded.host, position=excluded.position, handed_off_to=excluded.handed_off_to, deleted_at=NULL",
         )
         .bind(&pid)
         .bind(&p.path)
@@ -489,6 +493,7 @@ async fn project_inner(
         .bind(&p.host)
         // 陣列位置就是側欄順序（`POST /api/order` 會重排這個陣列）。
         .bind(p_at as i64)
+        .bind(p.handed_off_to.as_deref().map(str::trim))
         .bind(&now)
         .execute(pool)
         .await?;
