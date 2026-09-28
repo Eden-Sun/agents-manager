@@ -110,9 +110,19 @@
     line-height: 1.45;
   }
 
-  /* 手機點擊區預設 40px（styles.css），兩台疊起來中間空一大段；疊放時每列 28px，整列都能點。 */
+  /* 手機點擊區預設 40px（styles.css），兩台疊起來中間空一大段；疊放時每列 20px（整列都能點，徽章本身 17px）。 */
+  /* flex 置中：block 按鈕會帶 14px 字的行高，徽章被推低、跟 pane 數差 1.5px。 */
   .head-ram.multi .mem-open {
-    min-height: 28px;
+    display: flex;
+    align-items: center;
+    min-height: 20px;
+  }
+
+  /* 手機的 `AG Man` 已視覺收掉，左欄只剩部署 chip 與主題／燈號：排成一列，標題列不必兩列高（2026-09-28 使用者）。 */
+  .sidebar-head .head-brand {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
   }
 
   /* 分主機的數字已經在 RAM 旁邊，總數那顆收掉，不讓 24／20／4 三個數字並列。 */
