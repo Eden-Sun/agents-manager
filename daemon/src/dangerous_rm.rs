@@ -8,7 +8,7 @@
 //! * **送達不打進框裡**：`pane_ready_for_prompt` 認到框就回 409 `dangerous_rm_pending`，排隊的留在佇列，框關掉才送。
 //! * **通知使用者、帶上目標**：這一次框（同一句警語）在 bot 的對話裡插一則系統訊息，寫警語、目標與指令，只寫一次。
 //! * **標成 blocked**：herdr 通常自己就判成 `blocked`（2026-09-23 m12 的 pane 就是）；判成 `idle`／`unknown`
-//!   時由這裡補標，框關掉時照原值還回去（CAS：這段期間 herdr 自己改過狀態就不動）。
+//!   時由這裡補標。補標後收到任何 herdr 狀態事件，就由 herdr 接手狀態，不再還原這筆標記。
 //! * **框消失後回到正常**：不管是有人回答還是 2 分鐘自動拒絕，都補一則說明、叫醒排隊的 flush。
 //!
 //! 開著的框記在記憶體（`run_id` → 這一次的警語、補標前的狀態）：daemon 重啟後最多重講一次通知；
@@ -41,6 +41,13 @@ fn open() -> &'static Mutex<HashMap<String, Episode>> {
 /// 這個 run 現在有沒有開著的框（巡邏靠它把已經不是 idle／blocked 的 run 也看一眼，才收得掉）。
 pub fn is_open(run_id: &str) -> bool {
     open().lock().unwrap().contains_key(run_id)
+}
+
+/// Herdr reports the run's status; a synthetic blocked marker must no longer restore its stale prior value.
+pub(crate) fn on_herdr_status(run_id: &str) {
+    if let Some(episode) = open().lock().unwrap().get_mut(run_id) {
+        episode.forced_from = None;
+    }
 }
 
 /// 給使用者的那一則。
@@ -270,6 +277,31 @@ mod tests {
         assert!(!is_open(&run_id), "the newer herdr status authoritatively superseded our marker");
         assert_eq!(system_messages(&app, &bot.id).await.last().map(String::as_str), Some(CLOSED_NOTE));
         assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 1);
+    }
+
+    #[tokio::test]
+    async fn a_herdr_blocked_status_after_the_synthetic_marker_is_not_restored_to_idle() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "rm-herdr-blocked").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM).await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "dangerous-rm detection adds a synthetic blocked status");
+
+        let event = |status: &str| crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: serde_json::json!({"pane_id": pane, "agent_status": status}),
+        };
+        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &event("working")).await;
+        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &event("blocked")).await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "herdr's question must remain blocked");
+
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;
+
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "closing the old rm episode must not erase herdr's later blocked state");
+        assert!(!is_open(&run_id));
     }
 
     #[tokio::test]
