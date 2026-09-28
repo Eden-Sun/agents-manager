@@ -55,6 +55,13 @@ case "$1 $2" in
     [ "$4" = "--log-failed" ] || exit 2
     [ -n "${STUB_LOG_FAIL:-}" ] && exit 1
     cat "$GHDIR/log-$3.txt" 2>/dev/null ;;
+  "api repos/{owner}/{repo}/commits?sha=main&per_page=20")
+    cat "$GHDIR/commits.json" ;;
+  "api "*)
+    case "$2" in
+      "repos/{owner}/{repo}/commits/"*"/status") s="${2#repos/\{owner\}/\{repo\}/commits/}"; cat "$GHDIR/status-${s%/status}.json" 2>/dev/null || echo '{"statuses":[]}' ;;
+      *) echo "gh: unknown api $2" >&2; exit 2 ;;
+    esac ;;
   "issue list")
     case "$*" in *"--label ci-red"*"--state open"*) ;; *) exit 2 ;; esac
     cat "$GHDIR/issues.txt" 2>/dev/null; exit 0 ;;
@@ -79,10 +86,12 @@ STUB
   chmod +x "$ROOT/fakebin/gh"
   export PATH="$ROOT/fakebin:$PATH" AGM_EXTRA_PATH=""   # 不讓腳本把真的 /opt/homebrew/bin/gh 排到假 gh 前面
   unset AGM_CI_BOT STUB_GH_FAIL STUB_LOG_FAIL STUB_CREATE_FAIL STUB_ASSIGN_FAIL
+  # 既有情境都是 GitHub Actions 那條來源；ubuntu-ci 來源在檔尾另測（issue #716）。
+  export AGM_CI_SOURCE=actions AGM_CI_LOG_DIR="$ROOT/cilogs" AGM_CI_HOST=""
 }
 teardown() {
   rm -rf "$ROOT"
-  unset AGM_DIR AGM_REPO GHDIR AGM_CI_BOT AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_EXTRA_PATH STUB_GH_FAIL STUB_LOG_FAIL STUB_CREATE_FAIL STUB_ASSIGN_FAIL
+  unset AGM_CI_SOURCE AGM_CI_LOG_DIR AGM_CI_HOST AGM_DIR AGM_REPO GHDIR AGM_CI_BOT AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_EXTRA_PATH STUB_GH_FAIL STUB_LOG_FAIL STUB_CREATE_FAIL STUB_ASSIGN_FAIL
   export PATH="${PATH#"$ROOT/fakebin:"}"
 }
 
@@ -419,7 +428,7 @@ teardown
 # 12. launchd 的最小環境：env -i、PATH 只有 /usr/bin:/bin（加上假 gh 的目錄），系統 /bin/bash 也要跑得起來。
 setup
 mk_runs 5:failure 4:success; mk_log 5 mod::a
-env -i PATH="$ROOT/fakebin:/usr/bin:/bin" AGM_EXTRA_PATH="" AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" GHDIR="$GHDIR" /bin/bash "$SCRIPT"
+env -i PATH="$ROOT/fakebin:/usr/bin:/bin" AGM_EXTRA_PATH="" AGM_CI_SOURCE=actions AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" GHDIR="$GHDIR" /bin/bash "$SCRIPT"
 equals "env -i 最小 PATH：照開" "$(creates)" "1"
 equals "env -i 最小 PATH：照派" "$(assigns)" "1"
 teardown
@@ -525,6 +534,54 @@ chmod -x "$AGM_DIR/bin/agm"
 bash "$SCRIPT"; RC=$?
 equals "agm 不在：exit 0" "$RC" "0"
 check  "agm 不在：留一行 log" "agm CLI 不在" "$AGM_DIR/ci-watch.log"
+teardown
+
+# ubuntu-ci 來源（issue #716）：commit status `ubuntu-ci` 當 run，失敗 log 從 AGM_CI_LOG_DIR/<sha>.log 讀。
+# mk_ubuntu <sha:state>…：最新的排前面；state 空＝這個 commit 沒有 ubuntu-ci status（被合併跳過）。
+mk_ubuntu() {
+  python3 - "$GHDIR" "$@" <<'PY'
+import json, sys
+d, *specs = sys.argv[1:]
+commits = []
+for n, spec in enumerate(specs):
+    sha, state = (spec.split(":") + [""])[:2]
+    commits.append({"sha": sha, "html_url": "https://github.com/o/r/commit/" + sha})
+    # 別的 context 排在前面而且是紅的：沒濾 context 的話，綠的那組情境就會誤開 issue。
+    st = [] if not state else [{"context": "other", "state": "failure", "created_at": "2026-09-28T09:00:00Z"},
+                               {"context": "ubuntu-ci", "state": state, "created_at": "2026-09-28T09:%02d:00Z" % (59 - n)}]
+    json.dump({"statuses": st}, open("%s/status-%s.json" % (d, sha), "w"))
+json.dump(commits, open(d + "/commits.json", "w"))
+PY
+}
+
+setup
+export AGM_CI_SOURCE=ubuntu-ci
+mk_ubuntu ccc3:success bbb2:success aaa1:success
+bash "$SCRIPT"
+equals "ubuntu-ci 綠：不開" "$(creates)" "0"
+check_no "ubuntu-ci 綠：沒去碰 gh run" "run list" "$GHDIR/calls.log"
+teardown
+
+setup
+export AGM_CI_SOURCE=ubuntu-ci
+mkdir -p "$AGM_CI_LOG_DIR"
+mk_ubuntu ddd4:pending ccc3:failure bbb2: aaa1:success
+printf '==> ops: scripts/ops/x_test.sh\nok   - 過的\nFAIL - 在 Linux 紅的那條（是 1，預期 0）\n==> daemon: cargo test\ntest foo::bar ... FAILED\n' > "$AGM_CI_LOG_DIR/ccc3.log"
+bash "$SCRIPT"
+equals "ubuntu-ci 紅：開一張" "$(creates)" "1"
+equals "ubuntu-ci 紅：派一次" "$(assigns)" "1"
+check "ubuntu-ci 紅：ops 失敗帶檔名" 'x_test.sh: 在 Linux 紅的那條' "$GHDIR/created.log"
+check "ubuntu-ci 紅：cargo 失敗也抽得到" 'foo::bar' "$GHDIR/created.log"
+check_no "ubuntu-ci 紅：別的 context 不算" "other" "$GHDIR/created.log"
+equals "ubuntu-ci 紅：第一個紅的 sha（pending 與沒 status 的都不算）" "$(state first_red_sha)" "ccc3"
+teardown
+
+setup
+export AGM_CI_SOURCE=ubuntu-ci
+mk_ubuntu ccc3:failure aaa1:success
+bash "$SCRIPT"
+equals "ubuntu-ci 紅但 log 讀不到：這輪不開" "$(creates)" "0"
+check "ubuntu-ci 紅但 log 讀不到：留 log" "沒有 ubuntu-ci 的 log" "$AGM_DIR/ci-watch.log"
 teardown
 
 echo "$PASS passed, $FAIL failed"
