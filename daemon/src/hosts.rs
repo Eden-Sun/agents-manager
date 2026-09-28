@@ -56,15 +56,21 @@ pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::pro
     let err = child.stderr.take();
     let gather = async move {
         use tokio::io::AsyncReadExt;
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        if let Some(mut o) = out {
-            o.read_to_end(&mut stdout).await.ok();
-        }
-        if let Some(mut e) = err {
-            e.read_to_end(&mut stderr).await.ok();
-        }
-        (stdout, stderr)
+        let read_stdout = async move {
+            let mut stdout = Vec::new();
+            if let Some(mut o) = out {
+                o.read_to_end(&mut stdout).await.ok();
+            }
+            stdout
+        };
+        let read_stderr = async move {
+            let mut stderr = Vec::new();
+            if let Some(mut e) = err {
+                e.read_to_end(&mut stderr).await.ok();
+            }
+            stderr
+        };
+        tokio::join!(read_stdout, read_stderr)
     };
     let (status, (stdout, stderr)) = tokio::select! {
         r = async { tokio::join!(child.wait(), gather) } => (r.0.context("wait /bin/sh")?, r.1),
@@ -1390,6 +1396,22 @@ mod tests {
         let ok = sh_local("printf hi; exit 3", Duration::from_secs(5)).await.unwrap().unwrap();
         assert_eq!(ok.status.code(), Some(3));
         assert_eq!(ok.stdout, b"hi");
+    }
+
+    #[tokio::test]
+    async fn macos_local_sh_local_drains_stdout_and_stderr_concurrently() {
+        let output = sh_local(
+            r"head -c 200000 /dev/zero | tr '\0' x >&2; printf done",
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap()
+        .expect("large stderr output must not deadlock until timeout");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"done");
+        assert_eq!(output.stderr.len(), 200_000);
+        assert!(output.stderr.iter().all(|byte| *byte == b'x'));
     }
 
     fn cfg() -> HostCfg {

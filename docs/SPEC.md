@@ -2552,6 +2552,7 @@ label = "foo@m4p"
 
 ### 11.3 HostManager
 每個 host 一個 `HostConn`：
+本機子指令由 `hosts::sh_local` 在獨立 process group 執行，並行排空 stdout 與 stderr；逾時會殺掉整組 process group 並回 `None`。
 1. **ensure remote session**：遠端是 macOS 且 ssh 使用者就是 `/dev/console` 擁有者時，寫 `~/Library/LaunchAgents/dev.agents-manager.herdr-<session>.plist`
    （`herdr --session <session> server`、`KeepAlive`、`RunAtLoad`、`ProcessType Interactive`、PATH 含 `remote_path`）並 `launchctl bootstrap gui/<uid>`；已載入就沿用；
    原本有 nohup 起的 server 先 `server stop` 再交給 launchd。遠端是 Linux、而且 `systemctl --user cat herdr@<session>.service` 找得到（§19）時交給 systemd：
