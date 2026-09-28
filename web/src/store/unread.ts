@@ -15,7 +15,7 @@ export type UnreadKey = `bot:${string}` | `group:${string}`
 export const botKey = (botId: string): UnreadKey => `bot:${botId}`
 export const groupKey = (projectId: string): UnreadKey => `group:${projectId}`
 
-/** 時間是主要依據，id 只用來排除標記那一則本身。 */
+/** `(at, id)` 是讀取位置的全序；同一時間戳以 id 決定先後。 */
 export interface ReadMark {
   at: string
   id: string
@@ -102,8 +102,8 @@ export function completesTurn(msg: Pick<Message, 'role'>): boolean {
 export function isUnread(msg: Pick<Message, 'id' | 'created_at'>, mark: ReadMark | undefined): boolean {
   if (!mark) return true
   if (msg.created_at > mark.at) return true
-  // daemon 時間是秒級、常撞：同時間戳只有標記那則算已讀。
-  return msg.created_at === mark.at && msg.id !== mark.id
+  // 時間戳可能相同；全序中不晚於標記的訊息都算已讀。
+  return msg.created_at === mark.at && msg.id > mark.id
 }
 
 /** 以回合計數：同回合多則 assistant 訊息算一個；沒 turn_id 的各算一個。 */
@@ -130,7 +130,7 @@ export function completionKey(msg: Pick<Message, 'id' | 'turn_id'>, knownTurnIds
 export function markOfMessages(messages: readonly Message[]): ReadMark | null {
   let best: ReadMark | null = null
   for (const m of messages) {
-    if (!best || m.created_at > best.at) best = { at: m.created_at, id: m.id }
+    if (!best || m.created_at > best.at || (m.created_at === best.at && m.id > best.id)) best = { at: m.created_at, id: m.id }
   }
   return best
 }

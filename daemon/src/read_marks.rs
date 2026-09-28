@@ -80,7 +80,7 @@ pub async fn marks(pool: &SqlitePool) -> Result<HashMap<String, ReadMark>> {
 }
 
 /// 未讀回合數：標記之後的 assistant 訊息，依 `turn_id` 去重（沒 turn 的各算一則）。沒有標記＝全部未讀，
-/// 同前端（新 bot 本來就沒幾則）。時間戳相同時只有標記那一則算已讀。
+/// 同前端（新 bot 本來就沒幾則）。`(created_at, id)` 是全序，同時間戳下 id 不大於標記的算已讀。
 pub async fn unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT c.bot_id, COUNT(DISTINCT COALESCE(m.turn_id, 'msg:' || m.id))
@@ -88,7 +88,7 @@ pub async fn unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
            JOIN conversations c ON c.id = m.conversation_id
            LEFT JOIN bot_reads r ON r.bot_id = c.bot_id
           WHERE m.role = 'assistant'
-            AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND m.id <> r.message_id))
+            AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND m.id > r.message_id))
           GROUP BY c.bot_id",
     )
     .fetch_all(pool)
@@ -169,15 +169,17 @@ mod tests {
         }
     }
 
-    /// 裝置 A 讀到 t2，裝置 B（手機，分頁睡著沒收到事件）照樣看到只剩 1 則；舊標記不能倒退；同時間戳只有標記那則算讀過。
+    /// 裝置 A 讀到 t2，裝置 B（手機，分頁睡著沒收到事件）照樣看到只剩 1 則；舊標記不能倒退；同時間戳依 id 全序。
     #[tokio::test]
     async fn one_shared_mark_counts_turns_after_it_and_never_moves_back() {
         let (pool, dir) = pool().await;
         seed(&pool).await;
         sqlx::query("DELETE FROM bot_reads").execute(&pool).await.unwrap();
         assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&3), "沒有標記＝全部未讀，依回合去重");
+        mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a0-t2").await.unwrap();
+        assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&2), "a1-t2 的 id 較大，仍未讀 + t3");
         mark(&pool, "b", "2026-09-15T02:00:00.000Z", "a1-t2").await.unwrap();
-        assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&2), "同時間戳的 a0-t2 仍未讀 + t3");
+        assert_eq!(unread_counts(&pool).await.unwrap().get("b"), Some(&1), "a0-t2 的 id 較小，已讀；只剩 t3");
         let m = mark(&pool, "b", "2026-09-15T01:00:00.000Z", "a1-t1").await.unwrap();
         assert_eq!(m.at, "2026-09-15T02:00:00.000Z", "較舊的標記不倒退");
         mark(&pool, "b", "2026-09-15T03:00:01.000Z", "").await.unwrap();

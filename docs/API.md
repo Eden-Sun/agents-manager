@@ -582,7 +582,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 bot 或 active Run 不存在 404。
 
 ### `POST /api/bots/{id}/read`
-跨裝置共用的已讀位置（2026-09-15）。body `{"at":"<讀到的最後一則 created_at>","message_id":"<那則 id>"}`，兩者可省（`at` 省略＝現在）；標記**只往前推**，較舊的送來不會倒退。
+跨裝置共用的已讀位置（2026-09-15）。body `{"at":"<讀到的最後一則 created_at>","message_id":"<那則 id>"}`，兩者可省（`at` 省略＝現在）；標記**只按 `(at, message_id)` 字典序往前推**，較舊的送來不會倒退。同一時間戳時，id 不大於標記的訊息算已讀，較大的 id 才算未讀。
 回 `{"bot_id","read_mark":{"at","id"},"unread"}`，並推 WS `bot_read`（同形）讓其他分頁／裝置重拉 state。`at` 不是 RFC 3339 → 400；bot 不存在 404。有效時間先轉為 UTC 毫秒 `Z` 格式，晚於 daemon 現在的值夾到現在，避免裝置時鐘錯誤永久遮住新訊息；回傳 `read_mark.at` 為正規化後的值。
 `GET /api/state` 每顆 bot 帶 `unread`（標記之後的 assistant 訊息依回合去重的數目；沒有標記＝全部）與 `read_mark`（`{at,id}` 或 `null`）。升級建表時既有 bot 的標記設為當下，舊訊息不算未讀。
 

@@ -62,6 +62,17 @@ test('時間戳撞在一起時靠 id 分辨標記那一則', () => {
   const same = '2026-09-07T00:00:02Z'
   assert.equal(isUnread({ id: 'a', created_at: same }, { at: same, id: 'a' }), false)
   assert.equal(isUnread({ id: 'b', created_at: same }, { at: same, id: 'a' }), true)
+  assert.equal(isUnread({ id: 'a', created_at: same }, { at: same, id: 'b' }), false)
+})
+
+test('同毫秒以 id 最大的訊息作讀取標記，並清掉更早 id 的 assistant 未讀', () => {
+  const same = '2026-09-07T00:00:02Z'
+  const user = msg('u-user', 'user', same)
+  const assistant = msg('z-assistant', 'assistant', same, 'terminal-turn')
+  const mark = markOfMessages([user, assistant])
+
+  assert.deepEqual(mark, { at: same, id: 'z-assistant' })
+  assert.equal(countUnreadTurns([assistant], mark ?? undefined), 0)
 })
 
 test('markOfMessages 取時間最大的那一則（清單沒排序也一樣）', () => {
