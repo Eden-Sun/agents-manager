@@ -2,8 +2,8 @@
 """單一專案移交到另一顆 daemon（issue #710，#678 的子集）。
 
   project-transfer export --db <來源 agents-manager.sqlite3> --project <專案 id> --out <bundle.json.gz>
-  project-transfer import --bundle <bundle.json.gz> --host <目標 daemon 上的主機名> \
-      [--config ~/.config/agents-manager/config.toml] [--dry-run]
+  project-transfer import --bundle <bundle.json.gz> --host <目標 daemon 上的主機名，或 local> \
+      [--path-map /來源/路徑=/目標/路徑 …] [--config ~/.config/agents-manager/config.toml] [--dry-run]
 
 export 先對來源 DB 做 SQLite online backup（唯讀開來源，快照放暫存目錄、讀完當下刪），
 從快照取出專案、它活著的 bot（含 child；已軟刪的 bot 與它的一切都不帶）、conversations、runs、turns、messages、
@@ -16,7 +16,9 @@ import 是「目標 daemon 停著」的離線路徑：目標 daemon 沒有匯入
   2. 目標 DB 與 config.toml 先各備份一份（`*.pre-transfer-<時間>`，印出路徑）。
   3. 一個交易裡插列（已存在的 id 跳過＝重複 import 冪等）→ 外鍵檢查 → 寫 config.toml（原子 rename）→ COMMIT。
      config 寫不進去就回滾 DB；COMMIT 失敗就把 config 還原。
-改寫：專案與附件的 host 換成 `--host`；path 不變；hook token 重新產生；native_session_id 保留（接回用）；
+改寫：專案與附件的 host 換成 `--host`；path 預設不變，給了 `--path-map 來源=目標`（可重複，最長的先配）就把
+專案 path、bot 的 cwd、附件的 agent_path 換成目標上的路徑——專案改在目標本機跑（`--host local`，issue #717）時一定要給；
+hook token 重新產生；native_session_id 保留（接回用）；
 還在跑的 run 收成 exited、排隊／送出中的 turn 收成 failed（接手後由目標 `start?resume=native` 接回）；
 config.toml 裡的 bot 一律 `autostart = false`（來源還在跑時目標開機不能自己再起一份）；
 `handed_off_to`（#708）清掉。不搬憑證／身分（identity 只帶名字，目標要自己有同名身分）。
@@ -306,18 +308,42 @@ def load_bundle(path):
     return b
 
 
-def rewrite(bundle, host, data_dir, now):
+def parse_path_maps(items):
+    out = []
+    for item in items or []:
+        src, sep, dst = item.partition("=")
+        src, dst = src.rstrip("/"), dst.rstrip("/")
+        if not sep or not src.startswith("/") or not dst.startswith("/"):
+            die(f"--path-map 要寫成 /來源/路徑=/目標/路徑：{item!r}")
+        out.append((src, dst))
+    return sorted(out, key=lambda m: len(m[0]), reverse=True)
+
+
+def map_path(path, maps):
+    """最長的先配、只換完整的路徑段；配不上原樣回傳。"""
+    if not path:
+        return path
+    for src, dst in maps:
+        if path == src or path.startswith(src + "/"):
+            return dst + path[len(src):]
+    return path
+
+
+def rewrite(bundle, host, data_dir, now, maps=()):
     """回傳 {table: [row dict]}（已解碼、已改寫）與要寫的附件檔、改寫紀錄。"""
     t = {name: [{k: dec(v) for k, v in r.items()} for r in spec["rows"]] for name, spec in bundle["tables"].items()}
     src_host = bundle["source_host"]
     notes = {"runs_closed": [], "turns_failed": [], "autostart_off": []}
     for p in t["projects"]:
         p["host"] = host
+        p["path"] = map_path(p["path"], maps)
         for k, v in PROJECT_RESET.items():
             if k in p:
                 p[k] = v
     for b in t["bots"]:
         b["hook_token"] = secrets.token_hex(16)
+        if b.get("cwd"):
+            b["cwd"] = map_path(b["cwd"], maps)
         if b.get("autostart") and b.get("managed_by") == "user" and not b.get("deleted_at"):
             notes["autostart_off"].append(b["name"])
         b["autostart"] = 0
@@ -339,6 +365,7 @@ def rewrite(bundle, host, data_dir, now):
     for a in t["attachments"]:
         if a["host"] == src_host:
             a["host"] = host
+        a["agent_path"] = map_path(a["agent_path"], maps)
         # 遠端 bot 的附件：daemon 讀的是自己資料目錄底下的副本（attach.rs `local_copy_dir`）。
         name = os.path.basename(a["agent_path"])
         a["local_path"] = os.path.join(data_dir, "attachments", a["bot_id"], name)
@@ -349,7 +376,7 @@ def rewrite(bundle, host, data_dir, now):
 
 def check_config(cfg, bundle, host, project):
     hosts = {h.get("name") for h in cfg.get("hosts") or []}
-    if host not in hosts:
+    if host != "local" and host not in hosts:
         die(f"目標 config.toml 沒有 [[hosts]] name = {host!r}；先在目標加好這台主機再 import")
     existing = None
     for p in cfg.get("projects") or []:
@@ -392,10 +419,12 @@ def import_(args):
     try:
         # 拿到鎖之後重讀：拿鎖前那一刻 daemon 可能剛寫過 config。
         cfg = load_toml(config_path)
+        maps = parse_path_maps(args.path_map)
         project = [{k: dec(v) for k, v in r.items()} for r in bundle["tables"]["projects"]["rows"]][0]
+        project["path"] = map_path(project["path"], maps)
         existing = check_config(cfg, bundle, args.host, project)
         now = now_iso()
-        t, files, notes = rewrite(bundle, args.host, data_dir, now)
+        t, files, notes = rewrite(bundle, args.host, data_dir, now, maps)
         conn = sqlite3.connect(db_path, isolation_level=None)
         try:
             summary = write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, now)
@@ -528,12 +557,33 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
         "turns_failed": len(notes["turns_failed"]),
         "autostart_turned_off": notes["autostart_off"],
         "backups": backups,
-        "warnings": bundle["warnings"] + col_warnings + config_warnings(cfg, live_user_bots, args.host),
+        "warnings": bundle["warnings"] + col_warnings + config_warnings(cfg, live_user_bots, args.host)
+        + transcript_warnings(t["runs"], args.host),
     }
+
+
+def transcript_warnings(runs, host):
+    """本機接手（`--host local`）時，對話檔要已經在這台：daemon 接回前會先看 `runs.transcript_path` 在不在，
+    不在就退回開新對話。只看每段最後一個 run（接回挑的就是它），列出還沒搬過來的段數。"""
+    if host != "local":
+        return []
+    last = {}
+    for r in runs:
+        if r.get("native_session_id") and r.get("transcript_path"):
+            last[r["native_session_id"]] = r["transcript_path"]
+    gone = sorted(sid for sid, p in last.items() if not os.path.exists(p))
+    if not gone:
+        return []
+    return [f"{len(gone)} 段原生對話的 transcript 不在這台（例：{last[gone[0]]}）：先在來源跑 "
+            f"scripts/ops/transcript-transfer 搬過來、用它輸出的 bundle 再 import，否則接回會開新對話"]
 
 
 def conn_path(conn):
     return conn.execute("PRAGMA database_list").fetchone()[2]
+
+
+def bundle_project_paths(path):
+    return [dec(r["path"]) for r in load_bundle(path)["tables"]["projects"]["rows"]]
 
 
 def main():
@@ -545,15 +595,20 @@ def main():
     e.add_argument("--out", required=True, help="輸出的 bundle（.json.gz，含對話內容，權限 600）")
     i = sub.add_parser("import", help="寫進停著的目標 daemon（config.toml＋SQLite）")
     i.add_argument("--bundle", required=True)
-    i.add_argument("--host", required=True, help="目標 daemon 上代表來源機器的 [[hosts]] 名（例：m4p）")
+    i.add_argument("--host", required=True,
+                   help="目標 daemon 上代表來源機器的 [[hosts]] 名（例：m4p）；專案改在目標本機跑就寫 local，並給 --path-map")
+    i.add_argument("--path-map", action="append", default=[],
+                   help="/來源路徑=/目標路徑（可重複）：改寫專案 path、bot cwd、附件 agent_path")
     i.add_argument("--config", default="~/.config/agents-manager/config.toml", help="目標 daemon 的 config.toml")
     i.add_argument("--dry-run", action="store_true", help="整套跑完但回滾，不寫 config／附件、不備份")
     args = ap.parse_args()
     if args.cmd == "export":
         export(args)
     else:
-        if args.host == "local":
-            die("--host 不能是 local：專案的 path 仍在來源機器上，目標要透過遠端主機接手")
+        if args.host == "local" and not any(
+            map_path(p, parse_path_maps(args.path_map)) != p for p in bundle_project_paths(args.bundle)
+        ):
+            die("--host local 要搭 --path-map 把專案 path 換成這台上的路徑：不換的話 path 仍指向來源機器")
         import_(args)
 
 

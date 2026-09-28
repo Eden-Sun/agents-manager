@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""把 bot 的原生對話檔搬到另一台主機、改寫路徑，讓那台本機的 `start?resume=native` 接得回（issue #717，#675 的一部分）。
+
+  transcript-transfer --bundle <project-transfer 匯出的 bundle> --out <新 bundle> \
+      (--target <user@host> | --target-dir <本機目錄，當成目標的 $HOME；測試用>) \
+      --map /Users/m4p/project/agents-manager=/home/ubuntu/project/agents-manager [--map …] \
+      [--source-home <預設 ~>] [--overwrite] [--dry-run]
+
+跑在來源機器（對話檔所在的那台）。流程接在 `project-transfer export` 之後、`import` 之前：
+bundle 的 runs 帶著每一段的 native_session_id 與 transcript_path，這支照 bot 的 kind 找到那段對話的檔，
+改寫檔內路徑後放到目標的同一個位置，再把 bundle 裡的 `runs.transcript_path` 換成目標上的路徑
+（目標 daemon 接回前會先確認這個檔存在，對不上就退回開新對話——所以不能留來源的路徑）。
+
+各 CLI 的存放處（2026-09-28 Mac → ubuntu 實測，SPEC §11.9a）：
+  claude  <CLAUDE_CONFIG_DIR>/projects/<cwd 把非英數字換成 `-`>/<session>.jsonl（旁邊同名目錄一起搬）
+  codex   ~/.codex/sessions/YYYY/MM/DD/rollout-…-<session>.jsonl（目標 codex 只靠檔案就接得回，不用它的 state DB）
+  grok    ~/.grok/sessions/<cwd 的 URL 編碼>/<session>/（整個目錄）
+目錄名由 cwd 算：cwd 先照 --map 換成目標路徑再重算；檔內的絕對路徑也照 --map 換（最長的先配、只換完整的路徑段），
+對不上任何 --map 的，來源 $HOME 底下的換成目標 $HOME。
+
+安全：只碰上面三種位置底下的檔（其他路徑、`auth.json`／`.credentials.json` 一律拒絕），不搬憑證。
+目標已有同一個檔：內容一樣就跳過（重跑冪等）；不一樣＝目標那邊已經接著寫過，不蓋掉、列在 conflicts，
+確定要蓋才加 --overwrite。
+"""
+
+import argparse
+import base64
+import gzip
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import urllib.parse
+
+FORMAT = "agm-project-transfer/1"
+# 只有這些位置底下的檔可以搬：transcript 以外的東西（尤其是憑證）不能被 bundle 裡的路徑帶走。
+ALLOWED = re.compile(r"^(\.claude(-[^/]+)?/projects|\.codex/(archived_)?sessions|\.grok/sessions)/")
+SECRETS = {"auth.json", ".credentials.json", "credentials.json"}
+# 路徑段的一部分：比對時前後都不能接著這些字，`/a/b` 才不會吃到 `/a/bc`。
+PATH_CHAR = "A-Za-z0-9._-"
+
+
+def die(msg):
+    print(f"transcript-transfer: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def read_bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def dec(v):
+    if isinstance(v, dict) and set(v) == {"$b64"}:
+        return base64.b64decode(v["$b64"])
+    return v
+
+
+def parse_maps(items):
+    out = []
+    for item in items:
+        src, sep, dst = item.partition("=")
+        src, dst = src.rstrip("/"), dst.rstrip("/")
+        if not sep or not src.startswith("/") or not dst.startswith("/"):
+            die(f"--map 要寫成 /來源/路徑=/目標/路徑：{item!r}")
+        out.append((src, dst))
+    return sorted(out, key=lambda m: len(m[0]), reverse=True)
+
+
+def map_path(path, maps):
+    """最長的 --map 先配；沒有一條配得上回 None。"""
+    for src, dst in maps:
+        if path == src or path.startswith(src + "/"):
+            return dst + path[len(src):]
+    return None
+
+
+def claude_key(cwd):
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def grok_key(cwd):
+    return urllib.parse.quote(cwd, safe="")
+
+
+def rewrite_text(text, pairs):
+    """`pairs` 依序換，每一對只換完整的路徑段（前後不是路徑字元）。"""
+    n = 0
+    for src, dst in pairs:
+        pat = re.compile(rf"(?<![{PATH_CHAR}]){re.escape(src)}(?![{PATH_CHAR}])")
+        text, c = pat.subn(lambda _m, d=dst: d, text)
+        n += c
+    return text, n
+
+
+class Plan:
+    def __init__(self, maps, source_home, target_home):
+        home = (source_home.rstrip("/"), target_home.rstrip("/"))
+        self.maps = maps
+        # 內容改寫：--map 的原樣、claude 目錄名、grok 目錄名三種寫法，最後才是整個 $HOME。
+        pairs = []
+        for src, dst in maps:
+            pairs += [(src, dst), (claude_key(src), claude_key(dst)), (grok_key(src), grok_key(dst))]
+        if home[0] != home[1]:
+            pairs += [home, (claude_key(home[0]), claude_key(home[1])), (grok_key(home[0]), grok_key(home[1]))]
+        self.pairs = pairs
+        self.source_home, self.target_home = home
+
+    def target_cwd(self, cwd):
+        mapped = map_path(cwd, self.maps)
+        if mapped is not None:
+            return mapped
+        return map_path(cwd, [(self.source_home, self.target_home)]) or cwd
+
+    def rel(self, path):
+        """來源 $HOME 底下、允許的位置裡的相對路徑；不是的話丟 ValueError。"""
+        real = os.path.abspath(path)
+        home = self.source_home + "/"
+        if not real.startswith(home):
+            raise ValueError(f"{path} 不在來源 $HOME（{self.source_home}）底下")
+        rel = real[len(home):]
+        if not ALLOWED.match(rel) or os.path.basename(rel) in SECRETS:
+            raise ValueError(f"{path} 不是對話檔的位置（只搬 claude projects／codex sessions／grok sessions）")
+        return rel
+
+    def rewrite(self, data):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data, 0
+        text, n = rewrite_text(text, self.pairs)
+        return text.encode("utf-8"), n
+
+
+# ---------------------------------------------------------------- 找檔
+
+
+def find_claude(home, sid):
+    hits = []
+    for name in sorted(os.listdir(home)):
+        if not re.fullmatch(r"\.claude(-[^/]+)?", name):
+            continue
+        projects = os.path.join(home, name, "projects")
+        if not os.path.isdir(projects):
+            continue
+        for key in sorted(os.listdir(projects)):
+            f = os.path.join(projects, key, f"{sid}.jsonl")
+            if os.path.isfile(f):
+                hits.append(f)
+    return hits
+
+
+def find_codex(home, sid):
+    hits = []
+    for sub in ("sessions", "archived_sessions"):
+        root = os.path.join(home, ".codex", sub)
+        for d, _, names in os.walk(root):
+            hits += [os.path.join(d, n) for n in names if n.startswith("rollout-") and n.endswith(f"-{sid}.jsonl")]
+    return sorted(hits)
+
+
+def find_grok(home, sid):
+    root = os.path.join(home, ".grok", "sessions")
+    if not os.path.isdir(root):
+        return []
+    return [os.path.join(root, k, sid, "updates.jsonl") for k in sorted(os.listdir(root))
+            if os.path.isdir(os.path.join(root, k, sid))]
+
+
+FINDERS = {"claude": find_claude, "codex": find_codex, "grok": find_grok}
+
+
+def locate(kind, sid, recorded, home):
+    """DB 記的路徑還在就用它（身分換過時只有它知道是哪一個 config 目錄）；不在才照 kind 找。"""
+    if recorded and os.path.isfile(recorded):
+        return recorded
+    if kind == "grok" and recorded and os.path.isdir(os.path.dirname(recorded)):
+        return recorded
+    hits = FINDERS[kind](home, sid) if kind in FINDERS else []
+    return hits[0] if len(hits) == 1 else (None if not hits else hits)
+
+
+def claude_cwd(path):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and isinstance(d.get("cwd"), str):
+                return d["cwd"]
+    return None
+
+
+def session_files(kind, src, plan):
+    """回傳 (目標上的 transcript_path 相對 $HOME, [(來源檔, 目標相對路徑)])。"""
+    rel = plan.rel(src)
+    if kind == "codex":
+        return rel, [(src, rel)]
+    if kind == "claude":
+        cwd = claude_cwd(src)
+        if cwd is None:
+            raise ValueError(f"{src} 裡讀不到 cwd，算不出目標的 projects 目錄名")
+        parts = rel.split("/")  # .claude*/projects/<key>/<sid>.jsonl
+        new_key = claude_key(plan.target_cwd(cwd))
+        base = "/".join(parts[:2] + [new_key])
+        main = f"{base}/{parts[3]}"
+        out = [(src, main)]
+        companion = os.path.join(os.path.dirname(src), os.path.splitext(parts[3])[0])
+        out += walk_dir(companion, f"{base}/{os.path.splitext(parts[3])[0]}")
+        return main, out
+    if kind == "grok":
+        parts = rel.split("/")  # .grok/sessions/<key>/<sid>/updates.jsonl
+        cwd = urllib.parse.unquote(parts[2])
+        base = "/".join(parts[:2] + [grok_key(plan.target_cwd(cwd)), parts[3]])
+        return f"{base}/{parts[4]}", walk_dir(os.path.dirname(src), base)
+    raise ValueError(f"不支援的 kind {kind!r}")
+
+
+def walk_dir(src_dir, rel_base):
+    out = []
+    if not os.path.isdir(src_dir):
+        return out
+    for d, _, names in os.walk(src_dir):
+        for n in sorted(names):
+            if n.endswith(".lock") or n in SECRETS:
+                continue
+            p = os.path.join(d, n)
+            out.append((p, rel_base + "/" + os.path.relpath(p, src_dir)))
+    return out
+
+
+# ---------------------------------------------------------------- 目標
+
+
+class DirTarget:
+    """本機目錄當成目標機器的 $HOME（隔離測試用）。"""
+
+    def __init__(self, root):
+        self.home = os.path.abspath(root)
+
+    def digest(self, rel):
+        p = os.path.join(self.home, rel)
+        return hashlib.sha256(read_bytes(p)).hexdigest() if os.path.isfile(p) else None
+
+    def put(self, rel, data):
+        p = os.path.join(self.home, rel)
+        os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+        tmp = p + ".transfer-tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, p)
+
+
+REMOTE_DIGEST = ("import hashlib,os,sys;p=os.path.join(os.path.expanduser('~'),sys.argv[1]);"
+                 "print(hashlib.sha256(open(p,'rb').read()).hexdigest() if os.path.isfile(p) else '')")
+REMOTE_PUT = ("import os,sys;p=os.path.join(os.path.expanduser('~'),sys.argv[1]);"
+              "os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True);t=p+'.transfer-tmp';"
+              "f=os.fdopen(os.open(t,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),'wb');"
+              "f.write(sys.stdin.buffer.read());f.close();os.replace(t,p)")
+
+
+class SshTarget:
+    def __init__(self, dest):
+        self.dest = dest
+        self.home = self._run(["python3", "-c", "import os;print(os.path.expanduser('~'))"]).strip()
+        if not self.home.startswith("/"):
+            die(f"讀不到 {dest} 的 $HOME")
+
+    def _run(self, argv, data=None):
+        cmd = ["ssh", "-o", "BatchMode=yes", self.dest, " ".join(shlex.quote(a) for a in argv)]
+        r = subprocess.run(cmd, input=data, capture_output=True)
+        if r.returncode != 0:
+            die(f"ssh {self.dest} 失敗：{r.stderr.decode(errors='replace').strip()}")
+        return r.stdout.decode()
+
+    def digest(self, rel):
+        return self._run(["python3", "-c", REMOTE_DIGEST, rel]).strip() or None
+
+    def put(self, rel, data):
+        self._run(["python3", "-c", REMOTE_PUT, rel], data=data)
+
+
+# ---------------------------------------------------------------- 主流程
+
+
+def transfer(bundle, plan, target, overwrite, dry_run):
+    t = bundle["tables"]
+    kinds = {r["id"]: r["kind"] for r in t["bots"]["rows"]}
+    runs = t["runs"]["rows"]
+    report = {"sessions": [], "files_written": 0, "files_same": 0, "conflicts": [], "missing": [], "refused": []}
+    new_paths = {}
+    seen = {}
+    for r in runs:
+        sid = dec(r.get("native_session_id"))
+        if not sid:
+            continue
+        kind = kinds.get(r["bot_id"])
+        key = (kind, sid)
+        if key in seen:
+            continue
+        seen[key] = True
+        src = locate(kind, sid, dec(r.get("transcript_path")), plan.source_home)
+        if src is None or isinstance(src, list):
+            report["missing"].append({"kind": kind, "session": sid, "candidates": src or []})
+            continue
+        try:
+            main, files = session_files(kind, src, plan)
+        except ValueError as e:
+            report["refused"].append({"kind": kind, "session": sid, "why": str(e)})
+            continue
+        changed = 0
+        for path, rel in files:
+            data, n = plan.rewrite(read_bytes(path))
+            changed += n
+            have = target.digest(rel)
+            if have == hashlib.sha256(data).hexdigest():
+                report["files_same"] += 1
+                continue
+            if have is not None and not overwrite:
+                report["conflicts"].append(rel)
+                continue
+            if not dry_run:
+                target.put(rel, data)
+            report["files_written"] += 1
+        new_paths[key] = f"{target.home}/{main}"
+        report["sessions"].append({"kind": kind, "session": sid, "from": src, "to": new_paths[key],
+                                   "files": len(files), "paths_rewritten": changed})
+    updated = 0
+    for r in runs:
+        key = (kinds.get(r["bot_id"]), dec(r.get("native_session_id")))
+        if key in new_paths and r.get("transcript_path") != new_paths[key]:
+            r["transcript_path"] = new_paths[key]
+            updated += 1
+    report["runs_transcript_path_updated"] = updated
+    return report
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="transcript-transfer", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--bundle", required=True, help="project-transfer export 產生的 bundle")
+    ap.add_argument("--out", required=True, help="改好 transcript_path 的新 bundle（權限 600）")
+    tgt = ap.add_mutually_exclusive_group(required=True)
+    tgt.add_argument("--target", help="目標機器（ssh 目的地，例：ubuntu@agm-host）")
+    tgt.add_argument("--target-dir", help="本機目錄當成目標的 $HOME（隔離測試用）")
+    ap.add_argument("--map", action="append", default=[], help="/來源路徑=/目標路徑（可重複；worktree 在底下的一起換）")
+    ap.add_argument("--source-home", default=os.path.expanduser("~"), help="來源 $HOME（預設 ~）")
+    ap.add_argument("--overwrite", action="store_true", help="目標已有內容不同的同名檔時照樣蓋掉")
+    ap.add_argument("--dry-run", action="store_true", help="只列出要搬什麼，目標一個檔都不寫、不輸出 bundle")
+    args = ap.parse_args()
+    if os.path.abspath(args.out) == os.path.abspath(args.bundle):
+        die("--out 不能跟 --bundle 同一個檔")
+    with gzip.open(args.bundle, "rb") as f:
+        bundle = json.loads(f.read().decode())
+    if bundle.get("format") != FORMAT:
+        die(f"{args.bundle} 不是 {FORMAT} 的 bundle（format={bundle.get('format')!r}）")
+    target = DirTarget(args.target_dir) if args.target_dir else SshTarget(args.target)
+    plan = Plan(parse_maps(args.map), os.path.abspath(args.source_home), target.home)
+    report = transfer(bundle, plan, target, args.overwrite, args.dry_run)
+    report["dry_run"] = args.dry_run
+    if not args.dry_run:
+        fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb") as f:
+            f.write(json.dumps(bundle, ensure_ascii=False).encode())
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if report["conflicts"] or report["missing"] or report["refused"]:
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

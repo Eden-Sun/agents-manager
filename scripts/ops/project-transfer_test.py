@@ -318,6 +318,55 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertIn("佔著", p.stderr)
         self.assertEqual((digest(self.tgt_path), digest(self.cfg)), (db0, cfg0))
 
+    def test_local_host_needs_a_path_map(self):
+        self.export()
+        db0, cfg0 = digest(self.tgt_path), digest(self.cfg)
+        p = run("import", "--bundle", self.bundle, "--host", "local", "--config", self.cfg, env=self.env, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--path-map", p.stderr)
+        p = run("import", "--bundle", self.bundle, "--host", "local", "--config", self.cfg,
+                "--path-map", "/Users/m4p/project/other=/home/u/other", env=self.env, check=False)
+        self.assertNotEqual(p.returncode, 0, "換不到這個專案的 path 一樣不行")
+        self.assertEqual((digest(self.tgt_path), digest(self.cfg)), (db0, cfg0))
+
+    def local_import(self, transcripts_here):
+        """#717：專案改在目標本機跑。B1 在 worktree、C1 在兄弟目錄（不能被專案那條 map 吃到）。"""
+        src = sqlite3.connect(self.src_path)
+        src.execute("UPDATE bots SET cwd = '/Users/m4p/project/hub/.claude/worktrees/w1' WHERE id = ?", (B1,))
+        src.execute("UPDATE bots SET cwd = '/Users/m4p/project/hub-sibling' WHERE id = ?", (C1,))
+        if transcripts_here:
+            for rid in ("r-z-old", "r-a-new", "r-kid"):
+                f = os.path.join(self.tgt_dir, f"{rid}.jsonl")
+                put(f, b"{}")
+                src.execute("UPDATE runs SET transcript_path = ? WHERE id = ?", (f, rid))
+        src.commit()
+        src.close()
+        self.export()
+        return json.loads(run("import", "--bundle", self.bundle, "--host", "local", "--config", self.cfg,
+                              "--path-map", "/Users/m4p/project/hub=/home/u/hub", env=self.env).stdout)
+
+    def test_local_import_maps_project_paths(self):
+        out = self.local_import(transcripts_here=True)
+        self.assertEqual(out["host"], "local")
+        self.assertFalse(any("transcript" in w for w in out["warnings"]), out["warnings"])
+        c = self.tgt()
+        p = c.execute("SELECT host, path FROM projects WHERE id = ?", (PID,)).fetchone()
+        self.assertEqual(tuple(p), ("local", "/home/u/hub"))
+        cwd = dict(c.execute("SELECT id, cwd FROM bots").fetchall())
+        self.assertEqual(cwd[B1], "/home/u/hub/.claude/worktrees/w1", "worktree 跟著專案換")
+        self.assertEqual(cwd[C1], "/Users/m4p/project/hub-sibling", "只換完整的路徑段")
+        self.assertEqual(c.execute("SELECT agent_path FROM attachments WHERE id = 'a-ok'").fetchone()[0], self.att,
+                         "不在 map 底下的不動")
+        hub = {p["id"]: p for p in tomllib.loads(slurp(self.cfg, "r"))["projects"]}[PID]
+        self.assertEqual((hub["host"], hub["path"]), ("local", "/home/u/hub"))
+
+    def test_local_import_warns_when_transcripts_were_not_moved(self):
+        out = self.local_import(transcripts_here=False)
+        w = [x for x in out["warnings"] if "transcript" in x]
+        self.assertEqual(len(w), 1, out["warnings"])
+        self.assertIn("2 段", w[0])  # r-kid 沒記 transcript_path：沒得看
+        self.assertIn("transcript-transfer", w[0])
+
     def test_failed_insert_rolls_back_db_and_config(self):
         self.export()
         # 目標已有同一個 native turn（UNIQUE turns_native）：插到一半失敗，前面插過的也要回滾。

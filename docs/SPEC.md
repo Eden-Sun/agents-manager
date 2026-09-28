@@ -2675,7 +2675,7 @@ export 先對來源 DB 做 SQLite online backup 到暫存目錄、從快照讀�
 不搬：憑證與身分（`identity` 只帶名字，B 要自己有同名身分或 A 機的 alias 認得，import 會列警告）、supervisor／mission／spawn hint／預覽等執行期表、
 掛在這個專案 bot 底下卻屬於別的專案的 child（列警告）。
 
-**改寫**：專案與附件的 `host` → `--host`；`path`、`agent_path`、`native_session_id`、`transcript_path` 不變（接回用）；
+**改寫**：專案與附件的 `host` → `--host`；`path`、`agent_path`、`native_session_id`、`transcript_path` 不變（接回用；改在 B 本機跑時見 §11.9a 的 `--path-map`）；
 每顆 bot 的 `hook_token` 重新產生；附件的 `local_path` 改成 B 資料目錄的 `attachments/<bot_id>/` 副本（遠端 bot 的附件本來就這樣放）；
 還在跑的 run 收成 `exited`（`exit_reason = project transfer`）、`queued`／`in_flight` 的 turn 收成 `failed`；
 `handed_off_to`（#708）清掉；config.toml 只寫 user bot（child 只在 DB，投影本來就不碰 child），一律 `autostart = false`
@@ -2683,7 +2683,7 @@ export 先對來源 DB 做 SQLite online backup 到暫存目錄、從快照讀�
 
 **冪等與拒絕**：已存在的 id 跳過、config 裡已有這個專案 id 就不再追加，所以同一份 bundle 重跑 import 不會多列、不換 token。
 下列情況在寫入前就拒絕、什麼都不動：B 的 config 沒有 `[[hosts]] name = <--host>`；B 已有別的專案佔著同一個 `(host, path)`；
-B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先升 B；整批都是 NULL 的來源獨有欄——例如已移除 Team 功能留下的 `bots.team_id`／`team_role`——略過並列進 warnings）；`--host local`。插到一半撞約束（例如 `turns_native` 重號）整批回滾。
+B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先升 B；整批都是 NULL 的來源獨有欄——例如已移除 Team 功能留下的 `bots.team_id`／`team_role`——略過並列進 warnings）；`--host local` 卻沒有一條 `--path-map` 換得到專案 path（§11.9a）。插到一半撞約束（例如 `turns_native` 重號）整批回滾。
 `--dry-run` 整套跑完再回滾，不寫 config／附件、不備份。
 
 **runbook**（A＝Mac，B＝agm-host）。順序的關鍵：`handed_off_to`（#708，DB 的 `projects.handed_off_to` 與 config.toml `[[projects]]` 同名）
@@ -2698,6 +2698,43 @@ B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先
 5. B：起 B 的 daemon，逐顆 `POST /api/bots/{id}/start?resume=native` 接回同一段對話（B 用 ssh 到 A 機檢查 `transcript_path`），
    確認 B 側收得到回覆再做下一顆。child 由母 agent 開，不在 B 上單獨接回。全部接完後需要的 bot 在 B 打開 autostart。
    確認無誤後刪 bundle 與 B 上的 `*.pre-transfer-*` 備份。
+
+### 11.9a 專案改在接手那台本機跑：原生對話搬家（#717，使用者 2026-09-28）
+
+使用者決定 `Agents Manager` 專案的 bot 直接在 agm-host（ubuntu）本機跑，不經 `m4p`。這時專案在 B 上是 `host = local`、path 是 B 自己的 checkout
+（`/Users/m4p/project/agents-manager` → `/home/ubuntu/project/agents-manager`），原生對話檔也要在 B 上，`start?resume=native` 才接得回：
+B 接回前 `native_resume_plan` 會看 `runs.transcript_path` 在不在（`stage_cross_identity_transcript_local`），不在就退回開新對話——
+所以 bundle 裡來源機器的路徑不能原樣帶過去。
+
+**實測**（2026-09-28，拋棄式 session，做完兩邊都刪乾淨）：Mac claude 2.1.281／codex 0.157.1／grok 1.0.41 → ubuntu claude 2.1.283／codex 0.157.1／grok 1.0.41。
+在 Mac 的拋棄式目錄開一段、叫它記一個代號並讀一個檔，搬到 ubuntu 另一個目錄後接回，問代號並重讀那個檔：
+
+| kind | 存放處 | 結果 |
+|---|---|---|
+| claude | `<CLAUDE_CONFIG_DIR>/projects/<cwd 的每個非英數字換成 ->/<session>.jsonl`（有同名目錄一起搬） | `claude -p --resume <id>` 接回，代號對、同一個 session id、檔案工具用新 cwd。**只要檔案放在新 cwd 算出來的目錄就接得回，檔內路徑不改也行**；改寫是為了對話裡的舊路徑不誤導模型 |
+| codex | `~/.codex/sessions/YYYY/MM/DD/rollout-<時間>-<id>.jsonl`（另有 `state_5.sqlite` 的 threads 索引） | `codex exec resume <id>` 只靠檔案就接回（代號對、同一個 thread id），接回時自己登記進目標的 state DB——**不用、也不該碰 codex 的 state DB**。清理用 `codex delete --force <id>`（檔案與索引一起刪） |
+| grok | `~/.grok/sessions/<cwd 的 URL 編碼>/<id>/`（`updates.jsonl`、`chat_history.jsonl` 等整個目錄） | 目標認得這個 id（新的 prompt 接在搬過去的 chat_history 後面；陌生 id 會說 not found locally、改向遠端 registry 找）；兩邊 Grok 額度都用完（402），**模型回覆沒能驗** |
+
+其他實測事實：`env -i` 跑 claude 要保留 `USER`／`LOGNAME`，否則 macOS 鑰匙圈讀不到登入（報 Not logged in）；ubuntu 的 codex exec 沙箱起不來（與搬家無關）。
+
+**工具**：`scripts/ops/transcript-transfer`（在 A 跑，接在 `project-transfer export` 之後）。照 bundle 裡每個有 `native_session_id` 的 run、依 bot 的 kind 找檔
+（DB 記的 `transcript_path` 還在就用它——換過身分時只有它知道是哪個 config 目錄；不在才去三種位置找，找到多份或找不到就列出來、不猜），
+目錄名用「照 `--map` 換過的 cwd」重算（claude 的 cwd 讀檔內 `cwd`、grok 的解目錄名、codex 路徑跟 cwd 無關），檔內絕對路徑照 `--map`（最長先配、只換完整路徑段）換，
+沒配上的來源 `$HOME` 換成目標 `$HOME`；經 ssh 寫到 B 同一個位置（權限 600），再把 bundle 的 `runs.transcript_path` 換成 B 上的路徑輸出新 bundle。
+只碰 `.claude*/projects`、`.codex/(archived_)sessions`、`.grok/sessions` 底下的檔，`auth.json`／`.credentials.json` 一律拒絕。
+B 已有同一個檔：內容一樣跳過（重跑冪等），不一樣＝B 那邊已接著寫過，不蓋、列在 `conflicts`（確定要蓋才 `--overwrite`）。
+
+**import**：`project-transfer import --host local --path-map /Users/m4p/project/agents-manager=/home/ubuntu/project/agents-manager`
+把專案 path、bot 的 cwd（worktree 在底下的一起換）、附件的 `agent_path` 換成 B 上的路徑，config 寫 `host = "local"`；
+`--host local` 沒有一條 map 換得到專案 path 就拒絕。還有 transcript 不在 B 上的段落列在 warnings（提醒先跑 transcript-transfer）。
+附件位元組照 §11.9 放 B 資料目錄的副本；`agent_path` 換過之後 B 的 checkout 裡不一定有那個檔（`.agents-manager/attachments` 不進 git），舊對話裡的附件 agent 讀不到——**刻意不複製進 B 的 checkout**（使用者 2026-09-28 決定維持現狀）。
+
+**runbook** 跟 §11.9 同樣先停 A 的 bot、設 `handed_off_to`，差別在第 3、4 步：
+3. A：`project-transfer export … --out am.json.gz`，接著
+   `scripts/ops/transcript-transfer --bundle am.json.gz --out am-moved.json.gz --target ubuntu@agm-host --map /Users/m4p/project/agents-manager=/home/ubuntu/project/agents-manager`
+   （先 `--dry-run`；結束碼 2＝有 missing／refused／conflicts，看報告再決定）。把 `am-moved.json.gz` 傳到 B、刪 A 上兩份 bundle。
+4. B：停 B 的 daemon；`project-transfer import --bundle am-moved.json.gz --host local --path-map …`（先 `--dry-run`，warnings 不該有 transcript 那條）。
+   身分用 B 自己的（B 上 cc0／cc1／cc2 是 `~/.claude`、`~/.claude-cc1`、`~/.claude-cc2`，跟 A 同名同位置）。之後照 §11.9 第 5 步接回，只是現在是 B 本機。
 
 ### 11.10 共用 herdr session 的主機（#709，使用者 2026-09-28）
 
