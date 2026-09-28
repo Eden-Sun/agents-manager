@@ -80,13 +80,20 @@ CREATE INDEX IF NOT EXISTS supervisor_inbox_role_open
 
 /// 從 `store::migrate` 最後呼叫。可重入：每一步都有 `IF NOT EXISTS` 或欄位檢查。
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
+    // The new column and its historical ownership must commit together. A failed
+    // migration must not leave an added-but-unbackfilled column on the next startup.
+    if !super::store::has_column(pool, "supervisor_inbox", "claimed_by").await? {
+        let mut tx = pool.begin().await?;
+        sqlx::query("ALTER TABLE supervisor_inbox ADD COLUMN claimed_by TEXT").execute(&mut *tx).await?;
+        sqlx::query("UPDATE supervisor_inbox SET claimed_by='patrol' WHERE notify_turn_id IS NOT NULL OR delivered_at IS NOT NULL OR state IN ('delivered','handled')")
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+    }
     for (col, ddl) in [
         // NULL = 還沒分類（剛寫進來、或這個欄位出現以前的舊列）；controller 每個 tick 先補上。
         ("role", "ALTER TABLE supervisor_inbox ADD COLUMN role TEXT"),
         // 0 = 只記錄、不喚醒：回覆、ack、純通知、恢復。會跟下一次喚醒一起送，但自己不叫醒誰。
         ("wake", "ALTER TABLE supervisor_inbox ADD COLUMN wake INTEGER"),
-        // 實際送給哪個角色（送出那一刻寫下）。ack 以它為準，兩個角色不會各收一次。
-        ("claimed_by", "ALTER TABLE supervisor_inbox ADD COLUMN claimed_by TEXT"),
         ("acked_by", "ALTER TABLE supervisor_inbox ADD COLUMN acked_by TEXT"),
         // 被合併掉的事件指向留下來的那一筆（例如同一段時間的多次 health_changed）。
         ("merged_into", "ALTER TABLE supervisor_inbox ADD COLUMN merged_into TEXT"),
