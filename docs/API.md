@@ -224,6 +224,8 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 
 **`needs_restart`（`GET /api/state` 的 bot，#353）**：執行中的 CLI 載入的啟動設定（model／effort／fast／persona／instruction_files／args／identity／env／inject_hooks／auto_approve）跟現在存的不同＝`true`。從資料算：run 啟動時記下載入的版本（`runs.launch_rev`），bot 目前的版本對不上就是過期；`PATCH` 回應掉了、daemon 之後重啟，這個旗標都還在，重啟（新 run 載入新版本）或當場套用成功（`live_apply.applied`）才清掉。沒記版本的 run（adopt 來的、升版前的）不誤報，改設定的那一刻才開始追蹤。
 
+**`live_apply_deferred`（`GET /api/state` 的 bot，#712）**：只改可即時套用的欄位而 bot 正忙、這次送不進去時，`PATCH` 回 `needs_restart:false`、`live_apply.deferred:true`（`reason` 是 `slash_gate: agent_busy`／`slash_gate: turn_in_flight`／`codex: busy_not_ready`）；state 的 bot 帶 `live_apply_deferred:true`、`needs_restart:false`，回合結束後自動套用。codex 只改 `fast` 時回合中會直接送（`live_apply.applied:true`），只有輸入框有字或選單開著才排。回合結束後仍因選單或讀回失敗而套不上，才恢復 `needs_restart:true`。claude／grok 已經排著別的欄位時不合併，直接回 `needs_restart:true`。待套用狀態存在 daemon 記憶體，daemon 重啟後若設定仍有差異，會依啟動版本顯示需重啟。
+
 **`primary`（主力那列的固定順序，issue #344）**：bot id 陣列，位置（**1 起算**）寫進 `bots.primary_position`；沒點名的維持原值。
 只存 DB、不進 config.toml（同 `primary`：手機與桌機追的是同一組），所以只送 `primary` 的請求不碰 config.toml。`GET /api/state` 每顆 bot 有
 `primary_position`（整數，`0`＝從沒排過）；主力那組照它由小到大排，`0` 的（例如舊資料）排在有排過的之後，同值照側欄順序。新釘選（`PATCH primary:true`）
@@ -1246,12 +1248,13 @@ AGM CLI 可用 `agm bot set <bot_id> [--model M] [--effort E] [--identity I]` �
 `bot_missing` / `no_active_run` / `slash_gate: <not_running|agent_busy|turn_in_flight|no_pane>` /
 `no_herdr_client` / `<field>_cleared_to_default` / `no_slash_command_for_<field>` / `slash_send_failed` /
 `not_a_single_field`，codex 另有 `codex: <picker_failed|fast_toggle_failed|no_status_line|
-readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch>`；DB-only recovery 另有 `live_runtime_debt_store_failed`、`live_runtime_write_failed` 與 `live_bookkeeping_still_pending`。以前失敗是**靜默**的：
+readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch|busy_not_ready>`；DB-only recovery 另有 `live_runtime_debt_store_failed`、`live_runtime_write_failed` 與 `live_bookkeeping_still_pending`。以前失敗是**靜默**的：
 只回 `needs_restart: true`、log 也沒寫，「codex 改 effort 明明不用重啟，為什麼又重啟」查不出來。`applied: true` 代表 TUI readback 與 runtime snapshot 已寫入同一個目標 run；若後續 `launch_rev` stamp 失敗，`live_rev` marker 會留在該 run，避免假的 restart badge，背景只重試 stamp。若 runtime 寫入失敗，回 `applied: false`、`pending_bookkeeping: true`、`needs_restart: true`，daemon 持久化 readback snapshot 並只重試 DB 寫入，不重送指令。
 
-**codex 忙的時候（#393）**：`reason` 是 `slash_gate: agent_busy` 或 `slash_gate: turn_in_flight` 時，`live_apply.deferred: true`——daemon 把要套的欄位與 revision 基準記在記憶體，
-等這顆 bot 下一次 `pane_agent_status_changed → idle` 再走同一條 `apply_live_setting`（成功後收斂 runtime、`live_rev` 與 `launch_rev` 並推 `bot_changed`；daemon 重啟時未套用的 TUI 工作仍需使用者再次套用，已讀回的 bookkeeping debt 則會自動恢復）。
-`needs_restart` 在那之前仍是 `true`。記憶體裡的排程 daemon 重啟就沒了，UI 的落差徽章仍在，再按一次「當場套用」（重送同一個 `fast`，冪等）即可。
+**忙的時候（#393、#712）**：codex 只改 `fast` 時回合中直接送（`applied: true`，SPEC §4.4a「回合中只切 fast」）。送不進去、`reason` 是 `slash_gate: agent_busy`、`slash_gate: turn_in_flight` 或 `codex: busy_not_ready`（回合中輸入框有字／選單開著）時，
+`live_apply.deferred: true`、`needs_restart: false`——daemon 把要套的欄位與 revision 基準記在記憶體，等這顆 bot 的 idle 邊（working／blocked／unknown → idle）或回合收掉再走同一條 `apply_live_setting`
+（成功後收斂 runtime、`live_rev` 與 `launch_rev` 並推 `bot_changed`；已讀回的 bookkeeping debt 在 daemon 重啟後會自動恢復）。claude／grok 已經排著別的欄位時不排（`deferred: false`、`needs_restart: true`）。
+記憶體裡的排程 daemon 重啟就沒了：那時 `live_apply_deferred` 消失、`needs_restart` 依啟動版本回到 `true`，UI 的落差徽章仍在，再按一次「當場套用」（重送同一個 `fast`，冪等）即可。
 codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast_tier`）：見 SPEC §4.4a。
 
 - **`needs_restart: true`**：有 active Run 且動到影響啟動 argv/env 的欄位（`model`、`effort`、`fast`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`、`persona`、`instruction_files`）。

@@ -57,7 +57,7 @@ test('#539：被換掉時回報實際採用的值，並講一句；面板記的�
   assert.equal(applied, 'claude-opus-5-5')
 
   const res = await withDaemon(daemonThatRemaps(applied), () => useStore.getState().patchBot('b1', { model: 'opus' }))
-  assert.deepEqual(res, { needsRestart: false, remappedModel: { from: 'opus', to: applied } })
+  assert.deepEqual(res, { needsRestart: false, deferred: false, remappedModel: { from: 'opus', to: applied } })
   assert.equal(patched, 1)
 
   const said = useStore.getState().notices.map((n) => n.text)
@@ -81,7 +81,7 @@ test('#539：沒有 remapped 就照舊，不要無中生有一則通知', async 
         : json({ needs_restart: true }),
     () => useStore.getState().patchBot('b1', { model: 'fable' }),
   )
-  assert.deepEqual(res, { needsRestart: true, remappedModel: null })
+  assert.deepEqual(res, { needsRestart: true, deferred: false, remappedModel: null })
   assert.deepEqual(useStore.getState().notices, [])
 })
 

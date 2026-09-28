@@ -235,6 +235,8 @@ export interface Bot {
   primary_position: number
   /** 執行中的 CLI 載入的啟動設定跟現在存的不同＝要重啟（#353，daemon 從資料算，PATCH 回應掉了也看得到）。 */
   needs_restart: boolean
+  /** live 設定已排到這個回合結束後套用。 */
+  live_apply_deferred?: boolean
   /** null = 用 `project.path` */
   cwd: string | null
   /** 預覽模式（issue #253）：`/api/state` 帶的簡版；舊 daemon 沒有＝undefined，null＝沒開過。 */

@@ -712,7 +712,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 // 主力那列的固定順序（#344）：1 起算，0＝沒排過；取消釘選不清。
                 "primary_position": b.primary_position,
                 // 執行中的 CLI 載入的啟動設定跟現在存的不同＝要重啟（#353）：從資料算，PATCH 回應掉了也看得到。
-                "needs_restart": run.as_ref().is_some_and(|r| crate::launch_rev::is_stale(b, r)),
+                "needs_restart": run.as_ref().is_some_and(|r| crate::launch_rev::is_stale(b, r)) && !crate::lifecycle::is_deferred(&b.id),
+                "live_apply_deferred": crate::lifecycle::is_deferred(&b.id),
                 "cwd": b.cwd,
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 "run": run,
@@ -1841,13 +1842,15 @@ async fn patch_bot(
         None
     };
     // codex 的 fast（也含 model／effort）忙的時候不重啟：記下來，下一次 idle 再套（#393，lifecycle/deferred_live.rs）。
-    let deferred = kind == "codex"
-        && live_revisions.is_some()
-        && matches!(&live, Some(lifecycle::LiveApplyOutcome::Failed(why)) if lifecycle::is_busy_reason(why));
+    // claude／grok 也一樣（#712），但它們一次只能排一個欄位（`defer_live` 的 single_field）。
+    let busy = matches!(&live, Some(lifecycle::LiveApplyOutcome::Failed(why)) if lifecycle::is_busy_reason(why));
+    let deferred = busy
+        && live_revisions.as_ref().is_some_and(|(baseline_rev, target_rev)| {
+            lifecycle::defer_live(&id, &live_fields, baseline_rev, target_rev, kind != "codex")
+        });
     if deferred {
-        if let Some((baseline_rev, target_rev)) = live_revisions.as_ref() {
-            lifecycle::defer_live(&id, &live_fields, baseline_rev, target_rev);
-        }
+        // 上面那則 bot_changed 送出時還沒排上：前端要再拉一次 state 才看得到 `live_apply_deferred`。
+        app.emit("bot_changed", json!({"bot_id": id})).await;
     }
     let needs_restart = match &live {
         Some(lifecycle::LiveApplyOutcome::Applied { .. }) => match (
@@ -1860,7 +1863,7 @@ async fn patch_bot(
         Some(
             lifecycle::LiveApplyOutcome::BookkeepingPending { .. }
             | lifecycle::LiveApplyOutcome::Failed(_),
-        ) => true,
+        ) => !deferred,
         None => needs_restart,
     };
     let mut out = json!({"needs_restart": needs_restart});
@@ -6225,10 +6228,18 @@ mod instruction_files_tests {
         .await
         .unwrap();
 
+        // 回合中只切 fast 會直接送（#712）；輸入框裡有使用者的草稿就不碰，排到回合結束——這條測的是排隊那條路。
+        e.herdr.set_screen(&pane, CODEX_DRAFT_ANSI);
         let out = patch(&e, &id, json!({"fast": true}))
             .await
             .unwrap();
         assert_eq!(out["live_apply"]["deferred"], json!(true), "busy run should queue this live apply: {out}");
+        assert!(e.herdr.calls_to("pane.send_text").is_empty(), "草稿還在框裡：一個字都不打");
+        assert_eq!(out["needs_restart"], json!(false), "waiting for idle must not ask for restart: {out}");
+        let pending_state = state_json(&e.app).await.unwrap();
+        let pending_bot = pending_state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == json!(id)).unwrap();
+        assert_eq!(pending_bot["needs_restart"], json!(false));
+        assert_eq!(pending_bot["live_apply_deferred"], json!(true));
         assert_eq!(db::bot(&e.app.db, &id).await.unwrap().unwrap().fast, 1);
         let target = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
         sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?")
@@ -6267,6 +6278,9 @@ mod instruction_files_tests {
             matches!(deferred_outcome, Some(lifecycle::LiveApplyOutcome::Applied { .. })),
             "the deferred TUI readback must succeed before stamp debt exists: {deferred_outcome:?}"
         );
+        let applied_state = state_json(&e.app).await.unwrap();
+        let applied_bot = applied_state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == json!(id)).unwrap();
+        assert_eq!(applied_bot["live_apply_deferred"], json!(false));
 
         let sent_before_retry = e.herdr.calls_to("pane.send_keys").len();
         assert_eq!(sent_before_retry, 1, "the deferred fast toggle ran exactly once");
@@ -6330,6 +6344,166 @@ mod instruction_files_tests {
             sent_before_retry,
             "retry changes bookkeeping only and never resends to the TUI"
         );
+    }
+
+    const CODEX_WORKING_ANSI: &str = include_str!("lifecycle/fixtures/codex-0.155-working.ansi");
+    const CODEX_DRAFT_ANSI: &str = include_str!("lifecycle/fixtures/codex-0.155-draft.ansi");
+
+    /// 真的回合中畫面（輸入框空的），最後一列換成 0.157 的狀態列：印的是顯示名 `GPT-6-Luna`，不是 id。
+    fn codex_working_screen(status: &str) -> String {
+        let mut rows: Vec<&str> = CODEX_WORKING_ANSI.lines().collect();
+        rows.pop();
+        rows.push(status);
+        rows.join("\n") + "\n"
+    }
+
+    /// 在跑一個回合的 codex bot（#712）：model／effort 已對上，fast 關。回 (bot id, run id, pane)。
+    async fn busy_codex(e: &tt::Env, name: &str) -> (String, String, String) {
+        seed_project(e).await;
+        let id = add(e, json!({"name": name, "kind": "codex", "model": "gpt-6-luna", "effort": "max", "fast": false})).await.unwrap();
+        let run_id = tt::fake_run(&e.app, &id).await;
+        let pane = format!("pane-{id}");
+        let baseline = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
+        sqlx::query(
+            "UPDATE runs SET pane_id = ?, launch_rev = ?, runtime_model = 'gpt-6-luna', runtime_effort = 'max', runtime_fast = 0, agent_status = 'working' WHERE id = ?",
+        )
+        .bind(&pane)
+        .bind(&baseline)
+        .bind(&run_id)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        (id, run_id, pane)
+    }
+
+    /// #712：回合中只切 fast——codex 0.157.1 的 `/fast` 回合中照樣生效，不排隊、不要求重啟、不按 Esc（Esc＝中斷回合）。
+    /// 狀態列印顯示名 `GPT-6-Luna` 也要讀回得過（以前大小寫不同就判 `readback_model_mismatch`、退回重啟）。
+    #[tokio::test]
+    async fn a_busy_fast_only_change_goes_in_during_the_turn() {
+        let e = env().await;
+        let (id, run_id, pane) = busy_codex(&e, "fast-mid-turn").await;
+        e.herdr.set_screen(&pane, &codex_working_screen("  GPT-6-Luna max · /tmp · Context 43% used · 5h 12% left"));
+        let replace_screen = e.herdr.set_screen_later();
+        let toggled = codex_working_screen("  GPT-6-Luna max fast · /tmp · Context 43% used · 5h 12% left");
+        let pane_after = pane.clone();
+        crate::lifecycle::race_point::arm("codex_after_fast_toggle", &pane, move || async move {
+            replace_screen(&pane_after, &toggled);
+        });
+
+        let out = patch(&e, &id, json!({"fast": true})).await.unwrap();
+        assert_eq!(out["live_apply"]["applied"], json!(true), "回合中直接套用: {out}");
+        assert_eq!(out["live_apply"]["deferred"], json!(false), "{out}");
+        assert_eq!(out["needs_restart"], json!(false), "{out}");
+        let typed: Vec<Value> = e.herdr.calls_to("pane.send_text");
+        assert_eq!(typed.len(), 1, "一次 /fast: {typed:?}");
+        assert_eq!(typed[0]["text"], json!("/fast"));
+        let keys = e.herdr.calls_to("pane.send_keys");
+        assert!(!format!("{keys:?}").contains("Escape"), "回合中絕不按 Esc（會中斷回合）: {keys:?}");
+        let (runtime_model, runtime_fast): (Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT runtime_model, runtime_fast FROM runs WHERE id = ?").bind(&run_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(runtime_model.as_deref(), Some("gpt-6-luna"), "顯示名轉成 id 的寫法");
+        assert_eq!(runtime_fast, Some(1));
+        let state = state_json(&e.app).await.unwrap();
+        let shown = state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == json!(id)).unwrap();
+        assert_eq!(shown["needs_restart"], json!(false));
+        assert_eq!(shown["live_apply_deferred"], json!(false));
+    }
+
+    /// #712：回合中輸入框有使用者的草稿——打 `/fast` 會接在草稿後面、Enter 把整段送出去。不碰，排到回合結束，也不要求重啟。
+    #[tokio::test]
+    async fn a_busy_fast_change_waits_when_the_composer_holds_a_draft() {
+        let e = env().await;
+        let (id, _run_id, pane) = busy_codex(&e, "fast-draft").await;
+        e.herdr.set_screen(&pane, CODEX_DRAFT_ANSI);
+        let out = patch(&e, &id, json!({"fast": true})).await.unwrap();
+        assert_eq!(out["live_apply"]["deferred"], json!(true), "{out}");
+        assert_eq!(out["live_apply"]["reason"], json!("codex: busy_not_ready"), "{out}");
+        assert_eq!(out["needs_restart"], json!(false), "{out}");
+        assert!(e.herdr.calls_to("pane.send_text").is_empty(), "一個字都不打");
+        assert!(e.herdr.calls_to("pane.send_keys").is_empty(), "一個鍵都不按");
+        assert!(lifecycle::is_deferred(&id));
+        lifecycle::apply_deferred_once(&e.app, &id).await; // 清掉全域排程，不留給別的測試
+    }
+
+    /// 排著的 live 套用在 `limit` 內被取走（`schedule_deferred_live` 延遲 1.5 秒後 `take`）。
+    async fn deferred_taken_within(id: &str, limit: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < deadline {
+            if !lifecycle::is_deferred(id) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    /// #712：agent 早就 idle、只剩回合紀錄還在飛時排下的，等不到 idle 邊——回合收掉（`emit_turn`）就要套。
+    #[tokio::test]
+    async fn a_fast_change_deferred_behind_an_in_flight_turn_applies_when_the_turn_closes() {
+        let e = env().await;
+        let (id, run_id, pane) = busy_codex(&e, "fast-turn-close").await;
+        let conv = db::conversation_id(&e.app.db, &id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&turn_id)
+            .bind(&conv)
+            .bind(&run_id)
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&run_id).execute(&e.app.db).await.unwrap();
+        e.herdr.set_screen(&pane, CODEX_DRAFT_ANSI);
+        let out = patch(&e, &id, json!({"fast": true})).await.unwrap();
+        assert_eq!(out["live_apply"]["deferred"], json!(true), "{out}");
+        assert!(!deferred_taken_within(&id, std::time::Duration::from_millis(2500)).await, "回合還在飛：不動");
+
+        e.herdr.set_screen(&pane, "  gpt-6-luna max · /tmp · Context 43% used · 5h 12% left\n");
+        sqlx::query("UPDATE turns SET status = 'completed' WHERE id = ?").bind(&turn_id).execute(&e.app.db).await.unwrap();
+        lifecycle::emit_turn(&e.app, &turn_id).await;
+        assert!(deferred_taken_within(&id, std::time::Duration::from_secs(6)).await, "回合收掉那一刻就該套");
+    }
+
+    /// #712：blocked（權限框）→ idle 也是一條 idle 邊：排著的 fast 要套，不是只等 working → idle。
+    #[tokio::test]
+    async fn a_deferred_fast_change_applies_after_a_blocked_prompt_closes() {
+        let e = env().await;
+        let (id, run_id, pane) = busy_codex(&e, "fast-after-blocked").await;
+        e.herdr.set_screen(&pane, CODEX_DRAFT_ANSI);
+        let out = patch(&e, &id, json!({"fast": true})).await.unwrap();
+        assert_eq!(out["live_apply"]["deferred"], json!(true), "{out}");
+        sqlx::query("UPDATE runs SET agent_status = 'blocked' WHERE id = ?").bind(&run_id).execute(&e.app.db).await.unwrap();
+        e.herdr.set_screen(&pane, "  gpt-6-luna max · /tmp · Context 43% used · 5h 12% left\n");
+        let ev = crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: json!({"pane_id": pane, "agent_status": "idle"}),
+        };
+        crate::events::handle_status(&e.app, crate::config::LOCAL_HOST, "test", &ev).await;
+        assert!(deferred_taken_within(&id, std::time::Duration::from_secs(6)).await, "blocked → idle 就該套");
+    }
+
+    /// #712：claude 忙的時候改 model 排到回合結束、不要求重啟；再改 effort（slash 指令一次一個值）不合併，照舊要重啟。
+    #[tokio::test]
+    async fn a_busy_claude_defers_one_field_and_asks_for_restart_on_a_second() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "claude-busy", "kind": "claude", "model": "claude-sonnet-4-5", "effort": "high"})).await.unwrap();
+        let run_id = tt::fake_run(&e.app, &id).await;
+        let baseline = crate::launch_rev::of(&db::bot(&e.app.db, &id).await.unwrap().unwrap());
+        sqlx::query("UPDATE runs SET pane_id = ?, launch_rev = ?, agent_status = 'working' WHERE id = ?")
+            .bind(format!("pane-{id}"))
+            .bind(&baseline)
+            .bind(&run_id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let first = patch(&e, &id, json!({"model": "claude-opus-5-5"})).await.unwrap();
+        assert_eq!(first["live_apply"]["deferred"], json!(true), "{first}");
+        assert_eq!(first["needs_restart"], json!(false), "{first}");
+        let second = patch(&e, &id, json!({"effort": "low"})).await.unwrap();
+        assert_eq!(second["live_apply"]["deferred"], json!(false), "{second}");
+        assert_eq!(second["needs_restart"], json!(true), "{second}");
+        lifecycle::apply_deferred_once(&e.app, &id).await;
     }
 
     #[tokio::test]

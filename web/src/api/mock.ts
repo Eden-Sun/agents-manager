@@ -556,6 +556,8 @@ export class MockTransport implements Transport {
   private projects: MockProject[] = []
   private bots: MockBot[] = []
   private runs: MockRun[] = []
+  /** 排到回合結束才套的 live 設定（daemon `lifecycle/deferred_live.rs`，#712）。 */
+  private deferredLive = new Set<string>()
   private turns: MockTurn[] = []
   private messages: MockMessage[] = []
   /** 群組任務：只做狀態與事件，不真的派 bot。 */
@@ -2221,8 +2223,11 @@ export class MockTransport implements Transport {
               primary_position: b.primary_position ?? 0,
               cwd: b.cwd,
               // #353：mock 也從目前 run 的啟動值投影 needs_restart，讓設定面板與真 daemon 同步。
+              // 排到回合結束的不算需重啟（#712）。
+              live_apply_deferred: this.deferredLive.has(b.id),
               needs_restart:
                 run !== null &&
+                !this.deferredLive.has(b.id) &&
                 (run.runtime_model !== b.model ||
                   run.runtime_effort !== b.effort ||
                   run.runtime_fast !== (b.fast === 1) ||
@@ -2472,19 +2477,26 @@ export class MockTransport implements Transport {
     /** 改的欄位全在 `fields` 內。 */
     const within = (...fields: string[]) => LAUNCH_FIELDS.filter((k) => !fields.includes(k)).every((k) => b[k] === undefined)
     // SPEC §4.4a：codex `/model`、`/fast` 執行中可換（daemon 操作 TUI 再回讀），不用重啟。
-    // #393：codex 忙的時候不重啟——排到下次 idle 再套（daemon lifecycle/deferred_live.rs）；mock 4 秒後演「閒下來了」。
+    // #393／#712：codex 忙的時候不重啟。只改 fast、agent working（不是 blocked）、輸入框沒字＝回合中直接送（daemon `live_gate`）；
+    // 其他排到回合結束再套（daemon lifecycle/deferred_live.rs），這段期間不算需重啟；mock 4 秒後演「回合結束」。
     let deferred = false
     if (needs_restart && bot.kind === 'codex' && within('model', 'effort', 'fast')) {
-      if (run && (run.agent_status === 'working' || run.agent_status === 'blocked')) {
+      const busy = run && (run.agent_status === 'working' || run.agent_status === 'blocked')
+      const midTurn = busy && run.agent_status === 'working' && only('fast') && !this.composerDrafts.has(id)
+      if (busy && !midTurn) {
         deferred = true
+        needs_restart = false
+        this.deferredLive.add(id)
         const runId = run.id
         setTimeout(() => {
+          this.deferredLive.delete(id)
           const r = this.runs.find((x) => x.id === runId)
           if (!r) return
           r.runtime_model = bot.model
           r.runtime_effort = bot.effort
           r.runtime_fast = bot.fast === 1
           this.emitBotStatus(id)
+          this.emit('bot_changed', { bot_id: id })
         }, 4000)
       } else needs_restart = false
     }
@@ -2493,7 +2505,7 @@ export class MockTransport implements Transport {
     if (needs_restart && bot.kind === 'claude' && only('model') && bot.model) needs_restart = false
     if (needs_restart && bot.kind === 'claude' && only('effort') && bot.effort) needs_restart = false
     // SPEC §4.4a：當場套用成功才更新 runtime，否則標題列會卡著「需重啟」。
-    if (!needs_restart && run) {
+    if (!needs_restart && !deferred && run) {
       if (b.model !== undefined) run.runtime_model = bot.model
       if (b.effort !== undefined) run.runtime_effort = bot.effort
       if (b.fast !== undefined) run.runtime_fast = bot.fast === 1
@@ -2502,7 +2514,9 @@ export class MockTransport implements Transport {
     const touchedLive = bot.kind === 'codex' && run !== undefined && within('model', 'effort', 'fast') && ['model', 'effort', 'fast'].some((k) => b[k] !== undefined)
     return {
       needs_restart,
-      ...(touchedLive ? { live_apply: { fields: ['fast'], applied: !deferred, deferred, reason: deferred ? 'slash_gate: agent_busy' : null } } : {}),
+      ...(touchedLive
+        ? { live_apply: { fields: ['fast'], applied: !deferred, deferred, reason: deferred ? (run?.agent_status === 'working' && only('fast') ? 'codex: busy_not_ready' : 'slash_gate: agent_busy') : null } }
+        : {}),
     }
   }
 
@@ -3710,6 +3724,14 @@ export class MockTransport implements Transport {
     for (const b of this.bots) this.emitBotStatus(b.id)
   }
 
+  /** 截圖用：改 active run 讀回的 runtime（演 codex 0.157 狀態列的顯示名、TUI 裡手切的 fast、在忙）。 */
+  setRuntime(botId: string, patch: { runtime_model?: string | null; runtime_fast?: boolean; agent_status?: MockRun['agent_status'] }) {
+    const run = this.runs.find((r) => r.bot_id === botId && r.state === 'running')
+    if (!run) return
+    Object.assign(run, patch)
+    this.emitBotStatus(botId)
+  }
+
   botIdByName(name: string): string | undefined {
     return this.bots.find((b) => b.name === name)?.id
   }
@@ -3777,6 +3799,12 @@ function installDevHelpers(mock: MockTransport) {
     updateNotice: (botIdOrName: string, notice: string | null) => mock.setUpdateNotice(mock.botIdByName(botIdOrName) ?? botIdOrName, notice),
     // 上游有新版、磁碟上還沒有的通知（issue #707）：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`
     upstreamUpdate: (kind: string, latest: string, disk: string) => mock.emitUpstreamUpdate(kind, latest, disk),
+    // 截圖用：`__amMock.runtime('am-codex', {runtime_model: 'GPT-6-Luna', runtime_fast: true, agent_status: 'working'})`
+    runtime: (botIdOrName: string, patch: { runtime_model?: string | null; runtime_fast?: boolean; agent_status?: MockRun['agent_status'] }) =>
+      mock.setRuntime(mock.botIdByName(botIdOrName) ?? botIdOrName, patch),
+    // 截圖用：直接 PATCH 設定（`__amMock.patchBot('am-codex', {model: 'gpt-6-luna'})`），回 daemon 的回應。
+    patchBot: (botIdOrName: string, body: Rec) =>
+      mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, body),
     // 截圖用：改名（演長名字在手機標題列被擠的情況）
     rename: (botIdOrName: string, name: string) =>
       mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, { name }),

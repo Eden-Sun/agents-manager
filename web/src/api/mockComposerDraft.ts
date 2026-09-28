@@ -29,6 +29,11 @@ function refuse(reason: string, botId: string, draft: string | null): never {
 export class MockComposerDrafts {
   private drafts = new Map<string, string>()
 
+  /** 框裡有沒有字（#712：回合中切 fast 有草稿就不打，排到回合結束）。 */
+  has(botId: string): boolean {
+    return this.drafts.has(botId)
+  }
+
   set(botId: string, text: string | null) {
     if (text) this.drafts.set(botId, text)
     else this.drafts.delete(botId)

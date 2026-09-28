@@ -113,7 +113,7 @@ pub(crate) use queue::*;
 pub(crate) use screen::*;
 pub(crate) use setup::*;
 pub(crate) use slash::*;
-pub(crate) use deferred_live::{defer_live, is_busy_reason, schedule_deferred_live};
+pub(crate) use deferred_live::{defer_live, is_busy_reason, is_deferred, schedule_deferred_live};
 #[cfg(test)]
 pub(crate) use deferred_live::apply_deferred_once;
 

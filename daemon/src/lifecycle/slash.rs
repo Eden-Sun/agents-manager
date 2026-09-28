@@ -257,8 +257,8 @@ async fn apply_live_setting_inner(
         return Err("no_active_run".into());
     };
     let in_flight = !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None));
-    let pane_id = match slash_gate(&run, in_flight) {
-        Ok(p) => p,
+    let (pane_id, during_turn) = match live_gate(&run, in_flight, &bot.kind, fields) {
+        Ok(gate) => gate,
         Err(why) => return Err(format!("slash_gate: {}", why.reason())),
     };
     let Ok(client) = client_for_run(app, &run).await else {
@@ -269,7 +269,12 @@ async fn apply_live_setting_inner(
         // `/fast` 是開關：不知道現在狀態就不能按。
         let was_fast = run.runtime_fast.map(|v| v != 0);
         mark_pane_typed(app, &run.id).await?;
-        let seen = match crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await {
+        let applied = if during_turn {
+            crate::codex_live::apply_fast_during_turn(&client, &pane_id, &bot, was_fast).await
+        } else {
+            crate::codex_live::apply(&client, &pane_id, &bot, was_fast, fields).await
+        };
+        let seen = match applied {
             Ok(seen) => seen,
             Err(why) => return Err(format!("codex: {why}")),
         };
@@ -465,6 +470,26 @@ fn slash_gate(run: &db::Run, turn_in_flight: bool) -> Result<String, SlashBlocke
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .ok_or(SlashBlocked::NoPane)
+}
+
+/// [`slash_gate`]，外加 codex 回合中只切 fast 的例外（#712）：`/fast` 在 codex 0.157.1 回合中照樣生效、不打斷回合，
+/// 所以 working／回合在飛也放行，回 `(pane, true)` 走 `codex_live::apply_fast_during_turn`（不按 Esc、輸入框有字就不碰）。
+/// `blocked`（權限／選擇畫面）照舊擋：打的字會掉進那個畫面。model／effort 要開選單，回合中不碰，照舊排到回合結束。
+fn live_gate(run: &db::Run, turn_in_flight: bool, kind: &str, fields: &[&str]) -> Result<(String, bool), SlashBlocked> {
+    match slash_gate(run, turn_in_flight) {
+        Ok(pane) => Ok((pane, false)),
+        Err(SlashBlocked::AgentBusy | SlashBlocked::TurnInFlight)
+            if kind == "codex" && fields == ["fast"] && run.agent_status != "blocked" =>
+        {
+            run.pane_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| (p.to_string(), true))
+                .ok_or(SlashBlocked::NoPane)
+        }
+        Err(why) => Err(why),
+    }
 }
 
 /// 打一行 slash 指令並送出：先打字、等輸入列畫好、再 Enter（`"/login\n"` 會被當多行貼上）。
@@ -999,7 +1024,7 @@ mod live_slash_tests {
 
 #[cfg(test)]
 mod login_slash_tests {
-    use super::{login_slash_command, slash_gate, SlashBlocked};
+    use super::{live_gate, login_slash_command, slash_gate, SlashBlocked};
     use crate::db;
 
     fn run(state: &str, agent_status: &str, pane_id: Option<&str>) -> db::Run {
@@ -1065,6 +1090,23 @@ mod login_slash_tests {
         assert_eq!(slash_gate(&run("running", "idle", None), false), Err(SlashBlocked::NoPane));
         // 空字串的 pane id 和沒有 pane 是同一件事。
         assert_eq!(slash_gate(&run("running", "idle", Some("  ")), false), Err(SlashBlocked::NoPane));
+    }
+
+    /// #712：codex 回合中只切 fast 直接送（0.157.1 `/fast` 回合中照樣生效）；其他組合照舊擋。
+    #[test]
+    fn only_a_codex_fast_only_change_goes_in_during_a_turn() {
+        let working = run("running", "working", Some("w1:p1"));
+        assert_eq!(live_gate(&working, true, "codex", &["fast"]), Ok(("w1:p1".into(), true)));
+        assert_eq!(live_gate(&run("running", "idle", Some("w1:p1")), true, "codex", &["fast"]), Ok(("w1:p1".into(), true)), "回合在飛");
+        // 閒著走一般路徑（可以按 Esc 關選單、改 model／effort）。
+        assert_eq!(live_gate(&run("running", "idle", Some("w1:p1")), false, "codex", &["fast"]), Ok(("w1:p1".into(), false)));
+        assert_eq!(live_gate(&working, true, "codex", &["model", "fast"]), Err(SlashBlocked::AgentBusy), "model 要開選單，回合中不碰");
+        assert_eq!(live_gate(&working, true, "codex", &["effort"]), Err(SlashBlocked::AgentBusy));
+        assert_eq!(live_gate(&working, true, "claude", &["fast"]), Err(SlashBlocked::AgentBusy));
+        assert_eq!(live_gate(&working, true, "grok", &["effort"]), Err(SlashBlocked::AgentBusy));
+        assert_eq!(live_gate(&run("running", "blocked", Some("w1:p1")), false, "codex", &["fast"]), Err(SlashBlocked::AgentBusy), "blocked：字會掉進權限框");
+        assert_eq!(live_gate(&run("running", "working", None), true, "codex", &["fast"]), Err(SlashBlocked::NoPane));
+        assert_eq!(live_gate(&run("stopped", "working", Some("w1:p1")), true, "codex", &["fast"]), Err(SlashBlocked::NotRunning));
     }
 
     /// 停掉的 run 就算同時在忙也先報「沒在跑」：那是使用者要先處理的那一件事。

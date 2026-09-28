@@ -391,7 +391,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         for (const k of Object.keys(sent)) n.delete(k as BotFormKey)
         return n
       })
-      setBanner(res.needsRestart ? 'restart' : 'saved')
+      setBanner(res.needsRestart ? 'restart' : res.deferred ? null : 'saved')
       // 被換掉時 `store.patchBot` 已經講了一句，不要再疊一則「已儲存」。
       if (!res.needsRestart && !res.remappedModel) notify('info', `已儲存 ${patch.name ?? bot.name} 的設定`)
     })
@@ -468,6 +468,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
               : '✓ 已儲存（Bot 未在執行中，下次啟動就會套用）。'}
           </span>
         </div>
+      ) : null}
+      {banner === null && bot.live_apply_deferred ? (
+        <div className="bs-banner ok" role="status">已儲存，回合結束後自動套用。</div>
       ) : null}
 
       <div className="bs-body">

@@ -89,6 +89,14 @@ test('#393：只有 codex 的 fast 落差才走當場套用；混了別的欄位
   assert.equal(isFastOnlyDrift('codex', []), false)
 })
 
+test('#712：codex 0.157 狀態列印顯示名 GPT-6-Luna，跟設定 gpt-6-luna 不算模型落差；只差 fast 就走當場套用', () => {
+  const d = runtimeDrift(bot({ model: 'gpt-6-luna', fast: false }), run({ runtime_model: 'GPT-6-Luna', runtime_fast: true }))
+  assert.deepEqual(d.map((x) => x.field), ['fast'], '截圖裡多列的「換成模型 gpt-6-luna」不該出現')
+  assert.equal(isFastOnlyDrift('codex', d), true)
+  // 真的不同的模型照樣標。
+  assert.deepEqual(runtimeDrift(bot({ model: 'gpt-6-luna' }), run({ runtime_model: 'GPT-6-Sol' })).map((x) => x.field), ['model'])
+})
+
 test('#541：查額度用 run 實際起來的身分，沒有 active run 才退回設定值', () => {
   // 改成 cc2、還沒重啟：燒的仍是 cc1 的額度。
   assert.equal(quotaIdentity(bot({ identity: 'cc2' }), run({ runtime_identity: 'cc1' })), 'cc1')

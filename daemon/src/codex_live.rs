@@ -56,7 +56,8 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
         }
         let mut parts = head.split_whitespace();
         // 這一行的開頭沒有東西（`· Context …`）只是別的行：略過，不能整個函式回 None（下面才有真的狀態列）。
-        let Some(model) = parts.next().map(str::to_string) else { continue };
+        // 0.157 印顯示名（`GPT-6-Luna`）而不是 id（`gpt-6-luna`）：一律轉小寫，runtime 才跟設定比得起來（#712）。
+        let Some(model) = parts.next().map(str::to_ascii_lowercase) else { continue };
         if !model.contains('-') {
             continue;
         }
@@ -441,37 +442,54 @@ pub async fn apply(
         }
     }
     if fields.contains(&"fast") {
-        let want = bot.fast != 0;
-        // The screen is the truth about the tier right now; `runs.runtime_fast` may be stale.
-        let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
-        let now = parse_status_line(&screen).map(|r| r.fast).or(was_fast);
-        match fast_plan(now, want) {
-            FastPlan::Keep => {}
-            FastPlan::Toggle => {
-                if !toggle_fast(client, pane_id).await {
-                    return Err("fast_toggle_failed");
-                }
+        reach_fast(client, pane_id, bot.fast != 0, was_fast).await?;
+    }
+    readback(client, pane_id, bot, fields).await
+}
+
+/// `/fast` until the status line says `want`: read the tier first, toggle only when wrong; an unknown tier is
+/// toggled once, read back, and toggled back if it landed the wrong way round (module docs).
+async fn reach_fast(client: &HerdrClient, pane_id: &str, want: bool, was_fast: Option<bool>) -> Result<(), &'static str> {
+    // The screen is the truth about the tier right now; `runs.runtime_fast` may be stale.
+    let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+    let now = parse_status_line(&screen).map(|r| r.fast).or(was_fast);
+    match fast_plan(now, want) {
+        FastPlan::Keep => {}
+        FastPlan::Toggle => {
+            if !toggle_fast(client, pane_id).await {
+                return Err("fast_toggle_failed");
             }
-            FastPlan::ToggleThenCheck => {
-                if !toggle_fast(client, pane_id).await {
-                    return Err("fast_toggle_failed");
-                }
-                tokio::time::sleep(Duration::from_millis(900)).await;
-                let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
-                let seen = parse_status_line(&screen).map(|r| r.fast);
-                if needs_second_toggle(seen, want) && !toggle_fast(client, pane_id).await {
-                    return Err("fast_toggle_failed");
-                }
+        }
+        FastPlan::ToggleThenCheck => {
+            if !toggle_fast(client, pane_id).await {
+                return Err("fast_toggle_failed");
+            }
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+            let seen = parse_status_line(&screen).map(|r| r.fast);
+            if needs_second_toggle(seen, want) && !toggle_fast(client, pane_id).await {
+                return Err("fast_toggle_failed");
             }
         }
     }
-    // Read-back (SPEC §4.4a).
+    Ok(())
+}
+
+/// Read-back (SPEC §4.4a).
+async fn readback(client: &HerdrClient, pane_id: &str, bot: &db::Bot, fields: &[&str]) -> Result<CodexRuntime, &'static str> {
     tokio::time::sleep(Duration::from_millis(900)).await;
     let screen = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
     let Some(seen) = parse_status_line(&screen) else { return Err("no_status_line") };
-    let want_model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    if let Some(m) = want_model {
-        if seen.model != m {
+    verify(&seen, bot, fields)?;
+    Ok(seen)
+}
+
+/// Does the status line show what the bot is configured for? The model is compared without case: 0.157 prints
+/// the display name (`GPT-6-Luna`) for the id `gpt-6-luna`, and a case-only mismatch used to fail every live
+/// apply — a fast-only change included — back to "needs restart" (#712).
+pub fn verify(seen: &CodexRuntime, bot: &db::Bot, fields: &[&str]) -> Result<(), &'static str> {
+    if let Some(m) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !seen.model.eq_ignore_ascii_case(m) {
             return Err("readback_model_mismatch");
         }
     }
@@ -483,8 +501,38 @@ pub async fn apply(
     if fields.contains(&"fast") && seen.fast != (bot.fast != 0) {
         return Err("readback_fast_mismatch");
     }
-    Ok(seen)
+    Ok(())
 }
+
+/// 回合中不能碰這個畫面（[`apply_fast_during_turn`]）：選單／選擇畫面開著，或輸入框不是空的（使用者的草稿——打 `/fast`
+/// 會接在它後面，Enter 就把整段送出去）。輸入框要用**帶樣式**的讀法判：純文字分不出 codex 的灰色佔位字與打的字。
+pub fn busy_fast_blocked(plain: &str, styled: &str) -> bool {
+    picker_open(plain) || crate::lifecycle::box_state("codex", styled) != crate::lifecycle::BoxState::Empty
+}
+
+/// 回合中只切 fast（#712）。codex 0.157.1 的 service tier 指令（`/fast`）是 `available_during_task`：回合跑著照樣
+/// 當場生效（`• Service tier set to priority`，狀態列立刻多出 `fast`），回合不中斷、照常跑完（2026-09-28 隔離 herdr
+/// session 實測，兩個方向都試過）。跟閒著時的 [`apply`] 不同：這裡**絕不按 Esc**（回合中 Esc＝中斷回合），
+/// 畫面不能碰就回 `busy_not_ready`，由呼叫端排到回合結束再走 [`apply`]。
+pub async fn apply_fast_during_turn(
+    client: &HerdrClient,
+    pane_id: &str,
+    bot: &db::Bot,
+    was_fast: Option<bool>,
+) -> Result<CodexRuntime, &'static str> {
+    let plain = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
+    let styled = crate::lifecycle::read_styled(client, pane_id, "visible", 60)
+        .await
+        .map_err(|_| "pane_read_failed")?;
+    if busy_fast_blocked(&plain, &styled) {
+        return Err(BUSY_NOT_READY);
+    }
+    reach_fast(client, pane_id, bot.fast != 0, was_fast).await?;
+    readback(client, pane_id, bot, &["fast"]).await
+}
+
+/// [`apply_fast_during_turn`] 碰不得畫面時的理由：跟「agent 忙」一樣排到回合結束（`deferred_live::is_busy_reason`）。
+pub const BUSY_NOT_READY: &str = "busy_not_ready";
 
 #[cfg(test)]
 mod tests {
@@ -968,5 +1016,66 @@ mod tests {
         assert!(parse_status_quota("› Ask Codex to do anything\n1 background terminal running\n").is_none());
         // 空讀數不能蓋掉 app-server 的。
         assert!(parse_status_quota("gpt-6-astra high · /tmp · Context 44% used").is_none());
+    }
+
+    /// #712：0.157 的狀態列印顯示名（`GPT-6-Luna`）。runtime 記成 id 的寫法，設定才比得起來。
+    #[test]
+    fn a_display_cased_model_is_read_as_the_id() {
+        let rt = parse_status_line("  GPT-6-Luna max fast · /tmp · Context 43% used · 5h 12% left\n").unwrap();
+        assert_eq!(rt, CodexRuntime { model: "gpt-6-luna".into(), effort: Some("max".into()), fast: true });
+    }
+
+    fn bot(model: Option<&str>, effort: Option<&str>, fast: bool) -> crate::db::Bot {
+        crate::db::Bot {
+            id: "b".into(),
+            project_id: "p".into(),
+            name: "b".into(),
+            kind: "codex".into(),
+            model: model.map(Into::into),
+            effort: effort.map(Into::into),
+            fast: i64::from(fast),
+            persona: None,
+            instruction_files: None,
+            args_json: "[]".into(),
+            autostart: 0,
+            inject_hooks: 1,
+            auto_approve: 1,
+            identity: None,
+            env_json: "{}".into(),
+            managed_by: "user".into(),
+            cwd: None,
+            herdr_session: None,
+            parent_bot_id: None,
+            is_primary: 0,
+            primary_position: 0,
+            hook_token: "t".into(),
+            deleted_at: None,
+            created_at: crate::db::now(),
+        }
+    }
+
+    /// 讀回只在真的不一樣時失敗：模型大小寫不同不算（以前只切 fast 也因此退回重啟）。
+    #[test]
+    fn the_readback_ignores_model_case_but_not_a_different_model() {
+        let seen = |model: &str, fast: bool| CodexRuntime { model: model.into(), effort: Some("max".into()), fast };
+        let want = bot(Some("gpt-6-luna"), Some("max"), true);
+        assert_eq!(verify(&seen("GPT-6-Luna", true), &want, &["fast"]), Ok(()));
+        assert_eq!(verify(&seen("gpt-6-sol", true), &want, &["fast"]), Err("readback_model_mismatch"));
+        assert_eq!(verify(&seen("gpt-6-luna", false), &want, &["fast"]), Err("readback_fast_mismatch"));
+        assert_eq!(verify(&seen("gpt-6-luna", false), &want, &["model"]), Ok(()), "沒改 fast 就不比 fast");
+        let high = CodexRuntime { model: "gpt-6-luna".into(), effort: Some("high".into()), fast: true };
+        assert_eq!(verify(&high, &want, &["fast"]), Err("readback_effort_mismatch"));
+    }
+
+    /// 回合中切 fast 之前的畫面檢查（真畫面 fixtures）：輸入框空的才打，有草稿或選單開著就不碰。
+    #[test]
+    fn a_turn_is_only_typed_into_with_an_empty_composer_and_no_picker() {
+        let working = include_str!("lifecycle/fixtures/codex-0.155-working.ansi");
+        let draft = include_str!("lifecycle/fixtures/codex-0.155-draft.ansi");
+        let migration = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt");
+        assert!(!busy_fast_blocked(working, working), "回合中、輸入框只有灰色佔位字");
+        assert!(busy_fast_blocked(draft, draft), "使用者的草稿：/fast 會接在後面一起送出");
+        assert!(busy_fast_blocked(migration, working), "選擇畫面開著");
+        assert!(busy_fast_blocked(working, "gpt-6-luna max · /tmp · Context 1% used\n"), "讀不出輸入框：不打");
     }
 }

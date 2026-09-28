@@ -261,6 +261,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     parent_bot_id: optStr(pick(v, 'parent_bot_id')),
     primary: bool(pick(v, 'primary')),
     needs_restart: bool(pick(v, 'needs_restart')),
+    live_apply_deferred: bool(pick(v, 'live_apply_deferred')),
     primary_position: (() => {
       const n = pick(v, 'primary_position')
       return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
