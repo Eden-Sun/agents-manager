@@ -3713,8 +3713,9 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   提示：**升級就是這種情況的出口**，只回 `not_idle` 會讓呼叫端以為沒有路，轉而想繞過租約（2026-09-19 實測）。
 - **申請理由**：`POST /api/supervisor/approvals` 收 `reason`，存在 `supervisor_approvals.request_reason`，
   跟 AGM 裁示寫的 `reason` **分開兩欄**——共用一欄的話裁示一寫就把申請理由蓋掉，事後查不到「他當初為什麼申請」。
-- **申請者的身分**：`requester` 可以是 bot id、bot 名或**agent 名**（`AM_AGENT_NAME`），三種都對得回同一顆 bot
-  （`maintenance::requester_bot_id`）。2026-09-19 之前只認前兩種，bot 叫 `AM-m3`、agent 叫 `agents-manager-15m2dg`
+- **申請者的身分**：`requester` 可以是 bot id、全域唯一的 live bot 名，或只對到一顆 live bot 的 running agent 名（`AM_AGENT_NAME`）。
+  ID 直接解析；名稱同時比對 bot 名與 agent 名，只有唯一 bot ID 才接受。名字跨專案撞到多顆 bot 時 fail closed，不取排序第一顆；改用 bot id 或唯一名稱。
+  `maintenance::requester_bot_id` 仍支援 agent 名：2026-09-19 之前只認 bot id／bot 名，bot 叫 `AM-m3`、agent 叫 `agents-manager-15m2dg`
   的情形下「排除申請者自己」永遠對不上，restart 一律 409 `exclude_not_requester`。
 - **申請人要跟憑證綁在一起（issue #436）**：`#414` 之後「誰裁示」已經只有驗過的角色寫得出 `AGM:<role>`，
   「誰申請」卻還是 body 說了算——同一筆核准一半可信一半不可信，而「不能自己核准自己」也沒有可信的申請人可比。
