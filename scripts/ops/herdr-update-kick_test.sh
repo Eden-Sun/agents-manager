@@ -357,6 +357,8 @@ teardown
 
 # 14b. 找不到 herdr／gh／python3／curl：log＋ops_alert，不是靜默 exit 0（#66 留言：
 # launchd 預設 PATH 找不到 Homebrew 的 herdr／gh 時，功能表面「已排程」但永遠不派）。
+# 「缺某個工具」的 PATH 只放這個目錄＋連結進來的工具，不帶 /usr/bin：Ubuntu 的 gh 就裝在 /usr/bin，
+# 帶了就會找到真貨、測不到「缺」（issue #676，agm-host 上實測紅）。
 link_tools() { # link_tools <dir> <name…>
   local d="$1"; shift
   mkdir -p "$d"
@@ -366,7 +368,7 @@ setup
 mkdir "$ROOT/noherdr"
 ln -s "$ROOT/stubbin/gh" "$ROOT/noherdr/gh"
 link_tools "$ROOT/noherdr" date python3 curl
-env -i PATH="$ROOT/noherdr:/usr/bin:/bin" AGM_EXTRA_PATH="" \
+env -i PATH="$ROOT/noherdr" AGM_EXTRA_PATH="" \
   AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" AM_BINARY="$AM_BINARY" \
   HERDR_REPO="$HERDR_REPO" HERDR_CHANGELOG_URL="$HERDR_CHANGELOG_URL" \
   /bin/bash "$SCRIPT"
@@ -378,7 +380,7 @@ setup
 mkdir "$ROOT/nogh"
 ln -s "$ROOT/stubbin/herdr" "$ROOT/nogh/herdr"
 link_tools "$ROOT/nogh" date python3 curl
-env -i PATH="$ROOT/nogh:/usr/bin:/bin" AGM_EXTRA_PATH="" \
+env -i PATH="$ROOT/nogh" AGM_EXTRA_PATH="" \
   AGM_DIR="$AGM_DIR" AGM_REPO="$AGM_REPO" AM_BINARY="$AM_BINARY" \
   HERDR_REPO="$HERDR_REPO" HERDR_CHANGELOG_URL="$HERDR_CHANGELOG_URL" \
   STUB_HERDR_VERSION=0.8.2 /bin/bash "$SCRIPT"

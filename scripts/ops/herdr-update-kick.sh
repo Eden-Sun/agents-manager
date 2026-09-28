@@ -144,7 +144,7 @@ print(tag)
 ' 2>/dev/null) || LATEST_TAG=""
 [ -n "$LATEST_TAG" ] || fail_run "查不到 ${HERDR_REPO} 的最新穩定版（gh release list）"
 
-CHANGELOG=$(mktemp -t herdr-changelog); TMPS+=("$CHANGELOG")
+CHANGELOG=$(mktemp "${TMPDIR:-/tmp}/herdr-changelog.XXXXXX"); TMPS+=("$CHANGELOG")
 if ! curl -fsSL --max-time 20 "$CHANGELOG_URL" -o "$CHANGELOG" || [ ! -s "$CHANGELOG" ]; then
   fail_run "抓不到 CHANGELOG（${CHANGELOG_URL}）"
 fi
@@ -192,7 +192,7 @@ print(d.get("herdr_update_bot_id") or d.get("release_bot_id") or d.get("responde
 fi
 [ -n "$BOT" ] || fail_run "找不到要派給誰（AGM_HERDR_UPDATE_BOT／runtime.json 的 herdr_update_bot_id、release_bot_id 或 responder_bot_id），跳過"
 
-BODY=$(mktemp -t agm-herdr-update); TMPS+=("$BODY")
+BODY=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-update.XXXXXX"); TMPS+=("$BODY")
 {
   printf '%s' "$BRIEF"
   printf '\n---\n本機 `herdr --version`：%s ｜ 最新穩定版（gh release list -R %s）：%s\nCHANGELOG：%s\n' \

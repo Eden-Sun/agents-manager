@@ -220,7 +220,7 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
   [ -n "$BOT" ] || { note_fail "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
   quota_gate || exit 0
 
-  BODY=$(mktemp -t agm-release-triage); TMPS+=("$BODY")
+  BODY=$(mktemp "${TMPDIR:-/tmp}/agm-release-triage.XXXXXX"); TMPS+=("$BODY")
   {
     cat "$TASK"
     printf '\n\n---\n本次：kind=%s，%s 版待分診（新版 %s）。以下 JSON 是 `agents-managerd release-triage-check` 的輸出，逐條 verdict 用它的 `id`。\n\n```json\n%s\n```\n' \
