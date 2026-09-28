@@ -1,5 +1,7 @@
 #!/bin/bash
-# main 的 GitHub CI 盯哨（issue #211）：一紅就開 issue＋派工，同一段紅不重複派，綠回來在 issue 留言。
+# main 的 CI 盯哨（issue #211）：一紅就開 issue＋派工，同一段紅不重複派，綠回來在 issue 留言。
+# 來源（issue #716 起預設 ubuntu-ci）：AGM_CI_SOURCE=ubuntu-ci 看 commit status `ubuntu-ci`（agm-host 背景跑的整樹 check.sh），
+# 失敗 log 讀 AGM_CI_LOG_DIR（本機有就讀）或 ssh AGM_CI_HOST 取；AGM_CI_SOURCE=actions 看 GitHub Actions（舊行為）。
 # 2026-09-16 起 main 的 CI 連紅好幾天沒人發現——規則只要求跑本機 check.sh，沒人看 GitHub 的結果。
 # launchd `com.agm.ci-watch` 每 10 分鐘跑一次；唯讀（只開 issue、留言、派工），**不改程式、不重啟、不關 issue**。
 #
@@ -8,7 +10,7 @@
 #   {"first_red_sha","first_red_run","issue","assigned","failures":[…]}
 # 只看已完成的 run；cancelled／skipped 等不算紅也不算綠（不改變狀態）。gh 失敗／rate limit 這輪什麼都不做。
 #
-#   AGM_DIR、AGM_REPO、AGM_CI_BOT、AGM_LOCK_STALE_SECS、AGM_LOCK_HUNG_SECS、AGM_FAIL_ALERT_AFTER、AGM_EXTRA_PATH 可覆寫（測試用）。
+#   AGM_CI_SOURCE、AGM_CI_LOG_DIR、AGM_CI_HOST、AGM_DIR、AGM_REPO、AGM_CI_BOT、AGM_LOCK_STALE_SECS、AGM_LOCK_HUNG_SECS、AGM_FAIL_ALERT_AFTER、AGM_EXTRA_PATH 可覆寫（測試用）。
 set -u
 PATH="${AGM_EXTRA_PATH-/opt/homebrew/bin:/usr/local/bin}:$PATH"; export PATH   # AGM_EXTRA_PATH 只給測試蓋掉
 
@@ -96,12 +98,36 @@ if ! take_lock; then
   fi
 fi
 
-WORK=$(mktemp -d -t agm-ci-watch) || { log "建不了暫存目錄，跳過"; exit 0; }
+# GNU mktemp 的 -t 要範本裡至少 3 個 X，BSD 不用；寫完整範本兩邊都吃（ubuntu-ci 首輪抓到）。
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/agm-ci-watch.XXXXXX") || { log "建不了暫存目錄，跳過"; exit 0; }
 cd "$REPO" 2>/dev/null || { log "進不了 ${REPO}，跳過"; exit 0; }   # gh 靠這裡推得出是哪個 repo
 
 # 1. 抓最近的 run。失敗（網路、rate limit、沒登入）＝這輪什麼都不做，不改狀態、不誤報紅或綠。
+SOURCE="${AGM_CI_SOURCE:-ubuntu-ci}"
 RUNS="$WORK/runs.json"
-if ! gh run list --branch main --workflow CI -L 20 --json databaseId,conclusion,status,headSha,createdAt,url > "$RUNS" 2> "$WORK/err"; then
+if [ "$SOURCE" = ubuntu-ci ]; then
+  # 把 main 最近 20 個 commit 的 `ubuntu-ci` status 整理成跟 `gh run list` 同形狀，後面的判斷不用分兩套。
+  # 沒有 ubuntu-ci status 的 commit（被合併跳過的 sha）當沒看到；pending 算還沒完成。
+  if ! python3 -c '
+import json, subprocess, sys
+def gh(path):
+    return json.loads(subprocess.run(["gh", "api", path], check=True, capture_output=True, text=True).stdout)
+runs = []
+for c in gh("repos/{owner}/{repo}/commits?sha=main&per_page=20"):
+    sha = c["sha"]
+    st = [x for x in gh("repos/{owner}/{repo}/commits/%s/status" % sha).get("statuses", []) if x.get("context") == "ubuntu-ci"]
+    if not st:
+        continue
+    state = st[0].get("state")
+    runs.append({"databaseId": sha[:8], "headSha": sha, "createdAt": st[0].get("created_at") or "",
+                 "url": st[0].get("target_url") or c.get("html_url") or "",
+                 "status": "completed" if state in ("success", "failure", "error") else "in_progress",
+                 "conclusion": {"success": "success", "failure": "failure", "error": "failure"}.get(state, "")})
+json.dump(runs, open(sys.argv[1], "w"))
+' "$RUNS" 2> "$WORK/err"; then
+    fail_run "讀 ubuntu-ci commit status 失敗，這輪不動：$(tail -c 200 "$WORK/err" | tr '\n' ' ')"
+  fi
+elif ! gh run list --branch main --workflow CI -L 20 --json databaseId,conclusion,status,headSha,createdAt,url > "$RUNS" 2> "$WORK/err"; then
   fail_run "gh run list 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
 fi
 
@@ -178,7 +204,16 @@ esac
 FIRST_SHA=$(field first_sha); FIRST_RUN=$(field first_run); FIRST_URL=$(field first_url); PREV_GREEN=$(field prev_green_sha)
 
 # 3. 失敗清單：從最新一個紅 run 的 --log-failed 抽。抓不到就這輪不動（沒有清單就開不出有用的 issue）。
-if ! gh run view "$RUN_ID" --log-failed > "$WORK/failed.log" 2> "$WORK/err"; then
+if [ "$SOURCE" = ubuntu-ci ]; then
+  _clog="${AGM_CI_LOG_DIR:-${HOME:-/nonexistent}/.cache/agents-manager/ci/logs}/${RUN_SHA}.log"
+  if [ -r "$_clog" ]; then
+    cp "$_clog" "$WORK/failed.log"
+  elif [ -z "${AGM_CI_HOST-ubuntu@agm-host}" ]; then
+    fail_run "本機沒有 ubuntu-ci 的 log（${_clog}），也沒設 AGM_CI_HOST，這輪不動"
+  elif ! ssh -o BatchMode=yes -o ConnectTimeout=15 "${AGM_CI_HOST-ubuntu@agm-host}" "cat ~/.cache/agents-manager/ci/logs/${RUN_SHA}.log" > "$WORK/failed.log" 2> "$WORK/err"; then
+    fail_run "讀不到 ubuntu-ci 的 log（${RUN_SHA}），這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
+  fi
+elif ! gh run view "$RUN_ID" --log-failed > "$WORK/failed.log" 2> "$WORK/err"; then
   fail_run "gh run view ${RUN_ID} --log-failed 失敗，這輪不動：$(head -c 200 "$WORK/err" | tr '\n' ' ')"
 fi
 FAILURES=$(python3 -c '
