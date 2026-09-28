@@ -1,0 +1,514 @@
+#!/usr/bin/env python3
+"""單一專案移交到另一顆 daemon（issue #710，#678 的子集）。
+
+  project-transfer export --db <來源 agents-manager.sqlite3> --project <專案 id> --out <bundle.json.gz>
+  project-transfer import --bundle <bundle.json.gz> --host <目標 daemon 上的主機名> \
+      [--config ~/.config/agents-manager/config.toml] [--dry-run]
+
+export 先對來源 DB 做 SQLite online backup（唯讀開來源，快照放暫存目錄、讀完當下刪），
+從快照取出專案、它的 bot（含 child 與已軟刪的）、conversations、runs、turns、messages、
+attachments（連同 daemon 讀得到的位元組）與 bot_reads，寫成一個 gzip JSON。來源 DB 一個字都不寫。
+
+import 是「目標 daemon 停著」的離線路徑：目標 daemon 沒有匯入對話歷史的 API，而 Project／Bot
+的權威是 config.toml（SPEC §3.1），所以 config.toml 與 SQLite 要在同一個停機窗口一起寫：
+  1. 對目標資料目錄的 `daemon.lock` 拿 flock（跟 daemon 同一把）：拿不到＝daemon 還在跑，什麼都不動；
+     拿到之後到結束前 daemon 也起不來。
+  2. 目標 DB 與 config.toml 先各備份一份（`*.pre-transfer-<時間>`，印出路徑）。
+  3. 一個交易裡插列（已存在的 id 跳過＝重複 import 冪等）→ 外鍵檢查 → 寫 config.toml（原子 rename）→ COMMIT。
+     config 寫不進去就回滾 DB；COMMIT 失敗就把 config 還原。
+改寫：專案與附件的 host 換成 `--host`；path 不變；hook token 重新產生；native_session_id 保留（接回用）；
+還在跑的 run 收成 exited、排隊／送出中的 turn 收成 failed（接手後由目標 `start?resume=native` 接回）；
+config.toml 裡的 bot 一律 `autostart = false`（來源還在跑時目標開機不能自己再起一份）；
+`handed_off_to`（#708）清掉。不搬憑證／身分（identity 只帶名字，目標要自己有同名身分）。
+"""
+
+import argparse
+import base64
+import datetime as _dt
+import fcntl
+import gzip
+import json
+import os
+import secrets
+import shutil
+import sqlite3
+import sys
+import tempfile
+
+FORMAT = "agm-project-transfer/1"
+DB_NAME = "agents-manager.sqlite3"
+# 插入順序＝外鍵順序。`bot_reads` 是子模組的表，舊 DB 可能沒有。
+TABLES = ["projects", "bots", "conversations", "runs", "turns", "messages", "attachments", "bot_reads"]
+ACTIVE_RUN = ("starting", "running", "stopping")
+OPEN_TURN = ("queued", "in_flight")
+EXIT_REASON = "project transfer"
+# 目標自己管的欄位：來源的值帶過去是錯的，目標沒有這一欄也不算缺欄。
+PROJECT_RESET = {"handed_off_to": None}
+
+
+def die(msg):
+    print(f"project-transfer: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def now_iso():
+    t = _dt.datetime.now(_dt.timezone.utc)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
+
+
+def stamp():
+    return _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def enc(v):
+    if isinstance(v, (bytes, bytearray)):
+        return {"$b64": base64.b64encode(bytes(v)).decode()}
+    return v
+
+
+def dec(v):
+    if isinstance(v, dict) and set(v) == {"$b64"}:
+        return base64.b64decode(v["$b64"])
+    return v
+
+
+def has_table(conn, name):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def columns(conn, table):
+    return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def rows(conn, sql, args=()):
+    cur = conn.execute(sql, args)
+    names = [d[0] for d in cur.description]
+    return [{k: enc(v) for k, v in zip(names, r)} for r in cur.fetchall()]
+
+
+def in_list(ids):
+    return ",".join("?" * len(ids))
+
+
+# ---------------------------------------------------------------- export
+
+
+def export(args):
+    if not os.path.isfile(args.db):
+        die(f"找不到來源 DB {args.db}")
+    tmp = tempfile.mkdtemp(prefix="agm-transfer-")
+    try:
+        snap_path = os.path.join(tmp, "snapshot.sqlite3")
+        src = sqlite3.connect(f"file:{os.path.abspath(args.db)}?mode=ro", uri=True)
+        snap = sqlite3.connect(snap_path)
+        try:
+            src.backup(snap)
+        finally:
+            src.close()
+        try:
+            bundle = collect(snap, args.project)
+        finally:
+            snap.close()
+    finally:
+        # 快照是整顆 DB 的複本（含其他專案與 hook token），讀完當下刪。
+        shutil.rmtree(tmp, ignore_errors=True)
+    out = args.out
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb") as f:
+        f.write(json.dumps(bundle, ensure_ascii=False).encode())
+    counts = {t: len(bundle["tables"][t]["rows"]) for t in TABLES if t in bundle["tables"]}
+    print(json.dumps({"out": out, "project": bundle["project_id"], "counts": counts,
+                      "files": len(bundle["files"]), "missing_files": bundle["missing_files"],
+                      "warnings": bundle["warnings"]}, ensure_ascii=False, indent=2))
+
+
+def collect(conn, project_id):
+    warnings = []
+    proj = rows(conn, "SELECT * FROM projects WHERE id = ?", (project_id,))
+    if not proj:
+        die(f"來源 DB 沒有專案 {project_id}")
+    if proj[0].get("deleted_at"):
+        die(f"專案 {project_id} 已軟刪（deleted_at={proj[0]['deleted_at']}），不移交已刪的專案")
+    data = {"projects": proj}
+    data["bots"] = rows(conn, "SELECT * FROM bots WHERE project_id = ? ORDER BY rowid", (project_id,))
+    for b in data["bots"]:
+        # 來源的 token 在 A 機上仍然有效，不帶出去；import 一律重產。
+        b["hook_token"] = ""
+    bot_ids = [b["id"] for b in data["bots"]]
+    if bot_ids:
+        stray = conn.execute(
+            f"SELECT id, name, project_id FROM bots WHERE parent_bot_id IN ({in_list(bot_ids)}) AND project_id <> ?",
+            (*bot_ids, project_id),
+        ).fetchall()
+        for bid, name, pid in stray:
+            warnings.append(f"child {name}（{bid}）掛在這個專案的 bot 底下但屬於專案 {pid}，沒有搬")
+
+    def by_bot(table):
+        if not bot_ids:
+            return []
+        return rows(conn, f"SELECT * FROM {table} WHERE bot_id IN ({in_list(bot_ids)}) ORDER BY rowid", bot_ids)
+
+    data["conversations"] = by_bot("conversations")
+    # rowid 順序照原樣插：`last_native_session` 挑「最後一個 run」的第二鍵是 rowid（issue #461）。
+    data["runs"] = by_bot("runs")
+    conv_ids = [c["id"] for c in data["conversations"]]
+    for table in ("turns", "messages"):
+        data[table] = (
+            rows(conn, f"SELECT * FROM {table} WHERE conversation_id IN ({in_list(conv_ids)}) ORDER BY rowid", conv_ids)
+            if conv_ids
+            else []
+        )
+    data["attachments"] = by_bot("attachments")
+    data["bot_reads"] = by_bot("bot_reads") if has_table(conn, "bot_reads") else []
+
+    files, missing = {}, []
+    for a in data["attachments"]:
+        if a.get("state") != "ready":
+            continue
+        try:
+            with open(a["local_path"], "rb") as f:
+                files[a["id"]] = base64.b64encode(f.read()).decode()
+        except OSError as e:
+            missing.append({"id": a["id"], "local_path": a["local_path"], "error": str(e)})
+
+    tables = {}
+    for t in TABLES:
+        if t == "bot_reads" and not has_table(conn, t):
+            continue
+        tables[t] = {"columns": columns(conn, t), "rows": data[t]}
+    return {
+        "format": FORMAT,
+        "project_id": project_id,
+        "exported_at": now_iso(),
+        "source_user_version": conn.execute("PRAGMA user_version").fetchone()[0],
+        "source_host": proj[0]["host"],
+        "tables": tables,
+        "files": files,
+        "missing_files": missing,
+        "warnings": warnings,
+    }
+
+
+# ---------------------------------------------------------------- import
+
+
+def load_toml(path):
+    try:
+        import tomllib
+    except ImportError:
+        die("需要 python 3.11 以上（tomllib）")
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def data_dir_for(config_path, cfg):
+    # SPEC §3.1：`[server] data_dir` > 設定檔所在目錄（字面所在，不跟 config.toml 本身的 symlink）。
+    base = os.path.dirname(os.path.abspath(config_path))
+    d = (cfg.get("server") or {}).get("data_dir")
+    if d:
+        d = os.path.expanduser(d)
+        return d if os.path.isabs(d) else os.path.join(base, d)
+    return base
+
+
+def tq(s):
+    # TOML basic string 的跳脫是 JSON 的子集以外再加 \uXXXX；json.dumps 產生的都合法。
+    return json.dumps(s, ensure_ascii=False)
+
+
+def toml_block(project, bots, host):
+    out = ["", f"# project-transfer {now_iso()}：從 {project['host']} 移交過來（issue #710）", "[[projects]]",
+           f"id = {tq(project['id'])}", f"path = {tq(project['path'])}", f"label = {tq(project['label'])}",
+           f"host = {tq(host)}"]
+    for b in bots:
+        out += ["", "[[projects.bots]]", f"id = {tq(b['id'])}", f"name = {tq(b['name'])}", f"kind = {tq(b['kind'])}"]
+        for key in ("model", "effort", "persona", "instruction_files", "identity", "herdr_session"):
+            if b.get(key) not in (None, ""):
+                out.append(f"{key} = {tq(b[key])}")
+        if b.get("fast"):
+            out.append("fast = true")
+        arr = json.loads(b.get("args_json") or "[]")
+        out.append("args = [" + ", ".join(tq(a) for a in arr) + "]")
+        out.append("autostart = false")
+        out.append(f"inject_hooks = {'true' if b.get('inject_hooks', 1) else 'false'}")
+        out.append(f"auto_approve = {'true' if b.get('auto_approve', 1) else 'false'}")
+        env = json.loads(b.get("env_json") or "{}")
+        if env:
+            out += ["", "[projects.bots.env]"] + [f"{tq(k)} = {tq(v)}" for k, v in sorted(env.items())]
+    return "\n".join(out) + "\n"
+
+
+def atomic_write(path, text):
+    real = os.path.realpath(path)
+    mode = os.stat(real).st_mode & 0o777 if os.path.exists(real) else 0o600
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real), prefix=".config.toml.transfer-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def take_lock(data_dir):
+    path = os.path.join(data_dir, "daemon.lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        who = open(path).read().strip() or "pid 不明"
+        os.close(fd)
+        die(f"目標資料目錄 {data_dir} 的 daemon 還在跑（daemon.lock：{who}）。先停目標 daemon 再 import，什麼都沒動。")
+    return fd
+
+
+def load_bundle(path):
+    with gzip.open(path, "rb") as f:
+        b = json.loads(f.read().decode())
+    if b.get("format") != FORMAT:
+        die(f"{path} 不是 {FORMAT} 的 bundle（format={b.get('format')!r}）")
+    return b
+
+
+def rewrite(bundle, host, data_dir, now):
+    """回傳 {table: [row dict]}（已解碼、已改寫）與要寫的附件檔、改寫紀錄。"""
+    t = {name: [{k: dec(v) for k, v in r.items()} for r in spec["rows"]] for name, spec in bundle["tables"].items()}
+    src_host = bundle["source_host"]
+    notes = {"runs_closed": [], "turns_failed": [], "autostart_off": []}
+    for p in t["projects"]:
+        p["host"] = host
+        for k, v in PROJECT_RESET.items():
+            if k in p:
+                p[k] = v
+    for b in t["bots"]:
+        b["hook_token"] = secrets.token_hex(16)
+        if b.get("autostart") and b.get("managed_by") == "user" and not b.get("deleted_at"):
+            notes["autostart_off"].append(b["name"])
+        b["autostart"] = 0
+    for r in t["runs"]:
+        if r["state"] in ACTIVE_RUN:
+            r["state"] = "exited"
+            r["ended_at"] = r.get("ended_at") or bundle["exported_at"]
+            if "exit_reason" in r:
+                r["exit_reason"] = EXIT_REASON
+            notes["runs_closed"].append(r["id"])
+    for r in t["turns"]:
+        if r["status"] in OPEN_TURN:
+            r["status"] = "failed"
+            r["completed_at"] = r.get("completed_at") or now
+            if "awaits_start" in r:
+                r["awaits_start"] = 0
+            notes["turns_failed"].append(r["id"])
+    files = []
+    for a in t["attachments"]:
+        if a["host"] == src_host:
+            a["host"] = host
+        # 遠端 bot 的附件：daemon 讀的是自己資料目錄底下的副本（attach.rs `local_copy_dir`）。
+        name = os.path.basename(a["agent_path"])
+        a["local_path"] = os.path.join(data_dir, "attachments", a["bot_id"], name)
+        if a["id"] in bundle["files"]:
+            files.append((a["local_path"], base64.b64decode(bundle["files"][a["id"]])))
+    return t, files, notes
+
+
+def check_config(cfg, bundle, host, project):
+    hosts = {h.get("name") for h in cfg.get("hosts") or []}
+    if host not in hosts:
+        die(f"目標 config.toml 沒有 [[hosts]] name = {host!r}；先在目標加好這台主機再 import")
+    existing = None
+    for p in cfg.get("projects") or []:
+        if p.get("id") == project["id"]:
+            existing = p
+        elif p.get("host", "local") == host and p.get("path") == project["path"]:
+            die(f"目標 config.toml 已有另一個專案 {p.get('id')} 佔著 {host}:{project['path']}")
+    if existing is not None and existing.get("host", "local") != host:
+        die(f"目標 config.toml 已有專案 {project['id']} 但 host={existing.get('host', 'local')!r}，不是 {host!r}")
+    return existing
+
+
+def config_warnings(cfg, bots, host):
+    have = {(i.get("name"), i.get("kind")) for i in cfg.get("identities") or []
+            if (i.get("host") or "").strip() in ("", host)}
+    out = []
+    for b in bots:
+        ident = b.get("identity")
+        if ident and (ident, b["kind"]) not in have:
+            out.append(f"bot {b['name']} 用身分 {ident}（{b['kind']}）：目標 config 沒有這個身分，"
+                       f"要看 {host} 那台自己的 alias 是否認得（SPEC §16.2），否則啟動會 409")
+        if b.get("herdr_session"):
+            out.append(f"bot {b['name']} 釘在 herdr session {b['herdr_session']!r}（從 default session 收編的）："
+                       f"目標要確認 {host} 上接得到同一個 session，`default` 的 bot 不能由 daemon 啟動（SPEC §6.5.1）")
+    return out
+
+
+def import_(args):
+    bundle = load_bundle(args.bundle)
+    config_path = os.path.expanduser(args.config)
+    if not os.path.isfile(config_path):
+        die(f"找不到目標 config {config_path}")
+    cfg = load_toml(config_path)
+    data_dir = data_dir_for(config_path, cfg)
+    db_path = os.path.join(data_dir, DB_NAME)
+    if not os.path.isfile(db_path):
+        die(f"找不到目標 DB {db_path}：目標 daemon 要先起過一次（建好 schema）再停下來 import")
+
+    lock = take_lock(data_dir)
+    try:
+        # 拿到鎖之後重讀：拿鎖前那一刻 daemon 可能剛寫過 config。
+        cfg = load_toml(config_path)
+        project = [{k: dec(v) for k, v in r.items()} for r in bundle["tables"]["projects"]["rows"]][0]
+        existing = check_config(cfg, bundle, args.host, project)
+        now = now_iso()
+        t, files, notes = rewrite(bundle, args.host, data_dir, now)
+        conn = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            summary = write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, now)
+        finally:
+            conn.close()
+    finally:
+        os.close(lock)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, now):
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 10000")
+    target_cols = {}
+    for name in t:
+        if not has_table(conn, name):
+            if t[name]:
+                die(f"目標 DB 沒有 {name} 表：目標 daemon 版本太舊，先升級")
+            continue
+        target_cols[name] = set(columns(conn, name))
+        missing = [c for c in bundle["tables"][name]["columns"] if c not in target_cols[name] and c not in PROJECT_RESET]
+        if missing:
+            die(f"目標 DB 的 {name} 少了欄位 {missing}：來源比目標新，先把目標 daemon 升到同版以上")
+    live = conn.execute(
+        "SELECT id FROM projects WHERE host = ? AND path = ? AND deleted_at IS NULL AND id <> ?",
+        (args.host, t["projects"][0]["path"], t["projects"][0]["id"]),
+    ).fetchone()
+    if live:
+        die(f"目標 DB 已有另一個活著的專案 {live[0]} 佔著 {args.host}:{t['projects'][0]['path']}")
+
+    backups = []
+    if not args.dry_run:
+        b = os.path.join(os.path.dirname(conn_path(conn)), f"{DB_NAME}.pre-transfer-{stamp()}")
+        dst = sqlite3.connect(b)
+        conn.backup(dst)
+        dst.close()
+        backups.append(b)
+
+    inserted, skipped = {}, {}
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # bot_reads 的主鍵是 bot_id，不是 id。
+        for name, rows_ in t.items():
+            if name not in target_cols:
+                continue
+            key = "bot_id" if name == "bot_reads" else "id"
+            ins = skp = 0
+            for r in rows_:
+                if conn.execute(f"SELECT 1 FROM {name} WHERE {key} = ?", (r[key],)).fetchone():
+                    skp += 1
+                    continue
+                cols = [c for c in r if c in target_cols[name]]
+                try:
+                    conn.execute(
+                        f"INSERT INTO {name} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                        [r[c] for c in cols],
+                    )
+                except sqlite3.DatabaseError as e:
+                    raise RuntimeError(f"插入 {name} {key}={r[key]} 失敗：{e}") from e
+                ins += 1
+            inserted[name], skipped[name] = ins, skp
+        bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            raise RuntimeError(f"外鍵檢查沒過：{bad[:10]}")
+
+        live_user_bots = sorted(
+            (b for b in t["bots"] if b.get("managed_by") == "user" and not b.get("deleted_at")),
+            key=lambda b: (b.get("position") or 0, b["id"]),
+        )
+        config_written = False
+        if existing is None and not args.dry_run:
+            cfg_backup = f"{config_path}.pre-transfer-{stamp()}"
+            shutil.copy2(os.path.realpath(config_path), cfg_backup)
+            backups.append(cfg_backup)
+            with open(config_path) as f:
+                text = f.read()
+            atomic_write(config_path, text.rstrip("\n") + "\n" + toml_block(t["projects"][0], live_user_bots, args.host))
+            config_written = True
+        if args.dry_run:
+            conn.execute("ROLLBACK")
+        else:
+            try:
+                conn.execute("COMMIT")
+            except BaseException:
+                if config_written:
+                    shutil.copy2(cfg_backup, os.path.realpath(config_path))
+                raise
+    except BaseException as e:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        if isinstance(e, RuntimeError):
+            die(f"{e}（DB 已回滾，config.toml 未變更）")
+        raise
+
+    written = 0
+    if not args.dry_run:
+        for path, data in files:
+            if os.path.exists(path):
+                continue
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+            written += 1
+
+    return {
+        "dry_run": args.dry_run,
+        "project": t["projects"][0]["id"],
+        "host": args.host,
+        "inserted": inserted,
+        "skipped_existing": skipped,
+        "config": "already present" if existing is not None else ("would append" if args.dry_run else "appended"),
+        "config_bots": [b["name"] for b in live_user_bots],
+        "attachment_files_written": written,
+        "missing_attachment_files": [m["id"] for m in bundle["missing_files"]],
+        "runs_closed": len(notes["runs_closed"]),
+        "turns_failed": len(notes["turns_failed"]),
+        "autostart_turned_off": notes["autostart_off"],
+        "backups": backups,
+        "warnings": bundle["warnings"] + config_warnings(cfg, live_user_bots, args.host),
+    }
+
+
+def conn_path(conn):
+    return conn.execute("PRAGMA database_list").fetchone()[2]
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="project-transfer", description=__doc__.split("\n\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    e = sub.add_parser("export", help="從來源 DB 的快照匯出一個專案")
+    e.add_argument("--db", required=True, help="來源 agents-manager.sqlite3（只讀，先做 backup 快照）")
+    e.add_argument("--project", required=True, help="專案 id")
+    e.add_argument("--out", required=True, help="輸出的 bundle（.json.gz，含對話內容，權限 600）")
+    i = sub.add_parser("import", help="寫進停著的目標 daemon（config.toml＋SQLite）")
+    i.add_argument("--bundle", required=True)
+    i.add_argument("--host", required=True, help="目標 daemon 上代表來源機器的 [[hosts]] 名（例：m4p）")
+    i.add_argument("--config", default="~/.config/agents-manager/config.toml", help="目標 daemon 的 config.toml")
+    i.add_argument("--dry-run", action="store_true", help="整套跑完但回滾，不寫 config／附件、不備份")
+    args = ap.parse_args()
+    if args.cmd == "export":
+        export(args)
+    else:
+        if args.host == "local":
+            die("--host 不能是 local：專案的 path 仍在來源機器上，目標要透過遠端主機接手")
+        import_(args)
+
+
+if __name__ == "__main__":
+    main()
