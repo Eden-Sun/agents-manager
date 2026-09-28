@@ -324,6 +324,18 @@ fn pick_port_starts_at_5180_and_skips_taken_and_listening() {
     assert!(pick_port(&set(&[]), &set(&[])).unwrap() > 5173);
 }
 
+#[tokio::test]
+async fn port_probe_detects_ipv6_only_listeners() {
+    let mut checked = Vec::new();
+    let listening = loopback_port_listening(5173, |addr| {
+        checked.push(addr);
+        std::future::ready(addr.is_ipv6())
+    })
+    .await;
+    assert!(listening, "a listener on ::1 is still a loopback listener");
+    assert!(checked.iter().any(|addr| addr.ip().is_ipv6()), "the probe must try ::1: {checked:?}");
+}
+
 #[test]
 fn command_binds_by_allow_lan() {
     assert_eq!(command(true, 5181), "bunx vite --host 0.0.0.0 --port 5181 --strictPort");

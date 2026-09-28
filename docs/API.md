@@ -653,6 +653,7 @@ bot 或 active Run 不存在 404。
 
 ### `GET /api/bots/{id}/preview`
 先對一次帳（pane 還在不在、port 有沒有在 listen）再回。`running` 期間 daemon 也有常駐監看（SPEC §6.12），server 半路掛掉會自己轉 `failed`（`attached` 轉 `off`）並推 `preview_changed`，不必等 GET。
+port 存活探測同時連 `127.0.0.1` 與 `::1`，因此只綁 IPv6 loopback 的 dev server 仍會回報為存活。
 
 ### `POST /api/bots/{id}/preview`
 冪等啟動：已經 `starting`／`running` 就原樣回；`failed`／`off` 重新起（重挑 port；`failed` 先關掉它留下的 pane，關不掉回 409 `preview_stop_failed`）。body 可省略，或：

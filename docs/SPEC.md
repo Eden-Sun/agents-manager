@@ -2432,6 +2432,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   關不掉就 409 `preview_stop_failed`、不起新的（否則舊 pane 變成沒人管的孤兒）。
 - **誰在看**（#260）：預覽在 `starting`／`running` 期間有一個常駐監看（一顆 bot 一個，登記在 `gate` 裡，重複的 `POST`／`GET`／開機對帳不會多掛）：
   `starting` 每秒、`running` 每 5 秒對一次帳（pane 還在不在＋port 有沒有在 listen），離開這兩個狀態（`off`／`failed`／這列沒了）才結束。
+  port 存活探測同時連 `127.0.0.1` 與 `::1`；只綁 IPv6 loopback 的 dev server 也算存活（issue #689）。
   server 半路掛掉（`spawned` 轉 `failed`、`attached` 轉 `off`）不必等人 `GET` 才發現，狀態一變就推 `preview_changed`。
   `POST`（含接上既有的）、`GET` 看到還活著的列、開機（`reconcile_all`，含已經 `running` 的）都會確保監看存在。
   暫時性的讀不到（DB／herdr）不會結束監看，見「收掉」。
