@@ -135,10 +135,8 @@ pub async fn listen_sockets(host: &str, pids: &[i32]) -> Option<Vec<(String, u16
     if host != crate::config::LOCAL_HOST || pids.is_empty() {
         return Some(Vec::new());
     }
-    let list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
-    let script = format!("lsof -nP -iTCP -sTCP:LISTEN -a -p {list} -Fpn 2>/dev/null");
-    let Ok(Some(o)) = crate::hosts::sh_local(&script, std::time::Duration::from_secs(10)).await else { return None };
-    Some(crate::preview_bind::parse_listeners(&String::from_utf8_lossy(&o.stdout)))
+    let out = crate::linux_proc::listen_fpn(Some(pids), std::time::Duration::from_secs(10)).await?;
+    Some(crate::preview_bind::parse_listeners(&out))
 }
 
 /// `lsof -Fpn` 是一行一個欄位：`p<pid>` 之後的 `n<addr>` 都屬於那個 pid。位址取最後一個 `:` 之後的數字。

@@ -371,4 +371,17 @@ mod tests {
         assert!(!probe_due(&bot.id, "w1:p1"));
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
+
+    /// Linux procps 的 `ps eww -p`（BSD 的 `e` 混 SysV 的 `-p`）也要吐出環境：child 的身分就靠它認
+    /// （SPEC「Linux 主機」）。真的起一個行程，外部編譯主機會跑到。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_real_ps_eww_shows_the_environment_of_our_own_process() {
+        let mut child = std::process::Command::new("sleep").arg("30").env("CLAUDE_CONFIG_DIR", "/home/u/.claude-cc2").spawn().unwrap();
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(ps_cmd(i64::from(child.id()))).output().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        let env = parse_ps_env(&String::from_utf8_lossy(&out.stdout));
+        assert_eq!(env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/u/.claude-cc2"), "{}", String::from_utf8_lossy(&out.stdout));
+    }
 }

@@ -210,19 +210,22 @@ impl PreviewEnv for RealEnv {
     }
 }
 
-/// 三次查詢：`ps`（每個 pid 的命令列）、`lsof`（全機 listen 的 port）、`lsof`（那些 pid 的 cwd），再交給 [`join_servers`] 篩。
+/// 每個 pid 的命令列。Linux 的 procps 也認這組旗標、一樣列到沒有終端的行程（測試在外部編譯主機實跑）。
+const PS_COMMANDS: &str = "ps -axo pid=,command=";
+
+/// 三次查詢：`ps`（每個 pid 的命令列）、全機 listen 的 port、那些 pid 的 cwd（後兩個 macOS 用 `lsof`、Linux 讀
+/// `/proc`，見 [`crate::linux_proc`]），再交給 [`join_servers`] 篩。
 async fn scan_real(roots: &[String]) -> Option<Vec<ViteProc>> {
     let t = Duration::from_secs(10);
-    let ps = crate::hosts::sh_local("ps -axo pid=,command=", t).await.ok().flatten()?;
+    let ps = crate::hosts::sh_local(PS_COMMANDS, t).await.ok().flatten()?;
     let cmds = parse_ps_commands(&String::from_utf8_lossy(&ps.stdout));
-    let ports = crate::hosts::sh_local("lsof -nP -iTCP -sTCP:LISTEN -Fpn 2>/dev/null", t).await.ok().flatten()?;
-    let ports = crate::panes::parse_lsof(&String::from_utf8_lossy(&ports.stdout));
+    let ports = crate::panes::parse_lsof(&crate::linux_proc::listen_fpn(None, t).await?);
     if ports.is_empty() {
         return Some(Vec::new());
     }
-    let list = ports.keys().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
-    let cwds = crate::hosts::sh_local(&format!("lsof -nP -a -d cwd -p {list} -Fpn 2>/dev/null"), t).await.ok().flatten()?;
-    Some(join_servers(&ports, &parse_lsof_cwd(&String::from_utf8_lossy(&cwds.stdout)), &cmds, roots, std::process::id() as i32))
+    let pids: Vec<i32> = ports.keys().copied().collect();
+    let cwds = crate::linux_proc::cwd_fpn(&pids, t).await?;
+    Some(join_servers(&ports, &parse_lsof_cwd(&cwds), &cmds, roots, std::process::id() as i32))
 }
 
 #[cfg(test)]
@@ -385,7 +388,7 @@ pub fn classify_listener(cmd: &str, cwd: &str, roots: &[String]) -> Option<&'sta
     (under_any(cwd, roots) && !is_infrastructure(cmd)).then_some("unknown")
 }
 
-/// `ps -axo pid=,command=` → pid 到命令列。
+/// [`PS_COMMANDS`] 的輸出 → pid 到命令列。
 pub fn parse_ps_commands(out: &str) -> HashMap<i32, String> {
     out.lines()
         .filter_map(|l| {
