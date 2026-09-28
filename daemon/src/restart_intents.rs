@@ -20,6 +20,32 @@ use crate::lifecycle::{self, LcError, StartOpts};
 use crate::state::App;
 use std::sync::Arc;
 
+/// Reconcile must not heal a restart's committed stop while recovery still owns it.
+pub(crate) async fn has_open_restart_for_run(
+    pool: &sqlx::SqlitePool,
+    host: &str,
+    bot_id: &str,
+    run_id: &str,
+) -> anyhow::Result<bool> {
+    let payload: Option<String> = sqlx::query_scalar(
+        "SELECT payload_json FROM intents \
+         WHERE kind='restart' AND subject_id=? AND host=? AND status IN ('pending','running')",
+    )
+    .bind(bot_id)
+    .bind(host)
+    .fetch_optional(pool)
+    .await?;
+    Ok(payload
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|payload| {
+            payload
+                .get("from_run_id")
+                .and_then(serde_json::Value::as_str)
+                .map(|id| id == run_id)
+        })
+        .unwrap_or(false))
+}
+
 /// Keep the immediately committed credential rotation recoverable for the same window as restarts.
 pub const ROTATION_INTENT_TTL_SECS: i64 = 15 * 60;
 
@@ -346,9 +372,12 @@ mod tests {
         crate::intents::insert(&e.app.db, "restart", &bot.id, LOCAL_HOST, &json!({"opts": {}, "from_run_id": run1}), 900).await.unwrap();
 
         let app2 = tt::restart_app(&e).await;
-        recover_host(&app2, LOCAL_HOST).await;
+        lifecycle::restart_hold::adopt_open_intents(&app2).await;
+        crate::reconcile::reconcile_host(&app2, LOCAL_HOST).await.unwrap();
+        crate::reconcile::autostart_after_reconcile(&app2, LOCAL_HOST, true).await;
         let run2 = db::active_run(&app2.db, &bot.id).await.unwrap().expect("補完之後 bot 回來");
         assert_ne!(run2.id, run1);
+        assert_eq!(run_state(&app2, &run1).await, "exited");
         assert_eq!(intent_status(&app2, &bot.id).await, vec!["done"]);
     }
 

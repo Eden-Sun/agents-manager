@@ -663,6 +663,10 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
             continue;
         }
         let computed = db::agent_name_for_bot(&app.db, &bot).await?;
+        let preserve_stopping = match &active {
+            Some(run) if run.state == "stopping" => crate::restart_intents::has_open_restart_for_run(&app.db, host, &bot.id, &run.id).await?,
+            _ => false,
+        };
         let mut candidates: Vec<String> = Vec::new();
         if let Some(r) = &active {
             if let Some(n) = r.agent_name.clone().filter(|s| !s.is_empty()) {
@@ -777,14 +781,15 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
                     Ok(Some(fresh)) => fresh.agent_status.normalized().as_str().to_string(),
                     _ => agent.agent_status.normalized().as_str().to_string(),
                 };
-                // `stopping` is healed too: a give-up stop left it stuck (review 2026-09-12 #1).
-                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, tab_id=?, agent_status=?, agent_name=COALESCE(?, agent_name), herdr_session=COALESCE(herdr_session, ?), state=CASE WHEN state IN ('starting','stopping') THEN 'running' ELSE state END WHERE id=?")
+                // Preserve a committed restart stop for recovery; heal other stuck `stopping` runs too.
+                sqlx::query("UPDATE runs SET pane_id=?, workspace_id=?, tab_id=?, agent_status=?, agent_name=COALESCE(?, agent_name), herdr_session=COALESCE(herdr_session, ?), state=CASE WHEN state='starting' OR (state='stopping' AND ?=0) THEN 'running' ELSE state END WHERE id=?")
                     .bind(&agent.pane_id)
                     .bind(&agent.workspace_id)
                     .bind(&agent.tab_id)
                     .bind(&status)
                     .bind(&found_name)
                     .bind(&session)
+                    .bind(preserve_stopping)
                     .bind(&run.id)
                     .execute(&app.db)
                     .await?;
@@ -824,8 +829,9 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
                                 }
                             }
                             let status = occupant.agent_status.normalized().as_str().to_string();
-                            sqlx::query("UPDATE runs SET agent_status=?, state=CASE WHEN state IN ('starting','stopping') THEN 'running' ELSE state END WHERE id=?")
+                            sqlx::query("UPDATE runs SET agent_status=?, state=CASE WHEN state='starting' OR (state='stopping' AND ?=0) THEN 'running' ELSE state END WHERE id=?")
                                 .bind(&status)
+                                .bind(preserve_stopping)
                                 .bind(&run.id)
                                 .execute(&app.db)
                                 .await?;
