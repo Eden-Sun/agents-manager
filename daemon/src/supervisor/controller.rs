@@ -1976,6 +1976,26 @@ async fn quota_reset_at(app: &Arc<App>, identity: &str) -> Option<String> {
 /// The generation whose controller loop was spawned last (`-1` = none yet).
 static LIVE_GENERATION: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
+/// A failed generation read must not turn into a retirement decision or a tight DB retry loop.
+const CURRENT_READ_RETRY: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+static TEST_PANIC_CONTROLLER_GENERATION: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+#[cfg(test)]
+static TEST_CURRENT_READ_FAILURE_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct LiveGenerationGuard {
+    generation: i64,
+}
+
+impl Drop for LiveGenerationGuard {
+    fn drop(&mut self) {
+        // A retiring older loop must never release the latch installed by a newer generation.
+        let _ = LIVE_GENERATION.compare_exchange(self.generation, -1, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Start the controller for `generation`. An older controller notices the mismatch on its
 /// next tick and stops, so a model switch never leaves two of them sending notifications.
 pub fn spawn(app: Arc<App>, generation: i64) {
@@ -1984,7 +2004,16 @@ pub fn spawn(app: Arc<App>, generation: i64) {
     if LIVE_GENERATION.swap(generation, std::sync::atomic::Ordering::SeqCst) == generation {
         return;
     }
+    let latch = LiveGenerationGuard { generation };
     tokio::spawn(async move {
+        let _latch = latch;
+        #[cfg(test)]
+        if TEST_PANIC_CONTROLLER_GENERATION
+            .compare_exchange(generation, -1, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+            .is_ok()
+        {
+            panic!("test-injected supervisor controller panic");
+        }
         let mut turns = app.subscribe_turns();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1994,9 +2023,19 @@ pub fn spawn(app: Arc<App>, generation: i64) {
         // Startup reconciliation: results that arrived while the daemon was down.
         reconcile(&app).await;
         loop {
-            if !current(&app, generation).await {
-                tracing::info!(generation, "supervisor controller retiring: newer generation took over");
-                return;
+            match current(&app, generation).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::info!(generation, "supervisor controller retiring: newer generation took over");
+                    return;
+                }
+                Err(error) => {
+                    #[cfg(test)]
+                    TEST_CURRENT_READ_FAILURE_SEEN.store(true, std::sync::atomic::Ordering::SeqCst);
+                    tracing::warn!(error = ?error, generation, "supervisor generation could not be read; skipping this controller tick");
+                    tokio::time::sleep(CURRENT_READ_RETRY).await;
+                    continue;
+                }
             }
             tokio::select! {
                 ev = turns.recv() => match ev {
@@ -2103,8 +2142,8 @@ fn note_classify_result(app: &Arc<App>, result: anyhow::Result<usize>) {
     }
 }
 
-async fn current(app: &Arc<App>, generation: i64) -> bool {
-    store::get_or_init(&app.db).await.map(|s| s.generation == generation).unwrap_or(false)
+async fn current(app: &Arc<App>, generation: i64) -> anyhow::Result<bool> {
+    Ok(store::get_or_init(&app.db).await?.generation == generation)
 }
 
 /// 兩個 AGM 角色都算：協調者自己的回合結束同樣不能變成一則叫醒自己的事件。
@@ -2154,6 +2193,8 @@ async fn respawn_with(app: &Arc<App>, delays: &'static [Duration]) {
 
 #[cfg(test)]
 mod tests {
+    static CONTROLLER_TASK_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// #472：`classify` 失敗要累計、成功要歸零，而且**整拍不因此中止**。
     /// 用真的讓 `classify` 讀不到表來產生錯誤，不是自己造一個 `Err`——
     /// 要證明的是「真的失敗時計數會動」，不是「我寫的 match 會動」。
@@ -2188,9 +2229,50 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn a_controller_retries_a_failed_generation_read_then_releases_its_latch_when_superseded() {
+        let _serial = CONTROLLER_TASK_TEST_LOCK.lock().await;
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sup = store::get_or_init(&app.db).await.unwrap();
+        const GEN: i64 = 7_300_041;
+        sqlx::query("UPDATE supervisors SET generation=? WHERE id=?").bind(GEN).bind(&sup.id).execute(&app.db).await.unwrap();
+
+        TEST_CURRENT_READ_FAILURE_SEEN.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::testing::make_table_unreadable(&app, "supervisors").await;
+        spawn(app.clone(), GEN);
+        assert!(
+            crate::testing::eventually!(TEST_CURRENT_READ_FAILURE_SEEN.load(std::sync::atomic::Ordering::SeqCst)),
+            "a failed generation read must be observed as a retryable error, not as a stale generation"
+        );
+
+        crate::testing::make_table_readable(&app, "supervisors").await;
+        sqlx::query("UPDATE supervisors SET generation=? WHERE id=?").bind(GEN + 1).bind(&sup.id).execute(&app.db).await.unwrap();
+        assert!(
+            crate::testing::eventually!(LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == -1),
+            "after a real generation change the retiring loop must release its own latch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_controller_releases_its_live_generation_latch() {
+        let _serial = CONTROLLER_TASK_TEST_LOCK.lock().await;
+        let env = crate::testing::env().await;
+        const GEN: i64 = 7_300_042;
+        TEST_PANIC_CONTROLLER_GENERATION.store(GEN, std::sync::atomic::Ordering::SeqCst);
+
+        spawn(env.app.clone(), GEN);
+        assert!(
+            crate::testing::eventually!(LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == -1),
+            "panic unwinding must restore LIVE_GENERATION so a later start can run"
+        );
+        TEST_PANIC_CONTROLLER_GENERATION.store(-1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// #300：開機讀不到 supervisor 列不能讓 controller 整個行程期間都不起來——背景重試，讀得到就起。
     #[tokio::test]
     async fn an_unreadable_supervisor_row_at_boot_is_retried_until_the_controller_starts() {
+        let _serial = CONTROLLER_TASK_TEST_LOCK.lock().await;
         static FAST: [Duration; 1] = [Duration::from_millis(20)];
         let env = crate::testing::env().await;
         let app = env.app.clone();
