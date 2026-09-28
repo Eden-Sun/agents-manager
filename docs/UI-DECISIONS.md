@@ -685,3 +685,16 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 ![codex 有分析](screenshots/codex-update-review/codex-analysed-1440.png) ![codex 尚未分析](screenshots/codex-update-review/codex-not-analysed-1440.png)
 ![claude 有分析](screenshots/codex-update-review/claude-analysed-1440.png) ![claude 尚未分析](screenshots/codex-update-review/claude-not-analysed-1440.png)
 ![手機](screenshots/codex-update-review/claude-not-analysed-390.png) ![真 daemon（唯讀）](screenshots/codex-update-review/codex-real-daemon-1440.png)
+
+## 上游有新版、磁碟上還沒有：一則通知，不做 header chip（2026-09-28，issue #707）
+
+使用者：npm 已是 2.1.283、磁碟停在 2.1.281，AG Man 沒通知。
+
+- **跟「重啟套用」分開**：header 的更新 chip／批次重啟只收「已下載（claude）／已安裝（codex）、重啟就換」的 run；上游有而磁碟沒有時重啟換不到東西，
+  放進去等於叫人按一顆沒用的鈕。所以這件事**不寫 `runs.update_notice`、不長 chip**，只跳一則通知，字面寫明「還沒下載，重啟也換不到」／「需先安裝」。
+- **帶「知道了」**：純資訊通知 4 秒就消失，這則是要人去處理的，帶一顆動作鈕讓它停 15 秒（同刪 bot 的「復原」）。
+- **每個新版本每個瀏覽器一次**：daemon 只推一次（跨重啟也記得）；推的當下沒開網頁會錯過，開機再讀快照補上，看過的版本記在 localStorage。
+  抓不到上游的錯誤通知只在 daemon 推的那一次跳，重整不重跳。
+- 驗證：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`。
+
+![桌機](screenshots/upstream-update/desktop-1440-dark.png) ![手機](screenshots/upstream-update/phone-390-light.png)

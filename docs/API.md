@@ -1805,6 +1805,25 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
   "source_url": "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md", "error": null }
 ```
 
+## 上游有新版可裝 `GET /api/upstream-updates`（SPEC §3.1「上游有新版」，issue #707）
+
+跟 `update_notice`（磁碟已是新版、重啟套用）不同：這是**上游有、磁碟上還沒有**（claude 還沒自己下載、codex 還沒裝），重啟換不到任何東西。
+
+- 唯讀、不觸發抓取，回最近一輪巡邏（每 10 分鐘；daemon 啟動後約 1 分鐘第一輪）的快照；第一輪還沒跑完是 `{"items":[]}`。
+- 上游：claude `https://registry.npmjs.org/@anthropic-ai/claude-code/latest` 的 `version`；codex 沿用 `/api/changelog` 那份 GitHub releases 快取，取最大的正式版（濾掉 draft／prerelease）。成功的結果快取 1 小時；失敗不快取，下一輪再試。
+- 磁碟：每台工具探測認為有裝該 kind 的主機跑一次 `<kind> --version`。`behind`＝上游比那台新（數值比較）；`has_update`＝至少一台 `behind`。
+- **抓不到上游**：`latest_version:null`、`has_update:false`、`error` 寫原因——不是「沒有新版」。`text` 是給畫面的那一句（有新版或抓不到時才有，否則 `null`）。
+- `notified_version`：上次推過通知的上游版本（`<data_dir>/upstream-update.last.json`，跨重啟保留）。
+
+```json
+{ "items": [{ "kind": "claude", "latest_version": "2.1.283", "source_url": "https://www.npmjs.com/package/@anthropic-ai/claude-code",
+  "checked_at": "2026-09-28T02:00:00.000Z", "error": null, "has_update": true, "notified_version": "2.1.283",
+  "hosts": [{ "host": "local", "installed_version": "2.1.281", "error": null, "behind": true }],
+  "text": "claude 上游有新版 2.1.283（local 磁碟上是 2.1.281）：claude 還沒下載，重啟也換不到；…" }] }
+```
+
+WS `upstream_update`：快照有變或要通知時推，`data` ＝上面一筆 item ＋ `notify`：`"update"`（這個上游版本第一次發現有主機落後；同一版只推一次，npm `latest` 退回舊版再推回來不重報）、`"error"`（從抓得到變成抓不到的那一輪；持續抓不到不重推）或 `null`（只是快照變了，例如磁碟追上了）。
+
 ## 撞限第二意見帳本 `/api/judge/shadow`（SPEC §4.3c，issue #240）
 - `GET /api/judge/shadow?limit=`（預設 200、上限 1000）→ `{enabled, projects, model, rows:[{id,at,bot_id,run_id,kind,matched_line,composer_idle,regex_verdict,jev_is_live_ui,jev_same_work,model,ms,input_tokens,error,cleared_at,assignment_id,claims_verified,asks_parent_action}]}`，新的在前。唯讀；`matched_line` 是遮罩後的；key 與 `key_file` 不回。
   `regex_verdict`：`limit_hit`（撞限第二意見，`jev_is_live_ui`＝那一行是介面畫的機率）、`stuck_queued`（卡在不認識的畫面，SPEC §4.3c；`jev_is_live_ui`＝畫面底部有框在等人的機率、`matched_line`＝畫面尾段指紋）、`report_evidence`（完成回報的證據旗標，issue #558；`assignment_id` 指回那筆交辦，`claims_verified`／`asks_parent_action` 是兩題 Noul，`jev_is_live_ui` 留空，`matched_line`＝遮罩後回報的指紋），或 `same_work`（撞題提示，#557；`jev_same_work`＝該不該先把兩件連起來的機率，`jev_is_live_ui` 為 null，`matched_line`＝這一對的 JSON，答案回來時候選交辦已經不會開始就多一個 `stale`＝那時的狀態、不推提示，`run_id`＝配對鍵）。`stuck_queued` ≥0.7 推 inbox `judge_stuck_screen`（payload `{bot_id,bot_name,kind,run_id,turn_id,waited_secs,probability,screen_tail,action}`）。`same_work` ≥0.5 推 inbox `judge_same_work`（payload `{assignment_id,parent_bot_id,probability,threshold,source,candidate_ref,candidate_title,existing_ref,existing_title,shadow,action}`），只提示不阻擋。`report_evidence` 在 `claims_verified` < 0.8 或 `asks_parent_action` ≥ 0.8 時推 inbox `judge_report_evidence`（payload `{assignment_id,bot_id,bot_name,parent_bot_id,turn_id,claims_verified,asks_parent_action,reasons,action}`，`reasons` 是 `missing_verification`／`needs_parent_action`）；歸交辦的驗收角色、不叫醒，不改交辦狀態。只問 `turn_status=completed` 的回報（`completed_fallback` 不送）。父 bot 另有一則系統訊息：「交辦 <id>（<bot 名>）的」＋`action`。

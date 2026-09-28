@@ -37,6 +37,7 @@ import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
 import { cliUpdateDone, cliUpdateProgress, reconcileCliUpdate, type CliUpdate } from './cliUpdate'
 import { gateFrame } from './frameSeen'
+import { applyUpstreamItem, loadUpstreamUpdates } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
@@ -928,6 +929,7 @@ export const useStore = create<StoreState>((set, get) => {
       return
     }
     connectSocket(set, get)
+    void loadUpstreamUpdates(() => api.rawTransport.request('GET', '/upstream-updates'), get().notify)
     void get().loadQuota()
     void get().loadMem()
     // 安全網：daemon 不重啟也可能在執行中清掉某個額度 key（例如收掉 kind 不符的身分），WS 不會說。
@@ -2994,6 +2996,10 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     }
     case 'mem_updated': {
       set({ mem: toMemSnapshot(data) })
+      return
+    }
+    case 'upstream_update': {
+      applyUpstreamItem(data, get().notify)
       return
     }
     case 'quota_updated': {

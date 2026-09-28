@@ -108,6 +108,7 @@ mod trusted_open;
 mod tui_prompts;
 mod turn_error;
 mod update_watch;
+mod upstream_update;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -512,6 +513,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     tui_prompts::spawn_survey_watcher(app.clone());
     lifecycle::spawn_stuck_turn_sweeper(app.clone());
     update_watch::spawn_update_watcher(app.clone());
+    // issue #707：claude／codex 上游有新版、磁碟上還沒有（跟上面的「重啟套用」分開）。
+    upstream_update::spawn(app.clone());
     // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
     hook_inbox::spawn_worker(app.clone());
     hookrecv::spawn_spool_scanner(app.clone());
