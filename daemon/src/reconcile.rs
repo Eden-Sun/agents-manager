@@ -3,7 +3,7 @@
 
 use crate::config::LOCAL_HOST;
 use crate::db;
-use crate::state::App;
+use crate::state::{App, AutostartHostStatus};
 use anyhow::Result;
 use serde_json::json;
 use std::collections::HashMap;
@@ -64,7 +64,7 @@ async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str) -
     }
     if !app.host_connected(host).await {
         tracing::info!(bot = %bot.name, host, "autostart skipped: host not connected");
-        return Ok(());
+        return Err(anyhow::anyhow!("host is not connected"));
     }
     // 讀不到 active run 也不能當成沒在跑。
     if db::active_run(&app.db, &bot.id).await?.is_some() {
@@ -80,10 +80,68 @@ async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str) -
         return Ok(());
     }
     tracing::info!(bot = %bot.name, host, "autostart");
-    if let Err(e) = crate::lifecycle::start_bot(app, &bot.id).await {
-        tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
+    // Keep startup independent from the reconcile/supervisor task. Aborting that task while
+    // start_bot is between inserting its `starting` run and completing setup would strand it.
+    let start_app = app.clone();
+    let bot_id = bot.id.clone();
+    match tokio::spawn(async move { crate::lifecycle::start_bot(&start_app, &bot_id).await }).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
+            if !app.host_connected(host).await {
+                return Err(anyhow::anyhow!("host disconnected while starting bot"));
+            }
+        }
+        Err(e) => return Err(e.into()),
     }
     Ok(())
+}
+
+struct AutostartClaim {
+    app: Arc<App>,
+    host: String,
+    since: String,
+    completed: bool,
+}
+
+impl AutostartClaim {
+    fn begin(app: &Arc<App>, host: &str) -> Option<Self> {
+        let mut statuses = app.autostart_hosts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if statuses.contains_key(host) {
+            return None;
+        }
+        let since = app
+            .autostart_since
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(host.to_string())
+            .or_insert_with(db::now)
+            .clone();
+        statuses.insert(host.to_string(), AutostartHostStatus::InProgress);
+        Some(Self { app: app.clone(), host: host.to_string(), since, completed: false })
+    }
+
+    fn complete(mut self) {
+        self.app
+            .autostart_hosts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.host.clone(), AutostartHostStatus::Done);
+        self.app.autostart_since.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.host);
+        self.completed = true;
+    }
+}
+
+impl Drop for AutostartClaim {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut statuses = self.app.autostart_hosts.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if statuses.get(&self.host) == Some(&AutostartHostStatus::InProgress) {
+            statuses.remove(&self.host);
+        }
+    }
 }
 
 /// 對帳做完之後才叫的 autostart 入口（§6.1 第 6 步，review 2026-09-16 core 5）。回 `true`＝這次真的跑了。
@@ -101,25 +159,29 @@ pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: b
     crate::restart_intents::recover_host(app, host).await;
     crate::delete_intents::recover_host(app, host).await;
     crate::promote_intents::recover_host(app, host).await;
-    if !app.autostarted_hosts.lock().await.insert(host.to_string()) {
+    let Some(claim) = AutostartClaim::begin(app, host) else {
         tracing::info!(host, "autostart already ran for this host in this daemon's lifetime; not restarting stopped bots");
         return false;
-    }
+    };
     // 讀不到的部分背景補到判斷完（#209）：本機不會有「下次連上」，只等重連的話 AGM 在內的 autostart bot 要到下次重啟才起。
     // 主機照樣只算跑過一次：補的只是這一次還沒判斷完的，已經判斷過（起了、或本來就在跑）的不再碰。
-    let since = db::now();
+    let since = claim.since.clone();
     let mut owed = None;
     if !autostart_pass(app, host, &mut owed, &since).await {
         let (app, host) = (app.clone(), host.to_string());
         tokio::spawn(async move {
+            let claim = claim;
             for attempt in 0.. {
                 tokio::time::sleep(recovery_retry_delay(attempt)).await;
                 if autostart_pass(&app, &host, &mut owed, &since).await {
                     tracing::info!(host = %host, "autostart caught up");
+                    claim.complete();
                     return;
                 }
             }
         });
+    } else {
+        claim.complete();
     }
     // bot 沒在跑時收下、還在等它起來的訊息（issue #122）：重啟前那次啟動可能沒做完，這裡再替它起一次。
     crate::lifecycle::start_send::resume_after_boot(app, host).await;
@@ -1393,6 +1455,55 @@ mod autostart_tests {
         assert!(super::autostart_after_reconcile(app, "m4p", true).await, "失敗那次不算數：下次連上照跑");
         assert!(!super::autostart_after_reconcile(app, "m4p", true).await, "重連不再跑");
         assert!(super::autostart_after_reconcile(app, "local", true).await, "每台主機各算各的");
+    }
+
+    #[tokio::test]
+    async fn autostart_retries_bots_skipped_while_the_host_is_disconnected() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let first = autostart_bot(&env, &env.project_id, "first").await;
+        let second = autostart_bot(&env, &env.project_id, "second").await;
+
+        app.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(super::autostart_after_reconcile(app, "local", true).await);
+        assert!(!running(app, &first).await && !running(app, &second).await);
+
+        app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(eventually_running(app, &first).await, "重連後補起第一顆");
+        assert!(eventually_running(app, &second).await, "重連後補起尚未判斷的第二顆");
+        for bot in [&first, &second] {
+            let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?")
+                .bind(bot)
+                .fetch_one(&app.db)
+                .await
+                .unwrap();
+            assert_eq!(runs, 1, "每顆只起一次");
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_an_interrupted_autostart_claim_allows_a_later_pass() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let claim = super::AutostartClaim::begin(app, "local").expect("claim absent host");
+        let since = claim.since.clone();
+        assert_eq!(
+            app.autostart_hosts.lock().unwrap().get("local"),
+            Some(&crate::state::AutostartHostStatus::InProgress)
+        );
+
+        drop(claim);
+        assert!(!app.autostart_hosts.lock().unwrap().contains_key("local"), "cancelled pass clears its claim");
+
+        let retry = super::AutostartClaim::begin(app, "local").expect("retry after cancellation");
+        assert_eq!(retry.since, since, "retry preserves the first attempt time");
+        retry.complete();
+        assert_eq!(
+            app.autostart_hosts.lock().unwrap().get("local"),
+            Some(&crate::state::AutostartHostStatus::Done)
+        );
+        assert!(!app.autostart_since.lock().unwrap().contains_key("local"), "completed pass releases its retry time");
+        assert!(super::AutostartClaim::begin(app, "local").is_none(), "completed pass runs once");
     }
 
     use crate::db;
