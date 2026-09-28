@@ -66,6 +66,9 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_AGM_STATE_FAIL="" STUB_AGM_SUPERVISOR_FAIL=""
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
   export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep" HERDR_BIN="$ROOT/bin/herdr"
+  # 預設照 macOS 走 launchd；Linux 那幾個 case 自己改（issue #677）。不設的話在 Linux 上跑這支，
+  # 前面整批 launchd 的斷言會因為 uname 換了路徑而紅。
+  export SYSTEMD_RUN_BIN="$ROOT/bin/systemd-run" AGM_OPS_PLATFORM=darwin
   export SWAP_PROBE_TRIES=2 SWAP_PROBE_BOT=bot-probe
   export HERDR_PANE_ID="w1:pA"          # 預設：pane 裡本來就有；測 current 的 case 會 unset
   export STUB_PANE_READ_OK=1 STUB_PANE_CURRENT="w1:pA" STUB_PROBE='200 {"delivery":"ok"}' 
@@ -186,8 +189,8 @@ STUB
 
   cat > "$ROOT/bin/curl" <<'STUB'
 #!/bin/bash
-# 第二次 submit 之後＝往前修那次重啟；它成不成功由 STUB_SESSION_OK_AFTER_FORWARD 決定。
-starts=$(grep -c "^submit" "$AGM_DIR/launchctl.log" 2>/dev/null || echo 0)
+# 第二次啟動（launchctl submit 或 systemd-run）之後＝往前修那次重啟；成不成功由 STUB_SESSION_OK_AFTER_FORWARD 決定。
+starts=$(wc -l < "$AGM_DIR/starts.log" 2>/dev/null | tr -d ' '); starts=${starts:-0}
 if [ "$starts" -ge 2 ]; then [ -n "$STUB_SESSION_OK_AFTER_FORWARD" ] && exit 0 || exit 7; fi
 [ -n "$STUB_SESSION_OK" ] && exit 0 || exit 7
 STUB
@@ -197,11 +200,22 @@ STUB
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/launchctl.log"
 case "$1" in
-  submit) : > "$AGM_DIR/started"
+  submit) : > "$AGM_DIR/started"; echo launchctl >> "$AGM_DIR/starts.log"
           echo "$(cat "$AGM_REPO/target/release/agents-managerd")" >> "$AGM_DIR/started-binary.log"
           echo "$STUB_UV_AFTER_START" > "$ROOT/uv" ;;
 esac
 exit 0
+STUB
+
+  # systemd-run stub（Linux，issue #677）：記下 argv 與 XDG_RUNTIME_DIR，行為同上面的 submit。
+  cat > "$ROOT/bin/systemd-run" <<'STUB'
+#!/bin/bash
+echo "$*" >> "$AGM_DIR/systemd-run.log"
+echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}" >> "$AGM_DIR/systemd-run.env"
+echo systemd-run >> "$AGM_DIR/starts.log"
+echo "$(cat "$AGM_REPO/target/release/agents-managerd")" >> "$AGM_DIR/started-binary.log"
+echo "$STUB_UV_AFTER_START" > "$ROOT/uv"
+exit "${STUB_SYSTEMD_RUN_RC:-0}"
 STUB
 
   cat > "$ROOT/bin/pgrep" <<'STUB'
@@ -236,6 +250,7 @@ esac
 STUB
   chmod +x "$ROOT/bin/"*
   : > "$AGM_DIR/calls.log"; : > "$AGM_DIR/launchctl.log"; : > "$AGM_DIR/herdr.log"; : > "$AGM_DIR/probe.log"
+  : > "$AGM_DIR/systemd-run.log"; : > "$AGM_DIR/starts.log"
 }
 
 teardown() { rm -rf "$ROOT"; }
@@ -704,6 +719,38 @@ rc=$(run)
 check_eq "舊 child 無明確 successor 退役證據仍回滾（rc=7）" "7" "$rc"
 check "DB 還原前記下的新收編 child 在回滾後有警示" "WARN: rollback restored the DB but these newly adopted children may still have live panes: new-kid (id-new-kid)" "$SWAP_LOG"
 check_eq "binary 照常還原" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+# 36. Linux（issue #677）：重啟改走 `systemd-run --user` 的 transient unit，不叫 launchctl。
+#     Type=forking（啟動器 fork 後父行程結束，daemon 才是 main PID）與 KillMode=process
+#     （systemd 看 cgroup，setsid 脫離不了；只殺 main PID 才跟 macOS 一樣）缺一不可。
+setup 10 10
+export AGM_OPS_PLATFORM=linux
+rc=$(run)
+check_eq "Linux 上順利換版 rc=0" "0" "$rc"
+check "Linux 走 systemd-run --user 的 transient unit" "^--user --collect --unit=am-daemon-swap-[0-9]*-1 -p Type=forking -p KillMode=process -- /" "$AGM_DIR/systemd-run.log"
+check "啟動器用絕對路徑（transient unit 的 cwd 是 HOME）" " $HERE/daemon-start.py $AGM_REPO $DAEMON_LOG\$" "$AGM_DIR/systemd-run.log"
+check_eq "Linux 上完全沒叫 launchctl" "" "$(cat "$AGM_DIR/launchctl.log")"
+check "有換上新 binary" "new-binary" "$AGM_DIR/started-binary.log"
+teardown
+
+# 37. Linux 往前修：第二次啟動用新的 unit 名（上一顆可能還沒被 --collect 收掉，同名會撞）。
+setup 11 10
+export AGM_OPS_PLATFORM=linux STUB_SUPERVISOR=stopped
+rc=$(run)
+check_eq "Linux 往前修 rc=6" "6" "$rc"
+check "第一次啟動 unit -1" "--unit=am-daemon-swap-[0-9]*-1 " "$AGM_DIR/systemd-run.log"
+check "往前修那次換成 unit -2" "--unit=am-daemon-swap-[0-9]*-2 " "$AGM_DIR/systemd-run.log"
+teardown
+
+# 38. Linux 沒有 XDG_RUNTIME_DIR（不是從登入 session 叫起來）：補成 /run/user/<uid>，systemd-run 才連得到 user bus；
+#     systemd-run 失敗要留 log，交給後面的 /api/session 驗證判斷（這裡驗證也失敗 → 回滾）。
+setup 10 10
+export AGM_OPS_PLATFORM=linux STUB_SYSTEMD_RUN_RC=1 STUB_SESSION_OK=""
+rc=$( unset XDG_RUNTIME_DIR; run )
+check "沒有 XDG_RUNTIME_DIR 時補成 /run/user/<uid>" "^XDG_RUNTIME_DIR=/run/user/$(id -u)\$" "$AGM_DIR/systemd-run.env"
+check "systemd-run 失敗有留 log" "WARN: systemd-run rc=1" "$SWAP_LOG"
+check_eq "起不來就照舊回滾（rc=7）" "7" "$rc"
 teardown
 
 echo "$PASS passed, $FAIL failed"
