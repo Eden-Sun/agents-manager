@@ -23,6 +23,7 @@ use crate::db;
 use crate::config::{valid_id, ID_RE};
 use crate::hosts::{sh_quote, HostConn};
 use crate::state::App;
+use crate::trusted_open;
 
 /// Retina screenshot fits; an ssh push stays sub-second.
 pub const MAX_BYTES: usize = 12 * 1024 * 1024;
@@ -311,12 +312,47 @@ pub fn deliver_text(text: &str, items: &[Attachment]) -> String {
 
 /// `GET /api/attachments/:id`
 pub async fn read(app: &Arc<App>, id: &str) -> Result<(String, Vec<u8>)> {
-    let row = sqlx::query_as::<_, (String, String)>("SELECT mime, local_path FROM attachments WHERE id = ? AND state = 'ready'")
+    let row = sqlx::query_as::<_, (String, String, String)>("SELECT mime, local_path, bot_id FROM attachments WHERE id = ? AND state = 'ready'")
         .bind(id)
         .fetch_optional(&app.db)
         .await?;
-    let Some((mime, path)) = row else { bail!("unknown attachment") };
-    let data = std::fs::read(&path).with_context(|| format!("read {path}"))?;
+    let Some((mime, path, bot_id)) = row else { bail!("unknown attachment") };
+    let bot = db::bot(&app.db, &bot_id).await?.ok_or_else(|| anyhow::anyhow!("unknown attachment"))?;
+    let project = db::project(&app.db, &bot.project_id).await?.ok_or_else(|| anyhow::anyhow!("unknown attachment"))?;
+
+    // `local_path` is daemon-written, but the local project itself is writable by the bot.
+    // Never reopen that pathname directly: a bot can replace the attachment with a symlink
+    // between any separate validation and read. Open the expected attachment subtree with
+    // O_NOFOLLOW and read the returned fd instead.
+    let path = Path::new(&path);
+    let (root, prefix, owner_uid): (PathBuf, Vec<std::ffi::OsString>, Option<u32>) = if project.host == crate::config::LOCAL_HOST {
+        (
+            PathBuf::from(&project.path),
+            [".agents-manager", "attachments"].into_iter().map(std::ffi::OsString::from).collect(),
+            None,
+        )
+    } else {
+        use std::os::unix::fs::MetadataExt as _;
+        let owner = std::fs::metadata(&app.data_dir)?.uid();
+        (
+            app.data_dir.clone(),
+            [std::ffi::OsString::from("attachments"), std::ffi::OsString::from(&bot_id)].into_iter().collect(),
+            Some(owner),
+        )
+    };
+    let relative = path.strip_prefix(&root).with_context(|| format!("attachment path is outside its root: {}", path.display()))?;
+    let components = trusted_open::safe_relative_components(relative)
+        .ok_or_else(|| anyhow::anyhow!("attachment path is not a safe relative path"))?
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect::<Vec<_>>();
+    if components.len() != prefix.len() + 1 || !components.iter().take(prefix.len()).zip(&prefix).all(|(got, want)| got == want) {
+        bail!("attachment path is outside its attachment directory");
+    }
+    let refs = components.iter().map(std::ffi::OsString::as_os_str).collect::<Vec<_>>();
+    let mut file = trusted_open::open_bound_file(&root, &refs, owner_uid).with_context(|| format!("open attachment {}", path.display()))?;
+    let mut data = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut data).with_context(|| format!("read attachment {}", path.display()))?;
     Ok((mime, data))
 }
 
@@ -383,6 +419,24 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         let (mime, data) = read(&env.app, &a.id).await.unwrap();
         assert_eq!((mime.as_str(), data.as_slice()), ("image/png", &b"pngbytes"[..]));
+    }
+
+    #[tokio::test]
+    async fn read_does_not_follow_a_symlinked_local_attachment() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let a = save(&env.app, &bot.id, "secret.png", "image/png", b"user attachment").await.unwrap();
+        let local_path: String = sqlx::query_scalar("SELECT local_path FROM attachments WHERE id = ?")
+            .bind(&a.id)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        let secret = env.dir.join("host-secret");
+        std::fs::write(&secret, b"host secret").unwrap();
+        std::fs::remove_file(&local_path).unwrap();
+        std::os::unix::fs::symlink(&secret, &local_path).unwrap();
+
+        assert!(read(&env.app, &a.id).await.is_err(), "the attachment API must not follow a project symlink outside the attachment directory");
     }
 
     /// issue #88：寫檔失敗（這裡用「父目錄其實是個檔案」逼 `create_dir_all` 失敗，不靠平台權限假設）

@@ -7,7 +7,18 @@ use crate::state::App;
 use anyhow::Result;
 use serde_json::json;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
+
+const AUTOSTART_MAX_ATTEMPTS: usize = 3;
+
+fn autostart_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(match attempt {
+        1 => 100,
+        _ => 200,
+    })
+}
 
 #[allow(dead_code)]
 pub async fn reconcile(app: &Arc<App>) -> Result<()> {
@@ -31,6 +42,17 @@ pub async fn reconcile(app: &Arc<App>) -> Result<()> {
 ///
 /// 一定要在對帳**之後**才叫：否則會把 herdr 上還活著、只是 DB 還沒認回來的那顆再開一次。
 pub async fn autostart_connected(app: &Arc<App>, only_host: Option<&str>) {
+    let start = |app: Arc<App>, bot_id: String| async move {
+        crate::lifecycle::start_bot_locked_with(&app, &bot_id, Default::default()).await
+    };
+    autostart_connected_with(app, only_host, &start).await;
+}
+
+async fn autostart_connected_with<F, Fut>(app: &Arc<App>, only_host: Option<&str>, start: &F)
+where
+    F: Fn(Arc<App>, String) -> Fut,
+    Fut: Future<Output = crate::lifecycle::LcResult<String>>,
+{
     for bot in db::live_bots(&app.db).await.unwrap_or_default() {
         if bot.autostart != 1 {
             continue;
@@ -46,9 +68,36 @@ pub async fn autostart_connected(app: &Arc<App>, only_host: Option<&str>) {
         if db::active_run(&app.db, &bot.id).await.ok().flatten().is_some() {
             continue;
         }
-        tracing::info!(bot = %bot.name, host, "autostart");
-        if let Err(e) = crate::lifecycle::start_bot(app, &bot.id).await {
-            tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
+
+        // Keep the bot lock through retries. A user stop/start cannot interleave between a
+        // failed attempt and its retry, while the active-run check below still protects against
+        // an ambiguous start result that actually created a run.
+        let lock = app.bot_lock(&bot.id).await;
+        let _guard = lock.lock().await;
+        for attempt in 1..=AUTOSTART_MAX_ATTEMPTS {
+            if db::active_run(&app.db, &bot.id).await.ok().flatten().is_some() {
+                break;
+            }
+            tracing::info!(bot = %bot.name, host, attempt, "autostart");
+            match start(app.clone(), bot.id.clone()).await {
+                Ok(_) => break,
+                Err(e @ crate::lifecycle::LcError::Upstream(_)) if attempt < AUTOSTART_MAX_ATTEMPTS => {
+                    let delay = autostart_retry_delay(attempt);
+                    tracing::warn!(
+                        bot = %bot.name,
+                        host,
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        error = ?e,
+                        "autostart failed; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => {
+                    tracing::error!(bot = %bot.name, host, attempt, error = ?e, "autostart failed");
+                    break;
+                }
+            }
         }
     }
 }
@@ -59,6 +108,17 @@ pub async fn autostart_connected(app: &Arc<App>, only_host: Option<&str>) {
 /// - **每台主機在這顆 daemon 的一生只跑一次**：遠端 ssh 斷線重連會再走一次「連上」，而 `stop` 不會改 `autostart`——
 ///   使用者停掉的 autostart bot 在筆電睡醒重連後被重開、開始吃額度，本機同樣設定的卻不會。對帳失敗不算數，下次連上再試。
 pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: bool) -> bool {
+    let start = |app: Arc<App>, bot_id: String| async move {
+        crate::lifecycle::start_bot_locked_with(&app, &bot_id, Default::default()).await
+    };
+    autostart_after_reconcile_with(app, host, reconciled, &start).await
+}
+
+async fn autostart_after_reconcile_with<F, Fut>(app: &Arc<App>, host: &str, reconciled: bool, start: &F) -> bool
+where
+    F: Fn(Arc<App>, String) -> Fut,
+    Fut: Future<Output = crate::lifecycle::LcResult<String>>,
+{
     if !reconciled {
         tracing::warn!(host, "autostart skipped: reconcile did not succeed; will retry on the next successful connect");
         return false;
@@ -67,7 +127,7 @@ pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: b
         tracing::info!(host, "autostart already ran for this host in this daemon's lifetime; not restarting stopped bots");
         return false;
     }
-    autostart_connected(app, Some(host)).await;
+    autostart_connected_with(app, Some(host), start).await;
     true
 }
 
@@ -824,6 +884,9 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
 
 #[cfg(test)]
 mod autostart_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     /// review 2026-09-16 core 5：遠端每次重連都走一次「連上」分支。使用者停掉的 autostart bot（`stop` 不改 `autostart`）
     /// 不能在筆電睡醒重連後被重開；對帳失敗的那一次也不能跑（不知道哪些 agent 其實還活著）。
     #[tokio::test]
@@ -834,6 +897,60 @@ mod autostart_tests {
         assert!(super::autostart_after_reconcile(app, "m4p", true).await, "失敗那次不算數：下次連上照跑");
         assert!(!super::autostart_after_reconcile(app, "m4p", true).await, "重連不再跑");
         assert!(super::autostart_after_reconcile(app, "local", true).await, "每台主機各算各的");
+    }
+
+    #[tokio::test]
+    async fn autostart_retries_a_transient_start_failure_without_reentering_the_host_gate() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot_id = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,?,'claude','[]',1,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind("retry-me")
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let start = {
+            let attempts = attempts.clone();
+            move |app: Arc<crate::state::App>, bot_id: String| {
+                let attempts = attempts.clone();
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return Err(crate::lifecycle::LcError::Upstream("temporary Herdr failure".into()));
+                    }
+                    sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, started_at) VALUES (?,?,'running','idle',?)")
+                        .bind(crate::db::ulid())
+                        .bind(&bot_id)
+                        .bind(crate::db::now())
+                        .execute(&app.db)
+                        .await
+                        .unwrap();
+                    Ok("run".into())
+                }
+            }
+        };
+
+        assert!(super::autostart_after_reconcile_with(&app, crate::config::LOCAL_HOST, true, &start).await);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "temporary failure should be retried once");
+        assert!(crate::db::active_run(&app.db, &bot_id).await.unwrap().is_some());
+
+        assert!(!super::autostart_after_reconcile_with(&app, crate::config::LOCAL_HOST, true, &start).await);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "once-only host gate must block re-entry");
+        let active_runs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM runs WHERE bot_id=? AND state IN ('starting','running','stopping')",
+        )
+        .bind(&bot_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(active_runs, 1, "retry must not duplicate active runs");
     }
 }
 

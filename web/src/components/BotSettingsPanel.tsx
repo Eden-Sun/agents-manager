@@ -607,20 +607,24 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
         </button>
       </div>
 
-      {/* `/login` 會讓 Bot 在登完前不能工作，按下去之前講清楚。 */}
+      {/* Claude 用獨立 CLI shell 登入，不佔用 bot 的回合。 */}
       <ConfirmDialog
         open={loginOpen}
-        title="送出登入指令？"
+        title={bot.kind === 'claude' && bot.identity ? '開啟 Claude CLI 登入？' : '送出登入指令？'}
         body={
-          <>
-            會對 <strong>{bot.name}</strong> 的 agent 送 <code>/login</code>。它的畫面會切到登入流程，通常會開瀏覽器要你在那邊完成登入。
-            <br />
-            <strong>在你完成登入之前，這個 Bot 不能工作</strong>——這期間送給它的訊息會卡住。
-            <br />
-            登入完成後回到這裡按「重新偵測」，身份狀態才會更新。
-          </>
+          bot.kind === 'claude' && bot.identity ? (
+            <>會在獨立終端替 <strong>{bot.identity}</strong> 執行 <code>claude auth login</code>。完成瀏覽器授權後按「重新偵測」，原 Bot 的終端不會被登入流程佔住。</>
+          ) : (
+            <>
+              會對 <strong>{bot.name}</strong> 的 agent 送 <code>/login</code>。它的畫面會切到登入流程，通常會開瀏覽器要你在那邊完成登入。
+              <br />
+              <strong>在你完成登入之前，這個 Bot 不能工作</strong>——這期間送給它的訊息會卡住。
+              <br />
+              登入完成後回到這裡按「重新偵測」，身份狀態才會更新。
+            </>
+          )
         }
-        confirmLabel="送出 /login"
+        confirmLabel={bot.kind === 'claude' && bot.identity ? '開啟 CLI 登入' : '送出 /login'}
         width={400}
         onCancel={() => setLoginOpen(false)}
         onConfirm={() => {
@@ -628,7 +632,9 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           void loginBot(botId).then((ok) => {
             if (!ok) return
             setLoginSent(true)
-            notify('info', `已送出 /login 給 ${bot.name}，請到它的畫面完成登入`)
+            notify('info', bot.kind === 'claude' && bot.identity
+              ? `已開啟 ${bot.identity} 的 CLI 登入，請在新終端完成授權`
+              : `已送出 /login 給 ${bot.name}，請到它的畫面完成登入`)
           })
         }}
       />

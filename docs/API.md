@@ -178,6 +178,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 ```
 
 - `relay_from` 省略 = **使用者自己打的**。其他來源一定要帶：另一顆 bot 帶它的 `bot_id`，launchd 腳本與 daemon 的自動通知帶 `"daemon"`。不是存在中的 bot 也不是 `daemon` → 400。
+  帶 bot id 時，呼叫者還必須在 `X-AM-Bot-Token` 帶該 bot 自己的 `hook_token`；缺少或不相符 → 403。這避免只有 UI `X-AM-Token` 的本機呼叫者冒充另一顆 bot。
   寫入 `messages.relay_from`，UI 據此畫「誰 → 誰」。
 - `client_request_id` 可省（daemon 補），建議自帶：同 id 重送回同一個 `turn_id`（即使已有新 Turn 在飛）。
 
@@ -691,7 +692,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 - WS `identities_changed {}` → 重拉 state；bot 的 identity/env 變更沿用 `bot_changed`。
 
 ### `POST /api/hosts/{name}/identities/{identity}/login`
-在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude /login` / `codex login` / `grok login`。env 只送進該 pane，不寫 daemon log 或事件。
+在該主機開**臨時 host-shell pane**，以該身份展開後的 env 執行 `claude auth login` / `codex login` / `grok login`。env 只送進該 pane，不寫 daemon log 或事件。
 回應是主機 shell 的 pane 物件；UI 從它的 terminal 顯示 device code / URL。登入指令結束後 daemon 重新探測該身份並關 pane。
 
 | 狀況 | 回應 |
@@ -701,7 +702,7 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 | host 不存在 / 未連線 / pane 建立失敗 | 404 / 502 |
 
 ### `POST /api/hosts/{name}/identities/{identity}/logout`
-同一條路、同一組 env，只是指令換成 `claude /logout` / `codex logout` / `grok logout`（回應與錯誤與 login 相同）。
+同一條路、同一組 env，只是指令換成 `claude auth logout` / `codex logout` / `grok logout`（回應與錯誤與 login 相同）。
 env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR` 會登出**別的**帳號。
 清掉的是該身份設定目錄裡的憑證：正在跑的 bot 不受影響，之後重新啟動會停在登入畫面。
 
@@ -1355,6 +1356,11 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 `kind ∈ instruction | report | note | verified | round | paused | resumed | cancelled | delivered | completed`。
 `relay_from`：`null` = 使用者本人（只有 `instruction`），bot id = 那顆 bot，`"daemon"` = daemon 自己記的。
 
+所有接受 `relay_from` 的 mission POST（`events`／`question`／`answer`／`revise`／`complete`／`deliver`）都先驗證來源：
+`relay_from` 是 bot id 時，呼叫者必須在 `X-AM-Bot-Token` 帶**該 bot 自己的** `hook_token`；缺少或不相符一律 403，
+而且不會寫事件、任務或 AGM inbox。`relay_from: "daemon"` 保留 daemon 既有語意；daemon 專用 credential migration 另行處理，
+所以 daemon-owned code 應走內部 lifecycle path，不把這個公開 HTTP 入口當成 daemon 身分驗證。
+
 ### 端點
 
 | 方法 | 路徑 | 說明 |
@@ -1362,7 +1368,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | POST | `/api/projects/{id}/missions` | `{text, client_request_id?, delivery_mode, executor_kind, on_5h_limit, max_rounds?(0..=10，預設 2)}` → 任務＋`created`。同一個 `client_request_id` 回同一筆（`created:false`）。建立時記一則 `instruction` 事件，並往 AGM inbox 放一則 `mission_created`（event_key `mission:<id>:created`，payload 含 `mission_id/project_id/project/cwd/text` 與三個選項）；任務列、`instruction` 與 inbox 是**同一個交易**。重送（`created:false`）也補推一次 `mission_created`（同一個 event_key，已經有就不多一筆），寫一半的舊列靠它補回通知。遠端專案回 400 `{"error":"remote_not_supported","host":…}`。 |
 | GET | `/api/projects/{id}/missions?status=all\|open\|done\|cancelled&limit=` | `{project_id, missions:[…]}`，新的在前。**已完成任務清單＝`status=done`，不含已取消的**；取消的另用 `status=cancelled` 取（UI 若要一起顯示須分開標示，不能混進「已完成」）。 |
 | GET | `/api/missions/{id}` | 任務＋`events[]`＋`revisions[]`（這筆成果的續作，新的在前）＋`parent`（自己是誰的續作；來源被刪掉時是 `{id, missing:true}`）。 |
-| POST | `/api/missions/{id}/events` | `{kind: "report"\|"note"\|"verified", text, relay_from?, payload?, worktree?, sha?}` → 事件。`relay_from` 規則同 `POST /api/bots/{id}/prompt`（不存在的值 400）。**交付前必須有一則 `verified`**，而且 `verified` 要說驗的是哪個 commit：`worktree`（本專案 repo 的工作樹，daemon 讀它的 HEAD）或 `sha`（可縮寫，必須是本專案 repo 裡的 commit），兩個都給時必須一致；daemon 把完整 sha 寫進 `payload.sha`。都沒給、工作樹不是本專案的 repo、sha 找不到 → 400。 |
+| POST | `/api/missions/{id}/events` | `{kind: "report"\|"note"\|"verified", text, relay_from?, payload?, worktree?, sha?}` → 事件。`relay_from` 的 bot-token 規則見上（不存在的值 400）。**交付前必須有一則 `verified`**，而且 `verified` 要說驗的是哪個 commit：`worktree`（本專案 repo 的工作樹，daemon 讀它的 HEAD）或 `sha`（可縮寫，必須是本專案 repo 裡的 commit），兩個都給時必須一致；daemon 把完整 sha 寫進 `payload.sha`。都沒給、工作樹不是本專案的 repo、sha 找不到 → 400。 |
 | POST | `/api/missions/{id}/pause` | `{reason, detail?}` → 任務。`reason` **必填**（機器碼；缺了是 422，handler 不會跑）。任務列、`paused` 事件與叫醒協調者的 `mission_paused`（event_key `mission:<id>:paused:<event id>`，payload 含 `reason`／`detail`／`open_assignments[]`）是**同一個交易**；由收 mission 事件的那個 AGM 角色自己呼叫（bot token 驗過）時不推 inbox——自己叫醒自己只是多一個空回合。暫停**不**中止進行中的回合、不取消交辦，但 `deliver` 會 409（見下）。 |
 | POST | `/api/missions/{id}/resume` | → 任務（清掉 `paused_reason`）。 |
 | POST | `/api/missions/{id}/cancel` | → 任務，多 `temp_bots`（見 complete）與 `assignments[]`（被收掉的交辦：`{id, role, status, target_bot_id, turn_id, cancelled, revoked_turn_id?, may_still_be_running?}`）。任務列、`cancelled` 事件與 `mission_cancelled`（event_key `mission:<id>:cancelled:<event id>`；AGM 自己取消時不推）同一個交易；接著把底下**還開著的交辦**逐件走 `review --decision cancel`（排隊中的 turn 撤回、`quota_blocked` 不再被 controller 自動重送），最後才收臨時 bot。已經在跑的回合 daemon 不會中止，`may_still_be_running` 照實講。 |

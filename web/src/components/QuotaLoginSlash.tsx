@@ -5,7 +5,7 @@ import { canLoginInSession, cliLoginCommand, findLoginTargetId, identityEnv } fr
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { ConfirmDialog } from './ConfirmDialog'
 
-/** 額度 popover「未登入」列的登入鈕（claude / grok）：`/login` 送進同 host、kind、身份且在跑的 bot（`findLoginTarget`）。 */
+/** 額度 popover「未登入」列的登入鈕。Claude 用獨立 CLI shell，避免卡住原本的 bot。 */
 export function QuotaLoginSlash({
   kind,
   host,
@@ -29,6 +29,8 @@ export function QuotaLoginSlash({
   const [loginSent, setLoginSent] = useState(false)
   const shellCommand = useStore((s) => cliLoginCommand(kind, identityEnv(s, host, kind, identity)))
 
+  // Claude 的 auth fail 不能再把 /login 送回原 pane：它可能正卡在失敗狀態。
+  if (kind === 'claude') return <QuotaLoginShell host={host} hostLabel={hostLabel} kind={kind} command={shellCommand} />
   // codex 沒有 `/login`，走 `QuotaLogin-codex`；這裡擋一下免得被誤用時給出壞按鈕。
   if (!canLoginInSession(kind)) return null
   // 沒有在跑的 Bot 就走 codex 那條路：開主機 shell 跑 `<cli> login`，登的是同一個身份。

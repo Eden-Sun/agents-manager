@@ -340,6 +340,15 @@ fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]")
 }
 
+/// Compare authentication tokens without returning early on the first differing byte.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 async fn auth(State(app): State<Arc<App>>, req: axum::extract::Request, next: Next) -> Response {
     let headers = req.headers().clone();
     if !origin_is_local(&headers, app.port, app.allow_lan) {
@@ -2347,7 +2356,17 @@ async fn prompt_bot(
         None => None,
         Some(crate::agent_relay::DAEMON_SENDER) => Some(crate::agent_relay::DAEMON_SENDER.to_string()),
         Some(from) => match db::bot(&app.db, from).await.map_err(any_err)? {
-            Some(b) if b.deleted_at.is_none() => Some(b.id),
+            Some(b) if b.deleted_at.is_none() => {
+                let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+                if token.is_empty() || !ct_eq(token, &b.hook_token) {
+                    return Err(LcError::Forbidden(json!({
+                        "error": "forbidden",
+                        "reason": "relay_from_token_required",
+                        "message": "relay_from requires the matching X-AM-Bot-Token",
+                    })));
+                }
+                Some(b.id)
+            }
             _ => return Err(LcError::Bad(format!("relay_from must be a live bot id or `{}`", crate::agent_relay::DAEMON_SENDER))),
         },
     };
@@ -3393,7 +3412,11 @@ mod prompt_route_tests {
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
         let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false };
-        let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
+        call_with(e, bot, HeaderMap::new(), body).await
+    }
+
+    async fn call_with(e: &crate::testing::Env, bot: &str, headers: HeaderMap, body: PromptIn) -> (StatusCode, Value) {
+        let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), headers, Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
         };
@@ -3431,6 +3454,65 @@ mod prompt_route_tests {
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns").fetch_one(&e.app.db).await.unwrap();
         assert_eq!(turns, 0);
     }
+
+    /// `X-AM-Token` authenticates the API caller, not the bot named by `relay_from`.
+    /// A relay must also prove possession of that bot's hook token, while a valid bot relay
+    /// keeps the existing source attribution.
+    #[tokio::test]
+    async fn a_relay_from_bot_requires_that_bots_hook_token() {
+        let e = crate::testing::env().await;
+        let target = typed_bot(&e, "grok").await;
+        let source = crate::testing::claude_bot(&e.app, &e.project_id, "relay-source").await;
+        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?")
+            .bind("source-token")
+            .bind(&source.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        e.herdr.live_pane("pane-route", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+
+        let body = PromptIn {
+            text: "from source".into(),
+            client_request_id: Some("relay-auth-1".into()),
+            attachments: vec![],
+            relay_from: Some(source.id.clone()),
+            ack: false,
+            reply_to: None,
+            send_now: false,
+        };
+        let (status, body) = call_with(&e, &target, HeaderMap::new(), body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["reason"], "relay_from_token_required");
+        let forged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE content = ?")
+            .bind("from source")
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(forged, 0, "an unauthenticated relay must not reach the prompt path");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-AM-Bot-Token", "source-token".parse().unwrap());
+        let body = PromptIn {
+            text: "from source".into(),
+            client_request_id: Some("relay-auth-2".into()),
+            attachments: vec![],
+            relay_from: Some(source.id.clone()),
+            ack: false,
+            reply_to: None,
+            send_now: false,
+        };
+        let (status, response) = call_with(&e, &target, headers, body).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let attributed: Option<String> = sqlx::query_scalar(
+            "SELECT m.relay_from FROM messages m JOIN turns t ON t.id = m.turn_id WHERE t.client_request_id = ?",
+        )
+        .bind("relay-auth-2")
+        .fetch_optional(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(attributed.as_deref(), Some(source.id.as_str()));
+    }
+
 }
 
 #[cfg(test)]

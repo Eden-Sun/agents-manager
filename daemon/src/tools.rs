@@ -308,7 +308,7 @@ pub const CLAUDE_LOGIN_ARGS: &[&str] = &["auth", "status", "--json"];
 /// the UI. Identity env is quoted as shell data; never logged or persisted by this path.
 pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Option<String> {
     let login = match kind {
-        "claude" => "claude /login",
+        "claude" => "claude auth login",
         "codex" => "codex login",
         "grok" => "grok login",
         _ => return None,
@@ -316,12 +316,11 @@ pub fn identity_login_command(kind: &str, env: &BTreeMap<String, String>) -> Opt
     Some(with_identity_env(login, env))
 }
 
-/// 登出，跟 [`identity_login_command`] 對稱：claude 沒有 `logout` 子命令，用 REPL 的斜線指令
-/// （`/login` 也是這樣帶），codex／grok 有自己的子命令。帳號的認證資料在那個身份的設定目錄裡，
+/// 登出，跟 [`identity_login_command`] 對稱。帳號的認證資料在那個身份的設定目錄裡，
 /// 所以環境變數前綴跟登入完全一樣——少帶一個就會去登出**別的**帳號。
 pub fn identity_logout_command(kind: &str, env: &BTreeMap<String, String>) -> Option<String> {
     let logout = match kind {
-        "claude" => "claude /logout",
+        "claude" => "claude auth logout",
         "codex" => "codex logout",
         "grok" => "grok logout",
         _ => return None,
@@ -1235,7 +1234,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         let mut env = BTreeMap::new();
         env.insert("CLAUDE_CONFIG_DIR".into(), "/tmp/cc one".into());
         env.insert("bad name".into(), "must not be emitted".into());
-        assert_eq!(identity_login_command("claude", &env).as_deref(), Some("env CLAUDE_CONFIG_DIR='/tmp/cc one' claude /login"));
+        assert_eq!(identity_login_command("claude", &env).as_deref(), Some("env CLAUDE_CONFIG_DIR='/tmp/cc one' claude auth login"));
         assert_eq!(identity_login_command("codex", &BTreeMap::new()).as_deref(), Some("codex login"));
         assert_eq!(identity_login_command("grok", &BTreeMap::new()).as_deref(), Some("grok login"));
         assert!(identity_login_command("other", &BTreeMap::new()).is_none());
@@ -1269,7 +1268,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     fn identity_logout_commands_carry_the_same_config_dir() {
         let mut env = BTreeMap::new();
         env.insert("CLAUDE_CONFIG_DIR".to_string(), "/tmp/cc one".to_string());
-        assert_eq!(identity_logout_command("claude", &env).as_deref(), Some("env CLAUDE_CONFIG_DIR='/tmp/cc one' claude /logout"));
+        assert_eq!(identity_logout_command("claude", &env).as_deref(), Some("env CLAUDE_CONFIG_DIR='/tmp/cc one' claude auth logout"));
         assert_eq!(identity_logout_command("codex", &BTreeMap::new()).as_deref(), Some("codex logout"));
         assert_eq!(identity_logout_command("grok", &BTreeMap::new()).as_deref(), Some("grok logout"));
         assert!(identity_logout_command("other", &BTreeMap::new()).is_none());
