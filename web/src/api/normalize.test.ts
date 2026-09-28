@@ -38,3 +38,20 @@ test('cli_updates 同一個三態：在就是清單（可能空），不在是 u
   assert.deepEqual(toState({ cli_updates: [{ update_id: 'u1', host: 'local', kind: 'codex' }] }).cli_updates, [{ update_id: 'u1', host: 'local' }])
   assert.equal(toState({}).cli_updates, undefined)
 })
+
+test('#699：同名但不同 host 的 identities 都保留', () => {
+  const identities = toState({
+    identities: [
+      { name: 'cc1', kind: 'claude', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-1' } },
+      { name: 'cc1', kind: 'claude', host: 'm4p', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-work' } },
+    ],
+  }).identities
+
+  assert.deepEqual(
+    identities.map(({ name, host, env }) => ({ name, host, env })),
+    [
+      { name: 'cc1', host: null, env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-1' } },
+      { name: 'cc1', host: 'm4p', env: { CLAUDE_CONFIG_DIR: '$HOME/.claude-work' } },
+    ],
+  )
+})

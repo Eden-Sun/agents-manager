@@ -3103,6 +3103,7 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 - 合併只有一條 `tools::merge_identities()`（`identities_for_host` 與偵測登入的 `detect_identities` 共用），同名時前面的贏：
   ① config 裡**明寫這一台**的；② 本機：沒寫 host 的 config 身分；③ 那台自己的 shell `ccN`；④ 遠端：沒寫 host 的 config 身分——名字是 `ccN` 時要等那台的 alias 偵測過才給。
 - **`[[identities]]` 有 host 維度**（AGM 裁示 2026-09-16）：鍵是 `(host, name)`；`host` 省略＝**本機優先、遠端讓位給那台同名的身分**；只要本機就寫 `host = "local"`。
+  Web 解析 `/api/state` 時也以 `(host, name)` 去重；同名的本機與遠端身分都保留為不同列，供列表、選擇與刪除使用。
   以前沒有這一欄，一個全域設定會靜默遮蔽掉每一台機器上同名的 `ccN`：使用者寫一筆 `cc1` 想固定本機的帳號，m4p 上所有選 `cc1` 的 bot 就被注入一個那台根本不存在的設定目錄，
   claude 以未登入狀態開一個空的設定目錄，額度探測也去問那個空目錄——UI 上兩者名字一模一樣，沒有任何地方會提示它們不是同一個帳號（review 2026-09-16）。
   **現行 config.toml（不寫 host）在本機的行為一個字都沒變**，有測試釘住；在遠端它不再蓋掉那台的 `ccN`。

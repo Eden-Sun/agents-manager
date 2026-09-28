@@ -65,6 +65,7 @@ import {
   hostOfQuotaKey,
   TOOL_UNKNOWN,
 } from './types.ts'
+import { identityRowKey } from '../store/identityRows'
 
 type Rec = Record<string, unknown>
 
@@ -548,7 +549,7 @@ export function toState(raw: unknown): AppState {
 
   for (const i of arr(pick(root, 'identities'))) {
     const ident = toIdentity(i)
-    if (ident && !identities.some((x) => x.name === ident.name)) identities.push(ident)
+    if (ident && !identities.some((x) => identityRowKey(x) === identityRowKey(ident))) identities.push(ident)
   }
 
   for (const p of arr(pick(root, 'projects'))) {
