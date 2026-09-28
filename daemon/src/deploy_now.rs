@@ -8,12 +8,14 @@
 //!    有沒有會進 binary 的差異（路徑同 kick 的 `build-inputs`），以及現在有沒有部署在跑。
 //! 2. `POST /api/deploy/now`：開一筆 `requester=daemon-update-kick` 的 rebuild 核准並**以使用者的名義核准**
 //!    （這一下就是使用者的裁示，不再等 AGM），寫 `supervisor/AGM/daemon-update.now.json`，再
-//!    `launchctl kickstart` 同一個 launchd job。kick 看到這個檔就略過觸發閘，其餘安全條件照舊
+//!    `launchctl kickstart` 同一個 launchd job（Linux 是 `systemctl --user start --no-block` 同一個
+//!    systemd unit，issue #677）。kick 看到這個檔就略過觸發閘，其餘安全條件照舊
 //!    （乾淨 HEAD worktree、整樹測試、沒人 working 才換、租約、`.bak`、驗證失敗回滾）。
 //!
-//! 為什麼走 launchd 而不是 daemon 自己 fork 一支 kick：kick 的 `AGM_BUILD_BOT`、`PATH` 只寫在 plist 的
-//! `EnvironmentVariables`，daemon 這邊拿不到；而且 launchd 保證同一個 job 同時只有一個，跟排程那一輪
-//! 不會疊。kick 正在跑的那一刻 kickstart 不會再起一個，請求檔留著，下一輪（最多 5 分鐘）就吃到。
+//! 為什麼走排程器而不是 daemon 自己 fork 一支 kick：kick 的 `AGM_BUILD_BOT`、`PATH` 只寫在 plist 的
+//! `EnvironmentVariables`（unit 的 `Environment=`），daemon 這邊拿不到；而且 launchd／systemd 都保證同一個
+//! job 同時只有一個，跟排程那一輪不會疊。kick 正在跑的那一刻 kickstart／start 不會再起一個，請求檔留著，
+//! 下一輪（最多 5 分鐘）就吃到。
 use crate::lifecycle::LcError;
 use crate::state::App;
 use crate::supervisor::store;
@@ -36,6 +38,8 @@ pub const REQUEST_FILE: &str = "daemon-update.now.json";
 pub const LOG_FILE: &str = "daemon-update.log";
 pub const KICK_SCRIPT: &str = "bin/daemon-update-kick.sh";
 pub const LAUNCHD_LABEL: &str = "com.agm.daemon-update";
+/// Linux 上同一個 job 的 systemd user unit（`scripts/ops/systemd/`，issue #677）。
+pub const SYSTEMD_UNIT: &str = "com.agm.daemon-update.service";
 /// kick 派出的更新交辦都用這個前綴（`agm-daemon-update-<sha>`，立即模式多一段 `-now-<核准>`）。
 pub const ASSIGNMENT_PREFIX: &str = "agm-daemon-update-";
 /// 確認框最多列幾個 commit；落後更多時只列最新的這幾個，總數照實寫。
@@ -46,25 +50,60 @@ const APPROVAL_TTL_SECS: i64 = 21600;
 const FETCH_EVERY: Duration = Duration::from_secs(300);
 const GIT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// 使用者按下之後由誰把 kick 叫起來。正式是 `launchctl kickstart`；測試換成假的，不碰 launchd。
+/// 使用者按下之後由誰把 kick 叫起來。正式是 [`SchedulerKick::for_this_host`]；測試換成假的，不碰 launchd／systemd。
 pub trait KickLauncher: Send + Sync {
     fn kick(&self) -> Result<(), String>;
 }
 
-pub struct Launchctl;
+/// 叫排程器「現在跑一輪」的那一條指令：macOS `launchctl kickstart`，Linux `systemctl --user start`（issue #677）。
+pub struct SchedulerKick {
+    program: String,
+    args: Vec<String>,
+    env: Vec<(&'static str, String)>,
+}
 
-impl KickLauncher for Launchctl {
-    fn kick(&self) -> Result<(), String> {
+impl SchedulerKick {
+    pub fn for_this_host() -> Self {
         // SAFETY: getuid 沒有前置條件，也不會失敗。
         let uid = unsafe { libc::getuid() };
-        let target = format!("gui/{uid}/{LAUNCHD_LABEL}");
-        // 不帶 -k：正在跑的那一輪不能被砍掉（它可能正拿著租約派工）；沒在跑就起一輪。
-        let out = std::process::Command::new("launchctl").args(["kickstart", &target]).output().map_err(|e| e.to_string())?;
+        if cfg!(target_os = "linux") {
+            Self::systemd(uid, std::env::var_os("XDG_RUNTIME_DIR").is_some())
+        } else {
+            Self::launchd(uid)
+        }
+    }
+
+    /// 不帶 -k：正在跑的那一輪不能被砍掉（它可能正拿著租約派工）；沒在跑就起一輪。
+    fn launchd(uid: u32) -> Self {
+        SchedulerKick { program: "launchctl".into(), args: vec!["kickstart".into(), format!("gui/{uid}/{LAUNCHD_LABEL}")], env: Vec::new() }
+    }
+
+    /// `--no-block`：oneshot unit 的 start 會一路等到 kick 跑完（可能好幾分鐘），這一下只要排進去就好。
+    /// 正在跑的那一輪不受影響：start job 併進正在進行的那一個，不會再起一個（同 kickstart 不帶 -k）。
+    /// daemon 不是從登入 session 起的（沒有 pam_systemd）就沒有 `XDG_RUNTIME_DIR`，`systemctl --user`
+    /// 連不到 user bus，所以補上 `/run/user/<uid>`。
+    fn systemd(uid: u32, has_runtime_dir: bool) -> Self {
+        let env = if has_runtime_dir { Vec::new() } else { vec![("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))] };
+        SchedulerKick {
+            program: "systemctl".into(),
+            args: ["--user", "start", "--no-block", SYSTEMD_UNIT].map(String::from).to_vec(),
+            env,
+        }
+    }
+}
+
+impl KickLauncher for SchedulerKick {
+    fn kick(&self) -> Result<(), String> {
+        let out = std::process::Command::new(&self.program)
+            .args(&self.args)
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .output()
+            .map_err(|e| format!("{}: {e}", self.program))?;
         if out.status.success() {
             Ok(())
         } else {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            Err(if err.is_empty() { format!("launchctl kickstart {target} rc={:?}", out.status.code()) } else { err })
+            Err(if err.is_empty() { format!("{} {} rc={:?}", self.program, self.args.join(" "), out.status.code()) } else { err })
         }
     }
 }
@@ -328,7 +367,7 @@ pub fn refuse_bot_caller(headers: &HeaderMap) -> Result<(), LcError> {
 pub async fn post_now(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<Json<NowIn>>) -> Result<Json<Value>, LcError> {
     refuse_bot_caller(&headers)?;
     let b = body.map(|Json(b)| b).unwrap_or_default();
-    Ok(Json(start(&app, &Ctx::of(&app), b.sha.as_deref(), &Launchctl).await?))
+    Ok(Json(start(&app, &Ctx::of(&app), b.sha.as_deref(), &SchedulerKick::for_this_host()).await?))
 }
 
 pub async fn start(app: &Arc<App>, ctx: &Ctx, sha: Option<&str>, launcher: &dyn KickLauncher) -> Result<Value, LcError> {
@@ -691,6 +730,88 @@ mod tests {
         assert!(store::approvals(&f.env.app.db, 100).await.unwrap().is_empty());
         assert!(!f.ctx.agm_dir.join(REQUEST_FILE).exists());
         assert_eq!(kick.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// 寫一支假的排程器指令並確定它已經可以被 exec：並行的測試 fork 時會短暫繼承寫入 fd，
+    /// 這段時間 exec 回 ETXTBSY（issue #189）——探測 exec 一次，還被擋就重試，等的是條件不是時間。
+    fn write_exec(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, format!("#!/bin/sh\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{body}")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        loop {
+            match std::process::Command::new(path).env("AM_TEST_EXEC_PROBE", "1").output() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && started.elapsed() < Duration::from_secs(30) => {
+                    std::thread::sleep(Duration::from_millis(2))
+                }
+                r => {
+                    assert!(r.unwrap().status.success());
+                    return;
+                }
+            }
+        }
+    }
+
+    struct Tmp(PathBuf);
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn tmp() -> Tmp {
+        let d = std::env::temp_dir().join(format!("am-deploy-kick-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&d).unwrap();
+        Tmp(d)
+    }
+
+    /// 假 `systemctl`：把 argv 與它看到的 `XDG_RUNTIME_DIR` 記下來，照 `rc` 離開（issue #677）。
+    fn fake_systemctl(dir: &Path, rc: i32, stderr: &str) -> (SchedulerKick, PathBuf) {
+        let log = dir.join("systemctl.log");
+        let bin = dir.join("systemctl");
+        write_exec(&bin, &format!(
+            "printf '%s\\n' \"$*\" \"XDG_RUNTIME_DIR=${{XDG_RUNTIME_DIR:-}}\" >> '{}'\nprintf '%s' '{stderr}' >&2\nexit {rc}\n",
+            log.display()
+        ));
+        let mut k = SchedulerKick::systemd(4242, false);
+        k.program = bin.to_string_lossy().into_owned();
+        (k, log)
+    }
+
+    #[test]
+    fn linux_kick_starts_the_systemd_user_unit_without_blocking() {
+        let dir = tmp();
+        let (k, log) = fake_systemctl(&dir.0, 0, "");
+        k.kick().unwrap();
+        // --no-block：oneshot 的 start 預設會等 kick 整輪跑完，UI 那一下會卡住好幾分鐘。
+        // 沒有 XDG_RUNTIME_DIR 時要補 /run/user/<uid>，否則 systemctl --user 連不到 user bus。
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "--user start --no-block com.agm.daemon-update.service\nXDG_RUNTIME_DIR=/run/user/4242\n"
+        );
+    }
+
+    #[test]
+    fn linux_kick_keeps_an_existing_runtime_dir_and_reports_systemctl_errors() {
+        let dir = tmp();
+        let (mut k, log) = fake_systemctl(&dir.0, 5, "Unit com.agm.daemon-update.service not found.");
+        k.env = SchedulerKick::systemd(4242, true).env;
+        assert_eq!(k.kick().unwrap_err(), "Unit com.agm.daemon-update.service not found.");
+        // 已經有值就不蓋：假 systemctl 看到的是繼承下來的原值（本機沒設就是空的，遠端編譯主機上有）。
+        let inherited = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+        assert!(std::fs::read_to_string(&log).unwrap().ends_with(&format!("XDG_RUNTIME_DIR={inherited}\n")));
+        let (k, _) = fake_systemctl(&dir.0, 5, "");
+        let err = k.kick().unwrap_err();
+        assert!(err.ends_with("systemctl --user start --no-block com.agm.daemon-update.service rc=Some(5)"), "{err}");
+    }
+
+    #[test]
+    fn each_host_kicks_its_own_scheduler() {
+        // 只看組出來的指令，不真的執行 launchctl（destructive-canary 的規則）。
+        let mac = SchedulerKick::launchd(501);
+        assert_eq!((mac.program.as_str(), mac.args.as_slice()), ("launchctl", ["kickstart".to_string(), "gui/501/com.agm.daemon-update".into()].as_slice()));
+        assert!(mac.env.is_empty());
+        let want = if cfg!(target_os = "linux") { "systemctl" } else { "launchctl" };
+        assert_eq!(SchedulerKick::for_this_host().program, want);
     }
 
     #[test]

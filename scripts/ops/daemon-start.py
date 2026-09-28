@@ -4,6 +4,10 @@
 job 就算結束、`launchctl remove` 不會殺到 daemon。直接在 pane 裡 setsid 起會繼承 pane 的
 nice（忙的時候是 5），而非 root 降不回 0——2026-09-20 那顆 daemon 就是這樣變成 nice 5 的。
 
+Linux 上改由 `systemd-run --user -p Type=forking -p KillMode=process` 執行（issue #677，見
+daemon-swap.sh 的 start()）：systemd 看的是 cgroup 不是程序群，setsid 脫離不了，所以不靠
+這裡的 fork 脫身，而是讓 systemd 把 fork 出來的 daemon 認成 main PID。
+
     python3 daemon-start.py <repo dir> <daemon log>
 """
 
