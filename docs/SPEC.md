@@ -3014,6 +3014,7 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 ### 14.5 UI
 - 額度條吃一個 `host`：bot 對話用該 bot 專案的 host、群組用 Project 的，都沒選是本機。
 - 遠端時條最左掛主機名牌（`.quota-host`），本機不掛；桌機標題列擠的時候名牌先收（標題列左邊已有 `@host`，UI-DECISIONS〈額度〉）；tooltip 以主機名開頭，popover 標題「本機額度」/「m4p 的額度」。
+- popover 的帳號列可點列內空白處切換暫時停用；按鈕等控制項保留自身操作。登入確認框以 portal 顯示，點確認框內容不會切換背後的帳號列。
 - 側欄 bot 的 critical 警告讀該 bot 所在主機的列。
 - 兩個 daemon 管同一台遠端會搶同一條 ssh master（`hosts::short_dir()` 只用 uid 命名），測試 daemon 要先停掉另一個。
 
