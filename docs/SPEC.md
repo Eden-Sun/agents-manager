@@ -3020,7 +3020,7 @@ claude 的預設強度來自**帳號的 `settings.json`**：
 
 ## 18. 總管（AGM）運維規範
 
-AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同一份規則的執行期投影（§18.11），launchd 腳本是實作；不一致時**以實際腳本行為為準**，再把本節改對。
+AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同一份規則的執行期投影（§18.11），launchd（Linux 主機是 systemd，§18.2e）腳本是實作；不一致時**以實際腳本行為為準**，再把本節改對。
 
 ### 18.1 開發用 dev server（5173）
 
@@ -3064,9 +3064,9 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - 動 migration 的版本：上線前對正式 DB 的副本跑一次 migrate，重建申請附 DB 備份步驟。
 - **立即部署**（使用者 2026-09-25：「agm排以外，要我可以在左上角直接點立即部署」）：網頁左上角在線上 binary 落後 origin/main **且有程式碼差異**
   （`build-inputs` 路徑，docs-only 不算）時出現「⇪ 部署 N」。按下去先開確認框（`live..target` 的 commit、此刻 working 的 bot），確認後 `POST /api/deploy/now`（API.md）。
-  **這一下就是使用者的裁示**：daemon 開一筆 `requester=daemon-update-kick` 的 rebuild 核准並以 `user(立即部署)` 核准，寫 `daemon-update.now.json`，`launchctl kickstart` 同一個 `com.agm.daemon-update` job——
+  **這一下就是使用者的裁示**：daemon 開一筆 `requester=daemon-update-kick` 的 rebuild 核准並以 `user(立即部署)` 核准，寫 `daemon-update.now.json`，`launchctl kickstart` 同一個 `com.agm.daemon-update` job（Linux 是 `systemctl --user start --no-block com.agm.daemon-update.service`，§18.2e）——
   依 #556 使用者裁示，這裡不做真人證明：持有共用 UI token 視為使用者，接受本機／`allow_lan` 取得 token 的風險（原話「沒關系lan開放」，[裁示留言](https://github.com/Eden-Sun/agents-manager/issues/556#issuecomment-5833272486)）。有效 Bot principal 回 403 `ui_only`；缺值、錯值、只帶一半或跟 `X-AM-Token` 混帶的 Bot 標頭在 `/api` 中介層就回 401（#556），不可退回使用者權限；兩者都沒帶才按此政策視為 UI 使用者。
-  **不另寫一套 build＋swap**，也不 fork 自己的 kick（`AGM_BUILD_BOT`／`PATH` 只在 plist 裡；launchd 保證同一個 job 不會疊）。
+  **不另寫一套 build＋swap**，也不 fork 自己的 kick（`AGM_BUILD_BOT`／`PATH` 只在 plist／unit 裡；launchd／systemd 都保證同一個 job 不會疊）。
   kick 讀到請求檔就走立即模式，只略過三道排程閘：觸發條件（整點／門檻／等太久）、「同 commit 已派過」、等 AGM 裁示 rebuild。**其餘照舊**：建置 child 要在、上一筆 `agm-daemon-update-*` 要結案、
   `lease safety`／`acquire` 的沒人 working（等太久的縮小封鎖面照 §18.10 從核准時間起算）、派工正文的固定條件 1～6（乾淨 HEAD worktree、整樹測試、`.bak`、驗證失敗回滾，§18.13）、`daemon-swap.sh`。
   建的是確認框上那顆（daemon 驗過是 origin/main 的祖先，且線上版本是它的祖先或同一顆；否則回 409 `target_older_than_live` 並提供原因）。kick 在派工前也檢查已建入正式 binary 的版本；`daemon-swap.sh` 先驗 `--old` 是 target 的祖先，再取得 restart 窗口後重驗正式 binary 的 hash，避免等待時被另一趟換版。任一處無法證明不是降版就中止。派工 request id `agm-daemon-update-<sha>-now-<核准>`（同一顆先前派過沒上線也能再派）。
@@ -3099,6 +3099,25 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - **不必等開機也換得掉**（issue #532）：`POST /api/supervisor/cli` 就地跑同一支 `refresh`（只動 `bin/agm`）；
   `agm ops-sync --check --refresh-cli` 偵測到安裝端落後時就叫它，換完重問一次。開機是唯一觸發點的時候，
   「安裝端落後」只能靠重啟 daemon 修，而重啟要另外申請核准——一個換檔案就好的問題被綁在整條換版流程上。
+
+### 18.2e Linux 主機的排程：systemd user unit（issue #677）
+
+AG Man 搬到 Linux 主機（#675）後，`com.agm.*` 例行 job 由 systemd user manager 排程，行為與 launchd 版相同：
+
+- **來源**：`scripts/ops/systemd/com.agm.<名字>.service`（`Type=oneshot`，跑同一支安裝好的 kick）＋`.timer`，
+  安裝到 `~/.config/systemd/user/`，`systemctl --user enable --now <名字>.timer`，並 `loginctl enable-linger`（沒登入也要跑）。
+  對應：`StartInterval N` → `OnUnitActiveSec=Ns`，第一次 `OnActiveSec=Ns`（`RunAtLoad` 則 `1s`）；log 落在 `supervisor/AGM/<名字>.systemd.log`；
+  `EnvironmentVariables` → `Environment=`（同名變數）。`scripts/agm_test.py` 的 `SystemdParityTest` 逐支比對 plist 與 unit。
+- **cgroup**：systemd 收 unit 時殺整個 cgroup，不是程序群。kick 自己 detached 拉起的長駐行程（`dev-server` 的 vite）要 `KillMode=process` 才活得過 kick 結束。
+- **browser-gc 在 Linux 不裝**：它喚醒的 child 操作 ego-browser（圖形介面），Linux 主機沒有桌面。對照表把它的 kick、task 與 plist 標成 `darwin`，systemd 那組沒有它（§18.4 只在 macOS 成立）。
+- **對照表依平台選組**：`install-manifest.tsv` 可選第三欄 `darwin`／`linux`；`agm ops-sync --check` 只比這台平台的列，另一邊的放進 `skipped`。
+  排程列必須標對（`LaunchAgents/…`＝`darwin`、`systemd/…`＝`linux`），否則 `bad_manifest`。Linux 上掃 `~/.config/systemd/user/com.agm.*` 找沒版控的 unit（`extra`），
+  unit 比 parse 過的「段.鍵 → 值」，註解與空白不算，只忽略 `Environment=` 的值。
+- **立即部署**：`deploy_now` 在 Linux 叫 `systemctl --user start --no-block com.agm.daemon-update.service`（oneshot 的 start 預設會等 kick 跑完；
+  正在跑的那一輪不受影響、也不會疊一輪），macOS 照舊 `launchctl kickstart gui/<uid>/com.agm.daemon-update`（不帶 `-k`）。沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`。
+- **換版重啟**：`daemon-swap.sh` 在 Linux 用 `systemd-run --user --collect --unit=am-daemon-swap-<pid>-<第幾次> -p Type=forking -p KillMode=process`
+  跑 `daemon-start.py`（`launchctl submit` 的對應，transient unit 不必另外裝檔）：`Type=forking` 讓 daemon 成為 main PID，`KillMode=process`
+  讓 daemon 停下時不連帶殺掉它起的子行程（同 macOS）。unit 名每次不同，往前修／回滾時不會撞上還沒回收的上一顆。
 
 ### 18.2b herdr 升級流程：偵測與交辦（issue #66）
 

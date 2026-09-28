@@ -1,0 +1,11 @@
+# 來源檔（issue #677）：改這裡再照 scripts/ops/README.md install 到 ~/.config/systemd/user/。
+# 對應 macOS 的 scripts/ops/launchd/com.agm.ci-watch.plist，排程與指令兩邊要一致（agm_test.py 釘住）。
+[Unit]
+Description=AGM ci-watch：盯 CI、紅了開 issue 派工（唯讀）
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/bin/bash %h/.config/agents-manager/supervisor/AGM/bin/ci-watch-kick.sh
+StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/ci-watch.systemd.log
+StandardError=append:%h/.config/agents-manager/supervisor/AGM/ci-watch.systemd.log

@@ -1,0 +1,13 @@
+# 來源檔（issue #677）；launchd 的 StartInterval 600。
+# OnActiveSec＝timer 啟動後第一次（launchd 的 StartInterval 也是載入後隔一個間隔才第一次），
+# OnUnitActiveSec＝之後每次都從上一次啟動起算；上一輪還在跑就不會疊一個（同 launchd）。
+[Unit]
+Description=AGM ci-watch 排程（每 600 秒）
+
+[Timer]
+OnActiveSec=600s
+OnUnitActiveSec=600s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
