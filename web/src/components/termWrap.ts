@@ -1,8 +1,7 @@
 import { useSyncExternalStore } from 'react'
-import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 
 /**
- * 終端快照要不要折行：桌機不折（會弄爛 TUI 框線），手機折（mobile-rwd-round2-2026-09-08 問題 1）；使用者選擇優先。
+ * 終端快照要不要折行：預設折（2026-09-28 使用者：桌機也折；以前桌機預設不折，怕弄亂 TUI 框線）；使用者選擇優先。
  * 三個終端面板共用，所以狀態放 module scope。
  */
 const KEY = 'am.term.wrap'
@@ -39,13 +38,12 @@ export function setTermWrap(on: boolean): void {
   for (const fn of subs) fn()
 }
 
-/** 現在該不該折行：使用者設過就聽他的，沒設過就手機折、桌機不折。 */
+/** 現在該不該折行：使用者設過就聽他的，沒設過就折。 */
 export function useTermWrap(): boolean {
   const p = useSyncExternalStore(
     subscribe,
     () => pref,
     () => null,
   )
-  const phone = useMediaQuery(PHONE_QUERY)
-  return p === null ? phone : p === 'wrap'
+  return p !== 'nowrap'
 }
