@@ -95,15 +95,15 @@ pub(crate) fn extract_pane_ids(payload: &Value) -> Vec<String> {
     pane_ids
 }
 
-/// Record (or replace) which bot's own tool call just produced `pane_id`. One row per pane —
-/// `pane_id` is unique within a herdr session, and a pane can only ever be legitimately created
-/// once, so a later insert for the same id is either a retry (harmless overwrite) or that id being
-/// recycled for a new pane later (the newer claim is the one that is actually true now).
+/// Record (or replace) which bot's own tool call just produced `pane_id`. Pane IDs are only unique
+/// within a host, so a later insert for the same `(host, pane_id)` is either a retry (harmless
+/// overwrite) or that id being recycled for a new pane later (the newer claim is the one that is
+/// actually true now). An identical ID on another host is a separate hint.
 pub(crate) async fn record(app: &Arc<App>, bot_id: &str, pane_id: &str) -> anyhow::Result<()> {
     let host = db::bot_host(&app.db, bot_id).await?;
     sqlx::query(
         "INSERT INTO spawn_hints (pane_id, host, bot_id, created_at) VALUES (?,?,?,?)
-         ON CONFLICT(pane_id) DO UPDATE SET host=excluded.host, bot_id=excluded.bot_id, created_at=excluded.created_at",
+         ON CONFLICT(host, pane_id) DO UPDATE SET bot_id=excluded.bot_id, created_at=excluded.created_at",
     )
     .bind(pane_id)
     .bind(&host)
@@ -127,9 +127,13 @@ pub(crate) async fn for_host(app: &Arc<App>, host: &str) -> anyhow::Result<HashM
 }
 
 /// A hint that actually decided an adoption is spent — not required for correctness (the pane's
-/// agent is `claimed` either way, so nothing looks at this pane's hint again), just hygiene.
-pub(crate) async fn consume(app: &Arc<App>, pane_id: &str) {
-    let _ = sqlx::query("DELETE FROM spawn_hints WHERE pane_id = ?").bind(pane_id).execute(&app.db).await;
+/// agent is `claimed` either way, so nothing looks at this host's hint again), just hygiene.
+pub(crate) async fn consume(app: &Arc<App>, host: &str, pane_id: &str) {
+    let _ = sqlx::query("DELETE FROM spawn_hints WHERE host = ? AND pane_id = ?")
+        .bind(host)
+        .bind(pane_id)
+        .execute(&app.db)
+        .await;
 }
 
 /// Hints nobody ever consumed (the spawn failed, or reconcile never got to it in time). Run once
@@ -243,8 +247,37 @@ mod tests {
         assert_eq!(hints.get("w1:p2"), Some(&bot.id));
         assert!(for_host(&env.app, "some-other-host").await.unwrap().is_empty(), "scoped by host");
 
-        consume(&env.app, "w1:p2").await;
+        consume(&env.app, crate::config::LOCAL_HOST, "w1:p2").await;
         assert!(for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap().is_empty());
+    }
+
+    /// issue #635: pane IDs are only unique within a host, and consuming one host's hint must not
+    /// erase another host's hint with the same ID.
+    #[tokio::test]
+    async fn the_same_pane_id_on_two_hosts_is_isolated_when_consumed() {
+        let env = crate::testing::env().await;
+        let local = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let remote_project_id = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(&remote_project_id)
+            .bind(env.repo.to_string_lossy().to_string())
+            .bind("remote-project")
+            .bind("remote-host")
+            .bind(db::now())
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let remote = crate::testing::claude_bot(&env.app, &remote_project_id, "bravo").await;
+
+        record(&env.app, &local.id, "w1:p2").await.unwrap();
+        record(&env.app, &remote.id, "w1:p2").await.unwrap();
+
+        assert_eq!(for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap().get("w1:p2"), Some(&local.id));
+        assert_eq!(for_host(&env.app, "remote-host").await.unwrap().get("w1:p2"), Some(&remote.id));
+
+        consume(&env.app, crate::config::LOCAL_HOST, "w1:p2").await;
+        assert!(for_host(&env.app, crate::config::LOCAL_HOST).await.unwrap().is_empty());
+        assert_eq!(for_host(&env.app, "remote-host").await.unwrap().get("w1:p2"), Some(&remote.id));
     }
 
     /// Same pane id recorded twice (a retried Bash call, or the id recycled later): the row is
