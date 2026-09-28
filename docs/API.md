@@ -1989,7 +1989,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   **沒帶 `supersedes` 時 daemon 自己找**（issue #421）：同一個 `requester`、同一個 `purpose`、而且還 `pending` 的最新那一筆，直接取代掉（回應的 `superseded` 會帶它的 id）。
   kick 記住舊 id 的狀態檔掉了就不會帶 `--supersedes`，以前每輪開一筆新的 pending——2026-09-23 累積了四筆，AGM 被叫醒四次講同一件事。
   **只自動取代 `pending`**：`approved` 是人做過的裁示，不會因為排程又跑一輪就消失（要動它得明講 `supersedes`）。自動挑到的那筆對不上（剛被裁示、剛過期）只是不取代，不會讓申請失敗。
-  **Bot principal 帶自己的 bot id 與 token 時，`requester` 只能是自己**（bot id、bot 名或 herdr agent 名都認，`maintenance.rs` 那套解析）：填別人 → `403 {"reason":"requester_not_the_caller"}`，什麼都不寫。有效 User principal 不帶 Bot 身分照收，只是那筆記成 `requester_unverified:true`；無效或混用的 Bot／service 身分在全域中介層回 401（issue #415、#556）。
+  **Bot principal 帶自己的 bot id 與 token 時，`requester` 只能是自己**（bot id 或全域唯一的 bot／herdr agent 名）：填別人或名字有歧義 → `403 {"reason":"requester_not_the_caller"}`，什麼都不寫；跨專案同名時改用 bot id。有效 User principal 不帶 Bot 身分照收，只是那筆記成 `requester_unverified:true`；無效或混用的 Bot／service 身分在全域中介層回 401（issue #415、#556）。
   daemon **不會改寫** `requester`：它之後要跟 `lease acquire` 的 `owner` 逐字相等（下面的 `approval_owner_mismatch`），改寫等於讓申請人開不了自己的窗口。
   `supersedes=<舊的 approval id>`：**同一個 requester、同一個 purpose** 換 commit 重新申請。舊的還是 `pending`／`approved` 而且沒過期時，同一個 transaction 裡標 `superseded`、
   它還沒送出的 `approval_requested` 一起收掉（`acked_by:"daemon"`），新的 `wait_since` 接過舊的等待起點（舊的已核准＝它的 `min(wait_since, decided_at)`）；
@@ -2004,7 +2004,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `deny`／`revoke` 不要求角色，只有 UI token 也收（人在一般 shell 裡還能叫停）。
   **不能核准自己送出的申請**（issue #436）：`requester` 解析出來就是這個呼叫端那顆 bot 時，`approve` 回 `403 {"reason":"self_approval_forbidden"}`，那筆不動。`deny`／`revoke` 不擋——把自己的申請收回本來就該讓他做。
   **不看那筆申請驗過沒**：只要呼叫端驗得過、而且 `requester` 指的就是它，照擋——否則守衛等於被約束者自己選配（申請時不帶 `X-AM-Bot-Id`、裁示時才帶，就整段跳過）。解析不到 bot 的 `requester`（`daemon-update-kick` 的 `agm-kick`）不受影響。
-  查不出申請人是誰時（DB 讀取失敗）回 `503 {"reason":"requester_lookup_failed","retryable":true,"sent":false}`，**不放行**：這裡的「解析不到」等於通過，所以不能把讀取失敗吞成「不是它」。
+  查不出申請人是誰時（DB 讀取失敗或名字對到多顆 bot）回 `503 {"reason":"requester_lookup_failed","retryable":true,"sent":false}`，**不放行**：這裡的「解析不到」等於通過，所以不能把讀取失敗或歧義吞成「不是它」。
   `decided_by` **不看 body**（issue #414）：驗過角色的是 `AGM:patrol`／`AGM:responder`，其餘一律 `user`，body 的 `actor` 只當未驗證的備註包成 `user(<自稱>)`（取前 64 字）。
   **第一個裁示定案**：`approve`／`deny` 只從 `pending` 條件寫入；`revoke` 從 `approved` 或 `pending`。寫不進去 → 409
   `{reason:"already_decided"|"decided_concurrently",status,decided_by,allowed_from}`，什麼都沒寫（後到的 deny 不會把 approved 改掉）。

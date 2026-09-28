@@ -2173,7 +2173,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("op", choices=["request", "decide", "list"])
     s.add_argument("approval_id", nargs="?", help="decide 的目標")
     s.add_argument("--id", help="list：只查這一筆（清單只回最新 100 筆，舊的要用這個查）")
-    s.add_argument("--requester", help="request：申請者（bot id 或名字）")
+    s.add_argument("--requester", help="request：申請者（bot id、腳本名或唯一 bot／agent 名；名稱有歧義時拒絕）")
     s.add_argument("--purpose", choices=["rebuild", "restart"], help="request：要做什麼")
     s.add_argument("--scope", help="request：會動到什麼")
     s.add_argument("--commit", help="request：針對哪個 commit（之後 acquire 要對得上）")
