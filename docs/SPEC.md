@@ -1711,6 +1711,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    **mission 端點**（`events`／`question`／`answer`／`revise`／`complete`／`deliver`）的 `relay_from` 共用同一段 token 比對（#409，`relay_auth::authenticate_mission`），
    差在兩格：沒帶 token 直接 403 `relay_from_token_required`（沒有相容期——唯一帶 `relay_from` 的呼叫端 `bin/agm` 在角色自己的 pane 裡一律帶 token，web 從不帶）；
    `relay_from:"daemon"` 只給驗證過的 AGM 角色 bot（`X-AM-Bot-Id`＋`X-AM-Bot-Token`，`agm mission … --as-daemon`），其他一律 403 `relay_from_reserved`。
+   evidence 搜尋也回傳訊息實際的 `relay_from` 與 `relay_unverified`：對 `role=user` 訊息，`relay_from:null` 且 `relay_unverified:false` 表示 daemon 記錄為使用者直接輸入，`relay_unverified:true` 是相容期未驗證的來源自稱。舊 daemon 缺少這兩欄時，`agm search` 保留為 `null`／`null`（來源未知），不可把缺欄位轉成空字串。
 
 ### 6.5e shell／服務 pane 的歸屬與生命週期（2026-09-16 使用者交辦；AGM 2026-09-16 review 通過，實作另行派工）
 

@@ -493,6 +493,18 @@ class SlimTest(unittest.TestCase):
         self.assertEqual(m["source"], "terminal_fallback")
         self.assertTrue(m["incomplete"])
 
+    def test_message_without_relay_metadata_keeps_source_unknown(self):
+        m = agm.slim_message({"id": "m1", "role": "user", "content": "交辦"})
+        self.assertIsNone(m["relay_from"])
+        self.assertIsNone(m["relay_unverified"])
+
+    def test_message_preserves_relay_metadata(self):
+        m = agm.slim_message(
+            {"id": "m1", "role": "user", "relay_from": "manager", "relay_unverified": True}
+        )
+        self.assertEqual(m["relay_from"], "manager")
+        self.assertTrue(m["relay_unverified"])
+
 
 # -------------------------------------------------------------------- 子命令
 
@@ -533,6 +545,8 @@ class SearchCommandTest(CliCase):
         out = self.ok("search", "登入", "--project", "p1")
         self.assertEqual(out["source"], "evidence")
         self.assertEqual(out["messages"][0]["turn_id"], "t1")
+        self.assertIsNone(out["messages"][0]["relay_from"])
+        self.assertIsNone(out["messages"][0]["relay_unverified"])
         self.assertEqual(out["next_cursor"], "m1")
         path = [r["path"] for r in FakeDaemon.seen if "evidence" in r["path"]][0]
         self.assertIn("project_id=p1", path)

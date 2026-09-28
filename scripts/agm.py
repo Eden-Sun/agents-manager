@@ -538,7 +538,9 @@ def slim_message(m: object) -> dict:
         "source": _s(m.get("source")),
         "incomplete": bool(m.get("incomplete")),
         "truncated": bool(m.get("truncated")),
-        "relay_from": _s(m.get("relay_from")),
+        # 舊 daemon 的 evidence 端點沒有這個欄位；未知來源不能偽裝成使用者訊息。
+        "relay_from": _s(m.get("relay_from")) if m.get("relay_from") is not None else None,
+        "relay_unverified": bool(m.get("relay_unverified")) if "relay_unverified" in m else None,
         "content": _s(m.get("content") or m.get("text")),
         "created_at": _s(m.get("created_at") or m.get("ts")),
     }
