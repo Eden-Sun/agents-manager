@@ -346,6 +346,48 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual(counts(c), before)
         self.assertEqual(digest(self.cfg), cfg0)
 
+    def test_config_with_daemon_empty_projects_array(self):
+        # daemon 在專案清單為空時寫的是頂層 `projects = []`；直接 append `[[projects]]` 是 duplicate key（智選hub 實測）。
+        put(self.cfg, "projects = []\n\n[server]\nlisten = \"127.0.0.1:7788\"\n\n[[hosts]]\nname = \"m4p\"\nssh = \"m4p\"\n\n[panes]\nidle_close_secs = 600\n")
+        self.export()
+        cfg0 = digest(self.cfg)
+        self.assertEqual(json.loads(self.imp("--dry-run").stdout)["config"], "would append")
+        self.assertEqual(digest(self.cfg), cfg0)
+        self.imp()
+        text = slurp(self.cfg, "r")
+        cfg = tomllib.loads(text)
+        self.assertEqual([p["id"] for p in cfg["projects"]], [PID])
+        self.assertNotIn("projects = []", text)
+        self.assertEqual((cfg["server"], cfg["panes"], [h["name"] for h in cfg["hosts"]]),
+                         ({"listen": "127.0.0.1:7788"}, {"idle_close_secs": 600}, ["m4p"]))
+        self.assertEqual(json.loads(self.imp().stdout)["config"], "already present")
+        self.assertEqual(slurp(self.cfg, "r"), text)
+
+    def test_refuses_config_whose_projects_cannot_take_an_append(self):
+        hosts = '\n[[hosts]]\nname = "m4p"\nssh = "m4p"\n'
+        cases = {
+            # inline 陣列：append `[[projects]]` 直接 duplicate key，解析不了。
+            "inline": 'projects = [{ id = "01TARGETPROJ00000000000R01", path = "/home/u/r", label = "r" }]\n' + hosts,
+            # 解析得過但內容變了：多行字串裡剛好有一行 `projects = []`，刪掉它會改到別的值。
+            "in-string": 'note = """\nprojects = []\n"""\n' + hosts,
+        }
+        self.export()
+        c = self.tgt()
+        before = counts(c)
+        c.close()
+        for case, text in cases.items():
+            put(self.cfg, text)
+            cfg0 = digest(self.cfg)
+            for extra in (("--dry-run",), ()):
+                p = self.imp(*extra, check=False)
+                self.assertNotEqual(p.returncode, 0, (case, extra))
+                self.assertIn("手動處理", p.stderr, case)
+                self.assertIn("已回滾", p.stderr, case)
+            self.assertEqual(digest(self.cfg), cfg0, case)
+        c = self.tgt()
+        self.assertEqual(counts(c), before)
+        self.assertEqual([f for f in os.listdir(self.tgt_dir) if "pre-transfer" in f and "config" in f], [])
+
     def add_legacy_team_columns(self, team_id):
         # 已移除的 Team 功能留在舊 DB 的欄位（db.rs：`teams`／`team_*` may exist; nothing reads them）。
         s = sqlite3.connect(self.src_path)

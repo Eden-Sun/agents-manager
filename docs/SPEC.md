@@ -2628,6 +2628,9 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 對 B 資料目錄的 `daemon.lock` 拿 flock（跟 daemon 同一把；拿不到＝daemon 還在跑，什麼都不動，拿著的期間 daemon 也起不來）→
 B 的 DB 與 config.toml 各備份一份（`*.pre-transfer-<時間>`）→ 一個交易裡插列、外鍵檢查 → 原子寫 config.toml → COMMIT
 （config 寫不進去就回滾 DB，COMMIT 失敗就還原 config）。
+config 是在原文後面追加 `[[projects]]` 區塊，不整份重寫（標準庫沒有 TOML writer，也保住使用者的排版）；daemon 在專案清單為空時寫的是頂層
+`projects = []`，追加前先拿掉那一行，否則 duplicate key 會讓 daemon 起不來。組好的文字先用 `tomllib` 解析，必須**正好等於「原本的 config 多一個專案」**
+才寫（dry-run 也驗），寫完再重讀比一次，不符就還原 config、回滾 DB；`projects` 是別種寫法（inline 陣列等）一律拒絕、請人手動處理。
 
 **搬什麼**：`projects` 一列、該專案活著的 `bots`（`deleted_at IS NULL`，含 child；**已軟刪的 bot 與它的一切都不帶**）、它們的 `conversations`／`runs`／`turns`／`messages`／`attachments`／`bot_reads`，
 照來源的 rowid 順序插（`last_native_session` 挑最後一個 run 的第二鍵是 rowid，#461）；附件位元組一起打包（來源讀不到的列在 `missing_files`）。
