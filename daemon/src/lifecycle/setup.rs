@@ -364,7 +364,7 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
     let statusline = shell_join(&[p.hook_sh.clone(), "statusline".into(), bot.id.clone(), REMOTE_TOKEN_SLOT.into()]);
     // 遠端也用同一支：`remoteControlAtStartup` 要明講，否則那台機器帳號的全域設定會替每顆 bot
     // 決定要不要開手機入口（見 `claude_settings`）。
-    let settings = claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), instruction_files_of(bot));
+    let settings = claude_settings(&cmd, &statusline, bot.args().iter().any(|a| a == "--remote-control"), instruction_files_of(bot), bot.auto_approve != 0);
     let settings_text = serde_json::to_string_pretty(&settings)?;
     let script = format!(
         // issue #494：目錄 0700、腳本 0700、設定 0600。`umask 077` 管新建的，`chmod` 管舊版留下的
@@ -478,7 +478,7 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
             let statusline = shell_join(&statusline_parts(hook_cmd_parts(app, bot, "claude")));
             // Remote Control 明講，不要靠帳號的全域 settings 決定（見 `claude_settings`）。
             let wants_remote = bot.args().iter().any(|a| a == "--remote-control");
-            let settings = claude_settings(&cmd, &statusline, wants_remote, instruction_files_of(bot));
+            let settings = claude_settings(&cmd, &statusline, wants_remote, instruction_files_of(bot), bot.auto_approve != 0);
             let path = dir.join("claude-settings.json");
             write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
             vec!["--settings".into(), path.to_string_lossy().to_string(), "--verbose".into()]
@@ -506,8 +506,17 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
 ///
 /// `instruction_files` 是 `agents-md` plugin 的選項值，只能是 `config::INSTRUCTION_FILES` 裡的一個
 /// （由 [`instruction_files_of`] 給；CLI 遇到選項以外的值會退回它自己的預設，等於沒釘）。
-fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, instruction_files: &str) -> Value {
+fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, instruction_files: &str, auto_approve: bool) -> Value {
     json!({
+        // issue #722：claude 2.1.283 的 fullscreen 渲染。`tui` 沒設時，回合結束會跳「Try the new fullscreen renderer?」
+        // 選單（herdr 判 blocked、daemon 認不出，AGM 切到 agm-host 當天就卡在這裡），使用者在同一個設定目錄試過一次
+        // 還會把 `"tui": "fullscreen"` 寫進 `~/.claude/settings.json`。`tui_prompts`、畫面備援、回音剝除都照一般渲染寫，
+        // 所以 bot 一律釘 `default`：`--settings` 優先於使用者設定，而且只要 `tui` 有值，那個選單的條件就不成立。
+        "tui": "default",
+        // 同一版的「Make auto mode your default permission mode?」（游標預設在 Yes）只在 user settings 有
+        // `permissions.defaultMode`、而 `--settings` 這類較高層沒有時才跳。照這顆 bot 自己的 auto_approve 寫，
+        // 不會因此放大權限（沒開 auto_approve 的就是 `default`，跟不寫一樣）。
+        "permissions": {"defaultMode": if auto_approve { "bypassPermissions" } else { "default" }},
         "remoteControlAtStartup": wants_remote,
         "hooks": {
             "SessionStart": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
@@ -1034,7 +1043,7 @@ mod hook_cmd_parts_tests {
     /// 既有的兩個 hook 一個都不能掉，三個都指向同一支 hook 指令（分類在 daemon 裡做）。
     #[test]
     fn a_claude_bot_subscribes_to_stop_failure_as_well_as_stop() {
-        let v = claude_settings("/usr/bin/agents-managerd hook claude --bot b1", "/usr/bin/agents-managerd statusline", false, "claude-md");
+        let v = claude_settings("/usr/bin/agents-managerd hook claude --bot b1", "/usr/bin/agents-managerd statusline", false, "claude-md", true);
         let hooks = v.get("hooks").and_then(|h| h.as_object()).expect("hooks");
         let mut names: Vec<&String> = hooks.keys().collect();
         names.sort();
@@ -2071,9 +2080,9 @@ mod claude_settings_tests {
     /// 現在每顆 bot 的設定檔都明講，且只有自己 argv 要求過才是 true。
     #[test]
     fn remote_control_is_stated_per_bot_not_inherited_from_the_account() {
-        let off = claude_settings("hook", "sl", false, "claude-md");
+        let off = claude_settings("hook", "sl", false, "claude-md", true);
         assert_eq!(off["remoteControlAtStartup"], json!(false));
-        let on = claude_settings("hook", "sl", true, "claude-md");
+        let on = claude_settings("hook", "sl", true, "claude-md", true);
         assert_eq!(on["remoteControlAtStartup"], json!(true));
         for v in [&off, &on] {
             assert_eq!(v["statusLine"]["command"], "sl");
@@ -2092,7 +2101,7 @@ mod claude_settings_tests {
     #[test]
     fn managed_panes_do_not_let_claude_auto_continue_past_a_usage_limit() {
         for wants_remote in [false, true] {
-            let v = claude_settings("hook", "sl", wants_remote, "claude-md");
+            let v = claude_settings("hook", "sl", wants_remote, "claude-md", true);
             assert_eq!(v["autoContinueAtUsageLimit"], json!(false), "wants_remote={wants_remote}");
         }
     }
@@ -2103,7 +2112,7 @@ mod claude_settings_tests {
     #[test]
     fn managed_panes_do_not_sync_skills_or_plugins_from_the_claude_ai_account() {
         for wants_remote in [false, true] {
-            let v = claude_settings("hook", "sl", wants_remote, "claude-md");
+            let v = claude_settings("hook", "sl", wants_remote, "claude-md", true);
             assert_eq!(v["syncClaudeAiSkills"], json!(false), "wants_remote={wants_remote}");
             assert_eq!(v["syncClaudeAiPlugins"], json!(false), "wants_remote={wants_remote}");
         }
@@ -2119,7 +2128,7 @@ mod claude_settings_tests {
         const KNOWN: [&str; 4] = ["claude-md", "claude-md-or-agents-md", "claude-md-and-agents-md", "managed-only"];
         for wants_remote in [false, true] {
             for want in KNOWN {
-                let v = claude_settings("hook", "sl", wants_remote, want);
+                let v = claude_settings("hook", "sl", wants_remote, want, true);
                 let options = &v["pluginConfigs"]["agents-md@builtin"]["options"];
                 assert_eq!(options["instructionFiles"], json!(want), "wants_remote={wants_remote}");
                 assert!(KNOWN.contains(&options["instructionFiles"].as_str().unwrap()));
@@ -2132,7 +2141,7 @@ mod claude_settings_tests {
     /// 一樣——`hook_cmd.rs` 是通用轉發，不分事件名字（`payload comes from stdin`），不需要另外的旗標。
     #[test]
     fn subagent_lifecycle_hooks_are_registered_on_the_same_command() {
-        let v = claude_settings("hook", "sl", false, "claude-md");
+        let v = claude_settings("hook", "sl", false, "claude-md", true);
         for event in ["SubagentStart", "SubagentStop"] {
             assert_eq!(v["hooks"][event][0]["hooks"][0]["command"], "hook", "{event}");
         }
@@ -2142,9 +2151,21 @@ mod claude_settings_tests {
     /// Read／Edit／Grep 這些跟子 pane 完全無關的呼叫也送進 daemon，白白增加流量。
     #[test]
     fn post_tool_use_only_matches_the_bash_tool() {
-        let v = claude_settings("hook", "sl", false, "claude-md");
+        let v = claude_settings("hook", "sl", false, "claude-md", true);
         assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], json!("Bash"));
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "hook");
+    }
+
+    /// issue #722：2.1.283 的 fullscreen 選單與 auto mode 選單都靠「較高層設定沒寫」才跳；
+    /// bot 一律釘一般渲染，權限模式照 auto_approve 寫、不放大。
+    #[test]
+    fn bots_pin_the_default_renderer_and_state_their_permission_mode() {
+        let yolo = claude_settings("hook", "sl", false, "claude-md", true);
+        assert_eq!(yolo["tui"], json!("default"));
+        assert_eq!(yolo["permissions"]["defaultMode"], json!("bypassPermissions"));
+        let asks = claude_settings("hook", "sl", false, "claude-md", false);
+        assert_eq!(asks["tui"], json!("default"));
+        assert_eq!(asks["permissions"]["defaultMode"], json!("default"));
     }
 }
 
