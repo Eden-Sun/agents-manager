@@ -954,15 +954,28 @@ pub(crate) fn extract_reply(kind: &str, text: &str) -> Option<String> {
     let after_echo = after_last_prompt_echo(kind, &lines);
     let tool_rows = codex_tool_cell_mask(kind, &lines);
     let is_tool_row = |i: usize| tool_rows.get(i).copied().unwrap_or(false);
-    let start = after_echo
-        + lines[after_echo..].iter().enumerate().rposition(|(off, l)| {
-            let s = l.trim_start();
-            s.starts_with(marker)
-                && (kind != "codex"
-                    || (codex_usage_notice_line(s).is_none()
-                        && !codex_non_reply_row(s)
-                        && !is_tool_row(after_echo + off)))
-        })?;
+    let is_reply_start = |i: usize| {
+        let s = lines[i].trim_start();
+        s.starts_with(marker)
+            && codex_usage_notice_line(s).is_none()
+            && !codex_non_reply_row(s)
+            && !is_tool_row(i)
+    };
+    // Codex uses `• ` both for assistant rows and for bullets in the answer. Start at the first
+    // assistant row after the last tool cell, so bullets in its body cannot move the start forward.
+    // If an interrupted turn has no assistant row after its final tool, retain the latest earlier
+    // assistant row as the partial answer.
+    let last_tool_end = (after_echo..lines.len())
+        .rfind(|&i| is_tool_row(i))
+        .map(|i| i + 1)
+        .unwrap_or(after_echo);
+    let start = (last_tool_end..lines.len())
+        .find(|&i| is_reply_start(i))
+        .or_else(|| (after_echo..last_tool_end).rev().find(|&i| is_reply_start(i)))?;
+    let is_diagram_line = |s: &str| {
+        s.chars().next().is_some_and(|c| ('\u{2500}'..='\u{257F}').contains(&c))
+            || (!s.trim().is_empty() && s.chars().all(|c| matches!(c, '─' | '━' | '-' | '=' | '_' | ' ')))
+    };
     let mut out: Vec<String> = Vec::new();
     for (i, line) in lines.iter().enumerate().skip(start) {
         // The answer ends where the next tool cell begins; its `└` output is not part of the reply.
@@ -971,26 +984,21 @@ pub(crate) fn extract_reply(kind: &str, text: &str) -> Option<String> {
         }
         let t = line.trim_end();
         let s = t.trim_start();
-        // Stop at the input box / horizontal rule drawn below the transcript.
-        // Codex has no frame: the composer is an unboxed `›` row（#207 真畫面：不在這裡停的話，
-        // 沒有 Context 的狀態列會留在尾巴，完成時間行就剝不掉）。
-        if s.starts_with('╭') || s.starts_with('│') || s.starts_with('╰') || s.starts_with('▔')
-            || s.starts_with('›')
-            || s.starts_with('❯')
-        {
+        // The composer is an unboxed `›` row. Box-drawing characters and horizontal rules can be
+        // part of Codex's Mermaid diagrams, so they are not transcript boundaries.
+        if s.starts_with('›') || s.starts_with('❯') {
             break;
         }
         if kind == "codex" && codex_non_reply_row(s) {
             break;
         }
-        if !s.is_empty() && s.chars().all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_') {
-            break;
-        }
         // Skip the spinner / status line and its neighbours (`Tip:`, `✗ Auto-update failed`).
-        if s.chars().next().map(is_spinner_glyph).unwrap_or(false) || is_noise(s) {
+        if s.chars().next().map(is_spinner_glyph).unwrap_or(false) || (is_noise(s) && !is_diagram_line(s)) {
             continue;
         }
-        let cleaned = s.strip_prefix(marker).unwrap_or(t).to_string();
+        // Only the first marker is Codex chrome. Later `• ` rows belong to the answer body, such
+        // as a list, and must survive verbatim.
+        let cleaned = if i == start { s.strip_prefix(marker).unwrap_or(t) } else { t }.to_string();
         out.push(cleaned);
     }
     if kind == "codex" {
@@ -1207,6 +1215,24 @@ gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used 
         assert_eq!(extract_reply("codex", CODEX_IDLE_SPLASH), None);
         assert_eq!(last_prompt_echo_text("codex", CODEX_IDLE_SPLASH), None);
         assert!(codex_usage_notice_lines(CODEX_IDLE_SPLASH).iter().any(|n| n.contains("usage limit reset")));
+    }
+
+    #[test]
+    fn codex_reply_keeps_prose_and_bulleted_list_items() {
+        const SCREEN: &str = include_str!("fixtures/codex-0.157-reply-bullets.txt");
+        assert_eq!(
+            extract_reply("codex", SCREEN).as_deref(),
+            Some("這次修正包含三個部分：\n  保留說明與細節。\n\n• 第一項：保留清單的第一項。\n• 第二項：保留清單的第二項。\n• 第三項：保留最後一項。"),
+        );
+    }
+
+    #[test]
+    fn codex_reply_keeps_mermaid_box_drawing_lines() {
+        const SCREEN: &str = include_str!("fixtures/codex-0.158-mermaid-boxed-flowchart.txt");
+        assert_eq!(
+            extract_reply("codex", SCREEN).as_deref(),
+            Some("流程如下：\n\n  ╭────────╮\n  │ 收到請求 │\n  ╰────┬───╯\n       │\n  ╭────▼────╮\n  │ 判斷流程 │\n  ╰────┬────╯\n       ├── 是 ──▶ 完成\n       └── 否 ──▶ 修正\n\n圖後文字仍屬於回覆。"),
+        );
     }
 
     #[test]

@@ -591,9 +591,11 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   - **工具呼叫跟回覆共用 `• ` 標記**（2026-09-25 w168:pGD 真畫面）：`• Ran <指令>` 底下接一個縮排的輸出框
     （`└ …`，heredoc 是 `│ …`，折疊處是 `… +N lines (ctrl + t to view transcript)`，中間可能夾輸出自己的空行）。
     回合結束時「畫面上最後一個 `•`」幾乎一定是工具列，抽出來的就是 `Ran …` 加它的指令輸出，真回覆在更上面一則都收不到
-    （真實災情：三則回覆一則沒進對話，網頁上那顆 codex 的回覆變成 `cargo test` 的 rsync 錯誤）。所以 `extract_reply` 取的是
-    **最後一個不是工具列的 `•` 行**、往下掃到下一個工具 cell 就停，`clean_screen` 把整塊跳過。動詞會隨版本變（`Ran`／`Explored`／…），
-    認的是**結構**——底下第一行非空的續行是不是輸出框——不是 `Ran` 這個字。fixture：`codex-0.155-tool-rows-share-the-answer-marker.txt`。
+    （真實災情：三則回覆一則沒進對話，網頁上那顆 codex 的回覆變成 `cargo test` 的 rsync 錯誤）。所以 `extract_reply` 取最後一個工具 cell 後的
+    **第一個不是工具列的 `•` 行**，往下掃到下一個工具 cell 就停；若最後一個工具後沒有助手列，保留它前面的最後一段作為中斷回合的部分回覆。
+    只剝開頭那一行的 `• `，後續同樣以 `• ` 開頭的清單項目屬於內文，原樣保留。`clean_screen` 把工具 cell 整塊跳過。動詞會隨版本變（`Ran`／`Explored`／…），
+    認的是**結構**——底下第一行非空的續行是不是輸出框——不是 `Ran` 這個字。回覆中的 Mermaid 框線（`│`／`╭`／`─` 等）也是內文，不作為擷取邊界。
+    fixtures：`codex-0.155-tool-rows-share-the-answer-marker.txt`、`codex-0.157-reply-bullets.txt`、`codex-0.158-mermaid-boxed-flowchart.txt`。
   - 真機 fixture：`daemon/src/lifecycle/fixtures/codex-0.155-{idle,working,working-summary,finished}.{txt,ansi}`（0.155.1 私有 prefix、
     拋棄式 `CODEX_HOME`、名字為空的 pane）。`screen.rs` 的 `codex_0155_screen_tests`、`poller.rs` 的 `codex_0155_fallback_tests` 讀這些檔。
 - **沒有 hook 的 run**：被認領的 pane（`runs.adopted = 1` 且 `bots.inject_hooks = 0`，典型是 bot 自己開的子 agent，§6.5a）等不到 hook，
