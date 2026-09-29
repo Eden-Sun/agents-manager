@@ -20,6 +20,7 @@ mod launch_rev;
 mod promote_intents;
 mod assets;
 mod background_jobs;
+mod claude_live;
 mod attach;
 mod bulk_restart;
 mod changelog;

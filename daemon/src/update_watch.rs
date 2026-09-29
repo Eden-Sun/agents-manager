@@ -79,7 +79,9 @@ fn version_notice(disk: &str, running: &str) -> Option<String> {
 
 async fn sweep(app: &Arc<App>) {
     let runs = db::all_active_runs(&app.db).await.unwrap_or_default();
-    crate::background_jobs::retain_runs(app, &runs.iter().map(|r| r.id.clone()).collect::<Vec<_>>());
+    let active: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
+    crate::background_jobs::retain_runs(app, &active);
+    crate::claude_live::retain_runs(&active);
     for run in runs.into_iter().filter(|r| r.state == "running") {
         let kind = match db::bot(&app.db, &run.bot_id).await {
             Ok(Some(b)) if b.kind == "claude" || b.kind == "codex" => b.kind,
@@ -91,6 +93,10 @@ async fn sweep(app: &Arc<App>) {
         let Ok(read) = client.pane_read(&pane, "visible", 80).await else { continue };
         // #714：同一份畫面順便看底部標的背景工作數（不另開輪詢）。
         crate::background_jobs::observe(app, &run, &kind, &read.text, &client, &pane).await;
+        if kind == "claude" {
+            // 同一份畫面順便看 `/model`、`/effort` 的確認行（沒掛 hook 的子 agent 只有這個訊號）。
+            crate::claude_live::observe(app, &run, &read.text).await;
+        }
         if kind == "codex" {
             // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。
             crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane).await;
