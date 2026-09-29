@@ -2243,6 +2243,10 @@ class SystemdParityTest(unittest.TestCase):
     #: 只有 systemd 需要講的屬性。dev-server 的 kick 用 detached 拉起 vite：launchd 看程序群，脫離了就活著；
     #: systemd 看 cgroup，預設 KillMode=control-group 會在 kick 一結束就把 vite 一起收掉。
     SYSTEMD_ONLY = {"dev-server": {"Service.KillMode": ["process"]}}
+    #: 只有 unit 帶的環境變數。Linux 主機只跑 daemon 用的 `agents-manager` session，沒有 default server；
+    #: 排程沒有 pane 環境，daemon-swap 的 `herdr pane list` 不指定 session 會回 server_not_running。
+    #: macOS 使用者自己的 default session 一直開著，plist 不需要。
+    SYSTEMD_ONLY_ENV = {"daemon-update": {"HERDR_SESSION"}}
 
     @staticmethod
     def home_relative(arg: str) -> str:
@@ -2281,7 +2285,9 @@ class SystemdParityTest(unittest.TestCase):
                 # 值被 `_unit_semantics` 忽略了，這裡直接讀原文比變數名。
                 raw = (self.REPO / f"scripts/ops/systemd/com.agm.{name}.service").read_text(encoding="utf-8")
                 env = sorted(m.split("=", 1)[0] for m in re.findall(r"^Environment=(\S+)", raw, re.M))
-                self.assertEqual(env, sorted(pl.get("EnvironmentVariables", {})))
+                extra = self.SYSTEMD_ONLY_ENV.get(name, set())
+                self.assertTrue(extra <= set(env), f"{name} 的 unit 少了 {extra - set(env)}")
+                self.assertEqual([k for k in env if k not in extra], sorted(pl.get("EnvironmentVariables", {})))
                 for key, want_value in self.SYSTEMD_ONLY.get(name, {}).items():
                     self.assertEqual(svc.get(key), want_value, key)
 
