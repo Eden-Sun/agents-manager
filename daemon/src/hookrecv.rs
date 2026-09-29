@@ -3698,7 +3698,8 @@ mod external_claim_tests {
     }
 
     /// Hook vs. fallback race (review 2026-09-12 #5). The BEFORE UPDATE trigger stands in for the
-    /// fallback winning the CAS.
+    /// fallback winning the CAS. Losing the CAS is evidence the hook belongs to that very turn (8e7ef5fa),
+    /// so its transcript text replaces the fallback's reply in place — still one answer, not two.
     #[tokio::test]
     async fn a_hook_that_loses_the_cas_to_the_fallback_adds_no_second_reply() {
         let env = tt::env().await;
@@ -3738,7 +3739,7 @@ mod external_claim_tests {
         .execute(&app.db)
         .await
         .unwrap();
-        crate::lifecycle::insert_message(&app, &conv, Some(&turn_id), "assistant", "from the pane", "terminal_fallback", true, None)
+        let fallback = crate::lifecycle::insert_message(&app, &conv, Some(&turn_id), "assistant", "from the pane", "terminal_fallback", true, None)
             .await
             .unwrap();
         sqlx::query(
@@ -3777,15 +3778,20 @@ mod external_claim_tests {
             .fetch_one(&app.db)
             .await
             .unwrap();
-        assert_eq!(turn.status, "completed_fallback", "the fallback's claim stands");
+        assert_eq!(turn.status, "completed", "the hook's reply supersedes the fallback's claim");
         assert_eq!(turn.native_turn_id.as_deref(), Some("native-turn"), "the ids land on that turn, so a retry dedups");
         assert_eq!(turn.native_session_id.as_deref(), Some("native-session"));
-        let replies: Vec<String> = sqlx::query_scalar("SELECT source FROM messages WHERE turn_id=? AND role='assistant'")
-            .bind(&turn_id)
-            .fetch_all(&app.db)
-            .await
-            .unwrap();
-        assert_eq!(replies, ["terminal_fallback"], "one answer, not two");
+        let replies: Vec<(String, String, String, i64)> =
+            sqlx::query_as("SELECT id, source, content, incomplete FROM messages WHERE turn_id=? AND role='assistant'")
+                .bind(&turn_id)
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            replies,
+            [(fallback.id.clone(), "hook".to_string(), "from the hook".to_string(), 0)],
+            "one answer, not two: the fallback's row is overwritten in place"
+        );
         let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?")
             .bind(&conv)
             .fetch_one(&app.db)
