@@ -489,7 +489,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | 409 | `not_running`／`not_idle`（`busy`：`working`／`blocked`／`unknown_status`／`turn_in_flight`／`queued_turn`）／`no_pane` | 要閒著、有 pane 的 run（在 bot 鎖裡查） |
 | 409 | `composer_busy`／`rewind_ui_open` | 終端輸入列有字、或 rewind 選單本來就開著：一個字都沒打 |
 | 409 | `menu_not_shown` | 打了 `/rewind` 選單沒出來（已清掉打進去的字） |
-| 409 | `not_in_menu` | 選單裡找不到這則（更早的 session、沒落地）；已退出 |
+| 409 | `not_in_menu` | 選單裡找不到這則（更早的 session、沒落地）；已退出。還沒輸出就被中斷、沒有回覆的那一則不回這個：它本來就不在對話裡，照倒回成功處理（SPEC §6.13） |
 | 409 | `confirm_not_shown`／`text_mismatch`／`restore_not_selected` | 確認頁沒出來、印的不是這則（body 的 `message` 帶畫面上的字）、游標不在 Restore；已退出，沒倒 |
 | 409 | `rewind_unconfirmed` | 按了 Restore 畫面沒離開選單：不知道倒了沒有，訊息沒標 |
 | 502 | — | 讀不到或打不進終端（herdr） |
