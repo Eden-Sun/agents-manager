@@ -32,8 +32,6 @@ function toStatus(raw: unknown): DeployStatus | null {
         sha: str(r.sha) || undefined,
         resource: str(r.resource) || undefined,
         owner: str(r.owner) || undefined,
-        status: str(r.status) || undefined,
-        client_request_id: str(r.client_request_id) || undefined,
       }
     : null
   const working = Array.isArray(o.working)
@@ -98,15 +96,14 @@ export interface DeployStarted {
   sha: string
   short: string
   log_path: string
-  approval_id: string
 }
 
 /** 部署確認框上的那顆 commit（不是按下去那一刻的 origin/main）。錯誤照拋，交給 `deployNowNotice` 分類。 */
 export async function startDeployNow(sha: string): Promise<DeployStarted> {
   if (rawTransport.mock) {
     mockStarted = true
-    return { started: true, sha, short: sha.slice(0, 8), log_path: MOCK.log_path, approval_id: 'mock-ap' }
+    return { started: true, sha, short: sha.slice(0, 8), log_path: MOCK.log_path }
   }
   const raw = (await rawTransport.request('POST', '/deploy/now', { sha })) as Record<string, unknown>
-  return { started: raw.started === true, sha: str(raw.sha), short: str(raw.short), log_path: str(raw.log_path), approval_id: str(raw.approval_id) }
+  return { started: raw.started === true, sha: str(raw.sha), short: str(raw.short), log_path: str(raw.log_path) }
 }

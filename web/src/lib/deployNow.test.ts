@@ -32,7 +32,6 @@ test('部署在跑時照樣出現（寫部署中），不因為差異算不出�
   assert.equal(deployVisible(status({ code_changed: false, behind: 0, running: { kind: 'lease', resource: 'restart', owner: 'b1' } })), true)
   assert.match(runningText({ kind: 'lease', resource: 'restart', owner: 'b1' }), /b1.*restart/)
   assert.match(runningText({ kind: 'requested', sha: 'c'.repeat(40) }), /cccccccc/)
-  assert.match(runningText({ kind: 'assignment', client_request_id: 'agm-daemon-update-x', status: 'delivered' }), /agm-daemon-update-x/)
 })
 
 test('送出的結果分得清楚：開始了／已經在跑／不用部署／其他錯', () => {
