@@ -1,18 +1,17 @@
-//! 左上角「立即部署」（使用者 2026-09-25：「agm排以外，要我可以在左上角直接點立即部署」）。
+//! 左上角「立即部署」（使用者 2026-09-25；2026-09-29 隨例行部署簡化）。
 //!
-//! 例行更新是 launchd `com.agm.daemon-update` 每 5 分鐘跑 `daemon-update-kick.sh`，由它自己判斷
-//! 整點／申請門檻／等太久才往下走，而 rebuild 核准要等 AGM 裁示（SPEC §18.2、§18.10）。這裡只做
+//! 例行更新是 systemd timer／launchd 每 5 分鐘跑 `daemon-update-kick.sh`，腳本自己找最新一顆
+//! `ubuntu-ci` 綠燈的 main commit、建置、換版，不經 LLM、不要核准（SPEC §18.2）。這裡只做
 //! 「使用者按下去」那一段，**不另寫一套 build＋swap**：
 //!
 //! 1. `GET /api/deploy/status`：線上 binary（`build_info::BUILD_SHA`）落後 `origin/main` 幾個 commit、
 //!    有沒有會進 binary 的差異（路徑同 kick 的 `build-inputs`），以及現在有沒有部署在跑。
-//! 2. `POST /api/deploy/now`：開一筆 `requester=daemon-update-kick` 的 rebuild 核准並**以使用者的名義核准**
-//!    （這一下就是使用者的裁示，不再等 AGM），寫 `supervisor/AGM/daemon-update.now.json`，再
+//! 2. `POST /api/deploy/now`：寫 `supervisor/AGM/daemon-update.now.json`（要部署的 sha），再
 //!    `launchctl kickstart` 同一個 launchd job（Linux 是 `systemctl --user start --no-block` 同一個
-//!    systemd unit，issue #677）。kick 看到這個檔就略過觸發閘，其餘安全條件照舊
-//!    （乾淨 HEAD worktree、整樹測試、沒人 working 才換、租約、`.bak`、驗證失敗回滾）。
+//!    systemd unit，issue #677）。kick 看到這個檔就直接部署那顆 sha，不等 ubuntu-ci（使用者按下就是裁示），
+//!    做完刪檔；沒人 working／送達中才換版等安全條件照舊。
 //!
-//! 為什麼走排程器而不是 daemon 自己 fork 一支 kick：kick 的 `AGM_BUILD_BOT`、`PATH` 只寫在 plist 的
+//! 為什麼走排程器而不是 daemon 自己 fork 一支 kick：kick 的 `PATH` 只寫在 plist 的
 //! `EnvironmentVariables`（unit 的 `Environment=`），daemon 這邊拿不到；而且 launchd／systemd 都保證同一個
 //! job 同時只有一個，跟排程那一輪不會疊。kick 正在跑的那一刻 kickstart／start 不會再起一個，請求檔留著，
 //! 下一輪（最多 5 分鐘）就吃到。
@@ -28,24 +27,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// kick 申請 rebuild 用的名字（plist 沒設 `AM_AGENT_NAME`）。核准的 `requester` 要跟 kick 之後
-/// `lease acquire --owner` 逐字相等，否則 409 `approval_owner_mismatch`。
-pub const KICK_OWNER: &str = "daemon-update-kick";
-/// 使用者在 UI 按「立即部署」時記在核准上的 actor。
-pub const USER_ACTOR: &str = "user(立即部署)";
-/// 使用者的請求：kick 讀到就走「立即」模式，派工成功才刪。
+/// 使用者的請求：kick 讀到就走「立即」模式，部署做完（或那顆 sha 已經不能部署）才刪。
 pub const REQUEST_FILE: &str = "daemon-update.now.json";
 pub const LOG_FILE: &str = "daemon-update.log";
 pub const KICK_SCRIPT: &str = "bin/daemon-update-kick.sh";
 pub const LAUNCHD_LABEL: &str = "com.agm.daemon-update";
 /// Linux 上同一個 job 的 systemd user unit（`scripts/ops/systemd/`，issue #677）。
 pub const SYSTEMD_UNIT: &str = "com.agm.daemon-update.service";
-/// kick 派出的更新交辦都用這個前綴（`agm-daemon-update-<sha>`，立即模式多一段 `-now-<核准>`）。
-pub const ASSIGNMENT_PREFIX: &str = "agm-daemon-update-";
 /// 確認框最多列幾個 commit；落後更多時只列最新的這幾個，總數照實寫。
 const COMMIT_LIST_MAX: usize = 30;
-/// 核准有效期同 kick 的 `--expires-in`（issue #421）：等安全窗口可能要好幾個整點。
-const APPROVAL_TTL_SECS: i64 = 21600;
 /// `GET /status` 最多多久 fetch 一次（背景跑，不擋回應）。
 const FETCH_EVERY: Duration = Duration::from_secs(300);
 const GIT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -204,15 +194,13 @@ pub async fn behind(repo: &Path, live: &str) -> Result<Value, String> {
     }))
 }
 
-/// 現在有沒有部署在跑；有就回是哪一種、誰。三種都算：
-/// * 使用者上一下的請求檔還在（kick 還沒派出去，或在等安全窗口）；
-/// * 有人握著 rebuild／restart 租約（kick 正在派、建置 child 正在換、或別顆 bot 自己在重建）；
-/// * `agm-daemon-update-*` 交辦還沒結案（含等驗收，同 kick 的 `assignments --open`）。
+/// 現在有沒有部署在跑；有就回是哪一種、誰。兩種都算：
+/// * 使用者上一下的請求檔還在（kick 還沒吃到、正在建置，或在等安全窗口）；
+/// * 有人握著 rebuild／restart 租約（kick 正在換版，或別顆 bot 自己在重建）。
 pub async fn in_progress(app: &Arc<App>, agm_dir: &Path) -> Result<Option<Value>, LcError> {
     let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
     if let Some(req) = read_request(agm_dir) {
-        return Ok(Some(json!({"kind": "requested", "sha": req.get("sha"), "requested_at": req.get("requested_at"),
-                              "approval_id": req.get("approval_id")})));
+        return Ok(Some(json!({"kind": "requested", "sha": req.get("sha"), "requested_at": req.get("requested_at")})));
     }
     let now = crate::db::now();
     for resource in crate::supervisor::maintenance::RESOURCES {
@@ -220,65 +208,13 @@ pub async fn in_progress(app: &Arc<App>, agm_dir: &Path) -> Result<Option<Value>
             return Ok(Some(json!({"kind": "lease", "resource": resource, "owner": l.owner, "expires_at": l.expires_at})));
         }
     }
-    let open = store::unsettled_assignments(&app.db).await.map_err(up)?;
-    if let Some(a) = open.iter().find(|a| a.client_request_id.starts_with(ASSIGNMENT_PREFIX)) {
-        return Ok(Some(json!({"kind": "assignment", "client_request_id": a.client_request_id, "status": a.status,
-                              "bot_id": a.target_bot_id})));
-    }
     Ok(None)
-}
-
-/// kick 在立即模式替建置 child 申請 restart 時用的 request id 前綴，後面接那筆 rebuild 核准的 id。
-pub const RESTART_REQUEST_PREFIX: &str = "deploy-now-restart-";
-
-/// 立即部署的 restart 核准由 daemon 在建立當下核准（#447 之後 `decide` 的 approve 要驗過的 AGM 角色，
-/// launchd 跑的 kick 沒有角色身分，打 HTTP decide 會 403）。只在全部對得上時才核准，否則照舊留給 AGM：
-/// 請求檔還在、request id 是 `deploy-now-restart-<請求檔的 rebuild 核准>`、那筆 rebuild 是使用者在 UI 核准的
-/// 且還有效、commit 一致、這筆 restart 還是 pending。回傳核准後的那筆。
-pub async fn preapprove_restart(app: &Arc<App>, a: &store::Approval) -> Option<store::Approval> {
-    preapprove_restart_in(app, &Ctx::of(app).agm_dir, a).await
-}
-
-async fn preapprove_restart_in(app: &Arc<App>, agm_dir: &Path, a: &store::Approval) -> Option<store::Approval> {
-    if a.purpose != "restart" || a.status != "pending" {
-        return None;
-    }
-    let rebuild_id = a.client_request_id.as_deref()?.strip_prefix(RESTART_REQUEST_PREFIX)?;
-    let req = read_request(agm_dir)?;
-    if req.get("approval_id").and_then(Value::as_str) != Some(rebuild_id) {
-        return None;
-    }
-    let rebuild = store::approval(&app.db, rebuild_id).await.ok()??;
-    let now = crate::db::now();
-    let live = rebuild.purpose == "rebuild"
-        && rebuild.status == "approved"
-        && rebuild.decided_by.as_deref() == Some(USER_ACTOR)
-        && rebuild.expires_at.as_deref().is_none_or(|e| crate::db::cmp_ts(e, &now).is_gt());
-    let same_commit = match (rebuild.target_commit.as_deref(), a.target_commit.as_deref()) {
-        (Some(r), Some(t)) if !t.is_empty() => r.starts_with(t) || t.starts_with(r),
-        _ => false,
-    };
-    if !live || !same_commit {
-        return None;
-    }
-    let reason = format!("使用者在 UI 按「立即部署」（rebuild 核准 {rebuild_id}）");
-    match store::decide_approval_from(&app.db, &a.id, "pending", "approved", USER_ACTOR, Some(&reason), None).await {
-        Ok(Some((decided, _))) => {
-            tracing::info!(approval = %a.id, rebuild = rebuild_id, "deploy now: restart approval pre-approved by the daemon");
-            Some(decided)
-        }
-        Ok(None) => None,
-        Err(e) => {
-            tracing::warn!(approval = %a.id, error = %e, "deploy now: could not pre-approve the restart");
-            None
-        }
-    }
 }
 
 /// 請求檔還在、讀得懂才算。壞掉的檔 kick 會自己清掉並記 log，這裡不把它當成有部署在跑。
 fn read_request(agm_dir: &Path) -> Option<Value> {
     let txt = std::fs::read_to_string(agm_dir.join(REQUEST_FILE)).ok()?;
-    serde_json::from_str::<Value>(&txt).ok().filter(|v| v.get("approval_id").and_then(Value::as_str).is_some())
+    serde_json::from_str::<Value>(&txt).ok().filter(|v| v.get("sha").and_then(Value::as_str).is_some())
 }
 
 /// 正在 `working` 的 bot（確認框列出來：換 binary 要等它們，不是按了就砍）。
@@ -412,49 +348,23 @@ pub async fn start(app: &Arc<App>, ctx: &Ctx, sha: Option<&str>, launcher: &dyn 
             "message": "線上那顆到這個 commit 之間只動到不進 binary 的檔，不用重建"})));
     }
     let short: String = target.chars().take(8).collect();
-    let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
-    let expires = crate::db::iso_in(APPROVAL_TTL_SECS);
-    let request_id = format!("deploy-now-{short}-{}", crate::db::ulid());
-    // 不推 `approval_requested`：這筆不是在等誰裁示，下一行就由使用者核准。
-    let created = store::create_approval_superseding(
-        &app.db,
-        KICK_OWNER,
-        "rebuild",
-        &format!("立即部署 {}..{short}（使用者在 UI 按下）；restart 由 daemon 在 kick 申請時以同一個授權核准", ctx.live_sha),
-        Some(&target),
-        Some(&expires),
-        Some(&request_id),
-        None,
-        Some("使用者在左上角按「立即部署」"),
-    )
-    .await
-    .map_err(up)?;
-    let id = created.approval.id.clone();
-    let decided = store::decide_approval_from(&app.db, &id, "pending", "approved", USER_ACTOR, Some("使用者在 UI 按「立即部署」"), None)
-        .await
-        .map_err(up)?;
-    if decided.is_none() {
-        return Err(LcError::conflict("approval_not_pending", json!({"approval_id": id, "message": "剛開的核准已經不是 pending，這趟不動"})));
-    }
-    let request = json!({"approval_id": id, "sha": target, "live_sha": ctx.live_sha, "requested_at": crate::db::now(), "requested_by": "ui"});
+    let request = json!({"sha": target, "live_sha": ctx.live_sha, "requested_at": crate::db::now(), "requested_by": "ui"});
     if let Err(e) = write_request(&ctx.agm_dir, &request) {
-        undo(app, &ctx.agm_dir, &id, &format!("寫不進請求檔：{e}")).await;
         return Err(LcError::Unavailable(json!({"reason": "request_write_failed", "message": e, "retryable": true})));
     }
     if let Err(e) = launcher.kick() {
-        undo(app, &ctx.agm_dir, &id, &format!("叫不起 {LAUNCHD_LABEL}：{e}")).await;
+        undo(&ctx.agm_dir, &format!("叫不起 {LAUNCHD_LABEL}：{e}"));
         return Err(LcError::Unavailable(json!({"reason": "kick_start_failed", "message": format!("叫不起例行更新（{LAUNCHD_LABEL}）：{e}"),
             "retryable": true})));
     }
-    let _ = store::add_note(&app.db, "deploy_now", &json!({"approval_id": id, "sha": target, "live_sha": ctx.live_sha})).await;
-    app.emit("supervisor_changed", json!({"approval": decided.map(|(a, _)| a.to_json()), "deploy_now": {"sha": target}})).await;
-    tracing::info!(sha = %target, live = %ctx.live_sha, approval = %id, "deploy now requested from the UI");
+    let _ = store::add_note(&app.db, "deploy_now", &json!({"sha": target, "live_sha": ctx.live_sha})).await;
+    app.emit("supervisor_changed", json!({"deploy_now": {"sha": target}})).await;
+    tracing::info!(sha = %target, live = %ctx.live_sha, "deploy now requested from the UI");
     Ok(json!({
         "started": true,
         "sha": target,
         "short": short,
         "live_sha": ctx.live_sha,
-        "approval_id": id,
         "log_path": ctx.agm_dir.join(LOG_FILE),
         "request_path": ctx.agm_dir.join(REQUEST_FILE),
     }))
@@ -470,13 +380,10 @@ fn write_request(agm_dir: &Path, v: &Value) -> Result<(), String> {
     })
 }
 
-/// 叫不起 kick 就收回：請求檔刪掉、核准撤銷。留著的話之後每一下都 409，而且沒有人會去用那筆核准。
-async fn undo(app: &Arc<App>, agm_dir: &Path, approval_id: &str, why: &str) {
+/// 叫不起 kick 就收回請求檔：留著的話之後每一下都 409，而且沒有人會去吃它。
+fn undo(agm_dir: &Path, why: &str) {
     let _ = std::fs::remove_file(agm_dir.join(REQUEST_FILE));
-    if let Err(e) = store::decide_approval_from(&app.db, approval_id, "approved", "revoked", USER_ACTOR, Some(why), None).await {
-        tracing::warn!(approval = %approval_id, error = %e, "deploy now: could not revoke the approval after a failed start");
-    }
-    tracing::warn!(approval = %approval_id, why, "deploy now did not start");
+    tracing::warn!(why, "deploy now did not start");
 }
 
 #[cfg(test)]
@@ -553,109 +460,22 @@ mod tests {
         let _ = &f.live;
     }
 
-    async fn restart_request(f: &Fixture, rebuild_id: &str, commit: &str) -> store::Approval {
-        store::create_approval_superseding(&f.env.app.db, "bot-build", "restart", "daemon 重啟", Some(commit), None,
-            Some(&format!("{RESTART_REQUEST_PREFIX}{rebuild_id}")), None, None)
-        .await
-        .unwrap()
-        .approval
-    }
-
-    async fn started(f: &Fixture) -> String {
-        start(&f.env.app, &f.ctx, Some(&f.code), &fake(None)).await.unwrap()["approval_id"].as_str().unwrap().to_string()
-    }
-
-    /// #447：kick 沒有角色身分打不了 decide，restart 改由 daemon 在建立當下核准——但只在全部對得上時。
     #[tokio::test]
-    async fn restart_for_a_live_deploy_now_is_approved_by_the_daemon() {
-        let f = fixture().await;
-        let rebuild = started(&f).await;
-        let r = restart_request(&f, &rebuild, &f.code[..8]).await;
-        let ok = preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &r).await.expect("對得上就核准");
-        assert_eq!((ok.status.as_str(), ok.decided_by.as_deref()), ("approved", Some(USER_ACTOR)));
-    }
-
-    #[tokio::test]
-    async fn a_restart_for_another_commit_is_left_to_agm() {
-        let f = fixture().await;
-        let rebuild = started(&f).await;
-        let r = restart_request(&f, &rebuild, &f.head).await;
-        assert!(preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &r).await.is_none(), "commit 對不上不能核准");
-        assert_eq!(store::approval(&f.env.app.db, &r.id).await.unwrap().unwrap().status, "pending", "留給 AGM");
-    }
-
-    #[tokio::test]
-    async fn a_restart_naming_another_rebuild_or_after_the_request_is_gone_is_left_to_agm() {
-        let f = fixture().await;
-        let rebuild = started(&f).await;
-        // 另一筆同樣由使用者核准、同一個 commit 的 rebuild，但請求檔指的不是它。
-        let db = &f.env.app.db;
-        let other = store::create_approval_superseding(db, KICK_OWNER, "rebuild", "另一趟", Some(&f.code), None, Some("other-rebuild"), None, None)
-            .await
-            .unwrap()
-            .approval;
-        store::decide_approval_from(db, &other.id, "pending", "approved", USER_ACTOR, None, None).await.unwrap();
-        let stranger = restart_request(&f, &other.id, &f.code).await;
-        assert!(preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &stranger).await.is_none(), "不是請求檔那筆 rebuild");
-        std::fs::remove_file(f.ctx.agm_dir.join(REQUEST_FILE)).unwrap();
-        let late = restart_request(&f, &rebuild, &f.code).await;
-        assert!(preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &late).await.is_none(), "請求檔不在就不核准");
-    }
-
-    #[tokio::test]
-    async fn a_revoked_deploy_now_does_not_preapprove_the_restart() {
-        let f = fixture().await;
-        let rebuild = started(&f).await;
-        store::decide_approval_from(&f.env.app.db, &rebuild, "approved", "revoked", "agm", Some("撤回"), None).await.unwrap();
-        let r = restart_request(&f, &rebuild, &f.code).await;
-        assert!(preapprove_restart_in(&f.env.app, &f.ctx.agm_dir, &r).await.is_none(), "rebuild 已撤銷就不核准 restart");
-    }
-
-    #[tokio::test]
-    async fn start_approves_as_the_user_writes_the_request_and_kicks_once() {
+    async fn start_writes_the_request_and_kicks_once() {
         let f = fixture().await;
         let kick = fake(None);
         let out = start(&f.env.app, &f.ctx, Some(&f.code), &kick).await.unwrap();
         assert_eq!(out["started"], true);
         assert_eq!(out["sha"], f.code, "部署確認框上的 commit，不是 origin/main HEAD");
         assert_eq!(kick.calls.load(Ordering::SeqCst), 1);
-        let id = out["approval_id"].as_str().unwrap();
-        let a = store::approval(&f.env.app.db, id).await.unwrap().unwrap();
-        assert_eq!((a.status.as_str(), a.purpose.as_str(), a.requester.as_str()), ("approved", "rebuild", KICK_OWNER));
-        assert_eq!(a.target_commit.as_deref(), Some(f.code.as_str()));
-        assert_eq!(a.decided_by.as_deref(), Some("user(立即部署)"));
+        assert!(store::approvals(&f.env.app.db, 100).await.unwrap().is_empty(), "不再開核准單");
         let req: Value = serde_json::from_str(&std::fs::read_to_string(f.ctx.agm_dir.join(REQUEST_FILE)).unwrap()).unwrap();
-        assert_eq!(req["approval_id"], id);
         assert_eq!(req["sha"], f.code);
 
-        // 第二下：請求還沒被 kick 吃掉＝有部署在跑，409，不再開核准也不再 kick。
-        let before = store::approvals(&f.env.app.db, 100).await.unwrap().len();
+        // 第二下：請求還沒被 kick 吃掉＝有部署在跑，409，不再 kick。
         let e = start(&f.env.app, &f.ctx, None, &kick).await.unwrap_err();
         assert!(matches!(&e, LcError::Conflict(v) if v["reason"] == "deploy_in_progress" && v["running"]["kind"] == "requested"), "{e:?}");
         assert_eq!(kick.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store::approvals(&f.env.app.db, 100).await.unwrap().len(), before);
-    }
-
-    #[tokio::test]
-    async fn start_refuses_while_an_update_assignment_is_open() {
-        let f = fixture().await;
-        let kick = fake(None);
-        // 例行更新的交辦還沒結案（含等驗收）。
-        sqlx::query(
-            "INSERT INTO supervisor_assignments (id, supervisor_id, target_bot_id, client_request_id, text, status, attempts, created_at, updated_at)
-             VALUES ('as1', ?, 'b1', ?, 't', 'delivered', 0, ?, ?)",
-        )
-        .bind(store::SUPERVISOR_ID)
-        .bind(format!("{ASSIGNMENT_PREFIX}{}", f.head))
-        .bind(crate::db::now())
-        .bind(crate::db::now())
-        .execute(&f.env.app.db)
-        .await
-        .unwrap();
-        let e = start(&f.env.app, &f.ctx, None, &kick).await.unwrap_err();
-        assert!(matches!(&e, LcError::Conflict(v) if v["running"]["kind"] == "assignment"), "{e:?}");
-        assert_eq!(kick.calls.load(Ordering::SeqCst), 0);
-        assert!(store::approvals(&f.env.app.db, 100).await.unwrap().is_empty(), "擋下來就不開核准");
     }
 
     #[tokio::test]
@@ -687,7 +507,6 @@ mod tests {
         let e = start(&f.env.app, &f.ctx, Some(&side), &kick).await.unwrap_err();
         assert!(matches!(&e, LcError::Conflict(v) if v["reason"] == "target_not_on_main"), "{e:?}");
         assert_eq!(kick.calls.load(Ordering::SeqCst), 0);
-        assert!(store::approvals(&f.env.app.db, 100).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -702,20 +521,16 @@ mod tests {
         assert!(matches!(&e, LcError::Conflict(v) if v["reason"] == "target_older_than_live"), "{e:?}");
         assert!(matches!(&e, LcError::Conflict(v) if v["message"].as_str().unwrap_or("").contains("降版")), "{e:?}");
         assert_eq!(kick.calls.load(Ordering::SeqCst), 0);
-        assert!(store::approvals(&f.env.app.db, 100).await.unwrap().is_empty());
         assert!(!f.ctx.agm_dir.join(REQUEST_FILE).exists());
     }
 
     #[tokio::test]
-    async fn a_kick_that_cannot_start_rolls_the_approval_and_request_back() {
+    async fn a_kick_that_cannot_start_rolls_the_request_back() {
         let f = fixture().await;
         let kick = fake(Some("Could not find service"));
         let e = start(&f.env.app, &f.ctx, None, &kick).await.unwrap_err();
         assert!(matches!(&e, LcError::Unavailable(v) if v["reason"] == "kick_start_failed"), "{e:?}");
         assert!(!f.ctx.agm_dir.join(REQUEST_FILE).exists(), "留著的話之後每一下都 409");
-        let rows = store::approvals(&f.env.app.db, 100).await.unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].status, "revoked");
         // 收回之後可以再按。
         assert!(in_progress(&f.env.app, &f.ctx.agm_dir).await.unwrap().is_none());
     }
@@ -727,7 +542,6 @@ mod tests {
         let kick = fake(None);
         let e = start(&f.env.app, &f.ctx, None, &kick).await.unwrap_err();
         assert!(matches!(&e, LcError::Unavailable(v) if v["reason"] == "kick_outdated"), "{e:?}");
-        assert!(store::approvals(&f.env.app.db, 100).await.unwrap().is_empty());
         assert!(!f.ctx.agm_dir.join(REQUEST_FILE).exists());
         assert_eq!(kick.calls.load(Ordering::SeqCst), 0);
     }

@@ -251,6 +251,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/fs/dirs", get(list_dirs))
         .route("/capabilities", get(get_capabilities))
         .route("/services/daemon-swap/probe/{id}", post(service_daemon_swap_probe))
+        .route("/services/daemon-swap/restart-window", post(service_daemon_swap_restart_window))
         .route("/services/herdr-upgrade/resume/{id}", post(service_herdr_upgrade_resume))
         .route("/services/herdr-upgrade/notify", post(service_herdr_upgrade_notify))
         .route("/supervisor/herdr-maintenance", get(crate::herdr_maintenance::get))
@@ -3555,7 +3556,7 @@ async fn refuse_child_restart(app: &Arc<App>, id: &str) -> Result<(), LcError> {
 
 /// 這顆 daemon 支援哪些要先確認才能用的能力（例如升級腳本在停 herdr 前要確定 `resume_native_start`）。
 async fn get_capabilities() -> Json<Value> {
-    Json(json!({"capabilities": ["resume_native_start", "herdr_maintenance", "service_principals"]}))
+    Json(json!({"capabilities": ["resume_native_start", "herdr_maintenance", "service_principals", "swap_restart_window"]}))
 }
 
 /// SPEC §6.9。立刻回計畫、進度走 WS：一顆 `stop_bot` 最久十秒，同步做完會拖死 HTTP 連線。
@@ -3824,6 +3825,51 @@ async fn service_daemon_swap_probe(
     )
     .await?;
     Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SwapWindowIn {
+    owner: String,
+    commit: String,
+    #[serde(default)]
+    ttl_secs: Option<i64>,
+}
+
+/// 例行自動部署換版的窗口（使用者 2026-09-29：建置已在推 main 前測過、ubuntu-ci 也跑過，不再要核准單）。
+/// daemon-swap 服務身分自己開一筆立即核准的 restart 單再走**同一個** `maintenance::acquire`：
+/// 沒有人 working／送達中／別人握租約才拿得到、拿到時暫停 assignment 派送、fence 與 lease_token 都照舊。
+/// 拿不到就把剛開的單撤掉，不留 pending／approved 的殘單。不接受 `exclude_bot_ids`：沒有「自己那顆 bot」可排除。
+async fn service_daemon_swap_restart_window(
+    State(app): State<Arc<App>>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(b): Json<SwapWindowIn>,
+) -> Result<Json<Value>, LcError> {
+    require_service(&principal, crate::service_auth::DAEMON_SWAP)?;
+    let (owner, commit) = (b.owner.trim(), b.commit.trim());
+    if owner.is_empty() || commit.is_empty() {
+        return Err(LcError::Bad("owner 與 commit 都必填".into()));
+    }
+    let ttl = b.ttl_secs.unwrap_or(900);
+    let expires = db::iso_in(ttl.clamp(30, 3600) + 300);
+    let actor = format!("service({})", crate::service_auth::DAEMON_SWAP);
+    let created = crate::supervisor::store::create_approval_superseding(
+        &app.db, owner, "restart", &format!("例行自動部署換版 {commit}（daemon-swap 自動核准）"),
+        Some(commit), Some(&expires), Some(&format!("auto-deploy-restart-{}", db::ulid())), None, None,
+    )
+    .await
+    .map_err(any_err)?;
+    let id = created.approval.id;
+    crate::supervisor::store::decide_approval_from(&app.db, &id, "pending", "approved", &actor, Some("例行自動部署：建置與整樹測試在推 main 前後已由 ubuntu-ci 驗過"), None)
+        .await
+        .map_err(any_err)?;
+    match crate::supervisor::maintenance::acquire(&app, "restart", owner, &id, Some(commit), ttl, true, &[]).await {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => {
+            let _ = crate::supervisor::store::decide_approval_from(&app.db, &id, "approved", "revoked", &actor, Some("沒拿到窗口"), None).await;
+            Err(e)
+        }
+    }
 }
 
 const DAEMON_SWAP_PROBE_TEXT: &str = "[build 自測，回 ok 即可，不要做任何事]";
@@ -7044,6 +7090,46 @@ mod per_principal_auth_tests {
             format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: {id}\r\nX-AM-Service-Token: {token}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn daemon_swap_opens_its_own_restart_window_without_an_approval_from_anyone_else() {
+        let e = crate::testing::env().await;
+        let body = || SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc123".into(), ttl_secs: Some(600) };
+        let svc = || Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into()));
+        // 只有 daemon-swap 服務身分；使用者與 bot 都不行。
+        for other in [RequestPrincipal::User, RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service(crate::service_auth::HERDR_UPGRADE.into())] {
+            let r = service_daemon_swap_restart_window(State(e.app.clone()), Extension(other), Json(body())).await;
+            assert!(matches!(r, Err(LcError::Forbidden(_))));
+        }
+        let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(body())).await.unwrap();
+        assert_eq!(v["lease"]["held"], true, "{v}");
+        assert!(v["lease_token"].as_str().is_some_and(|t| !t.is_empty()));
+        assert_eq!(v["approval"]["decided_by"], "service(daemon-swap)");
+        assert_eq!(v["approval"]["purpose"], "restart");
+        // 窗口被握著時別人拿不到，而且不留下 approved 的殘單。
+        let mut other = body();
+        other.owner = "someone-else".into();
+        let r = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(other)).await;
+        assert!(matches!(r, Err(LcError::Conflict(_))), "{r:?}");
+        let live = crate::supervisor::store::approvals(&e.app.db, 100).await.unwrap().into_iter().filter(|a| a.status == "approved").count();
+        assert_eq!(live, 1, "只剩握著窗口的那一筆");
+    }
+
+    #[tokio::test]
+    async fn daemon_swap_window_is_refused_while_a_bot_is_working() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "swap-busy").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&e.app.db).await.unwrap();
+        let body = SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc123".into(), ttl_secs: None };
+        let r = service_daemon_swap_restart_window(
+            State(e.app.clone()),
+            Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into())),
+            Json(body),
+        )
+        .await;
+        assert!(matches!(&r, Err(LcError::Conflict(v)) if v["detail"]["reason"] == "not_idle" || v["reason"] == "not_idle"), "{r:?}");
     }
 
     #[tokio::test]
