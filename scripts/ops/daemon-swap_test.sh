@@ -86,6 +86,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export SYSTEMD_RUN_BIN="$ROOT/bin/systemd-run" AGM_OPS_PLATFORM=darwin
   export SWAP_PROBE_TRIES=2 SWAP_PROBE_BOT=bot-probe
   export HERDR_PANE_ID="w1:pA"          # 預設：pane 裡本來就有；測 current 的 case 會 unset
+  export STUB_CAP=service STUB_PANE_LIST_FAIL=""
   export STUB_PANE_READ_OK=1 STUB_PANE_CURRENT="w1:pA" STUB_PROBE='200 {"delivery":"ok"}' 
   mkdir -p "$AGM_DIR" "$AM_DATA/service-tokens" "$AGM_REPO/target/release" "$CHECKOUT/daemon/src" "$CHECKOUT/target/release" "$ROOT/bin"
   printf 'test-daemon-swap-service-token\n' > "$AM_DATA/service-tokens/daemon-swap.token"
@@ -140,28 +141,6 @@ for a in "$@"; do
   if [ -z "$sub" ]; then sub="$a"; elif [ -z "$op" ]; then op="$a"; fi
 done
 case "$sub:$op" in
-  lease:acquire)
-      # 自測回合還在飛就拿不到窗口（跟正式 daemon 一樣：in_flight 擋，working 名單是空的）。
-      # 時間用「查過幾次 safety＋要過幾次窗口」來代表：每問一次，自測回合就往收尾推進一步。
-      safeties=$(grep -cE "lease (safety|acquire restart)" "$AGM_DIR/calls.log" 2>/dev/null); safeties=${safeties:-0}
-      if [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -ge "$safeties" ] && [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -gt 0 ]; then
-        printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","safety":{"working":[],"in_flight":[{"bot_id":"bot-probe"}]}}}'
-        exit 1
-      fi
-      tries=$(grep -c "lease acquire restart" "$AGM_DIR/calls.log" 2>/dev/null); tries=${tries:-0}
-      if [ "${STUB_ACQUIRE_FAIL_TIMES:-0}" -ge "$tries" ] && [ "${STUB_ACQUIRE_FAIL_TIMES:-0}" -gt 0 ]; then
-        if [ -n "$STUB_ACQUIRE_EMPTY_WORKING" ]; then
-          printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","safety":{"working":[],"in_flight":[{"bot_id":"bot-probe"}]}}}'
-        else
-          printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","escalates_at":"2026-09-21T01:31:00Z","safety":{"working":[{"name":"busy-bot"}]}}}'
-        fi
-        exit 1
-      fi
-      if [ -n "${STUB_SWAP_BINARY_ON_ACQUIRE:-}" ] && [ ! -e "$AGM_DIR/changed-live" ]; then
-        printf 'newer-live-binary\n' > "$AGM_REPO/target/release/agents-managerd"
-        : > "$AGM_DIR/changed-live"
-      fi
-      printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1"}' "$STUB_ACQUIRE_HELD" ;;
   lease:safety)  n=$(grep -cE "lease (safety|acquire restart)" "$AGM_DIR/calls.log"); fl=""
                  [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -ge "$n" ] && fl='{"bot_id":"bot-probe","turn_id":"t-1"}'
                  printf '{"safe":%s,"working":[],"delivering":[],"in_flight":[%s]}' "$STUB_SAFE" "$fl" ;;
@@ -191,6 +170,38 @@ case "$sub:$op" in
   *)             printf '{}' ;;
 esac
 STUB
+
+  # 假的 restart-window 回應（SWAP_WINDOW_CMD）：daemon 的 restart-window 路由印出的本文；被拒時是 409 的 JSON。
+  cat > "$ROOT/bin/window" <<'STUB'
+#!/bin/bash
+echo "lease acquire restart --owner $1 --commit $2" >> "$AGM_DIR/calls.log"
+# 自測回合還在飛就拿不到窗口（跟正式 daemon 一樣：in_flight 擋，working 名單是空的）。
+# 時間用「查過幾次 safety＋要過幾次窗口」來代表：每問一次，自測回合就往收尾推進一步。
+safeties=$(grep -cE "lease (safety|acquire restart)" "$AGM_DIR/calls.log" 2>/dev/null); safeties=${safeties:-0}
+if [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -ge "$safeties" ] && [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -gt 0 ]; then
+  printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","safety":{"working":[],"in_flight":[{"bot_id":"bot-probe"}]}}}'
+  exit 0
+fi
+tries=$(grep -c "lease acquire restart" "$AGM_DIR/calls.log" 2>/dev/null); tries=${tries:-0}
+if [ "${STUB_ACQUIRE_FAIL_TIMES:-0}" -ge "$tries" ] && [ "${STUB_ACQUIRE_FAIL_TIMES:-0}" -gt 0 ]; then
+  if [ -n "$STUB_ACQUIRE_EMPTY_WORKING" ]; then
+    printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","safety":{"working":[],"in_flight":[{"bot_id":"bot-probe"}]}}}'
+  else
+    printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"not_idle","escalates_at":"2026-09-21T01:31:00Z","safety":{"working":[{"name":"busy-bot"}]}}}'
+  fi
+  exit 0
+fi
+if [ -n "${STUB_SWAP_BINARY_ON_ACQUIRE:-}" ] && [ ! -e "$AGM_DIR/changed-live" ]; then
+  printf 'newer-live-binary\n' > "$AGM_REPO/target/release/agents-managerd"
+  : > "$AGM_DIR/changed-live"
+fi
+printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1"}' "$STUB_ACQUIRE_HELD"
+STUB
+  cat > "$ROOT/bin/cap" <<'STUB'
+#!/bin/bash
+printf '%s' "${STUB_CAP:-service}"
+STUB
+  export SWAP_WINDOW_CMD="$ROOT/bin/window" SWAP_CAP_CMD="$ROOT/bin/cap"
 
   cat > "$ROOT/bin/sqlite3" <<'STUB'
 #!/bin/bash
@@ -258,7 +269,8 @@ STUB
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/herdr.log"
 case "$1 $2" in
-  "pane current") printf '{"result":{"pane":{"pane_id":"%s"}}}' "$STUB_PANE_CURRENT" ;;
+  "pane list") [ -z "${STUB_PANE_LIST_FAIL:-}" ] || { printf '{"error":"socket down"}'; exit 1; }; printf '{"result":{"panes":[]}}' ;;
+  "pane current") [ -n "$STUB_PANE_CURRENT" ] || exit 1; printf '{"result":{"pane":{"pane_id":"%s"}}}' "$STUB_PANE_CURRENT" ;;
   "pane read")
       # 只有「當下真的存在」的那個 pane 讀得到：預設是 HERDR_PANE_ID／current 回的那顆。
       want="$STUB_PANE_CURRENT"   # 當下真的存在的那顆；別的 id（例如被寫死的舊 id）一律 not found
@@ -282,7 +294,7 @@ run() {
   (
     sleep() { :; }
     export -f sleep
-    bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
+    bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
   )
   echo $?
 }
@@ -531,7 +543,7 @@ teardown
 
 # 14. 3b：pane id 不接受呼叫端帶進來——腳本沒有這種參數，而且讀的一定是當下取到的那顆。
 setup 10 10
-rc=$(bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" --pane w9:pSTALE >/dev/null 2>&1; echo $?)
+rc=$(bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --owner bot-me --checkout "$CHECKOUT" --pane w9:pSTALE >/dev/null 2>&1; echo $?)
 check_eq "帶 --pane 會被拒（rc=2）" "2" "$rc"
 setup 10 10
 rc=$(run)
@@ -570,6 +582,52 @@ rc=$(run)
 check_eq "service 能力無法判定時 fail closed（rc=4）" "4" "$rc"
 check_no "能力不明時不取得維運租約" "lease acquire restart" "$AGM_DIR/calls.log"
 check_no "能力不明時不替換 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+# 16c. 不需要核准單（使用者 2026-09-29）：窗口走 restart-window，acquire 不帶 approval，也不接受 --approval。
+setup 10 10
+rc=$(run)
+check_eq "沒有核准單也能換版（rc=0）" "0" "$rc"
+check "窗口帶的是 owner 與 commit" "lease acquire restart --owner bot-me --commit $SHA" "$AGM_DIR/calls.log"
+check_no "safety 查詢不帶 --approval" "lease safety.*--approval" "$AGM_DIR/calls.log"
+rc=$(bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1; echo $?)
+check_eq "已經沒有 --approval 參數（rc=2）" "2" "$rc"
+teardown
+
+# 16f. 自測對象沒有在跑（no active run，例如 Linux 上 offline 的 browser-gc child）：略過自測、照樣換版，不卡死每趟自動部署。
+setup 10 10
+export STUB_PROBE='409 {"error":"conflict","reason":"bot has no active run"}'
+rc=$(run)
+check_eq "自測對象沒在跑就略過（rc=0）" "0" "$rc"
+check "log 講清楚略過的原因" "3b 自測略過" "$SWAP_LOG"
+check "照樣換了 binary" "new-binary" "$AGM_DIR/started-binary.log"
+teardown
+
+# 16d. 排程（timer／launchd）跑的沒有 pane：改用 herdr pane list 確認 socket 通，不是中止。
+setup 10 10
+unset HERDR_PANE_ID
+export STUB_PANE_CURRENT=""
+rc=$(run)
+check_eq "沒有自己的 pane 也能往下走（rc=0）" "0" "$rc"
+check "改問 pane list" "pane list" "$AGM_DIR/herdr.log"
+check "log 講明是排程執行" "3b herdr pane list ok" "$SWAP_LOG"
+teardown
+setup 10 10
+unset HERDR_PANE_ID
+export STUB_PANE_CURRENT="" STUB_PANE_LIST_FAIL=1
+rc=$(run)
+check_eq "herdr 不通就中止（rc=3）" "3" "$rc"
+check_no "沒有動 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+# 16e. 線上 daemon 太舊（沒有 restart-window 路由）：rc=9，什麼都不動。
+setup 10 10
+export STUB_CAP=service_old
+rc=$(run)
+check_eq "daemon 太舊時 rc=9" "9" "$rc"
+check "log 講清楚要先手動換一次" "線上 daemon 太舊" "$SWAP_LOG"
+check_no "沒有動 binary" "submit" "$AGM_DIR/launchctl.log"
+check_no "沒有要窗口" "lease acquire restart" "$AGM_DIR/calls.log"
 teardown
 
 # 17. 腳本本身：`$VAR` 後面直接接全形標點會被 `set -u` 當成變數名的一部分（2026-09-16／09-20／09-20 踩過三次）。

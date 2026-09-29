@@ -16,7 +16,6 @@ scripts/ops/release-triage-kick.sh  bin/release-triage-kick.sh
 scripts/ops/browser-gc-task.md      browser-gc-task.md          darwin
 scripts/ops/ci-watch-task.md        ci-watch-task.md
 scripts/ops/claude-release-task.md  claude-release-task.md
-scripts/ops/daemon-update-task.md   daemon-update-task.md
 scripts/ops/release-triage-task.md  release-triage-task.md
 
 # browser-gc 只在 macOS 裝：它喚醒的 child 操作 ego-browser（圖形介面瀏覽器），Linux 主機沒有桌面，

@@ -1,105 +1,31 @@
 #!/bin/bash
-# daemon-update-kick.sh 的隔離測試。
+# daemon-update-kick.sh 的隔離測試（例行自動部署，使用者 2026-09-29 簡化）。
 #
-# 完全不碰正式 daemon、正式 repo 或正式 AGM 目錄：每個 case 自己開一個暫存 git repo 與一支
-# 假的 `bin/agm`，用環境變數餵回應，再檢查腳本做了什麼決定（log 與它送出的指令）。
-# 測的是**決策**——什麼時候不派、什麼時候申請核准、拿不到窗口時會不會硬做。
+# 完全不碰正式 daemon／AGM 目錄／GitHub：每個 case 開暫存目錄，放一個假 origin（真的 git）、
+# 假主樹、假 AGM 目錄，再把 gh／bun／cargo／agm／daemon-swap.sh 換成 stub，從它們的 log 檢查腳本做了什麼決定。
+#
+# 釘住的行為：
+#   1. 沿 first-parent 往回找最新一顆 ubuntu-ci＝success 的 sha；沒有會進 binary 的差異就不問 GitHub、不建置。
+#   2. 在專用 checkout 建置，不動主樹；同一顆等安全窗口那幾輪不重建。
+#   3. 換版交給 daemon-swap.sh，**不帶核准單**、也不派工給任何 bot。
+#   4. 立即部署請求檔：部署那顆 sha（不等 ubuntu-ci），做完才刪；等不到窗口就留著。
+#   5. 失敗照舊推 ops_alert；被回滾的 sha 不再挑。
 #
 #   bash scripts/ops/daemon-update-kick_test.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/daemon-update-kick.sh"
+GITBIN=$(command -v git)
 PASS=0
 FAIL=0
-
-setup() {
-  ROOT=$(mktemp -d)
-  export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" AGM_BUILD_BOT="bot-build" AM_AGENT_NAME="test-owner"
-  export AGM_TEST_MINUTE="00"   # 預設當成整點那一輪；門檻的 case 自己覆寫
-  mkdir -p "$AGM_DIR/bin"
-  echo "TASK-BODY 建置說明" > "$AGM_DIR/daemon-update-task.md"
-  printf '%s' '{"manager_bot_id":"bot-manager","bot_id":"legacy-not-manager"}' > "$AGM_DIR/runtime.json"
-  # 一個有 origin/main 的最小 repo。
-  /usr/bin/git init -q "$AGM_REPO"
-  ( cd "$AGM_REPO" && /usr/bin/git config user.email t@t && /usr/bin/git config user.name t \
-      && mkdir -p daemon docs/goals scripts && echo x > daemon/main.rs && echo p > docs/goals/agm-supervisor-persona.md \
-      && /usr/bin/git add -A && /usr/bin/git commit -qm init && /usr/bin/git branch -qf origin-main \
-      && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
-  # 假的 agm：把呼叫寫進 calls.log，回應從 STUB_* 環境變數讀（在各 case 覆寫）。
-  cat > "$AGM_DIR/bin/agm" <<'STUB'
-#!/bin/bash
-echo "$*" >> "$AGM_DIR/calls.log"
-# 第一個不是 --flag 的參數是子命令，下一個是它的 op。
-sub=""; op=""
-for a in "$@"; do
-  case "$a" in --*) continue;; esac
-  if [ -z "$sub" ]; then sub="$a"; elif [ -z "$op" ]; then op="$a"; fi
-done
-case "$sub:$op" in
-  build-inputs:*)    printf '%s' "$STUB_BUILD_INPUTS" ;;
-  state:*)           printf '%s' "$STUB_STATE" ;;
-  assignments:*)     case " $* " in
-                       *" --id "*)
-                         query_id=""; previous=""
-                         for a in "$@"; do
-                           if [ "$previous" = --id ]; then query_id="$a"; break; fi
-                           previous="$a"
-                         done
-                         case "$STUB_ASSIGNMENT_QUERY_MODE" in
-                           match) printf '{"id":"a-1","client_request_id":"%s","status":"delivered"}' "$query_id" ;;
-                           not_found_complete) printf '{"error":"not_found","id":"%s","complete":true}' "$query_id"; exit 4 ;;
-                           not_found_incomplete) printf '{"error":"not_found","id":"%s","complete":false}' "$query_id"; exit 4 ;;
-                           *) printf '%s' "$STUB_ASSIGNMENT_QUERY_BODY"; exit "${STUB_ASSIGNMENT_QUERY_RC:-1}" ;;
-                         esac
-                         ;;
-                       *) printf '%s' "$STUB_ASSIGNMENTS" ;;
-                     esac ;;
-  lease:safety)      printf '%s' "$STUB_SAFETY" ;;
-  lease:acquire)     printf '%s' "$STUB_ACQUIRE" ;;
-  lease:release)     [ -n "${STUB_RELEASE_FAIL:-}" ] && { printf '%s' '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"fence_mismatch"}}'; exit 1; }
-                     printf '%s' '{"released":true}' ;;
-  approval:request)  case " $* " in
-                       *" --purpose restart "*) [ -n "${STUB_RESTART_FAIL:-}" ] && exit 1; printf '%s' "${STUB_RESTART_APPROVAL:-$STUB_APPROVAL}" ;;
-                       *) printf '%s' "$STUB_APPROVAL" ;;
-                     esac ;;
-  approval:decide)   [ -n "${STUB_DECIDE_FAIL:-}" ] && exit 1; printf '%s' '{"status":"approved"}' ;;
-  approval:list)     printf '%s' "$STUB_APPROVAL_LIST" ;;
-  approval:)         printf '%s\n' "${STUB_APPROVAL_HELP- --supersedes APPROVAL_ID}" ;;   # `approval --help`
-  assign:*)          for i in $(seq 1 $#); do
-                       eval "a=\${$i}"
-                       case "$a" in --text-file) eval "f=\${$((i+1))}"; cat "$f" >> "$AGM_DIR/assign-body.txt" ;; esac
-                     done
-                     [ -n "$STUB_ASSIGN_RC" ] && exit "$STUB_ASSIGN_RC"
-                     [ -n "$STUB_ASSIGN_FAIL" ] && exit 1; printf '%s' '{"id":"a-1"}' ;;
-  responder:show)    [ -n "${STUB_RESPONDER:-}" ] && printf '%s' "$STUB_RESPONDER" || printf '%s' '{}' ;;
-  *)                 printf '%s' '{}' ;;
-esac
-STUB
-  chmod +x "$AGM_DIR/bin/agm"
-  : > "$AGM_DIR/calls.log"
-  : > "$AGM_DIR/assign-body.txt"
-  # 預設是「一路順」，各 case 只覆寫自己要測的那一項。
-  export STUB_BUILD_INPUTS='{"paths":["daemon","web","Cargo.toml","docs/goals/agm-supervisor-persona.md","scripts/agm.py"]}'
-  export STUB_STATE='{"bots":[{"id":"bot-build","name":"build"}]}'
-  export STUB_ASSIGNMENTS='{"assignments":[]}'
-  export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-  export STUB_ACQUIRE='{"lease":{"fence":7,"resource":"rebuild"}}'
-  export STUB_APPROVAL='{"id":"ap-1","status":"pending"}'
-  export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
-  export STUB_ASSIGN_FAIL=""
-  export STUB_ASSIGN_RC="" STUB_ASSIGNMENT_QUERY_MODE="" STUB_ASSIGNMENT_QUERY_BODY='{}' STUB_ASSIGNMENT_QUERY_RC=1
-}
-
-teardown() { rm -rf "$ROOT"; unset AGM_FAIL_ALERT_AFTER AGM_BUILD_BOT AGM_TEST_MINUTE AGM_REBUILD_THRESHOLD AGM_REBUILD_MAX_WAIT_MIN; }
 
 check() { # check <描述> <要出現的字串> <檔案>
   if grep -q -- "$2" "$3" 2>/dev/null; then
     echo "ok   - $1"; PASS=$((PASS + 1))
   else
-    echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3"; FAIL=$((FAIL + 1))
+    echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3" 2>/dev/null; FAIL=$((FAIL + 1))
   fi
 }
-
 check_no() {
   if grep -q -- "$2" "$3" 2>/dev/null; then
     echo "FAIL - $1"; echo "      不該出現 '$2'"; sed 's/^/      /' "$3"; FAIL=$((FAIL + 1))
@@ -107,7 +33,6 @@ check_no() {
     echo "ok   - $1"; PASS=$((PASS + 1))
   fi
 }
-
 check_eq() { # check_eq <描述> <期望> <實際>
   if [ "$2" = "$3" ]; then
     echo "ok   - $1"; PASS=$((PASS + 1))
@@ -115,973 +40,307 @@ check_eq() { # check_eq <描述> <期望> <實際>
     echo "FAIL - $1（預期 '$2'，實際 '$3'）"; FAIL=$((FAIL + 1))
   fi
 }
-
-# 1. 一路順的情形：申請核准 → 取得窗口 → 派工，而且未結案查詢用的是 --open。
-setup
-bash "$SCRIPT"
-check "順利時會派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
-check "未結案判斷用 --open（含 awaiting_review）" "assignments --open" "$AGM_DIR/calls.log"
-check "先申請核准" "approval request" "$AGM_DIR/calls.log"
-# issue #421：核准有效期 6 小時，不是 90 分鐘。90 分鐘會在協調者沒裁示的那個晚上自己過期，
-# 下個整點的 kick 只能重新申請，部署就一小時一次地原地打轉。
-check "核准有效期是 6 小時（21600 秒）" "expires-in 21600" "$AGM_DIR/calls.log"
-check_no "不再用 90 分鐘" "expires-in 5400" "$AGM_DIR/calls.log"
-check "再取得 rebuild 窗口" "lease acquire rebuild" "$AGM_DIR/calls.log"
-check "派工帶 ownership" "--owns daemon" "$AGM_DIR/calls.log"
-teardown
-
-# 2. 上一筆還沒結案（awaiting_review）：不要再疊一筆。舊版只看 completed/failed 會在這裡出錯。
-setup
-export STUB_ASSIGNMENTS='{"assignments":[{"client_request_id":"agm-daemon-update-abc","status":"awaiting_review"}]}'
-bash "$SCRIPT"
-check "上一筆等驗收時不再派" "還沒結案" "$AGM_DIR/daemon-update.log"
-check_no "而且不會去申請核准" "approval request" "$AGM_DIR/calls.log"
-teardown
-
-# 3. 有人在跑：不取窗口、不派工。**核准照樣先申請**——「等太久就縮小封鎖面」的計時是從
-# 自己這筆核准被核准的時刻起算（SPEC §18.10），不先申請的話那個時鐘永遠不會開始走。
-setup
-export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-busy","name":"bot-busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "有人在跑就不派" "還有人在跑（bot-busy）" "$AGM_DIR/daemon-update.log"
-check_no "有人在跑不取窗口" "lease acquire" "$AGM_DIR/calls.log"
-check_no "有人在跑不派工" "assign --bot" "$AGM_DIR/calls.log"
-check "safety 帶著自己那筆核准問" "lease safety --approval" "$AGM_DIR/calls.log"
-teardown
-
-# 4. AGM 還沒核准：停在這裡，不硬做，也不去拿窗口。
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
-bash "$SCRIPT"
-check "沒核准就停住" "核准狀態是 pending" "$AGM_DIR/daemon-update.log"
-check_no "沒核准不會去拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 5. 窗口被別人拿走：不派工（這正是兩個執行者同時「等空檔」時的那一半）。
-setup
-export STUB_ACQUIRE='{"error":"conflict"}'
-bash "$SCRIPT"
-check "拿不到窗口就不派" "拿不到 rebuild 窗口" "$AGM_DIR/daemon-update.log"
-check_no "不會硬派工" "已派工" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 6. 派工失敗要把窗口還回去，不然下一輪永遠卡著。
-setup
-export STUB_ASSIGN_FAIL=yes
-bash "$SCRIPT"
-check "派工失敗會交還窗口" "lease release rebuild" "$AGM_DIR/calls.log"
-teardown
-
-# issue #669：assign exit 7 是 delivery_unknown。先對帳；已存在就當成功，不能交還 lease 或刪 token。
-setup
-export AGM_TEST_MINUTE="0"
-export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
-export STUB_ASSIGN_RC=7 STUB_ASSIGNMENT_QUERY_MODE=match
-bash "$SCRIPT"
-check "delivery_unknown 用同一 CRID 對帳" "assignments --id agm-daemon-update-" "$AGM_DIR/calls.log"
-check_no "已查到交辦時不交還 rebuild 窗口" "lease release rebuild" "$AGM_DIR/calls.log"
-check_eq "已查到交辦時保留 lease token 檔" "1" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
-check_eq "已查到交辦時保存 STATE" "1" "$( [ -s "$AGM_DIR/daemon-update.last" ] && echo 1 || echo 0 )"
-teardown
-
-# 只有 assignments --id 的完整清單明確 not_found，才確定未送達並交還。
-setup
-export AGM_TEST_MINUTE="0"
-export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
-export STUB_ASSIGN_RC=7 STUB_ASSIGNMENT_QUERY_MODE=not_found_complete
-bash "$SCRIPT"
-check "完整查詢明確不存在" "assignments --id agm-daemon-update-" "$AGM_DIR/calls.log"
-check "確認不存在後交還 rebuild 窗口" "lease release rebuild" "$AGM_DIR/calls.log"
-check_eq "確認不存在後移除 token 檔" "0" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
-teardown
-
-# 查詢清單不完整時仍是不確定：必須留住租約憑證並立即告警。
-setup
-export AGM_TEST_MINUTE="0"
-export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
-export STUB_ASSIGN_RC=7 STUB_ASSIGNMENT_QUERY_MODE=not_found_incomplete
-bash "$SCRIPT"
-check "不完整查詢使用 CRID 對帳" "assignments --id agm-daemon-update-" "$AGM_DIR/calls.log"
-check_no "不完整查詢不交還 rebuild 窗口" "lease release rebuild" "$AGM_DIR/calls.log"
-check_eq "不完整查詢保留 token 檔" "1" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
-check "不完整查詢立即推 ops_alert" "ops-alert --source test-owner --reason assign_delivery_unknown" "$AGM_DIR/calls.log"
-teardown
-
-# 6b. 連續沒能完成：過閘的那幾輪累計，連續 N 輪推 ops_alert；非整點輪不動計數；完整跑完清零。
-setup
-export STUB_STATE='{"bots":[]}' AGM_FAIL_ALERT_AFTER=3
-bash "$SCRIPT"; AGM_TEST_MINUTE=37 bash "$SCRIPT"; bash "$SCRIPT"
-check_no "連續 2 輪（中間夾一輪非整點）還不喊人" "ops-alert" "$AGM_DIR/calls.log"
-bash "$SCRIPT"
-check "連續 3 個過閘輪推 check_failing" "ops-alert.*check_failing" "$AGM_DIR/calls.log"
-export STUB_STATE='{"bots":[{"id":"bot-build","name":"build"}]}'
-bash "$SCRIPT"
-[ ! -e "$AGM_DIR/daemon-update.fails" ] && { echo "ok   - 完整跑完一輪清零"; PASS=$((PASS + 1)); } || { echo "FAIL - 完整跑完一輪清零"; FAIL=$((FAIL + 1)); }
-unset AGM_FAIL_ALERT_AFTER
-teardown
-
-# 6c. 任務說明檔不在：不申請核准、不拿租約、不派（以前會拿了租約派出一則沒有說明的交辦）。
-setup
-rm -f "$AGM_DIR/daemon-update-task.md"
-bash "$SCRIPT"
-check "任務檔不在有記 log" "daemon-update-task.md" "$AGM_DIR/daemon-update.log"
-check_no "不申請核准" "approval request" "$AGM_DIR/calls.log"
-check_no "不拿租約" "lease acquire" "$AGM_DIR/calls.log"
-check_no "不派工" "assign" "$AGM_DIR/calls.log"
-teardown
-
-# 7. 沒設建置 child 就整支跳過——絕不改派給使用者的 bot。
-setup
-unset AGM_BUILD_BOT
-bash "$SCRIPT"
-check "沒有建置 child 就跳過" "沒設 AGM_BUILD_BOT" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 8. Real asynchronous decision: the next run must reuse the first request, not create ap-2.
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
-bash "$SCRIPT"
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
-bash "$SCRIPT"
-check_no "跨次執行不再申請新 ID" "approval request" "$AGM_DIR/calls.log"
-check "接續原核准取得租約" "--approval ap-1" "$AGM_DIR/calls.log"
-check "核准後才派工" "已派工" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 9. Transport failures and malformed replies cannot mean there is no pending work.
-setup
-export STUB_ASSIGNMENTS='{"error":"unavailable"}'
-bash "$SCRIPT"
-check "查派工失敗會停住" "無法確認未結案派工" "$AGM_DIR/daemon-update.log"
-check_no "查派工失敗不申請" "approval request" "$AGM_DIR/calls.log"
-teardown
-
-# 10. A denial is durable, not a reason to spam AGM with another approval next hour.
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"denied"}]}'
-bash "$SCRIPT"
-: > "$AGM_DIR/calls.log"
-bash "$SCRIPT"
-check_no "拒絕後不重複申請" "approval request" "$AGM_DIR/calls.log"
-check_no "拒絕後不取租約" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 11. Expiry permits a new request on the next run, never using the expired approval.
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved","expires_at":"2000-01-01T00:00:00Z"}]}'
-bash "$SCRIPT"
-check_no "過期不取租約" "lease acquire" "$AGM_DIR/calls.log"
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-2","status":"pending"}]}'
-bash "$SCRIPT"
-check "過期後可重新申請" "approval request" "$AGM_DIR/calls.log"
-teardown
-
-# 12. A lost/corrupt approval list cannot authorize execution or create another request.
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
-bash "$SCRIPT"
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL_LIST='{"approvals":null}'
-bash "$SCRIPT"
-check "核准讀取失敗會停住" "ALERT approval_missing" "$AGM_DIR/daemon-update.log"
-# 只寫 log 會永久靜默停住（review 2026-09-16 c1 M1）：要推一則 durable 事件給 AGM。
-check "核准查不到會喊人" "ops-alert --source test-owner --reason approval_missing" "$AGM_DIR/calls.log"
-check_no "不拿新申請繞過讀取錯誤" "approval request" "$AGM_DIR/calls.log"
-check_no "讀取錯誤不取租約" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 13. Overlapping invocations stop before making any API mutations.
-setup
-mkdir "$AGM_DIR/daemon-update.lock"
-printf '%s %s\n' "$$" "$(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"   # $$ = 這支測試，command 含 daemon-update-kick
-bash "$SCRIPT"
-check "重疊執行停止" "已有執行者" "$AGM_DIR/daemon-update.log"
-check_no "重疊執行不申請" "approval request" "$AGM_DIR/calls.log"
-check_no "重疊執行不喊人" "ops-alert" "$AGM_DIR/calls.log"
-teardown
-
-# 13b. 殘留鎖（執行者已經不在：強制關機、SIGKILL）：回收後照常做這一輪，不再永久停住。
-setup
-mkdir "$AGM_DIR/daemon-update.lock"
-printf '%s %s\n' 999999 "$(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"   # 不存在的 pid
-touch -t 202601010000 "$AGM_DIR/daemon-update.lock"                           # 而且已經放很久
-bash "$SCRIPT"
-check "殘留鎖被回收" "清掉殘留鎖" "$AGM_DIR/daemon-update.log"
-check "回收後照常派工" "已派工" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 13c. 執行者還活著但卡了太久：不搶它的鎖，改喊人。
-setup
-mkdir "$AGM_DIR/daemon-update.lock"
-printf '%s %s\n' "$$" "$(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"
-touch -t 202601010000 "$AGM_DIR/daemon-update.lock"
-AGM_LOCK_HUNG_SECS=60 bash "$SCRIPT"
-check "卡住的執行者會喊人" "ops-alert --source test-owner --reason runner_hung" "$AGM_DIR/calls.log"
-check_no "卡住時不搶鎖" "approval request" "$AGM_DIR/calls.log"
-teardown
-
-# 13d. 核准狀態檔壞掉：一樣喊人，不自己繞過。
-setup
-printf '%s' 'not json' > "$AGM_DIR/daemon-update.approval.json"
-bash "$SCRIPT"
-check "狀態檔壞掉會喊人" "ops-alert --source test-owner --reason state_corrupt" "$AGM_DIR/calls.log"
-check_no "狀態檔壞掉不申請" "approval request" "$AGM_DIR/calls.log"
-teardown
-
-# 14. The daemon filtered AGM and builder activity; consume its result and forward both IDs.
-setup
-export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "只有 AGM 與建置者忙碌仍可派工" "已派工" "$AGM_DIR/daemon-update.log"
-check "acquire 帶同一份兩顆排除名單" "--exclude-bot bot-build --exclude-bot bot-manager" "$AGM_DIR/calls.log"
-check_no "不得拿相容 bot_id 當管理員" "--exclude-bot legacy-not-manager" "$AGM_DIR/calls.log"
-teardown
-
-# 15. Exclude identities, not names: an unrelated bot also named AGM is still protected.
-setup
-export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"user-bot","name":"AGM"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check_no "其他同名 bot 忙碌時不取租約" "lease acquire" "$AGM_DIR/calls.log"
-check "仍回報有人在跑" "還有人在跑（AGM）" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 16. The in-flight check protects user turns even when working is empty.
-setup
-export STUB_SAFETY='{"safe":false,"working":[],"in_flight":[{"bot_id":"user-bot","turn_id":"t3"}],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check_no "其他 bot 的 in-flight 不可被排除" "lease acquire" "$AGM_DIR/calls.log"
-check "in-flight 理由可見" "還有人在跑（in_flight）" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 17. Do not hide failed reads, including reads of the excluded manager itself.
-setup
-export STUB_SAFETY='{"safe":false,"working":[],"in_flight":[],"unreadable":[{"bot_id":"bot-manager"}],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check_no "讀取失敗不取租約" "lease acquire" "$AGM_DIR/calls.log"
-check "unreadable 理由可見" "還有人在跑（unreadable）" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 18. A missing/corrupt manager identity must not turn into a guessed exclusion.
-for runtime in '{}' '{"manager_bot_id":null}' '{"manager_bot_id":" "}' 'broken'; do
-  setup
-  printf '%s' "$runtime" > "$AGM_DIR/runtime.json"
-  bash "$SCRIPT"
-  check "無效 runtime 不會猜 AGM 身分" "無法從 runtime.json 取得 manager_bot_id" "$AGM_DIR/daemon-update.log"
-  check_no "無效 runtime 不取租約" "lease acquire" "$AGM_DIR/calls.log"
-  teardown
-done
-
-# 19. Filtering must not turn malformed safety responses into an empty safe window.
-for safety in '{}' '{"safe":false}' '{"safe":false,"working":[],"in_flight":[],"unreadable":[]}' '{"safe":true,"working":[],"in_flight":{},"unreadable":[]}'; do
-  setup
-  export STUB_SAFETY="$safety"
-  bash "$SCRIPT"
-  check_no "錯誤或無法解釋的 safety 不取租約" "lease acquire" "$AGM_DIR/calls.log"
-  teardown
-done
-
-# 20. Upgraded daemon applies exclusions server-side and echoes the applied IDs.
-setup
-export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "safety 傳兩顆排除 ID" "lease safety --approval ap-1 --exclude-bot bot-build --exclude-bot bot-manager" "$AGM_DIR/calls.log"
-check "新版 daemon 確認安全後派工" "已派工" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 21. Never override a new daemon's refusal with client-side filtering.
-setup
-export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-manager","name":"AGM"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check_no "新版 daemon 判不安全時不靠過濾繞過" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 22. The server must confirm the exact exclusions before its preflight can be trusted.
-setup
-export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","unrelated-bot"]}'
-bash "$SCRIPT"
-check_no "排除名單不一致時停止" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 23. An old daemon that did not apply exclusions cannot authorize this script.
-setup
-export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[]}'
-bash "$SCRIPT"
-check_no "舊端點沒有回排除名單時不取租約" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 24. AGM 雙角色：協調者也排除；以 runtime.json 的角色派工，巡檢目錄就是 patrol 驗收。
-setup
-printf '%s' '{"manager_bot_id":"bot-manager","role":"patrol","self_bot_id":"bot-manager"}' > "$AGM_DIR/runtime.json"
-export STUB_RESPONDER='{"configured":true,"bot_id":"bot-resp"}'
-export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager","bot-resp"]}'
-bash "$SCRIPT"
-check "safety 也排除協調者" "lease safety --approval ap-1 --exclude-bot bot-build --exclude-bot bot-manager --exclude-bot bot-resp" "$AGM_DIR/calls.log"
-check "派工帶上巡檢角色" "--review-by patrol" "$AGM_DIR/calls.log"
-check "雙角色下照常派工" "已派工" "$AGM_DIR/daemon-update.log"
-teardown
-unset STUB_RESPONDER
-
-# 25. 舊部署（runtime 沒有 role、沒有協調者）：不帶 --review-by，舊 CLI 才不會拒絕整筆派工。
-setup
-bash "$SCRIPT"
-check_no "舊部署不帶 --review-by" "--review-by" "$AGM_DIR/calls.log"
-check "舊部署照常派工" "已派工" "$AGM_DIR/daemon-update.log"
-teardown
-
-echo "----"
-# 7b. 預設門檻是 3（使用者 2026-09-16 從 5 降下來）：兩筆還要等整點，第三筆一到就不等。
-setup
-export AGM_TEST_MINUTE="37"
-two='{"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"},
-  {"id":"a2","purpose":"rebuild","status":"pending","requester":"bot-2","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"}'
-export STUB_APPROVAL_LIST="{\"approvals\":[$two]}"
-bash "$SCRIPT"
-check "兩筆還不夠" "非整點且重建申請只有 2/3" "$AGM_DIR/daemon-update.log"
-check_no "兩筆不會去拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-setup
-export AGM_TEST_MINUTE="37"
-export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"ap-1\",\"status\":\"approved\"},$two,
-  {\"id\":\"a3\",\"purpose\":\"rebuild\",\"status\":\"pending\",\"requester\":\"bot-3\",\"target_commit\":\"c2\",\"created_at\":\"2099-01-01T00:00:00.000Z\"}]}"
-bash "$SCRIPT"
-check "第三筆就不等整點" "重建申請 3/3，不等整點" "$AGM_DIR/daemon-update.log"
-check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
-teardown
-
-echo "----"
-# 8. 非整點又沒有累積夠的重建申請：整輪跳過，連 fetch 之後的判斷都不做（使用者 2026-09-14）。
-setup
-export AGM_TEST_MINUTE="37"
-export STUB_APPROVAL_LIST='{"approvals":[]}'
-bash "$SCRIPT"
-check "非整點且請求不足就不檢查" "非整點且重建申請只有 0/3" "$AGM_DIR/daemon-update.log"
-check_no "不會申請核准" "approval request" "$AGM_DIR/calls.log"
-check_no "不會去拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 9. 非整點但申請集滿門檻：照樣走完整流程。
-setup
-export AGM_TEST_MINUTE="37"
-export STUB_APPROVAL_LIST='{"approvals":[
-  {"id":"ap-1","status":"approved"},
-  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"},
-  {"id":"a2","purpose":"rebuild","status":"approved","requester":"bot-2","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"},
-  {"id":"a3","purpose":"rebuild","status":"pending","requester":"bot-3","target_commit":"c2","created_at":"2099-01-01T00:00:00.000Z"},
-  {"id":"a4","purpose":"rebuild","status":"pending","requester":"bot-4","target_commit":"c2","created_at":"2099-01-01T00:00:00.000Z"},
-  {"id":"a5","purpose":"rebuild","status":"pending","requester":"bot-4","target_commit":"c2","created_at":"2099-01-01T00:00:00.000Z"},
-  {"id":"a6","purpose":"rebuild","status":"pending","requester":"bot-5","target_commit":"c3","created_at":"2099-01-01T00:00:00.000Z"},
-  {"id":"a7","purpose":"restart","status":"pending","requester":"bot-9","target_commit":"c9","created_at":"2099-01-01T00:00:00.000Z"},
-  {"id":"a8","purpose":"rebuild","status":"denied","requester":"bot-8","target_commit":"c8","created_at":"2099-01-01T00:00:00.000Z"}
-]}'
-bash "$SCRIPT"
-check "集滿門檻就不等整點" "重建申請 5/3，不等整點" "$AGM_DIR/daemon-update.log"
-check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 10. 門檻可調：AGM_REBUILD_THRESHOLD=2 時兩筆就夠。
-setup
-export AGM_TEST_MINUTE="37" AGM_REBUILD_THRESHOLD=2
-export STUB_APPROVAL_LIST='{"approvals":[
-  {"id":"ap-1","status":"approved"},
-  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"},
-  {"id":"a2","purpose":"rebuild","status":"pending","requester":"bot-2","target_commit":"c1","created_at":"2099-01-01T00:00:00.000Z"}
-]}'
-bash "$SCRIPT"
-check "門檻可以調小" "重建申請 2/2，不等整點" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 11. 上次上線之後才算：built 之前建立的申請不列入。
-setup
-export AGM_TEST_MINUTE="37"
-printf '%s' "$(cd "$AGM_REPO" && /usr/bin/git rev-parse --short HEAD)x" > "$AGM_DIR/daemon-update.built"
-export STUB_APPROVAL_LIST='{"approvals":[
-  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
-  {"id":"a2","purpose":"rebuild","status":"pending","requester":"bot-2","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
-  {"id":"a3","purpose":"rebuild","status":"pending","requester":"bot-3","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
-  {"id":"a4","purpose":"rebuild","status":"pending","requester":"bot-4","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
-  {"id":"a5","purpose":"rebuild","status":"pending","requester":"bot-5","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"}
-]}'
-bash "$SCRIPT"
-check "上次上線之前的申請不算" "非整點且重建申請只有 0/3" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 12. 申請沒湊滿，但最早一筆已經等超過 30 分鐘：不等整點（使用者 2026-09-15）。
-setup
-export AGM_TEST_MINUTE="37"
-export STUB_APPROVAL_LIST='{"approvals":[
-  {"id":"ap-1","status":"approved"},
-  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"}
-]}'
-bash "$SCRIPT"
-check "等超過上限就不等整點" "最早一筆重建申請已等" "$AGM_DIR/daemon-update.log"
-check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 13. 申請還沒等滿 30 分鐘（剛建立）而且沒湊滿：照舊等整點。
-setup
-export AGM_TEST_MINUTE="37"
-now_iso=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"a1\",\"purpose\":\"rebuild\",\"status\":\"pending\",\"requester\":\"bot-1\",\"target_commit\":\"c1\",\"created_at\":\"$now_iso\"}]}"
-bash "$SCRIPT"
-check "剛建立的申請不觸發" "非整點且重建申請只有 1/3（最早一筆等了 0 分鐘）" "$AGM_DIR/daemon-update.log"
-check_no "不會去拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 14. 等待上限可調：AGM_REBUILD_MAX_WAIT_MIN 設很大時，舊申請也不觸發。
-setup
-export AGM_TEST_MINUTE="37" AGM_REBUILD_MAX_WAIT_MIN=99999999
-export STUB_APPROVAL_LIST='{"approvals":[
-  {"id":"a1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"}
-]}'
-bash "$SCRIPT"
-check "等待上限可以調大" "非整點且重建申請只有 1/3" "$AGM_DIR/daemon-update.log"
-teardown
-
-echo "----"
-# 15. 縮小封鎖面（SPEC §18.10）：daemon 判 safe，即使還有 bot 在 working 也照換，log 與派工正文寫明是升級後才換的。
-setup
-export STUB_SAFETY='{"safe":true,"escalated":true,"waited_secs":2700,"working":[{"bot_id":"b9","name":"wits-pro"}],"in_flight":[{"bot_id":"b9","turn_id":"t9"}],"unreadable":[],"delivering":[],"held_leases":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "升級後照樣拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-check "log 寫明是升級後才換" "安全窗口是升級後才成立的：核准後已等 45 分鐘" "$AGM_DIR/daemon-update.log"
-check "派工正文也寫明" "這次是升級後才換：核准後已等 45 分鐘" "$AGM_DIR/assign-body.txt"
-teardown
-
-# 16. 升級歸升級，daemon 說不安全就是不安全——而且理由要指出真正擋住的那一項。
-setup
-export STUB_SAFETY='{"safe":false,"escalated":true,"waited_secs":2700,"working":[{"bot_id":"b9","name":"wits-pro"}],"in_flight":[],"unreadable":[],"delivering":[{"bot_id":"b1","name":"AM-1-XH","turn_id":"t1"}],"held_leases":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "送達中就是不換" "還有人在跑（送達中:AM-1-XH）" "$AGM_DIR/daemon-update.log"
-check_no "送達中不取租約" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-setup
-export STUB_SAFETY='{"safe":false,"escalated":true,"waited_secs":2700,"working":[],"in_flight":[],"unreadable":[],"delivering":[],"held_leases":[{"resource":"restart","owner":"someone"}],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "別人握著租約就是不換" "還有人在跑（租約:restart）" "$AGM_DIR/daemon-update.log"
-check_no "有租約不取租約" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 自己握的租約不擋自己（SPEC §18.10）：safety 要用跟 acquire 同一個 owner 問，daemon 判安全就照常派。
-setup
-export STUB_SAFETY='{"safe":true,"escalated":true,"waited_secs":2700,"working":[{"bot_id":"b9","name":"wits-pro"}],"in_flight":[],"unreadable":[],"delivering":[],"held_leases":[{"resource":"rebuild","owner":"test-owner","own":true}],"owner":"test-owner","excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "safety 以自己的 owner 問" "--exclude-bot bot-manager --owner test-owner" "$AGM_DIR/calls.log"
-check "自己的租約不擋，照常取租約" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 就算 daemon 判不安全，理由裡也不把自己的那把列成「租約」——看 log 的人才不會以為是別人卡住。
-setup
-export STUB_SAFETY='{"safe":false,"escalated":true,"waited_secs":2700,"working":[],"in_flight":[],"unreadable":[],"delivering":[{"bot_id":"b1","name":"AM-1-XH","turn_id":"t1"}],"held_leases":[{"resource":"rebuild","owner":"test-owner","own":true}],"owner":"test-owner","excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "擋人的理由是送達中" "還有人在跑（送達中:AM-1-XH）" "$AGM_DIR/daemon-update.log"
-check_no "自己的租約不出現在理由裡" "租約:rebuild" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 17. 沒升級時照舊：daemon 判不安全，理由還是那顆在跑的 bot。
-setup
-export STUB_SAFETY='{"safe":false,"escalated":false,"waited_secs":null,"working":[{"bot_id":"b9","name":"wits-pro"}],"in_flight":[],"unreadable":[],"delivering":[],"held_leases":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "沒升級照舊擋" "還有人在跑（wits-pro）" "$AGM_DIR/daemon-update.log"
-check_no "沒升級不取租約" "lease acquire" "$AGM_DIR/calls.log"
-check_no "沒升級不寫升級 log" "升級後才成立" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 18. 舊 daemon（沒有 escalated／delivering 欄位）：行為完全照舊，也不會誤寫升級紀錄。
-setup
-export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "舊 daemon 照樣派工" "已派工" "$AGM_DIR/daemon-update.log"
-check_no "舊 daemon 不寫升級紀錄" "升級後" "$AGM_DIR/assign-body.txt"
-teardown
-
-echo "----"
-# 26. 租約憑證（SPEC §18.10）：token 不進派工正文（會出現在 assignments API、child 的對話紀錄與這份 log），
-# 寫進只有本人讀得到的檔案，正文只給路徑（review2 sup #5）。
-setup
-export AGM_TEST_MINUTE="0"
-export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
-bash "$SCRIPT"
-# 檔名是 mktemp 給的隨機尾巴（O_EXCL＋猜不到，同 uid 的行程佔不住那個名字，i92b 審核）。
-TOKF=$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | head -1)
-check_eq "token 檔只有一份" "1" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
-if [ -e "$AGM_DIR/daemon-update.lease-token" ]; then
-  echo "FAIL - 還在用可預測的固定路徑"; FAIL=$((FAIL + 1))
-else
-  echo "ok   - 不是可預測的固定路徑"; PASS=$((PASS + 1))
-fi
-check "腳本用 mktemp 建 token 檔" 'mktemp "\$DIR/daemon-update.lease-token.XXXXXX"' "$SCRIPT"
-check "派工正文用檔案帶 lease-token" "--lease-token-file $TOKF" "$AGM_DIR/assign-body.txt"
-# `--lease-token "$(cat …)"` 等於叫 child 把 token 攤回 argv（同 uid 用 `ps` 就看得到），
-# 前面寫 600 檔的功夫就白做了；正文只能給路徑（issue #477，i264 審核）。
-check_no "正文不叫 child 把 token 攤回 argv" 'cat .*daemon-update.lease-token' "$AGM_DIR/assign-body.txt"
-check_no "派工正文沒有 token 本身" "tok-abc123" "$AGM_DIR/assign-body.txt"
-check_no "log 裡也沒有" "tok-abc123" "$AGM_DIR/daemon-update.log"
-check "token 檔的內容" "^tok-abc123$" "$TOKF"
-if [ "$(stat -c %a "$TOKF" 2>/dev/null || stat -f %Lp "$TOKF")" = "600" ]; then
-  echo "ok   - token 檔只有本人讀得到"; PASS=$((PASS + 1))
-else
-  echo "FAIL - token 檔權限不是 600"; FAIL=$((FAIL + 1))
-fi
-teardown
-
-# 派工失敗要交還窗口，一樣要出示憑證。
-setup
-export AGM_TEST_MINUTE="0"
-export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
-export STUB_ASSIGN_FAIL=1
-bash "$SCRIPT"
-check "交還窗口帶 lease-token" "lease release rebuild --owner .* --fence 9 --lease-token-file .*daemon-update.lease-token" "$AGM_DIR/calls.log"
-check_no "token 自己不進 argv" "tok-abc123" "$AGM_DIR/calls.log"
-teardown
-
-# token 檔寫不出來：退而用 stdin（`--lease-token -`），仍然不讓 token 進 argv（issue #477）。
-setup
-export AGM_TEST_MINUTE="0"
-export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
-# mktemp 的名字猜不到，佔不住——改成讓「建 token 檔」那一次 mktemp 直接失敗（不帶樣板的那次照常，
-# 派工正文的暫存檔還要用）。
-mkdir -p "$ROOT/stubbin"
-{ echo '#!/bin/bash'
-  echo 'case "${1:-}" in *daemon-update.lease-token.XXXXXX) exit 1 ;; esac'
-  echo 'exec /usr/bin/mktemp "$@"'
-} > "$ROOT/stubbin/mktemp"
-chmod +x "$ROOT/stubbin/mktemp"
-PATH="$ROOT/stubbin:$PATH" bash "$SCRIPT"
-check "寫不進檔就從 stdin 交還" "lease release rebuild --owner .* --fence 9 --lease-token -" "$AGM_DIR/calls.log"
-check_no "這條路一樣不讓 token 進 argv" "tok-abc123" "$AGM_DIR/calls.log"
-check "這輪不派工" "寫不進 lease token 檔" "$AGM_DIR/daemon-update.log"
-check_eq "失敗那次不留半個 token 檔" "0" "$(ls "$AGM_DIR"/daemon-update.lease-token.* 2>/dev/null | wc -l | tr -d ' ')"
-check "stdin 那條路交還成功也記一行" "rebuild 窗口已交還（token 檔寫不出來）" "$AGM_DIR/daemon-update.log"
-if [ -s "$AGM_DIR/assign-body.txt" ]; then   # setup 會先建一個空的，有內容才是真的派了工
-  echo "FAIL - 寫不進 token 檔卻還是派了工"; FAIL=$((FAIL + 1))
-else
-  echo "ok   - 寫不進 token 檔就不派工"; PASS=$((PASS + 1))
-fi
-teardown
-
-# 交還窗口失敗：log 不准說「已交還」（issue #477，i407 審核）。以前這兩處都是 `… || true`，
-# note_fail 先寫了「交還窗口」，release 的 rc 又被丟掉，窗口其實握到 TTL 而紀錄說還了。
-setup
-export AGM_TEST_MINUTE="0"
-export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
-export STUB_ASSIGN_FAIL=1 STUB_RELEASE_FAIL=1
-bash "$SCRIPT"
-check "派工失敗的交還失敗有記 log" "交還 rebuild 窗口失敗 rc=" "$AGM_DIR/daemon-update.log"
-check "講出窗口仍被握著" "窗口仍被握著" "$AGM_DIR/daemon-update.log"
-check_no "不准謊報已交還" "rebuild 窗口已交還" "$AGM_DIR/daemon-update.log"
-check "log 的字眼是「嘗試交還」" "派工失敗，嘗試交還窗口" "$AGM_DIR/daemon-update.log"
-unset STUB_RELEASE_FAIL
-teardown
-
-# 交還成功時照樣要留一行，下一個人才看得出窗口確實還了。
-setup
-export AGM_TEST_MINUTE="0"
-export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"},"lease_token":"tok-abc123"}'
-export STUB_ASSIGN_FAIL=1
-bash "$SCRIPT"
-check "交還成功有記 log" "rebuild 窗口已交還（派工失敗）" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 舊 daemon 沒有 lease_token：照舊不帶，不要送出空的旗標。
-setup
-export AGM_TEST_MINUTE="0"
-export STUB_ACQUIRE='{"lease":{"fence":9,"resource":"rebuild"}}'
-export STUB_ASSIGN_FAIL=1
-bash "$SCRIPT"
-check_no "舊 daemon 不帶空旗標" "--lease-token" "$AGM_DIR/calls.log"
-check "舊 daemon 照樣交還窗口" "lease release rebuild --owner" "$AGM_DIR/calls.log"
-teardown
-
-echo "----"
-# 27. 申請計數不算自己的、也不算過期的（review2 sup 新發現 2）：自己先申請、30 分鐘後再被自己觸發，
-# 每 5 分鐘一輪、main 一動就對協調者再開一筆。
-setup
-export AGM_TEST_MINUTE="37"
-export STUB_APPROVAL_LIST='{"approvals":[
-  {"id":"m1","purpose":"rebuild","status":"denied","requester":"test-owner","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
-  {"id":"x1","purpose":"rebuild","status":"pending","requester":"bot-1","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z","expires_at":"2000-01-01T01:00:00Z"},
-  {"id":"x2","purpose":"rebuild","status":"approved","requester":"bot-2","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z","expires_at":"2000-01-01T01:00:00Z"},
-  {"id":"x3","purpose":"rebuild","status":"pending","requester":"bot-3","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z","expires_at":"2000-01-01T01:00:00Z"}
-]}'
-bash "$SCRIPT"
-check "過期的申請不算、也不觸發等太久" "非整點且重建申請只有 0/3（最早一筆等了 0 分鐘）" "$AGM_DIR/daemon-update.log"
-teardown
-
-setup
-export AGM_TEST_MINUTE="37"
-export STUB_APPROVAL_LIST='{"approvals":[
-  {"id":"ap-1","purpose":"rebuild","status":"approved","requester":"test-owner","target_commit":"c1","created_at":"2000-01-01T00:00:00.000Z"},
-  {"id":"m2","purpose":"rebuild","status":"pending","requester":"test-owner","target_commit":"c2","created_at":"2000-01-01T00:00:00.000Z"},
-  {"id":"m3","purpose":"rebuild","status":"pending","requester":"test-owner","target_commit":"c3","created_at":"2000-01-01T00:00:00.000Z"}
-]}'
-bash "$SCRIPT"
-check_no "自己的申請不算進門檻" "重建申請 3/3" "$AGM_DIR/daemon-update.log"
-check_no "自己的申請不觸發等太久" "最早一筆重建申請已等" "$AGM_DIR/daemon-update.log"
-check "自己還有在等的核准就照常往下跑" "自己的重建核准還在等（裁示或安全窗口），不等整點（別人的申請 0/3）" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 28. main 只動到不進 binary 的檔：沿用原本的核准（commit 對原本那顆），不為 docs-only 再叫醒協調者。
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
-bash "$SCRIPT"
-H1=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
-( cd "$AGM_REPO" && echo more >> docs/goals/notes.md && /usr/bin/git add -A && /usr/bin/git commit -qm docs \
-    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
-bash "$SCRIPT"
-check_no "docs-only 不重新申請" "approval request" "$AGM_DIR/calls.log"
-check "沿用原核准、commit 對原本那顆" "lease acquire rebuild --approval ap-1 --commit $H1" "$AGM_DIR/calls.log"
-check "log 寫明沿用" "只動到不進 binary 的檔，沿用核准 ap-1" "$AGM_DIR/daemon-update.log"
-check "照常派工" "已派工" "$AGM_DIR/daemon-update.log"
-# HEAD 在核准後前進：派工目標必須是核准的那顆，不得派 HEAD（2026-09-22 核准 513f2320、建了 69010d72）。
-H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
-check "交辦正文指名核准的 commit" "要建、要重啟的 commit：${H1}（核准 ap-1 針對的就是它）" "$AGM_DIR/assign-body.txt"
-check "交辦正文說明 HEAD 不是目標" "仍然 checkout $H1 來建，restart 核准也申請 $H1" "$AGM_DIR/assign-body.txt"
-check_no "交辦正文不把 HEAD 當目標" "要建、要重啟的 commit：$H2" "$AGM_DIR/assign-body.txt"
-check "request-id 用核准的 commit" "request-id agm-daemon-update-$H1" "$AGM_DIR/calls.log"
-check_no "request-id 不用 HEAD" "request-id agm-daemon-update-$H2" "$AGM_DIR/calls.log"
-teardown
-
-# 29. 已核准、還沒派工（在等安全窗口）時 main 又動到要建的東西：照核准的那顆建，不 supersede、不開新申請
-#     （issue #439：main 約每 5 分鐘一個 push，已核准的那張每輪被取代，核准永遠派不出去）。
-bump_code() { ( cd "$AGM_REPO" && echo "$1" >> daemon/main.rs && /usr/bin/git add -A && /usr/bin/git commit -qm "code $1" \
-    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1; }
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
-export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"b9","name":"busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-H1=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
-bump_code y
-H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check_no "已核准沒派工：main 前進不開新申請" "approval request" "$AGM_DIR/calls.log"
-check_no "已核准沒派工：不 supersede" "--supersedes" "$AGM_DIR/calls.log"
-check "拿窗口用核准的 commit" "lease acquire rebuild --approval ap-1 --commit $H1" "$AGM_DIR/calls.log"
-check "request-id 用核准的 commit" "request-id agm-daemon-update-$H1" "$AGM_DIR/calls.log"
-check "交辦正文指名核准的 commit" "要建、要重啟的 commit：${H1}（核准 ap-1 針對的就是它）" "$AGM_DIR/assign-body.txt"
-check "交辦正文說明 HEAD 留到下一輪" "這次仍然只 checkout $H1 來建" "$AGM_DIR/assign-body.txt"
-check "交辦正文寫出之後有幾個 commit 動到 binary" "之後還有 1 個 commit 動到 binary，留下一趟" "$AGM_DIR/assign-body.txt"
-check_no "交辦正文不說成 docs-only" "只動到不進 binary 的檔" "$AGM_DIR/assign-body.txt"
-check "log 寫明照核准的建" "核准 ap-1 已核准、還沒派工：照它的 commit $H1 建，origin/main $H2 留到下一輪" "$AGM_DIR/daemon-update.log"
-check "已派過記的是核准的 commit，不是 HEAD" "^$H1$" "$AGM_DIR/daemon-update.last"
-# 同一張核准還掛著 approved（例如租約還沒交還）但這顆 commit 已經派過：不再派同一顆，改為 HEAD 申請。
-: > "$AGM_DIR/calls.log"; : > "$AGM_DIR/assign-body.txt"
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"},{"id":"ap-2","status":"pending"}]}'
-bash "$SCRIPT"
-check_no "已派過的核准不再派一次" "request-id agm-daemon-update-$H1" "$AGM_DIR/calls.log"
-check "改為 HEAD 申請" "approval request .* --commit $H2" "$AGM_DIR/calls.log"
-teardown
-
-# 29b. 那張核准用掉（consumed）之後才為新的 HEAD 開申請。
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"approved"}]}'
-export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"b9","name":"busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-bump_code y
-export STUB_SAFETY='{"safe":true,"working":[],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-bump_code z
-H3=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"consumed"},{"id":"ap-2","status":"pending"}]}'
-bash "$SCRIPT"
-check "consumed 之後為 HEAD 開新申請" "approval request --requester test-owner --purpose rebuild .* --commit $H3" "$AGM_DIR/calls.log"
-check "新申請等裁示，這輪不派" "核准狀態是 pending" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 29c. 還沒核准（pending）時 main 動到要建的東西：照舊換成新 commit（--supersedes），等待時間由 daemon 接過去。
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
-bash "$SCRIPT"
-bump_code y
-H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"},{"id":"ap-2","status":"pending"}]}'
-bash "$SCRIPT"
-check "pending 時換了要建的東西就取代舊申請" "approval request --requester test-owner --purpose rebuild .* --commit $H2 --expires-in 21600 --supersedes ap-1" "$AGM_DIR/calls.log"
-check "log 寫明取代誰" "已申請核准 ap-2（commit ${H2}，取代 ap-1）" "$AGM_DIR/daemon-update.log"
-check_no "pending 不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-teardown
-
-# 29d. 被駁回（denied）之後 main 動到要建的東西：開新的（同一顆 commit 被駁不重申請，見 case 10）。
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"denied"}]}'
-bash "$SCRIPT"
-bump_code y
-H2=$(cd "$AGM_REPO" && /usr/bin/git rev-parse HEAD)
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"denied"},{"id":"ap-2","status":"pending"}]}'
-bash "$SCRIPT"
-check "denied 之後為新 commit 開申請" "approval request .* --commit $H2" "$AGM_DIR/calls.log"
-teardown
-
-# 舊的 bin/agm 不認得 --supersedes：照舊開一筆新的，不要讓整筆申請被 argparse 拒絕。
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
-bash "$SCRIPT"
-( cd "$AGM_REPO" && echo y >> daemon/main.rs && /usr/bin/git add -A && /usr/bin/git commit -qm code \
-    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL_HELP="usage: agm approval [--requester R]"
-export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-bash "$SCRIPT"
-check "舊 CLI 照樣申請" "approval request" "$AGM_DIR/calls.log"
-check_no "舊 CLI 不帶 --supersedes" "--supersedes" "$AGM_DIR/calls.log"
-unset STUB_APPROVAL_HELP
-teardown
-
-# 30. 舊的核准已經被用掉（上一個窗口過期沒交還，daemon 當場消耗）：同一輪就重新申請，不白等到下一個整點。
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
-bash "$SCRIPT"
-: > "$AGM_DIR/calls.log"
-export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"consumed"},{"id":"ap-2","status":"approved"}]}'
-bash "$SCRIPT"
-check "用掉的核准當場重新申請" "approval request" "$AGM_DIR/calls.log"
-check "用新的那筆拿窗口" "lease acquire rebuild --approval ap-2" "$AGM_DIR/calls.log"
-check "log 寫明為什麼重申請" "核准 ap-1 已經不能用（consumed），重新申請" "$AGM_DIR/daemon-update.log"
-teardown
-
-# 31. 讀不到重建申請數不能當 0（當 0＝沒人申請＝非整點整輪跳過，換版流程靜默停擺）：這輪照常往下檢查、記成失敗、
-#     連續幾輪就喊人；不是「非整點且重建申請只有 0/3，這輪不檢查」。
-setup
-export AGM_TEST_MINUTE="37"
-export STUB_APPROVAL_LIST='not json at all'
-bash "$SCRIPT"
-check "讀不到申請數要講清楚" "讀不到重建申請數" "$AGM_DIR/daemon-update.log"
-check_no "不能當成 0 個申請而跳過這輪" "非整點且重建申請只有 0/3" "$AGM_DIR/daemon-update.log"
-check "照常往下檢查（過了閘，走到申請核准）" "已申請核准" "$AGM_DIR/daemon-update.log"
-teardown
-
-setup
-export AGM_TEST_MINUTE="37" AGM_FAIL_ALERT_AFTER=1
-export STUB_APPROVAL_LIST='not json at all'
-bash "$SCRIPT"
-check "讀不到申請數算失敗、連續幾輪會喊人" "ops-alert.*check_failing" "$AGM_DIR/calls.log"
-teardown
-
-# 32. issue #420：協調者一直不裁示時，到期重申請不能讓等待歸零；超過一個到期週期推 ops_alert。
-setup
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"pending"}]}'
-bash "$SCRIPT"
-check "第一次看到 pending 就開始計時" "" "$AGM_DIR/daemon-update.undecided"
-check_no "剛開始等不喊人" "approval_undecided" "$AGM_DIR/calls.log"
-echo $(( $(date +%s) - 6000 )) > "$AGM_DIR/daemon-update.undecided"
-: > "$AGM_DIR/calls.log"
-bash "$SCRIPT"
-check "等超過一個到期週期推 ops_alert" "ops-alert.*approval_undecided" "$AGM_DIR/calls.log"
-check "寫明協調者幾小時沒裁示" "協調者 1 小時 40 分沒裁示" "$AGM_DIR/daemon-update.log"
-teardown
-
-setup
-echo $(( $(date +%s) - 6000 )) > "$AGM_DIR/daemon-update.undecided"
-printf '%s' '{"owner":"test-owner","id":"ap-1","commit":"'"$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)"'"}' > "$AGM_DIR/daemon-update.approval.json"
-export STUB_APPROVAL='{"id":"ap-2","status":"pending"}'
-export STUB_APPROVAL_LIST='{"approvals":[{"id":"ap-1","status":"expired"},{"id":"ap-2","status":"pending"}]}'
-bash "$SCRIPT"
-check "過期重申請了" "核准 ap-1 已經不能用（expired），重新申請" "$AGM_DIR/daemon-update.log"
-check "重申請不讓等待歸零" "ops-alert.*approval_undecided" "$AGM_DIR/calls.log"
-teardown
-
-setup
-echo $(( $(date +%s) - 6000 )) > "$AGM_DIR/daemon-update.undecided"
-bash "$SCRIPT"
-check_no "裁示了（approved）不喊人" "approval_undecided" "$AGM_DIR/calls.log"
-if [ -e "$AGM_DIR/daemon-update.undecided" ]; then
-  echo "FAIL - 裁示了就清掉計時"; FAIL=$((FAIL + 1))
-else
-  echo "ok   - 裁示了就清掉計時"; PASS=$((PASS + 1))
-fi
-teardown
-
-# ── 立即部署（使用者 2026-09-25，SPEC §18.2）：daemon 寫 daemon-update.now.json（使用者核准的 rebuild），
-# kick 略過觸發閘／已派過／AGM 裁示，安全條件照舊。
-now_setup() { # now_setup [sha]：非整點、已派過同一顆，請求檔指著使用者核准的 now-1
-  setup
-  export AGM_TEST_MINUTE=37
-  NOW_SHA=${1:-$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)}
-  printf '%s' "{\"approval_id\":\"now-1\",\"sha\":\"$NOW_SHA\",\"requested_by\":\"ui\"}" > "$AGM_DIR/daemon-update.now.json"
-  /usr/bin/git -C "$AGM_REPO" rev-parse HEAD > "$AGM_DIR/daemon-update.last"
-  export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"now-1\",\"purpose\":\"rebuild\",\"requester\":\"test-owner\",\"target_commit\":\"$NOW_SHA\",\"status\":\"approved\"}]}"
-  export STUB_RESTART_APPROVAL='{"id":"rs-1","status":"approved"}'   # daemon 建立當下就核准（#447）
+count() { grep -c -- "$1" "$2" 2>/dev/null || true; }
+
+commit() { # commit <檔案> <訊息>：在 WORK 提交並推到 origin，回 sha
+  mkdir -p "$(dirname "$WORK/$1")"
+  echo "$2" >> "$WORK/$1"
+  "$GITBIN" -C "$WORK" add -A >/dev/null
+  "$GITBIN" -C "$WORK" commit -q -m "$2"
+  "$GITBIN" -C "$WORK" push -q origin HEAD:main
+  "$GITBIN" -C "$WORK" rev-parse HEAD
 }
-now_teardown() { teardown; unset STUB_RESTART_APPROVAL STUB_RESTART_FAIL STUB_DECIDE_FAIL NOW_SHA; }
 
-# N1. 一路順：非整點、同一顆已派過也照樣派；不另申請 rebuild，用使用者那筆拿窗口；restart 也預先開好並核准。
-now_setup
-bash "$SCRIPT"
-check "立即模式不等整點" "使用者按了立即部署，不等整點" "$AGM_DIR/daemon-update.log"
-check_no "不為 rebuild 另外申請（使用者已核准）" "approval request --requester test-owner" "$AGM_DIR/calls.log"
-check "用使用者那筆核准拿 rebuild 窗口" "lease acquire rebuild --approval now-1 --commit $NOW_SHA" "$AGM_DIR/calls.log"
-check "safety 綁使用者那筆核准" "lease safety --approval now-1" "$AGM_DIR/calls.log"
-check "restart 以建置 child 名義申請" "approval request --requester bot-build --purpose restart" "$AGM_DIR/calls.log"
-check "restart 的 request id 指回 rebuild 核准" "request-id deploy-now-restart-now-1" "$AGM_DIR/calls.log"
-check_no "kick 不打 decide（#447 之後沒有角色身分會 403）" "approval decide" "$AGM_DIR/calls.log"
-check "派工 request id 帶核准（不撞先前派過的同一顆）" "request-id agm-daemon-update-${NOW_SHA}-now-now-1" "$AGM_DIR/calls.log"
-check "正文寫明是使用者按的立即部署" "左上角按「立即部署」" "$AGM_DIR/assign-body.txt"
-check "正文帶預先核准的 restart" "restart 核准 rs-1" "$AGM_DIR/assign-body.txt"
-check "正文照抄固定條件" "TASK-BODY 建置說明" "$AGM_DIR/assign-body.txt"
-check_eq "派工成功就收掉請求" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-check "狀態檔改指使用者那筆" '"id": "now-1"' "$AGM_DIR/daemon-update.approval.json"
-now_teardown
+setup() {
+  ROOT=$(mktemp -d); export ROOT
+  ORIGIN="$ROOT/origin.git"; WORK="$ROOT/work"
+  export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" AGM_DEPLOY_CHECKOUT="$ROOT/deploy"
+  mkdir -p "$AGM_DIR/bin" "$ROOT/bin" "$ROOT/ci"
+  "$GITBIN" init -q --bare -b main "$ORIGIN"
+  "$GITBIN" clone -q "$ORIGIN" "$WORK" 2>/dev/null
+  "$GITBIN" -C "$WORK" config user.email t@t; "$GITBIN" -C "$WORK" config user.name t
+  mkdir -p "$WORK/web"; : > "$WORK/web/.keep"     # 每顆 commit 都要有 web/（腳本會 cd 進去建置）
+  C0=$(commit daemon/src/a.rs "live")            # 線上那顆
+  C1=$(commit daemon/src/a.rs "fix one")          # 會進 binary
+  C2=$(commit docs/x.md "docs only")              # 不進 binary
+  C3=$(commit web/src/b.ts "web change")          # 會進 binary（HEAD）
+  export C0 C1 C2 C3
+  # 主樹：只用來取 origin URL 與放線上 binary。
+  "$GITBIN" clone -q "$ORIGIN" "$AGM_REPO" 2>/dev/null
+  mkdir -p "$AGM_REPO/target/release"
+  printf 'old-binary\n' > "$AGM_REPO/target/release/agents-managerd"
+  echo "$(echo "$C0" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
 
-# N2. 還有人在 working：不拿窗口、不派，請求留著等下一輪（安全條件不因為「立即」放寬）。
-now_setup
-export STUB_SAFETY='{"safe":false,"working":[{"bot_id":"bot-busy","name":"bot-busy"}],"in_flight":[],"unreadable":[],"excluded_bot_ids":["bot-build","bot-manager"]}'
-bash "$SCRIPT"
-check "有人在跑就等安全窗口" "立即部署等安全窗口" "$AGM_DIR/daemon-update.log"
-check_no "有人在跑不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-check_no "有人在跑不開 restart 核准" "--purpose restart" "$AGM_DIR/calls.log"
-check_eq "請求留著" "yes" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-now_teardown
+  export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun" CARGO_BIN="$ROOT/bin/cargo"
+  export AGM_SWAP_SCRIPT="$ROOT/bin/swap.sh" AM_AGENT_NAME=daemon-update-kick
+  export STUB_GH_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL=""
+  export AGM_FAIL_ALERT_AFTER=3 AGM_CI_LOOKBACK=30
 
-# N3. 使用者那筆核准被撤銷（或過期／用掉）：收掉請求並喊人，不拿去撞 acquire。
-now_setup
-export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"now-1\",\"purpose\":\"rebuild\",\"requester\":\"test-owner\",\"target_commit\":\"$NOW_SHA\",\"status\":\"revoked\"}]}"
-bash "$SCRIPT"
-check "核准不能用就喊人" "ops-alert.*now_approval_unusable" "$AGM_DIR/calls.log"
-check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-check_eq "請求收掉" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-now_teardown
+  cat > "$AGM_DIR/bin/agm" <<'STUB'
+#!/bin/bash
+echo "$*" >> "$AGM_DIR/agm.log"
+case "$*" in
+  *build-inputs*) printf '{"paths":["daemon","web","Cargo.toml","Cargo.lock"]}' ;;
+  *ops-alert*) reason=""; nxt=0
+      for a in "$@"; do [ "$nxt" = 1 ] && { reason="$a"; nxt=0; }; [ "$a" = "--reason" ] && nxt=1; done
+      echo "$reason" >> "$AGM_DIR/alerts.log" ;;
+  *) printf '{}' ;;
+esac
+STUB
+  cat > "$ROOT/bin/gh" <<'STUB'
+#!/bin/bash
+echo "$*" >> "$AGM_DIR/gh.log"
+[ -z "$STUB_GH_FAIL" ] || { echo "gh: network down" >&2; exit 1; }
+sha=$(echo "$*" | sed -n 's|.*commits/\([0-9a-f]*\)/status.*|\1|p')
+[ -f "$ROOT/ci/$sha" ] && cat "$ROOT/ci/$sha"
+exit 0
+STUB
+  cat > "$ROOT/bin/bun" <<'STUB'
+#!/bin/bash
+echo "bun $* @ $(pwd)" >> "$AGM_DIR/build.log"
+[ -z "$STUB_BUN_FAIL" ] || exit 1
+exit 0
+STUB
+  cat > "$ROOT/bin/cargo" <<'STUB'
+#!/bin/bash
+echo "cargo $* @ $(pwd) AM_REAL_CARGO=${AM_REAL_CARGO:-} PATH_HEAD=${PATH%%:*}" >> "$AGM_DIR/build.log"
+[ -z "$STUB_CARGO_FAIL" ] || exit 1
+mkdir -p target/release
+git rev-parse HEAD > target/release/agents-managerd
+chmod +x target/release/agents-managerd
+STUB
+  cat > "$ROOT/bin/swap.sh" <<'STUB'
+#!/bin/bash
+echo "$*" >> "$AGM_DIR/swap.log"
+[ "$STUB_SWAP_RC" != 0 ] || echo "$(echo "$2" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
+exit "$STUB_SWAP_RC"
+STUB
+  chmod +x "$AGM_DIR/bin/agm" "$ROOT/bin/"*
+  : > "$AGM_DIR/agm.log"; : > "$AGM_DIR/gh.log"; : > "$AGM_DIR/build.log"; : > "$AGM_DIR/swap.log"; : > "$AGM_DIR/alerts.log"
+  : > "$AGM_DIR/daemon-update.log"
+}
+teardown() { [ -n "${KEEP:-}" ] && echo "KEPT $ROOT" && return; rm -rf "$ROOT"; }
+run() { bash "$SCRIPT" >/dev/null 2>&1; echo $?; }
+ci() { echo "$2" > "$ROOT/ci/$1"; }   # ci <sha> <state>
+LOG() { echo "$AGM_DIR/daemon-update.log"; }
 
-# N4. 核准對不上（申請者不是自己、commit 不同）：一樣不用。
-now_setup
-export STUB_APPROVAL_LIST="{\"approvals\":[{\"id\":\"now-1\",\"purpose\":\"rebuild\",\"requester\":\"someone-else\",\"target_commit\":\"$NOW_SHA\",\"status\":\"approved\"}]}"
-bash "$SCRIPT"
-check "申請者對不上算不能用" "核准 mismatch" "$AGM_DIR/daemon-update.log"
-check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-now_teardown
-
-# N5. 查不到那筆核准（daemon 不在）：這輪不知道，請求留著，不當成不能用。
-now_setup
-export STUB_APPROVAL_LIST='{"error":"unavailable"}'
-bash "$SCRIPT"
-check "查不到就這輪不派" "查不到立即部署的核准 now-1" "$AGM_DIR/daemon-update.log"
-check_eq "請求留著" "yes" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-now_teardown
-
-# N6. 線上已經是那一顆（docs-only）：收掉請求，不申請、不拿窗口。
-now_setup
-/usr/bin/git -C "$AGM_REPO" rev-parse --short HEAD > "$AGM_DIR/daemon-update.built"
-bash "$SCRIPT"
-check "零程式碼差異就收掉" "已經是最新" "$AGM_DIR/daemon-update.log"
-check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-check_eq "請求收掉" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-now_teardown
-
-# N6b. 已建出的正式版比立即部署核准的 target 更新：不派工，避免準備降版（#638）。
-now_setup
-echo newer >> "$AGM_REPO/daemon/main.rs"
-( cd "$AGM_REPO" && /usr/bin/git add daemon/main.rs && /usr/bin/git commit -qm newer )
-/usr/bin/git -C "$AGM_REPO" rev-parse --short HEAD > "$AGM_DIR/daemon-update.built"
-bash "$SCRIPT"
-check "live 較新就喊明原因" "ops-alert.*now_target_older" "$AGM_DIR/calls.log"
-check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-check_eq "降版請求收掉" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-now_teardown
-
-# N7. commit 不在 origin/main 上：不做。
-now_setup 0123456789abcdef0123456789abcdef01234567
-bash "$SCRIPT"
-check "不在 main 上就喊人" "ops-alert.*now_target_invalid" "$AGM_DIR/calls.log"
-check_no "不拿窗口" "lease acquire" "$AGM_DIR/calls.log"
-now_teardown
-
-# N8. 上一筆更新還沒結案：不疊，請求留著（等它結案後下一輪接著做）。
-now_setup
-export STUB_ASSIGNMENTS='{"assignments":[{"client_request_id":"agm-daemon-update-abc","status":"delivered"}]}'
-bash "$SCRIPT"
-check "上一筆未結案不疊" "還沒結案" "$AGM_DIR/daemon-update.log"
-check_eq "請求留著" "yes" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-now_teardown
-
-# N9. restart 核准開不出來：照樣派，正文叫建置 child 照例行流程申請（不是停手）。
-now_setup
-export STUB_RESTART_FAIL=yes
-bash "$SCRIPT"
-check "restart 開不出來有記 log" "restart 核准沒有當場核准" "$AGM_DIR/daemon-update.log"
-check "正文改叫 child 自己申請" "restart 核准沒能預先開好" "$AGM_DIR/assign-body.txt"
-check "照樣派工" "已派工 agm-daemon-update-" "$AGM_DIR/daemon-update.log"
-now_teardown
-
-# N9b. daemon 沒有當場核准（回 pending：請求檔對不上、commit 不同…）：不拿來用、不自己 decide，叫 child 照例行流程申請。
-now_setup
-export STUB_RESTART_APPROVAL='{"id":"rs-1","status":"pending"}'
-bash "$SCRIPT"
-check "pending 就不當成已核准" "restart 核准沒有當場核准" "$AGM_DIR/daemon-update.log"
-check_no "不自己 decide" "approval decide" "$AGM_DIR/calls.log"
-check "正文改叫 child 自己申請" "restart 核准沒能預先開好" "$AGM_DIR/assign-body.txt"
-check_no "正文不帶 pending 那筆" "restart 核准 rs-1" "$AGM_DIR/assign-body.txt"
-now_teardown
-
-# N10. 請求檔壞掉：喊人並收掉，這輪回到例行判斷（不略過任何閘）。
-now_setup
-printf '%s' 'not json' > "$AGM_DIR/daemon-update.now.json"
-bash "$SCRIPT"
-check "壞掉的請求喊人" "ops-alert.*now_request_corrupt" "$AGM_DIR/calls.log"
-check_no "不當成立即部署" "使用者按了立即部署" "$AGM_DIR/daemon-update.log"
-check_no "例行判斷下（同一顆已派過）不派" "已派工" "$AGM_DIR/daemon-update.log"
-check_eq "請求收掉" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-now_teardown
-
-# N11. 沒有請求檔的例行一輪不會去開 restart 核准（那仍是建置 child 申請、AGM 裁示）。
+# 1. 沒有會進 binary 的差異：不問 GitHub、不建置、不換版。
 setup
-bash "$SCRIPT"
-check_no "例行路徑不預開 restart" "--purpose restart" "$AGM_DIR/calls.log"
-check_no "例行路徑正文不提立即部署" "立即部署" "$AGM_DIR/assign-body.txt"
+"$GITBIN" -C "$WORK" reset -q --hard "$C0"; "$GITBIN" -C "$WORK" push -q -f origin HEAD:main
+D=$(commit docs/y.md "docs only again")
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check "log 說只動到不進 binary 的檔" "沒有會進 binary 的差異" "$(LOG)"
+check_eq "沒問 GitHub" "0" "$(wc -l < "$AGM_DIR/gh.log" | tr -d ' ')"
+check_eq "沒建置" "0" "$(wc -l < "$AGM_DIR/build.log" | tr -d ' ')"
+check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
-# N12. 使用者按下之後 main 又有兩個動到 binary 的 commit（加一個 docs）：只建按下的那顆，正文如實寫出 N=2、
-#      不宣稱沒差；「已派過」記按下的那顆，下一輪例行路徑才會為 HEAD 另外申請。
-now_setup
-bump_docs() { ( cd "$AGM_REPO" && mkdir -p docs && echo "$1" >> docs/NOTE.md && /usr/bin/git add -A && /usr/bin/git commit -qm "docs $1" \
-    && /usr/bin/git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1; }
-bump_code n1; bump_docs n2; bump_code n3
-H=$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)
-bash "$SCRIPT"
-check "照按下的那顆建" "lease acquire rebuild --approval now-1 --commit $NOW_SHA" "$AGM_DIR/calls.log"
-check "正文寫出 N" "之後還有 2 個 commit 動到 binary，留下一趟" "$AGM_DIR/assign-body.txt"
-check "正文仍只 checkout 按下的那顆" "這次仍然只 checkout $NOW_SHA 來建" "$AGM_DIR/assign-body.txt"
-check_no "正文不宣稱只動到不進 binary 的檔" "只動到不進 binary 的檔" "$AGM_DIR/assign-body.txt"
-check "log 寫明留下一趟" "立即部署 ${NOW_SHA} 之後 origin/main ${H} 又動到會進 binary 的檔，留下一趟" "$AGM_DIR/daemon-update.log"
-check "已派過記按下的那顆，不是 HEAD" "^$NOW_SHA$" "$AGM_DIR/daemon-update.last"
-now_teardown
+# 2. HEAD 綠燈：專用 checkout 建置、換版，不帶核准單、不派工。
+setup
+ci "$C3" success
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check "問的是 ubuntu-ci 的 commit status" "repos/Eden-Sun/agents-manager/commits/$C3/status" "$AGM_DIR/gh.log"
+check "web 建置在專用 checkout" "bun run build @ $ROOT/deploy/web" "$AGM_DIR/build.log"
+check "cargo 建置在專用 checkout" "cargo build --release -p agents-managerd @ $ROOT/deploy" "$AGM_DIR/build.log"
+check "cargo 帶 AM_REAL_CARGO 與 cargo 的 PATH" "AM_REAL_CARGO=$ROOT/bin/cargo PATH_HEAD=$ROOT/bin" "$AGM_DIR/build.log"
+check_eq "專用 checkout 停在目標 sha" "$C3" "$("$GITBIN" -C "$ROOT/deploy" rev-parse HEAD)"
+check "換版的 sha" "--sha $C3" "$AGM_DIR/swap.log"
+check "換版的舊版是 .built" "--old $(echo "$C0" | cut -c1-8)" "$AGM_DIR/swap.log"
+check "換版帶舊 binary 的 hash" "--old-hash $(shasum -a 256 "$AGM_REPO/target/release/agents-managerd" | cut -c1-16)" "$AGM_DIR/swap.log"
+check "換版指向專用 checkout" "--checkout $ROOT/deploy" "$AGM_DIR/swap.log"
+check_no "不帶核准單" "approval" "$AGM_DIR/swap.log"
+check_no "不申請核准、不派工" "approval\|assign\|lease" "$AGM_DIR/agm.log"
+check_eq "主樹 HEAD 沒被動" "$C3" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
+teardown
 
-# N13. #715：使用者按下之後 main 只多了 docs：正文照實寫沒有動到 binary，已派過仍記實際 target。
-now_setup
-bump_docs d1
-H=$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)
-bash "$SCRIPT"
-check "正文寫只動到不進 binary 的檔" "多出來的 commit 只動到不進 binary 的檔；仍然 checkout $NOW_SHA 來建" "$AGM_DIR/assign-body.txt"
-check_no "正文不寫留下一趟" "留下一趟" "$AGM_DIR/assign-body.txt"
-check "已派過記立即 target，不提前記 HEAD" "^$NOW_SHA$" "$AGM_DIR/daemon-update.last"
-now_teardown
+# 3. HEAD 還在跑（pending）：往前一顆找到綠燈的那顆；中間 docs-only 不會被當成候選。
+setup
+ci "$C3" pending
+ci "$C1" success
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check "HEAD 不是綠燈就往前找" "${C3}.*pending" "$(LOG)"
+check "換的是綠燈那顆" "--sha $C1" "$AGM_DIR/swap.log"
+teardown
 
-# N14. #715：立即 target 已在正式 binary，main 只多了 docs；收請求時也不能把 HEAD 記成已派過。
-now_setup
-bump_docs d1
-H=$(/usr/bin/git -C "$AGM_REPO" rev-parse HEAD)
-echo "$H" > "$AGM_DIR/daemon-update.last"
-echo "$NOW_SHA" > "$AGM_DIR/daemon-update.built"
-bash "$SCRIPT"
-check "target 已建好時已派過記 target，不記較新的 HEAD" "^$NOW_SHA$" "$AGM_DIR/daemon-update.last"
-check_no "target 已建好時不另派建置" "assign --bot" "$AGM_DIR/calls.log"
-check_eq "target 已建好時收掉立即請求" "no" "$([ -e "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
-now_teardown
+# 4. 沒有任何綠燈：不建置、不換版，也不算失敗（等下一輪）。
+setup
+ci "$C3" failure
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check_eq "沒建置" "0" "$(wc -l < "$AGM_DIR/build.log" | tr -d ' ')"
+check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check_eq "沒有失敗計數" "no" "$([ -f "$AGM_DIR/daemon-update.fails" ] && echo yes || echo no)"
+teardown
+
+# 5. GitHub 問不到：這輪不動、記成失敗；連續 3 輪推 ops_alert。
+setup
+export STUB_GH_FAIL=1
+for _ in 1 2; do run >/dev/null; done
+check_no "兩輪還不喊人" "check_failing" "$AGM_DIR/alerts.log"
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check "第三輪推 check_failing" "check_failing" "$AGM_DIR/alerts.log"
+check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+export STUB_GH_FAIL=""
+ci "$C3" success
+run >/dev/null
+check_eq "恢復後失敗計數清零" "no" "$([ -f "$AGM_DIR/daemon-update.fails" ] && echo yes || echo no)"
+teardown
+
+# 6. 等安全窗口（swap rc=4）：不算失敗、不重建；下一輪同一顆直接再換。
+setup
+ci "$C3" success
+export STUB_SWAP_RC=4
+run >/dev/null
+check "有人在忙記 log" "還有人在忙" "$(LOG)"
+check_eq "沒有失敗計數" "no" "$([ -f "$AGM_DIR/daemon-update.fails" ] && echo yes || echo no)"
+export STUB_SWAP_RC=0
+run >/dev/null
+check_eq "只建置一次" "1" "$(count 'cargo build' "$AGM_DIR/build.log")"
+check_eq "換版試了兩次" "2" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check "第二輪說已經建好" "已經建好" "$(LOG)"
+teardown
+
+# 7. 換上去被回滾（swap rc=7）：推 ops_alert，之後不再挑那顆；往前一顆綠燈就退而求其次也不行（那顆才是被拒的）。
+setup
+ci "$C3" success
+export STUB_SWAP_RC=7
+run >/dev/null
+check "推 swap_rolled_back" "swap_rolled_back" "$AGM_DIR/alerts.log"
+check "記進 rejected" "$C3" "$AGM_DIR/daemon-update.rejected"
+: > "$AGM_DIR/swap.log"
+ci "$C1" success
+export STUB_SWAP_RC=0
+run >/dev/null
+check "下一輪略過被回滾的那顆" "之前換上去被回滾過" "$(LOG)"
+check "改換往前的綠燈" "--sha $C1" "$AGM_DIR/swap.log"
+teardown
+
+# 8. 往前修（rc=6）：補寫 .built，推 ops_alert。
+setup
+ci "$C3" success
+export STUB_SWAP_RC=6
+run >/dev/null
+check_eq ".built 補上" "$(echo "$C3" | cut -c1-8)" "$(cat "$AGM_DIR/daemon-update.built")"
+check "推 swap_forward_fixed" "swap_forward_fixed" "$AGM_DIR/alerts.log"
+teardown
+
+# 9. 建置失敗：不換版、記失敗。
+setup
+ci "$C3" success
+export STUB_CARGO_FAIL=1
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check "log 記 cargo build 失敗" "cargo build 失敗" "$(LOG)"
+check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
+teardown
+
+# 10. 立即部署：不等 ubuntu-ci（那顆是 pending），換完才刪請求檔。
+setup
+ci "$C3" pending
+printf '{"sha":"%s","live_sha":"x","requested_by":"ui"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+rc=$(run)
+check_eq "rc=0" "0" "$rc"
+check "換的是請求的那顆" "--sha $C1" "$AGM_DIR/swap.log"
+check_eq "立即部署不問 GitHub" "0" "$(wc -l < "$AGM_DIR/gh.log" | tr -d ' ')"
+check_eq "做完刪請求檔" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_no "不帶核准單" "approval" "$AGM_DIR/swap.log"
+teardown
+
+# 11. 立即部署等不到窗口（rc=4）：請求檔留著，下一輪再試。
+setup
+printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+export STUB_SWAP_RC=4
+run >/dev/null
+check_eq "請求檔留著" "yes" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+export STUB_SWAP_RC=0
+run >/dev/null
+check_eq "下一輪換完才刪" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_eq "只建置一次" "1" "$(count 'cargo build' "$AGM_DIR/build.log")"
+teardown
+
+# 12. 立即部署：sha 不在 origin/main、壞掉的請求檔 → alert 並收掉，不建置。
+setup
+printf '{"sha":"deadbeef00000000000000000000000000000000"}' > "$AGM_DIR/daemon-update.now.json"
+run >/dev/null
+check "推 now_target_invalid" "now_target_invalid" "$AGM_DIR/alerts.log"
+check_eq "請求檔收掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+printf 'not json' > "$AGM_DIR/daemon-update.now.json"
+run >/dev/null
+check "推 now_request_corrupt" "now_request_corrupt" "$AGM_DIR/alerts.log"
+check_eq "壞檔收掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+teardown
+
+# 13. 立即部署：只動到不進 binary 的檔（C2 相對線上 C0 之間有 C1，所以改成把線上設成 C1 再要 C2）。
+setup
+echo "$(echo "$C1" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
+printf '{"sha":"%s"}' "$C2" > "$AGM_DIR/daemon-update.now.json"
+run >/dev/null
+check "說已經是最新" "只動到不進 binary" "$(LOG)"
+check_eq "請求檔收掉" "no" "$([ -f "$AGM_DIR/daemon-update.now.json" ] && echo yes || echo no)"
+check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+teardown
+
+# 14. 立即部署：目標比線上舊 → 拒絕降版。
+setup
+echo "$(echo "$C3" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
+printf '{"sha":"%s"}' "$C1" > "$AGM_DIR/daemon-update.now.json"
+run >/dev/null
+check "推 now_target_older" "now_target_older" "$AGM_DIR/alerts.log"
+check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+teardown
+
+# 15. 讀不到線上版本（.built 不在）：喊人，不動。
+setup
+rm -f "$AGM_DIR/daemon-update.built"
+ci "$C3" success
+run >/dev/null
+check "推 built_unknown" "built_unknown" "$AGM_DIR/alerts.log"
+check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+teardown
+
+# 16. daemon 太舊（swap rc=9）：推 swap_daemon_too_old，算失敗。
+setup
+ci "$C3" success
+export STUB_SWAP_RC=9
+run >/dev/null
+check "推 swap_daemon_too_old" "swap_daemon_too_old" "$AGM_DIR/alerts.log"
+check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
+teardown
+
+# 17. 殘留鎖（執行者已不在）超過門檻就回收；還活著的執行者則跳過。
+setup
+ci "$C3" success
+mkdir -p "$AGM_DIR/daemon-update.lock"; echo "999999 1" > "$AGM_DIR/daemon-update.lock/owner"
+AGM_LOCK_STALE_SECS=0 run >/dev/null
+check "清掉殘留鎖" "清掉殘留鎖" "$(LOG)"
+check_eq "接手後有換版" "1" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+teardown
+setup
+ci "$C3" success
+sleep 30 & SLEEPER=$!
+mkdir -p "$AGM_DIR/daemon-update.lock"; echo "$SLEEPER $(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"
+run >/dev/null
+kill "$SLEEPER" 2>/dev/null
+check_eq "活著的執行者：這輪不動" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+teardown
+
+# 18. 腳本本身：不再有建置 child／核准／門檻這些東西；daemon 的 kick_ready 靠這個檔名判斷；全形標點前要有大括號。
+check "認得立即部署請求檔（kick_ready 靠這個字）" "daemon-update.now.json" "$SCRIPT"
+for gone in AGM_BUILD_BOT AGM_REBUILD_THRESHOLD "approval request" "lease acquire" "agm assign\|assign --bot" "AGM_REBUILD_MAX_WAIT_MIN"; do
+  check_no "已拿掉：${gone}" "$gone" "$SCRIPT"
+done
+if LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' "$SCRIPT" > "/tmp/daemon-update-unbraced.$$" 2>/dev/null; then
+  echo "FAIL - 變數後面接非 ASCII 字元要用 \${VAR}"; sed 's/^/      /' "/tmp/daemon-update-unbraced.$$"; FAIL=$((FAIL + 1))
+else
+  echo "ok   - 變數後面接非 ASCII 字元都有大括號"; PASS=$((PASS + 1))
+fi
+rm -f "/tmp/daemon-update-unbraced.$$"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

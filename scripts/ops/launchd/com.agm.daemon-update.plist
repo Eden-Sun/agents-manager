@@ -4,12 +4,8 @@
 <dict>
 	<key>EnvironmentVariables</key>
 	<dict>
-		<key>AGM_BUILD_BOT</key>
-		<string>01M2F1PTHCMCP5YN7RAGW8NVVX</string>
-		<key>AGM_REBUILD_THRESHOLD</key>
-		<string>3</string>
 		<key>PATH</key>
-		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>/Users/m4p/.bun/bin:/Users/m4p/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 	</dict>
 	<key>Label</key>
 	<string>com.agm.daemon-update</string>
