@@ -17,7 +17,7 @@ pub fn allows(id: &str, method: &str, path: &str) -> bool {
     let exact = matches!(
         (id, method, path),
         (DAEMON_SWAP, "GET", "/api/supervisor" | "/api/supervisor/health" | "/api/supervisor/state" | "/api/supervisor/leases" | "/api/supervisor/maintenance/safety")
-            | (DAEMON_SWAP, "POST", "/api/supervisor/leases/restart/acquire" | "/api/supervisor/leases/restart/renew" | "/api/supervisor/leases/restart/release")
+            | (DAEMON_SWAP, "POST", "/api/services/daemon-swap/restart-window" | "/api/supervisor/leases/restart/renew" | "/api/supervisor/leases/restart/release")
             | (HERDR_UPGRADE, "GET", "/api/capabilities" | "/api/supervisor/state" | "/api/panes" | "/api/supervisor/health")
             | (HERDR_UPGRADE, "POST", "/api/services/herdr-upgrade/notify")
     );
@@ -108,7 +108,10 @@ mod tests {
         assert!(allows(HERDR_UPGRADE, "POST", "/api/services/herdr-upgrade/resume/01M123"));
         assert!(allows(DAEMON_SWAP, "POST", "/api/services/daemon-swap/probe/01M123"));
         assert!(allows(DAEMON_SWAP, "GET", "/api/supervisor/health"));
-        assert!(allows(DAEMON_SWAP, "POST", "/api/supervisor/leases/restart/acquire"));
+        assert!(allows(DAEMON_SWAP, "POST", "/api/services/daemon-swap/restart-window"));
+        // 窗口只能經 restart-window 自己開（同一個核准＋安全檢查），generic acquire 要核准單、不在 scope。
+        assert!(!allows(DAEMON_SWAP, "POST", "/api/supervisor/leases/restart/acquire"));
+        assert!(!allows(DAEMON_SWAP, "POST", "/api/supervisor/leases/rebuild/acquire"));
         // One service's route is not the other's.
         assert!(!allows(DAEMON_SWAP, "POST", "/api/services/herdr-upgrade/resume/01M123"));
         assert!(!allows(HERDR_UPGRADE, "POST", "/api/services/daemon-swap/probe/01M123"));
