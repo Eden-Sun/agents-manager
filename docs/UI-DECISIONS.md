@@ -311,49 +311,25 @@
 **寫倒數的那一列不畫量表條**（同日使用者：「< 10 的狀態進度條就不要了，很小更不易看，只要數字」）——剩不到一成的條只有幾個像素，用完的條是空的，都看不出東西；倒數放在條原本的位置，**百分比照樣印**在最右那一欄（同日使用者：「雖然除去條，但也要數字」），例如 `7d 22h12 8`。手機緊縮列維持只寫倒數（寬度不夠放兩個數字）。門檻在 `lib/quotaReset.ts`（`RESET_SOON_MS`／`RESET_SOON_WEEKLY_MS`）。
 
 截圖 `docs/screenshots/quota-reset/`。
-## 左上角的重建申請計數（2026-09-14，使用者指定）
+## 左上角的重建申請計數：已拿掉（2026-09-29，使用者裁示）
 
-AGM 的重建排程原本只在整點檢查；使用者要它**集滿門檻筆重建申請就不等整點**（2026-09-14 訂 5，2026-09-16 改成 3），並要「這個 counter 標在左上角」。
-
-- **位置**（使用者 2026-09-14 指定）：側欄標題列的**右欄，瀏覽器晶片下面**。先試過放 `AG Man`
-  底下那一列與 RAM 那格旁邊，都被使用者退掉：那兩處不是擠成兩行就是跟 pane／連線燈混在一起。
-  下拉靠右對齊、寬 260px——側欄最窄只有 288px（`clamp(288px, 18vw, 344px)`），左錨或更寬都會掉出畫面。
-- **樣子**：`⟳ 3/5`。一筆都沒有時整顆不出現——常態是 0，畫一顆永遠寫 0 的 chip 只是噪音。
-  到門檻時邊框與數字轉警示色：那一刻的意思是「下一輪檢查就會重建」，使用者該看得出來。
-- **點開**：列出申請者、commit、待裁示／已核准、scope 一句話，底下寫明滿幾筆會提前重建。
-- **資料**：唯讀的 `GET /api/supervisor/approvals`，計數規則在 `web/src/lib/rebuildCount.ts`，
-  與 `scripts/ops/daemon-update-kick.sh` 同一套：`purpose=rebuild`、狀態 `pending`／`approved`、
-  **`expires_at` 還沒到**（daemon 不會把過期的核准改狀態）、**不算腳本自己提的那筆**（requester `daemon-update-kick`），
-  同一個 requester 對同一個 commit 算一筆。每 30 秒重讀一次（申請是人在動的）。
-- **上次上線之前的申請不算**：時間取 `GET /api/supervisor` 的 `last_deploy.at`（daemon 960ba06 起，
-  SPEC §18.15）＝這顆 binary 第一次上線的時間，跟腳本讀 `daemon-update.built` mtime 是同一個意思
-  （binary 沒換的重啟不會把它往前推，review 2026-09-16 c3 L3）。舊 daemon 沒有這個欄位就不濾
-  時間——寧可多算一筆，也不要把真的在等的申請藏起來。
-- **門檻**：腳本吃 `AGM_REBUILD_THRESHOLD`（預設 3）；daemon 沒有這個欄位，所以前端是常數 3
-  （`web/src/api/rebuildRequests.ts`）。兩邊要一起改。
-- **等太久也提前**（使用者 2026-09-15）：最早一筆申請等超過 30 分鐘（`AGM_REBUILD_MAX_WAIT_MIN`，前端常數
-  `REBUILD_MAX_WAIT_MIN`）也不等整點。chip 在這種時候同樣轉警示色，提示寫出最早那筆等了幾分鐘。
-- **問不到 ≠ 沒有**（#531）：daemon 回錯（舊 daemon 沒這支、500）＝它說了算，chip 收掉；**連不上**
-  （daemon 多半正在重啟）只代表這一次問不到，數字留著上一次的，但 chip 轉虛線＋淡化、提示寫明「是斷線前的」，
-  點開的清單也加一句。不轉警示色——連線狀態由側欄的連線燈號負責，這裡只要不假裝數字是現況。
-- **「請 AGM 現在重建」**：送一則使用者 prompt 給 AGM（`lib/rebuildAsk.ts`）。AGM 回合進行中 daemon 必回 409、不替人排隊，
-  所以明講「AGM 正在忙，等它這一輪結束再按」；`delivery` 是 `failed`／`unknown` 不說「已請 AGM 開始重建」。
-  沒送出（409、回應斷在路上、`unknown`）重按沿用同一個 `client_request_id`，送到了（或那一回合確定 failed）才換新的。
-
-![桌機](screenshots/rebuild-counter/desktop-1440.png)
-![手機 390](screenshots/rebuild-counter/mobile-390.png)
+2026-09-14 曾在側欄標題列放 `⟳ 3/5` 的重建申請計數 chip（＋「請 AGM 現在重建」按鈕），因為例行重建要湊滿門檻筆申請或等太久才提前。
+例行自動部署簡化之後（SPEC §18.2）：`daemon-update-kick.sh` 每 5 分鐘自己找最新一顆 `ubuntu-ci` 綠燈的 main 建置換版，
+**不再有門檻、整點、等太久或 AGM 裁示**，計數沒有東西可以預告，「請 AGM 現在重建」也沒有 AGM 可請——所以整顆 chip
+（`RebuildBadge`、`rebuildCount.ts`、`rebuildRequests.ts`、`rebuildAsk.ts`）連同它讓位給部署鈕的 CSS 一起刪掉。
+想立刻上線就按下面的「立即部署」。bot 自己申請的 rebuild／restart 核准（SPEC §18.10）仍在協調者的核准清單裡，不靠這顆 chip。
 
 ## 左上角「立即部署」（2026-09-25，使用者指定）
 
-使用者原話：「agm排以外，要我可以在左上角直接點立即部署」。重建申請 chip 只在有申請時出現、「請 AGM 現在重建」也只是傳訊息給 AGM，都不是「我按了就部署」。
+使用者原話：「agm排以外，要我可以在左上角直接點立即部署」。當時的重建申請 chip 只在有申請時出現、「請 AGM 現在重建」也只是傳訊息給 AGM，都不是「我按了就部署」（那顆 chip 已於 2026-09-29 拿掉）。
 
 - **位置**：標題列「AG Man」右邊、靠右（2026-09-25 改）。第二列看起來空，但 `pane N` 在那列，加上 `⇪ 部署 N` 就把左欄撐到 160px；側欄最窄 288px 時中間 RAM 格被擠到 16px、跟兩側重疊。標題列放得下的前提是只寫 `⇪N`（約 34px）、且跟重建 chip 不同時出現。
 - **樣子**：`⇪ 4`（落後 origin/main 4 個 commit），放標題列「AG Man」右邊；「立即部署」四個字在 tooltip／aria-label。原本 `⇪ 部署 4` 放第二列時左欄被撐到 160px，中間的 RAM 格只剩 16px、疊到兩側（2026-09-25 使用者截圖）。部署鈕出現時同一列的重建申請 chip 讓位（兩顆擠不下；立即部署做的就是那些申請要的事），已是最新時重建 chip 照常出現。只在**有會進 binary 的差異**時出現——docs-only 的落後按下去也不會重建，畫一顆按不動的鍵只是噪音（規則同 kick，`GET /api/deploy/status` 的 `code_changed`）。accent 邊框表示「可以按」，不用警示色：落後是常態，不是警報。
-- **部署中**：kick 還沒派出去、有人握著 rebuild／restart 窗口、或更新交辦未結案時改寫 `⇪ 部署中`（綠），點下去只出一則通知說在做什麼、log 在哪，不開確認框——daemon 反正會 409，按鈕不該讓人以為能再來一趟。
-- **確認框**：線上 → 上線的 sha、共幾個 commit／幾個動到程式碼、commit 清單（最多 30 筆，可捲）、此刻 working 的 bot（換 binary 會等它們，不是按了就砍）、固定條件一句話與 log 路徑。開框前當場重讀一次狀態；部署的是**框上那顆**（`sha` 送給 daemon），不是按下去那一刻的 origin/main。焦點預設在「取消」（ConfirmDialog 既有規則）。
+- **部署中**：kick 還沒吃到請求／正在建置、或有人握著 rebuild／restart 窗口時改寫 `⇪ 部署中`（綠），點下去只出一則通知說在做什麼、log 在哪，不開確認框——daemon 反正會 409，按鈕不該讓人以為能再來一趟。
+- **確認框**：線上 → 上線的 sha、共幾個 commit／幾個動到程式碼、commit 清單（最多 30 筆，可捲）、此刻 working 的 bot（換 binary 會等它們，不是按了就砍）、一句話說明「不等 ubuntu-ci、專用 checkout 建置、沒人 working 才換、失敗回滾」（建置與整樹測試已在推 main 前後跑過，這裡不再重跑，2026-09-29）與 log 路徑。開框前當場重讀一次狀態；部署的是**框上那顆**（`sha` 送給 daemon），不是按下去那一刻的 origin/main。焦點預設在「取消」（ConfirmDialog 既有規則）。
 - **kick 還沒裝新版**：確認鍵反灰，框裡寫要先照 `scripts/ops/README.md` install。daemon 也會 503 `kick_outdated`，但不該讓人按了才知道。
 - **結果**：成功寫「已開始立即部署 <sha>…進度看 <log>」；409 分清楚「已經有部署在跑」與「不用部署」；其他錯照 daemon 的 `message` 寫。
-- **問不到 daemon**：同重建 chip（#531），留著上一次的狀態、虛線淡化、不給按。
+- **問不到 daemon**（#531）：daemon 回錯＝它說了算，按鈕收掉；連不上（多半正在重啟）只代表這一次問不到，留著上一次的狀態、虛線淡化、不給按。
 - **資料**：每 60 秒讀一次 `GET /api/deploy/status`（origin/main 約 5 分鐘一個 push）。mock 模式有一組固定假資料，按下去變成「部署中」。
 
 ![桌機確認框](screenshots/deploy-now/desktop-1440.png)
