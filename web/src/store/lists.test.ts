@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns } from './lists.ts'
+import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns, upsertSorted } from './lists.ts'
 
 const m = (id: string, created_at = id) => ({ id, created_at })
 
@@ -79,4 +79,14 @@ test('pruneTurns never drops an in-flight turn; a settled unknown-delivery one i
 test('pruneTurns returns the same object when nothing needs dropping', () => {
   const map = { t0: { status: 'completed' } }
   assert.equal(pruneTurns(map, 50), map)
+})
+
+test('upsertSorted：同 id 內容變了就原地換掉，一樣的回 null，新的照順序插', () => {
+  type M = { id: string; t: number; content: string }
+  const cmp = (a: M, b: M) => a.t - b.t
+  const same = (a: M, b: M) => a.content === b.content
+  const list: M[] = [{ id: 'a', t: 1, content: 'x' }, { id: 'b', t: 2, content: '備援' }, { id: 'c', t: 3, content: 'z' }]
+  assert.deepEqual(upsertSorted(list, { id: 'b', t: 2, content: 'hook 原文' }, cmp, same)?.map((m) => m.content), ['x', 'hook 原文', 'z'])
+  assert.equal(upsertSorted(list, { id: 'b', t: 2, content: '備援' }, cmp, same), null)
+  assert.deepEqual(upsertSorted(list, { id: 'd', t: 4, content: 'w' }, cmp, same)?.map((m) => m.id), ['a', 'b', 'c', 'd'])
 })

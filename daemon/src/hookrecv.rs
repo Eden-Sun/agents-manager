@@ -636,6 +636,11 @@ async fn upgrade_clipped_user_message(conn: &mut sqlx::SqliteConnection, turn_id
 
 /// 遲到的 hook 撞上備援關掉的回合：沒有 assistant 訊息就用 hook 的回覆補上並改 `completed`，
 /// 已有回覆才丟（防一回合兩則）。2026-09-13 GROK 備援 15 秒就關回合、36 秒後的真回覆被丟。
+///
+/// `same_turn`＝有正面證據這個 hook 就是這一回合的（hook 看得到的使用者訊息對上這回合的 prompt，或 CAS 輸給備援的
+/// 那筆本來就是它）：已有的回覆**全是備援抓的**時，用 hook 的原文原地蓋掉最新那則（id 不變、`source=hook`、
+/// 不再標可能不完整）並升 `completed`。2026-09-29 使用者：遠端 hook 走 spool 晚 25 秒到，畫面備援只抓到最後一段、
+/// 還夾著 `✻ Crunched …` 狀態列，真回覆卻被丟掉。沒有證據（看不到使用者訊息）時照舊丟，防跨回合錯配。
 /// 不會重開 c1526f7 的洞：`try_fallback` 認領與寫回覆同一交易、同一把 bot lock，讀到零則就真的是零則。
 ///
 /// native id、升級、回覆寫在同一個交易裡（#115）：native id 是去重的鑰匙，先寫它再寫回覆的話，
@@ -646,6 +651,7 @@ async fn fill_or_drop_late_hook(
     body_text: &str,
     session_id: &Option<String>,
     native_turn_id: &Option<String>,
+    same_turn: bool,
 ) -> Result<()> {
     let mut tx = app.db.begin().await?;
     sqlx::query(
@@ -662,6 +668,9 @@ async fn fill_or_drop_late_hook(
             .bind(&turn.id)
             .fetch_one(&mut *tx)
             .await?;
+    if !body_text.trim().is_empty() && has_reply > 0 && same_turn {
+        return replace_fallback_reply(app, tx, turn, body_text).await;
+    }
     if body_text.trim().is_empty() || has_reply > 0 {
         tx.commit().await?;
         tracing::info!(turn = %turn.id, has_reply, "late hook dropped; turn already completed via terminal fallback");
@@ -687,6 +696,47 @@ async fn fill_or_drop_late_hook(
     tx.commit().await?;
     lifecycle::emit_message_added(app, &bot_id, message).await;
     tracing::info!(turn = %turn.id, "late hook filled a fallback-closed turn that had no reply");
+    lifecycle::emit_turn(app, &turn.id).await;
+    Ok(())
+}
+
+/// `fill_or_drop_late_hook` 的 `same_turn` 分支：這回合的 assistant 訊息全是 `terminal_fallback` 才蓋（有 hook 寫的就不動），
+/// 蓋最新那則、其餘備援那幾則留著（通常只有一則）。回合 `completed_fallback → completed`（合法邊）；CAS 沒過就不蓋。
+async fn replace_fallback_reply(app: &Arc<App>, mut tx: sqlx::Transaction<'_, sqlx::Sqlite>, turn: &db::Turn, body_text: &str) -> Result<()> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, source FROM messages WHERE turn_id=? AND role='assistant' ORDER BY created_at DESC, id DESC")
+            .bind(&turn.id)
+            .fetch_all(&mut *tx)
+            .await?;
+    let Some((latest, _)) = rows.first().filter(|_| rows.iter().all(|(_, src)| src == "terminal_fallback")) else {
+        tx.commit().await?;
+        tracing::info!(turn = %turn.id, "late hook dropped; the turn already has a hook reply");
+        return Ok(());
+    };
+    let latest = latest.clone();
+    if lifecycle::turn_controller::set_status_on(&mut tx, &turn.id, "completed_fallback", "completed", "遲到的 hook 以原文取代備援回覆").await?
+        != lifecycle::turn_controller::Outcome::Applied
+    {
+        tx.commit().await?;
+        return Ok(());
+    }
+    sqlx::query("UPDATE messages SET content=?, source='hook', incomplete=0, updated_at=? WHERE id=?")
+        .bind(body_text)
+        .bind(db::now())
+        .bind(&latest)
+        .execute(&mut *tx)
+        .await?;
+    let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
+        .bind(&turn.conversation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let message: db::Message = sqlx::query_as("SELECT * FROM messages WHERE id=?").bind(&latest).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    tracing::info!(turn = %turn.id, msg = %latest, "late hook replaced the terminal-fallback reply with the transcript's");
+    if let Some(bot_id) = bot_id {
+        // 同一個 id 再推一次：前端遇到內容不同的同 id 訊息會換掉（`store/lists.ts` 的 `upsertSorted`）。
+        lifecycle::emit_message_added(app, &bot_id, message).await;
+    }
     lifecycle::emit_turn(app, &turn.id).await;
     Ok(())
 }
@@ -1110,7 +1160,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                                 && !answers_none_of(late_prompt.as_deref(), seen.as_deref())
                             {
                                 tracing::info!(turn = %t.id, late = %late.id, bot = %bot.id, "遲到 hook 回答的是備援關掉的那一回合，不是現在 in-flight 的：補回那一回合");
-                                fill_or_drop_late_hook(app, &late, &assistant.clone().unwrap_or_default(), &session_id, &turn_id).await?;
+                                fill_or_drop_late_hook(app, &late, &assistant.clone().unwrap_or_default(), &session_id, &turn_id, true).await?;
                                 return Ok(());
                             }
                         }
@@ -1139,7 +1189,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     lifecycle::turn_controller::Outcome::Raced { now } if now == "completed_fallback" => {
                         // 這個交易沒寫到東西；先結束它，`fill_or_drop_late_hook` 自己開一個。
                         tx.commit().await?;
-                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id).await?;
+                        // 這筆就是 hook 要收的 in-flight 回合，只是 CAS 輸給備援：同一回合。
+                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, true).await?;
                         return Ok(());
                     }
                     _ => {}
@@ -1190,7 +1241,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
                         user = user.or(seen);
                     } else {
-                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id).await?;
+                        // 看得到使用者訊息而且對上＝同一回合；看不到只能補空的，不蓋已有的。
+                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, seen.is_some()).await?;
                         return Ok(());
                     }
                 }
@@ -1906,6 +1958,66 @@ mod external_claim_tests {
         (TmpDb(dir), pool, "r".to_string(), "c".to_string())
     }
 
+    /// 2026-09-29（遠端 claude）：hook 走 spool 晚 25 秒到，備援已經存了只有最後一段、還帶狀態列的回覆。
+    /// 有證據是同一回合就用 hook 的原文原地蓋掉（id 不變）；已經有 hook 寫的回覆、或沒有證據時不動。
+    #[tokio::test]
+    async fn a_late_hook_with_evidence_replaces_the_fallback_reply_in_place() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,'late-replace','claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,'web','completed_fallback','ok',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let fb = lifecycle::insert_message(&app, &conv, Some(&turn_id), "assistant", "最後一段\n\n✻ Crunched for 40s · done 17:02", "terminal_fallback", true, None)
+            .await
+            .unwrap();
+        let turn = || async {
+            sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap()
+        };
+
+        fill_or_drop_late_hook(&app, &turn().await, "hook 原文", &Some("s1".into()), &Some("n1".into()), false).await.unwrap();
+        let (content, source): (String, String) =
+            sqlx::query_as("SELECT content, source FROM messages WHERE id=?").bind(&fb.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(source, "terminal_fallback", "沒有證據不蓋：{content}");
+
+        fill_or_drop_late_hook(&app, &turn().await, "第一段\n\n最後一段", &Some("s1".into()), &Some("n1".into()), true).await.unwrap();
+        let (content, source, incomplete): (String, String, i64) =
+            sqlx::query_as("SELECT content, source, incomplete FROM messages WHERE id=?").bind(&fb.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!((content.as_str(), source.as_str(), incomplete), ("第一段\n\n最後一段", "hook", 0), "同一個 id 換成 hook 原文");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "不會變成兩則");
+        assert_eq!(turn().await.status, "completed");
+
+        // 已經是 hook 寫的（回合也不再是 completed_fallback）：再來一份不動。
+        fill_or_drop_late_hook(&app, &turn().await, "又一份", &Some("s1".into()), &Some("n1".into()), true).await.unwrap();
+        let content: String = sqlx::query_scalar("SELECT content FROM messages WHERE id=?").bind(&fb.id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(content, "第一段\n\n最後一段");
+    }
+
     /// 2026-09-13（GROK）：備援關掉的回合沒存回覆，遲到 hook 的答案被丟、使用者看到「沒回應」。
     #[tokio::test]
     async fn a_late_hook_fills_a_fallback_turn_that_has_no_reply() {
@@ -1941,7 +2053,7 @@ mod external_claim_tests {
             .await
             .unwrap();
 
-        fill_or_drop_late_hook(&app, &turn, "側欄那組徽章已收齊，cdcf165 已推", &Some("s1".into()), &Some("n1".into()))
+        fill_or_drop_late_hook(&app, &turn, "側欄那組徽章已收齊，cdcf165 已推", &Some("s1".into()), &Some("n1".into()), false)
             .await
             .unwrap();
 
@@ -1967,7 +2079,7 @@ mod external_claim_tests {
             .fetch_one(&app.db)
             .await
             .unwrap();
-        fill_or_drop_late_hook(&app, &turn, "第二份回覆", &Some("s1".into()), &Some("n1".into())).await.unwrap();
+        fill_or_drop_late_hook(&app, &turn, "第二份回覆", &Some("s1".into()), &Some("n1".into()), false).await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
             .bind(&turn_id)
             .fetch_one(&app.db)
@@ -2012,7 +2124,7 @@ mod external_claim_tests {
         let mut events = app.subscribe();
 
         tt::make_table_unreadable(&app, "conversations").await;
-        let first = fill_or_drop_late_hook(&app, &turn, "late reply", &Some("s1".into()), &Some("n1".into())).await;
+        let first = fill_or_drop_late_hook(&app, &turn, "late reply", &Some("s1".into()), &Some("n1".into()), false).await;
         tt::make_table_readable(&app, "conversations").await;
 
         assert!(first.is_err(), "an unreadable owner must return a retryable error: {first:?}");
@@ -2038,7 +2150,7 @@ mod external_claim_tests {
             .unwrap();
         assert_eq!(failed_replies, 0, "failed owner lookup cannot leave a durable reply without its event");
 
-        fill_or_drop_late_hook(&app, &turn, "late reply", &Some("s1".into()), &Some("n1".into())).await.unwrap();
+        fill_or_drop_late_hook(&app, &turn, "late reply", &Some("s1".into()), &Some("n1".into()), false).await.unwrap();
         let message_events: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
             .filter(|event| event.kind == "message_added")
             .collect();
@@ -2081,7 +2193,7 @@ mod external_claim_tests {
             .fetch_one(&app.db)
             .await
             .unwrap();
-        fill_or_drop_late_hook(&app, &turn, "   ", &Some("s2".into()), &Some("n2".into())).await.unwrap();
+        fill_or_drop_late_hook(&app, &turn, "   ", &Some("s2".into()), &Some("n2".into()), false).await.unwrap();
         let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
             .bind(&turn_id)
             .fetch_one(&app.db)
