@@ -58,11 +58,20 @@ am_bot_token() {
 # A bot pane must reserve its inherited proof before asking herdr to create a pane or child agent.
 # Rotation raises the matching daemon fence before its descendant snapshot; an unreadable / refused
 # gate means we do not run herdr. The permit remains open until the created pane is registered.
+#
+# 遠端主機上的 bot（有 bot 身分、沒有 `AM_PORT`）不走 fence：遠端沒有 daemon、不開反向埠（SPEC §11.4），
+# daemon 本來就不注入 `AM_PORT`，跟 cargo shim 的 #153 同一條判準。以前這裡把它當成「確認不了」而 fail closed，
+# 遠端 bot 就一顆子 pane／子 agent 都開不出來。遠端子 pane 本來也登記不到 daemon（/relay/pane 一樣要 AM_PORT），
+# fence 在那邊保護不到任何東西。
+am_spawn_fenced() {
+    [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_PORT:-}" ]
+}
+
 am_spawn_begin() {
     _AM_SPAWN_PERMIT=""
-    [ -n "${AM_BOT_ID:-}" ] || return 0
+    am_spawn_fenced || return 0
     _tok=$(am_bot_token)
-    if [ -z "$_tok" ] || [ -z "${AM_PORT:-}" ] || ! command -v curl >/dev/null 2>&1; then
+    if [ -z "$_tok" ] || ! command -v curl >/dev/null 2>&1; then
         printf 'agents-manager: 無法確認憑證輪替狀態，拒絕建立會繼承 bot credential 的 pane\n' >&2
         return 75
     fi
@@ -87,7 +96,7 @@ am_spawn_begin() {
 am_spawn_finish() {
     _pane=$1
     _purpose=$2
-    [ -n "${AM_BOT_ID:-}" ] || return 0
+    am_spawn_fenced || return 0
     [ -n "${_AM_SPAWN_PERMIT:-}" ] || return 75
     if [ -z "$_pane" ]; then
         printf 'agents-manager: herdr 沒回新 pane id；保留 spawn fence，拒絕假裝已登記\n' >&2
@@ -558,7 +567,7 @@ am_forward_with_env() {
     done
     # Every managed pane creation is fenced, even without a display purpose: an empty pane still
     # retains AM_BOT_ID / AM_BOT_TOKEN and can start a child after the parent restarts.
-    if [ -n "${AM_BOT_ID:-}" ]; then
+    if am_spawn_fenced; then
         am_spawn_begin || exit $?
         trap 'am_spawn_abort; exit 130' INT TERM
         _out=$("$AM_HERDR" "$_sub1" "$_sub2" "$@")
@@ -1723,6 +1732,30 @@ mod tests {
         assert_eq!(rc, 130, "{out:?} {err}");
         let sent = std::fs::read_to_string(&log).unwrap();
         assert!(sent.contains("/relay/spawn/abort"), "{sent}");
+    }
+
+    /// 遠端主機上的 bot 沒有 `AM_PORT`（SPEC §11.4）：spawn fence 問不到 daemon 也不能擋，
+    /// pane split 與 agent start 都要照開，而且一通 curl 都不打（127.0.0.1 在遠端是那台機器自己）。
+    #[test]
+    fn a_remote_bot_without_am_port_still_spawns_children() {
+        let s = Sandbox::new();
+        let log = curl_log(&s);
+        let created = r#"{"id":"pane.created","result":{"pane":{"pane_id":"w1:p-child"}}}"#;
+        let env = [
+            ("AM_AGENT_NAME", "parent"),
+            ("AM_BOT_ID", "b1"),
+            ("AM_BOT_TOKEN", "tok"),
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("AM_TEST_CREATE_JSON", created),
+            ("TMPDIR", s.dir.to_str().unwrap()),
+        ];
+        let (out, err, rc) = s.run_full(&env, &["pane", "split", "--pane", "w1:p1"]);
+        assert_eq!(rc, 0, "{out:?} {err}");
+        assert!(!out.is_empty(), "herdr pane split 要真的跑：{err}");
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--pane", "w1:p1"]);
+        assert_eq!(rc, 0, "{out:?} {err}");
+        assert!(!err.contains("拒絕"), "{err}");
+        assert!(!log.exists(), "遠端 bot 不該打任何 curl：{:?}", std::fs::read_to_string(&log));
     }
 
     /// #665：母名已經 32 字時，子 agent 不能被改成母 bot 自己；不同字尾也不能撞成同一個名字。
