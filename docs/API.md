@@ -52,7 +52,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 
 | Service ID | 可用路徑 |
 |---|---|
-| `daemon-swap` | `GET /api/supervisor`, `/api/supervisor/health`, `/api/supervisor/state`, `/api/supervisor/leases`, `/api/supervisor/maintenance/safety`; `POST /api/supervisor/leases/restart/{acquire,renew,release}`, `/api/services/daemon-swap/probe/{bot_id}` |
+| `daemon-swap` | `GET /api/supervisor`, `/api/supervisor/health`, `/api/supervisor/state`, `/api/supervisor/leases`, `/api/supervisor/maintenance/safety`; `POST /api/supervisor/leases/restart/{renew,release}`, `/api/services/daemon-swap/restart-window`, `/api/services/daemon-swap/probe/{bot_id}` |
 | `herdr-upgrade` | `GET /api/capabilities`, `/api/supervisor/state`, `/api/panes`, `/api/supervisor/health`; `POST /api/services/herdr-upgrade/notify`, `/api/services/herdr-upgrade/resume/{bot_id}` |
 
 兩個 service 都讀不到 `/api/state`（帶 bot 的 `env`／`args`，可能有秘密），要狀態讀去敏的 `/api/supervisor/state`。`daemon-swap/probe/{bot_id}` 對指定的 bot 送一句寫死的自測文字（`daemon-swap.sh` 的 `SWAP_PROBE_BOT`），來源固定 daemon，不能改文字或帶附件；`herdr-upgrade/notify` 只送給設定的 responder 並以 daemon 作來源；`resume/{bot_id}` 固定要求 native resume，不能傳 session 或其他 start 選項。daemon-swap 第一次升級舊版 daemon 時，舊 daemon 尚不認 service token，該次維持 User bootstrap；新版首次啟動後建立 service token，後續操作改用 service principal。回滾到舊版時腳本清掉新版 service token，避免拿舊 daemon 重試時降級不明。
@@ -1298,7 +1298,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 - 只要 transaction 已提交，即使立即重啟失敗，回應也包含 `credential_rotated:true`；intent 保留並重試，開機 recovery 會替仍 active 的舊 run 冪等續做。若舊 run 已停止或退出，直接收尾 intent，不改標 run、不建立新 run。
 
 ### 10.3c `GET /api/capabilities`
-`200 {"capabilities":["resume_native_start","herdr_maintenance","service_principals"]}`。會停 herdr server 的腳本先確認這裡有 `resume_native_start` 才動手；`service_principals` 表示 launchd service token 已支援，缺少 service token 檔時不得退回 User。
+`200 {"capabilities":["resume_native_start","herdr_maintenance","service_principals","swap_restart_window"]}`。會停 herdr server 的腳本先確認這裡有 `resume_native_start` 才動手；`service_principals` 表示 launchd service token 已支援，缺少 service token 檔時不得退回 User；`swap_restart_window` 表示有 `POST /api/services/daemon-swap/restart-window`（自動換版開窗口不需要核准單）。
 
 ### 10.3d herdr 維護狀態 `/api/supervisor/herdr-maintenance`（SPEC §6.5.2）
 - `GET` → `{"active":bool,"window":{"opened_at","until","opened_by","reason"}|null,"max_minutes":30}`；過了 `until` 的窗口在讀取當下自動結束。
@@ -1968,17 +1968,26 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `GET /api/deploy/status` → `{live_sha,live_full,target_sha,target_short,behind,code_commits,code_changed,commits:[{sha,subject}],commits_truncated,running,working:[{bot_id,name,is_supervisor}],log_path,kick_ready,error?}`。
   `live_sha`＝這顆 binary 建置時的 short sha（同 `GET /api/supervisor` 的 `last_deploy.sha`），`target_sha`＝daemon 所在 repo 的 `origin/main`（完整 sha）。
   `behind`＝`live..origin/main` 的 commit 數，`code_commits`／`code_changed` 只看 `build-inputs` 的路徑（docs-only 的落後是 `code_changed:false`，規則同 kick）；`commits` 最多 30 個、最新在前，超過時 `commits_truncated:true`。
-  `running`＝現在有沒有部署在跑（`null`＝沒有）：`{kind:"requested",sha,requested_at,approval_id}`（按過、kick 還沒派出去或在等安全窗口）、`{kind:"lease",resource,owner,expires_at}`（有人握著 rebuild／restart 窗口）、`{kind:"assignment",client_request_id,status,bot_id}`（`agm-daemon-update-*` 交辦還沒結案，含等驗收）。
+  `running`＝現在有沒有部署在跑（`null`＝沒有）：`{kind:"requested",sha,requested_at}`（按過、kick 還沒吃到、正在建置或在等安全窗口）、`{kind:"lease",resource,owner,expires_at}`（有人握著 rebuild／restart 窗口）。
   `working`＝此刻 `working` 的 bot（`lease safety` 同一份判定，沒有排除任何人）。`kick_ready:false`＝裝好的 `bin/daemon-update-kick.sh` 不存在或還不認得立即模式。
   說不出落後多少（sha 是 `unknown`、不在 repo、讀不到 origin/main）時 `code_changed:false` 並帶 `error`。repo 是 daemon binary 往上第一個有 `.git` 與 `daemon/Cargo.toml` 的目錄（找不到退回 `~/project/agents-manager`）；每 5 分鐘最多在背景 `git fetch origin main` 一次，這一次的回應用 fetch 之前的 ref。
-- `POST /api/deploy/now {sha?}` → `{started:true,sha,short,live_sha,approval_id,log_path,request_path}`。`sha` 是確認框上那顆（不帶＝當下的 origin/main）：部署的就是它，不是按下去那一刻的 HEAD。
+- `POST /api/deploy/now {sha?}` → `{started:true,sha,short,live_sha,log_path,request_path}`。`sha` 是確認框上那顆（不帶＝當下的 origin/main）：部署的就是它，不是按下去那一刻的 HEAD。
   **只給 UI**：有效 Bot principal（`X-AM-Bot-Id`＋自己的 `X-AM-Bot-Token`）一律 `403 {"reason":"ui_only"}`；缺值、錯 token、非 UTF-8、只帶一半或跟 `X-AM-Token` 混帶的 Bot 標頭由 `/api` 中介層回 401，不能降級成使用者（#339、#556）。bot 要重建照 §18.10 申請核准。兩個 bot 標頭都沒帶時，共用 UI token 持有者依 #556 使用者裁示視為使用者；不做真人證明，接受本機／`allow_lan` 取得 UI token 的風險（使用者原話「沒關系lan開放」，[裁示留言](https://github.com/Eden-Sun/agents-manager/issues/556#issuecomment-5833272486)）。
-  做的事：開一筆 `requester=daemon-update-kick`、`purpose=rebuild`、`target_commit=<sha>`、有效 6 小時的核准並**當場以 `user(立即部署)` 核准**（不推 `approval_requested`，同 requester 的 pending 照 #421 自動取代），寫 `supervisor/AGM/daemon-update.now.json`，再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`；留一筆 `deploy_now` note。
-  - `409 deploy_in_progress {running,log_path}`：上面 `running` 的三種任一，什麼都不寫。
+  做的事：**不開核准單**（使用者 2026-09-29），只寫 `supervisor/AGM/daemon-update.now.json`（`{sha,live_sha,requested_at,requested_by}`），再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`（Linux：`systemctl --user start --no-block com.agm.daemon-update.service`）；留一筆 `deploy_now` note。kick 讀到就部署那顆 sha、不等 `ubuntu-ci`，做完刪檔。
+  - `409 deploy_in_progress {running,log_path}`：上面 `running` 的任一種，什麼都不寫。
   - `409 nothing_to_deploy`（線上到那顆只動到不進 binary 的檔）、`409 target_not_on_main`（不是 origin/main 的祖先）、`409 target_older_than_live`（線上不是目標的祖先或同一顆，拒絕降版，`message` 說明原因）、`409 unknown_commit`、`409 status_unknown`（說不出落後多少）。
   - `503 kick_not_installed`／`kick_outdated`：kick 沒裝或還不認得立即模式（檔裡沒有 `daemon-update.now.json`），先 install，什麼都不寫。
-  - `503 kick_start_failed`／`request_write_failed`：已開的核准改成 `revoked`、請求檔刪掉，可以直接重按。
+  - `503 kick_start_failed`／`request_write_failed`：請求檔刪掉，可以直接重按。
   同一時間只受理一次（連點兩下第二下是 409）。
+
+### 換版窗口 `POST /api/services/daemon-swap/restart-window`（SPEC §18.2、§18.10，2026-09-29）
+- 只給 `daemon-swap` 服務身分（`X-AM-Service-Id: daemon-swap` ＋ `X-AM-Service-Token`；token 檔 `service-tokens/daemon-swap.token`，範圍見 `service_auth::allows`）。其他身分（使用者、bot、`herdr-upgrade`）一律 403。
+  `GET /api/capabilities` 有 `swap_restart_window` 才有這條路由；`daemon-swap.sh` 沒看到它就以結束碼 9 中止（舊 daemon 要先手動換過一次）。
+- body `{owner, commit, ttl_secs?}`（`deny_unknown_fields`；不接受 `exclude_bot_ids`：沒有「申請者自己那顆 bot」可排除）。daemon 開一筆 `purpose=restart`、`requester=owner`、`target_commit=commit` 的核准並**當場以 `service(daemon-swap)` 核准**
+  （有效期 `ttl_secs`＋5 分鐘，不推 `approval_requested`），再走與 `POST /api/supervisor/leases/restart/acquire` **同一個** `maintenance::acquire`（`require_idle`）：
+  沒有 bot 在 `working`／`in_flight`、送達臨界區沒有 prompt、沒有別人握租約才拿得到，拿到時 assignment 派送暫停。
+- 回應同 acquire：`{lease,lease_token,approval,safety}`（`lease_token` 只出現這一次）；拿不到回 acquire 的 409（`not_idle`／`lease_held`），並把剛開的核准改成 `revoked`，不留 `approved` 的殘單。
+  續約與交還仍走 `/api/supervisor/leases/restart/{renew,release}`（要 `lease_token`，release 會把這筆核准消耗掉）。daemon-swap 的 scope 不再含 `leases/restart/acquire`：generic acquire 要事先核准的單，這條路由是唯一不需要別人核准的入口。
 
 ### 核准與租約（SPEC §18.10）
 - `GET /api/supervisor/approvals?id=<id>`：只回那一筆（清單本身只有最新 100 筆，排程腳本要確認的舊核准會被擠出去）。
