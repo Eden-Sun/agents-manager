@@ -122,3 +122,14 @@
 .update-menu-pop .head-menu-item {
   white-space: normal;
 }
+
+/* 手機 menu 最上面那列（Sidebar，2026-09-30 使用者）：不在額度區裡，不畫分組線、不留額度區的邊距，跟部署 chip 一樣置中。 */
+
+.sidebar-head .quota-update {
+  align-self: center;
+  margin: 0;
+}
+
+.sidebar-head .quota-update::before {
+  display: none;
+}

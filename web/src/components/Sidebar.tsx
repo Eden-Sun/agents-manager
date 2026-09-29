@@ -45,6 +45,7 @@ import { KeepAwakeToggle } from './KeepAwakeToggle'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
 import { HeadMemBadges } from './HeadMemBadges'
+import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { ThemeToggle } from './ThemeToggle'
 import { ProjectMemBadge } from './ProjectMemBadge'
 import { HandedOffBadge } from './HandedOffBadge'
@@ -1082,6 +1083,8 @@ export function Sidebar() {
             {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
             {/* 立即部署（2026-09-25 使用者）：落後且有程式碼差異才出現。放標題列、只寫 `⇪N`：放第二列會把 RAM 格擠到跟兩側重疊。 */}
             <DeployNowBadge />
+            {/* 手機 menu 也放一鍵重啟（2026-09-30 使用者：打開 menu 時標題列那顆被蓋住，看到 Bot 帶更新箭頭卻找不到按鈕）。 */}
+            {phone ? <UpdateQuotaChip /> : null}
           </div>
           <div className="head-brand-meta">
             <PaneBadge />

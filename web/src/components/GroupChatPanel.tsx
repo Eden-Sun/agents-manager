@@ -27,6 +27,7 @@ import { loadMissionOpts, type MissionOpts } from '../lib/missionOpts'
 import { MissionOptions } from './MissionOptions'
 import { MissionsBar } from './MissionsBar'
 import { QuotaStrip } from './QuotaStrip'
+import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
 import { ToolsHint, ToolsHintIcon } from './Tools'
 import type { BotKind } from '../api/types'
@@ -572,6 +573,7 @@ function GroupComposer({
 export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string; onOpenSidebar: () => void }) {
   const project = useStore((s) => s.projects.find((p) => p.id === projectId) ?? null)
   const hostName = useStore((s) => projectHostName(s, projectId))
+  const phone = useMediaQuery(PHONE_QUERY)
   const hostUp = useStore((s) => hostName === 'local' || (s.hosts.find((h) => h.name === hostName)?.connected ?? false))
   const members = useStore(useShallow((s) => s.bots.filter((b) => b.project_id === projectId)))
   const memberCount = members.length
@@ -629,6 +631,8 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         <MemberStrip projectId={projectId} />
         <span className="spacer" />
         <ToolsHintIcon />
+        {/* 手機的額度列不畫更新 chip（見 QuotaStrip）；單一 Bot 那頁放在名字旁，群組頁放這裡（2026-09-30 使用者）。 */}
+        {phone ? <UpdateQuotaChip /> : null}
         <QuotaStrip host={hostName} />
         <AttachButton command={attachCommand} compact />
         <div className="head-actions">
