@@ -102,12 +102,14 @@ systemctl --user enable --now com.agm.<名字>.timer
 loginctl enable-linger "$USER"   # 沒登入也要跑（一次就好；沒開的話登出後整個 user manager 會停）
 ```
 
-`daemon-update` 的 `Environment=` 只有 PATH（`%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`）；
-新主機的工具不在這些位置就改安裝那份，`ops-sync` 不會報。
+`daemon-update` 的 `Environment=` 有 PATH（`%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`）
+與 `HERDR_SESSION=agents-manager`；新主機的工具不在這些位置就改安裝那份，`ops-sync` 不會報（`Environment=` 只看在不在，不比內容；安裝端少了 `HERDR_SESSION` 也一樣不會報，要自己重裝或補 drop-in）。
+`HERDR_SESSION` 只有 systemd unit 帶：Linux 主機只跑 daemon 用的 session、沒有 default server，排程又沒有 pane 環境，
+不指定的話 `daemon-swap.sh` 的 `herdr pane list` 會回 `server_not_running` 而中止換版。daemon 改用別的 session 名時這裡跟著改。
 
 排程每 5 分鐘一輪（`StartInterval 300`／`OnUnitActiveSec=300s`），每輪都往下檢查；沒有新東西時只有一次 `git fetch`，不問 GitHub。
 
-環境變數（都可選；unit／plist 的 `Environment` 只放 `PATH`，要有 `git`、`gh`、`bun`、`python3`、`nice`）：
+環境變數（都可選；unit／plist 的 `Environment` 只放 `PATH`（unit 另加 `HERDR_SESSION`，見上），要有 `git`、`gh`、`bun`、`python3`、`nice`）：
 
 | 變數 | 預設 | 意義 |
 | --- | --- | --- |
