@@ -901,7 +901,6 @@ export function QuotaStrip({
     )
   }, [quota, configured, idStatus, host, disabledIdentities])
 
-  const remote = host !== LOCAL_HOST
   const fitKey = `${host}|${ordered.map(entryReactKey).join(',')}`
   const fit = fitState.key === fitKey ? fitState.s : QUOTA_FIT_START
 
@@ -915,7 +914,7 @@ export function QuotaStrip({
     const row = strip?.querySelector<HTMLElement>('.quota-open')
     if (!drawn || phone || !strip || !head || !row) return
     const remeasure = () => {
-      const next = nextQuotaFit(fit, quotaAvail(head, strip), quotaContent(row), remote)
+      const next = nextQuotaFit(fit, quotaAvail(head, strip), quotaContent(row), false)
       if (next !== fit) setFitState({ key: fitKey, s: next })
     }
     remeasure()
@@ -923,7 +922,7 @@ export function QuotaStrip({
     const ro = new ResizeObserver(remeasure)
     for (const el of [head, ...head.children, ...row.children]) ro.observe(el)
     return () => ro.disconnect()
-  }, [drawn, phone, fit, fitKey, remote])
+  }, [drawn, phone, fit, fitKey])
 
   const popEntries = ordered
 
@@ -946,12 +945,7 @@ export function QuotaStrip({
       <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
         {/* 更新 chip 放最左邊，避免夾在兩個 kind 間被誤認（2026-09-11 使用者）。手機搬到標題列 ★ 左邊（ChatPanel，2026-09-19 使用者）。 */}
         {phone ? null : <UpdateQuotaChip />}
-        {/* 遠端才掛主機名；桌機擠的時候先收（標題列左邊已有 `@host` 徽章），量表最後才讓。 */}
-        {remote && (phone || fit.level === 0) ? (
-          <span className="quota-host" aria-hidden="true">
-            {host}
-          </span>
-        ) : null}
+        {/* 不掛主機名牌（2026-09-29 使用者）：標題列左邊的 `@host` 已經說了是哪台；tooltip／popover 標題仍寫主機。 */}
         {shown.map((entry) => {
           let focused = false
           if (focusKind && entry.kind === focusKind) {

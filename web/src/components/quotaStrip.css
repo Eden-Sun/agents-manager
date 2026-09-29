@@ -81,26 +81,6 @@
   cursor: pointer;
 }
 
-/* 遠端名牌比 .host-badge 矮，免得撐高標題列（本機不掛）。 */
-
-.quota-host {
-  flex: none;
-  margin-right: 7px;
-  max-width: 7em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
-  padding: 1px 5px;
-  border: 1px solid var(--border-strong);
-  border-radius: 3px;
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-  font-family: var(--font-mono);
-}
-
 /* 格子裡不用 gap（2026-09-11 使用者）：改量表自己 3px 左內距。 */
 
 .quota-hp {
