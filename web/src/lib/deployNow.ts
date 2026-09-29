@@ -12,13 +12,11 @@ export interface DeployCommit {
 }
 
 export interface DeployRunning {
-  /** `requested`＝按過、kick 還沒派出去（或在等安全窗口）；`lease`＝有人握著 rebuild／restart 窗口；`assignment`＝更新交辦還沒結案。 */
+  /** `requested`＝按過、kick 還沒吃到（或正在建置、在等安全窗口）；`lease`＝有人握著 rebuild／restart 窗口。 */
   kind: string
   sha?: string
   resource?: string
   owner?: string
-  status?: string
-  client_request_id?: string
 }
 
 export interface DeployStatus {
@@ -48,11 +46,9 @@ export function deployVisible(s: DeployStatus | null): boolean {
 export function runningText(r: DeployRunning): string {
   switch (r.kind) {
     case 'requested':
-      return `已按下立即部署${r.sha ? `（${r.sha.slice(0, 8)}）` : ''}，等例行更新接手或等安全窗口`
+      return `已按下立即部署${r.sha ? `（${r.sha.slice(0, 8)}）` : ''}，等自動部署接手、建置或等安全窗口`
     case 'lease':
       return `${r.owner || '有人'}正握著 ${r.resource ?? ''} 窗口（重建或換版進行中）`
-    case 'assignment':
-      return `更新交辦 ${r.client_request_id ?? ''} 還沒結案（${r.status ?? ''}）`
     default:
       return '有部署在跑'
   }
@@ -68,7 +64,7 @@ export function deployNowNotice(result: { short?: string; log_path?: string } | 
   if (result) {
     return {
       level: 'info',
-      text: `已開始立即部署 ${result.short ?? ''}：照例行流程建置、整樹測試、沒人 working 才換 binary。進度看 ${result.log_path ?? 'daemon-update.log'}`,
+      text: `已開始立即部署 ${result.short ?? ''}：不等 ubuntu-ci，在專用 checkout 建置，沒人 working 才換 binary。進度看 ${result.log_path ?? 'daemon-update.log'}`,
     }
   }
   if (error instanceof ApiError) {

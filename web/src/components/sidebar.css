@@ -49,15 +49,8 @@
   gap: 6px;
 }
 
-.head-brand-title > .rebuild-badge-box,
 .head-brand-meta > .conn {
   margin-left: auto;
-}
-
-/* chip 現在在左欄：清單改靠左展開，靠右會掉出畫面左緣。 */
-.head-brand .rebuild-pop {
-  right: auto;
-  left: 0;
 }
 
 /* 側欄不夠寬時「剩 N」在這格折行，不去擠左右兩欄。 */

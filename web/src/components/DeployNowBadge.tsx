@@ -2,8 +2,8 @@
  * 左上角「立即部署」（使用者 2026-09-25：「agm排以外，要我可以在左上角直接點立即部署」）。
  *
  * 線上 binary 落後 origin/main、而且有會進 binary 的差異時才出現，寫落後幾個 commit；按下去先開確認框
- * （要上線的 commit 範圍、正在 working 的 bot），確認後 `POST /api/deploy/now`——daemon 以使用者的名義核准
- * 並叫起既有的例行更新（daemon-update-kick），安全條件一條都不省。部署在跑時 chip 改寫「部署中」、不給再按。
+ * （要上線的 commit 範圍、正在 working 的 bot），確認後 `POST /api/deploy/now`——daemon 寫下請求檔
+ * 並叫起既有的自動部署（daemon-update-kick），直接部署那顆 commit、不等 ubuntu-ci，沒人 working 才換版等安全條件照舊。部署在跑時 chip 改寫「部署中」、不給再按。
  */
 import { useCallback, useEffect, useState } from 'react'
 import { fetchDeployStatus, startDeployNow } from '../api/deploy'
@@ -108,11 +108,11 @@ export function DeployNowBadge() {
             </ul>
             <p className={status.working.length ? 'deploy-working' : undefined}>
               {status.working.length
-                ? `正在 working：${status.working.map((w) => w.name).join('、')}——換 binary 會等它們跑完（等太久照例行規則縮小封鎖面），不會中途砍掉。`
+                ? `正在 working：${status.working.map((w) => w.name).join('、')}——換 binary 會等它們跑完，不會中途砍掉。`
                 : '目前沒有 bot 在 working。'}
             </p>
             <p className="deploy-note">
-              不等排程、不等 AGM 裁示；照例行流程在乾淨 worktree 建置、整樹測試、備份 .bak，驗證失敗自動回滾。進度看{' '}
+              不等排程、不等 ubuntu-ci；在專用乾淨 checkout 建置（建置已在推 main 前測過），備份 binary 與 DB，驗證失敗自動回滾。進度看{' '}
               <code>{status.log_path}</code>
             </p>
             {!status.kick_ready ? (

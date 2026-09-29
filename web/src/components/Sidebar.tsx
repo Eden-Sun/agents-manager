@@ -49,7 +49,6 @@ import { ThemeToggle } from './ThemeToggle'
 import { ProjectMemBadge } from './ProjectMemBadge'
 import { HandedOffBadge } from './HandedOffBadge'
 import { BackgroundJobsBadge } from './BackgroundJobs'
-import { RebuildBadge } from './RebuildBadge'
 import { DeployNowBadge } from './DeployNowBadge'
 import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
@@ -1081,8 +1080,6 @@ export function Sidebar() {
           <div className="head-brand-title">
             <h1 title="Agents Manager">AG Man</h1>
             {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
-            {/* 重建申請數放在「AG Man」右上、連線燈號正上方（2026-09-14 使用者）。 */}
-            <RebuildBadge />
             {/* 立即部署（2026-09-25 使用者）：落後且有程式碼差異才出現。放標題列、只寫 `⇪N`：放第二列會把 RAM 格擠到跟兩側重疊。 */}
             <DeployNowBadge />
           </div>

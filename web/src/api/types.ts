@@ -691,7 +691,7 @@ export const HIDDEN_MODELS: readonly string[] = ['gpt-5.5', 'gpt-5.6-sol', 'gpt-
 /**
  * daemon 已停用的模型別名（#400）：送這些值進去，它會換成右邊那個再存，並在回應帶 `remapped`。
  * 權威在 `daemon/src/models.rs` 的 `remap_deprecated_model`，這裡留一份只為了**前端自己不要再送別名**
- * （靜態後備清單、快捷按鈕）與排序時把別名對到正式 id；**兩邊要一起改**（同 `REBUILD_THRESHOLD` 的作法）。
+ * （靜態後備清單、快捷按鈕）與排序時把別名對到正式 id；**兩邊要一起改**。
  * 選單本身照舊顯示 daemon 給的清單——claude 的 `GET /api/models` 目前就是回 `opus` 這種別名，
  * 前端擅自濾掉會讓人選不到 opus。真的被換時由 `store.patchBot` 講一句。
  */
