@@ -729,3 +729,67 @@ async fn an_older_duplicate_is_found_past_the_newer_one() {
     rewind(&e.app, &bot.id, &ids[1], Some(tui.clone() as Arc<dyn Pane>)).await.unwrap();
     assert_eq!(tui.restored(), Some(1), "倒的是第一個 again，不是最後那個");
 }
+
+/// 把 `msg` 掛到一筆 `status` 的回合上（被中斷的是 `failed`、沒有 assistant 回覆）。
+async fn turn_for(r: &Rig, msg: &str, status: &str) -> String {
+    let conv = db::conversation_id(&r.e.app.db, &r.bot).await.unwrap();
+    let turn = db::ulid();
+    sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web',?,'ok',NULL,?)")
+        .bind(&turn)
+        .bind(&conv)
+        .bind(status)
+        .bind(db::now())
+        .execute(&r.e.app.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE messages SET turn_id = ? WHERE id = ?").bind(&turn).bind(msg).execute(&r.e.app.db).await.unwrap();
+    turn
+}
+
+/// 2026-09-29 使用者（console-rpa 的「pl」）：送出後還沒輸出就被中斷，claude 把它拿出對話、原文放回輸入列，
+/// `/rewind` 選單裡沒有它。倒回它＝清掉放回來的原文、標記，原文交回網頁；不去按 Restore。
+#[tokio::test]
+async fn a_prompt_interrupted_before_any_output_rewinds_by_clearing_its_refill() {
+    let r = rig().await;
+    let ids = insert_msgs(&r.e.app, &r.bot, &[("user", "pl")]).await;
+    turn_for(&r, &ids[0], "failed").await;
+    // 輸入列裡是 claude 放回來的原文（2.1.284 實機）。
+    let tui = FakeTui::new(&[A, SECOND, C], Faults { composer: Some("pl".into()), ..Default::default() });
+    let out = call(&r, &ids[0], &tui).await.unwrap();
+    assert_eq!((out["text"].as_str(), out["hidden"].as_i64(), out["pane_cleared"].as_bool()), (Some("pl"), Some(1), Some(true)));
+    assert_eq!(tui.composer(), "", "放回來的原文清掉，下一則才不會接在後面");
+    assert_eq!(tui.restored(), None, "沒按 Restore");
+    assert_eq!(rewound(&r).await, vec![false; 6], "之前的都不動");
+
+    // 輸入列已經是空的（console-rpa 那次）：選單找不到，一樣算倒回。
+    let r = rig().await;
+    let ids = insert_msgs(&r.e.app, &r.bot, &[("user", "pl")]).await;
+    turn_for(&r, &ids[0], "failed").await;
+    let tui = FakeTui::new(&[A, SECOND, C], Faults::default());
+    assert_eq!(call(&r, &ids[0], &tui).await.unwrap()["text"], "pl");
+}
+
+/// 被丟掉的那一則後面還有在對話裡的：倒回到那一則之前（被丟掉的本來就不在）。
+#[tokio::test]
+async fn a_dropped_prompt_followed_by_real_ones_rewinds_to_the_next_real_one() {
+    let r = rig().await;
+    let ids = insert_msgs(&r.e.app, &r.bot, &[("user", "pl"), ("user", "later one"), ("assistant", "OK")]).await;
+    turn_for(&r, &ids[0], "failed").await;
+    turn_for(&r, &ids[1], "completed").await;
+    let tui = FakeTui::new(&[A, SECOND, C, "later one"], Faults::default());
+    let out = call(&r, &ids[0], &tui).await.unwrap();
+    assert_eq!(out["text"], "pl");
+    assert_eq!(out["hidden"], 3, "pl、later one 與它的回覆");
+    assert_eq!(tui.restored(), Some(3), "倒到 later one 之前");
+}
+
+/// 回合有回覆（不是被丟掉的）卻在選單上找不到：照舊回錯，不猜。
+#[tokio::test]
+async fn a_prompt_with_a_reply_missing_from_the_menu_still_fails() {
+    let r = rig().await;
+    let turn = turn_for(&r, &r.ids[2], "failed").await; // 有 assistant 回覆，只是回合失敗
+    sqlx::query("UPDATE messages SET turn_id = ? WHERE id = ?").bind(&turn).bind(&r.ids[3]).execute(&r.e.app.db).await.unwrap();
+    let tui = FakeTui::new(&[A, C], Faults::default());
+    assert_eq!(reason(call(&r, &r.ids[2], &tui).await.unwrap_err()), "not_in_menu");
+    assert_eq!(rewound(&r).await, vec![false; 6]);
+}

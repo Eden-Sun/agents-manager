@@ -414,11 +414,15 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
     let Some(refill) = wait_for(pane, RESTORE_WAIT_MS, |s| (!in_rewind_ui(s)).then(|| lifecycle::composer_text("claude", s))).await? else {
         return Err(Fail::Unconfirmed);
     };
-    // 原文交給網頁；pane 的輸入列要空著，下一則才不會接在後面。只清 CLI 放回來的那段：輸入列看得到的是目標的連續一段
-    // （長的只看得到尾巴幾行，14 列實測）才清。
-    let pane_cleared = match refill {
+    Ok(Done { pane_cleared: clear_refill(pane, refill, target).await? })
+}
+
+/// 原文交給網頁；pane 的輸入列要空著，下一則才不會接在後面。只清 CLI 放回來的那段：輸入列看得到的是目標的連續一段
+/// （長的只看得到尾巴幾行，14 列實測）才清。`Ok(false)`＝輸入列裡是別的字，沒動。
+async fn clear_refill(pane: &dyn Pane, refill: Option<String>, target: &str) -> Result<bool, Fail> {
+    Ok(match refill {
         None => true,
-        Some(text) if !squash(&text).is_empty() && squash(target).contains(&squash(&text)) => {
+        Some(text) if is_refill_of(&text, target) => {
             keys(pane, &["ctrl+c"]).await?;
             let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| lifecycle::composer_text("claude", s).is_none().then_some(())).await?.is_some();
             // 清掉之後 claude 會顯示幾秒「Press Ctrl-C again to exit」：這段時間再來一個 ctrl+c（停機、中斷）就把它關掉了。
@@ -430,8 +434,28 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
             tracing::warn!(composer = %preview(&other, 60), "rewind: the composer holds something other than the rewound prompt; leaving it");
             false
         }
-    };
-    Ok(Done { pane_cleared })
+    })
+}
+
+fn is_refill_of(text: &str, target: &str) -> bool {
+    !squash(text).is_empty() && squash(target).contains(&squash(text))
+}
+
+/// 還沒輸出任何東西就被中斷的那一則（2026-09-29 使用者：console-rpa 送「pl」4 秒就中斷，倒回失敗）：claude 2.1.284 實機
+/// 會把它從對話拿掉、原文放回輸入列，`/rewind` 選單裡就沒有它。這種訊息本來就不在 context 裡，倒回它＝
+/// 清掉 CLI 放回來的原文，之後還有在 context 裡的訊息就改倒到那一則之前。`drive` 失敗在 `NotInMenu`／`ComposerBusy` 時才走這條。
+async fn rewind_dropped(pane: &dyn Pane, target: &str, next: Option<(String, usize)>) -> Result<Done, Fail> {
+    let s = read(pane).await?;
+    if in_rewind_ui(&s) {
+        return Err(Fail::UiBusy);
+    }
+    let cleared = clear_refill(pane, lifecycle::composer_text("claude", &s), target).await?;
+    match next {
+        Some((later, skip)) if cleared => drive(pane, &later, skip).await,
+        Some(_) => Err(Fail::ComposerBusy),
+        None if cleared => Ok(Done { pane_cleared: true }),
+        None => Err(Fail::ComposerBusy),
+    }
 }
 
 // ───────────── 端點 ─────────────
@@ -523,8 +547,28 @@ pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option
     };
     // 直接對 pane 打過字：之後的 prompt 改走打字路線（`slash::mark_pane_typed` 的理由）。記不下來就不打。
     lifecycle::mark_pane_typed(app, &run.id).await.map_err(up)?;
+    let dropped = match msg.turn_id.as_deref() {
+        Some(t) => turn_dropped(app, t).await.map_err(up)?,
+        None => false,
+    };
     let done = match drive(pane.as_ref(), &target, skip).await {
         Ok(d) => d,
+        Err(Fail::NotInMenu | Fail::ComposerBusy) if dropped => {
+            let next = next_in_context(app, &conv, &msg.id).await.map_err(up)?;
+            match rewind_dropped(pane.as_ref(), &target, next).await {
+                Ok(d) => {
+                    tracing::info!(bot = %bot.name, "rewind: the target was interrupted before any output and never stayed in the context");
+                    d
+                }
+                Err(f) => {
+                    tracing::warn!(bot = %bot.name, reason = f.reason(), "rewind did not happen");
+                    return Err(match f {
+                        Fail::Pane(_) => up(f.message()),
+                        _ => LcError::conflict(f.reason(), json!({"message": f.message()})),
+                    });
+                }
+            }
+        }
         Err(f) => {
             tracing::warn!(bot = %bot.name, reason = f.reason(), "rewind did not happen");
             return Err(match f {
@@ -549,6 +593,41 @@ pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option
         "hidden": hidden,
         "pane_cleared": done.pane_cleared,
     }))
+}
+
+/// 回合失敗、而且一則 assistant 回覆都沒有：claude 沒留下它（見 [`rewind_dropped`]）。
+async fn turn_dropped(app: &Arc<App>, turn_id: &str) -> anyhow::Result<bool> {
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_optional(&app.db).await?;
+    if status.as_deref() != Some("failed") {
+        return Ok(false);
+    }
+    let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'assistant'")
+        .bind(turn_id)
+        .fetch_one(&app.db)
+        .await?;
+    Ok(replies == 0)
+}
+
+/// `message_id` 之後第一則還在 context 裡的使用者訊息（沒倒回、不是被丟掉的），連同它在選單上要跳過幾則同樣開頭的較新訊息。
+async fn next_in_context(app: &Arc<App>, conv: &str, message_id: &str) -> anyhow::Result<Option<(String, usize)>> {
+    let later: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT content, turn_id FROM messages WHERE conversation_id = ? AND role = 'user' AND rewound_at IS NULL
+           AND rowid > (SELECT rowid FROM messages WHERE id = ?) ORDER BY rowid",
+    )
+    .bind(conv)
+    .bind(message_id)
+    .fetch_all(&app.db)
+    .await?;
+    for (i, (content, turn)) in later.iter().enumerate() {
+        if let Some(t) = turn {
+            if turn_dropped(app, t).await? {
+                continue;
+            }
+        }
+        let skip = later[i + 1..].iter().filter(|(c, _)| same_first_line(c, content)).count();
+        return Ok(Some((content.clone(), skip)));
+    }
+    Ok(None)
 }
 
 /// 這一則與之後的都標成倒回（標記不刪）。回標了幾則。
