@@ -25,7 +25,7 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
     const p = codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id))
     return p ? JSON.stringify(p) : ''
   })
-  const cli = useStore((s) => s.cliUpdate)
+  const cliKey = useStore((s) => JSON.stringify(s.cliUpdates.filter((item) => item.kind === 'codex')))
   const install = useStore((s) => s.installCodexUpdate)
   const notify = useStore((s) => s.notify)
   const [localOpen, setLocalOpen] = useState(false)
@@ -35,6 +35,7 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
   const [asking, setAsking] = useState(false)
   const [reviewKey, setReviewKey] = useState(0)
 
+  const cli = (JSON.parse(cliKey) as import('../store/cliUpdate').CliUpdate[])[0]
   if (cli && !control) {
     const label = `${cli.host} 的 codex ${CLI_UPDATE_PHASE_LABEL[cli.phase]}${cli.from ? `（${cli.from}${cli.to ? ` → ${cli.to}` : ''}）` : ''}…`
     return (

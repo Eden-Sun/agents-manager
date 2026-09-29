@@ -556,6 +556,7 @@ export class MockTransport implements Transport {
   private projects: MockProject[] = []
   private bots: MockBot[] = []
   private runs: MockRun[] = []
+  private upstreamItems: Rec[] = []
   /** 排到回合結束才套的 live 設定（daemon `lifecycle/deferred_live.rs`，#712）。 */
   private deferredLive = new Set<string>()
   private turns: MockTurn[] = []
@@ -851,6 +852,7 @@ export class MockTransport implements Transport {
     const seg = rawPath.split('/').filter(Boolean)
 
     if (method === 'GET' && rawPath === '/state') return this.state()
+    if (method === 'GET' && rawPath === '/upstream-updates') return { items: this.upstreamItems }
     { const r = this.releaseTriage.handle(method, rawPath, q, b); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
@@ -2559,43 +2561,69 @@ export class MockTransport implements Transport {
   }
 
   /** SPEC §6.9，規則照 `daemon/src/bulk_restart.rs`；進度用 setTimeout 拉開，否則進度條一閃而過。 */
-  /** SPEC §6.9 的 codex 安裝：演「讀版本 → 安裝 → 驗版本 → 開那台 codex 的一鍵重啟」，不碰任何真的東西。 */
+  /** SPEC §6.9 的 CLI 安裝：只演示進度與持續通知，不執行任何主機指令。 */
   private cliUpdateRunning = new Set<string>()
   private cliUpdate(host: string, b: Rec) {
     const kind = String(b.kind ?? '')
-    if (kind !== 'codex') throw new ApiError(400, { error: 'bad_request', message: 'kind 目前只收 codex' }, 'bad request')
+    if (kind !== 'codex' && kind !== 'claude') throw new ApiError(400, { error: 'bad_request', message: 'kind 目前只收 claude 或 codex' }, 'bad request')
     if (this.cliUpdateRunning.has(host)) {
-      throw new ApiError(409, { error: 'conflict', reason: 'cli_update_in_progress', host, message: `${host} 已經在安裝 codex` }, 'conflict')
+      throw new ApiError(409, { error: 'conflict', reason: 'cli_update_in_progress', host, message: `${host} 已經在安裝 ${kind}` }, 'conflict')
     }
     this.cliUpdateRunning.add(host)
     const update_id = ulid('cliup')
     const hostOf = (botId: string) => this.projects.find((p) => p.id === this.bot(botId).project_id)?.host ?? 'local'
-    const targets = this.bots.filter((x) => x.kind === 'codex' && hostOf(x.id) === host && this.activeRun(x.id)?.update_notice?.includes('需安裝'))
-    const notice = targets.map((x) => this.activeRun(x.id)?.update_notice ?? '').find(Boolean) ?? ''
-    const [from = '0.155.1', to = '0.157.0'] = notice.match(/\d+(?:\.\d+)+/g) ?? []
-    // daemon 核對確認框寫的那一版（#569）；mock 只比第一則通知的目標。
-    if (String(b.target_version ?? '') !== to) {
-      this.cliUpdateRunning.delete(host)
-      throw new ApiError(409, { error: 'conflict', reason: 'stale_target', host, current_target: to, message: `${host} 的 codex 現在要裝的是 ${to}` }, 'conflict')
+    let targets: MockBot[]
+    let from: string
+    let to: string
+    if (kind === 'claude') {
+      const item = this.upstreamItems.find((old) => old.kind === 'claude')
+      to = String(item?.target_version ?? '')
+      const row = Array.isArray(item?.hosts) ? (item.hosts as Rec[]).find((entry) => entry.host === host) : undefined
+      from = typeof row?.installed_version === 'string' ? row.installed_version : '讀取失敗'
+      targets = this.bots.filter((x) => x.kind === 'claude' && hostOf(x.id) === host && this.activeRun(x.id)?.update_notice?.includes('需安裝'))
+    } else {
+      targets = this.bots.filter((x) => x.kind === 'codex' && hostOf(x.id) === host && this.activeRun(x.id)?.update_notice?.includes('需安裝'))
+      const notice = targets.map((x) => this.activeRun(x.id)?.update_notice ?? '').find(Boolean) ?? ''
+      ;[from = '0.155.1', to = '0.157.0'] = notice.match(/\d+(?:\.\d+)+/g) ?? []
     }
-    const base = { update_id, host, kind: 'codex', target_version: to }
+    // daemon 核對確認框寫的目標；Claude 使用 fleet 快照的共同目標。
+    if (!to || String(b.target_version ?? '') !== to) {
+      this.cliUpdateRunning.delete(host)
+      throw new ApiError(409, { error: 'conflict', reason: 'stale_target', host, current_target: to || null, message: `${host} 的 ${kind} 現在要裝的是 ${to || '未知版本'}` }, 'conflict')
+    }
+    const base = { update_id, host, kind, target_version: to }
     const steps: [number, string, Rec][] = [
       [200, 'checking', {}],
       [700, 'installing', { from }],
       [2600, 'verifying', { from }],
-      [3200, 'restarting', { from, to }],
     ]
+    if (kind === 'codex') steps.push([3200, 'restarting', { from, to }])
     for (const [at, phase, extra] of steps) setTimeout(() => this.emit('cli_update_progress', { ...base, phase, ...extra }), at)
     setTimeout(() => {
       for (const x of targets) {
         const run = this.activeRun(x.id)
-        if (run) run.update_notice = `codex 有新版 ${to}（這個 run 跑的是 ${from}），已安裝，重啟套用`
+        if (run) run.update_notice = kind === 'claude'
+          ? `磁碟上已是 ${to}（這個 run 跑的是 ${from}）· 重啟套用`
+          : `codex 有新版 ${to}（這個 run 跑的是 ${from}），已安裝，重啟套用`
         this.emitBotStatus(x.id)
       }
-      const restart = this.restartIdle({ kind: 'codex', host })
       this.cliUpdateRunning.delete(host)
-      this.emit('cli_update_done', { ...base, ok: true, from, to, notices_updated: targets.length, restart })
-    }, 3400)
+      if (kind === 'claude') {
+        const old = this.upstreamItems.find((entry) => entry.kind === 'claude')
+        const hosts = Array.isArray(old?.hosts) ? (old.hosts as Rec[]).map((entry) => {
+          if (entry.host !== host) return entry
+          return { ...entry, installed_version: to, error: null, behind: false }
+        }) : []
+        const hasUpdate = hosts.some((entry) => entry.behind === true || (entry.installed_version !== null && entry.installed_version !== to))
+        const item = { ...old, kind: 'claude', target_version: to, has_update: hasUpdate, hosts, text: hasUpdate ? old?.text ?? null : null, notify: null }
+        this.upstreamItems = [...this.upstreamItems.filter((entry) => entry.kind !== 'claude'), item]
+        this.emit('upstream_update', item)
+        this.emit('cli_update_done', { ...base, ok: true, from, to, notices_updated: targets.length, restart: null, restart_required: true, restart_status: 'manual' })
+      } else {
+        const restart = this.restartIdle({ kind: 'codex', host })
+        this.emit('cli_update_done', { ...base, ok: true, from, to, notices_updated: targets.length, restart })
+      }
+    }, kind === 'claude' ? 2800 : 3400)
     return { ...base, started: true }
   }
 
@@ -3753,14 +3781,33 @@ export class MockTransport implements Transport {
     this.emitBotStatus(botId)
   }
 
-  /** 截圖用：推一則 `upstream_update`（issue #707，上游有新版、磁碟上還沒有）。 */
+  /** 截圖用：推並保存一筆 `upstream_update` 快照。 */
   emitUpstreamUpdate(kind: string, latest: string, disk: string) {
-    const how = kind === 'codex' ? '需先安裝，裝好才會出現「重啟套用」' : 'claude 還沒下載，重啟也換不到；等它自己背景更新或在那台跑 `claude update`，下載好才會出現「重啟套用」'
-    this.emit('upstream_update', {
-      kind, latest_version: latest, has_update: true, error: null, notify: 'update', notified_version: latest,
+    const target = latest
+    const item = {
+      kind, latest_version: latest, target_version: target, has_update: true, error: null, notify: 'update', notified_version: latest,
       hosts: [{ host: 'local', installed_version: disk, error: null, behind: true }],
-      text: `${kind} 上游有新版 ${latest}（local 磁碟上是 ${disk}）：${how}`,
-    })
+      text: kind === 'claude'
+        ? `claude 需安裝 ${target}（local：${disk} → ${target}）：需安裝到共同版本。指令：\`claude install ${target}\``
+        : `${kind} 上游有新版 ${latest}（local：${disk} → ${target}）：需先安裝，裝好才會出現「重啟套用」`,
+    }
+    this.upstreamItems = [...this.upstreamItems.filter((old) => old.kind !== kind), { ...item, notify: null }]
+    this.emit('upstream_update', item)
+  }
+
+  /** 截圖用：Claude 上游已更新且 fleet 版本不一致，展示持續提示與逐台版本。 */
+  emitClaudeFleetUpdate(target = '2.1.284', hosts: { host: string; installed_version: string | null; error: string | null; behind: boolean }[] = [
+    { host: 'local', installed_version: target, error: null, behind: false },
+    { host: 'm4p', installed_version: '2.1.281', error: null, behind: true },
+    { host: 'buildbox', installed_version: null, error: 'timeout', behind: true },
+  ]) {
+    const item = {
+      kind: 'claude', latest_version: '2.1.283', target_version: target, has_update: true, error: null, notify: null, notified_version: '2.1.283',
+      hosts,
+      text: `claude 需安裝 ${target}（${hosts.map((host) => `${host.host}：${host.installed_version ?? host.error} → ${target}`).join('；')}）：需安裝到共同版本。指令：\`claude install ${target}\``,
+    }
+    this.upstreamItems = [...this.upstreamItems.filter((old) => old.kind !== 'claude'), item]
+    this.emit('upstream_update', item)
   }
 }
 
@@ -3799,6 +3846,8 @@ function installDevHelpers(mock: MockTransport) {
     updateNotice: (botIdOrName: string, notice: string | null) => mock.setUpdateNotice(mock.botIdByName(botIdOrName) ?? botIdOrName, notice),
     // 上游有新版、磁碟上還沒有的通知（issue #707）：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`
     upstreamUpdate: (kind: string, latest: string, disk: string) => mock.emitUpstreamUpdate(kind, latest, disk),
+    // Claude fleet install chip；可指定目標或主機快照以做其他視覺案例。
+    claudeFleetUpdate: (target?: string, hosts?: { host: string; installed_version: string | null; error: string | null; behind: boolean }[]) => mock.emitClaudeFleetUpdate(target, hosts),
     // 截圖用：`__amMock.runtime('am-codex', {runtime_model: 'GPT-6-Luna', runtime_fast: true, agent_status: 'working'})`
     runtime: (botIdOrName: string, patch: { runtime_model?: string | null; runtime_fast?: boolean; agent_status?: MockRun['agent_status'] }) =>
       mock.setRuntime(mock.botIdByName(botIdOrName) ?? botIdOrName, patch),

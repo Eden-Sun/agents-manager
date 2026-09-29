@@ -9,9 +9,10 @@ import { UpgradeIcon } from './UpgradeIcon'
 import { UpdateChangelog } from './UpdateChangelog'
 import { AgmReviewBox } from './AgmReviewBox'
 import { CodexInstallChip } from './CodexInstallChip'
+import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { MergedUpdateChip, type DialogControl } from './MergedUpdateChip'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
-import { codexInstallPlan, mergeUpdateChips } from '../lib/updateBatch'
+import { claudeInstallPlan, codexInstallPlan, mergeUpdateChips } from '../lib/updateBatch'
 import './updateQuotaChip.css'
 
 /**
@@ -27,16 +28,19 @@ export function UpdateQuotaChip() {
   })
   const codexShown = useStore(
     (s) =>
-      Boolean(s.cliUpdate) ||
+      s.cliUpdates.some((item) => item.kind === 'codex') ||
       codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id)) !== null,
   )
-  // 手機兩種都有時合成一顆（名字行只讓得出一顆的寬，兩顆並排名字只剩 ▾；UI-DECISIONS「header 的 codex 安裝」）。
-  if (mergeUpdateChips(phone, restartShown, codexShown)) return <MergedUpdateChip />
-  // codex 新版還沒裝的那顆（安裝＋重啟）跟這顆（重啟套用）並排，各自一個確認框（UI-DECISIONS「header 的 codex 安裝」）。
+  const claudeShown = useStore((s) =>
+    Boolean(claudeInstallPlan(s.upstreamUpdates.claude)) || s.cliUpdates.some((item) => item.kind === 'claude'),
+  )
+  // 手機兩種以上更新 chip 都要出現時合成一顆，選單分開列重啟與兩種 CLI 安裝。
+  if (mergeUpdateChips(phone, restartShown, codexShown, claudeShown)) return <MergedUpdateChip />
   return (
     <>
       <RestartChip />
       <CodexInstallChip />
+      <ClaudeInstallChip />
     </>
   )
 }

@@ -35,9 +35,9 @@ import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
 import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
-import { cliUpdateDone, cliUpdateProgress, reconcileCliUpdate, type CliUpdate } from './cliUpdate'
+import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgressMany, reconcileCliUpdates, type CliUpdate } from './cliUpdate'
 import { gateFrame } from './frameSeen'
-import { applyUpstreamItem, loadUpstreamUpdates } from './upstreamUpdate'
+import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { byId, byTime, capList, insertSorted, pruneTurns } from './lists'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
@@ -535,9 +535,13 @@ export interface StoreState {
   /** null = 沒有批次在跑，也沒有摘要要看。 */
   restartBatch: RestartBatch | null
   clearRestartBatch: () => void
-  /** header 一鍵升級 codex（SPEC §6.9）：那台裝好、驗過版本就接著重啟那台閒置的 codex。null＝沒有在裝。 */
-  cliUpdate: CliUpdate | null
+  /** header 的 CLI 安裝進度（SPEC §6.9）：多台 Claude 可同時安裝；Codex 仍一次一台。 */
+  cliUpdates: CliUpdate[]
+  /** 上游與各主機安裝版本快照，用於持續顯示 header 提示。 */
+  upstreamUpdates: Record<string, UpstreamItem>
+  startCliUpdate: (host: string, kind: 'codex' | 'claude', targetVersion: string) => Promise<void>
   installCodexUpdate: (host: string, targetVersion: string) => Promise<void>
+  installClaudeUpdates: (hosts: string[], targetVersion: string) => Promise<void>
   removeBot: (botId: string, opts?: { confirmSupervisor?: boolean }) => Promise<void>
   /** 刪除被 daemon 以「這是 AGM 的 bot」擋下，等使用者第二次確認（issue #406）；null＝沒有在問。 */
   agmDeleteAsk: AgmDeleteAsk | null
@@ -903,7 +907,8 @@ export const useStore = create<StoreState>((set, get) => {
   notices: [],
   busy: {},
   restartBatch: null,
-  cliUpdate: null,
+  cliUpdates: [],
+  upstreamUpdates: {},
 
   notify: (kind, text, action) => {
     // 同一則還掛在畫面上就不要再疊一張（issue #530）：重試迴圈會把同一句話刷成一整排，
@@ -931,7 +936,9 @@ export const useStore = create<StoreState>((set, get) => {
       return
     }
     connectSocket(set, get)
-    void loadUpstreamUpdates(() => api.rawTransport.request('GET', '/upstream-updates'), get().notify)
+    void loadUpstreamUpdates(() => api.rawTransport.request('GET', '/upstream-updates'), get().notify, (item) => {
+      set((s) => ({ upstreamUpdates: { ...s.upstreamUpdates, [item.kind]: item } }))
+    })
     void get().loadQuota()
     void get().loadMem()
     // 安全網：daemon 不重啟也可能在執行中清掉某個額度 key（例如收掉 kind 不符的身分），WS 不會說。
@@ -1023,7 +1030,7 @@ export const useStore = create<StoreState>((set, get) => {
         // 手上的一鍵重啟進度跟快照對帳（issue #492）：`bots_restart_done` 收不到時（批次中途 daemon 重啟、
         // 或落到全量 resync）它會永遠停在「重啟中 k/N」，而那顆晶片一直蓋著一鍵重啟的觸發鈕。
         restartBatch: reconcileBatch(s.restartBatch, st.restart_batch),
-        cliUpdate: reconcileCliUpdate(s.cliUpdate, st.cli_updates),
+        cliUpdates: reconcileCliUpdates(s.cliUpdates, st.cli_updates),
         selectedBotId: selected,
         selectedProjectId: selectedProject,
       }
@@ -1925,18 +1932,28 @@ export const useStore = create<StoreState>((set, get) => {
     })
   },
 
-  async installCodexUpdate(host, targetVersion) {
+  async startCliUpdate(host, kind, targetVersion) {
     await guarded(set, get, `cli-update:${host}`, async () => {
-      set({ cliUpdate: { id: '', host, kind: 'codex', phase: 'starting', from: null, to: null } })
+      set((s) => ({ cliUpdates: [...s.cliUpdates.filter((item) => !(item.host === host && item.kind === kind)), { id: '', host, kind, phase: 'starting', from: null, to: null }] }))
       try {
-        const r = await api.startCliUpdate(host, 'codex', targetVersion)
+        const r = await api.startCliUpdate(host, kind, targetVersion)
         // 事件可能比回應先到（已經換成真的 id 與階段），那就不要蓋回 starting。
-        set((s) => (s.cliUpdate?.phase === 'starting' ? { cliUpdate: { ...s.cliUpdate, id: r.update_id } } : {}))
+        set((s) => ({
+          cliUpdates: s.cliUpdates.map((item) => (item.host === host && item.kind === kind && item.phase === 'starting' ? { ...item, id: r.update_id } : item)),
+        }))
       } catch (e) {
-        set({ cliUpdate: null })
+        set((s) => ({ cliUpdates: s.cliUpdates.filter((item) => !(item.host === host && item.kind === kind && item.phase === 'starting')) }))
         throw e
       }
     })
+  },
+
+  async installCodexUpdate(host, targetVersion) {
+    await get().startCliUpdate(host, 'codex', targetVersion)
+  },
+
+  async installClaudeUpdates(hosts, targetVersion) {
+    await Promise.allSettled(hosts.map((host) => get().startCliUpdate(host, 'claude', targetVersion)))
   },
 
   cancelAgmDelete() {
@@ -3019,7 +3036,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       return
     }
     case 'upstream_update': {
-      applyUpstreamItem(data, get().notify)
+      const item = applyUpstreamItem(data, get().notify)
+      if (item) set((s) => ({ upstreamUpdates: { ...s.upstreamUpdates, [item.kind]: item } }))
       return
     }
     case 'quota_updated': {
@@ -3071,8 +3089,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
     case 'cli_update_progress': {
       if (!isRec(data)) return
       set((s) => {
-        const next = cliUpdateProgress(s.cliUpdate, data)
-        return next !== s.cliUpdate ? { cliUpdate: next } : {}
+        const next = cliUpdateProgressMany(s.cliUpdates, data)
+        return next !== s.cliUpdates ? { cliUpdates: next } : {}
       })
       return
     }
@@ -3080,7 +3098,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
       if (!isRec(data)) return
       const r = cliUpdateDone(data)
       set((s) => ({
-        cliUpdate: null,
+        cliUpdates: cliUpdateDoneMany(s.cliUpdates, data),
         // 同一批已經在手上（進度事件先到）就留著它，不要把數到一半的進度歸零。
         restartBatch: r.batch
           ? s.restartBatch?.id === r.batch.id

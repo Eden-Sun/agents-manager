@@ -150,7 +150,8 @@ async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result
         state: run.state.clone(),
         agent_status: run.agent_status.clone(),
         has_update: !notice.trim().is_empty(),
-        needs_manual_install: bot.kind == "codex" && notice.contains("需安裝"),
+        needs_manual_install: matches!(bot.kind.as_str(), "claude" | "codex")
+            && notice.contains("需安裝"),
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
         default_session: lifecycle::in_default_session(run) || bot.herdr_session.as_deref() == Some("default"),
     })
@@ -911,6 +912,17 @@ mod tests {
         assert_eq!(skip[0].1, Skip::NeedsManualInstall);
     }
 
+    #[test]
+    fn a_claude_that_still_needs_a_manual_install_is_not_restarted() {
+        let claude = Cand {
+            needs_manual_install: true,
+            ..cand("claude", "claude", "running", "idle", true, false)
+        };
+        assert!(is_candidate(&claude), "持續安裝提示仍是 header 候選");
+        let (go, skip) = plan(std::slice::from_ref(&claude));
+        assert!(go.is_empty());
+        assert_eq!(skip[0].1, Skip::NeedsManualInstall);
+    }
     /// 2026-09-22：子 agent 列在跳過名單，理由 `child`，由父 bot 用 herdr 重開（推翻 2026-09-12 的「子 agent 也進來」）。
     #[test]
     fn children_are_listed_as_skipped_not_restarted() {

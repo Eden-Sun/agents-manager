@@ -42,6 +42,41 @@ const SWEEP: Duration = Duration::from_secs(600);
 const UPSTREAM_TTL: Duration = Duration::from_secs(3600);
 pub const LAST_FILE: &str = "upstream-update.last.json";
 
+pub const CLAUDE_NOTICE_PREFIX: &str = "claude 有新版";
+
+/// Claude 的安裝提示掛在 run 上，讓一般重啟流程知道新版尚未安裝。
+pub fn claude_pending_text(from: Option<&str>, to: &str) -> String {
+    match from {
+        Some(from) => format!("{CLAUDE_NOTICE_PREFIX} {from} → {to}，需安裝後重啟"),
+        None => format!("{CLAUDE_NOTICE_PREFIX} {to}，需安裝後重啟"),
+    }
+}
+
+pub fn claude_pending_from(notice: &str) -> Option<String> {
+    if !notice.starts_with(CLAUDE_NOTICE_PREFIX) || !notice.contains("需安裝") {
+        return None;
+    }
+    notice_versions(notice).into_iter().next()
+}
+
+pub fn claude_pending_to(notice: &str) -> Option<String> {
+    if !notice.starts_with(CLAUDE_NOTICE_PREFIX) || !notice.contains("需安裝") {
+        return None;
+    }
+    notice_versions(notice).into_iter().last()
+}
+
+fn notice_versions(notice: &str) -> Vec<String> {
+    notice
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .filter_map(version_string)
+        .collect()
+}
+
+pub fn claude_installed_text(disk: &str, running: &str) -> String {
+    format!("claude 有新版 {disk}（這個 run 跑的是 {running}），已安裝，重啟套用")
+}
+
 pub fn source_url(kind: &str) -> &'static str {
     if kind == "codex" {
         CODEX_RELEASES_PAGE
@@ -81,6 +116,8 @@ pub struct UpstreamStatus {
     pub kind: String,
     /// 上游最新正式版；抓不到是 `None`（原因在 `error`），**不是**「沒有新版」。
     pub latest_version: Option<String>,
+    /// 這次允許安裝的共同目標。Claude 會取上游版本與各主機已安裝版本的最大值；Codex 等於上游版本。
+    pub target_version: Option<String>,
     pub source_url: String,
     /// 上游那份結果是什麼時候抓的。
     pub checked_at: Option<String>,
@@ -95,25 +132,60 @@ pub struct UpstreamStatus {
 /// 純函式：上游結果＋每台主機的磁碟版本 → 快照。版本比較一律用數值（`0.9.9 < 0.9.10`）。
 pub fn build_status(kind: &str, upstream: &Result<String, String>, disks: &[(String, Result<String, String>)], checked_at: Option<String>) -> UpstreamStatus {
     let latest_version = upstream.as_ref().ok().and_then(|v| version_string(v));
-    let latest = latest_version.as_deref().and_then(parse_version);
-    let hosts: Vec<HostDisk> = disks
+    let mut hosts: Vec<HostDisk> = disks
         .iter()
         .map(|(host, r)| {
             let (installed_version, error) = match r {
                 Ok(line) => match cli_version_string(line).or_else(|| version_string(line)) {
                     Some(v) => (Some(v), None),
-                    None => (None, Some(format!("`{kind} --version` 回了「{line}」，看不出版本"))),
+                    None => (None, Some(format!("`{kind} --version` 回了「{line}」，看不出版本")),
+                    ),
                 },
                 Err(e) => (None, Some(e.clone())),
             };
-            let behind = matches!((&latest, installed_version.as_deref().and_then(parse_version)), (Some(l), Some(i)) if *l > i);
-            HostDisk { host: host.clone(), installed_version, error, behind }
+            HostDisk {
+                host: host.clone(),
+                installed_version,
+                error,
+                behind: false,
+            }
         })
         .collect();
+    let target_version = if kind == "claude" {
+        hosts
+            .iter()
+            .filter_map(|h| h.installed_version.as_deref())
+            .chain(latest_version.as_deref())
+            .max_by(|a, b| parse_version(a).cmp(&parse_version(b)))
+            .map(str::to_string)
+    } else {
+        latest_version.clone()
+    };
+    for host in &mut hosts {
+        host.behind = match (
+            target_version.as_deref().and_then(parse_version),
+            host.installed_version.as_deref().and_then(parse_version),
+        ) {
+            (Some(target), Some(installed)) => installed < target,
+            (Some(_), None) => kind == "claude",
+            (None, _) => false,
+        };
+    }
+    let claude_versions_differ = kind == "claude"
+        && hosts
+            .iter()
+            .filter_map(|h| h.installed_version.as_deref().and_then(parse_version))
+            .any(|v| {
+                target_version
+                    .as_deref()
+                    .and_then(parse_version)
+                    .is_some_and(|target| v != target)
+            });
     UpstreamStatus {
         kind: kind.to_string(),
-        has_update: hosts.iter().any(|h| h.behind),
+        has_update: hosts.iter().any(|h| h.behind) || claude_versions_differ,
         latest_version,
+        target_version,
         source_url: source_url(kind).to_string(),
         checked_at,
         error: upstream.as_ref().err().cloned(),
@@ -131,18 +203,19 @@ pub fn should_notify(status: &UpstreamStatus, last_notified: Option<&str>) -> bo
 /// 給使用者看的那一句：要跟「重啟套用」分得清——這是上游有、磁碟上還沒有。
 pub fn notice_text(status: &UpstreamStatus) -> String {
     let latest = status.latest_version.as_deref().unwrap_or("?");
-    let behind: Vec<String> = status
-        .hosts
-        .iter()
-        .filter(|h| h.behind)
-        .map(|h| format!("{} 磁碟上是 {}", h.host, h.installed_version.as_deref().unwrap_or("?")))
-        .collect();
-    let how = if status.kind == "codex" {
-        "需先安裝，裝好才會出現「重啟套用」"
-    } else {
-        "claude 還沒下載，重啟也換不到；等它自己背景更新或在那台跑 `claude update`，下載好才會出現「重啟套用」"
-    };
-    format!("{} 上游有新版 {latest}（{}）：{how}", status.kind, behind.join("、"))
+    if status.kind != "claude" {
+        let behind: Vec<String> = status.hosts.iter().filter(|h| h.behind)
+            .map(|h| format!("{} 磁碟上是 {}", h.host, h.installed_version.as_deref().unwrap_or("?")))
+            .collect();
+        return format!("{} 上游有新版 {latest}（{}）：需先安裝，裝好才會出現「重啟套用」", status.kind, behind.join("、"));
+    }
+
+    let target = status.target_version.as_deref().unwrap_or(latest);
+    let hosts: Vec<String> = status.hosts.iter().map(|h| {
+        let installed = h.installed_version.as_deref().unwrap_or_else(|| h.error.as_deref().unwrap_or("讀取失敗"));
+        format!("{}：{} → {target}", h.host, installed)
+    }).collect();
+    format!("claude 需安裝 {target}（{}）：需安裝到共同版本，裝到每台都相同後才會出現「重啟套用」。指令：`claude install {target}`", hosts.join("；"))
 }
 
 /// 快照＋畫面要顯示的那一句：有新版是 [`notice_text`]、抓不到是 [`error_text`]、其他 `null`。
@@ -214,6 +287,78 @@ impl Watch {
 pub fn watch() -> &'static Watch {
     static W: OnceLock<Watch> = OnceLock::new();
     W.get_or_init(Watch::default)
+}
+
+/// 有 Claude 安裝需要處理時，回傳這份快照允許安裝的共同目標。
+pub async fn latest_target_for_host(kind: &str, host: &str) -> Option<String> {
+    let snapshots = watch().snapshot.lock().await;
+    let status = snapshots.get(kind)?;
+    (status.has_update && status.hosts.iter().any(|h| h.host == host))
+        .then(|| status.target_version.clone())
+        .flatten()
+}
+
+/// CLI 安裝成功後立即修正快照，讓 header 不必等下一輪 10 分鐘巡邏才收起警示。
+pub async fn note_installed(app: &App, kind: &str, host: &str, version: &str) {
+    let updated = {
+        let mut snapshots = watch().snapshot.lock().await;
+        let Some(status) = snapshots.get_mut(kind) else {
+            return;
+        };
+        let Some(disk) = status.hosts.iter_mut().find(|h| h.host == host) else {
+            return;
+        };
+        disk.installed_version = Some(version.to_string());
+        disk.error = None;
+        status.target_version = if kind == "claude" {
+            status
+                .hosts
+                .iter()
+                .filter_map(|h| h.installed_version.as_deref())
+                .chain(status.latest_version.as_deref())
+                .max_by(|a, b| parse_version(a).cmp(&parse_version(b)))
+                .map(str::to_string)
+        } else {
+            status.latest_version.clone()
+        };
+        for h in &mut status.hosts {
+            h.behind = match (
+                status.target_version.as_deref().and_then(parse_version),
+                h.installed_version.as_deref().and_then(parse_version),
+            ) {
+                (Some(target), Some(installed)) => installed < target,
+                (Some(_), None) => kind == "claude",
+                (None, _) => false,
+            };
+        }
+        let versions_differ = kind == "claude"
+            && status
+                .hosts
+                .iter()
+                .filter_map(|h| h.installed_version.as_deref().and_then(parse_version))
+                .any(|v| {
+                    status
+                        .target_version
+                        .as_deref()
+                        .and_then(parse_version)
+                        .is_some_and(|target| v != target)
+                });
+        status.has_update = status.hosts.iter().any(|h| h.behind) || versions_differ;
+        status.checked_at = Some(crate::db::now());
+        item_json(status)
+    };
+    let mut event = updated;
+    event["notify"] = json!(null);
+    app.emit("upstream_update", event).await;
+}
+
+#[cfg(test)]
+pub(crate) async fn set_snapshot_for_test(status: UpstreamStatus) {
+    watch()
+        .snapshot
+        .lock()
+        .await
+        .insert(status.kind.clone(), status);
 }
 
 pub fn last_path(app: &App) -> PathBuf {
@@ -356,7 +501,17 @@ mod tests {
         assert_eq!(s.hosts[0].installed_version.as_deref(), Some("2.1.281"));
         assert!(should_notify(&s, None));
         let t = notice_text(&s);
-        assert!(t.contains("2.1.283") && t.contains("2.1.281") && t.contains("還沒下載") && t.contains("重啟也換不到"), "{t}");
+        assert!(t.contains("2.1.283") && t.contains("local：2.1.281 → 2.1.283") && t.contains("裝到每台都相同"),
+            "{t}"
+        );
+        assert!(
+            t.contains("claude install 2.1.283"),
+            "提示要給出指定版本的安裝方式：{t}"
+        );
+        assert!(
+            !t.contains("背景更新") && !t.contains("claude update"),
+            "停用自動更新時不可叫人繼續等：{t}"
+        );
     }
 
     #[test]
@@ -366,6 +521,32 @@ mod tests {
         // 磁碟比 npm 新（npm 還沒同步、或裝了別的通道）：不叫人去裝。
         let older = build_status("claude", &ok("2.1.281"), &[disk("local", "2.1.283 (Claude Code)")], None);
         assert!(!older.has_update && !should_notify(&older, None));
+    }
+
+    #[test]
+    fn claude_host_version_mismatch_uses_one_fleet_target_and_lists_every_host() {
+        let disks = [
+            disk("local", "2.1.284"),
+            disk("m4p", "2.1.281"),
+            ("offline".into(), Err("timeout".into())),
+        ];
+        let s = build_status("claude", &ok("2.1.283"), &disks, None);
+        assert!(s.has_update, "版本不一致也要持續提示");
+        assert_eq!(s.latest_version.as_deref(), Some("2.1.283"));
+        assert_eq!(
+            s.target_version.as_deref(),
+            Some("2.1.284"),
+            "最高已安裝版成為共同目標"
+        );
+        assert_eq!(
+            s.hosts.iter().map(|h| h.behind).collect::<Vec<_>>(),
+            [false, true, true]
+        );
+        let text = notice_text(&s);
+        assert!(text.contains("local：2.1.284 → 2.1.284"), "{text}");
+        assert!(text.contains("m4p：2.1.281 → 2.1.284"), "{text}");
+        assert!(text.contains("offline：timeout → 2.1.284"), "{text}");
+        assert!(text.contains("claude install 2.1.284"), "{text}");
     }
 
     #[test]

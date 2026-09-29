@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cliUpdateDone, cliUpdateProgress, reconcileCliUpdate, type CliUpdate } from './cliUpdate.ts'
+import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgress, cliUpdateProgressMany, reconcileCliUpdate, reconcileCliUpdates, type CliUpdate } from './cliUpdate.ts'
 
 const base = { update_id: 'u1', host: 'local', kind: 'codex' }
 
@@ -12,6 +12,22 @@ test('進度照階段走，版本沿用前一則', () => {
   assert.deepEqual([cur?.phase, cur?.from], ['verifying', '0.155.1'])
   // 看不懂的階段不動。
   assert.equal(cliUpdateProgress(cur, { ...base, phase: '???' }), cur)
+})
+
+test('多台 Claude 安裝各自保留進度，done 只移除對應主機', () => {
+  let cur = cliUpdateProgressMany([], { update_id: 'u-local', host: 'local', kind: 'claude', phase: 'installing', from: '2.1.281' })
+  cur = cliUpdateProgressMany(cur, { update_id: 'u-m4p', host: 'm4p', kind: 'claude', phase: 'checking' })
+  assert.deepEqual(cur.map((item) => [item.id, item.host, item.phase]), [['u-local', 'local', 'installing'], ['u-m4p', 'm4p', 'checking']])
+  assert.deepEqual(cliUpdateDoneMany(cur, { update_id: 'u-local', kind: 'claude', ok: true, restart_required: true }), [cur[1]])
+  assert.deepEqual(reconcileCliUpdates(cur, [{ update_id: 'u-m4p', host: 'm4p' }]), [cur[1]])
+})
+
+test('Claude 安裝完成只提示另行確認重啟', () => {
+  const r = cliUpdateDone({ update_id: 'u-claude', host: 'm4p', kind: 'claude', ok: true, from: '2.1.281', to: '2.1.284', restart: null, restart_required: true })
+  assert.equal(r.batch, null)
+  assert.equal(r.joinBatchId, null)
+  assert.match(r.message, /m4p 的 claude 已升到 2\.1\.281 → 2\.1\.284/)
+  assert.match(r.message, /確認後再重啟/)
 })
 
 test('別的分頁按的也收；另一個 id 的舊事件不蓋掉手上這一個', () => {

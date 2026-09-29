@@ -349,11 +349,11 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   對 running 的 claude run `pane.read visible 80`，認到就寫 `runs.update_notice` 並推 `bot_status`，消失就清 NULL（讀不到畫面不清）；不限 idle。
   認法（`tui_prompts::update_notice`）：兩段字都要中，**且只看最下面 6 行非空白**（正文引用這兩句時會誤中）。存在 run 上：重啟（套用更新本身）後的新 run 本來就沒有。
   畫面上讀不到那句時退到版本比對：statusLine 的 `version`（process 在跑的）對 `claude --version`（磁碟上的），磁碟較新才算；磁碟版本每台主機快取 5 分鐘。
-- **上游有新版**（issue #707，2026-09-28 使用者：npm 已是 2.1.283、磁碟停在 2.1.281，AG Man 什麼都沒說）：上面兩條都只看**磁碟**，
-  上游出了新版而 claude 還沒自己下載、codex 還沒裝時沒有任何提示。`daemon/src/upstream_update.rs` 每 10 分鐘比一次「上游最新正式版」對
+- **上游有新版**（issue #707／#725，2026-09-28）：`daemon/src/upstream_update.rs` 每 10 分鐘比一次「上游最新正式版」對
   「每台有裝的主機磁碟上的 `--version`」：claude 問 npm registry 的 `latest`，codex 沿用 changelog 那份 GitHub releases 快取；上游結果快取
-  1 小時、失敗不快取。上游較新＝推 WS `upstream_update`（`notify:"update"`），網頁跳一則通知（「還沒下載，重啟也換不到」／「需先安裝」），
-  **不寫 `runs.update_notice`、不進批次重啟**——跟「已下載，重啟套用」是兩件事、並存。同一個上游版本只通知一次（`<data_dir>/upstream-update.last.json`，
+  1 小時、失敗不快取。Codex 新版仍跳一次「需先安裝」通知。Claude 除單次通知外，還把包含每台版本、讀取錯誤與共同 `target_version` 的快照保存在 header，持續列出目前版 → 目標版，
+  直到各台都到同一目標才收起；不依賴 toast 是否仍在畫面或是否有 active run。這時**不寫 `runs.update_notice`、不進批次重啟**——安裝與「已安裝，重啟套用」是兩步。
+  同一個上游版本只通知一次（`<data_dir>/upstream-update.last.json`，
   仿 herdr 的 `herdr-update.last`；只在比上次通知的更新時才推）。網頁另記每個瀏覽器看過的版本，開機讀 `GET /api/upstream-updates` 補上錯過的那則。
   抓不到上游不是「沒有新版」：快照帶 `error`，從正常變成抓不到那一輪推 `notify:"error"` 跳錯誤通知。跟 #204 分診（§18.2c）的分工：分診回答
   「新版改了什麼、要不要處理」、這裡只回答「有沒有比磁碟新的版本可裝」；codex 兩邊讀同一份 releases 快取。
@@ -2166,7 +2166,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 
   | 條件 | `reason` | 動作 |
   |---|---|---|
-  | codex 的通知是「需安裝」（新版還沒裝，重啟換不到任何東西，見 `codex_update.rs`） | `needs_manual_install` | 跳過 |
+  | Claude／Codex 的通知是「需安裝」（新版還沒裝，重啟換不到任何東西） | `needs_manual_install` | 跳過 |
   | run 或 bot 的 `herdr_session = 'default'` | `default_session` | 跳過 |
   | `runs.state != 'running'` | `not_running` | 跳過 |
   | `agent_status = 'working'` / `'blocked'` | `working` / `blocked` | 跳過 |
@@ -2191,6 +2191,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   4. 把那台 codex run 的通知改成「已安裝，重啟套用」，接著開一鍵重啟，**範圍只限那台主機的 codex**（`bulk_restart::spawn_scoped`；claude 與別台不在這批），之後照上面的規則與事件走。
   只收 UI token：帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 一律 403（換掉的是所有 codex bot 共用的 binary）；同一台同時只跑一個（409）。進度走 WS `cli_update_progress`／`cli_update_done`，
   `GET /api/state` 的 `cli_updates` 列出還沒收尾的，前端靠它對帳（同 #492）。
+  **Claude fleet 安裝（issue #725）**：`upstream_update` 快照另帶 `target_version`，Claude 目標取 npm 最新正式版與各主機已安裝版本的最大值。只要上游有新版、主機落後、版本不一致或目標已知但某台讀不到版本，header 就持續顯示警示色 ⌃⌃；tooltip 與確認框列出每台目前版本（讀不到時列原因）及共同目標，只有所有主機都到目標才收起。這個狀態取自快照，不依賴一次性 toast 或有沒有 active run。
+  使用者在確認框按「安裝到 N 台」後，才對落後或讀不到版本的主機逐台送 `POST /hosts/{name}/cli-update {kind:"claude",target_version}`；已到目標的主機不重裝。daemon 每台執行固定 `claude install <target_version>`、驗證 `claude --version` **精確等於**目標；不精確就失敗並保留安裝提示。安裝完成只把該主機 run 的「需安裝」改成「已安裝，重啟套用」，即時更新 fleet 快照；不自動重啟，使用者再按既有重啟 ⌃⌃ 確認套用。Recovery 讀持久列的 `kind`，Claude 也必須精確到版，只恢復通知、不重啟；安裝鎖與 Codex 分開。手機多個更新入口共用圖示選單，重啟、Codex 安裝、Claude fleet 安裝仍各自打開原本的確認框。
   **「同一台只跑一個」不能只記在行程裡**（#564）：daemon 被砍掉時遠端的 `curl | sh` 不會跟著停，以前重啟後 map 空了、再按一次就疊出第二個安裝。
   所以兩層：(a) 開跑前先寫 `cli_updates` 一列（部分唯一索引：每台最多一筆 `running`），終態寫入失敗時保留 `running`／host slot、盡力標成 `finishing`，以有上限退避在目前 daemon 持續重試；只有終態 commit 後才推 `cli_update_done`。CAS 更新 0 列時回讀並發布已存結果，絕不發布舊的本地結果；開機時上一顆行程
   （`boot` 不同）留下的 `running` 列由 `recover_at_startup` 接手——等那台的安裝鎖不再忙再讀版本收尾，不重跑安裝、不自動開重啟（隔了一次重啟，閒著的 bot 已經不是當時那份），

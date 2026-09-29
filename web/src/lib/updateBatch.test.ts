@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
-import { codexInstallPlan, mergeUpdateChips, updateBatchCounts } from './updateBatch.ts'
+import { claudeInstallPlan, codexInstallPlan, mergeUpdateChips, updateBatchCounts } from './updateBatch.ts'
 
 const NOTICE = 'Update installed · Restart to update'
 
@@ -158,6 +158,16 @@ test('手機兩種更新都有時合成一顆；桌機或只有一種時照舊',
   assert.equal(mergeUpdateChips(false, true, true), false, '桌機額度列放得下兩顆')
   assert.equal(mergeUpdateChips(true, true, false), false)
   assert.equal(mergeUpdateChips(true, false, true), false)
+  assert.equal(mergeUpdateChips(true, false, true, true), true, '兩種安裝提示也要合併')
+})
+
+test('Claude 尚未安裝的 run 不會被一般重啟納入', () => {
+  const bots = [bot('claude-pending')]
+  const runs = { 'claude-pending': run('claude-pending', { update_notice: 'claude 需安裝 2.1.284，需安裝後重啟' }) }
+  assert.deepEqual(updateBatchCounts(bots, runs, none), {
+    ready: [],
+    busy: [{ botId: 'claude-pending', name: 'claude-pending', why: '新版還沒裝，要先手動安裝才能套用', install: true }],
+  })
 })
 
 test('codexInstallPlan：同一台的「需安裝」目標不一樣時，取最新的那一版（跟 daemon 核對的目標一致，#569）', () => {
@@ -170,4 +180,25 @@ test('codexInstallPlan：同一台的「需安裝」目標不一樣時，取最�
   const p = codexInstallPlan(bots, runs, none, () => 'local')
   assert.equal(p?.notice, runs.new.update_notice)
   assert.equal(p?.installCount, 3)
+})
+
+test('claudeInstallPlan：有一台落後時一次涵蓋所有已安裝主機，並綁定同一目標版', () => {
+  const item = {
+    kind: 'claude',
+    latest: '2.1.284',
+    target: '2.1.284',
+    hasUpdate: true,
+    hosts: [
+      { host: 'local', installedVersion: '2.1.284', error: null, behind: false },
+      { host: 'm4p', installedVersion: '2.1.281', error: null, behind: true },
+      { host: 'unreadable', installedVersion: null, error: 'timeout', behind: false },
+    ],
+    notify: null,
+    text: null,
+  }
+  const p = claudeInstallPlan(item)
+  assert.ok(p)
+  assert.equal(p.target, '2.1.284')
+  assert.deepEqual(p.hosts.map((h) => h.host), ['local', 'm4p', 'unreadable'])
+  assert.deepEqual(p.installHosts, ['m4p', 'unreadable'])
 })
