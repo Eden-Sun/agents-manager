@@ -90,7 +90,7 @@ async fn sweep(app: &Arc<App>) {
         // 讀不到畫面就跳過，不要把已經看到的通知清掉。
         let Ok(read) = client.pane_read(&pane, "visible", 80).await else { continue };
         // #714：同一份畫面順便看底部標的背景工作數（不另開輪詢）。
-        crate::background_jobs::observe(app, &run, &kind, &read.text).await;
+        crate::background_jobs::observe(app, &run, &kind, &read.text, &client, &pane).await;
         if kind == "codex" {
             // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。
             crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane).await;
