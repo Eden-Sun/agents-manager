@@ -1437,9 +1437,7 @@ button.run-debug-toggle:hover:not(:disabled) {
   z-index: 1;
 }
 
-.main-head > .main-status,
-.main-head > .mem-open,
-.main-head > .mem-badge {
+.main-head > .main-status {
   flex: 0 1000 auto;
   min-width: 0;
 }

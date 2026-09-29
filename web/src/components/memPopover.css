@@ -40,28 +40,6 @@
   display: inline-flex;
 }
 
-/* 標題列的遠端記憶體比額度量表先讓（UI-DECISIONS 收縮優先序；styles.css 的 `.main-head > .mem-badge` 在包進
-   `.mem-wrap` 後就對不到了）：縮到 0 也不擠格子，明細清單 portal 到 body，裁掉不影響。
-   裁到放不下就整顆藏起來（`useClipped`），不留一截「(@m」；用 visibility 不改排版，量完不會又變寬。 */
-@media (width > 640px) {
-  .main-head > .mem-wrap {
-    flex: 0 1000 auto;
-    min-width: 0;
-    overflow: hidden;
-  }
-
-  .main-head > .mem-wrap.clipped {
-    visibility: hidden;
-  }
-}
-
-/* 手機（2026-09-28 使用者）：標題列不放遠端記憶體，只佔版面；要看就開側欄，左上角 RAM 格本機與遠端都有。 */
-@media (width <= 640px) {
-  .main-head > .mem-wrap {
-    display: none;
-  }
-}
-
 .mem-open {
   padding: 0;
   border: 0;
