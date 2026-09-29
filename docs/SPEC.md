@@ -2190,6 +2190,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   **codex 需安裝（2026-09-25，使用者：「codex 的 upgrade 也和 claude 用一樣的方式出現在 header」）**：header 在一般那顆旁邊另有一顆警示色的
   ⌃⌃ N（N＝那台還寫著「需安裝」的 codex 數），點下去是同一種確認框——左 changelog（`UpdateChangelog kind="codex"`）、右 AGM 解析（`kind=codex`，同一版只派一次）、
   下面列出裝好後會重啟的那台閒置 codex 與會跳過的（在忙、子 agent）。確認框標題的版本取那台「需安裝」通知裡**最新的目標**；
+  沒有任何 run 帶「需安裝」（沒有 codex 在跑）時改看上游快照：第一台落後的主機（本機優先）、目標取快照的 `target_version`，daemon 核對目標時同樣退回快照（那台要落後才算，`upstream_update::behind_target_for_host`，2026-09-29 使用者）；
   確認後 `POST /api/hosts/{name}/cli-update {kind:"codex",target_version}`（API §12.7a，`cli_update.rs`），daemon 綁定這一版（#569）：
   0. `target_version` 要等於 daemon 眼中那台「需安裝」通知的最新目標，不同（舊分頁、剛有新版、已經裝好沒有「需安裝」）409 `stale_target`，什麼都不跑；
   1. 讀安裝前的 `codex --version`（讀不到就不裝）；已經 `>= target_version` 就不跑安裝指令，直接到第 4 步（`already_installed:true`）；

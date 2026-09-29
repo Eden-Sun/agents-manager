@@ -36,6 +36,7 @@ export function MergedUpdateChip() {
         s.runs,
         (id) => inFlightTurn(s, id) !== null,
         (b) => projectHostName(s, b.project_id),
+        s.upstreamUpdates.codex,
       )?.installCount ?? 0,
   )
   const codexNotice = useStore(
@@ -45,6 +46,7 @@ export function MergedUpdateChip() {
         s.runs,
         (id) => inFlightTurn(s, id) !== null,
         (b) => projectHostName(s, b.project_id),
+        s.upstreamUpdates.codex,
       )?.notice ?? '',
   )
   const claudePlanKey = useStore((s) => {
@@ -74,7 +76,7 @@ export function MergedUpdateChip() {
   }, [open])
 
   const restartShown = Boolean(batch) || readyCount > 0 || busyCount > 0
-  const codexShown = cli.some((item) => item.kind === 'codex') || installCount > 0
+  const codexShown = cli.some((item) => item.kind === 'codex') || codexNotice !== ''
   const { restartItem, codexItem, claudeItem, label } = mergedUpdateLabels({
     batch,
     cli,

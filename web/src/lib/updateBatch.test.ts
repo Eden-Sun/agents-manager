@@ -202,3 +202,26 @@ test('claudeInstallPlan：有一台落後時一次涵蓋所有已安裝主機，
   assert.deepEqual(p.hosts.map((h) => h.host), ['local', 'm4p', 'unreadable'])
   assert.deepEqual(p.installHosts, ['m4p', 'unreadable'])
 })
+
+test('codexInstallPlan：沒有 codex 在跑也照上游快照出安裝鈕（本機優先，通知照 daemon 格式）', () => {
+  const upstream = {
+    kind: 'codex',
+    latest: '0.159.0',
+    target: '0.159.0',
+    hasUpdate: true,
+    hosts: [
+      { host: 'm4p', installedVersion: '0.157.1', error: null, behind: true },
+      { host: 'local', installedVersion: '0.158.0', error: null, behind: true },
+    ],
+    notify: null,
+    text: null,
+  }
+  const bots = [bot('cl', { kind: 'claude' })]
+  const runs = { cl: run('cl', { update_notice: 'claude 有新版，需安裝' }) }
+  const p = codexInstallPlan(bots, runs, none, () => 'local', upstream)
+  assert.equal(p?.host, 'local', '本機優先')
+  assert.equal(p?.notice, 'codex 有新版 0.158.0 → 0.159.0，需安裝後重啟')
+  assert.equal(p?.installCount, 0)
+  assert.equal(codexInstallPlan(bots, runs, none, () => 'local', { ...upstream, hasUpdate: false }), null)
+  assert.equal(codexInstallPlan(bots, runs, none, () => 'local'), null, "claude 的「需安裝」不算 codex 的")
+})

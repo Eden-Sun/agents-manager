@@ -1619,7 +1619,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - 舊 daemon 沒有 `herdr` 欄位，前端一律當未知。
 
 ### 12.7a header 安裝 CLI 更新 `POST /api/hosts/{name}/cli-update`
-`{"kind":"codex","target_version":"0.157.0"}` 或 `{"kind":"claude","target_version":"2.1.284"}`。請求只由使用者在 header 確認框送出，daemon 不會背景自動安裝。Codex 沿用該主機「需安裝」通知的目標與官方安裝指令；Claude 目標綁定 `GET /api/upstream-updates` 的 fleet 共同目標（上游版與各主機已安裝版的最大值），在該主機跑固定指令 `claude install <target_version>`。兩種都在安裝後讀版本驗證；Codex 可到達或超過目標，Claude 必須精確等於目標。成功後 Claude 只把該主機 run 的持續通知改成「已安裝，重啟套用」，不自動重啟；Codex 保留既有的 scoped restart（僅該主機、該 kind）。SPEC §6.9。
+`{"kind":"codex","target_version":"0.157.0"}` 或 `{"kind":"claude","target_version":"2.1.284"}`。請求只由使用者在 header 確認框送出，daemon 不會背景自動安裝。Codex 沿用該主機「需安裝」通知的目標與官方安裝指令（那台沒有 run 帶通知時，改用 `GET /api/upstream-updates` 快照裡那台落後時的目標）；Claude 目標綁定 `GET /api/upstream-updates` 的 fleet 共同目標（上游版與各主機已安裝版的最大值），在該主機跑固定指令 `claude install <target_version>`。兩種都在安裝後讀版本驗證；Codex 可到達或超過目標，Claude 必須精確等於目標。成功後 Claude 只把該主機 run 的持續通知改成「已安裝，重啟套用」，不自動重啟；Codex 保留既有的 scoped restart（僅該主機、該 kind）。SPEC §6.9。
 
 ```json
 202 {"update_id":"01M4…","host":"local","kind":"codex","target_version":"0.157.0","started":true}

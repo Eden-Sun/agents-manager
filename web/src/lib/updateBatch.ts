@@ -97,16 +97,19 @@ export function claudeInstallPlan(item: UpstreamItem | null | undefined): Claude
 /**
  * header「安裝 codex 新版」那顆 chip 的內容（SPEC §6.9，daemon `cli_update.rs`）：取第一台還有「需安裝」codex 的主機，
  * 列出那台裝好之後的一鍵重啟會動到哪幾顆——daemon 的批次範圍是「那台主機的 codex」，前端照同一條切。
- * 沒有需安裝的 codex 回 `null`。多台都有時一次一台，裝完那台 chip 自然換到下一台。
+ * 沒有在跑的 codex 帶「需安裝」時，退回上游快照（`GET /api/upstream-updates` 的 codex，2026-09-29 使用者：
+ * 上游有新版就該有安裝鈕，不必等有 codex 在跑）：取第一台落後的主機（本機優先），通知文字照 daemon 的格式合成。
+ * 都沒有回 `null`。多台都有時一次一台，裝完那台 chip 自然換到下一台。
  */
 export function codexInstallPlan(
   bots: Bot[],
   runs: Record<string, Run | null>,
   hasInFlightTurn: (botId: string) => boolean,
   hostOf: (bot: Bot) => string,
+  upstream?: UpstreamItem | null,
 ): CodexInstallPlan | null {
-  const first = bots.find((b) => needsManualInstall(b, runs[b.id]))
-  if (!first) return null
+  const first = bots.find((b) => b.kind === 'codex' && needsManualInstall(b, runs[b.id]))
+  if (!first) return codexUpstreamPlan(bots, runs, hasInFlightTurn, hostOf, upstream)
   const host = hostOf(first)
   const plan: CodexInstallPlan = { host, notice: runs[first.id]?.update_notice ?? '', installCount: 0, ready: [], busy: [] }
   for (const bot of bots) {
@@ -119,6 +122,34 @@ export function codexInstallPlan(
       if (to && (!cur || cmpVersion(to, cur) > 0)) plan.notice = run.update_notice
     }
     // 子 agent 批次一律跳過（daemon `Skip::Child`，SPEC §6.5a），由父 bot 用 herdr 重開。
+    const child = bot.managed_by === 'child' || Boolean(bot.parent_bot_id)
+    const why = child ? '子 agent，由父 Bot 重開' : runBusyReason(run, hasInFlightTurn(bot.id))
+    if (why) plan.busy.push({ botId: bot.id, name: bot.name, why })
+    else plan.ready.push({ botId: bot.id, name: bot.name })
+  }
+  return plan
+}
+
+/** 沒有在跑的 codex 帶「需安裝」時，照上游快照開一份（見 `codexInstallPlan`）。那台在跑的 codex 照樣列進重啟／跳過。 */
+function codexUpstreamPlan(
+  bots: Bot[],
+  runs: Record<string, Run | null>,
+  hasInFlightTurn: (botId: string) => boolean,
+  hostOf: (bot: Bot) => string,
+  upstream: UpstreamItem | null | undefined,
+): CodexInstallPlan | null {
+  if (!upstream || upstream.kind !== 'codex' || !upstream.hasUpdate || !upstream.target) return null
+  const behind = upstream.hosts.filter((h) => h.behind)
+  const disk = behind.find((h) => h.host === 'local') ?? behind[0]
+  if (!disk) return null
+  // 同 daemon `codex_update::pending_text`：`updateRange` 從這句讀 (from, to]。
+  const notice = disk.installedVersion
+    ? `codex 有新版 ${disk.installedVersion} → ${upstream.target}，需安裝後重啟`
+    : `codex 有新版 ${upstream.target}，需安裝後重啟`
+  const plan: CodexInstallPlan = { host: disk.host, notice, installCount: 0, ready: [], busy: [] }
+  for (const bot of bots) {
+    const run = runs[bot.id]
+    if (bot.kind !== 'codex' || !run || run.state !== 'running' || hostOf(bot) !== disk.host) continue
     const child = bot.managed_by === 'child' || Boolean(bot.parent_bot_id)
     const why = child ? '子 agent，由父 Bot 重開' : runBusyReason(run, hasInFlightTurn(bot.id))
     if (why) plan.busy.push({ botId: bot.id, name: bot.name, why })

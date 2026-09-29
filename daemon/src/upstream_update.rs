@@ -298,6 +298,15 @@ pub async fn latest_target_for_host(kind: &str, host: &str) -> Option<String> {
         .flatten()
 }
 
+/// 快照裡這台落後時的目標版本（codex：沒有 run 帶「需安裝」通知時，安裝 API 用它核對確認框寫的那一版）。
+pub async fn behind_target_for_host(kind: &str, host: &str) -> Option<String> {
+    let snapshots = watch().snapshot.lock().await;
+    let status = snapshots.get(kind)?;
+    (status.has_update && status.hosts.iter().any(|h| h.host == host && h.behind))
+        .then(|| status.target_version.clone().or_else(|| status.latest_version.clone()))
+        .flatten()
+}
+
 /// CLI 安裝成功後立即修正快照，讓 header 不必等下一輪 10 分鐘巡邏才收起警示。
 pub async fn note_installed(app: &App, kind: &str, host: &str, version: &str) {
     let updated = {
@@ -731,5 +740,22 @@ mod tests {
         let c = of(&tick(&e.app, &w, &src, &last).await, "claude").cloned().unwrap();
         assert_eq!(c["notify"], "update", "恢復之後照常通知新版");
         assert!(c["error"].is_null());
+    }
+
+    /// codex 沒有 run 帶「需安裝」時，安裝 API 靠這個核對：那台落後才給目標，沒落後、沒新版都是 None。
+    /// 用不存在的主機名，不去動別的測試會讀的 `local`（快照是 process 全域）。
+    #[tokio::test]
+    async fn behind_target_is_only_given_for_a_host_that_is_behind() {
+        set_snapshot_for_test(build_status(
+            "codex-behind-test",
+            &Ok("0.159.0".into()),
+            &[("bt-old".into(), Ok("codex-cli 0.157.1".into())), ("bt-new".into(), Ok("codex-cli 0.159.0".into()))],
+            None,
+        ))
+        .await;
+        assert_eq!(behind_target_for_host("codex-behind-test", "bt-old").await.as_deref(), Some("0.159.0"));
+        assert_eq!(behind_target_for_host("codex-behind-test", "bt-new").await, None, "已經是新版");
+        assert_eq!(behind_target_for_host("codex-behind-test", "bt-missing").await, None);
+        assert_eq!(behind_target_for_host("no-such-kind", "bt-old").await, None);
     }
 }

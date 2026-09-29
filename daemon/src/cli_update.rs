@@ -500,7 +500,11 @@ pub async fn start(
     // 使用者核准的版本要跟 daemon 眼中那台「需安裝」的目標是同一版：舊分頁、別人剛裝好、帳本又出了新版都擋下來重看。
     let current_target = match kind {
         "claude" => crate::upstream_update::latest_target_for_host(kind, host).await,
-        _ => pending_target(app, host).await,
+        // 沒有在跑的 codex 帶「需安裝」時退回上游快照（那台要落後才算），header 在沒有 codex 在跑時也能裝（2026-09-29 使用者）。
+        _ => match pending_target(app, host).await {
+            Some(t) => Some(t),
+            None => crate::upstream_update::behind_target_for_host(kind, host).await,
+        },
     };
     match current_target {
         Some(t) if parse_version(&t) == parse_version(&target) => {}
