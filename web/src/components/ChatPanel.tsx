@@ -57,7 +57,6 @@ import { relaySource } from '../lib/relaySource'
 import { relayPreview } from '../lib/relayPreview'
 import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
-import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
@@ -1361,8 +1360,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           focusIdentity={runningIdentity === undefined ? bot.identity : runningIdentity}
           host={hostName}
         />
-        {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
-        <MemBadge host={hostName} onlyRemote />
         {/* UI-DECISIONS〈無障礙語意（#11）〉。 */}
         <div className="tabs" role="tablist" aria-label="主面板" onKeyDown={onTabListKeyDown}>
           <button

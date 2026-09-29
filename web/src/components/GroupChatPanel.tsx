@@ -26,7 +26,6 @@ import { KindIcon } from './KindTag'
 import { loadMissionOpts, type MissionOpts } from '../lib/missionOpts'
 import { MissionOptions } from './MissionOptions'
 import { MissionsBar } from './MissionsBar'
-import { MemBadge } from './MemBadge'
 import { QuotaStrip } from './QuotaStrip'
 import { UnreadChip } from './UnreadChip'
 import { ToolsHint, ToolsHintIcon } from './Tools'
@@ -631,8 +630,6 @@ export function GroupChatPanel({ projectId, onOpenSidebar }: { projectId: string
         <span className="spacer" />
         <ToolsHintIcon />
         <QuotaStrip host={hostName} />
-        {/* 遠端才掛：本機的數字固定在左上角，這裡再放一次只是重複。 */}
-        <MemBadge host={hostName} onlyRemote />
         <AttachButton command={attachCommand} compact />
         <div className="head-actions">
           <button type="button" className="mini-btn" onClick={() => selectProject(null)} title="回到單一 Bot 的對話">

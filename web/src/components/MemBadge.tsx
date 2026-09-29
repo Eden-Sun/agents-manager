@@ -6,11 +6,9 @@ import './memBadge.css'
 
 import { humanBytes } from './memFormat'
 /** 一台主機上 herdr 進程樹的常駐記憶體（SPEC §15）。一格只講一台，不加總：跨機總和讀不懂。 */
-export function MemBadge({ host = LOCAL_HOST, onlyRemote = false }: { host?: string; onlyRemote?: boolean }) {
+export function MemBadge({ host = LOCAL_HOST }: { host?: string }) {
   const row = useStore((s) => s.mem?.hosts.find((h) => h.host === host) ?? null)
   const remote = host !== LOCAL_HOST
-  // 標題列傳 `onlyRemote`：本機的數字左上角已經有一顆，同一畫面掛兩次一樣的數字沒有意義。
-  if (onlyRemote && !remote) return null
   if (!row) return null
 
   if (row.error) {
