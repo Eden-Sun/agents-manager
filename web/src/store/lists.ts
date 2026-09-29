@@ -38,6 +38,22 @@ export function insertSorted<T extends { id: string }>(
   return [...list.slice(0, at), item, ...list.slice(at)]
 }
 
+/**
+ * 同 `insertSorted`，但同一個 id 已經在清單裡而且 `same` 說不一樣時換掉它（位置不動）：daemon 會原地改一則訊息再推一次
+ * （遲到的 hook 以原文取代備援抓的回覆，SPEC §4.3）。一樣的就回 `null`，不白重畫。
+ */
+export function upsertSorted<T extends { id: string }>(
+  list: readonly T[],
+  item: T,
+  cmp: (a: T, b: T) => number,
+  same: (a: T, b: T) => boolean,
+): T[] | null {
+  const at = list.findIndex((x) => x.id === item.id)
+  if (at < 0) return insertSorted(list, item, cmp)
+  if (same(list[at], item)) return null
+  return [...list.slice(0, at), item, ...list.slice(at + 1)]
+}
+
 /** 留最新的；`trimmed` 時呼叫端要打開「還有更早的」旗標。 */
 export function capList<T>(list: T[], cap: number): { list: T[]; trimmed: boolean } {
   if (list.length <= cap) return { list, trimmed: false }
