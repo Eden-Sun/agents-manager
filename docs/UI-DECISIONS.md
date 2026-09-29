@@ -127,6 +127,7 @@
   **不合成一個框分兩段**：兩件事的代價不同——claude 那顆只是重啟；codex 這顆會先換掉那台所有 codex 共用的 binary、失敗就一顆都不重啟——
   塞在同一個確認鈕後面，使用者很難分清楚按下去會發生哪幾件事；各自一個框也各自只有一份 changelog 與一份 AGM 解析。
   一般那顆的「在忙」名單不再列需安裝的 codex（由旁邊這顆負責），只剩需安裝時一般那顆不出現。
+- **Claude fleet 安裝提示**（issue #725）：桌機與既有 restart／Codex install chip 並列；若同時有多種更新，手機合成選單列出「重啟套用」、Codex 安裝、Claude fleet 安裝。Claude 的 chip tooltip 與確認框寫每台目前版 → 同一目標版，安裝完成後以一般 restart chip 提示手動套用。
 - **沿用上一份讀數的那一格要標出來**（#540）：daemon 對這次真的帶進來的窗會把 `observed_at` 蓋成
   `updated_at`，新讀數缺的那一桶沿用舊值（statusline 被截斷只剩 7d 時保住 5h）。`observed_at` 比
   `updated_at` 舊就是沿用——窗口名後面掛一個琥珀色小「舊」，提示寫出它自己的年齡，tooltip／aria 文字也點名。
@@ -678,18 +679,19 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 ![claude 有分析](screenshots/codex-update-review/claude-analysed-1440.png) ![claude 尚未分析](screenshots/codex-update-review/claude-not-analysed-1440.png)
 ![手機](screenshots/codex-update-review/claude-not-analysed-390.png) ![真 daemon（唯讀）](screenshots/codex-update-review/codex-real-daemon-1440.png)
 
-## 上游有新版、磁碟上還沒有：一則通知，不做 header chip（2026-09-28，issue #707）
+## Claude fleet 安裝提示持續留在 header（issue #725）
 
-使用者：npm 已是 2.1.283、磁碟停在 2.1.281，AG Man 沒通知。
+使用者：「應該也要有提示，而不是只幫她安裝」。Claude 有新版或主機版本不一致時，提示是主要入口，toast 只是補充。
 
-- **跟「重啟套用」分開**：header 的更新 chip／批次重啟只收「已下載（claude）／已安裝（codex）、重啟就換」的 run；上游有而磁碟沒有時重啟換不到東西，
-  放進去等於叫人按一顆沒用的鈕。所以這件事**不寫 `runs.update_notice`、不長 chip**，只跳一則通知，字面寫明「還沒下載，重啟也換不到」／「需先安裝」。
+- **Claude 安裝 chip 持續顯示**：npm 上游版更新、任一主機落後、版本不一致或目標已知但版本讀取失敗時，header 顯示警示色 ⌃⌃ N。tooltip 與確認框都逐台寫目前版本（或錯誤）→共同目標；只有 fleet 全部到目標才消失。狀態取自 `upstreamUpdates.claude` 快照，不由 toast 或 active run 決定。
+- **安裝與重啟分開確認**：確認框列出所有已安裝 Claude 的主機，只對落後或讀不到版本的主機執行固定的 `claude install <target_version>`。只有按「安裝到 N 台」才送請求；已到目標的不重裝。daemon 精確驗證版本後，run 轉成既有「已安裝，重啟套用」，再由一般的重啟 ⌃⌃ 開另一個確認框；安裝流程不自動重啟。
 - **帶「知道了」**：純資訊通知 4 秒就消失，這則是要人去處理的，帶一顆動作鈕讓它停 15 秒（同刪 bot 的「復原」）。
 - **每個新版本每個瀏覽器一次**：daemon 只推一次（跨重啟也記得）；推的當下沒開網頁會錯過，開機再讀快照補上，看過的版本記在 localStorage。
   抓不到上游的錯誤通知只在 daemon 推的那一次跳，重整不重跳。
-- 驗證：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`。
+- **手機**：重啟、Codex 安裝、Claude fleet 安裝有兩項以上同時出現時合成單一 ⌃⌃ 圖示選單；選單每項仍各自打開原本的確認框。
+- 驗證：mock 提供 `latest_version`、`target_version` 與多台 `hosts`；截圖在 `screenshots/claude-install/`。
 
-![桌機](screenshots/upstream-update/desktop-1440-dark.png) ![手機](screenshots/upstream-update/phone-390-light.png)
+![Claude fleet 安裝提示桌機](screenshots/claude-install/desktop-1440.png) ![Claude fleet 安裝確認手機](screenshots/claude-install/phone-390.png)
 
 ## 已移交的專案：標「由 <host> 管理」、輸入框鎖住（2026-09-28，issue #708）
 

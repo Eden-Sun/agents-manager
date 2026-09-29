@@ -107,19 +107,56 @@ async fn sweep(app: &Arc<App>) {
             let upstream = crate::release_triage::ledger::max_version(&app.db, "codex").await.ok().flatten();
             crate::codex_update::decide(prompt.as_ref(), running.as_deref(), disk.version.as_deref(), upstream.as_deref(), run.update_notice.as_deref())
         } else {
-            let mut seen = update_notice(&read.text);
-            // 畫面原句優先（claude 自己說的較準），沒有才用版本比對。
-            if seen.is_none() {
-                if let Some(running) = running_version(run.status_json.as_deref()) {
-                    // 讀不到 host 就整輪跳過、不動既有通知：拿本機的 claude 去比遠端跑的版本會造出或清掉假通知（#243）。
-                    let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { continue };
-                    let Some(disk) = disk_version(app, &host, "claude").await else { continue };
-                    observation_fence = Some(disk.fence);
-                    let Some(version) = disk.version else { continue };
-                    seen = version_notice(&version, &running);
+            // Claude 關閉自動更新時不能等 CLI 自己下載。上游快照有新版本就把指定目標寫進 run，
+            // 讓 header 的安裝提示持續存在；磁碟追上後改回既有的「重啟套用」通知。
+            let screen_notice = update_notice(&read.text);
+            let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else {
+                continue;
+            };
+            let Some(disk) = disk_version(app, &host, "claude").await else {
+                continue;
+            };
+            observation_fence = Some(disk.fence);
+            let running = running_version(run.status_json.as_deref());
+            let upstream = crate::upstream_update::latest_target_for_host("claude", &host).await;
+            let disk_version = disk.version.as_deref();
+            let below_upstream = upstream.as_deref().filter(|target| {
+                disk_version
+                    .and_then(crate::changelog::parse_version)
+                    .zip(crate::changelog::parse_version(target))
+                    .is_none_or(|(disk, target)| disk < target)
+            });
+            if let Some(target) = below_upstream {
+                Some(crate::upstream_update::claude_pending_text(
+                    disk_version.or(running.as_deref()),
+                    target,
+                ))
+            } else if upstream.is_none() {
+                // 上游抓不到時保留已存在的安裝提示；未知不能當成「沒有更新」。磁碟已追上舊目標則交給下方版本比對。
+                let old_target = run
+                    .update_notice
+                    .as_deref()
+                    .and_then(crate::upstream_update::claude_pending_to);
+                let old_still_pending = old_target.as_deref().is_some_and(|target| {
+                    disk_version
+                        .and_then(crate::changelog::parse_version)
+                        .zip(crate::changelog::parse_version(target))
+                        .is_none_or(|(disk, target)| disk < target)
+                });
+                if old_still_pending {
+                    run.update_notice.clone()
+                } else {
+                    disk_version
+                        .zip(running.as_deref())
+                        .and_then(|(disk, running)| version_notice(disk, running))
+                        .or(screen_notice)
                 }
+            } else {
+                disk_version
+                    .zip(running.as_deref())
+                    .and_then(|(disk, running)| version_notice(disk, running))
+                    .or(screen_notice)
             }
-            seen
         };
         if seen.as_deref() == run.update_notice.as_deref() {
             continue;
@@ -316,6 +353,49 @@ mod tests {
         assert!(n.contains("0.154.0") && n.contains("0.155.1") && n.contains("需安裝後重啟"), "{n}");
     }
 
+    #[tokio::test]
+    async fn claude_upstream_update_stays_visible_until_that_host_has_the_target_version() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "claude-upstream").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        e.herdr.set_screen(&pane, "› conversation\n");
+        sqlx::query("UPDATE runs SET status_json=? WHERE id=?")
+            .bind(r#"{"version":"2.1.281 (Claude Code)"}"#)
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        seed_disk(&e.app, "local", "claude", "2.1.281 (Claude Code)").await;
+        crate::upstream_update::set_snapshot_for_test(crate::upstream_update::build_status(
+            "claude",
+            &Ok("2.1.284".into()),
+            &[("local".into(), Ok("2.1.281 (Claude Code)".into()))],
+            None,
+        ))
+        .await;
+
+        sweep(&e.app).await;
+        let pending = notice_of(&e.app, &run)
+            .await
+            .expect("上游比磁碟新時要持續顯示安裝提示");
+        assert!(
+            pending.contains("2.1.284") && pending.contains("需安裝"),
+            "{pending}"
+        );
+
+        seed_disk(&e.app, "local", "claude", "2.1.284 (Claude Code)").await;
+        sweep(&e.app).await;
+        let installed = notice_of(&e.app, &run)
+            .await
+            .expect("裝到目標後改成重啟套用提示");
+        assert!(
+            installed.contains("已是 2.1.284") && installed.contains("重啟套用"),
+            "{installed}"
+        );
+        assert!(!installed.contains("需安裝"), "安裝提示要清掉：{installed}");
+    }
     /// 畫面被推掉：選單／方框不在了，通知不消失；磁碟被人裝好之後改成「已安裝，重啟套用」。
     #[tokio::test]
     async fn when_the_prompt_leaves_the_screen_the_notice_stays_until_the_disk_has_the_new_version() {

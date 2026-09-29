@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
-import { codexInstallPlan, updateBatchCounts } from '../lib/updateBatch'
+import { claudeInstallPlan, codexInstallPlan, updateBatchCounts } from '../lib/updateBatch'
 import { updateRange } from '../lib/updateRange'
 import { mergedUpdateLabels } from '../lib/mergedUpdateLabels'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { UpgradeIcon } from './UpgradeIcon'
 import { CodexInstallChip } from './CodexInstallChip'
+import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { RestartChip } from './UpdateQuotaChip'
 
 /** 由外面代為開關的確認框（手機合成那顆用）。 */
@@ -23,7 +24,7 @@ export interface DialogControl {
 export function MergedUpdateChip() {
   const batch = useStore((s) => s.restartBatch)
   const clear = useStore((s) => s.clearRestartBatch)
-  const cli = useStore((s) => s.cliUpdate)
+  const cli = useStore((s) => s.cliUpdates)
   const readyCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.length)
   const busyCount = useStore(
     (s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).busy.filter((b) => !b.install).length,
@@ -46,10 +47,18 @@ export function MergedUpdateChip() {
         (b) => projectHostName(s, b.project_id),
       )?.notice ?? '',
   )
+  const claudePlanKey = useStore((s) => {
+    const p = claudeInstallPlan(s.upstreamUpdates.claude)
+    return p ? JSON.stringify(p) : ''
+  })
+  const claudePlan = claudePlanKey ? (JSON.parse(claudePlanKey) as NonNullable<ReturnType<typeof claudeInstallPlan>>) : null
+  const activeClaudeHosts = new Set(cli.filter((item) => item.kind === 'claude').map((item) => item.host))
+  const claudeCanStart = Boolean(claudePlan?.installHosts.some((host) => !activeClaudeHosts.has(host)))
+  const claudeVisible = Boolean(claudePlan) || activeClaudeHosts.size > 0
   const [open, setOpen] = useState(false)
   // 標題列一路有 overflow 裁切與 transform（fixed 也會被帶偏），選單用 portal 掛到 body、fixed 在按鈕下緣。
   const [at, setAt] = useState<CSSProperties>({})
-  const [which, setWhich] = useState<'restart' | 'codex' | null>(null)
+  const [which, setWhich] = useState<'restart' | 'codex' | 'claude' | null>(null)
   const btn = useRef<HTMLButtonElement>(null)
   const pop = useRef<HTMLDivElement>(null)
   const menuKeys = useMenuKeys(open, pop, btn, () => setOpen(false))
@@ -64,13 +73,21 @@ export function MergedUpdateChip() {
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open])
 
-  const { restartItem, codexItem, label } = mergedUpdateLabels({
+  const restartShown = Boolean(batch) || readyCount > 0 || busyCount > 0
+  const codexShown = cli.some((item) => item.kind === 'codex') || installCount > 0
+  const { restartItem, codexItem, claudeItem, label } = mergedUpdateLabels({
     batch,
     cli,
     readyCount,
     busyCount,
     installCount,
     to: updateRange('codex', codexNotice, null).to,
+    claudeInstallCount: claudePlan?.installHosts.length ?? 0,
+    claudeTarget: claudePlan?.target ?? null,
+    claudeShown: claudeVisible,
+    claudeSummary: claudePlan?.hosts.map((host) => `${host.host} ${host.installedVersion ?? host.error ?? '讀取失敗'} → ${claudePlan.target}`).join('；'),
+    restartShown,
+    codexShown,
   })
   const close = () => setWhich(null)
 
@@ -107,7 +124,7 @@ export function MergedUpdateChip() {
               onClick={() => setOpen(false)}
               onKeyDown={menuKeys}
             >
-              <button
+              {restartShown ? <button
                 type="button"
                 className="head-menu-item"
                 role="menuitem"
@@ -116,23 +133,34 @@ export function MergedUpdateChip() {
                 onClick={() => (batch ? clear() : setWhich('restart'))}
               >
                 {restartItem}
-              </button>
-              <button
+              </button> : null}
+              {codexShown ? <button
                 type="button"
                 className="head-menu-item"
                 role="menuitem"
                 tabIndex={-1}
-                disabled={Boolean(cli)}
+                disabled={cli.some((item) => item.kind === 'codex')}
                 onClick={() => setWhich('codex')}
               >
                 {codexItem}
-              </button>
+              </button> : null}
+              {claudeVisible ? <button
+                type="button"
+                className="head-menu-item"
+                role="menuitem"
+                tabIndex={-1}
+                disabled={!claudeCanStart}
+                onClick={() => setWhich('claude')}
+              >
+                {claudeItem}
+              </button> : null}
             </div>,
             document.body,
           )
         : null}
       <RestartChip control={{ open: which === 'restart', close }} />
       <CodexInstallChip control={{ open: which === 'codex', close }} />
+      <ClaudeInstallChip control={{ open: which === 'claude', close }} />
     </>
   )
 }

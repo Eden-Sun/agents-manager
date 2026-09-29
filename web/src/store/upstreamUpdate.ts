@@ -12,7 +12,9 @@ const KEY = 'am.upstreamUpdate.seen'
 export interface UpstreamItem {
   kind: string
   latest: string | null
+  target: string | null
   hasUpdate: boolean
+  hosts: { host: string; installedVersion: string | null; error: string | null; behind: boolean }[]
   notify: 'update' | 'error' | null
   text: string | null
 }
@@ -27,7 +29,19 @@ export function parseUpstreamItem(raw: unknown): UpstreamItem | null {
   return {
     kind: raw.kind,
     latest: typeof raw.latest_version === 'string' ? raw.latest_version : null,
+    target: typeof raw.target_version === 'string' ? raw.target_version : null,
     hasUpdate: raw.has_update === true,
+    hosts: Array.isArray(raw.hosts)
+      ? raw.hosts.flatMap((entry) => {
+          if (!isRec(entry) || typeof entry.host !== 'string') return []
+          return [{
+            host: entry.host,
+            installedVersion: typeof entry.installed_version === 'string' ? entry.installed_version : null,
+            error: typeof entry.error === 'string' ? entry.error : null,
+            behind: entry.behind === true,
+          }]
+        })
+      : [],
     notify,
     text: typeof raw.text === 'string' && raw.text ? raw.text : null,
   }
@@ -63,22 +77,27 @@ function markSeen(kind: string, version: string) {
 type Notify = (kind: 'info' | 'error', text: string, action?: { label: string; run: () => void }) => void
 
 /** `upstream_update` 幀或開機讀到的一筆。 */
-export function applyUpstreamItem(raw: unknown, notify: Notify) {
+export function applyUpstreamItem(raw: unknown, notify: Notify): UpstreamItem | null {
   const item = parseUpstreamItem(raw)
-  if (!item) return
+  if (!item) return null
   const n = upstreamNotice(item, readSeen())
-  if (!n) return
+  if (!n) return item
   if (n.kind === 'info' && item.latest) markSeen(item.kind, item.latest)
   // 帶一顆「知道了」讓它停久一點（純資訊通知 4 秒就消失，這則是要人去處理的）。
   notify(n.kind, n.text, { label: '知道了', run: () => {} })
+  return item
 }
 
-export async function loadUpstreamUpdates(fetchItems: () => Promise<unknown>, notify: Notify) {
+export async function loadUpstreamUpdates(fetchItems: () => Promise<unknown>, notify: Notify, onItem?: (item: UpstreamItem) => void) {
   try {
     const r = await fetchItems()
     const items = isRec(r) && Array.isArray(r.items) ? r.items : []
     // 開機只補「有新版」：抓不到上游的那一則 daemon 已經在變化的當下推過，每次重整都跳會變成噪音。
-    for (const raw of items) if (isRec(raw)) applyUpstreamItem({ ...raw, notify: null }, notify)
+    for (const raw of items) {
+      if (!isRec(raw)) continue
+      const item = applyUpstreamItem({ ...raw, notify: null }, notify)
+      if (item) onItem?.(item)
+    }
   } catch {
     /* 舊 daemon 沒有這支、或暫時連不上：下一幀 `upstream_update` 會帶到 */
   }

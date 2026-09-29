@@ -29,7 +29,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 |---|---|---|---|---|---|
 | A | `POST /hosts/{name}/shells`、`…/shells/{pane_id}/text`、`…/keys` | 只有網頁 | UI token；text／keys 只認白名單 pane（daemon 自己開的、或 `panes` 表的 shell／service），跑 agent 的 pane 403、有 listen port 的唯讀（`shell::registered`） | 在任何已設定主機上執行任意指令 | 待裁示（見下） |
 | A | `POST /hosts/{name}/tools/install` | 只有網頁 | UI token | 叫 `via_bot_id` 那顆 agent 去裝 CLI（跟 `/bots/{id}/prompt` 等價） | 同 `/bots/{id}/prompt` |
-| A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 在那台跑 codex 官方安裝指令、換掉所有 codex bot 共用的 binary，再重啟那台閒置的 codex | 維持（網頁已有確認框） |
+| A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 安裝該主機共用的 Claude 或 Codex CLI；Codex 安裝後 scoped restart，Claude 留待使用者另按「重啟套用」 | 維持（網頁已有確認框） |
 | A | `POST /bots/{id}/prompt`、`/text`、`/keys` | 網頁、`scripts/remote-loop-test.sh`、`scripts/hook-timing-test.sh`；Bot pane 內的 `agm`／shim | 網頁與測試腳本用 User `X-AM-Token`；Bot 用成對 Bot headers；`relay_from` 不能覆蓋已驗身分；寫給 AGM 的排進 inbox | 驅動任一顆 agent | 網頁維持 User；Bot principal 按 caller 身分驗證 |
 | A | `POST /bots/{id}/credential/rotate` | 只有網頁／User `agm` | User `X-AM-Token`；執行中的 bot 先在同一 SQLite transaction 記錄可恢復的 restart intent，再輪替 token；舊值失效並重啟，daemon 重啟會接續；live child／grandchild 仍繼承時先回 `409 live_children_use_credential`，不改 token；不回傳新值 | 使該 bot 的舊 hook/API proof 失效 | User-only，Bot／service principal 403 |
 | A | `PUT /build/remote`、`POST /build/remote/install-toolchain` | 只有網頁 | UI token | 改外部編譯主機＝之後的 cargo 送到哪台機器跑 | 待裁示 |
@@ -102,7 +102,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 會因為 id 對不上被整段丟掉）。欄位**不存在**（舊 daemon）是「不知道」，什麼都不動。
 **欄位不存在**（舊 daemon）跟 `null`（沒有批次在跑）是兩件事，不能混成同一個值——不知道時不該動手上的進度。
 
-`cli_updates`：還沒收尾的 codex 升級（§12.7a）`[{"update_id","host","kind","target_version","phase","recovered"}]`，沒有就是 `[]`。存在 DB（#564）：
+`cli_updates`：還沒收尾的 Claude／Codex CLI 安裝（§12.7a）`[{"update_id","host","kind","target_version","phase","recovered"}]`，沒有就是 `[]`。存在 DB（#564）：
 daemon 重啟前開始、正在接手確認的那筆也在，`recovered:true`、`phase:"recovering"`。同一個理由：進度只走 WS，
 `cli_update_done` 收不到時前端拿它對帳——手上那一次不在清單裡就清掉（header 的 chip 變回可以按）；欄位不存在（舊 daemon）不動。
 
@@ -1618,42 +1618,41 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - `protocol_supported`：protocol 是否在 daemon 實測過的清單（`herdr.rs` `SUPPORTED_PROTOCOLS`，目前 20／22）；不知道 protocol 時 `null`。
 - 舊 daemon 沒有 `herdr` 欄位，前端一律當未知。
 
-### 12.7a header 一鍵升級 codex `POST /api/hosts/{name}/cli-update`
-`{"kind":"codex","target_version":"0.157.0"}`。`target_version` 是確認框寫的那一版（#569），daemon 要求它等於那台「需安裝」codex 通知裡最新的目標。在那台主機跑**寫死的**官方安裝指令 `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`
-（codex 自己升級提示寫的那一句；不接受呼叫端傳指令），確認 `codex --version` 真的升上去之後，把那台 codex run 的「需安裝」通知改成
-「已安裝，重啟套用」，接著開一鍵重啟（§10.3a），**範圍只限那台主機的 codex**（不動 claude、不動別台）。SPEC §6.9。
+### 12.7a header 安裝 CLI 更新 `POST /api/hosts/{name}/cli-update`
+`{"kind":"codex","target_version":"0.157.0"}` 或 `{"kind":"claude","target_version":"2.1.284"}`。請求只由使用者在 header 確認框送出，daemon 不會背景自動安裝。Codex 沿用該主機「需安裝」通知的目標與官方安裝指令；Claude 目標綁定 `GET /api/upstream-updates` 的 fleet 共同目標（上游版與各主機已安裝版的最大值），在該主機跑固定指令 `claude install <target_version>`。兩種都在安裝後讀版本驗證；Codex 可到達或超過目標，Claude 必須精確等於目標。成功後 Claude 只把該主機 run 的持續通知改成「已安裝，重啟套用」，不自動重啟；Codex 保留既有的 scoped restart（僅該主機、該 kind）。SPEC §6.9。
 
 ```json
 202 {"update_id":"01M4…","host":"local","kind":"codex","target_version":"0.157.0","started":true}
 ```
 - 403 `{"reason":"ui_only"}`：帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token`（bot 身分）一律拒絕——換掉的是所有 codex bot 共用的 binary。
-- 400：`kind` 不是 `codex`（claude 自己會下載新版，走 §10.3a 就好）、沒帶或看不懂 `target_version`；404：不認得的主機。
+- 400：`kind` 不是 `codex`／`claude`、沒帶或看不懂 `target_version`；404：不認得的主機。
 - 409 `{"reason":"stale_target","host","kind","target_version","current_target","message"}`：帶的版本不是 daemon 眼中那台現在的目標
-  （`current_target` 是現在的目標；`null`＝那台已經沒有「需安裝」的 codex）。什麼都不跑，重開確認框再按。
+  （Codex 取該主機 pending notice，Claude 取 fleet 快照；`null`＝沒有待安裝目標）。什麼都不跑，重開確認框再按。
 - 409 `{"reason":"cli_update_in_progress","host","kind","update_id","recovered","message"}`：那台已經在裝（同一台同時只跑一個）。記在 DB 的
   `cli_updates` 表，每台最多一筆 `running`，daemon 重啟後也還在；`recovered:true`＝那筆是重啟前開始的，daemon 正在確認那台的安裝跑完了沒（見下）。
 - 本機直接 `/bin/sh -c`，遠端走既有的 ssh 執行路徑（`ssh_exec_path_timeout`）；逾時 5 分鐘（遠端逾時只砍得掉本機那條 ssh，那台的安裝可能還在跑）。
-  安裝指令包在**主機端的鎖**裡（`$HOME/.agents-manager-codex-install.lock`，symlink 指向持鎖 shell 的 pid；pid 已死＝過期、拿走）：
+  安裝指令包在**主機端按 kind 分開的鎖**裡（`$HOME/.agents-manager-codex-install.lock` 或 `$HOME/.agents-manager-claude-install.lock`，symlink 指向持鎖 process group 與 nonce）：
   鎖被活著的安裝拿著時不跑，`cli_update_done` 回 `already_running`。
   輸出逐次附加到 `<data_dir>/cli-update.log`。
 
 WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶）：`cli_update_progress` 的 `phase` 依序 `checking`（讀安裝前版本）→ `installing`（帶 `from`）→
-`verifying` → `restarting`（帶 `from`、`to`）；最後一則 `cli_update_done`：
+`verifying`；Codex 接著有 `restarting`，Claude 安裝後直接完成、交給一般重啟 chip：
 
 ```json
 {"update_id":"01M4…","host":"local","kind":"codex","ok":true,"from":"0.155.1","to":"0.157.0","notices_updated":2,
  "restart":{"batch_id":"01M2…","total":2,"planned":[…],"skipped":[…]}}
+{"update_id":"01M5…","host":"m4p","kind":"claude","ok":true,"from":"2.1.281","to":"2.1.284","notices_updated":1,"restart":null,"restart_required":true,"restart_status":"manual"}
 {"update_id":"01M4…","host":"local","kind":"codex","ok":false,"reason":"install_failed","error":"安裝指令失敗（exit status: 6）：curl: (6) …","from":"0.155.1"}
 ```
-- 安裝前 `codex --version` 已經 `>= target_version`：不跑安裝指令、沒有 `installing`／`verifying`，直接改通知、開重啟，`ok:true` 帶 `already_installed:true`（`from`＝`to`）。
+- 安裝前版本已符合目標：不跑安裝指令、沒有 `installing`／`verifying`，直接改通知；Claude 回 `restart:null`、`restart_required:true`，Codex 開該主機 scoped restart。兩者 `ok:true` 都帶 `already_installed:true`（`from`＝`to`）。
 - `ok:false` 一律**沒有重啟任何 bot**、通知不動。`reason`：`version_unreadable`（讀不到安裝前的版本，沒有安裝）、`install_failed`、
   `already_running`（那台的安裝鎖被另一個還活著的安裝拿著——上一顆 daemon 開的、或別的實例開的；這次**沒有**跑安裝指令，等它結束再按）、
   `interrupted`（重啟接手的那筆收尾時版本沒到目標或讀不到、或等 15 分鐘那台的鎖還沒放；見下）、
   `verify_failed`（跑完讀不到版本）、`version_unchanged`（跑完版本沒變，帶 `from`／`to`）、`target_not_reached`（變新了但比 `target_version` 舊，帶 `from`／`to`）、
   `superseded`（途中那台主機重連或改指到另一台，SPEC §11.3 第 7 點：安裝只跑在開始時那條連線上，換了之後讀到的版本不算數，也不改通知、不開批次；
   安裝可能已經在舊連線那台跑完）。裝到比 `target_version` 還新算成功。
-- **daemon 重啟後接手**（#564）：開機時 `cli_updates` 裡上一顆行程留下的 `running` 列不丟掉，每筆背景每 5 秒探那台的安裝鎖，
-  等它沒有活著的主人（最多 15 分鐘）才讀 `codex --version` 收尾，**絕不重跑安裝指令**。期間那台照樣 409、`cli_updates` 照樣列著。
+- **daemon 重啟後接手**（#564）：開機時 `cli_updates` 裡上一顆行程留下的 `running` 列不丟掉，每筆背景每 5 秒探該 kind 的主機安裝鎖，
+  等它沒有活著的主人（最多 15 分鐘）才讀對應 CLI 版本收尾，**絕不重跑安裝指令**。Claude 要精確等於目標且不自動重啟；Codex 到達目標就只更新通知，不自動重啟。期間那台照樣 409、`cli_updates` 照樣列著。
   收尾推 `cli_update_done`，帶 `recovered:true`：到了 `target_version` 就改通知成「已安裝，重啟套用」、`ok:true`，但 `restart:null`＋`restart_error`
   （按下去的那一刻隔了一次重啟，不自動開批次，按一般的 ⌃⌃ 重啟）；沒到就是 `ok:false` `interrupted`，要裝再按一次（照常先讀版本，已經裝好就不再裝）。
 - 結果（`ok`／`reason`／版本）在推 `cli_update_done` **之前**寫進那一列（`status` `done`／`failed`），之後那台才能再開一次。
@@ -1825,15 +1824,16 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 - 唯讀、不觸發抓取，回最近一輪巡邏（每 10 分鐘；daemon 啟動後約 1 分鐘第一輪）的快照；第一輪還沒跑完是 `{"items":[]}`。
 - 上游：claude `https://registry.npmjs.org/@anthropic-ai/claude-code/latest` 的 `version`；codex 沿用 `/api/changelog` 那份 GitHub releases 快取，取最大的正式版（濾掉 draft／prerelease）。成功的結果快取 1 小時；失敗不快取，下一輪再試。
-- 磁碟：每台工具探測認為有裝該 kind 的主機跑一次 `<kind> --version`。`behind`＝上游比那台新（數值比較）；`has_update`＝至少一台 `behind`。
-- **抓不到上游**：`latest_version:null`、`has_update:false`、`error` 寫原因——不是「沒有新版」。`text` 是給畫面的那一句（有新版或抓不到時才有，否則 `null`）。
+- 磁碟：每台工具探測認為有裝該 kind 的主機跑一次 `<kind> --version`。`latest_version` 是上游版；`target_version` 是共同安裝目標。Codex 的目標等於上游版；Claude 取上游版與已安裝版本的最大值，避免把較新的主機降版。Claude `behind` 表示低於共同目標或目標已知但讀不到版本；`has_update` 在任一主機落後／讀取失敗或版本不一致時為 `true`。
+- Claude 目標需處理時，`text` 持續列出**每台**目前版本（或讀取錯誤）與共同目標，並列出 `claude install <target_version>`。網頁把此快照保存在 header；只有全部到目標版才收起。`notify`／toast 是另外的單次通知，不是持續提示本身。
+- **抓不到上游**：`latest_version:null`、`error` 寫原因——不是「沒有新版」。Claude 若主機間仍不一致，仍以已知最高安裝版做目標並持續顯示；沒有可比較目標時 `has_update:false`。`text` 是給畫面的那一句（有待處理或抓不到時才有，否則 `null`）。
 - `notified_version`：上次推過通知的上游版本（`<data_dir>/upstream-update.last.json`，跨重啟保留）。
 
 ```json
-{ "items": [{ "kind": "claude", "latest_version": "2.1.283", "source_url": "https://www.npmjs.com/package/@anthropic-ai/claude-code",
+{ "items": [{ "kind": "claude", "latest_version": "2.1.283", "target_version": "2.1.284", "source_url": "https://www.npmjs.com/package/@anthropic-ai/claude-code",
   "checked_at": "2026-09-28T02:00:00.000Z", "error": null, "has_update": true, "notified_version": "2.1.283",
-  "hosts": [{ "host": "local", "installed_version": "2.1.281", "error": null, "behind": true }],
-  "text": "claude 上游有新版 2.1.283（local 磁碟上是 2.1.281）：claude 還沒下載，重啟也換不到；…" }] }
+  "hosts": [{ "host": "local", "installed_version": "2.1.284", "error": null, "behind": false }, { "host": "m4p", "installed_version": "2.1.281", "error": null, "behind": true }],
+  "text": "claude 需安裝 2.1.284（local：2.1.284 → 2.1.284；m4p：2.1.281 → 2.1.284）：需安裝到共同版本…" }] }
 ```
 
 WS `upstream_update`：快照有變或要通知時推，`data` ＝上面一筆 item ＋ `notify`：`"update"`（這個上游版本第一次發現有主機落後；同一版只推一次，npm `latest` 退回舊版再推回來不重報）、`"error"`（從抓得到變成抓不到的那一輪；持續抓不到不重推）或 `null`（只是快照變了，例如磁碟追上了）。

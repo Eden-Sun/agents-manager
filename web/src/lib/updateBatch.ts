@@ -1,6 +1,7 @@
 import type { AgentStatus, Bot, Run } from '../api/types'
 import { cmpVersion } from './releaseTriage'
 import { updateRange } from './updateRange'
+import type { UpstreamItem } from '../store/upstreamUpdate'
 
 /**
  * 「重啟 N 顆閒置的 Bot」按鈕的數字（SPEC §6.9）。只畫按鈕用的前端副本，須與 daemon
@@ -21,7 +22,7 @@ export interface UpdateBatchCounts {
 
 /** codex 的新版還沒裝：重啟換不到，只能先手動安裝（daemon 的 `Skip::NeedsManualInstall`）。 */
 export function needsManualInstall(bot: Bot, run: Run | null | undefined): boolean {
-  return bot.kind === 'codex' && Boolean(run?.update_notice?.includes('需安裝'))
+  return (bot.kind === 'codex' || bot.kind === 'claude') && Boolean(run?.update_notice?.includes('需安裝'))
 }
 
 /** `null` = 可以動。 */
@@ -74,6 +75,25 @@ export interface CodexInstallPlan {
   busy: { botId: string; name: string; why: string }[]
 }
 
+export interface ClaudeInstallPlan {
+  target: string
+  /** 快照列出的每台已安裝 Claude 主機，確認框都會顯示目前版本與共同目標。 */
+  hosts: { host: string; installedVersion: string | null; error: string | null; behind: boolean }[]
+  /** 只安裝落後或讀不到版本的主機；已在目標版的主機保留在清單但不重裝。 */
+  installHosts: string[]
+}
+
+/** Claude fleet 快照有任何主機未到共同目標時持續提供安裝計畫；不依賴一次性 toast 或 active run。 */
+export function claudeInstallPlan(item: UpstreamItem | null | undefined): ClaudeInstallPlan | null {
+  if (!item || item.kind !== 'claude' || !item.hasUpdate || !item.target || item.hosts.length === 0) return null
+  const hosts = item.hosts.map((host) => ({ ...host }))
+  return {
+    target: item.target,
+    hosts,
+    installHosts: hosts.filter((host) => host.behind || host.error !== null).map((host) => host.host),
+  }
+}
+
 /**
  * header「安裝 codex 新版」那顆 chip 的內容（SPEC §6.9，daemon `cli_update.rs`）：取第一台還有「需安裝」codex 的主機，
  * 列出那台裝好之後的一鍵重啟會動到哪幾顆——daemon 的批次範圍是「那台主機的 codex」，前端照同一條切。
@@ -111,6 +131,6 @@ export function codexInstallPlan(
  * header 的兩顆更新 chip 要不要合成一顆（UI-DECISIONS「header 的 codex 安裝」）：只有手機、而且兩顆都會出現時。
  * 手機名字行在 390px 只讓得出一顆圖示的寬（兩顆並排時長名字只剩 ▾）；桌機的額度列放得下兩顆，照舊並排。
  */
-export function mergeUpdateChips(phone: boolean, restartShown: boolean, codexShown: boolean): boolean {
-  return phone && restartShown && codexShown
+export function mergeUpdateChips(phone: boolean, restartShown: boolean, codexShown: boolean, claudeShown = false): boolean {
+  return phone && Number(restartShown) + Number(codexShown) + Number(claudeShown) > 1
 }

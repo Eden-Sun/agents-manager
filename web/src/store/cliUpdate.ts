@@ -1,5 +1,5 @@
 /**
- * header 一鍵升級 codex（SPEC §6.9，API `POST /api/hosts/{name}/cli-update`）的進度怎麼累加。
+ * header 一鍵安裝 CLI 更新（SPEC §6.9，API `POST /api/hosts/{name}/cli-update`）的進度怎麼累加。
  * 拆出來是因為事件處理在 socket 裡，store 動作測不到它。
  *
  * daemon 只回 `update_id`，進度走 WS：`cli_update_progress`（`checking`→`installing`→`verifying`→`restarting`）、
@@ -47,7 +47,20 @@ export function cliUpdateProgress(cur: CliUpdate | null, data: Rec): CliUpdate |
   }
 }
 
+/** 多主機安裝時依 update id 合併進度；同一台的起始佔位會被 daemon id 接手。 */
+export function cliUpdateProgressMany(cur: CliUpdate[], data: Rec): CliUpdate[] {
+  const next = cliUpdateProgress(null, data)
+  if (!next) return cur
+  const index = cur.findIndex((item) => item.id === next.id || (item.phase === 'starting' && item.host === next.host && item.kind === next.kind))
+  if (index < 0) return [...cur, next]
+  if (cur[index].id === next.id && cur[index].phase !== 'starting' && cur[index].phase === next.phase && cur[index].from === next.from && cur[index].to === next.to) return cur
+  const out = [...cur]
+  out[index] = next
+  return out
+}
+
 export interface CliUpdateResult {
+  id: string
   ok: boolean
   /** 給 notify 的一句話。 */
   message: string
@@ -95,36 +108,46 @@ export function batchFromPlan(plan: RestartPlan): RestartBatch {
 
 /** 一則 `cli_update_done`。失敗一律沒有重啟任何 bot（daemon 的保證），訊息照 `reason` 講。 */
 export function cliUpdateDone(data: Rec): CliUpdateResult {
+  const id = str(pick(data, 'update_id'))
   const host = str(pick(data, 'host'), 'local')
+  const kind = str(pick(data, 'kind'), 'codex')
   const from = str(pick(data, 'from'))
   const to = str(pick(data, 'to'))
   if (pick(data, 'ok') !== true) {
     const reason = str(pick(data, 'reason'))
     const error = str(pick(data, 'error'))
-    const head = `${host} 的 codex 升級沒有完成（${REASON[reason] ?? reason ?? '失敗'}），沒有重啟任何 Bot`
-    return { ok: false, message: error ? `${head}：${error}` : head, batch: null, joinBatchId: null }
+    const head = `${host} 的 ${kind} 安裝沒有完成（${REASON[reason] ?? reason ?? '失敗'}），沒有重啟任何 Bot`
+    return { id, ok: false, message: error ? `${head}：${error}` : head, batch: null, joinBatchId: null }
   }
   const plan = toPlan(pick(data, 'restart'))
   const up = from && to && from !== to ? `${from} → ${to}` : to || '新版'
   // 磁碟上本來就是那一版（#569）：沒有跑安裝指令，只改通知、開重啟。
   const verb = pick(data, 'already_installed') === true ? '本來就是' : '已升到'
+  if (kind === 'claude' && pick(data, 'restart_required') === true) {
+    return { id, ok: true, message: `${host} 的 claude ${verb} ${up}；請按 header 的 ⌃⌃「重啟套用」確認後再重啟`, batch: null, joinBatchId: null }
+  }
   if (!plan) {
     const why = str(pick(data, 'restart_error'))
-    return { ok: true, message: `${host} 的 codex ${verb} ${up}，但重啟沒排起來${why ? `：${why}` : ''}；再按一次 ⌃⌃ 重啟`, batch: null, joinBatchId: null }
+    return { id, ok: true, message: `${host} 的 ${kind} ${verb} ${up}，但重啟沒排起來${why ? `：${why}` : ''}；再按一次 ⌃⌃ 重啟`, batch: null, joinBatchId: null }
   }
   // #566：有一批在跑不等於 codex 被排進去了——daemon 用 `restart_status` 講清楚是哪一種。
   const status = str(pick(data, 'restart_status'))
   if (status === 'deferred') {
-    return { ok: true, message: `${host} 的 codex ${verb} ${up}；已經有一批重啟在跑，codex 排在那批後面，跑完會自動接著重啟`, batch: null, joinBatchId: null }
+    return { id, ok: true, message: `${host} 的 ${kind} ${verb} ${up}；已經有一批重啟在跑，codex 排在那批後面，跑完會自動接著重啟`, batch: null, joinBatchId: null }
   }
   if (status === 'already_covered') {
-    return { ok: true, message: `${host} 的 codex ${verb} ${up}；正在跑的那批重啟已經排著這台的 codex`, batch: null, joinBatchId: plan.batch_id }
+    return { id, ok: true, message: `${host} 的 ${kind} ${verb} ${up}；正在跑的那批重啟已經排著這台的 codex`, batch: null, joinBatchId: plan.batch_id }
   }
   if (plan.already_running) {
-    return { ok: true, message: `${host} 的 codex ${verb} ${up}；已經有一批重啟在跑，那批跑完再按一次 ⌃⌃ 重啟 codex`, batch: null, joinBatchId: plan.batch_id }
+    return { id, ok: true, message: `${host} 的 ${kind} ${verb} ${up}；已經有一批重啟在跑，那批跑完再按一次 ⌃⌃ 重啟 codex`, batch: null, joinBatchId: plan.batch_id }
   }
-  const tail = plan.total > 0 ? `，重啟 ${plan.total} 顆閒置的 codex` : '；沒有閒置的 codex 可以重啟（在忙的之後再按 ⌃⌃）'
-  return { ok: true, message: `${host} 的 codex ${verb} ${up}${tail}`, batch: batchFromPlan(plan), joinBatchId: null }
+  const tail = plan.total > 0 ? `，重啟 ${plan.total} 顆閒置的 ${kind}` : `；沒有閒置的 ${kind} 可以重啟（在忙的之後再按 ⌃⌃）`
+  return { id, ok: true, message: `${host} 的 ${kind} ${verb} ${up}${tail}`, batch: batchFromPlan(plan), joinBatchId: null }
+}
+
+export function cliUpdateDoneMany(cur: CliUpdate[], data: Rec): CliUpdate[] {
+  const { id } = cliUpdateDone(data)
+  return id ? cur.filter((item) => item.id !== id) : cur
 }
 
 /**
@@ -134,4 +157,11 @@ export function cliUpdateDone(data: Rec): CliUpdateResult {
 export function reconcileCliUpdate(cur: CliUpdate | null, running: { update_id: string; host: string }[] | undefined): CliUpdate | null {
   if (!cur || running === undefined || cur.phase === 'starting') return cur
   return running.some((r) => r.update_id === cur.id) ? cur : null
+}
+
+export function reconcileCliUpdates(cur: CliUpdate[], running: { update_id: string; host: string }[] | undefined): CliUpdate[] {
+  if (running === undefined) return cur
+  const active = new Set(running.map((row) => row.update_id))
+  const next = cur.filter((item) => item.phase === 'starting' || active.has(item.id))
+  return next.length === cur.length && next.every((item, i) => item === cur[i]) ? cur : next
 }
