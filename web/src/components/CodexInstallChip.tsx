@@ -22,7 +22,7 @@ const INSTALL_CMD = 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON
 export function CodexInstallChip({ control }: { control?: DialogControl } = {}) {
   // 各 selector 回純值（見 UpdateQuotaChip：回新物件會 getSnapshot should be cached）。
   const planKey = useStore((s) => {
-    const p = codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id))
+    const p = codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id), s.upstreamUpdates.codex)
     return p ? JSON.stringify(p) : ''
   })
   const cliKey = useStore((s) => JSON.stringify(s.cliUpdates.filter((item) => item.kind === 'codex')))
@@ -49,7 +49,9 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
   const plan = JSON.parse(planKey) as NonNullable<ReturnType<typeof codexInstallPlan>>
   const range = updateRange('codex', plan.notice, null)
   const version = range.to ? ` ${range.to}` : ''
-  const label = `codex 有新版${version}，還沒裝（${plan.host}，${plan.installCount} 顆 Bot）· 點一下安裝並重啟閒置的 codex`
+  // 上游快照開的那份（沒有 codex 在跑）沒有「幾顆 Bot」可講，只講主機（`codexUpstreamPlan`）。
+  const where = plan.installCount > 0 ? `${plan.host}，${plan.installCount} 顆 Bot` : plan.host
+  const label = `codex 有新版${version}，還沒裝（${where}）· 點一下安裝${plan.ready.length ? '並重啟閒置的 codex' : ''}`
 
   return (
     <>
@@ -61,7 +63,7 @@ export function CodexInstallChip({ control }: { control?: DialogControl } = {}) 
         onClick={() => setConfirming(true)}
       >
         <span aria-hidden="true"><UpgradeIcon /></span>
-        <span className="quota-update-n" aria-hidden="true">{plan.installCount}</span>
+        {plan.installCount > 0 ? <span className="quota-update-n" aria-hidden="true">{plan.installCount}</span> : null}
       </button>}
       <ConfirmDialog
         open={confirming}

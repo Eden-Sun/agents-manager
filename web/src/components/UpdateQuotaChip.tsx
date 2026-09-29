@@ -29,7 +29,7 @@ export function UpdateQuotaChip() {
   const codexShown = useStore(
     (s) =>
       s.cliUpdates.some((item) => item.kind === 'codex') ||
-      codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id)) !== null,
+      codexInstallPlan(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null, (b) => projectHostName(s, b.project_id), s.upstreamUpdates.codex) !== null,
   )
   const claudeShown = useStore((s) =>
     Boolean(claudeInstallPlan(s.upstreamUpdates.claude)) || s.cliUpdates.some((item) => item.kind === 'claude'),
