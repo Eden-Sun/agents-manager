@@ -109,7 +109,7 @@
   舊門檻 `max(604, 340 + 格數×116)` 沒算到遠端才有的主機名牌與記憶體徽章（約 170px），而且完整量表的格子可以縮到比內容小，字就疊到下一格。
   現在完整量表的格子 `min-width: max-content`（38px 條＋數字，不能用 min-content：格內 grid 的 `min-width: 0` 讓它算成 90 vs 118px），
   由 `lib/quotaLayout.ts` 的 `nextQuotaFit` 比「額度區拿得到的寬」（標題列扣掉名字、分頁、內距與 gap；遠端記憶體會自己讓，算在可用裡）與「照內容排開要多寬」（量的當下關掉 flex-grow）。
-  讓位順序照上面的收縮優先序：**遠端記憶體先讓 → 額度列的主機名牌（標題列左邊已有 `@host`）→ 最後才收合量表**。記憶體徽章被壓到放不下就整顆藏（`hooks/useClipped.ts`，visibility 不改排版），不留一截「(@m」。
+  讓位順序照上面的收縮優先序：**遠端記憶體先讓 → 最後才收合量表**（額度列的主機名牌 2026-09-29 拿掉了：標題列左邊已有 `@host`，同一畫面兩個 m4p 讓人以為是兩件事）。記憶體徽章被壓到放不下就整顆藏（`hooks/useClipped.ts`，visibility 不改排版），不留一截「(@m」。
   遲滯：退回上一階段要寬回「上次放不下時量到的內容寬」，不會在兩階段間來回跳；格子或主機一換就從頭量。>1024px 名字那塊固定寬，額度區沒收合時 `flex-basis: 0`＋內容寬保底（max-content 當基準會白白擠掉記憶體徽章），收合後照內容寬當基準。
   實測同一份 mock（`__amMock.remoteDemo()`）：1568 由疊字 22px → 完整量表不疊字（記憶體與名牌讓位）；1440 收合時被裁的尾巴 204px → 46px；本機 1920／1700／1568 維持完整量表、1440 照舊收合。
   ![修正前 1568](screenshots/header-quota-overlap/before-remote-1568.png) ![修正後 1568](screenshots/header-quota-overlap/after-remote-1568.png)

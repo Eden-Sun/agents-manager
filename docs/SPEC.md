@@ -3028,7 +3028,7 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 
 ### 14.5 UI
 - 額度條吃一個 `host`：bot 對話用該 bot 專案的 host、群組用 Project 的，都沒選是本機。
-- 遠端時條最左掛主機名牌（`.quota-host`），本機不掛；桌機標題列擠的時候名牌先收（標題列左邊已有 `@host`，UI-DECISIONS〈額度〉）；tooltip 以主機名開頭，popover 標題「本機額度」/「m4p 的額度」。
+- 條上不掛主機名牌（標題列左邊的 `@host` 已經說了，2026-09-29 使用者）；tooltip 以主機名開頭，popover 標題「本機額度」/「m4p 的額度」。
 - popover 的帳號列可點列內空白處切換暫時停用；按鈕等控制項保留自身操作。登入確認框以 portal 顯示，點確認框內容不會切換背後的帳號列。
 - 未登入列有命名身份時，一律呼叫 `POST /api/hosts/{host}/identities/{identity}/login`，由 daemon 依該主機展開 env；不把 config 原文拼進 shell 指令。預設帳號才走 shell／TUI：codex 開 shell 跑 `codex login`，claude 開 shell 跑 `claude auth login`，grok 有同 host 的執行中 bot 就送 `/login`，否則開 shell 跑 `grok login`。
 - 側欄 bot 的 critical 警告讀該 bot 所在主機的列。
