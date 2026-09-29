@@ -40,8 +40,11 @@ scripts/ops/relay-compat-warnings.sh [~/.config/agents-manager/daemon.log]
 
 ## daemon-update-kick.sh
 
-例行更新：正式 daemon 的 release binary 落後 `origin/main` 時，申請核准、取得 rebuild 租約，
-再把重建重啟任務派給建置 child。
+例行自動部署（使用者 2026-09-29 簡化）：正式 daemon 的 release binary 落後最新一顆 `ubuntu-ci` 綠燈的 `origin/main` 時，
+**腳本自己直接**建置並換版——不經 LLM、不開核准單、不派建置 child。建置已在推 main 前測過、`ubuntu-ci` 也在背景跑整樹，AGM 不再驗一次。
+流程（SPEC §18.2）：`git fetch`（專用 checkout）→ 跟 `daemon-update.built` 比，沒有會進 binary 的差異就結束 →
+沿 first-parent 往回找最新一顆 `ubuntu-ci`＝success 的 sha（`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`）→
+專用 checkout 上 `bun run build`＋`cargo build --release -p agents-managerd` → `daemon-swap.sh` 換版。
 
 ### launchd 排程進了版控（issue #487）
 
@@ -99,74 +102,49 @@ systemctl --user enable --now com.agm.<名字>.timer
 loginctl enable-linger "$USER"   # 沒登入也要跑（一次就好；沒開的話登出後整個 user manager 會停）
 ```
 
-`Environment=` 的 PATH 是 `%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`，
-`AGM_BUILD_BOT` 沿用搬家前的建置 child id（DB 整份搬過去，id 不變）；新主機的工具不在這些位置就改安裝那份，`ops-sync` 不會報。
+`daemon-update` 的 `Environment=` 只有 PATH（`%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`）；
+新主機的工具不在這些位置就改安裝那份，`ops-sync` 不會報。
 
-**四個觸發條件**：整點的例行檢查（launchd 每 5 分鐘跑一次，分鐘 < 5 的那一輪）、
-**重建申請集滿門檻**（`AGM_REBUILD_THRESHOLD`，預設 3；使用者 2026-09-14 訂 5、2026-09-16 降成 3）、
-**最早一筆申請已經等超過上限**（`AGM_REBUILD_MAX_WAIT_MIN`，預設 30 分鐘；使用者 2026-09-15——不能卡著等湊滿），
-或**自己有還在等的核准**（pending／approved、沒過期：在等 AGM 裁示或安全窗口）。
-四個都不成立就立刻 `exit 0`，連 `git fetch` 之後的判斷都不做。同一個 `origin/main` 已經派過就不會重派，
-所以「等太久」在部署卡住時每 5 分鐘觸發一次也只會記一行「已經派過，跳過」。
+排程每 5 分鐘一輪（`StartInterval 300`／`OnUnitActiveSec=300s`），每輪都往下檢查；沒有新東西時只有一次 `git fetch`，不問 GitHub。
 
-「申請」的定義：`purpose=rebuild` 的核准申請（`agm approval request`／`POST /api/supervisor/approvals`），
-建立時間晚於上次真的上線（`daemon-update.built` 的 mtime）、狀態是 `pending` 或 `approved`、**還沒過期**；
-`denied` 不算，同一個 requester 對同一個 commit 重複申請算一筆，**這支腳本自己（`AM_AGENT_NAME`）的申請不算**
-（review2 2026-09-16：算進去的話自己申請、30 分鐘後自己觸發「等太久」，每 5 分鐘一輪、main 一動就再對協調者開一筆）。bot 在對話裡的口頭申請由 AGM 補一筆
-approval，所以 approval 表就是唯一真相。數不出來（端點壞了、格式不符）＝未知，**不當 0**（#336）：這輪照常往下檢查、記成失敗，連續 `AGM_FAIL_ALERT_AFTER` 輪推 `ops_alert check_failing`。
-網頁左上角 RAM 那一格旁邊的 chip 顯示同一個數字（`web/src/api/rebuildRequests.ts`）。
-
-環境變數：
+環境變數（都可選；unit／plist 的 `Environment` 只放 `PATH`，要有 `git`、`gh`、`bun`、`python3`、`nice`）：
 
 | 變數 | 預設 | 意義 |
 | --- | --- | --- |
 | `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | 總管 cwd（`bin/agm`、log、state 都在這） |
-| `AGM_REPO` | `~/project/agents-manager` | 要比對的 repo |
-| `AGM_BUILD_BOT` | （無） | 建置 child 的 bot id。**沒設就整支跳過**——寧可不做，也不要改派給使用者的 bot |
-| `AM_AGENT_NAME` | `daemon-update-kick` | 租約 owner |
-| `AGM_REBUILD_THRESHOLD` | `3` | 累積幾個重建申請就不等整點，立刻檢查 |
-| `AGM_REBUILD_MAX_WAIT_MIN` | `30` | 最早一筆重建申請等超過幾分鐘就不等整點（申請沒湊滿也一樣） |
-| `AM_MAINTENANCE_ESCALATE_MINS`（daemon 端） | `30` | 已核准的窗口等超過幾分鐘，daemon 就縮小封鎖面：思考中的 bot 不再擋，只擋送達臨界區／租約／讀不到畫面（SPEC §18.10）。設在 daemon 的環境，不是這支腳本 |
+| `AGM_REPO` | `~/project/agents-manager` | 正式 daemon 跑的那份（`daemon-swap.sh` 換它的 `target/release`）；也是專用 checkout 的 origin URL 來源 |
+| `AGM_DEPLOY_CHECKOUT` | `~/.cache/agents-manager/deploy-checkout` | 專用、乾淨的 checkout（第一次自動 `git clone`）。只有這支腳本動它，不碰主樹與別人的 worktree；`target/` 與 `node_modules` 留著讓建置增量 |
+| `AGM_GH_REPO` | `Eden-Sun/agents-manager` | 問 commit status 的 repo |
+| `AGM_CI_CONTEXT` | `ubuntu-ci` | 看哪一條 status |
+| `AGM_CI_LOOKBACK` | `30` | 沿 first-parent 往回最多看幾顆（`ubuntu-ci` 只跑最新 HEAD、會跳過中間的 sha） |
+| `AM_AGENT_NAME` | `daemon-update-kick` | 租約 owner／`ops_alert` 的 source |
+| `AGM_FAIL_ALERT_AFTER` | `6` | 連續幾輪「沒能完成」推 `ops_alert check_failing`（每輪 5 分鐘＝約 30 分鐘） |
 | `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者時，超過這麼久就當殘留回收 |
-| `AGM_LOCK_HUNG_SECS` | `3600` | 執行者還活著但卡了這麼久：推 `ops_alert` 喊人（不搶鎖） |
-| `AGM_TEST_MINUTE` | （無） | 只給隔離測試用：假裝現在是第幾分鐘 |
+| `AGM_LOCK_HUNG_SECS` | `7200` | 執行者還活著但卡了這麼久：推 `ops_alert runner_hung`（不搶鎖；冷建置要十幾分鐘，所以給寬） |
+| `AM_MAINTENANCE_ESCALATE_MINS`（daemon 端） | `30` | 只對 bot 申請的核准有意義（SPEC §18.10）；自動部署自開的單等待為 0，不會升級 |
 
-跟 2026-09-12 之前那份的差別：
+狀態檔（都在 `AGM_DIR`）：`daemon-update.built`（上次換上去的 short sha，`daemon-swap.sh` 寫）、`daemon-update.rejected`（換上去被回滾的完整 sha，之後不再挑）、
+`daemon-update.fails`（連續失敗輪數）、`daemon-update.lock`（防重疊）、`daemon-update.now.json`（立即部署請求）、`daemon-update.log`。
+`.built` 不在或指向不在 repo 的 sha 時，腳本推 `ops_alert built_unknown` 並停住——它需要知道線上是哪一版才敢往上換。
 
-1. 未結案判斷用 `agm assignments --open`，含 `awaiting_review`。回合跑完但沒人驗收時不會再疊一筆。
-2. 「會影響 binary 的路徑」跟 daemon 對齊（`agm build-inputs`），不再漏掉 `include_str!` 進來的
-   persona 與 `scripts/agm.py`。問不到端點時用保底清單。
-3. 空閒判斷改成 `lease safety`（等窗口）＋ `lease acquire`（在同一個鎖裡重驗並拿走窗口）。
-   依 SPEC §18.2，建置前排除建置 child 與 runtime.json 的 `manager_bot_id`；safety 與 acquire 都帶同一份兩顆 `--exclude-bot`；CLI 以 `?exclude=<id,id>` 傳給 safety API。新版回應會列出 `excluded_bot_ids`，腳本直接採用 daemon 判定；缺少該欄或名單不符就跳過，不自行過濾快照。其他 bot 仍受保護；runtime 缺少有效管理員 ID 就跳過並記錄原因。這個排除僅用於 rebuild，restart 另行核准。
-   拿著 `restart` 租約期間 supervisor assignment 派送會暫停；這不是所有 prompt 路徑的全域互斥鎖，正式替換前仍須由 AGM 重驗窗口。
-4. `daemon-update.approval.json` 保存同一完整 commit 與申請者的核准 ID，下一輪接續查核。pending、denied、revoked 不另建申請；過期、已被用掉（`consumed`，例如上一個窗口過期沒交還）或被取代時**同一輪**重新申請。查派工或核准失敗時停止，不當作無工作或已獲准。
-   `origin/main` 動了但 `build-inputs` 路徑沒變（docs-only）：沿用原核准，acquire 的 `--commit` 用核准那一顆，不為了建出一樣的東西再叫醒協調者。
-   真的動到要建的東西，而舊的**已核准、那顆 commit 還沒派過**（在等安全窗口）：照核准的那顆建，不開新申請；「已派過」（`daemon-update.last`）記核准的 commit，HEAD 多出來的留到下一輪另外申請（issue #439：main 約每 5 分鐘一個 push，以前已核准的那張每輪被取代，核准永遠派不出去）。
-   舊的還是 pending，或已經 denied／expired／consumed／superseded：新申請帶 `--supersedes <舊 id>`，daemon 把還能用的舊申請標 `superseded`、等待時間接過去（升級計時不因為 main 動了就歸零，SPEC §18.10），不能用的就不接；舊的 `bin/agm` 不認得這個旗標時照舊開新的一筆。pending 換成新 commit 是因為還沒人裁示，讓協調者審的就是現在要建的東西，不必核准後再為 HEAD 多裁示、多建一次。
-7. `lease_token` **不進派工正文，也不進 argv**：`mktemp` 建一個 `daemon-update.lease-token.XXXXXX`（權限 600，O_EXCL＋隨機名，不用可預測的固定路徑；上一輪的在拿到新窗口時清掉），自己交還與派工正文都用 `--lease-token-file <路徑>`，由 `agm` 自己去讀（issue #477）。正文會出現在 assignments API、建置 child 的對話紀錄與這份 log；argv 則是同一個 uid 的行程用 `ps` 就看得到，所以 `--lease-token "$(cat …)"` 這種寫法等於把前面的功夫做白工。檔寫不出來時退而用 `--lease-token -`（stdin）。兩處自己交還窗口的 rc **不吞**：失敗時 log 明寫「交還 rebuild 窗口失敗 … 窗口仍被握著」，不會上一行說要交還、下一行就當成還了。token 檔必須是單獨一行，多行直接拒絕（中間的換行會被當成 token 送出去，只換來一句 token 不符）。`--lease-token-file` 要求檔案權限不寬於 600，而且是 open 之後才 fstat、不跟隨 symlink。部署順序：`bin/agm` 要先換成認得這個旗標的版本，舊的 `bin/agm` 會以 rc 2 退掉。
-5. `daemon-update.lock` 防止腳本重疊執行，鎖裡寫 pid 與時間。執行者已經不在（強制關機、斷電、SIGKILL）就**自己回收**並接手這一輪；
-   還活著但卡超過 `AGM_LOCK_HUNG_SECS`（預設 3600 秒）不搶它的鎖，改推一則 `ops_alert` 給 AGM。核准狀態檔損毀、或核准 ID 查不到
-   （先用 `approval list --id` 查，清單只回最新 100 筆）一樣停住並推 `ops_alert`，不自動繞過——以前這些只寫 log 就 `exit 0`，
-   換版流程永久、靜默地停住（review3 c1 M1）。
-6. AGM 雙角色（SPEC §18.15）：idle 檢查另外排除協調者（`agm responder show` 有 `bot_id` 時）；runtime.json 有 `role` 才帶 `assign --review-by <role>`
-   （巡檢目錄＝`patrol`，更新結果回巡檢驗收）。舊部署兩者都沒有，行為照舊。
+同一顆 sha 建好後（`<checkout>/target/release/.built-for`）等安全窗口的那幾輪不會重建；`daemon-swap.sh` 結束碼 4（有人在忙）不算失敗，下一輪再試。
+其他結束碼：6（升過 schema、往前修）補寫 `.built` 並推 `swap_forward_fixed`；7（已回滾）推 `swap_rolled_back` 並記進 `.rejected`；8（換好但窗口沒交還）推 `swap_lease_not_released`；
+9（線上 daemon 太舊，沒有 restart-window 路由）推 `swap_daemon_too_old`。
+
+**首次上線／舊 daemon**：`daemon-swap.sh` 開窗口走 `POST /api/services/daemon-swap/restart-window`（`GET /api/capabilities` 有 `swap_restart_window`）。
+線上跑的 daemon 還沒有這條路由時，自動換版會以 9 中止——要先用別的方式（手動 build＋重啟，或舊流程）把含這條路由的 binary 換上去一次，之後才走得起來。
 
 ### 立即部署（使用者 2026-09-25，SPEC §18.2）
 
-網頁左上角按「立即部署」時，daemon（`POST /api/deploy/now`）以使用者的名義核准一筆 rebuild（requester＝`daemon-update-kick`），
-寫 `daemon-update.now.json`（`{approval_id,sha,live_sha,requested_at,requested_by}`），再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`
+網頁左上角按「立即部署」時，daemon（`POST /api/deploy/now`）驗過目標後寫 `daemon-update.now.json`（`{sha,live_sha,requested_at,requested_by}`；**不開核准單**），再 `launchctl kickstart gui/<uid>/com.agm.daemon-update`
 （Linux：`systemctl --user start --no-block com.agm.daemon-update.service`——`--no-block` 是因為 oneshot 的 start 會等 kick 整輪跑完；
-daemon 沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`，issue #677）。
-kick 讀到這個檔就走立即模式：
+daemon 沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`，issue #677）。kick 讀到這個檔：
 
-- **略過**：觸發條件、`daemon-update.last`（同一顆已派過）、申請／等 AGM 裁示 rebuild。
-- **核對那筆核准**：`approval list --id`，要 `purpose=rebuild`、`requester` 是自己的 `OWNER`、`target_commit` 等於請求的 sha、`approved` 沒過期。查不到＝這輪不知道（留著請求）；不能用＝`ops_alert now_approval_unusable` 並收掉請求。
-- **建確認框上那顆**：sha 要是 origin/main 的祖先（否則 `ops_alert now_target_invalid`）；`.built` 到它之間沒有程式碼差異就收掉請求（已經是最新）。
-- **照舊**：建置 child 要在、上一筆更新要結案、`lease safety`／`acquire`（等不到窗口就留著請求，下一輪再試）、token 檔、派工正文的固定條件。
-- **restart**：拿到 rebuild 窗口後以 `AGM_BUILD_BOT` 申請 restart（`--request-id deploy-now-restart-<rebuild 核准>`），daemon 在建立當下核准（kick 不打 decide，#447），回應是 `approved` 才叫 child 直接用它；開不出來就寫明「照 3c 自己申請」。
-- **派工**：request id `agm-daemon-update-<sha>-now-<核准>`，成功才刪請求檔；`daemon-update.approval.json` 改指那一筆。請求檔壞掉 → `ops_alert now_request_corrupt`、刪掉，這輪回到例行判斷。
+- **部署那顆 sha，不等 `ubuntu-ci`**（使用者按下就是明確要求）；其餘（建置、`daemon-swap.sh` 的安全條件）與例行相同。
+- sha 要是 origin/main 的祖先（否則 `ops_alert now_target_invalid`）、線上版本要是它的祖先（否則 `now_target_older`，拒絕降版）；`.built` 到它之間沒有程式碼差異就收掉請求（已經是最新）。
+- 做完（含往前修、回滾）才刪請求檔；`daemon-swap.sh` 回 4（有人在忙）就留著，下一輪再試。請求檔壞掉 → `ops_alert now_request_corrupt`、刪掉。
 
-daemon 的 `kick_ready` 以「裝好的 kick 裡有沒有 `daemon-update.now.json` 這個字」判斷，所以**要先 install 這一版 kick，按鈕才按得下去**（舊 kick 不會讀請求檔，按了只會永遠停在「部署中」）。
+daemon 的 `kick_ready` 以「裝好的 kick 裡有沒有 `daemon-update.now.json` 這個字」判斷，所以**要先 install 這一版 kick，按鈕才按得下去**。
 
 ### 隔離測試
 
@@ -176,8 +154,8 @@ daemon 的 `kick_ready` 以「裝好的 kick 裡有沒有 `daemon-update.now.jso
 AM_DATA_DIR=/tmp/am-ops-test ./target/release/agents-managerd serve --port 7799 &
 mkdir -p /tmp/am-ops-test/supervisor/AGM/bin
 # 把 bin/agm 指到測試 daemon（runtime.json 的 daemon_url 寫 127.0.0.1:7799）
-AGM_DIR=/tmp/am-ops-test/supervisor/AGM AGM_REPO=$PWD AGM_BUILD_BOT=<測試 bot> \
-  bash scripts/ops/daemon-update-kick.sh
+AGM_DIR=/tmp/am-ops-test/supervisor/AGM AGM_REPO=$PWD AGM_DEPLOY_CHECKOUT=/tmp/am-ops-test/checkout \
+  AGM_SWAP_SCRIPT=/bin/true bash scripts/ops/daemon-update-kick.sh
 cat /tmp/am-ops-test/supervisor/AGM/daemon-update.log
 ```
 
@@ -232,19 +210,14 @@ cat /tmp/am-ops-test/supervisor/AGM/daemon-update.log
 
 ```sh
 install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
-install -m 644 scripts/ops/daemon-update-task.md ~/.config/agents-manager/supervisor/AGM/
 ```
 
-任務內容在 `daemon-update-task.md`（kick 會把它當成派工正文的開頭，末尾再補這一輪的 sha／核准／租約）。
-這份是**來源檔**：改規則改這裡再 install，不要只改 AGM 目錄裡那份，否則下次有人從 repo 安裝就把規則改回去了。
-
-launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 300`），由腳本自己判斷
-「整點、集滿門檻，或等太久」；`AGM_BUILD_BOT`（必要）與 `AGM_REBUILD_THRESHOLD`／`AGM_REBUILD_MAX_WAIT_MIN`（可選）放 `EnvironmentVariables`。
+`daemon-swap.sh` 與 `daemon-start.py` 不裝：kick 從專用 checkout（要換上的那顆 sha）跑它們。
 
 ## daemon-swap.sh（＋ daemon-start.py）
 
-建置 child 換 binary 用的那一段：拿 restart 窗口 → 備份 DB → 換 binary → 重啟 → 驗證 → 寫 `.built`。
-以前每趟由 child 在 scratchpad 臨時寫一份，2026-09-20 就因為把 `user_version` 寫死成 10（那批升到 11）
+自動部署換 binary 用的那一段：拿 restart 窗口 → 備份 DB → 換 binary → 重啟 → 驗證 → 寫 `.built`。
+以前每趟由建置 child 在 scratchpad 臨時寫一份，2026-09-20 就因為把 `user_version` 寫死成 10（那批升到 11）
 誤判成失敗、回滾、舊 binary 被版本閘擋下，daemon 停了 33 秒。所以它進了版控，行為由
 `daemon-swap_test.sh` 釘住：
 
@@ -258,6 +231,7 @@ launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 3
   跑同一支 `daemon-start.py`：transient unit 對應 `launchctl submit`，不必另外裝 unit 檔。`Type=forking` 讓 systemd 把 fork 出來的
   daemon 認成 main PID；`KillMode=process` 是因為 systemd 收 unit 時看 cgroup，setsid 脫離不了，預設會連 daemon 起的子行程一起殺。
   平台看 `uname -s`（測試用 `AGM_OPS_PLATFORM` 蓋掉），沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`。
+- 3b 自測 prompt 送給固定的自測對象（`SWAP_PROBE_BOT`，預設 AGM 的 browser-gc child）；對方**沒有在跑**（`no active run`，例如 Linux 主機沒有桌面所以它 offline）就略過並在 log 寫明，不卡住自動部署；其他非 200 仍中止。
 - 換 binary 前必須讀到非空的 `agm state` bot 名單；命令失敗或名單空白會 exit 3 並交還 restart lease。
 - 重啟後比對 bot 名單（看 id）：少了就回滾，**只有**換版窗口內刻意刪掉的不算——deleted_at 在窗口起點之後、
   而且有刪除 API 留下的 `delete_bot`／`delete_project` intent（subject 是它、它的專案，或 payload 快照裡有它），DB 唯讀查。
@@ -269,10 +243,13 @@ launchd：`com.agm.daemon-update` 改成每 5 分鐘跑一次（`StartInterval 3
 
 ```sh
 scripts/ops/daemon-swap.sh --sha <完整 sha> --old <short sha> --old-hash <sha256 前 16 碼> \
-    --approval <restart 核准 id> --owner <自己的 bot id> --checkout <乾淨 worktree>
+    --owner <窗口持有者名稱> --checkout <乾淨 checkout>
 ```
 
-離開碼：0 成功、2 參數錯、3 前置核對失敗、4 沒窗口／複查不安全、5 備份有問題、6 往前修後停在新 binary、7 已回滾、8 換版成功但 restart 窗口沒交還成功（issue #477）。**窗口不會自己消失**：它要撐到租約的 `expires_at`——預設 900 秒（`maintenance::DEFAULT_TTL_SECS`，上限 3600，且不會晚於那張核准的到期時間），這段時間內 supervisor 的 assignment 派送是停的、也沒有人拿得到 restart 窗口。看到 8 就是要有人處理：等 TTL 到期，或請 AGM 用 `lease release restart --force` 附理由接管，不要當成換版順利結束。
+**不需要核准單**（使用者 2026-09-29）：窗口由 daemon 的 `POST /api/services/daemon-swap/restart-window` 開（daemon-swap 服務身分自己開一筆立即核准的 restart 單，再走同一個 acquire——
+沒人 working／送達中、沒有別人的租約才拿得到，拿到時暫停 assignment 派送）。沒有自己的 pane（排程跑）時，3b 改用 `herdr pane list` 確認 socket 通、協定對得上。
+
+離開碼：0 成功、2 參數錯、3 前置核對失敗、4 沒窗口／複查不安全、5 備份有問題、6 往前修後停在新 binary、7 已回滾、8 換版成功但 restart 窗口沒交還成功（issue #477）、9 daemon 太舊（沒有 service principal 或 restart-window 路由）。**窗口不會自己消失**：它要撐到租約的 `expires_at`——預設 900 秒（`maintenance::DEFAULT_TTL_SECS`，上限 3600，且不會晚於那張核准的到期時間；自開的單有效期＝ttl＋5 分鐘），這段時間內 supervisor 的 assignment 派送是停的、也沒有人拿得到 restart 窗口。看到 8 就是要有人處理：等 TTL 到期，或請 AGM 用 `lease release restart --force` 附理由接管，不要當成換版順利結束。
 
 `lease_token` **不進 argv**（issue #477）：拿到窗口之後 `mktemp` 在 AGM 私有目錄底下建一個 0600 的檔（不可預測路徑、不落在全域可寫的 /tmp），`agm lease release` 走 `--lease-token-file` 讀，腳本結束時（不管成敗）刪掉。argv 對同一個 uid 的行程是公開的（`ps`），而那顆 token 是「只出現一次、任何 API 都查不到」的一次性憑證，抄走就能收掉別人正在換 binary 的窗口。交還的 rc 也不再被 `>/dev/null 2>&1` 吞掉——以前失敗時 log 照樣寫「窗口已交還」，而窗口其實握到 TTL。
 
