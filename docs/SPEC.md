@@ -2493,11 +2493,16 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
 - codex（0.157.1 真機，fixture `codex-0.157-background-*.txt`）：`N background terminal(s) running`，閒著時是輸入框上方
   `1 background terminal running · /ps to view · /stop to close`，回合中併在 `• Working (…) · 2 background terminals running · …`。`/stop` 後整行消失。
 - 只看畫面最底下 8 個非空行，對話內容裡引用到的同一句不算。
+- **常駐服務不算**（2026-09-29 使用者：wits-ops 起了 dev server，回合早結束卻一直標「背景執行中」）：claude 數到 N > 0 時，
+  到那台主機看 pane 的行程樹（本機 `ps`＋`linux_proc::listen_fpn`；遠端一趟 ssh：`ps -Awwo pid=,ppid=,args=` 與
+  `lsof -nP -iTCP -sTCP:LISTEN -Fp`）。從 pane shell 往下找 claude 的工具 shell（命令列含 `/.claude/shell-snapshots/snapshot-`，
+  取最外層），子樹裡有程序在 listen TCP 的就是 bot 起的服務，從 N 扣掉。任何一塊讀不到（herdr 沒回 shell pid、ssh 失敗、
+  沒有 lsof 的遠端）都不扣：寧可多標，也不要把真的在跑的工作藏起來。codex 的背景終端照舊全算。
 - 數字記在記憶體、以 run 為鍵（`background_jobs.rs`）：屬於這個 process，新 run 自然歸零；run 結束那一輪就丟掉；daemon 重啟後
   等下一輪巡邏補上。數字變了才推 `bot_status`。背景跑完到畫面更新之間最多晚一輪（30 秒）。
 - 投影：`run.background_jobs`（`GET /api/state` 與 `bot_status` 的 run 物件）。**不改排隊／送 prompt 的語意**——agent 本身確實 idle。
 - 網頁只在 run `running` 且 `agent_status = idle` 時標（回合中燈號已經說了）：側欄那格「閒置」換成「背景 N」、標題列 chip
-  「背景執行中（N）」、輸入框上方一條說明（claude 說 shell、codex 說終端）。
+  「背景執行中（N）」（只在桌機）、輸入框上方一條說明（claude 說 shell、codex 說終端）。
 
 ## 7. API
 
