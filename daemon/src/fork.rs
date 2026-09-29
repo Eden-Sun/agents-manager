@@ -432,6 +432,7 @@ mod tests {
         assert_eq!(first["name"], "bravo-2nd");
         let args = started_args(&e).pop().unwrap();
         assert_eq!(&args[..2], ["fork", "sid-bravo"], "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "forked Codex turn tips must stay off: {args:?}");
 
         let again = fork(&e, &src, Some("bravo-2nd")).await.unwrap();
         assert_eq!(again["name"], "bravo-2nd-1", "撞名自動往後加");

@@ -8,9 +8,11 @@ async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String>
     crate::tools::identity_for_host(app, host, idn).await.map(|i| i.args).unwrap_or_default()
 }
 
+/// `-c tui.show_tooltips=false`：codex 0.158 起回合超過 30 秒、以及第三回合起的回合結束後會插一行隨機 tip
+/// （openai/codex#48352），畫面備援擷取可能把它當成回覆結尾（issue #728）。不依賴使用者的 config.toml，固定關掉。
 fn codex_pane_guard_args(kind: &str) -> Vec<String> {
     if kind == "codex" {
-        vec!["--no-daemon".into(), "--no-alt-screen".into()]
+        vec!["--no-daemon".into(), "--no-alt-screen".into(), "-c".into(), "tui.show_tooltips=false".into()]
     } else {
         Vec::new()
     }
@@ -1592,6 +1594,24 @@ mod resume_args_tests {
         assert!(args.contains(&"--no-daemon".into()), "Codex must not reuse a shared app server: {args:?}");
         assert!(args.contains(&"--no-alt-screen".into()), "Codex must keep its screen readable: {args:?}");
         assert!(args.contains(&"--yolo".into()), "existing auto-approve args must be preserved: {args:?}");
+        assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "Codex turn tips must stay off: {args:?}");
+        stop_bot(&e.app, &bot.id).await.unwrap();
+
+        // resume：子命令排最前面，guard 參數一樣要帶。
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at)
+             VALUES (?,?,'stopped','idle','codex-previous','2026-09-07T00:00:00Z','2026-09-07T00:01:00Z')",
+        )
+        .bind(db::ulid())
+        .bind(&bot.id)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+        let args = started_args(&e).pop().unwrap();
+        assert_eq!(&args[..2], ["resume", "codex-previous"], "{args:?}");
+        assert!(args.contains(&"--no-daemon".into()), "resumed Codex must not reuse a shared app server: {args:?}");
+        assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "resumed Codex turn tips must stay off: {args:?}");
     }
 
     /// `resume_native` 沒要求一定要接（`resume_required=false`）、接不回時照舊退回開新對話——但這件
@@ -2405,6 +2425,7 @@ mod child_restart_tests {
             .collect::<Vec<_>>();
         assert!(args.contains(&"--no-daemon"), "Codex must not reuse a shared app server: {args:?}");
         assert!(args.contains(&"--no-alt-screen"), "Codex must keep its screen readable: {args:?}");
+        assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "Codex turn tips must stay off: {args:?}");
     }
 }
 
