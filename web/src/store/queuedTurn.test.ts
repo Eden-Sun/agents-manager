@@ -91,6 +91,23 @@ test('queue_slot_taken leaves the attempted text in the draft and shows the one-
   assert.ok(useStore.getState().notices.some((notice) => notice.text.includes('已有一則訊息排隊中') && notice.text.includes('1 個附件')))
 })
 
+test('queue_slot_taken keeps the untrimmed composer draft without duplicating its trimmed body', async () => {
+  seed()
+  const originalDraft = '  第二則文字  '
+  useStore.setState({ drafts: { 'bot:b1': originalDraft } })
+  routeDaemon((req) =>
+    req.path.endsWith('/prompt')
+      ? json({ error: 'conflict', reason: 'queue_slot_taken', turn_id: 'existing' }, 409)
+      : req.path.endsWith('/state')
+        ? json({ error: 'intentional state-read failure' }, 502)
+        : json({}),
+  )
+
+  const ok = await useStore.getState().sendPrompt('b1', originalDraft.trim(), [], false, false, undefined, true)
+  assert.equal(ok, false)
+  assert.equal(useStore.getState().drafts['bot:b1'], originalDraft)
+})
+
 test('withdrawing an awaits_idle turn restores the server-returned text before the current draft', async () => {
   seed()
   const message = {

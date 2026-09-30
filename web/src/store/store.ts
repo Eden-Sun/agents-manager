@@ -3216,7 +3216,9 @@ function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
 }
 
 function draftWithText(text: string, current: string): string {
-  return current === text || (text && current.startsWith(`${text}\n`)) ? current : prependDraft(text, current)
+  return current === text || (text && (current.startsWith(`${text}\n`) || current.trim() === text.trim()))
+    ? current
+    : prependDraft(text, current)
 }
 
 /** Patch connection state onto the known hosts without losing their config fields. */
