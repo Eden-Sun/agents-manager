@@ -135,6 +135,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   cat > "$ROOT/bin/agm" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/calls.log"
+echo "identity service=${AM_SERVICE_ID:-} bot=${AM_BOT_ID:-}" >> "$AGM_DIR/identity.log"
 sub=""; op=""
 for a in "$@"; do
   case "$a" in --*) continue ;; esac
@@ -144,6 +145,7 @@ case "$sub:$op" in
   lease:safety)  n=$(grep -cE "lease (safety|acquire restart)" "$AGM_DIR/calls.log"); fl=""
                  [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -ge "$n" ] && fl='{"bot_id":"bot-probe","turn_id":"t-1"}'
                  printf '{"safe":%s,"working":[],"delivering":[],"in_flight":[%s]}' "$STUB_SAFE" "$fl" ;;
+  lease:acquire) printf '{"lease":{"held":true,"fence":9},"lease_token":"tok-legacy"}' ;;
   lease:status)  printf '{"leases":[{"resource":"restart","held":%s}]}' "$STUB_RESTART_HELD" ;;
   lease:release)
       # token 是怎麼進來的：記下檔案路徑、權限與讀到的內容，測試才驗得到「agm 真的讀到了
@@ -251,7 +253,7 @@ STUB
 
   cat > "$ROOT/bin/pgrep" <<'STUB'
 #!/bin/bash
-echo 99999
+echo "${STUB_PID:-99999}"
 STUB
 
   cat > "$ROOT/bin/probe" <<'STUB'
@@ -289,12 +291,17 @@ teardown() { rm -rf "$ROOT"; }
 seed_audit() { "$REAL_SQLITE" "$ROOT/audit.sqlite3" "$1"; }   # 換版後腳本唯讀查的那份 DB（bots／intents）
 
 run() {
+  local approval="${1:-}"
   # These tests assert decisions, not wall-clock waits; keep recovery cases quick without changing
   # the separate daemon-start process test below.
   (
     sleep() { :; }
     export -f sleep
-    bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
+    if [ -n "$approval" ]; then
+      bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval "$approval" --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
+    else
+      bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
+    fi
   )
   echo $?
 }
@@ -573,7 +580,7 @@ teardown
 check "agm 維運請求用 daemon-swap service principal" "AM_SERVICE_ID=daemon-swap" "$SCRIPT"
 check "自測送到固定 service route" "/api/services/daemon-swap/probe/" "$SCRIPT"
 check_no "自測不再自行宣告 relay_from" "relay_from" "$SCRIPT"
-check_no "自測不再先取 shared UI token" 'json.load(urllib.request.urlopen(base + "/api/session"))' "$SCRIPT"
+check "舊 daemon bootstrap 自測使用 User session token" 'with urllib.request.urlopen(base + "/api/session")' "$SCRIPT"
 
 # 16b. If the service credential disappeared, do not silently turn a newer daemon client back into User.
 setup 10 10
@@ -584,14 +591,63 @@ check_no "能力不明時不取得維運租約" "lease acquire restart" "$AGM_DI
 check_no "能力不明時不替換 binary" "submit" "$AGM_DIR/launchctl.log"
 teardown
 
-# 16c. 不需要核准單（使用者 2026-09-29）：窗口走 restart-window，acquire 不帶 approval，也不接受 --approval。
+# 16c. 新 daemon 走 restart-window，不帶 approval；舊 task 多傳的 --approval 要相容忽略。
 setup 10 10
 rc=$(run)
 check_eq "沒有核准單也能換版（rc=0）" "0" "$rc"
 check "窗口帶的是 owner 與 commit" "lease acquire restart --owner bot-me --commit $SHA" "$AGM_DIR/calls.log"
 check_no "safety 查詢不帶 --approval" "lease safety.*--approval" "$AGM_DIR/calls.log"
-rc=$(bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval ap-1 --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1; echo $?)
-check_eq "已經沒有 --approval 參數（rc=2）" "2" "$rc"
+teardown
+
+setup 10 10
+rc=$(run ap-1)
+check_eq "新 daemon 接受舊 task 傳入的 --approval（rc=0）" "0" "$rc"
+check_no "restart-window 模式忽略舊 approval" "lease acquire restart.*--approval" "$AGM_DIR/calls.log"
+teardown
+
+# 16e. 沒有 restart-window 的舊 daemon 只在明確給 approval 時走舊 User lease acquire。
+setup 10 10
+export STUB_CAP=service_old
+rc=$(run ap-1)
+check_eq "舊 daemon 用 approval bootstrap 完成 swap（rc=0）" "0" "$rc"
+check "舊路徑以 approval 取得 restart lease" "lease acquire restart --owner bot-me --approval ap-1 --commit $SHA --ttl 900 --exclude-bot bot-me" "$AGM_DIR/calls.log"
+check "舊路徑 safety 綁定同一 approval" "lease safety --approval ap-1 --owner bot-me --exclude-bot bot-me" "$AGM_DIR/calls.log"
+check "舊路徑清掉 service/bot 身分，使用本機 User token" "identity service= bot=" "$AGM_DIR/identity.log"
+teardown
+
+setup 10 10
+export STUB_CAP=bootstrap
+rm -rf "$AM_DATA/service-tokens"
+rc=$(run ap-1)
+check_eq "不支援 service principal 的舊 daemon 可用核准 bootstrap（rc=0）" "0" "$rc"
+check "bootstrap 使用舊式核准 acquire" "lease acquire restart --owner bot-me --approval ap-1" "$AGM_DIR/calls.log"
+teardown
+
+setup 10 10
+export STUB_CAP=service_old
+rm -rf "$AM_DATA/service-tokens"
+rc=$(run ap-1)
+check_eq "daemon 宣告 service principal 卻缺 token 時不降級（rc=4）" "4" "$rc"
+check_no "缺 service token 時不取得 User 租約" "lease acquire restart" "$AGM_DIR/calls.log"
+teardown
+
+# 16g. 找不到與 swap script 同版的 daemon-start.py 時，必須在停舊 daemon 前中止。
+setup 10 10
+ORIGINAL_SCRIPT="$SCRIPT"
+mkdir -p "$ROOT/without-starter"
+cp "$SCRIPT" "$ROOT/without-starter/daemon-swap.sh"
+SCRIPT="$ROOT/without-starter/daemon-swap.sh"
+sleep 60 &
+OLD_PID=$!
+export STUB_PID="$OLD_PID"
+rc=$(run)
+if kill -0 "$OLD_PID" 2>/dev/null; then old_alive=yes; else old_alive=no; fi
+kill "$OLD_PID" 2>/dev/null || true
+wait "$OLD_PID" 2>/dev/null || true
+SCRIPT="$ORIGINAL_SCRIPT"
+check_eq "缺 daemon-start.py 時 swap rc=3" "3" "$rc"
+check_eq "缺啟動器時舊 daemon 未被停止" "yes" "$old_alive"
+check_no "缺啟動器時沒有送出重新啟動" "submit" "$AGM_DIR/launchctl.log"
 teardown
 
 # 16f. 自測對象沒有在跑（no active run，例如 Linux 上 offline 的 browser-gc child）：略過自測、照樣換版，不卡死每趟自動部署。
@@ -620,12 +676,11 @@ check_eq "herdr 不通就中止（rc=3）" "3" "$rc"
 check_no "沒有動 binary" "submit" "$AGM_DIR/launchctl.log"
 teardown
 
-# 16e. 線上 daemon 太舊（沒有 restart-window 路由）：rc=9，什麼都不動。
+# 16h. 舊 daemon 沒有 restart-window 且呼叫端也沒給 approval：要求明確 bootstrap，不拿 User 權限猜。
 setup 10 10
 export STUB_CAP=service_old
 rc=$(run)
-check_eq "daemon 太舊時 rc=9" "9" "$rc"
-check "log 講清楚要先手動換一次" "線上 daemon 太舊" "$SWAP_LOG"
+check_eq "缺 approval 的舊 daemon 安全中止（rc=9）" "9" "$rc"
 check_no "沒有動 binary" "submit" "$AGM_DIR/launchctl.log"
 check_no "沒有要窗口" "lease acquire restart" "$AGM_DIR/calls.log"
 teardown

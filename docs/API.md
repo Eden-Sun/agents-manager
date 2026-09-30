@@ -55,7 +55,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 | `daemon-swap` | `GET /api/supervisor`, `/api/supervisor/health`, `/api/supervisor/state`, `/api/supervisor/leases`, `/api/supervisor/maintenance/safety`; `POST /api/supervisor/leases/restart/{renew,release}`, `/api/services/daemon-swap/restart-window`, `/api/services/daemon-swap/probe/{bot_id}` |
 | `herdr-upgrade` | `GET /api/capabilities`, `/api/supervisor/state`, `/api/panes`, `/api/supervisor/health`; `POST /api/services/herdr-upgrade/notify`, `/api/services/herdr-upgrade/resume/{bot_id}` |
 
-兩個 service 都讀不到 `/api/state`（帶 bot 的 `env`／`args`，可能有秘密），要狀態讀去敏的 `/api/supervisor/state`。`daemon-swap/probe/{bot_id}` 對指定的 bot 送一句寫死的自測文字（`daemon-swap.sh` 的 `SWAP_PROBE_BOT`），來源固定 daemon，不能改文字或帶附件；`herdr-upgrade/notify` 只送給設定的 responder 並以 daemon 作來源；`resume/{bot_id}` 固定要求 native resume，不能傳 session 或其他 start 選項。daemon-swap 第一次升級舊版 daemon 時，舊 daemon 尚不認 service token，該次維持 User bootstrap；新版首次啟動後建立 service token，後續操作改用 service principal。回滾到舊版時腳本清掉新版 service token，避免拿舊 daemon 重試時降級不明。
+兩個 service 都讀不到 `/api/state`（帶 bot 的 `env`／`args`，可能有秘密），要狀態讀去敏的 `/api/supervisor/state`。`daemon-swap/probe/{bot_id}` 對指定的 bot 送一句寫死的自測文字（`daemon-swap.sh` 的 `SWAP_PROBE_BOT`），來源固定 daemon，不能改文字或帶附件；`herdr-upgrade/notify` 只送給設定的 responder 並以 daemon 作來源；`resume/{bot_id}` 固定要求 native resume，不能傳 session 或其他 start 選項。daemon-swap 第一次升級舊版 daemon 時，已核准的舊部署可明確傳 `--approval <id>`，在沒有 `swap_restart_window` 的舊 daemon 上維持 User bootstrap，走舊式核准租約；沒有帶核准 id 的自動 kick 仍停止並要求先處理 bootstrap。`service_principals` 已存在但 service token 缺失時仍 fail closed；新版路由存在時接受這個相容參數但忽略，改走 service principal；新版首次啟動後建立 service token，後續操作都使用它。回滾到舊版時腳本清掉新版 service token，避免拿舊 daemon 重試時降級不明。
 
 `service-tokens/daemon-swap.token` 與 `service-tokens/herdr-upgrade.token` 在 daemon 資料目錄建立，目錄 `0700`、檔案 `0600`；重啟不改 token。維運腳本只能讀自己的 token 檔，header 值不可放進 argv 或 log。`/api/capabilities` 含 `service_principals` 時，client 缺少 service token 應停止並修復檔案，不得再退回 User bootstrap。
 
@@ -1299,7 +1299,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 - 只要 transaction 已提交，即使立即重啟失敗，回應也包含 `credential_rotated:true`；intent 保留並重試，開機 recovery 會替仍 active 的舊 run 冪等續做。若舊 run 已停止或退出，直接收尾 intent，不改標 run、不建立新 run。
 
 ### 10.3c `GET /api/capabilities`
-`200 {"capabilities":["resume_native_start","herdr_maintenance","service_principals","swap_restart_window"]}`。會停 herdr server 的腳本先確認這裡有 `resume_native_start` 才動手；`service_principals` 表示 launchd service token 已支援，缺少 service token 檔時不得退回 User；`swap_restart_window` 表示有 `POST /api/services/daemon-swap/restart-window`（自動換版開窗口不需要核准單）。
+`200 {"capabilities":["resume_native_start","herdr_maintenance","service_principals","swap_restart_window"]}`。會停 herdr server 的腳本先確認這裡有 `resume_native_start` 才動手；`service_principals` 表示 launchd service token 已支援，缺少 service token 檔時不得退回 User；`swap_restart_window` 表示有 `POST /api/services/daemon-swap/restart-window`（自動換版開窗口不需要核准單）。daemon-swap 沒有 `swap_restart_window` 時只有明確提供舊流程 `--approval <id>` 才能用 User token 取核准租約；若同時宣告 `service_principals`，service token 檔也必須存在，否則仍 fail closed。沒有核准 id 時以 9 停止。新路由存在時舊呼叫帶來的 `--approval` 會被忽略。
 
 ### 10.3d herdr 維護狀態 `/api/supervisor/herdr-maintenance`（SPEC §6.5.2）
 - `GET` → `{"active":bool,"window":{"opened_at","until","opened_by","reason"}|null,"max_minutes":30}`；過了 `until` 的窗口在讀取當下自動結束。
@@ -1983,7 +1983,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 ### 換版窗口 `POST /api/services/daemon-swap/restart-window`（SPEC §18.2、§18.10，2026-09-29）
 - 只給 `daemon-swap` 服務身分（`X-AM-Service-Id: daemon-swap` ＋ `X-AM-Service-Token`；token 檔 `service-tokens/daemon-swap.token`，範圍見 `service_auth::allows`）。其他身分（使用者、bot、`herdr-upgrade`）一律 403。
-  `GET /api/capabilities` 有 `swap_restart_window` 才有這條路由；`daemon-swap.sh` 沒看到它就以結束碼 9 中止（舊 daemon 要先手動換過一次）。
+  `GET /api/capabilities` 有 `swap_restart_window` 才有這條路由；`daemon-swap.sh` 對舊 daemon 僅在呼叫端明確提供 `--approval <id>` 時退回舊式 User 核准租約，否則以結束碼 9 中止。該相容參數在新路由存在時忽略。
 - body `{owner, commit, ttl_secs?}`（`deny_unknown_fields`；不接受 `exclude_bot_ids`：沒有「申請者自己那顆 bot」可排除）。daemon 開一筆 `purpose=restart`、`requester=owner`、`target_commit=commit` 的核准並**當場以 `service(daemon-swap)` 核准**
   （有效期 `ttl_secs`＋5 分鐘，不推 `approval_requested`），再走與 `POST /api/supervisor/leases/restart/acquire` **同一個** `maintenance::acquire`（`require_idle`）：
   沒有 bot 在 `working`／`in_flight`、送達臨界區沒有 prompt、沒有別人握租約才拿得到，拿到時 assignment 派送暫停。

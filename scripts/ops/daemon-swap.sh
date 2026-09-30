@@ -6,7 +6,7 @@
 # 擋下、daemon 起不來。腳本有版本控制與測試才擋得住這種事。
 #
 #   scripts/ops/daemon-swap.sh --sha <full sha> --old <short sha> --old-hash <sha256 前 16 碼> \
-#       --owner <窗口持有者名稱> --checkout <乾淨 checkout>
+#       --owner <窗口持有者名稱> --checkout <乾淨 checkout> [--approval <舊流程核准 id>]
 #
 # 前提（呼叫端負責）：checkout 已經建好 release binary，而且那顆 commit 已經過 ubuntu-ci（或使用者按了立即部署）。
 # 不需要核准單（使用者 2026-09-29）：窗口由 daemon 的 `POST /api/services/daemon-swap/restart-window` 開——
@@ -45,12 +45,13 @@ WINDOW_WAIT="${SWAP_WINDOW_WAIT_SECS:-15}"
 SETTLE_TRIES="${SWAP_PROBE_SETTLE_TRIES:-12}"      # 自測回合收尾最多等幾次（12 × 5 秒＝1 分鐘）
 SETTLE_WAIT="${SWAP_PROBE_SETTLE_WAIT_SECS:-5}"
 
-SHA=""; OLD=""; OLDHASH=""; OWNER=""; CHECKOUT=""
+SHA=""; OLD=""; OLDHASH=""; APPROVAL=""; OWNER=""; CHECKOUT=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --sha) SHA="$2"; shift 2 ;;
         --old) OLD="$2"; shift 2 ;;
         --old-hash) OLDHASH="$2"; shift 2 ;;
+        --approval) APPROVAL="$2"; shift 2 ;;
         --owner) OWNER="$2"; shift 2 ;;
         --checkout) CHECKOUT="$2"; shift 2 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -63,6 +64,12 @@ done
 
 LOG="${SWAP_LOG:-$AGM_DIR/daemon-swap.log}"
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+START_PY="$SCRIPT_DIR/daemon-start.py"
+if [ ! -f "$START_PY" ] || [ ! -r "$START_PY" ]; then
+    log "ABORT: 找不到可讀的 daemon-start.py（${START_PY}），不停止目前 daemon"
+    exit 3
+fi
 prune_old_db_backups() {
     local backup
     for backup in "$DB".bak-*; do
@@ -99,9 +106,8 @@ except Exception:
     print("unknown")
 PY
 }
-# 換版只認 daemon-swap 服務身分（一顆 owner-only 的 token 檔，範圍固定）；不再有「用 User token 過渡一次」的退路：
-# 那條路要拿核准單，而例行部署已經不開核准單了。daemon 沒有 service principal 或還沒有 restart-window 路由
-# （舊 binary）就是 9：要先手動換過一次新 binary，之後才走得了自動換版。
+# 新 daemon 只認 daemon-swap service principal。尚未提供 restart-window 的舊 daemon，僅接受明確帶來的舊核准 id，
+# 並用本機 User token 走原本的 lease acquire；一般自動部署不帶核准，仍安全中止，需按文件先做一次核准 bootstrap。
 if [ -L "$SERVICE_TOKEN_DIR" ] || { [ -e "$SERVICE_TOKEN_DIR" ] && [ ! -d "$SERVICE_TOKEN_DIR" ]; } \
     || [ -L "$SERVICE_TOKEN_FILE" ] || { [ -e "$SERVICE_TOKEN_FILE" ] && [ ! -f "$SERVICE_TOKEN_FILE" ]; }; then
     log "ABORT: daemon-swap service credential 不是一般檔案"
@@ -112,10 +118,25 @@ case "$CAP" in
     service)
         [ -f "$SERVICE_TOKEN_FILE" ] || { log "ABORT: daemon supports service principals but daemon-swap token file is missing"; exit 4; }
         SERVICE_MODE=service
+        WINDOW_MODE=service
         log "maintenance API identity: daemon-swap service principal" ;;
-    service_old|bootstrap)
-        log "ABORT: 線上 daemon 太舊（沒有 service principal 或 restart-window 路由）：要先手動換過一次含這條路由的 binary，之後才能自動換版"
-        exit 9 ;;
+    service_old)
+        [ -f "$SERVICE_TOKEN_FILE" ] || { log "ABORT: daemon supports service principals but daemon-swap token file is missing"; exit 4; }
+        [ -n "$APPROVAL" ] || {
+            log "ABORT: 線上 daemon 沒有 restart-window 路由；舊式換版需要明確的 --approval（rc=9）"
+            exit 9
+        }
+        SERVICE_MODE=user
+        WINDOW_MODE=legacy
+        log "maintenance API identity: 核准的舊 daemon bootstrap（User token）" ;;
+    bootstrap)
+        [ -n "$APPROVAL" ] || {
+            log "ABORT: 線上 daemon 沒有 restart-window 路由；舊式換版需要明確的 --approval（rc=9）"
+            exit 9
+        }
+        SERVICE_MODE=user
+        WINDOW_MODE=legacy
+        log "maintenance API identity: 核准的舊 daemon bootstrap（User token）" ;;
     *)
         log "ABORT: cannot determine daemon service-auth capability; refusing User fallback"
         exit 4 ;;
@@ -159,35 +180,55 @@ release_window() { # $1=為什麼要還（寫進 log）
     return "$rc"
 }
 agm() {
-    AM_SERVICE_ID=daemon-swap AM_SERVICE_TOKEN_FILE="$SERVICE_TOKEN_FILE" \
-        AM_BOT_ID= AM_BOT_TOKEN= AM_HOOK_TOKEN= "$AGM_BIN" --compact "$@"
+    if [ "$SERVICE_MODE" = service ]; then
+        AM_SERVICE_ID=daemon-swap AM_SERVICE_TOKEN_FILE="$SERVICE_TOKEN_FILE" \
+            AM_BOT_ID= AM_BOT_TOKEN= AM_HOOK_TOKEN= "$AGM_BIN" --compact "$@"
+    else
+        AM_SERVICE_ID= AM_SERVICE_TOKEN_FILE= AM_BOT_ID= AM_BOT_TOKEN= AM_HOOK_TOKEN= \
+            "$AGM_BIN" --compact "$@"
+    fi
+}
+lease_safety() {
+    if [ "$WINDOW_MODE" = legacy ]; then
+        agm lease safety --approval "$APPROVAL" --owner "$OWNER" --exclude-bot "$OWNER"
+    else
+        agm lease safety --owner "$OWNER"
+    fi
 }
 dpid() { "$PGREP" -f '^\./target/release/agents-managerd serve$' | head -1; }
 api() { "$CURL" -sf -o /dev/null "http://127.0.0.1:$PORT$1"; }
 agm_probe() { # agm_probe <bot id> → "<http code> <body>"
     # 測試用：注入一支假的送達器，才不用真的打 daemon。
     [ -n "${SWAP_PROBE_CMD:-}" ] && { "$SWAP_PROBE_CMD" "$1"; return; }
-    "$PYTHON" - "$PORT" "$SERVICE_TOKEN_FILE" "$1" <<'PY'
+    "$PYTHON" - "$PORT" "$SERVICE_TOKEN_FILE" "$1" "$SERVICE_MODE" <<'PY'
 import json, os, stat, sys, urllib.error, urllib.parse, urllib.request
-port, token_path, bot = sys.argv[1:]
+port, token_path, bot, mode = sys.argv[1:]
 base = f"http://127.0.0.1:{port}"
-flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-fd = os.open(token_path, flags)
-try:
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
-        raise RuntimeError("service credential file is not a private regular file owned by this user")
-    raw = os.read(fd, 4097)
-finally:
-    os.close(fd)
-if len(raw) > 4096:
-    raise RuntimeError("service credential file is too large")
-tok = raw.decode("utf-8").strip()
-if not tok or "\n" in tok or "\r" in tok:
-    raise RuntimeError("service credential file must contain one non-empty token line")
-headers = {"X-AM-Service-Id": "daemon-swap", "X-AM-Service-Token": tok}
-url = base + f"/api/services/daemon-swap/probe/{urllib.parse.quote(bot, safe='')}"
-data = b""
+if mode == "service":
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(token_path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or (hasattr(os, "getuid") and st.st_uid != os.getuid()):
+            raise RuntimeError("service credential file is not a private regular file owned by this user")
+        raw = os.read(fd, 4097)
+    finally:
+        os.close(fd)
+    if len(raw) > 4096:
+        raise RuntimeError("service credential file is too large")
+    tok = raw.decode("utf-8").strip()
+    if not tok or "\n" in tok or "\r" in tok:
+        raise RuntimeError("service credential file must contain one non-empty token line")
+    headers = {"X-AM-Service-Id": "daemon-swap", "X-AM-Service-Token": tok}
+    url = base + f"/api/services/daemon-swap/probe/{urllib.parse.quote(bot, safe='')}"
+    data = b""
+else:
+    # 舊 daemon 不認 service token：只在明確 --approval 的 bootstrap 使用 User 身分自測。
+    with urllib.request.urlopen(base + "/api/session") as response:
+        tok = json.load(response)["token"]
+    headers = {"X-AM-Token": tok, "Content-Type": "application/json"}
+    url = base + f"/api/bots/{urllib.parse.quote(bot, safe='')}/prompt"
+    data = json.dumps({"text": "[build 自測，回 ok 即可，不要做任何事]"}).encode("utf-8")
 req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 try:
     r = urllib.request.urlopen(req)
@@ -202,6 +243,10 @@ PY
 # 開 restart 窗口：daemon-swap 服務身分打 restart-window，daemon 自己開一筆立即核准的單再走 acquire
 # （安全檢查、暫停派送、fence／lease_token 都照舊）。印出回應本文（成功與被拒都是 JSON，下面同一份解析）。
 restart_window() {
+    if [ "$WINDOW_MODE" = legacy ]; then
+        agm lease acquire restart --owner "$OWNER" --approval "$APPROVAL" --commit "$SHA" --ttl 900 --exclude-bot "$OWNER" 2>&1
+        return
+    fi
     # 測試用：注入假的窗口回應（同樣印出回應本文）。
     [ -n "${SWAP_WINDOW_CMD:-}" ] && { "$SWAP_WINDOW_CMD" "$OWNER" "$SHA"; return; }
     "$PYTHON" - "$PORT" "$SERVICE_TOKEN_FILE" "$OWNER" "$SHA" <<'PY'
@@ -333,7 +378,7 @@ i=0; SETTLED=no; BUSY=no
 [ "$PROBE_SKIPPED" = yes ] && SETTLE_TRIES=0
 while [ "$i" -lt "$SETTLE_TRIES" ]; do
     i=$((i + 1))
-    BUSY=$(agm lease safety --owner "$OWNER" 2>/dev/null \
+    BUSY=$(lease_safety 2>/dev/null \
         | "$PYTHON" -c 'import json,sys
 try:
     d = json.load(sys.stdin)
@@ -388,7 +433,7 @@ done
 log "restart lease fence=$FENCE token=$([ "$TOKEN" != - ] && echo saved || echo MISSING)"
 save_token "$TOKEN"
 
-SAFE=$(agm lease safety --owner "$OWNER" | "$PYTHON" -c 'import json,sys
+SAFE=$(lease_safety | "$PYTHON" -c 'import json,sys
 d = json.load(sys.stdin)
 print(d.get("safe"), [w.get("name") for w in d.get("working") or []], d.get("delivering"))')
 log "3a recheck: $SAFE"
@@ -446,7 +491,6 @@ fi
 #     預設 control-group 會在 daemon 停下時連它起的子行程一起殺。只殺 main PID 才跟 macOS 一樣。
 # unit 名每次不同（`-$START_N`）：往前修／回滾時上一顆的 unit 可能還沒被 `--collect` 收掉。
 START_N=0
-START_PY="$(cd "$(dirname "$0")" && pwd)/daemon-start.py"   # transient unit 的 cwd 是 ${HOME}，相對路徑會找不到
 start() {
     L="am-daemon-swap-$$"
     if [ "$PLATFORM" = linux ]; then
@@ -459,7 +503,7 @@ start() {
         return
     fi
     "$LAUNCHCTL" remove "$L" 2>/dev/null
-    "$LAUNCHCTL" submit -l "$L" -- "$PYTHON" "$(dirname "$0")/daemon-start.py" "$AGM_REPO" "$DLOG"
+    "$LAUNCHCTL" submit -l "$L" -- "$PYTHON" "$START_PY" "$AGM_REPO" "$DLOG"
     sleep 2
     "$LAUNCHCTL" remove "$L" 2>/dev/null
 }
