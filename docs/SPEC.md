@@ -1974,6 +1974,12 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 要一個名額，拿到才跑；`build`/`check`/`test`/`clippy`/`bench`/`run`/`doc`/`install` 才會經過排程，`--version`／
 `metadata`／`fmt` 這類不編譯的子指令直接放行，不多繞一次 HTTP。
 
+**真 cargo 在哪**：`$AM_REAL_CARGO` → PATH 上第一個不是 shim 的 `cargo` → `$CARGO_HOME/bin/cargo` → `$HOME/.cargo/bin/cargo`；
+每個候選都要過「不是 shim 本身（檔頭 `AM_SHIM_MARKER`）、不在任何 `bots/*/bin`」兩道防呆，全部落空才 exit 127。後兩個是
+issue #731 補的：daemon 由 `daemon-start.py` 以固定的最小 PATH 起、沒有 `~/.cargo/bin`，bot pane 繼承它，PATH 上就只剩 shim。
+不在 daemon 啟動時注入 `AM_REAL_CARGO`：daemon 自己的 PATH 一樣找不到，只能靠同一套退回規則猜，而寫死進 pane env 的路徑在
+rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane 自己的 `$HOME` 下找。
+
 #### 名額的形狀
 - `build_slots` 表，**一個持有者一列**（`holder` 是主鍵，PRIMARY KEY 天然去重；呼叫端自己保證 `holder` 唯一，
   shim 用 `<agent 名>:<pid>`）：`status` 是 `held`（真的佔了一個名額）或 `waiting`（額滿或還沒輪到，記一列給

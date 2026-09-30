@@ -34,7 +34,7 @@ am_is_bot_bin_dir() {
 }
 
 # The real cargo: `$AM_REAL_CARGO` if set, else the first `cargo` on PATH that is not a copy of this
-# shim.
+# shim, else `$CARGO_HOME/bin/cargo`, else `$HOME/.cargo/bin/cargo`.
 #
 # **不能只跳過自己那個目錄**：一顆 bot 的 pane 會繼承祖先 pane 的 PATH，同一條 PATH 上常常掛著
 # 好幾顆 bot 的 `bots/<id>/bin`（2026-09-18 實測有 6 個）。只比對自己的目錄時，下一個目錄裡的
@@ -47,7 +47,14 @@ am_real_cargo() {
         return 0
     fi
     _self=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
-    printf '%s\n' "$PATH" | tr ':' '\n' | {
+    # PATH 找完再試 rustup 的安裝位置（issue #731）：daemon 由 daemon-start.py 以固定的最小 PATH 起，
+    # 沒有 `~/.cargo/bin`（rustup 只改 shell profile），bot pane 繼承它，PATH 上就只剩 shim 自己。
+    # 接在同一份清單後面，上面那幾道「是不是 shim」的防呆照樣套用。
+    {
+        printf '%s\n' "$PATH" | tr ':' '\n'
+        [ -z "${CARGO_HOME:-}" ] || printf '%s\n' "$CARGO_HOME/bin"
+        [ -z "${HOME:-}" ] || printf '%s\n' "$HOME/.cargo/bin"
+    } | {
         while IFS= read -r _d; do
             [ -n "$_d" ] || _d=.
             _abs=$(cd "$_d" 2>/dev/null && pwd) || continue
@@ -2549,6 +2556,56 @@ esac
         assert!(std::fs::read_to_string(&cargo_log).unwrap().contains("agents-managerd"), "{err}");
         let calls = std::fs::read_to_string(&call_log).unwrap();
         assert_eq!(calls.matches("acquire").count(), 1, "一層一個名額就是死結：{calls}");
+    }
+
+    /// issue #731：daemon 用固定的最小 PATH 起（沒有 `~/.cargo/bin`），bot pane 繼承下來，PATH 上只剩 shim。
+    /// 沒有 `AM_REAL_CARGO` 時要退回 `$CARGO_HOME/bin/cargo`，再退回 `$HOME/.cargo/bin/cargo`，不能 exit 127。
+    #[test]
+    fn with_no_real_cargo_on_path_the_shim_falls_back_to_the_rustup_home() {
+        let s = Sandbox::new();
+        let home_bin = s.dir.join("fake-home/.cargo/bin");
+        std::fs::create_dir_all(&home_bin).unwrap();
+        let log = s.dir.join("cargo.log");
+        write_exec(home_bin.join("cargo"), format!("#!/bin/sh\necho home \"$@\" >> '{}'\n", log.display()));
+        // PATH 上沒有 `real`（假 cargo 的目錄）：跟 bot pane 一樣，第一個 cargo 就是 shim 自己。
+        let path = format!("{}:/usr/bin:/bin", s.dir.join("bin").display());
+        let mut cmd = s.command(&path);
+        cmd.env_remove("CARGO_HOME").arg("--version");
+        let (_, err, rc) = s.run_group(cmd, None);
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "home --version\n", "{err}");
+
+        // `$CARGO_HOME` 先於 `$HOME/.cargo`。
+        let cargo_home = s.dir.join("cargo-home");
+        std::fs::create_dir_all(cargo_home.join("bin")).unwrap();
+        write_exec(cargo_home.join("bin/cargo"), format!("#!/bin/sh\necho cargo-home \"$@\" >> '{}'\n", log.display()));
+        let mut cmd = s.command(&path);
+        cmd.env("CARGO_HOME", &cargo_home).arg("--version");
+        let (_, err, rc) = s.run_group(cmd, None);
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "home --version\ncargo-home --version\n", "{err}");
+    }
+
+    /// 同上，但 `$HOME/.cargo/bin` 也沒有 cargo：照舊 exit 127，訊息一字不改（使用者照它設 `AM_REAL_CARGO`）。
+    #[test]
+    fn with_no_real_cargo_anywhere_the_shim_still_exits_127() {
+        let s = Sandbox::new();
+        std::fs::create_dir_all(s.dir.join("fake-home/.cargo/bin")).unwrap();
+        let path = format!("{}:/usr/bin:/bin", s.dir.join("bin").display());
+        let mut cmd = s.command(&path);
+        cmd.env_remove("CARGO_HOME").arg("--version");
+        let (_, err, rc) = s.run_group(cmd, None);
+        assert_eq!(rc, 127, "{err}");
+        assert_eq!(err, "agents-manager: 找不到真正的 cargo（把它的路徑放進 AM_REAL_CARGO）\n");
+
+        // 退回的位置一樣要過「是不是 shim」的防呆：`$CARGO_HOME/bin` 是另一顆 bot 的 shim 目錄時跳過，不能遞迴進去。
+        let other = s.dir.join("bots/OTHER");
+        super::install_local(&other).unwrap();
+        let mut cmd = s.command(&path);
+        cmd.env("CARGO_HOME", &other).arg("--version");
+        let (_, err, rc) = s.run_group(cmd, None);
+        assert_eq!(rc, 127, "{err}");
+        assert_eq!(err, "agents-manager: 找不到真正的 cargo（把它的路徑放進 AM_REAL_CARGO）\n");
     }
 
     /// 2026-09-18 兩次死鎖的可重現版：PATH 上兩層 shim（其中一層是**舊版**、沒有
