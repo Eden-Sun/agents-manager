@@ -3,6 +3,7 @@
 # 省略＝兩邊都裝。`agm ops-sync --check` 讀這一份比對，另一個平台的列報成 `skipped`、不算落差；
 # 新增／移除要安裝的檔就改這裡，照 README.md install。bin/agm 由 daemon 部署，不在這裡。
 scripts/ops/browser-gc-kick.sh      bin/browser-gc-kick.sh      darwin
+scripts/ops/browser_gc_linux.py     bin/browser_gc_linux.py     linux
 scripts/ops/ci-watch-kick.sh        bin/ci-watch-kick.sh
 scripts/ops/claude-release-kick.sh  bin/claude-release-kick.sh
 scripts/ops/daemon-update-kick.sh   bin/daemon-update-kick.sh
@@ -18,9 +19,9 @@ scripts/ops/ci-watch-task.md        ci-watch-task.md
 scripts/ops/claude-release-task.md  claude-release-task.md
 scripts/ops/release-triage-task.md  release-triage-task.md
 
-# browser-gc 只在 macOS 裝：它喚醒的 child 操作 ego-browser（圖形介面瀏覽器），Linux 主機沒有桌面，
-# 裝了只會每 30 分鐘叫醒一顆找不到瀏覽器的 bot（issue #677）。所以上面兩列與下面的 plist 都標 darwin，
-# systemd 那組也沒有它；Linux 有了圖形瀏覽器再補 unit 與這裡的列。
+# macOS browser-gc 會喚醒操作 ego-browser 的 child；Linux GUI／OB worker 暫不實作（#718）。
+# Linux 安裝獨立的 browser_gc_linux.py，只回收本使用者的 headless Chrome 與安全的舊 profile，並跑 pane-gc；
+# 不啟動 browser-gc bot、不派 ego-browser task。macOS kick、task 與 plist 仍只標 darwin。
 #
 # launchd 排程（issue #487、#499）：安裝位置以 `LaunchAgents/` 開頭的，解析成 `~/Library/LaunchAgents/`。
 # 比的是 plistlib parse 過的 dict（所以鍵的順序不影響），**除了 EnvironmentVariables 以外全部都比**——
@@ -41,6 +42,8 @@ scripts/ops/launchd/com.agm.release-triage.plist  LaunchAgents/com.agm.release-t
 # 比的是 parse 過的「段.鍵 → 值」（註解、空白不算），**除了 Environment= 的值以外全部都比**，理由同 plist。
 scripts/ops/systemd/com.agm.ci-watch.service        systemd/com.agm.ci-watch.service        linux
 scripts/ops/systemd/com.agm.ci-watch.timer          systemd/com.agm.ci-watch.timer          linux
+scripts/ops/systemd/com.agm.browser-gc.service      systemd/com.agm.browser-gc.service      linux
+scripts/ops/systemd/com.agm.browser-gc.timer        systemd/com.agm.browser-gc.timer        linux
 scripts/ops/systemd/com.agm.claude-release.service  systemd/com.agm.claude-release.service  linux
 scripts/ops/systemd/com.agm.claude-release.timer    systemd/com.agm.claude-release.timer    linux
 scripts/ops/systemd/com.agm.daemon-update.service   systemd/com.agm.daemon-update.service   linux

@@ -1,0 +1,11 @@
+# Linux browser-gc local cleanup cadence matches launchd StartInterval=1800.
+[Unit]
+Description=AGM browser-gc 排程（每 1800 秒）
+
+[Timer]
+OnActiveSec=1800s
+OnUnitActiveSec=1800s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

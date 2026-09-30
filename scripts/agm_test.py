@@ -2230,16 +2230,22 @@ class OpsSyncTest(CliCase):
 
 
 class SystemdParityTest(unittest.TestCase):
-    """issue #677：repo 裡每支 launchd job 都有等價的 systemd .service＋.timer（browser-gc 例外，寫明原因）。
+    """issue #677：每支 launchd job 都有 systemd .service＋.timer；GUI 工作可用 Linux 專用 worker。
 
-    「等價」＝跑同一支安裝好的 kick（直譯器同名、路徑把 `/Users/<人>/` 換成 `%h/`）、同一個間隔、
-    RunAtLoad 對到「timer 啟動後馬上跑」、plist 有 EnvironmentVariables 的 unit 也要有同一組變數名。
+    排程、log 與環境需對齊；一般 job 跑同一支安裝好的 kick，browser-gc 使用 Linux 非 GUI worker。
+    StartInterval、RunAtLoad 與 plist 的 EnvironmentVariables 都由測試釘住。
     改了其中一邊忘了另一邊，這裡就紅。
     """
 
     REPO = Path(__file__).resolve().parent.parent
-    #: 只在 macOS 裝的 job 與原因（同 install-manifest.tsv 的註解）。
-    DARWIN_ONLY = {"browser-gc": "喚醒的 child 操作 ego-browser（圖形介面），Linux 主機沒有桌面"}
+    #: Linux 與 macOS 的工作內容不同，但排程仍成對；GUI child 留在 macOS。
+    LINUX_EXEC = {
+        "browser-gc": ["/usr/bin/python3", "%h/.config/agents-manager/supervisor/AGM/bin/browser_gc_linux.py"],
+    }
+    DARWIN_ONLY_SOURCES = {
+        "browser-gc": ("scripts/ops/browser-gc-kick.sh", "scripts/ops/browser-gc-task.md",
+                       "scripts/ops/launchd/com.agm.browser-gc.plist"),
+    }
     #: 只有 systemd 需要講的屬性。dev-server 的 kick 用 detached 拉起 vite：launchd 看程序群，脫離了就活著；
     #: systemd 看 cgroup，預設 KillMode=control-group 會在 kick 一結束就把 vite 一起收掉。
     SYSTEMD_ONLY = {"dev-server": {"Service.KillMode": ["process"]}}
@@ -2257,6 +2263,24 @@ class SystemdParityTest(unittest.TestCase):
         return (agm._unit_semantics((d / f"com.agm.{name}.service").read_bytes()),
                 agm._unit_semantics((d / f"com.agm.{name}.timer").read_bytes()))
 
+    def test_linux_browser_gc_uses_the_non_gui_worker(self):
+        rows = {}
+        for line in (self.REPO / agm.OPS_MANIFEST).read_text(encoding="utf-8").splitlines():
+            if line.strip() and not line.startswith("#"):
+                source, target, *platform = line.split()
+                rows[source] = (target, platform[0] if platform else None)
+        self.assertEqual(rows.get("scripts/ops/browser_gc_linux.py"), ("bin/browser_gc_linux.py", "linux"))
+        for source in ("scripts/ops/browser-gc-kick.sh", "scripts/ops/browser-gc-task.md",
+                       "scripts/ops/launchd/com.agm.browser-gc.plist"):
+            self.assertEqual(rows.get(source, (None, None))[1], "darwin")
+
+        service, timer = self.units("browser-gc")
+        self.assertEqual(service["Service.Type"], ["oneshot"])
+        self.assertEqual(service["Service.ExecStart"],
+                         ["/usr/bin/python3 %h/.config/agents-manager/supervisor/AGM/bin/browser_gc_linux.py"])
+        self.assertEqual(timer["Timer.OnUnitActiveSec"], ["1800s"])
+        self.assertEqual(timer["Timer.OnActiveSec"], ["1800s"])
+
     def test_every_launchd_job_has_an_equivalent_unit_pair(self):
         import plistlib
         plists = sorted((self.REPO / "scripts/ops/launchd").glob("com.agm.*.plist"))
@@ -2264,18 +2288,18 @@ class SystemdParityTest(unittest.TestCase):
         for p in plists:
             name = p.name[len("com.agm."):-len(".plist")]
             with self.subTest(job=name):
-                if name in self.DARWIN_ONLY:
-                    self.assertFalse((self.REPO / f"scripts/ops/systemd/com.agm.{name}.service").exists())
-                    continue
                 pl = plistlib.loads(p.read_bytes())
                 svc, tmr = self.units(name)
                 self.assertEqual(svc["Service.Type"], ["oneshot"])
                 [exec_start] = svc["Service.ExecStart"]
                 want = [self.home_relative(a) for a in pl["ProgramArguments"]]
                 got = exec_start.split()
-                # 直譯器在兩個平台的位置不同（Homebrew 的 bun vs ~/.bun/bin），比名字；其餘逐字。
-                self.assertEqual(Path(got[0]).name, Path(want[0]).name)
-                self.assertEqual(got[1:], want[1:])
+                if name in self.LINUX_EXEC:
+                    self.assertEqual(got, self.LINUX_EXEC[name])
+                else:
+                    # 直譯器在兩個平台的位置不同（Homebrew 的 bun vs ~/.bun/bin），比名字；其餘逐字。
+                    self.assertEqual(Path(got[0]).name, Path(want[0]).name)
+                    self.assertEqual(got[1:], want[1:])
                 self.assertEqual(tmr["Timer.OnUnitActiveSec"], [f"{pl['StartInterval']}s"])
                 self.assertEqual(tmr["Timer.OnActiveSec"], ["1s" if pl.get("RunAtLoad") else f"{pl['StartInterval']}s"])
                 self.assertEqual(tmr["Install.WantedBy"], ["timers.target"])
@@ -2300,8 +2324,8 @@ class SystemdParityTest(unittest.TestCase):
         for u in sorted((self.REPO / "scripts/ops/systemd").iterdir()):
             with self.subTest(unit=u.name):
                 self.assertEqual(rows.get(f"scripts/ops/systemd/{u.name}"), "linux")
-        for name in self.DARWIN_ONLY:
-            for src in (f"scripts/ops/{name}-kick.sh", f"scripts/ops/{name}-task.md", f"scripts/ops/launchd/com.agm.{name}.plist"):
+        for sources in self.DARWIN_ONLY_SOURCES.values():
+            for src in sources:
                 with self.subTest(src=src):
                     self.assertEqual(rows.get(src), "darwin")
 

@@ -3318,7 +3318,8 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 
 ### 18.2e Linux 主機的排程：systemd user unit（issue #677）
 
-AG Man 搬到 Linux 主機（#675）後，`com.agm.*` 例行 job 由 systemd user manager 排程，行為與 launchd 版相同：
+AG Man 搬到 Linux 主機（#675）後，`com.agm.*` 例行 job 由 systemd user manager 排程，
+週期、首次執行時機與 log 對齊 launchd；browser-gc 的 Linux worker 只做本機非 GUI 清理（§18.4）：
 
 - **來源**：`scripts/ops/systemd/com.agm.<名字>.service`（`Type=oneshot`，跑同一支安裝好的 kick）＋`.timer`，
   安裝到 `~/.config/systemd/user/`，`systemctl --user enable --now <名字>.timer`，並 `loginctl enable-linger`（沒登入也要跑）。
@@ -3327,7 +3328,7 @@ AG Man 搬到 Linux 主機（#675）後，`com.agm.*` 例行 job 由 systemd use
 - **cgroup**：systemd 收 unit 時殺整個 cgroup，不是程序群。kick 自己 detached 拉起的長駐行程（`dev-server` 的 vite）要 `KillMode=process` 才活得過 kick 結束。
 - **herdr server 也交給 systemd**：`scripts/ops/systemd/herdr@.service`（不是排程、沒有 .timer、不 enable），daemon 要起 session 時
   `systemctl --user start herdr@<session>.service`，只有 systemd 一個看管者；細節與退回條件見 §19。
-- **browser-gc 在 Linux 不裝**：它喚醒的 child 操作 ego-browser（圖形介面），Linux 主機沒有桌面。對照表把它的 kick、task 與 plist 標成 `darwin`，systemd 那組沒有它（§18.4 只在 macOS 成立）。
+- **browser-gc 排程也有 Linux 版**：`com.agm.browser-gc.service`／`.timer` 每 1800 秒執行 `browser_gc_linux.py`，只回收本使用者的孤兒 headless Chrome（至少 2 分鐘、CDP 狀態可查且無連線）與安全標記的舊 `/tmp/am-*` profile，再跑 `pane-gc`。`ss` 不存在或查詢錯誤時保留程序。Linux worker 不啟動 browser-gc bot、不派 ego-browser task；圖形瀏覽器／OB worker 依 #718 暫不實作。macOS 的 `browser-gc-kick.sh`、task 與 plist 仍只裝在 `darwin`。
 - **對照表依平台選組**：`install-manifest.tsv` 可選第三欄 `darwin`／`linux`；`agm ops-sync --check` 只比這台平台的列，另一邊的放進 `skipped`。
   排程列必須標對（`LaunchAgents/…`＝`darwin`、`systemd/…`＝`linux`），否則 `bad_manifest`。Linux 上掃 `~/.config/systemd/user/com.agm.*` 找沒版控的 unit（`extra`），
   unit 比 parse 過的「段.鍵 → 值」，註解與空白不算，只忽略 `Environment=` 的值。
@@ -3465,6 +3466,8 @@ launchd `com.agm.browser-gc` 跑 `bin/browser-gc-kick.sh`，`StartInterval` 依�
 | Pro | 21600（6 小時） |
 | Max 5x | 3600（1 小時） |
 | Max 20x | 1800（30 分鐘，**目前**） |
+
+Linux `com.agm.browser-gc` systemd timer 每 1800 秒執行 `browser_gc_linux.py`：只清本使用者的 headless Chrome 與安全標記的舊 profile，並跑 `pane-gc`；不喚醒 GUI bot、不派 `browser-gc-task.md`。ego lite／OB 圖形 worker 保留在 macOS，依 #718 暫不實作 Linux 版本。
 
 每輪確認 `agm-pxf2pv-browser-gc` 在跑（沒跑就 `agm bot start`），派 `browser-gc-task.md`（request id `agm-browser-gc-<YYYYmmdd-HHMM>`）。規則：
 
