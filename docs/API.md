@@ -1620,7 +1620,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - 舊 daemon 沒有 `herdr` 欄位，前端一律當未知。
 
 ### 12.7a header 安裝 CLI 更新 `POST /api/hosts/{name}/cli-update`
-`{"kind":"codex","target_version":"0.157.0"}` 或 `{"kind":"claude","target_version":"2.1.284"}`。請求只由使用者在 header 確認框送出，daemon 不會背景自動安裝。Codex 沿用該主機「需安裝」通知的目標與官方安裝指令（那台沒有 run 帶通知時，改用 `GET /api/upstream-updates` 快照裡那台落後時的目標）；Claude 目標綁定 `GET /api/upstream-updates` 的 fleet 共同目標（上游版與各主機已安裝版的最大值），在該主機跑固定指令 `claude install <target_version>`。兩種都在安裝後讀版本驗證；Codex 可到達或超過目標，Claude 必須精確等於目標。成功後 Claude 只把該主機 run 的持續通知改成「已安裝，重啟套用」，不自動重啟；Codex 保留既有的 scoped restart（僅該主機、該 kind）。SPEC §6.9。
+`{"kind":"codex","target_version":"0.157.0"}` 或 `{"kind":"claude","target_version":"2.1.284"}`。請求只由使用者在 header 確認框送出，daemon 不會背景自動安裝。Codex 沿用該主機「需安裝」通知的目標與官方安裝指令（那台沒有 run 帶通知時，改用 `GET /api/upstream-updates` 快照裡那台落後時的目標）；Claude 目標綁定 `GET /api/upstream-updates` 的 fleet 共同目標（上游版與各主機已安裝版的最大值），在該主機跑固定指令 `claude install <target_version>`。安裝前若讀到版本已等於目標就不重裝；若快照落後、磁碟版已高於目標，也不降版，而以實際版更新通知與 fleet 快照。實際執行 Claude 安裝時，安裝後讀版本必須精確等於目標；Codex 可到達或超過目標。成功後 Claude 只把該主機 run 的持續通知改成「已安裝，重啟套用」，不自動重啟；Codex 保留既有的 scoped restart（僅該主機、該 kind）。SPEC §6.9。
 
 ```json
 202 {"update_id":"01M4…","host":"local","kind":"codex","target_version":"0.157.0","started":true}
@@ -1645,7 +1645,7 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
 {"update_id":"01M5…","host":"m4p","kind":"claude","ok":true,"from":"2.1.281","to":"2.1.284","notices_updated":1,"restart":null,"restart_required":true,"restart_status":"manual"}
 {"update_id":"01M4…","host":"local","kind":"codex","ok":false,"reason":"install_failed","error":"安裝指令失敗（exit status: 6）：curl: (6) …","from":"0.155.1"}
 ```
-- 安裝前版本已符合目標：不跑安裝指令、沒有 `installing`／`verifying`，直接改通知；Claude 回 `restart:null`、`restart_required:true`，Codex 開該主機 scoped restart。兩者 `ok:true` 都帶 `already_installed:true`（`from`＝`to`）。
+- 安裝前版本已符合目標：不跑安裝指令、沒有 `installing`／`verifying`，直接改通知；Claude 回 `restart:null`、`restart_required:true`，Codex 開該主機 scoped restart。兩者 `ok:true` 都帶 `already_installed:true`（`from`＝`to`）。Claude 磁碟版若高於快照目標，也走這條而不降版，並用實際版更新 Claude fleet 快照。
 - `ok:false` 一律**沒有重啟任何 bot**、通知不動。`reason`：`version_unreadable`（讀不到安裝前的版本，沒有安裝）、`install_failed`、
   `already_running`（那台的安裝鎖被另一個還活著的安裝拿著——上一顆 daemon 開的、或別的實例開的；這次**沒有**跑安裝指令，等它結束再按）、
   `interrupted`（重啟接手的那筆收尾時版本沒到目標或讀不到、或等 15 分鐘那台的鎖還沒放；見下）、

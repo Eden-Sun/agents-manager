@@ -53,6 +53,14 @@ test('失敗：不開批次，訊息講原因與錯誤', () => {
   assert.equal(below.batch, null)
 })
 
+test('Claude 失敗原因使用 Claude 名稱，不誤報成 Codex', () => {
+  for (const reason of ['version_unreadable', 'verify_failed']) {
+    const r = cliUpdateDone({ update_id: 'u-claude', host: 'm4p', kind: 'claude', ok: false, reason })
+    assert.match(r.message, /claude/)
+    assert.doesNotMatch(r.message, /codex/)
+  }
+})
+
 test('#564：主機端的鎖被別的安裝拿著／重啟接手：訊息講清楚，不開批次', () => {
   const locked = cliUpdateDone({ ...base, ok: false, reason: 'already_running', error: 'local 已經有另一個 codex 安裝在跑' })
   assert.match(locked.message, /另一個安裝在跑/)

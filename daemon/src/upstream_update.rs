@@ -56,7 +56,8 @@ pub fn claude_pending_from(notice: &str) -> Option<String> {
     if !notice.starts_with(CLAUDE_NOTICE_PREFIX) || !notice.contains("需安裝") {
         return None;
     }
-    notice_versions(notice).into_iter().next()
+    let versions = notice_versions(notice);
+    (versions.len() >= 2).then(|| versions[0].clone())
 }
 
 pub fn claude_pending_to(notice: &str) -> Option<String> {
@@ -64,6 +65,14 @@ pub fn claude_pending_to(notice: &str) -> Option<String> {
         return None;
     }
     notice_versions(notice).into_iter().last()
+}
+
+/// Claude 安裝完成提示裡記錄的磁碟版本。
+pub fn claude_installed_to(notice: &str) -> Option<String> {
+    if !notice.starts_with(CLAUDE_NOTICE_PREFIX) || !notice.contains("已安裝") {
+        return None;
+    }
+    notice_versions(notice).into_iter().next()
 }
 
 fn notice_versions(notice: &str) -> Vec<String> {
@@ -497,6 +506,15 @@ mod tests {
 
     fn disk(host: &str, line: &str) -> (String, Result<String, String>) {
         (host.to_string(), Ok(line.to_string()))
+    }
+
+    #[test]
+    fn claude_pending_from_requires_a_source_and_target_pair() {
+        let without_source = claude_pending_text(None, "2.1.284");
+        assert_eq!(claude_pending_from(&without_source), None);
+
+        let with_source = claude_pending_text(Some("2.1.281"), "2.1.284");
+        assert_eq!(claude_pending_from(&with_source).as_deref(), Some("2.1.281"));
     }
 
     // ── 純函式 ──

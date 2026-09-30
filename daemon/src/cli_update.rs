@@ -669,9 +669,12 @@ async fn run_with_fence(
         }
     };
     let target_v = parse_version(target);
-    // codex 的安裝器裝最新版，已到或超過目標就可直接套用；Claude 安裝器接受指定版本，必須精確一致。
+    // Codex 的安裝器裝最新版，已到或超過目標就可直接套用。Claude 只會在低於目標時執行指定版本安裝；
+    // 快照落後而磁碟已超前目標時也當作已安裝，避免照舊快照把 CLI 降版。
     let already = if kind == "claude" {
-        parse_version(&before) == target_v
+        parse_version(&before)
+            .zip(target_v.as_ref())
+            .is_some_and(|(before, target)| &before >= target)
     } else {
         parse_version(&before) >= target_v
     };
@@ -2285,6 +2288,91 @@ mod tests {
             .1;
         assert_eq!(result["restart_required"], true);
         assert!(result["restart"].is_null());
+    }
+
+    #[tokio::test]
+    async fn claude_install_does_not_downgrade_a_host_that_overtook_the_snapshot_target() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "claude-newer-than-snapshot").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        let pending = crate::upstream_update::claude_pending_text(Some("2.1.281"), "2.1.284");
+        sqlx::query("UPDATE runs SET update_notice=?, status_json=? WHERE id=?")
+            .bind(&pending)
+            .bind(r#"{"version":"2.1.281 (Claude Code)"}"#)
+            .bind(&run)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        crate::upstream_update::set_snapshot_for_test(crate::upstream_update::build_status(
+            "claude",
+            &Ok("2.1.284".into()),
+            &[("local".into(), Ok("2.1.281".into()))],
+            None,
+        ))
+        .await;
+        let fake = Fake::new(&["2.1.285"], Ok("must not run"));
+
+        let started = start(
+            &env.app,
+            &HeaderMap::new(),
+            "local",
+            Some("claude"),
+            Some("2.1.284"),
+            fake.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(crate::testing::eventually!(running_list(&env.app).await.is_empty()));
+
+        assert_eq!(fake.installs(), 0, "快照落後時不可把已安裝的較新 Claude 降版");
+        let result = row_status(&env.app, started["update_id"].as_str().unwrap())
+            .await
+            .1;
+        assert_eq!(result["ok"], true, "已在目標以上就只記錄實際版本：{result}");
+        assert_eq!(result["already_installed"], true);
+        assert_eq!(result["to"], "2.1.285");
+        let notice = notice_of(&env.app, &run).await.unwrap();
+        assert!(notice.contains("已安裝") && notice.contains("重啟套用"), "{notice}");
+        assert!(
+            crate::upstream_update::latest_target_for_host("claude", "local")
+                .await
+                .is_none(),
+            "套用後快照要反映主機已超前原目標"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_install_keeps_restart_notice_when_pending_notice_had_no_from_version() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "claude-install-no-from").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        let pending = crate::upstream_update::claude_pending_text(None, "2.1.284");
+        sqlx::query("UPDATE runs SET update_notice=? WHERE id=?")
+            .bind(&pending)
+            .bind(&run)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let updated = mark_installed_with_fence(
+            &env.app,
+            "local",
+            "claude",
+            "2.1.281",
+            "2.1.284",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(updated, Some(1));
+        let notice = notice_of(&env.app, &run)
+            .await
+            .expect("安裝成功後仍要留下需要重啟套用的持續提示");
+        assert!(
+            notice.contains("2.1.281") && notice.contains("已安裝") && notice.contains("重啟套用"),
+            "{notice}"
+        );
     }
 
     #[tokio::test]
