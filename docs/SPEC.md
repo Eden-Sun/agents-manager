@@ -3266,7 +3266,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   4. 換版交給 `daemon-swap.sh`（從這個 checkout 跑，不裝到 AGM 目錄）。**沒有 bot 在 `working`、送達臨界區沒有 prompt、沒有別人握租約**才換，換前一刻再查一次；備份舊 binary 與 DB、重啟後驗 `/api/session`／`agm health`／`agm supervisor`／bot 名單，
      失敗回滾（升過 schema 預設往前修，§18.13）、成功寫 `daemon-update.built`。窗口由 `POST /api/services/daemon-swap/restart-window` 開（API.md）：daemon-swap 服務身分自己開一筆立即核准的 `restart` 單、再走**同一個** `maintenance::acquire`，
      所以保護其他 bot 的部分一條都沒拆——持有 `restart` 租約期間 assignment 派送暫停、`lease_token` 與 fence 照舊（§18.10）。沒有等太久就縮小封鎖面這一段（那綁在核准等待時間上，自開的單等待為 0）：有人 working 就等下一輪。
-     `daemon-swap.sh` 結束碼 4（有人在忙）不算失敗；6（往前修）補寫 `.built` 並推 `ops_alert`；7（已回滾）推 `ops_alert` 並記進 `.rejected`；9（線上 daemon 太舊、沒有 restart-window 路由）推 `ops_alert`。
+     `daemon-swap.sh` 結束碼 4（有人在忙）不算失敗；6（往前修）補寫 `.built` 並推 `ops_alert`；7（已回滾）推 `ops_alert` 並記進 `.rejected`；9（線上 daemon 太舊且呼叫端沒有明確的 `--approval` bootstrap）推 `ops_alert`。若啟動器 `daemon-start.py` 不在同一 checkout 或不可讀，先以 3 中止，舊 daemon 不會被停掉。
   5. 任何失敗推 `ops_alert`（同 `source`+`reason` 每小時最多一則，§18.9），並寫 `daemon-update.log`；連續 `AGM_FAIL_ALERT_AFTER`（6）輪沒能完成推 `check_failing`。「有人在忙」「沒有新的綠燈 commit」是正常的等，不算失敗。
   鎖帶 pid 與時間（執行者不在了就回收，還活著卡超過 `AGM_LOCK_HUNG_SECS`＝7200 秒才喊人）。讀不到線上版本（`.built` 不在或 sha 不在 repo）推 `built_unknown` 並停住。
 - **可動手的判準是沒有 bot 在 `working`**（`lease safety` 的 `run.agent_status`），不是 `health.busy ≤ 1`：busy 含 `blocked`，而 blocked 可能等使用者好幾小時，重啟也不會打斷它。

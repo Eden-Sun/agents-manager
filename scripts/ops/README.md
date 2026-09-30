@@ -133,8 +133,7 @@ loginctl enable-linger "$USER"   # 沒登入也要跑（一次就好；沒開的
 其他結束碼：6（升過 schema、往前修）補寫 `.built` 並推 `swap_forward_fixed`；7（已回滾）推 `swap_rolled_back` 並記進 `.rejected`；8（換好但窗口沒交還）推 `swap_lease_not_released`；
 9（線上 daemon 太舊，沒有 restart-window 路由）推 `swap_daemon_too_old`。
 
-**首次上線／舊 daemon**：`daemon-swap.sh` 開窗口走 `POST /api/services/daemon-swap/restart-window`（`GET /api/capabilities` 有 `swap_restart_window`）。
-線上跑的 daemon 還沒有這條路由時，自動換版會以 9 中止——要先用別的方式（手動 build＋重啟，或舊流程）把含這條路由的 binary 換上去一次，之後才走得起來。
+**首次上線／舊 daemon**：自動 kick 不帶核准 id；線上 daemon 還沒有 `POST /api/services/daemon-swap/restart-window` 時，照樣以 9 中止並回報。若執行的是已核准的舊部署工作，可在同一份 checkout 呼叫 `daemon-swap.sh --approval <id>`：只有偵測到舊 daemon（`service_old`／`bootstrap`）才會用 User token 和舊式核准租約 bootstrap；`service_old` 還必須有既存的 service token，缺檔會 fail closed。新版路由存在時接受但忽略這個相容參數，改走 service principal。首換成功後新 daemon 建立 service token，之後自動換版使用新路徑。腳本會先確認同一 checkout 的 `daemon-start.py` 可讀，否則在停 daemon 前以 3 中止。
 
 ### 立即部署（使用者 2026-09-25，SPEC §18.2）
 
@@ -245,13 +244,13 @@ install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/superv
 
 ```sh
 scripts/ops/daemon-swap.sh --sha <完整 sha> --old <short sha> --old-hash <sha256 前 16 碼> \
-    --owner <窗口持有者名稱> --checkout <乾淨 checkout>
+    --owner <窗口持有者名稱> --checkout <乾淨 checkout> [--approval <舊流程核准 id>]
 ```
 
 **不需要核准單**（使用者 2026-09-29）：窗口由 daemon 的 `POST /api/services/daemon-swap/restart-window` 開（daemon-swap 服務身分自己開一筆立即核准的 restart 單，再走同一個 acquire——
 沒人 working／送達中、沒有別人的租約才拿得到，拿到時暫停 assignment 派送）。沒有自己的 pane（排程跑）時，3b 改用 `herdr pane list` 確認 socket 通、協定對得上。
 
-離開碼：0 成功、2 參數錯、3 前置核對失敗、4 沒窗口／複查不安全、5 備份有問題、6 往前修後停在新 binary、7 已回滾、8 換版成功但 restart 窗口沒交還成功（issue #477）、9 daemon 太舊（沒有 service principal 或 restart-window 路由）。**窗口不會自己消失**：它要撐到租約的 `expires_at`——預設 900 秒（`maintenance::DEFAULT_TTL_SECS`，上限 3600，且不會晚於那張核准的到期時間；自開的單有效期＝ttl＋5 分鐘），這段時間內 supervisor 的 assignment 派送是停的、也沒有人拿得到 restart 窗口。看到 8 就是要有人處理：等 TTL 到期，或請 AGM 用 `lease release restart --force` 附理由接管，不要當成換版順利結束。
+離開碼：0 成功、2 參數錯、3 前置核對失敗（含啟動器缺失，保證舊 daemon 尚未停止）、4 沒窗口／複查不安全、5 備份有問題、6 往前修後停在新 binary、7 已回滾、8 換版成功但 restart 窗口沒交還成功（issue #477）、9 daemon 太舊且沒有明確 `--approval`（自動 kick 不傳核准 id）。**窗口不會自己消失**：它要撐到租約的 `expires_at`——預設 900 秒（`maintenance::DEFAULT_TTL_SECS`，上限 3600，且不會晚於那張核准的到期時間；自開的單有效期＝ttl＋5 分鐘），這段時間內 supervisor 的 assignment 派送是停的、也沒有人拿得到 restart 窗口。看到 8 就是要有人處理：等 TTL 到期，或請 AGM 用 `lease release restart --force` 附理由接管，不要當成換版順利結束。
 
 `lease_token` **不進 argv**（issue #477）：拿到窗口之後 `mktemp` 在 AGM 私有目錄底下建一個 0600 的檔（不可預測路徑、不落在全域可寫的 /tmp），`agm lease release` 走 `--lease-token-file` 讀，腳本結束時（不管成敗）刪掉。argv 對同一個 uid 的行程是公開的（`ps`），而那顆 token 是「只出現一次、任何 API 都查不到」的一次性憑證，抄走就能收掉別人正在換 binary 的窗口。交還的 rc 也不再被 `>/dev/null 2>&1` 吞掉——以前失敗時 log 照樣寫「窗口已交還」，而窗口其實握到 TTL。
 
