@@ -345,11 +345,13 @@ am_spool_relay() {
     [ -d "$_sd" ] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
     python3 - "$_sd/hook-spool.d" "$AM_BOT_ID" "${AM_KIND:-claude}" "$1" "$2" <<'AMPY' >/dev/null 2>&1 || true
-import json, os, sys, tempfile, time
+import datetime, json, os, sys, tempfile, time
 sd, bot, kind, to_agent, text = sys.argv[1:6]
 os.makedirs(sd, exist_ok=True)
+# 跟 daemon 的 db::now() 同一種毫秒 UTC 格式：hook_events.received_at 只存這種（issue #101／#730）。
+now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 body = {"bot_id": bot, "provider": kind, "truncated": False, "run_id": "",
-        "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "received_at": now,
         "payload": {"hook_event_name": "AmRelayAnnounce", "to_agent": to_agent, "text": text}}
 fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=sd)
 with os.fdopen(fd, "w") as f:
@@ -1053,6 +1055,8 @@ mod tests {
         assert_eq!(body["payload"]["hook_event_name"], "AmRelayAnnounce");
         assert_eq!(body["payload"]["to_agent"], "robins-hub-3b84sb");
         assert_eq!(body["payload"]["text"], "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait 不進正文");
+        let at = body["received_at"].as_str().unwrap();
+        assert!(crate::db::parse_ts(at).is_some() && at.len() == "2026-09-30T04:23:28.123Z".len() && at.ends_with('Z'), "毫秒 UTC 格式：{at}");
 
         // 本機 bot（有 AM_PORT）不走 spool；沒有 bot 目錄的也不寫。
         let s2 = Sandbox::new();
