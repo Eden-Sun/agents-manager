@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import * as api from '../api'
+import type { Attachment } from '../api/types'
 import { compressible, compressImage } from '../lib/imageCompress'
 import { MAX_BYTES, SHELF_MIME, shelfFilesFor } from '../store/shelf'
 import { useStore } from '../store/store'
-import { admitFile, pendingReducer, runUpload } from './attachmentUpload'
+import { admitFile, pendingReducer, restoredAttachment, runUpload } from './attachmentUpload'
 import type { Pending, UploadDeps } from './attachmentUpload'
 
 export type { Pending } from './attachmentUpload'
@@ -159,10 +160,22 @@ export function useAttachments(uploadTo: string | null, resetKey: string | null)
     dispatch({ type: 'clear' })
   }, [abortAll, items, revokePreview])
 
+  /** 撤回 daemon 已收下的 prompt：同一批已上傳附件直接回 composer，不再傳一次。 */
+  const restoreAttachments = useCallback((attachments: Attachment[]) => {
+    const known = new Set(itemsRef.current.map((item) => item.id).filter((id): id is string => Boolean(id)))
+    for (const attachment of attachments) {
+      if (known.has(attachment.id)) continue
+      known.add(attachment.id)
+      const item = restoredAttachment(attachment, `restored:${attachment.id}`)
+      seen.current.add(item.fp)
+      dispatch({ type: 'restore', item })
+    }
+  }, [])
+
   const ids = items.map((it) => it.id).filter((id): id is string => Boolean(id))
   const uploading = items.some((it) => !it.id && !it.error)
 
-  return { items, add, remove, retry, clear, ids, uploading }
+  return { items, add, remove, retry, clear, restoreAttachments, ids, uploading }
 }
 
 /** Drop target for OS files and shelf drags (key only; the shelf never uploads, so bytes go to the bot dropped on). */

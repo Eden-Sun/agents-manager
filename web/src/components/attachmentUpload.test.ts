@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { admitFile, pendingReducer, progressGate, progressLabel, runUpload, uploadPercent } from './attachmentUpload'
+import { admitFile, pendingReducer, progressGate, progressLabel, restoredAttachment, runUpload, uploadPercent } from './attachmentUpload'
 import type { Pending, PendingAction, UploadDeps } from './attachmentUpload'
 import type { UploadOptions } from '../api/transport'
 import { abortError } from '../api/transport'
@@ -178,4 +178,14 @@ test('圖片超過上限先收下：壓完才比上限（壓不下去的由 runU
   assert.equal(admitFile(new Set(), 'huge.png|1', MAX_BYTES + 1, true), 'accept')
   assert.equal(admitFile(new Set(), 'huge.zip|1', MAX_BYTES + 1, false), 'too-large')
   assert.equal(admitFile(new Set(), 'edge.zip|1', MAX_BYTES, false), 'accept')
+})
+
+test('撤回 daemon 排隊訊息時，附件以已上傳卡片放回 composer，不重新上傳', () => {
+  assert.deepEqual(
+    restoredAttachment({ id: 'att1', name: 'plan.txt', mime: 'text/plain', size: 512, path: '/hidden' }, 'restored:att1'),
+    {
+      key: 'restored:att1', fp: 'restored:att1', name: 'plan.txt', size: 512, isImage: false, previewUrl: '',
+      compressing: false, loaded: 512, id: 'att1', error: null, retryable: false,
+    },
+  )
 })
