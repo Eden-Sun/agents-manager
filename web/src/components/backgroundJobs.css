@@ -26,7 +26,6 @@
 }
 
 .bg-jobs-state,
-.bg-jobs-chip,
 .bg-jobs-mini {
   display: inline-flex;
   align-items: center;
@@ -38,17 +37,6 @@
 .bg-jobs-state {
   /* 數字比名字尾巴重要：不讓名字把「（N）」擠掉，名字自己截。 */
   flex: none;
-}
-
-.bg-jobs-chip {
-  flex: none;
-  height: 18px;
-  padding: 0 7px;
-  border: 1px solid var(--accent);
-  border-radius: 3px;
-  background: var(--accent-soft);
-  font-size: 11px;
-  font-weight: 650;
 }
 
 .bg-jobs-mini {
