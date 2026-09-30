@@ -31,12 +31,19 @@ export function RewindControl({ msg, bot, blocked, after }: { msg: Message; bot:
   const botId = msg.bot_id ?? null
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
+  /** 終端輸入列卡著的那段字（409 `composer_busy`）：非 null＝在問要不要清掉再倒回。 */
+  const [draft, setDraft] = useState<string | null>(null)
   if (!botId || msg.group_id || !canOfferRewind(msg, bot)) return null
 
-  const go = () => {
+  const go = (clear?: string) => {
     setConfirming(false)
+    setDraft(null)
     setBusy(true)
-    void rewindAndRefill(botId, msg.id).finally(() => setBusy(false))
+    void rewindAndRefill(botId, msg.id, clear)
+      .then((r) => {
+        if (typeof r === 'object') setDraft(r.composerDraft)
+      })
+      .finally(() => setBusy(false))
   }
 
   const name = bot?.name ?? '這個 Bot'
@@ -52,7 +59,25 @@ export function RewindControl({ msg, bot, blocked, after }: { msg: Message; bot:
       >
         {busy ? '倒回中…' : '↶ 倒回這裡'}
       </button>
-      <RewindConfirm open={confirming} name={name} after={after} onCancel={() => setConfirming(false)} onConfirm={go} />
+      <RewindConfirm open={confirming} name={name} after={after} onCancel={() => setConfirming(false)} onConfirm={() => go()} />
+      <ConfirmDialog
+        open={draft !== null}
+        title="終端輸入列裡有字"
+        body={
+          <>
+            <p>
+              <strong>{name}</strong> 的終端輸入列裡有一段還沒送出的字，倒回前要先清掉它：
+            </p>
+            <pre className="rewind-draft">{draft}</pre>
+            <p>清掉的字不會送出，也不會放回這裡的輸入框。</p>
+          </>
+        }
+        confirmLabel="清掉再倒回"
+        danger
+        width={420}
+        onCancel={() => setDraft(null)}
+        onConfirm={() => go(draft ?? '')}
+      />
     </>
   )
 }

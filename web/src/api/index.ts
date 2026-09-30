@@ -464,8 +464,16 @@ export async function restartBot(botId: string, resumeNative?: boolean): Promise
  * `POST /bots/:id/rewind`（SPEC §6.13）：在終端驅動 claude 的 `/rewind`，倒回到這則使用者訊息送出之前；
  * `text` 是那則的原文（回填輸入框用）；`pane_cleared: false`＝CLI 放回終端輸入列的那段沒清掉。
  */
-export async function rewindBot(botId: string, messageId: string): Promise<{ text: string; hidden: number; paneCleared: boolean }> {
-  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/rewind`, { message_id: messageId })
+export async function rewindBot(
+  botId: string,
+  messageId: string,
+  /** 409 `composer_busy` 之後按「清掉再倒回」：帶 409 回的那段字，daemon 字對得上才清。 */
+  clearComposer?: string,
+): Promise<{ text: string; hidden: number; paneCleared: boolean }> {
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/rewind`, {
+    message_id: messageId,
+    ...(clearComposer !== undefined ? { clear_composer: true, expect_composer: clearComposer } : {}),
+  })
   const o = isRec(raw) ? raw : {}
   return { text: str(pick(o, 'text')), hidden: num(pick(o, 'hidden'), 0), paneCleared: pick(o, 'pane_cleared') !== false }
 }

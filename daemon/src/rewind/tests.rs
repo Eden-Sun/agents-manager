@@ -793,3 +793,33 @@ async fn a_prompt_with_a_reply_missing_from_the_menu_still_fails() {
     assert_eq!(reason(call(&r, &r.ids[2], &tui).await.unwrap_err()), "not_in_menu");
     assert_eq!(rewound(&r).await, vec![false; 6]);
 }
+
+/// 2026-10-01（cf-ox-2）：輸入列有字時倒回連兩次失敗，只叫人去終端清。409 要帶那段字，
+/// 使用者看過按「清掉再倒回」就清掉再倒；框裡換了字就不動（`composer_changed`）。
+#[tokio::test]
+async fn a_busy_composer_is_shown_and_can_be_cleared_on_request() {
+    let r = rig().await;
+    let busy = || FakeTui::new(&[A, SECOND, C], Faults { composer: Some("half typed".into()), ..Default::default() });
+
+    let tui = busy();
+    match call(&r, &r.ids[2], &tui).await.unwrap_err() {
+        LcError::Conflict(v) => {
+            assert_eq!(v["reason"], "composer_busy");
+            assert_eq!(v["draft"], "half typed", "把框裡那段帶回去給人看");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(tui.composer(), "half typed", "沒要求清就不動");
+
+    let tui = busy();
+    let wrong = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some("something else".into())).await;
+    assert_eq!(reason(wrong.unwrap_err()), "composer_changed");
+    assert_eq!(tui.composer(), "half typed", "字對不上就不清");
+    assert_eq!(rewound(&r).await, vec![false; 6]);
+
+    let tui = busy();
+    let out = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some("half typed".into())).await.unwrap();
+    assert_eq!(out["text"], SECOND);
+    assert_eq!(tui.restored(), Some(1), "清掉之後照常倒回");
+    assert_eq!(rewound(&r).await, vec![false, false, true, true, true, true]);
+}
