@@ -2222,6 +2222,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   3. 重新讀 `codex --version`，**真的變新而且 `>= target_version`** 才往下——安裝失敗、讀不到、版本沒變、或升了但沒到目標（`target_not_reached`，
      CDN 還沒傳到、PATH 上是別顆）：一顆 bot 都不重啟，`cli_update_done` 帶 `reason` 講原因、通知不動；比目標還新照成功走；
   4. 把那台 codex run 的通知改成「已安裝，重啟套用」，接著開一鍵重啟，**範圍只限那台主機的 codex**（`bulk_restart::spawn_scoped`；claude 與別台不在這批），之後照上面的規則與事件走。
+  背景 worker 使用建立 durable job 時已驗證的 `kind`，並在任何 CLI 版本或安裝指令前核對持久列；讀取失敗、列不存在、kind 不一致或 kind 不支援時都不呼叫外部 CLI 指令。可持久化的讀取錯誤／不一致以 `internal_error` 收尾，已不存在的列以 `superseded` 收尾。Recovery 在主機探測前重讀並核對啟動掃描得到的 kind，只接受持久列中的 `codex`／`claude`，不替缺漏或無效 kind 指派預設值。
   只收 UI token：帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 一律 403（換掉的是所有 codex bot 共用的 binary）；同一台同時只跑一個（409）。進度走 WS `cli_update_progress`／`cli_update_done`，
   `GET /api/state` 的 `cli_updates` 列出還沒收尾的，前端靠它對帳（同 #492）。
   **Claude fleet 安裝（issue #725）**：`upstream_update` 快照另帶 `target_version`，Claude 目標取 npm 最新正式版與各主機已安裝版本的最大值。只要上游有新版、主機落後、版本不一致或目標已知但某台讀不到版本，header 就持續顯示警示色 ⌃⌃；tooltip 與確認框列出每台目前版本（讀不到時列原因）及共同目標，只有所有主機都到目標才收起。這個狀態取自快照，不依賴一次性 toast 或有沒有 active run。
