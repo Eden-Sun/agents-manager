@@ -18,7 +18,7 @@
 # - web 的單元測試用 `bun test`（不是 `node --test`）：測試檔是 `node:test` 寫的，bun 直接吃，
 #   而且會解析 `.tsx` 與沒副檔名的 import；node 的 --experimental-strip-types 對那兩種都會
 #   ERR_MODULE_NOT_FOUND。
-# - daemon 用 rust-embed 把 web/dist 編進二進位，所以 web 要先 build。
+# - daemon 用 rust-embed 把 web/dist 編進二進位；`changed` 的 Rust fast path 用臨時 stub，完整 web bundle 由 web/full CI 驗。
 # - daemon 的測試會讀 AM_MODEL / AM_EFFORT（herdr shim 的沿用邏輯），在 bot 的 pane
 #   裡跑時這兩個有值會讓測試結果不同，這裡一律清掉。AM_DATA_DIR 也一樣：本機 bot 的 pane
 #   都被注入正式資料目錄，測試（hook spool 的預設目錄等）不該吃到它。清掉它不影響外部編譯
@@ -31,6 +31,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 step() { printf '\n==> %s\n' "$*"; }
+
+TEMPORARY_WEB_DIST_STUB=0
+cleanup_temporary_web_dist_stub() {
+    if [ "$TEMPORARY_WEB_DIST_STUB" = 1 ]; then
+        /bin/rm -f web/dist/index.html
+        rmdir web/dist 2>/dev/null || true
+    fi
+}
 
 check_web() {
     step "web: bun install --frozen-lockfile"
@@ -209,7 +217,13 @@ check_changed() {
     if echo "$parts" | grep -qx ops; then check_ops; fi
     if echo "$parts" | grep -qx web; then check_web; fi
     if echo "$parts" | grep -qx daemon; then
-        [ -f web/dist/index.html ] || check_web
+        if [ ! -f web/dist/index.html ]; then
+            step "daemon: temporary web/dist stub (skip web build on the Rust fast path)"
+            mkdir -p web/dist
+            printf '<!doctype html>\n' > web/dist/index.html
+            TEMPORARY_WEB_DIST_STUB=1
+            trap cleanup_temporary_web_dist_stub EXIT
+        fi
         step "daemon: cargo check --all-targets"
         env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
         if [ -n "${CHECK_TESTS:-}" ]; then
