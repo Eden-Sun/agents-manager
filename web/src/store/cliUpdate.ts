@@ -71,14 +71,18 @@ export interface CliUpdateResult {
 }
 
 const REASON: Record<string, string> = {
-  version_unreadable: '讀不到目前的 codex 版本，沒有安裝',
   install_failed: '安裝失敗',
-  verify_failed: '裝完讀不到 codex 版本',
   version_unchanged: '裝完版本沒變',
   target_not_reached: '裝完還沒到確認的版本',
   superseded: '途中主機重連或改指到另一台',
   already_running: '那台已經有另一個安裝在跑',
   interrupted: 'daemon 在安裝途中重啟過',
+}
+
+function failureReason(kind: string, reason: string): string {
+  if (reason === 'version_unreadable') return `讀不到目前的 ${kind} 版本，沒有安裝`
+  if (reason === 'verify_failed') return `裝完讀不到 ${kind} 版本`
+  return REASON[reason] ?? (reason || '失敗')
 }
 
 function toPlan(v: unknown): RestartPlan | null {
@@ -116,7 +120,7 @@ export function cliUpdateDone(data: Rec): CliUpdateResult {
   if (pick(data, 'ok') !== true) {
     const reason = str(pick(data, 'reason'))
     const error = str(pick(data, 'error'))
-    const head = `${host} 的 ${kind} 安裝沒有完成（${REASON[reason] ?? reason ?? '失敗'}），沒有重啟任何 Bot`
+    const head = `${host} 的 ${kind} 安裝沒有完成（${failureReason(kind, reason)}），沒有重啟任何 Bot`
     return { id, ok: false, message: error ? `${head}：${error}` : head, batch: null, joinBatchId: null }
   }
   const plan = toPlan(pick(data, 'restart'))
