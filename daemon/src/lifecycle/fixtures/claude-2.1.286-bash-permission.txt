@@ -1,0 +1,30 @@
+
+ ▐▛███▛█   Claude Code v2.1.286
+▝▜██████▀  Sonnet 5.5 with high effort · Claude Max
+ ▝▝   ▝▝   /…/scratchpad/cc2286-work
+
+
+❯ Use the Bash tool to run exactly: ls -la && echo
+  hello-2286 . Do nothing else.
+
+  Listing directory and echo marker
+  ⎿  $ ls -la && echo hello-2286
+
+────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose
+ "switch to auto mode" below
+ List directory and echo marker
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ rtk ls -la && echo hello-2286
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ This command requires approval
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don’t ask again for: rtk ls *
+   3. Yes, and switch to auto mode · auto mode handles these
+      prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend

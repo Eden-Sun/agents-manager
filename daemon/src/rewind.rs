@@ -5,7 +5,7 @@
 //! 同一個 session、同一個 jsonl 內分支，session id 不變、不重啟，被倒掉的原文 CLI 會自己放回輸入列。
 //! claude 2.1.280 的畫面（`rewind/claude_2.1.280_rewind_*.txt`，實機截的）：
 //! 1. 輸入列打 `/rewind`＋Enter → 選單：由舊到新列出使用者訊息，最下面是 `❯ (current)`，只看得到兩三則，其餘寫成
-//!    `↑ N more above`／`↓ N more below`。每則只顯示第一行（多行的後面加 `…`、太長的在欄寬截斷加 `…`）。
+//!    `↑ N more above`／`↓ N more below`（2.1.286 起是 `↑ N more`／`↓ N more`，#746；[`parse_menu`] 不看這兩列的字）。每則只顯示第一行（多行的後面加 `…`、太長的在欄寬截斷加 `…`）。
 //! 2. 往上移到目標、Enter → 確認頁：`│ <原文>` 印出那一則（**太長的只印前 4 行或約 6 個折行，沒有任何截斷記號**），
 //!    底下 `❯ 1. Restore conversation`／`2. Summarize from here`／`3. Summarize up to here`／`4. Never mind`。
 //!    pane 矮的時候選項會被擠出畫面（14 列實測只剩 `The conversation will be forked.` 那兩行）。在確認頁按 Esc 回到選單，選單再 Esc 關掉。

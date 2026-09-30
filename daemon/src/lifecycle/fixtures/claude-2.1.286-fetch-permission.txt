@@ -1,0 +1,40 @@
+
+
+❯ In a single message, make 5 parallel Bash tool calls,
+  each a separate call: touch f1.txt, touch f2.txt, touch
+  f3.txt, touch f4.txt, touch f5.txt. Do nothing else.
+
+  Ran 5 shell commands
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Worked for 1s · done 7:20 PM
+
+❯ In a single message, make 3 parallel Read tool calls (not
+  Bash) on /tmp/claude-1000/cc2286-outside/o1.txt, o2.txt
+  and o3.txt in that directory. Do nothing else.
+
+  Read 3 files
+
+● All three reads succeeded:
+  - o1.txt: "outside 1"
+  - o2.txt: "outside 2"
+  - o3.txt: "outside 3"
+
+✻ Sautéed for 2s · done 7:20 PM
+
+❯ Use the WebFetch tool to fetch https://example.com and
+  tell me its title. Do nothing else.
+
+● Fetch(https://example.com)
+
+────────────────────────────────────────────────────────────
+ Fetch
+ Claude wants to fetch content from example.com
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ url: https://example.com/
+ prompt: What is the title of this page?
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to allow Claude to fetch this content?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for example.com
+   3. No, and tell Claude what to do differently (esc)

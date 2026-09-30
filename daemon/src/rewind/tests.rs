@@ -17,6 +17,13 @@ const REFILLED: &str = include_str!("claude_2.1.280_rewind_restored_composer_ref
 const CLEARED: &str = include_str!("claude_2.1.280_rewind_restored_composer_cleared.txt");
 const CONFIRM_14_ROWS: &str = include_str!("claude_2.1.280_rewind_confirm_options_cut_off_14rows.txt");
 const REFILLED_TAIL: &str = include_str!("claude_2.1.280_rewind_restored_composer_tail_14rows.txt");
+/// 2.1.286 實機（2026-09-30，拋棄式安裝＋拋棄式 herdr pane，60 欄，`pane read --source visible`，#746）：先送 16 則短訊息，
+/// 溢出列改成 `↑ N more`／`↓ N more`（舊版是 `↑ N more above`／`↓ N more below`），每則底下 `No code changes`。
+const MENU_2286_CURRENT: &str = include_str!("claude_2.1.286_rewind_menu_current.txt");
+/// 同一個選單往上 5 格：上下都有溢出列。
+const MENU_2286_MIDDLE: &str = include_str!("claude_2.1.286_rewind_menu_middle.txt");
+/// 在上面那一則按 Enter 的確認頁：標題改成 `Confirm you want to restore to the point before…`（少了 `the conversation`）。
+const CONFIRM_2286: &str = include_str!("claude_2.1.286_rewind_confirm.txt");
 /// 7178806b 的實機畫面（帶樣式）：輸入列只有 dim 的「建議下一句」`Initialize git`。
 const SUGGESTION: &str = include_str!("../lifecycle/fixtures/claude-2.1.280-prompt-suggestion.ansi");
 
@@ -43,6 +50,28 @@ fn the_real_menu_is_read_with_its_cursor() {
     let m = parse_menu(MENU_LONG).expect("選單");
     assert!(entry_matches(m.selected.as_deref().unwrap(), &long_words()), "太長的在欄寬截斷加 …");
     assert!(!entry_matches(m.selected.as_deref().unwrap(), THIRD));
+}
+
+/// 2.1.286 的溢出列是 `↑ N more`／`↓ N more`：選單照樣讀得到游標，確認頁照樣讀得到原文；2.1.280 的舊畫面（上一個測試）也還認得。
+#[test]
+fn the_2_1_286_menu_with_short_overflow_rows_is_read() {
+    let m = parse_menu(MENU_2286_CURRENT).expect("選單");
+    assert_eq!(m.selected, None, "一開始游標在 (current)");
+    assert!(m.block.contains("↑ 23 more"), "{}", m.block);
+    let m = parse_menu(MENU_2286_MIDDLE).expect("選單");
+    assert_eq!(m.selected.as_deref(), Some("Message 12: reply with just OK."));
+    assert!(entry_matches(m.selected.as_deref().unwrap(), "Message 12: reply with just OK."));
+    assert!(!entry_matches(m.selected.as_deref().unwrap(), "Message 11: reply with just OK."), "溢出列上面那一則不是游標");
+    assert!(m.block.contains("↑ 18 more") && m.block.contains("↓ 5 more"), "{}", m.block);
+    assert_ne!(parse_menu(MENU_2286_CURRENT).unwrap().block, m.block, "游標移動看得出來");
+    assert!(in_rewind_ui(MENU_2286_CURRENT) && in_rewind_ui(MENU_2286_MIDDLE) && in_rewind_ui(CONFIRM_2286));
+
+    assert!(parse_menu(CONFIRM_2286).is_none(), "確認頁不是選單");
+    let c = parse_confirm(CONFIRM_2286).expect("確認頁");
+    assert_eq!(c.quoted, vec!["Message 12: reply with just OK."], "不含 (31s ago)");
+    assert!(confirm_matches(&c.quoted, "Message 12: reply with just OK."));
+    assert!(!confirm_matches(&c.quoted, "Message 11: reply with just OK."));
+    assert!(parse_confirm(MENU_2286_MIDDLE).is_none());
 }
 
 /// 歷史裡的 `❯ <prompt>` 不是選單；確認頁也不是選單；閒著的畫面兩者都不是。

@@ -1,0 +1,40 @@
+
+❯ Message 13: reply with just OK.
+
+● OK
+
+✻ Churned for 2s · done 7:23 PM
+
+❯ Message 14: reply with just OK.
+
+● OK
+
+✻ Worked for 2s · done 7:23 PM
+
+❯ Message 15: reply with just OK.
+
+● OK
+
+✻ Baked for 2s · done 7:23 PM
+
+❯ Message 16: reply with just OK.
+
+● OK
+
+✻ Worked for 1s · done 7:23 PM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Rewind
+
+   Confirm you want to restore to the point before you
+   sent this message:
+
+   │ Message 12: reply with just OK.
+   │ (31s ago)
+
+   The conversation will be forked.
+   The code will be unchanged.
+
+   ❯ 1. Restore conversation
+     2. Summarize from here
+     3. Summarize up to here
+     4. Never mind

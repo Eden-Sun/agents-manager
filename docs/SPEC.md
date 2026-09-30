@@ -334,7 +334,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   網頁的偵測在 `web/src/lib/dangerousRm.ts`，只判「是不是這個框」，解目標與指令仍以這裡的 `dangerous_rm_prompt` 為準。herdr 通常自己判成 `blocked`；判成 `idle` 時由 10 秒巡邏補標，
   補標後收到任何 herdr 狀態事件，就由 herdr 接手狀態、不再還原這筆合成標記；若沒有新事件，框消失（回答或自動拒絕）時才 CAS 還原原值。還原 UPDATE 成功，或重讀確認 run 已結束／狀態已被取代，才清掉記憶體標記、插一則「框已關掉」並叫醒排隊的 flush；寫入或重讀失敗時保留標記給下一輪巡邏重試，不發關閉通知、不叫 flush。
   開著的框記在記憶體：daemon 重啟後最多重講一次通知。
-  指令從框上方的 `Bash command` 讀：多列或折行的指令每列前有 `│`；只佔一列時沒有 `│`，就取標題下第一列（下一列是說明）。
+  指令從框上方的 `Bash command` 讀：多列或折行的指令每列前有 `│`；只佔一列時沒有 `│`，就取標題下第一列（下一列是說明）。2.1.286 起指令夾在兩條 `╌` 虛線之間、說明移到虛線上方：有虛線就只取虛線之間那幾列（#746）。
   手動重現要用目標**整段都是**替換輸出的指令，例如 `rm -rf "$(echo tmpdir2)"`；`rm -rf "$(pwd)/tmpdir"` 在 2.1.281 不跳框、直接刪掉（2026-09-24 實測）。
 - **claude 2.1.281 的「Session paused」選單不按、當成 blocked 讓人選**（`session_paused`，辨識在 `tui_prompts::is_session_paused_menu`）：
   API 拒答或額度用完時 claude 停下來問「1. Switch to <備援模型> / 2. Edit prompt and retry with <原模型>」（或用額度續跑／換模型），

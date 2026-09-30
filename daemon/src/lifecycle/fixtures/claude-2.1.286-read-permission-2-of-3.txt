@@ -1,0 +1,40 @@
+
+❯ In a single message, make 5 parallel Bash tool calls:
+  echo one-a, echo two-b, echo three-c, echo four-d, echo
+  five-e (each a separate call). Do nothing else.
+
+  Ran 5 shell commands
+
+● All five calls ran in parallel and printed one-a, two-b,
+  three-c, four-d and five-e.
+
+✻ Worked for 3s · done 7:18 PM
+
+❯ In a single message, make 5 parallel Bash tool calls,
+  each a separate call: touch f1.txt, touch f2.txt, touch
+  f3.txt, touch f4.txt, touch f5.txt. Do nothing else.
+
+  Ran 5 shell commands
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Worked for 1s · done 7:20 PM
+
+❯ In a single message, make 3 parallel Read tool calls (not
+  Bash) on /tmp/claude-1000/cc2286-outside/o1.txt, o2.txt
+  and o3.txt in that directory. Do nothing else.
+
+  Reading /tmp/claude-1000/cc2286-outside/o3.txt
+  ⎿  /tmp/claude-1000/cc2286-outside/o3.txt
+
+────────────────────────────────────────────────────────────
+ Read file                                           2 of 3
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Read(/tmp/claude-1000/cc2286-outside/o2.txt)
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, allow reading from
+      /tmp/claude-1000/cc2286-outside during this session
+   3. No
+
+ Esc to cancel · Tab to amend
