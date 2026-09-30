@@ -306,6 +306,15 @@ run() {
   echo $?
 }
 
+run_capture() {
+  (
+    sleep() { :; }
+    export -f sleep
+    bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --owner bot-me --checkout "$CHECKOUT" >"$ROOT/swap.out" 2>&1
+  )
+  echo $?
+}
+
 # 1. 一般情形（schema 沒升）：換 binary、重啟、驗證、寫 .built。
 setup 10 10
 printf 'old-backup-1\n' > "$DAEMON_DB.bak-20000101-0000"
@@ -885,6 +894,15 @@ rc=$(run)
 check_eq "舊 child 無明確 successor 退役證據仍回滾（rc=7）" "7" "$rc"
 check "DB 還原前記下的新收編 child 在回滾後有警示" "WARN: rollback restored the DB but these newly adopted children may still have live panes: new-kid (id-new-kid)" "$SWAP_LOG"
 check_eq "binary 照常還原" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+# 39. #726：rollback 首次執行時，必須已定義用來記錄新收編 child 的 helper。
+setup 10 10
+export STUB_SUPERVISOR=stopped
+rc=$(run_capture)
+check_eq "forced rollback 完成（rc=7）" "7" "$rc"
+check_no "rollback 時 helper 已定義" "rollback_new_children: command not found" "$ROOT/swap.out"
+check_no "rollback 不會因缺 helper 遺漏 child 對帳" "could not determine whether newly adopted children" "$SWAP_LOG"
 teardown
 
 # 36. Linux（issue #677）：重啟改走 `systemd-run --user` 的 transient unit，不叫 launchctl。
