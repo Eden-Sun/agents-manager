@@ -151,6 +151,16 @@ fn fold_event(ev: &mut Event) {
     }
 }
 
+/// claude 2.1.285 起輸入框與 prompt 回音寫成 `❯` 接 U+00A0（2026-10-01 cf-ox-2）：所有 `❯ ` 的比對（回音、送達證據、
+/// 回覆擷取、輸入框判斷）都對不上——送出後證不出已送（delivery 變 unknown）、空框被當成有字（倒回 composer_busy）。
+/// 在讀進來的那一刻換成一般空格，下游一套解析照舊。終端畫面裡的 NBSP 沒有別的意思。
+fn nbsp_to_space(mut r: PaneRead) -> PaneRead {
+    if r.text.contains('\u{a0}') {
+        r.text = r.text.replace('\u{a0}', " ");
+    }
+    r
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PaneRead {
     pub pane_id: String,
@@ -471,13 +481,13 @@ impl HerdrClient {
     }
 
     pub async fn pane_read(&self, pane_id: &str, source: &str, lines: u32) -> Result<PaneRead> {
-        self.call_as("pane.read", json!({"pane_id": pane_id, "source": source, "lines": lines}), "read").await
+        self.call_as("pane.read", json!({"pane_id": pane_id, "source": source, "lines": lines}), "read").await.map(nbsp_to_space)
     }
 
     /// Same read with SGR styling kept (`format: ansi`): the only way to tell a TUI's dim
     /// placeholder from the same words typed by a person.
     pub async fn pane_read_ansi(&self, pane_id: &str, source: &str, lines: u32) -> Result<PaneRead> {
-        self.call_as("pane.read", json!({"pane_id": pane_id, "source": source, "lines": lines, "format": "ansi"}), "read").await
+        self.call_as("pane.read", json!({"pane_id": pane_id, "source": source, "lines": lines, "format": "ansi"}), "read").await.map(nbsp_to_space)
     }
 
     /// 把使用者的視窗切到這顆 pane（§6.5e 的「聚焦」按鈕）。只動焦點，不改內容。
@@ -668,7 +678,7 @@ impl HerdrClient {
     }
 
     pub async fn agent_read(&self, target: &str, source: &str, lines: u32) -> Result<PaneRead> {
-        self.call_as("agent.read", json!({"target": target, "source": source, "lines": lines}), "read").await
+        self.call_as("agent.read", json!({"target": target, "source": source, "lines": lines}), "read").await.map(nbsp_to_space)
     }
 
     /// 訂閱的**握手**最多等這麼久（issue #491）。其他 RPC 都走 [`Self::call_timeout`]，只有這裡
@@ -1110,3 +1120,25 @@ mod split_paste_tests {
         assert!(pieces.iter().all(|p| p.len() <= 7 && std::str::from_utf8(p.as_bytes()).is_ok()));
     }
 }
+
+#[cfg(test)]
+mod nbsp_tests {
+    use super::*;
+
+    /// 2026-10-01 cf-ox-2（claude 2.1.285）：回音是 `❯` 接 U+00A0。讀進來就換成空格，送達證據（回音列）才對得上。
+    #[test]
+    fn a_no_break_space_after_the_prompt_marker_reads_as_a_space() {
+        let raw = PaneRead {
+            pane_id: "p".into(),
+            source: "visible".into(),
+            format: "text".into(),
+            text: format!("❯\u{a0}ui 審查你自己做\n\n⏺ 好\n\n{r}\n❯\u{a0}\n{r}\n  ⏵⏵ bypass permissions on\n", r = "─".repeat(40)),
+            revision: 1,
+            truncated: false,
+        };
+        let r = nbsp_to_space(raw);
+        assert!(!r.text.contains('\u{a0}'));
+        assert_eq!(crate::lifecycle::echo_row_hits("claude", &r.text, "ui 審查你自己做"), 1, "回音列認得出來");
+    }
+}
+

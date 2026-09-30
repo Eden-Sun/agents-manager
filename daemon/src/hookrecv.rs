@@ -657,6 +657,22 @@ fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
     !existing.iter().any(|e| prompt_texts_match(e, incoming))
 }
 
+/// 外部回合的 hook 帶的「使用者訊息」其實是 transcript 裡最後一則 prompt：claude 自己接著做（背景 shell 跑完、
+/// 排程叫醒）的那一輪沒有新的 prompt，hook 還是回報上一則（2026-10-01 cf-ox-2：「ui 審查你自己做」多存一則）。
+/// 跟這一輪以外最近一則使用者訊息一樣、而且那一則的回合已經收掉，就是舊的那句，不再存。
+async fn repeats_answered_prompt(conn: &mut sqlx::SqliteConnection, conv: &str, turn_id: &str, incoming: &str) -> Result<bool> {
+    let last: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT m.content, t.status FROM messages m LEFT JOIN turns t ON t.id = m.turn_id
+          WHERE m.conversation_id = ? AND m.role = 'user' AND (m.turn_id IS NULL OR m.turn_id <> ?)
+          ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1",
+    )
+    .bind(conv)
+    .bind(turn_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(matches!(last, Some((content, Some(status))) if matches!(status.as_str(), "completed" | "completed_fallback" | "failed") && prompt_texts_match(&content, incoming)))
+}
+
 /// 只在既有那則是原文的（去空白）前綴且較短時才覆蓋；不是前綴就是另一句話，不能動。
 /// 交易內：跟回合的收尾寫在同一個交易裡（#115）。
 async fn upgrade_clipped_user_message(conn: &mut sqlx::SqliteConnection, turn_id: &str, full: &str) -> Result<()> {
@@ -1259,7 +1275,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                                 .bind(&t.id)
                                 .fetch_all(&mut *tx)
                                 .await?;
-                        if hook_user_is_new(&have, u) {
+                        if hook_user_is_new(&have, u) && !repeats_answered_prompt(&mut tx, &conv, &t.id, u).await? {
                             let from = relay_source(run.as_ref(), u);
                             added.push(
                                 lifecycle::insert_message_relayed_tx(&mut tx, &conv, Some(&t.id), "user", u, "hook", false, None, from.as_deref())
@@ -3496,6 +3512,24 @@ mod external_claim_tests {
         assert_eq!(relay(echo.id.clone()).await.as_deref(), Some(from.id.as_str()), "回音補標寄件者");
         assert_eq!(relay(other.id.clone()).await, None, "使用者自己打的不動");
         assert_eq!(crate::agent_relay::claim("robins-hub-3b84sb", text), None, "補標後報備已用掉，不會再標一次");
+    }
+
+    /// 2026-10-01 cf-ox-2：claude 自己接著做的那一輪（背景 shell 跑完），hook 回報的「使用者訊息」是上一則已經回答過的 prompt，
+    /// 不能再存一次；真的是新的一句照存。
+    #[tokio::test]
+    async fn an_external_turn_does_not_restore_the_prompt_that_was_already_answered() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "cfox").await;
+        let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
+        let answered = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?,'web','in_flight','ok',?)")
+            .bind(&answered).bind(&conv).bind(db::now()).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&answered).execute(&env.app.db).await.unwrap();
+        lifecycle::insert_message(&env.app, &conv, Some(&answered), "user", "ui 審查你自己做", "web", false, None).await.unwrap();
+        let external = db::ulid();
+        let mut conn = env.app.db.acquire().await.unwrap();
+        assert!(repeats_answered_prompt(&mut conn, &conv, &external, "ui 審查你自己做").await.unwrap(), "同一句、那一回合已收掉：是舊的");
+        assert!(!repeats_answered_prompt(&mut conn, &conv, &external, "另一句新的話").await.unwrap(), "新的一句照存");
     }
 
     /// issue #634: a single Bash `PostToolUse` hook records every herdr response against its caller.
