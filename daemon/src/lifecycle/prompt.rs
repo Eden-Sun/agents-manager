@@ -19,6 +19,7 @@ pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id
 pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
     let verified = i64::from(rec.verified);
     let auto = i64::from(rec.auto_resend);
+    let first: Option<Option<String>> = sqlx::query_scalar("SELECT delivered_at FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await?;
     // 不重送的那條路照樣把重送額度用掉：回滾到不認得 `auto_resend` 的舊 binary 時，
     // 它仍然不會把同一則再打一次。
     // `delivered_at` 只記第一次：之後 poller 補證據再記一次，不能讓一則舊的看起來像剛送出（重啟補 watchdog 看它，deliv L3）。
@@ -37,8 +38,54 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
     .bind(turn_id)
     .execute(&app.db)
     .await?;
+    if matches!(first, Some(None)) {
+        restamp_queued_prompt(app, turn_id, at).await;
+    }
     Ok(())
 }
+
+/// 排過隊的一則（2026-09-30 使用者：cf-ox-2 的 daemon 通知 13:28 排進佇列、13:38:55 才送進去，畫面卻排在 13:31 那則補充上面，
+/// 13:40 的回覆看起來在回錯的那一則）：第一次真的送出、而且在佇列裡等了超過 [`QUEUE_RESTAMP_SECS`] 秒時，
+/// 這個回合的使用者訊息改成送出的時間，再推一次同 id 的 `message_added`（前端同 id、時間變了就重排）。
+/// 回合的 `created_at` 不動（它是排進佇列的時間，別處拿它算等了多久）。補充（`sent_via`）不是這個回合的 prompt，不動。
+async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str, at: &str) {
+    let Ok(Some(queued_at)) = sqlx::query_scalar::<_, String>("SELECT created_at FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await else {
+        return;
+    };
+    let waited = match (chrono::DateTime::parse_from_rfc3339(&queued_at), chrono::DateTime::parse_from_rfc3339(at)) {
+        (Ok(q), Ok(a)) => (a - q).num_seconds(),
+        _ => return,
+    };
+    if waited <= QUEUE_RESTAMP_SECS {
+        return;
+    }
+    let ids: Vec<String> = sqlx::query_scalar(
+        "UPDATE messages SET created_at = ? WHERE turn_id = ? AND role = 'user' AND sent_via IS NULL AND created_at < ? RETURNING id",
+    )
+    .bind(at)
+    .bind(turn_id)
+    .bind(at)
+    .fetch_all(&app.db)
+    .await
+    .unwrap_or_default();
+    if ids.is_empty() {
+        return;
+    }
+    let bot_id: Option<String> = sqlx::query_scalar("SELECT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?")
+        .bind(turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .ok()
+        .flatten();
+    if let Some(bot_id) = bot_id {
+        for id in &ids {
+            emit_prompt_message(app, &bot_id, id).await;
+        }
+    }
+}
+
+/// 在佇列裡等超過這麼久才重標時間：一般送出（沒排隊）的那幾百毫秒不必動。
+const QUEUE_RESTAMP_SECS: i64 = 5;
 
 /// The API answer for a prompt that was not sent. `retry` → 409 (temporary: a busy box, a
 /// transcript not reported yet; callers retry and assignments stay queued). Otherwise 422: this
@@ -3018,5 +3065,60 @@ pub(crate) async fn check_same_text(app: &Arc<App>, turn: &db::Turn, text: &str)
             json!({"reason": "text_mismatch", "turn_id": turn.id}),
         )),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod restamp_tests {
+    use super::*;
+    use crate::lifecycle::delivery::DeliveryRecord;
+
+    async fn turn_with_prompt(app: &Arc<App>, conv: &str, queued_at: &str, text: &str) -> (String, String) {
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?,'web','queued','pending',?)")
+            .bind(&turn)
+            .bind(conv)
+            .bind(queued_at)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let msg = db::ulid();
+        sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'user',?,'web',?)")
+            .bind(&msg)
+            .bind(conv)
+            .bind(&turn)
+            .bind(text)
+            .bind(queued_at)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        (turn, msg)
+    }
+
+    async fn created(app: &Arc<App>, id: &str) -> String {
+        sqlx::query_scalar("SELECT created_at FROM messages WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// 2026-09-30（cf-ox-2）：13:28 排進佇列、13:38:55 才送出的那一則，要排到送出的時間，回覆才接在它後面。
+    #[tokio::test]
+    async fn a_prompt_that_waited_in_the_queue_moves_to_when_it_was_sent() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "q").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let ok = DeliveryRecord { stored: "ok", verified: true, auto_resend: false };
+
+        let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T13:28:31.333Z", "daemon 通知").await;
+        mark_delivery(&app, &turn, ok, "2026-09-30T13:38:55.000Z").await.unwrap();
+        assert_eq!(created(&app, &msg).await, "2026-09-30T13:38:55.000Z");
+        // 之後補證據再記一次：delivered_at 不變，訊息也不再動。
+        mark_delivery(&app, &turn, ok, "2026-09-30T13:50:00.000Z").await.unwrap();
+        assert_eq!(created(&app, &msg).await, "2026-09-30T13:38:55.000Z");
+
+        sqlx::query("UPDATE turns SET status='failed' WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        // 沒排隊（幾百毫秒內就送出）的不動。
+        let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T14:00:00.000Z", "一般送出").await;
+        mark_delivery(&app, &turn, ok, "2026-09-30T14:00:00.600Z").await.unwrap();
+        assert_eq!(created(&app, &msg).await, "2026-09-30T14:00:00.000Z");
     }
 }

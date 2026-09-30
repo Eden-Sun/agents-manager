@@ -90,3 +90,11 @@ test('upsertSorted：同 id 內容變了就原地換掉，一樣的回 null，�
   assert.equal(upsertSorted(list, { id: 'b', t: 2, content: '備援' }, cmp, same), null)
   assert.deepEqual(upsertSorted(list, { id: 'd', t: 4, content: 'w' }, cmp, same)?.map((m) => m.id), ['a', 'b', 'c', 'd'])
 })
+
+test('upsertSorted：同 id 時間變了（排過隊的一則送出時改成送出時間）要重新排位置', () => {
+  type M = { id: string; t: number; content: string }
+  const cmp = (a: M, b: M) => a.t - b.t
+  const same = (a: M, b: M) => a.content === b.content && a.t === b.t
+  const list: M[] = [{ id: 'notice', t: 1, content: 'n' }, { id: 'supp', t: 2, content: 's' }, { id: 'reply', t: 4, content: 'r' }]
+  assert.deepEqual(upsertSorted(list, { id: 'notice', t: 3, content: 'n' }, cmp, same)?.map((m) => m.id), ['supp', 'notice', 'reply'])
+})
