@@ -628,6 +628,8 @@ main 的每個 push 不再等 GitHub Actions：agm-host 上的 systemd user time
 status、status.json 寫 `error`，不讓 pending 掛著（last-sha 不動，下一輪重試）；每段 `timeout -k`（`AGM_CI_KILL_AFTER`，預設 60s），
 step 不理 TERM 也收得掉、不會卡住鎖。隔離測試：`bash scripts/ops/ubuntu-ci_test.sh`（本地 bare repo＋假 gh）。安裝（agm-host，需 `loginctl enable-linger ubuntu`）：
 
+daemon 內的 CI coordinator（SPEC §20）已提供 fast/full durable queue 與 job API，但**不會在現有 daemon 設定下自動執行**：Linux daemon 啟動時需同時提供 `AGM_CI_REPO_DIR` 與 `AGM_CI_WORK_ROOT`。部署切換時要在 daemon service 設定這兩個路徑和 `scripts/check.sh` 所需工具 PATH，並停用本 timer；本次 repo 改動不動 agm-host 的 systemd service/timer。
+
 agent 本機收尾用 `scripts/check.sh changed`：Rust-only 改動在沒有 `web/dist/index.html` 的 clean checkout 會暫時建立 rust-embed stub，跑完即清除，不會因此安裝依賴或 build web。Web 檢查與背景完整 CI 仍 build 真正的 production bundle。
 
 ```sh
