@@ -2519,6 +2519,8 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - **標記**：`messages.rewound_at`——那則與之後的（同一個 conversation、rowid 不小於它）標上時間，**不刪**；對話加一則 system 說明。推 WS `messages_rewound`。
 - **不做的**：`Summarize from here／up to here`、還原程式碼（`--rewind-files`）、codex／grok。
 
+- **輸入列有字**（2026-10-01 使用者：cf-ox-2 倒回連兩次 `composer_busy`，只叫人去終端清）：409 帶 `draft`（那段字），網頁跳確認框給人看、按「清掉再倒回」重送並帶 `clear_composer`＋`expect_composer`；daemon 在 bot 鎖裡重讀輸入列，字對得上才 ctrl+c 清掉（等提示消失）再照常倒回，對不上回 `composer_changed`、不動。清掉的字不送出、不放回網頁輸入框。
+
 ### 6.14 回合結束、背景工作還在跑（issue #714，使用者 2026-09-28）
 
 child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 idle、可以收訊息，但只顯示「閒置」會被當成停了。CLI 自己在畫面底部

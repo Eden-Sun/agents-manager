@@ -463,6 +463,12 @@ async fn rewind_dropped(pane: &dyn Pane, target: &str, next: Option<(String, usi
 #[derive(Debug, Deserialize)]
 pub struct RewindIn {
     pub message_id: String,
+    /// 409 `composer_busy` 之後，使用者在確認框按「清掉再倒回」（2026-10-01 使用者：cf-ox-2 倒回連兩次失敗，只叫人去終端清）：
+    /// 先清掉終端輸入列再倒回。要帶 `expect_composer`＝409 回的那段字，框裡換了字就 409 `composer_changed`、不動它。
+    #[serde(default)]
+    pub clear_composer: bool,
+    #[serde(default)]
+    pub expect_composer: Option<String>,
 }
 
 fn conflict(reason: &str, message: &str) -> LcError {
@@ -480,11 +486,38 @@ fn preview(s: &str, n: usize) -> String {
 
 /// `POST /api/bots/{id}/rewind`
 pub async fn post_rewind(State(app): State<Arc<App>>, Path(bot_id): Path<String>, Json(b): Json<RewindIn>) -> LcResult<Json<Value>> {
-    rewind(&app, &bot_id, &b.message_id, None).await.map(Json)
+    rewind_with(&app, &bot_id, &b.message_id, None, b.clear_composer.then(|| b.expect_composer.unwrap_or_default())).await.map(Json)
 }
 
 /// `pane`：測試注入的假 pane；`None`＝這個 run 的真 pane。
 pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option<Arc<dyn Pane>>) -> LcResult<Value> {
+    rewind_with(app, bot_id, message_id, pane, None).await
+}
+
+/// 清掉終端輸入列裡那段（使用者在確認框看過、`expect` 是那段字）。字換了就不動，回 `composer_changed`。
+async fn clear_composer(pane: &dyn Pane, expect: &str) -> LcResult<()> {
+    let s = read(pane).await.map_err(|f| up(f.message()))?;
+    if in_rewind_ui(&s) {
+        return Err(conflict(Fail::UiBusy.reason(), &Fail::UiBusy.message()));
+    }
+    let Some(text) = lifecycle::composer_text("claude", &s) else { return Ok(()) };
+    if squash(&text) != squash(expect) {
+        return Err(LcError::conflict(
+            "composer_changed",
+            json!({"message": "終端輸入列裡的字跟剛才不一樣了，沒有動它；再按一次倒回看看現在是什麼。", "draft": text}),
+        ));
+    }
+    keys(pane, &["ctrl+c"]).await.map_err(|f| up(f.message()))?;
+    let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| lifecycle::composer_text("claude", s).is_none().then_some(())).await.map_err(|f| up(f.message()))?;
+    if cleared.is_none() {
+        return Err(conflict(Fail::ComposerBusy.reason(), "按了 ctrl+c，終端輸入列還是有字，沒有倒回。"));
+    }
+    let _ = wait_for(pane, HINT_WAIT_MS, |s| (!s.contains(CTRL_C_HINT)).then_some(())).await;
+    Ok(())
+}
+
+/// `clear`：先清掉輸入列裡這段再倒回（`None`＝不清）。
+pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option<Arc<dyn Pane>>, clear: Option<String>) -> LcResult<Value> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.kind != "claude" {
         return Err(conflict("unsupported_kind", "只有 claude 能倒回：codex／grok 沒有對應的 /rewind。"));
@@ -547,6 +580,9 @@ pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option
     };
     // 直接對 pane 打過字：之後的 prompt 改走打字路線（`slash::mark_pane_typed` 的理由）。記不下來就不打。
     lifecycle::mark_pane_typed(app, &run.id).await.map_err(up)?;
+    if let Some(expect) = clear.as_deref() {
+        clear_composer(pane.as_ref(), expect).await?;
+    }
     let dropped = match msg.turn_id.as_deref() {
         Some(t) => turn_dropped(app, t).await.map_err(up)?,
         None => false,
@@ -560,22 +596,10 @@ pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option
                     tracing::info!(bot = %bot.name, "rewind: the target was interrupted before any output and never stayed in the context");
                     d
                 }
-                Err(f) => {
-                    tracing::warn!(bot = %bot.name, reason = f.reason(), "rewind did not happen");
-                    return Err(match f {
-                        Fail::Pane(_) => up(f.message()),
-                        _ => LcError::conflict(f.reason(), json!({"message": f.message()})),
-                    });
-                }
+                Err(f) => return Err(rewind_failed(&bot.name, pane.as_ref(), f).await),
             }
         }
-        Err(f) => {
-            tracing::warn!(bot = %bot.name, reason = f.reason(), "rewind did not happen");
-            return Err(match f {
-                Fail::Pane(_) => up(f.message()),
-                _ => LcError::conflict(f.reason(), json!({"message": f.message()})),
-            });
-        }
+        Err(f) => return Err(rewind_failed(&bot.name, pane.as_ref(), f).await),
     };
 
     let now = db::now();
@@ -628,6 +652,20 @@ async fn next_in_context(app: &Arc<App>, conv: &str, message_id: &str) -> anyhow
         return Ok(Some((content.clone(), skip)));
     }
     Ok(None)
+}
+
+/// 倒回沒做成：記 log、轉成 API 錯誤。輸入列有字時把那段字帶回去（`draft`），網頁才能讓人看過再選「清掉再倒回」。
+async fn rewind_failed(bot: &str, pane: &dyn Pane, f: Fail) -> LcError {
+    let draft = if f == Fail::ComposerBusy {
+        read(pane).await.ok().and_then(|s| lifecycle::composer_text("claude", &s))
+    } else {
+        None
+    };
+    tracing::warn!(bot, reason = f.reason(), composer = ?draft.as_deref().map(|d| preview(d, 60)), "rewind did not happen");
+    match f {
+        Fail::Pane(_) => up(f.message()),
+        _ => LcError::conflict(f.reason(), json!({"message": f.message(), "draft": draft})),
+    }
 }
 
 /// 這一則與之後的都標成倒回（標記不刪）。回標了幾則。

@@ -487,7 +487,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | 409 | `default_session` | 從使用者自己 default session 匯入的 bot：只看不代打 |
 | 409 | `not_a_user_message`／`already_rewound` | 只能倒回到還沒被倒掉的使用者訊息 |
 | 409 | `not_running`／`not_idle`（`busy`：`working`／`blocked`／`unknown_status`／`turn_in_flight`／`queued_turn`）／`no_pane` | 要閒著、有 pane 的 run（在 bot 鎖裡查） |
-| 409 | `composer_busy`／`rewind_ui_open` | 終端輸入列有字、或 rewind 選單本來就開著：一個字都沒打 |
+| 409 | `composer_busy`／`rewind_ui_open` | 終端輸入列有字、或 rewind 選單本來就開著：一個字都沒打。`composer_busy` 另帶 `draft`（輸入列裡那段字）；使用者看過後可重送同一請求加 `{"clear_composer":true,"expect_composer":"<那段字>"}`，daemon 重讀一次、字對得上才 ctrl+c 清掉再倒回（2026-10-01） |
+| 409 | `composer_changed` | 帶了 `clear_composer`，但輸入列裡的字跟 `expect_composer` 不一樣了：沒動它，`draft` 是現在那段 |
 | 409 | `menu_not_shown` | 打了 `/rewind` 選單沒出來（已清掉打進去的字） |
 | 409 | `not_in_menu` | 選單裡找不到這則（更早的 session、沒落地）；已退出。還沒輸出就被中斷、沒有回覆的那一則不回這個：它本來就不在對話裡，照倒回成功處理（SPEC §6.13） |
 | 409 | `confirm_not_shown`／`text_mismatch`／`restore_not_selected` | 確認頁沒出來、印的不是這則（body 的 `message` 帶畫面上的字）、游標不在 Restore；已退出，沒倒 |

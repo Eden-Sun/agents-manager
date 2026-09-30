@@ -29,3 +29,17 @@
 .src-tag.rewound-tag {
   border-style: dashed;
 }
+
+/* 「終端輸入列裡有字」確認框裡那段字（2026-10-01）：原樣、可捲，不撐爆對話框。 */
+.rewind-draft {
+  max-height: 160px;
+  overflow: auto;
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
