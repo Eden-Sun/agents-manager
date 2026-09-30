@@ -257,29 +257,11 @@ scripts/ops/daemon-swap.sh --sha <完整 sha> --old <short sha> --old-hash <sha2
 
 ## claude-release-kick.sh
 
-Claude Code 換版就派 AGM 解析新版有什麼用得上的，AGM 的回覆就是給使用者的通知（使用者 2026-09-16）。
-唯讀、只派工，不 build 不重啟。任務內容在 `claude-release-task.md`（安裝到 AGM 目錄）。
+舊的排程入口保留為相容 wrapper，轉呼叫 `release-triage-kick.sh`。Claude binary diff 已併入 changelog 分診同一則交辦及通知；
+獨立腳本不再另派工。狀態檔仍是 `claude-release.last`，由統一 kick 在 binary diff 派成功後更新。隔離測試：
+`bash scripts/ops/claude-release-kick_test.sh` 驗 wrapper；合併內容和狀態由 `release-triage-kick_test.sh` 驗。
 
-| 變數 | 預設 | 意義 |
-| --- | --- | --- |
-| `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | 總管 cwd（`bin/agm`、log、state） |
-| `CLAUDE_VERSIONS_DIR` | `~/.local/share/claude/versions` | 版本目錄；目錄名就是版本號，最新的那個是現在會跑的 |
-| `AGM_RELEASE_BOT` | `runtime.json` 的 `release_bot_id`，沒有就 `responder_bot_id`（協調者） | 派給誰；**不能是巡檢自己**（daemon 擋總管對自己下交辦）。查不到就跳過，不亂派給別的 bot |
-
-狀態檔 `claude-release.last`＝已經解析過的版本；派工成功才寫。隔離測試：`bash scripts/ops/claude-release-kick_test.sh`（假的 AGM 目錄、版本目錄與 `bin/agm`）。
-
-安裝（需要 AGM 核准）：
-
-```sh
-install -m 755 scripts/ops/claude-release-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
-install -m 644 scripts/ops/claude-release-task.md ~/.config/agents-manager/supervisor/AGM/
-install -m 644 scripts/ops/codex-release-task.md ~/.config/agents-manager/supervisor/AGM/
-```
-
-`codex-release-task.md` 沒有對應的 kick：只給網頁更新框的「請 AGM 解析」（`POST /api/claude-update/review {kind:"codex"}`，issue #561）用，
-沒裝進 AGM 目錄時 daemon 退回讀 repo 的 `scripts/ops/`。
-
-launchd：`com.agm.claude-release`，`StartInterval 1800`，`ProgramArguments = [/bin/bash, …/bin/claude-release-kick.sh]`。
+既有 launchd／systemd 的 `com.agm.claude-release` 排程可繼續呼叫 wrapper；它與 `com.agm.release-triage` 同時觸發也共用 `release-triage.lock`，不會重疊派工。
 
 ## herdr-update-kick.sh
 
@@ -356,7 +338,7 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**�
 該處理的由 daemon 開成 GitHub issue。唯讀、只派工，**不升級、不改設定、不重啟**——升級照舊走 §6.9。
 版本比較、切 changelog、分桶（dropped／kept／unmatched）全部交給 `agents-managerd release-triage-check --kind <k> --json`（daemon 端），
 這支腳本不做版本比較也不切段，只照回來的 JSON（`{"kind","from","to","pending":[{"version","kept","unmatched","dropped_count"}]}`）決定要不要派。
-`pending` 是空的就安靜結束、不寫 log。任務內容在 `release-triage-task.md`（kick 把它當交辦正文開頭，後面接本次 JSON）。
+`pending` 是空的且沒有新 Claude binary 時就安靜結束、不寫 log。若 `CLAUDE_VERSIONS_DIR` 出現新版本，kick 會把 binary diff 補充任務及新舊路徑附到同一份正文；即使 changelog 沒有待分診列，也會派一則 binary-only 交辦。任務內容在 `release-triage-task.md`，Claude binary diff 指示在 `claude-release-diff-task.md`；`claude-release-task.md` 保留給更新框的手動解析入口。
 
 | 變數 | 預設 | 意義 |
 | --- | --- | --- |
@@ -368,6 +350,7 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**�
 | `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者時，超過這麼久就當殘留回收 |
 | `AGM_LOCK_HUNG_SECS` | `3600` | 執行者還活著但卡了這麼久：推 `ops_alert` 喊人（不搶鎖） |
 | `AGM_EXTRA_PATH` | `/opt/homebrew/bin:/usr/local/bin` | 腳本開頭補在 `PATH` 前面的目錄；只給測試蓋掉 |
+| `CLAUDE_VERSIONS_DIR` | `~/.local/share/claude/versions` | Claude binary 版本目錄；沿用 `claude-release.last` 偵測舊版到新版 |
 
 行為重點：
 
@@ -375,7 +358,7 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**�
   request-id 是 `release-triage-<kind>-<to>`；被截斷時 `<to>` 用這批最後一版，下一批才不會撞同一個 id 被 daemon 去重吞掉。
 - **額度閘門**：派之前用 `bin/agm state`＋`bin/agm quota` 找被派 bot 的身分那一格（`<kind>:<identity>`，沒有就 `<kind>`），
   5h ≥ `AGM_TRIAGE_QUOTA_MAX` 或有 `limit_hit` → 不派、記一行 log、列維持 `pending`，下一輪再看。查不到（端點壞、找不到那格）**照派**並記 log，
-  不因為端點壞了就永遠不做。只在真的有 pending 時才查，一輪只查一次。
+  不因為端點壞了就永遠不做。只在真的有 changelog pending 或 binary diff 時才查，一輪只查一次。
 - **鎖**（補 #66 留言的洞）：`release-triage.lock` 裡寫 pid＋時間（同 `daemon-update-kick.sh` 的格式）。執行者不在（含 pid 被別的程序重用）就回收接手；
   還活著但超過 `AGM_LOCK_HUNG_SECS` 推 `ops_alert`（`runner_hung`）；回收不掉推 `stale_lock`。
 - **依賴**（補 #66 留言的洞）：開頭自補 `PATH=/opt/homebrew/bin:/usr/local/bin:$PATH`；找不到 `python3` 推 `ops_alert`（`missing_dependency`）並寫 log，不靜默 `exit 0`。
@@ -386,12 +369,12 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**�
 - **`publish` 重試**：每輪（不論有沒有 pending、額度擋不擋）對兩個 kind 各呼叫一次 `bin/agm release-triage publish --kind <k>`，
   給 gh 失敗停在 `judged` 的版本一個重試入口（daemon 端不做定時器）。沒東西要重試（results 空、`disabled`、`deferred`）時安靜；只有 `published`／`failed` 才寫 log。
   舊的 `bin/agm` 不認得 `release-triage`（argparse exit 2）：log 講一次就略過，用 `release-triage-publish-unsupported` 這個 state 檔記「已經講過」，換新 agm 後自動清掉。
-- 某個 kind 的 `release-triage-check` 失敗（抓不到 feed 等）只跳過那個 kind，不當成「沒有新版」，另一個 kind 照跑。
+- 某個 kind 的 `release-triage-check` 失敗（抓不到 feed 等）只跳過該 kind 的 changelog 派工，不當成「沒有新版」，另一個 kind 照跑；若 Claude binary 同時換版，binary-only 交辦仍會送出。
+- Claude binary diff 與 changelog pending 同在時合成一則 assignment；只在派工成功後推進 `claude-release.last`，並使用 `release-triage` 的公告 id。Binary-only 用 `agm-claude-release-<版本>-notice`，避免已先送出的 changelog 通知與不同正文共用 ID。
 
 **跟其他 kick 的分工**：
 
-- `claude-release-kick.sh`：看 claude **binary diff**（changelog 沒寫到的東西），**保留不動**；這支看的是 changelog 逐條，兩者互補。
-  issue #204 之後的方向是讓 binary diff 由同一支 kick 帶進同一則交辦，那一步不在這次範圍。
+- `claude-release-kick.sh`：既有 launchd 的相容入口，單純呼叫本腳本；binary diff 由本腳本合併進 changelog 分診，不再各派各的。
 - `herdr-update-kick.sh`（#66）：herdr 是另一條管線；#204 說第二階段才把 herdr 併進來，這次不動。#66 留言的兩個洞（殘留鎖、launchd PATH）在這支一次補掉；`herdr-update-kick.sh` 之後也照同一套補上（鎖、PATH、缺依賴與連續失敗喊人）。
 - `daemon-update-kick.sh`：鎖回收與 `ops_alert` 的寫法照抄它，格式一致。
 
@@ -425,6 +408,8 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.release-triage.plist`；*
 ```sh
 install -m 755 scripts/ops/release-triage-kick.sh ~/.config/agents-manager/supervisor/AGM/bin/
 install -m 644 scripts/ops/release-triage-task.md ~/.config/agents-manager/supervisor/AGM/
+install -m 644 scripts/ops/claude-release-diff-task.md ~/.config/agents-manager/supervisor/AGM/
+install -m 644 scripts/ops/claude-release-task.md ~/.config/agents-manager/supervisor/AGM/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.release-triage.plist
 ```
 

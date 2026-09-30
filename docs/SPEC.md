@@ -3394,14 +3394,13 @@ claude 與 codex **每出一個新版**，自動把那一版的 changelog 逐條
   #66 留下它獨有的兩件事：隔離相容性驗證與升級窗口。本節目前只有 claude、codex。
 - **§6.9（一鍵套用 claude 更新）**：分診發生在**升級之前**（`from` 是帳本已分診的最大版本，不是磁碟上的、也不是跑著的），
   `guard` 類的鎖要在升級前補好；`upgrade-arg` 類（值得早點升級的理由）只進通知、當 AGM 排 §6.9 的依據，永遠不開 issue。
-- `claude-release-kick.sh` 的 binary diff 是 changelog 沒寫到的東西的補充，保留，由同一支 kick 帶進同一則交辦。
-  在那之前兩條管線各自派工、各自公告，而且**公告的 `client_request_id` 必須分開**：分診用
-  `agm-release-triage-<kind>-<版本>-notice`，binary diff 用 `agm-claude-release-<版本>-notice`。
-  兩邊處理同一個 claude 版本、又（依 `release_bot_id`／`responder_bot_id` 的解析順序）派給同一顆 bot，
-  公告內文必然不同，共用一個 id 的話後送的那一則會被 `supervisor::assign` 以
-  `client_request_id already used with different text` 拒絕，使用者只看得到其中一則（issue #519）。
-  **派工**的 crid 是另一回事：`agm-claude-release-<版本>`（不帶 `-notice`）由網頁按鈕與 kick 共用，
-  那是刻意的冪等（`claude_review.rs`），不要跟著改。codex 的網頁按鈕（issue #561）走同一支、同一套規則，
+- `claude-release-kick.sh` 保留為既有排程的相容入口，轉呼叫 `release-triage-kick.sh`。統一 kick 偵測
+  `CLAUDE_VERSIONS_DIR` 的 binary 版本變化，把 `claude-release-diff-task.md` 的唯讀比較指示與新舊路徑附進 changelog
+  分診的同一份 assignment；沒有 changelog pending 時仍可派 binary-only 交辦。只在派工成功後更新
+  `claude-release.last`。合併通知只送一則，使用 `agm-release-triage-claude-<版本>-notice`；binary-only
+  使用 `agm-claude-release-<版本>-notice`，避免 changelog 已先通知同版後又以不同正文重用其 notice id（#519）。
+  **派工**的 crid 是另一回事：`agm-claude-release-<版本>`（不帶 `-notice`）由網頁按鈕與 `claude_review.rs`
+  共用，那是刻意的冪等，不要跟著改。codex 的網頁按鈕（issue #561）走同一支、同一套規則，
   crid 是 `agm-codex-release-<版本>[-ui]`，任務檔 `codex-release-task.md`，公告 `agm-codex-release-<版本>-notice`（同樣跟分診的公告分開）。
 
 **網頁看得到帳本**（issue #561）：更新確認框（單顆徽章與額度列的批次框）的「分析」區塊讀 `GET /api/release-triage?kind=`，
@@ -3499,16 +3498,15 @@ Linux `com.agm.browser-gc` systemd timer 每 1800 秒執行 `browser_gc_linux.py
 
 ### 18.5a Claude Code 換版就解析（使用者 2026-09-16）
 
-launchd `com.agm.claude-release` 每 30 分鐘跑 `bin/claude-release-kick.sh`：比對 `~/.local/share/claude/versions` 最新的版本與 `claude-release.last`，
-換版才派 `claude-release-task.md` 給**協調者**（巡檢不能對自己下交辦；`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，
+既有 `com.agm.claude-release` 排程仍呼叫 `bin/claude-release-kick.sh`，該檔是 `release-triage-kick.sh` 的相容入口；排程 binary diff 現在由 §18.2c 的同一則分診交辦處理。
+更新框的「請 AGM 解析」仍由 daemon 直接派 `claude-release-task.md` 給**協調者**（巡檢不能對自己下交辦；`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`，
 都沒有就跳過），`--review-by patrol`、request id `agm-claude-release-<版本>`，協調者解析完把通知交給巡檢，使用者才看得到。規則：
+
 - 巡檢目錄的 `runtime.json` 由 setup 寫 `responder_bot_id`（協調者之後才建立時，`responder setup` 會回頭補寫；單角色安裝是 `null`）。
   腳本測試用的 runtime.json 是 `scripts/ops/fixtures/patrol-runtime.json`，Rust 測試釘住它等於 `runtime_json()` 的真實輸出。
-
-- 第一次執行只記下目前版本，不為「本來就在的版本」派一次工；沒換版安靜退出（不寫 log）。
-- 派工失敗不寫 `claude-release.last`，下一輪重派；同時只准一個執行者（`claude-release.lock`），殘留鎖交 AGM 檢查。
-- 任務本身**唯讀**：比 `--help`、比 binary 裡的 `describe()` 欄位與 `CLAUDE*_` 環境變數、疑似有用的實測一次（拋棄式目錄 + `-p`），
+- 更新框手動解析的任務本身**唯讀**：比 `--help`、比 binary 裡的 `describe()` 欄位與 `CLAUDE*_` 環境變數、疑似有用的實測一次（拋棄式目錄 + `-p`），
   結論三到五行（是什麼、對應哪個痛點、要改哪個檔）。要改程式另外走派工與核准，不在這筆交辦裡動手。
+- 排程的 binary diff 使用 `claude-release-diff-task.md` 補充指示，與 changelog pending 同送時合併成同一份 assignment；binary-only 時仍會派工。其版本狀態在派工成功後更新，鎖與重試見 §18.2c。
 
 ### 18.6 persona 的副本
 由 §18.11 規範：改人設走 `PUT /api/supervisor/persona`，不要手改 `config.toml` 或 `persona.md`。

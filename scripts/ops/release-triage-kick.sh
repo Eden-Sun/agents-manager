@@ -22,6 +22,11 @@ BIN="${AM_BINARY:-$REPO/target/release/agents-managerd}"
 AGM="$DIR/bin/agm"
 LOG="$DIR/release-triage.log"
 TASK="$DIR/release-triage-task.md"
+CLAUDE_VERSIONS="${CLAUDE_VERSIONS_DIR:-${HOME:-/nonexistent}/.local/share/claude/versions}"
+CLAUDE_STATE="$DIR/claude-release.last"
+CLAUDE_DIFF_TASK="$DIR/claude-release-diff-task.md"
+CLAUDE_DIFF_OLD=""
+CLAUDE_DIFF_NEW=""
 OWNER="${AM_AGENT_NAME:-release-triage-kick}"
 QUOTA_MAX="${AGM_TRIAGE_QUOTA_MAX:-85}"
 MAX_VERSIONS=5      # 一則交辦最多帶幾版
@@ -39,6 +44,37 @@ alert() { # alert <reason> <detail>
   log "ALERT ${1}：${2}"
   "$AGM" --compact ops-alert --source "$OWNER" --reason "$1" --detail "$2" >> "$LOG" 2>&1 ||
     log "推 ops-alert 失敗（舊 CLI 或 daemon 不在），只留在這份 log"
+}
+
+# Claude binary diff 曾由 claude-release-kick 獨立派工。現在只由這支 kick 把它附進 changelog
+# 分診交辦；版本狀態仍沿用 claude-release.last，派工成功後才推進。
+write_claude_state() { # write_claude_state <version>
+  _t="$CLAUDE_STATE.tmp.$$"
+  if printf '%s\n' "$1" > "$_t" 2>/dev/null && mv -f "$_t" "$CLAUDE_STATE" 2>/dev/null; then return 0; fi
+  rm -f "$_t" 2>/dev/null
+  return 1
+}
+prepare_claude_diff() {
+  [ -d "$CLAUDE_VERSIONS" ] || return 0
+  _new=$(ls -t "$CLAUDE_VERSIONS" 2>/dev/null | head -1)
+  [ -n "$_new" ] || return 0
+  _done=""
+  [ -f "$CLAUDE_STATE" ] && _done=$(tr -d '[:space:]' < "$CLAUDE_STATE")
+  if [ -z "$_done" ]; then
+    write_claude_state "$_new" || note_fail "寫不了狀態檔 ${CLAUDE_STATE}，Claude binary diff 基準仍未記錄"
+    return 0
+  fi
+  [ "$_new" != "$_done" ] || return 0
+  if [ ! -e "$CLAUDE_VERSIONS/$_done" ] || [ ! -e "$CLAUDE_VERSIONS/$_new" ]; then
+    note_fail "Claude binary diff 的舊版或新版不存在（${_done} → ${_new}），保留狀態等下一輪"
+    return 0
+  fi
+  if [ ! -f "$CLAUDE_DIFF_TASK" ]; then
+    note_fail "找不到 ${CLAUDE_DIFF_TASK}，Claude binary diff 保留到下一輪"
+    return 0
+  fi
+  CLAUDE_DIFF_OLD="$_done"
+  CLAUDE_DIFF_NEW="$_new"
 }
 
 # 連續沒能完成（check／assign／publish 失敗、找不到派給誰、binary 不在）不能永遠只有 local log：
@@ -114,6 +150,8 @@ print(d.get("release_bot_id") or d.get("responder_bot_id") or "")
 ' "$DIR/runtime.json" 2>/dev/null)
 fi
 
+prepare_claude_diff
+
 # 重試 gh 失敗、停在 judged 的版本（daemon 端刻意不做定時器，靠這裡每輪叫一次）。與有沒有 pending、額度夠不夠無關，
 # 所以放在派工迴圈之前；沒東西要重試（results 空、或只有 disabled／deferred）時安靜，不寫 log。
 # 舊的 bin/agm 沒有 release-triage 子命令（argparse exit 2）：只講一次，用 state 檔記「已經講過」，不每 30 分鐘洗 log。
@@ -181,9 +219,15 @@ except Exception:
 
 for KIND in claude codex; do
   # 抓不到／CLI 壞掉就是這輪不做這個 kind，不當成「沒有新版」；另一個 kind 照跑。
+  BINARY_ONLY=0
   REPORT=$("$BIN" release-triage-check --kind "$KIND" --json 2>>"$LOG") || {
-    note_fail "release-triage-check --kind ${KIND} 失敗，這輪跳過"; continue
+    note_fail "release-triage-check --kind ${KIND} 失敗，這輪跳過 changelog 派工"
+    if [ "$KIND" != claude ] || [ -z "$CLAUDE_DIFF_NEW" ]; then continue; fi
+    BINARY_ONLY=1
+    TO="$CLAUDE_DIFF_NEW"
+    PAYLOAD=$(printf '{"kind":"claude","from":"%s","to":"%s","pending":[]}' "$CLAUDE_DIFF_OLD" "$CLAUDE_DIFF_NEW")
   }
+  if [ "$BINARY_ONLY" -eq 0 ]; then
   # 只挑這一則交辦要帶的版本（最多 MAX_VERSIONS 版、kept+unmatched 合計 MAX_ENTRIES 條，順序照 JSON，
   # 第一版一定帶——單版超量也不能永遠卡住）。輸出第一行是這一批的 "to"，其後是精簡 JSON。
   # 沒被截斷時 "to" 就是 JSON 的 to；截斷時用這批最後一版，避免下一輪同 request-id 被 daemon 去重吞掉。
@@ -211,26 +255,63 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
 ' 2>>"$LOG"); RC=$?
   case $RC in
     0) ;;
-    3) continue ;;      # pending 是空的：安靜，不寫 log
-    *) note_fail "release-triage-check --kind ${KIND} 的輸出看不懂（rc=${RC}），這輪跳過"; continue ;;
+    3)
+      if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ]; then
+        BINARY_ONLY=1
+        TO="$CLAUDE_DIFF_NEW"
+        PAYLOAD=$(printf '{"kind":"claude","from":"%s","to":"%s","pending":[]}' "$CLAUDE_DIFF_OLD" "$CLAUDE_DIFF_NEW")
+      else
+        continue   # pending 是空的：安靜，不寫 log
+      fi
+      ;;
+    *)
+      note_fail "release-triage-check --kind ${KIND} 的輸出看不懂（rc=${RC}），這輪跳過"
+      if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ]; then
+        BINARY_ONLY=1
+        TO="$CLAUDE_DIFF_NEW"
+        PAYLOAD=$(printf '{"kind":"claude","from":"%s","to":"%s","pending":[]}' "$CLAUDE_DIFF_OLD" "$CLAUDE_DIFF_NEW")
+      else
+        continue
+      fi
+      ;;
   esac
-  TO=$(printf '%s\n' "$PICK" | head -1)
-  PAYLOAD=$(printf '%s\n' "$PICK" | sed 1d)
+  if [ "$BINARY_ONLY" -eq 0 ]; then
+    TO=$(printf '%s\n' "$PICK" | head -1)
+    PAYLOAD=$(printf '%s\n' "$PICK" | sed 1d)
+  fi
+  fi
 
   [ -n "$BOT" ] || { note_fail "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
   quota_gate || exit 0
 
   BODY=$(mktemp "${TMPDIR:-/tmp}/agm-release-triage.XXXXXX"); TMPS+=("$BODY")
+  NOTICE_ID="agm-release-triage-${KIND}-${TO}-notice"
+  if [ "$BINARY_ONLY" -eq 1 ]; then
+    # A changelog notice for this version may already have been sent before the installed binary changed.
+    # Keep the legacy binary namespace in that case so daemon notice idempotency does not reject different text.
+    NOTICE_ID="agm-claude-release-${TO}-notice"
+  fi
   {
     cat "$TASK"
-    printf '\n\n---\n本次：kind=%s，%s 版待分診（新版 %s）。以下 JSON 是 `agents-managerd release-triage-check` 的輸出，逐條 verdict 用它的 `id`。\n\n```json\n%s\n```\n' \
-      "$KIND" "$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["pending"]))')" "$TO" "$PAYLOAD"
+    if [ "$BINARY_ONLY" -eq 1 ]; then
+      printf '\n\n---\n本輪沒有待分診的 changelog 版本；以下 JSON 的 pending 為空，只需完成 binary diff 並在同一則通知回報。\n\n```json\n%s\n```\n' "$PAYLOAD"
+    else
+      printf '\n\n---\n本次：kind=%s，%s 版待分診（新版 %s）。以下 JSON 是 `agents-managerd release-triage-check` 的輸出，逐條 verdict 用它的 `id`。\n\n```json\n%s\n```\n' \
+        "$KIND" "$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["pending"]))')" "$TO" "$PAYLOAD"
+    fi
+    if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ]; then
+      cat "$CLAUDE_DIFF_TASK"
+      printf '\n\n---\nClaude binary diff：OLD=%s/%s\nNEW=%s/%s\n' "$CLAUDE_VERSIONS" "$CLAUDE_DIFF_OLD" "$CLAUDE_VERSIONS" "$CLAUDE_DIFF_NEW"
+    fi
+    printf '\n\n通知 request-id（child 需原樣使用）：%s\n' "$NOTICE_ID"
   } > "$BODY"
 
   # 旗標叫 `--request-id`（不是 --client-request-id）：拼錯的話 argparse 直接 exit 2，
   # 而 stub 吃掉未知旗標的測試看不出來（2026-09-16 的事故，見 claude-release-kick.sh）。
+  ASSIGN_ID="release-triage-${KIND}-${TO}"
+  [ "$BINARY_ONLY" -eq 0 ] || ASSIGN_ID="release-triage-claude-binary-${TO}"
   if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
-       --request-id "release-triage-${KIND}-${TO}" >> "$LOG" 2>&1; then
+       --request-id "$ASSIGN_ID" >> "$LOG" 2>&1; then
     log "${KIND} → ${TO}：已派 ${BOT} 分診"
     # 只標這一則實際帶出去的版本（截斷後那批）。標失敗不重派：request-id 會擋住重複交辦；
     # 帳本這輪停在 pending 只代表下一輪 check 又回同一批，下一輪同 request-id 由 daemon 去重。
@@ -241,9 +322,17 @@ for p in json.load(sys.stdin)["pending"]:
 ' 2>>"$LOG") || VERS=""
     VARGS=()
     while IFS= read -r _v; do [ -n "$_v" ] && VARGS+=(--version "$_v"); done <<< "$VERS"
+    DISPATCHED_OK=1
     if [ ${#VARGS[@]} -gt 0 ]; then
-      "$AGM" --compact release-triage dispatched --kind "$KIND" "${VARGS[@]}" >> "$LOG" 2>&1 ||
+      if "$AGM" --compact release-triage dispatched --kind "$KIND" "${VARGS[@]}" >> "$LOG" 2>&1; then
+        :
+      else
+        DISPATCHED_OK=0
         log "標記 dispatched 失敗（${KIND} → ${TO}），帳本仍是 pending；不重派"
+      fi
+    fi
+    if [ "$KIND" = claude ] && [ -n "$CLAUDE_DIFF_NEW" ] && [ "$DISPATCHED_OK" -eq 1 ]; then
+      write_claude_state "$CLAUDE_DIFF_NEW" || log "寫不了狀態檔 ${CLAUDE_STATE}（binary diff 已派成功；下一輪 request-id 會去重）"
     fi
   else
     note_fail "派工失敗（${KIND} → ${TO}），下一輪再試"

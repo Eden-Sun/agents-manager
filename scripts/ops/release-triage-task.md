@@ -1,9 +1,9 @@
 AGM 定期交辦：上游（claude／codex）出新版了，請對訊息末尾那份 JSON 裡**每一條** kept／unmatched 的 changelog 條目下 verdict，該處理的開成 issue（由 daemon 開，你不直接跑 `gh`）。只分診，**不改程式、不升級、不改設定、不重啟**。
 
 **通知怎麼送**：如果你是巡檢 AGM（使用者入口那顆），你這則回覆就是通知。如果你是協調者或其他 child（使用者看不到你的對話），做完要用
-`bin/agm assign --notice --bot <巡檢 bot id> --request-id agm-release-triage-<kind>-<新版號>-notice --text '…'` 把結論交給巡檢，由它出現在使用者入口。
+`bin/agm assign --notice --bot <巡檢 bot id> --request-id <通知 request-id> --text '…'` 把結論交給巡檢，由它出現在使用者入口。kick 會在訊息末尾附上 `通知 request-id`，請 child **原樣使用**：一般／合併分診用 `agm-release-triage-<kind>-<新版號>-notice`；binary-only 用 `agm-claude-release-<binary 版本>-notice`，避免 changelog 已先通知同版後 binary 更新時撞到不同正文。Claude binary diff 若附在本次交辦裡，結論併進這則通知，**不要另送第二則公告**。
 
-`<kind>` 是本次 JSON 的 `kind`（`claude` 或 `codex`），`<新版號>` 是本次 JSON 的 `to`——例如 `agm-release-triage-codex-0.156.1-notice`。**這個 id 一定要帶 `release-triage-` 與 `<kind>`**：同一個 claude 版本另外還有一條 binary diff 的管線（`claude-release-task.md`）也會發公告，兩邊若用同一個 id，後送的那一則會被 daemon 以「client_request_id already used with different text」拒絕，使用者就只看得到其中一則（issue #519）。
+`<kind>` 是本次 JSON 的 `kind`（`claude` 或 `codex`），`<新版號>` 是本次 JSON 的 `to`——例如 `agm-release-triage-codex-0.156.1-notice`。Claude binary diff 已由同一支 kick 附到同一則交辦；pending changelog 與 binary diff 同時送出時只送這一則合併通知（issue #204／#519）。
 
 ## 輸入
 
@@ -69,6 +69,7 @@ bin/agm release-triage submit --file verdicts.json
 ```
 
 - 一份 JSON 涵蓋本次所有版本：每個 `entry_id` 本來就唯一。欄位細節若跟 `bin/agm release-triage submit --help` 不一致，以 CLI／`docs/API.md` 為準。
+- binary-only 交辦的 JSON 會有空的 `pending`；此時不呼叫 submit，只依 binary diff 補充指示完成唯讀比較與通知。
 - `duplicate_of` 只有找到同主題 issue 時才填，沒有就整個欄位省略。
 - `title` 只寫那一句話：完整標題是 daemon 組的 `<kind> <version>: <你的一句話>（提防｜採用）`，
   自己再寫一次版本前綴會被剝掉（別版的前綴剝不掉，會變成兩層），結尾也不用自己加「（提防）」。
@@ -76,4 +77,4 @@ bin/agm release-triage submit --file verdicts.json
 
 ## 通知（三到五行）
 
-做完送一則三到五行的通知：這次看了哪個 kind、哪幾版；開了幾張 issue（編號與一句話）；`upgrade-arg` 清單（每項一句：是什麼、為什麼值得早升）——沒有就一句「`upgrade-arg`：本次無」。整體沒有 `guard`／`adopt` 就一句「本次無」。**不要**在這則交辦裡直接改程式或部署；要改另外走既有的派工與核准流程。
+做完送一則三到五行的通知：這次看了哪個 kind、哪幾版；開了幾張 issue（編號與一句話）；`upgrade-arg` 清單（每項一句：是什麼、為什麼值得早升）——沒有就一句「`upgrade-arg`：本次無」。若交辦附有 Claude binary diff，將其值得留意的結論併進這則通知。binary-only 交辦只回報 binary diff。整體沒有 `guard`／`adopt` 就一句「本次無」。**不要**在這則交辦裡直接改程式或部署；要改另外走既有的派工與核准流程。
