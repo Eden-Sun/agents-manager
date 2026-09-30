@@ -2854,7 +2854,9 @@ import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 
 
 剩下的 `Agents Manager` 與 `AGM-DM-GRUP` 改在 agm-host **本機**跑，之後 Mac 的 daemon 不再開；已移交的 hub 專案（§11.9，`host = "m4p"`）不動，
 它們的 agent 仍在 Mac 的 herdr（`dev.agents-manager.herdr-*` launchd job）裡跑，所以那幾個 herdr job 不停。
-工具是 `scripts/ops/cutover-to-host.sh`（在 Mac 跑；輔助 `cutover-helper.py` 在兩邊跑，到目標是經 ssh 從 stdin 餵原始碼），把 §11.9／§11.9a 的步驟串起來。
+工具是 `scripts/ops/cutover-to-host.sh`（在 Mac 跑；輔助 `cutover-helper.py` 在兩邊跑，到目標是經 ssh 從 stdin 餵原始碼），把 §11.9／§11.9a 的步驟串起來；`host-state-transfer.py` 隨 cutover 在兩邊執行，補上專案 bundle 以外的主機狀態。
+
+`host-state-transfer.py snapshot` 將來源完整 `config.toml`（路徑依 cutover map 改寫）、`ui-token`、`outbox` 檔案與 identity 設定目錄清單封成權限受限的 bundle。identity 清單只列設定路徑與目錄是否存在，**不讀、不複製憑證內容**。目標套用時以來源 config 的非 `projects` 段落為準，只保留目標已存在的 `projects`；沒有的 project rows 留給後續 `project-transfer` 匯入。outbox 同名但內容不同就停止，避免覆寫。安裝與 rollback 都要先取得目標 `daemon.lock`，而且不讀寫 SQLite。
 
 **預設 dry-run**：唯讀的檢查照做（GET、ssh 看一眼），會改東西的每一步只印出來；`--execute` 才真的做。真的做時自己脫離成背景行程
 （`setsid`＋`nohup`，log 在狀態目錄的 `run.log`）——`stop-bots` 會停掉這兩個專案的每一顆 bot，從 bot 的 pane 叫起來的腳本會跟著被收掉；
@@ -2863,24 +2865,24 @@ import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 
 
 | 步驟 | 在哪 | 做什麼 |
 |---|---|---|
-| `preflight` | 兩邊 | 兩個專案各剛好一個、都還沒設 `handed_off_to`（設了＝上一次沒做完，要 `--from` 或 rollback）；project-transfer 要有 `--with-supervisor`（#720，`--execute` 沒有就拒絕）；目標 python ≥ 3.11、有 DB／config、release binary、`daemon-start.py`、`systemd-run`。只警告：在跑的 child、目標沒裝 `herdr@.service`（#677）、目標 checkout 不含這支腳本的版本（先 pull＋build，否則 import 可能因欄位不足被拒）、Mac 各 worktree 沒推的 commit／沒提交的改動（目標看不到）、Mac config 有而目標沒有的段落（例如 `[judge]`，import 只搬 `[[projects]]`，要手動補）、目標 config 已有這些專案 id |
+| `preflight` | 兩邊 | 兩個專案各剛好一個、都還沒設 `handed_off_to`（設了＝上一次沒做完，要 `--from` 或 rollback）；project-transfer 要有 `--with-supervisor`（#720，`--execute` 沒有就拒絕）；目標 python ≥ 3.11、有 DB／config、release binary、`daemon-start.py`、`systemd-run`。只警告：在跑的 child、目標沒裝 `herdr@.service`（#677）、目標 checkout 不含這支腳本的版本（先 pull＋build，否則 import 可能因欄位不足被拒）、Mac 各 worktree 沒推的 commit／沒提交的改動（目標看不到）、目標 config 已有這些專案 id。來源非 project config 會由 host-state 搬移，不再要求手動補段落 |
 | `freeze` | Mac | `launchctl bootout` 載入中的 `com.agm.*`（換版 kick 不能在切換中途換 binary 或把 daemon 拉起來），記在 `launchd.txt` 給回滾 |
 | `record` | Mac | 快照兩個專案；**在跑名單**＝run 活著的 user bot（child 不單獨接回，由母 bot 重開；`CUTOVER_NO_RESUME` 預設排除 `agm-pxf2pv-browser-gc`——它操作 ego-browser，Linux 主機沒有桌面，§18.2e），加上協調者／巡檢原本是否在跑 |
 | `stop-bots` | Mac | 先 `POST /api/supervisor/stop`、`…/responder/stop` 把「不要它跑」寫進去（不然看門狗會把它們拉回來，§18.9），再逐顆 `POST /api/bots/{id}/stop`（child 先、parent 後），等 run 全部結束（預設 180 秒）。停機窗口從這裡起算 |
 | `hand-off` | Mac | 兩個專案 `PATCH handed_off_to = "agm-host"`：Mac daemon 萬一被拉起來也不會動它們（§6.5h） |
 | `stop-src` | Mac | 7788 的 listener 是 `agents-managerd` 才 `kill`，等 `daemon.lock` 放開 |
-| `export` | Mac | `project-transfer export`，協調者專案加 `--with-supervisor` |
+| `export` | Mac | `project-transfer export`，協調者專案加 `--with-supervisor`；host-state snapshot 完整設定、UI token、outbox 與 identity 路徑清單 |
 | `transcripts` | Mac→目標 | `transcript-transfer --target ubuntu@agm-host`，map：repo（`/Users/m4p/project/agents-manager`→`/home/ubuntu/project/agents-manager`）與資料目錄（`~/.config/agents-manager`→`/home/ubuntu/.config/agents-manager`，AGM-DM-GRUP 的 path 與協調者 cwd 在這底下）；`rsync` supervisor 目錄（不帶 `*.lease-token.*`、`*.lock`）。結束碼 2 時只擋 conflicts／refused 與「在跑名單裡的 bot 最後一段對話找不到」；更早的舊 session 在 Mac 上已經沒有檔（例：協調者專案 3 段）的只警告、記下個數給 import 的閘門 |
-| `ship` | Mac→目標 | 改好路徑的 bundle、project-transfer、helper、快照、在跑名單 `rsync` 到目標 `~/.config/agents-manager/cutover/<時間>/`（700），刪 Mac 上的 bundle（回滾靠的是 Mac 沒動過的 DB，不是 bundle） |
+| `ship` | Mac→目標 | 改好路徑的 project bundle、host-state bundle（含 UI token）、工具、快照、在跑名單 `rsync` 到目標 `~/.config/agents-manager/cutover/<時間>/`（700），傳完刪 Mac 上兩種 bundle；host-state bundle 只留目標安全狀態目錄供 verify／rollback 使用 |
 | `stop-dst` | 目標 | 7788 的 listener（`ss`）是 `agents-managerd` 才殺，等 `daemon.lock` 放開。hub 專案在這之後到 `start-dst` 之間也暫停 |
-| `import` | 目標 | 每個 bundle 先 `--dry-run`：transcript 不在的段數多於上一步記下的舊 session 數就停（對話沒搬到）；再正式 `import --host local --path-map …`（協調者專案加 `--with-supervisor`），摘要（含 `*.pre-transfer-*` 備份路徑）存回 Mac 的狀態目錄 |
+| `import` | 目標 | 所有 project bundle 先 `--dry-run`：transcript 不在的段數多於上一步記下的舊 session 數就停（對話沒搬到）；再先套用 host-state（來源非 project config、UI token、無衝突 outbox），最後正式 `import --host local --path-map …`（協調者專案加 `--with-supervisor`）。摘要與 `*.pre-transfer-*`／host-state 備份留在狀態目錄 |
 | `start-dst` | 目標 | 記下 `daemon.log` 行數，`systemd-run --user --collect -p Type=forking -p KillMode=process daemon-start.py`（§18.2e 同一套；沒有 `XDG_RUNTIME_DIR` 補 `/run/user/<uid>`），等 `/api/session` |
 | `resume` | 目標 | `POST /api/supervisor/setup`、`…/responder/setup` 用目標路徑重寫部署檔（`runtime.json` 的 `data_dir` 等）→ 在跑名單逐顆 `start?resume=native`（一次一顆）→ 原本在跑的協調者／巡檢 `…/start`（已經被接回的 409 也算好：要的是 `desired_running = 1`）。停機窗口到這裡結束 |
-| `verify` | 兩邊 | 兩個專案在目標 `host = local`、path 換過、沒有 `handed_off_to`、user bot 一顆不少、在跑名單都有活著的 run；`daemon.log` 起來之後沒有 `ERROR` 級的行（先去 ANSI 色碼、只看時間戳後的等級欄）；Mac 的 7788 沒人聽。沒過就停，提示 rollback |
+| `verify` | 兩邊 | host-state 的非 project config、UI token 與 outbox hash 都吻合；兩個專案在目標 `host = local`、path 換過、沒有 `handed_off_to`、user bot 一顆不少、在跑名單都有活著的 run；`daemon.log` 起來之後沒有 `ERROR` 級的行（先去 ANSI 色碼、只看時間戳後的等級欄）；Mac 的 7788 沒人聽。沒過就停，提示 rollback |
 | `timers` | 目標 | `systemctl --user enable --now ~/.config/systemd/user/com.agm.*.timer`（#677 的 unit 要先由 `agm ops-sync` 裝好，沒有就警告） |
 
 **回滾**（`cutover-to-host.sh rollback --state-dir <同一個>`，同樣預設 dry-run）：停目標 daemon → 把**第一次** import 前的 DB／config 備份放回
-（`import-<第一個專案>.json` 的 `backups`；同時刪 `-wal`／`-shm`）→ 起目標 daemon（hub 繼續跑）→ Mac 用 `launchctl submit` 跑 `daemon-start.py`（同 `daemon-swap.sh`）→
+（`import-<第一個專案>.json` 的 `backups`；同時刪 `-wal`／`-shm`），再還原原 config／UI token、移除內容仍未變動的搬入 outbox 檔（切換後已變更的檔保留）；即使尚無 project import 紀錄，也會還原已安裝的 host-state → 起目標 daemon（hub 繼續跑）→ Mac 用 `launchctl submit` 跑 `daemon-start.py`（同 `daemon-swap.sh`）→
 清兩個專案的 `handed_off_to` → 在跑名單在 Mac `start?resume=native`、協調者／巡檢標回要跑 → `launchctl bootstrap` 回 `launchd.txt` 裡的 `com.agm.*`。
 切換後在目標長出來的對話不會帶回 Mac（Mac 從切換前那一刻接回）；目標上搬過去的 transcript 與 supervisor 目錄留著不刪。
 

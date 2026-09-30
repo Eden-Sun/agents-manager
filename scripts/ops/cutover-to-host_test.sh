@@ -41,6 +41,8 @@ check_before() { # check_before <描述> <先出現的> <後出現的> <檔案>
     fi
 }
 
+PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$PATH" python3 -B "$HERE/host-state-transfer_test.py"
+
 # ---------------------------------------------------------------- 假 daemon
 
 FAKE_DAEMON='
@@ -135,10 +137,12 @@ setup() {
     export HOME="$ROOT/home"
     SRC_REPO="$ROOT/src-repo"; DST_REPO="$ROOT/dst-repo"; SRC_DATA="$ROOT/src-data"; DST_DATA="$ROOT/dst-data"
     mkdir -p "$HOME/Library/LaunchAgents" "$SRC_REPO" "$DST_REPO/target/release" "$DST_REPO/scripts/ops" \
-        "$SRC_DATA/supervisor/AGM" "$DST_DATA" "$ROOT/bin" "$ROOT/rbin"
+        "$SRC_DATA/supervisor/AGM" "$SRC_DATA/outbox/AM" "$DST_DATA/outbox" "$DST_DATA" "$ROOT/bin" "$ROOT/rbin"
     echo tok-src > "$SRC_DATA/ui-token"; echo tok-dst > "$DST_DATA/ui-token"
+    echo migrated-report > "$SRC_DATA/outbox/AM/report.txt"
     echo "x" > "$SRC_DATA/supervisor/AGM/handoff.md"
     : > "$DST_DATA/agents-manager.sqlite3"; echo '[server]' > "$DST_DATA/config.toml"
+    : > "$DST_DATA/daemon.lock"
     printf '[server]\n[judge]\nenabled = true\n' > "$SRC_DATA/config.toml"
     printf 'line\n' > "$DST_DATA/daemon.log"
     : > "$DST_REPO/target/release/agents-managerd"; chmod +x "$DST_REPO/target/release/agents-managerd"
@@ -234,6 +238,9 @@ if a[0] == "export":
     print(json.dumps({"counts": {}, "missing_files": []}))
     sys.exit(0)
 dry = "--dry-run" in a
+if not dry:
+    with open(os.path.join(root, "import-config.log"), "a") as f:
+        f.write(open(a[a.index("--config") + 1]).read())
 n_gone = os.environ.get("PT_WARN_TRANSCRIPT") if "PAM-moved" in a[a.index("--bundle") + 1] else None
 warn = [f"{n_gone} 段原生對話的 transcript 不在這台（例：/x）"] if dry and n_gone else []
 cfg = a[a.index("--config") + 1]
@@ -301,7 +308,8 @@ check "dry-run 列出目標接回" "start?resume=native" "$ROOT/out"
 check "在跑名單：接回 user bot，不含 browser-gc" "接回 3 顆：AM-1, AGM, AGM-responder" "$ROOT/out"
 check "在跑的 child 列出來" "在跑的 child 1 顆" "$ROOT/out"
 check "已移交的 hub 不在名單" "Agents Manager（PAM" "$ROOT/out"
-check "Mac config 有、目標沒有的段落要提醒" "Mac config 有 \[judge\]" "$ROOT/out"
+check "dry-run 列出完整設定移交" "host-state-transfer.py" "$ROOT/out"
+check_no "不再要求手動補來源 config 段落" "切換後在目標補上" "$ROOT/out"
 check_no "已移交的 hub 不碰" "H1" "$ROOT/out"
 teardown
 
@@ -330,6 +338,11 @@ check_no "Agents Manager 不帶 --with-supervisor" "project PAM .*--with-supervi
 check "對話搬移的 map 含 repo" "--map $SRC_REPO=$DST_REPO" "$ROOT/tt.log"
 check "對話搬移的 map 含資料目錄" "--map $SRC_DATA=$DST_DATA" "$ROOT/tt.log"
 check "supervisor 目錄 rsync 到目標" "$SRC_DATA/supervisor/ fake@target:$DST_DATA/supervisor/" "$ROOT/rsync.log"
+check "host-state bundle 與工具送到目標" "$DST_DATA/cutover/" "$ROOT/rsync.log"
+check_before "host-state install 在正式 project import 前執行" "host-state-transfer.py.*install.*host-state-backup" "project-transfer.*import.*--config.*config.toml[[:space:]]*$" "$ROOT/ssh.log"
+check "source ui-token 套用到目標" "tok=tok-src" "$ROOT/dst-api.log"
+check "outbox 檔案搬到目標" "migrated-report" "$DST_DATA/outbox/AM/report.txt"
+check "完整非 project config 在正式 import 前套用" "enabled = true" "$ROOT/import-config.log"
 compgen -G "$ROOT/src-data/cutover/*/*.json.gz" > /dev/null; check_eq "Mac 上的 bundle 傳完就刪" 1 $?
 kill -0 "$DST_PID" 2>/dev/null; check_eq "目標 daemon 停過" 1 $?
 check_before "import 先 --dry-run" "import .*PAM-moved.json.gz.*--dry-run" "import .*PAM-moved.json.gz --host local .*config.toml *$" "$ROOT/pt.log"
@@ -346,7 +359,7 @@ check_no "child 不單獨接回" "/api/bots/C1/start" "$D"
 check_no "browser-gc 不在目標接回" "/api/bots/A3/start" "$D"
 check_before "接回之後才標協調者要跑" "POST /api/bots/A1/start" "POST /api/supervisor/start" "$D"
 check "巡檢標回要跑" "POST /api/supervisor/responder/start" "$D"
-check "目標用目標的 token" "tok=tok-dst" "$D"
+check "目標用移交後的來源 token" "tok=tok-src" "$D"
 check "驗證通過" "驗證通過" "$ROOT/out"
 check "印出停機窗口" "停機窗口：" "$ROOT/out"
 check "記下每步耗時" "	import	" "$(ls -d "$ROOT"/src-data/cutover/*)/timings.tsv"
@@ -483,7 +496,9 @@ run "$ROOT/rb" rollback --state-dir "$ST" --execute --foreground
 check_eq "rollback 結束碼 0" 0 "$(cat "$ROOT/rb.rc")"
 check_eq "目標 DB 放回第一次 import 前的備份" db-before "$(cat "$DST_DATA/agents-manager.sqlite3")"
 [ -e "$DST_DATA/agents-manager.sqlite3-wal" ]; check_eq "舊的 -wal 清掉" 1 $?
-check_eq "目標 config 放回" cfg-before "$(cat "$DST_DATA/config.toml")"
+check_eq "目標 config 放回完整切換前內容" '[server]' "$(cat "$DST_DATA/config.toml")"
+check_eq "目標 ui-token rollback" tok-dst "$(cat "$DST_DATA/ui-token")"
+check_no "rollback 移除搬入 outbox 檔" "migrated-report" "$DST_DATA/outbox/AM/report.txt"
 check "Mac daemon 經 launchctl submit 起" "submit -l am-cutover-rollback-" "$ROOT/launchctl.log"
 check "清 handed_off_to" '"handed_off_to": null' "$ROOT/src-api.log"
 check_before "先收回再接回" "PATCH /api/projects/PAM" "POST /api/bots/P1/start?resume=native" "$ROOT/src-api.log"

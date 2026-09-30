@@ -597,7 +597,8 @@ install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/superv
 `Agents Manager` 與 `AGM-DM-GRUP` 整套從 Mac 切到 agm-host 本機跑（#675）。在 Mac 從 checkout 跑，不安裝；步驟、閘門、回滾與演練結果見 SPEC §11.9c。
 `cutover` 預設 dry-run（唯讀檢查＋列出會做的事），`--execute` 才做、並自己脫離成背景（log 在 `~/.config/agents-manager/cutover/<時間>/run.log`）；
 `rollback --state-dir <同一個>` 還原；`drill` 在目標另開目錄用 DB 複本演練、做完當下刪。輔助 `cutover-helper.py`（兩邊都跑）。
-隔離測試：`scripts/ops/cutover-to-host_test.sh`（兩顆假 daemon、假 ssh／rsync／launchctl，不碰正式環境）。
+`host-state-transfer.py` 隨 cutover 搬完整非 project config、UI token、outbox 與 identity 設定目錄清單；清單只記路徑／存在狀態，不搬憑證。目標安裝與 rollback 都拿 `daemon.lock`，不動 SQLite。
+隔離測試：`scripts/ops/cutover-to-host_test.sh`（兩顆假 daemon、假 ssh／rsync／launchctl、不碰正式環境，並執行 host-state 的暫存目錄測試）。
 
 ## 已安裝版與 repo 的落差（issue #418 稽核，2026-09-24）
 
