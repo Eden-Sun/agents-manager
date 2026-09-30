@@ -321,7 +321,37 @@ pub async fn prompt_from_api(
     // 「清掉再送我這則」：先清掉框裡使用者確認過的那段（`composer_draft::clear`），框空了才打字。
     clear_draft: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, Admission::Gated, send_now, clear_draft).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, false, Admission::Gated, send_now, clear_draft).await
+}
+
+/// `POST /prompt` with `queue_if_busy:true`: queue a user prompt only while the active run is busy.
+#[allow(clippy::too_many_arguments)]
+pub async fn prompt_from_api_queue_if_busy(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    send_now: bool,
+    clear_draft: Option<&str>,
+) -> LcResult<PromptOut> {
+    prompt_inner(
+        app,
+        bot_id,
+        text,
+        client_request_id,
+        None,
+        None,
+        attachment_ids,
+        relay,
+        true,
+        true,
+        Admission::Gated,
+        send_now,
+        clear_draft,
+    )
+    .await
 }
 
 /// AGM 派工專用：對方正在回合中時**排隊**而不是 409（AGM 2026-09-16 裁示）。
@@ -336,7 +366,7 @@ pub async fn prompt_relayed_queueable(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, Admission::Gated, false, None).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, false, Admission::Gated, false, None).await
 }
 
 /// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
@@ -647,7 +677,7 @@ pub async fn prompt_grouped(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, Admission::Gated, false, None).await
+    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, false, Admission::Gated, false, None).await
 }
 
 /// 插隊送出（issue #103）：照舊寫 turn／訊息進資料庫，但**不等 idle**——對 pane 送 claude 2.1.275 的
@@ -677,7 +707,7 @@ pub async fn prompt_control_plane(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, Admission::ControlPlane, false, None).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, false, Admission::ControlPlane, false, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -693,6 +723,8 @@ async fn prompt_inner(
     relay: RelaySrc<'_>,
     // 對方回合中時排隊而不是 409。只有 AGM 派工會給 true。
     queue_if_busy: bool,
+    // User /prompt 的 `queue_if_busy:true`：只在 run 正在跑但 turn／agent 忙時排入 awaits_idle。
+    queue_awaits_idle: bool,
     // 維護窗口的入場閘門要不要管這一則（issue #86）。
     admission: Admission,
     // 插隊送出（issue #103）：對方回合中時打斷它，而不是 409。只有使用者按「立刻送出」會給 true。
@@ -753,6 +785,11 @@ async fn prompt_inner(
         return answer_for_turn(app, &t).await;
     }
 
+    if queue_awaits_idle {
+        // A queued turn can remain pending briefly after its predecessor ends; do not let a direct
+        // prompt overtake that occupied user slot during the queue worker's wake-up window.
+        super::busy_send::refuse_if_slot_taken(app, &conv).await?;
+    }
     // 維護窗口的入場閘門（issue #86）：`restart` 租約握著的時候，daemon 這一側不再開新回合。
     // 擋在規劃與 turn 之前，所以連一列都不會建，同一個 `client_request_id` 之後原樣重送是乾淨的。
     // 冪等那一段在上面：已經送出去的那一筆照舊回它自己的結果，不會因為窗口開著就改口。
@@ -766,6 +803,12 @@ async fn prompt_inner(
     })?;
     if run.state != "running" {
         return Err(LcError::conflict("run is not running", json!({"run_id": run.id, "state": run.state})));
+    }
+    if queue_awaits_idle {
+        let in_flight = db::in_flight_turn(&app.db, &run.id).await.map_err(up)?;
+        if in_flight.is_some() || run.agent_status != "idle" {
+            return super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay, &files).await;
+        }
     }
     if run.agent_status == "blocked" {
         return Err(LcError::conflict("agent is blocked; answer the prompt first", json!({"run_id": run.id})));
@@ -803,6 +846,11 @@ async fn prompt_inner(
     // `--resume` 接回之後還沒證明接回的是原本那段對話（issue #92，`resume_gate`）：一個字都不打。
     // AGM 派工排進佇列（驗證完或到期由 flush 送）；其他送入跟「對方回合中」一樣回可重試的 409。
     if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, &bot, &run, &conv).await {
+        if queue_awaits_idle {
+            let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay, &files).await?;
+            schedule_flush_retry(app, bot_id, left);
+            return Ok(out);
+        }
         if queue_if_busy {
             let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay).await?;
             schedule_flush_retry(app, bot_id, left);
@@ -816,6 +864,11 @@ async fn prompt_inner(
     // AGM 派工遇到「使用者剛按 Esc」：一樣先讓使用者拿回輸入框——排進佇列，寬限到了才送（§4.4a）。
     if queue_if_busy {
         if let Some(wait) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
+            if queue_awaits_idle {
+                let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay, &files).await?;
+                schedule_flush_retry(app, bot_id, wait);
+                return Ok(out);
+            }
             let out = queue_for_next_turn(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay).await?;
             schedule_flush_retry(app, bot_id, wait);
             return Ok(out);

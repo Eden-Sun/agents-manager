@@ -260,6 +260,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (30, "db1edd18d6bf4693"),
     // issue #708：`projects.handed_off_to`（專案移交給另一台主機的 daemon）。
     (31, "4aa40b8a872df7d8"),
+    // issue #733：persist user prompts accepted while the agent is busy.
+    (32, "4376ae24058f9753"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -407,6 +409,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         // 沒有 run 也不當孤兒撤，啟動失敗只記原因（`start_error`），等使用者重新啟動或取消。
         ("turns", "awaits_start", "ALTER TABLE turns ADD COLUMN awaits_start INTEGER NOT NULL DEFAULT 0"),
         ("turns", "start_error", "ALTER TABLE turns ADD COLUMN start_error TEXT"),
+        // issue #733: a user prompt accepted while the run is busy waits for the next idle edge.
+        ("turns", "awaits_idle", "ALTER TABLE turns ADD COLUMN awaits_idle INTEGER NOT NULL DEFAULT 0"),
         // 舊庫裡的每一列都是舊流程「先寫檔、DB insert 最後做」留下來的——insert 成功就代表檔案已經寫完，
         // 一律當 'ready'（issue #88）。
         (
@@ -1022,6 +1026,9 @@ pub struct Turn {
     /// 1 = 送出時 bot 沒在跑，daemon 先收下、再替它啟動（issue #122）。只對 `queued` 有意義。
     #[sqlx(default)]
     pub awaits_start: i64,
+    /// 1 = accepted with `queue_if_busy` while the agent was busy (#733).
+    #[sqlx(default)]
+    pub awaits_idle: i64,
     /// 上一次替這一則啟動 bot 失敗（或 run 起來後又結束）的原因；`None`＝沒失敗過或正在重試。
     #[sqlx(default)]
     pub start_error: Option<String>,

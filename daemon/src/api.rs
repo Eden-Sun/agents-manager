@@ -3996,6 +3996,9 @@ struct PromptIn {
     /// bot 在跑就跟沒帶一樣。
     #[serde(default)]
     start_if_stopped: bool,
+    /// Busy run: persist this user prompt and wait for the next idle edge (issue #733).
+    #[serde(default)]
+    queue_if_busy: bool,
     /// 409 `composer_busy` 之後（2026-09-26）：`clear_draft` 先清掉框裡那段再送 `text`，`submit_draft` 改成送出框裡那段
     /// （按 Enter、不帶 `text`）。兩個都要帶 `expect_draft_token`＝409 回的完整草稿 token；框裡換了字就 409 `draft_changed`、不動它。
     #[serde(default)]
@@ -4042,12 +4045,14 @@ async fn prompt_bot(
         None
     };
     let out = if b.submit_draft {
-        if b.clear_draft || b.send_now || b.start_if_stopped || !b.attachments.is_empty() {
+        if b.clear_draft || b.send_now || b.start_if_stopped || b.queue_if_busy || !b.attachments.is_empty() {
             return Err(LcError::Bad("submit_draft sends the composer's draft as it is; it takes no other options".into()));
         }
         lifecycle::submit_composer_draft(&app, &id, expect.unwrap_or_default(), &crid).await?
     } else if b.start_if_stopped && !b.send_now && !b.clear_draft {
         lifecycle::prompt_starting(&app, &id, &b.text, &crid, &b.attachments, src).await?
+    } else if b.queue_if_busy && !b.clear_draft {
+        lifecycle::prompt_from_api_queue_if_busy(&app, &id, &b.text, &crid, &b.attachments, src, b.send_now, expect).await?
     } else {
         lifecycle::prompt_from_api(&app, &id, &b.text, &crid, &b.attachments, src, b.send_now, expect).await?
     };
@@ -5848,7 +5853,23 @@ mod prompt_route_tests {
     }
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, clear_draft: false, submit_draft: false, expect_draft_token: None };
+        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None };
+        let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
+            Ok(r) => r,
+            Err(err) => err.into_response(),
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn call_queue_if_busy(e: &crate::testing::Env, bot: &str, text: &str, crid: &str, attachments: &[String]) -> (StatusCode, Value) {
+        let body: PromptIn = serde_json::from_value(json!({
+            "text": text,
+            "client_request_id": crid,
+            "queue_if_busy": true,
+            "attachments": attachments,
+        })).unwrap();
         let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
@@ -5869,6 +5890,98 @@ mod prompt_route_tests {
         assert_eq!(body["error"], "delivery_unprovable");
         assert_eq!(body["reason"], "prompt_too_long_to_prove");
         assert_eq!(body["sent"], false);
+    }
+
+    #[tokio::test]
+    async fn a_user_prompt_can_claim_the_single_busy_queue_slot_idempotently() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        let run_id: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'")
+            .bind(&bot).fetch_one(&e.app.db).await.unwrap();
+        let conversation_id = db::conversation_id(&e.app.db, &bot).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?, ?, ?, 'web', 'in_flight', 'ok', ?)")
+            .bind(db::ulid()).bind(&conversation_id).bind(&run_id).bind(db::now()).execute(&e.app.db).await.unwrap();
+
+        let attachment_id = db::ulid();
+        sqlx::query("INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, created_at) VALUES (?,?,'image.png','image/png',1,'/tmp/image.png','/tmp/image.png','local',?)")
+            .bind(&attachment_id).bind(&bot).bind(db::now()).execute(&e.app.db).await.unwrap();
+        let attachments = vec![attachment_id.clone()];
+        let (status, first) = call_queue_if_busy(&e, &bot, "稍後送出", "busy-queue-1", &attachments).await;
+        assert_eq!(status, StatusCode::OK, "queue_if_busy 收下忙碌中的 prompt：{first}");
+        assert_eq!(first["delivery"], "queued", "{first}");
+        let turn_id = first["turn_id"].as_str().unwrap();
+        let message_id = first["message_id"].as_str().unwrap();
+        let stored: (String, String, String, i64, Option<String>) = sqlx::query_as("SELECT status, origin, delivery, awaits_idle, prompt_text FROM turns WHERE id=?")
+            .bind(turn_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!((stored.0.as_str(), stored.1.as_str(), stored.2.as_str(), stored.3), ("queued", "web", "pending", 1));
+        assert!(stored.4.as_deref().unwrap().starts_with("稍後送出\n\n"), "附件路徑要存在 flush 可送的 prompt_text：{stored:?}");
+        let replay = call_queue_if_busy(&e, &bot, "稍後送出", "busy-queue-1", &attachments).await;
+        assert_eq!(replay.0, StatusCode::OK, "{}", replay.1);
+        assert_eq!(replay.1["turn_id"], turn_id, "same client_request_id returns the queued turn");
+        assert_eq!(replay.1["message_id"], message_id);
+
+        let (status, second) = call_queue_if_busy(&e, &bot, "再一則", "busy-queue-2", &[]).await;
+        assert_eq!(status, StatusCode::CONFLICT, "one busy queue slot per bot: {second}");
+        assert_eq!(second["reason"], "queue_slot_taken", "{second}");
+        assert_eq!(second["turn_id"], turn_id, "the conflict identifies the existing slot");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE conversation_id=? AND status='queued'")
+            .bind(&conversation_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(count, 1, "the refused request writes no turn");
+        let message_turn: String = sqlx::query_scalar("SELECT turn_id FROM messages WHERE id=?")
+            .bind(message_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(message_turn, turn_id);
+        let bound: Option<String> = sqlx::query_scalar("SELECT message_id FROM attachments WHERE id=?")
+            .bind(&attachment_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(bound.as_deref(), Some(message_id), "message and attachment binding commit together");
+        let turn: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(turn_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(serde_json::to_value(turn).unwrap()["awaits_idle"], 1, "turn JSON exposes the wait flag");
+    }
+
+    #[tokio::test]
+    async fn queue_if_busy_uses_the_agent_status_when_no_turn_is_in_flight() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=? AND state='running'")
+            .bind(&bot).execute(&e.app.db).await.unwrap();
+        let (status, body) = call_queue_if_busy(&e, &bot, "等 agent 閒下來", "busy-agent-status", &[]).await;
+        assert_eq!(status, StatusCode::OK, "非 idle 狀態也要持久排隊：{body}");
+        assert_eq!(body["delivery"], "queued", "{body}");
+        assert!(e.herdr.calls_to("agent.prompt").is_empty());
+        assert!(e.herdr.calls_to("pane.send_text").is_empty());
+    }
+
+    #[tokio::test]
+    async fn queue_if_busy_on_an_idle_run_keeps_direct_delivery() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        e.herdr.live_pane("pane-route", crate::testing::LivePane { width: Some(120), boxed: true, ..Default::default() });
+        let (status, body) = call_queue_if_busy(&e, &bot, "現在就送", "idle-queue-flag", &[]).await;
+        assert_eq!(status, StatusCode::OK, "idle runs keep the existing direct prompt route: {body}");
+        assert_ne!(body["delivery"], "queued", "an idle run sends directly");
+        let awaits_idle: i64 = sqlx::query_scalar("SELECT awaits_idle FROM turns WHERE id=?")
+            .bind(body["turn_id"].as_str().unwrap()).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(awaits_idle, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_attachment_binding_rolls_back_the_busy_queue_admission() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE bot_id=? AND state='running'")
+            .bind(&bot).execute(&e.app.db).await.unwrap();
+        let attachment_id = db::ulid();
+        sqlx::query("INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, created_at) VALUES (?,?,'image.png','image/png',1,'/tmp/image.png','/tmp/image.png','local',?)")
+            .bind(&attachment_id).bind(&bot).bind(db::now()).execute(&e.app.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER refuse_busy_queue_attachment BEFORE UPDATE OF message_id ON attachments BEGIN SELECT RAISE(ABORT, 'injected bind failure'); END")
+            .execute(&e.app.db).await.unwrap();
+
+        let (status, body) = call_queue_if_busy(&e, &bot, "有附件", "busy-queue-rollback", &[attachment_id.clone()]).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "failed attachment binding must fail the admission: {body}");
+        let (turns, messages): (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM turns WHERE client_request_id='busy-queue-rollback'), (SELECT count(*) FROM messages WHERE content='有附件')")
+            .fetch_one(&e.app.db).await.unwrap();
+        let bound: Option<String> = sqlx::query_scalar("SELECT message_id FROM attachments WHERE id=?")
+            .bind(&attachment_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!((turns, messages, bound), (0, 0, None), "turn, message and attachment binding all roll back");
     }
 
     /// #337：同一個 client_request_id 換了內容不能回第一則的結果；完全一樣的重送照舊回同一個 turn。
@@ -8196,6 +8309,7 @@ mod relay_from_auth_tests {
             reply_to: None,
             send_now: false,
             start_if_stopped: false,
+            queue_if_busy: false,
             clear_draft: false,
             submit_draft: false,
             expect_draft_token: None,
@@ -8223,6 +8337,7 @@ mod relay_from_auth_tests {
             reply_to: None,
             send_now: false,
             start_if_stopped: false,
+            queue_if_busy: false,
             clear_draft: false,
             submit_draft: false,
             expect_draft_token: None,
@@ -8310,6 +8425,7 @@ mod relay_from_auth_tests {
             reply_to: None,
             send_now: false,
             start_if_stopped: true,
+            queue_if_busy: false,
             clear_draft: false,
             submit_draft: false,
             expect_draft_token: None,
@@ -8337,6 +8453,7 @@ mod relay_from_auth_tests {
                 reply_to: None,
                 send_now: false,
                 start_if_stopped: false,
+                queue_if_busy: false,
                 clear_draft: clear,
                 submit_draft: submit,
                 expect_draft_token: expect.map(str::to_string),
