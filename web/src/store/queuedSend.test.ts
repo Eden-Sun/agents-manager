@@ -1,31 +1,52 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { restoreQueued } from './queuedSend.ts'
+import { queuedSendFor } from './queuedSend.ts'
+import type { Message, Turn } from '../api/types.ts'
 
-const pending = { text: '排隊那句', attachments: ['a1', 'a2'] }
+const turn = (extra: Partial<Turn> = {}) =>
+  ({
+    id: 't1',
+    conversation_id: 'c1',
+    run_id: 'r1',
+    bot_id: 'b1',
+    origin: 'web',
+    status: 'queued',
+    delivery: 'pending',
+    unverified: false,
+    autoResend: true,
+    awaitsStart: false,
+    awaitsIdle: true,
+    startError: null,
+    client_request_id: 'cr1',
+    created_at: '2026-09-30T00:00:00Z',
+    completed_at: null,
+    ...extra,
+  }) as Turn
 
-test('槽位空著：原樣排回佇列，附件 id 一個不少', () => {
-  const r = restoreQueued({ queuedSends: {}, drafts: { 'bot:b1': '打到一半' } }, 'b1', pending)
-  assert.deepEqual(r.patch, { queuedSends: { b1: pending } })
-  assert.equal(r.droppedAttachments, 0)
-})
+const message = (extra: Partial<Message> = {}) =>
+  ({
+    id: 'm1',
+    conversation_id: 'c1',
+    turn_id: 't1',
+    bot_id: 'b1',
+    role: 'user',
+    content: '排隊那句',
+    source: 'web',
+    incomplete: false,
+    group_id: null,
+    attachments: [{ id: 'a1', name: 'image.png', mime: 'image/png', size: 10, path: '/a1' }],
+    relay_from: null,
+    terminal_snapshot: null,
+    created_at: '2026-09-30T00:00:00Z',
+    ...extra,
+  }) as Message
 
-test('槽位被新的一則佔走：不蓋掉新的，舊文字接回輸入框最前面', () => {
-  const newer = { text: '新排的', attachments: [] }
-  const r = restoreQueued({ queuedSends: { b1: newer }, drafts: { 'bot:b1': '打到一半' } }, 'b1', pending)
-  assert.equal(r.patch.queuedSends, undefined)
-  assert.deepEqual(r.patch.drafts, { 'bot:b1': '排隊那句\n打到一半' })
-  assert.equal(r.droppedAttachments, 2)
-})
-
-test('輸入框是空的就只放舊文字，不多一個換行', () => {
-  const r = restoreQueued({ queuedSends: { b1: { text: 'x', attachments: [] } }, drafts: {} }, 'b1', pending)
-  assert.deepEqual(r.patch.drafts, { 'bot:b1': '排隊那句' })
-})
-
-test('別顆 bot 的佇列與草稿不受影響', () => {
-  const s = { queuedSends: { b2: { text: 'z', attachments: [] } }, drafts: { 'bot:b2': 'zz' } }
-  const r = restoreQueued(s, 'b1', pending)
-  assert.deepEqual(r.patch.queuedSends, { b2: s.queuedSends.b2, b1: pending })
-  assert.equal(r.patch.drafts, undefined)
+test('queuedSendFor projects only an awaits_idle queued turn and its user message', () => {
+  const state = {
+    turns: { b1: { t1: turn(), t2: turn({ id: 't2', awaitsIdle: false, awaitsStart: true }) } },
+    messages: { b1: [message()] },
+  }
+  assert.deepEqual(queuedSendFor(state, 'b1'), { turnId: 't1', text: '排隊那句', attachments: ['a1'] })
+  assert.equal(queuedSendFor(state, 'b2'), null)
+  assert.equal(queuedSendFor({ ...state, turns: { b1: { t1: turn({ status: 'in_flight' }) } } }, 'b1'), null)
 })

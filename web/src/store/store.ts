@@ -47,14 +47,14 @@ import { quotaForIdentity } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
 import { paneReadOnly } from '../lib/shellAccess'
 import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
-import { prependDraft, restoreQueued } from './queuedSend'
+import { prependDraft, queuedSendFor } from './queuedSend'
 import { noteQueuedTurn, startingSend, startingSendLabel } from './startingSend'
 import { asUncommittedSend, noteInFlightTurn, uncommittedSendText } from './uncommittedSend'
 import { sendNowFellThrough } from './sendNowOutcome'
 import { missionRequests } from './missionRequests'
 import { MISSION_USER_PAUSE } from '../lib/missionView'
 
-import type { QueuedSend, RestoreResult } from './queuedSend'
+import type { QueuedSend } from './queuedSend'
 
 /** `patchBot` 的結果：要不要重啟，以及 daemon 有沒有把送進去的停用模型換掉（issue #539）。 */
 export interface PatchBotOutcome {
@@ -64,7 +64,6 @@ export interface PatchBotOutcome {
 }
 import { laterMark, serverUnread } from './sharedUnread'
 import { viewingBot, viewingGroup } from './viewing'
-import { flushDelayMs, flushGaveUp, flushGaveUpText } from './flushRetry'
 import { confirmGroupTurn, dropLegacyGroupCounts, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
 import {
   botKey,
@@ -98,6 +97,7 @@ const missionLoads = new Map<string, () => Promise<void>>()
 const missionListLoads = new Map<string, () => Promise<void>>()
 /** 整頁重抓成功後遞增；跨過重抓的較早頁回應不能再接到新的時間軸前面。 */
 const messagePageGenerations = new Map<string, number>()
+let legacyQueueMigrationAttempted = false
 
 function messagePageGeneration(kind: 'bot' | 'group', id: string): number {
   return messagePageGenerations.get(`${kind}:${id}`) ?? 0
@@ -405,7 +405,7 @@ export interface StoreState {
   /** Render only while `composerState(...).inFlightTurnId === liveReply.turnId` so a stale entry never shows. */
   liveReply: Record<string, LiveReply>
 
-  /** 回合進行中按送出的訊息（每 bot 最多一則），回合結束自動送出。 */
+  /** @deprecated UI compatibility projection only; source is queued awaits_idle turns plus their user messages. */
   queuedSends: Record<string, QueuedSend>
 
   /** SPEC §13 group view; non-null overrides `selectedBotId` (which is kept). */
@@ -503,7 +503,15 @@ export interface StoreState {
   /** `sendNow`＝插隊送出（issue #103）：對方回合中時打斷它，而不是排隊／409。 */
   /** `startIfStopped`：bot 沒在跑時交給 daemon 先收下再啟動（issue #122），不經瀏覽器佇列。 */
   /** `draft`：處理框裡卡著的草稿（`composerDrafts`）——清掉再送這則，或改成送出框裡那段。 */
-  sendPrompt: (botId: string, text: string, attachments?: string[], sendNow?: boolean, startIfStopped?: boolean, draft?: DraftRequest) => Promise<boolean>
+  sendPrompt: (
+    botId: string,
+    text: string,
+    attachments?: string[],
+    sendNow?: boolean,
+    startIfStopped?: boolean,
+    draft?: DraftRequest,
+    queueIfBusy?: boolean,
+  ) => Promise<boolean>
   /** 409 `composer_busy` 帶回來的框內草稿，輸入列旁邊顯示到使用者處理或取消（`store/composerDraft.ts`）。 */
   composerDrafts: Record<string, ComposerDraftBlock>
   dismissComposerDraft: (botId: string) => void
@@ -601,6 +609,8 @@ export interface StoreState {
   restoreQueuedSend: (botId: string, pending: QueuedSend) => void
   /** issue #122：撤回 daemon 那一則「等 bot 起來」的訊息，文字接回輸入框最前面。 */
   cancelStartingSend: (botId: string) => Promise<void>
+  /** issue #733：撤回 daemon-owned awaits_idle queued turn，再把原文接回草稿。 */
+  withdrawQueuedSend: (botId: string) => Promise<void>
 }
 
 let noticeSeq = 0
@@ -926,6 +936,7 @@ export const useStore = create<StoreState>((set, get) => {
   async bootstrap() {
     try {
       await api.session()
+      await migrateLegacyQueuedSends(get)
       await get().refreshState()
       // `refreshState` 永不 throw；首次失敗就 ready 會讓 routeSync 把深連結當成 Bot 不在、改成 `/`。
       if (get().stateStale) throw new Error(lastRefreshError ?? '無法讀取 daemon 狀態')
@@ -1404,7 +1415,6 @@ export const useStore = create<StoreState>((set, get) => {
           }
         }
         await get().refreshState()
-        if (get().queuedSends[botId]) flushQueued(botId)
       },
       startErrText,
     )
@@ -1468,41 +1478,23 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   queueSend(botId, text, attachments) {
-    // 槽位只有一格，而 UI 完全沒表達這個上限（輸入框清空、還寫著「先打下一則」）。不先把舊的接回去，
-    // 第二次 Enter 會把第一則從 store 裡整個刪掉：沒有通知、沒有草稿，附件 id 也一起孤兒化。
-    const prev = get().queuedSends[botId]
-    set((st) => ({ queuedSends: { ...st.queuedSends, [botId]: { text, attachments } } }))
-    if (!prev) return
-    const r = restoreQueued(get(), botId, prev)
-    applyRestore(set, get, r)
-    const lost = r.droppedAttachments > 0 ? `，${r.droppedAttachments} 個附件要重新加` : ''
-    get().notify('error', `一次只排得下一則，前一則已退回輸入框${lost}`)
+    // UI compatibility adapter. The queue itself is created by the daemon's /prompt endpoint.
+    void get().sendPrompt(botId, text, attachments, false, false, undefined, true)
   },
 
   cancelQueuedSend(botId) {
-    set((st) => ({ queuedSends: withoutKey(st.queuedSends, botId) }))
+    void get().withdrawQueuedSend(botId)
   },
 
   unqueueToDraft(botId) {
-    const pending = get().queuedSends[botId]
-    if (!pending) return
-    const key = `bot:${botId}` as const
-    // 接在現有草稿前面，不是蓋掉：輸入框裡可能正是上一次被退回的那一則。
-    const text = prependDraft(pending.text, get().drafts[key] ?? '')
-    set((st) => ({ queuedSends: withoutKey(st.queuedSends, botId) }))
-    get().setDraft(key, text)
-    get().setDraftCursor(key, pending.text.length)
-    if (pending.attachments.length > 0) {
-      get().notify('error', `訊息已放回輸入框，但 ${pending.attachments.length} 個附件要重新加`)
-    }
+    void get().withdrawQueuedSend(botId)
   },
 
   restoreQueuedSend(botId, pending) {
-    const r = restoreQueued(get(), botId, pending)
-    applyRestore(set, get, r)
-    if (r.droppedAttachments > 0) {
-      get().notify('error', `訊息已退回輸入框，但 ${r.droppedAttachments} 個附件要重新加`)
-    }
+    const key = `bot:${botId}` as const
+    get().setDraft(key, prependDraft(pending.text, get().drafts[key] ?? ''))
+    get().setDraftCursor(key, pending.text.length)
+    if (pending.attachments.length > 0) get().notify('error', `訊息已退回輸入框，但 ${pending.attachments.length} 個附件要重新加`)
   },
 
   async cancelStartingSend(botId) {
@@ -1510,8 +1502,9 @@ export const useStore = create<StoreState>((set, get) => {
     if (!pending) return
     // 連點：第一下撤回成功之後，第二下拿到 409（那一則已經是 failed）——不能被說成「撤不回來」。
     await guarded(set, get, `withdraw:${botId}`, async () => {
+      let withdrawn: Awaited<ReturnType<typeof api.withdrawTurn>>
       try {
-        await api.withdrawTurn(pending.turnId)
+        withdrawn = await api.withdrawTurn(pending.turnId)
       } catch (e) {
         // 409：已經被佇列送出去了，撤不回來。
         get().notify('error', `撤不回來（可能已經送出）：${errText(e)}`)
@@ -1519,22 +1512,48 @@ export const useStore = create<StoreState>((set, get) => {
         return
       }
       const key = `bot:${botId}` as const
-      get().setDraft(key, prependDraft(pending.text, get().drafts[key] ?? ''))
-      get().setDraftCursor(key, pending.text.length)
-      if (pending.attachments > 0) get().notify('error', `訊息已放回輸入框，但 ${pending.attachments} 個附件要重新加`)
+      const text = withdrawn.text || pending.text
+      markWithdrawnTurn(set, get, botId, pending.turnId)
+      get().setDraft(key, prependDraft(text, get().drafts[key] ?? ''))
+      get().setDraftCursor(key, text.length)
+      const attachmentCount = withdrawn.attachments.length || pending.attachments
+      if (attachmentCount > 0) get().notify('error', `訊息已放回輸入框，但 ${attachmentCount} 個附件要重新加`)
       await get().loadMessages(botId)
     })
   },
 
-  async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false, draft) {
+  async withdrawQueuedSend(botId) {
+    const pending = queuedSendFor(get(), botId)
+    if (!pending) return
+    await guarded(set, get, `withdraw:${botId}`, async () => {
+      let withdrawn: Awaited<ReturnType<typeof api.withdrawTurn>>
+      try {
+        withdrawn = await api.withdrawTurn(pending.turnId)
+      } catch (e) {
+        get().notify('error', `撤不回來（可能已經送出）：${errText(e)}`)
+        await Promise.all([get().refreshState(), get().loadMessages(botId)])
+        return
+      }
+      markWithdrawnTurn(set, get, botId, pending.turnId)
+      const key = `bot:${botId}` as const
+      const text = withdrawn.text || pending.text
+      get().setDraft(key, prependDraft(text, get().drafts[key] ?? ''))
+      get().setDraftCursor(key, text.length)
+      const attachmentCount = withdrawn.attachments.length || pending.attachments.length
+      if (attachmentCount > 0) get().notify('error', `訊息已放回輸入框，但 ${attachmentCount} 個附件要重新加`)
+      await get().loadMessages(botId)
+    })
+  },
+
+  async sendPrompt(botId, text, attachments = [], sendNow = false, startIfStopped = false, draft, queueIfBusy = false) {
     // 連線斷在 daemon 收下之後（回應遺失）：使用者會再按一次同一句，要拿同一個 crid，daemon 才認得是同一件事而不是再送一次。
     // 只有「沒收到任何回覆」的失敗才沿用；daemon 明確回了（成功或 ApiError）就作廢，下一次是新的動作（#367）。
     const draftKey = draft ? `:${draft.action}:${draft.token}` : ''
-    const reqKey = `send:${botId}:${sendNow ? 1 : 0}:${text}\u0000${attachments.join(',')}${draftKey}`
+    const reqKey = `send:${botId}:${sendNow ? 1 : 0}:${startIfStopped ? 1 : 0}:${queueIfBusy ? 1 : 0}:${text}\u0000${attachments.join(',')}${draftKey}`
     const crid = createRequestId(reqKey)
     if (draft) set((s) => markDraftBusy(s, botId, draft.action))
     try {
-      const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped, draft)
+      const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped, draft, queueIfBusy)
       settleCreateRequest(reqKey)
       set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
       // 送出鍵沒生效（not_sent）／不知道生效沒有（unknown）：這一則已是 failed、沒有照一般方式送出（#120）。
@@ -1559,7 +1578,12 @@ export const useStore = create<StoreState>((set, get) => {
       }
       // daemon 收下了、還沒送（issue #122：它會自己啟動 bot）：先記成排隊中，輸入框馬上換成「啟動中」那一條。
       if (res.delivery === 'queued') {
-        set((s) => noteQueuedTurn(s, botId, res.turn_id, crid, startIfStopped))
+        set((s) => noteQueuedTurn(s, botId, res.turn_id, crid, startIfStopped, queueIfBusy && !startIfStopped))
+        if (queueIfBusy && !startIfStopped) {
+          // The queued user message was committed with the turn. Read its canonical text and attachment metadata
+          // from the same daemon history API the selector uses instead of constructing a second browser copy.
+          await get().loadMessages(botId)
+        }
         return true
       }
       const delivery = res.delivery
@@ -1602,6 +1626,15 @@ export const useStore = create<StoreState>((set, get) => {
       // claude 停在登入選單：通知講白，不要只給「HTTP 409」。
       if (e instanceof ApiError && e.status === 409 && e.body.reason === 'needs_login') {
         get().notify('error', typeof e.body.message === 'string' ? e.body.message : '這個 claude 還沒登入，先到「終端」分頁完成登入。')
+        return false
+      }
+      if (queueIfBusy && e instanceof ApiError && e.status === 409 && e.body.reason === 'queue_slot_taken') {
+        const key = `bot:${botId}` as const
+        get().setDraft(key, draftWithText(text, get().drafts[key] ?? ''))
+        get().setDraftCursor(key, text.length)
+        const attachmentNote = attachments.length ? `；${attachments.length} 個附件要重新加` : ''
+        get().notify('error', `已有一則訊息排隊中，這一則已退回輸入框${attachmentNote}`)
+        await Promise.all([get().refreshState(), get().loadMessages(botId)])
         return false
       }
       // 插不了隊（不是 claude、CLI 比 2.1.275 舊、版本還不知道）：daemon 已經說了原因，照抄比「HTTP 409」有用。
@@ -2539,6 +2572,73 @@ export const useStore = create<StoreState>((set, get) => {
 }
 })
 
+/**
+ * Compatibility projection for the still-shared composer. It is rebuilt from daemon turns and messages,
+ * never written by Enter or used to decide when a message is sent.
+ */
+function queuedSendProjection(state: StoreState): Record<string, QueuedSend> {
+  const projection: Record<string, QueuedSend> = {}
+  for (const botId of Object.keys(state.turns)) {
+    const pending = queuedSendFor(state, botId)
+    if (pending) projection[botId] = pending
+  }
+  return projection
+}
+
+function sameQueuedProjection(a: Record<string, QueuedSend>, b: Record<string, QueuedSend>): boolean {
+  const keysA = Object.keys(a)
+  const keysB = Object.keys(b)
+  return keysA.length === keysB.length && keysA.every((key) => {
+    const left = a[key]
+    const right = b[key]
+    return Boolean(right) && left.turnId === right.turnId && left.text === right.text && left.attachments.join('\0') === right.attachments.join('\0')
+  })
+}
+
+useStore.subscribe((state, previous) => {
+  if (state.turns === previous.turns && state.messages === previous.messages) return
+  const queuedSends = queuedSendProjection(state)
+  if (!sameQueuedProjection(state.queuedSends, queuedSends)) useStore.setState({ queuedSends })
+})
+
+/** One-time bridge for a live/HMR store left over from the old bundle's non-persistent memory queue. */
+async function migrateLegacyQueuedSends(get: GetFn): Promise<void> {
+  if (legacyQueueMigrationAttempted) return
+  legacyQueueMigrationAttempted = true
+  const state = get()
+  const pending = Object.entries(state.queuedSends).filter(([botId, row]) => row && !queuedSendFor(state, botId))
+  if (pending.length === 0) return
+  useStore.setState({ queuedSends: {} })
+  for (const [botId, row] of pending) {
+    const legacy = row as QueuedSend
+    if (!legacy.text && legacy.attachments.length === 0) continue
+    const accepted = await get().sendPrompt(botId, legacy.text, legacy.attachments, false, false, undefined, true)
+    if (!accepted) {
+      const key = `bot:${botId}` as const
+      const current = get().drafts[key] ?? ''
+      const restored = draftWithText(legacy.text, current)
+      if (restored !== current) get().setDraft(key, restored)
+      if (legacy.attachments.length > 0) {
+        get().notify('error', `舊分頁的訊息已退回輸入框，但 ${legacy.attachments.length} 個附件要重新加`)
+      }
+    }
+  }
+}
+
+function markWithdrawnTurn(set: SetFn, get: GetFn, botId: string, turnId: string): void {
+  const turn = get().turns[botId]?.[turnId]
+  if (!turn || turn.status !== 'queued') return
+  set((state) => ({
+    turns: {
+      ...state.turns,
+      [botId]: {
+        ...(state.turns[botId] ?? {}),
+        [turnId]: { ...turn, status: 'failed', delivery: 'failed', completed_at: new Date().toISOString() },
+      },
+    },
+  }))
+}
+
 /** 任務不在了：從已載入的清單裡拿掉，沒載過的專案不動。 */
 function dropMission(map: Record<string, Mission[]>, missionId: string): Record<string, Mission[]> {
   const out: Record<string, Mission[]> = {}
@@ -2693,11 +2793,6 @@ function botIdsNeedingConversationReload(get: GetFn): string[] {
   return [...botIds]
 }
 
-/** A refreshed turn may be the only completion signal received while the socket was disconnected. */
-function flushQueuedSends(get: GetFn) {
-  for (const botId of Object.keys(get().queuedSends)) flushQueued(botId)
-}
-
 /**
  * 斷線重連後補訊息（#368）：daemon 重啟沒有世代標記，重連時新 daemon 的 seq 若已超過我們記的 `lastSeq`，
  * 它會當成「只差幾則」照補，舊 daemon 尾巴那段訊息永遠不會來，也不會 `resync`。`refreshState` 只補狀態不補訊息，
@@ -2705,7 +2800,6 @@ function flushQueuedSends(get: GetFn) {
  */
 export async function reloadLoadedConversations(get: GetFn): Promise<void> {
   for (const botId of botIdsNeedingConversationReload(get)) await get().loadMessages(botId)
-  flushQueuedSends(get)
   const proj = get().selectedProjectId
   if (proj) await get().loadGroupMessages(proj)
 }
@@ -2719,7 +2813,6 @@ const resyncTrigger = (() => {
       await get().refreshState()
       await get().loadQuota()
       for (const botId of botIdsNeedingConversationReload(get)) await get().loadMessages(botId)
-      flushQueuedSends(get)
       const proj = get().selectedProjectId
       if (proj) await get().loadGroupMessages(proj)
       await get().refreshLoadedMissions()
@@ -2891,8 +2984,6 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
           ? { hosts: mergeHosts(s.hosts, [{ name: target.host, connected: target.connected }]) }
           : {}),
       }))
-      // 自動啟動排隊的訊息：bot 起來、閒著就送（flushQueued 會再檢查一次能不能送）。
-      if (run?.state === 'running' && run.agent_status === 'idle' && get().queuedSends[botId]) flushQueued(botId)
       // working → idle 也算回合完成：終端直接對話或沒裝 hook 時不會有 message/turn frame。
       if (!wasWorking && run?.agent_status === 'working') clearHookCompletion(botId)
       if (wasWorking && run?.agent_status === 'idle') {
@@ -2982,10 +3073,8 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         liveReply:
           turn.status !== 'in_flight' && s.liveReply[botId]?.turnId === turn.id ? withoutKey(s.liveReply, botId) : s.liveReply,
       }))
-      // The turn that was blocking the composer is over: send whatever was queued behind it.
-      // `queued` 還沒開始（issue #122：啟動失敗的原因更新也推這一幀）——算成完成會吃掉之後真正的那一次（`takeTurnCompletion` 依 id 去重）。
+      // The daemon owns awaits_idle delivery; its turn update only changes the projection shown by the composer.
       if (turn.status !== 'in_flight' && turn.status !== 'queued') {
-        flushQueued(botId)
         // 沒有 assistant 訊息的回合（中止、只有終端輸出）也要算完成。
         markHookCompletion(botId)
         noteTurnDone(set, get, botId, turn.id)
@@ -3174,110 +3263,13 @@ function dropPane(set: SetFn, host: string, paneId: string) {
   }))
 }
 
-/** 退回輸入框的字也要寫進 localStorage：只 `set` 的話，重整一次就沒了。 */
-function applyRestore(set: SetFn, get: GetFn, r: RestoreResult) {
-  const prev = get().drafts
-  set(r.patch)
-  if (r.patch.drafts) writeDrafts(prev, r.patch.drafts)
-}
-
 function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
   const { [key]: _dropped, ...rest } = map
   return rest
 }
 
-/**
- * Send the message queued behind a turn that has just finished.
- *
- * The short delay lets the rest of the frame land (`run_updated` may still flip
- * `agent_status`), and the composer state is re-checked at the last moment so a bot that
- * went `blocked` — or that already has another turn in flight — keeps the queued text
- * instead of losing it to a 409.
- */
-/**
- * 每顆 bot 排隊訊息的重送進度（issue #530）。`pending` 記的是物件本身：使用者換了一則（或取消後重排）
- * 就從頭算，不會繼承上一則的失敗次數。節奏規則在 `store/flushRetry.ts`。
- */
-interface FlushRetry {
-  pending: QueuedSend | null
-  failures: number
-  timer: ReturnType<typeof setTimeout> | null
-  /** 放棄的話只講一次。 */
-  toldGaveUp: boolean
-}
-const flushRetries = new Map<string, FlushRetry>()
-
-function flushRetryOf(botId: string): FlushRetry {
-  const have = flushRetries.get(botId)
-  if (have) return have
-  const fresh: FlushRetry = { pending: null, failures: 0, timer: null, toldGaveUp: false }
-  flushRetries.set(botId, fresh)
-  return fresh
-}
-
-function clearFlushRetry(botId: string) {
-  const r = flushRetries.get(botId)
-  if (r?.timer) clearTimeout(r.timer)
-  flushRetries.delete(botId)
-}
-
-/** 測試用：模組層的進度跨測試會互相污染。 */
-export function resetFlushRetriesForTest() {
-  for (const botId of [...flushRetries.keys()]) clearFlushRetry(botId)
-}
-
-/**
- * 排隊的訊息排一次送出。幀（`bot_status`／`turn_updated`）與上一次失敗都會叫它，所以
- * **已經排好就不再排**：以前每一幀都疊一次 `setTimeout`，撞上 retryable 409 時幀來幾次就送幾次（#530）。
- */
-function flushQueued(botId: string) {
-  const r = flushRetryOf(botId)
-  if (r.timer) return
-  r.timer = setTimeout(() => {
-    r.timer = null
-    attemptFlush(botId)
-  }, flushDelayMs(r.failures))
-}
-
-function attemptFlush(botId: string) {
-  const s = useStore.getState()
-  const pending = s.queuedSends[botId]
-  if (!pending) {
-    clearFlushRetry(botId)
-    return
-  }
-  const r = flushRetryOf(botId)
-  // 換了一則（取消後重排、或第二次 Enter 覆蓋）：失敗次數重算。
-  if (r.pending !== pending) {
-    r.pending = pending
-    r.failures = 0
-    r.toldGaveUp = false
-  }
-  // 送不了不算一次嘗試：那是這顆 bot 現在的狀態，不是被 daemon 拒絕。
-  const cs = composerState(s, botId)
-  if (cs.disabled || cs.queued) return
-  if (flushGaveUp(r.failures)) {
-    if (!r.toldGaveUp) {
-      r.toldGaveUp = true
-      s.notify('error', flushGaveUpText(r.failures))
-    }
-    return
-  }
-  useStore.setState({ queuedSends: withoutKey(s.queuedSends, botId) })
-  // 送不出去（409 picker_open／dialog_open／needs_login、502、網路錯）就放回去，
-  // 別讓文字連附件一起消失；toast 由 sendPrompt 自己講（同一句會被 `notify` 去重）。
-  void s.sendPrompt(botId, pending.text, pending.attachments).then((ok) => {
-    if (ok) {
-      clearFlushRetry(botId)
-      return
-    }
-    useStore.getState().restoreQueuedSend(botId, pending)
-    const back = flushRetryOf(botId)
-    back.pending = pending
-    back.failures += 1
-    // 自己排下一次：不要再靠幀來推（幀可能一直來，也可能一直不來）。
-    flushQueued(botId)
-  })
+function draftWithText(text: string, current: string): string {
+  return current === text || (text && current.startsWith(`${text}\n`)) ? current : prependDraft(text, current)
 }
 
 /** Patch connection state onto the known hosts without losing their config fields. */

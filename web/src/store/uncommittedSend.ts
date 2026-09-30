@@ -61,6 +61,7 @@ export function noteInFlightTurn(
       unverified: false,
       autoResend: true,
       awaitsStart: false,
+      awaitsIdle: false,
       startError: null,
       client_request_id: crid,
       created_at: new Date().toISOString(),
