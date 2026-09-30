@@ -19,14 +19,24 @@ pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id
 pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
     let verified = i64::from(rec.verified);
     let auto = i64::from(rec.auto_resend);
-    let first: Option<Option<String>> = sqlx::query_scalar("SELECT delivered_at FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await?;
+    #[cfg(test)]
+    super::race_point::hit("mark_delivery_before_claim", turn_id).await;
+
+    let mut tx = app.db.begin().await?;
+    // 只有將 delivered_at 從 NULL 原子改寫成功的呼叫者能重排訊息；回傳資料庫保存的時間。
+    let first_at: Option<String> = sqlx::query_scalar(
+        "UPDATE turns SET delivered_at=? WHERE id=? AND delivered_at IS NULL RETURNING delivered_at",
+    )
+    .bind(at)
+    .bind(turn_id)
+    .fetch_optional(&mut *tx)
+    .await?;
     // 不重送的那條路照樣把重送額度用掉：回滾到不認得 `auto_resend` 的舊 binary 時，
     // 它仍然不會把同一則再打一次。
-    // `delivered_at` 只記第一次：之後 poller 補證據再記一次，不能讓一則舊的看起來像剛送出（重啟補 watchdog 看它，deliv L3）。
+    // 這筆 UPDATE 對每份 evidence 都執行，包括沒有取得 first-delivery claim 的呼叫者。
     sqlx::query(
         "UPDATE turns SET delivery=?, delivery_verified=?, auto_resend=?,
-                resend_count = CASE WHEN ? = 0 THEN MAX(resend_count, ?) ELSE resend_count END,
-                delivered_at = COALESCE(delivered_at, ?)
+                resend_count = CASE WHEN ? = 0 THEN MAX(resend_count, ?) ELSE resend_count END
           WHERE id=?",
     )
     .bind(rec.stored)
@@ -34,12 +44,12 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
     .bind(auto)
     .bind(auto)
     .bind(crate::lifecycle::MAX_PROMPT_RESENDS)
-    .bind(at)
     .bind(turn_id)
-    .execute(&app.db)
+    .execute(&mut *tx)
     .await?;
-    if matches!(first, Some(None)) {
-        restamp_queued_prompt(app, turn_id, at).await;
+    tx.commit().await?;
+    if let Some(first_at) = first_at.as_deref() {
+        restamp_queued_prompt(app, turn_id, first_at).await;
     }
     Ok(())
 }
@@ -3173,5 +3183,56 @@ mod restamp_tests {
         let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T14:00:00.000Z", "一般送出").await;
         mark_delivery(&app, &turn, ok, "2026-09-30T14:00:00.600Z").await.unwrap();
         assert_eq!(created(&app, &msg).await, "2026-09-30T14:00:00.000Z");
+    }
+
+    /// 在 first-delivery claim 前插入第二份 evidence，讓它先 claim；後到的 evidence 不能再移動訊息時間（#735）。
+    #[tokio::test]
+    async fn concurrent_delivery_evidence_only_restamps_for_the_first_claim() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "q-race").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+
+        let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T13:28:31.333Z", "daemon 通知").await;
+        let turn2 = turn.clone();
+        let app2 = app.clone();
+        super::super::race_point::arm("mark_delivery_before_claim", &turn, move || async move {
+            // 這筆在第一筆 claim 前進來，並先完成原子 claim。
+            mark_delivery(
+                &app2,
+                &turn2,
+                Delivered::Unverified.record().unwrap(),
+                "2026-09-30T13:38:55.000Z",
+            )
+            .await
+            .unwrap();
+        });
+
+        // 外層呼叫先抵達 claim 點後暫停；注入的 evidence 先 claim 13:38:55，外層稍後以另一份 evidence 寫入。
+        mark_delivery(
+            &app,
+            &turn,
+            Delivered::Submitted.record().unwrap(),
+            "2026-09-30T13:39:02.000Z",
+        )
+        .await
+        .unwrap();
+
+        let delivered_at: String = sqlx::query_scalar("SELECT delivered_at FROM turns WHERE id=?")
+            .bind(&turn)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(delivered_at, "2026-09-30T13:38:55.000Z");
+        assert_eq!(created(&app, &msg).await, delivered_at, "訊息時間跟著第一個成功 claim，不跟後到的 evidence 移動");
+
+        let (delivery, verified, auto_resend): (String, i64, i64) = sqlx::query_as(
+            "SELECT delivery, delivery_verified, auto_resend FROM turns WHERE id=?",
+        )
+        .bind(&turn)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!((delivery.as_str(), verified, auto_resend), ("ok", 1, 0), "第二條 evidence 仍更新送達欄位");
     }
 }
