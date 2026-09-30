@@ -373,9 +373,14 @@ pub(crate) async fn withdraw_waiting_tx(
 
 /// 使用者取消（`POST /turns/{id}/withdraw`）：還在等 bot 起來的那一則、或還在排的 daemon 自動通知（#562）撤回、寫明理由，不送。
 ///
-/// 只撤這兩種。已經被佇列領走（`in_flight`，字已經打進去了）或本來就不是這種的一律 409——不能拿「放棄回合」
+/// 只撤這三種。已經被佇列領走（`in_flight`，字已經打進去了）或本來就不是這種的一律 409——不能拿「放棄回合」
 /// 頂替：那會把已經送出的回合收成失敗，web 又把文字放回輸入框，使用者再按一次就送了兩次。
-pub async fn withdraw_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
+pub struct WithdrawnPrompt {
+    pub text: String,
+    pub attachments: Vec<String>,
+}
+
+pub async fn withdraw_turn(app: &Arc<App>, turn_id: &str) -> LcResult<WithdrawnPrompt> {
     let bot_id: String = sqlx::query_scalar("SELECT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id=?")
         .bind(turn_id)
         .fetch_optional(&app.db)
@@ -384,24 +389,62 @@ pub async fn withdraw_turn(app: &Arc<App>, turn_id: &str) -> LcResult<()> {
         .ok_or_else(|| LcError::NotFound("turn".into()))?;
     let lock = app.bot_lock(&bot_id).await;
     let _g = lock.lock().await;
-    let (status, awaits_start, crid): (String, i64, Option<String>) =
-        sqlx::query_as("SELECT status, awaits_start, client_request_id FROM turns WHERE id=?")
+    // B 可能先於 A 在未加欄位的 schema 上測試；正式 schema 由 A migrate 加上 awaits_idle。
+    let has_awaits_idle: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('turns') WHERE name = 'awaits_idle')",
+    )
+    .fetch_one(&app.db)
+    .await
+    .map_err(up)?;
+    let (status, awaits_start, awaits_idle, origin, crid): (String, i64, i64, String, Option<String>) = if has_awaits_idle {
+        sqlx::query_as("SELECT status, awaits_start, awaits_idle, origin, client_request_id FROM turns WHERE id=?")
             .bind(turn_id)
             .fetch_one(&app.db)
             .await
-            .map_err(up)?;
+            .map_err(up)?
+    } else {
+        sqlx::query_as("SELECT status, awaits_start, 0, origin, client_request_id FROM turns WHERE id=?")
+            .bind(turn_id)
+            .fetch_one(&app.db)
+            .await
+            .map_err(up)?
+    };
     // 還在排的 daemon 自動通知也可以撤（#562）：它擋在佇列頭時，使用者要能讓自己的訊息先走。
     let why = if awaits_start == 1 {
         "使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。"
+    } else if awaits_idle == 1 && origin == "web" {
+        "使用者取消了這一則：bot 忙碌時先排進佇列，還沒送出，不會再送。"
     } else if super::daemon_notice::is_daemon_notice(crid.as_deref()) {
         super::daemon_notice::WITHDRAWN_WHY
     } else {
         ""
     };
-    if status != "queued" || why.is_empty() || !revoke_queued_turn(app, turn_id, why).await.map_err(up)? {
+    if status != "queued" || why.is_empty() {
         return Err(LcError::conflict("turn is not waiting for its bot to start", json!({"turn_id": turn_id, "status": status})));
     }
-    Ok(())
+    let restores_user_prompt = awaits_start == 1 || (awaits_idle == 1 && origin == "web");
+    let (text, attachments) = if restores_user_prompt {
+        let message: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT content, attachments_json FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at, rowid LIMIT 1",
+        )
+        .bind(turn_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?;
+        let (text, encoded_attachments) = message.ok_or_else(|| LcError::Upstream("queued user turn has no user message".into()))?;
+        let attachments = encoded_attachments
+            .map(|json| serde_json::from_str::<Vec<crate::attach::Attachment>>(&json).map(|items| items.into_iter().map(|item| item.id).collect()))
+            .transpose()
+            .map_err(up)?
+            .unwrap_or_default();
+        (text, attachments)
+    } else {
+        (String::new(), Vec::new())
+    };
+    if !revoke_queued_turn(app, turn_id, why).await.map_err(up)? {
+        return Err(LcError::conflict("turn is not waiting for its bot to start", json!({"turn_id": turn_id, "status": status})));
+    }
+    Ok(WithdrawnPrompt { text, attachments })
 }
 
 /// 開機（那台主機對帳完成、autostart 那一步）：還在等 bot 起來、沒有 run 的，再替它啟動一次。
