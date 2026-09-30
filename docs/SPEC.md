@@ -2520,8 +2520,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
 - 數字記在記憶體、以 run 為鍵（`background_jobs.rs`）：屬於這個 process，新 run 自然歸零；run 結束那一輪就丟掉；daemon 重啟後
   等下一輪巡邏補上。數字變了才推 `bot_status`。背景跑完到畫面更新之間最多晚一輪（30 秒）。
 - 投影：`run.background_jobs`（`GET /api/state` 與 `bot_status` 的 run 物件）。**不改排隊／送 prompt 的語意**——agent 本身確實 idle。
-- 網頁只在 run `running` 且 `agent_status = idle` 時標（回合中燈號已經說了）：側欄那格「閒置」換成「背景 N」、標題列 chip
-  「背景執行中（N）」（只在桌機）、輸入框上方一條說明（claude 說 shell、codex 說終端）。
+- 網頁只在 run `running` 且 `agent_status = idle` 時標（回合中燈號已經說了）：側欄那格「閒置」換成「背景 N」、輸入框上方一條說明（標題列不放，2026-09-30 使用者）（claude 說 shell、codex 說終端）。
 
 ## 7. API
 
