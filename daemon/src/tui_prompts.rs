@@ -93,7 +93,7 @@ fn line_starts_with(lines: &[String], prefix: &str) -> bool {
 /// 擋不住刻意排成一行一句的引文，見 issue #114）。
 pub(crate) fn composer_is_idle(lines: &[&str]) -> bool {
     lines.iter().any(|l| {
-        let mut chars = l.chars().filter(|c| !"│┃╭╮╰╯─━▔ \t".contains(*c));
+        let mut chars = l.chars().filter(|c| !c.is_whitespace() && !"│┃╭╮╰╯─━▔".contains(*c));
         matches!(chars.next(), Some('❯') | Some('›')) && chars.next().is_none()
     })
 }
