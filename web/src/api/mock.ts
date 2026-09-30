@@ -2978,8 +2978,8 @@ export class MockTransport implements Transport {
         : {}
       throw new ApiError(409, { error: 'conflict', reason: 'a turn is already in flight', turn_id: busy.id, ...why }, 'conflict')
     }
-    const interrupting = Boolean(busy)
-    if (busy) {
+    const interrupting = Boolean(busy && canSendNow)
+    if (busy && interrupting) {
       this.updateTurn(busy, { status: 'failed', completed_at: now() })
       this.addMessage({
         conversation_id: busy.conversation_id,

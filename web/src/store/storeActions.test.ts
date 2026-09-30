@@ -8,6 +8,7 @@ import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
 import type { Bot, Message, Mission, MissionDetail, Project } from '../api/types.ts'
 import { MESSAGE_CAP, capList } from './lists.ts'
 import { capFor } from './messageCap.ts'
+import { queuedSendFor } from './queuedSend.ts'
 
 const { useStore, seqAfterFrame } = await import('./store.ts')
 
@@ -24,7 +25,6 @@ function seed() {
     botOrder: {},
     projectOrder: [],
     botUnread: {},
-    queuedSends: {},
     drafts: {},
     notices: [],
     missions: {},
@@ -594,7 +594,7 @@ test('沒在跑的 bot 送出：帶 start_if_stopped 交給 daemon，瀏覽器�
   const prompt = requests.find((request) => request.path.endsWith('/prompt'))!
   assert.equal((prompt.body as Record<string, unknown>).start_if_stopped, true)
   const s = useStore.getState()
-  assert.equal(s.queuedSends.b1, undefined, '瀏覽器記憶體不是那一份')
+  assert.equal(queuedSendFor(s, 'b1'), null, 'awaits_start 不會混成 awaits_idle queue')
   assert.equal(s.turns.b1.t9.status, 'queued')
   assert.equal(s.turns.b1.t9.awaitsStart, true)
 })
@@ -1074,7 +1074,7 @@ test('重連重抓從 daemon turns 恢復排隊訊息，不會再由瀏覽器 PO
   const { reloadLoadedConversations } = await import('./store.ts')
   await reloadLoadedConversations(useStore.getState)
   assert.equal(requests.filter((r) => r.path.endsWith('/prompt')).length, 0)
-  assert.deepEqual(useStore.getState().queuedSends.b1, { turnId: 't2', text: 'next question', attachments: [] })
+  assert.deepEqual(queuedSendFor(useStore.getState(), 'b1'), { turnId: 't2', text: 'next question', attachments: [] })
 })
 
 test('resync 從 api/state 的 queued_turn 恢復排隊訊息，不會由瀏覽器代送', async () => {
@@ -1107,7 +1107,7 @@ test('resync 從 api/state 的 queued_turn 恢復排隊訊息，不會由瀏覽�
   dispatchFrameForTest({ type: 'resync', seq: 1 })
   await settle()
   assert.equal(requests.filter((r) => r.path.endsWith('/prompt')).length, 0)
-  assert.deepEqual(useStore.getState().queuedSends.b1, { turnId: 't2', text: 'next question', attachments: [] })
+  assert.deepEqual(queuedSendFor(useStore.getState(), 'b1'), { turnId: 't2', text: 'next question', attachments: [] })
 })
 
 test('resync 也重抓未載入 bot 的進行中回合，清掉已結束的 stale turn（#696）', async () => {

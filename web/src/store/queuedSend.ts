@@ -28,36 +28,3 @@ export function queuedSendFor(
 export function prependDraft(text: string, current: string): string {
   return text ? (current ? `${text}\n${current}` : text) : current
 }
-
-/** Temporary composer adapter while the UI switches from local queueing to sendPrompt(queueIfBusy). */
-export interface ComposerIO {
-  setText: (text: string) => void
-  clearFiles: () => void
-}
-
-export function queueFromComposer(
-  io: ComposerIO & { queueSend: (botId: string, text: string, attachments: string[]) => void },
-  botId: string,
-  body: string,
-  attachments: string[],
-): void {
-  io.setText('')
-  io.clearFiles()
-  io.queueSend(botId, body, attachments)
-}
-
-/** Legacy composer helper; server-owned queues are no longer restored into a browser-side slot. */
-export function settleComposerSend(
-  io: ComposerIO & { restoreQueuedSend: (botId: string, pending: QueuedSend) => void },
-  botId: string,
-  wasQueued: QueuedSend | null,
-  ok: boolean,
-): void {
-  if (ok) {
-    if (wasQueued) return
-    io.setText('')
-    io.clearFiles()
-    return
-  }
-  if (wasQueued) io.restoreQueuedSend(botId, wasQueued)
-}
