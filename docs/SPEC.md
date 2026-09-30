@@ -1677,6 +1677,10 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
   `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）是 cargo shim 把 check／test／clippy 轉到外部編譯主機（#104）的前提：漏了它們，每個子 agent 的 cargo 都靜默留在本機。
   傳遞清單（`AM_RESERVED_ENV_KEYS`）與 daemon 注入端（`lifecycle/setup.rs` 的 `env.insert`）綁了一條測試：daemon 注入的每個 key 要嘛在清單裡、要嘛明列成「刻意不傳」。
   呼叫端自己給的同名 `--env` 不動。
+- **子 agent 不再開子 agent（使用者 2026-09-30）**：bot 經 shim 開的 pane（`pane split`／`pane new`／`tab create`／`workspace create` 補 `--env`，`agent start` 補 export）一律帶
+  `AM_CHILD_OF=<母 agent 名>`；呼叫端已經有 `AM_CHILD_OF`（子代自己開的 pane）就沿用同一個值，不往下疊；呼叫者自帶的 `--env AM_CHILD_OF=…` 一律剝掉。
+  沒有 bot 身分的人工 shell 不標。**有 `AM_CHILD_OF` 的 pane 打 `agent start` 一律 exit 77、不呼叫 herdr**，stderr 講明「要人手就在回報裡寫清楚，由 parent 決定另派兄弟」——
+  子代只有一層，狀態都掛在同一個 parent 底下追蹤。`pane split` 不擋（子代開 dev server 之類的 pane 仍可以）。
 - `herdr agent prompt`：見 §6.5d。其他子指令 `exec` 真正的 herdr（`$AM_REAL_HERDR`，否則 `PATH` 上第一個不是自己的）。
 
 **PATH 只靠 pane env 不夠**：herdr 用 login shell 開 pane，profile 之後才跑並重建 `PATH`（macOS `path_helper` + `brew shellenv` 會把 shim 擠到後面）。
@@ -1691,7 +1695,9 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 1. frontmatter `description` 換成 AG Man 版（herdr 原文說「使用者明確提到才用」，對 AG Man 裡的 bot 剛好相反）。
 2. body 最前面插 **AG Man 規則**（`lifecycle::child_agent_rules`）：先 `herdr agent list` 找自己底下閒置的 child 重用、命名、`herdr pane split --pane "$HERDR_PANE_ID"`、
    不要 `git stash`/`--autostash`、子 agent 會掛在自己底下、帳號與 hook 自動帶進子 pane；瀏覽器一律用 ego lite、一個 bot 最多一個分頁、結束就關；
-   輸出檔案規則（§6.5f：scratchpad 只放中間產物、給使用者的放 `$AM_OUTBOX`、私鑰／憑證／DB 禁放）。
+   輸出檔案規則（§6.5f：scratchpad 只放中間產物、給使用者的放 `$AM_OUTBOX`、私鑰／憑證／DB 禁放）；
+   派工只准走 herdr pane（禁止 CLI 內建子代理：Claude 的 `Agent`／`Task`／`Workflow`、codex／grok 的同類功能，也禁止在自己 pane 另起 agent CLI——AG Man 追不到）；
+   派工 prompt 必須寫明「你是 `<parent>` 的子 agent、禁止再開子 agent、要人手由 parent 決定」；有 `$AM_CHILD_OF` 的子 agent 不開子 agent，要人手在回報裡講、由 parent 決定是否另派兄弟（§6.5b）。
 
 herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只 warning。`child_agent_rules` 是同一份文字來源：claude skill 與三種 kind 的 persona
 （`--append-system-prompt` / `--rules` / `developer_instructions`）都用它。
