@@ -18,9 +18,8 @@ import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
 import { startingSend, startingSendLabel } from '../store/startingSend'
 import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
 import { isImeEnter } from '../lib/ime'
-import { herdrJumpCommand } from '../lib/herdrJump'
 import { herdrIdentity } from '../lib/herdrIdentity'
-import { HerdrAgentName } from './HerdrAgentName'
+import { PaneCopy } from './PaneCopy'
 import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
 import { handedOffTo } from '../lib/handoff'
 import { BackgroundJobsBar } from './BackgroundJobs'
@@ -34,7 +33,6 @@ import { BotNameField } from './BotNameField'
 import { BotSwitcher } from './BotSwitcher'
 import { ConfirmDialog } from './ConfirmDialog'
 import { onTabListKeyDown } from './tabKeys'
-import { CopyChip } from './CopyChip'
 import { HostBadge } from './HostsPanel'
 import { UpdateBadge } from './UpdateBadge'
 import { RewindButton, RewoundTag } from './RewindButton'
@@ -538,33 +536,6 @@ export function AbandonTurnAction({ botId }: { botId: string }) {
         onCancel={() => setOpenFor(null)}
       />
     </>
-  )
-}
-
-/** debug 用的 run 識別列（herdr pane/agent/session/workspace＋run id），預設收合、可複製。 */
-function RunDebugBar({ botId }: { botId: string }) {
-  const run = useStore((s) => s.runs[botId] ?? null)
-  const agentName = useStore((s) => s.bots.find((b) => b.id === botId)?.agent_name ?? null)
-  const isLocal = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === botId)?.project_id ?? null) === 'local')
-  if (!run) return null
-  return (
-    <div className="run-debug" role="group" aria-label="Run 識別資訊">
-      <span className="run-debug-hint">識別</span>
-      <CopyChip label="pane" value={run.pane_id ?? ''} title="herdr pane id：herdr pane send / capture 用的就是它" />
-      <CopyChip label="agent" value={agentName ?? ''} title="herdr agent 名稱：herdr agent list 裡對應的那個" />
-      <CopyChip label="session" value={run.herdr_session ?? ''} title="pane 所屬的 herdr session" />
-      <CopyChip label="workspace" value={run.workspace_id ?? ''} title="herdr workspace id" />
-      <CopyChip label="run" value={run.id} title="daemon DB 的 run id：turn 與 message 都掛在它底下" />
-      {/* 一行跳進 herdr 並落在這顆 pane（2026-09-17 使用者）；遠端主機要先 ssh，這裡組不出保證對的指令，不給。 */}
-      {isLocal ? (
-        <CopyChip
-          className="copy-chip-full"
-          label="進 herdr"
-          value={herdrJumpCommand(run.herdr_session, run.pane_id)}
-          title="貼到終端機：先把 herdr 的焦點移到這顆 pane，再打開 herdr（接回 session），一進去就是它"
-        />
-      ) : null}
-    </div>
   )
 }
 
@@ -1137,7 +1108,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   const startBot = useStore((s) => s.startBot)
   const busy = useStore((s) => s.busy)
   const composerRef = useRef<HTMLTextAreaElement>(null)
-  const [runDebugOpen, setRunDebugOpen] = useState(false)
   const [gitInfoBotId, setGitInfoBotId] = useState<string | null>(null)
   const statusInfo = useStore(
     useShallow((s): StatusInfo | null => {
@@ -1318,23 +1288,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
                 {modelExtra ? <span className="model-tag-extra">{modelExtra}</span> : null}
               </ModelQuickPicker>
             ) : null}
-            {/* pane id（debug 用，點開識別列）；2026-09-11 使用者：從第一排搬到這一排。窄時只剩 `▾`。
-                後面接 herdr 名，才對得到終端（#572）；擠的時候先截掉它。 */}
-            {run?.pane_id ? (
-              <button
-                type="button"
-                className={`main-status pane-toggle run-debug-toggle${runDebugOpen ? ' on' : ''}`}
-                aria-expanded={runDebugOpen}
-                title={`${herdrId?.title ?? `pane ${run.pane_id}`}（${LAMP_LABEL[lamp]}）· 點一下展開 run 識別資訊：agent、session、workspace、run id`}
-                onClick={() => setRunDebugOpen((v) => !v)}
-              >
-                <span className="pane-id">{run.pane_id}</span>
-                {herdrId?.agent ? <HerdrAgentName agent={herdrId.agent} /> : null}
-                <span className="pane-chev" aria-hidden="true">
-                  {runDebugOpen ? '▴' : '▾'}
-                </span>
-              </button>
-            ) : null}
+            {/* pane id：點一下複製（2026-09-30 使用者：只要 pane id，不展開識別列）。herdr 名等在 tooltip。 */}
+            {run?.pane_id ? <PaneCopy paneId={run.pane_id} detail={`${herdrId?.title ?? `pane ${run.pane_id}`}（${LAMP_LABEL[lamp]}）`} /> : null}
           </div>}
         </div>
         {phone ? (
@@ -1420,9 +1375,6 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
           ) : null}
         </div>
       </div>
-      {/* 識別列緊貼它的開關所在的標題列，排在主力／晶片列之上（2026-09-14 使用者）：展開的東西要出現在
-          按下去的地方旁邊，不是隔一整排晶片。 */}
-      {runDebugOpen ? <RunDebugBar botId={botId} /> : null}
       <UnreadChip />
       <ToolsHint focusHost={hostName} focusKinds={[bot.kind]} />
       {/* Issues popup must stay outside an `overflow` box; chip is chat-only (no composer in terminal). */}

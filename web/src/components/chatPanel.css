@@ -731,25 +731,7 @@
   font-weight: 700;
 }
 
-/* 燈號文字兼識別列開關：維持文字外觀，只補可點手感。 */
-
-button.run-debug-toggle {
-  border: 0;
-  background: transparent;
-  padding: 0;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-}
-
-/* 不改文字色：燈號顏色本身是狀態，開合交給 ▾▴。 */
-
-button.run-debug-toggle:hover {
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-/* Carries the pane id (what you retype while debugging), neutral colour so the lamp stays the status signal. */
+/* pane id，點一下複製（PaneCopy）。中性色，燈號才是狀態。 */
 
 .main-status.pane-toggle {
   display: inline-flex;
@@ -759,68 +741,28 @@ button.run-debug-toggle:hover {
   padding: 0 4px;
   border-radius: 5px;
   gap: 3px;
-  /* 放得下 `pane · herdr 名`（#572）；擠的時候照舊從尾巴截。 */
   max-width: 240px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-dim);
+}
+
+.main-status.pane-toggle:hover .pane-id {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.main-status.pane-toggle.copied {
+  color: var(--lamp-green);
 }
 
 .main-status.pane-toggle .pane-id {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* herdr 名（#572）：比 pane id 先讓位，而且從中間截，尾碼（分得出是哪一顆）留著。`·` 用 ::before，免得吃 gap。 */
-.main-status.pane-toggle .pane-agent {
-  display: inline-flex;
-  flex: 0 1000 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.main-status.pane-toggle .pane-agent::before {
-  content: '·';
-  flex: none;
-  margin-right: 3px;
-}
-
-.main-status.pane-toggle .pane-agent-head {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.main-status.pane-toggle .pane-agent-tail {
-  flex: none;
-}
-
-.main-status.pane-toggle .pane-chev {
-  flex: none;
-  font-size: 10px;
-  color: var(--text-faint);
-}
-
-.main-status.pane-toggle.on .pane-chev {
-  color: var(--accent-ink);
-}
-
-.run-debug {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 5px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-sunken);
-}
-
-.run-debug-hint {
-  flex: none;
-  color: var(--text-faint);
-  font-size: 11px;
 }
 
 /* 逃生門刻意比 `.mini-btn` 更輕，不搶「中斷 / 停止」。 */

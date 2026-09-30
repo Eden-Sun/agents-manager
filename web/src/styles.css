@@ -1273,7 +1273,7 @@ button:disabled {
 .quota-bars-open:hover:not(:disabled),
 .quota-pop-row:hover,
 .copy-chip:hover:not(:disabled),
-button.run-debug-toggle:hover:not(:disabled) {
+button.pane-toggle:hover:not(:disabled) {
   background: var(--btn-ghost-bg-hover);
   color: var(--btn-ghost-fg-hover);
 }
@@ -3022,10 +3022,6 @@ button.model-tag:hover:not(:disabled) {
 
 .msg-targets.relay.daemon {
   color: var(--text-dim);
-}
-
-.run-debug .copy-chip {
-  max-width: 280px;
 }
 
 .term-warn-actions .btn {
