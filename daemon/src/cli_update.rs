@@ -185,6 +185,28 @@ fn install_command(kind: &str, target: &str) -> Option<String> {
     }
 }
 
+fn supported_kind(kind: &str) -> bool {
+    matches!(kind, "codex" | "claude")
+}
+
+fn verify_durable_kind(
+    expected: &str,
+    stored: Result<Option<String>, sqlx::Error>,
+    update_id: &str,
+) -> Result<String, String> {
+    if !supported_kind(expected) {
+        return Err(format!("cli-update {update_id} 的啟動 kind 無效：{expected:?}"));
+    }
+    match stored {
+        Err(error) => Err(format!("讀取 cli-update {update_id} 的 kind 失敗：{error}")),
+        Ok(None) => Err(format!("cli-update {update_id} 的 durable job 列已不存在")),
+        Ok(Some(stored)) if stored == expected => Ok(stored),
+        Ok(Some(stored)) => Err(format!(
+            "cli-update {update_id} 的 kind 不一致：啟動時是 {expected}，durable 列是 {stored}"
+        )),
+    }
+}
+
 /// 會動到機器的四件事。正式版是 [`Real`]；測試換成假的。
 pub trait Runner: Send + Sync {
     /// 在主機端的安裝鎖裡跑安裝指令。`Ok` 是輸出，`Err` 是給人看的原因（含輸出尾巴）。遠端一律走 `fence` 記下的那條連線，
@@ -573,7 +595,7 @@ pub async fn start(
         kind.to_string(), operation_fence);
     tokio::spawn(async move {
         use futures::FutureExt as _;
-        let res = std::panic::AssertUnwindSafe(run_with_fence(&app2, runner.as_ref(), &host2, &id2, &target2, Some(fence2))).catch_unwind().await;
+        let res = std::panic::AssertUnwindSafe(run_with_fence(&app2, runner.as_ref(), &host2, &id2, &target2, &kind2, Some(fence2))).catch_unwind().await;
         if res.is_err() {
             // 中途 panic 也要等終態寫進 DB 後才告訴 UI；finish_row 會在目前行程內保留 retry debt。
             let failed = json!({"update_id": id2, "host": host2, "kind": kind2, "target_version": target2,
@@ -593,8 +615,15 @@ pub async fn start(
 /// 不能拿來判斷裝好了沒，更不能去改新機器的通知、重啟新機器的 bot。
 #[cfg(test)]
 pub async fn run(app: &Arc<App>, runner: &dyn Runner, host: &str, update_id: &str, target: &str) -> Value {
+    let stored_kind = read_durable_kind(app, update_id).await;
+    let expected_kind = stored_kind
+        .as_ref()
+        .ok()
+        .and_then(Option::as_deref)
+        .unwrap_or("")
+        .to_string();
     let fence = app.hosts.fence(host).await;
-    run_with_fence(app, runner, host, update_id, target, fence).await
+    run_with_kind_result(app, runner, host, update_id, target, &expected_kind, stored_kind, fence).await
 }
 
 async fn run_with_fence(
@@ -603,15 +632,31 @@ async fn run_with_fence(
     host: &str,
     update_id: &str,
     target: &str,
+    expected_kind: &str,
     fence: Option<HostFence>,
 ) -> Value {
-    let kind = sqlx::query_scalar::<_, String>("SELECT kind FROM cli_updates WHERE id=?")
+    let stored_kind = read_durable_kind(app, update_id).await;
+    run_with_kind_result(app, runner, host, update_id, target, expected_kind, stored_kind, fence).await
+}
+
+async fn read_durable_kind(app: &App, update_id: &str) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>("SELECT kind FROM cli_updates WHERE id=?")
         .bind(update_id)
         .fetch_optional(&app.db)
         .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "codex".to_string());
+}
+
+async fn run_with_kind_result(
+    app: &Arc<App>,
+    runner: &dyn Runner,
+    host: &str,
+    update_id: &str,
+    target: &str,
+    expected_kind: &str,
+    stored_kind: Result<Option<String>, sqlx::Error>,
+    fence: Option<HostFence>,
+) -> Value {
+    let kind = expected_kind.to_string();
     let log_path = app.data_dir.join(LOG_FILE);
     let base = json!({"update_id": update_id, "host": host, "kind": kind, "target_version": target, "log_path": log_path});
     let progress = |phase: &str, extra: Value| {
@@ -644,6 +689,11 @@ async fn run_with_fence(
         app.emit("cli_update_done", v.clone()).await;
         v
     }
+    };
+
+    let kind = match verify_durable_kind(expected_kind, stored_kind, update_id) {
+        Ok(kind) => kind,
+        Err(error) => return finish(done(false, json!({"reason": "internal_error", "error": error}))).await,
     };
 
     let Some(fence) = fence else {
@@ -985,6 +1035,43 @@ pub async fn recover_at_startup(app: &Arc<App>) {
 /// - 等到 `max` 鎖還在：一樣收成 `interrupted` 放掉這一列；那台的安裝真的還在跑的話，下一次按會被主機端的鎖擋成 `already_running`。
 ///
 /// 絕對不跑安裝指令。
+#[cfg(test)]
+async fn fail_recovery_kind(
+    app: &App,
+    update_id: &str,
+    host: &str,
+    target: &str,
+    kind: &str,
+    error: String,
+) -> Value {
+    let failed = json!({
+        "update_id": update_id,
+        "host": host,
+        "kind": kind,
+        "target_version": target,
+        "recovered": true,
+        "ok": false,
+        "reason": "internal_error",
+        "error": error,
+    });
+    match finish_row(app, update_id, &failed).await {
+        Some(result) => {
+            app.emit("cli_update_done", result.clone()).await;
+            result
+        }
+        None => json!({
+            "update_id": update_id,
+            "host": host,
+            "kind": kind,
+            "target_version": target,
+            "recovered": true,
+            "ok": false,
+            "reason": "superseded",
+            "error": "終態列已不存在或已被其他流程取代；沒有發布本地結果",
+        }),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 pub async fn recover(
@@ -997,13 +1084,15 @@ pub async fn recover(
     poll: Duration,
     max: Duration,
 ) -> Value {
-    let kind = sqlx::query_scalar::<_, String>("SELECT kind FROM cli_updates WHERE id=?")
-        .bind(update_id)
-        .fetch_optional(&app.db)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "codex".to_string());
+    let kind = match read_durable_kind(app, update_id).await {
+        Ok(Some(kind)) if supported_kind(&kind) => kind,
+        Ok(Some(kind)) => return fail_recovery_kind(app, update_id, host, target, &kind,
+            format!("持久 cli-update 列的 kind 不支援：{kind}")).await,
+        Ok(None) => return fail_recovery_kind(app, update_id, host, target, "",
+            "持久 cli-update 列已不存在，不能接手".to_string()).await,
+        Err(error) => return fail_recovery_kind(app, update_id, host, target, "",
+            format!("讀取持久 cli-update kind 失敗：{error}")).await,
+    };
     let host_target = sqlx::query_scalar::<_, Option<String>>("SELECT host_target FROM cli_updates WHERE id = ?")
         .bind(update_id)
         .fetch_optional(&app.db)
@@ -1058,6 +1147,9 @@ async fn recover_with_registry(
     };
     let changed_authority = |message: String| done(false, json!({"reason": "host_changed", "error": message}));
     let superseded = |message: String| done(false, json!({"reason": "superseded", "error": message}));
+    if let Err(error) = verify_durable_kind(kind, read_durable_kind(app, update_id).await, update_id) {
+        return finish(done(false, json!({"reason": "internal_error", "error": error}))).await;
+    }
     set_phase(app, update_id, "recovering", None).await;
     let mut progress = base.clone();
     progress["phase"] = json!("installing");
@@ -1652,7 +1744,7 @@ mod tests {
         let mut rx = app.subscribe();
         let (app_task, runner, host_task, fence_task) = (app.clone(), fake.clone(), host.to_string(), fence.clone());
         let task = tokio::spawn(async move {
-            run_with_fence(&app_task, runner.as_ref(), &host_task, "u-repoint", "0.157.0", Some(fence_task)).await
+            run_with_fence(&app_task, runner.as_ref(), &host_task, "u-repoint", "0.157.0", "codex", Some(fence_task)).await
         });
         assert!(crate::testing::eventually!(fake.restarts().len() == 1), "the dispatch gate is after the final pre-dispatch fence check");
 
@@ -2026,6 +2118,78 @@ mod tests {
         assert_eq!(done_events(&mut rx).len(), 1, "結果要推事件");
         let log = std::fs::read_to_string(env.app.data_dir.join(LOG_FILE)).unwrap();
         assert!(log.contains("installed") && log.contains(CODEX_INSTALL), "輸出寫 log：{log}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_durable_update_row_runs_no_cli_commands() {
+        let env = crate::testing::env().await;
+        let fake = Fake::new(&["codex-cli 0.155.1"], Ok("should not install"));
+
+        let result = super::run(&env.app, fake.as_ref(), "local", "missing-update", "0.157.0").await;
+
+        assert_eq!(result["reason"], "superseded", "a missing durable job must stop before using its kind: {result}");
+        assert_eq!(*fake.version_reads.lock().unwrap(), 0, "a missing job must not query any CLI version");
+        assert_eq!(fake.installs(), 0, "a missing job must not run any installer");
+    }
+
+    #[tokio::test]
+    async fn a_claude_kind_read_error_fails_the_job_without_running_either_installer() {
+        let env = crate::testing::env().await;
+        seed_running(&env.app, "u-kind-read-error", "local", "2.1.284").await;
+        sqlx::query("UPDATE cli_updates SET kind='claude' WHERE id=?")
+            .bind("u-kind-read-error")
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let fake = Fake::new(&["2.1.281"], Ok("should not install"));
+        let fence = env.app.hosts.fence("local").await;
+
+        let result = super::run_with_kind_result(
+            &env.app,
+            fake.as_ref(),
+            "local",
+            "u-kind-read-error",
+            "2.1.284",
+            "claude",
+            Err(sqlx::Error::Protocol("injected kind read failure".into())),
+            fence,
+        )
+        .await;
+
+        assert_eq!(result["kind"], "claude");
+        assert_eq!(result["reason"], "internal_error", "a transient kind read error is retryable: {result}");
+        assert!(result["error"].as_str().unwrap().contains("injected kind read failure"));
+        assert_eq!(*fake.version_reads.lock().unwrap(), 0, "kind must be verified before any CLI version command");
+        assert_eq!(fake.installs(), 0, "neither the Codex nor Claude installer may run");
+        let (status, durable) = row_status(&env.app, "u-kind-read-error").await;
+        assert_eq!(status, "failed");
+        assert_eq!(durable["reason"], "internal_error");
+    }
+
+    #[tokio::test]
+    async fn a_durable_kind_mismatch_fails_before_any_cli_command() {
+        let env = crate::testing::env().await;
+        seed_running(&env.app, "u-kind-mismatch", "local", "2.1.284").await;
+        let fake = Fake::new(&["2.1.281"], Ok("should not install"));
+        let fence = env.app.hosts.fence("local").await;
+
+        let result = super::run_with_kind_result(
+            &env.app,
+            fake.as_ref(),
+            "local",
+            "u-kind-mismatch",
+            "2.1.284",
+            "claude",
+            Ok(Some("codex".to_string())),
+            fence,
+        )
+        .await;
+
+        assert_eq!(result["reason"], "internal_error", "a changed kind must be reported clearly: {result}");
+        assert!(result["error"].as_str().unwrap().contains("kind 不一致"));
+        assert_eq!(*fake.version_reads.lock().unwrap(), 0, "kind mismatch must be rejected before CLI commands");
+        assert_eq!(fake.installs(), 0);
+        assert_eq!(row_status(&env.app, "u-kind-mismatch").await.0, "failed");
     }
 
     #[tokio::test]
@@ -2754,6 +2918,107 @@ mod tests {
         assert_eq!(*fake.probes.lock().unwrap(), 0);
         assert_eq!(*fake.version_reads.lock().unwrap(), 0);
         assert_eq!(notice_of(&env.app, &run).await, Some(pending));
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_an_unsupported_durable_kind_before_any_host_probe() {
+        let env = crate::testing::env().await;
+        let orphan = orphan_row(&env.app, "local", "0.157.0", "installing", Some("0.155.1")).await;
+        sqlx::query("UPDATE cli_updates SET kind='unknown' WHERE id=?")
+            .bind(&orphan)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let fake = Fake::new(&["codex-cli 0.157.0"], Ok("must not install"));
+
+        let result = recover(
+            &env.app,
+            fake.as_ref(),
+            &orphan,
+            "local",
+            "0.157.0",
+            Some("0.155.1"),
+            Duration::ZERO,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(result["kind"], "unknown");
+        assert_eq!(result["reason"], "internal_error", "recovery must reject unknown durable kinds: {result}");
+        assert_eq!(*fake.probes.lock().unwrap(), 0, "recovery must validate kind before probing host install locks");
+        assert_eq!(*fake.version_reads.lock().unwrap(), 0);
+        assert_eq!(fake.installs(), 0);
+        assert_eq!(row_status(&env.app, &orphan).await.0, "failed");
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_a_kind_changed_after_startup_scan() {
+        let env = crate::testing::env().await;
+        let orphan = orphan_row(&env.app, "local", "2.1.284", "installing", Some("2.1.281")).await;
+        let host_target: Option<String> = sqlx::query_scalar("SELECT host_target FROM cli_updates WHERE id=?")
+            .bind(&orphan)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        let fake = Fake::new(&["2.1.284"], Ok("must not install"));
+
+        let result = recover_with_registry(
+            &env.app,
+            fake.as_ref(),
+            &orphan,
+            "local",
+            "claude",
+            "2.1.284",
+            Some("2.1.281"),
+            Duration::ZERO,
+            Duration::from_secs(5),
+            host_target.as_deref(),
+            None,
+        )
+        .await;
+
+        assert_eq!(result["reason"], "internal_error", "recovery must match the startup row kind: {result}");
+        assert!(result["error"].as_str().unwrap().contains("kind 不一致"));
+        assert_eq!(*fake.probes.lock().unwrap(), 0, "kind mismatch must be rejected before host probes");
+        assert_eq!(*fake.version_reads.lock().unwrap(), 0);
+        assert_eq!(row_status(&env.app, &orphan).await.0, "failed");
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_probe_a_row_removed_after_startup_scan() {
+        let env = crate::testing::env().await;
+        let orphan = orphan_row(&env.app, "local", "0.157.0", "installing", Some("0.155.1")).await;
+        let host_target: Option<String> = sqlx::query_scalar("SELECT host_target FROM cli_updates WHERE id=?")
+            .bind(&orphan)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM cli_updates WHERE id=?")
+            .bind(&orphan)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let fake = Fake::new(&["codex-cli 0.157.0"], Ok("must not install"));
+
+        let result = recover_with_registry(
+            &env.app,
+            fake.as_ref(),
+            &orphan,
+            "local",
+            "codex",
+            "0.157.0",
+            Some("0.155.1"),
+            Duration::ZERO,
+            Duration::from_secs(5),
+            host_target.as_deref(),
+            None,
+        )
+        .await;
+
+        assert_eq!(result["reason"], "superseded", "a deleted recovery row must not be adopted: {result}");
+        assert_eq!(*fake.probes.lock().unwrap(), 0, "a missing row must stop before host probes");
+        assert_eq!(*fake.version_reads.lock().unwrap(), 0);
+        assert_eq!(fake.installs(), 0);
     }
 
     #[tokio::test]
