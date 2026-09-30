@@ -25,7 +25,7 @@ bot `name` 是可隨時改的暱稱（不需重啟、允許 CJK，禁空白與 `
 ### 2.1 Turn 狀態機
 
 ```
-status:   queued ────► in_flight             （排在前一回合後面的 prompt 被 flush 領走；目前只有 AGM 派工會排，§6）
+status:   queued ────► in_flight             （前一回合結束後由 flush 領走；AGM 派工、#122 與 `awaits_idle` 共用佇列，§6）
             ▲  └─────► failed                （送不出去：重試用完、內容空、無法照原樣送）
             └───────── in_flight             （領走後、打第一個字之前被擋下：放回佇列）
           in_flight ──► completed            （hook 配對成功）
@@ -1018,12 +1018,13 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 讀到候選後立刻重讀，要求 pane id、revision、內容及 active run/pane/session 都相同；空框、不同／編輯過的字、讀取失敗或身分改變都不按。按完重讀一次，
 框沒空只記 warn、不再按（空框的 `ctrl+c` 是「再按一次離開」）；Herdr 尚無條件 revision/CAS 按鍵，最後重讀到按鍵實際送達仍有窄競態。真畫面：`fixtures/claude-2.1.281-tall-draft-after-interrupt.ansi`。
 
-**誰會建 `queued` turn**（2026-09-16 AGM 裁示）：對方**回合中**時，**只有 AGM 的派工／通知**這條路
-（`supervisor::controller::dispatch` → `lifecycle::prompt::prompt_relayed_queueable`）；另外 bot **沒在跑**時帶 `start_if_stopped` 的送出
-也會建一筆（下面「bot 沒在跑時送出」，issue #122）。對方回合中時它排一筆 `queued`
-而不是 409——一顆回合 10～20 分鐘的 bot，用退避重試等於每五分鐘賭一次它剛好在兩個回合之間（實例：交辦
-01M2MC8CB2AGDKPB86XDW1FB0Q 重試 12 次、42 分鐘都沒送出）。**使用者與 web 的 `POST /api/bots/{id}/prompt`
-維持 409**，那條路的語意變更要單獨評估，不要照這段設計「送一次就好，daemon 會排隊」的使用者流程。
+**誰會建 `queued` turn**：AGM 派工／通知由 `supervisor::controller::dispatch` →
+`lifecycle::prompt::prompt_relayed_queueable` 排隊；bot 沒在跑時帶 `start_if_stopped` 的送出也會排隊（issue #122）。
+使用者與 web 的 `POST /api/bots/{id}/prompt` 預設仍回 409；帶 `queue_if_busy:true` 時，若 bot 有 in-flight turn
+或 agent 尚未 idle，則落地一筆 `awaits_idle=1` 的 queued turn。三種 turn 都走 `lifecycle::queue::flush_queued_locked`，
+依 `created_at, id` 領取，一次只送一筆；`awaits_idle=1` 必須等 run 的 agent 狀態明確為 `idle`，`unknown` 不算 idle。
+同一對話仍只有一筆 queued（`turns_one_queued`）；同一顆 bot 再送忙碌中的 web 訊息會回 `queue_slot_taken`，不覆蓋佇列。
+daemon 重啟會重掛所有 queued turn，包括沒有 `next_flush_at` 的列，回到 idle 後照原順序接續送出。
 
 界線：每個對話最多一筆 `queued`（`turns_one_queued`），同一筆交辦重試回同一筆（`turns_client_req`），撞到就回 409 照舊退避；
 排超過 `[supervisor] assignment_queue_wait_secs`（預設 1800 秒）還沒送出，controller 撤回那則 queued、把交辦停在 `blocked`，並推 `assignment_undeliverable`（見下面「交辦不要了」）；
@@ -1068,7 +1069,7 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
    失敗只寫 `start_error`（turn 留在佇列）。bot 從 `unknown`／`blocked` 變 `idle` 也叫醒 flush（不必等退避 timer）。
    agent 起來了、只是 `running` 寫不進 DB（`start_state_uncommitted`，#152；叫醒那條回的是字串，看有沒有留下 `starting` 的 run）
    **不是**沒能啟動：不寫 `start_error`，在背景等對帳把 run 收成 `running` 再叫 flush（對帳那條不會叫 flush）；run 不在了就交給撤孤兒那條記原因。
-3. 送出完全走既有的 flush：CAS claim 保證只送一次，resume／額度／維護窗口的閘門照舊。瀏覽器不留一份，WS 幀、重整、重按啟動都不會變成第二次送出。
+3. 送出完全走共用 flush：依 `created_at, id` 順序 CAS claim，一次送一筆；resume／額度／維護窗口的閘門照舊。瀏覽器不留一份，WS 幀、重整、重按啟動都不會變成第二次送出。
 4. 取消：`POST /api/turns/{id}/withdraw` 只撤還在等的那一則（`failed`＋說明；另外也撤還在排的 daemon 自動通知，#562）；已被佇列領走的回 409——不能拿 abandon 頂替，
    那會把已經送出的回合收成失敗，web 又把文字放回輸入框，再按一次就送兩次。
 5. daemon 重啟：開機對帳完成、autostart 那一步（`reconcile::autostart_after_reconcile` → `start_send::resume_after_boot`），

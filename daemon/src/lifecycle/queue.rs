@@ -66,6 +66,16 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     if run.state != "running" || run.agent_status == "blocked" || run.agent_status == "working" {
         return Ok(());
     }
+    // Web turns accepted with `queue_if_busy` stay queued until herdr explicitly reports idle.
+    // Older AGM and #122 turns retain their existing eligibility rules; in particular, this new
+    // admission must not treat `unknown` as proof that the busy agent has finished its turn.
+    let awaits_idle: i64 = sqlx::query_scalar("SELECT awaits_idle FROM turns WHERE id = ?")
+        .bind(&turn.id)
+        .fetch_one(&app.db)
+        .await?;
+    if awaits_idle == 1 && run.agent_status != "idle" {
+        return Ok(());
+    }
     if db::in_flight_turn(&app.db, &run.id).await?.is_some() {
         return Ok(());
     }
@@ -979,6 +989,9 @@ mod flush_queue_tests {
     async fn queued_kind(kind: &str, session: &str) -> Fixture {
         let env = tt::env().await;
         let app = env.app.clone();
+        // C is developed alongside A, which adds this production column and migration. Keep the
+        // queue fixture usable on either side of that merge without changing the schema history.
+        ensure_awaits_idle_fixture_column(&app.db).await;
         let bot_id = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
@@ -1016,6 +1029,21 @@ mod flush_queue_tests {
         .await
         .unwrap();
         Fixture { env, bot_id, conv, run_id, turn_id }
+    }
+
+    async fn ensure_awaits_idle_fixture_column(pool: &sqlx::SqlitePool) {
+        let present: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('turns') WHERE name = 'awaits_idle'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if present == 0 {
+            sqlx::query("ALTER TABLE turns ADD COLUMN awaits_idle INTEGER NOT NULL DEFAULT 0")
+                .execute(pool)
+                .await
+                .unwrap();
+        }
     }
 
     fn at(iso: &str) -> chrono::DateTime<chrono::Utc> {
@@ -1862,6 +1890,127 @@ mod flush_queue_tests {
         let t = turn(&app, &f.turn_id).await;
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"));
         assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1, "exactly once");
+    }
+
+    /// The new web queue entry waits for a real idle status and keeps its created_at position
+    /// relative to AGM dispatch turns and #122 start_if_stopped turns.
+    #[tokio::test]
+    async fn awaits_idle_queue_turns_wait_for_idle_and_keep_created_at_order() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("DROP INDEX turns_one_queued").execute(&app.db).await.unwrap();
+
+        let oldest = chrono::Utc::now() - chrono::Duration::seconds(5);
+        let created = |seconds: i64| {
+            (oldest + chrono::Duration::seconds(seconds)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        };
+        let awaits_idle = &f.turn_id;
+        let assignment_turn = db::ulid();
+        let awaits_start = db::ulid();
+        sqlx::query("UPDATE turns SET awaits_idle=1, prompt_text='web waits for idle', created_at=? WHERE id=?")
+            .bind(created(0))
+            .bind(awaits_idle)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,'web','queued','pending','AGM dispatch',?)",
+        )
+        .bind(&assignment_turn)
+        .bind(&f.conv)
+        .bind(created(1))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at, awaits_start)
+             VALUES (?,?,'web','queued','pending','start_if_stopped',?,1)",
+        )
+        .bind(&awaits_start)
+        .bind(&f.conv)
+        .bind(created(2))
+        .execute(&app.db)
+        .await
+        .unwrap();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let assignment = crate::supervisor::store::insert_assignment(
+            &app.db,
+            None,
+            &f.bot_id,
+            "queue-order-agm",
+            "AGM dispatch",
+            &[],
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        crate::supervisor::store::mark_delivered(&app.db, &assignment.id, &assignment_turn, "queued")
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE runs SET agent_status='unknown' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&app, awaits_idle).await.status, "queued", "awaits_idle does not treat unknown as idle");
+        assert_eq!(turn(&app, &assignment_turn).await.status, "queued", "a later AGM turn does not pass the queue head");
+        assert_eq!(turn(&app, &awaits_start).await.status, "queued", "a later #122 turn does not pass the queue head");
+        assert_eq!(typed(&f, "web waits for idle"), 0, "one character is not sent before idle");
+
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        for (id, expected) in [
+            (awaits_idle.as_str(), "web waits for idle"),
+            (assignment_turn.as_str(), "AGM dispatch"),
+            (awaits_start.as_str(), "start_if_stopped"),
+        ] {
+            flush_queued_locked(&app, &f.bot_id).await.unwrap();
+            assert_eq!(turn(&app, id).await.status, "in_flight", "created_at order selected {expected}");
+            assert_eq!(typed(&f, expected), 1, "the {expected} turn was typed once");
+            sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?")
+                .bind(db::now())
+                .bind(id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Queue timers are memory-only, so a persisted awaits_idle turn with no backoff must be
+    /// rediscovered after restart and delivered once the run is idle again.
+    #[tokio::test]
+    async fn an_awaits_idle_turn_is_flushed_after_daemon_restart() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET awaits_idle=1, prompt_text='after restart', next_flush_at=NULL WHERE id=?")
+            .bind(&f.turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        forget_queue_retry_timer(&f.bot_id);
+
+        drop(app);
+        let fresh = tt::restart_app(&f.env).await;
+        let fired = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = fired.clone();
+        assert_eq!(
+            rearm_queue_retries_with(&fresh, move |bot: String| seen.lock().unwrap().push(bot))
+                .await
+                .unwrap(),
+            1,
+            "a queued awaits_idle turn with no backoff is rearmed after restart",
+        );
+        let _ = crate::testing::eventually!(!fired.lock().unwrap().is_empty());
+        assert_eq!(fired.lock().unwrap().as_slice(), &[f.bot_id.clone()]);
+
+        let lock = fresh.bot_lock(&f.bot_id).await;
+        let _guard = lock.lock().await;
+        flush_queued_locked(&fresh, &f.bot_id).await.unwrap();
+        assert_eq!(turn(&fresh, &f.turn_id).await.status, "in_flight");
+        assert_eq!(f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1);
     }
 
     /// 排隊送：herdr 拒絕 `format: ansi` 照樣送出；讀不到畫面就放回隊列（不是 delivery=unknown 卡住後面的訊息）。
