@@ -46,9 +46,14 @@ origin:   web | external                     （external = 非本系統送出、
 |---|---|---|
 | 連線 | `connected` / `disconnected`（daemon ↔ herdr socket） | daemon |
 | Run 生命週期 | `stopped` / `starting` / `running` / `stopping` / `exited` | daemon |
-| Agent 狀態 | `idle` / `working` / `blocked` / `unknown` | herdr `AgentStatus`（`done` → `idle`） |
+| Agent 狀態 | `idle` / `working` / `blocked` / `unknown` | herdr `AgentStatus`（`done` → `idle`；codex 啟動完的 `unknown` → `idle`，見下） |
 
 燈號：disconnected 灰；stopped/exited 離線；starting 黃閃；stopping 黃；running+idle 綠；+working 藍動畫；+blocked 紅；+unknown 灰黃。
+
+herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上時回 `unknown`（`agent explain`：`codex_state_ambiguous`）；0.9.1 同一個畫面回
+`idle`（`default_known_agent_idle_fallback`）。codex 的 manifest 沒有 idle 規則，閒著的 codex 在 0.9.2+ 因此永遠是 `unknown`。herdr client
+（`herdr::fold_codex_unknown`）把「codex、已不在 `launch_pending`、`unknown`」折回 `idle`——`AgentInfo`／`PaneInfo` 的結果與
+`pane.agent_status_changed` 事件都一樣——下游看到的是 0.9.1 的語意；`working`／`blocked` 仍由規則判定，其他 kind 的 `unknown` 不動（issue #732）。
 
 側欄 bot 列可由列本身取得焦點後按 Enter／Space 選取；列內選單與按鈕保留各自的鍵盤操作。確認框由 portal 顯示時，其點擊不切換目前 bot；點列內一般內容仍可選取 bot。
 
@@ -1273,7 +1278,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    （立即回 `launch_pending`）。之後所有 herdr 目標一律用 `run.agent_name`。pane 建好到 start 成功之間任何失敗 → Run `exited` + 盡力關 pane（tab 空了一併關）。
    Codex 啟動（包含 resume／fork 與子 agent 原地重啟）在 `bot.args` 後固定加 `--no-daemon --no-alt-screen -c tui.show_tooltips=false`：0.157 的 `--no-daemon` 不會連上或啟動共用背景 server，該 pane 使用自己的 embedded server；`--no-alt-screen` 強制終端 transcript 模式，即使 Codex 預設開啟 fullscreen transcript 也保留一般可讀畫面與 scrollback。這讓每個 pane 的 `AM_*`／hook 環境留在自己的 Codex 執行個體。`-c tui.show_tooltips=false` 關掉 0.158 起回合中（超過 30 秒）與回合後（第三回合起）插入的隨機 tip，免得畫面備援擷取把它當成回覆結尾（issue #728）。
 6. 開該 pane 的狀態訂閱。
-7. `agent.wait {until:[idle,done,blocked], timeout_ms: 60000}`：idle/done → running+idle；blocked → running+blocked（例如 trust 提示）；
+7. `agent.wait {until:[idle,done,blocked], timeout_ms: 60000}`（codex 改成每 500ms 輪詢折過的 `agent.get`、到 `launch_pending` 結束才算，#732）：idle/done → running+idle；blocked → running+blocked（例如 trust 提示）；
    timeout/error → 不關 pane，`agent.get` 有 agent → running+unknown，沒有 → `exited` + 關 pane。
    `running` 以 CAS（`starting → running`）寫入，**寫不進去就不回成功**（#145）：agent 已經在跑，不殺它、也不收成 `exited`，
    回 `503 start_state_uncommitted`，排背景對帳重試照 herdr 的證據收成 `running`（不開第二顆）。CAS 輸了（不拿 bot 鎖的

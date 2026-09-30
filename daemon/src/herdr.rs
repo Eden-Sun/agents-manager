@@ -1,6 +1,7 @@
 //! herdr Unix socket client.
 //!
 //! Wire contract (verified against herdr 0.8.2 / protocol 20 and 0.9.1 / protocol 22 — 同一組 RPC 的請求與回應形狀逐項比對過，#242):
+//!   0.9.3（同為 protocol 22）對同一組 RPC 只多了欄位（`AgentInfo.completion_seq`、`PaneInfo.restore_error`）；語意上的差別見 [`fold_codex_unknown`]（#732）。
 //! - one connection per RPC: send `{"id":"<string>","method","params"}\n`, read one line, server closes.
 //! - `events.subscribe` keeps the connection open and streams `{"event":"<name>","data":{...}}\n`.
 //! - request `id` must be a string.
@@ -41,6 +42,19 @@ impl AgentStatus {
             AgentStatus::Done => "done",
             AgentStatus::Unknown => "unknown",
         }
+    }
+}
+
+/// herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何規則對上時回 `unknown`（`agent explain`：`codex_state_ambiguous`）；
+/// 0.9.1 同一個畫面回 `idle`（`default_known_agent_idle_fallback`）。codex 的 manifest 沒有 idle 規則，所以閒著的 codex
+/// 在 0.9.2+ 永遠是 `unknown`，daemon 各處「閒下來」的判斷（flush、備援、閒置回收、啟動等 ready）都等不到（issue #732）。
+/// 在 client 這一層折回 0.9.1 的語意：`working`／`blocked` 仍由規則判定，只有「判不出來」算閒著；還在啟動的不折。
+/// 0.9.1 上是 no-op（它從不對啟動完的 codex 回 `unknown`）。
+pub fn fold_codex_unknown(agent: Option<&str>, status: AgentStatus, launch_pending: bool) -> AgentStatus {
+    if status == AgentStatus::Unknown && agent == Some("codex") && !launch_pending {
+        AgentStatus::Idle
+    } else {
+        status
     }
 }
 
@@ -111,6 +125,30 @@ pub struct AgentInfo {
     pub state_change_seq: u64,
     #[serde(default)]
     pub revision: u64,
+}
+
+impl AgentInfo {
+    fn folded(mut self) -> Self {
+        self.agent_status = fold_codex_unknown(self.agent.as_deref(), self.agent_status, self.launch_pending);
+        self
+    }
+}
+
+impl PaneInfo {
+    fn folded(mut self) -> Self {
+        self.agent_status = self.agent_status.map(|s| fold_codex_unknown(self.agent.as_deref(), s, false));
+        self
+    }
+}
+
+/// 同 [`fold_codex_unknown`]，套在 `pane.agent_status_changed` 事件上（事件的 data 帶 `agent`）。
+fn fold_event(ev: &mut Event) {
+    if ev.event.replace('.', "_") != "pane_agent_status_changed" || ev.data.get("agent").and_then(Value::as_str) != Some("codex") {
+        return;
+    }
+    if ev.data.get("agent_status").and_then(Value::as_str) == Some("unknown") {
+        ev.data["agent_status"] = json!("idle");
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -399,12 +437,13 @@ impl HerdrClient {
             Some(w) => json!({"workspace_id": w}),
             None => json!({}),
         };
-        self.call_as("pane.list", params, "panes").await
+        let panes: Vec<PaneInfo> = self.call_as("pane.list", params, "panes").await?;
+        Ok(panes.into_iter().map(PaneInfo::folded).collect())
     }
 
     pub async fn pane_get(&self, pane_id: &str) -> Result<Option<PaneInfo>> {
         match self.call("pane.get", json!({"pane_id": pane_id})).await {
-            Ok(v) => Ok(Some(serde_json::from_value(v.get("pane").cloned().unwrap_or(v))?)),
+            Ok(v) => Ok(Some(serde_json::from_value::<PaneInfo>(v.get("pane").cloned().unwrap_or(v))?.folded())),
             Err(e) if is_not_found(&e) => Ok(None),
             Err(e) => Err(e),
         }
@@ -556,18 +595,19 @@ impl HerdrClient {
     }
 
     pub async fn agent_list(&self) -> Result<Vec<AgentInfo>> {
-        self.call_as("agent.list", json!({}), "agents").await
+        let agents: Vec<AgentInfo> = self.call_as("agent.list", json!({}), "agents").await?;
+        Ok(agents.into_iter().map(AgentInfo::folded).collect())
     }
 
     /// herdr clears a name when its agent exits, so a late exit after a same-named restart can
     /// clear the *new* agent's name (2026-09-11).
     pub async fn agent_rename(&self, target: &str, name: &str) -> Result<AgentInfo> {
-        self.call_as("agent.rename", json!({"target": target, "name": name}), "agent").await
+        Ok(self.call_as::<AgentInfo>("agent.rename", json!({"target": target, "name": name}), "agent").await?.folded())
     }
 
     pub async fn agent_get(&self, target: &str) -> Result<Option<AgentInfo>> {
         match self.call("agent.get", json!({"target": target})).await {
-            Ok(v) => Ok(Some(serde_json::from_value(v["agent"].clone())?)),
+            Ok(v) => Ok(Some(serde_json::from_value::<AgentInfo>(v["agent"].clone())?.folded())),
             Err(e) if is_not_found(&e) => Ok(None),
             Err(e) => Err(e),
         }
@@ -593,11 +633,33 @@ impl HerdrClient {
                 Duration::from_millis(timeout_ms + 5_000),
             )
             .await?;
-        Ok(serde_json::from_value(v["agent"].clone())?)
+        Ok(serde_json::from_value::<AgentInfo>(v["agent"].clone())?.folded())
+    }
+
+    /// 啟動後等 ready（[`Self::agent_wait`]）。codex 在 herdr 0.9.2+ 閒著是 `unknown`，server 端的 `agent.wait` 等 idle
+    /// 會等到逾時（issue #732）：改成輪詢折過的 `agent.get`。其他 kind 照舊交給 server 等。
+    pub async fn agent_wait_ready(&self, kind: &str, target: &str, until: &[AgentStatus], timeout_ms: u64) -> Result<AgentInfo> {
+        if kind != "codex" {
+            return self.agent_wait(target, until, timeout_ms).await;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let mut last = None;
+        loop {
+            if let Some(info) = self.agent_get(target).await? {
+                if !info.launch_pending && until.contains(&info.agent_status) {
+                    return Ok(info);
+                }
+                last = Some(info.agent_status);
+            }
+            if tokio::time::Instant::now() + AGENT_READY_POLL >= deadline {
+                bail!("agent {target} did not reach {until:?} within {timeout_ms} ms (last {last:?})");
+            }
+            tokio::time::sleep(AGENT_READY_POLL).await;
+        }
     }
 
     pub async fn agent_prompt(&self, target: &str, text: &str) -> Result<AgentInfo> {
-        self.call_as("agent.prompt", json!({"target": target, "text": text}), "agent").await
+        Ok(self.call_as::<AgentInfo>("agent.prompt", json!({"target": target, "text": text}), "agent").await?.folded())
     }
 
     pub async fn agent_send_keys(&self, target: &str, keys: &[String]) -> Result<()> {
@@ -652,7 +714,8 @@ impl HerdrClient {
                             continue;
                         }
                         match serde_json::from_str::<Event>(t) {
-                            Ok(ev) => {
+                            Ok(mut ev) => {
+                                fold_event(&mut ev);
                                 if tx.send(ev).await.is_err() {
                                     break;
                                 }
@@ -684,6 +747,9 @@ fn snippet(method: &str, body: &str) -> String {
     }
     out
 }
+
+/// codex 等 ready 時輪詢 `agent.get` 的間隔（[`HerdrClient::agent_wait_ready`]）。
+const AGENT_READY_POLL: Duration = Duration::from_millis(500);
 
 /// 錯誤訊息裡最多帶幾個字的回應。
 const SNIPPET_CHARS: usize = 200;
@@ -777,6 +843,143 @@ mod rpc_tests {
         let client = HerdrClient::new(&sock);
         let err = client.call_timeout("ping", json!({}), Duration::from_secs(15)).await.expect_err("不能成功");
         assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        server.abort();
+        std::fs::remove_dir_all(sock.parent().unwrap()).ok();
+    }
+
+    /// 照腳本回話的假 herdr：每條連線讀一行請求，`reply` 決定回什麼；`events.subscribe` 回 ack 之後把 `events` 一行行吐出去。
+    fn scripted_socket(tag: &str, reply: impl Fn(&Value) -> Value + Send + Sync + 'static, events: Vec<Value>) -> (PathBuf, tokio::task::JoinHandle<()>) {
+        let dir = std::env::temp_dir().join(format!("am-herdr-{tag}-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let reply = std::sync::Arc::new(reply);
+        let handle = tokio::spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                let (reply, events) = (reply.clone(), events.clone());
+                tokio::spawn(async move {
+                    let (r, mut w) = conn.into_split();
+                    let mut line = String::new();
+                    BufReader::new(r).read_line(&mut line).await.unwrap();
+                    let req: Value = serde_json::from_str(&line).unwrap();
+                    let mut out = vec![json!({"id": req["id"], "result": reply(&req)})];
+                    if req["method"] == "events.subscribe" {
+                        out.extend(events);
+                    }
+                    for v in out {
+                        w.write_all(format!("{v}\n").as_bytes()).await.unwrap();
+                    }
+                });
+            }
+        });
+        (sock, handle)
+    }
+
+    fn agent(name: &str, kind: &str, status: &str, launch_pending: bool) -> Value {
+        json!({"name": name, "agent": kind, "agent_status": status, "launch_pending": launch_pending,
+               "workspace_id": "w1", "tab_id": "w1:t1", "pane_id": format!("w1:{name}"), "cwd": "/tmp"})
+    }
+
+    /// #732：herdr 0.9.2+ 對閒著的 codex 回 `unknown`，折回 0.9.1 的 `idle`；其餘一律原樣。
+    #[test]
+    fn only_a_launched_codex_that_herdr_cannot_classify_is_folded_to_idle() {
+        use AgentStatus::*;
+        assert_eq!(fold_codex_unknown(Some("codex"), Unknown, false), Idle);
+        assert_eq!(fold_codex_unknown(Some("codex"), Unknown, true), Unknown, "還在啟動：不是閒著");
+        for s in [Working, Blocked, Done, Idle] {
+            assert_eq!(fold_codex_unknown(Some("codex"), s, false), s, "規則判得出來的照舊");
+        }
+        for kind in [Some("claude"), Some("grok"), None] {
+            assert_eq!(fold_codex_unknown(kind, Unknown, false), Unknown, "{kind:?} 的 unknown 不動");
+        }
+    }
+
+    /// 事件、`agent.list`、`agent.get`、`pane.list` 都經過同一個折法：下游（flush、備援、idle_sleep、對帳）看到的是 0.9.1 的語意。
+    #[tokio::test]
+    async fn codex_unknown_reaches_the_daemon_as_idle_on_every_read_path() {
+        let events = vec![
+            json!({"event": "pane.agent_status_changed", "data": {"agent": "codex", "agent_status": "unknown", "pane_id": "w1:p2"}}),
+            json!({"event": "pane.agent_status_changed", "data": {"agent": "claude", "agent_status": "unknown", "pane_id": "w1:p1"}}),
+            json!({"event": "pane.agent_status_changed", "data": {"agent": "codex", "agent_status": "working", "pane_id": "w1:p2"}}),
+            json!({"event": "pane_exited", "data": {"agent": "codex", "agent_status": "unknown", "pane_id": "w1:p2"}}),
+        ];
+        let (sock, server) = scripted_socket(
+            "fold",
+            |req| match req["method"].as_str().unwrap() {
+                "agent.list" => json!({"agents": [agent("cx", "codex", "unknown", false), agent("cc", "claude", "unknown", false), agent("new", "codex", "unknown", true)]}),
+                "agent.get" => json!({"agent": agent("cx", "codex", "unknown", false)}),
+                "pane.list" => json!({"panes": [{"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1", "cwd": "/tmp", "agent": "codex", "agent_status": "unknown"}]}),
+                _ => json!({"type": "subscription_started"}),
+            },
+            events,
+        );
+        let c = HerdrClient::new(&sock);
+        let got: Vec<_> = c.agent_list().await.unwrap().into_iter().map(|a| (a.name.unwrap(), a.agent_status)).collect();
+        assert_eq!(got, [("cx".into(), AgentStatus::Idle), ("cc".into(), AgentStatus::Unknown), ("new".into(), AgentStatus::Unknown)]);
+        assert_eq!(c.agent_get("cx").await.unwrap().unwrap().agent_status, AgentStatus::Idle);
+        assert_eq!(c.pane_list(None).await.unwrap()[0].agent_status, Some(AgentStatus::Idle));
+
+        let mut rx = c.subscribe(vec![json!({"type": "pane.agent_status_changed"})]).await.unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let ev = rx.recv().await.unwrap();
+            seen.push((ev.event, ev.data["agent"].as_str().unwrap().to_string(), ev.data["agent_status"].as_str().unwrap().to_string()));
+        }
+        let want = [
+            ("pane.agent_status_changed", "codex", "idle"),
+            ("pane.agent_status_changed", "claude", "unknown"),
+            ("pane.agent_status_changed", "codex", "working"),
+            ("pane_exited", "codex", "unknown"),
+        ];
+        assert_eq!(seen.iter().map(|(e, a, s)| (e.as_str(), a.as_str(), s.as_str())).collect::<Vec<_>>(), want);
+        server.abort();
+        std::fs::remove_dir_all(sock.parent().unwrap()).ok();
+    }
+
+    /// 啟動等 ready：codex 走輪詢（server 端的 `agent.wait` 等 idle 在 0.9.2+ 永遠逾時），啟動中的 `unknown` 不算 ready；
+    /// 其他 kind 照舊一次 `agent.wait`。
+    #[tokio::test]
+    async fn a_codex_start_is_ready_once_it_leaves_launch_pending() {
+        let gets = std::sync::Arc::new(AtomicU64::new(0));
+        let waits = std::sync::Arc::new(AtomicU64::new(0));
+        let (g, w) = (gets.clone(), waits.clone());
+        let (sock, server) = scripted_socket(
+            "ready",
+            move |req| match req["method"].as_str().unwrap() {
+                "agent.get" => {
+                    let pending = g.fetch_add(1, Ordering::SeqCst) < 2;
+                    json!({"agent": agent("cx", "codex", "unknown", pending)})
+                }
+                "agent.wait" => {
+                    w.fetch_add(1, Ordering::SeqCst);
+                    json!({"agent": agent("cc", "claude", "idle", false)})
+                }
+                m => panic!("unexpected {m}"),
+            },
+            vec![],
+        );
+        let c = HerdrClient::new(&sock);
+        let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
+        let info = c.agent_wait_ready("codex", "cx", &until, 10_000).await.unwrap();
+        assert_eq!(info.agent_status, AgentStatus::Idle);
+        assert_eq!(gets.load(Ordering::SeqCst), 3, "兩次還在啟動、第三次才算 ready");
+        assert_eq!(waits.load(Ordering::SeqCst), 0, "codex 不走 server 端的 agent.wait");
+
+        c.agent_wait_ready("claude", "cc", &until, 10_000).await.unwrap();
+        assert_eq!(waits.load(Ordering::SeqCst), 1, "claude 照舊");
+        server.abort();
+        std::fs::remove_dir_all(sock.parent().unwrap()).ok();
+    }
+
+    /// 一直在啟動（或一直 working）的 codex：到期回 `Err`（呼叫端退回 `agent.get`、不關 pane），不能無限等。
+    #[tokio::test]
+    async fn a_codex_that_never_settles_times_out() {
+        let (sock, server) = scripted_socket("never", |_| json!({"agent": agent("cx", "codex", "working", false)}), vec![]);
+        let c = HerdrClient::new(&sock);
+        let started = std::time::Instant::now();
+        let err = c.agent_wait_ready("codex", "cx", &[AgentStatus::Idle], 1_200).await.expect_err("不能成功");
+        assert!(format!("{err:#}").contains("Working"), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
         server.abort();
         std::fs::remove_dir_all(sock.parent().unwrap()).ok();
     }
