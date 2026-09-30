@@ -63,6 +63,8 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 - 名稱一律 `<你的 agent 名>-<字尾>`（`$AM_AGENT_NAME` 有值；PATH 上的 `herdr` shim 會自動補前綴），daemon 才會把它掛在你底下。
 - 子 pane 用 `herdr pane split --pane $HERDR_PANE_ID`，帳號與 hook 環境會繼承。
 - 子 agent 一樣要遵守本檔；派工 prompt 必須帶上：「先 `git worktree list` 找自己的 `.claude/worktrees/<你的 agent 名>`，沒有就 `git worktree add .claude/worktrees/<你的 agent 名>-<字尾> -b <分支>`；只在自己的 worktree 改與 commit，禁止在主樹 `git stash` / `--autostash` / `git checkout --`，只 `git add` 自己的檔案，收尾前跑 `scripts/check.sh changed`，推完不等 CI（完整驗證由 ubuntu-ci 背景跑，commit status `ubuntu-ci` 紅了再處理），完成後移除自己的 worktree。」
+- 派工只走 herdr pane：禁止用 CLI 內建子代理（Claude 的 `Agent`／`Task`／`Workflow`、codex／grok 的同類功能）或在自己 pane 另起 agent CLI 做事，AG Man 追不到。
+- 子 agent 不再開子 agent（pane 有 `$AM_CHILD_OF`，shim 會 exit 77 拒絕 `agent start`）：要人手就在回報裡寫清楚，由 parent 決定重用閒置 child 或另開兄弟。派工 prompt 要帶上這條。
 - 做完的子 agent 關掉 pane（`herdr pane close`），不要留一堆 done 的 pane。
 
 ## OB（網頁 GPT 外腦，使用者 2026-09-15）

@@ -55,6 +55,18 @@ am_bot_token() {
     if [ -n "${AM_BOT_TOKEN:-}" ]; then printf '%s' "$AM_BOT_TOKEN"; else printf '%s' "${AM_HOOK_TOKEN:-}"; fi
 }
 
+# 子 agent 的標記（使用者 2026-09-30）：bot 開出來的 pane 一律帶 `AM_CHILD_OF=<母 agent 名>`，
+# 子代自己再開的 pane 沿用同一個值（不往下疊）。有這個值的 pane 就是子 agent，`agent start` 直接拒絕：
+# 子 agent 不再有子 agent，要人手由 parent 決定另派兄弟，狀態才都掛在同一層被追蹤。
+# 呼叫者自帶的 `--env AM_CHILD_OF=…` 一律剝掉（清掉它就能繞過），只認這裡算出來的值。
+am_child_of_value() {
+    if [ -n "${AM_CHILD_OF:-}" ]; then
+        printf '%s' "$AM_CHILD_OF"
+    elif [ -n "${AM_BOT_ID:-}" ]; then
+        printf '%s' "${AM_AGENT_NAME:-${AM_BOT_ID}}"
+    fi
+}
+
 # A bot pane must reserve its inherited proof before asking herdr to create a pane or child agent.
 # Rotation raises the matching daemon fence before its descendant snapshot; an unreadable / refused
 # gate means we do not run herdr. The permit remains open until the created pane is registered.
@@ -192,6 +204,10 @@ am_child_name() {
 # one, and stop at `--` (everything after it is the agent's own argv).
 am_agent_start() {
     shift 2
+    if [ -n "${AM_CHILD_OF:-}" ]; then
+        printf 'agents-manager: 你是 `%s` 派出的子 agent，禁止再開子 agent。需要更多人手：停下來在回報裡寫清楚要另派什麼、為什麼，由 `%s` 決定要不要開兄弟 agent\n' "$AM_CHILD_OF" "$AM_CHILD_OF" >&2
+        exit 77
+    fi
     _n=$#
     _i=0
     _named=0
@@ -214,7 +230,7 @@ am_agent_start() {
                 --env)
                     if [ "$_i" -lt "$_n" ]; then
                         case "$1" in
-                            AM_INSTANCE=* | AM_DATA_DIR=*)
+                            AM_INSTANCE=* | AM_DATA_DIR=* | AM_CHILD_OF=*)
                                 shift
                                 _i=$((_i + 1))
                                 continue
@@ -222,7 +238,7 @@ am_agent_start() {
                         esac
                     fi
                     ;;
-                --env=AM_INSTANCE=* | --env=AM_DATA_DIR=*) continue ;;
+                --env=AM_INSTANCE=* | --env=AM_DATA_DIR=* | --env=AM_CHILD_OF=*) continue ;;
             esac
         fi
         if [ "$_prev" = "--kind" ]; then _kind=$_a; fi
@@ -310,6 +326,13 @@ am_reexport_env_before_start() {
 "
         _line="${_line}export $_k='$_esc'; "
     done
+    _v=$(am_child_of_value)
+    if [ -n "$_v" ]; then
+        _esc=$(printf '%s' "$_v" | sed "s/'/'\\\\''/g")
+        _body="${_body}export AM_CHILD_OF='$_esc'
+"
+        _line="${_line}export AM_CHILD_OF='$_esc'; "
+    fi
     [ -n "$_body" ] || return 0
     # #389：整串 export 一行行打進 pane 會灌滿終端畫面（沒 hook 的 bot 靠快照補回覆也會讀到）。
     # 寫進 0600 暫存檔，pane 只收一行 ` . '<檔>' && rm -f '<檔>'`（行首空白：不進 shell history）。
@@ -527,7 +550,7 @@ am_forward_with_env() {
             --env)
                 if [ "$_i" -lt "$_n" ]; then
                     case "$1" in
-                        AM_INSTANCE=* | AM_DATA_DIR=*)
+                        AM_INSTANCE=* | AM_DATA_DIR=* | AM_CHILD_OF=*)
                             shift
                             _i=$((_i + 1))
                             continue
@@ -535,7 +558,7 @@ am_forward_with_env() {
                     esac
                 fi
                 ;;
-            --env=AM_INSTANCE=* | --env=AM_DATA_DIR=*) continue ;;
+            --env=AM_INSTANCE=* | --env=AM_DATA_DIR=* | --env=AM_CHILD_OF=*) continue ;;
         esac
         set -- "$@" "$_a"
     done
@@ -543,6 +566,8 @@ am_forward_with_env() {
         eval "_v=\${$_k:-}"
         [ -z "$_v" ] || set -- "$@" --env "$_k=$_v"
     done
+    _v=$(am_child_of_value)
+    [ -z "$_v" ] || set -- "$@" --env "AM_CHILD_OF=$_v"
     # 呼叫者自己設過的 key 不補母 pane 的值。比對要**兩種拼法都認**（`--env K=V` 與 `--env=K=V`），
     # 而且只看 --env 的位置：以前用 `case " $* "` 比整串 argv，`--env=K=V` 因為前面是 `=` 不算數，
     # 於是同一個 key 被補第二份（子 agent 可能跑在母 bot 的帳號下），而隨便一個參數的值裡含有
@@ -1600,6 +1625,27 @@ mod tests {
         assert!(text.contains("export AM_HOOK_TOKEN='tok'"), "{text}");
         assert!(text.contains("export AM_INSTANCE='a1b2'"), "隔離實例的保留變數也補：{text}");
         assert!(text.contains("export AM_DATA_DIR='/data/iso'"), "{text}");
+        assert!(text.contains("export AM_CHILD_OF='p-1'"), "子 agent 的 pane 要標出 parent：{text}");
+    }
+
+    /// 使用者 2026-09-30：bot 開的 pane 標 `AM_CHILD_OF=<母名>`（子代再開的 pane 沿用同一個值、呼叫者偽造的剝掉），
+    /// 有這個標記的 pane 開 `agent start` 一律拒絕，而且 herdr 根本沒被叫到。
+    #[test]
+    fn a_child_pane_is_marked_and_cannot_start_a_grandchild() {
+        let s = Sandbox::new();
+        let parent = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1")];
+        let (out, _) = s.run(&parent, &["pane", "split", "--pane", "w1:p1", "--env", "AM_CHILD_OF=forged"]);
+        assert_eq!(env_values(&out, "AM_CHILD_OF"), vec!["p-1".to_string()], "{out:?}");
+        let (out, _) = s.run(&[("AM_AGENT_NAME", "p-1")], &["pane", "split", "--pane", "w1:p1"]);
+        assert!(env_values(&out, "AM_CHILD_OF").is_empty(), "沒有 bot 身分的人工 shell 不標：{out:?}");
+
+        let child = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_CHILD_OF", "p-1")];
+        let (out, _) = s.run(&child, &["pane", "split", "--pane", "w1:p2"]);
+        assert_eq!(env_values(&out, "AM_CHILD_OF"), vec!["p-1".to_string()], "子代的 pane 沿用同一個 parent：{out:?}");
+        let (out, err, rc) = s.run_full(&child, &["agent", "start", "grandkid", "--pane", "w1:p2"]);
+        assert_eq!(rc, 77, "{out:?} {err}");
+        assert!(out.is_empty(), "herdr 不能被叫到：{out:?}");
+        assert!(err.contains("禁止再開子 agent") && err.contains("`p-1` 決定"), "{err}");
     }
 
     /// 值裡有單引號要逃脫，不然那個 export 的邊界會斷在半路。

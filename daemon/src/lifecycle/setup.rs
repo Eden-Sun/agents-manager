@@ -796,6 +796,9 @@ pub fn child_agent_rules(agent_name: &str) -> String {
 \n\
 需要開子任務或平行工作時，一律用 herdr 開子 agent：\n\
 \n\
+- **只准用 herdr pane 派工**：把工作交給另一個 agent，**必須**是 herdr pane 裡的子 agent。\
+**禁止**用 CLI 內建的子代理（Claude 的 `Agent`／`Task` 工具與 `Workflow`、codex 的子代理、grok 的同類功能），\
+也**禁止**在自己的 pane 裡另起 `claude`／`codex`／`grok` 行程（含丟背景）來做事。那些 AG Man 看不到、追不到狀態、收不掉。\n\
 - **先找閒置的 child**：開新的子 agent 之前，**必須先跑** `herdr agent list`，看自己底下有沒有 `idle` / `done` 的子 agent。\
 有就用 `herdr agent prompt <名稱> \"…\"` 把下一份工作交下去。**禁止**每件事都開一顆新的；只有使用者明確要求新開時才可以。\n\
 - **命名**：`herdr agent start <名稱> …` 的名稱**必須**以 `{agent_name}-` 為前綴（例：`{agent_name}-review`、`{agent_name}-ui`）。\
@@ -805,6 +808,16 @@ PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 - **環境變數**：帳號與 hook 會自動帶進子 pane（`CLAUDE_CONFIG_DIR`、`AM_*`）。**禁止覆蓋**這些變數。\n\
 - **禁止 `git stash`、禁止 `--autostash`**：同一個工作樹上有別的 agent 還沒提交的改動，弄丟了算你的。\n\
 - 你開的子 agent 會被 AG Man 掛在**你底下**追蹤（側欄縮排顯示）。做完**必須**自己把它的 pane 收掉，不准留著。\n\
+- **派工 prompt 必須寫明**：「你是 `{agent_name}` 的子 agent：禁止再開子 agent（含內建子代理、另起 agent CLI）；\
+工作太大或要平行時，停下來在回報裡寫清楚要另派什麼，由 `{agent_name}` 決定」。子 agent 回報要人手時，由你決定重用閒置 child 或另開兄弟，\
+**禁止**叫子 agent 自己開。\n\
+\n\
+**你是子 agent 時**（環境變數 `$AM_CHILD_OF` 有值＝派你的 parent；或派工 prompt 說你是子 agent），以下取代上面「開子 agent」那幾條：\n\
+\n\
+- **禁止再開子 agent**：`herdr agent start`、內建子代理、另起 agent CLI 一律禁止。PATH 上的 herdr 會直接拒絕，**禁止**繞過（包括動 `AM_CHILD_OF`）。\n\
+- 工作太大、需要平行、或卡在範圍外的事時，**必須**停下來在回報裡寫清楚：要另派什麼、為什麼、跟你手上的工作怎麼切。\
+要不要開兄弟 agent、交給誰，由 parent 決定。\n\
+- 做完就回報 parent，由 parent 驗收並收掉你的 pane。\n\
 \n\
 瀏覽器（同樣是硬規則）：\n\
 \n\
@@ -1286,6 +1299,19 @@ mod model_args_tests {
         assert!(rule.contains("必須"));
         assert!(rule.contains("禁止"));
         assert!(!rule.contains("請"), "no polite softeners in an injected rule");
+    }
+
+    /// 使用者 2026-09-30：派工只走 herdr pane（內建子代理追不到），子 agent 不再開子 agent、要人手找 parent。
+    #[test]
+    fn children_go_through_herdr_panes_and_never_spawn_grandchildren() {
+        let rule = super::child_agent_rules("proj-abc123");
+        for want in ["`Agent`／`Task`", "`Workflow`", "codex 的子代理", "只准用 herdr pane 派工"] {
+            assert!(rule.contains(want), "要點名禁止內建子代理：{want}");
+        }
+        assert!(rule.contains("$AM_CHILD_OF"), "子 agent 要知道怎麼認出自己");
+        assert!(rule.contains("禁止再開子 agent"));
+        assert!(rule.contains("由 parent 決定"));
+        assert!(rule.contains("你是 `proj-abc123` 的子 agent"), "派工 prompt 要帶上的那句話用自己的名字");
     }
 
     /// §6.5f（使用者 2026-09-16 裁示）：每顆 bot 都讀得到輸出規則——claude 的 skill 與三種 kind 的 persona
