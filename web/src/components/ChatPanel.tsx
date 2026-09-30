@@ -14,9 +14,9 @@ import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
 import { SentViaTag } from './SentViaTag'
-import { queueFromComposer, settleComposerSend } from '../store/queuedSend'
 import { startingSend, startingSendLabel } from '../store/startingSend'
 import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
+import { queuedIdleSend } from '../lib/queuedIdleSend'
 import { isImeEnter } from '../lib/ime'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { PaneCopy } from './PaneCopy'
@@ -69,6 +69,8 @@ import { PreviewPanel } from './PreviewPanel'
 import { isTopLevelBot } from '../store/routeSync'
 import { ToolsHint } from './Tools'
 import './chatPanel.css'
+
+const NO_QUEUED_ATTACHMENTS: Message['attachments'] = []
 
 // `hook` 留著只是為了 tooltip 與萬一的 fallback：正常回覆不再標來源（見 `Bubble`）。
 const SOURCE_LABEL: Record<string, string> = {
@@ -666,24 +668,48 @@ function Composer({
 }) {
   // Fresh object per call: raw from the selector would spin `useSyncExternalStore`.
   const state = useStore(useShallow((s) => composerState(s, botId)))
-  const sendPrompt = useStore((s) => s.sendPrompt)
+  const sendPrompt = useStore((s) =>
+    s.sendPrompt as (
+      botId: string,
+      text: string,
+      attachments?: string[],
+      sendNow?: boolean,
+      startIfStopped?: boolean,
+      draft?: undefined,
+      queueIfBusy?: boolean,
+    ) => Promise<boolean>,
+  )
   const abandonTurn = useStore((s) => s.abandonTurn)
   const interruptBot = useStore((s) => s.interruptBot)
   const abortBot = useStore((s) => s.abortBot)
   // 插隊／補充是 claude 專屬（使用者 2026-09-27）：send-now 鍵與「打進 pane 併進這一輪」只在 claude 上驗過。
   const isClaude = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'claude')
   const aborting = useStore((s) => Boolean(s.busy[`abort:${botId}`]))
-  const queueSend = useStore((s) => s.queueSend)
   const startBot = useStore((s) => s.startBot)
-  const cancelQueuedSend = useStore((s) => s.cancelQueuedSend)
-  const restoreQueuedSend = useStore((s) => s.restoreQueuedSend)
-  const unqueueToDraft = useStore((s) => s.unqueueToDraft)
   const sendText = useStore((s) => s.sendText)
   const notify = useStore((s) => s.notify)
-  const queued = useStore((s) => s.queuedSends[botId] ?? null)
+  // TODO(D): switch this transitional projection to the daemon queued-send selector from the store.
+  const queued = useStore(
+    useShallow((s) => {
+      const queuedSend = queuedIdleSend(s.turns[botId], s.messages[botId])
+      return queuedSend
+        ? { turnId: queuedSend.turnId, text: queuedSend.text, attachmentCount: queuedSend.attachments.length }
+        : null
+    }),
+  )
+  const queuedAttachments = useStore((s) =>
+    queued
+      ? (s.messages[botId] ?? []).find((message) => message.turn_id === queued.turnId && message.role === 'user')?.attachments ?? NO_QUEUED_ATTACHMENTS
+      : NO_QUEUED_ATTACHMENTS,
+  )
   // issue #122：交給 daemon、在等 bot 起來的那一則（重整之後也還在）。
   const starting = useStore(useShallow((s) => startingSend(s.turns[botId], s.messages[botId])))
   const cancelStartingSend = useStore((s) => s.cancelStartingSend)
+  // TODO(D): selector/action are part of D's store change and are optional until that branch lands.
+  const withdrawQueuedSend = useStore((s) =>
+    (s as typeof s & { withdrawQueuedSend?: (botId: string) => Promise<void> }).withdrawQueuedSend ?? null,
+  )
+  const withdrawing = useStore((s) => Boolean(s.busy[`withdraw:${botId}`]))
   const startingBot = useStore((s) => Boolean(s.busy[`start:${botId}`]))
   const hasRun = useStore((s) => Boolean(s.runs[botId]))
   // Draft lives in the store (localStorage) so switching / reload keep it; cleared only on send.
@@ -721,15 +747,9 @@ function Composer({
       return
     }
     if (sending || files.uploading) return
-    // Turn still running: queue instead of eating a 409.
-    if (state.queued && !state.autoStart) {
-      queueFromComposer({ setText, clearFiles: files.clear, queueSend }, botId, body, files.ids)
-      return
-    }
     setSending(true)
-    // 沒在跑的 bot（issue #122）：交給 daemon 先收下、它自己啟動 bot，起來後由它送出。
-    // 瀏覽器不再留一份等著送——重整、關分頁都不會丟，也不會兩邊各送一次。
-    void sendPrompt(botId, body, files.ids, false, Boolean(state.autoStart)).then((ok) => {
+    // Enter always opts into daemon queueing; idle bots still follow the ordinary immediate-send path.
+    void sendPrompt(botId, body, files.ids, false, Boolean(state.autoStart), undefined, true).then((ok) => {
       setSending(false)
       if (ok) {
         setText('')
@@ -739,34 +759,40 @@ function Composer({
   }
   const enterToSend = useEnterToSend()
 
-  const pending = queued?.text ?? text
+  const pending = text
 
   // 插隊送出（issue #103）：照舊建一個新回合，但由 CLI 自己的 send-now 鍵打斷當下那一輪。
   // 「中止並取代」拿掉了（使用者 2026-09-27：要換題會先按 ESC 中斷）。
   const sendNow = async () => {
     const body = pending.trim()
-    const ids = queued ? queued.attachments : files.ids
+    const ids = files.ids
     if (!body && ids.length === 0) return
-    const wasQueued = queued
-    if (wasQueued) cancelQueuedSend(botId)
     setSending(true)
     const ok = await sendPrompt(botId, body, ids, true)
     setSending(false)
-    settleComposerSend({ setText, clearFiles: files.clear, restoreQueuedSend }, botId, wasQueued, ok)
+    if (ok) {
+      setText('')
+      files.clear()
+    }
   }
 
   // 直接打進 pane、不建新回合：回覆併在目前這一輪。
   const sendAlongside = async () => {
     const body = pending.trim()
     if (!body) return
-    const wasQueued = queued
-    if (wasQueued) cancelQueuedSend(botId)
     setSending(true)
     // 整段走 `POST /bots/:id/text`、Enter 另送（見 store/alongside.ts）；拆鍵名會把 `\n` 當鍵弄丟內容。
     const ok = await typeAlongside({ sendText }, botId, body)
     setSending(false)
     // 併送帶不了附件：附件列留著。
-    settleComposerSend({ setText, clearFiles: () => {}, restoreQueuedSend }, botId, wasQueued, ok)
+    if (ok) setText('')
+  }
+
+  const withdrawQueuedIdleSend = async () => {
+    if (!queued || !withdrawQueuedSend) return
+    await withdrawQueuedSend(botId)
+    const withdrawn = useStore.getState().turns[botId]?.[queued.turnId]?.status === 'failed'
+    if (withdrawn) files.restoreAttachments(queuedAttachments)
   }
 
   // in-flight 時輸入框不鎖，但仍要顯示這條，否則回合中沒有中斷入口（`.running`）。
@@ -812,18 +838,21 @@ function Composer({
         </div>
       ) : null}
       {queued ? (
-        <div className="composer-queued" role="status">
-          <span className="composer-queued-label">已排隊，這回合結束後送出：</span>
+        <div className="composer-queued composer-queued-idle" role="status">
+          <span className="composer-queued-label">已排隊，Bot 這回合結束後會自動送出：</span>
           <span className="composer-queued-text" title={queued.text}>
-            {queued.text || `（${queued.attachments.length} 個附件）`}
+            {queued.text
+              ? `${queued.text}${queued.attachmentCount ? `（附 ${queued.attachmentCount} 個檔案）` : ''}`
+              : `（${queued.attachmentCount} 個附件）`}
           </span>
           <button
             type="button"
             className="mini-btn"
-            title="取消排隊，把訊息放回輸入框"
-            onClick={() => unqueueToDraft(botId)}
+            disabled={withdrawing || !withdrawQueuedSend}
+            title="撤回這則訊息並放回輸入框"
+            onClick={() => void withdrawQueuedIdleSend()}
           >
-            取消
+            {withdrawing ? '撤回中…' : '撤回並放回'}
           </button>
         </div>
       ) : null}

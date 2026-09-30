@@ -1078,7 +1078,9 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 前端（`store/startingSend.ts`）只從 daemon 給的 turn 與訊息推出「有一則在等 bot 起來」：輸入框上方一條「啟動中，起來後自動送出」，
 失敗時「沒能啟動（原因），還沒送出」＋重新啟動（`POST /start`，起來後照樣由 flush 送）／取消；有這一條時不再另外顯示「啟動」列。
 `queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。
-**回合中**的 bot 也由 daemon 收下下一則（`queue_if_busy:true`，見上方 #733）；重連、`resync` 與其他分頁都從同一份 `queued` turn 投影，不在瀏覽器另存待送訊息。仍在 `queued` 時可用 `POST /api/turns/{id}/withdraw` 撤回，回傳原文與附件 id 供輸入框還原；已被 flush 認領成 `in_flight` 就回 409，避免把已送出的字放回輸入框再送一次。
+**回合中送出**（issue #733）：web 的 `POST /prompt` 帶 `queue_if_busy:true`。bot 有 in-flight turn 或 agent 尚未 idle 時，daemon 在 bot 鎖內把一筆 `origin:"web"`、`delivery:"pending"`、`awaits_idle=1` 的 queued turn、user message 與附件綁定寫進同一個交易，commit 後回 `200 {delivery:"queued",turn_id,message_id}`；空閒時照原本立即送出。每顆 bot 同時只有一格 `awaits_idle`，已佔用時再送回 `409 {reason:"queue_slot_taken",turn_id}`，不改動原佇列。舊版未帶 `queue_if_busy` 的呼叫仍維持原本 409 行為。
+這一則完全由 daemon 保存；`GET /api/state` 的 `queued_turn`、訊息／turn 頁與 socket 更新讓任何網址、分頁或裝置投影同一筆，不以瀏覽器記憶體或 `am.drafts` 當佇列。composer 顯示「已排隊，Bot 這回合結束後會自動送出」與原文，提供「撤回並放回」；撤回走 `POST /api/turns/{id}/withdraw`，daemon 只在 flush 尚未領走時回原文及附件 id，標 failed 並寫 system 說明，前端把原文和已上傳附件卡片放回輸入列。flush 已領走、turn 成為 `in_flight` 時回 409，前端更新狀態並說明可能已送出，不把文字再塞回輸入框。
+`queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。重連、`resync` 與初次載入依 daemon state／turns／messages 重建這條狀態；前端不再 flush 或重送本機的 `queuedSends`。
 **重啟不是停**（issue #106，`lifecycle::restart_hold`）：`restart_bot_with`（換身分、`?resume=native`、一鍵重啟）先停舊 run 再起新 run，
 中間那一段沒有 active run，但 bot 馬上就回來。重啟在 bot 鎖裡宣告「進行中」，這段期間任何撤孤兒的路徑——stop 自己、
 `restart_start` 收掉擋路 run 的 `mark_run_exited`、不拿 bot 鎖的 pane-exit 事件、定時掃描——都不撤；新 run 起來就叫醒 flush

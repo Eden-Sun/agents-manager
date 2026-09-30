@@ -32,8 +32,26 @@ export interface Pending {
   retryable: boolean
 }
 
+/** Rehydrate an already-uploaded daemon attachment after withdrawing a queued prompt. */
+export function restoredAttachment(attachment: Attachment, key: string): Pending {
+  return {
+    key,
+    fp: `restored:${attachment.id}`,
+    name: attachment.name,
+    size: attachment.size,
+    isImage: false,
+    previewUrl: '',
+    compressing: false,
+    loaded: attachment.size,
+    id: attachment.id,
+    error: null,
+    retryable: false,
+  }
+}
+
 export type PendingAction =
   | { type: 'add'; item: Pending }
+  | { type: 'restore'; item: Pending }
   | { type: 'compressed'; key: string; name: string; size: number }
   | { type: 'uploading'; key: string }
   | { type: 'progress'; key: string; loaded: number }
@@ -64,6 +82,8 @@ export function pendingReducer(items: Pending[], action: PendingAction): Pending
   switch (action.type) {
     case 'add':
       return [...items, action.item]
+    case 'restore':
+      return items.some((it) => it.id === action.item.id) ? items : [...items, action.item]
     case 'compressed':
       return patch(action.key, (it) => ({ ...it, name: action.name, originalSize: it.size, size: action.size }))
     case 'uploading':
