@@ -4307,6 +4307,15 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 `[build.remote]` 要拿掉（不然 cargo shim 會 ssh 回自己）；claude／codex／grok 的憑證都要是檔案（`~/.claude*/.credentials.json`、
 `~/.codex/auth.json`、`~/.grok/auth*`）。
 
+## 20. CI coordinator（issue #716）
+
+`daemon/src/ci_coordinator.rs` 是 fast/full CI queue 的持久排程入口，與 pane/run 的生命週期分離。Job 記錄 queue、commit SHA、狀態、timeout、輸出尾端與 project/requester routes；`GET /api/ci/jobs` 可查，`ci_job_updated` 依 route 推回 project 與 agent，細節由 job GET 讀取。
+
+- Fast 與 full 各自最多一個執行中的 job。Fast 對相同 SHA 合併重複請求；Full 不取消正在跑的 SHA，只留一個 pending row，新的請求更新 pending SHA 並保留所有 routes。
+- Full worker 依序呼叫共用的 `scripts/check.sh`：`ob`、`ops`、`web`、`daemon`；fast worker 呼叫 `scripts/check.sh changed origin/main`。Job 有 5 分鐘／45 分鐘期限，超時記成 `timed_out`。
+- Worker 只在 Linux daemon 啟動時同時設好 `AGM_CI_REPO_DIR`、`AGM_CI_WORK_ROOT` 才會啟動，並在每個 SHA 的 detached worktree 中執行；未設環境時 job 仍可持久排隊和查詢，但不會自動執行。
+- 此功能沒有替既有 agm-host systemd timer 做 cutover；啟用 daemon worker 前，部署者要先設定兩個路徑與 build 工具 PATH，並停止舊 timer，避免重複跑 Full CI。M4 Darwin-only worker、主機排程切換與效能量測仍由另行派工處理。
+
 ## 附錄 A：herdr socket（0.8.2 / protocol 20）
 
 - 每個請求一行 `{"id":"<string>","method","params"}`，`id` **必須是字串**；回應 `{"id","result":{"type":…}}` 或 `{"id","error":{"code","message"}}`

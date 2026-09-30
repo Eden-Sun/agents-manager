@@ -189,6 +189,8 @@ pub struct App {
     /// issue #90：build scheduler 的「數名額、發／收名額」critical section。SQLite 本身也序列化寫入，
     /// 但這裡要的是「先數後寫」一起做完，不靠 SQL 的原子性猜實作細節。
     pub build_slot_lock: Mutex<()>,
+    /// issue #716: serializes CI queue transitions, independently for short DB critical sections.
+    pub ci_queue_lock: Mutex<()>,
     /// 這一輪開機的代號：寫進 DB 的東西（`lifecycle::quota_hold`）靠它分辨是不是這個行程自己寫的。
     pub boot_id: String,
 }
@@ -271,6 +273,7 @@ impl App {
             autostart_since: Default::default(),
             hook_inbox_wake: tokio::sync::Notify::new(),
             build_slot_lock: Mutex::new(()),
+            ci_queue_lock: Mutex::new(()),
         })
     }
 
