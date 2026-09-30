@@ -173,6 +173,9 @@ pub fn router(app: Arc<App>) -> Router {
         // issue #90：build scheduler 的唯讀現況（UI 用一般 X-AM-Token）。acquire／renew／release 見下方
         // 的 `/build-slots/*`（不在 `/api` 底下：bot 的 pane 只有自己的 hook token，拿不到這個）。
         .route("/build-slots", get(crate::build_scheduler::get_status))
+        // issue #716: CI jobs are durable daemon work, not pane-owned processes.
+        .route("/ci/jobs", get(crate::ci_coordinator::get_jobs).post(crate::ci_coordinator::post_job))
+        .route("/ci/jobs/{id}", get(crate::ci_coordinator::get_job_http))
         // issue #104：開發者專用外部 Cargo worker 設定。密碼只進 data-dir 的 0600 secret file。
         .route(
             "/build/remote",

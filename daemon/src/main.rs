@@ -9,6 +9,7 @@ mod bot_trash;
 mod deleted_bots;
 mod build_info;
 mod build_scheduler;
+mod ci_coordinator;
 mod cargo_shim;
 mod agent_relay;
 mod api;
@@ -539,6 +540,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     panes::spawn_scanner(app.clone());
     // issue #90：名額持有者沒續約（掛了、被砍）就收回，不必等下一個人來要才發現。
     build_scheduler::spawn_sweeper(app.clone());
+    // issue #716: fast/full CI jobs outlive panes and run only when a dedicated worker checkout is configured.
+    ci_coordinator::spawn_worker(app.clone());
 
     {
         // 這一輪只起本機：遠端一律由 `hosts.rs` 在那台連上並對帳成功之後跑（§6.1 第 6 步沒有「遠端除外」這個但書）。

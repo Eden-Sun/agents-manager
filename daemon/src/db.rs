@@ -276,6 +276,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (34, "1fb4da468542c3bb"),
     // issue #756：`project_group_reads`（專案群組已讀標記存 daemon，跨裝置共用）。
     (35, "fe4e118f866a5cfd"),
+    // issue #716: durable fast/full CI jobs and project/agent result routing.
+    (36, "a90e6ec25118864e"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -540,6 +542,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     crate::release_triage::ledger::migrate(pool).await?;
     crate::judge::migrate(pool).await?;
     crate::cli_update::migrate(pool).await?;
+    crate::ci_coordinator::migrate(pool).await?;
     Ok(())
 }
 

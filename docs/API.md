@@ -943,6 +943,27 @@ rustup 的 minimal profile 不含它——UI 據此提示「按安裝補上」�
 失敗 → 5xx 並帶 stderr。第一次大約要一兩分鐘。`~/.cargo/bin` 由 daemon 自己接到遠端 PATH 前面（probe 與真正的
 遠端 cargo 都是），所以不必改遠端 profile。
 
+## CI coordinator（issue #716）
+
+`/api/ci/jobs` 使用一般 API 認證。Bot 只能為自己所屬的 project 送 job，且只能讀取自己送出或被 coalesce 的 job；UI token 可讀全部。
+
+### `POST /api/ci/jobs`
+
+送出 `{ "queue":"fast"|"full", "sha":"<完整 Git object id>", "project_id":"<project id>" }`，SHA 必須是 40–64 位十六進位字串。成功回 `202` 與 job 物件。
+
+- `fast` 跑 `scripts/check.sh changed origin/main`，相同 SHA 的 queued/running job 共用一列。
+- `full` 跑 `ob`、`ops`、`web`、`daemon` 四段。執行中不取消；pending 只保留最新提交的 SHA，並累積原 project／requester，所有提交者都能讀到最終結果。
+- Fast 與 full 各有一條序列 worker，timeout 分別是 5 分鐘與 45 分鐘。終態為 `success`、`failure` 或 `timed_out`。
+- Job 寫入 SQLite，和 pane lifecycle 無關。Bot 重連或 pane 關閉都不會取消 job。
+
+Linux daemon 只有在啟動環境同時設定 `AGM_CI_REPO_DIR`（含 `scripts/check.sh` 的 Git checkout）與 `AGM_CI_WORK_ROOT`（獨立的暫存 worktree/cache 根目錄）時才啟動 worker；其他情況仍可排隊與查詢，但不會執行。worker 為每個 SHA 建獨立 detached worktree。Darwin-specific cohort 不由它執行。
+
+### `GET /api/ci/jobs[?project_id=<id>]`、`GET /api/ci/jobs/{id}`
+
+列表依最新更新排序，最多 100 列。Job JSON 含 `id`、`queue`、`sha`、`status`、`routes`、`timeout_seconds`、`failed_steps`、`exit_code`、時間欄位及最多 32 KiB 的 `output_tail`。
+
+WebSocket 終態與排隊狀態以 `ci_job_updated` 推送，每個 route 一幀，含 `job_id`、`project_id`、`requester`、`queue`、`sha`、`status`；完整結果用 GET 查回。
+
 ## Build scheduler（全機 cargo/rustc 併發，SPEC §6.5g，issue #90）
 
 不在 `/api` 底下的三支（`acquire`／`renew`／`release`）：bot 的 pane 只有自己的 hook token，拿不到一般 UI token。
