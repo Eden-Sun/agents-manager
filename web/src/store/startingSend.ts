@@ -43,6 +43,7 @@ export function noteQueuedTurn(
   turnId: string,
   crid: string,
   awaitsStart: boolean,
+  awaitsIdle = false,
 ): { turns: Record<string, Record<string, Turn>> } | Record<string, never> {
   if (s.turns[botId]?.[turnId]) return {}
   const turn: Turn = {
@@ -56,6 +57,7 @@ export function noteQueuedTurn(
     unverified: false,
     autoResend: true,
     awaitsStart,
+    awaitsIdle,
     startError: null,
     client_request_id: crid,
     created_at: new Date().toISOString(),

@@ -147,6 +147,8 @@ interface MockTurn {
   completed_at: string | null
   /** issue #122：bot 沒在跑時收下、等它起來的那一則。 */
   awaits_start?: number
+  /** issue #733：bot 忙碌時收下、等它回到 idle 的那一則。 */
+  awaits_idle?: number
   start_error?: string | null
 }
 
@@ -2238,6 +2240,9 @@ export class MockTransport implements Transport {
               agent_name: `${p.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'b'}-${b.id.slice(-6).toLowerCase()}`,
               run,
               in_flight_turn: this.turns.find((t) => run && t.run_id === run.id && t.status === 'in_flight') ?? null,
+              queued_turn: this.turns
+                .filter((t) => t.bot_id === b.id && t.status === 'queued' && (t.awaits_start === 1 || t.awaits_idle === 1))
+                .sort((a, z) => a.created_at.localeCompare(z.created_at))[0] ?? null,
               unread: 0,
             }
           }),
@@ -2951,20 +2956,20 @@ export class MockTransport implements Transport {
     if (run.state !== 'running') {
       throw new ApiError(409, { error: 'conflict', reason: 'run is not running', state: run.state }, 'conflict')
     }
-    if (run.agent_status === 'blocked') {
+    if (run.agent_status === 'blocked' && b.queue_if_busy !== true) {
       throw new ApiError(409, { error: 'conflict', reason: 'agent is blocked; answer the prompt first' }, 'conflict')
     }
     const clientRequestId = typeof b.client_request_id === 'string' ? b.client_request_id : null
     if (clientRequestId) {
       const dup = this.turns.find((t) => t.client_request_id === clientRequestId)
-      if (dup) return { turn_id: dup.id, message_id: null, delivery: dup.delivery }
+      if (dup) return { turn_id: dup.id, message_id: null, delivery: dup.status === 'queued' ? 'queued' : dup.delivery }
     }
     const busy = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
     // 插隊送出（issue #103）：只有 claude 有那顆鍵，其他 kind 照舊 409 並說明為什麼沒插隊。
     // mock 不模擬版本閘門（沒有 statusLine），只分 kind——版本那條由 daemon 的單元測試把關。
     const wantSendNow = b.send_now === true
     const canSendNow = wantSendNow && this.bot(botId)?.kind === 'claude'
-    if (busy && !canSendNow) {
+    if (busy && !canSendNow && b.queue_if_busy !== true) {
       const why = wantSendNow
         ? {
             send_now_refused: 'send_now_unsupported_kind',
@@ -2993,6 +2998,53 @@ export class MockTransport implements Transport {
         { error: 'conflict', reason: 'a previous turn has unknown delivery; abandon it first', turn_id: unknown.id },
         'conflict',
       )
+    }
+
+    const queueForIdle = b.queue_if_busy === true && !canSendNow && (Boolean(busy) || run.agent_status !== 'idle')
+    if (queueForIdle) {
+      const occupied = this.turns.find((t) => t.bot_id === botId && t.status === 'queued' && t.awaits_idle === 1)
+      if (occupied) {
+        throw new ApiError(409, { error: 'conflict', reason: 'queue_slot_taken', turn_id: occupied.id }, 'conflict')
+      }
+      const text = this.composerDrafts.gate(botId, b)
+      const attachIds = Array.isArray(b.attachments) ? b.attachments.filter((x): x is string => typeof x === 'string') : []
+      const turn: MockTurn = {
+        id: ulid('turn'),
+        conversation_id: this.conv(botId),
+        run_id: run.id,
+        bot_id: botId,
+        origin: 'web',
+        status: 'queued',
+        delivery: 'pending',
+        client_request_id: clientRequestId,
+        created_at: now(),
+        completed_at: null,
+        awaits_idle: 1,
+      }
+      this.turns.push(turn)
+      const userMsg = this.addMessage({
+        conversation_id: turn.conversation_id,
+        turn_id: turn.id,
+        bot_id: botId,
+        role: 'user',
+        content: text,
+        source: 'web',
+        incomplete: 0,
+        group_id: groupId,
+        attachments_json: attachIds.length
+          ? JSON.stringify(
+              attachIds.map((id) => ({
+                id,
+                name: `image-${id.slice(-4)}.png`,
+                mime: this.blobs.get(id)?.type ?? 'image/png',
+                size: this.blobs.get(id)?.size ?? 0,
+                path: `/Users/me/project/agents-manager/.agents-manager/attachments/${id}.png`,
+              })),
+            )
+          : null,
+      })
+      this.emit('turn_updated', { bot_id: botId, turn })
+      return { turn_id: turn.id, message_id: userMsg.id, delivery: 'queued' }
     }
 
     const text = this.composerDrafts.gate(botId, b)
@@ -3174,9 +3226,11 @@ export class MockTransport implements Transport {
     return { turn_id: turn.id, message_id: msg.id, delivery: 'queued' }
   }
 
-  /** 起來、閒下來就把等著的那一則送出（daemon 的佇列 flush）。 */
+  /** 起來或回合結束後把最早的 daemon-owned queued turn 送出。 */
   private flushWaiting(botId: string) {
-    const turn = this.turns.find((t) => t.bot_id === botId && t.status === 'queued' && t.awaits_start === 1)
+    const turn = this.turns
+      .filter((t) => t.bot_id === botId && t.status === 'queued' && (t.awaits_start === 1 || t.awaits_idle === 1))
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
     if (!turn) return
     const run = this.activeRun(botId)
     if (!run) return
@@ -3184,7 +3238,7 @@ export class MockTransport implements Transport {
       setTimeout(() => this.flushWaiting(botId), 300)
       return
     }
-    this.updateTurn(turn, { status: 'in_flight', run_id: run.id, delivery: 'ok', start_error: null })
+    this.updateTurn(turn, { status: 'in_flight', run_id: run.id, delivery: 'ok', start_error: null, awaits_start: 0, awaits_idle: 0 })
     setAgentStatus(run, 'working')
     this.emitBotStatus(botId)
     setTimeout(() => this.finishTurn(botId, turn, 'hook'), 1500)
@@ -3213,6 +3267,7 @@ export class MockTransport implements Transport {
     if (run) {
       setAgentStatus(run, 'idle')
       this.emitBotStatus(botId)
+      this.flushWaiting(botId)
     }
   }
 
@@ -3233,6 +3288,7 @@ export class MockTransport implements Transport {
     if (run) {
       setAgentStatus(run, 'idle')
       this.emitBotStatus(botId)
+      this.flushWaiting(botId)
     }
   }
 
@@ -3370,26 +3426,40 @@ export class MockTransport implements Transport {
     if (!run) return
     setAgentStatus(run, 'idle')
     this.emitBotStatus(botId)
+    this.flushWaiting(botId)
   }
 
-  /** Mirrors `start_send::withdraw_turn`：只撤還在等 bot 起來的那一則，其他 409。 */
+  /** Mirrors withdraw for the #122 start queue and #733 idle queue. */
   private withdraw(turnId: string) {
     const turn = this.turns.find((t) => t.id === turnId)
     if (!turn) throw new ApiError(404, { reason: 'turn not found' }, 'not found')
-    if (turn.status !== 'queued' || turn.awaits_start !== 1) {
-      throw new ApiError(409, { error: 'conflict', reason: 'turn is not waiting for its bot to start', turn_id: turnId, status: turn.status }, 'conflict')
+    if (turn.status !== 'queued' || (turn.awaits_start !== 1 && turn.awaits_idle !== 1)) {
+      throw new ApiError(409, { error: 'conflict', reason: 'turn is no longer queued', turn_id: turnId, status: turn.status }, 'conflict')
     }
+    const userMessage = this.messages.find((message) => message.turn_id === turnId && message.role === 'user')
+    let attachments: string[] = []
+    if (userMessage?.attachments_json) {
+      try {
+        const parsed: unknown = JSON.parse(userMessage.attachments_json)
+        if (Array.isArray(parsed)) attachments = parsed.flatMap((entry) => (entry && typeof entry === 'object' && typeof (entry as Rec).id === 'string' ? [(entry as Rec).id as string] : []))
+      } catch {
+        attachments = []
+      }
+    }
+    const awaitsIdle = turn.awaits_idle === 1
     this.updateTurn(turn, { status: 'failed', delivery: 'failed', completed_at: now() })
     this.addMessage({
       conversation_id: turn.conversation_id,
       turn_id: turn.id,
       bot_id: turn.bot_id,
       role: 'system',
-      content: '使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。',
+      content: awaitsIdle
+        ? '使用者撤回了這一則排隊訊息；它還沒交給 agent，不會再送。'
+        : '使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。',
       source: 'system',
       incomplete: 0,
     })
-    return { ok: true }
+    return { text: userMessage?.content ?? '', attachments }
   }
 
   private abandon(turnId: string) {

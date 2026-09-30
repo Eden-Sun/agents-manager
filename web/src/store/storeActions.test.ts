@@ -6,7 +6,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
 import type { Bot, Message, Mission, MissionDetail, Project } from '../api/types.ts'
-import { queueFromComposer, settleComposerSend } from './queuedSend.ts'
 import { MESSAGE_CAP, capList } from './lists.ts'
 import { capFor } from './messageCap.ts'
 
@@ -225,61 +224,6 @@ test('兩次排序重疊、第一次晚到失敗：不能蓋掉第二次成功�
   const want = useStore.getState().projectOrder
   await new Promise((r) => setTimeout(r, 60))
   assert.deepEqual(useStore.getState().projectOrder, want, '第二次已存成功，舊的失敗不能把順序退回去')
-})
-
-test('回合還在跑時排第二則：第一則退回輸入框，不是無聲消失', () => {
-  seed()
-  useStore.getState().queueSend('b1', '先跑一次測試', ['a1'])
-  useStore.getState().queueSend('b1', '順便看一下 lint', [])
-  const s = useStore.getState()
-  assert.deepEqual(s.queuedSends.b1, { text: '順便看一下 lint', attachments: [] })
-  assert.equal(s.drafts['bot:b1'], '先跑一次測試', '第一則要看得到，不能只留在記憶裡')
-  assert.ok(noticeTexts().some((t) => t.includes('退回輸入框')))
-})
-
-/** 元件的 `setText` 就是寫 store 草稿；附件列在這裡用不到。 */
-const composerIO = (botId: string) => ({
-  setText: (v: string) => useStore.getState().setDraft(`bot:${botId}`, v),
-  clearFiles: () => {},
-  queueSend: useStore.getState().queueSend,
-  restoreQueuedSend: useStore.getState().restoreQueuedSend,
-})
-
-test('照 ChatPanel 的呼叫順序排第二則：退回的第一則真的留在輸入框', () => {
-  seed()
-  const io = composerIO('b1')
-  // 使用者打字 → Enter：草稿裡就是要排的那一則。
-  useStore.getState().setDraft('bot:b1', '先跑一次測試')
-  queueFromComposer(io, 'b1', '先跑一次測試', ['a1'])
-  assert.equal(useStore.getState().drafts['bot:b1'], undefined, '排進去的那則不留在輸入框')
-  useStore.getState().setDraft('bot:b1', '順便看一下 lint')
-  queueFromComposer(io, 'b1', '順便看一下 lint', [])
-  const s = useStore.getState()
-  assert.deepEqual(s.queuedSends.b1, { text: '順便看一下 lint', attachments: [] })
-  assert.equal(s.drafts['bot:b1'], '先跑一次測試', '通知說已退回輸入框，輸入框就要真的有')
-  assert.ok(noticeTexts().some((t) => t.includes('退回輸入框') && t.includes('1 個附件')))
-})
-
-test('中止並取代送出的是排隊那則：輸入框裡被退回的上一則不能跟著清掉', () => {
-  seed()
-  useStore.setState({ queuedSends: { b1: { text: '第二則', attachments: [] } }, drafts: { 'bot:b1': '第一則' } })
-  const wasQueued = useStore.getState().queuedSends.b1
-  useStore.getState().cancelQueuedSend('b1')
-  settleComposerSend(composerIO('b1'), 'b1', wasQueued, true)
-  assert.equal(useStore.getState().drafts['bot:b1'], '第一則')
-
-  // 沒排隊、送的是輸入框本身：照常清掉。
-  settleComposerSend(composerIO('b1'), 'b1', null, true)
-  assert.equal(useStore.getState().drafts['bot:b1'], undefined)
-})
-
-test('取消排隊：那則接回輸入框最前面，不蓋掉正在打的字', () => {
-  seed()
-  useStore.setState({ queuedSends: { b1: { text: '排隊那則', attachments: [] } }, drafts: { 'bot:b1': '打到一半' } })
-  useStore.getState().unqueueToDraft('b1')
-  const s = useStore.getState()
-  assert.equal(s.queuedSends.b1, undefined)
-  assert.equal(s.drafts['bot:b1'], '排隊那則\n打到一半')
 })
 
 test('已讀送不出去：daemon 的舊數字不可以把徽章點回來', async () => {
@@ -644,10 +588,11 @@ test('沒在跑的 bot 送出：帶 start_if_stopped 交給 daemon，瀏覽器�
   useStore.setState({ runs: {}, turns: {}, messages: {} })
   routeDaemon(() => json({ turn_id: 't9', message_id: 'm9', delivery: 'queued' }, 200))
   const ok = await useStore.getState().sendPrompt('b1', '起來後幫我跑測試', [], false, true)
-  assert.equal(ok, true)
-  assert.equal(requests.length, 1, '只有一個請求：沒有另外 POST /start')
-  assert.equal(requests[0].path.endsWith('/bots/b1/prompt'), true)
-  assert.equal((requests[0].body as Record<string, unknown>).start_if_stopped, true)
+  assert.equal(ok, true, JSON.stringify({ requests, notices: useStore.getState().notices }))
+  assert.equal(requests.filter((request) => request.path.endsWith('/prompt')).length, 1)
+  assert.equal(requests.some((request) => request.path.endsWith('/start')), false, '不另外 POST /start')
+  const prompt = requests.find((request) => request.path.endsWith('/prompt'))!
+  assert.equal((prompt.body as Record<string, unknown>).start_if_stopped, true)
   const s = useStore.getState()
   assert.equal(s.queuedSends.b1, undefined, '瀏覽器記憶體不是那一份')
   assert.equal(s.turns.b1.t9.status, 'queued')
@@ -759,35 +704,6 @@ test('503 維護窗口讀不到（sent:false）跟別的 503 一樣：沒送出�
   seed()
   routeDaemon(() => json({ reason: 'maintenance_state_unavailable', retryable: true, sent: false, message: 'x' }, 503))
   assert.equal(await useStore.getState().sendPrompt('b1', 'x'), false)
-})
-
-/** 上面那個 503 落在「排隊那則被 flush」：以前 `flushQueued` 見 false 就把已經送進 bot 的那則放回佇列，下一個回合結束又送一次。 */
-test('排隊的那則 flush 時撞到 503 delivery_state_uncommitted：不放回佇列（放回去＝下一輪再送一次）', async () => {
-  seed()
-  useStore.setState({ turns: {}, messages: {}, runs: {}, queuedSends: { b1: { text: '排隊那則', attachments: [] } } })
-  routeDaemon((req) => {
-    if (req.path.endsWith('/start')) return json({ run_id: 'r1' }, 200)
-    if (req.path.endsWith('/state'))
-      return json(
-        {
-          daemon_seq: 50,
-          projects: [
-            {
-              id: 'p1',
-              path: '/p',
-              bots: [{ id: 'b1', name: 'b1', kind: 'claude', run: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' } }],
-            },
-          ],
-        },
-        200,
-      )
-    if (req.path.endsWith('/prompt')) return uncommitted503()
-    return json({ messages: [], turns: [], has_more: false }, 200)
-  })
-  await useStore.getState().startBot('b1')
-  await new Promise((r) => setTimeout(r, 500))
-  assert.equal(requests.filter((r) => r.path.endsWith('/prompt')).length, 1, '有送出去一次')
-  assert.equal(useStore.getState().queuedSends.b1, undefined, '已經送進 bot 的那則不能又躺回佇列')
 })
 
 /**
@@ -1134,90 +1050,64 @@ test('斷線重連後：已載入的對話要重抓訊息，不能只補狀態�
   assert.ok(requests.some((r) => r.path.includes('/bots/b1/messages')))
 })
 
-test('重連重抓把回合改成 completed 後，送出排隊的下一則（#697）', async () => {
+test('重連重抓從 daemon turns 恢復排隊訊息，不會再由瀏覽器 POST 一次', async () => {
   seed()
   useStore.setState({
     loadedBots: { b1: true },
-    runs: { b1: { id: 'r1', state: 'running', agent_status: 'idle' } as never },
-    turns: {
-      b1: {
-        t1: {
-          id: 't1',
-          run_id: 'r1',
-          status: 'in_flight',
-          delivery: 'ok',
-          origin: 'web',
-          created_at: '2026-09-28T00:00:00Z',
-        } as never,
-      },
-    },
-    queuedSends: { b1: { text: 'next question', attachments: [] } },
+    runs: { b1: { id: 'r1', state: 'running', agent_status: 'working' } as never },
+    turns: {},
   })
   routeDaemon((r) => {
     if (r.path.includes('/bots/b1/messages')) {
-      return json({ messages: [], turns: [{ id: 't1', run_id: 'r1', status: 'completed', delivery: 'ok' }], has_more: false }, 200)
+      return json(
+        {
+          messages: [{ id: 'm2', turn_id: 't2', role: 'user', content: 'next question', source: 'web', attachments: [] }],
+          turns: [{ id: 't2', bot_id: 'b1', run_id: 'r1', status: 'queued', delivery: 'pending', awaits_idle: 1, created_at: '2026-09-28T00:00:01Z' }],
+          has_more: false,
+        },
+        200,
+      )
     }
-    if (r.path.endsWith('/prompt')) return json({ turn_id: 't2', message_id: 'm2', delivery: 'ok' }, 200)
     return json({}, 200)
   })
 
   const { reloadLoadedConversations } = await import('./store.ts')
   await reloadLoadedConversations(useStore.getState)
-  await new Promise((resolve) => setTimeout(resolve, 500))
-
-  const prompts = requests.filter((r) => r.path.endsWith('/prompt'))
-  assert.equal(prompts.length, 1)
-  assert.equal((prompts[0].body as { text: string }).text, 'next question')
-  assert.equal(useStore.getState().queuedSends.b1, undefined)
+  assert.equal(requests.filter((r) => r.path.endsWith('/prompt')).length, 0)
+  assert.deepEqual(useStore.getState().queuedSends.b1, { turnId: 't2', text: 'next question', attachments: [] })
 })
 
-test('resync 重抓把回合改成 completed 後，也送出排隊的下一則（#697）', async () => {
+test('resync 從 api/state 的 queued_turn 恢復排隊訊息，不會由瀏覽器代送', async () => {
   seed()
   useStore.setState({
     loadedBots: { b1: true },
-    runs: { b1: { id: 'r1', state: 'running', agent_status: 'idle' } as never },
-    turns: {
-      b1: {
-        t1: {
-          id: 't1',
-          run_id: 'r1',
-          status: 'in_flight',
-          delivery: 'ok',
-          origin: 'web',
-          created_at: '2026-09-28T00:00:00Z',
-        } as never,
-      },
-    },
-    queuedSends: { b1: { text: 'next question', attachments: [] } },
+    turns: {},
+    messages: {},
   })
   routeDaemon((r) => {
     if (r.path.endsWith('/state')) {
       return json(
         {
           daemon_seq: 1,
-          projects: [project()],
+          projects: [{ ...project(), bots: [{ ...bot('b1'), run: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'working' }, queued_turn: { id: 't2', bot_id: 'b1', run_id: 'r1', status: 'queued', delivery: 'pending', awaits_idle: 1, created_at: '2026-09-28T00:00:01Z' } }] }],
           bots: [bot('b1')],
           runs: [{ id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' }],
-          turns: [],
+          turns: [{ id: 't2', bot_id: 'b1', run_id: 'r1', status: 'queued', delivery: 'pending', awaits_idle: 1, created_at: '2026-09-28T00:00:01Z' }],
         },
         200,
       )
     }
     if (r.path.includes('/bots/b1/messages')) {
-      return json({ messages: [], turns: [{ id: 't1', run_id: 'r1', status: 'completed', delivery: 'ok' }], has_more: false }, 200)
+      return json({ messages: [{ id: 'm2', turn_id: 't2', role: 'user', content: 'next question', source: 'web', attachments: [] }], turns: [{ id: 't2', bot_id: 'b1', run_id: 'r1', status: 'queued', delivery: 'pending', awaits_idle: 1, created_at: '2026-09-28T00:00:01Z' }], has_more: false }, 200)
     }
-    if (r.path.endsWith('/prompt')) return json({ turn_id: 't2', message_id: 'm2', delivery: 'ok' }, 200)
     return json({}, 200)
   })
 
   const { dispatchFrameForTest } = await import('./store.ts')
   dispatchFrameForTest({ type: 'resync', seq: 1 })
-  await new Promise((resolve) => setTimeout(resolve, 500))
-
-  const prompts = requests.filter((r) => r.path.endsWith('/prompt'))
-  assert.equal(prompts.length, 1)
-  assert.equal((prompts[0].body as { text: string }).text, 'next question')
-  assert.equal(useStore.getState().queuedSends.b1, undefined)
+  await settle()
+  assert.equal(requests.filter((r) => r.path.endsWith('/prompt')).length, 0)
+  assert.deepEqual(useStore.getState().queuedSends.b1, { turnId: 't2', text: 'next question', attachments: [] })
 })
 
 test('resync 也重抓未載入 bot 的進行中回合，清掉已結束的 stale turn（#696）', async () => {

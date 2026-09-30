@@ -41,6 +41,7 @@ import type {
   PatchBotInput,
   PatchBotResult,
   PromptResult,
+  WithdrawTurnResult,
   RestartPlan,
   RestartSkip,
   BotKind,
@@ -566,6 +567,8 @@ export async function sendPrompt(
   startIfStopped = false,
   /** 409 `composer_busy` 之後：`clear`＝清掉框裡那段再送 `text`；`submit`＝改成送出框裡那段（`text` 不送）。 */
   draft?: { action: 'submit' | 'clear'; token: string },
+  /** issue #733：忙碌時請 daemon 建 queued turn，未提供時維持舊有 409 行為。 */
+  queueIfBusy = false,
 ): Promise<PromptResult> {
   const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/prompt`, {
     ...(draft?.action === 'submit' ? {} : { text }),
@@ -573,6 +576,7 @@ export async function sendPrompt(
     ...(attachments.length ? { attachments } : {}),
     ...(sendNow ? { send_now: true } : {}),
     ...(startIfStopped ? { start_if_stopped: true } : {}),
+    ...(queueIfBusy ? { queue_if_busy: true } : {}),
     ...(draft ? { [draft.action === 'submit' ? 'submit_draft' : 'clear_draft']: true, expect_draft_token: draft.token } : {}),
   })
   const o = isRec(raw) ? raw : {}
@@ -609,9 +613,14 @@ export async function abandonTurn(turnId: string): Promise<void> {
   await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/abandon`)
 }
 
-/** issue #122：撤回一則 bot 沒在跑時送、還在等它起來的訊息。已經送出去的 daemon 回 409。 */
-export async function withdrawTurn(turnId: string): Promise<void> {
-  await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/withdraw`)
+/** 撤回仍在 queued 的 turn。#733 回傳原文與附件 id，#122 舊回應缺欄時退回空值。 */
+export async function withdrawTurn(turnId: string): Promise<WithdrawTurnResult> {
+  const raw = await transport.request('POST', `/turns/${encodeURIComponent(turnId)}/withdraw`)
+  const o = isRec(raw) ? raw : {}
+  return {
+    text: typeof o.text === 'string' ? o.text : '',
+    attachments: Array.isArray(o.attachments) ? o.attachments.filter((id): id is string => typeof id === 'string') : [],
+  }
 }
 
 export async function uploadAttachment(botId: string, file: File, opts?: UploadOptions): Promise<Attachment> {

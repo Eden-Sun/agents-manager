@@ -386,6 +386,8 @@ export interface Turn {
   autoResend: boolean
   /** issue #122：送出時 bot 沒在跑，daemon 先收下再啟動它（`turns.awaits_start`）。只對 `queued` 有意義。 */
   awaitsStart: boolean
+  /** issue #733：送出時 bot 正忙，daemon 等它回到 idle 再送（`turns.awaits_idle`）。只對 `queued` 有意義。 */
+  awaitsIdle: boolean
   /** 上一次替它啟動 bot 失敗的原因（`turns.start_error`）；`null`＝沒失敗過。 */
   startError: string | null
   client_request_id: string | null
@@ -527,11 +529,18 @@ export interface HostShell {
 export interface PromptResult {
   turn_id: string
   message_id: string | null
-  /** `queued`＝daemon 收下了、還沒送（對方回合中的派工，或 issue #122 的「先收下再啟動」）。 */
+  /** `queued`＝daemon 收下了、還沒送（issue #733 等 bot idle，或 issue #122 先收下再啟動）。 */
   delivery: TurnDelivery | 'queued'
   /** 只有請求帶 `send_now` 時才有（issue #103）：`interrupted`＝打斷了一個回合，`idle`＝當下沒回合在飛，
    *  其他值（`send_now_*`）是**沒有**插隊的原因。 */
   send_now: string | null
+}
+
+export interface WithdrawTurnResult {
+  /** #733 queued turn 原文；舊 daemon／#122 回應沒帶時為空字串。 */
+  text: string
+  /** 附件 id；瀏覽器沒有原始檔時會提醒使用者重新附加。 */
+  attachments: string[]
 }
 
 export interface MessagesPage {

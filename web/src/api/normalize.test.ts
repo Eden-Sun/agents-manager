@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toKindQuota, toState } from './normalize.ts'
+import { toKindQuota, toState, toTurn } from './normalize.ts'
 
 const reading = (stale?: boolean) => toKindQuota({
   five_hour: { used_pct: 41, resets_at: '2099-01-01T00:00:00Z', low: false, critical: false },
@@ -37,6 +37,12 @@ test('cli_updates 同一個三態：在就是清單（可能空），不在是 u
   assert.deepEqual(toState({ cli_updates: [] }).cli_updates, [])
   assert.deepEqual(toState({ cli_updates: [{ update_id: 'u1', host: 'local', kind: 'codex' }] }).cli_updates, [{ update_id: 'u1', host: 'local' }])
   assert.equal(toState({}).cli_updates, undefined)
+})
+
+test('turn JSON 的 awaits_idle 會正規化到 store 欄位', () => {
+  assert.equal(toTurn({ id: 't1', status: 'queued', awaits_idle: 1 })?.awaitsIdle, true)
+  assert.equal(toTurn({ id: 't2', status: 'queued', awaits_idle: 0 })?.awaitsIdle, false)
+  assert.equal(toTurn({ id: 't3', status: 'queued' })?.awaitsIdle, false, '舊 daemon 缺欄位時視為一般 queued turn')
 })
 
 test('#699：同名但不同 host 的 identities 都保留', () => {
