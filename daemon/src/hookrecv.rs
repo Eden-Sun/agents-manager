@@ -102,6 +102,45 @@ pub async fn receive(
 
 /// 這句 prompt 回音是別的 agent 打進來的嗎？（見 SPEC §6.5d）
 /// 認不出來就當使用者自己打的——寧可少標一次，也不要冤枉一句話。
+/// 遠端 shim 寫進 spool 的報備事件名（`herdr_shim.rs` 的 `am_spool_relay`）。
+pub(crate) const RELAY_ANNOUNCE_EVENT: &str = "AmRelayAnnounce";
+
+/// 報備比收件方的回音晚到時補標：寄件者那台主機上、`agent_name` 是 `to_agent` 的在跑 run，它的對話裡
+/// 五分鐘內、還沒標來源、內容對得上的最新一則使用者訊息。補上就用掉那筆報備（同一句不標兩次）。
+async fn relay_backfill(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &str) -> Result<()> {
+    let host = db::bot_host(&app.db, from_bot).await?;
+    let since = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT m.id, m.content, b.id FROM messages m
+           JOIN conversations c ON c.id = m.conversation_id
+           JOIN bots b ON b.id = c.bot_id
+           JOIN projects p ON p.id = b.project_id
+           JOIN runs r ON r.bot_id = b.id AND r.state = 'running' AND r.agent_name = ?
+          WHERE p.host = ? AND b.id <> ? AND m.role = 'user' AND m.relay_from IS NULL AND m.created_at >= ?
+          ORDER BY m.created_at DESC, m.rowid DESC LIMIT 20",
+    )
+    .bind(to_agent)
+    .bind(&host)
+    .bind(from_bot)
+    .bind(&since)
+    .fetch_all(&app.db)
+    .await?;
+    let Some((msg_id, content, to_bot)) = rows.into_iter().find(|(_, c, _)| crate::agent_relay::same_prompt(text, c)) else {
+        return Ok(());
+    };
+    sqlx::query("UPDATE messages SET relay_from = ?, relay_unverified = 0, updated_at = ? WHERE id = ? AND relay_from IS NULL")
+        .bind(from_bot)
+        .bind(db::now())
+        .bind(&msg_id)
+        .execute(&app.db)
+        .await?;
+    let _ = crate::agent_relay::claim(to_agent, &content);
+    let message: db::Message = sqlx::query_as("SELECT * FROM messages WHERE id = ?").bind(&msg_id).fetch_one(&app.db).await?;
+    tracing::info!(from = %from_bot, to = %to_agent, msg = %msg_id, "relay announce arrived after the echo; attributed it");
+    lifecycle::emit_message_added(app, &to_bot, message).await;
+    Ok(())
+}
+
 fn relay_source(run: Option<&db::Run>, echo: &str) -> Option<String> {
     let agent = run?.agent_name.as_deref()?;
     crate::agent_relay::claim(agent, echo)
@@ -142,6 +181,9 @@ enum HookKind {
     /// `agent:start` responses — this bot's own tool call just created these pane IDs. Recorded as
     /// spawn hints for `reconcile::adopt_child`; never touches a Turn.
     SpawnHint { pane_ids: Vec<String> },
+    /// 遠端 bot 的 herdr shim 在 `agent prompt` 之前寫進自己 spool 的報備（SPEC §6.5d）：遠端沒有 `AM_PORT`，
+    /// 打不到 `/relay/announce`，只能跟 hook 走同一條 spool。寄件者就是這則 body 的 bot（spool 在它自己的目錄）。
+    RelayAnnounce { to_agent: String, text: String },
     Ignore(String),
 }
 
@@ -316,6 +358,13 @@ fn hook_session_id(p: &Value) -> Option<&str> {
 
 fn classify(provider: &str, p: &Value) -> HookKind {
     let s = |k: &str| p.get(k).and_then(|v| v.as_str()).map(String::from);
+    // shim 自己的事件，不分 claude／codex（寄件的 bot 可以是任何一種）。
+    if p.get("hook_event_name").and_then(Value::as_str) == Some(RELAY_ANNOUNCE_EVENT) {
+        return match (s("to_agent"), s("text")) {
+            (Some(to_agent), Some(text)) if !to_agent.trim().is_empty() && !text.trim().is_empty() => HookKind::RelayAnnounce { to_agent, text },
+            _ => HookKind::Ignore("relay announce without to_agent/text".into()),
+        };
+    }
     match provider {
         "claude" => {
             let ev = p
@@ -1074,6 +1123,12 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 crate::spawn_hints::record(app, &bot.id, &pane_id).await?;
             }
             Ok(())
+        }
+        // 2026-09-30 使用者：console-rpa（m4p）直送給 cicd 的一句被存成使用者訊息。spool 每 30 秒左右才收一次，
+        // 收件方的回音常常比這則報備先到，所以除了照常記下，也回頭補標已經存下的那一則。
+        HookKind::RelayAnnounce { to_agent, text } => {
+            crate::agent_relay::announce(&bot.id, &to_agent, &text);
+            relay_backfill(app, &bot.id, &to_agent, &text).await
         }
         HookKind::Identity { session_id, transcript_path } => {
             if let Some(r) = &run {
@@ -3409,6 +3464,38 @@ mod external_claim_tests {
         let recorded: Option<String> =
             sqlx::query_scalar("SELECT bot_id FROM spawn_hints WHERE pane_id = 'w1:p2'").fetch_optional(&env.app.db).await.unwrap();
         assert_eq!(recorded.as_deref(), Some(bot.id.as_str()));
+    }
+
+    /// 2026-09-30：遠端 bot 直送的一句，回音先被存成使用者訊息，報備之後才從寄件者的 spool 收到——補標 `relay_from`。
+    /// 同一句不標兩次；對不上的、別人的對話都不動。
+    #[tokio::test]
+    async fn a_late_relay_announce_attributes_the_echo_already_stored() {
+        let env = tt::env().await;
+        let from = tt::claude_bot(&env.app, &env.project_id, "rpa").await;
+        let to = tt::claude_bot(&env.app, &env.project_id, "cicd").await;
+        let run = tt::fake_run(&env.app, &to.id).await;
+        sqlx::query("UPDATE runs SET agent_name = 'robins-hub-3b84sb' WHERE id = ?").bind(&run).execute(&env.app.db).await.unwrap();
+        let conv = db::conversation_id(&env.app.db, &to.id).await.unwrap();
+        let text = "我是 robins-hub-bf3xq3。console PR #95 的 test／lint 卡在排隊";
+        let echo = lifecycle::insert_message(&env.app, &conv, None, "user", text, "hook", false, None).await.unwrap();
+        let other = lifecycle::insert_message(&env.app, &conv, None, "user", "使用者自己打的一句話，跟報備無關", "web", false, None).await.unwrap();
+        let announce = |t: &str| HookBody {
+            bot_id: from.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "robins-hub-3b84sb", "text": t}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+
+        process(&env.app, &announce(text)).await.unwrap();
+        let relay = |id: String| {
+            let db = env.app.db.clone();
+            async move { sqlx::query_scalar::<_, Option<String>>("SELECT relay_from FROM messages WHERE id = ?").bind(id).fetch_one(&db).await.unwrap() }
+        };
+        assert_eq!(relay(echo.id.clone()).await.as_deref(), Some(from.id.as_str()), "回音補標寄件者");
+        assert_eq!(relay(other.id.clone()).await, None, "使用者自己打的不動");
+        assert_eq!(crate::agent_relay::claim("robins-hub-3b84sb", text), None, "補標後報備已用掉，不會再標一次");
     }
 
     /// issue #634: a single Bash `PostToolUse` hook records every herdr response against its caller.

@@ -337,6 +337,27 @@ am_announce_refuse() {
     exit "$1"
 }
 
+# 遠端 bot（有 bot 身分、沒有 `AM_PORT`：遠端不開回 daemon 的埠）打不到 `/relay/announce`，收件方的回音就會被當成
+# 使用者打的字（2026-09-30 使用者）。改寫一則報備進自己 bot 目錄的 hook spool，daemon 收 hook 時一起收。
+# 寫不了（沒有目錄、沒有 python3）就算了，照舊直送：標不出來源不是送不出去的理由。
+am_spool_relay() {
+    _sd="$HOME/.config/agents-manager${AM_INSTANCE:+/instances/$AM_INSTANCE}/bots/${AM_BOT_ID}"
+    [ -d "$_sd" ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$_sd/hook-spool.d" "$AM_BOT_ID" "${AM_KIND:-claude}" "$1" "$2" <<'AMPY' >/dev/null 2>&1 || true
+import json, os, sys, tempfile, time
+sd, bot, kind, to_agent, text = sys.argv[1:6]
+os.makedirs(sd, exist_ok=True)
+body = {"bot_id": bot, "provider": kind, "truncated": False, "run_id": "",
+        "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "payload": {"hook_event_name": "AmRelayAnnounce", "to_agent": to_agent, "text": text}}
+fd, tmp = tempfile.mkstemp(prefix=".tmp.", dir=sd)
+with os.fdopen(fd, "w") as f:
+    f.write(json.dumps(body, ensure_ascii=False) + "\n")
+os.replace(tmp, os.path.join(sd, "%d-%d.json" % (time.time_ns(), os.getpid())))
+AMPY
+}
+
 am_agent_prompt() {
     shift 2
     case "${1:-}" in
@@ -460,6 +481,8 @@ am_agent_prompt() {
                     ;;
             esac
         fi
+    elif [ -n "${AM_BOT_ID:-}" ] && [ -z "${AM_PORT:-}" ]; then
+        am_spool_relay "$_name" "$_text"
     fi
     exec "$AM_HERDR" agent prompt "$_name" "$@"
 }
@@ -1008,6 +1031,37 @@ mod tests {
         );
         // 整段文字仍是**一個**參數。
         assert_eq!(out, ["agent", "prompt", "proj-abc123-review", "把 daemon 重建一次，然後回報"]);
+    }
+
+    /// 2026-09-30：遠端 bot（沒有 `AM_PORT`）直送的一句，要在打字前寫一則報備進自己的 hook spool，
+    /// daemon 收 hook 時才認得出寄件者。沒有 bot 目錄就什麼都不寫，照舊轉發。
+    #[test]
+    fn a_remote_bot_spools_a_relay_announce_before_prompting() {
+        let s = Sandbox::new();
+        let home = s.dir.join("home");
+        let spool = home.join(".config/agents-manager/bots/B-REMOTE/hook-spool.d");
+        std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
+        let home_s = home.to_string_lossy().to_string();
+        let env = [("HOME", home_s.as_str()), ("AM_BOT_ID", "B-REMOTE"), ("AM_KIND", "claude"), ("AM_TEST_AGENTS", "robins-hub-3b84sb")];
+        let (out, _) = s.run(&env, &["agent", "prompt", "robins-hub-3b84sb", "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait"]);
+        assert_eq!(out, ["agent", "prompt", "robins-hub-3b84sb", "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait"], "照舊轉發");
+        let files: Vec<_> = std::fs::read_dir(&spool).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+        assert_eq!(files.len(), 1, "一則報備：{files:?}");
+        let body: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&files[0]).unwrap().trim()).unwrap();
+        assert_eq!(body["bot_id"], "B-REMOTE");
+        assert_eq!(body["provider"], "claude");
+        assert_eq!(body["payload"]["hook_event_name"], "AmRelayAnnounce");
+        assert_eq!(body["payload"]["to_agent"], "robins-hub-3b84sb");
+        assert_eq!(body["payload"]["text"], "我是 robins-hub-bf3xq3。PR #95 卡在排隊", "--wait 不進正文");
+
+        // 本機 bot（有 AM_PORT）不走 spool；沒有 bot 目錄的也不寫。
+        let s2 = Sandbox::new();
+        let home2 = s2.dir.join("home");
+        let home2_s = home2.to_string_lossy().to_string();
+        std::fs::create_dir_all(&home2).unwrap();
+        let (out, _) = s2.run(&[("HOME", home2_s.as_str()), ("AM_BOT_ID", "B-NODIR")], &["agent", "prompt", "x-agent", "hello there relay"]);
+        assert_eq!(out[..2], ["agent", "prompt"]);
+        assert!(!home2.join(".config").exists(), "沒有 bot 目錄就不建");
     }
 
     /// 既有目標（AGM、頂層 bot）不改名，否則 unknown_target。

@@ -1710,6 +1710,12 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 3. 回音從 hook 回來時用 run 的 `agent_name` 認領：忽略所有空白（TUI 任意折行），長度取兩邊較短者且至少 12 字元；更短就要完全一樣。
    認到就在**插入當下**寫 `relay_from`（事後補的話 `message_added` 已經推出去了）。
 4. 認不出來維持 NULL = 使用者自己打的。寧可少標，不把使用者的話說成別人送的。
+5. **遠端 bot 走 spool**（2026-09-30 使用者：console-rpa 直送給 cicd 的一句被當成使用者打的）：遠端 bot 有 bot 身分但沒有 `AM_PORT`（遠端不開回 daemon 的埠），
+   打不到 `/relay/announce`。shim 改在打字前寫一則 `{"hook_event_name":"AmRelayAnnounce","to_agent","text"}` 的 hook body 進**自己** bot 目錄的
+   `hook-spool.d/`（`python3` 寫暫存檔再 rename，一則一檔；沒有 bot 目錄或 python3 就不寫、照舊直送），daemon 收 spool 時一起收（寄件者＝那個目錄的 bot）。
+   spool 每 30 秒左右才收一次，收件方的回音常常先到、已經存成使用者訊息：收到報備時除了照第 2 點記下，也回頭找寄件者那台主機上 `agent_name` 是 `to_agent`
+   的在跑 run、五分鐘內還沒標來源而且內容對得上（同第 3 點）的最新一則使用者訊息補標 `relay_from`（`relay_unverified=0`）、用掉那筆報備，
+   再推一次同 id 的 `message_added`（前端同 id 來源變了就換掉）。這一條要等遠端 bot 重啟、裝到新版 shim 才生效。
 5. **announce 之後盯收件方**（#380、#680，`lifecycle::relay_watch`）：`to_agent`（herdr agent 名或 pane id）只在寄件 bot 所在的 host 與 herdr session 解析；
    舊 run 沒記 session 時以該 host 的設定為準。只有唯一一顆 running run 符合才盯梢；bot 的資料庫名稱不是 herdr 目標，多筆相符時略過、不猜一筆。
    找到目標時，daemon 立刻開一個進行中的 `external` 回合（使用者訊息帶 `relay_from`；收件方已有回合在飛就不開），側欄與標題列看得出在跑，

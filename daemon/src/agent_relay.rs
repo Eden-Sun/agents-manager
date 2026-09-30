@@ -33,7 +33,7 @@ fn norm(s: &str) -> String {
 }
 
 /// 回音常被 TUI 截斷，所以誰是誰的開頭都算。
-fn same_prompt(pending: &str, echo: &str) -> bool {
+pub(crate) fn same_prompt(pending: &str, echo: &str) -> bool {
     let (a, b) = (norm(pending), norm(echo));
     let n = a.chars().count().min(b.chars().count());
     if n < MIN_MATCH {
