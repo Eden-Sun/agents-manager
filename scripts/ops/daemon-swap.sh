@@ -508,6 +508,22 @@ start() {
     "$LAUNCHCTL" remove "$L" 2>/dev/null
 }
 
+# `rollback()` runs before the later top-level child inventory, so define its query helper before any rollback can execute.
+rollback_new_children() { # 印出備份後新收編、還活著且不在換版前清單的 child；讀取錯誤交給呼叫端警示
+    set -o pipefail
+    rows=$("$SQLITE" -readonly "$DB" "SELECT id || char(9) || COALESCE(name, '') FROM bots
+      WHERE managed_by = 'child' AND deleted_at IS NULL AND created_at >= '$SWAP_T0' ORDER BY created_at, id") || return 1
+    printf '%s\n' "$rows" | "$PYTHON" -c 'import sys
+before = {line.split("\t", 1)[0] for line in sys.argv[1].splitlines() if line}
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    ident, sep, name = line.partition("\t")
+    if sep and ident not in before:
+        print("%s (%s)" % (name, ident))' "$BEFORE_ROWS"
+}
+
 rollback() {
     log "ROLLBACK requested: $*"
     # Capture children adopted by the new daemon before restoring the backup. Their panes can outlive
@@ -621,20 +637,6 @@ fi
 # 這是父 bot 換掉 quota 用盡 child 的明確證據。沒有這兩個證據的 unconfirmed，以及 agent_missing／herdr_restarted，照樣回滾。
 # 判準見 SPEC §6.5a。
 # 讀 DB 一律 -readonly；讀不到、id 格式不對都當成「沒有刪除紀錄」，照樣回滾。
-rollback_new_children() { # 印出備份後新收編、還活著且不在換版前清單的 child；讀取錯誤交給呼叫端警示
-    set -o pipefail
-    rows=$("$SQLITE" -readonly "$DB" "SELECT id || char(9) || COALESCE(name, '') FROM bots
-      WHERE managed_by = 'child' AND deleted_at IS NULL AND created_at >= '$SWAP_T0' ORDER BY created_at, id") || return 1
-    printf '%s\n' "$rows" | "$PYTHON" -c 'import sys
-before = {line.split("\t", 1)[0] for line in sys.argv[1].splitlines() if line}
-for line in sys.stdin:
-    line = line.rstrip("\n")
-    if not line:
-        continue
-    ident, sep, name = line.partition("\t")
-    if sep and ident not in before:
-        print("%s (%s)" % (name, ident))' "$BEFORE_ROWS"
-}
 deleted_on_purpose() { # $1=bot id → 印 1 才算
     case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
     "$SQLITE" -readonly "$DB" "SELECT count(*) FROM bots b WHERE b.id = '$1'
