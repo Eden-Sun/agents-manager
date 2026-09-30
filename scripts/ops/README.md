@@ -616,6 +616,8 @@ main 的每個 push 不再等 GitHub Actions：agm-host 上的 systemd user time
 只驗最新的 main HEAD（同時一輪、中間的 sha 不補跑），跑整樹 `scripts/check.sh`，結果寫成 commit status `ubuntu-ci`、
 `~/.cache/agents-manager/ci/status.json` 與 `logs/<sha>.log`。安裝（agm-host，需 `loginctl enable-linger ubuntu`）：
 
+daemon 內的 CI coordinator（SPEC §20）已提供 fast/full durable queue 與 job API，但**不會在現有 daemon 設定下自動執行**：Linux daemon 啟動時需同時提供 `AGM_CI_REPO_DIR` 與 `AGM_CI_WORK_ROOT`。部署切換時要在 daemon service 設定這兩個路徑和 `scripts/check.sh` 所需工具 PATH，並停用本 timer；本次 repo 改動不動 agm-host 的 systemd service/timer。
+
 agent 本機收尾用 `scripts/check.sh changed`：Rust-only 改動在沒有 `web/dist/index.html` 的 clean checkout 會暫時建立 rust-embed stub，跑完即清除，不會因此安裝依賴或 build web。Web 檢查與背景完整 CI 仍 build 真正的 production bundle。
 
 ```sh

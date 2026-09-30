@@ -260,6 +260,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (30, "db1edd18d6bf4693"),
     // issue #708：`projects.handed_off_to`（專案移交給另一台主機的 daemon）。
     (31, "4aa40b8a872df7d8"),
+    // issue #716: durable fast/full CI jobs and project/agent result routing.
+    (32, "3e1409d0e6f5daa7"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -508,6 +510,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     crate::release_triage::ledger::migrate(pool).await?;
     crate::judge::migrate(pool).await?;
     crate::cli_update::migrate(pool).await?;
+    crate::ci_coordinator::migrate(pool).await?;
     Ok(())
 }
 
