@@ -58,11 +58,10 @@
 
 - **收縮優先序**：分頁不讓 > 名字 > 附屬 chip。**額度量表不在可讓的名單裡：桌機每個帳號都畫完整量表**（使用者指定「額度顯示很重要，不要省空間」）。
   名字 `flex: 1 0.25 auto`、下限 3em、上限 22em；中間空白要真的被名字與 pane id 用掉。
-- 第一行：燈號、名字、★、⚙、更新 chip 等；第二行：`● 需要回應`（blocked 時，排第一）、kind logo（無框、有底色、貼近 model）、model／effort chip、pane id（擠不下只剩 `▾`；blocked 時也一樣，不因為多了 `● 需要回應` 就整顆藏掉，2026-09-25 使用者）。
-- **pane id 後面接 herdr agent 名**（#572，2026-09-26 使用者）：暱稱與 herdr 名（`<專案 slug>-<id 尾 6 碼>`）本來就無關，
-  只看暱稱對不到終端。顯示成 `w16T:p2 · pt-hub-sytk6j`，只在有 active run 時出現；擠的時候 herdr 名比 pane id 先讓位，
-  而且**從中間截**、尾 6 碼（id 尾碼、子 agent 字尾）一定留著（`pt…sytk6j`），完整值在 tooltip。側欄不加字，
-  暱稱的 tooltip 第二行寫 `herdr agent … ・pane …`（側欄每列已滿）。不改暱稱、不動 reconcile 與燈號。
+- 第一行：燈號、名字、★、⚙、更新 chip 等；第二行：`● 需要回應`（blocked 時，排第一）、kind logo（無框、有底色、貼近 model）、model／effort chip、pane id（點一下複製、擠不下從尾巴截；blocked 時也一樣，不因為多了 `● 需要回應` 就整顆藏掉，2026-09-25 使用者）。
+- **標題列只放 pane id、點一下就複製**（2026-09-30 使用者：「對於 pane 的描述不用那麼多，header 上只要 pane name，一點下去就是 copy 而不用往下展開，實際上用不到」，
+  取代 #572 的 `pane id · herdr 名` 與點開的識別列）。herdr agent 名、session 等完整識別放 tooltip；複製後那顆暫時寫「已複製」。
+  側欄不加字，暱稱的 tooltip 第二行寫 `herdr agent … ・pane …`（側欄每列已滿）。
 - 顏色：kind 品牌色 `--kind-claude` 橘、`--kind-codex` 綠、`--kind-grok` 紫（使用者選的）；model chip 吃該 kind 色；⚙ 與 ▾ 吃 accent；★ 釘起來實心黃、沒釘淡黃空心。
   kind 圖示 tooltip 寫「這是哪個 CLI、哪家模型」，`aria-label` 只有 kind 名。codex 顯示時去掉 `gpt-` 前綴（完整 id 在 tooltip）（使用者指定）。
 - **停用的模型別名照 daemon 的清單顯示，但被換掉一定要講**（#539）：daemon 對 `opus`（claude）與
@@ -411,7 +410,7 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 
 第一個確認框只講「裡面正在跑的指令會結束」，沒講「裡面是 dev server」。所以前端**不預設帶 confirm**：daemon 對在 listen 的服務 pane、或讀不到它在跑什麼的 pane 回 409 `service_pane`，面板接著跳第二個確認框，寫出 port（或「讀不到狀態」），按「仍要關掉」才帶 `confirm=true` 重送。這一步不是錯誤，不跳紅字、面板也不收掉。
 
-## 識別列的「進 herdr」一行指令（2026-09-17，使用者指定）
+## 識別列的「進 herdr」一行指令（2026-09-17，使用者指定；**2026-09-30 隨識別列一起拿掉**：使用者說展開的識別列實際上用不到，標題列改成點 pane id 直接複製）
 
 使用者：「在 pane name show 出一行字，可以 resume 後進去至該 pane 的 herdr shell」。點標題列的 pane id 展開識別列，最後一顆是
 `herdr --session <session> agent focus <pane> >/dev/null && herdr --session <session>`，點一下複製。
