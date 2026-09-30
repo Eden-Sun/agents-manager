@@ -88,12 +88,13 @@ vite，launchd 那邊脫離程序群就活著；systemd 預設 `KillMode=control
 `Environment=` 的值以外全部都比**（鍵要在，理由同 plist）。Linux 上掃的是 `~/.config/systemd/user/com.agm.*`，
 不掃 `~/Library/LaunchAgents`。
 
-**browser-gc 在 Linux 不裝**：它喚醒的 child 操作 ego-browser（圖形介面瀏覽器），Linux 主機沒有桌面，裝了只會
-每 30 分鐘叫醒一顆找不到瀏覽器的 bot。所以 systemd 那組沒有它，`browser-gc-kick.sh`／`browser-gc-task.md`／plist
-在對照表都標 `darwin`；Linux 的 `bin/` 裡出現 `browser-gc-kick.sh` 會報成 `extra`。有了圖形瀏覽器（或 OB 另訂方案，#675）
-再補 unit 與對照表的列。
+Linux 有 `com.agm.browser-gc` systemd timer，但執行 Linux 專用的 `browser_gc_linux.py`：每 30 分鐘回收本使用者
+已孤兒、超過 2 分鐘且沒有 CDP 連線的 headless Chrome，清理安全標記的舊 `/tmp/am-*` profile，再跑 `pane-gc`。
+如果 `ss` 不存在或 CDP 狀態無法查明，會保留程序。它不啟動 browser-gc bot，也不派 ego-browser task。
+`browser-gc-kick.sh`／`browser-gc-task.md`／plist 仍只標 `darwin`；ego lite／OB 圖形 worker 依 #718 暫不實作，
+所以 Linux `bin/` 裡出現 macOS 的 `browser-gc-kick.sh` 仍會報成 `extra`。
 
-安裝（**需要 AGM 核准**，同 macOS；`<名字>` 是對照表列出的那七支）：
+安裝（**需要 AGM 核准**，同 macOS；`<名字>` 是對照表列出的八支）：
 
 ```sh
 install -m 644 scripts/ops/systemd/com.agm.<名字>.{service,timer} ~/.config/systemd/user/

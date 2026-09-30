@@ -1,0 +1,9 @@
+# Linux local process cleanup only; ego-browser task work remains on macOS.
+[Unit]
+Description=AGM browser-gc：回收本使用者殘留的 headless Chrome 與 pane
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.config/agents-manager/supervisor/AGM/bin/browser_gc_linux.py
+StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/browser-gc.systemd.log
+StandardError=append:%h/.config/agents-manager/supervisor/AGM/browser-gc.systemd.log
