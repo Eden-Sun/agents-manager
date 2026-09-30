@@ -1,0 +1,40 @@
+
+❯ Message 13: reply with just OK.
+
+● OK
+
+✻ Churned for 2s · done 7:23 PM
+
+❯ Message 14: reply with just OK.
+
+● OK
+
+✻ Worked for 2s · done 7:23 PM
+
+❯ Message 15: reply with just OK.
+
+● OK
+
+✻ Baked for 2s · done 7:23 PM
+
+❯ Message 16: reply with just OK.
+
+● OK
+
+✻ Worked for 1s · done 7:23 PM
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Rewind
+
+   Restore the code and/or conversation to the point
+   before…
+
+     ↑ 18 more
+     Message 11: reply with just OK.
+     No code changes
+
+   ❯ Message 12: reply with just OK.
+     No code changes
+
+     ↓ 5 more
+
+   Enter to continue · Esc to cancel

@@ -467,6 +467,12 @@ fn strip_box(line: &str) -> String {
     line.trim().trim_start_matches(['│', '┃', '▎']).trim().trim_end_matches(['│', '┃']).trim().to_string()
 }
 
+/// 2.1.286 起權限框夾住指令／內容的虛線（整行只有 `╌`）。
+fn is_dash_rule(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && t.chars().all(|c| c == '╌')
+}
+
 pub fn dangerous_rm_prompt(screen: &str) -> Option<DangerousRm> {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = raw.len().saturating_sub(RM_DIALOG_TAIL_LINES);
@@ -493,10 +499,16 @@ pub fn dangerous_rm_prompt(screen: &str) -> Option<DangerousRm> {
     let target = warning.split_once(": ").map(|(_, t)| t.trim().to_string()).unwrap_or_default();
     // 指令在框上方的 `Bash command` 區塊：標題下、警語前，`│` 開頭的那幾行。指令只佔一列時 claude 不畫 `│`
     // （2026-09-24 真畫面），那就是標題下第一列；再下一列是說明，不算。
+    // 2.1.286 起指令改用兩條 `╌` 虛線夾住、說明移到虛線上方（#746，`claude-2.1.286-dangerous-rm-*.txt`）：
+    // 有虛線就只取兩條虛線之間，不然單列指令會把說明當成指令。
     let abs_warn = start + warn;
     let from = abs_warn.saturating_sub(RM_COMMAND_LOOKBACK);
     let command = raw[from..abs_warn].iter().rposition(|l| norm_line(l) == "bash command").map(|h| {
-        let block = &raw[from + h + 1..abs_warn];
+        let mut block = &raw[from + h + 1..abs_warn];
+        let rules: Vec<usize> = block.iter().enumerate().filter(|(_, l)| is_dash_rule(l)).map(|(i, _)| i).collect();
+        if let [open, close, ..] = rules[..] {
+            block = &block[open + 1..close];
+        }
         let gutter: Vec<String> = block.iter().filter(|l| l.trim_start().starts_with('│')).map(|l| strip_box(l)).collect();
         if gutter.is_empty() { block.first().map(|l| strip_box(l)).unwrap_or_default() } else { gutter.join("\n") }
     });
@@ -751,6 +763,17 @@ pub(crate) mod screens {
     /// `Bash command` 底下**沒有 `│`**（多列或折行才畫），下一列是說明。重現要用 `rm -rf "$(echo tmpdir2)"` 這種目標
     /// **整段都是**替換輸出的；`rm -rf "$(pwd)/tmpdir"` 在 2.1.281 不跳框、直接刪掉。
     pub const DANGEROUS_RM_ONE_ROW: &str = include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm-one-row.txt");
+    /// 2.1.286 真畫面（2026-09-30，#746：拋棄式安裝＋拋棄式 herdr pane，60 欄，**沒有**帶 skip-permissions，`pane read --source visible`）。
+    /// 指令改用兩條 `╌` 虛線夾住、說明移到虛線上方；單列指令一樣沒有 `│`，警語改成 `│` 開頭、沒有倒數。
+    pub const DANGEROUS_RM_2286_ONE_ROW: &str = include_str!("lifecycle/fixtures/claude-2.1.286-dangerous-rm-one-row.txt");
+    /// 同一個 session：兩列指令，虛線之間是 `│` 開頭的指令列。
+    pub const DANGEROUS_RM_2286_MULTILINE: &str = include_str!("lifecycle/fixtures/claude-2.1.286-dangerous-rm-multiline.txt");
+    /// 同一個 session 的一般權限框：Bash（指令夾在虛線之間，上面多一段 auto mode 提示）、平行 Read 疊起來的
+    /// `Read file … 1 of 3`／`2 of 3`（外觀跟檔案編輯框一樣）、Fetch（問句是 `Do you want to allow Claude to fetch this content?`）。
+    pub const PERMISSION_2286_BASH: &str = include_str!("lifecycle/fixtures/claude-2.1.286-bash-permission.txt");
+    pub const PERMISSION_2286_READ_1_OF_3: &str = include_str!("lifecycle/fixtures/claude-2.1.286-read-permission-1-of-3.txt");
+    pub const PERMISSION_2286_READ_2_OF_3: &str = include_str!("lifecycle/fixtures/claude-2.1.286-read-permission-2-of-3.txt");
+    pub const PERMISSION_2286_FETCH: &str = include_str!("lifecycle/fixtures/claude-2.1.286-fetch-permission.txt");
     /// 2026-09-23 m12 的 pane（巡檢交辦時抄的原文，路徑中段被抄錄者省略成 `…`）。
     pub const DANGEROUS_RM_M12: &str = "\
  Dangerous rm operation on statically-unresolvable target: /Users/…/web/docs/screenshots/pin-3rows/*
@@ -1284,6 +1307,43 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         let one = dangerous_rm_prompt(DANGEROUS_RM_ONE_ROW).expect("單列指令的真畫面");
         assert_eq!(one.target, "command substitution output");
         assert_eq!(one.command.as_deref(), Some(r#"rm -rf "$(echo tmpdir2)""#));
+    }
+
+    use super::screens::{
+        DANGEROUS_RM_2286_MULTILINE, DANGEROUS_RM_2286_ONE_ROW, PERMISSION_2286_BASH, PERMISSION_2286_FETCH, PERMISSION_2286_READ_1_OF_3,
+        PERMISSION_2286_READ_2_OF_3,
+    };
+
+    /// 2.1.286（#746）：指令夾在 `╌` 虛線之間、說明在虛線上方。以前單列指令取「標題下第一列」，會把說明當成指令。
+    #[test]
+    fn the_2_1_286_dangerous_rm_prompt_reads_the_command_between_the_dashed_rules() {
+        let one = dangerous_rm_prompt(DANGEROUS_RM_2286_ONE_ROW).expect("2.1.286 單列指令");
+        assert_eq!(one.warning, "Dangerous rm operation on statically-unresolvable target: command substitution output");
+        assert_eq!(one.target, "command substitution output");
+        assert_eq!(one.command.as_deref(), Some(r#"rm -rf "$(echo tmpdir2)""#));
+
+        let multi = dangerous_rm_prompt(DANGEROUS_RM_2286_MULTILINE).expect("2.1.286 兩列指令");
+        assert_eq!(multi.target, "command substitution output");
+        assert_eq!(multi.command.as_deref(), Some("touch m1.txt\nrm -rf \"$(echo tmpdir3)\""));
+
+        assert!(awaits_menu_choice(DANGEROUS_RM_2286_ONE_ROW) && awaits_menu_choice(DANGEROUS_RM_2286_MULTILINE));
+    }
+
+    /// 2.1.286 的一般權限框（虛線、`1 of 3` 計數、Read／Fetch 換成編輯框的外觀）：是等人選的選單，
+    /// 但不是防誤刪框、不是 daemon 會替人按掉的那幾種框。
+    #[test]
+    fn the_2_1_286_permission_prompts_are_open_menus_and_nothing_daemon_answers() {
+        for (name, screen) in [
+            ("bash", PERMISSION_2286_BASH),
+            ("read 1 of 3", PERMISSION_2286_READ_1_OF_3),
+            ("read 2 of 3", PERMISSION_2286_READ_2_OF_3),
+            ("fetch", PERMISSION_2286_FETCH),
+        ] {
+            assert!(awaits_menu_choice(screen), "{name}：等人選的選單");
+            assert_eq!(dangerous_rm_prompt(screen), None, "{name}：不是防誤刪框");
+            assert!(!is_switch_model_dialog(screen) && !is_auto_mode_offer(screen) && !is_feedback_survey(screen), "{name}");
+            assert!(!is_session_paused_menu(screen) && !stuck_at_login(screen) && !is_not_logged_in_reply(screen), "{name}");
+        }
     }
 
     /// 倒數到 0 之後框不見了；一般的權限框、其他對話框、回覆裡引了原文（輸入列空著）都不是。

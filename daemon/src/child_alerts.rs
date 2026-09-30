@@ -106,7 +106,8 @@ pub fn question_from_screen(screen: &str) -> Option<String> {
     for raw in screen.lines() {
         let line: String = raw
             .chars()
-            .map(|c| if "│┌┐└┘─├┤┬┴┼╭╮╯╰▎▔".contains(c) { ' ' } else { c })
+            // `╌`：2.1.286 起權限框夾住指令的虛線（#746），整行都是它，丟掉才不會佔掉尾段的行數。
+            .map(|c| if "│┌┐└┘─├┤┬┴┼╭╮╯╰▎▔╌".contains(c) { ' ' } else { c })
             .collect();
         let line = line.trim().to_string();
         if line.is_empty() || is_chrome(&line) {
@@ -543,6 +544,20 @@ mod tests {
         let m = message_for("am-m12", &q);
         assert!(m.contains("只有使用者本人能核准"), "{m}");
         assert!(!message_for("am-m12", "Do you want to proceed?").contains("防誤刪"), "一般權限框不加這段");
+    }
+
+    /// 2.1.286（#746）：指令夾在 `╌` 虛線之間。虛線不算進尾段，帶給 parent 的那段要看得到指令、問句與選項。
+    #[test]
+    fn a_2_1_286_permission_prompt_reaches_the_parent_with_its_command() {
+        use crate::tui_prompts::screens::{DANGEROUS_RM_2286_MULTILINE, PERMISSION_2286_BASH, PERMISSION_2286_READ_2_OF_3};
+        let q = alertable_question(PERMISSION_2286_BASH).expect("Bash 權限框要通知");
+        assert!(q.contains("rtk ls -la && echo hello-2286") && q.contains("Do you want to proceed?") && q.contains("4. No"), "{q}");
+        assert!(!q.contains('╌'), "{q}");
+        let q = alertable_question(PERMISSION_2286_READ_2_OF_3).expect("疊起來的 Read 權限框要通知");
+        assert!(q.contains("2 of 3") && q.contains("Read(/tmp/claude-1000/cc2286-outside/o2.txt)"), "{q}");
+        let q = alertable_question(DANGEROUS_RM_2286_MULTILINE).expect("防誤刪框要通知");
+        assert!(q.contains("Dangerous rm operation") && q.contains("touch m1.txt"), "{q}");
+        assert!(message_for("am-x", &q).contains("只有使用者本人能核准"));
     }
 
     #[test]
