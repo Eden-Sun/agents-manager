@@ -1205,6 +1205,7 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 同一輪也會把**兩分鐘內剛送出**（`delivery='ok'`）的 in-flight turn 補回 stall watchdog；更舊的不補，否則 12 秒後會把舊訊息再送一次。
 「剛送出」看 `turns.delivered_at`（送出的那一刻；`mark_delivery` 只記第一次，之後不改），不看 `created_at`——排隊的 turn 的
 `created_at` 是排進佇列的時間，flush 可能晚半小時；沒有 `delivered_at` 的舊列才退回 `created_at`（review 2026-09-16 deliv L3）。
+**排過隊的 prompt 在對話裡排到送出的時間**（2026-09-30 使用者：cf-ox-2 的 daemon 通知 13:28 排進佇列、13:38:55 才送，畫面卻排在 13:31 那則補充上面，13:40 的回覆看起來在回錯的一則）：`prompt::mark_delivery` 第一次記 `delivered_at` 時，回合在佇列等了超過 5 秒，就把它的使用者訊息（不含 `sent_via` 的補充）的 `created_at` 改成送出時間、再推一次同 id 的 `message_added`（前端同 id 時間變了就重排）。回合自己的 `created_at` 不動，等待時間照舊從它算。
 
 **送出之後結果寫不回去**（#149）：prompt 的副作用做完——打字送出、交給 `agent.prompt`、或 herdr 明確拒收（`agent_blocked`）——之後，
 把結果寫回那一筆回合（`mark_delivery`；拒收是收成 failed＋說明，同一個交易）是唯一的一步，寫不進去**不吞**。跟打斷、run 結束欠著的收尾（#147／#156）同一套，

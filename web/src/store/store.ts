@@ -2937,7 +2937,7 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         const more: Record<string, boolean> = {}
         // issue #25：滿了從頭截掉，並打開「還有更早的」。
         // 同 id 再來一次＝daemon 原地改過（遲到 hook 蓋掉備援回覆、晚到的 bot 報備補標來源），換掉。
-        const grown = upsertSorted(s.messages[botId] ?? [], msg, byTime, (a, b) => a.content === b.content && a.source === b.source && a.incomplete === b.incomplete && a.relay_from === b.relay_from)
+        const grown = upsertSorted(s.messages[botId] ?? [], msg, byTime, (a, b) => a.content === b.content && a.source === b.source && a.incomplete === b.incomplete && a.relay_from === b.relay_from && a.created_at === b.created_at)
         if (grown) {
           const cut = capList(grown, capFor(s.messageCapFloors, botId))
           patch.messages = { ...s.messages, [botId]: cut.list }
