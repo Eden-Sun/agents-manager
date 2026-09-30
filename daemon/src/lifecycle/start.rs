@@ -922,7 +922,7 @@ async fn start_inner(
 
     // 7. wait for readiness
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
-    let status = match client.agent_wait(&agent, &until, 60_000).await {
+    let status = match client.agent_wait_ready(&bot.kind, &agent, &until, 60_000).await {
         Ok(info) => info.agent_status.normalized(),
         Err(e) => {
             tracing::warn!(bot = %bot.name, error = %e, "agent.wait did not settle");
@@ -1487,7 +1487,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         tracing::warn!(bot = bot_id, error = %e, "child restart succeeded but its hand-off grace could not be cleared");
     }
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
-    if let Err(e) = client.agent_wait(&agent, &until, 60_000).await {
+    if let Err(e) = client.agent_wait_ready(&bot.kind, &agent, &until, 60_000).await {
         tracing::warn!(bot = %bot.name, error = %e, "子 agent 重啟後沒等到 ready，run 留著讓對帳接手");
     }
     // 沒有 hook 的 run，畫面是唯一來源（同收編）。
