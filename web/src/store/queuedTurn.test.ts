@@ -39,7 +39,6 @@ function seed() {
     messages: {},
     drafts: {},
     notices: [],
-    queuedSends: {},
   })
 }
 
@@ -128,13 +127,13 @@ test('withdrawing an awaits_idle turn restores the server-returned text before t
   assert.ok(requests.some((request) => request.method === 'POST' && request.path.endsWith('/turns/t1/withdraw')))
   assert.equal(useStore.getState().drafts['bot:b1'], 'authoritative text\ntyped while queued')
   assert.equal(useStore.getState().turns.b1.t1.status, 'failed')
-  assert.ok(useStore.getState().notices.some((notice) => notice.text.includes('2 個附件')))
+  assert.equal(useStore.getState().notices.some((notice) => notice.text.includes('附件要重新加')), false, 'composer restores the existing attachment cards')
 })
 
 test('first bootstrap migrates a leftover legacy in-memory row through /prompt once', async () => {
   seed()
   // Simulate a HMR-preserved state object from the pre-#733 bundle.
-  useStore.setState({ queuedSends: { b1: { text: 'legacy row', attachments: [] } as never } })
+  useStore.setState({ queuedSends: { b1: { text: 'legacy row', attachments: [] } } } as never)
   routeDaemon((req) => {
     if (req.path.endsWith('/session')) return json({ token: 't' })
     if (req.path.endsWith('/prompt')) return json({ turn_id: 'migrated', message_id: 'm1', delivery: 'queued' })
@@ -147,5 +146,6 @@ test('first bootstrap migrates a leftover legacy in-memory row through /prompt o
   assert.equal(prompts.length, 1)
   assert.equal((prompts[0].body as { queue_if_busy?: boolean }).queue_if_busy, true)
   assert.equal((prompts[0].body as { text?: string }).text, 'legacy row')
+  assert.equal((useStore.getState() as unknown as { queuedSends?: unknown }).queuedSends, undefined)
   useStore.setState({ projects: [], bots: [], runs: {}, turns: {}, messages: {}, socket: 'closed' })
 })

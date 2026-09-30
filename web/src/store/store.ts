@@ -54,7 +54,6 @@ import { sendNowFellThrough } from './sendNowOutcome'
 import { missionRequests } from './missionRequests'
 import { MISSION_USER_PAUSE } from '../lib/missionView'
 
-import type { QueuedSend } from './queuedSend'
 
 /** `patchBot` 的結果：要不要重啟，以及 daemon 有沒有把送進去的停用模型換掉（issue #539）。 */
 export interface PatchBotOutcome {
@@ -405,9 +404,6 @@ export interface StoreState {
   /** Render only while `composerState(...).inFlightTurnId === liveReply.turnId` so a stale entry never shows. */
   liveReply: Record<string, LiveReply>
 
-  /** @deprecated UI compatibility projection only; source is queued awaits_idle turns plus their user messages. */
-  queuedSends: Record<string, QueuedSend>
-
   /** SPEC §13 group view; non-null overrides `selectedBotId` (which is kept). */
   selectedProjectId: string | null
   groupMessages: Record<string, GroupMessage[]>
@@ -601,12 +597,6 @@ export interface StoreState {
   /** Positions are clamped to the current draft text. */
   setDraftCursor: (key: DraftKey, start: number, end?: number) => void
 
-  queueSend: (botId: string, text: string, attachments: string[]) => void
-  cancelQueuedSend: (botId: string) => void
-  /** 取消排隊：那則接回輸入框最前面（不蓋掉正在打的字）。 */
-  unqueueToDraft: (botId: string) => void
-  /** 送失敗時放回佇列或輸入框；三個送出入口共用，免得 409 把字吃掉。 */
-  restoreQueuedSend: (botId: string, pending: QueuedSend) => void
   /** issue #122：撤回 daemon 那一則「等 bot 起來」的訊息，文字接回輸入框最前面。 */
   cancelStartingSend: (botId: string) => Promise<void>
   /** issue #733：撤回 daemon-owned awaits_idle queued turn，再把原文接回草稿。 */
@@ -887,7 +877,6 @@ export const useStore = create<StoreState>((set, get) => {
   botUnread: initialUnread.bots,
   hiddenBotIds: [],
   liveReply: {},
-  queuedSends: {},
   composerDrafts: {},
 
   selectedProjectId: initialSelection.projectId,
@@ -1477,26 +1466,6 @@ export const useStore = create<StoreState>((set, get) => {
     }
   },
 
-  queueSend(botId, text, attachments) {
-    // UI compatibility adapter. The queue itself is created by the daemon's /prompt endpoint.
-    void get().sendPrompt(botId, text, attachments, false, false, undefined, true)
-  },
-
-  cancelQueuedSend(botId) {
-    void get().withdrawQueuedSend(botId)
-  },
-
-  unqueueToDraft(botId) {
-    void get().withdrawQueuedSend(botId)
-  },
-
-  restoreQueuedSend(botId, pending) {
-    const key = `bot:${botId}` as const
-    get().setDraft(key, prependDraft(pending.text, get().drafts[key] ?? ''))
-    get().setDraftCursor(key, pending.text.length)
-    if (pending.attachments.length > 0) get().notify('error', `訊息已退回輸入框，但 ${pending.attachments.length} 個附件要重新加`)
-  },
-
   async cancelStartingSend(botId) {
     const pending = startingSend(get().turns[botId], get().messages[botId])
     if (!pending) return
@@ -1539,8 +1508,6 @@ export const useStore = create<StoreState>((set, get) => {
       const text = withdrawn.text || pending.text
       get().setDraft(key, prependDraft(text, get().drafts[key] ?? ''))
       get().setDraftCursor(key, text.length)
-      const attachmentCount = withdrawn.attachments.length || pending.attachments.length
-      if (attachmentCount > 0) get().notify('error', `訊息已放回輸入框，但 ${attachmentCount} 個附件要重新加`)
       await get().loadMessages(botId)
     })
   },
@@ -2572,54 +2539,34 @@ export const useStore = create<StoreState>((set, get) => {
 }
 })
 
-/**
- * Compatibility projection for the still-shared composer. It is rebuilt from daemon turns and messages,
- * never written by Enter or used to decide when a message is sent.
- */
-function queuedSendProjection(state: StoreState): Record<string, QueuedSend> {
-  const projection: Record<string, QueuedSend> = {}
-  for (const botId of Object.keys(state.turns)) {
-    const pending = queuedSendFor(state, botId)
-    if (pending) projection[botId] = pending
-  }
-  return projection
+interface LegacyQueuedSend {
+  text: string
+  attachments: string[]
+  /** D's former compatibility projection tagged daemon rows with their turn id. */
+  turnId?: string
 }
 
-function sameQueuedProjection(a: Record<string, QueuedSend>, b: Record<string, QueuedSend>): boolean {
-  const keysA = Object.keys(a)
-  const keysB = Object.keys(b)
-  return keysA.length === keysB.length && keysA.every((key) => {
-    const left = a[key]
-    const right = b[key]
-    return Boolean(right) && left.turnId === right.turnId && left.text === right.text && left.attachments.join('\0') === right.attachments.join('\0')
-  })
-}
-
-useStore.subscribe((state, previous) => {
-  if (state.turns === previous.turns && state.messages === previous.messages) return
-  const queuedSends = queuedSendProjection(state)
-  if (!sameQueuedProjection(state.queuedSends, queuedSends)) useStore.setState({ queuedSends })
-})
-
-/** One-time bridge for a live/HMR store left over from the old bundle's non-persistent memory queue. */
+/** One-time bridge for a live/HMR store left over from a pre-#733 memory queue. */
 async function migrateLegacyQueuedSends(get: GetFn): Promise<void> {
   if (legacyQueueMigrationAttempted) return
   legacyQueueMigrationAttempted = true
-  const state = get()
-  const pending = Object.entries(state.queuedSends).filter(([botId, row]) => row && !queuedSendFor(state, botId))
-  if (pending.length === 0) return
-  useStore.setState({ queuedSends: {} })
+  const state = get() as StoreState & { queuedSends?: Record<string, LegacyQueuedSend> }
+  const legacyRows = state.queuedSends
+  if (!legacyRows) return
+  const pending = Object.entries(legacyRows).filter(([botId, row]) => row && !row.turnId && !queuedSendFor(state, botId))
+  const cleanState = { ...state } as StoreState & { queuedSends?: Record<string, LegacyQueuedSend> }
+  delete cleanState.queuedSends
+  useStore.setState(cleanState, true)
   for (const [botId, row] of pending) {
-    const legacy = row as QueuedSend
-    if (!legacy.text && legacy.attachments.length === 0) continue
-    const accepted = await get().sendPrompt(botId, legacy.text, legacy.attachments, false, false, undefined, true)
+    if (!row.text && row.attachments.length === 0) continue
+    const accepted = await get().sendPrompt(botId, row.text, row.attachments, false, false, undefined, true)
     if (!accepted) {
       const key = `bot:${botId}` as const
       const current = get().drafts[key] ?? ''
-      const restored = draftWithText(legacy.text, current)
+      const restored = draftWithText(row.text, current)
       if (restored !== current) get().setDraft(key, restored)
-      if (legacy.attachments.length > 0) {
-        get().notify('error', `舊分頁的訊息已退回輸入框，但 ${legacy.attachments.length} 個附件要重新加`)
+      if (row.attachments.length > 0) {
+        get().notify('error', `舊分頁的訊息已退回輸入框，但 ${row.attachments.length} 個附件要重新加`)
       }
     }
   }

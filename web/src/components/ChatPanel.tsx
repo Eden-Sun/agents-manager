@@ -16,7 +16,7 @@ import { typeAlongside } from '../store/alongside'
 import { SentViaTag } from './SentViaTag'
 import { startingSend, startingSendLabel } from '../store/startingSend'
 import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
-import { queuedIdleSend } from '../lib/queuedIdleSend'
+import { queuedSendFor } from '../store/queuedSend'
 import { isImeEnter } from '../lib/ime'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { PaneCopy } from './PaneCopy'
@@ -668,17 +668,7 @@ function Composer({
 }) {
   // Fresh object per call: raw from the selector would spin `useSyncExternalStore`.
   const state = useStore(useShallow((s) => composerState(s, botId)))
-  const sendPrompt = useStore((s) =>
-    s.sendPrompt as (
-      botId: string,
-      text: string,
-      attachments?: string[],
-      sendNow?: boolean,
-      startIfStopped?: boolean,
-      draft?: undefined,
-      queueIfBusy?: boolean,
-    ) => Promise<boolean>,
-  )
+  const sendPrompt = useStore((s) => s.sendPrompt)
   const abandonTurn = useStore((s) => s.abandonTurn)
   const interruptBot = useStore((s) => s.interruptBot)
   const abortBot = useStore((s) => s.abortBot)
@@ -688,10 +678,9 @@ function Composer({
   const startBot = useStore((s) => s.startBot)
   const sendText = useStore((s) => s.sendText)
   const notify = useStore((s) => s.notify)
-  // TODO(D): switch this transitional projection to the daemon queued-send selector from the store.
   const queued = useStore(
     useShallow((s) => {
-      const queuedSend = queuedIdleSend(s.turns[botId], s.messages[botId])
+      const queuedSend = queuedSendFor(s, botId)
       return queuedSend
         ? { turnId: queuedSend.turnId, text: queuedSend.text, attachmentCount: queuedSend.attachments.length }
         : null
@@ -705,10 +694,7 @@ function Composer({
   // issue #122：交給 daemon、在等 bot 起來的那一則（重整之後也還在）。
   const starting = useStore(useShallow((s) => startingSend(s.turns[botId], s.messages[botId])))
   const cancelStartingSend = useStore((s) => s.cancelStartingSend)
-  // TODO(D): selector/action are part of D's store change and are optional until that branch lands.
-  const withdrawQueuedSend = useStore((s) =>
-    (s as typeof s & { withdrawQueuedSend?: (botId: string) => Promise<void> }).withdrawQueuedSend ?? null,
-  )
+  const withdrawQueuedSend = useStore((s) => s.withdrawQueuedSend)
   const withdrawing = useStore((s) => Boolean(s.busy[`withdraw:${botId}`]))
   const startingBot = useStore((s) => Boolean(s.busy[`start:${botId}`]))
   const hasRun = useStore((s) => Boolean(s.runs[botId]))
@@ -789,7 +775,7 @@ function Composer({
   }
 
   const withdrawQueuedIdleSend = async () => {
-    if (!queued || !withdrawQueuedSend) return
+    if (!queued) return
     await withdrawQueuedSend(botId)
     const withdrawn = useStore.getState().turns[botId]?.[queued.turnId]?.status === 'failed'
     if (withdrawn) files.restoreAttachments(queuedAttachments)
@@ -848,7 +834,7 @@ function Composer({
           <button
             type="button"
             className="mini-btn"
-            disabled={withdrawing || !withdrawQueuedSend}
+            disabled={withdrawing}
             title="撤回這則訊息並放回輸入框"
             onClick={() => void withdrawQueuedIdleSend()}
           >
