@@ -18,17 +18,17 @@
 #   stop-bots  Mac：協調者／巡檢標「不要它跑」、child 先停、再停 user bot，等 run 全部結束
 #   hand-off   Mac：兩個專案設 handed_off_to（Mac daemon 萬一被拉起來也不會動它們）
 #   stop-src   Mac：停 daemon（7788 那顆），等 daemon.lock 放開
-#   export     Mac：project-transfer export（協調者專案加 --with-supervisor，#720）
+#   export     Mac：project-transfer export（協調者專案加 --with-supervisor，#720）＋host-state config/token/outbox/identity inventory 快照
 #   transcripts Mac→目標：transcript-transfer 搬原生對話（#717）、rsync supervisor 目錄
 #   ship       bundle、工具、快照傳到目標的狀態目錄，刪 Mac 上的 bundle
 #   stop-dst   目標：停 daemon，等 daemon.lock 放開
-#   import     目標：每個 bundle 先 --dry-run（有 transcript 警告就停），再正式 import（--host local＋路徑改寫）
+#   import     目標：project bundles 全部先 --dry-run（有 transcript 警告就停），host-state 安全合併後再正式 import
 #   start-dst  目標：systemd-run 起 daemon（#677 的 Type=forking＋KillMode=process），等 /api/session
 #   resume     目標：supervisor setup 重寫部署檔、在跑名單逐顆 start?resume=native、協調者／巡檢標回要它跑
 #   verify     目標：專案 host=local、path 換過、user bot 一顆不少、在跑名單都活著、daemon.log 沒有新的 ERROR；Mac 7788 沒人聽
 #   timers     目標：enable ~/.config/systemd/user/com.agm.*.timer（#677 的 unit 要先由 agm ops-sync 裝好）
 #
-# rollback：stop-dst → restore（第一次 import 前的 DB／config 備份放回）→ start-dst → start-src（launchctl submit）
+# rollback：stop-dst → restore（第一次 import 前的 DB／config 與 host-state 備份放回）→ start-dst → start-src（launchctl submit）
 #   → hand-back（清 handed_off_to）→ resume-src（Mac 上照在跑名單接回）→ thaw（bootstrap 回 com.agm.*）。
 #   目標那邊切換後長出來的對話不會帶回 Mac（Mac 從切換前那一刻接回）。
 #
@@ -42,6 +42,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 HELPER="$HERE/cutover-helper.py"
 PT="${PROJECT_TRANSFER:-$HERE/project-transfer}"
 TT="${TRANSCRIPT_TRANSFER:-$HERE/transcript-transfer}"
+HOST_STATE_TOOL="${HOST_STATE_TRANSFER:-$HERE/host-state-transfer.py}"
 PY="${PYTHON_BIN:-python3}"
 SSH="${SSH_BIN:-ssh}"
 RSYNC="${RSYNC_BIN:-rsync}"
@@ -217,6 +218,9 @@ echo 'target daemon did not answer /api/session' >&2; exit 1"
 do_preflight() {
     command -v "$PY" >/dev/null || die "找不到 $PY"
     [ -f "$SRC_DATA/ui-token" ] || die "讀不到 $SRC_DATA/ui-token"
+    [ -f "$SRC_DATA/config.toml" ] || die "讀不到 $SRC_DATA/config.toml"
+    [ -f "$HOST_STATE_TOOL" ] || die "找不到 host state 工具：$HOST_STATE_TOOL"
+    "$PY" "$HOST_STATE_TOOL" --help >/dev/null 2>&1 || die "host state 工具不能執行：$HOST_STATE_TOOL"
     local pre="$STATE/snapshot-preflight.json"
     local args=() l
     for l in "${LABELS[@]}"; do args+=(--label "$l"); done
@@ -258,16 +262,6 @@ do_preflight() {
         fi
     done < <(git -C "$SRC_REPO" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
     [ -n "$left" ] && warn "這些 worktree 有沒推的 commit 或沒提交的改動，目標看不到（切換前推上去或放棄）：${left}"
-    local extra=""; [ -f "$SRC_DATA/config.toml" ] && extra=$("$PY" - "$SRC_DATA/config.toml" <<'EOF'
-import sys, tomllib
-c = tomllib.load(open(sys.argv[1], "rb"))
-print(" ".join(k for k in c if k not in ("projects", "hosts", "server", "build", "panes", "identities")))
-EOF
-)
-    local k
-    for k in $extra; do
-        rsh "grep -q '^\[$k\]' $(q "$DST_DATA/config.toml")" || warn "Mac config 有 [$k]、目標沒有：切換後在目標補上（import 只搬 [[projects]]）"
-    done
 }
 
 do_freeze() {
@@ -325,7 +319,7 @@ bundle_of() { echo "$STATE/$1.json.gz"; }
 moved_of() { echo "$STATE/$1-moved.json.gz"; }
 
 do_export() {
-    local id sup_id; sup_id=$(project_id_of "$STATE/snapshot.json" "$SUP_LABEL")
+    local id sup_id margs=() m; sup_id=$(project_id_of "$STATE/snapshot.json" "$SUP_LABEL")
     for id in $(project_ids "$STATE/snapshot.json"); do
         if [ "$id" = "$sup_id" ]; then
             x "$PY" "$PT" export --db "$SRC_DATA/agents-manager.sqlite3" --project "$id" --out "$(bundle_of "$id")" --with-supervisor || die "export $id 失敗"
@@ -333,6 +327,9 @@ do_export() {
             x "$PY" "$PT" export --db "$SRC_DATA/agents-manager.sqlite3" --project "$id" --out "$(bundle_of "$id")" || die "export $id 失敗"
         fi
     done
+    for m in "${MAPS[@]}"; do margs+=(--map "$m"); done
+    x "$PY" "$HOST_STATE_TOOL" snapshot --source-data "$SRC_DATA" --source-home "$HOME" \
+        --out "$STATE/host-state" "${margs[@]}" || die "完整設定／token／outbox 快照失敗"
 }
 
 do_transcripts() {
@@ -370,23 +367,29 @@ do_ship() {
     x "$RSYNC" -a "${files[@]}" "$HELPER" "$STATE/snapshot.json" "$STATE/running.json" "$TARGET:$(rstate)/"
     # 固定檔名：import 叫的是 project-transfer，PROJECT_TRANSFER 指到別的檔名時也一樣。
     x "$RSYNC" -a "$PT" "$TARGET:$(rstate)/project-transfer"
+    x "$RSYNC" -a "$STATE/host-state/" "$TARGET:$(rstate)/host-state/"
+    x "$RSYNC" -a "$HOST_STATE_TOOL" "$TARGET:$(rstate)/host-state-transfer.py"
+    x touch "$STATE/host-state-shipped"
     # bundle 內含對話：傳過去就刪 Mac 這份（回滾用的是 Mac 沒動過的 DB，不是 bundle）。
     for id in $(project_ids "$STATE/snapshot.json"); do x rm -f "$(bundle_of "$id")" "$(moved_of "$id")"; done
+    # 輔助狀態包含 UI token，只保留目標端的安全副本。
+    x rm -rf "$STATE/host-state"
 }
 
 do_stop_dst() { x stop_dst_daemon || die "停不了目標 daemon"; }
 
 do_import() {
-    local id sup_id rs extra pmap=() m
+    local id sup_id rs extra pmap=() m state_cmd cmd gone allowed idx
+    local ids=() cmds=()
     sup_id=$(project_id_of "$STATE/snapshot.json" "$SUP_LABEL"); rs=$(rstate)
     for m in "${MAPS[@]}"; do pmap+=(--path-map "$m"); done
     for id in $(project_ids "$STATE/snapshot.json"); do
         extra=(); [ "$id" = "$sup_id" ] && extra=(--with-supervisor)
-        local cmd; cmd="python3 $(q "$rs/project-transfer") import --bundle $(q "$rs/$id-moved.json.gz") --host local $(q "${pmap[@]}") --config $(q "$DST_DATA/config.toml") ${extra[*]:-}"
+        cmd="python3 $(q "$rs/project-transfer") import --bundle $(q "$rs/$id-moved.json.gz") --host local $(q "${pmap[@]}") --config $(q "$DST_DATA/config.toml") ${extra[*]:-}"
+        ids+=("$id"); cmds+=("$cmd")
         if [ "$EXECUTE" = 1 ]; then
             rsh "$cmd --dry-run" > "$STATE/import-dry-$id.json" || die "import --dry-run $id 失敗：看 $STATE/import-dry-$id.json"
             # 目標上 transcript 不在的段數，只能是上一步放行的舊 session；多出來的＝對話沒搬到。
-            local gone allowed
             gone=$("$PY" -c 'import json, re, sys
 for w in json.load(open(sys.argv[1])).get("warnings") or []:
     m = re.match(r"(\d+) 段原生對話的 transcript 不在這台", w)
@@ -395,10 +398,26 @@ for w in json.load(open(sys.argv[1])).get("warnings") or []:
             allowed=$(cat "$STATE/transcripts-allowed-$id" 2>/dev/null || echo 0)
             [ -n "$gone" ] && [ "$gone" -gt "$allowed" ] \
                 && die "import --dry-run ${id}：目標有 ${gone} 段 transcript 不在，對話搬移只放行 ${allowed} 段舊 session：$STATE/import-dry-${id}.json"
+        else
+            echo "    [dry-run] ssh $TARGET $cmd --dry-run   # 有 transcript 警告就停"
+        fi
+    done
+    state_cmd="python3 $(q "$rs/host-state-transfer.py") install --bundle $(q "$rs/host-state") --target-data $(q "$DST_DATA") --backup-dir $(q "$rs/host-state-backup")"
+    if [ "$EXECUTE" = 1 ]; then
+        rsh "$state_cmd --dry-run" > "$STATE/host-state-dry-run.json" \
+            || die "host-state install --dry-run 失敗：看 $STATE/host-state-dry-run.json"
+        rsh "$state_cmd" > "$STATE/host-state-install.json" \
+            || die "host-state install 失敗：看 $STATE/host-state-install.json"
+    else
+        echo "    [dry-run] ssh $TARGET $state_cmd --dry-run   # target daemon 必須已停，config 由 host-state 合併"
+        echo "    [dry-run] ssh $TARGET $state_cmd"
+    fi
+    for idx in "${!ids[@]}"; do
+        id=${ids[$idx]}; cmd=${cmds[$idx]}
+        if [ "$EXECUTE" = 1 ]; then
             rsh "$cmd" > "$STATE/import-$id.json" || die "import $id 失敗：看 $STATE/import-$id.json"
             echo "$id" >> "$STATE/imports.txt"
         else
-            echo "    [dry-run] ssh $TARGET $cmd --dry-run   # 有 transcript 警告就停"
             echo "    [dry-run] ssh $TARGET $cmd"
         fi
     done
@@ -433,6 +452,8 @@ do_verify() {
     for m in "${MAPS[@]}"; do margs+=(--map "$m"); done
     if [ "$EXECUTE" != 1 ]; then echo "    [dry-run] 目標 helper verify＋daemon.log 新增 ERROR 行數＝0＋Mac $PORT 沒人聽"; return 0; fi
     local ok=0
+    rsh "python3 $(q "$(rstate)/host-state-transfer.py") verify --bundle $(q "$(rstate)/host-state") --target-data $(q "$DST_DATA")" \
+        | tee "$STATE/host-state-verify.json" || ok=1
     rhelper verify --snapshot "$rs/snapshot.json" --running "$rs/running.json" "${margs[@]}" | tee "$STATE/verify.json" || ok=1
     local errs; errs=$(rsh "N=\$(cat $(q "$DST_DATA/.cutover-log-mark") 2>/dev/null || echo 0); tail -n +\$((N + 1)) $(q "$DST_DATA/daemon.log") | $ERROR_COUNT" || true)
     [ "${errs:-0}" = 0 ] || { log "目標 daemon.log 起來後有 ${errs} 行 ERROR"; ok=1; }
@@ -449,14 +470,24 @@ do_timers() {
 # ---------------------------------------------------------------- rollback 各步
 
 do_restore() {
-    [ -s "$STATE/imports.txt" ] || { log "沒有 import 紀錄：目標沒被寫過，不用還原"; return 0; }
-    local first; first=$(head -1 "$STATE/imports.txt")
-    local db cfg
-    db=$("$PY" -c 'import json,sys; print(next(b for b in json.load(open(sys.argv[1]))["backups"] if ".sqlite3.pre-transfer-" in b))' "$STATE/import-$first.json") || die "import-$first.json 裡找不到 DB 備份"
-    cfg=$("$PY" -c 'import json,sys; print(next((b for b in json.load(open(sys.argv[1]))["backups"] if "config.toml.pre-transfer-" in b), ""))' "$STATE/import-$first.json")
-    # 第一次 import 之前的樣子＝切換前的目標。daemon 停著，-wal／-shm 一起清掉才不會被重放。
-    x rsh "set -e; cp $(q "$db") $(q "$DST_DATA/agents-manager.sqlite3"); rm -f $(q "$DST_DATA/agents-manager.sqlite3-wal") $(q "$DST_DATA/agents-manager.sqlite3-shm")"
-    [ -n "$cfg" ] && x rsh "cp $(q "$cfg") $(q "$DST_DATA/config.toml")"
+    local rs; rs=$(rstate)
+    if [ -s "$STATE/imports.txt" ]; then
+        local first; first=$(head -1 "$STATE/imports.txt")
+        local db cfg
+        db=$("$PY" -c 'import json,sys; print(next(b for b in json.load(open(sys.argv[1]))["backups"] if ".sqlite3.pre-transfer-" in b))' "$STATE/import-$first.json") || die "import-$first.json 裡找不到 DB 備份"
+        cfg=$("$PY" -c 'import json,sys; print(next((b for b in json.load(open(sys.argv[1]))["backups"] if "config.toml.pre-transfer-" in b), ""))' "$STATE/import-$first.json")
+        # 第一次 import 之前的樣子＝切換前的目標。daemon 停著，-wal／-shm 一起清掉才不會被重放。
+        x rsh "set -e; cp $(q "$db") $(q "$DST_DATA/agents-manager.sqlite3"); rm -f $(q "$DST_DATA/agents-manager.sqlite3-wal") $(q "$DST_DATA/agents-manager.sqlite3-shm")"
+        [ -n "$cfg" ] && x rsh "cp $(q "$cfg") $(q "$DST_DATA/config.toml")"
+    else
+        log "沒有 project import 紀錄；只檢查是否要還原 host-state"
+    fi
+    if [ -f "$STATE/host-state-shipped" ]; then
+        x rsh "if [ -f $(q "$rs/host-state-backup/backup.json") ]; then python3 $(q "$rs/host-state-transfer.py") restore --backup-dir $(q "$rs/host-state-backup") --target-data $(q "$DST_DATA"); else echo '沒有 host-state 備份'; fi" \
+            || die "host-state rollback 失敗"
+    else
+        log "沒有送出 host-state bundle，不用還原 host-state"
+    fi
     return 0
 }
 
