@@ -1078,8 +1078,7 @@ cancel 撤掉的是還沒送出的那則時，review 回應不再帶「turn 還�
 前端（`store/startingSend.ts`）只從 daemon 給的 turn 與訊息推出「有一則在等 bot 起來」：輸入框上方一條「啟動中，起來後自動送出」，
 失敗時「沒能啟動（原因），還沒送出」＋重新啟動（`POST /start`，起來後照樣由 flush 送）／取消；有這一條時不再另外顯示「啟動」列。
 `queued` 的 `turn_updated` 不算回合完成（不然未讀先多一，真正完成那次又被同一個 turn id 去重吃掉）。
-**回合中**的 bot 仍由瀏覽器暫存下一則（`queuedSends`），那條的語意沒有改（使用者對回合中的 bot `POST /prompt` 仍 409）。
-重連或 `resync` 除了重抓已載入對話，也要重抓本地仍有 `in_flight`／`queued` 回合的 bot 對話（即使使用者沒點開）；若重抓才發現回合已完成，還要檢查並 flush `queuedSends`，不能只等遺漏的 `turn_updated` 或後續 `bot_status` 幀。
+**回合中**的 bot 也由 daemon 收下下一則（`queue_if_busy:true`，見上方 #733）；重連、`resync` 與其他分頁都從同一份 `queued` turn 投影，不在瀏覽器另存待送訊息。仍在 `queued` 時可用 `POST /api/turns/{id}/withdraw` 撤回，回傳原文與附件 id 供輸入框還原；已被 flush 認領成 `in_flight` 就回 409，避免把已送出的字放回輸入框再送一次。
 **重啟不是停**（issue #106，`lifecycle::restart_hold`）：`restart_bot_with`（換身分、`?resume=native`、一鍵重啟）先停舊 run 再起新 run，
 中間那一段沒有 active run，但 bot 馬上就回來。重啟在 bot 鎖裡宣告「進行中」，這段期間任何撤孤兒的路徑——stop 自己、
 `restart_start` 收掉擋路 run 的 `mark_run_exited`、不拿 bot 鎖的 pane-exit 事件、定時掃描——都不撤；新 run 起來就叫醒 flush
@@ -3736,7 +3735,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   - `controller::dispatch`：交辦 **hold**（留 `queued`，不算重試）——它是有自己重試與驗收的持久工作項，窗口關掉照常送出去，不遺失也不重送（`dispatch_crid` 冪等）。
   - `lifecycle::prompt`（使用者、web、群組、工具、AGM 派工都走它）：**409 `maintenance_window`**，body 帶 `held_by`／`resource`／`expires_at`／`retry_after_secs`／`retryable:true`。
     擋在建 turn **之前**，所以連一列都不建、也不廣播 `message_added`——建完再撤的話使用者會看到一顆泡泡冒出來又消失。
-    使用者的 prompt **不排隊**：`turns_one_queued` 每個對話只留一筆 queued，而且窗口最長一小時（預設 15 分鐘），一則訊息默默躺著幾分鐘之後才出現在 pane，比當場說「正在維護、還要等 N 秒」更糟。這跟「回合中的使用者 prompt 回 409」是同一條既有裁示（§6）。
+    使用者的 prompt **不因維護窗口而排隊**：即使帶 `queue_if_busy:true`，窗口握著時仍回 409，不寫 turn；維護結束後由使用者重送。這跟 §6.4 的忙碌回合佇列是兩種情況：#733 只收下 bot 正在跑但 agent 忙碌的訊息，不會把維護中的訊息延後送出。
   - `lifecycle::queue::flush_queued_locked`：排隊的 prompt **留在佇列**，掛一個到窗口到期為止的 timer，不算重試（擋它的是我們自己開的窗口，不是 bot 的狀態）。
     沒有這一條的話，acquire 當下停在 `blocked`（不算臨界區）的 bot 一旦離開 blocked，排在後面的那筆就會在窗口中途打進 pane。
   **三態，讀不到也擋（issue #127）**：`window_held` 回 `Ok(Some)`＝確定有窗口、`Ok(None)`＝確定沒有、`Err(WindowUnreadable)`＝**讀不到**（SELECT 出錯、那一列解不開、沒放掉卻沒有讀得懂的到期時間）。

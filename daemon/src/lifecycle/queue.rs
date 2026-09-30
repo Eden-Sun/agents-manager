@@ -989,9 +989,6 @@ mod flush_queue_tests {
     async fn queued_kind(kind: &str, session: &str) -> Fixture {
         let env = tt::env().await;
         let app = env.app.clone();
-        // C is developed alongside A, which adds this production column and migration. Keep the
-        // queue fixture usable on either side of that merge without changing the schema history.
-        ensure_awaits_idle_fixture_column(&app.db).await;
         let bot_id = db::ulid();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
@@ -1029,21 +1026,6 @@ mod flush_queue_tests {
         .await
         .unwrap();
         Fixture { env, bot_id, conv, run_id, turn_id }
-    }
-
-    async fn ensure_awaits_idle_fixture_column(pool: &sqlx::SqlitePool) {
-        let present: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pragma_table_info('turns') WHERE name = 'awaits_idle'",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        if present == 0 {
-            sqlx::query("ALTER TABLE turns ADD COLUMN awaits_idle INTEGER NOT NULL DEFAULT 0")
-                .execute(pool)
-                .await
-                .unwrap();
-        }
     }
 
     fn at(iso: &str) -> chrono::DateTime<chrono::Utc> {

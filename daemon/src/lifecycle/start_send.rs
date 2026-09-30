@@ -389,26 +389,13 @@ pub async fn withdraw_turn(app: &Arc<App>, turn_id: &str) -> LcResult<WithdrawnP
         .ok_or_else(|| LcError::NotFound("turn".into()))?;
     let lock = app.bot_lock(&bot_id).await;
     let _g = lock.lock().await;
-    // B 可能先於 A 在未加欄位的 schema 上測試；正式 schema 由 A migrate 加上 awaits_idle。
-    let has_awaits_idle: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('turns') WHERE name = 'awaits_idle')",
+    let (status, awaits_start, awaits_idle, origin, crid): (String, i64, i64, String, Option<String>) = sqlx::query_as(
+        "SELECT status, awaits_start, awaits_idle, origin, client_request_id FROM turns WHERE id=?",
     )
+    .bind(turn_id)
     .fetch_one(&app.db)
     .await
     .map_err(up)?;
-    let (status, awaits_start, awaits_idle, origin, crid): (String, i64, i64, String, Option<String>) = if has_awaits_idle {
-        sqlx::query_as("SELECT status, awaits_start, awaits_idle, origin, client_request_id FROM turns WHERE id=?")
-            .bind(turn_id)
-            .fetch_one(&app.db)
-            .await
-            .map_err(up)?
-    } else {
-        sqlx::query_as("SELECT status, awaits_start, 0, origin, client_request_id FROM turns WHERE id=?")
-            .bind(turn_id)
-            .fetch_one(&app.db)
-            .await
-            .map_err(up)?
-    };
     // 還在排的 daemon 自動通知也可以撤（#562）：它擋在佇列頭時，使用者要能讓自己的訊息先走。
     let why = if awaits_start == 1 {
         "使用者取消了這一則：它是 bot 沒在跑時送的，還在等 bot 起來，沒有送出，不會再送。"

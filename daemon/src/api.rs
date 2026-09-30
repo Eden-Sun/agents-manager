@@ -4185,12 +4185,6 @@ mod withdraw_turn_tests {
         let bot = tt::claude_bot(&app, &env.project_id, "withdraw-awaits-idle").await;
         let conversation_id = db::conversation_id(&app.db, &bot.id).await.unwrap();
 
-        // A owns the production migration; keep this B-only test fixture local to its database.
-        sqlx::query("ALTER TABLE turns ADD COLUMN awaits_idle INTEGER NOT NULL DEFAULT 0")
-            .execute(&app.db)
-            .await
-            .unwrap();
-
         let turn_id = db::ulid();
         let message_id = db::ulid();
         let attachment_id = db::ulid();
@@ -5948,6 +5942,50 @@ mod prompt_route_tests {
         assert_eq!(body["delivery"], "queued", "{body}");
         assert!(e.herdr.calls_to("agent.prompt").is_empty());
         assert!(e.herdr.calls_to("pane.send_text").is_empty());
+    }
+
+    #[tokio::test]
+    async fn busy_prompt_admission_dispatch_and_withdrawal_share_the_durable_queue() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "claude").await;
+        let run_id: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'")
+            .bind(&bot).fetch_one(&e.app.db).await.unwrap();
+        let conversation_id = db::conversation_id(&e.app.db, &bot).await.unwrap();
+        let previous_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?, ?, ?, 'web', 'in_flight', 'ok', ?)")
+            .bind(&previous_id).bind(&conversation_id).bind(&run_id).bind(db::now()).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run_id).execute(&e.app.db).await.unwrap();
+
+        // B can restore a still-queued prompt submitted by A before C dispatches it.
+        let (status, withdrawn) = call_queue_if_busy(&e, &bot, "先放回輸入框", "queue-withdraw-first", &[]).await;
+        assert_eq!(status, StatusCode::OK, "{withdrawn}");
+        let withdrawn_id = withdrawn["turn_id"].as_str().unwrap().to_string();
+        let response = withdraw_turn(State(e.app.clone()), Path(withdrawn_id.clone())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), json!({"text": "先放回輸入框", "attachments": []}));
+        let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(&withdrawn_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(status, "failed");
+
+        // A second prompt remains queued while its predecessor is active, then C dispatches it at idle.
+        let (status, admitted) = call_queue_if_busy(&e, &bot, "等閒下來再送", "queue-dispatch-next", &[]).await;
+        assert_eq!(status, StatusCode::OK, "{admitted}");
+        let queued_id = admitted["turn_id"].as_str().unwrap();
+        crate::lifecycle::flush_queued_locked(&e.app, &bot).await.unwrap();
+        let still_queued: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(queued_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(still_queued, "queued", "busy run keeps the accepted prompt durable");
+        assert!(e.herdr.calls_to("pane.send_text").is_empty());
+
+        e.herdr.live_pane("pane-route", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?").bind(db::now()).bind(&previous_id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET agent_status='idle' WHERE id=?").bind(&run_id).execute(&e.app.db).await.unwrap();
+        crate::lifecycle::flush_queued_locked(&e.app, &bot).await.unwrap();
+        let sent: (String, String) = sqlx::query_as("SELECT status, delivery FROM turns WHERE id=?").bind(queued_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!((sent.0.as_str(), sent.1.as_str()), ("in_flight", "ok"));
+        assert_eq!(e.herdr.calls_to("pane.send_text").len(), 1, "C sends the admitted prompt once");
+
+        let response = withdraw_turn(State(e.app.clone()), Path(queued_id.to_string())).await.unwrap_err().into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "B cannot restore a turn C has already claimed");
     }
 
     #[tokio::test]
