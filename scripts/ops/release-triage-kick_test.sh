@@ -12,8 +12,8 @@ FAIL=0
 
 setup() {
   ROOT=$(mktemp -d)
-  export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo"
-  mkdir -p "$AGM_DIR/bin" "$ROOT/triage"
+  export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" CLAUDE_VERSIONS_DIR="$ROOT/claude-versions"
+  mkdir -p "$AGM_DIR/bin" "$ROOT/triage" "$CLAUDE_VERSIONS_DIR"
   cp "$HERE/fixtures/patrol-runtime.json" "$AGM_DIR/runtime.json"
   echo "TASK-BODY-MARKER 交辦正文" > "$AGM_DIR/release-triage-task.md"
 
@@ -70,7 +70,7 @@ PYEOF
 }
 teardown() {
   rm -rf "$ROOT"
-  unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_EXTRA_PATH AGM_FAIL_ALERT_AFTER
+  unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_EXTRA_PATH AGM_FAIL_ALERT_AFTER CLAUDE_VERSIONS_DIR
   unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_OLD_AGM
 }
 
@@ -434,27 +434,96 @@ equals "agm 不在：exit 0" "$RC" "0"
 check  "agm 不在：留一行 log" "agm CLI 不在" "$AGM_DIR/release-triage.log"
 teardown
 
-# issue #519：兩條管線的**公告** request-id 不能共用。claude 的 binary diff（claude-release-task.md）
-# 與 changelog 逐條分診（release-triage-task.md）會處理同一個版本、派給同一顆 bot，兩則公告的內文必然
-# 不同——共用一個 id 的話，後送的那一則會被 daemon 以 client_request_id already used with different text
-# 拒絕，使用者只看得到其中一則。這裡釘住「兩份 task.md 交代的 id 不一樣，而且各自帶得出自己的管線」。
+# issue #204：Claude binary diff 與 changelog 分診合併成同一則交辦。
+setup
+mk_empty claude; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.278"
+bash "$SCRIPT"
+equals "第一次只記下目前 Claude binary baseline" "$(cat "$AGM_DIR/claude-release.last")" "2.1.278"
+equals "第一次不因現有 binary 派工" "$(assigns)" "0"
+teardown
+
+setup
+mk_pending claude 2.1.279 2.1.279; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.278"
+sleep 1
+mkdir -p "$ROOT/claude-versions/2.1.279"
+echo 2.1.278 > "$AGM_DIR/claude-release.last"
+echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
+export CLAUDE_VERSIONS_DIR="$ROOT/claude-versions"
+bash "$SCRIPT"
+equals "binary diff 與 changelog 合併成一則派工" "$(assigns)" "1"
+check "合併交辦有 changelog 條目" "kept 2.1.279 0" "$AGM_DIR/assign-body.txt"
+check "合併交辦有 binary diff 任務" "CLAUDE_BINARY_DIFF_MARKER" "$AGM_DIR/assign-body.txt"
+check "合併交辦有 binary 舊版與新版路徑" "OLD=$ROOT/claude-versions/2.1.278" "$AGM_DIR/assign-body.txt"
+check "合併交辦有 binary 新版路徑" "NEW=$ROOT/claude-versions/2.1.279" "$AGM_DIR/assign-body.txt"
+check "合併交辦使用 changelog notice id" "通知 request-id（child 需原樣使用）：agm-release-triage-claude-2.1.279-notice" "$AGM_DIR/assign-body.txt"
+check_no "合併後不再指示第二則 binary 公告" "agm-claude-release-<新版號>-notice" "$AGM_DIR/assign-body.txt"
+teardown
+
+# Installed Claude binary can advance after its changelog row was already dispatched; still run one binary-only task.
+setup
+mk_empty claude; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.278"
+sleep 1
+mkdir -p "$ROOT/claude-versions/2.1.279"
+echo 2.1.278 > "$AGM_DIR/claude-release.last"
+echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
+export CLAUDE_VERSIONS_DIR="$ROOT/claude-versions"
+bash "$SCRIPT"
+equals "無 changelog pending 時仍派 binary-only" "$(assigns)" "1"
+check "binary-only request id 有版本" "release-triage-claude-binary-2.1.279" "$AGM_DIR/calls.log"
+check "binary-only body 說明沒有 changelog pending" "本輪沒有待分診的 changelog 版本" "$AGM_DIR/assign-body.txt"
+check "binary-only 用專屬 notice id 避免撞上先前 changelog 通知" "通知 request-id（child 需原樣使用）：agm-claude-release-2.1.279-notice" "$AGM_DIR/assign-body.txt"
+check_no "binary-only 不重用 changelog notice id" "通知 request-id（child 需原樣使用）：agm-release-triage-claude-2.1.279-notice" "$AGM_DIR/assign-body.txt"
+teardown
+
+# A successful assign followed by a failed ledger mark must retry the same combined body and only then advance binary state.
+setup
+mk_pending claude 2.1.279 2.1.279; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.278"
+sleep 1
+mkdir -p "$ROOT/claude-versions/2.1.279"
+echo 2.1.278 > "$AGM_DIR/claude-release.last"
+echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
+export STUB_DISPATCHED_FAIL=1
+bash "$SCRIPT"
+equals "標記 dispatched 失敗時不推進 binary state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.278"
+export STUB_DISPATCHED_FAIL=""
+bash "$SCRIPT"
+equals "重試仍用同一 request id" "$(grep -c 'release-triage-claude-2.1.279' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+equals "同一份合併正文兩次都帶 binary diff" "$(grep -c 'CLAUDE_BINARY_DIFF_MARKER' "$AGM_DIR/assign-body.txt" | tr -d ' ')" "2"
+equals "dispatched 成功後才推進 binary state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.279"
+teardown
+
+# A failed assignment leaves the binary state behind so the next scheduled run retries the same diff.
+setup
+mk_empty claude; mk_empty codex
+mkdir -p "$ROOT/claude-versions/2.1.278"
+bash "$SCRIPT"
+sleep 1
+mkdir -p "$ROOT/claude-versions/2.1.279"
+echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
+export STUB_ASSIGN_FAIL=1
+bash "$SCRIPT"
+equals "派工失敗時 binary state 不前進" "$(cat "$AGM_DIR/claude-release.last")" "2.1.278"
+export STUB_ASSIGN_FAIL=""
+bash "$SCRIPT"
+equals "下一輪 binary diff 重試成功後才前進" "$(cat "$AGM_DIR/claude-release.last")" "2.1.279"
+equals "binary diff assign 失敗後重試" "$(grep -c 'release-triage-claude-binary-2.1.279' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+teardown
+
+# issue #519：合併分診只用一個通知 id；binary-only 留著獨立命名空間，避免舊 changelog 通知衝突。
 TRIAGE_TASK="$HERE/release-triage-task.md"
-CLAUDE_TASK="$HERE/claude-release-task.md"
-notice_id() { # notice_id <task.md>：抓出 --request-id 後面那個 …-notice 的樣板
-  sed -n 's/.*--request-id \(agm-[^ ]*-notice\).*/\1/p' "$1" | head -1
-}
-TRIAGE_ID=$(notice_id "$TRIAGE_TASK")
-CLAUDE_ID=$(notice_id "$CLAUDE_TASK")
-equals "分診的公告 id 帶管線與 kind" "$TRIAGE_ID" "agm-release-triage-<kind>-<新版號>-notice"
-equals "binary diff 的公告 id 維持原樣" "$CLAUDE_ID" "agm-claude-release-<新版號>-notice"
-if [ -n "$TRIAGE_ID" ] && [ "$TRIAGE_ID" != "$CLAUDE_ID" ]; then
-  echo "ok   - 兩條管線的公告 id 不同"; PASS=$((PASS + 1))
-else
-  echo "FAIL - 兩條管線的公告 id 相同或抓不到（triage='$TRIAGE_ID' claude='$CLAUDE_ID'）"; FAIL=$((FAIL + 1))
-fi
+CLAUDE_TASK="$HERE/claude-release-diff-task.md"
+check "一般／合併分診公告 id 帶管線與 kind" "agm-release-triage-<kind>-<新版號>-notice" "$TRIAGE_TASK"
+check "binary-only 使用舊版獨立公告 id 命名空間" "agm-claude-release-<binary 版本>-notice" "$TRIAGE_TASK"
+check "binary diff supplement 不另送通知" "不要另送通知" "$CLAUDE_TASK"
+check "binary-only kick 輸出獨立公告 id" 'NOTICE_ID="agm-claude-release-${TO}-notice"' "$SCRIPT"
+check "正常 kick 輸出分診公告 id" 'NOTICE_ID="agm-release-triage-${KIND}-${TO}-notice"' "$SCRIPT"
 # 派工本身的 crid 是另一回事，不能被這次改動波及：`claude_review.rs` 用 agm-claude-release-<ver>
 # 讓網頁按鈕與 kick 冪等地指到同一筆（見該檔 :10／:142），所以那個**沒有** -notice 尾巴的 id 要留著。
-check "kick 的派工 request-id 仍是 release-triage-<kind>-<to>" 'release-triage-${KIND}-${TO}' "$SCRIPT"
+check "kick 的 changelog 派工 request-id 仍是 release-triage-<kind>-<to>" 'release-triage-${KIND}-${TO}' "$SCRIPT"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

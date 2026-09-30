@@ -1,203 +1,23 @@
 #!/bin/bash
-# claude-release-kick.sh 的隔離測試：自己的 AGM 目錄、假的版本目錄、假的 `bin/agm`，
-# 完全不碰正式 AGM 或 daemon。測的是決策：什麼時候派、派幾次、派給誰、state 什麼時候才寫。
-#
-#   bash scripts/ops/claude-release-kick_test.sh
+# Compatibility entry point must hand the existing schedule to the unified release-triage kick.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SCRIPT="$HERE/claude-release-kick.sh"
-PASS=0
-FAIL=0
-
-setup() {
-  ROOT=$(mktemp -d)
-  export AGM_DIR="$ROOT/agm" CLAUDE_VERSIONS_DIR="$ROOT/versions"
-  mkdir -p "$AGM_DIR/bin" "$CLAUDE_VERSIONS_DIR"
-  cp "$HERE/claude-release-task.md" "$AGM_DIR/claude-release-task.md"
-  # 正式安裝的形狀：`supervisor::setup::runtime_json()` 真正寫出來的那份（巡檢＋協調者），由 Rust 測試
-  # `the_ops_script_fixture_is_what_setup_actually_writes` 釘住——上一輪這裡手寫了一份正式環境根本不存在的形狀。
-  # 派工目標**不能**是巡檢自己（daemon 會 400）。
-  cp "$HERE/fixtures/patrol-runtime.json" "$AGM_DIR/runtime.json"
-  cat > "$AGM_DIR/bin/agm" <<'STUB'
+ROOT=$(mktemp -d)
+trap 'rm -rf "$ROOT"' EXIT
+mkdir -p "$ROOT/bin"
+cp "$HERE/claude-release-kick.sh" "$ROOT/bin/claude-release-kick.sh"
+cat > "$ROOT/bin/release-triage-kick.sh" <<'STUB'
 #!/bin/bash
-echo "$*" >> "$AGM_DIR/calls.log"
-# 真的 argparse 對認不得的旗標是 exit 2。stub 要照做，否則「--client-request-id」這種
-# 拼錯的旗標在測試裡永遠是綠的（2026-09-16 的事故就是這樣漏掉的）。
-for a in "$@"; do
-  case "$a" in
-    --compact|--bot|--review-by|--text-file|--request-id|--notice|--owns|--source|--reason|--detail|assign|ops-alert) ;;
-    --*) echo "agm: error: unrecognized arguments: $a" >&2; exit 2 ;;
-  esac
-done
-# 交辦內容也留一份，才驗得到有沒有把新舊版本帶進去。
-for i in $(seq 1 $#); do
-  eval "a=\${$i}"
-  case "$a" in --text-file) eval "f=\${$((i+1))}"; cat "$f" >> "$AGM_DIR/assign-body.txt" ;; esac
-done
-[ -n "${STUB_ASSIGN_FAIL:-}" ] && exit 1
-printf '%s' '{"id":"a-1"}'
+printf 'unified kick called: %s\n' "$*"
 STUB
-  chmod +x "$AGM_DIR/bin/agm"
-  : > "$AGM_DIR/calls.log"
-  : > "$AGM_DIR/assign-body.txt"
-  export STUB_ASSIGN_FAIL=""
-}
-teardown() { rm -rf "$ROOT"; unset AGM_DIR CLAUDE_VERSIONS_DIR AGM_RELEASE_BOT STUB_ASSIGN_FAIL AGM_FAIL_ALERT_AFTER; }
+chmod +x "$ROOT/bin/claude-release-kick.sh" "$ROOT/bin/release-triage-kick.sh"
 
-ver() { mkdir -p "$CLAUDE_VERSIONS_DIR/$1"; touch "$CLAUDE_VERSIONS_DIR/$1"; sleep 0.01; }
-check() {
-  if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3"; FAIL=$((FAIL + 1)); fi
-}
-check_no() {
-  if grep -q -- "$2" "$3" 2>/dev/null; then echo "FAIL - $1"; echo "      不該有 '$2'"; FAIL=$((FAIL + 1))
-  else echo "ok   - $1"; PASS=$((PASS + 1)); fi
-}
-equals() {
-  if [ "$2" = "$3" ]; then echo "ok   - $1"; PASS=$((PASS + 1))
-  else echo "FAIL - $1（是 '$2'，預期 '$3'）"; FAIL=$((FAIL + 1)); fi
-}
-
-# 1. 第一次執行：只記下目前版本，不為「本來就在的版本」派工。
-setup
-ver 2.1.272; ver 2.1.273
-bash "$SCRIPT"
-equals "第一次只記版本" "$(cat "$AGM_DIR/claude-release.last")" "2.1.273"
-check_no "第一次不派工" "assign" "$AGM_DIR/calls.log"
-teardown
-
-# 2. 換版：派給 runtime.json 的 AGM，交辦帶新舊版本與 binary 路徑，state 更新。
-setup
-ver 2.1.272; ver 2.1.273
-bash "$SCRIPT"                      # 記下 2.1.273
-ver 2.1.274
-bash "$SCRIPT"
-check "派給協調者而不是巡檢自己" "--bot bot-resp" "$AGM_DIR/calls.log"
-check_no "不派給巡檢（daemon 會 400）" "--bot bot-agm" "$AGM_DIR/calls.log"
-check "旗標是 --request-id" "--request-id agm-claude-release-2.1.274" "$AGM_DIR/calls.log"
-check "交辦給巡檢驗收" "--review-by patrol" "$AGM_DIR/calls.log"
-
-check "交辦寫出新舊版本" "本次：舊版 2.1.273 → 新版 2.1.274" "$AGM_DIR/assign-body.txt"
-check "交辦帶兩顆 binary 路徑" "NEW=$CLAUDE_VERSIONS_DIR/2.1.274" "$AGM_DIR/assign-body.txt"
-equals "state 更新" "$(cat "$AGM_DIR/claude-release.last")" "2.1.274"
-teardown
-
-# 3. 沒換版：安靜退出，不派也不寫 log。
-setup
-ver 2.1.273
-bash "$SCRIPT"; : > "$AGM_DIR/calls.log"
-bash "$SCRIPT"
-check_no "沒換版不派" "assign" "$AGM_DIR/calls.log"
-equals "沒換版不留 log" "$(wc -l < "$AGM_DIR/claude-release.log" | tr -d ' ')" "1"
-teardown
-
-# 4. 派工失敗：state 不動，下一輪還會再試。
-setup
-ver 2.1.273; bash "$SCRIPT"
-ver 2.1.274
-export STUB_ASSIGN_FAIL=1
-bash "$SCRIPT"
-equals "失敗不寫 state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.273"
-check "失敗有記 log" "派工失敗" "$AGM_DIR/claude-release.log"
-export STUB_ASSIGN_FAIL=""
-bash "$SCRIPT"
-equals "下一輪重派後才寫 state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.274"
-teardown
-
-# 4b. 連續派工失敗：連續 N 輪推 ops_alert；派成功清零。
-setup
-ver 2.1.273; bash "$SCRIPT"
-ver 2.1.274
-export STUB_ASSIGN_FAIL=1 AGM_FAIL_ALERT_AFTER=3
-bash "$SCRIPT"; bash "$SCRIPT"
-check_no "連續 2 輪還不喊人" "ops-alert" "$AGM_DIR/calls.log"
-bash "$SCRIPT"
-check "連續 3 輪推 dispatch_failing" "ops-alert.*dispatch_failing" "$AGM_DIR/calls.log"
-export STUB_ASSIGN_FAIL=""
-bash "$SCRIPT"
-[ ! -e "$AGM_DIR/claude-release.fails" ] && { echo "ok   - 派成功就清零"; PASS=$((PASS + 1)); } || { echo "FAIL - 派成功就清零"; FAIL=$((FAIL + 1)); }
-unset AGM_FAIL_ALERT_AFTER
-teardown
-
-# 5. 找不到要派給誰（沒有 runtime.json 也沒設 env）：跳過，不亂派給別的 bot。
-setup
-ver 2.1.273; bash "$SCRIPT"
-rm -f "$AGM_DIR/runtime.json"
-ver 2.1.274
-bash "$SCRIPT"
-check "找不到對象就跳過" "找不到要派給誰" "$AGM_DIR/claude-release.log"
-check_no "不亂派" "assign" "$AGM_DIR/calls.log"
-teardown
-
-# 5b. 單角色安裝（setup 寫 responder_bot_id: null）：跳過，不退回派給巡檢自己。
-setup
-ver 2.1.273; bash "$SCRIPT"
-python3 -c 'import json,sys;p=sys.argv[1];d=json.load(open(p));d["responder_bot_id"]=None;json.dump(d,open(p,"w"))' "$AGM_DIR/runtime.json"
-ver 2.1.274
-bash "$SCRIPT"
-check "沒有協調者就跳過" "找不到要派給誰" "$AGM_DIR/claude-release.log"
-check_no "不派給巡檢自己" "--bot bot-agm" "$AGM_DIR/calls.log"
-teardown
-
-# 6. 鎖：讀不到執行者、剛建立的鎖不動（可能是另一個正在起跑的執行者）。
-setup
-ver 2.1.273; bash "$SCRIPT"
-ver 2.1.274
-mkdir "$AGM_DIR/claude-release.lock"
-bash "$SCRIPT"
-check "剛建立的無主鎖先跳過" "鎖剛建立" "$AGM_DIR/claude-release.log"
-check_no "有鎖不派" "assign" "$AGM_DIR/calls.log"
-teardown
-
-# 6b. 殘留鎖（執行者已死）：回收接手、照派，不能永遠安靜地停住。
-setup
-ver 2.1.273; bash "$SCRIPT"
-ver 2.1.274
-DEAD=$(sh -c 'echo $$')
-mkdir "$AGM_DIR/claude-release.lock"; echo "$DEAD $(date +%s)" > "$AGM_DIR/claude-release.lock/owner"
-AGM_LOCK_STALE_SECS=0 bash "$SCRIPT"
-check "殘留鎖被回收" "清掉殘留鎖" "$AGM_DIR/claude-release.log"
-check "回收後照派" "assign" "$AGM_DIR/calls.log"
-equals "回收後 state 更新" "$(cat "$AGM_DIR/claude-release.last")" "2.1.274"
-[ ! -e "$AGM_DIR/claude-release.lock" ] && echo "ok   - 收尾移除鎖" && PASS=$((PASS + 1)) || { echo "FAIL - 收尾沒移除鎖"; FAIL=$((FAIL + 1)); }
-teardown
-
-# 6c. 執行者還活著但卡太久：不搶鎖，推 ops_alert 喊人。
-setup
-ver 2.1.273; bash "$SCRIPT"
-ver 2.1.274
-printf 'sleep 30\n' > "$ROOT/claude-release-kick-fake.sh"; bash "$ROOT/claude-release-kick-fake.sh" & LIVE=$!
-mkdir "$AGM_DIR/claude-release.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/claude-release.lock/owner"
-AGM_LOCK_HUNG_SECS=0 bash "$SCRIPT"
-kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
-check "卡住的執行者推 runner_hung" "ops-alert.*runner_hung" "$AGM_DIR/calls.log"
-check_no "不搶活著的鎖、不派" "assign" "$AGM_DIR/calls.log"
-teardown
-
-# 7. 狀態檔原子寫：中斷留下的暫存檔不影響下一輪；寫不進去時舊檔原封不動、不寫出空檔。
-setup
-ver 2.1.273; bash "$SCRIPT"
-ver 2.1.274
-printf '2.1' > "$AGM_DIR/claude-release.last.tmp.99999"      # 上一輪寫到一半被殺留下的暫存檔
-bash "$SCRIPT"
-equals "殘留暫存檔不影響派工與 state" "$(cat "$AGM_DIR/claude-release.last")" "2.1.274"
-teardown
-setup
-ver 2.1.273; bash "$SCRIPT"
-ver 2.1.274
-mkdir "$ROOT/failmv"; printf '#!/bin/sh\nexit 1\n' > "$ROOT/failmv/mv"; chmod +x "$ROOT/failmv/mv"   # rename 失敗（磁碟滿、權限）
-PATH="$ROOT/failmv:$PATH" bash "$SCRIPT"
-[ -z "$(ls "$AGM_DIR" | grep 'last.tmp')" ] && { echo "ok   - 失敗後不留暫存檔"; PASS=$((PASS + 1)); } || { echo "FAIL - 失敗後留下暫存檔"; FAIL=$((FAIL + 1)); }
-equals "寫不進去時舊 state 不動（不是空檔）" "$(cat "$AGM_DIR/claude-release.last")" "2.1.273"
-teardown
-
-# agm CLI 不在：整輪不跑，但要留一行 log，不能安靜 exit 0（#375）。
-setup
-chmod -x "$AGM_DIR/bin/agm"
-bash "$SCRIPT"; RC=$?
-equals "agm 不在：exit 0" "$RC" "0"
-check  "agm 不在：留一行 log" "agm CLI 不在" "$AGM_DIR/claude-release.log"
-teardown
-
-echo "$PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ]
+OUT=$(bash "$ROOT/bin/claude-release-kick.sh" scheduled)
+if [ "$OUT" = 'unified kick called: scheduled' ]; then
+  echo 'ok   - legacy Claude schedule delegates to the unified kick'
+  echo '1 passed, 0 failed'
+else
+  echo "FAIL - legacy schedule did not delegate: $OUT"
+  echo '0 passed, 1 failed'
+  exit 1
+fi

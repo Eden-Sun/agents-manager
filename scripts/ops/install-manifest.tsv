@@ -17,6 +17,7 @@ scripts/ops/release-triage-kick.sh  bin/release-triage-kick.sh
 scripts/ops/browser-gc-task.md      browser-gc-task.md          darwin
 scripts/ops/ci-watch-task.md        ci-watch-task.md
 scripts/ops/claude-release-task.md  claude-release-task.md
+scripts/ops/claude-release-diff-task.md  claude-release-diff-task.md
 scripts/ops/release-triage-task.md  release-triage-task.md
 
 # macOS browser-gc 會喚醒操作 ego-browser 的 child；Linux GUI／OB worker 暫不實作（#718）。
