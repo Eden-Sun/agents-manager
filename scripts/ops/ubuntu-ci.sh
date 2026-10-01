@@ -8,6 +8,8 @@
 #   4. 在常駐 clone 裡 checkout 該 sha、保留 target／node_modules 當暖快取，跑 scripts/check.sh（ob、ops、web、daemon）。
 #   5. 結果寫成 GitHub commit status（context `ubuntu-ci`）＋ ${CI_ROOT}/status.json＋每個 sha 一份 log。
 #
+# 剩餘空間低於 AGM_CI_MIN_FREE_GB（預設 20）時不跑，commit status 寫 error「磁碟不足，未執行」。
+#
 # 收尾的 agent 不等這一輪；要看結果就 `gh api repos/<repo>/commits/<sha>/status` 或讀 status.json。
 set -euo pipefail
 
@@ -19,6 +21,9 @@ TIMEOUT="${AGM_CI_TIMEOUT:-45m}"
 # timeout 只送 TERM；step 忽略 TERM 就永遠不結束、鎖永遠不放，之後每分鐘都「上一輪還在跑」。補 KILL。
 KILL_AFTER="${AGM_CI_KILL_AFTER:-60s}"
 KEEP_LOGS="${AGM_CI_KEEP_LOGS:-30}"
+# 剩餘空間（GB）低於這個就不跑：同機的 worktree 各有 1–6 GB 的 target/，滿了 ops／daemon 會因 ENOSPC 假紅（c3914e46），
+# 而紅燈會讓 last-sha 前進、同一個 sha 不再重試。
+MIN_FREE_GB="${AGM_CI_MIN_FREE_GB:-20}"
 
 mkdir -p "${CI_ROOT}/logs"
 exec 9>"${CI_ROOT}/lock"
@@ -50,6 +55,22 @@ json_str() {
     v="${v//\"/\\\"}"
     printf '%s' "${v}" | LC_ALL=C tr -d '\000-\037'
 }
+
+# 磁碟預檢（在任何 checkout／clean／建置之前）：不足就寫 error、不前進 last-sha，空間恢復後同一個 sha 會重跑。
+# 每分鐘都會再進來，所以同一個 sha 只送一次 status（disk-low-sha 記著）。
+free_kb="$(df -Pk "${CI_ROOT}" | awk 'NR==2 {print $4}')"
+free_gb=$(( ${free_kb:-0} / 1048576 ))
+if [ "${free_gb}" -lt "${MIN_FREE_GB}" ]; then
+    if [ "$(cat "${CI_ROOT}/disk-low-sha" 2>/dev/null || true)" != "${sha}" ]; then
+        status error "磁碟不足，未執行（剩 ${free_gb}G，門檻 ${MIN_FREE_GB}G）"
+        printf '{"sha":"%s","state":"error","reason":"disk_low","free_gb":%s,"min_free_gb":%s,"at":"%s"}\n' \
+            "${sha}" "${free_gb}" "${MIN_FREE_GB}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${CI_ROOT}/status.json"
+        echo "${sha}" > "${CI_ROOT}/disk-low-sha"
+    fi
+    echo "ubuntu-ci: 磁碟不足（剩 ${free_gb}G，門檻 ${MIN_FREE_GB}G），不跑 ${sha}" >&2
+    exit 0
+fi
+rm -f "${CI_ROOT}/disk-low-sha"
 
 log="${CI_ROOT}/logs/${sha}.log"
 started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

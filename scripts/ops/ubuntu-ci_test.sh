@@ -51,7 +51,7 @@ exit "$(cat "$FIX/gh.rc" 2>/dev/null || echo 0)"
 GH
   chmod +x "$ROOT/bin/gh"
   export PATH="$ROOT/bin:$PATH"
-  export AGM_CI_ROOT="$ROOT/ci" AGM_CI_REPO_URL="$ROOT/origin.git" AGM_CI_GH_REPO=o/r AGM_CI_TIMEOUT=30s AGM_CI_KILL_AFTER=1s
+  export AGM_CI_ROOT="$ROOT/ci" AGM_CI_REPO_URL="$ROOT/origin.git" AGM_CI_GH_REPO=o/r AGM_CI_TIMEOUT=30s AGM_CI_KILL_AFTER=1s AGM_CI_MIN_FREE_GB=0
   CI="$AGM_CI_ROOT"; : > "$FIX/gh.log"
 }
 teardown() { rm -rf "$ROOT"; }
@@ -102,6 +102,29 @@ run >/dev/null
 check "description 點名第一條紅的測試" "cli_update::tests::flaky_one" "$FIX/gh.log"
 check "description 說明還有幾條" "2 條測試紅" "$FIX/gh.log"
 check_no "綠的測試不進 description" "ok::fine" "$FIX/gh.log"
+teardown
+
+# 3d. 磁碟不足：不跑任何一段、寫 error（說明含「磁碟不足，未執行」與剩餘空間）、last-sha 不前進；
+#     同一個 sha 連續幾輪不重複送 status；空間恢復後同一個 sha 會跑。
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+export AGM_CI_MIN_FREE_GB=99999999
+equals "磁碟不足 exit 0" "$(run)" "0"
+check "送 error" "state=error" "$FIX/gh.log"
+check "說明磁碟不足，未執行" "磁碟不足，未執行" "$FIX/gh.log"
+check "說明剩餘空間與門檻" "剩 .*G，門檻 99999999G" "$FIX/gh.log"
+check_no "沒送 pending" "state=pending" "$FIX/gh.log"
+check "status.json 是 error／disk_low" '"reason":"disk_low"' "$CI/status.json"
+equals "last-sha 沒前進" "$(cat "$CI/last-sha" 2>/dev/null)" ""
+[ ! -e "$CI/logs/$SHA.log" ] && echo "ok   - 沒有開始跑（沒有 log）" && PASS=$((PASS + 1)) || { echo "FAIL - 不該產生 log"; FAIL=$((FAIL + 1)); }
+: > "$FIX/gh.log"
+equals "同 sha 下一輪 exit 0" "$(run)" "0"
+equals "同一個 sha 不重複送 status" "$(wc -l < "$FIX/gh.log" | tr -d ' ')" "0"
+export AGM_CI_MIN_FREE_GB=0
+equals "空間恢復後 exit 0" "$(run)" "0"
+check "同一個 sha 這時才跑、送 success" "state=success" "$FIX/gh.log"
+equals "last-sha 前進到這個 sha" "$(cat "$CI/last-sha")" "$SHA"
 teardown
 
 # 4. 鎖被占著：直接退出、不碰 git／gh。
