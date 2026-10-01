@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import { readableImagePath } from '../lib/markdownUrl'
 import { fetchRemoteImageBlob, isRemoteHttpImage, remoteImageInfo } from '../lib/remoteImage'
@@ -21,6 +21,14 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
   useEffect(() => () => {
     if (url) URL.revokeObjectURL(url)
   }, [url])
+  // 載入途中元件被卸掉：晚到的 blob 不能留下沒人回收的 object URL。
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
   if (url) {
     return (
       <a href={url} target="_blank" rel="noreferrer" className="md-image-link">
@@ -32,16 +40,21 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
   const load = () => {
     setState('loading')
     fetchRemoteImageBlob(src)
-      .then((blob) => setUrl(URL.createObjectURL(blob)))
+      .then((blob) => {
+        const made = URL.createObjectURL(blob)
+        if (alive.current) setUrl(made)
+        else URL.revokeObjectURL(made)
+      })
       .catch(() => setState('failed'))
   }
   return (
     <span className="md-image-remote" title={src}>
       <span aria-hidden="true">🖼</span> 外部圖片（<strong>{host}</strong>）{alt ? `：${alt}` : ''}
       {info?.suspicious ? <span className="md-image-warn">　網址帶了很長的參數或帳密，可能夾帶資料，確定要載入再點。</span> : null}
+      {info?.internal ? <span className="md-image-warn">　這是本機／內網位址：點下去會由這台機器對它發出請求。</span> : null}
       {state === 'failed' ? (
         <>
-          <span className="md-image-warn">　載入失敗（對方不允許跨站讀取、不是圖片或太大）。</span>
+          <span className="md-image-warn">　載入失敗（對方不允許跨站讀取、不是支援的點陣圖或太大）。</span>
           <a href={src} target="_blank" rel="noreferrer noopener">
             在新分頁開啟
           </a>
