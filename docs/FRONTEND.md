@@ -64,7 +64,7 @@ store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`f
   GIF、SVG、HEIC 與非圖片不動。50 MB 上限對壓完的檔案判。附件卡片的大小是實際上傳的，壓過的附「原 N MB」。
   實測手機照片 4032×3024／2.6 MB → 1568×1176／288 KB（桌機 Chrome 約 0.1 秒）。
 - **來源標籤**：`hook` 不標；`terminal_fallback` 標「可能不完整」；系統訊息另有來源標。
-- **WS**：指數退避重連（250ms 起跳、上限 3 秒 + jitter；`transport.ts`），重連帶 `?since=<lastDurableSeq>`——**最後一則耐久事件的 seq，不是最高的那個 seq**：store 裡 `lastSeq` 跟著每一幀走，`lastDurableSeq` 只跟著會進 daemon 重播環的幀走（`seqAfterFrame`，即時幀如 `bots_restart_progress` 不推進；送成 `lastSeq` 會指到環裡沒有的號碼，重連落回保守分支多一次 resync）。daemon 那邊 `state::is_ephemeral` 加了新的即時幀，這裡的名單要一起改；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`。
+- **WS**：指數退避重連（250ms 起跳、上限 3 秒 + jitter；`transport.ts`），存活偵測（#760）：daemon 每 20 秒送 `{type:"ping"}`，前景 60 秒沒收到任何幀（或切回前景時靜默 >35 秒）就主動關掉重連（`api/socketLiveness.ts`；不能只看 `readyState`）；重連帶 `?since=<lastDurableSeq>`——**最後一則耐久事件的 seq，不是最高的那個 seq**：store 裡 `lastSeq` 跟著每一幀走，`lastDurableSeq` 只跟著會進 daemon 重播環的幀走（`seqAfterFrame`，即時幀如 `bots_restart_progress` 不推進；送成 `lastSeq` 會指到環裡沒有的號碼，重連落回保守分支多一次 resync）。daemon 那邊 `state::is_ephemeral` 加了新的即時幀，這裡的名單要一起改；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`。
 - **blocked**：`BlockedModal`（全畫面，blocked 1 秒後自動彈出，只彈正在看的 bot，關過就不再彈直到下一次 blocked）與
   `BlockedPanel`（對話上方，全畫面開著時暫停輪詢）共用 `useTerminalSnapshot` 與 `usePaneKeys`。
   全畫面的鍵盤直通把 `KeyboardEvent` 翻成 herdr 鍵名（⌘ 系列留給瀏覽器，Home/End/PgUp/PgDn herdr 不收）；直通時 Esc 也送給 agent。

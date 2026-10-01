@@ -1,5 +1,7 @@
 import { ApiError } from './types'
 import type { ApiErrorBody } from './types'
+import { CHECK_MS, RESUME_STALE_MS, SILENCE_MS, isForeground, realLivenessDeps } from './socketLiveness'
+import type { LivenessDeps } from './socketLiveness'
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
@@ -197,8 +199,10 @@ export class HttpTransport implements Transport {
     return URL.createObjectURL(await res.blob())
   }
 
-  openSocket(handlers: SocketHandlers): () => void {
+  openSocket(handlers: SocketHandlers, liveness: LivenessDeps = realLivenessDeps): () => void {
     let closed = false
+    /** 最後一次收到任何幀（含心跳 ping）或連上的時刻；見 `socketLiveness.ts`（issue #760）。 */
+    let lastActive = liveness.now()
     let attempt = 0
     let sock: WebSocket | null = null
     let timer: ReturnType<typeof setTimeout> | null = null
@@ -226,11 +230,13 @@ export class HttpTransport implements Transport {
       sock = ws
       ws.onopen = () => {
         if (sock !== ws) return
+        lastActive = liveness.now()
         attempt = 0
         handlers.onStatus('open')
       }
       ws.onmessage = (ev: MessageEvent<string>) => {
         if (sock !== ws) return
+        lastActive = liveness.now()
         let frame: { seq?: number; type: string; data?: unknown } | null = null
         try {
           frame = JSON.parse(ev.data) as { seq?: number; type: string; data?: unknown }
@@ -238,6 +244,8 @@ export class HttpTransport implements Transport {
           /* malformed */
         }
         if (!frame || typeof frame.type !== 'string') return
+        // daemon 的心跳只是存活證據，不是事件。
+        if (frame.type === 'ping') return
         // handler 例外不能吞：`lastSeq` 已推進，重連不會補這則，至少留 console 痕跡。
         try {
           handlers.onFrame(frame)
@@ -268,18 +276,33 @@ export class HttpTransport implements Transport {
       attempt = 0
       connect()
     }
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') retryNow()
+    // 切回前景：`readyState` 是 OPEN 也不一定活著（半開），靜默超過心跳間隔就當死線，丟掉重連（`since` 補洞、open handler 重抓 state）。
+    const resume = () => {
+      if (closed || !isForeground()) return
+      if (sock && sock.readyState === WebSocket.OPEN && liveness.now() - lastActive > RESUME_STALE_MS) {
+        connect()
+        return
+      }
+      retryNow()
     }
-    window.addEventListener('online', retryNow)
-    window.addEventListener('focus', retryNow)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') resume()
+    }
+    // 前景裡靜默太久：同上。背景分頁不查——timer 被節流、frame 也可能被凍住，靜默不代表斷線，回前景那一刻再判斷。
+    const stopWatchdog = liveness.every(() => {
+      if (closed || !isForeground()) return
+      if (sock && sock.readyState === WebSocket.OPEN && liveness.now() - lastActive > SILENCE_MS) connect()
+    }, CHECK_MS)
+    window.addEventListener('online', resume)
+    window.addEventListener('focus', resume)
     document.addEventListener('visibilitychange', onVisible)
 
     connect()
     return () => {
       closed = true
-      window.removeEventListener('online', retryNow)
-      window.removeEventListener('focus', retryNow)
+      stopWatchdog()
+      window.removeEventListener('online', resume)
+      window.removeEventListener('focus', resume)
       document.removeEventListener('visibilitychange', onVisible)
       if (timer) clearTimeout(timer)
       sock?.close()
