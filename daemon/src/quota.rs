@@ -552,7 +552,7 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
     Ok(count)
 }
 
-async fn persist_cache(app: &Arc<App>, key: &str, q: &Quota) {
+pub(crate) async fn persist_cache(app: &Arc<App>, key: &str, q: &Quota) {
     let raw = match serde_json::to_string(q) {
         Ok(raw) => raw,
         Err(e) => {
@@ -560,11 +560,15 @@ async fn persist_cache(app: &Arc<App>, key: &str, q: &Quota) {
             return;
         }
     };
-    if let Err(e) = sqlx::query(
+    // 兩邊都包 `ts_sql` 照時刻比：舊列可能是秒格式（`…:00Z`），同一秒內較新的毫秒讀數（`…:00.500Z`）不能被字串比較判成較舊（#101）。
+    let sql = format!(
         "INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET quota_json=excluded.quota_json, updated_at=excluded.updated_at
-         WHERE excluded.updated_at >= quota_cache.updated_at",
-    )
+         WHERE {} >= {}",
+        crate::db::ts_sql("excluded.updated_at"),
+        crate::db::ts_sql("quota_cache.updated_at"),
+    );
+    if let Err(e) = sqlx::query(&sql)
     .bind(key)
     .bind(raw)
     .bind(&q.updated_at)

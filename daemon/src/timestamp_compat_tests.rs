@@ -613,3 +613,36 @@ fn the_lease_deadline_is_the_earlier_instant_whatever_the_spelling() {
     assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", Some("2026-09-18T18:00:01+08:00")), "2026-09-18T10:00:00.500Z");
     assert_eq!(lease_deadline("2026-09-18T10:00:00.500Z", None), "2026-09-18T10:00:00.500Z");
 }
+
+/// `quota_cache` 的 upsert 守衛（`excluded.updated_at >= quota_cache.updated_at`）：舊列是秒格式（`…:00Z`）時，
+/// 同一秒內較新的毫秒讀數（`…:00.500Z`）以前會被字串比較判成「比較舊」而寫不進去。
+#[tokio::test]
+async fn a_quota_cache_row_written_in_seconds_does_not_block_a_newer_millisecond_reading() {
+    let e = tt::env().await;
+    let p = &e.app.db;
+    let reading = |at: &str| crate::quota::Quota {
+        five_hour: None,
+        seven_day: None,
+        fable: None,
+        reset_credits: None,
+        limit_hit: None,
+        plan: Some(at.to_string()),
+        updated_at: at.to_string(),
+        source: "test".into(),
+        account: None,
+        host: "local".into(),
+    };
+    let stored = || async {
+        sqlx::query_as::<_, (String, String)>("SELECT quota_json, updated_at FROM quota_cache WHERE key = 'local|claude'").fetch_one(p).await.unwrap()
+    };
+    sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES ('local|claude', '{}', '2026-10-01T10:00:00Z')").execute(p).await.unwrap();
+    // 同一秒內、毫秒、較新（10:00:00.500 > 10:00:00.000）→ 要寫進去。字串比較在這裡判錯（`.` < `Z`）。
+    crate::quota::persist_cache(&e.app, "local|claude", &reading("2026-10-01T10:00:00.500Z")).await;
+    assert_eq!(stored().await.1, "2026-10-01T10:00:00.500Z", "舊的秒格式列擋住了較新的讀數");
+    // 較舊的（毫秒、更早）照舊不准蓋掉較新的。
+    crate::quota::persist_cache(&e.app, "local|claude", &reading("2026-10-01T10:00:00.200Z")).await;
+    assert_eq!(stored().await.1, "2026-10-01T10:00:00.500Z", "較舊的讀數不能蓋掉較新的");
+    // 帶位移的寫法也照時刻：18:00:01+08:00 就是 10:00:01Z，比 10:00:00.500Z 新。
+    crate::quota::persist_cache(&e.app, "local|claude", &reading("2026-10-01T18:00:01+08:00")).await;
+    assert_eq!(stored().await.1, "2026-10-01T18:00:01+08:00");
+}
