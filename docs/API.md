@@ -1082,7 +1082,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | `shared_session` | | 新主機 `false`；更新時不帶＝沿用舊值。`true`＝這個 session 也是另一顆 daemon 的（SPEC §11.10），這顆只碰自己的 pane、絕不 `herdr server stop`。改它不觸發重連 |
 
 回 `200 {"name","connected","error"}`；連不上仍 200（設定已寫入）。名稱不合法或為 `local` 400。同名視為更新（先斷舊連線）。
-同一組規則（保留字 `local`、slug 格式、`ssh` 不得為空、不得同名重複）從 issue #506 起也由 `projection::validate` 把關，
+同一組規則（保留字 `local`、slug 格式、`ssh` 不得為空且不得以 `-` 開頭或含空白／控制字元、`herdr_session` 限 1–64 個 `[A-Za-z0-9._-]`、不得同名重複）從 issue #506 起也由 `projection::validate` 把關，
 所以手改 `config.toml` 寫進去的 `[[hosts]]` 一樣擋得住：之後任何一次寫設定都回 **400 `config_invalid`**（`config.toml` 未變更），
 開機那一次投影則直接拒絕啟動並說明——以前這條路全部放行，而一列 `name = "local"` 會把本機那顆連線換成 ssh 遠端。
 
