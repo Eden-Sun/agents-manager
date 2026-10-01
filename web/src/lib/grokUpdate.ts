@@ -25,3 +25,8 @@ export function grokChipLabel(plan: GrokUpdatePlan): string {
   const hosts = plan.hosts.map((h) => `${h.host}：${h.from ?? '讀不到版本'}`).join('；')
   return `grok 有新版 ${plan.target}（${hosts}）· 在那台主機執行 \`${plan.command}\`，已在跑的 bot 重啟後才會換版`
 }
+
+/** 手機合成選單裡 grok 那一項的文案（只提示，點開看指令）。 */
+export function grokMenuItem(plan: GrokUpdatePlan): string {
+  return `grok ${plan.target}：${plan.hosts.map((h) => h.host).join('、')} 還沒升（只提示，指令 ${plan.command}）`
+}

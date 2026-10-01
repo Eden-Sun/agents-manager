@@ -33,3 +33,9 @@ test('批次在跑、codex 在裝、全在忙時的文案', () => {
   assert.equal(mergedUpdateLabels({ ...base, readyCount: 0, busyCount: 2 }).restartItem, '2 顆有更新但在忙，閒下來再按')
   assert.match(mergedUpdateLabels({ ...base, herdrItem: '更新 herdr 0.9.3（所有 Bot 中斷約 1 分鐘）' }).label, /；更新 herdr 0\.9\.3/)
 })
+
+test('合成選單有 grok 那一項時，aria-label 也寫出來（手機漏項）', () => {
+  const l = mergedUpdateLabels({ ...base, grokItem: 'grok 1.0.47：local 還是 1.0.46（只提示）' })
+  assert.match(l.label, /grok 1\.0\.47/)
+  assert.doesNotMatch(mergedUpdateLabels(base).label, /grok/)
+})
