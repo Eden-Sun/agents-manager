@@ -42,7 +42,7 @@ import { applyHerdrSnapshot, onHerdrFrame } from './herdrUpdate'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
-import { byId, byTime, capList, insertSorted, keptAfterPage, pruneTurns, upsertSorted } from './lists'
+import { byId, byTime, capList, insertSorted, keptAfterPage, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -1099,7 +1099,7 @@ export const useStore = create<StoreState>((set, get) => {
         return {
           groupMessages: {
             ...s.groupMessages,
-            [projectId]: kept.length > 0 ? sortById([...page.messages, ...kept]) : page.messages,
+            [projectId]: reuseUnchanged(s.groupMessages[projectId] ?? [], kept.length > 0 ? sortById([...page.messages, ...kept]) : page.messages),
           },
           loadedProjects: { ...s.loadedProjects, [projectId]: true },
           moreMessages: { ...s.moreMessages, [projectId]: page.has_more },
@@ -1291,7 +1291,8 @@ export const useStore = create<StoreState>((set, get) => {
           turns[t.id] = t
         }
         return {
-          messages: { ...s.messages, [botId]: kept.length > 0 ? sortByTime([...page.messages, ...kept]) : page.messages },
+          // 內容沒變的沿用舊物件：整頁重載不該讓整段歷史的 memo 全部失效（見 `reuseUnchanged`）。
+          messages: { ...s.messages, [botId]: reuseUnchanged(s.messages[botId] ?? [], kept.length > 0 ? sortByTime([...page.messages, ...kept]) : page.messages) },
           turns: { ...s.turns, [botId]: turns },
           loadedBots: { ...s.loadedBots, [botId]: true },
           moreMessages: { ...s.moreMessages, [botId]: page.has_more },

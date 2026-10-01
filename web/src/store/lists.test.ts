@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns, upsertSorted, keptAfterPage } from './lists.ts'
+import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns, reuseUnchanged, upsertSorted, keptAfterPage } from './lists.ts'
 
 const m = (id: string, created_at = id) => ({ id, created_at })
 
@@ -117,4 +117,34 @@ test('keptAfterPage：同一毫秒、id 比頁內最新那則大的訊息要留�
   )
   // 空頁退回 startedAt。
   assert.deepEqual(keptAfterPage(existing, [], T).map((m) => m.id), ['01D'])
+})
+
+test('reuseUnchanged: 內容一樣的沿用舊物件；全部一樣（同順序）連陣列也回舊的', () => {
+  const prev = [{ id: 'a', n: 1, tags: ['x'] }, { id: 'b', n: 2, tags: [] }]
+  const same = reuseUnchanged(prev, [{ id: 'a', n: 1, tags: ['x'] }, { id: 'b', n: 2, tags: [] }])
+  assert.equal(same, prev)
+  const edited = reuseUnchanged(prev, [{ id: 'a', n: 1, tags: ['x'] }, { id: 'b', n: 3, tags: [] }])
+  assert.notEqual(edited, prev)
+  assert.equal(edited[0], prev[0], '沒變的那則照舊')
+  assert.notEqual(edited[1], prev[1])
+  assert.equal(edited[1].n, 3)
+})
+
+test('reuseUnchanged: 巢狀欄位變了才換；新增、刪除、換順序都換陣列但沿用沒變的項目', () => {
+  const prev = [{ id: 'a', att: [{ id: 'f1', size: 1 }] }, { id: 'b', att: [] }, { id: 'c', att: [] }]
+  const nested = reuseUnchanged(prev, [{ id: 'a', att: [{ id: 'f1', size: 2 }] }, { id: 'b', att: [] }, { id: 'c', att: [] }])
+  assert.notEqual(nested[0], prev[0])
+  assert.equal(nested[1], prev[1])
+  const removed = reuseUnchanged(prev, [{ id: 'a', att: [{ id: 'f1', size: 1 }] }, { id: 'c', att: [] }])
+  assert.notEqual(removed, prev)
+  assert.deepEqual(removed.map((x) => x.id), ['a', 'c'])
+  assert.equal(removed[0], prev[0])
+  assert.equal(removed[1], prev[2])
+  const added = reuseUnchanged(prev, [...prev.map((x) => ({ ...x })), { id: 'd', att: [] }])
+  assert.equal(added.length, 4)
+  assert.equal(added[0], prev[0])
+  const reordered = reuseUnchanged(prev, [{ id: 'b', att: [] }, { id: 'a', att: [{ id: 'f1', size: 1 }] }, { id: 'c', att: [] }])
+  assert.notEqual(reordered, prev, '順序變了不能回舊陣列')
+  assert.equal(reordered[0], prev[1])
+  assert.deepEqual(reuseUnchanged([], [{ id: 'x' }]), [{ id: 'x' }])
 })
