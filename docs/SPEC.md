@@ -749,11 +749,12 @@ Codex 0.157.0 以舊模型啟動時可能顯示模型遷移選單（例如 `Meet
 
 **在 TUI 裡被換掉（claude，2026-09-29 使用者）**：母 bot 或使用者直接對 pane 打 `/model`、`/effort`（不經 AG Man）時，
 claude 在對話裡印 `⎿  Set model to Sonnet 5.5 and saved …`／`⎿  Set effort level to high …`。畫面巡邏（`update_watch`，
-30 秒一輪、`visible` 80 行）順便取最後一次的這兩行（`claude_live.rs`；只認 `⎿` 開頭，顯示名 `Sonnet 5.5` → `claude-sonnet-5-5`，
+30 秒一輪、`visible` 80 行）順便取最後一次的這兩行（`claude_live.rs`；只認頂格 `❯ /model …`／`❯ /effort …` 緊接著的那一行 `⎿`，
+工具結果（`⏺ Bash(…)` 底下的 stdout）也用 `⎿`，不能單靠它（#741）；顯示名 `Sonnet 5.5` → `claude-sonnet-5-5`，
 認不出的名字不猜），寫進 `runs.runtime_model`／`runtime_effort`。收編的子 agent（`managed_by=child`，設定本來就是從 argv 抄的）
 一併改 `bots.model`／`effort`，側欄跟著變；一般 bot 只改 runtime（設定不動，重啟回到設定值，畫成 drift）。一般 bot 可能是
 `--resume` 接回的、畫面上的那行是上一個 session 的：同一個 run 第一次看到的只當基準，之後變了才採用。已知限制：切換那行在
-下一輪巡邏前就被捲出 80 行就漏掉（忙的 pane）。
+下一輪巡邏前就被捲出 80 行就漏掉（忙的 pane）；指令行先被捲出而確認行還在，也當沒有。
 
 | kind | 執行中改 | 怎麼套用 |
 |---|---|---|
