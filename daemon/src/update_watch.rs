@@ -74,6 +74,14 @@ fn version_notice(disk: &str, running: &str) -> Option<String> {
     (d > r).then(|| format!("磁碟上已是 {disk}（這個 run 跑的是 {running}）· 重啟套用"))
 }
 
+/// 行程級（static）的 per-run／per-bot 記憶體帳：run 或 bot 結束後沒人會再回頭清它們，長跑的 daemon 裡只增不減。
+/// 這一輪的 active run 名單已經在手，順手把不在名單上的帶走。測試版不呼叫：帳是全域的，平行的測試會互相清掉對方剛記的東西
+/// （每個模組的 `retain_*` 本身各有單元測試）。
+#[cfg(not(test))]
+fn prune_process_state(active_runs: &[String]) {
+    crate::lifecycle::retain_pane_typed(active_runs);
+}
+
 async fn sweep(app: &Arc<App>) {
     sweep_runs(app, db::all_active_runs(&app.db).await).await;
 }
@@ -93,7 +101,10 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
     crate::claude_live::retain_runs(&active);
     // 帳是全域的：測試各自種 run、平行跑 sweep，會互相清掉對方剛記的版本，所以測試版不呼叫（`retain_runs` 本身有單元測試）。
     #[cfg(not(test))]
-    crate::codex_update::retain_runs(&active);
+    {
+        crate::codex_update::retain_runs(&active);
+        prune_process_state(&active);
+    }
     for run in runs.into_iter().filter(|r| r.state == "running") {
         let kind = match db::bot(&app.db, &run.bot_id).await {
             Ok(Some(b)) if b.kind == "claude" || b.kind == "codex" => b.kind,
