@@ -431,7 +431,11 @@ async fn clear_refill(pane: &dyn Pane, refill: Option<String>, target: &str) -> 
             cleared
         }
         Some(other) => {
-            tracing::warn!(composer = %preview(&other, 60), "rewind: the composer holds something other than the rewound prompt; leaving it");
+            tracing::warn!(
+                composer_present = true,
+                composer_chars = other.chars().count(),
+                "rewind: the composer holds something other than the rewound prompt; leaving it"
+            );
             false
         }
     })
@@ -661,7 +665,13 @@ async fn rewind_failed(bot: &str, pane: &dyn Pane, f: Fail) -> LcError {
     } else {
         None
     };
-    tracing::warn!(bot, reason = f.reason(), composer = ?draft.as_deref().map(|d| preview(d, 60)), "rewind did not happen");
+    tracing::warn!(
+        bot,
+        reason = f.reason(),
+        composer_present = draft.is_some(),
+        composer_chars = draft.as_deref().map_or(0, |d| d.chars().count()),
+        "rewind did not happen"
+    );
     match f {
         Fail::Pane(_) => up(f.message()),
         _ => LcError::conflict(f.reason(), json!({"message": f.message(), "draft": draft})),
