@@ -1769,6 +1769,14 @@ fn gate_admit(g: &mut DrainGate, now: std::time::Instant) -> bool {
     true
 }
 
+/// 閘門只在 [`DRAIN_WINDOW`] 內有意義；key 是 bot id，每顆遠端 bot（含 child）一格，只記不清的話只增不減。
+/// 過了這麼久沒再用、也沒有欠著的補跑，就把格子帶走（下次來是全新的格子，照樣放行）。
+const DRAIN_GATE_KEEP: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn prune_gates(g: &mut std::collections::HashMap<String, DrainGate>, now: std::time::Instant) {
+    g.retain(|_, e| e.again || e.last.is_some_and(|t| now.duration_since(t) < DRAIN_GATE_KEEP));
+}
+
 fn gate_take_again(g: &mut DrainGate) -> bool {
     std::mem::take(&mut g.again)
 }
@@ -1777,8 +1785,10 @@ fn gate_take_again(g: &mut DrainGate) -> bool {
 pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
     {
         let mut g = drain_gates().lock().unwrap();
+        let now = std::time::Instant::now();
+        prune_gates(&mut g, now);
         let e = g.entry(bot_id.to_string()).or_default();
-        if !gate_admit(e, std::time::Instant::now()) {
+        if !gate_admit(e, now) {
             tracing::debug!(bot_id, host, "drain merged into the one in the window");
             return Ok(0);
         }
@@ -2281,6 +2291,18 @@ mod external_claim_tests {
         fill_or_drop_late_hook(&app, &turn().await, "又一份", &Some("s1".into()), &Some("n1".into()), true).await.unwrap();
         let content: String = sqlx::query_scalar("SELECT content FROM messages WHERE id=?").bind(&fb.id).fetch_one(&app.db).await.unwrap();
         assert_eq!(content, "第一段\n\n最後一段");
+    }
+
+    #[test]
+    fn idle_drain_gates_are_dropped() {
+        let t0 = std::time::Instant::now();
+        let mut g = std::collections::HashMap::new();
+        g.insert("old".to_string(), DrainGate { last: Some(t0), again: false });
+        g.insert("recent".to_string(), DrainGate { last: Some(t0 + DRAIN_GATE_KEEP), again: false });
+        g.insert("owes".to_string(), DrainGate { last: Some(t0), again: true });
+        prune_gates(&mut g, t0 + DRAIN_GATE_KEEP + std::time::Duration::from_secs(1));
+        assert!(!g.contains_key("old"), "久沒用又沒欠補跑：帶走");
+        assert!(g.contains_key("recent") && g.contains_key("owes"));
     }
 
     async fn late_hook_fixture(env: &tt::Env, name: &str, status: &str) -> (String, String) {
