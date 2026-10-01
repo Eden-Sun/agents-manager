@@ -1307,11 +1307,23 @@ mod stop_commit_tests {
 
         let a_socket = crate::hosts::short_dir(None).join(format!("{host}.sock"));
         std::fs::create_dir_all(a_socket.parent().unwrap()).unwrap();
-        let _a_herdr = tt::MockHerdr::start(a_socket);
+        let _a_herdr = tt::MockHerdr::start(a_socket.clone());
         let b_instance = format!("restart-preview-{}", db::ulid());
         app.set_instance(Some(b_instance.clone()));
         let b_socket = crate::hosts::short_dir(Some(&b_instance)).join(format!("{host}.sock"));
         std::fs::create_dir_all(b_socket.parent().unwrap()).unwrap();
+        // /tmp 底下的 socket 與 B 的整個 instance 目錄不在 Env 的暫存資料目錄裡，測試結束（含 panic）要自己清，
+        // 不然每跑一次就在 /tmp 多留一個 agents-manager-<uid>-restart-preview-<ulid>。A 的 socket 在共用的 production
+        // 目錄，只刪自己那一個檔名，不碰整個目錄。
+        struct TmpSockets(Vec<std::path::PathBuf>);
+        impl Drop for TmpSockets {
+            fn drop(&mut self) {
+                for p in &self.0 {
+                    let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+                }
+            }
+        }
+        let _tmp_sockets = TmpSockets(vec![a_socket.clone(), b_socket.parent().unwrap().to_path_buf()]);
         let b_herdr = tt::MockHerdr::start(b_socket);
 
         sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(&app.db).await.unwrap();
