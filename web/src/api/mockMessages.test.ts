@@ -65,3 +65,33 @@ test('非法 role 回 400，不是靜默忽略', async () => {
     (e: unknown) => e instanceof ApiError && e.status === 400,
   )
 })
+
+test('`before` 指到不存在或別顆 bot 的訊息：404＋reason，跟 daemon 一樣（#766）', async () => {
+  const st = (await mock.request('GET', '/state')) as { projects: { id: string; bots: { id: string }[] }[] }
+  const ids = st.projects.flatMap((p) => p.bots.map((b) => b.id))
+  let owner = ''
+  let foreign = ''
+  for (const id of ids) {
+    foreign = (await page(id, '?limit=1')).messages[0]?.id ?? ''
+    if (foreign) {
+      owner = id
+      break
+    }
+  }
+  assert.ok(foreign, '前提：mock 裡有一顆 bot 有訊息')
+  const a = ids.find((x) => x !== owner)!
+  const lost = async (path: string) => {
+    try {
+      await mock.request('GET', path)
+    } catch (e) {
+      assert.ok(e instanceof ApiError)
+      return { status: e.status, reason: e.body.reason }
+    }
+    assert.fail(`${path} 應該 404`)
+  }
+  assert.deepEqual(await lost(`/bots/${a}/messages?before=m-never-existed`), { status: 404, reason: 'before_message_gone' })
+  assert.deepEqual(await lost(`/bots/${a}/messages?before=${foreign}`), { status: 404, reason: 'before_message_not_in_conversation' })
+  // 群組時間軸同一條規則。
+  const projectId = st.projects[0].id
+  assert.deepEqual(await lost(`/projects/${projectId}/messages?before=m-never-existed`), { status: 404, reason: 'before_message_gone' })
+})

@@ -43,6 +43,7 @@ import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
 import { byId, byTime, capList, insertSorted, keptAfterPage, pruneTurns, upsertSorted } from './lists'
+import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -1116,6 +1117,7 @@ export const useStore = create<StoreState>((set, get) => {
     const oldest = s0.groupMessages[projectId]?.[0]
     if (!oldest || s0.loadingMore[projectId]) return
     const generation = messagePageGeneration('group', projectId)
+    let lost: unknown
     set((s) => ({ loadingMore: { ...s.loadingMore, [projectId]: true } }))
     try {
       const page = await api.fetchProjectMessages(projectId, PAGE_SIZE, oldest.id)
@@ -1132,10 +1134,13 @@ export const useStore = create<StoreState>((set, get) => {
         }
       })
     } catch (e) {
-      get().notify('error', `載入更早的群組訊息失敗：${errText(e)}`)
+      lost = e
     } finally {
       set((s) => ({ loadingMore: withoutKey(s.loadingMore, projectId) }))
     }
+    if (lost === undefined) return
+    const recovered = await recoverLostCursor(`group:${projectId}`, lost, () => get().loadGroupMessages(projectId), () => get().loadEarlierGroupMessages(projectId))
+    if (!recovered) get().notify('error', `載入更早的群組訊息失敗：${errText(lost)}`)
   },
 
   async sendGroupChat(projectId, text, attachments = []) {
@@ -1309,6 +1314,7 @@ export const useStore = create<StoreState>((set, get) => {
     const oldest = s0.messages[botId]?.[0]
     if (!oldest || s0.loadingMore[botId]) return
     const generation = messagePageGeneration('bot', botId)
+    let lost: unknown
     set((s) => ({ loadingMore: { ...s.loadingMore, [botId]: true } }))
     try {
       const page = await api.fetchMessages(botId, PAGE_SIZE, oldest.id)
@@ -1326,10 +1332,14 @@ export const useStore = create<StoreState>((set, get) => {
         }
       })
     } catch (e) {
-      get().notify('error', `載入更早的訊息失敗：${errText(e)}`)
+      lost = e
     } finally {
       set((s) => ({ loadingMore: withoutKey(s.loadingMore, botId) }))
     }
+    if (lost === undefined) return
+    // 游標丟了（#766）：`loadingMore` 已放掉，才能重載後再翻一次。
+    const recovered = await recoverLostCursor(`bot:${botId}`, lost, () => get().loadMessages(botId), () => get().loadEarlierMessages(botId))
+    if (!recovered) get().notify('error', `載入更早的訊息失敗：${errText(lost)}`)
   },
 
   markBotRead: (botId) => {
