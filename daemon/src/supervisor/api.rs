@@ -1559,8 +1559,7 @@ mod persona_sync_tests {
 
     #[tokio::test]
     async fn migration_and_failed_projection_can_be_retried_without_losing_text() {
-        let dir = std::env::temp_dir().join(format!("agm-persona-sync-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-persona-sync");
         let bid = crate::db::ulid();
         let pid = crate::db::ulid();
         std::fs::write(dir.join("config.toml"), format!(
@@ -1606,8 +1605,7 @@ mod approval_decision_tests {
     use super::*;
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-approval-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-approval");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
@@ -2473,8 +2471,7 @@ mod review_boundary_tests {
     use super::*;
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-review-boundary-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-review-boundary");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));

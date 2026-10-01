@@ -205,6 +205,16 @@ pub struct App {
     pub boot_id: String,
 }
 
+/// 測試版：`scratch_dir` 建的資料目錄跟著最後一個 `Arc<App>` 一起刪（背景 task 還握著 `Arc` 時不會提早刪）。
+#[cfg(test)]
+impl Drop for App {
+    fn drop(&mut self) {
+        if crate::testing::release_scratch(&self.data_dir) {
+            let _ = std::fs::remove_dir_all(&self.data_dir);
+        }
+    }
+}
+
 impl App {
     pub fn probe(&self) -> Arc<dyn crate::pane_probe::PaneProbe> {
         self.pane_probe.lock().unwrap().clone()
