@@ -712,5 +712,56 @@ class WorkerLossTests(unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - start, 0.3)
 
 
+class LegacyLinkTests(unittest.TestCase):
+    """`link --legacy-key`：舊 chatgpt-consult.json 的指定 entry 找不到時，錯誤要講「是哪個 key／哪個檔出了問題」，
+    不是套用 `conversation_url` 的「需要 https://chatgpt.com/c/…」（那句會讓人以為是自己給的網址格式錯）。"""
+
+    URL = "https://chatgpt.com/c/legacy-abc"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "home"
+        (self.home / ".config/agents-manager").mkdir(parents=True)
+        self.data = Path(self.tmp.name) / "ob"
+        for p in (patch.object(ob, "daemon_project", return_value={"id": A, "label": "AM"}),
+                  patch.object(ob.Path, "home", return_value=self.home)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def legacy(self, content):
+        (self.home / ".config/agents-manager/chatgpt-consult.json").write_text(content)
+
+    def link(self, key):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            ob.main(["--data-dir", str(self.data), "link", "--project-id", A, "--legacy-key", key])
+        return json.loads(out.getvalue())
+
+    def assert_refused_before_any_write(self, key, pattern):
+        with self.assertRaisesRegex(OBError, pattern) as ctx:
+            self.link(key)
+        self.assertNotIn("https://chatgpt.com/c/", str(ctx.exception), "不是網址格式的問題，不要叫人去改網址")
+        store = Store(self.data)
+        self.addCleanup(store.db.close)
+        self.assertIsNone(store.project(A), "找不到就什麼都不能寫")
+
+    def test_a_missing_key_names_the_key_and_the_file(self):
+        self.legacy(json.dumps({"am": {"url": self.URL}}))
+        self.assert_refused_before_any_write("nope", r"legacy.*nope.*chatgpt-consult\.json")
+
+    def test_an_entry_without_a_url_says_so(self):
+        self.legacy(json.dumps({"am": {"label": "AM"}}))
+        self.assert_refused_before_any_write("am", r"legacy.*am.*url")
+
+    def test_a_missing_or_broken_legacy_file_says_so(self):
+        self.assert_refused_before_any_write("am", r"legacy.*chatgpt-consult\.json.*(不存在|找不到)")
+        self.legacy("{not json")
+        self.assert_refused_before_any_write("am", r"legacy.*chatgpt-consult\.json.*JSON")
+
+    def test_a_good_key_still_links(self):
+        self.legacy(json.dumps({"am": {"url": self.URL}}))
+        self.assertEqual(self.link("am")["url"], self.URL)
+
+
 if __name__ == '__main__':
     unittest.main()

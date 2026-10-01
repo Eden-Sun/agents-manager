@@ -29,6 +29,30 @@ def daemon_project(pid):
     return project
 
 
+def legacy_url(key):
+    """舊 chatgpt-consult.json 指定 entry 的對話網址。找不到、沒有 url、檔案不在／壞掉都**各自說清楚**：
+    以前直接把 `None` 丟給 `store.link`，使用者看到的是「需要 https://chatgpt.com/c/…」，
+    會以為是自己給的網址格式錯，其實是 key 打錯或舊檔沒這一筆。"""
+    path = Path.home() / ".config/agents-manager/chatgpt-consult.json"
+    try:
+        raw = path.read_text()
+    except FileNotFoundError:
+        raise OBError(f"legacy_file_not_found：舊登錄檔 {path} 不存在")
+    except OSError as e:
+        raise OBError(f"legacy_file_unreadable：讀不到舊登錄檔 {path}（{e.strerror or e}）")
+    try:
+        entries = json.loads(raw)
+    except ValueError as e:
+        raise OBError(f"legacy_file_invalid：舊登錄檔 {path} 不是合法 JSON（{e}）")
+    entry = entries.get(key) if isinstance(entries, dict) else None
+    if not isinstance(entry, dict):
+        raise OBError(f"legacy_key_not_found：'{key}' 不在舊登錄 {path} 裡；現有的 key：{', '.join(sorted(entries)) if isinstance(entries, dict) and entries else '（沒有）'}")
+    url = entry.get("url")
+    if not url:
+        raise OBError(f"legacy_entry_has_no_url：舊登錄 {path} 的 '{key}' 沒有 url 欄位")
+    return url
+
+
 def kick(store):
     if not store.setting("operator"):
         return False
@@ -189,8 +213,7 @@ def main(argv=None):
         project = daemon_project(args.project_id)
         url = args.url
         if args.legacy_key:
-            legacy = Path.home() / ".config/agents-manager/chatgpt-consult.json"
-            url = json.loads(legacy.read_text()).get(args.legacy_key, {}).get("url")
+            url = legacy_url(args.legacy_key)
         store.link(project["id"], project["label"], url)
         result = store.project(project["id"])
     if isinstance(result, dict):

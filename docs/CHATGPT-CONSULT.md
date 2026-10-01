@@ -79,6 +79,7 @@ python3 scripts/ob.py link --project-id <project-id> --url https://chatgpt.com/c
 ```
 
 一個 URL 不能同時綁兩個 project，也不覆寫已綁定 project 的不同 URL。先 link，再讓該專案送第一題。
+`--legacy-key` 找不到時各自回明確的錯，什麼都不寫：`legacy_file_not_found`／`legacy_file_invalid`（舊檔不在或不是 JSON）、`legacy_key_not_found`（key 不在檔裡，訊息列出現有的 key）、`legacy_entry_has_no_url`（entry 沒有 url）。
 
 ## 瀏覽器保留與驗證
 
