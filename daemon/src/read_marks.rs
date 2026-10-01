@@ -139,7 +139,7 @@ pub async fn group_marks(pool: &SqlitePool) -> Result<HashMap<String, ReadMark>>
     Ok(rows.into_iter().map(|(p, at, message_id)| (p, ReadMark { at, message_id })).collect())
 }
 
-/// 群組未讀回合數（專案標題的藍色數字）：群組回覆＝同一個回合的 user 訊息帶 `group_id`（API.md §11.1，直接 prompt
+/// 群組未讀回合數（專案標題的藍色數字）：只算還活著的 bot（跟 `group::messages` 的時間軸同一個範圍，不然已刪 bot 比最後一則可見訊息新的回覆會永遠清不掉）；群組回覆＝同一個回合的 user 訊息帶 `group_id`（API.md §11.1，直接 prompt
 /// API 設不了 `group_id`）的 assistant 回合；標記之後、依 `turn_id` 去重。沒有標記＝全部未讀，同 bot。
 pub async fn group_unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
@@ -148,7 +148,7 @@ pub async fn group_unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i6
            JOIN conversations c ON c.id = m.conversation_id
            JOIN bots b ON b.id = c.bot_id
            LEFT JOIN project_group_reads r ON r.project_id = b.project_id
-          WHERE m.role = 'assistant' AND m.turn_id IS NOT NULL
+          WHERE b.deleted_at IS NULL AND m.role = 'assistant' AND m.turn_id IS NOT NULL
             AND EXISTS (SELECT 1 FROM messages u
                          WHERE u.conversation_id = m.conversation_id AND u.turn_id = m.turn_id
                            AND u.role = 'user' AND u.group_id IS NOT NULL)
@@ -363,6 +363,29 @@ mod tests {
         assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), None);
         assert_eq!(unread(&pool).await, Some(3), "bot 的已讀不受群組標記影響");
         assert!(mark_group(&pool, "p", "yesterday", "").await.is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 群組時間軸（`group::messages`）不含已軟刪的 bot，已讀標記是前端從「看得到的最後一則」算的：已刪 bot 比那則更新的
+    /// 群組回覆若還算在未讀裡，這個專案的藍色數字就永遠清不掉（沒有任何可見訊息能把標記推過它）。
+    #[tokio::test]
+    async fn a_deleted_bots_group_reply_is_not_unread() {
+        let (pool, dir) = pool().await;
+        seed(&pool).await;
+        sqlx::query("UPDATE messages SET group_id = 'g-1' WHERE role = 'user'").execute(&pool).await.unwrap();
+        // 另一顆 bot 的群組回覆最新（04:00），之後那顆 bot 被刪。
+        let now = "2026-09-15T00:00:00.000Z";
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b2','p','b2','claude','t',?)").bind(now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c2','b2',?)").bind(now).execute(&pool).await.unwrap();
+        let at = "2026-09-15T04:00:00.000Z";
+        sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,created_at,completed_at) VALUES ('t4','c2','web','completed',?,?)").bind(at).bind(at).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,group_id,created_at) VALUES ('u-t4','c2','t4','user','q','web','g-1',?)").bind(at).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES ('a-t4','c2','t4','assistant','a','hook',?)").bind(at).execute(&pool).await.unwrap();
+        // 使用者在群組讀到可見的最後一則（b 的 t3，03:00）。
+        mark_group(&pool, "p", "2026-09-15T03:00:00.000Z", "a1-t3").await.unwrap();
+        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&1), "前提：b2 還在時，04:00 的回覆未讀");
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = 'b2'").bind(at).execute(&pool).await.unwrap();
+        assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), None, "bot 刪了，它的回覆不在時間軸上，也不算未讀");
         std::fs::remove_dir_all(dir).ok();
     }
 
