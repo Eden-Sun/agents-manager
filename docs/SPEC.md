@@ -2894,6 +2894,8 @@ B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先
    把 bundle 傳到 B（內含對話，不放 outbox／scratchpad；hook token 在 export 時就清掉了；傳完刪 A 上那份）。
 4. B：確認 config 有 `[[hosts]] name = "m4p"` 且連得上；停 B 的 daemon；`--dry-run` 看摘要；再正式跑
    `scripts/ops/project-transfer import --bundle hub.json.gz --host m4p`（`handed_off_to` 在 B 上清成 NULL，由 B 管）。
+   B 的 config.toml 已經有同 id 的專案時（重跑）config 不會被改，所以 bundle 裡的 user bot 必須本來就在那個專案底下；缺的話整批拒絕（DB 回滾），
+   不然只有 DB 有那些 bot，下次開機投影就把它們當「不在 config」軟刪。
 5. B：起 B 的 daemon，逐顆 `POST /api/bots/{id}/start?resume=native` 接回同一段對話（B 用 ssh 到 A 機檢查 `transcript_path`），
    確認 B 側收得到回覆再做下一顆。child 由母 agent 開，不在 B 上單獨接回。全部接完後需要的 bot 在 B 打開 autostart。
    確認無誤後刪 bundle 與 B 上的 `*.pre-transfer-*` 備份。

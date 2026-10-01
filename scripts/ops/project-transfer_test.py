@@ -446,6 +446,19 @@ class ProjectTransferTest(unittest.TestCase):
         hub = {p["id"]: p for p in tomllib.loads(slurp(self.cfg, "r"))["projects"]}[PID]
         self.assertEqual((hub["host"], hub["path"]), ("local", "/home/u/hub"))
 
+    def test_a_config_project_missing_the_bundles_bots_is_refused_not_half_imported(self):
+        """目標 config 已經有這個專案（id 一樣）但沒有 bundle 裡的 user bot：只插 DB 的話，下次開機投影看到
+        「bot 不在 config.toml」就把剛匯入的 bot 軟刪，而這支還印 `config: already present`。要嘛補進 config，
+        做不到就整批拒絕——DB 一個字不動。"""
+        self.export()
+        put(self.cfg, slurp(self.cfg, "r") + (
+            '\n[[projects]]\nid = "%s"\npath = "/Users/m4p/project/hub"\nlabel = "智選hub"\nhost = "m4p"\n' % PID))
+        db0, cfg0 = digest(self.tgt_path), digest(self.cfg)
+        p = self.imp(check=False)
+        self.assertNotEqual(p.returncode, 0, p.stdout)
+        self.assertIn("hub-main", p.stderr)
+        self.assertEqual((digest(self.tgt_path), digest(self.cfg)), (db0, cfg0), "DB 與 config 都不能動")
+
     def test_workspace_id_follows_the_host_it_was_made_on(self):
         """herdr 的 workspace id 是各台機器自己的短 id（`w1`、`wV`…）：帶到另一台 herdr 上可能剛好是**別的**
         workspace，daemon 的 `workspace_get` 看到「存在」就把這個專案的 bot 開在不相干的 workspace 裡。

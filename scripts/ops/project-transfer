@@ -723,6 +723,14 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
             (b for b in t["bots"] if b.get("managed_by") == "user" and not b.get("deleted_at")),
             key=lambda b: (b.get("position") or 0, b["id"]),
         )
+        # 目標 config 已經有這個專案：config 不會被改，所以 bundle 裡的 user bot 必須本來就在它底下。缺的話只有 DB 有那些 bot，
+        # 下次開機投影看到「bot 不在 config.toml」就把它們軟刪（而且超過一顆還會碰到批量刪除的閘門）——整批拒絕、DB 回滾。
+        if existing is not None:
+            have = {b.get("id") for b in existing.get("bots") or []}
+            lacking = [b["name"] for b in live_user_bots if b["id"] not in have]
+            if lacking:
+                raise RuntimeError(f"目標 config.toml 已經有專案 {existing.get('id')}，但它底下沒有這些 bot：{', '.join(lacking)}；"
+                                   f"先在 config 的那個專案底下加上它們（id 要跟 bundle 一樣），或把那個專案區塊移掉讓 import 自己寫")
         config_written = False
         if existing is None:
             with open(config_path) as f:
