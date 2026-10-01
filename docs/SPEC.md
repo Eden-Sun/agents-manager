@@ -1994,10 +1994,12 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - **遠端主機的 bot**（使用者 2026-10-01）：`AM_OUTBOX` 指到**那台上**的 `~/<remote root>/outbox/<bot_id>/`（跟 bot 目錄同一個實例根，
   bot.env 的自訂值一樣蓋掉；目錄由 bot 寫檔前自己 `mkdir -p`）。網頁列表與下載由 daemon 走 ssh（`outbox_remote`）：只列最上層的一般檔
   （符號連結不算，outbox 本身是符號連結就整個不列），擋檔名與內容的規則同本機；下載只收單一層檔名，內容以 base64 傳回、大小上限同本機。
-  遠端沒有 AGM 的 gc，**每次列表時順手刪掉 mtime 超過 60 分鐘的檔**。連不上那台時清單回 `reason:"outbox_remote_unreachable"`。
-- **時效**：檔案保留 1 小時（`outbox::TTL_SECS = 3600`），以 **mtime** 起算。
+  遠端沒有 AGM 的 gc，**每次列表時順手刪掉 mtime 與 ctime 都超過 60 分鐘的檔**。連不上那台時清單回 `reason:"outbox_remote_unreachable"`。
+- **時效**：檔案保留 1 小時（`outbox::TTL_SECS = 3600`），從**搬進 outbox 的時間**起算＝mtime 與 ctime 較晚的那個。
+  只看 mtime 會出事：`mv`／`cp -p` 進來的舊檔保留舊 mtime，下一輪清理就把 bot 剛交出去的檔刪掉；ctime 是搬入那一刻（寫入、改名、chmod 也會動它，只會延長不會縮短）。
+  清單的 `expires_at` 與清理用同一個規則，`modified` 仍是檔案內容的 mtime。
 - **清理者**：AGM 的 launchd `com.agm.outbox-gc`（`supervisor/AGM/bin/outbox-gc.sh`）每 10 分鐘刪掉 `-mindepth 2` 底下
-  mtime 超過 60 分鐘的檔，並收掉空目錄。**daemon 不清**。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
+  mtime 與 ctime **都**超過 60 分鐘的檔，並收掉空目錄（`OUTBOX_GC_NOW` 是測試用的時鐘接縫）。**daemon 不清**。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
   bot **寫之前一律 `mkdir -p "$AM_OUTBOX"`**。
 - **禁放清單**：私鑰、憑證、DB 一律不得放 scratchpad 或 outbox——`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、
   `id_rsa*`／`id_ed25519*`、`*.sqlite*`、`*.db`（含 `-wal`／`-shm`／`.bak`）、DB 複本、瀏覽器 profile。要長期保留的東西進 repo 或 `reports/`。

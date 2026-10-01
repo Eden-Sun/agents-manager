@@ -152,12 +152,14 @@ pub(crate) fn read_limited<R: Read>(reader: R, max_bytes: u64) -> Result<Vec<u8>
     Ok(bytes)
 }
 
-/// 一個目錄項目：名字、是不是一般檔案（符號連結／目錄／其他都是 `false`）、大小、mtime。
+/// 一個目錄項目：名字、是不是一般檔案（符號連結／目錄／其他都是 `false`）、大小、mtime、ctime。
 pub(crate) struct BoundEntry {
     pub name: OsString,
     pub is_file: bool,
     pub size: u64,
     pub modified: SystemTime,
+    /// inode 最後一次變動（搬進來、改名、chmod、寫入都會動）：`mv`／`cp -p` 進來的舊檔 mtime 不變、ctime 是搬入那一刻。
+    pub changed: SystemTime,
 }
 
 /// 列舉 `dir`（已經是 [`open_bound_dir`] 驗證、打開好的目錄 fd）裡的項目，全程只用這一個 fd：
@@ -213,7 +215,8 @@ pub(crate) fn read_dir_bound(dir: &File) -> io::Result<Vec<BoundEntry>> {
         }
         let is_file = (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
         let modified = SystemTime::UNIX_EPOCH + Duration::new(st.st_mtime.max(0) as u64, st.st_mtime_nsec.clamp(0, 999_999_999) as u32);
-        out.push(BoundEntry { name, is_file, size: st.st_size.max(0) as u64, modified });
+        let changed = SystemTime::UNIX_EPOCH + Duration::new(st.st_ctime.max(0) as u64, st.st_ctime_nsec.clamp(0, 999_999_999) as u32);
+        out.push(BoundEntry { name, is_file, size: st.st_size.max(0) as u64, modified, changed });
     }
     Ok(out)
 }

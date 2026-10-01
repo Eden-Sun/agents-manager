@@ -2,7 +2,7 @@
 //!
 //! 使用者 2026-09-16 裁示：scratchpad 暴露了私鑰與正式 DB 複本之後，**scratchpad 不再是輸出目錄**。
 //! 要交給使用者的檔案一律放 outbox；只保留 [`TTL_SECS`]，清理由 AGM 的 launchd `com.agm.outbox-gc`
-//! 每 10 分鐘做一次（依 mtime 刪超過一小時的檔、收空目錄）——daemon 不清。
+//! 每 10 分鐘做一次（mtime 與 ctime 都超過一小時才刪、收空目錄）——daemon 不清。
 //!
 //! 空目錄會被那支清理收掉，所以 daemon 在 bot 啟動時建的目錄不保證還在：bot 寫檔前自己 `mkdir -p "$AM_OUTBOX"`。
 //!
@@ -182,8 +182,8 @@ pub(crate) fn content_disposition(name: &str) -> String {
 }
 
 /// 目錄裡可以列出來的檔案：第一層的一般檔案（符號連結、子目錄不列），名字與內容都不是黑名單
-/// （[`withheld_name`]／[`content_is_withheld`]），新的排前面。每個帶 `expires_at`（mtime + [`TTL_SECS`]，
-/// AGM 清理看的也是 mtime）與 `remaining_secs`（到期了是 0，清理每 10 分鐘才跑一次，所以 0 的檔案還會在
+/// （[`withheld_name`]／[`content_is_withheld`]），新的排前面。每個帶 `expires_at`（mtime 與 ctime 較晚的那個 + [`TTL_SECS`]，
+/// 即「搬進來」的時間：`mv`／`cp -p` 保留舊 mtime，ctime 才是搬入那一刻；AGM 清理要兩個都過期才刪）與 `remaining_secs`（到期了是 0，清理每 10 分鐘才跑一次，所以 0 的檔案還會在
 /// 清單上待一下）。`dir` 是呼叫端已經驗證過（[`open_trusted_dir`]）拿到的目錄 fd：列舉
 /// （[`trusted_open::read_dir_bound`]）與逐一開檔看內容（[`trusted_open::open_entry_in`]）全程都掛在
 /// 這個 fd 底下，不再用任何路徑名字重新解析——檢查通過之後這個目錄被整個換成符號連結也不影響列出來的內容
@@ -211,16 +211,17 @@ pub(crate) fn scan(dir: &std::fs::File, now: u64) -> Vec<serde_json::Value> {
             if is_withheld {
                 continue;
             }
-            let modified = e.modified.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            files.push((name, e.size, modified));
+            let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let modified = secs(e.modified);
+            files.push((name, e.size, modified, modified.max(secs(e.changed))));
         }
     }
-    files.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    files.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
     files.truncate(MAX_ENTRIES);
     files
         .into_iter()
-        .map(|(name, size, modified)| {
-            let expires_at = modified + TTL_SECS;
+        .map(|(name, size, modified, landed)| {
+            let expires_at = landed + TTL_SECS;
             json!({"name": name, "size": size, "modified": modified, "expires_at": expires_at, "remaining_secs": expires_at.saturating_sub(now)})
         })
         .collect()
@@ -445,6 +446,23 @@ mod tests {
         assert_eq!(files[0]["expires_at"], json!(modified + TTL_SECS));
         assert_eq!(scan(&fd, modified + 600)[0]["remaining_secs"], json!(TTL_SECS - 600), "放了十分鐘剩五十分鐘");
         assert_eq!(scan(&fd, modified + TTL_SECS + 1)[0]["remaining_secs"], json!(0), "過期是 0，等清理");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// 保留期從「搬進 outbox」起算：`mv`／`cp -p` 進來的檔 mtime 還是很久以前，ctime 才是搬入那一刻。
+    /// 只看 mtime 的話，清單說「已過期」、清理（mtime 與 ctime 都過了才刪）卻還沒動，兩邊對不上。
+    #[test]
+    fn a_file_moved_in_with_an_old_mtime_expires_from_when_it_landed() {
+        let base = scratch("landed");
+        let f = std::fs::File::create(base.join("moved-in.pdf")).unwrap();
+        let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        f.set_modified(two_hours_ago).unwrap(); // mtime 兩小時前；ctime 是現在
+        drop(f);
+        let fd = trusted_open::open_bound_dir(&base, &[], None).unwrap();
+        let now = now_secs();
+        let listed = &scan(&fd, now)[0];
+        assert!(listed["modified"].as_u64().unwrap() <= now - 7000, "modified 仍是檔案內容的 mtime：{listed}");
+        assert!(listed["remaining_secs"].as_u64().unwrap() > TTL_SECS - 60, "剛搬進來，剩的是整個保留期：{listed}");
         std::fs::remove_dir_all(&base).unwrap();
     }
 

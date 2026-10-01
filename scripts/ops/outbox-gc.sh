@@ -9,7 +9,16 @@ OUTBOX="${AM_OUTBOX_ROOT:-$HOME/.config/agents-manager/outbox}"
 MAX_AGE_MIN=${OUTBOX_MAX_AGE_MIN:-60}
 [ -d "$OUTBOX" ] || exit 0
 case "$OUTBOX" in *..*) echo "$(date '+%F %T') 拒絕：OUTBOX 帶 .. $OUTBOX" >> "$LOG"; exit 1 ;; "$HOME/.config/agents-manager/outbox"|"$HOME/.config/agents-manager/outbox/"*) ;; *) echo "$(date '+%F %T') 拒絕：OUTBOX 不在預期路徑 $OUTBOX" >> "$LOG"; exit 1 ;; esac
-removed=$(find "$OUTBOX" -mindepth 2 -type f -mmin +"$MAX_AGE_MIN" -print -delete 2>/dev/null | wc -l | tr -d ' ')
+# 保留期從「檔案進到 outbox」起算，不是檔案內容的 mtime：`mv`／`cp -p` 進來的舊檔 mtime 還是很久以前，只看 mtime 會在下一輪就清掉
+# bot 剛交出去的檔。ctime 是搬入（或最後一次改 metadata）的時間，mtime 與 ctime 都超過才刪（跟 daemon 列表的 expires_at 同一個規則）。
+# `OUTBOX_GC_NOW`（epoch 秒）是測試用的時鐘接縫：測試沒辦法把 ctime 往回改，只能把「現在」往後撥。
+case "$MAX_AGE_MIN" in ''|*[!0-9]*) MAX_AGE_MIN=60 ;; esac
+NOW=${OUTBOX_GC_NOW:-$(date +%s)}
+CUTOFF=$((NOW - MAX_AGE_MIN * 60))
+REF=$(mktemp "${TMPDIR:-/tmp}/outbox-gc-ref.XXXXXX") || exit 1
+trap 'rm -f "$REF"' EXIT
+touch -t "$(date -r "$CUTOFF" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$CUTOFF" +%Y%m%d%H%M.%S)" "$REF" || exit 1
+removed=$(find "$OUTBOX" -mindepth 2 -type f ! -newer "$REF" ! -newercm "$REF" -print -delete 2>/dev/null | wc -l | tr -d ' ')
 find "$OUTBOX" -mindepth 1 -type d -empty -delete 2>/dev/null
 [ "$removed" != "0" ] && echo "$(date '+%F %T') 清掉 $removed 個超過 ${MAX_AGE_MIN} 分鐘的檔案" >> "$LOG"
 exit 0
