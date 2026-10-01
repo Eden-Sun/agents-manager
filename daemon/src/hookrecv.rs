@@ -874,6 +874,27 @@ async fn recent_fallback_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db:
     .await?)
 }
 
+/// hook 在 agent 那台觸發的時間（`received_at`，遠端 `hook.sh` 記的 UTC 秒）落在 `t` 開始之後，而且同一個對話在這段時間
+/// 沒開過別的回合：這則 hook 收的就是 `t`。時間讀不懂就是沒有證據。兩台機器的時鐘只比到秒。
+async fn fired_within(app: &Arc<App>, t: &db::Turn, received_at: Option<&str>) -> Result<bool> {
+    let Some(fired) = received_at.and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok()) else { return Ok(false) };
+    let Ok(started) = chrono::DateTime::parse_from_rfc3339(&t.created_at) else { return Ok(false) };
+    if fired.timestamp() < started.timestamp() {
+        return Ok(false);
+    }
+    let fired_at = fired.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let between: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND id <> ? AND created_at > ? AND created_at <= ?",
+    )
+    .bind(&t.conversation_id)
+    .bind(&t.id)
+    .bind(&t.created_at)
+    .bind(&fired_at)
+    .fetch_one(&app.db)
+    .await?;
+    Ok(between == 0)
+}
+
 /// 那一回合被問了什麼：`prompt_text`，沒有就取第一則使用者訊息。
 async fn turn_prompt(app: &Arc<App>, t: &db::Turn) -> Result<Option<String>> {
     match t.prompt_text.clone().filter(|p| !p.trim().is_empty()) {
@@ -1326,8 +1347,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
                         user = user.or(seen);
                     } else {
-                        // 看得到使用者訊息而且對上＝同一回合；看不到只能補空的，不蓋已有的。
-                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, seen.is_some()).await?;
+                        // 看得到使用者訊息而且對上＝同一回合。遠端 bot 讀不到 transcript（在那台）、看不到使用者訊息時，
+                        // 退而看 hook 在那台觸發的時間：落在這一回合開始之後、中間沒開過別的回合，也是同一回合（2026-10-02
+                        // wits-ops-web：備援抓到一份工具輸出當回覆，真回覆晚 25 秒到卻被丟）。都不成立只能補空的，不蓋已有的。
+                        let same = seen.is_some() || fired_within(app, &t, body.received_at.as_deref()).await?;
+                        fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, same).await?;
                         return Ok(());
                     }
                 }
@@ -2041,6 +2065,33 @@ mod external_claim_tests {
             sqlx::query(q).bind(&now).execute(&pool).await.unwrap();
         }
         (TmpDb(dir), pool, "r".to_string(), "c".to_string())
+    }
+
+    /// 2026-10-02 wits-ops-web：遠端讀不到 transcript，晚到的 hook 拿不出使用者訊息當證據。改看它在那台觸發的時間：
+    /// 落在備援回合開始之後、中間沒開過別的回合，才算同一回合。
+    #[tokio::test]
+    async fn a_remote_late_hook_is_matched_by_when_it_fired() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "remote").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let mk = |at: &'static str| {
+            let app = app.clone();
+            let conv = conv.clone();
+            async move {
+                let id = db::ulid();
+                sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?,'external','in_flight','ok',?)")
+                    .bind(&id).bind(&conv).bind(at).execute(&app.db).await.unwrap();
+                sqlx::query("UPDATE turns SET status='completed_fallback', completed_at=? WHERE id=?").bind(at).bind(&id).execute(&app.db).await.unwrap();
+                sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&id).fetch_one(&app.db).await.unwrap()
+            }
+        };
+        let t = mk("2026-10-01T16:54:43.000Z").await;
+        assert!(fired_within(&app, &t, Some("2026-10-01T17:05:39Z")).await.unwrap(), "回合開始後觸發、中間沒別的回合");
+        assert!(!fired_within(&app, &t, Some("2026-10-01T16:50:00Z")).await.unwrap(), "比回合還早觸發：是上一回合的");
+        assert!(!fired_within(&app, &t, None).await.unwrap(), "沒有時間＝沒有證據");
+        let _later = mk("2026-10-01T17:00:00.000Z").await;
+        assert!(!fired_within(&app, &t, Some("2026-10-01T17:05:39Z")).await.unwrap(), "中間開過別的回合：不能確定是哪一回合的");
     }
 
     /// 2026-09-29（遠端 claude）：hook 走 spool 晚 25 秒到，備援已經存了只有最後一段、還帶狀態列的回覆。
