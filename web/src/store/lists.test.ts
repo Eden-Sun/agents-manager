@@ -147,6 +147,7 @@ test('reuseUnchanged: 巢狀欄位變了才換；新增、刪除、換順序都�
   assert.notEqual(reordered, prev, '順序變了不能回舊陣列')
   assert.equal(reordered[0], prev[1])
   assert.deepEqual(reuseUnchanged([], [{ id: 'x' }]), [{ id: 'x' }])
+})
 
 // s748 的根治：同一毫秒的訊息 id（ULID 隨機段）不照插入序，daemon 帶 `seq`（rowid）。
 const S = '2026-10-01T10:00:00.123Z'
