@@ -402,7 +402,24 @@ async fn relay_announce(
             }
         }
     };
-    crate::agent_relay::announce(&body.bot_id, &body.to_agent, &body.text);
+    // 報備記的是寄件者所在的主機（同名 agent 在別台主機不能認領）；讀不到就跟收件目標讀不到一樣，要 shim 重試。
+    let host = match db::bot_host(&app.db, &body.bot_id).await {
+        Ok(host) => host,
+        Err(e) => {
+            tracing::warn!(to = %body.to_agent, error = ?e, "relay announce could not read the sender's host; refusing direct prompt so the shim can retry");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "relay_watch_unavailable",
+                    "watch_unavailable": true,
+                    "retryable": true,
+                    "detail": format!("{e:#}"),
+                    "message": "寄件者所在主機暫時讀不到；沒有直送，請稍後重試",
+                })),
+            );
+        }
+    };
+    crate::agent_relay::announce(&host, &body.bot_id, &body.to_agent, &body.text);
     // #380：收件方 UI 看得出在跑，字卡在輸入列時補 Enter；resolve 已在回 2xx 前確認，後續盯梢仍背景做。
     let (app2, from, text) = (app.clone(), body.bot_id.clone(), body.text.clone());
     tokio::spawn(async move { crate::lifecycle::relay_watch::on_resolved_announce(&app2, &from, &text, relay_run).await });
@@ -438,7 +455,7 @@ mod relay_announce_tests {
         // 一般 bot：不是 AGM，照舊 announce、回 200 `{}`（shim 接著直送）。
         let (code, v) = announce(&app, "builder", "幫我看一下 relay-143-plain").await;
         assert_eq!((code, v), (StatusCode::OK, json!({})));
-        assert!(crate::agent_relay::claim("builder", "幫我看一下 relay-143-plain").is_some(), "一般目標照舊記下直送");
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "builder", "幫我看一下 relay-143-plain").is_some(), "一般目標照舊記下直送");
 
         // 目標是 AGM，但協調佇列寫不進去。
         sqlx::query("CREATE TRIGGER test_inbox_down BEFORE INSERT ON supervisor_inbox BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
@@ -448,7 +465,7 @@ mod relay_announce_tests {
         let (code, v) = announce(&app, "AGM", "請核准重建 relay-143-queue").await;
         assert!(code.is_server_error(), "寫不進佇列不能假裝成「不是 AGM」：{code} {v}");
         assert_eq!(v["routing_unavailable"], true, "{v}");
-        assert!(crate::agent_relay::claim("AGM", "請核准重建 relay-143-queue").is_none(), "不能退回直接打進 pane");
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "AGM", "請核准重建 relay-143-queue").is_none(), "不能退回直接打進 pane");
 
         // DB 恢復後重試：只有一筆 durable 申請。
         sqlx::query("DROP TRIGGER test_inbox_down").execute(&app.db).await.unwrap();
@@ -461,7 +478,7 @@ mod relay_announce_tests {
         sqlx::query("DROP TABLE supervisor_roles").execute(&app.db).await.unwrap();
         let (code, v) = announce(&app, "AGM-responder", "請核准重啟 relay-143-lookup").await;
         assert!(code.is_server_error(), "{code} {v}");
-        assert!(crate::agent_relay::claim("AGM-responder", "請核准重啟 relay-143-lookup").is_none());
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "AGM-responder", "請核准重啟 relay-143-lookup").is_none());
     }
 
     /// #610：announce 的 managed-run 查詢讀不到時，不能先回 200 讓 shim 直送並永久略過 watchdog。
@@ -480,7 +497,7 @@ mod relay_announce_tests {
 
         crate::testing::make_table_unreadable(&app, "runs").await;
         let (code, body) = announce(&app, to, text).await;
-        let announced = crate::agent_relay::claim(to, text);
+        let announced = crate::agent_relay::claim(crate::config::LOCAL_HOST, to, text);
         crate::testing::make_table_readable(&app, "runs").await;
 
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "讀不到收件 run 時 shim 必須重試，不能直送：{body}");
@@ -490,7 +507,7 @@ mod relay_announce_tests {
 
         let (retry_code, retry_body) = announce(&app, to, text).await;
         assert_eq!((retry_code, retry_body), (StatusCode::OK, json!({})), "資料庫恢復後可正常重試");
-        assert!(crate::agent_relay::claim(to, text).is_some(), "成功重試才記下直送 announce");
+        assert!(crate::agent_relay::claim(crate::config::LOCAL_HOST, to, text).is_some(), "成功重試才記下直送 announce");
     }
 }
 

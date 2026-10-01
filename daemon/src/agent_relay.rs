@@ -9,6 +9,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 struct Pending {
+    /// 寄件者所在的主機：agent 名字（`<專案>-<bot>`）只在一台主機內唯一，兩台各有同名 agent 並不稀奇，
+    /// 報備只能由同一台主機上的收件方認領。
+    host: String,
     from_bot: String,
     /// shim 補完前綴之後的名字。
     agent: String,
@@ -43,20 +46,20 @@ pub(crate) fn same_prompt(pending: &str, echo: &str) -> bool {
     head(&a) == head(&b)
 }
 
-pub fn announce(from_bot: &str, agent: &str, text: &str) {
+pub fn announce(host: &str, from_bot: &str, agent: &str, text: &str) {
     if from_bot.is_empty() || agent.is_empty() || text.trim().is_empty() {
         return;
     }
     let mut s = store().lock().unwrap();
     s.retain(|p| p.at.elapsed() < TTL);
-    s.push(Pending { from_bot: from_bot.to_string(), agent: agent.to_string(), text: text.to_string(), at: Instant::now() });
+    s.push(Pending { host: host.to_string(), from_bot: from_bot.to_string(), agent: agent.to_string(), text: text.to_string(), at: Instant::now() });
 }
 
 /// 認出來就**用掉**那一筆，同一句不會被標兩次。
-pub fn claim(agent: &str, echo: &str) -> Option<String> {
+pub fn claim(host: &str, agent: &str, echo: &str) -> Option<String> {
     let mut s = store().lock().unwrap();
     s.retain(|p| p.at.elapsed() < TTL);
-    let i = s.iter().position(|p| p.agent == agent && same_prompt(&p.text, echo))?;
+    let i = s.iter().position(|p| p.host == host && p.agent == agent && same_prompt(&p.text, echo))?;
     Some(s.remove(i).from_bot)
 }
 
@@ -64,36 +67,38 @@ pub fn claim(agent: &str, echo: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    const H: &str = "local";
+
     // 表是行程全域、測試平行跑：每個測試用自己的 agent 名字。
 
     #[test]
     fn an_echo_is_attributed_to_the_agent_that_typed_it() {
-        announce("bot-agm", "t-echo", "AGM 裁示：重建這個 daemon，條件如下……");
+        announce(H, "bot-agm", "t-echo", "AGM 裁示：重建這個 daemon，條件如下……");
         // TUI 的回音換了行、縮了排。
-        assert_eq!(claim("t-echo", "AGM 裁示：重建這個 daemon，\n  條件如下……"), Some("bot-agm".into()));
+        assert_eq!(claim(H, "t-echo", "AGM 裁示：重建這個 daemon，\n  條件如下……"), Some("bot-agm".into()));
         // 同一句只認一次。
-        assert_eq!(claim("t-echo", "AGM 裁示：重建這個 daemon，條件如下……"), None);
+        assert_eq!(claim(H, "t-echo", "AGM 裁示：重建這個 daemon，條件如下……"), None);
     }
 
     #[test]
     fn a_truncated_echo_still_matches_but_a_different_prompt_does_not() {
-        announce("bot-agm", "t-trunc", "AGM 定期交辦：正式 daemon 落後 origin/main，請重建");
-        assert_eq!(claim("t-trunc", "AGM 定期交辦：正式 daemon 落"), Some("bot-agm".into()));
-        announce("bot-agm", "t-trunc", "AGM 定期交辦：正式 daemon 落後 origin/main，請重建");
-        assert_eq!(claim("t-trunc", "使用者自己打的另一句話，完全不一樣"), None);
+        announce(H, "bot-agm", "t-trunc", "AGM 定期交辦：正式 daemon 落後 origin/main，請重建");
+        assert_eq!(claim(H, "t-trunc", "AGM 定期交辦：正式 daemon 落"), Some("bot-agm".into()));
+        announce(H, "bot-agm", "t-trunc", "AGM 定期交辦：正式 daemon 落後 origin/main，請重建");
+        assert_eq!(claim(H, "t-trunc", "使用者自己打的另一句話，完全不一樣"), None);
     }
 
     /// 「繼續」這種字使用者自己也會打。
     #[test]
     fn a_short_prompt_must_match_exactly() {
-        announce("bot-agm", "t-short", "繼續");
-        assert_eq!(claim("t-short", "繼續做別的事"), None);
-        assert_eq!(claim("t-short", "繼續"), Some("bot-agm".into()));
+        announce(H, "bot-agm", "t-short", "繼續");
+        assert_eq!(claim(H, "t-short", "繼續做別的事"), None);
+        assert_eq!(claim(H, "t-short", "繼續"), Some("bot-agm".into()));
     }
 
     #[test]
     fn another_agents_echo_is_left_alone() {
-        announce("bot-agm", "t-agent", "AGM 裁示：這一句是給 abc 的，不是給 xyz 的");
-        assert_eq!(claim("t-agent-other", "AGM 裁示：這一句是給 abc 的，不是給 xyz 的"), None);
+        announce(H, "bot-agm", "t-agent", "AGM 裁示：這一句是給 abc 的，不是給 xyz 的");
+        assert_eq!(claim(H, "t-agent-other", "AGM 裁示：這一句是給 abc 的，不是給 xyz 的"), None);
     }
 }
