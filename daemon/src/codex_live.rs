@@ -432,6 +432,13 @@ pub async fn apply(
         Ok(false) => return Err("picker_open"),
         Err(()) => return Err("pane_read_failed"),
     }
+    // 輸入框裡有使用者的草稿：`/model`、`/fast` 會接在後面，Enter 把整段當 prompt 送出（回合中那條 #712 早有這道檢查）。
+    // herdr 不給帶樣式的讀法時分不出灰色佔位字與草稿，不擋（維持原行為）。
+    if let Ok(r) = crate::lifecycle::read_styled_snapshot(client, pane_id, "visible", 60).await {
+        if r.format == "ansi" && crate::lifecycle::box_state("codex", &r.text) == crate::lifecycle::BoxState::NonEmpty {
+            return Err("composer_not_empty");
+        }
+    }
     if fields.iter().any(|f| *f == "model" || *f == "effort") {
         let model = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let effort = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -636,7 +643,7 @@ mod tests {
             .unwrap();
         let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
         let pane = "pane-codex-unreadable-model-menu";
-        env.herdr.set_screen(pane, COMPOSER);
+        env.herdr.set_screen(pane, EMPTY_BOX_ANSI);
         let screens = env.herdr.screens.clone();
         let fail = env.herdr.fail_later();
         crate::lifecycle::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
@@ -687,7 +694,7 @@ mod tests {
         let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
         let pane = "pane-codex-readable-model-menu";
         let screens = env.herdr.screens.clone();
-        env.herdr.set_screen(pane, COMPOSER);
+        env.herdr.set_screen(pane, EMPTY_BOX_ANSI);
         let model_screens = screens.clone();
         crate::lifecycle::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
             model_screens.lock().unwrap().insert(pane.into(), MODEL_MENU.into());
@@ -910,6 +917,9 @@ mod tests {
             "the picker may only be escaped, never assigned an ambiguous row number"
         );
     }
+
+    /// 帶樣式的真空輸入框（灰色佔位字）：閒著套用前會先看輸入框有沒有草稿，純文字的 [`COMPOSER`] 分不出佔位字。
+    const EMPTY_BOX_ANSI: &str = include_str!("lifecycle/fixtures/codex-0.155-idle.ansi");
 
     /// Real composer, codex 0.154.0 (2026-09-10) — nothing in the way.
     const COMPOSER: &str = "\
