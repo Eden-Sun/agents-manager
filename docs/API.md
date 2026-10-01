@@ -1621,7 +1621,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - 舊 daemon 沒有 `herdr` 欄位，前端一律當未知。
 
 ### 12.7a header 安裝 CLI 更新 `POST /api/hosts/{name}/cli-update`
-`{"kind":"codex","target_version":"0.157.0"}` 或 `{"kind":"claude","target_version":"2.1.284"}`。請求只由使用者在 header 確認框送出，daemon 不會背景自動安裝。Codex 沿用該主機「需安裝」通知的目標與官方安裝指令（那台沒有 run 帶通知時，改用 `GET /api/upstream-updates` 快照裡那台落後時的目標）；Claude 目標綁定 `GET /api/upstream-updates` 的 fleet 共同目標（上游版與各主機已安裝版的最大值），在該主機跑固定指令 `claude install <target_version>`。安裝前若讀到版本已等於目標就不重裝；若快照落後、磁碟版已高於目標，也不降版，而以實際版更新通知與 fleet 快照。實際執行 Claude 安裝時，安裝後讀版本必須精確等於目標；Codex 可到達或超過目標。成功後 Claude 只把該主機 run 的持續通知改成「已安裝，重啟套用」，不自動重啟；Codex 保留既有的 scoped restart（僅該主機、該 kind）。SPEC §6.9。
+`{"kind":"codex","target_version":"0.157.0"}` 或 `{"kind":"claude","target_version":"2.1.284"}`。請求只由使用者在 header 確認框送出，daemon 不會背景自動安裝。Codex 沿用該主機「需安裝」通知的目標與官方安裝指令（只有成功確認那台沒有 run 帶通知時，才改用 `GET /api/upstream-updates` 快照裡那台落後時的目標）；Claude 目標綁定 `GET /api/upstream-updates` 的 fleet 共同目標（上游版與各主機已安裝版的最大值），在該主機跑固定指令 `claude install <target_version>`。安裝前若讀到版本已等於目標就不重裝；若快照落後、磁碟版已高於目標，也不降版，而以實際版更新通知與 fleet 快照。實際執行 Claude 安裝時，安裝後讀版本必須精確等於目標；Codex 可到達或超過目標。成功後 Claude 只把該主機 run 的持續通知改成「已安裝，重啟套用」，不自動重啟；Codex 保留既有的 scoped restart（僅該主機、該 kind）。SPEC §6.9。
 
 ```json
 202 {"update_id":"01M4…","host":"local","kind":"codex","target_version":"0.157.0","started":true}
@@ -1630,6 +1630,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - 400：`kind` 不是 `codex`／`claude`、沒帶或看不懂 `target_version`；404：不認得的主機。
 - 409 `{"reason":"stale_target","host","kind","target_version","current_target","message"}`：帶的版本不是 daemon 眼中那台現在的目標
   （Codex 取該主機 pending notice，Claude 取 fleet 快照；`null`＝沒有待安裝目標）。什麼都不跑，重開確認框再按。
+- 503 `{"reason":"pending_target_unavailable","retryable":true,"retry_after_secs":5,"message","detail"}`：Codex 的 active-run、bot 或 bot-host DB 讀取失敗，daemon 無法確認 pending notice；不使用快照 fallback，也不開始安裝。稍後重試。
 - 409 `{"reason":"cli_update_in_progress","host","kind","update_id","recovered","message"}`：那台已經在裝（同一台同時只跑一個）。記在 DB 的
   `cli_updates` 表，每台最多一筆 `running`，daemon 重啟後也還在；`recovered:true`＝那筆是重啟前開始的，daemon 正在確認那台的安裝跑完了沒（見下）。
 - 背景 worker 收到已驗證的請求 `kind`，在讀版本或執行安裝前必須與 durable job 列完全一致；kind 查詢錯誤、kind 不一致或 recovery 遇到不支援的 kind 時以 `internal_error` 收尾，不呼叫 CLI 指令。列已不存在時以 `superseded` 收尾，也不呼叫 CLI 指令。Recovery 在主機探測前也會重讀並核對啟動掃描讀到的 kind，只使用持久列裡明確記錄的 `codex`／`claude`，沒有預設 kind。
