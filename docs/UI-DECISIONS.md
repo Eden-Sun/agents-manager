@@ -696,6 +696,28 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 
 ![Claude fleet 安裝提示桌機](screenshots/claude-install/desktop-1440.png) ![Claude fleet 安裝確認手機](screenshots/claude-install/phone-390.png)
 
+## header 的 herdr 一鍵更新：同一個樣子，但警告擺最前面（2026-10-01）
+
+使用者：herdr 的更新要跟 claude／codex 一樣「header 出現徽章 → 確認框（左 changelog、右 AGM 解析、下面列會重啟的）→ 一鍵更新」。採完整重啟版（SPEC §6.9）。
+
+- **同一組 chip，數字位置寫 `herdr`**：外觀跟 codex／claude 那兩顆一樣（警示色 ⌃⌃，並排不畫分隔線），但三顆可能同時出現，數字分不出是哪一種；
+  herdr 這顆改寫小一號的 `herdr`。更新中是 `⌃⌃ herdr…`（tooltip 寫目前階段，等閒下來那段會講「最多 30 分鐘」），跑完換 ✓／⚠ `herdr`，
+  點開才看名單、按「知道了」才收起——結果有「誰沒接回」「哪些子 agent 沒了」，4 秒的 toast 不夠讀。
+- **確認框的重點是後果**：changelog／分析之下第一行是危險色的「**所有 Bot 會中斷約 1 分鐘**」；接著一段流程（先下載驗證、等全部閒下來、
+  起不來會換回舊版），再列「重啟後接回這 N 顆」與「這 N 個子 agent 會被結束、不會自動接回，由母 Bot 視需要重開」。名單是前端照
+  「那台在跑的頂層／子 agent」估的，實際以 202 回的 `will_resume`／`children_lost` 為準（進度 tooltip 用的是 daemon 回的）。
+  確認鈕是 danger 樣式：這顆按下去影響的是全部 Bot，不是一台的一種 CLI。
+- **遠端或 shared 主機：徽章照樣出現、按鈕停用並講原因**：只有遠端落後時 chip 退成灰（`waiting`），點開框底只寫原因（「遠端主機：這版只支援
+  更新本機」或「共用 session：別的 daemon 也在用」），確認鈕「無法從這裡更新」。不藏起來：落後是事實，藏了就沒人知道要去那台手動升。
+- **手機**跟 codex／claude 一樣併進合成的 ⌃⌃ 選單（第四項），各自打開原本的框。
+- 狀態放自己的 store（`store/herdrUpdate.ts`），不塞進 `useStore`：同時只會有一次，結果要留到人看完，跟快照替換無關。重整後靠
+  `GET /api/state` 的 `herdr_updates` 接回進度；daemon 說沒在跑就清掉漏掉 done 留下的進度。
+- 驗證：`VITE_MOCK=1` 下 `__amMock.herdrUpdate()`（`{failOne: true}` 演一顆沒接回、`{reason: 'busy_timeout'}` 演整次沒做、`{hold: 'waiting_idle'}` 停在那一步）。
+
+![桌機徽章](screenshots/herdr-update/desktop.png) ![確認框](screenshots/herdr-update/desktop-dialog.png) ![確認框（亮）](screenshots/herdr-update/desktop-dialog-light.png)
+![更新中](screenshots/herdr-update/desktop-progress.png) ![結果](screenshots/herdr-update/desktop-result.png)
+![手機選單](screenshots/herdr-update/phone-menu.png) ![手機確認框](screenshots/herdr-update/phone-dialog.png) ![手機結果（一顆沒接回）](screenshots/herdr-update/phone-result.png)
+
 ## 已移交的專案：標「由 <host> 管理」、輸入框鎖住（2026-09-28，issue #708）
 
 使用者要把專案交給另一台主機的 daemon 接手；這顆 daemon 對它的 bot 一律不動（SPEC §6.5h）。

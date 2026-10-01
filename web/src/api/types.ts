@@ -72,6 +72,8 @@ export interface Host {
   connected: boolean
   /** 連線正常時為 null */
   error: string | null
+  /** 跟別的 daemon 共用這台的 herdr session（#709）；舊 daemon 沒這欄＝undefined。herdr 一鍵更新不能動這種主機。 */
+  shared_session?: boolean
   /** 在本機終端 attach 同一個 herdr session 的指令 */
   attach_command: string
   herdr: HerdrVersion
@@ -486,6 +488,8 @@ export interface AppState {
   restart_batch: string | null | undefined
   /** 現在在跑的 codex 升級（SPEC §6.9）。同上：`undefined`＝舊 daemon 沒這欄＝不知道。 */
   cli_updates: { update_id: string; host: string }[] | undefined
+  /** 在跑的 herdr 一鍵更新（SPEC §6.9）；`undefined`＝舊 daemon 沒這欄＝不知道。 */
+  herdr_updates: { update_id: string; host: string; target_version: string; phase: string; started_at: string }[] | undefined
   connected: boolean
   /** The user's Herdr default session; separate from the manager session. */
   default_connected: boolean

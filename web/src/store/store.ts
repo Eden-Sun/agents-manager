@@ -37,6 +37,7 @@ import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetai
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
 import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgressMany, reconcileCliUpdates, type CliUpdate } from './cliUpdate'
+import { applyHerdrSnapshot, onHerdrFrame } from './herdrUpdate'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
@@ -1015,6 +1016,7 @@ export const useStore = create<StoreState>((set, get) => {
         selectedProjectId: selectedProject,
       }
     })
+    applyHerdrSnapshot(st.herdr_updates)
     {
       const s = get()
       const next = serverUnread(s.bots, s.botUnread, (id) => viewingBot(s, id) && windowActive(), unsentReads)
@@ -3123,6 +3125,17 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         const next = cliUpdateProgressMany(s.cliUpdates, data)
         return next !== s.cliUpdates ? { cliUpdates: next } : {}
       })
+      return
+    }
+    // herdr 一鍵更新（SPEC §6.9）：狀態在自己的 store（`herdrUpdate.ts`），這裡只跳通知、跑完重抓快照。
+    case 'herdr_update_progress':
+    case 'herdr_update_done': {
+      if (!isRec(data)) return
+      const n = onHerdrFrame(frame.type, data)
+      if (n) {
+        get().notify(n.kind, n.text)
+        void get().refreshState()
+      }
       return
     }
     case 'cli_update_done': {
