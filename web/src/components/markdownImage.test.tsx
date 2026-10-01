@@ -52,3 +52,11 @@ test('index.html 有 CSP img-src：只放 self、data:、blob:（之後新增的
   assert.match(csp, /img-src 'self' data: blob:/)
   assert.doesNotMatch(csp, /img-src[^;]*https?:/)
 })
+
+test('本機／內網位址的佔位多一句警告；一般網址沒有', () => {
+  const internal = renderToStaticMarkup(<MarkdownImage botId="b1" src="http://192.168.1.1/admin/reset.png" />)
+  assert.match(internal, /本機／內網位址/)
+  assert.doesNotMatch(internal, /<img/i)
+  const plain = renderToStaticMarkup(<MarkdownImage botId="b1" src="https://img.shields.io/badge/ok-green" />)
+  assert.doesNotMatch(plain, /本機／內網位址/)
+})
