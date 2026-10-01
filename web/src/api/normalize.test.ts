@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toKindQuota, toState, toTurn } from './normalize.ts'
+import { toKindQuota, toRun, toState, toTurn } from './normalize.ts'
 
 const reading = (stale?: boolean) => toKindQuota({
   five_hour: { used_pct: 41, resets_at: '2099-01-01T00:00:00Z', low: false, critical: false },
@@ -73,4 +73,12 @@ test('專案帶 daemon 算的群組未讀與已讀標記；舊 daemon 沒給就�
     [undefined, null],
     [undefined, null],
   ])
+})
+
+test('run.background_jobs：null＝巡邏還沒看過（保留 null）、沒帶＝舊 daemon 當 0、數字照收（#767）', () => {
+  const base = { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' }
+  assert.equal(toRun({ ...base, background_jobs: null })?.background_jobs, null)
+  assert.equal(toRun({ ...base })?.background_jobs, 0)
+  assert.equal(toRun({ ...base, background_jobs: 2 })?.background_jobs, 2)
+  assert.equal(toRun({ ...base, background_jobs: -1 })?.background_jobs, 0)
 })

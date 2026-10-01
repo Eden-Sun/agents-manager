@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Bot, Run } from '../api/types.ts'
-import { claudeInstallPlan, codexInstallPlan, mergeUpdateChips, updateBatchCounts } from './updateBatch.ts'
+import { claudeInstallPlan, codexInstallPlan, mergeUpdateChips, readyLabel, updateBatchCounts } from './updateBatch.ts'
 
 const NOTICE = 'Update installed · Restart to update'
 
@@ -113,6 +113,60 @@ test('使用者自己的 herdr default session 裡的 bot 不由一鍵重啟動�
     ['mine-default', 'run-default'],
   )
   assert.match(c.busy[0].why, /default session/)
+})
+
+test('背景工作還在跑的 bot 不由一鍵重啟動（daemon Skip::BackgroundJobs，#767）：進「在忙」名單、寫「背景執行中（N）」', () => {
+  const bots = [bot('bg'), bot('clean'), bot('fresh')]
+  const runs = {
+    bg: run('bg', { background_jobs: 2 }),
+    clean: run('clean', { background_jobs: 0 }),
+    fresh: run('fresh', { background_jobs: null }),
+  }
+  const c = updateBatchCounts(bots, runs, none)
+  assert.deepEqual(
+    c.ready.map((x) => x.name),
+    ['clean', 'fresh'],
+  )
+  assert.deepEqual(
+    c.busy.map((x) => [x.name, x.why]),
+    [['bg', '背景執行中（2）']],
+  )
+  // 正在跑的先說「正在跑」，跟 daemon skip_reason 的順序一致。
+  const working = updateBatchCounts([bot('w')], { w: run('w', { agent_status: 'working', background_jobs: 1 }) }, none)
+  assert.equal(working.busy[0].why, '正在跑')
+})
+
+test('巡邏還沒看過的 run（background_jobs 是 null）不擋，但在 ready 裡標「背景狀態未知」', () => {
+  const bots = [bot('clean'), bot('fresh'), bot('legacy')]
+  const runs = {
+    clean: run('clean', { background_jobs: 0 }),
+    fresh: run('fresh', { background_jobs: null }),
+    legacy: run('legacy'), // 舊 daemon 沒帶這個欄位：跟以前一樣當 0，不標
+  }
+  const c = updateBatchCounts(bots, runs, none)
+  assert.deepEqual(
+    c.ready.map((x) => [x.name, x.backgroundUnknown === true]),
+    [
+      ['clean', false],
+      ['fresh', true],
+      ['legacy', false],
+    ],
+  )
+})
+
+test('codex 安裝＋重啟的預覽也跳過背景工作還在跑的 codex', () => {
+  const bots = [bot('cx-wait', { kind: 'codex', project_id: 'p-local' }), bot('cx-bg', { kind: 'codex', project_id: 'p-local' })]
+  const runs = {
+    'cx-wait': run('cx-wait', { update_notice: 'codex 有新版 0.155.1 → 0.157.0，需安裝後重啟' }),
+    'cx-bg': run('cx-bg', { update_notice: 'codex 有新版 0.157.0（這個 run 跑的是 0.155.1），已安裝，重啟套用', background_jobs: 1 }),
+  }
+  const p = codexInstallPlan(bots, runs, none, () => 'local')!
+  assert.deepEqual(p.busy.map((x) => [x.name, x.why]), [['cx-bg', '背景執行中（1）']])
+})
+
+test('確認框的名單：背景狀態未知的在名字後面標出來，看過的不標', () => {
+  assert.equal(readyLabel({ botId: 'a', name: 'a' }), 'a')
+  assert.equal(readyLabel({ botId: 'b', name: 'b', backgroundUnknown: true }), 'b（背景狀態未知）')
 })
 
 // —— header 的 codex「安裝＋重啟」（SPEC §6.9，cli_update）——

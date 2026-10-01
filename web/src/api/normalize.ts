@@ -389,7 +389,9 @@ export function toRun(v: unknown, botId?: string): Run | null {
     status_line: optStr(pick(v, 'status_line')),
     status: toStatusInfo(pick(v, 'status_json')),
     update_notice: optStr(pick(v, 'update_notice')),
-    background_jobs: Math.max(0, Math.floor(num(pick(v, 'background_jobs')))),
+    // null＝巡邏還沒看過這個 run（#767，沒有證據）；沒帶（舊 daemon）照舊當 0。
+    // （`pick` 把 null 當沒有，所以這裡直接讀欄位。）
+    background_jobs: v.background_jobs === null ? null : Math.max(0, Math.floor(num(pick(v, 'background_jobs')))),
     turn_error: optStr(pick(v, 'turn_error')),
     // SPEC §4.4a：null = daemon 不知道，不能當 false
     runtime_model: optStr(pick(v, 'runtime_model')),

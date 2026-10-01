@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import * as api from '../api'
 import { inFlightTurn, projectHostName, useStore } from '../store/store'
-import { updateBatchCounts } from '../lib/updateBatch'
+import { readyLabel, updateBatchCounts } from '../lib/updateBatch'
 import { reviewErrText } from '../lib/claudeReviewErr'
 import { updateRange } from '../lib/updateRange'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -66,9 +66,11 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
   const readyCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.length)
   const readyNames = useStore((s) =>
     updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
-      .ready.map((b) => b.name)
+      .ready.map(readyLabel)
       .join('、'),
   )
+  // 巡邏還沒看過它們的背景工作（#767）：沒有證據所以照樣會重啟，確認框要講清楚。
+  const unknownCount = useStore((s) => updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null).ready.filter((b) => b.backgroundUnknown).length)
   // 還沒裝新版的 codex 由旁邊的 `CodexInstallChip` 負責（安裝＋重啟），不再算進這顆的「在忙」。
   const busyLines = useStore((s) =>
     updateBatchCounts(s.bots, s.runs, (id) => inFlightTurn(s, id) !== null)
@@ -173,6 +175,11 @@ export function RestartChip({ control }: { control?: DialogControl } = {}) {
                 <li key={n}>{n}</li>
               ))}
             </ul>
+            {unknownCount > 0 ? (
+              <p className="confirm-note">
+                標「背景狀態未知」的 {unknownCount} 顆，daemon 還沒讀過它們畫面底部有沒有背景工作（剛重啟）；若有，重啟會一起結束。要保險就等 30 秒再按。
+              </p>
+            ) : null}
             {busyCount > 0 ? (
               <>
                 <p className="confirm-note">另外 {busyCount} 顆在忙，這次會跳過：</p>
