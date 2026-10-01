@@ -1217,7 +1217,8 @@ export function Sidebar() {
                   <span className="chev">{projectShut ? '▶' : '▼'}</span>
                 </button>
                 <ProjectTitle projectId={p.id} label={p.label} host={p.host} path={p.path} hostUp={hostUp(p.host)} folded={projectShut} draggable={!query} />
-                <span className="project-head-actions">
+                {/* 同 `.bot-actions`：⋯ 的觸發鍵與選單空白處的點擊不能冒泡到整列的「選取專案」。 */}
+                <span className="project-head-actions" onClick={(e) => e.stopPropagation()}>
                   <button
                     type="button"
                     className="icon-btn add icon-tip"
