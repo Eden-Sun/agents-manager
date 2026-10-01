@@ -535,7 +535,7 @@ async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, f
         return None;
     }
     if logged_in && idn.kind == "claude" {
-        crate::quota_claude::unpark_identity(host, name);
+        crate::quota_claude::unpark_identity(host, name, crate::quota::identity_shares_default("claude", &idn.env));
     }
     Some(logged_in)
 }
