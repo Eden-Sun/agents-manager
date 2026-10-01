@@ -422,6 +422,23 @@ test('已經有一批在跑時再按一鍵重啟：不蓋掉進度，也不說�
   assert.ok(noticeTexts().some((t) => t.includes('已經有一批')))
 })
 
+/** 正在跑的是 cli-update 開的範圍批次、等著套用的 claude 不在裡面：daemon 回 `restart_status:'deferred'`（排在那批後面）。 */
+test('一鍵重啟排在別人的範圍批次後面：接上那一批的進度，並講清楚其餘會自動接著重啟', async () => {
+  seed()
+  routeDaemon((req) =>
+    req.path.includes('/bots/restart-idle')
+      ? json(
+          { batch_id: 'scoped-1', total: 0, planned: [], skipped: [], already_running: true, restart_status: 'deferred', behind_batch_id: 'scoped-1' },
+          200,
+        )
+      : json({}, 200),
+  )
+  await useStore.getState().restartIdleBots()
+  assert.equal(useStore.getState().restartBatch?.id, 'scoped-1')
+  assert.ok(noticeTexts().some((t) => t.includes('接著重啟')), noticeTexts().join('|'))
+  assert.ok(!noticeTexts().some((t) => t.includes('進度照那一批顯示')), '那一批沒有涵蓋這次要的，不能說進度照它顯示就完事')
+})
+
 /** AGM 驗收 9f05b03：服務 pane（在 listen）或讀不到狀態時，daemon 回 409 要人再確認——不能預設帶 confirm 把這道繞掉。 */
 for (const [label, body, route] of [
   ['面板自己開的（DELETE）', { reason: 'service_pane', unverified: false, pane: { pane_id: 'w9:s1', host: 'local', kind: 'service', listen_ports: [3010] } }, 'own'],

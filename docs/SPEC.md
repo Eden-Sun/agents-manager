@@ -2360,6 +2360,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - **同時只准一批**：已經有一批在跑時再按，回那一批的 `batch_id`（`already_running: true`、`total: 0`），不另開一份重疊的清單。
   範圍批次（`spawn_scoped`，cli-update 用）例外地不接回：要證明那一批「還沒輪到」的目標涵蓋自己的每一顆才算 `already_covered`，否則排成那一批的後續（`deferred`，見上面 codex 一鍵升級那一段）。
   「還沒輪到」是輪到時就拿掉，不管結果；定清單之前是空的，所以那段期間到的一律是 `deferred`。後續在那一格放掉時（`BatchSlot` 的 drop，含 panic）接著開，一個一個來。
+  **正在跑的是範圍批次、這時不限範圍的再按一次**同一條規則反過來：等著套用的 bot（`plan` 的 go）全都還排在那一批裡才當成接回（`already_running`）；有不在裡面的（例如 claude），回 `deferred`（`already_running` 照帶，讓前端接上那一批的進度），並在那一批上記 `followup_all`——放掉那一格時先開一批全域的，再開記著的範圍後續。以前直接回 `already_running`，前端說「進度照那一批顯示」，等著的 claude 卻不在那一批裡、也沒人接著做。
 - **執行**：序列、一顆一顆，每顆 `lifecycle::restart_bot_with(StartOpts { resume_native: true, require_idle: true })`——stop 與 start 在**同一次持有 bot 鎖**裡做完
   （中間有空檔時，拿鎖前讀了 agent 清單的 reconcile 會搶進來把剛停掉的 agent 收編成新 run，start 就以 `active run already exists` 放棄，bot 從此沒人拉起）。
   start 被一個 pane 已不存在的 run 擋住時先結束那個 run 再試。`stop_bot` 寫上 `ended_at` 後剛結束的 session 成為「上一個 session」，claude 拿到 `--resume <session>`。

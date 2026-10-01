@@ -253,6 +253,8 @@ struct Running {
     followups: Vec<ScopedRestart>,
     /// Authority of the batch whose candidates were selected at admission time.
     request: Option<ScopedRestart>,
+    /// 有人在這一批（範圍批次）跑著時按了不限範圍的重啟、而且有等著的 bot 不在這一批裡：放掉那一格時接著開一批全域的。
+    followup_all: bool,
 }
 
 /// 這個 daemon 現在有沒有一批在跑；有的話是哪一批（`GET /api/state` 的 `restart_batch`，issue #492）。
@@ -272,16 +274,30 @@ struct BatchSlot {
 
 impl Drop for BatchSlot {
     fn drop(&mut self) {
-        let followups = running_batches().lock().unwrap().remove(&self.key).map(|r| r.followups).unwrap_or_default();
-        if followups.is_empty() {
+        let (followups, all) = running_batches()
+            .lock()
+            .unwrap()
+            .remove(&self.key)
+            .map(|r| (r.followups, r.followup_all))
+            .unwrap_or_default();
+        if followups.is_empty() && !all {
             return;
         }
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
-            tracing::warn!(n = followups.len(), "restart batch ended outside the runtime; deferred scoped restarts were dropped");
+            tracing::warn!(n = followups.len(), all, "restart batch ended outside the runtime; deferred restarts were dropped");
             return;
         };
         let app = self.app.clone();
-        rt.spawn(run_followups(app, followups));
+        rt.spawn(async move {
+            // 全域的先開：它涵蓋所有範圍批次的目標，後面的範圍批次到時要嘛被它涵蓋、要嘛照舊排在它後面。
+            if all {
+                match spawn_scoped_request(&app, None).await {
+                    Ok(plan) => tracing::info!(status = %plan["restart_status"], batch = %plan["batch_id"], "deferred unscoped restart started"),
+                    Err(e) => tracing::warn!(error = %format!("{e:#}"), "deferred unscoped restart could not start"),
+                }
+            }
+            run_followups(app, followups).await;
+        });
     }
 }
 
@@ -369,10 +385,10 @@ async fn spawn_scoped_request(app: &Arc<App>, request: Option<ScopedRestart>) ->
     let slot_key = app.data_dir.display().to_string();
     let batch_id = db::ulid();
     loop {
-        let existing = {
+        let (existing, running_is_scoped) = {
             let mut running = running_batches().lock().unwrap();
             match running.get(&slot_key) {
-                Some(r) => r.batch_id.clone(),
+                Some(r) => (r.batch_id.clone(), r.request.is_some()),
                 None => {
                     running.insert(
                         slot_key.clone(),
@@ -383,6 +399,20 @@ async fn spawn_scoped_request(app: &Arc<App>, request: Option<ScopedRestart>) ->
             }
         };
         let Some(request) = &request else {
+            if running_is_scoped {
+                // 正在跑的是範圍批次（cli-update 開的，只有那台那個 kind）：接回它看進度不等於這次要的都排進去了。
+                // 還有不在那一批裡的等著套用的 bot 就排在它後面，放掉那一格時自己接著開一批全域的。
+                let cands = candidates(app, None).await?;
+                let (go, _) = plan(&cands);
+                let wanted: Vec<serde_json::Value> = go.iter().map(|c| json!({"bot_id": c.bot_id, "name": c.name})).collect();
+                let mut running = running_batches().lock().unwrap();
+                let Some(r) = running.get_mut(&slot_key) else { continue };
+                if !go.is_empty() && !go.iter().all(|c| r.remaining.contains(&c.bot_id)) {
+                    r.followup_all = true;
+                    return Ok(json!({"batch_id": r.batch_id, "total": 0, "planned": [], "skipped": [], "already_running": true,
+                                     "restart_status": "deferred", "behind_batch_id": r.batch_id, "deferred": wanted}));
+                }
+            }
             // 不限範圍的再按一次＝接回那一批看進度（#492）；這裡不宣稱涵蓋了什麼，所以不帶 `restart_status`。
             return Ok(json!({"batch_id": existing, "total": 0, "planned": [], "skipped": [], "already_running": true}));
         };
@@ -1524,6 +1554,62 @@ mod tests {
         let restarting_cx = evs.iter().filter(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == cx && d["status"] == "restarting").count();
         assert_eq!(restarting_cx, 1, "codex 只被那一批動一次：{evs:?}");
         assert!(evs.iter().all(|(_, d)| d["batch_id"] == first["batch_id"]), "不能再多開一批：{evs:?}");
+    }
+
+    /// 使用者按 ⌃⌃（不限範圍）時，正在跑的是 cli-update 開的**範圍批次**（只有那台的 codex）：以前拿到那一批的
+    /// `already_running`（total 0、不帶 `restart_status`），前端說「進度照那一批顯示」，可是等著套用的 claude 根本不在那一批裡，
+    /// 跑完還是舊版、也沒有人接著做。現在要說清楚排在那批後面（`deferred`），放掉那一格時自己接著開一批全域的。
+    #[tokio::test]
+    async fn an_unscoped_restart_behind_a_scoped_batch_is_deferred_and_runs_after_it() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (cl, _) = pending_bot(&env, "cl", "claude", "Update installed · Restart to update").await;
+        let (cx, _) = pending_bot(&env, "cx", "codex", "codex 有新版 0.157.0（這個 run 跑的是 0.155.1），已安裝，重啟套用").await;
+        let events = collect_restart_events(&app);
+        let release = hold_batch_at(&cx);
+
+        let scoped = spawn_scoped(&app, Some(&Scope { kind: "codex".into(), host: "local".into() })).await.unwrap();
+        assert_eq!(scoped["planned"].as_array().unwrap().len(), 1, "範圍批次只有 codex：{scoped}");
+        let all = spawn(&app).await.unwrap();
+
+        assert_eq!(all["restart_status"], "deferred", "那一批沒有涵蓋 claude，不能說成接回去看進度：{all}");
+        assert_eq!(all["behind_batch_id"], scoped["batch_id"], "{all}");
+        let touched_cl = |evs: &[(String, serde_json::Value)]| evs.iter().any(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == cl);
+        assert!(!touched_cl(&events.lock().unwrap()), "放行之前 claude 不能動");
+
+        release.send(()).unwrap();
+        assert!(
+            crate::testing::eventually!(events.lock().unwrap().iter().any(|(k, d)| k == "bots_restart_progress"
+                && d["bot_id"] == cl
+                && d["batch_id"] != scoped["batch_id"])),
+            "範圍批次放掉之後，等著的 claude 要自己接著跑一批：{:?}",
+            events.lock().unwrap()
+        );
+    }
+
+    /// 反向：正在跑的範圍批次**已經涵蓋**全部等著的 bot——不限範圍再按一次照舊只是接回那一批，不另排一批。
+    #[tokio::test]
+    async fn an_unscoped_restart_fully_covered_by_the_scoped_batch_just_joins_it() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (cx, cx_run) = pending_bot(&env, "cx", "codex", "codex 有新版 0.157.0（這個 run 跑的是 0.155.1），已安裝，重啟套用").await;
+        let (cx2, _) = pending_bot(&env, "cx2", "codex", "codex 有新版 0.157.0（這個 run 跑的是 0.155.1），已安裝，重啟套用").await;
+        let events = collect_restart_events(&app);
+        let release = hold_batch_at(&cx);
+
+        let scoped = spawn_scoped(&app, Some(&Scope { kind: "codex".into(), host: "local".into() })).await.unwrap();
+        assert!(scoped["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == cx2), "{scoped}");
+        // 卡住的那顆（已經輪到、不算「還排著」）更新套完了：現在等著的只剩還排在那一批裡的 cx2。
+        sqlx::query("UPDATE runs SET update_notice=NULL WHERE id=?").bind(&cx_run).execute(&app.db).await.unwrap();
+        let all = spawn(&app).await.unwrap();
+        assert_eq!(all["already_running"], true, "{all}");
+        assert_eq!(all["batch_id"], scoped["batch_id"], "{all}");
+        assert!(all.get("restart_status").is_none() || all["restart_status"] == "already_covered", "{all}");
+
+        release.send(()).unwrap();
+        assert!(crate::testing::eventually!(events.lock().unwrap().iter().any(|(k, d)| k == "bots_restart_done" && d["batch_id"] == scoped["batch_id"])));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(events.lock().unwrap().iter().all(|(_, d)| d["batch_id"] == scoped["batch_id"]), "不能多開一批：{:?}", events.lock().unwrap());
     }
 
     /// #566：清單裡有這顆、但已經輪到它（正在重啟或已經動過）就不算「還排著」——那一次重啟不保證吃到剛裝好的新版，

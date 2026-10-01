@@ -332,6 +332,8 @@ export interface RestartPlan {
   skipped: RestartSkip[]
   /** 已經有一批在跑：`batch_id` 是那一批，其餘欄位是空的，進度看那一批的事件。 */
   already_running: boolean
+  /** 正在跑的是範圍批次（只有某台某 kind）而這次要的 bot 不在裡面：`'deferred'`＝排在那批後面，放掉那一格自動接著開。 */
+  restart_status?: string
 }
 
 /** 前端維護：計畫 + WS 進度。 */
