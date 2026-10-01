@@ -113,6 +113,8 @@ mod service_auth;
 mod testing;
 #[cfg(test)]
 mod timestamp_compat_tests;
+#[cfg(test)]
+mod same_ms_order_tests;
 mod tools;
 mod trust;
 mod trusted_open;
