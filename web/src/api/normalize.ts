@@ -66,6 +66,7 @@ import {
   TOOL_UNKNOWN,
 } from './types.ts'
 import { identityRowKey } from '../store/identityRows'
+import { byInsert, byTime } from '../store/lists'
 
 type Rec = Record<string, unknown>
 
@@ -483,6 +484,7 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     created_at: str(v.created_at),
     rewound_at: optStr(pick(v, 'rewound_at')),
     sent_via: oneOf<'send_now' | 'supplement' | ''>(pick(v, 'sent_via'), SENT_VIA, '') || null,
+    seq: num(pick(v, 'seq')) || undefined,
   }
 }
 
@@ -502,19 +504,16 @@ export function toGroupMessagesPage(raw: unknown, projectId: string): GroupMessa
     const gm = toGroupMessage(m)
     if (gm) out.push(gm)
   }
-  return { project_id: str(pick(o, 'project_id'), projectId), messages: sortById(out), has_more: bool(pick(o, 'has_more')) }
+  return { project_id: str(pick(o, 'project_id'), projectId), messages: sortByInsert(out), has_more: bool(pick(o, 'has_more')) }
 }
 
-/** ULID order — the daemon paginates by it. */
-export function sortById<T extends { id: string }>(items: T[]): T[] {
-  return [...items].sort((a, b) => a.id.localeCompare(b.id))
+/** Insert order — the daemon paginates by rowid (`seq`); ULID order only when `seq` is missing. */
+export function sortByInsert<T extends { id: string; seq?: number }>(items: T[]): T[] {
+  return [...items].sort(byInsert)
 }
 
-export function sortByTime<T extends { created_at: string; id: string }>(items: T[]): T[] {
-  return [...items].sort((a, b) => {
-    const t = a.created_at.localeCompare(b.created_at)
-    return t !== 0 ? t : a.id.localeCompare(b.id)
-  })
+export function sortByTime<T extends { created_at: string; id: string; seq?: number }>(items: T[]): T[] {
+  return [...items].sort(byTime)
 }
 
 /**

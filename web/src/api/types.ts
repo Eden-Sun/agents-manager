@@ -433,6 +433,8 @@ export interface Message {
   rewound_at?: string | null
   /** 回合中送出的方式：`send_now`＝插隊、`supplement`＝補充（打進 pane、併在進行中的回合）。沒有＝一般送出。 */
   sent_via?: 'send_now' | 'supplement' | null
+  /** daemon 的插入序（rowid，單調）：同毫秒的訊息靠它定先後；舊 daemon 沒有。 */
+  seq?: number
 }
 
 /** SPEC §13.4 `GET /api/projects/:id/messages` */
