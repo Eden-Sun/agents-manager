@@ -470,14 +470,14 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         return;
     }
     let Some(pane_id) = ev.data.get("pane_id").and_then(|v| v.as_str()) else { return };
-    let status = ev
+    let reported_status = ev
         .data
         .get("agent_status")
         .and_then(|v| v.as_str())
         .map(|s| if s == "done" { "idle" } else { s })
         .unwrap_or("unknown")
         .to_string();
-    tracing::info!(host, session, pane_id, status = %status, "pane.agent_status_changed");
+    tracing::info!(host, session, pane_id, status = %reported_status, "pane.agent_status_changed");
     let key: PaneKey = (host.to_string(), session.to_string(), pane_id.to_string());
     // 重放的那一則不是新事件：沿用原來的序號，不能把自己登記成「最新」。
     let seq = match replay_seq {
@@ -504,13 +504,21 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     let runs = match crate::db::active_runs_for_pane(&app.db, host, pane_id, session, &fallback).await {
         Ok(runs) => runs,
         Err(e) => {
-            tracing::warn!(host, pane_id, status = %status, error = ?e, "could not look up the run for a pane status event; replaying it shortly");
+            tracing::warn!(host, pane_id, status = %reported_status, error = ?e, "could not look up the run for a pane status event; replaying it shortly");
             replay_status_later(app, host, session, ev, key, seq, attempt);
             return;
         }
     };
     let Some(run) = runs.into_iter().next() else {
         return;
+    };
+    let status = if reported_status == "unknown"
+        && ev.data.get("agent").and_then(serde_json::Value::as_str) == Some("codex")
+        && run.state != "starting"
+    {
+        "idle".to_string()
+    } else {
+        reported_status
     };
     // #708：移交出去的專案，狀態、外部回合、備援、通知 parent 都歸接手的 daemon。讀不到就照「讀不到 run」重放。
     match crate::handoff::bot_handed_off_to(&app.db, &run.bot_id).await {
@@ -825,6 +833,32 @@ mod tests {
         newer.await.unwrap();
         replay.await.unwrap();
         assert_eq!(stored().await, "idle", "較新的 idle 不能被舊的 blocked 重放蓋掉");
+    }
+
+    /// Codex's unknown status only means idle once startup has completed. `PaneInfo` and raw events
+    /// have no launch_pending bit, so the run state is the evidence for whether to fold it.
+    #[tokio::test]
+    async fn a_codex_unknown_event_is_preserved_while_starting_and_folded_when_running() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "codex-status").await;
+        sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        let unknown = crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: json!({"agent": "codex", "pane_id": pane, "agent_status": "unknown"}),
+        };
+
+        sqlx::query("UPDATE runs SET state='starting', agent_status='unknown' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        handle_status(&app, LOCAL_HOST, "test", &unknown).await;
+        let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "unknown", "starting Codex must not trigger idle handling");
+
+        sqlx::query("UPDATE runs SET state='running', agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        handle_status(&app, LOCAL_HOST, "test", &unknown).await;
+        let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "idle", "running Codex unknown keeps the #732 idle behavior");
     }
 
     fn close_event(pane: &str) -> crate::herdr::Event {
