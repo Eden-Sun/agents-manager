@@ -918,6 +918,14 @@ pub async fn env() -> Env {
     git::init_repo(&repo);
     let pool = db::open(&data.join("db.sqlite3")).await.unwrap();
     let cfg = crate::config::ConfigStore::load(data.join("config.toml")).await.unwrap();
+    // 出貨預設是關的（#749 審查）；測試 build 的 hook 本來就是空的，要用的測試換上 stub，所以這裡先把旗標打開，
+    // 「預設關」由 config 與 delivery 各自的測試把設定還原成預設再驗。
+    cfg.update(|c| {
+        c.codex_history.enabled = true;
+        Ok(())
+    })
+    .await
+    .unwrap();
     let sock = data.join("herdr.sock");
     let herdr = MockHerdr::start(sock.clone());
     let client = crate::herdr::HerdrClient::new(sock);

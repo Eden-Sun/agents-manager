@@ -2249,6 +2249,20 @@ mod api_tests {
         assert_eq!(delivery_of(&app, &out.turn_id).await.1, 0);
     }
 
+    /// 出貨的預設設定（沒寫 `[codex_history]`）：codex 的送達路徑完全不開 app-server（#749 審查：預設關）。
+    #[tokio::test]
+    async fn the_shipped_default_config_never_opens_the_history() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        app.cfg.update(|c| { c.codex_history = crate::config::CodexHistoryCfg::default(); Ok(()) }).await.unwrap();
+        let (bot_id, _conv, b) = codex_with_idle_rollout(&env).await;
+        let stub = crate::codex_history::StubSource::new();
+        stub.push_user(&b, "t0", "u0", "old prompt");
+        app.codex_history.set(Some(Arc::new(stub.clone())));
+        prompt(&app, &bot_id, "第一行\n第二行", "crid-hist-default").await.unwrap();
+        assert_eq!(stub.opens.load(std::sync::atomic::Ordering::Relaxed), 0, "預設設定不能起 app-server");
+    }
+
     /// 非 codex 的 bot 不碰 app-server；設定關掉也不碰。
     #[tokio::test]
     async fn only_an_enabled_codex_bot_opens_the_history() {

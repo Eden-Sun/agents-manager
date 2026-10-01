@@ -332,17 +332,13 @@ impl CodexCfg {
     }
 }
 
-/// `[codex_history]`：`enabled = false` 時完全不開 app-server，送達／回覆／中斷證據只走 rollout 與畫面（舊路）。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `[codex_history]`：`enabled = false`（**預設**）時完全不開 app-server，送達／回覆／中斷證據只走 rollout 與畫面（舊路）。
+/// 預設關的原因（#749 審查）：裝著的 codex 0.159.3 的 app-server 不支援 `thread/items/list`、`thread/turns/list` 又要先載入 thread，
+/// 開著只是每則 prompt 白起一個 app-server（寫 CODEX_HOME、對外跑 `git ls-remote`）卻拿不到證據；等有支援的 codex 版本再開。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct CodexHistoryCfg {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
-}
-
-impl Default for CodexHistoryCfg {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
 }
 
 impl CodexHistoryCfg {
@@ -1642,5 +1638,22 @@ mod supervisor_cfg_tests {
         assert!(on.codex.instant_interrupt);
         let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
         assert_eq!(on, back);
+    }
+
+    /// issue #749 審查：`[codex_history]` 預設關。裝著的 codex 0.159.3 的 app-server 對 `thread/items/list` 回
+    /// `-32601 not supported yet`、`thread/turns/list` 回 `thread not loaded`，預設開等於每則 codex prompt 白起一個 app-server
+    /// （還會寫 CODEX_HOME、對外跑 `git ls-remote`）卻永遠拿不到證據。要用請在設定檔明寫 `enabled = true`。
+    #[test]
+    fn codex_history_is_off_unless_the_config_turns_it_on() {
+        let none: ConfigFile = toml::from_str("").unwrap();
+        assert!(!none.codex_history.enabled);
+        assert!(!CodexHistoryCfg::default().enabled);
+        assert!(!toml::to_string_pretty(&none).unwrap().contains("codex_history"));
+        let on: ConfigFile = toml::from_str("[codex_history]\nenabled = true\n").unwrap();
+        assert!(on.codex_history.enabled);
+        let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
+        assert_eq!(on, back, "明寫開著要留得住");
+        let off: ConfigFile = toml::from_str("[codex_history]\nenabled = false\n").unwrap();
+        assert!(!off.codex_history.enabled);
     }
 }
