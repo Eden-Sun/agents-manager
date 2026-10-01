@@ -2314,7 +2314,13 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   | `agent_status = 'working'` / `'blocked'` | `working` / `blocked` | 跳過 |
   | `agent_status` 不是 `idle` | `unknown_status` | 跳過 |
   | 還有 `in_flight` Turn | `turn_in_flight` | 跳過 |
+  | 畫面底部還標著 N（> 0）個背景工作（§6.14，#767） | `background_jobs`（label 「背景執行中（N）」） | 跳過 |
   | 以上都不中 | — | 重啟 |
+
+  背景工作那一條（#767，使用者裁示）：agent 閒置不代表沒事在跑——重啟一退 CLI，背景 shell／終端跟著沒了。計畫時判一次、輪到它時 `recheck` 再判一次
+  （計畫之後才開始跑背景工作的跳過，不是失敗）；cli-update 的範圍批次走同一條，所以一併跳過。數字是**巡邏看過的**才算（`background_jobs::known`）：
+  daemon 剛重啟、新 run、畫面讀不到時沒有證據，**不擋**（`None` 與「看過、是 0」不同；API 的 `run.background_jobs` 沒看過是 `null`），
+  前端確認框在這幾顆旁標「背景狀態未知」。閒置回收（§6.11）有自己的三態判斷，不共用這一條。
 
   **2026-09-22 修**：以前候選直接限定 `kind == claude`，codex 有更新時整顆連候選都不算，`header`／批次框
   上完全看不到（使用者：「codex 有更新怎沒出現在 header」）。codex 的更新通知本來就分兩種
@@ -2671,7 +2677,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
   沒有 lsof 的遠端）都不扣：寧可多標，也不要把真的在跑的工作藏起來。codex 的背景終端照舊全算。
 - 數字記在記憶體、以 run 為鍵（`background_jobs.rs`）：屬於這個 process，新 run 自然歸零；run 結束那一輪就丟掉；daemon 重啟後
   等下一輪巡邏補上。數字變了才推 `bot_status`。背景跑完到畫面更新之間最多晚一輪（30 秒）。
-- 投影：`run.background_jobs`（`GET /api/state` 與 `bot_status` 的 run 物件）。**不改排隊／送 prompt 的語意**——agent 本身確實 idle。
+- 投影：`run.background_jobs`（`GET /api/state` 與 `bot_status` 的 run 物件）；巡邏還沒看過這個 run 時是 `null`（不是 0）。**不改排隊／送 prompt 的語意**——agent 本身確實 idle。一鍵重啟（§6.9）會跳過 `background_jobs > 0` 的 bot（#767）；`null` 不擋。
 - 網頁只在 run `running` 且 `agent_status = idle` 時標（回合中燈號已經說了）：側欄那格「閒置」換成「背景 N」、輸入框上方一條說明（標題列不放，2026-09-30 使用者）（claude 說 shell、codex 說終端）。
 
 ## 7. API

@@ -26,8 +26,8 @@ use std::time::Duration;
 /// 畫面底部看幾個非空行：claude 的模式列在最後一兩行；codex 的背景行上面還有額度警告、輸入框、狀態列、快捷鍵提示。
 const BOTTOM_LINES: usize = 8;
 
-/// `App.background_jobs`：run id → 背景工作數（只記 > 0 的）。掛在 App 上而不是 process 全域：同一個 process 裡的
-/// 另一個 App（測試）清自己的帳時不會清到這一份。
+/// `App.background_jobs`：run id → 背景工作數（**看過的**都記，含 0；沒有那一列＝巡邏還沒看過它，#767）。
+/// 掛在 App 上而不是 process 全域：同一個 process 裡的另一個 App（測試）清自己的帳時不會清到這一份。
 pub type Counts = Mutex<HashMap<String, u32>>;
 
 /// 畫面底部標著的背景工作數；沒有＝0。
@@ -58,7 +58,13 @@ fn codex_terminals(line: &str) -> Option<u32> {
 }
 
 pub fn get(app: &App, run_id: &str) -> u32 {
-    app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).get(run_id).copied().unwrap_or(0)
+    known(app, run_id).unwrap_or(0)
+}
+
+/// 巡邏看過這個 run 之後的數字；`None`＝還沒看過（daemon 剛重啟、新 run、畫面讀不到）。**沒有證據**：
+/// 一鍵重啟不拿它擋人，確認框標「背景狀態未知」（#767）。
+pub fn known(app: &App, run_id: &str) -> Option<u32> {
+    app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).get(run_id).copied()
 }
 
 /// claude 的 Bash 工具（前景與背景都是）：`<shell> -c source ~/.claude/shell-snapshots/snapshot-<shell>-….sh …`。
@@ -138,8 +144,8 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str, cl
     }
     let changed = {
         let mut m = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner());
-        let before = if n == 0 { m.remove(&run.id) } else { m.insert(run.id.clone(), n) };
-        before.unwrap_or(0) != n
+        // 0 也記：「看過、乾淨」跟「沒看過」不同（#767）。從沒看過到第一次看過也算變了，要推，前端才把「未知」換掉。
+        m.insert(run.id.clone(), n) != Some(n)
     };
     if changed {
         tracing::info!(run = %run.id, bot = %run.bot_id, kind, background_jobs = n, "background jobs changed");
@@ -156,7 +162,8 @@ pub fn retain_runs(app: &App, active: &[String]) {
 pub fn run_json<T: serde::Serialize>(app: &App, run: &Option<T>, run_id: Option<&str>) -> Value {
     let mut v = serde_json::to_value(run).unwrap_or(Value::Null);
     if let (Some(o), Some(id)) = (v.as_object_mut(), run_id) {
-        o.insert("background_jobs".into(), get(app, id).into());
+        // 沒觀察過是 `null`，不是 0（#767）。
+        o.insert("background_jobs".into(), known(app, id).into());
     }
     v
 }

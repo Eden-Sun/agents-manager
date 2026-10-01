@@ -34,6 +34,8 @@ pub struct Cand {
     pub turn_in_flight: bool,
     /// 使用者自己的 herdr `default` session（SPEC §6.5.1）：daemon 只觀察，不開、不關它的 pane。
     pub default_session: bool,
+    /// #714／#767：畫面底部標著的背景工作數；`None`＝巡邏還沒看過這個 run（沒有證據，不擋）。
+    pub background_jobs: Option<u32>,
 }
 
 /// `code` 給 API / 前端比對，`label` 給人看。
@@ -56,6 +58,8 @@ pub enum Skip {
     StateUnreadable,
     /// scoped restart 的原主機連線已被移除或改指，不能用相同名字改重啟新主機上的 bot。
     HostSuperseded,
+    /// 回合結束、agent 閒置，但畫面底部還標著 N 個背景工作（#714）：重啟一退 CLI，背景 shell／終端跟著沒了（#767）。
+    BackgroundJobs(u32),
 }
 
 impl Skip {
@@ -72,11 +76,16 @@ impl Skip {
             Skip::NoLongerPending => "no_longer_pending",
             Skip::StateUnreadable => "state_unreadable",
             Skip::HostSuperseded => "superseded",
+            Skip::BackgroundJobs(_) => "background_jobs",
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        use std::borrow::Cow::{Borrowed, Owned};
+        if let Skip::BackgroundJobs(n) = self {
+            return Owned(format!("背景執行中（{n}）"));
+        }
+        Borrowed(match self {
             Skip::Child => "子 agent：由父 bot 用 herdr 重開，daemon 不動它的 pane（SPEC §6.5a）",
             Skip::DefaultSession => "在你自己的 herdr default session 裡，daemon 不動它的 pane",
             Skip::NotRunning => "還在啟動或關閉中",
@@ -88,7 +97,8 @@ impl Skip {
             Skip::NoLongerPending => "排到它時已經不用重啟了（更新套用過或 run 不在了）",
             Skip::StateUnreadable => "讀不到它的狀態，這次沒動它；更新還在等，稍後再按一次",
             Skip::HostSuperseded => "主機設定已改變，沒有重啟新主機上的 bot",
-        }
+            Skip::BackgroundJobs(_) => unreachable!("handled above"),
+        })
     }
 }
 
@@ -120,6 +130,9 @@ pub fn skip_reason(c: &Cand) -> Option<Skip> {
         Some(Skip::UnknownStatus)
     } else if c.turn_in_flight {
         Some(Skip::TurnInFlight)
+    } else if let Some(n) = c.background_jobs.filter(|n| *n > 0) {
+        // 排在最後：它是閒置、沒有回合，唯一還擋著的是背景工作。`None`（沒看過）不擋——沒有證據。
+        Some(Skip::BackgroundJobs(n))
     } else {
         None
     }
@@ -154,6 +167,7 @@ async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result
             && notice.contains("需安裝"),
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
         default_session: lifecycle::in_default_session(run) || bot.herdr_session.as_deref() == Some("default"),
+        background_jobs: crate::background_jobs::known(app, &run.id),
     })
 }
 
@@ -862,6 +876,7 @@ mod tests {
             needs_manual_install: false,
             turn_in_flight: in_flight,
             default_session: false,
+            background_jobs: Some(0),
         }
     }
 
@@ -963,6 +978,68 @@ mod tests {
         assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["mine"]);
         assert_eq!(skip.iter().map(|(c, w)| (c.name.as_str(), *w)).collect::<Vec<_>>(), [("kid", Skip::Child)]);
         assert_eq!(Skip::Child.code(), "child");
+    }
+
+    /// #767：回合結束、agent 閒置，但畫面底部還標著背景工作（#714）——重啟一退 CLI，背景 shell／終端跟著沒了。
+    /// 跳過，理由 `background_jobs`、label 帶數字；數字是 0 或**還沒觀察過**（daemon 剛重啟、巡邏還沒輪到）時沒有證據，不擋。
+    #[test]
+    fn a_bot_with_background_work_is_skipped_but_an_unobserved_one_is_not() {
+        let busy = Cand { background_jobs: Some(2), ..cand("bg", "claude", "running", "idle", true, false) };
+        let none = cand("none", "claude", "running", "idle", true, false);
+        let unknown = Cand { background_jobs: None, ..cand("unknown", "claude", "running", "idle", true, false) };
+        let cands = [busy, none, unknown];
+        let (go, skip) = plan(&cands);
+        assert_eq!(go.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["none", "unknown"], "沒有證據不擋");
+        assert_eq!(skip.len(), 1);
+        assert_eq!(skip[0].1, Skip::BackgroundJobs(2));
+        assert_eq!(skip[0].1.code(), "background_jobs");
+        assert_eq!(skip[0].1.label(), "背景執行中（2）");
+        // 比它更該先處理的理由排在前面：正在跑的先說「正在跑」。
+        let working = Cand { background_jobs: Some(1), ..cand("w", "claude", "running", "working", true, false) };
+        assert_eq!(skip_reason(&working), Some(Skip::Working));
+    }
+
+    /// #767：計畫時就跳過，進 `skipped`（reason／reason_label 給前端直接顯示）；沒觀察過的照樣排進去。
+    #[tokio::test]
+    async fn the_plan_skips_a_bot_whose_pane_still_has_background_work() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (busy, busy_run) = pending_bot(&env, "bg", "claude", "Update installed · Restart to update").await;
+        let (fresh, _) = pending_bot(&env, "fresh", "claude", "Update installed · Restart to update").await;
+        app.background_jobs.lock().unwrap().insert(busy_run, 3);
+        let plan = spawn(&app).await.unwrap();
+        let skipped = plan["skipped"].as_array().unwrap();
+        let row = skipped.iter().find(|r| r["bot_id"] == busy).unwrap_or_else(|| panic!("背景工作在跑的要進 skipped：{plan}"));
+        assert_eq!(row["reason"], "background_jobs", "{plan}");
+        assert_eq!(row["reason_label"], "背景執行中（3）", "{plan}");
+        assert!(plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == fresh), "沒觀察過的不擋：{plan}");
+        assert!(!plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == busy), "{plan}");
+    }
+
+    /// #767：計畫之後、輪到它之前才開始跑背景工作（recheck 那一次要擋下）：跳過、不是失敗，也不動它的 run。
+    #[tokio::test]
+    async fn background_work_that_starts_after_the_plan_is_caught_at_restart_time() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (first, _) = pending_bot(&env, "first", "claude", "Update installed · Restart to update").await;
+        let (late, late_run) = pending_bot(&env, "late", "claude", "Update installed · Restart to update").await;
+        let events = collect_restart_events(&app);
+        let release = hold_batch_at(&first);
+        let plan = spawn(&app).await.unwrap();
+        assert!(plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == late), "計畫時它還是乾淨的：{plan}");
+        app.background_jobs.lock().unwrap().insert(late_run.clone(), 1);
+        release.send(()).unwrap();
+        assert!(
+            crate::testing::eventually!(events.lock().unwrap().iter().any(|(k, d)| k == "bots_restart_done" && d["batch_id"] == plan["batch_id"])),
+            "{:?}",
+            events.lock().unwrap()
+        );
+        let evs = events.lock().unwrap().clone();
+        let skip = evs.iter().find(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == late && d["status"] == "skipped").unwrap_or_else(|| panic!("{evs:?}"));
+        assert_eq!(skip.1["reason"], "background_jobs");
+        assert_eq!(skip.1["reason_label"], "背景執行中（1）");
+        assert!(!evs.iter().any(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == late && d["status"] == "restarting"), "不能動它：{evs:?}");
+        assert_eq!(db::active_run(&app.db, &late).await.unwrap().map(|r| r.id), Some(late_run), "它的 run 沒被動過");
     }
 
     /// SPEC §6.5.1：重啟會關掉使用者的終端（2026-09-12 review #4）。
