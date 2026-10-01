@@ -660,7 +660,7 @@ fn hook_user_is_new(existing: &[String], incoming: &str) -> bool {
 /// 外部回合的 hook 帶的「使用者訊息」其實是 transcript 裡最後一則 prompt：claude 自己接著做（背景 shell 跑完、
 /// 排程叫醒）的那一輪沒有新的 prompt，hook 還是回報上一則（2026-10-01 cf-ox-2：「ui 審查你自己做」多存一則）。
 /// 跟這一輪以外最近一則使用者訊息一樣、而且那一則的回合已經收掉，就是舊的那句，不再存。
-async fn repeats_answered_prompt(conn: &mut sqlx::SqliteConnection, conv: &str, turn_id: &str, incoming: &str) -> Result<bool> {
+pub(crate) async fn repeats_answered_prompt(conn: &mut sqlx::SqliteConnection, conv: &str, turn_id: &str, incoming: &str) -> Result<bool> {
     let last: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT m.content, t.status FROM messages m LEFT JOIN turns t ON t.id = m.turn_id
           WHERE m.conversation_id = ? AND m.role = 'user' AND (m.turn_id IS NULL OR m.turn_id <> ?)

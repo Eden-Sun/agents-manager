@@ -139,6 +139,30 @@ mod tests {
         assert_eq!(user_messages(&env, &bot_id).await.len(), 1, "run 沒有 transcript 路徑：照舊");
     }
 
+    /// 2026-10-01 wits-ops-web（遠端，transcript 讀不到）：claude 自己接著做的一輪，畫面上最後一則回音是上一則已經回答過的
+    /// prompt。沒有 transcript 可判斷時，回音跟上一則一樣、而且那一回合已收掉，就不再存；真的打了新的一句照存。
+    #[tokio::test]
+    async fn without_a_transcript_the_previous_answered_prompt_is_not_stored_again() {
+        let (env, mut run, bot_id) = with_transcript("").await;
+        run.transcript_path = None;
+        sqlx::query("UPDATE runs SET transcript_path=NULL WHERE id=?").bind(&run.id).execute(&env.app.db).await.unwrap();
+        let conv = db::conversation_id(&env.app.db, &bot_id).await.unwrap();
+        let answered = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','in_flight','ok',?)")
+            .bind(&answered).bind(&conv).bind(&run.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+        crate::lifecycle::insert_message(&env.app, &conv, Some(&answered), "user", "用 Bash 工具的 run_in_background 參數跑一個背景指令：sleep 20; echo done", "web", false, None).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed' WHERE id=?").bind(&answered).execute(&env.app.db).await.unwrap();
+
+        crate::lifecycle::begin_external_turn(&env.app, &run).await;
+        assert_eq!(user_messages(&env, &bot_id).await.len(), 1, "畫面上的回音是上一則：不再存一次");
+
+        // 收掉這一輪，換成使用者在 pane 裡打了新的一句：照存。
+        sqlx::query("UPDATE turns SET status='completed' WHERE origin='external'").execute(&env.app.db).await.unwrap();
+        env.herdr.set_screen(&format!("pane-{bot_id}"), SCREEN_TYPED_IN_THE_PANE);
+        crate::lifecycle::begin_external_turn(&env.app, &run).await;
+        assert_eq!(user_messages(&env, &bot_id).await.last().map(String::as_str), Some("順便看一下 lint"));
+    }
+
     /// 只有 claude 的 transcript 讀得懂：codex／grok 的 run 就算有路徑也照舊。
     #[tokio::test]
     async fn only_claude_transcripts_are_read() {
