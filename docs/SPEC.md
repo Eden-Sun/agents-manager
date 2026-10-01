@@ -2346,6 +2346,24 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
 - 回饋走 WS：`bots_restart_progress`（每顆 `restarting` / `ok`|`failed`）與 `bots_restart_done`（`ok`/`failed`/`skipped` 三張清單）。
 - UI 入口在額度列 claude 量表右邊的 `⬆ N` chip（`UpdateQuotaChip.tsx`），確認框列出要重啟與跳過的；側欄 `UpdateAllBanner` 只顯示進度與失敗／跳過名單。
 
+### 6.9b herdr 一鍵更新（完整重啟版）
+header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §12.7b，`daemon/src/herdr_upgrade.rs`）。不用 live handoff：
+換 binary → 在維護窗口（§6.5.2）裡重啟這顆 daemon 的 herdr server → 頂層 bot `resume_native` 接回。**只做 local**；遠端（尤其 `shared_session`，
+別顆 daemon 也在用那台的 herdr）一律 409。同一顆 daemon 同時只跑一個，進行中的狀態只在記憶體（`GET /api/state` 的 `herdr_updates`）。
+
+1. `downloading`：release asset（`herdr-{linux,macos}-{x86_64,aarch64}`）下載到 `<data_dir>/herdr-staging/<ver>/herdr`，`--version` 必須等於目標，
+   否則 `version_mismatch`、現行 binary 不動。現行 binary 只認 herdr 安裝器那種一般檔案（`~/.local/bin/herdr` 優先）；symlink（套件管理器裝的）不自動換，`install_path_unsupported`。
+2. `waiting_idle`：頂層 bot 沒有 `working`／`blocked`／回合在飛才往下（子 agent 反正會沒，不等），最多 30 分鐘；逾時 `busy_timeout`，窗口都沒開、什麼都沒動。
+3. `stopping`：以 `herdr_update` 名義開維護窗口（已有人開著＝`maintenance_busy`，不搶），窗口裡再看一次閒置（剛好有人送出就關窗口回去等），記下要接回的頂層 bot（總管排最後）與會失去的子 agent。
+4. 換 binary：新檔先複製到同目錄再 rename 蓋過去（原子），舊的留 `herdr.bak-<舊版>`。`restarting`：Linux `systemctl --user restart herdr@<session>.service`、
+   macOS `launchctl kickstart -k gui/<uid>/dev.agents-manager.herdr-<session>`，只動這顆 daemon 的 session。
+5. 等 ping 回來且 server 版本＝目標（最多 2 分鐘）。不是就 `rolling_back`：`.bak` 換回、再重啟一次、等舊版回來，`reason:"restart_failed"`，bot 照樣接回。
+6. `resuming`：記下的頂層 bot 逐顆 `restart_bot_with(resume_native)`。子 agent 的 pane 是母 bot 開的，daemon 重建不了：給每個母 bot 一則
+   daemon 來源的訊息（走 AGM 派工那條會排隊的路），列出失去的子 agent 名與原任務標題（run 的 `agent_title`），由母 bot 決定要不要重開。
+7. 關窗口（沒接回的子 agent 由 §6.5.2 第 3 條照原規則退休），推 `herdr_update_done`；成功時順手修正 `upstream-updates` 快照與 `hosts[].herdr`。
+
+每一步附加到 `<data_dir>/herdr-update.log`（`時間 update_id 目標版 phase 訊息`）。daemon 半途重啟時沒有接手：窗口 30 分鐘自己到期，換到一半的話 `.bak` 在旁邊、log 寫著做到哪。
+
 ### 6.10 Fork 頂層 bot（接續對話脈絡）
 - 入口：側欄 bot 列 `⋯` →「開同類分身…」→ 選「接續對話（fork）」→ `POST /api/bots/:id/fork`（`daemon/src/fork.rs`）；選「全新對話」走原本的建 bot＋啟動。只給頂層 bot：child 的 pane 與帳號環境是母 agent 開的，daemon 重建不出來；從 default session 匯入的也不行（§6.5.1）。
 - 來源 session：來源 bot 最近一次有 `native_session_id` 的 run（跑著的也算——三家 CLI 的 fork 都是讀對話檔，不打擾原本那顆）。本機對話檔不在就拒絕，避免 CLI 找不到對話直接退出。

@@ -153,6 +153,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/tools/install", post(install_tool))
         // header 一鍵升級 codex：裝好、驗版本、接著重啟那台的 codex（SPEC §6.9）。只給 UI。
         .route("/hosts/{name}/cli-update", post(crate::cli_update::post_cli_update))
+        // header 一鍵升級 herdr：下載驗版本 → 等閒置 → 維護窗口裡重啟 server → bot 接回（SPEC §6.9b）。只給 UI。
+        .route("/hosts/{name}/herdr-update", post(crate::herdr_upgrade::post_herdr_update))
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
         .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
         .route("/hosts/{name}/gh", get(get_gh_status))
@@ -748,6 +750,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         "restart_batch": crate::bulk_restart::running_batch(&app.data_dir),
         // 還沒收尾的 codex 升級（同一個理由：`cli_update_done` 收不到時的對帳來源）；存在 DB，daemon 重啟後也還在（#564）。
         "cli_updates": crate::cli_update::running_list(app).await,
+        "herdr_updates": crate::herdr_upgrade::running_list(app),
         "connected": connected,
         "default_connected": app.default_connected.load(Ordering::SeqCst),
         "herdr_session": app.herdr_session,
