@@ -1099,6 +1099,10 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         .await;
                     app.emit_bot_status(&bot.id).await;
                 }
+                // #750：server fallback 後實際在跑的模型（statusLine 是權威），校正 runtime_model、不碰 bots.model。
+                if body.provider == "claude" {
+                    crate::claude_live::adopt_statusline_model(app, r, &body.payload).await;
+                }
             }
             // Always keyed under the bot's **host**: remote limits must not land on the local row (SPEC §14).
             if let Some(idn) = identity {

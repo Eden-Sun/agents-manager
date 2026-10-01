@@ -758,6 +758,14 @@ claude 在對話裡印 `⎿  Set model to Sonnet 5.5 and saved …`／`⎿  Set 
 接回、分支、收編的 run 維持第一次只當基準（那一刻起的切換在 daemon 重啟後也一樣當基準）。已知限制：切換那行在
 下一輪巡邏前就被捲出 80 行就漏掉（忙的 pane）；巡邏列舉 active run 失敗（DB 暫時讀不到）就整輪跳過，基準與背景工作帳都不動，只有成功列舉出的清單才用來清掉已結束 run 的帳（#744）；指令行先被捲出而確認行還在，也當沒有。
 
+**statusLine 校正 runtime_model（claude，#750）**：有掛 hook 的 claude run，statusLine 的 `model.id` 是「實際在跑」的權威。
+CLI 被 API 拒絕而 server 端 fallback（2.1.286：同級退回上一版）時，argv 與 `bots.model` 寫 A、實際在跑 B；`hookrecv` 的
+StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發現 `model.id` 跟 `runs.runtime_model` 不同就 CAS 改寫並推 `bot_status`，
+**不動 `bots.model`**——UI 畫成「設定 A、實際 B」，重啟仍照設定值試 A；下一則又回 A 就收斂回去。模型專屬額度（`running_model`）因此讀 B。
+沒有 `model.id`（不從顯示名猜）、空字串、DB 讀寫失敗都保留舊值、不清空。啟動時記的是別名（`opus`、`fable`）而 statusLine 回同家族
+完整 id 不算分歧、不改寫（別名指到哪一版由 server 決定，也不會憑空多一條 drift）。沒有 statusLine 的收編子 agent 照舊走上一段的
+畫面確認行／argv，不混用。
+
 | kind | 執行中改 | 怎麼套用 |
 |---|---|---|
 | claude | 可以 | `apply_live_setting` 送 `/model <alias>`、`/effort <level>`；有對話紀錄時 `/model` 跳「Switch model?」確認框，daemon 回讀畫面按 `1`，關不掉就 Esc 並回 `needs_restart` |

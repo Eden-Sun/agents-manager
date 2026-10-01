@@ -107,6 +107,42 @@ pub fn retain_runs(active: &[String]) {
     baselines().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
 }
 
+/// statusLine 回報的 `model.id`（#750）：CLI 被 API 拒絕而 server 端 fallback（2.1.286：同級退回上一版）時，argv 與
+/// `bots.model` 寫的是 A、實際在跑的是 B，statusLine 的 model 才是權威。有掛 hook 的 claude run 以它校正
+/// `runs.runtime_model`（`bots.model` 不動，UI 自然畫成「設定 A、實際 B」，重啟仍照設定值試 A）；下一則又回 A 就收斂回 A。
+///
+/// 呼叫端已過世代圍籬（舊 run／舊 hook 進不來）。沒有 `model.id`（不從顯示名猜）、空字串、DB 讀寫失敗都保留舊值。
+/// 啟動時記的是別名（`opus`、`fable` 這類只有家族名）而 statusLine 回同家族的完整 id：別名本來就由 server 決定指到哪一版，
+/// 兩者不算分歧，不改寫（也避免畫面上憑空多出一條「模型」drift；模型專屬額度是以家族判斷的）。
+pub async fn adopt_statusline_model(app: &Arc<App>, run: &db::Run, payload: &serde_json::Value) {
+    let Some(id) = payload.pointer("/model/id").and_then(|v| v.as_str()).map(str::trim).filter(|m| !m.is_empty()) else {
+        return;
+    };
+    if let Some(cur) = run.runtime_model.as_deref() {
+        let alias_of_same_family = matches!(cur, "opus" | "sonnet" | "haiku" | "fable") && id.to_ascii_lowercase().starts_with(&format!("claude-{cur}-"));
+        if cur.eq_ignore_ascii_case(id) || alias_of_same_family {
+            return;
+        }
+    }
+    // CAS：只在這個 run 還活著、值真的不一樣時寫；同時有別的寫入者（`/model`、live apply）時以資料庫現況為準。
+    let wrote = sqlx::query(
+        "UPDATE runs SET runtime_model = ? WHERE id = ? AND state IN ('starting','running') AND COALESCE(runtime_model, '') <> ?",
+    )
+    .bind(id)
+    .bind(&run.id)
+    .bind(id)
+    .execute(&app.db)
+    .await;
+    match wrote {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::info!(run = %run.id, from = ?run.runtime_model, to = id, "statusLine reports a different model than the run's recorded one");
+            app.emit_bot_status(&run.bot_id).await;
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(run = %run.id, error = %e, "could not record the statusLine model, keeping the old value"),
+    }
+}
+
 /// 巡邏讀到一份 claude 畫面：有切換而且跟記著的不一樣才寫、才推 `bot_status`。
 pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
     let seen = parse(screen);
@@ -287,6 +323,89 @@ mod tests {
         observe(&app, &run, SCREEN).await;
         let b = db::bot(&app.db, &kid.id).await.unwrap().unwrap();
         assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "下一輪補上 model 與 effort");
+    }
+
+    /// 2.1.286 同級 fallback：argv／設定是 Opus 5.5，server 退回上一版（statusLine 回的 id 不同）。
+    fn statusline(model: serde_json::Value) -> crate::hookrecv::HookBody {
+        crate::hookrecv::HookBody {
+            bot_id: String::new(),
+            provider: "claude".into(),
+            payload: serde_json::json!({"hook_event_name": "StatusLine", "session_id": "s-750", "model": model}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_statusline_model_corrects_runtime_model_but_never_the_configured_one() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "fallback750").await;
+        sqlx::query("UPDATE bots SET model = 'claude-opus-5-5' WHERE id = ?").bind(&bot.id).execute(&app.db).await.unwrap();
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET runtime_model = 'claude-opus-5-5' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
+        let runtime = || async { db::run(&app.db, &run_id).await.unwrap().unwrap().runtime_model };
+        let send = |model: serde_json::Value| {
+            let mut body = statusline(model);
+            body.bot_id = bot.id.clone();
+            let app = app.clone();
+            async move { crate::hookrecv::process(&app, &body).await.unwrap() }
+        };
+
+        send(serde_json::json!({"id": "claude-opus-5", "display_name": "Opus 5"})).await;
+        assert_eq!(runtime().await.as_deref(), Some("claude-opus-5"), "實際在跑的是 fallback 後那一版");
+        let b = db::bot(&app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(b.model.as_deref(), Some("claude-opus-5-5"), "設定值不動，UI 才畫得出 drift");
+
+        // 沒有 id（只有顯示名）、空 id、沒有 model：保留舊值，不清空、不猜。
+        send(serde_json::json!({"display_name": "Opus 5.5"})).await;
+        send(serde_json::json!({"id": "  "})).await;
+        send(serde_json::Value::Null).await;
+        assert_eq!(runtime().await.as_deref(), Some("claude-opus-5"));
+
+        send(serde_json::json!({"id": "claude-opus-5-5"})).await;
+        assert_eq!(runtime().await.as_deref(), Some("claude-opus-5-5"), "下一則又回設定的那一版就收斂回去");
+
+        // 啟動時記的是別名：同家族的完整 id 不算分歧。
+        sqlx::query("UPDATE runs SET runtime_model = 'opus' WHERE id = ?").bind(&run_id).execute(&app.db).await.unwrap();
+        send(serde_json::json!({"id": "claude-opus-5-5"})).await;
+        assert_eq!(runtime().await.as_deref(), Some("opus"));
+        send(serde_json::json!({"id": "claude-sonnet-5-5"})).await;
+        assert_eq!(runtime().await.as_deref(), Some("claude-sonnet-5-5"), "別家族一定是真的換了");
+    }
+
+    #[tokio::test]
+    async fn a_stale_statusline_cannot_overwrite_the_current_run_and_a_db_error_keeps_the_old_value() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "stale750").await;
+        let old = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET state = 'exited', ended_at = ?, runtime_model = 'claude-opus-5-5', native_session_id = 's-old' WHERE id = ?")
+            .bind(db::now())
+            .bind(&old)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let cur = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET runtime_model = 'claude-opus-5-5', native_session_id = 's-cur' WHERE id = ?").bind(&cur).execute(&app.db).await.unwrap();
+
+        // 舊 session 的 statusLine（世代圍籬擋下）不能改到現在這個 run。
+        let mut body = statusline(serde_json::json!({"id": "claude-haiku-4-5"}));
+        body.bot_id = bot.id.clone();
+        body.payload["session_id"] = serde_json::json!("s-old");
+        crate::hookrecv::process(&app, &body).await.unwrap();
+        let r = db::run(&app.db, &cur).await.unwrap().unwrap();
+        assert_eq!(r.runtime_model.as_deref(), Some("claude-opus-5-5"));
+
+        // DB 寫入失敗：保留舊值（不清空）。
+        sqlx::query("CREATE TRIGGER refuse_runtime BEFORE UPDATE OF runtime_model ON runs BEGIN SELECT RAISE(ABORT, 'boom'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        adopt_statusline_model(&app, &r, &serde_json::json!({"model": {"id": "claude-opus-5"}})).await;
+        let r = db::run(&app.db, &cur).await.unwrap().unwrap();
+        assert_eq!(r.runtime_model.as_deref(), Some("claude-opus-5-5"));
     }
 
     #[tokio::test]
