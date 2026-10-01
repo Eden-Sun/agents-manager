@@ -96,19 +96,27 @@ test('標題只加 bot 的份——群組未讀是同一批回覆的第二份帳
 
 test('未讀數與已讀標記存得回來（跨重整的那一段）', () => {
   stubStorage()
-  saveCounts({ bots: { b1: 2 }, groups: { p1: 1 } })
+  saveCounts({ bots: { b1: 2 } })
   saveMarks({ 'bot:b1': { at: '2026-09-07T00:00:02Z', id: 'm2' } })
-  assert.deepEqual(loadCounts(), { bots: { b1: 2 }, groups: { p1: 1 } })
+  assert.deepEqual(loadCounts(), { bots: { b1: 2 } })
   assert.deepEqual(loadMarks(), { 'bot:b1': { at: '2026-09-07T00:00:02Z', id: 'm2' } })
+})
+
+test('群組未讀不再存本機（#756，以 daemon 為準）：舊版寫的 group: 鍵讀進來就丟，下次存檔也不帶', () => {
+  const map = stubStorage()
+  map.set('am.unread', JSON.stringify({ 'bot:b1': 2, 'group:p1': 7 }))
+  assert.deepEqual(loadCounts(), { bots: { b1: 2 } })
+  saveCounts(loadCounts())
+  assert.equal(map.get('am.unread'), JSON.stringify({ 'bot:b1': 2 }))
 })
 
 test('0 不寫進去；讀不到 / 壞掉的內容當作全部已讀', () => {
   const map = stubStorage()
-  saveCounts({ bots: { b1: 0 }, groups: {} })
+  saveCounts({ bots: { b1: 0 } })
   assert.equal(map.get('am.unread'), '{}')
   map.set('am.unread', 'not json')
   map.set('am.readMarks', '[1,2]')
-  assert.deepEqual(loadCounts(), { bots: {}, groups: {} })
+  assert.deepEqual(loadCounts(), { bots: {} })
   assert.deepEqual(loadMarks(), {})
 })
 
@@ -117,9 +125,9 @@ test('localStorage 整支不能用時不會炸（無痕視窗）', () => {
     getItem: () => { throw new Error('denied') },
     setItem: () => { throw new Error('denied') },
   }
-  assert.deepEqual(loadCounts(), { bots: {}, groups: {} })
+  assert.deepEqual(loadCounts(), { bots: {} })
   assert.deepEqual(loadMarks(), {})
-  saveCounts({ bots: { b1: 1 }, groups: {} })
+  saveCounts({ bots: { b1: 1 } })
   saveMarks({ 'bot:b1': { at: 'x', id: 'y' } })
 })
 

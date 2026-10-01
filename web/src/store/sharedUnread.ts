@@ -1,4 +1,4 @@
-import type { Bot } from '../api/types'
+import type { Bot, Project } from '../api/types'
 import type { ReadMark } from './unread'
 
 /**
@@ -32,6 +32,25 @@ export function serverUnread(
     changed = true
     if (b.unread > 0) next[b.id] = b.unread
     else delete next[b.id]
+  }
+  return changed ? next : null
+}
+
+/** 同 `serverUnread`，給專案標題的群組未讀（#756）：daemon 沒給數字的舊版、正在看的群組、已讀還沒送到的專案都不動。 */
+export function serverGroupUnread(
+  projects: readonly Pick<Project, 'id' | 'group_unread'>[],
+  current: Record<string, number>,
+  viewing: (id: string) => boolean,
+  unsent: { has: (id: string) => boolean } = new Set<string>(),
+): Record<string, number> | null {
+  let changed = false
+  const next = { ...current }
+  for (const p of projects) {
+    if (typeof p.group_unread !== 'number' || viewing(p.id) || unsent.has(p.id)) continue
+    if ((current[p.id] ?? 0) === p.group_unread) continue
+    changed = true
+    if (p.group_unread > 0) next[p.id] = p.group_unread
+    else delete next[p.id]
   }
   return changed ? next : null
 }

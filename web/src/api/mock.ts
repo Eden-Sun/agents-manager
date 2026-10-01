@@ -893,6 +893,7 @@ export class MockTransport implements Transport {
     { const r = this.serverDrafts.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
+    { const m = rawPath.match(/^\/projects\/([^/]+)\/group\/read$/); if (method === 'POST' && m) return { project_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
     // §6.5e：專案底下的非 agent pane（只回這個專案自己的，沒歸屬的走 `?unowned=1`）。
     { const m = rawPath.match(/^\/projects\/([^/]+)\/panes$/); if (method === 'GET' && m) return this.projectPanes(decodeURIComponent(m[1])) }

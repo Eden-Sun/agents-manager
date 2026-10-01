@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import type { Bot } from '../api/types.ts'
-import { laterMark, serverUnread } from './sharedUnread.ts'
+import type { Bot, Project } from '../api/types.ts'
+import { laterMark, serverGroupUnread, serverUnread } from './sharedUnread.ts'
 
 const bot = (id: string, unread?: number, extra: Partial<Bot> = {}) => ({ id, unread, ...extra }) as Bot
 
@@ -28,4 +28,18 @@ test('已讀還沒送到 daemon 的那顆跳過：快照的舊數字不可以把
   const unsent = new Set(['a'])
   assert.equal(serverUnread([bot('a', 3)], {}, () => false, unsent), null)
   assert.deepEqual(serverUnread([bot('a', 3), bot('b', 2)], {}, () => false, unsent), { b: 2 })
+})
+
+const proj = (id: string, group_unread?: number) => ({ id, group_unread }) as Project
+
+test('群組未讀以 daemon 的為準（#756）：別台讀過的清掉、沒開著時回來的補上', () => {
+  assert.deepEqual(serverGroupUnread([proj('a', 2), proj('b', 0), proj('c', 1)], { b: 3 }, () => false), { a: 2, c: 1 })
+})
+
+test('群組：正在看的、舊 daemon 沒給數字的、已讀還沒送出的都不動；沒變就回 null', () => {
+  assert.equal(serverGroupUnread([proj('a', 5), proj('old')], { a: 1, old: 4 }, (id) => id === 'a'), null)
+  assert.equal(serverGroupUnread([proj('a', 1)], { a: 1 }, () => false), null)
+  const unsent = new Set(['a'])
+  assert.equal(serverGroupUnread([proj('a', 3)], {}, () => false, unsent), null)
+  assert.deepEqual(serverGroupUnread([proj('a', 3), proj('b', 2)], {}, () => false, unsent), { b: 2 })
 })

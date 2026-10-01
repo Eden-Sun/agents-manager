@@ -63,16 +63,15 @@ export interface PatchBotOutcome {
   deferred: boolean
   remappedModel: ModelRemap | null
 }
-import { laterMark, serverUnread } from './sharedUnread'
+import { laterMark, serverGroupUnread, serverUnread } from './sharedUnread'
 import { viewingBot, viewingGroup } from './viewing'
-import { confirmGroupTurn, dropLegacyGroupCounts, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
+import { confirmGroupTurn, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
 import {
   botKey,
   clearHookCompletion,
   completesTurn,
   completionKey,
   countUnreadTurns,
-  groupKey,
   idleEdgeCompletionKey,
   loadCounts,
   loadMarks,
@@ -267,7 +266,7 @@ function readKindDisplay(): KindDisplay {
 }
 
 /** 未讀見 `store/unread.ts`。已讀標記留模組層不進 state：沒畫面讀它，進 state 只多一次 render。 */
-const initialUnread = dropLegacyGroupCounts(loadCounts())
+const initialUnread = loadCounts()
 let readMarks = loadMarks()
 
 function setReadMark(key: string, mark: ReadMark) {
@@ -275,8 +274,9 @@ function setReadMark(key: string, mark: ReadMark) {
   saveMarks(readMarks)
 }
 
-function persistUnread(s: { botUnread: Record<string, number>; groupUnread: Record<string, number> }) {
-  saveCounts({ bots: s.botUnread, groups: s.groupUnread })
+/** 群組未讀不存本機：daemon 算、跨裝置共用（`serverGroupUnread`），本機只留記憶體裡的即時 +1。 */
+function persistUnread(s: { botUnread: Record<string, number> }) {
+  saveCounts({ bots: s.botUnread })
 }
 
 export interface Notice {
@@ -766,9 +766,23 @@ function sendReadMark(botId: string, mark: ReadMark) {
     .catch(() => {})
 }
 
+/** 群組已讀同理（#756）：補送成功前 `serverGroupUnread` 跳過這些專案。 */
+const unsentGroupReads = new Map<string, ReadMark>()
+
+function sendGroupReadMark(projectId: string, mark: ReadMark) {
+  unsentGroupReads.set(projectId, mark)
+  void api
+    .markGroupRead(projectId, mark)
+    .then(() => {
+      if (unsentGroupReads.get(projectId) === mark) unsentGroupReads.delete(projectId)
+    })
+    .catch(() => {})
+}
+
 /** socket 重開＝daemon 回來了，把欠的已讀補送出去（別台裝置也才看得到）。 */
 function flushUnsentReads() {
   for (const [botId, mark] of [...unsentReads]) sendReadMark(botId, mark)
+  for (const [projectId, mark] of [...unsentGroupReads]) sendGroupReadMark(projectId, mark)
 }
 
 /** 在飛的 `POST /api/order` 數；歸零時 `refreshState` 清掉樂觀順序，別台裝置的順序才會過來。 */
@@ -864,7 +878,7 @@ export const useStore = create<StoreState>((set, get) => {
   selectedProjectId: initialSelection.projectId,
   groupMessages: {},
   loadedProjects: {},
-  groupUnread: initialUnread.groups,
+  groupUnread: {},
 
   missions: {},
   missionDetail: {},
@@ -1026,6 +1040,9 @@ export const useStore = create<StoreState>((set, get) => {
         set({ botUnread: next })
         persistUnread(get())
       }
+      // 群組未讀同樣以 daemon 為準（#756）：別台讀過的清掉、這個分頁沒開著時回來的補上。
+      const g = serverGroupUnread(s.projects, s.groupUnread, (id) => viewingGroup(s, id) && windowActive(), unsentGroupReads)
+      if (g) set({ groupUnread: g })
     }
     get().pruneUnread()
     if (behindFrames) void get().refreshState()
@@ -1326,10 +1343,10 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   markGroupRead: (projectId) => {
-    setReadMark(groupKey(projectId), markOfMessages(get().groupMessages[projectId] ?? []) ?? markNow())
+    // 已讀位置在 daemon（#756），本機不留標記：開著的群組時間軸若比標記新，daemon 只往前推。
+    sendGroupReadMark(projectId, markOfMessages(get().groupMessages[projectId] ?? []) ?? markNow())
     if (!get().groupUnread[projectId]) return
     set((s) => ({ groupUnread: withoutKey(s.groupUnread, projectId) }))
-    persistUnread(get())
   },
 
   markCurrentRead: () => {
@@ -1348,7 +1365,7 @@ export const useStore = create<StoreState>((set, get) => {
     const s = get()
     const liveBot = (id: string) => s.bots.some((b) => b.id === id)
     const liveProject = (id: string) => s.projects.some((p) => p.id === id)
-    readMarks = pruneMarks(readMarks, liveBot, liveProject)
+    readMarks = pruneMarks(readMarks, liveBot)
     saveMarks(readMarks)
     const botUnread = pruneUnread(s.botUnread, liveBot)
     const groupUnread = pruneUnread(s.groupUnread, liveProject)
@@ -2786,7 +2803,6 @@ function noteGroupTurnDone(set: SetFn, get: GetFn, projectId: string, turnId: st
   }
   if (!takeTurnCompletion(`group:${projectId}`, turnId)) return
   set((s) => ({ groupUnread: { ...s.groupUnread, [projectId]: (s.groupUnread[projectId] ?? 0) + 1 } }))
-  persistUnread(get())
 }
 
 /** 只有群組回合才記到專案（`store/groupUnread.ts`）；要抓訊息確認時非同步記。 */
@@ -3207,6 +3223,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'identities_changed':
     case 'project_changed':
     case 'bot_read':
+    case 'group_read':
     case 'bot_changed': {
       void get().refreshState()
       return

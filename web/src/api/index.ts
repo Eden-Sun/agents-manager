@@ -266,6 +266,11 @@ export async function markBotRead(botId: string, mark: { at: string; id: string 
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/read`, { at: mark.at, message_id: mark.id })
 }
 
+/** 專案群組的已讀位置，同 `markBotRead`；daemon 推 `group_read`。 */
+export async function markGroupRead(projectId: string, mark: { at: string; id: string }): Promise<void> {
+  await transport.request('POST', `/projects/${encodeURIComponent(projectId)}/group/read`, { at: mark.at, message_id: mark.id })
+}
+
 export async function movePaneToTab(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/pane/move-to-tab`)
 }

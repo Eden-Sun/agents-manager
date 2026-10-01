@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   confirmGroupTurn,
-  dropLegacyGroupCounts,
   isGroupTurn,
   isGroupTurnCandidate,
   noteGroupPrompt,
@@ -96,37 +95,6 @@ test('確認：抓失敗會退避重試；全失敗不記成「不是」，之�
   assert.equal(await confirmGroupTurn('B1', 't-g', rec, flaky, [1, 1]), true)
 })
 
-function withStorage(store: Record<string, string>, failSet: (key: string) => boolean, run: () => void) {
-  const g = globalThis as unknown as Record<string, unknown>
-  const prev = g.localStorage
-  g.localStorage = {
-    getItem: (k: string) => (k in store ? store[k] : null),
-    setItem: (k: string, v: string) => {
-      if (failSet(k)) throw new Error('QuotaExceededError')
-      store[k] = v
-    },
-  }
-  try {
-    run()
-  } finally {
-    g.localStorage = prev
-  }
-}
-
-test('舊群組數字存不回去就不寫遷移標記，下次開機再清；bot 未讀保留', () => {
-  const store: Record<string, string> = { 'am.unread': JSON.stringify({ 'group:P1': 150, 'bot:B1': 3 }) }
-  withStorage(store, (k) => k === 'am.unread', () => {
-    const out = dropLegacyGroupCounts({ bots: { B1: 3 }, groups: { P1: 150 } })
-    assert.deepEqual(out, { bots: { B1: 3 }, groups: {} })
-  })
-  assert.equal(store['am.groupUnread.v3'], undefined)
-  withStorage(store, () => false, () => {
-    assert.deepEqual(dropLegacyGroupCounts({ bots: { B1: 3 }, groups: { P1: 150 } }), { bots: { B1: 3 }, groups: {} })
-  })
-  assert.equal(store['am.groupUnread.v3'], '1')
-  assert.deepEqual(JSON.parse(store['am.unread']), { 'bot:B1': 3 })
-})
-
 // ── 整合：真的 import store、跑 bootstrap，每次開機一個行程（見 groupUnreadBoot.harness.ts） ──
 
 const HARNESS = join(import.meta.dirname, 'groupUnreadBoot.harness.ts')
@@ -172,7 +140,7 @@ test('整合：群組 prompt 在重整前送出、回覆在重整後到達，停
   const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
   const storage = join(dir, 'storage.json')
   // 重整前：人停在 P2 的 O1 單 bot 頁，P1 從沒打開過；前一個分頁已經做完群組遷移。
-  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }), 'am.groupUnread.v3': '1' }))
+  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
   const state = {
     daemon_seq: 1,
     projects: [
@@ -212,49 +180,34 @@ test('整合：群組 prompt 在重整前送出、回覆在重整後到達，停
   // 只有開機載入的單 bot 頁與兩個候選回合抓訊息；一般回合（B3）、已認得的（t-g2）不抓。
   assert.deepEqual([...out.fetches].sort(), ['B1', 'B2', 'O1'])
 
-  // 再重整一次：數字從 localStorage 回來，不重算也不歸零。
-  const again = boot(storage, { state: { ...state, projects: state.projects.map((p) => ({ ...p, bots: p.bots.map((b) => ({ ...b, in_flight_turn: null })) })) }, frames: [] })
+  // 再重整一次：本機什麼都不存，數字從 daemon 的快照回來（daemon 以訊息表算出同樣的 2 與 1）。
+  const again = boot(storage, {
+    state: { ...state, projects: state.projects.map((p) => ({ ...p, group_unread: p.id === 'P1' ? 2 : 1, bots: p.bots.map((b) => ({ ...b, in_flight_turn: null })) })) },
+    frames: [],
+  })
   assert.deepEqual(again.groupUnread, { P1: 2, P2: 1 })
 })
 
-test('整合：舊算法的 99+ 連續兩次開機都不會回來，bot 未讀保留', () => {
+test('整合：群組未讀以 daemon 的數字為準（#756）：本機舊的 group: 數字不讀，別台讀過的清掉，沒開著時回來的補上', () => {
   const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
   const storage = join(dir, 'storage.json')
-  // 人停在 O1：被選中的 bot 開機會依訊息重算，B1 的數字才看得出有沒有被遷移動到。
+  // 舊版把群組數字存在這裡（還有 99+ 的）：現在完全不認。
   writeFileSync(
     storage,
     JSON.stringify({ 'am.unread': JSON.stringify({ 'group:P1': 150, 'bot:B1': 3 }), 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }),
   )
-  const scenario = { state: { daemon_seq: 1, projects: [{ id: 'P1', path: '/p1', bots: [bot('B1'), bot('O1')] }] }, frames: [] }
-
-  const first = boot(storage, scenario)
-  assert.deepEqual(first.groupUnread, {})
+  const projects = (g1: number, g2: number) => [
+    { id: 'P1', path: '/p1', group_unread: g1, bots: [bot('B1'), bot('O1')] },
+    { id: 'P2', path: '/p2', group_unread: g2, bots: [bot('B2')] },
+  ]
+  const first = boot(storage, { state: { daemon_seq: 1, projects: projects(0, 4) }, frames: [] })
+  assert.deepEqual(first.groupUnread, { P2: 4 }, 'P1 的 150 不讀；P2 是這個分頁沒開著時回來的，daemon 的數字補上')
   assert.deepEqual(first.botUnread, { B1: 3 })
   const saved = JSON.parse(readFileSync(storage, 'utf8')) as Record<string, string>
-  assert.deepEqual(JSON.parse(saved['am.unread']), { 'bot:B1': 3 })
-  assert.equal(saved['am.groupUnread.v3'], '1')
+  assert.equal(JSON.stringify(saved['am.unread']).includes('group:P2'), false, 'daemon 給的群組數字不寫進本機')
 
-  const second = boot(storage, scenario)
-  assert.deepEqual(second.groupUnread, {})
-  assert.deepEqual(second.botUnread, { B1: 3 })
-})
-
-test('整合：72c332a 已寫過 v2 標記、群組又讀回 99+ 的分頁，升級後照樣清掉', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
-  const storage = join(dir, 'storage.json')
-  writeFileSync(
-    storage,
-    JSON.stringify({
-      'am.unread': JSON.stringify({ 'group:P1': 150, 'bot:B1': 3 }),
-      'am.groupUnread.v2': '1',
-      'am.selection': JSON.stringify({ botId: 'O1', projectId: null }),
-    }),
-  )
-  const scenario = { state: { daemon_seq: 1, projects: [{ id: 'P1', path: '/p1', bots: [bot('B1'), bot('O1')] }] }, frames: [] }
-  assert.deepEqual(boot(storage, scenario).groupUnread, {})
-  const second = boot(storage, scenario)
-  assert.deepEqual(second.groupUnread, {})
-  assert.deepEqual(second.botUnread, { B1: 3 })
+  // 在別台讀掉 P2：下一次開機 daemon 說 0。
+  assert.deepEqual(boot(storage, { state: { daemon_seq: 1, projects: projects(0, 0) }, frames: [] }).groupUnread, {})
 })
 
 /** issue #122：排隊中的 turn（起 bot 中、啟動失敗原因更新）推來的 `turn_updated` 不是「回合完成」——
@@ -262,14 +215,14 @@ test('整合：72c332a 已寫過 v2 標記、群組又讀回 99+ 的分頁，升
 test('整合：queued 的 turn_updated 不算完成，之後真正完成才記一次未讀', () => {
   const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
   const storage = join(dir, 'storage.json')
-  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }), 'am.groupUnread.v3': '1' }))
+  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
   const state = { daemon_seq: 1, projects: [{ id: 'P1', path: '/p1', bots: [bot('B3'), bot('O1')] }] }
   const queuedOnly = [
     { seq: 2, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-q', 'web-q', 'queued') } },
     { seq: 3, type: 'turn_updated', data: { bot_id: 'B3', turn: { ...turn('t-q', 'web-q', 'queued'), start_error: '找不到 claude' } } },
   ]
   assert.deepEqual(boot(storage, { state, frames: queuedOnly }).botUnread, {}, '還沒開始的不算完成')
-  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }), 'am.groupUnread.v3': '1' }))
+  writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
   const done = [...queuedOnly, { seq: 4, type: 'turn_updated', data: { bot_id: 'B3', turn: turn('t-q', 'web-q', 'completed') } }]
   assert.deepEqual(boot(storage, { state, frames: done }).botUnread, { B3: 1 }, '真正完成那一次照樣記')
 })
@@ -284,7 +237,6 @@ test('整合：人在前景、選著專案，但畫面是 shell 面板——群�
       JSON.stringify({
         // 選著 P1 的群組（`viewPane`／「在這裡開 shell」都不會清掉它）。
         'am.selection': JSON.stringify({ botId: null, projectId: 'P1' }),
-        'am.groupUnread.v3': '1',
         ...(shell ? { 'am.shellView': JSON.stringify({ host: 'local', paneId: 'w1:p9', cwd: '/p1' }) } : {}),
       }),
     )

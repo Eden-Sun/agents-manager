@@ -29,6 +29,9 @@ export interface Project {
   github: ProjectGithub | null
   /** #708：已移交給這台主機的 daemon 管；null／沒有＝這顆 daemon 管。 */
   handed_off_to?: string | null
+  /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
+  group_unread?: number
+  group_read_mark?: { at: string; id: string } | null
   created_at: string
 }
 

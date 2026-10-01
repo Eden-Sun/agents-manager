@@ -274,6 +274,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (33, "ed264766628799b2"),
     // 2026-10-01：`composer_drafts`（輸入框草稿存 daemon，各瀏覽器同步）。
     (34, "1fb4da468542c3bb"),
+    // issue #756：`project_group_reads`（專案群組已讀標記存 daemon，跨裝置共用）。
+    (35, "fe4e118f866a5cfd"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

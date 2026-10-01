@@ -16,7 +16,7 @@ test('主畫面照常寫（預設就是不在預覽裡）', () => {
     getItem: (k: string) => map.get(k) ?? null,
     setItem: (k: string, v: string) => void map.set(k, v),
   }
-  saveCounts({ bots: { b1: 2 }, groups: {} })
+  saveCounts({ bots: { b1: 2 } })
   assert.equal(map.size, 1)
 })
 
