@@ -43,4 +43,5 @@
    以及 profile 目錄刪掉幾個、釋出多少空間。
 4. 若記憶體不足導致指令被殺，回報這點並停止，不要重試迴圈。
 
-補充（2026-09-10 實戰經驗）：ego lite 的 CLI 卡住時，根因通常是背景服務程序 `ego lite --startup-ego-browser-service` 卡死；`osascript quit` 和 `open -a` 都會逾時。處理方式：先 `osascript -e 'quit app "ego lite"'`（逾時沒關係），`pkill -f '/Applications/ego lite'`，再對殘留的 `--startup-ego-browser-service` 程序 `kill -9`，最後 `open -a "ego lite"`，等 15 秒後用 `listTaskSpaces()` 驗證。這會關掉所有 ego lite 視窗，只在 CLI 確認無回應時才做。
+補充（2026-09-10 實戰經驗）：ego lite 的 CLI 卡住時，根因通常是背景服務程序 `ego lite --startup-ego-browser-service` 卡死；`osascript quit` 和 `open -a` 都會逾時。處理方式：先 `osascript -e 'quit app "ego lite"'`（逾時沒關係），`pkill -f '/Applications/ego lite'`，再對殘留的 `--startup-ego-browser-service` 程序 `kill -9`，最後 `open -a "ego lite"`，等 15 秒後用 `listTaskSpaces()` 驗證。這會關掉所有 ego lite 視窗（包括「ChatGPT 決策顧問」），只在 CLI 確認無回應時才做；
+**重開前先查 OB 有沒有請求正在用瀏覽器**：`python3 ~/.config/agents-manager/ob/bin/ob.py status`，`worker_running` 是 true、或 `requests` 裡有 `running`／`unknown` 的，就**不重開**（會把已送出的網頁問題切斷，之後只能 `collect`），回報寫明「ego lite 無回應但 OB 忙，等下一輪」。查不到 OB（指令不存在或報錯）就照原樣處理。
