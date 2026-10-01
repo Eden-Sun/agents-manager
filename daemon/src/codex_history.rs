@@ -29,8 +29,9 @@ use crate::state::App;
 /// 一頁最多拿幾筆、最多翻幾頁（基準之後的新東西一定很少；翻不到基準就當證不出來）。
 const PAGE_LIMIT: u32 = 50;
 const MAX_PAGES: usize = 4;
-/// 開 app-server + initialize + 一次請求的總時限。
-const CALL_TIMEOUT: Duration = Duration::from_secs(8);
+/// 開 app-server + initialize + 一次請求的總時限。測試 build 放寬：整樹並行高負載時，起一個假 `codex` 子行程可能慢到數秒，
+/// 沒有測試是靠這個逾時才過的。
+const CALL_TIMEOUT: Duration = if cfg!(test) { Duration::from_secs(60) } else { Duration::from_secs(8) };
 
 /// 嚴格綁定：哪台主機、哪個 `CODEX_HOME`、哪條 thread。三個一起才算同一份歷史。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -797,19 +798,36 @@ mod tests {
         assert!(hook.get().is_none());
     }
 
+    /// 寫一支假腳本並確定它**已經可以被 exec**：整樹並行時別條測試在別的執行緒 `fork`，會短暫繼承這個檔案的寫入 fd 直到它自己 `exec`，
+    /// 這段時間 exec 我們剛寫好的腳本會回 `ETXTBSY`（Text file busy，issue #189 同一個形狀），`AppServerConn::start` 就成了 `Unavailable`。
+    /// 腳本第一行在 `AM_TEST_EXEC_PROBE` 有設時直接 `exit 0`；寫完用它 exec 一次、還被擋就重試——等的是條件，不是睡一個固定時間。
+    fn write_exec(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, format!("#!/bin/sh\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{body}")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            match std::process::Command::new(path).env("AM_TEST_EXEC_PROBE", "1").output() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && started.elapsed() < Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(2)),
+                r => {
+                    assert!(r.unwrap().status.success());
+                    return;
+                }
+            }
+        }
+    }
+
     /// 真的 app-server 的 JSON-RPC 往返：用一支假的 `codex`（shell script）驗證 initialize／initialized、
     /// 略過 notification、error 轉成 `HistoryError::Rpc`、`CODEX_HOME` 帶進子行程。
     #[tokio::test]
     async fn the_app_server_conn_speaks_jsonrpc_over_stdio() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = std::env::temp_dir().join(format!("agm-codex-history-{}", db::ulid()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("codex");
         // 讀一行回一行：initialize 前先噴一則 notification；items/list 回一筆並帶 CODEX_HOME 當 item id；turns/list 回 error。
-        std::fs::write(
+        write_exec(
             &script,
-            r#"#!/bin/sh
-while IFS= read -r line; do
+            r#"while IFS= read -r line; do
   case "$line" in
     *'"method":"initialize"'*) echo '{"method":"configWarning","params":{}}'; echo '{"id":1,"result":{"codexHome":"x"}}' ;;
     *'"method":"initialized"'*) : ;;
@@ -818,9 +836,7 @@ while IFS= read -r line; do
   esac
 done
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let b = bind("local", Some("/tmp/agm-home-a"), "th1");
         let mut c = AppServerConn::start(script.to_str().unwrap(), &b).await.unwrap();
         let page = c.items_desc(None, 10).await.unwrap();
