@@ -134,18 +134,32 @@ fn safe_name<'a>(dir: &str, requested: &'a str) -> Option<&'a str> {
 }
 
 fn file_script(dir: &str, name: &str) -> String {
+    file_script_gap(dir, name, "")
+}
+
+/// 下載腳本。**先開 fd、再對同一個 fd 驗、只從這個 fd 讀**（#768）：遠端 bot 對自己的 outbox 有寫入權，
+/// 「`-L` 檢查 → `base64 < "$F"`」是兩次路徑操作，中間能把檔案（或整個目錄）換成指到 `~/.codex/auth.json` 的符號連結。
+/// 現在 `{{ … }} 3< "$F"` 先把檔案開在 fd 3（開的當下跟著連結走也沒關係），之後再驗：`$D`、`$F` 此刻都不是符號連結、`$F` 是一般檔案，
+/// 而且 `$F` 跟 fd 3 是同一個 inode（`-ef`，`/dev/fd/3`：GNU 與 BSD／macOS 的 `test`、`/dev/fd` 都有）。開檔那一刻 `$F` 若是連結，
+/// fd 指到的是連結目標，之後不管 `$F` 被換成什麼，inode 對不上就拒絕；開完才換成連結則 `-L` 擋下。內容只從 fd 讀，`head -c` 封頂
+/// （超過上限由呼叫端判 `file_too_large`），不再事先 `wc -c "$F"`。開檔失敗（不存在、沒權限）也是 MISSING。
+///
+/// `gap` 是測試用的插入點（正式永遠是空字串）：在開檔之後、驗證之前跑一段，模擬 bot 在那一瞬間換檔。
+fn file_script_gap(dir: &str, name: &str, gap: &str) -> String {
     format!(
         r#"D={d}
 F="$D"/{n}
-if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ]; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
-s=$(wc -c < "$F" | tr -d ' ')
-if [ "$s" -gt {max} ]; then printf 'AM_OUTBOX_TOO_LARGE %s\n' "$s"; exit 0; fi
+{{
+{gap}
+if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ] || [ ! "$F" -ef /dev/fd/3 ]; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
 printf 'AM_OUTBOX_FILE\n'
-base64 < "$F"
+head -c {cap} <&3 | base64
+}} 2>/dev/null 3< "$F" || printf 'AM_OUTBOX_MISSING\n'
 "#,
         d = sh_quote(dir),
         n = sh_quote(name),
-        max = MAX_BYTES,
+        cap = MAX_BYTES + 1,
+        gap = gap,
     )
 }
 
@@ -225,7 +239,7 @@ mod tests {
         let want_dir = format!("D={}", sh_quote(&dir));
         crate::hosts::set_ssh_fake(host, move |script| {
             assert!(script.contains(&want_dir), "{script}");
-            Ok(if script.contains("base64 <") {
+            Ok(if script.contains("| base64") {
                 format!("AM_OUTBOX_FILE\n{b64}\n")
             } else {
                 "AM_OUTBOX_OK\n7 2000\t89504e4700ff10\tshot.png\n".into()
@@ -296,7 +310,7 @@ mod tests {
         let s = list_script("/U/m x/outbox/01A");
         assert!(s.contains("D='/U/m x/outbox/01A'") && s.contains("-mmin +60") && s.contains("-cmin +60") && s.contains("printf '%s\\t%s\\t%s\\n'"), "{s}");
         let f = file_script("/U/o", "it's.md");
-        assert!(f.contains(r#"F="$D"/'it'\''s.md'"#) && f.contains(&format!("-gt {MAX_BYTES}")), "{f}");
+        assert!(f.contains(r#"F="$D"/'it'\''s.md'"#) && f.contains(&format!("head -c {}", MAX_BYTES + 1)) && f.contains("3< \"$F\""), "{f}");
     }
 
     #[test]
@@ -314,5 +328,85 @@ mod tests {
         assert!(matches!(parse_file("AM_OUTBOX_MISSING\n"), Some(Fetched::Missing)));
         assert!(matches!(parse_file("AM_OUTBOX_TOO_LARGE 99\n"), Some(Fetched::TooLarge(99))));
         assert!(parse_file("garbage").is_none());
+    }
+
+    /// 在本機用 `sh` 跑遠端的下載腳本（`gap` 在檢查與讀檔之間換檔，模擬遠端 bot 的競態），回腳本輸出。
+    fn run_download(dir: &std::path::Path, name: &str, gap: &str) -> String {
+        let script = file_script_gap(&dir.to_string_lossy(), name, gap);
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn served(out: &str) -> Option<Vec<u8>> {
+        match parse_file(out) {
+            Some(Fetched::File(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    fn sandbox(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("am-outbox-remote-{tag}-{}", crate::db::ulid()));
+        std::fs::create_dir_all(base.join("outbox")).unwrap();
+        std::fs::write(base.join("secret.txt"), b"TOP SECRET").unwrap();
+        base
+    }
+
+    /// 正常下載：一般檔案原樣回來；符號連結、目錄、不存在都是 MISSING。
+    #[test]
+    fn macos_local_remote_download_serves_a_regular_file_only() {
+        let base = sandbox("plain");
+        let d = base.join("outbox");
+        std::fs::write(d.join("report.txt"), b"hello").unwrap();
+        std::os::unix::fs::symlink(base.join("secret.txt"), d.join("link.txt")).unwrap();
+        std::fs::create_dir(d.join("sub")).unwrap();
+        assert_eq!(served(&run_download(&d, "report.txt", "")).as_deref(), Some(&b"hello"[..]));
+        for bad in ["link.txt", "sub", "missing.txt"] {
+            assert_eq!(run_download(&d, bad, "").trim(), "AM_OUTBOX_MISSING", "{bad}");
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// #768：檢查之後、讀檔之前，bot 把檔案換成指到界線外的符號連結。以前 `base64 < "$F"` 照著連結讀出來。
+    #[test]
+    fn macos_local_a_symlink_swapped_in_after_the_check_is_never_served() {
+        let base = sandbox("swap-after");
+        let d = base.join("outbox");
+        std::fs::write(d.join("report.txt"), b"hello").unwrap();
+        let gap = format!("rm -f \"$F\"; ln -s '{}' \"$F\"", base.join("secret.txt").display());
+        let out = run_download(&d, "report.txt", &gap);
+        assert!(!out.contains("TOP SECRET") && served(&out).as_deref() != Some(&b"TOP SECRET"[..]), "{out}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// 反過來：開檔的那一刻 `$F` 還是指到界線外的符號連結，開完之後被換回一般檔案（檢查看到的是一般檔案）。
+    /// 腳本讀的是開檔當下那個 inode，不是檢查看到的那個。
+    #[test]
+    fn macos_local_a_file_swapped_back_after_opening_the_link_is_never_served() {
+        let base = sandbox("swap-back");
+        let d = base.join("outbox");
+        std::os::unix::fs::symlink(base.join("secret.txt"), d.join("report.txt")).unwrap();
+        let gap = "rm -f \"$F\"; echo decoy > \"$F\"";
+        let out = run_download(&d, "report.txt", gap);
+        assert!(!out.contains("TOP SECRET") && served(&out).as_deref() != Some(&b"TOP SECRET"[..]), "{out}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// 目錄本身被換成符號連結（指到別的目錄、裡面剛好有同名檔）也不行。
+    #[test]
+    fn macos_local_an_outbox_dir_swapped_for_a_symlink_is_never_served() {
+        let base = sandbox("dir-link");
+        let real = base.join("elsewhere");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("report.txt"), b"TOP SECRET").unwrap();
+        let d = base.join("outbox-link");
+        std::os::unix::fs::symlink(&real, &d).unwrap();
+        let out = run_download(&d, "report.txt", "");
+        assert_eq!(out.trim(), "AM_OUTBOX_MISSING", "{out}");
+        let d2 = base.join("outbox");
+        std::fs::write(d2.join("report.txt"), b"hello").unwrap();
+        let gap = format!("mv \"$D\" \"$D.real\"; ln -s '{}' \"$D\"", real.display());
+        let out = run_download(&d2, "report.txt", &gap);
+        assert!(!out.contains("TOP SECRET") && served(&out).as_deref() != Some(&b"TOP SECRET"[..]), "{out}");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
