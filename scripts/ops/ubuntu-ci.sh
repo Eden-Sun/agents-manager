@@ -95,7 +95,13 @@ else
     state=failure
     # 紅的段落＋第一個紅段死掉前的最後一個 step 標題；GitHub description 上限 140 字。
     first="$(awk '/^==> \[ubuntu-ci\] .* rc=[1-9]/ {print last; exit} /^==> / {last=substr($0, 5)}' "${log}")"
-    desc="$(printf '紅：%s（%s）' "${failed}" "${first}" | cut -c1-120)"
+    # cargo test 紅了就點出是哪幾條（高負載偶發紅時，只寫「cargo test 紅了」看不出是誰）；編譯錯誤沒有這種行，照舊寫 step 標題。
+    red_tests="$(grep -E '^test .* \.\.\. FAILED$' "${log}" | awk '{print $2}' || true)"
+    if [ -n "${red_tests}" ]; then
+        desc="$(printf '紅：%s，%s 條測試紅（%s）' "${failed}" "$(printf '%s\n' "${red_tests}" | wc -l | tr -d ' ')" "$(printf '%s\n' "${red_tests}" | head -1)" | cut -c1-120)"
+    else
+        desc="$(printf '紅：%s（%s）' "${failed}" "${first}" | cut -c1-120)"
+    fi
 fi
 status "${state}" "${desc}"
 printf '{"sha":"%s","state":"%s","rc":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
