@@ -2300,6 +2300,23 @@ async fn live_projects_on_host(app: &Arc<App>, host: &str) -> Result<Vec<db::Pro
     Ok(db::live_projects(&app.db).await.map_err(any_err)?.into_iter().filter(|p| p.host == host).collect())
 }
 
+/// `ssh` 目標與 `herdr_session` 在存進 config 之前的形狀檢查。`ssh` 原樣成為 `ssh <opts> <目標> …` 的一個 argv：
+/// 開頭是 `-` 會被 ssh 當成選項（`-oProxyCommand=…` 在本機執行命令），空白／控制字元永遠不是合法的主機目標。
+/// `herdr_session` 會被拼進遠端的 session 路徑、launchd label 與 plist，限制在 herdr session 名字該有的字元。
+fn host_target_problem(ssh: &str, session: &str) -> Option<String> {
+    if ssh.is_empty() || ssh.starts_with('-') || ssh.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some("ssh target must be a host (or user@host / ssh_config alias): no leading `-`, whitespace or control characters".into());
+    }
+    let first = session.chars().next();
+    if session.len() > 64
+        || !first.is_some_and(|c| c.is_ascii_alphanumeric())
+        || !session.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Some("herdr_session must be 1-64 characters of [A-Za-z0-9._-], starting with a letter or digit".into());
+    }
+    None
+}
+
 async fn create_host(
     State(app): State<Arc<App>>,
     Query(q): Query<DeleteQuery>,
@@ -2313,6 +2330,10 @@ async fn create_host(
     }
     if b.ssh.trim().is_empty() {
         return Err(LcError::Bad("ssh target must not be empty".into()));
+    }
+    let session_wanted = b.herdr_session.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(crate::config::DEFAULT_HERDR_SESSION);
+    if let Some(why) = host_target_problem(b.ssh.trim(), session_wanted) {
+        return Err(LcError::Bad(why));
     }
     // 共用 session 是安全開關（#709）：沒帶就沿用，不因為一次只改 ssh 的更新而悄悄關掉。
     let prev_shared = app.cfg.get().await.hosts.iter().any(|h| h.name == b.name && h.shared_session);
@@ -8984,5 +9005,42 @@ mod host_header_tests {
     #[test]
     fn allow_lan_keeps_accepting_any_host() {
         assert!(origin_is_local(&h(&[("host", "agm-host.tailnet.ts.net:7788")]), 7788, true));
+    }
+}
+
+#[cfg(test)]
+mod host_target_tests {
+    use super::*;
+
+    /// `POST /api/hosts` 的 `ssh` 是 ssh 的一個 argv、`herdr_session` 會進遠端路徑與 plist：形狀不對一律 400，不寫進 config。
+    #[test]
+    fn a_host_target_cannot_smuggle_an_ssh_option_or_a_path() {
+        for ok in ["m4p@100.112.229.82", "build-box", "ssh-alias", "user@host.example.com", "[::1]", "10.0.0.5"] {
+            assert_eq!(host_target_problem(ok, "agents-manager"), None, "{ok}");
+        }
+        for bad in ["-oProxyCommand=touch /tmp/pwned", "-F/tmp/evil", "host name", "host\nname", "ho\tst", "a\u{0}b", ""] {
+            assert!(host_target_problem(bad, "agents-manager").is_some(), "{bad:?}");
+        }
+        for ok in ["agents-manager", "am_v40", "Session.1"] {
+            assert_eq!(host_target_problem("box", ok), None, "{ok}");
+        }
+        for bad in ["../../etc", "a/b", "-x", ".hidden", "a b", "a;b", "a\"b", "<x>", "a&b", "x\ny"] {
+            assert!(host_target_problem("box", bad).is_some(), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_host_refuses_a_target_that_looks_like_an_option_before_touching_config() {
+        let e = crate::testing::env().await;
+        let before = e.app.cfg.get().await.hosts.len();
+        let err = create_host(
+            State(e.app.clone()),
+            Query(DeleteQuery::default()),
+            Json(NewHost { name: "evil1".into(), ssh: "-oProxyCommand=true".into(), ssh_port: None, ssh_opts: None, herdr_session: None, remote_path: None, shared_session: None }),
+        )
+        .await
+        .expect_err("an option-looking target must be refused");
+        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        assert_eq!(e.app.cfg.get().await.hosts.len(), before, "什麼都沒寫");
     }
 }
