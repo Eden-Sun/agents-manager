@@ -713,8 +713,12 @@ fn unpark(key: &str) {
 }
 
 /// After a login recheck, so the popover isn't wrong for the 30-minute logged-out park.
-pub fn unpark_identity(host: &str, name: &str) {
+/// `shares_default`：這個身分用的是預設帳號（[`crate::quota::identity_shares_default`]），它的探測退避記在裸 `claude` 那把 key。
+pub fn unpark_identity(host: &str, name: &str, shares_default: bool) {
     unpark(&crate::quota::quota_key(host, &format!("claude:{name}")));
+    if shares_default {
+        unpark(&crate::quota::quota_key(host, "claude"));
+    }
 }
 
 struct Target {
@@ -1754,6 +1758,18 @@ AM_USAGE_DONE=0
         assert!(!cooling_down(&k, false, false));
         park(&k, false);
         assert!(!cooling_down_at(&k, false, false, std::time::Instant::now() + RETRY_AFTER_FAILURE), "a cool-down in the past is over");
+    }
+
+    /// 重新驗證登入成功要把退避收掉。共用預設帳號的身分（`cc0`）的額度與退避都記在**裸 `claude`** 那把 key，
+    /// 只收 `claude:cc0` 的話，使用者剛重新登入、那一格還要再被「沒登入」的 30 分鐘退避擋著。
+    #[test]
+    fn a_login_recheck_unparks_the_bare_default_account() {
+        let host = format!("h-{}", ulid::Ulid::new());
+        let bare = crate::quota::quota_key(&host, "claude");
+        park(&bare, true);
+        assert!(cooling_down(&bare, false, false));
+        unpark_identity(&host, "cc0", true);
+        assert!(!cooling_down(&bare, false, false), "共用預設帳號的身分重驗成功要收掉裸 key 的退避");
     }
 }
 
