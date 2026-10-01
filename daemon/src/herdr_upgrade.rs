@@ -583,7 +583,9 @@ fn session_ok(s: &str) -> bool {
 
 async fn command_output(mut cmd: tokio::process::Command, timeout: Duration) -> Result<String, String> {
     cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
-    let out = tokio::time::timeout(timeout, cmd.output())
+    // 驗的常常是 daemon 自己剛複製／換進去的 binary：同一個行程裡別的任務在寫入 fd 還開著時 fork，exec 會回 `ETXTBSY`（#189），
+    // 這不是 binary 壞了，重試就好；其他錯誤照舊。
+    let out = tokio::time::timeout(timeout, crate::exec_retry::output_async(&mut cmd))
         .await
         .map_err(|_| format!("超過 {timeout:?}"))?
         .map_err(|e| e.to_string())?;
@@ -678,6 +680,28 @@ impl Ops for Real {
 
 #[cfg(test)]
 mod tests {
+    /// 驗版本用的 `--version` 撞上 `ETXTBSY`（binary 剛複製進來、寫入 fd 還被別的 fork 出來的子行程握著）不能算「binary 壞了」：
+    /// 重試到 exec 得動為止。
+    #[tokio::test]
+    async fn the_version_check_waits_out_a_binary_that_is_still_busy_being_written() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::testing::scratch_dir("am-herdr-etxt");
+        let bin = dir.join("herdr");
+        let mut f = std::fs::File::create(&bin).unwrap();
+        f.write_all(b"#!/bin/sh\necho 'herdr 0.9.3'\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(crate::exec_retry::is_text_busy(&std::process::Command::new(&bin).output().unwrap_err()), "前提：寫入 fd 開著時 exec 回 ETXTBSY");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            drop(f);
+        });
+        let got = Real.binary_version(&bin).await;
+        release.join().unwrap();
+        assert_eq!(got.as_deref(), Ok("0.9.3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use crate::testing as tt;
     use std::sync::atomic::{AtomicUsize, Ordering};
