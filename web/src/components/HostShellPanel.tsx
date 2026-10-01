@@ -9,6 +9,7 @@ import type { TerminalSnapshot, TerminalSource } from '../api/types'
 import { useStore } from '../store/store'
 import { shellDraftKey } from '../store/shellDraft'
 import { ConfirmDialog } from './ConfirmDialog'
+import { ServicePaneNote } from './ServicePaneNote'
 import { HostBadge } from './HostsPanel'
 import { linkifyTerm } from './termLinks'
 import { splitAtCursor } from '../lib/termCursor'
@@ -530,27 +531,7 @@ export function HostShellPanel({
       <ConfirmDialog
         open={endNeedsConfirm !== null}
         title="這顆 pane 還在做事"
-        body={
-          endNeedsConfirm?.unverified ? (
-            <>daemon 讀不到這顆 pane 現在在跑什麼，無法確認裡面沒有 dev server 之類的服務。確定要關嗎？</>
-          ) : (
-            <>
-              這顆 pane 正在 listen
-              {endNeedsConfirm?.pane?.listen_ports.length ? (
-                <>
-                  {' '}
-                  <strong>{endNeedsConfirm.pane.listen_ports.join('、')}</strong>
-                </>
-              ) : null}
-              {endNeedsConfirm?.pane?.foreground ? (
-                <>
-                  （<code>{endNeedsConfirm.pane.foreground}</code>）
-                </>
-              ) : null}
-              。關掉它等於把裡面的服務一起停掉。確定要關嗎？
-            </>
-          )
-        }
+        body={<ServicePaneNote needs={endNeedsConfirm} />}
         confirmLabel="仍要關掉"
         danger
         onCancel={() => setEndNeedsConfirm(null)}
