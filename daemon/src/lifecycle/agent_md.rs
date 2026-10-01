@@ -33,12 +33,13 @@ pub async fn load(app: &App, project: &db::Project) -> AgentMd {
     if let Some(f) = agents.global_file() {
         reads.push(read_local(f).await);
     }
-    if let Some(f) = agents.project_file(&project.id, &project.label) {
+    let conn = if project.host == LOCAL_HOST { None } else { app.hosts.get(&project.host).await };
+    for f in agents.project_files(&project.id, &project.label) {
         reads.push(if project.host == LOCAL_HOST {
             read_local(f).await
         } else {
-            match app.hosts.get(&project.host).await {
-                Some(conn) => read_remote(&conn, f).await,
+            match &conn {
+                Some(conn) => read_remote(conn, f).await,
                 None => Err(format!("{f}：未知主機 `{}`", project.host)),
             }
         });
@@ -139,20 +140,22 @@ mod tests {
     fn the_project_file_is_found_by_id_before_label() {
         let mut cfg = crate::config::AgentsCfg { instructions_file: Some("~/g.md".into()), ..Default::default() };
         assert_eq!(cfg.global_file(), Some("~/g.md"));
-        cfg.projects.insert("proj".into(), "/by-label.md".into());
-        assert_eq!(cfg.project_file("01P", "proj"), Some("/by-label.md"));
-        cfg.projects.insert("01P".into(), "/by-id.md".into());
-        assert_eq!(cfg.project_file("01P", "proj"), Some("/by-id.md"));
+        use crate::config::AgentMdFiles;
+        cfg.projects.insert("proj".into(), AgentMdFiles::One("/by-label.md".into()));
+        assert_eq!(cfg.project_files("01P", "proj"), vec!["/by-label.md"]);
+        cfg.projects.insert("01P".into(), AgentMdFiles::Many(vec!["/a.md".into(), " ".into(), "/b.md".into()]));
+        assert_eq!(cfg.project_files("01P", "proj"), vec!["/a.md", "/b.md"], "id 優先、空白項略過、順序照寫");
         assert_eq!(crate::config::AgentsCfg::default().global_file(), None);
-        assert_eq!(crate::config::AgentsCfg::default().project_file("01P", "proj"), None);
+        assert!(crate::config::AgentsCfg::default().project_files("01P", "proj").is_empty());
     }
 
     #[test]
     fn the_section_round_trips_and_is_omitted_when_unset() {
-        let text = "[agents]\ninstructions_file = \"~/.config/agents-manager/agents/global.md\"\n\n[agents.projects]\nagents-manager = \"/repo/CLAUDE.md\"\n";
+        let text = "[agents]\ninstructions_file = \"~/.config/agents-manager/agents/global.md\"\n\n[agents.projects]\nagents-manager = \"/repo/CLAUDE.md\"\npt = [\"~/pt/CLAUDE.md\", \"~/pt/AGENTS.md\"]\n";
         let cfg: crate::config::ConfigFile = toml::from_str(text).unwrap();
         assert_eq!(cfg.agents.global_file(), Some("~/.config/agents-manager/agents/global.md"));
-        assert_eq!(cfg.agents.project_file("x", "agents-manager"), Some("/repo/CLAUDE.md"));
+        assert_eq!(cfg.agents.project_files("x", "agents-manager"), vec!["/repo/CLAUDE.md"]);
+        assert_eq!(cfg.agents.project_files("x", "pt"), vec!["~/pt/CLAUDE.md", "~/pt/AGENTS.md"]);
         let back = toml::to_string_pretty(&cfg).unwrap();
         assert_eq!(toml::from_str::<crate::config::ConfigFile>(&back).unwrap().agents, cfg.agents);
         assert!(!toml::to_string_pretty(&crate::config::ConfigFile::default()).unwrap().contains("[agents]"));
