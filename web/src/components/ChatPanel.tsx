@@ -273,6 +273,7 @@ export function LiveBubble({
   from,
   kind,
   action,
+  botId,
 }: {
   text: string | null
   activity?: string | null
@@ -281,6 +282,8 @@ export function LiveBubble({
   kind?: BotKind
   /** 狀態列右端的逃生門（`AbandonTurnAction`）。 */
   action?: ReactNode
+  /** 本機圖片經這顆 bot 的 daemon 讀；遠端圖片同樣走 `MarkdownImage`（#764，不能用 react-markdown 預設的 `<img>`）。 */
+  botId?: string
 }) {
   const act = activity?.trim() ? activity.trim() : null
   const warn = alert?.trim() ? alert.trim() : null
@@ -292,7 +295,9 @@ export function LiveBubble({
       <div className={`bubble${showText ? ' md' : ''}`}>
         {showText ? (
           <>
-            <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents(botId)} urlTransform={markdownUrlTransform}>
+              {text}
+            </Markdown>
             <span className="caret" aria-hidden="true" />
           </>
         ) : (
@@ -350,6 +355,7 @@ export function LiveReplyBubble({
       alert={alert}
       kind={kind}
       from={from}
+      botId={botId}
       action={abandon ? <AbandonTurnAction botId={botId} /> : undefined}
     />
   )

