@@ -85,3 +85,17 @@ export function pruneTurns<T extends Turnish>(map: Record<string, T>, cap = TURN
   return out
 }
 
+
+/**
+ * 一頁 messages 回來時舊清單留哪些：不能整包換（飛行中收到的 `message_added` 會被蓋掉），
+ * 也不能全留（resync 要能刪過期的）。界線是頁內最新一筆，空頁退回 `startedAt`。
+ *
+ * 界線用 `(created_at, id)` 全序，不只看時間：訊息時間是毫秒，頁抓完之後才 commit 的那一則可能跟頁內最新一則同一毫秒，
+ * 只比時間會把它當成「頁裡該有卻沒有的過期項」刪掉（同 #695 的已讀標記）。
+ */
+export function keptAfterPage<T extends { id: string; created_at: string }>(existing: T[], page: T[], startedAt: string): T[] {
+  let newest: T | null = null
+  for (const m of page) if (!newest || byTime(m, newest) > 0) newest = m
+  const seen = new Set(page.map((m) => m.id))
+  return existing.filter((m) => !seen.has(m.id) && (newest ? byTime(m, newest) > 0 : m.created_at > startedAt))
+}

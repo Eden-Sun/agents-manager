@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns, upsertSorted } from './lists.ts'
+import { MESSAGE_CAP, byId, byTime, capList, insertSorted, pruneTurns, upsertSorted, keptAfterPage } from './lists.ts'
 
 const m = (id: string, created_at = id) => ({ id, created_at })
 
@@ -97,4 +97,24 @@ test('upsertSorted：同 id 時間變了（排過隊的一則送出時改成送�
   const same = (a: M, b: M) => a.content === b.content && a.t === b.t
   const list: M[] = [{ id: 'notice', t: 1, content: 'n' }, { id: 'supp', t: 2, content: 's' }, { id: 'reply', t: 4, content: 'r' }]
   assert.deepEqual(upsertSorted(list, { id: 'notice', t: 3, content: 'n' }, cmp, same)?.map((m) => m.id), ['supp', 'notice', 'reply'])
+})
+
+test('keptAfterPage：同一毫秒、id 比頁內最新那則大的訊息要留（頁抓完後才 commit 的那一則，#695 同型）', () => {
+  const T = '2026-10-01T10:00:00.123Z'
+  const page = [
+    { id: '01A', created_at: '2026-10-01T09:59:59.000Z' },
+    { id: '01B', created_at: T },
+  ]
+  const existing = [
+    ...page,
+    { id: '01C', created_at: T }, // 同毫秒、頁抓完才進來的 message_added
+    { id: '01D', created_at: '2026-10-01T10:00:00.200Z' }, // 更晚
+    { id: '01Z0', created_at: '2026-10-01T09:00:00.000Z' }, // 頁裡沒有、比頁內最新舊：resync 要能刪過期的
+  ]
+  assert.deepEqual(
+    keptAfterPage(existing, page, '2026-10-01T10:00:01.000Z').map((m) => m.id),
+    ['01C', '01D'],
+  )
+  // 空頁退回 startedAt。
+  assert.deepEqual(keptAfterPage(existing, [], T).map((m) => m.id), ['01D'])
 })
