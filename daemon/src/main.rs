@@ -5,6 +5,7 @@
 //!   hook claude|codex ...       the tiny process agent CLIs invoke; always exits 0
 
 mod bot_trash;
+mod deleted_bots;
 mod build_info;
 mod build_scheduler;
 mod cargo_shim;
