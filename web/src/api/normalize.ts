@@ -224,6 +224,14 @@ export function toProject(v: unknown): Project | null {
       if (!owner || !repo) return null
       return { owner, repo, url: str(pick(g, 'url')) || `https://github.com/${owner}/${repo}` }
     })(),
+    ...(() => {
+      const n = pick(v, 'group_unread')
+      const m = pick(v, 'group_read_mark')
+      return {
+        group_unread: typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined,
+        group_read_mark: isRec(m) && typeof m.at === 'string' && m.at ? { at: m.at, id: typeof m.id === 'string' ? m.id : '' } : null,
+      }
+    })(),
     created_at: str(v.created_at),
   }
 }

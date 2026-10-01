@@ -1,5 +1,4 @@
 import type { Message, Turn } from '../api/types'
-import { loadCounts, saveCounts, type UnreadCounts } from './unread'
 
 /**
  * 專案標題的藍色數字只算「群組回覆」（2026-09-15 使用者選 1）：以前專案裡任何 bot 完成回合都 +1，
@@ -107,38 +106,6 @@ export async function confirmGroupTurn(
   })()
   confirming.set(turnId, p)
   return p
-}
-
-/**
- * v2 是 72c332a 的標記：它只寫標記、沒把清空存回去，已部署的分頁可能帶著 v2 又讀回 99+。
- * 分不出 v2 之後的群組數字哪些是舊的，所以換 v3 再清一次（最多丟掉幾個小時內的群組未讀）。
- */
-const RESET_KEY = 'am.groupUnread.v3'
-
-/**
- * 舊算法累積的群組數字（常是 99+）升級後清一次，之後照新規則算；bot 未讀原樣保留。
- *
- * 先把清空的結果寫回 `am.unread` 並讀回確認，才寫遷移標記：只寫標記不存檔的話，下次重整前沒有別的
- * 未讀變動就會把舊的 99+ 讀回來。存檔失敗就不寫標記，下次開機再清一次。
- */
-export function dropLegacyGroupCounts(counts: UnreadCounts): UnreadCounts {
-  const cleared: UnreadCounts = { bots: counts.bots, groups: {} }
-  try {
-    if (localStorage.getItem(RESET_KEY)) return counts
-  } catch {
-    // 讀不到 storage：`loadCounts` 也讀不到，本來就沒有舊數字。
-    return cleared
-  }
-  if (Object.keys(counts.groups).length > 0) {
-    saveCounts(cleared)
-    if (Object.keys(loadCounts().groups).length > 0) return cleared
-  }
-  try {
-    localStorage.setItem(RESET_KEY, '1')
-  } catch {
-    /* 標記寫不進去：數字已清，下次開機再清一次也無害 */
-  }
-  return cleared
 }
 
 export function resetGroupTurnsForTest() {

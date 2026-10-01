@@ -143,6 +143,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/scratchpad", get(crate::outbox::scratchpad_gone))
         .route("/bots/{id}/scratchpad/file", get(crate::outbox::scratchpad_gone))
         .route("/bots/{id}/read", post(crate::read_marks::post))
+        .route("/projects/{id}/group/read", post(crate::read_marks::post_group))
         .route("/turns/{id}/abandon", post(abandon_turn))
         .route("/turns/{id}/withdraw", post(withdraw_turn))
         .route("/bots/{id}/abort", post(abort_bot))
@@ -684,6 +685,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let bots = db::live_bots(&app.db).await.map_err(any_err)?;
     let unread = crate::read_marks::unread_counts(&app.db).await.map_err(any_err)?;
     let read_marks = crate::read_marks::marks(&app.db).await.map_err(any_err)?;
+    let group_unread = crate::read_marks::group_unread_counts(&app.db).await.map_err(any_err)?;
+    let group_marks = crate::read_marks::group_marks(&app.db).await.map_err(any_err)?;
     // §6.11：AGM 因為閒置收起來的那些。一次讀完，免得每顆 bot 再問一次資料庫。
     let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
     let previews = crate::preview::state_map(&app.db).await.map_err(any_err)?;
@@ -741,6 +744,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             "id": p.id, "path": p.path, "label": p.label, "host": p.host,
             "workspace_id": p.workspace_id,
             "handed_off_to": p.handed_off_to,
+            // 群組未讀與已讀標記跨裝置共用（read_marks.rs，#756）。
+            "group_unread": group_unread.get(&p.id).copied().unwrap_or(0),
+            "group_read_mark": group_marks.get(&p.id).map(|m| json!({"at": m.at, "id": m.message_id})),
             "github": crate::github::cached(app, &p.id).await,
             "bots": bl,
         }));

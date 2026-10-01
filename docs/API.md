@@ -599,6 +599,11 @@ bot 或 active Run 不存在 404。
 回 `{"bot_id","read_mark":{"at","id"},"unread"}`，並推 WS `bot_read`（同形）讓其他分頁／裝置重拉 state。`at` 不是 RFC 3339 → 400；bot 不存在 404。有效時間先轉為 UTC 毫秒 `Z` 格式，晚於 daemon 現在的值夾到現在，避免裝置時鐘錯誤永久遮住新訊息；回傳 `read_mark.at` 為正規化後的值。
 `GET /api/state` 每顆 bot 帶 `unread`（標記之後的 assistant 訊息依回合去重的數目；沒有標記＝全部）與 `read_mark`（`{at,id}` 或 `null`）。升級建表時既有 bot 的標記設為當下，舊訊息不算未讀。
 
+### `POST /api/projects/{id}/group/read`
+專案群組的已讀位置（#756），語意同上：body `{"at","message_id"}` 可省，標記只往前推、時間先正規化並夾到現在。
+回 `{"project_id","read_mark":{"at","id"},"unread"}`，並推 WS `group_read`（同形）；`at` 非 RFC 3339 → 400，專案不存在 404。
+`GET /api/state` 每個專案帶 `group_unread`（標記之後的**群組回覆回合**數：assistant 訊息、同回合的 user 訊息帶 `group_id`，依 `turn_id` 去重；沒有標記＝全部）與 `group_read_mark`（`{at,id}` 或 `null`）。升級建表時既有專案的標記設為當下。專案搬家（`project-transfer`）不帶群組標記，搬過去後群組未讀從全部開始。
+
 ### 輸入框草稿 `GET /api/drafts`、`PUT /api/drafts/{key}`（使用者 2026-10-01）
 對話輸入框還沒送出的字，以 daemon 為準，各瀏覽器（手機、電腦）共用；網頁不再把草稿存在 localStorage。
 

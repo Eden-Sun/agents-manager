@@ -51,13 +51,13 @@ export function saveMarks(marks: Record<string, ReadMark>) {
   }
 }
 
+/** 只有 bot 的數字存本機；群組未讀以 daemon 為準（`group_unread`，#756），不在這裡。 */
 export interface UnreadCounts {
   bots: Record<string, number>
-  groups: Record<string, number>
 }
 
 export function loadCounts(): UnreadCounts {
-  const out: UnreadCounts = { bots: {}, groups: {} }
+  const out: UnreadCounts = { bots: {} }
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(COUNTS_KEY) ?? 'null')
     if (!isRec(parsed)) return out
@@ -65,7 +65,6 @@ export function loadCounts(): UnreadCounts {
       const n = typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : 0
       if (n <= 0) continue
       if (k.startsWith('bot:')) out.bots[k.slice(4)] = n
-      else if (k.startsWith('group:')) out.groups[k.slice(6)] = n
     }
   } catch {
     /* 讀不到就當作全部已讀 */
@@ -76,7 +75,6 @@ export function loadCounts(): UnreadCounts {
 export function saveCounts(counts: UnreadCounts) {
   const flat: Record<string, number> = {}
   for (const [id, n] of Object.entries(counts.bots)) if (n > 0) flat[botKey(id)] = n
-  for (const [id, n] of Object.entries(counts.groups)) if (n > 0) flat[groupKey(id)] = n
   try {
     writeShared(() => localStorage.setItem(COUNTS_KEY, JSON.stringify(flat)))
   } catch {
@@ -146,11 +144,9 @@ export function pruneUnread<T>(book: Record<string, T>, live: (id: string) => bo
   return out
 }
 
-/** 同上，給 `bot:`／`group:` 前綴的標記表。 */
-export function pruneMarks(marks: Record<string, ReadMark>, liveBot: (id: string) => boolean, liveProject: (id: string) => boolean) {
-  return pruneUnread(marks, (k) =>
-    k.startsWith('bot:') ? liveBot(k.slice(4)) : k.startsWith('group:') ? liveProject(k.slice(6)) : false,
-  )
+/** 同上，給 `bot:` 前綴的標記表；舊版寫的 `group:` 標記（群組已讀現在在 daemon，#756）順手丟掉。 */
+export function pruneMarks(marks: Record<string, ReadMark>, liveBot: (id: string) => boolean) {
+  return pruneUnread(marks, (k) => k.startsWith('bot:') && liveBot(k.slice(4)))
 }
 
 /**

@@ -3110,7 +3110,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - 時間軸：bot 回覆／system 訊息帶 bot 名徽章（依 kind 配色）；user 副本折疊顯示 `→ @a, @b`；每個仍在回覆的成員各一個 typing 指示。
 - 載入更早的訊息與整頁重抓重疊時，重抓套用後才回來的舊頁丟棄；下一次從重抓後清單最舊的一則接續分頁。單 bot 與群組時間軸一致。
 - 輸入 `@` 彈出成員與 `all` 自動完成；沒有 mention 時送出鈕 disabled；列出收件者並標示將被略過的。**專案內至少一個 bot 可送就不鎖輸入框。**
-- 未打開群組時 sidebar 顯示未讀計數（前端記憶體，打開即歸零）。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。群組來源以持久化的 `messages.group_id` 確認；未載入原訊息時，`client_request_id` 的 `<crid>:<bot_id>` 僅作查詢候選，再向訊息 API 查該 bot、該回合的 user 訊息，不以命名或歷史頁數當證據。群組計數保存在 localStorage，v3 遷移先保存清空結果才寫完成標記，bot 未讀保留；包含 v2 已遷移的瀏覽器會再清一次群組計數。
+- 未打開群組時 sidebar 顯示未讀計數（打開即歸零）。**數字與已讀標記以 daemon 為準、跨裝置共用**（#756）：`project_group_reads` 存每個專案的標記，`GET /api/state` 每個專案帶 `group_unread`／`group_read_mark`（API.md `POST /api/projects/{id}/group/read`），前端只留記憶體裡的即時 +1，由下一次快照校正。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。群組來源以持久化的 `messages.group_id` 確認；未載入原訊息時，`client_request_id` 的 `<crid>:<bot_id>` 僅作查詢候選，再向訊息 API 查該 bot、該回合的 user 訊息，不以命名或歷史頁數當證據。daemon 的算法同前端舊規則：標記之後、同回合 user 訊息帶 `group_id` 的 assistant 回合，依 `turn_id` 去重。本機不再存群組計數（舊版的 `group:` 鍵忽略）。
 
 ## 14. 每台主機各自的額度
 
