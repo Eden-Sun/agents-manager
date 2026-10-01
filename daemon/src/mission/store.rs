@@ -934,6 +934,25 @@ pub async fn cancel_announced(pool: &SqlitePool, id: &str, announce: Option<Anno
     Ok(true)
 }
 
+/// 專案軟刪多久之後，掃描才把它底下開著的任務收掉。
+pub const PROJECT_GONE_GRACE_SECS: i64 = 300;
+
+/// 還開著、但專案已經軟刪（或根本不在了）的任務所屬的專案 id。專案有好幾條路變成已刪（API、config.toml 拿掉後的投影、
+/// 收任務失敗只記 log），只有 API 那條會收任務；這份清單讓掃描從持久狀態收斂，不靠刪除當下那一次呼叫。
+///
+/// 軟刪滿 [`PROJECT_GONE_GRACE_SECS`] 才算數：取消是終態，config.toml 被改寫的那一瞬間投影短暫看不到專案、
+/// 下一次又把它加回來（`deleted_at` 清掉）不該把任務收掉。
+pub async fn deleted_projects_with_open_missions(pool: &SqlitePool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT m.project_id FROM missions m
+           LEFT JOIN projects p ON p.id = m.project_id
+          WHERE m.completed_at IS NULL AND m.cancelled_at IS NULL AND (p.id IS NULL OR p.deleted_at <= ?)",
+    )
+    .bind(crate::db::iso_in(-PROJECT_GONE_GRACE_SECS))
+    .fetch_all(pool)
+    .await?)
+}
+
 /// 專案被刪時把它底下**還開著**的任務收掉（issue #498）。回收掉了幾筆。
 ///
 /// 為什麼要收：`open_unpaused`（`workflow::wake_stalled_at` 掃的那份）沒有存活性條件，任務也沒有軟刪——

@@ -4030,7 +4030,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   還開著的交辦的角色」，同時開兩件時它就不是一個定義良好的答案——任務卡、`mission get` 與 AGM 的下一步
   讀同一個函式卻可能得到不同結果。退回／換手走 `review followup` 不受影響：那條在同一個交易裡把原件標成
   `superseded` 再開新的，任何一刻都只有一件開著。
-- **刪掉專案會把它底下還開著的任務一併取消**（issue #498，理由寫進 `cancelled` 事件的 payload：`project_deleted`）。
+- **刪掉專案會把它底下還開著的任務一併取消**（issue #498，理由寫進 `cancelled` 事件的 payload：`project_deleted`）。專案經由別條路變成已刪（從 config.toml 拿掉的投影軟刪、API 刪除時收任務失敗、兩步之間 daemon 死了）時，`wake_stalled_at` 每輪先掃一次：專案軟刪滿 5 分鐘（或專案列根本不在）、底下還開著的任務一樣收掉（理由同 `project_deleted`），所以不靠刪除當下那一次呼叫。
   任務沒有軟刪、只有完成／取消兩種終態，而 `mission::store::open_unpaused`（`workflow::wake_stalled_at` 掃的那份）
   沒有存活性條件——不收的話那些任務永遠停在 open，十分鐘後還會推一則 `mission_next` 要 AGM 去推一個
   專案與 bot 都不存在的任務，而清臨時 bot 那條只收**已結案**的任務，連 `agm-mission-*` 都不會被收。
