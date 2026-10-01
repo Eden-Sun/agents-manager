@@ -400,6 +400,13 @@ async fn tell_parent(app: &Arc<App>, run: &db::Run) -> anyhow::Result<Told> {
     }
 }
 
+/// 不在 `live` 裡的 bot（刪掉、退役的 child）不留通知指紋與 episode：child 在 blocked 時就被退役的話，
+/// 沒有人會再呼叫 [`forget`]，兩張表只增不減。
+pub fn retain_bots(live: &[String]) {
+    spoken().lock().unwrap().retain(|id, _| live.contains(id));
+    episodes().lock().unwrap().retain(|id, _| live.contains(id));
+}
+
 /// child 不再 blocked 時把指紋忘掉：同一個問題**再次**出現（例如它又問一次）才會再講一次。
 pub fn forget(bot_id: &str) {
     spoken().lock().unwrap().remove(bot_id);
@@ -518,6 +525,23 @@ async fn last_sent(app: &Arc<App>, parent_id: &str, base: &str) -> anyhow::Resul
         }
         _ => Sent::Delivered,
     })
+}
+
+#[cfg(test)]
+mod retain_tests {
+    use super::*;
+
+    #[test]
+    fn a_retired_childs_alert_state_is_dropped() {
+        for id in ["alert-gone", "alert-kept"] {
+            spoken().lock().unwrap().insert(id.to_string(), (1, std::time::Instant::now()));
+            let _ = episode_for(id);
+        }
+        retain_bots(&["alert-kept".to_string()]);
+        assert!(!spoken().lock().unwrap().contains_key("alert-gone") && !episodes().lock().unwrap().contains_key("alert-gone"));
+        assert!(spoken().lock().unwrap().contains_key("alert-kept") && episodes().lock().unwrap().contains_key("alert-kept"));
+        retain_bots(&[]);
+    }
 }
 
 #[cfg(test)]

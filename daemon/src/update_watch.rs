@@ -92,6 +92,7 @@ async fn prune_process_state(app: &Arc<App>, active_runs: &[String]) {
     };
     crate::pane_identity::retain_bots(&live_bots);
     crate::lifecycle::retain_bot_state(&live_bots);
+    crate::child_alerts::retain_bots(&live_bots);
     app.retain_bot_locks(&live_bots).await;
 }
 
