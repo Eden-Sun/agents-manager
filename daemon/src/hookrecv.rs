@@ -439,12 +439,16 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                 .filter(|s| !s.is_empty());
             // Codex runs a hidden title-generation turn after each reply; not user-visible.
             let assistant = s("last-assistant-message");
-            let is_title_turn = user.as_deref().map(|u| u.contains("single-line task title")).unwrap_or(false)
-                || assistant
+            // 有 input 就以它為準（標題回合的 input 是標題指令）；真使用者回合的回覆剛好是 `{"title":…}` 不能被吞。
+            // 取不到 input 時，回覆長相才是唯一線索。
+            let is_title_turn = match user.as_deref() {
+                Some(u) => u.contains("single-line task title"),
+                None => assistant
                     .as_deref()
                     .and_then(|a| serde_json::from_str::<Value>(a).ok())
                     .map(|v| v.as_object().map(|o| o.len() == 1 && o.contains_key("title")).unwrap_or(false))
-                    .unwrap_or(false);
+                    .unwrap_or(false),
+            };
             if is_title_turn {
                 return HookKind::Ignore("codex title-generation turn".into());
             }
@@ -4706,6 +4710,24 @@ mod codex_title_tests {
             "input-messages": ["Reply with exactly MERGED-OK"], "last-assistant-message": "MERGED-OK"
         });
         assert!(matches!(classify("codex", &real), HookKind::TurnComplete { .. }));
+    }
+
+    /// 稽核：使用者真的要求「只回一個 title 的 JSON」時，助理回覆剛好就是 `{"title":…}`。以前只看回覆長相就當成標題回合丟掉——
+    /// 這個真回合的 Stop 永遠不認領，只剩終端備援（`completed_fallback`）收尾。標題回合的 input 是標題指令，不是使用者的話。
+    #[test]
+    fn a_real_turn_whose_reply_is_a_title_object_is_not_a_title_turn() {
+        let real = serde_json::json!({
+            "type": "agent-turn-complete", "thread-id": "t", "turn-id": "v",
+            "input-messages": ["把這篇文章的結論用 JSON 回我，只要一個欄位"],
+            "last-assistant-message": "{\"title\":\"結論\"}"
+        });
+        assert!(matches!(classify("codex", &real), HookKind::TurnComplete { .. }), "{:?}", classify("codex", &real));
+        // 沒有 input-messages（取不到）時，回覆長相仍是唯一線索：照舊當標題回合。
+        let no_input = serde_json::json!({
+            "type": "agent-turn-complete", "thread-id": "t", "turn-id": "w",
+            "last-assistant-message": "{\"title\":\"x\"}"
+        });
+        assert!(matches!(classify("codex", &no_input), HookKind::Ignore(_)));
     }
 }
 
