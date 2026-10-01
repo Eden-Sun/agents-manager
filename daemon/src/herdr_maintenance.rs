@@ -199,28 +199,36 @@ pub async fn open(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<
     if let Some(w) = active(&app).await.map_err(up)? {
         return Err(LcError::conflict("herdr maintenance is already open", json!({"window": w})));
     }
+    let Some(w) = open_as(&app, minutes, role.as_str(), reason).await.map_err(up)? else {
+        return Err(LcError::conflict("herdr maintenance is already open", json!({})));
+    };
+    Ok(Json(json!({"active": true, "window": w})))
+}
+
+/// 開窗口（API 與 daemon 自己的 herdr 一鍵更新共用，同一份稽核）。已經有人開著就回 `None`，不疊、不搶。
+pub async fn open_as(app: &Arc<App>, minutes: i64, actor: &str, reason: &str) -> Result<Option<Window>> {
     let opened_at = crate::db::now();
     let until = (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let actor = role.as_str();
     let inserted = sqlx::query("INSERT OR IGNORE INTO herdr_maintenance (id, opened_at, until, opened_by, reason) VALUES (1,?,?,?,?)")
         .bind(&opened_at)
         .bind(&until)
         .bind(actor)
         .bind(reason)
         .execute(&app.db)
-        .await
-        .map_err(up)?
+        .await?
         .rows_affected();
     if inserted == 0 {
-        return Err(LcError::conflict("herdr maintenance is already open", json!({})));
+        return Ok(None);
     }
-    store::add_note(&app.db, "herdr_maintenance_start", &json!({"opened_at": opened_at, "until": until, "opened_by": actor, "reason": reason}))
-        .await
-        .map_err(up)?;
-    arm_expiry(&app, &until);
+    store::add_note(&app.db, "herdr_maintenance_start", &json!({"opened_at": opened_at, "until": until, "opened_by": actor, "reason": reason})).await?;
+    arm_expiry(app, &until);
     tracing::info!(actor, until, reason, "herdr maintenance opened");
-    let w = row(&app.db).await.map_err(up)?;
-    Ok(Json(json!({"active": true, "window": w})))
+    row(&app.db).await
+}
+
+/// 關掉 `open_as` 開的那個窗口（`opened_at` 對得上才關，別人的不動）；回退休的子 agent 名。
+pub async fn close_as(app: &Arc<App>, w: &Window, actor: &str, reason: Option<&str>) -> Result<Vec<String>> {
+    close(app, w, "herdr_maintenance_end", actor, reason).await
 }
 
 pub async fn end(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<Json<CloseIn>>) -> Result<Json<Value>, LcError> {

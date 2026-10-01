@@ -61,6 +61,7 @@ mod herdr_shim;
 mod herdr_maintenance;
 mod herdr_unit;
 mod herdr_update;
+mod herdr_upgrade;
 mod herdr_version;
 mod hook_cmd;
 mod hook_inbox;

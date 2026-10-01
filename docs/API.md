@@ -30,6 +30,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | A | `POST /hosts/{name}/shells`、`…/shells/{pane_id}/text`、`…/keys` | 只有網頁 | UI token；text／keys 只認白名單 pane（daemon 自己開的、或 `panes` 表的 shell／service），跑 agent 的 pane 403、有 listen port 的唯讀（`shell::registered`） | 在任何已設定主機上執行任意指令 | 待裁示（見下） |
 | A | `POST /hosts/{name}/tools/install` | 只有網頁 | UI token | 叫 `via_bot_id` 那顆 agent 去裝 CLI（跟 `/bots/{id}/prompt` 等價） | 同 `/bots/{id}/prompt` |
 | A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 安裝該主機共用的 Claude 或 Codex CLI；Codex 安裝後 scoped restart，Claude 留待使用者另按「重啟套用」 | 維持（網頁已有確認框） |
+| A | `POST /hosts/{name}/herdr-update` | 只有網頁（確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；只收 local、同時只跑一個 | 換 herdr binary、重啟這顆 daemon 的 herdr server（所有 bot 中斷約 1 分鐘，子 agent 結束） | 維持（網頁已有確認框） |
 | A | `POST /bots/{id}/prompt`、`/text`、`/keys` | 網頁、`scripts/remote-loop-test.sh`、`scripts/hook-timing-test.sh`；Bot pane 內的 `agm`／shim | 網頁與測試腳本用 User `X-AM-Token`；Bot 用成對 Bot headers；`relay_from` 不能覆蓋已驗身分；寫給 AGM 的排進 inbox | 驅動任一顆 agent | 網頁維持 User；Bot principal 按 caller 身分驗證 |
 | A | `POST /bots/{id}/credential/rotate` | 只有網頁／User `agm` | User `X-AM-Token`；執行中的 bot 先在同一 SQLite transaction 記錄可恢復的 restart intent，再輪替 token；舊值失效並重啟，daemon 重啟會接續；live child／grandchild 仍繼承時先回 `409 live_children_use_credential`，不改 token；不回傳新值 | 使該 bot 的舊 hook/API proof 失效 | User-only，Bot／service principal 403 |
 | A | `PUT /build/remote`、`POST /build/remote/install-toolchain` | 只有網頁 | UI token | 改外部編譯主機＝之後的 cargo 送到哪台機器跑 | 待裁示 |
@@ -107,11 +108,15 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 daemon 重啟前開始、正在接手確認的那筆也在，`recovered:true`、`phase:"recovering"`。同一個理由：進度只走 WS，
 `cli_update_done` 收不到時前端拿它對帳——手上那一次不在清單裡就清掉（header 的 chip 變回可以按）；欄位不存在（舊 daemon）不動。
 
+`herdr_updates`：進行中的 herdr 一鍵更新（§12.7b）`[{"update_id","host","target_version","phase","started_at"}]`，沒有就是 `[]`。只在記憶體：
+daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端照樣清掉手上那一筆）。
+
 ```json
 {
   "daemon_seq": 6,
   "restart_batch": null,
   "cli_updates": [],
+  "herdr_updates": [],
   "connected": true,
   "default_connected": true,
   "herdr_session": "agents-manager",
@@ -543,6 +548,7 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `mem_updated` | 與 `GET /api/mem` 同形 |
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
 | `cli_update_progress` / `cli_update_done` | 見 §12.7a |
+| `herdr_update_progress` / `herdr_update_done` | 見 §12.7b |
 | `supervisor_health` | 見「總管」一節 |
 
 終端畫面不走 WS，輪詢 §7。
@@ -1691,6 +1697,34 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
   `restart_status` 說重啟交到哪了（#566）：`started`（開了這台 codex 的一批）、`already_covered`（正在跑的那一批確實還排著這台每一顆該重啟的 codex，
   `restart.batch_id` 是那一批）、`deferred`（正在跑的那一批沒涵蓋，排在它後面：`restart.batch_id:null`、`restart.behind_batch_id`＝那一批，
   它結束時 daemon 自己接著開這台 codex 的一批，不用再按）、`error`（批次開不起來：`restart:null`＋`restart_error`，新版已裝好，照一般重啟再按一次）。
+
+### 12.7b header 一鍵更新 herdr `POST /api/hosts/{name}/herdr-update`
+`{"target_version":"0.9.3"}`。只由使用者在 header 確認框送出。下載驗版 → 等閒置 → 維護窗口裡重啟這顆 daemon 的 herdr server → 頂層 bot `resume_native` 接回（SPEC §6.9b）。
+
+```json
+202 {"update_id":"01M4…","host":"local","target_version":"0.9.3","started":true,
+     "will_resume":[{"bot_id":"01M2…","name":"agents-manager-kd61te"}],
+     "children_lost":[{"bot_id":"01M3…","name":"agents-manager-kd61te-fix","parent_bot_id":"01M2…"}]}
+```
+`will_resume`／`children_lost` 是按下去那一刻的預估（真的接回的是窗口開了之後那一刻的名單，見 `herdr_update_done`）。
+- 403 `{"reason":"ui_only"}`：帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token`。400：沒帶或看不懂 `target_version`。404：不認得的主機。
+- 409 `{"reason":"shared_session","host","message"}`：那台設了 `shared_session`。409 `{"reason":"unsupported_host","host","message"}`：不是 `local`（這版不做遠端）。
+- 409 `{"reason":"stale_target","host","target_version","current_target","message"}`：不等於 `GET /api/upstream-updates` 裡 `kind:"herdr"` 這台落後時的目標（`null`＝沒有待升級的新版）。
+- 409 `{"reason":"herdr_update_in_progress","update_id","host","message"}`：這顆 daemon 已經在跑一個。
+
+WS（每則帶 `update_id`／`host`／`target_version`）：`herdr_update_progress` 的 `phase` 依序 `downloading` → `waiting_idle` → `stopping` → `restarting` →（失敗時 `rolling_back`）→ `resuming`。
+
+```json
+{"update_id":"01M4…","host":"local","ok":true,"from":"0.9.1","to":"0.9.3",
+ "resumed":[{"bot_id":"01M2…","name":"…","run_id":"01M5…"}],"failed":[{"bot_id":"…","name":"…","error":"…"}],
+ "children_lost":[{"bot_id":"…","name":"…","parent_bot_id":"…"}]}
+{"update_id":"01M4…","host":"local","ok":false,"from":"0.9.1","to":"0.9.3","reason":"busy_timeout","detail":"等了 1800s 仍有 bot 在忙：x (working)；什麼都沒動",
+ "resumed":[],"failed":[],"children_lost":[]}
+```
+- `reason`（`ok:false` 才有，另帶給人看的 `detail`）：沒動到 server 的——`install_path_unsupported`（現行 binary 是 symlink 或找不到）、`download_failed`、
+  `version_mismatch`（下載的 `--version` 不是目標）、`busy_timeout`（30 分鐘沒等到頂層 bot 全閒置）、`maintenance_busy`（別人開著 herdr 維護窗口）、
+  `swap_failed`（換 binary 失敗，server 沒重啟）；動過 server 的——`restart_failed`（新版 2 分鐘內沒以目標版本回來，已換回 `.bak` 再重啟；bot 照樣接回，`resumed`／`failed` 照填）。
+- 每一步附加到 `<data_dir>/herdr-update.log`；舊 binary 留在同目錄 `herdr.bak-<舊版>`。
 
 ### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`
 `{ "kind": "grok", "via_bot_id": "01M1…" }`：daemon 組一則安裝 prompt（官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、
