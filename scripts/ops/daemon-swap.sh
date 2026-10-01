@@ -196,6 +196,16 @@ lease_safety() {
     fi
 }
 dpid() { "$PGREP" -f '^\./target/release/agents-managerd serve$' | head -1; }
+# 停 daemon：TERM、最多等 30 秒、還在就 KILL。換版主線與 rollback 共用——rollback 以前只 TERM 後固定 sleep 5，
+# 新 daemon 還沒退就覆蓋 binary、刪 -wal／-shm、蓋掉 DB，等於在活著的 daemon 底下動它的資料。
+stop_daemon() { # stop_daemon <pid>（空的就什麼都不做）
+    local pid="$1" j=0
+    [ -n "$pid" ] || return 0
+    kill -TERM "$pid" 2>/dev/null
+    while [ $j -lt 30 ]; do kill -0 "$pid" 2>/dev/null || return 0; sleep 1; j=$((j + 1)); done
+    kill -KILL "$pid" 2>/dev/null; sleep 1
+    return 0
+}
 api() { "$CURL" -sf -o /dev/null "http://127.0.0.1:$PORT$1"; }
 agm_probe() { # agm_probe <bot id> → "<http code> <body>"
     # 測試用：注入一支假的送達器，才不用真的打 daemon。
@@ -537,7 +547,7 @@ rollback() {
     # 起不來（2026-09-20 實際發生過）。預設往前修，只有新 binary 真的起不來才動 DB。
     if [ "$BUMPED" = yes ]; then
         log "schema bumped $PRE_UV -> ${EXP_UV}：先往前修（舊 binary 開不了這個 DB）"
-        kill -TERM "$(dpid)" 2>/dev/null; sleep 5
+        stop_daemon "$(dpid)"
         cp "$NEWBIN" target/release/agents-managerd; start; sleep 3
         j=0; while [ $j -lt 30 ]; do api /api/session && break; sleep 1; j=$((j + 1)); done
         if api /api/session; then
@@ -546,7 +556,7 @@ rollback() {
         fi
         log "forward-fix 失敗：新 binary 起不來，改還原 binary 與 DB"
     fi
-    kill -TERM "$(dpid)" 2>/dev/null; sleep 5
+    stop_daemon "$(dpid)"
     cp -p "$BAK" target/release/agents-managerd
     # The old daemon cannot load or accept service principals. Remove credentials it generated before
     # the rollback so a stale token file is not mistaken for a working credential.
@@ -569,9 +579,7 @@ rollback() {
 }
 
 OLDPID=$(dpid); log "old pid $OLDPID"
-kill -TERM "$OLDPID" 2>/dev/null
-j=0; while [ $j -lt 30 ]; do kill -0 "$OLDPID" 2>/dev/null || break; sleep 1; j=$((j + 1)); done
-kill -0 "$OLDPID" 2>/dev/null && { kill -KILL "$OLDPID"; sleep 1; }
+stop_daemon "$OLDPID"
 PREV="target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)"
 [ -e "$PREV" ] && { log "ABORT: $PREV 已存在"; exit 5; }
 mv target/release/agents-managerd "$PREV"
