@@ -1681,6 +1681,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
   `AM_CHILD_OF=<母 agent 名>`；呼叫端已經有 `AM_CHILD_OF`（子代自己開的 pane）就沿用同一個值，不往下疊；呼叫者自帶的 `--env AM_CHILD_OF=…` 一律剝掉。
   沒有 bot 身分的人工 shell 不標。**有 `AM_CHILD_OF` 的 pane 打 `agent start` 一律 exit 77、不呼叫 herdr**，stderr 講明「要人手就在回報裡寫清楚，由 parent 決定另派兄弟」——
   子代只有一層，狀態都掛在同一個 parent 底下追蹤。`pane split` 不擋（子代開 dev server 之類的 pane 仍可以）。
+- `agent start` 補子 agent 的指示檔、關掉 CLI 自己的指示檔：見 §6.5i。`agent start --help`（`-h`）原樣轉給 herdr，不走 spawn 流程（以前會把 env 補送打進呼叫者自己的 pane）。
 - `herdr agent prompt`：見 §6.5d。其他子指令 `exec` 真正的 herdr（`$AM_REAL_HERDR`，否則 `PATH` 上第一個不是自己的）。
 
 **PATH 只靠 pane env 不夠**：herdr 用 login shell 開 pane，profile 之後才跑並重建 `PATH`（macOS `path_helper` + `brew shellenv` 會把 shim 擠到後面）。
@@ -1700,7 +1701,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
    派工 prompt 必須寫明「你是 `<parent>` 的子 agent、禁止再開子 agent、要人手由 parent 決定」；有 `$AM_CHILD_OF` 的子 agent 不開子 agent，要人手在回報裡講、由 parent 決定是否另派兄弟（§6.5b）。
 
 herdr 的 CLI 說明原樣保留（升級會帶進新文字）。裝不起來只 warning。`child_agent_rules` 是同一份文字來源：claude skill 與三種 kind 的 persona
-（`--append-system-prompt` / `--rules` / `developer_instructions`）都用它。
+（`--append-system-prompt` / `--rules` / `developer_instructions`）都用它；後面接 `[agents]` 的 agent md（§6.5i）。
 
 **語氣是規格的一部分（2026-09-13）**：注入給 bot 與 child 的人設／提示一律寫成**命令**——「必須」「一律」「禁止」，
 開頭先講明「硬規則，不是建議」。客氣的寫法（「請…」「…比較清楚」）agent 會當成建議而不執行，實測就是這樣漏掉找閒置 child、
@@ -2143,6 +2144,30 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
 - 設定當下**不停也不關任何東西**：agent 繼續跑，交給對方接。清掉旗標＝收回，當場排一輪對帳，照 §6.5 接手（run 還在的沿用、
   不在的收編）。刪除專案照舊要求「沒有 active run」，所以移交中的專案刪不掉，要先收回。
 - UI：側欄專案標題標「由 <host> 管理」，輸入框鎖住並寫明原因，bot 選單的「啟動」停用。
+
+### 6.5i bot 的指示檔：`[agents]` 指定的 agent md（使用者 2026-10-01）
+
+以前 claude bot 讀帳號層的 `~/.claude*/CLAUDE.md` 加 repo 的 CLAUDE.md，codex 讀 AGENTS.md：cc0／cc1／cc2 各一份、早就不同步（cc1 是舊版、cc2 沒有），
+codex 讀到的又是另一份。現在指示只有一個來源——config 指定的 agent md：
+
+```toml
+[agents]
+instructions_file = "~/.config/agents-manager/agents/global.md"   # 全域，每顆 bot 都讀
+
+[agents.projects]                                                  # key＝專案 id 或 label（id 優先）
+agents-manager = "/home/u/project/agents-manager/CLAUDE.md"
+```
+
+- **注入順序**：`child_agent_rules`（§6.5c）→ 全域 agent md → 專案 agent md → bot 自己的 persona。三種 kind 同一份文字（claude `--append-system-prompt`、
+  codex `developer_instructions`、grok `--rules`）。檔案在 daemon 這台機器上讀，遠端專案也一樣；每次啟動 bot 重讀，改檔不必重啟 daemon，重啟 bot 就生效。
+- **CLI 自己的指示檔一律關掉**（這個專案有任一份 agent md 時）：pane env `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`（claude 不讀任何 CLAUDE.md，帳號層與 repo 都是；
+  不分 kind 都設，別種 bot 開出來的 claude 子 agent 也繼承）、codex 加 `-c project_doc_max_bytes=0`（不讀 AGENTS.md）。
+  **沒設定的專案維持 CLI 原本的行為**：換版之後、設定寫好之前，bot 不會兩邊都讀不到。
+- **子 agent 拿同一份**：daemon 把「AG Man 規則 + agent md」（不含母 bot 自己的 persona）寫成 bot 目錄裡的 `instructions.md`（遠端走 ssh，暫存檔＋`cmp`），
+  路徑放進 pane env `AM_INSTRUCTIONS_FILE`（shim 保留清單帶到子 pane）。shim 的 `agent start` 依 `--kind` 補：claude `--append-system-prompt "$(cat …)"`、
+  codex `-c developer_instructions=<TOML 多行字面字串>`（三個單引號包住、不跳脫；內容本身含三個連續單引號就不帶並在 stderr 講）＋`-c project_doc_max_bytes=0`、
+  grok `--rules "$(cat …)"`。呼叫者自己帶了同類參數就尊重。
+- **讀不到不擋啟動**：檔案不存在或是空檔時 bot 照開，warn 並在對話裡寫一則 system 訊息講少了哪個檔。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
 

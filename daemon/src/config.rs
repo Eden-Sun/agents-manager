@@ -306,6 +306,35 @@ pub struct ConfigFile {
     /// issue #240：撞限偵測的第二意見（只記錄），預設關。
     #[serde(default, skip_serializing_if = "JudgeCfg::is_default")]
     pub judge: JudgeCfg,
+    /// 使用者 2026-10-01：bot 的指示檔（agent md）由這裡指定，CLI 自己的 CLAUDE.md／AGENTS.md 一律不讀（SPEC §6.5i）。
+    #[serde(default, skip_serializing_if = "AgentsCfg::is_default")]
+    pub agents: AgentsCfg,
+}
+
+/// `[agents]`（SPEC §6.5i）：每顆 bot 啟動時讀這些檔，接在 AG Man 規則後面注入（claude `--append-system-prompt`、
+/// codex `developer_instructions`、grok `--rules`），子 agent 經 herdr shim 拿同一份。路徑可用 `~`；讀不到只警告。
+/// `projects` 的 key 是專案 id 或 label，值是那個專案的 agent md（接在全域那份後面）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentsCfg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions_file: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub projects: std::collections::BTreeMap<String, String>,
+}
+
+impl AgentsCfg {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// 這個專案要讀的檔，依注入順序：全域在前、專案在後。id 優先於 label。
+    pub fn files_for(&self, project_id: &str, project_label: &str) -> Vec<String> {
+        let mut out: Vec<String> = self.instructions_file.iter().filter(|p| !p.trim().is_empty()).cloned().collect();
+        if let Some(p) = self.projects.get(project_id).or_else(|| self.projects.get(project_label)).filter(|p| !p.trim().is_empty()) {
+            out.push(p.clone());
+        }
+        out
+    }
 }
 
 /// `[judge]`（SPEC §4.3c）：`enabled` 與 `projects`（專案 id 或 label）兩層都要開才會把遮罩後的畫面尾段
