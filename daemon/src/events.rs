@@ -342,6 +342,7 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
     let own = key.clone();
     let handle = tokio::spawn(async move {
         let mut backoff = Duration::from_millis(250);
+        let mut resubscribing = false;
         loop {
             let Some(client) = app2.herdr_for_session(&hst, &sess).await else { break };
             let subs = vec![json!({"type": "pane.agent_status_changed", "pane_id": pid})];
@@ -349,6 +350,10 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
                 Ok(mut rx) => {
                     backoff = Duration::from_millis(250);
                     tracing::info!(host = %hst, session = %sess, pane_id = %pid, "watching pane agent status");
+                    if resubscribing {
+                        resync_pane_status(&app2, &client, &hst, &sess, &pid).await;
+                    }
+                    resubscribing = true;
                     while let Some(ev) = rx.recv().await {
                         handle_status(&app2, &hst, &sess, &ev).await;
                     }
@@ -372,6 +377,26 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
         forget_watcher(&app2, own, generation).await;
     });
     g.insert(key, handle);
+}
+
+/// 狀態訂閱斷過再接上（herdr 重啟、或 0.9.2+ 讀太慢被回 `events_lost` 收掉）：斷掉那段的狀態邊已經漏了——
+/// 漏掉 `working → idle` 的話燈號就凍在 working 直到下一則事件。訂閱**先**接上再讀 pane 當下的狀態，照一則狀態事件處理
+/// （讀完之後的變化由新訂閱送，不留縫）。讀不到或 pane 已經不在就不補：pane 收掉由全域訂閱重連時的 reconcile 處理。
+async fn resync_pane_status(app: &Arc<App>, client: &crate::herdr::HerdrClient, host: &str, session: &str, pane_id: &str) {
+    let pane = match client.pane_get(pane_id).await {
+        Ok(Some(pane)) => pane,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::debug!(host, session, pane_id, error = ?e, "could not re-read a pane's status after resubscribing");
+            return;
+        }
+    };
+    let Some(status) = pane.agent_status else { return };
+    let ev = crate::herdr::Event {
+        event: "pane.agent_status_changed".into(),
+        data: json!({"pane_id": pane_id, "agent": pane.agent, "agent_status": status.as_str()}),
+    };
+    handle_status(app, host, session, &ev).await;
 }
 
 /// Drop a watcher's own registration, on every path out of its loop.
@@ -789,6 +814,27 @@ mod tests {
         assert_eq!(run_state(&app, &run).await, "exited");
         assert_eq!(project_ws(&app, &e.project_id).await, None, "綁定清掉");
         assert_eq!(run_state(&app, &other_run).await, "running", "別的 workspace 不受影響");
+    }
+
+    /// 狀態訂閱重接（含 herdr 0.9.2+ 的 `events_lost`）之後補讀 pane 當下的狀態：斷掉那段漏掉的 `working → idle`
+    /// 要補回來，燈號不能凍在 working。pane 已經不在就什麼都不做。
+    #[tokio::test]
+    async fn a_resubscribed_pane_watcher_catches_up_on_the_status_it_missed() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "resync").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let stored = || async { sqlx::query_scalar::<_, String>("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap() };
+
+        resync_pane_status(&app, &app.herdr, LOCAL_HOST, "test", "pane-gone").await;
+        assert_eq!(stored().await, "working", "別的、已經不在的 pane 不動這個 run");
+
+        e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_agent("agent", &pane, false); // herdr 現在說 idle
+        resync_pane_status(&app, &app.herdr, LOCAL_HOST, "test", &pane).await;
+        assert_eq!(stored().await, "idle", "漏掉的 working → idle 要補回來");
     }
 
     /// #245：清綁定的 UPDATE 寫失敗一次，不能永遠殘留。
