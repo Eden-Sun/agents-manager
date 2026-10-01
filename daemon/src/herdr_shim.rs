@@ -260,8 +260,15 @@ am_agent_start() {
                 --env=AM_INSTANCE=* | --env=AM_DATA_DIR=* | --env=AM_CHILD_OF=*) continue ;;
             esac
         fi
-        if [ "$_prev" = "--kind" ]; then _kind=$_a; fi
-        if [ "$_prev" = "--pane" ]; then _pane=$_a; fi
+        # 只看 `--` 之前（之後是 agent 自己的 argv）；clap 的 `--kind=X`／`--pane=X` 與空白拼法同義。
+        if [ "$_stop" = 0 ]; then
+            if [ "$_prev" = "--kind" ]; then _kind=$_a; fi
+            if [ "$_prev" = "--pane" ]; then _pane=$_a; fi
+            case "$_a" in
+                --kind=*) _kind=${_a#--kind=} ;;
+                --pane=*) _pane=${_a#--pane=} ;;
+            esac
+        fi
         if [ "$_stop" = 1 ]; then
             # codex / grok spell it `-m`, codex also `-c model=…`: all of them are "the child
             # picked its own model" and must not be overridden with the parent's.
@@ -1498,6 +1505,25 @@ mod tests {
             &["agent", "start", "--kind", "claude", "--pane", "w1:p3", "ui", "--", "--model", "opus"],
         );
         assert_eq!(out, ["agent", "start", "--kind", "claude", "--pane", "w1:p3", "p-1-ui", "--", "--model", "opus"]);
+    }
+
+    /// clap 也收 `--kind=codex`／`--pane=ID`：等號拼法要跟空白拼法一樣處理。以前 `_kind`／`_pane` 只認空白拼法，
+    /// `--kind=codex` 的子 agent 被當成「沒指定 kind」而補上母 bot（claude）的 `--model`，指示旗標也照母 bot 的 kind 補；
+    /// `--pane=ID` 則被當成沒有 `--pane`，bot 的 agent start 直接被擋、也繞過「不能指到自己的 pane」的檢查。
+    #[test]
+    fn the_equals_spelling_of_kind_and_pane_is_understood() {
+        let s = Sandbox::new();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_KIND", "claude"), ("AM_MODEL", "opus"), ("AM_EFFORT", "medium")];
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind=codex"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind=codex"], "別的 kind 不借母 bot 的模型：{out:?}");
+
+        let bot = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_AGENT_NAME", "p-1")];
+        let (_, err, rc) = s.run_full(&bot, &["agent", "start", "kid", "--kind", "claude", "--pane=w1:p3"]);
+        assert_eq!(rc, 0, "有 --pane 的等號拼法不能被當成沒給：{err}");
+        let mut own = bot.to_vec();
+        own.push(("HERDR_PANE_ID", "w1:p1"));
+        let (_, err, rc) = s.run_full(&own, &["agent", "start", "kid", "--kind", "claude", "--pane=w1:p1"]);
+        assert_eq!(rc, 2, "指到自己的 pane 要擋：{err}");
     }
 
     /// 2026-09-08：沒帶 `--model` 的子 agent 跑 CLI 預設；同 kind 才補母 bot 的，自己有寫的不動。
