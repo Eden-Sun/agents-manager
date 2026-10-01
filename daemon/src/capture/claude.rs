@@ -115,20 +115,24 @@ impl Capture for ClaudeCapture {
 
 /// `⏺` 開頭的這一行是工具呼叫（`⏺ Bash(herdr agent get …)`），不是助手的文字。認結構不認工具名：
 /// 名字加 `(`、整行收在 `)`（長參數被畫成 `…)`），或下面第一行非空的就是 `⎿` 輸出。
-/// 回覆文字自己寫出 `parse(input) 會回傳…` 兩個條件都不中。
+/// 多行的命令（真畫面 `claude-2.1.281-background-shell.txt`）第一行不收在 `)`、下面也是命令的續行：
+/// 名字加 `(` 開頭的，跳過續行（不含下一個 `⏺`）後接著 `⎿` 也算。
+/// 回覆文字自己寫出 `parse(input) 會回傳…` 這幾個條件都不中。
 fn is_tool_call_row(lines: &[&str], i: usize) -> bool {
     let s = lines[i].trim();
     let body = s.strip_prefix("⏺").unwrap_or(s).trim_start();
-    let named_call = body.split_once('(').is_some_and(|(name, _)| {
+    let opens_call = body.split_once('(').is_some_and(|(name, _)| {
         name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && name.chars().all(|c| c.is_ascii_alphanumeric() || "_.:-".contains(c))
-    }) && body.ends_with(')');
-    named_call
-        || lines[i + 1..]
-            .iter()
-            .map(|l| l.trim())
-            .find(|l| !l.is_empty())
-            .is_some_and(|l| l.starts_with('⎿'))
+    });
+    if opens_call && body.ends_with(')') {
+        return true;
+    }
+    let mut rest = lines[i + 1..].iter().map(|l| l.trim());
+    if opens_call {
+        return rest.take_while(|l| !l.starts_with('⏺')).any(|l| l.starts_with('⎿'));
+    }
+    rest.find(|l| !l.is_empty()).is_some_and(|l| l.starts_with('⎿'))
 }
 
 /// 這一行是 spinner 開頭嗎。`*` 也是 spinner 的一格，但同時是回覆裡的 markdown 項目、程式碼區塊的 ` * 註解`：
@@ -475,6 +479,17 @@ mod reply_boundary_tests {
         let screen = format!("❯ 跑\n⏺ Bash(sleep 60)\n  ⎿  Running…\n{COMPOSER}");
         let reply = ClaudeCapture.extract_reply(&screen).unwrap();
         assert!(reply.starts_with("Bash(sleep 60)"), "{reply}");
+    }
+
+    /// 真畫面（`claude-2.1.281-background-shell.txt`）：多行的 Bash 呼叫第一行沒有收在 `)`、下面第一行也不是 `⎿`
+    /// （是命令的第二行）。這種工具呼叫要當工具呼叫，回覆仍是它上面最後一段文字。
+    #[test]
+    fn a_multiline_tool_call_at_the_bottom_is_still_a_tool_call() {
+        let screen = format!(
+            "❯ 提交\n⏺ 好，我來提交。\n\n⏺ Bash(SP=/private/tmp/claude-501/x/scratchpad\n      python3 - <<'EOF'…)\n  ⎿  daemon/src/config.rs:262: 內容\n     … +6 lines (ctrl+o to expand)\n{COMPOSER}"
+        );
+        let reply = ClaudeCapture.extract_reply(&screen).unwrap();
+        assert_eq!(reply, "好，我來提交。", "{reply}");
     }
 
     /// 回覆文字自己長得像函式呼叫（沒有 `⎿` 輸出跟在後面）不是工具呼叫。
