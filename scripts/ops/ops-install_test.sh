@@ -1,0 +1,151 @@
+#!/bin/bash
+# ops-install.sh 的隔離測試：假 repo（真的 git，帶 install-manifest.tsv）＋暫存的假 AGM 目錄，不碰正式的 AGM bin。
+# 釘住：只動「已經裝了、內容跟 repo 不同」的清單內檔案；先備份、原子替換；裝完自檢（bash -n／py 語法），
+# 沒過就還原那一支、其他照裝；新檔、排程 unit、清單外的檔一律不動；--dry-run 什麼都不寫。
+#
+#   bash scripts/ops/ops-install_test.sh
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT="$HERE/ops-install.sh"
+GITBIN=$(command -v git)
+PASS=0
+FAIL=0
+check() {
+  if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
+  else echo "FAIL - $1"; echo "      找不到 '$2'，實際內容："; sed 's/^/      /' "$3" 2>/dev/null; FAIL=$((FAIL + 1)); fi
+}
+check_no() {
+  if grep -q -- "$2" "$3" 2>/dev/null; then echo "FAIL - $1"; echo "      不該有 '$2'"; sed 's/^/      /' "$3"; FAIL=$((FAIL + 1))
+  else echo "ok   - $1"; PASS=$((PASS + 1)); fi
+}
+equals() {
+  if [ "$2" = "$3" ]; then echo "ok   - $1"; PASS=$((PASS + 1))
+  else echo "FAIL - $1（是 '$2'，預期 '$3'）"; FAIL=$((FAIL + 1)); fi
+}
+gone() { [ ! -e "$2" ] && { echo "ok   - $1"; PASS=$((PASS + 1)); } || { echo "FAIL - $1（$2 還在）"; FAIL=$((FAIL + 1)); }; }
+
+setup() {
+  ROOT=$(mktemp -d)
+  REPO="$ROOT/repo"; DIR="$ROOT/agm"; OUT="$ROOT/out"
+  "$GITBIN" init -q -b main "$REPO"
+  "$GITBIN" -C "$REPO" config user.email t@t; "$GITBIN" -C "$REPO" config user.name t
+  mkdir -p "$REPO/scripts/ops/systemd" "$DIR/bin"
+  cat > "$REPO/scripts/ops/install-manifest.tsv" <<'M'
+# 測試用對照表
+scripts/ops/a-kick.sh    bin/a-kick.sh
+scripts/ops/b-tool.py    bin/b-tool.py
+scripts/ops/c-task.md    c-task.md
+scripts/ops/new-one.sh   bin/new-one.sh
+scripts/ops/mac-only.sh  bin/mac-only.sh  darwin
+scripts/ops/linux-only.sh  bin/linux-only.sh  linux
+scripts/ops/systemd/x.timer  systemd/x.timer  linux
+M
+  printf '#!/bin/bash\necho a-v1\n' > "$REPO/scripts/ops/a-kick.sh"
+  printf 'print("b-v1")\n' > "$REPO/scripts/ops/b-tool.py"
+  printf 'task v1\n' > "$REPO/scripts/ops/c-task.md"
+  printf '#!/bin/bash\necho new\n' > "$REPO/scripts/ops/new-one.sh"
+  printf '#!/bin/bash\necho mac\n' > "$REPO/scripts/ops/mac-only.sh"
+  printf '#!/bin/bash\necho linux\n' > "$REPO/scripts/ops/linux-only.sh"
+  printf '[Timer]\nOnCalendar=daily\n' > "$REPO/scripts/ops/systemd/x.timer"
+  "$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m v1
+  # 安裝端：照 v1 裝好（new-one、mac-only 沒裝；x.timer 裝的是跟 repo 不同的舊版）
+  install -m 755 "$REPO/scripts/ops/a-kick.sh" "$DIR/bin/a-kick.sh"
+  install -m 755 "$REPO/scripts/ops/b-tool.py" "$DIR/bin/b-tool.py"
+  install -m 644 "$REPO/scripts/ops/c-task.md" "$DIR/c-task.md"
+  install -m 755 "$REPO/scripts/ops/linux-only.sh" "$DIR/bin/linux-only.sh"
+  mkdir -p "$DIR/systemd"; printf '[Timer]\nOnCalendar=hourly\n' > "$DIR/systemd/x.timer"
+  printf 'unversioned\n' > "$DIR/bin/not-in-manifest.sh"
+}
+teardown() { rm -rf "$ROOT"; }
+bump() { # bump <檔> <內容>：repo 裡改一支並 commit
+  printf '%s' "$2" > "$REPO/scripts/ops/$1"
+  "$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m "bump $1"
+}
+run() { bash "$SCRIPT" --repo "$REPO" --ref HEAD --dir "$DIR" --platform linux "$@" >"$OUT" 2>&1; echo $?; }
+
+# 1. 沒有變動：什麼都不寫，changes=0。
+setup
+equals "一致時 exit 0" "$(run)" "0"
+check "changes=0" "changes=0" "$OUT"
+gone "沒有備份目錄" "$DIR/ops-install-backups"
+teardown
+
+# 2. 有變動：先備份舊檔、換成新的、保留權限；清單外／新檔／排程 unit／別的平台不動。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+bump c-task.md $'task v2\n'
+bump linux-only.sh $'#!/bin/bash\necho linux-new\n'
+bump systemd/x.timer $'[Timer]\nOnCalendar=weekly\n'
+equals "更新 exit 0" "$(run)" "0"
+check "a-kick 裝了" "installed bin/a-kick.sh" "$OUT"
+check "task md 裝了" "installed c-task.md" "$OUT"
+equals "a-kick 內容是 v2" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v2"
+equals "a-kick 還是可執行" "$([ -x "$DIR/bin/a-kick.sh" ] && echo x)" "x"
+equals "md 不是可執行" "$([ -x "$DIR/c-task.md" ] && echo x || echo n)" "n"
+B=$(ls -d "$DIR"/ops-install-backups/*/ | head -1)
+equals "舊的 a-kick 在備份裡" "$(sed -n 2p "${B}bin/a-kick.sh")" "echo a-v1"
+equals "舊的 task 在備份裡" "$(cat "${B}c-task.md")" "task v1"
+equals "b-tool 沒變不備份" "$([ -e "${B}bin/b-tool.py" ] && echo yes || echo no)" "no"
+check "新檔不自動裝（要第一次手動）" "not-installed bin/new-one.sh" "$OUT"
+gone "new-one.sh 沒被建立" "$DIR/bin/new-one.sh"
+gone "darwin 的列在 linux 不動" "$DIR/bin/mac-only.sh"
+equals "排程 unit 不動（要 daemon-reload 與核准）" "$(sed -n 2p "$DIR/systemd/x.timer")" "OnCalendar=hourly"
+check "排程 unit 報成跳過" "skipped systemd/x.timer" "$OUT"
+equals "清單外的檔不動" "$(cat "$DIR/bin/not-in-manifest.sh")" "unversioned"
+equals "linux-only 也更新" "$(sed -n 2p "$DIR/bin/linux-only.sh")" "echo linux-new"
+check "彙總 3 個、0 失敗" "changes=3 failed=0" "$OUT"
+gone "沒有留下暫存檔" "$DIR/bin/a-kick.sh.new"
+equals "沒有留下 .new 殘檔" "$(ls "$DIR/bin" | grep -c '\.new' || true)" "0"
+check "記下裝的是哪個 commit" "$("$GITBIN" -C "$REPO" rev-parse HEAD | cut -c1-8)" "$DIR/ops-install.last"
+teardown
+
+# 3. --dry-run：列出會裝什麼，什麼都不寫。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+equals "dry-run exit 0" "$(run --dry-run)" "0"
+check "列出會裝" "would-install bin/a-kick.sh" "$OUT"
+check "changes=1" "changes=1" "$OUT"
+equals "安裝端沒動" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v1"
+gone "沒有備份目錄" "$DIR/ops-install-backups"
+gone "沒有 last 記錄" "$DIR/ops-install.last"
+teardown
+
+# 4. 自檢失敗：語法壞掉的新版要還原成舊檔、exit 1、點名；其他支照裝。
+setup
+bump a-kick.sh $'#!/bin/bash\nif then fi (\n'
+bump b-tool.py $'print("b-v2")\n'
+bump c-task.md $'task v2\n'
+equals "有自檢失敗 exit 1" "$(run)" "1"
+check "點名壞的那支" "failed bin/a-kick.sh" "$OUT"
+equals "壞的那支還原成舊檔" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v1"
+equals "還原後還能執行" "$(bash -n "$DIR/bin/a-kick.sh" && echo ok)" "ok"
+equals "py 的新版照裝" "$(cat "$DIR/bin/b-tool.py")" 'print("b-v2")'
+equals "md 的新版照裝" "$(cat "$DIR/c-task.md")" "task v2"
+check "彙總 2 個裝了、1 失敗" "changes=3 failed=1" "$OUT"
+teardown
+
+# 5. python 語法壞掉也要擋，而且自檢不能在安裝目錄留 __pycache__。
+setup
+bump b-tool.py $'def (:\n'
+equals "py 語法壞 exit 1" "$(run)" "1"
+check "點名 py" "failed bin/b-tool.py" "$OUT"
+equals "py 還原" "$(cat "$DIR/bin/b-tool.py")" 'print("b-v1")'
+gone "沒有 __pycache__" "$DIR/bin/__pycache__"
+teardown
+
+# 6. 來源在這個 ref 讀不到（清單寫了、repo 裡沒有）：報 failed、不動安裝端。
+setup
+printf 'scripts/ops/ghost.sh  bin/ghost.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m ghost
+printf '#!/bin/bash\n' > "$DIR/bin/ghost.sh"
+equals "來源缺 exit 1" "$(run)" "1"
+check "點名" "failed bin/ghost.sh" "$OUT"
+teardown
+
+# 7. 用法錯誤：缺必要參數 exit 2。
+setup
+equals "沒帶 --dir exit 2" "$(bash "$SCRIPT" --repo "$REPO" >"$OUT" 2>&1; echo $?)" "2"
+teardown
+
+echo "ops-install_test: $PASS passed, $FAIL failed"
+[ "$FAIL" = 0 ]
