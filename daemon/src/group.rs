@@ -347,7 +347,7 @@ pub async fn messages(app: &Arc<App>, project_id: &str, before: Option<&str>, li
         .filter(|p| p.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("project".into()))?;
     let limit = limit.clamp(1, 500);
-    const BASE: &str = "SELECT m.*, b.id AS bot_id, b.name AS bot_name FROM messages m
+    const BASE: &str = "SELECT m.*, m.rowid AS seq, b.id AS bot_id, b.name AS bot_name FROM messages m
          JOIN conversations c ON c.id = m.conversation_id
          JOIN bots b ON b.id = c.bot_id
          WHERE b.project_id = ? AND b.deleted_at IS NULL";

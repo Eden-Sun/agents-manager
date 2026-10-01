@@ -544,7 +544,7 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
     let _g = lock.lock().await;
     #[cfg(test)]
     lifecycle::race_point::hit("rewind_locked", bot_id).await;
-    let msg: db::Message = sqlx::query_as("SELECT * FROM messages WHERE id = ? AND conversation_id = ?")
+    let msg: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE id = ? AND conversation_id = ?")
         .bind(message_id)
         .bind(&conv)
         .fetch_optional(&app.db)

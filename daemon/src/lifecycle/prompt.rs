@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
-    if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id=?")
+    if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id=?")
         .bind(message_id)
         .fetch_optional(&app.db)
         .await
@@ -93,7 +93,7 @@ async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str) -> anyhow::Result<
     }
 
     let pending_messages: Vec<db::Message> = sqlx::query_as(
-        "SELECT * FROM messages WHERE turn_id=? AND role='user' AND sent_via IS NULL AND created_at<=?",
+        "SELECT *, rowid AS seq FROM messages WHERE turn_id=? AND role='user' AND sent_via IS NULL AND created_at<=?",
     )
     .bind(turn_id)
     .bind(&first_at)
@@ -127,7 +127,7 @@ async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str) -> anyhow::Result<
     }
     // Re-load in the same transaction, so the emitted message reflects the committed timestamp.
     let messages: Vec<db::Message> = sqlx::query_as(
-        "SELECT * FROM messages WHERE turn_id=? AND role='user' AND sent_via IS NULL AND created_at<=?",
+        "SELECT *, rowid AS seq FROM messages WHERE turn_id=? AND role='user' AND sent_via IS NULL AND created_at<=?",
     )
     .bind(turn_id)
     .bind(&first_at)

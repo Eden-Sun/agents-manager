@@ -136,7 +136,7 @@ async fn relay_backfill(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &s
         .execute(&app.db)
         .await?;
     let _ = crate::agent_relay::claim(&host, to_agent, &content);
-    let message: db::Message = sqlx::query_as("SELECT * FROM messages WHERE id = ?").bind(&msg_id).fetch_one(&app.db).await?;
+    let message: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&msg_id).fetch_one(&app.db).await?;
     tracing::info!(from = %from_bot, to = %to_agent, msg = %msg_id, "relay announce arrived after the echo; attributed it");
     lifecycle::emit_message_added(app, &to_bot, message).await;
     Ok(())
@@ -877,7 +877,7 @@ async fn replace_fallback_reply(app: &Arc<App>, mut tx: sqlx::Transaction<'_, sq
         .bind(&turn.conversation_id)
         .fetch_optional(&mut *tx)
         .await?;
-    let message: db::Message = sqlx::query_as("SELECT * FROM messages WHERE id=?").bind(&latest).fetch_one(&mut *tx).await?;
+    let message: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE id=?").bind(&latest).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     tracing::info!(turn = %turn.id, msg = %latest, "late hook replaced the terminal-fallback reply with the transcript's");
     if let Some(bot_id) = bot_id {
