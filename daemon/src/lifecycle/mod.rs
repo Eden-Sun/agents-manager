@@ -121,6 +121,12 @@ pub(crate) fn retain_pane_typed(active: &[String]) {
     }
 }
 
+/// 沒了的 bot（刪掉、退役的 child）在 lifecycle 各模組的 per-bot 記憶體帳：它們只在「結清／套用／disarm」時才清，
+/// bot 先沒了就沒有人會再來清。
+pub(crate) fn retain_bot_state(live: &[String]) {
+    interrupt_grace::retain_bots(live);
+}
+
 #[cfg(test)]
 mod pane_typed_memo_tests {
     use super::*;
