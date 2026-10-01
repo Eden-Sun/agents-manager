@@ -794,6 +794,27 @@ async fn upgrade_clipped_user_message(conn: &mut sqlx::SqliteConnection, turn_id
     Ok(())
 }
 
+/// 把 hook 帶來的 native id（去重鑰匙）記到回合上：只填空的、只動備援關掉或剛由它升級的回合。
+/// 沒有這兩道保護時，晚到 hook 手上的是舊快照，回合若已被別的路收好並蓋了自己的鑰匙，這裡會整個蓋掉。
+async fn stamp_native_ids(
+    conn: &mut sqlx::SqliteConnection,
+    turn_id: &str,
+    session_id: &Option<String>,
+    native_turn_id: &Option<String>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE turns SET native_session_id=COALESCE(native_session_id, ?),
+                          native_turn_id=COALESCE(native_turn_id, ?)
+          WHERE id=? AND status IN ('completed_fallback','completed')",
+    )
+    .bind(session_id)
+    .bind(native_turn_id)
+    .bind(turn_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// 遲到的 hook 撞上備援關掉的回合：沒有 assistant 訊息就用 hook 的回覆補上並改 `completed`，
 /// 已有回覆才丟（防一回合兩則）。2026-09-13 GROK 備援 15 秒就關回合、36 秒後的真回覆被丟。
 ///
@@ -814,24 +835,20 @@ async fn fill_or_drop_late_hook(
     same_turn: bool,
 ) -> Result<()> {
     let mut tx = app.db.begin().await?;
-    sqlx::query(
-        "UPDATE turns SET native_session_id=COALESCE(?, native_session_id),
-                          native_turn_id=COALESCE(?, native_turn_id) WHERE id=?",
-    )
-    .bind(session_id)
-    .bind(native_turn_id)
-    .bind(&turn.id)
-    .execute(&mut *tx)
-    .await?;
     let has_reply: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
             .bind(&turn.id)
             .fetch_one(&mut *tx)
             .await?;
     if !body_text.trim().is_empty() && has_reply > 0 && same_turn {
-        return replace_fallback_reply(app, tx, turn, body_text).await;
+        return replace_fallback_reply(app, tx, turn, body_text, session_id, native_turn_id).await;
     }
     if body_text.trim().is_empty() || has_reply > 0 {
+        // 丟掉的 hook：只有「有證據是這一回合的」才記它的鑰匙。沒有證據的（`same_turn = false`）可能屬於別的回合，
+        // 記上去之後 `recent_fallback_turn`（只找 native id 為空的）就找不到這一回合，它真正的晚到 hook 沒地方收。
+        if same_turn {
+            stamp_native_ids(&mut tx, &turn.id, session_id, native_turn_id).await?;
+        }
         tx.commit().await?;
         tracing::info!(turn = %turn.id, has_reply, "late hook dropped; turn already completed via terminal fallback");
         return Ok(());
@@ -851,6 +868,7 @@ async fn fill_or_drop_late_hook(
         tx.commit().await?;
         return Ok(());
     }
+    stamp_native_ids(&mut tx, &turn.id, session_id, native_turn_id).await?;
     let message =
         lifecycle::insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", body_text, "hook", false, None).await?;
     tx.commit().await?;
@@ -862,13 +880,22 @@ async fn fill_or_drop_late_hook(
 
 /// `fill_or_drop_late_hook` 的 `same_turn` 分支：這回合的 assistant 訊息全是 `terminal_fallback` 才蓋（有 hook 寫的就不動），
 /// 蓋最新那則、其餘備援那幾則留著（通常只有一則）。回合 `completed_fallback → completed`（合法邊）；CAS 沒過就不蓋。
-async fn replace_fallback_reply(app: &Arc<App>, mut tx: sqlx::Transaction<'_, sqlx::Sqlite>, turn: &db::Turn, body_text: &str) -> Result<()> {
+async fn replace_fallback_reply(
+    app: &Arc<App>,
+    mut tx: sqlx::Transaction<'_, sqlx::Sqlite>,
+    turn: &db::Turn,
+    body_text: &str,
+    session_id: &Option<String>,
+    native_turn_id: &Option<String>,
+) -> Result<()> {
     let rows: Vec<(String, String)> =
         sqlx::query_as("SELECT id, source FROM messages WHERE turn_id=? AND role='assistant' ORDER BY created_at DESC, rowid DESC")
             .bind(&turn.id)
             .fetch_all(&mut *tx)
             .await?;
     let Some((latest, _)) = rows.first().filter(|_| rows.iter().all(|(_, src)| src == "terminal_fallback")) else {
+        // 有證據是這一回合的 hook（呼叫端才會走到這裡），只是已經有 hook 寫的回覆：鑰匙照記。
+        stamp_native_ids(&mut tx, &turn.id, session_id, native_turn_id).await?;
         tx.commit().await?;
         tracing::info!(turn = %turn.id, "late hook dropped; the turn already has a hook reply");
         return Ok(());
@@ -880,6 +907,7 @@ async fn replace_fallback_reply(app: &Arc<App>, mut tx: sqlx::Transaction<'_, sq
         tx.commit().await?;
         return Ok(());
     }
+    stamp_native_ids(&mut tx, &turn.id, session_id, native_turn_id).await?;
     sqlx::query("UPDATE messages SET content=?, source='hook', incomplete=0, updated_at=? WHERE id=?")
         .bind(body_text)
         .bind(db::now())
@@ -2253,6 +2281,68 @@ mod external_claim_tests {
         fill_or_drop_late_hook(&app, &turn().await, "又一份", &Some("s1".into()), &Some("n1".into()), true).await.unwrap();
         let content: String = sqlx::query_scalar("SELECT content FROM messages WHERE id=?").bind(&fb.id).fetch_one(&app.db).await.unwrap();
         assert_eq!(content, "第一段\n\n最後一段");
+    }
+
+    async fn late_hook_fixture(env: &tt::Env, name: &str, status: &str) -> (String, String) {
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,?,'claude','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(&env.project_id)
+        .bind(name)
+        .bind(db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&env.app.db, &bot_id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at) VALUES (?,?,'web',?,'ok',?,?)")
+            .bind(&turn_id)
+            .bind(&conv)
+            .bind(status)
+            .bind(db::now())
+            .bind(db::now())
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        (conv, turn_id)
+    }
+
+    async fn native_ids(app: &Arc<App>, turn_id: &str) -> (Option<String>, Option<String>) {
+        sqlx::query_as("SELECT native_session_id, native_turn_id FROM turns WHERE id=?").bind(turn_id).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// 晚到的 hook 手上的回合快照是舊的：回合已經被別的路收成 `completed`、蓋好去重鑰匙（session, turn）。
+    /// 補回覆之前那句「寫 native id」沒有狀態保護，會把別人的鑰匙蓋掉——該回合 hook 的重送就不再被去重擋住。
+    #[tokio::test]
+    async fn a_late_hook_never_overwrites_the_dedup_key_of_a_turn_already_closed() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (_conv, turn_id) = late_hook_fixture(&env, "late-keys", "completed_fallback").await;
+        let stale = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        // 快照之後，另一則 hook 把它收成 completed、蓋上自己的鑰匙。
+        sqlx::query("UPDATE turns SET status='completed', native_session_id='s0', native_turn_id='n0' WHERE id=?").bind(&turn_id).execute(&app.db).await.unwrap();
+
+        fill_or_drop_late_hook(&app, &stale, "晚到的另一則", &Some("s1".into()), &Some("n1".into()), true).await.unwrap();
+        assert_eq!(native_ids(&app, &turn_id).await, (Some("s0".into()), Some("n0".into())), "已經收好的回合的去重鑰匙不能被蓋掉");
+    }
+
+    /// 沒有證據證明這則 hook 屬於這一回合（`same_turn = false`）而且丟掉它：它的 native id 不能記到這一回合上——
+    /// 記上去之後 `recent_fallback_turn`（只找 native id 為空的）就再也找不到這一回合，它真正的晚到 hook 沒地方收。
+    #[tokio::test]
+    async fn a_dropped_late_hook_that_may_belong_elsewhere_does_not_stamp_its_ids_on_the_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (conv, turn_id) = late_hook_fixture(&env, "late-foreign", "completed_fallback").await;
+        lifecycle::insert_message(&app, &conv, Some(&turn_id), "assistant", "備援抓的回覆", "terminal_fallback", true, None).await.unwrap();
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+
+        fill_or_drop_late_hook(&app, &turn, "別回合的回覆", &Some("s-other".into()), &Some("n-other".into()), false).await.unwrap();
+        assert_eq!(native_ids(&app, &turn_id).await, (None, None), "丟掉的 hook 不留鑰匙");
+        let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(replies, 1);
     }
 
     /// 2026-09-13（GROK）：備援關掉的回合沒存回覆，遲到 hook 的答案被丟、使用者看到「沒回應」。
