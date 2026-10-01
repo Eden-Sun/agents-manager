@@ -10,6 +10,9 @@ while IFS= read -r f; do
     case "$f" in
         # project skill（例如 verify）是 .md 但會被 Claude 當指令執行：要先於下面的文件規則，歸 ops（scripts/verify_skill_test.sh 驗契約）。
         .claude/skills/*) ops=1 ;;
+        # daemon 用 include_str! 編進去的文件（`supervisor::persona::BUILD_INPUTS`，那邊的測試擋「又多一個沒列」）與 daemon 底下的
+        # .md fixture 不是「只有文件」：改名、刪掉會編不過，也要先於下面的文件規則。
+        docs/goals/agm-supervisor-persona.md | docs/goals/agm-responder-persona.md | daemon/*) daemon=1 ;;
         docs/* | *.md | LICENSE | .gitignore | .github/ISSUE_TEMPLATE/*) ;;
         web/*) web=1 ;;
         daemon/* | Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/*) daemon=1 ;;

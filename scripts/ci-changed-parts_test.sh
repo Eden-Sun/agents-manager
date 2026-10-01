@@ -25,6 +25,11 @@ check "ops" ".claude/skills/verify/SKILL.md"
 check "web daemon ops" "web/src/a.ts" "daemon/src/b.rs" "scripts/check.sh"
 check "full" "web/src/a.ts" "somewhere/unknown.txt"
 check "" ""
+# 被 daemon include_str! 編進去的 .md／docs（supervisor::persona::BUILD_INPUTS）不是「只有文件」：改名、刪掉＝編不過。
+check "daemon" "docs/goals/agm-supervisor-persona.md"
+check "daemon" "docs/goals/agm-responder-persona.md"
+check "daemon" "daemon/src/release_triage/fixtures/claude_2.1.276-278.md"
+check "" "docs/goals/other-goal.md"
 
 if [ "$fail" = 0 ]; then echo "ci-changed-parts: OK"; fi
 exit "$fail"
