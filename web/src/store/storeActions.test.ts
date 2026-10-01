@@ -1538,3 +1538,86 @@ test('panes_changed：重抓 pane 清單（別的裝置開／關／改用途的 
   await settle()
   assert.ok(requests.some((r) => r.method === 'GET' && r.path.includes('/panes')), '要打 GET /api/panes')
 })
+
+// #766：翻頁游標指到已被刪掉／別顆 bot 的訊息時 daemon 回 404＋reason；網頁要重載第一頁再翻一次，不是只跳錯誤。
+const cursor404 = (reason: string) => json({ error: 'not_found', what: 'before message', reason }, 404)
+
+for (const reason of ['before_message_gone', 'before_message_not_in_conversation']) {
+  test(`#766：bot 翻頁收到 404 ${reason}：重載第一頁、再翻一次、不跳錯誤`, async () => {
+    seed()
+    useStore.setState({
+      messages: { b1: Array.from({ length: 5 }, (_, i) => capMsg(100 + i)) },
+      loadedBots: { b1: true },
+      moreMessages: { b1: true },
+    })
+    let stale = true
+    routeDaemon((r) => {
+      const before = new URL(r.path, 'http://x').searchParams.get('before')
+      if (before === capMsg(100).id && stale) {
+        stale = false
+        return cursor404(reason)
+      }
+      if (before) return json({ messages: [capMsg(1), capMsg(2)], turns: [], has_more: false }, 200)
+      // 重載後的第一頁：舊的最舊那則（capMsg(100)）已經不在了。
+      return json({ messages: [capMsg(101), capMsg(102)], turns: [], has_more: true }, 200)
+    })
+    await useStore.getState().loadEarlierMessages('b1')
+    await settle()
+    const s = useStore.getState()
+    assert.deepEqual(noticeTexts(), [], '不跳「載入更早的訊息失敗」')
+    assert.deepEqual(s.messages.b1.map((m) => m.id), [1, 2, 101, 102, 103, 104].map((n) => capMsg(n).id), '舊的最舊那則（100）已不存在；重載頁（101、102）之後本來就有的新訊息（103、104）照留，再從重載後的最舊那則往前補（1、2）')
+    assert.equal(s.loadingMore.b1, undefined)
+  })
+}
+
+test('#766：重載之後游標還是 404：只重試一次，之後照舊跳錯誤（不無限迴圈）', async () => {
+  seed()
+  useStore.setState({ messages: { b1: [capMsg(100)] }, loadedBots: { b1: true }, moreMessages: { b1: true } })
+  routeDaemon((r) => {
+    if (new URL(r.path, 'http://x').searchParams.get('before')) return cursor404('before_message_gone')
+    return json({ messages: [capMsg(101)], turns: [], has_more: true }, 200)
+  })
+  requests.length = 0
+  await useStore.getState().loadEarlierMessages('b1')
+  await settle()
+  const cursorCalls = requests.filter((r) => r.path.includes('before='))
+  assert.equal(cursorCalls.length, 2, `翻頁最多打兩次（原本一次＋重載後一次）：${cursorCalls.map((r) => r.path)}`)
+  assert.equal(requests.filter((r) => r.path.includes('/bots/b1/messages') && !r.path.includes('before=')).length, 1, '只重載一次第一頁')
+  assert.equal(noticeTexts().filter((t) => t.includes('載入更早的訊息失敗')).length, 1)
+  // 旗標要放掉：下一次使用者再按，仍可以再自救一次。
+  requests.length = 0
+  await useStore.getState().loadEarlierMessages('b1')
+  await settle()
+  assert.equal(requests.filter((r) => r.path.includes('/bots/b1/messages') && !r.path.includes('before=')).length, 1, '下一次手動翻頁又可以自救一次')
+})
+
+test('#766：其他錯誤（500）不重載，照舊跳錯誤', async () => {
+  seed()
+  useStore.setState({ messages: { b1: [capMsg(100)] }, loadedBots: { b1: true }, moreMessages: { b1: true } })
+  routeDaemon(() => json({ error: 'upstream', message: 'boom' }, 500))
+  requests.length = 0
+  await useStore.getState().loadEarlierMessages('b1')
+  await settle()
+  assert.equal(requests.length, 1)
+  assert.equal(noticeTexts().filter((t) => t.includes('載入更早的訊息失敗')).length, 1)
+})
+
+test('#766：群組時間軸翻頁收到 404 before_message_gone：同樣重載第一頁再翻一次', async () => {
+  seed()
+  const g = (n: number) => ({ ...capMsg(n), bot_id: 'b1', bot_name: 'b1' })
+  useStore.setState({ groupMessages: { p1: [g(100), g(101)] as never }, loadedProjects: { p1: true }, moreMessages: { p1: true } })
+  let stale = true
+  routeDaemon((r) => {
+    const before = new URL(r.path, 'http://x').searchParams.get('before')
+    if (before === capMsg(100).id && stale) {
+      stale = false
+      return cursor404('before_message_gone')
+    }
+    if (before) return json({ messages: [g(1)], has_more: false }, 200)
+    return json({ messages: [g(102), g(103)], has_more: true }, 200)
+  })
+  await useStore.getState().loadEarlierGroupMessages('p1')
+  await settle()
+  assert.deepEqual(noticeTexts(), [])
+  assert.deepEqual(useStore.getState().groupMessages.p1.map((m) => m.id), [capMsg(1).id, capMsg(102).id, capMsg(103).id])
+})

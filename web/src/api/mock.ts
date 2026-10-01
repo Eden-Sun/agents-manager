@@ -407,6 +407,11 @@ function claudeModelsForIdentity(identity: string): Rec[] {
 }
 
 /** 幾小時前（ISO）：mock 用來造「沿用的那一桶」。 */
+/** `daemon/src/api.rs::cursor_not_found`：`before=` 游標指不到東西的 404（#766）。 */
+function lostCursor(reason: 'before_message_gone' | 'before_message_not_in_conversation', messageId: string): ApiError {
+  return new ApiError(404, { error: 'not_found', what: 'before message', reason, message_id: messageId }, 'not found')
+}
+
 function hoursAgo(h: number): string {
   return new Date(Date.now() - h * 3600_000).toISOString()
 }
@@ -3617,7 +3622,8 @@ export class MockTransport implements Transport {
     let upto = mine.length
     if (before) {
       const at = mine.findIndex((m) => m.id === before)
-      if (at < 0) throw new ApiError(400, { error: 'bad_request', message: `before message \`${before}\` not found` }, 'bad request')
+      // daemon（#766）：游標要是這段對話裡還在的訊息；被刪掉的／別顆 bot 的一律 404＋reason。
+      if (at < 0) throw lostCursor(this.messages.some((m) => m.id === before) ? 'before_message_not_in_conversation' : 'before_message_gone', before)
       upto = at
     }
     const rows = mine
@@ -3642,6 +3648,12 @@ export class MockTransport implements Transport {
     const limit = Math.min(500, Math.max(1, Number(q.get('limit') ?? 100) || 100))
     const before = q.get('before') ?? ''
     const byId = new Map(this.bots.map((b) => [b.id, b] as const))
+    if (before) {
+      const at = this.messages.find((m) => m.id === before)
+      // daemon（#766）：游標要是這個專案某顆 bot 的訊息；被刪掉的 → gone，別個專案的 → not_in_conversation。
+      if (!at) throw lostCursor('before_message_gone', before)
+      if (byId.get(at.bot_id)?.project_id !== projectId) throw lostCursor('before_message_not_in_conversation', before)
+    }
     const rows = this.messages
       .filter((m) => byId.get(m.bot_id)?.project_id === projectId)
       .filter((m) => !before || m.id < before)
