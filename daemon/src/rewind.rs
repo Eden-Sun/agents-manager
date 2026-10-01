@@ -359,7 +359,7 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
     if in_rewind_ui(&s) {
         return Err(Fail::UiBusy);
     }
-    if lifecycle::composer_text("claude", &s).is_some() {
+    if lifecycle::composer_text_whole("claude", &s).is_some() {
         return Err(Fail::ComposerBusy);
     }
     pane.send_text("/rewind").await.map_err(|e| Fail::Pane(e.to_string()))?;
@@ -371,7 +371,7 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
         let s = read(pane).await?;
         if in_rewind_ui(&s) {
             back_out(pane).await;
-        } else if lifecycle::composer_text("claude", &s).is_some() {
+        } else if lifecycle::composer_text_whole("claude", &s).is_some() {
             let _ = keys(pane, &["ctrl+c"]).await;
         }
         return Err(Fail::MenuNotShown);
@@ -416,7 +416,7 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
     }
     // 對過字才選。按 `1` 而不是 Enter：選項是編號的，`1` 直接選 Restore，不靠游標位置，也不用看得到選項（矮 pane 會被擠掉）。
     keys(pane, &["1"]).await?;
-    let Some(refill) = wait_for(pane, RESTORE_WAIT_MS, |s| (!in_rewind_ui(s)).then(|| lifecycle::composer_text("claude", s))).await? else {
+    let Some(refill) = wait_for(pane, RESTORE_WAIT_MS, |s| (!in_rewind_ui(s)).then(|| lifecycle::composer_text_whole("claude", s))).await? else {
         return Err(Fail::Unconfirmed);
     };
     Ok(Done { pane_cleared: clear_refill(pane, refill, target).await? })
@@ -429,7 +429,7 @@ async fn clear_refill(pane: &dyn Pane, refill: Option<String>, target: &str) -> 
         None => true,
         Some(text) if is_refill_of(&text, target) => {
             keys(pane, &["ctrl+c"]).await?;
-            let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| lifecycle::composer_text("claude", s).is_none().then_some(())).await?.is_some();
+            let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| lifecycle::composer_text_whole("claude", s).is_none().then_some(())).await?.is_some();
             // 清掉之後 claude 會顯示幾秒「Press Ctrl-C again to exit」：這段時間再來一個 ctrl+c（停機、中斷）就把它關掉了。
             // 握著 bot 鎖等提示消失才放手（2026-09-23 實機：約 3 秒）。
             let _ = wait_for(pane, HINT_WAIT_MS, |s| (!s.contains(CTRL_C_HINT)).then_some(())).await?;
@@ -458,7 +458,7 @@ async fn rewind_dropped(pane: &dyn Pane, target: &str, next: Option<(String, usi
     if in_rewind_ui(&s) {
         return Err(Fail::UiBusy);
     }
-    let cleared = clear_refill(pane, lifecycle::composer_text("claude", &s), target).await?;
+    let cleared = clear_refill(pane, lifecycle::composer_text_whole("claude", &s), target).await?;
     match next {
         Some((later, skip)) if cleared => drive(pane, &later, skip).await,
         Some(_) => Err(Fail::ComposerBusy),
@@ -509,7 +509,7 @@ async fn clear_composer(pane: &dyn Pane, expect: &str) -> LcResult<()> {
     if in_rewind_ui(&s) {
         return Err(conflict(Fail::UiBusy.reason(), &Fail::UiBusy.message()));
     }
-    let Some(text) = lifecycle::composer_text("claude", &s) else { return Ok(()) };
+    let Some(text) = lifecycle::composer_text_whole("claude", &s) else { return Ok(()) };
     if !same_composer(&text, expect) {
         return Err(LcError::conflict(
             "composer_changed",
@@ -517,7 +517,7 @@ async fn clear_composer(pane: &dyn Pane, expect: &str) -> LcResult<()> {
         ));
     }
     keys(pane, &["ctrl+c"]).await.map_err(|f| up(f.message()))?;
-    let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| lifecycle::composer_text("claude", s).is_none().then_some(())).await.map_err(|f| up(f.message()))?;
+    let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| lifecycle::composer_text_whole("claude", s).is_none().then_some(())).await.map_err(|f| up(f.message()))?;
     if cleared.is_none() {
         return Err(conflict(Fail::ComposerBusy.reason(), "按了 ctrl+c，終端輸入列還是有字，沒有倒回。"));
     }
@@ -666,7 +666,7 @@ async fn next_in_context(app: &Arc<App>, conv: &str, message_id: &str) -> anyhow
 /// 倒回沒做成：記 log、轉成 API 錯誤。輸入列有字時把那段字帶回去（`draft`），網頁才能讓人看過再選「清掉再倒回」。
 async fn rewind_failed(bot: &str, pane: &dyn Pane, f: Fail) -> LcError {
     let draft = if f == Fail::ComposerBusy {
-        read(pane).await.ok().and_then(|s| lifecycle::composer_text("claude", &s))
+        read(pane).await.ok().and_then(|s| lifecycle::composer_text_whole("claude", &s))
     } else {
         None
     };

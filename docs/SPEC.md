@@ -2630,7 +2630,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 - **標記**：`messages.rewound_at`——那則與之後的（同一個 conversation、rowid 不小於它）標上時間，**不刪**；對話加一則 system 說明。推 WS `messages_rewound`。
 - **不做的**：`Summarize from here／up to here`、還原程式碼（`--rewind-files`）、codex／grok。
 
-- **輸入列有字**（2026-10-01 使用者：cf-ox-2 倒回連兩次 `composer_busy`，只叫人去終端清）：409 帶 `draft`（那段字），網頁跳確認框給人看、按「清掉再倒回」重送並帶 `clear_composer`＋`expect_composer`；daemon 在 bot 鎖裡重讀輸入列，只有完整草稿相同才 ctrl+c 清掉（只正規化 CRLF/LF 換行，空白與圖片佔位差異都算不同；等提示消失）再照常倒回，對不上回 `composer_changed`、不動。清掉的字不送出、不放回網頁輸入框。daemon log 只記草稿是否存在與字元數，不記草稿內容。
+- **輸入列有字**（2026-10-01 使用者：cf-ox-2 倒回連兩次 `composer_busy`，只叫人去終端清）：409 帶 `draft`（那段字），網頁跳確認框給人看、按「清掉再倒回」重送並帶 `clear_composer`＋`expect_composer`；daemon 在 bot 鎖裡重讀輸入列，只有完整草稿相同才 ctrl+c 清掉（草稿裡的空白列也算草稿，整段讀到框的下緣分隔線為止；只正規化 CRLF/LF 換行，空白與圖片佔位差異都算不同；等提示消失）再照常倒回，對不上回 `composer_changed`、不動。清掉的字不送出、不放回網頁輸入框。daemon log 只記草稿是否存在與字元數，不記草稿內容。
 
 ### 6.14 回合結束、背景工作還在跑（issue #714，使用者 2026-09-28）
 

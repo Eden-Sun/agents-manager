@@ -692,6 +692,17 @@ pub(crate) fn is_rule_row(s: &str) -> bool {
 /// holding only the TUI's own hint (claude 2.1.280's dim suggested next prompt) is an empty box here
 /// too, the same verdict the delivery check gives.
 pub(crate) fn composer_text(kind: &str, screen: &str) -> Option<String> {
+    composer_text_rows(kind, screen, false)
+}
+
+/// [`composer_text`]，但草稿裡的空白列算草稿（讀到下緣分隔線為止）：給「要拿整段草稿比對、清掉」的地方用（rewind 的 CAS）。
+/// `composer_text` 碰到空白列就停，兩段之間空一行的草稿只讀得到前半段——使用者只看得到、同意的是前半段，ctrl+c 卻清掉整段。
+/// 只有 claude 的框有下緣分隔線可以當終點；codex／grok 框外的頁尾列不能被吃進草稿，維持 `composer_text`。
+pub(crate) fn composer_text_whole(kind: &str, screen: &str) -> Option<String> {
+    composer_text_rows(kind, screen, kind == "claude")
+}
+
+fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option<String> {
     let plain = super::delivery::plain_without_hints(kind, screen);
     let screen = plain.as_str();
     let marker = prompt_echo_prefix(kind)?.trim_end();
@@ -711,7 +722,7 @@ pub(crate) fn composer_text(kind: &str, screen: &str) -> Option<String> {
         let row = undecorate_row(line);
         let body = if n == 0 { row[marker.len()..].trim().to_string() } else { row };
         // grok 的框底 `╰── Grok 4.7 (high) · … ─╯` 寫著字，不是純線條：一樣是框的下緣，不是草稿的一列。
-        if n > 0 && (body.is_empty() || is_rule_row(&body) || super::delivery::is_box_bottom(&body)) {
+        if n > 0 && ((body.is_empty() && !keep_blank_rows) || is_rule_row(&body) || super::delivery::is_box_bottom(&body)) {
             break;
         }
         out.push(body);
