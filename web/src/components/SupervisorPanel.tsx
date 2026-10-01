@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { SUPERVISOR_CANDIDATES, fetchIncidents, fetchSupervisor, supervisorAction } from '../api/supervisor'
 import type { SupervisorAction, SupervisorAssignment, SupervisorIncident, SupervisorInfo } from '../api/supervisor'
+import { ASSIGN_LABEL, INCIDENT_LABEL } from '../lib/supervisorLabels'
 import { useStore } from '../store/store'
 import './supervisor.css'
 
@@ -56,38 +57,16 @@ const REMOTE_REVOKED: Record<string, string> = {
   manager_not_running: 'AGM 沒在跑',
 }
 
-/**
- * 交辦的生命週期。`awaiting_review` 是這裡最重要的一格：回合跑完只到這裡，AGM 驗收過
- * 才會變 `completed`。把它畫成「已完成」就是在替沒人看過的工作背書。
- */
-const ASSIGN_LABEL: Record<string, string> = {
-  queued: '待送出',
-  delivered: '已送達',
-  unknown: '送達未知',
-  awaiting_review: '等驗收',
-  blocked: '阻塞中',
-  completed: '已驗收',
-  failed: '失敗',
-  cancelled: '已取消',
-  superseded: '已接續',
-}
 
 const ASSIGN_TONE: Record<string, string> = {
   completed: 'ok',
   failed: 'bad',
   awaiting_review: 'warn',
   blocked: 'warn',
+  quota_blocked: 'warn',
   unknown: 'warn',
 }
 
-const INCIDENT_LABEL: Record<string, string> = {
-  host_disconnected: '主機斷線',
-  bot_stopped: 'bot 該開著卻停了',
-  assignment_stalled: '交辦卡住沒進度',
-  assignment_undelivered: '交辦一直送不出去',
-  notify_exhausted: '通知送不出去',
-  remote_entry: '遠端入口異常',
-}
 
 /** 故障清單有三種狀態，而「還沒讀到」跟「讀到了，沒有故障」絕對不能畫成同一種。 */
 type IncidentState =
