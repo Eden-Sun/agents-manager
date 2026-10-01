@@ -345,6 +345,9 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
     let handle = tokio::spawn(async move {
         let mut backoff = Duration::from_millis(250);
         let mut resubscribing = false;
+        // 只有「證明 run 已經結束」那一種離開才算收掉這個 pane；拿不到 client（遠端斷線、session 對不上）離開時 run 還活著，
+        // 等著重放的狀態事件與 pane 的鎖都還要用（`forget_watcher`）。
+        let mut run_ended = false;
         loop {
             let Some(client) = app2.herdr_for_session(&hst, &sess).await else { break };
             let subs = vec![json!({"type": "pane.agent_status_changed", "pane_id": pid})];
@@ -372,7 +375,10 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
             match app2.session_for_host(&hst).await {
                 None => tracing::warn!(host = %hst, pane_id = %pid, "watcher cannot tell the host's session; keeping it"),
                 Some(fallback) => match crate::db::active_runs_for_pane(&app2.db, &hst, &pid, &sess, &fallback).await {
-                    Ok(runs) if runs.is_empty() => break,
+                    Ok(runs) if runs.is_empty() => {
+                        run_ended = true;
+                        break;
+                    }
                     Ok(_) => {}
                     Err(e) => tracing::warn!(host = %hst, pane_id = %pid, error = ?e, "watcher cannot read the pane's runs; keeping it"),
                 },
@@ -380,7 +386,7 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(10));
         }
-        forget_watcher(&app2, own, generation).await;
+        forget_watcher(&app2, own, generation, run_ended).await;
     });
     g.insert(key, handle);
 }
@@ -405,16 +411,19 @@ async fn resync_pane_status(app: &Arc<App>, client: &crate::herdr::HerdrClient, 
     handle_status(app, host, session, &ev).await;
 }
 
-/// Drop a watcher's own registration, on every path out of its loop.
-async fn forget_watcher(app: &Arc<App>, key: PaneKey, generation: u64) {
+/// Drop a watcher's own registration, on every path out of its loop. `run_ended`：離開是因為證明了這個 pane 已經沒有 active run
+/// （不是拿不到 client）——只有這時才把 pane 的狀態序號與鎖一起帶走。
+async fn forget_watcher(app: &Arc<App>, key: PaneKey, generation: u64, run_ended: bool) {
     let mut watchers = app.pane_watchers.lock().await;
     let mut gens = watcher_gens().lock().unwrap();
     if gens.get(&key) == Some(&generation) {
         gens.remove(&key);
         watchers.remove(&key);
         // watcher 自己退出（run 結束）也要把這個 pane 的狀態序號與鎖帶走，不只在 `unwatch_pane_on_session`：
-        // 不然這兩張行程級表每個開過又收掉的 pane 留一格。
-        forget_pane_status_state(&key);
+        // 不然這兩張行程級表每個開過又收掉的 pane 留一格。拿不到 client 而退出的不帶（run 還活著，之後重連會再裝 watcher）。
+        if run_ended {
+            forget_pane_status_state(&key);
+        }
     }
 }
 
@@ -818,7 +827,7 @@ mod tests {
         watcher_gens().lock().unwrap().insert(key.clone(), 7);
         app.pane_watchers.lock().await.insert(key.clone(), tokio::spawn(std::future::pending::<()>()));
 
-        forget_watcher(&app, key.clone(), 7).await;
+        forget_watcher(&app, key.clone(), 7, true).await;
         assert!(!status_seq().lock().unwrap().contains_key(&key), "狀態序號要清掉");
         assert!(!pane_status_locks().lock().unwrap().contains_key(&key), "pane 的鎖要清掉");
         assert!(!app.pane_watchers.lock().await.contains_key(&key));
@@ -826,10 +835,34 @@ mod tests {
         // 同一個 pane 之後裝了新的 watcher（世代不同）：舊的 watcher 退出不能動它的狀態。
         status_seq().lock().unwrap().insert(key.clone(), 9);
         watcher_gens().lock().unwrap().insert(key.clone(), 8);
-        forget_watcher(&app, key.clone(), 7).await;
+        forget_watcher(&app, key.clone(), 7, true).await;
         assert!(status_seq().lock().unwrap().contains_key(&key), "新的 watcher 的狀態不被舊的帶走");
         status_seq().lock().unwrap().remove(&key);
         watcher_gens().lock().unwrap().remove(&key);
+    }
+
+    /// watcher 也會因為「這台主機／session 現在拿不到 herdr client」（遠端斷線、session 對不上）離開迴圈——那不是 run 結束，
+    /// run 還活著、之後重連會再裝 watcher。這條路徑不能把 pane 的狀態序號與鎖帶走：讀不到 run 而延後重放的那一則 `blocked`
+    /// 是 child 的父 agent 唯一會被告知的一次（#192），序號被清掉它就被當成「已經有更新的事件」而放棄；鎖被換掉則讓
+    /// 兩個處理同一個 pane 的狀態事件可以同時跑。
+    #[tokio::test]
+    async fn a_watcher_that_leaves_because_the_host_is_unreachable_keeps_the_panes_status_state() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "unreach").await;
+        let _run = tt::fake_run(&app, &bot.id).await;
+        let session = "unreachable-session"; // 本機沒有這個 session 的 client：`herdr_for_session` 回 None
+        let pane = format!("pane-{}", bot.id);
+        let key: PaneKey = (LOCAL_HOST.to_string(), session.to_string(), pane.clone());
+        status_seq().lock().unwrap().insert(key.clone(), 41);
+        let lock_before = pane_status_lock(&key);
+
+        watch_pane_on_session(&app, LOCAL_HOST, session, &pane).await;
+        let gone = crate::testing::eventually!(!app.pane_watchers.lock().await.contains_key(&key));
+        assert!(gone, "拿不到 client 時 watcher 退出（之後重連再裝）");
+        assert_eq!(status_seq().lock().unwrap().get(&key), Some(&41), "run 還活著：等著重放的那一則不能被丟掉");
+        assert!(Arc::ptr_eq(&lock_before, &pane_status_lock(&key)), "pane 的鎖不能被換掉");
+        forget_pane_status_state(&key);
     }
 
     fn ws_event(ws: &str) -> crate::herdr::Event {
