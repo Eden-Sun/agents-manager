@@ -8,13 +8,16 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { act, click, imeEnter, keydown, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { MockTransport } from '../api/mock'
-import { useStore } from '../store/store'
+import { sharedMock } from '../testing/sharedMock'
+import { resetStoreForTest, useStore } from '../store/store'
 import { ChatPanel } from './ChatPanel'
 
 afterEach(unmountAll)
 before(setupDom)
-after(teardownDom)
+after(() => {
+  resetStoreForTest() // 要在拆 DOM 之前：關 socket 會拿掉 window 上的監聽
+  teardownDom()
+})
 
 const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer textarea')!
 const prompts = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'POST' && /\/bots\/[^/]+\/prompt/.test(r.path))
@@ -31,7 +34,7 @@ async function until(cond: () => boolean | Promise<boolean>, what: string, ms = 
 
 // 整個檔案共用一個 mock 後端：store 會丟掉 `daemon_seq` 比較小的快照（防舊快照蓋新的），每個測試各建一個新 mock
 // 等於「daemon 重啟」，store 就不更新了。不同測試用不同的 bot，免得上一個測試留下的回合／排隊互相干擾。
-const mock = new MockTransport()
+const mock = sharedMock
 
 /** 起 `name` 這顆 bot 並等它 running，選取它、掛上 ChatPanel。 */
 async function openChat(name: string) {

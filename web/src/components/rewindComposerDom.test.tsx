@@ -7,8 +7,8 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { MockTransport } from '../api/mock'
-import { useStore } from '../store/store'
+import { sharedMock } from '../testing/sharedMock'
+import { resetStoreForTest, useStore } from '../store/store'
 import { ChatPanel } from './ChatPanel'
 
 afterEach(async () => {
@@ -17,9 +17,12 @@ afterEach(async () => {
   if (bot) mock.composerDrafts.set(bot.id, null) // 上一個測試卡在終端的草稿不能影響下一個
 })
 before(setupDom)
-after(teardownDom)
+after(() => {
+  resetStoreForTest() // 要在拆 DOM 之前：關 socket 會拿掉 window 上的監聽
+  teardownDom()
+})
 
-const mock = new MockTransport()
+const mock = sharedMock
 
 async function until(cond: () => boolean | Promise<boolean>, what: string, ms = 8000): Promise<void> {
   const end = Date.now() + ms
