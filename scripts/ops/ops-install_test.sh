@@ -166,5 +166,26 @@ B=$(ls -d "$DIR"/ops-install-backups/*/ | tail -1)
 equals "手改的版本在備份裡" "$(sed -n 2p "${B}bin/a-kick.sh")" "echo a-hand-edited"
 teardown
 
+# 9. 自檢在**暫存檔**上做、過了才換：自檢跑的那一刻，安裝位置上還是舊檔（不能讓 cron／launchd 撞到沒驗過的新版）。
+setup
+FAKEBIN="$ROOT/fakebin"; mkdir -p "$FAKEBIN"
+printf 'scripts/ops/t-tool.ts  bin/t-tool.ts\n' >> "$REPO/scripts/ops/install-manifest.tsv"
+printf 'console.log("t-v1")\n' > "$REPO/scripts/ops/t-tool.ts"
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m ts
+install -m 755 "$REPO/scripts/ops/t-tool.ts" "$DIR/bin/t-tool.ts"
+bump t-tool.ts $'console.log("t-v2")\n'
+cat > "$FAKEBIN/bun" <<B
+#!/bin/sh
+cat "$DIR/bin/t-tool.ts" > "$ROOT/live-during-selfcheck"
+echo 'build failed' >&2
+exit 1
+B
+chmod +x "$FAKEBIN/bun"
+equals "ts 自檢失敗 exit 1" "$(PATH="$FAKEBIN:$PATH" run)" "1"
+equals "自檢那一刻安裝位置還是舊檔" "$(cat "$ROOT/live-during-selfcheck")" 'console.log("t-v1")'
+equals "失敗後還是舊檔" "$(cat "$DIR/bin/t-tool.ts")" 'console.log("t-v1")'
+check "點名" "failed bin/t-tool.ts" "$OUT"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

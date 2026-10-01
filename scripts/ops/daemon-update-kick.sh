@@ -87,7 +87,7 @@ ops_install_step() {
   _oout=$(printf '%s\n' "$_oscript" | bash -s -- --repo "$DEPLOY" --ref "$_osha" --dir "$DIR" 2>>"$LOG") || _orc=$?
   printf '%s\n' "$_oout" | sed 's/^/ops-install: /' >> "$LOG"
   if [ "$_orc" -ne 0 ]; then
-    alert ops_install_failed "自動換新已安裝的 ops 腳本有失敗（已還原舊版）：$(printf '%s\n' "$_oout" | grep '^failed ' | head -3 | tr '\n' ';')。細節見 ${LOG}，備份在 ${DIR}/ops-install-backups"
+    alert ops_install_failed "自動換新已安裝的 ops 腳本有失敗（沒換成的舊版原封不動）：$(printf '%s\n' "$_oout" | grep '^failed ' | head -3 | tr '\n' ';')。細節見 ${LOG}，備份在 ${DIR}/ops-install-backups"
   else
     log "ops 自動安裝：已把 ${_on} 支換成 $(printf '%s' "$_osha" | cut -c1-8) 的版本"
   fi

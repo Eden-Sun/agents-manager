@@ -10,8 +10,9 @@
 #   - 只看 `scripts/ops/install-manifest.tsv`（在 --ref 那版）列的檔、這個平台的列；來源用 `git show <ref>:<path>` 讀，不需要 checkout。
 #   - 只換「安裝端已經有、內容跟 repo 不同」的檔。安裝端沒有的＝新檔，報 `not-installed`，第一次要人（或 AGM）手動裝。
 #   - 排程 unit（`systemd/`、`LaunchAgents/`）不碰：換了還要 daemon-reload／launchctl，不是這支的事，報 `skipped`。
-#   - 每支：先備份舊檔到 `<AGM>/ops-install-backups/<UTC 時間>/<安裝位置>`，寫到同目錄暫存檔再 `mv`（原子替換），
-#     最後自檢（.sh → `bash -n`、.py → 語法編譯、.ts → 有 bun 就 `bun build`），沒過就把備份放回去、報 `failed`、其他支照裝。
+#   - 每支：新版先寫到同目錄暫存檔、**在暫存檔上自檢**（.sh → `bash -n`、.py → 語法編譯、.ts → 有 bun 就 `bun build`），
+#     沒過就丟掉暫存檔、報 `failed`、安裝位置上的舊檔一個位元都沒動（不讓 cron／launchd 撞到沒驗過的新版）、其他支照裝；
+#     過了才備份舊檔到 `<AGM>/ops-install-backups/<UTC 時間>/<安裝位置>`，再 `mv`（原子替換）。
 #   - **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的哪個 blob 都對不上，同 `agm ops-sync --check` 的
 #     `drift`）＝有人直接改了安裝檔，報 `drifted`、不動它、不算失敗。`--force` 才換（照樣先備份）。
 #   - `--dry-run` 只列 `would-install`，什麼都不寫。
@@ -49,12 +50,12 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="$DIR/ops-install-backups/$STAMP"
 changes=0; failed=0
 
-# 自檢安裝好的檔。不在安裝目錄產生任何東西（py 不用 py_compile，它會寫 __pycache__）。
-selfcheck() { # selfcheck <path>
+# 自檢（在暫存檔上做，種類看安裝位置的副檔名）。不在安裝目錄產生任何東西（py 不用 py_compile，它會寫 __pycache__）。
+selfcheck() { # selfcheck <安裝位置> <要檢查的檔案>
   case "$1" in
-    *.sh) bash -n "$1" 2>&1 ;;
-    *.py) python3 -B -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$1" 2>&1 ;;
-    *.ts) if command -v bun >/dev/null 2>&1; then bun build --target=bun --outfile=/dev/null "$1" 2>&1 >/dev/null; fi ;;
+    *.sh) bash -n "$2" 2>&1 ;;
+    *.py) python3 -B -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$2" 2>&1 ;;
+    *.ts) if command -v bun >/dev/null 2>&1; then bun build --target=bun --outfile=/dev/null "$2" 2>&1 >/dev/null; fi ;;
     *) return 0 ;;
   esac
 }
@@ -90,21 +91,23 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
   fi
   echo C >> "$TMP/results"
   if [ "$DRY" = 1 ]; then echo "would-install $tgt"; continue; fi
-  mkdir -p "$BACKUP/$(dirname "$tgt")"
-  if ! cp -p "$dest" "$BACKUP/$tgt"; then echo "failed ${tgt}（備份不了，沒動它）"; echo F >> "$TMP/results"; continue; fi
   mode=$(stat -c %a "$dest" 2>/dev/null || stat -f %Lp "$dest" 2>/dev/null || echo 644)
   stage="$dest.new.$$"
-  if ! { cp "$new" "$stage" && chmod "$mode" "$stage" && mv -f "$stage" "$dest"; }; then
+  if ! { cp "$new" "$stage" && chmod "$mode" "$stage"; }; then
     rm -f "$stage"; echo "failed ${tgt}（寫不進去，沒動它）"; echo F >> "$TMP/results"; continue
   fi
-  if err=$(selfcheck "$dest"); then
-    echo "installed ${tgt}（舊檔備份在 ${BACKUP}/${tgt}）"
-  else
-    # 還原：備份放回去（同樣先寫暫存檔再 mv），壞掉的新版不留在安裝端。
-    cp -p "$BACKUP/$tgt" "$stage" && mv -f "$stage" "$dest"
-    echo "failed ${tgt}（自檢沒過，已還原舊版）：$(printf '%s' "$err" | head -2 | tr '\n' ' ')"
-    echo F >> "$TMP/results"
+  # 先在暫存檔上自檢：沒過就丟掉，安裝位置上的舊檔沒被碰過。
+  if ! err=$(selfcheck "$tgt" "$stage"); then
+    rm -f "$stage"
+    echo "failed ${tgt}（自檢沒過，沒換，舊版原封不動）：$(printf '%s' "$err" | head -2 | tr '\n' ' ')"
+    echo F >> "$TMP/results"; continue
   fi
+  mkdir -p "$BACKUP/$(dirname "$tgt")"
+  if ! cp -p "$dest" "$BACKUP/$tgt"; then rm -f "$stage"; echo "failed ${tgt}（備份不了，沒動它）"; echo F >> "$TMP/results"; continue; fi
+  if ! mv -f "$stage" "$dest"; then
+    rm -f "$stage"; echo "failed ${tgt}（換不進去，沒動它）"; echo F >> "$TMP/results"; continue
+  fi
+  echo "installed ${tgt}（舊檔備份在 ${BACKUP}/${tgt}）"
 done > "$TMP/lines"
 
 cat "$TMP/lines"
