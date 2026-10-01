@@ -826,14 +826,18 @@ static PLAIN_FOR_ANSI_WARNED: std::sync::OnceLock<std::sync::Mutex<std::collecti
 /// ten minutes, so a herdr that silently ignores `format` is visible without flooding the log.
 pub(crate) fn should_warn_plain_for_ansi(pane: &str) -> bool {
     let Ok(mut seen) = PLAIN_FOR_ANSI_WARNED.get_or_init(Default::default).lock() else { return false };
-    let now = std::time::Instant::now();
-    match seen.get(pane) {
-        Some(at) if now.duration_since(*at) < std::time::Duration::from_secs(PLAIN_FOR_ANSI_WARN_SECS) => false,
-        _ => {
-            seen.insert(pane.to_string(), now);
-            true
-        }
+    warn_due(&mut seen, pane, std::time::Instant::now())
+}
+
+/// 窗口內講過的不再講；順手把窗口外的帶走——key 是 pane id，每個開過的 pane 一格，只記不清的話只增不減。
+fn warn_due(seen: &mut std::collections::HashMap<String, std::time::Instant>, pane: &str, now: std::time::Instant) -> bool {
+    let window = std::time::Duration::from_secs(PLAIN_FOR_ANSI_WARN_SECS);
+    seen.retain(|_, at| now.duration_since(*at) < window);
+    if seen.contains_key(pane) {
+        return false;
     }
+    seen.insert(pane.to_string(), now);
+    true
 }
 
 /// Read the pane for the composer checks: styled when herdr can, plain when it cannot. A plain
@@ -1401,6 +1405,24 @@ pub(crate) async fn deliver_prompt(
     match plan_delivery(app, client, run, bot, text, force_pane, waited_for_log).await? {
         Ok(plan) => execute_delivery(app, client, run, bot, text, plan).await,
         Err(not) => Ok(not),
+    }
+}
+
+#[cfg(test)]
+mod plain_warn_tests {
+    use super::*;
+
+    #[test]
+    fn the_plain_for_ansi_warning_is_rate_limited_per_pane_and_forgets_old_panes() {
+        let t0 = std::time::Instant::now();
+        let mut seen = std::collections::HashMap::new();
+        assert!(warn_due(&mut seen, "w1:p1", t0));
+        assert!(!warn_due(&mut seen, "w1:p1", t0 + std::time::Duration::from_secs(60)), "窗口內不再講");
+        assert!(warn_due(&mut seen, "w1:p2", t0 + std::time::Duration::from_secs(60)));
+        // 窗口過了：舊 pane 的格子被帶走，不是永遠留著。
+        assert!(warn_due(&mut seen, "w1:p3", t0 + std::time::Duration::from_secs(PLAIN_FOR_ANSI_WARN_SECS + 1)));
+        assert!(!seen.contains_key("w1:p1"), "p1 過期被清：{seen:?}");
+        assert!(seen.contains_key("w1:p2") && seen.contains_key("w1:p3"), "窗口內的留著：{seen:?}");
     }
 }
 
