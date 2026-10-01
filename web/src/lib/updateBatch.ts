@@ -1,6 +1,7 @@
 import type { AgentStatus, Bot, Run } from '../api/types'
 import { cmpVersion } from './releaseTriage'
 import { updateRange } from './updateRange'
+import { backgroundLabel } from './backgroundJobs'
 import type { UpstreamItem } from '../store/upstreamUpdate'
 
 /**
@@ -15,7 +16,8 @@ import type { UpstreamItem } from '../store/upstreamUpdate'
  */
 
 export interface UpdateBatchCounts {
-  ready: { botId: string; name: string }[]
+  /** `backgroundUnknown`：巡邏還沒看過它的背景工作（daemon 剛重啟、新 run）——沒有證據所以不擋，但確認框要標出來（#767）。 */
+  ready: { botId: string; name: string; backgroundUnknown?: true }[]
   /** 正在忙、或需要先手動處理才會被跳過的。`install`＝codex 新版還沒裝（header 另一顆 chip 負責，見 `codexInstallPlan`）。 */
   busy: { botId: string; name: string; why: string; install?: true }[]
 }
@@ -50,7 +52,15 @@ function runBusyReason(run: Run, hasInFlightTurn: boolean): string | null {
   if (st === 'blocked') return '卡在提問，等人回答'
   if (st !== 'idle') return '狀態不明'
   if (hasInFlightTurn) return '還有一回合沒收掉'
+  // 回合結束了、背景還在跑：重啟一退 CLI，背景 shell／終端跟著沒了（daemon `Skip::BackgroundJobs`，#767）。null＝沒看過，不擋。
+  const bg = run.background_jobs ?? 0
+  if (bg > 0) return backgroundLabel(bg)
   return null
+}
+
+/** 確認框裡「會重啟」那一列的字：背景狀態沒看過的標出來（#767）。 */
+export function readyLabel(b: UpdateBatchCounts['ready'][number]): string {
+  return b.backgroundUnknown ? `${b.name}（背景狀態未知）` : b.name
 }
 
 export function updateBatchCounts(
@@ -68,7 +78,7 @@ export function updateBatchCounts(
     const why = busyReason(bot, run, hasInFlightTurn(bot.id))
     if (why && needsManualInstall(bot, run)) busy.push({ botId: bot.id, name: bot.name, why, install: true })
     else if (why) busy.push({ botId: bot.id, name: bot.name, why })
-    else ready.push({ botId: bot.id, name: bot.name })
+    else ready.push({ botId: bot.id, name: bot.name, ...(run.background_jobs === null ? { backgroundUnknown: true as const } : {}) })
   }
   return { ready, busy }
 }
