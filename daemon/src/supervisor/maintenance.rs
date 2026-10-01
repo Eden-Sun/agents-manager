@@ -568,8 +568,10 @@ pub async fn acquire(
     // 一次核准一個窗口：這張已經開過一個、那個窗口過期沒 release（執行端掛了）時，**同一張**不能再開一次。
     // 接手過期租約時只消耗「別張」核准（store::acquire_lease），同一張會被放過去（review2 sup #6）。
     if let Some(l) = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))? {
-        let expired = l.released_at.is_none() && !l.held_at(&crate::db::now());
-        if expired && l.approval_id.as_deref() == Some(approval.id.as_str()) {
+        // 窗口已經 release 掉、核准卻還是 `approved`＝release 那一步的「消耗」沒寫成（DB 出錯，或兩步之間 daemon 死了）：
+        // 一樣算用掉了，不然同一張核准能再開第二個窗口。
+        let used = l.released_at.is_some() || !l.held_at(&crate::db::now());
+        if used && l.approval_id.as_deref() == Some(approval.id.as_str()) {
             let _ = store::decide_approval_from(&app.db, &approval.id, "approved", "consumed", "daemon", Some("lease expired"), None).await;
             return Err(LcError::conflict(
                 "this approval already opened a window that expired without being released",
@@ -1401,6 +1403,29 @@ mod tests {
         // 新申請的核准照常能接手那個過期的窗口。
         let b = approved_window(app, 0).await;
         acquire(app, "rebuild", "ops", &b, None, 300, true, &[]).await.expect("別張核准照常接手");
+    }
+
+    /// release 把窗口收掉、但「消耗核准」那一步沒寫成（DB 出錯，或兩步之間 daemon 死了）：核准還是 `approved`，
+    /// 租約卻已 released——過期的檢查只看「沒 release 的過期租約」，同一張核准就能再開第二個窗口。
+    /// 一次核准一個窗口：租約已經用這張開過，不管後來是過期還是 release 掉，都不能再用。
+    #[tokio::test]
+    async fn an_approval_whose_window_was_released_but_never_consumed_cannot_open_another() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let a = approved_window(app, 0).await;
+        let lease = acquire(app, "rebuild", "ops", &a, None, 300, true, &[]).await.unwrap();
+        let fence = lease["lease"]["fence"].as_i64().unwrap();
+        let token = lease["lease_token"].as_str().unwrap().to_string();
+        sqlx::query("CREATE TRIGGER no_consume BEFORE UPDATE ON supervisor_approvals WHEN NEW.status='consumed' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+            .execute(&app.db).await.unwrap();
+        assert!(release(app, "rebuild", "ops", fence, store::LeaseProof::Token(&token)).await.unwrap());
+        sqlx::query("DROP TRIGGER no_consume").execute(&app.db).await.unwrap();
+        assert_eq!(store::approval(&app.db, &a).await.unwrap().unwrap().status, "approved", "前提：消耗沒寫成");
+
+        let refused = acquire(app, "rebuild", "ops", &a, None, 300, true, &[]).await.unwrap_err();
+        let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+        assert_eq!(detail["reason"], "approval_already_used");
+        assert_eq!(store::approval(&app.db, &a).await.unwrap().unwrap().status, "consumed", "順手補記消耗");
     }
 
     /// 換 commit 重新申請（supersedes）：舊的標 superseded、它的等待接過來，升級計時不因為 main 動了就歸零（review2 sup 新發現 2）。
