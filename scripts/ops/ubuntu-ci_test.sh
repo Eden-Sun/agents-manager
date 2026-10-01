@@ -40,6 +40,15 @@ echo "==> fake $part"
 if [ -e "$FIX/hang.$part" ]; then trap '' TERM; sleep 30 & wait; fi
 exit "$(cat "$FIX/rc.$part" 2>/dev/null || echo 0)"
 CK
+  # 假 agm.py：記下參數；rc 看 $FIX/agm.rc（預設 0）。ubuntu-ci 的 ops-sync 漂移檢查跑的就是 repo 裡這支。
+  cat > "$ROOT/work/scripts/agm.py" <<'AGMPY'
+import os, sys
+fix = os.environ["FIX"]
+open(fix + "/agm.log", "a").write(" ".join(sys.argv[1:]) + "\n")
+print('{"in_sync": true}')
+rc = fix + "/agm.rc"
+sys.exit(int(open(rc).read()) if os.path.exists(rc) else 0)
+AGMPY
   (cd "$ROOT/work" && git add -A && git commit -q -m c1 && git push -q origin main)
   FIX="$ROOT/fix"; mkdir -p "$FIX" "$ROOT/bin"
   export FIX
@@ -126,6 +135,31 @@ equals "空間恢復後 exit 0" "$(run)" "0"
 check "同一個 sha 這時才跑、送 success" "state=success" "$FIX/gh.log"
 equals "last-sha 前進到這個 sha" "$(cat "$CI/last-sha")" "$SHA"
 teardown
+
+# 3e. 已安裝的 ops 腳本與 origin/main 的漂移檢查（#418 的 `agm ops-sync --check --alert`）：以前只有文件寫「巡檢每天跑一次」，
+#     沒有任何東西在排程它（outbox-gc.sh 停在舊版沒人發現）。ubuntu-ci 每輪順手問一次、每 AGM_CI_OPS_SYNC_INTERVAL 秒最多一次；
+#     只偵測回報，結果不影響 CI 的 status／last-sha，檢查壞掉也不能讓 CI 跟著壞。
+setup
+export AGM_CI_OPS_SYNC_INTERVAL=21600
+equals "漂移檢查：第一輪 exit 0" "$(run)" "0"
+check "跑的是 ops-sync --check --alert，對 CI clone" "ops-sync --check --alert --repo $CI/repo" "$FIX/agm.log"
+check "CI 本身照常 success" "state=success" "$FIX/gh.log"
+check "結果留在 ops-sync.json" '"in_sync"' "$CI/ops-sync.json"
+equals "同一個間隔內不重跑（同 sha 也不重跑）" "$(run >/dev/null; wc -l < "$FIX/agm.log" | tr -d ' ')" "1"
+echo 1 > "$CI/ops-sync.last"
+(cd "$ROOT/work" && echo 2 > g && git add g && git commit -q -m c2 && git push -q origin main)
+echo 1 > "$FIX/agm.rc"
+: > "$FIX/gh.log"
+equals "間隔過了再跑一次；有落差（agm exit 1）CI 仍 exit 0" "$(run)" "0"
+equals "又問了一次" "$(wc -l < "$FIX/agm.log" | tr -d ' ')" "2"
+check "有落差不影響這個 sha 的 CI 結果" "state=success" "$FIX/gh.log"
+echo 1 > "$CI/ops-sync.last"
+echo 9 > "$FIX/agm.rc"
+: > "$FIX/gh.log"
+equals "檢查本身壞掉（agm exit 9）CI 也 exit 0" "$(run)" "0"
+equals "沒有新 sha 時過了間隔照樣會問（不靠新 commit）" "$(wc -l < "$FIX/agm.log" | tr -d ' ')" "3"
+teardown
+export AGM_CI_OPS_SYNC_INTERVAL=0
 
 # 4. 鎖被占著：直接退出、不碰 git／gh。
 setup
