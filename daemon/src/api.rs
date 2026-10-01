@@ -4471,8 +4471,15 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
                 .await;
         }
     }
+    // 沒事件也定期送一幀（issue #760）：不佔 seq、不進重播環，客戶端只拿它當「線還活著」的證據。
+    let every = app.ws_ping_every();
+    let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                if socket.send(WsMessage::Text(json!({"type": "ping"}).to_string().into())).await.is_err() { return; }
+            }
             ev = rx.recv() => match ev {
                 // backlog 已經送過這一則（訂閱與讀環之間送出的，兩邊都有）：跳過，不是漏送（issue #521）。
                 Ok(e) if e.seq <= sent_through => {}
@@ -4608,6 +4615,89 @@ mod ws_backlog_dedupe_tests {
         let second = tokio::time::timeout(std::time::Duration::from_secs(5), read_text_frame(&mut client)).await.unwrap();
         assert_eq!(second["data"]["mark"], "sentinel", "同一個 seq 被送第二次（backlog 一次、即時串流一次）：{second}");
         assert!(second["seq"].as_u64().unwrap() > first_seq, "哨兵的 seq 要比前一則大：{second}");
+        drop(client);
+    }
+}
+
+/// issue #760：瀏覽器沒辦法看到 WebSocket 的 ping 控制幀，所以 daemon 定期送一個 text 幀 `{"type":"ping"}`，
+/// 讓客戶端有「連線還活著」的證據；半開連線（睡眠、NAT／tailscale 逾時）下它收不到，就能判定斷線。
+#[cfg(test)]
+mod ws_heartbeat_tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read_handshake(s: &mut tokio::net::TcpStream) {
+        let mut head = Vec::new();
+        let mut b = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            s.read_exact(&mut b).await.unwrap();
+            head.push(b[0]);
+        }
+        assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"));
+    }
+
+    async fn read_text_frame(s: &mut tokio::net::TcpStream) -> serde_json::Value {
+        let mut hdr = [0u8; 2];
+        s.read_exact(&mut hdr).await.unwrap();
+        assert_eq!(hdr[0] & 0x0f, 1, "只預期 text 幀，拿到 opcode {:x}", hdr[0] & 0x0f);
+        let mut len = (hdr[1] & 0x7f) as usize;
+        if len == 126 {
+            let mut ext = [0u8; 2];
+            s.read_exact(&mut ext).await.unwrap();
+            len = u16::from_be_bytes(ext) as usize;
+        }
+        let mut buf = vec![0u8; len];
+        s.read_exact(&mut buf).await.unwrap();
+        serde_json::from_slice(&buf).unwrap()
+    }
+
+    async fn connect(app: &std::sync::Arc<crate::state::App>) -> tokio::net::TcpStream {
+        let router = super::router(app.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
+        });
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /ws?token=test-token HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
+            .await
+            .unwrap();
+        read_handshake(&mut client).await;
+        client
+    }
+
+    /// 沒有任何事件也要定期有幀：靜止的連線若不送東西，客戶端分不出「沒事」與「線已經斷了」。
+    #[tokio::test]
+    async fn an_idle_socket_gets_a_ping_frame_without_a_seq() {
+        let env = crate::testing::env().await;
+        env.app.set_ws_ping_every(std::time::Duration::from_millis(60));
+        let mut client = connect(&env.app).await;
+        for _ in 0..2 {
+            let ping = tokio::time::timeout(std::time::Duration::from_secs(5), read_text_frame(&mut client)).await.unwrap();
+            assert_eq!(ping["type"], "ping", "{ping}");
+            assert!(ping.get("seq").is_none(), "ping 不佔 seq（不能推動客戶端的 lastSeq／重播環）：{ping}");
+        }
+        assert_eq!(env.app.current_seq(), 0, "ping 不是事件，不能讓 seq 前進");
+        drop(client);
+    }
+
+    /// 有事件在跑時 ping 照送，事件不被 ping 吞掉或換序。
+    #[tokio::test]
+    async fn events_still_arrive_between_pings() {
+        let env = crate::testing::env().await;
+        env.app.set_ws_ping_every(std::time::Duration::from_millis(60));
+        let mut client = connect(&env.app).await;
+        env.app.emit("bot_changed", serde_json::json!({"mark": "x"})).await;
+        let mut got_event = false;
+        for _ in 0..5 {
+            let f = tokio::time::timeout(std::time::Duration::from_secs(5), read_text_frame(&mut client)).await.unwrap();
+            if f["type"] == "bot_changed" {
+                got_event = true;
+                break;
+            }
+            assert_eq!(f["type"], "ping");
+        }
+        assert!(got_event);
         drop(client);
     }
 }

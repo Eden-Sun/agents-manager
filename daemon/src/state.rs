@@ -28,6 +28,9 @@ pub enum AutostartHostStatus {
 /// **前端有一份對應的清單**（`web/src/store/store.ts` 的 `seqAfterFrame`），沒有東西綁著兩邊：
 /// 這裡加了新的即時幀就要一起改那邊，否則客戶端的 `lastDurableSeq` 會推到不在環裡的 seq
 /// （後果只是重連多一次 resync，見 [`App::backlog`] 的註解）。
+/// WS 心跳預設間隔（issue #760）。客戶端的死線偵測是 60 秒（`web/src/api/socketLiveness.ts`），這裡要明顯短於它。
+pub const WS_PING_EVERY_MS: u64 = 20_000;
+
 pub fn is_ephemeral(kind: &str) -> bool {
     kind == "turn_progress"
 }
@@ -128,6 +131,8 @@ pub struct App {
     /// Internal turn-completion bus (the supervisor controller subscribes).
     turn_bus: broadcast::Sender<TurnEvent>,
     seq: AtomicU64,
+    /// WS 心跳間隔（毫秒，issue #760）；測試縮短它。
+    ws_ping_ms: AtomicU64,
     ring: Mutex<VecDeque<WsEvent>>,
     /// (host, session, pane_id) -> per-run agent_status subscription task
     pub pane_watchers: Mutex<HashMap<(String, String, String), tokio::task::JoinHandle<()>>>,
@@ -251,6 +256,7 @@ impl App {
             bus,
             turn_bus,
             seq: AtomicU64::new(0),
+            ws_ping_ms: AtomicU64::new(WS_PING_EVERY_MS),
             ring: Mutex::new(VecDeque::new()),
             pane_watchers: Mutex::new(HashMap::new()),
             global_watchers: Mutex::new(HashMap::new()),
@@ -469,6 +475,16 @@ impl App {
             }
             let _ = self.bus.send(ev);
         }
+    }
+
+    /// 每條 WS 連線多久送一個 `{"type":"ping"}` text 幀（瀏覽器看不到 ping 控制幀）。客戶端 60 秒沒收到任何幀就判定半開。
+    pub fn ws_ping_every(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.ws_ping_ms.load(Ordering::Relaxed).max(1))
+    }
+
+    #[cfg(test)]
+    pub fn set_ws_ping_every(&self, every: std::time::Duration) {
+        self.ws_ping_ms.store(every.as_millis() as u64, Ordering::Relaxed);
     }
 
     pub fn current_seq(&self) -> u64 {
