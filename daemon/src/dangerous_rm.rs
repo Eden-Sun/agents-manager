@@ -113,6 +113,28 @@ pub async fn observe(app: &Arc<App>, run: &db::Run) {
     observe_screen(app, run, &read.text).await;
 }
 
+/// 巡邏收尾：開著框的 run 已經結束或被刪（不在 active 名單上、DB 也確認不是進行中）就把那筆記錄拿掉。
+/// 巡邏只看 active run，結束的 run 不會再被 [`observe`] 讀到「框關了」，記錄不拿掉就只增不減。
+/// 以重讀 DB 為準；讀不到就留著等下一輪。
+pub async fn forget_ended(app: &Arc<App>, active: &[db::Run]) {
+    let candidates: Vec<String> = open()
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|id| !active.iter().any(|r| &r.id == *id))
+        .cloned()
+        .collect();
+    for id in candidates {
+        match db::run(&app.db, &id).await {
+            Ok(Some(r)) if matches!(r.state.as_str(), "starting" | "running" | "stopping") => {}
+            Ok(_) => {
+                open().lock().unwrap().remove(&id);
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
     match crate::tui_prompts::dangerous_rm_prompt(screen) {
         Some(rm) => {
@@ -200,6 +222,12 @@ mod tests {
     use crate::testing as tt;
     use crate::tui_prompts::screens::{DANGEROUS_RM, DANGEROUS_RM_AUTO_DENIED};
 
+    /// 記錄是全域的，[`forget_ended`] 會把「在這個測試 DB 讀不到」的別的測試的記錄清掉：這個模組的測試一個一個跑。
+    async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+        static L: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        L.lock().await
+    }
+
     async fn run_of(app: &Arc<App>, run_id: &str) -> db::Run {
         sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE id=?").bind(run_id).fetch_one(&app.db).await.unwrap()
     }
@@ -217,6 +245,7 @@ mod tests {
     /// 從頭到尾一個鍵、一個字都沒送進 pane。
     #[tokio::test]
     async fn the_prompt_is_announced_once_marked_blocked_and_released_after_the_auto_deny() {
+        let _serial = serial().await;
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "rm").await;
@@ -250,6 +279,7 @@ mod tests {
     /// herdr 自己判成 blocked 的（常見情形）不補標，框關掉時也不去改——那是 herdr 的狀態，它會自己報下一個。
     #[tokio::test]
     async fn a_blocked_status_that_herdr_set_is_left_to_herdr() {
+        let _serial = serial().await;
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "rm").await;
@@ -265,6 +295,7 @@ mod tests {
     /// 補標之後 herdr 報了別的狀態（例如使用者答完它開始 working）：還原是 CAS，不蓋掉 herdr 的新狀態。
     #[tokio::test]
     async fn restoring_does_not_overwrite_a_newer_herdr_status() {
+        let _serial = serial().await;
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "rm").await;
@@ -281,6 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_herdr_blocked_status_after_the_synthetic_marker_is_not_restored_to_idle() {
+        let _serial = serial().await;
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "rm-herdr-blocked").await;
@@ -306,6 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ended_run_releases_the_synthetic_blocked_episode() {
+        let _serial = serial().await;
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "rm-ended").await;
@@ -332,6 +365,7 @@ mod tests {
     /// closure or wake queued prompts until the database accepts the restore.
     #[tokio::test]
     async fn a_failed_restore_keeps_the_episode_until_a_later_patrol_succeeds() {
+        let _serial = serial().await;
         let e = tt::env().await;
         let app = e.app.clone();
         let bot = tt::claude_bot(&app, &e.project_id, "rm-restore").await;
@@ -379,5 +413,29 @@ mod tests {
         observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;
         assert_eq!(system_messages(&app, &bot.id).await.len(), 2, "closure note is written once");
         assert_eq!(crate::lifecycle::take_scheduled_flush_count(&bot.id), 0, "resolved episode wakes the queue once");
+    }
+
+    /// 稽核：框開著時 run 結束（pane 被關、bot 停掉）。巡邏只掃 active run，這筆記錄再也等不到「框關了」，
+    /// 不拿掉就一直留在行程記憶體裡。
+    #[tokio::test]
+    async fn an_episode_of_a_run_that_ended_while_the_box_was_open_is_forgotten() {
+        let _serial = serial().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "rm-gone").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM).await;
+        assert!(is_open(&run_id));
+
+        // 還在跑：不動。
+        let active = vec![run_of(&app, &run_id).await];
+        forget_ended(&app, &[]).await;
+        assert!(is_open(&run_id), "DB 說還在進行中（只是這一輪名單沒帶到）：留著");
+        forget_ended(&app, &active).await;
+        assert!(is_open(&run_id));
+
+        sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+        forget_ended(&app, &[]).await;
+        assert!(!is_open(&run_id), "結束的 run 不留記錄");
     }
 }
