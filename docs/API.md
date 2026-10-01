@@ -1822,6 +1822,11 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 死掉）或 `failed`（best-effort cleanup 可能沒清乾淨）的 row 全部當孤兒——刪本機檔、best-effort ssh 刪遠端檔、
 刪 row，可重複執行。舊資料庫的既有列（都是舊流程「檔案寫完才 insert」留下來的）打開時一律回填 `ready`。
 
+**上傳了卻沒送出的附件**（`attach::sweep_unreferenced`）：`state='ready'`、`message_id` 空、`created_at` 超過 24 小時
+（`UNREFERENCED_KEEP_SECS`），而且沒有任何訊息的 `attachments_json` 點名它（舊版兩步綁定可能留下「訊息點名了、`message_id` 卻沒設」的列）
+→ 刪 row 與檔案（本機檔；遠端 bot 另外 best-effort ssh 刪 agent 那份）。**先刪 row 才刪檔**：那句 `DELETE` 自己帶同樣的條件、跟 `bind`
+搶同一列，bind 先贏就什麼都不動。**被訊息引用的絕不刪**；`staging`／`failed` 仍歸 `reconcile_orphans`（開機）。開機跑一次，之後每 6 小時。
+
 ### `GET /api/attachments/{id}`
 回原始位元組。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。只有 `state='ready'`
 的附件讀得到，`staging`／`failed` 一律 404。

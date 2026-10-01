@@ -472,6 +472,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     shim_refresh::refresh_at_startup(&app).await;
     // #88: attachments whose save() died mid-write or mid-finalize before this restart.
     attach::reconcile_orphans(&app).await;
+    // 上傳了卻從沒送出的附件（`ready`、沒有訊息引用）依保留期清掉；開機一次、之後每 6 小時。
+    attach::spawn_sweep(app.clone());
     // 預覽（§6.12）：pane 還在不在、port 有沒有在 listen，對回 `bot_previews`。
     preview::reconcile_all(&app).await;
     events::spawn_global(app.clone()).await;
