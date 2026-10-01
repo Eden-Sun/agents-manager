@@ -1073,9 +1073,9 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | 欄位 | 必填 | 預設 |
 |---|---|---|
 | `name` | ✅ | `[a-z][a-z0-9_-]{0,31}`，`"local"` 保留 |
-| `ssh` | ✅ | `user@host` 或 ssh_config 別名 |
+| `ssh` | ✅ | `user@host` 或 ssh_config 別名；不得以 `-` 開頭（會被 ssh 當成選項）、不得含空白或控制字元，否則 400 |
 | `ssh_port` | | `22` |
-| `herdr_session` | | `"agents-manager"` |
+| `herdr_session` | | `"agents-manager"`；1–64 個 `[A-Za-z0-9._-]`、開頭是字母或數字，否則 400（它會進遠端 session 路徑與 plist） |
 | `remote_path` | | `""`（前置到遠端 PATH）。以 `:` 分項、每項各自 quote；項目開頭的 `$HOME`／`${HOME}`／`~` 展開成遠端 home，其他 `$`、`;` 都是字面（#241） |
 | `ssh_opts` | | `[]`，原樣附加到每個 ssh 指令 |
 | `shared_session` | | 新主機 `false`；更新時不帶＝沿用舊值。`true`＝這個 session 也是另一顆 daemon 的（SPEC §11.10），這顆只碰自己的 pane、絕不 `herdr server stop`。改它不觸發重連 |
