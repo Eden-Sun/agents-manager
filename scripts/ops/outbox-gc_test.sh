@@ -31,17 +31,23 @@ setup() {
   unset AM_OUTBOX_ROOT OUTBOX_MAX_AGE_MIN
 }
 teardown() { rm -rf "$ROOT"; }
-old() { touch -t 202601010000 "$@"; }     # 遠超過任何保留期
-run() { zsh "$ROOT/agm/bin/outbox-gc.sh"; echo $?; }
+old() { touch -t 202601010000 "$@"; }     # 遠超過任何保留期（只能往回改 mtime；ctime 一定是「現在」）
+# 「搬進來的時間」是 ctime（mv／cp -p 會保留舊 mtime，ctime 卻是搬入那一刻），測試沒辦法把 ctime 往回改，
+# 所以改成把腳本的時鐘往後撥：`run_at <分鐘>`＝假裝現在是 <分鐘> 分鐘之後（OUTBOX_GC_NOW 是腳本給測試的時鐘接縫）。
+run_at() { OUTBOX_GC_NOW=$(( $(date +%s) + $1 * 60 )) zsh "$ROOT/agm/bin/outbox-gc.sh"; echo $?; }
+run() { run_at 120; }                      # 兩小時後：剛寫好的檔（ctime＝現在）也已經過期
+# 兩小時後（`run`）的時鐘看起來「剛改過」的檔：mtime 設在假時鐘的一分鐘前。
+fresh() { touch -t "$(date -v+119M +%Y%m%d%H%M 2>/dev/null || date -d '119 minutes' +%Y%m%d%H%M)" "$@"; }
+run_now() { zsh "$ROOT/agm/bin/outbox-gc.sh"; echo $?; }
 
 # 1. 只刪超過保留期的檔；新檔、根目錄直屬檔、有檔的目錄都留下；空目錄收掉。
 setup
 mkdir -p "$OB/botA/sub" "$OB/botB" "$OB/botC" "$OB/botD"
 echo x > "$OB/botA/old.txt"; old "$OB/botA/old.txt"
 echo x > "$OB/botA/sub/deep-old.txt"; old "$OB/botA/sub/deep-old.txt"
-echo x > "$OB/botB/new.txt"
+echo x > "$OB/botB/new.txt"; fresh "$OB/botB/new.txt"
 echo x > "$OB/botC/old.txt"; old "$OB/botC/old.txt"
-echo x > "$OB/botC/new.txt"
+echo x > "$OB/botC/new.txt"; fresh "$OB/botC/new.txt"
 echo x > "$OB/rootfile.txt"; old "$OB/rootfile.txt"
 equals "正常跑 exit 0" "$(run)" "0"
 gone   "bot 目錄裡過期的檔被刪" "$OB/botA/old.txt"
@@ -59,12 +65,25 @@ teardown
 # 2. 保留期邊界與覆寫：30 分鐘的檔在 60 分鐘期限內留著；OUTBOX_MAX_AGE_MIN=5 就刪。
 setup
 mkdir -p "$OB/b"; echo x > "$OB/b/f.txt"; touch -t "$(date -v-30M +%Y%m%d%H%M 2>/dev/null || date -d '30 minutes ago' +%Y%m%d%H%M)" "$OB/b/f.txt"
-run >/dev/null
+run_now >/dev/null
 exists "30 分鐘的檔在預設 60 分鐘內不刪" "$OB/b/f.txt"
 check_no "沒刪東西就不寫 log" "清掉" "$LOG"
-OUTBOX_MAX_AGE_MIN=5 run >/dev/null
+OUTBOX_MAX_AGE_MIN=5 run_at 30 >/dev/null
 gone   "OUTBOX_MAX_AGE_MIN=5 時 30 分鐘的檔被刪" "$OB/b/f.txt"
 check  "log 寫的是實際的保留期" "超過 5 分鐘" "$LOG"
+teardown
+
+# 2b. 以「搬進 outbox 的時間」（ctime）起算，不是檔案內容的 mtime：`mv`／`cp -p` 進來的舊檔 mtime 還是很久以前，
+# 以前下一輪（最慢 10 分鐘）就被清掉，bot 剛交出去的檔使用者來不及拿。mtime 與 ctime 都過了才刪。
+setup
+mkdir -p "$OB/b"; echo x > "$OB/b/moved-in.pdf"; old "$OB/b/moved-in.pdf"
+run_now >/dev/null
+exists "mtime 很舊、剛搬進來（ctime 是現在）的檔不刪" "$OB/b/moved-in.pdf"
+check_no "沒刪就不寫 log" "清掉" "$LOG"
+run_at 30 >/dev/null
+exists "搬進來 30 分鐘後仍在保留期內" "$OB/b/moved-in.pdf"
+run_at 61 >/dev/null
+gone   "搬進來超過 60 分鐘才刪" "$OB/b/moved-in.pdf"
 teardown
 
 # 3. 不碰不該碰的：outbox 外面的私鑰、DB、scratchpad、別的 bot 資料，即使很舊。

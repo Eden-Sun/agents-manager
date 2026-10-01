@@ -6,7 +6,7 @@
 //! - 只列 outbox 最上層的一般檔（`find -type f` 的語意：符號連結不算），outbox 本身是符號連結就整個不列。
 //! - 跟本機同一套擋法：`outbox::withheld_name`（私鑰／憑證／DB／隱藏檔）不列也不給，內容開頭像私鑰或 SQLite 的也一樣。
 //! - 下載只收單一層檔名（沒有 `/`、不以 `.` 開頭），大小上限同本機；內容用 base64 傳回來，二進位檔不會被 UTF-8 弄壞。
-//! - 遠端沒有 AGM 的 `outbox-gc`：每次列表時順手刪掉超過一小時（[`crate::outbox::TTL_SECS`]）的檔，跟本機的承諾一致。
+//! - 遠端沒有 AGM 的 `outbox-gc`：每次列表時順手刪掉超過一小時（[`crate::outbox::TTL_SECS`]，mtime 與 ctime 都要過）的檔，跟本機的承諾一致。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,12 +57,12 @@ fn list_script(dir: &str) -> String {
         r#"D={d}
 if [ -L "$D" ]; then printf 'AM_OUTBOX_UNTRUSTED\n'; exit 0; fi
 if [ ! -d "$D" ]; then printf 'AM_OUTBOX_OK\n'; exit 0; fi
-find "$D" -maxdepth 1 -type f -mmin +{ttl_min} -exec rm -f {{}} + 2>/dev/null
+find "$D" -maxdepth 1 -type f -mmin +{ttl_min} -cmin +{ttl_min} -exec rm -f {{}} + 2>/dev/null
 if stat -c %Y "$D" >/dev/null 2>&1; then G=1; else G=; fi
 printf 'AM_OUTBOX_OK\n'
 for f in "$D"/*; do
   [ -f "$f" ] && [ ! -L "$f" ] || continue
-  if [ -n "$G" ]; then s=$(stat -c '%s %Y' "$f"); else s=$(stat -f '%z %m' "$f"); fi
+  if [ -n "$G" ]; then s=$(stat -c '%s %Y %Z' "$f"); else s=$(stat -f '%z %m %c' "$f"); fi
   h=$(od -An -tx1 -N64 "$f" | tr -d ' \n')
   printf '%s\t%s\t%s\n' "$s" "$h" "${{f##*/}}"
 done
@@ -83,24 +83,26 @@ fn parse_list(out: &str, now: u64) -> Option<Vec<serde_json::Value>> {
         Some("AM_OUTBOX_OK") => {}
         _ => return None,
     }
-    let mut files: Vec<(String, u64, u64)> = Vec::new();
+    let mut files: Vec<(String, u64, u64, u64)> = Vec::new();
     for line in lines {
         let mut parts = line.splitn(3, '\t');
         let (Some(meta), Some(hex), Some(name)) = (parts.next(), parts.next(), parts.next()) else { continue };
         let mut meta = meta.split_whitespace();
         let (Some(Ok(size)), Some(Ok(modified))) = (meta.next().map(str::parse::<u64>), meta.next().map(str::parse::<u64>)) else { continue };
+        // 第三欄 ctime＝搬進來的時間；舊格式沒有這一欄就只看 mtime。
+        let changed = meta.next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0);
         if name.is_empty() || withheld_name(&name.to_ascii_lowercase()) || content_is_withheld(&hex_bytes(hex)) {
             continue;
         }
-        files.push((name.to_string(), size, modified));
+        files.push((name.to_string(), size, modified, modified.max(changed)));
     }
-    files.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    files.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
     files.truncate(MAX_ENTRIES);
     Some(
         files
             .into_iter()
-            .map(|(name, size, modified)| {
-                let expires_at = modified + TTL_SECS;
+            .map(|(name, size, modified, landed)| {
+                let expires_at = landed + TTL_SECS;
                 json!({"name": name, "size": size, "modified": modified, "expires_at": expires_at, "remaining_secs": expires_at.saturating_sub(now)})
             })
             .collect(),
@@ -268,6 +270,17 @@ mod tests {
         assert_eq!(parse_list("AM_OUTBOX_OK\n", 0).unwrap().len(), 0);
     }
 
+    /// 第三欄是 ctime（搬進來的時間）：到期從 mtime 與 ctime 較晚的那個起算，`modified` 還是 mtime。
+    #[test]
+    fn a_remote_file_expires_from_the_later_of_mtime_and_ctime() {
+        let out = "AM_OUTBOX_OK\n10 1000 3000\t00\tmoved-in.pdf\n10 2000 1500\t00\tclock-skew.txt\n";
+        let files = parse_list(out, 3100).unwrap();
+        let by = |n: &str| files.iter().find(|f| f["name"] == n).unwrap().clone();
+        assert_eq!(by("moved-in.pdf")["modified"], json!(1000));
+        assert_eq!(by("moved-in.pdf")["expires_at"], json!(3000 + TTL_SECS));
+        assert_eq!(by("clock-skew.txt")["expires_at"], json!(2000 + TTL_SECS), "mtime 比 ctime 晚（時鐘不準）就看 mtime");
+    }
+
     #[test]
     fn downloads_take_one_plain_name_inside_the_outbox() {
         let d = "/Users/m/.config/agents-manager/outbox/01ABC";
@@ -281,7 +294,7 @@ mod tests {
     #[test]
     fn the_scripts_quote_their_paths_and_say_when_they_are_done() {
         let s = list_script("/U/m x/outbox/01A");
-        assert!(s.contains("D='/U/m x/outbox/01A'") && s.contains("-mmin +60") && s.contains("printf '%s\\t%s\\t%s\\n'"), "{s}");
+        assert!(s.contains("D='/U/m x/outbox/01A'") && s.contains("-mmin +60") && s.contains("-cmin +60") && s.contains("printf '%s\\t%s\\t%s\\n'"), "{s}");
         let f = file_script("/U/o", "it's.md");
         assert!(f.contains(r#"F="$D"/'it'\''s.md'"#) && f.contains(&format!("-gt {MAX_BYTES}")), "{f}");
     }
