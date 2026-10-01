@@ -1626,6 +1626,27 @@ mod tests {
         assert!(payload.contains("寫一半的任務"), "通知帶的是那筆任務自己的內容：{payload}");
     }
 
+    /// 使用者按了暫停，之後 daemon 自己的停下來（驗證者挑不到 Fable、輪數用完、交付失敗）不能把它的 reason 蓋掉：
+    /// `mission_gate`／`post_deliver` 只把**不在 daemon 那幾種**的 reason 當成使用者要它停手，蓋成 daemon 的 reason
+    /// 之後 AGM 就又派得出新交辦——使用者的暫停被一個 `GET /pick` 靜靜解除了。
+    #[tokio::test]
+    async fn a_daemon_pause_does_not_overwrite_the_users_pause() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("user-pause", "pr"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(PauseIn { reason: "等我確認再繼續".into(), detail: None })).await.unwrap();
+
+        // 沒有任何額度讀數 → 驗證者 ask_user，daemon 想把任務停成 no_fable_for_verifier。
+        let q = HashMap::from([("role".to_string(), "verifier".to_string())]);
+        let Json(p) = get_pick(State(app.clone()), Path(id.clone()), Query(q)).await.unwrap();
+        assert_eq!(p["pick"]["decision"], "ask_user", "前提：這個情境 daemon 會想停任務");
+
+        let cur = store::get(&app.db, &id).await.unwrap().unwrap();
+        assert_eq!(cur.paused_reason.as_deref(), Some("等我確認再繼續"), "使用者的暫停原封不動");
+        assert!(crate::supervisor::api::mission_gate(&cur).is_err(), "使用者暫停期間仍然不收新交辦");
+    }
+
     /// 同一個 `client_request_id` 配不同的內容：以前回原本那筆 200（`created:false`），新的那句指示整句被吞，
     /// 呼叫端還以為自己的任務開出去了。續作（revise）、追問、回覆都有指紋比對，頂層任務卻沒有（#334 同型）。
     #[tokio::test]

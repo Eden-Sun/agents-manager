@@ -4112,6 +4112,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 8. **停下問人的統一原則**：`paused_reason ∈ max_rounds | no_fable_for_verifier | push_main_failed | pr_failed | clarify`
    都是問使用者一個具體問題，得到答案後 `mission resume` 再從對應步驟接續（`mission_resumed`／`mission_answered` 的 `next`、
    或 `mission get` 的 `next.then` 就是那一步）；使用者取消 → `mission cancel`。
+   **daemon 自己的停下來不蓋使用者的暫停**：任務已經被使用者停著（reason 不在上面那幾種）時，daemon 想停成 `max_rounds`／`no_fable_for_verifier`／交付失敗（含驗證者撞限的那條路）都什麼都不寫，使用者的 reason 原封不動——蓋掉的話 `mission_gate` 就不再當它是使用者要停手，AGM 又派得出新交辦。
    停在 `max_rounds` 的任務被放行（`answer`／`resume`）時 daemon 會把上限加一輪，所以「再改一輪」是走得通的：
    放行後照第 3 步 `mission round` 再 followup 一次（加的是一輪，用完又會停下來問人）。
    **使用者自己按暫停／取消**（web 的任務卡，或別人代按）daemon 會叫醒你：
