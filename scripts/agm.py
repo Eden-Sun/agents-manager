@@ -788,6 +788,13 @@ def _server_status(args) -> str:
 
 
 def cmd_assignments(client: Client, cfg: dict, args) -> object:
+    # `--id` 先問單筆端點（有 review 歷程）：答得出來就直接回，不必先把整份清單翻完——正式機上動輒上百頁，
+    # 而且清單那支壞了、詳情那支好好的，指令也不該跟著失敗。只有它 404（舊 daemon、或拿的是 client_request_id）
+    # 才往下掃全量清單找。
+    if args.id:
+        one = optional_get(client, f"/api/supervisor/assignments/{urllib.parse.quote(args.id)}")
+        if one is not None:
+            return one
     # 有過濾條件就一定要翻完：只看第一頁的過濾結果會把頁外的未結案講成「沒有」。
     filtered = bool(args.id or args.status or args.open or args.awaiting_review)
     if filtered or args.all:
@@ -800,11 +807,7 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
         # 舊 daemon 沒有 `has_more`：那就是「不知道還有沒有」，不是「沒有了」。
         complete = "has_more" in out and not out.get("has_more")
     if args.id:
-        # 單筆優先走 `/assignments/{id}`（有 review 歷程）；那支只吃 assignment id，
-        # 拿 client_request_id 來查一定 404，所以退路掃的是**全量**清單。
-        one = optional_get(client, f"/api/supervisor/assignments/{urllib.parse.quote(args.id)}")
-        if one is not None:
-            return one
+        # 單筆端點上面問過了（404）；它只吃 assignment id，拿 client_request_id 來查一定 404，所以退路掃的是**全量**清單。
         for a in items:
             if a.get("id") == args.id or a.get("client_request_id") == args.id:
                 return a

@@ -729,6 +729,16 @@ class AssignmentsCommandTest(CliCase):
         out = self.ok("assignments", "--id", "a2")
         self.assertEqual(out["reviews"][0]["decision"], "accept")
 
+    def test_single_lookup_does_not_scan_the_whole_list_when_the_detail_endpoint_answers(self):
+        """`--id` 先問 `/assignments/{id}`；答得出來就不該先把整份清單（可能上萬筆、上百頁）翻完再丟掉。
+        清單那支壞掉時，詳情那支好好的，指令也不該跟著失敗。"""
+        FakeDaemon.routes["GET /api/supervisor/assignments/a2"] = (200, {"id": "a2", "status": "completed"})
+        FakeDaemon.routes["GET /api/supervisor/assignments"] = (500, {"error": "boom"})
+        out = self.ok("assignments", "--id", "a2")
+        self.assertEqual(out["id"], "a2")
+        paths = [r["path"] for r in FakeDaemon.seen if r["path"].startswith("/api/supervisor/assignments")]
+        self.assertEqual(paths, ["/api/supervisor/assignments/a2"], "詳情答得出來，清單一頁都不用讀")
+
     def test_single_lookup_falls_back_to_the_list_on_404(self):
         """舊 daemon 沒有 /assignments/{id}：退回清單過濾，不要把 404 當成「查無此筆」。"""
         self.assertEqual(self.ok("assignments", "--id", "req-1")["id"], "a1")
