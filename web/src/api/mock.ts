@@ -1622,11 +1622,19 @@ export class MockTransport implements Transport {
     }
     const ssh = String(b.ssh ?? '').trim()
     if (!ssh) throw new ApiError(400, { error: 'bad_request', message: 'ssh 目標不可為空' }, 'bad request')
+    // 同 daemon `host_target_problem`（API.md POST /api/hosts）：ssh 原樣成為 argv、herdr_session 進遠端路徑與 plist，建立前就 400。
+    const sessionWanted = String(b.herdr_session ?? '').trim() || 'agents-manager'
+    if (ssh.startsWith('-') || /[\s\u0000-\u001f\u007f]/.test(ssh)) {
+      throw new ApiError(400, { error: 'bad_request', message: 'ssh target must be a host (or user@host / ssh_config alias): no leading `-`, whitespace or control characters' }, 'bad request')
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(sessionWanted)) {
+      throw new ApiError(400, { error: 'bad_request', message: 'herdr_session must be 1-64 characters of [A-Za-z0-9._-], starting with a letter or digit' }, 'bad request')
+    }
     const h: MockHost = {
       name,
       ssh,
       ssh_port: Number(b.ssh_port ?? 22) || 22,
-      herdr_session: String(b.herdr_session ?? '') || 'agents-manager',
+      herdr_session: sessionWanted,
       remote_path: String(b.remote_path ?? ''),
       connected: false,
       error: null,

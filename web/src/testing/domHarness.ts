@@ -22,7 +22,6 @@ export function setupDom(): void {
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 }
 
-/** 拆掉全域 DOM、還原 fetch，讓後面不碰 DOM 的測試檔回到原來的環境。 */
 /** `MockTransport` 的最小介面（`request`／`upload`）。 */
 interface MockBackend {
   request(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<unknown>
@@ -168,6 +167,7 @@ export async function imeEnter(el: Element, how: 'composing' | 'keycode229' = 'c
   return event
 }
 
+/** 拆掉全域 DOM、還原 fetch／WebSocket／XHR，讓後面不碰 DOM 的測試檔回到原來的環境。 */
 export function teardownDom(): void {
   if (!GlobalRegistrator.isRegistered) return
   void GlobalRegistrator.unregister()
@@ -289,4 +289,14 @@ export function fakeApi(route: (req: FakeRequest) => unknown = () => undefined):
     return new Response(JSON.stringify(out ?? {}), { status: 200 })
   }) as unknown as typeof fetch
   return requests
+}
+
+/** 輪詢到條件成立；逾時就用 `what` 當失敗訊息（比單純 `settle` 一個固定時間穩）。 */
+export async function until(cond: () => boolean | Promise<boolean>, what: string, ms = 8000): Promise<void> {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    if (await cond()) return
+    await settle(50)
+  }
+  throw new Error(`等不到：${what}`)
 }
