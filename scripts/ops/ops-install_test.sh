@@ -231,5 +231,26 @@ equals "裝上了" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v2"
 gone "裝完放掉鎖" "$DIR/ops-install.lock"
 teardown
 
+# 14. kick 自己更新自己：正在跑的那支腳本被換掉（`mv` 換 inode，bash 手上還是舊檔），後面的行照常跑完，不會讀到新檔的中段。
+setup
+cat > "$REPO/scripts/ops/a-kick.sh" <<K
+#!/bin/bash
+bash "$SCRIPT" --repo "$REPO" --ref HEAD --dir "$DIR" --platform linux > "$ROOT/inner.out" 2>&1
+echo after-install-1
+echo after-install-2
+echo "padding padding padding padding padding padding padding padding padding padding"
+echo after-install-3
+K
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m self-v1
+install -m 755 "$REPO/scripts/ops/a-kick.sh" "$DIR/bin/a-kick.sh"
+printf '#!/bin/bash\necho new-version-short\n' > "$REPO/scripts/ops/a-kick.sh"
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m self-v2
+bash "$DIR/bin/a-kick.sh" >"$OUT" 2>&1
+check "自己被換掉之後，後面的行照跑（1）" "after-install-1" "$OUT"
+check "自己被換掉之後，後面的行照跑（3）" "after-install-3" "$OUT"
+check_no "沒有讀到新檔的內容" "new-version-short" "$OUT"
+equals "換上去的是新版" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo new-version-short"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
