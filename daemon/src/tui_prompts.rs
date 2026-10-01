@@ -601,6 +601,11 @@ async fn read_actionable_survey(target: &SurveyTarget, expected: Option<&PaneRea
     Some(read)
 }
 
+/// 不在 `active` 裡的 run（結束了）不留問卷去重記錄：每個出現過問卷的 run 一格，只記不清的話只增不減。
+pub(crate) async fn retain_survey_runs(app: &Arc<App>, active: &[String]) {
+    app.survey_revisions.lock().await.retain(|id, _| active.contains(id));
+}
+
 async fn release_survey_revision(app: &Arc<App>, run_id: &str, revision: u64) {
     let mut revisions = app.survey_revisions.lock().await;
     if revisions.get(run_id) == Some(&revision) {
@@ -800,6 +805,23 @@ pub(crate) mod screens {
 
  Esc to cancel · Tab to amend
 "#;
+}
+
+#[cfg(test)]
+mod survey_revision_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    #[tokio::test]
+    async fn an_ended_runs_survey_dedupe_record_is_dropped() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        app.survey_revisions.lock().await.insert("survey-gone".into(), 3);
+        app.survey_revisions.lock().await.insert("survey-kept".into(), 4);
+        retain_survey_runs(&app, &["survey-kept".to_string()]).await;
+        let m = app.survey_revisions.lock().await;
+        assert!(!m.contains_key("survey-gone") && m.contains_key("survey-kept"));
+    }
 }
 
 #[cfg(test)]
