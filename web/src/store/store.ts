@@ -18,7 +18,7 @@ import {
   toToolMap,
   toHerdrVersion,
   optStr,
-  sortById,
+  sortByInsert,
   sortByTime,
   str,
   toMessage,
@@ -42,7 +42,7 @@ import { applyHerdrSnapshot, onHerdrFrame } from './herdrUpdate'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
-import { byId, byTime, capList, insertSorted, keptAfterPage, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
+import { byInsert, byTime, capList, insertSorted, keptAfterPage, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -1099,7 +1099,7 @@ export const useStore = create<StoreState>((set, get) => {
         return {
           groupMessages: {
             ...s.groupMessages,
-            [projectId]: reuseUnchanged(s.groupMessages[projectId] ?? [], kept.length > 0 ? sortById([...page.messages, ...kept]) : page.messages),
+            [projectId]: reuseUnchanged(s.groupMessages[projectId] ?? [], kept.length > 0 ? sortByInsert([...page.messages, ...kept]) : page.messages),
           },
           loadedProjects: { ...s.loadedProjects, [projectId]: true },
           moreMessages: { ...s.moreMessages, [projectId]: page.has_more },
@@ -3041,7 +3041,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         if (bot) {
           const pid = bot.project_id
           const group = s.groupMessages[pid]
-          const grownGroup = group ? insertSorted(group, { ...msg, bot_id: botId, bot_name: bot.name }, byId) : null
+          const grownGroup = group ? insertSorted(group, { ...msg, bot_id: botId, bot_name: bot.name }, byInsert) : null
           if (grownGroup) {
             const cut = capList(grownGroup, capFor(s.messageCapFloors, pid))
             patch.groupMessages = { ...s.groupMessages, [pid]: cut.list }

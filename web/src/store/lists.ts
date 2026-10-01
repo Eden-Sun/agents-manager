@@ -7,15 +7,24 @@ export const MESSAGE_CAP = 500
 
 export const TURN_CAP = 50
 
-/** 同秒再比 id（ULID 即時間序）。 */
-export function byTime(a: { created_at: string; id: string }, b: { created_at: string; id: string }): number {
-  const t = a.created_at.localeCompare(b.created_at)
-  return t !== 0 ? t : a.id.localeCompare(b.id)
+/**
+ * 兩邊都有 `seq`（daemon 的 rowid，單調的插入序）且不同就照它；任一邊沒有（舊 daemon、樂觀訊息）或是 0＝未知，
+ * 退回 id（ULID）。同一份資料不會一半有一半沒有，所以這個混合比較在實務上仍是全序。
+ */
+function bySeqThenId(a: { id: string; seq?: number }, b: { id: string; seq?: number }): number {
+  if (a.seq && b.seq && a.seq !== b.seq) return a.seq < b.seq ? -1 : 1
+  return a.id.localeCompare(b.id)
 }
 
-/** 群組時間軸只看 id：daemon 的 `before=` 分頁照這個切。 */
-export function byId(a: { id: string }, b: { id: string }): number {
-  return a.id.localeCompare(b.id)
+/** 先比時間（毫秒）；同毫秒用 `seq`——ULID 的隨機段在同一毫秒內不單調，舊資料的同毫秒訊息 id 序不是插入序。 */
+export function byTime(a: { created_at: string; id: string; seq?: number }, b: { created_at: string; id: string; seq?: number }): number {
+  const t = a.created_at.localeCompare(b.created_at)
+  return t !== 0 ? t : bySeqThenId(a, b)
+}
+
+/** 群組時間軸看插入序：daemon 的 `before=` 分頁照 rowid 切（`seq` 就是它）；沒有 seq 才退回 id。 */
+export function byInsert(a: { id: string; seq?: number }, b: { id: string; seq?: number }): number {
+  return bySeqThenId(a, b)
 }
 
 /**
@@ -90,10 +99,10 @@ export function pruneTurns<T extends Turnish>(map: Record<string, T>, cap = TURN
  * 一頁 messages 回來時舊清單留哪些：不能整包換（飛行中收到的 `message_added` 會被蓋掉），
  * 也不能全留（resync 要能刪過期的）。界線是頁內最新一筆，空頁退回 `startedAt`。
  *
- * 界線用 `(created_at, id)` 全序，不只看時間：訊息時間是毫秒，頁抓完之後才 commit 的那一則可能跟頁內最新一則同一毫秒，
+ * 界線用 `(created_at, seq)`（沒有 seq 退回 id）全序，不只看時間：訊息時間是毫秒，頁抓完之後才 commit 的那一則可能跟頁內最新一則同一毫秒，
  * 只比時間會把它當成「頁裡該有卻沒有的過期項」刪掉（同 #695 的已讀標記）。
  */
-export function keptAfterPage<T extends { id: string; created_at: string }>(existing: T[], page: T[], startedAt: string): T[] {
+export function keptAfterPage<T extends { id: string; created_at: string; seq?: number }>(existing: T[], page: T[], startedAt: string): T[] {
   let newest: T | null = null
   for (const m of page) if (!newest || byTime(m, newest) > 0) newest = m
   const seen = new Set(page.map((m) => m.id))
