@@ -896,6 +896,26 @@ fn scratch_registry() -> &'static StdMutex<std::collections::HashSet<std::path::
     R.get_or_init(Default::default)
 }
 
+/// 寫一支測試用的假腳本（`content` 要以 `#!` 開頭）並確定它**已經可以被 exec**（issue #189）：並行的別條測試在別的執行緒
+/// `fork` 時會短暫繼承這個檔案的寫入 fd，這段時間 exec 它回 `ETXTBSY`——不管是測試直接 exec，還是被測的程式去 exec。
+/// shell 腳本在第一行後面插一行 `AM_TEST_EXEC_PROBE` 的守衛（有設就 `exit 0`），寫完用它 exec 一次、`ETXTBSY` 就重試
+/// （[`crate::exec_retry`]，等的是條件不是時間）；exec 成功的那一刻沒有任何行程握著寫入 fd，之後不會再撞。
+/// 不是 shell 的腳本（沒有守衛可插）只寫檔加 chmod。
+pub fn write_exec(path: impl AsRef<std::path::Path>, content: impl AsRef<str>) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (path, content) = (path.as_ref(), content.as_ref());
+    let (shebang, rest) = content.split_once('\n').unwrap_or((content, ""));
+    assert!(shebang.starts_with("#!"), "script needs a shebang line: {shebang}");
+    let is_shell = shebang.split_whitespace().any(|w| matches!(w.rsplit('/').next(), Some("sh" | "bash" | "zsh" | "dash")));
+    let body = if is_shell { format!("{shebang}\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{rest}") } else { content.to_string() };
+    std::fs::write(path, body).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if is_shell {
+        let out = crate::exec_retry::output(std::process::Command::new(path).env("AM_TEST_EXEC_PROBE", "1")).unwrap();
+        assert!(out.status.success(), "{}: {:?}", path.display(), out.status);
+    }
+}
+
 /// `$TMPDIR/<prefix>-<ulid>`，已建好並註冊。
 pub fn scratch_dir(prefix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}-{}", db::ulid()));

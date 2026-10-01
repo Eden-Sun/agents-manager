@@ -815,35 +815,14 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    /// 剛寫好的腳本立刻 exec 可能撞上 `ETXTBSY`（Text file busy）（issue #189）：並行的另一條測試在別的執行緒 `fork`，
-    /// 短暫繼承了這個檔案的寫入 fd，直到它自己 `exec` 為止；這邊在那一刻 exec 就回 `Text file busy`。這不是被測程式的問題，是測試
-    /// 基礎設施的競態。重試的條件是「exec 還在被擋」，不是睡一個固定的時間：等到 exec **真的成功**才往下。
-    fn is_text_file_busy(e: &std::io::Error) -> bool {
-        e.raw_os_error() == Some(libc::ETXTBSY)
-    }
-
+    /// 剛寫好的腳本立刻 exec 可能撞上 `ETXTBSY`（issue #189）：共用 [`crate::exec_retry`]，遇到才重試。
     fn output_retrying(cmd: &mut Command) -> std::process::Output {
-        let started = std::time::Instant::now();
-        loop {
-            match cmd.output() {
-                Err(e) if is_text_file_busy(&e) && started.elapsed() < std::time::Duration::from_secs(30) => std::thread::sleep(std::time::Duration::from_millis(2)),
-                r => return r.unwrap(),
-            }
-        }
+        crate::exec_retry::output(cmd).unwrap()
     }
 
-    /// 寫一支測試用腳本（`body` 接在 `#!/bin/sh` 之後）並確定它**已經可以被 exec**：腳本第一行在 `AM_TEST_EXEC_PROBE` 有設時直接 `exit 0`，
-    /// 寫完後用它 exec 一次、`ETXTBSY` 就重試。exec 成功那一刻沒有任何行程握著它的寫入 fd，之後（含被測的 shim 自己去 exec 這支腳本）
-    /// 就不會再撞上——只有我們會開它來寫，而我們已經寫完了。
+    /// 寫一支測試用腳本（`body` 接在 `#!/bin/sh` 之後）並確定它已經可以被 exec：見 [`crate::testing::write_exec`]。
     fn write_script(path: &Path, body: &str) {
-        std::fs::write(path, format!("#!/bin/sh\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{body}")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let out = output_retrying(Command::new(path).env("AM_TEST_EXEC_PROBE", "1"));
-        assert!(out.status.success(), "{}: {:?}", path.display(), out.status);
+        crate::testing::write_exec(path, format!("#!/bin/sh\n{body}"))
     }
 
     struct Sandbox {
