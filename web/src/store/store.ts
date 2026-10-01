@@ -527,6 +527,8 @@ export interface StoreState {
   installCodexUpdate: (host: string, targetVersion: string) => Promise<void>
   installClaudeUpdates: (hosts: string[], targetVersion: string) => Promise<void>
   removeBot: (botId: string, opts?: { confirmSupervisor?: boolean }) => Promise<void>
+  /** 軟刪復原（刪除通知與環境設定的「最近刪除」共用）；成功回 true，失敗已 notify。 */
+  restoreBot: (botId: string) => Promise<boolean>
   /** 刪除被 daemon 以「這是 AGM 的 bot」擋下，等使用者第二次確認（issue #406）；null＝沒有在問。 */
   agmDeleteAsk: AgmDeleteAsk | null
   cancelAgmDelete: () => void
@@ -1942,6 +1944,17 @@ export const useStore = create<StoreState>((set, get) => {
     set({ agmDeleteAsk: null })
   },
 
+  async restoreBot(botId) {
+    try {
+      await api.restoreBot(botId)
+      await get().refreshState()
+      return true
+    } catch (e) {
+      get().notify('error', `復原失敗：${errText(e)}`)
+      return false
+    }
+  },
+
   async removeBot(botId, opts = {}) {
     // SPEC: selection moves to the next bot in the same project, else null.
     await guarded(set, get, `remove:${botId}`, async () => {
@@ -1957,13 +1970,7 @@ export const useStore = create<StoreState>((set, get) => {
         get().notify('info', `已刪除 ${name}`, {
           label: '復原',
           run: async () => {
-            try {
-              await api.restoreBot(botId)
-              await get().refreshState()
-              get().selectBot(botId)
-            } catch (e) {
-              get().notify('error', `復原失敗：${errText(e)}`)
-            }
+            if (await get().restoreBot(botId)) get().selectBot(botId)
           },
         })
         // daemon 刪 bot 時自己清它的草稿（也會推給其他瀏覽器）；這裡只收掉本機的。

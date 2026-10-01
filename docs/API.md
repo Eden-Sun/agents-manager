@@ -1407,6 +1407,12 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 - 找不到 404。
 - daemon 啟動時掃一次 `bots/`，只把 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄搬進 `bots-trash/`。
 
+### 10.4b `GET /api/bots/deleted`
+軟刪的 **user bot** 清單（#757），讓「復原」不只活在刪除當下那個分頁 15 秒的通知：`200 {"bots": [{id, name, kind, project_id, project_label, deleted_at, last_message_at}]}`，
+`deleted_at` 新到舊，最多 200 筆；`last_message_at` 是它對話最後一則訊息的時間，沒對話為 `null`。
+不列 child（`managed_by != 'user'`，由父 bot／AGM 走 `restore` 自己復原）與所屬專案已刪的 bot（還原不回去）。不含重複同名檢查——撞名由 `restore` 回 409。
+復原仍是 §10.4a 同一支；復原與刪除都推 `bot_changed`，網頁據此重抓清單。
+
 ### 10.4a `POST /api/bots/{id}/restore`
 軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。
 刪除時搬進 `bots-trash/` 的 bot 目錄搬回來（本機直接搬；遠端 ssh 搬，最多等 10 秒）：`bots/<id>/` 已經在原地（重新啟動過、重建了）就不動，免得蓋掉新的；

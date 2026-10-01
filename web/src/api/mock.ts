@@ -559,6 +559,8 @@ export class MockTransport implements Transport {
   ]
   private projects: MockProject[] = []
   private bots: MockBot[] = []
+  /** 軟刪的 bot（daemon `bots.deleted_at`，#757）：`GET /bots/deleted` 列、`POST /bots/{id}/restore` 救回。 */
+  private deletedBots: { bot: MockBot; deleted_at: string }[] = []
   private runs: MockRun[] = []
   private upstreamItems: Rec[] = []
   /** 排到回合結束才套的 live 設定（daemon `lifecycle/deferred_live.rs`，#712）。 */
@@ -746,6 +748,17 @@ export class MockTransport implements Transport {
       cwd: null,
       created_at: now(),
     })
+    // 「最近刪除」清單的示範資料（#757）。
+    for (const [name, kind, ago] of [['am-old-review', 'codex', 3_600_000], ['scratch-claude', 'claude', 86_400_000 * 2]] as const) {
+      this.deletedBots.push({
+        bot: {
+          id: ulid('bot'), project_id: p.id, name, kind, model: null, effort: null, fast: 0, persona: null,
+          instruction_files: null, args_json: '[]', autostart: 0, inject_hooks: 1, auto_approve: 1, identity: null,
+          env_json: '{}', is_primary: 1, managed_by: 'user', cwd: null, created_at: now(),
+        },
+        deleted_at: new Date(Date.now() - ago).toISOString(),
+      })
+    }
     // 先鋪歷史再鋪示範訊息：示範的那兩則要留在最新一頁，不然翻頁才看得到就失去意義。
     this.seedLongHistory(p.id)
     this.seedGroupRelay(p.id)
@@ -973,6 +986,9 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'bots' && seg[1] === 'restart-idle' && seg.length === 2) {
       return this.restartIdle()
     }
+
+    if (method === 'GET' && seg[0] === 'bots' && seg[1] === 'deleted' && seg.length === 2) return this.deletedList()
+    if (method === 'POST' && seg[0] === 'bots' && seg[2] === 'restore' && seg.length === 3) return this.restoreBot(seg[1])
 
     if (seg[0] === 'bots' && seg.length >= 2) {
       const botId = seg[1]
@@ -2720,10 +2736,40 @@ export class MockTransport implements Transport {
       run.ended_at = now()
       this.emitBotStatus(id)
     }
+    const gone = this.bot(id)
+    this.deletedBots.unshift({ bot: gone, deleted_at: now() })
     this.bots = this.bots.filter((x) => x.id !== id)
     // 對話歷史刻意保留。
     this.emit('bot_changed', { bot_id: id, deleted: true })
     return {}
+  }
+
+  private deletedList() {
+    const last = (id: string) => this.messages.filter((m) => m.bot_id === id).map((m) => m.created_at).sort().pop() ?? null
+    const bots = this.deletedBots
+      .filter((d) => this.projects.some((p) => p.id === d.bot.project_id))
+      .map((d) => ({
+        id: d.bot.id, name: d.bot.name, kind: d.bot.kind, project_id: d.bot.project_id,
+        project_label: this.projects.find((p) => p.id === d.bot.project_id)?.label ?? '',
+        deleted_at: d.deleted_at, last_message_at: last(d.bot.id),
+      }))
+    return { bots }
+  }
+
+  private restoreBot(id: string) {
+    const i = this.deletedBots.findIndex((d) => d.bot.id === id)
+    if (i < 0) {
+      if (this.bots.some((b) => b.id === id)) throw new ApiError(409, { reason: 'bot is not deleted', bot_id: id }, 'conflict')
+      throw new ApiError(404, { what: 'bot' }, 'not found')
+    }
+    const { bot } = this.deletedBots[i]
+    const taken = this.bots.find((b) => b.project_id === bot.project_id && b.name === bot.name)
+    if (taken) throw new ApiError(409, { reason: 'bot name already in use in this project', bot_id: id, name: bot.name, taken_by: taken.id }, 'conflict')
+    this.deletedBots.splice(i, 1)
+    this.bots.push(bot)
+    this.emit('bot_changed', { bot_id: id })
+    this.emit('project_changed', { project_id: bot.project_id })
+    return { bot_id: id }
   }
 
   private start(botId: string) {
