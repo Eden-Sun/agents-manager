@@ -603,7 +603,9 @@ install -m 755 scripts/ops/herdr-full-restart.sh ~/.config/agents-manager/superv
 
 main 的每個 push 不再等 GitHub Actions：agm-host 上的 systemd user timer 每分鐘叫一次 `scripts/ops/ubuntu-ci.sh`，
 只驗最新的 main HEAD（同時一輪、中間的 sha 不補跑），跑整樹 `scripts/check.sh`，結果寫成 commit status `ubuntu-ci`、
-`~/.cache/agents-manager/ci/status.json` 與 `logs/<sha>.log`。安裝（agm-host，需 `loginctl enable-linger ubuntu`）：
+`~/.cache/agents-manager/ci/status.json` 與 `logs/<sha>.log`。pending 送出後腳本自己中斷（checkout 失敗之類）會補 `error`
+status、status.json 寫 `error`，不讓 pending 掛著（last-sha 不動，下一輪重試）；每段 `timeout -k`（`AGM_CI_KILL_AFTER`，預設 60s），
+step 不理 TERM 也收得掉、不會卡住鎖。隔離測試：`bash scripts/ops/ubuntu-ci_test.sh`（本地 bare repo＋假 gh）。安裝（agm-host，需 `loginctl enable-linger ubuntu`）：
 
 agent 本機收尾用 `scripts/check.sh changed`：Rust-only 改動在沒有 `web/dist/index.html` 的 clean checkout 會暫時建立 rust-embed stub，跑完即清除，不會因此安裝依賴或 build web。Web 檢查與背景完整 CI 仍 build 真正的 production bundle。
 
