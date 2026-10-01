@@ -99,3 +99,38 @@ export function keptAfterPage<T extends { id: string; created_at: string }>(exis
   const seen = new Set(page.map((m) => m.id))
   return existing.filter((m) => !seen.has(m.id) && (newest ? byTime(m, newest) > 0 : m.created_at > startedAt))
 }
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
+  if (Array.isArray(a) !== Array.isArray(b)) return false
+  const ka = Object.keys(a)
+  if (ka.length !== Object.keys(b).length) return false
+  for (const k of ka) {
+    if (!deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])) return false
+  }
+  return true
+}
+
+/**
+ * 一頁重載回來的清單裡，內容沒變的項目沿用舊物件。`loadMessages`／`loadGroupMessages` 每次都把整頁重新 normalize 成
+ * 新物件（WS 重連、resync、送失敗重讀、撤回都會走），`memo(Bubble)` 看到每則的 `msg` 都換了身分，整段歷史重新渲染——
+ * 每則都重新解析 markdown（量測：500 則短訊息約 1 秒、每 KB 約 11 ms）。內容一樣就留舊的；全部一樣（同順序）時連陣列也回舊的，
+ * 訂閱整份清單的選取器才不會白跑。內容變了的（遲到的 hook 以原文取代備援抓的回覆）才換新物件。
+ */
+export function reuseUnchanged<T extends { id: string }>(prev: readonly T[], next: T[]): T[] {
+  if (prev.length === 0) return next
+  const old = new Map<string, T>()
+  for (const x of prev) old.set(x.id, x)
+  let same = prev.length === next.length
+  const out = next.map((n, i) => {
+    const o = old.get(n.id)
+    if (o !== undefined && deepEqual(o, n)) {
+      if (prev[i] !== o) same = false
+      return o
+    }
+    same = false
+    return n
+  })
+  return same ? (prev as T[]) : out
+}

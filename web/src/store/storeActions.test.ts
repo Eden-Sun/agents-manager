@@ -1126,6 +1126,34 @@ test('群組送出被 daemon 明確拒絕（400 no_mention）：下一次是新�
   assert.notEqual(crids[0], crids[1], 'daemon 回了明確的錯＝那個動作結束了，鍵要作廢')
 })
 
+test('重載同一頁訊息：內容沒變的沿用原物件（memo 的 Bubble 才不會整串重新解析 markdown）', async () => {
+  seed()
+  const msg = (id: string, role: string, content: string) => ({
+    id, conversation_id: 'c1', turn_id: null, role, content, source: role === 'user' ? 'web' : 'hook', incomplete: 0,
+    created_at: `2026-10-01T00:00:0${id.slice(-1)}.000Z`, attachments: [],
+  })
+  const page = { messages: [msg('m1', 'user', 'hi'), msg('m2', 'assistant', 'hello **world**'), msg('m3', 'user', 'again')], turns: [], has_more: false }
+  routeDaemon(() => json(page, 200))
+  const messages = () => useStore.getState().messages['b1']
+  await useStore.getState().loadMessages('b1')
+  const first = messages()
+  assert.equal(first.length, 3)
+
+  await useStore.getState().loadMessages('b1')
+  const second = messages()
+  assert.equal(second, first, '一則都沒變：連陣列本身都不換，訂閱它的選取器才不會白跑')
+  second.forEach((m, i) => assert.equal(m, first[i]))
+
+  // 其中一則被改了（遲到的 hook 以原文取代備援抓的回覆）：只有那一則換新物件，其餘照舊。
+  page.messages[1] = msg('m2', 'assistant', 'hello **world**, edited')
+  await useStore.getState().loadMessages('b1')
+  const third = messages()
+  assert.notEqual(third[1], first[1])
+  assert.equal(third[1].content, 'hello **world**, edited')
+  assert.equal(third[0], first[0])
+  assert.equal(third[2], first[2])
+})
+
 test('斷線重連後：已載入的對話要重抓訊息，不能只補狀態（#368）', async () => {
   seed()
   useStore.setState({ loadedBots: { b1: true } })
