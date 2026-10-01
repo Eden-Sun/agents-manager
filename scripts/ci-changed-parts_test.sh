@@ -30,6 +30,9 @@ check "daemon" "docs/goals/agm-supervisor-persona.md"
 check "daemon" "docs/goals/agm-responder-persona.md"
 check "daemon" "daemon/src/release_triage/fixtures/claude_2.1.276-278.md"
 check "" "docs/goals/other-goal.md"
+# chatgpt-consult.sh 是 scripts/ 底下的 shell：lint-shell-vars 與 canary 在 ops，不能只跑 ob。
+check "ops ob" "scripts/chatgpt-consult.sh"
+check "ob" "scripts/chatgpt-consult.mjs"
 
 if [ "$fail" = 0 ]; then echo "ci-changed-parts: OK"; fi
 exit "$fail"
