@@ -2156,6 +2156,7 @@ instructions_file = "~/.config/agents-manager/agents/global.md"   # 全域，每
 
 [agents.projects]                                                  # key＝專案 id 或 label（id 優先）
 agents-manager = "/home/u/project/agents-manager/CLAUDE.md"
+pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照順序接；CLAUDE.md 的 @匯入不展開，要就都列
 ```
 
 - **注入順序**：`child_agent_rules`（§6.5c）→ 全域 agent md → 專案 agent md → bot 自己的 persona。三種 kind 同一份文字（claude `--append-system-prompt`、

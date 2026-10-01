@@ -313,13 +313,32 @@ pub struct ConfigFile {
 
 /// `[agents]`（SPEC §6.5i）：每顆 bot 啟動時讀這些檔，接在 AG Man 規則後面注入（claude `--append-system-prompt`、
 /// codex `developer_instructions`、grok `--rules`），子 agent 經 herdr shim 拿同一份。路徑可用 `~`；讀不到只警告。
-/// `projects` 的 key 是專案 id 或 label，值是那個專案的 agent md（接在全域那份後面）。
+/// `projects` 的 key 是專案 id 或 label，值是那個專案的 agent md（接在全域那份後面）：一個路徑或路徑陣列（依序接起來；
+/// CLAUDE.md 的 `@AGENTS.md` 匯入不會展開，要兩份就兩份都列）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentsCfg {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions_file: Option<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub projects: std::collections::BTreeMap<String, String>,
+    pub projects: std::collections::BTreeMap<String, AgentMdFiles>,
+}
+
+/// `[agents.projects]` 的值：一個路徑或路徑陣列。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AgentMdFiles {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl AgentMdFiles {
+    pub fn paths(&self) -> Vec<&str> {
+        let all: Vec<&str> = match self {
+            Self::One(p) => vec![p.as_str()],
+            Self::Many(v) => v.iter().map(String::as_str).collect(),
+        };
+        all.into_iter().filter(|p| !p.trim().is_empty()).collect()
+    }
 }
 
 impl AgentsCfg {
@@ -332,9 +351,9 @@ impl AgentsCfg {
         self.instructions_file.as_deref().filter(|p| !p.trim().is_empty())
     }
 
-    /// 這個專案那份（在專案所在的主機上讀，跟 repo 放在一起）。id 優先於 label。
-    pub fn project_file(&self, project_id: &str, project_label: &str) -> Option<&str> {
-        self.projects.get(project_id).or_else(|| self.projects.get(project_label)).map(String::as_str).filter(|p| !p.trim().is_empty())
+    /// 這個專案那幾份（在專案所在的主機上讀，跟 repo 放在一起），依序。id 優先於 label。
+    pub fn project_files(&self, project_id: &str, project_label: &str) -> Vec<&str> {
+        self.projects.get(project_id).or_else(|| self.projects.get(project_label)).map(AgentMdFiles::paths).unwrap_or_default()
     }
 }
 
