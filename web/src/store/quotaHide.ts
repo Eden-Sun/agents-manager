@@ -68,17 +68,53 @@ function scheduleExpiry() {
   }, delay)
 }
 
-function publish(next: Record<string, number | null>) {
+/**
+ * 多分頁（同 `persistSetDiff`／`persistDiff`）：整份覆寫會把別的分頁剛勾的停用洗掉（分頁 A 勾 cc1、分頁 B 的記憶體沒有它，
+ * B 再勾 cc2 就寫回不含 cc1 的整份）。只把相對 `prev` 有增減或改值的鍵套到磁碟現有那份。
+ */
+export function mergeDisabled(
+  prev: Record<string, number | null>,
+  next: Record<string, number | null>,
+  disk: Record<string, number | null>,
+): Record<string, number | null> {
+  const out = { ...disk }
+  for (const k of Object.keys(prev)) if (!(k in next)) delete out[k]
+  for (const [k, v] of Object.entries(next)) if (!(k in prev) || prev[k] !== v) out[k] = v
+  return out
+}
+
+function sameMap(a: Record<string, number | null>, b: Record<string, number | null>): boolean {
+  const ak = Object.keys(a)
+  return ak.length === Object.keys(b).length && ak.every((k) => k in b && a[k] === b[k])
+}
+
+/** 套用新的 map、重排到期 timer、推投影、叫醒訂閱者；不寫磁碟。 */
+function adopt(next: Record<string, number | null>) {
   disabled = next
-  try {
-    localStorage.setItem(QUOTA_DISABLED_KEY, JSON.stringify(next))
-  } catch {
-    /* 隱私模式：不記得而已 */
-  }
   scheduleExpiry()
   // 勾停用只動這裡的 map，store 不會自己變，投影要自己推一次。
   syncHiddenBots()
   for (const fn of listeners) fn()
+}
+
+function publish(next: Record<string, number | null>) {
+  let merged = next
+  try {
+    merged = prune(mergeDisabled(disabled, next, load()), Date.now())
+    localStorage.setItem(QUOTA_DISABLED_KEY, JSON.stringify(merged))
+  } catch {
+    /* 隱私模式：不記得而已 */
+  }
+  adopt(merged)
+}
+
+// 別的分頁勾了／解除了：照磁碟上的現況跟上（同一個瀏覽器的分頁看到同一份停用）。
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key !== null && e.key !== QUOTA_DISABLED_KEY) return
+    const disk = prune(load(), Date.now())
+    if (!sameMap(disk, disabled)) adopt(disk)
+  })
 }
 
 scheduleExpiry()
