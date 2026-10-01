@@ -1007,6 +1007,23 @@ export class MockTransport implements Transport {
       }
       if (method === 'GET' && action === 'pending-question') return this.pendingQuestion(botId)
       if (method === 'POST') {
+        // 子 agent 一律由父 bot 用 herdr 重開：daemon 的 start／restart 不收（API.md §4、§10.3；一鍵重啟走內部原地重啟，不經這裡）。
+        if ((action === 'start' || action === 'restart') && seg.length === 3) {
+          const parent = this.bots.find((x) => x.id === botId)?.parent_bot_id
+          if (parent) {
+            throw new ApiError(
+              409,
+              {
+                error: 'conflict',
+                reason: 'child_restart_forbidden',
+                bot_id: botId,
+                parent_bot_id: parent,
+                message: '子 agent 一律由父 bot 用 herdr 重開；被軟刪的先 POST /api/bots/{id}/restore（§10.4a）',
+              },
+              'child_restart_forbidden',
+            )
+          }
+        }
         if (action === 'start') {
           const r = this.start(botId)
           this.flushWaiting(botId)
@@ -2783,7 +2800,7 @@ export class MockTransport implements Transport {
       }
     }
     const existing = this.activeRun(botId)
-    if (existing) throw new ApiError(409, { reason: '已有 active Run', run_id: existing.id }, 'conflict')
+    if (existing) throw new ApiError(409, { error: 'conflict', reason: 'active run already exists', run_id: existing.id }, 'conflict')
     const run: MockRun = {
       id: ulid('run'),
       bot_id: botId,
