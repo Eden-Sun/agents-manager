@@ -2161,6 +2161,9 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
 - `max_concurrent`（預設 2，`AM_BUILD_MAX_CONCURRENT` 可覆寫，0／看不懂一律回預設——0 不是「停用排程」，是「誰都拿不到
   名額」，整台機器的受管建置會卡死，跟 `panes.idle_close_secs` 同一條防呆規矩）、`cargo_jobs`（預設 2）、
   `lease_ttl_secs`（預設 180，續約間隔取它的 1/3）。
+  這三個沒有 API 可寫，唯一的設定方式是手改 `config.toml`，所以 scheduler 每次拿名額／續約／看狀態都走 `ConfigStore::build_fresh`：
+  檔案 mtime 變了就重讀，**只**換 `[build]` 這一段，不用重啟；讀不了或解析失敗（半寫、打錯字、`lease_ttl_secs` 超出範圍）保留原值、記一次 WARN。
+  其他段仍只在啟動與 `ConfigStore::update` 時載入（要連著 TOML→SQLite 投影一起處理）。已發出的名額不受影響：`max_concurrent` 調小時不收回已持有的，只是不再放新的。
 
 #### 跟 `cargo-slot.sh` 並存（issue #90 交辦時的現況）
 這支手動腳本目前還有其他子 agent 在用，**這次改動不動它**。新機制透過 `lifecycle::setup.rs::install_shim` 在**下一次

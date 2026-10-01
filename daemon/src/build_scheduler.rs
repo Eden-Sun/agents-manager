@@ -138,7 +138,7 @@ async fn mark_waiting(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpos
 /// 佇列順序＝`(since, holder)` 字典序（`since` 相同——理論上毫秒級撞期——用 `holder` 當穩定的第二排序鍵）。
 pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose: &str, host: &str) -> Result<Acquired> {
     let _g = app.build_slot_lock.lock().await;
-    let cfg = app.cfg.get().await.build;
+    let cfg = app.cfg.build_fresh().await;
     let max = cfg.max_concurrent();
     let now = now_str();
     reap_expired_held(&app.db, &now).await?;
@@ -220,7 +220,7 @@ pub enum RenewErr {
 /// 就等於放棄，重問一次」同一個語意，不做「你的名額其實已經被別人拿走了」這種模糊地帶。
 pub async fn renew(app: &Arc<App>, holder: &str, token: &str) -> Result<Result<String, RenewErr>> {
     let _g = app.build_slot_lock.lock().await;
-    let cfg = app.cfg.get().await.build;
+    let cfg = app.cfg.build_fresh().await;
     let now = now_str();
     let row: Option<SlotRow> = sqlx::query_as("SELECT token, bot_id, status, since, expires_at FROM build_slots WHERE holder = ?")
         .bind(holder)
@@ -290,7 +290,7 @@ struct StatusRow {
 }
 
 pub async fn status(app: &Arc<App>) -> Result<Value> {
-    let cfg = app.cfg.get().await.build;
+    let cfg = app.cfg.build_fresh().await;
     reap_expired_held(&app.db, &now_str()).await?;
     let rows: Vec<StatusRow> = sqlx::query_as(
         "SELECT holder, status, bot_id, purpose, host, since, last_seen, expires_at FROM build_slots ORDER BY since",
@@ -405,11 +405,11 @@ pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(
     let bot_id = authenticate(&app, &headers, body.bot_id.as_deref()).await?;
     match acquire(&app, body.holder.trim(), bot_id.as_deref(), body.purpose.trim(), body.host.trim()).await.map_err(up)? {
         Acquired::Granted { token, expires_at } => {
-            let cfg = app.cfg.get().await.build;
+            let cfg = app.cfg.build_fresh().await;
             Ok(Json(json!({"granted": true, "token": token, "expires_at": expires_at, "cargo_jobs": cfg.cargo_jobs, "lease_ttl_secs": cfg.lease_ttl().map_err(LcError::Bad)?})))
         }
         Acquired::Waiting { active, since } => {
-            let cfg = app.cfg.get().await.build;
+            let cfg = app.cfg.build_fresh().await;
             Ok(Json(json!({"granted": false, "active": active, "max_concurrent": cfg.max_concurrent(), "since": since, "retry_after_secs": 5})))
         }
         Acquired::HolderOwnedByAnotherBot => Err(LcError::Forbidden(json!({
@@ -484,7 +484,7 @@ mod tests {
             let err = app.cfg.update(|cfg| { cfg.build.lease_ttl_secs = bad; Ok(()) }).await.unwrap_err().to_string();
             assert!(err.contains("lease_ttl_secs") && err.contains("未變更"), "{bad}: {err}");
         }
-        assert_eq!(app.cfg.get().await.build.lease_ttl().unwrap(), 180);
+        assert_eq!(app.cfg.build_fresh().await.lease_ttl().unwrap(), 180);
         assert!(matches!(acquire(&app, "A:1", None, "test", "local").await.unwrap(), Acquired::Granted { .. }));
         assert!(matches!(acquire(&app, "B:2", None, "test", "local").await.unwrap(), Acquired::Waiting { .. }));
         let huge = crate::config::BuildCfg { lease_ttl_secs: u64::MAX, ..crate::config::BuildCfg::default() };
