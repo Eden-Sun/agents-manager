@@ -12,6 +12,7 @@ import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskSt
 import { MockReleaseTriage } from './mockReleaseTriage'
 import { MockHerdrUpdate, type MockHerdrOpts } from './mockHerdrUpdate'
 import { MockServerDrafts } from './mockServerDrafts'
+import { MockRemoteCargo } from './mockRemoteCargo'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 import { MockComposerDrafts } from './mockComposerDraft'
 
@@ -586,6 +587,7 @@ export class MockTransport implements Transport {
   /** 更新框的 changelog／分診／AGM 解析（`mockReleaseTriage.ts`）。 */
   readonly releaseTriage = new MockReleaseTriage()
   readonly serverDrafts = new MockServerDrafts()
+  readonly remoteCargo = new MockRemoteCargo()
   /** header 的 herdr 一鍵更新（`mockHerdrUpdate.ts`，`__amMock.herdrUpdate()`）。 */
   readonly herdrUpdate = new MockHerdrUpdate({
     emit: (type, data) => this.emit(type, data),
@@ -891,6 +893,7 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/upstream-updates') return { items: this.upstreamItems }
     { const r = this.releaseTriage.handle(method, rawPath, q, b); if (r !== undefined) return r }
     { const r = this.serverDrafts.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
+    { const r = this.remoteCargo.handle(method, rawPath, b); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
     { const m = rawPath.match(/^\/projects\/([^/]+)\/group\/read$/); if (method === 'POST' && m) return { project_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
