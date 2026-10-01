@@ -276,13 +276,18 @@ pub async fn chat(
             Ok(out) => {
                 // 同一個 crid 之前對這顆寫過「未送達」note（當時沒在跑），這次送到了：note 已經不是事實，撤掉（#340）。
                 if let Ok(conv) = db::conversation_id(&app.db, &t.id).await {
-                    if let Err(e) = sqlx::query("DELETE FROM messages WHERE conversation_id = ? AND group_id = ? AND role = 'system'")
+                    match sqlx::query("DELETE FROM messages WHERE conversation_id = ? AND group_id = ? AND role = 'system'")
                         .bind(&conv)
                         .bind(&group_id)
                         .execute(&app.db)
                         .await
                     {
-                        tracing::warn!(bot = %t.name, error = %e, "could not retire the stale skipped note");
+                        // 刪掉的是一則前端已經收過的訊息：沒有事件的話群組時間軸會一直留著它（跟 `prompt.rs` 撤回 prompt 同一招）。
+                        Ok(r) if r.rows_affected() > 0 => {
+                            app.emit("resync", json!({"reason": "group_note_retired", "bot_id": t.id, "group_id": group_id})).await;
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(bot = %t.name, error = %e, "could not retire the stale skipped note"),
                     }
                 }
                 sent.push(json!({
@@ -693,5 +698,35 @@ mod uncommitted_tests {
         let out = chat(&app, &env.project_id, "@all hi", "crid-none", &[]).await.ok().unwrap();
         assert_eq!(out["delivered"], true, "{out}");
         assert!(system_notes(&app, &conv).await.is_empty(), "送到了，先前的未送達 note 要撤掉");
+    }
+
+    /// 撤掉「未送達」note 是**刪**一則已經推給前端的訊息：沒有任何事件的話，前端的群組時間軸會一直留著那句已經不是事實的話
+    /// （要重整才消失）。刪掉了就發 `resync`（跟撤回沒打進 pane 的 prompt 同一招，`prompt.rs` 的 `turn_retracted`）。
+    #[tokio::test]
+    async fn retiring_a_stale_skipped_note_tells_the_clients_to_resync() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let stopped = tt::claude_bot(&app, &env.project_id, "grp-evt").await;
+        env.herdr.live_pane("pane-evt", tt::LivePane { width: Some(120), ..Default::default() });
+        let out = chat(&app, &env.project_id, "@all hi", "crid-evt", &[]).await.ok().unwrap();
+        assert_eq!(out["delivered"], false, "{out}");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
+             VALUES (?,?,'running','idle','ws-1','pane-evt','evt-bot','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&stopped.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let mut events = app.subscribe();
+        let out = chat(&app, &env.project_id, "@all hi", "crid-evt", &[]).await.ok().unwrap();
+        assert_eq!(out["delivered"], true, "{out}");
+        let mut resynced = false;
+        while let Ok(ev) = events.try_recv() {
+            resynced |= ev.kind == "resync" && ev.data["reason"] == "group_note_retired";
+        }
+        assert!(resynced, "刪了一則前端已經有的訊息，要發 resync");
     }
 }
