@@ -2199,7 +2199,6 @@ mod identity_login_gate_tests {
     use crate::config::IdentityCfg;
     use crate::testing as tt;
     use crate::tools::{HostTools, IdentityInfo, ToolInfo, SOURCE_CONFIG};
-    use std::os::unix::fs::PermissionsExt;
 
     /// Registers `name` as a known local `claude` identity whose cache says logged out, and points
     /// its CLI at a fake script (never the real `claude`) that answers `{"loggedIn": fresh_logged_in}`
@@ -2221,10 +2220,7 @@ mod identity_login_gate_tests {
             .await
             .unwrap();
         let script = dir.join(format!("fake-cli-{name}.sh"));
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '{{\"loggedIn\": {fresh_logged_in}}}'\n")).unwrap();
-        let mut perm = std::fs::metadata(&script).unwrap().permissions();
-        perm.set_mode(0o755);
-        std::fs::set_permissions(&script, perm).unwrap();
+        crate::testing::write_exec(&script, format!("#!/bin/sh\nprintf '{{\"loggedIn\": {fresh_logged_in}}}'\n"));
         app.tools.lock().await.insert(
             crate::config::LOCAL_HOST.to_string(),
             HostTools {

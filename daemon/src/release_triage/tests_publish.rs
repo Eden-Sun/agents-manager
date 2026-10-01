@@ -210,10 +210,7 @@ case "$1 $2" in
   *) exit 2;;
 esac
 "#;
-        let p = dir.join("gh");
-        std::fs::write(&p, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(dir.join("gh"), script);
         Self { dir }
     }
     fn cfg(&self, publish: bool) -> ReleaseTriageCfg {

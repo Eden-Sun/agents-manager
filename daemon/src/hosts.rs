@@ -1665,12 +1665,9 @@ mod tests {
 mod shared_session_script_tests {
     //! #709：連上共用 session 的主機時，對方的 herdr server 在跑就一點都不碰（絕不 `server stop`）。
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn fake(bin: &std::path::Path, name: &str, body: &str) {
-        let p = bin.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(bin.join(name), format!("#!/bin/sh\n{body}\n"));
     }
 
     /// 假的 macOS：herdr 說 session 在跑（nohup 起的，launchd 沒有它）——正是以前會 `server stop` 交給 launchd 的形狀。
@@ -1726,12 +1723,9 @@ mod linux_systemd_script_tests {
     //! issue #677：遠端是 Linux、裝了 `herdr@.service` 就交給 systemd 看管；沒裝或起不來照舊 nohup；
     //! server 已經在跑（不管誰起的）一律不動。
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn fake(bin: &std::path::Path, name: &str, body: &str) {
-        let p = bin.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(bin.join(name), format!("#!/bin/sh\n{body}\n"));
     }
 
     /// `unit`：`systemctl --user cat herdr@test.service` 找得到；`start_ok`：start 成功（會把 server 起來）；
