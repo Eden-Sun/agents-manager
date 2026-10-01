@@ -197,5 +197,16 @@ equals "連結還在" "$([ -L "$DIR/bin/a-kick.sh" ] && echo link)" "link"
 equals "連結指到的檔沒動" "$(sed -n 2p "$ROOT/elsewhere.sh")" "echo a-v1"
 teardown
 
+# 12. 對照表的安裝位置跑出 AGM 目錄（絕對路徑、`..`）：不寫，報 failed。
+setup
+printf '#!/bin/bash\necho outside\n' > "$ROOT/escape.sh"
+printf 'scripts/ops/esc.sh  ../escape.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
+printf '#!/bin/bash\necho esc-v1\n' > "$REPO/scripts/ops/esc.sh"
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m esc
+equals "路徑跑出去 exit 1" "$(run)" "1"
+check "點名" "failed ../escape.sh" "$OUT"
+equals "目錄外的檔沒動" "$(sed -n 2p "$ROOT/escape.sh")" "echo outside"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
