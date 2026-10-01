@@ -3242,6 +3242,17 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 - **永遠不清成 NULL**：讀不到、沒人認領、該 kind 沒空 env 身份 → 維持現狀。
 - **一個 pane 只問一次作業系統**（重連重播一串 `pane.agent_detected`，每個小孩每次一個 ssh 會變風暴）；讀不到或那台還沒偵測出同 kind 身份不算問過。
 
+## 16b. 輸入框草稿以 daemon 為準（使用者 2026-10-01）
+
+對話輸入框還沒送出的字（bot 的 `bot:<id>`、群組的 `group:<project id>`）存在 `composer_drafts`（`key` 主鍵、`text`、`rev`、`updated_at`；`SCHEMA_VERSION` 34），
+各瀏覽器共用；不再存 localStorage（游標位置 `am.draftCursors` 仍是各瀏覽器自己的）。API 見 API.md「輸入框草稿」，實作 `daemon/src/drafts.rs`（網頁 `store/draftSync.ts`）。
+
+- `rev` 每個 key 單調遞增，空字串寫入留墓碑（`text=''`）而不整列刪，rev 才不會從 1 重來被網頁當成舊事件丟掉。內容沒變的寫入不加 rev、不推事件。
+- 網頁：開頁與每次 WS 重連 `GET /api/drafts` 整份拉；本機打字 debounce 400 ms 後 `PUT`，**清空（送出）不等 debounce**；同一個 key 同時只有一個 PUT 在飛。
+- 收到別的 client 的 `draft_updated`：輸入框**有焦點而且本機有還沒同步的修改**時不覆蓋（本機那次 PUT 照送，最後寫入者贏），其餘都套用。同 `client_id` 的回音只記 rev、不重套；`rev` 不大於已知的丟掉。
+- PUT 失敗（斷線）：草稿留在這個分頁、維持待送，3 秒重試，重連後 `load` 完再補送。重連時 daemon 沒有、而本機沒有待送修改的草稿視為已被刪（別處送出、bot 被刪），跟著清。
+- 刪 bot／刪專案時 daemon 自己清它們的草稿（含 child），並通知其他瀏覽器。
+
 ## 17. claude 的 `--effort`
 
 claude 有 `--effort <low|medium|high|xhigh|max>`：

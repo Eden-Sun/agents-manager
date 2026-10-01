@@ -657,6 +657,21 @@ export async function fetchQuota(): Promise<QuotaMap> {
   return toQuota(await transport.request('GET', '/quota'))
 }
 
+/** 對話輸入框的草稿（API.md `/api/drafts`）：以 daemon 為準，各瀏覽器共用。 */
+export async function fetchDrafts(): Promise<{ key: string; text: string; rev: number }[]> {
+  const raw = await transport.request('GET', '/drafts')
+  return arr(isRec(raw) ? raw.drafts : [])
+    .filter(isRec)
+    .map((d) => ({ key: str(pick(d, 'key')), text: str(pick(d, 'text')), rev: num(pick(d, 'rev'), 0) }))
+    .filter((d) => d.key && d.text && d.rev > 0)
+}
+
+/** 空字串＝刪除。回 daemon 這次的 rev。 */
+export async function putDraft(key: string, text: string, clientId: string): Promise<{ rev: number }> {
+  const raw = await transport.request('PUT', `/drafts/${encodeURIComponent(key)}`, { text, client_id: clientId })
+  return { rev: num(isRec(raw) ? pick(raw, 'rev') : 0, 0) }
+}
+
 /** 失敗就丟出來，由呼叫端當成「沒有訊息命中」。 */
 export async function searchMessages(q: string): Promise<Record<string, MessageHit>> {
   const raw = await transport.request('GET', `/search/messages?q=${encodeURIComponent(q)}`)

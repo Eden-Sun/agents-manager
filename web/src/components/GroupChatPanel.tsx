@@ -463,6 +463,7 @@ function GroupComposer({
         ) : null}
         <textarea
           ref={ref}
+          data-draft-key={draftKey}
           value={text}
           {...mentionComboAttrs({ open: showPop, listId: mentionListId, activeIdx, count: candidates.length })}
           /* 連線斷了也讓人繼續打（草稿會存），只是送不出去。 */

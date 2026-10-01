@@ -899,9 +899,10 @@ function Composer({
         <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />
         <textarea
           ref={ref}
+          data-draft-key={draftKey}
           rows={phone ? 1 : 2}
           value={text}
-          /* 斷線也讓人繼續打（草稿會存）。 */
+          /* 斷線也讓人繼續打（草稿先留在這個分頁，連回來再同步）。 */
           disabled={sending}
           /* 手機短版：390px 會撐成兩行，且觸控不能拖放。 */
           placeholder={composerPlaceholder(state, { phone, starting: Boolean(starting) })}

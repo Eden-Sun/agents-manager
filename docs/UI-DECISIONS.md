@@ -239,7 +239,7 @@
   bot 標題列第一行 ☰、名字、更新 chip、★、⚙、分頁，第二行 kind＋模型＋版本；git 鍵疊在額度列左下，跟齒輪同一種灰。
   「claude 有更新」（`⌃⌃ N`）手機放 ★ 左邊，不在額度列（2026-09-19 使用者）；桌機仍在額度列最左。
 - 桌機可在右欄嵌手機預覽（開關在右欄標題列，預設關）：iframe 帶 `?mobilePreview=1`、393×852 以 `scale(.5)` 顯示（不改 iframe 尺寸）。
-  預覽是同一個 origin 的第二個 client：**不寫共用的 localStorage**（草稿、游標、選取、未讀——各自拿整份 map 覆寫會洗掉主畫面的），
+  預覽是同一個 origin 的第二個 client：**不寫共用的 localStorage**（游標、選取、未讀——各自拿整份 map 覆寫會洗掉主畫面的；草稿已改存 daemon，預覽是它自己的 `client_id`，跟主畫面一樣走同步），
   多分頁問卷**不自動預載**（預載自己送導覽鍵，鎖跨不過 iframe，會跟主畫面互相插隊），退回即時模式、使用者點了才送鍵（review3 c1 L8）。
 
 ## Bot 設定卡片：不蓋標題列、加寬、拿掉說明（2026-09-13）
@@ -719,3 +719,12 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - 驗證：mock 起前端，把 run 的 `background_jobs` 設成 1／2。
 
 ![桌機](screenshots/background-jobs/bg-light.png) ![手機](screenshots/background-jobs/bg-mobile-dark.png)
+
+## 輸入框草稿跨瀏覽器同步（2026-10-01）
+
+- **以 daemon 為準，不存 localStorage**：手機打了一半，到電腦開頁就在輸入框裡（SPEC §16b）。游標位置仍留在各瀏覽器本機。
+- **不蓋正在打的字**：別的瀏覽器的改動只在「這個輸入框沒有焦點，或本機自上次同步後沒改過」時套用；正在打字就繼續打，本機那次寫入照送、最後寫入者贏。自己的回音（同 `client_id`）不重套，所以不會在打字時被自己的舊版本拉回去。
+- **送出馬上清**：送出清空不走 debounce，別的瀏覽器的框也跟著清，不會留著同一句被再送一次。
+- 倒回把原文放回輸入框、退回排隊中那則、`queue_slot_taken` 退回，都走同一個 `setDraft`，自動同步；輸入列上方那條 `ComposerDraftBar` 是終端 pane 裡的字，跟網頁草稿無關。
+- 離線不丟字：PUT 失敗留在本機重試，連回來先拉再補送。
+- 真畫面（兩個分頁連同一個 daemon，A 打字、B 沒操作就出現；CJK 在 headless 缺字型顯示成方框）：![A 打字](screenshots/server-drafts/a-typed.png) ![B 同步到](screenshots/server-drafts/b-synced-from-other-tab.png)
