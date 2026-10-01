@@ -1007,6 +1007,8 @@ export class MockTransport implements Transport {
       }
       if (method === 'GET' && action === 'pending-question') return this.pendingQuestion(botId)
       if (method === 'POST') {
+        // 專案已移交給另一台主機的 daemon（#708）：開、關、重啟與 pane RPC 一律 409 `handed_off`（`daemon/src/handoff.rs::refuse`）。
+        if (seg.length === 3 && ['start', 'stop', 'restart', 'keys', 'text', 'interrupt', 'login', 'abort'].includes(action)) this.refuseHandedOff(botId)
         // 子 agent 一律由父 bot 用 herdr 重開：daemon 的 start／restart 不收（API.md §4、§10.3；一鍵重啟走內部原地重啟，不經這裡）。
         if ((action === 'start' || action === 'restart') && seg.length === 3) {
           const parent = this.bots.find((x) => x.id === botId)?.parent_bot_id
@@ -3049,7 +3051,26 @@ export class MockTransport implements Transport {
     return { run_id: run.id, kind: bot.kind, command: '/login' }
   }
 
+  /** 移交出去的專案：daemon 不替它開、關、送 prompt 或操作 pane，409 `handed_off` 並說由誰管。 */
+  private refuseHandedOff(botId: string) {
+    const bot = this.bots.find((x) => x.id === botId)
+    const to = this.projects.find((p) => p.id === bot?.project_id)?.handed_off_to
+    if (!to) return
+    throw new ApiError(
+      409,
+      {
+        error: 'conflict',
+        reason: 'handed_off',
+        bot_id: botId,
+        handed_off_to: to,
+        message: `這個專案已移交給 ${to} 的 daemon 管理，這裡不替它開、關、送 prompt 或操作 pane；要收回請先清掉專案的「已移交」。`,
+      },
+      'handed_off',
+    )
+  }
+
   private prompt(botId: string, b: Rec, groupId: string | null = null, replyOverride: string | null = null) {
+    this.refuseHandedOff(botId)
     const run = this.activeRun(botId)
     if (!run && b.start_if_stopped === true) return this.promptStarting(botId, b)
     if (!run) throw new ApiError(409, { error: 'conflict', reason: 'bot has no active run' }, 'conflict')
