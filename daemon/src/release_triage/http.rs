@@ -74,6 +74,21 @@ async fn post_verdicts(State(app): State<Arc<App>>, Json(sub): Json<Submission>)
     }
     let (verdicts, proposals) = verdict::validate(&sub, &row.entries)
         .map_err(|problems| LcError::BadValue(json!({"error": "invalid_verdicts", "problems": problems})))?;
+    // `duplicate_of` 會被 publish 直接拿去 `gh issue comment <n>`：只收帳本裡真的有的 release-triage issue，
+    // 模型填錯或幻覺出別的 issue／PR 編號時整份退回，不能把留言貼到不相干的地方。
+    let dups: Vec<i64> = proposals.iter().filter_map(|p| p.duplicate_of).collect();
+    if !dups.is_empty() {
+        let known: std::collections::BTreeSet<i64> =
+            ledger::list(&app.db, None, None).await.map_err(up)?.iter().flat_map(|r| r.issues.iter().map(|i| i.number)).collect();
+        let problems: Vec<String> = dups
+            .iter()
+            .filter(|d| !known.contains(d))
+            .map(|d| format!("duplicate_of #{d} 不是帳本裡任何一張 release-triage issue（只能指向 `agm release-triage show` 看得到的 issue）"))
+            .collect();
+        if !problems.is_empty() {
+            return Err(LcError::BadValue(json!({"error": "invalid_verdicts", "problems": problems})));
+        }
+    }
     let next = if proposals.is_empty() { Status::Empty } else { Status::Judged };
     let stored = json!({"submitted_at": ledger::now_ts(), "verdicts": verdicts, "issues": proposals});
     if !ledger::save_verdicts(&app.db, &sub.kind, &version, &stored, next).await.map_err(up)? {
@@ -257,6 +272,48 @@ mod tests {
         for bad in [pub_in(None, Some("不是版本"), false), pub_in(Some("codx"), None, false), pub_in(Some("codx"), None, true)] {
             assert!(matches!(post_publish(State(app.clone()), Some(bad)).await, Err(LcError::Bad(_))));
         }
+    }
+
+    /// `duplicate_of` 是模型填的數字，publish 會直接 `gh issue comment <n>`：填錯（或幻覺出）一個 repo 裡別的 issue／PR 編號，
+    /// 留言就貼到不相干的地方。只收帳本裡真的有的 release-triage issue；整份退回、列出原因。
+    #[tokio::test]
+    async fn duplicate_of_must_name_a_release_triage_issue_the_ledger_knows() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let sections = source_sections("claude", include_str!("fixtures/claude_2.1.276-278.md"));
+        let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
+        ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
+        let vs: Vec<EntryVerdict> = entries
+            .iter()
+            .filter(|e| e.bucket != Bucket::Dropped)
+            .map(|e| EntryVerdict { entry_id: e.id.clone(), verdict: Verdict::Guard, reason: "r".into(), module: "m".into() })
+            .collect();
+        let proposal = |dup: Option<i64>| Proposal {
+            entry_ids: vec![vs[0].entry_id.clone()],
+            verdict: None,
+            title: "t".into(),
+            goal: "g".into(),
+            suggestion: "s".into(),
+            acceptance: "a".into(),
+            duplicate_of: dup,
+        };
+        let submit = |dup| post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: vs.clone(), issues: vec![proposal(dup)] }));
+        // 帳本裡沒有 #9999：退回，狀態不動。
+        let err = submit(Some(9999)).await.expect_err("不認得的 issue 編號不能當 duplicate_of");
+        let LcError::BadValue(body) = err else { panic!("要是 400：{err:?}") };
+        assert!(body["problems"].to_string().contains("9999"), "{body}");
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Pending);
+        // 帳本裡別的版本開過的 #123 是合法的重複對象。
+        let mut other = entries.clone();
+        other.truncate(1);
+        ledger::insert_version(&app.db, "claude", "2.1.276", &other).await.unwrap();
+        sqlx::query("UPDATE release_triage SET issue_numbers_json = ? WHERE kind = 'claude' AND version = '2.1.276'")
+            .bind(r#"[{"marker":"claude@2.1.276#x","entry_ids":["x"],"number":123,"url":"u","created_at":"2026-09-01T00:00:00.000Z","comment":false}]"#)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let ok = submit(Some(123)).await.expect("帳本裡有的 issue 照收");
+        assert_eq!(ok.0["status"], "judged");
     }
 
     /// herdr 沒有分診規則（第二階段）：更新框照樣能讀 `?kind=herdr`（200、空的 rows），寫入端點仍是 400。
