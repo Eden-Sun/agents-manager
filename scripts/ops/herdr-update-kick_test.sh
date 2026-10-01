@@ -35,6 +35,11 @@ for i in $(seq 1 $#); do
   case "$a" in --text-file) eval "f=\${$((i+1))}"; cat "$f" >> "$AGM_DIR/assign-body.txt" ;; esac
 done
 [ -n "${STUB_ASSIGN_FAIL:-}" ] && exit 1
+# 同一個 request id 已經被更新框的「請 AGM 解析」用掉（正文不同）：daemon 回 409，agm 把錯誤 JSON 印到 stderr、exit 4。
+if [ -n "${STUB_ASSIGN_409:-}" ]; then
+  printf '%s\n' "{\"error\":\"http_error\",\"message\":\"POST /api/supervisor/assignments 回 409\",\"status\":409,\"detail\":${STUB_ASSIGN_409}}" >&2
+  exit 4
+fi
 printf '%s' '{"id":"a-1"}'
 STUB
   chmod +x "$AGM_DIR/bin/agm"
@@ -213,6 +218,29 @@ check "失敗有記 log" "派工失敗" "$AGM_DIR/herdr-update.log"
 export STUB_ASSIGN_FAIL=""
 bash "$SCRIPT"
 equals "下一輪重派後才寫 state" "$(cat "$AGM_DIR/herdr-update.last")" "0.9.0"
+teardown
+
+# 5b. 使用者已在更新框按過「請 AGM 解析」（同一個 agm-herdr-update-<版>）：409 帶 assignment_id／inbox_event_id
+# ＝那一版已經派過，寫 state、不算失敗、下一輪不再送。別的 409（例如沒帶這兩個欄位）仍是失敗。
+for detail in '{"error":"conflict","reason":"text_mismatch","assignment_id":"a-ui"}' '{"error":"conflict","reason":"request_mismatch","inbox_event_id":"ev-1"}'; do
+  setup
+  export STUB_ASSIGN_409="$detail"
+  bash "$SCRIPT"
+  equals "409 已派過（${detail}）：寫 state" "$(cat "$AGM_DIR/herdr-update.last" 2>/dev/null)" "0.9.0"
+  check "409 已派過：log 講明不重派" "不重派" "$AGM_DIR/herdr-update.log"
+  check_no "409 已派過：不算失敗" "派工失敗" "$AGM_DIR/herdr-update.log"
+  : > "$AGM_DIR/calls.log"
+  bash "$SCRIPT"
+  check_no "409 已派過：下一輪不再送" "assign" "$AGM_DIR/calls.log"
+  unset STUB_ASSIGN_409
+  teardown
+done
+setup
+export STUB_ASSIGN_409='{"error":"conflict","reason":"not_configured"}'
+bash "$SCRIPT"
+[ ! -f "$AGM_DIR/herdr-update.last" ] && { echo "ok   - 別的 409：不寫 state"; PASS=$((PASS + 1)); } || { echo "FAIL - 別的 409：不寫 state"; FAIL=$((FAIL + 1)); }
+check "別的 409：記成派工失敗" "派工失敗" "$AGM_DIR/herdr-update.log"
+unset STUB_ASSIGN_409
 teardown
 
 # 6. 找不到要派給誰：跳過，不亂派給別的 bot。

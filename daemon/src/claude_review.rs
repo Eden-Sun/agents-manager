@@ -3,6 +3,10 @@
 //! changelog、哪份任務檔（`<kind>-release-task.md`）與識別碼前綴（`agm-<kind>-release-…`），派給誰、冪等、
 //! 結論回哪裡都是同一份程式。
 //!
+//! herdr（2026-10-01 一鍵更新）也走這裡，但有兩點不同：沒有任務檔，正文開頭是 `herdr_update::AGM_ASK`
+//! （跟 `scripts/ops/herdr-update-kick.sh` 的排程交辦同一段規則）；識別碼直接用 kick 的 `agm-herdr-update-<版>`，
+//! 按鈕與排程共用同一個——誰先派都是那一筆，另一邊看到就當「已經派過」（kick 收到 409 也一樣），同一版只派一次。
+//!
 //! `scripts/ops/claude-release-kick.sh` 每 30 分鐘做同一件事，但它是排程：使用者看到更新提示、
 //! 想**現在**知道「這版有沒有我們用得上的東西」時，沒有入口。這支就是那個入口——組出同一份交辦
 //! 派給協調者，結論照 `claude-release-task.md` 的規則回到使用者入口。
@@ -27,7 +31,7 @@ use crate::state::App;
 
 #[derive(Debug, Deserialize)]
 pub struct ReviewIn {
-    /// `claude`（預設）｜`codex`。
+    /// `claude`（預設）｜`codex`｜`herdr`。
     #[serde(default)]
     pub kind: Option<String>,
     /// 預設本機。
@@ -158,18 +162,33 @@ fn versions_dir(kind: &str) -> Option<String> {
     }))
 }
 
-/// `kind` 只收 claude／codex（兩個有 changelog 來源、也有任務檔的上游）；省略＝claude（舊呼叫端不帶）。
+/// `kind` 只收 claude／codex／herdr（有 changelog 來源的上游）；省略＝claude（舊呼叫端不帶）。
 fn parse_kind(kind: Option<&str>) -> Result<&'static str, LcError> {
     match kind.map(str::trim).filter(|k| !k.is_empty()) {
         None | Some("claude") => Ok("claude"),
         Some("codex") => Ok("codex"),
-        Some(other) => Err(LcError::Bad(format!("kind 只收 claude 或 codex，收到 `{other}`"))),
+        Some("herdr") => Ok("herdr"),
+        Some(other) => Err(LcError::Bad(format!("kind 只收 claude、codex 或 herdr，收到 `{other}`"))),
     }
+}
+
+/// 派工正文開頭的規則：claude／codex 讀任務檔；herdr 沒有任務檔，用跟排程交辦同一段 [`crate::herdr_update::AGM_ASK`]。
+fn task_head(app: &Arc<App>, kind: &str) -> Option<String> {
+    if kind == "herdr" {
+        return Some(format!("AGM 交辦：herdr 出新版了，請解析這一版對 agents-manager 的影響。\n\n{}", crate::herdr_update::AGM_ASK));
+    }
+    task_template(app, kind)
 }
 
 /// 沒指定新版時要解析哪一版。claude 是磁碟上那一版（自動更新已經下載好）；codex 的新版**還沒安裝**，
 /// 磁碟上是舊的，所以先看分診帳本裡最新的正式版（跟 `codex_update::decide` 同一個來源），帳本空才退回磁碟。
 async fn default_to(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
+    // herdr 同理：新版還沒裝，看上游快照裡這台落後時的目標版本。
+    if kind == "herdr" {
+        if let Some(v) = crate::upstream_update::behind_target_for_host(kind, host).await {
+            return Some(v);
+        }
+    }
     if kind == "codex" {
         if let Ok(Some(v)) = crate::release_triage::ledger::max_version(&app.db, kind).await {
             return Some(v);
@@ -198,7 +217,11 @@ pub async fn inbox_event_for(app: &Arc<App>, kind: &str, to: &str) -> anyhow::Re
 }
 
 /// kick 用的識別碼。使用者按鈕用 [`ui_request_id`]，兩邊分開。claude 的字串跟以前一樣（kick 與既有交辦都靠它）。
+/// herdr 是 `herdr-update-kick.sh` 一直在用的 `agm-herdr-update-<版>`。
 pub fn request_id(kind: &str, to: &str) -> String {
+    if kind == "herdr" {
+        return format!("agm-herdr-update-{to}");
+    }
     format!("agm-{kind}-release-{to}")
 }
 
@@ -235,7 +258,13 @@ async fn redispatch_target(app: &Arc<App>, kind: &str, to: &str) -> Result<(Stri
 /// 收件匣（`bot_request`），那條路沒有 assignment，結論只留在協調者自己的對話裡，視窗讀不到。
 /// 走自己的交辦就有 `result` 可以讀，做得到「按了 → 視窗裡看得到結論」。同一版重按仍只有一筆
 /// （`post_assignment` 靠這個 id 冪等）。
+///
+/// herdr 例外：按鈕直接用 kick 的 [`request_id`]。kick 派的不管走 assignment 還是收件匣，[`review_state`]
+/// 兩條路都讀得到結論；共用同一個 id，kick 晚到時撞同一個 id（409）就知道已經派過，同一版只派一次。
 pub fn ui_request_id(kind: &str, to: &str) -> String {
+    if kind == "herdr" {
+        return request_id(kind, to);
+    }
     format!("agm-{kind}-release-{to}-ui")
 }
 
@@ -417,6 +446,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
         Some(v) => Some(v),
         // codex 的新版還沒裝、磁碟是舊的：沒給 `to` 就用帳本的最新版（見 [`default_to`]）。
         None if kind == "codex" => crate::release_triage::ledger::max_version(&app.db, kind).await.ok().flatten(),
+        None if kind == "herdr" => crate::upstream_update::behind_target_for_host(kind, &host).await,
         None => None,
     };
     let reply = crate::changelog::lookup(&app, &host, kind, b.from.as_deref(), to_hint.as_deref()).await;
@@ -433,7 +463,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
                    "message": "找不到要派給誰：AGM_RELEASE_BOT、runtime.json 的 release_bot_id 或 responder_bot_id 都沒設（巡檢自己不能收交辦）。到 AGM 設定裡指定協調者，或等排程處理。"}),
         ));
     };
-    let Some(task_md) = task_template(&app, kind) else {
+    let Some(task_md) = task_head(&app, kind) else {
         return Err(LcError::conflict(
             "the release task file is not installed",
             json!({"reason": "no_task_file",
@@ -1018,6 +1048,60 @@ mod tests {
         assert!(parse_kind(None).is_ok_and(|k| k == "claude"), "舊呼叫端不帶 kind＝claude");
         assert!(parse_kind(Some("codex")).is_ok_and(|k| k == "codex"));
         assert!(parse_kind(Some("grok")).is_err(), "grok 沒有 changelog 來源也沒有任務檔");
+    }
+
+    /// herdr：按鈕跟 `herdr-update-kick.sh` 共用 kick 一直在用的 `agm-herdr-update-<版>`（同一版只派一次）。
+    #[test]
+    fn herdr_shares_the_kicks_request_id() {
+        assert_eq!(request_id("herdr", "0.9.3"), "agm-herdr-update-0.9.3");
+        assert_eq!(ui_request_id("herdr", "0.9.3"), request_id("herdr", "0.9.3"));
+        assert!(parse_kind(Some("herdr")).is_ok_and(|k| k == "herdr"));
+    }
+
+    /// kick 先派了 herdr 0.9.3：按鈕回那一筆（duplicate），不多派。反過來按鈕先派、kick 晚到（正文不同）
+    /// 撞同一個 id 是 409——kick 把它當成已經派過（`herdr-update-kick.sh`）。
+    #[tokio::test]
+    async fn herdr_is_dispatched_once_whether_the_kick_or_the_button_goes_first() {
+        let herdr_md = "# Changelog\n\n## [0.9.3] - 2026-09-29\n\n- codex idle\n\n## [0.9.2] - 2026-09-24\n\n- events_lost\n";
+        let body = |from: &str| ReviewIn { kind: Some("herdr".into()), host: None, from: Some(from.into()), to: Some("0.9.3".into()) };
+
+        // 1. kick 先派。
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        app.changelog.seed("herdr", herdr_md).await;
+        crate::supervisor::assign(
+            &app, "resp1", "排程交辦的正文", &request_id("herdr", "0.9.3"), None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap();
+        let before = counts(&app).await;
+        let Json(v) = post_review(State(app.clone()), Json(body("0.9.1"))).await.unwrap();
+        assert_eq!(v["duplicate"], json!(true), "{v}");
+        assert_eq!(v["review"]["state"], "pending", "{v}");
+        assert_eq!(counts(&app).await, before, "kick 派過就不再派");
+
+        // 2. 按鈕先派：正文是 AGM_ASK＋版差，用 kick 的 id。
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        review_fixture(&app, &e.project_id).await;
+        app.changelog.seed("herdr", herdr_md).await;
+        let Json(v) = post_review(State(app.clone()), Json(body("0.9.1"))).await.unwrap();
+        assert_eq!(v["duplicate"], json!(false), "{v}");
+        assert_eq!(v["sections"], 2, "{v}");
+        let a = crate::supervisor::store::assignment_by_crid(&app.db, "agm-herdr-update-0.9.3").await.unwrap().expect("用 kick 的 id 派");
+        assert!(a.text.contains("請判斷並回報") && a.text.contains("本次：舊版 0.9.1 → 新版 0.9.3") && a.text.contains("events_lost"), "{}", a.text);
+        let again = post_review(State(app.clone()), Json(body("0.9.1"))).await.unwrap();
+        assert_eq!(again.0["duplicate"], json!(true), "重按回同一筆");
+        let kick = crate::supervisor::assign(
+            &app, "resp1", "排程交辦的正文", &request_id("herdr", "0.9.3"), None, &[], None, true, None, None, None,
+            crate::supervisor::bot_requests::ReplyMark::default(),
+        )
+        .await
+        .unwrap_err();
+        let LcError::Conflict(detail) = kick else { panic!("kick 晚到要 409：{kick:?}") };
+        assert_eq!(detail["assignment_id"].as_str(), Some(a.id.as_str()), "kick 靠 409 的 assignment_id 認出已經派過：{detail}");
     }
 
     /// codex 沒有 claude 那種版本目錄：不寫 OLD／NEW（寫了就是指到不存在的路徑），其餘照舊。

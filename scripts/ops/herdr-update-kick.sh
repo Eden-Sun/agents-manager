@@ -202,11 +202,28 @@ BODY=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-update.XXXXXX"); TMPS+=("$BODY")
 
 # 旗標是 `--request-id`（不是 --client-request-id）：拼錯 argparse 直接 exit 2
 # （2026-09-16 claude-release-kick 出過這個事故，這裡照抄教訓）。
+# 同一個 id 也是更新框「請 AGM 解析」（kind=herdr，`daemon/src/claude_review.rs`）用的：使用者先按了，
+# 這裡再送就是同 id、不同正文的 409（帶 assignment_id／inbox_event_id）——那一版已經派過，不是失敗。
+ASSIGN_ERR=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-assign.XXXXXX"); TMPS+=("$ASSIGN_ERR")
 if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
-     --request-id "agm-herdr-update-$LATEST_VERSION" >> "$LOG" 2>&1; then
+     --request-id "agm-herdr-update-$LATEST_VERSION" >> "$LOG" 2>"$ASSIGN_ERR"; then
+  cat "$ASSIGN_ERR" >> "$LOG"
   write_state "$LATEST_VERSION" || log "寫不了狀態檔 ${STATE}（已派成功；下一輪同 request-id 由 daemon 去重）"
   ran_ok
   log "herdr ${INSTALLED} → ${LATEST_VERSION}：已派 AGM 解析"
+elif cat "$ASSIGN_ERR" >> "$LOG"; python3 -c '
+import json,sys
+try:
+    e = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+d = e.get("detail") if isinstance(e, dict) else None
+ok = e.get("status") == 409 and isinstance(d, dict) and bool(d.get("assignment_id") or d.get("inbox_event_id"))
+sys.exit(0 if ok else 1)
+' "$ASSIGN_ERR" 2>/dev/null; then
+  write_state "$LATEST_VERSION" || log "寫不了狀態檔 ${STATE}（這一版已派過）"
+  ran_ok
+  log "herdr ${INSTALLED} → ${LATEST_VERSION}：同一個 request id 已經派過（更新框的「請 AGM 解析」），不重派"
 else
   fail_run "派工失敗（${INSTALLED} → ${LATEST_VERSION}），下一輪再試"
 fi

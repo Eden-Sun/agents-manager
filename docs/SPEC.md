@@ -364,6 +364,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   仿 herdr 的 `herdr-update.last`；只在比上次通知的更新時才推）。網頁另記每個瀏覽器看過的版本，開機讀 `GET /api/upstream-updates` 補上錯過的那則。
   抓不到上游不是「沒有新版」：快照帶 `error`，從正常變成抓不到那一輪推 `notify:"error"` 跳錯誤通知。跟 #204 分診（§18.2c）的分工：分診回答
   「新版改了什麼、要不要處理」、這裡只回答「有沒有比磁碟新的版本可裝」；codex 兩邊讀同一份 releases 快取。
+  herdr 也在這份快照裡（2026-10-01，一鍵更新的徽章）：上游是 `herdrdev/herdr` GitHub releases 最大的正式版，磁碟版本讀工具探測快取的
+  `herdr --version`（`herdr_version` 每 60 秒重探），`target_version`＝上游版；同一版一樣只通知一次。
 - **codex 更新通知**（issue #388，2026-09-21 使用者截圖：codex 畫面有 `✨ Update available! 0.154.0 -> 0.155.1` 卻沒有任何徽章）：`update_watch`
   同一支巡邏也巡 running 的 codex run（`daemon/src/codex_update.rs`）。**跟 claude 相反：claude 是新版已經下載好、重啟就換；codex 是新版還沒安裝**，
   要先跑安裝指令再重啟——所以通知文字寫明「需安裝後重啟」，**安裝本身不自動跑**：只在使用者按 header 的 codex chip 並確認時才跑（§6.9「codex 需安裝」，
@@ -3453,6 +3455,9 @@ herdr 有新版時自動發現、整理出「對我們有沒有用、會不會�
    `runtime.json` 的 `herdr_update_bot_id`（專用 child，選用欄位）＞ `release_bot_id`（跟 Claude Code 換版通知同一顆分析型 child 也合理）＞
    `responder_bot_id`（協調者兜底）。**不能派給巡檢自己**（daemon 擋「總管對自己下交辦」）。查不到任何一個就跳過，不亂派給使用者的專案 bot。
 5. **同版不重派**：`herdr-update.last` 記上次真的派過工的版本，`should_notify` 比對這個字串；派工失敗不寫，下一輪重試同一版。
+   更新框的「請 AGM 解析」（`POST /api/claude-update/review` `kind=herdr`，2026-10-01）用**同一個** `agm-herdr-update-<版>`：
+   使用者先按了，kick 再送會收到同 id、不同正文的 409（帶 `assignment_id`／`inbox_event_id`）——kick 把它當成已經派過、寫 state、不算失敗；
+   kick 先派了，按鈕回 `duplicate:true`。兩條路合起來同一版只派一次。
    **鎖**（`herdr-update.lock`，#66 review 留言）：鎖裡寫 pid＋時間（同 `release-triage-kick.sh`）。另一個執行者還活著就安靜跳過（超過一小時才推 `runner_hung`，不搶鎖）；
    執行者不在（SIGKILL／斷電讓 EXIT trap 沒跑、pid 被別的程序重用、舊版純 `mkdir` 鎖）就回收接手並記 log，不再永久跳過——否則一次異常就讓偵測永久停擺，違反「有新版 24 小時內一定交辦」。
    **連續失敗要被 AGM 看見**：「這輪沒能完成檢查」的出口（讀不到本機版本、查不到最新版、抓不到 CHANGELOG、版本比較失敗、比較報告看不懂——不是 JSON 或沒有布林的 `should_notify`，不當成「沒有新版」（#226）、找不到派給誰、派工失敗、binary 不在）在 `herdr-update.fails`

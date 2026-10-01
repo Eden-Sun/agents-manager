@@ -259,6 +259,18 @@ mod tests {
         }
     }
 
+    /// herdr 沒有分診規則（第二階段）：更新框照樣能讀 `?kind=herdr`（200、空的 rows），寫入端點仍是 400。
+    /// herdr 的「請 AGM 解析」走 `claude_review`，跟 `herdr-update-kick.sh` 共用同一個 request id。
+    #[tokio::test]
+    async fn herdr_reads_an_empty_ledger_and_cannot_be_written() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let got = get_ledger(State(app.clone()), Query(LedgerQuery { kind: Some("herdr".into()), version: None })).await.unwrap();
+        assert_eq!(got.0["rows"], json!([]));
+        let d = post_dispatched(State(app.clone()), Json(DispatchedIn { kind: "herdr".into(), versions: vec!["0.9.3".into()] })).await;
+        assert!(matches!(d, Err(LcError::Bad(_))));
+    }
+
     /// 驗證期間狀態被別人改掉（`save_verdicts` 沒更新到任何一列）：一樣是 API.md 的 409 `not_awaiting_verdict`。
     /// 以前 extra 帶 `reason: "狀態在驗證期間變了"`，`LcError::conflict` 合併時蓋掉機器 key（跟 #219 同一類），
     /// `agm release-triage submit` 的呼叫端對不到。
