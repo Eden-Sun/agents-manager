@@ -1040,14 +1040,32 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
     if args.op == "acquire":
         if not args.approval:
             raise AgmError("bad_args", "lease acquire 需要 --approval（核准 id）", 2)
-        body: dict = {"owner": owner, "approval_id": args.approval, "require_idle": not args.allow_busy}
+        # 冪等鍵：`lease_token` 只在這支的回應出現一次，回應丟了（逾時、連線斷）租約就開了、token 卻沒了，
+        # 窗口握到 TTL。沒給 `--request-id` 就自己產一個（高熵祕密、每次不同），逾時時印出來讓呼叫端原樣重送。
+        request_id = args.request_id or uuid.uuid4().hex
+        body: dict = {"owner": owner, "approval_id": args.approval, "require_idle": not args.allow_busy, "request_id": request_id}
         if args.commit:
             body["commit"] = args.commit
         if args.ttl:
             body["ttl_secs"] = args.ttl
         if args.exclude_bot:
             body["exclude_bot_ids"] = list(args.exclude_bot)
-        return client.post(path, body)
+        try:
+            return client.post(path, body)
+        except AgmError as e:
+            if e.kind in ("timeout", "connection_lost"):
+                # 送達未知：租約可能已經開了。**不要**換 request_id 重送——那會被 lease_held 擋住、窗口握到 TTL；
+                # 同一個 request_id 重送，daemon 會把還握著的那一張（同 fence、同 lease_token）原樣回來（`replayed: true`）。
+                raise AgmError(
+                    "delivery_unknown",
+                    f"acquire 逾時或連線中斷，租約可能已經開了、lease_token 卻沒收到。用**同一個** --request-id {request_id} "
+                    "重送一次拿回同一張租約（回應 replayed=true）；不要換新的 id。",
+                    7,
+                    request_id=request_id,
+                    resource=args.resource,
+                    owner=owner,
+                )
+            raise
     if args.fence is None:
         raise AgmError("bad_args", f"lease {args.op} 需要 --fence（acquire 回傳的那個）", 2)
     # renew／release 要出示 acquire 當下發的一次性憑證：owner 與 fence 是公開欄位
@@ -2235,6 +2253,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="renew/release：從檔案讀 lease_token（權限要 600，group／other 讀得到就拒絕）。優先用這個，不要把 token 放進 argv",
     )
     s.add_argument("--force", action="store_true", help="release：強制接管（持有者已經不在了），要附 --reason，會留稽核紀錄")
+    s.add_argument(
+        "--request-id",
+        dest="request_id",
+        metavar="ID",
+        help="acquire：冪等鍵（只有你知道的祕密）。回應逾時、lease_token 沒收到時，帶**同一個**重送就拿回同一張租約；"
+        "不給就自己產一個並在逾時時印出來",
+    )
     s.add_argument("--allow-busy", action="store_true", dest="allow_busy", help="acquire：跳過「沒人在跑」的檢查")
     s.add_argument("--exclude-bot", action="append", dest="exclude_bot", metavar="BOT_ID", help="idle 檢查要忽略的 bot")
     s.add_argument("--reason", help="release --force：為什麼要強制接管")

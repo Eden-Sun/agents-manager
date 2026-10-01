@@ -3858,6 +3858,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   token **只在 acquire 的回應裡出現一次**：`lease status`、`GET /api/supervisor`、WS 事件與 `Lease::to_json()` 都不含它。owner 與 fence 是公開欄位，光憑它們等於誰都能把別人正在換 binary 的窗口收掉——那一刻正好最不能被打斷。
   例外只有兩條，都留稽核：(a) daemon 啟動時釋放上一輪殘留的 `restart` 租約（現行行為不變）；(b) **AGM 角色**（patrol／responder，`X-AM-Bot-Id`＋該 bot 自己的 hook token 驗出來的）的強制釋放 `--force`：`reason` 必填，寫進 `supervisor_notes` 的 `lease_force_release`（含判定到的角色），log warn，且不比對 owner／fence——持有者可能已經不在了。
   **不是 AGM 角色帶 `force` → 403 `lease_force_forbidden`**，租約一個字都不動：force 是授權問題，不只是稽核問題；只留紀錄而沒有界線，等於誰都能接管別人正在換 binary 的窗口。
+  **回應丟了的補救**：acquire 的回應逾時／斷線時租約已經開了、token 卻沒收到（窗口只能握到 TTL）。acquire 多一個選填的 `request_id`（冪等鍵、只有申請端知道的祕密，daemon 只存雜湊在租約的 `detail_json`）：帶同一個重送，租約還握在同一 owner／核准／commit 手上且當初就是這個 `request_id` 開的，就原樣回同一張（同 fence、同 token、不延長、不重驗 idle，多 `replayed:true`）；沒帶、換一個、租約已 release 或過期都走完整 acquire。`agm lease acquire` 自己產 id，逾時回 `delivery_unknown`（exit 7）並印出 id。
   升級過渡：欄位是 additive，升級前建立的租約 `lease_token IS NULL`，這種**不帶 token 也能釋放**（否則升級當下握著的窗口永遠沒人還得了），釋放時留一行 warn。過期自動失效與 fence 只增不減的語意都沒變。
   ops 腳本**不把 token 放進 argv 或 log**（review2 2026-09-16、issue #477）：`daemon-swap.sh` 把它寫進 AGM 目錄裡 `mktemp` 建的 0600 檔，交還窗口用 `--lease-token-file`，離開時不管成敗都刪掉。
 - **持有 `restart` 租約＝daemon 全域的 prompt 入場閘門**（issue #86）。`maintenance::window_held` 是唯一的定義，三個入口都讀它：
