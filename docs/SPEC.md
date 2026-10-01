@@ -305,6 +305,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     斷線指數退避重連，重連後對帳（§6.5）。串流中途的 JSON-RPC error 行（herdr 0.9.2+ 讀太慢會回 `events_lost` 再關連線）視同斷線：
     記一行帶 `code` 的 warn、結束該串流，不跳過繼續讀；全域訂閱重連後照常對帳，Run 的狀態訂閱重連後補讀一次 `pane.get` 當下狀態、照狀態事件處理。
   - 連上先 `ping`；`protocol != 20` 只警告。未知欄位與事件容忍；`docs/herdr-schema.json` 為契約參考。
+    **未知的 `agent_status` 值**（herdr 之後新增）一律當 `unknown`：client 解析（`AgentStatus`）與狀態事件寫 `runs.agent_status` 都是——前者不讓一個奇怪的值拖垮整份 `agent.list`，後者不讓 CHECK 擋掉整句 UPDATE。
+    **`pane.agent_detected` 觸發的對帳**（兩秒後整台主機一輪）略過 daemon 自己開的額度探測 workspace（`probe_ws`：grok／claude 探測開 workspace 時登記、結束後再留 30 秒給 agent 退出的事件）；否則每 30 秒一次的 grok 探測會讓遠端主機每 40 秒被完整對帳一輪。
 - **session 管理**：socket 連不上就 spawn `herdr --session <name> server`（detached），輪詢最多 10 秒。daemon 退出不停 herdr。
 - **per-bot 鎖**：每個 `bot_id` 一把 `tokio::sync::Mutex`；start／stop／prompt／hook 配對／spool 重放／對帳都在鎖內。
 - **hook receiver**：`POST /hook/claude|codex|grok`，驗 per-bot token → **寫進 `hook_events` 並 commit** → 才回 200 →

@@ -304,6 +304,8 @@ struct Probe {
     client: HerdrClient,
     workspace_id: String,
     closed: bool,
+    /// 登記期間 `pane.agent_detected` 不觸發整台主機的對帳（[`crate::probe_ws`]）。
+    _registered: crate::probe_ws::ProbeWorkspace,
 }
 
 impl Probe {
@@ -508,7 +510,12 @@ async fn run_probe_pane(
 ) -> Result<PaneRun> {
     sweep_leftovers(client, label).await;
     let (ws, pane) = client.workspace_create(cwd, label, env_json).await?;
-    let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone(), closed: false };
+    let probe = Probe {
+        client: client.clone(),
+        workspace_id: ws.workspace_id.clone(),
+        closed: false,
+        _registered: crate::probe_ws::ProbeWorkspace::register(client.socket_path(), &ws.workspace_id),
+    };
     let pane_id = pane.pane_id.clone();
 
     // workspace.create can return before the shell takes input; a line typed too early is lost, so retype.

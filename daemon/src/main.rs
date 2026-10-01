@@ -89,6 +89,7 @@ mod preview;
 mod preview_bind;
 mod primary_order;
 mod pane_probe;
+mod probe_ws;
 mod shim_path;
 mod shim_refresh;
 mod panes;
