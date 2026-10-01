@@ -640,6 +640,23 @@ class AssignCommandTest(CliCase):
         posts = [r for r in FakeDaemon.seen if r["path"] == "/api/supervisor/assignments"]
         self.assertEqual(len(posts), 1, "逾時不能自己重送——那會派出第二份同樣的工")
 
+    def test_a_token_fetch_that_times_out_is_not_delivery_unknown(self):
+        """取 token（GET /api/session）逾時時，交辦根本還沒送出：不能報「送達未知」叫人去對帳，
+        也不能讓呼叫端以為同一個 request id 已經可能派出去。"""
+        FakeDaemon.routes["POST /api/supervisor/assignments"] = (200, {"id": "a1"})
+        FakeDaemon.slow = {"/api/session"}
+        code, _out, err = self.run_cli("--timeout", "0.3", "assign", "--bot", "b1", "--text", "x", "--request-id", "req-tok")
+        self.assertNotEqual(code, 0)
+        self.assertNotEqual(json.loads(err)["error"], "delivery_unknown")
+        self.assertNotEqual(code, 7)
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [], "token 都沒拿到，不會有任何 POST")
+
+    def test_a_review_whose_token_fetch_times_out_is_not_delivery_unknown(self):
+        FakeDaemon.slow = {"/api/session"}
+        code, _out, err = self.run_cli("--timeout", "0.3", "review", "a1", "--decision", "accept", "--actor", "AGM", "--source", "test")
+        self.assertNotEqual(json.loads(err)["error"], "delivery_unknown")
+        self.assertNotEqual(code, 7)
+
     def test_a_non_utf8_text_file_is_a_bad_arg_not_a_traceback(self):
         f = Path(self.dir.name) / "bin.txt"
         f.write_bytes(b"\xff\xfe not utf8 \x80")
