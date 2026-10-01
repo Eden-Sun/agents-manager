@@ -257,14 +257,19 @@ pub fn is_tool_progress(reply: &str) -> bool {
 }
 
 fn after_last_prompt_echo(lines: &[&str]) -> usize {
-    lines
-        .iter()
-        .rposition(|l| {
-            let t = l.trim_start();
-            t.starts_with("❯ ") && t.len() > 3
-        })
-        .map(|i| i + 1)
-        .unwrap_or(0)
+    prompt_echo_row(lines).map(|i| i + 1).unwrap_or(0)
+}
+
+/// 使用者這回合的回音行（`❯ <內容>`）在 `lines` 裡的位置（issue #762）。
+///
+/// claude 把使用者訊息的 `❯ ` 印在**第 0 欄**（真畫面 `claude-2.1.281-dangerous-rm.txt`、`claude-2.1.286-*` 的回音都是頂格、
+/// ASCII 空白），續行才縮排兩格；助手回覆（`⏺` 之下）、使用者貼上的內文、工具輸出、排隊中的訊息一律縮排，
+/// 所以其中引用的 `  ❯ npm test`、`  ❯ Switch to O…` 不是回音（`claude_live.rs` 認 `/model` 指令行也是同一條）。
+/// 取**最後一個第 0 欄**的，縮排的一律不算：畫面上沒有第 0 欄回音（捲出去、輸入框裡的草稿用的是 `❯`＋U+00A0）就是「沒有回音」，
+/// 呼叫端從頭看，不會把引用行當起點。內容要有字：`❯ ` 後面空的是輸入框，不是回音。
+/// `lifecycle/screen.rs` 的 claude 分支共用這一支，不各寫一份。
+pub(crate) fn prompt_echo_row(lines: &[&str]) -> Option<usize> {
+    lines.iter().rposition(|l| l.starts_with("❯ ") && l.len() > "❯ ".len())
 }
 
 fn is_codex_idle_prompt(s: &str) -> bool {
@@ -506,6 +511,27 @@ mod reply_boundary_tests {
         assert!(reply.contains("│ 判斷流程 │"), "圖被第一個 ╭ 截掉：{reply}");
         assert!(reply.contains("圖後文字仍屬於回覆。"), "圖後面的文字被截掉：{reply}");
         assert!(!reply.contains("bypass permissions"), "輸入框以下的 chrome 不能進回覆：{reply}");
+    }
+
+    /// #762：回覆裡引了 shell 提示符行（`  ❯ npm test`，縮排在 `⏺` 區塊裡）不是使用者回音。真回音是第 0 欄的 `❯ `：
+    /// 以前取「最後一個 `❯ ` 開頭的行」，起點落在引用行之後，回覆整段 `None`（備援存不到回覆）。
+    #[test]
+    fn a_prompt_line_quoted_inside_the_reply_is_not_the_echo() {
+        let screen = format!("❯ 怎麼跑測試\n⏺ 執行：\n  ❯ npm test\n  PASS\n結論：全綠。\n{COMPOSER}");
+        assert_eq!(
+            ClaudeCapture.extract_reply(&screen).as_deref(),
+            Some("執行：\n  ❯ npm test\n  PASS\n結論：全綠。"),
+        );
+        // activity 也從真回音起算：引用行之後才有的字不能讓前面的活動列消失。
+        let busy = "❯ 跑\n✻ Cooking… (3s · ↓ 1 tokens)\n⏺ 結果：\n  ❯ ls\n";
+        assert_eq!(ClaudeCapture.activity(busy).as_deref(), Some("Cooking… (3s · ↓ 1 tokens)"));
+    }
+
+    /// 縮排的 `❯ ` 一律不是回音（排隊中的訊息、引用）：沒有第 0 欄回音時從頭看，最後一個 `⏺` 照舊是回覆。
+    #[test]
+    fn an_indented_prompt_row_never_counts_as_the_echo() {
+        let screen = format!("⏺ 舊回覆\n  ❯ 排隊的新問題\n⏺ 新回覆\n{COMPOSER}");
+        assert_eq!(ClaudeCapture.extract_reply(&screen).as_deref(), Some("新回覆"));
     }
 
     /// 回覆文字自己長得像函式呼叫（沒有 `⎿` 輸出跟在後面）不是工具呼叫。

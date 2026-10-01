@@ -200,6 +200,10 @@ pub(crate) fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
 /// Index after the last prompt echo (`❯ …` / `› …`), or 0 when not on screen.
 pub(crate) fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
     let Some(echo) = prompt_echo_prefix(kind) else { return 0 };
+    // claude 的回音是第 0 欄的 `❯ `；回覆與貼上內文裡縮排引用的不算（issue #762，認法在 `capture::claude`）。
+    if kind == "claude" {
+        return crate::capture::claude::prompt_echo_row(lines).map(|i| i + 1).unwrap_or(0);
+    }
     lines
         .iter()
         .rposition(|l| {
@@ -914,7 +918,13 @@ pub(crate) fn clean_screen(kind: &str, text: &str) -> Option<String> {
             break;
         }
         // Prompt box means the transcript ended. Codex's composer is unboxed `› …`（佔位字不是空的 `›`）。
-        if s == "❯" || s == "›" || s.starts_with("❯ ") || s.starts_with("› ") {
+        // claude 的輸入框／回音都是第 0 欄的 `❯`；縮排的 `  ❯ cmd` 是回覆或貼上內文裡引的，不是輸入框，不能在這裡收尾（issue #762）。
+        let at_prompt = if kind == "claude" {
+            line.starts_with('❯')
+        } else {
+            s == "❯" || s == "›" || s.starts_with("❯ ") || s.starts_with("› ")
+        };
+        if at_prompt || (kind == "claude" && (s == "›" || s.starts_with("› "))) {
             break;
         }
         let s = s.strip_prefix("⎿ ").or_else(|| s.strip_prefix("⎿")).unwrap_or(s).trim();
@@ -1215,6 +1225,34 @@ gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used 
         assert_eq!(extract_reply("codex", CODEX_IDLE_SPLASH), None);
         assert_eq!(last_prompt_echo_text("codex", CODEX_IDLE_SPLASH), None);
         assert!(codex_usage_notice_lines(CODEX_IDLE_SPLASH).iter().any(|n| n.contains("usage limit reset")));
+    }
+
+    /// #762 真畫面 `claude-2.1.281-paste-child-blocked-notice.ansi`：輸入框裡貼了一段 daemon 通知（草稿的 `❯` 後面是 U+00A0），
+    /// 通知內文引了另一顆 claude 的畫面，裡面有縮排的 `  ❯ 請讀…`、`  ❯ Switch to O…`。這張畫面上**沒有**使用者回音；
+    /// 以前取「最後一個 `❯ ` 開頭的行」，把引用的 `Switch to O…` 當成使用者 prompt、起點落在貼上內文中間。
+    #[test]
+    fn a_pasted_screen_quoted_in_the_composer_draft_does_not_become_the_echo() {
+        const ANSI: &str = include_str!("fixtures/claude-2.1.281-paste-child-blocked-notice.ansi");
+        let plain: String = ANSI.lines().map(crate::lifecycle::delivery::strip_ansi).collect::<Vec<_>>().join("\n");
+        assert_eq!(last_prompt_echo_text("claude", &plain), None, "引用行被當成使用者回音");
+        let lines: Vec<&str> = plain.lines().collect();
+        assert_eq!(after_last_prompt_echo("claude", &lines), 0);
+    }
+
+    /// 同一段內容（通知＋引用的畫面）送出之後，真回音是第 0 欄的 `❯ ` 加第一行；引用的縮排行不能搶走它。
+    #[test]
+    fn the_submitted_notice_with_a_quoted_screen_is_echoed_by_its_first_line() {
+        let screen = "❯ [daemon 自動通知] 子 agent fable 停在 blocked\n\n  以下是原文：\n  ```text\n  ❯ 請讀 /tmp/x.md\n  ❯ Switch to O…\n  ```\n\n⏺ 收到，我去看。\n";
+        let echo = last_prompt_echo_text("claude", screen).expect("第 0 欄的回音");
+        assert!(echo.starts_with("[daemon 自動通知] 子 agent fable 停在 blocked"), "{echo}");
+        assert!(!echo.contains("Switch to O"), "{echo}");
+    }
+
+    #[test]
+    fn a_quoted_prompt_row_in_a_claude_reply_keeps_the_whole_reply_in_clean_screen() {
+        let screen = "❯ 怎麼跑測試\n⏺ 執行：\n  ❯ npm test\n  PASS\n結論：全綠。\n";
+        let cleaned = clean_screen("claude", screen).unwrap();
+        assert!(cleaned.contains("執行：") && cleaned.contains("結論：全綠。"), "{cleaned}");
     }
 
     #[test]
