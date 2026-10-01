@@ -1459,3 +1459,12 @@ test('#624：群組較早頁晚於整頁重抓回來時丟棄舊邊界，下一�
     capMsg(101).id,
   )
 })
+
+test('supervisor_changed：supervisorRev 加一，AGM 面板開著時據此重讀（面板自己沒有任何輪詢）', async () => {
+  seed()
+  const { handleFrame } = await import('./store.ts')
+  const before = useStore.getState().supervisorRev
+  handleFrame(useStore.setState, useStore.getState, { seq: 7001, type: 'supervisor_changed', data: { acked: 'e1' } })
+  handleFrame(useStore.setState, useStore.getState, { seq: 7002, type: 'supervisor_changed', data: { status: 'waiting_quota' } })
+  assert.equal(useStore.getState().supervisorRev, before + 2)
+})
