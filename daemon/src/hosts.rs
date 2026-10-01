@@ -267,24 +267,7 @@ impl HostConn {
         let Some(cfg) = &self.cfg else { bail!("ssh_exec called on the local host") };
         let mut cmd = tokio::process::Command::new("ssh");
         cmd.args(self.ssh_args()).arg(&cfg.ssh).arg("/bin/sh").arg("-s");
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.kill_on_drop(true);
-        let mut child = cmd.spawn().with_context(|| format!("spawn ssh {}", cfg.ssh))?;
-        if let Some(mut sin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let script = script.to_string();
-            sin.write_all(script.as_bytes()).await.ok();
-            sin.shutdown().await.ok();
-        }
-        let out = tokio::time::timeout(timeout, child.wait_with_output())
-            .await
-            .map_err(|_| anyhow::anyhow!("ssh to {} timed out after {}s", cfg.ssh, timeout.as_secs()))?
-            .with_context(|| format!("run ssh {}", cfg.ssh))?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            bail!("ssh {} failed ({}): {}", cfg.ssh, out.status, if err.is_empty() { "no stderr".into() } else { err });
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        run_script_over_stdin(cmd, script, timeout, &cfg.ssh).await
     }
 
     /// Script in argv, stdin carries the file (`ssh_exec` already uses stdin for the script).
@@ -574,6 +557,21 @@ herdr session list 2>&1 | sed 's/^/AM_LIST /'
         let _ = std::fs::remove_file(&ctl);
         let _ = std::fs::remove_file(short_dir(self.instance.as_deref()).join(format!("{}.sock", self.name)));
     }
+}
+
+/// `ssh … /bin/sh -s` 的執行：script 走 stdin，**寫入與等待共用同一個 timeout**（#282 的同一個洞，見 [`run_with_stdin`]）。
+/// 以前 `write_all` 在 timeout 外面：script 大於 pipe buffer、遠端不讀（TCP 收下但不回話）時寫入永遠 pending，逾時根本不啟動。
+/// 寫入失敗（`sh -s` 先結束）不算錯，看 exit status／stderr 才是原因。
+async fn run_script_over_stdin(cmd: tokio::process::Command, script: &str, timeout: Duration, target: &str) -> Result<String> {
+    let (out, _wrote) = run_with_stdin(cmd, script.as_bytes(), timeout)
+        .await
+        .with_context(|| format!("run ssh {target}"))?
+        .ok_or_else(|| anyhow::anyhow!("ssh to {} timed out after {}s", target, timeout.as_secs()))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        bail!("ssh {} failed ({}): {}", target, out.status, if err.is_empty() { "no stderr".into() } else { err });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 /// 把 `data` 餵進子行程的 stdin 並等它結束，**寫入與等待共用同一個 `timeout`**（#282）。
@@ -1367,6 +1365,33 @@ mod tests {
         assert!(matches!(r, Ok(None)), "要回逾時：{r:?}");
         // 對端 `sleep 30`：真的卡住會等滿 30 秒；上限只要低於它就分得出來，不必貼著名義時間（慢 runner 才不會翻紅）。
         assert!(started.elapsed() < Duration::from_secs(25));
+    }
+
+    /// ssh_exec 的 script 走 stdin：遠端不讀、script 又大於 pipe buffer 時，寫入卡住也要在 timeout 內回「逾時」（同 #282）。
+    #[tokio::test]
+    async fn a_stalled_script_write_is_bounded_by_the_exec_timeout() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("sleep 30");
+        let script = format!("# {}\n", "x".repeat(8 * 1024 * 1024));
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(Duration::from_secs(10), run_script_over_stdin(cmd, &script, Duration::from_millis(500), "h"))
+            .await
+            .expect("寫入卡住時 timeout 必須生效，不能整個呼叫掛住");
+        let e = r.expect_err("要回逾時");
+        assert!(e.to_string().contains("timed out"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(25));
+    }
+
+    /// 正常路徑：script 完整送到、stdout 照拿；非 0 退出帶 stderr。
+    #[tokio::test]
+    async fn the_script_reaches_sh_and_failures_carry_stderr() {
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-s");
+        assert_eq!(run_script_over_stdin(cmd, "printf hi", Duration::from_secs(10), "h").await.unwrap(), "hi");
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-s");
+        let e = run_script_over_stdin(cmd, "echo boom >&2; exit 3", Duration::from_secs(10), "h").await.unwrap_err();
+        assert!(e.to_string().contains("boom"), "{e}");
     }
 
     /// 正常路徑：資料完整送到、輸出照拿。
