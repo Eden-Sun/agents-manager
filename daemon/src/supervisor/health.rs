@@ -312,8 +312,24 @@ pub fn spawn(app: Arc<App>) {
         let mut previous = String::new();
         let mut debounce = Debounce::default();
         let mut detector = crate::supervisor::incidents::Detector::default();
+        // 處理完的 inbox 列的大 payload 每小時收一次（第一次在開機後的第一拍）：見 `store::compact_handled_payloads`。
+        let mut last_compact: Option<std::time::Instant> = None;
         loop {
             tick.tick().await;
+            if last_compact.is_none_or(|t| t.elapsed() >= Duration::from_secs(3600)) {
+                last_compact = Some(std::time::Instant::now());
+                match crate::supervisor::store::compact_handled_payloads(
+                    &app.db,
+                    crate::supervisor::store::COMPACT_HANDLED_AFTER_SECS,
+                    crate::supervisor::store::COMPACT_HANDLED_MIN_BYTES,
+                )
+                .await
+                {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(compacted = n, "compacted old handled inbox payloads"),
+                    Err(e) => tracing::warn!(error = ?e, "could not compact old handled inbox payloads"),
+                }
+            }
             // #427 第 2 項：先看兩顆角色 bot 的畫面（巡檢也看），結論放記憶體。
             // 要排在 `sweep` **之前**——incident 與同一拍的 health 讀數要講同一件事，理由同下一行。
             crate::supervisor::role_faults::refresh(&app).await;

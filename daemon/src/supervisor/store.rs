@@ -2195,6 +2195,32 @@ pub async fn push_inbox(
     Ok((res.rows_affected() > 0).then_some(id))
 }
 
+/// 處理完（`handled`）多久之後，過大的 payload 才被換成標記。
+pub const COMPACT_HANDLED_AFTER_SECS: i64 = 24 * 3600;
+/// 多大才算過大。一般事件的 payload 不到 2 KB；`health_changed` 把整份 `supervisor.assignments` 塞進去，約 280 KB。
+pub const COMPACT_HANDLED_MIN_BYTES: i64 = 16 * 1024;
+
+/// 把「處理完、放超過 `older_than_secs`、payload 超過 `min_bytes`」的 inbox 列的 payload 換成
+/// `{"compacted":true,"original_bytes":N}`，回改了幾列。
+///
+/// 處理完的列沒有任何清理：正式庫 10 天 166 筆 `health_changed`、43 MB，是整顆 DB 最大的一塊。**不刪列**——
+/// `event_key` 是去重鍵，`controller::sweep_missing_events` 看到「已結算卻沒有事件」的交辦會再補一筆，刪了會被重新生出來。
+/// 只動 payload：列、鍵、狀態、時間都留著；沒處理完的（pending／delivered）不碰（還有人要讀）。冪等：壓過的已經很小。
+pub async fn compact_handled_payloads(pool: &SqlitePool, older_than_secs: i64, min_bytes: i64) -> Result<u64> {
+    let cutoff = crate::db::iso_in(-older_than_secs);
+    let ts = crate::db::ts_sql("updated_at");
+    let res = sqlx::query(&format!(
+        "UPDATE supervisor_inbox
+            SET payload_json = json_object('compacted', json('true'), 'original_bytes', length(payload_json))
+          WHERE state = 'handled' AND length(payload_json) > ? AND {ts} <= ?"
+    ))
+    .bind(min_bytes)
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 pub async fn inbox(pool: &SqlitePool, limit: i64) -> Result<Vec<InboxEvent>> {
     Ok(sqlx::query_as::<_, InboxEvent>(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? ORDER BY created_at DESC LIMIT ?",
@@ -4988,6 +5014,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(notes, 2, "the earlier summary is still recoverable");
+    }
+
+    /// 處理完的 inbox 列永遠不清，而 `health_changed` 的 payload 把整份 `supervisor.assignments` 塞進去（約 280 KB 一筆）：
+    /// 正式庫 10 天 166 筆、43 MB，是整顆 DB 最大的一塊。**不能刪列**：`event_key` 是去重鍵，`sweep_missing_events`
+    /// 看到「已結算卻沒有事件」的交辦會再補一筆——刪了就會被重新生出來。所以只把「處理完、放了一天、又很大」的
+    /// payload 換成一個小的標記，列、鍵、狀態、時間都留著；還沒處理完的（pending／delivered）一個字都不動。
+    #[tokio::test]
+    async fn old_large_handled_inbox_payloads_are_compacted_but_nothing_else_is_touched() {
+        let p = pool().await;
+        let big = serde_json::json!({"supervisor": {"assignments": vec!["x".repeat(100); 400]}});
+        let small = serde_json::json!({"note": "small"});
+        let day_ago = crate::db::iso_in(-26 * 3600);
+        let mut ids = std::collections::HashMap::new();
+        for (name, payload, state, updated) in [
+            ("old_big_handled", &big, "handled", day_ago.clone()),
+            ("new_big_handled", &big, "handled", crate::db::now()),
+            ("old_small_handled", &small, "handled", day_ago.clone()),
+            ("old_big_pending", &big, "pending", day_ago.clone()),
+            ("old_big_delivered", &big, "delivered", day_ago.clone()),
+        ] {
+            let id = push_inbox(&p, &format!("k:{name}"), "health_changed", None, None, None, payload).await.unwrap().unwrap();
+            sqlx::query("UPDATE supervisor_inbox SET state=?, updated_at=? WHERE id=?").bind(state).bind(&updated).bind(&id).execute(&p).await.unwrap();
+            ids.insert(name, id);
+        }
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox").fetch_one(&p).await.unwrap();
+
+        let n = compact_handled_payloads(&p, 24 * 3600, 16 * 1024).await.unwrap();
+        assert_eq!(n, 1, "只有「處理完、放超過一天、payload 很大」的那一筆");
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox").fetch_one(&p).await.unwrap();
+        assert_eq!(after, before, "不刪列：event_key 是去重鍵");
+
+        let payload = |name: &str| {
+            let id = ids[name].clone();
+            let p = p.clone();
+            async move { sqlx::query_scalar::<_, String>("SELECT payload_json FROM supervisor_inbox WHERE id=?").bind(id).fetch_one(&p).await.unwrap() }
+        };
+        let compacted: serde_json::Value = serde_json::from_str(&payload("old_big_handled").await).unwrap();
+        assert_eq!(compacted["compacted"], true);
+        assert!(compacted["original_bytes"].as_i64().unwrap() > 16 * 1024);
+        let key: String = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE id=?").bind(&ids["old_big_handled"]).fetch_one(&p).await.unwrap();
+        assert_eq!(key, "k:old_big_handled", "去重鍵還在");
+        for untouched in ["new_big_handled", "old_big_pending", "old_big_delivered"] {
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&payload(untouched).await).unwrap(), big, "{untouched} 不動");
+        }
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&payload("old_small_handled").await).unwrap(), small, "小的不動");
+        // 冪等：再跑一次什麼都不會再動（壓過的已經很小）。
+        assert_eq!(compact_handled_payloads(&p, 24 * 3600, 16 * 1024).await.unwrap(), 0);
     }
 }
 
