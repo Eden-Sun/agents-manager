@@ -1,7 +1,7 @@
 //! herdr Unix socket client.
 //!
 //! Wire contract (verified against herdr 0.8.2 / protocol 20 and 0.9.1 / protocol 22 — 同一組 RPC 的請求與回應形狀逐項比對過，#242):
-//!   0.9.3（同為 protocol 22）對同一組 RPC 只多了欄位（`AgentInfo.completion_seq`、`PaneInfo.restore_error`）；語意上的差別見 [`fold_codex_unknown`]（#732）。
+//!   0.9.3（同為 protocol 22）對同一組 RPC 只多了欄位（`AgentInfo.completion_seq`、`PaneInfo.restore_error`）；codex unknown 的折疊依來源提供的啟動證據處理（#732、#745）。
 //! - one connection per RPC: send `{"id":"<string>","method","params"}\n`, read one line, server closes.
 //! - `events.subscribe` keeps the connection open and streams `{"event":"<name>","data":{...}}\n`.
 //! - request `id` must be a string.
@@ -131,23 +131,6 @@ impl AgentInfo {
     fn folded(mut self) -> Self {
         self.agent_status = fold_codex_unknown(self.agent.as_deref(), self.agent_status, self.launch_pending);
         self
-    }
-}
-
-impl PaneInfo {
-    fn folded(mut self) -> Self {
-        self.agent_status = self.agent_status.map(|s| fold_codex_unknown(self.agent.as_deref(), s, false));
-        self
-    }
-}
-
-/// 同 [`fold_codex_unknown`]，套在 `pane.agent_status_changed` 事件上（事件的 data 帶 `agent`）。
-fn fold_event(ev: &mut Event) {
-    if ev.event.replace('.', "_") != "pane_agent_status_changed" || ev.data.get("agent").and_then(Value::as_str) != Some("codex") {
-        return;
-    }
-    if ev.data.get("agent_status").and_then(Value::as_str) == Some("unknown") {
-        ev.data["agent_status"] = json!("idle");
     }
 }
 
@@ -447,13 +430,12 @@ impl HerdrClient {
             Some(w) => json!({"workspace_id": w}),
             None => json!({}),
         };
-        let panes: Vec<PaneInfo> = self.call_as("pane.list", params, "panes").await?;
-        Ok(panes.into_iter().map(PaneInfo::folded).collect())
+        self.call_as("pane.list", params, "panes").await
     }
 
     pub async fn pane_get(&self, pane_id: &str) -> Result<Option<PaneInfo>> {
         match self.call("pane.get", json!({"pane_id": pane_id})).await {
-            Ok(v) => Ok(Some(serde_json::from_value::<PaneInfo>(v.get("pane").cloned().unwrap_or(v))?.folded())),
+            Ok(v) => Ok(Some(serde_json::from_value::<PaneInfo>(v.get("pane").cloned().unwrap_or(v))?)),
             Err(e) if is_not_found(&e) => Ok(None),
             Err(e) => Err(e),
         }
@@ -724,8 +706,7 @@ impl HerdrClient {
                             continue;
                         }
                         match serde_json::from_str::<Event>(t) {
-                            Ok(mut ev) => {
-                                fold_event(&mut ev);
+                            Ok(ev) => {
                                 if tx.send(ev).await.is_err() {
                                     break;
                                 }
@@ -904,9 +885,9 @@ mod rpc_tests {
         }
     }
 
-    /// 事件、`agent.list`、`agent.get`、`pane.list` 都經過同一個折法：下游（flush、備援、idle_sleep、對帳）看到的是 0.9.1 的語意。
+    /// `AgentInfo` has `launch_pending`; panes and events do not, so their `unknown` must stay unknown here.
     #[tokio::test]
-    async fn codex_unknown_reaches_the_daemon_as_idle_on_every_read_path() {
+    async fn codex_unknown_is_folded_only_when_the_source_has_launch_pending_evidence() {
         let events = vec![
             json!({"event": "pane.agent_status_changed", "data": {"agent": "codex", "agent_status": "unknown", "pane_id": "w1:p2"}}),
             json!({"event": "pane.agent_status_changed", "data": {"agent": "claude", "agent_status": "unknown", "pane_id": "w1:p1"}}),
@@ -919,6 +900,7 @@ mod rpc_tests {
                 "agent.list" => json!({"agents": [agent("cx", "codex", "unknown", false), agent("cc", "claude", "unknown", false), agent("new", "codex", "unknown", true)]}),
                 "agent.get" => json!({"agent": agent("cx", "codex", "unknown", false)}),
                 "pane.list" => json!({"panes": [{"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1", "cwd": "/tmp", "agent": "codex", "agent_status": "unknown"}]}),
+                "pane.get" => json!({"pane": {"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1", "cwd": "/tmp", "agent": "codex", "agent_status": "unknown"}}),
                 _ => json!({"type": "subscription_started"}),
             },
             events,
@@ -927,7 +909,8 @@ mod rpc_tests {
         let got: Vec<_> = c.agent_list().await.unwrap().into_iter().map(|a| (a.name.unwrap(), a.agent_status)).collect();
         assert_eq!(got, [("cx".into(), AgentStatus::Idle), ("cc".into(), AgentStatus::Unknown), ("new".into(), AgentStatus::Unknown)]);
         assert_eq!(c.agent_get("cx").await.unwrap().unwrap().agent_status, AgentStatus::Idle);
-        assert_eq!(c.pane_list(None).await.unwrap()[0].agent_status, Some(AgentStatus::Idle));
+        assert_eq!(c.pane_list(None).await.unwrap()[0].agent_status, Some(AgentStatus::Unknown));
+        assert_eq!(c.pane_get("w1:p2").await.unwrap().unwrap().agent_status, Some(AgentStatus::Unknown));
 
         let mut rx = c.subscribe(vec![json!({"type": "pane.agent_status_changed"})]).await.unwrap();
         let mut seen = Vec::new();
@@ -936,7 +919,7 @@ mod rpc_tests {
             seen.push((ev.event, ev.data["agent"].as_str().unwrap().to_string(), ev.data["agent_status"].as_str().unwrap().to_string()));
         }
         let want = [
-            ("pane.agent_status_changed", "codex", "idle"),
+            ("pane.agent_status_changed", "codex", "unknown"),
             ("pane.agent_status_changed", "claude", "unknown"),
             ("pane.agent_status_changed", "codex", "working"),
             ("pane_exited", "codex", "unknown"),
@@ -1141,4 +1124,3 @@ mod nbsp_tests {
         assert_eq!(crate::lifecycle::echo_row_hits("claude", &r.text, "ui 審查你自己做"), 1, "回音列認得出來");
     }
 }
-

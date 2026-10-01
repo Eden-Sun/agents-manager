@@ -52,8 +52,9 @@ origin:   web | external                     （external = 非本系統送出、
 
 herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上時回 `unknown`（`agent explain`：`codex_state_ambiguous`）；0.9.1 同一個畫面回
 `idle`（`default_known_agent_idle_fallback`）。codex 的 manifest 沒有 idle 規則，閒著的 codex 在 0.9.2+ 因此永遠是 `unknown`。herdr client
-（`herdr::fold_codex_unknown`）把「codex、已不在 `launch_pending`、`unknown`」折回 `idle`——`AgentInfo`／`PaneInfo` 的結果與
-`pane.agent_status_changed` 事件都一樣——下游看到的是 0.9.1 的語意；`working`／`blocked` 仍由規則判定，其他 kind 的 `unknown` 不動（issue #732）。
+只在帶有 `launch_pending` 的 `AgentInfo` 上，將「codex、`launch_pending=false`、`unknown`」折回 `idle`。`PaneInfo` 和
+`pane.agent_status_changed` 事件沒有啟動中證據，因此保留 `unknown`；daemon 處理狀態事件時以 run state 判斷，`starting` 保留 `unknown`，
+其餘狀態的 Codex `unknown` 折回 `idle`。`working`／`blocked` 仍由規則判定，其他 kind 的 `unknown` 不動（issues #732、#745）。
 
 側欄 bot 列可由列本身取得焦點後按 Enter／Space 選取；列內選單與按鈕保留各自的鍵盤操作。確認框由 portal 顯示時，其點擊不切換目前 bot；點列內一般內容仍可選取 bot。
 
