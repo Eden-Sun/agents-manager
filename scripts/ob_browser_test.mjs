@@ -196,3 +196,18 @@ test('沒有舊分頁可重用時才開新分頁', () => {
   assert.equal(r.code, 0, r.error);
   assert.ok(r.actions.some(a => a[0] === 'new'), JSON.stringify(r.actions));
 });
+
+test('retrying a first question that failed before sending reuses the tab that attempt opened, not a new tab per retry', () => {
+  // 第一次：沒登入、等 #prompt-textarea 逾時。journal 停在 opened，記著開的那個分頁（p3，停在 chatgpt.com 首頁）。
+  const r = run({newProject: true, progress: {phase: 'opened', page: 'p3', url: null, project_id: pid}});
+  assert.equal(r.code, 0, r.error);
+  assert.deepEqual(r.actions[0], ['reuse', 'p3']);
+  assert.equal(r.actions.filter(a => a[0] === 'new').length, 0, '每次重試都開新分頁會一路累積：一個 bot／一件事最多一個分頁');
+  assert.ok(r.actions.some(a => a[0] === 'goto' && a[1] === 'https://chatgpt.com/'), '重用的分頁要導回首頁開新對話');
+});
+test('a journal naming a tab that no longer exists, or someone else\'s tab, still gets a fresh page and never adopts a stranger', () => {
+  const gone = run({newProject: true, progress: {phase: 'opened', page: 'p9', url: null, project_id: pid}});
+  assert.equal(gone.code, 0, gone.error);
+  assert.deepEqual(gone.actions[0], ['new']);
+  assert.equal(gone.actions.filter(a => a[0] === 'reuse').length, 0);
+});

@@ -31,7 +31,10 @@ if (progress?.phase === "done") {
   // 換一串（url 空、previous 有值）時**重用這個 project 自己的分頁**，只是把它導到新對話：
   // 每換一串就開一個新分頁的話，一個 project 會累積一堆分頁，RAM 也是這樣吃光的。
   const findTab = (u) => (u ? tabs.find(t => t.url.split("?")[0] === u) : null);
-  const mine = findTab(url) || (url ? null : findTab(previous));
+  // 同一單送出前就失敗（沒登入、等輸入框逾時…）後重試：journal 記著上一次開的那個分頁（停在首頁，網址對不上任何對話），
+  // 要重用它，不然每重試一次就多開一個分頁。只認**這一單 journal 自己記的 label**，不收編別人的首頁分頁。
+  const own = progress?.page ? tabs.find(t => t.label === progress.page) : null;
+  const mine = findTab(url) || (url ? null : own || findTab(previous));
   let page;
   if (mine) {
     page = mine.label ? task.page(mine.label) : await task.adopt(mine.page);
