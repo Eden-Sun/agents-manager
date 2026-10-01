@@ -147,5 +147,24 @@ setup
 equals "沒帶 --dir exit 2" "$(bash "$SCRIPT" --repo "$REPO" >"$OUT" 2>&1; echo $?)" "2"
 teardown
 
+# 8. drift：安裝端的檔不是 repo 任何一版（有人手改過）＝不覆蓋，報 drifted，其他支照裝；--force 才換（照樣先備份）。
+#    判斷跟 `agm ops-sync --check` 的 drift 同一條（安裝檔的 blob 不在 `git log <ref> -- <來源>` 的任何一版裡）。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+bump c-task.md $'task v2\n'
+printf '#!/bin/bash\necho a-hand-edited\n' > "$DIR/bin/a-kick.sh"
+equals "有手改的檔：不算失敗 exit 0" "$(run)" "0"
+check "點名 drifted" "drifted bin/a-kick.sh" "$OUT"
+equals "手改過的檔原封不動" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-hand-edited"
+equals "沒手改的照裝" "$(cat "$DIR/c-task.md")" "task v2"
+check "彙總帶 drifted 數" "changes=1 failed=0 drifted=1" "$OUT"
+run --dry-run >/dev/null
+equals "dry-run 也不把它算進會裝的" "$(grep -c '^would-install bin/a-kick.sh' "$OUT" || true)" "0"
+equals "--force 才換" "$(run --force)" "0"
+equals "強制換成 v2" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v2"
+B=$(ls -d "$DIR"/ops-install-backups/*/ | tail -1)
+equals "手改的版本在備份裡" "$(sed -n 2p "${B}bin/a-kick.sh")" "echo a-hand-edited"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

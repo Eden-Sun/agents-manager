@@ -71,6 +71,10 @@ ops_install_step() {
   _oplan=$(printf '%s\n' "$_oscript" | bash -s -- --repo "$DEPLOY" --ref "$_osha" --dir "$DIR" --dry-run 2>>"$LOG")
   _on=$(printf '%s\n' "$_oplan" | sed -n 's/.*changes=\([0-9][0-9]*\) failed=.*/\1/p' | tail -1)
   case "$_on" in ''|*[!0-9]*) log "ops 自動安裝：看不懂 dry-run 的結果，這輪不裝"; return 0 ;; esac
+  # 手改過的安裝檔不覆蓋（ops-install 報 drifted）：不算失敗，但要有人看，不然那支永遠停在舊版而沒人知道（同 source+reason daemon 每小時只收一則）。
+  if printf '%s\n' "$_oplan" | grep -q '^drifted '; then
+    alert ops_install_drift "已安裝的 ops 腳本被手改過（不是 repo 任何一版），自動換新不會覆蓋它：$(printf '%s\n' "$_oplan" | grep '^drifted ' | cut -d' ' -f2 | head -5 | tr '\n' ' ')。先看差在哪（agm ops-sync --check），要換就手動 ops-install.sh --force（舊檔會備份）"
+  fi
   [ "$_on" -gt 0 ] || return 0
   if [ "$_ogreen" = 1 ]; then
     _ostate=$("$GH" api "repos/${GH_REPO}/commits/${_osha}/status" -q ".statuses[]|select(.context==\"${CI_CONTEXT}\")|.state" 2>>"$LOG" | head -1)

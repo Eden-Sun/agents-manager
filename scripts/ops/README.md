@@ -38,7 +38,9 @@ agm-host 上由 `ubuntu-ci.sh` 排程它（每 `AGM_CI_OPS_SYNC_INTERVAL` 秒，
   排程 unit（`systemd/`、`LaunchAgents/`）報 `skipped`、不碰（換了還要 daemon-reload／launchctl）；清單外的檔不碰。
 - 每支先備份到 `<AGM>/ops-install-backups/<UTC 時間>/<安裝位置>`，寫到同目錄暫存檔再 `mv`（原子替換），然後自檢
   （`.sh` → `bash -n`、`.py` → 語法編譯、`.ts` → 有 bun 就 `bun build`）；沒過就放回備份、報 `failed`、其他支照裝。
-- `--dry-run` 只列 `would-install`。最後一行 `changes=N failed=M`；有失敗 exit 1。成功會把「時間 commit」寫進 `<AGM>/ops-install.last`。
+- **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的 blob 都對不上，跟 `ops-sync --check` 的 `drift` 同一條）
+  報 `drifted`、不動它、不算失敗；kick 會另推 `ops_install_drift` 叫人看。手動 `--force` 才換（舊檔照樣備份）。
+- `--dry-run` 只列 `would-install`。最後一行 `changes=N failed=M drifted=K`；有失敗 exit 1。成功會把「時間 commit」寫進 `<AGM>/ops-install.last`。
 
 **接到部署**：`daemon-update-kick.sh` 在旗標開著時，於 ① 換版成功之後、② 「沒有會進 binary 的差異」那一輪（要該 sha 的 `ubuntu-ci` 綠燈）
 用該 sha 自己的 `ops-install.sh` 換新；失敗推 `ops_alert`（`ops_install_failed`），不影響部署結果。**旗標預設關**，要由使用者或 AGM 開：

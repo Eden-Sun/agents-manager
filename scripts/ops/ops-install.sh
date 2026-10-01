@@ -1,7 +1,7 @@
 #!/bin/bash
 # 把 repo 裡「有變動、而且已經裝在 AGM 目錄」的 ops 腳本更新進去（只更新，不新增）。
 #
-#   ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run]
+#   ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run] [--force]
 #
 # 為什麼：已安裝的 ops 腳本沒有任何東西在換新（outbox-gc.sh 停在舊版、repo 修了卻沒生效）；`agm ops-sync --check` 只偵測。
 # 這支補上「換新」，由 daemon-update-kick.sh 在 **旗標開著** 時於部署後叫（預設關，見 README「自動安裝」）。
@@ -12,13 +12,15 @@
 #   - 排程 unit（`systemd/`、`LaunchAgents/`）不碰：換了還要 daemon-reload／launchctl，不是這支的事，報 `skipped`。
 #   - 每支：先備份舊檔到 `<AGM>/ops-install-backups/<UTC 時間>/<安裝位置>`，寫到同目錄暫存檔再 `mv`（原子替換），
 #     最後自檢（.sh → `bash -n`、.py → 語法編譯、.ts → 有 bun 就 `bun build`），沒過就把備份放回去、報 `failed`、其他支照裝。
+#   - **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的哪個 blob 都對不上，同 `agm ops-sync --check` 的
+#     `drift`）＝有人直接改了安裝檔，報 `drifted`、不動它、不算失敗。`--force` 才換（照樣先備份）。
 #   - `--dry-run` 只列 `would-install`，什麼都不寫。
 #
-# 輸出一行一件事（installed／would-install／unchanged／not-installed／skipped／failed），最後一行 `changes=N failed=M`。
+# 輸出一行一件事（installed／would-install／unchanged／not-installed／skipped／drifted／failed），最後一行 `changes=N failed=M drifted=K`。
 # exit 0＝沒有失敗；1＝至少一支失敗（已還原）；2＝用法錯誤。
 set -u
 
-REPO=""; REF=""; DIR=""; PLATFORM=""; DRY=0
+REPO=""; REF=""; DIR=""; PLATFORM=""; DRY=0; FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="${2:-}"; shift 2 ;;
@@ -26,11 +28,12 @@ while [ $# -gt 0 ]; do
     --dir) DIR="${2:-}"; shift 2 ;;
     --platform) PLATFORM="${2:-}"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    *) echo "用法：ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run]" >&2; exit 2 ;;
+    --force) FORCE=1; shift ;;
+    *) echo "用法：ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run] [--force]" >&2; exit 2 ;;
   esac
 done
 if [ -z "$REPO" ] || [ -z "$REF" ] || [ -z "$DIR" ]; then
-  echo "用法：ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run]" >&2
+  echo "用法：ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run] [--force]" >&2
   exit 2
 fi
 if [ -z "$PLATFORM" ]; then
@@ -56,6 +59,14 @@ selfcheck() { # selfcheck <path>
   esac
 }
 
+# 安裝端這份是不是 repo 在 --ref 之前（含）出現過的任何一版？不是＝有人手改過（drift，同 `agm ops-sync --check`）。
+known_version() { # known_version <repo 來源> <安裝端檔案>
+  _have=$("$GIT" hash-object "$2" 2>/dev/null) || return 1
+  "$GIT" -C "$REPO" log --format=%H "$COMMIT" -- "$1" 2>/dev/null | while IFS= read -r _c; do
+    [ "$("$GIT" -C "$REPO" rev-parse --verify --quiet "${_c}:$1" 2>/dev/null)" = "$_have" ] && { echo found; break; }
+  done | grep -q found
+}
+
 printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in ''|'#'*) continue ;; esac
   # shellcheck disable=SC2086
@@ -73,6 +84,10 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
     echo "failed ${tgt}（${REF} 裡讀不到 ${src}）"; echo F >> "$TMP/results"; continue
   fi
   if cmp -s "$new" "$dest"; then echo "unchanged $tgt"; continue; fi
+  if [ "$FORCE" != 1 ] && ! known_version "$src" "$dest"; then
+    echo "drifted ${tgt}（安裝端的檔不是 repo 任何一版，有人手改過；沒動它。要換就先看差在哪，或加 --force，舊檔照樣會備份）"
+    echo D >> "$TMP/results"; continue
+  fi
   echo C >> "$TMP/results"
   if [ "$DRY" = 1 ]; then echo "would-install $tgt"; continue; fi
   mkdir -p "$BACKUP/$(dirname "$tgt")"
@@ -95,7 +110,8 @@ done > "$TMP/lines"
 cat "$TMP/lines"
 changes=$(grep -c '^C$' "$TMP/results" 2>/dev/null || true)
 failed=$(grep -c '^F$' "$TMP/results" 2>/dev/null || true)
-echo "changes=${changes:-0} failed=${failed:-0}"
+drifted=$(grep -c '^D$' "$TMP/results" 2>/dev/null || true)
+echo "changes=${changes:-0} failed=${failed:-0} drifted=${drifted:-0}"
 if [ "$DRY" = 0 ] && [ "${changes:-0}" -gt 0 ]; then
   printf '%s %s\n' "$STAMP" "$COMMIT" > "$DIR/ops-install.last"
 fi
