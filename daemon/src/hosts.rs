@@ -731,6 +731,8 @@ async fn forget_host_observations(app: &Arc<App>, name: &str) {
     };
     for key in removed {
         crate::quota::forget(app, &key).await;
+        // 前端的額度條認 `quota_updated`：不告訴它，那台機器（或換連線前的那條）的數字會掛到下一次輪詢（形狀同 `identity_kind::cleanup_host`）。
+        app.emit("quota_updated", json!({"kind": key, "host": name, "quota": null})).await;
     }
     app.models_cache.lock().await.retain(|k, _| !k.starts_with(&prefix));
     app.host_shells.lock().await.retain(|s| s.host != name);
@@ -1259,6 +1261,43 @@ mod tests {
         assert_eq!(current.data["connected"], true);
         assert_eq!(current.data["error"], serde_json::Value::Null);
         assert_eq!(current.data["herdr"]["cli_version"], "0.9.7");
+    }
+
+    /// 主機移除／換連線時 `forget_host_observations` 丟掉 `<host>/…` 的額度，但沒告訴前端：額度條在下一次 5 分鐘輪詢以前
+    /// 還顯示著那台機器的數字（換連線時甚至是另一台機器的）。每個被丟掉的 key 要發一則 `quota_updated`（`quota:null`），
+    /// 跟 `identity_kind::cleanup_host` 同一個形狀。
+    #[tokio::test]
+    async fn forgetting_a_hosts_quota_tells_the_clients() {
+        let env = crate::testing::env().await;
+        let host = "quota-forget-test";
+        let key = format!("{host}/claude");
+        env.app.quotas.lock().await.insert(
+            key.clone(),
+            crate::quota::Quota {
+                five_hour: None,
+                seven_day: None,
+                fable: None,
+                reset_credits: None,
+                limit_hit: None,
+                plan: None,
+                updated_at: crate::db::now(),
+                source: "test".into(),
+                account: None,
+                host: host.into(),
+            },
+        );
+        let mut events = env.app.subscribe();
+        forget_host_observations(&env.app, host).await;
+        assert!(env.app.quotas.lock().await.get(&key).is_none(), "前提：額度已丟掉");
+        let mut seen = None;
+        while let Ok(ev) = events.try_recv() {
+            if ev.kind == "quota_updated" && ev.data["kind"] == key.as_str() {
+                seen = Some(ev);
+            }
+        }
+        let ev = seen.expect("丟掉的額度 key 要發 quota_updated");
+        assert!(ev.data["quota"].is_null(), "{}", ev.data);
+        assert_eq!(ev.data["host"], host);
     }
 
     #[tokio::test]
