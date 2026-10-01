@@ -121,6 +121,11 @@ fn forget(bot_id: &str, turn_id: &str) {
     }
 }
 
+/// 不在 `live` 裡的 bot 不留欠著／待證的收尾：待證的（鍵不知道進了沒有）要等證據才結清，bot 被刪掉就永遠等不到。
+pub(crate) fn retain_bots(live: &[String]) {
+    ledger().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| live.contains(id));
+}
+
 /// 這顆 bot 對 `turn_id` 還欠著（鍵已經生效、DB 還沒寫成）嗎？欠著的時候不能再按一次鍵。
 pub(crate) fn owes(bot_id: &str, turn_id: &str) -> bool {
     owed_turn(bot_id).as_deref() == Some(turn_id)
@@ -616,6 +621,21 @@ pub(crate) fn uncommitted(run_id: &str, turn_id: &str, cause: Option<&anyhow::Er
         "message": "Esc 已經送進去了，回合的狀態還沒寫成；daemon 會自己補上，也可以帶同一個 turn_id 重試（不會再按一次 Esc）。",
         "detail": cause.map(|e| format!("{e:#}")),
     }))
+}
+
+#[cfg(test)]
+mod retain_tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_bots_unsettled_interruptions_are_dropped() {
+        for bot in ["ledger-gone", "ledger-kept"] {
+            record(bot, Pending { run_id: "r".into(), turn_id: format!("t-{bot}"), note: "n".into(), stage: Stage::Unconfirmed, new_turn: None, proof: None, esc_at: None });
+        }
+        retain_bots(&["ledger-kept".to_string()]);
+        assert!(pending("ledger-gone").is_empty() && !pending("ledger-kept").is_empty());
+        retain_bots(&[]);
+    }
 }
 
 #[cfg(test)]

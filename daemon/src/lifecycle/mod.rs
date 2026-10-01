@@ -125,6 +125,7 @@ pub(crate) fn retain_pane_typed(active: &[String]) {
 /// bot 先沒了就沒有人會再來清。
 pub(crate) fn retain_bot_state(live: &[String]) {
     interrupt_grace::retain_bots(live);
+    interruption::retain_bots(live);
 }
 
 #[cfg(test)]
