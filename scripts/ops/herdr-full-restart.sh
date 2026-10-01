@@ -10,8 +10,30 @@
 #
 # 路徑與 uid（gui/501）寫死成這台開發機的值，是原樣收進 repo 的既有行為，沒有改。
 # `scripts/ops/` 底下唯一沒有 set -u 的就是這支（issue #455 順帶）。這裡不加 -e：
-# bootout／pkill 對「本來就沒在跑」回非零是正常的，那些 rc 自己記進 log。
+# bootout／kill 對「本來就沒在跑」回非零是正常的，那些 rc 自己記進 log。
 set -u
+
+# 認 herdr server 用 argv，不用比對整行 argv 的 pattern kill：那個 pattern 會把 argv 裡恰好提到 herdr…server 的
+# claude／codex bot（長 persona）、ssh、`herdr pane list server` 之類全部一起殺掉。這裡要求第一個字的 basename 是
+# herdr，跳過旗標（`--session`／`--machine` 連值一起跳）後的第一個位置參數剛好是 `server`。印 pid，一行一個。
+server_pids() {
+  ps -axo pid=,args= 2>/dev/null | awk '
+    { n=split($2, parts, "/"); if (parts[n] != "herdr") next
+      for (i = 3; i <= NF; i++) {
+        if ($i == "--session" || $i == "--machine") { i++; continue }
+        if ($i ~ /^-/) continue
+        if ($i == "server") print $1
+        break
+      } }'
+}
+# TERM 先、等 5 秒、還活著的才 KILL；只對 server_pids 認出來的 pid。
+kill_servers() {
+  local p
+  for p in $(server_pids); do kill -TERM "$p" 2>/dev/null; done
+  sleep 5
+  for p in $(server_pids); do kill -KILL "$p" 2>/dev/null; done
+  sleep 2
+}
 
 # ---------------------------------------------------------------- Linux（issue #677）
 # Linux 主機的 herdr server 由 systemd user unit `herdr@<session>.service` 看管（scripts/ops/systemd/herdr@.service，
@@ -32,11 +54,10 @@ log "== full restart start (linux)"
 UNITS="$(systemctl --user list-units 'herdr@*.service' --state=active --plain --no-legend 2>>"$LOG" | awk '{print $1}' | tr '\n' ' ')"
 HAD_DEFAULT="$(default_status)"
 log "units before: ${UNITS}"
-log "servers before: $(pgrep -f 'herdr.*server' | tr '\n' ' ')"
+log "servers before: $(server_pids | tr '\n' ' ')"
 for u in $UNITS; do systemctl --user stop "$u" 2>>"$LOG"; log "stop ${u} rc=$?"; done
-pkill -TERM -f 'herdr.*server'; sleep 5
-pkill -KILL -f 'herdr.*server' 2>/dev/null; sleep 2
-log "servers after kill: $(pgrep -f 'herdr.*server' | tr '\n' ' ')"
+kill_servers
+log "servers after kill: $(server_pids | tr '\n' ' ')"
 for s in "$HOME/.config/herdr/herdr.sock" "$HOME"/.config/herdr/sessions/*/herdr.sock "$HOME"/.config/herdr/sessions/*/herdr-client.sock "$HOME/.config/herdr/herdr-client.sock"; do [ -S "$s" ] && rm -f "$s"; done
 for u in $UNITS; do systemctl --user start "$u" 2>>"$LOG"; log "start ${u} rc=$?"; done
 FAILED=0
@@ -63,7 +84,7 @@ fi
 for u in $UNITS; do
     systemctl --user is-active --quiet "$u" || { log "FAIL: ${u} 沒回到 active"; FAILED=1; }
 done
-log "servers after: $(pgrep -fl 'herdr.*server' | tr '\n' ';')"
+log "servers after: $(server_pids | tr '\n' ';')"
 log "session list: $(herdr session list 2>&1 | tr '\n' ';')"
 if [ "$FAILED" = 0 ]; then log "== done"; exit 0; fi
 log "== done (failed)"
@@ -76,12 +97,11 @@ log(){ echo "$(date '+%F %T') $*" >> "$LOG"; }
 export PATH=/opt/homebrew/bin:/Users/m4p/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 sleep 3
 log "== full restart start (user order 2026-09-22)"
-log "servers before: $(pgrep -f 'herdr.*server' | tr '\n' ' ')"
+log "servers before: $(server_pids | tr '\n' ' ')"
 launchctl bootout gui/501/dev.agents-manager.herdr-agents-manager 2>>"$LOG"; log "bootout agents-manager rc=$?"
 launchctl bootout gui/501/dev.agents-manager.herdr-am-attach-remote 2>>"$LOG"; log "bootout am-attach-remote rc=$?"
-pkill -TERM -f 'herdr.*server'; sleep 5
-pkill -KILL -f 'herdr.*server' 2>/dev/null; sleep 2
-log "servers after kill: $(pgrep -f 'herdr.*server' | tr '\n' ' ')"
+kill_servers
+log "servers after kill: $(server_pids | tr '\n' ' ')"
 for s in /Users/m4p/.config/herdr/herdr.sock /Users/m4p/.config/herdr/sessions/*/herdr.sock /Users/m4p/.config/herdr/sessions/*/herdr-client.sock /Users/m4p/.config/herdr/herdr-client.sock; do [ -S "$s" ] && rm -f "$s"; done
 launchctl bootstrap gui/501 /Users/m4p/Library/LaunchAgents/dev.agents-manager.herdr-agents-manager.plist 2>>"$LOG"; log "bootstrap agents-manager rc=$?"
 launchctl bootstrap gui/501 /Users/m4p/Library/LaunchAgents/dev.agents-manager.herdr-am-attach-remote.plist 2>>"$LOG"; log "bootstrap am-attach-remote rc=$?"
@@ -113,10 +133,10 @@ if [ "$(default_status)" = running ]; then
 else
     log "FAIL: default server 沒起來（pid=$DEFAULT_PID 只代表 fork 成功，不代表 herdr 在跑）"
     log "      /tmp/herdr-default.log 末幾行：$(tail -3 /tmp/herdr-default.log 2>/dev/null | tr '\n' ' ')"
-    log "servers after: $(pgrep -fl 'herdr.*server' | tr '\n' ';')"
+    log "servers after: $(server_pids | tr '\n' ';')"
     log "== done (failed)"
     exit 1
 fi
-log "servers after: $(pgrep -fl 'herdr.*server' | tr '\n' ';')"
+log "servers after: $(server_pids | tr '\n' ';')"
 log "session list: $(herdr session list 2>&1 | tr '\n' ';')"
 log "== done"

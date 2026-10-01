@@ -67,8 +67,15 @@ setup() {
     # 危險指令的攔截器。全部只記錄，rc 由 fixture 決定；真的 binary 一次都碰不到。
     echo "FIX='${FIX}'"
     echo 'launchctl() { echo "launchctl $*" >> "$FIX/calls.log"; return "$(cat "$FIX/launchctl.rc")"; }'
-    echo 'pkill() { echo "pkill $*" >> "$FIX/calls.log"; case "$1" in -TERM) : > "$FIX/servers" ;; esac; return 0; }'
-    echo 'pgrep() { case "$*" in *-fl*) awk "{print \$1\" /opt/homebrew/bin/herdr server\"}" "$FIX/servers" ;; *) cat "$FIX/servers" ;; esac; }'
+    # kill／ps 也是注入的函式（bash 內建的 kill 一樣被函式蓋掉）：TERM 預設讓 server 全消失，STUB_TERM_IGNORED 時裝死，
+    # 這樣 KILL 那一輪才有東西可殺。ps 除了真的 server 之外，永遠多印幾顆「argv 裡剛好有 herdr…server」的別人：
+    # 腳本不能動它們（issue：pkill -f 'herdr.*server' 會把帶長 persona 的 claude／codex bot 一起殺）。
+    echo 'kill() { echo "kill $*" >> "$FIX/calls.log"; case "$1" in -TERM) [ -n "${STUB_TERM_IGNORED:-}" ] || : > "$FIX/servers" ;; esac; return 0; }'
+    echo 'ps() { while read -r p; do [ -n "$p" ] && echo "$p herdr --session s$p server"; done < "$FIX/servers"
+      echo "9001 claude --dangerously-skip-permissions --append-system-prompt 你是 bot，要用 herdr 開 pane、不要碰 server"
+      echo "9002 codex -c developer_instructions=herdr rules for the server"
+      echo "9003 /usr/bin/ssh agm-host herdr --session x server-log"
+      echo "9004 herdr pane list server"; }'
     echo 'sleep() { :; }'
     # 平台由 fixture 決定（issue #677）：Darwin 走原本的 launchd 段，Linux 走 systemd 段。
     echo 'uname() { cat "$FIX/uname"; }'
@@ -95,7 +102,7 @@ run() { bash "$SCRIPT"; echo $?; }
 # 副本真的攔住了嗎：跑之前先確認沒有任何一行會叫到 PATH 上的 launchctl／pkill。
 setup
 equals "副本裡 launchctl 已被函式攔截" "$(grep -c '^launchctl() {' "$SCRIPT")" "1"
-equals "副本裡 pkill 已被函式攔截" "$(grep -c '^pkill() {' "$SCRIPT")" "1"
+equals "副本裡 kill／ps 已被函式攔截" "$(grep -cE '^(kill|ps)\(\) \{' "$SCRIPT")" "2"
 # canary-gap: 這一行是**斷言字串**，不是指派——它在檢查副本裡被改寫成的 PATH 長什麼樣。
 # 這支測試本來就不靠 PATH 擋（檔頭寫了理由）：launchctl／pkill／pgrep／herdr 都用注入的
 # shell 函式攔，函式優先於 PATH 查找，被測腳本自己 `export PATH=` 也蓋不掉。
@@ -111,7 +118,7 @@ equals "不再用 macOS 沒有的 setsid（只看會被執行的行，註解照�
 equals "起 server 那行沒有跟 cd 串成 && 清單" "$(grep -cE '^[^#]*cd .* && nohup' "$SRC")" "0" 
 # 副本裡還提到 /opt/homebrew 的，只准是假 pgrep 印出來的那行字串（不是會被執行的指令）。
 equals "副本裡提到真 binary 路徑的只剩假 pgrep 的輸出字串" \
-  "$(grep -n '/opt/homebrew' "$SCRIPT" | grep -vc '^[0-9]*:pgrep() {')" "0"
+  "$(grep -c '/opt/homebrew' "$SCRIPT")" "0"
 teardown
 
 # 1. 正常路徑：兩個 job 都 bootout、TERM 之後補 KILL、兩個 plist 都 bootstrap、log 有完整段落。
@@ -122,17 +129,29 @@ check "記下重啟前的 server pid" "servers before: 7422 7459" "$LOG"
 check "bootout agents-manager" "bootout gui/501/dev.agents-manager.herdr-agents-manager" "$FIX/calls.log"
 check "bootout am-attach-remote" "bootout gui/501/dev.agents-manager.herdr-am-attach-remote" "$FIX/calls.log"
 check "bootout 的 rc 有進 log" "bootout agents-manager rc=0" "$LOG"
-check "先送 TERM" "pkill -TERM -f herdr.\*server" "$FIX/calls.log"
-check "再補 KILL" "pkill -KILL -f herdr.\*server" "$FIX/calls.log"
+check "先對 server 的 pid 送 TERM" "kill -TERM 7422" "$FIX/calls.log"
+check "兩顆 server 都收到 TERM" "kill -TERM 7459" "$FIX/calls.log"
+check_no "不再用 pkill -f 的 pattern 比對" "pkill" "$SCRIPT"
+check_no "別人的行程（argv 恰好有 herdr 與 server）一顆都沒被碰" "kill .* 900[1-4]" "$FIX/calls.log"
 check "TERM 之後 server 清空（log 的 after kill 是空的）" "servers after kill: $" "$LOG"
 check "bootstrap agents-manager" "bootstrap gui/501 $ROOT/LaunchAgents/dev.agents-manager.herdr-agents-manager.plist" "$FIX/calls.log"
 check "bootstrap am-attach-remote" "bootstrap gui/501 $ROOT/LaunchAgents/dev.agents-manager.herdr-am-attach-remote.plist" "$FIX/calls.log"
 check "收尾問 session list" "herdr session list" "$FIX/calls.log"
 check "log 有結尾" "== done" "$LOG"
-# 順序：bootout 一定要在 pkill 之前，否則 launchd 會馬上把 server 拉回來又被殺。
-equals "bootout 排在 pkill 前面" \
+# 順序：bootout 一定要在 kill 之前，否則 launchd 會馬上把 server 拉回來又被殺。
+equals "bootout 排在 kill 前面" \
   "$(awk '{print $1}' "$FIX/calls.log" | head -3 | tr '\n' ',')" \
-  "launchctl,launchctl,pkill,"
+  "launchctl,launchctl,kill,"
+teardown
+
+# 1b. TERM 被忽略時才補 KILL：只對真的 server 的 pid，別人的長 argv 行程不能被 KILL（pkill -f 的老問題）。
+setup
+export STUB_TERM_IGNORED=1
+run >/dev/null
+unset STUB_TERM_IGNORED
+check "TERM 沒效時對 server pid 補 KILL" "kill -KILL 7422" "$FIX/calls.log"
+check "另一顆 server 也補 KILL" "kill -KILL 7459" "$FIX/calls.log"
+check_no "KILL 沒有波及 argv 恰好有 herdr／server 的 claude／codex／ssh／client" "kill .* 900[1-4]" "$FIX/calls.log"
 teardown
 
 # 2. socket 只刪清單上的那四種，而且只刪真的 unix socket。
@@ -213,9 +232,9 @@ check "停 unit" "systemctl --user stop herdr@agents-manager.service" "$FIX/call
 check "起回 unit" "systemctl --user start herdr@am-attach-remote.service" "$FIX/calls.log"
 check "沒有登入 session 也補上 runtime dir" "XDG_RUNTIME_DIR=/run/user/" "$FIX/calls.log"
 check_no "Linux 不碰 launchctl" "launchctl" "$FIX/calls.log"
-equals "stop 排在 pkill 前面、start 排在 pkill 後面" \
-  "$(grep -E '^(systemctl --user (stop|start)|pkill)' "$FIX/calls.log" | awk '{print $1 $3}' | tr '\n' ',')" \
-  "systemctlstop,systemctlstop,pkill-f,pkill-f,systemctlstart,systemctlstart,"
+equals "stop 排在 kill 前面、start 排在 kill 後面" \
+  "$(grep -E '^(systemctl --user (stop|start)|kill)' "$FIX/calls.log" | awk '{print $1 $3}' | tr '\n' ',')" \
+  "systemctlstop,systemctlstop,kill7422,kill7459,systemctlstart,systemctlstart,"
 gone   "HOME 底下 session 的 herdr.sock 被清掉" "$LHOME/.config/herdr/sessions/a/herdr.sock"
 exists "清單外的 socket 不刪" "$LHOME/.config/herdr/keep.sock"
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
