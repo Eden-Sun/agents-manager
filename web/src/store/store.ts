@@ -2894,6 +2894,11 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'supervisor_changed':
       set((s) => ({ supervisorRev: s.supervisorRev + 1 }))
       return
+    // `panes` 表（側欄「其他 pane」）真的變了：重抓，不必等 30 秒輪詢（別的裝置開／關／改用途的 pane）。
+    case 'panes_changed': {
+      void get().refreshPanes()
+      return
+    }
     case 'draft_updated': {
       // `{key, text, rev, client_id, updated_at}`（API.md）：別的瀏覽器的草稿；自己送的回音在 `draftSync` 裡只記 rev。
       if (!isRec(data)) return
