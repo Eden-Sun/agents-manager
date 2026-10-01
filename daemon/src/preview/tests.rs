@@ -1046,6 +1046,29 @@ async fn disconnecting_an_attached_preview_never_touches_the_others_server() {
     assert_eq!(status(&get(&r.e.app, &bot).await.unwrap()), "off");
 }
 
+/// 刪 bot 時接上別人 vite 的預覽：只斷開（那顆 server 是別人的，不動、不關），AG Man 這邊的紀錄標 `off`，
+/// 不再出現在 `/api/state`，port 也沒有被這顆已刪的 bot 占著——別顆 bot 照樣能接上同一個 port。
+/// （vite 本身還活著、還在聽那個 port，是設計：它不是 AG Man 開的。）
+#[tokio::test]
+async fn deleting_a_bot_disconnects_its_attached_preview_and_frees_the_port_for_another_bot() {
+    let r = rig().await;
+    r.fake.vite(4242, 5241, &web_dir(&r));
+    let bot = running_bot(&r, "alfa").await;
+    assert_eq!(start(&r.e.app, &bot, StartReq::default()).await.unwrap()["source"], "attached");
+
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot).execute(&r.e.app.db).await.unwrap();
+    crate::api::stop_for_delete_locked(&r.e.app, &bot).await.unwrap();
+
+    assert!(r.fake.closed.lock().unwrap().is_empty(), "沒有關任何 pane");
+    assert!(r.fake.vites.lock().unwrap().iter().any(|v| v.pid == 4242), "別人的 vite 還活著");
+    assert_eq!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status, "off", "紀錄標 off");
+    assert!(!state_map(&r.e.app.db).await.unwrap().contains_key(&bot), "不再出現在 /api/state");
+
+    let other = running_bot(&r, "bravo").await;
+    let body = start(&r.e.app, &other, StartReq::default()).await.unwrap();
+    assert_eq!((status(&body), body["source"].as_str(), body["port"].as_u64()), ("running", Some("attached"), Some(5241)));
+}
+
 #[tokio::test]
 async fn an_attached_preview_goes_off_when_that_server_exits_even_without_a_running_bot() {
     let r = rig().await;
