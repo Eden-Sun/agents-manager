@@ -140,6 +140,7 @@ try:
         if not isinstance(c,str) or not c.strip():
             continue
         if len(c)<=65536:
+            c.encode("utf-8")  # a lone surrogate would be written back out as an escape serde_json cannot read
             p["agm_user_text"]=c
             sys.stdout.buffer.write(json.dumps(p,separators=(",",":")).encode("ascii"))
         break
@@ -1582,6 +1583,24 @@ mod remote_hook_tests {
         let sb3 = Sandbox::new(false);
         sb3.run(&["claude", &sb3.bot, "-"], &stop(&transcript.to_string_lossy(), "SessionStart"));
         assert!(spooled(&sb3).get("agm_user_text").is_none());
+    }
+
+    /// transcript 裡的使用者訊息帶孤立的 surrogate 跳脫（`\\ud83d`，貼上的字被 UTF-16 切在 emoji 中間）：Python 的
+    /// `json.dumps` 會原樣寫回去，但 serde_json 讀不了孤立 surrogate——整行 spool 解析失敗、Stop 事件整筆被丟，
+    /// 比沒帶證據更糟。帶不進去就不帶，事件本身一定要是合法 JSON。
+    #[test]
+    fn a_lone_surrogate_in_the_transcript_never_breaks_the_spool_line() {
+        let sb = Sandbox::new(false);
+        let transcript = sb.dir.join("t.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"貼上的字 \\ud83d 被切斷\"}}\n").unwrap();
+        let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s-1", "transcript_path": transcript.to_string_lossy(), "stop_hook_active": false, "last_assistant_message": "回覆"}).to_string();
+        let (_, ok) = sb.run(&["claude", &sb.bot, "-"], &stop);
+        assert!(ok);
+        let events = sb.read("hook-spool.jsonl");
+        let last = events.lines().rev().find(|l| !l.trim().is_empty()).expect("spool 有一行");
+        let v: serde_json::Value = serde_json::from_str(last).unwrap_or_else(|e| panic!("spool 行不是 serde_json 讀得了的 JSON（{e}）：{last}"));
+        assert_eq!(v["payload"]["session_id"], "s-1");
+        assert_eq!(v["payload"]["last_assistant_message"], "回覆");
     }
 
     /// 真的執行產生出來的腳本：spool 要落在**這個實例**的根底下（sol 三輪）。正式實例的既有路徑不變。
