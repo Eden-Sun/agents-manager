@@ -802,6 +802,7 @@ fn why(e: LcError) -> anyhow::Error {
         LcError::Upstream(m) | LcError::Bad(m) => m,
         LcError::Conflict(v)
         | LcError::BadValue(v)
+        | LcError::NotFoundValue(v)
         | LcError::Unprocessable(v)
         | LcError::Forbidden(v)
         | LcError::Unavailable(v)

@@ -437,6 +437,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 ## 6. 讀訊息
 
 `GET /api/bots/{id}/messages?before=<message_id>&limit=100`：以插入順序倒序分頁（`before` = 目前最舊一則的 `id`），回傳的 `messages` 已依時間正序。可選 `turn_id` 限定該回合、`role=user|assistant|system` 限定角色，均在該 bot 的 conversation 內過濾後才分頁；不存在或其他 bot 的回合回空訊息清單，非法 role 回 400。不帶篩選參數沿用原行為。
+`before` 必須是這顆 bot 的 conversation 裡**還在**的訊息：被刪掉（例如撤回排隊的 prompt、撤掉過期的「未送達」note）或根本不存在 → **404** `{"error":"not_found","what":"before message","reason":"before_message_gone","message_id"}`；是別顆 bot 的訊息 → 404 `reason:"before_message_not_in_conversation"`。不會默默拿全域 rowid 切出錯的一頁；呼叫端的正解是重載第一頁（不是重試同一個游標）。
 沒有這個 bot → 404；已刪除的 bot 仍讀得到歷史。
 
 ```json
@@ -573,9 +574,9 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 路徑不存在或不是目錄 → 400。
 
 ### `GET /api/search/messages?q=<文字>&limit=200`
-側欄搜尋用的**命中計數**：回 `{q, bots:[{bot_id, hits, snippet}]}`——每顆 bot 幾則命中，外加最新那一則的片段
+側欄搜尋用的**命中計數**：回 `{q, bots:[{bot_id, bot_deleted, hits, snippet}]}`——每顆 bot 幾則命中，外加最新那一則的片段
 （命中字前後各約 90 字）。`q` trim 後為空就回 `{q:"", bots:[]}`（不是錯誤）；`limit` 1–1000，預設 200，
-依 `hits` 由多到少。字面子字串比對，`%`、`_`、`\` 是字元不是萬用字元。含已刪 bot 的歷史。
+**活的 bot 排在已刪的前面**，各自依 `hits` 由多到少，所以命中較多的已刪 bot 不會把活 bot 擠出 `limit`（#766）；每列帶 `bot_deleted`。同一顆 bot 的 `snippet` 取最新一則命中（同毫秒以後寫入的為準）。字面子字串比對，`%`、`_`、`\` 是字元不是萬用字元。含已刪 bot 的歷史。
 
 **跟 `GET /api/supervisor/evidence` 的分工**（兩支都在搜同一張 `messages` 表，但回答的是不同問題）：
 
@@ -737,7 +738,7 @@ port 存活探測同時連 `127.0.0.1` 與 `::1`，因此只綁 IPv6 loopback �
   ＝`kind=service` 或記過 port。跟打字那一端（`/hosts/{name}/shells/{pane_id}/text|keys`）同一條規則。
 - `owner_bot_id`／`owned_by`：`bot`＝從 pane 行程樹的 `AM_BOT_ID` 推斷；`user`＝沒有標記但 cwd 對得到這個專案（列在專案底下，**預設仍不自動關**）；`none`＝連專案都對不到。
 - `listen_ports` 只在本機判斷，遠端一律空陣列。`last_output_at` 由 herdr 的 `revision` 變化推進，不讀畫面內容。
-- Project 不存在 404。
+- Project 不存在 404。`before` 的規則同 §6 的 bot 版：訊息要屬於這個專案的某顆 bot（已刪 bot 的也算，清單載入後才刪 bot 照樣翻得下去）；被刪掉的 → 404 `reason:"before_message_gone"`，別個專案的 → 404 `reason:"before_message_not_in_conversation"`。
 
 ### `POST /relay/pane`（表單，bot 專用）
 `bot_id`／`pane_id`／`purpose`，header `X-AM-Bot-Token`；shim 開完 pane 後自己呼叫（`herdr … --purpose <文字>`）。

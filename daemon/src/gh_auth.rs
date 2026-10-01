@@ -167,6 +167,7 @@ fn lc_msg(e: &LcError) -> String {
         LcError::NotFound(w) => format!("not found: {w}"),
         LcError::Conflict(v)
         | LcError::BadValue(v)
+        | LcError::NotFoundValue(v)
         | LcError::Unprocessable(v)
         | LcError::Forbidden(v)
         | LcError::Unavailable(v)

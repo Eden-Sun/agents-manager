@@ -149,6 +149,8 @@ pub enum LcError {
     Conflict(Value),
     Upstream(String),
     Bad(String),
+    /// A 404 whose body is machine-readable (`{"error":"not_found","reason":…}`) instead of a bare `what`.
+    NotFoundValue(Value),
     /// A 400 whose body is machine-readable rather than a message, e.g.
     /// `{"error":"remote_not_supported","host":"m4p"}`.
     BadValue(Value),
