@@ -1181,10 +1181,27 @@ pub(crate) async fn delete_bot_http(State(app): State<Arc<App>>, Path(id): Path<
 async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     // 拿著專案裡每顆 bot 的 per-bot 鎖（start 用同一把）再確認都停了、再定案：鎖外檢查會跟 start 競爭，
     // 刪掉剛被重新啟動的 bot（sol 四輪）。依 id 排序拿鎖；其他路徑一次只拿一把，不會形成環。
-    let in_project: Vec<db::Bot> =
-        db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|b| b.project_id == id).collect();
-    let ids: Vec<String> = in_project.iter().map(|b| b.id.clone()).collect();
-    let (ids, guards) = lock_bots_in_order(&app, ids).await;
+    // 跟 `delete_bot` 同一個做法：拿鎖的途中又有 child 被認領進來的話，它沒被鎖住也不在快照裡——放掉重來（不能在持鎖時
+    // 再補拿，那會亂了順序）。定案之後還有最後一道（下面的 `late`）。
+    let mut attempt = 0;
+    let (in_project, ids, guards) = loop {
+        let in_project: Vec<db::Bot> =
+            db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|b| b.project_id == id).collect();
+        let ids: Vec<String> = in_project.iter().map(|b| b.id.clone()).collect();
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("delete_project_before_lock", &id).await;
+        let (ids, guards) = lock_bots_in_order(&app, ids).await;
+        let now: std::collections::BTreeSet<String> =
+            db::live_bots(&app.db).await.map_err(any_err)?.into_iter().filter(|b| b.project_id == id).map(|b| b.id).collect();
+        if now.iter().eq(ids.iter().collect::<std::collections::BTreeSet<_>>().into_iter()) {
+            break (in_project, ids, guards);
+        }
+        drop(guards);
+        attempt += 1;
+        if attempt >= 3 {
+            return Err(LcError::conflict("children_changed", json!({"project_id": id})));
+        }
+    };
     for bot_id in &ids {
         if db::active_run(&app.db, bot_id).await.map_err(any_err)?.is_some() {
             return Err(LcError::conflict("all bots must be stopped first", json!({"bot_id": bot_id})));
@@ -1233,7 +1250,26 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     // 專案已經在 config 裡定案刪除，之後不能再「一顆失敗就整段中止」：後面的 child 會永遠留在 `deleted_at IS NULL`，
     // 使用者再按一次只會拿到 not_in_config（#284）。每顆各自試，寫不進去的背景重試到成功才 purge，最後仍回錯讓人知道。
     let mut failed: Vec<db::Bot> = Vec::new();
-    for bot in in_project.iter().filter(|b| b.managed_by != "user") {
+    let mut kept_dirs: Vec<Value> = Vec::new();
+    // 定案之後再列一次：快照與定案之間才被認領進專案的 child（不在 `in_project`、沒被鎖住）一起軟刪。專案已經是已刪，
+    // reconcile 之後不會再掃它們，留成 `deleted_at IS NULL` 就永遠沒人收。它們沒經過「都已停止」的檢查，所以有 active run 的
+    // 只軟刪、不動目錄（列進 `kept_dirs`）。user bot 在 TOML 裡，`held` 已擋下沒鎖住的。
+    let late: Vec<db::Bot> = match db::live_bots(&app.db).await {
+        Ok(all) => all.into_iter().filter(|b| b.project_id == id && b.managed_by != "user" && !held.contains(&b.id)).collect(),
+        Err(e) => {
+            tracing::error!(project = %id, error = ?e, "project deleted but its children could not be listed again; stragglers may stay");
+            Vec::new()
+        }
+    };
+    for bot in &late {
+        if matches!(db::active_run(&app.db, &bot.id).await, Ok(None)) {
+            continue;
+        }
+        kept_dirs.push(json!({"bot_id": bot.id, "reason": "run_still_active"}));
+    }
+    let late_with_run: std::collections::HashSet<String> =
+        kept_dirs.iter().filter_map(|k| k["bot_id"].as_str().map(str::to_string)).collect();
+    for bot in in_project.iter().chain(late.iter()).filter(|b| b.managed_by != "user") {
         // 這個 UPDATE 以前用 `let _ =` 忽略結果：DB 寫不進去也照樣往下 purge，變成
         // 「DB 說它還活著、runtime 目錄卻已經被砍光」，事後救不回來（issue #87）。purge 只能發生在 DB 已經確定寫成 deleted 之後。
         if let Err(e) = soft_delete_child(&app, &bot.id).await {
@@ -1241,7 +1277,9 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
             failed.push(bot.clone());
             continue;
         }
-        lifecycle::purge_bot_dir(&app, &bot.id, &host).await;
+        if !late_with_run.contains(&bot.id) {
+            lifecycle::purge_bot_dir(&app, &bot.id, &host).await;
+        }
         tracing::info!(bot = %bot.name, project = %id, "project deleted; its child bot went with it");
     }
     let retry_failed = !failed.is_empty();
@@ -1251,7 +1289,6 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     }
     // user bot 由 config 投影軟刪，但 bots/<id>/ 沒人清：本機要等下次開機、遠端永遠不掃（#313）。已確認皆無 active run、鎖在手。
     // 只清「確定軟刪」的；讀不到就留著。清不掉（ssh 失敗等）不算成功，列進 kept_dirs。
-    let mut kept_dirs: Vec<Value> = Vec::new();
     for bot in in_project.iter().filter(|b| b.managed_by == "user") {
         match db::bot(&app.db, &bot.id).await {
             Ok(Some(b)) if b.deleted_at.is_some() => {
@@ -5432,6 +5469,71 @@ mod delete_bot_tests {
         sqlx::query("UPDATE projects SET host='ghost' WHERE id=?").bind(&e2.project_id).execute(&app2.db).await.unwrap();
         let out = body_of(delete_project(State(app2.clone()), Path(e2.project_id.clone())).await.unwrap()).await;
         assert_eq!(out["kept_dirs"], json!([{"bot_id": b2, "reason": "purge_failed"}]), "{out}");
+    }
+
+    /// 快照（鎖之前列的 bot）之後才被認領進專案的 child：以前不在快照裡，專案定案刪除後它的列仍是 `deleted_at IS NULL`——
+    /// UI 看不到、reconcile 也不掃（專案已刪），pane 與目錄永遠沒人收。定案之後要再列一次，連它一起軟刪。
+    #[tokio::test]
+    async fn a_child_adopted_after_the_snapshot_is_soft_deleted_with_the_project() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&b1, "alfa")]).await;
+        let late = db::ulid();
+        {
+            let (app, pid, late) = (app.clone(), e.project_id.clone(), late.clone());
+            // 快照與定案之間（持久 intent 寫完、config 還沒改）：另一條路認領了一顆新的 child。
+            crate::lifecycle::race_point::arm("delete_after_intent", &e.project_id, move || async move {
+                sqlx::query(
+                    "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+                     VALUES (?,?,'late-kid','claude','[]',0,1,'tok','child',?,?)",
+                )
+                .bind(&late)
+                .bind(&pid)
+                .bind(&b1)
+                .bind(db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+            });
+        }
+        delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap();
+        assert!(deleted(&app, &late).await, "專案刪了，快照之後才出現的 child 不能留成活列");
+    }
+
+    /// 同一個窗口提早一步：列完 bot、還沒拿鎖時被認領的 child。拿到鎖之後重列發現變了，放掉重來，這一顆就進了快照（有 intent、
+    /// 有鎖、有「都已停止」的檢查），而不是靠定案之後的補收。
+    #[tokio::test]
+    async fn a_child_adopted_before_the_locks_are_taken_joins_the_snapshot() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&b1, "alfa")]).await;
+        let early = db::ulid();
+        {
+            let (app, pid, early) = (app.clone(), e.project_id.clone(), early.clone());
+            crate::lifecycle::race_point::arm("delete_project_before_lock", &e.project_id, move || async move {
+                sqlx::query(
+                    "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, parent_bot_id, created_at)
+                     VALUES (?,?,'early-kid','claude','[]',0,1,'tok','child',?,?)",
+                )
+                .bind(&early)
+                .bind(&pid)
+                .bind(&b1)
+                .bind(db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+            });
+        }
+        delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap();
+        assert!(deleted(&app, &early).await);
+        let snap: String = sqlx::query_scalar("SELECT payload_json FROM intents WHERE subject_id = ? AND kind = 'delete_project'")
+            .bind(&e.project_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert!(snap.contains(&early), "重列之後它在持久 intent 的快照裡：{snap}");
     }
 
     // ---- #355 P3：刪除在定案之後（或之前）行程死掉，開機補完 ----

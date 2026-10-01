@@ -1494,7 +1494,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - 同一個資料目錄同時只准一顆 daemon（`daemon.lock` 的 `flock`），拿不到鎖就拒絕啟動，連預設 config 都不會寫出來。
 - 解析出來的資料目錄寫進 hook 的 argv（`--data-dir`）並注入本機 pane 的 `AM_DATA_DIR`，spool 跟著走；遠端則多一層 `instances/<slug>`。
 - 隔離實例不認領既有 pane（要在它底下重啟那顆 bot）。
-- `DELETE /api/bots/:id`、`DELETE /api/projects/:id`：目標此刻不在 config.toml → `409 {"error":"conflict","reason":"not_in_config"}`；除了這次要刪的 id 還有別的列會不見 → `409 … "reason":"delete_refused"`。兩者都什麼都不動（`DELETE /api/bots/:id` 不停 bot、不刪 child）。
+- `DELETE /api/bots/:id`、`DELETE /api/projects/:id`：目標此刻不在 config.toml → `409 {"error":"conflict","reason":"not_in_config"}`；除了這次要刪的 id 還有別的列會不見 → `409 … "reason":"delete_refused"`。`DELETE /api/projects/:id` 拿鎖之後重列專案裡的 bot，拿鎖途中又有 child 被認領就放掉重來（3 次仍在變 → `409 children_changed`）；定案之後再列一次，快照之後才出現的 child 一併軟刪（有 active run 的只軟刪、目錄留著，列在 `kept_dirs` `run_still_active`），不會留下專案已刪、`deleted_at` 仍為空的 child。兩者都什麼都不動（`DELETE /api/bots/:id` 不停 bot、不刪 child）。
 - `DELETE /api/projects/:id` 成功時一併清掉專案內 bot 的 runtime 目錄；清不掉的（遠端 ssh 失敗、主機不明、軟刪狀態讀不到）列在回應 `kept_dirs: [{bot_id, reason}]`（`purge_failed`／`delete_state_unreadable`），不能當成清掉了。
 - `DELETE /api/projects/:id` 也會把這個專案底下**還開著的任務**取消（issue #498），連同它們**還開著的交辦**逐件 `cancel`。任務多一則 `cancelled` 事件，payload 是 `{"reason":"project_deleted"}`（`GET /api/missions/{id}` 的事件串看得到為什麼被收）；已經完成／取消的任務一個字都不動。**不會**推 inbox（專案是使用者當下刪的），也**不會**因為某一筆收不掉就讓刪除回頭（只記 log）。專案之後又回到 config 也不會把任務救回來：取消是終態（SPEC §18.14）。
 - 只換 `listen` port **不算隔離**：2026-09-14 這樣起的第二顆開到正式 DB，被空 config 投影軟刪 15 顆 bot（SPEC §3.1）。
