@@ -47,9 +47,11 @@ export async function startHerdrUpdate(host: string, targetVersion: string): Pro
   }
 }
 
-/** 409／403／404 的 `reason` → 給人看的一句（API.md `POST /api/hosts/{name}/herdr-update`）。 */
+/** 409／403／404 → 給人看的一句（API.md §12.7b）。daemon 的 409／403 都帶寫好的 `message`，有就用它；這裡只是舊 daemon 或沒帶時的退路。 */
 export function herdrStartErrText(e: unknown, host: string): string {
   if (e instanceof ApiError) {
+    const human = e.body.message
+    if (typeof human === 'string' && human.trim()) return human.trim()
     if (e.status === 404 && !e.body.reason) return `這顆 daemon 還沒有 herdr 一鍵更新（HTTP 404），或不認得主機 ${host}`
     if (e.status === 405) return '這顆 daemon 還沒有 herdr 一鍵更新（HTTP 405），二進位比前端舊；要重建並重啟 daemon'
     switch (e.body.reason) {
@@ -59,15 +61,13 @@ export function herdrStartErrText(e: unknown, host: string): string {
         return `${host} 的 herdr session 跟別的 daemon 共用，不能從這裡重啟`
       case 'stale_target': {
         const cur = e.body.current_target
-        return `要裝的版本已經變了${typeof cur === 'string' && cur ? `（現在是 ${cur}）` : ''}，關掉框重開一次`
+        return typeof cur === 'string' && cur ? `要升的版本已經變成 ${cur}，關掉框重開一次` : '已經沒有等著升級的新版（可能剛升好了）'
       }
       case 'herdr_update_in_progress':
         return '已經有一次 herdr 更新在跑'
       case 'ui_only':
         return '只能從網頁按，Bot 不能自己觸發 herdr 更新'
     }
-    const human = e.body.message
-    if (typeof human === 'string' && human.trim()) return human.trim()
   }
   return e instanceof Error ? e.message : String(e)
 }

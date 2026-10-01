@@ -16,7 +16,7 @@ import type { UpstreamItem } from './upstreamUpdate'
 
 type Rec = Record<string, unknown>
 
-export type HerdrPhase = 'starting' | 'downloading' | 'waiting_idle' | 'stopping' | 'restarting' | 'resuming'
+export type HerdrPhase = 'starting' | 'downloading' | 'waiting_idle' | 'stopping' | 'restarting' | 'rolling_back' | 'resuming'
 
 export const HERDR_PHASE_LABEL: Record<HerdrPhase, string> = {
   starting: '準備更新',
@@ -24,10 +24,11 @@ export const HERDR_PHASE_LABEL: Record<HerdrPhase, string> = {
   waiting_idle: '等所有 Bot 閒下來',
   stopping: '停下 herdr',
   restarting: '重啟 herdr',
+  rolling_back: '新版起不來，換回舊版',
   resuming: '接回 Bot',
 }
 
-const PHASES = new Set<HerdrPhase>(['downloading', 'waiting_idle', 'stopping', 'restarting', 'resuming'])
+const PHASES = new Set<HerdrPhase>(['downloading', 'waiting_idle', 'stopping', 'restarting', 'rolling_back', 'resuming'])
 
 export interface HerdrUpdateActive {
   /** `''`＝POST 還沒回來。 */
@@ -46,7 +47,8 @@ export interface HerdrUpdateResult {
   from: string | null
   to: string | null
   reason: string | null
-  error: string | null
+  /** daemon 的 `detail`：給人看的失敗說明（`ok:false` 才有）。 */
+  detail: string | null
   resumed: (HerdrBotRef & { run_id: string })[]
   failed: (HerdrBotRef & { error: string })[]
   childrenLost: HerdrChildLost[]
@@ -77,7 +79,7 @@ export function parseHerdrDone(data: Rec): HerdrUpdateResult {
     from: str(pick(data, 'from')) || null,
     to: str(pick(data, 'to')) || null,
     reason: str(pick(data, 'reason')) || null,
-    error: str(pick(data, 'error')) || null,
+    detail: str(pick(data, 'detail')) || null,
     resumed: arr(pick(data, 'resumed')).flatMap((x) =>
       isRec(x) && str(pick(x, 'bot_id')) ? [{ bot_id: str(pick(x, 'bot_id')), name: str(pick(x, 'name')), run_id: str(pick(x, 'run_id')) }] : [],
     ),
@@ -88,12 +90,15 @@ export function parseHerdrDone(data: Rec): HerdrUpdateResult {
   }
 }
 
+/** daemon `herdr_upgrade.rs` 的 `reason`（API.md §12.7b）。`restart_failed` 以外都沒動到 server。 */
 const REASON: Record<string, string> = {
-  busy_timeout: '等了 30 分鐘還有 Bot 在忙，什麼都沒動',
-  restart_failed: '新版 herdr 起不來，已換回舊版',
+  install_path_unsupported: '現行 herdr 是 symlink 或找不到，不能原地換，什麼都沒動',
   download_failed: '下載新版失敗，什麼都沒動',
-  verify_failed: '下載的檔案版本不對，什麼都沒動',
-  interrupted: 'daemon 在更新途中重啟過',
+  version_mismatch: '下載的檔案版本不是目標版，什麼都沒動',
+  busy_timeout: '等了 30 分鐘還有 Bot 在忙，什麼都沒動',
+  maintenance_busy: '別人開著 herdr 維護窗口，什麼都沒動',
+  swap_failed: '換 binary 失敗，herdr 沒有重啟',
+  restart_failed: '新版 herdr 起不來，已換回舊版',
 }
 
 export function herdrReasonText(reason: string | null): string {
@@ -112,7 +117,7 @@ export function herdrDoneMessage(r: HerdrUpdateResult): string {
     return `${r.host} 的 herdr 已升到 ${up}${tail ? `；${tail}` : ''}（點 header 的 ✓ 看名單）`
   }
   const head = `${r.host} 的 herdr 沒有升級（${herdrReasonText(r.reason)}）`
-  return `${head}${r.error ? `：${r.error}` : ''}${tail ? `；${tail}` : ''}`
+  return `${head}${r.detail ? `：${r.detail}` : ''}${tail ? `；${tail}` : ''}`
 }
 
 /**

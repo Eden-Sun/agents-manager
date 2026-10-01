@@ -26,6 +26,7 @@ test('進度照階段走；看不懂的階段、別的 id 都不動', () => {
   assert.equal(herdrProgress(cur, { ...base, phase: 'downloading' }), cur)
   // 別的分頁按的：手上沒有也收。
   assert.equal(herdrProgress(null, { ...base, phase: 'waiting_idle' })?.phase, 'waiting_idle')
+  assert.equal(herdrProgress(cur, { ...base, phase: 'rolling_back' })?.phase, 'rolling_back')
 })
 
 test('done 解析名單，訊息講接回幾顆、沒接回、子 agent', () => {
@@ -39,7 +40,10 @@ test('done 解析名單，訊息講接回幾顆、沒接回、子 agent', () => 
   assert.match(herdrDoneMessage(r), /0\.9\.1 → 0\.9\.3；接回 2 顆，1 顆沒接回；1 個子 agent 已結束/)
   const bad = parseHerdrDone({ ...base, ok: false, reason: 'busy_timeout' })
   assert.match(herdrDoneMessage(bad), /沒有升級（等了 30 分鐘還有 Bot 在忙，什麼都沒動）/)
-  assert.match(herdrDoneMessage(parseHerdrDone({ ...base, ok: false, reason: 'weird', error: 'x' })), /（weird）：x/)
+  assert.match(herdrDoneMessage(parseHerdrDone({ ...base, ok: false, reason: 'weird', detail: 'x' })), /（weird）：x/)
+  // daemon 失敗時的說明在 `detail`（API.md §12.7b），`restart_failed` 照樣帶接回名單。
+  const rolled = parseHerdrDone({ ...base, ok: false, reason: 'restart_failed', detail: '2 分鐘沒回來', resumed: [{ bot_id: 'b1', name: 'am', run_id: 'r1' }] })
+  assert.match(herdrDoneMessage(rolled), /已換回舊版）：2 分鐘沒回來；接回 1 顆/)
 })
 
 test('快照對帳：undefined 不動、有一筆就採用、沒了就清掉，starting 不清', () => {

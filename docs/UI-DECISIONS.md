@@ -712,10 +712,11 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - **手機**跟 codex／claude 一樣併進合成的 ⌃⌃ 選單（第四項），各自打開原本的框。
 - 狀態放自己的 store（`store/herdrUpdate.ts`），不塞進 `useStore`：同時只會有一次，結果要留到人看完，跟快照替換無關。重整後靠
   `GET /api/state` 的 `herdr_updates` 接回進度；daemon 說沒在跑就清掉漏掉 done 留下的進度。
-- 驗證：`VITE_MOCK=1` 下 `__amMock.herdrUpdate()`（`{failOne: true}` 演一顆沒接回、`{reason: 'busy_timeout'}` 演整次沒做、`{hold: 'waiting_idle'}` 停在那一步）。
+- 驗證：`VITE_MOCK=1` 下 `__amMock.herdrUpdate()`（`{failOne: true}` 演一顆沒接回、`{reason: 'busy_timeout'}` 演整次沒做、`{reason: 'restart_failed'}` 演換回舊版、`{hold: 'waiting_idle'}` 停在那一步）。
+  失敗的說明用 daemon 的 `detail`；按鈕被 409 擋下時直接顯示 daemon 寫好的 `message`。herdr 沒有分診帳本，分析區塊只有「AGM 解析」那一段（沒派過就寫尚未分析）。
 
 ![桌機徽章](screenshots/herdr-update/desktop.png) ![確認框](screenshots/herdr-update/desktop-dialog.png) ![確認框（亮）](screenshots/herdr-update/desktop-dialog-light.png)
-![更新中](screenshots/herdr-update/desktop-progress.png) ![結果](screenshots/herdr-update/desktop-result.png)
+![更新中](screenshots/herdr-update/desktop-progress.png) ![結果](screenshots/herdr-update/desktop-result.png) ![換回舊版](screenshots/herdr-update/desktop-rollback-result.png)
 ![手機選單](screenshots/herdr-update/phone-menu.png) ![手機確認框](screenshots/herdr-update/phone-dialog.png) ![手機結果（一顆沒接回）](screenshots/herdr-update/phone-result.png)
 
 ## 已移交的專案：標「由 <host> 管理」、輸入框鎖住（2026-09-28，issue #708）

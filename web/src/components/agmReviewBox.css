@@ -1,5 +1,10 @@
 /* 更新框裡的「AGM 解析」區塊。載入順序在 styles.css 之後由元件自己 import。 */
+/* `--line`／`--surface-2`／`--muted` 主題裡從來沒定義過，一直掉回寫死的淺色預設——深色模式下整塊白底（2026-10-01）。
+   在這個區塊上對到主題 token，深淺色跟著主題走。 */
 .agm-review {
+  --line: var(--border);
+  --surface-2: var(--bg-sunken);
+  --muted: var(--text-dim);
   margin: 10px 0 4px;
   padding: 8px 10px;
   border: 1px solid var(--line, #e3e3e3);

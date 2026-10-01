@@ -26,26 +26,8 @@ const CHANGELOG: Record<string, { version: string; body: string }[]> = {
 }
 
 function triageRows(kind: string): Rec[] {
-  if (kind === 'herdr') {
-    return [
-      {
-        kind, version: '0.9.2', status: 'judged',
-        entries: [
-          { id: 'h1', text: 'Removed `pane.graphics.*`' },
-          { id: 'h2', text: 'Event subscriptions that fall too far behind now get an `events_lost` error' },
-        ],
-        verdicts: {
-          verdicts: [
-            { entry_id: 'h1', verdict: 'none', reason: '沒用到 pane.graphics', module: '' },
-            { entry_id: 'h2', verdict: 'guard', reason: '事件流落後會直接斷，要接住 events_lost 改走快照重對', module: 'herdr/events.rs' },
-          ],
-          issues: [{ entry_ids: ['h2'], title: 'herdr 0.9.2：事件訂閱落後改回 events_lost，要重訂閱並補一次快照（提防）', triage: 'guard' }],
-        },
-        issues: [],
-      },
-      { kind, version: '0.9.3', status: 'pending', entries: [{ id: 'h3', text: 'Agents can report their own resume command' }], verdicts: null, issues: [] },
-    ]
-  }
+  // daemon：herdr 還沒有分診規則，`GET /api/release-triage?kind=herdr` 回空的 rows（API.md）。
+  if (kind === 'herdr') return []
   if (kind === 'claude') {
     return [
       {
