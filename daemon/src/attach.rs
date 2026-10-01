@@ -203,12 +203,7 @@ pub async fn reconcile_orphans(app: &Arc<App>) -> usize {
     };
     let mut cleaned = 0;
     for (id, local_path, agent_path, host_name) in rows {
-        let _ = std::fs::remove_file(&local_path);
-        if let Some(host) = app.hosts.get(&host_name).await {
-            if !host.is_local() {
-                let _ = host.ssh_exec(&format!("rm -f {}", sh_quote(&agent_path))).await;
-            }
-        }
+        remove_files(app, &local_path, &agent_path, &host_name).await;
         match sqlx::query("DELETE FROM attachments WHERE id = ?").bind(&id).execute(&app.db).await {
             Ok(_) => cleaned += 1,
             Err(e) => tracing::warn!(id = %id, error = %e, "could not remove an orphaned attachment row"),
@@ -218,6 +213,80 @@ pub async fn reconcile_orphans(app: &Arc<App>) -> usize {
         tracing::info!(cleaned, "cleaned up orphaned (staging/failed) attachment rows left by a previous run");
     }
     cleaned
+}
+
+/// 刪一個附件的位元組：daemon 能讀的那份（本機 bot 就是專案裡那份、遠端 bot 是資料目錄裡的副本），遠端再 best-effort
+/// ssh 刪 agent 讀的那份。冪等，失敗只是留下一個沒有 row 的檔，不影響呼叫端。
+async fn remove_files(app: &Arc<App>, local_path: &str, agent_path: &str, host_name: &str) {
+    let _ = std::fs::remove_file(local_path);
+    if let Some(host) = app.hosts.get(host_name).await {
+        if !host.is_local() {
+            let _ = host.ssh_exec(&format!("rm -f {}", sh_quote(agent_path))).await;
+        }
+    }
+}
+
+/// 上傳了卻沒送出的附件（`ready`、沒有訊息引用）留多久。使用者貼圖到輸入框、當天回來送出的都夠；
+/// 送出時才 `resolve`＋`bind`（幾毫秒內），所以這個窗口只會碰到「上傳完放著不管」的。
+pub const UNREFERENCED_KEEP_SECS: i64 = 24 * 3600;
+/// 例行掃的間隔（開機另外跑一次）。
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+/// 清掉上傳了卻從沒送出的附件：`ready`、`message_id` 空、放超過 `keep_secs`、**而且沒有任何訊息的 `attachments_json` 點名它**
+/// （舊版兩步綁定可能留下「訊息點名了、`message_id` 卻沒設」的列）。被訊息引用的絕不刪；`staging`／`failed` 是
+/// [`reconcile_orphans`] 的事。回清掉幾筆。
+///
+/// 先刪 row 才刪檔：那一句 DELETE 自己帶同樣的條件，跟 [`bind`] 搶同一列——bind 先贏，這裡 0 rows、什麼檔都不動；
+/// 這裡先贏，才刪檔。檔案刪不掉只留下一個沒有 row 的檔（沒有人引用它），不會有「row 在、檔沒了」。
+pub async fn sweep_unreferenced(app: &Arc<App>, keep_secs: i64) -> usize {
+    let cutoff = db::iso_in(-keep_secs);
+    let created = db::ts_sql("a.created_at");
+    let named = "NOT EXISTS (SELECT 1 FROM messages m WHERE m.attachments_json LIKE '%' || a.id || '%')";
+    let rows: Vec<(String, String, String, String)> = match sqlx::query_as(&format!(
+        "SELECT a.id, a.local_path, a.agent_path, a.host FROM attachments a
+          WHERE a.state = 'ready' AND a.message_id IS NULL AND {created} <= ? AND {named}"
+    ))
+    .bind(&cutoff)
+    .fetch_all(&app.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list unreferenced attachments");
+            return 0;
+        }
+    };
+    let mut swept = 0;
+    for (id, local_path, agent_path, host_name) in rows {
+        let won = sqlx::query(&format!(
+            "DELETE FROM attachments AS a WHERE a.id = ? AND a.state = 'ready' AND a.message_id IS NULL AND {named}"
+        ))
+        .bind(&id)
+        .execute(&app.db)
+        .await;
+        match won {
+            Ok(r) if r.rows_affected() == 1 => {
+                remove_files(app, &local_path, &agent_path, &host_name).await;
+                swept += 1;
+            }
+            Ok(_) => {} // 剛好被 bind 搶走：它現在有訊息引用了。
+            Err(e) => tracing::warn!(id = %id, error = %e, "could not remove an unreferenced attachment row"),
+        }
+    }
+    if swept > 0 {
+        tracing::info!(swept, keep_hours = keep_secs / 3600, "removed uploaded attachments no message ever referenced");
+    }
+    swept
+}
+
+/// 開機跑一次、之後每 6 小時一次：常駐好幾天的 daemon 也要收。
+pub fn spawn_sweep(app: Arc<App>) {
+    tokio::spawn(async move {
+        loop {
+            sweep_unreferenced(&app, UNREFERENCED_KEEP_SECS).await;
+            tokio::time::sleep(SWEEP_EVERY).await;
+        }
+    });
 }
 
 fn write_gitignore_local(dir: &str) {
@@ -540,6 +609,59 @@ mod tests {
             sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE bot_id = ?").bind(&bot.id).fetch_one(&env.app.db).await.unwrap();
         assert_eq!(remaining, 0);
         assert_eq!(reconcile_orphans(&env.app).await, 0, "already cleaned up: a second pass is a no-op");
+    }
+
+    /// 上傳了卻從沒送出的附件（`ready`、沒有任何訊息引用）以前永遠不清：檔案留在專案的 `.agents-manager/attachments/`、
+    /// row 留在 DB（正式庫 50 筆、近 50 MB）。依保留期清掉；**被訊息引用的絕不刪**——`message_id` 有值的、
+    /// 或訊息的 `attachments_json` 點名它的（舊版兩步綁定留下的）、還在 `staging`／`failed` 的（那是 `reconcile_orphans` 的事）都不碰。
+    #[tokio::test]
+    async fn unreferenced_ready_attachments_are_swept_after_the_retention_but_referenced_ones_never() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
+        let mut made = std::collections::HashMap::new();
+        for name in ["old-unbound", "fresh-unbound", "old-bound", "old-named", "old-staging"] {
+            let a = save(&env.app, &bot.id, &format!("{name}.png"), "image/png", name.as_bytes()).await.unwrap();
+            made.insert(name, a);
+        }
+        let three_days_ago = db::iso_in(-3 * 86_400);
+        for name in ["old-unbound", "old-bound", "old-named", "old-staging"] {
+            sqlx::query("UPDATE attachments SET created_at = ? WHERE id = ?").bind(&three_days_ago).bind(&made[name].id).execute(&env.app.db).await.unwrap();
+        }
+        sqlx::query("UPDATE attachments SET state = 'staging' WHERE id = ?").bind(&made["old-staging"].id).execute(&env.app.db).await.unwrap();
+        let message = |content: String| {
+            let (db_, conv) = (env.app.db.clone(), conv.clone());
+            async move {
+                let id = db::ulid();
+                sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'user',?,'web',?)")
+                    .bind(&id).bind(conv).bind(content).bind(db::now()).execute(&db_).await.unwrap();
+                id
+            }
+        };
+        let bound_msg = message("with a bound attachment".into()).await;
+        bind(&env.app, &bound_msg, &[made["old-bound"].clone()]).await.unwrap();
+        // 舊版兩步綁定：訊息的 attachments_json 點名了它，attachments.message_id 卻沒設到。
+        let named_msg = message("legacy".into()).await;
+        sqlx::query("UPDATE messages SET attachments_json = ? WHERE id = ?")
+            .bind(serde_json::to_string(&[made["old-named"].clone()]).unwrap())
+            .bind(&named_msg)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 1, "只有 old-unbound");
+        let alive = |name: &str| {
+            let (db_, id, path) = (env.app.db.clone(), made[name].id.clone(), made[name].path.clone());
+            async move {
+                let row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE id = ?").bind(id).fetch_one(&db_).await.unwrap();
+                (row == 1, std::path::Path::new(&path).exists())
+            }
+        };
+        assert_eq!(alive("old-unbound").await, (false, false), "row 與檔案都清掉");
+        for kept in ["fresh-unbound", "old-bound", "old-named", "old-staging"] {
+            assert_eq!(alive(kept).await, (true, true), "{kept} 不能動");
+        }
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 0, "冪等");
     }
 
     /// issue #88：daemon 在 `INSERT ... 'staging'` 之後、`UPDATE ... 'ready'` 之前死掉（或 `save()` 自己
