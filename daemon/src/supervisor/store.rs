@@ -2201,7 +2201,9 @@ pub const COMPACT_HANDLED_AFTER_SECS: i64 = 24 * 3600;
 pub const COMPACT_HANDLED_MIN_BYTES: i64 = 16 * 1024;
 
 /// 把「處理完、放超過 `older_than_secs`、payload 超過 `min_bytes`」的 inbox 列的 payload 換成
-/// `{"compacted":true,"original_bytes":N}`，回改了幾列。
+/// `{"compacted":true,"original_bytes":N}`（加上原本就有的 `fingerprint`／`from_bot_id`，沒有的不補），回改了幾列。
+/// 這兩個要留：`bot_request` 同一個 `client_request_id` 重送時，重播判斷看 `fingerprint`（壓掉就變成「同 id 換內容」的 409），
+/// `reply_to` 的歸屬比對看 `from_bot_id`；json_patch 對 NULL 是「刪掉這個鍵」，所以缺的欄位不會變成 `null`。
 ///
 /// 處理完的列沒有任何清理：正式庫 10 天 166 筆 `health_changed`、43 MB，是整顆 DB 最大的一塊。**不刪列**——
 /// `event_key` 是去重鍵，`controller::sweep_missing_events` 看到「已結算卻沒有事件」的交辦會再補一筆，刪了會被重新生出來。
@@ -2211,7 +2213,10 @@ pub async fn compact_handled_payloads(pool: &SqlitePool, older_than_secs: i64, m
     let ts = crate::db::ts_sql("updated_at");
     let res = sqlx::query(&format!(
         "UPDATE supervisor_inbox
-            SET payload_json = json_object('compacted', json('true'), 'original_bytes', length(payload_json))
+            SET payload_json = json_patch(
+                    json_object('compacted', json('true'), 'original_bytes', length(payload_json)),
+                    json_object('fingerprint', json_extract(payload_json, '$.fingerprint'),
+                                'from_bot_id', json_extract(payload_json, '$.from_bot_id')))
           WHERE state = 'handled' AND length(payload_json) > ? AND {ts} <= ?"
     ))
     .bind(min_bytes)

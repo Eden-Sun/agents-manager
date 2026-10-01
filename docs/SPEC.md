@@ -4247,6 +4247,8 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 `health_changed` 的入列也看這一半：debounce 的鍵是「巡檢嚴重度／協調者嚴重度」，路由表在任一半不是 `healthy` 時叫醒巡檢——只算進頂層而不入列的話，UI 變 degraded 卻沒有人被叫醒。`responder_bot_missing` 的 event_key 也加了小時格，
 不再是「一輩子只提醒一次」（`push_inbox` 是 `INSERT OR IGNORE`）。
 
+**處理完的大 payload 會壓成摘要**（`store::compact_handled_payloads`，每小時）：`handled`、`updated_at` 超過 24 小時、payload 超過 16 KB 的 inbox 列，payload 換成 `{"compacted":true,"original_bytes":N}`（原本有 `fingerprint`／`from_bot_id` 的照留）；列、`event_key`、狀態、時間都留著（`event_key` 是去重鍵，`sweep_missing_events` 看到沒有事件的已結算交辦會補一筆）。`pending`／`delivered` 不碰。讀 `handled` 列 payload 的路徑只能依賴那兩個欄位：`bot_request` 同一個 `client_request_id` 的重播判斷看 `fingerprint`、`reply_to` 的歸屬比對看 `from_bot_id`。
+
 **一顆總管、一個專案**（使用者 2026-09-16）：協調者最早自成一個專案，因為一個專案只有一個 path；但側欄上「AGM」與「AGM-responder」分成兩塊看起來像兩顆總管。
 現在協調者的 bot 掛在巡檢的專案底下，工作目錄改由 `bots.cwd` 表達（`lifecycle::bot_cwd` 先看它，再退回專案的 path）——目錄仍然分開，只是不再自成一個專案。
 `responder::merge_into_manager_project` 在 daemon 啟動與 `responder setup` 時各跑一次，把舊安裝搬過去：同一顆 bot（id 不變，對話歷史不斷）、

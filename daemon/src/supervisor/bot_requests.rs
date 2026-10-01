@@ -946,6 +946,28 @@ pub(crate) mod flow_tests {
         assert!(err.is_err());
     }
 
+    /// 處理完 >24h 的大 payload 會被壓成摘要（`store::compact_handled_payloads`）。同一個 request id 一天之後重送——
+    /// 重播判斷要看 payload 裡的 `fingerprint`：壓掉之後讀不到，就會把「一模一樣的重送」誤判成
+    /// 「同一個 request id 換了內容」回 409（申請端以為自己的申請沒進任何人的佇列）。
+    #[tokio::test]
+    async fn a_replay_of_a_compacted_request_is_still_a_replay() {
+        let app = app().await;
+        configure_responder(&app).await;
+        let text = format!("請核准重建 abc123\n{}", "細節 ".repeat(8 * 1024)); // > 16 KB
+        let first = intercept(&app, "patrol", "w1", &text, Some("r-big"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
+        let id = first["inbox_event_id"].as_str().unwrap().to_string();
+        roles::ack(&app.db, &id, Role::Responder, true).await.unwrap();
+        sqlx::query("UPDATE supervisor_inbox SET updated_at=? WHERE id=?").bind(crate::db::iso_in(-2 * 86_400)).bind(&id).execute(&app.db).await.unwrap();
+        let n = store::compact_handled_payloads(&app.db, store::COMPACT_HANDLED_AFTER_SECS, store::COMPACT_HANDLED_MIN_BYTES).await.unwrap();
+        assert_eq!(n, 1, "前提：這一筆被壓掉了");
+
+        let again = intercept(&app, "patrol", "w1", &text, Some("r-big"), &[], true, "api", ReplyMark::default()).await.unwrap().unwrap();
+        assert_eq!((again["duplicate"].as_bool(), again["inbox_event_id"].as_str()), (Some(true), Some(id.as_str())), "{again}");
+        // 壓掉之後內容不同的重用仍然要擋。
+        let err = intercept(&app, "patrol", "w1", "完全不同的一句", Some("r-big"), &[], true, "api", ReplyMark::default()).await.unwrap_err();
+        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "request_mismatch"), "{err:?}");
+    }
+
     /// 協調者的 bot 被刪掉之後，申請仍然排給它（不倒回巡檢），狀態說得出是 `missing`，
     /// 並且巡檢會收到一則「它不見了」。
     #[tokio::test]
