@@ -597,11 +597,20 @@ fn prompt_texts_match(left: &str, right: &str) -> bool {
     })
 }
 
+/// 遠端 `hook.sh` 塞進 Stop payload 的鍵：本機 transcript 最後一則使用者訊息（`setup.rs` 的 `REMOTE_HOOK_SH_TEMPLATE`）。
+const CARRIED_USER_TEXT: &str = "agm_user_text";
+
 /// 這一回合的使用者訊息原文：codex 的 hook 直接帶；claude 的 Stop 沒帶，從 transcript 尾巴找最後一則。
 /// 讀不到就是 `None`（沒有證據，呼叫端照舊認領）。
-async fn hook_user_text(from_hook: Option<&str>, transcript_path: Option<&str>) -> Option<String> {
+///
+/// 遠端 bot 的 transcript 在那台機器上、這裡讀不到（issue #753）：遠端 `hook.sh` 在 spool 前從**本機** transcript 讀出同一則，
+/// 放在 payload 的 [`CARRIED_USER_TEXT`]。優先於讀檔：帶著的是 hook 當下讀的，檔案路徑在這台機器上可能指到別的東西。
+async fn hook_user_text(from_hook: Option<&str>, payload: &Value, transcript_path: Option<&str>) -> Option<String> {
     if let Some(u) = from_hook.map(str::trim).filter(|s| !s.is_empty()) {
         return Some(u.to_string());
+    }
+    if let Some(u) = payload.get(CARRIED_USER_TEXT).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(crate::lifecycle::pasted_content::original(u).into_owned());
     }
     let path = std::path::PathBuf::from(transcript_path?);
     tokio::task::spawn_blocking(move || last_transcript_user_text(&path)).await.ok().flatten()
@@ -1207,7 +1216,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 答案不能掛到原本那則，更不能順手把它標成「已送達」（第二輪 review 送達線 #3）。看不到使用者訊息時照舊認領。
             let (target, user) = match target {
                 Some(t) if t.delivery == "unknown" => {
-                    let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
+                    let seen = hook_user_text(user.as_deref(), &body.payload, transcript_path.as_deref()).await;
                     let sent = with_supplements(app, &t.id, t.prompt_text.as_deref()).await?;
                     if answers_none_of(sent.as_deref(), seen.as_deref()) {
                         tracing::info!(turn = %t.id, bot = %bot.id, "hook 的使用者訊息不是這一筆 unknown 的 prompt：不認領，記成外部回合");
@@ -1222,7 +1231,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 Some(t) => {
                     if let Some(r) = &run {
                         if let Some(late) = recent_fallback_turn(app, &r.id).await? {
-                            let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
+                            let seen = hook_user_text(user.as_deref(), &body.payload, transcript_path.as_deref()).await;
                             let ours = with_supplements(app, &t.id, t.prompt_text.as_deref()).await?;
                             let late_prompt = with_supplements(app, &late.id, turn_prompt(app, &late).await?.as_deref()).await?;
                             if answers_none_of(ours.as_deref(), seen.as_deref())
@@ -1306,7 +1315,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     // 跟上面 unknown 那條同一個判斷（review3 c1 L13）：hook 帶來的使用者訊息若是**別句**
                     // （使用者改到 pane 裡直接打、herdr 卡 working 沒開外部回合），答案屬於那一句，不能補進 T1、
                     // 更不能把 T1 標成 completed。對不上就往下記成外部回合；看不到使用者訊息時照舊補。
-                    let seen = hook_user_text(user.as_deref(), transcript_path.as_deref()).await;
+                    let seen = hook_user_text(user.as_deref(), &body.payload, transcript_path.as_deref()).await;
                     let prompt = with_supplements(app, &t.id, turn_prompt(app, &t).await?.as_deref()).await?;
                     if answers_none_of(prompt.as_deref(), seen.as_deref()) {
                         tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
@@ -2422,6 +2431,68 @@ mod external_claim_tests {
 
         let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
         assert_eq!((turn.status.as_str(), turn.delivery.as_str()), ("completed", "ok"));
+    }
+
+    /// issue #753：遠端 bot 的 Stop 比備援晚 0.1–0.3 秒到，備援已把畫面抓到的字存成回覆。遠端 transcript 在 agm-host 讀不到，
+    /// Stop 本身又不帶使用者訊息，以前 `seen=None` → 不算同一回合 → 真回覆被丟。遠端 `hook.sh` 現在在 spool 前從本機 transcript
+    /// 把最後一則使用者訊息塞進 payload（`agm_user_text`）：對得上才蓋；對不上（別句）或沒帶都不蓋。
+    #[tokio::test]
+    async fn a_remote_stop_that_carries_the_users_text_replaces_the_fallback_reply() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", "現在部 demo").await;
+        sqlx::query("UPDATE turns SET status='completed_fallback', delivery='ok', completed_at=? WHERE id=?")
+            .bind(db::now())
+            .bind(&turn_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let fb = db::ulid();
+        sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'assistant','Bash(herdr agent get …)','terminal_fallback',?)")
+            .bind(&fb)
+            .bind(&conv)
+            .bind(&turn_id)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let stop = |sid: &str, carried: Option<&str>| {
+            let mut payload = json!({
+                "hook_event_name": "Stop",
+                "session_id": sid,
+                "prompt_id": db::ulid(),
+                // m4p 的路徑：agm-host 讀不到。
+                "transcript_path": "/Users/m4p/.claude/projects/x/s.jsonl",
+                "last_assistant_message": "已經交給 memleak 排查，先看這幾點",
+            });
+            if let Some(t) = carried {
+                payload["agm_user_text"] = json!(t);
+            }
+            HookBody { bot_id: bot_id.clone(), provider: "claude".into(), payload, received_at: None, truncated: false, run_id: None }
+        };
+        let reply = || async {
+            sqlx::query_as::<_, (String, String)>("SELECT content, source FROM messages WHERE id=?").bind(&fb).fetch_one(&app.db).await.unwrap()
+        };
+
+        // 沒帶證據（舊版 hook.sh、沒有 python3）：照舊不蓋。
+        process(&app, &stop("s1", None)).await.unwrap();
+        assert_eq!(reply().await.1, "terminal_fallback", "沒有證據不蓋");
+        assert_eq!(turn_row(&app, &turn_id).await.status, "completed_fallback");
+
+        // 每個事件各自對上同一筆備援回合：清掉前一則記下的 native id（它是「這一回合已有 hook 來過」的去重鑰匙）。
+        let forget_native = || async { sqlx::query("UPDATE turns SET native_session_id=NULL, native_turn_id=NULL WHERE id=?").bind(&turn_id).execute(&app.db).await.unwrap() };
+        forget_native().await;
+        // 帶的是別句：答案不是這一回合的，不蓋。
+        process(&app, &stop("s2", Some("完全不同的另一句話"))).await.unwrap();
+        assert_eq!(reply().await.1, "terminal_fallback", "別句不蓋");
+
+        forget_native().await;
+        // 帶的就是這一回合的 prompt：蓋成 hook 原文。
+        process(&app, &stop("s3", Some("現在部 demo"))).await.unwrap();
+        assert_eq!(reply().await, ("已經交給 memleak 排查，先看這幾點".to_string(), "hook".to_string()));
+        assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
+        let on_turn = replies(&app, &conv).await.into_iter().filter(|(t, _)| t.as_deref() == Some(turn_id.as_str())).count();
+        assert_eq!(on_turn, 1, "這一回合不會變成兩則（別句那則在它自己的外部回合上）");
     }
 
     /// 備援剛把回合關掉、沒存回覆（這個 run 已經沒有 in-flight 回合）。

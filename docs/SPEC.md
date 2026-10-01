@@ -560,6 +560,9 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   一直沒人選就走 §4.3b（blocked 的不收；herdr 判 idle 的照 §4.3b 寫系統說明收尾，不存畫面）。
 - **執行**：CAS `UPDATE turns SET status='completed_fallback' WHERE id=? AND status='in_flight'`，成功才 `agent.read {source: recent_unwrapped, lines: 200}`，
   取游標（`last_read_revision` + 已見文字尾端 hash）之後的內容，依 provider 抽回覆：Claude `⏺ ` 開頭、Codex `• ` 開頭；grok 無標記（§12.3）。
+- **Claude 取最後一段文字、不取工具呼叫**（#753）：回合結束時畫面最底的 `⏺` 常是工具呼叫（`⏺ Bash(…)`＋`⎿` 輸出），真正的回答在它上面。
+  `capture::claude::extract_reply` 取**最後一個非工具呼叫的 `⏺` 段**，並收在它後面的下一個工具呼叫之前。工具呼叫認結構不認工具名：
+  `名字(…)` 且整行收在 `)`，或下面第一行非空的是 `⎿`；回覆文字自己寫出 `parse(input) 會回傳…` 兩條都不中。整個回合只有工具呼叫（被中斷）時沒有更好的可取，照舊取最後一個 `⏺`。
 - **Claude 回覆與 chrome 的邊界**（#661／#662／#663）：輸入框以真畫面為準（`────`／`❯`／`────`，狀態列與 `⏵⏵ bypass permissions` 在框下）。
   回覆收到框的上緣為止；緊貼上緣、中間沒有空行的活動列／完成列才是狀態區。框以上的 markdown 表格（`│`）、水平線（`---`）、
   以及 `⚠`／`✗`／`✘`／`⏵`／`Tip:` 開頭的句子都留在回覆裡。`still_busy` 只看這個狀態區（沒有輸入框時才退回單行活動列）；
@@ -571,7 +574,7 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   「（終端太窄，輸出被切成單字元而無法辨識；把 herdr 的 pane 拉寬一點就會恢復）」。不猜。
 - 存成 assistant Message `source = terminal_fallback`、`incomplete = 1`。**晚到的 hook 沒有證據時不覆蓋**（去重丟棄並 log），避免跨回合錯配。
   **有證據是同一回合就取代**（2026-09-29 使用者：遠端 hook 走 spool 晚 25 秒到，備援只抓到最後一段、還夾著 `✻ Crunched …` 狀態列）：
-  證據＝hook 看得到的使用者訊息對上這回合的 prompt，或 hook 要收的 in-flight 回合 CAS 輸給備援。這回合的 assistant 訊息**全是備援抓的**時，
+  證據＝hook 看得到的使用者訊息對上這回合的 prompt（遠端 bot 靠 `hook.sh` 帶來的 `agm_user_text`，§11.4.2；沒帶就是沒有證據），或 hook 要收的 in-flight 回合 CAS 輸給備援。這回合的 assistant 訊息**全是備援抓的**時，
   最新那則原地改成 hook 的原文（id 不變、`source = hook`、`incomplete = 0`）、回合 `completed_fallback → completed`，再推一次同 id 的
   `message_added`（前端同 id、內容不同就換掉，`store/lists.ts` 的 `upsertSorted`）。已有 hook 寫的回覆就不動。
   **例外**：那筆 Turn 若一則 assistant Message 都沒有，晚到的 hook 是唯一答案 → 寫進去並把 Turn 改 `completed`（grok 思考時畫面就是空的 `❯`，
@@ -2698,6 +2701,11 @@ label = "foo@m4p"
 | `grok` | stdin | `session_start` → 只 `report-agent-session`；`stop` 且 `end_turn` 且 `stopHookActive=false` → idle；`shutdown` 不報 | 寫 |
 | `statusline` | stdin | 不報 | 不進 spool（§11.4.5） |
 
+- **Stop 帶本機 transcript 的最後一則使用者訊息**（#753）：claude 的 Stop payload 沒有使用者訊息，遠端 transcript 路徑（`/Users/…`）在 agm-host 讀不到，
+  遲到的 Stop 就證明不了「是備援已關掉的那一回合」、真回覆被丟。所以 spool 前、`claude` 的 `Stop` 事件（且沒被截斷）、有 `python3` 時，腳本從**本機** transcript 尾端
+  512 KiB 找最後一則人打的使用者訊息（跳過 `isMeta`、含 `tool_result` 的條目；規則同 `lifecycle::transcript_user_text`），放進 payload 的 `agm_user_text`（超過 64 KiB 就不帶，免得截半截的 `<pasted_content>` 對不上）。
+  `hookrecv::hook_user_text` 的順序：hook 直接帶的 → `agm_user_text` → 讀本機 `transcript_path`。沒有 `python3`、讀不到檔、不是 Stop：payload 原樣，daemon 照舊「沒證據不蓋」。
+  **正在跑的遠端 bot 要等它自己重啟才換到新腳本**（上一點）。
 - **腳本不做語意判斷**：只用最粗的字串比對決定要不要報 idle，其餘照寫 spool，分類只在 `hookrecv::classify`。遠端腳本沒有測試；漏報最多晚一點被掃到，錯分類會吃掉訊息。
 - **先寫 spool，再 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated, run_id}`；`run_id` 取 `AM_RUN_ID`、只留 `[A-Za-z0-9_-]`，沒有就是空字串）。每一則寫進 `hook-spool.d/` 底下自己的檔（暫存檔寫完再 `mv` 成 `*.json`）；drain 只讀 `*.json`，寫到一半的 `.tmp.*` 碰不到。超過 1 MiB 被截斷時 payload 不再原樣嵌進去（半截物件仍以 `{` 開頭，整行會變無效 JSON）：改包成 `{"raw":"..."}`，`truncated` 仍是 `true`（#653）。舊的 `hook-spool.jsonl` 只留給還沒換腳本的那一輪，drain 仍會收。
 - `report-agent` 欄位：`$HERDR_PANE_ID`（沒有就跳過上報）；`--source agents-manager:<bot_id>`；`--agent <kind>`；`--state` 只送 `idle`（`working` 交給終端偵測，硬報會互蓋）；
@@ -2739,7 +2747,7 @@ label = "foo@m4p"
 - **重複事件**：同一 bot 的 drain 有 1 秒合併窗，窗內第二次觸發只記「還要再跑一次」。
 - **事件先到、spool 後寫**：拿不到 → T+2 秒再 drain 一次（早於 5 秒的終端備援），仍沒有就讓備援接手。
 - **事件整個遺失**：每台已連線 host 每 30 秒掃「有 in-flight Turn 或 spool 檔存在」的 bot 做 drain（一台一次 ssh，腳本內迴圈所有 bot 目錄）；host 重連與啟動對帳對每個 bot drain 一次（`replay_host`）。
-- **遲到的 hook**：對應 Turn 已 `completed_fallback` → 依 §4.3：已有回覆才丟棄只 log，一則都沒有就補上。
+- **遲到的 hook**：對應 Turn 已 `completed_fallback` → 依 §4.3：已有回覆的，帶得出「同一回合」證據（遠端靠 `agm_user_text`，§11.4.2）就以原文取代備援那則，沒有證據才丟棄只 log；一則都沒有就補上。
 - **bot 已刪除**：`process_locked` 擋 `deleted_at`；遠端 bot 目錄在刪除時搬進遠端 `bots-trash/`。
 - **收下了但沒處理完**：列留在 `hook_events`（`processed_at IS NULL`），daemon 重啟後 worker 第一件事就是把它們補做完（§4.4b）。
 - **host 斷線期間**：hook 照寫本機檔，重連後 `replay_host` 補進來。

@@ -30,19 +30,26 @@ impl Capture for ClaudeCapture {
         let marker = "⏺ ";
         let lines: Vec<&str> = text.lines().collect();
         let after_echo = after_last_prompt_echo(&lines);
-        let start = after_echo
+        let last_marker = after_echo
             + lines[after_echo..]
                 .iter()
                 .rposition(|l| l.trim_start().starts_with(marker))?;
+        // 回合結束時畫面最底的 `⏺` 常是工具呼叫（issue #753）：回覆是它上面最後一段文字，而且收在下一個工具呼叫之前。
+        // 整回合只有工具呼叫（被中斷）就沒有更好的可取，照舊取最後一個 `⏺`。
+        let last_text = (after_echo..=last_marker).rfind(|&i| lines[i].trim_start().starts_with(marker) && !is_tool_call_row(&lines, i));
+        let start = last_text.unwrap_or(last_marker);
         let mut out: Vec<String> = Vec::new();
         // 回覆收到輸入框上緣為止。框的位置用真畫面：規則線夾著 `❯`（`claude-2.1.281-feedback-survey.txt`）。
         // 緊貼上緣的那幾行是狀態列（spinner／done），不是回覆。框以上的 `│`、`---`、⚠ 都是內容。
         let cut = composer_top(&lines).filter(|i| *i > start).unwrap_or(lines.len());
         let keep_until = status_zone_start(&lines, cut);
-        for line in &lines[start..keep_until] {
+        for (i, line) in lines.iter().enumerate().take(keep_until).skip(start) {
             let t = line.trim_end();
             let s = t.trim_start();
             if s.starts_with('╭') || s.starts_with('╰') || s.starts_with('▔') {
+                break;
+            }
+            if last_text.is_some() && s.starts_with(marker) && is_tool_call_row(&lines, i) {
                 break;
             }
             if is_update_banner(s) || is_agents_md_notice(s) {
@@ -104,6 +111,24 @@ impl Capture for ClaudeCapture {
         cut.push('…');
         Some(cut)
     }
+}
+
+/// `⏺` 開頭的這一行是工具呼叫（`⏺ Bash(herdr agent get …)`），不是助手的文字。認結構不認工具名：
+/// 名字加 `(`、整行收在 `)`（長參數被畫成 `…)`），或下面第一行非空的就是 `⎿` 輸出。
+/// 回覆文字自己寫出 `parse(input) 會回傳…` 兩個條件都不中。
+fn is_tool_call_row(lines: &[&str], i: usize) -> bool {
+    let s = lines[i].trim();
+    let body = s.strip_prefix("⏺").unwrap_or(s).trim_start();
+    let named_call = body.split_once('(').is_some_and(|(name, _)| {
+        name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || "_.:-".contains(c))
+    }) && body.ends_with(')');
+    named_call
+        || lines[i + 1..]
+            .iter()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty())
+            .is_some_and(|l| l.starts_with('⎿'))
 }
 
 /// 這一行是 spinner 開頭嗎。`*` 也是 spinner 的一格，但同時是回覆裡的 markdown 項目、程式碼區塊的 ` * 註解`：
@@ -422,5 +447,41 @@ mod reply_boundary_tests {
         assert!(ClaudeCapture.still_busy(baking));
         // codex 的中斷提示沒有經過時間，不是 claude 的活動列。
         assert!(!ClaudeCapture.still_busy("• Working (🤖 • esc to interrupt)"));
+    }
+
+    /// issue #753：回合最後一段是工具呼叫（`⏺ Bash(…)`＋它的 `⎿` 輸出）時，備援以前抓「畫面上最後一個 `⏺`」，
+    /// 存成回覆的是工具呼叫原文，真正的文字回答在上面一段、整段沒進網頁。取最後一段**文字**，並收在下一個工具呼叫之前。
+    #[test]
+    fn the_last_text_block_wins_over_a_trailing_tool_call() {
+        let screen = format!(
+            "❯ 現在部 demo\n⏺ Bash(herdr agent get cf-1)\n  ⎿  status: working\n\n⏺ 已經交給 memleak 排查，\n  先看這幾點。\n\n⏺ Bash(herdr agent get cf-2 --json)\n  ⎿  {{\"status\": \"idle\"}}\n     … +3 lines (ctrl+o to expand)\n{COMPOSER}"
+        );
+        let reply = ClaudeCapture.extract_reply(&screen).unwrap();
+        assert_eq!(reply, "已經交給 memleak 排查，\n  先看這幾點。", "{reply}");
+    }
+
+    /// 最後一段就是文字時照舊（前面的工具呼叫與它們的輸出不進回覆）；收在工具呼叫之前的規則不影響它。
+    #[test]
+    fn a_text_block_after_tool_calls_is_still_the_reply() {
+        let screen = format!(
+            "❯ 看一下\n⏺ Read(src/main.rs)\n  ⎿  Read 120 lines\n\n⏺ Update(src/main.rs)\n  ⎿  Updated\n\n⏺ 改好了，三處。\n{COMPOSER}"
+        );
+        assert_eq!(ClaudeCapture.extract_reply(&screen).unwrap(), "改好了，三處。");
+    }
+
+    /// 這一回合只有工具呼叫（沒有任何文字段，例如被中斷）：沒有更好的可取，維持原本的行為。
+    #[test]
+    fn a_turn_with_only_tool_calls_keeps_the_last_one() {
+        let screen = format!("❯ 跑\n⏺ Bash(sleep 60)\n  ⎿  Running…\n{COMPOSER}");
+        let reply = ClaudeCapture.extract_reply(&screen).unwrap();
+        assert!(reply.starts_with("Bash(sleep 60)"), "{reply}");
+    }
+
+    /// 回覆文字自己長得像函式呼叫（沒有 `⎿` 輸出跟在後面）不是工具呼叫。
+    #[test]
+    fn a_reply_that_mentions_a_call_is_not_a_tool_call() {
+        let screen = format!("❯ 怎麼寫\n⏺ parse(input) 會回傳 Option，\n  記得處理 None。\n{COMPOSER}");
+        let reply = ClaudeCapture.extract_reply(&screen).unwrap();
+        assert!(reply.contains("記得處理 None。"), "{reply}");
     }
 }
