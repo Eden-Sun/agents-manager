@@ -208,5 +208,14 @@ check "點名" "failed ../escape.sh" "$OUT"
 equals "目錄外的檔沒動" "$(sed -n 2p "$ROOT/escape.sh")" "echo outside"
 teardown
 
+# 13. 同一秒內連裝兩次（兩個 ref）：第二次的備份不能蓋掉第一次留下的原始檔。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+equals "第一次裝 exit 0" "$(run)" "0"
+bump a-kick.sh $'#!/bin/bash\necho a-v3\n'
+equals "第二次裝 exit 0" "$(run)" "0"
+equals "兩份備份都在（v1 沒被 v2 蓋掉）" "$(cat "$DIR"/ops-install-backups/*/bin/a-kick.sh | grep -c 'echo a-v1\|echo a-v2')" "2"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
