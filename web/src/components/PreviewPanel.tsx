@@ -4,6 +4,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { orderRows, showRepo } from '../lib/previewList'
+import { shownPreviewErr } from '../lib/previewErr'
 import { groupOthers, kindLabel, fetchPreview, type PreviewOther, type PreviewRelation, type StartPreviewOpts, previewApiMissing, PREVIEW_API_MISSING, previewOutOfReach, previewReasonText, previewUrl, startPreview, stopPreview, NO_DEV_REASONS, PREVIEW_OFF, type Preview } from '../api/preview'
 import { isMock } from '../api'
 import { ApiError } from '../api/types'
@@ -165,7 +166,10 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
   const connected = useStore((s) => s.connected)
   const notify = useStore((s) => s.notify)
   const [pending, setPending] = useState<'start' | 'stop' | null>(null)
-  const [err, setErr] = useState<PreviewErr | null>(null)
+  const [startErr, setErr] = useState<PreviewErr | null>(null)
+  // 背景讀預覽狀態（GET）失敗的那條：跟按鈕的錯誤分開存，下一次讀成功就清掉，不然紅色警示會一直釘在跑起來的預覽上。
+  const [loadErr, setLoadErr] = useState<PreviewErr | null>(null)
+  const err = shownPreviewErr(startErr, loadErr)
   // GET 失敗：不能拿 state 帶的 starting 當真，否則分頁會永遠卡在「啟動中」。
   const [loadFailed, setLoadFailed] = useState(false)
   // 「重新整理」換 key 強制重載 iframe；跨 origin 拿不到 contentWindow.location.reload。
@@ -186,12 +190,13 @@ export function PreviewPanel({ botId, headStart, headEnd }: { botId: string; hea
       .then((r) => {
         if (!alive) return
         setLoadFailed(false)
+        setLoadErr(null)
         setPreview(botId, r)
       })
       .catch((e) => {
         if (!alive) return
         setLoadFailed(true)
-        setErr(startError(e))
+        setLoadErr(startError(e))
       })
     return () => {
       alive = false
