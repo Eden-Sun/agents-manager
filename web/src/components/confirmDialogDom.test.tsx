@@ -4,12 +4,13 @@
  * - 疊層時 Esc 只關事件所在的那一層。
  * - #693 對話框經 portal 掛到 body，但 React 事件仍沿 React 樹冒泡：框裡的點擊不能觸發外層（例如額度卡片列）的 onClick。
  */
-import test, { after, afterEach } from 'node:test'
+import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, focusLikeBrowserClick, keydown, mount, teardownDom, unmountAll } from '../testing/domHarness'
+import { click, focusLikeBrowserClick, keydown, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { ConfirmDialog } from './ConfirmDialog'
 
 afterEach(unmountAll)
+before(setupDom)
 after(teardownDom)
 
 const noop = () => {}
