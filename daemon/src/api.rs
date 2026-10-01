@@ -6808,6 +6808,22 @@ mod instruction_files_tests {
         lifecycle::apply_deferred_once(&e.app, &id).await; // 清掉全域排程，不留給別的測試
     }
 
+    /// 稽核：閒著的 codex 輸入框裡有使用者的草稿時，`apply`（model／effort／fast 當場套用）不能把 `/model`、`/fast` 打在草稿後面——
+    /// 接在草稿後面的 Enter 會把整段「草稿/fast」當 prompt 送出去。回合中那條（#712）有這道檢查，閒著這條沒有。
+    #[tokio::test]
+    async fn an_idle_codex_live_apply_never_types_after_a_users_draft() {
+        for patch_body in [json!({"fast": true}), json!({"effort": "high"})] {
+            let e = env().await;
+            let (id, run_id, pane) = busy_codex(&e, "idle-draft").await;
+            sqlx::query("UPDATE runs SET agent_status = 'idle' WHERE id = ?").bind(&run_id).execute(&e.app.db).await.unwrap();
+            e.herdr.set_screen(&pane, CODEX_DRAFT_ANSI);
+            let out = patch(&e, &id, patch_body.clone()).await.unwrap();
+            assert_eq!(out["live_apply"]["applied"], json!(false), "{patch_body}: {out}");
+            assert!(e.herdr.calls_to("pane.send_text").is_empty(), "{patch_body}: 草稿後面不能再打字: {:?}", e.herdr.calls_to("pane.send_text"));
+            assert!(e.herdr.calls_to("pane.send_keys").is_empty(), "{patch_body}: 一個鍵都不按（Enter 會送出草稿）: {:?}", e.herdr.calls_to("pane.send_keys"));
+        }
+    }
+
     /// 排著的 live 套用在 `limit` 內被取走（`schedule_deferred_live` 延遲 1.5 秒後 `take`）。
     async fn deferred_taken_within(id: &str, limit: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + limit;

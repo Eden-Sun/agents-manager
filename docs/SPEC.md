@@ -815,6 +815,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   `slash::live_gate` 放行，走 `codex_live::apply_fast_during_turn`：**絕不按 Esc**（回合中 Esc＝中斷），選單／選擇畫面開著或輸入框不是空的
   （帶樣式讀 `box_state`；使用者的草稿後面接 `/fast` 再 Enter 會把整段送出）就不碰，回 `codex: busy_not_ready` 走下面的排隊。`blocked` 照舊不碰。
   model／effort 要開選單，回合中不送。
+  閒著時的 `codex_live::apply` 同樣先帶樣式讀輸入框：有使用者的草稿（`NonEmpty`）就回 `codex: composer_not_empty`、一個鍵都不按，回退成需重啟（herdr 不給帶樣式讀法時分不出佔位字，不擋）。
 - **忙的時候不重啟**（#393、#712）：碰不得的時候（上面以外的忙：working／blocked／有回合在飛），`PATCH` 不回退成重啟，而是把欄位、PATCH 前版本與目標版本記進 `lifecycle/deferred_live.rs`（排程本身在記憶體），
   等 idle 邊（`events.rs`：working→idle，以及 blocked／unknown→idle）或回合收掉（`messages::emit_turn`：agent 早已 idle、只剩回合紀錄在飛時不會再有 idle 邊）再套；
   排著的期間 `PATCH` 回 `needs_restart:false`、`live_apply.deferred:true`，state 的 bot 帶 `live_apply_deferred:true` 且 `needs_restart:false`。
