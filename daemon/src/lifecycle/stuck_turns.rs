@@ -57,6 +57,24 @@ pub(crate) fn observe_at(run_id: &str, agent_status: &str, at: Instant) {
     }
 }
 
+/// 不在 `active` 裡的 run（結束了）不留計時：run 多半是 idle 時結束，只在「看到非 idle」才清的表會只增不減。
+pub(crate) fn retain_runs(active: &[String]) {
+    idle_since().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+}
+
+/// 巡邏每輪把已經不 active 的 run 的行程級帳（idle 計時、閒置回收看的最後狀態）帶走。讀不到 DB 就這輪不清。
+async fn forget_ended_runs(app: &Arc<App>) {
+    let ids: Result<Vec<String>, _> =
+        sqlx::query_scalar(&format!("SELECT id FROM runs WHERE state IN {}", db::ACTIVE_STATES)).fetch_all(&app.db).await;
+    match ids {
+        Ok(ids) => {
+            retain_runs(&ids);
+            crate::supervisor::idle_sleep::retain_runs(&ids);
+        }
+        Err(e) => tracing::warn!(error = ?e, "could not list active runs; per-run idle state not pruned this round"),
+    }
+}
+
 /// 從第一次看到 idle 到 `now` 過了多久；目前不是 idle（或還沒看過）是 `None`。
 pub(crate) fn idle_for(run_id: &str, now: Instant) -> Option<Duration> {
     let m = idle_since().lock().unwrap_or_else(|e| e.into_inner());
@@ -98,6 +116,7 @@ pub fn spawn_stuck_turn_sweeper(app: Arc<App>) {
             tokio::time::sleep(SWEEP_EVERY).await;
             super::dead_panes::sweep(&app).await;
             sweep(&app, None).await;
+            forget_ended_runs(&app).await;
             // run 早就結束卻還排著的 queued（含這個版本上線前留下來的）：沒有人會送，收掉。
             revoke_all_orphaned_queued_turns(&app).await;
             // 停在提問的子 agent 的通知不只靠那一條 blocked 邊（#192）。
@@ -382,6 +401,19 @@ pub(crate) fn codex_reply_after(log: &str, sent: &[String]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::testing as tt;
+
+    /// run 結束時多半是 idle：只在「看到非 idle」才清的計時表，結束的 run 會一直留著（run id 每次都是新的，只增不減）。
+    /// 巡邏每輪把不再 active 的 run 帶走（呼叫端傳的是 DB 裡還活著的 run id）。
+    #[test]
+    fn an_ended_runs_idle_timer_is_dropped() {
+        let (gone, kept) = ("idle-timer-gone", "idle-timer-kept");
+        observe_at(gone, "idle", Instant::now());
+        observe_at(kept, "idle", Instant::now());
+        retain_runs(&[kept.to_string()]);
+        assert!(idle_for(gone, Instant::now()).is_none(), "結束的 run 不留計時");
+        assert!(idle_for(kept, Instant::now()).is_some(), "還活著的 run 的計時不動");
+        retain_runs(&[]);
+    }
 
     /// #708：移交出去的專案，in-flight 回合是對方 daemon 的：巡邏不收；收回之後照常收。
     #[tokio::test]
