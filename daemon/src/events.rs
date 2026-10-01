@@ -867,13 +867,14 @@ mod tests {
         let stored = || async { sqlx::query_scalar::<_, String>("SELECT agent_status FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap() };
         let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), pane.clone());
         // 舊的 blocked 事件登記的號碼（讀不到 run、排了重放）。編號是全域遞增的（#521），所以這裡只能
-        // 斷言「較新的事件把它換掉了」，不能假設下一個號碼就是 2。
-        status_seq().lock().unwrap().insert(key.clone(), 1);
+        // 斷言「較新的事件把它換掉了」。舊號碼用 0：計數器從 1 起算，永遠不會發出 0（單獨跑這個測試時，
+        // 第一則事件就是 1，拿 1 當舊號碼會撞號、重放被當成最新的）。
+        status_seq().lock().unwrap().insert(key.clone(), 0);
 
         let held = pane_status_lock(&key).lock_owned().await;
         let newer = { let (app, ev) = (app.clone(), ev("idle")); tokio::spawn(async move { handle_status(&app, LOCAL_HOST, "test", &ev).await }) };
-        let _ = crate::testing::eventually!(status_seq().lock().unwrap().get(&key).is_some_and(|n| *n != 1));
-        let replay = { let (app, ev) = (app.clone(), ev("blocked")); tokio::spawn(async move { handle_status_try(&app, LOCAL_HOST, "test", &ev, 1, Some(1)).await }) };
+        let _ = crate::testing::eventually!(status_seq().lock().unwrap().get(&key).is_some_and(|n| *n != 0));
+        let replay = { let (app, ev) = (app.clone(), ev("blocked")); tokio::spawn(async move { handle_status_try(&app, LOCAL_HOST, "test", &ev, 1, Some(0)).await }) };
         tokio::task::yield_now().await;
         drop(held);
         newer.await.unwrap();
