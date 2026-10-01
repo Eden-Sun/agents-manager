@@ -690,6 +690,30 @@ export async function restoreBot(botId: string): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/restore`)
 }
 
+/** 軟刪的 user bot（最近刪的在前；#757）。 */
+export interface DeletedBot {
+  id: string
+  name: string
+  kind: string
+  project_id: string
+  project_label: string
+  deleted_at: string
+  last_message_at: string | null
+}
+
+export async function fetchDeletedBots(): Promise<DeletedBot[]> {
+  const raw = await transport.request('GET', '/bots/deleted')
+  return arr(isRec(raw) ? pick(raw, 'bots') : []).filter(isRec).map((b) => ({
+    id: str(pick(b, 'id')),
+    name: str(pick(b, 'name')),
+    kind: str(pick(b, 'kind')),
+    project_id: str(pick(b, 'project_id')),
+    project_label: str(pick(b, 'project_label')),
+    deleted_at: str(pick(b, 'deleted_at')),
+    last_message_at: optStr(pick(b, 'last_message_at')) ?? null,
+  }))
+}
+
 /** SPEC §15. */
 export async function fetchMem(): Promise<MemSnapshot> {
   return toMemSnapshot(await transport.request('GET', '/mem'))

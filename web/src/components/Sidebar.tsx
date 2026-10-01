@@ -34,6 +34,7 @@ import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { projectDeleteBlockers } from './projectDeleteGuard'
 import { HeadMoreMenu } from './HeadMoreMenu'
 import { DirPicker } from './DirPicker'
+import { DeletedBotsPanel } from './DeletedBotsPanel'
 import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
 import { SidebarPanes, SidebarUnownedPanes } from './SidebarPanes'
@@ -1445,6 +1446,10 @@ export function Sidebar() {
           <section className="env-sec">
             <h3>身分</h3>
             <IdentitiesPanel />
+          </section>
+          <section className="env-sec">
+            <h3>最近刪除</h3>
+            <DeletedBotsPanel />
           </section>
           <section className="env-sec">
             <h3>Jev 第二意見</h3>

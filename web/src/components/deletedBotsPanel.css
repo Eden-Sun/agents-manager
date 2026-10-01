@@ -1,0 +1,60 @@
+/* components/DeletedBotsPanel.tsx 專屬樣式（#757）。 */
+.deleted-note {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.deleted-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.deleted-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.deleted-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.deleted-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deleted-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.deleted-restore {
+  flex: none;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+.deleted-restore:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
