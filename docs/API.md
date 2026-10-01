@@ -41,7 +41,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | C | `DELETE /bots/{id}`、`DELETE /projects/{id}` | 網頁、`agm` | User UI token 或 Bot principal；AGM 的 bot／專案另要 `?confirm=supervisor`（`supervisor_owned`） | 軟刪，`POST /bots/{id}/restore` 救得回 | 維持 |
 | C | `POST /hosts`（改 ssh 目標）、`DELETE /hosts/{name}` | 網頁 | 還有專案在用時改 ssh 要 `?confirm=repoint`、刪除 409 | 只改 config.toml | 維持 |
 | C | `DELETE /hosts/{name}/shells/{pane_id}`、`POST /panes/{id}/close` | 網頁 | 服務 pane 要 `?confirm=true`；agent pane 403 | 關掉 pane | 維持 |
-| C | `PUT /drafts/{key}` | 網頁 | UI token（key 只收 `bot:<id>`／`group:<id>`、內容 ≤ 256 KiB） | 改輸入框草稿，空字串＝清掉；不碰任何 bot | 維持 |
+| C | `PUT /drafts/{key}` | 網頁 | UI token（key 只收 `bot:<id>`／`group:<id>`／`shell:<host>/<pane id>`、內容 ≤ 256 KiB） | 改輸入框草稿，空字串＝清掉；不碰任何 bot | 維持 |
 | C | `POST /bots/{id}/restore`、`/identities`、`DELETE /identities/{name}`、`POST /order`、`PATCH /bots/{id}`、`PATCH /projects/{id}`、start／stop／restart／fork／promote／rewind 等其餘寫入 | 網頁、`agm` | UI token（各自的狀態機檢查） | 本機設定與行程，改得回來 | 維持 |
 | D | `POST /supervisor/herdr-maintenance/open`／`end`、`/supervisor/inbox/{id}/ack`、lease `force` 接管 | AGM 角色 pane 裡的 `agm` | `require_role`／`actor_role`（沒角色 403） | — | 已有 |
 | D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；人在一般 shell 跑的 `agm`（不帶身分，只剩 deny／revoke） | `approve` 要 `require_role`（沒角色 403）；`deny`／`revoke` 只有 UI token | 核准換版窗口 | 已有（#447） |
@@ -609,7 +609,7 @@ bot 或 active Run 不存在 404。
 
 - `GET /api/drafts` → `{"drafts":[{"key","text","rev","updated_at"}]}`，只列有字的。
 - `PUT /api/drafts/{key}` body `{"text","client_id"?}`，`text:""`＝刪除。回 `{"key","rev","updated_at"}`。`key` 要 URL 編碼（`bot%3A<id>`）。
-  - key 只收 `bot:<bot id>`、`group:<project id>`（id 字元 `[A-Za-z0-9._-]`、整串 ≤ 128）；否則 400 `bad_draft_key`。`text` 超過 256 KiB（位元組）→ 400 `draft_too_large`（`max_bytes`）；`client_id` ≤ 64 字元。
+  - key 只收 `bot:<bot id>`、`group:<project id>`（id 字元 `[A-Za-z0-9._-]`、整串 ≤ 128），以及 host shell 面板的指令草稿 `shell:<host>/<pane id>`（#758；host、pane id 各一段，字元 `[A-Za-z0-9._:@+-]`，URL 裡 `/` 要編成 `%2F`）；否則 400 `bad_draft_key`。`DELETE /api/hosts/{name}/shells/{pane_id}` 成功後 daemon 把該 pane 的 `shell:` 草稿清成空字串並推 `draft_updated`（`client_id:""`）。`text` 超過 256 KiB（位元組）→ 400 `draft_too_large`（`max_bytes`）；`client_id` ≤ 64 字元。
   - `rev` **每個 key 單調遞增**：內容真的變了才加一；內容沒變的 PUT 回現有的 rev、不推事件。刪除不整列刪（`text=''` 的墓碑），所以重建後 rev 接著加、不會從 1 重來；刪一個從沒寫過的 key 回 `rev:0`。
   - 最後寫入者贏，沒有 compare-and-set；網頁用 `rev` 丟掉晚到的舊事件。
 - 寫入後推 WS `draft_updated {key, text, rev, client_id, updated_at}`（耐久事件，進 200 則重播環）。`client_id` 是發出寫入的那個網頁分頁自己取的隨機字串，原樣帶回，讓它辨認自己的回音。

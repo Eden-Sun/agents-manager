@@ -3304,7 +3304,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 
 ## 16b. 輸入框草稿以 daemon 為準（使用者 2026-10-01）
 
-對話輸入框還沒送出的字（bot 的 `bot:<id>`、群組的 `group:<project id>`）存在 `composer_drafts`（`key` 主鍵、`text`、`rev`、`updated_at`；`SCHEMA_VERSION` 34），
+對話輸入框還沒送出的字（bot 的 `bot:<id>`、群組的 `group:<project id>`、host shell 面板的 `shell:<host>/<pane id>`——pane 結束時清，#758）存在 `composer_drafts`（`key` 主鍵、`text`、`rev`、`updated_at`；`SCHEMA_VERSION` 34），
 各瀏覽器共用；不再存 localStorage（游標位置 `am.draftCursors` 仍是各瀏覽器自己的）。API 見 API.md「輸入框草稿」，實作 `daemon/src/drafts.rs`（網頁 `store/draftSync.ts`）。
 
 - `rev` 每個 key 單調遞增，空字串寫入留墓碑（`text=''`）而不整列刪，rev 才不會從 1 重來被網頁當成舊事件丟掉。內容沒變的寫入不加 rev、不推事件。

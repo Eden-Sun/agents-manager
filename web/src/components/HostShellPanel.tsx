@@ -7,6 +7,7 @@ import { isImeEnter } from '../lib/ime'
 import { ApiError } from '../api/types'
 import type { TerminalSnapshot, TerminalSource } from '../api/types'
 import { useStore } from '../store/store'
+import { shellDraftKey } from '../store/shellDraft'
 import { ConfirmDialog } from './ConfirmDialog'
 import { HostBadge } from './HostsPanel'
 import { linkifyTerm } from './termLinks'
@@ -78,33 +79,6 @@ function writeHistory(map: HistoryMap) {
   }
 }
 
-/** 未送出的指令依 `host/paneId` 各存一份，切去看一眼對話不會丟。 */
-const DRAFT_KEY = 'am.shellDrafts'
-
-function readDrafts(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(DRAFT_KEY)
-    const parsed: unknown = raw ? JSON.parse(raw) : null
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-    const out: Record<string, string> = {}
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) if (typeof v === 'string' && v) out[k] = v
-    return out
-  } catch {
-    return {}
-  }
-}
-
-function writeDraft(key: string, text: string) {
-  try {
-    const map = readDrafts()
-    if (text) map[key] = text
-    else delete map[key]
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(map))
-  } catch {
-    /* storage unavailable */
-  }
-}
-
 /** 標題列只放 cwd 最後兩段（完整路徑在 tooltip）；倒數第二段手機用 CSS 藏掉。 */
 function cwdTail(cwd: string): { parent: string; leaf: string } {
   const seg = cwd.split('/').filter(Boolean)
@@ -147,14 +121,11 @@ export function HostShellPanel({
   const [lines, setLines] = useState(200)
   const wrap = useTermWrap()
   const target = `${host}/${paneId}`
-  const [text, setTextState] = useState(() => readDrafts()[target] ?? '')
-  const setText = useCallback(
-    (v: string) => {
-      setTextState(v)
-      writeDraft(target, v)
-    },
-    [target],
-  )
+  // 未送出的指令跟對話輸入框同一套：存在 daemon、各瀏覽器共用（#758），切去看一眼對話也不會丟。
+  const draftKey = shellDraftKey(host, paneId)
+  const text = useStore((s) => s.drafts[draftKey] ?? '')
+  const setDraft = useStore((s) => s.setDraft)
+  const setText = useCallback((v: string) => setDraft(draftKey, v), [setDraft, draftKey])
   const [sending, setSending] = useState(false)
   const [sync, setSyncState] = useState(() => !readSyncOffSet().has(target))
   // 唯讀時記著「開」也不算：不然按鍵照樣一下一下送出去、一下一下吃 403，按鈕還 disabled 關不掉。
@@ -176,7 +147,6 @@ export function HostShellPanel({
     setLastTarget(target)
     setSnap(null)
     setErr(null)
-    setTextState(readDrafts()[target] ?? '')
     setHistAt(-1)
     setSyncState(!readSyncOffSet().has(target))
     setTyping(false)
