@@ -1828,7 +1828,8 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 ### `GET /api/attachments/{id}`
 回原始位元組。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。只有 `state='ready'`
-的附件讀得到，`staging`／`failed` 一律 404。
+的附件讀得到，`staging`／`failed` 一律 404。讀檔走 `trusted_open`（逐層 `openat(O_NOFOLLOW)`、fd 讀、50 MiB 上限）：本機 bot 的附件放在專案目錄（agent 寫得到），
+被換成符號連結（指到界線外的檔案或 `/dev/zero`）一律讀不到。
 
 送出去的 `Content-Type` **不是**上傳時收到的那個（那是呼叫端自己給的，`POST …/attachments` 刻意什麼都收）：
 走白名單，`image/png|jpeg|gif|webp`、`image/svg+xml`、`application/pdf`、`text/plain` 之外一律

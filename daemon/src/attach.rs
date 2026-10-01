@@ -409,6 +409,10 @@ pub fn deliver_text(text: &str, items: &[Attachment]) -> String {
 }
 
 /// `GET /api/attachments/:id`
+///
+/// 本機 bot 的附件放在專案目錄裡（agent 寫得到的地方），所以讀取跟 [`crate::outbox`]／[`crate::local_image`] 一樣走
+/// [`crate::trusted_open`]：從信任邊界逐層 `openat(O_NOFOLLOW)`、拿 fd 讀，並設大小上限。被換成符號連結（指到私鑰、別的 bot 的檔案、
+/// `/dev/zero`）一律讀不到。以前是 `std::fs::read(local_path)`：跟著連結走、沒有上限。
 pub async fn read(app: &Arc<App>, id: &str) -> Result<(String, Vec<u8>)> {
     let row = sqlx::query_as::<_, (String, String, String)>(
         "SELECT mime, local_path, bot_id FROM attachments WHERE id = ? AND state = 'ready'",
@@ -417,17 +421,42 @@ pub async fn read(app: &Arc<App>, id: &str) -> Result<(String, Vec<u8>)> {
     .fetch_optional(&app.db)
     .await?;
     let Some((mime, path, bot_id)) = row else { bail!("unknown attachment") };
-    let data = match std::fs::read(&path) {
+    let data = match read_contained(&app.data_dir, Path::new(&path)).await {
         Ok(d) => d,
         // 刪 bot 會把 `attachments/<id>/` 搬進 `bots-trash`（#465），但已刪 bot 的對話仍讀得到
         // （API.md §10.4），前端照樣會來抓縮圖——原地讀不到就去回收區裡那一份找同一個檔名。
         // 只有遠端 bot 的 `local_path` 在資料目錄底下；本機 bot 指的是專案裡那份，不受影響。
         Err(e) => match trashed_copy(app, &bot_id, &path) {
-            Some(alt) => std::fs::read(&alt).with_context(|| format!("read {} (trashed)", alt.display()))?,
+            Some(alt) => read_contained(&app.data_dir, &alt).await.with_context(|| format!("read {} (trashed)", alt.display()))?,
             None => return Err(e).with_context(|| format!("read {path}")),
         },
     };
     Ok((mime, data))
+}
+
+/// 信任邊界內讀一個附件。資料目錄底下的（遠端 bot 的副本、回收區）以資料目錄為界；本機專案裡的
+/// （`<專案>/.agents-manager/attachments/<檔>`，形狀是 [`save`] 寫死的）以記下來的專案目錄為界——不看 `projects.path`
+/// 現在是什麼：專案搬家之後舊附件的路徑照樣要讀得到。其他形狀的路徑一律不讀。
+async fn read_contained(data_dir: &Path, path: &Path) -> Result<Vec<u8>> {
+    let (base, rel): (PathBuf, PathBuf) = if let Ok(rel) = path.strip_prefix(data_dir) {
+        (data_dir.to_path_buf(), rel.to_path_buf())
+    } else {
+        let comps: Vec<&std::ffi::OsStr> = path.components().filter_map(|c| match c { std::path::Component::Normal(s) => Some(s), _ => None }).collect();
+        let n = comps.len();
+        let shaped = path.is_absolute() && n >= 4 && comps[n - 3] == ".agents-manager" && comps[n - 2] == "attachments";
+        if !shaped {
+            bail!("`{}` is not an attachment location", path.display());
+        }
+        let base = path.ancestors().nth(3).context("attachment path has no project directory")?.to_path_buf();
+        let rel = path.strip_prefix(&base)?.to_path_buf();
+        (base, rel)
+    };
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let comps = crate::trusted_open::safe_relative_components(&rel).context("unsafe attachment path")?;
+        let file = crate::trusted_open::open_bound_file(&base, &comps, None)?;
+        crate::trusted_open::read_limited(file, MAX_BYTES as u64).map_err(|_| anyhow::anyhow!("attachment is too large or unreadable"))
+    })
+    .await?
 }
 
 /// `local_path` 原地不在時，回收區裡對應的那一份（`bots-trash/<id>.attachments.<毫秒>/<檔名>`）。
@@ -542,6 +571,47 @@ mod tests {
         crate::bot_trash::move_in_kind(&app.data_dir, bot_id, Some(crate::bot_trash::ATTACHMENTS), &dir).unwrap().unwrap();
         assert!(!local_path.exists(), "原地已經沒有了");
         assert_eq!(read(app, "att1").await.unwrap().1, b"bytes", "回收區裡那份仍要讀得到，不能變破圖");
+    }
+
+    /// 本機 bot 的附件就放在專案目錄裡（agent 寫得到的地方）：它把那個檔案換成符號連結、指到界線外（私鑰、別的 bot 的檔案），
+    /// `GET /api/attachments/:id` 不能照單全收（outbox／local-image 的 #89 同一個形狀）。換成指到 `/dev/zero` 之類也不能把記憶體讀爆。
+    #[tokio::test]
+    async fn a_local_attachment_swapped_for_a_symlink_is_not_served() {
+        let env = tt::env().await;
+        let app = &env.app;
+        let bot = tt::claude_bot(app, &env.project_id, "planter").await;
+        let project = std::env::temp_dir().join(format!("am-attach-sym-{}", crate::db::ulid()));
+        let dir = project.join(SUBDIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = project.join("outside-secret.txt");
+        std::fs::write(&secret, b"TOP SECRET").unwrap();
+        let file = dir.join("a.png");
+        std::fs::write(&file, b"png-bytes").unwrap();
+        sqlx::query(
+            "INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, state, created_at)
+             VALUES ('att-sym', ?, 'a.png', 'image/png', 9, ?, ?, 'local', 'ready', ?)",
+        )
+        .bind(&bot.id)
+        .bind(file.to_string_lossy().into_owned())
+        .bind(file.to_string_lossy().into_owned())
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(read(app, "att-sym").await.unwrap().1, b"png-bytes", "正常的本機附件照舊讀得到");
+
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&secret, &file).unwrap();
+        assert!(read(app, "att-sym").await.is_err(), "被換成符號連結：不給");
+        // 附件目錄本身被換成指到別處的連結也一樣。
+        std::fs::remove_file(&file).unwrap();
+        let elsewhere = project.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("a.png"), b"other").unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+        assert!(read(app, "att-sym").await.is_err(), "目錄被換成符號連結：不給");
+        std::fs::remove_dir_all(&project).unwrap();
     }
 
     #[tokio::test]
