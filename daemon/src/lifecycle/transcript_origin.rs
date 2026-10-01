@@ -26,6 +26,11 @@ pub(crate) fn starter_origin_kind(log: &str) -> Option<String> {
     })
 }
 
+/// [`starter_origin_kind`] 對一個本機 transcript 檔（同步，呼叫端放進 `spawn_blocking`）。讀不到、沒有 `origin` ＝ `None`。
+pub(crate) fn starter_origin_kind_at(path: &std::path::Path) -> Option<String> {
+    read_tail(path).and_then(|log| starter_origin_kind(&log))
+}
+
 pub(crate) fn read_tail(path: &std::path::Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;

@@ -2248,6 +2248,10 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
   `lifecycle/fixtures/claude_2.1.278_task_notification.jsonl`）：回合起頭的 `type = "user"` entry 帶 `origin.kind`，使用者打的（含 daemon 經 herdr 送的）是 `human`，背景 shell 完成是
   `task-notification`（另有 `promptSource: "system"`、`turnOrigin: "task_notification"`，前面有 `queue-operation`）；回合中間的工具結果也是 `type = "user"` 但沒有 `origin`，不算起點。
   最新的起點不是 `human` 就不存回音（回合照開，回覆有地方掛，只是沒有 user 訊息）；讀不到 transcript、舊版沒有 `origin`、不是 claude 一律照舊存。
+  遠端 bot 的 transcript 在 agm-host 讀不到，開回合那一刻判不出起點，所以回音跟「上一則已答完回合的使用者訊息」一樣就先不存（`repeats_answered_prompt`；#754 之前的 bb80cdd9）。
+  **使用者真的在 pane 裡重送同一句時由 Stop 補回來**（issue #754）：外部回合收尾的 Stop（含備援先收、Stop 遲到的路徑）若證明起點是 `human`、而這回合還沒有任何 user 訊息，就存下 transcript 最後一則人打的訊息
+  （`hookrecv::human_started_prompt`）。起點不是 `human`（背景工作喚醒）、或讀不到起點（舊 CLI、舊版 hook.sh、codex／grok）＝沒有證據，不存。遠端的起點由 `hook.sh` 帶來（`agm_origin_kind`，§11.4.2），本機直接讀 transcript；
+  Stop 到的時候這一輪的起點一定已寫進 transcript，不像 `-> working` 邊那刻可能還讀到上一輪的。
 - `pane.exited` / `pane.closed`：Run → `exited`，in-flight Turn → `failed`。
   in-flight 那一筆收不成（寫不進 `failed`，#156）：pane 已經沒了、不能不做，所以記成**欠著的收尾**（`interruption` 的帳，跟 #147 同一套），
   由定時重試、這顆 bot 的下一則 hook／prompt 補上；回傳 `RunExit::TurnOwed`，不說「收尾做完了」。撤孤兒佇列與拆 watcher 是 run 結束的事，照做。
@@ -2778,6 +2782,7 @@ label = "foo@m4p"
 - **Stop 帶本機 transcript 的最後一則使用者訊息**（#753）：claude 的 Stop payload 沒有使用者訊息，遠端 transcript 路徑（`/Users/…`）在 agm-host 讀不到，
   遲到的 Stop 就證明不了「是備援已關掉的那一回合」、真回覆被丟。所以 spool 前、`claude` 的 `Stop` 事件（且沒被截斷）、有 `python3` 時，腳本從**本機** transcript 尾端
   512 KiB 找最後一則人打的使用者訊息（跳過 `isMeta`、含 `tool_result` 的條目；規則同 `lifecycle::transcript_user_text`），放進 payload 的 `agm_user_text`（超過 64 KiB 就不帶，免得截半截的 `<pasted_content>` 對不上；訊息帶孤立 surrogate 也不帶：`json.dumps` 會寫回 serde_json 讀不了的 `\ud83d`，整筆 Stop 會被 drain 丟掉）。
+  同一支 python 另帶 `agm_origin_kind`：從尾巴往前第一筆有 `origin.kind` 的使用者條目（`human`／`task-notification`…；舊版 CLI 沒有就不帶），daemon 靠它分辨「使用者重送同一句」與「背景工作喚醒的那一輪」（§6.5 外部回合，#754）。
   `hookrecv::hook_user_text` 的順序：hook 直接帶的 → `agm_user_text` → 讀本機 `transcript_path`。沒有 `python3`、讀不到檔、不是 Stop：payload 原樣，daemon 照舊「沒證據不蓋」。
   **正在跑的遠端 bot 要等它自己重啟才換到新腳本**（上一點）。
 - **腳本不做語意判斷**：只用最粗的字串比對決定要不要報 idle，其餘照寫 spool，分類只在 `hookrecv::classify`。遠端腳本沒有測試；漏報最多晚一點被掃到，錯分類會吃掉訊息。
