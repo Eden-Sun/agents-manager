@@ -6,7 +6,7 @@
 //! * **一個鍵都不按**：不像滿意度問卷、Auto mode 推銷框那樣替使用者選；也不整批設
 //!   `CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1` 把它關掉。
 //! * **送達不打進框裡**：`pane_ready_for_prompt` 認到框就回 409 `dangerous_rm_pending`，排隊的留在佇列，框關掉才送。
-//! * **通知使用者、帶上目標**：這一次框（同一句警語）在 bot 的對話裡插一則系統訊息，寫警語、目標與指令，只寫一次。
+//! * **通知使用者、帶上目標**：這一次框（同一句警語＋同一個指令）在 bot 的對話裡插一則系統訊息，寫警語、目標與指令，只寫一次。
 //! * **標成 blocked**：herdr 通常自己就判成 `blocked`（2026-09-23 m12 的 pane 就是）；判成 `idle`／`unknown`
 //!   時由這裡補標。補標後收到任何 herdr 狀態事件，就由 herdr 接手狀態，不再還原這筆標記。
 //! * **框消失後回到正常**：不管是有人回答還是 2 分鐘自動拒絕，都補一則說明、叫醒排隊的 flush。
@@ -27,6 +27,8 @@ const SETTLE: Duration = Duration::from_millis(800);
 
 struct Episode {
     warning: String,
+    /// 框裡的指令：警語是通用句（`command substitution output`）時，不同的 rm 靠它分辨是不是同一個框。
+    command: Option<String>,
     /// 由這裡補標成 `blocked` 之前的狀態；`None` ＝herdr 自己判的，框關掉時不必還。
     forced_from: Option<String>,
     /// Only one observer may finish the episode while it awaits a database restore.
@@ -72,14 +74,16 @@ pub fn notice(rm: &DangerousRm) -> String {
 pub const CLOSED_NOTE: &str =
     "防誤刪確認框已經關掉（有人回答了，或 2 分鐘到了 claude 自動拒絕——拒絕的話那個 rm 沒有執行）。排著要送的訊息照常送。";
 
-/// 這一次框（同一句警語）只講一次；送達閘門與巡邏共用。回傳這次有沒有真的寫。
+/// 這一次框（同一句警語＋同一個指令）只講一次；送達閘門與巡邏共用。回傳這次有沒有真的寫。
 pub(crate) async fn notify_once(app: &Arc<App>, run: &db::Run, rm: &DangerousRm) -> bool {
     {
         let mut m = open().lock().unwrap();
         match m.get(&run.id) {
-            Some(ep) if ep.warning == rm.warning => return false,
-            _ => {
-                m.insert(run.id.clone(), Episode { warning: rm.warning.clone(), forced_from: None, closing: false });
+            Some(ep) if ep.warning == rm.warning && ep.command == rm.command => return false,
+            // 另一個框接在上一個後面（上一個框沒被巡邏看到關掉）：補標的 blocked 還是我們的，沿用。
+            prev => {
+                let forced_from = prev.and_then(|ep| ep.forced_from.clone());
+                m.insert(run.id.clone(), Episode { warning: rm.warning.clone(), command: rm.command.clone(), forced_from, closing: false });
             }
         }
     }
@@ -437,5 +441,34 @@ mod tests {
         sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
         forget_ended(&app, &[]).await;
         assert!(!is_open(&run_id), "結束的 run 不留記錄");
+    }
+
+    /// 稽核：兩個不同的指令都落在同一句通用警語（`command substitution output`）時，以前只比警語，第二個框
+    /// 沒人講——使用者看到的目標與指令還是第一個。框的內容不同就是新的一次，要再講一次，補標的 blocked 沿用。
+    #[tokio::test]
+    async fn a_second_box_with_the_same_warning_but_another_command_is_announced_again() {
+        let _serial = serial().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "rm-two-cmds").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM).await;
+        let second = DANGEROUS_RM.replace("which-dir", "other-dir");
+        assert_eq!(
+            crate::tui_prompts::dangerous_rm_prompt(DANGEROUS_RM).unwrap().warning,
+            crate::tui_prompts::dangerous_rm_prompt(&second).unwrap().warning,
+            "前提：警語一樣"
+        );
+        observe_screen(&app, &run_of(&app, &run_id).await, &second).await;
+        let msgs = system_messages(&app, &bot.id).await;
+        assert_eq!(msgs.len(), 2, "{msgs:?}");
+        assert!(msgs[1].contains("other-dir"), "第二則要寫第二個指令：{}", msgs[1]);
+
+        // 同一個框再被看到：不重複。框關掉：補標的 blocked 還回去（沿用第一個框補的標記）。
+        observe_screen(&app, &run_of(&app, &run_id).await, &second).await;
+        assert_eq!(system_messages(&app, &bot.id).await.len(), 2);
+        observe_screen(&app, &run_of(&app, &run_id).await, DANGEROUS_RM_AUTO_DENIED).await;
+        assert_eq!(run_of(&app, &run_id).await.agent_status, "idle");
+        assert!(!is_open(&run_id));
     }
 }
