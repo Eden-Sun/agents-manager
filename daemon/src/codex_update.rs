@@ -195,6 +195,11 @@ pub fn remember_running(run_id: &str, screen: &str, prompt: Option<&Prompt>) -> 
     }
 }
 
+/// 這一輪沒看到的 run（結束了）不留帳：run id 每次重啟都是新的，不清就只增不減。
+pub fn retain_runs(active: &[String]) {
+    running_versions().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+}
+
 /// 這一個 run 看過的 codex 版本（`remember_running` 記的）；還沒看過＝`None`。issue #748 的版本閘門讀它。
 pub fn running_version_of(run_id: &str) -> Option<String> {
     running_versions().lock().unwrap().get(run_id).cloned()
@@ -203,6 +208,15 @@ pub fn running_version_of(run_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finished_runs_remembered_version_is_dropped_by_the_sweep() {
+        remember_running("retain-gone", "│ >_ OpenAI Codex (v0.154.0) │", None);
+        remember_running("retain-kept", "│ >_ OpenAI Codex (v0.155.1) │", None);
+        retain_runs(&["retain-kept".to_string()]);
+        assert_eq!(running_version_of("retain-gone"), None, "結束的 run 不留帳");
+        assert_eq!(running_version_of("retain-kept").as_deref(), Some("0.155.1"));
+    }
 
     /// 啟動時的互動選單（codex 0.15x）。
     const MENU: &str = "\
