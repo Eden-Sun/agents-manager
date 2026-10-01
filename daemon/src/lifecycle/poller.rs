@@ -278,6 +278,21 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     if by_the_cli {
         tracing::info!(turn = %tid, "external turn started by the CLI itself (task notification); no user message");
     }
+    // 判不出是不是 CLI 自己起頭的（遠端 bot 的 transcript 在那台，這裡讀不到）時，畫面上最後一則回音可能就是上一則
+    // 已經回答過的 prompt（2026-10-01 wits-ops-web：「去我的ego 開新身份」又出現一次）。跟它一樣就不存。
+    let echo = match echo {
+        Some(text) => match app.db.acquire().await {
+            Ok(mut conn) => match crate::hookrecv::repeats_answered_prompt(&mut conn, &conv, &tid, &text).await {
+                Ok(true) => {
+                    tracing::info!(turn = %tid, "external turn: the echo on screen is the previous, answered prompt; not storing it again");
+                    None
+                }
+                _ => Some(text),
+            },
+            Err(_) => Some(text),
+        },
+        None => None,
+    };
     if let Some(text) = echo {
         if let Err(e) = insert_message(app, &conv, Some(&tid), "user", &text, "hook", false, None).await {
             tracing::warn!(turn = %tid, error = ?e, "external prompt echo not stored");
