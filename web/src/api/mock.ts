@@ -2304,7 +2304,13 @@ export class MockTransport implements Transport {
               // 同 daemon：`slug(label)-<bot id 末 6 碼>`。
               agent_name: `${p.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'b'}-${b.id.slice(-6).toLowerCase()}`,
               run,
-              in_flight_turn: this.turns.find((t) => run && t.run_id === run.id && t.status === 'in_flight') ?? null,
+              // daemon 的 `/api/state` 不帶回合（沒有 `in_flight_turn`）：回合從訊息頁的 `turns` 與 WS 來。
+              herdr_session: 'agents-manager',
+              // §6.12：有預覽在用才帶 `{status, port}`，沒開（或 off）是 `null`。
+              preview: (() => {
+                const pv = this.previews.get(b.id)
+                return pv && pv.status !== 'off' ? { status: pv.status, port: pv.port } : null
+              })(),
               queued_turn: this.turns
                 .filter((t) => t.bot_id === b.id && t.status === 'queued' && (t.awaits_start === 1 || t.awaits_idle === 1))
                 .sort((a, z) => a.created_at.localeCompare(z.created_at))[0] ?? null,
