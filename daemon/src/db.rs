@@ -262,6 +262,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (31, "4aa40b8a872df7d8"),
     // issue #733：persist user prompts accepted while the agent is busy.
     (32, "4376ae24058f9753"),
+    // issue #738: durable retries for queued-prompt message restamping after delivery.
+    (33, "ed264766628799b2"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -402,6 +404,8 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         // 第一次記下送達結果的時間（`prompt::mark_delivery`）。排隊的 turn 的 `created_at` 是**排進佇列**的時間，
         // 重啟補 stall watchdog 要看的是「剛送出」，不是「剛排隊」（review 2026-09-16 deliv L3）。舊列 NULL＝退回 created_at。
         ("turns", "delivered_at", "ALTER TABLE turns ADD COLUMN delivered_at TEXT"),
+        // issue #738: delivery is durable before the queued prompt's message timestamp and event are restamped.
+        ("turns", "restamp_pending", "ALTER TABLE turns ADD COLUMN restamp_pending INTEGER NOT NULL DEFAULT 0"),
         // 排著的這一則被 flush 的額度閘擋下時看到的撞限（issue #108，`lifecycle::quota_hold`，JSON）。
         // `app.quotas` 只在記憶體：沒有這一欄，重啟後開機叫醒的 flush 會把它送進同一個還沒額度的身分。
         ("turns", "quota_hold", "ALTER TABLE turns ADD COLUMN quota_hold TEXT"),
@@ -461,6 +465,18 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
         }
     }
+    // Recover queued prompts delivered before #738 whose old timestamp proves the previous post-delivery
+    // update was lost. The predicate matches the original five-second restamp rule.
+    sqlx::query(
+        "UPDATE turns SET restamp_pending=1
+          WHERE restamp_pending=0 AND delivered_at IS NOT NULL
+            AND julianday(delivered_at) - julianday(created_at) > 5.0 / 86400.0
+            AND EXISTS (SELECT 1 FROM messages m WHERE m.turn_id=turns.id AND m.role='user'
+                         AND m.sent_via IS NULL AND m.created_at < turns.delivered_at)",
+    )
+    .execute(&mut *tx)
+    .await
+    .context("re-arm queued prompt restamps left behind before issue #738")?;
     // issue #474：pre-v2 建的 `bot_previews` 沒有 `REFERENCES bots(id)`——`CREATE TABLE IF NOT EXISTS`
     // 對既有 DB 是 no-op，而外鍵用 `ALTER TABLE` 加不回去，所以那種資料庫到今天都還缺這個約束
     // （`pragma_table_info` 看不到 FK，#470 之前漂移核對也不比表的約束，所以一直沒人發現）。

@@ -1207,7 +1207,7 @@ abort 之後照常 flush 出去（但先照下一段等寬限）。要取消排�
 同一輪也會把**兩分鐘內剛送出**（`delivery='ok'`）的 in-flight turn 補回 stall watchdog；更舊的不補，否則 12 秒後會把舊訊息再送一次。
 「剛送出」看 `turns.delivered_at`（送出的那一刻；`mark_delivery` 只記第一次，之後不改），不看 `created_at`——排隊的 turn 的
 `created_at` 是排進佇列的時間，flush 可能晚半小時；沒有 `delivered_at` 的舊列才退回 `created_at`（review 2026-09-16 deliv L3）。
-**排過隊的 prompt 在對話裡排到送出的時間**（2026-09-30 使用者：cf-ox-2 的 daemon 通知 13:28 排進佇列、13:38:55 才送，畫面卻排在 13:31 那則補充上面，13:40 的回覆看起來在回錯的一則）：`prompt::mark_delivery` 用 `UPDATE ... WHERE delivered_at IS NULL RETURNING delivered_at` 原子認領第一次送達；只有成功認領的呼叫者，才以資料庫回傳的時間重排訊息。回合在佇列等超過 5 秒時，將使用者訊息（不含 `sent_via` 的補充）的 `created_at` 改成該時間、再推一次同 id 的 `message_added`（前端同 id 時間變了就重排）。之後的 evidence 仍更新 delivery 欄位，但不能再移動訊息時間。回合自己的 `created_at` 不動，等待時間照舊從它算。
+**排過隊的 prompt 在對話裡排到送出的時間**（2026-09-30 使用者：cf-ox-2 的 daemon 通知 13:28 排進佇列、13:38:55 才送，畫面卻排在 13:31 那則補充上面，13:40 的回覆看起來在回錯的一則）：`prompt::mark_delivery` 用 `UPDATE ... WHERE delivered_at IS NULL` 原子認領第一次送達，並在同一交易留下 `restamp_pending` debt；重排一律讀 turns 裡固定的首次 `delivered_at`。回合在佇列等超過 5 秒時，將使用者訊息（不含 `sent_via` 的補充）的 `created_at` 改成該時間，再推一次同 id 的 `message_added`（前端同 id 時間變了就重排）。timestamp 更新、bot lookup 或訊息載入失敗都保留 debt，由背景退避重試與開機 recovery 補做；資料列在同一交易載入後才 emit，並在 emit 後清 debt。之後的 evidence 仍更新 delivery 欄位，但不能再改首次送達時間或讓訊息往後移。回合自己的 `created_at` 不動，等待時間照舊從它算。
 
 **送出之後結果寫不回去**（#149）：prompt 的副作用做完——打字送出、交給 `agent.prompt`、或 herdr 明確拒收（`agent_blocked`）——之後，
 把結果寫回那一筆回合（`mark_delivery`；拒收是收成 failed＋說明，同一個交易）是唯一的一步，寫不進去**不吞**。跟打斷、run 結束欠著的收尾（#147／#156）同一套，

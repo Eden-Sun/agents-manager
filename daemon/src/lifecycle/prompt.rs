@@ -23,14 +23,14 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
     super::race_point::hit("mark_delivery_before_claim", turn_id).await;
 
     let mut tx = app.db.begin().await?;
-    // 只有將 delivered_at 從 NULL 原子改寫成功的呼叫者能重排訊息；回傳資料庫保存的時間。
-    let first_at: Option<String> = sqlx::query_scalar(
-        "UPDATE turns SET delivered_at=? WHERE id=? AND delivered_at IS NULL RETURNING delivered_at",
-    )
+    // 只有將 delivered_at 從 NULL 原子改寫成功的呼叫者建立 restamp debt；回合內保存的時間是重試唯一依據。
+    let first_delivery = sqlx::query("UPDATE turns SET delivered_at=?, restamp_pending=1 WHERE id=? AND delivered_at IS NULL")
     .bind(at)
     .bind(turn_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
     // 不重送的那條路照樣把重送額度用掉：回滾到不認得 `auto_resend` 的舊 binary 時，
     // 它仍然不會把同一則再打一次。
     // 這筆 UPDATE 對每份 evidence 都執行，包括沒有取得 first-delivery claim 的呼叫者。
@@ -48,8 +48,11 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    if let Some(first_at) = first_at.as_deref() {
-        restamp_queued_prompt(app, turn_id, first_at).await;
+    if first_delivery {
+        if let Err(e) = restamp_queued_prompt(app, turn_id).await {
+            tracing::warn!(turn = turn_id, error = %e, "queued prompt restamp is durable and will be retried");
+            schedule_restamp_retry(app, turn_id);
+        }
     }
     Ok(())
 }
@@ -58,40 +61,131 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
 /// 13:40 的回覆看起來在回錯的那一則）：第一次真的送出、而且在佇列裡等了超過 [`QUEUE_RESTAMP_SECS`] 秒時，
 /// 這個回合的使用者訊息改成送出的時間，再推一次同 id 的 `message_added`（前端同 id、時間變了就重排）。
 /// 回合的 `created_at` 不動（它是排進佇列的時間，別處拿它算等了多久）。補充（`sent_via`）不是這個回合的 prompt，不動。
-async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str, at: &str) {
-    let Ok(Some(queued_at)) = sqlx::query_scalar::<_, String>("SELECT created_at FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await else {
-        return;
+/// Finish the durable side effect for a first-delivered prompt. All required reads and timestamp
+/// writes stay in one transaction, so any SQLite failure leaves `restamp_pending` set. The event
+/// carries the loaded row directly; there is no fallible post-commit lookup that can lose it.
+async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str) -> anyhow::Result<()> {
+    let mut tx = app.db.begin().await?;
+    let target: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT created_at, delivered_at FROM turns WHERE id=? AND restamp_pending=1",
+    )
+    .bind(turn_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((queued_at, first_at)) = target else {
+        tx.rollback().await?;
+        return Ok(());
     };
-    let waited = match (chrono::DateTime::parse_from_rfc3339(&queued_at), chrono::DateTime::parse_from_rfc3339(at)) {
+    let Some(first_at) = first_at else {
+        anyhow::bail!("queued prompt restamp debt has no first delivered_at: {turn_id}");
+    };
+    let waited = match (chrono::DateTime::parse_from_rfc3339(&queued_at), chrono::DateTime::parse_from_rfc3339(&first_at)) {
         (Ok(q), Ok(a)) => (a - q).num_seconds(),
-        _ => return,
+        _ => 0,
     };
     if waited <= QUEUE_RESTAMP_SECS {
-        return;
+        sqlx::query("UPDATE turns SET restamp_pending=0 WHERE id=? AND restamp_pending=1")
+            .bind(turn_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(());
     }
-    let ids: Vec<String> = sqlx::query_scalar(
-        "UPDATE messages SET created_at = ? WHERE turn_id = ? AND role = 'user' AND sent_via IS NULL AND created_at < ? RETURNING id",
+
+    let pending_messages: Vec<db::Message> = sqlx::query_as(
+        "SELECT * FROM messages WHERE turn_id=? AND role='user' AND sent_via IS NULL AND created_at<=?",
     )
-    .bind(at)
     .bind(turn_id)
-    .bind(at)
-    .fetch_all(&app.db)
-    .await
-    .unwrap_or_default();
-    if ids.is_empty() {
-        return;
+    .bind(&first_at)
+    .fetch_all(&mut *tx)
+    .await?;
+    if pending_messages.is_empty() {
+        sqlx::query("UPDATE turns SET restamp_pending=0 WHERE id=? AND restamp_pending=1")
+            .bind(turn_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(());
     }
-    let bot_id: Option<String> = sqlx::query_scalar("SELECT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?")
-        .bind(turn_id)
-        .fetch_optional(&app.db)
-        .await
-        .ok()
-        .flatten();
-    if let Some(bot_id) = bot_id {
-        for id in &ids {
-            emit_prompt_message(app, &bot_id, id).await;
+
+    // `fetch_one` preserves lookup failures (including a missing conversation) as retryable debt.
+    let bot_id: String = sqlx::query_scalar(
+        "SELECT c.bot_id FROM turns t JOIN conversations c ON c.id=t.conversation_id WHERE t.id=?",
+    )
+    .bind(turn_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    for message in pending_messages {
+        if message.created_at < first_at {
+            sqlx::query("UPDATE messages SET created_at=? WHERE id=? AND created_at<?")
+                .bind(&first_at)
+                .bind(&message.id)
+                .bind(&first_at)
+                .execute(&mut *tx)
+                .await?;
         }
     }
+    // Re-load in the same transaction, so the emitted message reflects the committed timestamp.
+    let messages: Vec<db::Message> = sqlx::query_as(
+        "SELECT * FROM messages WHERE turn_id=? AND role='user' AND sent_via IS NULL AND created_at<=?",
+    )
+    .bind(turn_id)
+    .bind(&first_at)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    for message in messages {
+        app.emit("message_added", json!({"bot_id": bot_id, "message": message})).await;
+    }
+    // Keep the marker through emission. A crash before this write replays the same id and first
+    // timestamp on recovery; clients upsert by message id.
+    sqlx::query("UPDATE turns SET restamp_pending=0 WHERE id=? AND delivered_at=? AND restamp_pending=1")
+        .bind(turn_id)
+        .bind(first_at)
+        .execute(&app.db)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn rearm_queued_prompt_restamps(app: &Arc<App>) -> anyhow::Result<()> {
+    let turns: Vec<String> = sqlx::query_scalar("SELECT id FROM turns WHERE restamp_pending=1 ORDER BY created_at, id")
+        .fetch_all(&app.db)
+        .await?;
+    let mut failed = None;
+    for turn_id in turns {
+        if let Err(e) = restamp_queued_prompt(app, &turn_id).await {
+            tracing::warn!(turn = %turn_id, error = %e, "cannot finish queued prompt restamp yet");
+            failed.get_or_insert(e);
+        }
+    }
+    failed.map_or(Ok(()), Err)
+}
+
+fn schedule_restamp_retry(app: &Arc<App>, turn_id: &str) {
+    let app = app.clone();
+    let turn_id = turn_id.to_string();
+    tokio::spawn(async move {
+        let mut attempt = 0;
+        loop {
+            tokio::time::sleep(restamp_retry_delay(attempt)).await;
+            match restamp_queued_prompt(&app, &turn_id).await {
+                Ok(()) => return,
+                Err(e) => {
+                    tracing::warn!(turn = %turn_id, error = %e, "queued prompt restamp retry failed");
+                    attempt += 1;
+                }
+            }
+        }
+    });
+}
+
+fn restamp_retry_delay(attempt: usize) -> std::time::Duration {
+    if cfg!(test) {
+        return std::time::Duration::from_millis(20);
+    }
+    const SECS: [u64; 5] = [2, 5, 15, 30, 60];
+    std::time::Duration::from_secs(SECS[attempt.min(SECS.len() - 1)])
 }
 
 /// 在佇列裡等超過這麼久才重標時間：一般送出（沒排隊）的那幾百毫秒不必動。
@@ -3183,6 +3277,81 @@ mod restamp_tests {
         let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T14:00:00.000Z", "一般送出").await;
         mark_delivery(&app, &turn, ok, "2026-09-30T14:00:00.600Z").await.unwrap();
         assert_eq!(created(&app, &msg).await, "2026-09-30T14:00:00.000Z");
+    }
+
+    /// SQLite may fail the post-delivery message update after the delivery transaction has committed.
+    /// A later delivery observation must settle that debt with the original first-delivery time.
+    #[tokio::test]
+    async fn queued_prompt_restamp_retries_after_a_transient_message_update_failure() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "q-restamp-retry").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let (turn, msg) = turn_with_prompt(&app, &conv, "2026-09-30T13:28:31.333Z", "daemon 通知").await;
+        let ok = DeliveryRecord { stored: "ok", verified: true, auto_resend: false };
+
+        sqlx::query("CREATE TABLE issue_738_restamp_block (turn_id TEXT PRIMARY KEY)").execute(&app.db).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER issue_738_fail_restamp BEFORE UPDATE OF created_at ON messages
+             WHEN EXISTS (SELECT 1 FROM issue_738_restamp_block WHERE turn_id = OLD.turn_id)
+             BEGIN SELECT RAISE(ABORT, 'issue 738 injected restamp failure'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO issue_738_restamp_block (turn_id) VALUES (?)")
+            .bind(&turn)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let first_at = "2026-09-30T13:38:55.000Z";
+        mark_delivery(&app, &turn, ok, first_at).await.unwrap();
+        let delivered_at: String = sqlx::query_scalar("SELECT delivered_at FROM turns WHERE id=?")
+            .bind(&turn)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(delivered_at, first_at, "delivery stays durable even when restamping fails");
+        assert_eq!(created(&app, &msg).await, "2026-09-30T13:28:31.333Z", "the injected update failed once");
+
+        sqlx::query("DELETE FROM issue_738_restamp_block WHERE turn_id=?").bind(&turn).execute(&app.db).await.unwrap();
+        assert!(crate::testing::eventually!(created(&app, &msg).await == first_at), "background retry uses first delivered_at");
+        mark_delivery(&app, &turn, ok, "2026-09-30T14:00:00.000Z").await.unwrap();
+        assert_eq!(created(&app, &msg).await, first_at, "repeated retries are idempotent");
+    }
+
+    #[tokio::test]
+    async fn queued_prompt_restamp_keeps_debt_when_bot_lookup_fails() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "q-restamp-bot-read").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let queued_at = "2026-09-30T13:28:31.333Z";
+        let first_at = "2026-09-30T13:38:55.000Z";
+        let (turn, msg) = turn_with_prompt(&app, &conv, queued_at, "daemon 通知").await;
+        let ok = DeliveryRecord { stored: "ok", verified: true, auto_resend: false };
+        mark_delivery(&app, &turn, ok, first_at).await.unwrap();
+
+        // Recreate an uncompleted durable debt, then make the bot lookup fail once.
+        sqlx::query("UPDATE messages SET created_at=? WHERE id=?").bind(queued_at).bind(&msg).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET restamp_pending=1 WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+        let mut events = app.subscribe();
+        crate::testing::make_table_unreadable(&app, "conversations").await;
+        assert!(super::rearm_queued_prompt_restamps(&app).await.is_err(), "bot lookup failure must remain an error");
+        assert_eq!(created(&app, &msg).await, queued_at, "failed lookup rolls back the timestamp update");
+        let pending: i64 = sqlx::query_scalar("SELECT restamp_pending FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(pending, 1, "the durable debt remains set");
+
+        crate::testing::make_table_readable(&app, "conversations").await;
+        super::rearm_queued_prompt_restamps(&app).await.unwrap();
+        assert_eq!(created(&app, &msg).await, first_at, "recovery uses first delivered_at");
+        let pending: i64 = sqlx::query_scalar("SELECT restamp_pending FROM turns WHERE id=?").bind(&turn).fetch_one(&app.db).await.unwrap();
+        assert_eq!(pending, 0);
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.kind, "message_added");
+        assert_eq!(event.data["bot_id"], bot.id);
+        assert_eq!(event.data["message"]["id"], msg);
     }
 
     /// 在 first-delivery claim 前插入第二份 evidence，讓它先 claim；後到的 evidence 不能再移動訊息時間（#735）。

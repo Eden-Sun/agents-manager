@@ -44,6 +44,9 @@ mod busy_send;
 /// 「輸入框有沒有字」的同一支判斷，給 lifecycle 以外的地方（judge 的卡住畫面）用。
 pub(crate) use delivery::{plain_without_hints, read_styled};
 mod prompt;
+pub(crate) async fn rearm_queued_prompt_restamps(app: &Arc<App>) -> anyhow::Result<()> {
+    prompt::rearm_queued_prompt_restamps(app).await
+}
 mod pane_text;
 mod poller;
 mod transcript_origin;
