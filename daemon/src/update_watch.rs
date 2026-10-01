@@ -7,7 +7,7 @@ use crate::db;
 use crate::state::App;
 use crate::tui_prompts::update_notice;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// 每個 claude pane 都要一次 `pane.read`，所以比問卷那支（10 秒）鬆。
@@ -17,7 +17,7 @@ const SWEEP: Duration = Duration::from_secs(30);
 const DISK_VERSION_TTL: Duration = Duration::from_secs(300);
 
 /// 項目鍵是 `<kind>@<host>`，值還綁住讀取時的 HostFence；同名主機換代後，舊 observation 不能命中。
-struct DiskVersionEntry {
+pub(crate) struct DiskVersionEntry {
     at: Instant,
     authority: crate::hosts::HostAuthorityKey,
     version: Option<String>,
@@ -28,17 +28,14 @@ struct DiskVersionObservation {
     fence: crate::hosts::HostFence,
 }
 
-type DiskCache = tokio::sync::Mutex<HashMap<String, DiskVersionEntry>>;
-
-fn disk_cache() -> &'static DiskCache {
-    static C: OnceLock<DiskCache> = OnceLock::new();
-    C.get_or_init(Default::default)
-}
+/// 掛在 `App.disk_versions`，不放 process 全域：測試各自一個 App，別的測試裝完版本時的
+/// [`forget_disk_version`] 不會清掉這個測試種的版本、害它改去問本機真的 `codex --version`（issue #759）。
+pub(crate) type DiskCache = tokio::sync::Mutex<HashMap<String, DiskVersionEntry>>;
 
 async fn disk_version(app: &Arc<App>, host: &str, kind: &str) -> Option<DiskVersionObservation> {
     let fence = app.hosts.fence(host).await?;
     let key = format!("{kind}@{host}");
-    let mut cache = disk_cache().lock().await;
+    let mut cache = app.disk_versions.lock().await;
     let cached = cache.get(&key).and_then(|entry| {
         (entry.authority.matches(&fence) && entry.at.elapsed() < DISK_VERSION_TTL).then(|| entry.version.clone())
     });
@@ -60,8 +57,8 @@ async fn disk_version(app: &Arc<App>, host: &str, kind: &str) -> Option<DiskVers
 }
 
 /// 剛在這台裝過新版（`cli_update`）：丟掉快取，下一輪巡邏重讀，不要拿五分鐘前的舊版本把通知改回「需安裝」。
-pub(crate) async fn forget_disk_version(host: &str, kind: &str) {
-    disk_cache().lock().await.remove(&format!("{kind}@{host}"));
+pub(crate) async fn forget_disk_version(app: &App, host: &str, kind: &str) {
+    app.disk_versions.lock().await.remove(&format!("{kind}@{host}"));
 }
 
 /// statusLine 回報的 process 版本（`runs.status_json.version`）。**跑著的**版本，不是磁碟上的；
@@ -267,16 +264,16 @@ mod tests {
 
     const CODEX_MENU: &str = "\
 >_ OpenAI Codex (v0.154.0)\n\n✨ Update available! 0.154.0 -> 0.155.1\n\n› 1. Update now (runs `npm install -g @openai/codex`)\n  2. Skip\n  3. Skip until next version\n";
-
+    /// 磁碟版本快取已改掛 App（#759）；這幾條仍序列化，只是保守、成本低。
     /// 磁碟版本快取是全域的：這幾條測試各自種不同的版本，不能平行。
     fn serial() -> &'static tokio::sync::Mutex<()> {
-        static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
         M.get_or_init(Default::default)
     }
 
     async fn seed_disk(app: &Arc<App>, host: &str, kind: &str, v: &str) {
         let fence = app.hosts.fence(host).await.expect("test host exists");
-        disk_cache().lock().await.insert(
+        app.disk_versions.lock().await.insert(
             format!("{kind}@{host}"),
             DiskVersionEntry { at: Instant::now(), authority: fence.authority_key(), version: Some(v.to_string()) },
         );
