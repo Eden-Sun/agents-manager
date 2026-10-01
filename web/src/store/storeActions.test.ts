@@ -1093,6 +1093,39 @@ test('送出時連線斷了（回應遺失）：再送同一句要沿用同一�
   assert.notEqual(last.client_request_id, crids[0], '成功之後同一句是新的動作')
 })
 
+test('群組送出時連線斷了（回應遺失）：再送同一句要沿用同一個 client_request_id，daemon 才回同一組 turn、不再打字', async () => {
+  seed()
+  let n = 0
+  routeDaemon(() => {
+    n += 1
+    if (n === 1) throw new TypeError('Failed to fetch')
+    return json({ group_id: 'g1', sent: [{ bot_id: 'b1', bot_name: 'b1', turn_id: 't1', message_id: 'm1', delivery: 'ok' }], skipped: [] }, 200)
+  })
+  assert.equal(await useStore.getState().sendGroupChat('p1', '@all 跑測試'), null)
+  assert.ok(await useStore.getState().sendGroupChat('p1', '@all 跑測試'))
+  const crids = requests.filter((r) => r.path.endsWith('/chat')).map((r) => (r.body as { client_request_id?: string }).client_request_id)
+  assert.equal(crids.length, 2)
+  assert.equal(crids[0], crids[1], '回應遺失後重送要是同一個 crid（API.md 11.2：同 crid 重送冪等）')
+  await useStore.getState().sendGroupChat('p1', '@all 跑測試')
+  const last = requests.filter((r) => r.path.endsWith('/chat')).at(-1)!.body as { client_request_id?: string }
+  assert.notEqual(last.client_request_id, crids[0], '成功之後同一句是新的動作')
+})
+
+test('群組送出被 daemon 明確拒絕（400 no_mention）：下一次是新的動作，不沿用舊 crid', async () => {
+  seed()
+  let n = 0
+  routeDaemon(() => {
+    n += 1
+    if (n === 1) return json({ error: 'bad_request', reason: 'no_mention' }, 400)
+    return json({ group_id: 'g1', sent: [{ bot_id: 'b1', bot_name: 'b1', turn_id: 't1', message_id: 'm1', delivery: 'ok' }], skipped: [] }, 200)
+  })
+  assert.equal(await useStore.getState().sendGroupChat('p1', '沒有 mention'), null)
+  assert.ok(await useStore.getState().sendGroupChat('p1', '沒有 mention'))
+  const crids = requests.filter((r) => r.path.endsWith('/chat')).map((r) => (r.body as { client_request_id?: string }).client_request_id)
+  assert.equal(crids.length, 2)
+  assert.notEqual(crids[0], crids[1], 'daemon 回了明確的錯＝那個動作結束了，鍵要作廢')
+})
+
 test('斷線重連後：已載入的對話要重抓訊息，不能只補狀態（#368）', async () => {
   seed()
   useStore.setState({ loadedBots: { b1: true } })

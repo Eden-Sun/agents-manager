@@ -1136,9 +1136,14 @@ export const useStore = create<StoreState>((set, get) => {
   },
 
   async sendGroupChat(projectId, text, attachments = []) {
-    const crid = api.newClientRequestId()
+    // 跟 `sendPrompt` 同一條規則（#367）：連線斷在 daemon 收下之後（回應遺失），使用者會再按一次同一句，
+    // 要拿同一個 crid——daemon 以它冪等（API.md 11.2：重送回同一組 turn_id、不再打字）。每次都換新的鍵，
+    // 等於把這個冪等關掉，N 顆 bot 各收到兩則。只有「沒收到任何回覆」的失敗才沿用；daemon 回了就作廢。
+    const reqKey = `group:${projectId}:${text}\u0000${attachments.join(',')}`
+    const crid = createRequestId(reqKey)
     try {
       const res = await api.sendGroupChat(projectId, text, crid, attachments)
+      settleCreateRequest(reqKey)
       // Lock each recipient's composer right away (same as `sendPrompt`).
       set((s) => {
         const turns = { ...s.turns }
@@ -1177,6 +1182,7 @@ export const useStore = create<StoreState>((set, get) => {
       }
       return res
     } catch (e) {
+      if (e instanceof ApiError) settleCreateRequest(reqKey)
       get().notify('error', errText(e))
       return null
     }
