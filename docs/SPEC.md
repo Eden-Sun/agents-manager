@@ -2735,7 +2735,7 @@ label = "foo@m4p"
 
 - **Stop 帶本機 transcript 的最後一則使用者訊息**（#753）：claude 的 Stop payload 沒有使用者訊息，遠端 transcript 路徑（`/Users/…`）在 agm-host 讀不到，
   遲到的 Stop 就證明不了「是備援已關掉的那一回合」、真回覆被丟。所以 spool 前、`claude` 的 `Stop` 事件（且沒被截斷）、有 `python3` 時，腳本從**本機** transcript 尾端
-  512 KiB 找最後一則人打的使用者訊息（跳過 `isMeta`、含 `tool_result` 的條目；規則同 `lifecycle::transcript_user_text`），放進 payload 的 `agm_user_text`（超過 64 KiB 就不帶，免得截半截的 `<pasted_content>` 對不上）。
+  512 KiB 找最後一則人打的使用者訊息（跳過 `isMeta`、含 `tool_result` 的條目；規則同 `lifecycle::transcript_user_text`），放進 payload 的 `agm_user_text`（超過 64 KiB 就不帶，免得截半截的 `<pasted_content>` 對不上；訊息帶孤立 surrogate 也不帶：`json.dumps` 會寫回 serde_json 讀不了的 `\ud83d`，整筆 Stop 會被 drain 丟掉）。
   `hookrecv::hook_user_text` 的順序：hook 直接帶的 → `agm_user_text` → 讀本機 `transcript_path`。沒有 `python3`、讀不到檔、不是 Stop：payload 原樣，daemon 照舊「沒證據不蓋」。
   **正在跑的遠端 bot 要等它自己重啟才換到新腳本**（上一點）。
 - **腳本不做語意判斷**：只用最粗的字串比對決定要不要報 idle，其餘照寫 spool，分類只在 `hookrecv::classify`。遠端腳本沒有測試；漏報最多晚一點被掃到，錯分類會吃掉訊息。
