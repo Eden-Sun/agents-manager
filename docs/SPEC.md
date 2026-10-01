@@ -2925,7 +2925,7 @@ B 已有同一個檔：內容一樣跳過（重跑冪等），不一樣＝B 那�
 
 **import**：`project-transfer import --host local --path-map /Users/m4p/project/agents-manager=/home/ubuntu/project/agents-manager`
 把專案 path、bot 的 cwd（worktree 在底下的一起換）、附件的 `agent_path` 換成 B 上的路徑，config 寫 `host = "local"`；
-`--host local` 沒有一條 map 換得到專案 path 就拒絕。還有 transcript 不在 B 上的段落列在 warnings（提醒先跑 transcript-transfer）。
+`--host local` 沒有一條 map 換得到專案 path 就拒絕。`--host local` 時專案的 `workspace_id` 清成 NULL：那是來源那台 herdr 的短 id（`w1`、`wV`…），帶到 B 上可能剛好是別的 workspace，daemon 的 `workspace_get` 看到存在就會把 bot 開在不相干的地方；B 第一次啟動自己建。還有 transcript 不在 B 上的段落列在 warnings（提醒先跑 transcript-transfer）。
 附件位元組照 §11.9 放 B 資料目錄的副本；`agent_path` 換過之後 B 的 checkout 裡不一定有那個檔（`.agents-manager/attachments` 不進 git），舊對話裡的附件 agent 讀不到——**刻意不複製進 B 的 checkout**（使用者 2026-09-28 決定維持現狀）。
 
 **runbook** 跟 §11.9 同樣先停 A 的 bot、設 `handed_off_to`，差別在第 3、4 步：

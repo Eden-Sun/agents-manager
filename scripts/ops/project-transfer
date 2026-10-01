@@ -24,7 +24,7 @@ import 是「目標 daemon 停著」的離線路徑：目標 daemon 沒有匯入
 hook token 重新產生；native_session_id 保留（接回用）；
 還在跑的 run 收成 exited、排隊／送出中的 turn 收成 failed（接手後由目標 `start?resume=native` 接回）；
 config.toml 裡的 bot 一律 `autostart = false`（來源還在跑時目標開機不能自己再起一份）；
-`handed_off_to`（#708）清掉。不搬憑證／身分（identity 只帶名字，目標要自己有同名身分）。
+`handed_off_to`（#708）清掉；`--host local` 時 `workspace_id` 也清成 NULL（那是來源那台 herdr 的 id）。不搬憑證／身分（identity 只帶名字，目標要自己有同名身分）。
 """
 
 import argparse
@@ -547,6 +547,11 @@ def rewrite(bundle, host, data_dir, now, maps=()):
         for k, v in PROJECT_RESET.items():
             if k in p:
                 p[k] = v
+        # herdr 的 workspace id 是那一台自己的短 id（`w1`、`wV`…）：專案改在目標本機跑時，帶過去的 id 在目標的 herdr 上
+        # 可能剛好是別的 workspace，daemon 的 `workspace_get` 看到「存在」就把這個專案的 bot 開在不相干的地方。
+        # 清掉讓目標第一次啟動時自己建；`--host <來源機器>` 的話那個 id 仍然是那台上的，原樣保留。
+        if host == "local" and "workspace_id" in p:
+            p["workspace_id"] = None
     for b in t["bots"]:
         b["hook_token"] = secrets.token_hex(16)
         if b.get("cwd"):

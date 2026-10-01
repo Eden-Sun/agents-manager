@@ -446,6 +446,21 @@ class ProjectTransferTest(unittest.TestCase):
         hub = {p["id"]: p for p in tomllib.loads(slurp(self.cfg, "r"))["projects"]}[PID]
         self.assertEqual((hub["host"], hub["path"]), ("local", "/home/u/hub"))
 
+    def test_workspace_id_follows_the_host_it_was_made_on(self):
+        """herdr 的 workspace id 是各台機器自己的短 id（`w1`、`wV`…）：帶到另一台 herdr 上可能剛好是**別的**
+        workspace，daemon 的 `workspace_get` 看到「存在」就把這個專案的 bot 開在不相干的 workspace 裡。
+        專案改在目標本機跑（`--host local`）就要清掉；`--host m4p`（來源機器仍是那台）原樣保留。"""
+        self.local_import(transcripts_here=True)
+        c = self.tgt()
+        self.assertIsNone(c.execute("SELECT workspace_id FROM projects WHERE id = ?", (PID,)).fetchone()[0],
+                          "來源機器的 workspace id 在目標本機的 herdr 上沒有意義")
+
+    def test_remote_import_keeps_the_workspace_id(self):
+        self.export()
+        self.imp()
+        c = self.tgt()
+        self.assertEqual(c.execute("SELECT workspace_id FROM projects WHERE id = ?", (PID,)).fetchone()[0], "w1")
+
     def test_local_import_warns_when_transcripts_were_not_moved(self):
         out = self.local_import(transcripts_here=False)
         w = [x for x in out["warnings"] if "transcript" in x]
