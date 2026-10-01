@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
+import type { CloseNeedsConfirm } from '../api'
 import type { HerdrVersion, HostResult, HostShell, RemoteCargoSettings } from '../api/types'
 import { herdrVersionView } from '../lib/herdrVersion'
 import { ApiError, HOST_DEFAULTS } from '../api/types'
@@ -9,6 +10,7 @@ import { useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
 import { GhHostStatus } from './GhAuth'
+import { ServicePaneNote } from './ServicePaneNote'
 import { ToolBadges } from './Tools'
 import './hostsPanel.css'
 
@@ -68,6 +70,8 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
   const opening = Boolean(busy[`shell:${host}`])
   const [shells, setShells] = useState<HostShell[]>([])
   const [tick, setTick] = useState(0)
+  // daemon 擋下「結束」（服務 pane／讀不到它在跑什麼）：不是失敗，要人看過再確認一次（跟 `HostShellPanel` 同一段說明）。
+  const [needs, setNeeds] = useState<{ paneId: string; why: CloseNeedsConfirm } | null>(null)
   const enabled = connected
 
   useEffect(() => {
@@ -112,13 +116,31 @@ function HostShellList({ host, connected }: { host: string; connected: boolean }
               disabled={ending}
               aria-label="結束這個 shell"
               title="結束這個 shell"
-              onClick={() => void endHostShell(host, sh.pane_id).then(() => setTick((t) => t + 1))}
+              onClick={() =>
+                void endHostShell(host, sh.pane_id).then((why) => {
+                  if (why) setNeeds({ paneId: sh.pane_id, why })
+                  setTick((t) => t + 1)
+                })
+              }
             >
               ✕
             </button>
           </span>
         )
       })}
+      <ConfirmDialog
+        open={needs !== null}
+        title="這顆 pane 還在做事"
+        body={<ServicePaneNote needs={needs?.why ?? null} />}
+        confirmLabel="仍要關掉"
+        danger
+        onCancel={() => setNeeds(null)}
+        onConfirm={() => {
+          const paneId = needs?.paneId
+          setNeeds(null)
+          if (paneId) void endHostShell(host, paneId, true).then(() => setTick((t) => t + 1))
+        }}
+      />
     </span>
   )
 }
