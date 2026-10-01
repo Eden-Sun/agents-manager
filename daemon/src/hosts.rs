@@ -85,6 +85,14 @@ pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::pro
     Ok(Some(std::process::Output { status, stdout, stderr }))
 }
 
+/// 本機跑一段 `/bin/sh -c`、只要 stdout；超過 `timeout` 回錯（`what timed out`）。
+/// 不能寫成 `tokio::time::timeout(Command::output())`：逾時只是丟掉 future，子行程沒人收（沒有 `kill_on_drop`、更碰不到孫行程），
+/// 卡住的 `--version`／`grok models`（`-lic` 互動 shell）每輪巡邏就多留一個。走 [`sh_local`]，逾時整個行程群組砍掉。
+pub async fn sh_local_stdout(script: &str, timeout: Duration, what: &str) -> Result<String> {
+    let out = sh_local(script, timeout).await?.ok_or_else(|| anyhow::anyhow!("{what} timed out"))?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 /// PATH 以 `:` 分項，每項各自 quote，所以空白、`;`、`$(…)` 是資料不是指令；只有項目**開頭**的
 /// `$HOME`／`${HOME}`／`~` 展開成遠端 home（API.md 的範例就是 `/opt/homebrew/bin:$HOME/.local/bin`，
 /// 整串包單引號會讓 `$HOME` 留成字面，遠端找不到 herdr，#241）。
@@ -1403,6 +1411,26 @@ mod tests {
         let (out, wrote) = run_with_stdin(cmd, &data, Duration::from_secs(10)).await.unwrap().unwrap();
         wrote.unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "300000");
+    }
+
+    /// 本機探測逾時：子行程（含孫行程）要被收掉，不能留著等下一輪再多留一個。
+    #[tokio::test]
+    async fn a_timed_out_local_probe_leaves_nothing_running() {
+        let marker = format!("am-local-probe-{}", crate::db::ulid());
+        let script = format!("sleep 30 # {marker}\nsleep 30 # {marker}");
+        let t0 = std::time::Instant::now();
+        let e = sh_local_stdout(&script, Duration::from_millis(300), "probe").await.unwrap_err();
+        assert!(e.to_string().contains("timed out"), "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(25));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let ps = std::process::Command::new("/bin/ps").args(["-axo", "command"]).output().unwrap();
+        let alive: Vec<&str> = std::str::from_utf8(&ps.stdout).unwrap().lines().filter(|l| l.contains(&marker) && !l.contains("ps ")).collect();
+        assert!(alive.is_empty(), "children survived the timeout: {alive:?}");
+    }
+
+    #[tokio::test]
+    async fn a_local_probe_returns_its_stdout() {
+        assert_eq!(sh_local_stdout("printf ok", Duration::from_secs(10), "probe").await.unwrap(), "ok");
     }
 
     #[tokio::test]

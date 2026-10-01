@@ -130,13 +130,7 @@ pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result
         crate::tools::login_abs_sh(kind).trim_end()
     );
     let out = if host == LOCAL_HOST {
-        let o = tokio::time::timeout(
-            VERSION_TIMEOUT,
-            tokio::process::Command::new("/bin/sh").arg("-c").arg(&script).stdin(std::process::Stdio::null()).output(),
-        )
-        .await
-        .map_err(|_| anyhow!("`{kind} --version` timed out"))??;
-        String::from_utf8_lossy(&o.stdout).to_string()
+        crate::hosts::sh_local_stdout(&script, VERSION_TIMEOUT, &format!("`{kind} --version`")).await?
     } else {
         let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
         conn.ssh_exec_path(&script).await?

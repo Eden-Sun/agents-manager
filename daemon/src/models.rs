@@ -399,13 +399,7 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
                     q = sh_quote(&format!("{exe} models")),
                     exe = sh_quote(&exe)
                 );
-                let o = tokio::time::timeout(
-                    Duration::from_secs(30),
-                    tokio::process::Command::new("/bin/sh").arg("-c").arg(&script).stdin(std::process::Stdio::null()).output(),
-                )
-                .await
-                .map_err(|_| anyhow!("`grok models` timed out"))??;
-                String::from_utf8_lossy(&o.stdout).to_string()
+                crate::hosts::sh_local_stdout(&script, Duration::from_secs(30), "`grok models`").await?
             } else {
                 let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
                 conn.ssh_exec_path(&format!("{} models 2>/dev/null </dev/null\n", sh_quote(&exe))).await?
