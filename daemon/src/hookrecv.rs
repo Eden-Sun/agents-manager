@@ -135,16 +135,19 @@ async fn relay_backfill(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &s
         .bind(&msg_id)
         .execute(&app.db)
         .await?;
-    let _ = crate::agent_relay::claim(to_agent, &content);
+    let _ = crate::agent_relay::claim(&host, to_agent, &content);
     let message: db::Message = sqlx::query_as("SELECT * FROM messages WHERE id = ?").bind(&msg_id).fetch_one(&app.db).await?;
     tracing::info!(from = %from_bot, to = %to_agent, msg = %msg_id, "relay announce arrived after the echo; attributed it");
     lifecycle::emit_message_added(app, &to_bot, message).await;
     Ok(())
 }
 
-fn relay_source(run: Option<&db::Run>, echo: &str) -> Option<String> {
-    let agent = run?.agent_name.as_deref()?;
-    crate::agent_relay::claim(agent, echo)
+async fn relay_source(app: &Arc<App>, run: Option<&db::Run>, echo: &str) -> Option<String> {
+    let run = run?;
+    let agent = run.agent_name.as_deref()?;
+    // 讀不到主機＝認不出來就不標（寧可少標，不要錯標）。
+    let host = db::bot_host(&app.db, &run.bot_id).await.ok()?;
+    crate::agent_relay::claim(&host, agent, echo)
 }
 
 #[derive(Debug)]
@@ -1182,7 +1185,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         // 2026-09-30 使用者：console-rpa（m4p）直送給 cicd 的一句被存成使用者訊息。spool 每 30 秒左右才收一次，
         // 收件方的回音常常比這則報備先到，所以除了照常記下，也回頭補標已經存下的那一則。
         HookKind::RelayAnnounce { to_agent, text } => {
-            crate::agent_relay::announce(&bot.id, &to_agent, &text);
+            // 讀不到寄件者的主機就不記（記了也沒人認得出是哪台）；補標那邊同樣要讀主機，會一起報錯。
+            let host = db::bot_host(&app.db, &bot.id).await?;
+            crate::agent_relay::announce(&host, &bot.id, &to_agent, &text);
             relay_backfill(app, &bot.id, &to_agent, &text).await
         }
         HookKind::Identity { session_id, transcript_path } => {
@@ -1315,7 +1320,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                                 .fetch_all(&mut *tx)
                                 .await?;
                         if hook_user_is_new(&have, u) && !repeats_answered_prompt(&mut tx, &conv, &t.id, u).await? {
-                            let from = relay_source(run.as_ref(), u);
+                            let from = relay_source(app, run.as_ref(), u).await;
                             added.push(
                                 lifecycle::insert_message_relayed_tx(&mut tx, &conv, Some(&t.id), "user", u, "hook", false, None, from.as_deref())
                                     .await?,
@@ -1379,7 +1384,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             .await?;
             let mut added = Vec::new();
             if let Some(u) = user.filter(|s| !s.is_empty()) {
-                let from = relay_source(run.as_ref(), &u);
+                let from = relay_source(app, run.as_ref(), &u).await;
                 added.push(
                     lifecycle::insert_message_relayed_tx(&mut tx, &conv, Some(&tid), "user", &u, "hook", false, None, from.as_deref()).await?,
                 );
@@ -3647,7 +3652,45 @@ mod external_claim_tests {
         };
         assert_eq!(relay(echo.id.clone()).await.as_deref(), Some(from.id.as_str()), "回音補標寄件者");
         assert_eq!(relay(web.id.clone()).await, None, "完全相同的 web 使用者訊息不動");
-        assert_eq!(crate::agent_relay::claim("robins-hub-3b84sb", text), None, "補標後報備已用掉，不會再標一次");
+        assert_eq!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "robins-hub-3b84sb", text), None, "補標後報備已用掉，不會再標一次");
+    }
+
+    /// 稽核：報備表只用 agent 名字當 key。名字是 `<專案>-<bot>`，兩台主機各有同名 agent 並不稀奇；
+    /// 寄件者那台的報備不能被另一台同名 agent 的同一句回音認領（錯標＋用掉真收件方的那一筆）。
+    #[tokio::test]
+    async fn a_relay_announce_is_not_claimed_by_a_same_named_agent_on_another_host() {
+        let env = tt::env().await;
+        let from = tt::claude_bot(&env.app, &env.project_id, "relay-host-from").await;
+        let local = tt::claude_bot(&env.app, &env.project_id, "relay-host-local").await;
+        let local_run = tt::fake_run(&env.app, &local.id).await;
+        let remote_project = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, 'remote', 'mac2', ?)")
+            .bind(&remote_project)
+            .bind(format!("{}/remote", env.dir.display()))
+            .bind(db::now())
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let remote = tt::claude_bot(&env.app, &remote_project, "relay-host-remote").await;
+        let remote_run = tt::fake_run(&env.app, &remote.id).await;
+        for run in [&local_run, &remote_run] {
+            sqlx::query("UPDATE runs SET agent_name = 'proj-same-name-host' WHERE id = ?").bind(run).execute(&env.app.db).await.unwrap();
+        }
+        let text = "請幫我看一下這個同名 agent 的跨主機報備是不是會被認錯";
+        let announce = HookBody {
+            bot_id: from.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "proj-same-name-host", "text": text}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        process(&env.app, &announce).await.unwrap();
+
+        let remote_run = db::run(&env.app.db, &remote_run).await.unwrap().unwrap();
+        assert_eq!(relay_source(&env.app, Some(&remote_run), text).await, None, "另一台主機的同名 agent 不能認領");
+        let local_run = db::run(&env.app.db, &local_run).await.unwrap().unwrap();
+        assert_eq!(relay_source(&env.app, Some(&local_run), text).await.as_deref(), Some(from.id.as_str()), "真正的收件方照常認領");
     }
 
     #[tokio::test]
