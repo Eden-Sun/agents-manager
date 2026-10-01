@@ -510,10 +510,27 @@ fn peer_is_local(peer: &std::net::SocketAddr, allow_lan: bool) -> bool {
 
 /// A5: compare the **host** exactly — `starts_with` let `http://localhost.attacker.com` through.
 /// Port not pinned: the Vite dev proxy forwards Origin verbatim; cross-origin reads still need the token.
+/// `Host` 或 Origin 的 authority 是不是 loopback 名稱（可帶 port）；`[::1]` 自己有冒號，只有尾端全是數字才當 port。
+fn is_loopback_host(authority: &str) -> bool {
+    let a = authority.trim();
+    let host = match a.rsplit_once(':') {
+        Some((h, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => a,
+    };
+    matches!(host.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "[::1]")
+}
+
 /// `allow_lan` accepts any Origin, same rationale as `peer_is_local`.
 fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
     if allow_lan {
         return true;
+    }
+    // DNS rebinding：同源 GET 沒有 Origin，所以 Host 也要是 loopback 名稱（沒有 Host 的不是瀏覽器）。
+    if let Some(host) = headers.get("host") {
+        let Ok(host) = host.to_str() else { return false };
+        if !is_loopback_host(host) {
+            return false;
+        }
     }
     let Some(o) = headers.get("origin").and_then(|v| v.to_str().ok()) else { return true };
     let Some(rest) = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")) else { return false };
@@ -8785,5 +8802,45 @@ mod relay_from_auth_tests {
         // 送給**別顆** bot 照舊通：擋的是 from == to，不是「有 relay_from」。
         let (status, body) = send(&f.e.app, &f.target, &f.bravo, Some("tok-bravo"), "self-ok").await;
         assert_eq!(status, StatusCode::OK, "{body}");
+    }
+}
+
+/// DNS rebinding：攻擊者的網域先指到他的伺服器載入頁面、再改指 127.0.0.1，之後頁面對自己 origin 的 GET
+/// **不帶 `Origin`**（同源 GET 瀏覽器不送），TCP 對端又是 loopback——只看 Origin 與對端擋不住，`GET /api/session` 就把
+/// UI token 交出去。瀏覽器送的 `Host` 是攻擊者的網域，所以 `allow_lan` 關著時 Host 也必須是 loopback 名稱。
+#[cfg(test)]
+mod host_header_tests {
+    use super::origin_is_local;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn h(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(*k, HeaderValue::from_str(v).unwrap());
+        }
+        m
+    }
+
+    #[test]
+    fn a_rebound_hostname_is_refused_even_without_an_origin_header() {
+        assert!(!origin_is_local(&h(&[("host", "evil.example:7788")]), 7788, false), "同源 GET 沒有 Origin，只看 Host 才擋得住");
+        assert!(!origin_is_local(&h(&[("host", "127.0.0.1.evil.example:7788")]), 7788, false));
+        assert!(!origin_is_local(&h(&[("host", "localhost.evil.example")]), 7788, false));
+        assert!(!origin_is_local(&h(&[("host", "evil.example"), ("origin", "http://127.0.0.1:7788")]), 7788, false));
+    }
+
+    #[test]
+    fn loopback_hosts_and_hostless_clients_still_pass() {
+        for host in ["127.0.0.1:7788", "127.0.0.1", "localhost:5173", "localhost", "[::1]:7788", "[::1]", "LOCALHOST:7788"] {
+            assert!(origin_is_local(&h(&[("host", host)]), 7788, false), "{host}");
+        }
+        // 沒有 Host 的不是瀏覽器（HTTP/1.0、內部呼叫）：照舊放行。
+        assert!(origin_is_local(&h(&[]), 7788, false));
+        assert!(origin_is_local(&h(&[("origin", "http://localhost:5173"), ("host", "127.0.0.1:7788")]), 7788, false));
+    }
+
+    #[test]
+    fn allow_lan_keeps_accepting_any_host() {
+        assert!(origin_is_local(&h(&[("host", "agm-host.tailnet.ts.net:7788")]), 7788, true));
     }
 }

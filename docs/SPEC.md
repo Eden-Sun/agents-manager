@@ -2655,7 +2655,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
 - bind：開發版 bind `0.0.0.0`；打包成 macOS app 的執行檔（路徑在 `…app/Contents/MacOS/`）bind `127.0.0.1`；`AM_DEV_LAN` 可雙向覆寫（`main.rs::dev_lan_default`）。
 - 啟動時產生 UI token 寫 `~/.config/agents-manager/ui-token`，**權限一律 0600**（issue #512）：新檔走 `write_private`
   （先建 0600 的暫存檔再 rename，明文 token 不會先躺在一個 0644 的 inode 上），開機讀到既有檔時發現權限比 0600 寬就修回來、
-  修不動記 WARN 但不擋開機。`GET /api/session`（**TCP 對端**須為 loopback——不看 `Host`，那是呼叫端自己填的）回 User token；
+  修不動記 WARN 但不擋開機。`GET /api/session`（**TCP 對端**須為 loopback，且 `Origin`、`Host`（若有）的主機都須是 `127.0.0.1`／`localhost`／`[::1]`：同源 GET 不帶 Origin，DNS rebinding 的頁面只有 Host 看得出來；`allow_lan` 開著一律放行）回 User token；
   其餘 `/api/*` 接受 User `X-AM-Token`、Bot 成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，或路徑限定的 service 成對 `X-AM-Service-Id`＋`X-AM-Service-Token`；
   出現 Bot／service header 即選該身分，缺欄、錯誤或混帶其他 principal 一律拒絕，不降級成 User。沒帶 Bot／service header 且帶有效共用 UI token 就是 User，
   這保留使用者接受的 LAN／共用 token 風險，不做額外人類證明。`/ws` 維持 `?token=`；`Origin` 存在時主機須為本機。

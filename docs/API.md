@@ -5,7 +5,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 ## 0. 認證
 
-1. `GET /api/session` 不需 token，但**連線的 TCP 對端**必須是 loopback（不看 `Host`：那是呼叫端自己填的），`Origin`（若有）的主機必須是 `127.0.0.1` / `localhost` / `[::1]`（不限 port）。回 `{"token":"<32 hex>","port":7788}`。
+1. `GET /api/session` 不需 token，但**連線的 TCP 對端**必須是 loopback（不看 `Host`：那是呼叫端自己填的），`Origin`（若有）的主機必須是 `127.0.0.1` / `localhost` / `[::1]`（不限 port）；**`Host`（若有）也必須是這三個名稱之一**（安全審查：DNS rebinding 的頁面對自己 origin 的 GET 不帶 `Origin`，只看 Origin 與 TCP 對端擋不住）。這條 loopback 檢查（Origin／Host／對端）套在 `/api/*` 的 auth 中介層、`/api/session` 與 `/ws`。沒有 `Host` 的請求（不是瀏覽器）照舊放行。回 `{"token":"<32 hex>","port":7788}`。
    開發版（`allow_lan`，見 SPEC §7.1）這兩項都直接放行：同網段誰都拿得到 token——這是使用者裁示保留的風險（`e7392dd`）。
 2. 其餘 `/api/*` 接受一種身分：User 的 `X-AM-Token`、Bot 的 `X-AM-Bot-Id`＋`X-AM-Bot-Token`、或範圍受限的 service `X-AM-Service-Id`＋`X-AM-Service-Token`。出現 Bot／service header 就表示要用該 principal；欄位不完整、token 不符、或混帶其他 principal 都拒絕，不降級成 User。沒有 Bot／service header 且 token 有效的請求是 User；這符合使用者裁示接受共用 UI token 的風險。
 3. WebSocket：`/ws?token=<token>[&since=<seq>]`。
@@ -22,7 +22,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 - **使用者證明刻意不新增**：網頁繼續拿共用 UI token；使用者已接受 LAN 可取用此 token 的現況。`GET /api/session` 仍依 loopback／`allow_lan` 規則發 token，Bot 請求不會自動攜帶它。
 - 同一個 unix 使用者的本機行程仍能讀到 UI token 與 pane 環境；Bot principal 是讓 Bot 呼叫明確以自己的憑證驗證，並防止帶錯／缺少 Bot proof 的同一請求降級成 User。它不區分同一使用者下的惡意本機行程。
 - 會因為 token 而**多拿到**權限的是本機使用者以外的人：開發版 `allow_lan`（跟 bind `0.0.0.0` 同一個判斷，§7.1）時，同網段的任何人
-  `GET /api/session` 就拿得到 token；而且 `Origin` 不檢查、`Host` 本來就不檢查，瀏覽器裡的 DNS rebinding 也走得到這條。
+  `GET /api/session` 就拿得到 token；而且 `allow_lan` 開著時 `Origin`、`Host` 都不檢查，瀏覽器裡的 DNS rebinding 也走得到這條（`allow_lan` 關著時 `Host` 必須是 loopback 名稱，擋得住）。
 - 遠端主機上沒有 daemon、也不開反向埠（SPEC §11.4），遠端的 bot 打不到 `/api`。
 
 | 組 | 端點 | 呼叫端 | 目前守衛 | 後果 | 建議要求 |
