@@ -250,6 +250,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(crate::release_triage::http::routes())
         .merge(crate::upstream_update::routes())
         .merge(crate::judge::http::routes())
+        .merge(crate::deleted_bots::routes())
         .route("/bots/{id}/restore", post(restore_bot))
         .route("/identities", post(create_identity))
         .route("/identities/{name}", delete(delete_identity))
