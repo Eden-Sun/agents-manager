@@ -769,6 +769,13 @@ codex 走**同一套**派工對象、冪等與結論回填，差別只在：讀 
 codex 的新版還沒安裝、磁碟是舊的，所以先取 `release_triage` 帳本裡最新的正式版，帳本空才退回磁碟。
 網頁一律把版本帶上（codex 從 `update_notice` 讀）。更新框另外讀 `GET /api/release-triage?kind=` 顯示該區間已分診的結論（SPEC §18.2c）。
 
+**herdr（`kind=herdr`，2026-10-01 一鍵更新）**：讀 herdr 的 CHANGELOG（`/api/changelog?kind=herdr`）；沒有任務檔，正文開頭是
+`herdr_update::AGM_ASK`（跟 `herdr-update-kick.sh` 排程交辦同一段規則）＋同樣的版本尾段；沒給 `to` 時取 `GET /api/upstream-updates`
+快照裡該主機落後時的 `target_version`，沒有才退回磁碟。識別碼**跟 kick 共用** `agm-herdr-update-<版本>`（沒有 `-ui`）：
+誰先派都是那一筆——kick 先派，按鈕回 `duplicate:true`；按鈕先派，kick 撞同一個 id 收到 409（帶 `assignment_id`／`inbox_event_id`）
+就當已經派過、寫進 `herdr-update.last`，同一版只派一次。分診帳本沒有 herdr 的規則（§18.2c 第二階段），
+`GET /api/release-triage?kind=herdr` 回 200 空的 `rows`；`verdicts`／`dispatched`／`publish` 對 herdr 仍是 400。
+
 ### `GET /api/claude-update/review`
 這一版的 AGM 解析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
 「結論會回到這裡」）。`?kind=`／`?host=`／`?to=` 可指定，預設 claude、本機與上面說的新版。
@@ -1828,10 +1835,11 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 
 更新徽章／批次重啟 chip 按下去先呼叫這支，把 changelog 放進確認框。
 
-- `kind` 省略 = `claude`，支援 `claude`、`codex`（其他含 grok、未知字串一律 `found:false`）。`host` 省略 = `local`；不認得的 host 也是 200 `found:false` + `error`，不是 404。
+- `kind` 省略 = `claude`，支援 `claude`、`codex`、`herdr`（其他含 grok、未知字串一律 `found:false`）。`host` 省略 = `local`；不認得的 host 也是 200 `found:false` + `error`，不是 404。
 - 沒給 `to` 時 daemon 在該主機再跑 `claude --version` 當 `installed_version`（磁碟已是新版，不快取）。`from` 有給就回 `from`（不含）到目標（含）之間每一版，新的在前。
 - **codex 一定要給 `to`**：它的更新是 TUI 當場問（`✨ Update available! 0.153.4 -> 0.154.0`），新版還沒進磁碟；UI 從畫面那句解出 `from` / `to`。
-- 來源：claude `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；codex `https://api.github.com/repos/openai/codex/releases`（濾掉 draft／prerelease，`rust-vX.Y.Z` + body 併成同格式）。各自快取 10 分鐘，認 `## x.y.z`。
+- **herdr 也要給 `to`**（新版還沒裝；UI 用 `GET /api/upstream-updates` 的 `target_version`），`from` 給該主機目前版本。
+- 來源：claude `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；codex `https://api.github.com/repos/openai/codex/releases`（濾掉 draft／prerelease，`rust-vX.Y.Z` + body 併成同格式）；herdr `https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md`（Keep a Changelog 的 `## [x.y.z] - date`）。各自快取 10 分鐘，認 `## x.y.z` 與 `## [x.y.z] - date`。
 - **永遠 200**；抓不到就 `found:false` + `error`，UI 必須寫「找不到 changelog」。
 
 ```json
@@ -1845,7 +1853,9 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 跟 `update_notice`（磁碟已是新版、重啟套用）不同：這是**上游有、磁碟上還沒有**（claude 還沒自己下載、codex 還沒裝），重啟換不到任何東西。
 
 - 唯讀、不觸發抓取，回最近一輪巡邏（每 10 分鐘；daemon 啟動後約 1 分鐘第一輪）的快照；第一輪還沒跑完是 `{"items":[]}`。
-- 上游：claude `https://registry.npmjs.org/@anthropic-ai/claude-code/latest` 的 `version`；codex 沿用 `/api/changelog` 那份 GitHub releases 快取，取最大的正式版（濾掉 draft／prerelease）。成功的結果快取 1 小時；失敗不快取，下一輪再試。
+- `kind`：`claude`、`codex`、`herdr`（herdr 2026-10-01 加入，給 header 的 herdr 一鍵更新徽章用）。
+- 上游：claude `https://registry.npmjs.org/@anthropic-ai/claude-code/latest` 的 `version`；codex 沿用 `/api/changelog` 那份 GitHub releases 快取，取最大的正式版（濾掉 draft／prerelease）；herdr 問 `https://api.github.com/repos/herdrdev/herdr/releases`，同樣取數值最大的正式版（`source_url` 是 `https://github.com/herdrdev/herdr/releases`）。成功的結果快取 1 小時；失敗不快取，下一輪再試。
+- herdr 的磁碟版本不另跑指令：讀工具探測快取的 `herdr --version`（`hosts[].herdr.cli_version` 同一份，每 60 秒重探）；探不到 herdr 的主機不列。`target_version` 等於上游版，`text` 列出落後的主機並講明更新會重啟 herdr server。
 - 磁碟：每台工具探測認為有裝該 kind 的主機跑一次 `<kind> --version`。`latest_version` 是上游版；`target_version` 是共同安裝目標。Codex 的目標等於上游版；Claude 取上游版與已安裝版本的最大值，避免把較新的主機降版。Claude `behind` 表示低於共同目標或目標已知但讀不到版本；`has_update` 在任一主機落後／讀取失敗或版本不一致時為 `true`。
 - Claude 目標需處理時，`text` 持續列出**每台**目前版本（或讀取錯誤）與共同目標，並列出 `claude install <target_version>`。網頁把此快照保存在 header；只有全部到目標版才收起。`notify`／toast 是另外的單次通知，不是持續提示本身。
 - **抓不到上游**：`latest_version:null`、`error` 寫原因——不是「沒有新版」。Claude 若主機間仍不一致，仍以已知最高安裝版做目標並持續顯示；沒有可比較目標時 `has_update:false`。`text` 是給畫面的那一句（有待處理或抓不到時才有，否則 `null`）。

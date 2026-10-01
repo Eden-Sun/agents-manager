@@ -50,19 +50,19 @@ pub fn should_notify(report: &HerdrUpdateReport, last_notified: Option<&str>) ->
     report.has_update && last_notified != Some(report.latest_version.as_str())
 }
 
+/// 交辦裡「請判斷並回報」那段：排程（[`render_agm_brief`]）與更新框的「請 AGM 解析」（`claude_review`，
+/// kind=herdr）共用，規則只有一份。
+pub const AGM_ASK: &str = "請判斷並回報：\n\
+    - 哪些條目對 agents-manager 有用（對到 daemon 的哪個模組、目前繞路的哪一段可以拿掉）\n\
+    - 哪些可能弄壞現有整合（API 變更、拿掉的功能、需不需要停 server）\n\
+    - 哪些繞路修不到、仍要保留\n\n\
+    驗證通過才向我申請升級窗口；升級與重啟 herdr server 一律要核准，不自動執行。\n";
+
 /// 交給 AGM 的交辦內文：版本差異＋原始 CHANGELOG 段落。「哪些條目對我們有用／可能弄壞什麼」
 /// 刻意不在這裡判斷——那要讀懂 changelog 的敘述內容，是 AGM 建置 child 的活；這裡只保證版本
 /// 沒比錯、段落沒抓漏。呼叫端只在 `report.has_update` 時才需要送這份交辦。
 pub fn render_agm_brief(report: &HerdrUpdateReport) -> String {
-    let mut out = format!(
-        "herdr 有新版：{} → {}（本機／最新穩定版）。\n\n\
-         請判斷並回報：\n\
-         - 哪些條目對 agents-manager 有用（對到 daemon 的哪個模組、目前繞路的哪一段可以拿掉）\n\
-         - 哪些可能弄壞現有整合（API 變更、拿掉的功能、需不需要停 server）\n\
-         - 哪些繞路修不到、仍要保留\n\n\
-         驗證通過才向我申請升級窗口；升級與重啟 herdr server 一律要核准，不自動執行。\n\n",
-        report.installed_version, report.latest_version
-    );
+    let mut out = format!("herdr 有新版：{} → {}（本機／最新穩定版）。\n\n{AGM_ASK}\n", report.installed_version, report.latest_version);
     if report.sections.is_empty() {
         out.push_str("（沒有抓到對應版本範圍的 CHANGELOG 段落，附件請自己核對原始 CHANGELOG）\n");
     } else {

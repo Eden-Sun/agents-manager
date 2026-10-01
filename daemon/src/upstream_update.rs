@@ -12,6 +12,9 @@
 //! 「沒有新版」：快照帶 `error`，從正常變成抓不到的那一輪推 `notify: "error"`，不靜默。上游結果有 TTL 快取，
 //! 巡邏每 10 分鐘只重比磁碟版本，不會每輪打 npm／GitHub。
 //!
+//! herdr（2026-10-01 一鍵更新）：上游是 GitHub releases 最大的正式版，磁碟版本直接讀工具探測快取的
+//! `herdr_cli`（`herdr_version` 每 60 秒重探），不另跑 `--version`。
+//!
 //! 跟 #204（`release_triage`，分析 changelog 開 issue）不同：那邊回答「新版改了什麼、要不要處理」，這邊只回答
 //! 「有沒有比磁碟新的版本可以裝」；兩邊都從同一份 releases 快取（`changelog::fetch_changelog`）發現 codex 新版。
 
@@ -35,7 +38,9 @@ use crate::state::App;
 pub const NPM_CLAUDE_LATEST: &str = "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const NPM_CLAUDE_PAGE: &str = "https://www.npmjs.com/package/@anthropic-ai/claude-code";
 const CODEX_RELEASES_PAGE: &str = "https://github.com/openai/codex/releases";
-pub const KINDS: [&str; 2] = ["claude", "codex"];
+const HERDR_RELEASES_PAGE: &str = "https://github.com/herdrdev/herdr/releases";
+const HERDR_RELEASES_API: &str = "https://api.github.com/repos/herdrdev/herdr/releases?per_page=30";
+pub const KINDS: [&str; 3] = ["claude", "codex", "herdr"];
 /// 巡邏間隔：重比磁碟版本（claude 自己下載完之後通知要消失）。
 const SWEEP: Duration = Duration::from_secs(600);
 /// 上游結果的有效期；抓失敗的不快取，下一輪（10 分鐘後）再試。
@@ -87,10 +92,10 @@ pub fn claude_installed_text(disk: &str, running: &str) -> String {
 }
 
 pub fn source_url(kind: &str) -> &'static str {
-    if kind == "codex" {
-        CODEX_RELEASES_PAGE
-    } else {
-        NPM_CLAUDE_PAGE
+    match kind {
+        "codex" => CODEX_RELEASES_PAGE,
+        "herdr" => HERDR_RELEASES_PAGE,
+        _ => NPM_CLAUDE_PAGE,
     }
 }
 
@@ -108,6 +113,11 @@ pub fn codex_latest(releases_md: &str) -> Result<String> {
         .map(|s| s.version)
         .max_by(|a, b| parse_version(a).cmp(&parse_version(b)))
         .ok_or_else(|| anyhow!("GitHub releases 裡沒有正式版"))
+}
+
+/// herdr 的 GitHub releases JSON → 最大的正式版（草稿、預發布、帶 `-rc` 之類後綴的 tag 都不算）。
+pub fn herdr_latest(releases_json: &str) -> Result<String> {
+    codex_latest(&changelog::codex_releases_to_md(releases_json)?)
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -212,6 +222,12 @@ pub fn should_notify(status: &UpstreamStatus, last_notified: Option<&str>) -> bo
 /// 給使用者看的那一句：要跟「重啟套用」分得清——這是上游有、磁碟上還沒有。
 pub fn notice_text(status: &UpstreamStatus) -> String {
     let latest = status.latest_version.as_deref().unwrap_or("?");
+    if status.kind == "herdr" {
+        let behind: Vec<String> = status.hosts.iter().filter(|h| h.behind)
+            .map(|h| format!("{} 是 {}", h.host, h.installed_version.as_deref().unwrap_or("?")))
+            .collect();
+        return format!("herdr 上游有新版 {latest}（{}）：更新會重啟 herdr server，所有 bot 中斷約 1 分鐘後自動接回", behind.join("、"));
+    }
     if status.kind != "claude" {
         let behind: Vec<String> = status.hosts.iter().filter(|h| h.behind)
             .map(|h| format!("{} 磁碟上是 {}", h.host, h.installed_version.as_deref().unwrap_or("?")))
@@ -240,7 +256,7 @@ pub fn item_json(status: &UpstreamStatus) -> Value {
 }
 
 pub fn error_text(status: &UpstreamStatus) -> String {
-    let from = if status.kind == "codex" { "GitHub releases" } else { "npm registry" };
+    let from = if status.kind == "claude" { "npm registry" } else { "GitHub releases" };
     format!("查 {} 上游最新版失敗（{from}）：{}", status.kind, status.error.as_deref().unwrap_or("未知原因"))
 }
 
@@ -444,6 +460,13 @@ impl Sources for Live {
                 .timeout(Duration::from_secs(20))
                 .build()
                 .map_err(|e| anyhow!("http client: {e}"))?;
+            if kind == "herdr" {
+                let resp = client.get(HERDR_RELEASES_API).send().await.map_err(|e| anyhow!("連不上 GitHub releases：{e}"))?;
+                if !resp.status().is_success() {
+                    return Err(anyhow!("GitHub releases 回 HTTP {}", resp.status()));
+                }
+                return herdr_latest(&resp.text().await.map_err(|e| anyhow!("讀 GitHub releases 回應失敗：{e}"))?);
+            }
             let resp = client.get(NPM_CLAUDE_LATEST).send().await.map_err(|e| anyhow!("連不上 npm registry：{e}"))?;
             if !resp.status().is_success() {
                 return Err(anyhow!("npm registry 回 HTTP {}", resp.status()));
@@ -459,7 +482,12 @@ impl Sources for Live {
             let tools = self.0.tools.lock().await;
             let mut out = Vec::new();
             for c in conns {
-                if tools.get(&c.name).and_then(|t| t.tools.get(kind)).is_some_and(|t| t.installed) {
+                let installed = match tools.get(&c.name) {
+                    Some(t) if kind == "herdr" => t.herdr_cli.is_some(),
+                    Some(t) => t.tools.get(kind).is_some_and(|t| t.installed),
+                    None => false,
+                };
+                if installed {
                     out.push(c.name.clone());
                 }
             }
@@ -468,6 +496,11 @@ impl Sources for Live {
     }
 
     fn installed<'a>(&'a self, host: &'a str, kind: &'a str) -> BoxFuture<'a, Result<String>> {
+        if kind == "herdr" {
+            return Box::pin(async move {
+                self.0.tools.lock().await.get(host).and_then(|t| t.herdr_cli.clone()).ok_or_else(|| anyhow!("讀不到 `herdr --version`"))
+            });
+        }
         Box::pin(changelog::installed_version(&self.0, host, kind))
     }
 }
@@ -632,6 +665,37 @@ mod tests {
         assert!(codex_latest("").is_err());
     }
 
+    /// herdr 走 GitHub releases：草稿、預發布、帶後綴的 tag 都不算，取數值最大的正式版（不是第一個、不是字串最大）。
+    #[test]
+    fn herdr_latest_is_the_highest_stable_release() {
+        let json = r#"[
+          {"tag_name":"v1.0.0","prerelease":false,"draft":true,"body":"草稿"},
+          {"tag_name":"v0.10.0-rc.1","prerelease":true,"draft":false,"body":"預發布"},
+          {"tag_name":"v0.9.3","prerelease":false,"draft":false,"body":"- codex idle"},
+          {"tag_name":"v0.9.10","prerelease":false,"draft":false,"body":"- 數值比較"},
+          {"tag_name":"v0.9.2","prerelease":false,"draft":false,"body":"- events_lost"}
+        ]"#;
+        assert_eq!(herdr_latest(json).unwrap(), "0.9.10");
+        assert!(herdr_latest("[]").is_err());
+        assert!(herdr_latest(r#"{"message":"API rate limit exceeded"}"#).is_err());
+    }
+
+    /// herdr 的磁碟版本是 `herdr 0.9.1` 這種形狀；目標就是上游最新版，落後的主機列在通知裡，並講明會重啟 herdr server。
+    #[test]
+    fn herdr_behind_upstream_names_the_host_and_warns_about_the_restart() {
+        let s = build_status("herdr", &ok("0.9.3"), &[disk("local", "herdr 0.9.1"), disk("m4p", "herdr 0.9.3")], None);
+        assert!(s.has_update && s.hosts[0].behind && !s.hosts[1].behind);
+        assert_eq!(s.target_version.as_deref(), Some("0.9.3"));
+        assert_eq!(s.hosts[0].installed_version.as_deref(), Some("0.9.1"));
+        assert_eq!(s.source_url, "https://github.com/herdrdev/herdr/releases");
+        let t = notice_text(&s);
+        assert!(t.contains("herdr 上游有新版 0.9.3") && t.contains("local 是 0.9.1") && !t.contains("m4p") && t.contains("重啟 herdr server"), "{t}");
+        let same = build_status("herdr", &ok("0.9.3"), &[disk("local", "herdr 0.9.3")], None);
+        assert!(!same.has_update && !should_notify(&same, None));
+        let err = build_status("herdr", &Err("GitHub releases 回 HTTP 403".into()), &[disk("local", "herdr 0.9.1")], None);
+        assert!(error_text(&err).contains("GitHub releases"), "{}", error_text(&err));
+    }
+
     // ── 整輪：假的上游與磁碟 ──
 
     struct Fake {
@@ -642,11 +706,18 @@ mod tests {
 
     impl Fake {
         fn new(claude: Result<&str, &str>, codex: Result<&str, &str>, claude_disk: &str, codex_disk: &str) -> Self {
-            let up = [("claude", claude), ("codex", codex)]
+            // herdr 預設跟上游同版（沒有更新），要測 herdr 的用 set_upstream／set_disk 改。
+            let up = [("claude", claude), ("codex", codex), ("herdr", Ok("0.9.3"))]
                 .into_iter()
                 .map(|(k, r)| (k.to_string(), r.map(str::to_string).map_err(str::to_string)))
                 .collect();
-            let d = [("claude".to_string(), claude_disk.to_string()), ("codex".to_string(), codex_disk.to_string())].into_iter().collect();
+            let d = [
+                ("claude".to_string(), claude_disk.to_string()),
+                ("codex".to_string(), codex_disk.to_string()),
+                ("herdr".to_string(), "herdr 0.9.3".to_string()),
+            ]
+            .into_iter()
+            .collect();
             Fake { upstream: StdMutex::new(up), disk: StdMutex::new(d), calls: StdMutex::new(0) }
         }
         fn set_disk(&self, kind: &str, v: &str) {
@@ -705,7 +776,7 @@ mod tests {
         let c = of(&evs, "claude").unwrap();
         assert_eq!(c["has_update"], false);
         assert!(c["notify"].is_null());
-        assert_eq!(w2.snapshot().await.len(), 2);
+        assert_eq!(w2.snapshot().await.len(), 3);
     }
 
     #[tokio::test]
@@ -726,6 +797,24 @@ mod tests {
         assert_eq!(of(&evs, "codex").unwrap()["latest_version"], "0.158.0");
     }
 
+    /// herdr 跟 claude／codex 同一套：同一個上游版本只通知一次，事件帶 `kind:"herdr"` 與 `target_version`。
+    #[tokio::test]
+    async fn herdr_notifies_each_upstream_version_once() {
+        let e = crate::testing::env().await;
+        let w = Watch::default();
+        let last = e.dir.join(LAST_FILE);
+        let src = Fake::new(Ok("2.1.281"), Ok("0.157.0"), "2.1.281", "codex-cli 0.157.0");
+        src.set_disk("herdr", "herdr 0.9.1");
+        let evs = tick(&e.app, &w, &src, &last).await;
+        let h = of(&evs, "herdr").expect("herdr 要推");
+        assert_eq!(h["notify"], "update");
+        assert_eq!(h["target_version"], "0.9.3");
+        assert_eq!(h["hosts"][0]["behind"], true);
+        assert!(h["text"].as_str().unwrap().contains("herdr 上游有新版 0.9.3"));
+        assert!(of(&tick(&e.app, &w, &src, &last).await, "herdr").is_none(), "同一版不重複通知");
+        assert_eq!(load_last(&last).get("herdr").map(String::as_str), Some("0.9.3"));
+    }
+
     /// TTL：一輪內或下一輪都不重打上游；失敗不快取，下一輪再試。
     #[tokio::test]
     async fn upstream_results_are_cached_but_failures_are_retried() {
@@ -734,9 +823,9 @@ mod tests {
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Ok("2.1.283"), Err("GitHub HTTP 403 rate limit"), "2.1.283", "codex-cli 0.157.0");
         tick(&e.app, &w, &src, &last).await;
-        assert_eq!(*src.calls.lock().unwrap(), 2);
+        assert_eq!(*src.calls.lock().unwrap(), 3);
         tick(&e.app, &w, &src, &last).await;
-        assert_eq!(*src.calls.lock().unwrap(), 3, "claude 用快取，只有失敗的 codex 重問");
+        assert_eq!(*src.calls.lock().unwrap(), 4, "claude、herdr 用快取，只有失敗的 codex 重問");
     }
 
     /// 抓不到要講：從正常變成抓不到推一次 `error`，一直抓不到不刷屏，恢復後沒事。

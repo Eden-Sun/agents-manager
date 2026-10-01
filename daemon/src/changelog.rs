@@ -16,6 +16,8 @@ pub const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/anthropics/cl
 /// codex 沒有真正的 CHANGELOG.md，改抓 releases；它在 TUI 當場問更新、新版未進磁碟，`to` 由呼叫端帶。
 const CODEX_RELEASES_API: &str = "https://api.github.com/repos/openai/codex/releases?per_page=100";
 const CODEX_RELEASES_URL: &str = "https://github.com/openai/codex/releases";
+/// herdr 有真正的 CHANGELOG.md（Keep a Changelog 的 `## [x.y.z] - date`，[`parse_version`] 認得）。
+pub const HERDR_CHANGELOG_URL: &str = "https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md";
 const CACHE_TTL: Duration = Duration::from_secs(600);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -148,15 +150,16 @@ pub(crate) fn feed_url(kind: &str) -> Option<(&'static str, bool)> {
     match kind {
         "claude" => Some((CHANGELOG_URL, false)),
         "codex" => Some((CODEX_RELEASES_API, true)),
+        "herdr" => Some((HERDR_CHANGELOG_URL, false)),
         _ => None,
     }
 }
 
 pub fn source_url(kind: &str) -> &'static str {
-    if kind == "codex" {
-        CODEX_RELEASES_URL
-    } else {
-        CHANGELOG_URL
+    match kind {
+        "codex" => CODEX_RELEASES_URL,
+        "herdr" => HERDR_CHANGELOG_URL,
+        _ => CHANGELOG_URL,
     }
 }
 
@@ -200,13 +203,13 @@ pub(crate) async fn fetch_changelog(app: &Arc<App>, kind: &str) -> Result<String
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| anyhow!("http client: {e}"))?;
-    let url = if kind == "codex" { CODEX_RELEASES_API } else { CHANGELOG_URL };
+    let (url, is_codex) = feed_url(kind).ok_or_else(|| anyhow!("{kind} 沒有 changelog 來源"))?;
     let resp = client.get(url).send().await.map_err(|e| anyhow!("抓 CHANGELOG 失敗：{e}"))?;
     if !resp.status().is_success() {
         return Err(anyhow!("抓 CHANGELOG 失敗：HTTP {}", resp.status()));
     }
     let raw = resp.text().await.map_err(|e| anyhow!("讀 CHANGELOG 失敗：{e}"))?;
-    let text = if kind == "codex" { codex_releases_to_md(&raw)? } else { raw };
+    let text = if is_codex { codex_releases_to_md(&raw)? } else { raw };
     app.changelog.inner.lock().await.insert(kind.to_string(), (Instant::now(), text.clone()));
     Ok(text)
 }
@@ -223,7 +226,7 @@ pub async fn lookup(app: &Arc<App>, host: &str, kind: &str, from: Option<&str>, 
         source_url: source_url(kind).to_string(),
         error: None,
     };
-    if kind != "claude" && kind != "codex" {
+    if feed_url(kind).is_none() {
         reply.error = Some(format!("{kind} 沒有 changelog 來源"));
         return reply;
     }
@@ -317,5 +320,22 @@ mod tests {
         assert!(s[0].body.contains("machine 遠端指令轉發"));
         let p = pick_sections(&s, Some("0.8.2"), "0.9.1");
         assert_eq!(p.iter().map(|x| x.version.as_str()).collect::<Vec<_>>(), ["0.9.1", "0.9.0"]);
+    }
+
+    /// `GET /api/changelog?kind=herdr`：herdr 有自己的 CHANGELOG 來源（Keep a Changelog），快取命中就不上網；
+    /// 帶了 `to`（新版還沒裝）就不探磁碟。
+    #[tokio::test]
+    async fn herdr_lookup_reads_its_own_changelog_feed() {
+        let e = crate::testing::env().await;
+        e.app.changelog.seed("herdr", "# Changelog\n\n## Unreleased\n\n\
+            ## [0.9.3] - 2026-09-29\n\n### Fixed\n- codex idle 判斷\n\n\
+            ## [0.9.2] - 2026-09-24\n\n### Removed\n- `pane.graphics.*`\n\n\
+            ## [0.9.1] - 2026-09-16\n\n- 基準\n").await;
+        let r = lookup(&e.app, "local", "herdr", Some("0.9.1"), Some("0.9.3")).await;
+        assert!(r.found, "{:?}", r.error);
+        assert_eq!(r.sections.iter().map(|x| x.version.as_str()).collect::<Vec<_>>(), ["0.9.3", "0.9.2"]);
+        assert_eq!(r.installed_version.as_deref(), Some("0.9.3"));
+        assert_eq!(r.source_url, HERDR_CHANGELOG_URL);
+        assert!(lookup(&e.app, "local", "grok", None, Some("1.0.0")).await.error.unwrap().contains("沒有 changelog 來源"));
     }
 }
