@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as Reac
 import { listDirs } from '../api'
 import { createLatestOnly } from '../lib/latestOnly'
 import { isImeEnter } from '../lib/ime'
+import { keyBelongsToControl } from '../lib/domEvents'
 import type { DirListing } from '../api/types'
 import './dirPicker.css'
 
@@ -126,6 +127,8 @@ export function DirPicker({
       }
       return
     }
+    // 焦點在按鈕／勾選格上時，Enter、方向鍵、Backspace 是那個控制項的（否則按「取消」會變成選擇目錄）；Esc 照舊離開。
+    if (e.key !== 'Escape' && keyBelongsToControl(e.target)) return
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
       if (!entries.length) return
