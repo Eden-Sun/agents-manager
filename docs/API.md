@@ -745,11 +745,11 @@ port 存活探測同時連 `127.0.0.1` 與 `::1`，因此只綁 IPv6 loopback �
 token 不對 401；其他失敗照樣回 200（`recorded:false`），少一個用途字串不該讓 bot 開 pane 失敗。
 
 ### `POST /relay/spawn/begin`、`POST /relay/spawn/finish` 與 `POST /relay/spawn/abort`（表單，bot shim 專用）
-pane split／tab create／workspace create 與 `agent start` 在呼叫 herdr 前，shim 以 `X-AM-Bot-Token` 送 `begin` 的 `bot_id`；daemon 回 `200 {"permit_id":"…"}` 才可繼續。credential rotation 進行中回 `409 credential_rotation_pending`，Bot proof 或 DB 讀取失敗回 401／503；shim 一律不呼叫 herdr。
+pane split／tab create／workspace create 與 `agent start` 在呼叫 herdr 前，shim 以 `X-AM-Bot-Token` 送 `begin` 的 `bot_id`（`agent start` 另帶 `timeout_ms`＝它的 `--timeout`，沒帶為空）；daemon 回 `200 {"permit_id":"…"}` 才可繼續。credential rotation 進行中回 `409 credential_rotation_pending`，Bot proof 或 DB 讀取失敗回 401／503；shim 一律不呼叫 herdr。
 
 herdr 成功後，shim 以 `X-AM-Bot-Token` 送 `finish` 的 `bot_id,permit_id,pane_id,purpose?`。daemon 先把非母 bot pane 登記到 `panes` inventory，再釋放 permit 並回 `200 {"pane_id":"…","registered":true}`。缺 pane id、permit 無效、DB／pane 登記失敗會回非 200，permit 保持佔用，shim 以 retryable failure 結束；這避免在登記狀態未知時讓舊憑證輪替。輪替在 descendants 快照前建立 fence，已有**未過期** permit 時回 `409 child_spawn_in_progress`，fence 存在時新的 `begin` 被拒；token 交易提交或中止後 fence 才清除。
 
-herdr 回非 0 且輸出沒有 pane id，或 shim 被中斷時，送 `abort` 的 `bot_id,permit_id`（#664）。daemon 驗 bot token 後釋放 permit，回 `200 {"released":true}`；permit 已經不在也回 200（`released:false`）。permit 自 `begin` 起 60 秒沒 finish／abort 就不再算 in-flight（curl 逾時但 daemon 已 reserve、以及沒跑到 abort 的 Ctrl-C）。過期不擋輪替。
+herdr 回非 0 且輸出沒有 pane id，或 shim 被中斷時，送 `abort` 的 `bot_id,permit_id`（#664）。daemon 驗 bot token 後釋放 permit，回 `200 {"released":true}`；permit 已經不在也回 200（`released:false`）。permit 自 `begin` 起 60 秒沒 finish／abort 就不再算 in-flight（`agent start` 帶了 `timeout_ms` 時有效期是 `timeout_ms`＋30 秒、至少 60 秒、上限 330 秒，herdr 慢慢等子 agent 就緒時 finish 才不會因 permit 過期回 409）（curl 逾時但 daemon 已 reserve、以及沒跑到 abort 的 Ctrl-C）。過期不擋輪替。
 
 ### `GET /api/panes?unowned=1`
 全機的非 agent pane（列的形狀同上）；`unowned=1` 只回 `owned_by="none"`（連 cwd 都對不到專案）的那些，同一台的 scratch 排第一。

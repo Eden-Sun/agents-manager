@@ -77,6 +77,10 @@ am_toml_string_of_file() {
     printf '%s%s%s' "$_q3" "$(cat "$1")" "$_q3"
 }
 
+# permit 的有效期要涵蓋 `agent start --timeout`（herdr 最多等 300 秒，預設 30 秒；子 agent 慢慢啟動時不能在 finish 之前過期）。
+# `_AM_SPAWN_TIMEOUT_MS` 由 am_agent_start 解析出來；其他子命令沒有，daemon 用預設有效期。
+_AM_SPAWN_TIMEOUT_MS=""
+
 # A bot pane must reserve its inherited proof before asking herdr to create a pane or child agent.
 # Rotation raises the matching daemon fence before its descendant snapshot; an unreadable / refused
 # gate means we do not run herdr. The permit remains open until the created pane is registered.
@@ -99,7 +103,8 @@ am_spawn_begin() {
     fi
     _out=$(curl -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/begin" \
         -H "X-AM-Bot-Token: $_tok" \
-        --data-urlencode "bot_id=${AM_BOT_ID}" 2>/dev/null)
+        --data-urlencode "bot_id=${AM_BOT_ID}" \
+        --data-urlencode "timeout_ms=${_AM_SPAWN_TIMEOUT_MS:-}" 2>/dev/null)
     _rc=$?
     _code=$(printf '%s\n' "$_out" | tail -n 1)
     _body=$(printf '%s\n' "$_out" | sed '$d')
@@ -264,9 +269,11 @@ am_agent_start() {
         if [ "$_stop" = 0 ]; then
             if [ "$_prev" = "--kind" ]; then _kind=$_a; fi
             if [ "$_prev" = "--pane" ]; then _pane=$_a; fi
+            if [ "$_prev" = "--timeout" ]; then _AM_SPAWN_TIMEOUT_MS=$_a; fi
             case "$_a" in
                 --kind=*) _kind=${_a#--kind=} ;;
                 --pane=*) _pane=${_a#--pane=} ;;
+                --timeout=*) _AM_SPAWN_TIMEOUT_MS=${_a#--timeout=} ;;
             esac
         fi
         if [ "$_stop" = 1 ]; then
@@ -1524,6 +1531,39 @@ mod tests {
         own.push(("HERDR_PANE_ID", "w1:p1"));
         let (_, err, rc) = s.run_full(&own, &["agent", "start", "kid", "--kind", "claude", "--pane=w1:p1"]);
         assert_eq!(rc, 2, "指到自己的 pane 要擋：{err}");
+    }
+
+    /// `agent start --timeout` 要原樣帶給 begin（`timeout_ms`），permit 才撐得過那麼久；沒帶就是空字串（daemon 用預設）。
+    #[test]
+    fn begin_carries_the_agent_start_timeout() {
+        for (args, want) in [
+            (vec!["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p3", "--timeout", "120000"], "timeout_ms=120000"),
+            (vec!["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p3", "--timeout=90000"], "timeout_ms=90000"),
+            (vec!["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p3"], "timeout_ms="),
+        ] {
+            let s = Sandbox::new();
+            let log = s.dir.join("curl.log");
+            write_script(
+                &s.dir.join("real").join("curl"),
+                &format!(
+                    "printf '%s\\n' \"$@\" >> '{}'\n\
+                     case \"$*\" in\n\
+                       */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+                       */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
+                     esac\n",
+                    log.display()
+                ),
+            );
+            let env = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1"), ("AM_AGENT_NAME", "p-1")];
+            let (_, err, rc) = s.run_full(&env, &args);
+            assert_eq!(rc, 0, "{err}");
+            let sent = std::fs::read_to_string(&log).unwrap();
+            assert!(sent.lines().any(|l| l == want), "{args:?} → {sent}");
+            if want != "timeout_ms=" {
+                // `--timeout` 的值不能被當成 agent 名字改名。
+                assert!(!sent.contains("p-1-120000") && !sent.contains("p-1-90000"), "{sent}");
+            }
+        }
     }
 
     /// 2026-09-08：沒帶 `--model` 的子 agent 跑 CLI 預設；同 kind 才補母 bot 的，自己有寫的不動。
