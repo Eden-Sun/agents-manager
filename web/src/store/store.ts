@@ -2,6 +2,7 @@
 
 import { gatewayErrText, networkErrText } from '../lib/netErr'
 import { DraftSync } from './draftSync'
+import { shellDraftKey } from './shellDraft'
 import { createResyncRunner } from './resyncQueue'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { groupSendDelivered } from './groupSend'
@@ -211,7 +212,8 @@ function writeShellView(v: ShellView | null) {
 const initialShellView = readShellView()
 
 /** Composer drafts survive bot / group / tab switches and reloads. */
-export type DraftKey = `bot:${string}` | `group:${string}`
+/** `shell:` 是 host shell 面板的指令草稿（#758，見 `shellDraft.ts`）。 */
+export type DraftKey = `bot:${string}` | `group:${string}` | `shell:${string}`
 
 export interface DraftCursor {
   start: number
@@ -3235,9 +3237,13 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
 
 /** 一顆 pane 不在了：兩份清單一起拿掉；正開著它的面板也收掉。 */
 function dropPane(set: SetFn, host: string, paneId: string) {
+  const draftKey = shellDraftKey(host, paneId)
+  draftSync.forget(draftKey)
   set((s) => ({
     ...withoutPane(s, host, paneId),
     ...(s.shellView?.host === host && s.shellView.paneId === paneId ? { shellView: null } : {}),
+    // pane 關了，它那行還沒送出的指令也沒地方送（daemon 關 pane 時也會清，這裡是本機跟上）。
+    ...(draftKey in s.drafts ? { drafts: withoutKey(s.drafts, draftKey) } : {}),
   }))
 }
 

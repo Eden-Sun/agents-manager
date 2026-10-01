@@ -342,6 +342,19 @@ test('點到已經不在的 pane：面板收掉、清單拿掉，而且講一聲
   assert.ok(noticeTexts().some((t) => t.includes('已經關掉')))
 })
 
+test('pane 不在了：它的指令草稿（shell: 鍵）一起拿掉，別顆 pane 的留著（#758）', () => {
+  seed()
+  useStore.setState({
+    sidePanes: { p1: [pane() as never] },
+    unownedPanes: [],
+    shellView: { host: 'local', paneId: 'w1:p9', cwd: '/p', traced: true },
+    drafts: { 'shell:local/w1:p9': 'git log', 'shell:local/w1:p8': 'ls', 'bot:b1': 'hi' },
+  })
+  routeDaemon(() => json({ panes: [] }, 200))
+  useStore.getState().paneGone('local', 'w1:p9')
+  assert.deepEqual(useStore.getState().drafts, { 'shell:local/w1:p8': 'ls', 'bot:b1': 'hi' })
+})
+
 test('重讀 pane：依 project_id 分組，沒歸屬的只進底部那一組', async () => {
   seed()
   const scratch = pane({ pane_id: 'w1:pS', project_id: null, owned_by: 'none', kind: 'shell' })

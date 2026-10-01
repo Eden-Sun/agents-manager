@@ -2710,6 +2710,7 @@ async fn close_host_shell(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Response, LcError> {
     shell::close_confirmed(&app, &name, &pane_id, flag(&q.get("confirm").cloned())).await?;
+    crate::drafts::clear_shell(&app, &name, &pane_id).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
