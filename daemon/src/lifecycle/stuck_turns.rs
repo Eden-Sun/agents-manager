@@ -283,6 +283,10 @@ async fn logged_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[Stri
             claude_reply_after(&log, sent)
         }
         "codex" => {
+            // #749：先問 codex 自己的 thread 歷史（正確綁定 thread／turn 的最終回覆）；沒有證據才讀 rollout。
+            if let Some(reply) = crate::codex_history::exact_reply(app, bot, run, sent).await {
+                return Some(reply);
+            }
             let home = codex_home(app, bot).await?;
             let session = run.native_session_id.clone().filter(|s| !s.trim().is_empty())?;
             let log = tokio::task::spawn_blocking(move || {
@@ -291,7 +295,11 @@ async fn logged_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[Stri
             })
             .await
             .ok()??;
-            codex_reply_after(&log, sent)
+            let reply = codex_reply_after(&log, sent);
+            if reply.is_some() {
+                crate::codex_history::note("reply", crate::codex_history::Evidence::Rollout);
+            }
+            reply
         }
         _ => None,
     }

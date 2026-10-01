@@ -425,6 +425,10 @@ pub(crate) fn codex_interrupted_after(log: &str, sent: &[String]) -> bool {
 
 /// 這一筆（`sent`）在這顆 bot 的 session log 裡是不是已經被使用者按停了（#235，重啟時用）。讀不到＝不知道＝`false`。
 pub(crate) async fn log_interrupted_after(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[String]) -> bool {
+    // #749：codex 先看 thread 歷史裡那個 turn 的狀態；只有明說 interrupted 才算數，其餘照舊讀 rollout。
+    if bot.kind == "codex" && crate::codex_history::interrupted_after(app, bot, run, sent).await {
+        return true;
+    }
     let Some(log) = session_log(app, bot, run).await else { return false };
     match bot.kind.as_str() {
         "claude" => claude_interrupted_after(&log, sent),

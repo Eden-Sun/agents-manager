@@ -312,6 +312,9 @@ pub struct ConfigFile {
     /// issue #748：codex 0.159 `instant_interrupt` 的 canary 旗標（預設關）。
     #[serde(default, skip_serializing_if = "CodexCfg::is_default")]
     pub codex: CodexCfg,
+    /// issue #749：codex app-server 的 thread 歷史當結構化 turn evidence（SPEC §4.4a）。預設開，可關。
+    #[serde(default, skip_serializing_if = "CodexHistoryCfg::is_default")]
+    pub codex_history: CodexHistoryCfg,
 }
 
 /// `[codex]`（issue #748，SPEC §6.3 第 9 點）：`instant_interrupt = true` 才讓 `send_now` 對 codex（>= 0.159.0）生效——
@@ -324,6 +327,25 @@ pub struct CodexCfg {
 }
 
 impl CodexCfg {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `[codex_history]`：`enabled = false` 時完全不開 app-server，送達／回覆／中斷證據只走 rollout 與畫面（舊路）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexHistoryCfg {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for CodexHistoryCfg {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl CodexHistoryCfg {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }

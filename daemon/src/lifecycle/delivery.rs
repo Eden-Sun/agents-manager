@@ -1012,7 +1012,7 @@ pub(crate) async fn execute_delivery(
 /// 按鍵前的準備都做完了：下一步就是第一個按鍵。
 pub(crate) enum Ready {
     AgentPrompt { target: String },
-    Type { pane: String, proof: Proof, submit: Submit, offset: u64, baseline: usize },
+    Type { pane: String, proof: Proof, submit: Submit, offset: u64, baseline: usize, structured: Option<crate::codex_history::Mark> },
 }
 
 /// [`execute_delivery`] 打第一個字之前的那一段：記下「這個 pane 要打字」、重看一次框、取證據基準。
@@ -1074,7 +1074,9 @@ pub(crate) async fn prepare_delivery(
             return Err(Delivered::NotAttempted { reason: "transcript_unreadable", retry: true });
         }
     };
-    Ok(Ready::Type { pane, proof, submit, offset, baseline })
+    // 結構化歷史的基準（#749）：送出前 thread 最新那筆 item。取不到＝沒有這條證據，不影響送達。
+    let structured = crate::codex_history::mark(app, bot, run).await;
+    Ok(Ready::Type { pane, proof, submit, offset, baseline, structured })
 }
 
 /// [`execute_delivery`] 準備完成後的派送。`type_text` 貼字前仍會重讀 composer；那一刻看到草稿還是 `NotAttempted`。
@@ -1104,6 +1106,8 @@ pub(crate) struct Typed {
     submit: Submit,
     offset: u64,
     baseline: usize,
+    /// codex app-server 歷史的基準（#749）；只用來把「證不出來」升級成 `Submitted`，永遠不拿來否定。
+    structured: Option<crate::codex_history::Mark>,
 }
 
 /// [`type_text`] 停下來的地方。
@@ -1128,7 +1132,7 @@ pub(crate) async fn type_text(
     text: &str,
     ready: Ready,
 ) -> anyhow::Result<Typing> {
-    let (pane, proof, submit, offset, baseline) = match ready {
+    let (pane, proof, submit, offset, baseline, structured) = match ready {
         Ready::AgentPrompt { target } => {
             #[cfg(test)]
             super::race_point::hit("agent_prompt_before_rpc", &run.bot_id).await;
@@ -1162,7 +1166,7 @@ pub(crate) async fn type_text(
                 .await?;
             return Ok(Typing::Done(Delivered::Handed));
         }
-        Ready::Type { pane, proof, submit, offset, baseline } => (pane, proof, submit, offset, baseline),
+        Ready::Type { pane, proof, submit, offset, baseline, structured } => (pane, proof, submit, offset, baseline, structured),
     };
     // Styled read when herdr can (`box_state` needs the dim flag); echo evidence strips the styling.
     let read = || read_composer(client, &pane);
@@ -1228,7 +1232,7 @@ pub(crate) async fn type_text(
         BoxState::Empty => return Ok(Typing::Done(Delivered::Unproven("nothing_typed"))),
         BoxState::Unready => return Ok(Typing::Done(Delivered::Unproven("composer_unreadable"))),
     }
-    Ok(Typing::Ready(Typed { pane, proof, submit, offset, baseline }))
+    Ok(Typing::Ready(Typed { pane, proof, submit, offset, baseline, structured }))
 }
 
 /// 按送出鍵。插隊送出時，會打斷正在跑的那一回合的是**這一顆鍵**，不是上面打的字——claude 忙的時候框裡照樣可以打字，
@@ -1246,10 +1250,11 @@ pub(crate) async fn confirm_submitted(
     text: &str,
     t: &Typed,
 ) -> anyhow::Result<Delivered> {
-    let Typed { pane, proof, submit, offset, baseline } = t;
+    let Typed { pane, proof, submit, offset, baseline, structured } = t;
     let (offset, baseline) = (*offset, *baseline);
     let read = || read_composer(client, pane);
     let mut pressed_again = false;
+    let mut history_conn = None;
     for _ in 0..SUBMIT_CHECKS {
         tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         let now = read().await?;
@@ -1257,15 +1262,29 @@ pub(crate) async fn confirm_submitted(
             tracing::warn!(run = %run.id, bot = %bot.name, "the session changed while delivering; the transcript proof no longer applies");
             return Ok(Delivered::Unproven("session_changed"));
         }
-        match box_state_within(&bot.kind, &now, typed_tail(text)) {
+        let state = box_state_within(&bot.kind, &now, typed_tail(text));
+        // #749：rollout／回音還證不出來時，問 codex 自己的 thread 歷史。只有 positive evidence 會升級成 `Submitted`；
+        // 歷史讀不到、沒看到都照舊往下走，不當成「沒送到」。
+        if state == BoxState::Empty && evidence(&bot.kind, proof, offset, &now, text)? <= baseline {
+            if let Some(mark) = structured {
+                if crate::codex_history::prompt_landed(app, mark, &mut history_conn, text).await {
+                    tracing::info!(run = %run.id, bot = %bot.name, "prompt proven submitted by the codex thread history");
+                    crate::codex_history::note("delivery", crate::codex_history::Evidence::Structured);
+                    return Ok(Delivered::Submitted);
+                }
+            }
+        }
+        match state {
             // No evidence to wait for: the box took the paste and emptied on Enter. That is all
             // that can be said, and it is said as `Unverified`, not as a proven delivery.
             BoxState::Empty if *proof == Proof::Unverified => {
                 tracing::warn!(run = %run.id, bot = %bot.name, "prompt typed and submitted; no lossless evidence on this run");
+                note_codex_delivery(&bot.kind, crate::codex_history::Evidence::Screen);
                 return Ok(Delivered::Unverified);
             }
             BoxState::Empty if evidence(&bot.kind, proof, offset, &now, text)? > baseline => {
                 tracing::info!(run = %run.id, bot = %bot.name, proof = ?proof, "prompt typed into the pane and proven submitted");
+                note_codex_delivery(&bot.kind, if matches!(proof, Proof::Transcript { .. }) { crate::codex_history::Evidence::Rollout } else { crate::codex_history::Evidence::Screen });
                 return Ok(Delivered::Submitted);
             }
             // claude 清掉隱形字元、等人 review（#205）：框裡是**清過的**字，再按一次送出去的就不是記下的那一段，
@@ -1285,10 +1304,27 @@ pub(crate) async fn confirm_submitted(
     let why = match box_state_within(&bot.kind, &read().await?, typed_tail(text)) {
         BoxState::NonEmpty => "still_in_box",
         BoxState::Unready => "composer_unreadable",
-        BoxState::Empty => "not_proven_submitted",
+        BoxState::Empty => {
+            // 最後再問一次歷史：rollout 還沒 flush 時，這是唯一的 positive evidence（#749）。
+            if let Some(mark) = structured {
+                if crate::codex_history::prompt_landed(app, mark, &mut history_conn, text).await {
+                    tracing::info!(run = %run.id, bot = %bot.name, "prompt proven submitted by the codex thread history");
+                    crate::codex_history::note("delivery", crate::codex_history::Evidence::Structured);
+                    return Ok(Delivered::Submitted);
+                }
+            }
+            "not_proven_submitted"
+        }
     };
     tracing::warn!(run = %run.id, bot = %bot.name, reason = why, "could not prove the prompt was submitted");
     Ok(Delivered::Unproven(why))
+}
+
+/// codex 的送達證據來源計數（#749）：非 codex 不記。
+fn note_codex_delivery(kind: &str, source: crate::codex_history::Evidence) {
+    if kind == "codex" {
+        crate::codex_history::note("delivery", source);
+    }
 }
 
 /// 送出鍵的 RPC 沒有回、不知道 herdr 按了沒有時，看它到底生效了沒有。
@@ -2095,5 +2131,143 @@ mod api_tests {
         assert_eq!(env.herdr.methods().iter().filter(|m| *m == "pane.send_text").count(), 1);
         // 同一個 request id 再問一次，答案一樣是 unverified。
         assert_eq!(prompt(&app, &bot_id, "第一行\n第二行", "crid-2").await.unwrap().delivery, "unverified");
+    }
+
+    // ───── #749：codex app-server 的結構化歷史 ─────
+
+    /// 一顆 codex bot：session `sess-api` 的 rollout 存在但永遠不長（mock pane 不寫 codex rollout＝「rollout 還沒 flush」）。
+    async fn codex_with_idle_rollout(env: &tt::Env) -> (String, String, crate::codex_history::Binding) {
+        let (bot_id, conv, run_id) = idle_bot(env, "codex").await;
+        let home = env.dir.join(format!("codex-home-{}", db::ulid()));
+        let day = home.join("sessions/2026/10/01");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-2026-10-01T00-00-00-sess-api.jsonl"), "").unwrap();
+        sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?").bind(json!({"CODEX_HOME": home.to_str().unwrap()}).to_string()).bind(&bot_id).execute(&env.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET native_session_id = 'sess-api' WHERE id = ?").bind(&run_id).execute(&env.app.db).await.unwrap();
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { codex: true, width: Some(120), ..Default::default() });
+        let binding = crate::codex_history::Binding { host: crate::config::LOCAL_HOST.into(), codex_home: Some(home), thread_id: "sess-api".into() };
+        (bot_id, conv, binding)
+    }
+
+    async fn delivery_of(app: &Arc<App>, turn_id: &str) -> (String, i64) {
+        sqlx::query_as("SELECT delivery, delivery_verified FROM turns WHERE id = ?").bind(turn_id).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// 多行 prompt、rollout 還沒 flush：thread 歷史裡出現我們那則 → 判 Submitted（verified），不靠終端回音。
+    #[tokio::test]
+    async fn a_prompt_the_rollout_cannot_prove_yet_is_proven_by_the_thread_history() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, b) = codex_with_idle_rollout(&env).await;
+        let stub = crate::codex_history::StubSource::new();
+        stub.push_user(&b, "t0", "u0", "old prompt");
+        stub.push_final(&b, "t0", "a0", "old reply");
+        let prompt_text = "第一行\n第二行\n\n  indented { \"json\": true }";
+        // 第 1 次 open 是送出前的基準，第 2 次起是送出後的確認；那時歷史裡才有我們這則。
+        stub.arrive_on_open(2, &b, "t1", "u1", prompt_text);
+        app.codex_history.set(Some(Arc::new(stub.clone())));
+        let before = crate::codex_history::counts();
+
+        let out = prompt(&app, &bot_id, prompt_text, "crid-hist-hit").await.unwrap();
+        assert_eq!(delivery_of(&app, &out.turn_id).await, ("ok".to_string(), 1), "結構化歷史是 positive proof");
+        assert_eq!(env.herdr.calls_to("pane.send_text").len(), 1, "只送一次");
+        assert!(crate::codex_history::counts().structured_hit > before.structured_hit);
+    }
+
+    /// 歷史讀不到（RPC error）：行為跟沒有這個模組一模一樣——證不出來就是 unknown，**不**重送、不收掉。
+    #[tokio::test]
+    async fn an_rpc_error_in_the_history_is_the_old_path_not_a_verdict() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, b) = codex_with_idle_rollout(&env).await;
+        let stub = crate::codex_history::StubSource::new();
+        stub.push_user(&b, "t0", "u0", "old prompt");
+        stub.fail(true);
+        app.codex_history.set(Some(Arc::new(stub.clone())));
+        let with_error = prompt(&app, &bot_id, "第一行\n第二行", "crid-hist-err").await.unwrap();
+        let with_error = (delivery_of(&app, &with_error.turn_id).await, env.herdr.calls_to("pane.send_text").len());
+
+        // 對照組：模組關掉（hook 空）。
+        let env2 = tt::env().await;
+        let (bot2, conv2, _) = codex_with_idle_rollout(&env2).await;
+        let baseline = prompt(&env2.app, &bot2, "第一行\n第二行", "crid-hist-off").await.unwrap();
+        let baseline = (delivery_of(&env2.app, &baseline.turn_id).await, env2.herdr.calls_to("pane.send_text").len());
+
+        assert_eq!(with_error, baseline, "RPC error 與關掉結構化路徑結果相同");
+        assert_eq!(with_error.1, 1, "沒有因為歷史讀不到而重送");
+        assert_eq!(turns(&app, &conv).await, 1);
+        assert_eq!(turns(&env2.app, &conv2).await, 1);
+    }
+
+    /// 投影停住（歷史一直回空／沒有基準）：沒有 positive evidence，一樣只走舊路，也不會被後來才吐出的舊歷史騙到。
+    #[tokio::test]
+    async fn a_stalled_or_empty_history_proves_nothing() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, b) = codex_with_idle_rollout(&env).await;
+        let stub = crate::codex_history::StubSource::new();
+        // 同一句 prompt 以前就送過（舊歷史）；投影在送出前停住，所以基準拿不到。
+        stub.push_user(&b, "t0", "u0", "第一行\n第二行");
+        stub.stall(true);
+        app.codex_history.set(Some(Arc::new(stub.clone())));
+        let out = prompt(&app, &bot_id, "第一行\n第二行", "crid-hist-stall").await.unwrap();
+        assert_eq!(delivery_of(&app, &out.turn_id).await.1, 0, "舊的同句歷史不能當成這一次的證據");
+        assert_eq!(env.herdr.calls_to("pane.send_text").len(), 1);
+    }
+
+    /// 基準之前就有一模一樣的 prompt：不算；只有基準之後新出現的才算。
+    #[tokio::test]
+    async fn an_identical_older_prompt_is_not_new_evidence() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, b) = codex_with_idle_rollout(&env).await;
+        let stub = crate::codex_history::StubSource::new();
+        stub.push_user(&b, "t0", "u0", "第一行\n第二行");
+        stub.push_final(&b, "t0", "a0", "ok");
+        app.codex_history.set(Some(Arc::new(stub.clone())));
+        let out = prompt(&app, &bot_id, "第一行\n第二行", "crid-hist-old").await.unwrap();
+        assert_eq!(delivery_of(&app, &out.turn_id).await.1, 0);
+    }
+
+    /// 另一顆 bot（別的 thread）出現同一句話，不會算成這顆的證據。
+    #[tokio::test]
+    async fn another_threads_identical_prompt_does_not_count() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, b) = codex_with_idle_rollout(&env).await;
+        let stub = crate::codex_history::StubSource::new();
+        stub.push_user(&b, "t0", "u0", "old");
+        let other = crate::codex_history::Binding { thread_id: "sess-other".into(), ..b.clone() };
+        stub.arrive_on_open(2, &other, "t1", "u1", "第一行\n第二行");
+        // 別的 home、別的 host 也一樣。
+        let other_home = crate::codex_history::Binding { codex_home: Some(std::path::PathBuf::from("/elsewhere")), ..b.clone() };
+        stub.arrive_on_open(2, &other_home, "t1", "u2", "第一行\n第二行");
+        let other_host = crate::codex_history::Binding { host: "m4p".into(), ..b.clone() };
+        stub.arrive_on_open(2, &other_host, "t1", "u3", "第一行\n第二行");
+        app.codex_history.set(Some(Arc::new(stub.clone())));
+        let out = prompt(&app, &bot_id, "第一行\n第二行", "crid-hist-other").await.unwrap();
+        assert_eq!(delivery_of(&app, &out.turn_id).await.1, 0);
+    }
+
+    /// 非 codex 的 bot 不碰 app-server；設定關掉也不碰。
+    #[tokio::test]
+    async fn only_an_enabled_codex_bot_opens_the_history() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let stub = crate::codex_history::StubSource::new();
+        app.codex_history.set(Some(Arc::new(stub.clone())));
+        let (claude_bot, _conv, _run) = idle_bot(&env, "claude").await;
+        env.herdr.live_pane("pane-api", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        prompt(&app, &claude_bot, "Reply with PONG please", "crid-hist-claude").await.unwrap();
+        assert_eq!(stub.opens.load(std::sync::atomic::Ordering::Relaxed), 0, "claude 不開");
+
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, _b) = codex_with_idle_rollout(&env).await;
+        let stub = crate::codex_history::StubSource::new();
+        app.codex_history.set(Some(Arc::new(stub.clone())));
+        app.cfg.update(|c| { c.codex_history.enabled = false; Ok(()) }).await.unwrap();
+        prompt(&app, &bot_id, "第一行\n第二行", "crid-hist-disabled").await.unwrap();
+        assert_eq!(stub.opens.load(std::sync::atomic::Ordering::Relaxed), 0, "設定關掉就不開");
     }
 }

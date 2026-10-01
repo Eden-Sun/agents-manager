@@ -118,6 +118,8 @@ pub struct App {
     pub upstream_watch: crate::upstream_update::Watch,
     /// `update_watch` 讀各主機磁碟上 CLI 版本的五分鐘快取；同樣跟著 App 走（issue #759）。
     pub(crate) disk_versions: crate::update_watch::DiskCache,
+    /// 結構化的 codex turn evidence 來源（`codex_history.rs`）；測試 build 預設關。
+    pub codex_history: crate::codex_history::HistoryHook,
 
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Child pane creation permits and the short fence used while a bot credential rotates.
@@ -243,6 +245,7 @@ impl App {
             kind_probe: Default::default(),
             upstream_watch: Default::default(),
             disk_versions: Default::default(),
+            codex_history: Default::default(),
             locks: Mutex::new(HashMap::new()),
             credential_spawn_gate: std::sync::Mutex::new(crate::credential_spawn::Gate::default()),
             bus,
