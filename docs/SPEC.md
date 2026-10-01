@@ -1944,8 +1944,11 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - **路徑**：`<data_dir>/outbox/<bot_id>/`（正式實例＝`~/.config/agents-manager/outbox/<bot_id>/`）。bot id 只收英數才拼進路徑。
 - **env**：本機 bot 啟動時 daemon `mkdir -p` 並注入 `AM_OUTBOX=<絕對路徑>`。跟 `AM_DATA_DIR` 一樣是保留變數：
   在 identity.env／bot.env 合併**之後**才由 daemon 蓋回去（被改掉的話 bot 寫到別處，使用者看不到）。
-  herdr shim 的轉發清單帶 `AM_OUTBOX`（§6.5b），子 pane 繼承母 bot 的 outbox。**遠端主機不注入**（那台的檔案這台 daemon 拿不到），
-  bot.env 裡的自訂值也清掉。
+  herdr shim 的轉發清單帶 `AM_OUTBOX`（§6.5b），子 pane 繼承母 bot 的 outbox。
+- **遠端主機的 bot**（使用者 2026-10-01）：`AM_OUTBOX` 指到**那台上**的 `~/<remote root>/outbox/<bot_id>/`（跟 bot 目錄同一個實例根，
+  bot.env 的自訂值一樣蓋掉；目錄由 bot 寫檔前自己 `mkdir -p`）。網頁列表與下載由 daemon 走 ssh（`outbox_remote`）：只列最上層的一般檔
+  （符號連結不算，outbox 本身是符號連結就整個不列），擋檔名與內容的規則同本機；下載只收單一層檔名，內容以 base64 傳回、大小上限同本機。
+  遠端沒有 AGM 的 gc，**每次列表時順手刪掉 mtime 超過 60 分鐘的檔**。連不上那台時清單回 `reason:"outbox_remote_unreachable"`。
 - **時效**：檔案保留 1 小時（`outbox::TTL_SECS = 3600`），以 **mtime** 起算。
 - **清理者**：AGM 的 launchd `com.agm.outbox-gc`（`supervisor/AGM/bin/outbox-gc.sh`）每 10 分鐘刪掉 `-mindepth 2` 底下
   mtime 超過 60 分鐘的檔，並收掉空目錄。**daemon 不清**。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：

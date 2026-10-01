@@ -769,9 +769,14 @@ pub(crate) async fn pane_env_for_fence(
     let local_data_dir = (host == LOCAL_HOST).then(|| app.data_dir.to_string_lossy().into_owned());
     reserve_instance_env(&mut env, app.instance().as_deref(), local_data_dir.as_deref());
     // §6.5f：給使用者的檔案放這裡（不是 scratchpad）。跟 AM_DATA_DIR 一樣在自訂 env 合併之後才由 daemon 蓋回去：
-    // 被改掉的話 bot 寫到別處，使用者在網頁上看不到。遠端主機不給——那台的檔案這台 daemon 拿不到。
-    match (host == LOCAL_HOST).then(|| crate::outbox::ensure(&app.data_dir, &bot.id)).flatten() {
-        Some(dir) => env.insert("AM_OUTBOX".into(), json!(dir.to_string_lossy())),
+    // 被改掉的話 bot 寫到別處，使用者在網頁上看不到。遠端主機給**那台上**的目錄，網頁走 ssh 列與下載（`outbox_remote`）。
+    let outbox = if host == LOCAL_HOST {
+        crate::outbox::ensure(&app.data_dir, &bot.id).map(|d| d.to_string_lossy().into_owned())
+    } else {
+        crate::outbox_remote::remote_dir(&home, app.instance().as_deref(), &bot.id)
+    };
+    match outbox {
+        Some(dir) => env.insert("AM_OUTBOX".into(), json!(dir)),
         None => env.remove("AM_OUTBOX"),
     };
     Ok(Value::Object(env))
@@ -877,7 +882,8 @@ PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 \n\
 - **scratchpad 只放中間產物**（腳本、log、暫存資料）。scratchpad **不是**給使用者的地方，**禁止**把要交給使用者的檔案放在那裡。\n\
 - **要交給使用者的檔案一律放 `$AM_OUTBOX`**（`~/.config/agents-manager/outbox/<AM_BOT_ID>/`）。寫之前**必須先** `mkdir -p \"$AM_OUTBOX\"`（空目錄會被清掉）。\
-放進去 **1 小時後由 AGM 自動刪除**；要長期保留的放 repo 或 `reports/`。`$AM_OUTBOX` 沒有值（遠端主機）時**禁止**改放 scratchpad，直接在對話裡講清楚檔案在哪台機器的哪個路徑。\n\
+放進去 **1 小時後自動刪除**；要長期保留的放 repo 或 `reports/`。遠端主機的 bot 也有 `$AM_OUTBOX`（在那台機器上，網頁一樣列得到）。\
+`$AM_OUTBOX` 沒有值時**禁止**改放 scratchpad，直接在對話裡講清楚檔案在哪台機器的哪個路徑。\n\
 - **私鑰、憑證、DB 一律禁止放進 scratchpad 或 `$AM_OUTBOX`**（`.pem`、`.key`、`.p12`、`.env`、`*.sqlite*`、`*.db`、DB 複本、瀏覽器 profile）。\
 驗證要用 DB 複本時，做完**必須當下刪掉**。"
     )
@@ -1975,7 +1981,7 @@ mod pane_env_tests {
         }
     }
 
-    /// §6.5f：本機 pane 拿到自己的 outbox（啟動時就建好），自訂 env 搬不走；遠端沒有。
+    /// §6.5f：本機 pane 拿到自己的 outbox（啟動時就建好），自訂 env 搬不走；遠端拿那台上的目錄（網頁走 ssh 列）。
     #[tokio::test]
     async fn a_local_pane_gets_its_own_outbox_that_custom_env_cannot_move() {
         let env = tt::env().await;
@@ -1985,7 +1991,8 @@ mod pane_env_tests {
         let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap();
         assert_eq!(e["AM_OUTBOX"], json!(want.to_string_lossy()));
         assert!(want.is_dir(), "啟動時就建好");
-        assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap().get("AM_OUTBOX").is_none(), "遠端沒有");
+        let remote_want = json!(format!("/home/remote/.config/agents-manager/outbox/{}", bot.id));
+        assert_eq!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap()["AM_OUTBOX"], remote_want, "遠端給那台上的目錄");
 
         sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
             .bind(r#"{"AM_OUTBOX":"/elsewhere","FOO":"kept"}"#)
@@ -1997,7 +2004,7 @@ mod pane_env_tests {
         let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap();
         assert_eq!(e["AM_OUTBOX"], json!(want.to_string_lossy()), "bot.env 蓋不過去");
         assert_eq!(e["FOO"], json!("kept"));
-        assert!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap().get("AM_OUTBOX").is_none(), "遠端也不留自訂的假路徑");
+        assert_eq!(pane_env(&env.app, &bot, "box", "run-1", "proj-alfa", None).await.unwrap()["AM_OUTBOX"], remote_want, "遠端也不留自訂的假路徑");
     }
 
     #[tokio::test]

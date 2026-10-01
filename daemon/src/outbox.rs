@@ -36,9 +36,9 @@ use crate::trusted_open;
 /// 檔案在 outbox 裡保留多久（AGM 清理的門檻，跟 `outbox-gc.sh` 的 `MAX_AGE_MIN=60` 同一個數）。
 pub(crate) const TTL_SECS: u64 = 3600;
 /// 一次最多列這麼多（新的排前面）。
-const MAX_ENTRIES: usize = 300;
+pub(crate) const MAX_ENTRIES: usize = 300;
 /// 單檔下載上限：整份先讀進記憶體，瀏覽器那端也要收得下。
-const MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// 這顆 bot 的 outbox。bot id 會拼進路徑：只收英數（ULID），其他一律不給。
 pub(crate) fn dir_for(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
@@ -83,7 +83,7 @@ fn open_trusted_dir(data_dir: &Path, dir: &Path) -> Result<Option<std::fs::File>
 /// 不列、不給下載的檔案（2a96096 的黑名單，在 outbox 上保留當第二道：規則本來就禁止放這些，放了也拿不走）。
 /// 先看名字（隱藏檔、資料庫與它的旁檔、金鑰與憑證），名字看不出來的再看開頭幾個位元組（改過副檔名的 SQLite、PEM 私鑰，
 /// 見 [`content_is_withheld`]，[`scan`] 與 [`file`] 都是讀已經開好的 fd，不重新用路徑名字 open）。
-fn withheld_name(name: &str) -> bool {
+pub(crate) fn withheld_name(name: &str) -> bool {
     if name.starts_with('.') {
         return true;
     }
@@ -102,7 +102,7 @@ fn withheld_name(name: &str) -> bool {
 
 /// 內容判斷本體，吃已經讀進來的位元組：[`scan`]（列表，開 [`trusted_open::open_entry_in`] 讀檔頭）與
 /// [`file`]（下載，見 [`open_outbox_entry`] 的呼叫端）都用同一個 fd 讀出來的內容餵這裡，不重新用路徑名字 open。
-fn content_is_withheld(head: &[u8]) -> bool {
+pub(crate) fn content_is_withheld(head: &[u8]) -> bool {
     let head = &head[..head.len().min(64)];
     if head.starts_with(b"SQLite format 3\0") {
         return true;
@@ -150,7 +150,7 @@ fn open_outbox_entry(base: &Path, prefix: &[&OsStr], requested: &str, owner_uid:
 
 /// 下載時的 content type。白名單以外一律 octet-stream：使用者自己的 HTML 不該在這個 origin 跑起來
 /// （token 就放在這個 origin 的 localStorage）。
-fn mime_of(path: &Path) -> &'static str {
+pub(crate) fn mime_of(path: &Path) -> &'static str {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "txt" | "log" | "md" | "csv" | "tsv" => "text/plain; charset=utf-8",
@@ -165,7 +165,7 @@ fn mime_of(path: &Path) -> &'static str {
 }
 
 /// `filename*=UTF-8''…`：中文檔名在 `filename=` 裡會變亂碼或被截斷。
-fn content_disposition(name: &str) -> String {
+pub(crate) fn content_disposition(name: &str) -> String {
     let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "-_.".contains(c) { c } else { '_' }).collect();
     let encoded: String = name
         .as_bytes()
@@ -242,6 +242,16 @@ async fn outbox_of(app: &Arc<App>, bot_id: &str) -> Result<PathBuf, LcError> {
 
 /// `GET /api/bots/{id}/outbox` — 這顆 bot 交給使用者的檔案（新的排前面），各自還剩多久被清掉。
 pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> Result<Response, LcError> {
+    // 遠端主機的 bot：outbox 在那台機器上，走 ssh 列（`outbox_remote`）。
+    // 連不上那台不是錯誤：回空清單並講原因（下載才回 409）。
+    match crate::outbox_remote::target(&app, &id).await {
+        Ok(Some(t)) => return crate::outbox_remote::list(t, now_secs()).await,
+        Ok(None) => {}
+        Err(LcError::Conflict(detail)) => {
+            return Ok((StatusCode::OK, axum::Json(json!({"files": [], "ttl_secs": TTL_SECS, "reason": detail.get("reason"), "host": detail.get("host")}))).into_response())
+        }
+        Err(e) => return Err(e),
+    }
     let dir = match outbox_of(&app, &id).await {
         Ok(d) => d,
         // 遠端不是錯誤，是常態：回空清單並說明原因，前端不用畫成紅字。
@@ -283,6 +293,9 @@ pub async fn file(
     use std::os::unix::fs::MetadataExt as _;
     let not_found = || LcError::NotFound("file".into());
     let requested = q.get("path").ok_or_else(|| LcError::Bad("path required".into()))?.clone();
+    if let Some(t) = crate::outbox_remote::target(&app, &id).await? {
+        return crate::outbox_remote::file(t, &requested).await;
+    }
     outbox_of(&app, &id).await?; // 確認本機、bot 存在；拿到的路徑只是拿來確認，不再用它重新 open。
     let data_dir = app.data_dir.clone();
     let bot_id = id.clone();
@@ -579,9 +592,9 @@ mod tests {
         assert_ne!(bytes, b"host secret".to_vec());
     }
 
-    /// 遠端主機的 bot：清單回空＋原因，下載不給。
+    /// 遠端主機的 bot 而那台連不上（這裡根本沒設定 `box`）：清單回空＋原因，下載不給。連得上的情形見 `outbox_remote`。
     #[tokio::test]
-    async fn a_remote_bot_has_no_outbox_here() {
+    async fn a_remote_bot_on_an_unreachable_host_lists_nothing_and_says_why() {
         let env = crate::testing::env().await;
         let pid = crate::db::ulid();
         sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, '/r', 'r', 'box', ?)")
@@ -594,7 +607,7 @@ mod tests {
         let (status, bytes) = body(list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap()).await;
         assert_eq!(status, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!((v["files"].clone(), v["reason"].clone()), (json!([]), json!("outbox_remote")));
+        assert_eq!((v["files"].clone(), v["reason"].clone(), v["host"].clone()), (json!([]), json!("outbox_remote_unreachable"), json!("box")));
         assert_ne!(get_file(&env.app, &bot.id, "x.txt").await.0, StatusCode::OK);
         assert_eq!(get_file(&env.app, "nope", "x.txt").await.0, StatusCode::NOT_FOUND);
     }

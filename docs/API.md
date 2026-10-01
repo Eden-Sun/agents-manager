@@ -617,11 +617,12 @@ bot 或 active Run 不存在 404。
 - 只列**第一層的一般檔案**（不遞迴；子目錄與符號連結不列），新的排前面，最多 300 筆。
 - `expires_at` = mtime + `ttl_secs`；`remaining_secs` 是回應當下還剩幾秒，到期是 0（AGM 的 `com.agm.outbox-gc` 每 10 分鐘才清一次，0 的檔案還會出現一下）。前端從回應那一刻往下扣，不拿瀏覽器時鐘比 `expires_at`。
 - **一律不列**：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env` `.token` `.keychain`、`id_rsa*` 等，以及 `auth.json`、`credentials.json`、`application_default_credentials.json`、`hosts.yml`、`ui-token`），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案。規則本來就禁止放這些，這是第二道。
-- 目錄不存在（還沒寫過、被清理收掉）→ `200` 空清單。遠端主機的 bot → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_remote"}`。bot 不存在 404。
+- 目錄不存在（還沒寫過、被清理收掉）→ `200` 空清單。bot 不存在 404。
+- **遠端主機的 bot**：outbox 在那台機器上（`~/<remote root>/outbox/<bot_id>/`），daemon 走 ssh 列，回應多一個 `host`；只列最上層的一般檔，私鑰／憑證／DB 一樣不列；列表時順手刪掉超過 `ttl_secs` 的檔（遠端沒有 AGM 的 gc）。outbox 是符號連結 → `reason:"outbox_untrusted"`；連不上那台 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_remote_unreachable","host":…}`。舊版 daemon 回的 `reason:"outbox_remote"` 已不再出現。
 - `outbox` 或 `<bot_id>` 這兩段是符號連結、或擁有者跟資料目錄不同 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_untrusted"}`，下載 404：界線不能跟著連結搬到別處（例如 `~/.codex`）。
 
 ### `GET /api/bots/{id}/outbox/file?path=<檔名>`
-下載 outbox 裡的一個檔案。`path` 解開符號連結後必須仍在該 bot 的 outbox 內、是一般檔案、路徑上沒有隱藏目錄、也不是上面「一律不列」的那幾類，否則 `404 {"what":"file"}`（指到 scratchpad 的絕對路徑或符號連結一樣 404）；缺 `path` 400；bot 不存在 404；遠端主機的 bot 409 `outbox_remote`；大於 64 MiB，或檢查大小後又長大的檔案，409 `file_too_large`。
+下載 outbox 裡的一個檔案。`path` 解開符號連結後必須仍在該 bot 的 outbox 內、是一般檔案、路徑上沒有隱藏目錄、也不是上面「一律不列」的那幾類，否則 `404 {"what":"file"}`（指到 scratchpad 的絕對路徑或符號連結一樣 404）；缺 `path` 400；bot 不存在 404；遠端主機的 bot 走 ssh 取檔，只收最上層的單一檔名（含 `/` 的一律 404），連不上那台 409 `outbox_remote_unreachable`；大於 64 MiB，或檢查大小後又長大的檔案，409 `file_too_large`。
 
 一律 `Content-Disposition: attachment`（檔名走 `filename` + RFC 5987 `filename*`），加 `X-Content-Type-Options: nosniff` 與 `Cache-Control: private, no-store`。`Content-Type` 只認白名單（文字/JSON/CSV/TSV/PNG/JPEG/GIF/WebP/PDF），其餘一律 `application/octet-stream`。只讀，沒有刪除或覆寫的端點。
 

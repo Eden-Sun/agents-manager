@@ -75,6 +75,7 @@ mod local_sh;
 mod memproc;
 mod memstat;
 mod outbox;
+mod outbox_remote;
 mod mission;
 mod models;
 mod pane_identity;
