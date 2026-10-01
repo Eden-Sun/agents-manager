@@ -1058,8 +1058,15 @@ fn codex_tool_row(lines: &[&str], i: usize) -> bool {
         .iter()
         .map(|l| l.trim())
         .find(|l| !l.is_empty())
-        .is_some_and(|l| l.starts_with('└') || l.starts_with('│'))
+        .is_some_and(opens_tool_output)
 }
+
+/// 工具輸出框的第一行：`└ <輸出>`／`│ <輸出>`（corner 或豎線後面一個空白，或單獨一個 `└`）。`└── src/`、`│   ├── a` 這種目錄樹／圖不是
+/// ——回覆的第一個續行長那樣時，整則回覆不能被當成工具 cell 遮掉。
+fn opens_tool_output(l: &str) -> bool {
+    matches!(l, "└" | "│") || l.starts_with("└ ") && !l.starts_with("└ ─") || l.starts_with("│ ") && !l.starts_with("│ ├") && !l.starts_with("│ └")
+}
+
 
 /// 工具 cell 的最後一行（不含）：續行都是縮排的（`  └ …`、`    … +N lines …`、heredoc 的 `  │ …`），
 /// 中間可能夾**輸出自己的空行**（`sed` 印出來的空白行），下一個 cell 從第一欄的 `•`／`■` 重新開始。
@@ -1253,6 +1260,21 @@ gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used 
         let screen = "❯ 怎麼跑測試\n⏺ 執行：\n  ❯ npm test\n  PASS\n結論：全綠。\n";
         let cleaned = clean_screen("claude", screen).unwrap();
         assert!(cleaned.contains("執行：") && cleaned.contains("結論：全綠。"), "{cleaned}");
+    }
+
+    /// codex 的回覆是 `•` 文字、第一個非空續行是目錄樹的 `└── src/`（單一子項的樹以 `└` 起頭）：不是工具 cell。
+    /// 工具輸出框是 `└ <輸出>`／`│ <輸出>`（corner 後面一個空白，真畫面 `codex-0.155-tool-rows-share-the-answer-marker.txt`）；
+    /// 以前只看第一個字元，整則回覆被當工具列遮掉，備援存不到回覆。
+    #[test]
+    fn codex_reply_whose_first_continuation_is_a_directory_tree_is_not_a_tool_cell() {
+        let screen = "› 看結構\n\n• 專案結構如下：\n  └── src/\n      └── main.rs\n\n› Ask Codex to do anything\n";
+        assert_eq!(
+            extract_reply("codex", screen).as_deref(),
+            Some("專案結構如下：\n  └── src/\n      └── main.rs"),
+        );
+        // 真的工具列照舊遮掉：回覆是它後面那一則。
+        let with_tool = "› 跑\n\n• Ran ls\n  └ a.txt\n\n• 只有一個檔案。\n";
+        assert_eq!(extract_reply("codex", with_tool).as_deref(), Some("只有一個檔案。"));
     }
 
     #[test]
