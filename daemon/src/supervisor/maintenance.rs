@@ -533,6 +533,39 @@ pub async fn acquire(
     require_idle: bool,
     exclude: &[String],
 ) -> Result<Value, LcError> {
+    acquire_with_request(app, resource, owner, approval_id, commit, ttl_secs, require_idle, exclude, None).await
+}
+
+/// 租約列的 `detail_json` 裡記的「這張租約是哪個 request_id 開的」。只存雜湊：`detail_json` 不出現在任何 API，
+/// 但 request_id 本身是申請端的祕密（拿得回 `lease_token` 靠的就是它），不落地明文。
+fn request_hash(request_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(request_id.as_bytes()))
+}
+
+/// 同 [`acquire`]，多一個選填的 `request_id`（冪等鍵）。
+///
+/// `lease_token` 只在 acquire 的回應裡出現一次；那個回應逾時或連線斷掉時，租約已經開了、token 卻丟了，
+/// 窗口只能握到 TTL（預設 900 秒、期間 restart 窗口擋住 assignment 派送）。帶同一個 `request_id` 重送，
+/// 租約還握在**同一個 owner、同一張核准、同一個 commit** 手上、而且當初就是這個 `request_id` 開的，
+/// 就原樣回同一張（同 fence、同 token、不延長、不重驗 idle），回應多一個 `replayed: true`。
+/// 沒帶、換一個、租約已經還掉或過期，都照舊走完整的 acquire——request_id 只是「拿回」，不是另一條開窗口的路。
+pub async fn acquire_with_request(
+    app: &Arc<App>,
+    resource: &str,
+    owner: &str,
+    approval_id: &str,
+    commit: Option<&str>,
+    ttl_secs: i64,
+    require_idle: bool,
+    exclude: &[String],
+    request_id: Option<&str>,
+) -> Result<Value, LcError> {
+    let request_id = match request_id.map(str::trim) {
+        Some("") => return Err(LcError::Bad("request_id must not be empty".into())),
+        Some(r) if r.len() > 200 => return Err(LcError::Bad("request_id is too long (max 200)".into())),
+        other => other,
+    };
     if !RESOURCES.contains(&resource) {
         return Err(LcError::Bad(format!("unknown lease resource: {resource}")));
     }
@@ -578,6 +611,22 @@ pub async fn acquire(
                 json!({"reason": "approval_already_used", "approval_id": approval.id, "fence": l.fence,
                        "hint": "那個窗口已經用掉這筆核准；要再開一個窗口請重新申請"}),
             ));
+        }
+    }
+    // 重送：同一個 request_id 開的、還握著的那一張，原樣拿回（見 [`acquire_with_request`]）。
+    if let Some(rid) = request_id {
+        if let Some(l) = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+            let detail: Value = serde_json::from_str(&l.detail_json).unwrap_or(Value::Null);
+            let same = l.held_at(&crate::db::now())
+                && l.owner.as_deref() == Some(owner)
+                && l.approval_id.as_deref() == Some(approval.id.as_str())
+                && l.target_commit.as_deref() == commit
+                && detail.get("request_hash").and_then(Value::as_str) == Some(request_hash(rid).as_str());
+            if same {
+                tracing::info!(resource, owner, fence = l.fence, "maintenance lease acquire replayed by request_id");
+                let safety = detail.get("safety").cloned().unwrap_or(Value::Null);
+                return Ok(json!({"lease": l.to_json(), "lease_token": l.lease_token, "approval": approval.to_json(), "safety": safety, "replayed": true}));
+            }
         }
     }
 
@@ -643,7 +692,8 @@ pub async fn acquire(
         &expires_at,
         quiet_delivery,
         exclude_self.as_deref(),
-        &json!({"require_idle": require_idle, "safety": safety, "excluded_self": exclude_self}),
+        &json!({"require_idle": require_idle, "safety": safety, "excluded_self": exclude_self,
+                "request_hash": request_id.map(request_hash)}),
     )
     .await
     .map_err(|e| LcError::Upstream(e.to_string()))?;
@@ -1426,6 +1476,44 @@ mod tests {
         let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
         assert_eq!(detail["reason"], "approval_already_used");
         assert_eq!(store::approval(&app.db, &a).await.unwrap().unwrap().status, "consumed", "順手補記消耗");
+    }
+
+    /// acquire 的回應（含只出現一次的 `lease_token`）送丟了：帶同一個 `request_id` 重送要拿回**同一張**租約
+    /// （同 fence、同 token），不能多開一張，也不能讓窗口握到 TTL 沒人收得掉。request_id 是只有申請端知道的祕密，
+    /// 所以只有它拿得回 token；沒帶、換一個、窗口已經還掉，都照舊走完整的 acquire。
+    #[tokio::test]
+    async fn a_retried_acquire_with_the_same_request_id_gets_the_same_lease_back() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let a = approved_window(app, 0).await;
+        let first = acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], Some("req-secret-1")).await.unwrap();
+        assert!(first.get("replayed").is_none(), "第一次不是重送：{first}");
+
+        let again = acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], Some("req-secret-1")).await.unwrap();
+        assert_eq!(again["replayed"], true);
+        assert_eq!(again["lease_token"], first["lease_token"], "同一張租約的同一個 token");
+        assert_eq!(again["lease"]["fence"], first["lease"]["fence"], "fence 不能再往上加");
+        assert_eq!(again["lease"]["expires_at"], first["lease"]["expires_at"], "重送不延長租約");
+        assert_eq!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().fence, 1);
+
+        // 換一個 request_id、或不帶：不是同一個申請，租約握在自己手上也照舊 lease_held。
+        for rid in [Some("req-other"), None] {
+            let refused = acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], rid).await.unwrap_err();
+            let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+            assert_eq!(detail["reason"], "lease_held", "{rid:?}");
+        }
+        // 空白的 request_id 是呼叫端的錯，不是「沒帶」。
+        assert!(matches!(
+            acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], Some("   ")).await,
+            Err(LcError::Bad(_))
+        ));
+
+        // 窗口還掉之後，同一個 request_id 不能把已經還掉的租約救回來：走完整的 acquire，而一張核准只開一個窗口
+        // （release／過期都算用掉），所以是 approval_already_used，不是 replayed。
+        assert!(store::release_lease(&app.db, "rebuild", "ops", 1).await.unwrap());
+        let refused = acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], Some("req-secret-1")).await.unwrap_err();
+        let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+        assert_eq!(detail["reason"], "approval_already_used", "已還掉的租約不能靠 request_id 救回來");
     }
 
     /// 換 commit 重新申請（supersedes）：舊的標 superseded、它的等待接過來，升級計時不因為 main 動了就歸零（review2 sup 新發現 2）。

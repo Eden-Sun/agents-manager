@@ -1367,6 +1367,9 @@ pub struct AcquireIn {
     /// Bots to ignore in the idle check — normally just the one doing the maintenance.
     #[serde(default)]
     pub exclude_bot_ids: Vec<String>,
+    /// 冪等鍵：回應丟了時帶同一個再送，拿回同一張租約（含只出現一次的 `lease_token`）。
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 fn yes() -> bool {
@@ -1379,7 +1382,7 @@ pub async fn post_lease_acquire(
     Json(b): Json<AcquireIn>,
 ) -> Result<Json<Value>, LcError> {
     Ok(Json(
-        super::maintenance::acquire(
+        super::maintenance::acquire_with_request(
             &app,
             &resource,
             &b.owner,
@@ -1388,6 +1391,7 @@ pub async fn post_lease_acquire(
             b.ttl_secs.unwrap_or(super::maintenance::DEFAULT_TTL_SECS),
             b.require_idle,
             &b.exclude_bot_ids,
+            b.request_id.as_deref(),
         )
         .await?,
     ))

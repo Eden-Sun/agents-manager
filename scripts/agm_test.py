@@ -1028,6 +1028,41 @@ class ApprovalLeaseCommandTest(CliCase):
         self.assertEqual((body["approval_id"], body["commit"], body["owner"]), ("ap-1", "abc123", "bot-a"))
         self.assertIs(body["require_idle"], True)
 
+    def test_acquire_always_carries_a_request_id_so_a_lost_response_can_be_replayed(self):
+        """`lease_token` 只在 acquire 的回應出現一次；回應丟了要靠同一個 request_id 拿回同一張租約。
+        自己給的照送，沒給就自己產一個（高熵、每次不同）。"""
+        self.ok("lease", "acquire", "rebuild", "--approval", "ap-1", "--request-id", "my-req-1")
+        self.assertEqual(self._last_body()["request_id"], "my-req-1")
+        self.ok("lease", "acquire", "rebuild", "--approval", "ap-1")
+        first = self._last_body()["request_id"]
+        self.assertRegex(first, r"^[0-9a-f]{32}$")
+        self.ok("lease", "acquire", "rebuild", "--approval", "ap-1")
+        self.assertNotEqual(self._last_body()["request_id"], first)
+
+    def test_an_acquire_that_times_out_is_delivery_unknown_and_names_the_request_id_to_replay(self):
+        """逾時＝租約可能已經開了、token 卻沒收到：不能只回含糊的 timeout，要說「用同一個 request_id 重送拿回同一張」，
+        而且 CLI 自己不重送（換一個 id 重送會被 lease_held 擋住、窗口握到 TTL）。"""
+        FakeDaemon.slow = {"/api/supervisor/leases/rebuild/acquire"}
+        err = self.bad("--timeout", "0.3", "lease", "acquire", "rebuild", "--approval", "ap-1", "--request-id", "req-t1")
+        self.assertEqual(err["error"], "delivery_unknown")
+        self.assertEqual(err["request_id"], "req-t1")
+        self.assertIn("req-t1", err["message"])
+        posts = [r for r in FakeDaemon.seen if r["path"].endswith("/leases/rebuild/acquire")]
+        self.assertEqual(len(posts), 1, "不能自己重送")
+
+    def test_an_acquire_whose_connection_drops_after_sending_is_delivery_unknown(self):
+        FakeDaemon.drop = {"/api/supervisor/leases/rebuild/acquire"}
+        err = self.bad("lease", "acquire", "rebuild", "--approval", "ap-1", "--request-id", "req-d1")
+        self.assertEqual(err["error"], "delivery_unknown")
+        self.assertEqual(err["request_id"], "req-d1")
+
+    def test_a_token_fetch_timeout_before_acquire_is_not_delivery_unknown(self):
+        """取 token 就逾時＝acquire 根本沒送出（跟 assign 同一條規則）。"""
+        FakeDaemon.slow = {"/api/session"}
+        code, _out, err = self.run_cli("--timeout", "0.3", "lease", "acquire", "rebuild", "--approval", "ap-1")
+        self.assertNotEqual(json.loads(err)["error"], "delivery_unknown")
+        self.assertEqual([r for r in FakeDaemon.seen if r["method"] == "POST"], [])
+
     def test_renew_and_release_need_the_fence(self):
         """fence 是防舊持有人的那道鎖，缺了就不要送。"""
         self.assertEqual(self.bad("lease", "release", "rebuild", "--owner", "bot-a")["error"], "bad_args")

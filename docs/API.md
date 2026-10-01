@@ -2111,12 +2111,17 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `own:true` 就是發問者自己的。不帶 owner＝舊行為，每一把都算擋、`own` 一律 false；回傳的 `owner` 回聲讓呼叫端分得出舊 daemon 忽略了它。
   acquire 一律以自己的 `owner` 問（SPEC §18.10「自己的租約不擋自己」）。
 - `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`。
-- `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?}` → `{lease,lease_token,approval,safety}`；同 lock 內重驗核准與 idle，
+- `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?,request_id?}` → `{lease,lease_token,approval,safety}`；同 lock 內重驗核准與 idle，
   搶輸 409 `lease_held`。`owner` 必須等於核准的 `requester`，否則 409 `approval_owner_mismatch`（別人的核准開不了你的窗口，也借不走它的等待）。
   這張核准開過的窗口**過期沒 release**（執行端掛了），或已 release 卻因寫入失敗／daemon 中途死掉而沒記到 `consumed` 時，同一張再 acquire → 409 `approval_already_used`，並當場標 `consumed`（note `lease expired`）；要再開就重新申請。
   ttl 預設 900、上限 3600。`POST …/renew {owner,fence,ttl_secs?,lease_token}`、`POST …/release {owner,fence,lease_token}`；舊 fence 409 `lease_lost`；release 把核准標 `consumed`。
   **renew 不接受 `force`**（400）：force 只用來收掉持有者已經不在的窗口，不是替別人延長。
-  **`lease_token` 只在 acquire 的回應裡出現一次**（`GET /leases`、`GET /api/supervisor`、WS 事件都不含它）。renew／release 不帶或帶錯 → `403 {"reason":"lease_token_required"|"lease_token_mismatch"}`，租約不動。
+  **`lease_token` 只在 acquire 的回應裡出現一次**（`GET /leases`、`GET /api/supervisor`、WS 事件都不含它）。
+  **`request_id`（冪等鍵）**：回應丟了（逾時、連線斷）時租約已經開了、token 卻沒收到。帶**同一個** `request_id` 重送，租約還握在同一個 `owner`、同一張核准、同一個 `commit` 手上，
+  而且當初就是這個 `request_id` 開的，就原樣回同一張（同 `fence`、同 `lease_token`，不延長、不重驗 idle），回應多 `replayed:true`。request_id 是只有申請端知道的祕密
+  （daemon 只存雜湊，不出現在任何讀取介面），所以別人拿不回 token。沒帶、換一個、租約已經 release 或過期，都照舊走完整的 acquire（握著時 409 `lease_held`）；空白或超過 200 字 400。
+  CLI：`agm lease acquire --request-id <id>`，沒給就自己產一個；逾時回 `delivery_unknown`（exit 7）並印出 `request_id`，用同一個重送。
+  `POST /api/services/daemon-swap/restart-window` 不吃這個欄位（它自己開核准、自己拿 token，不走這條重送）。renew／release 不帶或帶錯 → `403 {"reason":"lease_token_required"|"lease_token_mismatch"}`，租約不動。
   強制接管：`{force:true, reason:"…"}`，**只有 AGM 角色**（`X-AM-Bot-Id`＋該 bot 的 hook token）可以；其他呼叫端 403 `lease_force_forbidden`。`reason` 必填（否則 400），不比對 owner／fence，寫進 `supervisor_notes` 的 `lease_force_release`（含 `by_role`）。升級前建立的租約沒有 token，不帶也能 release（見 SPEC §18.10）。
   持有 `restart` 租約期間 assignment 派送 hold（留 `queued`、不算重試）。
 
