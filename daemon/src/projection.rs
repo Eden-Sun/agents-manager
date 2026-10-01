@@ -241,6 +241,9 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
         if let Some(why) = crate::config::host_target_problem(h.ssh.trim(), h.herdr_session.trim()) {
             bail!("host `{}`: {why}", h.name);
         }
+        if let Some(why) = crate::config::ssh_opts_problem(&h.ssh_opts) {
+            bail!("host `{}`: {why}", h.name);
+        }
         if !seen_hosts.insert(h.name.as_str()) {
             bail!("duplicate [[hosts]] entry named `{}`", h.name);
         }
@@ -856,6 +859,7 @@ mod tests {
             ("ssh 帶空白", with(vec![host("m4p", "me@host extra")]), "ssh target"),
             ("herdr_session 帶斜線（會進遠端路徑）", with(vec![blank_session("../../x")]), "herdr_session"),
             ("herdr_session 帶引號（會進 plist）", with(vec![blank_session("a\"b")]), "herdr_session"),
+            ("ssh_opts 帶 ProxyCommand（會在本機執行）", with(vec![HostCfg { ssh_opts: vec!["-o".into(), "ProxyCommand=true".into()], ..host("m4p", "me@10.0.0.2") }]), "ssh_opts"),
         ] {
             let err = validate(&cfg).expect_err(what).to_string();
             assert!(err.contains(needle), "{what}: {err}");

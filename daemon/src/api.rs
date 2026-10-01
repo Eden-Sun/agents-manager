@@ -2305,6 +2305,9 @@ async fn create_host(
     if let Some(why) = crate::config::host_target_problem(b.ssh.trim(), session_wanted) {
         return Err(LcError::Bad(why));
     }
+    if let Some(why) = crate::config::ssh_opts_problem(b.ssh_opts.as_deref().unwrap_or_default()) {
+        return Err(LcError::Bad(why));
+    }
     // 共用 session 是安全開關（#709）：沒帶就沿用，不因為一次只改 ssh 的更新而悄悄關掉。
     let prev_shared = app.cfg.get().await.hosts.iter().any(|h| h.name == b.name && h.shared_session);
     let cfg = HostCfg {
@@ -9273,6 +9276,63 @@ mod host_target_tests {
         for bad in ["../../etc", "a/b", "-x", ".hidden", "a b", "a;b", "a\"b", "<x>", "a&b", "x\ny"] {
             assert!(host_target_problem("box", bad).is_some(), "{bad:?}");
         }
+    }
+
+    fn opts(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `ssh_opts` 是「原樣附加到每個 ssh 指令」：`-oProxyCommand=…`／`LocalCommand` 就是在**跑 daemon 的這台機器**上執行任意命令。
+    /// `POST /api/hosts` 任何 principal（含 bot 的 hook token）都能呼叫，以前只驗 `ssh` 與 `herdr_session`，這個欄位完全沒驗。
+    /// 只放行真的用得到的：`-i 檔`、`-o 白名單鍵=值`（dev sshd 與 ConnectTimeout 那類）。
+    #[test]
+    fn ssh_opts_cannot_carry_a_command_to_run_locally() {
+        for ok in [
+            opts(&[]),
+            opts(&["-o", "ConnectTimeout=2"]),
+            opts(&["-i", "/home/u/.ssh/id_ed25519", "-o", "UserKnownHostsFile=/tmp/k", "-o", "StrictHostKeyChecking=yes"]),
+            opts(&["-oConnectTimeout=5", "-oStrictHostKeyChecking=no"]),
+            opts(&["-o", "serveraliveinterval=30"]),
+            opts(&["-4"]),
+        ] {
+            assert_eq!(crate::config::ssh_opts_problem(&ok), None, "{ok:?}");
+        }
+        for bad in [
+            opts(&["-oProxyCommand=touch /tmp/pwned"]),
+            opts(&["-o", "ProxyCommand=touch /tmp/pwned"]),
+            opts(&["-o", "proxycommand=touch /tmp/pwned"]),
+            opts(&["-o", "ProxyCommand touch /tmp/pwned"]),
+            opts(&["-o", "PermitLocalCommand=yes", "-o", "LocalCommand=touch /tmp/pwned"]),
+            opts(&["-o", "KnownHostsCommand=touch /tmp/pwned"]),
+            opts(&["-o", "Include=/tmp/evil.conf"]),
+            opts(&["-F", "/tmp/evil.conf"]),
+            opts(&["-J", "-oProxyCommand=true"]),
+            opts(&["-i", "-oProxyCommand=true"]),
+            opts(&["-o"]),
+            opts(&["-o", "ConnectTimeout"]),
+            opts(&["host"]),
+            opts(&["-o", "ConnectTimeout=2\nProxyCommand=true"]),
+            opts(&["-L", "8080:localhost:80"]),
+            opts(&["-p", "2222"]),
+        ] {
+            assert!(crate::config::ssh_opts_problem(&bad).is_some(), "{bad:?}");
+        }
+        assert!(host_target_problem("me@-oProxyCommand=true", "agents-manager").is_some(), "@ 後面以 - 開頭的主機名也會被當成選項");
+    }
+
+    #[tokio::test]
+    async fn create_host_refuses_ssh_opts_that_run_a_command_before_touching_config() {
+        let e = crate::testing::env().await;
+        let before = e.app.cfg.get().await.hosts.len();
+        let err = create_host(
+            State(e.app.clone()),
+            Query(DeleteQuery::default()),
+            Json(NewHost { name: "evil2".into(), ssh: "me@10.0.0.9".into(), ssh_port: None, ssh_opts: Some(opts(&["-o", "ProxyCommand=touch /tmp/pwned"])), herdr_session: None, remote_path: None, shared_session: None }),
+        )
+        .await
+        .expect_err("ProxyCommand must be refused");
+        assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        assert_eq!(e.app.cfg.get().await.hosts.len(), before, "什麼都沒寫");
     }
 
     #[tokio::test]

@@ -960,7 +960,9 @@ pub fn expand_home(value: &str, home: &str) -> String {
 /// `herdr_session` 會被拼進遠端的 session 路徑、launchd label 與 plist，限制在 herdr session 名字該有的字元。
 /// 呼叫端先 trim。
 pub fn host_target_problem(ssh: &str, session: &str) -> Option<String> {
-    if ssh.is_empty() || ssh.starts_with('-') || ssh.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    // `user@-oProxyCommand=…`：`@` 後面以 `-` 開頭的主機名，較舊的 ssh 一樣會當成選項。
+    let host_part = ssh.rsplit_once('@').map_or(ssh, |(_, h)| h);
+    if ssh.is_empty() || ssh.starts_with('-') || host_part.starts_with('-') || ssh.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Some("ssh target must be a host (or user@host / ssh_config alias): no leading `-`, whitespace or control characters".into());
     }
     let first = session.chars().next();
@@ -969,6 +971,66 @@ pub fn host_target_problem(ssh: &str, session: &str) -> Option<String> {
         || !session.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
         return Some("herdr_session must be 1-64 characters of [A-Za-z0-9._-], starting with a letter or digit".into());
+    }
+    None
+}
+
+/// `ssh_opts` 白名單鍵（`-o Key=Value`）。刻意只放連線／驗證／逾時這類：`ProxyCommand`、`LocalCommand`、`KnownHostsCommand`、
+/// `Include`、`Match`、`*Forward`、`SetEnv` 都不在內——它們會在**跑 daemon 的這台機器**上執行命令或開通道。
+const SSH_OPT_KEYS: &[&str] = &[
+    "connecttimeout", "connectionattempts", "stricthostkeychecking", "userknownhostsfile", "globalknownhostsfile", "identityfile",
+    "identitiesonly", "serveraliveinterval", "serveralivecountmax", "hostkeyalgorithms", "pubkeyacceptedalgorithms",
+    "pubkeyauthentication", "passwordauthentication", "kbdinteractiveauthentication", "compression", "addressfamily", "loglevel",
+    "user", "hostkeyalias", "checkhostip", "updatehostkeys", "tcpkeepalive",
+];
+
+/// `ssh_opts` 是「原樣附加到每個 ssh 指令」的 argv。放行的形狀只有：`-i <檔>`、`-o Key=Value`／`-oKey=Value`（Key 在白名單內）、`-4`／`-6`／`-q`。
+/// 其餘（`-F`、`-J`、`-L`／`-R`、`-p`、裸字串…）一律不收——埠用 `ssh_port`；要跳板請寫進 ssh_config 別名。
+/// 值不得以 `-` 開頭、不得含空白以外的控制字元、換行。回 `Some(原因)`。
+pub fn ssh_opts_problem(opts: &[String]) -> Option<String> {
+    let bad = |why: String| Some(format!("ssh_opts: {why}"));
+    let clean = |v: &str| !v.is_empty() && !v.starts_with('-') && !v.chars().any(|c| c.is_control());
+    let mut it = opts.iter().map(String::as_str);
+    while let Some(a) = it.next() {
+        match a {
+            "-4" | "-6" | "-q" => {}
+            "-i" => match it.next() {
+                Some(v) if clean(v) => {}
+                _ => return bad("`-i` needs a key file path (not starting with `-`)".into()),
+            },
+            "-o" => match it.next() {
+                Some(kv) => {
+                    if let Some(why) = ssh_option_problem(kv) {
+                        return bad(why);
+                    }
+                }
+                None => return bad("`-o` needs a Key=Value".into()),
+            },
+            _ if a.starts_with("-o") && a.len() > 2 => {
+                if let Some(why) = ssh_option_problem(&a[2..]) {
+                    return bad(why);
+                }
+            }
+            other => return bad(format!("`{}` is not an allowed ssh option (allowed: -i <file>, -o <Key>=<Value>, -4, -6, -q)", other.chars().take(40).collect::<String>())),
+        }
+    }
+    None
+}
+
+fn ssh_option_problem(kv: &str) -> Option<String> {
+    // 允許 `Key=Value`；ssh 也接受 `Key Value`，一律先當成同一個東西檢查（Key 就是第一個 `=` 或空白前）。
+    if kv.chars().any(|c| c.is_control()) {
+        return Some("an -o value contains a control character or newline".into());
+    }
+    let (key, value) = match kv.find(|c: char| c == '=' || c.is_whitespace()) {
+        Some(i) => (&kv[..i], kv[i + 1..].trim()),
+        None => (kv, ""),
+    };
+    if !SSH_OPT_KEYS.contains(&key.to_ascii_lowercase().as_str()) {
+        return Some(format!("`-o {}` is not an allowed ssh option key (it could run a command or open a tunnel)", key.chars().take(40).collect::<String>()));
+    }
+    if value.is_empty() || value.starts_with('-') {
+        return Some(format!("`-o {key}` needs a value that does not start with `-`"));
     }
     None
 }
