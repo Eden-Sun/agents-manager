@@ -231,11 +231,12 @@ struct Recovery {
     queue: bool,
     send_nows: bool,
     ended_runs: bool,
+    queued_prompt_restamps: bool,
 }
 
 impl Recovery {
     fn new() -> Self {
-        Self { boot: db::now(), runs: None, queue: true, send_nows: true, ended_runs: true }
+        Self { boot: db::now(), runs: None, queue: true, send_nows: true, ended_runs: true, queued_prompt_restamps: true }
     }
 
     /// 補一輪；回 `true`＝什麼都不欠了。
@@ -257,7 +258,13 @@ impl Recovery {
         if self.ended_runs {
             self.ended_runs = !crate::lifecycle::adopt_turns_of_ended_runs(app, &self.boot).await;
         }
-        self.runs.as_ref().is_some_and(|r| r.is_empty()) && !self.queue && !self.send_nows && !self.ended_runs
+        if self.queued_prompt_restamps {
+            match crate::lifecycle::rearm_queued_prompt_restamps(app).await {
+                Ok(()) => self.queued_prompt_restamps = false,
+                Err(e) => tracing::warn!(error = %e, "cannot re-arm queued prompt restamps yet"),
+            }
+        }
+        self.runs.as_ref().is_some_and(|r| r.is_empty()) && !self.queue && !self.send_nows && !self.ended_runs && !self.queued_prompt_restamps
     }
 
     async fn rearm_in_flight(&mut self, app: &Arc<App>) {
