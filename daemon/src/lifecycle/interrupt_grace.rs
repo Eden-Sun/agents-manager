@@ -97,6 +97,13 @@ fn pending_echoes() -> &'static Mutex<HashMap<String, InterruptedTurn>> {
     M.get_or_init(Default::default)
 }
 
+/// 不在 `live` 裡的 bot（刪掉、退役的 child）不留中斷標記與等回聲的記錄：兩張表都是一顆 bot 一格、
+/// 回聲沒來（claude 2.1.276 起 Esc 不送 Stop／StopFailure）或寬限沒清就一直留著，bot 沒了也不會有人再來清。
+pub(crate) fn retain_bots(live: &[String]) {
+    interrupt_holds().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| live.contains(id));
+    pending_echoes().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| live.contains(id));
+}
+
 pub(crate) fn expect_interrupt_echo(bot_id: &str, interrupted: InterruptedTurn) {
     pending_echoes().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string(), interrupted);
 }
@@ -504,6 +511,23 @@ pub(crate) async fn hold_at(
         }
     }
     left
+}
+
+#[cfg(test)]
+mod retain_tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_bots_interrupt_marks_are_dropped() {
+        for bot in ["intr-gone", "intr-kept"] {
+            note_user_interrupt(bot);
+            expect_interrupt_echo(bot, InterruptedTurn { run_id: "r".into(), turn_id: None, session_id: None, prompt_id: None, at: Utc::now() });
+        }
+        retain_bots(&["intr-kept".to_string()]);
+        assert!(hold_of("intr-gone").is_none() && pending_echo("intr-gone").is_none(), "沒了的 bot 不留記錄");
+        assert!(hold_of("intr-kept").is_some() && pending_echo("intr-kept").is_some());
+        retain_bots(&[]);
+    }
 }
 
 #[cfg(test)]
