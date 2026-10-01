@@ -137,7 +137,7 @@ pub(crate) async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev:
                 if let Err(e) = crate::default_session::sync(app).await {
                     tracing::debug!(host, session, error = ?e, "default session sync after agent detection failed");
                 }
-            } else if app.session_for_host(host).await.as_deref() == Some(session) {
+            } else if app.session_for_host(host).await.as_deref() == Some(session) && detection_wants_reconcile(app, host, session, &ev.data).await {
                 // 多半是 bot 剛開的子 pane（見 `reconcile`），不排一次對帳就要等到下次重啟才看得到。
                 // 另開 task 並晚一拍，讓還在啟動的 agent 先報出名字與 kind。
                 let app = app.clone();
@@ -152,6 +152,14 @@ pub(crate) async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev:
         }
         other => tracing::trace!(host, session, event = other, "unhandled global herdr event"),
     }
+}
+
+/// 偵測到的 agent 可能是 bot 剛開的子 pane，值得對帳；daemon 自己開的探測 workspace（額度探測，[`crate::probe_ws`]）不是——
+/// 它們每 30～60 秒就來一個，每個都對整台主機對帳一輪是白做。
+async fn detection_wants_reconcile(app: &Arc<App>, host: &str, session: &str, data: &serde_json::Value) -> bool {
+    let Some(ws) = data.get("workspace_id").and_then(|v| v.as_str()) else { return true };
+    let Some(client) = app.herdr_for_session(host, session).await else { return true };
+    !crate::probe_ws::is_probe(client.socket_path(), ws)
 }
 
 /// 訂閱（重）建後的對帳；成功且 `autostart` 才補跑欠著的 autostart（#259）。`autostart_hosts` 保證每台主機只完成一次 autostart pass：
@@ -1034,6 +1042,21 @@ mod tests {
         handle_status(&app, LOCAL_HOST, "test", &ev).await;
         let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert_eq!(status, "unknown", "不認得的狀態不能讓寫入整句失敗、燈號停在舊的 working");
+    }
+
+    /// m4p 每 39 秒被完整對帳一輪（十幾顆 bot × 好幾個 ssh RPC）：原因是 grok 額度探測（每 30 秒）開的 workspace 一偵測到
+    /// agent 就觸發 `pane.agent_detected` → 兩秒後對整台主機對帳。探測登記過的 workspace 不排；別的照舊排。
+    #[tokio::test]
+    async fn an_agent_detected_in_a_quota_probe_workspace_does_not_schedule_a_reconcile() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let probe = crate::probe_ws::ProbeWorkspace::register(app.herdr.socket_path(), "w-probe");
+        let detected = |ws: &str| json!({"agent": "grok", "pane_id": format!("{ws}:p1"), "workspace_id": ws});
+        assert!(!detection_wants_reconcile(&app, LOCAL_HOST, "test", &detected("w-probe")).await, "探測 workspace 不對帳");
+        assert!(detection_wants_reconcile(&app, LOCAL_HOST, "test", &detected("w-child")).await, "別的 workspace（可能是子 agent）照舊對帳");
+        assert!(detection_wants_reconcile(&app, LOCAL_HOST, "test", &json!({"agent": "grok"})).await, "沒有 workspace_id 的事件看不出來，照舊");
+        drop(probe);
+        assert!(!detection_wants_reconcile(&app, LOCAL_HOST, "test", &detected("w-probe")).await, "剛結束：退出的偵測事件還會晚幾秒到，也不對帳");
     }
 
     fn close_event(pane: &str) -> crate::herdr::Event {

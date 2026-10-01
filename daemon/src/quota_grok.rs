@@ -270,6 +270,8 @@ async fn probe_label(app: &Arc<App>, host: &str) -> String {
 struct Probe {
     client: HerdrClient,
     workspace_id: String,
+    /// 登記期間 `pane.agent_detected` 不觸發整台主機的對帳（[`crate::probe_ws`]）。
+    _registered: crate::probe_ws::ProbeWorkspace,
 }
 
 impl Drop for Probe {
@@ -317,7 +319,11 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     }
     let client = client_for_fence(app, &fence).await?;
     let (ws, pane) = client.workspace_create(&cwd, &probe_label(app, host).await, json!({})).await?;
-    let probe = Probe { client: client.clone(), workspace_id: ws.workspace_id.clone() };
+    let probe = Probe {
+        client: client.clone(),
+        workspace_id: ws.workspace_id.clone(),
+        _registered: crate::probe_ws::ProbeWorkspace::register(client.socket_path(), &ws.workspace_id),
+    };
     let pane_id = pane.pane_id.clone();
 
     // A distinct name so reconcile and the bot list can never confuse it with a real bot.
