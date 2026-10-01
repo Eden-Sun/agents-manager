@@ -496,6 +496,7 @@ export async function restartIdleBots(): Promise<RestartPlan> {
     ),
     skipped: toRestartSkips(pick(o, 'skipped')),
     already_running: pick(o, 'already_running') === true,
+    restart_status: optStr(pick(o, 'restart_status')) ?? undefined,
   }
 }
 

@@ -1377,6 +1377,9 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 `reason`：`child`（子 agent，由父 bot 用 herdr 重開，SPEC §6.5a；2026-09-22）、`default_session`、`not_running`、`working`、`blocked`、`unknown_status`、`turn_in_flight`、`needs_manual_install`、`no_longer_pending`、`state_unreadable`。
 - **202**：回的是計畫，重啟在背景一顆一顆跑。`total = 0` 也是 202，並立刻推 `bots_restart_done`。
 - 已經有一批在跑：`202 {"batch_id": <那一批>, "total": 0, "planned": [], "skipped": [], "already_running": true}`，不另開一批、不推新的 `done`，進度照那一批的事件。
+- 正在跑的是**範圍批次**（cli-update 開的，只有那台那個 kind）時，不限範圍的再按一次不能只當成接回去：等著套用的 bot 全都還排在那一批裡才照上面的 `already_running`（不帶 `restart_status`）；
+  有不在裡面的，回 `{"already_running": true, "batch_id": <那一批>, "restart_status": "deferred", "behind_batch_id", "deferred": [{bot_id, name}…]}`，
+  那一批放掉那一格時 daemon 自己接著開一批全域的（新的 `batch_id`，前端靠 `GET /api/state` 的 `restart_batch` 對帳接上）。
 - 自己開的一批回 `restart_status:"started"`。範圍批次（只有 `cli_update` 內部用，§12.7a）遇到已經在跑的一批另有兩種結果（#566），不會只憑「有一批在跑」就回 `already_running`：
   `already_covered`（那一批還沒輪到的目標涵蓋這個範圍每一顆該重啟的，帶 `covered`）或 `deferred`（`batch_id:null`、`behind_batch_id`、`deferred`＝現在會重啟的那幾顆；
   那一批結束時自動開這個範圍的一批，到時重新挑）。

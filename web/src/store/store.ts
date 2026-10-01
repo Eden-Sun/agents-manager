@@ -1912,7 +1912,12 @@ export const useStore = create<StoreState>((set, get) => {
       // 把進度蓋掉或跳「沒有閒置的 Bot」——接著看那一批的事件就好。
       if (plan.already_running) {
         set({ restartBatch: joinRunningBatch(get().restartBatch, plan.batch_id) })
-        get().notify('info', '已經有一批重啟在跑，這次不另開，進度照那一批顯示')
+        get().notify(
+          'info',
+          plan.restart_status === 'deferred'
+            ? '正在跑的那一批只動某台的 CLI，其餘等著套用的會在它跑完後自動接著重啟'
+            : '已經有一批重啟在跑，這次不另開，進度照那一批顯示',
+        )
         return
       }
       // 按鈕數字從此用 daemon 的計畫，不用前端估的。
