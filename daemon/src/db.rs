@@ -185,6 +185,14 @@ CREATE TABLE IF NOT EXISTS live_apply_debts (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS live_apply_debts_bot ON live_apply_debts(bot_id);
+-- 對話輸入框還沒送出的草稿（使用者 2026-10-01，見 `drafts.rs`）：以 daemon 為準，每個瀏覽器共用。
+-- key＝`bot:<id>`／`group:<project id>`；rev 每個 key 單調遞增；text 空字串＝已刪除（留墓碑，rev 才不會從頭來）。
+CREATE TABLE IF NOT EXISTS composer_drafts (
+  key TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  rev INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
@@ -264,6 +272,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (32, "4376ae24058f9753"),
     // issue #738: durable retries for queued-prompt message restamping after delivery.
     (33, "ed264766628799b2"),
+    // 2026-10-01：`composer_drafts`（輸入框草稿存 daemon，各瀏覽器同步）。
+    (34, "1fb4da468542c3bb"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

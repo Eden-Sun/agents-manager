@@ -16,6 +16,7 @@ mod intents;
 mod restart_intents;
 mod delete_intents;
 mod deploy_now;
+mod drafts;
 mod launch_rev;
 mod promote_intents;
 mod assets;

@@ -1,7 +1,7 @@
 /** Single Zustand store: server state from `GET /api/state` + `/ws`, plus UI state. Event flow / resync: SPEC §7.3. */
 
 import { gatewayErrText, networkErrText } from '../lib/netErr'
-import { draftsClearedElsewhere } from './draftSync'
+import { DraftSync } from './draftSync'
 import { createResyncRunner } from './resyncQueue'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { groupSendDelivered } from './groupSend'
@@ -26,6 +26,7 @@ import {
   unwrap,
   isRec,
   bool,
+  num,
   pick,
   arr,
 } from '../api/normalize'
@@ -86,7 +87,7 @@ import {
   type ReadMark,
 } from './unread'
 import { fetchSupervisor } from '../api/supervisor'
-import { IN_MOBILE_PREVIEW, writeShared } from './mobilePreview'
+import { writeShared } from './mobilePreview'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
 import { handedOffReason, handedOffTo } from '../lib/handoff'
@@ -128,7 +129,6 @@ export function anchorOf(el: Element): SettingsAnchor {
 export type KindDisplay = 'icon' | 'text'
 
 const KIND_DISPLAY_KEY = 'am.kindDisplay'
-const DRAFTS_KEY = 'am.drafts'
 const DRAFT_CURSORS_KEY = 'am.draftCursors'
 const SELECTION_KEY = 'am.selection'
 
@@ -218,19 +218,6 @@ export interface DraftCursor {
   end: number
 }
 
-function readDrafts(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(DRAFTS_KEY)
-    const parsed: unknown = raw ? JSON.parse(raw) : null
-    if (!isRec(parsed)) return {}
-    const out: Record<string, string> = {}
-    for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string' && v) out[k] = v
-    return out
-  } catch {
-    return {}
-  }
-}
-
 /**
  * 多分頁：整份覆寫會把別的分頁剛存的草稿洗掉（分頁 A 打 bot1、分頁 B 的記憶體沒有它，B 一打 bot2 就寫回不含 bot1 的整份）。
  * 只把「這次相對 prev 有變的鍵」套到磁碟上現有的那份（#300）。
@@ -240,14 +227,6 @@ function persistDiff<V>(storageKey: string, prev: Record<string, V>, next: Recor
   for (const k of Object.keys(prev)) if (!(k in next)) delete disk[k]
   for (const [k, v] of Object.entries(next)) if (prev[k] !== v) disk[k] = v
   localStorage.setItem(storageKey, JSON.stringify(disk))
-}
-
-function writeDrafts(prev: Record<string, string>, drafts: Record<string, string>) {
-  try {
-    writeShared(() => persistDiff(DRAFTS_KEY, prev, drafts, readDrafts))
-  } catch {
-    /* storage unavailable: drafts still live for this page */
-  }
 }
 
 function readDraftCursors(): Record<string, DraftCursor> {
@@ -862,7 +841,7 @@ export const useStore = create<StoreState>((set, get) => {
   modelsFailedAt: {},
   kindDisplay: readKindDisplay(),
   toolHintDismissed: false,
-  drafts: readDrafts(),
+  drafts: {},
   draftCursors: readDraftCursors(),
   identities: [],
   projects: [],
@@ -941,6 +920,7 @@ export const useStore = create<StoreState>((set, get) => {
     })
     void get().loadQuota()
     void get().loadMem()
+    void draftSync.load().catch(() => {})
     // 安全網：daemon 不重啟也可能在執行中清掉某個額度 key（例如收掉 kind 不符的身分），WS 不會說。
     // 每 5 分鐘整份換一次，最慢 5 分鐘內消失；GET /api/quota 很便宜。
     if (!quotaSweep) quotaSweep = setInterval(() => void get().loadQuota(), QUOTA_SWEEP_MS)
@@ -1984,10 +1964,11 @@ export const useStore = create<StoreState>((set, get) => {
             }
           },
         })
+        // daemon 刪 bot 時自己清它的草稿（也會推給其他瀏覽器）；這裡只收掉本機的。
+        draftSync.forget(`bot:${botId}`)
         set((s) => {
           const drafts = withoutKey(s.drafts, `bot:${botId}`)
           const draftCursors = withoutKey(s.draftCursors, `bot:${botId}`)
-          writeDrafts(s.drafts, drafts)
           writeDraftCursors(s.draftCursors, draftCursors)
           return {
             selectedBotId: s.selectedBotId === botId ? next : s.selectedBotId,
@@ -2027,12 +2008,12 @@ export const useStore = create<StoreState>((set, get) => {
     const botIds = get().bots.filter((b) => b.project_id === projectId).map((b) => b.id)
     try {
       await api.deleteProject(projectId)
+      for (const k of [`group:${projectId}`, ...botIds.map((id) => `bot:${id}`)]) draftSync.forget(k)
       set((s) => {
         let drafts = withoutKey(s.drafts, `group:${projectId}`)
         let draftCursors = withoutKey(s.draftCursors, `group:${projectId}`)
         for (const id of botIds) drafts = withoutKey(drafts, `bot:${id}`)
         for (const id of botIds) draftCursors = withoutKey(draftCursors, `bot:${id}`)
-        writeDrafts(s.drafts, drafts)
         writeDraftCursors(s.draftCursors, draftCursors)
         return {
           drafts,
@@ -2166,6 +2147,7 @@ export const useStore = create<StoreState>((set, get) => {
   dismissToolHint: () => set({ toolHintDismissed: true }),
 
   setDraft: (key, text) => {
+    const before = get().drafts[key] ?? ''
     set((s) => {
       if ((s.drafts[key] ?? '') === text) {
         if (text || !s.draftCursors[key]) return {}
@@ -2175,10 +2157,11 @@ export const useStore = create<StoreState>((set, get) => {
       }
       const drafts = text ? { ...s.drafts, [key]: text } : withoutKey(s.drafts, key)
       const draftCursors = text ? s.draftCursors : withoutKey(s.draftCursors, key)
-      writeDrafts(s.drafts, drafts)
       if (!text) writeDraftCursors(s.draftCursors, draftCursors)
       return { drafts, draftCursors }
     })
+    // 所有本機改動（打字、倒回、退回排隊）都從這裡進來：交給 `draftSync` 送到 daemon，別的瀏覽器才看得到。
+    if (before !== text) draftSync.localChange(key, text)
   },
 
   setDraftCursor: (key, start, end = start) => {
@@ -2720,6 +2703,8 @@ function connectSocket(set: SetFn, get: GetFn) {
         // 額度也整份重抓（取代，不合併）：WS 只會推「某個 key 更新了」，daemon 刪掉的 key 永遠不會
         // 通知。2026-09-14 daemon 重啟清掉 `codex:cc1` 之後，開著的分頁標題列仍一直顯示它。
         void get().loadQuota()
+        // 草稿也整份重拉：斷線期間別的瀏覽器改的、被刪的都在這裡補上，本機還沒送出的接著送。
+        void draftSync.load().catch(() => {})
         return
       }
       set({ socket })
@@ -2825,7 +2810,7 @@ export function seqAfterFrame(prev: { lastSeq: number; lastDurableSeq: number },
   }
 }
 
-function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string; data?: unknown }) {
+export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string; data?: unknown }) {
   // daemon 訂閱與讀重播環之間送出的耐久事件兩邊都有（issue #521）。daemon 端已經擋掉，這是第二道：
   // handler 不見得冪等（`bots_restart_progress` 是純累加），同一個 seq 套兩次就是多算一次。
   const gate = gateFrame(seenSeq, frame.type, frame.seq)
@@ -2855,6 +2840,15 @@ function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type: string
         if (raw !== undefined) patch.hosts = mergeHosts(s.hosts, hostArray(raw))
         return patch
       })
+      return
+    }
+    case 'draft_updated': {
+      // `{key, text, rev, client_id, updated_at}`（API.md）：別的瀏覽器的草稿；自己送的回音在 `draftSync` 裡只記 rev。
+      if (!isRec(data)) return
+      const key = str(pick(data, 'key'))
+      const rev = num(pick(data, 'rev'), 0)
+      if (!key || rev <= 0) return
+      draftSync.remote({ key, text: str(pick(data, 'text')), rev, client_id: str(pick(data, 'client_id')) })
       return
     }
     case 'identity_prefs_changed': {
@@ -3685,11 +3679,28 @@ export function groupComposerState(state: StoreState, projectId: string | null):
   return { disabled: false, reason: '', sendable }
 }
 
-// 多分頁：別的分頁送出（清掉草稿）時，這個分頁的輸入框也要跟著清，不然同一句會被再送一次（#369）。
-if (typeof window !== 'undefined' && typeof window.addEventListener === 'function' && !IN_MOBILE_PREVIEW) {
-  window.addEventListener('storage', (ev: StorageEvent) => {
-    if (ev.key !== DRAFTS_KEY) return
-    const gone = draftsClearedElsewhere(useStore.getState().drafts, ev.oldValue, ev.newValue)
-    for (const k of gone) useStore.setState((s) => ({ drafts: withoutKey(s.drafts, k), draftCursors: withoutKey(s.draftCursors, k) }))
-  })
+// 草稿以 daemon 為準（`draftSync.ts`）：這裡把同步引擎接上 store 與 DOM。
+function composerFocused(key: string): boolean {
+  if (typeof document === 'undefined' || !document.hasFocus()) return false
+  const el = document.activeElement
+  return el instanceof HTMLElement && el.dataset.draftKey === key
+}
+
+export const draftSync = new DraftSync({
+  clientId: newClientId(),
+  put: (key, text, clientId) => api.putDraft(key, text, clientId),
+  fetchAll: () => api.fetchDrafts(),
+  read: (key) => useStore.getState().drafts[key] ?? '',
+  write: (key, text) =>
+    useStore.setState((s) => ({
+      drafts: text ? { ...s.drafts, [key]: text } : withoutKey(s.drafts, key),
+      draftCursors: text ? s.draftCursors : withoutKey(s.draftCursors, key),
+    })),
+  focused: composerFocused,
+  keys: () => Object.keys(useStore.getState().drafts),
+})
+
+function newClientId(): string {
+  const c = typeof crypto !== 'undefined' ? crypto : undefined
+  return c && typeof c.randomUUID === 'function' ? c.randomUUID() : `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }

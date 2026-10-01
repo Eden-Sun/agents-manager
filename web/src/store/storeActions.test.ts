@@ -1013,14 +1013,53 @@ test('removeBot／addBot／addProject 連點：只送一次，不跳第二個失
   assert.equal(noticeTexts().filter((t) => /not_found|already|找不到/.test(t)).length, 0)
 })
 
-test('多分頁：這個分頁存草稿不能洗掉別的分頁剛存的草稿', () => {
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+test('草稿以 daemon 為準：打字 debounce 後 PUT（帶 client_id），不再寫 localStorage', async () => {
   seed()
-  // 別的分頁在這個分頁載入之後才寫進 localStorage 的 bot9 草稿。
-  localStorage.setItem('am.drafts', JSON.stringify({ 'bot:b9': '另一個分頁打的' }))
-  useStore.getState().setDraft('bot:b1', '這個分頁打的')
-  assert.deepEqual(JSON.parse(localStorage.getItem('am.drafts')!), { 'bot:b9': '另一個分頁打的', 'bot:b1': '這個分頁打的' })
-  useStore.getState().setDraft('bot:b1', '')
-  assert.deepEqual(JSON.parse(localStorage.getItem('am.drafts')!), { 'bot:b9': '另一個分頁打的' }, '清掉自己的鍵，別人的留著')
+  const rev = { n: 0 }
+  routeDaemon((req) => (req.method === 'PUT' && req.path.includes('/drafts/') ? json({ key: 'bot:b1', rev: (rev.n += 1) }, 200) : json({}, 200)))
+  const st = useStore.getState()
+  st.setDraft('bot:b1', '幫')
+  st.setDraft('bot:b1', '幫我跑')
+  st.setDraft('bot:b1', '幫我跑測試')
+  assert.equal(requests.filter((r) => r.path.includes('/drafts/')).length, 0, 'debounce 內不送')
+  await wait(550)
+  const puts = requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/'))
+  assert.equal(puts.length, 1)
+  assert.match(puts[0].path, /\/api\/drafts\/bot%3Ab1$/)
+  assert.equal((puts[0].body as { text: string }).text, '幫我跑測試')
+  assert.equal(typeof (puts[0].body as { client_id: string }).client_id, 'string')
+  assert.equal(localStorage.getItem('am.drafts'), null)
+  // 送出清空：不等 debounce。
+  st.setDraft('bot:b1', '')
+  await wait(60)
+  const last = requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/')).at(-1)
+  assert.equal((last?.body as { text: string }).text, '')
+})
+
+test('別的瀏覽器的 draft_updated：套用到輸入框；自己的回音與舊 rev 不套', async () => {
+  seed()
+  const { handleFrame, draftSync } = await import('./store.ts')
+  let seq = 5000
+  const frame = (data: Record<string, unknown>) => handleFrame(useStore.setState, useStore.getState, { seq: (seq += 1), type: 'draft_updated', data })
+  frame({ key: 'bot:b1', text: '手機上打的', rev: 10, client_id: 'phone', updated_at: 'x' })
+  assert.equal(useStore.getState().drafts['bot:b1'], '手機上打的')
+  frame({ key: 'bot:b1', text: '舊事件', rev: 9, client_id: 'phone', updated_at: 'x' })
+  assert.equal(useStore.getState().drafts['bot:b1'], '手機上打的')
+  frame({ key: 'bot:b1', text: '自己的回音', rev: 11, client_id: draftSync.clientId, updated_at: 'x' })
+  assert.equal(useStore.getState().drafts['bot:b1'], '手機上打的')
+  frame({ key: 'bot:b1', text: '', rev: 12, client_id: 'phone', updated_at: 'x' })
+  assert.equal(useStore.getState().drafts['bot:b1'], undefined, '對方送出清空，這裡也清')
+  assert.equal(requests.filter((r) => r.method === 'PUT').length, 0, '套用別人的草稿不會又 PUT 回去')
+})
+
+test('開頁／重連載入：GET /api/drafts 的草稿放進輸入框', async () => {
+  seed()
+  const { draftSync } = await import('./store.ts')
+  routeDaemon((req) => (req.method === 'GET' && req.path.endsWith('/api/drafts') ? json({ drafts: [{ key: 'group:p1', text: '桌機打的', rev: 3, updated_at: 'x' }] }, 200) : json({}, 200)))
+  await draftSync.load()
+  assert.equal(useStore.getState().drafts['group:p1'], '桌機打的')
 })
 
 test('送出時連線斷了（回應遺失）：再送同一句要沿用同一個 client_request_id（#367）', async () => {

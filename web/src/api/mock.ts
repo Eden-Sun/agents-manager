@@ -10,6 +10,7 @@ import type { BotKind } from './types'
 import { abortError } from './transport'
 import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
 import { MockReleaseTriage } from './mockReleaseTriage'
+import { MockServerDrafts } from './mockServerDrafts'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 import { MockComposerDrafts } from './mockComposerDraft'
 
@@ -575,6 +576,7 @@ export class MockTransport implements Transport {
 
   /** 更新框的 changelog／分診／AGM 解析（`mockReleaseTriage.ts`）。 */
   readonly releaseTriage = new MockReleaseTriage()
+  readonly serverDrafts = new MockServerDrafts()
 
   /** bot 輸入框卡著的草稿（`__amMock.composerDraft`，`mockComposerDraft.ts`）。 */
   readonly composerDrafts = new MockComposerDrafts()
@@ -856,6 +858,7 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/state') return this.state()
     if (method === 'GET' && rawPath === '/upstream-updates') return { items: this.upstreamItems }
     { const r = this.releaseTriage.handle(method, rawPath, q, b); if (r !== undefined) return r }
+    { const r = this.serverDrafts.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
     { const m = rawPath.match(/^\/bots\/([^/]+)\/read$/); if (method === 'POST' && m) return { bot_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
@@ -2068,6 +2071,10 @@ export class MockTransport implements Transport {
     this.missions.push(killed)
     this.missionEvent(killed.id, 'instruction', killed.text)
     this.missionEvent(killed.id, 'cancelled', '使用者取消', null, 'daemon')
+  }
+
+  remoteDraft(key: string, text: string) {
+    this.serverDrafts.remote(key, text, (t, d) => this.emit(t, d))
   }
 
   private emit(type: string, data: unknown) {
@@ -3913,6 +3920,8 @@ function installDevHelpers(mock: MockTransport) {
     composerDraft: (botIdOrName: string, text: string | null) => mock.composerDrafts.set(mock.botIdByName(botIdOrName) ?? botIdOrName, text),
     // 更新框：清掉某個 kind 的分診帳本（演「尚未分析」）、給 bot 掛更新通知
     triageOff: (kind: string) => mock.releaseTriage.triageOff(kind),
+    // 假裝別的瀏覽器改了輸入框草稿：`__amMock.remoteDraft('bot:<id>', '手機上打的')`（空字串＝對方送出清空）
+    remoteDraft: (key: string, text: string) => mock.remoteDraft(key, text),
     updateNotice: (botIdOrName: string, notice: string | null) => mock.setUpdateNotice(mock.botIdByName(botIdOrName) ?? botIdOrName, notice),
     // 上游有新版、磁碟上還沒有的通知（issue #707）：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`
     upstreamUpdate: (kind: string, latest: string, disk: string) => mock.emitUpstreamUpdate(kind, latest, disk),

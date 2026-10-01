@@ -70,6 +70,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/projects", post(create_project))
         .route("/order", post(set_order))
         .route("/intents", get(list_intents))
+        // 對話輸入框的草稿（各瀏覽器共用，見 `drafts.rs`）。
+        .route("/drafts", get(crate::drafts::get_http))
+        .route("/drafts/{key}", axum::routing::put(crate::drafts::put_http))
         .route("/projects/{id}", patch(patch_project).delete(delete_project_http))
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
@@ -1162,6 +1165,9 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_project_after_commit", &id).await;
+    // 輸入框草稿跟著專案走：群組草稿與每顆 bot 的草稿都清掉，其他瀏覽器也會收到清除事件。
+    let draft_keys: Vec<String> = std::iter::once(format!("group:{id}")).chain(ids.iter().map(|b| format!("bot:{b}"))).collect();
+    crate::drafts::clear_keys(&app, &draft_keys).await;
     // 專案沒了，它底下還開著的任務也跟著收（issue #498）：任務沒有軟刪，而 `mission::store::open_unpaused`
     // （`workflow::wake_stalled_at` 掃的那份）沒有存活性條件——不收的話它們永遠停在 open，十分鐘後還會推一則
     // `mission_next` 要 AGM 去推一個專案與 bot 都不存在的任務。順帶把它們底下還開著的交辦也收掉。
@@ -1960,6 +1966,9 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_bot_after_decided", &id).await;
+    // 輸入框草稿跟著 bot 走（含一併刪掉的 child）。
+    let draft_keys: Vec<String> = std::iter::once(&id).chain(children.iter().map(|c| &c.id)).map(|b| format!("bot:{b}")).collect();
+    crate::drafts::clear_keys(&app, &draft_keys).await;
     let mut child_retry = false;
     // 目錄只在「確定沒有 active run」時才 purge（#210）；不確定的留著，列在回應的 `kept_dirs`，下次開機的
     // `purge_deleted_bot_dirs` 在 run 確定結束之後再收。
@@ -5226,6 +5235,38 @@ mod delete_bot_tests {
         delete_bot(State(app.clone()), Path(id.clone())).await.unwrap();
         assert_eq!(*outcome.lock().unwrap(), Some(false), "delete 還持著鎖的時候，restore 不能完成");
         restore_bot(State(app.clone()), Path(id.clone())).await.unwrap();
+    }
+
+    /// 輸入框草稿跟著 bot／專案走：刪掉之後 `GET /api/drafts` 不再列它，其他瀏覽器收到清除事件。
+    #[tokio::test]
+    async fn deleting_a_bot_or_project_clears_its_composer_drafts() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let b1 = a_bot(&e, "alfa", "user").await;
+        let b2 = a_bot(&e, "bravo", "user").await;
+        in_config(&e, &[(&b1, "alfa"), (&b2, "bravo")]).await;
+        let (k1, k2, kg) = (format!("bot:{b1}"), format!("bot:{b2}"), format!("group:{}", e.project_id));
+        for k in [&k1, &k2, &kg] {
+            crate::drafts::put(&app.db, k, "草稿").await.unwrap();
+        }
+        let mut rx = app.subscribe();
+        delete_bot(State(app.clone()), Path(b1.clone())).await.unwrap();
+        let keys: Vec<String> = crate::drafts::list(&app.db).await.unwrap().into_iter().map(|d| d.key).collect();
+        assert_eq!(keys, {
+            let mut v = vec![k2.clone(), kg.clone()];
+            v.sort();
+            v
+        });
+        let mut cleared = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == "draft_updated" {
+                assert_eq!(ev.data["text"], "");
+                cleared.push(ev.data["key"].as_str().unwrap().to_string());
+            }
+        }
+        assert_eq!(cleared, [k1.clone()]);
+        delete_project(State(app.clone()), Path(e.project_id.clone())).await.unwrap();
+        assert!(crate::drafts::list(&app.db).await.unwrap().is_empty(), "專案刪除帶走群組草稿與剩下那顆 bot 的草稿");
     }
 
     /// #313：刪專案要一併清掉 user bot 的 runtime 目錄；清不掉（遠端主機不明）不能當成清掉了。
