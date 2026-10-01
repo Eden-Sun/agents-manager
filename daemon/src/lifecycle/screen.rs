@@ -388,7 +388,7 @@ fn drop_codex_completion_tail(out: &mut Vec<String>) {
 /// grok 1.0.13 TUI chrome (appendix F): `◆` rows, "Worked for" footer, telemetry banner, shortcut
 /// footer, `<cwd>   15K / 500K` header, `[stable]`.
 fn is_grok_noise(s: &str) -> bool {
-    if s.starts_with('◆') || s.starts_with("Worked for ") || s.contains("[hooks:") {
+    if s.starts_with('◆') || is_grok_worked_footer(s) || s.contains("[hooks:") {
         return true;
     }
     if s.starts_with("Help improve Grok")
@@ -396,7 +396,7 @@ fn is_grok_noise(s: &str) -> bool {
         || s == "settings."
         || s.starts_with("Read Terms and Privacy")
         || s == "[stable]"
-        || s.starts_with("Grok Build ")
+        || is_grok_banner(s)
     {
         return true;
     }
@@ -411,6 +411,18 @@ fn is_grok_noise(s: &str) -> bool {
         }
     }
     false
+}
+
+/// `Worked for 3.6s`／`Worked for 1m 2s` 頁尾：後面第一個詞是帶單位的數字。回覆裡的 `Worked for three days on…` 是內容。
+fn is_grok_worked_footer(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("Worked for ") else { return false };
+    let tok = rest.split_whitespace().next().unwrap_or("");
+    tok.chars().next().is_some_and(|c| c.is_ascii_digit()) && tok.ends_with(['s', 'm', 'h'])
+}
+
+/// `Grok Build  1.0.13` 橫幅：後面接版本號。回覆裡以 `Grok Build 是…` 起頭的句子是內容。
+fn is_grok_banner(s: &str) -> bool {
+    s.strip_prefix("Grok Build ").is_some_and(|rest| rest.trim_start().trim_start_matches('v').chars().next().is_some_and(|c| c.is_ascii_digit()))
 }
 
 /// Strip grok's right-edge scrollbar `█` and right-aligned `h:mm AM|PM` clock.
@@ -1067,7 +1079,6 @@ fn opens_tool_output(l: &str) -> bool {
     matches!(l, "└" | "│") || l.starts_with("└ ") && !l.starts_with("└ ─") || l.starts_with("│ ") && !l.starts_with("│ ├") && !l.starts_with("│ └")
 }
 
-
 /// 工具 cell 的最後一行（不含）：續行都是縮排的（`  └ …`、`    … +N lines …`、heredoc 的 `  │ …`），
 /// 中間可能夾**輸出自己的空行**（`sed` 印出來的空白行），下一個 cell 從第一欄的 `•`／`■` 重新開始。
 /// 尾端的空行不吃掉，留給 [`clean_screen`] 當段落分隔。
@@ -1275,6 +1286,17 @@ gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used 
         // 真的工具列照舊遮掉：回覆是它後面那一則。
         let with_tool = "› 跑\n\n• Ran ls\n  └ a.txt\n\n• 只有一個檔案。\n";
         assert_eq!(extract_reply("codex", with_tool).as_deref(), Some("只有一個檔案。"));
+    }
+
+    /// grok 的 chrome 只認真的格式：`Worked for 3.6s` 頁尾、`Grok Build  1.0.13` 橫幅。回覆裡剛好以這兩個詞起頭的句子是內容。
+    #[test]
+    fn grok_reply_lines_that_start_like_its_chrome_are_kept() {
+        let screen = "  /tmp/ws                                       15K / 500K\n     ❯ 介紹\n\n     ◆ Thought for 0.1s\n\n     Grok Build 是 xAI 的終端 agent。\n     Worked for three days on this feature.\n\n     Worked for 3.6s                                        stop  [hooks: 2]\n  ╭──────╮\n  │ ❯    │\n  ╰──────╯\n";
+        let cleaned = clean_screen("grok", screen).unwrap();
+        assert!(cleaned.contains("Grok Build 是 xAI 的終端 agent。"), "{cleaned}");
+        assert!(cleaned.contains("Worked for three days on this feature."), "{cleaned}");
+        assert!(!cleaned.contains("Worked for 3.6s"), "真的頁尾要剝：{cleaned}");
+        assert!(is_grok_noise("Grok Build  1.0.13"), "真的橫幅照舊是 chrome");
     }
 
     #[test]
