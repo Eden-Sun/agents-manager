@@ -93,6 +93,17 @@ equals "status.json 是合法 JSON" "$(python3 -c 'import json,sys; print(json.l
 check "description 保留了反斜線之後的字" "dir" "$CI/status.json"
 teardown
 
+# 3c. daemon 測試紅：description 要點出是哪一條測試，不只是「cargo test 紅了」（高負載偶發紅時才知道是誰）。
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+printf '==> daemon: cargo test -p agents-managerd\ntest ok::fine ... ok\ntest cli_update::tests::flaky_one ... FAILED\ntest other::tests::flaky_two ... FAILED\n' > "$FIX/title.daemon"
+echo 101 > "$FIX/rc.daemon"
+run >/dev/null
+check "description 點名第一條紅的測試" "cli_update::tests::flaky_one" "$FIX/gh.log"
+check "description 說明還有幾條" "2 條測試紅" "$FIX/gh.log"
+check_no "綠的測試不進 description" "ok::fine" "$FIX/gh.log"
+teardown
+
 # 4. 鎖被占著：直接退出、不碰 git／gh。
 setup
 mkdir -p "$CI"
