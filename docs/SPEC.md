@@ -3315,6 +3315,8 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 ### 18.2 正式 daemon 的定義與例行更新
 
 - **正式 daemon** = `target/release/agents-managerd serve`，`127.0.0.1:7788`，`web/dist` 內嵌。前端改動要 `bun run build` 再 `cargo build --release -p agents-managerd` 才進 7788。
+- **驗證分工**（issue #747）：repo 內的 project skill `.claude/skills/verify/SKILL.md`（Claude Code 2.1.286+ 在 commit 前會自動叫起 `verify`）只指向 `scripts/check.sh changed`，是 L0/L1 快速閘：判斷全在 check.sh，skill 不複製 CI matrix；紅燈不得宣稱已驗證。
+  Ubuntu Full CI（`ubuntu-ci`）仍是非同步的整樹那道，不在 commit 的 critical path 上。skill 隨 repo 進每個 worktree，不寫使用者全域 `~/.claude`；契約與四條路徑（web／daemon／ops／ob）的 fixture 煙測在 `scripts/verify_skill_test.sh`（`check.sh ops` 會跑）。
 - **例行自動部署**（使用者 2026-09-29 簡化）：建置已在推 main 前跑過（`scripts/check.sh changed`）、`ubuntu-ci` 也在背景跑整樹，所以 AGM **不再驗一次、不開核准單、不派建置 child、不經 LLM**。
   systemd timer／launchd `com.agm.daemon-update` 每 5 分鐘跑 `daemon-update-kick.sh`，**腳本自己直接做**：
   1. `git fetch`（專用 checkout，見 3）→ `git diff --quiet <built> origin/main -- <build-inputs>` 沒有會進 binary 的差異就結束（不問 GitHub）。
