@@ -40,6 +40,21 @@ cleanup_temporary_web_dist_stub() {
     fi
 }
 
+# 失敗的當下磁碟幾乎滿了：多半是 `No space left on device`（同機各 worktree 的 target/ 吃掉的），不是程式碼的問題；
+# 錯誤訊息散在 cargo／bun／sqlite 各自的輸出裡不好認（c3914e46 的 ops 假紅），所以在最後明講。
+DISK_LOW_KB=2097152
+on_exit() {
+    local rc=$? avail_kb
+    cleanup_temporary_web_dist_stub
+    if [ "$rc" != 0 ]; then
+        avail_kb="$(df -Pk "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}')"
+        if [ -n "${avail_kb:-}" ] && [ "$avail_kb" -lt "$DISK_LOW_KB" ] 2>/dev/null; then
+            printf '\n!! 失敗時磁碟只剩 %s MB（No space left on device）：這次紅很可能是磁碟滿了，不是程式碼；清出空間（例如不用的 worktree 的 target/）後重跑。\n' "$((avail_kb / 1024))" >&2
+        fi
+    fi
+}
+trap on_exit EXIT
+
 check_web() {
     step "web: bun install --frozen-lockfile"
     (cd web && bun install --frozen-lockfile)
@@ -242,7 +257,6 @@ check_changed() {
             mkdir -p web/dist
             printf '<!doctype html>\n' > web/dist/index.html
             TEMPORARY_WEB_DIST_STUB=1
-            trap cleanup_temporary_web_dist_stub EXIT
         fi
         step "daemon: cargo check --all-targets"
         env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
