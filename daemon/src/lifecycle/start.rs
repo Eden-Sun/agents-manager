@@ -1012,15 +1012,8 @@ async fn ensure_kind_installed(app: &Arc<App>, host: &str, kind: &str) -> Result
     let found: Option<String> = if let Some(run) = app.kind_probe.get() {
         run(host, kind, &probe)
     } else if host == LOCAL_HOST {
-        let out = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio::process::Command::new("/bin/sh").arg("-c").arg(&probe).output(),
-        )
-        .await;
-        match out {
-            Ok(Ok(o)) => Some(String::from_utf8_lossy(&o.stdout).trim().to_string()),
-            _ => None, // could not probe → do not block the start
-        }
+        // could not probe → do not block the start
+        crate::hosts::sh_local_stdout(&probe, Duration::from_secs(10), "kind preflight").await.ok().map(|o| o.trim().to_string())
     } else {
         match app.hosts.get(host).await {
             Some(conn) => match conn.ssh_exec_path(&probe).await {
