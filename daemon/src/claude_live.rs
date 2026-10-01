@@ -15,6 +15,10 @@
 //! 只認 `⎿` 開頭的行（slash 指令的輸出），對話內容裡引用到的同一句不算。一般 bot 可能是 `--resume` 接回來的，
 //! 畫面上那行可能是上一個 session 的：**同一個 run 第一次看到的只當基準**，之後變了才採用。子 agent 不會被 AG Man
 //! 接回，看到就採用。
+//!
+//! 例外：AG Man 自己用全新對話起的 run（argv 沒有 `--resume`／`--continue`）畫面上不可能有舊確認，起 run 時就記下空基準
+//! （[`start_fresh`]）：第一輪巡邏前使用者打的 `/model` 就是真切換，不能被當基準丟掉（#742）。接回／分支／收編的 run
+//! 沒有這個保證，維持「第一次看到只當基準」。
 
 use crate::db;
 use crate::state::App;
@@ -81,6 +85,16 @@ fn model_id(display: &str) -> Option<String> {
 fn baselines() -> &'static Mutex<HashMap<String, Switch>> {
     static B: OnceLock<Mutex<HashMap<String, Switch>>> = OnceLock::new();
     B.get_or_init(Default::default)
+}
+
+/// AG Man 剛用全新對話起了這個 run：畫面上還沒有任何確認行，基準就是「什麼都沒有」，之後第一個看到的切換直接採用。
+pub fn start_fresh(run_id: &str) {
+    baselines().lock().unwrap_or_else(|e| e.into_inner()).insert(run_id.to_string(), Switch::default());
+}
+
+#[cfg(test)]
+pub(crate) fn is_fresh(run_id: &str) -> bool {
+    baselines().lock().unwrap_or_else(|e| e.into_inner()).get(run_id) == Some(&Switch::default())
 }
 
 /// 這一輪沒看到的 run（結束了）不留帳。
@@ -213,6 +227,21 @@ mod tests {
         assert_eq!(r.runtime_model.as_deref(), Some("claude-haiku-4-5"), "之後變了才採用");
         let b = db::bot(&app.db, &user.id).await.unwrap().unwrap();
         assert_ne!(b.model.as_deref(), Some("claude-haiku-4-5"), "一般 bot 的設定不動（重啟會回到設定值，畫成 drift）");
+    }
+
+    #[tokio::test]
+    async fn a_switch_typed_before_the_first_sweep_of_a_fresh_run_is_adopted() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let user = crate::testing::claude_bot(&app, &env.project_id, "fresh").await;
+        let run_id = crate::testing::fake_run(&app, &user.id).await;
+        start_fresh(&run_id);
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        observe(&app, &run, SCREEN).await;
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "model 與 effort 都在第一輪就採用");
+        let b = db::bot(&app.db, &user.id).await.unwrap().unwrap();
+        assert_eq!(b.model, None, "一般 bot 的設定不動");
     }
 
     #[tokio::test]

@@ -878,6 +878,11 @@ async fn start_inner(
                 .map_err(up),
         )
         .await?;
+    // #742：全新對話起的 claude run 畫面上不會有舊的 `/model`、`/effort` 確認，第一輪巡邏前使用者真的切了也要採用。
+    // 接回、分支（argv 帶 `--resume`／`--continue`）會把舊對話印回來，那種維持「第一次看到只當基準」。
+    if bot.kind == "claude" && !args.iter().any(|a| matches!(a.as_str(), "--resume" | "-r" | "--continue" | "-c")) {
+        crate::claude_live::start_fresh(run_id);
+    }
     // A fresh pane answers `agent_pane_busy: … is not an available shell` until its shell settles
     // (2026-09-06: one of six back-to-back starts lost, 300 ms in); hence the retry.
     // SPEC §6.5b: the login shell's profile rebuilds PATH after the pane env (macOS 2026-09-07:
@@ -1657,6 +1662,27 @@ mod resume_args_tests {
         .await
         .unwrap();
         assert!(note.contains("接不回"), "{note}");
+    }
+
+    /// #742：全新對話起的 claude run 記空基準（第一輪巡邏前的切換要採用）；`--resume` 接回的不記。
+    #[tokio::test]
+    async fn only_a_fresh_conversation_gets_an_empty_live_switch_baseline() {
+        let e = env().await;
+        let pm = claude_bot(&e.app, &e.project_id, "pm").await;
+        let fresh = start_bot_with(&e.app, &pm.id, StartOpts::default()).await.unwrap();
+        assert!(crate::claude_live::is_fresh(&fresh), "全新對話：空基準");
+
+        let transcript = e.dir.join("pm-742.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        sqlx::query("UPDATE runs SET native_session_id='sid-742', transcript_path=? WHERE id=?")
+            .bind(transcript.to_str().unwrap())
+            .bind(&fresh)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let resumed = restart_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+        assert!(started_args(&e).pop().unwrap().windows(2).any(|w| w == ["--resume", "sid-742"]));
+        assert!(!crate::claude_live::is_fresh(&resumed), "接回的 run 畫面上可能有上個 session 的確認，第一次看到只當基準");
     }
 
     /// `?resume=native`（resume_required）：接不回就**整個不啟動**，回 `resumed:false`＋原因，不默默開新對話；
