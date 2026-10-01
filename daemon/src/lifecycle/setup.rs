@@ -111,6 +111,10 @@ esac
 # carry it as `agm_user_text`; the daemon replaces the fallback reply only when it matches the turn's
 # prompt. Best effort: no python3, an unreadable transcript, or a non-Stop event leaves the payload
 # untouched (no evidence, so the daemon keeps the fallback reply as before).
+# issue #754: also carry `agm_origin_kind`, who started the turn (`origin.kind` of the newest entry that
+# has one: `human`, `task-notification`, ...). A turn claude starts by itself (background job done) has
+# no new prompt, so its last user message is the previous one; the daemon stores the carried text only
+# when the origin is `human`.
 if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
   case "$PAYLOAD" in
     '{'*'"hook_event_name":"Stop"'*|'{'*'"hook_event_name": "Stop"'*)
@@ -125,12 +129,22 @@ try:
         n=os.fstat(f.fileno()).st_size
         f.seek(max(0,n-524288))
         data=f.read().decode("utf-8","replace")
+    users=[]
     for line in reversed(data.splitlines()):
         try:
             v=json.loads(line)
         except Exception:
             continue
-        if not isinstance(v,dict) or v.get("type")!="user" or v.get("isMeta") is True:
+        if isinstance(v,dict) and v.get("type")=="user":
+            users.append(v)
+    kind=None
+    for v in users:
+        o=v.get("origin")
+        if isinstance(o,dict) and isinstance(o.get("kind"),str):
+            kind=o["kind"]
+            break
+    for v in users:
+        if v.get("isMeta") is True:
             continue
         c=(v.get("message") or {}).get("content")
         if isinstance(c,list):
@@ -142,6 +156,8 @@ try:
         if len(c)<=65536:
             c.encode("utf-8")  # a lone surrogate would be written back out as an escape serde_json cannot read
             p["agm_user_text"]=c
+            if kind is not None:
+                p["agm_origin_kind"]=kind
             sys.stdout.buffer.write(json.dumps(p,separators=(",",":")).encode("ascii"))
         break
 except Exception:
@@ -1601,6 +1617,50 @@ mod remote_hook_tests {
         let v: serde_json::Value = serde_json::from_str(last).unwrap_or_else(|e| panic!("spool 行不是 serde_json 讀得了的 JSON（{e}）：{last}"));
         assert_eq!(v["payload"]["session_id"], "s-1");
         assert_eq!(v["payload"]["last_assistant_message"], "回覆");
+    }
+
+    /// issue #754：背景工作完成喚醒的那一輪沒有新 prompt，transcript 最後一則使用者訊息是上一句。
+    /// `hook.sh` 另外帶 `agm_origin_kind`（最新一筆有 `origin.kind` 的使用者條目），daemon 才分得出來；工具結果沒有 origin，不算起點。
+    #[test]
+    fn a_remote_stop_carries_who_started_the_turn() {
+        let line = |v: serde_json::Value| format!("{v}\n");
+        let stop = |path: &std::path::Path| {
+            serde_json::json!({"hook_event_name": "Stop", "session_id": "s-1", "transcript_path": path, "stop_hook_active": false}).to_string()
+        };
+        let spooled = |sb: &Sandbox| -> serde_json::Value {
+            let events = sb.read("hook-spool.jsonl");
+            let last = events.lines().rev().find(|l| !l.trim().is_empty()).expect("spool 有一行").to_string();
+            serde_json::from_str::<serde_json::Value>(&last).expect("spool 行是合法 JSON")["payload"].clone()
+        };
+        let human = |t: &str| line(serde_json::json!({"type": "user", "origin": {"kind": "human"}, "message": {"role": "user", "content": t}}));
+        let tool_result = line(serde_json::json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}}));
+        let wake = line(serde_json::json!({"type": "user", "origin": {"kind": "task-notification"}, "message": {"role": "user", "content": "<task-notification>done</task-notification>"}}));
+        let reply = line(serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "好"}]}}));
+
+        // 使用者打的一句，中間有工具結果：起點是 human。
+        let sb = Sandbox::new(false);
+        let t = sb.dir.join("human.jsonl");
+        std::fs::write(&t, [human("現在部 demo"), reply.clone(), tool_result.clone()].concat()).unwrap();
+        sb.run(&["claude", &sb.bot, "-"], &stop(&t));
+        let p = spooled(&sb);
+        assert_eq!((p["agm_user_text"].as_str(), p["agm_origin_kind"].as_str()), (Some("現在部 demo"), Some("human")), "{p}");
+
+        // 背景工作完成喚醒的一輪：起點是 task-notification（文字仍是最後一則使用者條目，daemon 看起點決定不存）。
+        let sb = Sandbox::new(false);
+        let t = sb.dir.join("wake.jsonl");
+        std::fs::write(&t, [human("現在部 demo"), reply, wake, tool_result].concat()).unwrap();
+        sb.run(&["claude", &sb.bot, "-"], &stop(&t));
+        let p = spooled(&sb);
+        assert_eq!(p["agm_origin_kind"].as_str(), Some("task-notification"), "{p}");
+
+        // 舊版 CLI 沒有 origin：只帶文字，不帶起點（沒有證據）。
+        let sb = Sandbox::new(false);
+        let t = sb.dir.join("old.jsonl");
+        std::fs::write(&t, line(serde_json::json!({"type": "user", "message": {"role": "user", "content": "舊版"}}))).unwrap();
+        sb.run(&["claude", &sb.bot, "-"], &stop(&t));
+        let p = spooled(&sb);
+        assert_eq!(p["agm_user_text"].as_str(), Some("舊版"), "{p}");
+        assert!(p.get("agm_origin_kind").is_none(), "{p}");
     }
 
     /// 真的執行產生出來的腳本：spool 要落在**這個實例**的根底下（sol 三輪）。正式實例的既有路徑不變。

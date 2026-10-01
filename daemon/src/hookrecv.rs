@@ -624,6 +624,71 @@ async fn hook_user_text(from_hook: Option<&str>, payload: &Value, transcript_pat
     tokio::task::spawn_blocking(move || last_transcript_user_text(&path)).await.ok().flatten()
 }
 
+/// 遠端 `hook.sh` 塞進 Stop payload 的另一個鍵：這一回合的起點（transcript 的 `origin.kind`，`human`／`task-notification`…）。
+const CARRIED_ORIGIN_KIND: &str = "agm_origin_kind";
+
+/// 這一回合**確定是人打的**時，那一句使用者訊息原文；起點不是 `human`、或讀不到起點（舊 CLI、讀不到 transcript、
+/// 舊版 hook.sh）＝ `None`（issue #754）。
+///
+/// 背景工作完成喚醒 claude 的那一輪沒有新 prompt、transcript 最後一則使用者訊息是上一句，所以不能只憑「讀得到最後一句」
+/// 就存：要起點是 `human`。遠端 transcript 在 agm-host 讀不到，起點跟文字一起由 `hook.sh` 從本機 transcript 帶來；
+/// 本機就直接讀檔。Stop 到的時候這一輪的起點一定已經寫進 transcript，不像回合剛開（`-> working` 邊）時可能還讀到上一輪的。
+async fn human_started_prompt(payload: &Value, transcript_path: Option<&str>) -> Option<String> {
+    if let Some(kind) = payload.get(CARRIED_ORIGIN_KIND).and_then(Value::as_str) {
+        return if kind == "human" { hook_user_text(None, payload, None).await } else { None };
+    }
+    let path = std::path::PathBuf::from(transcript_path?);
+    let kind = {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || lifecycle::starter_origin_kind_at(&path)).await.ok().flatten()
+    };
+    if kind.as_deref() != Some("human") {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || last_transcript_user_text(&path)).await.ok().flatten()
+}
+
+/// 外部回合沒有任何使用者訊息、而 Stop 證明起點是人打的：補記那一句。`begin_external_turn` 在回音跟上一句已答完的 prompt
+/// 一樣時不存（為了擋背景工作喚醒那一輪，見 [`repeats_answered_prompt`]）；使用者真的重送同一句時這裡補回來。
+/// 回合上已有使用者訊息就不動。
+async fn store_resent_prompt_tx(
+    app: &Arc<App>,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    conv: &str,
+    turn: &db::Turn,
+    run: Option<&db::Run>,
+    text: &str,
+) -> Result<Option<db::Message>> {
+    if turn.origin != "external" || text.trim().is_empty() {
+        return Ok(None);
+    }
+    let have: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user'")
+        .bind(&turn.id)
+        .fetch_one(&mut **tx)
+        .await?;
+    if have > 0 {
+        return Ok(None);
+    }
+    tracing::info!(turn = %turn.id, "external turn: the Stop proves a person typed this prompt again; storing it");
+    let from = relay_source(app, run, text).await;
+    Ok(Some(lifecycle::insert_message_relayed_tx(tx, conv, Some(&turn.id), "user", text, "hook", false, None, from.as_deref()).await?))
+}
+
+/// [`store_resent_prompt_tx`] 給「回合已被備援收掉、遲到的 Stop 才到」的路徑：自己開交易、補完就發事件。
+async fn store_resent_prompt(app: &Arc<App>, bot_id: &str, conv: &str, turn: &db::Turn, run: Option<&db::Run>, payload: &Value, transcript_path: Option<&str>) -> Result<()> {
+    if turn.origin != "external" {
+        return Ok(());
+    }
+    let Some(text) = human_started_prompt(payload, transcript_path).await else { return Ok(()) };
+    let mut tx = app.db.begin().await?;
+    let added = store_resent_prompt_tx(app, &mut tx, conv, turn, run, &text).await?;
+    tx.commit().await?;
+    if let Some(m) = added {
+        lifecycle::emit_message_added(app, bot_id, m).await;
+    }
+    Ok(())
+}
+
 /// transcript 最後一則使用者訊息。只讀尾巴：回合結束時它一定在最後幾百 KB 裡。
 fn last_transcript_user_text(path: &std::path::Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
@@ -1306,6 +1371,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         tx.commit().await?;
                         // 這筆就是 hook 要收的 in-flight 回合，只是 CAS 輸給備援：同一回合。
                         fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, true).await?;
+                        store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_path.as_deref()).await?;
                         return Ok(());
                     }
                     _ => {}
@@ -1329,6 +1395,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                             // 刮下來的回音可能被折行截斷；hook 的原文較可信，補完下半截。
                             upgrade_clipped_user_message(&mut tx, &t.id, u).await?;
                         }
+                    } else if let Some(text) = human_started_prompt(&body.payload, transcript_path.as_deref()).await {
+                        added.extend(store_resent_prompt_tx(app, &mut tx, &conv, &t, run.as_ref(), &text).await?);
                     }
                 }
                 if !body_text.is_empty() {
@@ -1361,6 +1429,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         // wits-ops-web：備援抓到一份工具輸出當回覆，真回覆晚 25 秒到卻被丟）。都不成立只能補空的，不蓋已有的。
                         let same = seen.is_some() || fired_within(app, &t, body.received_at.as_deref()).await?;
                         fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, same).await?;
+                        store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_path.as_deref()).await?;
                         return Ok(());
                     }
                 }
@@ -2411,7 +2480,7 @@ mod external_claim_tests {
         )
         .bind(&bot_id)
         .bind(project_id)
-        .bind(format!("hook-{}", &bot_id[..6]))
+        .bind(format!("hook-{}", &bot_id[bot_id.len() - 6..]))
         .bind(kind)
         .bind(db::now())
         .execute(&app.db)
@@ -3773,6 +3842,107 @@ mod external_claim_tests {
         let mut conn = env.app.db.acquire().await.unwrap();
         assert!(repeats_answered_prompt(&mut conn, &conv, &external, "ui 審查你自己做").await.unwrap(), "同一句、那一回合已收掉：是舊的");
         assert!(!repeats_answered_prompt(&mut conn, &conv, &external, "另一句新的話").await.unwrap(), "新的一句照存");
+    }
+
+    /// issue #754 的場景：使用者送過「現在部 demo」（已答完），之後 claude 又開了一輪沒有新 prompt 的外部回合
+    /// （`begin_external_turn` 因為回音跟上一句一樣沒存）。回傳 (bot, conv, 外部回合)。
+    async fn an_external_turn_after_an_answered_prompt(app: &Arc<App>, project_id: &str, fallback_closed: bool) -> (String, String, String) {
+        let (bot_id, conv, answered) = unknown_turn(app, project_id, "claude", "現在部 demo").await;
+        lifecycle::insert_message(app, &conv, Some(&answered), "user", "現在部 demo", "web", false, None).await.unwrap();
+        sqlx::query("UPDATE turns SET status='completed', delivery='ok', completed_at=? WHERE id=?")
+            .bind(db::now()).bind(&answered).execute(&app.db).await.unwrap();
+        let run_id: String = sqlx::query_scalar("SELECT run_id FROM turns WHERE id=?").bind(&answered).fetch_one(&app.db).await.unwrap();
+        let external = db::ulid();
+        let status = if fallback_closed { "completed_fallback" } else { "in_flight" };
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'external',?,'ok',?)",
+        )
+        .bind(&external).bind(&conv).bind(&run_id).bind(status).bind(db::now()).execute(&app.db).await.unwrap();
+        if fallback_closed {
+            sqlx::query("UPDATE turns SET completed_at=? WHERE id=?").bind(db::now()).bind(&external).execute(&app.db).await.unwrap();
+            sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'assistant','⏺ 畫面備援','terminal_fallback',?)")
+                .bind(db::ulid()).bind(&conv).bind(&external).bind(db::now()).execute(&app.db).await.unwrap();
+        }
+        (bot_id, conv, external)
+    }
+
+    fn claude_stop_for(bot_id: &str, extra: Value) -> HookBody {
+        let mut payload = json!({
+            "hook_event_name": "Stop",
+            "session_id": format!("s-{}", db::ulid()),
+            "prompt_id": db::ulid(),
+            "transcript_path": "/Users/m4p/.claude/projects/x/s.jsonl",
+            "last_assistant_message": "背景工作做完了",
+        });
+        for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+            payload[k] = v;
+        }
+        HookBody { bot_id: bot_id.to_string(), provider: "claude".into(), payload, received_at: None, truncated: false, run_id: None }
+    }
+
+    async fn user_texts_on(app: &Arc<App>, turn_id: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at")
+            .bind(turn_id).fetch_all(&app.db).await.unwrap()
+    }
+
+    /// issue #754：背景工作完成喚醒的外部回合不能掛上一句使用者訊息；但使用者真的在 pane 裡重送同一句時要照記。
+    /// 遠端 transcript 在 agm-host 讀不到，起點由遠端 hook.sh 從本機 transcript 讀出、跟 Stop 一起帶來（`agm_origin_kind`）：
+    /// `human` 才補記（`begin_external_turn` 開回合時為了擋喚醒那一輪而沒存的回音），其他起點或沒證據都不存。
+    #[tokio::test]
+    async fn a_resent_prompt_is_stored_but_a_background_wake_up_is_not() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        for (origin, expect_stored) in [(Some("human"), true), (Some("task-notification"), false), (None, false)] {
+            let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, false).await;
+            let mut extra = json!({"agm_user_text": "現在部 demo"});
+            if let Some(k) = origin {
+                extra["agm_origin_kind"] = json!(k);
+            }
+            process(&app, &claude_stop_for(&bot_id, extra)).await.unwrap();
+            let stored = user_texts_on(&app, &external).await;
+            assert_eq!(stored, if expect_stored { vec!["現在部 demo".to_string()] } else { vec![] }, "origin={origin:?}");
+            assert_eq!(turn_row(&app, &external).await.status, "completed", "origin={origin:?}");
+        }
+    }
+
+    /// 同一題，Stop 比終端備援晚到（#753 的競態）：備援已把外部回合收掉，使用者那一句一樣要補上。
+    #[tokio::test]
+    async fn a_late_stop_after_the_fallback_still_stores_a_resent_prompt() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        for (origin, expect_stored) in [("human", true), ("task-notification", false)] {
+            let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, true).await;
+            let extra = json!({"agm_user_text": "現在部 demo", "agm_origin_kind": origin});
+            process(&app, &claude_stop_for(&bot_id, extra)).await.unwrap();
+            let stored = user_texts_on(&app, &external).await;
+            assert_eq!(stored, if expect_stored { vec!["現在部 demo".to_string()] } else { vec![] }, "origin={origin}");
+        }
+    }
+
+    /// 本機 bot：transcript 在這台，daemon 自己讀 `origin.kind`，不需要 hook.sh 帶。
+    #[tokio::test]
+    async fn a_local_transcript_decides_whether_the_stop_stores_a_resent_prompt() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let line = |origin: Option<&str>, text: &str| {
+            let mut v = json!({"type": "user", "message": {"role": "user", "content": text}});
+            if let Some(k) = origin {
+                v["origin"] = json!({"kind": k});
+            }
+            format!("{v}\n")
+        };
+        for (origin, expect_stored) in [("human", true), ("task-notification", false)] {
+            let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, false).await;
+            let path = env.dir.join(format!("t-{origin}.jsonl"));
+            std::fs::write(&path, [line(Some("human"), "現在部 demo"), line(Some(origin), if origin == "human" { "現在部 demo" } else { "<task-notification/>" })].concat()).unwrap();
+            process(&app, &claude_stop_for(&bot_id, json!({"transcript_path": path.to_string_lossy()}))).await.unwrap();
+            let stored = user_texts_on(&app, &external).await;
+            if expect_stored {
+                assert_eq!(stored, vec!["現在部 demo".to_string()], "origin={origin}");
+            } else {
+                assert!(stored.is_empty(), "喚醒那一輪不掛上一句：{stored:?}");
+            }
+        }
     }
 
     /// issue #634: a single Bash `PostToolUse` hook records every herdr response against its caller.
