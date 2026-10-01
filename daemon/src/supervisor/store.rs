@@ -1307,7 +1307,7 @@ pub async fn list_assignments_with_open(pool: &SqlitePool, limit: i64) -> Result
 pub async fn open_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>> {
     Ok(sqlx::query_as::<_, Assignment>(
         "SELECT * FROM supervisor_assignments WHERE supervisor_id=? AND status IN ('queued','delivered','unknown')
-          ORDER BY created_at ASC",
+          ORDER BY created_at ASC, rowid ASC",
     )
     .bind(SUPERVISOR_ID)
     .fetch_all(pool)
@@ -1321,7 +1321,7 @@ pub async fn unsettled_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>>
     Ok(sqlx::query_as::<_, Assignment>(&format!(
         "SELECT * FROM supervisor_assignments WHERE supervisor_id=?
            AND status IN ({})
-          ORDER BY created_at ASC",
+          ORDER BY created_at ASC, rowid ASC",
         sql_list(&OPEN_STATES)
     ))
     .bind(SUPERVISOR_ID)
@@ -4945,6 +4945,32 @@ mod tests {
         let rows = mission_assignments(&p, "m1").await.unwrap();
         let roles: Vec<&str> = rows.iter().filter_map(|a| a.mission_role.as_deref()).collect();
         assert_eq!(roles, vec!["executor", "verifier"], "同一毫秒照寫入順序，不是照 ULID");
+    }
+
+    /// 稽核：controller 的工作清單（`open_assignments`）與「還欠 AGM 的全部」（`unsettled_assignments`）要照寫入順序派，
+    /// 同一毫秒建的兩件不能看 ULID 的亂數段（`mission_assignments` 同一個坑，這兩支漏了）。
+    #[tokio::test]
+    async fn open_and_unsettled_assignments_written_in_the_same_millisecond_keep_their_order() {
+        let p = pool().await;
+        let at = "2026-09-17T12:00:00.000Z";
+        for id in ["01ZZZZZZZZZZZZZZZZZZZZZZZZ", "01AAAAAAAAAAAAAAAAAAAAAAAA"] {
+            sqlx::query(
+                "INSERT INTO supervisor_assignments (id, supervisor_id, target_bot_id, client_request_id, text, status, attempts, created_at, updated_at)
+                 VALUES (?,?, 'bot1', ?, 'x', 'queued', 0, ?, ?)",
+            )
+            .bind(id)
+            .bind(SUPERVISOR_ID)
+            .bind(format!("crid-{id}"))
+            .bind(at)
+            .bind(at)
+            .execute(&p)
+            .await
+            .unwrap();
+        }
+        let want = vec!["01ZZZZZZZZZZZZZZZZZZZZZZZZ", "01AAAAAAAAAAAAAAAAAAAAAAAA"];
+        let ids = |v: Vec<Assignment>| v.into_iter().map(|a| a.id).collect::<Vec<_>>();
+        assert_eq!(ids(open_assignments(&p).await.unwrap()), want, "open_assignments 照寫入順序");
+        assert_eq!(ids(unsettled_assignments(&p).await.unwrap()), want, "unsettled_assignments 照寫入順序");
     }
 
     #[tokio::test]
