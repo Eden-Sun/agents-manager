@@ -1707,12 +1707,18 @@ async fn recover_unacked(app: &Arc<App>) {
         std::collections::HashMap::new();
     for e in delivered {
         let Some(turn_id) = e.notify_turn_id.clone() else { continue };
-        let turn = sqlx::query_as::<_, crate::db::Turn>("SELECT * FROM turns WHERE id=?")
+        // 讀不到不等於「回合不見了」：下面 `None` 會把事件放回佇列重送，DB 暫時出錯不能走那條路。
+        let turn = match sqlx::query_as::<_, crate::db::Turn>("SELECT * FROM turns WHERE id=?")
             .bind(&turn_id)
             .fetch_optional(&app.db)
             .await
-            .ok()
-            .flatten();
+        {
+            Ok(t) => t,
+            Err(err) => {
+                tracing::warn!(event = %e.id, turn = %turn_id, error = ?err, "cannot read the notify turn; leaving the event for the next pass");
+                continue;
+            }
+        };
         let why = match turn.as_ref().map(|t| t.status.as_str()) {
             // The wake-up itself never completed (`lifecycle` fails a turn on an aborted or
             // interrupted send): the manager cannot have read it.
@@ -2689,6 +2695,41 @@ mod tests {
             "the completed acknowledged turn is proof that notifications work again"
         );
         assert!(super::super::role_faults::snapshot(&app, Role::Responder).await.unwrap().failed_turns.is_empty());
+    }
+
+    /// 讀不到那個回合（DB 出錯）不等於「回合不見了」：以前 `.ok().flatten()` 把讀取失敗當成 `None`，
+    /// 走「notify turn is gone」把一個其實還在跑的回合的事件放回佇列、又重送一次 digest，還算進補送次數。
+    #[tokio::test]
+    async fn an_unreadable_notify_turn_is_not_treated_as_a_missing_one() {
+        use super::super::bot_requests::flow_tests;
+        use super::super::roles::{self, Role};
+        let app = flow_tests::app().await;
+        flow_tests::configure_responder(&app).await;
+        let id = store::push_inbox(&app.db, "approval_requested:a-unreadable", "approval_requested", None, None, None, &json!({}))
+            .await.unwrap().unwrap();
+        roles::classify(&app.db).await.unwrap();
+        let now = crate::db::now();
+        sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('r-u','resp','running','working',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c-u','resp',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES ('t-u','c-u','r-u','web','in_flight',?)")
+            .bind(&now).execute(&app.db).await.unwrap();
+        roles::mark_delivered(&app.db, std::slice::from_ref(&id), Role::Responder, "t-u", "ok").await.unwrap();
+
+        // 回合還在跑：什麼都不用做。
+        recover_unacked(&app).await;
+        let state = |app: &Arc<App>| {
+            let (app, id) = (app.clone(), id.clone());
+            async move { sqlx::query_scalar::<_, String>("SELECT state FROM supervisor_inbox WHERE id=?").bind(id).fetch_one(&app.db).await.unwrap() }
+        };
+        assert_eq!(state(&app).await, "delivered");
+
+        // 同一個回合，只是這一刻 turns 讀不到：不是「回合不見了」，照樣不動它。
+        sqlx::query("ALTER TABLE turns RENAME TO turns_hidden").execute(&app.db).await.unwrap();
+        recover_unacked(&app).await;
+        sqlx::query("ALTER TABLE turns_hidden RENAME TO turns").execute(&app.db).await.unwrap();
+        assert_eq!(state(&app).await, "delivered", "讀取失敗不能把還在跑的回合當成不見了而重送");
     }
 
     /// 放棄補送（`gave_up`）與喊另一個角色的 `inbox_gave_up` 同一個交易：通知寫不進去，事件就不轉 `gave_up`、留在
