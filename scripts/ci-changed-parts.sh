@@ -18,6 +18,8 @@ while IFS= read -r f; do
         daemon/* | Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/*) daemon=1 ;;
         # agm.py 與 herdr shim 等腳本由 daemon include_str! 編進去，改了兩邊都要看。
         scripts/agm.py | scripts/agm_test.py) ops=1; daemon=1 ;;
+        # chatgpt-consult.sh 同時是 scripts/ 底下的 shell：變數寫法 lint 與 canary 在 ops。
+        scripts/chatgpt-consult*.sh) ob=1; ops=1 ;;
         scripts/ob* | scripts/chatgpt-consult*) ob=1 ;;
         scripts/* | bin/* | ops/*) ops=1 ;;
         .github/workflows/*) ops=1 ;;
