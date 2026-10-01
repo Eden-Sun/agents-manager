@@ -111,7 +111,7 @@ it('新增主機：連不上（200 但 connected:false）顯示失敗原因；�
 it('刪除主機：還有 Project 在用，確認鍵停用、不送 DELETE', async () => {
   const requests = await open()
   await mock.request('POST', '/hosts', { name: 'dom3used', ssh: 'me@dom3used' })
-  await mock.request('POST', '/projects', { path: '/srv/dom3used', label: 'dom3used-proj', host: 'dom3used' })
+  const proj = (await mock.request('POST', '/projects', { path: '/srv/dom3used', label: 'dom3used-proj', host: 'dom3used' })) as { project_id: string }
   await useStore.getState().refreshState()
   await until(() => [...document.querySelectorAll('.host-row')].some((r) => r.textContent?.includes('dom3used')), '主機列出現')
   const row = [...document.querySelectorAll('.host-row')].find((r) => r.textContent?.includes('dom3used'))!
@@ -122,4 +122,7 @@ it('刪除主機：還有 Project 在用，確認鍵停用、不送 DELETE', asy
   assert.equal(confirm.disabled, true)
   await click(confirm)
   assert.equal(requests.some((r) => r.method === 'DELETE'), false)
+  // 共用的 mock 會留給後面的測試檔：把這台主機與它的 Project 收乾淨。
+  await mock.request('DELETE', `/projects/${proj.project_id}`)
+  await mock.request('DELETE', '/hosts/dom3used')
 })

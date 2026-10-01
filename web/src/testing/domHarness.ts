@@ -11,6 +11,9 @@ import type { TestScope } from './testScope'
 import type { ReactElement } from 'react'
 
 const originalFetch = globalThis.fetch
+// React 載入時就抓走全域的 `queueMicrotask`（同步 lane 的更新靠它 flush）。happy-dom 註冊會換掉它，而那個版本綁在第一個 window 上：
+// 該 window 拆掉後，之後每個測試檔裡「不在 act 裡」的 store→render 更新就再也不會 flush（整樹跑時第二個 DOM 測試檔起才壞）。所以一律用原生的。
+const nativeQueueMicrotask = globalThis.queueMicrotask
 const originalWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket
 const originalXhr = (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest
 
@@ -18,6 +21,7 @@ const originalXhr = (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest
 export function setupDom(): void {
   if (GlobalRegistrator.isRegistered) return
   GlobalRegistrator.register({ url: 'http://localhost:5173' })
+  globalThis.queueMicrotask = nativeQueueMicrotask
   globalThis.fetch = (async () => new Response('{}', { status: 200 })) as typeof fetch
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 }
