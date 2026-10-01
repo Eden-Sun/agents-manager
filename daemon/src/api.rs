@@ -1916,7 +1916,13 @@ async fn patch_bot(
             lifecycle::LiveApplyOutcome::BookkeepingPending { .. }
             | lifecycle::LiveApplyOutcome::Failed(_),
         ) => !deferred,
-        None => needs_restart,
+        // 沒走當場套用（persona／args 等）：跟 `/state` 同一個判斷（launch_rev），值沒變或改回載入的值就不必重啟。
+        // 讀不到就保守說要重啟。
+        None if needs_restart => match (db::bot(&app.db, &id).await, db::active_run(&app.db, &id).await) {
+            (Ok(Some(bot)), Ok(Some(run))) => crate::launch_rev::is_stale(&bot, &run),
+            _ => true,
+        },
+        None => false,
     };
     let mut out = json!({"needs_restart": needs_restart});
     if let Some(value) = remapped { out["remapped"] = value; }
@@ -6622,6 +6628,23 @@ mod instruction_files_tests {
         assert_eq!(needs(&e, id.clone()).await, json!(false), "沒記版本＝不誤報");
         let _ = patch(&e, &id, json!({"persona": "換一份人設"})).await.unwrap();
         assert_eq!(needs(&e, id.clone()).await, json!(true), "舊 run 也在改設定的那刻開始被追蹤");
+    }
+
+    /// 稽核：沒有當場套用可走的欄位（persona 等），PATCH 回應的 `needs_restart` 只看「有 active run 且改了這類欄位」，
+    /// 不看值真的變沒變：改成跟現在一樣、或改回 run 啟動時的值，回應說要重啟，`/state` 卻（照 launch_rev）說不用。
+    #[tokio::test]
+    async fn a_patch_that_leaves_the_running_bots_settings_as_loaded_does_not_ask_for_a_restart() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "a", "kind": "claude", "persona": "P"})).await.unwrap();
+        lifecycle::start_bot(&e.app, &id).await.unwrap();
+
+        let out = patch(&e, &id, json!({"persona": "P"})).await.unwrap();
+        assert_eq!(out["needs_restart"], json!(false), "跟載入的一樣：不必重啟 {out}");
+        let out = patch(&e, &id, json!({"persona": "Q"})).await.unwrap();
+        assert_eq!(out["needs_restart"], json!(true), "{out}");
+        let out = patch(&e, &id, json!({"persona": "P"})).await.unwrap();
+        assert_eq!(out["needs_restart"], json!(false), "改回 run 載入的值：不必重啟 {out}");
     }
 
     #[tokio::test]
