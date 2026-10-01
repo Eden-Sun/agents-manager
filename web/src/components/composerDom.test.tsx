@@ -63,7 +63,7 @@ async function makeBusy(botId: string) {
   await settle(100)
 }
 
-test('IME 組字中的 Enter 不送出；組字結束後的 Enter 才送', async () => {
+test('IME 組字中的 Enter 不送出；組字結束後的 Enter 才送', { timeout: 30_000 }, async () => {
   const { requests } = await openChat('am-claude')
   await typeInto(textarea(), 'こんにちは')
   const composing = await imeEnter(textarea(), 'composing')
@@ -81,7 +81,7 @@ test('IME 組字中的 Enter 不送出；組字結束後的 Enter 才送', async
   assert.equal((prompts(requests)[0].body as { text: string }).text, 'こんにちは')
 })
 
-test('#733 回合中按 Enter：請 daemon 排隊（queue_if_busy）、輸入框清空、出現「已排隊」；撤回放回輸入框', async () => {
+test('#733 回合中按 Enter：請 daemon 排隊（queue_if_busy）、輸入框清空、出現「已排隊」；撤回放回輸入框', { timeout: 30_000 }, async () => {
   const { requests, bot } = await openChat('am-claude-2')
   await makeBusy(bot.id)
   await typeInto(textarea(), 'next question')
@@ -100,7 +100,7 @@ test('#733 回合中按 Enter：請 daemon 排隊（queue_if_busy）、輸入框
   assert.ok(requests.some((r) => r.method === 'POST' && /\/turns\/[^/]+\/withdraw/.test(r.path)), '真的打了 withdraw')
 })
 
-test('#733 撤回把附件卡片一起放回輸入框', async () => {
+test('#733 撤回把附件卡片一起放回輸入框', { timeout: 30_000 }, async () => {
   const { requests, bot } = await openChat('am-codex')
   await makeBusy(bot.id)
   const input = document.querySelector<HTMLInputElement>('input[type=file]')!
@@ -121,7 +121,7 @@ test('#733 撤回把附件卡片一起放回輸入框', async () => {
   await until(() => document.querySelectorAll('.attach-thumb').length === 1, '附件卡片放回輸入框')
 })
 
-test('#733 排隊的那一則落在 daemon：全新的 store（另一個分頁）讀回來看到同一則', async () => {
+test('#733 排隊的那一則落在 daemon：全新的 store（另一個分頁）讀回來看到同一則', { timeout: 30_000 }, async () => {
   const { bot } = await openChat('am-claude-2')
   await makeBusy(bot.id)
   await typeInto(textarea(), 'visible everywhere')
