@@ -238,6 +238,9 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
         if h.herdr_session.trim().is_empty() {
             bail!("host `{}` has an empty herdr_session", h.name);
         }
+        if let Some(why) = crate::config::host_target_problem(h.ssh.trim(), h.herdr_session.trim()) {
+            bail!("host `{}`: {why}", h.name);
+        }
         if !seen_hosts.insert(h.name.as_str()) {
             bail!("duplicate [[hosts]] entry named `{}`", h.name);
         }
@@ -851,6 +854,10 @@ mod tests {
             ("同名兩列", with(vec![host("m4p", "a@1"), host("m4p", "b@2")]), "duplicate"),
             ("空的 herdr_session", with(vec![blank_session("")]), "empty herdr_session"),
             ("herdr_session 只有空白", with(vec![blank_session("  ")]), "empty herdr_session"),
+            ("ssh 以 - 開頭（會被 ssh 當成選項）", with(vec![host("m4p", "-oProxyCommand=true")]), "ssh target"),
+            ("ssh 帶空白", with(vec![host("m4p", "me@host extra")]), "ssh target"),
+            ("herdr_session 帶斜線（會進遠端路徑）", with(vec![blank_session("../../x")]), "herdr_session"),
+            ("herdr_session 帶引號（會進 plist）", with(vec![blank_session("a\"b")]), "herdr_session"),
         ] {
             let err = validate(&cfg).expect_err(what).to_string();
             assert!(err.contains(needle), "{what}: {err}");
@@ -871,6 +878,25 @@ mod tests {
 
         let err = project_config_at_startup(&store, &pool, false).await.unwrap_err().to_string();
         assert!(err.contains("reserved"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "拒絕時檔案一個字都不能動");
+
+        pool.close().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 手改 `config.toml` 寫進 `ssh = '-oProxyCommand=…'`：開機投影拒絕、檔案不動（跟 `name = "local"` 同一條語意）。
+    #[tokio::test]
+    async fn a_hand_edited_option_looking_ssh_target_refuses_to_project() {
+        let dir = std::env::temp_dir().join(format!("am-hosts-opt-{}", db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'm4p'\nssh = '-oProxyCommand=true'\n";
+        std::fs::write(&path, text).unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+
+        let err = project_config_at_startup(&store, &pool, false).await.unwrap_err().to_string();
+        assert!(err.contains("ssh target"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "拒絕時檔案一個字都不能動");
 
         pool.close().await;

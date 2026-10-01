@@ -990,6 +990,24 @@ pub fn expand_home(value: &str, home: &str) -> String {
     res
 }
 
+/// `ssh` 目標與 `herdr_session` 的形狀檢查（API 與手改 `config.toml` 共用）。`ssh` 原樣成為 `ssh <opts> <目標> …` 的一個 argv：
+/// 開頭是 `-` 會被 ssh 當成選項（`-oProxyCommand=…` 在本機執行命令），空白／控制字元永遠不是合法的主機目標。
+/// `herdr_session` 會被拼進遠端的 session 路徑、launchd label 與 plist，限制在 herdr session 名字該有的字元。
+/// 呼叫端先 trim。
+pub fn host_target_problem(ssh: &str, session: &str) -> Option<String> {
+    if ssh.is_empty() || ssh.starts_with('-') || ssh.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some("ssh target must be a host (or user@host / ssh_config alias): no leading `-`, whitespace or control characters".into());
+    }
+    let first = session.chars().next();
+    if session.len() > 64
+        || !first.is_some_and(|c| c.is_ascii_alphanumeric())
+        || !session.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Some("herdr_session must be 1-64 characters of [A-Za-z0-9._-], starting with a letter or digit".into());
+    }
+    None
+}
+
 pub fn valid_host_name(name: &str) -> bool {
     valid_slug_name(name)
 }
