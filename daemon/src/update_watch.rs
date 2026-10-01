@@ -94,6 +94,9 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
     let active: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
     crate::background_jobs::retain_runs(app, &active);
     crate::claude_live::retain_runs(&active);
+    // 帳是全域的：測試各自種 run、平行跑 sweep，會互相清掉對方剛記的版本，所以測試版不呼叫（`retain_runs` 本身有單元測試）。
+    #[cfg(not(test))]
+    crate::codex_update::retain_runs(&active);
     for run in runs.into_iter().filter(|r| r.state == "running") {
         let kind = match db::bot(&app.db, &run.bot_id).await {
             Ok(Some(b)) if b.kind == "claude" || b.kind == "codex" => b.kind,
