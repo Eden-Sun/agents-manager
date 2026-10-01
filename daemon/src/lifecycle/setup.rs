@@ -797,8 +797,10 @@ pub fn child_agent_rules(agent_name: &str) -> String {
 需要開子任務或平行工作時，一律用 herdr 開子 agent：\n\
 \n\
 - **只准用 herdr pane 派工**：把工作交給另一個 agent，**必須**是 herdr pane 裡的子 agent。\
-**禁止**用 CLI 內建的子代理（Claude 的 `Agent`／`Task` 工具與 `Workflow`、codex 的子代理、grok 的同類功能），\
-也**禁止**在自己的 pane 裡另起 `claude`／`codex`／`grok` 行程（含丟背景）來做事。那些 AG Man 看不到、追不到狀態、收不掉。\n\
+**禁止**用 CLI 內建的子代理（Claude 的 `Agent`／`Task` 工具與 `Workflow`、codex 外掛的 `codex-rescue`／`/codex:rescue`、\
+codex 的子代理、grok 的同類功能），也**禁止**在自己的 pane 裡另起 `claude`／`codex`／`grok` 行程（含丟背景、`codex exec`）分擔工作。\
+那些 AG Man 看不到、追不到狀態、收不掉。要交給 codex 就開 `--kind codex` 的 herdr 子 agent。\
+只在拋棄式目錄驗證 CLI 本身的行為（例如試新旗標）不算派工。\n\
 - **先找閒置的 child**：開新的子 agent 之前，**必須先跑** `herdr agent list`，看自己底下有沒有 `idle` / `done` 的子 agent。\
 有就用 `herdr agent prompt <名稱> \"…\"` 把下一份工作交下去。**禁止**每件事都開一顆新的；只有使用者明確要求新開時才可以。\n\
 - **命名**：`herdr agent start <名稱> …` 的名稱**必須**以 `{agent_name}-` 為前綴（例：`{agent_name}-review`、`{agent_name}-ui`）。\
@@ -1305,7 +1307,7 @@ mod model_args_tests {
     #[test]
     fn children_go_through_herdr_panes_and_never_spawn_grandchildren() {
         let rule = super::child_agent_rules("proj-abc123");
-        for want in ["`Agent`／`Task`", "`Workflow`", "codex 的子代理", "只准用 herdr pane 派工"] {
+        for want in ["`Agent`／`Task`", "`Workflow`", "`codex-rescue`", "codex 的子代理", "只准用 herdr pane 派工", "`--kind codex`"] {
             assert!(rule.contains(want), "要點名禁止內建子代理：{want}");
         }
         assert!(rule.contains("$AM_CHILD_OF"), "子 agent 要知道怎麼認出自己");
