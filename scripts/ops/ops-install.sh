@@ -169,7 +169,16 @@ changes=$(grep -c '^C$' "$TMP/results" 2>/dev/null || true)
 failed=$(grep -c '^F$' "$TMP/results" 2>/dev/null || true)
 drifted=$(grep -c '^D$' "$TMP/results" 2>/dev/null || true)
 echo "changes=${changes:-0} failed=${failed:-0} drifted=${drifted:-0}"
-if [ "$DRY" = 0 ] && [ "${changes:-0}" -gt 0 ]; then
-  printf '%s %s\n' "$STAMP" "$COMMIT" > "$DIR/ops-install.last"
+# 兩個記錄檔（目前沒有程式讀它們，給人查「安裝端裝到哪一版了」用）：
+#   ops-install.last         最近一次**整輪都成功**而且真的換了檔的 `<UTC 時間> <commit>`；
+#   ops-install.last-failed  最近一次有失敗的 `<UTC 時間> <commit> failed=N`，下一次整輪成功就刪。
+# 有失敗的那輪不更新 .last：部分失敗的安裝不能被說成「裝到這個 commit 了」。
+if [ "$DRY" = 0 ]; then
+  if [ "${failed:-0}" -gt 0 ]; then
+    printf '%s %s failed=%s\n' "$STAMP" "$COMMIT" "$failed" > "$DIR/ops-install.last-failed"
+  else
+    rm -f "$DIR/ops-install.last-failed"
+    [ "${changes:-0}" -gt 0 ] && printf '%s %s\n' "$STAMP" "$COMMIT" > "$DIR/ops-install.last"
+  fi
 fi
 [ "${failed:-0}" = 0 ]
