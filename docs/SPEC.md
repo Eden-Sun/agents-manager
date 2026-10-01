@@ -117,7 +117,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
     認領用 CAS（`owner_boot`），補做失敗最多 5 次就 `failed`。`bots.launch_rev`／`runs.launch_rev` 是啟動相關設定的版本雜湊（NULL＝沒記，不誤報需重啟）。
     **已接線：`restart`**（`restart_bot_with`，含一鍵重啟每顆各一件）：記 `stopping` 之前先 commit intent（寫不進去就不重啟）；reconcile 遇到仍有對應開啟 intent 的 `stopping` run 時保留狀態，讓後續 recovery 能完成重啟；正常完成標 `done`、
     拒絕（沒動任何東西）標 `abandoned`、失敗標 `failed`（不推 AGM，呼叫端已拿到錯誤）。**開機／主機重連對帳成功之後、autostart 判斷之前**
-    （`restart_intents::recover_host`）讀還開著的 restart intent 檢查世界：有新 run＝`done`；舊 run 還 running／starting＝`abandoned`（`stopping` 從沒記過）；
+    （`restart_intents::recover_host`）讀還開著的 restart intent 檢查世界：有新 run（含 intent 記的那顆之後又起過、現在已停的 run，例如使用者起了又停）＝`done`、不再拉起；舊 run 還 running／starting＝`abandoned`（`stopping` 從沒記過）；
     舊 run `stopping`＝補完停；沒有 active run＝舊 run 由 `stopped` 改標 `exited`（不是使用者要它停）並照原選項 start（`autostart=0` 也補）。
     補不成最多試 5 次（背景以退避重試），用完標 `failed` 並在同一個交易推 AGM inbox `intent_failed`；放置超過 15 分鐘同樣 `failed`＋通知。
     在取得 intent id 之前，列舉 `intents::open` 若因 DB 暫時不可讀而失敗，沒有 per-intent worker 可接手，故 discovery 以封頂退避持續重試，直到讀到清單；只有取得 id 後才套用每件 intent 的 5 次上限。

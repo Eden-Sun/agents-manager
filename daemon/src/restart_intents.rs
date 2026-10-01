@@ -244,6 +244,23 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
+    // 沒有 active run、但 intent 記的那顆之後又有人起過 run（使用者自己起了又停、或它起來後掛了）：重啟的目的早已不成立，
+    // 現在的 `stopped` 是使用者要的——重試不能再把它拉起來（跟憑證輪替那條 #688 同一個原則）。
+    if let Some(from) = from_run {
+        let later: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM runs WHERE bot_id = ? AND id != ? AND rowid > (SELECT rowid FROM runs WHERE id = ?)",
+        )
+        .bind(bot_id)
+        .bind(from)
+        .bind(from)
+        .fetch_one(&app.db)
+        .await
+        .map_err(|e| format!("db: {e:#}"))?;
+        if later > 0 {
+            intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
+            return Ok(());
+        }
+    }
     match lifecycle::resume_restart_locked(app, bot_id, opts, from_run).await {
         Ok(_) => {}
         // 新 agent 起來了、只是 `running` 還沒記下：bot 回來了。
@@ -608,6 +625,28 @@ mod tests {
         assert_eq!(run_state(&e.app, &run1).await, "stopped", "a rotation retry must not rewrite the user stop");
         assert!(db::active_run(&e.app.db, &bot.id).await.unwrap().is_none());
         assert_eq!(intent_status(&e.app, &bot.id).await, vec!["done"]);
+    }
+
+    /// 補完的重試還沒輪到時，使用者自己把 bot 起來又停掉（`stopped`＝使用者要它停）：那件重啟的目的已經不成立，
+    /// 重試不能再把它拉起來（跟憑證輪替那條 #688 同一個原則；Refs #688）。
+    #[tokio::test]
+    async fn a_restart_retry_does_not_revive_a_bot_the_user_started_and_stopped_meanwhile() {
+        let e = tt::env().await;
+        let (bot, run1) = running_bot(&e, "restart-user-stop").await;
+        die_at(&e, &bot.id, "restart_after_stop").await;
+        assert_eq!(run_state(&e.app, &run1).await, "stopped");
+        assert_eq!(intent_status(&e.app, &bot.id).await, vec!["pending"]);
+
+        let app2 = tt::restart_app(&e).await;
+        let run2 = lifecycle::start_bot(&app2, &bot.id).await.unwrap();
+        assert!(lifecycle::stop_bot(&app2, &bot.id).await.unwrap());
+        assert_eq!(run_state(&app2, &run2).await, "stopped", "the user stop stays recorded");
+
+        let id: String = sqlx::query_scalar("SELECT id FROM intents WHERE subject_id=?").bind(&bot.id).fetch_one(&app2.db).await.unwrap();
+        assert_eq!(drive_once(&app2, &id).await, Outcome::Finished);
+        assert_eq!(runs_of(&app2, &bot.id).await, 2, "the retry must not start a third run");
+        assert!(db::active_run(&app2.db, &bot.id).await.unwrap().is_none(), "the user's stop is respected");
+        assert_eq!(intent_status(&app2, &bot.id).await, vec!["done"]);
     }
 
     #[tokio::test]
