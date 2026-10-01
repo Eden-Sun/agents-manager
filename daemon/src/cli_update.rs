@@ -522,10 +522,21 @@ pub async fn start(
     // 使用者核准的版本要跟 daemon 眼中那台「需安裝」的目標是同一版：舊分頁、別人剛裝好、帳本又出了新版都擋下來重看。
     let current_target = match kind {
         "claude" => crate::upstream_update::latest_target_for_host(kind, host).await,
-        // 沒有在跑的 codex 帶「需安裝」時退回上游快照（那台要落後才算），header 在沒有 codex 在跑時也能裝（2026-09-29 使用者）。
+        // 只有成功確認沒有 pending notice 才退回快照；讀取失敗時拒絕，避免舊確認框改用另一個目標。
         _ => match pending_target(app, host).await {
-            Some(t) => Some(t),
-            None => crate::upstream_update::behind_target_for_host(kind, host).await,
+            Ok(Some(t)) => Some(t),
+            Ok(None) => crate::upstream_update::behind_target_for_host(kind, host).await,
+            Err(error) => {
+                tracing::warn!(host, error = %error, "could not determine the pending Codex install target");
+                return Err(LcError::Unavailable(json!({
+                    "error": "pending_target_unavailable",
+                    "reason": "pending_target_unavailable",
+                    "retryable": true,
+                    "retry_after_secs": 5,
+                    "message": format!("讀取 {host} 的 Codex 安裝通知失敗，沒有開始安裝；稍後再試。"),
+                    "detail": format!("{error:#}"),
+                })));
+            }
         },
     };
     match current_target {
@@ -1251,12 +1262,12 @@ fn pending_notice_target(kind: &str, notice: &str) -> Option<String> {
     }
 }
 
-async fn pending_runs(app: &Arc<App>, host: &str, kind: &str) -> Vec<(crate::db::Run, String)> {
+async fn pending_runs(app: &Arc<App>, host: &str, kind: &str) -> anyhow::Result<Vec<(crate::db::Run, String)>> {
     let mut out = Vec::new();
-    for run in crate::db::all_active_runs(&app.db)
+    let runs = crate::db::all_active_runs(&app.db)
         .await
-        .unwrap_or_default()
-    {
+        .map_err(|error| anyhow::anyhow!("enumerate active runs: {error:#}"))?;
+    for run in runs {
         let Some(notice) = run
             .update_notice
             .clone()
@@ -1264,30 +1275,33 @@ async fn pending_runs(app: &Arc<App>, host: &str, kind: &str) -> Vec<(crate::db:
         else {
             continue;
         };
-        match crate::db::bot(&app.db, &run.bot_id).await {
-            Ok(Some(b)) if b.kind == kind => {}
-            _ => continue,
-        }
-        if crate::db::bot_host(&app.db, &run.bot_id)
+        let Some(bot) = crate::db::bot(&app.db, &run.bot_id)
             .await
-            .ok()
-            .as_deref()
-            != Some(host)
-        {
+            .map_err(|error| anyhow::anyhow!("read bot {}: {error:#}", run.bot_id))?
+        else {
+            continue;
+        };
+        if bot.kind != kind {
+            continue;
+        }
+        let bot_host = crate::db::bot_host(&app.db, &run.bot_id)
+            .await
+            .map_err(|error| anyhow::anyhow!("read host for bot {}: {error:#}", run.bot_id))?;
+        if bot_host != host {
             continue;
         }
         out.push((run, notice));
     }
-    out
+    Ok(out)
 }
 
 /// daemon 眼中那台現在要裝的版本。Claude 以 fleet 上游快照綁定共同目標，Codex 沿用 run 通知。
-async fn pending_target(app: &Arc<App>, host: &str) -> Option<String> {
-    pending_runs(app, host, "codex")
-        .await
+async fn pending_target(app: &Arc<App>, host: &str) -> anyhow::Result<Option<String>> {
+    Ok(pending_runs(app, host, "codex")
+        .await?
         .iter()
         .filter_map(|(_, n)| pending_notice_target("codex", n))
-        .max_by(|a, b| parse_version(a).cmp(&parse_version(b)))
+        .max_by(|a, b| parse_version(a).cmp(&parse_version(b))))
 }
 
 fn merge(v: &mut Value, extra: Value) {
@@ -1705,6 +1719,152 @@ mod tests {
         BotHostRead,
         NoticeWrite,
         CompareAndSwapLost,
+    }
+
+    #[derive(Clone, Copy)]
+    enum PendingLookupFailure {
+        ActiveRuns,
+        Bot,
+        BotHost,
+    }
+
+    fn test_host_cfg(host: &str) -> crate::config::HostCfg {
+        crate::config::HostCfg {
+            shared_session: false,
+            name: host.into(),
+            ssh: format!("target-{host}"),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }
+    }
+
+    async fn configure_codex_target(
+        env: &crate::testing::Env,
+        host: &str,
+        notice_target: &str,
+        snapshot_target: &str,
+    ) -> (String, String) {
+        env.app.hosts.insert_remote_for_test(test_host_cfg(host)).await;
+        let notice = crate::codex_update::pending_text(Some("0.158.0"), notice_target);
+        let (bot, run) = codex_bot_with_notice(env, host, &notice).await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=(SELECT project_id FROM bots WHERE id=?)")
+            .bind(host)
+            .bind(&bot)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let status = crate::upstream_update::build_status(
+            "codex",
+            &Ok(snapshot_target.to_string()),
+            &[(host.to_string(), Ok("codex-cli 0.158.0".to_string()))],
+            None,
+        );
+        crate::upstream_update::set_snapshot_for_test(status).await;
+        (bot, run)
+    }
+
+    async fn fail_pending_target_lookup(
+        env: &crate::testing::Env,
+        failure: PendingLookupFailure,
+    ) {
+        let (table, unavailable) = match failure {
+            PendingLookupFailure::ActiveRuns => ("runs", "runs_unavailable"),
+            PendingLookupFailure::Bot => ("bots", "bots_unavailable"),
+            PendingLookupFailure::BotHost => ("projects", "projects_unavailable"),
+        };
+        sqlx::query(&format!("ALTER TABLE {table} RENAME TO {unavailable}"))
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+    }
+
+    async fn restore_pending_target_lookup(
+        env: &crate::testing::Env,
+        failure: PendingLookupFailure,
+    ) {
+        let (table, unavailable) = match failure {
+            PendingLookupFailure::ActiveRuns => ("runs", "runs_unavailable"),
+            PendingLookupFailure::Bot => ("bots", "bots_unavailable"),
+            PendingLookupFailure::BotHost => ("projects", "projects_unavailable"),
+        };
+        sqlx::query(&format!("ALTER TABLE {unavailable} RENAME TO {table}"))
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+    }
+
+    async fn assert_pending_lookup_failure_fails_closed(
+        host: &str,
+        failure: PendingLookupFailure,
+    ) {
+        let env = crate::testing::env().await;
+        configure_codex_target(&env, host, "0.160.0", "0.159.0").await;
+        fail_pending_target_lookup(&env, failure).await;
+        let fake = Fake::new(&["codex-cli 0.158.0", "codex-cli 0.159.0"], Ok("ok"));
+
+        let result = start(
+            &env.app,
+            &HeaderMap::new(),
+            host,
+            Some("codex"),
+            Some("0.159.0"),
+            fake.clone(),
+        )
+        .await;
+        restore_pending_target_lookup(&env, failure).await;
+
+        let Err(LcError::Unavailable(body)) = result else {
+            panic!("pending notice lookup failure must return retryable 503 before the snapshot fallback: {result:?}");
+        };
+        assert_eq!(body["reason"], "pending_target_unavailable", "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert_eq!(fake.installs(), 0, "an unreadable pending notice must never start the installer");
+    }
+
+    #[tokio::test]
+    async fn an_active_runs_read_error_does_not_fall_back_to_the_snapshot_target() {
+        assert_pending_lookup_failure_fails_closed("cli-update-740-shared", PendingLookupFailure::ActiveRuns).await;
+    }
+
+    #[tokio::test]
+    async fn a_bot_read_error_does_not_fall_back_to_the_snapshot_target() {
+        assert_pending_lookup_failure_fails_closed("cli-update-740-shared", PendingLookupFailure::Bot).await;
+    }
+
+    #[tokio::test]
+    async fn a_bot_host_read_error_does_not_fall_back_to_the_snapshot_target() {
+        assert_pending_lookup_failure_fails_closed("cli-update-740-shared", PendingLookupFailure::BotHost).await;
+    }
+
+    #[tokio::test]
+    async fn no_pending_notice_can_still_use_the_behind_snapshot_target() {
+        let env = crate::testing::env().await;
+        let host = "cli-update-740-shared";
+        env.app.hosts.insert_remote_for_test(test_host_cfg(host)).await;
+        let status = crate::upstream_update::build_status(
+            "codex",
+            &Ok("0.159.0".to_string()),
+            &[(host.to_string(), Ok("codex-cli 0.158.0".to_string()))],
+            None,
+        );
+        crate::upstream_update::set_snapshot_for_test(status).await;
+        let fake = Fake::new(&["codex-cli 0.158.0", "codex-cli 0.159.0"], Ok("ok"));
+
+        let result = start(
+            &env.app,
+            &HeaderMap::new(),
+            host,
+            Some("codex"),
+            Some("0.159.0"),
+            fake.clone(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "successful empty lookup still accepts an out-of-date host snapshot: {result:?}");
+        assert!(crate::testing::eventually!(running_list(&env.app).await.is_empty()));
+        assert_eq!(fake.installs(), 1);
     }
 
     /// H is repointed after run_with_fence's last pre-dispatch check, while the restart runner is gated.
