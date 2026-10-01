@@ -2177,6 +2177,13 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   grok `--rules "$(cat …)"`。呼叫者自己帶了同類參數就尊重。
 - **讀不到不擋啟動**：檔案不存在或是空檔時 bot 照開，warn 並在對話裡寫一則 system 訊息講少了哪個檔。
 
+### 6.5j claude `--bare` worker profile（issue #752 spike，**目前不採用**）
+
+`lifecycle/runtime_profile.rs` 只是前提檢查（純函式，**沒接到任何 bot 的啟動路徑**，旗標 `AGM_BARE_WORKER_CANARY=1` 預設關）：
+`runtime_profile = "bare-worker"` 要同時滿足 claude、有 `ANTHROPIC_API_KEY`、`inject_hooks = 0`、不依賴 skill，才會回 `--bare`，否則回空旗標與 blocker 清單。
+2.1.286 實測：`--bare` 不讀 OAuth（無 API key 即 `Not logged in`）、連 `--settings` 的 hooks 都不跑（SessionStart 0/10）、不載入 user skill（`/herdr` 找不到）；
+idle RSS 只少約 12%（約 33 MB/顆）、啟動快約 0.6 秒、idle 沒有背景子程序。目前所有 AGM claude bot 都不相容，數據與 canary 步驟在 issue #752 留言。
+
 ### 6.5.1 採用使用者的 Herdr `default` session
 
 daemon 另外唯讀觀察本機 Herdr `default` session（`~/.config/herdr/herdr.sock`），不替它啟動 server。啟動、事件重連與定期輪詢時：

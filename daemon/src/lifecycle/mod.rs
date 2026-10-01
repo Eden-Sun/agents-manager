@@ -33,6 +33,8 @@ pub(crate) mod dead_panes;
 mod queue;
 pub(crate) mod setup;
 pub(crate) mod agent_md;
+#[allow(dead_code)] // issue #752 spike：尚未接到任何 bot 的啟動路徑
+pub(crate) mod runtime_profile;
 mod start;
 mod stop;
 mod deferred_live;
