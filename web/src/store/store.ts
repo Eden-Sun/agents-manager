@@ -2,6 +2,7 @@
 
 import { gatewayErrText, networkErrText } from '../lib/netErr'
 import { DraftSync } from './draftSync'
+import { pruneDeadKeys } from './prune'
 import { shellDraftKey } from './shellDraft'
 import { createResyncRunner } from './resyncQueue'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
@@ -470,6 +471,8 @@ export interface StoreState {
   /** 存下來的數字只是重整前的快照，訊息載入後要用已讀標記重算。 */
   recountBot: (botId: string) => void
   pruneUnread: () => void
+  /** 快照上已經不在的 bot／專案／任務，它們在 store 裡各張表的 key 一併帶走（`store/prune.ts`）。 */
+  pruneDead: () => void
   notify: (kind: Notice['kind'], text: string, action?: Notice['action']) => void
   dismiss: (id: number) => void
 
@@ -1039,6 +1042,7 @@ export const useStore = create<StoreState>((set, get) => {
       if (g) set({ groupUnread: g })
     }
     get().pruneUnread()
+    get().pruneDead()
     if (behindFrames) void get().refreshState()
     const sel = get().selectedBotId
     if (sel && !get().loadedBots[sel]) await get().loadMessages(sel)
@@ -1382,6 +1386,16 @@ export const useStore = create<StoreState>((set, get) => {
     if (Object.keys(botUnread).length === Object.keys(s.botUnread).length && Object.keys(groupUnread).length === Object.keys(s.groupUnread).length) return
     set({ botUnread, groupUnread })
     persistUnread(get())
+  },
+
+  pruneDead: () => {
+    const s = get()
+    const patch = pruneDeadKeys(s)
+    if (!patch) return
+    // 草稿另外有兩份外部帳：daemon 端的同步（`draftSync`）與 localStorage 的游標。
+    if (patch.drafts) for (const k of Object.keys(s.drafts)) if (!(k in patch.drafts)) draftSync.forget(k)
+    if (patch.draftCursors) writeDraftCursors(s.draftCursors, patch.draftCursors)
+    set(patch)
   },
 
   recountBot: (botId) => {
