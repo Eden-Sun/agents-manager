@@ -20,6 +20,33 @@ def project_id(value):
     return value
 
 
+# CLAUDE.md：不貼 token／密碼／客戶資料。題目會一字不漏送到第三方的網頁，所以在入口擋明確長得像憑證的內容；
+# 規則刻意窄（要有夠長的值），一般的技術討論（「sk-xxx 格式」「X-AM-Token header」）不會被誤擋。
+SECRET_PATTERNS = (
+    ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("github_token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})")),
+    ("api_key", re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{24,}")),
+    ("aws_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("slack_token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{20,}")),
+    ("am_token_header", re.compile(r"X-AM-(?:Bot-)?Token\s*[:=]\s*['\"]?[A-Za-z0-9._-]{16,}", re.I)),
+)
+
+
+def secret_in_question(text):
+    """題目裡有憑證就回它的種類（不回值，錯誤訊息不能把祕密再印一次），否則 None。"""
+    path = Path(os.environ.get("AM_UI_TOKEN_FILE") or Path.home() / ".config/agents-manager/ui-token")
+    try:
+        ui_token = path.read_text().strip()
+    except OSError:
+        ui_token = ""
+    if len(ui_token) >= 16 and ui_token in text:
+        return "ui_token"
+    for kind, pattern in SECRET_PATTERNS:
+        if pattern.search(text):
+            return kind
+    return None
+
+
 def conversation_url(value):
     if not re.fullmatch(r"https://chatgpt\.com/c/[a-zA-Z0-9-]+", value or ""):
         raise OBError("需要 https://chatgpt.com/c/<conversation-id>")
@@ -201,6 +228,9 @@ class Store:
         project_id(pid)
         if not rid or len(rid) > 200 or not question.strip():
             raise OBError("需要非空 request_id 與問題")
+        kind = secret_in_question(question)
+        if kind:
+            raise OBError(f"secret_in_question：題目含有 {kind}，不能送出（不貼 token／密碼／客戶資料）；拿掉後重送，不要用新 request ID 夾帶")
         with self.transaction():
             old = self.db.execute("SELECT * FROM requests WHERE project_id=? AND request_id=?", (pid, rid)).fetchone()
             if old:
