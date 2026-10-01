@@ -166,6 +166,8 @@ async fn reconcile_and_autostart(app: &Arc<App>, host: &str, autostart: bool) ->
         }
         Err(e) => {
             tracing::error!(host, error = ?e, "reconcile failed");
+            // 事件驅動的對帳失敗不會有下一個觸發點：斷線那段漏掉的 pane.closed 等不到補，排一輪晚一點的補跑（它失敗會自己再排）。
+            crate::reconcile::schedule_deferred_pass(app, host);
             false
         }
     }
@@ -750,6 +752,21 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id=?").bind(&bot.id).fetch_one(&app.db).await.unwrap();
         assert_eq!(runs, 1, "只跑一次：不再替它開新的 run");
+    }
+
+    /// 訂閱（重）建後的那一輪對帳失敗（herdr 剛重啟、snapshot 讀不到）：斷線那段漏掉的 `pane.closed` 沒人補，
+    /// run 會一直停在 running，直到下一個 herdr 事件或重啟。事件驅動的對帳失敗必須自己排補跑。
+    #[tokio::test]
+    async fn a_failed_reconcile_after_resubscribing_is_retried_on_its_own() {
+        let e = tt::env().await;
+        let app = &e.app;
+        e.herdr.fail_next("session.snapshot", tt::Fault::Refuse);
+        assert!(!reconcile_and_autostart(app, LOCAL_HOST, false).await, "對帳失敗");
+        let after_failure = e.herdr.calls_to("session.snapshot").len();
+        assert!(
+            crate::testing::eventually!(e.herdr.calls_to("session.snapshot").len() > after_failure),
+            "沒有任何補跑：失敗的對帳要等到下一個事件才會再來"
+        );
     }
 
     async fn plant_watcher(app: &Arc<App>, pane: &str) {
