@@ -417,6 +417,19 @@ check "推了 ops_install_failed" "ops_install_failed" "$AGM_DIR/alerts.log"
 check "部署照常完成" "已換上" "$(LOG)"
 teardown
 
+# 14. 安裝端的檔被人手改過（不是 repo 任何一版）：不覆蓋、推 ops_install_drift 叫人看，部署照常完成、不算失敗。
+setup
+seed_ops
+touch "$AGM_DIR/ops-auto-install.enabled"
+printf '#!/bin/bash\necho x-hand-edited\n' > "$AGM_DIR/bin/x-kick.sh"
+H=$(bump_x $'#!/bin/bash\necho x-v2\n'); ci "$H" success
+check_eq "rc=0" "0" "$(run)"
+check_eq "手改的檔沒被蓋掉" "echo x-hand-edited" "$(x_line)"
+check "推了 ops_install_drift" "ops_install_drift" "$AGM_DIR/alerts.log"
+check_no "不是 ops_install_failed" "ops_install_failed" "$AGM_DIR/alerts.log"
+check "部署照常完成" "已換上" "$(LOG)"
+teardown
+
 for gone in AGM_BUILD_BOT AGM_REBUILD_THRESHOLD "approval request" "lease acquire" "agm assign\|assign --bot" "AGM_REBUILD_MAX_WAIT_MIN"; do
   check_no "已拿掉：${gone}" "$gone" "$SCRIPT"
 done
