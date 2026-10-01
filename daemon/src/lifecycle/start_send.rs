@@ -40,12 +40,29 @@ pub async fn prompt_starting(
     attachment_ids: &[String],
     relay: RelaySrc<'_>,
 ) -> LcResult<PromptOut> {
+    prompt_starting_or_queue(app, bot_id, text, client_request_id, attachment_ids, relay, false).await
+}
+
+/// [`prompt_starting`]，另外帶著 `queue_if_busy`：bot 已經在跑（照一般的路）時，旗標不能掉，不然忙碌中的 bot 回 409
+/// 而不是落地排隊（#733）。bot 沒在跑／正在起的那條路不看它。
+pub async fn prompt_starting_or_queue(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    queue_if_busy: bool,
+) -> LcResult<PromptOut> {
     let accepted = {
         let lock = app.bot_lock(bot_id).await;
         let _g = lock.lock().await;
         accept_locked(app, bot_id, text, client_request_id, attachment_ids, relay).await?
     };
     match accepted {
+        Accepted::Normal if queue_if_busy => {
+            prompt_from_api_queue_if_busy(app, bot_id, text, client_request_id, attachment_ids, relay, false, None).await
+        }
         Accepted::Normal => prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, relay, false, None).await,
         Accepted::Queued(out, mark) => {
             if let Some(mark) = mark {
