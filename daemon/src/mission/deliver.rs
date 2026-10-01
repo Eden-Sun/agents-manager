@@ -411,13 +411,10 @@ mod tests {
         let (root, _seed, work) = fixture();
         commit(&work, "b");
         let gh = root.path().join("gh");
-        std::fs::write(
+        crate::testing::write_exec(
             &gh,
             "#!/bin/sh\ndir=$(dirname \"$0\")\ncase \"$2\" in\n  view) [ -f \"$dir/pr.url\" ] || { echo 'no pull requests found' >&2; exit 1; }; case \"$*\" in *--jq*) cat \"$dir/pr.url\";; *) echo \"{\\\"url\\\":\\\"$(cat \"$dir/pr.url\")\\\",\\\"state\\\":\\\"OPEN\\\"}\";; esac; exit 0;;\n  create) [ -f \"$dir/pr.url\" ] && { echo 'a pull request for branch already exists' >&2; exit 1; }; echo https://example.invalid/pull/7 > \"$dir/pr.url\"; cat \"$dir/pr.url\";;\nesac\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let open = |title: &'static str| {
             let (gh, work) = (gh.clone(), work.clone());
@@ -441,9 +438,7 @@ mod tests {
         let setup = |state: &str| {
             let (root, _seed, work) = fixture();
             let gh = root.path().join("gh");
-            std::fs::write(&gh, gh_script).unwrap();
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::testing::write_exec(&gh, gh_script);
             std::fs::write(root.path().join("pr.json"), format!("{{\"url\":\"https://example.invalid/pull/7\",\"state\":\"{state}\"}}")).unwrap();
             (root, gh, work)
         };
@@ -544,13 +539,7 @@ mod tests {
 
     fn fake_gh(root: &Path) -> std::path::PathBuf {
         let gh = root.join("gh");
-        std::fs::write(
-            &gh,
-            "#!/bin/sh\necho https://example.invalid/pull/9\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(&gh, "#!/bin/sh\necho https://example.invalid/pull/9\n");
         gh
     }
 

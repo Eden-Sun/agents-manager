@@ -1762,12 +1762,9 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
 #[cfg(test)]
 mod alias_path_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
 
     fn bin(dir: &std::path::Path, name: &str, body: &str) {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(dir.join(name), body);
     }
 
     fn sh(script: &str, shell: &std::path::Path, path: &str) -> String {

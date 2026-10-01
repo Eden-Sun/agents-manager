@@ -1100,3 +1100,22 @@ pub mod git {
         run(dir, &["commit", "-q", "-m", "base"]);
     }
 }
+
+#[cfg(test)]
+mod write_exec_tests {
+    /// 守衛只在探測那一次生效：寫完之後腳本照常跑，參數與 `$0` 都沒變；不是 shell 的腳本原樣寫、不插守衛。
+    #[test]
+    fn the_probe_guard_is_invisible_to_normal_runs_and_skipped_for_other_interpreters() {
+        let dir = super::scratch_dir("am-write-exec");
+        let sh = dir.join("echo.sh");
+        super::write_exec(&sh, "#!/bin/sh\nprintf '%s|%s' \"$0\" \"$1\"\n");
+        let out = std::process::Command::new(&sh).arg("x").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{}|x", sh.display()));
+        assert!(std::fs::read_to_string(&sh).unwrap().contains("AM_TEST_EXEC_PROBE"));
+
+        let py = dir.join("noop.py");
+        super::write_exec(&py, "#!/usr/bin/env python3\nprint('hi')\n");
+        assert!(!std::fs::read_to_string(&py).unwrap().contains("AM_TEST_EXEC_PROBE"), "非 shell 不插守衛");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

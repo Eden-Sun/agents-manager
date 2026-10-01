@@ -5338,13 +5338,7 @@ mod spool_claim_window_tests {
                 line = crate::hosts::sh_quote(text),
                 spool = crate::hosts::sh_quote(&self.spool.to_string_lossy()),
             );
-            let p = self.bin.join("rm");
-            std::fs::write(&p, stub).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            crate::testing::write_exec(self.bin.join("rm"), stub);
         }
 
         fn sh(&self, script: &str) -> String {

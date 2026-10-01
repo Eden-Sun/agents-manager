@@ -1536,11 +1536,7 @@ mod remote_hook_tests {
     }
 
     fn write_exec(path: &std::path::Path, body: &str) {
-        let mut f = std::fs::File::create(path).unwrap();
-        f.write_all(body.as_bytes()).unwrap();
-        drop(f);
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(path, body);
     }
 
     impl Sandbox {
