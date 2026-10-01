@@ -49,6 +49,8 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/ops-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="$DIR/ops-install-backups/$STAMP"
+# 同一秒內再裝一次（不同 ref）：備份目錄不能共用，不然第二次的 `cp -p` 會蓋掉第一次留下的原始檔。
+_n=1; while [ -e "$BACKUP" ]; do _n=$((_n + 1)); BACKUP="$DIR/ops-install-backups/$STAMP-$_n"; done
 changes=0; failed=0
 
 # 自檢（在暫存檔上做，種類看安裝位置的副檔名）。不在安裝目錄產生任何東西（py 不用 py_compile，它會寫 __pycache__）。
