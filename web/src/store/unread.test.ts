@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Message } from '../api/types.ts'
-import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, projectUnread, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
+import { clearHookCompletion, completionKey, countUnreadTurns, idleEdgeCompletionKey, isUnread, loadCounts, loadMarks, markHookCompletion, markOfMessages, projectUnread, pruneIdleEdges, resetIdleEdges, resetTurnCompletions, saveCounts, saveMarks, takeTurnCompletion, titleUnread, unreadShown } from './unread.ts'
 
 /** node 沒有 localStorage；這裡只要 get/set 兩支。 */
 function stubStorage() {
@@ -237,4 +237,19 @@ test('專案收合的 !N 與分頁標題同一份排除：額度隱藏與總管�
   const stale = { ...s, botUnread: { ...s.botUnread, gone: 7 } }
   assert.equal(titleUnread(stale), 2 + 5)
   assert.equal(projectUnread(stale, 'p1'), 2)
+})
+
+test('pruneIdleEdges：刪掉的 bot 的 idle 邊緣帳被帶走，還在的不動', () => {
+  resetIdleEdges()
+  for (const id of ['b-live', 'b-gone']) {
+    markHookCompletion(id)
+    idleEdgeCompletionKey(id, 'r1', { id: 't', status: 'completed' }) // 吃掉 hook 標記
+    idleEdgeCompletionKey(id, 'r1', { id: 't', status: 'completed' }) // 第一次真正的 idle 邊緣
+  }
+  markHookCompletion('b-gone')
+  pruneIdleEdges(new Set(['b-live']))
+  // b-live 的計數還在：下一次是第 2 次；b-gone 從頭來（第 1 次），hook 標記也沒了。
+  assert.equal(idleEdgeCompletionKey('b-live', 'r1', { id: 't', status: 'completed' }), 'run:r1:2')
+  assert.equal(idleEdgeCompletionKey('b-gone', 'r1', { id: 't', status: 'completed' }), 'run:r1:1')
+  resetIdleEdges()
 })
