@@ -1,5 +1,7 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from 'react'
 import { persistSetDiff } from '../store/sharedSet'
+import { renderProbe } from '../lib/renderProbe'
+import { useStableCallback } from '../hooks/useStableCallback'
 import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
@@ -123,7 +125,7 @@ function shortPath(path: string, max = 30): string {
 /** 拖曳中的一列，以及游標落在哪一列的哪一半（插入線畫在那裡）。 */
 type DragState = { id: string; projectId: string; overId: string | null; edge: 'before' | 'after' } | null
 
-function BotRow({
+function BotRowImpl({
   botId,
   hit,
   childCount = 0,
@@ -151,13 +153,14 @@ function BotRow({
   kidsListId?: string
   /** 子 agent 列：單行、只留身份／模型。 */
   compact?: boolean
-  onToggleChildren?: () => void
+  onToggleChildren?: (botId: string) => void
   drag: DragState
   onDrag: (next: DragState) => void
   onDropAt: (dragId: string, overId: string, edge: 'before' | 'after') => void
   onNudge: (botId: string, dir: -1 | 1) => void
   onStep: (botId: string, dir: -1 | 1) => void
 }) {
+  renderProbe('BotRow')
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const run = useStore((s) => s.runs[botId] ?? null)
   const { lamp, background: bgJobs, label: stateLabel } = useBotLamp(botId)
@@ -351,7 +354,7 @@ function BotRow({
           }
           onClick={(e) => {
             e.stopPropagation()
-            onToggleChildren()
+            onToggleChildren(botId)
           }}
         >
           <span className="chev">{collapsed ? '▶' : '▼'}</span>
@@ -449,6 +452,13 @@ function BotRow({
     </div>
   )
 }
+
+/**
+ * 一列只訂閱自己 bot 的切片（上面每個 `useStore` 都是 per-bot 選取器），但父層 `Sidebar` 訂閱整份 `runs`／`botUnread`：
+ * 任何一顆 bot 的狀態一變，父層重渲染，沒有 memo 的話 200 顆 bot 就是 200 列全部重算。傳進來的 props 都是穩定的
+ * （字串、布林、state 物件、`useStableCallback` 包過的回呼），所以淺比較就夠。
+ */
+const BotRow = memo(BotRowImpl)
 
 function NewProjectForm({ onDone }: { onDone: () => void }) {
   const addProject = useStore((s) => s.addProject)
@@ -944,7 +954,7 @@ export function Sidebar() {
       return new Set()
     }
   })
-  const toggleChildren = (id: string) =>
+  const toggleChildren = useStableCallback((id: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev)
       if (!next.delete(id)) next.add(id)
@@ -954,7 +964,8 @@ export function Sidebar() {
         /* 無痕視窗 / 關掉儲存：收合仍然有效，只是不跨重整記住 */
       }
       return next
-    })
+    }),
+  )
   const [shutProjects, setShutProjects] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem('am.collapsedProjects')
@@ -1014,7 +1025,7 @@ export function Sidebar() {
   // 與 matchCount 同一群，免得數字自相矛盾。
   const hitCount = bots.filter((b) => b.id in hits).length
 
-  const dropAt = (dragId: string, overId: string, edge: 'before' | 'after') => {
+  const dropAt = useStableCallback((dragId: string, overId: string, edge: 'before' | 'after') => {
     const bot = bots.find((b) => b.id === overId)
     if (!bot) return
     const ids = botsOfProject({ bots, botOrder }, bot.project_id).map((b) => b.id)
@@ -1024,10 +1035,10 @@ export function Sidebar() {
     // 原地放下：不能傳 null（null＝移到最後）。
     if (beforeId === dragId) return
     moveBot(dragId, beforeId)
-  }
+  })
 
   /** Alt+↑/↓ 換位置：只動父列，索引也只算父列（算進子列會原地不動）。 */
-  const nudge = (botId: string, dir: -1 | 1) => {
+  const nudge = useStableCallback((botId: string, dir: -1 | 1) => {
     const bot = bots.find((b) => b.id === botId)
     if (!bot || bot.parent_bot_id) return
     const ids = botsOfProject({ bots, botOrder }, bot.project_id)
@@ -1037,10 +1048,10 @@ export function Sidebar() {
     const to = at + dir
     if (at < 0 || to < 0 || to >= ids.length) return
     moveBot(botId, dir === -1 ? ids[to] : (ids[to + 1] ?? null))
-  }
+  })
 
   /** ↑/↓ 換 bot，焦點跟著走。 */
-  const step = (botId: string, dir: -1 | 1) => {
+  const step = useStableCallback((botId: string, dir: -1 | 1) => {
     const st = useStore.getState()
     const next = adjacentBotId(st, botId, dir)
     if (!next) return
@@ -1051,7 +1062,7 @@ export function Sidebar() {
       el?.focus()
       el?.scrollIntoView({ block: 'nearest' })
     })
-  }
+  })
 
   const hostUp = (name: string) => name === 'local' || (hosts.find((h) => h.name === name)?.connected ?? false)
   const hostsDown = hosts.filter((h) => !h.connected).length
@@ -1299,7 +1310,7 @@ export function Sidebar() {
                         kidsLamp={kidsLamp}
                         kidsWait={kidsWait}
                         kidsListId={shut || kids.length === 0 ? undefined : `bot-kids-${b.id}`}
-                        onToggleChildren={() => toggleChildren(b.id)}
+                        onToggleChildren={toggleChildren}
                         drag={drag}
                         onDrag={setDrag}
                         onDropAt={dropAt}
