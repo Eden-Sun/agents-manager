@@ -31,6 +31,8 @@ struct Evidence {
     content: String,
     source: String,
     incomplete: bool,
+    /// 對話倒回標掉的訊息（標記不刪）；`null` 是仍有效。
+    rewound_at: Option<String>,
     created_at: String,
 }
 
@@ -54,7 +56,7 @@ async fn query(pool: &SqlitePool, q: EvidenceQuery) -> Result<Value, LcError> {
                   p.id AS project_id, p.label AS project_label,
                   b.deleted_at IS NOT NULL AS bot_deleted, m.turn_id, m.role,
                   m.relay_from, m.relay_unverified != 0 AS relay_unverified,
-                  m.content, m.source, m.incomplete, m.created_at
+                  m.content, m.source, m.incomplete, m.rewound_at, m.created_at
            FROM messages m JOIN conversations c ON c.id=m.conversation_id
            JOIN bots b ON b.id=c.bot_id JOIN projects p ON p.id=b.project_id
            WHERE m.content LIKE ?1 ESCAPE '\'
@@ -90,6 +92,7 @@ mod tests {
         sqlx::raw_sql(crate::db::SCHEMA).execute(&db).await.unwrap();
         sqlx::query("ALTER TABLE messages ADD COLUMN relay_unverified INTEGER NOT NULL DEFAULT 0")
             .execute(&db).await.unwrap();
+        sqlx::query("ALTER TABLE messages ADD COLUMN rewound_at TEXT").execute(&db).await.unwrap();
         sqlx::raw_sql("INSERT INTO projects(id,path,label,created_at) VALUES ('p','/p','專案','now');
             INSERT INTO bots(id,project_id,name,kind,hook_token,created_at) VALUES ('b','p','新名字','claude','x','now');
             INSERT INTO bots(id,project_id,name,kind,hook_token,created_at,deleted_at) VALUES ('old','p','舊bot','claude','y','now','later');
@@ -120,6 +123,18 @@ mod tests {
         assert_eq!(next["messages"][0]["relay_from"], "manager");
         assert_eq!(next["messages"][0]["relay_unverified"], true);
         assert_eq!(next["has_more"], false);
+    }
+
+    /// 倒回（rewind）只標 `rewound_at`、不刪訊息：網頁把它畫成灰掉的「已倒回」，證據也要帶這個欄位，
+    /// 不然總管會把使用者已經撤銷的那一輪當成真的發生過的決定來引用。
+    #[tokio::test]
+    async fn a_rewound_message_says_so() {
+        let db = seed().await;
+        sqlx::query("UPDATE messages SET rewound_at='2026-09-10T00:00:00.000Z' WHERE id='m2'").execute(&db).await.unwrap();
+        let page = query(&db, EvidenceQuery { q:"遠端登入".into(), ..Default::default() }).await.unwrap();
+        let by_id = |id: &str| page["messages"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap().clone();
+        assert_eq!(by_id("m2")["rewound_at"], "2026-09-10T00:00:00.000Z");
+        assert_eq!(by_id("m1")["rewound_at"], serde_json::Value::Null);
     }
 
     #[tokio::test]

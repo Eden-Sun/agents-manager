@@ -548,6 +548,8 @@ def slim_message(m: object) -> dict:
         "source": _s(m.get("source")),
         "incomplete": bool(m.get("incomplete")),
         "truncated": bool(m.get("truncated")),
+        # 倒回標掉的訊息仍在歷史裡；有值＝使用者撤銷了那一段，不能當成真的發生過的決定引用。
+        "rewound_at": _s(m.get("rewound_at")) or None,
         # 舊 daemon 的 evidence 端點沒有這個欄位；未知來源不能偽裝成使用者訊息。
         "relay_from": _s(m.get("relay_from")) if m.get("relay_from") is not None else None,
         "relay_unverified": bool(m.get("relay_unverified")) if "relay_unverified" in m else None,

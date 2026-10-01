@@ -505,6 +505,11 @@ class SlimTest(unittest.TestCase):
         self.assertEqual(m["relay_from"], "manager")
         self.assertTrue(m["relay_unverified"])
 
+    def test_message_keeps_the_rewind_mark(self):
+        m = agm.slim_message({"id": "m1", "role": "assistant", "rewound_at": "2026-09-10T00:00:00.000Z"})
+        self.assertEqual(m["rewound_at"], "2026-09-10T00:00:00.000Z")
+        self.assertIsNone(agm.slim_message({"id": "m2", "role": "user"})["rewound_at"])
+
 
 # -------------------------------------------------------------------- 子命令
 
