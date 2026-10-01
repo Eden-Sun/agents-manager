@@ -236,6 +236,19 @@ pub async fn wake_stalled(app: &Arc<App>) {
 /// 還沒被看到——再推一則只是重複）。同一步只叫一次：event_key 是那一步的簽名，全部來自持久狀態，重啟後
 /// 算出來也一樣，所以 AGM 看過不理，不會每分鐘再叫一次。回傳這次叫醒了哪些任務。
 pub async fn wake_stalled_at(app: &Arc<App>, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+    // 專案已刪的任務先收掉再掃（#498 的收斂版）：不叫醒 AGM 去推一個專案不在的任務。
+    match crate::mission::store::deleted_projects_with_open_missions(&app.db).await {
+        Ok(projects) => {
+            for project_id in projects {
+                match crate::mission::store::cancel_open_for_project(&app.db, &project_id, "project_deleted").await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(project = %project_id, missions = n, "project is gone; its open missions were cancelled by the sweep"),
+                    Err(e) => tracing::warn!(project = %project_id, error = ?e, "could not cancel the open missions of a deleted project"),
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = ?e, "could not look for open missions of deleted projects"),
+    }
     let Ok(missions) = crate::mission::store::open_unpaused(&app.db).await else { return Vec::new() };
     let mut woke = Vec::new();
     for m in missions {
@@ -487,6 +500,39 @@ mod tests {
         assert_eq!(last.kind, "cancelled");
         let payload: Value = serde_json::from_str(&last.payload_json).unwrap();
         assert_eq!(payload["reason"], "project_deleted", "為什麼被收要留在事件裡：{payload}");
+    }
+
+    /// #498 只在 `DELETE /api/projects/{id}` 收任務。專案還有別條路變成已刪：從 config.toml 拿掉（投影軟刪）、
+    /// 或 API 刪除時收任務失敗（只記 log）、或兩步之間 daemon 死了。那些任務沒人收，永遠開著、還被 `mission_next`
+    /// 叫醒去推一個專案已經不在的任務。掃描本身要能收斂：專案已刪的開著的任務，這一輪就收掉。
+    #[tokio::test]
+    async fn an_open_mission_of_a_project_deleted_by_other_means_is_cancelled_by_the_sweep() {
+        let env = tt::env().await;
+        let app = &env.app;
+        store::get_or_init(&app.db).await.unwrap();
+        let id = mission(&env, "m-gone-config").await;
+        sqlx::query("UPDATE supervisor_inbox SET state='handled'").execute(&app.db).await.unwrap();
+        let a = linked(app, &id, "s1", "executor", "delivered").await;
+        // 投影路徑：專案被標成已刪，沒有人呼叫 `cancel_open_for_project`。
+        sqlx::query("UPDATE projects SET deleted_at=? WHERE id=?").bind(crate::db::now()).bind(&env.project_id).execute(&app.db).await.unwrap();
+        // 剛軟刪（config 改寫的一瞬間也長這樣）不動它：還沒過寬限。
+        let _ = wake_stalled_at(app, chrono::Utc::now()).await;
+        assert!(crate::mission::store::get(&app.db, &id).await.unwrap().unwrap().cancelled_at.is_none(), "寬限內不收");
+        sqlx::query("UPDATE projects SET deleted_at=? WHERE id=?")
+            .bind(crate::db::iso_in(-(crate::mission::store::PROJECT_GONE_GRACE_SECS + 5)))
+            .bind(&env.project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let later = chrono::Utc::now() + chrono::Duration::seconds(3 * STALL_SECS);
+        assert!(wake_stalled_at(app, later).await.is_empty(), "專案都沒了不能叫 AGM 去推任務");
+        let m = crate::mission::store::get(&app.db, &id).await.unwrap().unwrap();
+        assert!(m.cancelled_at.is_some(), "掃描要把它收掉");
+        assert_eq!(store::assignment(&app.db, &a).await.unwrap().unwrap().status, "cancelled", "底下開著的交辦一併收掉");
+        let ev = crate::mission::store::events(&app.db, &id).await.unwrap();
+        let payload: Value = serde_json::from_str(&ev.last().unwrap().payload_json).unwrap();
+        assert_eq!(payload["reason"], "project_deleted");
     }
 
     /// 停在輪到 AGM 的一步、很久沒動靜：推一則 `mission_next`，同一步只推一次；還沒到時間、有交辦開著、
