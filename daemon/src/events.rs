@@ -517,7 +517,12 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         .data
         .get("agent_status")
         .and_then(|v| v.as_str())
-        .map(|s| if s == "done" { "idle" } else { s })
+        // `runs.agent_status` 的 CHECK 只認這四種：herdr 之後新增的值原樣寫進去整句 UPDATE 會失敗。
+        .map(|s| match s {
+            "done" => "idle",
+            "idle" | "working" | "blocked" | "unknown" => s,
+            _ => "unknown",
+        })
         .unwrap_or("unknown")
         .to_string();
     tracing::info!(host, session, pane_id, status = %reported_status, "pane.agent_status_changed");
@@ -1010,6 +1015,25 @@ mod tests {
         handle_status(&app, LOCAL_HOST, "test", &unknown).await;
         let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert_eq!(status, "idle", "running Codex unknown keeps the #732 idle behavior");
+    }
+
+    /// herdr 之後若多出一個我們不認得的 agent_status 值：`runs.agent_status` 有 CHECK 只認四種，原樣寫進去整句 UPDATE 失敗
+    /// （只留一行 warn），燈號就停在舊值而且之後每一則同值事件都一樣失敗。不認得的一律當 `unknown`。
+    #[tokio::test]
+    async fn a_status_value_herdr_adds_later_is_stored_as_unknown_not_dropped() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let bot = tt::claude_bot(&app, &e.project_id, "new-status").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        let ev = crate::herdr::Event {
+            event: "pane_agent_status_changed".into(),
+            data: json!({"agent": "claude", "pane_id": pane, "agent_status": "waiting"}),
+        };
+        handle_status(&app, LOCAL_HOST, "test", &ev).await;
+        let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "unknown", "不認得的狀態不能讓寫入整句失敗、燈號停在舊的 working");
     }
 
     fn close_event(pane: &str) -> crate::herdr::Event {
