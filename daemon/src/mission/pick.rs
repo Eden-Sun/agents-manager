@@ -195,10 +195,11 @@ fn block_of(q: &Quota, now: DateTime<Utc>) -> Block {
     Block::None
 }
 
-/// 最早回來的那個重置時間（RFC3339 字串可以直接比大小：同一種格式、UTC）。
+/// 最早回來的那個重置時間。比**時刻**不比字串（`db::cmp_ts`）：重置時間來自各家 CLI 的讀數，可能帶 `+08:00` 偏移或
+/// 子秒（`…:00.500Z`），字串順序對這兩種都排錯；兩邊都解得開才比時刻，解不開退回字串比較（不替壞資料編時間）。
 fn earliest(resets: impl Iterator<Item = (String, Option<String>)>) -> Option<(String, Option<String>)> {
     resets.min_by(|a, b| match (&a.1, &b.1) {
-        (Some(x), Some(y)) => x.cmp(y),
+        (Some(x), Some(y)) => crate::db::cmp_ts(x, y),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
@@ -699,6 +700,20 @@ mod tests {
         let mut cs = cands(&qs);
         cs[0].disabled = true;
         assert_eq!(used(&pick(Role::Executor, &cs, On5hLimit::Switch, None, now())), ("cc1", None));
+    }
+
+    /// 「最早回來」比的是**時刻**，不是字串：`06:00+08:00` 是前一天 22:00Z，字串上卻排在 `01:00Z` 後面；
+    /// `…:00.500Z` 比 `…:00Z` 晚半秒，字串上卻因為 `.` 比 `Z` 小而排在前面。重置時間來自各家 CLI 的讀數，格式不一。
+    #[test]
+    fn the_earliest_reset_is_decided_by_instant_not_by_string() {
+        let r = |id: &str, at: &str| (id.to_string(), Some(at.to_string()));
+        let offset = earliest([r("utc", "2026-09-18T01:00:00Z"), r("tokyo", "2026-09-18T06:00:00+08:00")].into_iter()).unwrap();
+        assert_eq!(offset.0, "tokyo", "06:00+08:00 = 前一天 22:00Z，比 01:00Z 早");
+        let frac = earliest([r("frac", "2026-09-18T06:00:00.500Z"), r("whole", "2026-09-18T06:00:00Z")].into_iter()).unwrap();
+        assert_eq!(frac.0, "whole", ".500Z 比整秒晚");
+        // 沒有重置時間的排在後面；解不開的字串退回字串比較（不替壞資料編時間）。
+        let none = earliest([("nil".to_string(), None), r("has", "2026-09-18T06:00:00Z")].into_iter()).unwrap();
+        assert_eq!(none.0, "has");
     }
 
     #[test]
