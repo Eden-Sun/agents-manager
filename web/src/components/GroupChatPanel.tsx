@@ -4,7 +4,8 @@ import { useShallow } from 'zustand/react/shallow'
 import { parseMentions, stripMentionsOf } from '../api/mentions'
 import type { Bot, GroupMessage } from '../api/types'
 import { useScrollTail } from '../hooks/useScrollTail'
-import { attachCommandOf, botLamp, composerState, groupComposerState, projectHostName, useStore } from '../store/store'
+import { attachCommandOf, composerState, groupComposerState, projectHostName, useStore } from '../store/store'
+import { useBotLamp } from '../hooks/useBotLamp'
 import { useEnterToSend } from '../hooks/useEnterToSend'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { useComposerFocus } from '../hooks/useComposerFocus'
@@ -32,7 +33,6 @@ import { UnreadChip } from './UnreadChip'
 import { ToolsHint, ToolsHintIcon } from './Tools'
 import type { BotKind } from '../api/types'
 import { StatusLamp } from './StatusLamp'
-import { LAMP_LABEL } from './lampLabel'
 import './groupChatPanel.css'
 
 /** SPEC §13 project group chat: timeline merges every member bot's conversation; `@<bot>` / `@all` picks recipients. */
@@ -109,19 +109,19 @@ function MemberStrip({ projectId }: { projectId: string }) {
 
 /** Icon only: names are the sidebar's job; the name is one hover away. */
 function MemberChip({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
-  const lamp = useStore((s) => botLamp(s, bot.id))
+  const { lamp, background, label } = useBotLamp(bot.id)
   // listitem 放外層殼（display: contents），role 蓋在 button 上 AT 會唸成清單項目而非按鈕。
   return (
     <span role="listitem" className="li-wrap">
       <button
         type="button"
         className={`member member-icon ${bot.kind}`}
-        title={`${bot.name}：${LAMP_LABEL[lamp]}（點擊開啟單獨對話）`}
-        aria-label={`${bot.name}：${LAMP_LABEL[lamp]}`}
+        title={`${bot.name}：${label}（點擊開啟單獨對話）`}
+        aria-label={`${bot.name}：${label}`}
         onClick={onOpen}
       >
         <KindIcon kind={bot.kind} />
-        <StatusLamp lamp={lamp} title={`${bot.name}：${LAMP_LABEL[lamp]}`} />
+        <StatusLamp lamp={lamp} background={background} title={`${bot.name}：${label}`} />
       </button>
     </span>
   )

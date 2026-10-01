@@ -20,7 +20,8 @@ import { queuedSendFor } from '../store/queuedSend'
 import { isImeEnter } from '../lib/ime'
 import { herdrIdentity } from '../lib/herdrIdentity'
 import { PaneCopy } from './PaneCopy'
-import { anchorOf, botLamp, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
+import { anchorOf, composerState, inFlightTurn, liveReplyOf, projectHostName, toolsOfHost, useStore } from '../store/store'
+import { useBotLamp } from '../hooks/useBotLamp'
 import { handedOffTo } from '../lib/handoff'
 import { BackgroundJobsBar } from './BackgroundJobs'
 import { AttachPicker, AttachTray, DropVeil, MessageAttachments } from './Attachments'
@@ -60,7 +61,6 @@ import { PrimaryStar } from './PrimaryStar'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
 import { StatusLamp } from './StatusLamp'
-import { LAMP_LABEL } from './lampLabel'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
 import { markdownComponents } from '../lib/markdownComponents'
 import { markdownUrlTransform } from '../lib/markdownUrl'
@@ -1102,7 +1102,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   // 這顆 bot 的未讀：看著就清掉，只在人離開時亮。
   const headUnread = useStore((s) => (s.selectedBotId ? (s.botUnread[s.selectedBotId] ?? 0) : 0))
   const phone = useMediaQuery(PHONE_QUERY)
-  const lamp = useStore((s) => (s.selectedBotId ? botLamp(s, s.selectedBotId) : 'offline'))
+  const { lamp, background: bgJobs, label: stateLabel } = useBotLamp(botId)
   const hostName = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
   const hostUp = useStore((s) => {
     const name = projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null)
@@ -1240,7 +1240,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         </button>
         <div className="main-title">
           <div className="main-title-row">
-            <StatusLamp lamp={lamp} />
+            <StatusLamp lamp={lamp} background={bgJobs} />
             {/* kind logo 放第二行 model 左邊（2026-09-11 使用者），不佔名字寬度。 */}
             {phone ? <BotSwitcher botId={botId} name={bot.name} /> : <BotNameField botId={botId} name={bot.name} />}
             {/* 手機的「claude 有更新」放 ★ 左邊（2026-09-19 使用者）；桌面仍在額度列最左。 */}
@@ -1305,7 +1305,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               </ModelQuickPicker>
             ) : null}
             {/* pane id：點一下複製（2026-09-30 使用者：只要 pane id，不展開識別列）。herdr 名等在 tooltip。 */}
-            {run?.pane_id ? <PaneCopy paneId={run.pane_id} detail={`${herdrId?.title ?? `pane ${run.pane_id}`}（${LAMP_LABEL[lamp]}）`} /> : null}
+            {run?.pane_id ? <PaneCopy paneId={run.pane_id} detail={`${herdrId?.title ?? `pane ${run.pane_id}`}（${stateLabel}）`} /> : null}
           </div>}
         </div>
         {phone ? (

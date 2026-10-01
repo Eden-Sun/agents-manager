@@ -3,7 +3,8 @@ import { createPortal } from 'react-dom'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, RefObject } from 'react'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import type { Bot, Project } from '../api/types'
-import { botLamp, useStore } from '../store/store'
+import { useStore } from '../store/store'
+import { useBotLamp } from '../hooks/useBotLamp'
 import { KindTag } from './KindTag'
 import { StatusLamp } from './StatusLamp'
 import './botSwitcher.css'
@@ -96,8 +97,8 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
 
 /** 每列自己訂閱自己的燈：selector 回傳字串才穩定，回傳整張 map 會讓 zustand 每次 render 都換新物件而無限重繪。 */
 function RowLamp({ botId }: { botId: string }) {
-  const lamp = useStore((s) => botLamp(s, botId))
-  return <StatusLamp lamp={lamp} />
+  const { lamp, background } = useBotLamp(botId)
+  return <StatusLamp lamp={lamp} background={background} />
 }
 
 export function BotSwitcherMenu({
