@@ -3468,7 +3468,7 @@ AG Man 搬到 Linux 主機（#675）後，`com.agm.*` 例行 job 由 systemd use
 - **cgroup**：systemd 收 unit 時殺整個 cgroup，不是程序群。kick 自己 detached 拉起的長駐行程（`dev-server` 的 vite）要 `KillMode=process` 才活得過 kick 結束。
 - **herdr server 也交給 systemd**：`scripts/ops/systemd/herdr@.service`（不是排程、沒有 .timer、不 enable），daemon 要起 session 時
   `systemctl --user start herdr@<session>.service`，只有 systemd 一個看管者；細節與退回條件見 §19。
-- **browser-gc 排程也有 Linux 版**：`com.agm.browser-gc.service`／`.timer` 每 1800 秒執行 `browser_gc_linux.py`，只回收本使用者的孤兒 headless Chrome（至少 2 分鐘、CDP 狀態可查且無連線）與安全標記的舊 `/tmp/am-*` profile，再跑 `pane-gc`。`ss` 不存在或查詢錯誤時保留程序。Linux worker 不啟動 browser-gc bot、不派 ego-browser task；圖形瀏覽器／OB worker 依 #718 暫不實作。macOS 的 `browser-gc-kick.sh`、task 與 plist 仍只裝在 `darwin`。
+- **browser-gc 排程也有 Linux 版**：`com.agm.browser-gc.service`／`.timer` 每 1800 秒執行 `browser_gc_linux.py`，只回收本使用者的孤兒 headless Chrome（父程序是 pid 1 或自己的 `systemd --user`——Linux user session 的 subreaper，孤兒掛在它底下而不是 pid 1；至少 2 分鐘、CDP 狀態可查且無連線）與安全標記的舊 `/tmp/am-*` profile，再跑 `pane-gc`。`ss` 不存在或查詢錯誤時保留程序。Linux worker 不啟動 browser-gc bot、不派 ego-browser task；圖形瀏覽器／OB worker 依 #718 暫不實作。macOS 的 `browser-gc-kick.sh`、task 與 plist 仍只裝在 `darwin`。
 - **對照表依平台選組**：`install-manifest.tsv` 可選第三欄 `darwin`／`linux`；`agm ops-sync --check` 只比這台平台的列，另一邊的放進 `skipped`。
   排程列必須標對（`LaunchAgents/…`＝`darwin`、`systemd/…`＝`linux`），否則 `bad_manifest`。Linux 上掃 `~/.config/systemd/user/com.agm.*` 找沒版控的 unit（`extra`），
   unit 比 parse 過的「段.鍵 → 值」，註解與空白不算，只忽略 `Environment=` 的值。

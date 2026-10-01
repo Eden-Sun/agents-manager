@@ -91,6 +91,40 @@ class BrowserGcLinuxTest(unittest.TestCase):
         self.assertIn(105, result.kept_pids)
         self.assertIn("headless Chrome：收掉 1／保留 4", "\n".join(self.logs))
 
+    def add_parent(self, pid: int, argv: list[str], uid: int | None = None):
+        proc = self.proc / str(pid)
+        proc.mkdir()
+        (proc / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        uid = os.getuid() if uid is None else uid
+        (proc / "status").write_text(f"Name:\t{Path(argv[0]).name}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n", encoding="ascii")
+
+    def test_orphans_of_a_systemd_user_subreaper_are_orphans_too(self):
+        """Linux 的 user session 裡，孤兒不是掛到 pid 1，而是掛到 `systemd --user`（subreaper）：只認 ppid==1 的話，
+        這台上的孤兒 headless Chrome 永遠被判成「父程序仍存在」，一個都收不掉（實測：孤兒 sleep 的 ppid 是 systemd --user）。"""
+        reaped_profile = self.profile("am-sub-orphan")
+        self.add_parent(900, ["/usr/lib/systemd/systemd", "--user"])
+        self.add_process(311, 900, 300, ["/usr/bin/chromium", "--headless=new",
+                                        f"--user-data-dir={reaped_profile}", "--remote-debugging-port=9400"])
+        # 父程序是一個活著的 shell：真的有人在管它，不能收。
+        self.add_parent(901, ["/bin/bash", "-lc", "run-bot"])
+        self.add_process(312, 901, 300, ["/usr/bin/chromium", "--headless=new",
+                                        "--user-data-dir=/tmp/am-has-parent", "--remote-debugging-port=9401"])
+        # 別的使用者的 `systemd --user` 不是我們的 subreaper。
+        self.add_parent(902, ["/usr/lib/systemd/systemd", "--user"], uid=os.getuid() + 1)
+        self.add_process(313, 902, 300, ["/usr/bin/chromium", "--headless=new",
+                                        "--user-data-dir=/tmp/am-other-reaper", "--remote-debugging-port=9402"])
+        # 沒有 --user 的 systemd 不是 user subreaper。
+        self.add_parent(903, ["/usr/lib/systemd/systemd", "--system"])
+        self.add_process(314, 903, 300, ["/usr/bin/chromium", "--headless=new",
+                                        "--user-data-dir=/tmp/am-system-systemd", "--remote-debugging-port=9403"])
+
+        result = self.run_gc()
+
+        self.assertEqual(result.killed_pids, [311])
+        self.assertEqual(self.signals, [(311, signal.SIGTERM)])
+        self.assertFalse(reaped_profile.exists())
+        self.assertEqual(sorted(result.kept_pids), [312, 313, 314])
+
     def test_unknown_cdp_status_fails_closed_and_preserves_profile(self):
         profile = self.profile("am-unknown-cdp")
         self.add_process(201, 1, 300, ["/usr/bin/google-chrome", "--headless",

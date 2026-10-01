@@ -81,6 +81,20 @@ def _debug_port_arg(argv: tuple[str, ...]) -> int | None:
     return None
 
 
+def _is_orphan_parent(ppid: int, proc_root: Path, uid: int) -> bool:
+    """孤兒的父程序：pid 1，或這個使用者自己的 `systemd --user`（Linux user session 的 subreaper；孤兒掛在它底下、不是 pid 1）。"""
+    if ppid == 1:
+        return True
+    parent = proc_root / str(ppid)
+    if _proc_uid(parent) != uid:
+        return False
+    try:
+        argv = tuple(os.fsdecode(arg) for arg in (parent / "cmdline").read_bytes().split(b"\0") if arg)
+    except OSError:
+        return False
+    return bool(argv) and Path(argv[0]).name == "systemd" and "--user" in argv[1:]
+
+
 def _chrome_process(path: Path, uptime: float, ticks_per_second: int, uid: int) -> ChromeProcess | None:
     try:
         raw = (path / "cmdline").read_bytes()
@@ -274,7 +288,7 @@ def run_once(
 
     for process in processes:
         reason = None
-        if process.ppid != 1:
+        if not _is_orphan_parent(process.ppid, proc_root, uid):
             reason = "父程序仍存在"
         elif process.age_seconds < 120:
             reason = "啟動未滿 2 分鐘"
