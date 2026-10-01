@@ -846,16 +846,29 @@ pub async fn pause_announced(
     text: &str,
     announce: Option<Announce<'_>>,
 ) -> Result<bool> {
-    pause_tx(pool, id, reason, detail, text, &serde_json::json!({"reason": reason}), announce).await
+    pause_tx(pool, id, reason, detail, text, &serde_json::json!({"reason": reason}), announce, false).await
 }
 
 /// daemon 自己把任務停下來問人（輪數用完、驗證者沒 Fable、交付失敗）：暫停＋`paused` 事件一次交易，
 /// 事件帶呼叫端的 payload。回 `false` ＝ 任務已結案，**什麼都沒寫**——呼叫端要照實說任務已經關了，
 /// 不能再補一則「等使用者決定」（issue #130：以前 `pause` 的 bool 沒人看）。
 pub async fn pause_with_event(pool: &SqlitePool, id: &str, reason: &str, detail: Option<&str>, text: &str, payload: &serde_json::Value) -> Result<bool> {
-    pause_tx(pool, id, reason, detail, text, payload, None).await
+    pause_tx(pool, id, reason, detail, text, payload, None, true).await
 }
 
+/// 任務現在是不是被**使用者**停著（reason 不在 daemon 自己設的那幾種裡，見 `supervisor::api::user_pause_reason`）。
+/// daemon 自己的暫停（輪數用完、驗證者沒 Fable、交付失敗）不能蓋掉它：蓋成 daemon 的 reason 之後，
+/// `mission_gate` 就不再把任務當成使用者要它停手，AGM 又派得出新交辦。
+async fn held_by_user(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, id: &str) -> Result<bool> {
+    let current: Option<Option<String>> =
+        sqlx::query_scalar("SELECT paused_reason FROM missions WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL")
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    Ok(current.flatten().is_some_and(|r| crate::supervisor::api::user_pause_reason(Some(&r)).is_some()))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn pause_tx(
     pool: &SqlitePool,
     id: &str,
@@ -864,9 +877,14 @@ async fn pause_tx(
     text: &str,
     payload: &serde_json::Value,
     announce: Option<Announce<'_>>,
+    // daemon 自己停下來問人（不是使用者按的暫停）：使用者已經停著它時不蓋，什麼都不寫、回 `true`。
+    daemon: bool,
 ) -> Result<bool> {
     let now = crate::db::now();
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    if daemon && held_by_user(&mut tx, id).await? {
+        return Ok(true);
+    }
     let n = sqlx::query(
         "UPDATE missions SET paused_reason = ?, paused_detail = ?, updated_at = ?
          WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
@@ -899,6 +917,10 @@ pub async fn pause_on(
     text: &str,
     payload: &serde_json::Value,
 ) -> Result<bool> {
+    // daemon 自己的暫停不蓋使用者的（見 `held_by_user`）。
+    if held_by_user(tx, id).await? {
+        return Ok(true);
+    }
     let n = sqlx::query(
         "UPDATE missions SET paused_reason = ?, paused_detail = ?, updated_at = ?
          WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
