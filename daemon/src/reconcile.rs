@@ -1070,7 +1070,10 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
             .max_by_key(|p| (prefix_score(&p.agent_name, name), u8::from(p.bot.managed_by != "child")));
         let by_prefix =
             parents.iter().filter(|p| prefix_score(&p.agent_name, name) > 0).max_by_key(|p| p.agent_name.len());
-        let Some(entry) = by_hint.or(by_tab).or(by_prefix) else { continue };
+        // 同 tab 的候選名字對不上（前綴分數 0），而別處有一顆的名字正是它的前綴：以名字為準（2026-10-01 cf-優化：
+        // 它在 verify 的 tab 裡開了 `pt-hub-n4xznj-memleak`，被掛到 verify 底下，側欄看不到）。同 tab 而且名字也對得上的照舊優先。
+        let by_tab_named = by_tab.filter(|p| prefix_score(&p.agent_name, name) > 0);
+        let Some(entry) = by_hint.or(by_tab_named).or(by_prefix).or(by_tab) else { continue };
         let (parent_name, parent) = (&entry.agent_name, &entry.bot);
         let child_name = match prefix_score(parent_name, name) {
             0 => child_name_from_agent(name),
@@ -3655,6 +3658,52 @@ mod compat_tests {
         assert_eq!(grand.parent_bot_id.as_deref(), Some(kid.id.as_str()), "under the child, not the top bot");
     }
 
+    /// 2026-10-01 cf-優化：parent 在 verify 的 tab 裡開了 `<parent>-memleak`（沒有 spawn hint）。同 tab 的 verify 名字對不上，
+    /// 名字前綴說的是 parent：掛到 parent 底下，不是 verify；短名照前綴切成 `memleak`。
+    #[tokio::test]
+    async fn a_sibling_opened_in_a_childs_tab_follows_its_name_not_the_tab() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let (ws2, kid_root) = client.workspace_create("/tmp/p", "kid", json!({})).await.unwrap();
+        let sib_pane = client.pane_split(&kid_root.pane_id, "down", "/tmp/p", json!({})).await.unwrap();
+
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let agent_json = |name: &str, ws: &str, pane: &str, tab: &str| {
+            json!({"name": name, "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws, "tab_id": tab, "pane_id": pane, "cwd": "/tmp/p"})
+        };
+        *env.herdr.agents.lock().unwrap() = vec![
+            agent_json(&parent_agent, &ws.workspace_id, &root.pane_id, &root.tab_id),
+            agent_json(&format!("{parent_agent}-verify"), &ws2.workspace_id, &kid_root.pane_id, &kid_root.tab_id),
+        ];
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        env.herdr.agents.lock().unwrap().push(agent_json(&format!("{parent_agent}-memleak"), &ws2.workspace_id, &sib_pane.pane_id, &sib_pane.tab_id));
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let sib = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = 'memleak'")
+            .fetch_one(&app.db)
+            .await
+            .expect("adopted under its short name");
+        assert_eq!(sib.parent_bot_id.as_deref(), Some(parent.as_str()), "the name says the top bot opened it, not verify");
+    }
+
     /// issue #82：native `SubagentStart`／`SubagentStop`（頂層 bot 自己行程內的 Task 工具呼叫，跟
     /// §6.5a 血緣認領的子 pane 完全是兩回事）不能改變、也不會改變誰認領誰。父 bot 收到一則
     /// `SubagentStart`（`runs.subagent_json` 因此被寫入）之後，同一個 tab 底下的孫代仍然照血緣掛在
@@ -3934,9 +3983,8 @@ mod compat_tests {
         }
     }
 
-    /// 對照組（issue #94）：跟上面完全同樣的場景，但**不送任何 hint**——證明 hook 缺席時，舊的（有缺陷
-    /// 的）血緣推斷完全原樣保留，這是 CLI 不發事件時唯一能依靠的路徑，這張 issue 沒有拿掉它。第二、
-    /// 三顆確實串到前一顆底下，正是 2026-09-17 實際發生的現象。
+    /// 對照組（issue #94）：跟上面完全同樣的場景，但**不送任何 hint**。以前第二、三顆串到前一顆底下（2026-09-17 實際發生）；
+    /// 2026-10-01 起同 tab 的候選名字對不上時改以名字前綴為準，沒有 hint 也掛對。
     #[tokio::test]
     async fn without_spawn_hints_a_new_tab_full_of_children_still_chains_like_before() {
         let env = tt::env().await;
@@ -3981,11 +4029,12 @@ mod compat_tests {
 
         let k1 = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = 'k1'").fetch_one(&app.db).await.unwrap();
         assert_eq!(k1.parent_bot_id.as_deref(), Some(parent.as_str()), "第一顆本來就對，靠名字前綴");
-        // 第二顆被同一個 tab 誤認成第一顆的小孩：`prefix_score` 對錯的那個 parent（k1）算出來是 0，
-        // `adopt_child` 因此連短名字都取不到，退而用完整 herdr agent name 建 bot——這正是 issue 裡
-        // 「短名字被占用後另外建出重複 bot」那個現象的根：不是名字被搶走，是 parent 從一開始就選錯了。
-        let k2 = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = ?").bind(&name2).fetch_one(&app.db).await.unwrap();
-        assert_eq!(k2.parent_bot_id.as_deref(), Some(k1.id.as_str()), "沒有 hint 時，第二顆確實串到第一顆底下（既有行為原樣保留）");
+        // 2026-10-01 起修掉這個缺陷：同 tab 的 k1 名字對不上（前綴分數 0），名字前綴說的是父 bot，就以名字為準。
+        // 以前第二顆串到 k1 底下、連短名字都取不到（用完整 herdr agent name 建 bot），cf-優化的 memleak 就是這樣看不到的。
+        for short in ["k2", "k3"] {
+            let k = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE name = ?").bind(short).fetch_one(&app.db).await.unwrap();
+            assert_eq!(k.parent_bot_id.as_deref(), Some(parent.as_str()), "{short}：沒有 hint 也照名字掛到真正的父 bot 底下");
+        }
     }
 
     /// A run whose agent herdr no longer lists still exits, tab or not.
