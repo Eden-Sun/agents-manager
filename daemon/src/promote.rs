@@ -105,7 +105,7 @@ async fn locate_recorded(app: &Arc<App>, bot_id: &str) -> Result<Located, LcErro
     let last = sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT native_session_id, transcript_path FROM runs
           WHERE bot_id = ? AND native_session_id IS NOT NULL AND native_session_id != '' AND transcript_path IS NOT NULL
-          ORDER BY started_at DESC LIMIT 1",
+          ORDER BY started_at DESC, rowid DESC LIMIT 1",
     )
     .bind(bot_id)
     .fetch_optional(&app.db)
@@ -435,6 +435,28 @@ mod tests {
     use super::*;
     use crate::testing::{env, Env};
     use serde_json::Value;
+
+    /// 稽核：記下來的 session 取「最後一個有記的 run」，`started_at` 只到毫秒，同一毫秒的兩個 run 要看寫入順序（`rowid`）——
+    /// 挑錯就是把 child 升級成接著**另一段對話**的頂層 bot（#100／#461 同一個坑）。
+    #[tokio::test]
+    async fn the_recorded_session_is_the_run_written_last_when_two_share_a_millisecond() {
+        let e = env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "promote-tie").await;
+        let file = e.dir.join("tie.jsonl");
+        std::fs::write(&file, "{}\n").unwrap();
+        for (id, session) in [("r-zzz-earlier", "native-earlier"), ("r-aaa-latest", "native-latest")] {
+            sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at) VALUES (?,?, 'exited','idle',?,?, '2026-10-01T00:00:00.000Z')")
+                .bind(id)
+                .bind(&bot.id)
+                .bind(session)
+                .bind(file.to_string_lossy().to_string())
+                .execute(&e.app.db)
+                .await
+                .unwrap();
+        }
+        let got = locate_recorded(&e.app, &bot.id).await.unwrap();
+        assert_eq!(got.session_id, "native-latest");
+    }
 
     const SID: &str = "sess-promote-1";
     const CHILD_CWD: &str = "/tmp/promote-child-worktree";
