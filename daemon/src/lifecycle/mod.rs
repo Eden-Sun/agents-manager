@@ -114,6 +114,28 @@ pub(crate) fn pane_typed_memo(run_id: &str) -> bool {
     PANE_TYPED_MEMO.get_or_init(Default::default).lock().map(|s| s.contains(run_id)).unwrap_or(true)
 }
 
+/// 不在 `active` 裡的 run（結束了）不留帳：run id 每次都是新的，只記不清的話長跑的 daemon 裡這張表只增不減。
+pub(crate) fn retain_pane_typed(active: &[String]) {
+    if let Ok(mut set) = PANE_TYPED_MEMO.get_or_init(Default::default).lock() {
+        set.retain(|id| active.contains(id));
+    }
+}
+
+#[cfg(test)]
+mod pane_typed_memo_tests {
+    use super::*;
+
+    #[test]
+    fn an_ended_runs_pane_typed_memo_is_dropped() {
+        remember_pane_typed("memo-gone");
+        remember_pane_typed("memo-kept");
+        retain_pane_typed(&["memo-kept".to_string()]);
+        assert!(!pane_typed_memo("memo-gone"), "結束的 run 不留帳");
+        assert!(pane_typed_memo("memo-kept"));
+        retain_pane_typed(&[]);
+    }
+}
+
 pub(crate) use messages::*;
 pub(crate) use poller::*;
 pub(crate) use prompt::*;
