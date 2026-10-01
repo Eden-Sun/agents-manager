@@ -389,6 +389,67 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// 多裝置同時標讀（#756 審查）：同一個專案的標記以任何順序、同時到達，最後都停在 `(at, id)` 最大的那個，
+    /// 沒有哪一次較舊的寫入把它倒退回去（upsert 的條件在同一個 SQL 裡，不是先讀再寫）。
+    #[tokio::test]
+    async fn concurrent_group_marks_settle_on_the_largest_whatever_the_arrival_order() {
+        let (pool, dir) = pool().await;
+        seed(&pool).await;
+        let marks = [
+            ("2026-09-15T01:00:00.000Z", "a0-t1"),
+            ("2026-09-15T02:00:00.000Z", "a0-t2"),
+            ("2026-09-15T02:00:00.000Z", "a1-t2"),
+            ("2026-09-15T02:00:00.000Z", ""),
+            ("2026-09-15T00:30:00.000Z", "zzz"),
+        ];
+        for round in 0..20 {
+            sqlx::query("UPDATE project_group_reads SET read_at='2026-09-15T00:00:00.000Z', message_id=''").execute(&pool).await.unwrap();
+            let mut order: Vec<usize> = (0..marks.len()).collect();
+            order.rotate_left(round % marks.len());
+            if round % 2 == 1 {
+                order.reverse();
+            }
+            let mut tasks = Vec::new();
+            for i in order {
+                let pool = pool.clone();
+                let (at, id) = marks[i];
+                tasks.push(tokio::spawn(async move { mark_group(&pool, "p", at, id).await.unwrap() }));
+            }
+            for t in tasks {
+                t.await.unwrap();
+            }
+            let m = group_marks(&pool).await.unwrap().remove("p").unwrap();
+            assert_eq!((m.at.as_str(), m.message_id.as_str()), ("2026-09-15T02:00:00.000Z", "a1-t2"), "round {round}");
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 群組成員增減（#756 審查）：新加入的 bot 在標記之後的群組回覆算未讀、標記之前的不算；軟刪不算（35d926d6）、
+    /// 還原回來又算——數字永遠等於「現在還在的成員」在標記之後的群組回合。
+    #[tokio::test]
+    async fn group_unread_follows_the_members_that_are_there_now() {
+        let (pool, dir) = pool().await;
+        seed(&pool).await;
+        sqlx::query("UPDATE messages SET group_id = 'g-1' WHERE role = 'user'").execute(&pool).await.unwrap();
+        mark_group(&pool, "p", "2026-09-15T02:00:00.000Z", "a1-t2").await.unwrap();
+        let unread_p = |pool: SqlitePool| async move { group_unread_counts(&pool).await.unwrap().get("p").copied() };
+        assert_eq!(unread_p(pool.clone()).await, Some(1), "只有 t3");
+        // 新成員 b2：一則標記前的舊回覆（不算）、一則標記後的（算）。
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('b2','p','b2','claude','t','2026-09-15T01:30:00.000Z')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('c2','b2','2026-09-15T01:30:00.000Z')").execute(&pool).await.unwrap();
+        for (tid, at) in [("x1", "2026-09-15T01:45:00.000Z"), ("x2", "2026-09-15T02:30:00.000Z")] {
+            sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,created_at,completed_at) VALUES (?,'c2','web','completed',?,?)").bind(tid).bind(at).bind(at).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,group_id,created_at) VALUES (?,'c2',?,'user','q','web','g-1',?)").bind(format!("u-{tid}")).bind(tid).bind(at).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,'c2',?,'assistant','a','hook',?)").bind(format!("a-{tid}")).bind(tid).bind(at).execute(&pool).await.unwrap();
+        }
+        assert_eq!(unread_p(pool.clone()).await, Some(2), "t3 + x2；x1 在標記之前");
+        sqlx::query("UPDATE bots SET deleted_at='2026-09-15T04:00:00.000Z' WHERE id='b2'").execute(&pool).await.unwrap();
+        assert_eq!(unread_p(pool.clone()).await, Some(1), "b2 軟刪：它的回覆不算");
+        sqlx::query("UPDATE bots SET deleted_at=NULL WHERE id='b2'").execute(&pool).await.unwrap();
+        assert_eq!(unread_p(pool.clone()).await, Some(2), "還原回來又算");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// 升級時（表第一次建起來）既有專案的群組舊訊息都算已讀；再跑一次 migrate 不重設。
     #[tokio::test]
     async fn creating_the_group_table_marks_existing_projects_read() {
