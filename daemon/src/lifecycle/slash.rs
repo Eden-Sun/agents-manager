@@ -76,6 +76,11 @@ pub async fn send_text_recorded(
 
 async fn record_supplement(app: &Arc<App>, bot_id: &str, run_id: &str, text: &str) -> anyhow::Result<Option<db::Message>> {
     let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(None) };
+    insert_supplement(app, bot_id, &turn, text).await.map(Some)
+}
+
+/// 把 `text` 記成 `turn` 的補充（`sent_via = 'supplement'`）並推 `message_added`。codex steer（#748）也用這一支。
+pub(super) async fn insert_supplement(app: &Arc<App>, bot_id: &str, turn: &db::Turn, text: &str) -> anyhow::Result<db::Message> {
     let id = db::ulid();
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, sent_via, created_at)
@@ -90,7 +95,7 @@ async fn record_supplement(app: &Arc<App>, bot_id: &str, run_id: &str, text: &st
     .await?;
     let m = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id = ?").bind(&id).fetch_one(&app.db).await?;
     emit_message_added(app, bot_id, m.clone()).await;
-    Ok(Some(m))
+    Ok(m)
 }
 
 /// TUI slash command for a live setting, or `None` (caller reports `needs_restart`).

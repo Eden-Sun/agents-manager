@@ -195,6 +195,11 @@ pub fn remember_running(run_id: &str, screen: &str, prompt: Option<&Prompt>) -> 
     }
 }
 
+/// 這一個 run 看過的 codex 版本（`remember_running` 記的）；還沒看過＝`None`。issue #748 的版本閘門讀它。
+pub fn running_version_of(run_id: &str) -> Option<String> {
+    running_versions().lock().unwrap().get(run_id).cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

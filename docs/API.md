@@ -333,6 +333,7 @@ daemon 自己補（定時重試、下一則 prompt、回合 hook）；同一個 
 |---|---|
 | `"interrupted"` | 真的打斷了一個進行中的回合：send-now 鍵確定生效（herdr 收下，或 transcript 證明送出了） |
 | `"idle"` | 當下沒有回合在飛，照一般 Enter 送出（不需要插隊，也不檢查版本） |
+| `"steered"` | codex（issue #748，`[codex] instant_interrupt` 旗標開著才有）把字打進忙碌的 TUI、併進**同一個**進行中的回合：沒有打斷、沒有新回合，`turn_id` 是被 steer 的那一回合、`message_id` 是記在它底下的補充訊息（`sent_via=supplement`），`delivery` 照證據是 `ok`／`unverified`／`unknown` |
 | `"not_sent"` | send-now 鍵沒有生效（打字沒回應、打完框是空的、herdr 拒收那顆鍵）：進行中的回合照常，這一則 `delivery:"failed"`，字可能還留在終端的輸入框 |
 | `"unknown"` | 不知道 send-now 鍵有沒有生效：進行中的回合**不收**、等證據，這一則 `delivery:"unknown"`（turn 本身是 failed，不佔 in-flight） |
 
@@ -345,9 +346,11 @@ daemon 自己補，用同一個 `client_request_id` 重送拿到的是這一則�
 
 | `send_now_refused` | 意思 |
 |---|---|
-| `send_now_unsupported_kind` | 只有 claude 有這顆鍵；codex／grok 照舊排隊 |
+| `send_now_unsupported_kind` | 只有 claude 有這顆鍵；codex（`[codex] instant_interrupt` 沒開時）／grok 照舊排隊 |
 | `send_now_cli_too_old` | 這個 run 跑的 claude 比 2.1.275 舊，重啟套用新版後才能插隊 |
 | `send_now_version_unknown` | statusLine 還沒回報版本，不賭那顆鍵 |
+| `send_now_codex_too_old` | 旗標開著，但這個 run 跑的 codex 比 0.159.0 舊 |
+| `send_now_codex_version_unknown` | 旗標開著，但還沒讀到這個 run 的 codex 版本，不賭 |
 
 `send_now_message` 是同一件事的中文說明，前端直接顯示。灰字（sent／queued 到模型收到之前）由 CLI 自己畫，daemon 不模擬。
 

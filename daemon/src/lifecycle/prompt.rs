@@ -337,7 +337,7 @@ pub struct PromptOut {
     pub message_id: String,
     pub delivery: String,
     /// 只有請求帶 `send_now` 時才有（issue #103）。`"interrupted"`＝真的打斷了一個進行中的回合並按了
-    /// send-now 鍵；`"idle"`＝當下沒有回合在飛，照一般 Enter 送出，不需要插隊；其他值是
+    /// send-now 鍵；`"steered"`＝codex（#748）把字打進忙碌的 TUI、併進同一個進行中的回合（沒有打斷，`turn_id` 是被 steer 的那一回合）；`"idle"`＝當下沒有回合在飛，照一般 Enter 送出，不需要插隊；其他值是
     /// [`send_now::Refusal::code`]，也就是**沒有**插隊的原因。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_now: Option<&'static str>,
@@ -919,7 +919,17 @@ async fn prompt_inner(
     }
     // issue #103：插隊送出。先問這顆 run 認不認得 send-now 鍵，**再**決定要不要打斷——不合資格時
     // 一個鍵都不按，照原本的路回 409，只是把原因一起講出來。
-    let refused = want_send_now.then(|| send_now::supported(&bot.kind, run.status_json.as_deref()).err()).flatten();
+    // issue #748：codex 另有一條 steer（`[codex] instant_interrupt` 旗標＋跑著的版本 >= 0.159.0），旗標預設關。
+    let codex_on = want_send_now && bot.kind == "codex" && app.cfg.get().await.codex.instant_interrupt;
+    let gate = want_send_now.then(|| {
+        let codex_running = crate::codex_update::running_version_of(&run.id);
+        send_now::gate(&bot.kind, run.status_json.as_deref(), codex_running.as_deref(), codex_on)
+    });
+    let (refused, send_now_mode) = match gate {
+        Some(Err(r)) => (Some(r), None),
+        Some(Ok(m)) => (None, Some(m)),
+        None => (None, None),
+    };
     let send_now_ok = want_send_now && refused.is_none();
     // 打斷哪一筆。**現在不收**：計畫失敗（框裡有字、證據讀不到）時一個鍵都還沒按，不該先把人家的回合收掉。
     let interrupted = match db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
@@ -993,6 +1003,11 @@ async fn prompt_inner(
     let client = client_for_run(app, &run).await?;
     if let Some(expect) = clear_draft {
         super::composer_draft::clear(app, &client, &run, &bot, expect, interrupted.is_some()).await?;
+    }
+    // codex steer（#748）：字照一般方式打進忙碌的 pane，併進**同一個**進行中的回合——不收舊回合、不建新回合。
+    // 閒著（沒有進行中的回合）時不走這裡，照一般送出（`send_now: "idle"`）。
+    if let (Some(send_now::Mode::CodexSteer), Some(turn)) = (send_now_mode, interrupted.as_ref()) {
+        return super::codex_steer::steer(app, &client, &run, &bot, turn, text, &deliver, client_request_id).await;
     }
     // Decide how it will be delivered before a turn exists: a prompt that cannot be sent right now
     // (box busy, no way to prove it) must never become an in-flight turn nobody can release
@@ -2570,6 +2585,124 @@ mod send_now_tests {
 
     async fn sent_via(f: &Fixture, message_id: &str) -> Option<String> {
         sqlx::query_scalar("SELECT sent_via FROM messages WHERE id=? AND role='user'").bind(message_id).fetch_one(&f.env.app.db).await.unwrap()
+    }
+
+    /// issue #748：一顆 codex 的 run。`version` 是巡邏從畫面讀到的跑著的版本，`flag` 是 `[codex] instant_interrupt`。
+    /// 沒有 native session：送達證據走一列回音，不去翻真的 ~/.codex。
+    async fn codex_fixture(version: Option<&str>, flag: bool) -> Fixture {
+        let f = fixture("codex", None).await;
+        sqlx::query("UPDATE runs SET native_session_id = NULL, transcript_path = NULL WHERE id = ?").bind(&f.run_id).execute(&f.env.app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-sn", tt::LivePane { width: Some(120), codex: true, ..Default::default() });
+        if let Some(v) = version {
+            crate::codex_update::remember_running(&f.run_id, &format!("│ >_ OpenAI Codex (v{v})   │"), None);
+        }
+        f.env.app.cfg.update(|c| { c.codex.instant_interrupt = flag; Ok(()) }).await.unwrap();
+        f
+    }
+
+    async fn turn_count(f: &Fixture) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(&f.conv).fetch_one(&f.env.app.db).await.unwrap()
+    }
+
+    fn typed(f: &Fixture) -> usize {
+        f.env.herdr.calls_to("pane.send_text").len()
+    }
+
+    /// 旗標關（預設）：codex 的 send_now 跟以前一模一樣——409 說「只有 claude 有」，一個字都不打。
+    #[tokio::test]
+    async fn codex_send_now_is_refused_as_before_while_the_canary_is_off() {
+        let f = codex_fixture(Some("0.159.0"), false).await;
+        let running = busy(&f).await;
+        let err = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-off", &[], None).await.unwrap_err();
+        let LcError::Conflict(body) = err else { panic!("{err:?}") };
+        assert_eq!(body["send_now_refused"], "send_now_unsupported_kind", "{body}");
+        assert_eq!(typed(&f), 0, "沒插隊就一個字都不打");
+        assert_eq!(status_of(&f, &running).await, "in_flight");
+    }
+
+    /// 旗標開、版本夠：字打進忙碌的 pane，併進同一個回合——舊回合不收、不建新回合，泡泡掛在被 steer 的回合上，
+    /// 回應是 `steered` 而不是 claude 式的 `interrupted`，按的是一般 Enter 不是 send-now 鍵。
+    #[tokio::test]
+    async fn a_codex_steer_joins_the_running_turn_without_interrupting_it() {
+        let f = codex_fixture(Some("0.159.0"), true).await;
+        let running = busy(&f).await;
+        let out = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-steer", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("steered"));
+        assert_eq!(out.turn_id, running, "回的是被 steer 的那一回合");
+        assert!(matches!(out.delivery.as_str(), "ok" | "unverified"), "{}", out.delivery);
+        assert_eq!(status_of(&f, &running).await, "in_flight", "舊回合不收");
+        assert_eq!(turn_count(&f).await, 1, "不建新回合");
+        assert_eq!(in_flight_count(&f).await, 1);
+        assert_eq!(sent_via(&f, &out.message_id).await.as_deref(), Some("supplement"));
+        let msg_turn: Option<String> = sqlx::query_scalar("SELECT turn_id FROM messages WHERE id=?").bind(&out.message_id).fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(msg_turn.as_deref(), Some(running.as_str()));
+        assert!(notes_on(&f, &running).await.is_empty(), "不留「被插隊打斷」的說明");
+        assert_eq!(typed(&f), 1);
+        assert_eq!(keys_sent(&f), vec![r#"["Enter"]"#.to_string()], "一般 Enter，沒有 send-now 鍵");
+    }
+
+    /// 同一個 request id 重送（逾時重試）：字已經在 pane 裡，不能再打一次，也不能多一則訊息。
+    #[tokio::test]
+    async fn retrying_a_codex_steer_does_not_type_it_twice() {
+        let f = codex_fixture(Some("0.159.0"), true).await;
+        busy(&f).await;
+        let first = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-retry", &[], None).await.unwrap();
+        let again = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-retry", &[], None).await.unwrap();
+        assert_eq!((again.message_id.as_str(), again.send_now), (first.message_id.as_str(), Some("steered")));
+        assert_eq!(typed(&f), 1, "只打一次");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role='user' AND sent_via='supplement'").fetch_one(&f.env.app.db).await.unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// 字打進去了但訊息寫不進 DB：回 503（sent:true），重送只補記訊息，不重打。
+    #[tokio::test]
+    async fn a_codex_steer_whose_message_could_not_be_saved_is_not_typed_again_on_retry() {
+        let f = codex_fixture(Some("0.159.0"), true).await;
+        busy(&f).await;
+        sqlx::query("CREATE TRIGGER no_user_msg BEFORE INSERT ON messages WHEN NEW.sent_via = 'supplement' BEGIN SELECT RAISE(ABORT, 'disk hiccup'); END")
+            .execute(&f.env.app.db).await.unwrap();
+        let err = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-db", &[], None).await.unwrap_err();
+        let LcError::Uncommitted(body) = err else { panic!("{err:?}") };
+        assert_eq!((body["error"].as_str(), body["sent"].as_bool()), (Some("send_now_state_uncommitted"), Some(true)), "{body}");
+        sqlx::query("DROP TRIGGER no_user_msg").execute(&f.env.app.db).await.unwrap();
+        let out = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-db", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("steered"));
+        assert!(!out.message_id.is_empty());
+        assert_eq!(typed(&f), 1, "重送只補記，不重打");
+    }
+
+    /// 版本不夠或不知道：不賭，409 帶原因，一個字都不打。
+    #[tokio::test]
+    async fn a_codex_steer_needs_a_known_new_enough_version() {
+        for (version, want) in [(Some("0.158.9"), "send_now_codex_too_old"), (None, "send_now_codex_version_unknown")] {
+            let f = codex_fixture(version, true).await;
+            busy(&f).await;
+            let err = prompt_send_now(&f.env.app, &f.bot_id, "改方向", "cx-ver", &[], None).await.unwrap_err();
+            let LcError::Conflict(body) = err else { panic!("{err:?}") };
+            assert_eq!(body["send_now_refused"], want, "{body}");
+            assert_eq!(typed(&f), 0);
+        }
+    }
+
+    /// 普通 prompt／排隊不因這個功能變成插隊：旗標開著，沒帶 send_now 的 codex prompt 照舊 409。
+    #[tokio::test]
+    async fn a_plain_codex_prompt_still_waits_while_the_canary_is_on() {
+        let f = codex_fixture(Some("0.159.0"), true).await;
+        busy(&f).await;
+        let err = prompt_relayed(&f.env.app, &f.bot_id, "一般一句", "cx-plain", &[], None).await.unwrap_err();
+        let LcError::Conflict(body) = err else { panic!("{err:?}") };
+        assert_eq!(body["reason"], "a turn is already in flight", "{body}");
+        assert_eq!(typed(&f), 0);
+    }
+
+    /// codex 閒著時按插隊＝一般送出（`idle`），建新回合，不走 steer。
+    #[tokio::test]
+    async fn a_codex_send_now_while_idle_is_a_plain_send() {
+        let f = codex_fixture(Some("0.159.0"), true).await;
+        let out = prompt_send_now(&f.env.app, &f.bot_id, "現在做這個", "cx-idle", &[], None).await.unwrap();
+        assert_eq!(out.send_now, Some("idle"));
+        assert_eq!(turn_count(&f).await, 1);
+        assert_ne!(sent_via(&f, &out.message_id).await.as_deref(), Some("supplement"));
     }
 
     /// #120：插隊送出在**按任何鍵之前**就被擋下（這裡讓 `set_pane_typed` 寫不進去，`NotAttempted`）時，

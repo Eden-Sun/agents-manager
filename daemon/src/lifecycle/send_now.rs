@@ -14,6 +14,9 @@ use super::*;
 /// 有 send-now 鍵的最低 claude 版本。低於它的 run 照舊排隊／409。
 pub(crate) const MIN_VERSION: &str = "2.1.275";
 
+/// 有 `instant_interrupt` 的最低 codex 版本（issue #748，codex 0.159.0 release）。
+pub(crate) const CODEX_MIN_VERSION: &str = "0.159.0";
+
 /// 不能插隊的原因；回進 409 的 body（`send_now_refused`），讓呼叫端知道為什麼沒插隊。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {
@@ -23,6 +26,10 @@ pub(crate) enum Refusal {
     CliTooOld,
     /// statusLine 還沒回報版本。**不賭**：按錯鍵的代價是把使用者的字打進不知道什麼地方。
     VersionUnknown,
+    /// 旗標開著，但這個 run 跑的 codex 比 0.159.0 舊：沒有 `instant_interrupt`，打進去的字只會排在輸入佇列（#748）。
+    CodexTooOld,
+    /// 旗標開著，但還沒看過這個 run 的 codex 版本（畫面上的版本行還沒被巡邏讀到）。不賭（#748）。
+    CodexVersionUnknown,
 }
 
 impl Refusal {
@@ -31,6 +38,8 @@ impl Refusal {
             Refusal::UnsupportedKind => "send_now_unsupported_kind",
             Refusal::CliTooOld => "send_now_cli_too_old",
             Refusal::VersionUnknown => "send_now_version_unknown",
+            Refusal::CodexTooOld => "send_now_codex_too_old",
+            Refusal::CodexVersionUnknown => "send_now_codex_version_unknown",
         }
     }
 
@@ -39,6 +48,8 @@ impl Refusal {
             Refusal::UnsupportedKind => "插隊送出只有 claude 有（2.1.275 的 send-now 鍵）；這顆 bot 照舊排隊。".into(),
             Refusal::CliTooOld => format!("這個 run 跑的 claude 比 {MIN_VERSION} 舊，沒有 send-now 鍵；重啟套用新版後才能插隊。"),
             Refusal::VersionUnknown => "還不知道這個 run 跑的 claude 版本（statusLine 尚未回報），不賭那顆鍵。".into(),
+            Refusal::CodexTooOld => format!("這個 run 跑的 codex 比 {CODEX_MIN_VERSION} 舊，沒有 instant_interrupt；重啟套用新版後才能插隊。"),
+            Refusal::CodexVersionUnknown => "還不知道這個 run 跑的 codex 版本（畫面上的版本行尚未讀到），不賭 instant_interrupt。".into(),
         }
     }
 }
@@ -59,6 +70,41 @@ pub(crate) fn supported(kind: &str, status_json: Option<&str>) -> Result<(), Ref
         return Err(Refusal::CliTooOld);
     }
     Ok(())
+}
+
+/// 這一次插隊怎麼做。兩條路的 DB 語意不同，不能混用：
+/// claude 是**打斷舊回合再開新回合**（`deliver`）；codex 是 **steer 進同一個進行中的回合**（`codex_steer`，不收舊回合）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    ClaudeKey,
+    CodexSteer,
+}
+
+/// 這顆 run 用哪一條路插隊，或為什麼不能（issue #748）。`codex_running` 是 `codex_update::running_version_of`，
+/// `codex_instant_interrupt` 是 `[codex] instant_interrupt` 旗標。旗標關的時候 codex 一律回 [`Refusal::UnsupportedKind`]，
+/// 跟這個功能出現以前一模一樣。
+pub(crate) fn gate(
+    kind: &str,
+    status_json: Option<&str>,
+    codex_running: Option<&str>,
+    codex_instant_interrupt: bool,
+) -> Result<Mode, Refusal> {
+    match kind {
+        "claude" => supported(kind, status_json).map(|()| Mode::ClaudeKey),
+        "codex" if codex_instant_interrupt => {
+            let Some(running) = codex_running.and_then(crate::changelog::version_string) else {
+                return Err(Refusal::CodexVersionUnknown);
+            };
+            let (Some(r), Some(min)) = (crate::changelog::parse_version(&running), crate::changelog::parse_version(CODEX_MIN_VERSION)) else {
+                return Err(Refusal::CodexVersionUnknown);
+            };
+            if r < min {
+                return Err(Refusal::CodexTooOld);
+            }
+            Ok(Mode::CodexSteer)
+        }
+        _ => Err(Refusal::UnsupportedKind),
+    }
 }
 
 /// 插隊送出一句話的結果（#120）。
@@ -207,10 +253,39 @@ mod tests {
     /// 每個拒絕原因都有自己的機器可讀代碼與一句中文說明（回進 409 的 body）。
     #[test]
     fn every_refusal_says_why_in_both_forms() {
-        for r in [Refusal::UnsupportedKind, Refusal::CliTooOld, Refusal::VersionUnknown] {
+        for r in [Refusal::UnsupportedKind, Refusal::CliTooOld, Refusal::VersionUnknown, Refusal::CodexTooOld, Refusal::CodexVersionUnknown] {
             assert!(r.code().starts_with("send_now_"), "{r:?}");
             assert!(!r.message().is_empty(), "{r:?}");
         }
         assert!(Refusal::CliTooOld.message().contains(MIN_VERSION));
+        assert!(Refusal::CodexTooOld.message().contains(CODEX_MIN_VERSION));
+    }
+
+    /// issue #748：codex 的閘門。旗標關＝跟以前一樣「只有 claude 有」；旗標開還要看跑著的版本 >= 0.159.0，
+    /// 版本不明就不賭（steer 打進去的字，舊版只會排進輸入佇列，等於假裝插了隊）。
+    #[test]
+    fn codex_steers_only_with_the_canary_on_and_a_new_enough_running_version() {
+        let gate = |on, v: Option<&str>| gate("codex", None, v, on);
+        assert_eq!(gate(false, Some("0.159.0")), Err(Refusal::UnsupportedKind), "旗標關：維持舊行為與舊代碼");
+        assert_eq!(gate(false, None), Err(Refusal::UnsupportedKind));
+        assert_eq!(gate(true, Some("0.159.0")), Ok(Mode::CodexSteer));
+        assert_eq!(gate(true, Some("0.159.1")), Ok(Mode::CodexSteer));
+        assert_eq!(gate(true, Some("0.160.0")), Ok(Mode::CodexSteer));
+        assert_eq!(gate(true, Some("0.158.9")), Err(Refusal::CodexTooOld));
+        assert_eq!(gate(true, Some("0.155.1")), Err(Refusal::CodexTooOld));
+        assert_eq!(gate(true, None), Err(Refusal::CodexVersionUnknown));
+        assert_eq!(gate(true, Some("garbage")), Err(Refusal::CodexVersionUnknown));
+    }
+
+    /// 旗標只管 codex：claude 的閘門照舊走 statusLine 版本，旗標開不開都一樣；grok／shell 永遠不行。
+    #[test]
+    fn the_codex_flag_changes_nothing_for_other_kinds() {
+        for on in [false, true] {
+            assert_eq!(gate("claude", Some(&status("2.1.275")), Some("0.159.0"), on), Ok(Mode::ClaudeKey));
+            assert_eq!(gate("claude", Some(&status("2.1.274")), None, on), Err(Refusal::CliTooOld));
+            for kind in ["grok", "shell"] {
+                assert_eq!(gate(kind, None, Some("0.159.0"), on), Err(Refusal::UnsupportedKind), "{kind}");
+            }
+        }
     }
 }
