@@ -1496,3 +1496,12 @@ test('supervisor_changed：supervisorRev 加一，AGM 面板開著時據此重�
   handleFrame(useStore.setState, useStore.getState, { seq: 7002, type: 'supervisor_changed', data: { status: 'waiting_quota' } })
   assert.equal(useStore.getState().supervisorRev, before + 2)
 })
+
+test('panes_changed：重抓 pane 清單（別的裝置開／關／改用途的 pane 不必等 30 秒輪詢）', async () => {
+  seed()
+  const { handleFrame } = await import('./store.ts')
+  routeDaemon((r) => (r.path.includes('/panes') ? json({ panes: [] }, 200) : json({}, 200)))
+  handleFrame(useStore.setState, useStore.getState, { seq: 8001, type: 'panes_changed', data: { host: 'local' } })
+  await settle()
+  assert.ok(requests.some((r) => r.method === 'GET' && r.path.includes('/panes')), '要打 GET /api/panes')
+})

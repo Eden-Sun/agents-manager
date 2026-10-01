@@ -273,6 +273,7 @@ async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Resu
         observed.insert(pane_id.to_string(), seen);
     }
     let scan = record_scan(app, host, snapshot_panes, &observed, &scanned_at).await?;
+    announce_if_changed(app, host).await;
     if let (Some(pane_id), Some(client)) = (&scan.rename_scratch, &client) {
         let name = app.cfg.get().await.panes.scratch_name.clone();
         match client.pane_rename(pane_id, &name).await {
@@ -608,6 +609,40 @@ pub(crate) fn pick_scratch<'a>(cands: &'a [ScratchCandidate], name: &str, name_i
     earliest(&mut eligible().filter(|c| c.kind == "shell"))
 }
 
+/// 每台主機上一次發出 `panes_changed` 時那張表的指紋；第一次看到只記基準、不發（前端載入時本來就會讀一次）。
+static ANNOUNCED: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
+
+/// `panes` 表（側欄「其他 pane」的來源）被掃描、用途回報、adopt、關閉、GC 各自改寫，以前沒有任何事件：別的裝置要等 30 秒
+/// 輪詢。這裡把這台主機的列算成指紋，**真的變了**才發 `panes_changed {host}`（定期掃描每分鐘跑一次，沒變不會灌事件）。
+pub async fn announce_if_changed(app: &Arc<App>, host: &str) {
+    let rows: Vec<String> = match sqlx::query_scalar(
+        "SELECT pane_id || '|' || kind || '|' || COALESCE(owner_bot_id,'') || '|' || COALESCE(project_id,'') || '|' || COALESCE(bound_project_id,'')
+                || '|' || COALESCE(purpose,'') || '|' || COALESCE(foreground,'') || '|' || COALESCE(listen_ports,'') || '|' || scratch || '|' || orphaned
+                || '|' || COALESCE(label,'') || '|' || COALESCE(workspace_id,'') || '|' || COALESCE(tab_id,'')
+           FROM panes WHERE host = ? ORDER BY pane_id",
+    )
+    .bind(host)
+    .fetch_all(&app.db)
+    .await
+    {
+        Ok(r) => r,
+        // 讀不到不下結論：不發、也不動基準，下一次再比。
+        Err(_) => return,
+    };
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rows.hash(&mut h);
+    let fp = h.finish();
+    let changed = {
+        let mut guard = ANNOUNCED.lock().unwrap_or_else(|e| e.into_inner());
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(host.to_string(), fp).is_some_and(|prev| prev != fp)
+    };
+    if changed {
+        app.emit("panes_changed", json!({"host": host})).await;
+    }
+}
+
 /// shim 回報的用途：pane 還沒被掃到就先建一列（`kind` 先當 shell，下一輪掃描會修正）。
 /// owner 只在這一列還沒有 owner 時才寫——回報不能改寫別人的 pane；之後掃描讀到的 `AM_BOT_ID` 會蓋過它。
 /// 綁定（`bound_project_id`）同樣只補空的：讀不到那顆 pane 環境的輪次（macOS 閒著的 -zsh）才靠它知道是 bot 開的。
@@ -637,6 +672,7 @@ pub async fn note_purpose(app: &Arc<App>, host: &str, pane_id: &str, bot: &crate
     .execute(&app.db)
     .await?;
     tracing::info!(host, pane_id, bot = %bot.id, purpose, "pane purpose reported by the shim");
+    announce_if_changed(app, host).await;
     Ok(())
 }
 
@@ -668,6 +704,9 @@ pub async fn gc_host(app: &Arc<App>, host: &str) -> Result<usize> {
             Ok(false) => {}
             Err(e) => tracing::warn!(host, pane_id, error = ?e, "pane GC 放棄這一顆"),
         }
+    }
+    if closed > 0 {
+        announce_if_changed(app, host).await;
     }
     Ok(closed)
 }
@@ -845,6 +884,36 @@ mod tests {
         assert_eq!(gc_skip("shell", false, Some("user"), 1, later, old, six_h), None, "簽過名的手開 pane 才算");
         let now = crate::db::now();
         assert_eq!(gc_skip("shell", false, Some("bot"), 0, &now, old, six_h), Some("recent_output"));
+    }
+
+    /// `panes` 表是側欄「其他 pane」的來源，而它被掃描、用途回報、adopt、關閉、GC 各自改寫，從來沒有人通知前端：別的裝置
+    /// 要等 30 秒輪詢才看得到。表的內容真的變了才發一則 `panes_changed {host}`（沒變不發，定期掃描不會每分鐘灌一則）。
+    #[tokio::test]
+    async fn a_change_to_the_pane_table_is_announced_once() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = "panes-evt-host";
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "pane-owner").await;
+        announce_if_changed(&app, host).await; // 基準：這台現在是空的
+        let mut events = app.subscribe();
+
+        note_purpose(&app, host, "w1:pE", &bot, "dev-server").await.unwrap();
+        let mut seen = 0;
+        while let Ok(ev) = events.try_recv() {
+            if ev.kind == "panes_changed" && ev.data["host"] == host {
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 1, "新的 pane 列出現");
+
+        // 同樣的內容再報一次：表沒變，不再發。
+        note_purpose(&app, host, "w1:pE", &bot, "dev-server").await.unwrap();
+        announce_if_changed(&app, host).await;
+        assert!(events.try_recv().is_err(), "表沒變就不發");
+
+        note_purpose(&app, host, "w1:pE", &bot, "logs").await.unwrap();
+        let ev = events.try_recv().expect("用途變了要發");
+        assert_eq!(ev.kind, "panes_changed");
     }
 
     /// schema 變更（additive）：上一版的 `panes` 表（沒有 label／scratch／bound_project_id／orphaned／owner_adopted）
@@ -1765,6 +1834,7 @@ pub async fn adopt(
         .await
         .map_err(sql)?;
     tracing::info!(host, pane_id, owner = ?b.owner_bot_id, purpose = ?b.purpose, allow_gc = b.allow_gc, "pane adopted");
+    announce_if_changed(&app, &host).await;
     Ok(Json(row_json(&row)))
 }
 
@@ -1807,6 +1877,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
     match client.pane_get(&pane_id).await.map_err(up)? {
         None => {
             sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(&host).bind(&pane_id).execute(&app.db).await.map_err(sql)?;
+            announce_if_changed(&app, &host).await;
             return Err(LcError::NotFound("pane".into()));
         }
         Some(p) if p.agent.as_deref().is_some_and(|a| !a.is_empty()) => return Err(agent_pane()),
@@ -1852,6 +1923,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
         .await
         .map_err(sql)?;
     app.pane_live.lock().await.remove(&(host.clone(), pane_id.clone()));
+    announce_if_changed(&app, &host).await;
     tracing::info!(host, pane_id, kind = %info["kind"], "pane closed by request");
     Ok(json!({"closed": true, "pane": info}))
 }
