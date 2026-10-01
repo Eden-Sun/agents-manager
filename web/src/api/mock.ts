@@ -2916,7 +2916,14 @@ export class MockTransport implements Transport {
     if (body.mode === 'attach') {
       const port = Number(body.port)
       const other = this.previewHints(botId).others.find((o) => o.port === port)
-      if (!other) throw new ApiError(409, { reason: 'not_dev_server' }, 'not_dev_server')
+      // daemon（preview.rs）：port 上不是掃到的 dev server → not_vite；清單上挑的那顆已經換人（pid／dir 對不上）→ stale_selection，
+      // 兩個都帶 `{bot_id, port}`，stale_selection 另帶現在那顆的 pid／dir。
+      if (!other) throw new ApiError(409, { error: 'conflict', reason: 'not_vite', bot_id: botId, port }, 'not_vite')
+      const wantPid = typeof body.pid === 'number' ? body.pid : null
+      const wantDir = typeof body.dir === 'string' ? body.dir : null
+      if ((wantPid !== null && wantPid !== other.pid) || (wantDir !== null && wantDir.replace(/\/+$/, '') !== other.dir.replace(/\/+$/, ''))) {
+        throw new ApiError(409, { error: 'conflict', reason: 'stale_selection', bot_id: botId, port, pid: other.pid, dir: other.dir }, 'stale_selection')
+      }
       return { ...this.setPreviewState(botId, { status: 'running', port, dir: other.dir, pane_id: null, error: null, started_at: now(), source: 'attached', pid: other.pid }), ...this.previewHints(botId) }
     }
     const used = new Set([...this.previews.values()].map((p) => p.port))
