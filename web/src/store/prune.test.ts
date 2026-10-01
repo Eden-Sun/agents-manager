@@ -4,7 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { reset } from './storeEnv.harness.ts'
-import { useStore } from './store.ts'
+import { noteMessagePageForTest, storeMemoKeysForTest, useStore } from './store.ts'
 import type { Bot, Message, Mission, Project } from '../api/types.ts'
 
 const bot = (id: string, project = 'p1') => ({ id, name: id, project_id: project, kind: 'claude', identity: null, herdr_session: null }) as Bot
@@ -85,4 +85,14 @@ test('pruneDead：軟刪除的 bot 復原（回到 bots 名單）後，訊息會
   useStore.setState({ bots: [bot('b-live'), bot('b-gone')] })
   assert.equal(useStore.getState().loadedBots['b-gone'], undefined, '沒有「已載入」旗標＝選到它時會重載')
   assert.equal(useStore.getState().messages['b-gone'], undefined)
+})
+
+test('pruneDead：模組層的帳（頁代次）也只留還在名單上的 bot／專案', () => {
+  seed()
+  noteMessagePageForTest('bot', 'b-live')
+  noteMessagePageForTest('bot', 'b-gone')
+  noteMessagePageForTest('group', 'p-live')
+  noteMessagePageForTest('group', 'p-gone')
+  useStore.getState().pruneDead()
+  assert.deepEqual(storeMemoKeysForTest().messagePageGenerations.sort(), ['bot:b-live', 'group:p-live'])
 })

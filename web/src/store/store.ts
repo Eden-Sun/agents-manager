@@ -102,6 +102,35 @@ const missionListLoads = new Map<string, () => Promise<void>>()
 const messagePageGenerations = new Map<string, number>()
 let legacyQueueMigrationAttempted = false
 
+/**
+ * 模組層的帳（不在 state 裡，`pruneDeadKeys` 管不到）：不在快照名單上的 bot／專案／任務不留。
+ * 每個 bot／專案／任務各一格、沒有人會回頭清——長時間開著的分頁裡只增不減。
+ */
+function pruneStoreMemo(s: Pick<StoreState, 'bots' | 'projects' | 'missions'>): void {
+  const botIds = new Set(s.bots.map((b) => b.id))
+  const projectIds = new Set(s.projects.map((p) => p.id))
+  const missionIds = new Set(Object.values(s.missions).flatMap((list) => list.map((m) => m.id)))
+  for (const key of [...messagePageGenerations.keys()]) {
+    const id = key.slice(key.indexOf(':') + 1)
+    if (!(key.startsWith('bot:') ? botIds.has(id) : projectIds.has(id))) messagePageGenerations.delete(key)
+  }
+  for (const id of [...missionListLoads.keys()]) if (!projectIds.has(id)) missionListLoads.delete(id)
+  for (const id of [...missionLoads.keys()]) if (!missionIds.has(id)) missionLoads.delete(id)
+}
+
+/** 測試用：模組層那幾張帳現在有哪些 key。 */
+export function storeMemoKeysForTest() {
+  return {
+    messagePageGenerations: [...messagePageGenerations.keys()],
+    missionListLoads: [...missionListLoads.keys()],
+    missionLoads: [...missionLoads.keys()],
+  }
+}
+
+export function noteMessagePageForTest(kind: 'bot' | 'group', id: string) {
+  advanceMessagePageGeneration(kind, id)
+}
+
 function messagePageGeneration(kind: 'bot' | 'group', id: string): number {
   return messagePageGenerations.get(`${kind}:${id}`) ?? 0
 }
@@ -1390,6 +1419,7 @@ export const useStore = create<StoreState>((set, get) => {
 
   pruneDead: () => {
     const s = get()
+    pruneStoreMemo(s)
     const patch = pruneDeadKeys(s)
     if (!patch) return
     // 草稿另外有兩份外部帳：daemon 端的同步（`draftSync`）與 localStorage 的游標。
