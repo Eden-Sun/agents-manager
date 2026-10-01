@@ -167,6 +167,11 @@ fn probed() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
+/// 不在 `live` 裡的 bot（刪掉、退役的 child）不留探測記錄：key 是 `bot\u{1}pane`，每顆 child 每個 pane 一格，只記不清的話只增不減。
+pub fn retain_bots(live: &[String]) {
+    probed().lock().unwrap().retain(|k| k.split('\u{1}').next().is_some_and(|bot| live.iter().any(|l| l == bot)));
+}
+
 /// Checked before `pane.process_info`, so a settled child costs no herdr round trip.
 pub fn probe_due(bot_id: &str, pane_id: &str) -> bool {
     !probed().lock().unwrap().contains(&probe_key(bot_id, pane_id))
@@ -406,5 +411,21 @@ mod tests {
         let _ = child.wait();
         let env = parse_ps_env(&String::from_utf8_lossy(&out.stdout));
         assert_eq!(env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/home/u/.claude-cc2"), "{}", String::from_utf8_lossy(&out.stdout));
+    }
+}
+
+#[cfg(test)]
+mod retain_tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_bots_probe_records_are_dropped() {
+        for (bot, pane) in [("probe-gone", "w1:p1"), ("probe-gone", "w1:p2"), ("probe-kept", "w1:p3")] {
+            probed().lock().unwrap().insert(probe_key(bot, pane));
+        }
+        retain_bots(&["probe-kept".to_string()]);
+        assert!(probe_due("probe-gone", "w1:p1") && probe_due("probe-gone", "w1:p2"), "結束的 bot 不留記錄");
+        assert!(!probe_due("probe-kept", "w1:p3"), "還在的 bot 的記錄不動");
+        retain_bots(&[]);
     }
 }
