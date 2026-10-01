@@ -89,6 +89,7 @@ test('心跳 ping 幀算存活證據但不丟給 store；一直有幀就不重�
 test('開著的 socket 靜默超過 60 秒：判定半開，關掉舊的、走既有重連（since 由 open handler 補洞）', () => {
   const r = rig()
   r.last().open()
+  r.last().push({ type: 'ping' }) // 新 daemon：連上後 20 秒內就會有第一個 ping（舊 daemon 見下面那一則）
   const first = r.last()
   r.advance(30_000)
   r.watchdog()
@@ -107,6 +108,7 @@ test('開著的 socket 靜默超過 60 秒：判定半開，關掉舊的、走�
 test('切回前景：readyState 雖是 OPEN，但靜默超過心跳間隔就重連；剛有幀就不動', () => {
   const r = rig()
   r.last().open()
+  r.last().push({ type: 'ping' })
   r.advance(10_000)
   r.fireDoc('visibilitychange')
   r.fire('focus')
@@ -121,6 +123,7 @@ test('切回前景：readyState 雖是 OPEN，但靜默超過心跳間隔就重�
 test('分頁在背景時不用開心跳檢查去重連（回前景那一刻才判斷）', () => {
   const r = rig()
   r.last().open()
+  r.last().push({ type: 'ping' })
   ;(globalThis as unknown as { document: { visibilityState: string } }).document.visibilityState = 'hidden'
   r.advance(120_000)
   r.watchdog()
@@ -128,5 +131,34 @@ test('分頁在背景時不用開心跳檢查去重連（回前景那一刻才�
   ;(globalThis as unknown as { document: { visibilityState: string } }).document.visibilityState = 'visible'
   r.fireDoc('visibilitychange')
   assert.equal(FakeWS.instances.length, 2)
+  r.stop()
+})
+
+test('舊 daemon 不送 ping：安靜的前景分頁不能每分鐘重連（每次重連都整份重抓 state／對話）', () => {
+  const r = rig()
+  r.last().open()
+  for (let i = 0; i < 10; i++) {
+    r.advance(30_000)
+    r.watchdog()
+  }
+  assert.equal(FakeWS.instances.length, 1, '5 分鐘沒有任何幀：舊 daemon 本來就不送心跳，靜默不是斷線的證據')
+  r.advance(60_000)
+  r.fireDoc('visibilitychange')
+  r.fire('focus')
+  assert.equal(FakeWS.instances.length, 1, '切回前景也一樣：沒見過 ping 就不拿靜默當證據')
+  r.stop()
+})
+
+test('見過 ping 之後才信靜默：重連後的新連線（還沒收到第一個 ping）照樣有死線偵測', () => {
+  const r = rig()
+  r.last().open()
+  r.last().push({ type: 'ping' })
+  r.advance(61_000)
+  r.watchdog()
+  assert.equal(FakeWS.instances.length, 2, '見過 ping 的 daemon 靜默 61 秒＝半開')
+  r.last().open() // 新連線，還沒收到它的第一個 ping
+  r.advance(61_000)
+  r.watchdog()
+  assert.equal(FakeWS.instances.length, 3, '這個 daemon 會送 ping（同一個分頁已經見過），新連線也不能靜默 60 秒')
   r.stop()
 })
