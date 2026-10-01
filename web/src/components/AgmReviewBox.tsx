@@ -12,6 +12,8 @@ import { useEffect, useState } from 'react'
 import * as api from '../api'
 import type { UpdateReview } from '../api/types'
 import { anyAnalysed, triageForRange, type TriageItem, type TriageVersion } from '../lib/releaseTriage'
+import { scheduleReviewRefresh } from '../lib/reviewRefresh'
+import { useStore } from '../store/store'
 import './agmReviewBox.css'
 
 type Loaded = { key: string; version: string; review: UpdateReview | null; triage: TriageVersion[] | null }
@@ -47,6 +49,27 @@ export function AgmReviewBox({
       alive = false
     }
   }, [kind, host, from, to, key])
+
+  // AGM 給出結論（或接手）會推 `supervisor_changed`：還沒有結論時據此只重讀「AGM 解析」那一半（框不閃、分診帳本不重抓）。
+  const rev = useStore((s) => s.supervisorRev)
+  const reviewState = loaded?.key === key ? loaded.review?.state : undefined
+  useEffect(
+    () =>
+      scheduleReviewRefresh({
+        rev,
+        state: reviewState,
+        run: () => {
+          void api
+            .fetchUpdateReview({ kind, host, to })
+            .then((r) => {
+              // 讀失敗不蓋掉畫面上已有的；key 變了（換版本／重新派）就丟掉，那一輪有自己的讀取。
+              setLoaded((cur) => (cur && cur.key === key ? { ...cur, review: r?.review ?? cur.review } : cur))
+            })
+            .catch(() => {})
+        },
+      }),
+    [rev, reviewState, kind, host, to, key],
+  )
 
   const cur = loaded?.key === key ? loaded : null
   if (!cur || (!cur.review && !cur.triage)) return null
