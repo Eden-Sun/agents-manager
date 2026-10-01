@@ -58,6 +58,7 @@ store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`f
   `delivery="failed"` 不塞假 turn，文字留在框裡；`pending/ok/unknown` 才先補一筆 turn 讓輸入框立即鎖住。
   輸入框鎖定原因的順序在 `composerState()`；Enter 送出、Shift+Enter 換行、組字中的 Enter 不送。
 - **預覽分頁**（issue #253）：`api/preview.ts` 三個端點與型別、`store.previews`（`preview_changed` 寫入）、`components/PreviewPanel.tsx`；取捨見 UI-DECISIONS〈預覽分頁〉。
+- **往前翻頁的游標丟了**（#766）：`loadEarlierMessages`／`loadEarlierGroupMessages` 收到 404 `before_message_gone`／`before_message_not_in_conversation`（最舊那則已被刪、或不是這條時間軸的）時，不跳「載入更早的訊息失敗」，而是重載第一頁（`loadMessages`／`loadGroupMessages`，比最新頁新的訊息照留）再翻一次；**只自救一次**（`store/pageCursor.ts` 每條時間軸一把旗標），重載後游標仍 404 才照舊報錯。mock 的 `before` 同樣回這兩種 404。
 - **圖片附件上傳前先縮**（`lib/imageCompress.ts`，2026-09-23 使用者）：JPEG／PNG／WebP 長邊縮到 1568px（Claude 視覺的有效解析度；
   token 按像素算，省 token 的是縮尺寸）。JPEG 出 JPEG q0.85；PNG 維持 PNG 只縮尺寸（多半是截圖，壓成 JPEG 字會糊，透明度也留不住）；
   WebP 不透明出 JPEG、有透明出 PNG。EXIF 方向用 `createImageBitmap(imageOrientation:'from-image')` 烤進像素。壓完沒變小、解不開就傳原檔；
