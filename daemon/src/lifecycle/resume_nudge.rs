@@ -160,6 +160,11 @@ fn armed_run(bot_id: &str) -> Option<String> {
     armed().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).map(|a| a.run_id.clone())
 }
 
+/// 不在 `live` 裡的 bot 不留候選：bot 被刪掉就沒有人會再 disarm 它。
+pub(crate) fn retain_bots(live: &[String]) {
+    armed().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| live.contains(id));
+}
+
 fn disarm(bot_id: &str, run_id: &str) {
     let mut g = armed().lock().unwrap_or_else(|e| e.into_inner());
     if g.get(bot_id).is_some_and(|a| a.run_id == run_id) {
@@ -378,6 +383,21 @@ pub(crate) async fn withdraw_unless_resumed(app: &Arc<App>, turn: &db::Turn, run
     super::queue::revoke_queued_turn(app, &turn.id, why).await?;
     tracing::info!(bot = %run.bot_id, run = %run.id, turn = %turn.id, outcome = ?run.resume_outcome, "withdrew the resume nudge: not a verified resume of the old session");
     Ok(true)
+}
+
+#[cfg(test)]
+mod retain_tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_bots_resume_nudge_candidate_is_dropped() {
+        for bot in ["nudge-gone", "nudge-kept"] {
+            armed().lock().unwrap().insert(bot.to_string(), Armed { run_id: "r".into(), idle_since: None });
+        }
+        retain_bots(&["nudge-kept".to_string()]);
+        assert!(armed_run("nudge-gone").is_none() && armed_run("nudge-kept").is_some());
+        retain_bots(&[]);
+    }
 }
 
 #[cfg(test)]
