@@ -3935,7 +3935,9 @@ export class MockTransport implements Transport {
       hosts: [{ host: 'local', installed_version: disk, error: null, behind: true }],
       text: kind === 'claude'
         ? `claude 需安裝 ${target}（local：${disk} → ${target}）：需安裝到共同版本。指令：\`claude install ${target}\``
-        : `${kind} 上游有新版 ${latest}（local：${disk} → ${target}）：需先安裝，裝好才會出現「重啟套用」`,
+        : kind === 'grok'
+          ? `grok 上游有新版 ${latest}（local 磁碟上是 ${disk}）：到那台主機執行 \`grok update\`（官方升級指令，這裡不代裝）；跑著的 grok bot 要重啟才會換版`
+          : `${kind} 上游有新版 ${latest}（local：${disk} → ${target}）：需先安裝，裝好才會出現「重啟套用」`,
     }
     this.upstreamItems = [...this.upstreamItems.filter((old) => old.kind !== kind), { ...item, notify: null }]
     this.emit('upstream_update', item)
@@ -3992,7 +3994,7 @@ function installDevHelpers(mock: MockTransport) {
     // 假裝別的瀏覽器改了輸入框草稿：`__amMock.remoteDraft('bot:<id>', '手機上打的')`（空字串＝對方送出清空）
     remoteDraft: (key: string, text: string) => mock.remoteDraft(key, text),
     updateNotice: (botIdOrName: string, notice: string | null) => mock.setUpdateNotice(mock.botIdByName(botIdOrName) ?? botIdOrName, notice),
-    // 上游有新版、磁碟上還沒有的通知（issue #707）：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`
+    // 上游有新版、磁碟上還沒有的通知（issue #707）：`__amMock.upstreamUpdate('claude', '2.1.283', '2.1.281')`；grok（#761，只提示的徽章）：`__amMock.upstreamUpdate('grok', '1.0.47', '1.0.46')`
     upstreamUpdate: (kind: string, latest: string, disk: string) => mock.emitUpstreamUpdate(kind, latest, disk),
     // Claude fleet install chip；可指定目標或主機快照以做其他視覺案例。
     claudeFleetUpdate: (target?: string, hosts?: { host: string; installed_version: string | null; error: string | null; behind: boolean }[]) => mock.emitClaudeFleetUpdate(target, hosts),

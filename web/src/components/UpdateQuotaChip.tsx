@@ -11,6 +11,7 @@ import { AgmReviewBox } from './AgmReviewBox'
 import { CodexInstallChip } from './CodexInstallChip'
 import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { HerdrUpdateChip } from './HerdrUpdateChip'
+import { GrokUpdateChip } from './GrokUpdateChip'
 import { useHerdrPlan } from '../hooks/useHerdrPlan'
 import { useHerdrUpdate } from '../store/herdrUpdate'
 import { MergedUpdateChip, type DialogControl } from './MergedUpdateChip'
@@ -47,6 +48,8 @@ export function UpdateQuotaChip() {
       <CodexInstallChip />
       <ClaudeInstallChip />
       <HerdrUpdateChip />
+      {/* grok 只提示、不一鍵安裝：手機 header 擠，只畫在桌機；手機靠 daemon 推的通知。 */}
+      {phone ? null : <GrokUpdateChip />}
     </>
   )
 }
