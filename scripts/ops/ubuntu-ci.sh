@@ -16,6 +16,8 @@ REPO_URL="${AGM_CI_REPO_URL:-git@github.com:Eden-Sun/agents-manager.git}"
 GH_REPO="${AGM_CI_GH_REPO:-Eden-Sun/agents-manager}"
 CONTEXT="ubuntu-ci"
 TIMEOUT="${AGM_CI_TIMEOUT:-45m}"
+# timeout 只送 TERM；step 忽略 TERM 就永遠不結束、鎖永遠不放，之後每分鐘都「上一輪還在跑」。補 KILL。
+KILL_AFTER="${AGM_CI_KILL_AFTER:-60s}"
 KEEP_LOGS="${AGM_CI_KEEP_LOGS:-30}"
 
 mkdir -p "${CI_ROOT}/logs"
@@ -46,6 +48,19 @@ started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '{"sha":"%s","state":"running","started":"%s","log":"%s"}\n' "${sha}" "${started}" "${log}" > "${CI_ROOT}/status.json"
 status pending "ubuntu 完整 CI 執行中"
 
+# pending 送出之後任何一步（checkout、clean、彙總）因 set -e 中斷，都不能讓 commit status 永遠停在 pending、
+# status.json 永遠停在 running：離開時還沒寫完結果就補一個 error（last-sha 不動，下一輪會重試）。
+finalized=0
+on_exit() {
+    local code=$?
+    if [ "${finalized}" = 0 ]; then
+        status error "ubuntu-ci 腳本中斷（rc=${code}），見 journal"
+        printf '{"sha":"%s","state":"error","rc":%s,"started":"%s","log":"%s"}\n' \
+            "${sha}" "${code}" "${started}" "${log}" > "${CI_ROOT}/status.json"
+    fi
+}
+trap on_exit EXIT
+
 git checkout -q --detach -f "${sha}"
 git clean -q -fdx -e target -e web/node_modules
 
@@ -55,7 +70,7 @@ failed=""
 : > "${log}"
 for part in ob ops web daemon; do
     prc=0
-    timeout "${TIMEOUT}" env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u AM_DAEMON_EXE -u AM_CONFIG_PATH \
+    timeout -k "${KILL_AFTER}" "${TIMEOUT}" env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR -u AM_DAEMON_EXE -u AM_CONFIG_PATH \
         bash scripts/check.sh "${part}" >> "${log}" 2>&1 || prc=$?
     printf '\n==> [ubuntu-ci] %s rc=%s\n' "${part}" "${prc}" >> "${log}"
     if [ "${prc}" != 0 ]; then
@@ -78,6 +93,7 @@ status "${state}" "${desc}"
 printf '{"sha":"%s","state":"%s","rc":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
     "${sha}" "${state}" "${rc}" "${started}" "${finished}" "${log}" "${desc//\"/\'}" > "${CI_ROOT}/status.json"
 echo "${sha}" > "${CI_ROOT}/last-sha"
+finalized=1
 
 # 只留最近幾份 log。
 ls -1t "${CI_ROOT}/logs"/*.log 2>/dev/null | tail -n "+$((KEEP_LOGS + 1))" | while IFS= read -r old; do
