@@ -238,8 +238,8 @@ pub async fn create_announced(
     let res = sqlx::query(
         "INSERT OR IGNORE INTO missions
            (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, max_rounds,
-            parent_mission_id, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            parent_mission_id, request_fingerprint, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(m.project_id)
@@ -250,6 +250,7 @@ pub async fn create_announced(
     .bind(m.on_5h_limit)
     .bind(m.max_rounds)
     .bind(m.parent_mission_id)
+    .bind(create_fingerprint(m))
     .bind(&now)
     .bind(&now)
     .execute(&mut *tx)
@@ -285,6 +286,11 @@ pub enum ChildCreate {
 /// 同一個請求重送兩次就會被判成兩個不同的請求。
 pub fn revise_fingerprint(parent_id: &str, text: &str, delivery: &str, executor: &str, on_5h: &str, max_rounds: i64) -> String {
     serde_json::json!([parent_id, text, delivery, executor, on_5h, max_rounds]).to_string()
+}
+
+/// 頂層任務請求的正規化指紋：文字＋四個選項。同一個 crid 配不同內容不是重送（見 `post_mission`）。
+pub fn create_fingerprint(m: &NewMission<'_>) -> String {
+    serde_json::json!([m.text, m.delivery_mode, m.executor_kind, m.on_5h_limit, m.max_rounds]).to_string()
 }
 
 /// 目前還沒結案的那筆續作（如果有）。

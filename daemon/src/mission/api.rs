@@ -195,6 +195,24 @@ pub async fn post_mission(
     if created {
         emit(&app, &m).await;
     } else {
+        // 同一個 crid 配不同的內容不是重送：回原本那筆 200 等於把這句新的指示吞掉（呼叫端以為任務開出去了）。
+        // 沒有指紋的是指紋出現以前的舊列，照舊當重送。
+        let fp = store::create_fingerprint(&store::NewMission {
+            project_id: &project.id,
+            client_request_id: &crid,
+            text,
+            delivery_mode: &b.delivery_mode,
+            executor_kind: &b.executor_kind,
+            on_5h_limit: &b.on_5h_limit,
+            max_rounds,
+            parent_mission_id: None,
+        });
+        if m.request_fingerprint.as_deref().is_some_and(|stored| stored != fp) {
+            return Err(LcError::conflict(
+                "request_id_reused",
+                json!({"mission_id": m.id, "detail": "same client_request_id, different request (text / delivery_mode / executor_kind / on_5h_limit / max_rounds)"}),
+            ));
+        }
         // 重送也補推一次：交易上線以前寫一半的舊列（任務在、通知不在）靠這裡補回來。
         // event_key 相同，已經有的（含已 ack 的）不會多一筆、不會再叫醒誰。
         crate::supervisor::store::push_inbox(&app.db, &format!("mission:{}:created", m.id), "mission_created", None, None, None, &payload_of(&m))
@@ -1606,6 +1624,29 @@ mod tests {
             .await
             .unwrap();
         assert!(payload.contains("寫一半的任務"), "通知帶的是那筆任務自己的內容：{payload}");
+    }
+
+    /// 同一個 `client_request_id` 配不同的內容：以前回原本那筆 200（`created:false`），新的那句指示整句被吞，
+    /// 呼叫端還以為自己的任務開出去了。續作（revise）、追問、回覆都有指紋比對，頂層任務卻沒有（#334 同型）。
+    #[tokio::test]
+    async fn a_reused_request_id_with_different_content_is_refused_not_swallowed() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let pid = env.project_id.clone();
+        let Json(first) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("reused", "pr"))).await.unwrap();
+        let id = first["id"].as_str().unwrap().to_string();
+
+        let mut other_text = new_mission("reused", "pr");
+        other_text.text = "完全不同的另一件事".into();
+        let err = post_mission(State(app.clone()), Path(pid.clone()), Json(other_text)).await.unwrap_err();
+        let LcError::Conflict(body) = err else { panic!("要是 409：{err:?}") };
+        assert_eq!(body["mission_id"], json!(id));
+        let err = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("reused", "push_main"))).await.unwrap_err();
+        assert!(matches!(err, LcError::Conflict(_)), "換交付方式也是不同的請求：{err:?}");
+
+        // 一字不差的重送照舊是冪等的。
+        let Json(again) = post_mission(State(app.clone()), Path(pid.clone()), Json(new_mission("reused", "pr"))).await.unwrap();
+        assert_eq!((again["created"].as_bool(), again["id"].as_str()), (Some(false), Some(id.as_str())));
     }
 
     /// 結案請求跑關卡的途中任務被別人關掉了（使用者按了取消、或另一個結案先落地）：這一次結案必須不成立。
