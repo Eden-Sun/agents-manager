@@ -576,6 +576,7 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 - 存成 assistant Message `source = terminal_fallback`、`incomplete = 1`。**晚到的 hook 沒有證據時不覆蓋**（去重丟棄並 log），避免跨回合錯配。
   **有證據是同一回合就取代**（2026-09-29 使用者：遠端 hook 走 spool 晚 25 秒到，備援只抓到最後一段、還夾著 `✻ Crunched …` 狀態列）：
   證據＝hook 看得到的使用者訊息對上這回合的 prompt（遠端 bot 靠 `hook.sh` 帶來的 `agm_user_text`，§11.4.2；沒帶就是沒有證據），或 hook 要收的 in-flight 回合 CAS 輸給備援。這回合的 assistant 訊息**全是備援抓的**時，
+  連使用者訊息都拿不到時（舊版遠端 `hook.sh`、讀不到 transcript），再退一步看 hook 在那台觸發的時間（`received_at`，`hook.sh` 記的 UTC 秒）：落在這回合開始之後、這段時間對話沒開過別的回合，也算同一回合（`hookrecv::fired_within`，2026-10-02 wits-ops-web：備援抓到 13k 字的工具輸出當回覆，真回覆晚 25 秒到被丟）。
   最新那則原地改成 hook 的原文（id 不變、`source = hook`、`incomplete = 0`）、回合 `completed_fallback → completed`，再推一次同 id 的
   `message_added`（前端同 id、內容不同就換掉，`store/lists.ts` 的 `upsertSorted`）。已有 hook 寫的回覆就不動。
   **例外**：那筆 Turn 若一則 assistant Message 都沒有，晚到的 hook 是唯一答案 → 寫進去並把 Turn 改 `completed`（grok 思考時畫面就是空的 `❯`，
