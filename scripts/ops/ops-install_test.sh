@@ -281,5 +281,32 @@ run --dry-run >/dev/null
 equals "dry-run 不清暫存檔" "$(cat "$DIR/bin/a-kick.sh.new.$DEAD")" "half"
 teardown
 
+# 16. `.last` 只記「整輪都裝成功」的那次：有失敗就不更新（舊的留著），另記 `.last-failed`；之後整輪成功才更新並清掉 `.last-failed`。
+#     （目前沒有程式讀這兩個檔，是給人查「裝到哪一版了」用的，所以它不能把部分失敗的那次說成裝好了。）
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+equals "第一次整輪成功 exit 0" "$(run)" "0"
+LAST1=$(cat "$DIR/ops-install.last")
+gone "成功沒有 last-failed" "$DIR/ops-install.last-failed"
+bump a-kick.sh $'#!/bin/bash\nif then fi (\n'
+bump c-task.md $'task v3\n'
+equals "有一支自檢失敗 exit 1" "$(run)" "1"
+equals "失敗那輪不更新 .last" "$(cat "$DIR/ops-install.last")" "$LAST1"
+check "另記 .last-failed（commit）" "$("$GITBIN" -C "$REPO" rev-parse HEAD | cut -c1-8)" "$DIR/ops-install.last-failed"
+check "另記 .last-failed（失敗數）" "failed=1" "$DIR/ops-install.last-failed"
+bump a-kick.sh $'#!/bin/bash\necho a-v4\n'
+equals "修好之後整輪成功" "$(run)" "0"
+check ".last 換成這次的 commit" "$("$GITBIN" -C "$REPO" rev-parse HEAD | cut -c1-8)" "$DIR/ops-install.last"
+gone "成功之後清掉 .last-failed" "$DIR/ops-install.last-failed"
+teardown
+
+# 16b. 第一次就失敗：沒有 .last（從沒整輪成功過），有 .last-failed。
+setup
+bump a-kick.sh $'#!/bin/bash\nif then fi (\n'
+equals "第一次就失敗 exit 1" "$(run)" "1"
+gone "沒有 .last" "$DIR/ops-install.last"
+check "有 .last-failed" "failed=1" "$DIR/ops-install.last-failed"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

@@ -44,7 +44,7 @@ agm-host 上由 `ubuntu-ci.sh` 排程它（每 `AGM_CI_OPS_SYNC_INTERVAL` 秒，
   安裝位置是 symlink 的報 `skipped`（`mv` 會把連結換成拷貝）；對照表的安裝位置跑出 `--dir`（絕對路徑、`..`）報 `failed`、不寫。
 - **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的 blob 都對不上，跟 `ops-sync --check` 的 `drift` 同一條）
   報 `drifted`、不動它、不算失敗；kick 會另推 `ops_install_drift` 叫人看。手動 `--force` 才換（舊檔照樣備份）。
-- `--dry-run` 只列 `would-install`。最後一行 `changes=N failed=M drifted=K`；有失敗 exit 1。成功會把「時間 commit」寫進 `<AGM>/ops-install.last`。
+- `--dry-run` 只列 `would-install`。最後一行 `changes=N failed=M drifted=K`；有失敗 exit 1。整輪成功（而且真的換了檔）會把「時間 commit」寫進 `<AGM>/ops-install.last`；有失敗的那輪**不更新**它，改把「時間 commit failed=N」記進 `ops-install.last-failed`（下一次整輪成功就刪）。這兩個檔目前沒有程式讀（kick、ops-sync 都不看），只給人查「裝到哪一版了」。
 
 **接到部署**：`daemon-update-kick.sh` 在旗標開著時，於 ① 換版成功之後、② 「沒有會進 binary 的差異」那一輪（要該 sha 的 `ubuntu-ci` 綠燈）
 用該 sha 自己的 `ops-install.sh` 換新；失敗推 `ops_alert`（`ops_install_failed`），不影響部署結果。**旗標預設關**，要由使用者或 AGM 開：
