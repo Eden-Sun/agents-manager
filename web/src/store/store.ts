@@ -42,7 +42,7 @@ import { applyHerdrSnapshot, onHerdrFrame } from './herdrUpdate'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
-import { byId, byTime, capList, insertSorted, pruneTurns, upsertSorted } from './lists'
+import { byId, byTime, capList, insertSorted, keptAfterPage, pruneTurns, upsertSorted } from './lists'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
@@ -731,18 +731,6 @@ function loginErrText(e: unknown): string {
     default:
       return errText(e)
   }
-}
-
-/**
- * 一頁 messages 回來時舊清單留哪些：不能整包換（飛行中收到的 `message_added` 會被蓋掉），
- * 也不能全留（resync 要能刪過期的）。界線是頁內最新一筆，空頁退回 `startedAt`。
- */
-function keptAfterPage<T extends { id: string; created_at: string }>(existing: T[], page: T[], startedAt: string): T[] {
-  let newest = ''
-  for (const m of page) if (m.created_at > newest) newest = m.created_at
-  const cutoff = newest || startedAt
-  const seen = new Set(page.map((m) => m.id))
-  return existing.filter((m) => !seen.has(m.id) && m.created_at > cutoff)
 }
 
 /** issue #23：最近一次套用到 store 的 `GET /api/state` 的 `daemon_seq`；更舊的快照不套用。 */
