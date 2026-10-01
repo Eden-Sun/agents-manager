@@ -1117,6 +1117,8 @@ pub async fn post_complete(
     };
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
+    // 停著的任務不結案：使用者的暫停不能被一句「完成」關掉（`deliver` 早就是這樣）。寫入交易裡會再判一次。
+    ensure_not_paused(&id, m.paused_reason.as_deref())?;
     // 底下還有開著的交辦就不結案（issue #74）：那顆 bot 會繼續做一件已經關掉的任務，
     // 回合結束還會為它推一則沒有人要的 `assignment_completed`。取消那條路本來就會逐件收乾淨。
     crate::mission::workflow::ensure_can_complete(&app, &id).await?;
@@ -1155,6 +1157,8 @@ pub async fn post_complete(
         // 任務列與 `completed` 事件一次交易，任務已經被取消、或另一個結案先落地 → 照實 409，不補一則「完成」（issue #116）。
         let payload = json!({"delivery": delivery});
         let closed = store::complete_checked(&app.db, &id, b.result_summary.trim(), from.as_deref(), |s| {
+            // 暫停可能是在上面那次判定之後才落地的（暫停不走這把鎖）：寫入當下再看一次。
+            ensure_not_paused(&id, s.mission.paused_reason.as_deref())?;
             crate::mission::workflow::recheck_complete(s, waiver, &decided).map(|()| payload)
         })
         .await
@@ -1289,6 +1293,19 @@ pub struct DeliverIn {
 /// 交付失敗停下來的那兩種：交付成功就不再是事實，自動解除（不然卡片還寫著「等你決定」）。
 const DELIVERY_PAUSES: [&str; 2] = ["push_main_failed", "pr_failed"];
 
+/// 任務停著（使用者按了暫停、等人回答、輪數用完…）就不交付、不結案：要先 resume／answer，或走 cancel。
+/// 只有先前那次**交付**失敗停下的（[`DELIVERY_PAUSES`]）放行——重試交付、或使用者決定不交付時 `no_delivery=user_declined` 結案
+/// 都走這條。`deliver` 與 `complete` 共用，兩邊對「停著」的看法才不會漂開。
+fn ensure_not_paused(id: &str, paused_reason: Option<&str>) -> Result<(), LcError> {
+    match paused_reason.filter(|r| !DELIVERY_PAUSES.contains(r)) {
+        Some(reason) => Err(LcError::conflict(
+            "mission_paused",
+            json!({"mission_id": id, "paused_reason": reason, "hint": "任務停著：等使用者回答或 resume 之後再交付／結案"}),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// 依任務的 `delivery_mode` 推 main（fast-forward only）或開 PR。
 ///
 /// 關卡（都不改任務狀態，是呼叫端流程漏了，不是交付失敗）：
@@ -1310,12 +1327,7 @@ pub async fn post_deliver(
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
     // 任務停著（使用者按了暫停、等人回答、輪數用完…）就不交付。只有先前那次交付失敗停下的可以重試（review3 c1 M10）。
-    if let Some(reason) = m.paused_reason.as_deref().filter(|r| !DELIVERY_PAUSES.contains(r)) {
-        return Err(LcError::conflict(
-            "mission_paused",
-            json!({"mission_id": id, "paused_reason": reason, "hint": "任務停著：等使用者回答或 resume 之後再交付"}),
-        ));
-    }
+    ensure_not_paused(&id, m.paused_reason.as_deref())?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     let (assignments, events) = super::workflow::inputs(&app, &id).await?;
     let f = flow::derive(&assignments, &events);
@@ -2117,6 +2129,44 @@ mod tests {
             }
         }
         assert!(problems.is_empty(), "任務已經被推進了，卻用舊的判定結案：\n{}", problems.join("\n"));
+    }
+
+    /// 停著的任務不結案：使用者按了暫停（或等人回答、輪數用完…）之後，`deliver` 早就回 409 `mission_paused`，`complete` 卻照收——
+    /// 暫停形同虛設，AGM 一句「完成」就把使用者要它停下來的任務關掉。要結就先 resume／answer，或走 cancel。
+    /// 只有交付失敗停下的（`push_main_failed`／`pr_failed`）放行：使用者決定不交付時 `no_delivery=user_declined` 就是這條路。
+    /// 判定要在寫入交易裡再做一次：暫停是在結案判定之後才落地的，也不能結。
+    #[tokio::test]
+    async fn a_paused_mission_is_not_completed_until_it_is_resumed() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("paused-complete", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let pause = |reason: &str| PauseIn { reason: reason.into(), detail: None };
+
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(pause("user_pause"))).await.unwrap();
+        let err = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("完成", Some("no_changes"), None))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "mission_paused", "使用者暫停中的任務不結案");
+        assert_eq!(events_of("completed", &app, &id).await, 0);
+        assert_eq!(store::get(&app.db, &id).await.unwrap().unwrap().status(), "paused", "任務照舊停著");
+
+        // 放行之後結得了。
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        let (app2, id2) = (app.clone(), id.clone());
+        // 暫停在結案判定之後才落地：寫入交易裡再判一次，不能因為鎖外那一眼是「沒停」就結掉。
+        crate::lifecycle::race_point::arm("mission_complete_after_snapshot", &id, move || async move {
+            let _ = post_pause(State(app2), Path(id2), HeaderMap::new(), Json(PauseIn { reason: "user_pause".into(), detail: None })).await.expect("暫停要成功");
+        });
+        let err = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("完成", Some("no_changes"), None))).await.unwrap_err();
+        assert_eq!(conflict_reason(err), "mission_paused", "暫停插在判定與寫入之間也不結");
+        assert_eq!(events_of("completed", &app, &id).await, 0);
+
+        // 交付失敗停下的不算「停著」：使用者決定不交付，照樣能結。
+        let _ = post_resume(State(app.clone()), Path(id.clone())).await.unwrap();
+        let _ = post_pause(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(pause("push_main_failed"))).await.unwrap();
+        let Json(out) = post_complete(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(done("完成", Some("no_changes"), None))).await.unwrap();
+        assert_eq!(out["status"], "done");
+        assert_eq!(events_of("completed", &app, &id).await, 1);
     }
 
     /// `verified` 驗完 commit、算好它屬於哪一代之後，寫下之前任務被取消或被退回（issue #74 重開）：
