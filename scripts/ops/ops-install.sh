@@ -92,6 +92,30 @@ known_version() { # known_version <repo 來源> <安裝端檔案>
   done | grep -q found
 }
 
+# 上一次被 SIGKILL（EXIT trap 沒跑）會把 `<安裝位置>.new.<pid>` 留在安裝端；pid 已經不在的就是孤兒，清掉。
+# 只看清單裡的安裝位置、名字必須是 `.new.<純數字>`、pid 還活著的不碰（別人正在裝）；--dry-run 不清。
+if [ "$DRY" = 0 ]; then
+  : > "$TMP/clean"
+  printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    # shellcheck disable=SC2086
+    set -- $line
+    [ $# -ge 2 ] || continue
+    tgt="$2"; plat="${3:-}"
+    [ -z "$plat" ] || [ "$plat" = "$PLATFORM" ] || continue
+    case "$tgt" in systemd/*|LaunchAgents/*|/*|..|../*|*/..|*/../*) continue ;; esac
+    for f in "$DIR/$tgt".new.*; do
+      [ -f "$f" ] || continue
+      pid="${f##*.new.}"
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      kill -0 "$pid" 2>/dev/null && continue
+      rm -f "$f" && echo "$f" >> "$TMP/clean"
+    done
+  done
+  _cleaned=$(wc -l < "$TMP/clean" | tr -d ' ')
+  [ "${_cleaned:-0}" -eq 0 ] || echo "cleaned ${_cleaned}（被中斷的上一次留下的暫存檔：$(tr '\n' ' ' < "$TMP/clean" | sed "s#$DIR/##g")）"
+fi
+
 printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in ''|'#'*) continue ;; esac
   # shellcheck disable=SC2086

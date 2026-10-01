@@ -1466,7 +1466,8 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
     if bin_dir.is_dir():
         for f in sorted(bin_dir.iterdir()):
             rel = f"bin/{f.name}"
-            if f.is_file() and f.name != "agm" and ".bak" not in f.name and rel not in listed:
+            # `ops-install.sh` 換檔前的暫存檔 `<檔名>.new.<pid>`：被 SIGKILL 時會留下，下次執行就清掉，不算沒有版控的腳本。
+            if f.is_file() and f.name != "agm" and ".bak" not in f.name and not re.search(r"\.new\.\d+$", f.name) and rel not in listed:
                 report["extra"].append({"target": rel})
     report["in_sync"] = not any(report[k] for k in ("behind", "drift", "missing", "extra"))
     return report

@@ -252,5 +252,34 @@ check_no "沒有讀到新檔的內容" "new-version-short" "$OUT"
 equals "換上去的是新版" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo new-version-short"
 teardown
 
+# 15. 被 SIGKILL 的上一次留下的暫存檔（<安裝位置>.new.<pid>，pid 已不在）：下次執行清掉；pid 還活著的、名字不是 .new.<數字> 的、清單外的不碰。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+sleep 30 & LIVE=$!
+DEAD=$(sh -c 'echo $$')   # 這個 shell 已經結束，pid 不在了
+printf 'half' > "$DIR/bin/a-kick.sh.new.$DEAD"
+printf 'half' > "$DIR/c-task.md.new.$DEAD"
+printf 'live' > "$DIR/bin/a-kick.sh.new.$LIVE"
+printf 'mine' > "$DIR/bin/a-kick.sh.new.notapid"
+printf 'other' > "$DIR/bin/not-in-manifest.sh.new.$DEAD"
+equals "裝完 exit 0" "$(run)" "0"
+gone "死掉的 pid 留下的暫存檔清掉（bin）" "$DIR/bin/a-kick.sh.new.$DEAD"
+gone "死掉的 pid 留下的暫存檔清掉（根目錄的檔）" "$DIR/c-task.md.new.$DEAD"
+equals "還活著的 pid 的暫存檔不碰" "$(cat "$DIR/bin/a-kick.sh.new.$LIVE")" "live"
+equals "名字不是 .new.<數字> 的不碰" "$(cat "$DIR/bin/a-kick.sh.new.notapid")" "mine"
+equals "清單外的檔的暫存檔不碰" "$(cat "$DIR/bin/not-in-manifest.sh.new.$DEAD")" "other"
+check "有說清了幾個" "cleaned 2" "$OUT"
+kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
+teardown
+
+# 15b. --dry-run 什麼都不清。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+DEAD=$(sh -c 'echo $$')
+printf 'half' > "$DIR/bin/a-kick.sh.new.$DEAD"
+run --dry-run >/dev/null
+equals "dry-run 不清暫存檔" "$(cat "$DIR/bin/a-kick.sh.new.$DEAD")" "half"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

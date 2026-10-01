@@ -1988,6 +1988,18 @@ class OpsSyncTest(CliCase):
         self.git("commit", "-qam", "a 改第三版")
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
 
+    def test_an_install_stage_file_left_by_a_killed_ops_install_is_not_an_extra_script(self):
+        """`ops-install.sh` 換檔前先寫 `<檔名>.new.<pid>`；被 SIGKILL 時它會留在 bin/。那是 ops-install 的殘件
+        （下次執行會清），不是「沒有版控的腳本」：不能因此報成 `extra`、把 ops-sync 弄紅。名字不是 `.new.<數字>` 的照舊算。"""
+        self.install("bin/c.sh", "c v1\n")
+        self.install("bin/c.sh.new.4242", "half written")
+        self.install("bin/c.sh.new.notapid", "someone's own file")
+        code, out, err = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        r = json.loads(out)
+        extras = [x["target"] for x in r["extra"]]
+        self.assertNotIn("bin/c.sh.new.4242", extras)
+        self.assertIn("bin/c.sh.new.notapid", extras)
+
     def test_each_kind_of_gap_is_reported_separately_and_exits_nonzero(self):
         self.install("bin/a.sh", "a v1\n")            # 落後兩個 commit
         self.install("bin/b.sh", "b 有人直接改了\n")    # repo 任何一版都不是
