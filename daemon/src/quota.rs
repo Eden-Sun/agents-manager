@@ -1343,6 +1343,8 @@ fn pane_window_used(
 /// app-server 讀數會落後 CLI 一整輪（2026-09-13 使用者截圖：量表 5h 100、pane 90% left），CLI 狀態列才是它當下擋你的
 /// 依據。與 app-server 共用同一格；什麼時候採用 pane 上的數字見 [`pane_window_used`]。
 pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
+    // 讀 pane 要好幾趟 RPC：途中同名主機被換掉，舊機器 pane 上的讀數不能寫進新機器的 key（#347），所以先記下權威。
+    let Some(fence) = app.hosts.fence(host).await else { return 0 };
     let rows: Vec<(String, Option<String>, Option<String>)> = match sqlx::query_as(
         // 最近有動靜的 pane 排前面：它的狀態列最新。閒著的 pane 也會刷新，但剛跑完回合的那顆最準。
         // 第三欄是那顆 pane 畫面的年紀：最後一回合結束（或開始）的時間，沒有回合就是 run 起來的時間。
@@ -1373,7 +1375,7 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
         if seen.contains(&base) {
             continue;
         }
-        let Some(client) = app.herdr_for(host).await else { continue };
+        let client = fence.conn().client.clone();
         let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
         let Some(parsed) = crate::codex_live::parse_status_quota(&read.text) else { continue };
         seen.insert(base.clone());
@@ -1387,7 +1389,12 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
         let weekly = pane_window_used(used(parsed.weekly_left), stored.as_ref().and_then(|q| q.seven_day.as_ref()), chrono::Duration::days(7), screen_at, sighting, now);
         let status = crate::codex_live::CodexStatusQuota { five_hour_left: five.map(|u| 100.0 - u), weekly_left: weekly.map(|u| 100.0 - u) };
         let Some(q) = quota_from_codex_status(&status, identity.as_deref()) else { continue };
-        set(app, host, &base, q).await;
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("codex_panes_before_set", host).await;
+        if let Err(e) = set_fenced(app, host, &base, q, &fence).await {
+            tracing::debug!(host, error = %e, "codex statusline quota: host superseded; dropping this round");
+            break;
+        }
         wrote += 1;
     }
     wrote
@@ -2154,6 +2161,40 @@ mod tests {
         set(&app, LOCAL_HOST, "codex", server(5.0, now + chrono::Duration::hours(4))).await;
         assert_eq!(refresh_codex_from_panes(&app, LOCAL_HOST).await, 0);
         assert_eq!(five_used(app.clone()).await, 5.0, "重置之前的畫面不能把量表蓋回去");
+    }
+
+    /// #347：讀 pane 狀態列途中同名主機被換成另一台，舊機器 pane 上的讀數不能寫進新機器的 key
+    /// （換連線那一側已經清過 `<host>/…`，沒有 fence 的 `set` 會把它種回來）。
+    #[tokio::test]
+    async fn a_codex_pane_reading_from_a_superseded_host_is_not_published() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = format!("cx-{}", crate::db::ulid());
+        let cfg = |ssh: &str| crate::config::HostCfg { name: host.clone(), ssh: ssh.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let herdr_a = crate::testing::MockHerdr::start(env.dir.join("herdr-cx-a.sock"));
+        app.hosts.insert_remote_with_client_for_test(cfg("target-a"), crate::herdr::HerdrClient::new(env.dir.join("herdr-cx-a.sock"))).await;
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(&host).bind(&env.project_id).execute(&app.db).await.unwrap();
+        let bot = crate::db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
+             VALUES (?,?,'cx','codex','[]',0,1,'tok','user',?)",
+        )
+        .bind(&bot)
+        .bind(&env.project_id)
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let run = crate::testing::fake_run(&app, &bot).await;
+        let pane = crate::db::run(&app.db, &run).await.unwrap().unwrap().pane_id.unwrap();
+        herdr_a.screens.lock().unwrap().insert(pane, "\n› Ask Codex\n  gpt-6-astra low · /tmp · Context 20% used · 5h 90% left · weekly 65% left\n".into());
+
+        let (a2, cfg_b) = (app.clone(), cfg("target-b"));
+        crate::lifecycle::race_point::arm("codex_panes_before_set", &host, move || async move {
+            a2.hosts.replace_remote_for_test(&a2, cfg_b).await;
+        });
+        assert_eq!(refresh_codex_from_panes(&app, &host).await, 0, "換掉的主機上的讀數不算寫入");
+        assert!(app.quotas.lock().await.get(&format!("{host}/codex")).is_none(), "舊機器的讀數不能種進新機器的 key");
     }
 
     #[test]
