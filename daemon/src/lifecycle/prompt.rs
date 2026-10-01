@@ -249,14 +249,7 @@ pub(super) async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &
         // 刪不到就 rollback，連訊息那句一起退掉——效果就是「turn 不是 in_flight 時一個字都不刪」。
         // 附件的 message_id 指著這則訊息、沒有 ON DELETE。先解開再刪，不然帶圖的撤回會外鍵失敗，
         // 可重試的 409 變成 502，回合被收成假的 failed、crid 也燒掉（#646）。
-        sqlx::query(
-            "UPDATE attachments SET message_id = NULL
-              WHERE message_id IN (SELECT id FROM messages WHERE id = ? OR turn_id = ?)",
-        )
-        .bind(msg_id)
-        .bind(turn_id)
-        .execute(&mut *tx)
-        .await?;
+        crate::attach::unbind_message(&mut tx, msg_id, turn_id).await?;
         sqlx::query("DELETE FROM messages WHERE id = ? OR turn_id = ?").bind(msg_id).bind(turn_id).execute(&mut *tx).await?;
         let gone = sqlx::query("DELETE FROM turns WHERE id = ? AND status = 'in_flight'").bind(turn_id).execute(&mut *tx).await?;
         if gone.rows_affected() == 0 {

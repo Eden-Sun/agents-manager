@@ -267,7 +267,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   **找得回軟刪的 bot**（#757）：`GET /api/bots/deleted` 列出軟刪的 user bot（API.md §10.4b），網頁在「環境設定→最近刪除」每列一顆「復原」，走同一支 `restore`；刪除當下 15 秒的通知照舊。
   **「清目錄」＝搬進回收區，不是刪**（issue #406）：本機的 `bots/<id>/` 搬到 `<資料目錄>/bots-trash/<id>.<毫秒>/`，`POST /api/bots/:id/restore` 時若 `bots/<id>/` 不在就把最新那份搬回來；
   **附件副本一起收**（issue #465）：`<資料目錄>/attachments/<bot_id>/`（遠端 bot 也有，縮圖不走 ssh）以前刪 bot 時沒有任何人動它——沒有 TTL、沒有總量上限、`reconcile_orphans` 只收 `staging`／`failed`，`ready` 的永遠留著。現在跟著搬進同一個回收區，項目名是 `<id>.attachments.<毫秒>`（結尾一樣是毫秒，所以過期與總量上限一視同仁；`<kind>` 那段讓它不會被當成 `bots/<id>/` 還原回去），`restore` 時一起搬回來——不然還原後對話還在、縮圖全破（已刪 bot 的對話本來就讀得到，API.md §10.4）。
-  **沒送出的上傳也會清**：`ready`、沒有任何訊息引用（`message_id` 空且沒有訊息的 `attachments_json` 點名）、放超過 24 小時的附件，由 `attach::sweep_unreferenced` 在開機與之後每 6 小時刪掉 row 與檔案（先刪 row 才刪檔，跟 `bind` 搶同一列）；被訊息引用的絕不刪，`staging`／`failed` 仍歸開機的 `reconcile_orphans`。以前這類附件沒有任何清理（正式庫 50 筆、近 50 MB）。
+  **沒送出的上傳也會清**：`ready`、沒有任何訊息引用（`message_id` 空且沒有訊息的 `attachments_json` 點名）、放超過 24 小時（從上傳、或最後一次被 `resolve`／撤回解綁算起）的附件，由 `attach::sweep_unreferenced` 在開機與之後每 6 小時刪掉 row 與檔案（先刪 row 才刪檔，跟 `bind` 搶同一列）；被訊息引用的絕不刪，`staging`／`failed` 仍歸開機的 `reconcile_orphans`。以前這類附件沒有任何清理（正式庫 50 筆、近 50 MB）。
   本機回收區的清理有兩道、跑兩處：**過期**（放超過 7 天，看名字裡的時間，`rename` 不更新目錄 mtime）與**總量上限**（整個 `bots-trash/` 超過 2 GB 就從最舊的開始清到降下來，
   最新那一份永遠留著）；開機清掃跑一次，另外 `bot_trash::spawn_gc` 每天再跑一次——只靠開機那一次不夠，daemon 常駐好幾天回收區會一路長。
   **清掉一份是「先改名成 `<原名>.<毫秒>.deleting`，改名成功才 `remove_dir_all`」**（issue #513）：`remove_dir_all` 先把裡面 unlink 光、最後才刪目錄本身，而且走已開啟的 dir fd，
