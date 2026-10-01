@@ -27,6 +27,11 @@ fn open() -> &'static Mutex<HashMap<String, Episode>> {
     V.get_or_init(Default::default)
 }
 
+/// 不在 `active` 裡的 run（結束了）不留開著的記錄：框開著時 run 就結束的話，沒有人會再讀到「框關了」，記錄只增不減。
+pub fn retain_runs(active: &[String]) {
+    open().lock().unwrap().retain(|id, _| active.contains(id));
+}
+
 pub fn is_open(run_id: &str) -> bool {
     open().lock().unwrap().contains_key(run_id)
 }
@@ -174,6 +179,24 @@ async fn notify_once(app: &Arc<App>, run: &db::Run) {
         Err(error) => {
             tracing::warn!(run = %run.id, error = ?error, "could not post the Codex model migration notice")
         }
+    }
+}
+
+#[cfg(test)]
+mod retain_tests {
+    use super::*;
+
+    #[test]
+    fn an_episode_of_a_run_that_ended_is_dropped() {
+        for id in ["cmm-gone", "cmm-kept"] {
+            open().lock().unwrap().insert(
+                id.to_string(),
+                Episode { forced_from: None, closing: false },
+            );
+        }
+        retain_runs(&["cmm-kept".to_string()]);
+        assert!(!is_open("cmm-gone") && is_open("cmm-kept"));
+        retain_runs(&[]);
     }
 }
 
