@@ -1370,6 +1370,13 @@ fn remap_model(kind: &str, model: Option<&str>) -> (Option<String>, Option<Value
     }
 }
 
+/// 寫 config 時 `projection::validate` 在 config 鎖裡擋下的「bot 指到不存在的身分」。檢查與寫入是同一個原子步驟，
+/// 所以 `create_bot` 驗過身分之後、寫入之前被刪掉，或 `delete_identity` 查完之後、刪除之前有 bot 開始用，都不會留下孤兒身分；
+/// 只是兩邊本來都回籠統的 400 `config_invalid`，這裡翻成呼叫端分得出的碼（404 identity／409 identity still used by bots）。
+fn is_unknown_identity(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::projection::ConfigInvalid>().is_some_and(|c| c.0.contains("references unknown identity"))
+}
+
 async fn create_bot(
     State(app): State<Arc<App>>,
     Path(pid): Path<String>,
@@ -1388,6 +1395,8 @@ async fn create_bot(
         .map(|p| p.host)
         .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("create_bot_after_identity_check", &pid).await;
     let (model, remapped) = remap_model(&b.kind, b.model.as_deref());
     let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     let instruction_files = crate::config::normalize_instruction_files(&b.kind, b.instruction_files.as_deref()).map_err(LcError::Bad)?;
@@ -1487,6 +1496,7 @@ async fn create_bot(
             return Err(LcError::conflict("bot name already in use", json!({"name": b.name})))
         }
         Err(e) if e.to_string() == "no-project" => return Err(LcError::NotFound("project".into())),
+        Err(e) if is_unknown_identity(&e) => return Err(LcError::NotFound("identity".into())),
         Err(e) => return Err(projection_err(e)),
     }
     if let Some((bot_id, name)) = replayed.into_inner().unwrap() {
@@ -3399,6 +3409,61 @@ mod delete_identity_tests {
         assert_eq!((left.len(), left[0].host.as_deref()), (1, Some("m4p")));
     }
 
+    /// 並行：`create_bot` 驗過身分存在之後、寫進 config 之前，那個身分被刪掉。`projection::validate` 在 config 鎖裡重驗，
+    /// 所以不會建出帶孤兒身分的 bot（config 與 DB 都沒有它）；錯誤碼是 404 identity（以前是籠統的 400 `config_invalid`）。
+    #[tokio::test]
+    async fn a_bot_created_while_its_identity_is_deleted_is_refused() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (spid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
+        app.cfg
+            .update(move |c| {
+                c.identities.push(ident("racer", "codex", None));
+                c.projects.push(crate::config::ProjectCfg { id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (a2, pid) = (app.clone(), env.project_id.clone());
+        crate::lifecycle::race_point::arm("create_bot_after_identity_check", &env.project_id, move || async move {
+            delete_identity(State(a2.clone()), Path("racer".into()), Query(IdentityHostQuery { host: None }))
+                .await
+                .expect("沒有 bot 在用，刪得掉");
+            let _ = pid;
+        });
+        let body = json!({"name": "late", "kind": "codex", "identity": "racer"});
+        let res = create_bot(State(app.clone()), Path(env.project_id.clone()), Json(serde_json::from_value(body).unwrap())).await;
+        assert!(matches!(res, Err(LcError::NotFound(_))), "身分已被刪：不能建出帶孤兒身分的 bot：{:?}", res.map(|r| r.status()));
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE name = 'late'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 0);
+        assert!(app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).all(|b| b.name != "late"), "config 也不能留下它");
+    }
+
+    /// 並行：`delete_identity` 查完「沒有 bot 在用」之後、真的刪除之前，有 bot 開始用它。刪除在 config 鎖裡被 `projection::validate`
+    /// 擋下（身分還在、bot 也在）；錯誤碼是 409 identity still used by bots（以前是籠統的 400 `config_invalid`）。
+    #[tokio::test]
+    async fn an_identity_taken_by_a_bot_while_it_is_being_deleted_survives() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (spid, repo) = (env.project_id.clone(), env.repo.to_string_lossy().to_string());
+        app.cfg
+            .update(move |c| {
+                c.identities.push(ident("racer2", "codex", None));
+                c.projects.push(crate::config::ProjectCfg { id: Some(spid), path: repo, label: "proj".into(), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (a2, pid) = (app.clone(), env.project_id.clone());
+        crate::lifecycle::race_point::arm("delete_identity_after_check", "racer2", move || async move {
+            let body = json!({"name": "early", "kind": "codex", "identity": "racer2"});
+            create_bot(State(a2.clone()), Path(pid), Json(serde_json::from_value(body).unwrap())).await.expect("身分還在：建得起來");
+        });
+        let res = delete_identity(State(app.clone()), Path("racer2".into()), Query(IdentityHostQuery { host: None })).await;
+        assert!(matches!(res, Err(LcError::Conflict(_))), "有 bot 剛開始用它：不能刪：{:?}", res.map(|r| r.status()));
+        assert!(app.cfg.get().await.identities.iter().any(|i| i.name == "racer2"), "身分還在");
+    }
+
     /// 刪 m4p 那一台的 `work`：本機另有一筆自己的 `work`，它的快取列不能跟著消失（快取只在下次偵測才會補回來）。
     #[tokio::test]
     async fn deleting_one_hosts_identity_leaves_the_other_hosts_cached_row() {
@@ -3560,13 +3625,22 @@ async fn delete_identity(
             return Err(LcError::conflict("identity still used by bots", json!({"bot_id": b.id, "host": bot_host})));
         }
     }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("delete_identity_after_check", &name).await;
     let (n2, h2) = (name.clone(), host.clone());
     crate::projection::update_and_project(&app.cfg, &app.db, move |f| {
         f.identities.retain(|i| !(i.name == n2 && i.host_or_local() == h2));
         Ok(())
     })
     .await
-    .map_err(projection_err)?;
+    .map_err(|e| {
+        if is_unknown_identity(&e) {
+            // 查完之後、刪除之前有 bot 開始用它：config 鎖裡的驗證擋下來了（什麼都沒刪）。
+            LcError::conflict("identity still used by bots", json!({"host": host, "detail": "a bot started using it while it was being deleted"}))
+        } else {
+            projection_err(e)
+        }
+    })?;
     // A same-named `ccN` alias is a different entry (SPEC §16) and is put back from `shell_identities`.
     // 只動受影響的那幾台的快取：被刪的那一台；刪的是沒寫 host 的那筆時，還靠它的每一台（自己沒有明寫同名的）。
     let cfg_after = app.cfg.get().await;
