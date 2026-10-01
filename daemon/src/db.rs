@@ -876,8 +876,15 @@ pub fn ts_sql(col: &str) -> String {
     format!("COALESCE(strftime('%Y-%m-%dT%H:%M:%fZ', {col}), {col})")
 }
 
+/// 同一毫秒內**單調遞增**的 ULID。`Ulid::new()` 的隨機段在同一毫秒內不保證遞增，而 `created_at` 只到毫秒：
+/// 同毫秒的兩列（同一個交易裡的 user／assistant 訊息、快速連送的兩個回合）若拿 `id` 當第二排序鍵，
+/// 順序就是亂的——SQL 的 `ORDER BY created_at, id` 與前端的 `(created_at, id)` 排序都靠它（#695／#100 同一類）。
+/// 產生器掛在行程裡，所以同一個 daemon 產生的 id 照產生順序排；跨行程或舊資料不保證（那些要靠 `rowid`）。
+/// 隨機段溢位（同一毫秒內 2^80 個）時退回一般的 `Ulid::new()`。
 pub fn ulid() -> String {
-    ulid::Ulid::new().to_string()
+    static GEN: std::sync::Mutex<Option<ulid::Generator>> = std::sync::Mutex::new(None);
+    let mut g = GEN.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(ulid::Generator::new).generate().unwrap_or_else(|_| ulid::Ulid::new()).to_string()
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
@@ -1314,6 +1321,27 @@ pub async fn queued_turn_for_bot(pool: &SqlitePool, bot_id: &str) -> Result<Opti
 
 #[cfg(test)]
 mod tests {
+    /// 同一毫秒內 `db::ulid()` 要照產生順序遞增（行程內、跨執行緒也一樣），`ORDER BY created_at, id` 與前端的 `(created_at, id)`
+    /// 才不會把同毫秒的兩列排反。`Ulid::new()` 做不到：同一毫秒內的隨機段是亂的。
+    #[test]
+    fn ulids_from_one_process_ascend_within_a_millisecond() {
+        let batches: Vec<Vec<String>> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..4).map(|_| s.spawn(|| (0..5000).map(|_| ulid()).collect::<Vec<_>>())).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for b in &batches {
+            assert!(b.windows(2).all(|w| w[0] < w[1]), "同一個執行緒產生的 id 必須嚴格遞增");
+        }
+        let mut all: Vec<&String> = batches.iter().flatten().collect();
+        let n = all.len();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), n, "跨執行緒也不能重複");
+        // 對照：沒有這層的話，同一毫秒內會有降序（這個 crate 的隨機段不遞增）。
+        let plain: Vec<String> = (0..5000).map(|_| ulid::Ulid::new().to_string()).collect();
+        assert!(plain.windows(2).any(|w| w[0][..10] == w[1][..10] && w[0] > w[1]), "前提：Ulid::new() 在同一毫秒內會降序");
+    }
+
     /// issue #101：時間戳只有**一種**格式，而且那個格式必須讓「字典序＝時間序」。
     ///
     /// 很多判斷是拿這些字串在 SQL 裡直接比大小的，所以這不是風格問題：
