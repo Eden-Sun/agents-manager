@@ -116,7 +116,8 @@ async fn relay_backfill(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &s
            JOIN bots b ON b.id = c.bot_id
            JOIN projects p ON p.id = b.project_id
            JOIN runs r ON r.bot_id = b.id AND r.state = 'running' AND r.agent_name = ?
-          WHERE p.host = ? AND b.id <> ? AND m.role = 'user' AND m.relay_from IS NULL AND m.created_at >= ?
+          WHERE p.host = ? AND b.id <> ? AND m.role = 'user' AND m.source IN ('hook','terminal_fallback')
+            AND m.relay_from IS NULL AND m.created_at >= ?
           ORDER BY m.created_at DESC, m.rowid DESC LIMIT 20",
     )
     .bind(to_agent)
@@ -3565,7 +3566,12 @@ mod external_claim_tests {
         let conv = db::conversation_id(&env.app.db, &to.id).await.unwrap();
         let text = "我是 robins-hub-bf3xq3。console PR #95 的 test／lint 卡在排隊";
         let echo = lifecycle::insert_message(&env.app, &conv, None, "user", text, "hook", false, None).await.unwrap();
-        let other = lifecycle::insert_message(&env.app, &conv, None, "user", "使用者自己打的一句話，跟報備無關", "web", false, None).await.unwrap();
+        let web = lifecycle::insert_message(&env.app, &conv, None, "user", text, "web", false, None).await.unwrap();
+        sqlx::query("UPDATE messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 second') WHERE id = ?")
+            .bind(&web.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
         let announce = |t: &str| HookBody {
             bot_id: from.id.clone(),
             provider: "claude".into(),
@@ -3581,8 +3587,72 @@ mod external_claim_tests {
             async move { sqlx::query_scalar::<_, Option<String>>("SELECT relay_from FROM messages WHERE id = ?").bind(id).fetch_one(&db).await.unwrap() }
         };
         assert_eq!(relay(echo.id.clone()).await.as_deref(), Some(from.id.as_str()), "回音補標寄件者");
-        assert_eq!(relay(other.id.clone()).await, None, "使用者自己打的不動");
+        assert_eq!(relay(web.id.clone()).await, None, "完全相同的 web 使用者訊息不動");
         assert_eq!(crate::agent_relay::claim("robins-hub-3b84sb", text), None, "補標後報備已用掉，不會再標一次");
+    }
+
+    #[tokio::test]
+    async fn a_late_relay_announce_attributes_a_terminal_fallback_echo() {
+        let env = tt::env().await;
+        let from = tt::claude_bot(&env.app, &env.project_id, "rpa-terminal").await;
+        let to = tt::claude_bot(&env.app, &env.project_id, "cicd-terminal").await;
+        let run = tt::fake_run(&env.app, &to.id).await;
+        sqlx::query("UPDATE runs SET agent_name = 'robins-hub-terminal-734' WHERE id = ?").bind(&run).execute(&env.app.db).await.unwrap();
+        let conv = db::conversation_id(&env.app.db, &to.id).await.unwrap();
+        let text = "請幫我檢查 PR #95，終端截取的 prompt echo";
+        let echo = lifecycle::insert_message(&env.app, &conv, None, "user", text, "terminal_fallback", false, None).await.unwrap();
+        let announce = HookBody {
+            bot_id: from.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "robins-hub-terminal-734", "text": text}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+
+        process(&env.app, &announce).await.unwrap();
+
+        let relay: Option<String> = sqlx::query_scalar("SELECT relay_from FROM messages WHERE id = ?")
+            .bind(&echo.id)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(relay.as_deref(), Some(from.id.as_str()), "terminal_fallback echo 仍可由 late announce 補標");
+    }
+
+    #[tokio::test]
+    async fn a_late_relay_announce_does_not_attribute_a_matching_web_prefix() {
+        let env = tt::env().await;
+        let from = tt::claude_bot(&env.app, &env.project_id, "rpa-prefix").await;
+        let to = tt::claude_bot(&env.app, &env.project_id, "cicd-prefix").await;
+        let run = tt::fake_run(&env.app, &to.id).await;
+        sqlx::query("UPDATE runs SET agent_name = 'robins-hub-prefix-734' WHERE id = ?").bind(&run).execute(&env.app.db).await.unwrap();
+        let conv = db::conversation_id(&env.app.db, &to.id).await.unwrap();
+        let text = "請幫我檢查 PR #95，先跑 test 再回報，附上失敗摘要";
+        let web_prefix = "請幫我檢查 PR #95，先跑 test";
+        let web = lifecycle::insert_message(&env.app, &conv, None, "user", web_prefix, "web", false, None).await.unwrap();
+        sqlx::query("UPDATE messages SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 second') WHERE id = ?")
+            .bind(&web.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let announce = HookBody {
+            bot_id: from.id,
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": RELAY_ANNOUNCE_EVENT, "to_agent": "robins-hub-prefix-734", "text": text}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+
+        process(&env.app, &announce).await.unwrap();
+
+        let relay: Option<String> = sqlx::query_scalar("SELECT relay_from FROM messages WHERE id = ?")
+            .bind(&web.id)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(relay, None, ">=12 字元的相符前綴也不能把 web 訊息標成 relay");
     }
 
     /// 2026-10-01 cf-ox-2：claude 自己接著做的那一輪（背景 shell 跑完），hook 回報的「使用者訊息」是上一則已經回答過的 prompt，
