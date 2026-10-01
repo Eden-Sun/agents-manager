@@ -2671,7 +2671,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
   `service_principals` 標記代表 launchd clients 不得在憑證遺失時退回 User。service scope 與固定維運 route 見 API.md。
   開發版（`App::allow_lan`，跟 bind `0.0.0.0` 同一個判斷）對端與 `Origin` 都直接放行，同網段誰都拿得到 token：使用者裁示保留（`e7392dd` 撤掉配對碼時記明）。
 - `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/begin`、`/relay/spawn/finish`、`/relay/spawn/abort` 驗 **per-bot** `X-AM-Bot-Token`。
-  shim 在建立會繼承 bot proof 的 pane／child agent 前取得 spawn permit；輪替在讀 descendants 前立起同 daemon 共用的 fence。permit 未完成且未過期（60 秒）時輪替回 409，fence 存在時 shim 不呼叫 herdr；pane 成功後先登記到 `panes` inventory 才釋放 permit。herdr 失敗且沒有新 pane id、或 shim 被中斷，走 `POST /relay/spawn/abort` 釋放（#664）。Bot 或 DB 讀取失敗時 spawn／rotation 都 fail closed。遠端主機上的 bot（有 bot 身分、沒有 `AM_PORT`，§11.4）不走 fence：問不到 daemon 不是「確認不了」，子 pane 照開、不打 curl（遠端子 pane 本來也登記不到 `panes`）。
+  shim 在建立會繼承 bot proof 的 pane／child agent 前取得 spawn permit；輪替在讀 descendants 前立起同 daemon 共用的 fence。permit 未完成且未過期（60 秒；`agent start` 帶 `--timeout` 時涵蓋它再加 30 秒、上限 330 秒）時輪替回 409，fence 存在時 shim 不呼叫 herdr；pane 成功後先登記到 `panes` inventory 才釋放 permit。herdr 失敗且沒有新 pane id、或 shim 被中斷，走 `POST /relay/spawn/abort` 釋放（#664）。Bot 或 DB 讀取失敗時 spawn／rotation 都 fail closed。遠端主機上的 bot（有 bot 身分、沒有 `AM_PORT`，§11.4）不走 fence：問不到 daemon 不是「確認不了」，子 pane 照開、不打 curl（遠端子 pane 本來也登記不到 `panes`）。
 
 ### 7.3 WebSocket `/ws`
 - 事件帶遞增 `seq`（記憶體，daemon 重啟從 0）。客戶端帶 `?since=`；daemon 保留最近 200 則，補不齊或 seq 倒退 → `{"type":"resync","seq":<現在的 seq>}`（lag 掉的那條也一樣帶 seq），客戶端重新 `GET /state` 與訊息，並整份重拉只靠事件維持的資料（額度、輸入框草稿、身分停用名單；身分停用與草稿在重連時也重拉）。
