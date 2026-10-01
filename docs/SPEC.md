@@ -2669,6 +2669,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
 
 ### 7.3 WebSocket `/ws`
 - 事件帶遞增 `seq`（記憶體，daemon 重啟從 0）。客戶端帶 `?since=`；daemon 保留最近 200 則，補不齊或 seq 倒退 → `{"type":"resync","seq":<現在的 seq>}`（lag 掉的那條也一樣帶 seq），客戶端重新 `GET /state` 與訊息，並整份重拉只靠事件維持的資料（額度、輸入框草稿、身分停用名單；身分停用與草稿在重連時也重拉）。
+  **心跳**（issue #760）：daemon 每 20 秒送 `{"type":"ping"}`（無 seq、不進環）；客戶端前景裡 60 秒沒收到任何幀、或切回前景時靜默超過 35 秒，就判定半開並主動重連，重連走既有的 `since`／resync。
   **即時幀不佔那 200 個位子**（issue #482，`state::is_ephemeral`）：`turn_progress` 是每個 run 每秒 4 幀，跟耐久事件共用的話重播窗口＝`200 / (4 × 在跑的 run 數)`，20 顆同時在跑只剩 2.5 秒，而客戶端光是重連退避就 250ms～3 秒——每次重連都會退化成全量 resync（重抓 state、額度、每顆已載入 bot 的訊息）。progress 照樣即時廣播、照樣佔 `seq`，只是重連時不補送：下一幀 250ms 內就到，真相另有 `turn_updated` 與訊息。
 - 事件種類見 `API.md`。終端畫面由前端輪詢 `GET terminal`，不走 WS。
 
