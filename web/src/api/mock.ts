@@ -3597,7 +3597,12 @@ export class MockTransport implements Transport {
    * 不吃這些參數的話，issue #25 的往前翻頁與群組未讀的回合確認在 mock 下永遠走不到真 daemon 那條路。
    */
   private messagesOf(botId: string, q: URLSearchParams) {
-    const limit = Math.min(500, Math.max(1, Number(q.get('limit') ?? 100) || 100))
+    // daemon：不存在的 bot 404（已軟刪的仍讀得到歷史，API.md §10.4）；`limit` 解析失敗用 100，其餘夾在 1..500（`0` 變 1）。
+    if (!this.bots.some((x) => x.id === botId) && !this.deletedBots.some((d) => d.bot.id === botId)) {
+      throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
+    }
+    const rawLimit = q.get('limit') ?? ''
+    const limit = Math.min(500, Math.max(1, /^[+-]?\d+$/.test(rawLimit) ? Number(rawLimit) : 100))
     const before = q.get('before') ?? ''
     const turnId = q.get('turn_id') ?? ''
     const role = q.get('role') ?? ''
