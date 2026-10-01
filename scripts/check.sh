@@ -53,13 +53,30 @@ check_web() {
     (cd web && bun run build)
 }
 
+# cargo test 一次吐幾千行：紅了就把紅的測試名單獨列在最後（高負載偶發紅時，一眼看出是哪一條、有幾條）。
+# 輸出照常印到終端；編譯錯誤沒有 `... FAILED` 行，那種紅看 cargo 自己的訊息。
+run_daemon_tests() {
+    local log rc=0 red
+    log="$(mktemp "${TMPDIR:-/tmp}/am-check-daemon.XXXXXX")"
+    env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p agents-managerd --locked "$@" 2>&1 | tee "$log" || rc=$?
+    if [ "$rc" != 0 ]; then
+        red="$(grep -E '^test .* \.\.\. FAILED$' "$log" | awk '{print $2}' || true)"
+        if [ -n "$red" ]; then
+            printf '\n==> daemon: %s 條測試紅：\n' "$(printf '%s\n' "$red" | wc -l | tr -d ' ')" >&2
+            printf '%s\n' "$red" | sed 's/^/    /' >&2
+        fi
+    fi
+    /bin/rm -f "$log"
+    return "$rc"
+}
+
 check_daemon() {
     if [ ! -f web/dist/index.html ]; then
         echo "web/dist/index.html 不存在：先跑 scripts/check.sh web（daemon 會把它嵌進去）" >&2
         exit 1
     fi
     step "daemon: cargo test -p agents-managerd"
-    env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p agents-managerd --locked
+    run_daemon_tests
 }
 
 check_macos_local() {
@@ -209,6 +226,9 @@ check_changed() {
         return 0
     fi
     echo "changed（base ${base}）：$(echo "$parts" | tr '\n' ' ')"
+    if [ -n "${CHECK_TESTS:-}" ] && ! echo "$parts" | grep -qx -e daemon -e full; then
+        echo "!! CHECK_TESTS=${CHECK_TESTS} 沒有用到：這次改動沒有 daemon 部分，不會跑任何 daemon 測試" >&2
+    fi
     if echo "$parts" | grep -qx full; then
         check_ob; check_ops; check_web; check_daemon
         return
@@ -228,7 +248,7 @@ check_changed() {
         env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
         if [ -n "${CHECK_TESTS:-}" ]; then
             step "daemon: cargo test ${CHECK_TESTS}"
-            env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p agents-managerd --locked "${CHECK_TESTS}"
+            run_daemon_tests "${CHECK_TESTS}"
         fi
     fi
 }
