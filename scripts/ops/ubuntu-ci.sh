@@ -24,6 +24,8 @@ KEEP_LOGS="${AGM_CI_KEEP_LOGS:-30}"
 # 剩餘空間（GB）低於這個就不跑：同機的 worktree 各有 1–6 GB 的 target/，滿了 ops／daemon 會因 ENOSPC 假紅（c3914e46），
 # 而紅燈會讓 last-sha 前進、同一個 sha 不再重試。
 MIN_FREE_GB="${AGM_CI_MIN_FREE_GB:-20}"
+# 已安裝的 ops 腳本（AGM bin）與 origin/main 的漂移檢查間隔（秒；0＝不檢查）。見 ops_sync_check。
+OPS_SYNC_INTERVAL="${AGM_CI_OPS_SYNC_INTERVAL:-21600}"
 
 mkdir -p "${CI_ROOT}/logs"
 exec 9>"${CI_ROOT}/lock"
@@ -36,6 +38,26 @@ if [ ! -d "${CI_ROOT}/repo/.git" ]; then
 fi
 cd "${CI_ROOT}/repo"
 git fetch -q origin main
+
+# 已安裝的 ops 腳本跟 origin/main 的漂移檢查（#418 的 `agm ops-sync --check --alert`）：文件寫「巡檢每天跑一次」，但沒有任何東西在排程它，
+# outbox-gc.sh 停在舊版、repo 的修正一直沒生效也沒人知道。這支每分鐘都會跑、又是從 CI clone 直接執行（不用安裝），所以順手問一次。
+# 只偵測回報：不安裝、不改 AGM bin；有落差就由 ops-sync 自己推 ops_alert（同一小時一則）。結果寫在 ${CI_ROOT}/ops-sync.json，
+# 檢查本身壞掉也不能影響 CI 的 status／last-sha，所以失敗一律吞掉。不靠新 commit 觸發（沒人裝的話 main 靜止也要再提醒）。
+ops_sync_check() {
+    local now last rc=0
+    [ "${OPS_SYNC_INTERVAL}" -gt 0 ] 2>/dev/null || return 0
+    now="$(date +%s)"
+    last="$(cat "${CI_ROOT}/ops-sync.last" 2>/dev/null || echo 0)"
+    [ $((now - last)) -ge "${OPS_SYNC_INTERVAL}" ] || return 0
+    echo "${now}" > "${CI_ROOT}/ops-sync.last"
+    timeout -k 10 120 python3 -B "${CI_ROOT}/repo/scripts/agm.py" ops-sync --check --alert --repo "${CI_ROOT}/repo" \
+        > "${CI_ROOT}/ops-sync.json" 2> "${CI_ROOT}/ops-sync.err" || rc=$?
+    # rc 0＝一致、1＝有落差（已 alert）；其他是檢查自己沒跑成，看 ops-sync.err。
+    [ "${rc}" -le 1 ] || echo "ubuntu-ci: ops-sync 檢查沒跑成（rc=${rc}），見 ${CI_ROOT}/ops-sync.err" >&2
+    return 0
+}
+ops_sync_check || true
+
 sha="$(git rev-parse origin/main)"
 last="$(cat "${CI_ROOT}/last-sha" 2>/dev/null || true)"
 if [ "${sha}" = "${last}" ]; then

@@ -35,7 +35,8 @@ scripts/ops/relay-compat-warnings.sh [~/.config/agents-manager/daemon.log]
 `systemd/…` 標 `linux`），標錯是 `bad_manifest`（exit 2），不會變成一堆 `missing`。
 
 一致 exit 0；有落差 exit 1，加 `--alert` 另推一則 `ops_alert`（`source=ops-sync`、`reason=installed_out_of_sync`，同一小時一則）。
-巡檢每天跑一次 `bin/agm ops-sync --check --alert` 就會被叫醒；它不會替你 install。
+agm-host 上由 `ubuntu-ci.sh` 排程它（每 `AGM_CI_OPS_SYNC_INTERVAL` 秒，預設 6 小時，不靠新 commit 觸發；`--alert` 會叫醒巡檢，結果留在 `~/.cache/agents-manager/ci/ops-sync.json`）——
+以前只有文件寫「巡檢每天跑一次」、沒有任何東西在排程，`outbox-gc.sh` 停在 9/28 的舊版也沒人發現。它只偵測，不會替你 install。
 `--check` 另外唯讀比對 **`bin/agm`**（issue #532）：`installed` 段是「安裝的不是這顆 binary 內嵌的那份」——加 `--refresh-cli` 就地換掉（`POST /api/supervisor/cli`，不必等 daemon 重啟）；`binary` 段是「binary 內嵌的落後 repo」——那要重建 binary **並重啟 daemon**，這支動不了。daemon 問不到時 `cli.state` 是 `unknown`，不影響 ops 腳本那半邊的結論。
 
 ## daemon-update-kick.sh
