@@ -327,13 +327,14 @@ impl AgentsCfg {
         self == &Self::default()
     }
 
-    /// 這個專案要讀的檔，依注入順序：全域在前、專案在後。id 優先於 label。
-    pub fn files_for(&self, project_id: &str, project_label: &str) -> Vec<String> {
-        let mut out: Vec<String> = self.instructions_file.iter().filter(|p| !p.trim().is_empty()).cloned().collect();
-        if let Some(p) = self.projects.get(project_id).or_else(|| self.projects.get(project_label)).filter(|p| !p.trim().is_empty()) {
-            out.push(p.clone());
-        }
-        out
+    /// 全域那份（在 daemon 這台機器上讀）。
+    pub fn global_file(&self) -> Option<&str> {
+        self.instructions_file.as_deref().filter(|p| !p.trim().is_empty())
+    }
+
+    /// 這個專案那份（在專案所在的主機上讀，跟 repo 放在一起）。id 優先於 label。
+    pub fn project_file(&self, project_id: &str, project_label: &str) -> Option<&str> {
+        self.projects.get(project_id).or_else(|| self.projects.get(project_label)).map(String::as_str).filter(|p| !p.trim().is_empty())
     }
 }
 

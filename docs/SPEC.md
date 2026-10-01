@@ -2159,7 +2159,7 @@ agents-manager = "/home/u/project/agents-manager/CLAUDE.md"
 ```
 
 - **注入順序**：`child_agent_rules`（§6.5c）→ 全域 agent md → 專案 agent md → bot 自己的 persona。三種 kind 同一份文字（claude `--append-system-prompt`、
-  codex `developer_instructions`、grok `--rules`）。檔案在 daemon 這台機器上讀，遠端專案也一樣；每次啟動 bot 重讀，改檔不必重啟 daemon，重啟 bot 就生效。
+  codex `developer_instructions`、grok `--rules`）。全域那份在 daemon 這台機器上讀；專案那份跟 repo 放在一起，在**專案所在的主機**上讀（遠端走 ssh，`~` 用那台的 HOME 展開）。每次啟動 bot 重讀，改檔不必重啟 daemon，重啟 bot 就生效。
 - **CLI 自己的指示檔一律關掉**（這個專案有任一份 agent md 時）：pane env `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`（claude 不讀任何 CLAUDE.md，帳號層與 repo 都是；
   不分 kind 都設，別種 bot 開出來的 claude 子 agent 也繼承）、codex 加 `-c project_doc_max_bytes=0`（不讀 AGENTS.md）。
   **沒設定的專案維持 CLI 原本的行為**：換版之後、設定寫好之前，bot 不會兩邊都讀不到。

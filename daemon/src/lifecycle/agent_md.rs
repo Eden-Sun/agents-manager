@@ -25,22 +25,52 @@ pub struct AgentMd {
     pub problems: Vec<String>,
 }
 
-/// 依 `[agents]` 讀這個專案的 agent md（全域在前、專案在後）。檔案在 daemon 這台機器上，遠端專案也一樣。
+/// 依 `[agents]` 讀這個專案的 agent md（全域在前、專案在後）。全域那份在 daemon 這台機器上讀；
+/// 專案那份跟 repo 放在一起，在專案所在的主機上讀（遠端走 ssh）。
 pub async fn load(app: &App, project: &db::Project) -> AgentMd {
-    let files = app.cfg.get().await.agents.files_for(&project.id, &project.label);
-    load_files(files).await
+    let agents = app.cfg.get().await.agents;
+    let mut reads: Vec<Result<String, String>> = Vec::new();
+    if let Some(f) = agents.global_file() {
+        reads.push(read_local(f).await);
+    }
+    if let Some(f) = agents.project_file(&project.id, &project.label) {
+        reads.push(if project.host == LOCAL_HOST {
+            read_local(f).await
+        } else {
+            match app.hosts.get(&project.host).await {
+                Some(conn) => read_remote(&conn, f).await,
+                None => Err(format!("{f}：未知主機 `{}`", project.host)),
+            }
+        });
+    }
+    collect(reads)
 }
 
-async fn load_files(files: Vec<String>) -> AgentMd {
+async fn read_local(f: &str) -> Result<String, String> {
     let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut out = AgentMd { configured: !files.is_empty(), ..Default::default() };
+    let path = crate::config::expand_home(f, &home);
+    tokio::fs::read_to_string(&path).await.map_err(|e| format!("{path} 讀不到：{e}"))
+}
+
+async fn read_remote(conn: &crate::hosts::HostConn, f: &str) -> Result<String, String> {
+    let home = conn.home().await.map_err(|e| format!("{f}（{}）：{e}", conn.name))?;
+    let path = crate::config::expand_home(f, &home);
+    let script = format!("F={}\nif [ -r \"$F\" ]; then printf 'AM_MD_OK\\n'; cat \"$F\"; else printf 'AM_MD_MISSING\\n'; fi\n", sh_quote(&path));
+    let out = conn.ssh_exec(&script).await.map_err(|e| format!("{path}（{}）讀不到：{e}", conn.name))?;
+    match out.split_once('\n') {
+        Some(("AM_MD_OK", body)) => Ok(body.to_string()),
+        _ => Err(format!("{path}（{}）讀不到", conn.name)),
+    }
+}
+
+fn collect(reads: Vec<Result<String, String>>) -> AgentMd {
+    let mut out = AgentMd { configured: !reads.is_empty(), ..Default::default() };
     let mut parts: Vec<String> = Vec::new();
-    for f in files {
-        let path = crate::config::expand_home(&f, &home);
-        match tokio::fs::read_to_string(&path).await {
+    for r in reads {
+        match r {
             Ok(t) if !t.trim().is_empty() => parts.push(t.trim().to_string()),
-            Ok(_) => out.problems.push(format!("{path} 是空檔")),
-            Err(e) => out.problems.push(format!("{path} 讀不到：{e}")),
+            Ok(_) => out.problems.push("有一份 agent md 是空檔".into()),
+            Err(e) => out.problems.push(e),
         }
     }
     out.text = parts.join("\n\n");
@@ -106,20 +136,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn global_comes_before_the_project_and_id_wins_over_label() {
+    fn the_project_file_is_found_by_id_before_label() {
         let mut cfg = crate::config::AgentsCfg { instructions_file: Some("~/g.md".into()), ..Default::default() };
+        assert_eq!(cfg.global_file(), Some("~/g.md"));
         cfg.projects.insert("proj".into(), "/by-label.md".into());
-        assert_eq!(cfg.files_for("01P", "proj"), vec!["~/g.md".to_string(), "/by-label.md".into()]);
+        assert_eq!(cfg.project_file("01P", "proj"), Some("/by-label.md"));
         cfg.projects.insert("01P".into(), "/by-id.md".into());
-        assert_eq!(cfg.files_for("01P", "proj"), vec!["~/g.md".to_string(), "/by-id.md".into()]);
-        assert_eq!(crate::config::AgentsCfg::default().files_for("01P", "proj"), Vec::<String>::new());
+        assert_eq!(cfg.project_file("01P", "proj"), Some("/by-id.md"));
+        assert_eq!(crate::config::AgentsCfg::default().global_file(), None);
+        assert_eq!(crate::config::AgentsCfg::default().project_file("01P", "proj"), None);
     }
 
     #[test]
     fn the_section_round_trips_and_is_omitted_when_unset() {
         let text = "[agents]\ninstructions_file = \"~/.config/agents-manager/agents/global.md\"\n\n[agents.projects]\nagents-manager = \"/repo/CLAUDE.md\"\n";
         let cfg: crate::config::ConfigFile = toml::from_str(text).unwrap();
-        assert_eq!(cfg.agents.files_for("x", "agents-manager"), vec!["~/.config/agents-manager/agents/global.md".to_string(), "/repo/CLAUDE.md".into()]);
+        assert_eq!(cfg.agents.global_file(), Some("~/.config/agents-manager/agents/global.md"));
+        assert_eq!(cfg.agents.project_file("x", "agents-manager"), Some("/repo/CLAUDE.md"));
         let back = toml::to_string_pretty(&cfg).unwrap();
         assert_eq!(toml::from_str::<crate::config::ConfigFile>(&back).unwrap().agents, cfg.agents);
         assert!(!toml::to_string_pretty(&crate::config::ConfigFile::default()).unwrap().contains("[agents]"));
@@ -127,17 +160,33 @@ mod tests {
 
     #[tokio::test]
     async fn unset_means_not_configured_and_a_missing_file_is_reported() {
-        let none = load_files(vec![]).await;
+        let none = collect(vec![]);
         assert!(!none.configured && none.text.is_empty() && none.problems.is_empty());
         let dir = std::env::temp_dir().join(format!("am-agent-md-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ok = dir.join("g.md");
         std::fs::write(&ok, "GLOBAL\n").unwrap();
-        let got = load_files(vec![ok.to_string_lossy().into_owned(), dir.join("nope.md").to_string_lossy().into_owned()]).await;
-        assert!(got.configured);
+        let got = collect(vec![read_local(ok.to_str().unwrap()).await, read_local(dir.join("nope.md").to_str().unwrap()).await]);
+        assert!(got.configured, "設了但讀不到也算設了：CLI 自己的檔照樣關，問題寫進對話");
         assert_eq!(got.text, "GLOBAL");
         assert_eq!(got.problems.len(), 1, "{:?}", got.problems);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 專案那份跟 repo 放在一起：遠端專案到那台主機上讀，`~` 用那台的 HOME 展開；讀不到要講出主機名。
+    #[tokio::test]
+    async fn a_remote_projects_file_is_read_on_its_host() {
+        let host = "agent-md-box";
+        let env = crate::testing::env().await;
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        *conn.remote_home.lock().await = Some("/Users/x".into());
+        crate::hosts::set_ssh_fake(host, |script| {
+            Ok(if script.contains("F='/Users/x/repo/CLAUDE.md'") { "AM_MD_OK\nREMOTE RULES\n".into() } else { "AM_MD_MISSING\n".into() })
+        });
+        assert_eq!(read_remote(&conn, "~/repo/CLAUDE.md").await.unwrap().trim(), "REMOTE RULES");
+        let err = read_remote(&conn, "/nope.md").await.unwrap_err();
+        assert!(err.contains("/nope.md") && err.contains(host), "{err}");
     }
 
     #[test]
