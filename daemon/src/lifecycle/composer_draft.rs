@@ -93,7 +93,7 @@ async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Res
         anyhow::bail!("pane.read returned pane {} while reading {pane}", read.pane_id);
     }
     let state = box_state(kind, &read.text);
-    let text = (state == BoxState::NonEmpty).then(|| composer_text(kind, &read.text)).flatten();
+    let text = (state == BoxState::NonEmpty).then(|| composer_text_whole(kind, &read.text)).flatten();
     Ok((state, text, read.revision))
 }
 
@@ -286,7 +286,7 @@ async fn confirm(
                 tracing::warn!(run = %run.id, bot = %bot.name, "submitted the draft in the composer; no lossless evidence on this run");
                 return Ok((Delivered::Unverified, None));
             }
-            (BoxState::NonEmpty, _) if !pressed_again && composer_text(&bot.kind, &screen).as_deref() == Some(draft) => {
+            (BoxState::NonEmpty, _) if !pressed_again && composer_text_whole(&bot.kind, &screen).as_deref() == Some(draft) => {
                 tracing::warn!(run = %run.id, bot = %bot.name, "the draft is still in the composer after Enter; pressing it again");
                 client.pane_send_keys(pane, Submit::Enter.keys()).await?;
                 pressed_again = true;

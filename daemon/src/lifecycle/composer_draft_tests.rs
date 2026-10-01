@@ -49,6 +49,20 @@ fn a_long_claude_draft_reads_whole() {
     assert!(text.starts_with("fixture folded row 1\n") && text.ends_with("fixture folded row 14"), "{text}");
 }
 
+/// 草稿兩段之間空一行：給人看、算 token、被清掉的要是同一整段，不是讀到第一個空白列就停（使用者同意清的只是前半段）。
+#[test]
+fn a_claude_draft_with_a_blank_row_reads_whole() {
+    let screen = CLAUDE_MULTI.replace("fixture line one\r\n", "fixture line one\r\n\r\n");
+    assert_ne!(screen, CLAUDE_MULTI, "fixture 換行的寫法變了，這個測試要跟著改");
+    assert_eq!(composer_text("claude", &screen).as_deref(), Some("fixture line one"), "舊讀法：停在空白列");
+    assert_eq!(composer_text_whole("claude", &screen).as_deref(), Some("fixture line one\n\nfixture line two\nfixture line three"));
+    // 沒有空白列的畫面兩種讀法一樣；codex／grok 維持原讀法。
+    assert_eq!(composer_text_whole("claude", CLAUDE_MULTI).as_deref(), Some(THREE_LINES));
+    for (kind, draft) in [("codex", CODEX_MULTI), ("grok", GROK_MULTI)] {
+        assert_eq!(composer_text_whole(kind, draft), composer_text(kind, draft), "{kind}");
+    }
+}
+
 #[test]
 fn only_verified_kinds_get_the_actions() {
     for kind in ["claude", "codex", "grok"] {
