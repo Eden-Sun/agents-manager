@@ -25,10 +25,21 @@ export function needsManualInstall(bot: Bot, run: Run | null | undefined): boole
   return (bot.kind === 'codex' || bot.kind === 'claude') && Boolean(run?.update_notice?.includes('需安裝'))
 }
 
+/**
+ * 不是「等一下就好」、而是一鍵重啟**永遠不動**的（daemon `bulk_restart::skip_reason` 的 `Child`／`DefaultSession`）：
+ * 子 agent 由父 bot 用 herdr 重開（SPEC §6.5a，2026-09-22）；使用者自己 herdr default session 裡的 pane daemon 只觀察（SPEC §6.5.1）。
+ * 前端的計數要跟 daemon 同一條線，不然框裡寫「重啟 N 顆」，實際動的比它少。
+ */
+function neverRestartedReason(bot: Bot, run: Run): string | null {
+  if (bot.managed_by === 'child' || Boolean(bot.parent_bot_id)) return '子 agent，由父 Bot 重開'
+  if (bot.herdr_session === 'default' || run.herdr_session === 'default') return '在你自己的 herdr default session 裡，daemon 不動它'
+  return null
+}
+
 /** `null` = 可以動。 */
 function busyReason(bot: Bot, run: Run, hasInFlightTurn: boolean): string | null {
   if (needsManualInstall(bot, run)) return '新版還沒裝，要先手動安裝才能套用'
-  return runBusyReason(run, hasInFlightTurn)
+  return neverRestartedReason(bot, run) ?? runBusyReason(run, hasInFlightTurn)
 }
 
 /** 不管更新有沒有裝，這顆現在能不能重啟。 */
@@ -52,7 +63,6 @@ export function updateBatchCounts(
   for (const bot of bots) {
     // update_notice 只有 claude／codex 會被 update_watch 寫（grok 沒有這條巡邏），跟寫入端假設對齊。
     if (bot.kind !== 'claude' && bot.kind !== 'codex') continue
-    // 子 agent 也算（2026-09-12 使用者：子 agent 全被跳過，更新永遠套不上去）。
     const run = runs[bot.id]
     if (!run || !run.update_notice?.trim()) continue
     const why = busyReason(bot, run, hasInFlightTurn(bot.id))
@@ -121,9 +131,8 @@ export function codexInstallPlan(
       const cur = updateRange('codex', plan.notice, null).to
       if (to && (!cur || cmpVersion(to, cur) > 0)) plan.notice = run.update_notice
     }
-    // 子 agent 批次一律跳過（daemon `Skip::Child`，SPEC §6.5a），由父 bot 用 herdr 重開。
-    const child = bot.managed_by === 'child' || Boolean(bot.parent_bot_id)
-    const why = child ? '子 agent，由父 Bot 重開' : runBusyReason(run, hasInFlightTurn(bot.id))
+    // 子 agent、default session 的批次一律跳過（daemon `Skip::Child`／`DefaultSession`）。
+    const why = neverRestartedReason(bot, run) ?? runBusyReason(run, hasInFlightTurn(bot.id))
     if (why) plan.busy.push({ botId: bot.id, name: bot.name, why })
     else plan.ready.push({ botId: bot.id, name: bot.name })
   }
