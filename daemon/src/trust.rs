@@ -156,7 +156,9 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let dir = path.parent().ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("trust");
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{name}.am-trust.{}.tmp", std::process::id()));
+    // pid 之外再加一個遞增號：同一個行程裡並行的兩次寫入不能共用暫存檔（互相截斷、改名撞 ENOENT）。
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = dir.join(format!(".{name}.am-trust.{}.{}.tmp", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
 
     let res = (|| -> Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
@@ -189,17 +191,35 @@ fn merged(kind: &str, existing: &str, paths: &[String]) -> Result<Option<String>
     }
 }
 
+/// 本機信任檔的讀→合併→寫要一次一個：批次重啟時好幾顆 bot 並行預先信任同一個 `~/.claude.json`（不同 worktree），
+/// 沒有互斥就是後寫的蓋掉先寫的，那顆 bot 照樣跳出信任提示。
+static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 讀到寫之間 CLI 自己改了檔就重讀再合併（跟遠端的 `cksum` 比對同一個意思），不拿舊內容蓋掉。
+const LOCAL_RACE_ATTEMPTS: usize = 3;
+
+fn read_store(store: &Path) -> Result<String> {
+    match std::fs::read_to_string(store) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", store.display())),
+    }
+}
+
 /// No-op (file not rewritten) when already trusted.
 pub fn mark_trusted(kind: &str, store: &Path, paths: &[String]) -> Result<bool> {
-    let existing = match std::fs::read_to_string(store) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", store.display())),
-    };
-    let Some(next) = merged(kind, &existing, paths)? else { return Ok(false) };
-    write_atomic(store, &next)?;
-    tracing::info!(kind, store = %store.display(), ?paths, "pre-trusted agent workspace directories");
-    Ok(true)
+    let _one_at_a_time = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for _ in 0..LOCAL_RACE_ATTEMPTS {
+        let existing = read_store(store)?;
+        let Some(next) = merged(kind, &existing, paths)? else { return Ok(false) };
+        if read_store(store)? != existing {
+            continue;
+        }
+        write_atomic(store, &next)?;
+        tracing::info!(kind, store = %store.display(), ?paths, "pre-trusted agent workspace directories");
+        return Ok(true);
+    }
+    bail!("{} kept changing while pre-trusting it", store.display())
 }
 
 /// Identity env then bot env (`lifecycle::pane_env` minus daemon vars, which name no config dir).
@@ -541,6 +561,38 @@ trust_level = "trusted"
         assert!(!got.contains("/link"), "symlink not resolved: {got}");
 
         assert_eq!(canonical("/no/such/dir/anywhere"), "/no/such/dir/anywhere");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 批次重啟時好幾顆 bot（不同 worktree、同一個 `~/.claude.json`）同時預先信任：
+    /// 讀→合併→寫沒有互斥的話，後寫的蓋掉先寫的（那顆 bot 就跳出信任提示），暫存檔名又只有 pid，並行時還會撞檔。
+    #[test]
+    fn concurrent_pretrusts_of_one_store_lose_nothing() {
+        let dir = std::env::temp_dir().join(format!("am-trust-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = dir.join(".claude.json");
+        std::fs::write(&store, r#"{"numStartups": 9}"#).unwrap();
+        for round in 0..20 {
+            let n = 12;
+            let barrier = Arc::new(std::sync::Barrier::new(n));
+            let handles: Vec<_> = (0..n)
+                .map(|i| {
+                    let (store, barrier) = (store.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        mark_trusted("claude", &store, &[format!("/w/{round}/{i}")])
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap().expect("a concurrent pre-trust must not fail");
+            }
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).expect("store stays valid JSON");
+            for i in 0..n {
+                assert_eq!(v["projects"][format!("/w/{round}/{i}")][CLAUDE_KEY], json!(true), "round {round}: /w/{round}/{i} was lost");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
