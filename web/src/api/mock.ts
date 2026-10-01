@@ -2607,6 +2607,7 @@ export class MockTransport implements Transport {
     const i = mine.findIndex((m) => m.id === id)
     if (i < 0) throw new ApiError(404, { error: 'not_found', what: 'message' }, 'not found')
     if (mine[i].role !== 'user') throw new ApiError(409, { reason: 'not_a_user_message', message: '只能倒回到一則使用者訊息。' }, 'conflict')
+    this.composerDrafts.gateRewind(botId, b)
     const at = now()
     const hit = mine.slice(i).filter((m) => !m.rewound_at)
     for (const m of hit) m.rewound_at = at

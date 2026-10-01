@@ -39,6 +39,24 @@ export class MockComposerDrafts {
     else this.drafts.delete(botId)
   }
 
+  /**
+   * 倒回（API.md §6.1）：終端輸入列有字就 409 `composer_busy`（帶 `draft`，一個字都沒打）；帶 `clear_composer` 時
+   * 只有 `expect_composer` 跟輸入列**逐字**相同（只統一 CRLF／LF；空白、圖片佔位照比）才清掉再倒回，不同就 409
+   * `composer_changed`（帶現在那段），什麼都不動（#737）。沒有草稿就什麼都不擋。
+   */
+  gateRewind(botId: string, b: Rec): void {
+    const draft = this.drafts.get(botId)
+    if (!draft) return
+    const lf = (t: string) => t.replace(/\r\n/g, '\n')
+    if (b.clear_composer !== true) {
+      throw new ApiError(409, { error: 'conflict', reason: 'composer_busy', message: '終端輸入列裡有一段還沒送出的字，倒回前要先清掉它。', draft }, 'composer_busy')
+    }
+    if (typeof b.expect_composer !== 'string' || lf(b.expect_composer) !== lf(draft)) {
+      throw new ApiError(409, { error: 'conflict', reason: 'composer_changed', message: '終端輸入列裡的字跟你看過的不一樣了，沒有動它。', draft }, 'composer_changed')
+    }
+    this.drafts.delete(botId)
+  }
+
   /** 送 prompt 之前：回這一則的內容（`submit_draft` 時是框裡那段），框裡有字又沒帶動作就 409。 */
   gate(botId: string, b: Rec): string {
     const draft = this.drafts.get(botId) ?? null
