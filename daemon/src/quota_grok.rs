@@ -332,7 +332,7 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     // the target terminal），之後用名字 `agent_wait` 回 `agent_not_running`——grok 其實好好開著，額度卻從 09-23 起
     // 大多數輪都讀不到（2026-09-28 使用者：「grok children 跑了一陣子，usage 沒更新」）。探測只需要 pane：
     // 名字掉了不算失敗，改看 pane 自己的 agent／狀態。
-    if let Err(e) = client.agent_start(&name, "grok", &pane_id, &[], 60_000).await {
+    if let Err(e) = start_when_shell_ready(&client, &name, &pane_id).await {
         if !name_lost(&e) {
             return Err(e);
         }
@@ -360,6 +360,30 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
     drop(probe);
     tracing::debug!(host, screen = %last, "grok /usage did not render a limit row");
     Err(anyhow!("grok `/usage` on {host} did not report a limit within {DIALOG_TIMEOUT:?}"))
+}
+
+/// `workspace.create` 回來時 pane 的 shell 常常還沒就緒（claude 探測也因此先睡 700 ms 才打字）：這時 `agent.start`
+/// 回 `agent_pane_busy`（`agent target pane … is not an available shell`），以前整輪額度探測就此失敗、停放五分鐘——
+/// 本機的 grok 額度從 09-28 起每天幾十到一百多次這樣失敗。這個錯誤只代表 shell 還沒好：等一下重試，有上限。
+const SHELL_READY_ATTEMPTS: u32 = 12;
+const SHELL_READY_WAIT: Duration = if cfg!(test) { Duration::from_millis(5) } else { Duration::from_millis(500) };
+
+fn pane_busy(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<crate::herdr::HerdrError>().is_some_and(|h| h.code == "agent_pane_busy")
+}
+
+async fn start_when_shell_ready(client: &HerdrClient, name: &str, pane_id: &str) -> Result<crate::herdr::AgentInfo> {
+    let mut attempt = 1;
+    loop {
+        match client.agent_start(name, "grok", pane_id, &[], 60_000).await {
+            Err(e) if pane_busy(&e) && attempt < SHELL_READY_ATTEMPTS => {
+                tracing::debug!(pane = %pane_id, attempt, "grok probe: the pane's shell is not ready yet; retrying agent.start");
+                attempt += 1;
+                tokio::time::sleep(SHELL_READY_WAIT).await;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// herdr 回的是「名字已經不在那個 pane 上」——agent 本身可能好好的。
@@ -459,6 +483,30 @@ pub fn spawn_grok_poller(app: Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 剛開的 pane 的 shell 還沒好：`agent.start` 回 `agent_pane_busy` 不能讓整輪探測失敗，等一下重試；
+    /// 一直 busy 就在上限後照實回錯（不無限等）。
+    #[tokio::test]
+    async fn agent_start_waits_for_the_new_panes_shell_instead_of_failing_the_probe() {
+        let e = crate::testing::env().await;
+        let (_ws, pane) = e.app.herdr.workspace_create("/tmp/p", "probe", json!({})).await.unwrap();
+        e.herdr.fail_next("agent.start", crate::testing::Fault::RefuseWith("agent_pane_busy"));
+        e.herdr.fail_next("agent.start", crate::testing::Fault::RefuseWith("agent_pane_busy"));
+        let started = start_when_shell_ready(&e.app.herdr, "amquotatest", &pane.pane_id).await.expect("busy twice, then the shell is ready");
+        assert_eq!(started.pane_id, pane.pane_id);
+        assert_eq!(e.herdr.calls_to("agent.start").len(), 3);
+
+        for _ in 0..SHELL_READY_ATTEMPTS {
+            e.herdr.fail_next("agent.start", crate::testing::Fault::RefuseWith("agent_pane_busy"));
+        }
+        let err = start_when_shell_ready(&e.app.herdr, "amquotatest2", &pane.pane_id).await.unwrap_err();
+        assert!(pane_busy(&err), "有上限：一直 busy 就照實回錯，{err:#}");
+        // 別種錯誤不重試。
+        e.herdr.fail_next("agent.start", crate::testing::Fault::RefuseWith("invalid_agent_argument"));
+        let before = e.herdr.calls_to("agent.start").len();
+        assert!(start_when_shell_ready(&e.app.herdr, "amquotatest3", &pane.pane_id).await.is_err());
+        assert_eq!(e.herdr.calls_to("agent.start").len(), before + 1);
+    }
 
     #[test]
     fn a_logged_out_or_recently_failed_host_is_not_probed() {
