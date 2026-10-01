@@ -78,8 +78,17 @@ fn version_notice(disk: &str, running: &str) -> Option<String> {
 /// 這一輪的 active run 名單已經在手，順手把不在名單上的帶走。測試版不呼叫：帳是全域的，平行的測試會互相清掉對方剛記的東西
 /// （每個模組的 `retain_*` 本身各有單元測試）。
 #[cfg(not(test))]
-fn prune_process_state(active_runs: &[String]) {
+async fn prune_process_state(app: &Arc<App>, active_runs: &[String]) {
     crate::lifecycle::retain_pane_typed(active_runs);
+    // 沒刪掉的 bot：讀不到就這一輪不清 per-bot 的帳（把讀失敗當成「沒有 bot」會清光）。
+    let live_bots: Vec<String> = match sqlx::query_scalar("SELECT id FROM bots WHERE deleted_at IS NULL").fetch_all(&app.db).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(error = ?e, "could not list live bots; per-bot process state not pruned this round");
+            return;
+        }
+    };
+    crate::pane_identity::retain_bots(&live_bots);
 }
 
 async fn sweep(app: &Arc<App>) {
@@ -103,7 +112,7 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
     #[cfg(not(test))]
     {
         crate::codex_update::retain_runs(&active);
-        prune_process_state(&active);
+        prune_process_state(app, &active).await;
     }
     for run in runs.into_iter().filter(|r| r.state == "running") {
         let kind = match db::bot(&app.db, &run.bot_id).await {
