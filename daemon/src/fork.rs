@@ -36,7 +36,7 @@ async fn source_session(app: &Arc<App>, bot_id: &str) -> Result<Option<(String, 
     sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT native_session_id, transcript_path FROM runs
           WHERE bot_id = ? AND native_session_id IS NOT NULL AND native_session_id != ''
-          ORDER BY started_at DESC LIMIT 1",
+          ORDER BY started_at DESC, rowid DESC LIMIT 1",
     )
     .bind(bot_id)
     .fetch_optional(&app.db)
@@ -250,6 +250,25 @@ mod tests {
     use super::*;
     use crate::testing::{env, Env};
     use serde_json::Value;
+
+    /// 稽核：`started_at` 只到毫秒（`db::now`），快速重啟的兩個 run 會擠進同一毫秒。fork 挑「最近一個有 session 的 run」要看寫入順序
+    /// （`rowid`），不是留給 SQLite 隨便挑：挑錯就是 fork 到**另一段對話**（#100／#461 同一個坑，這裡漏了）。
+    #[tokio::test]
+    async fn the_fork_source_is_the_run_written_last_when_two_share_a_millisecond() {
+        let e = env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "fork-tie").await;
+        for (id, session) in [("r-zzz-earlier", "native-earlier"), ("r-aaa-latest", "native-latest")] {
+            sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at) VALUES (?,?, 'exited','idle',?, '2026-10-01T00:00:00.000Z')")
+                .bind(id)
+                .bind(&bot.id)
+                .bind(session)
+                .execute(&e.app.db)
+                .await
+                .unwrap();
+        }
+        let got = source_session(&e.app, &bot.id).await.unwrap().map(|(sid, _)| sid);
+        assert_eq!(got.as_deref(), Some("native-latest"));
+    }
 
     fn started_args(e: &Env) -> Vec<Vec<String>> {
         e.herdr
