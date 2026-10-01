@@ -326,7 +326,7 @@ pub async fn clear(app: &Arc<App>, run_id: &str, bot_id: &str) -> Result<()> {
 
 /// 不篩 status：斷線那回合可能已被 Stop hook 收成 `completed`。
 async fn last_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db::Turn>> {
-    Ok(sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE run_id = ? ORDER BY created_at DESC LIMIT 1")
+    Ok(sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
         .bind(run_id)
         .fetch_optional(&app.db)
         .await?)
@@ -335,6 +335,26 @@ async fn last_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db::Turn>> {
 #[cfg(test)]
 mod tests {
     use super::{api_error_line, is_quota_exhaustion, is_quota_limit};
+
+    /// 同一毫秒的兩個回合：「這個 run 的最後一回合」要看寫入順序，不是隨便一個（`created_at` 只到毫秒，id 的隨機段不遞增）。
+    #[tokio::test]
+    async fn the_last_turn_of_a_run_is_the_one_written_last_when_two_share_a_millisecond() {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "last-turn-tie").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let conv = crate::db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        for id in ["t-zzz-first", "t-aaa-second"] {
+            sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','completed','ok','2026-10-01T00:00:00.000Z')")
+                .bind(id)
+                .bind(&conv)
+                .bind(&run)
+                .execute(&e.app.db)
+                .await
+                .unwrap();
+        }
+        let last = super::last_turn(&e.app, &run).await.unwrap().map(|t| t.id);
+        assert_eq!(last.as_deref(), Some("t-aaa-second"));
+    }
 
     /// pane w168:pE 的真實快照（2026-09-09）：回合被 API 斷線截斷，但收尾照樣寫 `done`。
     const CONNECTION_LOST: &str = "\

@@ -851,7 +851,7 @@ async fn fill_or_drop_late_hook(
 /// 蓋最新那則、其餘備援那幾則留著（通常只有一則）。回合 `completed_fallback → completed`（合法邊）；CAS 沒過就不蓋。
 async fn replace_fallback_reply(app: &Arc<App>, mut tx: sqlx::Transaction<'_, sqlx::Sqlite>, turn: &db::Turn, body_text: &str) -> Result<()> {
     let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT id, source FROM messages WHERE turn_id=? AND role='assistant' ORDER BY created_at DESC, id DESC")
+        sqlx::query_as("SELECT id, source FROM messages WHERE turn_id=? AND role='assistant' ORDER BY created_at DESC, rowid DESC")
             .bind(&turn.id)
             .fetch_all(&mut *tx)
             .await?;
@@ -956,11 +956,16 @@ async fn fired_within(app: &Arc<App>, t: &db::Turn, received_at: Option<&str>) -
     }
     let fired_at = fired.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let between: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND id <> ? AND created_at > ? AND created_at <= ?",
+        // 「`t` 之後」同毫秒的也算：`created_at` 只到毫秒，同一毫秒開的另一個回合（寫入順序在 `t` 後面）一樣是在 `t` 之後開的。
+        "SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND id <> ?
+            AND (created_at > ? OR (created_at = ? AND rowid > (SELECT rowid FROM turns WHERE id = ?)))
+            AND created_at <= ?",
     )
     .bind(&t.conversation_id)
     .bind(&t.id)
     .bind(&t.created_at)
+    .bind(&t.created_at)
+    .bind(&t.id)
     .bind(&fired_at)
     .fetch_one(&app.db)
     .await?;
@@ -3722,6 +3727,54 @@ mod external_claim_tests {
         assert_eq!(relay(echo.id.clone()).await.as_deref(), Some(from.id.as_str()), "回音補標寄件者");
         assert_eq!(relay(web.id.clone()).await, None, "完全相同的 web 使用者訊息不動");
         assert_eq!(crate::agent_relay::claim(crate::config::LOCAL_HOST, "robins-hub-3b84sb", text), None, "補標後報備已用掉，不會再標一次");
+    }
+
+    /// 同一毫秒的兩則備援回覆：遲到的 hook 要蓋「最新」那則（寫入順序），不是 id 字典序大的那則。
+    #[tokio::test]
+    async fn a_late_hook_replaces_the_fallback_reply_written_last_when_two_share_a_millisecond() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "late-hook-tie").await;
+        let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES ('t-late', ?, 'web','completed_fallback','ok','2026-10-01T00:00:00.000Z')")
+            .bind(&conv)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        for (id, content) in [("m-zzz-first", "備援一"), ("m-aaa-second", "備援二")] {
+            sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?, 't-late', 'assistant', ?, 'terminal_fallback', '2026-10-01T00:00:01.000Z')")
+                .bind(id)
+                .bind(&conv)
+                .bind(content)
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+        }
+        let turn: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id='t-late'").fetch_one(&env.app.db).await.unwrap();
+        let tx = env.app.db.begin().await.unwrap();
+        replace_fallback_reply(&env.app, tx, &turn, "hook 原文").await.unwrap();
+        let rows: Vec<(String, String)> = sqlx::query_as("SELECT id, content FROM messages WHERE turn_id='t-late' ORDER BY rowid").fetch_all(&env.app.db).await.unwrap();
+        assert_eq!(rows, vec![("m-zzz-first".to_string(), "備援一".to_string()), ("m-aaa-second".to_string(), "hook 原文".to_string())]);
+    }
+
+    /// 同一毫秒、寫在 `t` 後面的另一個回合，也算「`t` 之後有開過別的回合」：這則 hook 不能認領 `t`。
+    #[tokio::test]
+    async fn a_turn_opened_in_the_same_millisecond_after_this_one_counts_as_in_between() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "fired-tie").await;
+        let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
+        for id in ["t-zzz-first", "t-aaa-second"] {
+            sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?, 'web','in_flight','ok','2026-10-01T00:00:00.000Z')")
+                .bind(id)
+                .bind(&conv)
+                .execute(&env.app.db)
+                .await
+                .unwrap();
+        }
+        let first: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id='t-zzz-first'").fetch_one(&env.app.db).await.unwrap();
+        let second: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id='t-aaa-second'").fetch_one(&env.app.db).await.unwrap();
+        let fired = Some("2026-10-01T00:00:05Z");
+        assert!(!fired_within(&env.app, &first, fired).await.unwrap(), "同毫秒、後寫的那個回合在它之後開");
+        assert!(fired_within(&env.app, &second, fired).await.unwrap(), "最後一個回合之後沒有別的");
     }
 
     /// 稽核：報備表只用 agent 名字當 key。名字是 `<專案>-<bot>`，兩台主機各有同名 agent 並不稀奇；

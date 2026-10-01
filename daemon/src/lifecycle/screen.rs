@@ -129,7 +129,7 @@ pub(crate) async fn conversation_message_count(app: &Arc<App>, conversation_id: 
 pub(crate) async fn last_assistant_content(app: &Arc<App>, conversation_id: &str) -> anyhow::Result<Option<String>> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'
-         ORDER BY created_at DESC, id DESC LIMIT 1",
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(conversation_id)
     .fetch_optional(&app.db)
