@@ -4059,7 +4059,7 @@ async fn prompt_bot(
         }
         lifecycle::submit_composer_draft(&app, &id, expect.unwrap_or_default(), &crid).await?
     } else if b.start_if_stopped && !b.send_now && !b.clear_draft {
-        lifecycle::prompt_starting(&app, &id, &b.text, &crid, &b.attachments, src).await?
+        lifecycle::prompt_starting_or_queue(&app, &id, &b.text, &crid, &b.attachments, src, b.queue_if_busy).await?
     } else if b.queue_if_busy && !b.clear_draft {
         lifecycle::prompt_from_api_queue_if_busy(&app, &id, &b.text, &crid, &b.attachments, src, b.send_now, expect).await?
     } else {
@@ -5970,6 +5970,38 @@ mod prompt_route_tests {
         assert_eq!(bound.as_deref(), Some(message_id), "message and attachment binding commit together");
         let turn: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(turn_id).fetch_one(&e.app.db).await.unwrap();
         assert_eq!(serde_json::to_value(turn).unwrap()["awaits_idle"], 1, "turn JSON exposes the wait flag");
+    }
+
+    /// web 的 Enter 永遠帶 `queue_if_busy`，bot 沒在跑時再加 `start_if_stopped`。畫面上的 run 比 daemon 慢一拍
+    /// （bot 剛起來、frame 還沒到）時兩個旗標會一起打到「已經在跑而且忙」的 bot：`start_if_stopped`
+    /// 「bot 在跑就跟沒帶一樣」，所以結果該跟只帶 `queue_if_busy` 相同——落地排隊，而不是丟掉旗標回 409（Refs #733）。
+    #[tokio::test]
+    async fn start_if_stopped_does_not_drop_queue_if_busy_for_a_running_busy_bot() {
+        let e = crate::testing::env().await;
+        let bot = typed_bot(&e, "grok").await;
+        let run_id: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'")
+            .bind(&bot).fetch_one(&e.app.db).await.unwrap();
+        let conversation_id = db::conversation_id(&e.app.db, &bot).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?, ?, ?, 'web', 'in_flight', 'ok', ?)")
+            .bind(db::ulid()).bind(&conversation_id).bind(&run_id).bind(db::now()).execute(&e.app.db).await.unwrap();
+        let body: PromptIn = serde_json::from_value(json!({
+            "text": "兩個旗標一起來",
+            "client_request_id": "start-and-queue",
+            "start_if_stopped": true,
+            "queue_if_busy": true,
+        })).unwrap();
+        let resp = match prompt_bot(State(e.app.clone()), Path(bot.clone()), HeaderMap::new(), Json(body)).await {
+            Ok(r) => r,
+            Err(err) => err.into_response(),
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let out: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::OK, "在跑的忙碌 bot 照 queue_if_busy 排隊：{out}");
+        assert_eq!(out["delivery"], "queued", "{out}");
+        let awaits_idle: i64 = sqlx::query_scalar("SELECT awaits_idle FROM turns WHERE id=?")
+            .bind(out["turn_id"].as_str().unwrap()).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(awaits_idle, 1);
     }
 
     #[tokio::test]
