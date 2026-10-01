@@ -933,6 +933,21 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
 
 超過 20 萬字一律 `NotAttempted(prompt_too_long_to_prove)`（422），不打。
 
+**codex 結構化歷史**（#749，`codex_history.rs`；`[codex_history] enabled`，預設開，關掉＝完全回到上面的 rollout／回音路線）：
+本機 codex、run 有 `native_session_id` 時，用短命的 `codex app-server`（stdio JSON-RPC，帶這顆 bot 的 `CODEX_HOME`，用完即殺，
+不另起長駐 daemon）讀 `thread/items/list`／`thread/turns/list`，當 rollout 與畫面**之外**的 positive evidence。
+- **綁定嚴格**：`(host, CODEX_HOME, thread id)` 三個一起；thread id 一律是 `runs.native_session_id`（daemon 重啟後同一個值，所以重啟後照樣讀得到），
+  不從「最近一條 thread」猜；id 含非英數／`-` 的字元就不用。真的 source 只認本機，其他主機（含遠端）一律不碰、走舊路。
+- **只升不降**：打字前記基準（thread 最新一筆 item 的 id；空歷史或讀不到＝沒有基準，不給結構化證據——空歷史與「投影停住」分不出來），
+  送出後由新到舊最多翻 4 頁、讀到基準為止，新出現一則與送出文字逐字相同的 `userMessage` 才算（多段 text 輸入接起來相同也算）。
+  成立 → `Submitted`（`delivery_verified=1`），在 rollout／回音還證不出來的時候補上；沒看到、翻不到基準、RPC error、逾時、app-server 開不起來
+  都只是「沒有證據」：照舊 `Unverified`／`Unproven`，**不**判未送達、**不**重送。
+- **回覆補撈**：stuck-turn 巡邏（§4.3b）找 codex 回覆時先看 thread 歷史——我們那則之後、同一個 turn、`phase = final_answer` 的 `agentMessage`
+  （中間又有別的 user 訊息、只有 commentary、沒有 phase 都不算）；沒有才讀 rollout 的 `task_complete`。
+- **中斷證據**：重啟後補判「這則是不是被使用者按停了」時，先看我們那則所在 turn 的 `turn.status`，明說 `interrupted` 才算；其他一律回頭讀 rollout 的 `turn_aborted`。
+- **計數與 log**：每次 codex 證據判定記一筆來源（`structured`／`rollout`／`screen`），log 帶累計的 `structured_hit`／`rollout_fallback`／`screen_fallback`
+  與 `structured_miss`（結構化路徑試了但沒證據），用來判斷之後值不值得把 rollout／畫面 scraping 降級。
+
 **「有沒有證據」與「能不能自動重送」是兩件事**（AGM 2026-09-16 裁示）：
 - `turns.delivery_verified` 只講**證據**：有沒有無損證據證明它進了對方的輸入框／session。
 - `turns.auto_resend` 只講**能不能自動重送**：打過字但證不明的那條路重送會重複派工，所以是 0；有證據的已經送進去，也是 0；
