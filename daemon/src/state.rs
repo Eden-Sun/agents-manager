@@ -445,6 +445,12 @@ impl App {
         g.entry(bot_id.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 
+    /// 沒了的 bot 不留鎖：`bot_lock` 每顆出現過的 bot（含每顆 child）一格 `Arc<Mutex>`，只記不清的話只增不減。
+    /// 還有人握著或等著的（`Arc` 不只這張表一份）一律不動。
+    pub async fn retain_bot_locks(&self, live: &[String]) {
+        self.locks.lock().await.retain(|id, lock| live.contains(id) || Arc::strong_count(lock) > 1);
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
         self.bus.subscribe()
     }
@@ -816,5 +822,29 @@ mod reap_tests {
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false));
         assert!(gone, "結束的子行程沒被 wait，留成 zombie");
+    }
+}
+
+#[cfg(test)]
+mod bot_lock_tests {
+    use crate::testing as tt;
+
+    #[tokio::test]
+    async fn the_locks_of_deleted_bots_are_dropped_unless_someone_holds_them() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let held = app.bot_lock("lock-held").await;
+        let _g = held.lock().await;
+        for id in ["lock-gone", "lock-kept"] {
+            let _ = app.bot_lock(id).await;
+        }
+        app.retain_bot_locks(&["lock-kept".to_string()]).await;
+        let first_gone = app.bot_lock("lock-gone").await;
+        let first_kept = app.bot_lock("lock-kept").await;
+        let again_kept = app.bot_lock("lock-kept").await;
+        let again_held = app.bot_lock("lock-held").await;
+        assert!(std::sync::Arc::ptr_eq(&first_kept, &again_kept), "還在的 bot 的鎖不換");
+        assert!(std::sync::Arc::ptr_eq(&held, &again_held), "有人握著的鎖不能被清掉再換一把（會讓兩個人同時進臨界區）");
+        assert_eq!(std::sync::Arc::strong_count(&first_gone), 2, "沒了的 bot 的鎖被清掉後重新建立（表一份＋我們手上一份）");
     }
 }
