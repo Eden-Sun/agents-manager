@@ -1550,6 +1550,7 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 第二顆因此掛在第一顆底下、第三顆掛在第二顆底下，一顆掛一顆串成鏈；短名字被前一顆占用時 `child_name` 的 `prefix_score` 對錯的那個
 parent 算出來是 0，連字尾都取不到，退而用完整 herdr agent name 建 bot，於是又多長出重複 bot。`spawn_hints` 直接把「這個 pane_id 是
 哪顆 bot 剛開的」這個事實排在血緣前面，繞過整個「同 tab 就算」的推斷，從根本上不讓鏈條長出來。三條都沒中就跳過。
+**同 tab 但名字對不上時以名字為準**（2026-10-01 使用者：cf-優化在 verify 的 tab 裡開了 `<cf-優化>-memleak`，被掛到 verify 底下，側欄看不到）：同 tab 的候選前綴分數是 0、而別處有一顆的 agent 名正是它的前綴，就掛到那一顆；同 tab 而且名字也對得上的照舊優先，誰的前綴都不是才退回同 tab。順序：spawn hint → 同 tab 且名字對得上 → 名字前綴 → 同 tab。
 
 **spawn hint 從哪來**：頂層 bot 自己的 `PostToolUse` hook（`matcher: "Bash"`，issue #94）——它自己的 Bash 工具跑
 `herdr pane split`／`agent start` 時，那條指令的 stdout 是 herdr 自己回的一個或多個 JSON-RPC 回應（`{"id":"cli:pane:split",
