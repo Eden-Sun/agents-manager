@@ -458,6 +458,38 @@ mod tests {
         assert!(!live.contains(&old.id), "超過保留時間：清");
     }
 
+    /// #767：「沒觀察過」跟「觀察過、是 0」是兩回事——前者（daemon 剛重啟、巡邏還沒輪到）沒有證據，一鍵重啟不擋、確認框標「未知」；
+    /// 後者才是乾淨。API 的 `run.background_jobs`：沒觀察過是 `null`，不是 0。
+    #[tokio::test]
+    async fn an_unobserved_run_is_unknown_and_an_observed_clean_one_is_zero() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "bgz").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let state_run = |app: &Arc<App>| {
+            let r = Some(serde_json::json!({"id": run}));
+            crate::background_jobs::run_json(app, &r, Some(run.as_str()))["background_jobs"].clone()
+        };
+        assert_eq!(crate::background_jobs::known(&e.app, &run), None);
+        assert!(state_run(&e.app).is_null(), "沒觀察過：null");
+
+        let screen = std::fs::read_to_string(format!(
+            "{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        e.herdr.set_screen(&format!("pane-{}", bot.id), &screen);
+        let mut rx = e.app.subscribe();
+        sweep(&e.app).await;
+        assert_eq!(crate::background_jobs::known(&e.app, &run), Some(0), "看過、乾淨：0");
+        assert_eq!(state_run(&e.app), 0);
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|f| f.kind == "bot_status"), "null → 0 也要推，確認框才不會一直停在「未知」");
+
+        sqlx::query("UPDATE runs SET state = 'exited' WHERE id = ?").bind(&run).execute(&e.app.db).await.unwrap();
+        sweep(&e.app).await;
+        assert_eq!(crate::background_jobs::known(&e.app, &run), None, "結束的 run 不留帳");
+    }
+
     /// #744：列舉 active run 失敗的那一輪不能清基準／背景工作帳；成功列舉出空清單才清。
     #[tokio::test]
     async fn a_failed_active_run_listing_keeps_baselines_and_background_jobs() {
