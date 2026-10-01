@@ -45,6 +45,31 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.s.project(A)["url"], UA)
         self.assertEqual(self.s.project(B)["url"], UB)
 
+    def test_a_question_carrying_a_credential_is_refused_and_never_stored(self):
+        """CLAUDE.md：不貼 token／密碼。題目會一字不漏送到第三方網頁，所以在入口擋，不留在佇列與 DB 裡。"""
+        token_file = Path(self.tmp.name) / "ui-token"
+        token_file.write_text("a-live-ui-token-0123456789abcdef\n")
+        secrets = {
+            "ui_token": "看這個 a-live-ui-token-0123456789abcdef 為什麼 401",
+            "private_key": "key:\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----",
+            "github_token": "gh auth 用 ghp_" + "A1b2C3d4E5" * 4,
+            "api_key": "ANTHROPIC_API_KEY=sk-ant-api03-" + "x9Y8z7W6v5" * 4,
+            "aws_key": "AKIAIOSFODNN7EXAMPLE 是 key",
+            "am_token_header": "curl -H 'X-AM-Token: 8f3c9d2b7a1e4f60b5d8c2a94e7f1b3d' http://127.0.0.1:7788/api/state",
+        }
+        with patch.dict(os.environ, {"AM_UI_TOKEN_FILE": str(token_file)}):
+            for kind, text in secrets.items():
+                with self.subTest(kind):
+                    with self.assertRaisesRegex(OBError, "secret_in_question") as caught:
+                        self.ask(rid="s-" + kind, text=text)
+                    self.assertIn(kind, str(caught.exception))
+                    for needle in ("a-live-ui-token", "ghp_", "sk-ant", "AKIAIOSFODNN", "8f3c9d2b"):
+                        self.assertNotIn(needle, str(caught.exception), "錯誤訊息不能把祕密再回顯一次")
+            self.assertEqual(self.s.list(), [], "被擋的題目不能留在佇列")
+            # 一般的技術討論不誤擋：短的 sk-、沒有值的 header 名稱、token 這個字本身。
+            ok = self.ask(rid="fine", text="UI token 放 header X-AM-Token，格式像 sk-xxx 嗎？ghp_ 開頭是 GitHub 的前綴。")
+            self.assertEqual(ok["status"], "pending")
+
     def test_request_replay_does_not_requeue_completed_work(self):
         a = self.ask()
         self.s.finish(a["id"], "answer", UA, self.s.claim()["claim_token"])
