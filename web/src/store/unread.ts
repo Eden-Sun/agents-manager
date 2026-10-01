@@ -257,6 +257,12 @@ export function idleEdgeCompletionKey(
   return `run:${runId}:${n}`
 }
 
+/** 不在 `live` 裡的 bot（刪掉、退役的 child）不留 idle 邊緣的帳：每顆 bot 各一格，沒有人會回頭清。 */
+export function pruneIdleEdges(live: ReadonlySet<string>) {
+  for (const id of [...hookCompleted]) if (!live.has(id)) hookCompleted.delete(id)
+  for (const id of [...idleEdges.keys()]) if (!live.has(id)) idleEdges.delete(id)
+}
+
 /** 測試用。 */
 export function resetIdleEdges() {
   hookCompleted.clear()
