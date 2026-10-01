@@ -1516,6 +1516,28 @@ mod tests {
         assert_eq!(detail["reason"], "approval_already_used", "已還掉的租約不能靠 request_id 救回來");
     }
 
+    /// 租約沒 release、只是過期（執行端掛了）：同一個 `request_id` 重送不能把它救回來，也不能延長——
+    /// 即使 `expires_at` 是舊版寫的秒格式、這一秒稍早已過期（#101 的同一類誤判：字串比會把它當成還握著）。
+    #[tokio::test]
+    async fn an_expired_lease_cannot_be_rescued_by_replaying_its_request_id() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let a = approved_window(app, 0).await;
+        let first = acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], Some("req-exp")).await.unwrap();
+        assert!(first.get("replayed").is_none());
+        // 這一秒稍早已過期，而且是秒格式：…:SS.000 < now，但 `…:SSZ` 在字串上大於 `…:SS.mmmZ`。
+        let now = chrono::Utc::now();
+        let earlier_this_second = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        assert!(crate::db::cmp_ts(&earlier_this_second, &crate::db::now()).is_le(), "前提");
+        sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='rebuild'").bind(&earlier_this_second).execute(&app.db).await.unwrap();
+
+        let refused = acquire_with_request(app, "rebuild", "ops", &a, None, 300, true, &[], Some("req-exp")).await.unwrap_err();
+        let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+        assert_eq!(detail["reason"], "approval_already_used", "過期的租約不能靠 request_id 救回來：{detail}");
+        let l = store::lease(&app.db, "rebuild").await.unwrap().unwrap();
+        assert_eq!(l.expires_at.as_deref(), Some(earlier_this_second.as_str()), "也沒有被延長");
+    }
+
     /// 換 commit 重新申請（supersedes）：舊的標 superseded、它的等待接過來，升級計時不因為 main 動了就歸零（review2 sup 新發現 2）。
     #[tokio::test]
     async fn a_new_commit_carries_the_wait_of_the_approval_it_supersedes() {
