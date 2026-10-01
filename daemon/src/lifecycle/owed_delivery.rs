@@ -62,6 +62,11 @@ fn ledger() -> &'static Mutex<HashMap<String, Vec<Owed>>> {
     M.get_or_init(Default::default)
 }
 
+/// 不在 `live` 裡的 bot 不留欠著的送達結果：bot 沒了就沒有回合可以補寫。
+pub(crate) fn retain_bots(live: &[String]) {
+    ledger().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| live.contains(id));
+}
+
 fn owed(bot_id: &str) -> Vec<Owed> {
     ledger().lock().unwrap_or_else(|e| e.into_inner()).get(bot_id).cloned().unwrap_or_default()
 }
@@ -255,6 +260,21 @@ pub(crate) fn owed_as_unknown(res: LcResult<PromptOut>) -> LcResult<PromptOut> {
             Ok(PromptOut { turn_id: s("turn_id"), message_id: s("message_id"), delivery: delivery.into(), send_now: None })
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod retain_tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_bots_owed_delivery_is_dropped() {
+        for bot in ["owed-gone", "owed-kept"] {
+            record(bot, Owed { turn_id: format!("t-{bot}"), write: Write::Closed { delivery: "failed", note: "n".into() } });
+        }
+        retain_bots(&["owed-kept".to_string()]);
+        assert!(owed("owed-gone").is_empty() && !owed("owed-kept").is_empty());
+        retain_bots(&[]);
     }
 }
 

@@ -126,6 +126,7 @@ pub(crate) fn retain_pane_typed(active: &[String]) {
 pub(crate) fn retain_bot_state(live: &[String]) {
     interrupt_grace::retain_bots(live);
     interruption::retain_bots(live);
+    owed_delivery::retain_bots(live);
 }
 
 #[cfg(test)]
