@@ -28,6 +28,7 @@ impl IntoResponse for LcError {
     fn into_response(self) -> Response {
         match self {
             LcError::NotFound(what) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "what": what}))).into_response(),
+            LcError::NotFoundValue(v) => (StatusCode::NOT_FOUND, Json(v)).into_response(),
             LcError::Conflict(v) => (StatusCode::CONFLICT, Json(v)).into_response(),
             LcError::Bad(m) => (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "message": m}))).into_response(),
             LcError::BadValue(v) => (StatusCode::BAD_REQUEST, Json(v)).into_response(),
@@ -3155,17 +3156,19 @@ async fn search_messages(State(app): State<Arc<App>>, Query(q): Query<SearchQuer
     }
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     let pattern = format!("%{}%", like_escape(needle));
-    let rows: Vec<(String, i64, String)> = sqlx::query_as(
-        r#"SELECT c.bot_id, COUNT(*) AS hits,
+    // 已刪 bot 仍在結果裡（總管查證據要），但活的排前面：命中較多的已刪 bot 不能把活 bot 擠出 `limit`（#766）。
+    let rows: Vec<(String, bool, i64, String)> = sqlx::query_as(
+        r#"SELECT c.bot_id, b.deleted_at IS NOT NULL AS bot_deleted, COUNT(*) AS hits,
                   (SELECT m2.content FROM messages m2
                      JOIN conversations c2 ON c2.id = m2.conversation_id
                     WHERE c2.bot_id = c.bot_id AND m2.content LIKE ?1 ESCAPE '\'
-                    ORDER BY m2.created_at DESC LIMIT 1) AS newest
+                    ORDER BY m2.created_at DESC, m2.rowid DESC LIMIT 1) AS newest
              FROM messages m
              JOIN conversations c ON c.id = m.conversation_id
+             JOIN bots b ON b.id = c.bot_id
             WHERE m.content LIKE ?1 ESCAPE '\'
             GROUP BY c.bot_id
-            ORDER BY hits DESC
+            ORDER BY bot_deleted ASC, hits DESC, c.bot_id
             LIMIT ?2"#,
     )
     .bind(&pattern)
@@ -3177,7 +3180,9 @@ async fn search_messages(State(app): State<Arc<App>>, Query(q): Query<SearchQuer
     let lower = needle.to_lowercase();
     let bots: Vec<Value> = rows
         .into_iter()
-        .map(|(bot_id, hits, newest)| json!({"bot_id": bot_id, "hits": hits, "snippet": snippet_around(&newest, &lower, 90)}))
+        .map(|(bot_id, bot_deleted, hits, newest)| {
+            json!({"bot_id": bot_id, "bot_deleted": bot_deleted, "hits": hits, "snippet": snippet_around(&newest, &lower, 90)})
+        })
         .collect();
     Ok(Json(json!({"q": needle, "bots": bots})))
 }
@@ -4419,6 +4424,12 @@ async fn abandon_turn(State(app): State<Arc<App>>, Path(id): Path<String>) -> Re
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
+/// `before=` 游標指不到東西的 404（#766）。`reason` 是機器可讀的：`before_message_gone`（被刪掉或根本沒有）、
+/// `before_message_not_in_conversation`（是別顆 bot／別個專案的訊息）。呼叫端的正解都是重載第一頁，不是重試。
+pub(crate) fn cursor_not_found(reason: &str, message_id: &str) -> LcError {
+    LcError::NotFoundValue(json!({"error": "not_found", "what": "before message", "reason": reason, "message_id": message_id}))
+}
+
 async fn get_messages(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -4430,15 +4441,20 @@ async fn get_messages(
     }
     let conv = db::conversation_id(&app.db, &id).await.map_err(any_err)?;
     let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100).clamp(1, 500);
+    // 游標必須是這段對話裡還在的訊息：被刪掉的或別顆 bot 的一律 404＋reason，不拿全域 rowid 默默切出錯的一頁（#766）。
     let before_rowid = match q.get("before") {
-        Some(b) => Some(
-            sqlx::query_scalar::<_, i64>("SELECT rowid FROM messages WHERE id = ?")
+        Some(b) => {
+            let at: Option<(i64, String)> = sqlx::query_as("SELECT rowid, conversation_id FROM messages WHERE id = ?")
                 .bind(b)
                 .fetch_optional(&app.db)
                 .await
-                .map_err(any_err)?
-                .ok_or_else(|| LcError::Bad(format!("before message `{b}` not found")))?,
-        ),
+                .map_err(any_err)?;
+            match at {
+                None => return Err(cursor_not_found("before_message_gone", b)),
+                Some((_, c)) if c != conv => return Err(cursor_not_found("before_message_not_in_conversation", b)),
+                Some((rowid, _)) => Some(rowid),
+            }
+        }
         None => None,
     };
     // `turn_id` / `role`：前端要證明某個回合是不是群組回覆（帶 `group_id` 的 user 訊息），沒有它就得
@@ -4944,7 +4960,7 @@ mod message_tests {
         let q = HashMap::from([(String::from("before"), String::from("missing"))]);
         assert!(matches!(
             get_messages(State(app), Path(bot_id.into()), Query(q)).await,
-            Err(LcError::Bad(_))
+            Err(LcError::NotFoundValue(_))
         ));
     }
 
@@ -5030,6 +5046,106 @@ mod message_tests {
         .execute(db)
         .await
         .unwrap();
+    }
+
+    async fn not_found_reason(r: Result<Json<Value>, LcError>) -> Option<String> {
+        let resp = r.err().expect("應該是錯誤").into_response();
+        if resp.status() != StatusCode::NOT_FOUND {
+            return None;
+        }
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice::<Value>(&body).unwrap()["reason"].as_str().map(str::to_string)
+    }
+
+    /// #766：游標指到已經被刪掉的訊息、或別顆 bot 的訊息，不能 400 也不能默默用全域 rowid 切出錯的一頁，
+    /// 一律 404 並帶 reason，呼叫端才知道要重載而不是重試。
+    #[tokio::test]
+    async fn a_before_cursor_that_is_gone_or_foreign_is_a_404_with_a_reason() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (mine, my_conv) = a_bot_with_conv(&e, "cursor-mine").await;
+        let (_other, other_conv) = a_bot_with_conv(&e, "cursor-other").await;
+        a_turn(&app.db, &my_conv, "t-mine").await;
+        a_turn(&app.db, &other_conv, "t-other").await;
+        a_message(&app.db, &my_conv, "m-mine-1", "t-mine", "user", None).await;
+        a_message(&app.db, &other_conv, "m-other-1", "t-other", "user", None).await;
+        a_message(&app.db, &my_conv, "m-mine-2", "t-mine", "assistant", None).await;
+        a_message(&app.db, &my_conv, "m-gone", "t-mine", "assistant", None).await;
+        sqlx::query("DELETE FROM messages WHERE id='m-gone'").execute(&app.db).await.unwrap();
+
+        let page = |before: &str| Query(HashMap::from([("before".to_string(), before.to_string())]));
+        // 自己的訊息照舊。
+        let Json(ok) = get_messages(State(app.clone()), Path(mine.clone()), page("m-mine-2")).await.unwrap();
+        assert_eq!(ok["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(not_found_reason(get_messages(State(app.clone()), Path(mine.clone()), page("m-gone")).await).await.as_deref(), Some("before_message_gone"));
+        assert_eq!(not_found_reason(get_messages(State(app.clone()), Path(mine.clone()), page("never-existed")).await).await.as_deref(), Some("before_message_gone"));
+        assert_eq!(
+            not_found_reason(get_messages(State(app.clone()), Path(mine.clone()), page("m-other-1")).await).await.as_deref(),
+            Some("before_message_not_in_conversation")
+        );
+
+        // 群組時間軸同一條規則：訊息要屬於這個專案的某顆 bot（含已刪的：游標在清單載入後才刪 bot 照樣能翻）。
+        let project = e.project_id.clone();
+        let Json(ok) = crate::group::messages(&app, &project, Some("m-mine-2"), 10).await.map(Json).unwrap();
+        assert!(ok["messages"].as_array().unwrap().iter().any(|m| m["id"] == "m-other-1"));
+        let group = |r: crate::lifecycle::LcResult<Value>| r.map(Json);
+        assert_eq!(not_found_reason(group(crate::group::messages(&app, &project, Some("m-gone"), 10).await)).await.as_deref(), Some("before_message_gone"));
+        sqlx::query("INSERT INTO projects (id, path, label, created_at) VALUES ('p-elsewhere','/tmp/elsewhere','e',?)").bind(db::now()).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b-elsewhere','p-elsewhere','x','claude','tok',?)").bind(db::now()).execute(&app.db).await.unwrap();
+        let conv_elsewhere = db::conversation_id(&app.db, "b-elsewhere").await.unwrap();
+        a_turn(&app.db, &conv_elsewhere, "t-else").await;
+        a_message(&app.db, &conv_elsewhere, "m-elsewhere", "t-else", "user", None).await;
+        assert_eq!(
+            not_found_reason(group(crate::group::messages(&app, &project, Some("m-elsewhere"), 10).await)).await.as_deref(),
+            Some("before_message_not_in_conversation")
+        );
+    }
+
+    async fn deleted_bot_with_hits(e: &crate::testing::Env, name: &str, hits: usize) -> String {
+        let (id, conv) = a_bot_with_conv(e, name).await;
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&id).execute(&e.app.db).await.unwrap();
+        let turn = format!("t-{name}");
+        a_turn(&e.app.db, &conv, &turn).await;
+        for i in 0..hits {
+            a_message(&e.app.db, &conv, &format!("{name}-{i}"), &turn, "user", None).await;
+        }
+        id
+    }
+
+    /// #766：已刪 bot 仍在結果裡（AGM 查證據要），但不能用較多的命中數把活 bot 擠出 `limit`；每列帶 `bot_deleted`。
+    #[tokio::test]
+    async fn search_keeps_live_bots_ahead_of_deleted_ones() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (live, live_conv) = a_bot_with_conv(&e, "needle-live").await;
+        a_turn(&app.db, &live_conv, "t-live").await;
+        a_message(&app.db, &live_conv, "needle-live-0", "t-live", "user", None).await;
+        let big = deleted_bot_with_hits(&e, "needle-big", 5).await;
+        let mid = deleted_bot_with_hits(&e, "needle-mid", 3).await;
+
+        let search = |limit| search_messages(State(app.clone()), Query(SearchQuery { q: Some("needle".into()), limit: Some(limit) }));
+        let Json(two) = search(2).await.unwrap();
+        let rows = two["bots"].as_array().unwrap();
+        assert_eq!(rows.iter().map(|r| r["bot_id"].as_str().unwrap()).collect::<Vec<_>>(), [live.as_str(), big.as_str()]);
+        assert_eq!(rows.iter().map(|r| r["bot_deleted"].as_bool().unwrap()).collect::<Vec<_>>(), [false, true]);
+        let Json(all) = search(10).await.unwrap();
+        assert_eq!(all["bots"].as_array().unwrap().iter().map(|r| r["bot_id"].as_str().unwrap()).collect::<Vec<_>>(), [live.as_str(), big.as_str(), mid.as_str()]);
+    }
+
+    /// 同一顆 bot 兩則命中同一毫秒：snippet 取後寫入的那則（rowid 較大），不是任一則。
+    #[tokio::test]
+    async fn search_snippet_is_the_last_written_hit_when_timestamps_tie() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let (_bot, conv) = a_bot_with_conv(&e, "tie-bot").await;
+        let at = db::now();
+        for (id, text) in [("zz-first", "tiehit 先寫的"), ("aa-second", "tiehit 後寫的")] {
+            sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'user',?,'web',?)")
+                .bind(id).bind(&conv).bind(text).bind(&at).execute(&app.db).await.unwrap();
+        }
+        let Json(r) = search_messages(State(app), Query(SearchQuery { q: Some("tiehit".into()), limit: None })).await.unwrap();
+        assert_eq!(r["bots"][0]["hits"], 2);
+        assert!(r["bots"][0]["snippet"].as_str().unwrap().contains("後寫的"), "{r}");
     }
 
     /// 前端要判斷「這個回合是不是群組回覆」：只問那個 turn 的 user 訊息，不必翻整段歷史。

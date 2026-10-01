@@ -216,6 +216,7 @@ fn skip_reason(app_err: &LcError) -> (&'static str, String) {
             (code, reason.to_string())
         }
         LcError::NotFound(w) => ("not_found", format!("not found: {w}")),
+        LcError::NotFoundValue(v) => ("not_found", v.to_string()),
         LcError::Bad(m) => ("bad_request", m.clone()),
         LcError::BadValue(v) => ("bad_request", v.to_string()),
         LcError::Unprocessable(v) => ("unprocessable", v.to_string()),
@@ -351,15 +352,25 @@ pub async fn messages(app: &Arc<App>, project_id: &str, before: Option<&str>, li
          JOIN conversations c ON c.id = m.conversation_id
          JOIN bots b ON b.id = c.bot_id
          WHERE b.project_id = ? AND b.deleted_at IS NULL";
+    // 游標要是這個專案某顆 bot 的訊息（已刪的也算：清單載入後才刪 bot，照樣翻得下去）；被刪掉的、別個專案的 → 404＋reason（#766）。
     let before_rowid = match before {
-        Some(message_id) => Some(
-            sqlx::query_scalar::<_, i64>("SELECT rowid FROM messages WHERE id = ?")
-                .bind(message_id)
-                .fetch_optional(&app.db)
-                .await
-                .map_err(|e| LcError::Upstream(e.to_string()))?
-                .ok_or_else(|| LcError::Bad(format!("before message does not exist: {message_id}")))?,
-        ),
+        Some(message_id) => {
+            let at: Option<(i64, String)> = sqlx::query_as(
+                "SELECT m.rowid, b.project_id FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                   JOIN bots b ON b.id = c.bot_id WHERE m.id = ?",
+            )
+            .bind(message_id)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(|e| LcError::Upstream(e.to_string()))?;
+            match at {
+                None => return Err(crate::api::cursor_not_found("before_message_gone", message_id)),
+                Some((_, p)) if p != project.id => {
+                    return Err(crate::api::cursor_not_found("before_message_not_in_conversation", message_id))
+                }
+                Some((rowid, _)) => Some(rowid),
+            }
+        }
         None => None,
     };
     let rows = match before_rowid {
@@ -555,7 +566,7 @@ mod message_tests {
         assert_eq!(has_more, vec![true, true, false]);
 
         let err = messages(&app, "p1", Some("missing-before"), 1).await.unwrap_err();
-        assert!(matches!(err, LcError::Bad(message) if message.contains("before") && message.contains("does not exist")));
+        assert!(matches!(err, LcError::NotFoundValue(v) if v["reason"] == "before_message_gone"), "#766：404＋reason");
 
         app.db.close().await;
         let _ = std::fs::remove_dir_all(&dir);
