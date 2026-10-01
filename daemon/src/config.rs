@@ -679,6 +679,44 @@ mod build_cfg_tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    /// 稽核：`[build]` 的三個門檻只有手改 `config.toml` 一條路，而 `get()` 是記憶體快照——改了不生效。
+    #[tokio::test]
+    async fn a_hand_edited_build_section_is_picked_up_without_a_restart() {
+        let dir = std::env::temp_dir().join(format!("am-build-fresh-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[server]\nherdr_session = 'one'\n\n[build]\nmax_concurrent = 2\n").unwrap();
+        let store = ConfigStore::load(path.clone()).await.unwrap();
+        assert_eq!(store.build_fresh().await.max_concurrent, 2);
+
+        let bump = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            // 不靠檔案系統的 mtime 解析度：每次都往後推一秒。
+            let at = std::time::SystemTime::now() + std::time::Duration::from_secs(bump_secs());
+            std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(at).unwrap();
+        };
+        fn bump_secs() -> u64 {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        }
+
+        bump("[server]\nherdr_session = 'two'\n\n[build]\nmax_concurrent = 4\ncargo_jobs = 3\n");
+        let fresh = store.build_fresh().await;
+        assert_eq!((fresh.max_concurrent, fresh.cargo_jobs), (4, 3), "手改的 [build] 讀得到");
+        assert_eq!(store.get().await.build.max_concurrent, 4, "記憶體裡的 [build] 一起換");
+        assert_eq!(store.get().await.server.herdr_session, "one", "其他段不熱載入（要連著投影一起處理）");
+
+        // 打錯字／離譜的值：保留原本的，不退回預設。
+        bump("[build]\nlease_ttl_secs = 0\n");
+        assert_eq!(store.build_fresh().await.max_concurrent, 4);
+        bump("[build\nmax_concurrent = 9\n");
+        assert_eq!(store.build_fresh().await.max_concurrent, 4);
+        // 改回來就跟上。
+        bump("[build]\nmax_concurrent = 1\n");
+        assert_eq!(store.build_fresh().await.max_concurrent, 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// 0 不是「停用排程」，是「誰都拿不到名額」——跟 `idle_close_secs` 同一條規矩：離譜的值回預設，不照單全收。
     #[test]
     fn a_zero_or_unreadable_override_falls_back_instead_of_locking_everyone_out() {
@@ -988,6 +1026,29 @@ impl ConfigStore {
 
     pub async fn get(&self) -> ConfigFile {
         self.inner.lock().await.cfg.clone()
+    }
+
+    /// `[build]` 的最新值。`max_concurrent`／`cargo_jobs`／`lease_ttl_secs` 沒有任何 API 寫得進去，唯一的設定方式就是手改
+    /// `config.toml`；而 [`Self::get`] 回的是記憶體那份，手改要等重啟、或下一次不相干的 API 寫入順手重讀才進得來——什麼時候生效
+    /// 沒有人說得準。build scheduler 每次拿名額／續約／看狀態都走這支：檔案的 mtime 變了就重讀，**只**換 `[build]` 那一段
+    /// （其他段要連著 TOML→SQLite 投影一起處理，仍然只在啟動與 [`Self::update`] 時載入）。檔案讀不了或解析失敗（半寫、打錯字）
+    /// 就保留記憶體裡原本的值並記一次 WARN（同一個 mtime 不重複報）。
+    pub async fn build_fresh(&self) -> BuildCfg {
+        let mut g = self.inner.lock().await;
+        let mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
+        if mtime.is_some() && mtime != g.mtime {
+            // 同一個 mtime 只試一次：壞檔不會每次呼叫都重讀、重報。
+            g.mtime = mtime;
+            match std::fs::read_to_string(&self.path).map_err(anyhow::Error::from).and_then(|t| parse_config(&t).map(|(cfg, _)| cfg)) {
+                Ok(cfg) if cfg.build != g.cfg.build => {
+                    tracing::info!(path = %self.path.display(), before = ?g.cfg.build, after = ?cfg.build, "config.toml [build] changed on disk; using the new values");
+                    g.cfg.build = cfg.build;
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(path = %self.path.display(), error = %format!("{e:#}"), "config.toml changed on disk but could not be read; keeping the in-memory [build]"),
+            }
+        }
+        g.cfg.build.clone()
     }
 
     /// `#[track_caller]`：寫入／重讀的 log 要記是哪一段程式叫的（issue #406）。async fn 不能掛
