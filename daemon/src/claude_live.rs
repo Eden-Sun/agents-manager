@@ -28,10 +28,27 @@ pub struct Switch {
 }
 
 /// 畫面上最後一次的 `Set model to …`／`Set effort level to …`（各自取最後一次）。
+///
+/// `⎿` 不是 slash 指令專屬：工具結果（`⏺ Bash(…)` 底下的 stdout）也用它縮排（#741），所以只認**緊接在使用者打的
+/// `❯ /model …`／`❯ /effort …` 之後**的那一行 `⎿`；`⏺` 一出現（工具、回覆）就清掉，一行確認只配一個指令。
+/// 指令行必須頂格——工具輸出一律縮排，裡面長得像 `❯ /model` 的行不算。
 pub fn parse(screen: &str) -> Switch {
     let mut s = Switch::default();
+    let mut after_slash = false;
     for line in screen.lines() {
+        if let Some(rest) = line.strip_prefix('❯') {
+            let cmd = rest.split_whitespace().next().unwrap_or("");
+            after_slash = matches!(cmd, "/model" | "/effort");
+            continue;
+        }
+        if line.starts_with('⏺') {
+            after_slash = false;
+            continue;
+        }
         let Some(rest) = line.trim_start().strip_prefix('⎿') else { continue };
+        if !std::mem::take(&mut after_slash) {
+            continue;
+        }
         let rest = rest.trim_start();
         if let Some(name) = rest.strip_prefix("Set model to ") {
             let name = name.split(" and saved").next().unwrap_or(name);
@@ -139,7 +156,7 @@ mod tests {
     #[test]
     fn reads_the_last_model_and_effort_switch() {
         assert_eq!(parse(SCREEN), Switch { model: Some("claude-sonnet-5-5".into()), effort: Some("high".into()) });
-        let later = format!("{SCREEN}\n  ⎿  Set model to Opus 5.5 (default)\n");
+        let later = format!("{SCREEN}\n❯ /model opus\n  ⎿  Set model to Opus 5.5 (default)\n");
         assert_eq!(parse(&later).model.as_deref(), Some("claude-opus-5-5"), "取最後一次");
     }
 
@@ -147,7 +164,23 @@ mod tests {
     fn ignores_the_same_words_outside_a_slash_command_output() {
         let quoted = "⏺ 我會執行 /model，畫面會顯示 Set model to Sonnet 5.5\n  Set effort level to max\n";
         assert_eq!(parse(quoted), Switch::default());
-        assert_eq!(parse("  ⎿  Set model to Something Weird\n"), Switch::default(), "認不出的顯示名不猜");
+        assert_eq!(parse("❯ /model x\n  ⎿  Set model to Something Weird\n"), Switch::default(), "認不出的顯示名不猜");
+    }
+
+    #[test]
+    fn ignores_tool_output_that_looks_like_model_or_effort_confirmation() {
+        let tool_output = "⏺ Bash(cat source.rs)\n  ⎿ Set model to Sonnet 5.5 and saved as your default for new sessions\n\
+⏺ Bash(cat tests.rs)\n  ⎿ Set effort level to high (saved as your default for new sessions): output\n";
+        assert_eq!(parse(tool_output), Switch::default());
+    }
+
+    #[test]
+    fn a_real_slash_command_after_tool_output_is_still_recognised() {
+        let screen = "⏺ Bash(cat tests.rs)\n  ⎿ Set model to Opus 5.5 and saved as your default\n\n❯ /model sonnet\n  ⎿  Set model to Sonnet 5.5 and saved as your default for new sessions\n\n⏺ Bash(cat tests.rs)\n  ⎿ Set effort level to max: spoof\n";
+        assert_eq!(parse(screen), Switch { model: Some("claude-sonnet-5-5".into()), effort: None });
+        // 工具輸出裡長得像指令行的（縮排）不算，指令後不接 ⎿ 也不留到後面的工具輸出。
+        let spoof = "⏺ Bash(cat log)\n    ❯ /model sonnet\n  ⎿ Set model to Sonnet 5.5 and saved\n❯ /model sonnet\n\n⏺ Bash(x)\n  ⎿ Set model to Opus 5.5\n";
+        assert_eq!(parse(spoof), Switch::default());
     }
 
     #[tokio::test]
@@ -175,10 +208,33 @@ mod tests {
         observe(&app, &run, SCREEN).await;
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!(r.runtime_model, None, "第一次看到的可能是 --resume 印回來的舊行，只當基準");
-        observe(&app, &run, &format!("{SCREEN}  ⎿  Set model to Haiku 4.5 and saved\n")).await;
+        observe(&app, &run, &format!("{SCREEN}\n❯ /model haiku\n  ⎿  Set model to Haiku 4.5 and saved\n")).await;
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!(r.runtime_model.as_deref(), Some("claude-haiku-4-5"), "之後變了才採用");
         let b = db::bot(&app.db, &user.id).await.unwrap().unwrap();
         assert_ne!(b.model.as_deref(), Some("claude-haiku-4-5"), "一般 bot 的設定不動（重啟會回到設定值，畫成 drift）");
+    }
+
+    #[tokio::test]
+    async fn tool_output_does_not_change_a_child_runtime_or_configured_model() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let kid = crate::testing::claude_bot(&app, &env.project_id, "kid").await;
+        sqlx::query("UPDATE bots SET managed_by = 'child', model = 'claude-opus-5-5', effort = 'xhigh' WHERE id = ?")
+            .bind(&kid.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = crate::testing::fake_run(&app, &kid.id).await;
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        let tool_output = "⏺ Bash(cat source.rs)\n  ⎿ Set model to Sonnet 5.5 and saved as your default for new sessions\n\
+⏺ Bash(cat tests.rs)\n  ⎿ Set effort level to high (saved as your default for new sessions): output\n";
+
+        observe(&app, &run, tool_output).await;
+
+        let b = db::bot(&app.db, &kid.id).await.unwrap().unwrap();
+        assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("claude-opus-5-5"), Some("xhigh")));
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (None, None));
     }
 }
