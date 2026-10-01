@@ -1295,13 +1295,21 @@ enum Sighting {
 
 /// 記在行程裡就夠：daemon 重啟後第一次看到的畫面算 [`Sighting::New`]，年紀另外用回合時間判斷。
 async fn status_line_sighting(host: &str, pane_id: &str, line: &str) -> Sighting {
-    static SEEN: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashMap<String, String>>> =
+    static SEEN: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>> =
         std::sync::OnceLock::new();
     let mut map = SEEN.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new())).lock().await;
-    let key = format!("{host}:{pane_id}");
-    match map.insert(key, line.to_string()) {
+    note_sighting(&mut map, format!("{host}:{pane_id}"), line, std::time::Instant::now())
+}
+
+/// 一格 pane 這個鍵多久沒被讀到就忘掉：pane 活著時每輪都會更新時間；收掉的 pane 不再回來，不清的話每個開過的 pane 留一格。
+/// 忘掉的 pane 下次看到只是回到 [`Sighting::New`]（年紀另外用回合時間判斷）。
+const SIGHTING_KEEP: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+fn note_sighting(map: &mut std::collections::HashMap<String, (String, std::time::Instant)>, key: String, line: &str, now: std::time::Instant) -> Sighting {
+    map.retain(|_, (_, at)| now.duration_since(*at) < SIGHTING_KEEP);
+    match map.insert(key, (line.to_string(), now)) {
         None => Sighting::New,
-        Some(prev) if prev == line => Sighting::Same,
+        Some((prev, _)) if prev == line => Sighting::Same,
         Some(_) => Sighting::Changed,
     }
 }
@@ -1452,6 +1460,24 @@ pub fn spawn_codex_poller(app: Arc<App>) {
             tokio::time::sleep(CODEX_PANE_POLL).await;
         }
     });
+}
+
+#[cfg(test)]
+mod sighting_tests {
+    use super::*;
+
+    #[test]
+    fn a_panes_status_line_sighting_is_forgotten_after_a_while() {
+        let t0 = std::time::Instant::now();
+        let mut m = std::collections::HashMap::new();
+        assert_eq!(note_sighting(&mut m, "h:p1".into(), "a", t0), Sighting::New);
+        assert_eq!(note_sighting(&mut m, "h:p1".into(), "a", t0 + std::time::Duration::from_secs(60)), Sighting::Same);
+        assert_eq!(note_sighting(&mut m, "h:p1".into(), "b", t0 + std::time::Duration::from_secs(120)), Sighting::Changed);
+        // 別的 pane 在很久以後出現：p1 沒再被讀到，格子被帶走。
+        let later = t0 + SIGHTING_KEEP + std::time::Duration::from_secs(200);
+        assert_eq!(note_sighting(&mut m, "h:p2".into(), "a", later), Sighting::New);
+        assert!(!m.contains_key("h:p1"), "收掉的 pane 不留格子：{:?}", m.keys().collect::<Vec<_>>());
+    }
 }
 
 #[cfg(test)]
