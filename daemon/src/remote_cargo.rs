@@ -1440,18 +1440,28 @@ fn run_status_tee_stderr(mut cmd: Command, what: &str, deadline: &Deadline) -> a
     cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("{what}: {e}"))?;
     let err = child.stderr.take().expect("stderr piped");
-    let tee = std::thread::spawn(move || {
-        let mut seen = String::new();
+    // 讀 stderr 的執行緒把已讀到的收在共用字串裡：子行程結束後孫行程（ssh 背景 master、ProxyCommand）可能還握著 pipe，
+    // 不能無限等 EOF，等一小段就拿手上已有的。
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let sink = seen.clone();
+    std::thread::spawn(move || {
         for line in BufReader::new(err).lines().map_while(Result::ok) {
             eprintln!("{line}");
-            seen.push_str(&line);
-            seen.push('\n');
+            let mut g = sink.lock().unwrap();
+            g.push_str(&line);
+            g.push('\n');
         }
-        seen
+        let _ = done_tx.send(());
     });
     let status = wait_child(child, what, deadline);
     // 被砍時 rsync 的 ssh 孫行程可能還握著 pipe；不等它，免得卡住收尾。
-    let seen = if status.is_ok() { tee.join().unwrap_or_default() } else { String::new() };
+    let seen = if status.is_ok() {
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+        seen.lock().unwrap().clone()
+    } else {
+        String::new()
+    };
     Ok((status?, seen))
 }
 
@@ -2042,6 +2052,25 @@ mod tests {
         assert!(d.limit.is_some() && d.at.get().is_none(), "還沒 arm：不計時");
         d.arm();
         assert!(d.at.get().is_some());
+    }
+
+    /// 子行程已經成功結束、但它留下的孫行程還握著 stderr pipe（ssh 的背景 master、ProxyCommand）：收尾不能等到孫行程自己退出。
+    #[test]
+    fn a_grandchild_holding_stderr_does_not_stall_a_finished_child() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg("-c").arg("echo oops >&2; sleep 12 & exit 0");
+            let d = Deadline::new(0);
+            d.arm();
+            let _ = tx.send(run_status_tee_stderr(cmd, "t", &d));
+        });
+        let (status, seen) = rx
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .expect("孫行程握著 pipe 時，已結束的子行程不能卡住收尾")
+            .unwrap();
+        assert!(status.success());
+        assert!(seen.contains("oops"), "已經讀到的 stderr 要留下來：{seen:?}");
     }
 
     /// `ssh -V` 的版本要照數字比：字串比會說 `10.3` 比 `8.4` 小。
