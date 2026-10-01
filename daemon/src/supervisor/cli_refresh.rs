@@ -292,9 +292,7 @@ mod tests {
     }
 
     fn tmpdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("am-cli-refresh-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::testing::scratch_dir("am-cli-refresh")
     }
 
     fn with_bin(content: &str) -> PathBuf {

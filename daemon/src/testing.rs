@@ -916,12 +916,32 @@ pub fn write_exec(path: impl AsRef<std::path::Path>, content: impl AsRef<str>) {
     }
 }
 
-/// `$TMPDIR/<prefix>-<ulid>`，已建好並註冊。
+/// `$TMPDIR/<prefix>-<ulid>`，已建好並註冊。除了 `App` 掉了就刪（見上），測試行程結束時也一定會掃掉（[`remove_at_exit`]）：
+/// 只回一個 `PathBuf` 的輔助函式（沒有地方放 guard）靠這一條不留殘骸，測試 panic 也一樣。
 pub fn scratch_dir(prefix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}-{}", db::ulid()));
     std::fs::create_dir_all(&dir).unwrap();
     scratch_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(dir.clone());
+    remove_at_exit(&dir);
     dir
+}
+
+/// 測試行程結束（`exit`）時刪掉這個檔案或目錄。`libc::atexit` 只掛一次；測試 harness 收尾走 `process::exit`，會跑到。
+pub fn remove_at_exit(path: &std::path::Path) {
+    static LIST: StdMutex<Vec<std::path::PathBuf>> = StdMutex::new(Vec::new());
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    extern "C" fn sweep() {
+        for p in LIST.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+            if std::fs::remove_dir_all(&p).is_err() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    LIST.lock().unwrap_or_else(|e| e.into_inner()).push(path.to_path_buf());
+    HOOK.call_once(|| {
+        // SAFETY: `sweep` 是沒有參數的 `extern "C"` 函式，整個行程生命週期內都有效。
+        unsafe { libc::atexit(sweep) };
+    });
 }
 
 /// `true`＝這個目錄是 [`scratch_dir`] 建的、現在交還給呼叫端刪。

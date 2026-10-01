@@ -72,7 +72,6 @@ mod tests {
     use super::*;
     use crate::lifecycle::{start_bot, LcError};
     use crate::testing::{claude_bot, env, Env};
-    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
     /// 不走登入 shell（`SHELL` 指到不存在的東西；登入 shell 會把 PATH 換成這台機器的），PATH 只有 `bin` 與系統目錄。
@@ -94,8 +93,7 @@ mod tests {
     fn stub(bin: &Path, name: &str) {
         std::fs::create_dir_all(bin).unwrap();
         let f = bin.join(name);
-        std::fs::write(&f, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(&f, "#!/bin/sh\nexit 0\n");
     }
 
     fn agent_started(e: &Env) -> bool {

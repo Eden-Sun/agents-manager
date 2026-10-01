@@ -2518,14 +2518,10 @@ mod claude_settings_tests {
 #[cfg(test)]
 mod herdr_skill_timeout_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
 
     fn fake_herdr(body: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("am-skill-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("herdr");
-        std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let f = crate::testing::scratch_dir("am-skill").join("herdr");
+        crate::testing::write_exec(&f, format!("#!/bin/sh\n{body}\n"));
         f
     }
 

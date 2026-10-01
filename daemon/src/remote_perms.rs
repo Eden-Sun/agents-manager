@@ -166,8 +166,7 @@ mod tests {
         std::fs::write(bad.join("hook-spool.jsonl"), "x\n").unwrap();
         let bin = home.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("chmod"), "#!/bin/sh\necho 'chmod: Read-only file system' >&2\nexit 1\n").unwrap();
-        std::fs::set_permissions(&bin.join("chmod"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(bin.join("chmod"), "#!/bin/sh\necho 'chmod: Read-only file system' >&2\nexit 1\n");
 
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")

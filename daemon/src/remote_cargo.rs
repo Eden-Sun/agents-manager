@@ -2713,9 +2713,7 @@ mod guard_tests {
         let bin = home.join(".cargo/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let cargo = bin.join("cargo");
-        std::fs::write(&cargo, "#!/bin/sh\ntouch \"$PWD/../cargo-started-$$\"\nexec sleep 60\n").unwrap();
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(&cargo, "#!/bin/sh\ntouch \"$PWD/../cargo-started-$$\"\nexec sleep 60\n");
         home
     }
 
