@@ -200,7 +200,7 @@ function ResultChip({ result, control }: { result: HerdrUpdateResult; control?: 
             <p>
               {result.ok
                 ? `${result.host}：${result.from ?? '舊版'} → ${result.to ?? '新版'}。`
-                : `${result.host}：${herdrReasonText(result.reason)}${result.error ? `（${result.error}）` : ''}。`}
+                : `${result.host}：${herdrReasonText(result.reason)}${result.detail ? `（${result.detail}）` : ''}。`}
             </p>
             {result.resumed.length > 0 ? (
               <>
