@@ -54,7 +54,7 @@ function RemoteImage({ src, alt }: { src: string; alt?: string }) {
       {info?.internal ? <span className="md-image-warn">　這是本機／內網位址：點下去會由這台機器對它發出請求。</span> : null}
       {state === 'failed' ? (
         <>
-          <span className="md-image-warn">　載入失敗（對方不允許跨站讀取、不是支援的點陣圖或太大）。</span>
+          <span className="md-image-warn">　載入失敗（對方不允許跨站讀取、轉址到別的主機、不是支援的點陣圖或太大）。</span>
           <a href={src} target="_blank" rel="noreferrer noopener">
             在新分頁開啟
           </a>
