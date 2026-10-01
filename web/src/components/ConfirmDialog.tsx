@@ -89,7 +89,9 @@ export function ConfirmDialog({
 
   // 掛到 body：就地渲染會被外層 stacking context 壓在 `.shelf`（z-index 30）底下，手機點不到（2026-09-10）。
   return createPortal(
-    <div className="confirm-backdrop" role="presentation" onMouseDown={onCancel}>
+    // React 事件沿 React 樹冒泡，不是沿 DOM：portal 出去的框裡的點擊會冒泡回渲染它的元件（額度卡片列、bot 列的 onClick
+    // 於是被誤觸，#693／#694）。對話框是自成一層的，點擊不該離開它——跟 `onMouseDown` 擋 popover 的外點關閉同一個道理。
+    <div className="confirm-backdrop" role="presentation" onMouseDown={onCancel} onClick={(e) => e.stopPropagation()}>
       <div
         className="confirm-dialog"
         ref={dialogRef}
