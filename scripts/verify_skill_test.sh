@@ -72,7 +72,7 @@ run_case() { # <name> <changed path> <want regex（行首）...> -- <forbidden r
     local name="$1" changed="$2" out rc=0 pat want=1
     shift 2
     : >"$tmp/log"
-    out="$(cd "$fx" && AM_TEST_LOG="$tmp/log" AM_TEST_CHANGED="$changed" PATH="$fx/bin:$PATH" bash -c "$cmd" 2>&1)" || rc=$?
+    out="$(cd "$fx" && env -u CHECK_TESTS AM_TEST_LOG="$tmp/log" AM_TEST_CHANGED="$changed" PATH="$fx/bin:$PATH" bash -c "$cmd" 2>&1)" || rc=$?
     if [ "$rc" != 0 ]; then bad "${name}：skill 那一行 rc=${rc}\n${out}"; return; fi
     for pat in "$@"; do
         if [ "$pat" = -- ]; then want=0; continue; fi
