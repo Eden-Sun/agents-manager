@@ -159,6 +159,8 @@ test('手機兩種更新都有時合成一顆；桌機或只有一種時照舊',
   assert.equal(mergeUpdateChips(true, true, false), false)
   assert.equal(mergeUpdateChips(true, false, true), false)
   assert.equal(mergeUpdateChips(true, false, true, true), true, '兩種安裝提示也要合併')
+  assert.equal(mergeUpdateChips(true, false, false, false, true), false, '只有 herdr 一顆不合併')
+  assert.equal(mergeUpdateChips(true, true, false, false, true), true, 'herdr 跟重啟並存也合成一顆')
 })
 
 test('Claude 尚未安裝的 run 不會被一般重啟納入', () => {

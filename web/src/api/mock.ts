@@ -10,6 +10,7 @@ import type { BotKind } from './types'
 import { abortError } from './transport'
 import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
 import { MockReleaseTriage } from './mockReleaseTriage'
+import { MockHerdrUpdate, type MockHerdrOpts } from './mockHerdrUpdate'
 import { MockServerDrafts } from './mockServerDrafts'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
 import { MockComposerDrafts } from './mockComposerDraft'
@@ -577,6 +578,24 @@ export class MockTransport implements Transport {
   /** 更新框的 changelog／分診／AGM 解析（`mockReleaseTriage.ts`）。 */
   readonly releaseTriage = new MockReleaseTriage()
   readonly serverDrafts = new MockServerDrafts()
+  /** header 的 herdr 一鍵更新（`mockHerdrUpdate.ts`，`__amMock.herdrUpdate()`）。 */
+  readonly herdrUpdate = new MockHerdrUpdate({
+    emit: (type, data) => this.emit(type, data),
+    liveBots: (host) =>
+      this.bots.flatMap((x) => {
+        const run = this.activeRun(x.id)
+        const on = this.projects.find((p) => p.id === x.project_id)?.host ?? 'local'
+        return run && on === host ? [{ bot_id: x.id, name: x.name, parent_bot_id: x.parent_bot_id ?? null, run_id: run.id }] : []
+      }),
+    setUpstream: (item) => {
+      this.upstreamItems = [...this.upstreamItems.filter((old) => old.kind !== 'herdr'), item]
+      this.emit('upstream_update', item)
+    },
+    hostKnown: (host) => host === 'local' || this.hosts.some((h) => h.name === host),
+    startLocal: () => {
+      for (const x of this.bots) if (!this.activeRun(x.id) && (this.projects.find((p) => p.id === x.project_id)?.host ?? 'local') === 'local') this.start(x.id)
+    },
+  })
 
   /** bot 輸入框卡著的草稿（`__amMock.composerDraft`，`mockComposerDraft.ts`）。 */
   readonly composerDrafts = new MockComposerDrafts()
@@ -891,6 +910,7 @@ export class MockTransport implements Transport {
     if (method === 'GET' && rawPath === '/mem/processes/pane') return this.memPane(q.get('host') ?? 'local', q.get('pane_id') ?? '')
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'install') return this.installTool(seg[1], b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'cli-update' && seg.length === 3) return this.cliUpdate(decodeURIComponent(seg[1]), b)
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'herdr-update' && seg.length === 3) return this.herdrUpdate.start(decodeURIComponent(seg[1]), b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))
@@ -2167,6 +2187,7 @@ export class MockTransport implements Transport {
   private state() {
     return {
       daemon_seq: this.seq,
+      herdr_updates: this.herdrUpdate.rows(),
       connected: this.connected,
       default_connected: false,
       herdr_session: 'agents-manager',
@@ -2230,6 +2251,7 @@ export class MockTransport implements Transport {
               identity: b.identity,
               env: JSON.parse(b.env_json) as Record<string, string>,
               managed_by: b.managed_by,
+              parent_bot_id: b.parent_bot_id ?? null,
               primary: b.is_primary === 1,
               primary_position: b.primary_position ?? 0,
               cwd: b.cwd,
@@ -3927,6 +3949,8 @@ function installDevHelpers(mock: MockTransport) {
     upstreamUpdate: (kind: string, latest: string, disk: string) => mock.emitUpstreamUpdate(kind, latest, disk),
     // Claude fleet install chip；可指定目標或主機快照以做其他視覺案例。
     claudeFleetUpdate: (target?: string, hosts?: { host: string; installed_version: string | null; error: string | null; behind: boolean }[]) => mock.emitClaudeFleetUpdate(target, hosts),
+    // header 的 herdr 徽章：`__amMock.herdrUpdate()`；`{failOne: true}` 演沒接回、`{reason: 'busy_timeout'}` 演沒做、`{hold: 'waiting_idle'}` 停在那一步
+    herdrUpdate: (opts?: MockHerdrOpts) => mock.herdrUpdate.seed(opts),
     // 截圖用：`__amMock.runtime('am-codex', {runtime_model: 'GPT-6-Luna', runtime_fast: true, agent_status: 'working'})`
     runtime: (botIdOrName: string, patch: { runtime_model?: string | null; runtime_fast?: boolean; agent_status?: MockRun['agent_status'] }) =>
       mock.setRuntime(mock.botIdByName(botIdOrName) ?? botIdOrName, patch),

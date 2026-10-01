@@ -145,6 +145,7 @@ export function toHost(v: unknown): Host | null {
     remote_path: str(pick(v, 'remote_path')),
     connected: bool(pick(v, 'connected'), false),
     error: optStr(pick(v, 'error')),
+    ...(pick(v, 'shared_session') === true ? { shared_session: true } : {}),
     attach_command:
       str(pick(v, 'attach_command')) ||
       `herdr --remote ${str(pick(v, 'ssh'))} --session ${str(pick(v, 'herdr_session'), 'agents-manager')}`,
@@ -596,6 +597,12 @@ export function toState(raw: unknown): AppState {
     cli_updates:
       'cli_updates' in root
         ? arr(pick(root, 'cli_updates')).flatMap((v) => (isRec(v) ? [{ update_id: str(pick(v, 'update_id')), host: str(pick(v, 'host')) }] : []))
+        : undefined,
+    herdr_updates:
+      'herdr_updates' in root
+        ? arr(pick(root, 'herdr_updates')).flatMap((v) =>
+            isRec(v) ? [{ update_id: str(pick(v, 'update_id')), host: str(pick(v, 'host')), target_version: str(pick(v, 'target_version')), phase: str(pick(v, 'phase')), started_at: str(pick(v, 'started_at')) }] : [],
+          )
         : undefined,
     connected: bool(pick(root, 'connected'), true),
     default_connected: bool(pick(root, 'default_connected'), false),

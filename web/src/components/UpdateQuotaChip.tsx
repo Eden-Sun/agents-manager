@@ -10,6 +10,9 @@ import { UpdateChangelog } from './UpdateChangelog'
 import { AgmReviewBox } from './AgmReviewBox'
 import { CodexInstallChip } from './CodexInstallChip'
 import { ClaudeInstallChip } from './ClaudeInstallChip'
+import { HerdrUpdateChip } from './HerdrUpdateChip'
+import { useHerdrPlan } from '../hooks/useHerdrPlan'
+import { useHerdrUpdate } from '../store/herdrUpdate'
 import { MergedUpdateChip, type DialogControl } from './MergedUpdateChip'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import { claudeInstallPlan, codexInstallPlan, mergeUpdateChips } from '../lib/updateBatch'
@@ -34,13 +37,16 @@ export function UpdateQuotaChip() {
   const claudeShown = useStore((s) =>
     Boolean(claudeInstallPlan(s.upstreamUpdates.claude)) || s.cliUpdates.some((item) => item.kind === 'claude'),
   )
-  // 手機兩種以上更新 chip 都要出現時合成一顆，選單分開列重啟與兩種 CLI 安裝。
-  if (mergeUpdateChips(phone, restartShown, codexShown, claudeShown)) return <MergedUpdateChip />
+  const herdrPlan = useHerdrPlan() !== null
+  const herdrShown = useHerdrUpdate((s) => s.active !== null || s.result !== null) || herdrPlan
+  // 手機兩種以上更新 chip 都要出現時合成一顆，選單分開列重啟、兩種 CLI 安裝與 herdr。
+  if (mergeUpdateChips(phone, restartShown, codexShown, claudeShown, herdrShown)) return <MergedUpdateChip />
   return (
     <>
       <RestartChip />
       <CodexInstallChip />
       <ClaudeInstallChip />
+      <HerdrUpdateChip />
     </>
   )
 }

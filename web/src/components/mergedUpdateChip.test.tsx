@@ -31,4 +31,5 @@ test('批次在跑、codex 在裝、全在忙時的文案', () => {
   const cli = { id: 'u', host: 'local', kind: 'codex', phase: 'installing' as const, from: null, to: null }
   assert.equal(mergedUpdateLabels({ ...base, cli }).codexItem, 'local 的 codex 安裝中…')
   assert.equal(mergedUpdateLabels({ ...base, readyCount: 0, busyCount: 2 }).restartItem, '2 顆有更新但在忙，閒下來再按')
+  assert.match(mergedUpdateLabels({ ...base, herdrItem: '更新 herdr 0.9.3（所有 Bot 中斷約 1 分鐘）' }).label, /；更新 herdr 0\.9\.3/)
 })

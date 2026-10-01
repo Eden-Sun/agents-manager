@@ -9,6 +9,9 @@ import { UpgradeIcon } from './UpgradeIcon'
 import { CodexInstallChip } from './CodexInstallChip'
 import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { RestartChip } from './UpdateQuotaChip'
+import { HerdrUpdateChip } from './HerdrUpdateChip'
+import { useHerdrPlan } from '../hooks/useHerdrPlan'
+import { herdrMenuItem, useHerdrUpdate } from '../store/herdrUpdate'
 
 /** 由外面代為開關的確認框（手機合成那顆用）。 */
 export interface DialogControl {
@@ -57,10 +60,14 @@ export function MergedUpdateChip() {
   const activeClaudeHosts = new Set(cli.filter((item) => item.kind === 'claude').map((item) => item.host))
   const claudeCanStart = Boolean(claudePlan?.installHosts.some((host) => !activeClaudeHosts.has(host)))
   const claudeVisible = Boolean(claudePlan) || activeClaudeHosts.size > 0
+  const herdrPlan = useHerdrPlan()
+  const herdrActive = useHerdrUpdate((s) => s.active)
+  const herdrResult = useHerdrUpdate((s) => s.result)
+  const herdrItem = herdrMenuItem(herdrActive, herdrResult, herdrPlan)
   const [open, setOpen] = useState(false)
   // 標題列一路有 overflow 裁切與 transform（fixed 也會被帶偏），選單用 portal 掛到 body、fixed 在按鈕下緣。
   const [at, setAt] = useState<CSSProperties>({})
-  const [which, setWhich] = useState<'restart' | 'codex' | 'claude' | null>(null)
+  const [which, setWhich] = useState<'restart' | 'codex' | 'claude' | 'herdr' | null>(null)
   const btn = useRef<HTMLButtonElement>(null)
   const pop = useRef<HTMLDivElement>(null)
   const menuKeys = useMenuKeys(open, pop, btn, () => setOpen(false))
@@ -90,6 +97,7 @@ export function MergedUpdateChip() {
     claudeSummary: claudePlan?.hosts.map((host) => `${host.host} ${host.installedVersion ?? host.error ?? '讀取失敗'} → ${claudePlan.target}`).join('；'),
     restartShown,
     codexShown,
+    herdrItem,
   })
   const close = () => setWhich(null)
 
@@ -156,6 +164,16 @@ export function MergedUpdateChip() {
               >
                 {claudeItem}
               </button> : null}
+              {herdrItem ? <button
+                type="button"
+                className="head-menu-item"
+                role="menuitem"
+                tabIndex={-1}
+                disabled={herdrActive !== null}
+                onClick={() => setWhich('herdr')}
+              >
+                {herdrItem}
+              </button> : null}
             </div>,
             document.body,
           )
@@ -163,6 +181,7 @@ export function MergedUpdateChip() {
       <RestartChip control={{ open: which === 'restart', close }} />
       <CodexInstallChip control={{ open: which === 'codex', close }} />
       <ClaudeInstallChip control={{ open: which === 'claude', close }} />
+      <HerdrUpdateChip control={{ open: which === 'herdr', close }} />
     </>
   )
 }

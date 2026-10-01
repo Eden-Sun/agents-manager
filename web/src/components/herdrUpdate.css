@@ -1,0 +1,35 @@
+/* header 的 herdr 一鍵更新（HerdrUpdateChip.tsx）。外觀沿用 `.quota-update`（updateQuotaChip.css），這裡只放 herdr 自己的。 */
+
+/* 數字位置寫 `herdr`：跟 codex／claude 那兩顆並排時一眼分得出。字小一號，不撐寬額度列。 */
+.herdr-chip-tag {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
+/* 「所有 Bot 會中斷」是這個框最重要的一句：放在 changelog 下面第一行，用危險色的左框，不跟一般說明混在一起。 */
+.herdr-update-warn {
+  margin: 10px 0 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-soft);
+  color: var(--text);
+}
+
+.herdr-update-warn strong {
+  color: var(--danger);
+}
+
+.herdr-update-sub {
+  color: var(--text-dim);
+}
+
+/* 子 agent 會沒了、或這台不能從這裡更新：警示色，看得出不是一般註記。 */
+.herdr-update-lost {
+  border-left-color: var(--warn);
+  color: var(--text);
+}
+
+.herdr-update-hosts {
+  margin-top: 6px;
+}

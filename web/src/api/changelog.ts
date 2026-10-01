@@ -22,9 +22,11 @@ export interface ChangelogReply {
 
 const CLAUDE_SOURCE = 'https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md'
 const CODEX_SOURCE = 'https://github.com/openai/codex/releases'
+const HERDR_SOURCE = 'https://github.com/herdrdev/herdr/releases'
 
 /** codex 沒有 CHANGELOG.md，只有 releases。 */
 function sourceFor(kind: string): string {
+  if (kind === 'herdr') return HERDR_SOURCE
   return kind === 'codex' ? CODEX_SOURCE : CLAUDE_SOURCE
 }
 

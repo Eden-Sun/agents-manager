@@ -15,6 +15,8 @@ export function mergedUpdateLabels(x: {
   claudeShown?: boolean
   restartShown?: boolean
   codexShown?: boolean
+  /** herdr 那一項（`herdrMenuItem`）；沒有就不列。 */
+  herdrItem?: string | null
 }): { restartItem: string; codexItem: string; claudeItem: string; label: string } {
   const { batch, readyCount, busyCount, installCount, to } = x
   const updates = Array.isArray(x.cli) ? x.cli : x.cli ? [x.cli] : []
@@ -38,5 +40,6 @@ export function mergedUpdateLabels(x: {
   if (x.codexShown !== false) pieces.push(codexItem)
   if (x.claudeShown) pieces.push(claudeItem)
   if (x.claudeSummary && x.claudeShown) pieces.push(x.claudeSummary)
+  if (x.herdrItem) pieces.push(x.herdrItem)
   return { restartItem, codexItem, claudeItem, label: `有更新：${pieces.join('；')}。點開選要做哪一個` }
 }
