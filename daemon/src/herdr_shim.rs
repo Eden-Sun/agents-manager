@@ -47,7 +47,7 @@ am_dedupe_path() {
 # `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）：cargo shim 把 check／test／clippy 轉到外部編譯主機的前提。
 # 少了它們，子 agent 的 cargo 永遠留在本機——#104 當初只在 daemon 注入端加了，這份清單漏了。
 # 跟其他 key 一樣：母 pane 有才帶、呼叫者自己給了就尊重（它們不是隔離實例那種要防偽造的保留變數）。
-AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
+AM_RESERVED_ENV_KEYS="CLAUDE_CONFIG_DIR CODEX_HOME AM_BOT_ID AM_BOT_TOKEN AM_HOOK_TOKEN AM_PORT AM_RUN_ID AM_AGENT_NAME AM_KIND AM_MODEL AM_EFFORT AM_PROJECT_ID AM_WORKSPACE_ID AM_OUTBOX AM_DAEMON_EXE AM_CONFIG_PATH AM_REAL_HERDR PATH CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS AM_INSTRUCTIONS_FILE"
 
 # API calls use the independent bot credential. Keep the hook-token fallback for already-running
 # hook-enabled panes until they restart to receive AM_BOT_TOKEN.
@@ -65,6 +65,16 @@ am_child_of_value() {
     elif [ -n "${AM_BOT_ID:-}" ]; then
         printf '%s' "${AM_AGENT_NAME:-${AM_BOT_ID}}"
     fi
+}
+
+# 檔案內容 → TOML 多行字面字串（三個單引號包起來），給 codex 的 `-c developer_instructions=…`（§6.5i）。
+# 字面字串不跳脫任何字元，碰不到各家 awk／sed 的反斜線差異；內容本身有三個連續單引號就表示不了，回 1 讓呼叫端不帶。
+am_toml_string_of_file() {
+    _q3="'''"
+    if grep -qF "$_q3" "$1" 2>/dev/null; then
+        return 1
+    fi
+    printf '%s%s%s' "$_q3" "$(cat "$1")" "$_q3"
 }
 
 # A bot pane must reserve its inherited proof before asking herdr to create a pane or child agent.
@@ -204,6 +214,13 @@ am_child_name() {
 # one, and stop at `--` (everything after it is the agent's own argv).
 am_agent_start() {
     shift 2
+    # `--help` 只是查用法：不開 pane、不補 env。以前照樣走 spawn 流程，env 補送就打進呼叫者自己的 pane（目標預設是 $HERDR_PANE_ID）。
+    for _a in "$@"; do
+        case "$_a" in
+            --) break ;;
+            -h | --help) exec "$AM_HERDR" agent start "$@" ;;
+        esac
+    done
     if [ -n "${AM_CHILD_OF:-}" ]; then
         printf 'agents-manager: 你是 `%s` 派出的子 agent，禁止再開子 agent。需要更多人手：停下來在回報裡寫清楚要另派什麼、為什麼，由 `%s` 決定要不要開兄弟 agent\n' "$AM_CHILD_OF" "$AM_CHILD_OF" >&2
         exit 77
@@ -217,6 +234,8 @@ am_agent_start() {
     _pane=""
     _has_model=0
     _has_effort=0
+    _has_instr=0
+    _has_docs=0
     while [ "$_i" -lt "$_n" ]; do
         _a=$1
         shift
@@ -251,6 +270,8 @@ am_agent_start() {
                 --effort | --effort=*) _has_effort=1 ;;
                 -c) : ;;
                 model_reasoning_effort=*) _has_effort=1 ;;
+                --append-system-prompt | --append-system-prompt=* | --append-system-prompt-file* | developer_instructions=* | --rules | --rules=*) _has_instr=1 ;;
+                project_doc_max_bytes=*) _has_docs=1 ;;
             esac
         elif [ "$_named" = 0 ]; then
             case "$_prev" in
@@ -279,12 +300,53 @@ am_agent_start() {
     # 同 kind 就補上；自己有寫 --model 的一律尊重。
     if [ -n "${AM_MODEL:-}" ] && [ "$_has_model" = 0 ] && { [ -z "$_kind" ] || [ "$_kind" = "${AM_KIND:-}" ]; }; then
         [ "$_stop" = 1 ] || set -- "$@" --
+        _stop=1
         set -- "$@" --model "$AM_MODEL"
         if [ -n "${AM_EFFORT:-}" ] && [ "$_has_effort" = 0 ] && [ "${AM_KIND:-}" = "claude" ]; then
             set -- "$@" --effort "$AM_EFFORT"
         fi
         printf 'agents-manager: 子 agent 沒指定模型，沿用母 bot 的 `%s`\n' "$AM_MODEL" >&2
     fi
+    # §6.5i：子 agent 的指示跟母 bot 同一個來源（`AM_INSTRUCTIONS_FILE`＝AG Man 規則＋`[agents]` 的 agent md），
+    # CLI 自己的指示檔一律不讀：claude 靠繼承的 CLAUDE_CODE_DISABLE_CLAUDE_MDS，codex 補 project_doc_max_bytes=0。
+    # 呼叫者自己帶了就尊重。
+    _instr=""
+    if [ "$_has_instr" = 0 ] && [ -n "${AM_INSTRUCTIONS_FILE:-}" ] && [ -r "$AM_INSTRUCTIONS_FILE" ]; then
+        _instr=$AM_INSTRUCTIONS_FILE
+    fi
+    case "${_kind:-${AM_KIND:-}}" in
+        claude)
+            if [ -n "$_instr" ]; then
+                [ "$_stop" = 1 ] || set -- "$@" --
+                _stop=1
+                set -- "$@" --append-system-prompt "$(cat "$_instr")"
+            fi
+            ;;
+        codex)
+            if [ -n "$_instr" ]; then
+                [ "$_stop" = 1 ] || set -- "$@" --
+                _stop=1
+                if _toml=$(am_toml_string_of_file "$_instr"); then
+                    set -- "$@" -c "developer_instructions=$_toml"
+                else
+                    printf 'agents-manager: %s 含有三個連續單引號，TOML 表示不了，子 agent 這次沒帶指示檔\n' "$_instr" >&2
+                fi
+            fi
+            # 只在 §6.5i 底下（daemon 給了 AM_INSTRUCTIONS_FILE）才關：人工 shell 的 codex 照它自己的習慣。
+            if [ "$_has_docs" = 0 ] && [ -n "${AM_INSTRUCTIONS_FILE:-}" ]; then
+                [ "$_stop" = 1 ] || set -- "$@" --
+                _stop=1
+                set -- "$@" -c project_doc_max_bytes=0
+            fi
+            ;;
+        grok)
+            if [ -n "$_instr" ]; then
+                [ "$_stop" = 1 ] || set -- "$@" --
+                _stop=1
+                set -- "$@" --rules "$(cat "$_instr")"
+            fi
+            ;;
+    esac
     [ -n "$_pane" ] || _pane=${HERDR_PANE_ID:-}
     if [ -n "${AM_BOT_ID:-}" ] && [ -z "$_pane" ]; then
         printf 'agents-manager: 找不到 agent start 的目標 pane，拒絕在憑證狀態未知時啟動 child\n' >&2
@@ -1626,6 +1688,50 @@ mod tests {
         assert!(text.contains("export AM_INSTANCE='a1b2'"), "隔離實例的保留變數也補：{text}");
         assert!(text.contains("export AM_DATA_DIR='/data/iso'"), "{text}");
         assert!(text.contains("export AM_CHILD_OF='p-1'"), "子 agent 的 pane 要標出 parent：{text}");
+    }
+
+    /// §6.5i：子 agent 的指示跟母 bot 同一份（`AM_INSTRUCTIONS_FILE`），CLI 自己的指示檔不讀；呼叫者自己帶了就尊重。
+    #[test]
+    fn a_child_agent_gets_the_parents_instructions_file() {
+        let s = Sandbox::new();
+        let f = s.dir.join("instructions.md");
+        // 假 herdr 一行記一個參數，所以內容用單行；多行內容一樣是一個參數（"$(cat …)" 有引號）。
+        let body = "RULES say \"hi\" \\ done";
+        std::fs::write(&f, format!("{body}\n")).unwrap();
+        let fp = f.to_str().unwrap();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", fp)];
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--pane", "w1:p9", "--", "--append-system-prompt", body]);
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "fork", "--last", "go"]);
+        let toml = format!("developer_instructions='''{body}'''");
+        assert_eq!(
+            out,
+            ["agent", "start", "p-1-kid", "--kind", "codex", "--pane", "w1:p9", "--", "fork", "--last", "go", "-c", toml.as_str(), "-c", "project_doc_max_bytes=0"]
+        );
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "grok", "--pane", "w1:p9"]);
+        assert_eq!(&out[out.len() - 2..], ["--rules", body]);
+        // 自己帶了指示就不補；codex 沒有檔也照樣不讀 AGENTS.md。
+        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9", "--", "--append-system-prompt", "mine"]);
+        assert_eq!(out.iter().filter(|a| *a == "--append-system-prompt").count(), 1, "{out:?}");
+        let gone = s.dir.join("gone.md");
+        let (out, _) = s.run(&[("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", gone.to_str().unwrap())], &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
+        assert_eq!(&out[out.len() - 3..], ["--", "-c", "project_doc_max_bytes=0"]);
+        // 內容有三個連續單引號：codex 不帶（TOML 表示不了），也不會因此失敗。
+        std::fs::write(&f, "a '''b'''").unwrap();
+        let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
+        assert!(!out.iter().any(|a| a.starts_with("developer_instructions=")), "{out:?}");
+        assert!(err.contains("TOML 表示不了"), "{err}");
+    }
+
+    /// `agent start --help` 只是查用法：原樣轉給 herdr，不能把 env 補送打進呼叫者自己的 pane（2026-10-01 實際發生）。
+    #[test]
+    fn agent_start_help_is_passed_through_without_touching_any_pane() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let env = [("AM_AGENT_NAME", "p-1"), ("HERDR_PANE_ID", "w1:p1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", s.dir.to_str().unwrap())];
+        let (out, _) = s.run(&env, &["agent", "start", "--help"]);
+        assert_eq!(out, ["agent", "start", "--help"]);
+        assert!(!log.exists(), "沒有任何 send-text：{:?}", std::fs::read_to_string(&log));
     }
 
     /// 使用者 2026-09-30：bot 開的 pane 標 `AM_CHILD_OF=<母名>`（子代再開的 pane 沿用同一個值、呼叫者偽造的剝掉），

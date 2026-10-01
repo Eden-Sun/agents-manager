@@ -975,12 +975,15 @@ async fn install_herdr_skill_remote(
     Ok(())
 }
 
-/// `bot.persona` appended to the system prompt per kind; `child_agent_rules` comes first.
-pub(crate) fn persona_args(bot: &db::Bot, agent_name: &str) -> Vec<String> {
+/// `bot.persona` appended to the system prompt per kind; `child_agent_rules` comes first, then the
+/// `[agents]` agent md (§6.5i). The CLIs' own instruction files are off, so this is the bot's only source.
+/// `agent_md` None＝`[agents]` 沒設定：CLI 照舊讀自己的指示檔。
+pub(crate) fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>) -> Vec<String> {
+    let base = super::agent_md::compose(&child_agent_rules(agent_name), agent_md.unwrap_or(""));
     let user = bot.persona.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let p = match user {
-        Some(u) => format!("{}\n\n{u}", child_agent_rules(agent_name)),
-        None => child_agent_rules(agent_name),
+        Some(u) => format!("{base}\n\n{u}"),
+        None => base,
     };
     let p = p.as_str();
     match bot.kind.as_str() {
@@ -988,7 +991,14 @@ pub(crate) fn persona_args(bot: &db::Bot, agent_name: &str) -> Vec<String> {
         // `grok --help`: "Extra rules to append to the system prompt".
         "grok" => vec!["--rules".into(), p.to_string()],
         // app-server / config schema key `developer_instructions`; the value is TOML.
-        "codex" => vec!["-c".into(), format!("developer_instructions={}", toml_basic_string(p))],
+        // §6.5i：`project_doc_max_bytes=0` 讓 codex 不讀 AGENTS.md，指示只有這一份。
+        "codex" => {
+            let mut v = vec!["-c".into(), format!("developer_instructions={}", toml_basic_string(p))];
+            if agent_md.is_some() {
+                v.extend(["-c".into(), "project_doc_max_bytes=0".into()]);
+            }
+            v
+        }
         _ => vec![],
     }
 }
@@ -1274,17 +1284,25 @@ mod model_args_tests {
         let rule = child_agent_rules("proj-abc123");
         b.persona = Some("回覆結尾一律加上 [PERSONA-OK]".into());
         let want = format!("{rule}\n\n回覆結尾一律加上 [PERSONA-OK]");
-        assert_eq!(persona_args(&b, "proj-abc123"), vec!["--append-system-prompt".to_string(), want.clone()]);
+        assert_eq!(persona_args(&b, "proj-abc123", None), vec!["--append-system-prompt".to_string(), want.clone()]);
         b.kind = "grok".into();
-        assert_eq!(persona_args(&b, "proj-abc123"), vec!["--rules".to_string(), want.clone()]);
+        assert_eq!(persona_args(&b, "proj-abc123", None), vec!["--rules".to_string(), want.clone()]);
         b.kind = "codex".into();
         b.persona = Some("line1\nsay \"hi\" \\ done".into());
         let want = format!("{rule}\n\nline1\nsay \"hi\" \\ done");
-        assert_eq!(persona_args(&b, "proj-abc123"), vec!["-c".to_string(), format!("developer_instructions={}", toml_basic_string(&want))]);
+        assert_eq!(
+            persona_args(&b, "proj-abc123", None),
+            vec!["-c".to_string(), format!("developer_instructions={}", toml_basic_string(&want))],
+            "沒設 [agents]：codex 照舊讀 AGENTS.md"
+        );
+        // §6.5i：agent md 夾在 AG Man 規則與 bot 自己的 persona 中間。
+        let args = persona_args(&b, "proj-abc123", Some("AGENT-MD"));
+        assert_eq!(&args[2..], ["-c", "project_doc_max_bytes=0"], "§6.5i：設了 [agents] 就不讀 AGENTS.md");
+        assert_eq!(args[1], format!("developer_instructions={}", toml_basic_string(&format!("{rule}\n\nAGENT-MD\n\nline1\nsay \"hi\" \\ done"))));
         // No user persona: the daemon's rule alone, never nothing.
         b.kind = "claude".into();
         b.persona = None;
-        assert_eq!(persona_args(&b, "proj-abc123"), vec!["--append-system-prompt".to_string(), rule.clone()]);
+        assert_eq!(persona_args(&b, "proj-abc123", None), vec!["--append-system-prompt".to_string(), rule.clone()]);
         assert!(rule.contains("`proj-abc123-`"));
         // 瀏覽器規則：只用 ego lite、一個 bot 一個分頁、bot 結束就關分頁，task space 用自己的名字。
         assert!(rule.contains("ego lite"));
@@ -1333,7 +1351,7 @@ mod model_args_tests {
         let mut b = bot("claude", None, None, false);
         for kind in ["claude", "grok", "codex"] {
             b.kind = kind.into();
-            let args = super::persona_args(&b, "proj-abc123").join(" ");
+            let args = super::persona_args(&b, "proj-abc123", None).join(" ");
             assert!(args.contains("$AM_OUTBOX"), "{kind}: {args}");
         }
         let doc = super::herdr_skill_doc("---\nname: herdr\ndescription: x\n---\n# herdr\n", "proj-abc123");

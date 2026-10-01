@@ -724,13 +724,36 @@ async fn start_inner(
         None => pane_env(app, bot, &host, run_id, &agent, shim_dir.as_deref()).await,
     }
     .map_err(up)?;
+    // §6.5i：agent md 讀一次，母 bot 的 persona 與子 agent 的檔用同一份。
+    let agent_md = super::agent_md::load(app, project).await;
+    if !agent_md.problems.is_empty() {
+        let reason = format!("agent md 有問題，這次啟動沒帶到：{}", agent_md.problems.join("；"));
+        tracing::warn!(bot = %bot.name, "{reason}");
+        if let Ok(conv) = db::conversation_id(&app.db, &bot.id).await {
+            let _ = insert_message(app, &conv, None, "system", &reason, "system", false, None).await;
+        }
+    }
+    let mut env = env;
+    if agent_md.configured {
+        // 這個專案有 agent md：claude 一律不讀任何 CLAUDE.md（帳號層與 repo 都是）。不分 kind 都設——codex／grok bot
+        // 開出來的 claude 子 agent 也繼承（shim 的保留清單帶下去）。沒設定的專案不動，CLI 照舊讀自己的檔。
+        if let Some(map) = env.as_object_mut() {
+            map.insert("CLAUDE_CODE_DISABLE_CLAUDE_MDS".into(), serde_json::json!("1"));
+        }
+        let child_md = super::agent_md::compose(&super::setup::child_agent_rules(&agent), &agent_md.text);
+        if let Some(path) = super::agent_md::install(app, bot, project, shim_dir.as_deref(), &child_md).await {
+            if let Some(map) = env.as_object_mut() {
+                map.insert("AM_INSTRUCTIONS_FILE".into(), serde_json::json!(path));
+            }
+        }
+    }
     // SPEC §6.5c: claude learns herdr from a skill (the CLI's own doc), not the persona.
     install_herdr_skill(app, bot, project, &env, &agent).await;
 
     // Remote hook injection may ssh-upload, so it must happen before workspace/tab creation.
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
-    args.extend(persona_args(bot, &agent));
+    args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str())));
     args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     args.extend(identity_args(app, bot, &project.host).await);
     args.extend(bot.args());
