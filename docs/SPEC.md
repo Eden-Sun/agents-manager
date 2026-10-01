@@ -935,7 +935,8 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
 
 超過 20 萬字一律 `NotAttempted(prompt_too_long_to_prove)`（422），不打。
 
-**codex 結構化歷史**（#749，`codex_history.rs`；`[codex_history] enabled`，預設開，關掉＝完全回到上面的 rollout／回音路線）：
+**codex 結構化歷史**（#749，`codex_history.rs`；`[codex_history] enabled`，**預設關**＝完全是上面的 rollout／回音路線；要開在設定檔明寫 `enabled = true`）：
+**預設關的原因（2026-10-01 審查）**：裝著的 codex 0.159.3 的 app-server 對 `thread/items/list` 回 `-32601 not supported yet`（連 `capabilities.experimentalApi` 都一樣）、`thread/turns/list` 回 `thread not loaded`（短命的 app-server 沒載入那條 thread），所以開著＝每則 codex prompt 白起一個 app-server、永遠拿不到證據；它還會在 `CODEX_HOME` 寫 sqlite／解開 skills，並對外跑一個 `git ls-remote https://github.com/openai/plugins.git`。等 codex 支援（或改用 `thread/resume` 載入再讀，要先評估對正在跑的 codex 的影響）再開。：
 本機 codex、run 有 `native_session_id` 時，用短命的 `codex app-server`（stdio JSON-RPC，帶這顆 bot 的 `CODEX_HOME`，用完即殺，
 不另起長駐 daemon）讀 `thread/items/list`／`thread/turns/list`，當 rollout 與畫面**之外**的 positive evidence。
 - **綁定嚴格**：`(host, CODEX_HOME, thread id)` 三個一起；thread id 一律是 `runs.native_session_id`（daemon 重啟後同一個值，所以重啟後照樣讀得到），

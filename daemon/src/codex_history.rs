@@ -9,7 +9,8 @@
 //! 不從「最近一條 thread」猜。app-server 是短命的子行程（每次要用才開、用完即殺），不引入第二個長駐 Codex。
 //! 增量讀取靠「基準 item id」：送出前記下最新那一筆，之後由新到舊翻頁讀到基準為止，不 hydrate 整份 transcript。
 //!
-//! 可關：設定檔 `[codex_history] enabled = false`。關掉時所有呼叫端的行為與沒有這個模組時一致（測試 build 預設也是關，
+//! **預設關**（#749 審查：裝著的 codex 0.159.3 的 app-server 不支援 `thread/items/list`，開著只是白起子行程）；要開在設定檔明寫
+//! `[codex_history] enabled = true`。關著時所有呼叫端的行為與沒有這個模組時一致（測試 build 的 source 預設也是空的，
 //! 要用就 `App.codex_history.set(...)` 換一個 stub）。
 
 #[cfg(test)]
