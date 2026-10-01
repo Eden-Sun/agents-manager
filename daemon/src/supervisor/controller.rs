@@ -3051,8 +3051,7 @@ mod conflict_fuse_tests {
 
     /// 一顆沒有 run 的 bot：`dispatch` 每次都拿到真的 409（`bot has no active run`）。
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-conflict-fuse-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-conflict-fuse");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
@@ -3249,8 +3248,7 @@ mod mission_quota_tests {
     use crate::quota::{LimitHit, Quota, Window};
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-mission-quota-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-mission-quota");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
@@ -3734,8 +3732,7 @@ mod no_grace_period_tests {
     use axum::Json;
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-no-grace-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-no-grace");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
@@ -3825,8 +3822,7 @@ mod window_unreadable_tests {
     /// 一顆沒有 run 的 bot：只要 `dispatch` 走過閘門，就會撞到真的 409（`bot has no active run`）——
     /// 那正是「閘門放行了」的可觀察證據。
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-window-unreadable-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-window-unreadable");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
@@ -3922,8 +3918,7 @@ mod queue_dispatch_tests {
     use super::*;
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-queue-dispatch-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-queue-dispatch");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
@@ -4330,8 +4325,7 @@ mod quota_restart_tests {
     use super::*;
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-quota-restart-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-quota-restart");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
@@ -4847,8 +4841,7 @@ mod late_reply_tests {
     use super::*;
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-late-reply-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-late-reply");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
@@ -4984,8 +4977,7 @@ mod turn_done_quota_tests {
     }
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-turn-done-quota-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-turn-done-quota");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));

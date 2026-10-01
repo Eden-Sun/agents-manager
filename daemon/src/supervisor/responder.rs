@@ -1811,6 +1811,9 @@ mod flow_tests {
         age_everything(&app).await;
         notify(&app).await; // 沒有 run：不送、不改狀態
         let db_path = app.data_dir.join("test.sqlite");
+        // 重啟要重開同一個資料庫：這個目錄不能跟著 `App` 一起被刪，測試結束自己收。
+        let data_dir = app.data_dir.clone();
+        crate::testing::release_scratch(&data_dir);
         drop(app);
 
         let db = crate::db::open(&db_path).await.unwrap();
@@ -1818,6 +1821,7 @@ mod flow_tests {
         assert_eq!(due.len(), 1, "重啟之後還在，下一次協調者起來就收得到");
         assert_eq!(due[0].state, "pending");
         assert_eq!(roles::get(&db, Role::Responder).await.unwrap().wakes, 0);
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     /// 巡檢與協調者（或 UI）同時決定同一筆核准：只有一個寫得進去，另一個拿到 None → 409。

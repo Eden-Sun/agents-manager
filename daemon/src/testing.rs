@@ -887,6 +887,28 @@ impl Drop for Env {
     }
 }
 
+/// 測試自己建的暫存資料目錄（`App` 的 `data_dir`）：註冊進來，最後一個 `Arc<App>` 掉了就由 `App` 的 `Drop` 刪掉
+/// （`state.rs`）。以前這些 `app()` 輔助函式只建不刪，每跑一輪整樹測試 `/tmp` 多出上千個帶 sqlite 的目錄
+/// （2026-10-01 實測 6GB、其中 4GB 是 supervisor 測試），ubuntu-ci 在 17:20 因為 ENOSPC 紅過一輪。
+/// 只有註冊過的目錄才會被刪：重開同一個目錄的測試（`restart_app` 之類）不註冊，不受影響。
+fn scratch_registry() -> &'static StdMutex<std::collections::HashSet<std::path::PathBuf>> {
+    static R: std::sync::OnceLock<StdMutex<std::collections::HashSet<std::path::PathBuf>>> = std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// `$TMPDIR/<prefix>-<ulid>`，已建好並註冊。
+pub fn scratch_dir(prefix: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("{prefix}-{}", db::ulid()));
+    std::fs::create_dir_all(&dir).unwrap();
+    scratch_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(dir.clone());
+    dir
+}
+
+/// `true`＝這個目錄是 [`scratch_dir`] 建的、現在交還給呼叫端刪。
+pub(crate) fn release_scratch(dir: &std::path::Path) -> bool {
+    scratch_registry().lock().unwrap_or_else(|e| e.into_inner()).remove(dir)
+}
+
 /// The data directory is a **sibling** of the repo, so nothing the daemon writes lands in the checkout.
 pub async fn env() -> Env {
     let dir = std::env::temp_dir().join(format!("am-test-{}", db::ulid()));

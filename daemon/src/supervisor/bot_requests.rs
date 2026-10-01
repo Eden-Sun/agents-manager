@@ -628,8 +628,7 @@ pub(crate) mod flow_tests {
     use super::*;
 
     pub(crate) async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("agm-bot-requests-{}", crate::db::ulid()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::scratch_dir("agm-bot-requests");
         let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
