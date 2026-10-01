@@ -1899,7 +1899,8 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 跟 `update_notice`（磁碟已是新版、重啟套用）不同：這是**上游有、磁碟上還沒有**（claude 還沒自己下載、codex 還沒裝），重啟換不到任何東西。
 
 - 唯讀、不觸發抓取，回最近一輪巡邏（每 10 分鐘；daemon 啟動後約 1 分鐘第一輪）的快照；第一輪還沒跑完是 `{"items":[]}`。
-- `kind`：`claude`、`codex`、`herdr`（herdr 2026-10-01 加入，給 header 的 herdr 一鍵更新徽章用）。
+- `kind`：`claude`、`codex`、`herdr`（herdr 2026-10-01 加入，給 header 的 herdr 一鍵更新徽章用）、`grok`（#761，只提示、沒有安裝端點；`POST /hosts/{name}/cli-update` 仍只收 claude／codex）。
+- grok：上游是 `https://storage.googleapis.com/grok-build-public-artifacts/cli/stable`（純文字版本號；`source_url` 同它），取不到或內容不是乾淨的 `x.y.z`（HTML 錯誤頁、預發布、build metadata）一律是 `error`、`latest_version:null`；磁碟版本是 `grok --version` 的版本（`(commit)` 後綴不算）；`target_version` 等於上游版，`text` 列落後的主機並寫 `grok update`。
 - 上游：claude `https://registry.npmjs.org/@anthropic-ai/claude-code/latest` 的 `version`；codex 沿用 `/api/changelog` 那份 GitHub releases 快取，取最大的正式版（濾掉 draft／prerelease）；herdr 問 `https://api.github.com/repos/herdrdev/herdr/releases`，同樣取數值最大的正式版（`source_url` 是 `https://github.com/herdrdev/herdr/releases`）。成功的結果快取 1 小時；失敗不快取，下一輪再試。
 - herdr 的磁碟版本不另跑指令：讀工具探測快取的 `herdr --version`（`hosts[].herdr.cli_version` 同一份，每 60 秒重探）；探不到 herdr 的主機不列。`target_version` 等於上游版，`text` 列出落後的主機並講明更新會重啟 herdr server。
 - 磁碟：每台工具探測認為有裝該 kind 的主機跑一次 `<kind> --version`。`latest_version` 是上游版；`target_version` 是共同安裝目標。Codex 的目標等於上游版；Claude 取上游版與已安裝版本的最大值，避免把較新的主機降版。Claude `behind` 表示低於共同目標或目標已知但讀不到版本；`has_update` 在任一主機落後／讀取失敗或版本不一致時為 `true`。

@@ -363,6 +363,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   直到各台都到同一目標才收起；不依賴 toast 是否仍在畫面或是否有 active run。這時**不寫 `runs.update_notice`、不進批次重啟**——安裝與「已安裝，重啟套用」是兩步。
   同一個上游版本只通知一次（`<data_dir>/upstream-update.last.json`，
   仿 herdr 的 `herdr-update.last`；只在比上次通知的更新時才推）。網頁另記每個瀏覽器看過的版本，開機讀 `GET /api/upstream-updates` 補上錯過的那則。
+  **grok**（issue #761）：xAI 自己的 installer（`~/.grok/bin/grok` 指到 `~/.grok/downloads/grok-<版本>-<平台>`，config `installer = "internal"`），沒有 npm／GitHub releases；上游是 `https://storage.googleapis.com/grok-build-public-artifacts/cli/stable`（純文字、內容只有版本號，`grok update --check` 查的同一個指標；HTML 錯誤頁、預發布、build metadata 一律當看不懂＝抓不到），磁碟版本是各主機的 `grok --version`（`grok 1.0.46 (2765805b9442)`，commit 後綴不是版本）。**只提示、不一鍵安裝**：官方升級指令是在那台主機跑 `grok update`，換版後跑著的 bot 要重啟，沒有我們能代跑的固定流程；`text` 寫出落後的主機與這條指令，header 有一顆只提示的 `grok` 徽章（桌機；手機靠 toast）。
   抓不到上游不是「沒有新版」：快照帶 `error`，從正常變成抓不到那一輪推 `notify:"error"` 跳錯誤通知。跟 #204 分診（§18.2c）的分工：分診回答
   「新版改了什麼、要不要處理」、這裡只回答「有沒有比磁碟新的版本可裝」；codex 兩邊讀同一份 releases 快取。
   herdr 也在這份快照裡（2026-10-01，一鍵更新的徽章）：上游是 `herdrdev/herdr` GitHub releases 最大的正式版，磁碟版本讀工具探測快取的

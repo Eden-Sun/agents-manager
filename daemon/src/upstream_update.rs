@@ -1,4 +1,4 @@
-//! claude／codex「上游有新版可裝」（issue #707）：仿 [`crate::herdr_update`] 的「最新版 vs 本機版本＋`last_notified`
+//! claude／codex／herdr／grok「上游有新版可裝」（issue #707）：仿 [`crate::herdr_update`] 的「最新版 vs 本機版本＋`last_notified`
 //! 去重」，但這裡真的去問上游——claude 問 npm registry 的 `latest`，codex 沿用 [`crate::changelog`] 抓的 GitHub releases。
 //!
 //! 跟 [`crate::update_watch`] 的「重啟套用」是**兩件事、並存**：
@@ -40,7 +40,12 @@ const NPM_CLAUDE_PAGE: &str = "https://www.npmjs.com/package/@anthropic-ai/claud
 const CODEX_RELEASES_PAGE: &str = "https://github.com/openai/codex/releases";
 const HERDR_RELEASES_PAGE: &str = "https://github.com/herdrdev/herdr/releases";
 const HERDR_RELEASES_API: &str = "https://api.github.com/repos/herdrdev/herdr/releases?per_page=30";
-pub const KINDS: [&str; 3] = ["claude", "codex", "herdr"];
+/// grok（issue #761）：xAI 自己的 installer 把 `~/.grok/bin/grok` 指到 `~/.grok/downloads/grok-<版本>-<平台>`，
+/// 沒有 npm／GitHub releases；`grok update --check` 查的 stable 指標就是這個純文字檔（內容只有版本號，例如 `1.0.46`）。
+pub const GROK_STABLE_URL: &str = "https://storage.googleapis.com/grok-build-public-artifacts/cli/stable";
+/// grok 官方的升級指令（`--check` 只查不裝）；要在**那台主機**上跑，這裡只提示、不代跑。
+pub const GROK_UPDATE_COMMAND: &str = "grok update";
+pub const KINDS: [&str; 4] = ["claude", "codex", "herdr", "grok"];
 /// 巡邏間隔：重比磁碟版本（claude 自己下載完之後通知要消失）。
 const SWEEP: Duration = Duration::from_secs(600);
 /// 上游結果的有效期；抓失敗的不快取，下一輪（10 分鐘後）再試。
@@ -95,6 +100,7 @@ pub fn source_url(kind: &str) -> &'static str {
     match kind {
         "codex" => CODEX_RELEASES_PAGE,
         "herdr" => HERDR_RELEASES_PAGE,
+        "grok" => GROK_STABLE_URL,
         _ => NPM_CLAUDE_PAGE,
     }
 }
@@ -104,6 +110,16 @@ pub fn npm_latest(json: &str) -> Result<String> {
     let v: Value = serde_json::from_str(json).map_err(|e| anyhow!("讀 npm registry 回應失敗：{e}"))?;
     let raw = v.get("version").and_then(Value::as_str).ok_or_else(|| anyhow!("npm registry 回應沒有 version"))?;
     version_string(raw).ok_or_else(|| anyhow!("npm registry 的 version 看不懂：「{raw}」"))
+}
+
+/// grok 的 stable 指標（一個版本號的純文字）→ 版本。HTML 錯誤頁、空內容、預發布（`-alpha.2`）與 build metadata（`+x`）
+/// 一律當看不懂：抓到什麼就信什麼的話，一個 404 頁面會變成「上游版本 <!doctype」。
+pub fn grok_latest(body: &str) -> Result<String> {
+    let t = body.trim();
+    let one_token = !t.is_empty() && t.split_whitespace().count() == 1;
+    version_string(t)
+        .filter(|v| one_token && v.contains('.') && v.as_str() == t.trim_start_matches('v'))
+        .ok_or_else(|| anyhow!("grok 的 stable 指標看不懂：「{}」", t.chars().take(60).collect::<String>()))
 }
 
 /// `changelog::codex_releases_to_md` 整理過的 releases（草稿、預發布已經丟掉）→ 最大的正式版。
@@ -228,6 +244,12 @@ pub fn notice_text(status: &UpstreamStatus) -> String {
             .collect();
         return format!("herdr 上游有新版 {latest}（{}）：更新會重啟 herdr server，所有 bot 中斷約 1 分鐘後自動接回", behind.join("、"));
     }
+    if status.kind == "grok" {
+        let behind: Vec<String> = status.hosts.iter().filter(|h| h.behind)
+            .map(|h| format!("{} 磁碟上是 {}", h.host, h.installed_version.as_deref().unwrap_or("?")))
+            .collect();
+        return format!("grok 上游有新版 {latest}（{}）：到那台主機執行 `{GROK_UPDATE_COMMAND}`（官方升級指令，這裡不代裝）；跑著的 grok bot 要重啟才會換版", behind.join("、"));
+    }
     if status.kind != "claude" {
         let behind: Vec<String> = status.hosts.iter().filter(|h| h.behind)
             .map(|h| format!("{} 磁碟上是 {}", h.host, h.installed_version.as_deref().unwrap_or("?")))
@@ -256,7 +278,11 @@ pub fn item_json(status: &UpstreamStatus) -> Value {
 }
 
 pub fn error_text(status: &UpstreamStatus) -> String {
-    let from = if status.kind == "claude" { "npm registry" } else { "GitHub releases" };
+    let from = match status.kind.as_str() {
+        "claude" => "npm registry",
+        "grok" => "x.ai 的 grok 發佈位置",
+        _ => "GitHub releases",
+    };
     format!("查 {} 上游最新版失敗（{from}）：{}", status.kind, status.error.as_deref().unwrap_or("未知原因"))
 }
 
@@ -461,6 +487,13 @@ impl Sources for Live {
                     return Err(anyhow!("GitHub releases 回 HTTP {}", resp.status()));
                 }
                 return herdr_latest(&resp.text().await.map_err(|e| anyhow!("讀 GitHub releases 回應失敗：{e}"))?);
+            }
+            if kind == "grok" {
+                let resp = client.get(GROK_STABLE_URL).send().await.map_err(|e| anyhow!("連不上 grok 的發佈位置：{e}"))?;
+                if !resp.status().is_success() {
+                    return Err(anyhow!("grok 的發佈位置回 HTTP {}", resp.status()));
+                }
+                return grok_latest(&resp.text().await.map_err(|e| anyhow!("讀 grok 的發佈位置回應失敗：{e}"))?);
             }
             let resp = client.get(NPM_CLAUDE_LATEST).send().await.map_err(|e| anyhow!("連不上 npm registry：{e}"))?;
             if !resp.status().is_success() {
@@ -702,7 +735,7 @@ mod tests {
     impl Fake {
         fn new(claude: Result<&str, &str>, codex: Result<&str, &str>, claude_disk: &str, codex_disk: &str) -> Self {
             // herdr 預設跟上游同版（沒有更新），要測 herdr 的用 set_upstream／set_disk 改。
-            let up = [("claude", claude), ("codex", codex), ("herdr", Ok("0.9.3"))]
+            let up = [("claude", claude), ("codex", codex), ("herdr", Ok("0.9.3")), ("grok", Ok("1.0.46"))]
                 .into_iter()
                 .map(|(k, r)| (k.to_string(), r.map(str::to_string).map_err(str::to_string)))
                 .collect();
@@ -710,6 +743,7 @@ mod tests {
                 ("claude".to_string(), claude_disk.to_string()),
                 ("codex".to_string(), codex_disk.to_string()),
                 ("herdr".to_string(), "herdr 0.9.3".to_string()),
+                ("grok".to_string(), "grok 1.0.46 (2765805b9442)".to_string()),
             ]
             .into_iter()
             .collect();
@@ -771,7 +805,54 @@ mod tests {
         let c = of(&evs, "claude").unwrap();
         assert_eq!(c["has_update"], false);
         assert!(c["notify"].is_null());
-        assert_eq!(w2.snapshot().await.len(), 3);
+        assert_eq!(w2.snapshot().await.len(), 4);
+    }
+
+    // ── grok（issue #761）：正式版是 x.ai 放在 storage.googleapis.com 的 `cli/stable` 純文字，磁碟版本是 `grok --version` ──
+
+    #[test]
+    fn grok_latest_reads_the_stable_pointer_and_refuses_anything_else() {
+        assert_eq!(grok_latest("1.0.47\n").unwrap(), "1.0.47");
+        assert_eq!(grok_latest("  v1.0.47  ").unwrap(), "1.0.47");
+        // 預發布、HTML 錯誤頁、空內容都不能被當成版本（也不能默默變成「沒有新版」）。
+        for bad in ["", "1.0.47-alpha.2", "<!doctype html><title>404</title>", "latest", "1.0.47+build5"] {
+            assert!(grok_latest(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_grok_host_behind_the_stable_release_is_an_update_with_the_official_command() {
+        let s = build_status("grok", &ok("1.0.47"), &[disk("local", "grok 1.0.46 (2765805b9442)"), disk("m4p", "grok 1.0.47 (abcdef012345)")], None);
+        assert!(s.has_update && s.hosts[0].behind && !s.hosts[1].behind);
+        assert_eq!(s.hosts[0].installed_version.as_deref(), Some("1.0.46"), "`(commit)` 後綴不是版本的一部分");
+        assert_eq!(s.target_version.as_deref(), Some("1.0.47"));
+        let t = notice_text(&s);
+        assert!(t.contains("grok") && t.contains("1.0.47") && t.contains("local 磁碟上是 1.0.46") && !t.contains("m4p"), "{t}");
+        assert!(t.contains("grok update"), "官方的升級指令要寫出來（只提示，不一鍵安裝）：{t}");
+        let up_to_date = build_status("grok", &ok("1.0.46"), &[disk("local", "grok 1.0.46 (2765805b9442)")], None);
+        assert!(!up_to_date.has_update && !should_notify(&up_to_date, None));
+        let err = build_status("grok", &Err("GCS 回 HTTP 503".into()), &[disk("local", "grok 1.0.46")], None);
+        assert!(!err.has_update && error_text(&err).contains("GCS 回 HTTP 503") && !error_text(&err).contains("npm"));
+    }
+
+    #[tokio::test]
+    async fn grok_notifies_each_new_stable_once_and_clears_when_the_host_catches_up() {
+        let e = crate::testing::env().await;
+        let w = Watch::default();
+        let last = e.dir.join(LAST_FILE);
+        let src = Fake::new(Ok("2.1.283"), Ok("0.157.0"), "2.1.283 (Claude Code)", "codex-cli 0.157.0");
+        src.set_upstream("grok", Ok("1.0.47"));
+
+        let evs = tick(&e.app, &w, &src, &last).await;
+        let g = of(&evs, "grok").expect("grok 落後要推");
+        assert_eq!((g["notify"].as_str(), g["has_update"].as_bool()), (Some("update"), Some(true)));
+        assert!(g["text"].as_str().unwrap().contains("grok update"));
+        assert!(tick(&e.app, &w, &src, &last).await.is_empty(), "同一版不重複通知");
+        src.set_disk("grok", "grok 1.0.47 (abcdef012345)");
+        let evs = tick(&e.app, &w, &src, &last).await;
+        let g = of(&evs, "grok").unwrap();
+        assert_eq!(g["has_update"], false);
+        assert!(g["notify"].is_null(), "裝好了只收掉提示，不再通知");
     }
 
     #[tokio::test]
@@ -818,9 +899,9 @@ mod tests {
         let last = e.dir.join(LAST_FILE);
         let src = Fake::new(Ok("2.1.283"), Err("GitHub HTTP 403 rate limit"), "2.1.283", "codex-cli 0.157.0");
         tick(&e.app, &w, &src, &last).await;
-        assert_eq!(*src.calls.lock().unwrap(), 3);
+        assert_eq!(*src.calls.lock().unwrap(), 4, "claude、codex、herdr、grok 各問一次");
         tick(&e.app, &w, &src, &last).await;
-        assert_eq!(*src.calls.lock().unwrap(), 4, "claude、herdr 用快取，只有失敗的 codex 重問");
+        assert_eq!(*src.calls.lock().unwrap(), 5, "claude、herdr、grok 用快取，只有失敗的 codex 重問");
     }
 
     /// 抓不到要講：從正常變成抓不到推一次 `error`，一直抓不到不刷屏，恢復後沒事。
