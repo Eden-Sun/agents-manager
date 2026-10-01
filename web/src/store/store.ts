@@ -3,6 +3,7 @@
 import { gatewayErrText, networkErrText } from '../lib/netErr'
 import { DraftSync } from './draftSync'
 import { pruneDeadKeys } from './prune'
+import { forgetBlockedExcept } from '../lib/blockedPrefetch'
 import { shellDraftKey } from './shellDraft'
 import { createResyncRunner } from './resyncQueue'
 import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
@@ -118,6 +119,7 @@ function pruneStoreMemo(s: Pick<StoreState, 'bots' | 'projects' | 'missions'>): 
   for (const id of [...missionListLoads.keys()]) if (!projectIds.has(id)) missionListLoads.delete(id)
   for (const id of [...missionLoads.keys()]) if (!missionIds.has(id)) missionLoads.delete(id)
   pruneIdleEdges(botIds)
+  forgetBlockedExcept(botIds)
 }
 
 /** 測試用：模組層那幾張帳現在有哪些 key。 */
