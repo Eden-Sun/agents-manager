@@ -407,6 +407,8 @@ export interface StoreState {
   missionLoadErrors: Record<string, string>
   /** false = daemon 沒有 `/api/missions`（舊版）：入口靜默消失。 */
   missionsSupported: boolean
+  /** `supervisor_changed` 事件的累計次數：AGM 面板（本身不輪詢）開著時拿它當「該重讀了」的訊號。 */
+  supervisorRev: number
   /** 已結案那兩段是不是被 `MISSION_CLOSED_LIMIT` 截掉了（標題要說「最近 N 筆」，不能冒充總數）。 */
   missionsCapped: Record<string, { done: boolean; cancelled: boolean }>
   loadMissions: (projectId: string) => Promise<void>
@@ -875,6 +877,7 @@ export const useStore = create<StoreState>((set, get) => {
   missionLoading: {},
   missionLoadErrors: {},
   missionsSupported: true,
+  supervisorRev: 0,
   missionsCapped: {},
   shellView: initialShellView,
   supervisorProjectId: null,
@@ -2870,6 +2873,9 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       })
       return
     }
+    case 'supervisor_changed':
+      set((s) => ({ supervisorRev: s.supervisorRev + 1 }))
+      return
     case 'draft_updated': {
       // `{key, text, rev, client_id, updated_at}`（API.md）：別的瀏覽器的草稿；自己送的回音在 `draftSync` 裡只記 rev。
       if (!isRec(data)) return

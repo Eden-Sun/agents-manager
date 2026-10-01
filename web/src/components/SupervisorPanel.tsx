@@ -248,6 +248,7 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
   const [incidents, setIncidents] = useState<IncidentState>({ kind: 'loading' })
   const selectBot = useStore((s) => s.selectBot)
   const bots = useStore((s) => s.bots)
+  const rev = useStore((s) => s.supervisorRev)
 
   /**
    * 讀一次狀態。回傳而不是自己寫進 state，掛載時的那一次才能在面板已經關掉之後
@@ -286,6 +287,29 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
       alive = false
     }
   }, [read, apply])
+
+  // 面板開著時 daemon 推 `supervisor_changed`（交辦、驗收、額度、看門狗…）：重讀狀態與故障清單。以前只在掛載時讀一次，
+  // 開著面板等 AGM 起來或交辦跑完，畫面一直停在按開的那一刻。節流成一秒一次（一陣事件只讀一輪）；第一次由上面的掛載 effect 讀。
+  useEffect(() => {
+    if (rev === 0) return
+    let alive = true
+    const t = setTimeout(() => {
+      void read().then((r) => {
+        // 讀失敗不蓋掉已經在畫面上的狀態（暫時性的錯誤不該把面板換成「讀不到」）。
+        if (alive && r.info) apply(r)
+      })
+      void fetchIncidents().then(
+        (r) => {
+          if (alive && r !== null) setIncidents({ kind: 'ok', items: r })
+        },
+        () => {},
+      )
+    }, 1000)
+    return () => {
+      alive = false
+      clearTimeout(t)
+    }
+  }, [rev, read, apply])
 
   const act = async (action: SupervisorAction) => {
     setBusy(action)
