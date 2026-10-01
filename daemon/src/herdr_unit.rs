@@ -96,7 +96,6 @@ pub fn start_server(session: &str, log_dir: &std::path::Path, unit: Option<&Unit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     pub(crate) struct Tmp(pub PathBuf);
@@ -127,15 +126,13 @@ mod tests {
     pub(crate) fn fake_systemctl(dir: &Path, rc: i32, stderr: &str) -> (UnitStart, PathBuf) {
         let log = dir.join("systemctl.log");
         let bin = dir.join("systemctl");
-        std::fs::write(
+        crate::testing::write_exec(
             &bin,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" \"XDG_RUNTIME_DIR=${{XDG_RUNTIME_DIR:-}}\" >> '{}'\nprintf '%s' '{stderr}' >&2\nexit {rc}\n",
                 log.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let mut u = UnitStart::systemd(4242, false, "agents-manager").unwrap();
         u.program = bin.to_string_lossy().into_owned();
         (u, log)
@@ -176,8 +173,7 @@ mod tests {
     fn fake_herdr(dir: &Path) -> (String, PathBuf) {
         let log = dir.join("herdr.log");
         let bin = dir.join("herdr");
-        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display())).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_exec(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()));
         (bin.to_string_lossy().into_owned(), log)
     }
 

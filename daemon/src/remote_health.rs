@@ -56,10 +56,7 @@ mod tests {
     use super::*;
 
     fn dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("am-remote-health-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::testing::scratch_dir(&format!("am-remote-health-{tag}"))
     }
 
     fn ok_at(t: &str) -> Health {
