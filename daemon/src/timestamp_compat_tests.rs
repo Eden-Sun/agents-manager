@@ -493,6 +493,37 @@ fn time_named_operands_ordered(line: &str) -> bool {
     })
 }
 
+/// `WHERE excluded.updated_at >= quota_cache.updated_at` 這種 upsert 守衛：`excluded.<時間欄>` 直接跟別的東西比大小。
+/// 舊列可能是秒格式，同一秒內新的毫秒字串會被判成「比較舊」而寫不進去（`quota_cache`，#101 的同一類）。
+/// 要把兩邊都包進 `db::ts_sql(..)`；這一條只看這一行有沒有 `ts_sql`。
+fn compares_excluded_time(line: &str) -> bool {
+    line.match_indices("excluded.").any(|(i, m)| {
+        let col: String = line[i + m.len()..].chars().take_while(|c| is_ident(*c)).collect();
+        let after = &line[i + m.len() + col.len()..];
+        (col.ends_with("_at") || col == "until" || col == "since") && starts_with_ordering_op(after)
+    })
+}
+
+/// 寫出**不是毫秒 UTC** 的時間字串：`to_rfc3339()`（`+00:00`、奈秒）、`SecondsFormat::Secs／Micros／Nanos／AutoSi`、
+/// 沒有 `%.3f` 的 `%Y-%m-%dT%H:%M:%S…` 格式、`to_rfc2822`。時間欄位只准用 `db::now()`／`iso_in`／`iso_at`
+/// （毫秒、`Z`）；各寫各的格式，之後拿字串比大小或排序就會在同一秒內判錯（#101／#702）。
+fn writes_non_millisecond_time(line: &str) -> bool {
+    if line.contains("to_rfc3339()") || line.contains("to_rfc2822") {
+        return true;
+    }
+    if ["SecondsFormat::Secs", "SecondsFormat::Micros", "SecondsFormat::Nanos", "SecondsFormat::AutoSi"].iter().any(|f| line.contains(f)) {
+        return true;
+    }
+    line.match_indices("%Y-%m-%dT%H:%M:%S").any(|(i, m)| !line[i + m.len()..].starts_with("%.3f"))
+}
+
+/// 生產程式碼裡**合法地**寫非毫秒時間字串的地方：`(命中的那行要包含的字串, 為什麼字串比較／排序不會出事)`。
+/// 新增一筆之前先確認那個欄位**不會**被拿來比大小；會比的就改成 `db::now()` 的格式。
+const NON_MILLISECOND_WRITERS: &[(&str, &str)] = &[(
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "遠端 hook.sh 蓋的 `received_at`（秒、遠端時鐘）：只當去重鑰匙的一部分（字串相等），要比先後的 `fired_within` 先 parse 成時刻",
+)];
+
 /// 生產程式碼裡的**時間字串**比大小，只有兩條合法的路：
 /// - SQL：把欄位包進 `db::ts_sql(..)` 再比（讀取端正規化）；
 /// - Rust：`db::cmp_ts`／`db::same_instant`／`db::parse_ts` 之後比時刻。
@@ -541,8 +572,10 @@ fn deadline_comparisons_never_compare_raw_timestamp_strings() {
             let time_column = DEADLINE_COLS.iter().chain(["until", "resets_at", "due_at"].iter()).any(|c| line.contains(c));
             let bad_rust = (!unit && (str_ordering(line) || (time_column && closure_param_ordering(line)) || time_named_operands_ordered(line)))
                 || (line.contains("resets_at") && (line.contains(".min()") || line.contains(".max()")));
-            let bad_clock = line.contains("datetime('now'") || line.contains("CURRENT_TIMESTAMP") || line.contains("strftime(");
-            let bad = if canonical_only { bad_clock } else { bad_sql || bad_rust || bad_clock };
+            let bad_excluded = compares_excluded_time(line) && !line.contains("ts_sql");
+            let bad_write = writes_non_millisecond_time(line) && !NON_MILLISECOND_WRITERS.iter().any(|(n, _)| line.contains(n));
+            let bad_clock = line.contains("datetime('now'") || line.contains("CURRENT_TIMESTAMP") || line.contains("strftime(") || bad_write;
+            let bad = if canonical_only { bad_clock } else { bad_sql || bad_rust || bad_excluded || bad_clock };
             if bad {
                 hits.push(format!("{file}:{}: {t}", i + 1));
             }
@@ -583,6 +616,17 @@ fn the_source_guard_recognises_the_shapes_it_is_meant_to_catch() {
     assert!(closure_param_ordering(".filter(|w| *w < decided)"));
     assert!(!closure_param_ordering(".map(|t| t + 1)"));
     assert!(!closure_param_ordering(".map(|a, b| a.cmp(b))"));
+    // upsert 守衛與寫入格式（#101／#702 的長期守衛）。
+    assert!(compares_excluded_time("WHERE excluded.updated_at >= quota_cache.updated_at"));
+    assert!(compares_excluded_time("AND excluded.read_at > bot_reads.read_at"));
+    assert!(!compares_excluded_time("SET updated_at=excluded.updated_at"), "賦值不是比較");
+    assert!(!compares_excluded_time("WHERE excluded.message_id > bot_reads.message_id"), "不是時間欄");
+    assert!(writes_non_millisecond_time("let at = chrono::Utc::now().to_rfc3339();"));
+    assert!(writes_non_millisecond_time("t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)"));
+    assert!(writes_non_millisecond_time("t.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)"));
+    assert!(writes_non_millisecond_time("now.format(\"%Y-%m-%dT%H:%M:%SZ\")"));
+    assert!(!writes_non_millisecond_time("now.format(\"%Y-%m-%dT%H:%M:%S%.3fZ\")"), "毫秒格式合法");
+    assert!(!writes_non_millisecond_time("t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)"));
 }
 
 /// 維護窗口的升級計時：`escalation_for` 過濾「還沒過期的核准」，用的是 `db::now()`。
