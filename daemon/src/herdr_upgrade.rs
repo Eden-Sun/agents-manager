@@ -195,7 +195,7 @@ pub async fn post_herdr_update(
     body: Option<Json<HerdrUpdateIn>>,
 ) -> Result<Response, LcError> {
     let b = body.map(|Json(b)| b).unwrap_or_default();
-    let current = crate::upstream_update::behind_target_for_host("herdr", &host).await;
+    let current = crate::upstream_update::behind_target_for_host(&app, "herdr", &host).await;
     let v = start(&app, &headers, &host, b.target_version.as_deref(), current, Arc::new(Real), Timing::default()).await?;
     Ok((StatusCode::ACCEPTED, Json(v)).into_response())
 }

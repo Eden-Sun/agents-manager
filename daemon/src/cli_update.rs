@@ -521,11 +521,11 @@ pub async fn start(
     };
     // 使用者核准的版本要跟 daemon 眼中那台「需安裝」的目標是同一版：舊分頁、別人剛裝好、帳本又出了新版都擋下來重看。
     let current_target = match kind {
-        "claude" => crate::upstream_update::latest_target_for_host(kind, host).await,
+        "claude" => crate::upstream_update::latest_target_for_host(app, kind, host).await,
         // 只有成功確認沒有 pending notice 才退回快照；讀取失敗時拒絕，避免舊確認框改用另一個目標。
         _ => match pending_target(app, host).await {
             Ok(Some(t)) => Some(t),
-            Ok(None) => crate::upstream_update::behind_target_for_host(kind, host).await,
+            Ok(None) => crate::upstream_update::behind_target_for_host(app, kind, host).await,
             Err(error) => {
                 tracing::warn!(host, error = %error, "could not determine the pending Codex install target");
                 return Err(LcError::Unavailable(json!({
@@ -1761,7 +1761,7 @@ mod tests {
             &[(host.to_string(), Ok("codex-cli 0.158.0".to_string()))],
             None,
         );
-        crate::upstream_update::set_snapshot_for_test(status).await;
+        crate::upstream_update::set_snapshot_for_test(&env.app, status).await;
         (bot, run)
     }
 
@@ -1849,7 +1849,7 @@ mod tests {
             &[(host.to_string(), Ok("codex-cli 0.158.0".to_string()))],
             None,
         );
-        crate::upstream_update::set_snapshot_for_test(status).await;
+        crate::upstream_update::set_snapshot_for_test(&env.app, status).await;
         let fake = Fake::new(&["codex-cli 0.158.0", "codex-cli 0.159.0"], Ok("ok"));
 
         let result = start(
@@ -2570,7 +2570,7 @@ mod tests {
             .execute(&env.app.db)
             .await
             .unwrap();
-        crate::upstream_update::set_snapshot_for_test(crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&env.app, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.281 (Claude Code)".into()))], None,
@@ -2627,7 +2627,7 @@ mod tests {
             .execute(&env.app.db)
             .await
             .unwrap();
-        crate::upstream_update::set_snapshot_for_test(crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&env.app, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.281".into()))],
@@ -2658,7 +2658,7 @@ mod tests {
         let notice = notice_of(&env.app, &run).await.unwrap();
         assert!(notice.contains("已安裝") && notice.contains("重啟套用"), "{notice}");
         assert!(
-            crate::upstream_update::latest_target_for_host("claude", "local")
+            crate::upstream_update::latest_target_for_host(&env.app, "claude", "local")
                 .await
                 .is_none(),
             "套用後快照要反映主機已超前原目標"
@@ -2712,7 +2712,7 @@ mod tests {
             .execute(&env.app.db)
             .await
             .unwrap();
-        crate::upstream_update::set_snapshot_for_test(crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&env.app, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.281".into()))],

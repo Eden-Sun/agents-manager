@@ -185,7 +185,7 @@ fn task_head(app: &Arc<App>, kind: &str) -> Option<String> {
 async fn default_to(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
     // herdr 同理：新版還沒裝，看上游快照裡這台落後時的目標版本。
     if kind == "herdr" {
-        if let Some(v) = crate::upstream_update::behind_target_for_host(kind, host).await {
+        if let Some(v) = crate::upstream_update::behind_target_for_host(app, kind, host).await {
             return Some(v);
         }
     }
@@ -446,7 +446,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
         Some(v) => Some(v),
         // codex 的新版還沒裝、磁碟是舊的：沒給 `to` 就用帳本的最新版（見 [`default_to`]）。
         None if kind == "codex" => crate::release_triage::ledger::max_version(&app.db, kind).await.ok().flatten(),
-        None if kind == "herdr" => crate::upstream_update::behind_target_for_host(kind, &host).await,
+        None if kind == "herdr" => crate::upstream_update::behind_target_for_host(&app, kind, &host).await,
         None => None,
     };
     let reply = crate::changelog::lookup(&app, &host, kind, b.from.as_deref(), to_hint.as_deref()).await;

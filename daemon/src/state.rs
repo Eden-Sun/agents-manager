@@ -113,6 +113,9 @@ pub struct App {
     /// start_bot 的 preflight「這台主機上有沒有 agent 執行檔」怎麼去問。正式 daemon 是 `command -v`；
     /// 測試 build 預設答「有」，不吃跑測試那台機器的 PATH（issue #139）。
     pub kind_probe: crate::kind_probe::KindProbeHook,
+    /// 上游新版巡邏的最近一輪快照（header 的 ⌃⌃ 警示與 CLI 安裝目標都讀它）。跟著 App 走、不放 process 全域：
+    /// 測試各自一個 App，平行跑時不會互相蓋掉別人的 `claude` 快照（issue #759）。
+    pub upstream_watch: crate::upstream_update::Watch,
 
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Child pane creation permits and the short fence used while a bot credential rotates.
@@ -236,6 +239,7 @@ impl App {
             default_connected: std::sync::atomic::AtomicBool::new(false),
             proc_env: Default::default(),
             kind_probe: Default::default(),
+            upstream_watch: Default::default(),
             locks: Mutex::new(HashMap::new()),
             credential_spawn_gate: std::sync::Mutex::new(crate::credential_spawn::Gate::default()),
             bus,
