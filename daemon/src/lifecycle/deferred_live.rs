@@ -62,6 +62,11 @@ pub(crate) fn defer_live(bot_id: &str, fields: &[&str], baseline_rev: &str, targ
     true
 }
 
+/// 不在 `live` 裡的 bot 不留排著的即時套用：要等 idle 邊才套，bot 被刪掉就永遠等不到。
+pub(crate) fn retain_bots(live: &[String]) {
+    pending().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| live.contains(id));
+}
+
 pub(crate) fn is_deferred(bot_id: &str) -> bool {
     pending().lock().unwrap_or_else(|e| e.into_inner()).contains_key(bot_id)
 }
@@ -120,6 +125,21 @@ pub(crate) async fn apply_deferred_once(
     }
     app.emit("bot_changed", serde_json::json!({"bot_id": bot_id})).await;
     Some(outcome)
+}
+
+#[cfg(test)]
+mod retain_tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_bots_deferred_live_apply_is_dropped() {
+        for bot in ["defer-gone", "defer-kept"] {
+            assert!(defer_live(bot, &["model"], "r0", "r1", false));
+        }
+        retain_bots(&["defer-kept".to_string()]);
+        assert!(!is_deferred("defer-gone") && is_deferred("defer-kept"));
+        retain_bots(&[]);
+    }
 }
 
 #[cfg(test)]

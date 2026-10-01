@@ -128,6 +128,7 @@ pub(crate) fn retain_bot_state(live: &[String]) {
     interruption::retain_bots(live);
     owed_delivery::retain_bots(live);
     resume_nudge::retain_bots(live);
+    deferred_live::retain_bots(live);
 }
 
 #[cfg(test)]
