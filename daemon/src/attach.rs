@@ -232,7 +232,7 @@ pub const UNREFERENCED_KEEP_SECS: i64 = 24 * 3600;
 /// 例行掃的間隔（開機另外跑一次）。
 const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 
-/// 清掉上傳了卻從沒送出的附件：`ready`、`message_id` 空、放超過 `keep_secs`、**而且沒有任何訊息的 `attachments_json` 點名它**
+/// 清掉上傳了卻從沒送出的附件：`ready`、`message_id` 空、放超過 `keep_secs`（從上傳、或最後一次被 `resolve`／解綁算起）、**而且沒有任何訊息的 `attachments_json` 點名它**
 /// （舊版兩步綁定可能留下「訊息點名了、`message_id` 卻沒設」的列）。被訊息引用的絕不刪；`staging`／`failed` 是
 /// [`reconcile_orphans`] 的事。回清掉幾筆。
 ///
@@ -315,7 +315,12 @@ pub async fn resolve(app: &Arc<App>, bot_id: &str, ids: &[String]) -> Result<Vec
         .fetch_optional(&app.db)
         .await?;
         match row {
-            Some((id, name, mime, size, path)) => out.push(Attachment { id, name, mime, size, path }),
+            Some((id, name, mime, size, path)) => {
+                // 正要被用了：重新算「沒人用」的時間，resolve 到 bind 之間輪到清理也不會把三天前上傳的它當孤兒刪掉
+                // （`created_at` 除了清理沒有別的讀者，所以它就是「最後一次被用到」）。
+                let _ = sqlx::query("UPDATE attachments SET created_at = ? WHERE id = ? AND message_id IS NULL").bind(db::now()).bind(&id).execute(&app.db).await;
+                out.push(Attachment { id, name, mime, size, path })
+            }
             None => bail!("unknown attachment `{id}`"),
         }
     }
@@ -363,6 +368,22 @@ pub async fn bind_tx(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, message_id: &
             bail!("attachment `{}` is missing or not ready", a.id);
         }
     }
+    Ok(())
+}
+
+/// 撤回一則沒送出的訊息之前，把它帶的附件解綁（`messages` 要刪，`attachments.message_id` 沒有 ON DELETE）。
+/// 訊息要是 `msg_id` 或 `turn_id` 底下的。解綁當下重新算「沒人用」的時間：同一個 `client_request_id` 馬上原樣重送，
+/// 舊上傳不能在重送之前被清理掃掉。
+pub async fn unbind_message(conn: &mut sqlx::SqliteConnection, msg_id: &str, turn_id: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE attachments SET message_id = NULL, created_at = ?
+          WHERE message_id IN (SELECT id FROM messages WHERE id = ? OR turn_id = ?)",
+    )
+    .bind(db::now())
+    .bind(msg_id)
+    .bind(turn_id)
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
@@ -662,6 +683,40 @@ mod tests {
             assert_eq!(alive(kept).await, (true, true), "{kept} 不能動");
         }
         assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 0, "冪等");
+    }
+
+    /// 掃的是「放了多久沒人用」，不是「上傳多久了」：一個三天前上傳的附件，使用者今天才送出——`resolve` 讀到它、`bind` 綁上它
+    /// 之間若剛好輪到清理，就會被當成孤兒刪掉，這一次送出變成 `attachment is missing`（而且檔案也沒了）。
+    #[tokio::test]
+    async fn resolving_an_old_upload_protects_it_from_the_sweep_until_it_is_bound() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let a = save(&env.app, &bot.id, "old.png", "image/png", b"aaa").await.unwrap();
+        sqlx::query("UPDATE attachments SET created_at = ? WHERE id = ?").bind(db::iso_in(-3 * 86_400)).bind(&a.id).execute(&env.app.db).await.unwrap();
+        let msg_id = seed_message(&env.app, &bot.id).await;
+
+        let files = resolve(&env.app, &bot.id, &[a.id.clone()]).await.unwrap();
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 0, "剛被 resolve 的附件正要綁上訊息，不能當孤兒");
+        bind(&env.app, &msg_id, &files).await.expect("resolve 到 bind 之間被清掉的話，這裡會失敗");
+        assert!(std::path::Path::new(&a.path).exists());
+    }
+
+    /// 同上，另一條路：送出後撤回（`retract_unsent_turn`）會把附件解綁，同一個 `client_request_id` 馬上原樣重送。
+    /// 解綁當下要重新算「沒人用」的時間，不然舊上傳在重送之前就被清掉。
+    #[tokio::test]
+    async fn unbinding_an_old_attachment_restarts_its_sweep_clock() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let a = save(&env.app, &bot.id, "old.png", "image/png", b"aaa").await.unwrap();
+        sqlx::query("UPDATE attachments SET created_at = ? WHERE id = ?").bind(db::iso_in(-3 * 86_400)).bind(&a.id).execute(&env.app.db).await.unwrap();
+        let msg_id = seed_message(&env.app, &bot.id).await;
+        bind(&env.app, &msg_id, &[a.clone()]).await.unwrap();
+
+        unbind_message(&mut *env.app.db.acquire().await.unwrap(), &msg_id, &msg_id).await.unwrap();
+        sqlx::query("DELETE FROM messages WHERE id = ?").bind(&msg_id).execute(&env.app.db).await.unwrap();
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 0, "剛解綁、等著原樣重送的附件不能被清掉");
+        let again = seed_message(&env.app, &bot.id).await;
+        bind(&env.app, &again, &[a.clone()]).await.unwrap();
     }
 
     /// issue #88：daemon 在 `INSERT ... 'staging'` 之後、`UPDATE ... 'ready'` 之前死掉（或 `save()` 自己
