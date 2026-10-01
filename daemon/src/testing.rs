@@ -51,6 +51,8 @@ pub struct MockHerdr {
     defer: Arc<StdMutex<Vec<(String, usize, Fault)>>>,
     /// `agent.list` 回空陣列，但 `agent.get` 仍看得到 `agents`：模擬「清單暫時是空的、agent 其實還在」。
     pub hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
+    /// `events.subscribe` 回 ack 並把連線留著（不吐事件）。預設關：沒開時訂閱照舊回 `unsupported`，既有測試依賴它「訂閱不起來」。
+    pub allow_subscribe: Arc<std::sync::atomic::AtomicBool>,
     /// `ping` 的回答 `(version, protocol)`；測 live-handoff 後版本變了（#254）。
     pub pong: Arc<StdMutex<(String, u32)>>,
     handle: tokio::task::JoinHandle<()>,
@@ -223,6 +225,7 @@ struct MockState {
     faults: Arc<StdMutex<Vec<(String, Fault)>>>,
     defer: Arc<StdMutex<Vec<(String, usize, Fault)>>>,
     hide_agent_list: Arc<std::sync::atomic::AtomicBool>,
+    allow_subscribe: Arc<std::sync::atomic::AtomicBool>,
     pong: Arc<StdMutex<(String, u32)>>,
     seq: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -292,6 +295,7 @@ impl MockHerdr {
             faults: Default::default(),
             defer: Default::default(),
             hide_agent_list: Default::default(),
+            allow_subscribe: Default::default(),
             pong: Arc::new(StdMutex::new(("mock".into(), 20))),
             seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         };
@@ -310,6 +314,7 @@ impl MockHerdr {
         let faults = state.faults.clone();
         let defer = state.defer.clone();
         let hide_agent_list = state.hide_agent_list.clone();
+        let allow_subscribe = state.allow_subscribe.clone();
         let pong = state.pong.clone();
         let handle = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
@@ -739,6 +744,16 @@ impl MockHerdr {
                                 None => json!({"id": id, "error": {"code": "not_found", "message": target}}),
                             }
                         }
+                        "events.subscribe" if st.allow_subscribe.load(std::sync::atomic::Ordering::SeqCst) => {
+                            let ack = json!({"id": id, "result": {"type": "subscription_started"}});
+                            let mut bytes = serde_json::to_vec(&ack).unwrap();
+                            bytes.push(b'\n');
+                            let _ = w.write_all(&bytes).await;
+                            let _ = w.flush().await;
+                            // 連線留著、不吐事件：訂閱建好的樣子。
+                            std::future::pending::<()>().await;
+                            return;
+                        }
                         other => json!({"id": id, "error": {"code": "unsupported",
                                         "message": format!("mock herdr does not implement {other}")}}),
                     };
@@ -752,7 +767,7 @@ impl MockHerdr {
                 });
             }
         });
-        MockHerdr { workspaces, tabs, calls, agents, screens, screen_revisions, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, defer, hide_agent_list, pong, handle }
+        MockHerdr { workspaces, tabs, calls, agents, screens, screen_revisions, live, reject_ansi, ignore_ansi, argvs, pids, shell_pids, faults, defer, hide_agent_list, allow_subscribe, pong, handle }
     }
 
     /// 接下來第一次呼叫 `method` 時照 `fault` 壞一次（排幾次就壞幾次，依序）。呼叫一樣記在 `calls` 裡。

@@ -361,7 +361,11 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
                     }
                     tracing::warn!(host = %hst, session = %sess, pane_id = %pid, "pane status subscription dropped");
                 }
-                Err(e) => tracing::debug!(host = %hst, session = %sess, pane_id = %pid, error = %e, "pane status subscribe failed"),
+                Err(e) => {
+                    // 這段時間的狀態邊也漏了：之後訂閱成功要補讀，不只是「斷線後重接」才補。
+                    resubscribing = true;
+                    tracing::debug!(host = %hst, session = %sess, pane_id = %pid, error = %e, "pane status subscribe failed");
+                }
             }
             // Stop retrying only once the run is *provably* no longer active (#244): a read error or an
             // unknown session is not proof, so keep the watcher and retry after the backoff.
@@ -852,6 +856,28 @@ mod tests {
         e.herdr.set_agent("agent", &pane, false); // herdr 現在說 idle
         resync_pane_status(&app, &app.herdr, LOCAL_HOST, "test", &pane).await;
         assert_eq!(stored().await, "idle", "漏掉的 working → idle 要補回來");
+    }
+
+    /// 第一次訂閱就失敗（herdr 剛重啟、握手被拒），之後才訂閱成功：失敗到成功之間的狀態邊一樣漏了，
+    /// 不能因為「這是第一次成功」就不補讀 pane 當下的狀態（燈號會凍在收編當下的 working，直到下一則事件）。
+    #[tokio::test]
+    async fn a_watcher_whose_first_subscribe_failed_catches_up_once_it_connects() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        e.herdr.allow_subscribe.store(true, Ordering::SeqCst);
+        let bot = tt::claude_bot(&app, &e.project_id, "late-sub").await;
+        let run = tt::fake_run(&app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
+        e.herdr.live_pane(&pane, tt::LivePane { rows: Some(40), ..Default::default() });
+        e.herdr.set_agent("agent", &pane, false); // herdr 現在說 idle：working → idle 發生在訂閱建起來之前
+        e.herdr.fail_next("events.subscribe", tt::Fault::Refuse);
+
+        watch_pane_on_session(&app, LOCAL_HOST, "test", &pane).await;
+        let stored = || async { sqlx::query_scalar::<_, String>("SELECT agent_status FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap() };
+        let _ = crate::testing::eventually!(e.herdr.calls_to("events.subscribe").len() >= 2 && stored().await == "idle");
+        assert!(e.herdr.calls_to("events.subscribe").len() >= 2, "第一次被拒、重試成功");
+        assert_eq!(stored().await, "idle", "訂閱建好後要補讀當下狀態，漏掉的 working → idle 才補得回來");
     }
 
     /// #245：清綁定的 UPDATE 寫失敗一次，不能永遠殘留。
