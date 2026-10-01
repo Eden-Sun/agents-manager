@@ -2243,7 +2243,8 @@ export const useStore = create<StoreState>((set, get) => {
     try {
       set({ disabledIdentities: await api.fetchDisabledIdentities() })
     } catch {
-      // 讀不到就當作沒有人被停用：選單多幾個選項，比整個面板掛掉好。
+      // 讀不到就當作沒有人被停用：選單多幾個選項，比整個面板掛掉好。下一次快照刷新再問一次。
+      identityPrefsAsked = false
     }
   },
 
@@ -2725,6 +2726,7 @@ function connectSocket(set: SetFn, get: GetFn) {
         set({ socket, stateStale: false })
         void get().refreshState()
         void get().refreshLoadedMissions()
+        const openedBefore = openedOnce
         if (openedOnce) void reloadLoadedConversations(get)
         openedOnce = true
         flushUnsentReads()
@@ -2733,6 +2735,8 @@ function connectSocket(set: SetFn, get: GetFn) {
         void get().loadQuota()
         // 草稿也整份重拉：斷線期間別的瀏覽器改的、被刪的都在這裡補上，本機還沒送出的接著送。
         void draftSync.load().catch(() => {})
+        // 身分停用只靠事件更新；第一次連上由 `refreshState` 抓，重連要整份重抓（斷線期間的事件不一定補得回來）。
+        if (openedBefore) void get().loadIdentityPrefs()
         return
       }
       set({ socket })
@@ -2772,6 +2776,9 @@ const resyncTrigger = (() => {
     try {
       await get().refreshState()
       await get().loadQuota()
+      // 只靠 WS 事件維持的兩份：漏掉的事件沒有別的來源會補（`identity_prefs_changed`、`draft_updated`）。
+      void get().loadIdentityPrefs()
+      void draftSync.load().catch(() => {})
       for (const botId of botIdsNeedingConversationReload(get)) await get().loadMessages(botId)
       const proj = get().selectedProjectId
       if (proj) await get().loadGroupMessages(proj)
