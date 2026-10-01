@@ -4,19 +4,15 @@
  * memo 化、回呼穩定之後每次只有那一列（avg 1、max 1，約 71 ms／次）。
  * 真的把 `Sidebar` 掛進 happy-dom（`react-dom/client`），用 `renderProbe` 數 `BotRow` 實際渲染次數。
  */
-import test, { after } from 'node:test'
+import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { GlobalRegistrator } from '@happy-dom/global-registrator'
+import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { useStore } from '../store/store'
+import { Sidebar } from './Sidebar'
 
-GlobalRegistrator.register({ url: 'http://localhost:5173' })
-// happy-dom 換掉了全域 fetch：元件掛上去時會打的 API 一律回空物件，不碰網路。
-globalThis.fetch = (async () => new Response('{}', { status: 200 })) as typeof fetch
-;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-
-const React = await import('react')
-const { createRoot } = await import('react-dom/client')
-const { useStore } = await import('../store/store.ts')
-const { Sidebar } = await import('./Sidebar.tsx')
+afterEach(unmountAll)
+before(setupDom)
+after(teardownDom)
 
 const BOTS = 200
 const PROJECTS = 10
@@ -42,14 +38,8 @@ function seed() {
 }
 
 test('量測：200 顆 bot、連續 20 次單顆 run 狀態變化，每次重渲染幾列 BotRow', { timeout: 300_000 }, async () => {
-  const { act } = React
   seed()
-  const host = document.createElement('div')
-  document.body.appendChild(host)
-  const root = createRoot(host)
-  await act(async () => {
-    root.render(React.createElement(Sidebar))
-  })
+  await mount(<Sidebar />)
   const initial = counts.BotRow ?? 0
   assert.ok(initial >= BOTS, `首次渲染要把 ${BOTS} 列都畫出來（${initial}）`)
 
@@ -69,10 +59,6 @@ test('量測：200 顆 bot、連續 20 次單顆 run 狀態變化，每次重渲
   const ms = performance.now() - t0
   const total = perChange.reduce((a, b) => a + b, 0)
   console.log(`[sidebar] bots=${BOTS} changes=${CHANGES} BotRow renders: first=${initial} total=${total} perChange avg=${(total / CHANGES).toFixed(1)} max=${Math.max(...perChange)} elapsed=${ms.toFixed(0)}ms (${(ms / CHANGES).toFixed(1)}ms/change)`)
-  await act(async () => root.unmount())
   assert.ok(Math.max(...perChange) <= 5, `一顆 bot 的 run 變了，最多只該重渲染它自己那幾列（實測最多 ${Math.max(...perChange)} 列）`)
 })
 
-after(() => {
-  void GlobalRegistrator.unregister()
-})
