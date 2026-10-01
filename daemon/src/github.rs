@@ -9,6 +9,7 @@ use crate::state::App;
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -328,8 +329,15 @@ pub async fn list_issues(
         "fetched_at": db::now(),
         "issues": arr.iter().map(issue_summary).collect::<Vec<_>>(),
     });
-    app.issues_cache.lock().await.insert(key, (Instant::now(), v.clone()));
+    remember_issues(&mut *app.issues_cache.lock().await, key, v.clone());
     Ok(v)
+}
+
+/// 存一份清單；順手把過期的帶走。key 帶搜尋字串，每個不同的查詢一格（每格一整份 issue 清單），
+/// 沒有人會再讀過期的那些——只記不清的話使用者每搜一個字就多留一份。
+fn remember_issues(cache: &mut HashMap<String, (Instant, Value)>, key: String, v: Value) {
+    cache.retain(|_, (at, _)| at.elapsed() < ISSUES_TTL);
+    cache.insert(key, (Instant::now(), v));
 }
 
 /// `GET /api/projects/:id/issues/:number` — uncached.
@@ -348,6 +356,20 @@ pub async fn get_issue(app: &Arc<App>, project_id: &str, repo: &str, number: u64
         o.insert("body".into(), json!(v.get("body").and_then(|b| b.as_str()).unwrap_or("")));
     }
     Ok(json!({"project_id": p.id, "repo": gh.slug(), "repo_path": repo.trim().trim_matches('/'), "issue": issue}))
+}
+
+#[cfg(test)]
+mod issues_cache_tests {
+    use super::*;
+
+    #[test]
+    fn expired_issue_lists_are_dropped_when_a_new_one_is_stored() {
+        let mut cache: HashMap<String, (Instant, Value)> = HashMap::new();
+        cache.insert("p|o/r|open|30|old query".into(), (Instant::now() - ISSUES_TTL - Duration::from_secs(1), json!({"issues": []})));
+        remember_issues(&mut cache, "p|o/r|open|30|new query".into(), json!({"issues": [1]}));
+        assert!(!cache.contains_key("p|o/r|open|30|old query"), "過期的那份被清掉");
+        assert!(cache.contains_key("p|o/r|open|30|new query"));
+    }
 }
 
 #[cfg(test)]
