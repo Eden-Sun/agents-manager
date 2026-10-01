@@ -11,9 +11,19 @@ import type { TestScope } from './testScope'
 import type { ReactElement } from 'react'
 
 const originalFetch = globalThis.fetch
-// React 載入時就抓走全域的 `queueMicrotask`（同步 lane 的更新靠它 flush）。happy-dom 註冊會換掉它，而那個版本綁在第一個 window 上：
-// 該 window 拆掉後，之後每個測試檔裡「不在 act 裡」的 store→render 更新就再也不會 flush（整樹跑時第二個 DOM 測試檔起才壞）。所以一律用原生的。
-const nativeQueueMicrotask = globalThis.queueMicrotask
+// happy-dom 註冊會換掉 queueMicrotask／setTimeout／clearTimeout／setInterval，換成綁在那個 window 上的版本；window 一關，這些 timer 就被清掉。
+// 兩個後果，整樹同一個行程時才現形（單檔都綠）：
+// 1. React 載入時抓走第一個 window 的 `queueMicrotask`，該 window 拆掉後，之後每個 DOM 測試檔裡「不在 act 裡」的 store→render 更新就再也不會 flush。
+// 2. 共用的 store／mock 在檔案結束時還有 `setTimeout` 在等（例如 mock 的 60ms 延遲）：timer 被清掉、promise 永遠不 resolve，
+//    `singleFlight(refreshState)` 就永遠卡在那一趟，下一個檔案的 `refreshState()` 全部跟著卡死。
+// 所以一律用原生的：timer 不隨 window 消失。
+const nativeTimers = {
+  queueMicrotask: globalThis.queueMicrotask,
+  setTimeout: globalThis.setTimeout,
+  clearTimeout: globalThis.clearTimeout,
+  setInterval: globalThis.setInterval,
+  clearInterval: globalThis.clearInterval,
+}
 const originalWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket
 const originalXhr = (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest
 
@@ -21,7 +31,7 @@ const originalXhr = (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest
 export function setupDom(): void {
   if (GlobalRegistrator.isRegistered) return
   GlobalRegistrator.register({ url: 'http://localhost:5173' })
-  globalThis.queueMicrotask = nativeQueueMicrotask
+  Object.assign(globalThis, nativeTimers)
   globalThis.fetch = (async () => new Response('{}', { status: 200 })) as typeof fetch
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 }
