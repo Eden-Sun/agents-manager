@@ -105,6 +105,50 @@ case "$PAYLOAD" in
   '') PAYLOAD=null ;;
   *) PAYLOAD=$(am_raw "$PAYLOAD") ;;
 esac
+# issue #753: a Stop hook carries no user message, and the daemon cannot read this machine's
+# transcript, so a Stop that arrives after the daemon's terminal fallback closed the turn could not
+# be shown to belong to that turn. Read the last human message out of the LOCAL transcript here and
+# carry it as `agm_user_text`; the daemon replaces the fallback reply only when it matches the turn's
+# prompt. Best effort: no python3, an unreadable transcript, or a non-Stop event leaves the payload
+# untouched (no evidence, so the daemon keeps the fallback reply as before).
+if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
+  case "$PAYLOAD" in
+    '{'*'"hook_event_name":"Stop"'*|'{'*'"hook_event_name": "Stop"'*)
+      if command -v python3 >/dev/null 2>&1; then
+        WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,sys
+try:
+    p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
+    path=p.get("transcript_path") or p.get("transcriptPath")
+    if p.get("hook_event_name")!="Stop" or not path:
+        raise SystemExit
+    with open(path,"rb") as f:
+        n=os.fstat(f.fileno()).st_size
+        f.seek(max(0,n-524288))
+        data=f.read().decode("utf-8","replace")
+    for line in reversed(data.splitlines()):
+        try:
+            v=json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(v,dict) or v.get("type")!="user" or v.get("isMeta") is True:
+            continue
+        c=(v.get("message") or {}).get("content")
+        if isinstance(c,list):
+            if any(not isinstance(x,dict) or x.get("type")!="text" for x in c):
+                continue
+            c="\n".join(x["text"] for x in c if isinstance(x.get("text"),str))
+        if not isinstance(c,str) or not c.strip():
+            continue
+        if len(c)<=65536:
+            p["agm_user_text"]=c
+            sys.stdout.buffer.write(json.dumps(p,separators=(",",":")).encode("ascii"))
+        break
+except Exception:
+    pass' 2>/dev/null)
+        case "$WITH" in '{'*) PAYLOAD="$WITH" ;; esac
+      fi ;;
+  esac
+fi
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # The run this CLI process was started for: `--resume` makes an old and a new process report the
 # same session, so this is how the daemon tells their late hooks apart (issue #92). Only id-safe
@@ -1484,6 +1528,55 @@ mod remote_hook_tests {
     }
 
     const STOP: &str = r#"{"hook_event_name":"Stop","session_id":"s-1","transcript_path":"/tmp/t.jsonl","stop_hook_active":false}"#;
+
+    /// issue #753：Stop 的 payload 不帶使用者訊息，agm-host 又讀不到遠端的 transcript，遲到的 Stop 就證明不了「是同一回合」。
+    /// `hook.sh` 在 spool 前從**本機** transcript 讀出最後一則使用者訊息，放進 payload 的 `agm_user_text`：
+    /// 跳過 tool_result 與 meta 那種不是人打的條目；讀不到、沒有 python3、不是 Stop 就原樣不動（沒有證據，daemon 照舊不蓋）。
+    #[test]
+    fn a_remote_stop_carries_the_last_user_message_from_the_local_transcript() {
+        let sb = Sandbox::new(false);
+        let transcript = sb.dir.join("t.jsonl");
+        let line = |v: serde_json::Value| format!("{v}\n");
+        std::fs::write(
+            &transcript,
+            [
+                line(serde_json::json!({"type": "user", "message": {"role": "user", "content": "舊的一句"}})),
+                line(serde_json::json!({"type": "user", "message": {"role": "user", "content": "現在部 \"demo\"\n第二行"}})),
+                line(serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "好"}]}})),
+                line(serde_json::json!({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}})),
+                line(serde_json::json!({"type": "user", "isMeta": true, "message": {"role": "user", "content": "meta"}})),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let stop = |path: &str, event: &str| {
+            serde_json::json!({"hook_event_name": event, "session_id": "s-1", "transcript_path": path, "stop_hook_active": false, "last_assistant_message": "回覆 ✓"}).to_string()
+        };
+        let spooled = |sb: &Sandbox| -> serde_json::Value {
+            let events = sb.read("hook-spool.jsonl");
+            let last = events.lines().rev().find(|l| !l.trim().is_empty()).expect("spool 有一行").to_string();
+            serde_json::from_str::<serde_json::Value>(&last).expect("spool 行是合法 JSON")["payload"].clone()
+        };
+
+        let (_, ok) = sb.run(&["claude", &sb.bot, "-"], &stop(&transcript.to_string_lossy(), "Stop"));
+        assert!(ok);
+        let p = spooled(&sb);
+        assert_eq!(p["agm_user_text"], "現在部 \"demo\"\n第二行", "{p}");
+        assert_eq!(p["last_assistant_message"], "回覆 ✓", "原本的欄位不動：{p}");
+        assert_eq!(p["session_id"], "s-1");
+
+        // 讀不到 transcript：不帶，其餘照舊。
+        let sb2 = Sandbox::new(false);
+        sb2.run(&["claude", &sb2.bot, "-"], &stop("/Users/nobody/none.jsonl", "Stop"));
+        let p = spooled(&sb2);
+        assert!(p.get("agm_user_text").is_none(), "{p}");
+        assert_eq!(p["session_id"], "s-1");
+
+        // 不是 Stop（SessionStart 之類）：不讀 transcript。
+        let sb3 = Sandbox::new(false);
+        sb3.run(&["claude", &sb3.bot, "-"], &stop(&transcript.to_string_lossy(), "SessionStart"));
+        assert!(spooled(&sb3).get("agm_user_text").is_none());
+    }
 
     /// 真的執行產生出來的腳本：spool 要落在**這個實例**的根底下（sol 三輪）。正式實例的既有路徑不變。
     #[test]
