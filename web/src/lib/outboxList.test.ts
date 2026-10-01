@@ -35,6 +35,7 @@ test('倒數以分鐘講、無條件進位，到期講即將清除', () => {
 test('沒有檔案的每一種原因都要講清楚，不能只留一片空白', () => {
   assert.match(emptyReason(null, false), /先選一顆 bot/)
   assert.match(emptyReason('outbox_remote', true), /遠端主機/)
+  assert.match(emptyReason('outbox_remote_unreachable', true), /連不上/)
   assert.match(emptyReason(null, true), /AM_OUTBOX/)
   assert.match(emptyReason(null, true), /1 小時/)
   assert.ok(emptyReason('something_new', true).length > 0, '認不得的原因也要有話講')
@@ -117,6 +118,7 @@ test('下載失敗講人話：404 是「被清掉了」並要求呼叫端移除�
   assert.match(big.text, /60 MB.*50 MB/)
 
   assert.match(downloadFailure('a.txt', new ApiError(409, { error: 'conflict', reason: 'outbox_remote', host: 'mini' }, 'x')).text, /遠端主機/)
+  assert.match(downloadFailure('a.txt', new ApiError(409, { error: 'conflict', reason: 'outbox_remote_unreachable', host: 'mini' }, 'x')).text, /連不上/)
   // 認不出來的 reason 至少帶狀態碼；不是 ApiError 的照原樣。
   assert.match(downloadFailure('a.txt', new ApiError(500, { error: 'upstream', message: '壞了' }, 'x')).text, /HTTP 500/)
   assert.match(downloadFailure('a.txt', new Error('連線中斷')).text, /連線中斷/)

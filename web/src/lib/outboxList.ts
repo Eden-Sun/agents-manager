@@ -48,7 +48,8 @@ export function downloadFailure(name: string, e: unknown): { text: string; gone:
     const max = typeof e.body.max === 'number' ? fileSize(e.body.max) : '下載上限'
     return plain(`「${name}」太大${big}，超過 ${max}，這裡下載不了——請 bot 換個小一點的，或到那台機器上拿。`)
   }
-  if (reason === 'outbox_remote') return plain(`「${name}」在遠端主機上，不在這台機器，下載不了。`)
+  if (reason === 'outbox_remote') return plain(`「${name}」在遠端主機上，這版 daemon 還下載不了；更新 daemon 後就可以。`)
+  if (reason === 'outbox_remote_unreachable') return plain(`連不上「${name}」所在的遠端主機，稍後再試。`)
   return plain(`下載「${name}」失敗：${e.message}（HTTP ${e.status}）`)
 }
 
@@ -78,7 +79,9 @@ export async function readOutbox(fetchList: () => Promise<OutboxList>): Promise<
 export function emptyReason(reason: string | null, botSelected: boolean): string {
   if (!botSelected) return '先選一顆 bot，這裡會列出它交給你的檔案。'
   if (reason === LOAD_FAILED) return '讀不到這顆 bot 的檔案清單（daemon 沒有回應或出錯），不代表沒有檔案。按上面的 ↻ 重新讀取。'
-  if (reason === 'outbox_remote') return '這顆 bot 在遠端主機上，它的檔案不在這台機器，列不出來。'
+  // 舊 daemon（遠端 outbox 之前）才會回這個。
+  if (reason === 'outbox_remote') return '這顆 bot 在遠端主機上，這版 daemon 還列不出它的檔案；更新 daemon 後就看得到。'
+  if (reason === 'outbox_remote_unreachable') return '連不上這顆 bot 所在的遠端主機，暫時列不出它的檔案。按上面的 ↻ 重試。'
   // daemon 902a85c：outbox 或 bot 那一層是符號連結、擁有者不是資料目錄的使用者——為了安全不列也不給下載，不能說成「還沒有檔案」。
   if (reason === 'outbox_untrusted') return '這顆 bot 的 outbox 不是一般資料夾（符號連結或擁有者不對），為了安全不列出、也不給下載。'
   return '還沒有檔案。bot 把要給你的檔案放進 $AM_OUTBOX 之後按重整就看得到；放進去 1 小時後會自動清掉。'
