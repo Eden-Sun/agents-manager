@@ -711,7 +711,16 @@ impl HerdrClient {
                                     break;
                                 }
                             }
-                            Err(e) => tracing::warn!(line = t, error = %e, "unparseable herdr event"),
+                            // herdr 0.9.2+：讀太慢、落後到 server 保留的歷史之外，會回一行 JSON-RPC error（`events_lost`）
+                            // 再關連線。這條串流從此缺事件，不能當沒看到繼續讀：收掉它，讓呼叫端照斷線處理
+                            // ——重訂閱，再用權威讀取對帳（全域訂閱跑 reconcile、pane 監看補讀當下狀態，見 `events.rs`）。
+                            Err(e) => match serde_json::from_str::<RawResponse>(t).ok().and_then(|r| r.error) {
+                                Some(err) => {
+                                    tracing::warn!(code = %err.code, message = %err.message, "herdr event stream returned an error; dropping it to resubscribe and reconcile");
+                                    break;
+                                }
+                                None => tracing::warn!(line = t, error = %e, "unparseable herdr event"),
+                            },
                         }
                     }
                 }
@@ -864,6 +873,43 @@ mod rpc_tests {
             }
         });
         (sock, handle)
+    }
+
+    /// herdr 0.9.2+ 讀太慢會回 `events_lost`（帶原 request id 的 JSON-RPC error）。那一行之後這條串流就缺事件了：
+    /// 串流要在那裡結束（呼叫端照斷線重訂閱、對帳），不能 warn 一聲繼續讀。假 herdr 送完錯誤行**不關連線**、
+    /// 還多吐一則事件，所以結束是因為認得錯誤行，不是剛好讀到 EOF。
+    #[tokio::test]
+    async fn an_events_lost_error_line_ends_the_stream_instead_of_being_skipped() {
+        let dir = std::env::temp_dir().join(format!("am-herdr-lost-{}", crate::db::ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let (r, mut w) = conn.into_split();
+            let mut line = String::new();
+            BufReader::new(r).read_line(&mut line).await.unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            let ev = |pane: &str| json!({"event": "pane.exited", "data": {"pane_id": pane}});
+            let out = [
+                json!({"id": req["id"], "result": {"type": "subscription_started"}}),
+                ev("w1:p1"),
+                json!({"id": req["id"], "error": {"code": "events_lost",
+                       "message": "event subscription fell behind retained history; resubscribe and resync with session.snapshot"}}),
+                ev("w1:p2"),
+            ];
+            for v in out {
+                w.write_all(format!("{v}\n").as_bytes()).await.unwrap();
+            }
+            std::future::pending::<()>().await;
+        });
+        let c = HerdrClient::new(&sock);
+        let mut rx = c.subscribe(vec![json!({"type": "pane.exited"})]).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap().data["pane_id"], "w1:p1");
+        let next = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.expect("錯誤行之後串流要結束，不能卡著等");
+        assert!(next.is_none(), "錯誤行之後的事件不能再送出來：{next:?}");
+        server.abort();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn agent(name: &str, kind: &str, status: &str, launch_pending: bool) -> Value {
