@@ -5,6 +5,8 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
+import { failureHint, failureLabel, loadFailure } from '../lib/attachmentLoad'
+import type { AttachmentFailure } from '../lib/attachmentLoad'
 import * as api from '../api'
 import type { Attachment } from '../api/types'
 import { useDialogFocus } from '../hooks/useDialogFocus'
@@ -229,17 +231,20 @@ export function MessageAttachments({ items }: { items: Attachment[] }) {
 function StoredThumb({ item, onOpen }: { item: Attachment; onOpen: () => void }) {
   const isImage = item.mime.startsWith('image/')
   // 非圖片不去抓位元組：一個 CSV 的縮圖沒有意義，看的是檔名。
-  const url = useStoredUrl(isImage ? item.id : null)
+  const { url, failure } = useStoredUrl(isImage ? item.id : null)
   return (
     <button
       type="button"
-      className={`msg-attachment${isImage ? '' : ' file'}${isImage && !url ? ' loading' : ''}`}
-      title={`${item.name} · ${formatSize(item.size)}\n${item.path}`}
+      className={`msg-attachment${isImage ? '' : ' file'}${isImage && !url && !failure ? ' loading' : ''}${failure ? ' failed' : ''}`}
+      title={`${item.name} · ${formatSize(item.size)}\n${item.path}${failure ? `\n${failureHint(failure)}` : ''}`}
       onClick={onOpen}
     >
       {isImage ? (
         url ? (
           <img src={url} alt={item.name} />
+        ) : failure ? (
+          // 抓失敗不是「還在載入」：已清除（超過保留期）與暫時失敗各說各的，不要永遠停在「…」。
+          <span className="msg-attachment-fallback">{failureLabel(failure)}</span>
         ) : (
           <span className="msg-attachment-fallback">…</span>
         )
@@ -253,28 +258,28 @@ function StoredThumb({ item, onOpen }: { item: Attachment; onOpen: () => void })
   )
 }
 
-function useStoredUrl(id: string | null): string | null {
-  const [url, setUrl] = useState<string | null>(null)
+function useStoredUrl(id: string | null): { url: string | null; failure: AttachmentFailure | null } {
+  const [state, setState] = useState<{ url: string | null; failure: AttachmentFailure | null }>({ url: null, failure: null })
   useEffect(() => {
     if (!id) return
     let live = true
     storedUrl(id)
       .then((u) => {
-        if (live) setUrl(u)
+        if (live) setState({ url: u, failure: null })
       })
-      .catch(() => {
-        if (live) setUrl(null)
+      .catch((e: unknown) => {
+        if (live) setState({ url: null, failure: loadFailure(e) })
       })
     return () => {
       live = false
     }
   }, [id])
-  return url
+  return state
 }
 
 function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) {
   const isImage = item.mime.startsWith('image/')
-  const url = useStoredUrl(isImage ? item.id : null)
+  const { url, failure } = useStoredUrl(isImage ? item.id : null)
   const boxRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
@@ -302,6 +307,10 @@ function Lightbox({ item, onClose }: { item: Attachment; onClose: () => void }) 
         {isImage ? (
           url ? (
             <img src={url} alt={item.name} />
+          ) : failure ? (
+            <div className="lightbox-loading" role="status">
+              {failureLabel(failure)}：{failureHint(failure)}
+            </div>
           ) : (
             <div className="lightbox-loading">載入中…</div>
           )
