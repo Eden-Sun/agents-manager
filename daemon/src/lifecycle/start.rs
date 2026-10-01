@@ -1515,8 +1515,23 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         tracing::warn!(bot = bot_id, error = %e, "child restart succeeded but its hand-off grace could not be cleared");
     }
     let until = [AgentStatus::Idle, AgentStatus::Done, AgentStatus::Blocked];
-    if let Err(e) = client.agent_wait_ready(&bot.kind, &agent, &until, 60_000).await {
-        tracing::warn!(bot = %bot.name, error = %e, "子 agent 重啟後沒等到 ready，run 留著讓對帳接手");
+    match client.agent_wait_ready(&bot.kind, &agent, &until, 60_000).await {
+        // 新 run 以 `unknown` 起頭、`running` 時沒帶狀態；閒著的 codex（herdr 0.9.2+）不會再有狀態事件，
+        // 不把 ready 的結果記下來就一直停在 `unknown`。只補還是 `unknown` 的，不蓋掉期間來的事件。
+        Ok(info) => {
+            let ready = info.agent_status.normalized();
+            if ready != AgentStatus::Unknown {
+                if let Err(e) = sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ? AND agent_status = 'unknown'")
+                    .bind(ready.as_str())
+                    .bind(&run_id)
+                    .execute(&app.db)
+                    .await
+                {
+                    tracing::warn!(bot = %bot.name, run = %run_id, error = %e, "could not record the restarted child's ready status");
+                }
+            }
+        }
+        Err(e) => tracing::warn!(bot = %bot.name, error = %e, "子 agent 重啟後沒等到 ready，run 留著讓對帳接手"),
     }
     // 沒有 hook 的 run，畫面是唯一來源（同收編）。
     spawn_adopted_capture(app, &run_id, bot_id);
@@ -2475,6 +2490,54 @@ mod child_restart_tests {
         assert!(args.contains(&"--no-daemon"), "Codex must not reuse a shared app server: {args:?}");
         assert!(args.contains(&"--no-alt-screen"), "Codex must keep its screen readable: {args:?}");
         assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "Codex turn tips must stay off: {args:?}");
+    }
+
+    /// 稽核：herdr 0.9.2+ 的閒著 codex 永遠回 `unknown`、不會再有狀態事件。原地重啟新 run 以 `unknown` 起頭，
+    /// 等到 ready 的結果（折成 idle）卻被丟掉，DB 就一直停在 `unknown`：一鍵重啟、閒置回收都把它當「狀態不明」跳過。
+    #[tokio::test]
+    async fn a_codex_child_restarted_in_its_pane_is_recorded_idle_once_ready() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let parent = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, auto_approve, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,'ui','codex','[]',0,0,'tok',1,'child',?,?)",
+        )
+        .bind(&kid)
+        .bind(&env.project_id)
+        .bind(&parent.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let agent = "proj-alfa-ui";
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&kid)
+        .bind(&ws.workspace_id)
+        .bind(&kid_pane.tab_id)
+        .bind(&kid_pane.pane_id)
+        .bind(agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![json!({
+            "name": agent, "agent": "codex", "agent_status": "unknown", "launch_pending": false,
+            "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id,
+            "cwd": "/tmp/p"})];
+
+        let run_id = restart_child_in_pane(&app, &kid).await.unwrap();
+
+        let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "idle", "ready 之後要記下折過的狀態，不能留在 unknown");
     }
 }
 
