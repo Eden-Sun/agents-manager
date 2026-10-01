@@ -191,9 +191,19 @@ class Client:
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
     def token(self) -> str:
-        """執行期取 token。不快取到磁碟、不印出來。"""
+        """執行期取 token。不快取到磁碟、不印出來。
+
+        取 token 發生在真正的請求**送出之前**：這裡逾時或斷線，呼叫端的 POST／PATCH 一個位元組都沒出去。
+        所以不能原樣丟 `timeout`／`connection_lost`——`assign`／`review` 會把這兩種當成「送達未知」（exit 7）
+        叫人去對帳，其實根本沒送。改成 `connect_failed`（exit 6，請求尚未送出）。
+        """
         if self._token is None:
-            body = self._raw("GET", "/api/session", None, auth=False)
+            try:
+                body = self._raw("GET", "/api/session", None, auth=False)
+            except AgmError as e:
+                if e.kind in ("timeout", "connection_lost"):
+                    raise AgmError("connect_failed", f"取 token 失敗，請求尚未送出：{e.message}", 6) from e
+                raise
             tok = ""
             if isinstance(body, dict) and isinstance(body.get("token"), str):
                 tok = body["token"]
