@@ -2112,7 +2112,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`。
 - `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?}` → `{lease,lease_token,approval,safety}`；同 lock 內重驗核准與 idle，
   搶輸 409 `lease_held`。`owner` 必須等於核准的 `requester`，否則 409 `approval_owner_mismatch`（別人的核准開不了你的窗口，也借不走它的等待）。
-  這張核准開過的窗口**過期沒 release**（執行端掛了）時，同一張再 acquire → 409 `approval_already_used`，並當場標 `consumed`（note `lease expired`）；要再開就重新申請。
+  這張核准開過的窗口**過期沒 release**（執行端掛了），或已 release 卻因寫入失敗／daemon 中途死掉而沒記到 `consumed` 時，同一張再 acquire → 409 `approval_already_used`，並當場標 `consumed`（note `lease expired`）；要再開就重新申請。
   ttl 預設 900、上限 3600。`POST …/renew {owner,fence,ttl_secs?,lease_token}`、`POST …/release {owner,fence,lease_token}`；舊 fence 409 `lease_lost`；release 把核准標 `consumed`。
   **renew 不接受 `force`**（400）：force 只用來收掉持有者已經不在的窗口，不是替別人延長。
   **`lease_token` 只在 acquire 的回應裡出現一次**（`GET /leases`、`GET /api/supervisor`、WS 事件都不含它）。renew／release 不帶或帶錯 → `403 {"reason":"lease_token_required"|"lease_token_mismatch"}`，租約不動。
