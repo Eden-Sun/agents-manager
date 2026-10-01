@@ -93,7 +93,7 @@ pub(super) async fn insert_supplement(app: &Arc<App>, bot_id: &str, turn: &db::T
     .bind(db::now())
     .execute(&app.db)
     .await?;
-    let m = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id = ?").bind(&id).fetch_one(&app.db).await?;
+    let m = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&id).fetch_one(&app.db).await?;
     emit_message_added(app, bot_id, m.clone()).await;
     Ok(m)
 }

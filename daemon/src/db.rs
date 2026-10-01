@@ -1096,6 +1096,10 @@ pub struct Message {
     /// `send_now`＝插隊送出、`supplement`＝回合中補充的一句（`POST /bots/:id/text` 帶 `record`）；NULL＝一般送出。
     #[sqlx(default)]
     pub sent_via: Option<String>,
+    /// 插入順序（SQLite rowid，單調遞增）：`created_at` 只有毫秒、ULID 的隨機段在同一毫秒內不單調，
+    /// 同毫秒的訊息靠它定先後；`before=` 分頁也是照 rowid 切。查詢要寫 `SELECT *, rowid AS seq`，沒帶就是 0（＝未知）。
+    #[sqlx(default)]
+    pub seq: i64,
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

@@ -457,7 +457,8 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
       "created_at": "2026-09-05T15:31:00.000Z",
       "updated_at": null,
       "rewound_at": null,
-      "sent_via": null | "send_now" | "supplement"
+      "sent_via": null | "send_now" | "supplement",
+      "seq": 1234
     }
   ],
   "turns": [
@@ -478,6 +479,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終端備援 · 可能不完整」；`system` 灰字系統列。
 `rewound_at`：被對話倒回（§6.1）拿掉的時間，`null`＝還在 CLI 的對話脈絡裡。標記不刪，UI 收成淡色＋「已倒回」。
 `sent_via`：user 訊息回合中送出的方式——`send_now`＝插隊送出且真的打斷了一個回合、`supplement`＝`/text` 帶 `record` 的補充；`null`＝一般送出。UI 在泡泡上標「插隊」「補充」。
+`seq`：訊息的插入順序（SQLite rowid，單調遞增整數；`before=` 分頁也照它切）。`created_at` 只有毫秒、`id`（ULID）的隨機段在同一毫秒內不單調，所以同一毫秒的訊息靠 `seq` 定先後。三處都帶：本端點、`GET /api/projects/{id}/messages`（§13.4）每一則、WS `message_added` 的 `message`。排序鍵是 `(created_at, seq)`；`seq` 只在同一個 daemon 資料庫內可比，缺（舊 daemon）或 0 視為未知，前端退回 `id`。
 
 ### 6.1 對話倒回 `POST /api/bots/{id}/rewind`（SPEC §6.13，issue #405）
 `{"message_id": "<messages.id>"}`：在 bot 的終端驅動 claude 自己的 `/rewind`，把對話倒回到這則**使用者訊息送出之前**——這則與之後的問答都不在 CLI 的 context 裡，

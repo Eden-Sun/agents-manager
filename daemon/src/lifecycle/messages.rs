@@ -65,7 +65,7 @@ pub(crate) async fn insert_message_relayed_tx(
     .bind(&now)
     .execute(&mut **tx)
     .await?;
-    Ok(sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id = ?")
+    Ok(sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?")
         .bind(&id)
         .fetch_one(&mut **tx)
         .await?)
@@ -131,7 +131,7 @@ pub async fn insert_message_full(
     .bind(&now)
     .execute(&mut *tx)
     .await?;
-    let m = sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE id = ?")
+    let m = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?")
         .bind(&id)
         .fetch_one(&mut *tx)
         .await?;

@@ -4480,7 +4480,7 @@ async fn get_messages(
         Some(r) if !["user", "assistant", "system"].contains(&r) => return Err(LcError::Bad(format!("bad role `{r}`"))),
         other => other,
     };
-    let mut sql = String::from("SELECT * FROM messages WHERE conversation_id=?");
+    let mut sql = String::from("SELECT *, rowid AS seq FROM messages WHERE conversation_id=?");
     if before_rowid.is_some() {
         sql.push_str(" AND rowid < ?");
     }
@@ -4977,6 +4977,50 @@ mod message_tests {
             get_messages(State(app), Path(bot_id.into()), Query(q)).await,
             Err(LcError::Bad(_))
         ));
+    }
+
+    /// 同一毫秒的訊息、id 不照插入序：每一則帶 `seq`（SQLite rowid，單調遞增），前端在 created_at 相同時靠它排，
+    /// 不必退回 id（ULID 的隨機段在同一毫秒內不單調）。REST 分頁、群組時間軸與 WS `message_added` 三條路都要帶。
+    #[tokio::test]
+    async fn every_message_carries_the_monotonic_insert_seq_on_rest_group_and_ws() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let bot = crate::testing::claude_bot(&app, &e.project_id, "seq-bot").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let at = db::now();
+        for id in ["m3", "m1", "m2"] {
+            sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?, 'user', ?, 'web', ?)")
+                .bind(id)
+                .bind(&conv)
+                .bind(id)
+                .bind(&at)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        let seqs = |v: &Value| -> Vec<(String, i64)> {
+            v["messages"].as_array().unwrap().iter().map(|m| (m["id"].as_str().unwrap().to_string(), m["seq"].as_i64().unwrap_or(-1))).collect()
+        };
+        let Json(body) = get_messages(State(app.clone()), Path(bot.id.clone()), Query(HashMap::new())).await.unwrap();
+        let rest = seqs(&body);
+        assert_eq!(rest.iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["m3", "m1", "m2"], "REST 照插入序");
+        assert!(rest.windows(2).all(|w| w[0].1 >= 0 && w[0].1 < w[1].1), "REST 的 seq 要單調遞增：{rest:?}");
+        let rowid: i64 = sqlx::query_scalar("SELECT rowid FROM messages WHERE id='m1'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(rest[1].1, rowid, "seq 就是 rowid，跟 before= 分頁用的同一把尺");
+
+        let Json(group) = get_project_messages(State(app.clone()), Path(e.project_id.clone()), Query(HashMap::new())).await.unwrap();
+        assert_eq!(seqs(&group), rest, "群組時間軸帶同一個 seq");
+
+        let mut rx = app.subscribe();
+        let m = crate::lifecycle::insert_message(&app, &conv, None, "assistant", "new", "hook", false, None).await.unwrap();
+        let mut pushed = None;
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == "message_added" && ev.data["message"]["id"] == json!(m.id) {
+                pushed = ev.data["message"]["seq"].as_i64();
+            }
+        }
+        let last = rest.last().unwrap().1;
+        assert!(pushed.is_some_and(|s| s > last), "message_added 的 seq 要比既有的大：{pushed:?} vs {last}");
     }
 
     async fn a_bot_with_conv(e: &crate::testing::Env, name: &str) -> (String, String) {
