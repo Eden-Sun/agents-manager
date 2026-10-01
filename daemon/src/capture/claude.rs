@@ -41,12 +41,15 @@ impl Capture for ClaudeCapture {
         let mut out: Vec<String> = Vec::new();
         // 回覆收到輸入框上緣為止。框的位置用真畫面：規則線夾著 `❯`（`claude-2.1.281-feedback-survey.txt`）。
         // 緊貼上緣的那幾行是狀態列（spinner／done），不是回覆。框以上的 `│`、`---`、⚠ 都是內容。
-        let cut = composer_top(&lines).filter(|i| *i > start).unwrap_or(lines.len());
+        let found_cut = composer_top(&lines).filter(|i| *i > start);
+        let cut = found_cut.unwrap_or(lines.len());
         let keep_until = status_zone_start(&lines, cut);
         for (i, line) in lines.iter().enumerate().take(keep_until).skip(start) {
             let t = line.trim_end();
             let s = t.trim_start();
-            if s.starts_with('╭') || s.starts_with('╰') || s.starts_with('▔') {
+            // 找不到輸入框（舊的圓角框 UI）時，框的上緣 `╭` 是回覆的終點。找得到就一路收到狀態列：助手自己畫的
+            // 圓角方框圖（`╭──╮`／`╰──╯`）是內容，不能在第一個 `╭` 截掉（codex 那條同一個理由，`codex_reply_keeps_mermaid_box_drawing_lines`）。
+            if found_cut.is_none() && (s.starts_with('╭') || s.starts_with('╰') || s.starts_with('▔')) {
                 break;
             }
             if last_text.is_some() && s.starts_with(marker) && is_tool_call_row(&lines, i) {
@@ -490,6 +493,19 @@ mod reply_boundary_tests {
         );
         let reply = ClaudeCapture.extract_reply(&screen).unwrap();
         assert_eq!(reply, "好，我來提交。", "{reply}");
+    }
+
+    /// 助手畫的圓角方框圖（`╭──╮`／`╰──╯`，LLM 很愛用）是回覆內容：輸入框的位置已經由 `composer_top` 找到時，
+    /// 回覆一路收到狀態列為止，不能在第一個 `╭` 就被截掉（codex 那條有同一個 fixture，`codex_reply_keeps_mermaid_box_drawing_lines`）。
+    #[test]
+    fn a_rounded_box_diagram_in_the_reply_does_not_end_it() {
+        let screen = format!(
+            "❯ 畫流程\n⏺ 流程如下：\n\n  ╭────────╮\n  │ 收到請求 │\n  ╰────┬───╯\n       │\n  ╭────▼────╮\n  │ 判斷流程 │\n  ╰─────────╯\n\n圖後文字仍屬於回覆。\n{COMPOSER}"
+        );
+        let reply = ClaudeCapture.extract_reply(&screen).unwrap();
+        assert!(reply.contains("│ 判斷流程 │"), "圖被第一個 ╭ 截掉：{reply}");
+        assert!(reply.contains("圖後文字仍屬於回覆。"), "圖後面的文字被截掉：{reply}");
+        assert!(!reply.contains("bypass permissions"), "輸入框以下的 chrome 不能進回覆：{reply}");
     }
 
     /// 回覆文字自己長得像函式呼叫（沒有 `⎿` 輸出跟在後面）不是工具呼叫。
