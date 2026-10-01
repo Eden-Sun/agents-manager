@@ -905,6 +905,28 @@ check_no "rollback 時 helper 已定義" "rollback_new_children: command not fou
 check_no "rollback 不會因缺 helper 遺漏 child 對帳" "could not determine whether newly adopted children" "$SWAP_LOG"
 teardown
 
+# 39b. rollback 停新 daemon 不能只 TERM＋固定 sleep 5：新 daemon 還沒退就覆蓋 binary、刪 WAL、蓋掉 DB，會踩在活著的 daemon 底下。
+#      跟換版主線一樣要等它退出、等不到才 KILL。假 kill：第 2 次 TERM（rollback 那次）之後 daemon 裝死，直到收到 -KILL。
+setup 10 10
+export STUB_SUPERVISOR=stopped
+: > "$AGM_DIR/kills.log"
+kill() {
+  echo "kill $*" >> "$AGM_DIR/kills.log"
+  if [ "$1" = -0 ]; then
+    [ "$(grep -c '^kill -TERM' "$AGM_DIR/kills.log")" -ge 2 ] && ! grep -q '^kill -KILL' "$AGM_DIR/kills.log" && return 0
+    return 1
+  fi
+  return 0
+}
+export -f kill
+rc=$(run_capture)
+unset -f kill
+check_eq "daemon 裝死的 rollback 仍完成（rc=7）" "7" "$rc"
+check "rollback 停不掉新 daemon 時補 KILL" "^kill -KILL" "$AGM_DIR/kills.log"
+check_eq "只補一次 KILL（換版主線那次 daemon 正常退出）" "1" "$(grep -c '^kill -KILL' "$AGM_DIR/kills.log")"
+check_eq "KILL 之後 binary 才還原" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
 # 36. Linux（issue #677）：重啟改走 `systemd-run --user` 的 transient unit，不叫 launchctl。
 #     Type=forking（啟動器 fork 後父行程結束，daemon 才是 main PID）與 KillMode=process
 #     （systemd 看 cgroup，setsid 脫離不了；只殺 main PID 才跟 macOS 一樣）缺一不可。
