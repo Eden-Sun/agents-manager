@@ -93,6 +93,11 @@ pub fn start_fresh(run_id: &str) {
 }
 
 #[cfg(test)]
+pub(crate) fn has_baseline(run_id: &str) -> bool {
+    baselines().lock().unwrap_or_else(|e| e.into_inner()).contains_key(run_id)
+}
+
+#[cfg(test)]
 pub(crate) fn is_fresh(run_id: &str) -> bool {
     baselines().lock().unwrap_or_else(|e| e.into_inner()).get(run_id) == Some(&Switch::default())
 }
