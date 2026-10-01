@@ -825,8 +825,9 @@ async fn a_prompt_with_a_reply_missing_from_the_menu_still_fails() {
 
 /// 2026-10-01（cf-ox-2）：輸入列有字時倒回連兩次失敗，只叫人去終端清。409 要帶那段字，
 /// 使用者看過按「清掉再倒回」就清掉再倒；框裡換了字就不動（`composer_changed`）。
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn a_busy_composer_is_shown_and_can_be_cleared_on_request() {
+    let (logs, _guard) = crate::config_audit::capture::start();
     let r = rig().await;
     let busy = || FakeTui::new(&[A, SECOND, C], Faults { composer: Some("half typed".into()), ..Default::default() });
 
@@ -838,11 +839,23 @@ async fn a_busy_composer_is_shown_and_can_be_cleared_on_request() {
         }
         other => panic!("{other:?}"),
     }
+    let log = logs.text();
+    assert!(log.contains("bot=\"rw\""), "要保留 bot metadata：{log}");
+    assert!(log.contains("reason=\"composer_busy\""), "要保留失敗原因：{log}");
+    assert!(log.contains("composer_present=true"), "只記草稿是否存在：{log}");
+    assert!(log.contains("composer_chars=10"), "只記草稿長度：{log}");
+    assert!(!log.contains("half typed"), "未送出的草稿不能進 daemon log：{log}");
     assert_eq!(tui.composer(), "half typed", "沒要求清就不動");
 
     let tui = busy();
     let wrong = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some("something else".into())).await;
-    assert_eq!(reason(wrong.unwrap_err()), "composer_changed");
+    match wrong.unwrap_err() {
+        LcError::Conflict(v) => {
+            assert_eq!(v["reason"], "composer_changed");
+            assert_eq!(v["draft"], "half typed", "composer_changed 仍將目前草稿交給 UI 確認");
+        }
+        other => panic!("{other:?}"),
+    }
     assert_eq!(tui.composer(), "half typed", "字對不上就不清");
     assert_eq!(rewound(&r).await, vec![false; 6]);
 
