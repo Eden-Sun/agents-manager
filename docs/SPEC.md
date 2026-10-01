@@ -3933,7 +3933,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - 前一個持有者**過期**而不是 release 時，接手的那次會把舊租約的核准標成 `consumed`（理由 `lease expired`，寫進 `supervisor_notes`）：
   否則同一張「可以」能在有效期內開好幾個窗口，而決定歷程上一筆紀錄都沒有。consume 一律走 `decide_approval_from`（有稽核、不覆寫 `decided_at`，升級判定的計時看的就是那一欄）。
 - **換 commit 接續等待**（review2 2026-09-16）：核准綁 `target_commit`，main 一動就要換一筆；升級計時若只看新那筆的 `decided_at`，忙碌的 repo 上永遠等不滿 30 分鐘。
-  申請帶 `supersedes=<舊 id>`（同 requester、同 purpose）時，舊的還能用就標 `superseded`、它未送出的 `approval_requested` 一起收掉，新的 `wait_since` 接過舊的等待起點；
+  申請帶 `supersedes=<舊 id>`（同 requester、同 purpose）時，舊的還能用就標 `superseded`、它未送出的 `approval_requested` 一起收掉（任何從 `pending` 出去的裁示——approve／deny／revoke——也一樣把那則 `approval_requested` 收成 `handled`，不再補送、不再改派），新的 `wait_since` 接過舊的等待起點；
   升級計時看 `min(wait_since, decided_at)`。舊的已經不能用（過期、被駁、用掉）就不接。`consumed`／`superseded` 都不覆寫 `decided_at`／`decided_by`。
 - 例行更新腳本計算「別人的重建申請」時排除自己的 requester 與已過期的；自己有還在等的核准時照常每輪往下跑。main 只動到不進 binary 的檔就沿用原核准，**派工目標仍是核准針對的那顆 commit**（交辦正文與 request-id 都用它，不派派工當下的 HEAD；2026-09-22 核准 513f2320 卻建了 69010d72），
   動到要建的東西才帶 `supersedes` 重新申請（review2 2026-09-16，細節見 `scripts/ops/README.md`）——**但自己的核准已經 approved、那顆還沒派過時不換**：

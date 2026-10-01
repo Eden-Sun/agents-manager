@@ -2938,6 +2938,19 @@ pub async fn decide_approval_from(
         .bind(&now)
         .execute(&mut *tx)
         .await?;
+    // 還 pending 就被裁示：叫 AGM 裁示的那則 `approval_requested` 跟著收掉（跟被取代那條路同一個道理）。
+    // 不收的話，它會繼續被補送、叫醒 AGM 去裁示一筆已經有結果的申請，協調者不可用時 failover 還會把它改派給巡檢。
+    if from_status == "pending" {
+        sqlx::query(
+            "UPDATE supervisor_inbox SET state='handled', acked_by='daemon', updated_at=?
+              WHERE supervisor_id=? AND event_key=? AND state!='handled'",
+        )
+        .bind(&now)
+        .bind(SUPERVISOR_ID)
+        .bind(format!("approval:{id}:requested"))
+        .execute(&mut *tx)
+        .await?;
+    }
     let row = sqlx::query_as::<_, Approval>("SELECT * FROM supervisor_approvals WHERE id=?")
         .bind(id)
         .fetch_one(&mut *tx)
@@ -3469,6 +3482,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(open, vec![format!("approval:{}:requested", second.approval.id)]);
+    }
+
+    /// 申請還 pending 就被裁示（申請者自己 revoke、有人 deny、另一個角色 approve）：叫 AGM 裁示的那則
+    /// `approval_requested` 要跟著收掉。以前只有「被取代」那條路收它，其他裁示都留著 pending／delivered，
+    /// 於是 AGM 被叫醒去裁示一筆已經有結果的申請、補送也繼續，協調者不可用時 failover 還會把它改派給巡檢。
+    #[tokio::test]
+    async fn deciding_a_pending_approval_closes_the_inbox_event_that_asked_for_the_decision() {
+        let p = pool().await;
+        for (status, delivered) in [("revoked", false), ("denied", true), ("approved", false)] {
+            let a = request(&p, &format!("c-{status}")).await.approval;
+            let key = format!("approval:{}:requested", a.id);
+            if delivered {
+                sqlx::query("UPDATE supervisor_inbox SET state='delivered' WHERE event_key=?").bind(&key).execute(&p).await.unwrap();
+            }
+            decide_approval_from(&p, &a.id, "pending", status, "someone", None, None).await.unwrap().unwrap();
+            let state: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE event_key=?").bind(&key).fetch_one(&p).await.unwrap();
+            assert_eq!(state, "handled", "{status}：裁示完就不用再叫人裁示");
+        }
+        // 消耗（approved→consumed）不是裁示：不動別筆的事件。
+        let b = request(&p, "c-other").await.approval;
+        decide_approval_from(&p, &b.id, "pending", "approved", "someone", None, None).await.unwrap().unwrap();
+        let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE state!='handled'").fetch_one(&p).await.unwrap();
+        assert_eq!(open, 0);
     }
 
     /// issue #443：同一毫秒建的幾筆，列出來要照**寫進去的順序**。
