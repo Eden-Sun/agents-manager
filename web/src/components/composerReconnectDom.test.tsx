@@ -6,13 +6,16 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeWebSocket, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
-import { MockTransport } from '../api/mock'
-import { useStore } from '../store/store'
+import { sharedMock } from '../testing/sharedMock'
+import { resetStoreForTest, useStore } from '../store/store'
 import { ChatPanel } from './ChatPanel'
 
 afterEach(unmountAll)
 before(setupDom)
-after(teardownDom)
+after(() => {
+  resetStoreForTest() // 要在拆 DOM 之前：關 socket 會拿掉 window 上的監聽
+  teardownDom()
+})
 
 const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer textarea')!
 
@@ -26,7 +29,7 @@ async function until(cond: () => boolean | Promise<boolean>, what: string, ms = 
 }
 
 async function boot() {
-  const mock = new MockTransport()
+  const mock = sharedMock
   const requests = mockApi(mock)
   const sockets = fakeWebSocket()
   await useStore.getState().bootstrap()

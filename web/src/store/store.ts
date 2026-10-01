@@ -2706,6 +2706,23 @@ function turnStillOpen(status: Turn['status']): boolean {
   return status === 'in_flight' || status === 'queued'
 }
 
+/**
+ * DOM 測試收尾（`testing/domHarness.ts`）：bun 整樹同一個行程，store 是模組單例——關掉 socket 與額度 interval、
+ * 把「只做一次」的旗標與 seq 歸零、state 換回初始值，下一個測試檔才拿到乾淨的 store。
+ */
+export function resetStoreForTest(): void {
+  disconnect?.()
+  disconnect = null
+  if (quotaSweep) clearInterval(quotaSweep)
+  quotaSweep = null
+  openedOnce = false
+  seenSeq = 0
+  appliedStateSeq = 0
+  legacyQueueMigrationAttempted = false
+  draftSync.dispose()
+  useStore.setState(useStore.getInitialState(), true)
+}
+
 /** 測試直接送一幀，不必先把 WebSocket 接起來。 */
 export function dispatchFrameForTest(frame: { seq?: number; type: string; data?: unknown }) {
   if (!boundSet || !boundGet) throw new Error('store 還沒建立')

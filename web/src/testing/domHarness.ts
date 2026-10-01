@@ -9,6 +9,8 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator'
 import type { ReactElement } from 'react'
 
 const originalFetch = globalThis.fetch
+const originalWebSocket = (globalThis as { WebSocket?: unknown }).WebSocket
+const originalXhr = (globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest
 
 /** 註冊全域 DOM（已經註冊就不動）。fetch 換成不碰網路的空回應，`fakeApi` 可以再換。 */
 export function setupDom(): void {
@@ -168,6 +170,8 @@ export function teardownDom(): void {
   if (!GlobalRegistrator.isRegistered) return
   void GlobalRegistrator.unregister()
   globalThis.fetch = originalFetch
+  ;(globalThis as { WebSocket?: unknown }).WebSocket = originalWebSocket
+  ;(globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = originalXhr
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false
 }
 
