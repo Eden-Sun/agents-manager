@@ -741,6 +741,9 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - **兩個地方看得到**：側欄那格「閒置」換成「背景 N」（那格原本只放兩個字，「背景執行中（N）」會被截成「背景執」；名字很長的列
   連數字也會被擠掉，完整說明在 tooltip）、輸入框上方一條說明（標題列不放：2026-09-28 先拿掉手機的、2026-09-30 使用者桌機也不要——側欄與輸入框上方已經講了）（claude 說 shell、codex 說終端，
   並講明現在也可以照常送訊息）。
+- **所有顯示 bot 狀態的燈都一致**（2026-10-01 使用者：「不要只有側欄看得到，其他地方還寫閒置」）：標題燈、手機 BotSwitcher 列、群組成員、手機主力晶片、側欄燈
+  一律走 `botStateLabel`／`StatusLamp` 的 `background`（文案同一來源）——idle 的綠點外圈多一圈 accent 呼吸環，tooltip／aria-label 寫「背景執行中（N）」，
+  主力晶片平常不畫 idle，有背景工作時畫。標題列仍**不畫文字徽章**（上一條 2026-09-30 的決定不翻案），只有燈與 tooltip 一致。
 - 驗證：mock 起前端，把 run 的 `background_jobs` 設成 1／2。
 
 ![桌機](screenshots/background-jobs/bg-light.png) ![手機](screenshots/background-jobs/bg-mobile-dark.png)

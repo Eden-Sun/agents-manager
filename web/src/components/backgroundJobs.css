@@ -73,3 +73,19 @@
     padding: 8px 14px;
   }
 }
+
+/* 燈上的背景執行環（StatusLamp 的 `background`）：idle 的綠點外圈一圈 accent 呼吸環，跟側欄的 `.bg-jobs-dot` 同一種語言。 */
+.lamp-bg::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  animation: bg-jobs-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lamp-bg::after {
+    animation: none;
+  }
+}

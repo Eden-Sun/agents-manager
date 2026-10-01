@@ -20,7 +20,8 @@ import { clipAfterRows, layoutBoxes, lineBudget, moreTitle } from '../lib/chipOv
 import { chipTracked } from '../lib/supervisorProject'
 import { pinGridLayout, sortPinned } from '../lib/pinnedOrder'
 import { useChipFlip } from './useChipFlip'
-import { botLamp, orderedBotIds, useStore } from '../store/store'
+import { orderedBotIds, useStore } from '../store/store'
+import { useBotLamp } from '../hooks/useBotLamp'
 import { StatusLamp } from './StatusLamp'
 import type { Lamp } from '../api/types'
 import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
@@ -78,8 +79,9 @@ const LAMP_SHOWN = new Set<Lamp>(['working', 'blocked', 'unknown', 'disconnected
 
 /** 側欄同一顆燈（`botLamp`）：working 會脈動、blocked 紅、斷線灰。 */
 function ChipLamp({ id }: { id: string }) {
-  const lamp = useStore((s) => botLamp(s, id))
-  return LAMP_SHOWN.has(lamp) ? <StatusLamp lamp={lamp} /> : null
+  const { lamp, background } = useBotLamp(id)
+  // idle 平常不畫；但回合結束後背景還有工作在跑（#714）就是值得注意的狀態，不能看起來像停了。
+  return LAMP_SHOWN.has(lamp) || background > 0 ? <StatusLamp lamp={lamp} background={background} /> : null
 }
 
 function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean }) {
