@@ -203,6 +203,12 @@ export class HttpTransport implements Transport {
     let closed = false
     /** 最後一次收到任何幀（含心跳 ping）或連上的時刻；見 `socketLiveness.ts`（issue #760）。 */
     let lastActive = liveness.now()
+    /**
+     * 這個 daemon 會送心跳（這個分頁見過 `ping`）。舊 daemon 不送，安靜時整條線一個幀都沒有，靜默不是斷線的證據；
+     * 沒有這個旗標的話，舊 daemon 搭新前端（vite dev 連 7788、daemon 回滾）閒置每分鐘就判半開重連，
+     * 而每次重連都整份重抓 state、已載入的對話、額度與草稿。旗標跨重連保留，所以新連線在第一個 ping 之前也有死線偵測。
+     */
+    let daemonPings = false
     let attempt = 0
     let sock: WebSocket | null = null
     let timer: ReturnType<typeof setTimeout> | null = null
@@ -245,7 +251,10 @@ export class HttpTransport implements Transport {
         }
         if (!frame || typeof frame.type !== 'string') return
         // daemon 的心跳只是存活證據，不是事件。
-        if (frame.type === 'ping') return
+        if (frame.type === 'ping') {
+          daemonPings = true
+          return
+        }
         // handler 例外不能吞：`lastSeq` 已推進，重連不會補這則，至少留 console 痕跡。
         try {
           handlers.onFrame(frame)
@@ -279,7 +288,7 @@ export class HttpTransport implements Transport {
     // 切回前景：`readyState` 是 OPEN 也不一定活著（半開），靜默超過心跳間隔就當死線，丟掉重連（`since` 補洞、open handler 重抓 state）。
     const resume = () => {
       if (closed || !isForeground()) return
-      if (sock && sock.readyState === WebSocket.OPEN && liveness.now() - lastActive > RESUME_STALE_MS) {
+      if (daemonPings && sock && sock.readyState === WebSocket.OPEN && liveness.now() - lastActive > RESUME_STALE_MS) {
         connect()
         return
       }
@@ -291,7 +300,7 @@ export class HttpTransport implements Transport {
     // 前景裡靜默太久：同上。背景分頁不查——timer 被節流、frame 也可能被凍住，靜默不代表斷線，回前景那一刻再判斷。
     const stopWatchdog = liveness.every(() => {
       if (closed || !isForeground()) return
-      if (sock && sock.readyState === WebSocket.OPEN && liveness.now() - lastActive > SILENCE_MS) connect()
+      if (daemonPings && sock && sock.readyState === WebSocket.OPEN && liveness.now() - lastActive > SILENCE_MS) connect()
     }, CHECK_MS)
     window.addEventListener('online', resume)
     window.addEventListener('focus', resume)
