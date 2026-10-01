@@ -78,7 +78,19 @@ fn version_notice(disk: &str, running: &str) -> Option<String> {
 }
 
 async fn sweep(app: &Arc<App>) {
-    let runs = db::all_active_runs(&app.db).await.unwrap_or_default();
+    sweep_runs(app, db::all_active_runs(&app.db).await).await;
+}
+
+/// `runs` 是這一輪列舉 active run 的結果。讀失敗要整輪跳過、不動任何 retain 狀態（#744）：
+/// 把讀不到當成「沒有 active run」會清掉所有基準與背景工作帳，下一輪現有的 run 又被當成第一次看到。
+async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
+    let runs = match runs {
+        Ok(runs) => runs,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list active runs, skipping this sweep");
+            return;
+        }
+    };
     let active: Vec<String> = runs.iter().map(|r| r.id.clone()).collect();
     crate::background_jobs::retain_runs(app, &active);
     crate::claude_live::retain_runs(&active);
@@ -359,6 +371,37 @@ mod tests {
         sqlx::query("UPDATE runs SET state = 'exited' WHERE id = ?").bind(&run).execute(&e.app.db).await.unwrap();
         sweep(&e.app).await;
         assert_eq!(crate::background_jobs::get(&e.app, &run), 0, "結束的 run 不留帳");
+    }
+
+    /// #744：列舉 active run 失敗的那一輪不能清基準／背景工作帳；成功列舉出空清單才清。
+    #[tokio::test]
+    async fn a_failed_active_run_listing_keeps_baselines_and_background_jobs() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "keep744").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let pane = format!("pane-{}", bot.id);
+        let screen = "❯ /model sonnet\n  ⎿  Set model to Sonnet 5.5 and saved as your default for new sessions\n";
+        e.herdr.set_screen(&pane, screen);
+        sweep(&e.app).await;
+        let model = || async { db::run(&e.app.db, &run).await.unwrap().unwrap().runtime_model };
+        assert_eq!(model().await, None, "第一次看到只當基準");
+        let set_jobs = |n: u32| {
+            e.app.background_jobs.lock().unwrap().insert(run.clone(), n);
+        };
+        set_jobs(2);
+
+        sweep_runs(&e.app, Err(anyhow::anyhow!("db is locked"))).await;
+        assert_eq!(crate::background_jobs::get(&e.app, &run), 2, "讀失敗不清背景工作帳");
+
+        e.herdr.set_screen(&pane, &format!("{screen}\n❯ /model haiku\n  ⎿  Set model to Haiku 4.5 and saved\n"));
+        sweep(&e.app).await;
+        assert_eq!(model().await.as_deref(), Some("claude-haiku-4-5"), "基準還在，之後的真切換被採用");
+
+        set_jobs(2);
+        sweep_runs(&e.app, Ok(vec![])).await;
+        assert_eq!(crate::background_jobs::get(&e.app, &run), 0, "成功列舉出空清單才清");
+        assert!(!crate::claude_live::has_baseline(&run), "成功列舉出空清單才清基準");
     }
 
     #[tokio::test]
