@@ -412,6 +412,9 @@ async fn forget_watcher(app: &Arc<App>, key: PaneKey, generation: u64) {
     if gens.get(&key) == Some(&generation) {
         gens.remove(&key);
         watchers.remove(&key);
+        // watcher 自己退出（run 結束）也要把這個 pane 的狀態序號與鎖帶走，不只在 `unwatch_pane_on_session`：
+        // 不然這兩張行程級表每個開過又收掉的 pane 留一格。
+        forget_pane_status_state(&key);
     }
 }
 
@@ -802,6 +805,31 @@ mod tests {
         sqlx::query("UPDATE runs SET state='exited' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
         let _ = crate::testing::eventually!(!watching(&app, &pane).await);
         assert!(!watching(&app, &pane).await, "確認 run 已結束才退出");
+    }
+
+    /// watcher 因為 run 結束自己退出（不是被 `unwatch_pane` 拆掉）：pane 的狀態序號與鎖也要跟著走。
+    #[tokio::test]
+    async fn a_watcher_that_exits_on_its_own_takes_the_panes_status_state_with_it() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let key: PaneKey = (LOCAL_HOST.to_string(), "test".to_string(), "pane-self-exit".to_string());
+        status_seq().lock().unwrap().insert(key.clone(), 5);
+        let _ = pane_status_lock(&key);
+        watcher_gens().lock().unwrap().insert(key.clone(), 7);
+        app.pane_watchers.lock().await.insert(key.clone(), tokio::spawn(std::future::pending::<()>()));
+
+        forget_watcher(&app, key.clone(), 7).await;
+        assert!(!status_seq().lock().unwrap().contains_key(&key), "狀態序號要清掉");
+        assert!(!pane_status_locks().lock().unwrap().contains_key(&key), "pane 的鎖要清掉");
+        assert!(!app.pane_watchers.lock().await.contains_key(&key));
+
+        // 同一個 pane 之後裝了新的 watcher（世代不同）：舊的 watcher 退出不能動它的狀態。
+        status_seq().lock().unwrap().insert(key.clone(), 9);
+        watcher_gens().lock().unwrap().insert(key.clone(), 8);
+        forget_watcher(&app, key.clone(), 7).await;
+        assert!(status_seq().lock().unwrap().contains_key(&key), "新的 watcher 的狀態不被舊的帶走");
+        status_seq().lock().unwrap().remove(&key);
+        watcher_gens().lock().unwrap().remove(&key);
     }
 
     fn ws_event(ws: &str) -> crate::herdr::Event {
