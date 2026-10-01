@@ -9,6 +9,7 @@ mod bot_trash;
 mod deleted_bots;
 mod build_info;
 mod build_scheduler;
+mod exec_retry;
 mod cargo_shim;
 mod agent_relay;
 mod api;

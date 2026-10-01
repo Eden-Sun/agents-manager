@@ -2980,22 +2980,9 @@ mod guard_tests {
 
     // ── 整體執行上限（issue #194）：用假的 ssh／rsync 把本機當成遠端，跑真的 `run_offload`＋真的守門腳本 ──
 
-    /// 寫一支假腳本並確定它已經可以被 exec：並行的另一條測試 fork 時會短暫繼承寫入 fd，這段時間 exec 會回 ETXTBSY（issue #189）——
-    /// 探測用 exec 一次（腳本第一行在 `AM_TEST_EXEC_PROBE` 有設時 `exit 0`），還在被擋就重試，等的是條件不是時間。
+    /// 寫一支假腳本（`body` 接在 `#!/bin/sh` 之後）並確定它已經可以被 exec（issue #189）：見 [`crate::testing::write_exec`]。
     fn write_exec(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::write(path, format!("#!/bin/sh\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{body}")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let started = Instant::now();
-        loop {
-            match Command::new(path).env("AM_TEST_EXEC_PROBE", "1").output() {
-                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && started.elapsed() < Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(2)),
-                r => {
-                    assert!(r.unwrap().status.success());
-                    return;
-                }
-            }
-        }
+        crate::testing::write_exec(path, format!("#!/bin/sh\n{body}"))
     }
 
     /// 假遠端：`ssh` 把最後一個參數（要在遠端跑的指令字串）在**本機**用 `sh -c` 跑，跟 sshd 一樣每條連線自成一個 session

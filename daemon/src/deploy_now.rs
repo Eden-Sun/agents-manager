@@ -546,24 +546,9 @@ mod tests {
         assert_eq!(kick.calls.load(Ordering::SeqCst), 0);
     }
 
-    /// 寫一支假的排程器指令並確定它已經可以被 exec：並行的測試 fork 時會短暫繼承寫入 fd，
-    /// 這段時間 exec 回 ETXTBSY（issue #189）——探測 exec 一次，還被擋就重試，等的是條件不是時間。
+    /// 寫一支假的排程器指令（`body` 接在 `#!/bin/sh` 之後）並確定它已經可以被 exec（issue #189）：見 [`crate::testing::write_exec`]。
     fn write_exec(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::write(path, format!("#!/bin/sh\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{body}")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let started = Instant::now();
-        loop {
-            match std::process::Command::new(path).env("AM_TEST_EXEC_PROBE", "1").output() {
-                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && started.elapsed() < Duration::from_secs(30) => {
-                    std::thread::sleep(Duration::from_millis(2))
-                }
-                r => {
-                    assert!(r.unwrap().status.success());
-                    return;
-                }
-            }
-        }
+        crate::testing::write_exec(path, format!("#!/bin/sh\n{body}"))
     }
 
     struct Tmp(PathBuf);

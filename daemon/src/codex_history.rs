@@ -799,23 +799,9 @@ mod tests {
         assert!(hook.get().is_none());
     }
 
-    /// 寫一支假腳本並確定它**已經可以被 exec**：整樹並行時別條測試在別的執行緒 `fork`，會短暫繼承這個檔案的寫入 fd 直到它自己 `exec`，
-    /// 這段時間 exec 我們剛寫好的腳本會回 `ETXTBSY`（Text file busy，issue #189 同一個形狀），`AppServerConn::start` 就成了 `Unavailable`。
-    /// 腳本第一行在 `AM_TEST_EXEC_PROBE` 有設時直接 `exit 0`；寫完用它 exec 一次、還被擋就重試——等的是條件，不是睡一個固定時間。
+    /// 寫一支假腳本（`body` 接在 `#!/bin/sh` 之後）並確定它已經可以被 exec（issue #189）：見 [`crate::testing::write_exec`]。
     fn write_exec(path: &std::path::Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::write(path, format!("#!/bin/sh\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{body}")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let started = std::time::Instant::now();
-        loop {
-            match std::process::Command::new(path).env("AM_TEST_EXEC_PROBE", "1").output() {
-                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && started.elapsed() < Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(2)),
-                r => {
-                    assert!(r.unwrap().status.success());
-                    return;
-                }
-            }
-        }
+        crate::testing::write_exec(path, format!("#!/bin/sh\n{body}"))
     }
 
     /// 真的 app-server 的 JSON-RPC 往返：用一支假的 `codex`（shell script）驗證 initialize／initialized、

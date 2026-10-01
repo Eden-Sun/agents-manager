@@ -682,45 +682,18 @@ mod tests {
     use std::io::Write as _;
     use std::process::Command;
 
-    /// 剛寫好的腳本立刻 `exec`，可能撞上 `ETXTBSY`（Text file busy）：並行的測試在別的執行緒 `fork`，
-    /// 短暫繼承了那個檔案的寫入 fd，直到它自己 `exec`。這不是被測程式的問題，重試就好。
+    /// 剛寫好的腳本立刻 `exec` 可能撞上 `ETXTBSY`（issue #189）：共用 [`crate::exec_retry`]，遇到才重試。
     fn output_retrying(cmd: &mut Command) -> std::process::Output {
-        for _ in 0..200 {
-            match cmd.output() {
-                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => std::thread::sleep(std::time::Duration::from_millis(25)),
-                r => return r.unwrap(),
-            }
-        }
-        cmd.output().unwrap()
+        crate::exec_retry::output(cmd).unwrap()
     }
 
     fn spawn_retrying(cmd: &mut Command) -> std::process::Child {
-        for _ in 0..200 {
-            match cmd.spawn() {
-                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => std::thread::sleep(std::time::Duration::from_millis(25)),
-                r => return r.unwrap(),
-            }
-        }
-        cmd.spawn().unwrap()
+        crate::exec_retry::spawn(cmd).unwrap()
     }
 
-    /// 寫一支測試用腳本（`content` 以 `#!` 開頭）並確定它**已經可以被 exec**（issue #189）：並行的另一條測試在別的執行緒 `fork`，
-    /// 短暫繼承了這個檔案的寫入 fd 直到它自己 `exec`，這段時間 exec 這支腳本會回 `ETXTBSY`——不管是測試直接 exec，還是被測的 shim 去 exec 它。
-    /// 腳本第一行在 `AM_TEST_EXEC_PROBE` 有設時直接 `exit 0`；寫完用它 exec 一次、`ETXTBSY` 就重試（`output_retrying`，條件是「還在被擋」，不是睡固定時間）。
-    /// exec 成功那一刻沒有任何行程握著寫入 fd，之後就不會再撞——只有我們會開它來寫，而我們寫完了。
+    /// 寫測試用腳本並確定它已經可以被 exec（`content` 以 `#!` 開頭）：見 [`crate::testing::write_exec`]。
     fn write_exec(path: impl AsRef<std::path::Path>, content: impl AsRef<str>) {
-        let path = path.as_ref();
-        let content = content.as_ref();
-        let (shebang, rest) = content.split_once('\n').expect("script needs a shebang line");
-        assert!(shebang.starts_with("#!"), "{shebang}");
-        std::fs::write(path, format!("{shebang}\n[ -z \"${{AM_TEST_EXEC_PROBE:-}}\" ] || exit 0\n{rest}")).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let out = output_retrying(Command::new(path).env("AM_TEST_EXEC_PROBE", "1"));
-        assert!(out.status.success(), "{}: {:?}", path.display(), out.status);
+        crate::testing::write_exec(path, content)
     }
 
     struct Sandbox {
