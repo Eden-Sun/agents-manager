@@ -880,3 +880,86 @@ async fn a_busy_composer_is_shown_and_can_be_cleared_on_request() {
     assert_eq!(tui.restored(), Some(1), "清掉之後照常倒回");
     assert_eq!(rewound(&r).await, vec![false, false, true, true, true, true]);
 }
+
+// ───────────── review：#736／#737 的對抗式驗證 ─────────────
+
+fn conflict_body(e: LcError) -> Value {
+    match e {
+        LcError::Conflict(v) => v,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// #737 後續：輸入列的草稿裡有空白列（兩段之間空一行）時，`composer_text` 讀到第一個空白列就停，409 的 `draft` 只有前半段；
+/// 使用者只看得到前半段按「清掉再倒回」，CAS 拿前半段比前半段「相同」，ctrl+c 卻把整段（含沒看過的後半）清掉。
+/// 草稿要整段讀得到：給人看的、CAS 比的、被清掉的是同一段字。
+#[tokio::test(flavor = "current_thread")]
+async fn a_draft_with_a_blank_row_is_shown_and_compared_whole() {
+    let r = rig().await;
+    let draft = "first paragraph\n\nsecond paragraph the user never saw";
+    let tui = FakeTui::new(&[A, SECOND, C], Faults { composer: Some(draft.into()), ..Default::default() });
+    let body = conflict_body(call(&r, &r.ids[2], &tui).await.unwrap_err());
+    assert_eq!(body["reason"], "composer_busy");
+    assert_eq!(body["draft"], draft, "409 的 draft 要是整段，不是讀到第一個空白列就停");
+
+    // 只認得前半段的同意不能用來清整段。
+    let partial = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some("first paragraph".into())).await.unwrap_err();
+    assert_eq!(reason(partial), "composer_changed");
+    assert_eq!(tui.composer(), draft, "CAS 不符就不動");
+    assert!(tui.log().is_empty(), "不能送 ctrl+c：{:?}", tui.log());
+
+    // 整段對得上才清。
+    let out = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some(draft.into())).await.unwrap();
+    assert_eq!(out["text"], SECOND);
+    assert_eq!(out["pane_cleared"], true);
+}
+
+/// CAS 的各種「看起來一樣」：CRLF 只在換行上算一樣；全形空白、兩張圖片佔位的差異、順序、換行與空格都算不同（不換行空白在 herdr 讀進來時就換成空格，見 `nbsp_to_space`，CAS 看不到那個差別，也沒有內容上的差別）；
+/// 完全相同（含全形空白、多張圖片）才清。
+#[tokio::test(flavor = "current_thread")]
+async fn composer_cas_distinguishes_wide_spaces_nbsp_and_image_placeholders() {
+    let r = rig().await;
+    let two_images = "[Image #1] [Image #2] compare these";
+    for (current, expect) in [
+        ("你好\u{3000}世界", "你好 世界"),
+        ("你好 世界", "你好\u{3000}世界"),
+        (two_images, "[Image #1] compare these"),
+        (two_images, "[Image #2] [Image #1] compare these"),
+        (two_images, "[Image #1][Image #2] compare these"),
+        ("line one\nline two", "line one line two"),
+    ] {
+        let tui = FakeTui::new(&[A, SECOND, C], Faults { composer: Some(current.into()), ..Default::default() });
+        let err = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some(expect.into())).await.unwrap_err();
+        assert_eq!(reason(err), "composer_changed", "current={current:?}, expect={expect:?}");
+        assert_eq!(tui.composer(), current);
+        assert!(tui.log().is_empty(), "{:?}", tui.log());
+    }
+    for same in ["你好\u{3000}世界", two_images, "line one\r\nline two"] {
+        let r = rig().await;
+        let shown = same.replace("\r\n", "\n");
+        let tui = FakeTui::new(&[A, SECOND, C], Faults { composer: Some(shown), ..Default::default() });
+        let out = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some(same.into())).await.unwrap();
+        assert_eq!(out["rewound"], true, "{same:?}");
+    }
+}
+
+/// #736 的其他路徑：被中斷的那則走 `rewind_dropped`，輸入列裡是別的字（使用者的草稿）時只能記「有字、幾個字」，
+/// 不能記內容；API 錯誤本體帶 `draft` 給操作的人看是功能本身，log 不行。
+#[tokio::test(flavor = "current_thread")]
+async fn a_foreign_draft_met_while_clearing_a_dropped_refill_never_reaches_the_log() {
+    let (logs, _guard) = crate::config_audit::capture::start();
+    let r = rig().await;
+    let ids = insert_msgs(&r.e.app, &r.bot, &[("user", "pl")]).await;
+    turn_for(&r, &ids[0], "failed").await;
+    let secret = "sk-live-0123456789abcdef password hunter2";
+    let tui = FakeTui::new(&[A, SECOND, C], Faults { composer: Some(secret.into()), ..Default::default() });
+    let body = conflict_body(call(&r, &ids[0], &tui).await.unwrap_err());
+    assert_eq!(body["reason"], "composer_busy");
+    assert_eq!(body["draft"], secret, "給操作的人看的草稿照舊在回應裡");
+    assert_eq!(tui.composer(), secret, "不是放回來的原文就不清");
+    let log = logs.text();
+    assert!(log.contains("composer_present=true") && log.contains(&format!("composer_chars={}", secret.chars().count())), "{log}");
+    for needle in ["sk-live", "hunter2", "0123456789"] {
+        assert!(!log.contains(needle), "草稿內容不能進 log（{needle}）：{log}");
+    }
+}
