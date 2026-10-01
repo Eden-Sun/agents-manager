@@ -2162,6 +2162,11 @@ mod tests {
         assert!(crate::testing::eventually!(fake.restarts().len() == 1), "run must reach the terminal path");
         fail_terminal_updates(&env.app).await;
         release.send(()).unwrap();
+        // 等它真的走到 finish_row，不賭固定 100ms：整樹平行跑負載高時還停在前一個 phase（#759，d753af7e）。
+        assert!(
+            crate::testing::eventually!(row_phase(&env.app, "u-finish-ok").await == "finishing"),
+            "run must reach the owed terminal write"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         let done_before_commit = done_events(&mut rx);
         let was_running = row_status(&env.app, "u-finish-ok").await.0 == "running";
@@ -2200,6 +2205,11 @@ mod tests {
         assert!(crate::testing::eventually!(fake.installs() == 1), "installer must start before injecting the failure");
         fail_terminal_updates(&env.app).await;
         release.send(()).unwrap();
+        // 等它真的走到 finish_row，不賭固定 100ms：整樹平行跑負載高時還停在前一個 phase（#759，d753af7e）。
+        assert!(
+            crate::testing::eventually!(row_phase(&env.app, "u-finish-failed").await == "finishing"),
+            "run must reach the owed terminal write"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         let done_before_commit = done_events(&mut rx);
         let was_running = row_status(&env.app, "u-finish-failed").await.0 == "running";
