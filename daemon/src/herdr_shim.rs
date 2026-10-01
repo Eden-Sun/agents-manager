@@ -347,10 +347,16 @@ am_agent_start() {
             fi
             ;;
     esac
-    [ -n "$_pane" ] || _pane=${HERDR_PANE_ID:-}
+    # 目標 pane 只認明寫的 `--pane`，**不退回 $HERDR_PANE_ID**：那是呼叫者自己的 pane（裡面跑著它自己的 agent），
+    # 補送 env 的那一行會被打進它的輸入框——2026-10-01 `pane split` 失敗、`--pane ""` 傳下來時就這樣灌了四行給使用者。
+    # 指到自己的 pane 也一樣擋：不能在自己正在跑的 agent 裡再開 agent。
+    if [ -n "$_pane" ] && [ "$_pane" = "${HERDR_PANE_ID:-}" ]; then
+        printf 'agents-manager: agent start 的 --pane 是你自己的 pane（%s）；先 herdr pane split 開新 pane，再把新 pane id 給 --pane\n' "$_pane" >&2
+        exit 2
+    fi
     if [ -n "${AM_BOT_ID:-}" ] && [ -z "$_pane" ]; then
-        printf 'agents-manager: 找不到 agent start 的目標 pane，拒絕在憑證狀態未知時啟動 child\n' >&2
-        exit 75
+        printf 'agents-manager: agent start 沒有 --pane（或是空的，多半是前面的 pane split 失敗）；先 herdr pane split 開新 pane，再把新 pane id 給 --pane。沒有呼叫 herdr\n' >&2
+        exit 2
     fi
     am_spawn_begin || exit $?
     trap 'am_spawn_abort; exit 130' INT TERM
@@ -911,6 +917,8 @@ mod tests {
                 }
             }
             cmd.env_remove("HERDR_PANE_ID");
+            // env 補送的暫存檔預設寫進沙盒，不要在 /tmp 留一堆（2026-10-01 一次測試留下幾十個 am-env.*）；測試自己給的 TMPDIR 照用。
+            cmd.env("TMPDIR", &self.dir);
             for (k, v) in env {
                 cmd.env(k, v);
             }
@@ -1841,6 +1849,30 @@ mod tests {
         assert!(!log.exists() || std::fs::read_to_string(&log).unwrap().trim().is_empty(), "沒有目標 pane，不猜著補");
     }
 
+    /// 2026-10-01：`pane split` 失敗、`--pane ""` 傳下來時，shim 退回 $HERDR_PANE_ID（呼叫者自己的 pane），
+    /// 把補送 env 那一行打進了使用者的輸入框。空的 `--pane`、沒帶、指到自己，都不能碰自己的 pane。
+    #[test]
+    fn agent_start_never_types_into_the_callers_own_pane() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let base = [("AM_AGENT_NAME", "p-1"), ("HERDR_PANE_ID", "w1:p1"), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap()), ("TMPDIR", s.dir.to_str().unwrap())];
+        // 人工 shell（沒有 bot 身分）：照舊轉給 herdr（它自己會因為缺 --pane 報錯），但不補送。
+        let (out, _) = s.run(&base, &["agent", "start", "kid", "--kind", "claude", "--pane", ""]);
+        assert_eq!(&out[..3], ["agent", "start", "p-1-kid"]);
+        // 受管的 bot：沒帶／空的 --pane 直接拒絕，herdr 也不叫。
+        let managed: Vec<(&str, &str)> = base.iter().copied().chain([("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")]).collect();
+        for argv in [&["agent", "start", "kid", "--kind", "claude", "--pane", ""][..], &["agent", "start", "kid", "--kind", "claude"][..]] {
+            let (out, err, rc) = s.run_full(&managed, argv);
+            assert_eq!(rc, 2, "{argv:?} {err}");
+            assert!(out.is_empty() && err.contains("pane split"), "{argv:?} {out:?} {err}");
+        }
+        // 指到自己的 pane：誰都不行。
+        let (out, err, rc) = s.run_full(&base, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p1"]);
+        assert_eq!(rc, 2, "{err}");
+        assert!(out.is_empty(), "{out:?}");
+        assert!(!log.exists() || std::fs::read_to_string(&log).unwrap().trim().is_empty(), "自己的 pane 一個字都不能收到");
+    }
+
     /// 真的 herdr 在的話，把 shim 產生的 argv 丟給它的 parser：在最後（`--` 之前）放一個假旗標，
     /// 回報的未知選項是那個假旗標，就代表前面每個參數它都認得。找不到真的 herdr 就略過。
     #[test]
@@ -1913,7 +1945,7 @@ mod tests {
             ("AM_BOT_ID", "b1"),
             ("AM_HOOK_TOKEN", "tok"),
             ("AM_PORT", "7788"),
-            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_PANE_ID", "w1:p0"),
             ("AM_TEST_HERDR_RC", "3"),
             ("TMPDIR", s.dir.to_str().unwrap()),
         ];
@@ -1934,7 +1966,7 @@ mod tests {
             ("AM_BOT_ID", "b1"),
             ("AM_HOOK_TOKEN", "tok"),
             ("AM_PORT", "7788"),
-            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_PANE_ID", "w1:p0"),
             ("AM_TEST_SIGNAL_PARENT", "1"),
             ("TMPDIR", s.dir.to_str().unwrap()),
         ];
@@ -1955,7 +1987,7 @@ mod tests {
             ("AM_AGENT_NAME", "parent"),
             ("AM_BOT_ID", "b1"),
             ("AM_BOT_TOKEN", "tok"),
-            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_PANE_ID", "w1:p0"),
             ("AM_TEST_CREATE_JSON", created),
             ("TMPDIR", s.dir.to_str().unwrap()),
         ];

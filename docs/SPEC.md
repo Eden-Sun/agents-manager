@@ -1713,7 +1713,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
   `AM_CHILD_OF=<母 agent 名>`；呼叫端已經有 `AM_CHILD_OF`（子代自己開的 pane）就沿用同一個值，不往下疊；呼叫者自帶的 `--env AM_CHILD_OF=…` 一律剝掉。
   沒有 bot 身分的人工 shell 不標。**有 `AM_CHILD_OF` 的 pane 打 `agent start` 一律 exit 77、不呼叫 herdr**，stderr 講明「要人手就在回報裡寫清楚，由 parent 決定另派兄弟」——
   子代只有一層，狀態都掛在同一個 parent 底下追蹤。`pane split` 不擋（子代開 dev server 之類的 pane 仍可以）。
-- `agent start` 補子 agent 的指示檔、關掉 CLI 自己的指示檔：見 §6.5i。`agent start --help`（`-h`）原樣轉給 herdr，不走 spawn 流程（以前會把 env 補送打進呼叫者自己的 pane）。
+- `agent start` 補子 agent 的指示檔、關掉 CLI 自己的指示檔：見 §6.5i。`agent start --help`（`-h`）原樣轉給 herdr，不走 spawn 流程（以前會把 env 補送打進呼叫者自己的 pane）。目標 pane 只認明寫的 `--pane`，不退回 `$HERDR_PANE_ID`：受管的 bot 沒帶或帶空的 `--pane`（多半是前面的 `pane split` 失敗）exit 2、不呼叫 herdr；`--pane` 指到呼叫者自己的 pane 一律 exit 2——補送 env 那行會被打進它自己的輸入框（2026-10-01 實際灌了四行給使用者）。
 - `herdr agent prompt`：見 §6.5d。其他子指令 `exec` 真正的 herdr（`$AM_REAL_HERDR`，否則 `PATH` 上第一個不是自己的）。
 
 **PATH 只靠 pane env 不夠**：herdr 用 login shell 開 pane，profile 之後才跑並重建 `PATH`（macOS `path_helper` + `brew shellenv` 會把 shim 擠到後面）。
