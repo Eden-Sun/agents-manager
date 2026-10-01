@@ -187,5 +187,15 @@ equals "失敗後還是舊檔" "$(cat "$DIR/bin/t-tool.ts")" 'console.log("t-v1"
 check "點名" "failed bin/t-tool.ts" "$OUT"
 teardown
 
+# 11. 安裝位置是 symlink（使用者把它連到別處）：不換、不把連結吃掉，報 skipped。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+cp "$DIR/bin/a-kick.sh" "$ROOT/elsewhere.sh"; rm "$DIR/bin/a-kick.sh"; ln -s "$ROOT/elsewhere.sh" "$DIR/bin/a-kick.sh"
+equals "symlink：exit 0" "$(run)" "0"
+check "報 skipped" "skipped bin/a-kick.sh" "$OUT"
+equals "連結還在" "$([ -L "$DIR/bin/a-kick.sh" ] && echo link)" "link"
+equals "連結指到的檔沒動" "$(sed -n 2p "$ROOT/elsewhere.sh")" "echo a-v1"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

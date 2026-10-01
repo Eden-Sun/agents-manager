@@ -9,6 +9,7 @@
 # 規則（刻意窄）：
 #   - 只看 `scripts/ops/install-manifest.tsv`（在 --ref 那版）列的檔、這個平台的列；來源用 `git show <ref>:<path>` 讀，不需要 checkout。
 #   - 只換「安裝端已經有、內容跟 repo 不同」的檔。安裝端沒有的＝新檔，報 `not-installed`，第一次要人（或 AGM）手動裝。
+#   - 安裝位置是 symlink 的不碰（`mv` 會把連結換成拷貝），報 `skipped`。
 #   - 排程 unit（`systemd/`、`LaunchAgents/`）不碰：換了還要 daemon-reload／launchctl，不是這支的事，報 `skipped`。
 #   - 每支：新版先寫到同目錄暫存檔、**在暫存檔上自檢**（.sh → `bash -n`、.py → 語法編譯、.ts → 有 bun 就 `bun build`），
 #     沒過就丟掉暫存檔、報 `failed`、安裝位置上的舊檔一個位元都沒動（不讓 cron／launchd 撞到沒驗過的新版）、其他支照裝；
@@ -79,6 +80,8 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
     systemd/*|LaunchAgents/*) echo "skipped ${tgt}（排程 unit 要 daemon-reload／launchctl，不自動換）"; continue ;;
   esac
   dest="$DIR/$tgt"
+  # symlink：使用者連到別處的（例如連到 repo 的腳本）。`mv` 會把連結換成一份拷貝、斷掉那條連結，所以不碰。
+  if [ -L "$dest" ]; then echo "skipped ${tgt}（是 symlink，不換；連結指到哪就是哪版）"; continue; fi
   if [ ! -f "$dest" ]; then echo "not-installed ${tgt}（新檔，第一次要手動裝）"; continue; fi
   new="$TMP/new"
   if ! "$GIT" -C "$REPO" show "${COMMIT}:${src}" > "$new" 2>/dev/null; then
