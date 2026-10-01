@@ -16,6 +16,11 @@
 #      等不到安全窗口就留著，下一輪再來。
 #   6. 任何失敗照舊推 ops_alert（同 source+reason 由 daemon 節流），並寫 `daemon-update.log`。
 #
+#   7. （旗標，**預設關**）已安裝的 ops 腳本自動換新：旗標＝環境變數 `AGM_OPS_AUTO_INSTALL=1` 或檔案 `<AGM>/ops-auto-install.enabled`。
+#      開著時，換版成功之後、以及「沒有會進 binary 的差異」那一輪（ops 腳本改了不會產生新 binary，只靠換版後那一步會永遠漏掉），
+#      用該 sha 的 `scripts/ops/ops-install.sh` 把「已經裝了、跟 repo 不同」的 ops 腳本裝進 AGM bin：備份、原子替換、
+#      自檢、壞了還原；只更新不新增，不碰排程 unit。後者要該 sha 的 ubuntu-ci 綠燈才裝。失敗推 ops_alert（`ops_install_failed`）。
+#
 # 邊界（老實說清楚）：建置與整樹測試不在這裡重跑——推 main 前 `scripts/check.sh changed` 已過、ubuntu-ci 在背景跑
 # 整樹；這裡只認 ubuntu-ci 的綠燈。窗口（沒人在忙）是協調，不是 OS 層的鎖：這台機器上任何 shell 仍可直接
 # kill daemon。安裝方式與排程 unit 見同目錄 README.md；這支腳本本身不安裝自己。
@@ -53,6 +58,36 @@ alert() { # alert <reason> <detail>
   else
     log "agm CLI 不在 ${AGM}，ops-alert 只留在這份 log"
   fi
+}
+
+# ── ops 腳本自動換新（旗標，預設關；見檔頭 7）──
+OPS_AUTO_FLAG="$DIR/ops-auto-install.enabled"
+ops_auto_on() { [ "${AGM_OPS_AUTO_INSTALL:-0}" = 1 ] || [ -f "$OPS_AUTO_FLAG" ]; }
+# ops_install_step <sha> <要不要 ubuntu-ci 綠燈 0|1>：永遠回 0（這一步壞了不能影響部署的結果）。
+ops_install_step() {
+  ops_auto_on || return 0
+  _osha="$1"; _ogreen="$2"
+  _oscript=$("$GIT" -C "$DEPLOY" show "${_osha}:scripts/ops/ops-install.sh" 2>/dev/null) || { log "ops 自動安裝：${_osha} 沒有 ops-install.sh，跳過"; return 0; }
+  _oplan=$(printf '%s\n' "$_oscript" | bash -s -- --repo "$DEPLOY" --ref "$_osha" --dir "$DIR" --dry-run 2>>"$LOG")
+  _on=$(printf '%s\n' "$_oplan" | sed -n 's/.*changes=\([0-9][0-9]*\) failed=.*/\1/p' | tail -1)
+  case "$_on" in ''|*[!0-9]*) log "ops 自動安裝：看不懂 dry-run 的結果，這輪不裝"; return 0 ;; esac
+  [ "$_on" -gt 0 ] || return 0
+  if [ "$_ogreen" = 1 ]; then
+    _ostate=$("$GH" api "repos/${GH_REPO}/commits/${_osha}/status" -q ".statuses[]|select(.context==\"${CI_CONTEXT}\")|.state" 2>>"$LOG" | head -1)
+    if [ "$_ostate" != success ]; then
+      log "ops 自動安裝：有 ${_on} 支待更新，但 $(printf '%s' "$_osha" | cut -c1-8) 的 ${CI_CONTEXT} 是「${_ostate:-沒有狀態}」，等綠燈"
+      return 0
+    fi
+  fi
+  _orc=0
+  _oout=$(printf '%s\n' "$_oscript" | bash -s -- --repo "$DEPLOY" --ref "$_osha" --dir "$DIR" 2>>"$LOG") || _orc=$?
+  printf '%s\n' "$_oout" | sed 's/^/ops-install: /' >> "$LOG"
+  if [ "$_orc" -ne 0 ]; then
+    alert ops_install_failed "自動換新已安裝的 ops 腳本有失敗（已還原舊版）：$(printf '%s\n' "$_oout" | grep '^failed ' | head -3 | tr '\n' ';')。細節見 ${LOG}，備份在 ${DIR}/ops-install-backups"
+  else
+    log "ops 自動安裝：已把 ${_on} 支換成 $(printf '%s' "$_osha" | cut -c1-8) 的版本"
+  fi
+  return 0
 }
 
 # A second runner must not build or swap at the same time. 鎖裡寫 pid 與時間：被強制關機、SIGKILL 的那一輪
@@ -190,6 +225,7 @@ else
   # 線上那顆到 origin/main 之間沒有會進 binary 的差異就結束，不去問 GitHub。
   if binary_same "$BUILT_FULL" "$HEAD_SHA"; then
     log "${BUILT_SHA} 之後沒有會進 binary 的差異，跳過（origin/main ${HEAD_SHA}）"
+    ops_install_step "$HEAD_SHA" 1
     exit 0
   fi
   # 沿 first-parent 往回找最新一顆 ubuntu-ci 綠燈；走到線上那顆（或它的祖先）為止——再往回都是舊的。
@@ -249,6 +285,7 @@ case "$SWAP_RC" in
   0)
     log "已換上 ${SHORT}"
     [ "$NOW" = 1 ] && drop_now "已部署 ${SHORT}"
+    ops_install_step "$TARGET" 0
     ;;
   4)
     # 有人在忙／窗口拿不到：正常的等。立即部署的請求留著，下一輪再試。

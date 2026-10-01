@@ -3445,7 +3445,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
 - **`scripts/ops/*.sh`（`daemon-update-kick.sh` 等）與 `*-task.md` 沒有內嵌，不會自動更新**——改了就照 `scripts/ops/README.md` 手動 install，並留備份。
   要裝哪些、裝到哪裡只寫在 `scripts/ops/install-manifest.tsv`；`agm ops-sync --check`（issue #418）唯讀比對安裝端與 `origin/main`，
   分開報 `drift`（安裝檔不是 repo 任何一版）、`behind`（落後，附 commit）、`missing`、`extra`（`bin/` 裡沒有版控的檔；`agm` 與 `*.bak*` 不算），
-  有落差 exit 1，加 `--alert` 推 `ops_alert`（`ops-sync`／`installed_out_of_sync`）。它不安裝任何東西，install 照舊由 AGM 核准後手動做。agm-host 上 `scripts/ops/ubuntu-ci.sh` 每輪順手排程它（預設每 6 小時最多一次、`AGM_CI_OPS_SYNC_INTERVAL` 可調，不靠新 commit 觸發），有落差由它推 `ops_alert`；檢查本身壞掉不影響 CI 結果。
+  有落差 exit 1，加 `--alert` 推 `ops_alert`（`ops-sync`／`installed_out_of_sync`）。它不安裝任何東西，install 照舊由 AGM 核准後手動做。agm-host 上 `scripts/ops/ubuntu-ci.sh` 每輪順手排程它（預設每 6 小時最多一次、`AGM_CI_OPS_SYNC_INTERVAL` 可調，不靠新 commit 觸發），有落差由它推 `ops_alert`；檢查本身壞掉不影響 CI 結果。例外是旗標（預設關）：`scripts/ops/ops-install.sh`（備份、原子替換、自檢、壞了還原；只更新已安裝的、清單內的檔，不新增、不碰排程 unit）由 `daemon-update-kick.sh` 在換版成功後與「沒有進 binary 的差異」那輪叫起，見 `scripts/ops/README.md`。
 - **`bin/agm` 也要比對**（issue #532）：ops 腳本是手動裝的、`bin/agm` 是開機時從內嵌版寫出來的，兩邊各走各的，
   而「腳本比 CLI 新」以前一律回報 ok——那正是最會痛的組合：`daemon-swap.sh` 交還窗口用 `--lease-token-file`，
   舊的 `bin/agm` 不認得就 argparse rc 2，restart 窗口沒交還、握到 TTL（預設 900 秒），期間 assignment 派送也停著。

@@ -332,6 +332,91 @@ teardown
 
 # 18. 腳本本身：不再有建置 child／核准／門檻這些東西；daemon 的 kick_ready 靠這個檔名判斷；全形標點前要有大括號。
 check "認得立即部署請求檔（kick_ready 靠這個字）" "daemon-update.now.json" "$SCRIPT"
+# ── ops 腳本自動換新（旗標，預設關）：假 repo 裡放真的 ops-install.sh＋一份對照表＋一支 x-kick.sh；安裝端先裝好 v1 ──
+seed_ops() { # 在 WORK 加上 ops-install.sh、對照表、x-kick.sh（v1）並推上去；安裝端的 x-kick.sh 是 v1
+  mkdir -p "$WORK/scripts/ops"
+  cp "$HERE/ops-install.sh" "$WORK/scripts/ops/ops-install.sh"
+  printf 'scripts/ops/x-kick.sh  bin/x-kick.sh\n' > "$WORK/scripts/ops/install-manifest.tsv"
+  printf '#!/bin/bash\necho x-v1\n' > "$WORK/scripts/ops/x-kick.sh"
+  "$GITBIN" -C "$WORK" add -A >/dev/null; "$GITBIN" -C "$WORK" commit -q -m "seed ops"; "$GITBIN" -C "$WORK" push -q origin HEAD:main
+  install -m 755 "$WORK/scripts/ops/x-kick.sh" "$AGM_DIR/bin/x-kick.sh"
+}
+bump_x() { # bump_x <內容>：改 x-kick.sh 並推上去，回 sha
+  printf '%s' "$1" > "$WORK/scripts/ops/x-kick.sh"
+  "$GITBIN" -C "$WORK" add -A >/dev/null; "$GITBIN" -C "$WORK" commit -q -m "bump x"; "$GITBIN" -C "$WORK" push -q origin HEAD:main
+  "$GITBIN" -C "$WORK" rev-parse HEAD
+}
+only_ops_since_built() { # 線上那顆之後只剩 ops 的改動（不進 binary）
+  "$GITBIN" -C "$WORK" reset -q --hard "$C0"; "$GITBIN" -C "$WORK" push -q -f origin HEAD:main
+  seed_ops
+}
+x_line() { sed -n 2p "$AGM_DIR/bin/x-kick.sh"; }
+
+# 8. 旗標沒開（預設）：ops 腳本改了也不動安裝端，也不為它問 GitHub。
+setup
+only_ops_since_built
+H=$(bump_x $'#!/bin/bash\necho x-v2\n'); ci "$H" success
+check_eq "rc=0" "0" "$(run)"
+check_eq "安裝端沒動" "echo x-v1" "$(x_line)"
+check_eq "沒問 GitHub" "0" "$(wc -l < "$AGM_DIR/gh.log" | tr -d ' ')"
+check_no "log 沒提 ops 自動安裝" "ops 自動安裝" "$(LOG)"
+teardown
+
+# 9. 旗標開（檔案）、沒有會進 binary 的差異、HEAD 綠燈：只換 ops 腳本，不建置、不換版；先備份。
+setup
+only_ops_since_built
+touch "$AGM_DIR/ops-auto-install.enabled"
+H=$(bump_x $'#!/bin/bash\necho x-v2\n'); ci "$H" success
+check_eq "rc=0" "0" "$(run)"
+check_eq "安裝端換成 v2" "echo x-v2" "$(x_line)"
+check "log 記下裝了哪支" "ops-install: installed bin/x-kick.sh" "$(LOG)"
+check_eq "備份是舊的 v1" "echo x-v1" "$(sed -n 2p "$(ls -d "$AGM_DIR"/ops-install-backups/*/ | head -1)bin/x-kick.sh")"
+check_eq "沒建置" "0" "$(wc -l < "$AGM_DIR/build.log" | tr -d ' ')"
+check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check_eq "沒有 ops_alert" "0" "$(wc -l < "$AGM_DIR/alerts.log" | tr -d ' ')"
+teardown
+
+# 10. 旗標開、HEAD 的 ubuntu-ci 還沒綠：等，不裝。
+setup
+only_ops_since_built
+touch "$AGM_DIR/ops-auto-install.enabled"
+H=$(bump_x $'#!/bin/bash\necho x-v2\n'); ci "$H" pending
+check_eq "rc=0" "0" "$(run)"
+check_eq "安裝端沒動" "echo x-v1" "$(x_line)"
+check "log 說等綠燈" "等綠燈" "$(LOG)"
+teardown
+
+# 11. 旗標開（環境變數）、有 binary 要換：換版成功之後才裝 ops 腳本；順序是先換版。
+setup
+seed_ops
+H=$(bump_x $'#!/bin/bash\necho x-v2\n'); ci "$H" success
+export AGM_OPS_AUTO_INSTALL=1
+check_eq "rc=0" "0" "$(run)"
+unset AGM_OPS_AUTO_INSTALL
+check "有換版" "--sha $H" "$AGM_DIR/swap.log"
+check_eq "換版後 ops 腳本也換了" "echo x-v2" "$(x_line)"
+teardown
+
+# 12. 換版沒成功（daemon-swap rc=7 回滾）：不裝 ops 腳本。
+setup
+seed_ops
+touch "$AGM_DIR/ops-auto-install.enabled"
+H=$(bump_x $'#!/bin/bash\necho x-v2\n'); ci "$H" success
+STUB_SWAP_RC=7 run >/dev/null
+check_eq "安裝端沒動" "echo x-v1" "$(x_line)"
+teardown
+
+# 13. 新版自檢沒過：還原舊版、推 ops_install_failed，部署本身的結果不受影響（照常寫「已換上」）。
+setup
+seed_ops
+touch "$AGM_DIR/ops-auto-install.enabled"
+H=$(bump_x $'#!/bin/bash\nif then fi (\n'); ci "$H" success
+check_eq "rc=0" "0" "$(run)"
+check_eq "壞的新版沒留在安裝端" "echo x-v1" "$(x_line)"
+check "推了 ops_install_failed" "ops_install_failed" "$AGM_DIR/alerts.log"
+check "部署照常完成" "已換上" "$(LOG)"
+teardown
+
 for gone in AGM_BUILD_BOT AGM_REBUILD_THRESHOLD "approval request" "lease acquire" "agm assign\|assign --bot" "AGM_REBUILD_MAX_WAIT_MIN"; do
   check_no "已拿掉：${gone}" "$gone" "$SCRIPT"
 done

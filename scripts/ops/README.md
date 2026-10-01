@@ -39,6 +39,25 @@ agm-host 上由 `ubuntu-ci.sh` 排程它（每 `AGM_CI_OPS_SYNC_INTERVAL` 秒，
 以前只有文件寫「巡檢每天跑一次」、沒有任何東西在排程，`outbox-gc.sh` 停在 9/28 的舊版也沒人發現。它只偵測，不會替你 install。
 `--check` 另外唯讀比對 **`bin/agm`**（issue #532）：`installed` 段是「安裝的不是這顆 binary 內嵌的那份」——加 `--refresh-cli` 就地換掉（`POST /api/supervisor/cli`，不必等 daemon 重啟）；`binary` 段是「binary 內嵌的落後 repo」——那要重建 binary **並重啟 daemon**，這支動不了。daemon 問不到時 `cli.state` 是 `unknown`，不影響 ops 腳本那半邊的結論。
 
+## 已安裝 ops 腳本的自動換新（`ops-install.sh`，旗標，預設關）
+
+根因（2026-10-01，`outbox-gc.sh` 停在 9/28 的舊版）：安裝一直是手動的，換版流程只管 daemon binary——而 ops 腳本的改動根本不會
+產生新 binary（`daemon-update-kick.sh` 看到「沒有會進 binary 的差異」就收工），所以沒有任何一步會把它們裝過去。
+
+`ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run]`：
+
+- 只看 `install-manifest.tsv`（`--ref` 那版）這個平台的列，來源用 `git show <ref>:<path>` 讀。
+- **只更新「已經裝了、內容跟 repo 不同」的檔**。安裝端沒有的（新檔）報 `not-installed`，第一次要手動裝；
+  排程 unit（`systemd/`、`LaunchAgents/`）報 `skipped`、不碰（換了還要 daemon-reload／launchctl）；清單外的檔不碰。
+- 每支先備份到 `<AGM>/ops-install-backups/<UTC 時間>/<安裝位置>`，寫到同目錄暫存檔再 `mv`（原子替換），然後自檢
+  （`.sh` → `bash -n`、`.py` → 語法編譯、`.ts` → 有 bun 就 `bun build`）；沒過就放回備份、報 `failed`、其他支照裝。
+- `--dry-run` 只列 `would-install`。最後一行 `changes=N failed=M`；有失敗 exit 1。成功會把「時間 commit」寫進 `<AGM>/ops-install.last`。
+
+**接到部署**：`daemon-update-kick.sh` 在旗標開著時，於 ① 換版成功之後、② 「沒有會進 binary 的差異」那一輪（要該 sha 的 `ubuntu-ci` 綠燈）
+用該 sha 自己的 `ops-install.sh` 換新；失敗推 `ops_alert`（`ops_install_failed`），不影響部署結果。**旗標預設關**，要由使用者或 AGM 開：
+`touch ~/.config/agents-manager/supervisor/AGM/ops-auto-install.enabled`（或給 kick 的環境 `AGM_OPS_AUTO_INSTALL=1`），關掉就刪檔。
+注意：kick 本身也是已安裝的檔，這一版 kick 要先手動 `install` 一次，旗標才有東西可開。
+
 ## daemon-update-kick.sh
 
 例行自動部署（使用者 2026-09-29 簡化）：正式 daemon 的 release binary 落後最新一顆 `ubuntu-ci` 綠燈的 `origin/main` 時，
