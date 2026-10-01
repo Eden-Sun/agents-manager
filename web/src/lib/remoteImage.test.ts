@@ -99,3 +99,14 @@ test('本機／內網位址要標出來（點下去是由這台機器對它發�
     assert.equal(remoteImageInfo(u)?.internal, false, u)
   }
 })
+
+test('不跟轉址：佔位只寫了原網址的網域，redirect 要是 error，被轉到別的主機就算失敗（請求不會送到使用者沒看到的主機）', async () => {
+  const seen: { init?: RequestInit }[] = []
+  await fetchRemoteImageBlob('https://example.com/a.png', fakeFetch({}, seen))
+  assert.equal(seen[0].init?.redirect, 'error')
+  // 瀏覽器遇到 redirect:'error' 的轉址會讓 fetch 以 TypeError reject：照樣往上丟，畫面改成「在新分頁開啟」。
+  const redirected = (async () => {
+    throw new TypeError('Failed to fetch')
+  }) as unknown as typeof fetch
+  await assert.rejects(fetchRemoteImageBlob('https://example.com/a.png', redirected), TypeError)
+})

@@ -89,9 +89,11 @@ async function readCapped(res: Response, type: string): Promise<Blob> {
  * 使用者點了「載入圖片」才呼叫。瀏覽器自己 `fetch`→blob：不帶 cookie、不帶 Referer（網址裡可能有 token），
  * 回應要是白名單裡的點陣圖（見 [[safeImageType]]，blob 一律用白名單型別重包）且不超過上限；
  * 對方沒開 CORS 或抓不到就丟錯，由畫面改成「在新分頁開啟」的連結。
+ * `redirect: 'error'`：不跟轉址。佔位只寫了原網址的網域，跟著轉到別的主機＝請求送去使用者沒看到的地方；
+ * CORS 模式下 `manual` 又讀不到 Location，事後比對最終網域也來不及（請求已送出），所以被轉址的圖一律算失敗、走新分頁連結。
  */
 export async function fetchRemoteImageBlob(src: string, fetchImpl: typeof fetch = fetch): Promise<Blob> {
-  const res = await fetchImpl(src, { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'follow' })
+  const res = await fetchImpl(src, { mode: 'cors', credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const raw = res.headers.get('content-type') ?? ''
   const type = safeImageType(raw)
