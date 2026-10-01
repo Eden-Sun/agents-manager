@@ -217,5 +217,19 @@ equals "第二次裝 exit 0" "$(run)" "0"
 equals "兩份備份都在（v1 沒被 v2 蓋掉）" "$(cat "$DIR"/ops-install-backups/*/bin/a-kick.sh | grep -c 'echo a-v1\|echo a-v2')" "2"
 teardown
 
+# 10. 同時只能有一個在裝：鎖被活著的行程握著就不動任何檔（exit 3）；握鎖的行程死了（殘留的鎖）就接手。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+sleep 30 & HOLDER=$!
+mkdir "$DIR/ops-install.lock"; echo "$HOLDER" > "$DIR/ops-install.lock/pid"
+equals "鎖被活著的行程握著：exit 3" "$(run)" "3"
+check "說有人在裝" "busy" "$OUT"
+equals "什麼都沒動" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v1"
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+equals "殘留的鎖（pid 已死）：接手照裝" "$(run)" "0"
+equals "裝上了" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v2"
+gone "裝完放掉鎖" "$DIR/ops-install.lock"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
