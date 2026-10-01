@@ -139,7 +139,7 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
             };
             observation_fence = Some(disk.fence);
             let running = running_version(run.status_json.as_deref());
-            let upstream = crate::upstream_update::latest_target_for_host("claude", &host).await;
+            let upstream = crate::upstream_update::latest_target_for_host(app, "claude", &host).await;
             let disk_version = disk.version.as_deref();
             let previous_installed_notice = run
                 .update_notice
@@ -434,7 +434,7 @@ mod tests {
             .await
             .unwrap();
         seed_disk(&e.app, "local", "claude", "2.1.281 (Claude Code)").await;
-        crate::upstream_update::set_snapshot_for_test(crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&e.app, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.281 (Claude Code)".into()))],
@@ -478,7 +478,7 @@ mod tests {
             .await
             .unwrap();
         seed_disk(&e.app, "local", "claude", "2.1.284 (Claude Code)").await;
-        crate::upstream_update::set_snapshot_for_test(crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&e.app, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.284 (Claude Code)".into()))],
