@@ -180,6 +180,11 @@ pub fn squash(s: &str) -> String {
     out.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+/// Destructive composer CAS is exact; only treat CRLF and LF as the same line ending.
+fn same_composer(current: &str, expected: &str) -> bool {
+    current.replace("\r\n", "\n") == expected.replace("\r\n", "\n")
+}
+
 fn first_line(text: &str) -> &str {
     text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
 }
@@ -498,14 +503,14 @@ pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option
     rewind_with(app, bot_id, message_id, pane, None).await
 }
 
-/// 清掉終端輸入列裡那段（使用者在確認框看過、`expect` 是那段字）。字換了就不動，回 `composer_changed`。
+/// 清掉終端輸入列裡那段（使用者在確認框看過、`expect` 是那段字）。逐字比對，只正規化 CRLF/LF 換行；有任何其他差異就不動，回 `composer_changed`。
 async fn clear_composer(pane: &dyn Pane, expect: &str) -> LcResult<()> {
     let s = read(pane).await.map_err(|f| up(f.message()))?;
     if in_rewind_ui(&s) {
         return Err(conflict(Fail::UiBusy.reason(), &Fail::UiBusy.message()));
     }
     let Some(text) = lifecycle::composer_text("claude", &s) else { return Ok(()) };
-    if squash(&text) != squash(expect) {
+    if !same_composer(&text, expect) {
         return Err(LcError::conflict(
             "composer_changed",
             json!({"message": "終端輸入列裡的字跟剛才不一樣了，沒有動它；再按一次倒回看看現在是什麼。", "draft": text}),

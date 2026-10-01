@@ -143,6 +143,13 @@ fn squash_ignores_whitespace_and_image_placeholders() {
     assert_eq!(squash("[Image #x] stays"), "[Image#x]stays");
 }
 
+#[test]
+fn composer_cas_only_normalizes_crlf_line_endings() {
+    assert!(same_composer("first\r\nsecond", "first\nsecond"));
+    assert!(!same_composer("a  b", "a b"));
+    assert!(!same_composer("look [Image #1]", "look"));
+}
+
 // ───────────── 假 TUI ─────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -858,6 +865,14 @@ async fn a_busy_composer_is_shown_and_can_be_cleared_on_request() {
     }
     assert_eq!(tui.composer(), "half typed", "字對不上就不清");
     assert_eq!(rewound(&r).await, vec![false; 6]);
+
+    for (current, expect) in [("a  b", "a b"), ("look here [Image #1]", "look here")] {
+        let tui = FakeTui::new(&[A, SECOND, C], Faults { composer: Some(current.into()), ..Default::default() });
+        let changed = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some(expect.into())).await.unwrap_err();
+        assert_eq!(reason(changed), "composer_changed", "current={current:?}, expect={expect:?}");
+        assert_eq!(tui.composer(), current, "CAS 不符時保留目前輸入列");
+        assert!(tui.log().is_empty(), "CAS 不符時不能送 ctrl+c: {:?}", tui.log());
+    }
 
     let tui = busy();
     let out = rewind_with(&r.e.app, &r.bot, &r.ids[2], Some(tui.clone() as Arc<dyn Pane>), Some("half typed".into())).await.unwrap();
