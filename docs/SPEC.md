@@ -752,7 +752,7 @@ claude 在對話裡印 `⎿  Set model to Sonnet 5.5 and saved …`／`⎿  Set 
 30 秒一輪、`visible` 80 行）順便取最後一次的這兩行（`claude_live.rs`；只認頂格 `❯ /model …`／`❯ /effort …` 緊接著的那一行 `⎿`，
 工具結果（`⏺ Bash(…)` 底下的 stdout）也用 `⎿`，不能單靠它（#741）；顯示名 `Sonnet 5.5` → `claude-sonnet-5-5`，
 認不出的名字不猜），寫進 `runs.runtime_model`／`runtime_effort`。收編的子 agent（`managed_by=child`，設定本來就是從 argv 抄的）
-一併改 `bots.model`／`effort`，側欄跟著變；一般 bot 只改 runtime（設定不動，重啟回到設定值，畫成 drift）。一般 bot 可能是
+一併改 `bots.model`／`effort`，側欄跟著變（run 與 bot 的落差分開算：bot 的 UPDATE 失敗會記 warn，下一輪只要 bot 還落後就重寫，#743）；一般 bot 只改 runtime（設定不動，重啟回到設定值，畫成 drift）。一般 bot 可能是
 `--resume` 接回的、畫面上的那行是上一個 session 的：同一個 run 第一次看到的只當基準，之後變了才採用；AG Man 用全新對話起的 run
 （argv 沒有 `--resume`／`--continue`）起 run 時就記空基準（`claude_live::start_fresh`），第一輪巡邏前使用者打的 `/model`、`/effort` 直接採用（#742）；
 接回、分支、收編的 run 維持第一次只當基準（那一刻起的切換在 daemon 重啟後也一樣當基準）。已知限制：切換那行在

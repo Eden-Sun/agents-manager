@@ -124,32 +124,42 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
         }
     }
     let Ok(Some(run)) = db::run(&app.db, &run.id).await else { return };
+    // run 的落差（跟 runtime 比）與 bot 設定的落差（跟 bots.* 比）分開算（#743）：bot 的 UPDATE 失敗時 runtime 已經對了，
+    // 下一輪只剩 bot 落後，仍要補寫，不能因為 runtime 已收斂就當作完成。
     let cur_model = run.runtime_model.clone().or_else(|| bot.model.clone());
     let cur_effort = run.runtime_effort.clone().or_else(|| bot.effort.clone());
-    let model = seen.model.filter(|m| cur_model.as_deref() != Some(m.as_str()));
-    let effort = seen.effort.filter(|e| cur_effort.as_deref() != Some(e.as_str()));
-    let bot_behind = child
-        && (model.is_some() && bot.model != model || effort.is_some() && bot.effort != effort);
-    if model.is_none() && effort.is_none() && !bot_behind {
-        return;
-    }
-    let wrote = sqlx::query("UPDATE runs SET runtime_model = COALESCE(?, runtime_model), runtime_effort = COALESCE(?, runtime_effort) WHERE id = ?")
-        .bind(&model)
-        .bind(&effort)
-        .bind(&run.id)
-        .execute(&app.db)
-        .await
-        .is_ok();
-    if wrote && child {
-        let _ = sqlx::query("UPDATE bots SET model = COALESCE(?, model), effort = COALESCE(?, effort) WHERE id = ?")
+    let model = seen.model.clone().filter(|m| cur_model.as_deref() != Some(m.as_str()));
+    let effort = seen.effort.clone().filter(|e| cur_effort.as_deref() != Some(e.as_str()));
+    let bot_model = seen.model.filter(|m| child && bot.model.as_deref() != Some(m.as_str()));
+    let bot_effort = seen.effort.filter(|e| child && bot.effort.as_deref() != Some(e.as_str()));
+    let mut changed = false;
+    if model.is_some() || effort.is_some() {
+        let wrote = sqlx::query("UPDATE runs SET runtime_model = COALESCE(?, runtime_model), runtime_effort = COALESCE(?, runtime_effort) WHERE id = ?")
             .bind(&model)
             .bind(&effort)
+            .bind(&run.id)
+            .execute(&app.db)
+            .await;
+        if let Err(e) = wrote {
+            tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not record the claude runtime switch, retrying next sweep");
+            return;
+        }
+        changed = true;
+        tracing::info!(run = %run.id, bot = %bot.name, ?model, ?effort, child, "claude runtime switched in the TUI");
+    }
+    if bot_model.is_some() || bot_effort.is_some() {
+        let wrote = sqlx::query("UPDATE bots SET model = COALESCE(?, model), effort = COALESCE(?, effort) WHERE id = ?")
+            .bind(&bot_model)
+            .bind(&bot_effort)
             .bind(&bot.id)
             .execute(&app.db)
             .await;
+        match wrote {
+            Ok(_) => changed = true,
+            Err(e) => tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not follow the claude runtime switch in bots.model/effort, retrying next sweep"),
+        }
     }
-    if wrote {
-        tracing::info!(run = %run.id, bot = %bot.name, ?model, ?effort, child, "claude runtime switched in the TUI");
+    if changed {
         app.emit_bot_status(&bot.id).await;
     }
 }
@@ -242,6 +252,36 @@ mod tests {
         assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "model 與 effort 都在第一輪就採用");
         let b = db::bot(&app.db, &user.id).await.unwrap().unwrap();
         assert_eq!(b.model, None, "一般 bot 的設定不動");
+    }
+
+    /// #743：run 的 UPDATE 成功、bot 的 UPDATE 失敗，下一輪要把 bot 補上（runtime 已經對了也一樣）。
+    #[tokio::test]
+    async fn a_child_whose_bot_update_failed_is_caught_up_on_the_next_sweep() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let kid = crate::testing::claude_bot(&app, &env.project_id, "kid743").await;
+        sqlx::query("UPDATE bots SET managed_by = 'child', model = 'claude-opus-5-5', effort = 'xhigh' WHERE id = ?")
+            .bind(&kid.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = crate::testing::fake_run(&app, &kid.id).await;
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        // 讓 bot 的 UPDATE 失敗（run 的不受影響）。
+        sqlx::query("CREATE TRIGGER fail_bot_update BEFORE UPDATE ON bots BEGIN SELECT RAISE(ABORT, 'boom'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        observe(&app, &run, SCREEN).await;
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "run 已寫入");
+        let b = db::bot(&app.db, &kid.id).await.unwrap().unwrap();
+        assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("claude-opus-5-5"), Some("xhigh")), "bot 的 UPDATE 失敗，還沒跟上");
+
+        sqlx::query("DROP TRIGGER fail_bot_update").execute(&app.db).await.unwrap();
+        observe(&app, &run, SCREEN).await;
+        let b = db::bot(&app.db, &kid.id).await.unwrap().unwrap();
+        assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "下一輪補上 model 與 effort");
     }
 
     #[tokio::test]
