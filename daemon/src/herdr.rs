@@ -23,6 +23,8 @@ pub enum AgentStatus {
     Working,
     Blocked,
     Done,
+    /// 也接住 herdr 之後新增、我們還不認得的值：一個奇怪的狀態不能讓整份清單解析失敗。
+    #[serde(other)]
     Unknown,
 }
 
@@ -916,6 +918,18 @@ mod rpc_tests {
         assert!(next.is_none(), "錯誤行之後的事件不能再送出來：{next:?}");
         server.abort();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 一個 agent 帶著我們不認得的狀態值（herdr 之後新增）：不能讓整份 `agent.list`／`pane.list` 解析失敗——
+    /// 對帳讀不到清單就整輪跳過，一台主機上所有 bot 都收不到對帳。不認得的當 `unknown`。
+    #[test]
+    fn an_unrecognised_agent_status_does_not_fail_the_whole_listing() {
+        let list = json!([agent("a", "claude", "idle", false), agent("b", "claude", "waiting", false)]);
+        let parsed: Vec<AgentInfo> = serde_json::from_value(list).expect("one odd status must not poison the list");
+        assert_eq!(parsed[0].agent_status, AgentStatus::Idle);
+        assert_eq!(parsed[1].agent_status, AgentStatus::Unknown);
+        let pane: PaneInfo = serde_json::from_value(json!({"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1", "agent_status": "waiting"})).unwrap();
+        assert_eq!(pane.agent_status, Some(AgentStatus::Unknown));
     }
 
     fn agent(name: &str, kind: &str, status: &str, launch_pending: bool) -> Value {
