@@ -227,3 +227,10 @@ test('codexInstallPlan：沒有 codex 在跑也照上游快照出安裝鈕（本
   assert.equal(codexInstallPlan(bots, runs, none, () => 'local', { ...upstream, hasUpdate: false }), null)
   assert.equal(codexInstallPlan(bots, runs, none, () => 'local'), null, "claude 的「需安裝」不算 codex 的")
 })
+
+test('grok 徽章也算一種更新 chip：手機單獨出現照舊一顆，跟別種並存就合成一顆（#761 補手機合併選單）', () => {
+  assert.equal(mergeUpdateChips(true, false, false, false, false, true), false, '只有 grok 一顆不合併（跟 herdr 一樣）')
+  assert.equal(mergeUpdateChips(true, true, false, false, false, true), true, 'grok 跟重啟並存要合成一顆')
+  assert.equal(mergeUpdateChips(true, false, false, false, true, true), true, 'grok 跟 herdr 並存要合成一顆')
+  assert.equal(mergeUpdateChips(false, true, true, true, true, true), false, '桌機照舊並排')
+})

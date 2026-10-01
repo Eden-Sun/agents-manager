@@ -13,6 +13,7 @@ import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { HerdrUpdateChip } from './HerdrUpdateChip'
 import { GrokUpdateChip } from './GrokUpdateChip'
 import { useHerdrPlan } from '../hooks/useHerdrPlan'
+import { useGrokPlan } from '../hooks/useGrokPlan'
 import { useHerdrUpdate } from '../store/herdrUpdate'
 import { MergedUpdateChip, type DialogControl } from './MergedUpdateChip'
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
@@ -40,16 +41,17 @@ export function UpdateQuotaChip() {
   )
   const herdrPlan = useHerdrPlan() !== null
   const herdrShown = useHerdrUpdate((s) => s.active !== null || s.result !== null) || herdrPlan
+  const grokShown = useGrokPlan() !== null
   // 手機兩種以上更新 chip 都要出現時合成一顆，選單分開列重啟、兩種 CLI 安裝與 herdr。
-  if (mergeUpdateChips(phone, restartShown, codexShown, claudeShown, herdrShown)) return <MergedUpdateChip />
+  if (mergeUpdateChips(phone, restartShown, codexShown, claudeShown, herdrShown, grokShown)) return <MergedUpdateChip />
   return (
     <>
       <RestartChip />
       <CodexInstallChip />
       <ClaudeInstallChip />
       <HerdrUpdateChip />
-      {/* grok 只提示、不一鍵安裝：手機 header 擠，只畫在桌機；手機靠 daemon 推的通知。 */}
-      {phone ? null : <GrokUpdateChip />}
+      {/* grok 只提示、不一鍵安裝；手機單獨出現照舊一顆，跟別種並存時併進上面的合成選單。 */}
+      <GrokUpdateChip />
     </>
   )
 }

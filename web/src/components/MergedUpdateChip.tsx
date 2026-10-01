@@ -10,7 +10,10 @@ import { CodexInstallChip } from './CodexInstallChip'
 import { ClaudeInstallChip } from './ClaudeInstallChip'
 import { RestartChip } from './UpdateQuotaChip'
 import { HerdrUpdateChip } from './HerdrUpdateChip'
+import { GrokUpdateChip } from './GrokUpdateChip'
 import { useHerdrPlan } from '../hooks/useHerdrPlan'
+import { useGrokPlan } from '../hooks/useGrokPlan'
+import { grokMenuItem } from '../lib/grokUpdate'
 import { herdrMenuItem, useHerdrUpdate } from '../store/herdrUpdate'
 
 /** 由外面代為開關的確認框（手機合成那顆用）。 */
@@ -64,10 +67,12 @@ export function MergedUpdateChip() {
   const herdrActive = useHerdrUpdate((s) => s.active)
   const herdrResult = useHerdrUpdate((s) => s.result)
   const herdrItem = herdrMenuItem(herdrActive, herdrResult, herdrPlan)
+  const grokPlan = useGrokPlan()
+  const grokItem = grokPlan ? grokMenuItem(grokPlan) : null
   const [open, setOpen] = useState(false)
   // 標題列一路有 overflow 裁切與 transform（fixed 也會被帶偏），選單用 portal 掛到 body、fixed 在按鈕下緣。
   const [at, setAt] = useState<CSSProperties>({})
-  const [which, setWhich] = useState<'restart' | 'codex' | 'claude' | 'herdr' | null>(null)
+  const [which, setWhich] = useState<'restart' | 'codex' | 'claude' | 'herdr' | 'grok' | null>(null)
   const btn = useRef<HTMLButtonElement>(null)
   const pop = useRef<HTMLDivElement>(null)
   const menuKeys = useMenuKeys(open, pop, btn, () => setOpen(false))
@@ -98,6 +103,7 @@ export function MergedUpdateChip() {
     restartShown,
     codexShown,
     herdrItem,
+    grokItem,
   })
   const close = () => setWhich(null)
 
@@ -174,6 +180,15 @@ export function MergedUpdateChip() {
               >
                 {herdrItem}
               </button> : null}
+              {grokItem ? <button
+                type="button"
+                className="head-menu-item"
+                role="menuitem"
+                tabIndex={-1}
+                onClick={() => setWhich('grok')}
+              >
+                {grokItem}
+              </button> : null}
             </div>,
             document.body,
           )
@@ -182,6 +197,7 @@ export function MergedUpdateChip() {
       <CodexInstallChip control={{ open: which === 'codex', close }} />
       <ClaudeInstallChip control={{ open: which === 'claude', close }} />
       <HerdrUpdateChip control={{ open: which === 'herdr', close }} />
+      <GrokUpdateChip control={{ open: which === 'grok', close }} />
     </>
   )
 }
