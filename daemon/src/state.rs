@@ -116,6 +116,8 @@ pub struct App {
     /// 上游新版巡邏的最近一輪快照（header 的 ⌃⌃ 警示與 CLI 安裝目標都讀它）。跟著 App 走、不放 process 全域：
     /// 測試各自一個 App，平行跑時不會互相蓋掉別人的 `claude` 快照（issue #759）。
     pub upstream_watch: crate::upstream_update::Watch,
+    /// `update_watch` 讀各主機磁碟上 CLI 版本的五分鐘快取；同樣跟著 App 走（issue #759）。
+    pub(crate) disk_versions: crate::update_watch::DiskCache,
 
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Child pane creation permits and the short fence used while a bot credential rotates.
@@ -240,6 +242,7 @@ impl App {
             proc_env: Default::default(),
             kind_probe: Default::default(),
             upstream_watch: Default::default(),
+            disk_versions: Default::default(),
             locks: Mutex::new(HashMap::new()),
             credential_spawn_gate: std::sync::Mutex::new(crate::credential_spawn::Gate::default()),
             bus,
