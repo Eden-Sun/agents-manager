@@ -39,6 +39,8 @@ agm-host 上由 `ubuntu-ci.sh` 排程它（每 `AGM_CI_OPS_SYNC_INTERVAL` 秒，
 - 每支先把新版寫到同目錄暫存檔、**在暫存檔上自檢**（`.sh` → `bash -n`、`.py` → 語法編譯、`.ts` → 有 bun 就 `bun build`）；
   沒過就丟掉暫存檔、報 `failed`、安裝位置的舊檔一個位元都沒動（不會讓排程撞到沒驗過的新版）、其他支照裝。
   過了才備份到 `<AGM>/ops-install-backups/<UTC 時間>/<安裝位置>`，再 `mv`（原子替換）。
+- 同時只能有一個在裝：鎖是 `<AGM>/ops-install.lock/`（記 pid；握鎖的行程死了就接手）；拿不到鎖 exit 3、不動任何檔。同一秒內重複裝，備份目錄也不共用（`<UTC 時間>-2`…）。
+  安裝位置是 symlink 的報 `skipped`（`mv` 會把連結換成拷貝）；對照表的安裝位置跑出 `--dir`（絕對路徑、`..`）報 `failed`、不寫。
 - **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的 blob 都對不上，跟 `ops-sync --check` 的 `drift` 同一條）
   報 `drifted`、不動它、不算失敗；kick 會另推 `ops_install_drift` 叫人看。手動 `--force` 才換（舊檔照樣備份）。
 - `--dry-run` 只列 `would-install`。最後一行 `changes=N failed=M drifted=K`；有失敗 exit 1。成功會把「時間 commit」寫進 `<AGM>/ops-install.last`。

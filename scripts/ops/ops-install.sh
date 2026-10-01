@@ -19,7 +19,7 @@
 #   - `--dry-run` 只列 `would-install`，什麼都不寫。
 #
 # 輸出一行一件事（installed／would-install／unchanged／not-installed／skipped／drifted／failed），最後一行 `changes=N failed=M drifted=K`。
-# exit 0＝沒有失敗；1＝至少一支失敗（已還原）；2＝用法錯誤。
+# exit 0＝沒有失敗；1＝至少一支失敗（沒換成，舊檔原封不動）；2＝用法錯誤；3＝另一個 ops-install 正在裝（沒動任何檔）。
 set -u
 
 REPO=""; REF=""; DIR=""; PLATFORM=""; DRY=0; FORCE=0
@@ -46,7 +46,28 @@ COMMIT=$("$GIT" -C "$REPO" rev-parse --verify --quiet "${REF}^{commit}") || { ec
 MANIFEST=$("$GIT" -C "$REPO" show "${COMMIT}:scripts/ops/install-manifest.tsv" 2>/dev/null) || { echo "${REF} 沒有 scripts/ops/install-manifest.tsv" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ops-install.XXXXXX")
-trap 'rm -rf "$TMP"' EXIT
+LOCK="$DIR/ops-install.lock"; HAVE_LOCK=0
+cleanup() { rm -rf "$TMP"; [ "$HAVE_LOCK" = 1 ] && rm -rf "$LOCK"; return 0; }
+trap cleanup EXIT
+# 同時只能有一個在裝（kick 與人手動、或兩輪 kick 重疊）：兩邊同時備份、換檔會互相蓋掉。鎖是 `<AGM>/ops-install.lock/`（裡面記 pid）；
+# 握鎖的行程死了（被 SIGKILL，EXIT trap 沒跑）就算殘留，接手。--dry-run 什麼都不寫，不用鎖。
+if [ "$DRY" = 0 ]; then
+  mkdir -p "$DIR" 2>/dev/null
+  _tries=0
+  until mkdir "$LOCK" 2>/dev/null; do
+    _holder=$(cat "$LOCK/pid" 2>/dev/null)
+    case "$_holder" in ''|*[!0-9]*) _holder="" ;; esac
+    if [ -n "$_holder" ] && kill -0 "$_holder" 2>/dev/null; then
+      echo "busy 另一個 ops-install（pid ${_holder}）正在裝，這次不動任何檔" >&2; exit 3
+    fi
+    _tries=$((_tries + 1))
+    [ "$_tries" -le 3 ] || { echo "busy 拿不到鎖 ${LOCK}" >&2; exit 3; }
+    # 沒有 pid（剛建好還沒寫、或殘留）：等一下再看，真的沒人握才清掉。
+    [ -z "$_holder" ] && sleep 1
+    rm -rf "$LOCK" 2>/dev/null
+  done
+  echo $$ > "$LOCK/pid"; HAVE_LOCK=1
+fi
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="$DIR/ops-install-backups/$STAMP"
 # 同一秒內再裝一次（不同 ref）：備份目錄不能共用，不然第二次的 `cp -p` 會蓋掉第一次留下的原始檔。
