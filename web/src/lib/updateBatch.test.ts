@@ -81,15 +81,38 @@ test('2026-09-22：codex 磁碟已裝好新版跟 claude 一樣可以重啟；�
   )
 })
 
-test('子 agent 也歸這顆按鈕管（587b07f：在自己的 pane 裡 exit + resume）', () => {
-  const bots = [bot('kid', { managed_by: 'child' }), bot('mine')]
-  const runs = { kid: run('kid'), mine: run('mine') }
+test('子 agent 不由一鍵重啟動（daemon Skip::Child，SPEC §6.5a）：進「在忙」名單、不算「可以重啟」', () => {
+  // 2026-09-22 起 daemon 一律跳過子 agent；框裡若還把它算進「重啟 N 顆」，數字跟實際重啟的對不上，
+  // 只剩子 agent 時按鈕還亮著、按下去卻是 total 0。
+  const bots = [bot('kid', { managed_by: 'child' }), bot('kid2', { parent_bot_id: 'mine' }), bot('mine')]
+  const runs = { kid: run('kid'), kid2: run('kid2'), mine: run('mine') }
   const c = updateBatchCounts(bots, runs, none)
   assert.deepEqual(
     c.ready.map((x) => x.name),
-    ['kid', 'mine'],
+    ['mine'],
   )
-  assert.deepEqual(c.busy, [])
+  assert.deepEqual(
+    c.busy.map((x) => [x.name, x.why]),
+    [
+      ['kid', '子 agent，由父 Bot 重開'],
+      ['kid2', '子 agent，由父 Bot 重開'],
+    ],
+  )
+})
+
+test('使用者自己的 herdr default session 裡的 bot 不由一鍵重啟動（daemon Skip::DefaultSession，SPEC §6.5.1）', () => {
+  const bots = [bot('mine-default', { herdr_session: 'default' }), bot('run-default'), bot('mine')]
+  const runs = { 'mine-default': run('mine-default'), 'run-default': run('run-default', { herdr_session: 'default' }), mine: run('mine') }
+  const c = updateBatchCounts(bots, runs, none)
+  assert.deepEqual(
+    c.ready.map((x) => x.name),
+    ['mine'],
+  )
+  assert.deepEqual(
+    c.busy.map((x) => x.name),
+    ['mine-default', 'run-default'],
+  )
+  assert.match(c.busy[0].why, /default session/)
 })
 
 // —— header 的 codex「安裝＋重啟」（SPEC §6.9，cli_update）——
