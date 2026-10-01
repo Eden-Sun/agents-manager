@@ -43,9 +43,17 @@ status() {
         -f description="$2" >/dev/null 2>&1 || echo "commit status 寫不上去（$1）" >&2
 }
 
+# 放進手寫 JSON 字串前的跳脫：反斜線、雙引號、控制字元（description 取自 step 標題，什麼字元都可能有）。
+json_str() {
+    local v="$1"
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    printf '%s' "${v}" | LC_ALL=C tr -d '\000-\037'
+}
+
 log="${CI_ROOT}/logs/${sha}.log"
 started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-printf '{"sha":"%s","state":"running","started":"%s","log":"%s"}\n' "${sha}" "${started}" "${log}" > "${CI_ROOT}/status.json"
+printf '{"sha":"%s","state":"running","started":"%s","log":"%s"}\n' "${sha}" "${started}" "$(json_str "${log}")" > "${CI_ROOT}/status.json"
 status pending "ubuntu 完整 CI 執行中"
 
 # pending 送出之後任何一步（checkout、clean、彙總）因 set -e 中斷，都不能讓 commit status 永遠停在 pending、
@@ -56,7 +64,7 @@ on_exit() {
     if [ "${finalized}" = 0 ]; then
         status error "ubuntu-ci 腳本中斷（rc=${code}），見 journal"
         printf '{"sha":"%s","state":"error","rc":%s,"started":"%s","log":"%s"}\n' \
-            "${sha}" "${code}" "${started}" "${log}" > "${CI_ROOT}/status.json"
+            "${sha}" "${code}" "${started}" "$(json_str "${log}")" > "${CI_ROOT}/status.json"
     fi
 }
 trap on_exit EXIT
@@ -91,7 +99,7 @@ else
 fi
 status "${state}" "${desc}"
 printf '{"sha":"%s","state":"%s","rc":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
-    "${sha}" "${state}" "${rc}" "${started}" "${finished}" "${log}" "${desc//\"/\'}" > "${CI_ROOT}/status.json"
+    "${sha}" "${state}" "${rc}" "${started}" "${finished}" "$(json_str "${log}")" "$(json_str "${desc}")" > "${CI_ROOT}/status.json"
 echo "${sha}" > "${CI_ROOT}/last-sha"
 finalized=1
 

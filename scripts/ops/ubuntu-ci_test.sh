@@ -36,6 +36,7 @@ setup() {
 #!/bin/bash
 part="$1"
 echo "==> fake $part"
+[ -e "$FIX/title.$part" ] && cat "$FIX/title.$part"
 if [ -e "$FIX/hang.$part" ]; then trap '' TERM; sleep 30 & wait; fi
 exit "$(cat "$FIX/rc.$part" 2>/dev/null || echo 0)"
 CK
@@ -80,6 +81,16 @@ check "送 failure" "state=failure" "$FIX/gh.log"
 check "description 點名 ops" "紅：ops" "$FIX/gh.log"
 check "status.json 記 rc=3" '"rc":3' "$CI/status.json"
 check "其他段照樣跑完" "\[ubuntu-ci\] daemon rc=0" "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log"
+teardown
+
+# 3b. 紅的 step 標題含引號與反斜線：status.json 仍要是合法 JSON，description 內容不能被吃掉。
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+printf '==> step "q" C:\\dir\\x\n' > "$FIX/title.ops"
+echo 1 > "$FIX/rc.ops"
+run >/dev/null
+equals "status.json 是合法 JSON" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$CI/status.json" 2>&1)" "failure"
+check "description 保留了反斜線之後的字" "dir" "$CI/status.json"
 teardown
 
 # 4. 鎖被占著：直接退出、不碰 git／gh。
