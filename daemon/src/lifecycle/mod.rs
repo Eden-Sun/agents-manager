@@ -68,6 +68,8 @@ mod run_state;
 pub(crate) mod quota_hold;
 pub(crate) mod start_send;
 mod send_now;
+/// codex 的 send_now：steer 進進行中的回合（issue #748，預設關的 canary）。
+mod codex_steer;
 mod interruption;
 /// 送達結果寫不回 DB 時欠著的那一筆（#149）。
 mod owed_delivery;

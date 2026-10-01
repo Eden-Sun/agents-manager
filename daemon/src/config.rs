@@ -309,6 +309,24 @@ pub struct ConfigFile {
     /// 使用者 2026-10-01：bot 的指示檔（agent md）由這裡指定，CLI 自己的 CLAUDE.md／AGENTS.md 一律不讀（SPEC §6.5i）。
     #[serde(default, skip_serializing_if = "AgentsCfg::is_default")]
     pub agents: AgentsCfg,
+    /// issue #748：codex 0.159 `instant_interrupt` 的 canary 旗標（預設關）。
+    #[serde(default, skip_serializing_if = "CodexCfg::is_default")]
+    pub codex: CodexCfg,
+}
+
+/// `[codex]`（issue #748，SPEC §6.3 第 9 點）：`instant_interrupt = true` 才讓 `send_now` 對 codex（>= 0.159.0）生效——
+/// 把字打進正在忙的 TUI，由 codex 自己的 `instant_interrupt` 把它 steer 進進行中的回合。這個旗標**只管 daemon 這一側肯不肯送**；
+/// codex 那一側要另外在它自己的設定打開 `instant_interrupt`，沒開的話那一句只是排在 codex 的輸入佇列。預設關＝codex 照舊不能插隊。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexCfg {
+    #[serde(default)]
+    pub instant_interrupt: bool,
+}
+
+impl CodexCfg {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// `[agents]`（SPEC §6.5i）：每顆 bot 啟動時讀這些檔，接在 AG Man 規則後面注入（claude `--append-system-prompt`、
@@ -1511,5 +1529,17 @@ mod supervisor_cfg_tests {
         .unwrap()
         .supervisor;
         assert_eq!(once, twice);
+    }
+
+    /// issue #748：`[codex] instant_interrupt` 預設關；沒寫就不出現在序列化結果裡（不改既有設定檔的長相）。
+    #[test]
+    fn codex_instant_interrupt_is_off_unless_the_config_turns_it_on() {
+        let none: ConfigFile = toml::from_str("").unwrap();
+        assert!(!none.codex.instant_interrupt);
+        assert!(!toml::to_string_pretty(&none).unwrap().contains("[codex]"));
+        let on: ConfigFile = toml::from_str("[codex]\ninstant_interrupt = true\n").unwrap();
+        assert!(on.codex.instant_interrupt);
+        let back: ConfigFile = toml::from_str(&toml::to_string_pretty(&on).unwrap()).unwrap();
+        assert_eq!(on, back);
     }
 }
