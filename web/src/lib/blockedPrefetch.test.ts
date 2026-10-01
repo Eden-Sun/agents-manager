@@ -5,6 +5,7 @@ import type { Io } from './choiceDraft.ts'
 import {
   draftKey,
   forgetBlocked,
+  forgetBlockedExcept,
   peekPrefetched,
   prefetchBlocked,
   PREFETCH_FRESH_MS,
@@ -100,5 +101,15 @@ test('多分頁問卷在看得見的分頁才背景預載，而且同一份只�
   await prefetchBlocked('b2', shown)
   await new Promise((r) => setTimeout(r, 0))
   assert.equal(shown.sent.length, first, '同一份問卷不重起')
+  resetBlockedPrefetch()
+})
+
+test('forgetBlockedExcept：刪掉的 bot 的快照與預載被放掉，還在的不動', async () => {
+  resetBlockedPrefetch()
+  await prefetchBlocked('b-live', deps(ONE_QUESTION))
+  await prefetchBlocked('b-gone', deps(ONE_QUESTION))
+  forgetBlockedExcept(new Set(['b-live']))
+  assert.ok(peekPrefetched('b-live', PREFETCH_SOURCE, PREFETCH_LINES, 1_000), '還在的不動')
+  assert.equal(peekPrefetched('b-gone', PREFETCH_SOURCE, PREFETCH_LINES, 1_000), null, '沒了的被放掉')
   resetBlockedPrefetch()
 })

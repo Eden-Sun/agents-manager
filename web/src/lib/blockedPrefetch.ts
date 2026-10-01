@@ -74,6 +74,11 @@ export function forgetBlocked(botId: string): void {
   held.delete(botId)
 }
 
+/** 不在 `live` 裡的 bot（刪掉、退役的 child）不留快照與握著的預載：bot 在 blocked 時就沒了的話沒有人會再叫 `forgetBlocked`。 */
+export function forgetBlockedExcept(live: ReadonlySet<string>): void {
+  for (const id of new Set([...snaps.keys(), ...held.keys()])) if (!live.has(id)) forgetBlocked(id)
+}
+
 /** 測試用。 */
 export function resetBlockedPrefetch(): void {
   for (const id of [...held.keys()]) forgetBlocked(id)
