@@ -182,6 +182,12 @@ pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_i
     Ok(ReadMark { at, message_id })
 }
 
+/// 讀到的訊息 id：真的 id 是 26 字元的 ULID。這個字串整個存進 DB、又隨 `GET /api/state` 與 WS 廣播給每個分頁，
+/// 所以長度要有上限、字元要乾淨（空字串＝只推時間）。
+fn valid_message_id(id: &str) -> bool {
+    id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+}
+
 #[derive(Deserialize, Default)]
 pub struct MarkIn {
     /// 讀到的最後一則訊息的 `created_at`；省略＝現在。
@@ -194,6 +200,9 @@ pub async fn post(State(app): State<Arc<App>>, Path(id): Path<String>, body: Opt
     let b = body.map(|Json(b)| b).unwrap_or_default();
     if crate::db::bot(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.is_none() {
         return Err(LcError::NotFound("bot".into()));
+    }
+    if !valid_message_id(b.message_id.as_deref().unwrap_or("")) {
+        return Err(LcError::Bad("message_id must be a message id (at most 64 characters of A-Z a-z 0-9 - _ : .)".into()));
     }
     let at = b.at.filter(|s| !s.trim().is_empty()).unwrap_or_else(crate::db::now);
     if chrono::DateTime::parse_from_rfc3339(&at).is_err() {
@@ -209,8 +218,12 @@ pub async fn post(State(app): State<Arc<App>>, Path(id): Path<String>, body: Opt
 /// `POST /api/projects/{id}/group/read`
 pub async fn post_group(State(app): State<Arc<App>>, Path(id): Path<String>, body: Option<Json<MarkIn>>) -> Result<Json<Value>, LcError> {
     let b = body.map(|Json(b)| b).unwrap_or_default();
-    if crate::db::project(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.is_none() {
+    // 已軟刪的專案跟 `/chat`、`/messages` 一樣當它不存在：不替一個看不到的專案存標記、再廣播出去。
+    if crate::db::project(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.is_none_or(|p| p.deleted_at.is_some()) {
         return Err(LcError::NotFound("project".into()));
+    }
+    if !valid_message_id(b.message_id.as_deref().unwrap_or("")) {
+        return Err(LcError::Bad("message_id must be a message id (at most 64 characters of A-Z a-z 0-9 - _ : .)".into()));
     }
     let at = b.at.filter(|s| !s.trim().is_empty()).unwrap_or_else(crate::db::now);
     if chrono::DateTime::parse_from_rfc3339(&at).is_err() {
@@ -499,5 +512,48 @@ mod tests {
         migrate(&pool).await.unwrap();
         assert_eq!(unread(&pool).await, None, "下次啟動重新建表並補標記，舊訊息算已讀");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    // ───────── 群組／bot 已讀標記端點的審查（#756 之後） ─────────
+
+    async fn app_with_bot() -> (crate::testing::Env, String) {
+        let e = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "rm-bot").await;
+        (e, bot.id)
+    }
+
+    /// 已軟刪的專案：`/chat`、`/messages` 都當它不存在（404），已讀標記也要一致，不能替一個看不到的專案存標記、再廣播出去。
+    #[tokio::test]
+    async fn a_soft_deleted_project_has_no_group_read_endpoint() {
+        let (e, _) = app_with_bot().await;
+        sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&e.project_id).execute(&e.app.db).await.unwrap();
+        let err = post_group(State(e.app.clone()), Path(e.project_id.clone()), None).await.unwrap_err();
+        assert!(matches!(err, LcError::NotFound(_)), "{err:?}");
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_group_reads WHERE project_id = ?").bind(&e.project_id).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(stored, 0);
+    }
+
+    /// `message_id` 是任意字串、整個存進 DB、又由 `GET /api/state` 與 WS 廣播給每個分頁：一個 1 MB 的 id 就把每次快照撐大。
+    /// 真正的 id 是 26 字元的 ULID；超長、含控制字元的一律 400，什麼都不存。
+    #[tokio::test]
+    async fn an_oversized_or_odd_message_id_is_refused_by_both_read_marks() {
+        let (e, bot) = app_with_bot().await;
+        let bad = ["x".repeat(5000), "a\nb".to_string(), "id with space".to_string(), "\u{1b}[0m".to_string()];
+        for id in &bad {
+            let body = || Some(Json(MarkIn { at: None, message_id: Some(id.clone()) }));
+            let a = post(State(e.app.clone()), Path(bot.clone()), body()).await;
+            let b = post_group(State(e.app.clone()), Path(e.project_id.clone()), body()).await;
+            assert!(matches!(a, Err(LcError::Bad(_))), "bot mark {id:?}: {a:?}");
+            assert!(matches!(b, Err(LcError::Bad(_))), "group mark {id:?}: {b:?}");
+        }
+        let stored: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM bot_reads) + (SELECT COUNT(*) FROM project_group_reads)").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(stored, 0, "被拒的請求什麼都不存");
+        // 正常的 id（ULID、空字串＝只推時間）照收。
+        for id in [crate::db::ulid(), String::new()] {
+            let body = Some(Json(MarkIn { at: None, message_id: Some(id.clone()) }));
+            assert!(post(State(e.app.clone()), Path(bot.clone()), body).await.is_ok(), "{id:?}");
+            let body = Some(Json(MarkIn { at: None, message_id: Some(id.clone()) }));
+            assert!(post_group(State(e.app.clone()), Path(e.project_id.clone()), body).await.is_ok(), "{id:?}");
+        }
     }
 }

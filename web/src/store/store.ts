@@ -8,7 +8,7 @@ import { shellDraftKey } from './shellDraft'
 import { createResyncRunner } from './resyncQueue'
 import { createRequestId, peekRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { queueSlotNotice, slotHolderFrom } from '../lib/queueSlot'
-import { groupSendDelivered } from './groupSend'
+import { groupSendDelivered, groupSkipText } from './groupSend'
 import { create } from 'zustand'
 import * as api from '../api'
 import {
@@ -1238,11 +1238,11 @@ export const useStore = create<StoreState>((set, get) => {
       }
       if (!groupSendDelivered(res)) {
         // 一顆都沒送到：回 null，輸入框才會保留草稿與附件（#340）。
-        get().notify('error', `一顆都沒送到，草稿已保留：${res.skipped.map((x) => `@${x.bot_name}（${x.detail || x.reason}）`).join('、')}`)
+        get().notify('error', `一顆都沒送到，草稿已保留：${res.skipped.map((x) => `@${x.bot_name}（${groupSkipText(x)}）`).join('、')}`)
         return null
       }
       if (res.skipped.length > 0) {
-        get().notify('info', `未送達：${res.skipped.map((x) => `@${x.bot_name}（${x.detail || x.reason}）`).join('、')}`)
+        get().notify('info', `未送達：${res.skipped.map((x) => `@${x.bot_name}（${groupSkipText(x)}）`).join('、')}`)
       }
       return res
     } catch (e) {
