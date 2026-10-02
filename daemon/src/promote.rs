@@ -218,7 +218,6 @@ pub(crate) fn user_bot_cfg(child: &db::Bot, new_id: &str, name: &str, model: &Op
         effort: effort.clone(),
         fast: false,
         persona: child.persona.clone(),
-        instruction_files: child.instruction_files.clone(),
         args: vec![],
         autostart: false,
         inject_hooks: true,

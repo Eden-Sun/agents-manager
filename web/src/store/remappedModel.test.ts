@@ -67,7 +67,7 @@ test('#539：被換掉時回報實際採用的值，並講一句；面板記的�
 
   // 面板把 daemon 實際採用的值記進 `saved`，`pruneSaved` 才追得上（記送出的 `opus` 會永遠追不上，
   // 欄位就一直顯示一個沒在用的模型、還算不出 dirty）。
-  const stored: BotFormBase = { name: 'b1', model: applied, effort: null, fast: false, persona: null, identity: null, instruction_files: null }
+  const stored: BotFormBase = { name: 'b1', model: applied, effort: null, fast: false, persona: null, identity: null }
   assert.deepEqual(pruneSaved({ model: applied }, stored), {}, '記實際採用的值：放得掉')
   assert.deepEqual(pruneSaved({ model: 'opus' }, stored), { model: 'opus' }, '記送出的值：永遠追不上')
 })

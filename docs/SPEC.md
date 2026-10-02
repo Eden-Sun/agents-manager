@@ -472,26 +472,12 @@ resend／排隊機制決定（`stuck_turns.rs`），不讓 CLI 自己另開一�
 寫進 `~/.claude/settings.json`；畫面辨識（`tui_prompts`、§4.3 備援、回音剝除）都照一般渲染寫，所以 bot 一律釘 `default`
 （`--settings` 優先，且 `tui` 有值那個選單就不跳）。同一版的「Make auto mode your default permission mode?」（游標預設 Yes）
 只在較高層設定沒寫 `permissions.defaultMode` 時才跳，所以照 bot 的 `auto_approve` 寫 `bypassPermissions`／`default`，不放大權限。
-還有 `pluginConfigs: {"agents-md@builtin": {"options": {"instructionFiles": "claude-md"}}}`（issue #206，claude **2.1.277** 起）：
-2.1.277 起，專案沒有 CLAUDE.md 時 claude 會改讀 AGENTS.md——內建 plugin `agents-md` 的 `instructionFiles`（`/config` 的「Project instructions」），
-可選 `claude-md`／`claude-md-or-agents-md`（**預設**）／`claude-md-and-agents-md`／`managed-only`。開不開由伺服器端旗標 `tengu_agents_md_mod`
-放量（2026-09-19 互動式 TUI：2.1.277 與 2.1.278 都 `plugin.register: agents-md … admitted`；同一顆 binary 的 `-p`／SDK 路徑 GrowthBook 關掉，plugin 可以完全不註冊——#206 當時看 2.1.278 `-p` 以為旗標關著）。同一個 project 常同時有
-codex bot，AGENTS.md 是寫給 codex 的（`codex fork`、sandbox／approval 的說法），所以釘在 `claude-md`＝維持 2.1.277 以前的行為（理由同 #102：
-升級不該改變 bot 讀到的指示）。plugin 的選項只從 user／`--settings`／managed settings 讀（**專案層 settings 不讀**），鍵認 `agents-md` 或
-`agents-md@builtin`；值不在上面四個裡時 CLI 退回預設（等於沒釘），所以單元測試照 binary 的 enum 驗值。2.1.276 的舊選項 `projectInstructions`
-（`claude` 預設／`agents-fallback`／`both`／`none`）預設本來就只讀 CLAUDE.md，不另外寫——新版兩個都設時會印一行「remove projectInstructions」；
-更舊的版本沒有這個 plugin，這一格沒人讀（2.1.276 實測帶著這包照常啟動、沒有警告）。
-**bot 層級的開關**（issue #213）：值由這顆 bot 的 `instruction_files`（`bots.instruction_files`，TOML 同名，claude 專用）決定，**不是全域開關**：
-沒設＝`claude-md`（上面那個釘住的預設），要讓某顆 claude 跟同 project 的 codex 共用 AGENTS.md 就在那顆設 `claude-md-and-agents-md`。四個值就是 CLI 的選項，
-API 只收這四個（`config::INSTRUCTION_FILES`，單元測試照 2.1.277／2.1.278 binary 的選項列表釘住；CLI 換名或增減值要照 binary 改這一份與測試）——不在裡面的值 CLI 會
-退回它自己的預設（`claude-md-or-agents-md`），所以 API 400、手改 TOML 寫錯則投影時丟掉（存 NULL＝`claude-md`），不會有拼錯的值走到 `--settings`。
-`claude_settings` 照 bot 的有效值（`config::effective_instruction_files`）寫，本機與遠端同一份；`GET /api/state` 的每顆 claude bot 帶有效值、前端 Bot 設定面板顯示與修改
-（API.md §12.8b）。改值要重啟才讀到（設定檔只在啟動時讀）。child bot 沒有 `--settings`，這一格管不到，API 直接拒絕。
-`bots.instruction_files` 是新欄位：加了 ALTER（舊列 NULL）、`SCHEMA_VERSION` 5 → 6（`SCHEMA_HISTORY` 加一行指紋）；**回滾到 `SCHEMA_VERSION` ≤ 5 的 daemon binary 會被 §3.1 的版本閘擋下**（不是資料壞掉）。
-`runs.runtime_identity`（issue #238，見 §12.4 的「額度記在 run 的身分」）同樣是新欄位：ALTER（舊列 NULL＝沒記）、`SCHEMA_VERSION` 6 → 7；回滾到 ≤ 6 的 binary 一樣被版本閘擋下，要連 DB 一起還原成升級前的備份。
-這個 plugin 的提示在 `capture::claude::is_noise` 一律當雜訊，不會被 §4.3 備援收進回覆。#212 真機（2.1.277／2.1.278 互動式、預設 config dir、只有 AGENTS.md 的拋棄式專案）：
-帶 daemon 注入的 `instructionFiles: "claude-md"` 時 debug log **沒有** `AGENTS.md loaded`、畫面沒有那一行；拿掉這一格時 log 寫 `every option is its default`，並在回覆槽畫
-`⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded: <path>`（跟助手回覆同一個 `⏺`，閒置時它就是畫面上最後一個 `⏺`）。鍵名與 enum 沒再換。2.1.276 的通知列 toast 這次沒重抓。
+**不寫 `pluginConfigs`**（2026-10-02 使用者決定，撤回 #206／#213）：claude 2.1.277 起沒有 CLAUDE.md 的專案會改讀 AGENTS.md（內建 plugin `agents-md` 的 `instructionFiles`），
+daemon 本來把它釘成 `claude-md`、再由 `bots.instruction_files` 逐顆開放；使用者說「新的 claude 已經能接受 AGENTS.md」，所以整個釘值與設定都拿掉，`--settings` 不帶 `pluginConfigs`，CLI 用它自己的預設。
+`bots.instruction_files` 欄位留在 SQLite、不再讀寫（不 DROP，舊 DB 照開，`SCHEMA_VERSION` 不動）；API 與 config.toml 還送／留著 `instruction_files` 時忽略（API.md §12.8b）。
+`launch_rev` 為此保留一個固定 `null` 的格子，沒設過它的 bot 版本不變，升級 daemon 不會把現役 bot 全標成「需重啟」；曾設過非預設值的 bot 會被標成需重啟（設定檔內容確實不同了）。
+`capture::claude::is_noise` 仍把這個 plugin 的提示（`⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded: <path>`）當雜訊，因為預設值現在就會畫出這一行，不會被 §4.3 備援收進回覆（#212）。
+`runs.runtime_identity`（issue #238，見 §12.4 的「額度記在 run 的身分」）是 ALTER 加的欄位（舊列 NULL＝沒記）、`SCHEMA_VERSION` 6 → 7；回滾到 ≤ 6 的 binary 會被 §3.1 的版本閘擋下，要連 DB 一起還原成升級前的備份。
 
 **Codex**：`-c notify=["/abs/agents-managerd","hook","codex","--bot",…,"--token",…,"--port",…]`；argv 最後一個參數是 JSON
 `{"type":"agent-turn-complete","thread-id","turn-id","cwd","input-messages","last-assistant-message"}`。使用者原本的 `notify` 在此實例被覆蓋。

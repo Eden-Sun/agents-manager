@@ -265,13 +265,11 @@
 
 截圖 `docs/screenshots/bot-settings/compact-1600.png`。
 
-### Bot 設定：claude 的「專案指示檔」（issue #213）
+### Bot 設定：拿掉 claude 的「專案指示檔」（issue #213 撤回，2026-10-02）
 
-- **只有 claude 的 user bot 才有這一格**：codex／grok 沒有 `agents-md` plugin；child bot 不是 daemon 帶 `--settings` 起的，daemon 會拒絕，所以不顯示（不是灰掉）。
-  daemon 沒給這欄（舊版）時也不顯示，不猜預設。
-- **四選一的按鈕列**（跟身份、模型同一種 `opt-group`，不用下拉）：值就是 CLI 的四個選項，預設 `claude-md` 排第一。選中的那項底下顯示一行說明；
-  「兩份都讀」的說明點出用途（跟同專案的 codex 共用 `AGENTS.md`）。改值要重啟才讀到，所以說明尾巴寫明，這一點跟模型／強度的當場套用不同。
-- 位置在身份／帳號之後、人設之前（都是「這顆 bot 讀到什麼」的設定）。截圖 `docs/screenshots/instruction-files/`。
+- 使用者決定：「已經不要了，因為新的 claude 已經能接受 AGENTS.md」。Bot 設定面板不再有「專案指示檔」那一格（四選一按鈕列、說明、`INSTRUCTION_FILES_CHOICES` 全部移除），daemon 也不再釘 `instructionFiles`——claude 讀哪份指示檔由 CLI 自己的預設決定。
+- 不要為了「想讓某顆 claude 不讀 AGENTS.md」再把這一格加回來；那是 CLI 的行為，不是 AG Man 的設定。
+
 ## 晶片列：daemon 自己的雜務 bot 跑完不出現（2026-09-13）
 
 使用者：「w8WM:pC 屬於 daemon 的，完成不需要在 header 列標示」。那顆是 `agm-pxf2pv-browser-gc`

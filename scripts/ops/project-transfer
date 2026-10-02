@@ -429,7 +429,7 @@ def toml_block(project, bots, host):
            f"host = {tq(host)}"]
     for b in bots:
         out += ["", "[[projects.bots]]", f"id = {tq(b['id'])}", f"name = {tq(b['name'])}", f"kind = {tq(b['kind'])}"]
-        for key in ("model", "effort", "persona", "instruction_files", "identity", "herdr_session"):
+        for key in ("model", "effort", "persona", "identity", "herdr_session"):
             if b.get(key) not in (None, ""):
                 out.append(f"{key} = {tq(b[key])}")
         if b.get("fast"):

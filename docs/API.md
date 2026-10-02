@@ -156,7 +156,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 - `queued_turn`：排在下一個要送的 Turn（`status = "queued"`，§5），沒有就 `null`；前端據此把輸入框畫成「已排隊」。生產者包含 AGM 派工（2026-09-16）、bot 沒在跑時帶 `start_if_stopped` 的送出（issue #122，turn 帶 `awaits_start:1`），以及回合中帶 `queue_if_busy:true` 的使用者送出（issue #733，turn 帶 `awaits_idle:1`）。
 - `handed_off_to`（#708）：專案已移交給這台主機的 daemon 管（SPEC §6.5h），`null`＝這顆 daemon 管。有值時這個專案的 bot 列照最後的狀態凍結顯示，start／stop／restart／prompt／keys 一律 409 `handed_off`（帶 `bot_id`、`handed_off_to`、`message`）。
 - `unread` 固定 `0`（未讀由前端算）。
-- 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/instruction_files/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
+- 其他欄位（hosts、identities、bot 的 model/effort/fast/persona/identity/managed_by/parent_bot_id、run 的 runtime_* 等）見各節。
 
 ### `run` 物件（`null` = 沒有 active Run）
 
@@ -212,7 +212,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 | POST | `/api/projects` | `{"path":"/abs/or/~/path","label"?:"foo","host"?:"m4p"}`（`label` 預設目錄名） | `200 {"project_id"}`；路徑不存在 400；重複 409 |
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 active Run → 409 |
 | PATCH | `/api/projects/{id}` | `{"label"?:"新名字","handed_off_to"?:"agm-host"\|null}` | `200 {"project_id","needs_restart":false}`；label trim 後為空 400。不擋 active run（agent 身分取自 bot id，label 只影響**下次啟動**的 `agent_name` slug）。`handed_off_to`（#708，SPEC §6.5h）：字串＝移交給那台主機的 daemon（trim 後寫進 config.toml），`null`＝收回（當場排一輪對帳接手），不帶＝不動；空字串或非字串 400。設定當下不停、不關任何 pane |
-| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, instruction_files?, auto_approve?, client_request_id?}` | `200 {"bot_id","name"}`；名稱重複 409，`instruction_files` 不合法 400（§12.8b），但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的）。提交已禁用模型時仍成功，並回 `remapped`（見下）。**`client_request_id`（冪等鍵，1..128 個 `[A-Za-z0-9-_.:]`，#352）**：同一個專案裡同一個鍵＋同樣的請求內容重送（回應遺失後重試），回第一次建好的那顆 `{"bot_id","name","replayed":true}`，不再建第二顆；同一個鍵換了請求內容（`name_auto:true` 時 `name` 只是提示、不算內容）回 409 `request_id_reused`（帶原本那顆的 `bot_id`）；沒帶＝照舊每次都建。鍵記在 config.toml 該 bot 的 `create_request_id`／`create_fingerprint`（daemon 持久，bot 刪除即失效） |
+| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, auto_approve?, client_request_id?}` | `200 {"bot_id","name"}`；名稱重複 409，但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的）。提交已禁用模型時仍成功，並回 `remapped`（見下）。**`client_request_id`（冪等鍵，1..128 個 `[A-Za-z0-9-_.:]`，#352）**：同一個專案裡同一個鍵＋同樣的請求內容重送（回應遺失後重試），回第一次建好的那顆 `{"bot_id","name","replayed":true}`，不再建第二顆；同一個鍵換了請求內容（`name_auto:true` 時 `name` 只是提示、不算內容）回 409 `request_id_reused`（帶原本那顆的 `bot_id`）；沒帶＝照舊每次都建。鍵記在 config.toml 該 bot 的 `create_request_id`／`create_fingerprint`（daemon 持久，bot 刪除即失效） |
 | PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}`；提交已禁用模型時另帶 `remapped` |
 | POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
 | POST | `/api/bots/{id}/promote` | `{"name"?,"model"?,"effort"?}` | 子 agent 升級成頂層 bot，見 §10.3c；停用模型被替換時回 `remapped` |
@@ -228,7 +228,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 **`POST /api/order`**：側欄排序 = config.toml 的陣列順序，`GET /api/state` 的順序就是權威（前端不另存）。只送要改的那一半；沒列到的維持原相對順序接在後面；
 config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_changed`。
 
-**`needs_restart`（`GET /api/state` 的 bot，#353）**：執行中的 CLI 載入的啟動設定（model／effort／fast／persona／instruction_files／args／identity／env／inject_hooks／auto_approve）跟現在存的不同＝`true`。從資料算：run 啟動時記下載入的版本（`runs.launch_rev`），bot 目前的版本對不上就是過期；`PATCH` 回應掉了、daemon 之後重啟，這個旗標都還在，重啟（新 run 載入新版本）或當場套用成功（`live_apply.applied`）才清掉。沒記版本的 run（adopt 來的、升版前的）不誤報，改設定的那一刻才開始追蹤。
+**`needs_restart`（`GET /api/state` 的 bot，#353）**：執行中的 CLI 載入的啟動設定（model／effort／fast／persona／args／identity／env／inject_hooks／auto_approve）跟現在存的不同＝`true`。從資料算：run 啟動時記下載入的版本（`runs.launch_rev`），bot 目前的版本對不上就是過期；`PATCH` 回應掉了、daemon 之後重啟，這個旗標都還在，重啟（新 run 載入新版本）或當場套用成功（`live_apply.applied`）才清掉。沒記版本的 run（adopt 來的、升版前的）不誤報，改設定的那一刻才開始追蹤。
 
 **`live_apply_deferred`（`GET /api/state` 的 bot，#712）**：只改可即時套用的欄位而 bot 正忙、這次送不進去時，`PATCH` 回 `needs_restart:false`、`live_apply.deferred:true`（`reason` 是 `slash_gate: agent_busy`／`slash_gate: turn_in_flight`／`codex: busy_not_ready`）；state 的 bot 帶 `live_apply_deferred:true`、`needs_restart:false`，回合結束後自動套用。codex 只改 `fast` 時回合中會直接送（`live_apply.applied:true`），只有輸入框有字或選單開著才排。回合結束後仍因選單或讀回失敗而套不上，才恢復 `needs_restart:true`。claude／grok 已經排著別的欄位時不合併，直接回 `needs_restart:true`。待套用狀態存在 daemon 記憶體，daemon 重啟後若設定仍有差異，會依啟動版本顯示需重啟。
 
@@ -1273,7 +1273,6 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 | `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步；新釘的排到主力那列最後（`primary_position`，見 `POST /api/order`）。**不能跟會寫 config.toml 的欄位（name／autostart／model／effort／args／identity／env…）同一個 PATCH 送**（config 內的 bot）：混送 400、什麼都不寫，分兩次（#350，兩個 store 不可能同一個交易）；child bot 全在 DB，不受此限 |
 | `identity` / `env` | 見身份一節 | |
 | `persona` | §12.8 | |
-| `instruction_files` | string \| null（唯讀給 codex／grok） | claude 才有：這顆 bot 讀哪份專案指示檔，§12.8b。`GET /api/state` 永遠給有效值（沒設＝`claude-md`），codex／grok 是 `null` |
 | `managed_by` / `parent_bot_id` | 唯讀 | `user` = config.toml 的 bot；`child` = bot 自己開的子 agent（§子 agent） |
 
 啟動 argv 順序（前端可據此預覽）：daemon 旗標（auto_approve、hooks、persona）→ model（claude `--model`、codex/grok `-m`）→ effort（claude `--effort`、grok `--reasoning-effort`、
@@ -1284,7 +1283,7 @@ codex `-c model_reasoning_effort="<level>"`）→ identity.args → bot.args。
 body 所有欄位可省；`model`、`identity` 傳 `null` 或 `""` 清除；`env` 傳整個物件為**取代**：
 
 ```json
-{ "name": "am-codex", "model": "gpt-5.5", "effort": "high", "fast": false, "args": ["--search"], "autostart": false, "auto_approve": true, "inject_hooks": true, "identity": "cc1", "env": {"FOO": "bar"}, "primary": false, "persona": "…", "instruction_files": "claude-md-and-agents-md" }
+{ "name": "am-codex", "model": "gpt-5.5", "effort": "high", "fast": false, "args": ["--search"], "autostart": false, "auto_approve": true, "inject_hooks": true, "identity": "cc1", "env": {"FOO": "bar"}, "primary": false, "persona": "…" }
 ```
 
 AGM CLI 可用 `agm bot set <bot_id> [--model M] [--effort E] [--identity I]` 更新這三欄；只會 PATCH 命令列有帶的欄位，至少要帶一欄。成功時完整輸出 daemon 回應（包括 `needs_restart` 與可能出現的 `live_apply`）；4xx／5xx 以 CLI 結構化錯誤輸出至 stderr 並以非 0 退出。
@@ -1303,7 +1302,7 @@ readback_model_mismatch|readback_effort_mismatch|readback_fast_mismatch|busy_not
 記憶體裡的排程 daemon 重啟就沒了：那時 `live_apply_deferred` 消失、`needs_restart` 依啟動版本回到 `true`，UI 的落差徽章仍在，再按一次「當場套用」（重送同一個 `fast`，冪等）即可。
 codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast_tier`）：見 SPEC §4.4a。
 
-- **`needs_restart: true`**：有 active Run 且動到影響啟動 argv/env 的欄位（`model`、`effort`、`fast`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`、`persona`、`instruction_files`）。
+- **`needs_restart: true`**：有 active Run 且動到影響啟動 argv/env 的欄位（`model`、`effort`、`fast`、`args`、`identity`、`env`、`auto_approve`、`inject_hooks`、`persona`）。
   沒有 active Run，或只改 `name` / `autostart` / `primary` → `false`。前端顯示「需要重新啟動」並提供 §10.3。
 - **當場套用的例外**：只動了下列欄位、Run `running` 且不忙（非 working/blocked、無 in-flight turn）、新值不是清成 `null`（codex `fast` 例外）時，daemon 操作 TUI 並回 `false`；
   任一條件不成立或回讀對不上就回 `true`。細節見 SPEC §4.4a：
@@ -1351,7 +1350,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 
 ### 10.3b `POST /api/bots/{id}/fork`
 從頂層 bot 分出一顆新 bot，讓它的 CLI 接續來源到目前為止的完整對話脈絡（SPEC §6.10）。body 可省略：`{"name"?:"alfa-fork","client_request_id"?:"<冪等鍵>"}`（省略＝`<來源>-fork`，撞名自動加 `-N`）。
-- 設定照抄來源的 config.toml 條目（kind、model、effort、fast、persona、instruction_files、args、identity、env、auto_approve、inject_hooks），`autostart` 一律 false。建好立刻啟動。
+- 設定照抄來源的 config.toml 條目（kind、model、effort、fast、persona、args、identity、env、auto_approve、inject_hooks），`autostart` 一律 false。建好立刻啟動。
 - `200 {"bot_id","name","forked_from":{"bot_id","session_id"},"run_id"|null,"start_error"|null}`：建好但沒啟動成功仍回 200，`start_error` 帶原因。推 `bot_changed`；新 bot 的對話裡有一則系統訊息說明從哪裡分出來。
 - **冪等**（SPEC §6.10）：`client_request_id` 相同的重送回同一個 `bot_id`／`run_id`／`start_error`，不會再建一顆或再對 provider 分岔；中斷（回應遺失、daemon 死掉）後也一樣從停下的那步接著做。同一個 id 但來源或名字不同 → `409 request_mismatch`；已定案的結果其目標已被刪 → `409 fork_target_deleted`。要再 fork 一次請換 id；不帶＝每次都是新的一次。
 - 錯誤（都不會先建 bot）：來源不存在 404；`409 reason`：`fork_child`（子 agent）、`default_session`（從 herdr default session 匯入的）、`no_session`（還沒記到 native session）、`transcript_missing`（本機對話檔不在）、`unsupported_kind`、`not_in_config`；名字不合法 400。
@@ -1759,21 +1758,9 @@ grok `curl -fsSL https://x.ai/cli/install.sh | bash`；接著確認 `--version`�
 
 位置在 daemon 旗標之後、model 之前。AGM 的人設另走 `/api/supervisor/persona`（總管一節）。
 
-### 12.8b bot 的專案指示檔 `bot.instruction_files`（issue #213）
-claude 2.1.277 起，內建 `agents-md` plugin 決定專案指示檔讀哪幾份（`instructionFiles`）。daemon 在每顆 claude bot 啟動時寫進它的 `--settings`（SPEC §4「注入設定」），**值由這顆 bot 決定，不是全域開關**：
-
-| 值（就是 CLI 的選項，只收這四個） | claude 讀什麼 |
-|---|---|
-| `claude-md`（沒設時的值） | 只讀 `CLAUDE.md`。跟 2.1.277 以前一樣，不會因為專案沒有 `CLAUDE.md` 就改讀寫給 codex 的 `AGENTS.md` |
-| `claude-md-or-agents-md` | 有 `CLAUDE.md` 讀它，沒有才讀 `AGENTS.md`（CLI 自己的預設） |
-| `claude-md-and-agents-md` | 兩份都讀——要讓這顆 claude 和同專案的 codex 共用同一份 `AGENTS.md` 就選這個 |
-| `managed-only` | 專案與使用者自己的指示檔都不讀，只留組織管理的 `CLAUDE.md` 與 memory |
-
-- TOML `instruction_files = "claude-md-and-agents-md"`；POST 可省、PATCH 可改（`null`／`""` 清回 `claude-md`，不是 CLI 的預設）。有 active Run 時列入 `needs_restart`——設定檔只在啟動時讀。
-- `GET /api/state` 每顆 claude bot 都帶**有效值**（`claude-md` 就是沒設），codex／grok 是 `null`；前端 Bot 設定面板的「專案指示檔」就是這一格，只在 claude 的 `managed_by: "user"` bot 顯示。
-- **400**：值不在上表（CLI 遇到選項以外的值會當成它自己的預設＝改讀 `AGENTS.md`，等於沒釘，所以在 API 就擋）；`kind` 不是 claude 卻帶值（`null`／`""` 放行）；`managed_by: "child"` 的 bot（被認領的既有 pane，沒有 daemon 的 `--settings`，設了也讀不到）。
-- 手改 config.toml 寫了看不懂的值、或寫在 codex／grok 上：投影時丟掉（DB 存 NULL），bot 照樣讀 `claude-md`，不會把拼錯的值交給 CLI。
-- fork（§10.3b）與還原已刪的 bot 都會帶著這個值。
+### 12.8b 已移除：bot 的專案指示檔 `instruction_files`（issue #213，2026-10-02）
+使用者決定拿掉（「新的 claude 已經能接受 AGENTS.md」）：daemon 不再往 claude 的 `--settings` 寫 `pluginConfigs`（`agents-md` plugin 的 `instructionFiles`），CLI 用它自己的預設；`GET /api/state` 不再輸出 `instruction_files`。
+POST／PATCH 還收到這個欄位（舊網頁快取）時照收、直接忽略，不影響同一個請求的其他欄位；config.toml 裡殘留的 `instruction_files = …` 也讀得進來、被忽略。`bots.instruction_files` 欄位留在 SQLite（不 DROP、不再讀寫）。
 
 ### 12.9 GitHub 專案偵測與 issues
 
