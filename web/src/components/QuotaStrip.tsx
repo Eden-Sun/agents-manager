@@ -349,8 +349,9 @@ function Bar({
     return (
       <span className="quota-bar-row countdown">
         {instead}
+        {/* 倒數那列旁邊是 `21h22` 這種數字，裸的 `0` 讀不出是百分比：這裡帶 `%`（2026-10-02 使用者）。 */}
         <span className={`quota-bar-pct ${lv}${pct === null ? ' nodata' : ''}`} aria-hidden="true">
-          {pct === null ? '—' : fmtPct(pct)}
+          {pct === null ? '—' : `${fmtPct(pct)}%`}
         </span>
       </span>
     )
@@ -529,9 +530,13 @@ function Gauge({
                 {w.staleAt ? <StaleWindowMark at={w.staleAt} name={w.name} now={now} /> : null}
               </span>
               {back ? (
-                <span className="quota-reset-at" title={`${w.pct !== null && w.pct > 0 ? `剩 ${fmtPct(w.pct)}%` : '用完了'}，還有 ${back} 重置`}>
-                  {back}
-                </span>
+                // 倒數時百分比也留著（2026-10-02 使用者：「雖然現在 7d 已經倒數，也要出現 %」），倒數在前。
+                <>
+                  <span className="quota-reset-at" title={`${w.pct !== null && w.pct > 0 ? `剩 ${fmtPct(w.pct)}%` : '用完了'}，還有 ${back} 重置`}>
+                    {back}
+                  </span>
+                  <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
+                </>
               ) : (
                 <span className="quota-compact-pct">{w.pct === null ? '無資料' : `${fmtPct(w.pct)}%`}</span>
               )}
