@@ -889,8 +889,8 @@ impl Drop for Env {
 
 /// 測試行程專屬的假家目錄（`crate::home::dir()` 在測試裡回它）：會寫使用者家目錄的程式碼不能碰真的 HOME。
 pub fn fake_home() -> std::path::PathBuf {
-    static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| scratch_dir("am-fake-home")).clone()
+    // 跟 `test_home` 換掉的 `$HOME` 同一個：兩條路（`home::dir()` 與讀 `$HOME` 的 `dirs::home_dir()`）都要落在同一處。
+    crate::test_home::dir().to_path_buf()
 }
 
 /// 測試自己建的暫存資料目錄（`App` 的 `data_dir`）：註冊進來，最後一個 `Arc<App>` 掉了就由 `App` 的 `Drop` 刪掉
