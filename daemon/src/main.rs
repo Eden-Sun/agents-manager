@@ -119,6 +119,8 @@ mod service_auth;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]
+mod test_home;
+#[cfg(test)]
 mod timestamp_compat_tests;
 #[cfg(test)]
 mod same_ms_order_tests;
