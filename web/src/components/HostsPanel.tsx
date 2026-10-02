@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { CloseNeedsConfirm } from '../api'
-import type { HerdrVersion, HostResult, HostShell, RemoteCargoSettings } from '../api/types'
+import type { HerdrVersion, HostBaseline, HostResult, HostShell, RemoteCargoSettings } from '../api/types'
 import { herdrVersionView } from '../lib/herdrVersion'
+import { hostBaselineView } from '../lib/hostBaseline'
 import { ApiError, HOST_DEFAULTS } from '../api/types'
 import { nestableBusy } from '../lib/nestableBusy'
 import { DEFAULT_REMOTE_ROOT, remoteCargoUnsaved, toRemoteCargoInput } from '../lib/remoteCargoForm'
@@ -156,6 +157,27 @@ function HerdrVersionLine({ herdr }: { herdr: HerdrVersion }) {
   )
 }
 
+/** 工作環境一致性（SPEC §16.7，只讀）：缺什麼逐項列；未知就說未知，不當全缺。 */
+function BaselineLine({ baseline }: { baseline: HostBaseline | null }) {
+  const v = hostBaselineView(baseline)
+  return (
+    <span className={`host-baseline ${v.level}`}>
+      <span className="host-baseline-head" title={v.hint || undefined} role={v.level === 'critical' ? 'alert' : undefined}>
+        {v.text}
+      </span>
+      {v.items.length > 0 ? (
+        <ul className="host-baseline-items">
+          {v.items.map((i) => (
+            <li key={i.id} className={i.severity} title={i.id}>
+              {i.message}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </span>
+  )
+}
+
 function HostRow({ name }: { name: string }) {
   const host = useStore((s) => s.hosts.find((h) => h.name === name))
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === name).length)
@@ -189,6 +211,7 @@ function HostRow({ name }: { name: string }) {
         )}
         <HerdrVersionLine herdr={host.herdr} />
         <ToolBadges host={host.name} tools={host.tools} />
+        <BaselineLine baseline={host.baseline} />
         <GhHostStatus host={host.name} />
         <HostShellList host={host.name} connected={host.connected} />
       </span>
@@ -356,6 +379,7 @@ function LocalHostRow() {
   const connected = useStore((s) => s.connected)
   const tools = useStore((s) => s.localTools)
   const herdr = useStore((s) => s.localHerdr)
+  const baseline = useStore((s) => s.localBaseline)
   const attach = useStore((s) => s.attachCommand)
   const projectCount = useStore((s) => s.projects.filter((p) => p.host === 'local').length)
   return (
@@ -369,6 +393,7 @@ function LocalHostRow() {
         <span className="host-ssh">{attach}</span>
         <HerdrVersionLine herdr={herdr} />
         <ToolBadges host="local" tools={tools} />
+        <BaselineLine baseline={baseline} />
         <GhHostStatus host="local" />
         <HostShellList host="local" connected={connected} />
       </span>

@@ -3367,7 +3367,11 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
   - codex：`config.toml`、`hooks.json`、`approval_policy` 鍵；grok `config.toml`；herdr `config.toml`（都是提醒）。**不檢查** model／effort／service_tier（使用者規定不動）。
   - `~/.gitconfig` 內嵌帶密碼的網址（提醒）：只回報有沒有，**不回傳內容**。
 - 檔案本身不在就不再列裡面的鍵（一個根因一行）。探測沒跑完（沒有結尾標記）＝`issues: null`（未知），一次 ssh 逾時不會在每台主機喊一排缺漏。
-- 這一版沒做：啟動時推 inbox、UI 主機面板顯示、自動安裝／同步、Mac 專用項（darwin-only）標記。
+- **darwin-only**：探測也印 `AM_BL os <uname -s>`。Mac 專用項（claude `settings.json` 的 `enabledPlugins` 裡 `imessage@…`／`discord@…` 沒有啟用，`MAC_ONLY_PLUGINS`）只在 `os=Darwin` 時才列；Linux 或不知道系統（舊探測沒帶 `os`）一律不算缺。Vercel autoMode 不在這一版（沒有可靠的鍵可查）。
+- **inbox 通知**：每次偵測結果寫進快取後，`issues` 非空就推一則 `ops_alert`（`source=daemon`、`reason=host_baseline`）給 AGM；key 帶差異 id 集合的雜湊，同一份差異只推一次、差異變了才再推，一致或未知不推。沿用 `push_inbox` 的 `INSERT OR IGNORE` 去重（跟其他 `ops_alert` 同一套）。
+- **定期重量**：偵測本來只在連上／alias 變了／手動時跑；另有 `host_baseline::spawn_poller` 每 6 小時對連著的主機重跑一次完整偵測（啟動那一輪由開機偵測負責）。
+- **UI**：網頁「主機」面板每台（含本機）一行「一致性：…」，有差異逐項列出（嚴重的在前、紅；提醒黃）；沒量過顯示「尚未檢查」、`issues: null` 顯示「未知」，**不當成全缺**（`web/src/lib/hostBaseline.ts`）。
+- 這一版沒做：自動安裝／同步（要使用者另行同意）。
 
 ## 16b. 輸入框草稿以 daemon 為準（使用者 2026-10-01）
 

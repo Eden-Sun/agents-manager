@@ -506,6 +506,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // 這顆 binary 是哪一版、什麼時候**上線**的（`GET /api/supervisor` 的 `last_deploy`）。
     build_info::mark_started(&app.data_dir);
     tools::spawn_alias_poller(app.clone());
+    host_baseline::spawn_poller(app.clone());
     herdr_version::spawn_poller(app.clone());
     remote_purge::spawn_poller(app.clone());
     // 連上那趟收權限失敗的主機（#501）：欠著的每 5 分鐘補跑一次，不然一台不重連的主機就一直是 0755（#501 複看）。

@@ -199,3 +199,117 @@ fn snapshot(root: &std::path::Path) -> Vec<(String, u64)> {
     acc.sort();
     acc
 }
+
+// ───────── 第二版（#719-b）：darwin-only、inbox 通知 ─────────
+
+const MAC_PLUGINS_MISSING: &str = "AM_BL claude-plugin default imessage 0
+AM_BL claude-plugin default discord 0
+";
+
+fn with_os(os: &str) -> String {
+    GOOD.replace("AM_BL begin\n", &format!("AM_BL begin\nAM_BL os {os}\n"))
+        .replace("AM_BL claude-key default permissions 1\n", &format!("AM_BL claude-key default permissions 1\n{MAC_PLUGINS_MISSING}"))
+}
+
+#[test]
+fn mac_only_items_are_not_missing_on_a_linux_host() {
+    let out = with_os("Linux");
+    assert_eq!(os_of(&out).as_deref(), Some("Linux"));
+    assert_eq!(evaluate(&out), Some(vec![]));
+}
+
+#[test]
+fn mac_only_items_are_listed_on_a_mac() {
+    let out = with_os("Darwin");
+    assert_eq!(os_of(&out).as_deref(), Some("Darwin"));
+    assert_eq!(ids(&out), vec!["claude.default.plugin:imessage", "claude.default.plugin:discord"]);
+    assert_eq!(sev(&out, "claude.default.plugin:imessage"), WARN);
+}
+
+#[test]
+fn an_unknown_os_never_counts_mac_only_items() {
+    // 舊探測沒帶 `AM_BL os`：不知道是哪個系統就不能說缺 Mac 專用項。
+    let out = GOOD.replace("AM_BL claude-key default permissions 1\n", &format!("AM_BL claude-key default permissions 1\n{MAC_PLUGINS_MISSING}"));
+    assert_eq!(os_of(&out), None);
+    assert_eq!(evaluate(&out), Some(vec![]));
+}
+
+#[test]
+fn mac_plugins_are_not_asked_about_when_settings_json_is_missing() {
+    let out = with_os("Darwin")
+        .replace("claude-file default settings.json 1", "claude-file default settings.json 0")
+        .replace("claude-key default statusLine 1", "claude-key default statusLine 0")
+        .replace("claude-key default hooks 1", "claude-key default hooks 0")
+        .replace("claude-key default permissions 1", "claude-key default permissions 0");
+    assert_eq!(ids(&out), vec!["claude.default.settings.json"]);
+}
+
+#[test]
+fn the_real_script_reports_the_os_and_checks_plugins_by_name() {
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".claude")).unwrap();
+    fs::write(h.join(".claude/settings.json"), r#"{ "enabledPlugins": { "imessage@claude-plugins-official": true } }"#).unwrap();
+    let out = run_probe(h, "/usr/bin:/bin");
+    assert!(out.contains("AM_BL os "), "{out}");
+    assert!(out.contains("AM_BL claude-plugin default imessage 1"), "{out}");
+    assert!(out.contains("AM_BL claude-plugin default discord 0"), "{out}");
+}
+
+fn report(issues: Option<Vec<BaselineIssue>>) -> BaselineReport {
+    BaselineReport { os: Some("Linux".into()), issues, checked_at: "2026-10-02T00:00:00.000Z".into() }
+}
+
+fn bi(id: &str, severity: &'static str) -> BaselineIssue {
+    BaselineIssue { id: id.into(), severity, message: format!("{id} message") }
+}
+
+#[test]
+fn nothing_is_pushed_for_a_consistent_or_unknown_host() {
+    assert!(alert_for("ubuntu", &report(Some(vec![]))).is_none());
+    assert!(alert_for("ubuntu", &report(None)).is_none(), "unknown is not a difference");
+}
+
+#[test]
+fn the_same_difference_has_the_same_key_whatever_the_order_and_a_changed_one_does_not() {
+    let a = alert_for("ubuntu", &report(Some(vec![bi("tool.rtk", CRITICAL), bi("claude.cc2.settings.json", CRITICAL)]))).unwrap();
+    let b = alert_for("ubuntu", &report(Some(vec![bi("claude.cc2.settings.json", CRITICAL), bi("tool.rtk", CRITICAL)]))).unwrap();
+    let c = alert_for("ubuntu", &report(Some(vec![bi("tool.rtk", CRITICAL)]))).unwrap();
+    let other_host = alert_for("m4p", &report(Some(vec![bi("tool.rtk", CRITICAL)]))).unwrap();
+    assert_eq!(a.0, b.0);
+    assert_ne!(a.0, c.0);
+    assert_ne!(c.0, other_host.0, "each host is its own difference");
+    assert!(a.0.starts_with("ops_alert:daemon:host_baseline:ubuntu:"), "{}", a.0);
+    assert_eq!(a.1["source"], "daemon");
+    assert_eq!(a.1["reason"], "host_baseline");
+    assert_eq!(a.1["subject"], "ubuntu");
+    assert_eq!(a.1["critical"], 2);
+    let listed = a.1["issues"].as_array().unwrap();
+    assert_eq!(listed.len(), 2);
+}
+
+async fn inbox_keys(app: &std::sync::Arc<crate::state::App>) -> Vec<String> {
+    crate::supervisor::store::inbox(&app.db, 50).await.unwrap().into_iter().map(|e| e.event_key).collect()
+}
+
+#[tokio::test]
+async fn notify_pushes_one_inbox_event_per_distinct_difference() {
+    let env = crate::testing::env().await;
+    let app = &env.app;
+    let first = report(Some(vec![bi("tool.rtk", CRITICAL)]));
+    notify(app, "ubuntu", &first).await;
+    notify(app, "ubuntu", &first).await; // 重連、定期重量：同一份差異不再推
+    assert_eq!(inbox_keys(app).await.len(), 1);
+
+    notify(app, "ubuntu", &report(Some(vec![bi("tool.rtk", CRITICAL), bi("tool.zsh", CRITICAL)]))).await;
+    assert_eq!(inbox_keys(app).await.len(), 2, "a changed difference is pushed again");
+
+    notify(app, "ubuntu", &report(Some(vec![]))).await;
+    notify(app, "ubuntu", &report(None)).await;
+    assert_eq!(inbox_keys(app).await.len(), 2, "consistent / unknown pushes nothing");
+}
+
+#[test]
+fn mac_only_plugins_match_the_script() {
+    assert!(BASELINE_SH.contains(&format!("MAC_ONLY_PLUGINS=\"{}\"", MAC_ONLY_PLUGINS.join(" "))));
+}

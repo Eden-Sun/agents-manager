@@ -199,3 +199,31 @@
   font-family: inherit;
   margin-top: 2px;
 }
+
+/* 工作環境一致性（SPEC §16.7）：未知用淡色，不要看起來像出事。 */
+.host-baseline {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.host-baseline.warn .host-baseline-head {
+  color: var(--warn);
+}
+
+.host-baseline.critical .host-baseline-head {
+  color: var(--danger);
+}
+
+.host-baseline-items {
+  margin: 2px 0 0;
+  padding-left: 16px;
+}
+
+.host-baseline-items li.critical {
+  color: var(--danger);
+}
+
+.host-baseline-items li.warn {
+  color: var(--warn);
+}

@@ -1,6 +1,7 @@
 /** Tolerant decoders for daemon payloads: accept plausible shapes (SQLite 0/1 booleans, JSON-string fields, nested or flat bots/runs). */
 
 import type {
+  HostBaseline,
   MemOwner,
   MemProcess,
   MemProcesses,
@@ -131,6 +132,21 @@ export function toHerdrVersion(v: unknown): HerdrVersion {
   }
 }
 
+/** `hosts[].baseline`（SPEC §16.7）。不是物件＝還沒量過＝null；`issues` 不是陣列＝探測沒跑完＝null（未知，不當全缺）。 */
+export function toHostBaseline(v: unknown): HostBaseline | null {
+  if (!isRec(v)) return null
+  const raw = pick(v, 'issues')
+  const issues = Array.isArray(raw)
+    ? raw.flatMap((i) => {
+        if (!isRec(i)) return []
+        const id = str(pick(i, 'id'))
+        if (!id) return []
+        return [{ id, severity: pick(i, 'severity') === 'critical' ? ('critical' as const) : ('warn' as const), message: str(pick(i, 'message')) }]
+      })
+    : null
+  return { issues, checked_at: str(pick(v, 'checked_at')), os: optStr(pick(v, 'os')) }
+}
+
 /** SPEC §11.6 */
 export function toHost(v: unknown): Host | null {
   if (!isRec(v)) return null
@@ -151,6 +167,7 @@ export function toHost(v: unknown): Host | null {
       `herdr --remote ${str(pick(v, 'ssh'))} --session ${str(pick(v, 'herdr_session'), 'agents-manager')}`,
     herdr: toHerdrVersion(pick(v, 'herdr')),
     tools: toToolMap(pick(v, 'tools')),
+    baseline: toHostBaseline(pick(v, 'baseline')),
     identity_status: toIdentityStatusMap(pick(v, 'identities')),
   }
 }
@@ -537,6 +554,7 @@ export function toState(raw: unknown): AppState {
   let attachCommand = `herdr --session ${session}`
   let localTools = toToolMap(undefined)
   let localHerdr = UNKNOWN_HERDR
+  let localBaseline: HostBaseline | null = null
   let localIdentityStatus: IdentityStatusMap = {}
   for (const h of hostArray(pick(root, 'hosts'))) {
     // `local` is modelled via `state.connected`; keep only its attach/tools/identities.
@@ -546,6 +564,7 @@ export function toState(raw: unknown): AppState {
       if (isRec(h) && str(h.attach_command)) attachCommand = str(h.attach_command)
       localTools = host.tools
       localHerdr = host.herdr
+      localBaseline = host.baseline
       localIdentityStatus = host.identity_status
       continue
     }
@@ -612,6 +631,7 @@ export function toState(raw: unknown): AppState {
     attach_command: attachCommand,
     herdr: localHerdr,
     tools: localTools,
+    baseline: localBaseline,
     identity_status: localIdentityStatus,
     hosts,
     identities,

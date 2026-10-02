@@ -40,3 +40,29 @@ test('舊版 host_changed 只有 host 時重讀 state，讓身份登入狀態收
     unsubscribe()
   }
 })
+
+test('host_changed 帶 baseline：本機與遠端都更新；沒帶＝沒變；issues: null 是未知不是全缺', () => {
+  reset()
+  useStore.setState({
+    hosts: [
+      {
+        name: 'm4p', ssh: 'm4p', ssh_port: 22, herdr_session: 's', remote_path: '', connected: true, error: null,
+        disconnected_since: null, attach_command: '', herdr: useStore.getState().localHerdr, tools: useStore.getState().localTools,
+        baseline: null, identity_status: {},
+      },
+    ],
+  })
+  const base = { checked_at: '2026-10-02T00:00:00Z', os: 'Linux' }
+
+  dispatchFrameForTest({ type: 'host_changed', data: { name: 'local', connected: true, baseline: { ...base, issues: [{ id: 'tool.rtk', severity: 'critical', message: '缺工具 rtk' }] } } })
+  assert.equal(useStore.getState().localBaseline?.issues?.[0]?.id, 'tool.rtk')
+
+  dispatchFrameForTest({ type: 'host_changed', data: { name: 'local', connected: true } })
+  assert.equal(useStore.getState().localBaseline?.issues?.length, 1, '沒帶 baseline 不能把已知的差異洗掉')
+
+  dispatchFrameForTest({ type: 'host_changed', data: { name: 'm4p', connected: true, baseline: { ...base, issues: null } } })
+  assert.equal(useStore.getState().hosts[0].baseline?.issues, null, '探測沒跑完＝未知')
+
+  dispatchFrameForTest({ type: 'host_changed', data: { name: 'm4p', connected: true, baseline: { ...base, issues: [] } } })
+  assert.deepEqual(useStore.getState().hosts[0].baseline?.issues, [])
+})
