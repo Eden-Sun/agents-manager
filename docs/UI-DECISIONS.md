@@ -818,3 +818,11 @@ claude 的 `AskUserQuestion`（網頁或終端答的都一樣）答完之後，�
 - 取消（Cancel／Esc）或沒答的題目寫斜體「沒有回答」；整組都沒答，標頭改成「提問（沒有回答）」。
 - **只讀**：沒有倒回鍵、來源標、送達標、重送入口，不是使用者的 prompt，不碰任何送出或排隊；點一下複製問答純文字。答案用文字節點畫，不解析成 HTML／Markdown。
 - 只有 `id` 以 `ask:` 開頭、`role=system`、`content.type=ask_answers` 的訊息才畫成這張卡；使用者自己打一樣長相的 JSON 仍是使用者泡泡。
+
+## bot 輸出的 Markdown 是不可信內容（對抗式審查，2026-10）
+
+- 一律走 `SafeMarkdown`：react-markdown 不開原始 HTML（不用 rehype-raw）、網址走 `markdownUrlTransform`（`javascript:`／`data:`／`vbscript:` 清成空字串；只對 `<img src>` 放行 `file:`）。
+- **連結一律 `target="_blank" rel="noopener noreferrer"`**；被清掉網址的連結不留 `<a>`，字還在。以前沒有，bot 給的連結一按就整個 app 換頁。
+- **太長（> 2 萬字）或巢狀太深（引用 > 20 層、行首縮排 > 80 格）預設純文字**，附「以 Markdown 顯示」讓使用者自己展開：remark 對某些輸入是平方時間（`*a` 重複 2 萬次卡 22 秒），巢狀引用 6000 層卡 87 秒、更深遞迴爆 stack。轉換真的丟例外由 error boundary 退回純文字（整個 app 沒有 error boundary，沒接住就白畫面且重新整理也白）。
+- 不是 Markdown 的欄位（bot／專案名、檔名、通知）一律文字節點，不用 `innerHTML`；`document.title` 只帶未讀數；沒有用 Notification API。
+- 放進 `<a href>` 的外來網址（遠端入口、交付 PR、issue）先過 `safeHttpUrl`，只收絕對 http／https；daemon 端 `POST /api/supervisor/remote` 也擋。

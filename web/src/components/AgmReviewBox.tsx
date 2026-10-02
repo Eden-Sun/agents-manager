@@ -15,6 +15,7 @@ import { anyAnalysed, triageForRange, type TriageItem, type TriageVersion } from
 import { scheduleReviewRefresh } from '../lib/reviewRefresh'
 import { useStore } from '../store/store'
 import './agmReviewBox.css'
+import { safeHttpUrl } from '../lib/safeUrl'
 
 type Loaded = { key: string; version: string; review: UpdateReview | null; triage: TriageVersion[] | null }
 
@@ -144,8 +145,8 @@ function TriageBlock({ v }: { v: TriageVersion }) {
               {i.number !== null ? (
                 <>
                   {' '}
-                  {i.url ? (
-                    <a href={i.url} target="_blank" rel="noreferrer">
+                  {safeHttpUrl(i.url) ? (
+                    <a href={safeHttpUrl(i.url)} target="_blank" rel="noopener noreferrer">
                       #{i.number}
                     </a>
                   ) : (

@@ -24,6 +24,7 @@ import {
 import { useStore } from '../store/store'
 import { KindIcon } from './KindTag'
 import './missions.css'
+import { safeHttpUrl } from '../lib/safeUrl'
 
 /** 一次最多攤開幾張進行中的卡；其餘收在「還有 N 個」後面。 */
 const OPEN_SHOWN = 2
@@ -349,8 +350,8 @@ function Evidence({ view, mission }: { view: ReturnType<typeof missionView>; mis
       {view.delivered ? (
         <li>
           <span className="mission-tag">{deliveryLabel(view.delivered.mode)}</span>
-          {view.delivered.url ? (
-            <a href={view.delivered.url} target="_blank" rel="noreferrer">
+          {safeHttpUrl(view.delivered.url) ? (
+            <a href={safeHttpUrl(view.delivered.url)} target="_blank" rel="noopener noreferrer">
               {view.delivered.branch ?? view.delivered.url}
             </a>
           ) : (

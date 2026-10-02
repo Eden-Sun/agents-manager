@@ -796,6 +796,12 @@ pub async fn post_remote_observation(
             json!({"reason": "source_cannot_verify", "source": b.source}),
         ));
     }
+    // `url` 會被前端放進 `<a href>`：只收 http／https（`javascript:` 一按就在 app 的 origin 執行）。
+    if let Some(u) = b.url.as_deref() {
+        if !is_http_url(u) {
+            return Err(LcError::Bad("url must be an absolute http(s) URL".into()));
+        }
+    }
     let claim = b.actor.as_deref().map(str::trim).filter(|s| !s.is_empty());
     // 驗過的角色不必再自稱：它的身分本身就是署名。沒驗過的照舊要填一個名字，
     // 只是那個名字會被包成 `user(<自稱>)`，讀的人一眼看得出沒驗過。
@@ -830,6 +836,13 @@ pub async fn post_remote_observation(
     tracing::info!(status = %b.status, source = source.as_str(), actor = actor.unwrap_or(""), "remote entry observation recorded");
     app.emit("supervisor_changed", json!({"remote": true})).await;
     Ok(Json(super::remote::status(&app).await))
+}
+
+/// 絕對的 http／https 網址：協定要在最前面（不收前導空白、Tab、換行這些瀏覽器會幫忙吃掉的變形）、有主機、沒有空白或控制字元。
+fn is_http_url(u: &str) -> bool {
+    let rest = ["http://", "https://"].iter().find_map(|p| u.get(..p.len()).filter(|h| h.eq_ignore_ascii_case(p)).map(|_| &u[p.len()..]));
+    let Some(rest) = rest else { return false };
+    u.len() <= 2048 && !rest.is_empty() && !rest.starts_with(['/', '?', '#']) && !u.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 // ------------------------------------------------------------------------ persona
@@ -1762,6 +1775,34 @@ mod approval_decision_tests {
         let agm = agm_role_headers(&app).await;
         let _ = obs(&app, agm, Some("我是別人")).await.unwrap();
         assert_eq!(recorded(&app).await.unwrap_or_default(), format!("{}:patrol", store::SUPERVISOR_ID));
+
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// 遠端入口的 `url` 會被前端放進 `<a href>`：任何拿得到 token 的呼叫端（含被 prompt injection 的 bot）寫進 `javascript:`，
+    /// 使用者一按就在 app 的 origin 執行（記憶體裡的 daemon token 跟著暴露）。只收 http／https，其餘 400，且什麼都不寫。
+    #[tokio::test]
+    async fn a_remote_observation_url_must_be_http_or_https() {
+        let app = app().await;
+        let post = |url: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                let body = json!({"status": "requested", "source": "manual", "url": url});
+                post_remote_observation(State(app), HeaderMap::new(), Json(serde_json::from_value(body).unwrap())).await
+            }
+        };
+        let stored = || async { sqlx::query_scalar::<_, Option<String>>("SELECT remote_url FROM supervisors WHERE id=?").bind(store::SUPERVISOR_ID).fetch_one(&app.db).await.unwrap() };
+        for bad in ["javascript:alert(1)", "JaVaScRiPt:alert(1)", "  javascript:alert(1)", "data:text/html;base64,PHNjcmlwdD4=", "vbscript:msgbox(1)", "file:///etc/passwd", "//evil.example/x", "/relative", "not a url", ""] {
+            let err = post(json!(bad)).await.unwrap_err();
+            assert!(matches!(err, LcError::Bad(_)), "{bad:?} 要 400，卻是 {err:?}");
+            assert_eq!(stored().await, None, "{bad:?} 不能寫進去");
+        }
+        post(json!("https://claude.ai/code/session_1")).await.unwrap();
+        assert_eq!(stored().await.as_deref(), Some("https://claude.ai/code/session_1"));
+        // 沒帶 url 照舊（`url` 是選填）。
+        let body = json!({"status": "requested", "source": "manual"});
+        post_remote_observation(State(app.clone()), HeaderMap::new(), Json(serde_json::from_value(body).unwrap())).await.unwrap();
 
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();

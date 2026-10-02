@@ -2400,6 +2400,10 @@ button.pane-toggle:hover:not(:disabled) {
   line-height: 24px;
 }
 
+/* 太長／太深的訊息預設純文字（SafeMarkdown）。 */
+.bubble .md-plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-height: 60vh; overflow: auto; }
+.bubble .md-plain-note { margin: 6px 0 0; font-size: 12px; opacity: 0.75; }
+
 .bubble.md > :first-child { margin-top: 0; }
 
 .bubble.md > :last-child { margin-bottom: 0; }

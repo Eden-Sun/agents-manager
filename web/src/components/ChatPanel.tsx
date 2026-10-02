@@ -1,5 +1,3 @@
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { memo, useEffect, useLayoutEffect, useRef, useState, useId } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
@@ -66,8 +64,7 @@ import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
 import { StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
-import { markdownComponents } from '../lib/markdownComponents'
-import { markdownUrlTransform } from '../lib/markdownUrl'
+import { SafeMarkdown } from './SafeMarkdown'
 import { TerminalTab } from './TerminalTab'
 import { PreviewPanel } from './PreviewPanel'
 import { isTopLevelBot } from '../store/routeSync'
@@ -218,9 +215,7 @@ const PlainBubble = memo(function PlainBubble({
         {!msg.content ? (
           <em style={{ opacity: 0.6 }}>（空白訊息）</em>
         ) : msg.role === 'assistant' && !fallback ? (
-          <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents(msg.bot_id)} urlTransform={markdownUrlTransform}>
-            {msg.content}
-          </Markdown>
+          <SafeMarkdown text={msg.content} botId={msg.bot_id} />
         ) : folded && preview ? (
           preview.text
         ) : (
@@ -293,7 +288,7 @@ export function LiveBubble({
       <div className={`bubble${showText ? ' md' : ''}`}>
         {showText ? (
           <>
-            <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+            <SafeMarkdown text={text ?? ""} />
             <span className="caret" aria-hidden="true" />
           </>
         ) : (
