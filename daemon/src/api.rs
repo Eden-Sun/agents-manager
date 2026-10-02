@@ -8075,6 +8075,64 @@ mod per_principal_auth_tests {
         }
     }
 
+    /// `/hook/{provider}` 的入口：畸形／缺欄位／型別錯／過大的 body 都是乾淨的 4xx（不是 5xx、不 panic、不留一列在收件匣），
+    /// 認證失敗一律 401，provider 跟 bot 的 kind 不符 409；正常的一則收下一列，重送不長第二列。
+    #[tokio::test]
+    async fn the_hook_endpoint_rejects_bad_requests_cleanly_and_stores_a_good_one_once() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "hook-edge").await;
+        let post = |provider: &str, token: Option<&str>, body: String| {
+            let tok = token.map(|t| format!("X-AM-Bot-Token: {t}\r\n")).unwrap_or_default();
+            format!(
+                "POST /hook/{provider} HTTP/1.1\r\nHost: 127.0.0.1\r\n{tok}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let rows = || async { sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM hook_events").fetch_one(&e.app.db).await.unwrap() };
+        let status = |r: &str| r.split_whitespace().nth(1).unwrap_or("").to_string();
+        let good = |extra: &str| format!(r#"{{"bot_id":"{}","provider":"claude","payload":{{"hook_event_name":"PostToolUse","tool_use_id":"t1"{extra}}},"received_at":"2026-10-02T00:00:00.000Z"}}"#, bot.id);
+
+        for (what, body, want) in [
+            ("畸形 JSON", "{".to_string(), "400"),
+            ("缺 bot_id", r#"{"payload":{}}"#.to_string(), "422"),
+            ("bot_id 型別錯", r#"{"bot_id":5,"payload":{}}"#.to_string(), "422"),
+            ("payload 是字串也收得下（之後的處理不 panic）", format!(r#"{{"bot_id":"{}","payload":"x"}}"#, bot.id), "200"),
+        ] {
+            let r = raw(e.app.clone(), post("claude", Some(&bot.hook_token), body)).await;
+            assert_eq!(status(&r), want, "{what}: {r}");
+        }
+        assert_eq!(rows().await, 1, "只有那則型別怪但合法的 body 進了收件匣");
+
+        // 認證：沒有 token、錯的 token、不存在的 bot，一律 401 且分不出差別。
+        for (what, token, bot_id) in [("沒有 token", None, bot.id.as_str()), ("錯 token", Some("wrong"), bot.id.as_str()), ("沒這顆 bot", Some("x"), "no-such-bot")] {
+            let body = format!(r#"{{"bot_id":"{bot_id}","payload":{{}}}}"#);
+            let r = raw(e.app.clone(), post("claude", token, body)).await;
+            assert_eq!(status(&r), "401", "{what}: {r}");
+        }
+        // 未知 provider（跟這顆 bot 的 kind 不符）。
+        let r = raw(e.app.clone(), post("nonesuch", Some(&bot.hook_token), good(""))).await;
+        let r2 = raw(e.app.clone(), post("claude", Some(&bot.hook_token), good("").replace(r#""provider":"claude""#, r#""provider":"codex""#))).await;
+        assert_eq!(status(&r2), "409", "{r2}");
+        assert!(status(&r) == "200" || status(&r) == "409", "URL 上的 provider 被 body 的蓋過：{r}");
+
+        // 太大：2 MiB 以上整個擋在 body 限制，不進 JSON 解析、不進收件匣。
+        let before = rows().await;
+        let huge = good(&format!(r#","tool_response":"{}""#, "x".repeat(3 * 1024 * 1024)));
+        let r = raw(e.app.clone(), post("claude", Some(&bot.hook_token), huge)).await;
+        assert_eq!(status(&r), "413", "{}", &r[..r.len().min(200)]);
+        assert_eq!(rows().await, before);
+
+        // 好的一則：收下一列，同一則重送回 stored:false、不長第二列。
+        let fresh = || good("").replace("\"t1\"", "\"t2\"");
+        let before = rows().await;
+        let one = raw(e.app.clone(), post("claude", Some(&bot.hook_token), fresh())).await;
+        assert_eq!(status(&one), "200", "{one}");
+        assert!(one.contains(r#""stored":true"#), "{one}");
+        let again = raw(e.app.clone(), post("claude", Some(&bot.hook_token), fresh())).await;
+        assert!(again.contains(r#""stored":false"#), "{again}");
+        assert_eq!(rows().await, before + 1, "重送不長第二列");
+    }
+
     async fn state(app: Arc<App>, headers: &[(&str, &str)]) -> String {
         let extra: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
         raw(

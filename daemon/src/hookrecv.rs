@@ -79,12 +79,7 @@ pub async fn receive(
 
     // 單槽、最新的贏的訊號：不進佇列，掉一格只是晚一次重繪（`hook_inbox` 模組說明）。
     if matches!(classify(&b.provider, &b.payload), HookKind::StatusLine) {
-        let app2 = app.clone();
-        tokio::spawn(async move {
-            if let Err(e) = process(&app2, &b).await {
-                tracing::error!(error = ?e, "statusline processing failed");
-            }
-        });
+        spawn_statusline(&app, b);
         return (StatusCode::OK, Json(json!({})));
     }
 
@@ -99,6 +94,42 @@ pub async fn receive(
             (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "not persisted"})))
         }
     }
+}
+
+/// 每顆 bot 在等處理的最新一則 StatusLine。
+fn status_slots() -> &'static std::sync::Mutex<std::collections::HashMap<String, HookBody>> {
+    static SLOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, HookBody>>> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+static STATUSLINE_TASKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+fn statusline_tasks_spawned() -> usize {
+    STATUSLINE_TASKS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// StatusLine 是「最新的贏」的單槽訊號：處理它要拿 bot 鎖，鎖被長操作握著時，每一則各丟一個 task 排隊就會一路疊上去
+/// （每個 task 抱一份 body，高頻 × 慢鎖＝記憶體與排隊都無上限）。同一顆 bot 只留一格：槽裡已經有一則在等，
+/// 後到的直接取代它（等的那個 task 醒來處理的就是最新的）；槽是空的才起一個 task。所以每顆 bot 最多一個在處理、一個在等。
+fn spawn_statusline(app: &Arc<App>, b: HookBody) {
+    let bot_id = b.bot_id.clone();
+    let replaced = status_slots().lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.clone(), b).is_some();
+    if replaced {
+        return;
+    }
+    #[cfg(test)]
+    STATUSLINE_TASKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let app = app.clone();
+    tokio::spawn(async move {
+        // 先排隊等鎖、拿到鎖才把槽裡「當下最新」的那則取走：等鎖期間到的都已經取代過了。
+        let lock = app.bot_lock(&bot_id).await;
+        let _g = lock.lock().await;
+        let Some(b) = status_slots().lock().unwrap_or_else(|e| e.into_inner()).remove(&bot_id) else { return };
+        if let Err(e) = process_locked(&app, &b).await {
+            tracing::error!(error = ?e, "statusline processing failed");
+        }
+    });
 }
 
 /// 這句 prompt 回音是別的 agent 打進來的嗎？（見 SPEC §6.5d）
@@ -1021,6 +1052,33 @@ async fn turn_prompt(app: &Arc<App>, t: &db::Turn) -> Result<Option<String>> {
     }
 }
 
+/// 寫進回合的 native 證據。`(session, turn)` 是全域唯一的去重鑰匙（`turns_native`），而 hook 的 id 是送端自己報的：
+/// 這組 id 若已經記在**別顆 bot** 的回合上（別顆 bot 先送了同樣的 id、或兩顆 bot 接回同一段 session），照寫會撞唯一索引，
+/// 這顆 bot 的收尾就一直失敗、卡在收件匣重試，回合掛著等備援。撞到別人的就不寫 turn id（回合照常收尾），只留 session。
+async fn native_evidence<'a>(
+    app: &Arc<App>,
+    bot_id: &str,
+    session_id: Option<&'a str>,
+    turn_id: Option<&'a str>,
+) -> Result<lifecycle::turn_controller::NativeEvidence<'a>> {
+    if let (Some(sid), Some(tid)) = (session_id, turn_id) {
+        let taken: Option<String> = sqlx::query_scalar(
+            "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+              WHERE c.bot_id <> ? AND t.native_session_id = ? AND t.native_turn_id = ? LIMIT 1",
+        )
+        .bind(bot_id)
+        .bind(sid)
+        .bind(tid)
+        .fetch_optional(&app.db)
+        .await?;
+        if taken.is_some() {
+            tracing::warn!(bot = bot_id, session = sid, turn = tid, "native turn id already belongs to another bot's turn; not recorded on this one");
+            return Ok(lifecycle::turn_controller::NativeEvidence { session_id: Some(sid), turn_id: None });
+        }
+    }
+    Ok(lifecycle::turn_controller::NativeEvidence { session_id, turn_id })
+}
+
 pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     let Some(bot) = db::bot(&app.db, &body.bot_id).await? else { return Ok(()) };
     // A3: also guards the spool-replay path, where nothing checked the token.
@@ -1132,7 +1190,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             }
             // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
             let seen = match (&session_id, &turn_id) {
-                (Some(sid), Some(tid)) => sqlx::query_scalar::<_, String>("SELECT id FROM turns WHERE native_session_id=? AND native_turn_id=?")
+                (Some(sid), Some(tid)) => sqlx::query_scalar::<_, String>(
+                    "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+                      WHERE c.bot_id=? AND t.native_session_id=? AND t.native_turn_id=?",
+                )
+                .bind(&bot.id)
                     .bind(sid)
                     .bind(tid)
                     .fetch_optional(&app.db)
@@ -1195,7 +1257,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 收尾（連同當作去重鑰匙的 native id）與說明同一個交易（#115）：說明寫不進去時整筆回滾，
             // 收件匣的重試才不會被去重擋掉、留下一筆沒有原因的失敗回合。
             let mut tx = app.db.begin().await?;
-            let native = lifecycle::turn_controller::NativeEvidence { session_id: session_id.as_deref(), turn_id: turn_id.as_deref() };
+            let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
             let claimed = lifecycle::turn_controller::fail_with_native_evidence(&mut tx, &t.id, admitted, native).await?;
             if claimed != lifecycle::turn_controller::Outcome::Applied {
                 tracing::info!(turn = %t.id, ?claimed, "StopFailure 來晚了：這一筆已經被別的路徑收掉，不重複收尾");
@@ -1355,7 +1417,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 3. dedup on (native_session_id, native_turn_id)
             if let (Some(sid), Some(tid)) = (&session_id, &turn_id) {
                 let dup: Option<String> =
-                    sqlx::query_scalar("SELECT id FROM turns WHERE native_session_id=? AND native_turn_id=?")
+                    sqlx::query_scalar(
+                        "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+                          WHERE c.bot_id=? AND t.native_session_id=? AND t.native_turn_id=?",
+                    )
+                    .bind(&bot.id)
                         .bind(sid)
                         .bind(tid)
                         .fetch_optional(&app.db)
@@ -1414,7 +1480,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 // 收尾（連同當作去重鑰匙的 native id）與訊息同一個交易（#115）：訊息寫不進去時整筆回滾，
                 // 收件匣重試時才不會被去重擋掉、留下一筆沒有回覆的 completed 回合。
                 let mut tx = app.db.begin().await?;
-                let native = lifecycle::turn_controller::NativeEvidence { session_id: session_id.as_deref(), turn_id: turn_id.as_deref() };
+                let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
                 let claimed = lifecycle::turn_controller::complete_with_native_evidence(&mut tx, &t.id, admitted, native).await?;
                 match &claimed {
                     lifecycle::turn_controller::Outcome::Applied => {}
@@ -1496,6 +1562,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
 
             // 5. external turn：回合（帶去重用的 native id）與它的訊息同一個交易（#115）。
             let tid = db::ulid();
+            let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
             let mut tx = app.db.begin().await?;
             sqlx::query(
                 "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, native_session_id, native_turn_id, created_at, completed_at)
@@ -1504,8 +1571,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             .bind(&tid)
             .bind(&conv)
             .bind(run.as_ref().map(|r| r.id.clone()))
-            .bind(&session_id)
-            .bind(&turn_id)
+            .bind(native.session_id)
+            .bind(native.turn_id)
             .bind(db::now())
             .bind(db::now())
             .execute(&mut *tx)
@@ -3312,6 +3379,121 @@ mod external_claim_tests {
         process(&app, &ev).await.unwrap();
         assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
         assert!(system_notes(&app, &turn_id).await.is_empty());
+    }
+
+    /// 去重是「這顆 bot 自己」的事：另一顆 bot 的 token 驗得過，但它不能靠先送一則帶著別人 session／turn id 的 hook，
+    /// 把那組 id 先佔走，讓真正屬於那顆 bot 的完成事件被當成「重複」吞掉（回合卡 in_flight 到備援才收）。
+    #[tokio::test]
+    async fn another_bots_hook_cannot_pre_claim_my_session_and_turn_ids() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (attacker, _, attacker_turn) = delivered_turn(&app, &env.project_id).await;
+        let (victim, _, victim_turn) = delivered_turn(&app, &env.project_id).await;
+        let stop = |bot: &str, msg: &str| {
+            stop_failure(bot, json!({"hook_event_name": "Stop", "session_id": "s-shared", "prompt_id": "p-shared", "last_assistant_message": msg}))
+        };
+        process(&app, &stop(&attacker, "我先到")).await.unwrap();
+        assert_eq!(turn_row(&app, &attacker_turn).await.status, "completed");
+
+        process(&app, &stop(&victim, "我才是被問的那顆")).await.unwrap();
+        assert_eq!(turn_row(&app, &victim_turn).await.status, "completed", "別顆 bot 先用過同一組 id，不能讓我的完成事件被當成重複");
+
+        // 失敗事件同一道理。
+        let (attacker2, _, _) = delivered_turn(&app, &env.project_id).await;
+        let (victim2, _, victim2_turn) = delivered_turn(&app, &env.project_id).await;
+        let fail = |bot: &str| stop_failure(bot, json!({"hook_event_name": "StopFailure", "session_id": "s-f", "prompt_id": "p-f", "reason": "API Error: 500"}));
+        process(&app, &fail(&attacker2)).await.unwrap();
+        process(&app, &fail(&victim2)).await.unwrap();
+        assert_eq!(turn_row(&app, &victim2_turn).await.status, "failed");
+    }
+
+    /// 外部回合（終端手打、沒有 in-flight 的回合）那條路一樣：別顆 bot 佔過的 id 不能讓這一筆 insert 撞唯一索引、一直重試。
+    #[tokio::test]
+    async fn an_external_turn_survives_native_ids_another_bot_already_used() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (attacker, _, attacker_turn) = delivered_turn(&app, &env.project_id).await;
+        let (victim, victim_conv, victim_turn) = delivered_turn(&app, &env.project_id).await;
+        // 受害者那顆沒有 in-flight 的回合（使用者在終端手打的）。
+        sqlx::query("UPDATE turns SET status='completed', completed_at=? WHERE id=?").bind(db::now()).bind(&victim_turn).execute(&app.db).await.unwrap();
+        let stop = |bot: &str| stop_failure(bot, json!({"hook_event_name": "Stop", "session_id": "s-ext", "prompt_id": "p-ext", "last_assistant_message": "終端那句的回答"}));
+        process(&app, &stop(&attacker)).await.unwrap();
+        assert_eq!(turn_row(&app, &attacker_turn).await.status, "completed");
+        process(&app, &stop(&victim)).await.expect("撞到別顆 bot 的 native id 也要收得下");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND role='assistant' AND content='終端那句的回答'")
+            .bind(&victim_conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "這顆 bot 的外部回合與回覆都記下來了");
+    }
+
+    /// StatusLine 是「最新的贏」的單槽訊號（每次重繪一則）：bot 鎖被長時間握著時，不能每一則各丟一個背景 task 排隊等鎖
+    /// （每個都抱著一份 body，高頻時 task 與記憶體一路疊上去）。同一顆 bot 最多一個在等，後到的取代先到的。
+    #[tokio::test]
+    async fn statusline_hooks_queued_behind_a_busy_bot_lock_are_coalesced() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "status-flood").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let lock = app.bot_lock(&bot.id).await;
+        let held = lock.lock().await;
+        let spawned_before = statusline_tasks_spawned();
+        for i in 0..50 {
+            let mut headers = HeaderMap::new();
+            headers.insert("X-AM-Bot-Token", bot.hook_token.parse().unwrap());
+            let body = HookBody {
+                bot_id: bot.id.clone(),
+                provider: "claude".into(),
+                payload: json!({"hook_event_name": "StatusLine", "session_id": "s-flood", "model": {"id": format!("claude-model-{i}")}}),
+                received_at: None,
+                truncated: false,
+                run_id: None,
+            };
+            let (status, _) = receive(State(app.clone()), Path("claude".to_string()), headers, Json(body)).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let spawned = statusline_tasks_spawned() - spawned_before;
+        assert!(spawned <= 2, "50 則 StatusLine 排在忙碌的 bot 鎖後面，背景 task 只該有 1～2 個，不是 {spawned}");
+        drop(held);
+        // 放鎖之後最後一則（最新的）贏。
+        assert!(
+            crate::testing::eventually!(db::run(&app.db, &run_id).await.unwrap().unwrap().runtime_model.as_deref() == Some("claude-model-49")),
+            "最新的那一則要生效"
+        );
+    }
+
+    /// 型別怪的 payload（字串、數字、陣列、null、很深的巢狀）不能 panic，也不能讓整批卡住：處理完就是處理完。
+    #[tokio::test]
+    async fn payloads_of_the_wrong_shape_are_handled_without_panicking() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = delivered_turn(&app, &env.project_id).await;
+        let mut deep = json!("x");
+        for _ in 0..200 {
+            deep = json!({ "a": deep });
+        }
+        for payload in [
+            json!("a string"),
+            json!(5),
+            json!([1, 2, 3]),
+            json!(null),
+            json!({"hook_event_name": 5}),
+            json!({"hook_event_name": "PostToolUse", "tool_use_id": null, "tool_response": deep}),
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": 12}),
+        ] {
+            let ev = stop_failure(&bot_id, payload.clone());
+            process(&app, &ev).await.unwrap_or_else(|e| panic!("{payload}: {e:#}"));
+        }
+        // 這一串怪事件沒有誤收掉那顆還在跑的回合。
+        assert_eq!(turn_row(&app, &turn_id).await.status, "in_flight");
+        // Stop 的欄位型別全錯：照樣只是「這一回合結束了」，不 panic、也沒有把垃圾當成回覆。
+        let weird_stop = stop_failure(
+            &bot_id,
+            json!({"hook_event_name": "Stop", "session_id": 7, "prompt_id": ["x"], "last_assistant_message": {"not": "text"}}),
+        );
+        process(&app, &weird_stop).await.unwrap();
+        assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
     }
 
     /// 收件匣的重試（issue #70）要能補回第一次只做了一半的處理。第一次認領回合、寫下 native id 之後，
