@@ -25,9 +25,19 @@ function staticModels(kind: BotKind): ModelInfo[] {
   }))
 }
 
+/**
+ * 存的模型對到哪一顆按鈕：完全相等，或 claude 的完整版號對到它的系列別名（`claude-opus-5-5` → `opus`）。
+ * daemon 會把 `opus` 存成完整版號（#400），以前比對要完全相等，Opus 的 bot 開設定時一顆都沒亮（2026-10-02 使用者）。
+ */
+export function modelMatches(chipId: string, stored: string | null): boolean {
+  if (!stored) return false
+  if (chipId === stored) return true
+  return !chipId.includes('-') && stored.startsWith(`claude-${chipId}-`)
+}
+
 /** 拿掉 `HIDDEN_MODELS` 但留下目前選的，否則看起來像設定被改掉。 */
 function visibleModels(models: ModelInfo[], selected: string | null): ModelInfo[] {
-  return models.filter((m) => m.id === selected || !HIDDEN_MODELS.includes(m.id))
+  return models.filter((m) => modelMatches(m.id, selected) || !HIDDEN_MODELS.includes(m.id))
 }
 
 /** 按鈕字拿掉 `gpt-` 前綴省寬度，完整 id 在 `title`（2026-09-09 使用者決定）。 */
@@ -86,7 +96,7 @@ export function ApiModelFields({
   const models = fromApi ? cached : staticModels(kind)
   const shownModels = sortModels(kind, visibleModels(models, model))
   const defaultModel = models.find((m) => m.is_default) ?? models[0]
-  const current = (model && models.find((m) => m.id === model)) || defaultModel
+  const current = (model && (models.find((m) => m.id === model) ?? models.find((m) => modelMatches(m.id, model)))) || defaultModel
   const efforts = current?.efforts ?? []
   const selectedModel = model ?? defaultModel?.id ?? null
   const selectedEffort = effort ?? current?.default_effort ?? null
@@ -118,7 +128,7 @@ export function ApiModelFields({
             <button
               key={m.id}
               type="button"
-              className={`opt${selectedModel === m.id ? ' on' : ''}`}
+              className={`opt${modelMatches(m.id, selectedModel) ? ' on' : ''}`}
               title={[m.id, m.description, m.is_default ? '模型預設' : ''].filter(Boolean).join(' — ')}
               onClick={() => pickModel(m.id)}
             >
