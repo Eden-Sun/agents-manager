@@ -110,7 +110,7 @@ vite，launchd 那邊脫離程序群就活著；systemd 預設 `KillMode=control
 
 Linux 有 `com.agm.browser-gc` systemd timer，但執行 Linux 專用的 `browser_gc_linux.py`：每 30 分鐘回收本使用者
 已孤兒（父程序是 pid 1 或自己的 `systemd --user`）、超過 2 分鐘且沒有 CDP 連線的 headless Chrome，清理安全標記的舊 `/tmp/am-*` profile，再跑 `pane-gc`。
-如果 `ss` 不存在或 CDP 狀態無法查明，會保留程序。它不啟動 browser-gc bot，也不派 ego-browser task。
+如果 `ss` 不存在或 CDP 狀態無法查明，會保留程序。unit 帶 `HERDR_SESSION=agents-manager`（跟 daemon-update 一致），尾端 `pane-gc.sh` 才連得到 daemon 用的 herdr server；`herdr pane list` 回的不是 JSON 或是 error JSON 時，pane-gc 只在 `browser-gc.log` 記一行原因就收，不噴 traceback。它不啟動 browser-gc bot，也不派 ego-browser task。
 `browser-gc-kick.sh`／`browser-gc-task.md`／plist 仍只標 `darwin`；ego lite／OB 圖形 worker 依 #718 暫不實作，
 所以 Linux `bin/` 裡出現 macOS 的 `browser-gc-kick.sh` 仍會報成 `extra`。
 

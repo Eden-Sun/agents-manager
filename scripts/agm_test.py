@@ -2319,7 +2319,8 @@ class SystemdParityTest(unittest.TestCase):
     #: 只有 unit 帶的環境變數。Linux 主機只跑 daemon 用的 `agents-manager` session，沒有 default server；
     #: 排程沒有 pane 環境，daemon-swap 的 `herdr pane list` 不指定 session 會回 server_not_running。
     #: macOS 使用者自己的 default session 一直開著，plist 不需要。
-    SYSTEMD_ONLY_ENV = {"daemon-update": {"HERDR_SESSION"}}
+    #: browser-gc 的 Linux worker 尾端會跑 pane-gc.sh（`herdr pane list`），同樣需要指到那個 session。
+    SYSTEMD_ONLY_ENV = {"daemon-update": {"HERDR_SESSION"}, "browser-gc": {"HERDR_SESSION"}}
 
     @staticmethod
     def home_relative(arg: str) -> str:
