@@ -14,6 +14,7 @@ import type { SupervisorAction, SupervisorAssignment, SupervisorIncident, Superv
 import { ASSIGN_LABEL, INCIDENT_LABEL } from '../lib/supervisorLabels'
 import { useStore } from '../store/store'
 import './supervisor.css'
+import { safeHttpUrl } from '../lib/safeUrl'
 
 /** bot 起沒起來。跟遠端入口是兩件事，不要混在同一顆燈上。 */
 const STATUS_LABEL: Record<string, string> = {
@@ -364,8 +365,8 @@ export function SupervisorPanel({ onOpenChat }: { onOpenChat?: () => void }) {
         >
           {label(REMOTE_LABEL, live.remote.status)}
         </span>
-        {live.remote.url ? (
-          <a className="agm-link" href={live.remote.url} target="_blank" rel="noreferrer">
+        {safeHttpUrl(live.remote.url) ? (
+          <a className="agm-link" href={safeHttpUrl(live.remote.url)} target="_blank" rel="noopener noreferrer">
             開啟連線
           </a>
         ) : (

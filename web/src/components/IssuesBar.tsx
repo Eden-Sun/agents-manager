@@ -11,6 +11,7 @@ import { isGhAuthError } from './ghAuthError'
 import { ISSUE_PAGE_LIMIT, openCountFromPage } from '../lib/issueCount'
 import { onTabListKeyDown } from './tabKeys'
 import './issuesBar.css'
+import { safeHttpUrl } from '../lib/safeUrl'
 
 /** v4.0 GitHub issues (via `gh` on the daemon): search, open / closed toggle, insert into the composer. */
 
@@ -277,7 +278,7 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
               {issues.map((i) => (
                 <li key={i.number} className="issue-row">
                   <div className="issue-main">
-                    <a className="issue-title" href={i.url} target="_blank" rel="noreferrer" title={i.body_excerpt || i.title}>
+                    <a className="issue-title" href={safeHttpUrl(i.url)} target="_blank" rel="noopener noreferrer" title={i.body_excerpt || i.title}>
                       <span className="issue-num">#{i.number}</span> {i.title}
                     </a>
                     <div className="issue-meta">

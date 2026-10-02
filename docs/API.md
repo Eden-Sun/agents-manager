@@ -2041,7 +2041,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 ### 遠端入口
 `GET /api/supervisor/remote` → `{status,stored_status,revoked,source,observed_at,observed_by,session_id,current_session_id,url,url_is_evidence,capability,ttl_secs}`。
 `status` 只有 `requested` | `verified` | `unavailable` | `unknown`（SPEC §18.12）；`capability.status` 目前 `unsupported`。觀測超過 `ttl_secs`（900）或 AGM 換 session 退回 `unknown`（`revoked` 說明），`url` 不回（`url_is_evidence:false`）。
-`POST /api/supervisor/remote {status,source,actor?,evidence?,url?}`：`source` 只收 `manual`（`provider` 保留、`argv` 拒絕）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run，15 分鐘後失效。
+`POST /api/supervisor/remote {status,source,actor?,evidence?,url?}`：`url` 只收絕對的 http／https 網址（`javascript:`／`data:`／`file:`／相對路徑／含空白或控制字元的一律 400，什麼都不寫；前端會把它放進 `<a href>`）；`source` 只收 `manual`（`provider` 保留、`argv` 拒絕）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run，15 分鐘後失效。
   記下來的 `observed_by` 照 #414 的形狀（issue #463）：驗過的角色寫 `AGM:<role>`，其餘寫 `user(<自稱>)`／`user`——body 的 `actor` 只是未驗證的自稱。驗過的角色不必再帶 `actor`。
 用一個**不能作證**的來源報 `verified` → 409 `{"reason":"source_cannot_verify","source":"<送來的 source>"}`：哪些來源作得了證是 `remote::Source::can_verify` 說了算，不是呼叫端說了算。
 
