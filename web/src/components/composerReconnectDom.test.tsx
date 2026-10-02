@@ -5,11 +5,12 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { fakeWebSocket, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
-import { sharedMock } from '../testing/sharedMock'
+import { fakeWebSocket, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
+import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { ChatPanel } from './ChatPanel'
 
+virtualMockTime()
 afterEach(unmountAll)
 before(setupDom)
 after(() => {
@@ -19,14 +20,6 @@ after(() => {
 
 const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer textarea')!
 
-async function until(cond: () => boolean | Promise<boolean>, what: string, ms = 8000): Promise<void> {
-  const end = Date.now() + ms
-  while (Date.now() < end) {
-    if (await cond()) return
-    await settle(50)
-  }
-  assert.fail(`等不到：${what}`)
-}
 
 async function boot() {
   const mock = sharedMock

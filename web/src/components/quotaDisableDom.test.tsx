@@ -6,7 +6,7 @@
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, act, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
-import { sharedMock } from '../testing/sharedMock'
+import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { QUOTA_DISABLED_KEY } from '../store/quotaHide'
 import { QuotaStrip } from './QuotaStrip'
@@ -36,6 +36,7 @@ async function open() {
   await until(() => stripBox() !== null, '額度條畫出來')
 }
 
+virtualMockTime()
 afterEach(async () => {
   // 停用清單是模組層級的偏好：每個測試收尾都解除，下一個測試從空的開始。
   if (Object.keys(disk()).length || stripBox()?.checked) await otherTabWrites({})

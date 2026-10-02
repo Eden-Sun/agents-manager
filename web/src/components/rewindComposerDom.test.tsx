@@ -5,12 +5,13 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, mockApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { click, mockApi, mount, settle, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { sharedMock } from '../testing/sharedMock'
+import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { ChatPanel } from './ChatPanel'
 
+virtualMockTime()
 afterEach(async () => {
   await unmountAll()
   const bot = useStore.getState().bots.find((b) => b.name === 'am-claude')
@@ -24,14 +25,6 @@ after(() => {
 
 const mock = sharedMock
 
-async function until(cond: () => boolean | Promise<boolean>, what: string, ms = 8000): Promise<void> {
-  const end = Date.now() + ms
-  while (Date.now() < end) {
-    if (await cond()) return
-    await settle(50)
-  }
-  assert.fail(`等不到：${what}`)
-}
 
 /** 起 am-claude、送一則會很快結束的 prompt、等它閒下來，掛上 ChatPanel。 */
 async function openIdleChatWithAUserMessage(text: string) {

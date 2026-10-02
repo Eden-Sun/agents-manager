@@ -3,6 +3,7 @@
  * `__amMock.herdrUpdate()` 推一筆 `kind:"herdr"` 的上游快照（local 與 m4p 都落後；m4p 是遠端，按鈕那台只會是 local），header 就會出現徽章；
  * `__amMock.herdrUpdate({ failOne: true })` 演一顆沒接回，`{ reason: 'busy_timeout' }` 演整次沒做、`{ reason: 'restart_failed' }` 演換回舊版（多一步 `rolling_back`，bot 照樣接回）。
  */
+import { later } from './mockClock'
 import { ApiError } from './types'
 
 type Rec = Record<string, unknown>
@@ -110,14 +111,14 @@ export class MockHerdrUpdate {
         ? [...STEPS.slice(0, 4), [5800, 'rolling_back'], [6400, 'resuming']]
         : STEPS
     for (const [at, phase] of steps) {
-      setTimeout(() => {
+      later(() => {
         if (this.running?.update_id !== update_id) return
         this.running.phase = phase
         this.ctx.emit('herdr_update_progress', { ...base, phase })
       }, at)
       if (phase === this.opts.hold) return { ...base, started: true, will_resume, children_lost }
     }
-    setTimeout(() => {
+    later(() => {
       this.running = null
       const reason = this.opts.reason ?? null
       const ok = !reason
