@@ -742,6 +742,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 
 create／PATCH／promote 回應以 `remapped.model.from/to` 說明實際替換；`GET /api/models?kind=codex` 不列出這三個精確的 `gpt-5.6-*` 值。啟動舊 DB 設定、採納子 agent argv、config.toml 投影與 responder/supervisor 的啟動設定都套用同一 helper。schema v15 將 `bots.model` 的既有精確舊值改寫，包含軟刪列；資料 migration 可重複執行。額度與 runtime 探測到明確版本 id 時不做前綴推測或降版。
   **codex 啟動時的「Update available」互動選單**（預設選 `1. Update now`、底下 `Press enter to continue`，`codex_update::update_menu_open`）跟 model migration、rate-limit 切換選單一樣算「使用者的選擇」：送 prompt 前遇到回 409 `dialog_open`（訊息請使用者到終端選 `2. Skip`），**不按任何鍵、不打字**（打進去的 Enter 會選到預設的 Update now，在 pane 裡直接跑安裝）；live apply 的 `/model`、`/fast` 也不碰它（`picker_open`／`close_picker` 都認得，Escape 都不按）。只認畫面尾巴、最後一行是 `Press enter to continue` 的那種；非互動方框（底下就是輸入列）與對話裡引用選單原文都不算。
+  這類擋住輸入列的 codex 畫面（model migration、更新選單、rate-limit 切換，`codex_model_migration::Dialog`）開著時：herdr 判成 idle 也補標 `blocked`、在對話裡講一次原因（例如「Codex 更新提示等待選擇：…請到終端選 2. Skip」）、一個鍵都不按；選單關掉後自動回到原本的狀態、補一句「提示已關閉」並放行排隊的訊息（畫面掃描與送 prompt 的守門都會觸發）。
 
 Codex 0.157.0 以舊模型啟動時可能顯示模型遷移選單（例如 `Meet GPT-6 Sol`，含 `Try new model`／`Use existing model`）。daemon 偵測後保留選單、不送任何鍵，將 run 標成 `blocked` 並通知使用者；一般送出與排隊 flush 都等使用者在終端選完。選單關閉後，只有還原 UPDATE 成功或重讀確認 run 已結束／狀態已被取代，才清掉記憶體標記、寫一次關閉通知並繼續送佇列；DB 寫入或重讀失敗就保留標記給下一輪巡邏重試，不發關閉通知、不叫醒佇列。`Approaching rate limits` 的切換建議也辨識為選擇畫面；它不代表額度已用盡，不會標成 quota hit。
 
