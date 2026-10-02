@@ -1798,11 +1798,11 @@ mod approval_decision_tests {
             assert!(matches!(err, LcError::Bad(_)), "{bad:?} 要 400，卻是 {err:?}");
             assert_eq!(stored().await, None, "{bad:?} 不能寫進去");
         }
-        post(json!("https://claude.ai/code/session_1")).await.unwrap();
+        let _ = post(json!("https://claude.ai/code/session_1")).await.unwrap();
         assert_eq!(stored().await.as_deref(), Some("https://claude.ai/code/session_1"));
         // 沒帶 url 照舊（`url` 是選填）。
         let body = json!({"status": "requested", "source": "manual"});
-        post_remote_observation(State(app.clone()), HeaderMap::new(), Json(serde_json::from_value(body).unwrap())).await.unwrap();
+        let _ = post_remote_observation(State(app.clone()), HeaderMap::new(), Json(serde_json::from_value(body).unwrap())).await.unwrap();
 
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();

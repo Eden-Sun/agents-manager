@@ -565,7 +565,7 @@ mod tests {
         }
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots").fetch_one(&app.db).await.unwrap();
         assert_eq!(rows, 0, "被擋下來的不能留下任何一列");
-        post_acquire(State(app.clone()), h, Form(ok("h", "p", "local"))).await.unwrap();
+        let _ = post_acquire(State(app.clone()), h, Form(ok("h", "p", "local"))).await.unwrap();
     }
 
     /// 核心驗收條件（issue #90）：N 個同時的 acquire，只有設定的名額數真的拿到，其餘回 waiting。
