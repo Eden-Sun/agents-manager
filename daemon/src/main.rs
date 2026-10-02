@@ -5,6 +5,7 @@
 //!   hook claude|codex ...       the tiny process agent CLIs invoke; always exits 0
 
 mod ask_answers;
+mod blocked_reason;
 mod bot_input;
 mod bot_trash;
 mod deleted_bots;

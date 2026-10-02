@@ -2,6 +2,7 @@
 
 import type {
   BackgroundTask,
+  BlockedReason,
   SessionCron,
   HostBaseline,
   MemOwner,
@@ -418,6 +419,14 @@ export function toStatusInfo(v: unknown): StatusInfo | null {
   }
 }
 
+/** `{code, text}` 兩個都是非空字串才算；其他（沒帶、null、形狀不對）一律 null——舊 daemon 沒有這個欄位。 */
+export function toBlockedReason(v: unknown): BlockedReason | null {
+  if (!isRec(v)) return null
+  const code = typeof v.code === 'string' ? v.code.trim() : ''
+  const text = typeof v.text === 'string' ? v.text.trim() : ''
+  return code && text ? { code, text } : null
+}
+
 export function toRun(v: unknown, botId?: string): Run | null {
   if (!isRec(v)) return null
   const id = str(pick(v, 'id'))
@@ -439,6 +448,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     // null＝巡邏還沒看過這個 run（#767，沒有證據）；沒帶（舊 daemon）照舊當 0。
     // （`pick` 把 null 當沒有，所以這裡直接讀欄位。）
     background_jobs: v.background_jobs === null ? null : Math.max(0, Math.floor(num(pick(v, 'background_jobs')))),
+    blocked_reason: toBlockedReason(v.blocked_reason),
     background_tasks: toBackgroundTasks(v.background_tasks),
     session_crons: toSessionCrons(v.session_crons),
     turn_error: optStr(pick(v, 'turn_error')),

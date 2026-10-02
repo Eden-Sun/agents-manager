@@ -56,6 +56,7 @@ import { ThemeToggle } from './ThemeToggle'
 import { ProjectMemBadge } from './ProjectMemBadge'
 import { HandedOffBadge } from './HandedOffBadge'
 import { BackgroundJobsBadge } from './BackgroundJobs'
+import { BotStateText } from './BotStateText'
 import { DeployNowBadge } from './DeployNowBadge'
 import { TabsBadge } from './TabsBadge'
 import { ModelTag } from './ModelTag'
@@ -165,7 +166,7 @@ function BotRowImpl({
   renderProbe('BotRow')
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const run = useStore((s) => s.runs[botId] ?? null)
-  const { lamp, background: bgJobs, label: stateLabel } = useBotLamp(botId)
+  const { lamp, background: bgJobs, label: stateLabel, blockedReason } = useBotLamp(botId)
   const hostDown = useBotOfflineHost(botId)
   // 額度 critical 時整列反灰＋警語（API.md §12.4）。botQuotaWarning 每次回新物件，不 useShallow 會無限重繪。
   const quotaWarning = useStore(
@@ -387,7 +388,7 @@ function BotRowImpl({
             {showTitle ? null : compact ? (
               <BackgroundJobsBadge botId={botId} variant="mini" />
             ) : (
-              hostDown ? <HostDownState /> : <BackgroundJobsBadge botId={botId} variant="state" fallback={<span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>} />
+              hostDown ? <HostDownState /> : <BackgroundJobsBadge botId={botId} variant="state" fallback={<BotStateText lamp={lamp} reason={blockedReason} />} />
             )}
           </BotNameField>
         </span>

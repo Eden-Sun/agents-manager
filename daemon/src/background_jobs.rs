@@ -189,6 +189,10 @@ pub fn run_json<T: serde::Serialize>(app: &App, run: &Option<T>, run_id: Option<
         o.insert("background_source".into(), if tasks.is_null() { Value::Null } else { "hook".into() });
         o.insert("background_tasks".into(), tasks);
         o.insert("session_crons".into(), crons);
+        // 為什麼停在 blocked（結構化原因，`blocked_reason.rs`）：只在 run 現在真的是 blocked 才帶，其他一律 null；
+        // 舊的前端忽略這個欄位。
+        let blocked = o.get("agent_status").and_then(Value::as_str) == Some("blocked");
+        o.insert("blocked_reason".into(), if blocked { crate::blocked_reason::json(id) } else { Value::Null });
     }
     v
 }
