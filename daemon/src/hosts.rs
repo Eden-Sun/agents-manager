@@ -1150,8 +1150,15 @@ fn cfg_differs(a: &HostCfg, b: &HostCfg) -> bool {
         || a.remote_path != b.remote_path
 }
 
-/// `GET /api/fs/dirs?host=` (§11.5); same JSON shape as the local branch.
-pub async fn remote_list_dirs(conn: &HostConn, path: Option<&str>, hidden: bool) -> Result<serde_json::Value> {
+/// 一次最多列幾個子目錄（本機與遠端同一個數字）；超過就截斷並回 `truncated:true`。
+pub(crate) const DIR_LIST_LIMIT: usize = 2000;
+
+/// 遠端目錄列舉要跑的 sh（純字串，可以拿到本機直接跑來驗）。
+
+/// 輸出靠 `AM_*` 開頭的行解析，所以：目前路徑或目錄名字含控制字元（換行、tab、CR…）的一律不列——否則一個叫
+/// `a\nAM_PATH=/etc` 的目錄就能偽造「目前路徑」；憑證與金鑰目錄（`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、daemon 與各 CLI 的設定目錄）
+/// 不給進；子目錄最多 [`DIR_LIST_LIMIT`] 個。
+pub(crate) fn dir_list_script(path: Option<&str>, hidden: bool) -> String {
     let target = match path.map(str::trim).filter(|s| !s.is_empty()) {
         None => "\"$HOME\"".to_string(),
         Some(p) if p == "~" => "\"$HOME\"".to_string(),
@@ -1160,27 +1167,44 @@ pub async fn remote_list_dirs(conn: &HostConn, path: Option<&str>, hidden: bool)
         Some(p) => sh_quote(p),
     };
     let globs = if hidden { "*/ .*/" } else { "*/" };
-    let script = format!(
+    format!(
         r#"cd -- {target} 2>/dev/null || {{ printf 'AM_ERR=no such directory\n'; exit 0; }}
+P=$(pwd -P)
+case "$P" in *[[:cntrl:]]*) printf 'AM_ERR=directory name has control characters\n'; exit 0;; esac
+H=$(cd -- "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")
+case "$P" in
+  "$H"/.ssh|"$H"/.ssh/*|"$H"/.gnupg|"$H"/.gnupg/*|"$H"/.aws|"$H"/.aws/*|"$H"/.kube|"$H"/.kube/*|"$H"/.config/agents-manager|"$H"/.config/agents-manager/*|"$H"/.claude|"$H"/.claude/*|"$H"/.claude-*|"$H"/.codex|"$H"/.codex/*|"$H"/.grok|"$H"/.grok/*)
+    printf 'AM_ERR=forbidden directory\n'; exit 0;;
+esac
 printf 'AM_HOME=%s\n' "$HOME"
-printf 'AM_PATH=%s\n' "$(pwd -P)"
-printf 'AM_PARENT=%s\n' "$(dirname -- "$(pwd -P)")"
+printf 'AM_PATH=%s\n' "$P"
+printf 'AM_PARENT=%s\n' "$(dirname -- "$P")"
+count=0
 for d in {globs} ; do
   [ -d "$d" ] || continue
   n=${{d%/}}
   case "$n" in '*'|'.*'|.|..) continue;; esac
+  case "$n" in *[[:cntrl:]]*) continue;; esac
+  count=$((count+1))
+  if [ "$count" -gt {DIR_LIST_LIMIT} ]; then printf 'AM_TRUNC=1\n'; break; fi
   if [ -e "$n/.git" ]; then g=1; else g=0; fi
   printf 'AM_D\t%s\t%s\n' "$n" "$g"
 done
 "#
-    );
-    let out = conn.ssh_exec(&script).await?;
+    )
+}
+
+/// [`dir_list_script`] 的輸出 → 與本機同形的 JSON。
+pub(crate) fn parse_dir_listing(out: &str, hidden: bool) -> Result<serde_json::Value> {
     let mut home = String::new();
     let mut cwd = String::new();
     let mut parent: Option<String> = None;
     let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut truncated = false;
     for line in out.lines() {
-        if let Some(e) = line.strip_prefix("AM_ERR=") {
+        if line == "AM_TRUNC=1" {
+            truncated = true;
+        } else if let Some(e) = line.strip_prefix("AM_ERR=") {
             bail!("{}", e.trim());
         } else if let Some(v) = line.strip_prefix("AM_HOME=") {
             home = v.trim_end().to_string();
@@ -1192,7 +1216,7 @@ done
             let mut it = v.trim_end_matches('\n').splitn(2, '\t');
             let name = it.next().unwrap_or("").to_string();
             let git = it.next().unwrap_or("0") == "1";
-            if name.is_empty() || (name.starts_with('.') && !hidden) {
+            if name.is_empty() || name.chars().any(char::is_control) || (name.starts_with('.') && !hidden) {
                 continue;
             }
             let full = if cwd == "/" { format!("/{name}") } else { format!("{cwd}/{name}") };
@@ -1206,7 +1230,13 @@ done
         a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
     });
     let parent = parent.filter(|p| p != &cwd);
-    Ok(json!({"path": cwd, "parent": parent, "home": home, "entries": entries}))
+    Ok(json!({"path": cwd, "parent": parent, "home": home, "entries": entries, "truncated": truncated}))
+}
+
+/// `GET /api/fs/dirs?host=` (§11.5); same JSON shape as the local branch.
+pub async fn remote_list_dirs(conn: &HostConn, path: Option<&str>, hidden: bool) -> Result<serde_json::Value> {
+    let out = conn.ssh_exec(&dir_list_script(path, hidden)).await?;
+    parse_dir_listing(&out, hidden)
 }
 
 pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String> {

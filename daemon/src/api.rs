@@ -990,8 +990,27 @@ struct DirsQuery {
     hidden: Option<String>,
 }
 
-async fn list_dirs(State(app): State<Arc<App>>, Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
-    // SPEC §11.5.
+/// 目錄瀏覽不該列的地方（憑證、金鑰、daemon 自己的資料與各 CLI 的設定／身分目錄）。純判斷，可測。
+/// 用 component 比（`.sshx` 不是 `.ssh`，`.claudeish` 不是 `.claude`）；身分目錄 `~/.claude-<名>` 整族都擋。
+fn fs_dir_denied(path: &std::path::Path, home: &std::path::Path, data_dir: &std::path::Path) -> bool {
+    if path.starts_with(data_dir) {
+        return true;
+    }
+    const UNDER_HOME: [&str; 8] = [".ssh", ".gnupg", ".aws", ".kube", ".config/agents-manager", ".claude", ".codex", ".grok"];
+    if UNDER_HOME.iter().any(|d| path.starts_with(home.join(d))) {
+        return true;
+    }
+    path.strip_prefix(home)
+        .ok()
+        .and_then(|rest| rest.components().next())
+        .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with(".claude-"))
+}
+
+async fn list_dirs(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>, Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
+    // SPEC §11.5。DirPicker 專用：pane 裡的 bot（拿得到自己的 token）不能借 daemon 的身分去列本機、更不能經 daemon 的 ssh 列別台主機。
+    if principal != RequestPrincipal::User {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
     let host = q.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
     let hidden = matches!(q.hidden.as_deref(), Some("1" | "true" | "yes"));
     if host != LOCAL_HOST {
@@ -1005,17 +1024,26 @@ async fn list_dirs(State(app): State<Arc<App>>, Query(q): Query<DirsQuery>) -> R
     let raw = q.path.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| home.to_string_lossy().to_string());
     let raw = if let Some(rest) = raw.strip_prefix("~") { format!("{}{}", home.display(), rest) } else { raw };
     let path = std::fs::canonicalize(&raw).map_err(|e| LcError::Bad(format!("{raw}: {e}")))?;
+    // 錯誤訊息講使用者自己打的那串，不替人把符號連結解開、講出真正指到哪。
     if !path.is_dir() {
-        return Err(LcError::Bad(format!("{} is not a directory", path.display())));
+        return Err(LcError::Bad(format!("{raw} is not a directory")));
     }
-    let rd = tokio::task::spawn_blocking({
+    let canon_home = std::fs::canonicalize(&home).unwrap_or_else(|_| home.clone());
+    let canon_data = std::fs::canonicalize(&app.data_dir).unwrap_or_else(|_| app.data_dir.clone());
+    if fs_dir_denied(&path, &canon_home, &canon_data) {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "directory_not_browsable"})));
+    }
+    let (rd, truncated) = tokio::task::spawn_blocking({
         let path = path.clone();
-        move || -> std::io::Result<Vec<Value>> {
-            let mut out = Vec::new();
+        move || -> std::io::Result<(Vec<Value>, bool)> {
+            // 先只收名字（不 stat `.git`）：上萬個子目錄時，要 stat 的只有最後留下的前 N 個。
+            let mut names: Vec<String> = Vec::new();
+            let mut truncated = false;
             for ent in std::fs::read_dir(&path)? {
                 let Ok(ent) = ent else { continue };
                 let name = ent.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') && !hidden {
+                // 含控制字元的名字不列（跟遠端同一條規則：畫面與協定都不該被目錄名字帶著走）。
+                if name.chars().any(char::is_control) || (name.starts_with('.') && !hidden) {
                     continue;
                 }
                 let Ok(ft) = ent.file_type() else { continue };
@@ -1023,25 +1051,38 @@ async fn list_dirs(State(app): State<Arc<App>>, Query(q): Query<DirsQuery>) -> R
                 if !is_dir {
                     continue;
                 }
-                let full = path.join(&name);
-                let has_git = full.join(".git").exists();
-                out.push(json!({"name": name, "path": full.to_string_lossy(), "git": has_git}));
+                if names.len() >= crate::hosts::DIR_LIST_LIMIT * 10 {
+                    truncated = true;
+                    break;
+                }
+                names.push(name);
             }
-            out.sort_by(|a, b| {
-                a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
-            });
-            Ok(out)
+            names.sort_by_key(|n| n.to_lowercase());
+            if names.len() > crate::hosts::DIR_LIST_LIMIT {
+                names.truncate(crate::hosts::DIR_LIST_LIMIT);
+                truncated = true;
+            }
+            let out = names
+                .into_iter()
+                .map(|name| {
+                    let full = path.join(&name);
+                    let has_git = full.join(".git").exists();
+                    json!({"name": name, "path": full.to_string_lossy(), "git": has_git})
+                })
+                .collect();
+            Ok((out, truncated))
         }
     })
     .await
     .map_err(any_err)?
-    .map_err(|e| LcError::Bad(format!("{}: {e}", path.display())))?;
+    .map_err(|e| LcError::Bad(format!("{raw}: {e}")))?;
     let parent = path.parent().map(|p| p.to_string_lossy().to_string());
     Ok(Json(json!({
         "path": path.to_string_lossy(),
         "parent": parent,
         "home": home.to_string_lossy(),
         "entries": rd,
+        "truncated": truncated,
     })))
 }
 
@@ -7293,6 +7334,131 @@ mod bot_config_tests {
         // 合法的照收。
         assert!(create_identity(State(e.app.clone()), Json(identity(json!({"CLAUDE_CONFIG_DIR": "$HOME/.claude-cc9", "_X1": "y"})))).await.is_ok());
         assert!(patch(&e, &id, json!({"env": {"GOOD_NAME": "1"}})).await.is_ok());
+    }
+
+    // ───────── 目錄瀏覽（DirPicker 背後的 `/fs/dirs`）的安全審查 ─────────
+
+    fn dirs_user() -> Extension<RequestPrincipal> {
+        Extension(RequestPrincipal::User)
+    }
+
+    fn dirs_query(path: &std::path::Path) -> Query<DirsQuery> {
+        Query(DirsQuery { path: Some(path.to_string_lossy().into_owned()), host: None, hidden: None })
+    }
+
+    /// 列目錄是 UI 的 DirPicker 在用；bot（pane 裡的 agent 拿得到自己的 token）不該能用 daemon 的身分去列本機、
+    /// 更不該能經 daemon 的 ssh 去列別台主機。
+    #[tokio::test]
+    async fn dirs_only_the_user_may_browse_directories() {
+        let e = env().await;
+        let tmp = crate::testing::track(std::env::temp_dir().join(format!("am-test-dirs-{}", db::ulid())));
+        std::fs::create_dir_all(tmp.join("sub")).unwrap();
+        assert!(list_dirs(State(e.app.clone()), dirs_user(), dirs_query(&tmp)).await.is_ok());
+        for principal in [RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service("daemon-swap".into())] {
+            let err = list_dirs(State(e.app.clone()), Extension(principal), dirs_query(&tmp)).await.unwrap_err();
+            assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+        }
+    }
+
+    /// 憑證、金鑰、daemon 自己的資料目錄不列（只回子目錄名字，但 `bots/<id>` 之類的結構也不該外流）。
+    #[tokio::test]
+    async fn dirs_credential_and_daemon_directories_are_not_listed() {
+        let home = std::path::Path::new("/home/u");
+        let data = std::path::Path::new("/srv/am-data");
+        for denied in [
+            "/home/u/.ssh", "/home/u/.ssh/keys", "/home/u/.gnupg", "/home/u/.aws", "/home/u/.kube", "/home/u/.config/agents-manager",
+            "/home/u/.config/agents-manager/bots/B1", "/home/u/.claude", "/home/u/.claude-cc1/projects", "/home/u/.codex", "/home/u/.grok",
+            "/srv/am-data", "/srv/am-data/bots",
+        ] {
+            assert!(fs_dir_denied(std::path::Path::new(denied), home, data), "{denied} 要擋");
+        }
+        for ok in ["/", "/home", "/home/u", "/home/u/project", "/home/u/.config", "/home/u/.sshx", "/home/u/.claudeish", "/srv", "/srv/am-data2"] {
+            assert!(!fs_dir_denied(std::path::Path::new(ok), home, data), "{ok} 不該擋");
+        }
+        // 真的走 handler：daemon 自己的資料目錄。
+        let e = env().await;
+        let err = list_dirs(State(e.app.clone()), dirs_user(), dirs_query(&e.app.data_dir)).await.unwrap_err();
+        assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+    }
+
+    /// 上萬個子目錄的資料夾：每一項都要 stat 一次 `.git`、整份塞進一個 JSON。設上限、回 `truncated`，不拖死 daemon。
+    #[tokio::test]
+    async fn dirs_a_huge_directory_is_capped_and_says_so() {
+        let e = env().await;
+        let tmp = crate::testing::track(std::env::temp_dir().join(format!("am-test-dirs-many-{}", db::ulid())));
+        for i in 0..2100 {
+            std::fs::create_dir_all(tmp.join(format!("d{i:04}"))).unwrap();
+        }
+        let Json(v) = list_dirs(State(e.app.clone()), dirs_user(), dirs_query(&tmp)).await.unwrap();
+        assert_eq!(v["entries"].as_array().unwrap().len(), 2000);
+        assert_eq!(v["truncated"], json!(true));
+        let small = crate::testing::track(std::env::temp_dir().join(format!("am-test-dirs-few-{}", db::ulid())));
+        std::fs::create_dir_all(small.join("a")).unwrap();
+        let Json(v) = list_dirs(State(e.app.clone()), dirs_user(), dirs_query(&small)).await.unwrap();
+        assert_eq!(v["truncated"], json!(false));
+    }
+
+    /// 錯誤訊息不替人把符號連結解開、講出真正的位置。
+    #[tokio::test]
+    async fn dirs_the_not_a_directory_error_does_not_reveal_where_a_symlink_points() {
+        let e = env().await;
+        let tmp = crate::testing::track(std::env::temp_dir().join(format!("am-test-dirs-link-{}", db::ulid())));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let secret = tmp.join("secret-target-file.txt");
+        std::fs::write(&secret, "x").unwrap();
+        let link = tmp.join("innocent-link");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        let err = list_dirs(State(e.app.clone()), dirs_user(), dirs_query(&link)).await.unwrap_err();
+        let LcError::Bad(msg) = err else { panic!("要 400") };
+        assert!(!msg.contains("secret-target-file"), "不能講出符號連結指到哪：{msg}");
+    }
+
+    /// 遠端列目錄的 sh 輸出是靠 `AM_*` 開頭的行解析的：目錄名字帶換行就能偽造 `AM_PATH=…`（把「目前路徑」改成別處，
+    /// 後面所有項目的 `path` 跟著錯）或偽造項目。名字含控制字元（換行、tab、CR…）的一律不列；真的拿去 `sh` 跑。
+    #[test]
+    fn dirs_a_directory_name_cannot_forge_the_remote_listing_protocol() {
+        let tmp = crate::testing::track(std::env::temp_dir().join(format!("am-test-dirs-inject-{}", db::ulid())));
+        for name in ["ok1", "a\nAM_PATH=/etc", "x\nAM_D\tfake\t1", "tab\tname", "cr\rname", ".hidden"] {
+            std::fs::create_dir_all(tmp.join(name)).unwrap();
+        }
+        let run = |path: &str, hidden: bool| {
+            let script = crate::hosts::dir_list_script(Some(path), hidden);
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env("HOME", &tmp).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let canon = std::fs::canonicalize(&tmp).unwrap();
+        let v = crate::hosts::parse_dir_listing(&run(tmp.to_str().unwrap(), false), false).unwrap();
+        assert_eq!(v["path"], json!(canon.to_string_lossy()), "目前路徑不能被偽造：{v}");
+        let names: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["ok1"], "{v}");
+        let v = crate::hosts::parse_dir_listing(&run(tmp.to_str().unwrap(), true), true).unwrap();
+        let names: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert_eq!(names, [".hidden", "ok1"], "hidden=1 才多出隱藏的：{v}");
+    }
+
+    /// 遠端也一樣：憑證目錄不列、超大目錄有上限。
+    #[test]
+    fn dirs_the_remote_listing_refuses_credential_dirs_and_caps_a_huge_one() {
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-test-dirs-home-{}", db::ulid())));
+        std::fs::create_dir_all(home.join(".ssh/inner")).unwrap();
+        std::fs::create_dir_all(home.join(".config/agents-manager/bots")).unwrap();
+        std::fs::create_dir_all(home.join("many")).unwrap();
+        for i in 0..2100 {
+            std::fs::create_dir_all(home.join("many").join(format!("d{i:04}"))).unwrap();
+        }
+        let run = |path: &str| {
+            let script = crate::hosts::dir_list_script(Some(path), true);
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env("HOME", &home).output().unwrap();
+            crate::hosts::parse_dir_listing(&String::from_utf8_lossy(&out.stdout), true)
+        };
+        for denied in ["~/.ssh", "~/.ssh/inner", "~/.config/agents-manager", "~/.config/agents-manager/bots"] {
+            let err = run(denied).unwrap_err().to_string();
+            assert!(err.contains("forbidden"), "{denied}: {err}");
+        }
+        let v = run("~/many").unwrap();
+        assert_eq!(v["entries"].as_array().unwrap().len(), 2000);
+        assert_eq!(v["truncated"], json!(true));
+        assert_eq!(run("~").unwrap()["truncated"], json!(false));
     }
 
     /// #353：改了要重啟才生效的設定，`needs_restart` 不能只存在 PATCH 的 HTTP 回應裡——回應掉了（或 daemon 之後重啟）

@@ -66,3 +66,17 @@ test('清單上 ↓ 選到一個再 Enter＝進入那個目錄；⌘Enter＝直�
   await keydown(d.dialog, 'Enter', { metaKey: true })
   assert.equal(d.picked.length, 1, '⌘Enter 直接選')
 })
+
+test('daemon 說清單被截斷（資料夾太多）：畫面講出來，不是默默少一截', async () => {
+  fakeApi((req) => (req.path.includes('/fs/dirs') ? { ...listing('/home/u'), truncated: true } : undefined))
+  await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => {}} />)
+  await settle()
+  assert.match(document.querySelector('[role=dialog]')!.textContent ?? '', /只列出前 2000 個/)
+})
+
+test('沒被截斷就不顯示那句', async () => {
+  fakeApi((req) => (req.path.includes('/fs/dirs') ? { ...listing('/home/u'), truncated: false } : undefined))
+  await mount(<DirPicker initial="/home/u" onPick={() => {}} onCancel={() => {}} />)
+  await settle()
+  assert.doesNotMatch(document.querySelector('[role=dialog]')!.textContent ?? '', /只列出前/)
+})

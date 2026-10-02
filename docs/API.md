@@ -577,10 +577,15 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 新增 Project 的目錄選擇器。`path` 空白為家目錄，支援 `~`；只列子目錄（含指向目錄的 symlink）。`.` 開頭預設略過，`hidden=1|true|yes` 才列。`host` 省略 = 本機，遠端見 SPEC §11.5。
 
 ```json
-{"path":"/Users/me/project","parent":"/Users/me","home":"/Users/me","entries":[{"name":"foo","path":"/Users/me/project/foo","git":true}]}
+{"path":"/Users/me/project","parent":"/Users/me","home":"/Users/me","entries":[{"name":"foo","path":"/Users/me/project/foo","git":true}],"truncated":false}
 ```
 
-路徑不存在或不是目錄 → 400。
+路徑不存在或不是目錄 → 400（訊息講使用者打的那串，不替人把符號連結解開）。
+安全規則（2026-10-02 審查）：
+- **只有 User principal**：pane 裡 bot 的 token（`X-AM-Bot-*`）與 service token 一律 `403 {"reason":"user_only"}`——bot 不能借 daemon 的身分去列本機、更不能經 daemon 的 ssh 列別台主機。
+- **憑證與設定目錄不給進**：`~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.kube`、`~/.config/agents-manager`、daemon 的資料目錄、`~/.claude`／`~/.claude-*`／`~/.codex`／`~/.grok`（含底下所有層）→ `403 {"reason":"directory_not_browsable"}`（遠端同一份規則，回 502 帶 `forbidden directory`）。
+- **名字含控制字元（換行、tab、CR…）的目錄不列**，目前路徑含控制字元回錯誤：遠端的 sh 輸出靠 `AM_*` 行解析，一個叫 `a\nAM_PATH=/etc` 的目錄就能偽造「目前路徑」。
+- **最多列 2000 個子目錄**，超過 `truncated:true`（本機與遠端同一個上限；上限內依名字不分大小寫排序）。
 
 ### `GET /api/search/messages?q=<文字>&limit=200`
 側欄搜尋用的**命中計數**：回 `{q, bots:[{bot_id, bot_deleted, hits, snippet}]}`——每顆 bot 幾則命中，外加最新那一則的片段

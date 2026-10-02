@@ -649,6 +649,8 @@ export interface DirListing {
   parent: string | null
   home: string
   entries: DirEntry[]
+  /** 子資料夾太多（daemon 最多列 2000 個）只列了一部分；舊 daemon 沒這欄＝false。 */
+  truncated?: boolean
 }
 
 export interface NewBotInput {

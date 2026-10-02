@@ -290,6 +290,7 @@ export async function listDirs(path?: string, host?: string, hidden?: boolean): 
     parent: r.parent == null ? null : str(r.parent),
     home: str(r.home),
     entries: entries.filter(isRec).map((e) => ({ name: str(e.name), path: str(e.path), git: e.git === true })),
+    truncated: r.truncated === true,
   }
 }
 
