@@ -120,6 +120,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_UV_AFTER_START="$1"  # 新 binary 起來之後 DB 會被 migrate 到這個版本
   export STUB_SESSION_OK=1 STUB_SESSION_OK_AFTER_FORWARD=1 STUB_HEALTH_OK=1
   export STUB_ACQUIRE_HELD=true STUB_SAFE=true STUB_SUPERVISOR=idle
+  unset STUB_SUPERVISOR_BEFORE
   export STUB_RELEASE_FAIL=""       # 設了：lease release 回 409（模擬 fence 過期／token 對不上）
   export STUB_NAMES_BEFORE='["a","b"]' STUB_NAMES_AFTER='["a","b"]'
   export STUB_RESTART_HELD=false
@@ -163,6 +164,8 @@ case "$sub:$op" in
       printf '{"released":true}' ;;
   health:*)      [ -n "$STUB_HEALTH_OK" ] || exit 1; printf '{"status":"healthy"}' ;;
   supervisor:*)  if [ -n "$STUB_AGM_SUPERVISOR_FAIL" ]; then printf '{"status":"idle"}'; exit 1; fi
+                 # 換版前（started 還沒出現）可用 STUB_SUPERVISOR_BEFORE 單獨指定；沒設就跟換版後同一個值。
+                 if [ ! -e "$AGM_DIR/started" ] && [ -n "${STUB_SUPERVISOR_BEFORE+x}" ]; then printf '{"status":"%s"}' "$STUB_SUPERVISOR_BEFORE"; exit 0; fi
                  printf '{"status":"%s"}' "$STUB_SUPERVISOR" ;;
   state:*)       if [ -e "$AGM_DIR/started" ]; then phase=after; names="$STUB_NAMES_AFTER"; else phase=before; names="$STUB_NAMES_BEFORE"; fi
                  [ "$STUB_AGM_STATE_FAIL" != "$phase" ] || { printf '{}'; exit 1; }
@@ -478,14 +481,39 @@ check "空 status 要當成讀取失敗" "agm supervisor 讀取失敗" "$SWAP_LO
 check_eq "空 status 後還原舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
+# 換版前就健康、換版後才 waiting_quota／unknown：是新版造成的，照樣 rollback。
 for status in waiting_quota unknown; do
   setup 10 10
-  export STUB_SUPERVISOR="$status"
+  export STUB_SUPERVISOR_BEFORE="idle" STUB_SUPERVISOR="$status"
   rc=$(run)
-  check_eq "supervisor status=${status:-空} 要 rollback（rc=7）" "7" "$rc"
+  check_eq "換版前 idle、換版後 ${status} 要 rollback（rc=7）" "7" "$rc"
   check "拒絕 supervisor 非健康／未知狀態" "supervisor status 不健康或未知" "$SWAP_LOG"
   teardown
 done
+
+# 換版前就是 unknown（不是 waiting_quota）：沒有「額度等待」這個前提，換版後仍 unknown 也照樣 rollback。
+setup 10 10
+export STUB_SUPERVISOR_BEFORE="unknown" STUB_SUPERVISOR="unknown"
+rc=$(run)
+check_eq "換版前後都 unknown 仍要 rollback（rc=7）" "7" "$rc"
+teardown
+
+# 換版前讀不到 supervisor：不能當成 waiting_quota，換版後 waiting_quota 照樣 rollback。
+setup 10 10
+export STUB_SUPERVISOR_BEFORE="" STUB_SUPERVISOR="waiting_quota"
+rc=$(run)
+check_eq "換版前 status 讀不到、換版後 waiting_quota 要 rollback（rc=7）" "7" "$rc"
+teardown
+
+# issue #771：額度等待是換版前就存在的狀態（跟 binary 無關），換版前後都 waiting_quota 不回滾。
+setup 10 10
+export STUB_SUPERVISOR_BEFORE="waiting_quota" STUB_SUPERVISOR="waiting_quota"
+rc=$(run)
+check_eq "換版前後都 waiting_quota 不回滾（rc=0）" "0" "$rc"
+check "log 講明是換版前就存在的額度等待" "換版前就是 waiting_quota" "$SWAP_LOG"
+check_no "沒有 ROLLBACK" "ROLLBACK requested" "$SWAP_LOG"
+check_eq "新 binary 留在線上" "new-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
 
 # 10. DB 備份讀不回來：不換版（不然回滾時沒有可用的備份）。
 setup 10 10

@@ -263,6 +263,8 @@ install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/superv
   `cause` 是 `pane_closed`（herdr 報過關閉事件、當下 pane 也不在）或 `promoted` 的。`agent_missing`／`unconfirmed`／`herdr_restarted`
   是換版會弄丟 child 的樣子，照樣回滾（issue #554，判準見 SPEC §6.5a）。
 - `agm supervisor` 讀取失敗、status 空白或不屬於 `starting`／`idle`／`busy` 都回滾；新版 bot 名單也必須成功讀回且非空。
+  例外（issue #771）：停 daemon 前先讀一次 status；**換版前就是 `waiting_quota`、換版後仍是**視為額度等待、與新版無關，不回滾（log 會寫明）。換版前健康、換版後才 `waiting_quota`，或換版前讀不到，照樣回滾。
+  以前因這條被回滾而進了 `daemon-update.rejected` 的 sha（2026-10-02 的 09a2438d）不會自動解除：確認它是無辜的後，從該檔刪掉那一行（`grep -vx <完整 sha> daemon-update.rejected`）下一輪就會再挑。
 
 ```sh
 scripts/ops/daemon-swap.sh --sha <完整 sha> --old <short sha> --old-hash <sha256 前 16 碼> \

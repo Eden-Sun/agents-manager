@@ -578,6 +578,26 @@ rollback() {
     exit 7
 }
 
+# 換版前先讀一次 supervisor status（issue #771）：額度等待（waiting_quota）是換版前就存在的狀態，跟新 binary 無關。
+# 換版後只拿來判斷「這一刻起沒有變壞」：換版前讀不到或不是 waiting_quota，就沒有這個前提，不放寬。
+read_supervisor_status() {
+    set -o pipefail
+    agm supervisor | "$PYTHON" -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+status = d.get("status")
+if not isinstance(status, str):
+    sup = d.get("supervisor")
+    status = sup.get("status") if isinstance(sup, dict) else None
+if not isinstance(status, str) or not status.strip():
+    raise SystemExit(1)
+print(status.strip())'
+}
+PRE_SUP=$(read_supervisor_status 2>/dev/null) || PRE_SUP=""
+log "supervisor status before swap: ${PRE_SUP:-讀不到}"
+
 OLDPID=$(dpid); log "old pid $OLDPID"
 stop_daemon "$OLDPID"
 PREV="target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)"
@@ -610,25 +630,18 @@ RELEASE_FAILED=0
 [ "$HELD_AFTER" = True ] && { release_window "daemon 沒有自動放掉，手動交還" || RELEASE_FAILED=1; }
 
 sleep "$SETTLE"
-read_supervisor_status() {
-    set -o pipefail
-    agm supervisor | "$PYTHON" -c 'import json,sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    raise SystemExit(1)
-status = d.get("status")
-if not isinstance(status, str):
-    sup = d.get("supervisor")
-    status = sup.get("status") if isinstance(sup, dict) else None
-if not isinstance(status, str) or not status.strip():
-    raise SystemExit(1)
-print(status.strip())'
-}
 if ! SUP=$(read_supervisor_status); then rollback "agm supervisor 讀取失敗"; fi
 log "supervisor status: $SUP"
 case "$SUP" in
     starting|idle|busy) ;;
+    waiting_quota)
+        # 換版前就是 waiting_quota、換版後仍是：額度等待不是新版造成的（2026-10-02 兩顆無辜 commit 因此被回滾並進了 .rejected）。
+        # 換版前健康、換版後才 waiting_quota 仍然回滾。
+        if [ "$PRE_SUP" = waiting_quota ]; then
+            log "supervisor status waiting_quota：換版前就是 waiting_quota，額度等待與這顆 binary 無關，不回滾"
+        else
+            rollback "supervisor status 不健康或未知（${SUP:-空}）"
+        fi ;;
     *) rollback "supervisor status 不健康或未知（${SUP:-空}）" ;;
 esac
 
