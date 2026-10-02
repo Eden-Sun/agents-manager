@@ -1004,6 +1004,11 @@ pub async fn env() -> Env {
 /// A second `App` on the same database and mock herdr, the way a restarted daemon would open them.
 /// In-memory state (timers, pollers) starts empty; everything persisted is still there.
 pub async fn restart_app(env: &Env) -> Arc<App> {
+    restart_app_lan(env, false).await
+}
+
+/// Same as [`restart_app`] with `allow_lan` chosen (the packaged app has it off; dev/LAN daemons turn it on).
+pub async fn restart_app_lan(env: &Env, allow_lan: bool) -> Arc<App> {
     let data = env.dir.join("data");
     let pool = db::open(&data.join("db.sqlite3")).await.unwrap();
     let cfg = crate::config::ConfigStore::load(data.join("config.toml")).await.unwrap();
@@ -1018,7 +1023,7 @@ pub async fn restart_app(env: &Env) -> Arc<App> {
         7799,
         "test-token".into(),
         "test".into(),
-        false,
+        allow_lan,
     );
     app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
     app
