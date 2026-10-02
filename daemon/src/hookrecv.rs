@@ -1079,6 +1079,18 @@ async fn native_evidence<'a>(
     Ok(lifecycle::turn_controller::NativeEvidence { session_id, turn_id })
 }
 
+/// hook 是 pane 裡的行程送進來的：`transcript_path` 要在這顆 bot 自己的 `projects/`（codex：`sessions/`）底下才收進 `runs`，
+/// 不然 daemon 之後每次輪詢都會去讀一個任意的檔（別顆 bot 的對話、`/etc/passwd`…）。不合就當沒帶（沿用原本的值）。
+async fn vetted_transcript(app: &Arc<App>, bot: &db::Bot, path: Option<&str>) -> Option<String> {
+    let path = path.filter(|p| !p.trim().is_empty())?;
+    if crate::transcript_read::transcript_allowed(app, bot, path).await {
+        Some(path.to_string())
+    } else {
+        tracing::warn!(bot = %bot.name, path, "ignoring a hook transcript_path outside the bot's own transcript directory");
+        None
+    }
+}
+
 pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     let Some(bot) = db::bot(&app.db, &body.bot_id).await? else { return Ok(()) };
     // A3: also guards the spool-replay path, where nothing checked the token.
@@ -1229,6 +1241,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 }
             }
             if let Some(r) = &run {
+                let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
                 sqlx::query(
                     "UPDATE runs SET native_session_id = COALESCE(native_session_id, ?),
                      transcript_path = COALESCE(?, transcript_path) WHERE id = ?",
@@ -1382,6 +1395,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 if body.provider == "claude" {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
+                let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
                 sqlx::query(
                     "UPDATE runs SET native_session_id = COALESCE(?, native_session_id),
                      transcript_path = COALESCE(?, transcript_path) WHERE id = ?",
@@ -1396,6 +1410,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
         HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+            // Stop 的 transcript_path 不只寫進 `runs`：下面還會直接讀它、把內容當成使用者訊息記進對話，所以一進來就驗。
+            let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
             if body.provider == "codex" || body.provider == "grok" {
                 if let Some(r) = &run {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
@@ -4292,6 +4308,20 @@ mod external_claim_tests {
         }
     }
 
+    /// hook 送來的 transcript 路徑要在 bot 自己身分的 `projects/` 底下才算數（`transcript_read`）：把這顆 bot 的 `CLAUDE_CONFIG_DIR` 指到 `root`，
+    /// 回傳 `root/projects/-t/<name>`（目錄已建好）。
+    async fn own_projects_file(app: &Arc<App>, bot_id: &str, root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(json!({"CLAUDE_CONFIG_DIR": root.to_string_lossy()}).to_string())
+            .bind(bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let dir = root.join("projects/-t");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
     /// 本機 bot：transcript 在這台，daemon 自己讀 `origin.kind`，不需要 hook.sh 帶。
     #[tokio::test]
     async fn a_local_transcript_decides_whether_the_stop_stores_a_resent_prompt() {
@@ -4306,7 +4336,7 @@ mod external_claim_tests {
         };
         for (origin, expect_stored) in [("human", true), ("task-notification", false)] {
             let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, false).await;
-            let path = env.dir.join(format!("t-{origin}.jsonl"));
+            let path = own_projects_file(&app, &bot_id, &env.dir, &format!("t-{origin}.jsonl")).await;
             std::fs::write(&path, [line(Some("human"), "現在部 demo"), line(Some(origin), if origin == "human" { "現在部 demo" } else { "<task-notification/>" })].concat()).unwrap();
             process(&app, &claude_stop_for(&bot_id, json!({"transcript_path": path.to_string_lossy()}))).await.unwrap();
             let stored = user_texts_on(&app, &external).await;
@@ -4474,7 +4504,7 @@ mod external_claim_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot_id, _conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", "跑一次測試").await;
-        let transcript = app.data_dir.join(format!("t-{}.jsonl", db::ulid()));
+        let transcript = own_projects_file(&app, &bot_id, &app.data_dir, &format!("t-{}.jsonl", db::ulid())).await;
         std::fs::write(
             &transcript,
             format!(
@@ -4529,7 +4559,7 @@ mod external_claim_tests {
             .expect("記成這一回合的訊息");
         assert_eq!(supp.turn_id.as_deref(), Some(turn_id.as_str()));
 
-        let transcript = app.data_dir.join(format!("t-{}.jsonl", db::ulid()));
+        let transcript = own_projects_file(&app, &bot_id, &app.data_dir, &format!("t-{}.jsonl", db::ulid())).await;
         std::fs::write(
             &transcript,
             format!(
@@ -4613,7 +4643,7 @@ mod external_claim_tests {
         let app = env.app.clone();
         let prompt = "這段文字裡有字面的 <pasted_content id=\"1234\">x</pasted_content id=\"1234\"> 標籤，請只回覆 OK 兩個字母。";
         let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", prompt).await;
-        let transcript = app.data_dir.join(format!("t-{}.jsonl", db::ulid()));
+        let transcript = own_projects_file(&app, &bot_id, &app.data_dir, &format!("t-{}.jsonl", db::ulid())).await;
         let log: Vec<&str> = include_str!("lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl").lines().collect();
         assert!(log[8].contains(r#"<\\pasted_content id=\"1234\">"#), "fixture 這一列是 CLI 跳脫過又包起來的");
         std::fs::write(&transcript, log[8..].join("\n") + "\n").unwrap();

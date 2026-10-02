@@ -244,14 +244,7 @@ async fn draft_proof(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &
 
 /// `path` 在 `offset` 之後多出來的使用者訊息（原文，CLI 包起來的貼上已還原）。
 fn new_user_entries(format: LogFormat, path: &std::path::Path, offset: u64) -> std::io::Result<Vec<String>> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path)?;
-    if f.metadata()?.len() < offset {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "session log shrank below the baseline"));
-    }
-    f.seek(SeekFrom::Start(offset))?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
+    let buf = crate::transcript_read::read_since(path, offset, "session log")?;
     let body = String::from_utf8_lossy(&buf);
     Ok(body.lines().filter_map(|l| log_user_text(format, l)).map(|t| super::pasted_content::original(&t).into_owned()).collect())
 }

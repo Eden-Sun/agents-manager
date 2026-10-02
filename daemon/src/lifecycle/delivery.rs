@@ -669,16 +669,8 @@ pub(crate) fn transcript_hits_since(path: &std::path::Path, offset: u64, text: &
 }
 
 pub(crate) fn log_hits_since(format: LogFormat, path: &std::path::Path, offset: u64, text: &str) -> std::io::Result<usize> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path)?;
-    let len = f.metadata()?.len();
-    if len < offset {
-        // The file was replaced or truncated: whatever is there is not the baseline we took.
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "transcript shrank below the baseline"));
-    }
-    f.seek(SeekFrom::Start(offset))?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
+    // The file was replaced or truncated (shorter than the baseline) or grew by an absurd amount: unreadable, never zero.
+    let buf = crate::transcript_read::read_since(path, offset, "transcript")?;
     let body = String::from_utf8_lossy(&buf);
     // claude 可能把貼上的 prompt 包成 `<pasted_content>` 才寫進去（#218）；codex 不會。
     let ours = |t: &String| match format {
