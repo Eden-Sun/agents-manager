@@ -300,7 +300,13 @@ pub async fn promote_bot(
         .join(cwd_key(&project.path));
 
     // 3. 複製 transcript。
-    let staged = stage_transcript(&located.src, &dest_dir, &located.session_id)?;
+    // transcript 可能有幾百 MB：複製放到 blocking pool，不占 tokio worker。
+    let staged = {
+        let (src, dest_dir, sid) = (located.src.clone(), dest_dir.clone(), located.session_id.clone());
+        tokio::task::spawn_blocking(move || stage_transcript(&src, &dest_dir, &sid))
+            .await
+            .map_err(|e| refuse("transcript_copy_failed", json!({"message": e.to_string()})))??
+    };
 
     // 持久 intent（#355 P4）：第一個回不去的一步（停 child）**之前**先 commit；承諾點＝目標 user bot 進 config。承諾點之後 daemon 死掉，
     // 開機由 `promote_intents::recover_host` **往前補完**（不回滾，使用者 2026-09-20 裁示）；停 child 之前死掉＝`abandoned`（收回複製）。寫不進去就不繼續。
