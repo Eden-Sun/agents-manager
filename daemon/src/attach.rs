@@ -580,7 +580,7 @@ mod tests {
         let env = tt::env().await;
         let app = &env.app;
         let bot = tt::claude_bot(app, &env.project_id, "planter").await;
-        let project = std::env::temp_dir().join(format!("am-attach-sym-{}", crate::db::ulid()));
+        let project = crate::testing::track(std::env::temp_dir().join(format!("am-attach-sym-{}", crate::db::ulid())));
         let dir = project.join(SUBDIR);
         std::fs::create_dir_all(&dir).unwrap();
         let secret = project.join("outside-secret.txt");
