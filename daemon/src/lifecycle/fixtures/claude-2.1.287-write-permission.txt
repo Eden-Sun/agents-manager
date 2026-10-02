@@ -1,6 +1,13 @@
-● Write(a.txt)
+ ▐▛███▛█   Claude Code v2.1.287
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   /…/-home-ubuntu-project-agents-manager/bc0dc1b2-d3b4-4adb-a678-2b3815263252/scratchpad/cc2287-work
 
-● Fetch(https://example.com)
+
+❯ /clear
+
+❯ Use the Write tool to create a.txt containing a single line: x. Nothing else.
+
+● Write(a.txt)
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  Create file
