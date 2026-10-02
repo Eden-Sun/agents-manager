@@ -13,7 +13,7 @@
 | 種類 | 意思 |
 | --- | --- |
 | `drift` | 安裝檔不是 repo 任何一版——有人直接改了安裝檔，最嚴重 |
-| `behind` | repo 有更新沒裝；附安裝的是哪個 commit、落後的 commit 標題 |
+| `behind` | repo 有更新沒裝；附安裝的是哪個 commit、落後的 commit 標題（腳本比位元組、plist／unit 比語意，**兩種都回頭找歷史**：安裝的是 repo 以前某一版就是 `behind`，不是 `drift`） |
 | `missing` | 對照表有、安裝端沒有 |
 | `extra` | `bin/` 裡有、對照表沒有（沒有版控的腳本；`agm` 與 `*.bak*` 不算） |
 

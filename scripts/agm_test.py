@@ -2271,6 +2271,50 @@ class OpsSyncTest(CliCase):
         self.assertEqual(rows["systemd/com.agm.x.timer"]["Timer.OnUnitActiveSec"], {"repo": ["1800s"], "installed": ["600s"]})
         self.assertEqual(rows["systemd/com.agm.x.service"]["Service.Environment"], {"repo": "<ignored>", "installed": None})
 
+    def report(self):
+        code, out, err = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertIn(code, (0, 1), err)
+        return json.loads(out)
+
+    def test_a_unit_or_plist_that_is_an_older_repo_version_is_behind_not_drift(self):
+        """repo 把 unit 加了一行 `Environment=`（browser-gc.service 的 HERDR_SESSION，420ac4ab），安裝端還是上一版：
+        那是「repo 較新、還沒裝」（behind，附落後的 commit），不是「有人直接改了安裝檔」（drift）。以前 unit／plist 只跟最新一版
+        比語意，沒有像腳本那樣回頭找歷史，於是 ops-install 的 drift 保護（絕不覆蓋被手改的檔）會把這種正常落後的檔也擋下來。"""
+        self.with_units()
+        old_service = self.SERVICE.replace("Environment=PATH=/opt/repo\n", "")
+        old_plist = self.plist("com.agm.x", 900)
+        # 歷史：unit 先沒有 Environment、plist 先是 900 秒；之後才改成現在的樣子。
+        self.put("scripts/ops/systemd/com.agm.x.service", old_service)
+        self.put("scripts/ops/launchd/com.agm.x.plist", old_plist)
+        self.git("commit", "-qam", "unit/plist 舊版")
+        self.put("scripts/ops/systemd/com.agm.x.service", self.SERVICE)
+        self.put("scripts/ops/launchd/com.agm.x.plist", self.plist("com.agm.x", 1800))
+        self.git("commit", "-qam", "unit 加 Environment、plist 改 1800")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        (self.units / "com.agm.x.service").write_text(old_service, encoding="utf-8")
+        (self.units / "com.agm.x.timer").write_text(self.TIMER.format(1800), encoding="utf-8")
+        r = self.report()
+        self.assertEqual(r["drift"], [], r)
+        [behind] = r["behind"]
+        self.assertEqual((behind["target"], behind["behind"]), ("systemd/com.agm.x.service", 1))
+        self.assertEqual([c.split(" ", 1)[1] for c in behind["commits"]], ["unit 加 Environment、plist 改 1800"])
+        self.assertTrue(behind["installed_commit"])
+        self.assertFalse(r["in_sync"])
+
+        # 手改過的（不是 repo 任何一版）仍然是 drift，跟 behind 分得開。
+        (self.units / "com.agm.x.service").write_text(old_service.replace("Type=oneshot", "Type=simple"), encoding="utf-8")
+        r = self.report()
+        self.assertEqual([x["target"] for x in r["drift"]], ["systemd/com.agm.x.service"])
+        self.assertEqual(r["behind"], [])
+
+        # plist 同理（macOS）。
+        os.environ["AGM_OPS_PLATFORM"] = "darwin"
+        (self.agents / "com.agm.x.plist").write_text(old_plist, encoding="utf-8")
+        r = self.report()
+        [behind] = [x for x in r["behind"] if x["target"] == "LaunchAgents/com.agm.x.plist"]
+        self.assertEqual(behind["behind"], 1)
+        self.assertEqual([x["target"] for x in r["drift"]], [])
+
     def test_linux_reports_unlisted_agm_units_and_darwin_only_scripts_as_extra(self):
         """Linux 上沒版控的 `com.agm.*` unit＝extra；`~/Library/LaunchAgents` 不掃（那不是這台的排程）。
         只在 darwin 裝的 browser-gc 腳本出現在 Linux 的 bin/，也算 extra——它不該被裝在這裡。"""
