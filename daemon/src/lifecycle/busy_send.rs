@@ -10,11 +10,12 @@ async fn slot_taken(app: &Arc<App>, turn_id: &str) -> LcError {
 
 /// 佔槽的是誰：`{"kind": "user"｜"start"｜"daemon"｜"agm"｜"bot"｜"unknown", "bot_id"?, "bot_name"?}`。
 /// `user`＝使用者自己（可能是另一個分頁）排的 `awaits_idle`；`start`＝在等 bot 起來的那一則（#122）；`daemon`＝daemon 的通知；
-/// `agm`／`bot`＝別人派來的（`relay_from` 是 bot id；是 AGM 的 bot 算 `agm`）。讀不到就是 `unknown`，不猜。
+/// `agm`／`bot`＝別人派來的（`relay_from` 是 bot id；是 AGM 的 bot 算 `agm`；**自稱**的 `relay_from`〔沒帶 bot token，`relay_unverified`〕只說 `bot`，不帶名字與 id）。讀不到就是 `unknown`，不猜。
 async fn slot_holder(app: &Arc<App>, turn_id: &str) -> Value {
-    let row: Option<(i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
+    let row: Option<(i64, i64, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
         "SELECT t.awaits_idle, t.awaits_start, t.client_request_id,
-                (SELECT m.relay_from FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' ORDER BY m.created_at, m.rowid LIMIT 1)
+                (SELECT m.relay_from FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' ORDER BY m.created_at, m.rowid LIMIT 1),
+                (SELECT m.relay_unverified FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' ORDER BY m.created_at, m.rowid LIMIT 1)
            FROM turns t WHERE t.id = ?",
     )
     .bind(turn_id)
@@ -22,7 +23,7 @@ async fn slot_holder(app: &Arc<App>, turn_id: &str) -> Value {
     .await
     .ok()
     .flatten();
-    let Some((awaits_idle, awaits_start, crid, relay_from)) = row else { return json!({"kind": "unknown"}) };
+    let Some((awaits_idle, awaits_start, crid, relay_from, relay_unverified)) = row else { return json!({"kind": "unknown"}) };
     if awaits_start == 1 {
         return json!({"kind": "start"});
     }
@@ -33,6 +34,10 @@ async fn slot_holder(app: &Arc<App>, turn_id: &str) -> Value {
         return json!({"kind": "daemon"});
     }
     if let Some(from) = relay_from {
+        // 沒帶 bot token 的 `relay_from` 只是自稱（`relay_unverified`）：不當事實講成 AGM、也不替呼叫端把任意 id 解析成名字。
+        if relay_unverified.unwrap_or(1) != 0 {
+            return json!({"kind": "bot"});
+        }
         if let Ok(Some(bot)) = db::bot(&app.db, &from).await {
             let agm = match crate::supervisor_owned::load(&app.db).await {
                 Ok(owned) => owned.owns(&bot),

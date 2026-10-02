@@ -6542,6 +6542,32 @@ mod prompt_route_tests {
         }
     }
 
+    /// `relay_from` 沒帶 bot token 時只是**自稱**（`relay_unverified`）：不能拿它當事實講「AGM／某顆 bot 的訊息正在排隊」，
+    /// 也不該替呼叫端把任意 bot id 解析成名字。自稱的一律只說「別的 bot」，不帶名字與 id。
+    #[tokio::test]
+    async fn a_self_declared_relay_source_is_never_named_or_called_agm() {
+        let e = crate::testing::env().await;
+        let agm = typed_bot_named(&e, "claude", "agm-bot", "pane-agm2").await;
+        sqlx::query("INSERT INTO supervisors (id, bot_id, created_at, updated_at) VALUES ('sup-2', ?, ?, ?)").bind(&agm).bind(db::now()).bind(db::now()).execute(&e.app.db).await.unwrap();
+        let victim = typed_bot_named(&e, "grok", "holder-spoof", "pane-spoof").await;
+        let run_id: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'").bind(&victim).fetch_one(&e.app.db).await.unwrap();
+        let conv = db::conversation_id(&e.app.db, &victim).await.unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?, ?, ?, 'web', 'in_flight', 'ok', ?)")
+            .bind(db::ulid()).bind(&conv).bind(&run_id).bind(db::now()).execute(&e.app.db).await.unwrap();
+        let held = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at, awaits_idle) VALUES (?, ?, 'web', 'queued', 'pending', 'held', ?, 0)")
+            .bind(&held).bind(&conv).bind(db::now()).execute(&e.app.db).await.unwrap();
+        // 自稱是 AGM 的 bot（沒帶 token）。
+        sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at) VALUES (?, ?, ?, 'user', 'held', 'web', ?, 1, ?)")
+            .bind(db::ulid()).bind(&conv).bind(&held).bind(&agm).bind(db::now()).execute(&e.app.db).await.unwrap();
+
+        let (status, body) = call_queue_if_busy(&e, &victim, "我也要排隊", "slot-spoof", &[]).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["reason"], "queue_slot_taken", "{body}");
+        assert_eq!(body["holder"]["kind"], "bot", "自稱的來源不能被講成 AGM：{body}");
+        assert!(body["holder"].get("bot_name").is_none() && body["holder"].get("bot_id").is_none(), "自稱的來源不帶名字與 id：{body}");
+    }
+
     /// web 的 Enter 永遠帶 `queue_if_busy`，bot 沒在跑時再加 `start_if_stopped`。畫面上的 run 比 daemon 慢一拍
     /// （bot 剛起來、frame 還沒到）時兩個旗標會一起打到「已經在跑而且忙」的 bot：`start_if_stopped`
     /// 「bot 在跑就跟沒帶一樣」，所以結果該跟只帶 `queue_if_busy` 相同——落地排隊，而不是丟掉旗標回 409（Refs #733）。

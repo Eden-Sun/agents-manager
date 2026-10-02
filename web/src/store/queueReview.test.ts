@@ -232,3 +232,44 @@ test('AGM 的交辦佔著槽：中文說清楚，輸入框的字保留', async (
   const text = useStore.getState().notices.at(-1)?.text ?? ''
   assert.ok(text.includes('AGM 的交辦正在排隊'), text)
 })
+
+// ───────── 第三輪：「同一句」的判斷要保守，寧可多還原一次也不能吞掉使用者的字 ─────────
+
+const draftKey = 'bot:b1' as const
+const sendRejected = async (holder: unknown, queuedText: string, mine: string, attachments: string[] = []) => {
+  seed()
+  routeDaemon(slotRoutes(holder, queuedText))
+  useStore.getState().setDraft(draftKey, mine)
+  const ok = await useStore.getState().sendPrompt('b1', mine, attachments, false, false, undefined, true)
+  return { ok, draft: useStore.getState().drafts[draftKey] ?? '' }
+}
+
+test('同一句判斷只 trim 頭尾：大小寫、內部空白、標點不同都是不同的話，字要還回輸入框', async () => {
+  for (const [queued, mine] of [
+    ['Continue', 'continue'],
+    ['請 繼續', '請繼續'],
+    ['請繼續', '請繼續。'],
+    ['a\nb', 'a b'],
+  ] as const) {
+    const r = await sendRejected({ kind: 'user' }, queued, mine)
+    assert.equal(r.ok, false, `${queued} vs ${mine}`)
+    assert.equal(r.draft, mine, `${queued} vs ${mine}：字不能被吞掉`)
+  }
+  // 頭尾空白才算同一句。
+  const same = await sendRejected({ kind: 'user' }, '  請繼續  ', '請繼續\n')
+  assert.equal(same.ok, true)
+})
+
+test('帶附件的送出永遠不當成「同一句」：附件要讓使用者重新加，字也還回去', async () => {
+  const r = await sendRejected({ kind: 'user' }, '請看圖', '請看圖', ['a1'])
+  assert.equal(r.ok, false)
+  assert.equal(r.draft, '請看圖')
+})
+
+test('佔槽的不是使用者自己（unknown／start／daemon／bot）時，就算文字一樣也不吞：那一句不是這個使用者排的', async () => {
+  for (const holder of [{ kind: 'unknown' }, { kind: 'start' }, { kind: 'daemon' }, { kind: 'bot', bot_name: 'x' }, { kind: 'agm', bot_name: 'AGM' }]) {
+    const r = await sendRejected(holder, '繼續', '繼續')
+    assert.equal(r.ok, false, JSON.stringify(holder))
+    assert.equal(r.draft, '繼續', JSON.stringify(holder))
+  }
+})
