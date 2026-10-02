@@ -13,6 +13,7 @@ import { useScrollTail } from '../hooks/useScrollTail'
 import { useTapCopy } from '../hooks/useTapCopy'
 import { cleanLiveActivity, cleanLiveText } from '../store/liveText'
 import { typeAlongside } from '../store/alongside'
+import { sendNowButton } from '../store/sendNowCopy'
 import { SentViaTag } from './SentViaTag'
 import { startingSend, startingSendLabel } from '../store/startingSend'
 import { composerPlaceholder, sendButtonLabel, sendButtonTitle } from '../lib/composerLabels'
@@ -685,6 +686,7 @@ function Composer({
   const abortBot = useStore((s) => s.abortBot)
   // 插隊／補充是 claude 專屬（使用者 2026-09-27）：send-now 鍵與「打進 pane 併進這一輪」只在 claude 上驗過。
   const isClaude = useStore((s) => s.bots.find((b) => b.id === botId)?.kind === 'claude')
+  const botKind = useStore((s) => s.bots.find((b) => b.id === botId)?.kind)
   const aborting = useStore((s) => Boolean(s.busy[`abort:${botId}`]))
   const startBot = useStore((s) => s.startBot)
   const sendText = useStore((s) => s.sendText)
@@ -866,29 +868,32 @@ function Composer({
               ESC 中斷
             </button>
           ) : null}
-          {isClaude && state.inFlightTurnId && pending.trim() ? (
+          {state.inFlightTurnId && pending.trim() && sendNowButton(botKind, pending) ? (
             <>
-              {/* 插隊＝CLI 自己的 send-now 鍵（claude 2.1.275 起）：它打斷目前那一輪、收掉它，再收下這句。
-                  CLI 太舊時 daemon 回 409 並說原因，這裡照原樣顯示。 */}
+              {/* 插隊＝claude 的 send-now 鍵（2.1.275 起）：它打斷目前那一輪、收掉它，再收下這句；
+                  codex 是「插入」（#748）：不打斷、不開新回合，由 instant_interrupt 併進同一輪。文案在 sendNowCopy。
+                  不合資格時 daemon 回 409 並說原因（旗標關、版本不足），這裡照原樣顯示。 */}
               <button
                 type="button"
                 className="mini-btn"
                 disabled={aborting || sending}
-                title={`打斷目前這一輪，改送這一句（需要 claude 2.1.275 以上）：${pending.slice(0, 40)}${pending.length > 40 ? '…' : ''}`}
+                title={sendNowButton(botKind, pending)!.title}
                 onClick={() => void sendNow()}
               >
-                插隊
+                {sendNowButton(botKind, pending)!.label}
               </button>
-              {/* 補充＝直接打進 pane，不是第二輪：daemon 一次只認一個 turn（SPEC §2）。 */}
-              <button
-                type="button"
-                className="mini-btn"
-                disabled={sending}
-                title="補充一句給正在跑的這一輪：不建立新回合，直接打進終端，它邊做邊看到。這句會記在對話裡（標「補充」），回覆併在目前這一輪。"
-                onClick={() => void sendAlongside()}
-              >
-                補充
-              </button>
+              {/* 補充＝直接打進 pane，不是第二輪：daemon 一次只認一個 turn（SPEC §2）。只給 claude。 */}
+              {isClaude ? (
+                <button
+                  type="button"
+                  className="mini-btn"
+                  disabled={sending}
+                  title="補充一句給正在跑的這一輪：不建立新回合，直接打進終端，它邊做邊看到。這句會記在對話裡（標「補充」），回覆併在目前這一輪。"
+                  onClick={() => void sendAlongside()}
+                >
+                  補充
+                </button>
+              ) : null}
             </>
           ) : null}
           {/* esc 送不進去時回合會卡死；這顆先解鎖，送鍵只是順帶。 */}
