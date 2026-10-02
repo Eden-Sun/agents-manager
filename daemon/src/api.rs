@@ -4783,11 +4783,45 @@ async fn ws_handler(
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
     let since: Option<u64> = q.get("since").and_then(|s| s.parse().ok());
-    ws.on_upgrade(move |socket| ws_loop(app, socket, since))
+    // 連線數上限：每條連線一個 task、一個訂閱與（慢 client 時）一份緩衝，不能無限開。
+    let Some(slot) = WsSlot::take(&app) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many websocket connections").into_response();
+    };
+    ws.max_message_size(crate::state::WS_MAX_INBOUND_BYTES)
+        .max_frame_size(crate::state::WS_MAX_INBOUND_BYTES)
+        .on_upgrade(move |socket| async move {
+            ws_loop(app, socket, since).await;
+            drop(slot);
+        })
+}
+
+/// 一條開著的 WebSocket 連線佔的名額（[`crate::state::App::ws_connections`]）；連線結束（含 client 斷線、被我們踢掉）時放回。
+struct WsSlot(Arc<App>);
+
+impl WsSlot {
+    fn take(app: &Arc<App>) -> Option<WsSlot> {
+        let max = app.ws_max_connections.load(Ordering::SeqCst);
+        app.ws_connections
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < max).then_some(n + 1))
+            .ok()
+            .map(|_| WsSlot(app.clone()))
+    }
+}
+
+impl Drop for WsSlot {
+    fn drop(&mut self) {
+        self.0.ws_connections.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 送一幀；client 太久不收（TCP 緩衝滿了）就放棄，呼叫端收掉這條連線。
+async fn ws_send(socket: &mut WebSocket, msg: WsMessage, timeout: std::time::Duration) -> bool {
+    matches!(tokio::time::timeout(timeout, socket.send(msg)).await, Ok(Ok(())))
 }
 
 async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
     let mut rx = app.subscribe();
+    let send_timeout = app.ws_send_timeout();
     #[cfg(test)]
     crate::lifecycle::race_point::hit("ws_subscribed", &app.data_dir.display().to_string()).await;
     // **先訂閱再讀環**是對的：反過來的話兩者之間的事件誰都收不到。代價是重複——那一段時間送出的耐久事件
@@ -4808,15 +4842,15 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
         Some(evs) => {
             for e in evs {
                 sent_through = sent_through.max(e.seq);
-                if socket.send(WsMessage::Text(serde_json::to_string(&e).unwrap().into())).await.is_err() {
+                if !ws_send(&mut socket, WsMessage::Text(serde_json::to_string(&e).unwrap().into()), send_timeout).await {
                     return;
                 }
             }
         }
         None => {
-            let _ = socket
-                .send(WsMessage::Text(json!({"type": "resync", "seq": app.current_seq()}).to_string().into()))
-                .await;
+            if !ws_send(&mut socket, WsMessage::Text(json!({"type": "resync", "seq": app.current_seq()}).to_string().into()), send_timeout).await {
+                return;
+            }
         }
     }
     // 沒事件也定期送一幀（issue #760）：不佔 seq、不進重播環，客戶端只拿它當「線還活著」的證據。
@@ -4826,21 +4860,19 @@ async fn ws_loop(app: Arc<App>, mut socket: WebSocket, since: Option<u64>) {
     loop {
         tokio::select! {
             _ = ping.tick() => {
-                if socket.send(WsMessage::Text(json!({"type": "ping"}).to_string().into())).await.is_err() { return; }
+                if !ws_send(&mut socket, WsMessage::Text(json!({"type": "ping"}).to_string().into()), send_timeout).await { return; }
             }
             ev = rx.recv() => match ev {
                 // backlog 已經送過這一則（訂閱與讀環之間送出的，兩邊都有）：跳過，不是漏送（issue #521）。
                 Ok(e) if e.seq <= sent_through => {}
                 Ok(e) => {
                     sent_through = e.seq;
-                    if socket.send(WsMessage::Text(serde_json::to_string(&e).unwrap().into())).await.is_err() { return; }
+                    if !ws_send(&mut socket, WsMessage::Text(serde_json::to_string(&e).unwrap().into()), send_timeout).await { return; }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     // 帶 seq，跟重連那條一樣（API.md §8：`{"type":"resync","seq":12}`）——少了它，
                     // 客戶端在 lag 之後的 `lastSeq` 會停在漏掉的事件之前，下一次重連白跑一趟 backlog（issue #482）。
-                    let _ = socket
-                        .send(WsMessage::Text(json!({"type": "resync", "seq": app.current_seq()}).to_string().into()))
-                        .await;
+                    if !ws_send(&mut socket, WsMessage::Text(json!({"type": "resync", "seq": app.current_seq()}).to_string().into()), send_timeout).await { return; }
                 }
                 Err(_) => return,
             },
@@ -4888,6 +4920,127 @@ mod ws_shutdown_tests {
         let done = tokio::time::timeout(std::time::Duration::from_secs(3), server).await;
         assert!(done.is_ok(), "開著的 websocket 讓 graceful shutdown 卡住了");
         drop(client);
+    }
+}
+
+/// WebSocket 伺服端的資源上限（對抗式審查）：client→server 的訊息大小、同時連線數、一直不讀的 client、事件裡不能出現憑證欄位。
+#[cfg(test)]
+mod ws_limits_tests {
+    use serde_json::json;
+    use std::sync::atomic::Ordering;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve(app: std::sync::Arc<crate::state::App>) -> std::net::SocketAddr {
+        let router = super::router(app);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
+        addr
+    }
+
+    async fn connect(addr: std::net::SocketAddr) -> (tokio::net::TcpStream, String) {
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"GET /ws?token=test-token HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").await.unwrap();
+        let mut head = Vec::new();
+        let mut b = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            c.read_exact(&mut b).await.unwrap();
+            head.push(b[0]);
+        }
+        (c, String::from_utf8_lossy(&head).into_owned())
+    }
+
+    /// client→server 一個 `len` 位元組的 binary 幀（要 mask；全 0 的 mask key 讓 payload 原樣）。
+    fn masked_binary_frame(len: usize) -> Vec<u8> {
+        let mut f = vec![0x82, 0xFF];
+        f.extend_from_slice(&(len as u64).to_be_bytes());
+        f.extend_from_slice(&[0, 0, 0, 0]);
+        f.resize(f.len() + len, 0);
+        f
+    }
+
+    async fn eventually_closed(app: &crate::state::App) -> bool {
+        for _ in 0..200 {
+            if app.ws_connections.load(Ordering::SeqCst) == 0 {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// 這個 server 從不看 client 送來的內容，所以一個幾十 MiB 的訊息只是白白被緩衝（tungstenite 預設 64 MiB／幀 16 MiB）：
+    /// 超過上限就斷線。
+    #[tokio::test]
+    async fn an_oversized_client_message_closes_the_connection() {
+        let env = crate::testing::env().await;
+        let addr = serve(env.app.clone()).await;
+        let (mut c, head) = connect(addr).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+        assert_eq!(env.app.ws_connections.load(Ordering::SeqCst), 1);
+        let _ = c.write_all(&masked_binary_frame(2 * 1024 * 1024)).await;
+        assert!(eventually_closed(&env.app).await, "2 MiB 的 client 訊息要被斷線，而不是整個吃進記憶體");
+    }
+
+    #[tokio::test]
+    async fn the_number_of_concurrent_connections_is_capped() {
+        let env = crate::testing::env().await;
+        env.app.ws_max_connections.store(3, Ordering::SeqCst);
+        let addr = serve(env.app.clone()).await;
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            let (c, head) = connect(addr).await;
+            assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+            held.push(c);
+        }
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"GET /ws?token=test-token HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").await.unwrap();
+        let mut out = vec![0u8; 256];
+        let n = c.read(&mut out).await.unwrap();
+        assert!(String::from_utf8_lossy(&out[..n]).starts_with("HTTP/1.1 503"), "第 4 條要被拒：{}", String::from_utf8_lossy(&out[..n]));
+        // 一條斷線，名額就回來。
+        drop(held.pop());
+        let mut ok = String::new();
+        for _ in 0..100 {
+            let (_c, head) = connect(addr).await;
+            ok = head;
+            if ok.starts_with("HTTP/1.1 101") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(ok.starts_with("HTTP/1.1 101"), "{ok}");
+    }
+
+    /// 連上就不讀的 client：送不出去的那條 `socket.send` 以前會永遠卡住（連線與記憶體都不放）。
+    #[tokio::test]
+    async fn a_client_that_never_reads_is_dropped_after_the_send_timeout() {
+        let env = crate::testing::env().await;
+        env.app.set_ws_send_timeout(std::time::Duration::from_millis(300));
+        let addr = serve(env.app.clone()).await;
+        let (_stuck, head) = connect(addr).await;
+        assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+        let big = "x".repeat(1024 * 1024);
+        // 把 kernel 的送出／接收緩衝塞滿：之後的 send 才會真的卡住。
+        for _ in 0..96 {
+            env.app.emit("message_added", json!({"text": big})).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(eventually_closed(&env.app).await, "不讀的連線要在逾時後被放掉");
+    }
+
+    /// 事件是廣播給所有 UI 連線的：憑證欄位不能進去（也不能進重播環），就算哪個呼叫端手滑把整個物件塞進 payload。
+    #[tokio::test]
+    async fn credential_fields_never_leave_in_an_event() {
+        let env = crate::testing::env().await;
+        let mut rx = env.app.subscribe();
+        env.app.emit("bot_changed", json!({"bot": {"id": "b1", "hook_token": "SECRET-HOOK", "nested": [{"ui_token": "SECRET-UI", "ok": 1}]}, "AM_BOT_TOKEN": "SECRET-BOT"})).await;
+        let ev = rx.recv().await.unwrap();
+        let wire = serde_json::to_string(&ev).unwrap();
+        assert!(!wire.contains("SECRET"), "{wire}");
+        assert!(wire.contains("\"id\":\"b1\"") && wire.contains("\"ok\":1"), "其他欄位照舊：{wire}");
+        let backlog = env.app.backlog(0).await.unwrap_or_default();
+        assert!(!serde_json::to_string(&backlog).unwrap().contains("SECRET"), "重播環裡也不能有");
     }
 }
 

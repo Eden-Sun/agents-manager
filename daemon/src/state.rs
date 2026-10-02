@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
@@ -30,9 +30,30 @@ pub enum AutostartHostStatus {
 /// （後果只是重連多一次 resync，見 [`App::backlog`] 的註解）。
 /// WS 心跳預設間隔（issue #760）。客戶端的死線偵測是 60 秒（`web/src/api/socketLiveness.ts`），這裡要明顯短於它。
 pub const WS_PING_EVERY_MS: u64 = 20_000;
+/// 同時開著的 WebSocket 連線上限（UI 分頁；超過回 503）。
+pub const WS_MAX_CONNECTIONS: usize = 64;
+/// 送一幀給 client 最多等多久：連上就不讀的 client 會讓 `socket.send` 永遠卡住，連線、task 與緩衝都不放。
+pub const WS_SEND_TIMEOUT_MS: u64 = 30_000;
+/// client→server 的訊息／幀上限：這個 server 從不看 client 送來的內容（只收 ping），所以給小一點；超過就斷線。
+pub const WS_MAX_INBOUND_BYTES: usize = 64 * 1024;
 
 pub fn is_ephemeral(kind: &str) -> bool {
     kind == "turn_progress"
+}
+
+/// 事件廣播給所有 UI 連線，也留在重播環裡：這些欄位名一律不外送（含巢狀）。呼叫端本來就不該放（`db::Bot::hook_token` 是
+/// `skip_serializing`），這是最後一道，防哪個 payload 手滑把整個物件塞進來。
+const SECRET_KEYS: [&str; 6] = ["hook_token", "ui_token", "am_bot_token", "am_hook_token", "service_token", "x-am-token"];
+
+fn scrub_credentials(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            map.retain(|k, _| !SECRET_KEYS.contains(&k.to_ascii_lowercase().as_str()));
+            map.values_mut().for_each(scrub_credentials);
+        }
+        Value::Array(items) => items.iter_mut().for_each(scrub_credentials),
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,6 +154,10 @@ pub struct App {
     seq: AtomicU64,
     /// WS 心跳間隔（毫秒，issue #760）；測試縮短它。
     ws_ping_ms: AtomicU64,
+    ws_send_timeout_ms: AtomicU64,
+    /// 現在開著幾條 WebSocket、上限多少（[`WS_MAX_CONNECTIONS`]；測試調小）。
+    pub ws_connections: AtomicUsize,
+    pub ws_max_connections: AtomicUsize,
     ring: Mutex<VecDeque<WsEvent>>,
     /// (host, session, pane_id) -> per-run agent_status subscription task
     pub pane_watchers: Mutex<HashMap<(String, String, String), tokio::task::JoinHandle<()>>>,
@@ -271,6 +296,9 @@ impl App {
             turn_bus,
             seq: AtomicU64::new(0),
             ws_ping_ms: AtomicU64::new(WS_PING_EVERY_MS),
+            ws_send_timeout_ms: AtomicU64::new(WS_SEND_TIMEOUT_MS),
+            ws_connections: AtomicUsize::new(0),
+            ws_max_connections: AtomicUsize::new(WS_MAX_CONNECTIONS),
             ring: Mutex::new(VecDeque::new()),
             pane_watchers: Mutex::new(HashMap::new()),
             global_watchers: Mutex::new(HashMap::new()),
@@ -483,7 +511,8 @@ impl App {
         self.turn_bus.receiver_count()
     }
 
-    pub async fn emit(&self, kind: &str, data: Value) {
+    pub async fn emit(&self, kind: &str, mut data: Value) {
+        scrub_credentials(&mut data);
         // seq 在 ring 鎖**內**取，ring 順序＝seq 順序。在鎖外編號的話兩個並行 emit 可能先推 6 再推 5，
         // 斷線後帶 `since=6` 重連的客戶端就永遠收不到 5（review 2026-09-12 f）。
         {
@@ -507,6 +536,15 @@ impl App {
     /// 每條 WS 連線多久送一個 `{"type":"ping"}` text 幀（瀏覽器看不到 ping 控制幀）。客戶端 60 秒沒收到任何幀就判定半開。
     pub fn ws_ping_every(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.ws_ping_ms.load(Ordering::Relaxed).max(1))
+    }
+
+    pub fn ws_send_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.ws_send_timeout_ms.load(Ordering::Relaxed).max(1))
+    }
+
+    #[cfg(test)]
+    pub fn set_ws_send_timeout(&self, t: std::time::Duration) {
+        self.ws_send_timeout_ms.store(t.as_millis() as u64, Ordering::Relaxed);
     }
 
     #[cfg(test)]
