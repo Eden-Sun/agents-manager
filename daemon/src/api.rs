@@ -4127,7 +4127,7 @@ struct PromptIn {
     /// In display order.
     #[serde(default)]
     attachments: Vec<String>,
-    /// 相容期的 relay metadata；有效 Bot principal 省略時由 daemon 補成該 bot id。
+    /// relay metadata；有效 Bot principal 省略時由 daemon 補成該 bot id。
     /// Bot principal 帶其他 bot id 時，middleware 的 principal proof 與 relay_auth 會拒絕。
     #[serde(default)]
     relay_from: Option<String>,
@@ -4167,20 +4167,20 @@ async fn prompt_bot(
     let given_crid = b.client_request_id.clone();
     let crid = b.client_request_id.unwrap_or_else(db::ulid);
     // `relay_from` is metadata, never an alternate principal. A proven bot that omits it is
-    // attributed to the id already authenticated by middleware. User requests keep #339's
-    // unsigned compatibility branch until #410's recorded conditions permit its removal.
+    // attributed to the id already authenticated by middleware. A User request claiming a bot
+    // without that bot's token is refused (#410 ended #339's unsigned compatibility branch).
     let relay_claim = b.relay_from.as_deref().map(str::trim).filter(|value| !value.is_empty());
     let effective_relay = relay_claim.or_else(|| headers.get("X-AM-Bot-Id").and_then(|v| v.to_str().ok()));
     let relay = crate::relay_auth::authenticate(&app, &headers, effective_relay, &id).await?;
     // bot 寫給 AGM 的申請不直接開回合：排進協調者的佇列，回 202（SPEC §18.15）。
     if let Some(r) = &relay {
         let mark = crate::supervisor::bot_requests::ReplyMark { ack: b.ack, reply_to: b.reply_to.as_deref() };
-        let queued = crate::supervisor::bot_requests::intercept(&app, &id, &r.from, &b.text, given_crid.as_deref(), &b.attachments, !r.unverified, "api", mark);
+        let queued = crate::supervisor::bot_requests::intercept(&app, &id, &r.from, &b.text, given_crid.as_deref(), &b.attachments, true, "api", mark);
         if let Some(v) = queued.await? {
             return Ok((StatusCode::ACCEPTED, Json(v)).into_response());
         }
     }
-    let src = lifecycle::RelaySrc { from: relay.as_ref().map(|r| r.from.as_str()), unverified: relay.as_ref().is_some_and(|r| r.unverified) };
+    let src = lifecycle::RelaySrc { from: relay.as_ref().map(|r| r.from.as_str()), unverified: false };
     // 框裡的草稿只有使用者自己在畫面上處理：bot 轉送的 prompt 不能替人送出或清掉別人的字。
     if (b.clear_draft || b.submit_draft) && relay.is_some() {
         return Err(LcError::Bad("clear_draft / submit_draft are for the user's own prompts, not relayed ones".into()));
@@ -8960,28 +8960,24 @@ mod relay_from_auth_tests {
         assert_eq!(stored(&f.e.app, body["message_id"].as_str().unwrap()).await, (Some(f.alfa.clone()), 0));
     }
 
-    /// 相容期：沒帶 token 的既有呼叫端（daemon-swap.sh 換版自測、手打 curl）照收，但記成未驗證，
-    /// 推給前端的那一則也帶著這個標記（不能先畫成已驗證、事後才改）。
+    /// #410 相容期結束：沒帶 token 的 `relay_from` 一律 403 `relay_from_token_required`，
+    /// 什麼都不寫（沒有 turn、沒有訊息、沒有 `message_added`）。
     #[tokio::test]
-    async fn an_unsigned_relay_still_goes_through_but_is_marked_unverified() {
+    async fn an_unsigned_relay_is_refused_and_writes_nothing() {
         let f = fx().await;
         let mut rx = f.e.app.subscribe();
         let (status, body) = send(&f.e.app, &f.target, &f.alfa, None, "unsigned").await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let id = body["message_id"].as_str().unwrap().to_string();
-        assert_eq!(stored(&f.e.app, &id).await, (Some(f.alfa.clone()), 1));
-        let mut pushed = None;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["reason"], "relay_from_token_required", "{body}");
+        assert_eq!(counts(&f.e.app).await, (0, 0));
         while let Ok(ev) = rx.try_recv() {
-            if ev.kind == "message_added" && ev.data["message"]["id"] == json!(id) {
-                pushed = Some(ev.data["message"]["relay_unverified"].clone());
-            }
+            assert_ne!(ev.kind, "message_added", "被拒絕的 relay 不能推訊息");
         }
-        assert_eq!(pushed, Some(json!(1)), "message_added 就要帶未驗證標記");
     }
 
-    /// `start_if_stopped`（另一個寫訊息的地方）一樣記標記。
+    /// `start_if_stopped`（另一個寫訊息的地方）一樣拒絕，不留下排隊中的訊息。
     #[tokio::test]
-    async fn the_start_if_stopped_path_keeps_the_mark_too() {
+    async fn the_start_if_stopped_path_refuses_an_unsigned_relay_too() {
         let f = fx().await;
         let stopped = crate::testing::claude_bot(&f.e.app, &f.e.project_id, "sleeper").await;
         let body = PromptIn {
@@ -8998,11 +8994,9 @@ mod relay_from_auth_tests {
             submit_draft: false,
             expect_draft_token: None,
         };
-        let resp = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Json(body)).await.unwrap();
-        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-        let out: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(out["delivery"], "queued", "{out}");
-        assert_eq!(stored(&f.e.app, out["message_id"].as_str().unwrap()).await, (Some(f.alfa.clone()), 1));
+        let err = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Json(body)).await.expect_err("unsigned relay");
+        assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+        assert_eq!(counts(&f.e.app).await, (0, 0));
     }
 
     /// 框裡的草稿（409 `composer_busy`）只有使用者自己處理：`clear_draft`／`submit_draft` 沒帶 `expect_draft_token` 是 400，
@@ -9026,7 +9020,12 @@ mod relay_from_auth_tests {
                 submit_draft: submit,
                 expect_draft_token: expect.map(str::to_string),
             };
-            prompt_bot(State(f.e.app.clone()), Path(f.target.clone()), HeaderMap::new(), Json(body))
+            // 轉送要帶那顆 bot 自己的 token（#410 後沒帶就是 403），這樣測的才是「草稿動作不給轉送」那一條。
+            let mut headers = HeaderMap::new();
+            if body.relay_from.is_some() {
+                headers.insert("X-AM-Bot-Token", "tok-alfa".parse().unwrap());
+            }
+            prompt_bot(State(f.e.app.clone()), Path(f.target.clone()), headers, Json(body))
         };
         let busy = call(false, false, None, None).await.expect_err("composer_busy");
         let token = match busy {
@@ -9046,7 +9045,7 @@ mod relay_from_auth_tests {
         assert_eq!(out["delivery"], "unverified", "{out}");
     }
 
-    /// 寫給 AGM（協調者存在）的申請：對不上的 token 一樣 403、不進收件匣；沒帶照舊排進去、記 `sender_verified:false`。
+    /// 寫給 AGM（協調者存在）的申請：對不上的 token 一樣 403、不進收件匣；沒帶也 403（#410 相容期已結束）。
     #[tokio::test]
     async fn requests_to_agm_follow_the_same_rule() {
         use crate::supervisor::bot_requests::flow_tests::{app, configure_responder};
@@ -9059,12 +9058,12 @@ mod relay_from_auth_tests {
         let (status, body) = send(&app, "patrol", "w1", Some("tok-w1"), "agm-signed").await;
         assert_eq!(status, StatusCode::ACCEPTED, "{body}");
         let (status, body) = send(&app, "patrol", "w1", None, "agm-unsigned").await;
-        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         let verified: Vec<bool> = sqlx::query_scalar("SELECT json_extract(payload_json,'$.sender_verified') FROM supervisor_inbox ORDER BY created_at, id")
             .fetch_all(&app.db)
             .await
             .unwrap();
-        assert_eq!(verified, vec![true, false]);
+        assert_eq!(verified, vec![true]);
     }
 
     // --------------------------------------------- review 7ed32d94：同一張 #339 的收尾
@@ -9103,7 +9102,7 @@ mod relay_from_auth_tests {
         );
         assert_eq!(counts(&f.e.app).await, (0, 0));
 
-        // 沒帶 token 的相容期照舊是 400（那條路沒有 token 可以對，也沒有神諭可讀）。
+        // 沒帶 token、bot 不存在照舊是 400（那條路沒有 token 可以對，也沒有神諭可讀）。
         let (status, _) = send(&f.e.app, &f.target, "01MNOSUCHBOTIDATALL0000000", None, "absent-nosig").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }

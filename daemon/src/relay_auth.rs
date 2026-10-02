@@ -2,7 +2,7 @@
 //!
 //! `/api` 認證中介層先選定 User（共用 UI token）、Bot（成對 Bot headers）或 service principal。
 //! 本機任何行程都可能取得 UI token（`/api/session`、`ui-token` 檔），所以使用者裁示接受「持有 UI token 就是 User」；
-//! 本模組只處理來源標記，不能讓 body claim 改變 principal。User 的 Bot 來源 claim 仍在 #410 相容期內標為未驗證；
+//! 本模組只處理來源標記，不能讓 body claim 改變 principal。User 沒帶 Bot proof 就自稱 Bot 來源一律 403；
 //! `daemon` 不接受 HTTP 冒名，因為那會繞過 AGM 協調者的收件匣（`bot_requests::intercept` 不攔 daemon）。
 //!
 //! Bot 身分由 auth 中介層用那顆 bot 現行的 hook token 驗證（`X-AM-Bot-Token`；pane 一律注入 `AM_BOT_TOKEN`，
@@ -17,16 +17,16 @@
 //! | bot | 就是那顆的 token | 已驗證 |
 //! | bot | **有帶**、但對不上（別顆的／空的／非 UTF-8） | **403** `relay_from_mismatch`：claim 和目前的 per-bot proof 不同 |
 //! | 不存在／已刪的 bot | **有帶** | **403** `relay_from_mismatch`（同上，不回 400） |
-//! | bot | 沒帶 | **相容期**：照收，訊息標 `relay_unverified = 1`，UI 在來源旁寫「未驗證」 |
-//! | 不存在／已刪的 bot | 沒帶 | 400（不變） |
+//! | 活的 bot | 沒帶 | **403** `relay_from_token_required`：#410 相容期已結束，什麼都不寫 |
+//! | 不存在／已刪的 bot | 沒帶 | 400 |
 //!
 //! 「有帶但對不上」與「有帶但那顆 bot 不存在」回同一個 403：分開回（403／400）等於讓帶錯 token 的
 //! 呼叫端拿狀態碼當神諭，一個一個試出某個 bot id 存不存在。空字串與非 UTF-8 的 token 算「有帶」，
 //! 不算「沒帶」——否則送 `X-AM-Bot-Token:` 就能走進相容期，等於用一個壞掉的 header 換到冒名放行。
 //!
-//! 相容期的理由：沒有 Bot proof 的 User 舊呼叫端一被拒絕就會誤判失敗；移除條件寫在 SPEC §6.5d，
-//! 不因 Bot principal 上線而提前結束。
-//! 移除條件寫在 SPEC §6.5d。
+//! #339 相容期（沒帶 token 的 `relay_from` 照收、標 `relay_unverified = 1`）在 #410 結束：移除條件
+//! （repo 內與維運腳本改走 service principal、persona 慣例帶 token、daemon.log 連續 7 天零 warn）都成立。
+//! 歷史訊息的 `relay_unverified = 1` 仍保留，UI 照舊在來源旁寫「未驗證」。
 
 use std::sync::Arc;
 
@@ -36,11 +36,10 @@ use serde_json::json;
 use crate::lifecycle::LcError;
 use crate::state::App;
 
-/// 驗過之後的來源。`unverified` 只在相容期那一格是 true。
+/// 驗過之後的來源（bot id）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relay {
     pub from: String,
-    pub unverified: bool,
 }
 
 /// 省略 effective claim＝`Ok(None)`（User principal 本人）。Bot route handlers derive an omitted claim from the authenticated header first.
@@ -70,13 +69,8 @@ pub async fn authenticate(
         })));
     }
     match prove_bot(app, headers, claimed).await? {
-        Proof::Verified(from) => Ok(Some(Relay { from, unverified: false })),
-        // 沒帶：相容期照收（bot 還是得是活的）。不記 token（本來就沒有），只記誰冒了誰的名，
-        // 方便相容期結束前清點還有誰沒帶。
-        Proof::Absent(from) => {
-            tracing::warn!(relay_from = %from, "relay_from without X-AM-Bot-Token: accepted as unverified (issue #339 compat)");
-            Ok(Some(Relay { from, unverified: true }))
-        }
+        Proof::Verified(from) => Ok(Some(Relay { from })),
+        Proof::Absent(_) => Err(token_required()),
     }
 }
 
@@ -115,6 +109,14 @@ async fn prove_bot(app: &Arc<App>, headers: &HeaderMap, claimed: &str) -> Result
     }
 }
 
+fn token_required() -> LcError {
+    LcError::Forbidden(json!({
+        "error": "forbidden",
+        "reason": "relay_from_token_required",
+        "message": "relay_from 是 bot 時要帶那顆 bot 自己的 X-AM-Bot-Id／X-AM-Bot-Token（#410 相容期已結束）",
+    }))
+}
+
 fn mismatch() -> LcError {
     LcError::Forbidden(json!({
         "error": "forbidden",
@@ -150,10 +152,6 @@ pub async fn authenticate_mission(app: &Arc<App>, headers: &HeaderMap, claimed: 
     }
     match prove_bot(app, headers, claimed).await? {
         Proof::Verified(from) => Ok(Some(from)),
-        Proof::Absent(_) => Err(LcError::Forbidden(json!({
-            "error": "forbidden",
-            "reason": "relay_from_token_required",
-            "message": "relay_from 是 bot 時要帶那顆 bot 自己的 X-AM-Bot-Token",
-        }))),
+        Proof::Absent(_) => Err(token_required()),
     }
 }
