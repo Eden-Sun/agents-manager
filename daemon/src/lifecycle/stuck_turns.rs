@@ -331,13 +331,7 @@ async fn logged_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[Stri
 
 /// 檔案最後 `max` 個位元組（第一行可能被切到一半，解析時自然會跳過）。
 fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    crate::transcript_read::read_tail(path, max)
 }
 
 /// claude transcript：最後一次出現我們送的 prompt 之後，有 `stop_reason: end_turn` 的 assistant 訊息＝回合真的結束，

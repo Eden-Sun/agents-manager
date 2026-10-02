@@ -44,13 +44,7 @@ pub(crate) fn pending_ask(log: &str) -> Option<Value> {
 }
 
 pub(crate) fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    crate::transcript_read::read_tail(path, max)
 }
 
 /// `GET /api/bots/{id}/pending-question`：`200 {"questions": [...] | null}`。

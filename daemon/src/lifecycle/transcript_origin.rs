@@ -32,13 +32,7 @@ pub(crate) fn starter_origin_kind_at(path: &std::path::Path) -> Option<String> {
 }
 
 pub(crate) fn read_tail(path: &std::path::Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    crate::transcript_read::read_tail(path, TAIL)
 }
 
 /// 這個 claude run 目前這一回合是不是 CLI 自己起頭的（`origin.kind` 有寫、而且不是 `human`）。

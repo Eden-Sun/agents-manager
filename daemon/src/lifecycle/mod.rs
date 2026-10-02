@@ -49,7 +49,7 @@ pub(crate) async fn rearm_queued_prompt_restamps(app: &Arc<App>) -> anyhow::Resu
 }
 mod pane_text;
 mod poller;
-mod transcript_origin;
+pub(crate) mod transcript_origin;
 pub(crate) use transcript_origin::starter_origin_kind_at;
 mod screen;
 pub(crate) mod transcript_stage;

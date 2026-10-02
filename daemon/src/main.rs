@@ -125,6 +125,7 @@ mod same_ms_order_tests;
 mod host_baseline;
 mod restart_coalesce;
 mod tools;
+mod transcript_read;
 mod trust;
 mod trusted_open;
 mod tui_prompts;

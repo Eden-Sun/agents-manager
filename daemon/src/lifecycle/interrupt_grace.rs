@@ -355,13 +355,7 @@ pub(crate) fn codex_interrupted_since(log: &str, since: DateTime<Utc>) -> bool {
 }
 
 fn read_tail(path: &std::path::Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(LOG_TAIL_BYTES))).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    crate::transcript_read::read_tail(path, LOG_TAIL_BYTES)
 }
 
 /// 這顆 bot 的 session log 尾端：本機 claude 的 transcript、codex 的 rollout。其他（遠端、grok）讀不到。

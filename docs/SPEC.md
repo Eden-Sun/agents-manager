@@ -514,6 +514,13 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 
 `runs.transcript_path` 由 SessionStart 回填；`messages.source` 保留 `transcript` 值（尚未實作回補）。
 
+**transcript／rollout 讀取（`transcript_read.rs`）**：`transcript_path` 是 pane 裡的 CLI（任何拿得到該 bot token 的行程）經 hook 送進來的，之後 daemon 會反覆讀它
+（回合結束判斷、AskUserQuestion 補抓、`GET /pending-question`、Stop 的使用者訊息補記…）。所以：
+- **寫入前驗路徑**（`SessionStart`／`Stop`／`StopFailure`）：本機 bot 的路徑必須是絕對、無 `..`／控制字元、副檔名 `.jsonl`，且解開符號連結後仍在**這顆 bot 自己身分**的 `CLAUDE_CONFIG_DIR/projects/`（codex：`CODEX_HOME/sessions/`）底下；
+  `managed_by='child'` 的 bot 身分由 pane env 帶、daemon 事後才猜，多放行 `~/.claude*/projects/`。不合就當沒帶（保留原值）並記一行 warn；Stop 自己用的路徑也是驗過的那份，所以別處的檔案內容進不了對話。遠端 bot 的檔案在那台機器、daemon 不在本機讀，只擋形狀。
+- **讀取只讀一般檔**：用 `O_NONBLOCK` 開、`metadata` 不是一般檔就退（FIFO 不會卡住 blocking 執行緒、`/dev/zero` 之類不會灌爆記憶體）；尾端讀取有位元組上限（各處 512 KB～8 MB），第一行被切到一半、最後一行還沒寫完、壞 JSON 行都由解析端跳過。
+- **基準位移之後的新內容**（送出證據、輸入框草稿）：檔案比基準短（被換掉、被截斷）或新長超過 32 MB 都回錯（＝讀不到，不是「零命中」）。
+
 **Turn 狀態轉移的單一權威**（issue #68、#125，`lifecycle::turn_controller`）：合法邊只定義在 `LEGAL_EDGES` 一處，
 並由它**生成一句 SQLite trigger**（`turns_status_transition`）裝在 `turns` 上。生產路徑上的
 `UPDATE turns SET status=…` 只出現在 `turn_controller` 裡；trigger 是**最後一道防線**，
