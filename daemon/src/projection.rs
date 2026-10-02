@@ -245,9 +245,15 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
         if let Some(why) = crate::config::ssh_opts_problem(&h.ssh_opts) {
             bail!("host `{}`: {why}", h.name);
         }
+        if h.ssh_port == 0 {
+            bail!("host `{}`: ssh_port must be 1..65535", h.name);
+        }
         if !seen_hosts.insert(h.name.as_str()) {
             bail!("duplicate [[hosts]] entry named `{}`", h.name);
         }
+    }
+    if cfg.build.remote.ssh_port == 0 {
+        bail!("[build.remote] ssh_port must be 1..65535");
     }
     for i in &cfg.identities {
         if !crate::config::valid_identity_name(&i.name) {

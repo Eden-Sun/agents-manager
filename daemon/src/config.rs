@@ -1080,20 +1080,38 @@ impl ConfigStore {
     /// 就保留記憶體裡原本的值並記一次 WARN（同一個 mtime 不重複報）。
     pub async fn build_fresh(&self) -> BuildCfg {
         let mut g = self.inner.lock().await;
+        self.refresh_hot_sections(&mut g);
+        g.cfg.build.clone()
+    }
+
+    /// `[agents]` 的最新值（bot 啟動時讀指示檔的設定）。跟 [`Self::build_fresh`] 同一條規矩：mtime 變了就重讀、只換 `[agents]`，
+    /// 手改 `config.toml` 的 `[agents.projects]` 不必重啟 daemon（SPEC §6.5i：改完重啟 bot 就生效）。
+    pub async fn agents_fresh(&self) -> AgentsCfg {
+        let mut g = self.inner.lock().await;
+        self.refresh_hot_sections(&mut g);
+        g.cfg.agents.clone()
+    }
+
+    /// 檔案 mtime 變了就重讀一次，只換可以熱換的區段（`[build]`、`[agents]`）。同一個 mtime 只試一次：壞檔不會每次都重讀、重報。
+    fn refresh_hot_sections(&self, g: &mut Loaded) {
         let mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
-        if mtime.is_some() && mtime != g.mtime {
-            // 同一個 mtime 只試一次：壞檔不會每次呼叫都重讀、重報。
-            g.mtime = mtime;
-            match std::fs::read_to_string(&self.path).map_err(anyhow::Error::from).and_then(|t| parse_config(&t).map(|(cfg, _)| cfg)) {
-                Ok(cfg) if cfg.build != g.cfg.build => {
+        if mtime.is_none() || mtime == g.mtime {
+            return;
+        }
+        g.mtime = mtime;
+        match std::fs::read_to_string(&self.path).map_err(anyhow::Error::from).and_then(|t| parse_config(&t).map(|(cfg, _)| cfg)) {
+            Ok(cfg) => {
+                if cfg.build != g.cfg.build {
                     tracing::info!(path = %self.path.display(), before = ?g.cfg.build, after = ?cfg.build, "config.toml [build] changed on disk; using the new values");
                     g.cfg.build = cfg.build;
                 }
-                Ok(_) => {}
-                Err(e) => tracing::warn!(path = %self.path.display(), error = %format!("{e:#}"), "config.toml changed on disk but could not be read; keeping the in-memory [build]"),
+                if cfg.agents != g.cfg.agents {
+                    tracing::info!(path = %self.path.display(), "config.toml [agents] changed on disk; using the new values");
+                    g.cfg.agents = cfg.agents;
+                }
             }
+            Err(e) => tracing::warn!(path = %self.path.display(), error = %format!("{e:#}"), "config.toml changed on disk but could not be read; keeping the in-memory [build]/[agents]"),
         }
-        g.cfg.build.clone()
     }
 
     /// `#[track_caller]`：寫入／重讀的 log 要記是哪一段程式叫的（issue #406）。async fn 不能掛
@@ -1148,7 +1166,7 @@ impl ConfigStore {
         crate::projection::validate(&next)?;
         // 純驗證過了才問需要 DB 的那一類（同一條理由：驗不過就不寫，guard 也不例外）。
         guard(&next)?;
-        // A serde rewrite drops comments / unknown keys: no-op updates must not write (issue #38).
+        // 沒變就不寫（issue #38）；有變的話 `write_atomic` 就地改、保留註解與未知鍵。
         if next != g.cfg {
             write_atomic(&self.path, &next)?;
             g.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
@@ -1191,28 +1209,52 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
     Ok((cfg, mtime))
 }
 
-/// Full serde re-serialization: comments are lost.
+/// 寫回 `config.toml`：只改動被改的值，使用者手寫的註解、排版與（打錯字或新版才有的）未知鍵都留著（[`render_preserving`]）。
+/// 檔案還不存在，或舊內容不是合法 TOML（沒辦法保留什麼），才整份重新序列化。
 ///
 /// 寫的是 `path` **解開 symlink 之後**的那個檔（issue #506 的鄰居 #507）：`startup::normalize_config_file`
 /// 刻意不 canonicalize 檔名那一段，因為 `config.toml` 常是指到 dotfiles 的 symlink，而資料目錄要留在
 /// 連結所在的目錄。但 `rename(2)` 換掉的是連結本身，所以照著 `path` 寫等於第一次寫入就把連結吃掉：
 /// 連結變成一般檔、dotfiles 那一份停在舊內容，而 `git status` 什麼都看不出來。
 /// 暫存檔跟著搬到目標所在目錄，順便讓「目標在另一個檔案系統」不會 rename EXDEV。
+///
+/// 持久性：暫存檔 `fsync` 之後才 `rename`，再 `fsync` 所在目錄——否則寫到一半斷電／被砍，rename 先落地、內容還在快取裡，
+/// 重開機看到的是一個空檔，而 daemon 看到空 config 會把它當成全新安裝。權限：暫存檔一開始就是 0600（不是先照 umask 寫出
+/// 0644 的內容、再 chmod），再套上原檔的 mode；原檔不存在（第一次寫預設設定）就維持 0600。
 pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
-    let text = toml::to_string_pretty(cfg)?;
+    use std::io::Write as _;
     // 檔案還不存在（`read_file` 第一次寫預設設定）時 canonicalize 會失敗：那就照原路徑建。
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = match std::fs::read_to_string(&target) {
+        Ok(old) => render_preserving(&old, cfg)?,
+        Err(_) => toml::to_string_pretty(cfg)?,
+    };
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let tmp = target.with_extension(format!("toml.{}.{}.tmp", std::process::id(), nonce));
     let result = (|| -> Result<()> {
-        std::fs::write(&tmp, text)?;
-        // rename 會把暫存檔的權限（umask，通常 0644）當成新檔的權限。設定檔被 chmod 600 過的話，
-        // 第一次寫入就會被悄悄放寬——跟 `trust.rs::write_atomic_preserving_mode` 同一條規矩：
-        // 先把原檔的 mode 套到暫存檔上。原檔不存在（第一次寫預設設定）就照 umask。
-        if let Ok(md) = std::fs::metadata(&target) {
-            let _ = std::fs::set_permissions(&tmp, md.permissions());
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
         }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        // rename 會把暫存檔的權限當成新檔的權限：原檔被 chmod 過（0600、0640…）就沿用，不能被悄悄放寬或收窄
+        // （跟 `trust.rs::write_atomic_preserving_mode` 同一條規矩）。
+        if let Ok(md) = std::fs::metadata(&target) {
+            let _ = f.set_permissions(md.permissions());
+        }
+        f.sync_all()?;
+        drop(f);
         std::fs::rename(&tmp, &target)?;
+        // 目錄項目的更動也要落盤；有些檔案系統不支援對目錄 fsync，那就算了（檔案本身已經 sync 過）。
+        if let Some(dir) = target.parent() {
+            if let Ok(d) = std::fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
         Ok(())
     })();
     if result.is_err() {
@@ -1220,6 +1262,158 @@ pub fn write_atomic(path: &Path, cfg: &ConfigFile) -> Result<()> {
     }
     result?;
     Ok(())
+}
+
+/// 把 `next` 套進 `old_text`（使用者的檔）：以舊文件為底就地改，所以註解、空行、排版、鍵的順序都留著。
+///
+/// - 兩邊都有的值：一樣就不碰（連引號風格都保留），不一樣才換掉並保留前後的註解；
+/// - `next` 有、舊檔沒有：加在該表格尾端；`next` 沒有、舊檔有：拿掉——**除非**它是未知鍵（`parse_config` 報告的、結構不認得的鍵：
+///   打錯字或新版 daemon 的欄位），那種原樣留著。因為 `skip_serializing_if` 而被省略的已知欄位（例如回到預設的 `[codex]`）不在未知清單裡，會被拿掉；
+/// - `[[projects]]`、`[[projects.bots]]`、`[[hosts]]`、`[[identities]]` 這類陣列表格依 `id`／`name`／`label` 認人而不是靠位置，
+///   刪掉或重排一顆 bot 不會讓別顆 bot 的註解與未知鍵錯位。
+///
+/// 保險：合併後的文字必須重新解析成**完全等於** `next`，否則退回整份重新序列化（不留半吊子的檔）。
+fn render_preserving(old_text: &str, next: &ConfigFile) -> Result<String> {
+    let plain = toml::to_string_pretty(next)?;
+    let Ok(mut doc) = old_text.parse::<toml_edit::DocumentMut>() else { return Ok(plain) };
+    let want: toml_edit::DocumentMut = plain.parse().context("re-serialized config is not valid TOML")?;
+    let unknown: std::collections::HashSet<String> = parse_config(old_text).map(|(_, u)| u.into_iter().collect()).unwrap_or_default();
+    merge_table(doc.as_table_mut(), want.as_table(), "", &unknown);
+    let merged = doc.to_string();
+    match parse_config(&merged) {
+        Ok((cfg, _)) if cfg == *next => Ok(merged),
+        _ => {
+            tracing::warn!("config.toml: could not apply the change in place; rewrote the whole file (comments and unknown keys are lost)");
+            Ok(plain)
+        }
+    }
+}
+
+fn join_path(prefix: &str, key: &str) -> String {
+    if prefix.is_empty() { key.to_string() } else { format!("{prefix}.{key}") }
+}
+
+fn merge_table(old: &mut toml_edit::Table, new: &toml_edit::Table, path: &str, unknown: &std::collections::HashSet<String>) {
+    let stale: Vec<String> = old
+        .iter()
+        .map(|(k, _)| k.to_string())
+        .filter(|k| !new.contains_key(k) && !unknown.contains(&join_path(path, k)))
+        .collect();
+    for k in stale {
+        old.remove(&k);
+    }
+    for (k, n) in new.iter() {
+        let p = join_path(path, k);
+        match old.get_mut(k) {
+            Some(o) => merge_item(o, n, &p, unknown),
+            None => {
+                old.insert(k, without_positions(n));
+            }
+        }
+    }
+}
+
+fn merge_item(old: &mut toml_edit::Item, new: &toml_edit::Item, path: &str, unknown: &std::collections::HashSet<String>) {
+    use toml_edit::Item;
+    match (&mut *old, new) {
+        (Item::Table(o), Item::Table(n)) => merge_table(o, n, path, unknown),
+        (Item::ArrayOfTables(o), Item::ArrayOfTables(n)) => merge_array_of_tables(o, n, path, unknown),
+        (Item::Value(o), Item::Value(n)) => {
+            if !same_value(o, n) {
+                let decor = o.decor().clone();
+                let mut v = n.clone();
+                *v.decor_mut() = decor;
+                *o = v;
+            }
+        }
+        _ => {
+            *old = without_positions(new);
+        }
+    }
+}
+
+/// 語意相同就不動它（使用者寫 `'x'` 而序列化器寫 `"x"` 不算改動）；陣列與 inline table 比去掉前後空白的文字。
+fn same_value(a: &toml_edit::Value, b: &toml_edit::Value) -> bool {
+    use toml_edit::Value::*;
+    match (a, b) {
+        (String(x), String(y)) => x.value() == y.value(),
+        (Integer(x), Integer(y)) => x.value() == y.value(),
+        (Boolean(x), Boolean(y)) => x.value() == y.value(),
+        (Float(x), Float(y)) => x.value() == y.value(),
+        _ => {
+            let strip = |v: &toml_edit::Value| {
+                let mut v = v.clone();
+                *v.decor_mut() = toml_edit::Decor::default();
+                v.to_string()
+            };
+            strip(a) == strip(b)
+        }
+    }
+}
+
+/// 依序試這幾組欄位找舊檔裡的同一個元素：`id`、（`name`＋`host`）、（`label`＋`path`）、`name`、`label`。每組要兩邊都有而且都相等。
+fn match_old_element(old: &toml_edit::ArrayOfTables, used: &[bool], new: &toml_edit::Table) -> Option<usize> {
+    const KEYS: &[&[&str]] = &[&["id"], &["name", "host"], &["label", "path"], &["name"], &["label"]];
+    let field = |t: &toml_edit::Table, k: &str| t.get(k).and_then(|i| i.as_str()).map(str::to_owned);
+    for keys in KEYS {
+        let want: Option<Vec<String>> = keys.iter().map(|k| field(new, k)).collect();
+        let Some(want) = want else { continue };
+        for (i, t) in old.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+            let have: Option<Vec<String>> = keys.iter().map(|k| field(t, k)).collect();
+            if have.as_ref() == Some(&want) {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn merge_array_of_tables(old: &mut toml_edit::ArrayOfTables, new: &toml_edit::ArrayOfTables, path: &str, unknown: &std::collections::HashSet<String>) {
+    let mut used = vec![false; old.len()];
+    let mut merged = toml_edit::ArrayOfTables::new();
+    for n in new.iter() {
+        match match_old_element(old, &used, n) {
+            Some(i) => {
+                used[i] = true;
+                let mut t = old.get(i).expect("matched index").clone();
+                // 未知鍵的路徑用**舊檔**的索引（`parse_config` 就是這樣報的）。
+                merge_table(&mut t, n, &format!("{path}.{i}"), unknown);
+                merged.push(t);
+            }
+            None => {
+                merged.push(rebuilt_table(n));
+            }
+        }
+    }
+    *old = merged;
+}
+
+/// 從另一份文件複製過來的表格帶著那份文件的顯示順序（`position`），toml_edit 又不給清掉：重建一份沒有 position 的（內容與
+/// 表格旗標照舊），才會接在目標的最後面，不會插到別的表格中間。新加的內容來自序列化器，沒有註解可丟。
+fn without_positions(item: &toml_edit::Item) -> toml_edit::Item {
+    match item {
+        toml_edit::Item::Table(t) => toml_edit::Item::Table(rebuilt_table(t)),
+        toml_edit::Item::ArrayOfTables(a) => {
+            let mut out = toml_edit::ArrayOfTables::new();
+            a.iter().for_each(|t| out.push(rebuilt_table(t)));
+            toml_edit::Item::ArrayOfTables(out)
+        }
+        other => other.clone(),
+    }
+}
+
+fn rebuilt_table(t: &toml_edit::Table) -> toml_edit::Table {
+    let mut out = toml_edit::Table::new();
+    out.set_implicit(t.is_implicit());
+    out.set_dotted(t.is_dotted());
+    *out.decor_mut() = t.decor().clone();
+    for (k, v) in t.iter() {
+        out.insert(k, without_positions(v));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1365,7 +1559,7 @@ auto_start = true   # typo for autostart
         assert!(!dirty);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), SAMPLE, "comments and typos survive a no-op update");
 
-        // Known trade-off: a real change drops the typo'd key.
+        // 真的有改：只動被改的那個值，使用者手寫的註解與（打錯字的）未知鍵原樣留著。
         store
             .update(|cfg| {
                 cfg.projects[0].bots[0].autostart = true;
@@ -1375,7 +1569,8 @@ auto_start = true   # typo for autostart
             .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("autostart = true"));
-        assert!(!text.contains("# top comment"));
+        assert!(text.contains("# top comment"), "{text}");
+        assert!(text.contains("auto_start = true   # typo for autostart"), "{text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
@@ -1658,5 +1853,168 @@ mod supervisor_cfg_tests {
         assert_eq!(on, back, "明寫開著要留得住");
         let off: ConfigFile = toml::from_str("[codex_history]\nenabled = false\n").unwrap();
         assert!(!off.codex_history.enabled);
+    }
+}
+
+#[cfg(test)]
+mod write_review_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::Arc;
+
+    const HAND_WRITTEN: &str = r#"# 我的設定：手寫的，別洗掉
+[server]
+listen = "127.0.0.1:7788"   # 只開本機
+
+# 未來版本才有的區段
+[future]
+knob = 3
+
+[[projects]]
+# 主專案
+path = "/tmp"
+label = "main"
+id = "01PROJ"
+
+[[projects.bots]]
+id = "01BOTA"
+name = "a"
+kind = "claude"
+secret_note = "keep me"   # 未知鍵
+
+[[projects.bots]]
+id = "01BOTB"
+name = "b"
+kind = "codex"
+# b 的註解
+model = "gpt-6"
+"#;
+
+    async fn store_with(text: &str) -> (ConfigStore, PathBuf) {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-config-write-review-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        (ConfigStore::load(path.clone()).await.unwrap(), path)
+    }
+
+    /// 寫回只改動被改的值：手寫的註解、未知區段與未知鍵都留著，檔案重讀起來跟記憶體一致。
+    #[tokio::test]
+    async fn a_write_keeps_hand_written_comments_and_unknown_keys() {
+        let (store, path) = store_with(HAND_WRITTEN).await;
+        store.update(|c| { c.projects[0].bots[1].model = Some("gpt-6.1-sol".into()); Ok(()) }).await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for keep in ["# 我的設定：手寫的，別洗掉", "# 只開本機", "# 未來版本才有的區段", "[future]", "knob = 3", "# 主專案", "secret_note = \"keep me\"   # 未知鍵", "# b 的註解"] {
+            assert!(text.contains(keep), "lost `{keep}`:\n{text}");
+        }
+        assert!(text.contains("gpt-6.1-sol") && !text.contains("\"gpt-6\""), "{text}");
+        let (reread, _) = parse_config(&text).unwrap();
+        assert_eq!(reread, store.get().await);
+    }
+
+    /// 刪掉一顆 bot：它那段（含註解、未知鍵）一起走，其他 bot 不受影響；新增的 bot 接在後面。
+    #[tokio::test]
+    async fn removing_and_adding_bots_only_touches_those_bots() {
+        let (store, path) = store_with(HAND_WRITTEN).await;
+        store
+            .update(|c| {
+                c.projects[0].bots.retain(|b| b.id.as_deref() != Some("01BOTA"));
+                let mut nb = c.projects[0].bots[0].clone();
+                nb.id = Some("01BOTC".into());
+                nb.name = "c".into();
+                nb.model = None;
+                c.projects[0].bots.push(nb);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("secret_note"), "被刪的 bot 的未知鍵跟著它走：\n{text}");
+        assert!(text.contains("# b 的註解") && text.contains("# 未來版本才有的區段"), "{text}");
+        let (reread, _) = parse_config(&text).unwrap();
+        assert_eq!(reread.projects[0].bots.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+        assert_eq!(reread, store.get().await);
+    }
+
+    /// 回到預設而被省略序列化的區段（`skip_serializing_if`）要從檔案裡拿掉，不能因為「保留未知鍵」而殘留。
+    #[tokio::test]
+    async fn a_section_reset_to_its_default_is_removed_not_kept_as_an_unknown_key() {
+        let (store, path) = store_with("[codex]\ninstant_interrupt = true\n\n[[projects]]\npath = \"/tmp\"\nlabel = \"p\"\nid = \"01P\"\n").await;
+        store.update(|c| { c.codex = CodexCfg::default(); Ok(()) }).await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("instant_interrupt"), "{text}");
+        assert_eq!(parse_config(&text).unwrap().0, store.get().await);
+    }
+
+    /// 同時兩個更新各加一個專案：誰都不能被蓋掉（lost update）。
+    #[tokio::test]
+    async fn concurrent_updates_do_not_lose_each_other() {
+        let (store, path) = store_with(HAND_WRITTEN).await;
+        let store = Arc::new(store);
+        let mut tasks = Vec::new();
+        for n in 0..16 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .update(|c| {
+                        c.projects.push(ProjectCfg { id: Some(format!("01CONC{n:02}")), path: "/tmp".into(), label: format!("conc-{n}"), host: LOCAL_HOST.into(), bots: vec![], handed_off_to: None });
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }));
+        }
+        for t in tasks { t.await.unwrap(); }
+        let (reread, _) = parse_config(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(reread.projects.len(), 17, "16 個並行新增＋原本那個");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("# 我的設定：手寫的，別洗掉"));
+    }
+
+    /// 設定檔權限：原本 0600 的寫回後仍是 0600；新建的檔（預設設定）是 0600，不是 umask 的 0644；暫存檔不留。
+    #[tokio::test]
+    async fn the_config_file_keeps_or_gets_owner_only_permissions_and_leaves_no_temp_file() {
+        let (store, path) = store_with(HAND_WRITTEN).await;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        store.update(|c| { c.projects[0].label = "renamed".into(); Ok(()) }).await.unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        let dir = path.parent().unwrap().to_path_buf();
+        let fresh = dir.join("fresh").join("config.toml");
+        std::fs::create_dir_all(fresh.parent().unwrap()).unwrap();
+        ConfigStore::load(fresh.clone()).await.unwrap();
+        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600, "新檔不能吃 umask 變成 0644");
+        for d in [&dir, fresh.parent().unwrap()] {
+            let leftovers: Vec<_> = std::fs::read_dir(d).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
+            assert!(leftovers.is_empty(), "{leftovers:?}");
+        }
+    }
+
+    /// `[agents]` 手改了不必重啟 daemon（跟 `[build]` 同一條規矩）：mtime 變了就換，壞檔保留舊值。
+    #[tokio::test]
+    async fn agents_section_edited_on_disk_is_picked_up_without_a_restart() {
+        let (store, path) = store_with("[agents]\ninstructions_file = \"~/old.md\"\n").await;
+        assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/old.md"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, "[agents]\ninstructions_file = \"~/new.md\"\n").unwrap();
+        let t = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(t).unwrap();
+        assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/new.md"));
+        // 半寫／打錯字：保留記憶體裡的值。
+        std::fs::write(&path, "[agents\ninstructions_file = ").unwrap();
+        let t2 = t + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(t2).unwrap();
+        assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/new.md"));
+    }
+
+    /// 埠 0 不是合法的 ssh 埠：手改進 `[[hosts]]`／`[build.remote]` 要在寫入前就被擋，而不是等到連線才失敗。
+    #[test]
+    fn a_zero_ssh_port_is_refused_before_it_can_be_written() {
+        let mut cfg = ConfigFile::default();
+        cfg.hosts.push(HostCfg { shared_session: false, name: "m4p".into(), ssh: "m4p@host".into(), ssh_port: 0, ssh_opts: vec![], herdr_session: "s".into(), remote_path: String::new() });
+        let err = crate::projection::validate(&cfg).unwrap_err().to_string();
+        assert!(err.contains("ssh_port"), "{err}");
+        let mut cfg = ConfigFile::default();
+        cfg.build.remote.ssh_port = 0;
+        assert!(crate::projection::validate(&cfg).unwrap_err().to_string().contains("ssh_port"));
     }
 }

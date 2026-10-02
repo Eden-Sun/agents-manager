@@ -858,7 +858,8 @@ label = "foo"
 - 未知欄位用 `serde_ignored` 收集並 WARN 完整路徑，仍可載入。
 - **設定檔在哪，資料就在哪**：`--config` 指到非預設路徑時，SQLite／`ui-token`／spool 一律跟著設定檔的目錄（或 `[server] data_dir`），不得沿用 `~/.config/agents-manager`；`AM_DATA_DIR` 與它不一致就拒絕啟動（§3.1）。隔離測試請用
   `agents-managerd serve --config /tmp/am-iso/config.toml`（要跑 hook 就再 `AM_DATA_DIR=/tmp/am-iso`，兩者必須一致），**不要**只換 `listen` port：2026-09-14 就是這樣開到正式 DB，被空 config 投影軟刪了 15 顆 bot。
-- 寫回：serde 全量序列化（註解不保留），暫存檔 + 原子 rename，單一 mutex；mtime 與上次讀取不符時在同一把 mutex 內重讀再套用。內容沒變就不碰檔案。
+- 寫回：以使用者的檔為底**就地改**（toml_edit），只動被改的值——手寫的註解、排版、鍵的順序與未知鍵（打錯字或新版才有的欄位）都留著；陣列表格（`[[projects]]`、`[[projects.bots]]`、`[[hosts]]`、`[[identities]]`）依 `id`／`name`／`label` 認人而不是靠位置，刪掉或重排一顆 bot 不會讓別顆的註解錯位，被刪那顆的註解與未知鍵跟著它走。因 `skip_serializing_if` 省略的已知欄位（回到預設的 `[codex]` 等）會被拿掉，不當成未知鍵殘留。保險：合併後重新解析必須**完全等於**要寫的設定，否則退回整份重新序列化（log 一行 WARN）。暫存檔從建立起就是 0600（原檔有 mode 就沿用，新檔維持 0600）、`fsync` 後才 rename，再 `fsync` 所在目錄（寫到一半斷電不會留下空檔）；單一 mutex；每次寫入前在同一把 mutex 內重讀磁碟再套用（不會蓋掉手改）。內容沒變就不碰檔案。
+- 驗證補充：`[[hosts]]` 與 `[build.remote]` 的 `ssh_port` 為 0 在寫入前就被擋（`projection::validate`）。
   目標檔原本的權限會先套到暫存檔上再 rename（否則 chmod 600 過的設定檔會被 umask 放寬，同 `trust.rs`）。
   `config.toml` 本身是 symlink 時（相對或絕對都算，以連結所在的目錄解析），暫存檔與 rename 都落在**解開連結之後**的目標檔（issue #507）：`rename(2)` 換掉的是連結本身，
   照字面寫等於第一次寫入就把指到 dotfiles 的連結換成一般檔，之後 daemon 的每次寫入都進不去而 `git status` 什麼都看不出來。
@@ -2164,7 +2165,8 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   `lease_ttl_secs`（預設 180，續約間隔取它的 1/3）。
   這三個沒有 API 可寫，唯一的設定方式是手改 `config.toml`，所以 scheduler 每次拿名額／續約／看狀態都走 `ConfigStore::build_fresh`：
   檔案 mtime 變了就重讀，**只**換 `[build]` 這一段，不用重啟；讀不了或解析失敗（半寫、打錯字、`lease_ttl_secs` 超出範圍）保留原值、記一次 WARN。
-  其他段仍只在啟動與 `ConfigStore::update` 時載入（要連著 TOML→SQLite 投影一起處理）。已發出的名額不受影響：`max_concurrent` 調小時不收回已持有的，只是不再放新的。
+  `[agents]` 同樣熱重載（`ConfigStore::agents_fresh`，bot 啟動讀指示檔時走它）：手改 `[agents.projects]` 不必重啟 daemon，重啟 bot 就生效；壞檔保留原值。
+  其他段（含 `[[hosts]]`）仍只在啟動與 `ConfigStore::update` 時載入（要連著 TOML→SQLite 投影一起處理）。已發出的名額不受影響：`max_concurrent` 調小時不收回已持有的，只是不再放新的。
 
 #### 跟 `cargo-slot.sh` 並存（issue #90 交辦時的現況）
 這支手動腳本目前還有其他子 agent 在用，**這次改動不動它**。新機制透過 `lifecycle::setup.rs::install_shim` 在**下一次
