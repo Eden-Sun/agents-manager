@@ -39,6 +39,10 @@ SESSIONS="agents-manager am-attach-remote"
 HCFG="$HOME/.config/herdr/config.toml"
 
 log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
+# 行數：BSD（macOS）的 wc 數字前面會補空白，進 log／通知字串前去掉。
+count_lines() {
+  wc -l < "$1" | tr -d ' '
+}
 # svc <METHOD> <path> [輸出檔] [JSON body 檔]：以 service principal 打 daemon。回應 body 寫到輸出檔（沒給就 stdout），
 # stderr 最後一行是 HTTP 狀態碼（連不上是 000）；憑證檔缺或不安全時最後一行是 CRED、exit 3，什麼都不送。
 svc() {
@@ -144,7 +148,7 @@ for p in d:
     print(f'{p.get("pane_id")}\t{p.get("kind")}\towned_by={p.get("owned_by")}\towner={p.get("owner_bot_id")}\tfg={p.get("foreground")}\tports={p.get("listen_ports")}\tcwd={p.get("cwd")}')
 EOF
 cp -p "$HCFG" "$SNAP/herdr-config.toml.bak"
-log "snapshot: $(wc -l < "$SNAP/running.tsv") running bots, $(wc -l < "$SNAP/non-agent-panes.txt") non-agent panes → $SNAP"
+log "snapshot: $(count_lines "$SNAP/running.tsv") running bots, $(count_lines "$SNAP/non-agent-panes.txt") non-agent panes → $SNAP"
 # 還在回合中的 bot 不能停（同 daemon 重啟判準）
 BUSY=$(awk -F'|' '$6=="working"{print $2}' "$SNAP/running.tsv" | tr '\n' ' ')
 [ -z "$BUSY" ] || finish ABORT "還有 bot 在 working：$BUSY"
@@ -222,6 +226,6 @@ count_daemon_errors() { # <logfile> <cutoff UTC YYYY-MM-DDTHH:MM:SS>
   ' "$1"
 }
 ERRORS=$(count_daemon_errors "$HOME/.config/agents-manager/daemon.log" "$(date -u -v-5M +%FT%T)")
-log "after: $(wc -l < "$SNAP/running-after.tsv") running; missing: ${MISSING:-none}; session changed: ${SID_CHANGED:-none}; daemon ERROR (5m): $ERRORS"
+log "after: $(count_lines "$SNAP/running-after.tsv") running; missing: ${MISSING:-none}; session changed: ${SID_CHANGED:-none}; daemon ERROR (5m): $ERRORS"
 [ -z "$MISSING" ] || finish FAIL "升級完成但有 bot 沒接回：$MISSING"
-finish OK "herdr 0.9.0 上線；running $(wc -l < "$SNAP/running.tsv")→$(wc -l < "$SNAP/running-after.tsv")，session 換掉的：${SID_CHANGED:-無}，daemon ERROR $ERRORS"
+finish OK "herdr 0.9.0 上線；running $(count_lines "$SNAP/running.tsv")→$(count_lines "$SNAP/running-after.tsv")，session 換掉的：${SID_CHANGED:-無}，daemon ERROR $ERRORS"

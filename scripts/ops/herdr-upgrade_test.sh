@@ -133,5 +133,18 @@ printf '\ncount_daemon_errors "$1" "$2"\n' >> "$ROOT/count.sh"
 got=$(bash "$ROOT/count.sh" "$LOGF" "$CUTOFF")
 check_eq "ANSI 行與純文字行都算，太舊的不算" "2" "$got"
 
+# BSD（macOS）的 `wc -l` 會在數字前面補空白（"       3"）：log 與通知字串裡的行數要去掉，不然變成「      3 running」。
+# 抽出 count_lines()，PATH 前面放一個照 BSD 補空白的假 wc。
+sed -n '/^count_lines() {$/,/^}$/p' "$SCRIPT" > "$ROOT/count_lines.sh"
+if grep -q '^count_lines() {' "$ROOT/count_lines.sh"; then ok "腳本有 count_lines()"; else bad "腳本沒有 count_lines()（行數字串沒處理 BSD 的前導空白）"; fi
+mkdir -p "$ROOT/bsdbin"
+printf '#!/bin/sh\n/usr/bin/wc "$@" | sed "s/^/       /"\n' > "$ROOT/bsdbin/wc"; chmod 755 "$ROOT/bsdbin/wc"
+printf 'a\nb\nc\n' > "$ROOT/three.txt"
+got=$(PATH="$ROOT/bsdbin:$PATH" bash -c '. "$1"; count_lines "$2"' _ "$ROOT/count_lines.sh" "$ROOT/three.txt" 2>/dev/null)
+check_eq "BSD 風格的 wc 輸出被去掉前導空白" "3" "$got"
+check_eq "假 wc 真的會補空白（測試有效）" "       3" "$(PATH="$ROOT/bsdbin:$PATH" wc -l < "$ROOT/three.txt")"
+# 腳本裡不再有直接把 wc -l 塞進字串的地方。
+if grep -n 'wc -l' "$SCRIPT" | grep -v 'count_lines\|tr -d' | grep -q .; then bad "還有沒處理前導空白的 wc -l"; else ok "沒有裸的 wc -l 進字串"; fi
+
 echo "herdr-upgrade_test: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" = 0 ]

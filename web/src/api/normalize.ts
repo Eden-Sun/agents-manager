@@ -144,7 +144,7 @@ export function toHostBaseline(v: unknown): HostBaseline | null {
         return [{ id, severity: pick(i, 'severity') === 'critical' ? ('critical' as const) : ('warn' as const), message: str(pick(i, 'message')) }]
       })
     : null
-  return { issues, checked_at: str(pick(v, 'checked_at')), os: optStr(pick(v, 'os')) }
+  return { issues, checked_at: str(pick(v, 'checked_at')), os: optStr(pick(v, 'os')), stale: pick(v, 'stale') === true, error: optStr(pick(v, 'error')) }
 }
 
 /** SPEC §11.6 */

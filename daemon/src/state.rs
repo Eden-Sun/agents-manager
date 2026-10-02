@@ -653,7 +653,7 @@ pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) 
             }
             // 同樣是「沒有就不帶」：沒量過不等於一致。
             if let Some(b) = app.host_baseline.lock().await.get(&conn.name) {
-                ev.insert("baseline".into(), json!(b));
+                ev.insert("baseline".into(), json!(b.snapshot(chrono::Utc::now())));
             }
             app.emit("host_changed", Value::Object(ev)).await;
             emit_daemon_status(app).await;

@@ -929,12 +929,24 @@ pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate:
     }
     // 一趟探測帶著 #719 的一致性檢查（只讀），不多一次 ssh。
     let script = format!("{PROBE_SH}\n{}", crate::host_baseline::BASELINE_SH);
-    let out = if host == LOCAL_HOST {
-        run_local(&script, PROBE_TIMEOUT).await?
-    } else {
-        fence.conn().ssh_exec_path(&script).await?
+    let probed = if host == LOCAL_HOST { run_local(&script, PROBE_TIMEOUT).await } else { fence.conn().ssh_exec_path(&script).await };
+    let out = match probed {
+        Ok(out) => out,
+        Err(e) => {
+            // 連不上／逾時：留著的舊 baseline 標上失敗（不能讓它看起來像剛量的），並推給網頁。
+            crate::host_baseline::note_failure(app, host, &e).await;
+            crate::state::emit_host_changed(app, fence).await;
+            return Err(e);
+        }
     };
-    let baseline = crate::host_baseline::BaselineReport { os: crate::host_baseline::os_of(&out), issues: crate::host_baseline::evaluate(&out), checked_at: crate::db::now() };
+    let baseline = crate::host_baseline::BaselineReport {
+        os: crate::host_baseline::os_of(&out),
+        issues: crate::host_baseline::evaluate(&out),
+        checked_at: crate::db::now(),
+        failed_at: None,
+        error: None,
+        stale: false,
+    };
     let tools = parse_probe(&out);
     let shell_identities = parse_shell_identities(&out);
     let identities = detect_identities(app, host, fence, &tools, &shell_identities).await;

@@ -71,8 +71,13 @@ export interface BaselineIssue {
  */
 export interface HostBaseline {
   issues: BaselineIssue[] | null
+  /** 這份結果量到的時間（最後一次**成功**的偵測）。 */
   checked_at: string
   os: string | null
+  /** 最後一次偵測失敗，或太久沒更新：結果是舊的，現在連不上。舊 daemon 沒這欄＝false。 */
+  stale: boolean
+  /** 最後一次失敗的原因（第一行）；沒失敗＝null。 */
+  error: string | null
 }
 
 /** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */

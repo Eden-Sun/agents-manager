@@ -1,6 +1,6 @@
 import type { HostBaseline } from '../api/types'
 
-export type HostBaselineLevel = 'ok' | 'warn' | 'critical' | 'unknown'
+export type HostBaselineLevel = 'ok' | 'warn' | 'critical' | 'unknown' | 'stale'
 
 export interface HostBaselineView {
   text: string
@@ -11,22 +11,46 @@ export interface HostBaselineView {
   items: { id: string; severity: 'critical' | 'warn'; message: string }[]
 }
 
+/** 跟 daemon 的 `RECHECK_EVERY + STALE_GRACE`（6 小時 + 15 分）同一條線：超過就算太久沒量。 */
+const STALE_AFTER_MS = (6 * 60 + 15) * 60 * 1000
+
+/** 「上次檢查」的時間，本地時區 `MM-DD HH:mm`；讀不懂就原樣顯示。 */
+export function formatCheckedAt(iso: string): string {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso || '不明'
+  const d = new Date(t)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
 /**
  * hosts 面板的工作環境一致性行（SPEC §16.7，只讀）。
  * 沒量過、或探測沒跑完 → 「未知」，絕不當成全缺（一次 ssh 逾時不能在每台主機上喊一排缺漏）。
+ * 過期（最後一次偵測失敗，或超過一個重量週期沒更新——主機一直離線時沒有任何事件，所以前端自己也算）→
+ * 「上次檢查於…，目前無法連線」：舊結果照列但不再說是現況，連「與基準一致」也不能說。
  */
-export function hostBaselineView(b: HostBaseline | null): HostBaselineView {
+export function hostBaselineView(b: HostBaseline | null, now: number = Date.now()): HostBaselineView {
   if (!b) return { text: '一致性：尚未檢查', level: 'unknown', hint: '還沒量過這台主機（剛連上、或 daemon 是舊版）', items: [] }
+  const checked = Date.parse(b.checked_at)
+  const old = !Number.isNaN(checked) && now - checked > STALE_AFTER_MS
+  const sorted = b.issues === null ? [] : [...b.issues].sort((a, c) => Number(c.severity === 'critical') - Number(a.severity === 'critical'))
+  if (b.stale || old) {
+    return {
+      text: `一致性：上次檢查於 ${formatCheckedAt(b.checked_at)}，目前無法連線`,
+      level: 'stale',
+      hint: b.error ? `最後一次偵測失敗：${b.error}。下面是上次量到的結果，不是現況。` : '超過一個重量週期沒有更新（主機離線或偵測沒跑成）。下面是上次量到的結果，不是現況。',
+      items: sorted,
+    }
+  }
   if (b.issues === null) {
     return { text: '一致性：未知', level: 'unknown', hint: '上一趟探測沒跑完（逾時或被截斷），這不代表缺東西；下一次偵測會再量', items: [] }
   }
   if (b.issues.length === 0) return { text: '一致性：與基準一致', level: 'ok', hint: '', items: [] }
-  const items = [...b.issues].sort((a, c) => Number(c.severity === 'critical') - Number(a.severity === 'critical'))
-  const critical = items.filter((i) => i.severity === 'critical').length
+  const critical = sorted.filter((i) => i.severity === 'critical').length
   return {
-    text: critical > 0 ? `一致性：${items.length} 項不一致（${critical} 項嚴重）` : `一致性：${items.length} 項提醒`,
+    text: critical > 0 ? `一致性：${sorted.length} 項不一致（${critical} 項嚴重）` : `一致性：${sorted.length} 項提醒`,
     level: critical > 0 ? 'critical' : 'warn',
     hint: '',
-    items,
+    items: sorted,
   }
 }

@@ -769,7 +769,7 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             "shell_identities": t.map(|x| json!(x.shell_identities)),
             "tools_checked_at": t.map(|x| x.checked_at.clone()),
             // 工作環境一致性（只讀檢查，#719）：`{issues: null|[{id,severity,message}], checked_at}`；沒量過＝null。
-            "baseline": baselines.get(&c.name).map(|b| json!(b)),
+            "baseline": baselines.get(&c.name).map(|b| json!(b.snapshot(chrono::Utc::now()))),
             // herdr 版本（server／protocol 來自 ping，只在連著時報；CLI 來自探測），SPEC §11.6。
             "herdr": crate::herdr_version::for_host(&c, connected, t),
         }));
@@ -2469,7 +2469,7 @@ async fn refresh_tools(State(app): State<Arc<App>>, Path(name): Path<String>) ->
             "identities": ht.identities,
             "shell_identities": ht.shell_identities,
             "tools_checked_at": ht.checked_at,
-            "baseline": app.host_baseline.lock().await.get(&name),
+            "baseline": app.host_baseline.lock().await.get(&name).map(|b| b.snapshot(chrono::Utc::now())),
         })),
     )
         .into_response())

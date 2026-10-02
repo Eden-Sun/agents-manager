@@ -339,7 +339,7 @@ fn the_real_script_reports_the_os_and_checks_plugins_by_name() {
 }
 
 fn report(issues: Option<Vec<BaselineIssue>>) -> BaselineReport {
-    BaselineReport { os: Some("Linux".into()), issues, checked_at: "2026-10-02T00:00:00.000Z".into() }
+    BaselineReport { os: Some("Linux".into()), issues, checked_at: "2026-10-02T00:00:00.000Z".into(), failed_at: None, error: None, stale: false }
 }
 
 fn bi(id: &str, severity: &'static str) -> BaselineIssue {
@@ -394,4 +394,97 @@ async fn notify_pushes_one_inbox_event_per_distinct_difference() {
 #[test]
 fn mac_only_plugins_match_the_script() {
     assert!(BASELINE_SH.contains(&format!("MAC_ONLY_PLUGINS=\"{}\"", MAC_ONLY_PLUGINS.join(" "))));
+}
+
+// ───────── 過期標記：偵測失敗或太久沒量，不能讓舊結果看起來像現在的 ─────────
+
+fn at(hours_ago: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn fresh(issues: Option<Vec<BaselineIssue>>, checked_at: String) -> BaselineReport {
+    BaselineReport { checked_at, ..report(issues) }
+}
+
+#[test]
+fn a_report_is_stale_after_a_failed_probe_or_after_more_than_one_recheck_cycle() {
+    let now = chrono::Utc::now();
+    assert!(!fresh(Some(vec![]), at(0)).snapshot(now).stale, "剛量完不算過期");
+    assert!(!fresh(Some(vec![]), at(6)).snapshot(now).stale, "一個重量週期內（含偵測自己花的時間）不算過期");
+    assert!(fresh(Some(vec![]), at(7)).snapshot(now).stale, "超過一個重量週期");
+    let mut failed = fresh(Some(vec![bi("tool.rtk", CRITICAL)]), at(0));
+    failed.failed_at = Some(at(0));
+    failed.error = Some("ssh timeout".into());
+    let snap = failed.snapshot(now);
+    assert!(snap.stale, "最後一次偵測失敗");
+    assert_eq!(snap.issues.as_ref().map(Vec::len), Some(1), "舊結果照樣留著給人看，只是標過期");
+    // 時間讀不懂：不賭它新。
+    assert!(fresh(Some(vec![]), "garbage".into()).snapshot(now).stale);
+}
+
+#[test]
+fn stale_is_part_of_the_json_the_web_reads() {
+    let mut r = fresh(Some(vec![]), at(0));
+    r.failed_at = Some(at(0));
+    r.error = Some("ssh timeout".into());
+    let v = serde_json::to_value(r.snapshot(chrono::Utc::now())).unwrap();
+    assert_eq!(v["stale"], true);
+    assert_eq!(v["error"], "ssh timeout");
+    assert!(v["failed_at"].is_string() && v["checked_at"].is_string());
+}
+
+#[tokio::test]
+async fn a_failed_detection_marks_the_kept_baseline_stale_and_a_good_one_clears_it() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    let host = format!("stale-{}", crate::db::ulid().to_ascii_lowercase());
+    let conn = app
+        .hosts
+        .insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        })
+        .await;
+    conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let ok2 = ok.clone();
+    crate::hosts::set_ssh_fake(&host, move |_| {
+        if ok2.load(std::sync::atomic::Ordering::SeqCst) {
+            Ok("AM_BL begin\nAM_BL os Linux\nAM_BL tool rtk \nAM_BL end\n".into())
+        } else {
+            Err(anyhow::anyhow!("ssh: connect to host timed out\nsecond line"))
+        }
+    });
+
+    crate::tools::detect(&app, &host).await.unwrap();
+    let first = app.host_baseline.lock().await.get(&host).cloned().unwrap();
+    assert!(first.failed_at.is_none() && !first.snapshot(chrono::Utc::now()).stale);
+    assert!(first.issues.as_ref().unwrap().iter().any(|i| i.id == "tool.rtk"));
+
+    ok.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(crate::tools::detect(&app, &host).await.is_err());
+    let kept = app.host_baseline.lock().await.get(&host).cloned().unwrap();
+    assert_eq!(kept.checked_at, first.checked_at, "checked_at 是上一次成功的時間，不被失敗改寫");
+    assert_eq!(kept.issues, first.issues, "舊結果留著");
+    assert!(kept.failed_at.is_some());
+    assert_eq!(kept.error.as_deref(), Some("ssh: connect to host timed out"), "只留第一行");
+    assert!(kept.snapshot(chrono::Utc::now()).stale);
+
+    ok.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::tools::detect(&app, &host).await.unwrap();
+    let healed = app.host_baseline.lock().await.get(&host).cloned().unwrap();
+    assert!(healed.failed_at.is_none() && healed.error.is_none() && !healed.snapshot(chrono::Utc::now()).stale);
+}
+
+#[tokio::test]
+async fn a_failed_detection_with_no_earlier_baseline_invents_none() {
+    let env = crate::testing::env().await;
+    let app = env.app.clone();
+    note_failure(&app, "never-measured", &anyhow::anyhow!("boom")).await;
+    assert!(app.host_baseline.lock().await.get("never-measured").is_none(), "沒量過就維持「尚未檢查」，不憑空造一份");
 }

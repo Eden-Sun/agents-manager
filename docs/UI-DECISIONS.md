@@ -826,3 +826,8 @@ claude 的 `AskUserQuestion`（網頁或終端答的都一樣）答完之後，�
 - **太長（> 2 萬字）或巢狀太深（引用 > 20 層、行首縮排 > 80 格）預設純文字**，附「以 Markdown 顯示」讓使用者自己展開：remark 對某些輸入是平方時間（`*a` 重複 2 萬次卡 22 秒），巢狀引用 6000 層卡 87 秒、更深遞迴爆 stack。轉換真的丟例外由 error boundary 退回純文字（整個 app 沒有 error boundary，沒接住就白畫面且重新整理也白）。
 - 不是 Markdown 的欄位（bot／專案名、檔名、通知）一律文字節點，不用 `innerHTML`；`document.title` 只帶未讀數；沒有用 Notification API。
 - 放進 `<a href>` 的外來網址（遠端入口、交付 PR、issue）先過 `safeHttpUrl`，只收絕對 http／https；daemon 端 `POST /api/supervisor/remote` 也擋。
+
+## 主機一致性過期（2026-10-02）
+
+偵測失敗或太久沒量時，主機面板那行「一致性」改成「上次檢查於 MM-DD HH:mm，目前無法連線」（黃字），舊的差異淡色（0.55）照列、不再說是現況，連「與基準一致」也不說；
+tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件，所以超過 6 小時 15 分（daemon 的 `RECHECK_EVERY + STALE_GRACE`）前端自己也標。從沒量過仍是「尚未檢查」。
