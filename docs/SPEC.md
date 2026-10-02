@@ -2027,6 +2027,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   用的同一個 fd，全程不再用任何路徑重新解析，沒有殘餘窗口。
 - **拒絕 FIFO 且不阻塞（issue #620）**：打開最後一段前先以 `fstatat(AT_SYMLINK_NOFOLLOW)` 確認是一般檔案；`openat` 再帶
   `O_NONBLOCK | O_NOFOLLOW`，並在已開啟的 fd 上重查一般檔案後清掉 `O_NONBLOCK`。若名字在檢查與開啟之間被換成 FIFO，開啟仍會立即返回，且 fd 的種類檢查會拒絕它。local-image 的 canonicalize／逐層開檔也放在 `spawn_blocking`，不佔 tokio worker。
+- **硬連結不給開**：`O_NOFOLLOW` 擋不住硬連結（它就是一般檔案），`ln ui-token outbox/notes.txt` 之後名字黑名單也看不出來；`trusted_open::open_entry_in` 對連結數 > 1 的檔案一律拒絕（outbox 列表／下載、附件、local-image 共用）。`/proc`、裝置檔、FIFO 因為要求 `S_IFREG` 且只從信任邊界逐層打開而進不來。
 - **讀取內容也受大小上限約束（issue #621）**：outbox 與 local-image 先以 fd metadata 快速拒絕已超限的檔案，真正讀取再用 `take(max_bytes + 1)` 限制最多讀取的位元組數。檢查後持續 append 的檔案只會讀到上限加一個位元組便拒絕；outbox 回 `409 file_too_large`，local-image 回 `404 image`。
 
 ### 6.5g build scheduler：全機 cargo/rustc 併發（issue #90）
