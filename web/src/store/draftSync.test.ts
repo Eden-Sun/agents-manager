@@ -1,6 +1,20 @@
-import test from 'node:test'
+import test, { afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { ManualClock } from '../api/mockClock'
 import { DraftSync, type DraftWire } from './draftSync'
+
+// debounce／重試是 `setTimeout`：換成手動時鐘，`tick(ms)` 才是「過了 ms 毫秒」而不是「睡 ms 毫秒然後祈禱」。
+// 牆鐘版本在高負載下會因為兩次 `tick(10)` 被拖長超過 30ms 的 debounce 而多送一次 PUT。
+const realTimers = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout }
+let clock = new ManualClock()
+beforeEach(() => {
+  clock = new ManualClock()
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => clock.schedule(fn, ms ?? 0)) as unknown as typeof setTimeout
+  globalThis.clearTimeout = ((id: unknown) => clock.cancel(id)) as unknown as typeof clearTimeout
+})
+afterEach(() => {
+  Object.assign(globalThis, realTimers)
+})
 
 /** 假的 daemon＋輸入框：用手動時鐘推進 debounce，PUT 可以卡住或失敗。 */
 function rig(opts: { debounceMs?: number } = {}) {
@@ -40,7 +54,13 @@ function rig(opts: { debounceMs?: number } = {}) {
   return { sync, local, focus, server, puts, gate, type }
 }
 
-const tick = (ms: number) => new Promise((r) => setTimeout(r, ms))
+/** 虛擬時間過 `ms`，並讓 PUT 的 promise 鏈跑完。 */
+const settleMicrotasks = () => new Promise<void>((resolve) => setImmediate(resolve))
+const tick = async (ms: number) => {
+  await settleMicrotasks() // 先讓剛 resolve 的 PUT 跑完，它排的 debounce 才進得了這個窗口
+  await clock.advance(ms)
+  await settleMicrotasks()
+}
 
 test('打字 debounce：連打只送最後一次', async () => {
   const r = rig({ debounceMs: 30 })
