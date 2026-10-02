@@ -149,3 +149,23 @@ async fn an_unreadable_project_file_still_turns_the_cli_files_off_but_the_rules_
         assert!(s.system.iter().any(|m| m.contains("agent md 有問題") && m.contains("no-such-CLAUDE.md")), "{kind}: {:?}", s.system);
     }
 }
+
+/// persona 沒能交給檔案、退回 inline（argv 會被壓進 900 bytes、規則被截斷）：不能只在 daemon.log 裡——
+/// 對話裡要有一則 system 訊息，使用者／AGM 才知道這顆母 bot 拿到的規則是殘缺的。
+#[tokio::test]
+async fn a_persona_that_falls_back_to_inline_says_so_in_the_conversation() {
+    let e = tt::env().await;
+    let bot = tt::claude_bot(&e.app, &e.project_id, "fallback").await;
+    // bot 自己的 args 帶了 `-p`：codex 的 profile 不能搶，persona 退回 inline。
+    sqlx::query("UPDATE bots SET kind='codex', args_json=? WHERE id=?").bind(json!(["-p", "mine"]).to_string()).bind(&bot.id).execute(&e.app.db).await.unwrap();
+    start_bot(&e.app, &bot.id).await.unwrap();
+    let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+    let system: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'").bind(&conv).fetch_all(&e.app.db).await.unwrap();
+    assert!(system.iter().any(|m| m.contains("persona") && m.contains("截斷")), "要說 persona 退回 inline、會被截斷：{system:?}");
+    // 走檔案的正常情況不能多這則。
+    let ok = tt::claude_bot(&e.app, &e.project_id, "fine").await;
+    start_bot(&e.app, &ok.id).await.unwrap();
+    let conv = db::conversation_id(&e.app.db, &ok.id).await.unwrap();
+    let system: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'").bind(&conv).fetch_all(&e.app.db).await.unwrap();
+    assert!(!system.iter().any(|m| m.contains("截斷")), "{system:?}");
+}
