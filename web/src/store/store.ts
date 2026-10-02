@@ -1880,7 +1880,9 @@ export const useStore = create<StoreState>((set, get) => {
     return out
   },
 
-  async restartBot(botId, resumeNative) {
+  // 一律接回原對話（2026-10-02 使用者：console-rpa 換身分後按 ⟳ 重啟，起了全新的 session、整個失憶）。
+  // 以前只有設定面板換身分時才帶；⟳、單顆更新重啟、改模型後的重啟都開新對話。接不回才退回開新對話（下面）。
+  async restartBot(botId, resumeNative = true) {
     let ok = false
     await guarded(set, get, `restart:${botId}`, async () => {
       try {

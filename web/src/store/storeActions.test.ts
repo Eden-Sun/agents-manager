@@ -531,6 +531,22 @@ test('重啟 503 restart_state_uncommitted：要刷新狀態', async () => {
   assert.ok(requests.some((r) => r.method === 'GET' && r.path.endsWith('/state')))
 })
 
+/** 2026-10-02 console-rpa：換身分後按 ⟳ 重啟起了新 session、失憶。重啟一律先要求接回原對話，接不回才開新的。 */
+test('重啟預設帶 resume=native；接不回（cannot_resume）才不帶重送', async () => {
+  seed()
+  routeDaemon((r) => (r.path.includes('/restart') ? json({ run_id: 'r2' }, 200) : json({}, 200)))
+  assert.equal(await useStore.getState().restartBot('b1'), true)
+  const restarts = () => requests.filter((r) => r.method === 'POST' && r.path.includes('/restart')).map((r) => r.path)
+  assert.deepEqual(restarts().map((p) => p.endsWith('/restart?resume=native')), [true], '不帶參數也要接回')
+
+  requests.length = 0
+  routeDaemon((r) =>
+    r.path.endsWith('/restart?resume=native') ? json({ error: 'conflict', reason: 'cannot_resume' }, 409) : json({ run_id: 'r3' }, 200),
+  )
+  assert.equal(await useStore.getState().restartBot('b1'), true)
+  assert.deepEqual(restarts().map((p) => p.endsWith('?resume=native')), [true, false], '接不回才退回開新對話')
+})
+
 /** issue #112：刪 bot 成功只該跳一次帶「復原」的通知，不該在 refreshState 之後又補一則沒有復原的。 */
 test('刪 Bot 成功：只跳一張帶「復原」的通知，不重複跳第二張', async () => {
   seed()

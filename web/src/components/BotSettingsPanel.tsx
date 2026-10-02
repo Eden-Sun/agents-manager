@@ -9,7 +9,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
-import { computeBotPatch, effectiveForm, INSTRUCTION_FILES_CHOICES, pruneSaved, restartWantsNativeResume, type BotFormKey } from './botSettingsForm'
+import { computeBotPatch, effectiveForm, INSTRUCTION_FILES_CHOICES, pruneSaved, type BotFormKey } from './botSettingsForm'
 import './botSettings.css'
 
 /**
@@ -219,8 +219,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   const [instructionFiles, setInstructionFiles] = useState<InstructionFiles>(bot?.instruction_files ?? INSTRUCTION_FILES_DEFAULT)
   /** 沒動過的欄位跟著 store 走，別處改了 model／effort 時不會被開啟當下的舊值蓋回去。 */
   const [touched, setTouched] = useState<ReadonlySet<BotFormKey>>(() => new Set())
-  /** 換身分的那次存檔。pruneSaved 會把 identity 從 saved 拿掉，重啟仍要靠它帶 resume=native（#658）。 */
-  const identityRestart = useRef(false)
   const touch = (k: BotFormKey) =>
     setTouched((t) => {
       if (t.has(k)) return t
@@ -323,7 +321,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
     setInstructionFiles(b.instruction_files ?? INSTRUCTION_FILES_DEFAULT)
     setTouched(new Set())
     setSaved({})
-    identityRestart.current = false
     setBanner(null)
     setCloseConfirmOpen(false)
   }, [botId])
@@ -385,7 +382,6 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       // 記 daemon **實際採用**的值，不是送出去的：停用別名會被換掉（#539），記送出的那個會讓
       // `pruneSaved` 永遠追不上，欄位就一直顯示一個沒在用的模型、還算不出 dirty。
       setSaved((s) => ({ ...s, ...sent, ...(res.remappedModel ? { model: res.remappedModel.to } : {}) }))
-      if ('identity' in sent && res.needsRestart) identityRestart.current = true
       setTouched((t) => {
         const n = new Set(t)
         for (const k of Object.keys(sent)) n.delete(k as BotFormKey)
@@ -443,13 +439,11 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             disabled={restarting}
             onClick={() => {
               setRestarting(true)
-              // 換過身分：重啟要接回原對話，不然對話就斷了（2026-09-17 AGM 手動搶救過兩顆）。
-              // 用 `saved`（送出當下記的 patch），不是這次 render 重算的 `patch`——存完 touched 已清空，
-              // 這裡再算會看不出剛剛動過 identity。
-              void restartBot(botId, restartWantsNativeResume(saved, identityRestart.current)).then((ok) => {
+              // 重啟一律接回原對話（store 的預設；接不回才退回開新對話）。以前只有換過身分才帶（#658），
+              // 改模型等其他設定後的重啟會開新對話、整個失憶。
+              void restartBot(botId).then((ok) => {
                 setRestarting(false)
                 if (ok) {
-                  identityRestart.current = false
                   setBanner(null)
                   notify('info', `${bot.name} 已重新啟動`)
                 }
