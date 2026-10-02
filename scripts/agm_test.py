@@ -2632,6 +2632,26 @@ class IssueClaimTest(unittest.TestCase):
         claim = agm.current_claim({"comments": comments, "updatedAt": stamp})
         self.assertEqual(claim["bot"], "first")
 
+    def test_only_repo_insiders_can_write_claim_or_release_markers(self):
+        """公開 repo 上誰都能留言：陌生人貼的認領標記不能鎖票，貼的交回標記不能撤掉別人的認領。"""
+        stamp = _iso(-10)
+        outsider = lambda i, body, who="NONE": {"id": i, "created_at": stamp, "author_association": who, "body": body}
+        insider = lambda i, body, who="COLLABORATOR": {"id": i, "created_at": _iso(-60), "author_association": who, "body": body}
+        # 只有陌生人的標記：沒人認領。
+        self.assertIsNone(agm.current_claim({"comments": [outsider(1, '<!-- agm:issue-claim {"bot":"evil"} -->')], "updatedAt": stamp}))
+        self.assertIsNone(agm.current_claim({"comments": [outsider(1, '<!-- agm:issue-claim {"bot":"evil"} -->', "CONTRIBUTOR")], "updatedAt": stamp}))
+        # 自己人認領之後，陌生人貼交回／搶認領都沒用。
+        comments = [
+            insider(10, '<!-- agm:issue-claim {"bot":"real"} -->', "OWNER"),
+            outsider(11, '<!-- agm:issue-release {"bot":"real"} -->'),
+            outsider(12, '<!-- agm:issue-claim {"bot":"evil"} -->', "FIRST_TIME_CONTRIBUTOR"),
+        ]
+        claim = agm.current_claim({"comments": comments, "updatedAt": stamp})
+        self.assertEqual(claim["bot"], "real")
+        # MEMBER／COLLABORATOR／OWNER 都算自己人；沒帶欄位的舊格式照舊採信。
+        for who in ("MEMBER", "COLLABORATOR", "OWNER"):
+            self.assertEqual(agm.current_claim({"comments": [insider(1, '<!-- agm:issue-claim {"bot":"x"} -->', who)], "updatedAt": stamp})["bot"], "x")
+
     def test_first_claim_after_release_wins_the_new_claim_epoch(self):
         stamp = _iso(-10)
         comments = [
