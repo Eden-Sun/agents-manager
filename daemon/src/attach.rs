@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use axum::body::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -111,6 +112,15 @@ fn local_copy_dir(app: &Arc<App>, bot_id: &str) -> Result<PathBuf> {
 }
 
 pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[u8]) -> Result<Attachment> {
+    save_bytes(app, bot_id, name, mime, Bytes::copy_from_slice(data)).await
+}
+
+/// 測試用：附件檔名 → 寫它的那條執行緒（要證明不是 tokio worker 自己寫的）。
+#[cfg(test)]
+static WRITE_THREADS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::thread::ThreadId>>> = std::sync::LazyLock::new(Default::default);
+
+/// 同 [`save`]，但 body 已經是 `Bytes`（上傳 handler）：寫檔放到 blocking pool 時只複製參考、不複製最多 50 MiB。
+pub async fn save_bytes(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: Bytes) -> Result<Attachment> {
     if data.is_empty() {
         bail!("attachment is empty");
     }
@@ -160,7 +170,7 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
     .execute(&app.db)
     .await?;
 
-    if let Err(e) = write_bytes(&host, &project.host, project.path.trim_end_matches('/'), &dir, &file, &agent_path, &local_path, data).await {
+    if let Err(e) = write_bytes(&host, &project.host, project.path.trim_end_matches('/'), &dir, &file, &agent_path, &local_path, &data).await {
         best_effort_cleanup(&host, &local_path, &agent_path).await;
         let _ = sqlx::query("UPDATE attachments SET state = 'failed' WHERE id = ?").bind(&id).execute(&app.db).await;
         return Err(e);
@@ -177,20 +187,32 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
 /// its failure path (leave `state = 'staging'`/`'failed'` for [`reconcile_orphans`], don't touch the
 /// DB row here) stays separate from the row bookkeeping.
 #[allow(clippy::too_many_arguments)]
-async fn write_bytes(host: &Arc<HostConn>, host_name: &str, project_dir: &str, dir: &str, file: &str, agent_path: &str, local_path: &str, data: &[u8]) -> Result<()> {
+async fn write_bytes(host: &Arc<HostConn>, host_name: &str, project_dir: &str, dir: &str, file: &str, agent_path: &str, local_path: &str, data: &Bytes) -> Result<()> {
+    // 最多 50 MiB 的同步寫檔放到 blocking pool：在 tokio worker 上做會卡住同一條 worker 上的其他請求。
     if host.is_local() {
-        // 專案目錄是 agent 寫得到的地方：`.agents-manager`／`attachments` 被換成連結時不能跟進去（讀取側同一個界線）。
-        let comps = [std::ffi::OsStr::new(".agents-manager"), std::ffi::OsStr::new("attachments")];
-        let dir_fd = crate::trusted_open::create_bound_dirs(Path::new(project_dir), &comps).with_context(|| format!("create {dir}"))?;
-        // `.gitignore` 只在還沒有時寫；已經有（含被換成連結）就不動。
-        let _ = crate::trusted_open::write_new_file_in(&dir_fd, std::ffi::OsStr::new(".gitignore"), b"*\n");
-        crate::trusted_open::write_new_file_in(&dir_fd, std::ffi::OsStr::new(file), data).with_context(|| format!("write {agent_path}"))?;
+        let (project_dir, dir, file, agent_path, data) = (project_dir.to_string(), dir.to_string(), file.to_string(), agent_path.to_string(), data.clone());
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            // 專案目錄是 agent 寫得到的地方：`.agents-manager`／`attachments` 被換成連結時不能跟進去（讀取側同一個界線）。
+            let comps = [std::ffi::OsStr::new(".agents-manager"), std::ffi::OsStr::new("attachments")];
+            let dir_fd = crate::trusted_open::create_bound_dirs(Path::new(&project_dir), &comps).with_context(|| format!("create {dir}"))?;
+            // `.gitignore` 只在還沒有時寫；已經有（含被換成連結）就不動。
+            let _ = crate::trusted_open::write_new_file_in(&dir_fd, std::ffi::OsStr::new(".gitignore"), b"*\n");
+            crate::trusted_open::write_new_file_in(&dir_fd, std::ffi::OsStr::new(&file), &data).with_context(|| format!("write {agent_path}"))?;
+            #[cfg(test)]
+            WRITE_THREADS.lock().unwrap_or_else(|e| e.into_inner()).insert(file.clone(), std::thread::current().id());
+            Ok(())
+        })
+        .await??;
     } else {
-        let copy_dir = Path::new(local_path).parent().ok_or_else(|| anyhow::anyhow!("`{local_path}` has no parent directory"))?;
-        std::fs::create_dir_all(copy_dir).with_context(|| format!("create {}", copy_dir.display()))?;
-        std::fs::write(local_path, data).with_context(|| format!("write {local_path}"))?;
+        let copy_dir = Path::new(local_path).parent().ok_or_else(|| anyhow::anyhow!("`{local_path}` has no parent directory"))?.to_path_buf();
+        let (lp, bytes) = (local_path.to_string(), data.clone());
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            std::fs::create_dir_all(&copy_dir).with_context(|| format!("create {}", copy_dir.display()))?;
+            std::fs::write(&lp, &bytes).with_context(|| format!("write {lp}"))?;
+            Ok(())
+        })
+        .await??;
         host.ssh_put(agent_path, data).await.with_context(|| format!("copy attachment to {host_name}:{agent_path}"))?;
-        // Best effort — a repo that never sees the directory is nicer, but not worth failing over.
         let _ = host.ssh_exec(&format!("printf '*\\n' > {}", sh_quote(&format!("{dir}/.gitignore")))).await;
     }
     Ok(())
@@ -671,6 +693,18 @@ mod tests {
         // 正常的還是通。
         let a = save(&env.app, &bot.id, "ok.txt", "text/plain", b"fine").await.unwrap();
         assert_eq!(read(&env.app, &a.id).await.unwrap().1, b"fine");
+    }
+
+    /// 最多 50 MiB 的寫檔不能在 tokio worker 上做（會卡住同一條 worker 上的其他請求）：寫的那條執行緒不是跑這個測試的執行緒。
+    #[tokio::test]
+    async fn the_local_write_runs_on_the_blocking_pool_not_the_async_worker() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let a = save(&env.app, &bot.id, "big.bin", "application/octet-stream", &vec![1u8; 4 * 1024 * 1024]).await.unwrap();
+        let file = a.path.rsplit('/').next().unwrap().to_string();
+        let writer = WRITE_THREADS.lock().unwrap().get(&file).copied().expect("the write was recorded");
+        assert_ne!(writer, std::thread::current().id(), "寫檔在跑 async 測試的這條執行緒上做了");
+        assert_eq!(read(&env.app, &a.id).await.unwrap().1.len(), 4 * 1024 * 1024);
     }
 
     /// 存進 DB、回給 UI 的檔名：控制字元與雙向覆寫字元（`evil\u{202E}gnp.exe` 會顯示成 `evilexe.png`）拿掉，長度設上限。
