@@ -2946,6 +2946,12 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 ### 11.8 開發測試
 `scripts/dev-sshd.sh` 以使用者權限起 127.0.0.1:2222 的 sshd，`host = "loop"`（session `am-loop`）。
 
+**daemon 的測試行程用拋棄式 `$HOME`**（`test_home.rs`，2026-10-02 資料安全審查）：測試 build 在 `main` 之前（`.init_array`／`__mod_init_func`）把 `HOME` 換成
+`$TMPDIR/am-test-home-<pid>`、行程結束時刪掉，所以程式裡 `dirs::home_dir()` 找的 `~/.claude*`、`~/.claude.json`、`~/.codex`、`~/.grok` 一律落在裡面。
+以前測試直接用跑測試那個人的真 HOME：一台機器的 `~/.claude.json` 累積 3 萬筆 `/tmp/am-test-…` 專案（6.5 MB）、`~/.codex/config.toml`／`~/.grok/trusted_folders.toml`
+各上千筆、`~/.claude/projects/` 兩千多個 `am-test-*`，`~/.grok/hooks/agents-manager.json` 還被改成指到已刪的測試目錄。守護測試在 `test_home::tests`。
+新測試要驗「寫到哪」就看 `test_home::dir()`；不要自己再去碰真的 `~`。
+
 ### 11.9 專案移交到另一顆 daemon（issue #710，#678 的單一專案子集）
 一個專案從 A 機的 daemon（例：Mac，專案 `host = local`）交給 B 機的 daemon（例：agm-host），B 以遠端主機（例：`m4p`）接手；
 專案的 `path` 不變，檔案與 agent 仍在 A 機上。工具是 `scripts/ops/project-transfer`（python 3.11+，只用標準函式庫）。
