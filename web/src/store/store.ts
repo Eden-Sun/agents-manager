@@ -3380,7 +3380,9 @@ function mergeHosts(current: Host[], updates: unknown[]): Host[] {
     const identityStatus = u.identities !== undefined ? toIdentityStatusMap(u.identities) : h.identity_status
     const herdr = u.herdr !== undefined ? toHerdrVersion(u.herdr) : h.herdr
     // 沒帶＝沒變（沒量過不會帶）；帶了就換成新的快照。
-    const baseline = u.baseline !== undefined ? toHostBaseline(u.baseline) : h.baseline
+    const nextBaseline = u.baseline !== undefined ? toHostBaseline(u.baseline) : h.baseline
+    // toHostBaseline 每次都產新物件：內容沒變就沿用舊的，不然每次 host_changed 都換 hosts 陣列、整個主機面板重畫。
+    const baseline = JSON.stringify(nextBaseline) === JSON.stringify(h.baseline) ? h.baseline : nextBaseline
     // 沒帶這欄（bot_status 合成的更新、舊 daemon）：連著就清掉，斷著沿用。
     const since = u.disconnected_since !== undefined ? optStr(pick(u, 'disconnected_since')) : connected ? null : h.disconnected_since
     if (connected === h.connected && error === h.error && since === h.disconnected_since && tools === h.tools && identityStatus === h.identity_status && sameHerdr(herdr, h.herdr) && baseline === h.baseline) {

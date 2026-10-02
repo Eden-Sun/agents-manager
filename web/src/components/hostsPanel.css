@@ -227,3 +227,9 @@
 .host-baseline-items li.warn {
   color: var(--warn);
 }
+
+/* 差異很多時（多個 claude 身分各缺幾項）不要把主機列撐到整頁：清單自己捲動。 */
+.host-baseline-items {
+  max-height: 160px;
+  overflow-y: auto;
+}
