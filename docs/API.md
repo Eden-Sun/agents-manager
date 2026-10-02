@@ -1347,7 +1347,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
 有 Run 先 stop（ctrl+c ×2、逾時關 pane）再 start → `200 {"run_id"}`（新 Run）。沒有 Run 也可呼叫（= start）。錯誤同 start，另加 stop 那一半的錯誤（同 `POST /stop`）。過程推 `bot_status`。
 子 agent（`parent_bot_id` 非空）不收：`409 {"reason":"child_restart_forbidden","parent_bot_id"}`，由父 bot 用 herdr 重開（SPEC §6.5a）；`start` 同。內部原地重啟若 herdr 回 `agent_name_taken`，daemon 把新 run 留為 `running`、記下保護原因，回 `409 {"reason":"agent_name_taken","bot_id","run_id","message"}`；reconcile 不會因此軟刪 bot。
 `?resume=native`：同 start 的語意，**停之前**就判斷接不接得回（看現在這個 Run 的 session）；接不回回 `409 cannot_resume`，原本的 agent 不會被停。**預設（不帶）也會接回**（2026-10-02 使用者：「預設必 resume」）：有記錄的 session 就接、接不回才開新對話，不回 409；`?resume=fresh` 才是明確開新對話。
-**連點會合併**（`restart_coalesce`）：同一顆 bot、同樣的重啟種類（`resume`／`session` 一樣）已經有一個在進行，或剛做完（5 秒內），後來的請求**不再重啟一次**，等同一個結果、回同一個 `{"run_id"}` 並多一個 `"coalesced":true`；種類不同（例如 `?resume=fresh`）是另一件事，照做；領頭的那個失敗，等著的自己重試（不假裝成功）。只在這個 HTTP 入口合併，一鍵重啟、換版、輪替憑證等 daemon 內部流程直接重啟、不經這裡。
+**連點會合併**（`restart_coalesce`）：同一顆 bot、同樣的重啟種類（`resume`／`session` 一樣）已經有一個**仍在進行中**，後來的請求**不再重啟一次**，等它做完、回同一個 `{"run_id"}` 並多一個 `"coalesced":true`；**做完之後再來的一律是新的一次**（改了 model／effort／設定馬上重啟要套用新設定，沒有「剛重啟過」這種窗口）；種類不同（例如 `?resume=fresh`）是另一件事，照做；領頭的那個失敗，等著的自己重試（不假裝成功）。只在這個 HTTP 入口合併，一鍵重啟、換版、輪替憑證等 daemon 內部流程直接重啟、不經這裡。
 重啟期間這顆 bot 排著的 queued（AGM 派工）**不撤**，留給新的 Run 送；重啟沒能把 bot 開回來才撤（SPEC §4.4a「重啟不是停」，issue #106）。
 停掉了卻沒能開回來時，舊 Run 改標 `exited`；改標寫不進 DB 回 `503 {"error":"restart_state_uncommitted","run_id":<舊 Run>,"retryable":true,"message","detail","start_error"}`（`start_error` 是 start 那一半的錯），已排重試（SPEC §6.4）。
 
