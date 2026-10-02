@@ -109,17 +109,25 @@ function publish(next: Record<string, number | null>) {
 }
 
 // 別的分頁勾了／解除了：照磁碟上的現況跟上（同一個瀏覽器的分頁看到同一份停用）。
-if (typeof window !== 'undefined') {
-  window.addEventListener('storage', (e) => {
-    if (e.key !== null && e.key !== QUOTA_DISABLED_KEY) return
-    const disk = prune(load(), Date.now())
-    if (!sameMap(disk, disabled)) adopt(disk)
-  })
+function onStorage(e: StorageEvent) {
+  if (e.key !== null && e.key !== QUOTA_DISABLED_KEY) return
+  const disk = prune(load(), Date.now())
+  if (!sameMap(disk, disabled)) adopt(disk)
 }
+
+// 綁在「訂閱當下」的 window：模組載入時 window 還沒有（或之後被換掉，例如測試拆掉重建 happy-dom）就會永遠收不到 storage 事件。
+let storageWindow: Window | null = null
+function listenStorage() {
+  if (typeof window === 'undefined' || storageWindow === window) return
+  storageWindow = window
+  window.addEventListener('storage', onStorage)
+}
+listenStorage()
 
 scheduleExpiry()
 
 function subscribe(fn: () => void) {
+  listenStorage()
   listeners.add(fn)
   return () => listeners.delete(fn)
 }
