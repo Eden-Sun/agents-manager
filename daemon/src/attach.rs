@@ -111,6 +111,7 @@ fn local_copy_dir(app: &Arc<App>, bot_id: &str) -> Result<PathBuf> {
     Ok(app.data_dir.join("attachments").join(bot_id))
 }
 
+#[cfg(test)]
 pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[u8]) -> Result<Attachment> {
     save_bytes(app, bot_id, name, mime, Bytes::copy_from_slice(data)).await
 }
