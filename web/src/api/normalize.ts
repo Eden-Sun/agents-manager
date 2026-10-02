@@ -146,6 +146,7 @@ export function toHost(v: unknown): Host | null {
     remote_path: str(pick(v, 'remote_path')),
     connected: bool(pick(v, 'connected'), false),
     error: optStr(pick(v, 'error')),
+    disconnected_since: optStr(pick(v, 'disconnected_since')),
     ...(pick(v, 'shared_session') === true ? { shared_session: true } : {}),
     attach_command:
       str(pick(v, 'attach_command')) ||

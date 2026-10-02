@@ -699,6 +699,8 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             "shared_session": crate::shared_host::is_shared(app, &c.name).await,
             "connected": connected,
             "error": c.error_string().await,
+            // 遠端斷線起點；連著／本機為 null（UI 的離線警示條算「離線多久」）。
+            "disconnected_since": c.disconnected_since(),
             "attach_command": crate::config::attach_command(c.cfg.as_ref(), &app.herdr_session),
             "tools": t.map(|x| json!(x.tools)),
             // Login state *on this host*, `[[identities]]` + this host's `ccN` aliases (SPEC §16).

@@ -244,6 +244,8 @@ interface MockHost {
   remote_path: string
   connected: boolean
   error: string | null
+  /** API.md `hosts[].disconnected_since`：連著時 null。 */
+  disconnected_since: string | null
   tools: Record<BotKind, MockTool>
   /** Keyed by identity name. */
   identities: Record<string, MockIdentityStatus>
@@ -1596,11 +1598,11 @@ export class MockTransport implements Transport {
     return h
   }
 
-  private hostMap(): Record<string, { connected: boolean; error: string | null }> {
-    const out: Record<string, { connected: boolean; error: string | null }> = {
-      local: { connected: this.connected, error: null },
+  private hostMap(): Record<string, { connected: boolean; error: string | null; disconnected_since: string | null }> {
+    const out: Record<string, { connected: boolean; error: string | null; disconnected_since: string | null }> = {
+      local: { connected: this.connected, error: null, disconnected_since: null },
     }
-    for (const h of this.hosts) out[h.name] = { connected: h.connected, error: h.error }
+    for (const h of this.hosts) out[h.name] = { connected: h.connected, error: h.error, disconnected_since: h.disconnected_since }
     return out
   }
 
@@ -1608,6 +1610,7 @@ export class MockTransport implements Transport {
   private dial(h: MockHost) {
     const bad = /fail|bad|unreachable|0\.0\.0\.0/i.test(h.ssh)
     h.connected = !bad
+    h.disconnected_since = bad ? (h.disconnected_since ?? now()) : null
     h.error = bad ? `ssh: connect to host ${h.ssh.split('@').pop()} port ${h.ssh_port}: Operation timed out` : null
   }
 
@@ -1629,6 +1632,7 @@ export class MockTransport implements Transport {
       remote_path: String(b.remote_path ?? ''),
       connected: false,
       error: null,
+      disconnected_since: now(),
       // grok missing (exercises the tools hint).
       tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null } },
       identities: {
@@ -1721,12 +1725,14 @@ export class MockTransport implements Transport {
     this.emit('mem_updated', this.mem())
   }
 
-  setHostConnected(name: string, connected: boolean) {
+  setHostConnected(name: string, connected: boolean, downMinutes = 23) {
     const h = this.hosts.find((x) => x.name === name)
     if (!h) return
+    // 截圖要有「離線多久」：預設演 23 分鐘前斷的（`downMinutes` 可改）。
+    h.disconnected_since = connected ? null : (h.disconnected_since ?? new Date(Date.now() - downMinutes * 60_000).toISOString())
     h.connected = connected
     h.error = connected ? null : 'ssh master 已退出（mock 模擬斷線）'
-    this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error })
+    this.emit('host_changed', { name: h.name, connected: h.connected, error: h.error, disconnected_since: h.disconnected_since })
     this.emit('daemon_status', { herdr_connected: this.connected, connected: this.connected, default_connected: false, hosts: this.hostMap() })
     for (const b of this.botsOnHost(h.name)) this.emitBotStatus(b.id)
     this.emitMem()
@@ -2251,6 +2257,7 @@ export class MockTransport implements Transport {
           remote_path: h.remote_path,
           connected: h.connected,
           error: h.error,
+          disconnected_since: h.disconnected_since,
           attach_command: `herdr --remote ${h.ssh}${h.ssh_port !== 22 ? ` -p ${h.ssh_port}` : ''} --session ${h.herdr_session}`,
           herdr: h.connected
             ? { server_version: '0.8.2', protocol: 20, protocol_supported: true, cli_version: '0.9.1', mismatch: true }
@@ -4035,7 +4042,7 @@ function installDevHelpers(mock: MockTransport) {
     loggedOut: (botIdOrName: string, identity = 'cc1') => mock.markLoggedOut(mock.botIdByName(botIdOrName) ?? botIdOrName, identity),
     disconnect: () => mock.setConnected(false),
     reconnect: () => mock.setConnected(true),
-    hostDown: (name: string) => mock.setHostConnected(name, false),
+    hostDown: (name: string, downMinutes?: number) => mock.setHostConnected(name, false, downMinutes),
     hostUp: (name: string) => mock.setHostConnected(name, true),
     hosts: () => mock.hostNames(),
     // 遠端主機＋專案＋在跑的 bot、五格額度（截圖用，重現遠端標題列最擠的情況）。回 bot id。

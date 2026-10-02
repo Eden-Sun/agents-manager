@@ -546,8 +546,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 | `panes_changed` | `{"host"}`：這台主機的 `panes` 表（側欄「其他 pane」的來源）真的變了——掃描、用途回報、adopt、關閉、GC 之後比對指紋，沒變不發；前端收到就重抓 `GET /api/panes` |
 | `draft_updated` | `{"key","text","rev","client_id","updated_at"}`：輸入框草稿被寫了（`PUT /api/drafts/{key}`），`text:""`＝刪除（含 bot／專案被刪）；見「輸入框草稿」 |
 | `preview_changed` | `{"bot_id", "status":"off"\|"starting"\|"running"\|"failed", "port", "source"}`（SPEC §6.12） |
-| `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?}}}` |
-| `host_changed` | `{"name","connected","error"?,"herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上） |
+| `daemon_status` | `{"herdr_connected", "hosts": {"<name>": {"connected","error"?,"disconnected_since"}}}` |
+| `host_changed` | `{"name","connected","error"?,"disconnected_since","herdr","tools"?,"identities"?,"shell_identities"?,"tools_checked_at"?}`（`herdr` 見 §12.6b；有偵測快取時一併帶上） |
 | `quota_updated` | 見 §12.5 |
 | `mem_updated` | 與 `GET /api/mem` 同形 |
 | `bots_restart_progress` / `bots_restart_done` | 見 §10.3a |
@@ -1053,7 +1053,8 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
   "hosts": [
     {"name":"local","ssh":null,"ssh_port":null,"ssh_opts":[],"herdr_session":"agents-manager","remote_path":null,"connected":true,"error":null},
     {"name":"m4p","ssh":"m4p@100.112.229.82","ssh_port":22,"ssh_opts":[],"herdr_session":"agents-manager",
-     "remote_path":"/opt/homebrew/bin:$HOME/.local/bin","connected":false,"error":"ssh master exited immediately (exit status: 255)"}
+     "remote_path":"/opt/homebrew/bin:$HOME/.local/bin","connected":false,"error":"ssh master exited immediately (exit status: 255)",
+     "disconnected_since":"2026-10-02T03:14:07.512Z"}
   ],
   "projects": [ {"id":"01M1...","path":"/Users/m4p/work/foo","label":"foo@m4p","host":"m4p","workspace_id":null,"bots":[ ... ]} ]
 }
@@ -1063,6 +1064,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 - `default_connected`：本機使用者 Herdr `default` session 的連線狀態；採用該 session 的 bot 只看這個欄位。
 - `projects[].host` 永遠存在（本機 `"local"`）；sidebar 徽章在 `host !== "local"` 時才顯示。
 - host 斷線時其下所有 bot 的 `lamp` 一律 `"disconnected"`。
+- `hosts[].disconnected_since`：遠端主機從什麼時候開始連不上（`db::now()` 格式）；連著與 `local` 為 `null`。只記第一次斷線，重試失敗不往後推；daemon 起來後還沒連上過＝從 daemon 建立這台的連線算起。UI 的離線警示條用它算「離線多久」。
 - 另有 `hosts[].tools`、`identities`、`shell_identities`、`attach_command`（§12、身份一節）。
 - `hosts[].shared_session`（#709，SPEC §11.10）：這台的 herdr session 也被另一顆 daemon 用著；讀當下的設定（改了不必重連）。`local` 一律 `false`。
 

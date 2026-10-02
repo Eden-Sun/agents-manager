@@ -2503,10 +2503,9 @@ button.pane-toggle:hover:not(:disabled) {
 }
 
 .host-badge.down {
-  background: var(--bg-sunken);
-  border-color: var(--border-strong);
-  color: var(--text-faint);
-  text-decoration: line-through;
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
 }
 
 /* 可點，比 `.host-badge` 多一點內距與 hover；色沿用 accent-soft。 */

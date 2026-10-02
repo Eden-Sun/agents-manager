@@ -6,6 +6,7 @@ import { useViewportPin } from './hooks/useViewportPin'
 import { DRAWER_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import { useProjectJumpKeys } from './hooks/useProjectJumpKeys'
 import { ChatPanel } from './components/ChatPanel'
+import { HostOfflineBanner } from './components/HostOffline'
 import { GroupChatPanel } from './components/GroupChatPanel'
 import { HostShellPanel } from './components/HostShellPanel'
 import { ImageShelf } from './components/ImageShelf'
@@ -240,6 +241,7 @@ export default function App() {
       ) : null}
       <main className="main">
         <ConnBanner />
+        <HostOfflineBanner />
         {/* 選著 bot 時 shell 是 ChatPanel 的分頁；group／沒選才整個換成 shell 面板。 */}
         {shellView && (groupProjectId || !botId) ? (
           <HostShellPanel

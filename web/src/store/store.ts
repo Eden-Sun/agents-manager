@@ -3311,11 +3311,13 @@ function mergeHosts(current: Host[], updates: unknown[]): Host[] {
     // absent field means "unchanged", never "no identities".
     const identityStatus = u.identities !== undefined ? toIdentityStatusMap(u.identities) : h.identity_status
     const herdr = u.herdr !== undefined ? toHerdrVersion(u.herdr) : h.herdr
-    if (connected === h.connected && error === h.error && tools === h.tools && identityStatus === h.identity_status && sameHerdr(herdr, h.herdr)) {
+    // 沒帶這欄（bot_status 合成的更新、舊 daemon）：連著就清掉，斷著沿用。
+    const since = u.disconnected_since !== undefined ? optStr(pick(u, 'disconnected_since')) : connected ? null : h.disconnected_since
+    if (connected === h.connected && error === h.error && since === h.disconnected_since && tools === h.tools && identityStatus === h.identity_status && sameHerdr(herdr, h.herdr)) {
       return h
     }
     changed = true
-    return { ...h, connected, error, tools, identity_status: identityStatus, herdr }
+    return { ...h, connected, error, disconnected_since: since, tools, identity_status: identityStatus, herdr }
   })
   return changed ? next : current
 }
@@ -3566,7 +3568,8 @@ export function composerState(state: StoreState, botId: string | null): Composer
   if (hostName !== 'local') {
     const host = hostOfBot(state, botId)
     if (!host || !host.connected) {
-      return { ...base, reason: `主機未連線（${hostName}）${host?.error ? `：${host.error}` : ''}` }
+      // 原因（ssh 錯誤字串）在聊天區頂端的離線橫幅；這裡只講結果，輸入框 placeholder 才放得下。
+      return { ...base, reason: `主機 ${hostName} 離線，訊息送不出去` }
     }
   } else if (!(bot?.herdr_session === 'default' ? state.defaultConnected : state.connected)) {
     return { ...base, reason: 'daemon 與 herdr 的連線中斷，無法送出訊息' }

@@ -592,7 +592,7 @@ pub async fn hosts_json(app: &Arc<App>) -> Value {
     let mut m = serde_json::Map::new();
     for c in app.hosts.list().await {
         let connected = if c.is_local() { app.connected.load(Ordering::SeqCst) } else { c.is_connected() };
-        m.insert(c.name.clone(), json!({"connected": connected, "error": c.error_string().await}));
+        m.insert(c.name.clone(), json!({"connected": connected, "error": c.error_string().await, "disconnected_since": c.disconnected_since()}));
     }
     Value::Object(m)
 }
@@ -633,6 +633,7 @@ pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) 
             ev.insert("name".into(), json!(conn.name));
             ev.insert("connected".into(), json!(connected));
             ev.insert("error".into(), json!(conn.error_string().await));
+            ev.insert("disconnected_since".into(), json!(conn.disconnected_since()));
             ev.insert("herdr".into(), crate::herdr_version::for_host(conn, connected, detected.as_ref()));
             // Absent, not null: a client treats a present-but-empty `tools` as "nothing installed".
             if let Some(d) = detected {
