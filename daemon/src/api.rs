@@ -4144,6 +4144,9 @@ async fn service_daemon_swap_restart_window(
     if owner.is_empty() || commit.is_empty() {
         return Err(LcError::Bad("owner 與 commit 都必填".into()));
     }
+    if !crate::supervisor::maintenance::valid_commit(commit) {
+        return Err(LcError::Bad("commit 要是 7～64 碼十六進位的 git sha".into()));
+    }
     let ttl = b.ttl_secs.unwrap_or(900);
     let actor = format!("service({})", crate::service_auth::DAEMON_SWAP);
     // 同一張核准一輪輪沿用，升級計時才接得下去（`swap_window`）。
@@ -8336,7 +8339,7 @@ mod per_principal_auth_tests {
     #[tokio::test]
     async fn daemon_swap_opens_its_own_restart_window_without_an_approval_from_anyone_else() {
         let e = crate::testing::env().await;
-        let body = || SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc123".into(), ttl_secs: Some(600) };
+        let body = || SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc1234".into(), ttl_secs: Some(600) };
         let svc = || Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into()));
         // 只有 daemon-swap 服務身分；使用者與 bot 都不行。
         for other in [RequestPrincipal::User, RequestPrincipal::Bot("b1".into()), RequestPrincipal::Service(crate::service_auth::HERDR_UPGRADE.into())] {
@@ -8363,7 +8366,7 @@ mod per_principal_auth_tests {
         let bot = distinct_bot(&e, "swap-busy").await;
         let run = crate::testing::fake_run(&e.app, &bot.id).await;
         sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&e.app.db).await.unwrap();
-        let body = SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc123".into(), ttl_secs: None };
+        let body = SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc1234".into(), ttl_secs: None };
         let r = service_daemon_swap_restart_window(
             State(e.app.clone()),
             Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into())),
@@ -8371,6 +8374,45 @@ mod per_principal_auth_tests {
         )
         .await;
         assert!(matches!(&r, Err(LcError::Conflict(v)) if v["detail"]["reason"] == "not_idle" || v["reason"] == "not_idle"), "{r:?}");
+    }
+
+    /// commit 是自由字串會被寫進核准、租約與稽核紀錄、也會被腳本拿去用：三個入口（申請、acquire、daemon-swap 的窗口）都只收 7～64 碼十六進位。
+    /// 被擋的什麼都不寫（不留 pending 核准、不留租約）。
+    #[tokio::test]
+    async fn a_commit_that_is_not_a_sha_is_refused_at_every_entrance_and_nothing_is_written() {
+        let e = crate::testing::env().await;
+        let bad = ["main", "abc12", "abc1234; rm -rf /", "abc1234\n--force"];
+        for commit in bad {
+            let r = crate::supervisor::api::post_approval(
+                State(e.app.clone()),
+                HeaderMap::new(),
+                Json(crate::supervisor::api::ApprovalIn {
+                    requester: "ops".into(), purpose: "rebuild".into(), scope: "x".into(), target_commit: Some(commit.into()),
+                    expires_in_secs: None, request_id: None, supersedes: None, reason: None,
+                }),
+            )
+            .await;
+            assert!(matches!(r, Err(LcError::Bad(_))), "{commit:?}: {r:?}");
+            let r = service_daemon_swap_restart_window(
+                State(e.app.clone()),
+                Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into())),
+                Json(SwapWindowIn { owner: "ops".into(), commit: commit.into(), ttl_secs: None }),
+            )
+            .await;
+            assert!(matches!(r, Err(LcError::Bad(_))), "{commit:?}: {r:?}");
+        }
+        let approvals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_approvals").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(approvals, 0, "被擋的申請不留列");
+        let good = crate::supervisor::api::post_approval(
+            State(e.app.clone()),
+            HeaderMap::new(),
+            Json(crate::supervisor::api::ApprovalIn {
+                requester: "ops".into(), purpose: "rebuild".into(), scope: "x".into(), target_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+                expires_in_secs: None, request_id: None, supersedes: None, reason: None,
+            }),
+        )
+        .await;
+        assert!(good.is_ok(), "{good:?}");
     }
 
     /// 2026-10-01：一直有 bot 在忙時，每一輪都開新核准、拿不到就撤，升級計時每輪歸零，自動部署卡了一整晚。
@@ -8387,8 +8429,8 @@ mod per_principal_auth_tests {
             Err(LcError::Conflict(v)) => v["safety"]["escalation_approval_id"].as_str().or(v["detail"]["safety"]["escalation_approval_id"].as_str()).map(String::from),
             _ => None,
         };
-        let r1 = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c1"))).await;
-        let r2 = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c1"))).await;
+        let r1 = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c1c1c1c1"))).await;
+        let r2 = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c1c1c1c1"))).await;
         let (a1, a2) = (approval_of(&r1), approval_of(&r2));
         assert!(a1.is_some(), "{r1:?}");
         assert_eq!(a1, a2, "同 commit 下一輪沿用同一張核准");
@@ -8398,7 +8440,7 @@ mod per_principal_auth_tests {
         // 那張核准已經等了 31 分鐘（把核准時間往前推）；main 又動了，換 commit 也接得下去。
         let old = crate::db::iso_in(-31 * 60);
         sqlx::query("UPDATE supervisor_approvals SET decided_at=?, created_at=? WHERE id=?").bind(&old).bind(&old).bind(&a1).execute(&e.app.db).await.unwrap();
-        let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c2"))).await.expect("等滿門檻之後 working 不再擋");
+        let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c2c2c2c2"))).await.expect("等滿門檻之後 working 不再擋");
         assert_eq!(v["lease"]["held"], true, "{v}");
         assert_eq!(crate::supervisor::store::approval(&e.app.db, &a1).await.unwrap().unwrap().status, "superseded");
     }
@@ -8410,7 +8452,7 @@ mod per_principal_auth_tests {
     async fn daemon_swap_keeps_its_approval_when_the_window_attempt_fails_on_the_database() {
         let e = crate::testing::env().await;
         let svc = || Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into()));
-        let ask = || SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc123".into(), ttl_secs: None };
+        let ask = || SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc1234".into(), ttl_secs: None };
         let live = || async { crate::supervisor::store::approvals(&e.app.db, 100).await.unwrap().into_iter().filter(|a| a.status == "approved").collect::<Vec<_>>() };
 
         crate::testing::make_table_unreadable(&e.app, "supervisor_leases").await;

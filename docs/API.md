@@ -2100,6 +2100,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 ### 換版窗口 `POST /api/services/daemon-swap/restart-window`（SPEC §18.2、§18.10，2026-09-29）
 - 只給 `daemon-swap` 服務身分（`X-AM-Service-Id: daemon-swap` ＋ `X-AM-Service-Token`；token 檔 `service-tokens/daemon-swap.token`，範圍見 `service_auth::allows`）。其他身分（使用者、bot、`herdr-upgrade`）一律 403。
   `GET /api/capabilities` 有 `swap_restart_window` 才有這條路由；`daemon-swap.sh` 對舊 daemon 僅在呼叫端明確提供 `--approval <id>` 時退回舊式 User 核准租約，否則以結束碼 9 中止。該相容參數在新路由存在時忽略。
+- 沿用／取代只認**這個服務自己核准的**自動單（`decided_by=service(daemon-swap)`）：同一個 `owner` 名下 AGM 親手核的 restart 單原封不動，不被借用、不被 `supersedes`。
 - body `{owner, commit, ttl_secs?}`（`deny_unknown_fields`；不接受 `exclude_bot_ids`：沒有「申請者自己那顆 bot」可排除）。daemon 開一筆 `purpose=restart`、`requester=owner`、`target_commit=commit` 的核准並**當場以 `service(daemon-swap)` 核准**
   （有效期 `ttl_secs`＋5 分鐘，不推 `approval_requested`），再走與 `POST /api/supervisor/leases/restart/acquire` **同一個** `maintenance::acquire`（`require_idle`）：
   沒有 bot 在 `working`／`in_flight`、送達臨界區沒有 prompt、沒有別人握租約才拿得到，拿到時 assignment 派送暫停。
@@ -2112,6 +2113,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `requester_unverified`（issue #436）：`true`＝`requester` 只是申請時自稱的字串（沒帶 `X-AM-Bot-Id`，例如 `daemon-update-kick.sh` 這類 launchd 腳本），`false`＝申請時附了那顆 bot 自己的 hook token、確定是它本人。欄位加上去之前的舊列一律 `true`。
   `status`：`pending` | `approved` | `denied` | `revoked` | `consumed` | `superseded`。`consumed`／`superseded` 不覆寫 `decided_at`／`decided_by`（誰、何時核准的留著；誰用掉的在 `decisions`）。
   `decisions` 是 append-only 的決定歷程（那一列只留最後一個狀態）。
+- `target_commit`／acquire 的 `commit`／`restart-window` 的 `commit` 只收 7～64 碼十六進位（git sha），其他一律 400、什麼都不寫。
 - `POST /api/supervisor/approvals {requester,purpose:"rebuild"|"restart",scope,target_commit?,expires_in_secs?,request_id?,supersedes?}` → 一筆 `pending`（回應多 `created`、`superseded`），並推 inbox `approval_requested` 給 AGM。例外：`purpose:"restart"`、`request_id` 是 `deploy-now-restart-<rebuild 核准>` 且對得上正在進行的立即部署（見 `POST /api/deploy/now`）時，回來就是 `approved`（`decided_by:"user(立即部署)"`）。
   **沒帶 `supersedes` 時 daemon 自己找**（issue #421）：同一個 `requester`、同一個 `purpose`、而且還 `pending` 的最新那一筆，直接取代掉（回應的 `superseded` 會帶它的 id）。
   kick 記住舊 id 的狀態檔掉了就不會帶 `--supersedes`，以前每輪開一筆新的 pending——2026-09-23 累積了四筆，AGM 被叫醒四次講同一件事。
@@ -2124,7 +2126,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   帶 `request_id`（穩定 id）時**冪等**：同一個 supervisor 下同一個 id 再送回**原本那一筆**（200、`created:false`），不新增、不重推 inbox；已經被 decide 的也照樣回它本人（狀態就是當時的裁示）。
   同一個 id 但 `requester`／`purpose`／`scope`／`target_commit` 不同 → `409 {"reason":"approval_request_mismatch", field, existing, requested, approval_id}`，原本那筆一個字都不動（另一顆 bot 撞同一個自然 id 拿不回別人的核准）。
   `expires_in_secs` 不參與比對：原本那筆的到期時間不會被重送改掉。不帶 `request_id` 就是舊行為，每次開一筆新的。
-  `expires_in_secs` 省略＝不過期；有帶就必須是 `1..=604800`（7 天，含 kick 的 21600）。超出範圍（含 0 與負數）回 400，不寫核准（#655）。`decide` 的 `expires_in_secs` 同一範圍。
+  `expires_in_secs` 省略（申請與裁示都沒給）＝核准後 24 小時失效（`store::APPROVAL_MAX_AGE_SECS`；不是永遠有效，放了幾天的 `approved` 不能再開窗口，也不計入升級計時，租約不會比它活得久）；有帶就必須是 `1..=604800`（7 天，含 kick 的 21600）。超出範圍（含 0 與負數）回 400，不寫核准（#655）。`decide` 的 `expires_in_secs` 同一範圍。
   CLI：`agm approval request --request-id <id>`（不確定送出去沒有時用同一個 id 重送，不要換新的）；`--supersedes <舊 id>` 帶 `supersedes`。
 - `POST /api/supervisor/approvals/{id}/decide {decision:"approve"|"deny"|"revoke",actor?,reason?,expires_in_secs?}`：同 decision 重送回 `idempotent:true`。
   **`approve` 只給驗過的 AGM 角色**（issue #447，同 `require_role`）：User principal 或有效但不是巡檢／協調者的 Bot → `403 {"reason":"role_required"}`；Bot／service 身分不完整、憑證錯誤或混帶 principal 由全域中介層回 401；那筆都不動。
