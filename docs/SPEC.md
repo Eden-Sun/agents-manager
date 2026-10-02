@@ -2117,6 +2117,10 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   排超過 30 分鐘回 75，issue #104，詳見 API.md「外部 Cargo 主機」）。
   helper 結束碼原樣帶出（非 125 一律 `exit`，不會偷偷在本機重跑；超過整體上限 `[build.remote] timeout_secs`，預設 12 分鐘，是 **124**，issue #194）；只有 **125＝根本沒有在遠端動手**（設定被關掉、不適合 offload）才落到下面，
   認證：密碼留空＝走 ssh 的 key／agent（`BatchMode=yes`，不碰 sshpass／askpass）；`[build.remote] identity_file = "<路徑>"` 讓 ssh 與 rsync 都帶同一把 `-i … -o IdentitiesOnly=yes`（只放路徑；設定指的檔案不存在＝設定錯，**126** 明確失敗，不退回本機，issue #104）。
+  **信任模型（host key）**：ssh 與 rsync 都帶 `StrictHostKeyChecking=accept-new`＝**第一次連一台沒見過的主機自動信任並寫進 `known_hosts`（TOFU），之後 host key 變了一律拒絕（回 255、退回本機）**。
+  代價要講清楚：第一次連線時若有人在路上（DNS、區網、被劫持的 tailscale 名稱），會被當成那台主機；用密碼認證（sshpass／askpass）時密碼就送給他，之後同步過去的整棵原始碼（含工作區裡的 `.env` 之類，只排除 `.git` 與 `/target`）也都給他。
+  要避免就在啟用前先手動 `ssh <user>@<host>` 一次、核對指紋（或事先把 host key 放進 `known_hosts`），並優先用 SSH 金鑰（密碼留空）。symlink 同步時照原樣當 symlink 送（`rsync -a`，不跟隨、不改寫），所以不會經由 symlink 把來源樹外的檔案內容帶過去，但指向外面的 symlink 在遠端也會原樣存在。
+  **config.toml 手改的 host／user／remote_root 也要過 API 同一套字元檢查**（英數與 `.`、`-`、`_`、`/`，`remote_root` 不可含 `..` 或以 `-` 開頭）：不合法就退回本機並講原因，不會進 ssh（避免 `host = "-oProxyCommand=…"` 變 ssh 選項、`$(…)` 被遠端 shell 展開）。
   **連不進去（ssh 回 255：認證被拒、連不上、host key 不合）改成退回本機（125，issue #428，翻掉原本一律 126 的決定）**：
   遠端這時什麼都還沒跑，讓每個人的編譯整個失敗換不到任何東西。但不能靜默（issue #138 的教訓）——helper 在 stderr 講明
   「連的是誰、ssh 怎麼了、這次拿什麼登入（密碼檔／`identity_file`／ssh 預設金鑰）」，**第一行就要自己講完
