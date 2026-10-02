@@ -397,6 +397,14 @@ am_agent_start() {
         printf 'agents-manager: agent start 沒有 --pane（或是空的，多半是前面的 pane split 失敗）；先 herdr pane split 開新 pane，再把新 pane id 給 --pane。沒有呼叫 herdr\n' >&2
         exit 2
     fi
+    # 目標 pane 裡已經有 agent（別顆 bot 的 pane、拿錯的 id）就一個字都不送：補送 env 那行會被打進那顆 agent 的
+    # 輸入框（2026-10-02 A issuers-1 拿 wW:p3 去開 child，那是別顆 bot 的 pane，使用者收到一行 ` . '/tmp/am-env…'`）。
+    # 問不到（pane 不在、herdr 沒回）就照舊交給 herdr 自己判斷，只有確定有 agent 才擋。
+    _tagent=$("$AM_HERDR" pane get "$_pane" 2>/dev/null | tr ',' '\n' | sed -n 's/.*"agent" *: *"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ -n "$_tagent" ]; then
+        printf 'agents-manager: --pane %s 裡已經在跑 %s，不是空的 shell；先 herdr pane split 開新 pane，再把新 pane id 給 --pane。沒有送任何東西\n' "$_pane" "$_tagent" >&2
+        exit 2
+    fi
     am_spawn_begin || exit $?
     trap 'am_spawn_abort; exit 130' INT TERM
     am_reexport_env_before_start "$_pane"
@@ -1989,6 +1997,25 @@ mod tests {
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude"]);
         assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude"]);
         assert!(!log.exists() || std::fs::read_to_string(&log).unwrap().trim().is_empty(), "沒有目標 pane，不猜著補");
+    }
+
+    /// 2026-10-02：別顆 bot 拿錯 pane id、指到一個正在跑 agent 的 pane——補送 env 那行會打進那顆 agent 的輸入框。
+    /// `pane get` 說裡面有 agent 就擋；問不到（pane 不在）照舊交給 herdr。
+    #[test]
+    fn agent_start_never_types_into_a_pane_that_already_runs_an_agent() {
+        let s = Sandbox::new();
+        let log = s.dir.join("sendtext.log");
+        let busy = r#"{"id":"cli:pane:get","result":{"pane":{"agent":"claude","agent_status":"working","pane_id":"w2:p3"}}}"#;
+        let env = [("AM_AGENT_NAME", "p-1"), ("HERDR_PANE_ID", "w1:p1"), ("AM_TEST_PANE_JSON", busy), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap())];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w2:p3"]);
+        assert_eq!(rc, 2, "{err}");
+        assert!(out.is_empty() && err.contains("已經在跑 claude"), "{out:?} {err}");
+        assert!(!log.exists() || std::fs::read_to_string(&log).unwrap().trim().is_empty(), "那顆 agent 一個字都不能收到");
+        // 空的 shell pane（agent 是 null）照常開。
+        let shell = r#"{"id":"cli:pane:get","result":{"pane":{"agent":null,"agent_status":"unknown","pane_id":"w2:p4"}}}"#;
+        let env = [("AM_AGENT_NAME", "p-1"), ("HERDR_PANE_ID", "w1:p1"), ("AM_TEST_PANE_JSON", shell), ("AM_TEST_SENDTEXT_LOG", log.to_str().unwrap())];
+        let (_, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w2:p4"]);
+        assert_eq!(rc, 0, "{err}");
     }
 
     /// 2026-10-01：`pane split` 失敗、`--pane ""` 傳下來時，shim 退回 $HERDR_PANE_ID（呼叫者自己的 pane），
