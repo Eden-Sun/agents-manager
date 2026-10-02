@@ -2223,6 +2223,8 @@ pane 沒有立即影響。等這套機制在正式環境跑穩，`cargo-slot.sh`
   不在的收編）。刪除專案照舊要求「沒有 active run」，所以移交中的專案刪不掉，要先收回。
 - UI：側欄專案標題標「由 <host> 管理」，輸入框鎖住並寫明原因，bot 選單的「啟動」停用。
 
+> **角色 bot 的認定（AGM 權限提升的防線）**：巡檢／協調者**只由 DB 裡登記的 bot id 認定**（`supervisors.bot_id`、`supervisor_roles.bot_id`），每次請求都讀 DB（`roles::role_of_bot`），角色換人後舊 bot 立刻失效；改名、改 identity、改 persona 都不影響。登記只發生在 setup：重跑 setup 時「還沒記過 bot id、config 裡卻已有同名 bot」只接手 **setup 自己留了記號**（`create_request_id = agm-role-setup:<role>`）的那一顆（#181 的做到一半失敗恢復）；沒有記號的同名 bot 是別人建的 → 409 `name_taken`，不接手、設定一個字不改；`POST /projects/{id}/bots` 的 `client_request_id` 不收 `agm-role-setup:` 前綴，記號偽造不了。AGM 的管理面（setup／start／stop／fallback、交辦與裁示、管理摘要、ops-alert、CLI 更新、協調者的 setup／start／stop）一律由 `bot_requests::forbid_plain_bot` 把關：被證明身分的一般 bot 403 `role_required`。
+
 ### 6.5i bot 的指示檔：`[agents]` 指定的 agent md（使用者 2026-10-01）
 
 以前 claude bot 讀帳號層的 `~/.claude*/CLAUDE.md` 加 repo 的 CLAUDE.md，codex 讀 AGENTS.md：cc0／cc1／cc2 各一份、早就不同步（cc1 是舊版、cc2 沒有），

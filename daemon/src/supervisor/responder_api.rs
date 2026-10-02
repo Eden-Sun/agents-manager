@@ -19,13 +19,13 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
-/// 掛在 `/api` 底下、auth layer 之內。
-pub fn routes() -> Router<Arc<App>> {
+/// 掛在 `/api` 底下、auth layer 之內。setup／start／stop 是 AGM 的管理面：被證明身分的一般 bot 403（`forbid_plain_bot`）。
+pub fn routes(app: Arc<App>) -> Router<Arc<App>> {
     Router::new()
         .route("/supervisor/responder", get(get_responder))
-        .route("/supervisor/responder/setup", post(post_setup))
-        .route("/supervisor/responder/start", post(post_start))
-        .route("/supervisor/responder/stop", post(post_stop))
+        .route("/supervisor/responder/setup", post(post_setup).layer(axum::middleware::from_fn_with_state(app.clone(), super::bot_requests::gate_plain_bots)))
+        .route("/supervisor/responder/start", post(post_start).layer(axum::middleware::from_fn_with_state(app.clone(), super::bot_requests::gate_plain_bots)))
+        .route("/supervisor/responder/stop", post(post_stop).layer(axum::middleware::from_fn_with_state(app.clone(), super::bot_requests::gate_plain_bots)))
         .route("/supervisor/responder/persona", get(get_persona).put(put_persona))
 }
 
