@@ -82,3 +82,20 @@ test('run.background_jobs：null＝巡邏還沒看過（保留 null）、沒帶�
   assert.equal(toRun({ ...base, background_jobs: 2 })?.background_jobs, 2)
   assert.equal(toRun({ ...base, background_jobs: -1 })?.background_jobs, 0)
 })
+
+test('run.background_tasks／session_crons：hook 報的明細照收、壞形狀丟掉、沒帶＝null（舊 daemon／畫面判斷）', () => {
+  const base = { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle' }
+  assert.equal(toRun({ ...base })?.background_tasks, null)
+  assert.equal(toRun({ ...base, background_tasks: null })?.background_tasks, null)
+  assert.deepEqual(toRun({ ...base, background_tasks: [] })?.background_tasks, [], '報過「沒有」不是 null')
+  const r = toRun({
+    ...base,
+    background_tasks: [{ id: 'a', type: 'shell', status: 'running', description: '等 build', command: 'sleep 1' }, 5, { id: 'b' }],
+    session_crons: [{ id: 'c', schedule: '0 9 * * *', recurring: true, prompt: 'p' }, 'x'],
+  })
+  assert.deepEqual(r?.background_tasks, [
+    { id: 'a', type: 'shell', status: 'running', description: '等 build', command: 'sleep 1' },
+    { id: 'b', type: 'unknown', status: '', description: '' },
+  ])
+  assert.deepEqual(r?.session_crons, [{ id: 'c', schedule: '0 9 * * *', recurring: true, prompt: 'p' }])
+})

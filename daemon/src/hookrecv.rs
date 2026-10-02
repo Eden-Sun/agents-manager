@@ -1085,6 +1085,14 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         admitted = owner.admit(&r.id);
     }
 
+    // claude ≥ 2.1.287 的 Stop 自己報背景工作（`background_tasks`）：以它為準，不用等畫面巡邏（`background_hook.rs`）。
+    // 放在世代圍籬之後：上一代的 Stop 不能改這一代的帳。
+    if body.provider == "claude" && matches!(&kind, HookKind::TurnComplete { .. }) {
+        if let Some(r) = run.as_ref() {
+            crate::background_hook::on_stop(app, r, &body.payload).await;
+        }
+    }
+
     // Codex's usage-reset hint is a TUI row, not in the payload; give the pane a moment to render it.
     if body.provider == "codex" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {

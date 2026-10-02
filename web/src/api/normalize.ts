@@ -1,6 +1,8 @@
 /** Tolerant decoders for daemon payloads: accept plausible shapes (SQLite 0/1 booleans, JSON-string fields, nested or flat bots/runs). */
 
 import type {
+  BackgroundTask,
+  SessionCron,
   HostBaseline,
   MemOwner,
   MemProcess,
@@ -75,6 +77,34 @@ function str(v: unknown, fallback = ''): string {
   if (typeof v === 'string') return v
   if (typeof v === 'number' || typeof v === 'boolean') return String(v)
   return fallback
+}
+
+function asRecords(v: unknown): Record<string, unknown>[] | null {
+  return Array.isArray(v) ? v.filter((x): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)) : null
+}
+
+/** 沒帶／不是陣列＝null（沒報過）；空陣列是「報過：沒有」。 */
+function toBackgroundTasks(v: unknown): BackgroundTask[] | null {
+  return (
+    asRecords(v)?.map((t) => ({
+      id: typeof t.id === 'string' ? t.id : '',
+      type: typeof t.type === 'string' && t.type !== '' ? t.type : 'unknown',
+      status: typeof t.status === 'string' ? t.status : '',
+      description: typeof t.description === 'string' ? t.description : '',
+      ...(typeof t.command === 'string' ? { command: t.command } : {}),
+    })) ?? null
+  )
+}
+
+function toSessionCrons(v: unknown): SessionCron[] | null {
+  return (
+    asRecords(v)?.map((c) => ({
+      id: typeof c.id === 'string' ? c.id : '',
+      schedule: typeof c.schedule === 'string' ? c.schedule : '',
+      recurring: c.recurring === true,
+      prompt: typeof c.prompt === 'string' ? c.prompt : '',
+    })) ?? null
+  )
 }
 
 function optStr(v: unknown): string | null {
@@ -409,6 +439,8 @@ export function toRun(v: unknown, botId?: string): Run | null {
     // null＝巡邏還沒看過這個 run（#767，沒有證據）；沒帶（舊 daemon）照舊當 0。
     // （`pick` 把 null 當沒有，所以這裡直接讀欄位。）
     background_jobs: v.background_jobs === null ? null : Math.max(0, Math.floor(num(pick(v, 'background_jobs')))),
+    background_tasks: toBackgroundTasks(v.background_tasks),
+    session_crons: toSessionCrons(v.session_crons),
     turn_error: optStr(pick(v, 'turn_error')),
     // SPEC §4.4a：null = daemon 不知道，不能當 false
     runtime_model: optStr(pick(v, 'runtime_model')),

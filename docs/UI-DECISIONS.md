@@ -767,6 +767,7 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
   一律走 `botStateLabel`／`StatusLamp` 的 `background`（文案同一來源）——idle 的綠點外圈多一圈 accent 呼吸環，tooltip／aria-label 寫「背景執行中（N）」，
   主力晶片平常不畫 idle，有背景工作時畫。標題列仍**不畫文字徽章**（上一條 2026-09-30 的決定不翻案），只有燈與 tooltip 一致。
 - 驗證：mock 起前端，把 run 的 `background_jobs` 設成 1／2。
+- hook 報了明細（`run.background_tasks`，claude ≥ 2.1.287）時，輸入框上方那條多兩段小字：最多三行 `type：描述`（沒有描述用命令）、超過折成「另有 N 個」，以及 `session_crons` 的「另有 N 個排程會叫醒它」。側欄「背景 N」不變。沒有明細（舊版 claude、codex）整條跟以前一樣。
 
 ![桌機](screenshots/background-jobs/bg-light.png) ![手機](screenshots/background-jobs/bg-mobile-dark.png)
 

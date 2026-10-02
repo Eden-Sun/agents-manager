@@ -1881,6 +1881,9 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `status_json` | statusLine 壓縮前的原始 JSON（`transcript_path` 以外整份），daemon 補 `account_email`（讀該身份設定目錄 `.claude.json` 的 `oauthAccount.emailAddress`）。變了才寫 |
 | `herdr_session` | bot 與 run 都有；一般為 `null`（沿用 host 設定），從本機 `default` session 採用的是 `"default"`（SPEC §6.5.1） |
 | `background_jobs` | 回合結束後畫面底部還標著的背景工作數（claude 模式列的 `N shell(s)`、codex 的 `N background terminal(s) running`），`0`＝巡邏看過、沒有；`null`＝巡邏還沒看過這個 run（daemon 剛重啟、新 run、畫面讀不到），沒有證據（SPEC §6.14，issue #714／#767）。只在 `GET /api/state` 與 WS `bot_status` 的 run 物件裡；記憶體裡的數字、不在 DB，daemon 重啟後最多晚一輪（30 秒）補上。不影響送 prompt |
+| `background_source` | `"hook"`＝這個數字來自 claude Stop hook 的 `background_tasks`（≥ 2.1.287）；`null`＝畫面判斷（舊版 claude、codex、hook 帳過期被畫面校正）。SPEC §6.14 |
+| `background_tasks` | 只有 `background_source:"hook"` 時是陣列，否則 `null`：`[{id, type, status, description, command?}]`（`type`：`shell`／`subagent`／`monitor`／`workflow`…；最多 20 筆，`description`／`command` 各截 200 字）。**空陣列＝hook 報過「沒有」**，不是 `null`。常駐服務（listen port 的背景 shell）仍在清單裡，但不計入 `background_jobs` |
+| `session_crons` | 同一則 Stop 報的 session 排程 `[{id, schedule, recurring, prompt}]`（/loop、ScheduleWakeup、CronCreate），`null` 規則同上。**不計入 `background_jobs`**，只是資訊 |
 | `update_notice` | 有新版等著處理，或 `null`（SPEC §3.1）。claude：固定字串 `"Update installed · Restart to update"`（已下載，重啟就換）；單顆套用 `POST /bots/{id}/restart`，全部 `POST /bots/restart-idle`。**codex**（issue #388）：以 `codex 有新版` 開頭，`codex 有新版 0.154.0 → 0.155.1，需安裝後重啟`（**還沒安裝**，重啟換不到；要先裝）或 `codex 有新版 0.155.1（這個 run 跑的是 0.154.0），已安裝，重啟套用`；`POST /bots/restart-idle` 只收「已安裝」的 codex（「需安裝」的列進 `skipped`，`needs_manual_install`），要先裝就走 `POST /hosts/{name}/cli-update`（§12.7a，裝好接著重啟） |
 | `runtime_model` / `runtime_effort` / `runtime_fast` | run **實際**在跑的值（SPEC §4.4a），跟 `bot.*`（下次啟動的設定）分開。三個都 `null` = 不知道（收編的 pane），前端不比對不標 |
 | `runtime_identity` | run 用哪個身分起來的（issue #238）：`""`＝沒有身分（預設帳號）、`null`＝不知道（收編的 pane、升級前的舊列）。改了 `bot.identity` 之後、重啟之前兩者不同；額度一律記在這個身分上 |

@@ -1,0 +1,18 @@
+{
+  "background_tasks": [
+    {"command": "sleep 600 && echo done", "description": "wait for the remote build", "id": "b4tv6m45u", "status": "running", "type": "shell"},
+    {"command": "pnpm dev -p 3200", "description": "dev server", "id": "bmw0irxkz", "status": "running", "type": "shell"}
+  ],
+  "cwd": "/home/u/project/demo",
+  "effort": {"level": "high"},
+  "hook_event_name": "Stop",
+  "last_assistant_message": "已丟到背景",
+  "permission_mode": "bypassPermissions",
+  "prompt_id": "f2aeb035-8e97-40cc-a5f7-1cc272833e7a",
+  "session_crons": [
+    {"id": "c1", "prompt": "check the build", "recurring": false, "schedule": "30 14 2 10 *"}
+  ],
+  "session_id": "f5cace31-60cd-4577-9681-a8c96cc7db98",
+  "stop_hook_active": false,
+  "transcript_path": "/home/u/.claude/projects/-home-u-project-demo/f5cace31-60cd-4577-9681-a8c96cc7db98.jsonl"
+}

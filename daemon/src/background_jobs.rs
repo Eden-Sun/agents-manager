@@ -117,7 +117,7 @@ const PS_ARGS: &str = "ps -Awwo pid=,ppid=,args= 2>/dev/null";
 const LISTEN_MARK: &str = "---AM-LISTEN---";
 
 /// 這個 run 的 pane 底下有幾個背景 shell 是常駐服務。讀不到任何一塊都回 0。
-async fn services(app: &Arc<App>, run: &db::Run, client: &crate::herdr::HerdrClient, pane: &str) -> u32 {
+pub(crate) async fn services(app: &Arc<App>, run: &db::Run, client: &crate::herdr::HerdrClient, pane: &str) -> u32 {
     let Some(shell) = client.pane_shell(pane).await.ok().and_then(|s| s.shell_pid) else { return 0 };
     let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { return 0 };
     let Some(conn) = app.hosts.get(&host).await else { return 0 };
@@ -139,9 +139,14 @@ async fn services(app: &Arc<App>, run: &db::Run, client: &crate::herdr::HerdrCli
 
 /// 巡邏讀到一份畫面：數字變了才記、才推 `bot_status`。
 pub async fn observe(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str, client: &crate::herdr::HerdrClient, pane: &str) {
-    let mut n = parse(kind, screen);
+    let raw = parse(kind, screen);
+    let mut n = raw;
     if n > 0 && kind == "claude" {
         n = n.saturating_sub(services(app, run, client, pane).await);
+    }
+    // claude 的 Stop hook 自己報過背景工作（`background_hook.rs`）就以它為準；沒報過（舊版）才是畫面的數字。
+    if kind == "claude" {
+        n = crate::background_hook::reconcile(app, &run.id, n, raw);
     }
     let changed = {
         let mut m = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner());
@@ -170,6 +175,7 @@ pub async fn refresh(app: &Arc<App>, run: &db::Run, kind: &str) {
 /// 這一輪沒看到的 run（結束了）不留帳。
 pub fn retain_runs(app: &App, active: &[String]) {
     app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+    crate::background_hook::retain_runs(app, active);
 }
 
 /// API 的 run 物件加上 `background_jobs`（`GET /api/state` 與 `bot_status` 共用）。
@@ -178,6 +184,11 @@ pub fn run_json<T: serde::Serialize>(app: &App, run: &Option<T>, run_id: Option<
     if let (Some(o), Some(id)) = (v.as_object_mut(), run_id) {
         // 沒觀察過是 `null`，不是 0（#767）。
         o.insert("background_jobs".into(), known(app, id).into());
+        // claude 的 Stop hook 報的明細（`background_hook.rs`）；沒報過（舊版 claude、剛重啟）都是 null，數字來自畫面。
+        let (tasks, crons) = crate::background_hook::details(app, id);
+        o.insert("background_source".into(), if tasks.is_null() { Value::Null } else { "hook".into() });
+        o.insert("background_tasks".into(), tasks);
+        o.insert("session_crons".into(), crons);
     }
     v
 }
