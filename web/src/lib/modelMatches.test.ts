@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { modelMatches } from './ModelPicker.tsx'
+import { modelMatches } from './modelMatches.ts'
 
 // 2026-10-02：存的是 `claude-opus-5-5`（#400 把 `opus` 換成完整版號），按鈕是 `opus`，以前一顆都不亮。
 test('完整版號對到系列別名的按鈕；別的系列、空值都不算', () => {
