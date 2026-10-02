@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useEnterCommit } from '../hooks/useEnterCommit'
+import { useUnsavedGuard } from '../hooks/useUnsavedGuard'
 import { isImeEnter } from '../lib/ime'
 import { useStore } from '../store/store'
 import './projectNameField.css'
@@ -40,6 +41,8 @@ export function ProjectNameField({
   }, [editing])
 
   const trimmed = draft.trim()
+  // 改名打到一半（輸入框開著、字跟原本不同）：關分頁會丟掉。
+  useUnsavedGuard(editing && trimmed !== '' && trimmed !== label)
 
   const commit = () => {
     onEditing(false)

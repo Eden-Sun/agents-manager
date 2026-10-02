@@ -6,6 +6,7 @@ import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostN
 import { canLoginInSession } from '../lib/quotaLogin'
 import { startCliLogin } from '../lib/cliLogin'
 import { envDisplayText } from './identityEnv'
+import { UnsavedGuard } from './UnsavedGuard'
 import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
@@ -413,6 +414,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       aria-modal={phone ? 'true' : undefined}
       aria-label={`${bot.name} 的設定`}
     >
+      <UnsavedGuard dirty={dirty} />
       <div className="bs-head">
         <strong>Bot 設定</strong>
         <KindTag kind={bot.kind} />

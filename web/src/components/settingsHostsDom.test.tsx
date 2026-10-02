@@ -31,7 +31,6 @@ const hostNames = () => useStore.getState().hosts.map((h) => h.name)
 const input = (placeholder: string) => document.querySelector<HTMLInputElement>(`.hosts-panel form input[placeholder="${placeholder}"]`)!
 const buttonByText = (root: ParentNode, text: string) => [...root.querySelectorAll('button')].find((b) => b.textContent?.includes(text))!
 const posts = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'POST' && r.path === '/api/hosts')
-const errorNotices = () => useStore.getState().notices.filter((n) => n.kind === 'error').map((n) => n.text)
 
 async function open() {
   const requests = mockApi(mock)
@@ -46,34 +45,39 @@ async function fillAndSubmit(name: string, ssh: string) {
   await click(buttonByText(document.body, '新增並連線'))
 }
 
+// 這兩種 daemon 會 400；前端現在先擋（`lib/hostForm`，跟 `config::host_target_problem` 同一條規則）：說原因、不送請求、表單留著。
 for (const [label, ssh] of [
   ['開頭是 - 的 ssh 目標（會被 ssh 當選項）', '-oProxyCommand=touch /tmp/pwned'],
   ['含空白的 ssh 目標', 'host name'],
 ] as const) {
-  it(`新增主機：${label}被 400 擋下，畫面有原因、表單留著、清單不變`, async () => {
+  it(`新增主機：${label}前端先擋，畫面有原因、不送請求、表單留著、清單不變`, async () => {
     const requests = await open()
     const before = hostNames()
-    await fillAndSubmit('evil1', ssh)
-    await until(() => errorNotices().length > 0, '錯誤通知')
-    assert.equal(posts(requests).length, 1)
-    assert.match(errorNotices().at(-1)!, /ssh/i, '通知講到 ssh 目標')
-    assert.match(errorNotices().at(-1)!, /400/, '帶 HTTP 400')
+    await typeInto(input('m4p'), 'evil1')
+    await typeInto(input('m4p@100.112.229.82'), ssh)
+    assert.match(document.querySelector('.hosts-panel form')!.textContent ?? '', /ssh 目標要是主機/, '畫面說原因')
+    assert.equal(buttonByText(document.body, '新增並連線').disabled, true, '按鈕鎖住')
+    assert.equal(posts(requests).length, 0, '一個請求都沒送')
     assert.deepEqual(hostNames(), before, '沒有多出主機')
     assert.equal(input('m4p').value, 'evil1', '名稱還在，讓人改')
     assert.equal(input('m4p@100.112.229.82').value, ssh, 'ssh 欄位還在，讓人改')
-    assert.equal(buttonByText(document.body, '新增並連線').disabled, false, '按鈕回到可按')
-    assert.equal(document.querySelector('.hosts-panel > .host-result'), null, '不是「連線失敗」那種結果條')
   })
 }
 
-it('新增主機：非法 herdr_session（含 /）也是 400', async () => {
+it('新增主機：非法 herdr_session（含 /）、打錯的 port 前端先擋', async () => {
   const requests = await open()
   await click(buttonByText(document.body, '進階'))
-  const session = [...document.querySelectorAll<HTMLInputElement>('.hosts-panel form input')].find((i) => i.value === 'agents-manager')!
-  await typeInto(session, '../../etc')
-  await fillAndSubmit('evil2', 'build-box')
-  await until(() => errorNotices().some((t) => /herdr_session/.test(t)), 'herdr_session 的錯誤通知')
-  assert.equal(posts(requests).at(-1)!.body && (posts(requests).at(-1)!.body as { herdr_session: string }).herdr_session, '../../etc')
+  const inputs = () => [...document.querySelectorAll<HTMLInputElement>('.hosts-panel form input')]
+  await typeInto(inputs().find((i) => i.value === 'agents-manager')!, '../../etc')
+  await typeInto(input('m4p'), 'evil2')
+  await typeInto(input('m4p@100.112.229.82'), 'build-box')
+  assert.equal(buttonByText(document.body, '新增並連線').disabled, true)
+  assert.match(document.querySelector('.hosts-panel form')!.textContent ?? '', /herdr_session 要是/)
+  await typeInto(inputs().find((i) => i.value === '../../etc')!, 'agents-manager')
+  await typeInto(inputs().find((i) => i.value === '22')!, '2222x')
+  assert.equal(buttonByText(document.body, '新增並連線').disabled, true, '「2222x」以前悄悄變成 22')
+  assert.match(document.querySelector('.hosts-panel form')!.textContent ?? '', /port 要是/)
+  assert.equal(posts(requests).length, 0)
   assert.equal(hostNames().includes('evil2'), false)
 })
 
