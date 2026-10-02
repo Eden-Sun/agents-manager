@@ -1,11 +1,15 @@
 /** mock 的「補充」「插隊」要跟 daemon 同形：補充帶 `record` 才記、掛在進行中的回合；插隊真的打斷才標。 */
-import test from 'node:test'
+import test, { after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { MockTransport } from './mock.ts'
+import { manualMockClock, useManualMockClock } from './mockClock.ts'
 
 interface Msg { id: string; role: string; turn_id: string | null; content: string; sent_via?: string | null }
 interface BotRow { id: string; kind: string; run?: { state?: string } | null }
 
+// mock 的 bot 啟動／回合是 timer：用虛擬時間，不在牆鐘上輪詢等它（高負載下 5 秒的 test timeout 會先到）。
+before(() => void useManualMockClock(true))
+after(() => void useManualMockClock(false))
 const mock = new MockTransport()
 const bots = async () => ((await mock.request('GET', '/state')) as { projects: { bots: BotRow[] }[] }).projects.flatMap((p) => p.bots)
 let started: Promise<string> | null = null
@@ -17,7 +21,7 @@ const claudeBot = () =>
     await mock.request('POST', `/bots/${b.id}/start`, {})
     for (let i = 0; i < 100; i++) {
       if ((await bots()).find((x) => x.id === b.id)?.run?.state === 'running') return b.id
-      await new Promise((r) => setTimeout(r, 50))
+      await manualMockClock.advance(250)
     }
     throw new Error('mock 的 claude 沒起來')
   })())
