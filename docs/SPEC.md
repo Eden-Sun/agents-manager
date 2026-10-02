@@ -2221,6 +2221,12 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   argv 帶 `-p am-child-<bot id>`＋`-c project_doc_max_bytes=0`（呼叫者自己帶了 `-p`／`--profile` 就不補，stderr 講沒帶到指示）；
   grok 的 `--rules` 也沒有讀檔版，給一行「先完整讀 `<路徑>` 並照做」。呼叫者自己帶了同類參數就尊重。
   daemon 自己開 bot 時（`HerdrClient::agent_start`）同理把 persona 裡的所有控制字元折成空白。
+  **注入的細節（#772 審查）**：① codex profile 寫進去前先濾掉 TOML 字面字串不收的控制字元（只留 tab、換行；ESC、DEL、單獨的 CR、換頁都濾掉——不濾的話
+  真 codex 讀到會 `TOML parse error` 整個起不來）；結尾的單引號、反斜線、中文照舊保留。② profile 是 0600（內容是 AG Man 規則），暫存檔＋`mv` 換上，
+  同一顆 bot 同時開多個 codex child 讀到的永遠是完整一份；每次寫完順手掃掉超過 10 分鐘的 `am-child-*.config.toml.*` 暫存檔與超過 30 天沒重寫的 `am-child-*` profile
+  （每次開 child 都重寫，掃掉不會害到誰；CODEX_HOME 裡別的檔案不碰）。③ CODEX_HOME 寫不進去（是檔案、唯讀）：子 agent 照開、沒帶指示、stderr 講一聲。
+  ④ 注入的值（指示檔路徑、`AM_MODEL`、`AM_EFFORT`）含控制字元就不帶那個參數並在 stderr 講（`am_arg_ok`）——herdr 會因為一個壞參數拒絕整個 `agent start`。
+  ⑤ 指示檔路徑含空白、全形字、引號時仍是單一 argv 元素；grok 那句話把路徑用反引號框起來。
 - **讀不到不擋啟動**：檔案不存在或是空檔時 bot 照開，warn 並在對話裡寫一則 system 訊息講少了哪個檔。
 
 ### 6.5.1 採用使用者的 Herdr `default` session

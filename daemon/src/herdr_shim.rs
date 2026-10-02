@@ -67,32 +67,50 @@ am_child_of_value() {
     fi
 }
 
+# 注入的參數值不能含控制字元：herdr ≥0.9 只要有一個參數壞掉就拒絕整個 `agent start`（invalid_agent_argument，#772），
+# 子 agent 就開不起來。寧可不帶那個參數、說一聲。
+am_arg_ok() {
+    [ "$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177')" = "$1" ]
+}
+
 # 檔案內容 → TOML 多行字面字串（三個單引號包起來），給 codex 的 `developer_instructions`（§6.5i）。
 # 字面字串不跳脫任何字元，碰不到各家 awk／sed 的反斜線差異；內容本身有三個連續單引號就表示不了，回 1 讓呼叫端不帶。
+# TOML 多行字面字串不收控制字元（只有 tab 與換行可以；真 codex 讀到壞掉的 profile 整個起不來），所以先濾掉再包。
 am_toml_string_of_file() {
     _q3="'''"
-    if grep -qF "$_q3" "$1" 2>/dev/null; then
-        return 1
-    fi
-    printf '%s%s%s' "$_q3" "$(cat "$1")" "$_q3"
+    _body=$(LC_ALL=C tr -d '\000-\010\013-\037\177' < "$1" 2>/dev/null) || return 1
+    case "$_body" in
+        *"$_q3"*) return 1 ;;
+    esac
+    printf '%s%s%s' "$_q3" "$_body" "$_q3"
 }
 
 # codex 沒有「從檔案讀 developer_instructions」的參數；`-c developer_instructions=<內容>` 是多行，herdr ≥0.9.0
 # 的 `agent start` 擋所有控制字元（invalid_agent_argument，#772），壓成一行又會撞到打字長度上限（herdr.rs 的
 # `fit_command_line`）。改寫成 `$CODEX_HOME/<名>.config.toml`，argv 只帶 `-p <名>`；印出 profile 名，失敗回 1。
-# 每顆 bot 一個檔（同帳號的 bot 共用 CODEX_HOME），暫存檔＋mv 換上，兩個 child 同時開也不會讀到半份。
+# 每顆 bot 一個檔（同帳號的 bot 共用 CODEX_HOME），0600（內容是 AG Man 的規則）、暫存檔＋mv 換上，兩個 child 同時開也不會讀到半份。
+# 回傳碼：0＝成功（印 profile 名）、2＝寫不進去、3＝內容表示不了（三個連續單引號）。
 am_codex_instructions_profile() {
-    _toml=$(am_toml_string_of_file "$1") || return 1
+    _toml=$(am_toml_string_of_file "$1") || return 3
     _home=${CODEX_HOME:-$HOME/.codex}
     _name="am-child-$(printf '%s' "${AM_BOT_ID:-${AM_AGENT_NAME:-local}}" | tr -c 'A-Za-z0-9_-' '_')"
     _dst="$_home/$_name.config.toml"
+    _tmp="$_dst.$$"
     mkdir -p "$_home" 2>/dev/null
-    if printf 'developer_instructions = %s\n' "$_toml" > "$_dst.$$" 2>/dev/null && mv -f "$_dst.$$" "$_dst"; then
+    if ( umask 077; printf 'developer_instructions = %s\n' "$_toml" > "$_tmp" ) 2>/dev/null && mv -f "$_tmp" "$_dst" 2>/dev/null; then
+        am_sweep_codex_profiles "$_home"
         printf '%s' "$_name"
         return 0
     fi
-    rm -f "$_dst.$$"
-    return 1
+    rm -f "$_tmp"
+    return 2
+}
+
+# 殘留清理：寫到一半被殺掉的暫存檔（超過 10 分鐘）、超過 30 天沒重寫的 `am-child-*` profile。profile 每次開 child 都重寫，
+# 所以掃掉舊的不會害到誰；只認 `am-child-*.config.toml*`，CODEX_HOME 裡別的檔案（config.toml、自己的 profile）不碰。
+am_sweep_codex_profiles() {
+    find "$1" -maxdepth 1 \( -name 'am-child-*.config.toml.*' -mmin +10 -o -name 'am-child-*.config.toml' -mtime +30 \) -exec rm -f {} + 2>/dev/null
+    return 0
 }
 
 # permit 的有效期要涵蓋 `agent start --timeout`（herdr 最多等 300 秒，預設 30 秒；子 agent 慢慢啟動時不能在 finish 之前過期）。
@@ -333,13 +351,21 @@ am_agent_start() {
     # 側欄就多出一顆「claude-fable-5-1」看不懂的。母 bot 的模型／強度在 AM_MODEL / AM_EFFORT，
     # 同 kind 就補上；自己有寫 --model 的一律尊重。
     if [ -n "${AM_MODEL:-}" ] && [ "$_has_model" = 0 ] && { [ -z "$_kind" ] || [ "$_kind" = "${AM_KIND:-}" ]; }; then
-        [ "$_stop" = 1 ] || set -- "$@" --
-        _stop=1
-        set -- "$@" --model "$AM_MODEL"
-        if [ -n "${AM_EFFORT:-}" ] && [ "$_has_effort" = 0 ] && [ "${AM_KIND:-}" = "claude" ]; then
-            set -- "$@" --effort "$AM_EFFORT"
+        if am_arg_ok "$AM_MODEL"; then
+            [ "$_stop" = 1 ] || set -- "$@" --
+            _stop=1
+            set -- "$@" --model "$AM_MODEL"
+            if [ -n "${AM_EFFORT:-}" ] && [ "$_has_effort" = 0 ] && [ "${AM_KIND:-}" = "claude" ]; then
+                if am_arg_ok "$AM_EFFORT"; then
+                    set -- "$@" --effort "$AM_EFFORT"
+                else
+                    printf 'agents-manager: AM_EFFORT 含控制字元，子 agent 這次沒帶 --effort（herdr 會拒絕整個 agent start）\n' >&2
+                fi
+            fi
+            printf 'agents-manager: 子 agent 沒指定模型，沿用母 bot 的 `%s`\n' "$AM_MODEL" >&2
+        else
+            printf 'agents-manager: AM_MODEL 含控制字元，子 agent 這次沒帶 --model（herdr 會拒絕整個 agent start）\n' >&2
         fi
-        printf 'agents-manager: 子 agent 沒指定模型，沿用母 bot 的 `%s`\n' "$AM_MODEL" >&2
     fi
     # §6.5i：子 agent 的指示跟母 bot 同一個來源（`AM_INSTRUCTIONS_FILE`＝AG Man 規則＋`[agents]` 的 agent md），
     # CLI 自己的指示檔一律不讀：claude 靠繼承的 CLAUDE_CODE_DISABLE_CLAUDE_MDS，codex 補 project_doc_max_bytes=0。
@@ -351,9 +377,13 @@ am_agent_start() {
     case "${_kind:-${AM_KIND:-}}" in
         claude)
             if [ -n "$_instr" ]; then
-                [ "$_stop" = 1 ] || set -- "$@" --
-                _stop=1
-                set -- "$@" --append-system-prompt-file "$_instr"
+                if am_arg_ok "$_instr"; then
+                    [ "$_stop" = 1 ] || set -- "$@" --
+                    _stop=1
+                    set -- "$@" --append-system-prompt-file "$_instr"
+                else
+                    printf 'agents-manager: 指示檔路徑含控制字元，子 agent 這次沒帶指示檔（herdr 會拒絕整個 agent start）\n' >&2
+                fi
             fi
             ;;
         codex)
@@ -362,12 +392,13 @@ am_agent_start() {
                 _stop=1
                 if [ "$_has_profile" = 1 ]; then
                     printf 'agents-manager: 你自己帶了 codex 的 -p/--profile，子 agent 這次沒帶指示檔 %s\n' "$_instr" >&2
-                elif _prof=$(am_codex_instructions_profile "$_instr"); then
-                    set -- "$@" -p "$_prof"
-                elif grep -qF "'''" "$_instr" 2>/dev/null; then
-                    printf 'agents-manager: %s 含有三個連續單引號，TOML 表示不了，子 agent 這次沒帶指示檔\n' "$_instr" >&2
                 else
-                    printf 'agents-manager: 寫不進 codex 的 profile（%s），子 agent 這次沒帶指示檔\n' "${CODEX_HOME:-$HOME/.codex}" >&2
+                    _prof=$(am_codex_instructions_profile "$_instr")
+                    case $? in
+                        0) set -- "$@" -p "$_prof" ;;
+                        3) printf 'agents-manager: %s 含有三個連續單引號，TOML 表示不了，子 agent 這次沒帶指示檔\n' "$_instr" >&2 ;;
+                        *) printf 'agents-manager: 寫不進 codex 的 profile（%s），子 agent 這次沒帶指示檔\n' "${CODEX_HOME:-$HOME/.codex}" >&2 ;;
+                    esac
                 fi
             fi
             # 只在 §6.5i 底下（daemon 給了 AM_INSTRUCTIONS_FILE）才關：人工 shell 的 codex 照它自己的習慣。
@@ -379,10 +410,15 @@ am_agent_start() {
             ;;
         grok)
             if [ -n "$_instr" ]; then
-                [ "$_stop" = 1 ] || set -- "$@" --
-                _stop=1
-                # grok 的 `--rules` 只收字串、沒有讀檔版：給一行指向檔案的指示，讓它開工前自己讀。
-                set -- "$@" --rules "AG Man 指示（硬規則，效力同系統指示）在 ${_instr}：開始任何工作前先完整讀過並照做。"
+                if am_arg_ok "$_instr"; then
+                    [ "$_stop" = 1 ] || set -- "$@" --
+                    _stop=1
+                    # grok 的 `--rules` 只收字串、沒有讀檔版：給一行指向檔案的指示，讓它開工前自己讀。
+                    # 路徑用反引號框起來：有空白時才分得出哪裡到哪裡。
+                    set -- "$@" --rules "AG Man 指示（硬規則，效力同系統指示）在 \`${_instr}\`：開始任何工作前先完整讀過並照做。"
+                else
+                    printf 'agents-manager: 指示檔路徑含控制字元，子 agent 這次沒帶指示檔（herdr 會拒絕整個 agent start）\n' >&2
+                fi
             fi
             ;;
     esac
@@ -2173,5 +2209,203 @@ mod tests {
         assert_eq!(out.get(1).map(String::as_str), Some("prompt"));
         assert_ne!(out.get(2).map(String::as_str), Some(parent), "prompt 不能打回母 bot：{out:?}");
         assert_eq!(out.get(2).map(String::as_str), Some(names[0].as_str()), "prompt 用的名字要跟 start 一樣：{out:?}");
+    }
+
+    // ───────── #772 注入方式的對抗式審查（fix/herdr-shim-inject-review） ─────────
+
+    /// 子 agent 的 codex 環境：回 `(sandbox, instructions 檔, CODEX_HOME)`。
+    fn codex_child(s: &Sandbox, body: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
+        let f = s.dir.join("instructions.md");
+        std::fs::write(&f, body).unwrap();
+        (f, s.dir.join("codex-home"))
+    }
+
+    fn start_codex(s: &Sandbox, f: &Path, home: &Path, bot: &str) -> (Vec<String>, String, i32) {
+        s.run_full(
+            &[("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", bot), ("AM_INSTRUCTIONS_FILE", f.to_str().unwrap()), ("CODEX_HOME", home.to_str().unwrap())],
+            &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"],
+        )
+    }
+
+    /// codex 讀到壞掉的 profile 會整個起不來（`TOML parse error`，真 codex 0.160 實測）。指示檔裡的控制字元
+    /// （ESC、DEL、單獨的 CR、表單換頁…）在 TOML 多行字面字串裡不合法，所以要先濾掉；tab、換行、中文、反斜線、
+    /// 結尾的單引號照舊保留。
+    #[test]
+    fn the_codex_profile_is_valid_toml_whatever_control_characters_the_instructions_hold() {
+        let cases: [&[u8]; 5] = [
+            b"rule\x1b[31mred\x1b[0m\x7f\x0c end\r\nnext\rlone-cr\ttab \\ \xe4\xb8\xad\xe6\x96\x87\n",
+            b"ends with one quote '\n",
+            b"ends with two quotes ''\n",
+            b"has '' and ' inside, but never three\n",
+            b"\nstarts with a blank line\n",
+        ];
+        let expected = |raw: &[u8]| -> String {
+            // 跟 shim 的規則一樣：濾掉 TOML 字面字串不收的控制字元，保留 \t \n。
+            let kept: Vec<u8> = raw.iter().copied().filter(|b| !matches!(b, 0..=8 | 11..=31 | 127)).collect();
+            String::from_utf8(kept).unwrap().trim_end_matches('\n').to_string()
+        };
+        for (i, raw) in cases.iter().enumerate() {
+            let s = Sandbox::new();
+            let (f, home) = codex_child(&s, raw);
+            let (out, err, rc) = start_codex(&s, &f, &home, "b1");
+            assert_eq!(rc, 0, "case {i}: {err}");
+            assert!(out.iter().any(|a| a == "-p"), "case {i}: 指示該帶上：{out:?} {err}");
+            let text = std::fs::read_to_string(home.join("am-child-b1.config.toml")).unwrap();
+            let parsed: toml::Table = toml::from_str(&text).unwrap_or_else(|e| panic!("case {i}: profile 不是合法 TOML：{e}\n{text:?}"));
+            let got = parsed["developer_instructions"].as_str().unwrap();
+            // TOML 會吃掉開頭緊接的那一個換行，所以比對時兩邊都去掉開頭換行。
+            assert_eq!(got.trim_start_matches('\n'), expected(raw).trim_start_matches('\n'), "case {i}");
+        }
+    }
+
+    /// profile 內容是 AG Man 的規則：0600；寫到一半被殺掉留下的暫存檔、以及很久沒用的別顆 bot 的 profile 要清掉
+    /// （profile 每次開 child 都重寫，所以刪掉舊的不會害到誰），但 CODEX_HOME 裡不是我們的檔案一個都不能動。
+    #[test]
+    fn the_codex_profile_is_private_and_stale_leftovers_are_swept() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let s = Sandbox::new();
+        let (f, home) = codex_child(&s, b"rules\n");
+        std::fs::create_dir_all(&home).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
+        let age = |p: &Path, t: std::time::SystemTime| std::fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
+        let stale_tmp = home.join("am-child-b1.config.toml.4242");
+        let old_profile = home.join("am-child-gone.config.toml");
+        let fresh_profile = home.join("am-child-live.config.toml");
+        let mine = home.join("mine.config.toml");
+        let main_cfg = home.join("config.toml");
+        for p in [&stale_tmp, &old_profile, &fresh_profile, &mine, &main_cfg] {
+            std::fs::write(p, "x = 1\n").unwrap();
+        }
+        for p in [&stale_tmp, &old_profile, &mine, &main_cfg] {
+            age(p, old);
+        }
+        let (_, err, rc) = start_codex(&s, &f, &home, "b1");
+        assert_eq!(rc, 0, "{err}");
+        let mode = std::fs::metadata(home.join("am-child-b1.config.toml")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "profile 帶著 AG Man 規則，不該全世界可讀");
+        assert!(!stale_tmp.exists(), "寫到一半被殺掉的暫存檔要掃掉");
+        assert!(!old_profile.exists(), "很久沒用的 am-child profile 要掃掉");
+        assert!(fresh_profile.exists(), "新的別顆 bot profile 不能動");
+        assert!(mine.exists() && main_cfg.exists(), "不是 am-child-* 的檔案一個都不能動");
+        let left: Vec<String> = std::fs::read_dir(&home).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(!left.iter().any(|n| n.starts_with("am-child-b1.config.toml.")), "沒有暫存檔殘留：{left:?}");
+    }
+
+    /// CODEX_HOME 寫不進去（是個檔案、或唯讀）：子 agent 照開、只是沒帶指示，而且不留任何東西。
+    #[test]
+    fn an_unwritable_codex_home_still_starts_the_child_without_instructions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let s = Sandbox::new();
+        let (f, _) = codex_child(&s, b"rules\n");
+        let a_file = s.dir.join("not-a-dir");
+        std::fs::write(&a_file, "").unwrap();
+        let (out, err, rc) = start_codex(&s, &f, &a_file, "b1");
+        assert_eq!(rc, 0, "{err}");
+        assert!(!out.iter().any(|a| a == "-p"), "{out:?}");
+        assert!(err.contains("寫不進"), "{err}");
+
+        let ro = s.dir.join("ro-home");
+        std::fs::create_dir_all(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::write(ro.join("probe"), "").is_ok() {
+            return; // root 照樣寫得進唯讀目錄：這一段在 root 下沒有意義。
+        }
+        let (out, err, rc) = start_codex(&s, &f, &ro, "b1");
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(rc, 0, "{err}");
+        assert!(!out.iter().any(|a| a == "-p"), "{out:?}");
+        assert_eq!(std::fs::read_dir(&ro).unwrap().count(), 0, "唯讀目錄裡不留任何東西");
+    }
+
+    /// 同一顆 bot 同時開多個 codex child 都在改寫同一份 profile：讀的人任何時候都只能看到完整、合法的一份。
+    #[test]
+    fn concurrent_codex_children_of_one_bot_never_expose_a_half_written_profile() {
+        let s = std::sync::Arc::new(Sandbox::new());
+        let body = format!("{}\n", "規則 line with \\ and ' quote\n".repeat(4000));
+        let (f, home) = codex_child(&s, body.as_bytes());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let (stop, path, want) = (stop.clone(), home.join("am-child-b1.config.toml"), body.trim_end_matches('\n').to_string());
+            std::thread::spawn(move || {
+                let mut seen = 0;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                    let t: toml::Table = toml::from_str(&text).unwrap_or_else(|e| panic!("讀到半份 profile：{e}"));
+                    assert_eq!(t["developer_instructions"].as_str().unwrap(), want);
+                    seen += 1;
+                }
+                seen
+            })
+        };
+        let writers: Vec<_> = (0..6)
+            .map(|_| {
+                let (s, f, home) = (s.clone(), f.clone(), home.clone());
+                std::thread::spawn(move || start_codex(&s, &f, &home, "b1").2)
+            })
+            .collect();
+        for w in writers {
+            assert_eq!(w.join().unwrap(), 0);
+        }
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        reader.join().unwrap();
+        let left: Vec<String> = std::fs::read_dir(&home).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, ["am-child-b1.config.toml"], "沒有暫存檔殘留");
+    }
+
+    /// 指示檔路徑含空白、全形字、引號：整條路徑是一個 argv 元素，herdr 收得下，grok 的那句話裡路徑也要完整、可辨認。
+    #[test]
+    fn instruction_paths_with_spaces_and_full_width_characters_stay_one_argument() {
+        let s = Sandbox::new();
+        let dir = s.dir.join("全形 dir 'q' \"dq\"").join("with  space");
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("指示 檔.md");
+        std::fs::write(&f, "rules\n").unwrap();
+        let fp = f.to_str().unwrap();
+        let ch = s.dir.join("codex home");
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_INSTRUCTIONS_FILE", fp), ("CODEX_HOME", ch.to_str().unwrap())];
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0, "{err}");
+        assert_eq!(&out[out.len() - 2..], ["--append-system-prompt-file", fp], "{out:?}");
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "grok", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0, "{err}");
+        let rules = &out[out.iter().position(|a| a == "--rules").unwrap() + 1];
+        assert!(rules.contains(&format!("`{fp}`")), "路徑要用反引號框起來，有空白才分得出哪裡到哪裡：{rules}");
+        let (out, err, rc) = s.run_full(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
+        assert_eq!(rc, 0, "{err}");
+        assert!(out.iter().any(|a| a == "-p"), "{out:?}");
+        assert!(ch.join("am-child-b1.config.toml").exists(), "CODEX_HOME 有空白也寫得進去");
+    }
+
+    /// 注入的值（路徑、模型）含控制字元：herdr ≥0.9 會因為一個壞參數拒絕整個 `agent start`（#772），
+    /// 子 agent 就開不起來。寧可不帶那個參數、說一聲，也不要讓 herdr 收到。
+    #[test]
+    fn an_injected_value_with_a_control_character_is_dropped_not_sent_to_herdr() {
+        let s = Sandbox::new();
+        let weird = s.dir.join("line\nbreak.md");
+        std::fs::write(&weird, "rules\n").unwrap();
+        for kind in ["claude", "grok"] {
+            let (out, err, rc) = s.run_full(
+                &[("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_INSTRUCTIONS_FILE", weird.to_str().unwrap())],
+                &["agent", "start", "kid", "--kind", kind, "--pane", "w1:p9"],
+            );
+            assert_eq!(rc, 0, "{kind}: herdr 不該被餵控制字元：{out:?} {err}");
+            assert!(!out.iter().any(|a| a.starts_with("--append-system-prompt") || a == "--rules"), "{kind}: {out:?}");
+            assert!(err.contains("控制字元"), "{kind}: 要說一聲：{err}");
+        }
+        for model in ["opus\n", "op\tus", "opus\u{1b}[0m"] {
+            let (out, err, rc) = s.run_full(
+                &[("AM_AGENT_NAME", "p-1"), ("AM_KIND", "claude"), ("AM_MODEL", model)],
+                &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"],
+            );
+            assert_eq!(rc, 0, "{model:?}: {out:?} {err}");
+            assert!(!out.iter().any(|a| a == "--model"), "{model:?}: {out:?}");
+            assert!(err.contains("控制字元"), "{model:?}: {err}");
+        }
+        let (out, err, rc) = s.run_full(
+            &[("AM_AGENT_NAME", "p-1"), ("AM_KIND", "claude"), ("AM_MODEL", "opus"), ("AM_EFFORT", "high\n")],
+            &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"],
+        );
+        assert_eq!(rc, 0, "{out:?} {err}");
+        assert!(out.iter().any(|a| a == "--model") && !out.iter().any(|a| a == "--effort"), "{out:?}");
     }
 }
