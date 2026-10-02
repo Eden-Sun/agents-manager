@@ -87,12 +87,14 @@ test('換 pane 時清掉還沒送的鍵', () => {
 
 test('貼上走同一個佇列：打一半貼一段，順序不會反過來', async () => {
   const log: string[] = []
+  // 等「整串送完」的回報，不猜要等幾毫秒：一串 1ms 的 timer 在高負載下可能比一個 30ms 的等待還晚（5/40 紅過）。
+  const settled = deferred()
   const q = new KeyQueue(
     async (keys) => {
       log.push(`keys:${keys.join(',')}`)
       await new Promise((r) => setTimeout(r, 1))
     },
-    undefined,
+    () => settled.resolve(),
     async (text) => {
       log.push(`text:${text}`)
       await new Promise((r) => setTimeout(r, 1))
@@ -101,17 +103,21 @@ test('貼上走同一個佇列：打一半貼一段，順序不會反過來', as
   q.push(['e', 'c', 'h', 'o', 'space'])
   q.pushText('hello world')
   q.push(['enter'])
-  await new Promise((r) => setTimeout(r, 30))
+  await settled.promise
   assert.deepEqual(log, ['keys:e,c,h,o,space', 'text:hello world', 'keys:enter'])
 })
 
 test('沒給 sendText 時貼上直接丟掉，不會假裝送出去', async () => {
   const log: string[] = []
-  const q = new KeyQueue(async (keys) => {
-    log.push(keys.join(','))
-  })
+  const settled = deferred()
+  const q = new KeyQueue(
+    async (keys) => {
+      log.push(keys.join(','))
+    },
+    () => settled.resolve(),
+  )
   q.pushText('rm -rf /')
   q.push(['a'])
-  await new Promise((r) => setTimeout(r, 10))
+  await settled.promise
   assert.deepEqual(log, ['a'])
 })
