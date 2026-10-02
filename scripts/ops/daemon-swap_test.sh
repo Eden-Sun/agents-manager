@@ -515,6 +515,53 @@ check_no "沒有 ROLLBACK" "ROLLBACK requested" "$SWAP_LOG"
 check_eq "新 binary 留在線上" "new-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
+# issue #771 對抗式審查：換版前是 waiting_quota，只放過「換版後仍是 waiting_quota」這一種；
+# 額度等待期間真壞掉的版本（supervisor 變 stopped／unknown、daemon 沒起來、bot 不見）照樣回滾。
+for status in stopped failed unknown; do
+  setup 10 10
+  export STUB_SUPERVISOR_BEFORE="waiting_quota" STUB_SUPERVISOR="$status"
+  rc=$(run)
+  check_eq "換版前 waiting_quota、換版後 ${status}：照樣 rollback（rc=7）" "7" "$rc"
+  check_eq "額度等待中壞掉的版本（${status}）還原舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+  teardown
+done
+
+setup 10 10
+export STUB_SUPERVISOR_BEFORE="waiting_quota" STUB_SUPERVISOR="idle"
+rc=$(run)
+check_eq "換版前 waiting_quota、換版後已恢復 idle：放行（rc=0）" "0" "$rc"
+check_no "額度恢復不走 waiting_quota 放行那條" "額度等待與這顆 binary 無關" "$SWAP_LOG"
+teardown
+
+setup 10 10
+export STUB_SUPERVISOR_BEFORE="waiting_quota" STUB_SUPERVISOR="waiting_quota" STUB_SESSION_OK=""
+rc=$(run)
+check_eq "waiting_quota 放行不蓋過 /api/session 起不來（rc=7）" "7" "$rc"
+check "講的是 session 沒起來" "/api/session 30 秒內沒起來" "$SWAP_LOG"
+check_eq "session 起不來還原舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+setup 10 10
+export STUB_SUPERVISOR_BEFORE="waiting_quota" STUB_SUPERVISOR="waiting_quota" STUB_HEALTH_OK=""
+rc=$(run)
+check_eq "waiting_quota 放行不蓋過 health 失敗（rc=7）" "7" "$rc"
+teardown
+
+setup 10 10
+export STUB_SUPERVISOR_BEFORE="waiting_quota" STUB_SUPERVISOR="waiting_quota" STUB_NAMES_AFTER='["a"]'
+rc=$(run)
+check_eq "waiting_quota 放行不蓋過 bot 不見（rc=7）" "7" "$rc"
+check "講的是 bot 不見了" "有 bot 不見了" "$SWAP_LOG"
+teardown
+
+# 升過 schema 又在額度等待：waiting_quota 不是失敗，不該被轉成「往前修」（rc=6）。
+setup 11 10
+export STUB_SUPERVISOR_BEFORE="waiting_quota" STUB_SUPERVISOR="waiting_quota"
+rc=$(run)
+check_eq "升 schema、前後都 waiting_quota：rc=0，不走往前修" "0" "$rc"
+check_no "不講往前修" "forward-fix" "$SWAP_LOG"
+teardown
+
 # 10. DB 備份讀不回來：不換版（不然回滾時沒有可用的備份）。
 setup 10 10
 echo "bad rows" > "$ROOT/integrity"
