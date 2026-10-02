@@ -531,16 +531,42 @@ async fn last_sent(app: &Arc<App>, parent_id: &str, base: &str) -> anyhow::Resul
 mod retain_tests {
     use super::*;
 
+    /// herdr 重啟後 reconcile 把 child 退役（`deleted_at`），父 bot 隨後用 herdr 重開、復原：這段時間 sweep 不能把它的通知指紋清掉，
+    /// 不然復原後還停在同一個 blocked 問題，父 bot 會被同一件事再叫一次。退役太久（沒人會回來了）才清。
+    #[tokio::test]
+    async fn a_child_retired_and_restored_soon_after_is_not_told_to_its_parent_twice() {
+        let env = crate::testing::env().await;
+        let recent = crate::testing::claude_bot(&env.app, &env.project_id, "kid-recent").await;
+        let stale = crate::testing::claude_bot(&env.app, &env.project_id, "kid-stale").await;
+        for (bot, ago) in [(&recent, 120), (&stale, 3 * 3600)] {
+            sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::iso_in(-ago)).bind(&bot.id).execute(&env.app.db).await.unwrap();
+            spoken().lock().unwrap().insert(bot.id.clone(), (7, std::time::Instant::now()));
+        }
+        let mut live = crate::update_watch::live_bot_ids(&env.app).await.unwrap();
+        // 這兩張表是行程級的、平行的測試共用：把別的測試手上的項目一起放進名單，只讓這個測試的 `stale` 被清。
+        live.extend(spoken().lock().unwrap().keys().filter(|k| **k != stale.id).cloned());
+        live.extend(episodes().lock().unwrap().keys().filter(|k| **k != stale.id).cloned());
+        retain_bots(&live);
+        assert!(spoken().lock().unwrap().contains_key(&recent.id), "剛退役：指紋留著，復原後同一個問題不再講第二次");
+        assert!(!spoken().lock().unwrap().contains_key(&stale.id), "退役很久了：清掉");
+        spoken().lock().unwrap().remove(&recent.id);
+        episodes().lock().unwrap().remove(&recent.id);
+    }
+
     #[test]
     fn a_retired_childs_alert_state_is_dropped() {
         for id in ["alert-gone", "alert-kept"] {
             spoken().lock().unwrap().insert(id.to_string(), (1, std::time::Instant::now()));
             let _ = episode_for(id);
         }
-        retain_bots(&["alert-kept".to_string()]);
+        // 行程級的表平行測試共用：別的測試手上的項目一起放進名單，只讓 `alert-gone` 被清。
+        let mut live: Vec<String> = spoken().lock().unwrap().keys().chain(episodes().lock().unwrap().keys()).filter(|k| *k != "alert-gone").cloned().collect();
+        live.push("alert-kept".to_string());
+        retain_bots(&live);
         assert!(!spoken().lock().unwrap().contains_key("alert-gone") && !episodes().lock().unwrap().contains_key("alert-gone"));
         assert!(spoken().lock().unwrap().contains_key("alert-kept") && episodes().lock().unwrap().contains_key("alert-kept"));
-        retain_bots(&[]);
+        spoken().lock().unwrap().remove("alert-kept");
+        episodes().lock().unwrap().remove("alert-kept");
     }
 }
 

@@ -96,14 +96,23 @@ async fn prune_process_state(app: &Arc<App>, active_runs: &[String]) {
     app.retain_bot_locks(&live_bots).await;
 }
 
-/// per-bot 行程帳（`retain_bot_state`、child 通知指紋、per-bot 鎖…）要留著的 bot：沒刪掉的，加上**軟刪了但還有 active run** 的——
-/// `delete_bot` 先定案 `deleted_at`、再停機，停機那幾秒 bot 還在用這些帳（欠著的收尾寫入、中斷標記…），run 結束後下一輪才清。
-async fn live_bot_ids(app: &Arc<App>) -> anyhow::Result<Vec<String>> {
+/// 軟刪（含 child 退役）之後 per-bot 行程帳多留多久：退役的 child 常是 herdr 重啟後 reconcile 暫時收掉的，父 bot 會用 herdr 重開、
+/// 復原（SPEC §6.5a）；這段時間帳清掉的話，復原後還停在同一個 blocked 問題會被再通知父 bot 一次。
+const RETIRED_KEEP_SECS: i64 = 30 * 60;
+
+/// per-bot 行程帳（`retain_bot_state`、child 通知指紋、per-bot 鎖…）要留著的 bot：
+/// - 沒刪掉的；
+/// - **軟刪了但還有 active run** 的：`delete_bot` 先定案 `deleted_at`、再停機，停機那幾秒 bot 還在用這些帳（欠著的收尾寫入、中斷標記…），
+///   run 結束後下一輪才清；
+/// - 剛軟刪／退役不久（[`RETIRED_KEEP_SECS`]）的：可能馬上復原。
+pub(crate) async fn live_bot_ids(app: &Arc<App>) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT id FROM bots
           WHERE deleted_at IS NULL
+             OR deleted_at >= ?
              OR EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = bots.id AND r.state IN ('starting','running','stopping'))",
     )
+    .bind(db::iso_in(-RETIRED_KEEP_SECS))
     .fetch_all(&app.db)
     .await?)
 }
@@ -434,6 +443,19 @@ mod tests {
 
         sqlx::query("UPDATE runs SET state = 'exited' WHERE id = ?").bind(&run).execute(&e.app.db).await.unwrap();
         assert!(!live_bot_ids(&e.app).await.unwrap().contains(&stopping.id), "停機結束後下一輪才清");
+    }
+
+    /// 剛軟刪／退役的 bot 多留一段（可能馬上復原），退役很久的才不在名單裡；沒有 active run 也一樣。
+    #[tokio::test]
+    async fn a_recently_retired_bot_stays_in_the_live_set_for_a_while() {
+        let e = crate::testing::env().await;
+        let recent = crate::testing::claude_bot(&e.app, &e.project_id, "ret-recent").await;
+        let old = crate::testing::claude_bot(&e.app, &e.project_id, "ret-old").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::iso_in(-120)).bind(&recent.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::iso_in(-RETIRED_KEEP_SECS - 60)).bind(&old.id).execute(&e.app.db).await.unwrap();
+        let live = live_bot_ids(&e.app).await.unwrap();
+        assert!(live.contains(&recent.id), "兩分鐘前退役：可能馬上復原，帳留著");
+        assert!(!live.contains(&old.id), "超過保留時間：清");
     }
 
     /// #744：列舉 active run 失敗的那一輪不能清基準／背景工作帳；成功列舉出空清單才清。
