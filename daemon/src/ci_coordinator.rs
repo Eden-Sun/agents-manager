@@ -264,20 +264,22 @@ async fn submit(
         .fetch_optional(&app.db)
         .await?
     } else {
-        let pending = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM ci_jobs WHERE queue='full' AND status='queued' ORDER BY created_at DESC, id DESC LIMIT 1",
+        // 正在跑的就是這個 SHA：直接掛上去等它的結果，不要把 pending 改成同一個 SHA 再跑第二遍
+        // （那也會把別人排在後面、比較新的 SHA 蓋掉）。
+        let running_same = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM ci_jobs WHERE queue='full' AND status='running' AND sha=? LIMIT 1",
         )
+        .bind(sha)
         .fetch_optional(&app.db)
         .await?;
-        match pending {
+        match running_same {
             Some(id) => Some(id),
             None => {
-                let running = sqlx::query_as::<_, (String, String)>(
-                    "SELECT id, sha FROM ci_jobs WHERE queue='full' AND status='running' ORDER BY started_at LIMIT 1",
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM ci_jobs WHERE queue='full' AND status='queued' ORDER BY created_at DESC, id DESC LIMIT 1",
                 )
                 .fetch_optional(&app.db)
-                .await?;
-                running.and_then(|(id, running_sha)| (running_sha == sha).then_some(id))
+                .await?
             }
         }
     };
@@ -440,25 +442,23 @@ async fn list_jobs(
         let _guard = app.ci_queue_lock.lock().await;
         expire_due_unlocked(app, None).await?;
     }
+    // 先過濾再 LIMIT：bot 只看自己的 route，不能因為別人比較新的 100 筆把自己的擠掉。
     let rows = sqlx::query_as::<_, StoredJob>(
-        "SELECT * FROM ci_jobs ORDER BY updated_at DESC, id DESC LIMIT ?",
+        "SELECT * FROM ci_jobs WHERE EXISTS (
+           SELECT 1 FROM json_each(request_routes_json)
+            WHERE (?1 IS NULL OR json_extract(value, '$.project_id') = ?1)
+              AND (?2 IS NULL OR json_extract(value, '$.requester') = ?2))
+         ORDER BY updated_at DESC, id DESC LIMIT ?3",
     )
+    .bind(project_id)
+    .bind(requester)
     .bind(limit.clamp(1, 100))
     .fetch_all(&app.db)
     .await?;
-    let jobs = rows
+    Ok(rows
         .into_iter()
         .map(CiJob::try_from)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(jobs
-        .into_iter()
-        .filter(|job| {
-            job.routes.iter().any(|route| {
-                project_id.is_none_or(|project| route.project_id == project)
-                    && requester.is_none_or(|who| route.requester == who)
-            })
-        })
-        .collect())
+        .collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -590,12 +590,54 @@ pub fn spawn_worker(app: Arc<App>) {
         tracing::info!("daemon CI worker disabled: AGM_CI_WORK_ROOT is not configured");
         return;
     };
-    for queue in [Queue::Fast, Queue::Full] {
-        let app = app.clone();
-        let repo = repo.clone();
-        let work_root = work_root.clone();
-        tokio::spawn(async move { worker_loop(app, queue, repo, work_root).await });
+    // 先收拾上一個行程留下的東西，再開 worker：不然當時還 running 的 job 會一直卡住那條 queue 到 timeout 才放。
+    let app_for_recovery = app.clone();
+    let (repo_r, work_r) = (repo.clone(), work_root.clone());
+    tokio::spawn(async move {
+        if let Err(error) = requeue_interrupted(&app_for_recovery).await {
+            tracing::error!(error = %error, "could not requeue interrupted CI jobs");
+        }
+        clean_stale_worktrees(&repo_r, &work_r).await;
+        for queue in [Queue::Fast, Queue::Full] {
+            let app = app_for_recovery.clone();
+            let repo = repo_r.clone();
+            let work_root = work_r.clone();
+            tokio::spawn(async move { worker_loop(app, queue, repo, work_root).await });
+        }
+    });
+}
+
+/// 只有這個 daemon 的 worker 會把 job 設成 running，所以開機時還 running 的一定是上個行程被中斷的：放回 queued 重跑
+/// （job 是 durable 的，重啟不該讓提交者永遠等不到結果，也不該把 queue 卡到 timeout）。
+async fn requeue_interrupted(app: &Arc<App>) -> Result<()> {
+    let _guard = app.ci_queue_lock.lock().await;
+    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM ci_jobs WHERE status='running'")
+        .fetch_all(&app.db)
+        .await?;
+    for id in ids {
+        sqlx::query("UPDATE ci_jobs SET status='queued', started_at=NULL, updated_at=? WHERE id=? AND status='running'")
+            .bind(db::now())
+            .bind(&id)
+            .execute(&app.db)
+            .await?;
+        if let Some(job) = stored_job(&app.db, &id).await? {
+            tracing::warn!(job_id = %id, "requeued a CI job interrupted by a daemon restart");
+            emit_job(app, &job).await;
+        }
     }
+    Ok(())
+}
+
+/// 被中斷的 job 留下的 detached worktree（含 repo 裡的登記）；每個 job 用自己的 id 當目錄，不清就一直佔磁碟。
+async fn clean_stale_worktrees(repo: &FsPath, work_root: &FsPath) {
+    let root = work_root.join("worktrees");
+    if let Ok(mut entries) = tokio::fs::read_dir(&root).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+        }
+    }
+    let args = vec!["-C".into(), repo.to_string_lossy().into_owned(), "worktree".into(), "prune".into()];
+    let _ = bounded_command("git", &args, repo, 30).await;
 }
 
 async fn worker_loop(app: Arc<App>, queue: Queue, repo: PathBuf, work_root: PathBuf) {
@@ -673,7 +715,9 @@ async fn execute_job(repo: &FsPath, work_root: &FsPath, job: &CiJob) -> JobResul
         Err(error) => return JobResult::failure(1, "checkout", &error.to_string()),
     }
 
-    let target_dir = work_root.join("target");
+    // fast 與 full 各自一條 worker、同時跑；共用 CARGO_TARGET_DIR 的話 fast 會卡在 cargo 的 build-directory 鎖上
+    // 等 full（最長 45 分鐘），5 分鐘 timeout 先到而假紅。
+    let target_dir = work_root.join(format!("target-{}", job.queue));
     let mut output_tail = String::new();
     let mut failed_steps = Vec::new();
     let mut exit_code = 0;
@@ -1063,5 +1107,67 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_bot_still_sees_its_own_job_when_more_than_a_hundred_newer_jobs_belong_to_others() {
+        let e = env().await;
+        let mine = submit(&e.app, Queue::Fast, &"1".repeat(40), &e.project_id, "bot:me").await.unwrap();
+        for n in 0..101 {
+            submit(&e.app, Queue::Fast, &format!("{n:040x}"), &e.project_id, "bot:other").await.unwrap();
+        }
+        let seen = list_jobs(&e.app, Some(&e.project_id), Some("bot:me"), 100).await.unwrap();
+        assert_eq!(seen.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), [mine.id.as_str()]);
+        assert_eq!(list_jobs(&e.app, None, None, 100).await.unwrap().len(), 100, "unfiltered list stays capped");
+    }
+
+    #[tokio::test]
+    async fn a_full_request_for_the_running_sha_joins_it_and_leaves_the_pending_sha_alone() {
+        let e = env().await;
+        let running = submit(&e.app, Queue::Full, &"a".repeat(40), &e.project_id, "bot:a").await.unwrap();
+        claim_next(&e.app, Queue::Full).await.unwrap().unwrap();
+        let pending = submit(&e.app, Queue::Full, &"b".repeat(40), &e.project_id, "bot:b").await.unwrap();
+        let again = submit(&e.app, Queue::Full, &"a".repeat(40), &e.project_id, "bot:c").await.unwrap();
+        assert_eq!(again.id, running.id, "same sha as the running job: share its result");
+        assert_eq!(get_job(&e.app.db, &pending.id).await.unwrap().unwrap().sha, "b".repeat(40));
+        assert_eq!(list_jobs(&e.app, None, None, 100).await.unwrap().len(), 2, "no third job");
+    }
+
+    #[tokio::test]
+    async fn a_job_left_running_by_a_dead_daemon_is_requeued_instead_of_blocking_its_queue() {
+        let e = env().await;
+        let job = submit(&e.app, Queue::Full, &"a".repeat(40), &e.project_id, "bot:a").await.unwrap();
+        claim_next(&e.app, Queue::Full).await.unwrap().unwrap();
+        assert!(claim_next(&e.app, Queue::Full).await.unwrap().is_none(), "running job holds the queue");
+
+        let restarted = restart_app(&e).await;
+        requeue_interrupted(&restarted).await.unwrap();
+        let after = get_job(&restarted.db, &job.id).await.unwrap().unwrap();
+        assert_eq!((after.status.as_str(), after.started_at), ("queued", None));
+        assert_eq!(claim_next(&restarted, Queue::Full).await.unwrap().unwrap().id, job.id);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn fast_and_full_checks_use_separate_cargo_target_dirs() {
+        let e = env().await;
+        let repo = e.dir.join("ci-repo-target");
+        crate::testing::git::init_repo(&repo);
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::write(repo.join("scripts/check.sh"), "#!/bin/sh\nprintf 'target=%s\\n' \"$CARGO_TARGET_DIR\"\n").unwrap();
+        crate::testing::git::run(&repo, &["add", "scripts/check.sh"]);
+        crate::testing::git::run(&repo, &["commit", "-q", "-m", "fake"]);
+        crate::testing::git::run(&repo, &["remote", "add", "origin", "."]);
+        let sha = crate::testing::git::run(&repo, &["rev-parse", "HEAD"]);
+        let work_root = e.dir.join("ci-worker-target");
+        let mut dirs = Vec::new();
+        for queue in [Queue::Fast, Queue::Full] {
+            submit(&e.app, queue, &sha, &e.project_id, "bot:a").await.unwrap();
+            let job = claim_next(&e.app, queue).await.unwrap().unwrap();
+            let result = execute_job(&repo, &work_root, &job).await;
+            assert_eq!(result.status, "success", "{}", result.output_tail);
+            dirs.push(result.output_tail.lines().find_map(|l| l.strip_prefix("target=")).unwrap().to_owned());
+        }
+        assert_ne!(dirs[0], dirs[1], "a fast job must not wait on the full job's cargo build-dir lock");
     }
 }
