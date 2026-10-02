@@ -19,6 +19,7 @@ pub fn is_text_busy(e: &io::Error) -> bool {
 }
 
 /// 同步版：`f` 回 `ETXTBSY` 就重試到 `limit`，其他結果（成功或別的錯誤）直接回。
+#[cfg(test)]
 pub fn retry<T>(limit: Duration, mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let started = Instant::now();
     loop {
@@ -30,11 +31,13 @@ pub fn retry<T>(limit: Duration, mut f: impl FnMut() -> io::Result<T>) -> io::Re
 }
 
 /// `std::process::Command::output`，遇到 `ETXTBSY` 重試。
+#[cfg(test)]
 pub fn output(cmd: &mut std::process::Command) -> io::Result<std::process::Output> {
     retry(LIMIT, || cmd.output())
 }
 
 /// `std::process::Command::spawn`，遇到 `ETXTBSY` 重試。
+#[cfg(test)]
 pub fn spawn(cmd: &mut std::process::Command) -> io::Result<std::process::Child> {
     retry(LIMIT, || cmd.spawn())
 }
