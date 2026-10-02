@@ -8049,6 +8049,88 @@ mod per_principal_auth_tests {
         assert!(response.starts_with("HTTP/1.1 403") && response.contains("relay_from_mismatch"), "{response}");
     }
 
+    /// #410 對抗式審查：HTTP 層（含認證中介層）上所有「沒有證明卻想讓 `relay_from` 記上別顆 bot」的送法，
+    /// 一律被擋、什麼都不寫；擋掉的錯誤碼／內容不能洩漏某顆 bot 存不存在。
+    #[tokio::test]
+    async fn no_header_trick_gets_an_unproven_relay_from_stored() {
+        let e = crate::testing::env().await;
+        let sender = distinct_bot(&e, "adv-sender").await;
+        let victim = distinct_bot(&e, "adv-victim").await;
+        let target = distinct_bot(&e, "adv-target").await;
+        let gone = distinct_bot(&e, "adv-gone").await;
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&gone.id).execute(&e.app.db).await.unwrap();
+        let ui = e.app.ui_token.clone();
+        let send = |marker: &str, relay: &str, headers: Vec<(String, String)>| {
+            let app = e.app.clone();
+            let (target, marker, relay) = (target.id.clone(), marker.to_string(), relay.to_string());
+            async move {
+                let body = serde_json::to_vec(&json!({"text": marker, "client_request_id": marker, "relay_from": relay})).unwrap();
+                let extra: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+                let resp = raw(
+                    app.clone(),
+                    format!(
+                        "POST /api/bots/{target}/prompt HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        String::from_utf8(body).unwrap()
+                    ),
+                )
+                .await;
+                let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE content=?").bind(&marker).fetch_one(&app.db).await.unwrap();
+                assert_eq!(stored, 0, "{marker}: nothing may be written\n{resp}");
+                resp
+            }
+        };
+        let h = |k: &str, v: &str| (k.to_string(), v.to_string());
+        let status = |r: &str| r.lines().next().unwrap_or_default().to_string();
+
+        // UI token（User）自稱 bot、沒有任何 bot 憑證。
+        let r = send("adv-ui-only", &victim.id, vec![h("X-AM-Token", &ui)]).await;
+        assert!(status(&r).contains("403") && r.contains("relay_from_token_required"), "{r}");
+        // UI token 加上受害者的 token（混合憑證不得降級／升級）：401。
+        for (name, headers) in [
+            ("adv-ui-plus-token", vec![h("X-AM-Token", &ui), h("X-AM-Bot-Token", &victim.hook_token)]),
+            ("adv-ui-plus-empty-token", vec![h("X-AM-Token", &ui), h("X-AM-Bot-Token", "")]),
+            ("adv-token-only", vec![h("X-AM-Bot-Token", &victim.hook_token)]),
+            ("adv-empty-token", vec![h("X-AM-Bot-Id", &sender.id), h("X-AM-Bot-Token", "")]),
+            ("adv-victim-id-sender-token", vec![h("X-AM-Bot-Id", &victim.id), h("X-AM-Bot-Token", &sender.hook_token)]),
+            ("adv-lowercased-id", vec![h("X-AM-Bot-Id", &sender.id.to_lowercase()), h("X-AM-Bot-Token", &sender.hook_token)]),
+            ("adv-deleted-bot", vec![h("X-AM-Bot-Id", &gone.id), h("X-AM-Bot-Token", &gone.hook_token)]),
+        ] {
+            let r = send(name, &victim.id, headers).await;
+            assert!(status(&r).contains("401"), "{name}: {r}");
+        }
+        // 自己的憑證、claim 別顆：不管大小寫的 header 名、前後空白、重複 header，都是 403 mismatch。
+        let mut bodies = Vec::new();
+        for (name, relay, headers) in [
+            ("adv-plain", victim.id.clone(), vec![h("X-AM-Bot-Id", &sender.id), h("X-AM-Bot-Token", &sender.hook_token)]),
+            ("adv-lower-names", victim.id.clone(), vec![h("x-am-bot-id", &sender.id), h("x-am-bot-token", &sender.hook_token)]),
+            ("adv-padded", format!("  {}  ", victim.id), vec![h("X-AM-Bot-Id", &format!(" {} ", sender.id)), h("X-AM-Bot-Token", &format!(" {} ", sender.hook_token))]),
+            ("adv-dup-id", victim.id.clone(), vec![h("X-AM-Bot-Id", &sender.id), h("X-AM-Bot-Id", &victim.id), h("X-AM-Bot-Token", &sender.hook_token)]),
+            ("adv-dup-token", victim.id.clone(), vec![h("X-AM-Bot-Id", &sender.id), h("X-AM-Bot-Token", &sender.hook_token), h("X-AM-Bot-Token", &victim.hook_token)]),
+            ("adv-dup-token-rev", victim.id.clone(), vec![h("X-AM-Bot-Id", &sender.id), h("X-AM-Bot-Token", &victim.hook_token), h("X-AM-Bot-Token", &sender.hook_token)]),
+            ("adv-deleted-claim", gone.id.clone(), vec![h("X-AM-Bot-Id", &sender.id), h("X-AM-Bot-Token", &sender.hook_token)]),
+            ("adv-nosuch-claim", "01MNOSUCHBOTIDATALL0000000".to_string(), vec![h("X-AM-Bot-Id", &sender.id), h("X-AM-Bot-Token", &sender.hook_token)]),
+        ] {
+            let r = send(name, &relay, headers).await;
+            let ok_status = if name == "adv-dup-token-rev" { "401" } else { "403" };
+            assert!(status(&r).contains(ok_status), "{name}: {r}");
+            if ok_status == "403" {
+                assert!(r.contains("relay_from_mismatch"), "{name}: {r}");
+                bodies.push(r.split("\r\n\r\n").nth(1).unwrap_or_default().to_string());
+            }
+        }
+        // 活的、已刪的、根本不存在的 claim，回的內容完全一樣（不能當 bot id 神諭）。
+        assert!(bodies.windows(2).all(|w| w[0] == w[1]), "{bodies:?}");
+        // 自己轉給自己：400，同樣不寫。
+        let r = send(
+            "adv-self",
+            &target.id,
+            vec![h("X-AM-Bot-Id", &target.id), h("X-AM-Bot-Token", &target.hook_token)],
+        )
+        .await;
+        assert!(status(&r).contains("400") && r.contains("relay_self"), "{r}");
+    }
+
     #[tokio::test]
     async fn rotating_a_bot_credential_invalidates_the_old_token_without_returning_the_new_one() {
         let e = crate::testing::env().await;
