@@ -226,6 +226,11 @@ async fn remove_files(app: &Arc<App>, local_path: &str, agent_path: &str, host_n
     }
 }
 
+/// 有訊息的 `attachments_json` 點名這個附件（`a` 是 attachments 那列）。`IS NOT NULL` 讓 `messages_with_attachments`
+/// 這個局部索引派得上用場：1.7 萬則訊息裡只有幾百則帶附件，以前每個候選附件都把 `messages` 全表 LIKE 過一遍
+/// （開機那次掃 50 筆候選花了 1.9 秒）。`NULL LIKE …` 本來就不成立，所以結果不變。
+const NAMED_BY_A_MESSAGE: &str = "NOT EXISTS (SELECT 1 FROM messages m WHERE m.attachments_json IS NOT NULL AND m.attachments_json LIKE '%' || a.id || '%')";
+
 /// 上傳了卻沒送出的附件（`ready`、沒有訊息引用）留多久。使用者貼圖到輸入框、當天回來送出的都夠；
 /// 送出時才 `resolve`＋`bind`（幾毫秒內），所以這個窗口只會碰到「上傳完放著不管」的。
 pub const UNREFERENCED_KEEP_SECS: i64 = 24 * 3600;
@@ -241,7 +246,7 @@ const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600
 pub async fn sweep_unreferenced(app: &Arc<App>, keep_secs: i64) -> usize {
     let cutoff = db::iso_in(-keep_secs);
     let created = db::ts_sql("a.created_at");
-    let named = "NOT EXISTS (SELECT 1 FROM messages m WHERE m.attachments_json LIKE '%' || a.id || '%')";
+    let named = NAMED_BY_A_MESSAGE;
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(&format!(
         "SELECT a.id, a.local_path, a.agent_path, a.host FROM attachments a
           WHERE a.state = 'ready' AND a.message_id IS NULL AND {created} <= ? AND {named}"
@@ -516,6 +521,17 @@ pub fn to_json(a: &Attachment) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::testing as tt;
+
+    /// 清附件問「有沒有訊息點名它」時，只能看帶附件的那幾則（局部索引），不能對每個候選附件把 messages 全表 LIKE 一遍。
+    #[tokio::test]
+    async fn the_named_by_a_message_check_uses_the_attachment_message_index() {
+        let env = tt::env().await;
+        let sql = format!("EXPLAIN QUERY PLAN SELECT a.id FROM attachments a WHERE {NAMED_BY_A_MESSAGE}");
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&sql).fetch_all(&env.app.db).await.unwrap();
+        let details: Vec<&str> = plan.iter().map(|r| r.3.as_str()).collect();
+        assert!(details.iter().any(|d| d.contains("USING INDEX messages_with_attachments")), "{details:#?}");
+        assert!(!details.iter().any(|d| d.starts_with("SCAN m") && !d.contains("messages_with_attachments")), "{details:#?}");
+    }
 
     /// #471：上傳時的 mime 是呼叫端自己給的，送回去不能原樣照用——白名單外一律 octet-stream。
     /// **SVG 在白名單裡而且 inline**（瀏覽器對 SVG 不嗅探，落成 octet-stream 會讓現有縮圖變破圖），

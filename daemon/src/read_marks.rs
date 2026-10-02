@@ -98,19 +98,20 @@ pub async fn marks(pool: &SqlitePool) -> Result<HashMap<String, ReadMark>> {
 /// 未讀回合數：標記之後的 assistant 訊息，依 `turn_id` 去重（沒 turn 的各算一則）。沒有標記＝全部未讀，
 /// 同前端（新 bot 本來就沒幾則）。`(created_at, id)` 是全序，同時間戳下 id 不大於標記的算已讀。
 pub async fn unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT c.bot_id, COUNT(DISTINCT COALESCE(m.turn_id, 'msg:' || m.id))
-           FROM messages m
-           JOIN conversations c ON c.id = m.conversation_id
-           LEFT JOIN bot_reads r ON r.bot_id = c.bot_id
-          WHERE m.role = 'assistant'
-            AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND m.id > r.message_id))
-          GROUP BY c.bot_id",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String, i64)> = sqlx::query_as(UNREAD_SQL).fetch_all(pool).await?;
     Ok(rows.into_iter().collect())
 }
+
+/// 從 `conversations` 出發、用 `messages_conv_time` 只讀標記之後的範圍（`CROSS JOIN` 鎖住順序、`INDEXED BY` 鎖住索引）：
+/// `/api/state` 每次都會問，以前是從 `messages` 全表掃起（1.7 萬則約 40～70 ms，隨訊息數線性長），已讀過的 bot 其實幾乎沒有
+/// 標記之後的訊息。`created_at >= 標記時間` 是下面那個全序條件的必要條件，只負責讓索引能 seek，結果不變。
+const UNREAD_SQL: &str = "SELECT c.bot_id, COUNT(DISTINCT COALESCE(m.turn_id, 'msg:' || m.id))
+           FROM conversations c
+           LEFT JOIN bot_reads r ON r.bot_id = c.bot_id
+           CROSS JOIN messages m INDEXED BY messages_conv_time
+          WHERE m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '') AND m.role = 'assistant'
+            AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND m.id > r.message_id))
+          GROUP BY c.bot_id";
 
 /// 只往前推：另一台裝置送來較舊的標記（離線很久才同步）不能把已讀退回未讀。`at` 先經 [`normalize_at`]。
 pub async fn mark(pool: &SqlitePool, bot_id: &str, at: &str, message_id: &str) -> Result<ReadMark> {
@@ -142,23 +143,23 @@ pub async fn group_marks(pool: &SqlitePool) -> Result<HashMap<String, ReadMark>>
 /// 群組未讀回合數（專案標題的藍色數字）：只算還活著的 bot（跟 `group::messages` 的時間軸同一個範圍，不然已刪 bot 比最後一則可見訊息新的回覆會永遠清不掉）；群組回覆＝同一個回合的 user 訊息帶 `group_id`（API.md §11.1，直接 prompt
 /// API 設不了 `group_id`）的 assistant 回合；標記之後、依 `turn_id` 去重。沒有標記＝全部未讀，同 bot。
 pub async fn group_unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT b.project_id, COUNT(DISTINCT m.turn_id)
-           FROM messages m
-           JOIN conversations c ON c.id = m.conversation_id
-           JOIN bots b ON b.id = c.bot_id
+    let rows: Vec<(String, i64)> = sqlx::query_as(GROUP_UNREAD_SQL).fetch_all(pool).await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// 同 [`UNREAD_SQL`]：從 bot 出發、只讀專案標記之後的訊息。
+const GROUP_UNREAD_SQL: &str = "SELECT b.project_id, COUNT(DISTINCT m.turn_id)
+           FROM bots b
+           CROSS JOIN conversations c ON c.bot_id = b.id
            LEFT JOIN project_group_reads r ON r.project_id = b.project_id
-          WHERE b.deleted_at IS NULL AND m.role = 'assistant' AND m.turn_id IS NOT NULL
+           CROSS JOIN messages m INDEXED BY messages_conv_time
+          WHERE m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '')
+            AND b.deleted_at IS NULL AND m.role = 'assistant' AND m.turn_id IS NOT NULL
             AND EXISTS (SELECT 1 FROM messages u
                          WHERE u.conversation_id = m.conversation_id AND u.turn_id = m.turn_id
                            AND u.role = 'user' AND u.group_id IS NOT NULL)
             AND (r.project_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND m.id > r.message_id))
-          GROUP BY b.project_id",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().collect())
-}
+          GROUP BY b.project_id";
 
 /// 同 [`mark`]：只往前推。
 pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_id: &str) -> Result<ReadMark> {
@@ -247,6 +248,21 @@ mod tests {
                 sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,'c',?,'assistant','a','hook',?)")
                     .bind(format!("a{k}-{tid}")).bind(tid).bind(at).execute(pool).await.unwrap();
             }
+        }
+    }
+
+    /// `/api/state` 每次都問未讀：不能再從 messages 全表掃起（隨訊息數線性變慢），要用 `messages_conv_time` 只讀標記之後的範圍。
+    #[tokio::test]
+    async fn the_unread_queries_seek_messages_by_conversation_and_time_instead_of_scanning_them() {
+        let (pool, _dir) = pool().await;
+        for (name, sql) in [("unread", UNREAD_SQL), ("group_unread", GROUP_UNREAD_SQL)] {
+            let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {sql}")).fetch_all(&pool).await.unwrap();
+            let details: Vec<&str> = plan.iter().map(|r| r.3.as_str()).collect();
+            assert!(
+                details.iter().any(|d| d.starts_with("SEARCH m USING INDEX messages_conv_time (conversation_id=? AND created_at>")),
+                "{name} must range-seek messages: {details:#?}"
+            );
+            assert!(!details.iter().any(|d| d.starts_with("SCAN m")), "{name} must not scan messages: {details:#?}");
         }
     }
 
