@@ -239,6 +239,45 @@ pub async fn verified_bot_id(app: &Arc<App>, headers: &axum::http::HeaderMap) ->
     Ok(Some(id.to_string()))
 }
 
+/// setup 自己建出來的角色 bot 在 config 裡留的記號（`create_request_id`）。重跑 setup 時「還沒記過 bot id、但 config 裡已經有同名的 bot」
+/// 只有帶這個記號的才算是上一次 setup 自己寫進去的（issue #181，做到一半失敗的恢復）；沒有記號的同名 bot 是別人建的——
+/// 例如一般 bot 先在總管的專案裡建一顆叫 `AGM-responder` 的，再叫 setup 去「接著用」，就會被認成協調者而拿到角色權限。
+/// `POST /projects/{id}/bots` 的 `client_request_id` 不接受這個前綴（`api::create_bot`），所以記號偽造不了。
+pub const ROLE_SETUP_MARK_PREFIX: &str = "agm-role-setup:";
+pub const ROLE_SETUP_MARK_PREFIX_PATROL: &str = "agm-role-setup:patrol";
+pub const ROLE_SETUP_MARK_PREFIX_RESPONDER: &str = "agm-role-setup:responder";
+
+/// AGM 自己的管理面（setup／start／stop／fallback、交辦與裁示、管理摘要、ops-alert、CLI 更新）：被證明身分的**一般 bot**
+/// （不是巡檢也不是協調者）不能碰——它們不是總管，也不該替總管下指令、改總管的記憶、對自己的交辦下裁示。
+/// 沒帶身分的（使用者的網頁、一般 shell）照舊放行（共用 UI token 的既有取捨）；證明不了身分的由 [`verified_bot_id`] 回 403。
+/// 跟 `persona_actor`（人設）、`require_role`（approve／ack／herdr 維護窗口）同一個角色判斷（`roles::role_of_bot`，每次讀 DB，
+/// 角色換人之後舊 bot 立刻失效）。
+pub async fn forbid_plain_bot(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<(), LcError> {
+    let Some(id) = verified_bot_id(app, headers).await? else { return Ok(()) };
+    match roles::role_of_bot(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+        Some(_) => Ok(()),
+        None => Err(LcError::Forbidden(json!({
+            "error": "forbidden",
+            "reason": "role_required",
+            "message": "這支只給 AGM 角色（巡檢／協調者）或沒有 bot 身分的使用者：這顆 bot 證明得了自己，但它不是巡檢也不是協調者",
+            "bot_id": id,
+        }))),
+    }
+}
+
+/// [`forbid_plain_bot`] 當 route layer 用：掛在 `post(handler).layer(…)` 上，不必改 handler 的簽名。
+pub async fn gate_plain_bots(
+    axum::extract::State(app): axum::extract::State<Arc<App>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match forbid_plain_bot(&app, req.headers()).await {
+        Ok(()) => next.run(req).await,
+        Err(e) => e.into_response(),
+    }
+}
+
 /// 角色端點專用：一定要證明得了身分，而且那顆要是角色 bot。
 ///
 /// `actor_role` 的 `Ok(None)`（＝完全沒宣告身分）在這裡**不是**「使用者，什麼都能做」而是 403。

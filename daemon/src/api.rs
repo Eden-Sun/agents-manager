@@ -85,6 +85,13 @@ async fn upload_slot(State(slots): State<Arc<tokio::sync::Semaphore>>, req: axum
     }
 }
 
+/// AGM 的管理面 route layer：被證明身分的一般 bot 403（`supervisor::bot_requests::forbid_plain_bot`）。
+macro_rules! agm_gate {
+    ($app:expr) => {
+        axum::middleware::from_fn_with_state($app.clone(), crate::supervisor::bot_requests::gate_plain_bots)
+    };
+}
+
 pub fn router(app: Arc<App>) -> Router {
     let upload_slots = Arc::new(tokio::sync::Semaphore::new(UPLOAD_CONCURRENCY));
     let api = Router::new()
@@ -212,21 +219,22 @@ pub fn router(app: Arc<App>) -> Router {
         // AGM 總管（docs/goals/agm-supervisor-environment-plan-2026-09-09.md）。
         .route("/supervisor", get(crate::supervisor::api::get_supervisor))
         .route("/supervisor/health", get(crate::supervisor::api::get_health))
-        .route("/supervisor/setup", post(crate::supervisor::api::post_setup))
-        .route("/supervisor/start", post(crate::supervisor::api::post_start))
-        .route("/supervisor/stop", post(crate::supervisor::api::post_stop))
-        .route("/supervisor/fallback", post(crate::supervisor::api::post_fallback))
+        // AGM 的管理面：被證明身分的一般 bot 一律 403 `role_required`（`bot_requests::forbid_plain_bot`）。
+        .route("/supervisor/setup", post(crate::supervisor::api::post_setup).layer(agm_gate!(app)))
+        .route("/supervisor/start", post(crate::supervisor::api::post_start).layer(agm_gate!(app)))
+        .route("/supervisor/stop", post(crate::supervisor::api::post_stop).layer(agm_gate!(app)))
+        .route("/supervisor/fallback", post(crate::supervisor::api::post_fallback).layer(agm_gate!(app)))
         .route(
             "/supervisor/assignments",
-            get(crate::supervisor::api::get_assignments).post(crate::supervisor::api::post_assignment),
+            get(crate::supervisor::api::get_assignments).merge(post(crate::supervisor::api::post_assignment).layer(agm_gate!(app))),
         )
         .route(
             "/supervisor/handoff",
-            get(crate::supervisor::api::get_handoff).put(crate::supervisor::api::put_handoff),
+            get(crate::supervisor::api::get_handoff).merge(axum::routing::put(crate::supervisor::api::put_handoff).layer(agm_gate!(app))),
         )
         .route("/supervisor/assignments/{id}", get(crate::supervisor::api::get_assignment))
         // 回合結束只到 awaiting_review；驗收／阻塞／續作／取消都走這支（SPEC §18.3）。
-        .route("/supervisor/assignments/{id}/review", post(crate::supervisor::api::post_review))
+        .route("/supervisor/assignments/{id}/review", post(crate::supervisor::api::post_review).layer(agm_gate!(app)))
         // 使用者在更新提示上按「請 AGM 解析」：把這一版的 changelog 派給協調者判讀（唯讀）。
         .route(
             "/claude-update/review",
@@ -266,12 +274,12 @@ pub fn router(app: Arc<App>) -> Router {
         // 不必等下一次開機（issue #532）。
         .route(
             "/supervisor/cli",
-            get(crate::supervisor::cli_refresh::get_cli).post(crate::supervisor::cli_refresh::post_cli_refresh),
+            get(crate::supervisor::cli_refresh::get_cli).merge(post(crate::supervisor::cli_refresh::post_cli_refresh).layer(agm_gate!(app))),
         )
         // 排程腳本卡住時喊人（SPEC §18.9）：只寫一則 durable inbox 事件。
-        .route("/supervisor/ops-alerts", post(crate::supervisor::api::post_ops_alert))
+        .route("/supervisor/ops-alerts", post(crate::supervisor::api::post_ops_alert).layer(agm_gate!(app)))
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search))
-        .merge(crate::supervisor::responder_api::routes())
+        .merge(crate::supervisor::responder_api::routes(app.clone()))
         .merge(crate::release_triage::http::routes())
         .merge(crate::upstream_update::routes())
         .merge(crate::judge::http::routes())
@@ -1485,6 +1493,10 @@ async fn create_bot(
     if let Some(c) = &create_request_id {
         if c.len() > 128 || !c.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_.:".contains(ch)) {
             return Err(LcError::Bad("client_request_id must be 1..=128 chars of [A-Za-z0-9-_.:]".into()));
+        }
+        // 這個前綴是 daemon 在 setup 角色 bot 時自己留的記號：使用者給了就等於偽造「這顆是 setup 建的」。
+        if c.starts_with(crate::supervisor::bot_requests::ROLE_SETUP_MARK_PREFIX) {
+            return Err(LcError::Bad(format!("client_request_id must not start with `{}` (reserved)", crate::supervisor::bot_requests::ROLE_SETUP_MARK_PREFIX)));
         }
     }
     // 請求指紋＝會影響這顆 bot 的欄位；`name_auto` 時名字只是提示（重送時瀏覽器的清單已同步，算出來的名字本來就會變）。
@@ -8493,6 +8505,135 @@ mod per_principal_auth_tests {
         assert!(swapped.starts_with("HTTP/1.1 401"), "{swapped}");
         let unknown = service_post(e.app.clone(), "root", "swap-secret", "/api/services/daemon-swap/probe/01NOSUCHBOT").await;
         assert!(unknown.starts_with("HTTP/1.1 401"), "{unknown}");
+    }
+
+    /// 被證明身分的一般 bot 打 AGM 的管理面：setup／start／stop／fallback、交辦與裁示、管理摘要、ops-alert、CLI 更新、
+    /// 協調者的 setup／start／stop——一律 403 `role_required`，而且什麼都不動。使用者（沒帶 bot 標頭）與角色 bot 不受影響；
+    /// 角色換人之後舊 bot 立刻失效。
+    #[tokio::test]
+    async fn a_plain_bot_cannot_use_the_agm_management_endpoints_and_a_role_swap_takes_effect_at_once() {
+        let e = crate::testing::env().await;
+        let plain = distinct_bot(&e, "plain-gate").await;
+        let patrol = distinct_bot(&e, "patrol-gate").await;
+        let other = distinct_bot(&e, "patrol-gate-2").await;
+        crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+        crate::supervisor::store::set_env(&e.app.db, &patrol.id, &e.project_id, "/tmp").await.unwrap();
+        let call = |method: &'static str, path: &'static str, who: Option<(&str, &str)>| {
+            let app = e.app.clone();
+            let ui = e.app.ui_token.clone();
+            let who = who.map(|(i, t)| (i.to_string(), t.to_string()));
+            async move {
+                let body = "{}";
+                let auth = match &who {
+                    Some((id, tok)) => format!("X-AM-Bot-Id: {id}\r\nX-AM-Bot-Token: {tok}\r\n"),
+                    None => format!("X-AM-Token: {ui}\r\n"),
+                };
+                raw(app, format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len())).await
+            }
+        };
+        let endpoints: &[(&'static str, &'static str)] = &[
+            ("POST", "/api/supervisor/setup"),
+            ("POST", "/api/supervisor/start"),
+            ("POST", "/api/supervisor/stop"),
+            ("POST", "/api/supervisor/fallback"),
+            ("POST", "/api/supervisor/assignments"),
+            ("POST", "/api/supervisor/assignments/nope/review"),
+            ("PUT", "/api/supervisor/handoff"),
+            ("POST", "/api/supervisor/ops-alerts"),
+            ("POST", "/api/supervisor/cli"),
+            ("POST", "/api/supervisor/responder/setup"),
+            ("POST", "/api/supervisor/responder/start"),
+            ("POST", "/api/supervisor/responder/stop"),
+        ];
+        let denied = |r: &str| r.starts_with("HTTP/1.1 403") && r.contains("role_required");
+        let plain_creds = (plain.id.as_str(), plain.hook_token.as_str());
+        let patrol_creds = (patrol.id.as_str(), patrol.hook_token.as_str());
+        for (m, p) in endpoints {
+            let r = call(m, p, Some(plain_creds)).await;
+            assert!(denied(&r), "{m} {p}: 一般 bot 要 403 role_required：{r}");
+            let r = call(m, p, None).await;
+            assert!(!denied(&r), "{m} {p}: 使用者不能被擋：{r}");
+        }
+        // 角色 bot：過了這道閘（後面可能因為別的原因 4xx/5xx，但不是 role_required）。
+        for (m, p) in endpoints {
+            let r = call(m, p, Some(patrol_creds)).await;
+            assert!(!denied(&r), "{m} {p}: 角色 bot 不能被擋：{r}");
+        }
+        // 角色換人：原本的巡檢立刻變成一般 bot，新的那顆立刻有權限。
+        crate::supervisor::store::set_env(&e.app.db, &other.id, &e.project_id, "/tmp").await.unwrap();
+        let r = call("POST", "/api/supervisor/stop", Some(patrol_creds)).await;
+        assert!(denied(&r), "換人之後舊的巡檢沒有權限了：{r}");
+        let r = call("POST", "/api/supervisor/stop", Some((other.id.as_str(), other.hook_token.as_str()))).await;
+        assert!(!denied(&r), "{r}");
+    }
+
+    /// setup 的「接著用上一次寫進去的那顆」只認它自己留了記號的 bot：別人先建一顆同名的（`AGM`／`AGM-responder`）再叫 setup，
+    /// 不能因此拿到角色；記號本身也偽造不了（`client_request_id` 不收這個前綴）。
+    #[tokio::test]
+    async fn a_same_named_bot_somebody_else_made_is_never_adopted_as_the_agm_role() {
+        use crate::supervisor::{responder, roles, setup, store};
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let row = roles::get(&app.db, roles::Role::Responder).await.unwrap();
+        let sup = store::get_or_init(&app.db).await.unwrap();
+        app.tools.lock().await.insert(
+            LOCAL_HOST.to_string(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![
+                    crate::config::IdentityCfg { name: row.identity.clone(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] },
+                    crate::config::IdentityCfg { name: sup.identity.clone(), kind: "claude".into(), host: None, env: Default::default(), args: vec![] },
+                ],
+                utc_offset_secs: None, herdr_cli: None, checked_at: db::now(),
+            },
+        );
+        // 巡檢：總管目錄對應的專案先被別人建好、裡面有一顆叫 `AGM` 的普通 bot。
+        let agm_dir = setup::agm_dir(&app);
+        std::fs::create_dir_all(&agm_dir).unwrap();
+        let canonical = crate::config::canonical_path(&agm_dir.to_string_lossy()).unwrap();
+        let (pid, planted) = (db::ulid(), db::ulid());
+        let (pid2, planted2) = (pid.clone(), planted.clone());
+        app.cfg
+            .update(move |cfg| {
+                let mut bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted2}'\nname = 'AGM'\nkind = 'claude'\n")).unwrap();
+                bot.persona = Some("我是普通 bot".into());
+                cfg.projects.push(crate::config::ProjectCfg { id: Some(pid2), path: canonical, label: "planted".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let err = setup::ensure_env(&app).await.expect_err("同名但不是 setup 建的：不能接著用");
+        assert!(format!("{err:?}").contains("name_taken"), "{err:?}");
+        assert_eq!(store::get_or_init(&app.db).await.unwrap().bot_id, None, "角色沒有被綁到那顆 bot");
+        assert_eq!(app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).find(|b| b.id.as_deref() == Some(planted.as_str())).unwrap().persona.as_deref(), Some("我是普通 bot"), "它的設定一個字都沒被改");
+
+        // 協調者：同一個形狀。
+        let resp_dir = responder::dir(&app);
+        std::fs::create_dir_all(&resp_dir).unwrap();
+        let resp_canonical = crate::config::canonical_path(&resp_dir.to_string_lossy()).unwrap();
+        let planted_resp = db::ulid();
+        let planted_resp2 = planted_resp.clone();
+        app.cfg
+            .update(move |cfg| {
+                let bot: crate::config::BotCfg = toml::from_str(&format!("id = '{planted_resp2}'\nname = 'AGM-responder'\nkind = 'claude'\n")).unwrap();
+                cfg.projects.push(crate::config::ProjectCfg { id: Some(db::ulid()), path: resp_canonical, label: "planted-resp".into(), host: LOCAL_HOST.into(), bots: vec![bot], handed_off_to: None });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let err = responder::ensure_env(&app, None, None, None).await.expect_err("協調者也一樣");
+        assert!(format!("{err:?}").contains("name_taken"), "{err:?}");
+        assert_eq!(roles::get(&app.db, roles::Role::Responder).await.unwrap().bot_id, None);
+
+        // 記號偽造不了：`client_request_id` 帶保留前綴 → 400。
+        let r = create_bot(
+            State(app.clone()),
+            Path(e.project_id.clone()),
+            Json(serde_json::from_value(json!({"name": "AGM-responder", "kind": "claude", "client_request_id": "agm-role-setup:responder"})).unwrap()),
+        )
+        .await;
+        assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
     }
 
     #[tokio::test]

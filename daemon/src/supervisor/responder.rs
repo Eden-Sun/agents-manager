@@ -248,7 +248,8 @@ pub async fn ensure_env(
                 Some(id) => proj.bots.iter().position(|b| b.id.as_ref() == Some(id)),
                 // 還沒記過 bot：這時找到的專案只會是 daemon 自己目錄裡的那一個，同名的 `AGM-responder` 只可能是上一次設定寫進 config、
                 // 還沒來得及記進角色列就失敗的那一顆——接著用它（issue #181）。當成別人的回 `name_taken`，就永遠設定不起來。
-                None => proj.bots.iter().position(|b| b.name == BOT_NAME),
+                // 只認 setup 自己留了記號的那一顆（`bot_requests::ROLE_SETUP_MARK_PREFIX`）：同名但沒記號的是別人建的。
+                None => proj.bots.iter().position(|b| b.name == BOT_NAME && b.create_request_id.as_deref() == Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_RESPONDER)),
             };
             let bidx = match bidx {
                 Some(i) => i,
@@ -271,7 +272,7 @@ pub async fn ensure_env(
                         identity: None,
                         env: Default::default(),
                         herdr_session: None,
-                        create_request_id: None,
+                        create_request_id: Some(super::bot_requests::ROLE_SETUP_MARK_PREFIX_RESPONDER.into()),
                         create_fingerprint: None,
                     });
                     proj.bots.len() - 1
