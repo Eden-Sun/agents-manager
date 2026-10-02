@@ -2225,9 +2225,13 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   不分 kind 都設，別種 bot 開出來的 claude 子 agent 也繼承）、codex 加 `-c project_doc_max_bytes=0`（不讀 AGENTS.md）。
   **沒設定的專案維持 CLI 原本的行為**：換版之後、設定寫好之前，bot 不會兩邊都讀不到。
 - **子 agent 拿同一份**：daemon 把「AG Man 規則 + agent md」（不含母 bot 自己的 persona）寫成 bot 目錄裡的 `instructions.md`（遠端走 ssh，暫存檔＋`cmp`），
-  路徑放進 pane env `AM_INSTRUCTIONS_FILE`（shim 保留清單帶到子 pane）。shim 的 `agent start` 依 `--kind` 補：claude `--append-system-prompt "$(cat …)"`、
-  codex `-c developer_instructions=<TOML 多行字面字串>`（三個單引號包住、不跳脫；內容本身含三個連續單引號就不帶並在 stderr 講）＋`-c project_doc_max_bytes=0`、
-  grok `--rules "$(cat …)"`。呼叫者自己帶了同類參數就尊重。
+  路徑放進 pane env `AM_INSTRUCTIONS_FILE`（shim 保留清單帶到子 pane）。shim 的 `agent start` 依 `--kind` 補，**一律只帶單行短參數**——
+  herdr ≥0.9.0 的 `agent start` 擋任何含控制字元（換行、tab、ESC…，`char::is_control`）的參數（`invalid_agent_argument`，#772），
+  整份內容壓成一行又會撞打字長度上限：claude `--append-system-prompt-file <路徑>`；codex 沒有讀檔參數，shim 把內容寫成
+  `$CODEX_HOME/am-child-<bot id>.config.toml` 的 `developer_instructions`（TOML 多行字面字串，三個單引號包住、不跳脫；內容本身含三個連續單引號就不帶並在 stderr 講），
+  argv 帶 `-p am-child-<bot id>`＋`-c project_doc_max_bytes=0`（呼叫者自己帶了 `-p`／`--profile` 就不補，stderr 講沒帶到指示）；
+  grok 的 `--rules` 也沒有讀檔版，給一行「先完整讀 `<路徑>` 並照做」。呼叫者自己帶了同類參數就尊重。
+  daemon 自己開 bot 時（`HerdrClient::agent_start`）同理把 persona 裡的所有控制字元折成空白。
 - **讀不到不擋啟動**：檔案不存在或是空檔時 bot 照開，warn 並在對話裡寫一則 system 訊息講少了哪個檔。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
