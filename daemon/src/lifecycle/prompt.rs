@@ -976,7 +976,10 @@ async fn prompt_inner(
         ));
     }
     // AGM 派工遇到「使用者剛按 Esc」：一樣先讓使用者拿回輸入框——排進佇列，寬限到了才送（§4.4a）。
-    if queue_if_busy {
+    // 使用者自己在網頁送的（User /prompt：`queue_awaits_idle`，沒有轉寄來源）不擋：那就是他接管後要打的那一句，
+    // 擋下來等 60 秒是反了（2026-10-02 prorosal：Esc 後 7 秒送的「用cc1 sonnets」卡到寬限結束才送）。
+    let users_own = queue_awaits_idle && relay.from.is_none();
+    if queue_if_busy && !users_own {
         if let Some(wait) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
             if queue_awaits_idle {
                 let out = super::busy_send::queue_awaiting_idle(app, &conv, bot_id, text, &deliver, client_request_id, group_id, relay, &files).await?;
