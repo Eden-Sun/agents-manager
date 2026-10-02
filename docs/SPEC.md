@@ -1782,9 +1782,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    90 秒內字既沒進輸入列、agent 也沒接手，回合標 `failed` 並留一則系統說明。
    **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited，
    不看 RPC 失敗（不是證據）、herdr 計畫中的維護期間不動（§6.5.2）；補上對帳只在開機／重連／事件時才跑、pane-exit 事件漏了就一直畫成活的那個洞。盯梢的時間由呼叫端傳入、pane 走 herdr client，測試不睡覺。
-6. **`POST /api/bots/{id}/prompt` 與 mission 的 `relay_from` 是來源標記，不是 principal**（issue #339、#409、#556，`relay_auth.rs`）：User 沿用共用 UI token；User 未帶 Bot 身分 header 且 prompt `relay_from` 指活 bot 時，#410 相容期照收並標 `relay_unverified = 1`。Bot principal 必須帶成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，後者驗該 bot 現行的 `hook_token`（pane 的 `AM_BOT_TOKEN`；hook 開關另控制 `AM_HOOK_TOKEN`）。`X-AM-Bot-Id` 或 token header 一旦出現就選了 Bot principal；欄位缺少、值錯、或混帶 UI/service 身分都拒絕，不得降為 User。Bot 省略或留空 `relay_from` 時由 daemon 以驗證過的 id 標記；明確自稱別顆 bot 回 403 `relay_from_mismatch`。
+6. **`POST /api/bots/{id}/prompt` 與 mission 的 `relay_from` 是來源標記，不是 principal**（issue #339、#409、#556，`relay_auth.rs`）：User 沿用共用 UI token；User 未帶 Bot 身分 header 且 prompt `relay_from` 指活 bot 時，一律 403 `relay_from_token_required`（#339 相容期已在 #410 結束；歷史訊息的 `relay_unverified = 1` 保留，UI 照舊標「未驗證」）。Bot principal 必須帶成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，後者驗該 bot 現行的 `hook_token`（pane 的 `AM_BOT_TOKEN`；hook 開關另控制 `AM_HOOK_TOKEN`）。`X-AM-Bot-Id` 或 token header 一旦出現就選了 Bot principal；欄位缺少、值錯、或混帶 UI/service 身分都拒絕，不得降為 User。Bot 省略或留空 `relay_from` 時由 daemon 以驗證過的 id 標記；明確自稱別顆 bot 回 403 `relay_from_mismatch`。
    User 請求帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 卻無有效 Bot principal 時，在 auth 中介層先回 401，不進相容分支。未帶 Bot 身分 header 且有有效 `X-AM-Token` 的請求是 User；這保留使用者裁示接受的共用 UI token／`allow_lan` 風險，並不提供額外的人類證明。Bot 憑證沿用 hook token，User 用 credential rotation 立即失效；活 bot 重啟取得新值，停止 bot 下次啟動取得。
-   `relay_from:"daemon"` 從 Bot／User HTTP 請求一律 403 `relay_from_reserved`——daemon 自己的訊息（通知、digest、child 警示、派工）都在行程內直接寫，不走 HTTP，而 `daemon` 會繞過 AGM 協調者的收件匣（§18.15）。User 的未驗證相容行為和 #410 移除條件維持原票，不因 Bot principal 上線而提早移除。
+   `relay_from:"daemon"` 從 Bot／User HTTP 請求一律 403 `relay_from_reserved`——daemon 自己的訊息（通知、digest、child 警示、派工）都在行程內直接寫，不走 HTTP，而 `daemon` 會繞過 AGM 協調者的收件匣（§18.15）。維運腳本（`daemon-swap.sh`、`herdr-upgrade.sh`）走 service principal，不自稱 `relay_from`。
    **`relay_from` 不能是收件的那顆 bot 自己** → 400 `relay_self`：`relay_from` 的意思是「這句話不是收件者自己想的」，
    指向本人就沒有來源可標，UI 會畫出「A → A」；daemon 的 child 警示是 child → 母代，本來就是兩顆不同的 bot。
    信任邊界照實寫：hook token 也在同一個 unix 使用者讀得到的檔案裡（bot 目錄的 settings），這一層擋的是「以為可以代別人發言」的 agent 與誤用，
@@ -1792,7 +1792,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    **mission 端點**（`events`／`question`／`answer`／`revise`／`complete`／`deliver`）的 `relay_from` 共用同一段 token 比對（#409，`relay_auth::authenticate_mission`），
    差在兩格：沒帶 token 直接 403 `relay_from_token_required`（沒有相容期——唯一帶 `relay_from` 的呼叫端 `bin/agm` 在角色自己的 pane 裡一律帶 token，web 從不帶）；
    `relay_from:"daemon"` 只給驗證過的 AGM 角色 bot（`X-AM-Bot-Id`＋`X-AM-Bot-Token`，`agm mission … --as-daemon`），其他一律 403 `relay_from_reserved`。
-   evidence 搜尋也回傳訊息實際的 `relay_from` 與 `relay_unverified`：對 `role=user` 訊息，`relay_from:null` 且 `relay_unverified:false` 表示 daemon 記錄為使用者直接輸入，`relay_unverified:true` 是相容期未驗證的來源自稱。舊 daemon 缺少這兩欄時，`agm search` 保留為 `null`／`null`（來源未知），不可把缺欄位轉成空字串。
+   evidence 搜尋也回傳訊息實際的 `relay_from` 與 `relay_unverified`：對 `role=user` 訊息，`relay_from:null` 且 `relay_unverified:false` 表示 daemon 記錄為使用者直接輸入，`relay_unverified:true` 是 #410 之前相容期留下的未驗證來源自稱。舊 daemon 缺少這兩欄時，`agm search` 保留為 `null`／`null`（來源未知），不可把缺欄位轉成空字串。
 
 ### 6.5e shell／服務 pane 的歸屬與生命週期（2026-09-16 使用者交辦；AGM 2026-09-16 review 通過，實作另行派工）
 
@@ -4305,7 +4305,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 - **角色身分**：只認 `X-AM-Bot-Id` + 該 bot 的 hook token（`X-AM-Bot-Token`），常數時間比對。`bin/agm` 在自己的 pane 裡（`AM_BOT_ID` 等於 runtime 的 `self_bot_id`）才帶；
   驗證過的決定記成 `AGM:patrol`／`AGM:responder`，body 自稱的 `actor` 不算——**沒驗過就記 `user`／`user(<自稱>)`，寫不出 `AGM` 開頭的身分**（issue #414；以前沒驗過時直接採信 body，預設還填 `AGM`）。
   已驗證 bot 的角色查詢若遇 DB 錯誤，assignment 建立／review 回可重試的 server error，且不寫 assignment、裁示或 audit；不得降成 `user`／`None`。恢復後原請求可重試，review owner 與 audit actor 保留驗證出的角色。
-  `relay_from` 的 bot 申請沒帶 token 仍收，但標 `sender_verified=false`。
+  `relay_from` 的 bot 申請沒帶 token 一律 403 `relay_from_token_required`（#410）。
   **Bot／service 身分標頭不完整、token 空／非 UTF-8／對不上，或混帶 principal，一律由 `/api` 全域中介層回 401，不退回 User**（issue #415、#556）：使用者權限在 `inbox` ack 上比角色權限大（跨角色也結得掉），
   當成「沒帶」等於把驗證失敗變成提權。
   **`inbox/{id}/ack` 再進一步，連「沒帶」也不收**（issue #432）：沒宣告身分、或宣告了而那顆不是角色 bot，都是 403 `role_required`——否則角色 bot 只要不送標頭就繞過角色分界。

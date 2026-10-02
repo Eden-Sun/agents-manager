@@ -297,7 +297,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 ```
 
   - Bot principal 一定要帶成對 `X-AM-Bot-Id`、`X-AM-Bot-Token`，且不能混帶 `X-AM-Token`。`AM_BOT_TOKEN` 是每個 bot 都注入的 API 憑證；目前重用 `bots.hook_token`，可由 User 用 credential rotation 立即失效並重啟該 bot。若任一活著的後代 pane 還繼承母 bot 的 token，輪替先以 `409 live_children_use_credential` 拒絕，不撤舊值。`AM_HOOK_TOKEN` 只在 hook-enabled pane 注入。網頁沒有 Bot headers，仍以共用 UI token 作 User principal。
-  - `relay_from` 是來源標記，不能覆蓋 principal。省略時：User 請求記為使用者；Bot 請求由 daemon 補成已驗證的 `X-AM-Bot-Id`。Bot 若提供 `relay_from`，只能是自己的 id，否則 403 `relay_from_mismatch`。User 呼叫端仍有 #339 的未驗證相容期：不帶任何 Bot 身分 header 時，`relay_from` bot 才會標 `relay_unverified = 1`；移除條件見 #410。
+  - `relay_from` 是來源標記，不能覆蓋 principal。省略時：User 請求記為使用者；Bot 請求由 daemon 補成已驗證的 `X-AM-Bot-Id`。Bot 若提供 `relay_from`，只能是自己的 id，否則 403 `relay_from_mismatch`。#339 的未驗證相容期已在 #410 結束：User 沒帶 Bot proof 就自稱活 bot 來源一律 403 `relay_from_token_required`（歷史訊息的 `relay_unverified = 1` 保留）。
 
   | principal／`relay_from` | 回應 |
   |---|---|
@@ -306,11 +306,11 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
   | Bot，提供別的 bot id | **403** `relay_from_mismatch`，什麼都不寫 |
   | Bot headers 欄位不完整、token 錯、或同時帶 User token | **401**；不退回 User |
   | User，`relay_from="daemon"` | **403** `relay_from_reserved`：daemon 自己的訊息不走 HTTP |
-  | User，`relay_from` 是活 bot 且未帶 Bot token | 相容期照收，`relay_unverified = 1`；移除條件見 #410 |
+  | User，`relay_from` 是活 bot 且未帶 Bot token | **403** `relay_from_token_required`，什麼都不寫（#410 相容期已結束） |
   | User，附上任何 Bot identity header 但無有效 Bot principal | **401**；不進 User 相容分支 |
   | User，relay bot 不存在／已刪且未帶 Bot token | 400 |
 
-  `/api` 認證中介層先驗 principal。帶 Bot id/token header 即代表選擇 Bot principal，錯誤或不完整時回 401；所以只有不帶 Bot 身分 header、以有效 UI token 驗證的 User 請求能走 #339 相容分支。User 的 `relay_from` 本身不會授予 Bot 身分。
+  `/api` 認證中介層先驗 principal。帶 Bot id/token header 即代表選擇 Bot principal，錯誤或不完整時回 401；不帶 Bot 身分 header 的 User 請求也不能憑 `relay_from` 取得 Bot 來源（#410）。`relay_from` 本身不會授予 Bot 身分。
 
   寫入 `messages.relay_from`（與 `relay_unverified`），UI 據此畫「誰 → 誰」。
 - `client_request_id` 可省（daemon 補），建議自帶：同 id 重送回同一個 `turn_id`（即使已有新 Turn 在飛）。
@@ -2219,13 +2219,13 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（run 的 `agent_status`、`native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`、`asleep`、`lamp`）、未結案 assignment、待處理 inbox。不含 env、hook token、args、persona 全文。
   `lamp` 跟 `GET /api/state` 是同一個函式算的（`api.rs` 的 `lamp`，吃 `bot_connected`＝bot → host → herdr session），呼叫端照抄就好：CLI 這邊只看得到主機層的 `host_connected`，自己推的話同一台主機上 session 掉了的那顆會分岔（issue #514）。
 - `GET /api/supervisor/handoff` 與 `GET /api/supervisor` 的 `assignments`：最近一頁**加上**掉在頁外的未結案交辦，所以 `open_assignments` 不會少報（issue #515）。
-- `GET /api/supervisor/evidence?q=<文字>&bot_id=&project_id=&before=<cursor>&limit=20` → `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,relay_from,relay_unverified,content,source,incomplete,rewound_at,created_at,truncated}],has_more,next_cursor}`；`rewound_at` 非 `null` ＝這則被對話倒回標掉（網頁畫成「已倒回」），內容仍在歷史裡但不是有效決定。`relay_from` 是訊息的來源 bot id 或 `null`；對 `role=user` 訊息，`null` 表示使用者直接輸入。`relay_unverified` 是 `true` 時表示 User principal 在相容期自稱了 bot 來源。`agm search` 遇到舊 daemon 沒回這兩欄時會輸出兩欄為 `null`，保留「來源未知」而不是把它當成使用者訊息。
+- `GET /api/supervisor/evidence?q=<文字>&bot_id=&project_id=&before=<cursor>&limit=20` → `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,relay_from,relay_unverified,content,source,incomplete,rewound_at,created_at,truncated}],has_more,next_cursor}`；`rewound_at` 非 `null` ＝這則被對話倒回標掉（網頁畫成「已倒回」），內容仍在歷史裡但不是有效決定。`relay_from` 是訊息的來源 bot id 或 `null`；對 `role=user` 訊息，`null` 表示使用者直接輸入。`relay_unverified` 是 `true` 時表示 #410 之前相容期內 User principal 自稱的 bot 來源（現已拒絕，只剩歷史訊息）。`agm search` 遇到舊 daemon 沒回這兩欄時會輸出兩欄為 `null`，保留「來源未知」而不是把它當成使用者訊息。
   `q` 必填（trim 後 1–500 字），字面子字串（`%`、`_` 不是萬用字元）；`limit` 1–100；含已刪 bot 的歷史。依 `(created_at DESC,id DESC)`，`next_cursor` 原樣放回 `before`。
   每筆 content 最多 16,000 字（超過 `truncated:true`）。空查詢、過長、壞 cursor 400。只提供證據，不把命中當完成或適合度。
 
 ### bot 寫給 AGM（SPEC §18.15）
 協調者建立後，下面兩條路目標是巡檢或協調者 bot 時**不開回合**，改寫 inbox `bot_request`：
-- `POST /api/bots/{id}/prompt {text,client_request_id?,attachments?,relay_from:<bot id>,ack?,reply_to?}`（Bot principal 必須是成對 `X-AM-Bot-Id`／`X-AM-Bot-Token`；未帶 Bot proof 的 User 仍依 #339/#410 相容期記 `sender_verified:false`）→ **202**
+- `POST /api/bots/{id}/prompt {text,client_request_id?,attachments?,relay_from:<bot id>,ack?,reply_to?}`（Bot principal 必須是成對 `X-AM-Bot-Id`／`X-AM-Bot-Token`；未帶 Bot proof 的 User 自稱 bot 來源 → 403 `relay_from_token_required`，不進收件匣（#410））→ **202**
   `{routed:"responder"|"patrol",queued:true,duplicate,wake,inbox_event_id,state,delivery:"queued",turn_id:null,message_id:null,note}`。
   沒有 `relay_from`（使用者）、目標不是角色 bot、協調者未建立 → 照舊 200 `PromptOut`（`relay_from:"daemon"` 從 HTTP 帶進來是 403，見 §5）。
 - `POST /relay/announce`（shim，`X-AM-Bot-Token`，表單 `bot_id,to_agent,text,ack?,reply_to?`）的 `to_agent` 對得上角色 bot（名字、agent 名、pane id）→ 200 同上形狀；shim 見 `routed` 不再轉給真的 herdr。其他 → `{}`（照舊記來源）。
