@@ -261,13 +261,19 @@ pub fn protocol_supported(protocol: u32) -> bool {
     SUPPORTED_PROTOCOLS.contains(&protocol)
 }
 
-/// herdr rejects any argument with a newline (`invalid_agent_argument`; only newlines, verified
-/// 2026-09-06 herdr 0.8.2). Multi-line personas are common, so fold rather than fail to start.
+/// herdr rejects any argument with a control character (`invalid_agent_argument`: 0.8.2 was seen
+/// failing on newlines, herdr ≥0.9.0 checks `char::is_control`, so a tab counts too — #772).
+/// Multi-line personas are common, so fold rather than fail to start.
 fn fold_newlines(arg: &str) -> String {
-    if !arg.contains('\n') && !arg.contains('\r') {
+    if !arg.chars().any(char::is_control) {
         return arg.to_string();
     }
-    arg.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join(" ")
+    arg.lines()
+        .map(|l| l.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>())
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Margin under the shell typing cliff: 2026-09-06 a 1256-byte line stopped at 1019 and the
@@ -1089,12 +1095,18 @@ mod arg_tests {
     }
 
     #[test]
-    fn only_newlines_are_folded() {
+    fn control_characters_are_folded() {
         assert_eq!(fold_newlines("你是 issue #1 的 PM。\n成員：`pm`、`dev-1`。\n合併由 daemon 處理。"),
                    "你是 issue #1 的 PM。 成員：`pm`、`dev-1`。 合併由 daemon 處理。");
         assert_eq!(fold_newlines("a\r\nb"), "a b");
         assert_eq!(fold_newlines("a\n\n\nb"), "a b");
         assert_eq!(fold_newlines("trailing\n"), "trailing");
+        // herdr ≥0.9.0 擋的是所有 `char::is_control`，不只換行（#772）：tab、ESC、C1 一樣要清掉。
+        assert_eq!(fold_newlines("a\tb"), "a b");
+        assert_eq!(fold_newlines("```\n\tindented\n```"), "``` indented ```");
+        for s in ["a\u{1b}[0mb", "x\u{7f}y\u{85}z\tq\n"] {
+            assert!(!fold_newlines(s).chars().any(char::is_control), "{s:?} → {:?}", fold_newlines(s));
+        }
 
         // Everything herdr accepts has to survive byte-for-byte.
         for s in ["--append-system-prompt", "with `backtick` and 'quote' and \"dq\"", "#1 中文與符號、《》", ""] {

@@ -67,7 +67,7 @@ am_child_of_value() {
     fi
 }
 
-# 檔案內容 → TOML 多行字面字串（三個單引號包起來），給 codex 的 `-c developer_instructions=…`（§6.5i）。
+# 檔案內容 → TOML 多行字面字串（三個單引號包起來），給 codex 的 `developer_instructions`（§6.5i）。
 # 字面字串不跳脫任何字元，碰不到各家 awk／sed 的反斜線差異；內容本身有三個連續單引號就表示不了，回 1 讓呼叫端不帶。
 am_toml_string_of_file() {
     _q3="'''"
@@ -75,6 +75,24 @@ am_toml_string_of_file() {
         return 1
     fi
     printf '%s%s%s' "$_q3" "$(cat "$1")" "$_q3"
+}
+
+# codex 沒有「從檔案讀 developer_instructions」的參數；`-c developer_instructions=<內容>` 是多行，herdr ≥0.9.0
+# 的 `agent start` 擋所有控制字元（invalid_agent_argument，#772），壓成一行又會撞到打字長度上限（herdr.rs 的
+# `fit_command_line`）。改寫成 `$CODEX_HOME/<名>.config.toml`，argv 只帶 `-p <名>`；印出 profile 名，失敗回 1。
+# 每顆 bot 一個檔（同帳號的 bot 共用 CODEX_HOME），暫存檔＋mv 換上，兩個 child 同時開也不會讀到半份。
+am_codex_instructions_profile() {
+    _toml=$(am_toml_string_of_file "$1") || return 1
+    _home=${CODEX_HOME:-$HOME/.codex}
+    _name="am-child-$(printf '%s' "${AM_BOT_ID:-${AM_AGENT_NAME:-local}}" | tr -c 'A-Za-z0-9_-' '_')"
+    _dst="$_home/$_name.config.toml"
+    mkdir -p "$_home" 2>/dev/null
+    if printf 'developer_instructions = %s\n' "$_toml" > "$_dst.$$" 2>/dev/null && mv -f "$_dst.$$" "$_dst"; then
+        printf '%s' "$_name"
+        return 0
+    fi
+    rm -f "$_dst.$$"
+    return 1
 }
 
 # permit 的有效期要涵蓋 `agent start --timeout`（herdr 最多等 300 秒，預設 30 秒；子 agent 慢慢啟動時不能在 finish 之前過期）。
@@ -241,6 +259,7 @@ am_agent_start() {
     _has_effort=0
     _has_instr=0
     _has_docs=0
+    _has_profile=0
     while [ "$_i" -lt "$_n" ]; do
         _a=$1
         shift
@@ -286,6 +305,7 @@ am_agent_start() {
                 model_reasoning_effort=*) _has_effort=1 ;;
                 --append-system-prompt | --append-system-prompt=* | --append-system-prompt-file* | developer_instructions=* | --rules | --rules=*) _has_instr=1 ;;
                 project_doc_max_bytes=*) _has_docs=1 ;;
+                -p | --profile | --profile=*) _has_profile=1 ;;
             esac
         elif [ "$_named" = 0 ]; then
             case "$_prev" in
@@ -323,7 +343,7 @@ am_agent_start() {
     fi
     # §6.5i：子 agent 的指示跟母 bot 同一個來源（`AM_INSTRUCTIONS_FILE`＝AG Man 規則＋`[agents]` 的 agent md），
     # CLI 自己的指示檔一律不讀：claude 靠繼承的 CLAUDE_CODE_DISABLE_CLAUDE_MDS，codex 補 project_doc_max_bytes=0。
-    # 呼叫者自己帶了就尊重。
+    # 呼叫者自己帶了就尊重。注入的一律是單行短參數（路徑／profile 名）：herdr ≥0.9.0 擋含換行、tab 等控制字元的參數（#772）。
     _instr=""
     if [ "$_has_instr" = 0 ] && [ -n "${AM_INSTRUCTIONS_FILE:-}" ] && [ -r "$AM_INSTRUCTIONS_FILE" ]; then
         _instr=$AM_INSTRUCTIONS_FILE
@@ -333,17 +353,21 @@ am_agent_start() {
             if [ -n "$_instr" ]; then
                 [ "$_stop" = 1 ] || set -- "$@" --
                 _stop=1
-                set -- "$@" --append-system-prompt "$(cat "$_instr")"
+                set -- "$@" --append-system-prompt-file "$_instr"
             fi
             ;;
         codex)
             if [ -n "$_instr" ]; then
                 [ "$_stop" = 1 ] || set -- "$@" --
                 _stop=1
-                if _toml=$(am_toml_string_of_file "$_instr"); then
-                    set -- "$@" -c "developer_instructions=$_toml"
-                else
+                if [ "$_has_profile" = 1 ]; then
+                    printf 'agents-manager: 你自己帶了 codex 的 -p/--profile，子 agent 這次沒帶指示檔 %s\n' "$_instr" >&2
+                elif _prof=$(am_codex_instructions_profile "$_instr"); then
+                    set -- "$@" -p "$_prof"
+                elif grep -qF "'''" "$_instr" 2>/dev/null; then
                     printf 'agents-manager: %s 含有三個連續單引號，TOML 表示不了，子 agent 這次沒帶指示檔\n' "$_instr" >&2
+                else
+                    printf 'agents-manager: 寫不進 codex 的 profile（%s），子 agent 這次沒帶指示檔\n' "${CODEX_HOME:-$HOME/.codex}" >&2
                 fi
             fi
             # 只在 §6.5i 底下（daemon 給了 AM_INSTRUCTIONS_FILE）才關：人工 shell 的 codex 照它自己的習慣。
@@ -357,7 +381,8 @@ am_agent_start() {
             if [ -n "$_instr" ]; then
                 [ "$_stop" = 1 ] || set -- "$@" --
                 _stop=1
-                set -- "$@" --rules "$(cat "$_instr")"
+                # grok 的 `--rules` 只收字串、沒有讀檔版：給一行指向檔案的指示，讓它開工前自己讀。
+                set -- "$@" --rules "AG Man 指示（硬規則，效力同系統指示）在 $_instr：開始任何工作前先完整讀過並照做。"
             fi
             ;;
     esac
@@ -831,6 +856,7 @@ mod tests {
             let fake = dir.join("real");
             std::fs::create_dir_all(&fake).unwrap();
             // `agent get <name>` answers from `AM_TEST_AGENTS`; everything else echoes argv.
+            // `agent start` 跟 herdr ≥0.9.0 一樣擋控制字元（`char::is_control`：換行、tab、ESC…，#772），整套測試都在驗 herdr 收得下。
             write_script(
                 &fake.join("herdr"),
                 "if [ \"$1\" = agent ] && [ \"$2\" = get ]; then\n\
@@ -844,6 +870,13 @@ mod tests {
                  if [ \"$1\" = pane ] && [ \"$2\" = send-text ]; then\n\
                    { for a in \"$@\"; do printf '%s\\n' \"$a\"; done; printf -- '---\\n'; } >> \"${AM_TEST_SENDTEXT_LOG:-/dev/null}\"\n\
                    exit 0\n\
+                 fi\n\
+                 if [ \"$1\" = agent ] && [ \"$2\" = start ]; then\n\
+                   for a in \"$@\"; do\n\
+                     if [ \"$(printf '%s' \"$a\" | LC_ALL=C tr -d '\\000-\\037\\177')\" != \"$a\" ]; then\n\
+                       printf '{\"error\":{\"code\":\"invalid_agent_argument\"}}\\n' >&2; exit 1\n\
+                     fi\n\
+                   done\n\
                  fi\n\
                  if [ -n \"${AM_TEST_SIGNAL_PARENT:-}\" ]; then kill -INT \"$PPID\"; sleep 2; exit 1; fi\n\
                  for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n\
@@ -1769,32 +1802,63 @@ mod tests {
     fn a_child_agent_gets_the_parents_instructions_file() {
         let s = Sandbox::new();
         let f = s.dir.join("instructions.md");
-        // 假 herdr 一行記一個參數，所以內容用單行；多行內容一樣是一個參數（"$(cat …)" 有引號）。
-        let body = "RULES say \"hi\" \\ done";
+        // 真的指示檔是多行、可能有 tab：整份當一個參數，herdr ≥0.9.0 回 invalid_agent_argument（#772，假 herdr 照樣擋）。
+        let body = "RULES say \"hi\" \\ done\n\n\t- second line 中文";
         std::fs::write(&f, format!("{body}\n")).unwrap();
         let fp = f.to_str().unwrap();
-        let env = [("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", fp)];
-        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
-        assert_eq!(out, ["agent", "start", "p-1-kid", "--kind", "claude", "--pane", "w1:p9", "--", "--append-system-prompt", body]);
-        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "fork", "--last", "go"]);
-        let toml = format!("developer_instructions='''{body}'''");
+        let codex_home = s.dir.join("codex-home");
+        let ch = codex_home.to_str().unwrap();
+        let env = [("AM_AGENT_NAME", "p-1"), ("AM_BOT_ID", "b1"), ("AM_INSTRUCTIONS_FILE", fp), ("CODEX_HOME", ch)];
+        let every_arg_fits_herdr = |out: &[String], err: &str| {
+            assert!(!out.is_empty() && !err.contains("invalid_agent_argument"), "{out:?} {err}");
+            assert!(out.iter().all(|a| !a.chars().any(char::is_control) && a.len() < 300), "{out:?}");
+        };
+        // claude：只傳路徑。
+        let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"]);
+        every_arg_fits_herdr(&out, &err);
+        assert_eq!(&out[..10], ["agent", "start", "p-1-kid", "--kind", "claude", "--pane", "w1:p9", "--", "--append-system-prompt-file", fp]);
+        // codex：沒有讀檔參數，指示寫進 `$CODEX_HOME/<profile>.config.toml`，argv 只帶 `-p <profile>`。
+        let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "fork", "--last", "go"]);
+        every_arg_fits_herdr(&out, &err);
         assert_eq!(
-            out,
-            ["agent", "start", "p-1-kid", "--kind", "codex", "--pane", "w1:p9", "--", "fork", "--last", "go", "-c", toml.as_str(), "-c", "project_doc_max_bytes=0"]
+            &out[..15],
+            ["agent", "start", "p-1-kid", "--kind", "codex", "--pane", "w1:p9", "--", "fork", "--last", "go", "-p", "am-child-b1", "-c", "project_doc_max_bytes=0"]
         );
-        let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "grok", "--pane", "w1:p9"]);
-        assert_eq!(&out[out.len() - 2..], ["--rules", body]);
+        let profile = std::fs::read_to_string(codex_home.join("am-child-b1.config.toml")).unwrap();
+        assert_eq!(profile, format!("developer_instructions = '''{body}'''\n"));
+        // 呼叫者自己帶了 profile：不再補第二個 `-p`（clap 會報重覆），提醒指示檔沒帶到。
+        let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9", "--", "--profile", "mine"]);
+        assert_eq!(out.iter().filter(|a| *a == "-p" || *a == "--profile").count(), 1, "{out:?}");
+        assert!(err.contains("沒帶指示檔"), "{err}");
+        // grok：沒有讀檔參數，`--rules` 給一行指向檔案的指示。
+        let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "grok", "--pane", "w1:p9"]);
+        every_arg_fits_herdr(&out, &err);
+        let rules = out.iter().position(|a| a == "--rules").expect("--rules");
+        assert!(out[rules + 1].contains(fp), "{out:?}");
         // 自己帶了指示就不補；codex 沒有檔也照樣不讀 AGENTS.md。
         let (out, _) = s.run(&env, &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9", "--", "--append-system-prompt", "mine"]);
-        assert_eq!(out.iter().filter(|a| *a == "--append-system-prompt").count(), 1, "{out:?}");
+        assert_eq!(out.iter().filter(|a| a.starts_with("--append-system-prompt")).count(), 1, "{out:?}");
         let gone = s.dir.join("gone.md");
-        let (out, _) = s.run(&[("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", gone.to_str().unwrap())], &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
+        let (out, _) = s.run(&[("AM_AGENT_NAME", "p-1"), ("AM_INSTRUCTIONS_FILE", gone.to_str().unwrap()), ("CODEX_HOME", ch)], &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
         assert_eq!(&out[out.len() - 3..], ["--", "-c", "project_doc_max_bytes=0"]);
         // 內容有三個連續單引號：codex 不帶（TOML 表示不了），也不會因此失敗。
         std::fs::write(&f, "a '''b'''").unwrap();
         let (out, err) = s.run(&env, &["agent", "start", "kid", "--kind", "codex", "--pane", "w1:p9"]);
-        assert!(!out.iter().any(|a| a.starts_with("developer_instructions=")), "{out:?}");
+        assert!(!out.iter().any(|a| a == "-p"), "{out:?}");
         assert!(err.contains("TOML 表示不了"), "{err}");
+    }
+
+    /// 假 herdr 跟 0.9.x 一樣擋控制字元：呼叫者自己塞多行參數會失敗，上面「herdr 收得下」的檢查才有意義（#772）。
+    #[test]
+    fn the_fake_herdr_rejects_control_characters_like_herdr_0_9() {
+        let s = Sandbox::new();
+        for bad in ["a\nb", "a\tb", "a\rb", "a\u{1b}b", "a\u{7f}b"] {
+            let (out, err, rc) = s.run_full(&[("AM_AGENT_NAME", "p-1")], &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9", "--", bad]);
+            assert_eq!(rc, 1, "{bad:?} {out:?}");
+            assert!(err.contains("invalid_agent_argument"), "{bad:?} {err}");
+        }
+        let (out, _, rc) = s.run_full(&[("AM_AGENT_NAME", "p-1")], &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9", "--", "中文 'q' \"dq\" $HOME"]);
+        assert_eq!(rc, 0, "{out:?}");
     }
 
     /// `agent start --help` 只是查用法：原樣轉給 herdr，不能把 env 補送打進呼叫者自己的 pane（2026-10-01 實際發生）。
