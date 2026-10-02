@@ -4293,6 +4293,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 不再是「一輩子只提醒一次」（`push_inbox` 是 `INSERT OR IGNORE`）。
 
 **處理完的大 payload 會壓成摘要**（`store::compact_handled_payloads`，每小時）：`handled`、`updated_at` 超過 24 小時、payload 超過 16 KB 的 inbox 列，payload 換成 `{"compacted":true,"original_bytes":N}`（原本有 `fingerprint`／`from_bot_id` 的照留）；列、`event_key`、狀態、時間都留著（`event_key` 是去重鍵，`sweep_missing_events` 看到沒有事件的已結算交辦會補一筆）。`pending`／`delivered` 不碰。讀 `handled` 列 payload 的路徑只能依賴那兩個欄位：`bot_request` 同一個 `client_request_id` 的重播判斷看 `fingerprint`、`reply_to` 的歸屬比對看 `from_bot_id`。
+**流水帳類事件處理完 60 天整列刪掉**（`store::prune_handled_events`，跟壓縮同一個每小時的拍）：壓縮只動大於 16 KB 的 payload、不刪列，小的事件（每小時一則的 `ops_alert`、bot 的申請、健康變化）就是一張只增不減的表。只刪 `health_changed`／`ops_alert`／`bot_request` 且 `handled` 超過 60 天的列（刪了之後同一個 `client_request_id` 再來就是新的一則，這個時間尺度可以接受）；**不刪**交辦結果等靠 `event_key` 去重的種類（`assignment_*`、核准…）、`pending`／`delivered`／`gave_up`、比較新的。
 
 **一顆總管、一個專案**（使用者 2026-09-16）：協調者最早自成一個專案，因為一個專案只有一個 path；但側欄上「AGM」與「AGM-responder」分成兩塊看起來像兩顆總管。
 現在協調者的 bot 掛在巡檢的專案底下，工作目錄改由 `bots.cwd` 表達（`lifecycle::bot_cwd` 先看它，再退回專案的 path）——目錄仍然分開，只是不再自成一個專案。

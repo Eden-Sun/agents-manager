@@ -2752,5 +2752,35 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(self.run_cli("issue", "claim", "425")[0], 0)
 
 
+class AckPathTest(unittest.TestCase):
+    """`agm ack <id>` 的 id 是一段路徑：不能讓 `/`、`?`、`#`、`..` 改變它打到哪一個端點。"""
+
+    class Stub:
+        def __init__(self):
+            self.paths = []
+
+        def post(self, path, body=None):
+            self.paths.append(path)
+            return {}
+
+    def ack(self, event_id):
+        stub = self.Stub()
+        agm.cmd_ack(stub, {}, type("Args", (), {"event_id": event_id})())
+        return stub.paths[0]
+
+    def test_an_event_id_with_path_characters_stays_one_path_segment(self):
+        for evil in ["a/b", "../../health", "a?x=1", "a#frag", "a b", "%2e%2e"]:
+            path = self.ack(evil)
+            self.assertTrue(path.startswith("/api/supervisor/inbox/") and path.endswith("/ack"), path)
+            middle = path[len("/api/supervisor/inbox/") : -len("/ack")]
+            self.assertNotIn("/", middle, f"{evil!r} 變成了好幾段：{path}")
+            self.assertNotIn("?", middle)
+            self.assertNotIn("#", middle)
+            self.assertEqual(urllib.parse.unquote(middle), evil, "解回來還是原本那串")
+
+    def test_a_real_ulid_is_unchanged(self):
+        self.assertEqual(self.ack("01M3YJ0S4V0Y9004VFV0YJ386C"), "/api/supervisor/inbox/01M3YJ0S4V0Y9004VFV0YJ386C/ack")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

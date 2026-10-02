@@ -51,6 +51,12 @@ CLAIM_STALE_SECS = 24 * 3600
 GH_TIMEOUT = 60.0
 
 
+
+def path_segment(value: object) -> str:
+    """URL 路徑的**一段**：`/`、`?`、`#`、`..` 都編碼，id 不能改變打到哪一個端點。"""
+    return urllib.parse.quote(str(value), safe="")
+
+
 class AgmError(Exception):
     """帶結構的失敗；`main` 會把它印成 JSON 並用非 0 離開。"""
 
@@ -613,7 +619,7 @@ def cmd_search(client: Client, cfg: dict, args) -> object:
 
 def cmd_messages(client: Client, cfg: dict, args) -> object:
     page = client.get(
-        f"/api/bots/{urllib.parse.quote(args.bot_id)}/messages",
+        f"/api/bots/{path_segment(args.bot_id)}/messages",
         {"limit": args.limit, "before": args.before},
     )
     if not isinstance(page, dict):
@@ -794,7 +800,7 @@ def cmd_assignments(client: Client, cfg: dict, args) -> object:
     # 而且清單那支壞了、詳情那支好好的，指令也不該跟著失敗。只有它 404（舊 daemon、或拿的是 client_request_id）
     # 才往下掃全量清單找。
     if args.id:
-        one = optional_get(client, f"/api/supervisor/assignments/{urllib.parse.quote(args.id)}")
+        one = optional_get(client, f"/api/supervisor/assignments/{path_segment(args.id)}")
         if one is not None:
             return one
     # 有過濾條件就一定要翻完：只看第一頁的過濾結果會把頁外的未結案講成「沒有」。
@@ -877,7 +883,7 @@ def cmd_review(client: Client, cfg: dict, args) -> object:
         body["followup_request_id"] = args.followup_request_id
         if args.followup_bot:
             body["followup_bot_id"] = args.followup_bot
-    path = f"/api/supervisor/assignments/{urllib.parse.quote(args.assignment_id)}/review"
+    path = f"/api/supervisor/assignments/{path_segment(args.assignment_id)}/review"
     try:
         return client.post(path, body)
     except AgmError as e:
@@ -934,7 +940,7 @@ def cmd_approval(client: Client, cfg: dict, args) -> object:
         body["reason"] = args.reason
     if args.expires_in:
         body["expires_in_secs"] = args.expires_in
-    return client.post(f"/api/supervisor/approvals/{urllib.parse.quote(args.approval_id)}/decide", body)
+    return client.post(f"/api/supervisor/approvals/{path_segment(args.approval_id)}/decide", body)
 
 
 def single_line_token(raw: str, where: str) -> str:
@@ -1038,7 +1044,7 @@ def cmd_lease(client: Client, cfg: dict, args) -> object:
         raise AgmError("bad_args", f"lease {args.op} 需要 resource（rebuild / restart）", 2)
     # acquire／renew／release 一定要有 owner：沒帶就用 $AM_AGENT_NAME（safety 則刻意不補，見上）。
     owner = args.owner or os.environ.get("AM_AGENT_NAME", "agm-ops")
-    path = f"/api/supervisor/leases/{urllib.parse.quote(args.resource)}/{args.op}"
+    path = f"/api/supervisor/leases/{path_segment(args.resource)}/{args.op}"
     if args.op == "acquire":
         if not args.approval:
             raise AgmError("bad_args", "lease acquire 需要 --approval（核准 id）", 2)
@@ -1201,7 +1207,7 @@ def cmd_ack(client: Client, cfg: dict, args) -> object:
     Bot 的身分請求，沒有 token 時不會退回共用 User token。角色權限由 daemon 再依驗過的 id 判斷。
     """
     try:
-        return client.post(f"/api/supervisor/inbox/{urllib.parse.quote(args.event_id)}/ack", {})
+        return client.post(f"/api/supervisor/inbox/{path_segment(args.event_id)}/ack", {})
     except AgmError as e:
         if e.extra.get("status") != 403:
             raise
@@ -1621,12 +1627,12 @@ def cmd_mission(client: Client, cfg: dict, args) -> object:
         if not args.project:
             raise AgmError("bad_args", "mission list 需要 --project", 2)
         return client.get(
-            f"/api/projects/{urllib.parse.quote(args.project)}/missions",
+            f"/api/projects/{path_segment(args.project)}/missions",
             {"status": args.status, "limit": args.limit},
         )
     if not args.mission_id:
         raise AgmError("bad_args", f"mission {op} 需要 mission id", 2)
-    base = f"/api/missions/{urllib.parse.quote(args.mission_id)}"
+    base = f"/api/missions/{path_segment(args.mission_id)}"
     if op == "get":
         return client.get(base)
     if op == "events":
@@ -2037,23 +2043,23 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
         for key, val in (("kind", args.kind), ("model", args.model), ("effort", args.effort), ("identity", args.identity)):
             if val:
                 body[key] = val
-        return client.post(f"/api/projects/{urllib.parse.quote(args.project)}/bots", body)
+        return client.post(f"/api/projects/{path_segment(args.project)}/bots", body)
     if not args.bot_id:
         raise AgmError("bad_args", f"bot {args.op} 需要 bot id", 2)
     if args.op == "set":
         body = {key: val for key, val in (("model", args.model), ("effort", args.effort), ("identity", args.identity)) if val is not None}
         if not body:
             raise AgmError("bad_args", "bot set 至少需要 --model、--effort 或 --identity 其中一個", 2)
-        return client.patch(f"/api/bots/{urllib.parse.quote(args.bot_id)}", body)
+        return client.patch(f"/api/bots/{path_segment(args.bot_id)}", body)
     if args.op == "delete":
         # 軟刪：先停 pane，再從設定拿掉；它開的子 agent 一起收，對話紀錄保留。
         # AGM 的 bot（總管專案裡的、總管的 child）不帶 --confirm-supervisor 會 409 supervisor_owned（issue #406）。
         query = "?confirm=supervisor" if getattr(args, "confirm_supervisor", False) else ""
-        return client.delete(f"/api/bots/{urllib.parse.quote(args.bot_id)}{query}")
+        return client.delete(f"/api/bots/{path_segment(args.bot_id)}{query}")
     if args.op == "restore":
         # 還原被軟刪的 bot（API §10.4a；子 agent 只清 deleted_at、不開 run，pane 由父 bot 用 herdr 重開）。
-        return client.post(f"/api/bots/{urllib.parse.quote(args.bot_id)}/restore", {})
-    path = f"/api/bots/{urllib.parse.quote(args.bot_id)}/{args.op}"
+        return client.post(f"/api/bots/{path_segment(args.bot_id)}/restore", {})
+    path = f"/api/bots/{path_segment(args.bot_id)}/{args.op}"
     # `--resume native`：接回 DB 記的原生對話（接不回 daemon 回 409 resumed:false，不會默默開新的）。
     # 回應原樣印出——resumed／session_id／resume_outcome 就是呼叫端要看的。
     if getattr(args, "session", None) and not getattr(args, "resume", None):

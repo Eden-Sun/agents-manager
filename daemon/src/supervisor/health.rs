@@ -329,6 +329,12 @@ pub fn spawn(app: Arc<App>) {
                     Ok(n) => tracing::info!(compacted = n, "compacted old handled inbox payloads"),
                     Err(e) => tracing::warn!(error = ?e, "could not compact old handled inbox payloads"),
                 }
+                // 小的流水帳事件不會被壓縮，表只增不減：處理完放了 60 天的整列刪掉（只限不靠 event_key 去重的種類）。
+                match crate::supervisor::store::prune_handled_events(&app.db, crate::supervisor::store::PRUNE_HANDLED_AFTER_SECS).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(pruned = n, "pruned old handled log events from the inbox"),
+                    Err(e) => tracing::warn!(error = ?e, "could not prune old handled inbox events"),
+                }
             }
             // #427 第 2 項：先看兩顆角色 bot 的畫面（巡檢也看），結論放記憶體。
             // 要排在 `sweep` **之前**——incident 與同一拍的 health 讀數要講同一件事，理由同下一行。
