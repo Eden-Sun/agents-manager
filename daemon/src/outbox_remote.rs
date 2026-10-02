@@ -140,7 +140,7 @@ fn file_script(dir: &str, name: &str) -> String {
 /// 下載腳本。**先開 fd、再對同一個 fd 驗、只從這個 fd 讀**（#768）：遠端 bot 對自己的 outbox 有寫入權，
 /// 「`-L` 檢查 → `base64 < "$F"`」是兩次路徑操作，中間能把檔案（或整個目錄）換成指到 `~/.codex/auth.json` 的符號連結。
 /// 現在 `{{ … }} 3< "$F"` 先把檔案開在 fd 3（開的當下跟著連結走也沒關係），之後再驗：`$D`、`$F` 此刻都不是符號連結、`$F` 是一般檔案，
-/// 而且 `$F` 跟 fd 3 是同一個 inode（`-ef`，`/dev/fd/3`：GNU 與 BSD／macOS 的 `test`、`/dev/fd` 都有）。開檔那一刻 `$F` 若是連結，
+/// 而且 `$F` 跟 fd 3 是同一個檔（GNU：`-ef` 比 dev＋inode；macOS 的 `/dev/fd/N` 在 devfs 上、dev 號不同所以 `-ef` 恆為假，改比 `stat -L -f '%i %z %m %c'`）。開檔那一刻 `$F` 若是連結，
 /// fd 指到的是連結目標，之後不管 `$F` 被換成什麼，inode 對不上就拒絕；開完才換成連結則 `-L` 擋下。內容只從 fd 讀，`head -c` 封頂
 /// （超過上限由呼叫端判 `file_too_large`），不再事先 `wc -c "$F"`。開檔失敗（不存在、沒權限）也是 MISSING。
 ///
@@ -149,9 +149,15 @@ fn file_script_gap(dir: &str, name: &str, gap: &str) -> String {
     format!(
         r#"D={d}
 F="$D"/{n}
+am_same() {{
+  [ "$F" -ef /dev/fd/3 ] && return 0
+  stat -c %Y "$D" >/dev/null 2>&1 && return 1
+  a=$(stat -L -f '%i %z %m %c' "$F" 2>/dev/null) || return 1
+  [ -n "$a" ] && [ "$a" = "$(stat -L -f '%i %z %m %c' /dev/fd/3 2>/dev/null)" ]
+}}
 {{
 {gap}
-if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ] || [ ! "$F" -ef /dev/fd/3 ]; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
+if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ] || ! am_same; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
 printf 'AM_OUTBOX_FILE\n'
 head -c {cap} <&3 | base64
 }} 2>/dev/null 3< "$F" || printf 'AM_OUTBOX_MISSING\n'
