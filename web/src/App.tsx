@@ -5,6 +5,8 @@ import { useDialogFocus } from './hooks/useDialogFocus'
 import { useViewportPin } from './hooks/useViewportPin'
 import { DRAWER_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import { useProjectJumpKeys } from './hooks/useProjectJumpKeys'
+import { useBotSwitchKeys } from './hooks/useBotSwitchKeys'
+import { dialogOpen } from './lib/dialogOpen'
 import { ChatPanel } from './components/ChatPanel'
 import { HostOfflineBanner } from './components/HostOffline'
 import { GroupChatPanel } from './components/GroupChatPanel'
@@ -122,25 +124,6 @@ function ConnBanner() {
   )
 }
 
-/** ⌥↑/⌥↓ switches bot from anywhere; plain ↑/↓ belongs to focus. Skipped inside a bot row (reorder) and dialogs. */
-function useBotSwitchKeys() {
-  const selectAdjacentBot = useStore((s) => s.selectAdjacentBot)
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!e.altKey || e.metaKey || e.ctrlKey || e.isComposing) return
-      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
-      if (e.defaultPrevented) return
-      const target = e.target instanceof Element ? e.target : null
-      if (target?.closest('.bot-row')) return
-      if (document.querySelector('.modal-backdrop, .confirm-backdrop')) return
-      e.preventDefault()
-      selectAdjacentBot(e.key === 'ArrowUp' ? -1 : 1)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [selectAdjacentBot])
-}
-
 export default function App() {
   const ready = useStore((s) => s.ready)
   const bootError = useStore((s) => s.bootError)
@@ -183,7 +166,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
       // A dialog on top owns Escape; it is the drawer's turn only when none is open.
-      if (document.querySelector('.modal-backdrop, .confirm-backdrop')) return
+      if (dialogOpen()) return
       e.preventDefault()
       setDrawer(false)
     }

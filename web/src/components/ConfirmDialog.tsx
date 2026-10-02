@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import { useDialogFocus } from '../hooks/useDialogFocus'
+import { isImeEnter } from '../lib/ime'
 import './confirmDialog.css'
 
 export interface ConfirmDialogProps {
@@ -24,6 +25,9 @@ export interface ConfirmDialogProps {
   onConfirm: () => void
   onCancel: () => void
 }
+
+/** 連點防護的時間窗。 */
+const FIRE_GUARD_MS = 800
 
 /** Reusable confirm modal. Escape / Cancel never call onConfirm; optional requireText gates confirm. */
 export function ConfirmDialog({
@@ -56,6 +60,16 @@ export function ConfirmDialog({
   if (lastOpen !== open) {
     setLastOpen(open)
     if (!open && typed !== '') setTyped('')
+  }
+
+  // 確認／第二選項共用一道門：連點（或手快按了兩顆）只算一次。呼叫端不一定會同步關掉這個框（要等 API 回、或失敗要留著重試），
+  // 沒有這道門，兩次 click 就是兩次刪除請求。時間窗不是永久鎖：失敗後使用者隔一下再按照樣能重試。
+  const lastFire = useRef(0)
+  const once = (fn: () => void) => () => {
+    const now = Date.now()
+    if (now - lastFire.current < FIRE_GUARD_MS) return
+    lastFire.current = now
+    fn()
   }
 
   // Via ref so the Escape listener needn't depend on the unstable prop.
@@ -118,9 +132,10 @@ export function ConfirmDialog({
               aria-label={requireTextLabel ?? `輸入 ${requireText}`}
               onChange={(e) => setTyped(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && matched && !confirmDisabled) {
+                // 輸入法選字確認的 Enter（isComposing／keyCode 229）不算：用中文輸入法打完名字，選字那一下就會把東西刪掉。
+                if (e.key === 'Enter' && matched && !confirmDisabled && !isImeEnter(e.nativeEvent)) {
                   e.preventDefault()
-                  onConfirm()
+                  once(onConfirm)()
                 }
               }}
             />
@@ -131,7 +146,7 @@ export function ConfirmDialog({
             {cancelLabel}
           </button>
           {secondaryLabel && onSecondary ? (
-            <button type="button" className="btn" disabled={secondaryDisabled} onClick={onSecondary}>
+            <button type="button" className="btn" disabled={secondaryDisabled} onClick={once(onSecondary)}>
               {secondaryLabel}
             </button>
           ) : null}
@@ -139,7 +154,7 @@ export function ConfirmDialog({
             type="button"
             className={`btn${danger ? ' danger' : ' primary'}`}
             disabled={!matched || confirmDisabled}
-            onClick={onConfirm}
+            onClick={once(onConfirm)}
           >
             {confirmLabel}
           </button>
