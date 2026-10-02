@@ -122,7 +122,8 @@ step_end() {
 print_times() {
     local line total=0
     log "每步耗時（秒）："
-    for line in "${TIMES[@]}"; do printf '    %-12s %s\n' "${line%%	*}" "${line#*	}"; total=$((total + ${line#*	})); done
+    # `${TIMES[@]+…}`：沒跑任何步驟（--from 把全部跳過）時 TIMES 是空的，macOS 的 /bin/bash 3.2 在 set -u 下對空陣列的 "${arr[@]}" 會 unbound variable。
+    for line in ${TIMES[@]+"${TIMES[@]}"}; do printf '    %-12s %s\n' "${line%%	*}" "${line#*	}"; total=$((total + ${line#*	})); done
     printf '    %-12s %s\n' "合計" "$total"
 }
 
