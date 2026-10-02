@@ -2804,8 +2804,10 @@ struct NewShell {
 async fn open_host_shell(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
     body: Option<Json<NewShell>>,
 ) -> Result<Response, LcError> {
+    require_user(&principal)?;
     let cwd = body.and_then(|Json(b)| b.cwd);
     let s = shell::open(&app, &name, cwd.as_deref()).await?;
     Ok((StatusCode::OK, Json(json!(s))).into_response())
@@ -2836,8 +2838,10 @@ struct ShellTextIn {
 async fn host_shell_text(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<ShellTextIn>,
 ) -> Result<Response, LcError> {
+    require_user(&principal)?;
     shell::send_text(&app, &name, &pane_id, &b.text, b.enter.unwrap_or(true)).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
@@ -2851,8 +2855,10 @@ struct ShellKeysIn {
 async fn host_shell_keys(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<ShellKeysIn>,
 ) -> Result<Response, LcError> {
+    require_user(&principal)?;
     shell::send_keys(&app, &name, &pane_id, &b.keys).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
@@ -2861,8 +2867,10 @@ async fn host_shell_keys(
 async fn close_host_shell(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Response, LcError> {
+    require_user(&principal)?;
     shell::close_confirmed(&app, &name, &pane_id, flag(&q.get("confirm").cloned())).await?;
     crate::drafts::clear_shell(&app, &name, &pane_id).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
@@ -4039,6 +4047,15 @@ async fn rotate_bot_credential(
     Ok((StatusCode::OK, Json(json!({"credential_rotated": true, "restarted": true, "run_id": run_id}))).into_response())
 }
 
+/// 原始按鍵／文字／開關 shell 只有使用者本人（UI token）能用：bot 的 hook token 只證明「我是那顆 bot」，
+/// 不該拿來直接對任何 pane 打字或按鍵。
+fn require_user(principal: &RequestPrincipal) -> Result<(), LcError> {
+    if *principal == RequestPrincipal::User {
+        return Ok(());
+    }
+    Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})))
+}
+
 fn require_service(principal: &RequestPrincipal, expected: &str) -> Result<(), LcError> {
     if matches!(principal, RequestPrincipal::Service(id) if id == expected) {
         Ok(())
@@ -4379,7 +4396,14 @@ struct KeysIn {
     expect_run_id: Option<String>,
 }
 
-async fn keys_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<KeysIn>) -> Result<Response, LcError> {
+async fn keys_bot(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(b): Json<KeysIn>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    shell::check_keys(&b.keys)?;
     lifecycle::send_keys(&app, &id, b.keys, b.expect_run_id).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
@@ -4394,7 +4418,14 @@ struct TextIn {
     record: Option<bool>,
 }
 
-async fn text_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(b): Json<TextIn>) -> Result<Response, LcError> {
+async fn text_bot(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(b): Json<TextIn>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    shell::check_text(&b.text)?;
     let record = b.record.unwrap_or(false);
     let m = lifecycle::send_text_recorded(&app, &id, &b.text, b.enter.unwrap_or(true), b.expect_run_id, record).await?;
     let body = if record { json!({ "message_id": m.map(|m| m.id) }) } else { json!({}) };
@@ -7942,6 +7973,43 @@ mod per_principal_auth_tests {
 
     fn response_json(response: &str) -> Value {
         serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap_or("{}")).unwrap()
+    }
+
+    /// 原始按鍵／文字／開關 shell 是給人用的（網頁的鍵盤同步、shell 面板）：bot 的 hook token 驗得過身分，
+    /// 但不該拿它直接對任何 pane 打字或按鍵（受 prompt injection 的 bot 可以替自己開一顆 shell 再打指令進去，
+    /// 或對別顆 bot 按鍵繞過回合那條線）。只有 UI token 的使用者可以。
+    #[tokio::test]
+    async fn raw_pane_text_keys_and_shell_endpoints_are_for_the_user_only() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "raw-pane-bot").await;
+        let victim = distinct_bot(&e, "raw-pane-victim").await;
+        let call = |method: &str, path: &str, body: &str, who: &[(&str, String)]| {
+            let extra: String = who.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let as_bot = [("X-AM-Bot-Id", bot.id.clone()), ("X-AM-Bot-Token", bot.hook_token.clone())];
+        let as_user = [("X-AM-Token", e.app.ui_token.clone())];
+        let victim_text = format!("/api/bots/{}/text", victim.id);
+        let victim_keys = format!("/api/bots/{}/keys", victim.id);
+        let cases: Vec<(&str, &str, String)> = vec![
+            ("POST", "/api/hosts/local/shells", "{}".into()),
+            ("POST", "/api/hosts/local/shells/w1:p1/text", r#"{"text":"id"}"#.into()),
+            ("POST", "/api/hosts/local/shells/w1:p1/keys", r#"{"keys":["enter"]}"#.into()),
+            ("DELETE", "/api/hosts/local/shells/w1:p1", String::new()),
+        ];
+        for (method, path, body) in cases.iter().map(|(m, p, b)| (*m, p.to_string(), b.clone())).chain([
+            ("POST", victim_text.clone(), r#"{"text":"hi"}"#.to_string()),
+            ("POST", victim_keys.clone(), r#"{"keys":["ctrl+c"]}"#.to_string()),
+        ]) {
+            let denied = raw(e.app.clone(), call(method, &path, &body, &as_bot)).await;
+            assert!(denied.starts_with("HTTP/1.1 403"), "bot 不能打 {method} {path}：{denied}");
+            assert!(denied.contains("user_only"), "{denied}");
+            let user = raw(e.app.clone(), call(method, &path, &body, &as_user)).await;
+            assert!(!user.starts_with("HTTP/1.1 401") && !user.contains("user_only"), "使用者本人照常（可以是別的錯，但不是被擋）：{method} {path}: {user}");
+        }
     }
 
     async fn state(app: Arc<App>, headers: &[(&str, &str)]) -> String {

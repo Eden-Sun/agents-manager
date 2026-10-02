@@ -18,6 +18,34 @@ pub const MAX_PER_HOST: usize = 8;
 
 const SHELL_LABEL: &str = "shell";
 
+/// 一次打進 pane 的字數上限（位元組）。人貼一大段 log 也遠小於此；上限是擋失控的呼叫端，不是限制使用者。
+pub const MAX_TEXT_BYTES: usize = 256 * 1024;
+/// 一次按鍵請求最多幾個鍵、鍵名最長幾個字元。
+pub const MAX_KEYS: usize = 64;
+const MAX_KEY_LEN: usize = 32;
+
+/// 打字內容的界線（`/text` 系列端點共用）。
+pub fn check_text(text: &str) -> LcResult<()> {
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(LcError::Bad(format!("text is too long ({} bytes, max {MAX_TEXT_BYTES})", text.len())));
+    }
+    Ok(())
+}
+
+/// 鍵名清單的界線（`/keys` 系列端點共用）：鍵名原樣交給 herdr，所以不能帶空白、換行、控制字元，也不能一次幾百個。
+pub fn check_keys(keys: &[String]) -> LcResult<()> {
+    if keys.is_empty() {
+        return Err(LcError::Bad("keys must not be empty".into()));
+    }
+    if keys.len() > MAX_KEYS {
+        return Err(LcError::Bad(format!("too many keys ({}, max {MAX_KEYS})", keys.len())));
+    }
+    if let Some(bad) = keys.iter().find(|k| k.is_empty() || k.chars().count() > MAX_KEY_LEN || k.chars().any(|c| c.is_control() || c.is_whitespace())) {
+        return Err(LcError::Bad(format!("bad key name {bad:?}")));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HostShell {
     pub host: String,
@@ -180,7 +208,10 @@ pub enum LiveVerdict {
 
 /// 問 herdr 這顆 pane 現在的樣子（本機另外對 listen port）。問不到回 `None`——呼叫端**不放行**（比照 GC「讀不到就不關」）。
 /// 遠端不算 port（§6.5e：不為了它多開 ssh 往返），所以遠端只會是 Typeable／Agent／Gone；遠端的 Typeable 還要再看表上的事實。
-pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str) -> Option<LiveVerdict> {
+///
+/// `expect` 是白名單記的 `(workspace_id, tab_id)`：pane id 關掉後可能被 herdr 重用給別的 tab 的 pane，id 一樣不代表是同一顆——
+/// 現在的 pane 在別的 tab／workspace 就當成已經不在（`Gone`）。
+pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str, expect: Option<(&str, &str)>) -> Option<LiveVerdict> {
     let key = (host.to_string(), pane_id.to_string());
     if let Some((at, v)) = app.pane_live.lock().await.get(&key).copied() {
         if at.elapsed() < LIVE_TTL {
@@ -190,6 +221,7 @@ pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str) -> O
     let (client, _) = client_for(app, host).await.ok()?;
     let verdict = match client.pane_get(pane_id).await.ok()? {
         None => LiveVerdict::Gone,
+        Some(p) if expect.is_some_and(|(ws, tab)| (!ws.is_empty() && p.workspace_id != ws) || (!tab.is_empty() && p.tab_id != tab)) => LiveVerdict::Gone,
         Some(p) if p.agent.as_deref().is_some_and(|a| !a.is_empty()) => LiveVerdict::Agent,
         Some(_) if host != crate::config::LOCAL_HOST => LiveVerdict::Typeable,
         Some(_) => {
@@ -255,7 +287,17 @@ fn agent_pane_error() -> LcError {
 /// ——就算掃描在 agent 還沒被 herdr 認出來的空檔把它記成 shell，也不能讓按鍵繞過回合那條線。
 /// 打字前再即時問一次 herdr（[`live_verdict`]）：表上的 port 可能是好幾分鐘前的。
 async fn registered(app: &Arc<App>, host: &str, pane_id: &str, access: Access) -> LcResult<HostShell> {
-    if let Some(s) = app.host_shells.lock().await.iter().find(|s| s.host == host && s.pane_id == pane_id).cloned() {
+    let mine = app.host_shells.lock().await.iter().find(|s| s.host == host && s.pane_id == pane_id).cloned();
+    if let Some(s) = mine {
+        // 記憶體白名單認到了也不能直接放行：pane id 關掉後會被重用，記的 session 也可能已經不是現在的；
+        // 打字前還要即時問 herdr（裡面現在有 agent、在 listen、或根本是另一顆 pane）。
+        if app.session_for_host(host).await.as_deref() != Some(s.herdr_session.as_str()) {
+            return Err(LcError::NotFound("shell".into()));
+        }
+        if access == Access::Type {
+            let local = host == crate::config::LOCAL_HOST;
+            typing_decision(live_verdict(app, host, pane_id, Some((&s.workspace_id, &s.tab_id))).await, local, "shell", &[])?;
+        }
         return Ok(s);
     }
     type Row = (String, Option<String>, Option<String>, Option<String>, String, Option<String>);
@@ -281,7 +323,7 @@ async fn registered(app: &Arc<App>, host: &str, pane_id: &str, access: Access) -
     }
     if access == Access::Type {
         let local = host == crate::config::LOCAL_HOST;
-        typing_decision(live_verdict(app, host, pane_id).await, local, &kind, &ports)?;
+        typing_decision(live_verdict(app, host, pane_id, Some((workspace_id.as_deref().unwrap_or(""), tab_id.as_deref().unwrap_or("")))).await, local, &kind, &ports)?;
     }
     Ok(HostShell {
         host: host.to_string(),
@@ -317,6 +359,7 @@ pub async fn read(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines
 /// `POST /api/hosts/:name/shells/:pane_id/text`. Enter is a **separate** `pane.send_keys`: a `\n`
 /// in `pane.send_text` is a pasted line break to herdr. Empty `text` + `enter` = "just press Enter".
 pub async fn send_text(app: &Arc<App>, host: &str, pane_id: &str, text: &str, enter: bool) -> LcResult<()> {
+    check_text(text)?;
     registered(app, host, pane_id, Access::Type).await?;
     let (client, _) = client_for(app, host).await?;
     if !text.is_empty() {
@@ -330,10 +373,8 @@ pub async fn send_text(app: &Arc<App>, host: &str, pane_id: &str, text: &str, en
 
 /// `POST /api/hosts/:name/shells/:pane_id/keys` — names go to herdr verbatim, like `POST /bots/:id/keys`.
 pub async fn send_keys(app: &Arc<App>, host: &str, pane_id: &str, keys: &[String]) -> LcResult<()> {
+    check_keys(keys)?;
     registered(app, host, pane_id, Access::Type).await?;
-    if keys.is_empty() {
-        return Err(LcError::Bad("keys must not be empty".into()));
-    }
     let (client, _) = client_for(app, host).await?;
     let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
     client.pane_send_keys(pane_id, &refs).await.map_err(up)
@@ -614,6 +655,84 @@ mod tests {
             Err(LcError::Forbidden(body)) => assert_eq!(body["error"], "agent_pane"),
             other => panic!("pane 裡現在有 agent：{:?}", other.map(|s| s.pane_id)),
         }
+    }
+
+    /// 記憶體白名單（daemon 自己開的）以前一認到就放行，不再問 herdr：開出來之後 pane 裡被起了 agent、
+    /// 或 pane 被關掉而 herdr 把同一個 id 給了別的 tab 的 pane（id 重用），按鍵都會照樣打進去。
+    /// 打字前一律即時複查，跟 `panes` 表那條路一樣。
+    #[tokio::test]
+    async fn a_daemon_opened_shell_is_rechecked_live_before_typing() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let session = app.session_for_host("local").await.unwrap();
+        let (_, p) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+        let reg = |tab: &str, sess: &str| HostShell {
+            host: "local".into(),
+            herdr_session: sess.into(),
+            workspace_id: p.workspace_id.clone(),
+            tab_id: tab.into(),
+            pane_id: p.pane_id.clone(),
+            cwd: "/tmp".into(),
+            created_at: crate::db::now(),
+        };
+        let code = |r: LcResult<HostShell>| match r {
+            Ok(_) => "ok".to_string(),
+            Err(LcError::Forbidden(b)) => b["error"].as_str().unwrap_or("forbidden").to_string(),
+            Err(LcError::Conflict(b)) => b["reason"].as_str().unwrap_or("conflict").to_string(),
+            Err(LcError::NotFound(_)) => "404".to_string(),
+            Err(_) => "other".to_string(),
+        };
+        let set = |s: HostShell| {
+            let app = app.clone();
+            async move {
+                *app.host_shells.lock().await = vec![s];
+                app.pane_live.lock().await.clear();
+            }
+        };
+        env.herdr.set_shell_pid(&p.pane_id, 41101);
+        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+
+        // 正常：同一顆、同一個 session、什麼都沒變。
+        set(reg(&p.tab_id, &session)).await;
+        assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "ok");
+
+        // pane id 被重用：同一個 id 現在在另一個 tab（不是我們開的那顆）。
+        set(reg("some-other-tab", &session)).await;
+        assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "404", "id 重用要當成不是同一顆");
+
+        // 記的是別的 herdr session：這個 session 裡的同號 pane 是陌生人。
+        set(reg(&p.tab_id, "some-old-session")).await;
+        assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "404", "session 不同");
+
+        // 打字前 pane 裡被起了 agent。
+        set(reg(&p.tab_id, &session)).await;
+        env.herdr.set_agent("kid", &p.pane_id, false);
+        app.pane_live.lock().await.clear();
+        assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "agent_pane");
+
+        // 看畫面不需要複查（跟 `panes` 表那條一樣）。
+        assert_eq!(code(registered(app, "local", &p.pane_id, Access::View).await), "ok");
+
+        // pane 已經不在：404。
+        set(HostShell { pane_id: "ws-404:pGone".into(), ..reg(&p.tab_id, &session) }).await;
+        assert_eq!(code(registered(app, "local", "ws-404:pGone", Access::Type).await), "404");
+    }
+
+    /// 打字的量與鍵名：太大的一段字、一次幾百個鍵、帶換行／控制字元的鍵名，在送進 herdr 之前就擋掉。
+    #[test]
+    fn text_and_key_names_are_bounded_before_they_reach_herdr() {
+        assert!(check_text(&"a".repeat(MAX_TEXT_BYTES)).is_ok());
+        assert!(matches!(check_text(&"a".repeat(MAX_TEXT_BYTES + 1)), Err(LcError::Bad(_))));
+        assert!(check_text("").is_ok());
+        let ok = |k: &[&str]| check_keys(&k.iter().map(|s| s.to_string()).collect::<Vec<_>>()).is_ok();
+        assert!(ok(&["ctrl+c"]) && ok(&["enter"]) && ok(&["y"]) && ok(&["shift+tab", "up", "up"]) && ok(&["/"]));
+        assert!(!ok(&[]), "空的要 400");
+        assert!(!ok(&["ctrl+c\nrm -rf ~"]), "鍵名不能帶換行");
+        assert!(!ok(&["ctrl c"]), "鍵名不能帶空白");
+        assert!(!ok(&["a\u{0}"]), "鍵名不能帶控制字元");
+        assert!(!ok(&[&"x".repeat(33)]), "鍵名太長");
+        assert!(!ok(&vec!["a"; MAX_KEYS + 1]), "一次太多鍵");
+        assert!(ok(&vec!["a"; MAX_KEYS]));
     }
 
     /// 像剛重啟：記憶體那份白名單是空的，pane 只在 `panes` 表裡。

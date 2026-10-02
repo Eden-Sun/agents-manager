@@ -1162,6 +1162,11 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | POST | `/api/hosts/{name}/shells/{pane_id}/keys` | `{"keys":["ctrl+c"]}` 原樣送 herdr；空陣列 400 |
 | DELETE | `/api/hosts/{name}/shells/{pane_id}[?confirm=true]` | `pane.close`（分頁空了一起收）。記憶體清單裡的直接關；清單沒有就照 `panes` 表關，規則同 `POST /api/panes/{id}/close`：`confirm` 沒帶＝false，服務 pane 或讀不到事實時回 `409 {"reason":"service_pane","pane":{…含 kind／listen_ports／read_only},"unverified":bool}`，agent／active run 403；兩邊都沒有 404 |
 
+- **只有使用者本人能用**（2026-10-02 安全審查）：上表加上 `POST /api/bots/{id}/text`、`POST /api/bots/{id}/keys` 共六個「原始 pane 輸入／開關」端點，bot 的 `X-AM-Bot-Id`/`X-AM-Bot-Token`
+  與 service 身分一律 `403 {"error":"forbidden","reason":"user_only"}`（bot 驗得過身分，但不該直接對 pane 打字或按鍵；要跟別顆 bot 說話走 `/prompt` 的 relay）。
+  上限：`text` 最多 256 KiB（超過 400）；`keys` 最多 64 個、每個鍵名 ≤ 32 字元且不含空白／控制字元（400）。
+- **白名單每次打字前複查**：記憶體清單（daemon 自己開的）認到的 pane，打字前也問 herdr——裡面現在有 agent → 403 `agent_pane`、在 listen → 403 `read_only_pane`、
+  pane 已不在或 **id 被重用到另一個 tab／workspace**（跟登記的 `workspace_id`／`tab_id` 對不上）→ 404、登記的 `herdr_session` 不是這台主機現在的 session → 404；`panes` 表那條同樣比對 workspace／tab。
 - 建立：先借該主機某 project 的 workspace 開新 tab，借不到才 `workspace.create`（標籤 `shell`，不寫回 `projects.workspace_id`）。回的 `cwd` 是 herdr 實際開起來的目錄。
 - **鍵盤同步**（UI 的「鍵盤同步」開關）沒有新端點：每一下按鍵是一次 `…/keys`（`herdrKeyFromEvent` 譯成 herdr 鍵名），貼上是一次 `…/text` 且 `enter:false`。
   兩者共用同一個前端佇列（`web/src/lib/keyQueue.ts`）：**同一時間只有一個請求在路上**，飛的期間按的鍵合成下一批。
