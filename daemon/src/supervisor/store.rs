@@ -2219,6 +2219,29 @@ pub async fn compact_handled_payloads(pool: &SqlitePool, older_than_secs: i64, m
     Ok(res.rows_affected())
 }
 
+/// 處理完（`handled`）超過這麼久的「流水帳」事件整列刪掉（60 天）。
+pub const PRUNE_HANDLED_AFTER_SECS: i64 = 60 * 24 * 3600;
+/// 刪得掉的種類：沒有任何東西靠它們的 `event_key` 去重。**不含**交辦結果（`assignment_*`）與核准等：
+/// `sweep_missing_events` 看到「已結算卻沒有事件」的交辦會再補一筆，刪了會被重新生出來。
+pub const PRUNABLE_KINDS: [&str; 3] = ["health_changed", "ops_alert", "bot_request"];
+
+/// `compact_handled_payloads` 只壓大於 16 KB 的 payload、而且永遠不刪列：小的事件（每小時一則的 `ops_alert`、bot 的申請…）
+/// 一年下來仍是一張只增不減的表。流水帳類的事件處理完放了 60 天就整列刪掉；其他種類、還沒處理完的（pending／delivered／gave_up）、
+/// 比較新的一個字都不動。回刪了幾列。
+pub async fn prune_handled_events(pool: &SqlitePool, older_than_secs: i64) -> Result<u64> {
+    let cutoff = crate::db::iso_in(-older_than_secs);
+    let ts = crate::db::ts_sql("updated_at");
+    let kinds = PRUNABLE_KINDS.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(",");
+    let res = sqlx::query(&format!(
+        "DELETE FROM supervisor_inbox WHERE supervisor_id = ? AND state = 'handled' AND kind IN ({kinds}) AND {ts} <= ?"
+    ))
+    .bind(SUPERVISOR_ID)
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
 pub async fn inbox(pool: &SqlitePool, limit: i64) -> Result<Vec<InboxEvent>> {
     Ok(sqlx::query_as::<_, InboxEvent>(
         "SELECT * FROM supervisor_inbox WHERE supervisor_id=? ORDER BY created_at DESC LIMIT ?",
@@ -5040,6 +5063,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(notes, 2, "the earlier summary is still recoverable");
+    }
+
+    /// 事件表只增不減：小的事件（`compact_handled_payloads` 不碰 <16 KB）永遠留著。流水帳類（健康變化、ops 警報、bot 申請）處理完放了
+    /// 60 天就整列刪掉；交辦結果等靠 `event_key` 去重的種類、沒處理完的、比較新的都不動。
+    #[tokio::test]
+    async fn old_handled_log_events_are_pruned_but_dedupe_keys_and_open_work_stay() {
+        let p = pool().await;
+        let old = crate::db::iso_in(-61 * 24 * 3600);
+        let recent = crate::db::iso_in(-30 * 24 * 3600);
+        let mut ids = std::collections::HashMap::new();
+        for (name, kind, state, updated) in [
+            ("old_health", "health_changed", "handled", old.clone()),
+            ("old_ops", "ops_alert", "handled", old.clone()),
+            ("old_request", "bot_request", "handled", old.clone()),
+            ("recent_request", "bot_request", "handled", recent.clone()),
+            ("old_assignment", "assignment_completed", "handled", old.clone()),
+            ("old_pending_request", "bot_request", "pending", old.clone()),
+            ("old_delivered_ops", "ops_alert", "delivered", old.clone()),
+            ("old_gave_up_request", "bot_request", "gave_up", old.clone()),
+        ] {
+            let id = push_inbox(&p, &format!("k:{name}"), kind, None, None, None, &serde_json::json!({"n": name})).await.unwrap().unwrap();
+            sqlx::query("UPDATE supervisor_inbox SET state=?, updated_at=? WHERE id=?").bind(state).bind(&updated).bind(&id).execute(&p).await.unwrap();
+            ids.insert(name, id);
+        }
+        assert_eq!(prune_handled_events(&p, PRUNE_HANDLED_AFTER_SECS).await.unwrap(), 3, "old_health、old_ops、old_request");
+        let left: Vec<String> = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox ORDER BY rowid").fetch_all(&p).await.unwrap();
+        assert_eq!(
+            left,
+            ["k:recent_request", "k:old_assignment", "k:old_pending_request", "k:old_delivered_ops", "k:old_gave_up_request"],
+            "交辦結果的去重鍵、沒處理完的、比較新的都留著"
+        );
+        // 冪等。
+        assert_eq!(prune_handled_events(&p, PRUNE_HANDLED_AFTER_SECS).await.unwrap(), 0);
+        // 被刪掉的那種申請，之後同一句再來就是新的一則（不會被當成重播吞掉）。
+        assert!(push_inbox(&p, "k:old_request", "bot_request", None, None, None, &serde_json::json!({})).await.unwrap().is_some());
     }
 
     /// 處理完的 inbox 列永遠不清，而 `health_changed` 的 payload 把整份 `supervisor.assignments` 塞進去（約 280 KB 一筆）：
