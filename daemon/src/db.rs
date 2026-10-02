@@ -130,6 +130,9 @@ CREATE INDEX IF NOT EXISTS messages_turn ON messages(turn_id);
 CREATE INDEX IF NOT EXISTS messages_group ON messages(group_id) WHERE group_id IS NOT NULL;
 -- 帶附件的訊息只佔一小部分：清附件時問「有沒有訊息點名它」只需要看這些（attach.rs `NAMED_BY_A_MESSAGE`）。
 CREATE INDEX IF NOT EXISTS messages_with_attachments ON messages(id) WHERE attachments_json IS NOT NULL;
+-- 未讀數（read_marks.rs `UNREAD_SQL`）只看 assistant 訊息的 conversation／時間／turn／id：partial covering 索引讓它不必撈整列
+-- （quoted `m.role = 'assistant'` 要跟查詢一字不差，partial index 才用得上）。
+CREATE INDEX IF NOT EXISTS messages_assistant_unread ON messages(conversation_id, created_at, turn_id, id) WHERE role = 'assistant';
 CREATE TABLE IF NOT EXISTS attachments (
   id TEXT PRIMARY KEY, bot_id TEXT NOT NULL REFERENCES bots(id),
   name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
@@ -280,6 +283,9 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (35, "fe4e118f866a5cfd"),
     // perf：`messages_with_attachments`（清附件時問「有沒有訊息點名它」只看帶附件的訊息）。
     (36, "dea182f6831c676b"),
+    // perf：`messages_assistant_unread`（未讀數只看 assistant 訊息的 partial covering 索引）。主幹現況是 36；若與 716-b 的 schema 變更同時合流，
+    // 兩邊都會寫成 37 而衝突，以合流後主幹的最後一號 +1 重算指紋、併成同一版。
+    (37, "5560444159e4c9a5"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
