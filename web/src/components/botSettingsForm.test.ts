@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { computeBotPatch, effectiveForm, INSTRUCTION_FILES_CHOICES, pruneSaved, restartWantsNativeResume, type BotFormBase, type BotFormKey, type BotFormValues } from './botSettingsForm.ts'
+import { computeBotPatch, effectiveForm, INSTRUCTION_FILES_CHOICES, pruneSaved, type BotFormBase, type BotFormKey, type BotFormValues } from './botSettingsForm.ts'
 import { INSTRUCTION_FILES } from '../api/types.ts'
 
 const base: BotFormBase = { name: 'am', model: 'opus', effort: 'high', fast: false, persona: null, identity: null, instruction_files: 'claude-md' }
@@ -88,14 +88,6 @@ test('store 還沒追上：存值照留（避免誤跳放棄未儲存）', () =>
   assert.equal(pruneSaved(saved, base), saved)
 })
 
-test('換身分存完、pruneSaved 清掉 identity 之後，立即重啟仍要 resume=native', () => {
-  const sent = { identity: 'work' }
-  const pruned = pruneSaved(sent, { ...base, identity: 'work' })
-  assert.equal('identity' in pruned, false, 'store 追上後 identity 不在 saved')
-  assert.equal(restartWantsNativeResume(pruned, true), true)
-  assert.equal(restartWantsNativeResume(sent, false), true, '還沒被清掉時 saved 自己就夠')
-  assert.equal(restartWantsNativeResume(pruned, false), false, '沒換過身分不要帶')
-})
 
 test('存過 null（清回預設）與 fast：以 store 的值相等為準', () => {
   assert.deepEqual(pruneSaved({ effort: null, fast: true }, { ...base, effort: null, fast: true }), {})

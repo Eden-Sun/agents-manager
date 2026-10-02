@@ -764,3 +764,11 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
   列 `GET /api/bots/deleted`：名稱、kind、專案、刪除於幾天前、最後對話時間，每列一顆「復原」。放在環境設定而不是側欄：它是低頻的救援入口，不該佔側欄的位置。
 - 復原走 store 的 `restoreBot`（通知上的「復原」與這份清單共用）：成功後重抓 state；失敗（撞名 409 等）用錯誤通知顯示 daemon 的說法。清單在 `bots` 變動時重抓，所以別的分頁刪／復原也會同步。
 - 只列 user bot 與專案還活著的；child 由父 bot／AGM 管。真畫面（mock；CJK 用補裝字型）：![最近刪除](screenshots/bot-restore/1-recent-deleted-list.png) ![復原後](screenshots/bot-restore/2-after-restore.png)
+
+## 重啟一律接回原對話（2026-10-02 使用者）
+
+console-rpa 撞額度、換身分後按標題列的 ⟳「需重啟才生效」重啟，起了全新的 session，整個失憶。daemon 的規則是重啟沒帶
+`?resume=native` 就開新對話，而網頁以前只有設定面板「換過身分」那次才帶；⟳、單顆「重啟套用」、改模型等其他設定後的重啟都不帶。
+現在 `store.restartBot` 預設一律帶 `resume=native`，daemon 回 `cannot_resume`（沒有記錄的 session）才退回不帶、開新對話。
+要刻意開新對話不走重啟。
+
