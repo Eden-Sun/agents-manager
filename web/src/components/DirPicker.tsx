@@ -279,6 +279,9 @@ export function DirPicker({
         {!error && listing && listing.entries.length === 0 ? (
           <div className="dirpicker-empty">（沒有子資料夾，可直接選擇這一層）</div>
         ) : null}
+        {!error && listing?.truncated ? (
+          <div className="dirpicker-empty">這個資料夾的子資料夾太多，只列出前 2000 個；上面的輸入框只過濾這幾個，要找別的請直接貼完整路徑。</div>
+        ) : null}
         {!error && listing && listing.entries.length > 0 && entries.length === 0 ? (
           <div className="dirpicker-empty">沒有符合「{filter}」的資料夾</div>
         ) : null}
