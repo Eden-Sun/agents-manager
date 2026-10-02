@@ -82,8 +82,8 @@ async fn prune_process_state(app: &Arc<App>, active_runs: &[String]) {
     crate::lifecycle::retain_pane_typed(active_runs);
     crate::tui_prompts::retain_survey_runs(app, active_runs).await;
     crate::codex_model_migration::retain_runs(active_runs);
-    // 沒刪掉的 bot：讀不到就這一輪不清 per-bot 的帳（把讀失敗當成「沒有 bot」會清光）。
-    let live_bots: Vec<String> = match sqlx::query_scalar("SELECT id FROM bots WHERE deleted_at IS NULL").fetch_all(&app.db).await {
+    // 還要留著 per-bot 帳的 bot：讀不到就這一輪不清（把讀失敗當成「沒有 bot」會清光）。
+    let live_bots: Vec<String> = match live_bot_ids(app).await {
         Ok(ids) => ids,
         Err(e) => {
             tracing::warn!(error = ?e, "could not list live bots; per-bot process state not pruned this round");
@@ -94,6 +94,18 @@ async fn prune_process_state(app: &Arc<App>, active_runs: &[String]) {
     crate::lifecycle::retain_bot_state(&live_bots);
     crate::child_alerts::retain_bots(&live_bots);
     app.retain_bot_locks(&live_bots).await;
+}
+
+/// per-bot 行程帳（`retain_bot_state`、child 通知指紋、per-bot 鎖…）要留著的 bot：沒刪掉的，加上**軟刪了但還有 active run** 的——
+/// `delete_bot` 先定案 `deleted_at`、再停機，停機那幾秒 bot 還在用這些帳（欠著的收尾寫入、中斷標記…），run 結束後下一輪才清。
+async fn live_bot_ids(app: &Arc<App>) -> anyhow::Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM bots
+          WHERE deleted_at IS NULL
+             OR EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = bots.id AND r.state IN ('starting','running','stopping'))",
+    )
+    .fetch_all(&app.db)
+    .await?)
 }
 
 async fn sweep(app: &Arc<App>) {
@@ -396,6 +408,32 @@ mod tests {
         sqlx::query("UPDATE runs SET state = 'exited' WHERE id = ?").bind(&run).execute(&e.app.db).await.unwrap();
         sweep(&e.app).await;
         assert_eq!(crate::background_jobs::get(&e.app, &run), 0, "結束的 run 不留帳");
+    }
+
+    /// `delete_bot` 先定案（`deleted_at`）、再停機：停機那幾秒 bot 已經「沒了」但還在用它的 per-bot 行程帳（欠著的收尾寫入、
+    /// 中斷標記…）。這時撞上 sweep 不能把帳清掉——名單要留著還有 active run 的軟刪 bot，停機完成（run 結束）後下一輪才清。
+    #[tokio::test]
+    async fn a_soft_deleted_bot_that_is_still_stopping_keeps_its_process_state() {
+        let e = crate::testing::env().await;
+        let stopping = crate::testing::claude_bot(&e.app, &e.project_id, "del-stopping").await;
+        let stopped = crate::testing::claude_bot(&e.app, &e.project_id, "del-stopped").await;
+        let alive = crate::testing::claude_bot(&e.app, &e.project_id, "alive").await;
+        let run = crate::testing::fake_run(&e.app, &stopping.id).await;
+        let old_run = crate::testing::fake_run(&e.app, &stopped.id).await;
+        let long_ago = db::iso_in(-24 * 3600);
+        for id in [&stopping.id, &stopped.id] {
+            sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(&long_ago).bind(id).execute(&e.app.db).await.unwrap();
+        }
+        sqlx::query("UPDATE runs SET state = 'stopping' WHERE id = ?").bind(&run).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE runs SET state = 'exited' WHERE id = ?").bind(&old_run).execute(&e.app.db).await.unwrap();
+
+        let live = live_bot_ids(&e.app).await.unwrap();
+        assert!(live.contains(&alive.id));
+        assert!(live.contains(&stopping.id), "軟刪了、停機還沒完成（run 還 active）：帳要留著");
+        assert!(!live.contains(&stopped.id), "停完很久了：可以清");
+
+        sqlx::query("UPDATE runs SET state = 'exited' WHERE id = ?").bind(&run).execute(&e.app.db).await.unwrap();
+        assert!(!live_bot_ids(&e.app).await.unwrap().contains(&stopping.id), "停機結束後下一輪才清");
     }
 
     /// #744：列舉 active run 失敗的那一輪不能清基準／背景工作帳；成功列舉出空清單才清。
