@@ -770,6 +770,11 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - **送出馬上清**：送出清空不走 debounce，別的瀏覽器的框也跟著清，不會留著同一句被再送一次。
 - 倒回把原文放回輸入框、退回排隊中那則、`queue_slot_taken` 退回，都走同一個 `setDraft`，自動同步；輸入列上方那條 `ComposerDraftBar` 是終端 pane 裡的字，跟網頁草稿無關。
 - 離線不丟字：PUT 失敗留在本機重試，連回來先拉再補送。
+- **重送去重鍵（`client_request_id`）只活一小段（2026-10-02 審查）**：回應遺失（連線斷在 daemon 收下之後）時，同一句話的重試要沿用同一個 crid，daemon 才認得是同一件事。
+  但它不能永遠留著（sessionStorage 連重整都在）：daemon 其實收下了、之後送完或被撤回，使用者再打同一句，沿用舊 crid 會被當成重送、回舊回合的結果——新的這一則沒送出去，輸入框卻清空了。
+  所以 `sendPrompt`／群組送出的 crid 只沿用 5 分鐘（`SEND_RETRY_WINDOW_MS`），而且本機已經看到那個 crid 對應的回合是終態就當場作廢。建 bot 那類靠 daemon 去重的鍵不受影響（不帶時間窗）。
+- **「排隊中」以 daemon 快照為準**：分頁在背景／斷線時漏掉那一則的 `turn_updated`（被送出、撤回、run 結束），`refreshState` 在快照沒落後本機已看到的幀時，會清掉快照沒列出的 queued 回合，
+  不然這個分頁會一直顯示「排隊中」（#733 的 7788 與 5173 不一致）。快照落後時不清（那一則可能正好是快照之後才排進去的）。
 - 真畫面（兩個分頁連同一個 daemon，A 打字、B 沒操作就出現；CJK 在 headless 缺字型顯示成方框）：![A 打字](screenshots/server-drafts/a-typed.png) ![B 同步到](screenshots/server-drafts/b-synced-from-other-tab.png)
 
 ## 刪除 bot 之後怎麼救回來（2026-10-01，#757）
