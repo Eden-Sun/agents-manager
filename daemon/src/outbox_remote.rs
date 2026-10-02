@@ -47,6 +47,11 @@ pub(crate) async fn target(app: &Arc<App>, bot_id: &str) -> Result<Option<Target
     }
     let unreachable = || LcError::conflict("outbox_remote_unreachable", json!({"reason": "outbox_remote_unreachable", "host": project.host}));
     let conn = app.hosts.get(&project.host).await.ok_or_else(unreachable)?;
+    // 已知連不上（睡著、tailscale 斷線）就直接說連不上：不去等一趟 ssh（列表 30 秒、下載 180 秒才逾時），
+    // 網頁每開一次也不會多養一條卡住的 ssh 行程。
+    if !conn.is_connected() {
+        return Err(unreachable());
+    }
     let home = conn.home().await.map_err(|_| unreachable())?;
     let dir = remote_dir(&home, app.instance().as_deref(), &bot.id).ok_or_else(|| LcError::NotFound("bot".into()))?;
     Ok(Some(Target { conn, dir }))
@@ -237,6 +242,7 @@ mod tests {
         let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
         let conn = env.app.hosts.insert_remote_for_test(cfg).await;
         *conn.remote_home.lock().await = Some("/Users/x".into());
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
         let bot = crate::testing::claude_bot(&env.app, &env.project_id, "far").await;
         let dir = format!("/Users/x/.config/agents-manager/outbox/{}", bot.id);
@@ -263,6 +269,42 @@ mod tests {
         assert_eq!(axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec(), png);
         let q = Query([("path".to_string(), "../etc/passwd".to_string())].into_iter().collect());
         assert!(matches!(crate::outbox::file(State(env.app.clone()), UrlPath(bot.id.clone()), q).await, Err(LcError::NotFound(_))));
+    }
+
+    /// 主機睡著／tailscale 斷線：這台已知連不上時，網頁開「檔案暫存」不能再去等一趟 ssh（列表 30 秒、下載 180 秒才逾時），
+    /// 也不能每次開都多養一條卡住的 ssh 行程；直接回「連不上那台」，一個 ssh 都不打。
+    #[tokio::test]
+    async fn a_known_down_host_answers_unreachable_without_dialing_ssh() {
+        use axum::extract::{Path as UrlPath, Query, State};
+        let host = "outbox-asleep";
+        let env = crate::testing::env().await;
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        *conn.remote_home.lock().await = Some("/Users/x".into()); // 連過一次，home 有快取
+        assert!(!conn.is_connected());
+        sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "asleep").await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        crate::hosts::set_ssh_fake(host, move |_| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("AM_OUTBOX_OK\n".into())
+        });
+        crate::hosts::set_ssh_delay(host, Duration::from_secs(3));
+
+        let started = std::time::Instant::now();
+        let resp = crate::outbox::list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["reason"], json!("outbox_remote_unreachable"), "{v}");
+        assert_eq!(v["host"], json!(host));
+        let q = Query([("path".to_string(), "shot.png".to_string())].into_iter().collect());
+        match crate::outbox::file(State(env.app.clone()), UrlPath(bot.id.clone()), q).await {
+            Err(LcError::Conflict(d)) => assert_eq!(d["reason"], json!("outbox_remote_unreachable")),
+            other => panic!("下載要回 409 outbox_remote_unreachable：{:?}", other.map(|r| r.status())),
+        }
+        assert!(started.elapsed() < Duration::from_secs(1), "連不上的主機不能讓請求等：{:?}", started.elapsed());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "不該打任何 ssh");
     }
 
     #[test]
