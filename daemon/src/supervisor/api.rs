@@ -212,6 +212,19 @@ pub async fn post_assignment(
     Json(b): Json<AssignIn>,
 ) -> Result<Json<Value>, LcError> {
     let actor = super::bot_requests::actor_role(&app, &headers).await?;
+    // 一般 bot（被證明身分、不是 AGM 角色）能做的只有一件事：對 AGM 角色 bot 送 `notice`（不等回覆、不驗收、不掛任務）——
+    // release／herdr 更新任務裡 `agm assign --notice --bot <巡檢>` 就是這樣把結論交回去。派工給別的 bot、要驗收的交辦、掛任務的交辦
+    // 是 AGM 的事（它們會直接叫那顆 bot 做事）。
+    if let Some(bot) = super::bot_requests::declared_plain_bot(&app, &headers).await? {
+        let to_role = super::roles::role_of_bot(&app.db, &b.target_bot_id).await.map_err(up)?.is_some();
+        let has_mission = b.mission_id.as_deref().is_some_and(|m| !m.trim().is_empty()) || b.role.as_deref().is_some_and(|r| !r.trim().is_empty());
+        if b.expects_review() || !to_role || has_mission {
+            return Err(super::bot_requests::plain_bot_forbidden(
+                &bot,
+                "一般 bot 只能對 AGM 角色 bot 送 notice（kind=notice）；派工、要驗收的交辦與任務交辦只給 AGM 角色或使用者",
+            ));
+        }
+    }
     let review_role = match b.review_role.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(r) => Some(super::roles::Role::parse(r).ok_or_else(|| LcError::Bad("review_role must be patrol | responder".into()))?),
         None => actor,
