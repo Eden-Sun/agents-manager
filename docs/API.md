@@ -1760,6 +1760,7 @@ WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶�
 - 409 `{"reason":"shared_session","host","message"}`：那台設了 `shared_session`。409 `{"reason":"unsupported_host","host","message"}`：不是 `local`（這版不做遠端）。
 - 409 `{"reason":"stale_target","host","target_version","current_target","message"}`：不等於 `GET /api/upstream-updates` 裡 `kind:"herdr"` 這台落後時的目標（`null`＝沒有待升級的新版）。
 - 409 `{"reason":"herdr_update_in_progress","update_id","host","message"}`：這顆 daemon 已經在跑一個。
+- 409 `{"reason":"cli_update_in_progress","update_id","host","kind","message"}`：這台正在安裝 claude／codex CLI（安裝完會重啟 bot），先等它結束。反過來，herdr 更新進行中 `POST /hosts/local/cli-update` 回 409 `herdr_update_in_progress`（不留 `running` 那一列）。
 
 WS（每則帶 `update_id`／`host`／`target_version`）：`herdr_update_progress` 的 `phase` 依序 `downloading` → `waiting_idle` → `stopping` → `restarting` →（失敗時 `rolling_back`）→ `resuming`。
 
@@ -1771,8 +1772,8 @@ WS（每則帶 `update_id`／`host`／`target_version`）：`herdr_update_progre
  "resumed":[],"failed":[],"children_lost":[]}
 ```
 - `reason`（`ok:false` 才有，另帶給人看的 `detail`）：沒動到 server 的——`install_path_unsupported`（現行 binary 是 symlink 或找不到）、`download_failed`、
-  `version_mismatch`（下載的 `--version` 不是目標）、`busy_timeout`（30 分鐘沒等到頂層 bot 全閒置）、`maintenance_busy`（別人開著 herdr 維護窗口）、
-  `swap_failed`（換 binary 失敗，server 沒重啟）；動過 server 的——`restart_failed`（新版 2 分鐘內沒以目標版本回來，已換回 `.bak` 再重啟；bot 照樣接回，`resumed`／`failed` 照填）。
+  `restart_unsupported`（換 binary 之前的檢查沒過：Linux `herdr@<session>.service` 不是 active、macOS 沒有 launchd job——server 不是它們在管的，`restart` 會另外起一顆搶 socket；請自己重啟 server）、`checksum_mismatch`（下載的檔對不上 GitHub release API 公布的 sha256，或查不到公布值；**沒有執行它**）、`version_mismatch`（下載的 `--version` 不是目標）、`busy_timeout`（30 分鐘沒等到頂層 bot 全閒置）、`maintenance_busy`（別人開著 herdr 維護窗口）、
+  `swap_failed`（換 binary 失敗，server 沒重啟）；動過 server 的——`restart_failed`（新版 2 分鐘內沒以目標版本回來，或回來了但 protocol 是這顆 daemon 不認得的；已換回 `.bak` 再重啟；bot 照樣接回，`resumed`／`failed` 照填）。
 - 每一步附加到 `<data_dir>/herdr-update.log`；舊 binary 留在同目錄 `herdr.bak-<舊版>`。
 
 ### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`
