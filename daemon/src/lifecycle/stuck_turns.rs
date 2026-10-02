@@ -59,7 +59,12 @@ pub(crate) fn observe_at(run_id: &str, agent_status: &str, at: Instant) {
 
 /// 不在 `active` 裡的 run（結束了）不留計時：run 多半是 idle 時結束，只在「看到非 idle」才清的表會只增不減。
 pub(crate) fn retain_runs(active: &[String]) {
-    idle_since().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+    prune(&mut idle_since().lock().unwrap_or_else(|e| e.into_inner()), active);
+}
+
+/// 只留 `active` 裡的 run。獨立成函式讓單元測試用自己的表驗證：全域表被 `retain_runs(&[…])` 清掉的話，同時跑的其他測試剛記的計時會一起不見。
+fn prune<V>(map: &mut HashMap<String, V>, active: &[String]) {
+    map.retain(|id, _| active.contains(id));
 }
 
 /// 巡邏每輪把已經不 active 的 run 的行程級帳（idle 計時、閒置回收看的最後狀態）帶走。讀不到 DB 就這輪不清。
@@ -406,13 +411,13 @@ mod tests {
     /// 巡邏每輪把不再 active 的 run 帶走（呼叫端傳的是 DB 裡還活著的 run id）。
     #[test]
     fn an_ended_runs_idle_timer_is_dropped() {
-        let (gone, kept) = ("idle-timer-gone", "idle-timer-kept");
-        observe_at(gone, "idle", Instant::now());
-        observe_at(kept, "idle", Instant::now());
-        retain_runs(&[kept.to_string()]);
-        assert!(idle_for(gone, Instant::now()).is_none(), "結束的 run 不留計時");
-        assert!(idle_for(kept, Instant::now()).is_some(), "還活著的 run 的計時不動");
-        retain_runs(&[]);
+        // 用自己的表：全域那張被別的測試同時在用，清它會讓它們剛記的計時憑空消失（整樹偶發紅的來源）。
+        let mut timers: HashMap<String, Instant> = HashMap::new();
+        timers.insert("idle-timer-gone".into(), Instant::now());
+        timers.insert("idle-timer-kept".into(), Instant::now());
+        prune(&mut timers, &["idle-timer-kept".to_string()]);
+        assert!(!timers.contains_key("idle-timer-gone"), "結束的 run 不留計時");
+        assert!(timers.contains_key("idle-timer-kept"), "還活著的 run 的計時不動");
     }
 
     /// #708：移交出去的專案，in-flight 回合是對方 daemon 的：巡邏不收；收回之後照常收。
