@@ -633,7 +633,7 @@ pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
         reconcile_host_locked(app, host).await?
     };
     // 這一輪收掉的 autostart bot：pass 鎖放開之後才起（起的過程會碰 herdr 與 DB，不能卡著下一輪對帳）。
-    crate::autostart_revive::revive(app, host, lost).await;
+    crate::autostart_revive::spawn_revive(app, host, lost);
     Ok(())
 }
 
@@ -933,8 +933,13 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                 if exit == crate::lifecycle::RunExit::NotRecorded {
                     tracing::warn!(host, bot = %bot.name, run = %run.id, "reconcile: the run's exit was not recorded; bot left as is, will look again");
                     schedule_deferred_pass(app, host);
-                } else if bot.managed_by != "child" && bot.autostart == 1 {
+                } else if bot.managed_by != "child"
+                    && bot.autostart == 1
+                    && matches!(exit, crate::lifecycle::RunExit::Recorded | crate::lifecycle::RunExit::TurnOwed)
+                {
                     // 不是使用者停的（那是 `stopped`）：herdr 掉了這個 agent。pass 結束後由 `autostart_revive` 決定要不要再起。
+                    // 只有**這一輪自己**把它收成 exited 才算：`AlreadyEnded`＝別的路先收了（使用者的 stop、pane-exited 事件＝使用者在 herdr 裡關了 pane），
+                    // 那不是 herdr 掉的，拉起來就是推翻使用者要它停。
                     lost_autostart.push(crate::autostart_revive::Lost { bot_id: bot.id.clone(), run_id: run.id.clone() });
                 } else if bot.managed_by == "child" && may_retire_child(app, host, &bot).await {
                     let why = if let Ok(hints) = &spawn_hints {

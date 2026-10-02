@@ -7,8 +7,9 @@
 //!
 //! * 只在開機那一輪 autostart 跑完之後才動（`autostart_hosts` 是 `Done`）：開機那一輪由 autostart 負責，不搶著起第二次。
 //! * herdr 計畫中的維護期間不動（`herdr_maintenance`）：那邊自己會把 bot 接回來。
-//! * 起之前再驗一次：bot 還在、還是 autostart、沒有 active run、最後一個 run 就是這次被收掉的那個
-//!   （使用者在中間做了任何事＝有新 run＝不碰）。
+//! * 起之前再驗一次：bot 還在、還是 autostart、沒有 active run、最後一個 run 就是這次被收掉的那個而且退出原因是對帳記的
+//!   （使用者在中間做了任何事＝有新 run＝不碰；`pane exited` 等別的路收的＝使用者關的，不碰）。
+//! * 對帳那頭只有「這一輪自己記下 exited」才算遺失（`AlreadyEnded`＝別的路先收了，不是 herdr 掉的）；補開丟到背景一顆一顆做，不卡對帳。
 //! * 退避：同一顆 bot 30 分鐘內最多重開 3 次；herdr 一直掛時只通知、不再開（避免無限重開）。
 //! * 每次遺失都推一則 supervisor inbox `bot_lost`（巡檢收、叫醒），帶 `outcome`：`restarted`／`failed`／`backoff`，不等探針。
 use crate::db;
@@ -24,6 +25,9 @@ pub(crate) struct Lost {
     pub bot_id: String,
     pub run_id: String,
 }
+
+/// 對帳收掉 run 時記的退出原因（`reconcile.rs`）；只有這個原因才是「herdr 掉了 agent」。
+const LOST_REASON: &str = "agent not found during reconcile";
 
 const MAX_RESTARTS: usize = 3;
 const WINDOW: Duration = Duration::from_secs(30 * 60);
@@ -43,6 +47,59 @@ fn take_slot(bot_id: &str) -> bool {
     }
     hits.push(Instant::now());
     true
+}
+
+/// 還沒做完的背景補開，依 `App` 分開記（測試用它等補開收尾；平行的測試各有各的 `App`，不能共用一個計數）。
+static PENDING: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
+
+fn pending() -> &'static Mutex<HashMap<usize, usize>> {
+    PENDING.get_or_init(Default::default)
+}
+
+fn pending_key(app: &Arc<App>) -> usize {
+    Arc::as_ptr(app) as usize
+}
+
+/// 對帳一輪做完（host 的 pass 鎖已放開）之後呼叫：**丟到背景**，不讓對帳呼叫端等。
+///
+/// 補開是一顆一顆 `start_bot`（每顆要開 pane、等 CLI 起來，遠端還要 ssh，一顆動輒十幾秒）。對帳是 supervisor 連上之後的第一步：
+/// 後面的全域事件訂閱、spool 補放、工具偵測、autostart 都排在它後面，herdr 一次更新掉了十顆 bot 的話，
+/// 同步等著補開就是整台主機的事件訂閱晚好幾分鐘才建。一顆一顆補（不並行）是刻意的：不要同時對 herdr 與額度開十個 CLI。
+pub(crate) fn spawn_revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
+    if lost.is_empty() {
+        return;
+    }
+    let key = pending_key(app);
+    *pending().lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default() += 1;
+    let (app, host) = (app.clone(), host.to_string());
+    tokio::spawn(async move {
+        revive(&app, &host, lost).await;
+        let mut map = pending().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&key) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&key);
+            }
+        }
+    });
+}
+
+/// 測試：這個 `App` 還有幾輪背景補開沒做完。
+#[cfg(test)]
+pub(crate) fn pending_count(app: &Arc<App>) -> usize {
+    pending().lock().unwrap_or_else(|e| e.into_inner()).get(&pending_key(app)).copied().unwrap_or(0)
+}
+
+/// 測試：等這個 `App` 的背景補開做完（上限 60 秒）。
+#[cfg(test)]
+pub(crate) async fn quiesce(app: &Arc<App>) {
+    for _ in 0..6000 {
+        if pending_count(app) == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("背景補開 60 秒還沒做完");
 }
 
 /// 對帳一輪做完（host 的 pass 鎖已放開）之後呼叫。
@@ -77,11 +134,14 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
     if db::active_run(&app.db, &bot.id).await?.is_some() {
         return Ok(());
     }
-    let last: Option<(String, String)> = sqlx::query_as("SELECT id, state FROM runs WHERE bot_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
-        .bind(&bot.id)
-        .fetch_optional(&app.db)
-        .await?;
-    if last.as_ref().map(|(id, state)| (id.as_str(), state.as_str())) != Some((l.run_id.as_str(), "exited")) {
+    let last: Option<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, state, exit_reason FROM runs WHERE bot_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
+            .bind(&bot.id)
+            .fetch_optional(&app.db)
+            .await?;
+    // 最後一個 run 要就是這次被收掉的、而且退出原因真的是對帳記的「agent 不見」：`pane exited`（使用者在 herdr 裡關 pane）、
+    // 其他路徑收的 exited 都不是 herdr 掉的，不拉起來。
+    if last.as_ref().map(|(id, state, why)| (id.as_str(), state.as_str(), why.as_deref())) != Some((l.run_id.as_str(), "exited", Some(LOST_REASON))) {
         return Ok(());
     }
     let (outcome, error) = if !take_slot(&bot.id) {
@@ -156,6 +216,7 @@ mod tests {
         herdr_forgets_everything(&env).await;
 
         crate::reconcile::reconcile_host(&env.app, config::LOCAL_HOST).await.unwrap();
+        super::quiesce(&env.app).await;
 
         let runs = runs(&env.app, &bot.id).await;
         assert_eq!(runs.len(), 2, "舊的收掉、新的起來：{runs:?}");
@@ -179,6 +240,7 @@ mod tests {
         herdr_forgets_everything(&env).await;
 
         crate::reconcile::reconcile_host(&env.app, config::LOCAL_HOST).await.unwrap();
+        super::quiesce(&env.app).await;
 
         assert!(db::active_run(&env.app.db, &plain.id).await.unwrap().is_none(), "沒開 autostart：不拉起來");
         assert!(db::active_run(&env.app.db, &stopped.id).await.unwrap().is_none(), "使用者停掉的：不拉起來");
@@ -195,8 +257,113 @@ mod tests {
         herdr_forgets_everything(&env).await;
 
         crate::reconcile::reconcile_host(&env.app, config::LOCAL_HOST).await.unwrap();
+        super::quiesce(&env.app).await;
 
         assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none());
+        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty());
+    }
+
+    /// 使用者在 herdr 裡關掉 pane：`pane exited` 事件那條路把 run 收成 exited（原因 `pane exited`）。對帳剛好同一瞬也發現 agent 不見——
+    /// 它讀完 run、還沒寫 exited 的那一瞬被事件搶先（CAS 輸了，`AlreadyEnded`）。那是使用者要它停，不是 herdr 掉的：不能拉起來
+    /// （SPEC 寫「在 herdr 裡關 pane 都不走這條」）。以前對帳在 `AlreadyEnded` 也把它記成遺失，`revive_one` 又只看「最後一個 run 是 exited」。
+    #[tokio::test]
+    async fn a_pane_the_user_closed_is_not_revived_when_the_event_wins_the_race() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "closed").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        herdr_forgets_everything(&env).await;
+        let app = env.app.clone();
+        let run2 = run.clone();
+        crate::lifecycle::race_point::arm("mark_run_exited_after_read", &run, move || async move {
+            // pane-exited 事件那條路（events.rs）：在對帳讀完 run、還沒寫 exited 的那一瞬先收掉它。
+            crate::lifecycle::mark_run_exited(&app, &run2, "pane exited").await;
+        });
+
+        crate::reconcile::reconcile_host(&env.app, config::LOCAL_HOST).await.unwrap();
+        super::quiesce(&env.app).await;
+
+        let runs = runs(&env.app, &bot.id).await;
+        assert_eq!(runs, vec![("exited".to_string(), Some("pane exited".to_string()))], "使用者關的 pane 不能被拉起來：{runs:?}");
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none());
+        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "不是 herdr 掉的，不推 bot_lost");
+    }
+
+    /// 補開是一顆一顆 `start_bot`，動輒十幾秒；對帳是 supervisor 連上之後的第一步（後面還有事件訂閱、spool 補放、工具偵測）。
+    /// 補開卡住（這裡用一把被測試握著的 bot 鎖讓 `start_bot` 一直等）時，對帳呼叫端照樣要回來——不靠時間：
+    /// 對帳回來的當下補開還沒做完（還在等鎖、沒有新 run），放開鎖之後它才做完。
+    #[tokio::test]
+    async fn a_stuck_revive_does_not_hold_up_the_reconcile_caller() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "slow").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        herdr_forgets_everything(&env).await;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (app, bot_id, gate) = (env.app.clone(), bot.id.clone(), release.clone());
+        // 對帳讀完 run 的那一瞬排一個等這顆 bot 鎖的 task：它排在對帳 pass 後面，pass 一放開就拿到、握到測試放手，補開的 start_bot 因此卡住。
+        crate::lifecycle::race_point::arm("mark_run_exited_after_read", &run, move || async move {
+            tokio::spawn(async move {
+                let lock = app.bot_lock(&bot_id).await;
+                let _g = lock.lock().await;
+                gate.notified().await;
+            });
+            tokio::task::yield_now().await;
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(20), crate::reconcile::reconcile_host(&env.app, config::LOCAL_HOST))
+            .await
+            .expect("對帳不能等補開")
+            .unwrap();
+        assert_eq!(super::pending_count(&env.app), 1, "對帳回來的時候補開還沒做完");
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "還在等鎖：沒有新 run");
+
+        release.notify_one();
+        super::quiesce(&env.app).await;
+        let events = bot_lost_events(&env.app, &bot.id).await;
+        assert_eq!(events.len(), 1, "補開照樣做完：{events:?}");
+        assert_eq!(events[0]["outcome"], "restarted");
+    }
+
+    /// 遠端主機睡著／斷線：herdr 那頭連不上不是「agent 被 herdr 清掉」。對帳讀不到 snapshot 就整輪跳過（什麼都不收、不補開、不推 inbox），
+    /// 連回來之後真的對到帳，才分得出誰活著、誰真的掉了。
+    #[tokio::test]
+    async fn an_unreachable_remote_host_loses_nothing_and_revives_nothing() {
+        let env = tt::env().await;
+        let host = "revive-asleep";
+        let cfg = config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        assert!(!conn.is_connected());
+        sqlx::query("UPDATE projects SET host = ? WHERE id = ?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let bot = autostart_bot(&env, "far").await;
+        let run = tt::fake_run(&env.app, &bot.id).await;
+        env.app.autostart_hosts.lock().unwrap().insert(host.to_string(), AutostartHostStatus::Done);
+
+        assert!(crate::reconcile::reconcile_host(&env.app, host).await.is_err(), "連不上：整輪跳過");
+        super::quiesce(&env.app).await;
+
+        let still: Option<db::Run> = db::active_run(&env.app.db, &bot.id).await.unwrap();
+        assert_eq!(still.map(|r| r.id), Some(run), "run 沒被收");
+        assert_eq!(runs(&env.app, &bot.id).await.len(), 1, "沒有補開");
+        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "沒有 inbox");
+    }
+
+    /// 同一件事的第二道防線：就算有人（或之後的改動）把這顆 run 當成遺失交給 `revive`，`revive_one` 也要確認
+    /// 那顆 run 的退出原因真的是對帳記的「agent 不見」，而不只是「最後一個 run 是 exited」。
+    #[tokio::test]
+    async fn revive_only_trusts_a_run_whose_recorded_exit_is_the_reconcile_one() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "claimed").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &run, "pane exited").await;
+
+        super::revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: run.clone() }]).await;
+
+        assert_eq!(runs(&env.app, &bot.id).await.len(), 1, "原因是 pane exited：不拉起來");
         assert!(bot_lost_events(&env.app, &bot.id).await.is_empty());
     }
 
@@ -210,6 +377,7 @@ mod tests {
         for _ in 0..5 {
             herdr_forgets_everything(&env).await;
             crate::reconcile::reconcile_host(&env.app, config::LOCAL_HOST).await.unwrap();
+        super::quiesce(&env.app).await;
         }
         let runs = runs(&env.app, &bot.id).await;
         assert_eq!(runs.len(), 4, "原本那顆＋最多 3 次重開：{runs:?}");
