@@ -23,25 +23,37 @@ etime_secs() {
 # 先把 pane list 整份收下來再解析：排程環境（systemd）沒有 pane 的環境變數，沒帶 HERDR_SESSION 時 herdr 找的是
 # default session 的 socket，回的不是 JSON 或是 server_not_running 的 error JSON；這種情況記一行清楚的錯誤就收，
 # 不能讓 python 的 traceback 灌進 log，也不能把它當成「0 個 pane」正常收尾。
-list_out=$(herdr pane list 2>&1)
-pane_ids=$(echo "$list_out" | python3 -c '
+# 只拿 stdout 解析（stderr 的警告不能混進 JSON）；用 printf 不用 echo（zsh 的 echo 會展開 JSON 裡的 \n、\\）。
+# 解析程式一定先印 OK 或 ERR：什麼都沒印＝解析程式自己壞了，不是「0 個 pane」。
+# 這支腳本 macOS 用 zsh 跑、Linux 的 browser_gc_linux.py 用 bash 跑，所以只能用兩邊都一樣的語法。
+errf=$(mktemp "${TMPDIR:-/tmp}/pane-gc.XXXXXX") || errf=/dev/null
+list_out=$(herdr pane list 2>"$errf")
+parsed=$(printf '%s\n' "$list_out" | python3 -c '
 import json,sys
 try:
     d=json.load(sys.stdin)
 except Exception:
     print("ERR 回的不是 JSON"); sys.exit(0)
 try:
-    for p in d["result"]["panes"]: print(p["pane_id"])
+    ids=[p["pane_id"] for p in d["result"]["panes"]]
 except Exception:
     e=d.get("error") if isinstance(d,dict) else None
-    print("ERR", (e.get("code") if isinstance(e,dict) else None) or "沒有 result.panes")' 2>/dev/null)
-case "$pane_ids" in
+    print("ERR", (e.get("code") if isinstance(e,dict) else None) or "沒有 result.panes"); sys.exit(0)
+print("OK")
+for i in ids: print(i)' 2>/dev/null)
+case "$parsed" in
+  OK|"OK
+"*) pane_ids=${parsed#OK} ;;
   "ERR "*)
-    echo "pane-gc: herdr pane list ${pane_ids#ERR }（排程環境要帶 HERDR_SESSION；HERDR_SESSION=${HERDR_SESSION:-未設定}）：${list_out:0:120}" >> "$LOG"
-    exit 0 ;;
+    echo "pane-gc: herdr pane list ${parsed#ERR }（排程環境要帶 HERDR_SESSION；HERDR_SESSION=${HERDR_SESSION:-未設定}）：$(printf '%s %s' "$list_out" "$(head -c 120 "$errf" 2>/dev/null)" | head -c 120)" >> "$LOG"
+    rm -f "$errf"; exit 0 ;;
+  *)
+    echo "pane-gc: 解析 herdr pane list 失敗（python3 沒有輸出，不是 0 個 pane）" >> "$LOG"
+    rm -f "$errf"; exit 0 ;;
 esac
+rm -f "$errf"
 closed=0; ghost=0
-for pid_pane in ${=pane_ids}; do
+for pid_pane in $(printf '%s\n' "$pane_ids"); do
   info=$(herdr pane process-info --pane "$pid_pane" 2>/dev/null)
   if [ -z "$info" ] || ! echo "$info" | grep -q '"foreground_processes"'; then
     if herdr pane get "$pid_pane" 2>&1 | grep -q pane_not_found; then
