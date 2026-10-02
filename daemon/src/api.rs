@@ -3644,7 +3644,9 @@ async fn delete_identity(
 
 #[derive(Deserialize, Default)]
 struct StartQuery {
-    /// `native`：接回 DB 記的原生對話；接不回回 409 `resumed:false`，**不會**默默開新對話。
+    /// 沒帶（預設）：有記錄的 session 就接回，沒有才開新對話（2026-10-02 使用者：「預設必 resume」——console-rpa 換身分後
+    /// 重啟沒帶參數，起了新 session、整個失憶）。`native`：一定要接回，接不回回 409 `resumed:false`、不啟動。
+    /// `fresh`：明確要開新對話。
     resume: Option<String>,
     /// 跟 `resume=native` 一起：不看 DB，接這一段 session（救援用；只有 `bin/agm` 露出這個旗標）。
     session: Option<String>,
@@ -3654,7 +3656,9 @@ fn resume_opts(q: &StartQuery) -> Result<lifecycle::StartOpts, LcError> {
     let session = q.session.as_deref().map(str::trim).filter(|v| !v.is_empty());
     match q.resume.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
         None if session.is_some() => Err(LcError::Bad("`session` needs `resume=native`".into())),
-        None => Ok(lifecycle::StartOpts::default()),
+        None => Ok(lifecycle::StartOpts { resume_native: true, ..Default::default() }),
+        Some("fresh") if session.is_none() => Ok(lifecycle::StartOpts::default()),
+        Some("fresh") => Err(LcError::Bad("`session` needs `resume=native`".into())),
         Some("native") => {
             if let Some(s) = session {
                 if s.len() > 128 || !s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)) {
@@ -3663,7 +3667,7 @@ fn resume_opts(q: &StartQuery) -> Result<lifecycle::StartOpts, LcError> {
             }
             Ok(lifecycle::StartOpts { resume_native: true, resume_required: true, resume_session: session.map(str::to_string), ..Default::default() })
         }
-        Some(other) => Err(LcError::Bad(format!("unknown resume mode `{other}` (only `native`)"))),
+        Some(other) => Err(LcError::Bad(format!("unknown resume mode `{other}` (only `native` or `fresh`)"))),
     }
 }
 
@@ -6504,11 +6508,14 @@ mod resume_query_tests {
     #[test]
     fn only_native_is_a_resume_mode_and_it_is_strict() {
         let q = |v: Option<&str>| StartQuery { resume: v.map(str::to_string), session: None };
-        assert_eq!(resume_opts(&q(None)).unwrap(), lifecycle::StartOpts::default(), "預設行為不變");
-        assert_eq!(resume_opts(&q(Some(""))).unwrap(), lifecycle::StartOpts::default());
+        // 2026-10-02 起預設接回（接不回才開新的），`fresh` 才是開新對話。
+        let default = resume_opts(&q(None)).unwrap();
+        assert!(default.resume_native && !default.resume_required, "預設：能接就接，接不回照樣啟動");
+        assert_eq!(resume_opts(&q(Some(""))).unwrap(), default);
+        assert_eq!(resume_opts(&q(Some("fresh"))).unwrap(), lifecycle::StartOpts::default(), "fresh：開新對話");
         let native = resume_opts(&q(Some("native"))).unwrap();
         assert!(native.resume_native && native.resume_required, "native 一定是「接不回就不啟動」");
-        assert!(matches!(resume_opts(&q(Some("fresh"))), Err(LcError::Bad(_))));
+        assert!(matches!(resume_opts(&q(Some("bogus"))), Err(LcError::Bad(_))));
     }
 
     /// `session=<id>` 只跟 `resume=native` 一起收，而且只收乾淨的 id（救援路徑，2026-09-22）。
