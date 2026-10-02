@@ -7,7 +7,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 
 1. `GET /api/session` 不需 token，但**連線的 TCP 對端**必須是 loopback（不看 `Host`：那是呼叫端自己填的），`Origin`（若有）的主機必須是 `127.0.0.1` / `localhost` / `[::1]`（不限 port）；**`Host`（若有）也必須是這三個名稱之一**（安全審查：DNS rebinding 的頁面對自己 origin 的 GET 不帶 `Origin`，只看 Origin 與 TCP 對端擋不住）。這條 loopback 檢查（Origin／Host／對端）套在 `/api/*` 的 auth 中介層、`/api/session` 與 `/ws`。沒有 `Host` 的請求（不是瀏覽器）照舊放行。回 `{"token":"<32 hex>","port":7788}`。
    比對是整段、精確的（`localhost.`、`[::ffff:127.0.0.1]`、`127.1`、帶帳密或多餘冒號的寫法一律拒絕＝fail closed）。**注意**：放在本機反向代理（nginx、tailscale serve 等）後面時，TCP 對端是代理的 loopback、`Host` 若被改寫成 `localhost` 就等於這兩道檢查都沒了——不要把 7788 經代理對外公開，要對外請改 `allow_lan` 並自負網路隔離。
-   開發版（`allow_lan`，見 SPEC §7.1）這兩項都直接放行：同網段誰都拿得到 token——這是使用者裁示保留的風險（`e7392dd`）。
+   開發版（`allow_lan`，見 SPEC §7.1）**對端**不限：同網段誰都拿得到 token——這是使用者裁示保留的風險（`e7392dd`）；但 `Host`／`Origin`（若有）的主機名仍要過關：IP 字面值、`localhost`、單一標籤主機名、`.local`／`.ts.net`／`.home.arpa`／`.lan`／`.internal`／`.localdomain`，或環境變數 `AM_ALLOWED_HOSTS`（逗號分隔）明列的主機名；其他（例如被 DNS rebind 過來的 `evil.example`）一律 403。
 2. 其餘 `/api/*` 接受一種身分：User 的 `X-AM-Token`、Bot 的 `X-AM-Bot-Id`＋`X-AM-Bot-Token`、或範圍受限的 service `X-AM-Service-Id`＋`X-AM-Service-Token`。出現 Bot／service header 就表示要用該 principal；欄位不完整、token 不符、或混帶其他 principal 都拒絕，不降級成 User。沒有 Bot／service header 且 token 有效的請求是 User；這符合使用者裁示接受共用 UI token 的風險。
 3. WebSocket：`/ws?token=<token>[&since=<seq>]`。
 4. `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/*` 仍用 per-bot 的 `X-AM-Bot-Token`。Bot pane 一律注入 `AM_BOT_TOKEN`；hook 開關只控制 `AM_HOOK_TOKEN`。兩者目前是同一個 `bots.hook_token`。User 可用 `POST /bots/{id}/credential/rotate` 立即輪替：舊值立刻失效，執行中的 bot 會重啟以取得新值，停止中的 bot 下次啟動時取得。若有任何仍活著的 child／grandchild pane 繼承該母 bot 的憑證，回 `409 {"reason":"live_children_use_credential","children":[...]}` 且不改 token、不重啟，待後代 pane 都停止後再重試。`/hook/{provider}` 的 provider 還必須等於那顆 bot 的 `kind`，否則 `409 {"error":"provider_mismatch","bot_kind","provider"}`：bot pane 裡起的別種 CLI 子行程（例如 claude bot 裡跑 `codex exec -c notify=…`）繼承了 `AM_BOT_ID`／token，不擋就會把自己的 session id 記成這顆 bot 的（2026-09-22）。
@@ -23,7 +23,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 - **使用者證明刻意不新增**：網頁繼續拿共用 UI token；使用者已接受 LAN 可取用此 token 的現況。`GET /api/session` 仍依 loopback／`allow_lan` 規則發 token，Bot 請求不會自動攜帶它。
 - 同一個 unix 使用者的本機行程仍能讀到 UI token 與 pane 環境；Bot principal 是讓 Bot 呼叫明確以自己的憑證驗證，並防止帶錯／缺少 Bot proof 的同一請求降級成 User。它不區分同一使用者下的惡意本機行程。
 - 會因為 token 而**多拿到**權限的是本機使用者以外的人：開發版 `allow_lan`（跟 bind `0.0.0.0` 同一個判斷，§7.1）時，同網段的任何人
-  `GET /api/session` 就拿得到 token；而且 `allow_lan` 開著時 `Origin`、`Host` 都不檢查，瀏覽器裡的 DNS rebinding 也走得到這條（`allow_lan` 關著時 `Host` 必須是 loopback 名稱，擋得住）。
+  `GET /api/session` 就拿得到 token；但瀏覽器裡的 DNS rebinding 走不到這條：`allow_lan` 開著時 `Host`／`Origin` 也要是區網名稱（見 §0.1），攻擊者的網域不在其中；別的網頁直接從使用者瀏覽器打區網 IP，也因為沒有 CORS 回應標頭讀不到 `/api/session`，且 `Origin` 不合會被擋。
 - 遠端主機上沒有 daemon、也不開反向埠（SPEC §11.4），遠端的 bot 打不到 `/api`。
 
 | 組 | 端點 | 呼叫端 | 目前守衛 | 後果 | 建議要求 |

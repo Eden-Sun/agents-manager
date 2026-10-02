@@ -515,7 +515,8 @@ mod relay_announce_tests {
 /// TCP peer address, **not** `Host`: the header is caller-chosen, so on 0.0.0.0 anyone on the LAN
 /// could fetch the UI token with `curl -H 'Host: localhost:…'`. Needs connect_info (main.rs).
 /// `allow_lan` is the explicit dev-only opt-in (off in the packaged app, `main.rs::dev_lan_default`);
-/// no range allowlist because "LAN" includes overlays like Tailscale (100.64.0.0/10).
+/// no range allowlist because "LAN" includes overlays like Tailscale (100.64.0.0/10). The peer is
+/// not filtered, but Host／Origin still are (`origin_is_local`): that is what stops DNS rebinding.
 fn peer_is_local(peer: &std::net::SocketAddr, allow_lan: bool) -> bool {
     if allow_lan {
         return true;
@@ -538,15 +539,54 @@ fn is_loopback_host(authority: &str) -> bool {
     matches!(host.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "[::1]")
 }
 
-/// `allow_lan` accepts any Origin, same rationale as `peer_is_local`.
-fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
-    if allow_lan {
+/// `allow_lan` 開著時 Host／Origin 能用的名字：區網存取用的是 IP 字面值、`localhost`、單一標籤主機名、
+/// `.local`／`.ts.net`／`.home.arpa`／`.lan`／`.internal`／`.localdomain`，這些名字攻擊者的 DNS 都給不出來。
+/// 其他名字（含 `127.0.0.1.evil.example`、`192.168.1.5.nip.io`）擋掉：那正是 DNS rebinding 用的。
+/// 要用自訂網域，在環境變數 `AM_ALLOWED_HOSTS` 明列（逗號分隔、整個主機名完全相同）。
+fn lan_host_ok(authority: &str, extra: &[String]) -> bool {
+    let a = authority.trim();
+    let host = match a.rsplit_once(':') {
+        Some((h, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => a,
+    };
+    let host = host.to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return inner.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_ok() || host == "localhost" || extra.iter().any(|e| *e == host) {
         return true;
     }
-    // DNS rebinding：同源 GET 沒有 Origin，所以 Host 也要是 loopback 名稱（沒有 Host 的不是瀏覽器）。
+    if !host.contains('.') {
+        return host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    }
+    [".local", ".ts.net", ".home.arpa", ".lan", ".internal", ".localdomain"]
+        .iter()
+        .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len())
+}
+
+fn extra_allowed_hosts() -> &'static [String] {
+    static EXTRA: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    EXTRA.get_or_init(|| {
+        std::env::var("AM_ALLOWED_HOSTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect()
+    })
+}
+
+/// Host 與 Origin 的名字都要過關：`allow_lan` 關著＝loopback 名稱，開著＝[`lan_host_ok`]。
+/// 任何 Origin 都放行的舊行為讓別的網頁（或 rebind 過來的網域）在 LAN 模式下拿得到 UI token。
+fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
+    let name_ok = |authority: &str| if allow_lan { lan_host_ok(authority, extra_allowed_hosts()) } else { is_loopback_host(authority) };
+    // DNS rebinding：同源 GET 沒有 Origin，所以 Host 也要過關（沒有 Host 的不是瀏覽器）。
     if let Some(host) = headers.get("host") {
         let Ok(host) = host.to_str() else { return false };
-        if !is_loopback_host(host) {
+        if !name_ok(host) {
             return false;
         }
     }
@@ -555,12 +595,7 @@ fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
     if rest.contains('/') || rest.contains('@') {
         return false;
     }
-    let host = match rest.rsplit_once(':') {
-        // `[::1]` has colons of its own: only treat the tail as a port when it is numeric.
-        Some((h, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => h,
-        _ => rest,
-    };
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+    name_ok(rest)
 }
 
 /// 呼叫端自稱是某顆 bot（`X-AM-Bot-Id`）而且拿得出那顆 bot 的 hook token（`X-AM-Bot-Token`）時，回
@@ -9274,8 +9309,128 @@ mod host_header_tests {
     }
 
     #[test]
-    fn allow_lan_keeps_accepting_any_host() {
+    fn allow_lan_keeps_accepting_lan_names() {
         assert!(origin_is_local(&h(&[("host", "agm-host.tailnet.ts.net:7788")]), 7788, true));
+    }
+}
+
+/// `allow_lan` 開著（dev／Tailscale 存取）時的暴露面。以前這時 Host 與 Origin 一律放行：使用者瀏覽器開著任何網頁，
+/// 攻擊者把自己的網域 DNS rebind 到區網上的 daemon，同源之後 `GET /api/session` 就把 UI token 交出去。
+/// 區網存取用的是 IP、`localhost`、單一標籤主機名、`.local`、`.ts.net` 這類攻擊者拿不到的名字；其他名字不放行
+/// （要用自訂網域，`AM_ALLOWED_HOSTS` 明列）。
+#[cfg(test)]
+mod lan_exposure_tests {
+    use super::origin_is_local;
+    use axum::http::{HeaderMap, HeaderValue};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn h(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        for (k, v) in pairs {
+            m.insert(*k, HeaderValue::from_str(v).unwrap());
+        }
+        m
+    }
+
+    #[test]
+    fn a_rebound_hostname_is_refused_in_lan_mode_too() {
+        for host in ["evil.example:7788", "evil.example", "127.0.0.1.evil.example:7788", "192.168.1.5.nip.io", "x.ts.net.evil.example", "local"] {
+            let ok = origin_is_local(&h(&[("host", host)]), 7788, true);
+            // `local` 是單一標籤（允許）；其他都不行。
+            assert_eq!(ok, host == "local", "{host}");
+        }
+        assert!(!origin_is_local(&h(&[("host", "192.168.1.5:7788"), ("origin", "http://evil.example")]), 7788, true), "別的網頁從瀏覽器打過來");
+        assert!(!origin_is_local(&h(&[("host", "192.168.1.5:7788"), ("origin", "null")]), 7788, true));
+        assert!(!origin_is_local(&h(&[("host", "192.168.1.5:7788"), ("origin", "http://evil.example@192.168.1.5")]), 7788, true));
+    }
+
+    #[test]
+    fn lan_names_a_user_actually_types_still_pass() {
+        for host in [
+            "192.168.1.5:7788", "10.0.0.2", "100.64.0.9:7788", "[fd7a:115c:a1e0::1]:7788", "[::1]", "localhost:5173",
+            "agm-host.tailnet.ts.net:7788", "box.local", "agm-host", "nas.home.arpa",
+        ] {
+            assert!(origin_is_local(&h(&[("host", host)]), 7788, true), "{host}");
+        }
+        assert!(origin_is_local(&h(&[("host", "192.168.1.5:7788"), ("origin", "http://192.168.1.5:7788")]), 7788, true));
+        assert!(origin_is_local(&h(&[("host", "agm-host.tailnet.ts.net:7788"), ("origin", "https://agm-host.tailnet.ts.net")]), 7788, true));
+        assert!(origin_is_local(&h(&[("host", "192.168.1.5:7788")]), 7788, true), "沒有 Origin 的（curl、同源 GET）照舊");
+        assert!(origin_is_local(&h(&[]), 7788, true));
+    }
+
+    #[test]
+    fn an_explicitly_allowed_hostname_passes() {
+        assert!(super::lan_host_ok("agm.example.com:7788", &["agm.example.com".to_string()]));
+        assert!(!super::lan_host_ok("evil.example.com", &["agm.example.com".to_string()]));
+    }
+
+    async fn raw(app: std::sync::Arc<crate::state::App>, request: &str) -> String {
+        let router = super::router(app);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(request.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), c.read_to_end(&mut out)).await;
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// 端到端：LAN 模式下，rebind 過來的 Host 拿不到 token、也不能用 token 打 /api。
+    #[tokio::test]
+    async fn lan_mode_does_not_hand_the_token_to_a_rebound_host() {
+        let env = crate::testing::env().await;
+        let app = crate::testing::restart_app_lan(&env, true).await;
+        let rebound = raw(app.clone(), "GET /api/session HTTP/1.1\r\nHost: evil.example:7788\r\nConnection: close\r\n\r\n").await;
+        assert!(rebound.starts_with("HTTP/1.1 403"), "{rebound}");
+        assert!(!rebound.contains("test-token"), "{rebound}");
+        let lan = raw(app.clone(), "GET /api/session HTTP/1.1\r\nHost: 192.168.1.5:7788\r\nConnection: close\r\n\r\n").await;
+        assert!(lan.starts_with("HTTP/1.1 200"), "區網 IP 存取照舊（#556：持有 UI token 就是使用者，allow_lan 的風險使用者已接受）：{lan}");
+        let api = raw(app.clone(), "GET /api/state HTTP/1.1\r\nHost: evil.example\r\nX-AM-Token: test-token\r\nConnection: close\r\n\r\n").await;
+        assert!(api.starts_with("HTTP/1.1 403"), "有 token 也不行：{api}");
+        let ws = raw(app, "GET /ws?token=test-token HTTP/1.1\r\nHost: 192.168.1.5:7788\r\nOrigin: http://evil.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").await;
+        assert!(ws.starts_with("HTTP/1.1 403"), "別的網頁開 WebSocket：{ws}");
+    }
+
+    /// 沒有憑證的呼叫端看到的錯誤不能帶出路徑或內部細節。
+    #[tokio::test]
+    async fn unauthenticated_errors_do_not_leak_paths() {
+        let env = crate::testing::env().await;
+        let data = env.app.data_dir.display().to_string();
+        let app = crate::testing::restart_app_lan(&env, true).await;
+        for req in [
+            "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            "GET /api/bots/x/outbox/file?path=../../etc/passwd HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            "GET /api/nope HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            "POST /hook/claude HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            "POST /relay/announce HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "GET /../../etc/passwd HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        ] {
+            let resp = raw(app.clone(), req).await;
+            assert!(!resp.contains(&data) && !resp.contains("/home/") && !resp.contains("/Users/") && !resp.contains("root:"), "{req}\n{resp}");
+        }
+        let state = raw(app, "GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").await;
+        assert!(state.starts_with("HTTP/1.1 401"), "{state}");
+    }
+
+    /// service principal 只能打明列路徑：UI／bot 的路徑（含 /api/state、/api/session 之外的寫入）一律 403。
+    #[tokio::test]
+    async fn a_service_principal_is_confined_to_its_listed_paths() {
+        let env = crate::testing::env().await;
+        let app = crate::testing::restart_app_lan(&env, true).await;
+        app.service_tokens.write().unwrap().insert("herdr-upgrade".into(), "svc-token".into());
+        for (method, path) in [
+            ("GET", "/api/state"), ("GET", "/api/supervisor/state/"), ("POST", "/api/bots/x/prompt"), ("POST", "/api/bots/x/keys"),
+            ("GET", "/api/panes/"), ("POST", "/api/services/daemon-swap/restart-window"), ("POST", "/api/services/herdr-upgrade/resume/a/b"),
+            ("GET", "/api/capabilities?x=1/../state"), ("DELETE", "/api/hosts/m4p"), ("PUT", "/api/drafts/k"),
+        ] {
+            let resp = raw(app.clone(), &format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: herdr-upgrade\r\nX-AM-Service-Token: svc-token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")).await;
+            let allowed_listed = path.starts_with("/api/capabilities");
+            assert!(allowed_listed || resp.starts_with("HTTP/1.1 403") || resp.starts_with("HTTP/1.1 404") || resp.starts_with("HTTP/1.1 405"), "{method} {path}: {}", resp.lines().next().unwrap_or(""));
+        }
+        // 同時帶 UI token 與 service 身分：拒絕，不降級。
+        let mixed = raw(app, "GET /api/capabilities HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: herdr-upgrade\r\nX-AM-Service-Token: svc-token\r\nX-AM-Token: test-token\r\nConnection: close\r\n\r\n").await;
+        assert!(mixed.starts_with("HTTP/1.1 401"), "{mixed}");
     }
 }
 
