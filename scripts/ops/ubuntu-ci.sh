@@ -39,6 +39,33 @@ fi
 cd "${CI_ROOT}/repo"
 git fetch -q origin main
 
+# 送一則 commit status（sha 由參數給，補送舊 sha 也用它）。暫時連不上就重試幾次（間隔 AGM_CI_STATUS_RETRY_SLEEP 秒）；
+# 還是不行回非零，由呼叫端決定要不要記下來補送。
+post_status() {
+    local at="$1" state="$2" desc="$3" i
+    for i in 1 2 3; do
+        if gh api -X POST "repos/${GH_REPO}/statuses/${at}" -f state="${state}" -f context="${CONTEXT}" \
+            -f description="${desc}" >/dev/null 2>&1; then
+            return 0
+        fi
+        [ "${i}" -ge 3 ] || sleep "${AGM_CI_STATUS_RETRY_SLEEP:-3}"
+    done
+    echo "commit status 寫不上去（${state}）" >&2
+    return 1
+}
+
+# 上一輪沒送上去的最後結果（見 final_status）先補送：要在「同一個 sha 就退出」之前，不然 main 靜止時永遠補不到。
+post_unposted() {
+    local usha ustate udesc
+    [ -s "${CI_ROOT}/unposted" ] || return 0
+    IFS=$'\t' read -r usha ustate udesc < "${CI_ROOT}/unposted" || true
+    [ -n "${usha}" ] && [ -n "${ustate}" ] || { rm -f "${CI_ROOT}/unposted"; return 0; }
+    if post_status "${usha}" "${ustate}" "${udesc}"; then
+        rm -f "${CI_ROOT}/unposted"
+    fi
+}
+post_unposted || true
+
 # 已安裝的 ops 腳本跟 origin/main 的漂移檢查（#418 的 `agm ops-sync --check --alert`）：文件寫「巡檢每天跑一次」，但沒有任何東西在排程它，
 # outbox-gc.sh 停在舊版、repo 的修正一直沒生效也沒人知道。這支每分鐘都會跑、又是從 CI clone 直接執行（不用安裝），所以順手問一次。
 # 只偵測回報：不安裝、不改 AGM bin；有落差就由 ops-sync 自己推 ops_alert（同一小時一則）。結果寫在 ${CI_ROOT}/ops-sync.json，
@@ -64,11 +91,20 @@ if [ "${sha}" = "${last}" ]; then
     exit 0
 fi
 
+# 回報失敗不能讓整輪中斷：GitHub 暫時連不上時，結果仍寫在 status.json。
 status() {
-    # 回報失敗不能讓整輪中斷：GitHub 暫時連不上時，結果仍寫在 status.json。
-    gh api -X POST "repos/${GH_REPO}/statuses/${sha}" -f state="$1" -f context="${CONTEXT}" \
-        -f description="$2" >/dev/null 2>&1 || echo "commit status 寫不上去（$1）" >&2
+    post_status "${sha}" "$1" "$2" || true
 }
+
+# 最後的結果（success／failure／error）一定要送到：送不上去就記在 ${CI_ROOT}/unposted（一行：sha、state、description，tab 分隔），
+# 下一輪（不管有沒有新 commit、也不重跑檢查）先補送。不然 last-sha 已經前進，這個 sha 在 GitHub 上永遠停在 pending，
+# 而 status.json 卻寫著 success。
+final_status() {
+    if ! post_status "${sha}" "$1" "$2"; then
+        printf '%s\t%s\t%s\n' "${sha}" "$1" "$2" > "${CI_ROOT}/unposted"
+    fi
+}
+
 
 # 放進手寫 JSON 字串前的跳脫：反斜線、雙引號、控制字元（description 取自 step 標題，什麼字元都可能有）。
 json_str() {
@@ -171,7 +207,7 @@ else
         desc="$(printf '紅：%s（%s）' "${failed}" "${first}" | cut -c1-120)"
     fi
 fi
-status "${state}" "${desc}"
+final_status "${state}" "${desc}"
 printf '{"sha":"%s","state":"%s","rc":%s,"started":"%s","finished":"%s","log":"%s","description":"%s"}\n' \
     "${sha}" "${state}" "${rc}" "${started}" "${finished}" "$(json_str "${log}")" "$(json_str "${desc}")" > "${CI_ROOT}/status.json"
 echo "${sha}" > "${CI_ROOT}/last-sha"

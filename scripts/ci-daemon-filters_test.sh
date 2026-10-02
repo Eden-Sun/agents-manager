@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# scripts/ci-daemon-filters.sh 的路徑 → cargo test 過濾字串對應（2026-10-02 閘門審查）。純函式：stdin 檔案清單 → 過濾字串（一行一個）。
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+fail=0
+check() {
+    local want="$1" got
+    shift
+    got="$(printf '%s\n' "$@" | bash scripts/ci-daemon-filters.sh | tr '\n' ' ' | sed 's/ $//')"
+    if [ "$got" != "$want" ]; then
+        printf 'FAIL: %s → got [%s] want [%s]\n' "$*" "$got" "$want" >&2
+        fail=1
+    fi
+}
+
+# 模組路徑：daemon/src/a/b.rs → a::b::；mod.rs 就是目錄本身；頂層 x.rs → x::。
+check "lifecycle::queue::" "daemon/src/lifecycle/queue.rs"
+check "api::" "daemon/src/api.rs"
+check "supervisor::" "daemon/src/supervisor/mod.rs"
+check "supervisor::controller::" "daemon/src/supervisor/controller.rs"
+# 測試檔就在自己的模組底下（foo/tests.rs → foo::tests::，包含在 foo:: 裡）。
+check "host_baseline::tests::" "daemon/src/host_baseline/tests.rs"
+# main.rs／lib.rs 不是模組：沒有可挑的子集（cargo check 已經涵蓋編譯）。
+check "" "daemon/src/main.rs"
+# fixtures：歸給它所在的模組。
+check "lifecycle::" "daemon/src/lifecycle/fixtures/claude-2.1.281-draft.ansi"
+check "release_triage::" "daemon/src/release_triage/fixtures/claude_2.1.276-278.md"
+# 多個檔案：去重、排序。
+check "lifecycle::prompt:: lifecycle::queue::" "daemon/src/lifecycle/queue.rs" "daemon/src/lifecycle/prompt.rs" "daemon/src/lifecycle/queue.rs"
+# daemon 以外、但 daemon 的測試會讀的檔案（跟 ci-changed-parts.sh 同一份清單）。
+check "cargo_shim::" "scripts/check.sh"
+check "herdr_shim::" "scripts/ops/lint-shell-vars.sh"
+check "claude_review::" "scripts/ops/codex-release-task.md"
+check "supervisor::setup::" "scripts/ops/fixtures/patrol-runtime.json"
+check "supervisor::setup::" "scripts/agm.py"
+check "supervisor::persona:: supervisor::responder:: supervisor::setup::" "docs/goals/agm-supervisor-persona.md" "docs/goals/agm-responder-persona.md"
+# 跟 daemon 無關的檔案不產生過濾字串。
+check "" "web/src/store/store.ts" "docs/SPEC.md" "scripts/ops/README.md"
+
+if [ "$fail" = 0 ]; then echo "ci-daemon-filters: OK"; fi
+exit "$fail"

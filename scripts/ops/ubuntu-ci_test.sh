@@ -55,13 +55,19 @@ AGMPY
   # 假 gh：記下呼叫；$FIX/gh.rc 決定回傳碼。
   cat > "$ROOT/bin/gh" <<'GH'
 #!/bin/bash
+# $FIX/gh.failn：前 N 次呼叫失敗（每次減一）；$FIX/gh.rc：其餘呼叫的回傳碼（預設 0）。失敗的呼叫也記在 gh.attempts。
+echo "gh $*" >> "$FIX/gh.attempts"
+if [ -s "$FIX/gh.failn" ] && [ "$(cat "$FIX/gh.failn")" -gt 0 ]; then
+  echo $(( $(cat "$FIX/gh.failn") - 1 )) > "$FIX/gh.failn"
+  exit 1
+fi
 echo "gh $*" >> "$FIX/gh.log"
 exit "$(cat "$FIX/gh.rc" 2>/dev/null || echo 0)"
 GH
   chmod +x "$ROOT/bin/gh"
   export PATH="$ROOT/bin:$PATH"
   export AGM_CI_ROOT="$ROOT/ci" AGM_CI_REPO_URL="$ROOT/origin.git" AGM_CI_GH_REPO=o/r AGM_CI_TIMEOUT=30s AGM_CI_KILL_AFTER=1s AGM_CI_MIN_FREE_GB=0
-  CI="$AGM_CI_ROOT"; : > "$FIX/gh.log"
+  CI="$AGM_CI_ROOT"; : > "$FIX/gh.log"; : > "$FIX/gh.attempts"; export AGM_CI_STATUS_RETRY_SLEEP=0
 }
 teardown() { rm -rf "$ROOT"; }
 run() { bash "$HERE/ubuntu-ci.sh" >"$ROOT/out" 2>&1; echo $?; }
@@ -262,6 +268,30 @@ kept "TMPDIR 是 HOME：不清" "$HOME/am-home-$U1"
 (cd "$ROOT" && export TMPDIR=tmp && run >/dev/null)
 kept "TMPDIR 是相對路徑：不清" "$T/am-stale-$U1"
 unset TMPDIR; teardown
+
+# 8. 最後一則 commit status 暫時寫不上去（GitHub 連不上）：以前只印一行就算了、last-sha 照樣前進，
+#    這個 sha 在 GitHub 上永遠停在 pending（status.json 卻說 success）。現在先重試，還不行就記下來，下一輪補送（不重跑）。
+setup
+echo 4 > "$FIX/gh.failn"   # 前 4 次呼叫失敗：pending 那則整個送不出去、最後的 success 第一次也失敗，靠重試補上
+equals "status 寫不上去時 CI 本身 exit 0" "$(run)" "0"
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+equals "last-sha 照常前進（結果是真的跑出來的）" "$(cat "$CI/last-sha")" "$SHA"
+check "最後的 success 有送到（重試或補送）" "state=success" "$FIX/gh.log"
+teardown
+
+setup
+echo 99 > "$FIX/gh.failn"   # 整輪 GitHub 都連不上
+equals "GitHub 整輪連不上 CI 也 exit 0" "$(run)" "0"
+check "結果記下來等補送" "$SHA\|success\|$(git -C "$ROOT/work" rev-parse HEAD)" "$CI/unposted" 2>/dev/null || true
+[ -s "$CI/unposted" ] && echo "ok   - 有 unposted 記錄" && PASS=$((PASS + 1)) || { echo "FAIL - 沒有 unposted 記錄"; FAIL=$((FAIL + 1)); }
+check_no "GitHub 沒收到任何 status" "state=" "$FIX/gh.log"
+echo 0 > "$FIX/gh.failn"
+equals "GitHub 回來後下一輪 exit 0" "$(run)" "0"
+check "補送了 success（同一個 sha，不重跑）" "state=success" "$FIX/gh.log"
+check "補送的是那個 sha" "statuses/$(git -C "$ROOT/work" rev-parse HEAD)" "$FIX/gh.log"
+[ ! -e "$CI/unposted" ] && echo "ok   - 補送完清掉記錄" && PASS=$((PASS + 1)) || { echo "FAIL - unposted 還在"; FAIL=$((FAIL + 1)); }
+equals "沒有重跑檢查（log 只有一份 daemon 結尾）" "$(grep -c '\[ubuntu-ci\] daemon rc=' "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log")" "1"
+teardown
 
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

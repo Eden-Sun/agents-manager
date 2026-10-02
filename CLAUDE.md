@@ -34,7 +34,7 @@
 
 ## 驗證（收尾前必跑）
 - Claude 端另有 project skill `verify`（`.claude/skills/verify/`，issue #747）在 commit 前叫起同一個 `scripts/check.sh changed`；它只是這條規則的入口，不另有判斷，Ubuntu Full CI 仍非同步。
-- 收尾跑 `scripts/check.sh changed`（issue #716）：只跑改到的部分（跟 `origin/main` 比），daemon 只做 `cargo check --all-targets`；要跑指定測試加 `CHECK_TESTS=<過濾字串>`。改動範圍大、或改到共用基礎時再跑整樹 `scripts/check.sh`。
+- 收尾跑 `scripts/check.sh changed`（issue #716）：只跑改到的部分（跟 `origin/main` 比），daemon 做 `cargo check --all-targets` 再跑**改到的模組自己的測試**（`scripts/ci-daemon-filters.sh` 由路徑挑；跨模組的連帶影響抓不到，交給 ubuntu-ci）；要明講跑哪些加 `CHECK_TESTS=<過濾字串>`、不跑測試用 `CHECK_TESTS=none`。改動範圍大、或改到共用基礎時再跑整樹 `scripts/check.sh`。
 - 整樹測試「單跑都綠、整樹偶發紅」：`scripts/flaky-sweep.sh -n 5 -c 2`（高並行連跑 N 輪、可同時開多份製造負載，列出紅過的測試與次數、有紅 exit 1、一輪都沒跑到或少跑 exit 2）；修完要用它連跑證明不再紅。**本機預設禁跑**（協調者 2026-09-24 裁示）：它繞過 cargo shim、開高 `--test-threads` 又同時開好幾份，要驗 flaky 走遠端編譯主機或 CI；真的要在本機跑得在命令列加 `--i-know`（唯一的同意方式，沒有環境變數繞法）並先跟協調者講一聲。
 - daemon 個別指令：`cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`、`cargo clippy -p agents-managerd`（目前既有 32 個 warning，暫不加 `-D warnings`）。
 - web 個別指令：`cd web && bunx tsc -p tsconfig.app.json --noEmit && bunx oxlint src && bun run build`（既有 warning 不算，新增的要清）。
