@@ -5,6 +5,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { requests, reset, routeDaemon } from './storeEnv.harness.ts'
+import { installManualTimers } from '../testing/manualTimers.ts'
 import type { Bot, Message, Mission, MissionDetail, Project } from '../api/types.ts'
 import { MESSAGE_CAP, capList } from './lists.ts'
 import { capFor } from './messageCap.ts'
@@ -39,6 +40,10 @@ function seed() {
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 10))
+/** 讓剛 resolve 的 promise 鏈（fetch 樁→PUT 回應）跑完；不是在等牆鐘。 */
+const flush = async () => {
+  for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r))
+}
 const noticeTexts = () => useStore.getState().notices.map((n) => n.text)
 
 test('任務被清掉：收掉那一張卡，其他任務與「交給 AGM」不受影響', async () => {
@@ -211,10 +216,13 @@ test('兩次排序重疊、第一次晚到失敗：不能蓋掉第二次成功�
   seed()
   useStore.setState({ projects: [project(), { id: 'p2', label: 'p2', path: '/p2', host: 'local' } as Project, { id: 'p3', label: 'p3', path: '/p3', host: 'local' } as Project] })
   let n = 0
+  // 第一個請求卡在閘門上，第二個先成功；放開閘門＝「第一個晚到失敗」。不靠 30ms／60ms 的牆鐘賽跑。
+  let lateFailure!: () => void
+  const gate = new Promise<void>((resolve) => (lateFailure = resolve))
   routeDaemon(async () => {
     n += 1
     if (n === 1) {
-      await new Promise((r) => setTimeout(r, 30))
+      await gate
       return json({ error: 'upstream', message: 'x' }, 502)
     }
     return json({ ok: true }, 200)
@@ -222,7 +230,9 @@ test('兩次排序重疊、第一次晚到失敗：不能蓋掉第二次成功�
   useStore.getState().moveProject('p3', 'p1')
   useStore.getState().moveProject('p2', 'p1')
   const want = useStore.getState().projectOrder
-  await new Promise((r) => setTimeout(r, 60))
+  await flush() // 第二個請求已成功
+  lateFailure()
+  await flush()
   assert.deepEqual(useStore.getState().projectOrder, want, '第二次已存成功，舊的失敗不能把順序退回去')
 })
 
@@ -1059,29 +1069,35 @@ test('removeBot／addBot／addProject 連點：只送一次，不跳第二個失
   assert.equal(noticeTexts().filter((t) => /not_found|already|找不到/.test(t)).length, 0)
 })
 
-const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 test('草稿以 daemon 為準：打字 debounce 後 PUT（帶 client_id），不再寫 localStorage', async () => {
   seed()
-  const rev = { n: 0 }
-  routeDaemon((req) => (req.method === 'PUT' && req.path.includes('/drafts/') ? json({ key: 'bot:b1', rev: (rev.n += 1) }, 200) : json({}, 200)))
-  const st = useStore.getState()
-  st.setDraft('bot:b1', '幫')
-  st.setDraft('bot:b1', '幫我跑')
-  st.setDraft('bot:b1', '幫我跑測試')
-  assert.equal(requests.filter((r) => r.path.includes('/drafts/')).length, 0, 'debounce 內不送')
-  await wait(550)
-  const puts = requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/'))
-  assert.equal(puts.length, 1)
-  assert.match(puts[0].path, /\/api\/drafts\/bot%3Ab1$/)
-  assert.equal((puts[0].body as { text: string }).text, '幫我跑測試')
-  assert.equal(typeof (puts[0].body as { client_id: string }).client_id, 'string')
-  assert.equal(localStorage.getItem('am.drafts'), null)
-  // 送出清空：不等 debounce。
-  st.setDraft('bot:b1', '')
-  await wait(60)
-  const last = requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/')).at(-1)
-  assert.equal((last?.body as { text: string }).text, '')
+  const timers = installManualTimers()
+  try {
+    const rev = { n: 0 }
+    routeDaemon((req) => (req.method === 'PUT' && req.path.includes('/drafts/') ? json({ key: 'bot:b1', rev: (rev.n += 1) }, 200) : json({}, 200)))
+    const st = useStore.getState()
+    st.setDraft('bot:b1', '幫')
+    st.setDraft('bot:b1', '幫我跑')
+    st.setDraft('bot:b1', '幫我跑測試')
+    assert.equal(requests.filter((r) => r.path.includes('/drafts/')).length, 0, 'debounce 內不送')
+    await timers.clock.advance(550) // 手動時鐘：debounce（400ms）過了；不靠牆鐘
+    await flush()
+    const puts = requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/'))
+    assert.equal(puts.length, 1)
+    assert.match(puts[0].path, /\/api\/drafts\/bot%3Ab1$/)
+    assert.equal((puts[0].body as { text: string }).text, '幫我跑測試')
+    assert.equal(typeof (puts[0].body as { client_id: string }).client_id, 'string')
+    assert.equal(localStorage.getItem('am.drafts'), null)
+    // 送出清空：不等 debounce。
+    st.setDraft('bot:b1', '')
+    await timers.clock.advance(0)
+    await flush()
+    const last = requests.filter((r) => r.method === 'PUT' && r.path.includes('/drafts/')).at(-1)
+    assert.equal((last?.body as { text: string }).text, '')
+  } finally {
+    timers.restore()
+  }
 })
 
 test('別的瀏覽器的 draft_updated：套用到輸入框；自己的回音與舊 rev 不套', async () => {
