@@ -627,12 +627,17 @@ async fn host_pass_lock(app: &Arc<App>, host: &str) -> Arc<tokio::sync::Mutex<()
 }
 
 pub async fn reconcile_host(app: &Arc<App>, host: &str) -> Result<()> {
-    let lock = host_pass_lock(app, host).await;
-    let _pass = lock.lock().await;
-    reconcile_host_locked(app, host).await
+    let lost = {
+        let lock = host_pass_lock(app, host).await;
+        let _pass = lock.lock().await;
+        reconcile_host_locked(app, host).await?
+    };
+    // 這一輪收掉的 autostart bot：pass 鎖放開之後才起（起的過程會碰 herdr 與 DB，不能卡著下一輪對帳）。
+    crate::autostart_revive::revive(app, host, lost).await;
+    Ok(())
 }
 
-async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
+async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::autostart_revive::Lost>> {
     let Some(session) = app.session_for_host(host).await else {
         anyhow::bail!("unknown host `{host}`");
     };
@@ -640,6 +645,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
         anyhow::bail!("unknown host `{host}`");
     };
     crate::github::spawn_detect_host(app.clone(), host.to_string());
+    let mut lost_autostart: Vec<crate::autostart_revive::Lost> = Vec::new();
     let snapshot = client.snapshot().await?;
     // A1 的同一條規則也要套在 snapshot 上：`panes`／`workspaces` 這兩個 key 不在（不是「陣列是空的」，
     // 是「連 key 都沒有」）＝這份回應不是我們認得的形狀，下面每一段都會把它讀成「什麼都不存在」，
@@ -927,6 +933,9 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
                 if exit == crate::lifecycle::RunExit::NotRecorded {
                     tracing::warn!(host, bot = %bot.name, run = %run.id, "reconcile: the run's exit was not recorded; bot left as is, will look again");
                     schedule_deferred_pass(app, host);
+                } else if bot.managed_by != "child" && bot.autostart == 1 {
+                    // 不是使用者停的（那是 `stopped`）：herdr 掉了這個 agent。pass 結束後由 `autostart_revive` 決定要不要再起。
+                    lost_autostart.push(crate::autostart_revive::Lost { bot_id: bot.id.clone(), run_id: run.id.clone() });
                 } else if bot.managed_by == "child" && may_retire_child(app, host, &bot).await {
                     let why = if let Ok(hints) = &spawn_hints {
                         if parent_replaced_child(
@@ -1175,7 +1184,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<()> {
     }
     // agent 早就 idle、turn 還停在 in_flight：收尾並放行排在後面的 queued（AGM 2026-09-16）。
     crate::lifecycle::sweep_stuck_turns(app, Some(host)).await;
-    Ok(())
+    Ok(lost_autostart)
 }
 
 /// Returns the bot id. Lookup keyed on parent + name: name alone hit another parent's same-named

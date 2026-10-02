@@ -26,6 +26,7 @@ mod assets;
 mod background_hook;
 mod background_jobs;
 mod claude_live;
+mod autostart_revive;
 mod attach;
 mod bulk_restart;
 mod changelog;

@@ -1301,6 +1301,12 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    **讀不到不當成沒有**（#209）：bot 清單讀不到＝這一輪一顆都不起；某顆讀不到主機（不當成本機）或讀不到 active run（不當成沒在跑）
    就只跳過那顆。沒判斷完的部分背景照開機恢復的退避（§3.1）補到判斷完——本機不會有「下次連上」，不能只靠重連。主機照樣只算跑過
    一次：補的只是這一次還沒判斷完的，已經判斷過的不再碰；第一次嘗試之後才有 run 的 bot（使用者自己起過又停掉）也不再替它起。
+   **開機之後掉的 autostart bot 會自動補起（`autostart_revive`）**：herdr 斷線重連或 server 重啟（herdr 更新）時，對帳發現 run 的 agent 不見，
+   收成 `exited`（原因 `agent not found during reconcile`）——使用者停的是 `stopped`、在 herdr 裡關 pane 走 `pane exited` 事件，都不走這條。
+   對帳那輪結束（pass 鎖放開）後，對 `autostart=1`、非 child、沒有 active run、最後一個 run 就是這次收掉的那個的 bot 再 `start_bot` 一次，
+   並立刻推 supervisor inbox `bot_lost`（巡檢收、叫醒；`payload.outcome` = `restarted`／`failed`／`backoff`，不等 `bot_stopped` 探針的 300 秒）。
+   只在該主機的開機 autostart 跑完之後才動（開機那輪由 autostart 負責，不搶著起第二次），herdr 計畫中維護期間不動；
+   退避：同一顆 bot 30 分鐘內最多重開 3 次（記憶體計數，daemon 重啟歸零），超過只推 `outcome=backoff`、不再開，交給 supervisor／探針。
 
 ### 6.2 啟動 Bot（per-bot 鎖內）
 1. `INSERT runs (state='starting')`；違反 active Run 唯一索引 → 409 附既有 `run_id`。
@@ -4283,7 +4289,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 | 入口 | 使用者 web／手機 Remote Control（**唯一**的 remote） | 沒有 remote；只有 daemon 的通知 |
 | 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（記在 `bots.cwd`；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
 | 專案 | 巡檢的專案 | **同一個**（見下）；側欄上兩個角色在同一塊 |
-| 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`bot_shim_stale`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
+| 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`bot_shim_stale`、`bot_lost`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
 | 喚醒節流 | `notify_interval_secs`（600） | 短窗批次 `responder_batch_secs`（15）：最舊的待辦等滿、且距上次喚醒也滿才叫 |
 
 **協調者的健康算進頂層 `status`**（review 2026-09-16）：它是 bot 申請、核准請求與所有 `mission_*` 的唯一收件人，

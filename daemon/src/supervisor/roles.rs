@@ -238,7 +238,8 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         | "judge_same_work"
         // `persona_changed`：總管的常駐指示被改寫了（issue #462）。沒帶身分的呼叫端也改得動
         // （共用 UI token 的界線留在 #447），所以至少要有人看見——巡檢收、叫醒。
-        | "child_retire_refused" | "persona_changed" => r(Role::Patrol, true),
+        // `bot_lost`：herdr 掉了一顆 autostart bot 的 agent（重啟／斷線），對帳收成 exited 後 daemon 已照退避再起一次或放棄（`autostart_revive`）。
+        | "child_retire_refused" | "persona_changed" | "bot_lost" => r(Role::Patrol, true),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
         // 協調者那一半也算：它倒了或在等額度，能發現的只有巡檢（review 2026-09-16 #7）。
