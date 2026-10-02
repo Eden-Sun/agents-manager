@@ -1985,6 +1985,10 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   `close_log_lines` 預設 20），不寫死。`idle_close_secs` 另外要能用環境變數覆寫（與 §18.8 的保險絲門檻同一套規矩：看不懂／0／負數一律回預設——一個手滑的值不該把 GC 變成「立刻關」）。
   **設定檔的值同一條規矩**，另有下限 600 秒：低於下限（含 0——不是「停用」）的環境變數不採用、退回設定檔；設定檔的值低於下限就回預設 21600。
 
+
+**安全審查補充（2026-10-02）**：① 原始 pane 輸入端點（主機 shell 的 `shells`／`text`／`keys`／`DELETE`，以及 `/bots/:id/text`、`/bots/:id/keys`）只給 `RequestPrincipal::User`，bot／service 身分 403 `user_only`；
+② 記憶體白名單（daemon 自己開的）打字前也即時複查，不再「認到就放行」：agent／在 listen／pane 已不在／同 id 但 `workspace_id`、`tab_id` 對不上（id 重用）／登記的 `herdr_session` 不是現在的 session，都擋；
+③ `text` ≤ 256 KiB、`keys` ≤ 64 個且鍵名 ≤ 32 字元無空白與控制字元。`panes` 表那條同樣比對 workspace／tab。實作 `shell::{registered, live_verdict, check_text, check_keys}`、`api::require_user`。
 ### 6.5f 給使用者的輸出檔案：outbox（使用者 2026-09-16 裁示）
 
 2026-09-16 scratchpad 下載功能把 bot scratchpad 裡的私鑰（`.pem`）與正式 DB 複本（`*.sqlite3`、`*.db`）放上網頁可下載。
