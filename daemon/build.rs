@@ -23,7 +23,14 @@ fn main() {
     let short = git(&["rev-parse", "--short", "HEAD"]).filter(|s| !s.is_empty()).unwrap_or_else(|| "unknown".to_string());
     // 髒樹（有未提交的改動）建出來的 binary 不是任何一個 commit：標記出來，不能冒充乾淨的 sha。
     // 只看追蹤中的檔案（`-uno`）：沒追蹤的檔案進不了 binary。拿不到 git 就不標（sha 本來就是 unknown）。
-    let dirty = git(&["status", "--porcelain", "-uno"]).is_some_and(|s| !s.is_empty());
+    // `--no-optional-locks`：只讀，不去刷新／寫 index（自動部署的 checkout 同時還有別的 git 指令在跑，不要跟它搶 index.lock）。
+    let changed = git(&["--no-optional-locks", "status", "--porcelain", "-uno"]).unwrap_or_default();
+    let dirty = !changed.is_empty();
+    if dirty {
+        // 部署會因為 `-dirty` 中止（daemon-swap.sh rc=10）：把是哪些檔案寫進 build log，才查得到是誰弄髒的。
+        let files: Vec<&str> = changed.lines().take(8).collect();
+        println!("cargo:warning=build tree is dirty ({} tracked file(s) changed): {}", changed.lines().count(), files.join(" | "));
+    }
     println!("cargo:rustc-env=AM_BUILD_SHA={short}");
     println!("cargo:rustc-env=AM_BUILD_SHA_FULL={full}");
     println!("cargo:rustc-env=AM_BUILD_DIRTY={}", if dirty { "1" } else { "0" });
