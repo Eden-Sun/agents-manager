@@ -7,6 +7,7 @@ import { forgetBlockedExcept } from '../lib/blockedPrefetch'
 import { shellDraftKey } from './shellDraft'
 import { createResyncRunner } from './resyncQueue'
 import { createRequestId, peekRequestId, settleCreateRequest } from '../lib/createRequestId'
+import { queueSlotNotice, slotHolderFrom } from '../lib/queueSlot'
 import { groupSendDelivered } from './groupSend'
 import { create } from 'zustand'
 import * as api from '../api'
@@ -1678,12 +1679,19 @@ export const useStore = create<StoreState>((set, get) => {
         return false
       }
       if (queueIfBusy && e instanceof ApiError && e.status === 409 && e.body.reason === 'queue_slot_taken') {
+        // 先對帳再決定怎麼還：兩個分頁同一句同時 Enter，另一邊已經排進去（並清掉了共用草稿），排著的就是這一句——
+        // 這邊不能再把字塞回輸入框（同步出去，成功的那一邊又冒出同一句），也不是失敗。
+        await Promise.all([get().refreshState(), get().loadMessages(botId)])
+        const holder = slotHolderFrom(e.body)
+        const queuedNow = queuedSendFor(get(), botId)
+        if ((!holder || holder.kind === 'user') && attachments.length === 0 && queuedNow && queuedNow.text.trim() === text.trim()) {
+          get().notify('info', '這一句已經在排隊中（可能是另一個分頁剛送出的），沒有再送一次')
+          return true
+        }
         const key = `bot:${botId}` as const
         get().setDraft(key, draftWithText(text, get().drafts[key] ?? ''))
         get().setDraftCursor(key, text.length)
-        const attachmentNote = attachments.length ? `；${attachments.length} 個附件要重新加` : ''
-        get().notify('error', `已有一則訊息排隊中，這一則已退回輸入框${attachmentNote}`)
-        await Promise.all([get().refreshState(), get().loadMessages(botId)])
+        get().notify('error', queueSlotNotice(holder, attachments.length))
         return false
       }
       // 插不了隊（不是 claude、CLI 比 2.1.275 舊、版本還不知道）：daemon 已經說了原因，照抄比「HTTP 409」有用。

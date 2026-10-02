@@ -6392,14 +6392,21 @@ mod prompt_route_tests {
     use super::*;
 
     async fn typed_bot(e: &crate::testing::Env, kind: &str) -> String {
-        let bot = crate::testing::claude_bot(&e.app, &e.project_id, "route-bot").await;
+        typed_bot_named(e, kind, "route-bot", "pane-route").await
+    }
+
+    /// 同一個專案要好幾顆（名字與 pane 都不能撞）的測試用。
+    async fn typed_bot_named(e: &crate::testing::Env, kind: &str, name: &str, pane: &str) -> String {
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, name).await;
         sqlx::query("UPDATE bots SET kind = ? WHERE id = ?").bind(kind).bind(&bot.id).execute(&e.app.db).await.unwrap();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, started_at)
-             VALUES (?,?,'running','idle','ws-1','pane-route','route-bot','test',1,?)",
+             VALUES (?,?,'running','idle','ws-1',?,?,'test',1,?)",
         )
         .bind(db::ulid())
         .bind(&bot.id)
+        .bind(pane)
+        .bind(name)
         .bind(db::now())
         .execute(&e.app.db)
         .await
@@ -6490,6 +6497,49 @@ mod prompt_route_tests {
         assert_eq!(bound.as_deref(), Some(message_id), "message and attachment binding commit together");
         let turn: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(turn_id).fetch_one(&e.app.db).await.unwrap();
         assert_eq!(serde_json::to_value(turn).unwrap()["awaits_idle"], 1, "turn JSON exposes the wait flag");
+    }
+
+    /// 唯一的 queued 槽被別人佔著時，409 要說是誰佔著（`holder`），web 才講得出人話：
+    /// 以前 AGM 派工／別的 bot／啟動等待佔著時，使用者的 Enter 撞上 DB 唯一索引，只拿到英文的
+    /// 「a turn is already queued for this bot」，沒有 `queue_slot_taken`、也沒有 `turn_id`。
+    #[tokio::test]
+    async fn a_queue_slot_held_by_someone_else_is_a_structured_409_that_says_who() {
+        let e = crate::testing::env().await;
+        let agm = typed_bot_named(&e, "claude", "agm-bot", "pane-agm").await;
+        sqlx::query("INSERT INTO supervisors (id, bot_id, created_at, updated_at) VALUES ('sup-1', ?, ?, ?)").bind(&agm).bind(db::now()).bind(db::now()).execute(&e.app.db).await.unwrap();
+        let other = typed_bot_named(&e, "claude", "other-bot", "pane-other").await;
+
+        // (佔著的人, awaits_idle, awaits_start, crid, relay_from, 期望的 holder.kind)
+        let cases: Vec<(&str, i64, i64, Option<String>, Option<String>, &str)> = vec![
+            ("agm", 0, 0, None, Some(agm.clone()), "agm"),
+            ("bot", 0, 0, None, Some(other.clone()), "bot"),
+            ("daemon", 0, 0, None, Some("daemon".into()), "daemon"),
+            ("start", 0, 1, None, None, "start"),
+            ("user", 1, 0, None, None, "user"),
+        ];
+        for (name, awaits_idle, awaits_start, crid, relay_from, kind) in cases {
+            let bot = typed_bot_named(&e, "grok", &format!("holder-{name}"), &format!("pane-{name}")).await;
+            let run_id: String = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id=? AND state='running'").bind(&bot).fetch_one(&e.app.db).await.unwrap();
+            let conv = db::conversation_id(&e.app.db, &bot).await.unwrap();
+            sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?, ?, ?, 'web', 'in_flight', 'ok', ?)")
+                .bind(db::ulid()).bind(&conv).bind(&run_id).bind(db::now()).execute(&e.app.db).await.unwrap();
+            let held = db::ulid();
+            sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at, awaits_idle, awaits_start, client_request_id) VALUES (?, ?, 'web', 'queued', 'pending', 'held', ?, ?, ?, ?)")
+                .bind(&held).bind(&conv).bind(db::now()).bind(awaits_idle).bind(awaits_start).bind(crid).execute(&e.app.db).await.unwrap();
+            sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, relay_unverified, created_at) VALUES (?, ?, ?, 'user', 'held', 'web', ?, 0, ?)")
+                .bind(db::ulid()).bind(&conv).bind(&held).bind(relay_from).bind(db::now()).execute(&e.app.db).await.unwrap();
+
+            let (status, body) = call_queue_if_busy(&e, &bot, "我也要排隊", &format!("slot-{name}"), &[]).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{name}: {body}");
+            assert_eq!(body["reason"], "queue_slot_taken", "{name}: {body}");
+            assert_eq!(body["turn_id"], held, "{name}: 指出佔著的那一筆：{body}");
+            assert_eq!(body["holder"]["kind"], kind, "{name}: {body}");
+            if kind == "agm" || kind == "bot" {
+                assert!(body["holder"]["bot_name"].is_string(), "{name}: 要帶佔著的 bot 名字：{body}");
+            }
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE conversation_id=? AND status='queued'").bind(&conv).fetch_one(&e.app.db).await.unwrap();
+            assert_eq!(count, 1, "{name}: 被拒的請求什麼都不寫");
+        }
     }
 
     /// web 的 Enter 永遠帶 `queue_if_busy`，bot 沒在跑時再加 `start_if_stopped`。畫面上的 run 比 daemon 慢一拍

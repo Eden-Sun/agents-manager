@@ -181,3 +181,54 @@ test('群組送出同一道理：回應遺失後隔了重送窗口再送同一�
   assert.equal(crids.length, 2)
   assert.notEqual(crids[1], crids[0])
 })
+
+// ───────── 第二輪：佔槽的人要講清楚、同句兩分頁不能把字又塞回去 ─────────
+
+const slotRoutes = (holder: unknown, queuedText: string) => (req: { path: string }) => {
+  if (req.path.endsWith('/prompt')) return json({ error: 'conflict', reason: 'queue_slot_taken', turn_id: 't1', ...(holder ? { holder } : {}) }, 409)
+  if (req.path.endsWith('/state'))
+    return json({ daemon_seq: 7, projects: [{ ...project, bots: [{ ...bot, queued_turn: { id: 't1', conversation_id: 'c1', run_id: 'r1', bot_id: 'b1', origin: 'web', status: 'queued', delivery: 'pending', awaits_idle: 1, created_at: '2026-09-30T00:00:00Z' } }] }] })
+  if (req.path.includes('/messages'))
+    return json({
+      messages: [{ id: 'm1', conversation_id: 'c1', turn_id: 't1', bot_id: 'b1', role: 'user', content: queuedText, source: 'web', attachments_json: '[]' }],
+      turns: [{ id: 't1', bot_id: 'b1', run_id: 'r1', status: 'queued', delivery: 'pending', awaits_idle: 1, created_at: '2026-09-30T00:00:00Z' }],
+      has_more: false,
+    })
+  return json({})
+}
+
+test('兩個分頁同一句同時 Enter：被退回的這邊發現排著的就是同一句，不把字還原回輸入框，也不當成失敗', async () => {
+  seed()
+  const key = 'bot:b1' as const
+  routeDaemon(slotRoutes({ kind: 'user' }, '同一句話'))
+  // 另一個分頁成功送出並清掉了共用草稿；這個分頁的 Enter 慢一步撞上唯一槽。
+  useStore.getState().setDraft(key, '')
+  const ok = await useStore.getState().sendPrompt('b1', '同一句話', [], false, false, undefined, true)
+  assert.equal(ok, true, '同一句已經排著了：沒有東西要還給輸入框，輸入框可以清掉')
+  assert.equal(useStore.getState().drafts[key] ?? '', '', '成功送出的那一邊不該又冒出那一句')
+  const last = useStore.getState().notices.at(-1)
+  assert.ok(last && last.text.includes('已經在排隊'), JSON.stringify(last))
+})
+
+test('被退回的是不同的一句：只還原那一句（自己這邊），並說清楚', async () => {
+  seed()
+  const key = 'bot:b1' as const
+  routeDaemon(slotRoutes({ kind: 'user' }, '先排著的那一句'))
+  useStore.getState().setDraft(key, '')
+  const ok = await useStore.getState().sendPrompt('b1', '另一句', [], false, false, undefined, true)
+  assert.equal(ok, false)
+  assert.equal(useStore.getState().drafts[key], '另一句')
+  assert.ok(useStore.getState().notices.at(-1)?.text.includes('已有一則訊息排隊中'))
+})
+
+test('AGM 的交辦佔著槽：中文說清楚，輸入框的字保留', async () => {
+  seed()
+  const key = 'bot:b1' as const
+  routeDaemon(slotRoutes({ kind: 'agm', bot_name: 'AGM' }, 'AGM 派的工'))
+  useStore.getState().setDraft(key, '我的一句')
+  const ok = await useStore.getState().sendPrompt('b1', '我的一句', [], false, false, undefined, true)
+  assert.equal(ok, false)
+  assert.equal(useStore.getState().drafts[key], '我的一句')
+  const text = useStore.getState().notices.at(-1)?.text ?? ''
+  assert.ok(text.includes('AGM 的交辦正在排隊'), text)
+})
