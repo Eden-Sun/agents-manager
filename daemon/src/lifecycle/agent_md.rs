@@ -28,7 +28,7 @@ pub struct AgentMd {
 /// 依 `[agents]` 讀這個專案的 agent md（全域在前、專案在後）。全域那份在 daemon 這台機器上讀；
 /// 專案那份跟 repo 放在一起，在專案所在的主機上讀（遠端走 ssh）。
 pub async fn load(app: &App, project: &db::Project) -> AgentMd {
-    let agents = app.cfg.get().await.agents;
+    let agents = app.cfg.agents_fresh().await;
     let mut reads: Vec<Result<String, String>> = Vec::new();
     if let Some(f) = agents.global_file() {
         reads.push(read_local(f).await);
