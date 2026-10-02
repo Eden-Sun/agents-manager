@@ -206,11 +206,40 @@ pub(crate) fn mission_gate(m: &crate::mission::store::Mission) -> Result<(), LcE
     Ok(())
 }
 
+/// 交辦／裁示各欄位的上限：這些值原樣存進 DB、審計列、digest 與 inbox，不設限就是任何呼叫端都能把它們撐大
+/// （ownership 還會對每一件開著的交辦逐字串比對）。本文另有 `MAX_PROVABLE_CHARS`。
+const MAX_REQUEST_ID_CHARS: usize = 200;
+const MAX_OWNERSHIP_ENTRIES: usize = 64;
+const MAX_OWNERSHIP_CHARS: usize = 1000;
+const MAX_NOTE_CHARS: usize = 8000;
+const MAX_LABEL_CHARS: usize = 200;
+
+fn bounded(label: &str, value: &str, max: usize) -> Result<(), LcError> {
+    let chars = value.chars().count();
+    if chars > max {
+        return Err(LcError::Bad(format!("{label} is too long ({chars} chars; max {max})")));
+    }
+    Ok(())
+}
+
+fn bounded_ownership(ownership: &[String]) -> Result<(), LcError> {
+    if ownership.len() > MAX_OWNERSHIP_ENTRIES {
+        return Err(LcError::Bad(format!("ownership has {} entries; max {MAX_OWNERSHIP_ENTRIES}", ownership.len())));
+    }
+    ownership.iter().try_for_each(|o| bounded("an ownership entry", o, MAX_OWNERSHIP_CHARS))
+}
+
 pub async fn post_assignment(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
     Json(b): Json<AssignIn>,
 ) -> Result<Json<Value>, LcError> {
+    bounded("client_request_id", &b.client_request_id, MAX_REQUEST_ID_CHARS)?;
+    bounded_ownership(&b.ownership)?;
+    // 只有 `task`（預設）與 `notice`：`Notice`／`urgent` 這種打錯的值以前被當成要驗收的交辦，呼叫端以為自己送了通知。
+    if !matches!(b.kind.as_deref(), None | Some("task") | Some("notice")) {
+        return Err(LcError::Bad("kind must be task | notice".into()));
+    }
     let actor = super::bot_requests::actor_role(&app, &headers).await?;
     // 一般 bot（被證明身分、不是 AGM 角色）能做的只有一件事：對 AGM 角色 bot 送 `notice`（不等回覆、不驗收、不掛任務）——
     // release／herdr 更新任務裡 `agm assign --notice --bot <巡檢>` 就是這樣把結論交回去。派工給別的 bot、要驗收的交辦、掛任務的交辦
@@ -327,6 +356,24 @@ pub async fn post_review(
     Json(b): Json<ReviewIn>,
 ) -> Result<Json<Value>, LcError> {
     let verified = super::bot_requests::actor_role(&app, &headers).await?;
+    // 輸入先驗再碰任何東西：被拒的裁示不留審計列、不動交辦。
+    for (label, value, max) in [
+        ("reason", b.reason.as_deref(), MAX_NOTE_CHARS),
+        ("evidence", b.evidence.as_deref(), MAX_NOTE_CHARS),
+        ("actor", b.actor.as_deref(), MAX_LABEL_CHARS),
+        ("source", b.source.as_deref(), MAX_LABEL_CHARS),
+        ("followup_request_id", b.followup_request_id.as_deref(), MAX_REQUEST_ID_CHARS),
+        ("followup_bot_id", b.followup_bot_id.as_deref(), MAX_LABEL_CHARS),
+    ] {
+        bounded(label, value.unwrap_or_default(), max)?;
+    }
+    bounded_ownership(&b.ownership)?;
+    // 續作文字跟交辦本文同一個上限（#335）：超過的一定送不出去，不收下一件註定失敗的續作。
+    if let Some(chars) = b.followup_text.as_deref().map(|t| t.chars().count()).filter(|c| *c > crate::lifecycle::MAX_PROVABLE_CHARS) {
+        return Err(LcError::Unprocessable(json!({
+            "error": "text_too_long", "max_chars": crate::lifecycle::MAX_PROVABLE_CHARS, "chars": chars, "sent": false,
+        })));
+    }
     let _g = super::lock().await;
     let to_status = store::decision_status(&b.decision).ok_or_else(|| {
         LcError::Bad("decision must be one of accept | block | followup | fail | cancel".into())
@@ -2779,6 +2826,61 @@ mod review_boundary_tests {
         assert_eq!(d["error"], "text_too_long");
         assert_eq!(d["sent"], false);
         assert!(store::assignment_by_crid(&app.db, "crid-big").await.unwrap().is_none());
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// 對抗式審查：交辦／裁示的輸入有界。以前除了交辦本文，其他欄位（request id、ownership、reason、evidence、續作文字）
+    /// 都不限長度，會原樣存進 DB、審計列與 digest；續作文字超長更是收下一件註定送不出去的工作。
+    #[tokio::test]
+    async fn assignment_and_review_inputs_are_bounded_and_refuse_before_writing() {
+        let app = app().await;
+        let big = |n: usize| "x".repeat(n);
+        async fn assign(app: &Arc<App>, v: serde_json::Value) -> Result<Json<Value>, LcError> {
+            let mut base = json!({"target_bot_id": "bot", "text": "do it", "client_request_id": "crid-ok"});
+            base.as_object_mut().unwrap().extend(v.as_object().unwrap().clone());
+            let input: AssignIn = serde_json::from_value(base).unwrap();
+            post_assignment(State(app.clone()), HeaderMap::new(), Json(input)).await
+        }
+        for (label, patch) in [
+            ("request id too long", json!({"client_request_id": big(201)})),
+            ("too many ownership entries", json!({"ownership": (0..65).map(|i| format!("f{i}")).collect::<Vec<_>>()})),
+            ("ownership entry too long", json!({"ownership": [big(1001)]})),
+            ("unknown kind", json!({"kind": "Notice"})),
+            ("unknown kind 2", json!({"kind": "urgent"})),
+        ] {
+            let err = assign(&app, patch).await.expect_err(label);
+            assert!(matches!(err, LcError::Bad(_)), "{label}: {err:?}");
+        }
+        assert!(store::assignment_by_crid(&app.db, "crid-ok").await.unwrap().is_none());
+        assert!(store::assignment_by_crid(&app.db, &big(201)).await.unwrap().is_none());
+
+        let parent = store::insert_assignment(&app.db, None, "bot", "parent", "original", &[], None, true).await.unwrap();
+        async fn review(app: &Arc<App>, id: &str, v: serde_json::Value) -> Result<Json<Value>, LcError> {
+            let mut base = json!({"decision": "followup", "followup_request_id": "f-ok", "followup_text": "continue"});
+            base.as_object_mut().unwrap().extend(v.as_object().unwrap().clone());
+            let input: ReviewIn = serde_json::from_value(base).unwrap();
+            post_review(State(app.clone()), Path(id.to_string()), HeaderMap::new(), Json(input)).await
+        }
+        let too_long = crate::lifecycle::MAX_PROVABLE_CHARS + 1;
+        let err = review(&app, &parent.id, json!({"followup_text": big(too_long)})).await.expect_err("followup text too long");
+        let LcError::Unprocessable(d) = err else { panic!("expected 422, got {err:?}") };
+        assert_eq!(d["error"], "text_too_long");
+        for (label, patch) in [
+            ("followup request id", json!({"followup_request_id": big(201)})),
+            ("reason", json!({"reason": big(8001)})),
+            ("evidence", json!({"evidence": big(8001)})),
+            ("actor", json!({"actor": big(201)})),
+            ("source", json!({"source": big(201)})),
+            ("ownership count", json!({"ownership": (0..65).map(|i| format!("f{i}")).collect::<Vec<_>>()})),
+            ("ownership entry", json!({"ownership": [big(1001)]})),
+        ] {
+            let err = review(&app, &parent.id, patch).await.expect_err(label);
+            assert!(matches!(err, LcError::Bad(_)), "{label}: {err:?}");
+        }
+        let after = store::assignment(&app.db, &parent.id).await.unwrap().unwrap();
+        assert!(after.is_open() && after.review_decision.is_none(), "被拒的裁示不能改動交辦：{}", after.status);
+        assert!(store::reviews(&app.db, &parent.id).await.unwrap().is_empty(), "也不能留下審計列");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
