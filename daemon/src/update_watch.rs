@@ -490,6 +490,35 @@ mod tests {
         assert_eq!(crate::background_jobs::known(&e.app, &run), None, "結束的 run 不留帳");
     }
 
+    /// #767：第一次看過也推 `bot_status`（null → 0）。daemon 剛重啟時每個 run 都是第一次，但每個 run 只推這一次：
+    /// 之後的巡邏畫面沒變就不再推，不會變成每 30 秒一波事件風暴。
+    #[tokio::test]
+    async fn the_first_observation_of_many_runs_pushes_once_each_and_then_stays_quiet() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let screen = std::fs::read_to_string(format!(
+            "{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let mut bots = Vec::new();
+        for i in 0..5 {
+            let bot = crate::testing::claude_bot(&e.app, &e.project_id, &format!("storm{i}")).await;
+            crate::testing::fake_run(&e.app, &bot.id).await;
+            e.herdr.set_screen(&format!("pane-{}", bot.id), &screen);
+            bots.push(bot.id);
+        }
+        let mut rx = e.app.subscribe();
+        let pushed = |rx: &mut tokio::sync::broadcast::Receiver<_>| -> usize {
+            std::iter::from_fn(|| rx.try_recv().ok()).filter(|f: &crate::state::WsEvent| f.kind == "bot_status" && bots.iter().any(|b| f.data["bot_id"] == b.as_str())).count()
+        };
+        sweep(&e.app).await;
+        assert_eq!(pushed(&mut rx), 5, "每個 run 第一次看過各推一次");
+        sweep(&e.app).await;
+        sweep(&e.app).await;
+        assert_eq!(pushed(&mut rx), 0, "畫面沒變，之後的巡邏不再推");
+    }
+
     /// #744：列舉 active run 失敗的那一輪不能清基準／背景工作帳；成功列舉出空清單才清。
     #[tokio::test]
     async fn a_failed_active_run_listing_keeps_baselines_and_background_jobs() {
