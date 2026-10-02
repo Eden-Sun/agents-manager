@@ -1474,6 +1474,7 @@ async fn create_bot(
     let (model, remapped) = remap_model(&b.kind, b.model.as_deref());
     let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
+    check_env_names(&env)?;
     let id = db::ulid();
     let used_name = std::sync::Mutex::new(b.name.clone());
     let create_request_id = b.client_request_id.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
@@ -1778,6 +1779,9 @@ async fn patch_bot(
     Path(id): Path<String>,
     Json(mut b): Json<PatchBot>,
 ) -> Result<Response, LcError> {
+    if let Some(env) = &b.env {
+        check_env_names(env)?;
+    }
     let active = db::active_run(&app.db, &id).await.map_err(any_err)?;
     #[cfg(test)]
     crate::lifecycle::race_point::hit("patch_after_active_snapshot", &id).await;
@@ -3598,7 +3602,19 @@ struct NewIdentity {
     host: Option<String>,
 }
 
+/// env 的 key 一律要是合法的環境變數名稱。以前不合法的照樣存，到用的時候才被 `tools::valid_env_name` 靜靜濾掉——
+/// 少打一個 `=`、名字帶空白，身份／bot 的 env 就悄悄變成空的（身份＝用了預設帳號），沒有任何錯誤。存之前就擋，說出是哪個 key。
+fn check_env_names(env: &BTreeMap<String, String>) -> Result<(), LcError> {
+    match env.keys().find(|k| !crate::tools::valid_env_name(k)) {
+        Some(k) => Err(LcError::Bad(format!(
+            "env key `{k}` is not a valid variable name (letters, digits and _ only, not starting with a digit)"
+        ))),
+        None => Ok(()),
+    }
+}
+
 async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>) -> Result<Response, LcError> {
+    check_env_names(&b.env)?;
     if !valid_identity_name(&b.name) {
         return Err(LcError::Bad(format!("identity name must match {}", crate::config::SLUG_NAME_RE)));
     }
@@ -7232,6 +7248,32 @@ mod bot_config_tests {
         let fresh = body(restart_bot(State(e.app.clone()), Path(id.clone()), q(Some("fresh"))).await.unwrap()).await;
         assert_eq!(starts() - before, 4, "不同的重啟種類不合併：{fresh}");
         assert_ne!(fresh["run_id"], third["run_id"]);
+    }
+
+    /// 身份／bot 的 env 名稱只收合法的環境變數名稱：不合法的以前照樣存下，到用的時候才被 `tools::valid_env_name` 靜靜濾掉——
+    /// 少打一個 `=`、名字帶空白，身份的 env 就悄悄變成空的＝用了預設帳號，沒有任何錯誤。現在存之前就擋，說出是哪個 key。
+    #[tokio::test]
+    async fn an_invalid_env_variable_name_is_refused_up_front_not_dropped_at_use_time() {
+        let e = env().await;
+        seed_project(&e).await;
+        let reason = |err: LcError| match err {
+            LcError::Bad(m) => m,
+            other => panic!("要 400：{other:?}"),
+        };
+        let identity = |env: Value| NewIdentity { name: "cc9".into(), kind: "claude".into(), env: serde_json::from_value(env).unwrap(), args: vec![], host: None };
+        for bad in ["CLAUDE CONFIG DIR", "9LIVES", "A-B", "", "A=B"] {
+            let err = create_identity(State(e.app.clone()), Json(identity(json!({ bad: "/x" })))).await.unwrap_err();
+            assert!(reason(err).contains(&format!("`{bad}`")), "身份：{bad:?} 要被點名");
+            let err = add(&e, json!({"name": "ebad", "kind": "claude", "env": { bad: "1" }})).await.unwrap_err();
+            assert!(reason(err).contains(&format!("`{bad}`")), "新 bot：{bad:?}");
+        }
+        assert!(e.app.cfg.get().await.identities.iter().all(|i| i.name != "cc9"), "被拒的身份什麼都沒存");
+        let id = add(&e, json!({"name": "eok", "kind": "claude"})).await.unwrap();
+        let err = patch(&e, &id, json!({"env": {"BAD NAME": "1"}})).await.unwrap_err();
+        assert!(reason(err).contains("`BAD NAME`"), "patch bot");
+        // 合法的照收。
+        assert!(create_identity(State(e.app.clone()), Json(identity(json!({"CLAUDE_CONFIG_DIR": "$HOME/.claude-cc9", "_X1": "y"})))).await.is_ok());
+        assert!(patch(&e, &id, json!({"env": {"GOOD_NAME": "1"}})).await.is_ok());
     }
 
     /// #353：改了要重啟才生效的設定，`needs_restart` 不能只存在 PATCH 的 HTTP 回應裡——回應掉了（或 daemon 之後重啟）

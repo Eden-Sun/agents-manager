@@ -24,10 +24,15 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
   const [applying, setApplying] = useState(false)
 
   const drift = runtimeDrift(bot, run)
-  if (!bot || !drift.length) return null
+  // daemon 說要重啟（`needs_restart`），但改的是「已知落差欄位」以外的東西（人設、args、env…）：沒有落差明細也要留徽章，
+  // 不然只有設定面板開著時才看得到「要重啟」（#353：這個旗標從資料算，不依賴 PATCH 回應）。
+  const unlisted = Boolean(bot?.needs_restart) && !drift.length
+  if (!bot || (!drift.length && !unlisted)) return null
 
   const busy = run?.agent_status === 'working' || run?.agent_status === 'blocked'
-  const fastOnly = isFastOnlyDrift(bot.kind, drift)
+  const fastOnly = !unlisted && isFastOnlyDrift(bot.kind, drift)
+  const driftLabels = unlisted ? '設定已改' : drift.map((d) => d.label).join('、')
+  const driftTitle = unlisted ? '人設、args、env 等設定改了，執行中的 CLI 只在啟動時載入' : drift.map(driftLine).join('\n')
   const deferred = bot.live_apply_deferred
   // 重送同一個 fast 值：冪等，daemon 會當場套用（回合中也是）、碰不得畫面就排到回合結束、都不行才回 needs_restart。
   const applyFast = async () => {
@@ -68,10 +73,10 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
         disabled={restarting || applying || deferred}
         title={
           deferred
-            ? `${drift.map(driftLine).join('\n')}\n回合結束後自動套用`
+            ? `${driftTitle}\n回合結束後自動套用`
             : fastOnly
-            ? `${drift.map(driftLine).join('\n')}\ncodex 的 fast 可以當場切換，不用重啟${busy ? '\n回合中也直接切；輸入框有字才排到回合結束' : ''}`
-            : `${drift.map(driftLine).join('\n')}\n${bot.kind} 只有啟動時吃得到這些設定，重啟才會換過去${busy ? '\n它正在忙，會先問一句' : ''}`
+            ? `${driftTitle}\ncodex 的 fast 可以當場切換，不用重啟${busy ? '\n回合中也直接切；輸入框有字才排到回合結束' : ''}`
+            : `${driftTitle}\n${bot.kind} 只有啟動時吃得到這些設定，重啟才會換過去${busy ? '\n它正在忙，會先問一句' : ''}`
         }
         onClick={() => {
           if (fastOnly) void applyFast()
@@ -84,10 +89,10 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
           : applying
             ? '套用中…'
             : deferred
-              ? `⏳ ${drift.map((d) => d.label).join('、')}待套用`
+              ? `⏳ ${driftLabels}待套用`
               : fastOnly
               ? '⟳ fast 當場套用'
-              : `⟳ ${drift.map((d) => d.label).join('、')}需重啟`}
+              : `⟳ ${driftLabels}需重啟`}
       </button>
       <ConfirmDialog
         open={confirming}

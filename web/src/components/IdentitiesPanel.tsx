@@ -6,7 +6,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { KindTag } from './KindTag'
 import './identitiesPanel.css'
 
-import { parseEnvText, envToText } from './identityEnv'
+import { checkEnvText, envDisplayText } from './identityEnv'
 /** 身份預設（例如 `cc1` = 另一個 `CLAUDE_CONFIG_DIR`）：daemon 啟動 bot 時注入 `env`；`args` 契約仍在但 UI 不提供輸入。 */
 
 export function IdentityBadge({
@@ -220,7 +220,7 @@ function IdentityRow({ host, name }: { host: string; name: string }) {
   const removeIdentity = useStore((s) => s.removeIdentity)
   const [confirmDelete, setConfirmDelete] = useState(false)
   if (!ident) return null
-  const envText = envToText(ident.env)
+  const envText = envDisplayText(ident.env)
   return (
     <div className="identity-row">
       <span className="identity-main">
@@ -289,15 +289,16 @@ function NewIdentityForm() {
   const [envText, setEnvText] = useState(ENV_PREFILL.claude)
   const [busy, setBusy] = useState(false)
   const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name)
+  const envCheck = checkEnvText(envText)
 
   return (
     <form
       className="form"
       onSubmit={(e) => {
         e.preventDefault()
-        if (!nameOk || busy) return
+        if (!nameOk || busy || envCheck.errors.length > 0) return
         setBusy(true)
-        void addIdentity({ name, kind, env: parseEnvText(envText) }).then((ok) => {
+        void addIdentity({ name, kind, env: envCheck.env }).then((ok) => {
           setBusy(false)
           if (ok) setName('')
         })
@@ -335,9 +336,16 @@ function NewIdentityForm() {
       <label className="field">
         <span>env（每行 KEY=VALUE；`$HOME` 與開頭 `~` 會以該主機的家目錄展開；claude 用 CLAUDE_CONFIG_DIR、grok 用 GROK_HOME）</span>
         <textarea rows={3} value={envText} spellCheck={false} onChange={(e) => setEnvText(e.target.value)} />
+        {envCheck.errors.length > 0 ? (
+          <ul className="hint env-errors" role="alert">
+            {envCheck.errors.map((e) => (
+              <li key={e}>{e}</li>
+            ))}
+          </ul>
+        ) : null}
       </label>
       <div className="form-actions">
-        <button type="submit" className="btn primary" disabled={!nameOk || busy}>
+        <button type="submit" className="btn primary" disabled={!nameOk || busy || envCheck.errors.length > 0}>
           新增身份
         </button>
       </div>

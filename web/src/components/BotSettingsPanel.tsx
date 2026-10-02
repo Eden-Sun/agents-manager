@@ -5,6 +5,7 @@ import { useDialogFocus } from '../hooks/useDialogFocus'
 import { enabledIdentities, identitiesOfHost, identityStatusOfHost, projectHostName, useStore } from '../store/store'
 import { canLoginInSession } from '../lib/quotaLogin'
 import { startCliLogin } from '../lib/cliLogin'
+import { envDisplayText } from './identityEnv'
 import { ConfirmDialog } from './ConfirmDialog'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
@@ -89,9 +90,8 @@ function identityWarning(st: IdentityStatus | undefined, hostLabel: string): { m
 }
 
 function identityTitle(env: Record<string, string>, st: IdentityStatus | undefined, hostLabel: string): string {
-  const envText = Object.entries(env)
-    .map(([k, v]) => `${k}=${v}`)
-    .join(' ')
+  // 身份的 env 可能放 API key／token：畫面上遮起來（tooltip 也會被截圖）。
+  const envText = envDisplayText(env).split('\n').join(' ')
   const parts = [envText]
   if (st?.logged_in === true) {
     parts.push(`${hostLabel}：已登入${st.account ? ` — ${st.account}` : ''}${st.plan ? `（${st.plan}）` : ''}`)
