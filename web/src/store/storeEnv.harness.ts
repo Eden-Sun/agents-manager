@@ -23,6 +23,11 @@ export function routeDaemon(handler: (req: FakeRequest) => Response | Promise<Re
 }
 
 export function reset(): void {
+  // store 是模組單例、bun 整樹同一個行程：前面的測試檔推高的 daemon_seq（storeActions 的 5000）會留在
+  // `appliedStateSeq`，之後用 daemon_seq: 1 的快照全被當舊的丟掉、測試逾時（#773，macOS 檔案順序不同才現形）。
+  // 所以每次 reset 連 store 一起歸零。用到時才載入：這支 harness 必須先裝好全域物件，store.ts 才能 import。
+  const { resetStoreForTest } = require('./store.ts') as typeof import('./store.ts')
+  resetStoreForTest()
   requests.length = 0
   route = () => ok()
   // 別的測試檔（movePrimary、rewindAction…）會直接換掉全域 fetch；這個模組只在第一次 import 時執行，
