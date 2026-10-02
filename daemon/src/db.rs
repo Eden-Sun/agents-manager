@@ -1045,6 +1045,7 @@ pub struct Turn {
     /// Times a queued prompt was put back because it could not be typed yet.
     #[sqlx(default)]
     #[serde(skip_serializing)]
+    #[cfg_attr(not(test), allow(dead_code))] // 只有測試讀；daemon 用 SQL 直接遞增與比較
     pub flush_retries: i64,
     /// Not before this (RFC 3339) is that queued prompt tried again.
     #[sqlx(default)]
@@ -1148,6 +1149,7 @@ pub async fn run(pool: &SqlitePool, id: &str) -> Result<Option<Run>> {
     Ok(sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
+#[cfg(test)]
 pub async fn last_native_session_id(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
     Ok(last_native_session(pool, bot_id).await?.map(|(id, _)| id))
 }

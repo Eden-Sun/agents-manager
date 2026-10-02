@@ -2550,7 +2550,6 @@ mod herdr_skill_timeout_tests {
 /// #494：遠端安裝腳本把 bot 目錄與裡面的檔案收成只有自己讀得到，升級上來的舊權限也一起修。
 #[cfg(test)]
 mod remote_install_permission_tests {
-    use super::*;
     use crate::config::HostCfg;
     use crate::testing as tt;
     use std::os::unix::fs::PermissionsExt as _;

@@ -17,6 +17,7 @@ async fn note(pool: &SqlitePool, bot_id: &str, kind: &str, body: &str) -> Result
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn hold_after_name_taken(pool: &SqlitePool, bot_id: &str, agent: &str) -> Result<()> {
     note(
         pool,
@@ -27,6 +28,7 @@ pub async fn hold_after_name_taken(pool: &SqlitePool, bot_id: &str, agent: &str)
     .await
 }
 
+#[cfg(test)]
 pub async fn clear_after_successful_restart(pool: &SqlitePool, bot_id: &str) -> Result<()> {
     note(
         pool,
@@ -43,6 +45,7 @@ pub async fn record_retirement_grace(pool: &SqlitePool, bot_id: &str) -> Result<
     Ok(until)
 }
 
+#[cfg(test)]
 pub async fn clear_retirement_grace(pool: &SqlitePool, bot_id: &str) -> Result<()> {
     note(pool, bot_id, "child_retirement_grace", &crate::db::now()).await
 }

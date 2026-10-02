@@ -184,6 +184,7 @@ const SAMPLE: i64 = 20;
 /// 試過這麼多次還沒成功就算「一直做不成」。
 pub const FAILING_ATTEMPTS: i64 = 3;
 /// [`pending`] 每一類最多列這麼多（列清單用；摘要的數字走 [`counts`]，不吃這個上限）。
+#[cfg(test)]
 pub(crate) const PER_KIND: i64 = 50;
 
 /// 每一類的**精確**數量。
@@ -271,6 +272,7 @@ pub async fn failing_sample(pool: &SqlitePool, limit: i64) -> Result<Vec<DueActi
 /// 列出還沒做完的動作，最早到期的在前；**每一類最多 [`PER_KIND`] 筆**。
 ///
 /// 給「想看有哪些」用。摘要的數字不走這裡（那會少報，見 [`counts`]）。
+#[cfg(test)]
 pub async fn pending(pool: &SqlitePool) -> Result<Vec<DueAction>> {
     let mut out: Vec<DueAction> = Vec::new();
     for s in SOURCES {

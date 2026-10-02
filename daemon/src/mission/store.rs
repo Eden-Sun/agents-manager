@@ -191,6 +191,7 @@ pub struct NewMission<'a> {
 }
 
 /// 建立任務；同一個 `(project_id, client_request_id)` 已經有了就回那一筆（`created=false`）。
+#[cfg(test)]
 pub async fn create(pool: &SqlitePool, m: &NewMission<'_>) -> Result<(Mission, bool)> {
     if let Some(existing) = by_crid(pool, m.project_id, m.client_request_id).await? {
         return Ok((existing, false));
@@ -792,6 +793,7 @@ pub async fn pause(pool: &SqlitePool, id: &str, reason: &str, detail: Option<&st
     Ok(n == 1)
 }
 
+#[cfg(test)]
 pub async fn resume(pool: &SqlitePool, id: &str) -> Result<bool> {
     let now = crate::db::now();
     let n = sqlx::query(
@@ -1057,6 +1059,7 @@ pub async fn cancel_open_for_project(pool: &SqlitePool, project_id: &str, reason
     Ok(done)
 }
 
+#[cfg(test)]
 pub async fn cancel(pool: &SqlitePool, id: &str) -> Result<bool> {
     let now = crate::db::now();
     let n = sqlx::query("UPDATE missions SET cancelled_at = ?, updated_at = ? WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL")
@@ -1248,15 +1251,6 @@ fn round_is_due(s: &Snapshot) -> bool {
         None => !s.assignments.is_empty(),
         Some(id) => s.assignments.iter().position(|a| a.id == id).is_some_and(|i| s.assignments.len() > i + 1),
     }
-}
-
-pub async fn has_event(pool: &SqlitePool, mission_id: &str, kind: &str) -> Result<bool> {
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mission_events WHERE mission_id = ? AND kind = ?")
-        .bind(mission_id)
-        .bind(kind)
-        .fetch_one(pool)
-        .await?;
-    Ok(n > 0)
 }
 
 pub async fn disabled_identities(pool: &SqlitePool, host: &str, kind: &str) -> Result<Vec<String>> {

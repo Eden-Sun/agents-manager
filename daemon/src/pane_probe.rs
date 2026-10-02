@@ -3,6 +3,7 @@
 //! 正式路徑走真的 `ps`／`lsof`；測試可以換掉，餵決定性的結果。以前那兩條測試拿真的 pid 走真指令，
 //! 結果隨機器（CI 的 macOS runner 上 `lsof` 慢到逾時）翻紅。`None`＝讀不到的語意不變：不是「沒有 port」。
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::sync::Arc;
 

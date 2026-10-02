@@ -437,11 +437,6 @@ async fn forget_watcher(app: &Arc<App>, key: PaneKey, generation: u64, run_ended
     }
 }
 
-pub async fn unwatch_pane(app: &Arc<App>, host: &str, pane_id: &str) {
-    let Some(session) = app.session_for_host(host).await else { return };
-    unwatch_pane_on_session(app, host, &session, pane_id).await;
-}
-
 pub async fn unwatch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pane_id: &str) {
     let key = (host.to_string(), session.to_string(), pane_id.to_string());
     let mut watchers = app.pane_watchers.lock().await;

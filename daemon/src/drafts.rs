@@ -195,8 +195,8 @@ mod tests {
     #[tokio::test]
     async fn closing_a_shell_pane_clears_only_that_panes_draft() {
         let app = app().await;
-        put_http(State(app.clone()), Path("shell:local/w1:p9".into()), put_in("git log", "c")).await.unwrap();
-        put_http(State(app.clone()), Path("shell:local/w1:p8".into()), put_in("ls", "c")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("shell:local/w1:p9".into()), put_in("git log", "c")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("shell:local/w1:p8".into()), put_in("ls", "c")).await.unwrap();
         let mut rx = app.subscribe();
         clear_shell(&app, "local", "w1:p9").await;
         let left = list(&app.db).await.unwrap();
@@ -233,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn empty_text_deletes_but_keeps_rev_monotonic() {
         let app = app().await;
-        put_http(State(app.clone()), Path("bot:b1".into()), put_in("abc", "c1")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("bot:b1".into()), put_in("abc", "c1")).await.unwrap();
         let r = put_http(State(app.clone()), Path("bot:b1".into()), put_in("", "c1")).await.unwrap().0;
         assert_eq!(r["rev"], 2);
         assert!(get_http(State(app.clone())).await.unwrap().0["drafts"].as_array().unwrap().is_empty());
@@ -249,7 +249,7 @@ mod tests {
     async fn put_pushes_draft_updated_with_client_id_and_skips_unchanged() {
         let app = app().await;
         let mut rx = app.subscribe();
-        put_http(State(app.clone()), Path("bot:b1".into()), put_in("abc", "tab-1")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("bot:b1".into()), put_in("abc", "tab-1")).await.unwrap();
         let ev = rx.try_recv().unwrap();
         assert_eq!(ev.kind, "draft_updated");
         assert_eq!(ev.data["key"], "bot:b1");
@@ -262,7 +262,7 @@ mod tests {
         assert_eq!(r["rev"], 1);
         assert!(rx.try_recv().is_err());
         // 刪除也推，text 空。
-        put_http(State(app.clone()), Path("bot:b1".into()), put_in("", "tab-2")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("bot:b1".into()), put_in("", "tab-2")).await.unwrap();
         let ev = rx.try_recv().unwrap();
         assert_eq!((ev.data["text"].as_str(), ev.data["rev"].as_i64(), ev.data["client_id"].as_str()), (Some(""), Some(2), Some("tab-2")));
     }
@@ -287,11 +287,11 @@ mod tests {
     #[tokio::test]
     async fn clear_keys_empties_drafts_and_tells_other_browsers() {
         let app = app().await;
-        put_http(State(app.clone()), Path("bot:b1".into()), put_in("a", "c")).await.unwrap();
-        put_http(State(app.clone()), Path("group:p1".into()), put_in("g", "c")).await.unwrap();
-        put_http(State(app.clone()), Path("bot:keep".into()), put_in("k", "c")).await.unwrap();
-        put_http(State(app.clone()), Path("bot:b2".into()), put_in("x", "c")).await.unwrap();
-        put_http(State(app.clone()), Path("bot:b2".into()), put_in("", "c")).await.unwrap(); // 已經是墓碑
+        let _ = put_http(State(app.clone()), Path("bot:b1".into()), put_in("a", "c")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("group:p1".into()), put_in("g", "c")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("bot:keep".into()), put_in("k", "c")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("bot:b2".into()), put_in("x", "c")).await.unwrap();
+        let _ = put_http(State(app.clone()), Path("bot:b2".into()), put_in("", "c")).await.unwrap(); // 已經是墓碑
         let mut rx = app.subscribe();
         clear_keys(&app, &["bot:b1".into(), "group:p1".into(), "bot:b2".into(), "bot:never".into()]).await;
         let left = list(&app.db).await.unwrap();

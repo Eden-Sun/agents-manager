@@ -255,7 +255,7 @@ mod tests {
             acceptance: "a".into(),
             duplicate_of: None,
         }];
-        post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues })).await.unwrap();
+        let _ = post_verdicts(State(app.clone()), Json(Submission { kind: "claude".into(), version: "2.1.277".into(), verdicts: vs, issues })).await.unwrap();
         assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Judged);
 
         let pub_in = |kind: Option<&str>, version: Option<&str>, dry_run: bool| {

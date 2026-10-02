@@ -975,7 +975,9 @@ pub async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b
 
 #[derive(Deserialize)]
 pub struct AdoptIn {
+    /// 收下但不採信：誰採用內嵌版以驗證過的身分為準（見 `post_persona_adopt`），這個欄位只為相容既有呼叫端。
     #[serde(default)]
+    #[allow(dead_code)]
     pub actor: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
@@ -1751,14 +1753,14 @@ mod approval_decision_tests {
         };
 
         // 沒驗過卻自稱是總管：包成 user(...)，變不成 AGM 開頭。
-        obs(&app, HeaderMap::new(), Some("AGM:responder")).await.unwrap();
+        let _ = obs(&app, HeaderMap::new(), Some("AGM:responder")).await.unwrap();
         let who = recorded(&app).await.unwrap_or_default();
         assert_eq!(who, "user(AGM:responder)");
         assert!(!who.starts_with(store::SUPERVISOR_ID), "未驗證的呼叫端寫不出 AGM 開頭的身分，卻拿到 {who:?}");
 
         // 驗過的角色：以 token 為準，body 的自稱不影響。
         let agm = agm_role_headers(&app).await;
-        obs(&app, agm, Some("我是別人")).await.unwrap();
+        let _ = obs(&app, agm, Some("我是別人")).await.unwrap();
         assert_eq!(recorded(&app).await.unwrap_or_default(), format!("{}:patrol", store::SUPERVISOR_ID));
 
         app.db.close().await;
@@ -1932,7 +1934,7 @@ mod approval_decision_tests {
 
         // 沒驗過卻自稱是協調者：記成 user(...)，絕不是 AGM 開頭。沒驗過的只能 deny／revoke（issue #447）。
         let a1 = pending(&app).await;
-        decide(&app, &a1, "deny", "AGM:responder").await.unwrap();
+        let _ = decide(&app, &a1, "deny", "AGM:responder").await.unwrap();
         let who = decided_by(&app, a1).await;
         assert_eq!(who, "user(AGM:responder)");
         assert!(!who.starts_with(store::SUPERVISOR_ID), "未驗證的呼叫端寫不出 AGM 開頭的身分，卻拿到 {who:?}");
@@ -1940,14 +1942,14 @@ mod approval_decision_tests {
         // 沒驗過、也沒自稱：user，而不是以前的 AGM。
         let a2 = pending(&app).await;
         let body: DecisionIn = serde_json::from_value(json!({"decision": "deny"})).unwrap();
-        post_approval_decision(State(app.clone()), Path(a2.clone()), HeaderMap::new(), Json(body)).await.unwrap();
+        let _ = post_approval_decision(State(app.clone()), Path(a2.clone()), HeaderMap::new(), Json(body)).await.unwrap();
         assert_eq!(decided_by(&app, a2).await, "user");
 
         // 驗過的角色：以 token 為準，body 自稱的名字不影響。
         let a3 = pending(&app).await;
         let h = agm_role_headers(&app).await;
         let body: DecisionIn = serde_json::from_value(json!({"decision": "approve", "actor": "AGM:responder"})).unwrap();
-        post_approval_decision(State(app.clone()), Path(a3.clone()), h, Json(body)).await.unwrap();
+        let _ = post_approval_decision(State(app.clone()), Path(a3.clone()), h, Json(body)).await.unwrap();
         assert_eq!(decided_by(&app, a3).await, format!("{}:patrol", store::SUPERVISOR_ID));
 
         app.db.close().await;
@@ -2043,12 +2045,12 @@ mod approval_decision_tests {
         assert_eq!(status(&app, mine.clone()).await, "pending", "擋下來就不該動到那筆");
 
         // 同一個人把自己的申請收回（deny）照舊可以。
-        decide_as(&app, mine.clone(), h.clone(), "deny").await.unwrap();
+        let _ = decide_as(&app, mine.clone(), h.clone(), "deny").await.unwrap();
         assert_eq!(status(&app, mine).await, "denied");
 
         // 別人送的申請照常裁示得了。
         let theirs = ask(&app, HeaderMap::new(), "fixer", "s-2").await;
-        decide_as(&app, theirs.clone(), h.clone(), "approve").await.unwrap();
+        let _ = decide_as(&app, theirs.clone(), h.clone(), "approve").await.unwrap();
         assert_eq!(status(&app, theirs).await, "approved");
 
         // 申請時不帶身分、裁示時才帶自己的——守衛不能因此變成選配的（i406 的審核，2026-09-24 裁示）：
@@ -2410,7 +2412,7 @@ mod approval_decision_tests {
     async fn revoking_an_approval_keeps_the_whole_history() {
         let app = app().await;
         let id = pending(&app).await;
-        decide(&app, &id, "approve", "AGM:responder").await.unwrap();
+        let _ = decide(&app, &id, "approve", "AGM:responder").await.unwrap();
         let out = decide(&app, &id, "revoke", "AGM:patrol").await.unwrap().0;
         assert_eq!(out["status"], "revoked");
         assert_eq!(out["decided_from"], "approved");
@@ -2458,7 +2460,7 @@ mod approval_decision_tests {
     async fn repeating_the_same_decision_is_idempotent() {
         let app = app().await;
         let id = pending(&app).await;
-        decide(&app, &id, "deny", "AGM:patrol").await.unwrap();
+        let _ = decide(&app, &id, "deny", "AGM:patrol").await.unwrap();
         let again = decide(&app, &id, "deny", "AGM:patrol").await.unwrap().0;
         assert_eq!(again["idempotent"], json!(true));
         let listed = get_approvals(State(app.clone()), Query(ApprovalQuery::default())).await.unwrap().0;

@@ -75,10 +75,6 @@ impl AskRecord {
     }
 }
 
-fn s(v: &Value) -> Option<String> {
-    v.as_str().map(str::to_owned)
-}
-
 /// `answers` 的值：字串照原文；多選有時是陣列，用「、」接起來。
 fn answer_text(v: &Value) -> Option<String> {
     match v {

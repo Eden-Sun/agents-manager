@@ -159,7 +159,7 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
             // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。
             crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane).await;
         }
-        let mut observation_fence = None;
+        let observation_fence;
         let seen = if kind == "codex" {
             // 讀不到 host 就整輪跳過、不動既有通知（#243 的同一條理由）。
             let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { continue };

@@ -161,6 +161,7 @@ impl AssignmentState {
     }
 
     /// 終局沒有出邊——跟 [`is_terminal`] 同一份答案，這裡不重複判斷邏輯，只是型別化的一面。
+    #[cfg(test)]
     pub fn is_terminal(self) -> bool {
         is_terminal(self.as_str())
     }
@@ -223,6 +224,7 @@ pub enum Outcome {
 /// 轉移合不合法問 [`allowed`]——那張表才是「這一步准不准」的權威，這裡不重複判斷一次。
 /// 既有那幾支「status 跟別的欄位一起寫」的函式（見模組文件）繼續用自己的整句 UPDATE，但一樣
 /// 從 [`sources_for`] 算 guard，跟這裡問的是同一張表。
+#[cfg(test)]
 pub async fn set_status(pool: &SqlitePool, id: &str, from: AssignmentState, to: AssignmentState, why: &str) -> Result<Outcome> {
     let mut conn = pool.acquire().await?;
     set_status_on(&mut conn, id, from, to, why).await

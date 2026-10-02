@@ -663,6 +663,7 @@ pub(crate) fn transcript_len(path: &std::path::Path) -> std::io::Result<u64> {
 /// after the baseline is read, so an old identical message sliding out of any window cannot hide
 /// a new one, and the cost is the new bytes only. A partial first line fails to parse and is
 /// skipped; a partial last line is simply not complete yet. `Err` = unreadable, never zero.
+#[cfg(test)]
 pub(crate) fn transcript_hits_since(path: &std::path::Path, offset: u64, text: &str) -> std::io::Result<usize> {
     log_hits_since(LogFormat::Claude, path, offset, text)
 }
@@ -1548,7 +1549,6 @@ mod tests {
         assert_eq!(box_state("claude", &claude), BoxState::NonEmpty);
     }
 
-    #[test]
     /// grok 的建議句是**暗灰前景**（`38;2;88;88;88`），不是 SGR 2 的 dim：只看 dim 會把它當成
     /// 使用者打的草稿，那顆 bot 從此每一則 prompt 都 409 `composer_busy`（2026-09-19 w168:p7J，
     /// 使用者打了字送不出去，畫面上框裡只有一句灰色的「繼續寫完」）。

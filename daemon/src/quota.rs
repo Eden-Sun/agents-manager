@@ -206,6 +206,7 @@ pub async fn try_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Resu
 
 /// [`try_limit_hit_for_bot`]，讀不到時回 `None`（記 warn）。只剩 supervisor 的派送／重送在用：那邊拿到撞限會 park、
 /// 群組任務還會換身分，不能拿假的撞限去擋；改用 `try_` 版、讀不到就延後，見 #108 重開時開的 supervisor 票。
+#[cfg(test)]
 pub async fn limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Option<LimitHit> {
     match try_limit_hit_for_bot(app, bot).await {
         Ok(hit) => hit,

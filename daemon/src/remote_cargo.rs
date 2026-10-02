@@ -38,7 +38,7 @@ pub const EXIT_RUN_LOCALLY: i32 = 125;
 /// 所以在交握階段看到 255 就是「我們根本沒進去」（issue #428）。
 const SSH_FAILED: i32 = 255;
 
-/// 測試用：把 `ssh`／`rsync` 換成假腳本（本機當遠端）。只有測試 build 有這個入口，而且是**執行緒本地**的——並行的其他測試不受影響。
+// 測試用：把 `ssh`／`rsync` 換成假腳本（本機當遠端）。只有測試 build 有這個入口，而且是**執行緒本地**的——並行的其他測試不受影響。
 #[cfg(test)]
 thread_local! {
     static TEST_PROGRAMS: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
@@ -1343,7 +1343,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
 /// 只裝 handler、只做 atomic 操作（async-signal-safe）。
 fn install_signal_handlers() {
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-        unsafe { libc::signal(sig, on_signal as usize as libc::sighandler_t) };
+        unsafe { libc::signal(sig, on_signal as extern "C" fn(libc::c_int) as usize as libc::sighandler_t) };
     }
 }
 

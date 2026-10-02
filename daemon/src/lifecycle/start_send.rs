@@ -32,6 +32,7 @@ enum Accepted {
 }
 
 /// `POST /bots/{id}/prompt` 帶 `start_if_stopped`。
+#[cfg(test)]
 pub async fn prompt_starting(
     app: &Arc<App>,
     bot_id: &str,

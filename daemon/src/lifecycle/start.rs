@@ -1030,6 +1030,7 @@ async fn ensure_kind_installed(app: &Arc<App>, host: &str, kind: &str) -> Result
 }
 
 
+#[cfg(test)]
 pub async fn restart_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
     restart_bot_with(app, bot_id, StartOpts::default()).await
 }
@@ -1265,6 +1266,7 @@ pub(crate) async fn restart_start(
 }
 
 /// herdr `agent.start` 回「名字被占」：原 pane 的舊 agent 還在（狀態 Done、名字沒釋放）。
+#[cfg(test)]
 fn agent_name_taken(e: &anyhow::Error) -> bool {
     if let Some(h) = e.downcast_ref::<crate::herdr::HerdrError>() {
         return h.code == "agent_name_taken";
@@ -1276,11 +1278,13 @@ fn agent_name_taken(e: &anyhow::Error) -> bool {
 /// 同名 `agent.start --resume <上一個 session>`。pane 是父 agent 開的，且 shell 裡的環境
 /// （`CLAUDE_CONFIG_DIR`、shim）daemon 重建不了。沒注入 hook，回覆照舊走終端快照。
 /// 過程中 pane 不見了就不重開。
+#[cfg(test)]
 pub async fn restart_child_in_pane(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
     restart_child_in_pane_with(app, bot_id, false).await
 }
 
 /// 同上；`require_idle` 見 [`StartOpts::require_idle`]。
+#[cfg(test)]
 pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_idle: bool) -> LcResult<String> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;

@@ -372,6 +372,7 @@ pub async fn prompt(app: &Arc<App>, bot_id: &str, text: &str, client_request_id:
 
 /// `prompt` with images (`attach.rs`): the agent gets paths on its host; the timeline renders
 /// thumbnails from `messages.attachments_json`.
+#[cfg(test)]
 pub async fn prompt_with(
     app: &Arc<App>,
     bot_id: &str,

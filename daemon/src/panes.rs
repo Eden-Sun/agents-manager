@@ -64,15 +64,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneRow {
-    pub pane_id: String,
-    pub kind: &'static str,
-    pub owner_bot_id: Option<String>,
-    pub foreground: Option<String>,
-    pub listen_ports: Vec<u16>,
-}
-
 /// 分類（SPEC §6.5e）：有前景程式或 listen port＝`service`，其餘＝`shell`。
 pub fn classify(foreground: Option<&str>, ports: &[u16]) -> &'static str {
     if foreground.is_some() || !ports.is_empty() {
@@ -1630,7 +1621,7 @@ mod tests {
                 .await
                 .unwrap()
         };
-        adopt(
+        let _ = adopt(
             State(app.clone()),
             Path("w1:pU".into()),
             Query(HashMap::new()),
@@ -1639,7 +1630,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(gc(app.clone()).await, 0, "沒簽名就不能自動關");
-        adopt(
+        let _ = adopt(
             State(app.clone()),
             Path("w1:pU".into()),
             Query(HashMap::new()),
