@@ -1,5 +1,6 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig, type ProxyOptions } from 'vite'
+import { DEV_ALLOWED_HOSTS, devHostAllowed } from './src/lib/devHosts.ts'
 
 // Dev-time daemon endpoint (SPEC §5: `[server] listen = "127.0.0.1:7788"`).
 const DAEMON = process.env.VITE_DAEMON ?? 'http://127.0.0.1:7788'
@@ -26,13 +27,21 @@ export default defineConfig({
     host: true,
     // vite 只放行 localhost 與 IP：用 tailnet 名字開（`http://agm:5173`、`agm.tail161aae.ts.net`）會被擋成 403
     // （2026-10-02 使用者）。只放行自己 tailnet 的名字，不整個關掉主機檢查（那是擋 DNS rebinding 的）。
-    allowedHosts: ['agm', '.ts.net'],
+    allowedHosts: DEV_ALLOWED_HOSTS,
     // The daemon rejects requests whose `Host` is not `127.0.0.1:<port>` / `localhost:<port>`
     // (docs/API.md §0), so the proxy must rewrite Host to the target: changeOrigin: true.
     proxy: {
       '/api': { target: DAEMON, changeOrigin: true, configure: rewriteOrigin },
       '/hook': { target: DAEMON, changeOrigin: true, configure: rewriteOrigin },
-      '/ws': { target: DAEMON_WS, ws: true, changeOrigin: true, configure: rewriteOrigin },
+      // `allowedHosts` 只管一般 HTTP：proxy 的 WebSocket upgrade 不經過它，而 changeOrigin／rewriteOrigin 又把 Host／Origin
+      // 改成 daemon 自己的位址，daemon 那一側的 Host 檢查等於被繞過。upgrade 這裡補上同一條規則（false＝直接斷線）。
+      '/ws': {
+        target: DAEMON_WS,
+        ws: true,
+        changeOrigin: true,
+        configure: rewriteOrigin,
+        bypass: req => (devHostAllowed(req.headers.host, DEV_ALLOWED_HOSTS) ? undefined : false),
+      },
     },
   },
   build: {

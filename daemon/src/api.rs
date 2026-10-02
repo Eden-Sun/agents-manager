@@ -9358,6 +9358,15 @@ mod lan_exposure_tests {
         assert!(origin_is_local(&h(&[]), 7788, true));
     }
 
+    /// vite dev server（5173）的 proxy 一律把 Host／Origin 改成 daemon 自己的位址（`changeOrigin` ＋ `rewriteOrigin`），
+    /// 所以不論使用者用 IP、.ts.net 或 localhost 連 5173，daemon 看到的都是這一組：兩種模式都要放行，不能被 403。
+    #[test]
+    fn what_the_vite_proxy_forwards_passes_in_both_modes() {
+        for lan in [false, true] {
+            assert!(origin_is_local(&h(&[("host", "127.0.0.1:7788"), ("origin", "http://127.0.0.1:7788")]), 7788, lan), "allow_lan={lan}");
+        }
+    }
+
     #[test]
     fn an_explicitly_allowed_hostname_passes() {
         assert!(super::lan_host_ok("agm.example.com:7788", &["agm.example.com".to_string()]));
