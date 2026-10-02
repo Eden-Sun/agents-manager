@@ -46,9 +46,9 @@ impl Dialog {
     /// 結構化的原因（`blocked_reason`）：穩定的短代碼＋一句話。
     pub fn reason(self) -> crate::blocked_reason::Reason {
         match self {
-            Self::Migration => crate::blocked_reason::Reason { code: "codex_migration", text: "codex 模型升級提示等待選擇" },
-            Self::UpdateMenu => crate::blocked_reason::Reason { code: "codex_update_menu", text: "codex 更新提示等待選擇" },
-            Self::RateLimitSwitch => crate::blocked_reason::Reason { code: "rate_limit_switch", text: "codex 額度換模型建議等待選擇" },
+            Self::Migration => crate::blocked_reason::Reason { code: "codex_migration", text: "codex 模型升級提示等待選擇".into() },
+            Self::UpdateMenu => crate::blocked_reason::Reason { code: "codex_update_menu", text: "codex 更新提示等待選擇".into() },
+            Self::RateLimitSwitch => crate::blocked_reason::Reason { code: "rate_limit_switch", text: "codex 額度換模型建議等待選擇".into() },
         }
     }
 

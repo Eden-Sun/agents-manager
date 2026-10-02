@@ -82,6 +82,7 @@ async fn prune_process_state(app: &Arc<App>, active_runs: &[String]) {
     crate::lifecycle::retain_pane_typed(active_runs);
     crate::tui_prompts::retain_survey_runs(app, active_runs).await;
     crate::codex_model_migration::retain_runs(active_runs);
+    crate::blocked_reason::retain_runs(active_runs);
     // 還要留著 per-bot 帳的 bot：讀不到就這一輪不清（把讀失敗當成「沒有 bot」會清光）。
     let live_bots: Vec<String> = match live_bot_ids(app).await {
         Ok(ids) => ids,
