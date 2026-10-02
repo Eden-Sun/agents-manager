@@ -143,10 +143,12 @@ fn write_private_local(path: &std::path::Path, text: &str) -> std::io::Result<()
         use std::os::unix::fs::OpenOptionsExt as _;
         o.mode(0o600);
     }
-    o.open(&tmp)?.write_all(text.as_bytes())?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    // 寫不完（磁碟滿）或換不上：暫存檔（內容是 AG Man 規則）一律收掉，不留半份在 bot 目錄／CODEX_HOME。
+    let done = o.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes())).and_then(|()| std::fs::rename(&tmp, path));
+    if done.is_err() {
         let _ = std::fs::remove_file(&tmp);
-    })
+    }
+    done
 }
 
 const REMOTE_EOF: &str = "AM_AGENT_MD_EOF";
@@ -165,8 +167,15 @@ async fn install_remote(conn: &crate::hosts::HostConn, path: &str, text: &str) -
 
 /// 暫存檔 + `cmp`：內容一樣就不動 mtime，跟 herdr skill 的遠端安裝同一招。
 fn remote_script(path: &str, text: &str) -> String {
+    // codex 的母 bot profile：標成剛用過（內容一樣時 mv 不會發生，mtime 會越來越舊）、掃掉很久沒重寫的別顆 bot 的 profile 與被殺掉留下的暫存檔。
+    let is_profile = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("am-parent-") && n.ends_with(".config.toml"));
+    let sweep = if is_profile {
+        "touch \"$F\"\nfind \"$(dirname \"$F\")\" -maxdepth 1 \\( -name 'am-parent-*.config.toml' -mtime +30 -o -name '.am-parent-*.tmp-*' -mmin +10 \\) -exec rm -f {} + 2>/dev/null || true\n"
+    } else {
+        ""
+    };
     format!(
-        "set -e\nF={f}\nmkdir -p \"$(dirname \"$F\")\"\numask 077\ncat > \"$F.new\" <<'{REMOTE_EOF}'\n{text}\n{REMOTE_EOF}\nchmod 600 \"$F.new\"\nif cmp -s \"$F.new\" \"$F\" 2>/dev/null; then rm -f \"$F.new\"; chmod 600 \"$F\"; else mv \"$F.new\" \"$F\"; fi\nprintf 'AM_AGENT_MD_OK\\n'\n",
+        "set -e\nF={f}\nmkdir -p \"$(dirname \"$F\")\"\numask 077\ncat > \"$F.new\" <<'{REMOTE_EOF}'\n{text}\n{REMOTE_EOF}\nchmod 600 \"$F.new\"\nif cmp -s \"$F.new\" \"$F\" 2>/dev/null; then rm -f \"$F.new\"; chmod 600 \"$F\"; else mv \"$F.new\" \"$F\"; fi\n{sweep}printf 'AM_AGENT_MD_OK\\n'\n",
         f = sh_quote(path),
         text = text.trim_end(),
     )
@@ -175,6 +184,31 @@ fn remote_script(path: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 遠端送檔的 script 真的拿去 `sh` 跑：路徑與內容含引號、`$()`、反引號、換行、像結束標記的行，都只是資料——
+    /// 不會執行任何東西、內容原樣落地、檔案 0600。
+    #[test]
+    fn the_remote_script_treats_path_and_text_as_data() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = std::env::temp_dir().join(format!("am-test-remote-script-{}", crate::db::ulid()));
+        let evil = root.join("sp ace/'q' $(touch PWN-PATH)/`touch PWN-BQ`/line\nbreak");
+        let path = evil.join("persona.md");
+        let text = "a'b \"c\" \\d\n$(touch PWN-TEXT)\n`touch PWN-TEXT2`\n${HOME} $HOME\nAM_AGENT_MD_EOFX\n  AM_AGENT_MD_EOF\n\\\nend";
+        std::fs::create_dir_all(&root).unwrap();
+        let script = remote_script(path.to_str().unwrap(), text);
+        // cwd 放進 root：萬一真的被執行，`touch PWN-*` 會落在 root 底下找得到。
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(&script).current_dir(&root).output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let pwned: Vec<String> = ["PWN-PATH", "PWN-BQ", "PWN-TEXT", "PWN-TEXT2"].iter().filter(|n| root.join(n).exists()).map(|s| s.to_string()).collect();
+        let written = std::fs::read_to_string(&path);
+        let mode = std::fs::metadata(&path).map(|m| m.permissions().mode() & 0o777);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(stdout.contains("AM_AGENT_MD_OK"), "{stdout} {stderr}");
+        assert!(pwned.is_empty(), "不該執行任何東西：{pwned:?}");
+        assert_eq!(written.unwrap(), format!("{}\n", text.trim_end()));
+        assert_eq!(mode.unwrap(), 0o600);
+    }
 
     #[test]
     fn the_project_file_is_found_by_id_before_label() {

@@ -758,7 +758,15 @@ async fn start_inner(
     let persona = super::setup::persona_text(bot, &agent, md_text);
     match super::persona_file::launch_args(app, bot, project, shim_dir.as_deref(), &env, &persona, agent_md.configured).await {
         Some(file_args) => args.extend(file_args),
-        None => args.extend(persona_args(bot, &agent, md_text)),
+        None => {
+            // 退回 inline：argv 會被壓進 900 bytes、規則被截斷。不能只記 log——對話裡留一則，使用者／AGM 才知道這顆拿到的指示是殘缺的。
+            let notice = super::persona_file::fallback_notice(bot);
+            tracing::warn!(bot = %bot.name, "{notice}");
+            if let Ok(conv) = db::conversation_id(&app.db, &bot.id).await {
+                let _ = insert_message(app, &conv, None, "system", &notice, "system", false, None).await;
+            }
+            args.extend(persona_args(bot, &agent, md_text));
+        }
     }
     args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     args.extend(identity_args(app, bot, &project.host).await);
