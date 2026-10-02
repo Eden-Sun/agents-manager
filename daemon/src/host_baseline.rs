@@ -34,7 +34,40 @@ pub struct BaselineReport {
     pub os: Option<String>,
     /// 探測沒跑完＝`None`（未知）；跑完而且一致＝`Some([])`。
     pub issues: Option<Vec<BaselineIssue>>,
+    /// 這份結果是**什麼時候量到的**（最後一次成功的偵測）；偵測失敗不改寫它。
     pub checked_at: String,
+    /// 最後一次偵測失敗的時間；之後成功就清掉。有值＝上面的結果是舊的、現在連不上／探測失敗。
+    pub failed_at: Option<String>,
+    /// 失敗原因，只留第一行（ssh 的錯誤很長，也可能帶主機細節）。
+    pub error: Option<String>,
+    /// 讀取時才算（[`BaselineReport::snapshot`]）：最後一次偵測失敗，或超過一個重量週期沒更新。存在記憶體裡的一律是 `false`。
+    pub stale: bool,
+}
+
+/// 超過 [`RECHECK_EVERY`] 再寬限這麼久才算「太久沒量」：定期重量剛好在週期上，偵測本身又要花幾十秒，不寬限的話
+/// 每個週期交界都會閃一下過期。
+pub const STALE_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+impl BaselineReport {
+    /// 對外給的樣子：把 `stale` 算進去。偵測失敗，或 `checked_at` 比 `RECHECK_EVERY + STALE_GRACE` 還舊（讀不懂也當舊）＝過期。
+    /// 舊結果照樣留著給人看，只是標明不是現在的。
+    pub fn snapshot(&self, now: chrono::DateTime<chrono::Utc>) -> BaselineReport {
+        let limit = chrono::Duration::from_std(RECHECK_EVERY + STALE_GRACE).unwrap_or_else(|_| chrono::Duration::hours(7));
+        let old = chrono::DateTime::parse_from_rfc3339(&self.checked_at)
+            .map(|t| now.signed_duration_since(t.with_timezone(&chrono::Utc)) > limit)
+            .unwrap_or(true);
+        BaselineReport { stale: self.failed_at.is_some() || old, ..self.clone() }
+    }
+}
+
+/// 偵測失敗（ssh 逾時、連不上、探測腳本沒跑起來）：已經有舊結果就標上失敗時間與原因，結果本身與 `checked_at` 原封不動；
+/// 沒量過就什麼都不造（維持「尚未檢查」）。
+pub async fn note_failure(app: &std::sync::Arc<crate::state::App>, host: &str, err: &anyhow::Error) {
+    let mut map = app.host_baseline.lock().await;
+    let Some(report) = map.get_mut(host) else { return };
+    let first_line = format!("{err:#}").lines().next().unwrap_or_default().chars().take(200).collect::<String>();
+    report.failed_at = Some(crate::db::now());
+    report.error = Some(first_line);
 }
 
 /// Mac 專用的 claude plugin（使用者 2026-09-28：imessage／discord）：只在 Darwin 主機上才算「該有」，Linux 不列為缺。

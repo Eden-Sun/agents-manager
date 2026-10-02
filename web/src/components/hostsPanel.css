@@ -233,3 +233,12 @@
   max-height: 160px;
   overflow-y: auto;
 }
+
+/* 過期：舊結果淡色顯示，不要看起來像現況。 */
+.host-baseline.stale .host-baseline-head {
+  color: var(--warn);
+}
+
+.host-baseline.stale .host-baseline-items {
+  opacity: 0.55;
+}

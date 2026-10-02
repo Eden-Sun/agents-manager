@@ -3387,6 +3387,10 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 - **inbox 通知**：每次偵測結果寫進快取後，`issues` 非空就推一則 `ops_alert`（`source=daemon`、`reason=host_baseline`）給 AGM；key 帶差異 id 集合的雜湊，同一份差異只推一次、差異變了才再推，一致或未知不推。沿用 `push_inbox` 的 `INSERT OR IGNORE` 去重（跟其他 `ops_alert` 同一套）。去重存在 DB（daemon 重啟、主機離線再回來都不會重推）；`event_key` 永久，所以**曾經推過的差異集合日後（修好又壞回同一組）不會再推**——這種回歸只在主機面板看得到，是刻意的（避免偵測偶發抖動讓 AGM 一直收到同一則）。
 - **定期重量**：偵測本來只在連上／alias 變了／手動時跑；另有 `host_baseline::spawn_poller` 每 6 小時對連著的主機重跑一次完整偵測（啟動那一輪由開機偵測負責）。
 - **UI**：網頁「主機」面板每台（含本機）一行「一致性：…」，有差異逐項列出（嚴重的在前、紅；提醒黃）；沒量過顯示「尚未檢查」、`issues: null` 顯示「未知」，**不當成全缺**（`web/src/lib/hostBaseline.ts`）。
+- **過期（stale）**：偵測失敗時，已經有的舊結果**不能繼續裝成現況**。`BaselineReport` 帶 `checked_at`（最後一次成功）、`failed_at`／`error`（最後一次失敗；成功後清掉）；
+  對外 `stale = 最後一次失敗 || checked_at 超過 RECHECK_EVERY + STALE_GRACE（6h15m）`，讀取時算（`BaselineReport::snapshot`）。失敗當下推 `host_changed`。
+  網頁：`stale` 或本機算出超過同一條線（主機一直離線時沒有事件，所以前端自己也算）→ 「一致性：上次檢查於 MM-DD HH:mm，目前無法連線」，舊的差異淡色照列、
+  tooltip 寫最後一次失敗的原因；過期時連「與基準一致」也不說。
 - 這一版沒做：自動安裝／同步（要使用者另行同意）。
 
 ## 16b. 輸入框草稿以 daemon 為準（使用者 2026-10-01）
