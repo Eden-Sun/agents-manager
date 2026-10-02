@@ -14,7 +14,7 @@ check() {
     fi
 }
 
-check "" "docs/SPEC.md" "README.md"
+check "" "docs/API.md" "README.md"
 check "web" "web/src/store/store.ts"
 check "daemon" "daemon/src/api.rs"
 check "daemon" "Cargo.lock"
@@ -51,6 +51,18 @@ for f in daemon/src/db.rs daemon/src/supervisor/store.rs daemon/src/supervisor/r
     check "daemon ops" "$f"
 done
 check "daemon" "daemon/src/api.rs"
+
+# 有測試釘住內容的文件：docs/SPEC.md（scripts/jev-role_test.sh 要求裡面有 Jev 角色政策那幾句）。
+# 只改這份文件不必跑整包 ops，單獨一個 `specs` 部分只跑那支契約測試。
+check "specs" "docs/SPEC.md"
+check "specs" "docs/SPEC.md" "docs/API.md"
+check "daemon specs" "docs/SPEC.md" "daemon/src/api.rs"
+check "ops specs" "docs/SPEC.md" "scripts/ops/README.md"
+
+# web 的設定檔改了＝web 整套（build 與全部測試）：vite／tsconfig／package.json／鎖檔／bunfig／測試墊片／靜態資源。
+for f in web/vite.config.ts web/tsconfig.app.json web/tsconfig.json web/tsconfig.node.json web/package.json web/bun.lock web/bunfig.toml web/test/node-test-shim.ts web/index.html web/public/x.svg; do
+    check "web" "$f"
+done
 
 if [ "$fail" = 0 ]; then echo "ci-changed-parts: OK"; fi
 exit "$fail"

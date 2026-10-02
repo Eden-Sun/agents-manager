@@ -11,6 +11,10 @@ mkdir -p "$fixture/scripts" "$fixture/web" "$fixture/bin"
 cp "$ROOT/scripts/check.sh" "$fixture/scripts/check.sh"
 cp "$ROOT/scripts/ci-changed-parts.sh" "$fixture/scripts/ci-changed-parts.sh"
 cp "$ROOT/scripts/ci-daemon-filters.sh" "$fixture/scripts/ci-daemon-filters.sh"
+# SPEC 契約測試的替身：只記一筆，證明 changed 有叫它。
+printf '#!/usr/bin/env bash\necho jev-ran >>"${AM_TEST_JEV_LOG:?}"\n' >"$fixture/scripts/jev-role_test.sh"
+chmod +x "$fixture/scripts/jev-role_test.sh"
+export AM_TEST_JEV_LOG="$tmp/jev.log"
 
 cat >"$fixture/bin/git" <<'SH'
 #!/usr/bin/env bash
@@ -120,5 +124,39 @@ unset AM_TEST_GIT_FAIL
 export AM_TEST_GIT_FAIL='ls-files --others --exclude-standard'
 if out="$(changed)"; then fail "ls-files 失敗卻放行了：$out"; fi
 unset AM_TEST_GIT_FAIL
+
+# 只改 docs/SPEC.md：跑 SPEC 契約測試（Jev 角色政策那幾句），但不跑 ops 整包、也不碰 cargo。
+: >"$AM_TEST_CARGO_LOG"; : >"$AM_TEST_JEV_LOG"
+export AM_TEST_DIFF_HEAD=docs/SPEC.md
+output="$(changed)" || fail "只改 SPEC 的 changed 失敗：$output"
+grep -q jev-ran "$AM_TEST_JEV_LOG" || fail "只改 SPEC 沒有跑 jev-role_test.sh：$output"
+[ ! -s "$AM_TEST_CARGO_LOG" ] || fail "只改 SPEC 不該動 cargo"
+# 其他文件不跑它。
+: >"$AM_TEST_JEV_LOG"
+export AM_TEST_DIFF_HEAD=docs/API.md
+changed >/dev/null || fail "只改 API.md 的 changed 失敗"
+[ ! -s "$AM_TEST_JEV_LOG" ] || fail "只改 API.md 不該跑 SPEC 契約測試"
+
+# 平台敏感的 daemon 模組（macos-local 的三組測試所在）改了：Linux 上跑不了 macos-local，至少要明講請去 Mac 跑，
+# 不能安靜地綠燈讓人以為都驗過了。
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=daemon/src/cargo_shim.rs
+output="$(changed)" || fail "改 cargo_shim.rs 的 changed 失敗：$output"
+printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' || fail "改 cargo_shim.rs 沒提醒跑 macos-local：$output"
+export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
+output="$(changed)" || fail "改 queue.rs 的 changed 失敗"
+printf '%s' "$output" | grep -q 'macos-local' && fail "改 queue.rs 不該提醒 macos-local：$output"
+
+# web：改任何一個檔（含共用的 store／lib 與設定檔）都是整套——型別檢查、lint、**全部**測試（不是同目錄的）、build。
+# 這支只是釘住現況：以後有人想為了快把 bun test 縮成只跑相關檔，這裡會紅。
+for f in web/src/lib/shared.ts web/vite.config.ts web/package.json web/bun.lock; do
+    : >"$AM_TEST_BUN_LOG"
+    export AM_TEST_DIFF_HEAD="$f"
+    output="$(changed)" || fail "$f 的 changed 失敗：$output"
+    grep -qx 'test' "$AM_TEST_BUN_LOG" || fail "${f}：bun test 要不帶任何過濾字串跑全部：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
+    grep -qx 'run build' "$AM_TEST_BUN_LOG" || fail "${f}：沒跑 build：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
+    grep -q 'tsc -p tsconfig.app.json' "$AM_TEST_BUN_LOG" || fail "${f}：沒跑 tsc：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
+    grep -q 'install --frozen-lockfile' "$AM_TEST_BUN_LOG" || fail "${f}：沒驗鎖檔：$(tr '\n' '|' <"$AM_TEST_BUN_LOG")"
+done
 
 echo 'changed: 受影響模組的測試、CHECK_TESTS、測試紅與 git 失敗都不會被吞掉'

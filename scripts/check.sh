@@ -97,7 +97,7 @@ check_daemon() {
 check_macos_local() {
     local local_cargo local_rustc local_rustdoc path_cargo filter output
     if [ "$(uname -s)" != Darwin ]; then
-        echo "macos-local tests only run on macOS; use the CI macOS runner elsewhere" >&2
+        echo "macos-local tests only run on macOS（這是 Linux／其他系統，什麼都沒驗）：請在 Mac 本機跑 scripts/check.sh macos-local" >&2
         return 2
     fi
     if ! command -v rustup >/dev/null 2>&1; then
@@ -230,6 +230,24 @@ check_clippy() {
     cargo clippy -p agents-managerd --all-targets --locked -- -D warnings
 }
 
+# 平台敏感的 daemon 模組（macos-local 的測試組：cli_update::tests、cargo_shim::tests，以及函式名帶 macos_local_ 的）改了：
+# 非 macOS 上跑不了 macos-local（check.sh macos-local 會明確拒絕），至少要明講，不能安靜綠燈讓人以為都驗過了（CLAUDE.md：
+# 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時要在 Mac 本機跑）。只提醒不擋：Mac 上同樣只提醒，因為它要幾分鐘。
+macos_local_hint() {
+    local f hit=""
+    while IFS= read -r f; do
+        case "$f" in
+            daemon/src/cargo_shim.rs | daemon/src/cli_update.rs) hit="${hit} ${f}" ;;
+            daemon/src/*.rs | daemon/src/*/*.rs) if [ -f "$f" ] && grep -q 'fn macos_local_' "$f" 2>/dev/null; then hit="${hit} ${f}"; fi ;;
+        esac
+    done <<EOF
+$1
+EOF
+    if [ -n "$hit" ]; then
+        printf '!! 改到平台敏感的模組（%s ）：請在 Mac 本機再跑 scripts/check.sh macos-local（Linux 上跑不了，這裡沒有驗）\n' "${hit# }" >&2
+    fi
+}
+
 # 只跑改到的部分（issue #716）：跟 base（預設 origin/main）比的 commit 差異＋工作樹還沒提交的改動。
 # daemon 做 `cargo check --all-targets`（`#[cfg(test)]` 被非測試路徑用到也抓得到），再跑「改到的模組自己的測試」
 # （`scripts/ci-daemon-filters.sh` 由路徑挑 cargo test 的過濾字串；挑法與限制見該檔）。
@@ -257,6 +275,7 @@ check_changed() {
         return 0
     fi
     echo "changed（base ${base}）：$(echo "$parts" | tr '\n' ' ')"
+    macos_local_hint "$files"
     if [ -n "${CHECK_TESTS:-}" ] && [ "${CHECK_TESTS}" != none ] && ! echo "$parts" | grep -qx -e daemon -e full; then
         echo "!! CHECK_TESTS=${CHECK_TESTS} 沒有用到：這次改動沒有 daemon 部分，不會跑任何 daemon 測試" >&2
     fi
@@ -265,6 +284,11 @@ check_changed() {
         return
     fi
     if echo "$parts" | grep -qx ob; then check_ob; fi
+    if echo "$parts" | grep -qx specs; then
+        # 釘住 SPEC 內容的契約測試（Jev 角色政策）；ops 部分也會跑它，這裡是「只改了 SPEC」的快路徑。
+        step "docs: SPEC 契約（scripts/jev-role_test.sh）"
+        bash scripts/jev-role_test.sh
+    fi
     if echo "$parts" | grep -qx ops; then check_ops; fi
     if echo "$parts" | grep -qx web; then check_web; fi
     if echo "$parts" | grep -qx daemon; then
