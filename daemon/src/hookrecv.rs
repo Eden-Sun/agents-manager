@@ -4246,6 +4246,30 @@ mod external_claim_tests {
         assert_eq!(on.as_deref(), Some(newest.as_str()), "問答掛在新的外部回合上");
     }
 
+    /// 外部回合是 Stop 才建立的（`created_at`＝Stop 到的那一刻）：回合中間在終端答的提問，答的時間比這個 `created_at`
+    /// 早很多，不能被「這一回合開始之後」的門檻擋掉；上一回合收掉之前的（fork／resume 帶來的舊提問）仍然不記。
+    #[tokio::test]
+    async fn an_ask_answered_minutes_before_the_stop_of_an_external_turn_is_still_recorded() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, old_turn) = unknown_turn(&app, &env.project_id, "claude", "舊的一句").await;
+        let at = |mins: i64| (chrono::Utc::now() + chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let (prev_done, _) = (at(-10), ());
+        sqlx::query("UPDATE turns SET status='completed', delivery='ok', created_at=?, completed_at=? WHERE id=?")
+            .bind(&prev_done).bind(&prev_done).bind(&old_turn).execute(&app.db).await.unwrap();
+        let qs = json!([{"question": "要不要？", "header": "確認", "options": []}]);
+        let ask = |id: &str| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "AskUserQuestion", "input": {"questions": qs}}]}});
+        let result = |id: &str, ans: &str, when: String| json!({"type": "user", "timestamp": when,
+            "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": "x"}]},
+            "toolUseResult": {"questions": qs, "answers": {"要不要？": ans}}});
+        let path = env.dir.join("ext-mid.jsonl");
+        let lines = [ask("older"), result("older", "舊的", at(-30)), ask("mid"), result("mid", "要", at(-5))];
+        std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        process(&app, &claude_stop_for(&bot_id, json!({"transcript_path": path.to_string_lossy()}))).await.unwrap();
+        let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM messages WHERE id LIKE 'ask:%' ORDER BY created_at, rowid").fetch_all(&app.db).await.unwrap();
+        assert_eq!(ids, [format!("ask:{conv}:mid")], "上一回合收掉之後答的記進外部回合；之前的舊提問不記");
+    }
+
     /// 被使用者中斷的回合沒有 Stop：PostToolUse 當下就記；遠端 bot 的 Stop 帶 `agm_asks`（`hook.sh` 從本機 transcript 讀的），
     /// 讀不到檔案也照記。認不出答案的 PostToolUse 不記（不能先記一筆「沒有回答」把正確的擋掉）。
     #[tokio::test]

@@ -2291,7 +2291,7 @@ claude 用 `AskUserQuestion` 問、使用者答完（網頁或終端答的都一
 - **資料來源（`ask_answers.rs`）**：
   1. **回合結束時讀 transcript（主要）**：`Stop`／`StopFailure` 的 hook 處理完（`hookrecv::process` 收尾，終端打字開的外部回合要等 Stop 才建立，這時「最新的回合」才是對的那一個）之後，讀 transcript 尾巴 512 KiB，找每個有對應 `tool_result` 的 `AskUserQuestion`。claude 自己寫的 `toolUseResult` 是結構化的
      （`questions`、`answers: {題目: 答案}`、`annotations.<題目>.notes`），網頁答的、終端答的、舊版 `The user answered:` 都一樣；取消是 `The user did not answer the questions.`／`The user doesn't want to proceed…`（`toolUseResult: "User rejected tool use"`）→ 每題記「沒有回答」。
-     **認不出形狀的 `tool_result` 一律不記**，不會把它當成取消。不需要改任何 bot 的設定：已經在跑的 session 也補得到。只收這一回合開始之後（留 2 秒時鐘餘裕）答的，fork／resume 帶來的舊提問不補。
+     **認不出形狀的 `tool_result` 一律不記**，不會把它當成取消。不需要改任何 bot 的設定：已經在跑的 session 也補得到。只收這一回合開始之後（留 2 秒時鐘餘裕）答的，fork／resume 帶來的舊提問不補；外部回合（Stop 才建立，`created_at` 是 Stop 那一刻）的下限改看上一回合收掉的時間，回合中間在終端答的提問才不會被擋掉。
      本機 bot 由 daemon 讀自己這台的 transcript；遠端 transcript 在那台機器，由 `hook.sh` 讀出放進 payload 的 `agm_asks`（§11.4.2，跟 `agm_user_text` 同一套）。
   2. **`PostToolUse`（`matcher: "AskUserQuestion"`，新啟動的 bot 才有）**：被使用者中斷的回合沒有 Stop，這是當下就留得下來的那一條路（遠端走 spool）。只在 `tool_response.answers` 認得出至少一個答案時才記；
      取消時 claude 不觸發它，payload 形狀也沒有完整的契約，所以認不出就不記、留給回合結束的補讀——絕不先記一筆「沒有回答」把後面正確的那筆擋掉（INSERT OR IGNORE 先到先贏）。
