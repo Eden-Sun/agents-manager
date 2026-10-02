@@ -11,6 +11,15 @@ export const SILENCE_MS = 60_000
 /** 切回前景（visible／focus／online）時，靜默超過這麼久就不信 `readyState`，直接重連：心跳 20 秒加餘裕。 */
 export const RESUME_STALE_MS = 35_000
 
+/** 連線開著超過這麼久才算「穩定」，斷線後的退避才從頭開始；比這短就被關的連線繼續往上退。 */
+export const STABLE_MS = 10_000
+
+/** 連續這麼多次握手根本沒開成，就重拿一次 token（daemon 換 token 的徵兆）。 */
+export const TOKEN_REFRESH_AFTER_FAILS = 2
+
+/** 重拿 token 之間至少隔這麼久：daemon 真的掛著時 /api/session 也不通，不必每次重連都打。 */
+export const TOKEN_REFRESH_MIN_GAP_MS = 10_000
+
 /** 看門狗多久檢查一次。 */
 export const CHECK_MS = 10_000
 

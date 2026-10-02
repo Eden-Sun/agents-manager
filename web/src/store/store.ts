@@ -2853,6 +2853,8 @@ function connectSocket(set: SetFn, get: GetFn) {
         void draftSync.load().catch(() => {})
         // 身分停用只靠事件更新；第一次連上由 `refreshState` 抓，重連要整份重抓（斷線期間的事件不一定補得回來）。
         if (openedBefore) void get().loadIdentityPrefs()
+        // pane 清單（側欄「其他 pane」）靠 `panes_changed` 事件＋30 秒輪詢：斷線期間漏掉的事件要馬上補，不等下一輪輪詢。
+        if (openedBefore) void get().refreshPanes()
         return
       }
       set({ socket })
@@ -2895,6 +2897,7 @@ const resyncTrigger = (() => {
       // 只靠 WS 事件維持的兩份：漏掉的事件沒有別的來源會補（`identity_prefs_changed`、`draft_updated`）。
       void get().loadIdentityPrefs()
       void draftSync.load().catch(() => {})
+      void get().refreshPanes()
       for (const botId of botIdsNeedingConversationReload(get)) await get().loadMessages(botId)
       const proj = get().selectedProjectId
       if (proj) await get().loadGroupMessages(proj)
