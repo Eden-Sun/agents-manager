@@ -421,6 +421,9 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.release-triage.plist`；*
 </plist>
 ```
 
+重疊：`com.agm.release-triage` 與相容入口 `com.agm.claude-release`（`claude-release-kick.sh` `exec` 進同一支腳本）兩個 timer 會在同一秒到點，後到的撞上鎖就安靜跳過；
+只有鎖已存在超過 `AGM_LOCK_QUIET_SECS`（預設 60）才記「已有執行者」，超過 `AGM_LOCK_HUNG_SECS` 仍照舊推 `runner_hung`。
+
 隔離測試：`bash scripts/ops/release-triage-kick_test.sh`（假的 `bin/agm`／`agents-managerd`，含 `env -i PATH=/usr/bin:/bin` 模擬 launchd、殘留鎖與活鎖、額度閘門）；
 `release-triage-check` 本身的切條與分桶由 daemon 的 `cargo test` 釘住，不在這裡重測。
 

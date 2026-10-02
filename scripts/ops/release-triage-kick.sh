@@ -12,7 +12,7 @@
 # （開頭自補 PATH；缺依賴不靜默，log＋ops_alert）。
 #
 #   AGM_DIR、AGM_REPO、AM_BINARY、AGM_RELEASE_BOT、AGM_TRIAGE_QUOTA_MAX、AGM_LOCK_STALE_SECS、
-#   AGM_LOCK_HUNG_SECS、AGM_FAIL_ALERT_AFTER 可覆寫（測試用）。
+#   AGM_LOCK_HUNG_SECS、AGM_LOCK_QUIET_SECS、AGM_FAIL_ALERT_AFTER 可覆寫（測試用）。
 set -u
 PATH="${AGM_EXTRA_PATH-/opt/homebrew/bin:/usr/local/bin}:$PATH"; export PATH   # AGM_EXTRA_PATH 只給測試蓋掉
 
@@ -100,6 +100,10 @@ command -v python3 >/dev/null 2>&1 || { alert missing_dependency "找不到 pyth
 LOCK="$DIR/release-triage.lock"
 LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
 LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：喊人
+# 執行者剛拿到鎖不到這麼久就撞上＝同一秒內兩個排程一起到點（com.agm.release-triage 與相容入口
+# claude-release-kick.sh 的 com.agm.claude-release 兩個 timer，exec 進同一支腳本）：正常重疊，照擋不派，不寫 log
+# （原本每個 tick 都洗一行「已有執行者（0 秒）」）。超過這個時間還在跑才記，卡太久仍照舊喊人。
+LOCK_QUIET_SECS=${AGM_LOCK_QUIET_SECS:-60}
 lock_age() { # lock_age → 鎖建立到現在幾秒（讀不到就當 0）
   _born=$(python3 -c '
 import os,sys
@@ -121,7 +125,7 @@ if ! take_lock; then
   if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && ps -o command= -p "$_pid" 2>/dev/null | grep -q 'release-triage-kick'; then
     if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
       alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，上游新版分診停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
-    else
+    elif [ "$_age" -ge "$LOCK_QUIET_SECS" ]; then
       log "分診已有執行者（pid ${_pid}，${_age} 秒），這輪跳過"
     fi
     exit 0

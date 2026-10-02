@@ -70,7 +70,7 @@ PYEOF
 }
 teardown() {
   rm -rf "$ROOT"
-  unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_EXTRA_PATH AGM_FAIL_ALERT_AFTER CLAUDE_VERSIONS_DIR
+  unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_LOCK_QUIET_SECS AGM_EXTRA_PATH AGM_FAIL_ALERT_AFTER CLAUDE_VERSIONS_DIR
   unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_OLD_AGM
 }
 
@@ -246,12 +246,27 @@ bash "$SCRIPT"
 equals "沒有 owner 檔的舊鎖：過了門檻就回收" "$(assigns)" "1"
 teardown
 
-# 7. 活鎖（執行者還在、指令列是這支腳本）：擋下；卡太久推 ops-alert，仍不搶鎖。
+# 7a. 剛拿到鎖的活鎖（同一秒內另一個排程也啟動了，例如 com.agm.release-triage 與相容入口 com.agm.claude-release
+#     兩個 timer 同時到點）：這是正常重疊，照樣擋下不派，但不寫 log——否則每個 tick 都洗一行「已有執行者（0 秒）」。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
 bash -c 'sleep 30; : # release-triage-kick' & LIVE=$!
 sleep 0.3
 mkdir "$AGM_DIR/release-triage.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/release-triage.lock/owner"
+bash "$SCRIPT"
+equals "剛拿到的活鎖：不派" "$(assigns)" "0"
+check_no "剛拿到的活鎖：不洗 log" "已有執行者" "$AGM_DIR/release-triage.log"
+check_no "剛拿到的活鎖：不喊人" "ops-alert" "$AGM_DIR/calls.log"
+kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
+teardown
+# 7. 活鎖（執行者還在、指令列是這支腳本）：擋下；卡太久推 ops-alert，仍不搶鎖。
+#    QUIET_SECS=0＝連剛拿到的鎖也記 log，才驗得到「有記」這一條。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+bash -c 'sleep 30; : # release-triage-kick' & LIVE=$!
+sleep 0.3
+mkdir "$AGM_DIR/release-triage.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/release-triage.lock/owner"
+export AGM_LOCK_QUIET_SECS=0
 bash "$SCRIPT"
 equals "活鎖：不派" "$(assigns)" "0"
 check "活鎖：有記 log" "已有執行者" "$AGM_DIR/release-triage.log"
