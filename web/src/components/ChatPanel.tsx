@@ -42,6 +42,8 @@ import { TurnErrorBadge } from './TurnErrorBadge'
 import { AuthLoginAction } from './AuthLoginAction'
 import { ComposerDraftBar } from './ComposerDraftBar'
 import { isAuthFailure } from '../lib/authFailure'
+import { parseAskAnswers } from '../lib/askAnswers'
+import { AskAnswersCard } from './AskAnswersCard'
 import { HostShellPanel } from './HostShellPanel'
 import { GearIcon, GitIcon } from './Icons'
 import { useShelfSink } from './useShelfSink'
@@ -112,15 +114,7 @@ const RelayFrom = memo(function RelayFrom({ fromId, toId, unverified }: { fromId
   )
 })
 
-/** 一則訊息。`memo`：串流 tick 會重 render 清單，不 memo 就每則重解析 Markdown（issue #8）。 */
-export const Bubble = memo(function Bubble({
-  msg,
-  from,
-  fromClassName,
-  fromTitle,
-  kind,
-  flash,
-}: {
+interface BubbleProps {
   msg: Message
   from?: string
   fromClassName?: string
@@ -128,7 +122,23 @@ export const Bubble = memo(function Bubble({
   kind?: BotKind
   /** 被「這回合的提問」浮窗捲過來時閃一下（見 `LastAskPeek`）。 */
   flash?: boolean
-}) {
+}
+
+/** 一則訊息。claude 的提問與使用者的回答（`ask:` 系統訊息）畫成「Claude 問／你答」卡，其餘照一般泡泡。 */
+export const Bubble = memo(function Bubble(props: BubbleProps) {
+  const ask = parseAskAnswers(props.msg)
+  return ask ? <AskAnswersCard msg={props.msg} ask={ask} /> : <PlainBubble {...props} />
+})
+
+/** 一般泡泡。`memo`：串流 tick 會重 render 清單，不 memo 就每則重解析 Markdown（issue #8）。 */
+const PlainBubble = memo(function PlainBubble({
+  msg,
+  from,
+  fromClassName,
+  fromTitle,
+  kind,
+  flash,
+}: BubbleProps) {
   const fallback = msg.source === 'terminal_fallback'
   const system = msg.role === 'system'
   const rail = system || msg.source === 'hook' || msg.source === 'system'

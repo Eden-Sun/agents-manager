@@ -4,6 +4,7 @@
 //!   serve                       run the daemon (REST + WS + hook receiver)
 //!   hook claude|codex ...       the tiny process agent CLIs invoke; always exits 0
 
+mod ask_answers;
 mod bot_trash;
 mod deleted_bots;
 mod build_info;

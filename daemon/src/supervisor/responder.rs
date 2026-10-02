@@ -726,7 +726,7 @@ async fn answered_since(app: &Arc<App>, bot_id: &str, since: Option<&str>) -> bo
         "SELECT t.status, t.completed_at, r.turn_error,
                 EXISTS(SELECT 1 FROM turns n WHERE n.run_id = t.run_id AND n.id <> t.id
                          AND n.created_at > t.created_at AND n.status <> 'queued') AS newer,
-                EXISTS(SELECT 1 FROM messages m WHERE m.turn_id = t.id AND m.role = 'system') AS noted
+                EXISTS(SELECT 1 FROM messages m WHERE m.turn_id = t.id AND m.role = 'system' AND m.id NOT LIKE 'ask:%') AS noted
            FROM turns t
            JOIN conversations c ON c.id = t.conversation_id
            LEFT JOIN runs r ON r.id = t.run_id

@@ -1,5 +1,6 @@
 //! Hook receiver: `POST /hook/{provider}` plus Turn matching (SPEC §6.7) and spool replay (§4.4.6).
 
+use crate::ask_answers;
 use crate::db;
 use crate::config::{valid_id, ID_RE};
 use crate::lifecycle;
@@ -185,6 +186,9 @@ enum HookKind {
     /// `agent:start` responses — this bot's own tool call just created these pane IDs. Recorded as
     /// spawn hints for `reconcile::adopt_child`; never touches a Turn.
     SpawnHint { pane_ids: Vec<String> },
+    /// `PostToolUse` on `AskUserQuestion` with a recognisable answer: record the Q&A in the conversation
+    /// (`ask_answers`). Never touches a Turn.
+    AskAnswered(crate::ask_answers::AskRecord),
     /// 遠端 bot 的 herdr shim 在 `agent prompt` 之前寫進自己 spool 的報備（SPEC §6.5d）：遠端沒有 `AM_PORT`，
     /// 打不到 `/relay/announce`，只能跟 hook 走同一條 spool。寄件者就是這則 body 的 bot（spool 在它自己的目錄）。
     RelayAnnounce { to_agent: String, text: String },
@@ -419,6 +423,12 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                 },
                 // issue #94：`matcher: "Bash"` already scopes this to shell commands; the actual
                 // "was this herdr creating a pane" decision is `crate::spawn_hints::extract_pane_ids`.
+                "PostToolUse" if p.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion") => {
+                    match crate::ask_answers::from_post_tool_use(p) {
+                        Some(rec) => HookKind::AskAnswered(rec),
+                        None => HookKind::Ignore("PostToolUse (AskUserQuestion without a recognisable answer)".into()),
+                    }
+                }
                 "PostToolUse" => {
                     let pane_ids = crate::spawn_hints::extract_pane_ids(p);
                     if pane_ids.is_empty() {
@@ -556,7 +566,10 @@ mod classify_tests {
 pub async fn process(app: &Arc<App>, body: &HookBody) -> Result<()> {
     let lock = app.bot_lock(&body.bot_id).await;
     let _g = lock.lock().await;
-    process_locked(app, body).await
+    process_locked(app, body).await?;
+    // 回合收完（含終端打字開的外部回合）之後才補：這時候「這一回合」才一定存在。
+    ask_answers::after_turn_end(app, body).await;
+    Ok(())
 }
 
 /// A pane-wrapped echo must still compare equal to the hook's single-line copy.
@@ -1250,6 +1263,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             for pane_id in pane_ids {
                 crate::spawn_hints::record(app, &bot.id, &pane_id).await?;
             }
+            Ok(())
+        }
+        // 2026-10-02 使用者：claude 問的題目與使用者的答案要留在對話裡（`ask_answers`）。
+        HookKind::AskAnswered(rec) => {
+            ask_answers::record(app, &bot.id, &conv, vec![rec]).await?;
             Ok(())
         }
         // 2026-09-30 使用者：console-rpa（m4p）直送給 cicd 的一句被存成使用者訊息。spool 每 30 秒左右才收一次，
@@ -4031,6 +4049,121 @@ mod external_claim_tests {
             .await
             .unwrap();
         assert_eq!(recorded, ["w1:p2", "w1:p3", "w1:p4"]);
+    }
+
+    fn ask_messages_sql() -> &'static str {
+        "SELECT content FROM messages WHERE id LIKE 'ask:%' ORDER BY created_at, rowid"
+    }
+
+    /// 2026-10-02 wits-pro：問了三題、答完，網頁看不到。回合結束時從 transcript 補進對話；同一筆 Stop 重送（hook 重送、spool replay）
+    /// 與 PostToolUse 同一個 `tool_use_id` 之後到，都不能多一則。
+    #[tokio::test]
+    async fn a_finished_ask_user_question_lands_in_the_conversation_exactly_once() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", "做 WA 流程").await;
+        let at = |secs: i64| (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let qs = json!([
+            {"question": "拋單怎麼處理？", "header": "拋單倉庫", "options": [{"label": "保留拋單"}, {"label": "拿掉拋單"}]},
+            {"question": "go API 放哪？", "header": "go API", "options": [{"label": "stock-server"}]},
+        ]);
+        let ask = |id: &str| json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "AskUserQuestion", "input": {"questions": qs}}]}});
+        let result = |id: &str, secs: i64, body: Value| {
+            let mut v = json!({"type": "user", "timestamp": at(secs), "message": {"content": [{"type": "tool_result", "tool_use_id": id, "content": "…"}]}});
+            v["toolUseResult"] = body;
+            v
+        };
+        let path = env.dir.join("asks.jsonl");
+        let lines = [
+            // 這一回合開始之前就答完的（fork／resume 帶來的舊提問）：不記。
+            ask("old"),
+            result("old", -3600, json!({"questions": qs, "answers": {"拋單怎麼處理？": "舊的"}})),
+            ask("t1"),
+            result("t1", 1, json!({"questions": qs, "answers": {"拋單怎麼處理？": "拿掉拋單", "go API 放哪？": "自訂：gateway"}})),
+            ask("t2"),
+            // 取消（Cancel／Esc）：content 是固定那句。
+            json!({"type": "user", "timestamp": at(2), "message": {"content": [{"type": "tool_result", "tool_use_id": "t2", "content": "The user did not answer the questions."}]}, "toolUseResult": {"questions": qs}}),
+        ];
+        std::fs::write(&path, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+
+        let stop = claude_stop_for(&bot_id, json!({"transcript_path": path.to_string_lossy()}));
+        process(&app, &stop).await.unwrap();
+        process(&app, &stop).await.unwrap(); // 重送
+        let rows: Vec<String> = sqlx::query_scalar(ask_messages_sql()).fetch_all(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 2, "t1 與 t2 各一則，舊的不補：{rows:?}");
+        let first: Value = serde_json::from_str(&rows[0]).unwrap();
+        assert_eq!((first["type"].as_str(), first["tool_use_id"].as_str(), first["answered"].as_bool()), (Some("ask_answers"), Some("t1"), Some(true)));
+        assert_eq!(first["items"][0], json!({"header": "拋單倉庫", "question": "拋單怎麼處理？", "answer": "拿掉拋單"}));
+        assert_eq!(first["items"][1]["answer"], "自訂：gateway");
+        let second: Value = serde_json::from_str(&rows[1]).unwrap();
+        assert_eq!(second["answered"], json!(false), "取消＝沒有回答");
+        assert!(second["items"].as_array().unwrap().iter().all(|i| i["answer"].is_null()));
+        // 掛在這一回合、是系統訊息，不是使用者打的字，也沒有新開任何回合。
+        let (role, source, turn): (String, String, Option<String>) =
+            sqlx::query_as("SELECT role, source, turn_id FROM messages WHERE id LIKE 'ask:%' ORDER BY created_at LIMIT 1").fetch_one(&app.db).await.unwrap();
+        assert_eq!((role.as_str(), source.as_str(), turn.as_deref()), ("system", "system", Some(turn_id.as_str())));
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE conversation_id = ?").bind(&_conv).fetch_one(&app.db).await.unwrap(), 1);
+
+        // 同一個 tool_use_id 的 PostToolUse 晚到：一樣只有一列。
+        let post = stop_failure(&bot_id, json!({"hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion", "tool_use_id": "t1",
+            "tool_input": {"questions": qs}, "tool_response": {"questions": qs, "answers": {"拋單怎麼處理？": "拿掉拋單"}}}));
+        process(&app, &post).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE id LIKE 'ask:%'").fetch_one(&app.db).await.unwrap(), 2);
+    }
+
+    /// 使用者在終端打字開的回合（外部回合）要等 Stop 才建立：問答要掛在那一個新回合上，不是前一個已經收掉的。
+    #[tokio::test]
+    async fn an_ask_answered_in_an_external_turn_belongs_to_that_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, old_turn) = unknown_turn(&app, &env.project_id, "claude", "舊的一句").await;
+        let long_ago = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE turns SET status='completed', delivery='ok', created_at=?, completed_at=? WHERE id=?")
+            .bind(&long_ago).bind(&long_ago).bind(&old_turn).execute(&app.db).await.unwrap();
+        let qs = json!([{"question": "要不要？", "header": "確認", "options": []}]);
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let path = env.dir.join("ext.jsonl");
+        std::fs::write(&path, format!("{}\n{}\n",
+            json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "AskUserQuestion", "input": {"questions": qs}}]}}),
+            json!({"type": "user", "timestamp": now, "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x"}]}, "toolUseResult": {"questions": qs, "answers": {"要不要？": "要"}}}),
+        )).unwrap();
+        process(&app, &claude_stop_for(&bot_id, json!({"transcript_path": path.to_string_lossy()}))).await.unwrap();
+        let on: Option<String> = sqlx::query_scalar("SELECT turn_id FROM messages WHERE id LIKE 'ask:%'").fetch_optional(&app.db).await.unwrap();
+        let newest: String = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(&conv).fetch_one(&app.db).await.unwrap();
+        assert_ne!(newest, old_turn, "Stop 開了一個外部回合");
+        assert_eq!(on.as_deref(), Some(newest.as_str()), "問答掛在新的外部回合上");
+    }
+
+    /// 被使用者中斷的回合沒有 Stop：PostToolUse 當下就記；遠端 bot 的 Stop 帶 `agm_asks`（`hook.sh` 從本機 transcript 讀的），
+    /// 讀不到檔案也照記。認不出答案的 PostToolUse 不記（不能先記一筆「沒有回答」把正確的擋掉）。
+    #[tokio::test]
+    async fn post_tool_use_and_the_carried_asks_record_without_reading_a_transcript() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, _turn) = unknown_turn(&app, &env.project_id, "claude", "做 WA 流程").await;
+        let qs = json!([{"question": "拋單怎麼處理？", "header": "拋單倉庫", "options": []}]);
+
+        let unreadable = stop_failure(&bot_id, json!({"hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion", "tool_use_id": "t0",
+            "tool_input": {"questions": qs}, "tool_response": "something claude changed"}));
+        process(&app, &unreadable).await.unwrap();
+        assert!(sqlx::query_scalar::<_, String>(ask_messages_sql()).fetch_all(&app.db).await.unwrap().is_empty());
+
+        let live = stop_failure(&bot_id, json!({"hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion", "tool_use_id": "t1",
+            "tool_input": {"questions": qs}, "tool_response": {"answers": {"拋單怎麼處理？": "拿掉拋單"}}}));
+        process(&app, &live).await.unwrap();
+        process(&app, &live).await.unwrap();
+        let rows: Vec<String> = sqlx::query_scalar(ask_messages_sql()).fetch_all(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(serde_json::from_str::<Value>(&rows[0]).unwrap()["items"][0]["answer"], "拿掉拋單");
+
+        let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let carried = claude_stop_for(&bot_id, json!({"transcript_path": "/Users/m4p/none.jsonl", "agm_asks": [
+            {"id": "t1", "at": at, "items": [{"header": "拋單倉庫", "question": "拋單怎麼處理？", "answer": "拿掉拋單"}]},
+            {"id": "t9", "at": at, "items": [{"question": "要不要？", "answer": null}]},
+        ]}));
+        process(&app, &carried).await.unwrap();
+        let rows: Vec<String> = sqlx::query_scalar(ask_messages_sql()).fetch_all(&app.db).await.unwrap();
+        assert_eq!(rows.len(), 2, "t1 已記過不重複，t9 是新的：{rows:?}");
     }
 
     /// claude 的 Stop 沒帶使用者訊息：從 transcript 尾巴讀。對不上一樣不認領；讀不到（沒有 transcript）就照舊認領。
