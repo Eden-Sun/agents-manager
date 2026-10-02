@@ -313,6 +313,17 @@ check "推 swap_daemon_too_old" "swap_daemon_too_old" "$AGM_DIR/alerts.log"
 check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
 teardown
 
+# 16b. 新 binary 內嵌的 sha 不是核准的那顆（swap rc=10，換版之前就擋下、什麼都沒動）：推 swap_binary_sha_mismatch，算失敗，
+#      但不記進 rejected（commit 本身沒問題，是這次建出來的 binary 不對，下一輪重建就可能好）。
+setup
+ci "$C3" success
+export STUB_SWAP_RC=10
+run >/dev/null
+check "推 swap_binary_sha_mismatch" "swap_binary_sha_mismatch" "$AGM_DIR/alerts.log"
+check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
+check_no "sha 不符不記進 rejected" "$C3" "$AGM_DIR/daemon-update.rejected"
+teardown
+
 # 17. 殘留鎖（執行者已不在）超過門檻就回收；還活著的執行者則跳過。
 setup
 ci "$C3" success

@@ -310,6 +310,11 @@ case "$SWAP_RC" in
     alert swap_lease_not_released "換上 ${SHORT} 成功，但 restart 窗口沒交還成功，下一次換版可能拿不到窗口。請看 ${DIR}/daemon-swap.log"
     [ "$NOW" = 1 ] && drop_now "已部署 ${SHORT}（窗口沒交還）"
     ;;
+  10)
+    # 換版之前就擋下、什麼都沒動：這次建出來的 binary 不是 ${SHORT} 這顆 commit 的（沒重建？髒樹？），不是 commit 本身有問題，所以不記進 rejected。
+    alert swap_binary_sha_mismatch "要換上 ${SHORT} 的 binary 內嵌的 sha 不是它（或髒樹建的、或舊 binary 沒內嵌 sha），換版中止、窗口沒拿、線上沒動。請看 ${DIR}/daemon-swap.log"
+    ROUND_FAIL="${ROUND_FAIL:-新 binary 的內嵌 sha 對不上 ${SHORT}}"
+    ;;
   9)
     alert swap_daemon_too_old "線上 daemon 太舊，沒有 restart-window 路由，自動換版做不了。要先手動換過一次含這條路由的 binary（scripts/ops/README.md）"
     ROUND_FAIL="${ROUND_FAIL:-線上 daemon 太舊，沒有 restart-window 路由}"

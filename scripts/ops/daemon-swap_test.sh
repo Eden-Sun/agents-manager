@@ -98,12 +98,18 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
     echo '    (10, "bbb"),'
     [ "$1" -ge 11 ] && echo "    ($1, \"ccc\"),"
     echo '];'; } > "$CHECKOUT/daemon/src/db.rs"
-  printf 'new-binary\n' > "$CHECKOUT/target/release/agents-managerd"; chmod +x "$CHECKOUT/target/release/agents-managerd"
+  # 假 binary 是會答 `--version` 的 shell 腳本（真 binary 的 `--version` 印 `<name> <版本> <完整 sha>[-dirty]`）；
+  # 最後一行 `new-binary` 永遠跑不到（上一行 exit），只是讓測試認得「換上去的是新的那顆」。
+  { echo '#!/bin/sh'
+    echo '[ "$1" = --version ] && printf "agents-managerd 0.1.0 %s\n" "$STUB_BIN_VERSION_SHA"; exit 0'
+    echo 'new-binary'; } > "$CHECKOUT/target/release/agents-managerd"; chmod +x "$CHECKOUT/target/release/agents-managerd"
   /usr/bin/git init -q "$CHECKOUT"
   ( cd "$CHECKOUT" && /usr/bin/git config user.email t@t && /usr/bin/git config user.name t \
       && /usr/bin/git add -A && /usr/bin/git commit -qm live \
       && /usr/bin/git commit -q --allow-empty -m target ) >/dev/null 2>&1
   export SHA=$(/usr/bin/git -C "$CHECKOUT" rev-parse HEAD)
+  export STUB_BIN_VERSION_SHA="$SHA"      # 新 binary `--version` 印的 sha（預設＝要換上的那顆）
+  export STUB_DAEMON_SHA="$SHA"           # 新 daemon 起來後 `agm supervisor` 回報的 last_deploy.sha_full
   export OLD=$(/usr/bin/git -C "$CHECKOUT" rev-parse HEAD~1)
 
   # 假 repo：線上那顆 binary（回滾點的內容）。
@@ -166,7 +172,7 @@ case "$sub:$op" in
   supervisor:*)  if [ -n "$STUB_AGM_SUPERVISOR_FAIL" ]; then printf '{"status":"idle"}'; exit 1; fi
                  # 換版前（started 還沒出現）可用 STUB_SUPERVISOR_BEFORE 單獨指定；沒設就跟換版後同一個值。
                  if [ ! -e "$AGM_DIR/started" ] && [ -n "${STUB_SUPERVISOR_BEFORE+x}" ]; then printf '{"status":"%s"}' "$STUB_SUPERVISOR_BEFORE"; exit 0; fi
-                 printf '{"status":"%s"}' "$STUB_SUPERVISOR" ;;
+                 printf '{"status":"%s","last_deploy":{"sha":"x","sha_full":"%s","dirty":%s}}' "$STUB_SUPERVISOR" "$STUB_DAEMON_SHA" "${STUB_DAEMON_DIRTY:-false}" ;;
   state:*)       if [ -e "$AGM_DIR/started" ]; then phase=after; names="$STUB_NAMES_AFTER"; else phase=before; names="$STUB_NAMES_BEFORE"; fi
                  [ "$STUB_AGM_STATE_FAIL" != "$phase" ] || { printf '{}'; exit 1; }
                  printf '{"bots":['; sep=""
@@ -598,7 +604,7 @@ rc=$(run)
 check_eq "換版前後都 waiting_quota 不回滾（rc=0）" "0" "$rc"
 check "log 講明是換版前就存在的額度等待" "換版前就是 waiting_quota" "$SWAP_LOG"
 check_no "沒有 ROLLBACK" "ROLLBACK requested" "$SWAP_LOG"
-check_eq "新 binary 留在線上" "new-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "新 binary 留在線上" "new-binary" "$(tail -1 "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
 # issue #771 對抗式審查：換版前是 waiting_quota，只放過「換版後仍是 waiting_quota」這一種；
@@ -1118,6 +1124,49 @@ rc=$( unset XDG_RUNTIME_DIR; run )
 check "沒有 XDG_RUNTIME_DIR 時補成 /run/user/<uid>" "^XDG_RUNTIME_DIR=/run/user/$(id -u)\$" "$AGM_DIR/systemd-run.env"
 check "systemd-run 失敗有留 log" "WARN: systemd-run rc=1" "$SWAP_LOG"
 check_eq "起不來就照舊回滾（rc=7）" "7" "$rc"
+teardown
+
+# 39. 換 binary 之前先問新 binary 自己是哪個 commit（`--version`），跟核准的 --sha 比前綴：不符就整趟中止（rc=10），
+#     窗口都不拿、舊 daemon 不停、binary 不換。daemon 沒辦法驗自己換上去的是不是核准的那顆，只有這支腳本摸得到檔案。
+for case_ in "other:0000000000000000000000000000000000000000" "dirty:DIRTY" "unknown:unknown" "old:NONE"; do
+  name=${case_%%:*}; val=${case_#*:}
+  setup 10 10
+  case "$val" in
+    DIRTY) export STUB_BIN_VERSION_SHA="${SHA}-dirty" ;;
+    NONE)  export STUB_BIN_VERSION_SHA="" ;;   # 舊 binary：`--version` 只印名字與版本，沒有 sha
+    *)     export STUB_BIN_VERSION_SHA="$val" ;;
+  esac
+  rc=$(run)
+  check_eq "新 binary 的 sha 不對（${name}）→ rc=10" "10" "$rc"
+  check "log 講明 binary 內嵌的 sha 對不上" "內嵌" "$SWAP_LOG"
+  check_no "沒有去拿窗口" "lease acquire restart" "$AGM_DIR/calls.log"
+  check_file "沒有啟動任何東西" no "$AGM_DIR/started"
+  check_eq "線上 binary 沒動" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+  check_file "沒有寫 .built" no "$AGM_DIR/daemon-update.built"
+  teardown
+done
+
+# 40. sha 對得上：完整、或核准的是前綴（--sha 比 binary 內嵌的短）都放行；換版照常完成。
+setup 10 10
+export STUB_BIN_VERSION_SHA="$SHA"
+rc=$(run)
+check_eq "binary 的 sha 對上 → 照常換版（rc=0）" "0" "$rc"
+check "log 記下驗過的 sha" "binary sha ok" "$SWAP_LOG"
+teardown
+
+# 41. 新 daemon 起來後再用 API 回報的 sha 複核一次：binary 驗過了，但起來的不是它（例如啟動器拉起別顆）→ 回滾（rc=7）。
+setup 10 10
+export STUB_DAEMON_SHA="1111111111111111111111111111111111111111"
+rc=$(run)
+check_eq "新 daemon 回報的 sha 不是核准的 → 回滾（rc=7）" "7" "$rc"
+check "log 講明是 sha 複核失敗" "回報的 sha" "$SWAP_LOG"
+teardown
+
+# 42. 新 daemon 是髒樹建的（dirty:true）→ 回滾；沒回報 sha_full 的 daemon（讀不到）也不放行。
+setup 10 10
+export STUB_DAEMON_DIRTY=true
+rc=$(run)
+check_eq "新 daemon 說自己是髒樹建的 → 回滾（rc=7）" "7" "$rc"
 teardown
 
 echo "$PASS passed, $FAIL failed"
