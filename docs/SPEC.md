@@ -2273,6 +2273,12 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   （每次開 child 都重寫，掃掉不會害到誰；CODEX_HOME 裡別的檔案不碰）。③ CODEX_HOME 寫不進去（是檔案、唯讀）：子 agent 照開、沒帶指示、stderr 講一聲。
   ④ 注入的值（指示檔路徑、`AM_MODEL`、`AM_EFFORT`）含控制字元就不帶那個參數並在 stderr 講（`am_arg_ok`）——herdr 會因為一個壞參數拒絕整個 `agent start`。
   ⑤ 指示檔路徑含空白、全形字、引號時仍是單一 argv 元素；grok 那句話把路徑用反引號框起來。
+- **母 bot 的 persona 也走檔案**（`lifecycle/persona_file.rs`）：全文（AG Man 規則＋agent md＋bot 自己的 persona）放不進 argv——`HerdrClient::agent_start` 的 `fit_command_line` 把整條 argv 壓進 900 bytes，規則自己就比這長，會被截成「…（後略）」。
+  所以寫成 `<bot 目錄>/persona.md`（0600、暫存檔＋rename；遠端先 ssh 送過去，heredoc 用帶引號的結束標記，路徑經 `sh_quote`，內容與路徑只是資料）：claude `--append-system-prompt-file <路徑>`；grok `--rules` 一行指向它（路徑用反引號框起來）；
+  codex 寫 `$CODEX_HOME/am-parent-<bot id>.config.toml` 的 `developer_instructions`（TOML **basic string**，所有控制字元與 `\`、`"` 都跳脫，所以含 `'''`、ESC、CR 也讀得回原文），argv 帶 `-p am-parent-<bot id>`。
+  - **退回 inline 要說出來**：寫不進去（磁碟、權限、ssh）、bot 自己的 codex args 帶了 `-p`／`--profile`、或 bot 目錄路徑含控制字元（herdr 會拒絕整個 `agent start`）時，persona 退回 inline 參數——會被截斷，所以 daemon 在對話裡寫一則 system 訊息（「母 bot 的 persona 沒能交給檔案…被截斷」），不是只記 daemon.log。
+  - **殘留清理**：寫暫存檔失敗一律收掉暫存檔；codex profile 每次啟動重寫，寫完順手把這份標成剛用過、掃掉同目錄超過 30 天沒重寫的 `am-parent-*.config.toml` 與超過 10 分鐘的 `.am-parent-*.tmp-*`（遠端同一趟 ssh 做）；別的檔案不碰。bot 刪除時 `persona.md` 隨 bot 目錄進 `bots-trash`。
+  - **讀得到這個檔的人**：同一個 OS 使用者底下的所有 bot 都讀得到（沒有更細的隔離），所以 0600 只擋別的使用者。
 - **讀不到不擋啟動**：檔案不存在或是空檔時 bot 照開，warn 並在對話裡寫一則 system 訊息講少了哪個檔。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
