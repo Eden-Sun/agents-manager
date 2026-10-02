@@ -237,6 +237,7 @@ STUB
 echo "$*" >> "$AGM_DIR/launchctl.log"
 case "$1" in
   submit) : > "$AGM_DIR/started"; echo launchctl >> "$AGM_DIR/starts.log"
+          [ -z "${STUB_MUTATE_DB:-}" ] || [ -e "$AGM_DIR/mutated" ] || { printf 'mutated-by-new-binary\n' > "$DAEMON_DB"; : > "$AGM_DIR/mutated"; }
           echo "$(cat "$AGM_REPO/target/release/agents-managerd")" >> "$AGM_DIR/started-binary.log"
           echo "$STUB_UV_AFTER_START" > "$ROOT/uv" ;;
 esac
@@ -448,6 +449,46 @@ check_file "回滾後保留舊 DB 備份" yes "$DAEMON_DB.bak-20000101-0000"
 check_eq "回滾後保留新舊兩份 DB 備份" "2" "$(db_backup_count)"
 check_file "-wal 一樣要清掉" no "$DAEMON_DB-wal"
 teardown
+
+# 5b. 回滾還原 DB 要原子：先寫同目錄暫存檔、fsync、成功了才清 -wal／-shm 再 mv 覆蓋。
+#     以前 `rm -f -wal -shm; cp backup DB`：cp 中途失敗（磁碟滿、被殺）就是「原 DB 被截斷＋它的 WAL 已經刪了」。
+setup 10 10
+export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
+rc=$(run)
+check_eq "原子還原：回滾 rc=7" "7" "$rc"
+check_eq "DB 內容是備份的（新版寫的被還原掉）" "db@10" "$(cat "$DAEMON_DB")"
+check_file "還原後 -wal 清掉" no "$DAEMON_DB-wal"
+check_file "還原後 -shm 清掉" no "$DAEMON_DB-shm"
+check_eq "還原後的 DB 權限 600" "600" "$(stat -c '%a' "$DAEMON_DB" 2>/dev/null || stat -f '%Lp' "$DAEMON_DB")"
+LEFT=$(ls "$ROOT" | grep -c 'restore' || true)
+check_eq "沒有留下暫存檔" "0" "$LEFT"
+teardown
+
+# 5c. 還原的 cp 中途失敗：原 DB 與它的 -wal／-shm 一個位元組都不能動（WAL 裡還有 commit 過、沒 checkpoint 的資料），
+#     不留暫存檔，log 講清楚還原失敗。
+setup 10 10
+export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
+mkdir -p "$ROOT/fakecp"
+cat > "$ROOT/fakecp/cp" <<'STUB'
+#!/bin/bash
+for a in "$@"; do dest=$a; done
+case "$dest" in
+  *restore*) printf 'half-written' > "$dest"; exit 1 ;;   # 還原用的暫存檔：寫一半就失敗
+esac
+exec /bin/cp "$@"
+STUB
+chmod +x "$ROOT/fakecp/cp"
+rc=$(PATH="$ROOT/fakecp:$PATH" run)
+check_eq "還原失敗仍走回滾結束（rc=7）" "7" "$rc"
+check_eq "原 DB 沒被動（新版寫的內容還在）" "mutated-by-new-binary" "$(cat "$DAEMON_DB")"
+check_eq "原 -wal 沒被刪" "stale-wal" "$(cat "$DAEMON_DB-wal" 2>/dev/null)"
+check_eq "原 -shm 沒被刪" "stale-shm" "$(cat "$DAEMON_DB-shm" 2>/dev/null)"
+LEFT=$(ls "$ROOT" | grep -c 'restore' || true)
+check_eq "失敗後不留暫存檔" "0" "$LEFT"
+check "log 講清楚 DB 還原失敗" "DB 還原失敗" "$SWAP_LOG"
+check_no "失敗時不能說還原成功" "db restored from" "$SWAP_LOG"
+teardown
+unset STUB_MUTATE_DB
 
 # 6. 讀不到 checkout 的 SCHEMA_VERSION：停手，不要拿上一輪的數字猜。
 setup 10 10

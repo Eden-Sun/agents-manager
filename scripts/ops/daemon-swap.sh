@@ -584,11 +584,25 @@ rollback() {
     rm -f "$AM_DATA/service-tokens/daemon-swap.token" "$AM_DATA/service-tokens/herdr-upgrade.token"
     rmdir "$AM_DATA/service-tokens" 2>/dev/null || true
     # DB 還原：daemon 已停；主檔與 -wal／-shm 要一起處理——新版留下的 WAL 配舊主檔會變成半新半舊。
-    rm -f "$DB-wal" "$DB-shm"
-    cp -p "$DBB" "$DB"
-    RU=$("$SQLITE" "$DB" "pragma user_version"); RI=$("$SQLITE" "$DB" "pragma integrity_check" | head -1)
-    log "db restored from $DBB: user_version=$RU integrity=$RI"
-    [ "$RI" = ok ] || log "WARN: 還原後的 DB integrity_check=$RI"
+    # **原子**：先寫同目錄的暫存檔（600）、fsync，成功了才清 -wal／-shm 再 mv 覆蓋（同一個檔案系統的 rename 是原子的）。
+    # 以前是「先刪 -wal／-shm、再 cp 蓋過主檔」：cp 中途失敗（磁碟滿、被殺）就是原 DB 被截斷、它 WAL 裡 commit 過沒 checkpoint 的資料也已經刪了。
+    # 現在失敗時原 DB 與它的 -wal／-shm 一個位元組都不動，備份也還在，可以手動還原。
+    RESTORE_TMP="$DB.restore.$$"
+    if ( umask 077 && cp "$DBB" "$RESTORE_TMP" ) && chmod 600 "$RESTORE_TMP" \
+        && "$PYTHON" -c 'import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)' "$RESTORE_TMP" \
+        && rm -f "$DB-wal" "$DB-shm" && mv -f "$RESTORE_TMP" "$DB"; then
+        RU=$("$SQLITE" "$DB" "pragma user_version"); RI=$("$SQLITE" "$DB" "pragma integrity_check" | head -1)
+        log "db restored from $DBB: user_version=$RU integrity=$RI"
+        [ "$RI" = ok ] || log "WARN: 還原後的 DB integrity_check=$RI"
+    else
+        rm -f "$RESTORE_TMP"
+        log "ERROR: DB 還原失敗（備份 $DBB 複製或同步失敗）——原 DB 與它的 -wal／-shm 沒有動；備份還在，請手動還原後再啟動"
+    fi
     if [ "$ROLLBACK_CHILDREN_KNOWN" != yes ]; then
         log "WARN: rollback restored the DB but could not determine whether newly adopted children still have live panes"
     elif [ -n "$ROLLBACK_NEW_CHILDREN" ]; then
