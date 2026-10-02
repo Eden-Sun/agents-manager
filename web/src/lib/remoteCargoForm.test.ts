@@ -66,3 +66,24 @@ test('送出的 body：預設值、trim、密碼三態', () => {
   assert.equal(toRemoteCargoInput(form({ clearPassword: true })).password, '')
   assert.equal('password' in toRemoteCargoInput(form()), false)
 })
+
+import { remoteCargoProblems } from './remoteCargoForm.ts'
+
+const okForm: RemoteCargoForm = { enabled: true, host: 'build.example', user: 'builder', port: '22', root: 'work/dir', jobs: '4', password: '', clearPassword: false }
+
+test('外部 Cargo 表單：daemon 會拒絕或悄悄改掉的值，前端先講', () => {
+  assert.deepEqual(remoteCargoProblems(okForm), [])
+  const problems = (over: Partial<RemoteCargoForm>) => remoteCargoProblems({ ...okForm, ...over }).map((p) => p.field)
+  assert.deepEqual(problems({ port: '2222x' }), ['port'])
+  assert.deepEqual(problems({ port: '0' }), ['port'])
+  assert.deepEqual(problems({ jobs: 'abc' }), ['jobs'])
+  assert.deepEqual(problems({ jobs: '0' }), ['jobs'])
+  assert.deepEqual(problems({ jobs: '100' }), ['jobs'], 'daemon 把超過 64 的悄悄截成 64')
+  assert.deepEqual(problems({ host: 'bad host' }), ['host'])
+  assert.deepEqual(problems({ host: '-oProxyCommand=x' }), ['host'])
+  assert.deepEqual(problems({ user: '-x' }), ['user'])
+  assert.deepEqual(problems({ root: '../etc' }), ['root'])
+  assert.deepEqual(problems({ root: 'a b' }), ['root'])
+  assert.deepEqual(problems({ root: '' }), [], '空的＝用預設')
+  assert.deepEqual(problems({ host: '', user: '', enabled: false }), [], '沒啟用、沒填：沒問題')
+})

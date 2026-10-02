@@ -6,7 +6,9 @@ import { herdrVersionView } from '../lib/herdrVersion'
 import { hostBaselineView } from '../lib/hostBaseline'
 import { ApiError, HOST_DEFAULTS } from '../api/types'
 import { nestableBusy } from '../lib/nestableBusy'
-import { DEFAULT_REMOTE_ROOT, remoteCargoUnsaved, toRemoteCargoInput } from '../lib/remoteCargoForm'
+import { DEFAULT_REMOTE_ROOT, remoteCargoProblems, remoteCargoUnsaved, toRemoteCargoInput } from '../lib/remoteCargoForm'
+import { portProblem, sessionProblem, sshTargetProblem } from '../lib/hostForm'
+import { useUnsavedGuard } from '../hooks/useUnsavedGuard'
 import { useStore } from '../store/store'
 import { AttachButton } from './AttachButton'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -278,7 +280,13 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
   const [busy, setBusy] = useState(false)
 
   const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name) && name !== 'local'
-  const ok = nameOk && ssh.trim().length > 0
+  // 跟 daemon 同一條規則（`lib/hostForm`）：放行了卻被 400，或打錯的 port 悄悄變成 22，都不行。
+  const sshHint = ssh.trim() ? sshTargetProblem(ssh.trim()) : null
+  const portHint = portProblem(sshPort)
+  const sessionHint = sessionProblem(session.trim() || HOST_DEFAULTS.herdr_session)
+  const ok = nameOk && ssh.trim().length > 0 && !sshHint && !portHint && !sessionHint
+  // 打了一半的新主機：關分頁會丟掉。
+  useUnsavedGuard(Boolean(name || ssh.trim()))
 
   return (
     <form
@@ -291,7 +299,7 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
         void addHost({
           name,
           ssh: ssh.trim(),
-          ssh_port: Number(sshPort) || HOST_DEFAULTS.ssh_port,
+          ssh_port: Number(sshPort.trim()),
           herdr_session: session.trim() || HOST_DEFAULTS.herdr_session,
           remote_path: remotePath.trim(),
           ...(sshOpts.trim() ? { ssh_opts: sshOpts.trim().split(/\s+/) } : {}),
@@ -327,6 +335,7 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
           spellCheck={false}
           onChange={(e) => setSsh(e.target.value)}
         />
+        {sshHint ? <span className="hint">{sshHint}</span> : null}
       </label>
 
       <button type="button" className="disclosure sub" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)}>
@@ -337,10 +346,12 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
           <label className="field">
             <span>ssh_port</span>
             <input type="text" value={sshPort} spellCheck={false} onChange={(e) => setSshPort(e.target.value)} />
+            {portHint ? <span className="hint">{portHint}</span> : null}
           </label>
           <label className="field">
             <span>herdr_session（遠端 named session）</span>
             <input type="text" value={session} spellCheck={false} onChange={(e) => setSession(e.target.value)} />
+            {sessionHint ? <span className="hint">{sessionHint}</span> : null}
           </label>
           <label className="field">
             <span>remote_path（非互動 ssh shell 要前置的 PATH）</span>
@@ -461,6 +472,10 @@ function RemoteCargoPanel() {
   }, [])
 
   const form = { enabled, host, user, port, root, jobs, password, clearPassword }
+  const problems = remoteCargoProblems(form)
+  const blocked = problems.length > 0
+  // 改了沒存就關分頁會丟掉：跟「按儲存會送出的值」比（空白、`022` 這種打法不同、存下去一樣的不算）。
+  useUnsavedGuard(Boolean(saved) && remoteCargoUnsaved(saved!, form))
 
   // `test()` 借用這段來先存表單；busy 全程由呼叫端（`save` 或 `test`）自己用 `lock` 包一次，
   // 這裡不碰 busy，才不會在 `test()` 還沒做完時就把旗標撥回 false（見 `lib/nestableBusy.ts`）。
@@ -595,10 +610,10 @@ function RemoteCargoPanel() {
         </label>
       ) : null}
       <div className="form-actions">
-        <button type="button" className="btn" disabled={busy || !host.trim() || !user.trim()} onClick={() => void test()}>
+        <button type="button" className="btn" disabled={busy || blocked || !host.trim() || !user.trim()} onClick={() => void test()}>
           測試連線
         </button>
-        <button type="button" className="btn primary" disabled={busy || (enabled && (!host.trim() || !user.trim()))} onClick={() => void save()}>
+        <button type="button" className="btn primary" disabled={busy || blocked || (enabled && (!host.trim() || !user.trim()))} onClick={() => void save()}>
           {busy ? '處理中…' : '儲存'}
         </button>
         {needsToolchain ? (
@@ -607,6 +622,13 @@ function RemoteCargoPanel() {
           </button>
         ) : null}
       </div>
+      {problems.length > 0 ? (
+        <ul className="hint field-problems" role="alert">
+          {problems.map((p) => (
+            <li key={p.field}>{p.text}</li>
+          ))}
+        </ul>
+      ) : null}
       {message ? <pre className="host-result">{message}</pre> : null}
     </section>
   )

@@ -4,7 +4,7 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
+import { click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
 import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { dispatchFrameForTest, resetStoreForTest, useStore } from '../store/store'
@@ -134,4 +134,24 @@ it('新增身份後出現在清單；用不到就能刪（要先確認）', asyn
   await click(btn(document.querySelector('[role=alertdialog]')!, '刪除身份')!)
   await until(() => requests.some((r) => r.method === 'DELETE' && /\/identities\/dom3id/.test(r.path)), '送了 DELETE')
   await until(() => !row('dom3id'), '清單移除')
+})
+
+it('新增身份表單：env 打錯的行逐行說明並鎖住送出（不靜靜丟掉）；打了名字沒送出就關分頁會被攔', async () => {
+  const requests = await open()
+  const form = () => document.querySelector('.identities-panel form, form')!
+  const nameInput = [...document.querySelectorAll<HTMLInputElement>('form input[type=text]')].find((i) => i.placeholder === 'cc1')!
+  const envBox = document.querySelector<HTMLTextAreaElement>('form textarea')!
+  const unload = () => {
+    const ev = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(ev)
+    return ev.defaultPrevented
+  }
+  assert.equal(unload(), false, '還沒打東西')
+  await typeInto(nameInput, 'cc9')
+  assert.equal(unload(), true, '打了名字沒送出：攔')
+  await typeInto(envBox, 'CLAUDE_CONFIG_DIR ~/.claude-cc9')
+  assert.match(form().textContent ?? '', /第 1 行.*沒有 =/)
+  const submit = [...form().querySelectorAll('button')].find((b) => b.textContent === '新增身份') as HTMLButtonElement
+  assert.equal(submit.disabled, true)
+  assert.equal(calls(requests, /\/identities$/).length, 0, '一個請求都沒送')
 })

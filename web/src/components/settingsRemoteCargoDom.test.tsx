@@ -55,12 +55,12 @@ it('啟用卻沒填主機／帳號：儲存鍵停用；填好後儲存，body �
   assert.equal((btn('儲存') as HTMLButtonElement).disabled, true)
   await typeInto(field('主機'), '  10.0.0.9 ')
   await typeInto(field('SSH 帳號'), 'ci')
-  await typeInto(field('SSH port'), 'abc')
+  await typeInto(field('SSH port'), '2222')
   await typeInto(field('SSH 密碼'), 'pw1')
   await click(btn('儲存')!)
   await until(() => sent(requests, 'PUT', /build\/remote/).length === 1, '送出 PUT')
   const body = sent(requests, 'PUT', /build\/remote/)[0].body as Record<string, unknown>
-  assert.deepEqual([body.enabled, body.host, body.user, body.ssh_port, body.password], [true, '10.0.0.9', 'ci', 22, 'pw1'])
+  assert.deepEqual([body.enabled, body.host, body.user, body.ssh_port, body.password], [true, '10.0.0.9', 'ci', 2222, 'pw1'])
   await until(() => message().startsWith('✓ 已儲存'), '已儲存訊息')
   assert.equal(field('SSH 密碼').value, '', '密碼欄清空')
   assert.match(field('SSH 密碼').placeholder, /已安全儲存/, '之後顯示已存密碼')
@@ -118,4 +118,49 @@ it('已存密碼：出現「清除」勾選，勾了儲存送 password:""；沒�
   assert.equal((sent(requests, 'PUT', /build\/remote/)[1].body as { password: string }).password, '')
   await until(() => /未設定/.test(field('SSH 密碼').placeholder), '清掉後顯示未設定')
   assert.equal([...panel().querySelectorAll('input[type=checkbox]')].some((c) => c.parentElement?.textContent?.includes('清除已存密碼')), false, '沒密碼就沒有清除勾選')
+})
+
+it('打錯的數字欄位不再靜靜變成預設值：port「2222x」、jobs「abc」會停用儲存／測試並說明（以前 port 悄悄變 22，連到別的埠）', async () => {
+  const requests = await open({ enabled: true, host: 'build.example', user: 'builder' })
+  await typeInto(field('SSH port'), '2222x')
+  await typeInto(field('遠端 cargo jobs'), 'abc')
+  assert.equal((btn('儲存') as HTMLButtonElement).disabled, true)
+  assert.equal((btn('測試連線') as HTMLButtonElement).disabled, true)
+  const problems = panel().querySelector('.field-problems')?.textContent ?? ''
+  assert.match(problems, /SSH port/)
+  assert.match(problems, /cargo jobs/)
+  await typeInto(field('SSH port'), '2222')
+  await typeInto(field('遠端 cargo jobs'), '8')
+  assert.equal((btn('儲存') as HTMLButtonElement).disabled, false)
+  assert.equal(sent(requests, 'PUT', /build\/remote/).length, 0, '被擋的時候一個請求都沒送')
+})
+
+it('daemon 會拒絕的字元（主機含空白、user 以 - 開頭、工作目錄含 ..）前端先擋，不等 400', async () => {
+  await open({ enabled: true, host: 'build.example', user: 'builder' })
+  await typeInto(field('主機'), 'bad host')
+  assert.equal((btn('儲存') as HTMLButtonElement).disabled, true)
+  assert.match(panel().querySelector('.field-problems')?.textContent ?? '', /主機/)
+  await typeInto(field('主機'), 'build.example')
+  await typeInto(field('SSH 帳號'), '-oProxyCommand=x')
+  assert.equal((btn('儲存') as HTMLButtonElement).disabled, true)
+  await typeInto(field('SSH 帳號'), 'builder')
+  await typeInto(field('遠端工作目錄'), '../etc')
+  assert.equal((btn('儲存') as HTMLButtonElement).disabled, true)
+  await typeInto(field('遠端工作目錄'), 'work/dir')
+  assert.equal((btn('儲存') as HTMLButtonElement).disabled, false)
+})
+
+it('有沒存的改動時關分頁會被攔（beforeunload）；存了就不攔', async () => {
+  await open({ enabled: true, host: 'build.example', user: 'builder' })
+  const unload = () => {
+    const ev = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(ev)
+    return ev.defaultPrevented
+  }
+  assert.equal(unload(), false, '沒改任何東西：不攔')
+  await typeInto(field('主機'), 'other.example')
+  assert.equal(unload(), true, '改了沒存：攔')
+  await click(btn('儲存')!)
+  await until(() => message().startsWith('✓ 已儲存'), '存好了')
+  assert.equal(unload(), false, '存完不攔')
 })

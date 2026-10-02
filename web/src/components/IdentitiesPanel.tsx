@@ -7,6 +7,7 @@ import { KindTag } from './KindTag'
 import './identitiesPanel.css'
 
 import { checkEnvText, envDisplayText } from './identityEnv'
+import { useUnsavedGuard } from '../hooks/useUnsavedGuard'
 /** 身份預設（例如 `cc1` = 另一個 `CLAUDE_CONFIG_DIR`）：daemon 啟動 bot 時注入 `env`；`args` 契約仍在但 UI 不提供輸入。 */
 
 export function IdentityBadge({
@@ -290,6 +291,7 @@ function NewIdentityForm() {
   const [busy, setBusy] = useState(false)
   const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name)
   const envCheck = checkEnvText(envText)
+  useUnsavedGuard(Boolean(name))
 
   return (
     <form
