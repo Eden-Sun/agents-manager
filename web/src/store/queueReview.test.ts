@@ -286,3 +286,18 @@ test('群組送出被跳過的收件者：toast 講人話，草稿保留', async
   const text = useStore.getState().notices.at(-1)?.text ?? ''
   assert.ok(text.includes('bot 未啟動') && !text.includes('no active run'), text)
 })
+
+test('同一顆 bot 同時按兩次重啟：只送一個 /restart 請求（第二下被 store 合併，不是再重啟一次）', async () => {
+  seed()
+  let hits = 0
+  routeDaemon((req) => {
+    if (req.path.includes('/restart')) {
+      hits++
+      return json({ run_id: 'r2', resumed: true })
+    }
+    return json({})
+  })
+  const [a, b] = await Promise.all([useStore.getState().restartBot('b1'), useStore.getState().restartBot('b1')])
+  assert.equal(hits, 1)
+  assert.deepEqual([a, b].sort(), [false, true], '第一下做完是 true；被合併的第二下是 false（呼叫端據此不再跳「已重新啟動」）')
+})

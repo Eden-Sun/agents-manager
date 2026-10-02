@@ -14,7 +14,10 @@ export function RuntimeDriftBadge({ botId }: { botId: string }) {
   const run = useStore((s) => s.runs[botId] ?? null)
   const restartBot = useStore((s) => s.restartBot)
   const notify = useStore((s) => s.notify)
-  const [restarting, setRestarting] = useState(false)
+  const [restartingLocal, setRestarting] = useState(false)
+  // 這顆 bot 在別處（設定面板、更新徽章、別的分頁送的請求）已經在重啟：store 的 busy 旗標，所有重啟鈕共用。
+  const restartingShared = useStore((s) => Boolean(s.busy[`restart:${botId}`]))
+  const restarting = restartingLocal || restartingShared
   const [confirming, setConfirming] = useState(false)
   // codex 的 fast（#393）：按下去當場套用，回合中也是（#712）；輸入框有字才排到回合結束，這時徽章改寫「回合結束後套用」。
   const refreshState = useStore((s) => s.refreshState)

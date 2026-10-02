@@ -24,7 +24,10 @@ export function UpdateBadge({ botId, variant = 'chip' }: { botId: string; varian
   const runningVersion = useStore((s) => s.runs[botId]?.status?.version ?? null)
   const restartBot = useStore((s) => s.restartBot)
   const notify = useStore((s) => s.notify)
-  const [restarting, setRestarting] = useState(false)
+  const [restartingLocal, setRestarting] = useState(false)
+  // 這顆 bot 在別處（⟳ 徽章、設定面板）已經在重啟：store 的 busy 旗標，所有重啟鈕共用。
+  const restartingShared = useStore((s) => Boolean(s.busy[`restart:${botId}`]))
+  const restarting = restartingLocal || restartingShared
   const [confirming, setConfirming] = useState(false)
   const [asking, setAsking] = useState(false)
   const [reviewKey, setReviewKey] = useState(0)

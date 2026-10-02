@@ -230,7 +230,10 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
   /** 已存成功的欄位；dirty 要跟它比，store 慢一拍時才不會誤跳「放棄未儲存？」（2026-09-11）。 */
   const [saved, setSaved] = useState<PatchBotInput>({})
   const [saving, setSaving] = useState(false)
-  const [restarting, setRestarting] = useState(false)
+  const [restartingLocal, setRestarting] = useState(false)
+  // 這顆 bot 在別處（⟳ 徽章、更新徽章）已經在重啟：store 的 busy 旗標，所有重啟鈕共用。
+  const restartingShared = useStore((s) => Boolean(s.busy[`restart:${botId}`]))
+  const restarting = restartingLocal || restartingShared
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
