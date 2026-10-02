@@ -78,6 +78,31 @@ json_str() {
     printf '%s' "${v}" | LC_ALL=C tr -d '\000-\037'
 }
 
+# 保險（#763）：舊版測試與被 kill 的測試行程留下的 am-*／agm-* 暫存目錄／檔案（名字結尾是 26 碼 ULID）會慢慢塞滿根磁碟
+# （2026-10-01 實測 44G、ubuntu-ci 因 ENOSPC 紅 19 條）。持有鎖時才清（ubuntu-ci 自己那一輪不會被誤刪），失敗一律吞掉。保守規則：
+#   - 排在磁碟預檢**之前**：磁碟被這些東西塞滿的那一輪正是需要清的那一輪，排在後面就永遠清不到。
+#   - 只認 ${TMPDIR}（沒設用 /tmp）底下第一層；${TMPDIR} 不是絕對路徑、不存在、或解析後是 / 或 ${HOME} 就整個不動（設錯不能照字面去刪）。
+#   - 只處理真的目錄與一般檔案（find 預設不跟 symlink，-type d／f 也排除 symlink 本身），rm 不會跟進 symlink 刪到別處。
+#   - 超過 6 小時沒動：目錄自己的 mtime 只在直接子項增減時才變，所以裡面還有 6 小時內動過的東西就跳過（有行程可能還在用）。
+#   - 名字必須以 am- 或 agm- 開頭、並以 26 碼 ULID（可再接一個 .副檔名）結尾；沒有 ULID 的 am-*（如 am-ops-test）、herdr-*、claude-* 都不碰。
+# 僅 Linux（GNU find 的 -regextype；整支腳本本來就用 flock／timeout）：BSD find 不認得它時整段失敗被吞掉，等於不清、不會誤刪。
+sweep_stale_tmp() {
+    local root real home_real d
+    root="${TMPDIR:-/tmp}"
+    case "${root}" in /*) ;; *) return 0 ;; esac
+    real="$(cd "${root}" 2>/dev/null && pwd -P)" || return 0
+    home_real="$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P || true)"
+    case "${real}" in /|"${home_real}") return 0 ;; esac
+    while IFS= read -r -d '' d; do
+        if [ -d "${d}" ] && [ -n "$(find "${d}" -mmin -360 -print -quit 2>/dev/null)" ]; then
+            continue
+        fi
+        rm -rf -- "${d}" 2>/dev/null || true
+    done < <(find "${real}" -mindepth 1 -maxdepth 1 \( -type d -o -type f \) -mmin +360 -regextype posix-extended \
+        -regex '.*/(am|agm)-[A-Za-z0-9-]*[0-9A-HJKMNP-TV-Z]{26}(\.[a-z]+)?' -print0 2>/dev/null || true)
+}
+sweep_stale_tmp || true
+
 # 磁碟預檢（在任何 checkout／clean／建置之前）：不足就寫 error、不前進 last-sha，空間恢復後同一個 sha 會重跑。
 # 每分鐘都會再進來，所以同一個 sha 只送一次 status（disk-low-sha 記著）。
 free_kb="$(df -Pk "${CI_ROOT}" | awk 'NR==2 {print $4}')"
@@ -97,11 +122,6 @@ rm -f "${CI_ROOT}/disk-low-sha"
 log="${CI_ROOT}/logs/${sha}.log"
 started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '{"sha":"%s","state":"running","started":"%s","log":"%s"}\n' "${sha}" "${started}" "$(json_str "${log}")" > "${CI_ROOT}/status.json"
-# 保險（#763）：舊版測試與被 kill 的測試行程留下的 am-*／agm-*／am-test-* 暫存目錄（名字結尾是 26 碼 ULID）會慢慢塞滿根磁碟
-# （2026-10-01 實測 44G、ubuntu-ci 因 ENOSPC 紅 19 條）。只在持有鎖時清（不會誤刪跑到一半的那一輪），超過 6 小時沒動的才刪；失敗吞掉。
-find "${TMPDIR:-/tmp}" -maxdepth 1 -mmin +360 -regextype posix-extended \
-    -regex '.*/(am|agm)-[A-Za-z0-9-]*[0-9A-HJKMNP-TV-Z]{26}(\.[a-z]+)?' -exec rm -rf {} + 2>/dev/null || true
-
 status pending "ubuntu 完整 CI 執行中"
 
 # pending 送出之後任何一步（checkout、clean、彙總）因 set -e 中斷，都不能讓 commit status 永遠停在 pending、
