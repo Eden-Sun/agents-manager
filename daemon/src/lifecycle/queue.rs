@@ -28,6 +28,12 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         }
     };
     let Some(turn) = db::queued_turn(&app.db, &conv).await? else { return Ok(()) };
+    // 已軟刪的 bot（run 還留著的晚到 child、退役中的 child）不再收字：直送的 prompt 在 #338 就擋了，排隊的不能比較寬鬆。
+    // 撤掉而不是留著——bot 回不來，留著只會一直佔住唯一的排隊名額。撤不掉就留在佇列，下一次叫醒再撤。
+    if db::bot(&app.db, bot_id).await?.is_some_and(|b| b.deleted_at.is_some()) {
+        revoke_queued_turn(app, &turn.id, "bot 已被刪除，排著的 prompt 不再送出").await?;
+        return Ok(());
+    }
     // 交辦已經不要了（cancel／superseded／failed）：撤銷，不送。API 做決定的當下已經撤過一次，這裡是保險——
     // 繞過 API 改了狀態、或決定 commit 之後還沒撤就重啟，都不能讓一則已取消的指令在錯的時機送到（AGM 2026-09-16）。
     // 讀不到交辦的狀態不等於還要、撤不掉也不等於撤完了（#159）：都留在佇列（不認領、不花重試、一個字都不送），
@@ -153,26 +159,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     }
 
     // 讀完 run、還沒認領的那一瞬（測試在這裡插進不拿 bot 鎖的 run 結束，issue #125）。
-    /// 排著的這一則是使用者自己從網頁送的：User /prompt 排的（`awaits_idle = 1`、`origin = web`），而且它的使用者訊息沒有
-/// 轉寄來源（`relay_from` 空）。AGM 派工排的是 `awaits_idle = 0`。讀不到就當不是（照舊受寬限擋，跟改之前一樣）。
-async fn queued_from_the_user(app: &Arc<App>, turn: &db::Turn) -> bool {
-    if turn.origin != "web" || turn.awaits_idle != 1 {
-        return false;
-    }
-    let relayed: Result<Option<i64>, _> = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user' AND relay_from IS NOT NULL",
-    )
-    .bind(&turn.id)
-    .fetch_optional(&app.db)
-    .await;
-    let users: Result<Option<i64>, _> = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user'")
-        .bind(&turn.id)
-        .fetch_optional(&app.db)
-        .await;
-    matches!((relayed, users), (Ok(Some(0)), Ok(Some(n))) if n > 0)
-}
-
-#[cfg(test)]
+    #[cfg(test)]
     {
         super::race_point::hit("flush_before_claim", bot_id).await;
     }
@@ -269,6 +256,25 @@ async fn queued_from_the_user(app: &Arc<App>, turn: &db::Turn) -> bool {
         arm_progress(app, &run.id, bot_id, &turn.id).await;
     }
     written.map_err(|e| e.context("排隊的 prompt 送出去了，送達結果卻寫不進去（記成欠著）"))
+}
+
+/// 排著的這一則是使用者自己從網頁送的：User /prompt 排的（`awaits_idle = 1`、`origin = web`），而且它的使用者訊息沒有
+/// 轉寄來源（`relay_from` 空）。AGM 派工排的是 `awaits_idle = 0`。讀不到就當不是（照舊受寬限擋，跟改之前一樣）。
+async fn queued_from_the_user(app: &Arc<App>, turn: &db::Turn) -> bool {
+    if turn.origin != "web" || turn.awaits_idle != 1 {
+        return false;
+    }
+    let relayed: Result<Option<i64>, _> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user' AND relay_from IS NOT NULL",
+    )
+    .bind(&turn.id)
+    .fetch_optional(&app.db)
+    .await;
+    let users: Result<Option<i64>, _> = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user'")
+        .bind(&turn.id)
+        .fetch_optional(&app.db)
+        .await;
+    matches!((relayed, users), (Ok(Some(0)), Ok(Some(n))) if n > 0)
 }
 
 /// Undo a `queued -> in_flight` claim that never became a delivery, and arm a retry timer for it —
@@ -1696,6 +1702,24 @@ mod flush_queue_tests {
         assert_eq!((t.status.as_str(), t.delivery.as_str()), ("in_flight", "ok"));
         let pane = f.env.herdr.pane("pane-1").unwrap();
         assert_eq!(pane.transcript.iter().filter(|l| l.contains("Reply with PONG please")).count(), 1);
+    }
+
+    /// 已軟刪的 bot（child 退役、專案刪除時沒鎖住的晚到 child）可能還留著 running 的 run：排著的 prompt 不能再打進
+    /// 使用者已經刪掉的東西（#338 說的是直送的 prompt；flush 是同一個道理，不能比直送寬鬆）。
+    #[tokio::test]
+    async fn a_soft_deleted_bot_never_gets_its_queued_prompt_typed_into_its_pane() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&f.bot_id).execute(&app.db).await.unwrap();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+
+        flush_queued_locked(&app, &f.bot_id).await.unwrap();
+
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!(t.status, "failed", "已刪的 bot 不該領走排著的 prompt，而是撤掉它");
+        let writes = f.env.herdr.methods().iter().filter(|m| *m == "pane.send_text" || *m == "pane.send_keys").count();
+        assert_eq!(writes, 0, "一個字都不該打進已刪 bot 的 pane");
     }
 
     /// 排隊中的 grok 多行 prompt：沒有無損證據也照樣送出，turn 標成 unverified（delivery ok＋delivery_verified 0）。

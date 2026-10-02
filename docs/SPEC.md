@@ -1049,7 +1049,7 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 `lifecycle::prompt::prompt_relayed_queueable` 排隊；bot 沒在跑時帶 `start_if_stopped` 的送出也會排隊（issue #122）。
 使用者與 web 的 `POST /api/bots/{id}/prompt` 預設仍回 409；帶 `queue_if_busy:true` 時，若 bot 有 in-flight turn
 或 agent 尚未 idle，則落地一筆 `awaits_idle=1` 的 queued turn。三種 turn 都走 `lifecycle::queue::flush_queued_locked`，
-依 `created_at, id` 領取，一次只送一筆；`awaits_idle=1` 必須等 run 的 agent 狀態明確為 `idle`，`unknown` 不算 idle。
+依 `created_at, id` 領取，一次只送一筆；`awaits_idle=1` 必須等 run 的 agent 狀態明確為 `idle`，`unknown` 不算 idle。已軟刪的 bot 即使 run 還在跑也不領排著的 prompt：flush 撤掉它（`bot 已被刪除，排著的 prompt 不再送出`），跟直送 prompt 擋已刪 bot（#338）一致。
 同一對話仍只有一筆 queued（`turns_one_queued`）；同一顆 bot 再送忙碌中的 web 訊息會回 `queue_slot_taken`，不覆蓋佇列。
 daemon 重啟會重掛所有 queued turn，包括沒有 `next_flush_at` 的列，回到 idle 後照原順序接續送出。
 
