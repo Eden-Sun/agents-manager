@@ -788,13 +788,17 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     // §6.11：AGM 因為閒置收起來的那些。一次讀完，免得每顆 bot 再問一次資料庫。
     let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
     let previews = crate::preview::state_map(&app.db).await.map_err(any_err)?;
+    // 每顆 bot 的 run 與排隊中的回合各一次讀完：逐顆查是 N+1（34 顆 bot 約 30 ms，隨 bot 數線性長）。
+    let mut runs = db::active_runs_by_bot(&app.db).await.map_err(any_err)?;
+    let mut queued_turns = db::queued_turns_by_bot(&app.db).await.map_err(any_err)?;
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
         for b in bots.iter().filter(|b| b.project_id == p.id) {
-            let run = db::active_run(&app.db, &b.id).await.map_err(any_err)?;
-            let queued_turn = db::queued_turn_for_bot(&app.db, &b.id).await.map_err(any_err)?;
-            let bot_connected = app.bot_connected(&b.id).await;
+            let run = runs.remove(&b.id);
+            let queued_turn = queued_turns.remove(&b.id);
+            // host 就是這個專案的 host（`db::bot_host` 的 JOIN 同一個欄位），不必再讀 bot／bot_host 兩次。
+            let bot_connected = app.bot_connected_on(b, &p.host).await;
             bl.push(json!({
                 "id": b.id,
                 "project_id": b.project_id,
@@ -9962,6 +9966,164 @@ mod upload_concurrency_tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(ok.starts_with("HTTP/1.1 200"), "名額放回來之後要收：{ok}");
+    }
+}
+
+/// `GET /api/state` 的 SQL 語句數不能隨 bot 數成長（以前每顆 bot 再問 5 次：active_run、queued_turn、bot＋bot_host×2），
+/// 而且每顆 bot 的 run／lamp／排隊中的回合要跟逐顆查的結果一樣。
+#[cfg(test)]
+mod state_query_count_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_snapshot_does_no_per_bot_lookups() {
+        let env = crate::testing::env().await;
+        for i in 0..15 {
+            let b = crate::testing::claude_bot(&env.app, &env.project_id, &format!("many{i}")).await;
+            crate::testing::fake_run(&env.app, &b.id).await;
+        }
+        db::PER_BOT_LOOKUPS.with(|c| c.set(0));
+        let state = state_json(&env.app).await.unwrap();
+        assert_eq!(state["projects"][0]["bots"].as_array().unwrap().len(), 15);
+        assert_eq!(db::PER_BOT_LOOKUPS.with(|c| c.get()), 0, "每顆 bot 再查一次（active_run／queued_turn／bot／bot_host）= N+1，要改成一次讀完");
+    }
+
+    #[tokio::test]
+    async fn each_bots_run_lamp_and_queued_turn_are_still_its_own() {
+        let env = crate::testing::env().await;
+        let running = crate::testing::claude_bot(&env.app, &env.project_id, "running").await;
+        let run = crate::testing::fake_run(&env.app, &running.id).await;
+        let queued = crate::testing::claude_bot(&env.app, &env.project_id, "queued").await;
+        let idle = crate::testing::claude_bot(&env.app, &env.project_id, "idle").await;
+        let conv = db::ulid();
+        sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)").bind(&conv).bind(&queued.id).bind(db::now()).execute(&env.app.db).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, prompt_text, created_at) VALUES (?,?,'web','queued','pending','等著',?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let state = state_json(&env.app).await.unwrap();
+        let bots: Vec<&Value> = state["projects"].as_array().unwrap().iter().flat_map(|p| p["bots"].as_array().unwrap()).collect();
+        let by = |name: &str| bots.iter().find(|b| b["name"] == name).copied().unwrap();
+        assert_eq!(by("running")["run"]["id"], json!(run));
+        assert_eq!(by("running")["lamp"], "idle");
+        assert!(by("running")["queued_turn"].is_null());
+        assert_eq!(by("queued")["queued_turn"]["id"], json!(turn));
+        assert!(by("queued")["run"].is_null());
+        assert_eq!(by("queued")["lamp"], "offline");
+        assert!(by("idle")["run"].is_null() && by("idle")["queued_turn"].is_null());
+        env.app.connected.store(false, Ordering::SeqCst);
+        let state = state_json(&env.app).await.unwrap();
+        let lamp = |name: &str| state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["name"] == name).unwrap()["lamp"].clone();
+        assert_eq!(lamp("running"), "disconnected", "herdr 斷線時燈是 disconnected");
+        assert_eq!(lamp("idle"), "disconnected");
+    }
+}
+
+/// `GET /api/state` 與 WebSocket 推送的成本（量測）。`AM_STATE_BENCH_DIR` 指到一個放著 `db.sqlite3`（正式 DB 的**複本**）的暫存目錄時才跑，
+/// 沒設就直接過；複本用完要立刻刪（見 CLAUDE.md：DB 只能放 `mktemp -d /tmp/am-state-XXXX`）。
+#[cfg(test)]
+mod state_cost_tests {
+    use super::*;
+    use std::time::Instant;
+
+    async fn app_over(dir: &std::path::Path) -> Option<Arc<App>> {
+        let pool = db::open(&dir.join("db.sqlite3")).await.ok()?;
+        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.ok()?;
+        let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
+        let app = App::new(pool, client.clone(), client, cfg, dir.to_path_buf(), dir.join("agents-managerd"), 7799, "t".into(), "test".into(), false);
+        app.connected.store(true, Ordering::SeqCst);
+        Some(app)
+    }
+
+    #[tokio::test]
+    async fn state_snapshot_and_ws_fanout_stay_cheap_on_a_production_sized_db() {
+        let Ok(dir) = std::env::var("AM_STATE_BENCH_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let app = app_over(&dir).await.expect("open the db copy");
+        let bots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE deleted_at IS NULL").fetch_one(&app.db).await.unwrap();
+        // 暖機一次，再量 30 次。
+        let _ = state_json(&app).await.unwrap();
+        let mut build = Vec::new();
+        let mut ser = Vec::new();
+        let mut size = 0;
+        for _ in 0..30 {
+            let t = Instant::now();
+            let v = state_json(&app).await.unwrap();
+            build.push(t.elapsed());
+            let t = Instant::now();
+            let bytes = serde_json::to_vec(&v).unwrap();
+            ser.push(t.elapsed());
+            size = bytes.len();
+        }
+        build.sort();
+        ser.sort();
+        // 哪一段貴：逐段量（同一份 DB、暖機後各 20 次取中位數）。
+        async fn med<F: std::future::Future>(label: &str, mut f: impl FnMut() -> F) {
+            let mut v = Vec::new();
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ = f().await;
+                v.push(t.elapsed());
+            }
+            v.sort();
+            eprintln!("PART {label}: p50={:?}", v[10]);
+        }
+        let ids: Vec<String> = db::live_bots(&app.db).await.unwrap().into_iter().map(|b| b.id).collect();
+        med("live_projects", || db::live_projects(&app.db)).await;
+        med("live_bots", || db::live_bots(&app.db)).await;
+        med("unread_counts", || crate::read_marks::unread_counts(&app.db)).await;
+        med("read_marks", || crate::read_marks::marks(&app.db)).await;
+        med("group_unread_counts", || crate::read_marks::group_unread_counts(&app.db)).await;
+        med("group_marks", || crate::read_marks::group_marks(&app.db)).await;
+        med("preview_state_map", || crate::preview::state_map(&app.db)).await;
+        med("all_asleep", || crate::supervisor::idle_sleep::all_asleep(&app)).await;
+        med("active_run x bots", || async { for id in &ids { let _ = db::active_run(&app.db, id).await; } }).await;
+        med("queued_turn x bots", || async { for id in &ids { let _ = db::queued_turn_for_bot(&app.db, id).await; } }).await;
+        med("bot_connected x bots", || async { for id in &ids { let _ = app.bot_connected(id).await; } }).await;
+        med("cli_updates", || crate::cli_update::running_list(&app)).await;
+        med("hosts_list", || hosts_list(&app)).await;
+        med("cfg identities", || async { app.cfg.get().await.identities }).await;
+        eprintln!("STATE bots={bots} size={size}B build p50={:?} max={:?} | serialize p50={:?} max={:?}", build[15], build[29], ser[15], ser[29]);
+
+        // WebSocket 扇出：每個事件進環一份、`bus.send` 一份，每條連線 recv 時再 clone、再各自序列化一次。
+        let payload = |n: usize| json!({"bot_id": "01M1", "turn_id": "01M2", "text": "x".repeat(n), "items": (0..20).map(|i| json!({"i": i, "k": "v"})).collect::<Vec<_>>()});
+        for (label, n) in [("small(0.5KB)", 500usize), ("big(50KB)", 50_000)] {
+            for clients in [0usize, 5] {
+                let mut handles = Vec::new();
+                let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                for _ in 0..clients {
+                    let mut rx = app.subscribe();
+                    let done = done.clone();
+                    handles.push(tokio::spawn(async move {
+                        while let Ok(ev) = rx.recv().await {
+                            let _ = serde_json::to_string(&ev).unwrap();
+                            done.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }));
+                }
+                let events = 2000;
+                let t = Instant::now();
+                for _ in 0..events {
+                    app.emit("message_added", payload(n)).await;
+                    tokio::task::yield_now().await;
+                }
+                while done.load(Ordering::SeqCst) < events * clients {
+                    tokio::task::yield_now().await;
+                }
+                let total = t.elapsed();
+                eprintln!("WS {label} clients={clients}: {events} events in {total:?} = {:?}/event", total / events as u32);
+                for h in handles {
+                    h.abort();
+                }
+            }
+        }
+        // 20 ms 是目標；這個機器常常負載 40+，量測用的上限放寬到 50 ms，只擋「又變成逐顆查」這種數量級的退步。
+        assert!(build[15] < std::time::Duration::from_millis(50), "state_json p50 {:?}", build[15]);
+        assert!(size < 1_000_000, "state size {size}");
     }
 }
 

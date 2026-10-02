@@ -410,8 +410,13 @@ impl App {
         let Ok(Some(bot)) = crate::db::bot(&self.db, bot_id).await else { return false };
         // 讀不到 host＝不知道，不當成 local 去比對本機 herdr（#243）。
         let Ok(host) = crate::db::bot_host(&self.db, bot_id).await else { return false };
-        let Some(session) = self.session_for_bot(&bot, &host).await else { return false };
-        self.session_connected(&host, &session).await
+        self.bot_connected_on(&bot, &host).await
+    }
+
+    /// [`bot_connected`] 在呼叫端已經有 bot 列與它的 host 時用（`GET /api/state` 每顆 bot 都問，不再各讀兩次 DB）。
+    pub async fn bot_connected_on(&self, bot: &crate::db::Bot, host: &str) -> bool {
+        let Some(session) = self.session_for_bot(bot, host).await else { return false };
+        self.session_connected(host, &session).await
     }
 
     /// 既有 run 的 session：新 run 會存，沒存的沿用 bot／專案的設定。
