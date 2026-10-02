@@ -226,6 +226,57 @@ class TranscriptTransfer(unittest.TestCase):
         for d, _, names in os.walk(e.dst):
             self.assertEqual(names, [])
 
+    # ---- 對抗式審查（資料安全）----
+
+    def test_a_symlinked_session_file_is_refused_not_followed(self):
+        """`transcript_path` 是 DB 記的字串：位置對但是個符號連結（指到憑證之類），不能被讀進 bundle 搬到別台機器。"""
+        e = self.env
+        secret = e.put("elsewhere/token.txt", "SECRET-TOKEN\n")
+        link = os.path.join(e.src, f".claude/projects/{claude_key(SRC_PROJ)}/s-link.jsonl")
+        os.makedirs(os.path.dirname(link))
+        os.symlink(secret, link)
+        b = e.bundle([bot("b1", "claude")], [run("r1", "b1", "s-link", link)])
+        r, rep, _ = e.run(b, maps=self.maps)
+        self.assertEqual(rep["files_written"], 0, rep)
+        self.assertEqual(len(rep["refused"]), 1, rep)
+        for d, _, names in os.walk(e.dst):
+            for n in names:
+                with open(os.path.join(d, n), errors="replace") as f:
+                    self.assertNotIn("SECRET-TOKEN", f.read())
+
+    def test_a_symlink_inside_the_companion_dir_is_not_carried_over(self):
+        e = self.env
+        src = claude_session(e, SRC_PROJ, "s-comp")
+        secret = e.put("elsewhere/token2.txt", "SECRET-TOKEN-2\n")
+        comp = os.path.join(os.path.dirname(src), "s-comp")
+        os.makedirs(comp)
+        os.symlink(secret, os.path.join(comp, "leak.txt"))
+        e.put(f".claude/projects/{claude_key(SRC_PROJ)}/s-comp/ok.txt", "fine\n")
+        b = e.bundle([bot("b1", "claude")], [run("r1", "b1", "s-comp", src)])
+        r, rep, _ = e.run(b, maps=self.maps)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        for d, _, names in os.walk(e.dst):
+            for n in names:
+                with open(os.path.join(d, n), errors="replace") as f:
+                    self.assertNotIn("SECRET-TOKEN-2", f.read())
+        self.assertEqual(e.dst_read(f".claude/projects/{claude_key(DST_PROJ)}/s-comp/ok.txt"), "fine\n")
+
+    def test_a_leftover_temp_file_with_loose_permissions_does_not_make_the_result_loose(self):
+        """被殺掉的上一趟留下的 `.transfer-tmp` 是 0644：`open(..., 0o600)` 只在新建時才套用，內容寫進去再 replace 就是 0644。"""
+        e = self.env
+        src = claude_session(e, SRC_PROJ, "s-tmp")
+        rel = f".claude/projects/{claude_key(DST_PROJ)}/s-tmp.jsonl"
+        tmp = os.path.join(e.dst, rel + ".transfer-tmp")
+        os.makedirs(os.path.dirname(tmp))
+        with open(tmp, "w") as f:
+            f.write("half")
+        os.chmod(tmp, 0o644)
+        b = e.bundle([bot("b1", "claude")], [run("r1", "b1", "s-tmp", src)])
+        r, rep, _ = e.run(b, maps=self.maps)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(oct(os.stat(os.path.join(e.dst, rel)).st_mode & 0o777), "0o600")
+        self.assertFalse(os.path.exists(tmp), "暫存檔不留")
+
     def test_bad_maps_are_refused(self):
         e = self.env
         b = e.bundle([bot("b1", "claude")], [])

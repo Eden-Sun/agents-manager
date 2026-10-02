@@ -121,6 +121,9 @@ class Plan:
         home = self.source_home + "/"
         if not real.startswith(home):
             raise ValueError(f"{path} 不在來源 $HOME（{self.source_home}）底下")
+        # 符號連結不搬：DB 記的路徑位置對、檔卻是指到別處（憑證、別的對話）的連結，讀出來就帶到別台機器去了。
+        if os.path.islink(real) or not os.path.realpath(real).startswith(os.path.realpath(self.source_home) + "/"):
+            raise ValueError(f"{path} 是符號連結或實際位置不在來源 $HOME 底下，不搬")
         rel = real[len(home):]
         if not ALLOWED.match(rel) or os.path.basename(rel) in SECRETS:
             raise ValueError(f"{path} 不是對話檔的位置（只搬 claude projects／codex sessions／grok sessions）")
@@ -229,6 +232,8 @@ def walk_dir(src_dir, rel_base):
             if n.endswith(".lock") or n in SECRETS:
                 continue
             p = os.path.join(d, n)
+            if os.path.islink(p):
+                continue
             out.append((p, rel_base + "/" + os.path.relpath(p, src_dir)))
     return out
 
@@ -250,7 +255,10 @@ class DirTarget:
         p = os.path.join(self.home, rel)
         os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
         tmp = p + ".transfer-tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # 上一趟被殺掉可能留下別的權限（或符號連結）的暫存檔：先清掉再 O_EXCL 新建，0o600 才一定套得上。
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
         os.replace(tmp, p)
@@ -260,7 +268,8 @@ REMOTE_DIGEST = ("import hashlib,os,sys;p=os.path.join(os.path.expanduser('~'),s
                  "print(hashlib.sha256(open(p,'rb').read()).hexdigest() if os.path.isfile(p) else '')")
 REMOTE_PUT = ("import os,sys;p=os.path.join(os.path.expanduser('~'),sys.argv[1]);"
               "os.makedirs(os.path.dirname(p),mode=0o700,exist_ok=True);t=p+'.transfer-tmp';"
-              "f=os.fdopen(os.open(t,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),'wb');"
+              "os.path.lexists(t) and os.unlink(t);"
+              "f=os.fdopen(os.open(t,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'wb');"
               "f.write(sys.stdin.buffer.read());f.close();os.replace(t,p)")
 
 

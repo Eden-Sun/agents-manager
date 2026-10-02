@@ -353,6 +353,11 @@ pub(crate) async fn identity_config_dir_for_fence(
 /// 透過 ssh 執行一段 shell script，不是本機↔遠端搬檔（issue #95：以前只做本機這半，遠端完全跳過，
 /// 換身分後 `--resume` 在遠端主機上一樣找不到檔案，只是要等 CLI 真的跑起來才會發現）。
 async fn stage_cross_identity_transcript(app: &Arc<App>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
+    // 只有 claude 的 session 檔住在 `<CLAUDE_CONFIG_DIR>/projects/` 底下。codex／grok 的對話檔不歸這個目錄管：
+    // 以前照樣複製，把 codex 的 rollout 整份丟進 `<claude 身分>/projects/<日>/`（資料安全審查）。
+    if bot.kind != "claude" {
+        return Ok(());
+    }
     if host == LOCAL_HOST {
         stage_cross_identity_transcript_local(app, bot, transcript).await
     } else {
@@ -401,27 +406,40 @@ fn stage_cross_identity_transcript_local_fs(
     if same {
         return Ok(());
     }
-    let Some(cwd_key) = cwd_dir.file_name() else { return Err("transcript_missing") };
-    let dest_dir = new_projects.join(cwd_key);
-    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
-        tracing::warn!(bot = %bot_name, dest = %dest_dir.display(), error = %e, "identity switch：建不出新身分的 projects 目錄，改開新對話");
+    // 要複製了：來源是 DB 記的字串，形狀不對（不是 projects/<key>/<sid>.jsonl）或是符號連結，一律不複製。
+    if !super::transcript_stage::is_claude_transcript(src) {
+        tracing::warn!(bot = %bot_name, from = %src.display(), "identity switch：來源不是 projects/<cwd>/<id>.jsonl 的一般檔，不複製，改開新對話");
         return Err("transcript_missing");
     }
-    let dest_file = dest_dir.join(fname);
-    if let Err(e) = std::fs::copy(src, &dest_file) {
-        tracing::warn!(bot = %bot_name, from = %src.display(), to = %dest_file.display(), error = %e, "identity switch：複製 session 檔到新身分失敗，改開新對話");
-        return Err("transcript_missing");
+    let Some(cwd_key) = cwd_dir.file_name() else { return Err("transcript_missing") };
+    let dest_dir = new_projects.join(cwd_key);
+    // 暫存檔＋rename、不蓋比來源長的目標、檔 0600／目錄 0700：規則在 `transcript_stage`。
+    let staged = match super::transcript_stage::stage_file(src, &dest_dir, fname) {
+        Ok(staged) => staged,
+        Err(e) => {
+            tracing::warn!(bot = %bot_name, from = %src.display(), to = %dest_dir.display(), error = %e, "identity switch：複製 session 檔到新身分失敗，改開新對話");
+            return Err("transcript_missing");
+        }
+    };
+    match &staged {
+        super::transcript_stage::Staged::KeptLongerDestination => {
+            tracing::info!(bot = %bot_name, dest = %dest_dir.join(fname).display(), "identity switch：新身分那邊的 session 檔已經比來源長，沿用它不覆蓋");
+        }
+        super::transcript_stage::Staged::Diverged { set_aside } => {
+            tracing::warn!(bot = %bot_name, set_aside = %set_aside.display(), "identity switch：新身分那邊的 session 檔跟來源分岔，舊的改名留在旁邊");
+        }
+        _ => {}
     }
     // 檔名同名的附屬目錄（有些 CLI 版本會在 jsonl 旁邊放一份）一起搬，搬不動不影響主對話。
     if let Some(stem) = src.file_stem() {
         let companion_src = cwd_dir.join(stem);
         if companion_src.is_dir() {
-            if let Err(e) = copy_dir_recursive(&companion_src, &dest_dir.join(stem)) {
+            if let Err(e) = super::transcript_stage::copy_dir_private(&companion_src, &dest_dir.join(stem)) {
                 tracing::warn!(bot = %bot_name, error = %e, "identity switch：session 附屬目錄複製失敗（不影響主對話檔）");
             }
         }
     }
-    tracing::info!(bot = %bot_name, from = %src.display(), to = %dest_file.display(), "identity switch：session 檔已搬到新身分的 projects 目錄，可以接回對話");
+    tracing::info!(bot = %bot_name, from = %src.display(), to = %dest_dir.join(fname).display(), "identity switch：session 檔已搬到新身分的 projects 目錄，可以接回對話");
     Ok(())
 }
 
@@ -429,6 +447,11 @@ fn stage_cross_identity_transcript_local_fs(
 /// 執行一段 shell script，不是本機↔遠端搬檔。主機沒連線／ssh 指令本身失敗都回 `transcript_missing`
 /// ——連不上就假裝已經搬過去，比直接開新對話更糟（會讓 `--resume` 帶著錯的期待送出去）。
 async fn stage_cross_identity_transcript_remote(app: &Arc<App>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
+    // 形狀不對（不是 projects/<key>/<id>.jsonl）就不碰 ssh：路徑是 DB 記的字串，不能拿來叫遠端複製任意檔案。
+    if !super::transcript_stage::has_claude_transcript_shape(transcript) {
+        tracing::warn!(bot = %bot.name, host, transcript, "identity switch：遠端來源不是 projects/<cwd>/<id>.jsonl，不複製，改開新對話");
+        return Err("transcript_missing");
+    }
     let src = std::path::Path::new(transcript);
     let (Some(cwd_dir), Some(fname)) = (src.parent(), src.file_name()) else { return Err("transcript_missing") };
     let Some(old_projects) = cwd_dir.parent() else { return Err("transcript_missing") };
@@ -485,22 +508,35 @@ fn remote_stage_script(old_projects: &str, new_projects: &str, cwd_key: &str, fn
     let new_cwd_dir = format!("{new_projects}/{cwd_key}");
     let src = format!("{old_cwd_dir}/{fname}");
     let dest = format!("{new_cwd_dir}/{fname}");
+    // 附屬目錄：`umask 077` 之下 `cp -R` 建出來的目錄 0700、檔 0600（不保留來源權限）；符號連結不展開。
     let companion = stem
         .map(|s| {
             let from = format!("{old_cwd_dir}/{s}");
             format!(
-                "if [ -d {from} ]; then cp -a {from} {to} 2>/dev/null || true; fi\n",
+                "if [ -d {from} ]; then cp -R {from} {to} 2>/dev/null || true; fi\n",
                 from = sh_quote(&from),
                 to = sh_quote(&format!("{new_cwd_dir}/"))
             )
         })
         .unwrap_or_default();
+    // 資料安全（對抗式審查）：`umask 077`；來源要是一般檔（符號連結不跟）；先複製到同目錄的暫存檔再 `mv`，複製到一半被殺
+    // 最終路徑上不會有半份檔；目標已經有同名檔：一樣或比來源長（來源是它的前綴）就不動，是來源的前綴就蓋，
+    // 分岔就把目標改名留在旁邊（`….jsonl.replaced-<秒>`，不以 .jsonl 結尾）。`head -c N | cmp -s - file`：GNU／BSD 都能用。
     format!(
         "set -e\n\
+         umask 077\n\
          if [ \"$(readlink -f {old} 2>/dev/null || printf '%s' {old})\" = \"$(readlink -f {new} 2>/dev/null || printf '%s' {new})\" ]; then printf 'AM_SAME\\n'; exit 0; fi\n\
-         [ -f {src} ] || {{ printf 'AM_MISSING\\n'; exit 0; }}\n\
+         {{ [ -f {src} ] && [ ! -L {src} ]; }} || {{ printf 'AM_MISSING\\n'; exit 0; }}\n\
          mkdir -p {new_cwd_dir} || {{ printf 'AM_MKDIR_FAILED\\n'; exit 0; }}\n\
-         cp {src} {dest} || {{ printf 'AM_COPY_FAILED\\n'; exit 0; }}\n\
+         if [ -f {dest} ] && [ ! -L {dest} ]; then\n\
+           s=$(wc -c < {src} | tr -d ' '); d=$(wc -c < {dest} | tr -d ' ')\n\
+           if [ \"$d\" -ge \"$s\" ] && head -c \"$s\" {dest} | cmp -s - {src}; then printf 'AM_STAGED\\n'; exit 0; fi\n\
+           if ! {{ [ \"$d\" -lt \"$s\" ] && head -c \"$d\" {src} | cmp -s - {dest}; }}; then mv {dest} {dest}.replaced-$(date +%s) || {{ printf 'AM_COPY_FAILED\\n'; exit 0; }}; fi\n\
+         fi\n\
+         t={new_cwd_dir}/.stage-$$\n\
+         if ! cp {src} \"$t\"; then rm -f \"$t\"; printf 'AM_COPY_FAILED\\n'; exit 0; fi\n\
+         chmod 600 \"$t\"\n\
+         mv \"$t\" {dest} || {{ rm -f \"$t\"; printf 'AM_COPY_FAILED\\n'; exit 0; }}\n\
          {companion}printf 'AM_STAGED\\n'\n",
         old = sh_quote(old_projects),
         new = sh_quote(new_projects),
@@ -519,20 +555,6 @@ fn parse_stage_output(out: &str) -> Result<(), &'static str> {
     } else {
         Err("transcript_missing")
     }
-}
-
-pub(crate) fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dest)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let to = dest.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry.path(), &to)?;
-        } else {
-            std::fs::copy(entry.path(), to)?;
-        }
-    }
-    Ok(())
 }
 
 fn cannot_resume(bot_id: &str, why: &str) -> LcError {
@@ -1693,6 +1715,33 @@ mod resume_args_tests {
         assert!(note.contains("接不回"), "{note}");
     }
 
+    /// 這個 bot 自己身分的 `projects/` 底下的 transcript 路徑（檔還沒寫）：身分的 config dir 就是它所在的那一份，
+    /// 所以「換身分複製」判成同一份、不碰測試機器真正的 `~/.claude`。
+    async fn own_transcript(e: &crate::testing::Env, bot: &db::Bot, name: &str) -> std::path::PathBuf {
+        let dir = e.dir.join("own-cfg");
+        let d = dir.to_str().unwrap().to_string();
+        e.app
+            .cfg
+            .update(|c| {
+                if !c.identities.iter().any(|i| i.name == "own") {
+                    c.identities.push(crate::config::IdentityCfg {
+                        name: "own".into(),
+                        kind: "claude".into(),
+                        host: None,
+                        env: [("CLAUDE_CONFIG_DIR".to_string(), d.clone())].into(),
+                        args: vec![],
+                    });
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE bots SET identity='own' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        let path = dir.join("projects/-own").join(format!("{name}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        path
+    }
+
     /// #742：全新對話起的 claude run 記空基準（第一輪巡邏前的切換要採用）；`--resume` 接回的不記。
     #[tokio::test]
     async fn only_a_fresh_conversation_gets_an_empty_live_switch_baseline() {
@@ -1701,7 +1750,7 @@ mod resume_args_tests {
         let fresh = start_bot_with(&e.app, &pm.id, StartOpts::default()).await.unwrap();
         assert!(crate::claude_live::is_fresh(&fresh), "全新對話：空基準");
 
-        let transcript = e.dir.join("pm-742.jsonl");
+        let transcript = own_transcript(&e, &pm, "pm-742").await;
         std::fs::write(&transcript, "{}\n").unwrap();
         sqlx::query("UPDATE runs SET native_session_id='sid-742', transcript_path=? WHERE id=?")
             .bind(transcript.to_str().unwrap())
@@ -1731,7 +1780,7 @@ mod resume_args_tests {
         assert!(started_args(&e).is_empty(), "nothing was started");
         assert!(db::active_run(&e.app.db, &pm.id).await.unwrap().is_none(), "no run row left behind");
 
-        let transcript = e.dir.join("pm.jsonl");
+        let transcript = own_transcript(&e, &pm, "pm").await;
         std::fs::write(&transcript, "{}\n").unwrap();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
@@ -1790,7 +1839,7 @@ mod resume_args_tests {
         assert!(!args.contains(&"--resume".into()), "resumed a session that has no transcript: {args:?}");
         stop_bot(&e.app, &pm.id).await.unwrap();
 
-        let written = e.dir.join("written.jsonl");
+        let written = own_transcript(&e, &pm, "written").await;
         std::fs::write(&written, "{}\n").unwrap();
         ended("sid-written", written.to_str().unwrap(), "2026-09-11T00:10:00Z").execute(&e.app.db).await.unwrap();
         start_bot_with(&e.app, &pm.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
@@ -1931,6 +1980,163 @@ mod resume_args_tests {
             let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap();
             assert_eq!(plan, Err("transcript_missing"));
         }
+
+        // ---- 對抗式審查（資料安全）：以下測的都是「換身分複製 transcript」的失敗與邊界 ----
+
+        use std::os::unix::fs::PermissionsExt;
+
+        /// 把一段 run 記在 DB 裡，回新身分（`cc9`）的 config dir。
+        async fn seed(e: &crate::testing::Env, bot: &db::Bot, kind: &str, sid: &str, transcript: &std::path::Path) -> std::path::PathBuf {
+            let new_dir = e.dir.join(format!("new-{sid}"));
+            set_identity_dir(&e.app, "cc9", &new_dir).await;
+            sqlx::query("UPDATE bots SET identity='cc9', kind=? WHERE id=?").bind(kind).bind(&bot.id).execute(&e.app.db).await.unwrap();
+            sqlx::query(
+                "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at)
+                 VALUES (?,?,'stopped','idle',?,?,'2026-09-17T00:00:00Z','2026-09-17T00:01:00Z')",
+            )
+            .bind(db::ulid())
+            .bind(&bot.id)
+            .bind(sid)
+            .bind(transcript.to_str().unwrap())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+            new_dir
+        }
+
+        async fn plan_of(e: &crate::testing::Env, bot: &db::Bot) -> Result<(String, Vec<String>), &'static str> {
+            let bot = db::bot(&e.app.db, &bot.id).await.unwrap().unwrap();
+            native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap()
+        }
+
+        fn files_under(dir: &std::path::Path) -> Vec<String> {
+            fn walk(d: &std::path::Path, out: &mut Vec<String>) {
+                let Ok(rd) = std::fs::read_dir(d) else { return };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() { walk(&p, out) } else { out.push(p.to_string_lossy().into_owned()) }
+                }
+            }
+            let mut out = vec![];
+            walk(dir, &mut out);
+            out.sort();
+            out
+        }
+
+        /// codex／grok 的對話檔不在 claude 的 `projects/` 底下，也不歸 `CLAUDE_CONFIG_DIR` 管：以前照樣複製進
+        /// `<claude 身分>/projects/<日>/rollout-….jsonl`，把整段 codex 對話複製到 claude 的目錄裡當垃圾專案。
+        #[tokio::test]
+        async fn a_codex_rollout_is_never_copied_into_a_claude_projects_dir() {
+            let e = env().await;
+            let bot = claude_bot(&e.app, &e.project_id, "cx").await;
+            let rollout = e.dir.join("codex-home/sessions/2026/10/02/rollout-2026-10-02T00-00-00-sid-cx.jsonl");
+            std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+            std::fs::write(&rollout, "{\"secret\":\"conversation\"}\n").unwrap();
+            let new_dir = seed(&e, &bot, "codex", "sid-cx", &rollout).await;
+            let _ = plan_of(&e, &bot).await;
+            assert!(files_under(&new_dir).is_empty(), "codex 的對話被複製進 claude 的目錄：{:?}", files_under(&new_dir));
+        }
+
+        /// 來源路徑來自 hook payload 記下的 `transcript_path`：不是 `…/projects/<key>/<sid>.jsonl` 的形狀、或是符號連結
+        /// （指到別的檔），都不能被「換身分」複製到另一個身分的目錄。
+        #[tokio::test]
+        async fn only_a_regular_jsonl_inside_a_projects_dir_is_ever_staged() {
+            let e = env().await;
+            let bot = claude_bot(&e.app, &e.project_id, "shape").await;
+            let secret = e.dir.join("fake-home/.codex/auth.json");
+            std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+            std::fs::write(&secret, "TOKEN").unwrap();
+
+            // 1. 形狀不對（不是 projects/<key>/<sid>.jsonl）。
+            let new_dir = seed(&e, &bot, "claude", "sid-shape", &secret).await;
+            assert_eq!(plan_of(&e, &bot).await, Err("transcript_missing"));
+            assert!(files_under(&new_dir).is_empty(), "憑證被複製了：{:?}", files_under(&new_dir));
+
+            // 2. 形狀對，但檔案是指到別處的符號連結。
+            let linked = e.dir.join("old-link/projects/-k/sid-link.jsonl");
+            std::fs::create_dir_all(linked.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&secret, &linked).unwrap();
+            sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, transcript_path, started_at, ended_at) VALUES (?,?,'stopped','idle','sid-link',?,'2026-09-18T00:00:00Z','2026-09-18T00:01:00Z')")
+                .bind(db::ulid()).bind(&bot.id).bind(linked.to_str().unwrap()).execute(&e.app.db).await.unwrap();
+            assert_eq!(plan_of(&e, &bot).await, Err("transcript_missing"));
+            assert!(files_under(&new_dir).is_empty(), "符號連結被跟著複製：{:?}", files_under(&new_dir));
+        }
+
+        /// transcript 是整段對話內容：複製出去的檔 0600、這次新建的目錄 0700，不管來源檔當初是什麼權限（umask 022 的 0644 很常見）。
+        #[tokio::test]
+        async fn the_copy_and_its_new_directories_are_private() {
+            let e = env().await;
+            let bot = claude_bot(&e.app, &e.project_id, "priv").await;
+            let old_dir = e.dir.join("old-priv");
+            let t = write_jsonl(&old_dir, "-Users-x-priv", "sid-priv");
+            std::fs::set_permissions(&t, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let companion = old_dir.join("projects/-Users-x-priv/sid-priv/sub");
+            std::fs::create_dir_all(&companion).unwrap();
+            std::fs::write(companion.join("note.txt"), "x").unwrap();
+            std::fs::set_permissions(companion.join("note.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+            let new_dir = seed(&e, &bot, "claude", "sid-priv", &t).await;
+            plan_of(&e, &bot).await.expect("resumable");
+            let mode = |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            let base = new_dir.join("projects/-Users-x-priv");
+            assert_eq!(mode(base.join("sid-priv.jsonl")), 0o600, "複製出去的對話檔");
+            assert_eq!(mode(base.clone()), 0o700, "新建的 cwd 目錄");
+            assert_eq!(mode(new_dir.join("projects")), 0o700, "新建的 projects 目錄");
+            assert_eq!(mode(base.join("sid-priv/sub/note.txt")), 0o600, "附屬目錄的檔");
+            assert_eq!(mode(base.join("sid-priv/sub")), 0o700, "附屬目錄");
+        }
+
+        /// 目標已經有同名檔而且比來源**長**（來源是它的前綴）：那邊已經接著寫過了，不能被較短的來源蓋回去。
+        #[tokio::test]
+        async fn a_destination_that_already_continued_the_session_is_not_truncated() {
+            let e = env().await;
+            let bot = claude_bot(&e.app, &e.project_id, "cont").await;
+            let old_dir = e.dir.join("old-cont");
+            let t = write_jsonl(&old_dir, "-Users-x-cont", "sid-cont");
+            std::fs::write(&t, "{\"a\":1}\n").unwrap();
+            let new_dir = seed(&e, &bot, "claude", "sid-cont", &t).await;
+            let dest = new_dir.join("projects/-Users-x-cont/sid-cont.jsonl");
+            std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            std::fs::write(&dest, "{\"a\":1}\n{\"b\":2}\n").unwrap();
+            plan_of(&e, &bot).await.expect("resumable");
+            assert_eq!(std::fs::read_to_string(&dest).unwrap(), "{\"a\":1}\n{\"b\":2}\n", "新身分那邊多出來的回合被蓋掉了");
+        }
+
+        /// 兩邊各自長出不同的內容（不是前綴關係）：照 run 記的來源為準，但被換掉的那份留在旁邊，不是直接消失。
+        #[tokio::test]
+        async fn a_diverged_destination_is_set_aside_not_destroyed() {
+            let e = env().await;
+            let bot = claude_bot(&e.app, &e.project_id, "div").await;
+            let old_dir = e.dir.join("old-div");
+            let t = write_jsonl(&old_dir, "-Users-x-div", "sid-div");
+            std::fs::write(&t, "{\"a\":1}\n{\"src\":true}\n").unwrap();
+            let new_dir = seed(&e, &bot, "claude", "sid-div", &t).await;
+            let dest_dir = new_dir.join("projects/-Users-x-div");
+            std::fs::create_dir_all(&dest_dir).unwrap();
+            std::fs::write(dest_dir.join("sid-div.jsonl"), "{\"a\":1}\n{\"dest\":true}\n").unwrap();
+            plan_of(&e, &bot).await.expect("resumable");
+            assert_eq!(std::fs::read_to_string(dest_dir.join("sid-div.jsonl")).unwrap(), "{\"a\":1}\n{\"src\":true}\n");
+            let aside: Vec<_> = files_under(&dest_dir).into_iter().filter(|f| !f.ends_with("/sid-div.jsonl")).collect();
+            assert_eq!(aside.len(), 1, "被換掉的那份要留下來：{aside:?}");
+            assert!(!aside[0].ends_with(".jsonl"), "備份不能也叫 .jsonl，不然 CLI 會把它當成另一段 session：{aside:?}");
+            assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), "{\"a\":1}\n{\"dest\":true}\n");
+        }
+
+        /// 同一顆 bot 同時兩個（以上）接回請求：不會留下暫存檔、結果是完整的來源內容。
+        #[tokio::test]
+        async fn concurrent_resumes_leave_one_complete_copy_and_no_debris() {
+            let e = env().await;
+            let bot = claude_bot(&e.app, &e.project_id, "race").await;
+            let old_dir = e.dir.join("old-race");
+            let t = write_jsonl(&old_dir, "-Users-x-race", "sid-race");
+            let body = "{\"turn\":\"x\"}\n".repeat(20_000);
+            std::fs::write(&t, &body).unwrap();
+            let new_dir = seed(&e, &bot, "claude", "sid-race", &t).await;
+            let results = futures::future::join_all((0..6).map(|_| plan_of(&e, &bot))).await;
+            assert!(results.iter().all(|r| r.is_ok()), "{results:?}");
+            let files = files_under(&new_dir);
+            assert_eq!(files.len(), 1, "只該有最後那一個檔，沒有 .tmp／備份：{files:?}");
+            assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), body);
+        }
     }
 
     /// issue #95：換身分後 transcript 只搬本機，遠端主機的對話接不回來。這裡測遠端那條路：純函式
@@ -1991,6 +2197,100 @@ mod resume_args_tests {
             assert_eq!(std::fs::read_to_string(new.join("cwd-key").join("sid.jsonl")).unwrap(), "hello");
             assert_eq!(std::fs::read_to_string(new.join("cwd-key").join("sid").join("extra.txt")).unwrap(), "companion");
 
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        // ---- 對抗式審查（資料安全）：遠端 script 的暫存檔／權限／覆蓋規則要跟本機版一致 ----
+
+        fn mode(p: &std::path::Path) -> u32 {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+        }
+
+        fn names(dir: &std::path::Path) -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        }
+
+        /// 形狀不對的遠端來源（例如指到 `auth.json`）：連 ssh 都不碰就退回開新對話；host 刻意是連不上的假名，
+        /// 要是有去連會是另一種失敗訊息，但一樣是 `transcript_missing`，所以另外確認 script 根本沒被組出來。
+        #[tokio::test]
+        async fn a_remote_source_of_the_wrong_shape_is_refused_before_any_ssh() {
+            assert!(!crate::lifecycle::transcript_stage::has_claude_transcript_shape("/home/u/.codex/auth.json"));
+            assert!(!crate::lifecycle::transcript_stage::has_claude_transcript_shape("/home/u/.claude/projects/k/sid.txt"));
+            assert!(!crate::lifecycle::transcript_stage::has_claude_transcript_shape("/home/u/.claude/other/k/sid.jsonl"));
+            assert!(crate::lifecycle::transcript_stage::has_claude_transcript_shape("/home/u/.claude-cc1/projects/-Users-x/sid.jsonl"));
+        }
+
+        #[test]
+        fn the_remote_copy_is_private_and_leaves_no_temp_file() {
+            use std::os::unix::fs::PermissionsExt;
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("k/sid/sub")).unwrap();
+            std::fs::write(old.join("k/sid.jsonl"), "hello").unwrap();
+            std::fs::write(old.join("k/sid/sub/n.txt"), "c").unwrap();
+            for f in ["k/sid.jsonl", "k/sid/sub/n.txt"] {
+                std::fs::set_permissions(old.join(f), std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            let new = base.join("new-projects");
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", Some("sid"));
+            assert!(run_script_locally(&script).contains("AM_STAGED"));
+            assert_eq!(mode(&new.join("k/sid.jsonl")), 0o600);
+            assert_eq!(mode(&new.join("k")), 0o700);
+            assert_eq!(mode(&new.join("k/sid/sub/n.txt")), 0o600);
+            assert_eq!(names(&new.join("k")), vec!["sid".to_string(), "sid.jsonl".to_string()], "不能留下暫存檔");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn the_remote_copy_never_truncates_a_destination_that_already_continued() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("k")).unwrap();
+            std::fs::write(old.join("k/sid.jsonl"), "{\"a\":1}\n").unwrap();
+            let new = base.join("new-projects");
+            std::fs::create_dir_all(new.join("k")).unwrap();
+            std::fs::write(new.join("k/sid.jsonl"), "{\"a\":1}\n{\"b\":2}\n").unwrap();
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+            assert!(run_script_locally(&script).contains("AM_STAGED"));
+            assert_eq!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap(), "{\"a\":1}\n{\"b\":2}\n");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn a_diverged_remote_destination_is_set_aside_not_destroyed() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("k")).unwrap();
+            std::fs::write(old.join("k/sid.jsonl"), "{\"a\":1}\n{\"src\":1}\n").unwrap();
+            let new = base.join("new-projects");
+            std::fs::create_dir_all(new.join("k")).unwrap();
+            std::fs::write(new.join("k/sid.jsonl"), "{\"a\":1}\n{\"dest\":1}\n").unwrap();
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+            assert!(run_script_locally(&script).contains("AM_STAGED"));
+            assert_eq!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap(), "{\"a\":1}\n{\"src\":1}\n");
+            let aside: Vec<String> = names(&new.join("k")).into_iter().filter(|n| n != "sid.jsonl").collect();
+            assert_eq!(aside.len(), 1, "{aside:?}");
+            assert!(!aside[0].ends_with(".jsonl"), "{aside:?}");
+            assert_eq!(std::fs::read_to_string(new.join("k").join(&aside[0])).unwrap(), "{\"a\":1}\n{\"dest\":1}\n");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn a_symlinked_remote_source_is_reported_missing_and_copies_nothing() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("k")).unwrap();
+            let secret = base.join("secret");
+            std::fs::write(&secret, "TOKEN").unwrap();
+            std::os::unix::fs::symlink(&secret, old.join("k/sid.jsonl")).unwrap();
+            let new = base.join("new-projects");
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_MISSING"), "{out}");
+            assert!(!new.exists(), "符號連結被跟著複製");
             let _ = std::fs::remove_dir_all(&base);
         }
 
@@ -2099,7 +2399,8 @@ mod resume_args_tests {
                 herdr_session: "agents-manager".into(),
                 remote_path: String::new(),
             }).await;
-            let transcript = e.dir.join("remote-home-resume.jsonl");
+            let transcript = e.dir.join("projects/-k/remote-home-resume.jsonl");
+            std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
             std::fs::write(&transcript, "{}\n").unwrap();
             let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
             let calls2 = calls.clone();
