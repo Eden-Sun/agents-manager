@@ -93,7 +93,7 @@ pub async fn escalation_for(app: &Arc<App>, approval_id: Option<&str>) -> Result
             .map_err(|e| LcError::Upstream(e.to_string()))?
             // 只有「還能用來開窗口」的核准才有資格計時：已消耗、被撤、過期的都不算。
             .filter(|a| a.status == "approved" && RESOURCES.contains(&a.purpose.as_str()))
-            .filter(|a| !a.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le())),
+            .filter(|a| !a.effective_expiry().as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le())),
         None => store::oldest_live_window_approval(&app.db, &now).await.map_err(|e| LcError::Upstream(e.to_string()))?,
     };
     let Some(a) = found else { return Ok(None) };
@@ -565,6 +565,9 @@ pub async fn acquire_with_request(
     if !RESOURCES.contains(&resource) {
         return Err(LcError::Bad(format!("unknown lease resource: {resource}")));
     }
+    if commit.is_some_and(|c| !valid_commit(c)) {
+        return Err(LcError::Bad("commit must be 7-64 hex characters (a git sha)".into()));
+    }
     // A restart interrupts every session on the box. "Take the window anyway" is not a thing
     // you get to ask for: the idle check *is* the window for this resource.
     if EXCLUSIVE.contains(&resource) && !require_idle {
@@ -671,7 +674,7 @@ pub async fn acquire_with_request(
     // The lease may not outlive the permission it rests on. Otherwise "approved until 14:00"
     // quietly becomes "holding the box until 14:45", which is a different promise than the one
     // anybody agreed to.
-    let expires_at = lease_deadline(&iso_in(ttl), approval.expires_at.as_deref());
+    let expires_at = lease_deadline(&iso_in(ttl), approval.effective_expiry().as_deref());
     // 會中斷 pane 的窗口，連**寫下去的那一刻**都要沒有人在送達臨界區：safety 是上面讀的，
     // 讀完到寫入之間還是有可能有一則 prompt 把 turn commit 進來（issue #86 的 TOCTOU）。
     let quiet_delivery = EXCLUSIVE.contains(&resource);
@@ -730,6 +733,11 @@ pub async fn acquire_with_request(
     app.emit("supervisor_changed", json!({"lease": lease.to_json()})).await;
     // token 只在這裡出現一次：`to_json()`（`lease status`、`/api/supervisor`、事件）永遠不含它。
     Ok(json!({"lease": lease.to_json(), "lease_token": lease_token, "approval": approval.to_json(), "safety": safety}))
+}
+
+/// 核准與租約裡的 commit 是 git sha：7～64 碼十六進位。自由字串會被寫進核准、租約、稽核紀錄，腳本也會拿去用。
+pub fn valid_commit(c: &str) -> bool {
+    (7..=64).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The earlier of the requested deadline and the approval's own expiry.
@@ -892,6 +900,97 @@ mod tests {
         let at = (chrono::Utc::now() - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         sqlx::query("UPDATE supervisor_approvals SET decided_at=? WHERE id=?").bind(&at).bind(&a.id).execute(&app.db).await.unwrap();
         a.id
+    }
+
+    /// 核准沒寫有效期（申請、裁示都沒給 `expires_in_secs`）不等於永遠有效：放了一天沒用，當時的安全判斷與 commit 早就過時。
+    /// 預設一天；有寫有效期的照寫的算。過期的不能開窗口，也不能再替升級計時（放寬）開門。
+    #[tokio::test]
+    async fn an_approval_nobody_gave_an_expiry_still_lapses_after_a_day() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let fresh = approved_window(app, 23 * 60).await;
+        let old = approved_window(app, 25 * 60).await;
+        let explicit = approved_window(app, 25 * 60).await;
+        sqlx::query("UPDATE supervisor_approvals SET expires_at=? WHERE id=?").bind(crate::db::iso_in(3600)).bind(&explicit).execute(&app.db).await.unwrap();
+
+        let refused = acquire(app, "rebuild", "ops", &old, None, 300, true, &[]).await.unwrap_err();
+        let LcError::Conflict(detail) = &refused else { panic!("expected a conflict, got {refused:?}") };
+        assert_eq!(detail["reason"], "approval_expired", "{detail}");
+        assert!(store::lease(&app.db, "rebuild").await.unwrap().is_none());
+
+        // 有明寫有效期的，不套預設（呼叫端自己決定了）。
+        let l = acquire(app, "rebuild", "ops", &explicit, None, 300, true, &[]).await.expect("明寫的有效期照算");
+        let fence = l["lease"]["fence"].as_i64().unwrap();
+        release(app, "rebuild", "ops", fence, store::LeaseProof::Token(l["lease_token"].as_str().unwrap())).await.unwrap();
+
+        // 一天內的照常；租約不會活得比隱含的有效期久。
+        let l = acquire(app, "rebuild", "ops", &fresh, None, 3 * 3600, true, &[]).await.expect("23 小時前的核准還有效");
+        let expires = l["lease"]["expires_at"].as_str().unwrap();
+        let implied = store::approval(&app.db, &fresh).await.unwrap().unwrap().effective_expiry().unwrap();
+        assert!(crate::db::cmp_ts(expires, &implied).is_le(), "租約 {expires} 不能比核准隱含的期限 {implied} 久");
+    }
+
+    /// 放了好幾天的舊核准不能讓「等太久就放寬」的計時一開始就算滿（`safety` 不帶核准時看最早那筆還活著的）。
+    #[tokio::test]
+    async fn a_forgotten_ancient_approval_does_not_start_the_escalation_clock() {
+        let e = crate::testing::env().await;
+        let (app, pid) = (&e.app, e.project_id.clone());
+        thinking_bot(app, &pid, "user").await;
+        let _ancient = approved_window(app, 5 * 24 * 60).await;
+        let s = safety(app, &[]).await.unwrap();
+        assert_eq!(s["escalated"], false, "{s}");
+        assert_eq!(s["waited_secs"], serde_json::Value::Null, "過期的核准不計時");
+        assert_eq!(s["safe"], false);
+    }
+
+    /// commit 是自由字串會被寫進核准、租約與稽核紀錄、也會被腳本拿去用：只收 7～64 碼十六進位。
+    #[test]
+    fn a_commit_must_look_like_a_commit() {
+        for ok in ["abc1234", "0123456789abcdef0123456789abcdef01234567", "ABCDEF1"] {
+            assert!(valid_commit(ok), "{ok}");
+        }
+        for bad in ["", "abc", "main", "HEAD~1", "abc1234; rm -rf /", "abc1234\n", "../x", " abc1234", "g123456", &"a".repeat(65)] {
+            assert!(!valid_commit(bad), "{bad:?}");
+        }
+    }
+
+    /// 窗口拿著的時候，同一個 owner 用另一張核准再 acquire 同一個 resource：不重入、不換 fence、不消耗第二張核准。
+    #[tokio::test]
+    async fn the_same_owner_cannot_re_enter_a_window_it_already_holds() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let a = approved_window(app, 0).await;
+        let b = approved_window(app, 0).await;
+        let first = acquire(app, "rebuild", "ops", &a, None, 300, true, &[]).await.unwrap();
+        let fence = first["lease"]["fence"].as_i64().unwrap();
+        let err = acquire(app, "rebuild", "ops", &b, None, 300, true, &[]).await.unwrap_err();
+        let LcError::Conflict(d) = &err else { panic!("{err:?}") };
+        assert_eq!(d["reason"], "lease_held", "{d}");
+        assert_eq!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().fence, fence);
+        assert_eq!(store::approval(&app.db, &b).await.unwrap().unwrap().status, "approved", "第二張沒被消耗");
+    }
+
+    /// 持有者還在做事、TTL 已經到了：續約被拒（`lease_lost`），不是靜靜復活；舊 token 在別人接手後也不能再用。
+    #[tokio::test]
+    async fn an_expired_lease_cannot_be_renewed_and_an_old_token_dies_with_it() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let a = approved_window(app, 0).await;
+        let first = acquire(app, "rebuild", "ops", &a, None, 300, true, &[]).await.unwrap();
+        let (fence, token) = (first["lease"]["fence"].as_i64().unwrap(), first["lease_token"].as_str().unwrap().to_string());
+        let past = (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE supervisor_leases SET expires_at=? WHERE resource='rebuild'").bind(&past).execute(&app.db).await.unwrap();
+        let deadline = iso_in(300);
+        assert!(!store::renew_lease(&app.db, "rebuild", "ops", fence, &deadline).await.unwrap(), "過期的租約不能續");
+        // 別人接手（另一張核准、另一個 owner）。
+        let b = store::create_approval(&app.db, "other", "rebuild", "x", None, None, None).await.unwrap().approval;
+        store::decide_approval(&app.db, &b.id, "approved", "AGM", None, None).await.unwrap();
+        let second = acquire(app, "rebuild", "other", &b.id, None, 300, true, &[]).await.unwrap();
+        assert!(second["lease"]["fence"].as_i64().unwrap() > fence);
+        // 舊持有者的 owner＋fence＋token 全都過期作廢：release 不會動到新的租約。
+        let released = release(app, "rebuild", "ops", fence, store::LeaseProof::Token(&token)).await;
+        assert!(matches!(released, Ok(false)) || released.is_err(), "{released:?}");
+        assert!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().held_at(&crate::db::now()), "新持有者的租約還在");
     }
 
     /// 核准後一直等不到全靜止時才放寬，而且只放寬「思考中」這一項。

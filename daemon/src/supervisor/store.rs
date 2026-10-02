@@ -2574,6 +2574,16 @@ impl Approval {
         })
     }
 
+    /// 實際的到期時間：寫了 `expires_at` 就用它；沒寫的，核准後放過 [`APPROVAL_MAX_AGE_SECS`] 一樣算過期。
+    /// 還沒核准（沒有 `decided_at`）又沒寫有效期就是 `None`——那種狀態本來就不能拿來開窗口。
+    pub fn effective_expiry(&self) -> Option<String> {
+        if let Some(e) = self.expires_at.as_deref() {
+            return Some(e.to_string());
+        }
+        let decided = chrono::DateTime::parse_from_rfc3339(self.decided_at.as_deref()?).ok()?;
+        Some((decided + chrono::Duration::seconds(APPROVAL_MAX_AGE_SECS)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    }
+
     /// 升級計時的起點：接續來的 `wait_since` 與自己被核准的時間，取早的那個。還沒核准就沒有。
     pub fn waiting_since(&self) -> Option<&str> {
         let decided = self.decided_at.as_deref()?;
@@ -2594,7 +2604,7 @@ impl Approval {
                 _ => "approval_not_usable",
             });
         }
-        if self.expires_at.as_deref().is_some_and(|t| crate::db::cmp_ts(t, now).is_le()) {
+        if self.effective_expiry().as_deref().is_some_and(|t| crate::db::cmp_ts(t, now).is_le()) {
             return Some("approval_expired");
         }
         if self.purpose != resource {
@@ -2890,17 +2900,24 @@ pub async fn approval(pool: &SqlitePool, id: &str) -> Result<Option<Approval>> {
 ///
 /// SPEC §18.10「等太久就縮小封鎖面」的計時從它的 `decided_at` 起算：一筆核准放著沒用掉，
 /// 代表這段時間一直等不到安全窗口。
+/// 申請、裁示都沒給有效期的核准，核准後多久沒用就失效。AGM 通常給明確的 `expires_in_secs`（kick 是 6 小時）；
+/// 沒給的不能是「永遠」：放了好幾天的 `approved` 還能開窗口，也讓升級計時一開始就算滿。
+pub const APPROVAL_MAX_AGE_SECS: i64 = 24 * 60 * 60;
+
 pub async fn oldest_live_window_approval(pool: &SqlitePool, now: &str) -> Result<Option<Approval>> {
     // `expires_at` 可能是舊版寫的秒格式：正規化成毫秒再比（issue #101）。
     let expires_at = crate::db::ts_sql("expires_at");
+    let decided = crate::db::ts_sql("decided_at");
     Ok(sqlx::query_as::<_, Approval>(&format!(
         "SELECT * FROM supervisor_approvals
-          WHERE supervisor_id=? AND status='approved' AND purpose IN ('rebuild','restart')
-            AND decided_at IS NOT NULL AND (expires_at IS NULL OR {expires_at} > ?)
+          WHERE supervisor_id=?3 AND status='approved' AND purpose IN ('rebuild','restart')
+            AND decided_at IS NOT NULL
+            AND (({expires_at} > ?1 AND expires_at IS NOT NULL) OR (expires_at IS NULL AND {decided} > ?2))
           ORDER BY MIN(COALESCE(wait_since, decided_at), decided_at) LIMIT 1"
     ))
-    .bind(SUPERVISOR_ID)
     .bind(now)
+    .bind(crate::db::iso_in(-APPROVAL_MAX_AGE_SECS))
+    .bind(SUPERVISOR_ID)
     .fetch_optional(pool)
     .await?)
 }

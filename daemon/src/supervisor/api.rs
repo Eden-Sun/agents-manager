@@ -1140,6 +1140,9 @@ pub async fn post_approval(State(app): State<Arc<App>>, headers: HeaderMap, Json
     if !super::maintenance::RESOURCES.contains(&b.purpose.as_str()) {
         return Err(LcError::Bad(format!("purpose must be one of {:?}", super::maintenance::RESOURCES)));
     }
+    if b.target_commit.as_deref().is_some_and(|c| !super::maintenance::valid_commit(c)) {
+        return Err(LcError::Bad("target_commit must be 7-64 hex characters (a git sha)".into()));
+    }
     let expires = approval_expires(b.expires_in_secs)?;
     let unverified = requester_claim(&app, &headers, &b.requester).await?;
     let out = store::create_approval_notifying(
@@ -1528,7 +1531,7 @@ pub async fn post_lease_renew(
     if !proof.allows(store::lease_token(&app.db, &resource).await.map_err(up)?.as_deref()) {
         return Err(lease_forbidden(&resource, &b.owner, b.lease_token.is_some()));
     }
-    let deadline = super::maintenance::lease_deadline(&iso_in(ttl), approval.as_ref().and_then(|a| a.expires_at.as_deref()));
+    let deadline = super::maintenance::lease_deadline(&iso_in(ttl), approval.as_ref().and_then(|a| a.effective_expiry()).as_deref());
     if !store::renew_lease(&app.db, &resource, &b.owner, b.fence, &deadline).await.map_err(up)? {
         let held = store::lease(&app.db, &resource).await.map_err(up)?;
         return Err(LcError::conflict(

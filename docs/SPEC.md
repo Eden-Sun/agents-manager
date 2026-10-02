@@ -3956,6 +3956,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 2. **取得排他窗口**：`POST /api/supervisor/leases/{resource}/acquire`，在同一個 supervisor lock 裡重驗核准與 idle，單一條件式 UPDATE 拿租約；搶同一窗口只有一個成功。
 
 - 核准是紀錄：申請者、purpose、範圍、`target_commit`、有效期、決定者、理由。acquire 逐項核對（purpose 不符、過期、撤銷、commit 不同都拒）；release 時標 `consumed`——一次核准一個窗口。
+- **核准不會永遠有效**：申請與裁示都沒給 `expires_in_secs` 的核准，核准後 24 小時失效（`Approval::effective_expiry`；明寫的有效期照寫的算）。過期的不能 acquire／renew、不計入升級計時（`oldest_live_window_approval`），租約的期限也不超過它。`target_commit`／acquire 的 `commit` 只收 7～64 碼十六進位的 git sha。daemon-swap 的自動核准（`swap_window`）只沿用、只取代**自己核准的**自動單，AGM 親手核的 restart 單不碰。
   **核准是給申請者的**（review2 2026-09-16）：acquire 的 `owner` 必須等於 `requester`（409 `approval_owner_mismatch`），否則 bot B 能拿 bot A 的核准開窗口、連 A 的升級計時一起借走；
   `request_id` 的冪等比對也含 `requester`。同一張核准開過的窗口**過期沒 release**時，同一張再 acquire 回 409 `approval_already_used` 並當場消耗——
   接手過期租約只消耗「別張」核准，執行端掛掉後拿同一張重試原本會在有效期內開出第二個窗口。renew 不接受 `force`（400）。
