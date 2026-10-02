@@ -3440,7 +3440,9 @@ mod guard_tests {
         let t0 = Instant::now();
         let mut c = guard_with(&base, HASH, "job-3-3", Admission { shared_wait_secs: 2, ..QUICK });
         assert!(c.hs.dir.ends_with(&format!("/{HASH}/job-3-3")), "{:?}", c.hs);
-        assert!(t0.elapsed() >= Duration::from_secs(2), "{:?}", t0.elapsed());
+        // guard 腳本用 `date +%s`（整秒）算已等多久：上限 2 秒實際會在 1～2 秒之間放棄（負載高時更明顯），
+        // 要擋的是「馬上改用冷編譯」，所以門檻是至少等過 1 秒，不是剛好 2 秒。
+        assert!(t0.elapsed() >= Duration::from_secs(1), "{:?}", t0.elapsed());
         c.finish();
         b.finish();
         let _ = std::fs::remove_dir_all(base);
