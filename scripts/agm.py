@@ -50,6 +50,10 @@ RELEASE_MARK = "agm:issue-release"
 LABEL_ONLY_RELEASE = "label-only"
 # 認領多久沒有任何動靜就算放掉了（票上的裁示）。
 CLAIM_STALE_SECS = 24 * 3600
+# 認領／交回標記只認 repo 自己人寫的留言：GitHub 上誰都能在公開 repo 的 issue 底下留言，貼一個
+# `<!-- agm:issue-claim … -->` 就能把別人的票鎖住，或貼 `issue-release` 把正在做的認領撤掉，標記裡的 bot／worktree／branch 文字還會
+# 原樣印給讀的 bot。REST 留言帶 `author_association`；沒帶這個欄位的（測試資料、舊格式）照舊採信。
+TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 GH_TIMEOUT = 60.0
 
 
@@ -1851,6 +1855,9 @@ def current_claim(issue: dict) -> dict | None:
     ordered = []
     for index, c in enumerate(issue.get("comments") or []):
         if not isinstance(c, dict):
+            continue
+        assoc = c.get("author_association") or c.get("authorAssociation")
+        if assoc is not None and str(assoc).upper() not in TRUSTED_ASSOCIATIONS:
             continue
         at = parse_iso(c.get("createdAt") or c.get("created_at"))
         if at is None:

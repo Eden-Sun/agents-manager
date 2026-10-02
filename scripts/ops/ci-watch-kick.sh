@@ -220,7 +220,10 @@ FAILURES=$(python3 -c '
 import json, re, sys
 seen, out = set(), []
 def add(n):
-    n = n.strip()
+    # 這些字串來自 CI log（跑的是 PR／分支上的程式碼，不可信），之後會被放進 issue 內文的 `…` 與派給 bot 的交辦正文：
+    # 反引號會跳出 code span、控制字元與過長的行會把整張票灌滿別人的字。反引號換成單引號、控制字元換成空白、限 200 字。
+    n = re.sub(r"[\x00-\x1f\x7f\u202a-\u202e\u2066-\u2069]", " ", n.replace(chr(96), chr(39)))
+    n = re.sub(r"\s+", " ", n).strip()[:200]
     if n and n not in seen:
         seen.add(n); out.append(n)
 in_block = False
