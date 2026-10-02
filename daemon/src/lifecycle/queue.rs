@@ -131,10 +131,14 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     // 使用者剛按了 interrupt：讓他先拿回輸入框（§4.4a）。判斷放在這裡（而不是觸發端）是因為 flush 不只一個呼叫端
     // （`stuck_turns` 在同一把鎖裡直接呼叫）；排在撤銷檢查之後，不要的派工照樣當場撤。閒著的 bot 不會再有
     // `working -> idle` 邊叫醒它，所以要掛 timer 到寬限結束。
+    // 寬限只替使用者擋**別人**的派工；排著的這一則就是使用者自己在網頁送的（沒有轉寄來源）時不擋——那正是他接管後要打的字
+    // （2026-10-02 prorosal：Esc 後送的一句卡滿 60 秒才送）。
+    if !queued_from_the_user(app, &turn).await {
     if let Some(left) = super::interrupt_grace::hold(app, &bot, &run, &conv).await {
         tracing::info!(bot = %bot_id, turn = %turn.id, wait_s = left.as_secs(), "使用者剛 interrupt：排隊的派工等寬限結束再送");
         schedule_flush_retry(app, bot_id, left);
         return Ok(());
+    }
     }
     let text = turn.prompt_text.clone().unwrap_or_default();
     if text.trim().is_empty() {
@@ -149,7 +153,26 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     }
 
     // 讀完 run、還沒認領的那一瞬（測試在這裡插進不拿 bot 鎖的 run 結束，issue #125）。
-    #[cfg(test)]
+    /// 排著的這一則是使用者自己從網頁送的：User /prompt 排的（`awaits_idle = 1`、`origin = web`），而且它的使用者訊息沒有
+/// 轉寄來源（`relay_from` 空）。AGM 派工排的是 `awaits_idle = 0`。讀不到就當不是（照舊受寬限擋，跟改之前一樣）。
+async fn queued_from_the_user(app: &Arc<App>, turn: &db::Turn) -> bool {
+    if turn.origin != "web" || turn.awaits_idle != 1 {
+        return false;
+    }
+    let relayed: Result<Option<i64>, _> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user' AND relay_from IS NOT NULL",
+    )
+    .bind(&turn.id)
+    .fetch_optional(&app.db)
+    .await;
+    let users: Result<Option<i64>, _> = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user'")
+        .bind(&turn.id)
+        .fetch_optional(&app.db)
+        .await;
+    matches!((relayed, users), (Ok(Some(0)), Ok(Some(n))) if n > 0)
+}
+
+#[cfg(test)]
     {
         super::race_point::hit("flush_before_claim", bot_id).await;
     }
@@ -1592,6 +1615,22 @@ mod flush_queue_tests {
         // AGM 自己排進去的那筆不是「使用者新輸入」：下一次 flush 照樣等寬限。
         flush_queued_locked(&app, &f.bot_id).await.unwrap();
         assert_eq!(typed(&f, "新的派工"), 0);
+    }
+
+    /// 2026-10-02 prorosal：使用者按 Esc 之後馬上在網頁送一句——那就是他接管要打的字，不能跟 AGM 派工一樣等滿寬限。
+    #[tokio::test]
+    async fn the_users_own_prompt_right_after_an_interrupt_is_not_held() {
+        let f = queued("test").await;
+        let app = f.env.app.clone();
+        f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
+        sqlx::query("DELETE FROM turns WHERE id = ?").bind(&f.turn_id).execute(&app.db).await.unwrap();
+        note_user_interrupt(&f.bot_id);
+        super::super::stuck_turns::observe_at(&f.run_id, "idle", std::time::Instant::now());
+        let out = super::super::prompt_from_api_queue_if_busy(&app, &f.bot_id, "用cc1 sonnets", "crid-own", &[], RelaySrc::trusted(None), false, None)
+            .await
+            .unwrap();
+        assert_ne!(out.delivery, "queued", "使用者自己送的不排隊等寬限");
+        assert_eq!(typed(&f, "用cc1 sonnets"), 1, "當場打進 pane");
     }
 
     /// 網頁按 Esc（interrupt_bot）端到端：收掉回合觸發的 flush 不會把排著的派工打進去。
