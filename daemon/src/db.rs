@@ -128,6 +128,8 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_conv_time ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS messages_turn ON messages(turn_id);
 CREATE INDEX IF NOT EXISTS messages_group ON messages(group_id) WHERE group_id IS NOT NULL;
+-- 帶附件的訊息只佔一小部分：清附件時問「有沒有訊息點名它」只需要看這些（attach.rs `NAMED_BY_A_MESSAGE`）。
+CREATE INDEX IF NOT EXISTS messages_with_attachments ON messages(id) WHERE attachments_json IS NOT NULL;
 CREATE TABLE IF NOT EXISTS attachments (
   id TEXT PRIMARY KEY, bot_id TEXT NOT NULL REFERENCES bots(id),
   name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
@@ -276,6 +278,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (34, "1fb4da468542c3bb"),
     // issue #756：`project_group_reads`（專案群組已讀標記存 daemon，跨裝置共用）。
     (35, "fe4e118f866a5cfd"),
+    // perf：`messages_with_attachments`（清附件時問「有沒有訊息點名它」只看帶附件的訊息）。
+    (36, "dea182f6831c676b"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
