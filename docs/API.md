@@ -535,6 +535,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 
 `ws://127.0.0.1:7788/ws?token=<token>`，重連帶 `&since=<最後收到的 seq>`。每則一行 `{ "seq": 12, "type": "bot_status", "data": { ... } }`。
 `seq` 從 1 遞增（daemon 重啟歸零），保留最近 200 則；補不齊或 seq 倒退會先送不帶 data 的 `{ "type": "resync", "seq": 12 }`，收到就重新 `GET /api/state` 與訊息。
+**資源上限**（對抗式審查）：同時最多 64 條連線（第 65 條升級前回 `503`，一條斷線名額就回來）；client→server 的訊息／幀最多 64 KiB（這個 server 從不看 client 送來的內容，超過就斷線，tungstenite 預設是 64 MiB／16 MiB）；送一幀給 client 超過 30 秒送不出去（client 連上卻不讀、TCP 緩衝滿了）就放掉這條連線，client 重連後走 `?since=`／`resync` 補洞。慢 client 追不上時廣播通道（1024 則）會讓它收到 `resync` 而不是無限堆積。事件 payload 在 `emit` 一律拿掉 `hook_token`／`ui_token`／`AM_BOT_TOKEN`／`AM_HOOK_TOKEN`／`service_token`／`X-AM-Token` 這些欄位名（含巢狀），事件與重播環裡都不會有。WS 只認 UI token（`?token=`），那顆 token 在 daemon 行程存活期間不會輪替，所以沒有「輪替後舊連線還收得到事件」的情形；Bot 憑證輪替不影響 UI 的 WS。
+
 **心跳**（issue #760）：瀏覽器看不到 WebSocket 的 ping 控制幀，所以 daemon 每 20 秒對每條連線送一個 text 幀 `{ "type": "ping" }`——**不帶 `seq`、不是事件、不進重播環、不推進 `seq`**，只讓客戶端有「線還活著」的證據。客戶端把它當存活證據丟掉（不進事件處理）；前景裡連續 60 秒沒收到任何幀就判定半開（睡眠、NAT／tailscale 逾時），主動關掉重連（`?since=` 補洞、重連後照常重拉 state）；切回前景（visible／focus／online）時靜默已超過 35 秒也直接重連，不只看 `readyState`。
 **`turn_progress` 不進那 200 則**（issue #482）：它是每個 run 每秒 4 幀，跟耐久事件共用額度的話，重播窗口＝`200 / (4 × 在跑的 run 數)`——20 顆同時在跑只剩 2.5 秒，而客戶端光是重連退避就 250ms～3 秒，於是每次重連都退化成全量 resync。它照樣即時廣播、照樣佔 `seq`，只是重連時不補送：下一幀 250ms 內就到，真相另有 `turn_updated` 與訊息。
 **同一條連線上同一個 `seq` 只送一次**（issue #521）：daemon 先訂閱再讀重播環（反過來會漏掉兩者之間的事件），所以那一段時間送出的耐久事件兩邊都有；`ws_loop` 自己記「backlog 送到哪」，之後低於它的即時幀跳過。客戶端不必為此做 seq 去重，但也不要假設 handler 冪等——`bots_restart_progress` 這類是純累加的。跨連線不保證：重連帶 `since` 會把該補的重送一次，客戶端本來就要能承受同一則在**不同連線上**再看到（`message_added` 靠 id 去重就是為此）。
