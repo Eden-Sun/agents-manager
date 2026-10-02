@@ -323,6 +323,15 @@ case "$EXP_UV" in
     ''|*[!0-9]*) log "ABORT: 讀不到 checkout 的 SCHEMA_VERSION（拿到 '$EXP_UV'）——不要用上一輪的數字猜"; exit 3 ;;
 esac
 PRE_UV=$("$SQLITE" "$DB" "pragma user_version")
+# 讀不到（sqlite3 壞了、DB 開不了）不能當成「升過 schema」往下跑；DB 比要換上的 binary 還新的話，
+# 換上去的 binary 一定被版本閘擋下（db.rs `apply_migrations`），停機之後才發現就晚了——停 daemon 之前就拒絕。
+case "$PRE_UV" in
+    ''|*[!0-9]*) log "ABORT: 讀不到 DB 的 user_version（拿到 '$PRE_UV'）——不換版"; exit 3 ;;
+esac
+if [ "$PRE_UV" -gt "$EXP_UV" ]; then
+    log "ABORT: DB 的 schema 版本 $PRE_UV 比要換上的 binary 認得的 $EXP_UV 還新（要換上的 $SHA 比線上舊，或線上已經往前修過）——這顆 binary 會被版本閘擋下，不換"
+    exit 3
+fi
 BUMPED=no; [ "$EXP_UV" != "$PRE_UV" ] && BUMPED=yes
 log "schema: checkout SCHEMA_VERSION=$EXP_UV, db user_version=$PRE_UV, bumped=$BUMPED"
 
@@ -464,8 +473,20 @@ if [ -z "$LIVEHASH" ] || [ "$LIVEHASH" != "$OLDHASH" ]; then
 fi
 
 # ── 3. 備份 DB 與舊 binary ───────────────────────────────────────────────────
-DBB="$DB.bak-$(date +%Y%m%d-%H%M)"
-"$SQLITE" "$DB" ".backup $DBB" || { log "ABORT: DB 備份失敗"; exit 5; }
+# 檔名到秒，而且已經存在就拒絕：`.backup` 對既有檔是整個覆蓋，同一分鐘的第二趟會把上一趟換版前唯一的好備份蓋成「已經 migrate 過的」。
+# SWAP_BACKUP_STAMP 只給測試固定檔名。
+DBB="$DB.bak-${SWAP_BACKUP_STAMP:-$(date +%Y%m%d-%H%M%S)}"
+if [ -e "$DBB" ]; then
+    log "ABORT: DB 備份 $DBB 已經存在，不覆蓋它（可能是上一趟換版前唯一的好備份）"
+    release_window "DB 備份檔已存在" || true
+    exit 5
+fi
+# DB 裡有 bot 的 hook token 等憑證：備份只給自己讀（600），不看呼叫端的 umask。
+( umask 077 && "$SQLITE" "$DB" ".backup $DBB" ) || {
+    log "ABORT: DB 備份失敗"
+    release_window "DB 備份失敗" || true
+    exit 5
+}
 IC=$("$SQLITE" "$DBB" "pragma integrity_check" | head -1)
 BUV=$("$SQLITE" "$DBB" "pragma user_version")
 log "db backup $DBB integrity=$IC user_version=$BUV"

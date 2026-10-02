@@ -2175,6 +2175,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 回滾的真實情形：新版 binary 升了 schema（多一張舊 binary 不認得的表、版本號比較大）之後被換回舊 binary，
+    /// 走的是真的 `open`（不是只呼叫 `migrate`）。舊 binary 要拒絕啟動，而且**一個位元組的資料都不能動**：
+    /// 不能刪掉不認得的表、不能把版本號蓋回去、不能少任何一列——回滾的人還要靠這份 DB 往前修。
+    #[tokio::test]
+    async fn a_rolled_back_binary_opening_a_newer_db_refuses_and_changes_nothing() {
+        let dir = tmp_dir();
+        let path = dir.join("db.sqlite3");
+        drop(open(&path).await.unwrap());
+        let raw = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect(&format!("sqlite://{}?mode=rwc", path.display())).await.unwrap();
+        let future = SCHEMA_VERSION + 2;
+        sqlx::query("CREATE TABLE from_the_future (id INTEGER PRIMARY KEY, note TEXT)").execute(&raw).await.unwrap();
+        sqlx::query("INSERT INTO from_the_future (note) VALUES ('only the new binary understands this')").execute(&raw).await.unwrap();
+        sqlx::query(&format!("PRAGMA user_version = {future}")).execute(&raw).await.unwrap();
+        let before: Vec<(String, String)> = sqlx::query_as("SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name").fetch_all(&raw).await.unwrap();
+        raw.close().await;
+
+        for attempt in 0..2 {
+            let err = open(&path).await.expect_err("舊 binary 開比它新的 DB 要拒絕啟動");
+            let msg = format!("{err:#}");
+            assert!(msg.contains(&future.to_string()) && msg.contains(&SCHEMA_VERSION.to_string()), "第 {attempt} 次：要講清楚兩個版本號：{msg}");
+        }
+
+        let raw = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect(&format!("sqlite://{}", path.display())).await.unwrap();
+        let after: Vec<(String, String)> = sqlx::query_as("SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name").fetch_all(&raw).await.unwrap();
+        assert_eq!(before, after, "拒絕啟動不能動任何 schema 物件（含不認得的表、trigger）");
+        let v: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&raw).await.unwrap();
+        assert_eq!(v, future, "版本號要留著，往前修的那顆才認得");
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM from_the_future").fetch_one(&raw).await.unwrap();
+        assert_eq!(notes, 1, "新版寫的資料一列都不能少");
+        raw.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 版本號功能上線前建立的舊資料庫（`user_version` 從沒被設過，SQLite 預設 0）一樣要能升上來，
     /// 而且升級之後可重入：同一版重跑版本號不變、不報錯（issue #72 驗收項）。
     #[tokio::test]
