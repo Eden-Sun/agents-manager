@@ -758,6 +758,11 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
                 let hint = "codex 正在問要不要為了降低額度消耗切換模型；請到「終端」選擇，daemon 不會替你選，也不會把訊息打進選單。";
                 return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
             }
+            // 啟動時的更新選單：不替使用者選更新、不把 prompt 打進去（Enter 會選到預設的 Update now）。
+            if crate::codex_update::update_menu_open(&screen) {
+                // 不寫系統訊息：排隊的 prompt 會一直重試，每次都寫就是一串一樣的提示（跟 model migration 那條一樣只回 409）。
+                return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": crate::codex_update::MENU_HINT})));
+            }
             if !crate::codex_live::close_picker(client, pane).await {
                 let hint = "codex 的 /model 選單擋在輸入列前面或畫面讀取失敗。請到「終端」分頁確認後再送一次。";
                 let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
@@ -1995,6 +2000,46 @@ mod prompt_tests {
         assert_eq!(status, "blocked", "herdr 判 idle 時也要顯示 blocked");
         assert!(f.env.herdr.calls_to("pane.send_keys").is_empty());
         assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
+    }
+
+    /// 啟動時的更新選單：預設選的是 `› 1. Update now`，畫面底下是 `Press enter to continue`。daemon 把 prompt 打進去、
+    /// 最後那個 Enter 就等於替使用者按下「現在更新」（在 pane 裡跑 `npm install -g`），而且 prompt 本身被選單吃掉
+    /// （2026-10-02 實際發生：Update available 吃掉 prompt）。要像其他 codex 對話框一樣擋下、不打字不按鍵、告訴使用者。
+    #[tokio::test]
+    async fn codex_update_menu_is_never_answered_by_typing_a_prompt_into_it() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", include_str!("fixtures/codex-0.155-update-menu.txt"));
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+
+        match pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err() {
+            LcError::Conflict(body) => {
+                assert_eq!(body["reason"], "dialog_open", "{body}");
+                let msg = body["message"].as_str().unwrap();
+                assert!(msg.contains("更新") && msg.contains("Skip"), "要講清楚是更新選單、選 Skip：{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "不按任何鍵（Enter 會選到 Update now）");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty(), "不打字進選單");
+    }
+
+    /// 非互動的更新方框（底下就是正常的輸入列）與對話裡引用選單原文，都不是擋路的對話框。
+    #[tokio::test]
+    async fn codex_update_banner_or_a_quoted_menu_does_not_block_delivery() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let boxed = "╭──────╮\n│ >_ OpenAI Codex (v0.154.0) │\n╰──────╯\n\n  ✨ Update available! 0.154.0 -> 0.155.1\n  Run sh -c 'curl x/install.sh | sh' to update.\n\n› Explain this codebase\n";
+        let quoted = format!("• 上次畫面長這樣：\n{}\n\n› ", include_str!("fixtures/codex-0.155-update-menu.txt").lines().map(|l| format!("  > {l}")).collect::<Vec<_>>().join("\n"));
+        for screen in [boxed.to_string(), quoted] {
+            f.env.herdr.set_screen("pane-prompt-test", &screen);
+            pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_or_else(|e| panic!("不該擋：{e:?}\n{screen}"));
+        }
     }
 
     #[tokio::test]

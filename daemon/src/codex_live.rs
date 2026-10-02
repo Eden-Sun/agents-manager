@@ -221,6 +221,8 @@ pub fn picker_open(screen: &str) -> bool {
     let t = screen.to_lowercase();
     crate::tui_prompts::is_codex_model_migration_prompt(screen)
         || rate_limit_switch_prompt_open(screen)
+        // 啟動時的更新選單（預設選 Update now）：`/model`、`/fast` 打進去、Enter 就是替使用者按下「現在更新」。
+        || crate::codex_update::update_menu_open(screen)
         || t.contains("press enter to confirm or esc to go back")
         || t.contains("select model and effort")
         || t.contains("select reasoning level")
@@ -266,7 +268,7 @@ fn picker_choice_matches(screen: &str, needle: &str, n: u32) -> bool {
 async fn close_picker_checked(client: &HerdrClient, pane_id: &str) -> Result<bool, ()> {
     for _ in 0..PICKER_ESCAPES {
         let screen = read(client, pane_id).await?;
-        if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) {
+        if crate::tui_prompts::is_codex_model_migration_prompt(&screen) || rate_limit_switch_prompt_open(&screen) || crate::codex_update::update_menu_open(&screen) {
             return Ok(false);
         }
         if !picker_open(&screen) {
@@ -583,7 +585,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn close_picker_leaves_model_migration_and_rate_limit_choices_for_the_user() {
+    async fn close_picker_leaves_model_migration_rate_limit_and_update_choices_for_the_user() {
         let env = crate::testing::env().await;
         for (name, pane, screen) in [
             (
@@ -595,6 +597,11 @@ mod tests {
                 "rate-limit",
                 "pane-codex-rate-limit",
                 include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt"),
+            ),
+            (
+                "update-menu",
+                "pane-codex-update-menu",
+                include_str!("lifecycle/fixtures/codex-0.155-update-menu.txt"),
             ),
         ] {
             let bot = crate::testing::claude_bot(&env.app, &env.project_id, name).await;

@@ -72,6 +72,27 @@ pub fn parse_prompt(screen: &str) -> Option<Prompt> {
     None
 }
 
+/// 啟動時的互動更新選單**現在就開著**（擋在輸入列前面）：預設選的是 `› 1. Update now`，畫面底下是 `Press enter to continue`。
+/// 這時對 pane 打字、按 Enter 就是替使用者按下「現在更新」（在 pane 裡跑安裝指令），prompt 也被選單吃掉。
+/// 跟 [`parse_prompt`] 不同：這裡要的是「正在擋路」，所以選單要在畫面尾巴、最後一行就是 `Press enter to continue`；
+/// 非互動方框（底下就是正常的輸入列）與對話裡引用選單原文（後面接著輸入列）都不算。
+pub fn update_menu_open(screen: &str) -> bool {
+    const TAIL_LINES: usize = 16;
+    // 最後一個非空的**原始**行要是 `Press enter to continue`：`body` 會把行首的 `›`／`>` 洗掉，引用選單、或選單底下真的有輸入列
+    // （`› `）時，不看原始行就分不出來。
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let last_is_footer = raw.last().is_some_and(|l| lower(&body(l)).starts_with("press enter to continue") && !l.trim_start().starts_with('>'));
+    let lines: Vec<String> = screen.lines().map(body).filter(|l| !l.is_empty()).map(|l| lower(&l)).collect();
+    let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
+    last_is_footer
+        && tail.iter().any(|l| l.starts_with("1. update now"))
+        && tail.iter().any(|l| l.starts_with("2. skip"))
+        && tail.iter().any(|l| l.starts_with("update available"))
+}
+
+/// 擋下 prompt 時給使用者的話。
+pub const MENU_HINT: &str = "codex 啟動時跳出「Update available」更新選單（預設選 1. Update now）擋在輸入列前面；daemon 不會替你選更新，也不會把訊息打進選單。請到「終端」分頁選 2. Skip（或 3）再送一次。";
+
 /// 啟動畫面的 `>_ OpenAI Codex (v0.154.0)`：**跑著的**版本。
 pub fn parse_running_version(screen: &str) -> Option<String> {
     screen.lines().find_map(|l| {
@@ -250,6 +271,16 @@ mod tests {
 
     fn p(from: &str, to: &str) -> Prompt {
         Prompt { from: Some(from.into()), to: to.into() }
+    }
+
+    #[test]
+    fn only_a_menu_that_is_blocking_the_composer_counts_as_open() {
+        assert!(update_menu_open(MENU));
+        assert!(!update_menu_open(BOXED), "非互動方框：底下就是輸入列");
+        let quoted: String = MENU.lines().map(|l| format!("  > {l}\n")).collect::<String>() + "\n› \n";
+        assert!(!update_menu_open(&quoted), "對話裡引用選單：後面接著輸入列");
+        assert!(!update_menu_open("› 1. Update now\n  2. Skip\n\n  Press enter to continue\n"), "沒有 Update available 那一句不算");
+        assert!(!update_menu_open(""));
     }
 
     #[test]
