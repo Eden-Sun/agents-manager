@@ -186,6 +186,7 @@ async fn preflight(dir: &Path, remote: &str, base: &str, expected: Option<&str>)
 /// `attempted_before` = 這個 commit 先前已經試過一次交付（呼叫端記的 `delivery_attempt`）。HEAD 已經在
 /// base 裡時它決定這是「上一次其實推成功了」還是「根本沒東西可交」：以前一律回 `nothing_to_deliver`，
 /// 逾時重試就把一筆已經在 main 上的交付報成失敗、任務停在「等你決定」（review3 c1 M11）。
+#[cfg(test)]
 pub async fn push_main(dir: &Path, remote: &str, base: &str, attempted_before: bool) -> Result<Pushed, Failure> {
     push_main_at(dir, remote, base, attempted_before, None).await
 }
@@ -215,12 +216,7 @@ pub async fn push_main_at(dir: &Path, remote: &str, base: &str, attempted_before
     Ok(Pushed { sha: head, already_in_base: false })
 }
 
-/// 推一條 `mission/<id>` 分支並用 `gh` 開 PR。成功回 PR 網址。
-pub async fn open_pr(dir: &Path, remote: &str, base: &str, branch: &str, title: &str, body: &str) -> Result<Opened, Failure> {
-    open_pr_at(dir, remote, base, branch, title, body, None).await
-}
-
-/// 同 [`open_pr`]，另外要求工作樹的 HEAD 必須就是 `expected`（見 [`push_main_at`]）。
+/// 推一條 `mission/<id>` 分支並用 `gh` 開 PR，成功回 PR 網址；另外要求工作樹的 HEAD 必須就是 `expected`（見 [`push_main_at`]）。
 pub async fn open_pr_at(dir: &Path, remote: &str, base: &str, branch: &str, title: &str, body: &str, expected: Option<&str>) -> Result<Opened, Failure> {
     open_pr_expecting(Path::new("gh"), dir, remote, base, branch, title, body, expected).await
 }
@@ -247,6 +243,7 @@ async fn pr_for_branch(gh: &Path, dir: &Path, branch: &str) -> Option<(String, S
 }
 
 /// `gh` 的路徑可換，測試才餵得進假的 `gh`（開 PR 不能真的打 GitHub）。
+#[cfg(test)]
 pub(crate) async fn open_pr_with(
     gh: &Path,
     dir: &Path,

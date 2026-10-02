@@ -2707,7 +2707,7 @@ mod review_boundary_tests {
         assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
         let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='handoff'").fetch_one(&app.db).await.unwrap();
         assert_eq!(before, 0);
-        put_handoff(State(app.clone()), Json(HandoffIn { summary: "x".repeat(MAX_HANDOFF_BYTES) })).await.expect("剛好在上限內");
+        let _ = put_handoff(State(app.clone()), Json(HandoffIn { summary: "x".repeat(MAX_HANDOFF_BYTES) })).await.expect("剛好在上限內");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }

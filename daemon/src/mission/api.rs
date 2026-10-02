@@ -2884,7 +2884,7 @@ mod tests {
         let (_stranger, stranger_h) = bot_with_token(&app, &env.project_id, false).await;
         forbidden(post_event(State(app.clone()), Path(id.clone()), stranger_h, Json(verified(Some(&wt), None))).await);
         // 驗證者：可以記 verified，但不能 deliver。
-        post_event(State(app.clone()), Path(id.clone()), verifier_h.clone(), Json(verified(Some(&wt), None))).await.expect("驗證者記 verified");
+        let _ = post_event(State(app.clone()), Path(id.clone()), verifier_h.clone(), Json(verified(Some(&wt), None))).await.expect("驗證者記 verified");
         forbidden(post_deliver(State(app.clone()), Path(id.clone()), verifier_h, Json(deliver_from(&wt))).await);
         assert_eq!(git(&origin, &["rev-parse", "main"]), git(&env.repo, &["rev-parse", "main"]), "被擋的請求什麼都沒推");
         // 同一顆既是驗證者又是執行者：不算驗證者。
@@ -2907,7 +2907,7 @@ mod tests {
         let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("concurrent", "push_main"))).await.unwrap();
         let id = m["id"].as_str().unwrap().to_string();
         let sha = commit_file(&wt, "a.txt");
-        post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
         let call = || post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt)));
         let (a, b) = tokio::join!(call(), call());
         let (a, b) = (a.expect("第一個"), b.expect("第二個也要成功，不是 nothing_to_deliver"));
@@ -2931,7 +2931,7 @@ mod tests {
         assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
         let r = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ev("ok".into(), Some(json!({"blob": "y".repeat(65 * 1024)}))))).await;
         assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
-        post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ev("x".repeat(16 * 1024), Some(json!({"k": 1}))))).await.expect("剛好在上限內");
+        let _ = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ev("x".repeat(16 * 1024), Some(json!({"k": 1}))))).await.expect("剛好在上限內");
     }
 
     /// 交付失敗停下來之後，rebase 並重驗、再交付成功：「推 main 失敗」的暫停自動解除，卡片不再寫著等你決定（review3 c1 M9）。

@@ -1137,7 +1137,7 @@ pub async fn project(pool: &SqlitePool, id: &str) -> Result<Option<Project>> {
     Ok(sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
-/// 測試用：這條執行緒上做了幾次「一顆 bot 一次」的查詢（`GET /api/state` 不准逐顆查，見 `api::state_query_count_tests`）。
+// 測試用：這條執行緒上做了幾次「一顆 bot 一次」的查詢（`GET /api/state` 不准逐顆查，見 `api::state_query_count_tests`）。
 #[cfg(test)]
 thread_local! {
     pub static PER_BOT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };

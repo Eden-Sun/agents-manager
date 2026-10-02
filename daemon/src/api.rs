@@ -10036,7 +10036,7 @@ mod state_query_count_tests {
         let running = crate::testing::claude_bot(&env.app, &env.project_id, "running").await;
         let run = crate::testing::fake_run(&env.app, &running.id).await;
         let queued = crate::testing::claude_bot(&env.app, &env.project_id, "queued").await;
-        let idle = crate::testing::claude_bot(&env.app, &env.project_id, "idle").await;
+        let _idle = crate::testing::claude_bot(&env.app, &env.project_id, "idle").await;
         let conv = db::ulid();
         sqlx::query("INSERT INTO conversations (id, bot_id, created_at) VALUES (?,?,?)").bind(&conv).bind(&queued.id).bind(db::now()).execute(&env.app.db).await.unwrap();
         let turn = db::ulid();
