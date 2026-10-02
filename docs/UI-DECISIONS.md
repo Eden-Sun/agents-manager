@@ -835,3 +835,10 @@ claude 的 `AskUserQuestion`（網頁或終端答的都一樣）答完之後，�
 
 偵測失敗或太久沒量時，主機面板那行「一致性」改成「上次檢查於 MM-DD HH:mm，目前無法連線」（黃字），舊的差異淡色（0.55）照列、不再說是現況，連「與基準一致」也不說；
 tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件，所以超過 6 小時 15 分（daemon 的 `RECHECK_EVERY + STALE_GRACE`）前端自己也標。從沒量過仍是「尚未檢查」。
+
+## blocked 的原因（2026-10）
+
+- daemon 在 run 物件帶 `blocked_reason {code, text}`（API.md `blocked_reason`）；網頁**只在 run 現在真的是 blocked 時**顯示：側欄 bot 列的狀態字旁一行小字原因（窄欄截斷，完整字在 hover），`botStateLabel`（標題燈、BotSwitcher、群組成員、手機主力晶片的 tooltip）寫成「等待回應：<原因>」。
+- 沒有原因（舊 daemon、daemon 不知道，例如一般的權限確認）照舊只寫「等待回應」，不編原因。不認得的 `code` 照樣顯示 `text`：前端不維護代碼表。
+- 清除不靠前端記：原因跟著 run 物件走，選單關掉／狀態變了／run 結束，下一個 `bot_status` 就沒有它；前端另外只在 `agent_status==='blocked'` 且 run 還活著時才顯示，所以晚一格事件也不會掛著舊字。
+

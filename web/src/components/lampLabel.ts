@@ -1,5 +1,6 @@
 import type { Lamp, Run } from '../api/types'
 import { backgroundJobs, backgroundLabel } from '../lib/backgroundJobs'
+import { blockedReasonOf } from '../lib/blockedReason'
 
 /** SPEC §2.2 colour rules. */
 export const LAMP_LABEL: Record<Lamp, string> = {
@@ -20,5 +21,8 @@ export const LAMP_LABEL: Record<Lamp, string> = {
  */
 export function botStateLabel(lamp: Lamp, run: Run | null | undefined): string {
   const n = lamp === 'idle' ? backgroundJobs(run) : 0
-  return n > 0 ? backgroundLabel(n) : LAMP_LABEL[lamp]
+  if (n > 0) return backgroundLabel(n)
+  // blocked 帶原因：「等待回應：codex 更新提示等待選擇」（daemon 的 `run.blocked_reason`），沒有原因照舊。
+  const why = lamp === 'blocked' ? blockedReasonOf(run) : ''
+  return why ? `${LAMP_LABEL[lamp]}：${why}` : LAMP_LABEL[lamp]
 }

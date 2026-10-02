@@ -3765,3 +3765,6 @@ button.model-tag:hover:not(:disabled) {
   line-height: 1.6;
   color: var(--text-faint);
 }
+
+/* blocked 的原因（daemon 的 run.blocked_reason）：狀態字旁的小字，窄欄放不下就截斷，完整字在 hover。 */
+.bot-state-reason { display: block; margin-top: 1px; font-size: 11px; line-height: 14px; font-weight: 400; opacity: 0.8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }

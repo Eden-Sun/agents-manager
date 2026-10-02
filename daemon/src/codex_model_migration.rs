@@ -43,6 +43,15 @@ impl Dialog {
         }
     }
 
+    /// 結構化的原因（`blocked_reason`）：穩定的短代碼＋一句話。
+    pub fn reason(self) -> crate::blocked_reason::Reason {
+        match self {
+            Self::Migration => crate::blocked_reason::Reason { code: "codex_migration", text: "codex 模型升級提示等待選擇" },
+            Self::UpdateMenu => crate::blocked_reason::Reason { code: "codex_update_menu", text: "codex 更新提示等待選擇" },
+            Self::RateLimitSwitch => crate::blocked_reason::Reason { code: "rate_limit_switch", text: "codex 額度換模型建議等待選擇" },
+        }
+    }
+
     /// 告訴使用者「為什麼卡住、要去哪裡處理」的那句話。
     pub fn hint(self) -> &'static str {
         match self {
@@ -58,6 +67,8 @@ struct Episode {
     forced_from: Option<String>,
     /// Only one observer may finish the episode while it awaits a database restore.
     closing: bool,
+    /// 開著的是哪一種（`blocked_reason` 靠它）。
+    dialog: Dialog,
 }
 
 fn open() -> &'static Mutex<HashMap<String, Episode>> {
@@ -68,6 +79,11 @@ fn open() -> &'static Mutex<HashMap<String, Episode>> {
 /// 不在 `active` 裡的 run（結束了）不留開著的記錄：框開著時 run 就結束的話，沒有人會再讀到「框關了」，記錄只增不減。
 pub fn retain_runs(active: &[String]) {
     open().lock().unwrap().retain(|id, _| active.contains(id));
+}
+
+/// 這個 run 現在開著的是哪個擋路的 codex 畫面（`blocked_reason` 讀）；沒有＝`None`。
+pub fn open_dialog(run_id: &str) -> Option<Dialog> {
+    open().lock().unwrap().get(run_id).filter(|e| !e.closing).map(|e| e.dialog)
 }
 
 #[cfg(test)]
@@ -198,7 +214,7 @@ async fn notify_once(app: &Arc<App>, run: &db::Run, dialog: Dialog) {
         if episodes.contains_key(&run.id) {
             return;
         }
-        episodes.insert(run.id.clone(), Episode { forced_from: None, closing: false });
+        episodes.insert(run.id.clone(), Episode { forced_from: None, closing: false, dialog });
     }
     tracing::warn!(run = %run.id, bot = %run.bot_id, ?dialog, "Codex dialog is waiting for a user choice");
     match db::conversation_id(&app.db, &run.bot_id).await {
@@ -230,7 +246,7 @@ mod retain_tests {
         for id in ["cmm-gone", "cmm-kept"] {
             open().lock().unwrap().insert(
                 id.to_string(),
-                Episode { forced_from: None, closing: false },
+                Episode { forced_from: None, closing: false, dialog: Dialog::Migration },
             );
         }
         retain_runs(&["cmm-kept".to_string()]);
