@@ -598,6 +598,15 @@ pub async fn start(
             json!({"host": host, "kind": running_kind, "update_id": id, "recovered": recovered, "message": message}),
         ));
     }
+    // herdr 一鍵更新在跑（server 要重啟、所有 pane 會消失）：同一台不能同時裝 CLI 再 scoped 重啟 bot。
+    // 先寫自己的列、再看那邊（herdr_upgrade 反過來：先佔位、再看這邊的列）；被擋就把剛寫的列拿掉，不然這台從此被自己的殘列卡住。
+    if host == crate::config::LOCAL_HOST && crate::herdr_upgrade::is_running(app) {
+        let _ = sqlx::query("DELETE FROM cli_updates WHERE id = ?").bind(&update_id).execute(&app.db).await;
+        return Err(LcError::conflict(
+            "herdr_update_in_progress",
+            json!({"host": host, "message": "herdr 正在更新（server 會重啟、所有 pane 都會消失），這一下沒有安裝；等它結束再試"}),
+        ));
+    }
     let (app2, host2, id2, target2, kind2, fence2) = (
         app.clone(),
         host.to_string(),
@@ -2832,6 +2841,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(host_target.as_deref(), Some("target-a:2222/codex-work"));
+    }
+
+    /// herdr 一鍵更新在跑（server 要重啟、所有 pane 會消失）：同一台不能同時裝 CLI 再 scoped 重啟 bot。
+    /// 被擋的不留 `running` 那一列（不然這台的 cli-update 從此被自己的殘列卡住）。
+    #[tokio::test]
+    async fn a_running_herdr_update_blocks_a_cli_install_on_that_host_and_leaves_no_row() {
+        let env = crate::testing::env().await;
+        let pending = crate::codex_update::pending_text(Some("0.155.1"), "0.157.0");
+        let _ = codex_bot_with_notice(&env, "cx", &pending).await;
+        let _held = crate::herdr_upgrade::hold_slot_for_test(&env.app);
+        let fake = Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("ok"));
+        let err = start(&env.app, &HeaderMap::new(), "local", Some("codex"), Some("0.157.0"), fake.clone()).await.unwrap_err();
+        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "herdr_update_in_progress"), "{err:?}");
+        assert_eq!(fake.installs(), 0);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cli_updates WHERE host = 'local'").fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(rows, 0, "被擋的不留列");
     }
 
     #[tokio::test]

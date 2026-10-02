@@ -63,6 +63,10 @@ pub trait Ops: Send + Sync {
     fn install_path(&self) -> Result<PathBuf, String>;
     /// 把 `version` 的 release asset 下載到 `dest`（可執行）。
     fn download<'a>(&'a self, version: &'a str, dest: &'a Path) -> BoxFuture<'a, Result<(), String>>;
+    /// 下載好的 `path` 對得上 release 公布的 sha256 嗎。**在執行它之前**（`--version` 就是執行）；對不上、或查不到公布值都是 `Err`。
+    fn verify_download<'a>(&'a self, version: &'a str, path: &'a Path) -> BoxFuture<'a, Result<(), String>>;
+    /// 換 binary **之前**確認重啟這條路走得通（server 真的是 systemd／launchd 在管的）。`Err`＝什麼都不動。
+    fn preflight_restart<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<(), String>>;
     /// `<path> --version` 讀到的版本（`0.9.3`）。
     fn binary_version<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, String>>;
     /// 重啟 `session` 的 herdr server（只動這一個 session）。
@@ -88,6 +92,27 @@ pub struct Progress {
 fn running() -> &'static Mutex<HashMap<PathBuf, Progress>> {
     static M: OnceLock<Mutex<HashMap<PathBuf, Progress>>> = OnceLock::new();
     M.get_or_init(Default::default)
+}
+
+/// 這台 daemon 眼中是否有 herdr 更新在跑（cli_update 開工前問）。
+pub fn is_running(app: &App) -> bool {
+    running().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&app.data_dir)
+}
+
+/// 測試用：佔住這顆 App 的更新位置，掉了就放。
+#[cfg(test)]
+pub(crate) fn hold_slot_for_test(app: &App) -> impl Drop + '_ {
+    struct Held<'a>(&'a App);
+    impl Drop for Held<'_> {
+        fn drop(&mut self) {
+            running().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0.data_dir);
+        }
+    }
+    running().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        app.data_dir.clone(),
+        Progress { update_id: "held".into(), host: "local".into(), target_version: "0.0.0".into(), phase: "downloading".into(), started_at: crate::db::now() },
+    );
+    Held(app)
 }
 
 /// `GET /api/state` 的 `herdr_updates`：進行中的那一筆（沒有就空陣列）。
@@ -253,6 +278,24 @@ pub async fn start(
         }
         g.insert(app.data_dir.clone(), progress);
     }
+    // 先佔自己的位、再看對方（cli_update 反過來：先寫列、再看這邊）：兩邊同時開的最壞結果是互相退讓，不會兩個都跑。
+    // herdr server 一重啟，CLI 安裝後 scoped 重啟正在開的 pane 全部消失。
+    match sqlx::query_as::<_, (String, String)>("SELECT id, kind FROM cli_updates WHERE host = ? AND status = 'running'")
+        .bind(host)
+        .fetch_optional(&app.db)
+        .await
+    {
+        Ok(None) => {}
+        Ok(Some((id, kind))) => {
+            release_slot(app, &update_id);
+            return Err(LcError::conflict("cli_update_in_progress", json!({"update_id": id, "host": host, "kind": kind,
+                "message": format!("{host} 正在安裝 {kind}（安裝完會重啟 bot），先等它結束再更新 herdr")})));
+        }
+        Err(e) => {
+            release_slot(app, &update_id);
+            return Err(LcError::Upstream(format!("讀不到 CLI 安裝紀錄，沒有開始：{e}")));
+        }
+    }
     let session = app.cfg.get().await.server.herdr_session.clone();
     let ctx = Ctx { update_id: update_id.clone(), host: host.to_string(), session, target: target.clone() };
     let app2 = app.clone();
@@ -348,6 +391,9 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         Ok(p) => p,
         Err(e) => return out.fail("install_path_unsupported", e),
     };
+    if let Err(e) = ops.preflight_restart(&ctx.session).await {
+        return out.fail("restart_unsupported", format!("{e}；什麼都沒動，請自己重啟 herdr server"));
+    }
     out.from = ops.binary_version(&install).await.ok();
     let staging = app.data_dir.join(STAGING_DIR).join(&ctx.target).join("herdr");
     if let Some(dir) = staging.parent() {
@@ -357,6 +403,10 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     }
     if let Err(e) = ops.download(&ctx.target, &staging).await {
         return out.fail("download_failed", e);
+    }
+    if let Err(e) = ops.verify_download(&ctx.target, &staging).await {
+        let _ = std::fs::remove_file(&staging);
+        return out.fail("checksum_mismatch", format!("下載的 binary 沒通過校驗（沒有執行它）：{e}；現行 binary 沒動"));
     }
     match ops.binary_version(&staging).await {
         Ok(v) if parse_version(&v) == parse_version(&ctx.target) => {
@@ -479,8 +529,12 @@ async fn wait_server(app: &Arc<App>, expected: &str, timing: Timing) -> Result<S
     let deadline = Instant::now() + timing.restart_max;
     loop {
         let last = match ping_version(app).await {
-            Ok(v) if parse_version(&v) == parse_version(expected) => return Ok(v),
-            Ok(v) => format!("server 回報 {v}，不是 {expected}"),
+            // 版本對了還要 daemon 認得它的 protocol：不認得的話之後每個 RPC 都會壞，bot 一顆也接不回，不如現在換回舊版。
+            Ok((v, protocol)) if parse_version(&v) == parse_version(expected) && crate::herdr::protocol_supported(protocol) => return Ok(v),
+            Ok((v, protocol)) if parse_version(&v) == parse_version(expected) => {
+                format!("server 是 {v}，但 protocol {protocol} 不是這顆 daemon 認得的（{:?}）", crate::herdr::SUPPORTED_PROTOCOLS)
+            }
+            Ok((v, _)) => format!("server 回報 {v}，不是 {expected}"),
             Err(e) => e,
         };
         if Instant::now() >= deadline {
@@ -495,17 +549,18 @@ async fn wait_server_any(app: &Arc<App>, timing: Timing) -> Result<String, Strin
     let deadline = Instant::now() + timing.restart_max;
     loop {
         match ping_version(app).await {
-            Ok(v) => return Ok(v),
+            Ok((v, _)) => return Ok(v),
             Err(e) if Instant::now() >= deadline => return Err(e),
             Err(_) => tokio::time::sleep(timing.restart_poll).await,
         }
     }
 }
 
-async fn ping_version(app: &Arc<App>) -> Result<String, String> {
+async fn ping_version(app: &Arc<App>) -> Result<(String, u32), String> {
     let conn = app.hosts.get(crate::config::LOCAL_HOST).await.ok_or("沒有 local 主機")?;
     let pong = conn.client.ping().await.map_err(|e| format!("ping：{e:#}"))?;
-    Ok(cli_version_string(&pong.version).or_else(|| version_string(&pong.version)).unwrap_or(pong.version))
+    let protocol = pong.protocol;
+    Ok((cli_version_string(&pong.version).or_else(|| version_string(&pong.version)).unwrap_or(pong.version), protocol))
 }
 
 /// staging → 現行位置：先把新檔複製到同一個目錄（rename 才原子），舊的留 `herdr.bak-<舊版>`（硬連結，不行就複製），
@@ -575,6 +630,34 @@ pub fn parent_notice(target: &str, ok: bool, kids: &[LostChild]) -> String {
 
 pub struct Real;
 
+/// 下載 release asset 的 curl 參數：只准 https（含被導向的下一跳），不接受降到 http／其他協定。
+fn curl_args(url: &str, part: &Path) -> Vec<String> {
+    let mut a: Vec<String> = ["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--retry", "2", "--max-time", "300", "-o"].map(String::from).to_vec();
+    a.push(part.display().to_string());
+    a.push(url.to_string());
+    a
+}
+
+/// GitHub release JSON 裡 `asset` 的 `digest: "sha256:<hex>"`（小寫）。找不到 asset、沒有 digest、不是 sha256 都是 `Err`。
+fn published_digest(body: &str, asset: &str) -> Result<String, String> {
+    let v: Value = serde_json::from_str(body).map_err(|e| format!("release API 回的不是 JSON：{e}"))?;
+    let entry = v["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"] == asset)).ok_or_else(|| format!("release 裡沒有 {asset}"))?;
+    let digest = entry["digest"].as_str().ok_or_else(|| format!("{asset} 沒有公布 digest"))?;
+    digest
+        .strip_prefix("sha256:")
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| format!("{asset} 的 digest 不是 sha256：{digest}"))
+}
+
+fn sha256_hex(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut h = Sha256::new();
+    std::io::copy(&mut f, &mut h).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(format!("{:x}", h.finalize()))
+}
+
 fn asset_name() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Some("herdr-linux-x86_64"),
@@ -626,10 +709,57 @@ impl Ops for Real {
             let url = format!("{RELEASE_BASE}/v{version}/{asset}");
             let part = dest.with_extension("part");
             let mut cmd = tokio::process::Command::new("curl");
-            cmd.args(["-fsSL", "--retry", "2", "--max-time", "300", "-o"]).arg(&part).arg(&url);
+            cmd.args(curl_args(&url, &part));
             command_output(cmd, Duration::from_secs(320)).await.map_err(|e| format!("curl {url}: {e}"))?;
             set_exec(&part)?;
             std::fs::rename(&part, dest).map_err(|e| format!("{}: {e}", dest.display()))
+        })
+    }
+
+    /// release 的 sha256 取自 GitHub release API 的 `assets[].digest`（herdr 沒有另外發 checksum 檔）；
+    /// 查不到（限流、asset 沒有 digest）也算沒過：沒有校驗就不執行下載來的東西。
+    fn verify_download<'a>(&'a self, version: &'a str, path: &'a Path) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let asset = asset_name().ok_or("沒有對應的 release asset")?;
+            let url = format!("https://api.github.com/repos/herdrdev/herdr/releases/tags/v{version}");
+            let mut cmd = tokio::process::Command::new("curl");
+            cmd.args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-time", "30", "-H", "Accept: application/vnd.github+json", &url]);
+            let body = command_output(cmd, Duration::from_secs(40)).await.map_err(|e| format!("查不到 {version} 公布的 sha256（{url}）：{e}"))?;
+            let want = published_digest(&body, asset)?;
+            let got = sha256_hex(path)?;
+            if got == want {
+                Ok(())
+            } else {
+                Err(format!("{asset} 的 sha256 是 {got}，release 公布的是 {want}"))
+            }
+        })
+    }
+
+    /// Linux：`herdr@<session>.service` 要是 active（daemon 自己 spawn 的 server `systemctl restart` 會另外起一顆搶 socket）；
+    /// macOS：launchd job 要存在。
+    fn preflight_restart<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            if !session_ok(session) {
+                return Err(format!("session 名 `{session}` 不能當 systemd/launchd 名稱"));
+            }
+            // SAFETY: getuid 沒有前置條件，也不會失敗。
+            let uid = unsafe { libc::getuid() };
+            if cfg!(target_os = "macos") {
+                let mut cmd = tokio::process::Command::new("launchctl");
+                cmd.args(["print", &format!("gui/{uid}/dev.agents-manager.herdr-{session}")]);
+                command_output(cmd, Duration::from_secs(15)).await.map(|_| ()).map_err(|e| format!("launchd job dev.agents-manager.herdr-{session} 不存在（server 不是 launchd 在管的？）：{e}"))
+            } else {
+                let unit = format!("herdr@{session}.service");
+                let mut cmd = tokio::process::Command::new("systemctl");
+                cmd.args(["--user", "is-active", &unit]);
+                if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+                    cmd.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
+                }
+                match command_output(cmd, Duration::from_secs(15)).await {
+                    Ok(out) if out.trim() == "active" => Ok(()),
+                    other => Err(format!("{unit} 不是 active（server 不是 systemd 在管的，restart 會另外起一顆）：{other:?}")),
+                }
+            }
         })
     }
 
@@ -731,6 +861,12 @@ mod tests {
         download_as: String,
         /// 前 N 次重啟起來的不是現行檔案寫的版本（模擬新版起不來／起成別的）。
         bad_restarts: AtomicUsize,
+        /// 下載的 binary 對不上 release 公布的 sha256。
+        bad_checksum: AtomicUsize,
+        /// 重啟前的檢查（server 不是 systemd／launchd 在管）失敗的原因。
+        preflight_err: Mutex<Option<String>>,
+        /// 新版 server 回報的 protocol（舊版 daemon 認不得的 protocol 就是起不來）。
+        new_protocol: AtomicUsize,
         pong: Arc<std::sync::Mutex<(String, u32)>>,
         restarts: Mutex<Vec<String>>,
         resumed: Mutex<Vec<String>>,
@@ -748,6 +884,9 @@ mod tests {
                 install,
                 download_as: download_as.into(),
                 bad_restarts: AtomicUsize::new(0),
+                bad_checksum: AtomicUsize::new(0),
+                preflight_err: Mutex::new(None),
+                new_protocol: AtomicUsize::new(22),
                 pong: env.herdr.pong.clone(),
                 restarts: Mutex::new(vec![]),
                 resumed: Mutex::new(vec![]),
@@ -772,6 +911,18 @@ mod tests {
                 cli_version_string(&s).ok_or(s)
             })
         }
+        fn verify_download<'a>(&'a self, _v: &'a str, _path: &'a Path) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                if self.bad_checksum.load(Ordering::SeqCst) > 0 {
+                    Err("sha256 不符".into())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        fn preflight_restart<'a>(&'a self, _session: &'a str) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move { self.preflight_err.lock().unwrap().clone().map_or(Ok(()), Err) })
+        }
         fn restart_server<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<(), String>> {
             Box::pin(async move {
                 self.restarts.lock().unwrap().push(session.to_string());
@@ -781,7 +932,9 @@ mod tests {
                 } else {
                     cli_version_string(&self.installed()).unwrap()
                 };
-                *self.pong.lock().unwrap() = (v, 22);
+                // 只有「新版」那一次會帶新的 protocol；換回舊版就是正常的 22。
+                let protocol = if v == "0.9.3" { self.new_protocol.load(Ordering::SeqCst) as u32 } else { 22 };
+                *self.pong.lock().unwrap() = (v, protocol);
                 Ok(())
             })
         }
@@ -968,6 +1121,111 @@ mod tests {
         assert_eq!(env.herdr.pong.lock().unwrap().0, "0.9.1");
         assert_eq!(*fake.resumed.lock().unwrap(), vec![bot], "失敗也要把 bot 接回");
         assert!(!window_open(&env.app).await);
+    }
+
+    /// 下載的 binary 對不上 release 公布的 sha256（被換掉、截斷）：在**執行它之前**就擋掉（驗 `--version` 就是執行它）。
+    /// 現行 binary、server、維護窗口一個都沒碰。
+    #[tokio::test]
+    async fn a_download_that_does_not_match_the_published_checksum_is_never_run_or_installed() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        fake.bad_checksum.store(1, Ordering::SeqCst);
+        let bot = top(&env, "boss", "idle").await;
+        let (_, done) = go(&env, &fake, "0.9.3").await;
+        assert_eq!((done["ok"].clone(), done["reason"].clone()), (json!(false), json!("checksum_mismatch")), "{done}");
+        assert_eq!(fake.installed(), "herdr 0.9.1");
+        assert!(!fake.install.with_file_name("herdr.bak-0.9.1").exists());
+        assert!(fake.restarts.lock().unwrap().is_empty() && fake.resumed.lock().unwrap().is_empty());
+        assert!(!window_open(&env.app).await);
+        assert!(!env.app.data_dir.join(STAGING_DIR).join("0.9.3").join("herdr").exists(), "不信任的檔案不留在 staging");
+        assert!(crate::db::active_run(&env.app.db, &bot).await.unwrap().is_some());
+    }
+
+    /// server 不是 systemd／launchd 在管的（daemon 自己 spawn 的）：`systemctl restart` 會去**另外起**一顆搶 socket，
+    /// 舊的還在跑舊版。換 binary 之前就要知道這條路走不通，而不是換完才失敗、再換回來。
+    #[tokio::test]
+    async fn a_server_nobody_can_restart_is_refused_before_anything_is_touched() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        *fake.preflight_err.lock().unwrap() = Some("herdr@agents-manager.service 不是 active".into());
+        let bot = top(&env, "boss", "idle").await;
+        let (_, done) = go(&env, &fake, "0.9.3").await;
+        assert_eq!(done["reason"], "restart_unsupported", "{done}");
+        assert!(done["detail"].as_str().unwrap().contains("不是 active"), "{done}");
+        assert_eq!(fake.installed(), "herdr 0.9.1");
+        assert!(!fake.install.with_file_name("herdr.bak-0.9.1").exists(), "沒換就沒有備份");
+        assert!(fake.restarts.lock().unwrap().is_empty() && fake.resumed.lock().unwrap().is_empty());
+        assert!(!window_open(&env.app).await, "連維護窗口都不開");
+        assert!(crate::db::active_run(&env.app.db, &bot).await.unwrap().is_some());
+    }
+
+    /// 新版 server 起來了、版本也對，但 protocol 是這顆 daemon 不認得的：之後每個 RPC 都會壞，bot 一顆也接不回。
+    /// 當成沒起來，換回舊版。
+    #[tokio::test]
+    async fn a_new_server_speaking_an_unsupported_protocol_is_rolled_back() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        fake.new_protocol.store(99, Ordering::SeqCst);
+        let bot = top(&env, "boss", "idle").await;
+        let (_, done) = go(&env, &fake, "0.9.3").await;
+        assert_eq!(done["reason"], "restart_failed", "{done}");
+        assert!(done["detail"].as_str().unwrap().contains("protocol"), "{done}");
+        assert!(done["detail"].as_str().unwrap().contains("已換回 0.9.1"), "{done}");
+        assert_eq!(fake.installed(), "herdr 0.9.1");
+        assert_eq!(fake.restarts.lock().unwrap().len(), 2);
+        assert_eq!(*fake.resumed.lock().unwrap(), vec![bot]);
+    }
+
+    /// 同一台同時有 claude／codex CLI 安裝＋scoped 重啟在跑：herdr server 一重啟，它們正在重開的 pane 全部消失。
+    #[tokio::test]
+    async fn a_running_cli_install_on_this_host_blocks_a_herdr_update() {
+        let env = tt::env().await;
+        let fake = Fake::new(&env, "0.9.1", "0.9.3");
+        sqlx::query(
+            "INSERT INTO cli_updates (id, host, kind, target_version, status, phase, boot, started_at, updated_at, host_target)
+             VALUES ('cu1','local','claude','2.1.290','running','installing','b',?,?,'t')",
+        )
+        .bind(crate::db::now())
+        .bind(crate::db::now())
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+        let err = start(&env.app, &HeaderMap::new(), "local", Some("0.9.3"), Some("0.9.3".into()), fake.clone(), fast()).await.unwrap_err();
+        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "cli_update_in_progress" && v["update_id"] == "cu1"), "{err:?}");
+        assert!(running_list(&env.app).is_empty(), "被擋的不佔位");
+        assert!(fake.restarts.lock().unwrap().is_empty());
+    }
+
+    /// 下載用 https 且不接受被導到別的協定。
+    #[test]
+    fn the_download_only_speaks_https_even_through_redirects() {
+        let args = curl_args("https://example.invalid/herdr", Path::new("/tmp/x.part"));
+        let joined = args.join(" ");
+        assert!(joined.contains("--proto =https") && joined.contains("--proto-redir =https"), "{joined}");
+        assert!(args.contains(&"-f".to_string()) || joined.contains("-fsSL"), "{joined}");
+        assert_eq!(args.last().map(String::as_str), Some("https://example.invalid/herdr"));
+    }
+
+    /// GitHub release API 每個 asset 都帶 `digest: "sha256:…"`；找不到那個 asset 或沒有 digest 都不能當成「驗過」。
+    #[test]
+    fn the_published_digest_comes_from_the_matching_asset_only() {
+        let (up, low) = ("AB12".repeat(16), "ab12".repeat(16));
+        let body = format!(r#"{{"assets":[{{"name":"herdr-linux-x86_64","digest":"sha256:{up}"}},{{"name":"herdr-macos-aarch64","digest":"sha256:{low}"}},{{"name":"herdr-linux-aarch64"}}]}}"#);
+        let body = body.as_str();
+        assert_eq!(published_digest(body, "herdr-linux-x86_64").as_deref(), Ok(low.as_str()), "大小寫統一成小寫");
+        assert!(published_digest(body, "herdr-linux-aarch64").is_err(), "沒有 digest");
+        assert!(published_digest(body, "herdr-windows").is_err(), "沒有這個 asset");
+        assert!(published_digest("not json", "x").is_err());
+        assert!(published_digest(r#"{"assets":[{"name":"x","digest":"md5:00"}]}"#, "x").is_err(), "只認 sha256");
+        assert!(published_digest(r#"{"assets":[{"name":"x","digest":"sha256:ab12"}]}"#, "x").is_err(), "長度不對不算");
+    }
+
+    #[test]
+    fn sha256_of_a_file_matches_the_known_vector() {
+        let dir = crate::testing::scratch_dir("am-herdr-sha");
+        let f = dir.join("f");
+        std::fs::write(&f, "abc").unwrap();
+        assert_eq!(sha256_hex(&f).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
 
     #[tokio::test]
