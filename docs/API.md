@@ -950,12 +950,13 @@ rustup 的 minimal profile 不含它——UI 據此提示「按安裝補上」�
 不在 `/api` 底下的三支（`acquire`／`renew`／`release`）：bot 的 pane 只有自己的 hook token，拿不到一般 UI token。
 
 ### `POST /build-slots/acquire`（表單）
-`{holder, bot_id?, purpose?, host?}`。Bot 請求用 `X-AM-Bot-Id`、`X-AM-Bot-Token` 與相同的 body `bot_id`；舊 shim 在 body 有 `bot_id`、只有 token header 時仍相容。人工 host shell 不帶 Bot 身分與 body `bot_id` 時用 `X-AM-Token`。Bot 身分不完整、token 錯、header/body id 不同或混帶 UI token → 403，不能降級成 User。`holder` 空字串 400。
+`{holder, bot_id?, purpose?, host?}`。Bot 請求用 `X-AM-Bot-Id`、`X-AM-Bot-Token` 與相同的 body `bot_id`；舊 shim 在 body 有 `bot_id`、只有 token header 時仍相容。人工 host shell 不帶 Bot 身分與 body `bot_id` 時用 `X-AM-Token`。Bot 身分不完整、token 錯、header/body id 不同或混帶 UI token → 403，不能降級成 User。`holder` 空字串 400；`holder`／`purpose`／`host` 各最多 200 個字元，超過 400（被擋的不留任何一列）。
 
 - 拿到：`200 {"granted":true,"token","expires_at","cargo_jobs","lease_ttl_secs"}`。同一個 `holder` 對已經握著、
   沒過期的名額重 call 是幂等的，回同一份憑證。
 - Bot token 只能重用該 bot 自己的 `holder`；若該字串已屬於另一顆 bot（或人工呼叫），回 `403`
   `{"reason":"holder_bot_mismatch"}`，不會交出名額憑證或改動排隊位置。`X-AM-Token` 是人工／管理 bypass。
+- **每顆 bot 同時最多佔 32 列**（held＋waiting；`holder` 是呼叫端自己取的，不設上限一顆 bot 就能用不同 holder 把佇列塞滿）。已經有的 holder 重 call 不算新的；第 33 個新 holder → `409 {"reason":"too_many_build_slots","max_per_bot":32}`。人工呼叫（`X-AM-Token`、沒有 bot 身分）不受限。
 - 額滿或還沒輪到：`200 {"granted":false,"active","max_concurrent","since","retry_after_secs"}`——**這是正常的等待
   狀態，不是錯誤**，回 200 不是 4xx／5xx；呼叫端照 `retry_after_secs` 再問一次。**FIFO**（SPEC §6.5g）：名額空出
   來時只給排隊排最早的 holder（`since` 最早，同值比 `holder`），就算這一刻剛好也在問、名額也剛好空著一樣要等。

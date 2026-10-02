@@ -301,6 +301,25 @@ fn sanitized(cfg: &BuildRemoteCfg, data_dir: &Path) -> Value {
     })
 }
 
+/// host／user／remote_root 的字元限制：這三個會進 ssh 的引數與遠端 shell（rsync 的遠端路徑、守門腳本）。
+/// API 寫入時擋（[`put_settings`]），讀 config.toml 要轉遠端時也擋（[`decide_offload`]）——設定檔手改得到，
+/// 不能讓 `host = "-oProxyCommand=…"` 變成 ssh 的選項、`remote_root` 的 `$(…)` 被遠端 shell 展開。`remote_root` 空＝用預設。
+fn validate_target(host: &str, user: &str, remote_root: &str) -> Result<(), &'static str> {
+    let safe_host = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':');
+    let safe_user = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
+    let safe_root = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/');
+    if !host.chars().all(safe_host) || host.starts_with('-') {
+        return Err("remote Cargo host 含不支援的字元");
+    }
+    if !user.chars().all(safe_user) || user.starts_with('-') {
+        return Err("remote Cargo user 含不支援的字元");
+    }
+    if !remote_root.is_empty() && (!remote_root.chars().all(safe_root) || remote_root.contains("..") || remote_root.starts_with('-')) {
+        return Err("remote_root 只能使用英數、._-/，不可含 ..，也不可以 - 開頭");
+    }
+    Ok(())
+}
+
 pub async fn get_settings(State(app): State<Arc<App>>) -> Json<Value> {
     let cfg = app.cfg.get().await;
     Json(sanitized(&cfg.build.remote, &app.data_dir))
@@ -316,18 +335,7 @@ pub async fn put_settings(
     if input.enabled && (host.is_empty() || user.is_empty()) {
         return Err(LcError::Bad("remote Cargo 啟用時 host 與 user 都必填".into()));
     }
-    let safe_host = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':');
-    let safe_user = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_');
-    let safe_root = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/');
-    if !host.chars().all(safe_host) || host.starts_with('-') {
-        return Err(LcError::Bad("remote Cargo host 含不支援的字元".into()));
-    }
-    if !user.chars().all(safe_user) || user.starts_with('-') {
-        return Err(LcError::Bad("remote Cargo user 含不支援的字元".into()));
-    }
-    if !remote_root.is_empty() && (!remote_root.chars().all(safe_root) || remote_root.contains("..")) {
-        return Err(LcError::Bad("remote_root 只能使用英數、._-/，且不可含 ..".into()));
-    }
+    validate_target(&host, &user, &remote_root).map_err(|e| LcError::Bad(e.into()))?;
     if input.ssh_port == 0 {
         return Err(LcError::Bad("ssh_port must be 1..65535".into()));
     }
@@ -719,7 +727,8 @@ pub fn login_shell_arg(script: &str) -> String {
 }
 
 pub fn sh_quote(s: &str) -> String {
-    if s.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_./:=@+".contains(&c)) {
+    // 空字串要寫成 `''`：回空字串的話 `cargo test -- ''` 送到遠端會少一個引數。
+    if !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric() || b"-_./:=@+".contains(&c)) {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -1676,6 +1685,12 @@ pub fn decide_offload(config_path: &Path, args: &[String], env: impl IntoIterato
     if remote.host.trim().is_empty() || remote.user.trim().is_empty() {
         return Offload::Local(Some("外部編譯啟用了但 host／user 是空的".into()));
     }
+    if let Err(why) = validate_target(remote.host.trim(), remote.user.trim(), remote.remote_root.trim()) {
+        return Offload::Local(Some(format!("設定檔 [build.remote] 不合法（{why}）")));
+    }
+    if remote.ssh_port == 0 {
+        return Offload::Local(Some("設定檔 [build.remote] 不合法（ssh_port 不能是 0）".into()));
+    }
     if let Some(var) = env_blocking_offload(env) {
         return Offload::Local(Some(format!("本機設了 {var}，遠端看不到它，結果會跟本機不一致")));
     }
@@ -1905,6 +1920,52 @@ mod tests {
         assert!(env_blocking_offload([("RUSTFLAGS".to_string(), String::new())]).is_none(), "空值不算");
         assert!(env_blocking_offload([("PATH".to_string(), "/x".to_string())]).is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// config.toml 是人（或有寫檔權限的 agent）手改得到的，不只有 API 寫得進來：API 擋了的 host／user／remote_root 在這裡也要擋，
+    /// 不然 `host = "-oProxyCommand=…"`、`user = "-o…"` 會變成 ssh 的選項、`remote_root` 的 `$(…)` 會被 rsync 的遠端 shell 展開。
+    /// 擋下來就退回本機並講原因（跟設定檔壞掉同一條路）。
+    #[test]
+    fn a_hand_edited_config_with_option_or_shell_metacharacters_never_reaches_ssh() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-decide-bad-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args = vec!["test".to_string()];
+        let decide = |host: &str, user: &str, root: &str, port: u32| {
+            let p = dir.join("c.toml");
+            let body = format!("[build.remote]\nenabled = true\nhost = {host:?}\nuser = {user:?}\nremote_root = {root:?}\nssh_port = {port}\n");
+            std::fs::write(&p, body).unwrap();
+            decide_offload(&p, &args, Vec::<(String, String)>::new())
+        };
+        assert!(matches!(decide("h.example", "u", "/srv/cargo", 22), Offload::Go(_)), "正常的照轉");
+        assert!(matches!(decide("2001:db8::1", "me.x-y_z", ".cache/a/b", 2222), Offload::Go(_)), "IPv6、相對路徑也正常");
+        for (host, user, root, port) in [
+            ("-oProxyCommand=touch /tmp/pwn", "u", "/r", 22),
+            ("h;id", "u", "/r", 22),
+            ("h h", "u", "/r", 22),
+            ("h\nid", "u", "/r", 22),
+            ("h", "-oProxyCommand=touch /tmp/pwn", "/r", 22),
+            ("h", "u;id", "/r", 22),
+            ("h", "u", "/a/../b", 22),
+            ("h", "u", "/a b", 22),
+            ("h", "u", "$(touch /tmp/pwn)", 22),
+            ("h", "u", "/a'b", 22),
+            ("h", "u", "/a`id`", 22),
+            ("h", "u", "-rf", 22),
+        ] {
+            match decide(host, user, root, port) {
+                Offload::Local(Some(why)) => assert!(why.contains("不合法") || why.contains("不支援"), "{host:?} {user:?} {root:?}：{why}"),
+                _ => panic!("{host:?} {user:?} {root:?} 不能轉到 ssh"),
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `sh_quote("")` 以前回空字串：`cargo test -- ''`（空的過濾字串）送到遠端少一個引數，跟本機不是同一個意思。
+    #[test]
+    fn an_empty_argument_survives_quoting() {
+        assert_eq!(sh_quote(""), "''");
+        let s = run_script("/r/0123456789abcdef/shared", "", &LeaseToken::new(), 1, 0, &["test".into(), "--".into(), String::new(), "a b".into()]);
+        assert!(s.ends_with("cargo test -- '' 'a b'"), "{s}");
     }
 
     use super::*;

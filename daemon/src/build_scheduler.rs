@@ -57,6 +57,13 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
 /// shim 的 poll 間隔遠短於這個值，正常排隊不會被誤收。
 const STALE_WAITING: Duration = Duration::from_secs(60);
 
+/// 每顆 bot 同時最多佔幾列（held＋waiting）。`holder` 是呼叫端自己取的，不設上限的話一顆 bot 就能用不同 holder 把佇列塞滿
+/// （FIFO 擋在最前面的是幽靈）、把表撐大。正常用法是每個進行中的 cargo 一列，遠低於這個數字。沒有 bot 身分的人工呼叫不受限。
+const MAX_ROWS_PER_BOT: usize = 32;
+
+/// holder／purpose／host 的長度上限（字元）：呼叫端給的字串原樣進 DB 再顯示在網頁。
+const MAX_FIELD_CHARS: usize = 200;
+
 /// 背景 sweep 的間隔：跟 `lifecycle::stuck_turns` 的節奏一致（見那邊的說明）。
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
 
@@ -76,6 +83,8 @@ pub enum Acquired {
     Waiting { active: usize, since: String },
     /// A bot tried to reuse a holder row owned by another bot (or by a manual caller).
     HolderOwnedByAnotherBot,
+    /// 這顆 bot 已經佔了 [`MAX_ROWS_PER_BOT`] 列，不收新的 holder。
+    TooManyForBot,
 }
 
 fn now_str() -> String {
@@ -154,6 +163,13 @@ pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose
     if let (Some(caller_bot_id), Some(row)) = (bot_id, existing.as_ref()) {
         if row.bot_id.as_deref() != Some(caller_bot_id) {
             return Ok(Acquired::HolderOwnedByAnotherBot);
+        }
+    }
+    // 新的 holder 才算數：已經有的列（重 poll、重問）照舊，不會被自己的上限擋在門外。
+    if let (Some(bot), None) = (bot_id, existing.as_ref()) {
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots WHERE bot_id = ?").bind(bot).fetch_one(&app.db).await?;
+        if rows as usize >= MAX_ROWS_PER_BOT {
+            return Ok(Acquired::TooManyForBot);
         }
     }
     // 已經握著且沒過期：把同一份憑證還回去，重call（例如逾時後重問一次）安全。FIFO 不擋自己已經有的名額。
@@ -402,6 +418,9 @@ pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(
     if body.holder.trim().is_empty() {
         return Err(LcError::Bad("holder 不能是空的".into()));
     }
+    if [&body.holder, &body.purpose, &body.host].iter().any(|f| f.chars().count() > MAX_FIELD_CHARS) {
+        return Err(LcError::Bad(format!("holder／purpose／host 最多 {MAX_FIELD_CHARS} 個字元")));
+    }
     let bot_id = authenticate(&app, &headers, body.bot_id.as_deref()).await?;
     match acquire(&app, body.holder.trim(), bot_id.as_deref(), body.purpose.trim(), body.host.trim()).await.map_err(up)? {
         Acquired::Granted { token, expires_at } => {
@@ -412,6 +431,10 @@ pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(
             let cfg = app.cfg.build_fresh().await;
             Ok(Json(json!({"granted": false, "active": active, "max_concurrent": cfg.max_concurrent(), "since": since, "retry_after_secs": 5})))
         }
+        Acquired::TooManyForBot => Err(LcError::conflict(
+            "too_many_build_slots",
+            json!({"reason": "too_many_build_slots", "max_per_bot": MAX_ROWS_PER_BOT, "message": "這顆 bot 同時佔著或排著的名額太多了；等手上的 cargo 跑完（或放掉）再要"}),
+        )),
         Acquired::HolderOwnedByAnotherBot => Err(LcError::Forbidden(json!({
             "error": "forbidden",
             "reason": "holder_bot_mismatch",
@@ -503,6 +526,46 @@ mod tests {
         tt::make_table_readable(&app, "build_slots").await;
         assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.0["released"], false);
+    }
+
+    /// 任何一顆 bot（含被 prompt injection 的）都能呼叫 acquire，`holder` 又是呼叫端自己取的：每個新 holder 一列，
+    /// 不設上限的話，一顆 bot 用不同 holder 狂送就能把佇列塞滿、讓真正的建置排不到（FIFO 擋在最前面的是幽靈），
+    /// 也能把整張表撐大。每顆 bot 最多同時佔 [`MAX_ROWS_PER_BOT`] 列；已經有的列重送照舊（冪等），別顆 bot 不受影響。
+    #[tokio::test]
+    async fn a_bot_cannot_flood_the_build_queue_with_holders() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        set_max_concurrent(&app, 1).await;
+        for i in 0..MAX_ROWS_PER_BOT {
+            let r = acquire(&app, &format!("flood:{i}"), Some("BOTA"), "x", "local").await.unwrap();
+            assert!(matches!(r, Acquired::Granted { .. } | Acquired::Waiting { .. }), "第 {i} 列：{r:?}");
+        }
+        assert_eq!(acquire(&app, "flood:extra", Some("BOTA"), "x", "local").await.unwrap(), Acquired::TooManyForBot);
+        // 已經有的列重送不受影響（waiting 的重 poll、held 的重問）。
+        assert!(!matches!(acquire(&app, "flood:1", Some("BOTA"), "x", "local").await.unwrap(), Acquired::TooManyForBot));
+        // 別顆 bot 照樣排得進去。
+        assert!(matches!(acquire(&app, "b:1", Some("BOTB"), "x", "local").await.unwrap(), Acquired::Waiting { .. }));
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots").fetch_one(&app.db).await.unwrap();
+        assert_eq!(rows as usize, MAX_ROWS_PER_BOT + 1, "表不會被撐大");
+        // 手動（UI token，沒有 bot 身分）不受這個上限管：那是人在操作。
+        assert!(matches!(acquire(&app, "manual:1", None, "x", "local").await.unwrap(), Acquired::Waiting { .. }));
+    }
+
+    /// holder／purpose／host 是呼叫端給的字串，原樣進 DB 再顯示在網頁：不設長度上限等於讓呼叫端往 DB 寫任意大的東西。
+    #[tokio::test]
+    async fn oversized_holder_purpose_and_host_are_rejected() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let mut h = HeaderMap::new();
+        h.insert("X-AM-Token", app.ui_token.parse().unwrap());
+        let ok = |holder: &str, purpose: &str, host: &str| AcquireIn { holder: holder.into(), bot_id: None, purpose: purpose.into(), host: host.into() };
+        for (holder, purpose, host) in [("h".repeat(MAX_FIELD_CHARS + 1), String::new(), "local".to_string()), ("h".into(), "p".repeat(MAX_FIELD_CHARS + 1), "local".into()), ("h".into(), String::new(), "x".repeat(MAX_FIELD_CHARS + 1))] {
+            let err = post_acquire(State(app.clone()), h.clone(), Form(ok(&holder, &purpose, &host))).await.unwrap_err();
+            assert!(matches!(err, LcError::Bad(_)), "{err:?}");
+        }
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots").fetch_one(&app.db).await.unwrap();
+        assert_eq!(rows, 0, "被擋下來的不能留下任何一列");
+        post_acquire(State(app.clone()), h, Form(ok("h", "p", "local"))).await.unwrap();
     }
 
     /// 核心驗收條件（issue #90）：N 個同時的 acquire，只有設定的名額數真的拿到，其餘回 waiting。
