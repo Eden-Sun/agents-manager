@@ -23,6 +23,11 @@ use tokio::process::Command;
 const FAST_TIMEOUT_SECS: i64 = 5 * 60;
 const FULL_TIMEOUT_SECS: i64 = 45 * 60;
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
+/// 一個 job 最多被 claim 幾次：daemon 在它跑到一半死掉就放回 queued，但會讓 daemon 當掉的 job 不能無限重來。
+const MAX_ATTEMPTS: i64 = 3;
+/// 終態的 job 留多久（同 `hook_inbox` 的 prune：只刪已完成的，排隊中／執行中的不動）。
+const KEEP_FINISHED_SECS: i64 = 30 * 24 * 3600;
+const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Queue {
@@ -71,6 +76,7 @@ struct StoredJob {
     failed_steps_json: String,
     output_tail: String,
     exit_code: Option<i64>,
+    attempts: i64,
     created_at: String,
     updated_at: String,
     started_at: Option<String>,
@@ -88,6 +94,7 @@ struct CiJob {
     failed_steps: Vec<String>,
     output_tail: String,
     exit_code: Option<i64>,
+    attempts: i64,
     created_at: String,
     updated_at: String,
     started_at: Option<String>,
@@ -108,6 +115,7 @@ impl TryFrom<StoredJob> for CiJob {
             failed_steps: serde_json::from_str(&row.failed_steps_json)?,
             output_tail: row.output_tail,
             exit_code: row.exit_code,
+            attempts: row.attempts,
             created_at: row.created_at,
             updated_at: row.updated_at,
             started_at: row.started_at,
@@ -128,6 +136,7 @@ impl CiJob {
             "failed_steps": self.failed_steps,
             "output_tail": self.output_tail,
             "exit_code": self.exit_code,
+            "attempts": self.attempts,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "started_at": self.started_at,
@@ -185,6 +194,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
            failed_steps_json TEXT NOT NULL DEFAULT '[]',
            output_tail TEXT NOT NULL DEFAULT '',
            exit_code INTEGER,
+           attempts INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL,
            updated_at TEXT NOT NULL,
            started_at TEXT,
@@ -194,6 +204,13 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await
     .context("create ci_jobs")?;
+    // 先前（v36）建出來的表沒有 attempts：additive 補上，舊 DB 照開。
+    if !db::has_column(pool, "ci_jobs", "attempts").await? {
+        sqlx::query("ALTER TABLE ci_jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await
+            .context("add ci_jobs.attempts")?;
+    }
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS ci_jobs_queue_state ON ci_jobs(queue, status, created_at)",
     )
@@ -378,7 +395,7 @@ async fn claim_next(app: &Arc<App>, queue: Queue) -> Result<Option<CiJob>> {
     .await?;
     let Some(id) = id else { return Ok(None) };
     let now = db::now();
-    sqlx::query("UPDATE ci_jobs SET status='running', started_at=?, updated_at=? WHERE id=? AND status='queued'")
+    sqlx::query("UPDATE ci_jobs SET status='running', attempts=attempts+1, started_at=?, updated_at=? WHERE id=? AND status='queued'")
         .bind(&now)
         .bind(&now)
         .bind(&id)
@@ -590,6 +607,16 @@ pub fn spawn_worker(app: Arc<App>) {
         tracing::info!("daemon CI worker disabled: AGM_CI_WORK_ROOT is not configured");
         return;
     };
+    if let Some(ci_root) = ubuntu_ci_root() {
+        if conflicts_with_ubuntu_ci(&repo, &ci_root) {
+            tracing::error!(
+                repo = %repo.display(),
+                "daemon CI worker refused to start: AGM_CI_REPO_DIR is the scripts/ops/ubuntu-ci.sh clone ({}/repo); point it at a dedicated checkout",
+                ci_root.display()
+            );
+            return;
+        }
+    }
     // 先收拾上一個行程留下的東西，再開 worker：不然當時還 running 的 job 會一直卡住那條 queue 到 timeout 才放。
     let app_for_recovery = app.clone();
     let (repo_r, work_r) = (repo.clone(), work_root.clone());
@@ -598,6 +625,17 @@ pub fn spawn_worker(app: Arc<App>) {
             tracing::error!(error = %error, "could not requeue interrupted CI jobs");
         }
         clean_stale_worktrees(&repo_r, &work_r).await;
+        let app_for_prune = app_for_recovery.clone();
+        tokio::spawn(async move {
+            loop {
+                match prune_finished(&app_for_prune).await {
+                    Ok(n) if n > 0 => tracing::info!(pruned = n, "pruned finished CI jobs past retention"),
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(error = %error, "CI job prune failed"),
+                }
+                tokio::time::sleep(PRUNE_EVERY).await;
+            }
+        });
         for queue in [Queue::Fast, Queue::Full] {
             let app = app_for_recovery.clone();
             let repo = repo_r.clone();
@@ -611,21 +649,63 @@ pub fn spawn_worker(app: Arc<App>) {
 /// （job 是 durable 的，重啟不該讓提交者永遠等不到結果，也不該把 queue 卡到 timeout）。
 async fn requeue_interrupted(app: &Arc<App>) -> Result<()> {
     let _guard = app.ci_queue_lock.lock().await;
-    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM ci_jobs WHERE status='running'")
+    let rows: Vec<(String, i64)> = sqlx::query_as("SELECT id, attempts FROM ci_jobs WHERE status='running'")
         .fetch_all(&app.db)
         .await?;
-    for id in ids {
-        sqlx::query("UPDATE ci_jobs SET status='queued', started_at=NULL, updated_at=? WHERE id=? AND status='running'")
-            .bind(db::now())
+    for (id, attempts) in rows {
+        let now = db::now();
+        if attempts >= MAX_ATTEMPTS {
+            // 已經跑過上限次、每次都在中途斷掉：不再重來（可能就是這個 job 讓 daemon 當掉的），記下原因。
+            let note = format!("interrupted by a daemon restart on each of {attempts} attempts; not retried");
+            sqlx::query(
+                "UPDATE ci_jobs SET status='failure', failed_steps_json='[\"interrupted\"]', output_tail=?, updated_at=?, finished_at=?
+                 WHERE id=? AND status='running'",
+            )
+            .bind(&note)
+            .bind(&now)
+            .bind(&now)
             .bind(&id)
             .execute(&app.db)
             .await?;
+            tracing::error!(job_id = %id, attempts, "CI job gave up after repeated daemon restarts");
+        } else {
+            sqlx::query("UPDATE ci_jobs SET status='queued', started_at=NULL, updated_at=? WHERE id=? AND status='running'")
+                .bind(&now)
+                .bind(&id)
+                .execute(&app.db)
+                .await?;
+            tracing::warn!(job_id = %id, attempts, "requeued a CI job interrupted by a daemon restart");
+        }
         if let Some(job) = stored_job(&app.db, &id).await? {
-            tracing::warn!(job_id = %id, "requeued a CI job interrupted by a daemon restart");
             emit_job(app, &job).await;
         }
     }
     Ok(())
+}
+
+/// 刪掉超過保留期限的終態 job；queued／running 的不碰。
+async fn prune_finished(app: &Arc<App>) -> Result<u64> {
+    let _guard = app.ci_queue_lock.lock().await;
+    let cutoff = db::iso_in(-KEEP_FINISHED_SECS);
+    Ok(sqlx::query("DELETE FROM ci_jobs WHERE status IN ('success','failure','timed_out') AND finished_at IS NOT NULL AND finished_at < ?")
+        .bind(cutoff)
+        .execute(&app.db)
+        .await?
+        .rows_affected())
+}
+
+/// 同機的 `scripts/ops/ubuntu-ci.sh` 用 `${AGM_CI_ROOT:-~/.cache/agents-manager/ci}/repo` 這份 clone，而且它的 flock 不管這邊：
+/// 兩個排程器對同一份 clone 一邊 `checkout -f`、一邊 `worktree add`／`fetch`，還會同時各跑一輪完整 CI。指到那份就拒絕啟動。
+fn conflicts_with_ubuntu_ci(repo: &FsPath, ci_root: &FsPath) -> bool {
+    let theirs = ci_root.join("repo");
+    let canon = |p: &FsPath| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(repo) == canon(&theirs)
+}
+
+fn ubuntu_ci_root() -> Option<PathBuf> {
+    std::env::var_os("AGM_CI_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/agents-manager/ci")))
 }
 
 /// 被中斷的 job 留下的 detached worktree（含 repo 裡的登記）；每個 job 用自己的 id 當目錄，不清就一直佔磁碟。
@@ -1169,5 +1249,80 @@ mod tests {
             dirs.push(result.output_tail.lines().find_map(|l| l.strip_prefix("target=")).unwrap().to_owned());
         }
         assert_ne!(dirs[0], dirs[1], "a fast job must not wait on the full job's cargo build-dir lock");
+    }
+
+    #[tokio::test]
+    async fn a_job_interrupted_on_every_allowed_attempt_is_failed_with_a_reason_not_requeued_again() {
+        let e = env().await;
+        let job = submit(&e.app, Queue::Fast, &"a".repeat(40), &e.project_id, "bot:a").await.unwrap();
+        for attempt in 1..=MAX_ATTEMPTS {
+            let claimed = claim_next(&e.app, Queue::Fast).await.unwrap().unwrap();
+            assert_eq!(claimed.attempts, attempt);
+            requeue_interrupted(&e.app).await.unwrap();
+            let after = get_job(&e.app.db, &job.id).await.unwrap().unwrap();
+            if attempt < MAX_ATTEMPTS {
+                assert_eq!(after.status, "queued", "attempt {attempt}: still within the retry budget");
+            } else {
+                assert_eq!(after.status, "failure");
+                assert_eq!(after.failed_steps, ["interrupted"]);
+                assert!(after.output_tail.contains("not retried"), "{}", after.output_tail);
+                assert!(after.finished_at.is_some());
+            }
+        }
+        assert!(claim_next(&e.app, Queue::Fast).await.unwrap().is_none(), "a given-up job never comes back");
+    }
+
+    #[tokio::test]
+    async fn only_finished_jobs_older_than_the_retention_are_pruned() {
+        let e = env().await;
+        let mut ids = Vec::new();
+        for n in 0..4u8 {
+            ids.push(submit(&e.app, Queue::Fast, &format!("{n:040x}"), &e.project_id, "bot:a").await.unwrap().id);
+        }
+        let old = db::iso_in(-KEEP_FINISHED_SECS - 3600);
+        let recent = db::iso_in(-3600);
+        // 0: 舊且完成；1: 近期完成；2: 很舊但還在排隊；3: 很舊但還在跑
+        sqlx::query("UPDATE ci_jobs SET status='success', finished_at=?, created_at=? WHERE id=?").bind(&old).bind(&old).bind(&ids[0]).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE ci_jobs SET status='failure', finished_at=? WHERE id=?").bind(&recent).bind(&ids[1]).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE ci_jobs SET created_at=? WHERE id=?").bind(&old).bind(&ids[2]).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE ci_jobs SET status='running', started_at=?, created_at=? WHERE id=?").bind(&old).bind(&old).bind(&ids[3]).execute(&e.app.db).await.unwrap();
+
+        assert_eq!(prune_finished(&e.app).await.unwrap(), 1);
+        assert!(get_job(&e.app.db, &ids[0]).await.unwrap().is_none());
+        for kept in &ids[1..] {
+            assert!(get_job(&e.app.db, kept).await.unwrap().is_some(), "{kept} must survive the prune");
+        }
+    }
+
+    #[test]
+    fn the_worker_refuses_the_checkout_that_ubuntu_ci_uses() {
+        let dir = std::env::temp_dir().join(format!("agm-ci-guard-{}", db::ulid()));
+        let ci_root = dir.join("ci");
+        std::fs::create_dir_all(ci_root.join("repo")).unwrap();
+        std::fs::create_dir_all(dir.join("dedicated")).unwrap();
+        // 一般路徑、帶 `..` 的路徑、symlink 都要認得出是同一份
+        assert!(conflicts_with_ubuntu_ci(&ci_root.join("repo"), &ci_root));
+        assert!(conflicts_with_ubuntu_ci(&ci_root.join("repo/../repo"), &ci_root));
+        std::os::unix::fs::symlink(ci_root.join("repo"), dir.join("alias")).unwrap();
+        assert!(conflicts_with_ubuntu_ci(&dir.join("alias"), &ci_root));
+        assert!(!conflicts_with_ubuntu_ci(&dir.join("dedicated"), &ci_root));
+        // ubuntu-ci 的 clone 還沒建出來時也要擋（路徑相同）
+        assert!(conflicts_with_ubuntu_ci(&dir.join("ci2/repo"), &dir.join("ci2")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_v36_ci_jobs_table_without_attempts_is_upgraded_in_place() {
+        let e = env().await;
+        sqlx::query("DROP TABLE ci_jobs").execute(&e.app.db).await.unwrap();
+        sqlx::query("CREATE TABLE ci_jobs (id TEXT PRIMARY KEY, queue TEXT NOT NULL, sha TEXT NOT NULL, status TEXT NOT NULL,
+            request_routes_json TEXT NOT NULL DEFAULT '[]', timeout_seconds INTEGER NOT NULL, failed_steps_json TEXT NOT NULL DEFAULT '[]',
+            output_tail TEXT NOT NULL DEFAULT '', exit_code INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, finished_at TEXT)")
+            .execute(&e.app.db).await.unwrap();
+        sqlx::query("INSERT INTO ci_jobs (id,queue,sha,status,timeout_seconds,created_at,updated_at) VALUES ('old','fast','aa','queued',300,'2026-10-01T00:00:00.000Z','2026-10-01T00:00:00.000Z')")
+            .execute(&e.app.db).await.unwrap();
+        migrate(&e.app.db).await.unwrap();
+        migrate(&e.app.db).await.unwrap();
+        assert_eq!(get_job(&e.app.db, "old").await.unwrap().unwrap().attempts, 0);
     }
 }

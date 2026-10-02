@@ -960,7 +960,7 @@ Linux daemon 只有在啟動環境同時設定 `AGM_CI_REPO_DIR`（含 `scripts/
 
 ### `GET /api/ci/jobs[?project_id=<id>]`、`GET /api/ci/jobs/{id}`
 
-列表依最新更新排序，最多 100 列。Job JSON 含 `id`、`queue`、`sha`、`status`、`routes`、`timeout_seconds`、`failed_steps`、`exit_code`、時間欄位及最多 32 KiB 的 `output_tail`。
+列表依最新更新排序，最多 100 列。Job JSON 含 `id`、`queue`、`sha`、`status`、`routes`、`timeout_seconds`、`failed_steps`、`exit_code`、`attempts`（被 worker claim 過幾次）、時間欄位及最多 32 KiB 的 `output_tail`。
 
 WebSocket 終態與排隊狀態以 `ci_job_updated` 推送，每個 route 一幀，含 `job_id`、`project_id`、`requester`、`queue`、`sha`、`status`；完整結果用 GET 查回。
 

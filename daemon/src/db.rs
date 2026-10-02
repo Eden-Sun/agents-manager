@@ -278,6 +278,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (35, "fe4e118f866a5cfd"),
     // issue #716: durable fast/full CI jobs and project/agent result routing.
     (36, "a90e6ec25118864e"),
+    // issue #716: `ci_jobs.attempts`（被中斷重跑的次數上限）。
+    (37, "e07a16508d045dc3"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
