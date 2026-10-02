@@ -118,7 +118,7 @@ fn a_missing_codex_config_does_not_also_list_its_keys() {
 struct FakeHome(std::path::PathBuf);
 impl FakeHome {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("am-test-baseline-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-test-baseline-{}", crate::db::ulid())));
         fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }

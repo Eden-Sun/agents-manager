@@ -351,7 +351,7 @@ mod tests {
     }
 
     fn sandbox(tag: &str) -> std::path::PathBuf {
-        let base = std::env::temp_dir().join(format!("am-outbox-remote-{tag}-{}", crate::db::ulid()));
+        let base = crate::testing::track(std::env::temp_dir().join(format!("am-outbox-remote-{tag}-{}", crate::db::ulid())));
         std::fs::create_dir_all(base.join("outbox")).unwrap();
         std::fs::write(base.join("secret.txt"), b"TOP SECRET").unwrap();
         base
