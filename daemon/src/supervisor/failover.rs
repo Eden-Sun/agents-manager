@@ -180,6 +180,7 @@ fn age_secs(iso: &str) -> i64 {
 }
 
 /// 改派之後誰擁有這一則。測試與 SPEC 都讀這個。
+#[cfg(test)]
 pub async fn owner_of(pool: &sqlx::SqlitePool, event_id: &str) -> anyhow::Result<Option<String>> {
     Ok(sqlx::query_scalar(&format!("SELECT {owner} FROM supervisor_inbox WHERE id=?", owner = roles::OWNER))
         .bind(event_id)

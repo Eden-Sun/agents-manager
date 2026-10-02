@@ -499,6 +499,7 @@ pub async fn post_rewind(State(app): State<Arc<App>>, Path(bot_id): Path<String>
 }
 
 /// `pane`：測試注入的假 pane；`None`＝這個 run 的真 pane。
+#[cfg(test)]
 pub async fn rewind(app: &Arc<App>, bot_id: &str, message_id: &str, pane: Option<Arc<dyn Pane>>) -> LcResult<Value> {
     rewind_with(app, bot_id, message_id, pane, None).await
 }

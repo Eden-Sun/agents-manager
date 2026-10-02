@@ -1654,7 +1654,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
 
     /// grok 1.0.13 `agent.read {source: visible}` (appendix F), columns narrowed.
     const GROK_SCREEN: &str = "\
-
   /private/tmp/scratch/grok-ws                                       15K / 500K
 
 
@@ -1757,7 +1756,6 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     /// grok echo of an attachment prompt (`01M1XSVME9SKEG1NZXG51HFP73`, 2026-09-07): lines 2..n
     /// squeezed onto one `…` row, which was stored as the answer.
     const GROK_ATTACHMENT_ECHO: &str = "\
-
    main ~/project/agents-manager                                          250K / 500K
 
 

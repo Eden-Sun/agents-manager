@@ -206,6 +206,7 @@ fn sweep_leftovers(data_dir: &Path) {
 }
 
 /// 清掉放超過 `keep` 的（看名字裡的時間，不看 mtime：`rename` 不會更新目錄的 mtime）。
+#[cfg(test)]
 pub fn gc(data_dir: &Path, keep: Duration) -> usize {
     gc_with_cap(data_dir, keep, MAX_BYTES).0
 }

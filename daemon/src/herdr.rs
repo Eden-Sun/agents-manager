@@ -83,6 +83,7 @@ pub struct PaneInfo {
     pub tab_id: String,
     pub cwd: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)] // herdr 協定欄位，測試與日後除錯用
     pub foreground_cwd: Option<String>,
     pub agent: Option<String>,
     pub agent_status: Option<AgentStatus>,
@@ -124,8 +125,10 @@ pub struct AgentInfo {
     #[serde(default)]
     pub launch_pending: bool,
     #[serde(default)]
+    #[allow(dead_code)] // herdr 協定欄位
     pub state_change_seq: u64,
     #[serde(default)]
+    #[allow(dead_code)] // herdr 協定欄位
     pub revision: u64,
 }
 
@@ -169,8 +172,6 @@ pub struct ProcessInfo {
     pub argv: Vec<String>,
     #[serde(default)]
     pub argv0: Option<String>,
-    #[serde(default)]
-    pub cwd: Option<String>,
     /// No env in `pane.process_info`, so the pid is the only handle on the pane's *account*
     /// (see [`crate::pane_identity`]).
     #[serde(default)]
@@ -658,17 +659,9 @@ impl HerdrClient {
         }
     }
 
-    pub async fn agent_prompt(&self, target: &str, text: &str) -> Result<AgentInfo> {
-        Ok(self.call_as::<AgentInfo>("agent.prompt", json!({"target": target, "text": text}), "agent").await?.folded())
-    }
-
     pub async fn agent_send_keys(&self, target: &str, keys: &[String]) -> Result<()> {
         self.call("agent.send_keys", json!({"target": target, "keys": keys})).await?;
         Ok(())
-    }
-
-    pub async fn agent_read(&self, target: &str, source: &str, lines: u32) -> Result<PaneRead> {
-        self.call_as("agent.read", json!({"target": target, "source": source, "lines": lines}), "read").await.map(nbsp_to_space)
     }
 
     /// 訂閱的**握手**最多等這麼久（issue #491）。其他 RPC 都走 [`Self::call_timeout`]，只有這裡

@@ -3914,7 +3914,7 @@ mod compat_tests {
 
         // DB 恢復：延後的那一輪自己補跑，照 hint 認領，沒有鏈、沒有重複。
         sqlx::query("ALTER TABLE spawn_hints_unreadable RENAME TO spawn_hints").execute(&app.db).await.unwrap();
-        let mut kids = Vec::new();
+        let mut kids;
         let _ = crate::testing::eventually!({
             kids = children(app.clone()).await;
             kids.len() == 3
@@ -4079,7 +4079,6 @@ mod compat_tests {
 /// snapshot 的 `workspaces` 暫時是空陣列、pane 還掛著那個 workspace_id：不能把專案映射清成 NULL。
 #[cfg(test)]
 mod snapshot_workspace_tests {
-    use crate::db;
     use crate::testing as tt;
     use serde_json::json;
 

@@ -870,6 +870,7 @@ fn resend_unreadable(turn_id: &str, e: &anyhow::Error) -> Resend {
 }
 
 impl Resend {
+    #[cfg(test)]
     fn sent(self) -> bool {
         self == Resend::Sent
     }
@@ -2051,8 +2052,6 @@ mod hookless_capture_tests {
 mod issue_17_tests {
     use super::*;
     use crate::testing as tt;
-
-    const FALLBACK_SCREEN: &str = "❯ Reply with PONG\n⏺ PONG\n✻ Worked for 5s · done 1:07 AM\n──────\n❯\n";
 
     struct Fixture {
         env: tt::Env,

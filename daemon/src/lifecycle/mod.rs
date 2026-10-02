@@ -123,6 +123,7 @@ pub(crate) fn retain_pane_typed(active: &[String]) {
 
 /// 沒了的 bot（刪掉、退役的 child）在 lifecycle 各模組的 per-bot 記憶體帳：它們只在「結清／套用／disarm」時才清，
 /// bot 先沒了就沒有人會再來清。
+#[cfg(not(test))]
 pub(crate) fn retain_bot_state(live: &[String]) {
     interrupt_grace::retain_bots(live);
     interruption::retain_bots(live);
@@ -165,7 +166,7 @@ pub(crate) async fn recover_live_apply_debts(app: &Arc<App>) {
 pub(crate) use live_apply_debt::retry_once as retry_live_apply_bookkeeping_once;
 pub(crate) use delivery::*;
 pub(crate) use start::*;
-pub(crate) use start_send::{prompt_starting, prompt_starting_or_queue, withdraw_turn};
+pub(crate) use start_send::{prompt_starting_or_queue, withdraw_turn};
 pub(crate) use composer_draft::submit as submit_composer_draft;
 pub(crate) use stop::*;
 pub(crate) use interrupt_grace::{note_user_interrupt_of, settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};

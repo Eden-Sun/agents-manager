@@ -72,6 +72,7 @@ pub struct MachineMem {
 }
 
 impl MachineMem {
+    #[cfg(test)]
     pub fn used_bytes(&self) -> u64 {
         self.total_bytes.saturating_sub(self.available_bytes)
     }

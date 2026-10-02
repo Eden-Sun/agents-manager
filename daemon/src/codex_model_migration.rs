@@ -32,6 +32,7 @@ pub fn retain_runs(active: &[String]) {
     open().lock().unwrap().retain(|id, _| active.contains(id));
 }
 
+#[cfg(test)]
 pub fn is_open(run_id: &str) -> bool {
     open().lock().unwrap().contains_key(run_id)
 }

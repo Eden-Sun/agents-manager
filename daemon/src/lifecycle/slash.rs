@@ -20,6 +20,7 @@ pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_r
 /// `POST /api/bots/:id/text` — 把（多行）文字打進 pane，選擇性按 Enter。`\n` 不是鍵名，所以不走
 /// `send_keys`；Enter 另用 `pane.send_keys`（`send_text` 裡的 `\n` 是貼上換行）。不擋
 /// `agent_status`：用途就是回合中「併送」。
+#[cfg(test)]
 pub async fn send_text(app: &Arc<App>, bot_id: &str, text: &str, enter: bool, expect_run_id: Option<String>) -> LcResult<()> {
     send_text_recorded(app, bot_id, text, enter, expect_run_id, false).await.map(|_| ())
 }

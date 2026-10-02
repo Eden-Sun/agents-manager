@@ -103,10 +103,6 @@ pub async fn escalation_for(app: &Arc<App>, approval_id: Option<&str>) -> Result
     Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated: waited >= escalate_after_secs() }))
 }
 
-pub async fn escalation(app: &Arc<App>) -> Result<Option<Escalation>, LcError> {
-    escalation_for(app, None).await
-}
-
 /// 還握著的租約。縮小封鎖面時這是**唯一**新增的阻擋條件：窗口一次只給一個人。
 ///
 /// `own` 標出「就是發問的這個 owner 自己握的」（`owner` 給了才會是 true）。**自己的租約不擋自己**

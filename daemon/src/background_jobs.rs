@@ -57,6 +57,7 @@ fn codex_terminals(line: &str) -> Option<u32> {
     })
 }
 
+#[cfg(test)]
 pub fn get(app: &App, run_id: &str) -> u32 {
     known(app, run_id).unwrap_or(0)
 }

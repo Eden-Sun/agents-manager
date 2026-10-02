@@ -28,18 +28,13 @@ pub const LOOPBACK: &str = "127.0.0.1";
 /// 已經 `running` 的預覽多久重驗一次綁的位址（issue #452）。
 ///
 /// 測試裡是 0＝每一拍都驗：測的是「running 期間會不會再驗」這條線，不是計時器本身；
-/// 間隔的算法由 [`recheck_due`] 自己的測試釘住。
+/// 間隔的算法由 [`due_after`] 自己的測試釘住。
 #[cfg(not(test))]
 pub const RECHECK_EVERY_MS: i64 = 60_000;
 #[cfg(test)]
 pub const RECHECK_EVERY_MS: i64 = 0;
 
-/// 距離上一次驗夠久了沒（間隔是 [`RECHECK_EVERY_MS`]）。
-pub fn recheck_due(last: Option<&str>, now: &str) -> bool {
-    due_after(last, now, RECHECK_EVERY_MS)
-}
-
-/// [`recheck_due`] 的本體，間隔可指定——正式的間隔在測試裡是 0（每一拍都驗），算法本身要另外釘。
+/// 距離上一次驗夠久了沒；間隔可指定——正式的間隔（[`RECHECK_EVERY_MS`]）在測試裡是 0（每一拍都驗），算法本身要另外釘。
 /// `last` 是上一次驗的時間戳（`db::now()` 的格式），`None`＝沒驗過（要驗）。
 /// 讀不懂的時間戳當成沒驗過：寧可多跑一次 `lsof`，也不要因為一個壞字串從此不再檢查。
 fn due_after(last: Option<&str>, now: &str, every_ms: i64) -> bool {

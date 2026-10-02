@@ -1472,7 +1472,7 @@ pub async fn defer_conflict(pool: &SqlitePool, id: &str, next_attempt_at: &str, 
 ///
 /// 只從 `queued` 動手——比表上「哪些狀態能走到 `blocked`」窄（那張表容許任何未結案狀態，因為
 /// `blocked` 也是一種裁示），是刻意的：`mark_undeliverable` 講的是「這一次派送就是進不去」，
-/// `delivered`／`unknown` 已經送出去了，進不去的保險絲是 [`block_stale_queue`] 的事，兩者不能共用
+/// `delivered`／`unknown` 已經送出去了，進不去的保險絲是 [`block_stale_queue_tx`] 的事，兩者不能共用
 /// 同一個更寬的 guard。guard 跟 CAS 走 [`assignment_state::set_status_on`]（issue #71 第二刀），
 /// 這裡自己只管 `queued → blocked` 以外的欄位。
 pub async fn mark_undeliverable(pool: &SqlitePool, id: &str, why: &str, event_key: &str, payload: &Value) -> Result<bool> {
@@ -1627,14 +1627,7 @@ pub async fn settle_and_notify_on(
 /// `dispatch_failed`，工作就這樣無聲斷掉（2026-09-12 codex-astra 三次都是這樣）。
 /// 排進佇列後等太久還沒送出：停在 `blocked` 並留下理由，讓 AGM 看得到（AGM 2026-09-16）。
 /// 只動 `delivered` 的列（就是排隊中的那些），回 true = 這次真的把它擋下了。
-pub async fn block_stale_queue(pool: &SqlitePool, id: &str, why: &str) -> Result<bool> {
-    let mut tx = pool.begin().await?;
-    let moved = block_stale_queue_tx(&mut tx, id, why).await?;
-    tx.commit().await?;
-    Ok(moved)
-}
-
-/// [`block_stale_queue`] 的交易內版本：保險絲要「turn 撤成功才標 blocked」，兩個寫入同一個交易。
+/// 保險絲要「turn 撤成功才標 blocked」，兩個寫入同一個交易。
 ///
 /// 只從 `delivered` 動手——比表上的一般 guard 窄，理由跟 [`mark_undeliverable`] 同一種：這支管的
 /// 是「排太久沒送出」的那條保險絲，不是任何一種裁示。guard 跟 CAS 走
@@ -2610,6 +2603,7 @@ pub struct ApprovalSupersedeRefused {
     pub reason: &'static str,
 }
 
+#[cfg(test)]
 pub async fn create_approval(
     pool: &SqlitePool,
     requester: &str,
@@ -2887,6 +2881,7 @@ pub async fn approvals(pool: &SqlitePool, limit: i64) -> Result<Vec<Approval>> {
 
 /// Approve, deny, revoke or consume. Only a `pending` approval can be approved or denied; a
 /// revoke applies to one that was already approved, and takes effect for every later acquire.
+#[cfg(test)]
 pub async fn decide_approval(
     pool: &SqlitePool,
     id: &str,

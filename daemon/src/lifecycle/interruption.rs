@@ -379,9 +379,8 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
         }
         notes.push(insert_message_tx(&mut tx, &conv, Some(&p.turn_id), "system", &p.note, "system", false, None).await?);
     }
-    let mut bound = false;
     if let Some(n) = &p.new_turn {
-        bound = sqlx::query(
+        let bound = sqlx::query(
             "UPDATE turns SET run_id=? WHERE id=? AND run_id IS NULL AND status='in_flight'
                 AND NOT EXISTS (SELECT 1 FROM turns WHERE run_id=? AND status='in_flight')
                 AND EXISTS (SELECT 1 FROM runs WHERE id=? AND state='running')",

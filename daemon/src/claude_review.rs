@@ -25,7 +25,6 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::changelog::Section;
 use crate::lifecycle::LcError;
 use crate::state::App;
 
@@ -198,6 +197,7 @@ async fn default_to(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
 }
 
 /// 這一版已經有交辦了嗎（使用者按過，或 kick 先派了——兩邊用同一個 `client_request_id`）。
+#[cfg(test)]
 pub async fn existing_for(app: &Arc<App>, kind: &str, to: &str) -> anyhow::Result<Option<crate::supervisor::store::Assignment>> {
     crate::supervisor::store::assignment_by_crid(&app.db, &request_id(kind, to)).await
 }
@@ -208,6 +208,7 @@ pub async fn existing_for(app: &Arc<App>, kind: &str, to: &str) -> anyhow::Resul
 /// 2026-09-19 上線後實測：按鈕回 409 `request_mismatch`——crid 被 18:27 那次 kick 的 bot_request
 /// 佔住，正文不同（我們多一句「使用者按了…」）所以指紋對不上。對使用者來說那就是「已經派過」，
 /// 不是錯誤，所以這裡也要算進去。
+#[cfg(test)]
 pub async fn inbox_event_for(app: &Arc<App>, kind: &str, to: &str) -> anyhow::Result<Option<String>> {
     let like = format!("%:crid:{}", request_id(kind, to));
     Ok(sqlx::query_scalar::<_, String>("SELECT id FROM supervisor_inbox WHERE event_key LIKE ? ORDER BY created_at DESC LIMIT 1")

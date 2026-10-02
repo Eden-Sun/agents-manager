@@ -125,25 +125,6 @@ impl Skip {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Skip::Supervisor => "總管自己，巡邏的人不收自己",
-            Skip::Primary => "主力 bot，使用者指定閒置再久也不收",
-            Skip::TeamMember => "是 team 的成員，由 team 排程管",
-            Skip::Child => "是子 agent，pane 歸父 agent 管，daemon 起不回來",
-            Skip::NotRunning => "還在啟動或關閉中",
-            Skip::Working => "正在跑",
-            Skip::Blocked => "卡在提問，等人回答",
-            Skip::UnknownStatus => "狀態不明，不確定它在不在忙",
-            Skip::TurnInFlight => "還有一回合沒收掉",
-            Skip::QueuedTurn => "還有排隊中的訊息沒送進去",
-            Skip::OpenAssignment => "AGM 還有沒結案的 assignment 指著它",
-            Skip::LiveChildren => "它開的子 agent 還在跑，回報與提問要送得到它",
-            Skip::BackgroundShell => "pane 裡還有背景 shell／建置在跑",
-            Skip::NoResume => "沒有可續接的 session，收起來會把對話弄丟",
-            Skip::StillWarm => "還沒閒置到門檻",
-        }
-    }
 }
 
 /// 收不收這一顆。`threshold` 是分鐘數；判斷順序就是回報的理由順序，第一個中的就是理由。

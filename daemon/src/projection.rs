@@ -24,6 +24,7 @@ static PROJECTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 ///
 /// 帶大量軟刪的閘門：啟動與 runtime 的每一次重投都走這條。`ConfigStore::update` 每次都從磁碟重讀，
 /// 所以「外面把 TOML 換掉／清空，再由 API 或總管觸發重投」也是事故路徑，不能只擋啟動。
+#[cfg(test)]
 #[track_caller]
 pub fn project_config<'a>(store: &'a ConfigStore, pool: &'a SqlitePool) -> impl std::future::Future<Output = Result<()>> + 'a {
     let at = Location::caller();
