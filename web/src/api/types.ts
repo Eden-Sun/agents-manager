@@ -58,6 +58,23 @@ export interface HerdrVersion {
 
 export const UNKNOWN_HERDR: HerdrVersion = { server_version: null, protocol: null, protocol_supported: null, cli_version: null, mismatch: false }
 
+/** 一項跟基準不一致的東西（SPEC §16.7）。`id` 穩定可比對。 */
+export interface BaselineIssue {
+  id: string
+  severity: 'critical' | 'warn'
+  message: string
+}
+
+/**
+ * 主機工作環境一致性檢查（`hosts[].baseline`，SPEC §16.7，只讀）。
+ * `issues: null`＝這趟探測沒跑完＝未知，**不是**全缺；整個 `baseline` 為 null＝還沒量過（或舊 daemon）。
+ */
+export interface HostBaseline {
+  issues: BaselineIssue[] | null
+  checked_at: string
+  os: string | null
+}
+
 /** SPEC §11.2 / §11.6 — 遠端主機（透過 SSH 轉發的遠端 herdr）。 */
 export interface Host {
   /** `[a-z][a-z0-9_-]{0,31}`；`"local"` 保留給本機，不會出現在這個清單 */
@@ -78,6 +95,8 @@ export interface Host {
   attach_command: string
   herdr: HerdrVersion
   tools: ToolMap
+  /** 工作環境一致性（SPEC §16.7）；null＝還沒量過或舊 daemon。 */
+  baseline: HostBaseline | null
   /** daemon 的 `hosts[].identities`；per-host，因為同一身份的帳號能不能用因主機而異。 */
   identity_status: IdentityStatusMap
 }
@@ -501,6 +520,8 @@ export interface AppState {
   /** 本機 `hosts[0].herdr` */
   herdr: HerdrVersion
   tools: ToolMap
+  /** 本機 `hosts[0].baseline` */
+  baseline: HostBaseline | null
   identity_status: IdentityStatusMap
   hosts: Host[]
   identities: Identity[]

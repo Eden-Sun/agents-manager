@@ -509,6 +509,15 @@ bot 的終端輸入框裡留著一段沒送出的字（claude 的「Edit prompt 
 - 不放狀態列：版本是低頻資訊，狀態列每個字都要跟額度、context 搶位置；hosts 面板就是使用者驗收升級會去看的地方。
 - 文字組合在 `lib/herdrVersion.ts`（有單元測試）。截圖：`docs/screenshots/herdr-version/`。
 
+## 主機工作環境一致性顯示在 hosts 面板（2026-10-02，issue #719）
+
+每台主機（含本機）在工具徽章下面多一行「一致性：…」（11px、`text-dim`），資料是 `hosts[].baseline`（SPEC §16.7，只讀檢查）。
+
+- **與基準一致**：「一致性：與基準一致」，淡色。**有差異**：「一致性：N 項不一致（M 項嚴重）」，嚴重紅、只有提醒黃；下面逐項列缺什麼（嚴重的排前面），滑過去看穩定 id。
+- **未知不是全缺**：還沒量過（剛連上、舊 daemon）寫「尚未檢查」；探測沒跑完（`issues: null`）寫「未知」並在 tooltip 說明——一次 ssh 逾時不能在每台主機喊一排缺漏。兩者都不上色。
+- 只報告，面板上沒有「修復」按鈕：自動安裝／同步要使用者另行同意。Mac 專用項在 Linux 主機根本不會出現（daemon 端就不列）。
+- 文字組合在 `lib/hostBaseline.ts`（有單元測試）。
+
 ## 預覽分頁：頂層 bot 的 vite dev server 內嵌在右半面板（2026-09-19，issue #253）
 
 - **只給頂層 bot**：tablist 在「對話／終端」後多一個「預覽」，`parent_bot_id` 為空且 `managed_by='user'` 才出現（`routeSync.isTopLevelBot`）。

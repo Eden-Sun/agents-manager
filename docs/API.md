@@ -1656,10 +1656,13 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - `hosts[].identities.<name>` 的 `logged_in`/`account`/`plan` 另一條路：codex、grok 走 ssh（`codex login status` / `grok models`，遠端回「未登入」照樣寫回快取）；**claude 不走 ssh**（讀不到 Keychain 會誤答 false，遠端讀到的 false 一律丟掉），
   搭 §12.4 的 `claude-usage` 探測拿，所以第一輪額度輪詢（≤ 60 秒）後才從 `null` 變真答案，變了推 `host_changed`。
 - 尚未偵測時 `tools`、`tools_checked_at` 為 `null`。
-- `hosts[].baseline`（issue #719，SPEC §16.7）：工作環境一致性檢查，**只讀、只報告**：`{"issues": null | [{"id","severity":"critical"|"warn","message"}], "checked_at"}`。
+- `hosts[].baseline`（issue #719，SPEC §16.7）：工作環境一致性檢查，**只讀、只報告**：`{"issues": null | [{"id","severity":"critical"|"warn","message"}], "checked_at", "os": "Linux"|"Darwin"|null}`。
   `issues: []` = 跟基準一致；`null` = 這趟探測沒跑完（逾時、被截斷），未知，不是「全缺」；整個 `baseline` 為 `null` = 還沒量過。
   `id` 穩定可比對（`tool.rtk`、`claude.cc1.settings.json:statusLine`、`codex.config.toml:approval_policy`、`gitconfig.token`…）。
-  跟 `tools` 同一趟探測、同時更新；`host_changed` 在有結果時帶 `baseline`（沒量過就不帶）；`POST /api/hosts/{name}/tools/refresh` 回應也帶。
+  `os` 是那台的 `uname -s`；Mac 專用項（`claude.<身分>.plugin:imessage`／`:discord`，plugin 沒啟用）只有 `os=Darwin` 才會列，Linux／不知道是什麼系統一律不列。
+  有差異（`issues` 非空）時推一則 `ops_alert`（`source=daemon`，`reason=host_baseline`，`subject`＝主機名，payload 帶 `issues`、`critical` 數）進 AGM inbox；
+  event_key 是 `ops_alert:daemon:host_baseline:<host>:<差異 id 集合的雜湊>`——同一份差異（與順序無關）只推一次，差異變了才再推；一致或未知（`issues: null`）不推。
+  跟 `tools` 同一趟探測、同時更新（連上、alias 變了、手動重新偵測，另外**每 6 小時**對連著的主機重跑一次）；`host_changed` 在有結果時帶 `baseline`（沒量過就不帶）；`POST /api/hosts/{name}/tools/refresh` 回應也帶。
 - `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測 `200 {"name","tools","tools_checked_at"}`（host 不存在 404、ssh 失敗 502），並推 `host_changed`。
 
 ### 12.6b herdr 版本 `hosts[].herdr`

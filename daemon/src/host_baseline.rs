@@ -30,18 +30,27 @@ pub struct BaselineIssue {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BaselineReport {
+    /// 那台主機的 `uname -s`（`Darwin`／`Linux`）；探測沒帶＝`None`。Mac 專用項只在 Darwin 上才算數。
+    pub os: Option<String>,
     /// 探測沒跑完＝`None`（未知）；跑完而且一致＝`Some([])`。
     pub issues: Option<Vec<BaselineIssue>>,
     pub checked_at: String,
 }
 
+/// Mac 專用的 claude plugin（使用者 2026-09-28：imessage／discord）：只在 Darwin 主機上才算「該有」，Linux 不列為缺。
+/// 腳本裡的 `MAC_ONLY_PLUGINS` 與這裡同步（`mac_only_plugins_match_the_script` 測試守著）。
+pub const MAC_ONLY_PLUGINS: [&str; 2] = ["imessage", "discord"];
+
 /// 只讀。接在 `PROBE_SH` 後面（用它定義的 `am_abs`）。身分＝`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`。
 pub const BASELINE_SH: &str = r#"
 printf 'AM_BL begin\n'
+MAC_ONLY_PLUGINS="imessage discord"
+printf 'AM_BL os %s\n' "$(uname -s 2>/dev/null)"
 for t in herdr rtk zsh bun jq gh; do
   printf 'AM_BL tool %s %s\n' "$t" "$(am_abs "$t")"
 done
 bl_has() { [ -e "$1" ] && printf 1 || printf 0; }
+bl_plugin() { [ -f "$1" ] && grep -Eq "\"$2@[^\"]*\"[[:space:]]*:[[:space:]]*true" "$1" 2>/dev/null && printf 1 || printf 0; }
 bl_key() { [ -f "$1" ] && grep -Eq "\"$2\"[[:space:]]*:" "$1" 2>/dev/null && printf 1 || printf 0; }
 for d in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude" "$HOME"/.claude-cc[0-9]*; do
   [ -n "$d" ] && [ -d "$d" ] || continue
@@ -52,6 +61,9 @@ for d in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude" "$HOME"/.claude-cc[0-9]*; do
   done
   for k in statusLine hooks permissions; do
     printf 'AM_BL claude-key %s %s %s\n' "$n" "$k" "$(bl_key "$d/settings.json" "$k")"
+  done
+  for pl in $MAC_ONLY_PLUGINS; do
+    printf 'AM_BL claude-plugin %s %s %s\n' "$n" "$pl" "$(bl_plugin "$d/settings.json" "$pl")"
   done
 done
 CX="${CODEX_HOME:-$HOME/.codex}"
@@ -72,6 +84,64 @@ fi
 printf 'AM_BL end\n'
 "#;
 
+/// 探測輸出裡的 `AM_BL os <uname -s>`。
+pub fn os_of(out: &str) -> Option<String> {
+    out.lines().find_map(|l| l.trim_end().strip_prefix("AM_BL os ")).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// 差異有東西才推 inbox：回 `(event_key, payload)`。同一份差異（id 集合相同，與順序無關）key 相同，
+/// `push_inbox` 的 `INSERT OR IGNORE` 就只留第一則；差異變了 key 才不同。未知（`issues: None`）或一致都不推。
+pub fn alert_for(host: &str, report: &BaselineReport) -> Option<(String, serde_json::Value)> {
+    let issues = report.issues.as_ref().filter(|i| !i.is_empty())?;
+    let mut ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+    ids.sort_unstable();
+    let key = format!("ops_alert:daemon:host_baseline:{host}:{}", crate::supervisor::cli_refresh::short_hash(ids.join("\n").as_bytes()));
+    let critical = issues.iter().filter(|i| i.severity == CRITICAL).count();
+    let payload = serde_json::json!({
+        "source": "daemon",
+        "reason": "host_baseline",
+        "subject": host,
+        "detail": format!("主機 `{host}` 的 CLI 工作環境跟基準不一致：{} 項（{critical} 項嚴重）", issues.len()),
+        "critical": critical,
+        "issues": issues,
+        "checked_at": report.checked_at,
+        "action": "只是報告，daemon 什麼都沒改：看 issues 決定要不要補（缺的工具、statusline、hook、設定檔）；補完下一次偵測（重連、每 6 小時、`POST /api/hosts/{name}/tools/refresh`）會重量。同一份差異只推這一次，差異變了才會再推。",
+    });
+    Some((key, payload))
+}
+
+/// 把 [`alert_for`] 推進 AGM inbox（`ops_alert`，`source=daemon`）。推不進去只記 log：檢查本身不能因此失敗。
+pub async fn notify(app: &std::sync::Arc<crate::state::App>, host: &str, report: &BaselineReport) {
+    let Some((key, payload)) = alert_for(host, report) else { return };
+    match crate::supervisor::store::push_inbox(&app.db, &key, "ops_alert", None, None, None, &payload).await {
+        Ok(Some(_)) => tracing::warn!(host, issues = report.issues.as_ref().map_or(0, Vec::len), "host baseline differs; ops_alert queued"),
+        Ok(None) => {}
+        Err(e) => tracing::error!(host, error = %e, "host baseline differs; ops_alert could not be queued"),
+    }
+}
+
+/// 定期重量的間隔：偵測本來只在連上、alias 變了、手動時才跑，設定被改掉（或補好）要等到下一次才看得到。
+pub const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+/// 每隔 [`RECHECK_EVERY`] 對每台連著的主機重跑一次偵測（含這份檢查）；啟動那一輪由開機偵測負責，所以先睡再做。
+pub fn spawn_poller(app: std::sync::Arc<crate::state::App>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(RECHECK_EVERY).await;
+            for name in app.hosts.names().await {
+                let connected = match app.hosts.get(&name).await {
+                    Some(c) if c.is_local() => app.connected.load(std::sync::atomic::Ordering::SeqCst),
+                    Some(c) => c.is_connected(),
+                    None => false,
+                };
+                if connected {
+                    crate::tools::spawn_detect(app.clone(), name);
+                }
+            }
+        }
+    });
+}
+
 fn issue(id: String, severity: &'static str, message: String) -> BaselineIssue {
     BaselineIssue { id, severity, message }
 }
@@ -87,6 +157,7 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
     if !out.lines().any(|l| l.trim_end() == "AM_BL end") {
         return None;
     }
+    let mac = os_of(out).as_deref() == Some("Darwin");
     let mut issues = Vec::new();
     // 目前這個 claude 身分的 settings.json 在不在、codex 的 config.toml 在不在：決定要不要看裡面的鍵。
     let mut claude_settings = true;
@@ -122,6 +193,16 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
                         format!("claude.{}.settings.json:{}", f[2], f[3]),
                         severity_of(&CLAUDE_KEYS, f[3]),
                         format!("claude 身分 {}：settings.json 沒有 {}", f[2], f[3]),
+                    ));
+                }
+            }
+            "claude-plugin" if f.len() >= 5 => {
+                // Mac 專用：Linux（或不知道是什麼系統）一律不算缺；settings.json 本身不在也不再追問。
+                if mac && claude_settings && MAC_ONLY_PLUGINS.contains(&f[3]) && !present(f.get(4)) {
+                    issues.push(issue(
+                        format!("claude.{}.plugin:{}", f[2], f[3]),
+                        WARN,
+                        format!("claude 身分 {}：沒有啟用 {} plugin（Mac 專用）", f[2], f[3]),
                     ));
                 }
             }

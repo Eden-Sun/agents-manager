@@ -934,7 +934,7 @@ pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate:
     } else {
         fence.conn().ssh_exec_path(&script).await?
     };
-    let baseline = crate::host_baseline::BaselineReport { issues: crate::host_baseline::evaluate(&out), checked_at: crate::db::now() };
+    let baseline = crate::host_baseline::BaselineReport { os: crate::host_baseline::os_of(&out), issues: crate::host_baseline::evaluate(&out), checked_at: crate::db::now() };
     let tools = parse_probe(&out);
     let shell_identities = parse_shell_identities(&out);
     let identities = detect_identities(app, host, fence, &tools, &shell_identities).await;
@@ -944,7 +944,8 @@ pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate:
     if !install_host_tools_fenced(app, host, ht.clone(), fence).await {
         return Err(anyhow::Error::new(Superseded { host: host.to_string() }));
     }
-    app.host_baseline.lock().await.insert(host.to_string(), baseline);
+    app.host_baseline.lock().await.insert(host.to_string(), baseline.clone());
+    crate::host_baseline::notify(app, host, &baseline).await;
     tracing::info!(
         host,
         tools = ?ht.tools.iter().map(|(k, t)| (k.clone(), t.installed, t.logged_in)).collect::<Vec<_>>(),

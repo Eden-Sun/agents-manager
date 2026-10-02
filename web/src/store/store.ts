@@ -19,6 +19,7 @@ import {
   toIdentityStatusMap,
   toToolMap,
   toHerdrVersion,
+  toHostBaseline,
   optStr,
   sortByInsert,
   sortByTime,
@@ -36,7 +37,7 @@ import {
 import { ApiError } from '../api/types'
 import { DRAFT_REASON_TEXT, draftBlockFrom, draftIsGone, markDraftBusy, type ComposerDraftBlock, type DraftRequest } from './composerDraft'
 import { PREVIEW_OFF, toPreviewEvent, type Preview } from '../api/preview'
-import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
+import type { Bot, BotKind, RestartBatch, GroupChatResult, Mission, MissionDetail, NewMissionInput, MemSnapshot, GroupMessage, Host, HerdrVersion, HostBaseline, HostResult, HostShell, Identity, IdentityStatusMap, Lamp, Message, ModelInfo, NewBotInput, NewHostInput, NewIdentityInput, NewProjectInput, PatchBotInput, PatchProjectInput, Project, QuotaMap, Run, TerminalSource, ToolMap, Turn, TurnDelivery, ModelRemap } from '../api/types'
 import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
 import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgressMany, reconcileCliUpdates, type CliUpdate } from './cliUpdate'
@@ -381,6 +382,8 @@ export interface StoreState {
   /** Local machine's `hosts[0].tools`. */
   localTools: ToolMap
   localHerdr: HerdrVersion
+  /** Local machine's `hosts[0].baseline`（SPEC §16.7）；null＝還沒量過。 */
+  localBaseline: HostBaseline | null
   /** Local machine's `hosts[0].identities`. */
   localIdentityStatus: IdentityStatusMap
   /** 被標為停用的身份，鍵是 `api.identityPrefKey(host, kind, name)`（daemon 端的設定，不是瀏覽器記的）。 */
@@ -879,6 +882,7 @@ export const useStore = create<StoreState>((set, get) => {
   attachCommand: 'herdr --session agents-manager',
   localTools: toToolMap(undefined),
   localHerdr: toHerdrVersion(undefined),
+  localBaseline: null,
   localIdentityStatus: {},
   disabledIdentities: [],
   quota: {},
@@ -1038,6 +1042,7 @@ export const useStore = create<StoreState>((set, get) => {
         attachCommand: st.attach_command,
         localTools: st.tools,
         localHerdr: st.herdr,
+        localBaseline: st.baseline,
         localIdentityStatus: st.identity_status,
         identities: st.identities,
         projects: st.projects,
@@ -3004,6 +3009,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
           connected: bool(pick(data, 'connected'), get().connected),
           ...(pick(data, 'tools') !== undefined ? { localTools: toToolMap(pick(data, 'tools')) } : {}),
           ...(pick(data, 'herdr') !== undefined ? { localHerdr: toHerdrVersion(pick(data, 'herdr')) } : {}),
+          ...(pick(data, 'baseline') !== undefined ? { localBaseline: toHostBaseline(pick(data, 'baseline')) } : {}),
           ...(pick(data, 'identities') !== undefined
             ? { localIdentityStatus: toIdentityStatusMap(pick(data, 'identities')) }
             : {}),
@@ -3373,13 +3379,15 @@ function mergeHosts(current: Host[], updates: unknown[]): Host[] {
     // absent field means "unchanged", never "no identities".
     const identityStatus = u.identities !== undefined ? toIdentityStatusMap(u.identities) : h.identity_status
     const herdr = u.herdr !== undefined ? toHerdrVersion(u.herdr) : h.herdr
+    // 沒帶＝沒變（沒量過不會帶）；帶了就換成新的快照。
+    const baseline = u.baseline !== undefined ? toHostBaseline(u.baseline) : h.baseline
     // 沒帶這欄（bot_status 合成的更新、舊 daemon）：連著就清掉，斷著沿用。
     const since = u.disconnected_since !== undefined ? optStr(pick(u, 'disconnected_since')) : connected ? null : h.disconnected_since
-    if (connected === h.connected && error === h.error && since === h.disconnected_since && tools === h.tools && identityStatus === h.identity_status && sameHerdr(herdr, h.herdr)) {
+    if (connected === h.connected && error === h.error && since === h.disconnected_since && tools === h.tools && identityStatus === h.identity_status && sameHerdr(herdr, h.herdr) && baseline === h.baseline) {
       return h
     }
     changed = true
-    return { ...h, connected, error, disconnected_since: since, tools, identity_status: identityStatus, herdr }
+    return { ...h, connected, error, disconnected_since: since, tools, identity_status: identityStatus, herdr, baseline }
   })
   return changed ? next : current
 }
