@@ -167,8 +167,10 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
     let Ok(Some(run)) = db::run(&app.db, &run.id).await else { return };
     // run 的落差（跟 runtime 比）與 bot 設定的落差（跟 bots.* 比）分開算（#743）：bot 的 UPDATE 失敗時 runtime 已經對了，
     // 下一輪只剩 bot 落後，仍要補寫，不能因為 runtime 已收斂就當作完成。
-    let cur_model = run.runtime_model.clone().or_else(|| bot.model.clone());
-    let cur_effort = run.runtime_effort.clone().or_else(|| bot.effort.clone());
+    // 只跟 run 自己記的比，不退回 `bots.*`：child 的模型跟設定一樣、強度不一樣時，以前只寫了 runtime_effort，
+    // runtime_model 留空——網頁認定 runtime 已知、模型卻是空的，畫成「CLI 預設 ⟳」（2026-10-02 使用者：cf-優化 的 nv-opus／nv-fable）。
+    let cur_model = run.runtime_model.clone();
+    let cur_effort = run.runtime_effort.clone();
     let model = seen.model.clone().filter(|m| cur_model.as_deref() != Some(m.as_str()));
     let effort = seen.effort.clone().filter(|e| cur_effort.as_deref() != Some(e.as_str()));
     let bot_model = seen.model.filter(|m| child && bot.model.as_deref() != Some(m.as_str()));
@@ -278,6 +280,25 @@ mod tests {
         assert_eq!(r.runtime_model.as_deref(), Some("claude-haiku-4-5"), "之後變了才採用");
         let b = db::bot(&app.db, &user.id).await.unwrap().unwrap();
         assert_ne!(b.model.as_deref(), Some("claude-haiku-4-5"), "一般 bot 的設定不動（重啟會回到設定值，畫成 drift）");
+    }
+
+    /// 2026-10-02 cf-優化 的 nv-opus：child 的模型跟設定一樣、強度不一樣，以前只寫 runtime_effort、runtime_model 留空，
+    /// 網頁畫成「CLI 預設 ⟳」。兩欄都要寫。
+    #[tokio::test]
+    async fn a_child_whose_model_matches_its_setting_still_records_the_runtime_model() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let kid = crate::testing::claude_bot(&app, &env.project_id, "kid").await;
+        sqlx::query("UPDATE bots SET managed_by = 'child', model = 'claude-sonnet-5-5', effort = NULL WHERE id = ?")
+            .bind(&kid.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = crate::testing::fake_run(&app, &kid.id).await;
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        observe(&app, &run, SCREEN).await;
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")));
     }
 
     #[tokio::test]
