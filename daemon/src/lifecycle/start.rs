@@ -377,9 +377,26 @@ async fn stage_cross_identity_transcript_local(app: &Arc<App>, bot: &db::Bot, tr
         }
     };
     let new_projects = std::path::Path::new(&new_dir).join("projects");
-    let same = match (std::fs::canonicalize(old_projects), std::fs::canonicalize(&new_projects)) {
+    // transcript 可能有幾百 MB：複製放到 blocking pool，不占 tokio worker。
+    let (src, cwd_dir, old_projects, fname, bot_name) =
+        (src.to_path_buf(), cwd_dir.to_path_buf(), old_projects.to_path_buf(), fname.to_os_string(), bot.name.clone());
+    tokio::task::spawn_blocking(move || stage_cross_identity_transcript_local_fs(&bot_name, &src, &cwd_dir, &old_projects, &fname, &new_projects))
+        .await
+        .unwrap_or(Err("transcript_missing"))
+}
+
+/// [`stage_cross_identity_transcript_local`] 的檔案那一半（同步）：呼叫端放進 `spawn_blocking`。
+fn stage_cross_identity_transcript_local_fs(
+    bot_name: &str,
+    src: &std::path::Path,
+    cwd_dir: &std::path::Path,
+    old_projects: &std::path::Path,
+    fname: &std::ffi::OsStr,
+    new_projects: &std::path::Path,
+) -> Result<(), &'static str> {
+    let same = match (std::fs::canonicalize(old_projects), std::fs::canonicalize(new_projects)) {
         (Ok(a), Ok(b)) => a == b,
-        _ => old_projects == new_projects.as_path(),
+        _ => old_projects == new_projects,
     };
     if same {
         return Ok(());
@@ -387,12 +404,12 @@ async fn stage_cross_identity_transcript_local(app: &Arc<App>, bot: &db::Bot, tr
     let Some(cwd_key) = cwd_dir.file_name() else { return Err("transcript_missing") };
     let dest_dir = new_projects.join(cwd_key);
     if let Err(e) = std::fs::create_dir_all(&dest_dir) {
-        tracing::warn!(bot = %bot.name, dest = %dest_dir.display(), error = %e, "identity switch：建不出新身分的 projects 目錄，改開新對話");
+        tracing::warn!(bot = %bot_name, dest = %dest_dir.display(), error = %e, "identity switch：建不出新身分的 projects 目錄，改開新對話");
         return Err("transcript_missing");
     }
     let dest_file = dest_dir.join(fname);
     if let Err(e) = std::fs::copy(src, &dest_file) {
-        tracing::warn!(bot = %bot.name, from = %src.display(), to = %dest_file.display(), error = %e, "identity switch：複製 session 檔到新身分失敗，改開新對話");
+        tracing::warn!(bot = %bot_name, from = %src.display(), to = %dest_file.display(), error = %e, "identity switch：複製 session 檔到新身分失敗，改開新對話");
         return Err("transcript_missing");
     }
     // 檔名同名的附屬目錄（有些 CLI 版本會在 jsonl 旁邊放一份）一起搬，搬不動不影響主對話。
@@ -400,11 +417,11 @@ async fn stage_cross_identity_transcript_local(app: &Arc<App>, bot: &db::Bot, tr
         let companion_src = cwd_dir.join(stem);
         if companion_src.is_dir() {
             if let Err(e) = copy_dir_recursive(&companion_src, &dest_dir.join(stem)) {
-                tracing::warn!(bot = %bot.name, error = %e, "identity switch：session 附屬目錄複製失敗（不影響主對話檔）");
+                tracing::warn!(bot = %bot_name, error = %e, "identity switch：session 附屬目錄複製失敗（不影響主對話檔）");
             }
         }
     }
-    tracing::info!(bot = %bot.name, from = %src.display(), to = %dest_file.display(), "identity switch：session 檔已搬到新身分的 projects 目錄，可以接回對話");
+    tracing::info!(bot = %bot_name, from = %src.display(), to = %dest_file.display(), "identity switch：session 檔已搬到新身分的 projects 目錄，可以接回對話");
     Ok(())
 }
 

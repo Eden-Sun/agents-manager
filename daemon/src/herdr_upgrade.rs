@@ -403,7 +403,12 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     phase(app, ctx, "stopping", &format!("窗口 {} 開了；要接回 {:?}，子 agent 會沒了 {}", window.opened_at, names, plan.children.len())).await;
 
     // 4. 換 binary → 重啟。
-    let backup = match swap_in(&staging, &install, out.from.as_deref().unwrap_or("unknown")) {
+    // binary 有幾十 MB（硬連結不行就是整份複製）：放到 blocking pool。
+    let swapped = {
+        let (staging, install, from) = (staging.clone(), install.clone(), out.from.clone().unwrap_or_else(|| "unknown".to_string()));
+        tokio::task::spawn_blocking(move || swap_in(&staging, &install, &from)).await.unwrap_or_else(|e| Err(format!("swap_in 沒跑完：{e}")))
+    };
+    let backup = match swapped {
         Ok(b) => b,
         Err(e) => {
             let _ = crate::herdr_maintenance::close_as(app, &window, "herdr_update", Some("換 binary 失敗，沒有重啟")).await;
@@ -419,7 +424,11 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
     if let Err(e) = restarted {
         out.reason = Some("restart_failed");
         phase(app, ctx, "rolling_back", &format!("新版沒起來：{e}；換回 {}", backup.display())).await;
-        let rolled = match restore(&backup, &install) {
+        let rolled_back = {
+            let (backup, install) = (backup.clone(), install.clone());
+            tokio::task::spawn_blocking(move || restore(&backup, &install)).await.unwrap_or_else(|e| Err(format!("restore 沒跑完：{e}")))
+        };
+        let rolled = match rolled_back {
             Ok(()) => match ops.restart_server(&ctx.session).await {
                 Ok(()) => match out.from.as_deref() {
                     Some(from) => wait_server(app, from, timing).await,

@@ -78,7 +78,7 @@ pub async fn sh_local(script: &str, timeout: Duration) -> Result<Option<std::pro
         r = async { tokio::join!(child.wait(), gather) } => (r.0.context("wait /bin/sh")?, r.1),
         _ = tokio::time::sleep(timeout) => {
             if let Some(pid) = pid {
-                let _ = std::process::Command::new("/bin/kill").args(["-9", "--", &format!("-{pid}")]).status();
+                let _ = tokio::process::Command::new("/bin/kill").args(["-9", "--", &format!("-{pid}")]).status().await;
             }
             let _ = child.kill().await;
             return Ok(None);

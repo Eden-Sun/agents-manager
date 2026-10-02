@@ -218,7 +218,10 @@ async fn draft_proof(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &
         Err(_) => return Err(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "host_unreadable", retry: true })),
     };
     let codex_log = match (bot.kind.as_str(), host_is_local, run.native_session_id.as_deref()) {
-        ("codex", true, Some(session)) => codex_home(app, bot).await.and_then(|h| codex_session_log(&h, session)),
+        ("codex", true, Some(session)) => match codex_home(app, bot).await {
+            Some(h) => codex_session_log_async(h, session.to_string()).await,
+            None => None,
+        },
         _ => None,
     };
     let inputs = ProofInputs {

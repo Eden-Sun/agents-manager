@@ -694,6 +694,12 @@ pub(crate) fn log_hits_since(format: LogFormat, path: &std::path::Path, offset: 
 /// found. Inside a day, several files for the same session (a resume on the same day) resolve to the
 /// newest by modification time. The winner is canonicalized and must still lie under the canonical
 /// `sessions` root, so a symlinked entry cannot point the proof at some other file.
+/// [`codex_session_log`] 放到 blocking pool：它整棵日期樹逐層 `read_dir`（用了好幾個月的 `~/.codex/sessions` 有上百個目錄），
+/// 每次送 prompt 都會走一次，不能占 tokio worker。
+pub(crate) async fn codex_session_log_async(codex_home: std::path::PathBuf, session_id: String) -> Option<std::path::PathBuf> {
+    tokio::task::spawn_blocking(move || codex_session_log(&codex_home, &session_id)).await.ok().flatten()
+}
+
 pub(crate) fn codex_session_log(codex_home: &std::path::Path, session_id: &str) -> Option<std::path::PathBuf> {
     let id = session_id.trim();
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
@@ -925,7 +931,10 @@ pub(crate) async fn plan_delivery(
     };
     let pane_cols = client.pane_size(&pane).await.ok().flatten().map(|(w, _)| w);
     let codex_log = match (bot.kind.as_str(), host_is_local, run.native_session_id.as_deref()) {
-        ("codex", true, Some(session)) => codex_home(app, bot).await.and_then(|h| codex_session_log(&h, session)),
+        ("codex", true, Some(session)) => match codex_home(app, bot).await {
+            Some(h) => codex_session_log_async(h, session.to_string()).await,
+            None => None,
+        },
         _ => None,
     };
     let inputs = ProofInputs {
@@ -1896,6 +1905,20 @@ mod tests {
             assert_eq!(codex_session_log(&home, "sess-link"), None, "指到 sessions 外面的 symlink 不算");
         }
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 日期樹整棵走的查找放到 blocking pool 之後，答案要跟同步版一樣（找得到、找不到都是）。
+    #[tokio::test]
+    async fn the_async_rollout_lookup_matches_the_sync_one() {
+        let home = crate::testing::scratch_dir("am-rollout-async");
+        let day = home.join("sessions/2026/09/14");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-2026-09-14T10-00-00-sess-a.jsonl"), "").unwrap();
+        for id in ["sess-a", "sess-missing"] {
+            assert_eq!(codex_session_log_async(home.clone(), id.to_string()).await, codex_session_log(&home, id), "{id}");
+        }
+        assert!(codex_session_log_async(home.clone(), "sess-a".into()).await.is_some());
+        assert!(codex_session_log_async(home, "../x".into()).await.is_none(), "不合法的 id 照舊拒絕");
     }
 
     /// codex session 已知但 rollout 還沒寫出來：先等（可重試），等過了才退回一列回音或 unverified（sol 第九輪 #1）。
