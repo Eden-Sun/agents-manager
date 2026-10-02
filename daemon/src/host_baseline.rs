@@ -46,8 +46,15 @@ pub const BASELINE_SH: &str = r#"
 printf 'AM_BL begin\n'
 MAC_ONLY_PLUGINS="imessage discord"
 printf 'AM_BL os %s\n' "$(uname -s 2>/dev/null)"
+# 六個工具一次問完：每次 `$SHELL -lic` 都要讀完整個 rc（nvm／conda 動輒數秒），PROBE_SH 自己已經開了好幾次，
+# 再各開六次會把整趟探測推過 ssh 的 30 秒上限，連原本的 tools 偵測都跟著失敗。只認絕對路徑（alias 的字串不算，#666）。
+bl_paths=$( "${SHELL:-/bin/sh}" -lic 'for t in herdr rtk zsh bun jq gh; do printf "AM_BLP %s %s\n" "$t" "$(command -v "$t" 2>/dev/null | tail -1)"; done' 2>/dev/null </dev/null | grep '^AM_BLP ' )
 for t in herdr rtk zsh bun jq gh; do
-  printf 'AM_BL tool %s %s\n' "$t" "$(am_abs "$t")"
+  p=$(printf '%s\n' "$bl_paths" | sed -n "s/^AM_BLP $t //p" | tail -1)
+  case "$p" in /*) ;; *) p="" ;; esac
+  [ -n "$p" ] || p=$(command -v "$t" 2>/dev/null)
+  case "$p" in /*) ;; *) p="" ;; esac
+  printf 'AM_BL tool %s %s\n' "$t" "$p"
 done
 bl_has() { [ -e "$1" ] && printf 1 || printf 0; }
 bl_plugin() { [ -f "$1" ] && grep -Eq "\"$2@[^\"]*\"[[:space:]]*:[[:space:]]*true" "$1" 2>/dev/null && printf 1 || printf 0; }
@@ -55,7 +62,10 @@ bl_key() { [ -f "$1" ] && grep -Eq "\"$2\"[[:space:]]*:" "$1" 2>/dev/null && pri
 for d in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude" "$HOME"/.claude-cc[0-9]*; do
   [ -n "$d" ] && [ -d "$d" ] || continue
   case "$d" in "$HOME/.claude") n=default ;; "$HOME"/.claude-cc*) n=${d##*/.claude-} ;; *) n=custom ;; esac
-  printf 'AM_BL claude-dir %s %s\n' "$n" "$d"
+  # `.claude-cc<數字>*` 的 glob 什麼名字都收：身分名只認一般字元，空白、換行這類會讓欄位錯位或偽造 `AM_BL` 行的整個跳過。
+  # 路徑本身不輸出（evaluate 不用它）。
+  case "$n" in *[!A-Za-z0-9_.-]*) continue ;; esac
+  printf 'AM_BL claude-dir %s\n' "$n"
   for f in settings.json statusline-command.sh CLAUDE.md RTK.md; do
     printf 'AM_BL claude-file %s %s %s\n' "$n" "$f" "$(bl_has "$d/$f")"
   done
@@ -76,7 +86,7 @@ else
 fi
 printf 'AM_BL grok-file config.toml %s\n' "$(bl_has "${GROK_HOME:-$HOME/.grok}/config.toml")"
 printf 'AM_BL herdr-file config.toml %s\n' "$(bl_has "${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml")"
-if [ -f "$HOME/.gitconfig" ] && grep -Eq 'https?://[^/@[:space:]]+:[^/@[:space:]]+@' "$HOME/.gitconfig" 2>/dev/null; then
+if [ -f "$HOME/.gitconfig" ] && grep -Eq 'https?://([^/@[:space:]]+:[^/@[:space:]]+|(gh[pousr]_|github_pat_|glpat-)[A-Za-z0-9_-]+)@' "$HOME/.gitconfig" 2>/dev/null; then
   printf 'AM_BL gitconfig-token 1\n'
 else
   printf 'AM_BL gitconfig-token 0\n'
@@ -238,6 +248,9 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
             _ => {}
         }
     }
+    // CLAUDE_CONFIG_DIR 指到 ~/.claude 或 ~/.claude-ccN 時，同一個目錄會走到兩次：同一個 id 只報一次。
+    let mut seen = std::collections::HashSet::new();
+    issues.retain(|i| seen.insert(i.id.clone()));
     Some(issues)
 }
 

@@ -3365,7 +3365,8 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
   - 工具（嚴重）：`herdr rtk zsh bun jq gh`，用登入 shell 找（跟 §16.1 同一支 `am_abs`）。claude／codex／grok 本身要不要裝由各主機決定，看 `tools`，不在這裡。
   - 每個 claude 身分（`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`，各自檢查）：`settings.json`、`statusline-command.sh`（嚴重）、`CLAUDE.md`、`RTK.md`（提醒）；`settings.json` 有沒有 `statusLine`、`hooks`（嚴重）、`permissions`（提醒）——只看鍵在不在，不比內容。
   - codex：`config.toml`、`hooks.json`、`approval_policy` 鍵；grok `config.toml`；herdr `config.toml`（都是提醒）。**不檢查** model／effort／service_tier（使用者規定不動）。
-  - `~/.gitconfig` 內嵌帶密碼的網址（提醒）：只回報有沒有，**不回傳內容**。
+  - `~/.gitconfig` 內嵌帶密碼的網址（`user:pass@`，或 `ghp_…`／`github_pat_…`／`glpat-…` 當 user 的 `token@`；提醒）：只回報有沒有，**不回傳內容**。
+- 探測腳本是 POSIX sh（遠端以 `/bin/sh -s` 跑，macOS 是 bash 3.2 的 sh 模式）；六個工具只開**一次** login shell 問完（不是各開一次，避免慢 rc 把整趟推過 ssh 30 秒上限）；`~/.claude-cc<N>*` glob 收到的目錄名只認 `[A-Za-z0-9_.-]`，其餘整個跳過（空白錯位欄位、換行偽造 `AM_BL` 行）；路徑不輸出；同一個 id 只報一次（`CLAUDE_CONFIG_DIR` 指到 `~/.claude*` 時同一目錄會走兩次）。
 - 檔案本身不在就不再列裡面的鍵（一個根因一行）。探測沒跑完（沒有結尾標記）＝`issues: null`（未知），一次 ssh 逾時不會在每台主機喊一排缺漏。
 - **darwin-only**：探測也印 `AM_BL os <uname -s>`。Mac 專用項（claude `settings.json` 的 `enabledPlugins` 裡 `imessage@…`／`discord@…` 沒有啟用，`MAC_ONLY_PLUGINS`）只在 `os=Darwin` 時才列；Linux 或不知道系統（舊探測沒帶 `os`）一律不算缺。Vercel autoMode 不在這一版（沒有可靠的鍵可查）。
 - **inbox 通知**：每次偵測結果寫進快取後，`issues` 非空就推一則 `ops_alert`（`source=daemon`、`reason=host_baseline`）給 AGM；key 帶差異 id 集合的雜湊，同一份差異只推一次、差異變了才再推，一致或未知不推。沿用 `push_inbox` 的 `INSERT OR IGNORE` 去重（跟其他 `ops_alert` 同一套）。

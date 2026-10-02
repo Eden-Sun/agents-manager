@@ -133,14 +133,19 @@ impl Drop for FakeHome {
 }
 
 fn run_probe(home: &std::path::Path, path: &str) -> String {
-    // `am_abs` 是 PROBE_SH 的函式；這裡用 `command -v` 代替，只量 BASELINE_SH 本身。
-    let script = format!("am_abs() {{ command -v \"$1\" 2>/dev/null; }}\n{BASELINE_SH}");
+    run_probe_env(home, path, &[])
+}
+
+fn run_probe_env(home: &std::path::Path, path: &str, envs: &[(&str, &std::ffi::OsStr)]) -> String {
+    // `am_abs` 是 PROBE_SH 的函式；BASELINE_SH 不依賴它（自己一次問完六個工具），這裡仍給一個替身，確保沒偷用。
+    let script = format!("am_abs() {{ echo am_abs-called >&2; return 1; }}\n{BASELINE_SH}");
     let out = Command::new("/bin/sh")
         .arg("-c")
         .arg(script)
         .env_clear()
         .env("HOME", home)
         .env("PATH", path)
+        .envs(envs.iter().map(|(k, v)| (*k, *v)))
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -181,6 +186,83 @@ fn a_host_with_no_claude_dir_at_all_reports_no_claude_identity() {
     let home = FakeHome::new();
     let out = run_probe(home.path(), "/usr/bin:/bin");
     assert!(!ids(&out).iter().any(|i| i.starts_with("claude.")), "{out}");
+}
+
+#[test]
+fn the_same_claude_dir_reached_twice_is_reported_once() {
+    // daemon 自己的環境若有 CLAUDE_CONFIG_DIR 指到 ~/.claude-ccN（或 ~/.claude），迴圈會走到同一個目錄兩次。
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".claude-cc2")).unwrap();
+    fs::write(h.join(".claude-cc2/settings.json"), "{}").unwrap();
+    let out = run_probe_env(h, "/usr/bin:/bin", &[("CLAUDE_CONFIG_DIR", h.join(".claude-cc2").as_os_str())]);
+    let all = ids(&out);
+    let mut uniq = all.clone();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(all.len(), uniq.len(), "duplicate issue ids: {all:?}");
+    assert!(all.contains(&"claude.cc2.settings.json:statusLine".to_string()), "{all:?}");
+}
+
+#[test]
+fn evaluate_never_lists_the_same_issue_twice() {
+    let dup = GOOD.replace(
+        "AM_BL codex-file config.toml 1",
+        "AM_BL claude-file default settings.json 1
+AM_BL claude-file default RTK.md 0
+AM_BL claude-file default RTK.md 0
+AM_BL codex-file config.toml 1",
+    );
+    assert_eq!(ids(&dup), vec!["claude.default.RTK.md"]);
+}
+
+#[test]
+fn a_hostile_directory_name_cannot_forge_probe_lines() {
+    // `~/.claude-cc<數字>*` 的 glob 什麼名字都收：空白會讓欄位錯位、換行可以偽造 `AM_BL end` 或假的缺項。
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".claude-cc1 x")).unwrap();
+    fs::create_dir_all(h.join(".claude-cc3\nAM_BL end")).unwrap();
+    fs::create_dir_all(h.join(".claude-cc4\nAM_BL tool rtk")).unwrap();
+    let out = run_probe(h, "/usr/bin:/bin");
+    assert_eq!(out.lines().filter(|l| *l == "AM_BL end").count(), 1, "forged end marker: {out}");
+    assert!(out.lines().all(|l| l.starts_with("AM_BL ")), "a line escaped the AM_BL framing: {out}");
+    assert!(!out.lines().any(|l| l.starts_with("AM_BL tool rtk") && l.len() > "AM_BL tool rtk ".len()), "{out}");
+    let all = ids(&out);
+    assert!(!all.iter().any(|i| i.contains(' ') || i.contains('\n')), "{all:?}");
+    assert!(!all.iter().any(|i| i.starts_with("claude.cc1") || i.starts_with("claude.cc3") || i.starts_with("claude.cc4")), "{all:?}");
+}
+
+#[test]
+fn the_tools_are_looked_up_with_one_login_shell_not_six() {
+    // 每次 `$SHELL -lic` 都要讀完整個 rc（nvm／conda 動輒數秒）；PROBE_SH 自己已經開了好幾次，
+    // 再加六次會把整趟探測推過 30 秒上限，連原本的 tools 偵測都跟著失敗。
+    let home = FakeHome::new();
+    let h = home.path();
+    let counter = h.join("shell-calls");
+    let wrapper = h.join("fake-shell");
+    fs::write(&wrapper, format!("#!/bin/sh\necho x >> {}\nexec /bin/sh \"$@\"\n", counter.display())).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = run_probe_env(h, "/usr/bin:/bin", &[("SHELL", wrapper.as_os_str())]);
+    assert!(out.contains("AM_BL end"), "{out}");
+    let calls = fs::read_to_string(&counter).map_or(0, |c| c.lines().count());
+    assert!(calls <= 1, "BASELINE_SH opened {calls} login shells");
+}
+
+#[test]
+fn a_token_used_as_the_url_user_is_also_flagged_without_echoing_it() {
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::write(h.join(".gitconfig"), "[url \"https://ghp_abc123SECRET@github.com/\"]\n  insteadOf = https://github.com/\n").unwrap();
+    let out = run_probe(h, "/usr/bin:/bin");
+    assert!(ids(&out).contains(&"gitconfig.token".to_string()), "{out}");
+    assert!(!out.contains("abc123SECRET"), "{out}");
+    // 一般的 user@host（SSH 風格、沒有密碼）不算。
+    fs::write(h.join(".gitconfig"), "[url \"https://git@github.com/\"]\n  insteadOf = https://github.com/\n").unwrap();
+    assert!(!ids(&run_probe(h, "/usr/bin:/bin")).contains(&"gitconfig.token".to_string()));
 }
 
 fn snapshot(root: &std::path::Path) -> Vec<(String, u64)> {
