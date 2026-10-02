@@ -547,7 +547,12 @@ pub fn observe_status(run_id: &str, status: &str) {
 
 /// 不在 `active` 裡的 run（結束了）不留帳：run id 每次都是新的，不清就只增不減。
 pub fn retain_runs(active: &[String]) {
-    observed().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+    prune(&mut observed().lock().unwrap_or_else(|e| e.into_inner()), active);
+}
+
+/// 只留 `active` 裡的 run；獨立成函式讓單元測試用自己的表（清全域表會讓同時跑的其他測試剛記的狀態不見）。
+fn prune<V>(map: &mut std::collections::HashMap<String, V>, active: &[String]) {
+    map.retain(|id, _| active.contains(id));
 }
 
 /// 事件流最後說它不是 idle（working／blocked／unknown…），而且那一則**不比 DB 最後一次改狀態舊**。沒看過就是 `false`，照 DB 判。
@@ -884,12 +889,9 @@ mod tests {
     /// `observe_status` 每個 run 記一格、結束的 run 不會再來清它：巡邏每輪把不再 active 的 run 帶走。
     #[test]
     fn an_ended_runs_observed_status_is_dropped() {
-        observe_status("obs-gone", "working");
-        observe_status("obs-kept", "working");
-        retain_runs(&["obs-kept".to_string()]);
-        let seen = |id: &str| observed().lock().unwrap_or_else(|e| e.into_inner()).contains_key(id);
-        assert!(!seen("obs-gone") && seen("obs-kept"));
-        retain_runs(&[]);
+        let mut seen: std::collections::HashMap<String, ()> = ["obs-gone", "obs-kept"].iter().map(|id| (id.to_string(), ())).collect();
+        prune(&mut seen, &["obs-kept".to_string()]);
+        assert!(!seen.contains_key("obs-gone") && seen.contains_key("obs-kept"));
     }
 
     static SWEEP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
