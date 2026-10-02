@@ -780,6 +780,14 @@ pub(crate) mod screens {
     pub const PERMISSION_2286_READ_1_OF_3: &str = include_str!("lifecycle/fixtures/claude-2.1.286-read-permission-1-of-3.txt");
     pub const PERMISSION_2286_READ_2_OF_3: &str = include_str!("lifecycle/fixtures/claude-2.1.286-read-permission-2-of-3.txt");
     pub const PERMISSION_2286_FETCH: &str = include_str!("lifecycle/fixtures/claude-2.1.286-fetch-permission.txt");
+    /// 2.1.287 default 權限模式的真畫面（2026-10-02，拋棄式 `CLAUDE_CONFIG_DIR`＋tmux 120x40，Linux，`--permission-mode default`）：
+    /// Bash、Write（`Create file`）、Fetch、MCP（`Tool use … (MCP)`，工具呼叫夾在虛線之間）各一張。
+    pub const PERMISSION_2287_BASH: &str = include_str!("lifecycle/fixtures/claude-2.1.287-bash-permission.txt");
+    pub const PERMISSION_2287_WRITE: &str = include_str!("lifecycle/fixtures/claude-2.1.287-write-permission.txt");
+    pub const PERMISSION_2287_FETCH: &str = include_str!("lifecycle/fixtures/claude-2.1.287-fetch-permission.txt");
+    pub const PERMISSION_2287_MCP: &str = include_str!("lifecycle/fixtures/claude-2.1.287-mcp-permission.txt");
+    /// 2026-10-02 grok 1.0.46 在沒信任過的目錄的真畫面（拋棄式 tmux；信任框置中，標題與選項各自成行，最底一行是版本）。
+    pub const GROK_1046_TRUST: &str = include_str!("lifecycle/fixtures/grok-1.0.46-trust-dialog.txt");
     /// 2026-09-23 m12 的 pane（巡檢交辦時抄的原文，路徑中段被抄錄者省略成 `…`）。
     pub const DANGEROUS_RM_M12: &str = "\
  Dangerous rm operation on statically-unresolvable target: /Users/…/web/docs/screenshots/pin-3rows/*
@@ -1367,6 +1375,26 @@ pub fn is_feedback_survey(screen: &str) -> bool {
             assert!(!is_switch_model_dialog(screen) && !is_auto_mode_offer(screen) && !is_feedback_survey(screen), "{name}");
             assert!(!is_session_paused_menu(screen) && !stuck_at_login(screen) && !is_not_logged_in_reply(screen), "{name}");
         }
+    }
+
+    /// 2.1.287 default 模式的四種權限框（Bash／Write／Fetch／MCP）：一樣是等人選的選單，daemon 一個鍵都不替人按。
+    #[test]
+    fn the_2_1_287_default_mode_permission_prompts_are_open_menus_and_nothing_daemon_answers() {
+        use super::screens::{PERMISSION_2287_BASH, PERMISSION_2287_FETCH, PERMISSION_2287_MCP, PERMISSION_2287_WRITE};
+        for (name, screen) in [("bash", PERMISSION_2287_BASH), ("write", PERMISSION_2287_WRITE), ("fetch", PERMISSION_2287_FETCH), ("mcp", PERMISSION_2287_MCP)] {
+            assert!(awaits_menu_choice(screen), "{name}：等人選的選單");
+            assert_eq!(dangerous_rm_prompt(screen), None, "{name}：不是防誤刪框");
+            assert!(!is_switch_model_dialog(screen) && !is_auto_mode_offer(screen) && !is_feedback_survey(screen), "{name}");
+            assert!(!is_session_paused_menu(screen) && !stuck_at_login(screen) && !is_not_logged_in_reply(screen), "{name}");
+            assert!(!is_grok_trust_dialog(screen) && !is_onboarding_theme(screen), "{name}");
+        }
+    }
+
+    /// grok 1.0.46 的信任框真畫面照舊認得（pretrust 沒寫到的目錄才會跳）。
+    #[test]
+    fn the_grok_1_0_46_trust_dialog_is_still_recognised() {
+        use super::screens::GROK_1046_TRUST;
+        assert!(is_grok_trust_dialog(GROK_1046_TRUST));
     }
 
     /// 倒數到 0 之後框不見了；一般的權限框、其他對話框、回覆裡引了原文（輸入列空著）都不是。
