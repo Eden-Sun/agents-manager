@@ -20,7 +20,7 @@ pub fn routes() -> Router<Arc<App>> {
     Router::new().route("/bots/deleted", get(list_deleted))
 }
 
-async fn list_deleted(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+pub(crate) async fn list_deleted(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
     let rows: Vec<(String, String, String, String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT b.id, b.name, b.kind, b.project_id, p.label, b.deleted_at,
                 (SELECT MAX(m.created_at) FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.bot_id = b.id)
