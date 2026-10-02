@@ -136,7 +136,9 @@ async fn daemon_start_repairs_a_wrong_hook_file_but_never_creates_or_touches_a_g
 async fn tests_never_write_the_real_home() {
     let e = tt::env().await;
     let fake = crate::home::dir().expect("fake home");
-    assert_ne!(Some(fake.clone()), dirs::home_dir(), "測試的 HOME 不是真的 HOME");
+    // `test_home` 在行程開始前就把 `$HOME` 換成拋棄式目錄，所以 `dirs::home_dir()` 也指向它；這裡驗它確實是那個拋棄式目錄。
+    assert_eq!(fake.as_path(), crate::test_home::dir(), "home::dir() 與換掉的 $HOME 是同一處");
+    assert!(fake.to_string_lossy().contains("am-test-home-"), "測試的 HOME 不是真的 HOME：{}", fake.display());
     install_local(&e.app, &json!({})).unwrap();
     assert!(fake.join(".grok/hooks").join(super::setup::grok_hooks_file(None)).is_file(), "寫進了假 HOME");
 }
