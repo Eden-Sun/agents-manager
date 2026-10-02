@@ -219,15 +219,21 @@ pub(crate) async fn record(app: &Arc<App>, bot_id: &str, conversation_id: &str, 
     if records.is_empty() {
         return Ok(0);
     }
-    let turn: Option<(String, String)> = sqlx::query_as(
-        "SELECT id, created_at FROM turns WHERE conversation_id = ? AND status <> 'queued' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    let turns: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, created_at, origin, completed_at FROM turns WHERE conversation_id = ? AND status <> 'queued' ORDER BY created_at DESC, rowid DESC LIMIT 2",
     )
     .bind(conversation_id)
-    .fetch_optional(&app.db)
+    .fetch_all(&app.db)
     .await?;
-    let Some((turn_id, turn_started)) = turn else { return Ok(0) };
+    let Some((turn_id, turn_started, origin, _)) = turns.first().cloned() else { return Ok(0) };
+    // 外部回合（使用者在終端打的字）是 Stop 到了才建立的：`created_at` 是 Stop 那一刻，回合中間答的提問比它早很多。
+    // 這種回合的下限改看上一回合收掉的時間——那之後答的都屬於這一回合；更早的（fork／resume 帶來的舊提問）仍不記。
+    let started = match (origin.as_str(), turns.get(1)) {
+        ("external", Some((prev_id, prev_started, _, prev_done))) if *prev_id != turn_id => prev_done.clone().unwrap_or_else(|| prev_started.clone()),
+        _ => turn_started,
+    };
     // 兩台機器的時鐘只比到秒：留一點餘裕，寧可多收到剛好壓線的一筆（冪等會擋重複）。
-    let floor = chrono::DateTime::parse_from_rfc3339(&turn_started).ok().map(|t| t.timestamp() - 2);
+    let floor = chrono::DateTime::parse_from_rfc3339(&started).ok().map(|t| t.timestamp() - 2);
     let mut added = 0;
     for rec in records {
         let at = rec.at.as_deref().and_then(normalize);
