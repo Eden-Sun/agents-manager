@@ -269,7 +269,7 @@ fn after_last_prompt_echo(lines: &[&str]) -> usize {
 /// 呼叫端從頭看，不會把引用行當起點。內容要有字：`❯ ` 後面空的是輸入框，不是回音。
 /// `lifecycle/screen.rs` 的 claude 分支共用這一支，不各寫一份。
 pub(crate) fn prompt_echo_row(lines: &[&str]) -> Option<usize> {
-    lines.iter().rposition(|l| l.starts_with("❯ ") && l.len() > "❯ ".len())
+    lines.iter().rposition(|l| l.strip_prefix("❯ ").is_some_and(|rest| !rest.trim().is_empty()))
 }
 
 fn is_codex_idle_prompt(s: &str) -> bool {
@@ -525,6 +525,16 @@ mod reply_boundary_tests {
         // activity 也從真回音起算：引用行之後才有的字不能讓前面的活動列消失。
         let busy = "❯ 跑\n✻ Cooking… (3s · ↓ 1 tokens)\n⏺ 結果：\n  ❯ ls\n";
         assert_eq!(ClaudeCapture.activity(busy).as_deref(), Some("Cooking… (3s · ↓ 1 tokens)"));
+    }
+
+    /// 輸入框那一行只有 `❯` 加空白（有的版本／寬度會在後面補空白）：不是回音，不能把起點推到畫面最底、
+    /// 讓上面真正的回音與回覆整段消失（#762 審查；註解寫「內容要有字」，條件以前只看長度，空白也算有字）。
+    #[test]
+    fn a_composer_row_of_only_spaces_after_the_marker_is_not_the_echo() {
+        for composer in ["❯ ", "❯   ", "❯                                        "] {
+            let screen = format!("❯ 問題\n⏺ 答案\n{composer}\n");
+            assert_eq!(ClaudeCapture.extract_reply(&screen).as_deref(), Some("答案"), "composer={composer:?}");
+        }
     }
 
     /// 縮排的 `❯ ` 一律不是回音（排隊中的訊息、引用）：沒有第 0 欄回音時從頭看，最後一個 `⏺` 照舊是回覆。
