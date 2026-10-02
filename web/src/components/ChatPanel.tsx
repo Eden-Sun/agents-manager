@@ -153,9 +153,9 @@ const PlainBubble = memo(function PlainBubble({
   const preview = msg.role === 'user' && (msg.relay_from || quoted) ? relayPreview(msg.content) : null
   const [expanded, setExpanded] = useState(false)
   const folded = Boolean(preview?.truncated) && !expanded
-  const notify = useStore((s) => s.notify)
+  // 點擊複製的回報在事件裡才用 `notify`：不為它掛 selector（清單幾百則，每個 selector 都要在每次 store 更新時跑一遍）。
   const tapCopy = useTapCopy(system ? systemNoticeText(msg.content) : msg.content, (ok) => {
-    notify(ok ? 'info' : 'error', ok ? '已複製訊息' : '複製失敗，請長按選取文字複製')
+    useStore.getState().notify(ok ? 'info' : 'error', ok ? '已複製訊息' : '複製失敗，請長按選取文字複製')
   })
 
   return (
@@ -288,7 +288,7 @@ export function LiveBubble({
       <div className={`bubble${showText ? ' md' : ''}`}>
         {showText ? (
           <>
-            <SafeMarkdown text={text ?? ""} />
+            <SafeMarkdown text={text ?? ""} cache={false} />
             <span className="caret" aria-hidden="true" />
           </>
         ) : (

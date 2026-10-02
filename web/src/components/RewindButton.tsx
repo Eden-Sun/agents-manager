@@ -15,19 +15,28 @@ import './rewind.css'
  */
 export function RewindButton({ msg }: { msg: Message }) {
   const botId = msg.bot_id ?? null
+  // 每顆使用者泡泡都掛這一個：只回一個布林。不可倒回的（群組發言、非 claude、已倒回過）就到此為止，不再多掛 selector——
+  // 清單有幾百則時，每次 store 更新每個 selector 都要跑一遍。
+  const offer = useStore((s) => Boolean(botId) && !msg.group_id && canOfferRewind(msg, s.bots.find((b) => b.id === botId)))
+  return offer ? <RewindActive msg={msg} /> : null
+}
+
+function RewindActive({ msg }: { msg: Message }) {
+  const botId = msg.bot_id ?? null
   const bot = useStore((s) => (botId ? (s.bots.find((b) => b.id === botId) ?? null) : null))
   const blocked = useStore((s) => (botId ? rewindBlocked(s.runs[botId]) : null))
-  // 這則之後還有幾則會一起被拿掉（確認框講清楚代價）。
-  const after = useStore((s) => {
-    const list = botId ? (s.messages[botId] ?? []) : []
+  // 「這則之後還有幾則會一起被拿掉」只有確認框要用：按下去才數（以前每個 selector 在每次 store 更新時
+  // 各掃一遍整段清單，N 則就是 O(N²)）。
+  const afterOf = () => {
+    const list = botId ? (useStore.getState().messages[botId] ?? []) : []
     const i = list.findIndex((m) => m.id === msg.id)
     return i < 0 ? 0 : list.slice(i + 1).filter((m) => m.role !== 'system' && !m.rewound_at).length
-  })
-  return <RewindControl msg={msg} bot={bot} blocked={blocked} after={after} />
+  }
+  return <RewindControl msg={msg} bot={bot} blocked={blocked} afterOf={afterOf} />
 }
 
 /** 不讀 store 的那一半（測試直接餵 props；SSR 渲染拿不到 `useStore.setState` 的狀態）。 */
-export function RewindControl({ msg, bot, blocked, after }: { msg: Message; bot: Bot | null; blocked: string | null; after: number }) {
+export function RewindControl({ msg, bot, blocked, after = 0, afterOf }: { msg: Message; bot: Bot | null; blocked: string | null; after?: number; afterOf?: () => number }) {
   const botId = msg.bot_id ?? null
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -59,7 +68,7 @@ export function RewindControl({ msg, bot, blocked, after }: { msg: Message; bot:
       >
         {busy ? '倒回中…' : '↶ 倒回這裡'}
       </button>
-      <RewindConfirm open={confirming} name={name} after={after} onCancel={() => setConfirming(false)} onConfirm={() => go()} />
+      <RewindConfirm open={confirming} name={name} after={confirming && afterOf ? afterOf() : after} onCancel={() => setConfirming(false)} onConfirm={() => go()} />
       <ConfirmDialog
         open={draft !== null}
         title="終端輸入列裡有字"

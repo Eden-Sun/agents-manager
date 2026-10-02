@@ -1067,7 +1067,12 @@ export const useStore = create<StoreState>((set, get) => {
         connected: st.connected,
         defaultConnected: st.default_connected,
         // daemon 重啟後 seq 變小要跟著降，否則 `?since=` 送未來數字會一直 `resync`。
-        lastSeq: st.daemon_seq < s.lastSeq ? st.daemon_seq : Math.max(s.lastSeq, st.daemon_seq),
+        lastSeq: (() => {
+          const seen = Math.max(s.lastSeq, ephemeralSeq)
+          // progress 記在模組變數的那一份在這裡併進 `lastSeq`；併完歸零（daemon 重啟後號碼變小，舊號碼不能再灌回來）。
+          ephemeralSeq = 0
+          return st.daemon_seq < seen ? st.daemon_seq : Math.max(seen, st.daemon_seq)
+        })(),
         // 這份快照反映到 `daemon_seq` 為止的所有狀態，所以耐久 seq 直接對到它：比現在的小（daemon 重啟）要跟著降、
         // 比現在的大就跟上——兩條路都等於 `st.daemon_seq`，不寫成三元式，免得看起來像有「不往下降」的分支
         // （i264 的複看，2026-09-24）。
@@ -2812,6 +2817,7 @@ export function resetStoreForTest(): void {
   quotaSweep = null
   openedOnce = false
   seenSeq = 0
+  ephemeralSeq = 0
   appliedStateSeq = 0
   legacyQueueMigrationAttempted = false
   draftSync.dispose()
@@ -2946,6 +2952,9 @@ function noteGroupCompletion(set: SetFn, get: GetFn, botId: string, turnId: stri
  * Rust 那邊加了新的即時幀卻忘了改這裡的話，`lastDurableSeq` 會被推到一個不在環裡的 seq，重連就落回
  * `backlog` 的保守分支——多一次 resync，不會壞掉。加幀時兩邊一起改。
  */
+/** 看過的 `turn_progress` 最高 seq（沒進 store，見 `handleFrame`）；併進下一次耐久幀／快照的 `lastSeq`。 */
+let ephemeralSeq = 0
+
 export function seqAfterFrame(prev: { lastSeq: number; lastDurableSeq: number }, type: string, seq: number) {
   const durable = type !== 'turn_progress' && type !== 'resync'
   return {
@@ -2962,7 +2971,16 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
   seenSeq = gate.seen
   if (typeof frame.seq === 'number') {
     const seq = frame.seq
-    set((s) => seqAfterFrame(s, frame.type, seq))
+    if (frame.type === 'turn_progress') {
+      // 最高頻的幀（一個 run 每秒約 4 幀）：seq 只記在模組變數，不 set。每個 set 都會通知所有掛著的 selector
+      // （長對話開著時有幾百個），為了一個沒有人訂閱的欄位每幀多通知一輪是白花的；下一個真的 set 時併進 `lastSeq`。
+      ephemeralSeq = Math.max(ephemeralSeq, seq)
+    } else {
+      set((s) => {
+        const next = seqAfterFrame(s, frame.type, seq)
+        return ephemeralSeq > next.lastSeq ? { ...next, lastSeq: ephemeralSeq } : next
+      })
+    }
   }
   const data = frame.data
   switch (frame.type) {

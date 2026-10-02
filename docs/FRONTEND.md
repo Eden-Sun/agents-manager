@@ -64,6 +64,16 @@ store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`f
   WebP 不透明出 JPEG、有透明出 PNG。EXIF 方向用 `createImageBitmap(imageOrientation:'from-image')` 烤進像素。壓完沒變小、解不開就傳原檔；
   GIF、SVG、HEIC 與非圖片不動。50 MB 上限對壓完的檔案判。附件卡片的大小是實際上傳的，壓過的附「原 N MB」。
   實測手機照片 4032×3024／2.6 MB → 1568×1176／288 KB（桌機 Chrome 約 0.1 秒）。
+- **長對話的渲染成本**（2026-10-02 量測，`components/longConvoPerf.test.tsx`、`store/frameFlood.test.ts`）：一顆 bot 的清單最多 500 則（`MESSAGE_CAP`），
+  每次 store 更新（含每一幀 WS）都會通知清單上所有掛著的 selector，所以「每顆泡泡一個 selector」是會乘以則數的成本。守則：
+  - **泡泡上的 selector 一律 O(1)**。以前「倒回」的 `after` 計數器每顆使用者泡泡各掃兩遍整段清單，120 則就是 10 次更新 72,000 次陣列讀取（500 則約每次 19 萬次）；
+    現在只在確認框打開的當下才數（`RewindControl` 的 `afterOf`），不可倒回的泡泡只掛一個布林 selector。新加的泡泡功能不要在 selector 裡 `find`／`filter` 整段訊息。
+  - **點擊才用的東西（`notify` 這類）用 `useStore.getState()`**，不為它掛 selector。
+  - **Markdown 解析快取**（`lib/markdownCache.tsx`）：換 bot 再換回來，清單整個重掛，每則 assistant 訊息的 parse＋轉 React 樹約 3–5 ms；
+    快取 `react-markdown` 的輸出樹（鍵＝原文＋bot id），上限 300 則／100 萬字，單則超過 5 萬字不快取，LRU。`Bubble` 的 `memo` 只擋同一次掛載內的重 render。
+  - **`turn_progress`（每個 run 每秒約 4 幀）不為 seq 單獨 `set`**：`lastSeq` 沒有人訂閱，只記在模組變數、併進下一次耐久幀／快照；liveReply 本來就 250 ms 節流。
+  - 沒做、已知：清單沒有虛擬化（上限 500 則 DOM）；逛過的 bot 的訊息陣列（各最多 500 則）留在 store 裡，只有 bot 被刪才釋放（`prune.ts`）——
+    要釋放就得連未讀計數（`recountBot` 讀 `messages`）一起改，這一輪沒碰。
 - **來源標籤**：`hook` 不標；`terminal_fallback` 標「可能不完整」；系統訊息另有來源標。
 - **WS**：指數退避重連（250ms 起跳、上限 3 秒 + jitter；`transport.ts`），存活偵測（#760）：daemon 每 20 秒送 `{type:"ping"}`，前景 60 秒沒收到任何幀（或切回前景時靜默 >35 秒）就主動關掉重連（`api/socketLiveness.ts`；不能只看 `readyState`）；重連帶 `?since=<lastDurableSeq>`——**最後一則耐久事件的 seq，不是最高的那個 seq**：store 裡 `lastSeq` 跟著每一幀走，`lastDurableSeq` 只跟著會進 daemon 重播環的幀走（`seqAfterFrame`，即時幀如 `bots_restart_progress` 不推進；送成 `lastSeq` 會指到環裡沒有的號碼，重連落回保守分支多一次 resync）。daemon 那邊 `state::is_ephemeral` 加了新的即時幀，這裡的名單要一起改；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`。　**只在這個分頁見過 `ping` 之後才用靜默判半開**（舊 daemon 不送心跳，安靜時整條線沒有幀；不加這個條件的話舊 daemon 搭新前端閒置每分鐘重連、整份重抓 state 與對話）；旗標跨重連保留。
 - **blocked**：`BlockedModal`（全畫面，blocked 1 秒後自動彈出，只彈正在看的 bot，關過就不再彈直到下一次 blocked）與
