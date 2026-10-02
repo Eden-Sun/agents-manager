@@ -11,7 +11,7 @@ use tokio::process::Command;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Failure {
-    /// 機器碼：`dirty_worktree` | `fetch_failed` | `not_fast_forward` | `nothing_to_deliver` | `push_failed` | `branch_moved` | `pr_failed`
+    /// 機器碼：`dirty_worktree` | `fetch_failed` | `not_fast_forward` | `nothing_to_deliver` | `push_failed` | `branch_moved` | `pr_failed` | `head_moved`
     pub code: &'static str,
     pub detail: String,
 }
@@ -96,6 +96,19 @@ pub struct Opened {
     pub existing: bool,
 }
 
+/// 分支名會被組進 `git fetch`／`git push` 的參數與 refspec：開頭的 `-` 會被當成選項，空白、控制字元、`..`、`:`、`~`、`^`、`?`、`*`、`[`、
+/// `\\` 在 refspec 裡各有意義。base 是從遠端（`origin/HEAD`、`ls-remote`）問來的，遠端回什麼我們就得驗什麼；只收最保守的一組字元。
+pub fn valid_branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with(['-', '/', '.'])
+        && !name.ends_with(['/', '.'])
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.ends_with(".lock")
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
 /// 這個 repo 的預設分支（交付的 base）。
 ///
 /// 以前寫死 `main`：預設分支叫 `master`／`trunk` 的專案一定 `fetch_failed`，任務停在交付失敗
@@ -103,14 +116,14 @@ pub struct Opened {
 pub async fn base_branch(dir: &Path, remote: &str) -> String {
     let head_ref = format!("refs/remotes/{remote}/HEAD");
     if let Ok((true, out)) = git(dir, &["symbolic-ref", "--quiet", "--short", &head_ref]).await {
-        if let Some(b) = out.lines().next().map(str::trim).and_then(|l| l.strip_prefix(&format!("{remote}/"))).filter(|b| !b.is_empty()) {
+        if let Some(b) = out.lines().next().map(str::trim).and_then(|l| l.strip_prefix(&format!("{remote}/"))).filter(|b| valid_branch_name(b)) {
             return b.to_string();
         }
     }
     if let Ok((true, out)) = git(dir, &["ls-remote", "--symref", remote, "HEAD"]).await {
         for line in out.lines() {
             if let Some(rest) = line.trim().strip_prefix("ref: refs/heads/") {
-                if let Some(b) = rest.split_whitespace().next().filter(|b| !b.is_empty()) {
+                if let Some(b) = rest.split_whitespace().next().filter(|b| valid_branch_name(b)) {
                     return b.to_string();
                 }
             }
@@ -145,7 +158,7 @@ async fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
 ///
 /// 「有沒有東西要交」不在這裡判：重試時 HEAD 已經在 base 裡是**成功**的證據，不是錯誤，
 /// 由呼叫端配合「先前有沒有試過」決定（review3 c1 M11）。
-async fn preflight(dir: &Path, remote: &str, base: &str) -> Result<(String, String), Failure> {
+async fn preflight(dir: &Path, remote: &str, base: &str, expected: Option<&str>) -> Result<(String, String), Failure> {
     let (_, porcelain) = git(dir, &["status", "--porcelain"]).await?;
     if !porcelain.trim().is_empty() {
         return Err(fail("dirty_worktree", format!("worktree 還有未提交的改動：\n{porcelain}")));
@@ -156,6 +169,11 @@ async fn preflight(dir: &Path, remote: &str, base: &str) -> Result<(String, Stri
     }
     let remote_ref = format!("{remote}/{base}");
     let (_, head) = git(dir, &["rev-parse", "HEAD"]).await?;
+    // 呼叫端驗過／檢查過的是 `expected` 那個 commit：工作樹的 HEAD 在這之間被動過（執行者還在同一個樹上做事）就不能交，
+    // 不然推上去的是沒驗過的東西。
+    if let Some(want) = expected.filter(|w| *w != head) {
+        return Err(fail("head_moved", format!("工作樹的 HEAD（{head}）已經不是要交付的那個 commit（{want}）：中間有人又 commit 了，回到驗證那一步重驗")));
+    }
     let (ok, upstream) = git(dir, &["rev-parse", &remote_ref]).await?;
     if !ok {
         return Err(fail("fetch_failed", upstream));
@@ -169,7 +187,13 @@ async fn preflight(dir: &Path, remote: &str, base: &str) -> Result<(String, Stri
 /// base 裡時它決定這是「上一次其實推成功了」還是「根本沒東西可交」：以前一律回 `nothing_to_deliver`，
 /// 逾時重試就把一筆已經在 main 上的交付報成失敗、任務停在「等你決定」（review3 c1 M11）。
 pub async fn push_main(dir: &Path, remote: &str, base: &str, attempted_before: bool) -> Result<Pushed, Failure> {
-    let (head, upstream) = preflight(dir, remote, base).await?;
+    push_main_at(dir, remote, base, attempted_before, None).await
+}
+
+/// 同 [`push_main`]，另外要求工作樹的 HEAD 必須就是 `expected`（驗過的那個 commit），否則 `head_moved`。
+/// 推的是那個 sha 本身（`<sha>:refs/heads/<base>`），不是「推的當下的 HEAD」：檢查與推之間 HEAD 又動了也不會把別的 commit 帶上去。
+pub async fn push_main_at(dir: &Path, remote: &str, base: &str, attempted_before: bool, expected: Option<&str>) -> Result<Pushed, Failure> {
+    let (head, upstream) = preflight(dir, remote, base, expected).await?;
     if is_ancestor(dir, &head, &upstream).await {
         return if attempted_before {
             Ok(Pushed { sha: head, already_in_base: true })
@@ -183,7 +207,7 @@ pub async fn push_main(dir: &Path, remote: &str, base: &str, attempted_before: b
             format!("{remote}/{base}（{upstream}）已經往前走，HEAD（{head}）不是它的後代；要先 rebase 並重新驗證"),
         ));
     }
-    let refspec = format!("HEAD:refs/heads/{base}");
+    let refspec = format!("{head}:refs/heads/{base}");
     let (ok, out) = git(dir, &["push", remote, &refspec]).await?;
     if !ok {
         return Err(fail("push_failed", out));
@@ -193,7 +217,12 @@ pub async fn push_main(dir: &Path, remote: &str, base: &str, attempted_before: b
 
 /// 推一條 `mission/<id>` 分支並用 `gh` 開 PR。成功回 PR 網址。
 pub async fn open_pr(dir: &Path, remote: &str, base: &str, branch: &str, title: &str, body: &str) -> Result<Opened, Failure> {
-    open_pr_with(Path::new("gh"), dir, remote, base, branch, title, body).await
+    open_pr_at(dir, remote, base, branch, title, body, None).await
+}
+
+/// 同 [`open_pr`]，另外要求工作樹的 HEAD 必須就是 `expected`（見 [`push_main_at`]）。
+pub async fn open_pr_at(dir: &Path, remote: &str, base: &str, branch: &str, title: &str, body: &str, expected: Option<&str>) -> Result<Opened, Failure> {
+    open_pr_expecting(Path::new("gh"), dir, remote, base, branch, title, body, expected).await
 }
 
 /// 這條分支**最近的一條** PR：`(網址, 狀態)`，狀態是 `OPEN` | `CLOSED` | `MERGED`。`None` = 從來沒有
@@ -227,7 +256,21 @@ pub(crate) async fn open_pr_with(
     title: &str,
     body: &str,
 ) -> Result<Opened, Failure> {
-    let (head, upstream) = preflight(dir, remote, base).await?;
+    open_pr_expecting(gh, dir, remote, base, branch, title, body, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_pr_expecting(
+    gh: &Path,
+    dir: &Path,
+    remote: &str,
+    base: &str,
+    branch: &str,
+    title: &str,
+    body: &str,
+    expected: Option<&str>,
+) -> Result<Opened, Failure> {
+    let (head, upstream) = preflight(dir, remote, base, expected).await?;
     let in_base = is_ancestor(dir, &head, &upstream).await;
     if !in_base {
         push_mission_branch(dir, remote, branch, &head).await?;
@@ -279,7 +322,7 @@ async fn push_mission_branch(dir: &Path, remote: &str, branch: &str, head: &str)
             (false, detail) => return Err(fail("fetch_failed", detail)),
         }
     };
-    let refspec = format!("HEAD:refs/heads/{branch}");
+    let refspec = format!("{head}:refs/heads/{branch}");
     let lease_ref = format!("refs/heads/{branch}");
     let (lease, rewritten) = match tip.as_deref() {
         None => (Some(format!("--force-with-lease={lease_ref}:")), false),
@@ -402,6 +445,38 @@ mod tests {
         assert!(push_main(&work, "origin", "main", true).await.expect("仍在 main 裡").already_in_base);
         // 沒試過的那次維持 `nothing_to_deliver`：那是「執行者根本沒 commit」。
         assert_eq!(push_main(&work, "origin", "main", false).await.unwrap_err().code, "nothing_to_deliver");
+    }
+
+    /// 檢查與推之間 HEAD 被動過（執行者還在同一個樹上做事）：只能交驗過的那個 commit，推不上去、遠端原封不動。
+    #[tokio::test]
+    async fn a_head_that_moved_after_verification_is_refused_and_nothing_is_pushed() {
+        let (_root, _seed, work) = fixture();
+        commit(&work, "b");
+        let (_, verified) = git(&work, &["rev-parse", "HEAD"]).await.unwrap();
+        commit(&work, "sneaky");
+        let (_, remote_before) = git(&work, &["ls-remote", "origin", "refs/heads/main"]).await.unwrap();
+        let err = push_main_at(&work, "origin", "main", false, Some(&verified)).await.unwrap_err();
+        assert_eq!(err.code, "head_moved", "{err:?}");
+        let (_, remote_after) = git(&work, &["ls-remote", "origin", "refs/heads/main"]).await.unwrap();
+        assert_eq!(remote_before, remote_after, "什麼都沒推");
+        let gh = std::path::Path::new("/nonexistent/gh");
+        let err = open_pr_expecting(gh, &work, "origin", "main", "mission/x", "t", "b", Some(&verified)).await.unwrap_err();
+        assert_eq!(err.code, "head_moved", "PR 路徑一樣：{err:?}");
+        // 驗的就是目前的 HEAD：照推。
+        let (_, head) = git(&work, &["rev-parse", "HEAD"]).await.unwrap();
+        let out = push_main_at(&work, "origin", "main", false, Some(&head)).await.expect("HEAD 就是驗過的");
+        assert_eq!(out.sha, head);
+    }
+
+    /// base 是遠端回的：開頭的 `-`（會被當成 git 的選項）、refspec 的特殊字元、`..` 都不收。
+    #[test]
+    fn a_base_branch_name_that_could_be_read_as_an_option_or_a_refspec_is_refused() {
+        for bad in ["", "-x", "--upload-pack=sh", "a b", "a:b", "a..b", "a~1", "a^", "a?", "a*", "a[b", "a\\b", "/a", "a/", ".a", "a.", "a//b", "x.lock", "a\nb"] {
+            assert!(!valid_branch_name(bad), "{bad:?}");
+        }
+        for ok in ["main", "master", "trunk", "release/1.2", "feature_x-1", "v1.0.x"] {
+            assert!(valid_branch_name(ok), "{ok}");
+        }
     }
 
     /// 假的 `gh`：第一次開 PR，第二次 `pr create` 會說已經有了——要回原本那條 PR，不是 `pr_failed`。

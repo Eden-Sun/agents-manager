@@ -623,7 +623,13 @@ pub struct HandoffIn {
     pub summary: String,
 }
 
+/// 管理摘要的上限（正式庫最大一筆約 38 KB）：會寫進 DB、AGM 目錄的 `handoff.md`，每次冷啟動都要整份讀。
+const MAX_HANDOFF_BYTES: usize = 64 * 1024;
+
 pub async fn put_handoff(State(app): State<Arc<App>>, Json(b): Json<HandoffIn>) -> Result<Json<Value>, LcError> {
+    if b.summary.len() > MAX_HANDOFF_BYTES {
+        return Err(LcError::Bad(format!("summary is too long (max {MAX_HANDOFF_BYTES} bytes); keep the handoff short and put detail in the repo")));
+    }
     let version = store::set_summary(&app.db, &b.summary).await.map_err(up)?;
     // The readable copy in the manager's own directory. The database stays authoritative;
     // this is what the manager reads on a cold start before anything else is available.
@@ -2685,6 +2691,20 @@ mod review_boundary_tests {
         let plan = plan.iter().map(|r| r.3.as_str()).collect::<Vec<_>>().join(" | ");
         assert!(plan.contains("supervisor_assignments_created"), "沒走新索引：{plan}");
         assert!(!plan.contains("TEMP B-TREE"), "還在排整張表：{plan}");
+        app.db.close().await;
+        std::fs::remove_dir_all(&app.data_dir).unwrap();
+    }
+
+    /// 管理摘要有上限：超過的 400，而且什麼都沒存；剛好在上限內照存。
+    #[tokio::test]
+    async fn an_oversized_handoff_is_refused_and_not_stored() {
+        let app = app().await;
+        store::get_or_init(&app.db).await.unwrap();
+        let r = put_handoff(State(app.clone()), Json(HandoffIn { summary: "x".repeat(MAX_HANDOFF_BYTES + 1) })).await;
+        assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='handoff'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(before, 0);
+        put_handoff(State(app.clone()), Json(HandoffIn { summary: "x".repeat(MAX_HANDOFF_BYTES) })).await.expect("剛好在上限內");
         app.db.close().await;
         std::fs::remove_dir_all(&app.data_dir).unwrap();
     }
