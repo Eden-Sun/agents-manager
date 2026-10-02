@@ -609,6 +609,10 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
     fixtures：`codex-0.155-tool-rows-share-the-answer-marker.txt`、`codex-0.157-reply-bullets.txt`、`codex-0.158-mermaid-boxed-flowchart.txt`。
   - 真機 fixture：`daemon/src/lifecycle/fixtures/codex-0.155-{idle,working,working-summary,finished}.{txt,ansi}`（0.155.1 私有 prefix、
     拋棄式 `CODEX_HOME`、名字為空的 pane）。`screen.rs` 的 `codex_0155_screen_tests`、`poller.rs` 的 `codex_0155_fallback_tests` 讀這些檔。
+- **claude 在 Linux 的畫面跟 macOS 不同**（2.1.287，2026-10-02 tmux 真畫面，fixtures `claude-2.1.287-linux-{idle,draft,working,finished}`）：回覆／工具列的字頭在第 0 欄是 `●`（macOS 是 `⏺`），
+  備援解析（`capture/claude.rs`）進來先把第 0 欄的 `● ` 當 `⏺`（縮排的 `●` 是問卷或回覆內容，不動）；工具列改成「描述 ＋ `⎿  $ 指令`」，沒有 `Bash(…)`，
+  結構判斷（下一行是 `⎿`）照樣認得。活動列／完成行跟輸入框上緣之間隔著空行（長對話一行，短對話輸入框釘在畫面底、是一整段空白），
+  `status_zone_start` 容許**一段**空白、而且它上面要真的是狀態列，不然 `still_busy` 在真畫面永遠是 false。
 - **沒有 hook 的 run**：被認領的 pane（`runs.adopted = 1` 且 `bots.inject_hooks = 0`，典型是 bot 自己開的子 agent，§6.5a）等不到 hook，
   快照是**唯一來源**：`working → idle` 沒有 in-flight Turn 時，補一筆 `origin = external`、`completed_fallback` 的 Turn（prompt 回音記 user、回覆記 assistant）。
   認領當下仍 `working` 就先開一筆 in-flight Turn。

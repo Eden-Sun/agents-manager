@@ -28,6 +28,7 @@ impl Capture for ClaudeCapture {
 
     fn extract_reply(&self, text: &str) -> Option<String> {
         let marker = "⏺ ";
+        let text = &dot_marker_as_record(text);
         let lines: Vec<&str> = text.lines().collect();
         let after_echo = after_last_prompt_echo(&lines);
         let last_marker = after_echo
@@ -116,6 +117,29 @@ impl Capture for ClaudeCapture {
     }
 }
 
+/// claude 在 Linux 上把回覆／工具列的字頭畫成 `●`（U+25CF），macOS 才是 `⏺`（U+23FA）（2.1.287 Linux 真畫面
+/// `claude-2.1.287-linux-*.txt`）。字頭一律在第 0 欄；縮排的 `●`（問卷、回覆裡自己寫的項目符號）不是字頭。
+/// 後面的解析都認 `⏺`，進來先把第 0 欄的 `● ` 換過去。
+fn dot_marker_as_record(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.lines().any(|l| l.starts_with("● ")) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        match line.strip_prefix("● ") {
+            Some(rest) => {
+                out.push_str("⏺ ");
+                out.push_str(rest);
+            }
+            None => out.push_str(line),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// `⏺` 開頭的這一行是工具呼叫（`⏺ Bash(herdr agent get …)`），不是助手的文字。認結構不認工具名：
 /// 名字加 `(`、整行收在 `)`（長參數被畫成 `…)`），或下面第一行非空的就是 `⎿` 輸出。
 /// 多行的命令（真畫面 `claude-2.1.281-background-shell.txt`）第一行不收在 `)`、下面也是命令的續行：
@@ -183,9 +207,32 @@ fn is_full_rule(s: &str) -> bool {
 /// 緊貼輸入框上緣、中間沒有空行的狀態列。空行以上是回覆，不掃。
 fn status_zone_start(lines: &[&str], cut: usize) -> usize {
     let mut zone = cut;
+    // 真畫面的活動列／完成行跟輸入框上緣之間隔著空行（接在長對話後面是一行，短對話輸入框釘在畫面底、中間是一整段空白：
+    // `claude-2.1.287-linux-working.txt`、`claude-2.1.281-background-shell.txt`）：這一段空白只容許一次，而且它上面要真的是狀態列；
+    // 再往上的空行還是回覆的界線。
+    let mut spacer_used = false;
     while zone > 0 {
         let s = lines[zone - 1].trim();
-        if s.is_empty() || !(is_status_chrome(s) || is_zone_busy(s)) {
+        if s.is_empty() {
+            if spacer_used {
+                break;
+            }
+            let mut first_blank = zone - 1;
+            while first_blank > 0 && lines[first_blank - 1].trim().is_empty() {
+                first_blank -= 1;
+            }
+            let above_is_status = first_blank > 0 && {
+                let a = lines[first_blank - 1].trim();
+                is_status_chrome(a) || is_zone_busy(a)
+            };
+            if !above_is_status {
+                break;
+            }
+            spacer_used = true;
+            zone = first_blank;
+            continue;
+        }
+        if !(is_status_chrome(s) || is_zone_busy(s)) {
             break;
         }
         zone -= 1;
@@ -550,5 +597,49 @@ mod reply_boundary_tests {
         let screen = format!("❯ 怎麼寫\n⏺ parse(input) 會回傳 Option，\n  記得處理 None。\n{COMPOSER}");
         let reply = ClaudeCapture.extract_reply(&screen).unwrap();
         assert!(reply.contains("記得處理 None。"), "{reply}");
+    }
+}
+
+/// claude 2.1.287 在 **Linux** 的真畫面（2026-10-02，tmux 120x40、`--dangerously-skip-permissions`）：回覆／工具列的字頭是
+/// `●`（U+25CF），macOS 才是 `⏺`（U+23FA）；工具列也改成「描述 ＋ `⎿  $ 指令`」。本機 Linux 與遠端 Linux 主機的 claude bot
+/// 備援（終端快照）都吃這個畫面。
+#[cfg(test)]
+mod linux_2_1_287_screen_tests {
+    use super::*;
+
+    const IDLE: &str = include_str!("../lifecycle/fixtures/claude-2.1.287-linux-idle.txt");
+    const WORKING: &str = include_str!("../lifecycle/fixtures/claude-2.1.287-linux-working.txt");
+    const FINISHED: &str = include_str!("../lifecycle/fixtures/claude-2.1.287-linux-finished.txt");
+
+    #[test]
+    fn busy_only_while_the_spinner_row_is_up() {
+        assert!(ClaudeCapture.still_busy(WORKING));
+        assert!(!ClaudeCapture.still_busy(FINISHED));
+        assert!(!ClaudeCapture.still_busy(IDLE));
+    }
+
+    #[test]
+    fn an_empty_composer_awaits_input() {
+        assert!(ClaudeCapture.awaits_input(IDLE));
+        assert!(ClaudeCapture.awaits_input(FINISHED));
+    }
+
+    /// 回覆是 `● PONG`；完成行 `✻ Churned for 9s · done 3:03 PM` 不進回覆。
+    #[test]
+    fn the_reply_is_read_after_a_dot_marker() {
+        assert_eq!(ClaudeCapture.extract_reply(FINISHED).as_deref(), Some("PONG"));
+    }
+
+    /// 回合中畫面底下只有「● Sleeping for six seconds / ⎿  $ sleep 6」這個工具列（新的「描述＋指令」寫法，沒有 `Bash(…)`）：
+    /// 照「整回合只有工具呼叫就取最後一個」的老規則，不會把 spinner 或輸入框 chrome 帶進來。
+    #[test]
+    fn a_running_tool_row_does_not_pull_in_the_spinner_or_the_composer() {
+        let reply = ClaudeCapture.extract_reply(WORKING).unwrap();
+        assert_eq!(reply, "Sleeping for six seconds\n  ⎿  $ sleep 6");
+    }
+
+    #[test]
+    fn activity_is_the_spinner_row() {
+        assert_eq!(ClaudeCapture.activity(WORKING).as_deref(), Some("Frosting… (2s · ↓ 77 tokens)"));
     }
 }

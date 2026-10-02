@@ -45,7 +45,8 @@ pub fn parse(screen: &str) -> Switch {
             after_slash = matches!(cmd, "/model" | "/effort");
             continue;
         }
-        if line.starts_with('⏺') {
+        // macOS 的字頭是 `⏺`，Linux 是 `●`（2.1.287 真畫面）。
+        if line.starts_with(['⏺', '●']) {
             after_slash = false;
             continue;
         }
@@ -450,5 +451,15 @@ mod tests {
         assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("claude-opus-5-5"), Some("xhigh")));
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (None, None));
+    }
+
+    /// Linux 的 claude 把助手／工具列畫成 `● `：一出現也要清掉「剛打的 /model」，不然後面工具輸出的 `⎿  Set model to …` 會被當成確認。
+    #[test]
+    fn a_dot_marker_row_clears_the_pending_slash_command_like_the_record_marker() {
+        let screen = "❯ /model sonnet
+● Ran a command
+  ⎿  Set model to Opus 5.5
+";
+        assert_eq!(parse(screen), Switch::default());
     }
 }
