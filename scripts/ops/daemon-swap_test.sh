@@ -216,7 +216,7 @@ case "$q" in
   "pragma user_version")
       if [ "$db" = "$DAEMON_DB" ]; then cat "$ROOT/uv"; else cat "$db.uv" 2>/dev/null || cat "$ROOT/uv"; fi ;;
   "pragma integrity_check") cat "$ROOT/integrity" ;;
-  .backup*) dest=${q#.backup }; cp "$db" "$dest"; cp "$ROOT/uv" "$dest.uv" ;;
+  .backup*) [ -z "${STUB_BACKUP_FAIL:-}" ] || exit 1; dest=${q#.backup }; cp "$db" "$dest"; cp "$ROOT/uv" "$dest.uv" ;;
   *) # 其他查詢（換版後比對刪除紀錄）交給真的 sqlite3，查 seed_audit 種的那份；要求一定是唯讀開的。
      [ "$db" = "$DAEMON_DB" ] && [ -n "$ro" ] || { echo "non-readonly query: $q" >> "$AGM_DIR/sqlite-rw.log"; exit 1; }
      "$REAL_SQLITE" -readonly "$ROOT/audit.sqlite3" "$q" ;;
@@ -333,6 +333,51 @@ check_file "成功後保留這趟 DB 備份" yes "$(logged_db_backup)"
 check_file "成功後刪除較舊 DB 備份" no "$DAEMON_DB.bak-20000101-0000"
 check_file "成功後刪除另一份較舊 DB 備份" no "$DAEMON_DB.bak-20010101-0000"
 check_eq "成功後只保留一份 DB 備份" "1" "$(db_backup_count)"
+teardown
+
+# 1b. DB 備份檔權限：DB 裡有 bot 的 hook token 等憑證，備份不能是預設 umask 的 644（別的使用者讀得到）。
+#     備份是腳本自己建的，不論呼叫端的 umask 是什麼都要 600。
+setup 10 10
+( umask 022; rc=$(run); check_eq "備份權限：順利時 rc=0" "0" "$rc" )
+BK=$(logged_db_backup)
+MODE=$(stat -c '%a' "$BK" 2>/dev/null || stat -f '%Lp' "$BK")
+check_eq "DB 備份檔權限是 600（呼叫端 umask 022 也一樣）" "600" "$MODE"
+teardown
+
+# 1b-2. 同一秒／同名的備份已經存在：不能覆蓋它（那可能是上一趟換版前唯一的一份好備份），拒絕換版、什麼都沒動。
+setup 11 10
+printf 'precious-pre-migration-backup\n' > "$DAEMON_DB.bak-samestamp"
+rc=$(SWAP_BACKUP_STAMP=samestamp run)
+check_eq "備份檔已存在：rc=5" "5" "$rc"
+check_eq "既有的備份一個字都沒動" "precious-pre-migration-backup" "$(cat "$DAEMON_DB.bak-samestamp")"
+check_eq "沒有重啟 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+teardown
+
+# 1b-2b. 備份拍不出來（磁碟滿、DB 鎖著）：已經拿著 restart 窗口，中止前要還——不然窗口一直握到 TTL 到期，別人都拿不到。
+setup 11 10
+rc=$(STUB_BACKUP_FAIL=1 run)
+check_eq "備份失敗：rc=5" "5" "$rc"
+check "備份失敗要交還窗口" "lease release restart" "$AGM_DIR/calls.log"
+check_eq "沒有重啟 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+teardown
+
+# 1b-3. DB 的 schema 比要換上的 binary 還新（例如部署了比線上舊的 commit）：換上去的 binary 一定會被版本閘擋下，
+#       停機之後才發現就晚了——停 daemon 之前就拒絕。
+setup 10 11
+rc=$(run)
+check_eq "DB 比目標 binary 新：rc=3" "3" "$rc"
+check "log 講明是 schema 比 binary 新" "比要換上的" "$SWAP_LOG"
+check_eq "沒有重啟 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+check_eq "線上 binary 沒被動" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "沒有拍備份" "0" "$(db_backup_count)"
+teardown
+
+# 1b-4. 讀不到 DB 的 user_version（sqlite3 壞了、DB 開不了）：不能當成「升過 schema」往下跑。
+setup 10 10
+: > "$ROOT/uv"
+rc=$(run)
+check_eq "讀不到 user_version：rc=3" "3" "$rc"
+check_eq "沒有重啟 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
 teardown
 
 # 1c. 線上版本比目標新：在任何備份或重啟前拒絕（#638）。
