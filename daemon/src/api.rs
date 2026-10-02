@@ -686,6 +686,7 @@ pub(crate) fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
 async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
     let mut out = Vec::new();
     let tools = app.tools.lock().await.clone();
+    let baselines = app.host_baseline.lock().await.clone();
     for c in app.hosts.list().await {
         let connected = if c.is_local() { app.connected.load(Ordering::SeqCst) } else { c.is_connected() };
         let t = tools.get(&c.name);
@@ -709,6 +710,8 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             // Env unexpanded, as written.
             "shell_identities": t.map(|x| json!(x.shell_identities)),
             "tools_checked_at": t.map(|x| x.checked_at.clone()),
+            // 工作環境一致性（只讀檢查，#719）：`{issues: null|[{id,severity,message}], checked_at}`；沒量過＝null。
+            "baseline": baselines.get(&c.name).map(|b| json!(b)),
             // herdr 版本（server／protocol 來自 ping，只在連著時報；CLI 來自探測），SPEC §11.6。
             "herdr": crate::herdr_version::for_host(&c, connected, t),
         }));
@@ -2405,6 +2408,7 @@ async fn refresh_tools(State(app): State<Arc<App>>, Path(name): Path<String>) ->
             "identities": ht.identities,
             "shell_identities": ht.shell_identities,
             "tools_checked_at": ht.checked_at,
+            "baseline": app.host_baseline.lock().await.get(&name),
         })),
     )
         .into_response())

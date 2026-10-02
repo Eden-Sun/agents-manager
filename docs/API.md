@@ -1656,6 +1656,10 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 - `hosts[].identities.<name>` 的 `logged_in`/`account`/`plan` 另一條路：codex、grok 走 ssh（`codex login status` / `grok models`，遠端回「未登入」照樣寫回快取）；**claude 不走 ssh**（讀不到 Keychain 會誤答 false，遠端讀到的 false 一律丟掉），
   搭 §12.4 的 `claude-usage` 探測拿，所以第一輪額度輪詢（≤ 60 秒）後才從 `null` 變真答案，變了推 `host_changed`。
 - 尚未偵測時 `tools`、`tools_checked_at` 為 `null`。
+- `hosts[].baseline`（issue #719，SPEC §16.7）：工作環境一致性檢查，**只讀、只報告**：`{"issues": null | [{"id","severity":"critical"|"warn","message"}], "checked_at"}`。
+  `issues: []` = 跟基準一致；`null` = 這趟探測沒跑完（逾時、被截斷），未知，不是「全缺」；整個 `baseline` 為 `null` = 還沒量過。
+  `id` 穩定可比對（`tool.rtk`、`claude.cc1.settings.json:statusLine`、`codex.config.toml:approval_policy`、`gitconfig.token`…）。
+  跟 `tools` 同一趟探測、同時更新；`host_changed` 在有結果時帶 `baseline`（沒量過就不帶）；`POST /api/hosts/{name}/tools/refresh` 回應也帶。
 - `POST /api/hosts/{name}/tools/refresh` → 立即重新偵測 `200 {"name","tools","tools_checked_at"}`（host 不存在 404、ssh 失敗 502），並推 `host_changed`。
 
 ### 12.6b herdr 版本 `hosts[].herdr`
