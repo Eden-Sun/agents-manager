@@ -698,6 +698,11 @@ pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
     // 可能正是見底的那一格。
     // issue #475：「有讀數」要是**說得出話**的讀數——一筆比窗長還舊、又沒有重置時間的，
     // 不能拿來宣稱恢復（那正是「少的那一格可能就是見底的那一格」的情形）。
+    // 讀數本身也要新鮮：開機從快取回填的、或執行中探測壞掉而太久沒人更新的，不是「現在可以用」的證據（見底的照舊擋，寧可多擋）。
+    let flagged = app.quota_stale.lock().await.contains(&key);
+    if crate::quota::reading_is_stale(quota, flagged, now) {
+        return QuotaState::Unknown;
+    }
     if quota.usable_window(crate::quota::Bucket::FiveHour, now).is_some() && quota.usable_window(crate::quota::Bucket::SevenDay, now).is_some() {
         QuotaState::Available
     } else {
@@ -1390,6 +1395,36 @@ mod flow_tests {
         assert_eq!(quota_state(&app, &bot).await, QuotaState::Unknown, "沒有自己的讀數就是不知道，不借 cc0 的");
         app.quotas.lock().await.insert("claude:cc2".into(), available());
         assert_eq!(quota_state(&app, &bot).await, QuotaState::Available);
+    }
+
+    /// 對抗式審查：「可以用」要有**新鮮**的證據。三小時沒更新的讀數、或開機從快取回填、還沒被真探測換掉的（`quota_stale`），
+    /// 只能是「不知道」：不然探測壞掉的帳號會一直被宣告恢復。見底（Blocked）不受影響——寧可多擋。
+    #[tokio::test]
+    async fn an_old_or_cache_restored_reading_cannot_declare_the_account_available() {
+        let app = fx::app().await;
+        fx::configure_responder(&app).await;
+        app.cfg
+            .update(|cfg| {
+                let mut env = std::collections::BTreeMap::new();
+                env.insert("CLAUDE_CONFIG_DIR".to_string(), "/home/u/.claude-cc2".to_string());
+                cfg.identities.push(crate::config::IdentityCfg { name: "cc2".into(), kind: "claude".into(), host: None, env, args: vec![] });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE bots SET identity='cc2' WHERE id='resp'").execute(&app.db).await.unwrap();
+        let bot = roles::responder_bot(&app.db).await.unwrap().unwrap();
+        let mut old = available();
+        old.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(3));
+        app.quotas.lock().await.insert("claude:cc2".into(), old);
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Unknown, "三小時前的讀數不是證據");
+
+        app.quotas.lock().await.insert("claude:cc2".into(), available());
+        app.quota_stale.lock().await.insert("claude:cc2".into());
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Unknown, "開機回填的快取不是證據");
+
+        app.quota_stale.lock().await.clear();
+        assert_eq!(quota_state(&app, &bot).await, QuotaState::Available, "新鮮的讀數照舊可用");
     }
 
     /// 額度是**帳號的**：cc1 的協調者不能看著 cc0 的讀數決定要不要等。讀不到自己的就是不知道，
