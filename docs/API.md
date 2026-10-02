@@ -2278,6 +2278,8 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 認領人省略時取 `AM_AGENT_NAME`，再退 `AM_BOT_ID`，都沒有就 `no_identity`／exit 2。票已被**別的** bot 認領且最後動靜在 24 小時內 → `issue_claimed`／**exit 3**，
 輸出 `claimed_by` 與那筆認領，且不寫任何東西；超過 24 小時沒動靜就接手並在留言裡寫明。自己重跑是 no-op（`already:true`，不留第二則，label 掉了會補回去）。
 `agm issue release <n>` 拿掉 label 並留 `<!-- agm:issue-release … -->`；別人還按著的票同樣 exit 3。每次交回只結束它指向的認領；每個認領期由 REST 數字留言 ID 最小的第一則認領勝出（同秒也照此排序），輸家會追加自己的交回標記並 exit 3。過期認領允許新認領開始下一期。
+標記必須**自己佔一行**（行首只能有空白）：被「引用回覆」（`> <!-- … -->`）或夾在句子中間的標記不算，免得引用別顆 bot 的交回標記就把它的認領清掉。只清 label、沒有認領可交回時，交回標記的 `claim_id` 寫成 `label-only`（不會對上任何認領；沒有 `claim_id` 的舊標記仍是「交回當下有效的任何一筆」），讀完留言到寫入之間別人搶到的新認領不會被它清掉。
+`gh` 被限流（`rate limit`／HTTP 429）回 `gh_rate_limited`（exit 1、`retryable:true`，訊息明講「不是沒人認領」）；其他 `gh` 失敗是 `gh_failed`。兩者都不是 exit 3，呼叫端不能當成可以派工。「最後動靜」只看留言與票的 `updatedAt`，不看分支 push。
 執行期設定讀 `<cwd>/runtime.json`：`{daemon_url, manager_bot_id, responder_bot_id, bot_id, role, self_bot_id, data_dir, supervisor_id, remote_name}`（巡檢目錄的 `responder_bot_id` 在沒有協調者時是 `null`）；一般 shell CLI 執行期 `GET /api/session` 取 User token；`daemon_url` 只接受 loopback。
 `role` 缺省＝`patrol`。Bot pane（有 `AM_BOT_ID`）裡的 `agm` API client 一律以那顆 bot 的身分請求：帶 `X-AM-Bot-Id`／`X-AM-Bot-Token`（`AM_BOT_TOKEN`；舊 pane 回退 `AM_HOOK_TOKEN`），不帶共用 UI token；缺 token 就送半套讓 daemon 回 401，不降級成 User。角色仍由 daemon 比對已驗證的 bot id（不是巡檢／協調者的 bot 照樣拿不到角色權限）。沒有 `AM_BOT_ID` 的一般 shell 才用共用 User token；`AM_SERVICE_ID`＋`AM_SERVICE_TOKEN_FILE` 一起設時改用 service principal（`daemon-swap.sh` 這樣呼叫）。mission 的 `relay_from` 由 authenticated bot id 推導或必須與它相同。
 

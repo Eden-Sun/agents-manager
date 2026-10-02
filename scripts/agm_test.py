@@ -2469,7 +2469,7 @@ sub = " ".join(argv[:2])
 fail = os.environ.get("GH_FAIL")
 if fail in (sub, argv[0]) or (fail == "api_after_comment" and argv[0] == "api"
                                and os.path.exists(os.path.join(state, "comment-written"))):
-    sys.stderr.write("gh: boom\n")
+    sys.stderr.write(os.environ.get("GH_FAIL_MSG", "gh: boom") + "\n")
     sys.exit(1)
 if sub == "issue view":
     n = argv[2]
@@ -2524,7 +2524,7 @@ def _iso(delta_secs: float) -> str:
 class IssueClaimTest(unittest.TestCase):
     """`agm issue claim/release` 不連 daemon，只跟 gh 說話。"""
 
-    ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_NO_LABEL", "GH_INJECT_COMPETITOR", "AM_AGENT_NAME", "AM_BOT_ID", "AGM_RUNTIME_DIR")
+    ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_INJECT_COMPETITOR", "AM_AGENT_NAME", "AM_BOT_ID", "AGM_RUNTIME_DIR")
 
     def setUp(self):
         # 先存原值再改：PATH 指向的是等一下會被刪掉的暫存目錄，收尾一定要還原。
@@ -2546,7 +2546,7 @@ class IssueClaimTest(unittest.TestCase):
         os.environ["PATH"] = ":".join(p for p in (guard, str(bindir), "/usr/bin", "/bin") if p)
         os.environ["GH_STATE"] = str(self.state)
         os.environ["AM_AGENT_NAME"] = "vvyyg1"
-        for k in ("GH_FAIL", "GH_NO_LABEL", "AM_BOT_ID"):
+        for k in ("GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "AM_BOT_ID"):
             os.environ.pop(k, None)
         # runtime.json 故意不存在：issue 這條路不該去讀它。
         os.environ["AGM_RUNTIME_DIR"] = str(Path(self.dir.name) / "no-such-runtime")
@@ -2789,6 +2789,84 @@ class IssueClaimTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertTrue(json.loads(out)["released"])
         self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]], [["--remove-label", "wip"]])
+
+    # --- 對抗式審查（認領協定） ---
+
+    def test_a_quoted_marker_in_a_reply_is_not_a_claim_or_a_release(self):
+        """GitHub 的「引用回覆」會把原留言的原始 markdown（含 HTML 註解）貼進新留言。引用別人的交回標記不能把那顆的認領清掉，
+        引用認領標記也不能自己變成一筆認領。只有『標記自己一行』的留言才算（agm 自己寫的就是這個形狀）。"""
+        quoted_release = {"createdAt": _iso(-100), "body": "> 交回。\n>\n> <!-- agm:issue-release {\"bot\":\"kd61te\"} -->\n\n我覺得還沒做完"}
+        self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=600), quoted_release])
+        code, _out, err = self.run_cli("issue", "claim", "413")
+        self.assertEqual(code, 3, "引用的交回標記不算交回：kd61te 還按著")
+        self.assertEqual(json.loads(err)["claimed_by"], "kd61te")
+
+        quoted_claim = {"createdAt": _iso(-100), "body": "> <!-- agm:issue-claim {\"bot\":\"ghost\"} -->\n這個我來吧"}
+        self.issue(414, comments=[quoted_claim])
+        self.assertEqual(self.run_cli("issue", "claim", "414")[0], 0, "引用的認領標記不算認領")
+
+        inline = {"createdAt": _iso(-100), "body": "文字 <!-- agm:issue-claim {\"bot\":\"ghost\"} --> 還有文字"}
+        self.issue(415, comments=[inline])
+        self.assertEqual(self.run_cli("issue", "claim", "415")[0], 0, "夾在句子中間的也不算")
+
+    def test_a_label_only_release_cannot_erase_a_claim_that_lands_in_between(self):
+        """票上有 wip 但沒有任何認領留言（上次交回只拿掉了一半、或人手貼的）：release 的標記沒有 claim_id 時，
+        是『交回當下有效的任何一筆』——在它讀完留言、寫入之前搶進來的別人的新認領，就被它悄悄清掉了。"""
+        self.issue(425, labels=["wip"])
+        os.environ["GH_INJECT_COMPETITOR"] = "race-winner"
+        code, _out, err = self.run_cli("issue", "release", "425")
+        self.assertEqual(code, 0, err)
+        issue = json.loads((self.state / "issue-425.json").read_text())
+        claim = agm.current_claim(issue)
+        self.assertIsNotNone(claim, "別人剛搶到的認領被這次的 label-only release 清掉了")
+        self.assertEqual(claim["bot"], "race-winner")
+
+    def test_rate_limits_are_told_apart_from_a_plain_failure(self):
+        """限流不是『沒人認領』：呼叫端要等一等再試，不能當成可以直接派工。種類獨立、標 retryable。"""
+        self.issue(425)
+        for msg in ("gh: API rate limit exceeded for user ID 1", "HTTP 403: You have exceeded a secondary rate limit", "HTTP 429: Too Many Requests"):
+            os.environ["GH_FAIL"] = "issue view"
+            os.environ["GH_FAIL_MSG"] = msg
+            code, _out, err = self.run_cli("issue", "claim", "425")
+            e = json.loads(err)
+            self.assertEqual((code, e["error"], e.get("retryable")), (1, "gh_rate_limited", True), msg)
+            self.assertIn("不是", e["message"])
+        os.environ["GH_FAIL_MSG"] = "gh: could not resolve host"
+        self.assertEqual(json.loads(self.run_cli("issue", "claim", "425")[2])["error"], "gh_failed")
+        self.assertFalse([c for c in self.calls() if c[:2] == ["issue", "comment"]])
+
+    def test_a_failed_label_after_winning_leaves_a_claim_that_a_retry_completes(self):
+        self.issue(425)
+        os.environ["GH_FAIL"] = "issue edit"
+        code, _out, err = self.run_cli("issue", "claim", "425")
+        self.assertEqual((code, json.loads(err)["error"]), (1, "gh_failed"))
+        os.environ.pop("GH_FAIL")
+        got = json.loads(self.run_cli("issue", "claim", "425")[1])
+        self.assertTrue(got["already"], "重跑不再留第二則留言")
+        self.assertEqual(sum(c[:2] == ["issue", "comment"] for c in self.calls()), 1)
+        self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]][-1], ["--add-label", "wip"])
+
+    def test_a_failed_label_removal_after_release_is_cleaned_up_by_a_retry(self):
+        self.issue(425, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300)])
+        os.environ["GH_FAIL"] = "issue edit"
+        self.assertEqual(self.run_cli("issue", "release", "425")[0], 1)
+        os.environ.pop("GH_FAIL")
+        got = json.loads(self.run_cli("issue", "release", "425")[1])
+        self.assertTrue(got["released"])
+        self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]][-1], ["--remove-label", "wip"])
+
+    def test_hand_mangled_markers_never_crash_or_hand_over_the_claim(self):
+        """人手改壞的標記：欄位型別亂掉、claim_id 是物件、時間不是時間。不能丟例外，也不能因此讓別人搶走活的認領。"""
+        weird = [
+            {"createdAt": _iso(-600), "body": '<!-- agm:issue-claim {"bot": ["a"], "claim_id": {"x": 1}, "observed_updated_at": 5} -->'},
+            {"createdAt": _iso(-500), "body": '<!-- agm:issue-release {"claim_id": [1, 2]} -->'},
+            {"createdAt": "not a time", "body": '<!-- agm:issue-release {"bot":"kd61te"} -->'},
+            {"createdAt": _iso(-400), "body": '<!-- agm:issue-claim [1,2,3] -->'},
+        ]
+        self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=900)] + weird)
+        code, _out, err = self.run_cli("issue", "claim", "413")
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(err)["claimed_by"], "kd61te")
 
     def test_claim_never_touches_the_daemon_runtime(self):
         # AGM_RUNTIME_DIR 指向不存在的目錄：真的去讀 runtime.json 就會是 no_runtime／exit 2。
