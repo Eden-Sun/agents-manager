@@ -66,3 +66,27 @@ test('host_changed 帶 baseline：本機與遠端都更新；沒帶＝沒變；i
   dispatchFrameForTest({ type: 'host_changed', data: { name: 'm4p', connected: true, baseline: { ...base, issues: [] } } })
   assert.deepEqual(useStore.getState().hosts[0].baseline?.issues, [])
 })
+
+test('host_changed 帶同一份 baseline：不換 hosts 陣列也不換 baseline 物件（每 6 小時重量不該讓整個主機面板重畫）', () => {
+  reset()
+  useStore.setState({
+    hosts: [
+      {
+        name: 'm4p', ssh: 'm4p', ssh_port: 22, herdr_session: 's', remote_path: '', connected: true, error: null,
+        disconnected_since: null, attach_command: '', herdr: useStore.getState().localHerdr, tools: useStore.getState().localTools,
+        baseline: null, identity_status: {},
+      },
+    ],
+  })
+  const data = () => ({
+    name: 'm4p',
+    connected: true,
+    baseline: { checked_at: '2026-10-02T00:00:00Z', os: 'Linux', issues: [{ id: 'tool.rtk', severity: 'critical', message: '缺工具 rtk' }] },
+  })
+  dispatchFrameForTest({ type: 'host_changed', data: data() })
+  const first = useStore.getState().hosts
+  const firstBaseline = first[0].baseline
+  dispatchFrameForTest({ type: 'host_changed', data: data() })
+  assert.equal(useStore.getState().hosts, first, 'hosts 陣列不該換')
+  assert.equal(useStore.getState().hosts[0].baseline, firstBaseline, 'baseline 內容沒變就沿用舊物件')
+})
