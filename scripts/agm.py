@@ -46,6 +46,8 @@ DEFAULT_RUNTIME_DIR = "~/.config/agents-manager/supervisor/AGM"
 CLAIM_LABEL = "wip"
 CLAIM_MARK = "agm:issue-claim"
 RELEASE_MARK = "agm:issue-release"
+#: 只清 label、沒有認領可交回時的 claim_id：不會對上任何一筆認領（見 cmd_issue 的 release）。
+LABEL_ONLY_RELEASE = "label-only"
 # 認領多久沒有任何動靜就算放掉了（票上的裁示）。
 CLAIM_STALE_SECS = 24 * 3600
 GH_TIMEOUT = 60.0
@@ -1763,7 +1765,11 @@ def gh(argv: list[str], *, allow_fail: bool = False) -> str:
     except subprocess.TimeoutExpired:
         raise AgmError("gh_timeout", f"gh {' '.join(argv[:2])} 超過 {GH_TIMEOUT:g} 秒沒回", 1)
     if r.returncode != 0 and not allow_fail:
-        raise AgmError("gh_failed", f"gh {' '.join(argv[:2])} 失敗（rc={r.returncode}）：{r.stderr.strip()[:300]}", 1)
+        detail = r.stderr.strip()[:300]
+        if re.search(r"rate limit|HTTP 429|too many requests", r.stderr, re.I):
+            # 限流不是『沒人認領』也不是『沒有這張票』：呼叫端要等一等再試，不能當成可以直接派工。
+            raise AgmError("gh_rate_limited", f"gh {' '.join(argv[:2])} 被限流（rc={r.returncode}）：{detail}。這不是『沒人認領』，稍後重試，不要先派工", 1, retryable=True)
+        raise AgmError("gh_failed", f"gh {' '.join(argv[:2])} 失敗（rc={r.returncode}）：{detail}", 1)
     return r.stdout
 
 
@@ -1790,8 +1796,11 @@ def parse_iso(t: str | None) -> datetime.datetime | None:
 
 
 def mark_of(body: str) -> tuple[str, dict] | None:
-    """一則留言裡的認領／交回標記。`<!-- agm:issue-claim {...} -->`，JSON 壞掉就當沒有這個標記。"""
-    m = re.search(r"<!--\s*(agm:issue-(?:claim|release))\s+(\{.*?\})\s*-->", body or "", re.S)
+    """一則留言裡的認領／交回標記。`<!-- agm:issue-claim {...} -->`，JSON 壞掉就當沒有這個標記。
+
+    標記必須**自己一行**（行首只能有空白）：GitHub 的「引用回覆」會把原留言的原始 markdown 逐行加上 `> ` 貼進新留言，
+    句子中間夾著的也不是 agm 寫的。這兩種都不算——否則有人引用別顆 bot 的交回標記，就把那顆還按著的認領清掉了。"""
+    m = re.search(r"^[ \t]*<!--\s*(agm:issue-(?:claim|release))\s+(\{.*?\})\s*-->[ \t]*$", body or "", re.S | re.M)
     if not m:
         return None
     try:
@@ -1957,8 +1966,9 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
             out["already"] = True
             return out
         release_payload = {"bot": me, "at": now}
-        if claim and claim.get("claim_id"):
-            release_payload["claim_id"] = claim["claim_id"]
+        # 沒有 claim_id 的交回標記是『交回當下有效的任何一筆』（舊資料的相容）。這次沒有看到任何認領（只是清 label），
+        # 就不能寫成那個形狀：讀完留言到寫入之間，別人剛搶到的新認領會被它清掉。寫一個不會對上任何認領的標記。
+        release_payload["claim_id"] = claim["claim_id"] if claim and claim.get("claim_id") else LABEL_ONLY_RELEASE
         body = f"{me} 交回 #{number}。\n\n<!-- {RELEASE_MARK} {json.dumps(release_payload, ensure_ascii=False, sort_keys=True)} -->"
         gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
         if CLAIM_LABEL in labels:
