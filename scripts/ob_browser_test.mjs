@@ -25,8 +25,8 @@ function run(options = {}) {
     if (options.progress) writeFileSync(journal, JSON.stringify(options.progress));
     // rotate = 這個 project 已經有一串（`previous_url`），但這一題要開新的一串（`url` 空）。
     const args = {project_id: pid, project_label: 'AM', question: 'review this', request_key: key,
-      url: options.newProject || options.rotate ? null : url,
-      previous_url: options.rotate ? url : null,
+      url: 'url' in options ? options.url : options.newProject || options.rotate ? null : url,
+      previous_url: 'previous_url' in options ? options.previous_url : options.rotate ? url : null,
       journal, collect: !!options.collect, timeout_ms: 600000};
     const prelude = `
       const actions=[];
@@ -210,4 +210,19 @@ test('a journal naming a tab that no longer exists, or someone else\'s tab, stil
   assert.equal(gone.code, 0, gone.error);
   assert.deepEqual(gone.actions[0], ['new']);
   assert.equal(gone.actions.filter(a => a[0] === 'reuse').length, 0);
+});
+
+test('a hostile conversation URL — from the worker args or from the journal — is refused before any page is opened', () => {
+  const hostile = ['file:///etc/passwd', 'javascript:alert(1)', 'chrome://settings', 'https://chatgpt.com.evil.test/c/x',
+    'https://chatgpt.com@evil.test/c/x', 'https://chatgpt.com/c/x\n', 'https://chatgpt.com/c/x#frag'];
+  for (const bad of hostile) {
+    for (const where of ['url', 'previous_url', 'journal']) {
+      const r = where === 'journal'
+        ? run({progress: {phase: 'opened', project_id: pid, url: bad}})
+        : run({[where]: bad, ...(where === 'previous_url' ? {url: null} : {})});
+      assert.notEqual(r.code, 0, `${where}: ${bad}`);
+      assert.match(r.error, /invalid_conversation_url/, `${where}: ${bad}`);
+      assert.deepEqual(r.actions.filter(a => ['goto', 'new', 'reuse', 'click', 'insert'].includes(a[0])), [], `${where}: ${bad} opened or typed something`);
+    }
+  }
 });

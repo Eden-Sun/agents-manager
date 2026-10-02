@@ -54,7 +54,7 @@ python3 scripts/ob.py status --project-id <project-id>
 
 worker 意外退出留下的 `running`，在重放 `ask`、`ask --wait`、`status`、`collect` 或執行 `recover` 時，以 `worker.lock` 確認沒有存活 worker 後轉為 `unknown`；保留原單與瀏覽器 journal，絕不重新送出。存活 worker 持鎖時不改狀態。`recover` 回 `{worker_running,recovered[]}`，無 id 的 `status` 也列出本次恢復的 id。`collect` 等待原 request marker 對應的完整回答，不以頁面目前渲染的歷史訊息數判斷完成。
 
-問題先整理專案、現況、選項與取捨；ChatGPT 看不到 repo，只看得到提供的內容。不要送 token、密碼、ui-token 或客戶資料——入口（`Store.submit`）會擋明確長得像憑證的內容（目前的 ui-token、PEM 私鑰、GitHub／Anthropic／AWS／Slack 的 token 格式、`X-AM-Token: <值>`），回 `secret_in_question`、不入佇列，錯誤訊息只講種類不回顯值；拿掉再送。回報區分「OB 建議」與「本機已驗證」，附對話 URL 方便查證。OB 不替代使用者授權或 AGM 的 ownership／運維裁示。
+問題先整理專案、現況、選項與取捨；ChatGPT 看不到 repo，只看得到提供的內容。不要送 token、密碼、ui-token 或客戶資料——入口（`Store.submit`）會擋明確長得像憑證的內容（目前的 ui-token、PEM 私鑰、GitHub／Anthropic／AWS／Slack 的 token 格式、`X-AM-Token`／`X-AM-Bot-Token`／`X-AM-Service-Token: <值>`、`AM_BOT_TOKEN=`／`AM_HOOK_TOKEN=<值>`、`Bearer <值>`、JWT），回 `secret_in_question`、不入佇列，錯誤訊息只講種類不回顯值；拿掉再送。回報區分「OB 建議」與「本機已驗證」，附對話 URL 方便查證。OB 不替代使用者授權或 AGM 的 ownership／運維裁示。
 
 ## 安裝與帳號
 
@@ -86,3 +86,5 @@ python3 scripts/ob.py link --project-id <project-id> --url https://chatgpt.com/c
 沿用唯一 task space **「ChatGPT 決策顧問」**，不因簡稱 OB 改名。任何 bot、AGM、browser-gc 都不能關它或它的分頁、刪除 OB 資料庫／journal／舊登錄檔（SPEC §18.4）。已知對話的分頁消失會回原 URL；新專案不用他人的空白 ChatGPT 草稿頁。使用者接手、登入問題或網頁改版時停止，不另開 space 規避。
 
 `scripts/check.sh ob` 跑隔離的 Python 佇列／operator 測試與 Node 瀏覽器契約測試，不消耗模型／網頁額度。真實驗證另以明確指定專案的短問題測試，確認回傳 `done` 與相同對話 URL。
+
+**入口的資源與權限界線**（對抗式審查）：`ask --file` 只收 UTF-8 的一般檔案、至多 256 KiB（FIFO、`/dev/zero`、目錄、超大檔在讀之前就拒絕，不會卡死或吃光記憶體）；一題至多 10 萬字（`question_too_long`）；資料目錄（預設 `~/.config/agents-manager/ob`）一律收成 `0700`（既有的較寬也會被收緊），檔案另有 umask 077。送去瀏覽器的網址只有固定的 `https://chatgpt.com/` 與 `https://chatgpt.com/c/<id>`（Python `fullmatch` 與 JS 兩邊各驗一次，journal 裡瀏覽器那端寫的網址讀進來也驗），`file://`、`javascript:`、`chrome://`、帶 userinfo 的假網域、換行／fragment 一律拒絕；瀏覽器端的腳本是固定的（只有 JSON 參數進去），不執行呼叫端給的任何程式碼，也不讀 profile 或 cookie。同一時間只有一顆 worker、一把 `browser.lock`，ego 逾時 720 秒、操作員 900 秒，逾時殺整個行程群組。

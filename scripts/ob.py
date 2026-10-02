@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -12,6 +13,33 @@ from pathlib import Path
 from ob_store import OBError, Store, exclusive, project_id
 
 HERE = Path(__file__).resolve().parent
+# `ask --file` 最多讀這麼多：題目整段送去第三方網頁，不是拿來傳大檔。
+MAX_FILE_BYTES = 256 * 1024
+
+
+def read_question_file(path):
+    """只讀有大小上限的一般文字檔。先 `O_NONBLOCK` 開、再用同一個 fd `fstat`：FIFO（會永遠擋住）、`/dev/zero`、目錄、
+    超大檔都在讀之前就擋掉，不能靠 `Path.read_text()` 一路讀到記憶體爆或卡死。"""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as e:
+        raise OBError(f"file_unreadable：讀不到 {path}（{e.strerror or e}）")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OBError("file_not_regular：--file 只收一般檔案（不收目錄、FIFO、裝置）")
+        if st.st_size > MAX_FILE_BYTES:
+            raise OBError(f"file_too_large：{st.st_size} 位元組，上限 {MAX_FILE_BYTES}")
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            data = f.read(MAX_FILE_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_FILE_BYTES:
+        raise OBError(f"file_too_large：上限 {MAX_FILE_BYTES}")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise OBError("file_not_text：--file 必須是 UTF-8 文字")
 
 
 def daemon_project(pid):
@@ -152,7 +180,7 @@ def main(argv=None):
         if args.wait < 0 or args.wait > 3600:
             raise OBError("--wait 必須在 0..3600 秒")
         project = daemon_project(args.project_id)
-        question = Path(args.file).read_text() if args.file else args.text
+        question = read_question_file(args.file) if args.file else args.text
         result = store.submit(project["id"], project["label"], args.request_id, question, os.environ.get("AM_BOT_ID"))
         if result["status"] == "running" and recover(store, not args.no_start):
             result = store.get(result["id"])  # replay after a worker crash: unknown, not resent

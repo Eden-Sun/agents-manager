@@ -788,5 +788,104 @@ class LegacyLinkTests(unittest.TestCase):
         self.assertEqual(self.link("am")["url"], self.URL)
 
 
+class HardeningTests(unittest.TestCase):
+    """對抗式審查：送去網頁的網址與內容、`--file` 讀什麼、資料目錄權限、憑證擋得住哪些。不啟動任何瀏覽器。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data = Path(self.tmp.name) / "ob"
+        # 不碰真的 daemon，也不讀真實 HOME 的 ui-token。
+        for p in (patch.object(ob, "daemon_project", lambda pid: {"id": A, "label": "AM", "host": "local"}),
+                  patch.dict(os.environ, {"AM_UI_TOKEN_FILE": str(Path(self.tmp.name) / "no-ui-token")})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def ask_file(self, path, rid="f1"):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            ob.main(["--data-dir", str(self.data), "ask", "--project-id", A, "--request-id", rid, "--file", str(path), "--no-start"])
+        return json.loads(out.getvalue())
+
+    def test_hostile_conversation_urls_are_refused_everywhere_they_could_enter(self):
+        """bot 能影響的網址入口：link、journal（瀏覽器那邊寫的）、finish。不接受 file://、javascript:、chrome://、帶 userinfo／別的 host／換行。"""
+        hostile = ["file:///etc/passwd", "javascript:alert(1)", "chrome://settings", "data:text/html,<script>1</script>",
+                   "https://chatgpt.com.evil.test/c/x", "https://chatgpt.com@evil.test/c/x", "http://chatgpt.com/c/x",
+                   "https://chatgpt.com/c/x\n", "https://chatgpt.com/c/x#frag", "https://chatgpt.com/c/x/../../y", "https://chatgpt.com/c/",
+                   "https://CHATGPT.com/c/x", " https://chatgpt.com/c/x"]
+        s = Store(self.data)
+        self.addCleanup(s.db.close)
+        job = s.submit(A, "AM", "r", "q")
+        claimed = s.claim()
+        for url in hostile:
+            with self.subTest(url=url):
+                for call in (lambda: s.link(B, "b", url), lambda: s.remember_url(job["id"], url),
+                             lambda: s.finish(job["id"], "answer", url, claimed["claim_token"])):
+                    with self.assertRaises(OBError):
+                        call()
+        self.assertIsNone(s.project(B))
+        # 瀏覽器那邊寫的 journal 帶了壞網址：讀進來就拒絕，不記到 DB。
+        journal = operator.journal_for(s, job["id"])
+        journal.write_text(json.dumps({"phase": "sent", "url": "javascript:alert(1)", "project_id": A}))
+        with self.assertRaises(OBError):
+            operator.journal_state(s, job["id"])
+        self.assertIsNone(s.get(job["id"])["url"])
+
+    def test_ask_file_reads_only_a_bounded_regular_file(self):
+        base = Path(self.tmp.name)
+        small = base / "small.md"
+        small.write_text("請 review 這段設計")
+        self.assertEqual(self.ask_file(small)["status"], "pending")
+        big = base / "big.txt"
+        big.write_text("x" * (ob.MAX_FILE_BYTES + 1))
+        fifo = base / "fifo"
+        os.mkfifo(fifo)
+        binary = base / "blob.bin"
+        binary.write_bytes(b"\xff\xfe\x00\x01" * 10)
+        for label, path in (("too big", big), ("fifo (would block forever)", fifo), ("character device", Path("/dev/zero")),
+                            ("directory", base), ("not text", binary), ("missing", base / "nope")):
+            with self.subTest(label):
+                with self.assertRaises(OBError):
+                    self.ask_file(path, rid="bad-" + label.split()[0])
+        store = Store(self.data)
+        self.addCleanup(store.db.close)
+        self.assertEqual([r["request_id"] for r in store.list()], ["f1"], "被擋的檔案不能留下請求")
+
+    def test_a_question_has_a_size_cap(self):
+        s = Store(self.data)
+        self.addCleanup(s.db.close)
+        with self.assertRaisesRegex(OBError, "question_too_long"):
+            s.submit(A, "AM", "huge", "x" * (Store.MAX_QUESTION_CHARS + 1))
+        self.assertEqual(s.submit(A, "AM", "ok", "x" * Store.MAX_QUESTION_CHARS)["status"], "pending")
+
+    def test_the_data_directory_is_private_even_if_it_already_existed_wide_open(self):
+        self.data.mkdir(parents=True, mode=0o755)
+        os.chmod(self.data, 0o755)
+        s = Store(self.data)
+        self.addCleanup(s.db.close)
+        s.submit(A, "AM", "r", "q")
+        self.assertEqual(self.data.stat().st_mode & 0o077, 0, "題目與回答都在這個目錄裡")
+        for f in self.data.glob("ob.sqlite3*"):
+            self.assertEqual(f.stat().st_mode & 0o077, 0, f.name)
+
+    def test_more_credential_shapes_are_refused(self):
+        s = Store(self.data)
+        self.addCleanup(s.db.close)
+        shapes = {
+            "am_env_token": "export AM_BOT_TOKEN=8f3c9d2b7a1e4f60b5d8c2a94e7f1b3d",
+            "am_env_hook_token": "AM_HOOK_TOKEN: '8f3c9d2b7a1e4f60b5d8c2a94e7f1b3d'",
+            "am_service_header": "curl -H 'X-AM-Service-Token: 8f3c9d2b7a1e4f60b5d8c2a94e7f1b3d' http://127.0.0.1:7788/api/capabilities",
+            "bearer": "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789",
+            "jwt": "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        }
+        for kind, text in shapes.items():
+            with self.subTest(kind):
+                with self.assertRaisesRegex(OBError, "secret_in_question"):
+                    s.submit(A, "AM", "s-" + kind, text)
+        self.assertEqual(s.list(), [])
+        # 講這些詞本身不誤擋。
+        for ok in ("AM_BOT_TOKEN 是 pane 的環境變數", "X-AM-Service-Token header 的格式？", "Bearer token 怎麼放", "JWT 的 eyJ 開頭是 base64"):
+            s.submit(A, "AM", "ok-" + ok[:6], ok)
+
+
 if __name__ == '__main__':
     unittest.main()
