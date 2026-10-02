@@ -6,6 +6,8 @@
  * （實測：不拆的話 15 個無關測試失敗）。事件都在 `act` 裡發，React 的更新照真的流程跑完才回來。
  */
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
+import { currentTestScope, endCurrentTest, endedTestScope } from './testScope'
+import type { TestScope } from './testScope'
 import type { ReactElement } from 'react'
 
 const originalFetch = globalThis.fetch
@@ -182,7 +184,34 @@ const { createRoot } = await import('react-dom/client')
 
 const mounted: Array<{ root: ReturnType<typeof createRoot>; host: HTMLElement }> = []
 
-export const act = React.act
+const ORPHAN_ACT_WAIT_MS = 5000
+/** 還沒結束的 `act()`，記著是哪條測試發的（hook 裡發的是 `undefined`）。 */
+const inflightActs = new Map<Promise<unknown>, TestScope | undefined>()
+
+/**
+ * `React.act`，但不讓逾時測試留下來的 body 跟後面的測試重疊（#770，見 `testScope.ts`）：
+ * - 已經結束的測試再呼叫：直接丟錯（訊息寫出是哪一條），它就停在這裡，不再動共用的 DOM／store。
+ * - 已經結束的測試還有 `act()` 在半路：先等它收掉再開新的，React 的 act 深度才不會錯位。
+ */
+export function act<T>(callback: () => T | Promise<T>): Promise<Awaited<T>> {
+  const ended = endedTestScope()
+  if (ended) return Promise.reject(new Error(`測試「${ended.name}」已經結束（多半是逾時），它的 body 還在跑：不再進 act()，以免跟後面的測試重疊`))
+  const orphans = [...inflightActs].filter(([, scope]) => scope?.ended).map(([p]) => p)
+  const run = () => {
+    const p = Promise.resolve(React.act(callback) as PromiseLike<Awaited<T>>)
+    const settled = p.then(
+      () => {},
+      () => {},
+    )
+    inflightActs.set(settled, currentTestScope())
+    void settled.then(() => inflightActs.delete(settled))
+    return p
+  }
+  if (!orphans.length) return run()
+  // 等有上限：那個 act 永遠不收（卡在不會 resolve 的 promise）的話，寧可照跑、讓它紅在這裡，也不要整套測試掛住。
+  const cap = new Promise((resolve) => setTimeout(resolve, ORPHAN_ACT_WAIT_MS))
+  return Promise.race([Promise.allSettled(orphans), cap]).then(run)
+}
 
 /** 掛進 body，回容器。 */
 export async function mount(element: ReactElement): Promise<HTMLElement> {
@@ -198,6 +227,9 @@ export async function mount(element: ReactElement): Promise<HTMLElement> {
 
 /** 每個測試結束時呼叫：卸掉所有掛上去的樹、清空 body，下一個測試從乾淨的 DOM 開始。 */
 export async function unmountAll(): Promise<void> {
+  // 從 afterEach 叫的（不在任何測試 body 裡）：逾時的那條在這之後就進不了 act()（shim 的 afterEach 也會標，但順序不保證在這之前）。
+  // 測試 body 中途自己叫（例如模擬換一個分頁）不算結束。
+  if (!currentTestScope()) endCurrentTest()
   await settle() // 還在路上的 fetch→setState 先跑完，卸載之後才不會有更新打到已卸掉的樹
   for (const { root, host } of mounted.splice(0)) {
     await act(async () => root.unmount())

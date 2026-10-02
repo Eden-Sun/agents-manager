@@ -9,8 +9,15 @@
 // 這裡把 node:test 常見的成員都對上。用到別的 API（`t.mock`、`t.signal`…）要在這裡補，不然會是 undefined。
 // 上游 1.4 已經重寫了 node:test，升級 bun 後可以拿掉這個 preload。
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, mock, test as bunTest } from 'bun:test'
+import { endCurrentTest, runTestBody } from '../src/testing/testScope'
 
-const test = Object.assign((...args: Parameters<typeof bunTest>) => bunTest(...args), {
+// 每條測試的 body 包進自己的 scope（#770）：逾時後 bun 不等它、但它還在跑，`domHarness` 靠這個認出它、不讓它的
+// `act()` 跟後面的測試重疊。帶 `done` 參數的 callback 式測試不包（包了 arity 會變），web 目前也沒有。
+const wrapBody = (args: unknown[]): unknown[] =>
+  args.map((a) => (typeof a === 'function' && a.length === 0 ? () => runTestBody(String(args[0]), a as () => unknown) : a))
+afterEach(endCurrentTest)
+
+const test = Object.assign((...args: Parameters<typeof bunTest>) => bunTest(...(wrapBody(args) as Parameters<typeof bunTest>)), {
   describe,
   it,
   before: beforeAll,
