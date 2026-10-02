@@ -52,6 +52,7 @@ mod poller;
 mod transcript_origin;
 pub(crate) use transcript_origin::starter_origin_kind_at;
 mod screen;
+pub(crate) mod transcript_stage;
 #[cfg(test)]
 mod claude_linux_screens;
 mod limit_banner;

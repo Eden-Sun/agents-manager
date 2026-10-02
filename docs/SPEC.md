@@ -1562,6 +1562,11 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    結尾是模型回覆、使用者打的字（含 `[Request interrupted by user…]`）、空檔、讀不到的都不補。檔案照這顆 bot 實際帳號找：
    `<CLAUDE_CONFIG_DIR>/projects/<cwd 目錄名>/<session>.jsonl`（`identity_config_dir`，沒設就是 `~/.claude`）——換身分時讀複製進新帳號的那份，
    不讀舊帳號那份。只讀本機：遠端主機的 bot 讀不到尾巴，不補（同 `stuck_turns`）。
+   **換身分複製 transcript 的資料安全規則**（`lifecycle/transcript_stage.rs`；遠端是 `remote_stage_script`，promote 的 `stage_transcript` 共用同一組 helper，2026-10-02 對抗式審查）：
+   只有 claude 才複製（codex／grok 的對話檔不在 `projects/`，以前會被整份丟進 claude 的目錄）；來源要是 `…/projects/<cwd>/<id>.jsonl` 形狀的一般檔，符號連結與其他路徑
+   （`transcript_path` 是 hook payload 記的字串）一律不複製、回 `transcript_missing` 改開新對話；先寫同目錄的 `.` 開頭暫存檔（0600、fsync）再 `rename`，複製中途失敗或被殺不會在最終路徑留半份檔；
+   目標已有同名檔時：一樣不動、**比來源長（來源是它的前綴）不蓋**、是來源的前綴才蓋、分岔就把目標改名成 `<name>.jsonl.replaced-<時間>` 留在旁邊再放來源；新建目錄 0700、檔 0600
+   （不管來源權限）；附屬目錄只收一般檔與目錄。promote 另外：附屬目錄複製到一半失敗不留半份目錄。`transcript-transfer` 同理拒絕符號連結、不帶走附屬目錄裡的連結，暫存檔先清掉再 `O_EXCL` 新建。
    等的期間變成 `working`／`blocked`、有人排了派工或送了回合、接回是 `mismatch`／`unverified`／沒有 hook 可驗、使用者中斷，這一輪就取消，
    AGM 或使用者的派工因此可以先佔。排進去之後才發現 run 換掉或接回不是 `verified` 的，flush 把它撤掉並在聊天室說明。
    同一個 run 只補一次（`client_request_id = resume-nudge:<run_id>`）；等待記在行程記憶體裡，daemon 在這段時間重啟就不補。

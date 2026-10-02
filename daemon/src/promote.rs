@@ -135,8 +135,14 @@ impl Staged {
 /// 複製到 `dest_dir/<sid>.jsonl`：來源與目標是同一個檔就什麼都不做；目標已存在且內容相同視為上次留下的
 /// （冪等）；內容不同就拒絕，不覆寫。
 fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result<Staged, LcError> {
+    use lifecycle::transcript_stage as ts;
     let dest = dest_dir.join(format!("{session_id}.jsonl"));
     let mut staged = Staged { created: vec![], dest: dest.clone() };
+    let bad = |e: std::io::Error| refuse("transcript_copy_failed", json!({"message": e.to_string()}));
+    // 來源是 DB／sessions 檔記的路徑：要是 `projects/<cwd>/<id>.jsonl` 形狀的一般檔，符號連結不跟（不能拿它複製任意檔案成對話）。
+    if !ts::is_claude_transcript(src) {
+        return Err(refuse("transcript_copy_failed", json!({"message": "來源不是 projects/<cwd>/<id>.jsonl 的一般檔"})));
+    }
     if let (Ok(a), Ok(b)) = (std::fs::canonicalize(src), std::fs::canonicalize(&dest)) {
         if a == b {
             return Ok(staged);
@@ -149,10 +155,9 @@ fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result
         }
         return Err(refuse("transcript_exists", json!({"path": dest.to_string_lossy()})));
     }
-    let bad = |e: std::io::Error| refuse("transcript_copy_failed", json!({"message": e.to_string()}));
-    std::fs::create_dir_all(dest_dir).map_err(bad)?;
+    ts::private_create_dir_all(dest_dir).map_err(bad)?;
     let tmp = dest_dir.join(format!(".promote-{}.tmp", db::ulid()));
-    if let Err(e) = std::fs::copy(src, &tmp) {
+    if let Err(e) = ts::write_private_copy(src, &tmp) {
         let _ = std::fs::remove_file(&tmp);
         return Err(bad(e));
     }
@@ -161,11 +166,16 @@ fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result
         return Err(bad(e));
     }
     staged.created.push(dest);
-    // 同名附屬目錄（subagent 對話等）：沒有就跳過，複製失敗不影響主對話。
+    // 同名附屬目錄（subagent 對話等）：沒有就跳過，複製失敗不影響主對話，但不留下半份目錄。
     if let (Some(parent), Some(stem)) = (src.parent(), src.file_stem()) {
         let (cs, cd) = (parent.join(stem), dest_dir.join(stem));
-        if cs.is_dir() && !cd.exists() && lifecycle::copy_dir_recursive(&cs, &cd).is_ok() {
-            staged.created.push(cd);
+        if cs.is_dir() && !cd.exists() {
+            match ts::copy_dir_private(&cs, &cd) {
+                Ok(()) => staged.created.push(cd),
+                Err(_) => {
+                    let _ = std::fs::remove_dir_all(&cd);
+                }
+            }
         }
     }
     Ok(staged)
@@ -642,6 +652,54 @@ mod tests {
         assert_eq!(std::fs::read_to_string(r.dest()).unwrap(), "別人的對話\n");
         assert_eq!(child_state(&r).await, (false, Some("running".into())));
         assert!(cfg_bot_names(&r).await.is_empty());
+    }
+
+    /// 對抗式審查（資料安全）：transcript 是整段對話內容。複製出去的檔 0600、這次新建的目錄 0700，不管來源是 0644。
+    #[tokio::test]
+    async fn the_promoted_copy_and_its_new_directories_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let r = rig(true).await;
+        std::fs::set_permissions(r.src(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let companion = r.src().with_extension("");
+        std::fs::create_dir_all(companion.join("sub")).unwrap();
+        std::fs::write(companion.join("sub/n.txt"), "x").unwrap();
+        std::fs::set_permissions(companion.join("sub/n.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        promote(&r, PromoteReq { name: Some("kid-priv".into()), ..Default::default() }).await.unwrap();
+        let mode = |p: PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(r.dest()), 0o600);
+        assert_eq!(mode(r.dest().parent().unwrap().to_path_buf()), 0o700, "新建的 cwd 目錄");
+        let cd = r.dest().with_extension("");
+        assert_eq!(mode(cd.join("sub/n.txt")), 0o600);
+        assert_eq!(mode(cd.join("sub")), 0o700);
+    }
+
+    /// 來源 transcript 是符號連結（指到別的檔）：不能被複製成新 bot 的對話檔。
+    #[tokio::test]
+    async fn a_symlinked_source_transcript_is_refused() {
+        let r = rig(true).await;
+        let secret = r.e.dir.join("secret.txt");
+        std::fs::write(&secret, "TOKEN\n").unwrap();
+        std::fs::remove_file(r.src()).unwrap();
+        std::os::unix::fs::symlink(&secret, r.src()).unwrap();
+        assert_eq!(reason(promote(&r, PromoteReq::default()).await.unwrap_err()), "transcript_copy_failed");
+        assert!(!r.dest().exists(), "符號連結被跟著複製");
+        assert_eq!(child_state(&r).await, (false, Some("running".into())), "整個不動");
+    }
+
+    /// 附屬目錄複製到一半失敗：不留下半份目錄（它不在 `created` 裡，收回時也不會被清）。
+    #[tokio::test]
+    async fn a_half_copied_companion_directory_is_not_left_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let r = rig(true).await;
+        let companion = r.src().with_extension("");
+        std::fs::create_dir_all(&companion).unwrap();
+        for n in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(companion.join(n), "x").unwrap();
+        }
+        std::fs::set_permissions(companion.join("b.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _ = promote(&r, PromoteReq { name: Some("kid-half".into()), ..Default::default() }).await;
+        std::fs::set_permissions(companion.join("b.txt"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!r.dest().with_extension("").exists(), "半份附屬目錄被留下來了");
     }
 
     #[tokio::test]
