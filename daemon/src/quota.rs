@@ -802,6 +802,32 @@ fn already_past(resets_at: Option<&str>) -> bool {
     }
 }
 
+/// 讀數出口的最後一道檢查（對抗式審查）：入口（statusLine、app-server、`/usage` 文字、grok 長條）各自 parse 出裸 `f64`，
+/// 只有少數幾條有夾值。百分比一律夾進 0–100；不是有限數（`NaN`／`inf`）整格丟掉——留著的話
+/// `(100 - NaN).max(0)` 是 0，那個身分會被判成見底。丟掉之後 [`set_inner`] 會沿用上一份的同一桶，不是填 0。
+fn sanitize_percentages(q: &mut Quota, key: &str) {
+    for (bucket, w) in [("five_hour", &mut q.five_hour), ("seven_day", &mut q.seven_day), ("fable", &mut q.fable)] {
+        let Some(win) = w.as_mut() else { continue };
+        if !win.used_pct.is_finite() {
+            tracing::warn!(key, bucket, used_pct = win.used_pct, "額度讀數的百分比不是有限數，丟掉這一桶");
+            *w = None;
+        } else if !(0.0..=100.0).contains(&win.used_pct) {
+            tracing::warn!(key, bucket, used_pct = win.used_pct, "額度讀數的百分比超出 0–100，夾進範圍");
+            win.used_pct = win.used_pct.clamp(0.0, 100.0);
+        }
+    }
+}
+
+/// 執行中沒有人更新超過這麼久，就當成陳舊的讀數。最慢的健康節奏是 claude `/usage` 的 10 分鐘（`USAGE_REFRESH`），
+/// codex 5 分鐘、grok 30 秒；留三倍，容得下兩次探測失敗。
+pub const STALE_AFTER: chrono::Duration = chrono::Duration::minutes(30);
+
+/// 這筆讀數該不該標「陳舊」：開機從快取回填、還沒被真探測換掉的（`flagged`），或執行中太久沒人更新。
+/// 解不開的 `updated_at` 當成陳舊（同這個檔案其他地方「解不開＝過期」的方向）。
+pub fn reading_is_stale(q: &Quota, flagged: bool, now: chrono::DateTime<chrono::Utc>) -> bool {
+    flagged || parse_utc(&q.updated_at).map_or(true, |at| now - at > STALE_AFTER)
+}
+
 pub async fn set(app: &Arc<App>, host: &str, base: &str, q: Quota) {
     set_inner(app, host, base, q, None).await;
 }
@@ -810,6 +836,7 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, q: Quota) {
 async fn set_inner(app: &Arc<App>, host: &str, base: &str, mut q: Quota, fence: Option<&crate::hosts::HostFence>) -> bool {
     q.host = host.to_string();
     let key = quota_key(host, base);
+    sanitize_percentages(&mut q, &key);
     let stale = if base.contains(':') { Vec::new() } else { stale_split_keys(app, host, base).await };
     // 撞限校正只看**這份讀數自己帶來的**窗；下面沿用的舊窗不是新證據。
     let brings_its_own_hit = q.limit_hit.is_some();
@@ -1248,18 +1275,20 @@ pub async fn snapshot(app: &Arc<App>) -> Value {
     let hosts = app.hosts.names().await;
     let q = app.quotas.lock().await.clone();
     let stale = app.quota_stale.lock().await.clone();
+    let now = chrono::Utc::now();
+    let is_stale = |key: &str, x: &Quota| reading_is_stale(x, stale.contains(key), now);
     let mut m = serde_json::Map::new();
     for h in &hosts {
         for k in crate::config::KINDS {
             let key = quota_key(h, k);
-            m.insert(key.clone(), q.get(&key).map(|x| quota_value(x, stale.contains(&key))).unwrap_or(Value::Null));
+            m.insert(key.clone(), q.get(&key).map(|x| quota_value(x, is_stale(&key, x))).unwrap_or(Value::Null));
         }
     }
     for (k, v) in q.iter() {
         // Otherwise read as a local key downstream.
         let orphan = k.contains('/') && host_of_key(k, &hosts).0 == LOCAL_HOST;
         if !orphan {
-            m.insert(k.clone(), quota_value(v, stale.contains(k)));
+            m.insert(k.clone(), quota_value(v, is_stale(k, v)));
         }
     }
     json!({"kinds": Value::Object(m)})
@@ -3144,5 +3173,54 @@ mod tests {
         let fresh = app.hosts.fence("build1").await.unwrap();
         set_fenced(&app, "build1", "codex", reading(), &fresh).await.unwrap();
         assert!(app.quotas.lock().await.get("build1/codex").is_some());
+    }
+
+    fn plain(five: Option<Window>, seven: Option<Window>, fable: Option<Window>) -> Quota {
+        Quota {
+            five_hour: five, seven_day: seven, fable, reset_credits: None, limit_hit: None, plan: None,
+            updated_at: crate::db::now(), source: "test".into(), account: None, host: LOCAL_HOST.into(),
+        }
+    }
+
+    /// 對抗式審查：沒有任何一個入口驗過百分比（claude statusLine、codex app-server、`/usage` 文字、grok 的長條都是裸 `f64`）。
+    /// 超過 100、負數都照單全收，`NaN`／`inf` 更糟——`(100 - NaN).max(0)` 是 0，身分會被判成「見底」。
+    /// 唯一的共同出口是 `set`：在那裡夾進 0–100，不是有限數的整格丟掉（沿用上一份）。
+    #[tokio::test]
+    async fn a_percentage_outside_zero_to_one_hundred_never_reaches_the_cache_as_is() {
+        let app = crate::testing::env().await.app.clone();
+        let w = |used: f64| Some(Window { observed_at: None, used_pct: used, resets_at: None });
+        set(&app, LOCAL_HOST, "claude", plain(w(30.0), w(40.0), w(50.0))).await;
+        set(&app, LOCAL_HOST, "claude", plain(w(140.0), w(-20.0), w(f64::NAN))).await;
+        let got = app.quotas.lock().await.get("claude").cloned().unwrap();
+        assert_eq!(got.five_hour.as_ref().unwrap().used_pct, 100.0, "超過 100 夾到 100");
+        assert_eq!(got.seven_day.as_ref().unwrap().used_pct, 0.0, "負數夾到 0");
+        assert_eq!(got.fable.as_ref().unwrap().used_pct, 50.0, "NaN 不是讀數：丟掉，沿用上一份的 Fable，不是判成見底");
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            set(&app, LOCAL_HOST, "codex", plain(w(bad), w(25.0), None)).await;
+            let c = app.quotas.lock().await.get("codex").cloned().unwrap();
+            assert!(c.five_hour.is_none(), "{bad} 的 5h 整格丟掉");
+            assert_eq!(c.seven_day.as_ref().unwrap().used_pct, 25.0);
+            assert!(!c.seven_day.as_ref().unwrap().critical());
+        }
+    }
+
+    /// 對抗式審查：`quota_stale` 只有開機從快取回填時才會標，執行中探測壞掉（`/usage` 格式變了、帳號登出、pane 卡住）
+    /// 舊數字會一直以「新鮮」的樣子留在畫面上。快照要看年齡：沒人更新超過半小時（最慢的健康節奏是 claude `/usage` 的 10 分鐘）就標 stale，
+    /// 網頁既有的「上次讀數 N 前」就會出現。
+    #[tokio::test]
+    async fn a_reading_nobody_refreshed_for_half_an_hour_is_reported_stale_in_the_snapshot() {
+        let app = crate::testing::env().await.app.clone();
+        let w = Some(Window { observed_at: None, used_pct: 10.0, resets_at: None });
+        let mut old = plain(w.clone(), w.clone(), None);
+        old.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::hours(2));
+        set(&app, LOCAL_HOST, "claude", old).await;
+        set(&app, LOCAL_HOST, "claude:cc1", plain(w.clone(), w.clone(), None)).await;
+        let mut edge = plain(w.clone(), w.clone(), None);
+        edge.updated_at = crate::db::iso_at(chrono::Utc::now() - chrono::Duration::minutes(29));
+        set(&app, LOCAL_HOST, "claude:cc2", edge).await;
+        let snap = snapshot(&app).await;
+        assert_eq!(snap["kinds"]["claude"]["stale"], json!(true), "兩小時沒更新");
+        assert_eq!(snap["kinds"]["claude:cc1"]["stale"], json!(false), "剛寫的");
+        assert_eq!(snap["kinds"]["claude:cc2"]["stale"], json!(false), "29 分鐘還在健康節奏的容忍內");
     }
 }

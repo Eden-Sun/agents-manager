@@ -1614,7 +1614,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
   statusLine 讀數、撞限、成功回合清撞限、派送與排隊的閘門都記在／看 `runs.runtime_identity`；沒有 run、或 run 沒記（收編的 pane、升級前的舊列）
   才用 `bots.identity`。讀不到 run 時閘門照擋（不拿設定的身分猜）。
 - `used_pct` 0–100；`resets_at` RFC3339 或 `null`；`five_hour` / `seven_day` 任一可為 `null`。
-- `updated_at` 是這筆讀數的時間；`stale = true` 代表 daemon 剛重啟、先從 DB 的 `quota_cache` 回填上一輪讀數，新的探測尚未回來。這筆仍可畫量表，但 UI 要以淡色／年齡提示它不是最新值；新探測透過 `quota_updated` 回來後會變成 `stale = false`。讀數的重置時間已過時，開機回填沿用既有規則清掉過期的 `limit_hit`，不會拿舊的「用完了」擋派送。
+- `updated_at` 是這筆讀數的時間；`stale = true` 代表 daemon 剛重啟、先從 DB 的 `quota_cache` 回填上一輪讀數，新的探測尚未回來。這筆仍可畫量表，但 UI 要以淡色／年齡提示它不是最新值；新探測透過 `quota_updated` 回來後會變成 `stale = false`。執行中太久沒人更新（超過 30 分鐘，最慢的健康節奏是 claude `/usage` 的 10 分鐘）的讀數，`GET /api/quota` 也回 `stale = true`（探測壞掉時舊數字不會假裝新鮮）；`quota_updated` 事件帶的是剛寫入的讀數，一律 `stale = false`。讀數的重置時間已過時，開機回填沿用既有規則清掉過期的 `limit_hit`，不會拿舊的「用完了」擋派送。
 - `fable`：Claude Max 方案的 Fable 週額度（`Current week (Fable)`），形狀同 `seven_day`；沒有這個桶一律 `null`，**UI 不畫也不佔位**。
 - `reset_credits`（只有 codex）：`account/rateLimits/read` 的 `rateLimitResetCredits`——`available` = 可用張數，`title`/`expires_at` 取第一張 available 的。daemon 只讀不用。
 - `limit_hit`：CLI 印的上限橫幅 `{"message","until": "…"|null,"at","bucket": "five_hour"|"seven_day"|"fable"|null}`。速率視窗可以顯示 0% 已用但 credits 用完，這一格是唯一說「現在收不了工作」的地方，所以**黏著**：
