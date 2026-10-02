@@ -871,7 +871,7 @@ pub fn valid_bot_name(name: &str) -> bool {
         && !name.starts_with(' ')
         && !name.ends_with(' ')
         && !name.contains("  ")
-        && !name.chars().any(|c| (c.is_whitespace() && c != ' ') || matches!(c, '@' | ',' | ':' | ';'))
+        && !name.chars().any(|c| (c.is_whitespace() && c != ' ') || c.is_control() || crate::bot_input::is_invisible_format_char(c) || matches!(c, '@' | ',' | ':' | ';'))
 }
 
 /// Into herdr's `[a-z][a-z0-9_-]*` alphabet; empty when nothing usable is left.
@@ -1489,6 +1489,10 @@ mod agent_name_tests {
         assert!(!valid_bot_name("two  spaces"));
         assert!(!valid_bot_name("tab\there"));
         assert!(!valid_bot_name("new\nline"));
+        assert!(!valid_bot_name("esc\u{1b}[31m"), "終端機控制字元會出現在 pane 標題與畫面上");
+        assert!(!valid_bot_name("bell\u{7}"));
+        assert!(!valid_bot_name("rtl\u{202e}gnp"), "方向控制字元");
+        assert!(!valid_bot_name("zero\u{200b}width"));
         assert!(!valid_bot_name(" "));
         assert!(!valid_bot_name("a@b"));
         assert!(!valid_bot_name(&"x".repeat(33)));

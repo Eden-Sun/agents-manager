@@ -1110,7 +1110,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 強制重建 ssh master 與訂閱，回應同 `POST /api/hosts`。`local` 也可（重新 ping）。找不到 404。
 
 ### 遠端 project
-`POST /api/projects` 帶 `host`（未設定的 host → 404）。遠端 `path` 不在本機 canonicalize，daemon 經 ssh 確認目錄存在並取遠端 canonical path，失敗 400。
+`POST /api/projects` 本機 `path` 只收絕對路徑（或 `~`、`~/…`；相對路徑會解成 daemon 自己的工作目錄，一律 400），解開 symlink 與 `..` 之後必須是目錄；`label`（`POST`／`PATCH`）不得含控制字元或看不見的字元、最長 64 字。`POST /api/projects` 帶 `host`（未設定的 host → 404）。遠端 `path` 不在本機 canonicalize，daemon 經 ssh 確認目錄存在並取遠端 canonical path，失敗 400。
 目錄瀏覽 `GET /api/fs/dirs?host=` 只走 ssh 不經 herdr：host 斷線時仍可能 200，只有 ssh 失敗才 502；host 不存在 404。
 
 ### WebSocket
@@ -1237,6 +1237,12 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 ### bot 建立 / 修改
 `POST /api/projects/{id}/bots`、`PATCH /api/bots/{id}` 接受 `identity` 與 `env`：`identity` 省略 = 不變（PATCH）／`null`（POST），傳 `null` 或 `""` 解除；
 `env` 傳整個物件會**取代**。不存在的 identity 404；kind 不符 400。
+
+輸入檢查（POST／PATCH 一致，不合格一律 400、config.toml 與 DB 都不動）：
+- `name`：1–32 字，不可含 `@ , : ;`、控制字元（含 ESC、BEL）與看不見／改變方向的字元（零寬、U+202A–202E、U+2066–2069、BOM）；空白只能單一個、夾在中間。**只差大小寫的兩個名字可以並存**（群組 `@` 的處理見 §13，#657）。
+- `model`：會原樣成為 `--model <值>`／`-m <值>`，所以不得以 `-` 開頭、不得含空白／控制字元、最長 128 bytes；空字串＝清除。
+- `env`：key 要是合法的環境變數名（`[A-Za-z_][A-Za-z0-9_]*`），`AM_*` 一律保留給 daemon（`AM_BOT_TOKEN`、`AM_RUN_ID`、`AM_PORT`…）；value 不得含控制字元、最長 8 KiB；最多 128 個。`CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`PATH` 等仍可設。
+- `args`：使用者明講要附加的 CLI 參數，原樣附加；只擋 NUL。
 
 ### `POST /api/identities` / `DELETE /api/identities/{name}?host=`
 - POST `{name, kind, env, args, host?}` → `200 {"name"}`；名稱或 kind 不合法 400；未知的 host `409 {"reason":"unknown host","host"}`；
