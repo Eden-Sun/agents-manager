@@ -529,6 +529,45 @@ async fn verified_commit(app: &Arc<App>, m: &store::Mission, b: &EventIn) -> Res
     }
 }
 
+/// `verified` 與 `deliver` 是把東西推上主幹的兩道關卡，不是任何一顆 bot 都能按的：被證明身分的**一般 bot**（沒有 AGM 角色）
+/// 不能記 `verified` 也不能 `deliver`——否則執行者自己驗自己、自己交付，把審查整個繞過去。放行的是使用者（沒宣告 bot 身分）、
+/// AGM 角色（巡檢／協調者），以及——只對 `verified`——這個任務的**驗證者**（而且同一顆不能同時是這個任務的執行者）。
+async fn require_gatekeeper(app: &Arc<App>, headers: &HeaderMap, mission_id: &str, verifier_may: bool) -> Result<(), LcError> {
+    let Some(bot) = crate::supervisor::bot_requests::verified_bot_id(app, headers).await? else { return Ok(()) };
+    if crate::supervisor::bot_requests::actor_role(app, headers).await?.is_some() {
+        return Ok(());
+    }
+    if verifier_may {
+        let assignments = crate::supervisor::store::mission_assignments(&app.db, mission_id).await.map_err(up)?;
+        let role_of = |a: &crate::supervisor::store::Assignment| a.mission_role.clone().unwrap_or_else(|| "executor".into());
+        let mine = |role: &str| assignments.iter().any(|a| a.target_bot_id == bot && role_of(a) == role);
+        if mine("verifier") && !mine("executor") {
+            return Ok(());
+        }
+    }
+    Err(LcError::Forbidden(json!({
+        "error": "forbidden",
+        "reason": "mission_gatekeeper_required",
+        "message": if verifier_may {
+            "verified 只給使用者、AGM 角色，以及這個任務的驗證者（不能同時是執行者）"
+        } else {
+            "deliver 只給使用者與 AGM 角色；執行者不能自己交付"
+        },
+    })))
+}
+
+/// 同一個任務同一時間只跑一個 `deliver`：兩個並發的請求都在對方記下 `delivery_attempt`、推上去**之前**讀了事件，
+/// 後到的那個在 push 成功之後的 fetch 看見 HEAD 已在 base 裡、卻不知道有人試過，會報 `nothing_to_deliver` 並把任務停成交付失敗，
+/// 而那個 commit 其實剛推成功。
+fn deliver_lock(mission_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
+    LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(mission_id.to_string()).or_default().clone()
+}
+
+/// 事件的文字與 payload 不是無限的：一則 `report`／`note`／`verified` 會永遠留在任務時間軸（還會被推給 AGM 讀）。
+const MAX_EVENT_TEXT_BYTES: usize = 16 * 1024;
+const MAX_EVENT_PAYLOAD_BYTES: usize = 64 * 1024;
+
 /// AGM／bot 往群組時間軸回報（`report`、`note`），或記下驗證通過（`verified`，交付前必須有，而且要帶 commit）。
 pub async fn post_event(
     State(app): State<Arc<App>>,
@@ -540,9 +579,18 @@ pub async fn post_event(
     if b.text.trim().is_empty() {
         return Err(LcError::Bad("text is empty".into()));
     }
+    if b.text.len() > MAX_EVENT_TEXT_BYTES {
+        return Err(LcError::Bad(format!("text is too long (max {MAX_EVENT_TEXT_BYTES} bytes)")));
+    }
+    if b.payload.as_ref().is_some_and(|p| p.to_string().len() > MAX_EVENT_PAYLOAD_BYTES) {
+        return Err(LcError::Bad(format!("payload is too large (max {MAX_EVENT_PAYLOAD_BYTES} bytes)")));
+    }
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
+    if b.kind == "verified" {
+        require_gatekeeper(&app, &headers, &id, true).await?;
+    }
     let mut payload = b.payload.clone().unwrap_or_else(|| json!({}));
     let mut generation = None;
     if b.kind == "verified" {
@@ -1324,11 +1372,15 @@ pub async fn post_deliver(
     headers: HeaderMap,
     Json(b): Json<DeliverIn>,
 ) -> Result<Json<Value>, LcError> {
+    // 先鎖再讀：之後讀到的事件與任務狀態都是前一個 deliver 做完之後的樣子。
+    let lock = deliver_lock(&id);
+    let _serial = lock.lock().await;
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
     // 任務停著（使用者按了暫停、等人回答、輪數用完…）就不交付。只有先前那次交付失敗停下的可以重試（review3 c1 M10）。
     ensure_not_paused(&id, m.paused_reason.as_deref())?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
+    require_gatekeeper(&app, &headers, &id, false).await?;
     let (assignments, events) = super::workflow::inputs(&app, &id).await?;
     let f = flow::derive(&assignments, &events);
     let Some((verified, stale)) = f.latest_verified.clone() else {
@@ -1391,14 +1443,14 @@ pub async fn post_deliver(
     // 以前一定 `fetch_failed`。
     let base = deliver::base_branch(&dir, "origin").await;
     let result = if m.delivery_mode == "push_main" {
-        deliver::push_main(&dir, "origin", &base, attempted_before)
+        deliver::push_main_at(&dir, "origin", &base, attempted_before, Some(&head))
             .await
             .map(|p| json!({"mode": "push_main", "sha": p.sha, "base": base, "already_in_base": p.already_in_base}))
     } else {
         let branch = format!("mission/{}", m.id.to_lowercase());
         let title = b.title.clone().unwrap_or_else(|| m.text.chars().take(72).collect());
         let body = b.body.clone().unwrap_or_else(|| format!("群組任務 {}\n\n{}", m.id, m.text));
-        deliver::open_pr(&dir, "origin", &base, &branch, &title, &body)
+        deliver::open_pr_at(&dir, "origin", &base, &branch, &title, &body, Some(&head))
             .await
             .map(|o| json!({"mode": "pr", "branch": branch, "base": base, "url": o.url, "sha": o.sha, "existing_pr": o.existing}))
     };
@@ -1422,6 +1474,8 @@ pub async fn post_deliver(
             emit(&app, &load(&app, &id).await?).await;
             Ok(Json(out))
         }
+        // 檢查與推之間 HEAD 又被動過：跟 `head_not_verified` 一樣是「流程漏了一步」，不是交付失敗——不停任務，回去重驗。
+        Err(f) if f.code == "head_moved" => Err(LcError::conflict(f.code, json!({"mission_id": id, "verified_sha": verified_sha, "detail": f.detail}))),
         Err(f) => {
             let reason = if m.delivery_mode == "push_main" { "push_main_failed" } else { "pr_failed" };
             let text = format!("交付失敗（{}），等使用者決定：{}", f.code, f.detail);
@@ -2794,6 +2848,90 @@ mod tests {
         let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         assert_eq!(out["sha"], json!(b));
         assert_eq!(git(&origin, &["rev-parse", "main"]), b);
+    }
+
+    /// 推上主幹的兩道關卡（`verified`、`deliver`）：被證明身分的一般 bot（例如執行者）不能自己驗證、自己交付；
+    /// 使用者與 AGM 角色可以；這個任務的驗證者可以記 `verified`（但同一顆如果也是執行者就不行）。
+    #[tokio::test]
+    async fn a_plain_bot_cannot_verify_or_deliver_its_own_work() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("gatekeeper", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        commit_file(&wt, "a.txt");
+        let (exec_bot, exec_h) = bot_with_token(&app, &env.project_id, false).await;
+        let (verifier_bot, verifier_h) = bot_with_token(&app, &env.project_id, false).await;
+        let (_agm_bot, agm_h) = bot_with_token(&app, &env.project_id, true).await;
+        let link = |bot: &str, crid: &str, role: &str| {
+            let (app, id, bot, crid, role) = (app.clone(), id.clone(), bot.to_string(), crid.to_string(), role.to_string());
+            async move {
+                let a = crate::supervisor::store::insert_assignment(&app.db, None, &bot, &crid, "做 X", &[], None, true).await.unwrap();
+                crate::supervisor::store::set_mission_link(&app.db, &a.id, &id, &role).await.unwrap();
+            }
+        };
+        link(&exec_bot, "gk-exec", "executor").await;
+        link(&verifier_bot, "gk-verify", "verifier").await;
+
+        let forbidden = |r: Result<Json<Value>, LcError>| match r {
+            Err(LcError::Forbidden(v)) => assert_eq!(v["reason"], "mission_gatekeeper_required", "{v}"),
+            other => panic!("expected 403, got {other:?}"),
+        };
+        // 執行者：不能記 verified、不能 deliver。
+        forbidden(post_event(State(app.clone()), Path(id.clone()), exec_h.clone(), Json(verified(Some(&wt), None))).await);
+        forbidden(post_deliver(State(app.clone()), Path(id.clone()), exec_h.clone(), Json(deliver_from(&wt))).await);
+        // 沒有任何交辦的一般 bot 也不行。
+        let (_stranger, stranger_h) = bot_with_token(&app, &env.project_id, false).await;
+        forbidden(post_event(State(app.clone()), Path(id.clone()), stranger_h, Json(verified(Some(&wt), None))).await);
+        // 驗證者：可以記 verified，但不能 deliver。
+        post_event(State(app.clone()), Path(id.clone()), verifier_h.clone(), Json(verified(Some(&wt), None))).await.expect("驗證者記 verified");
+        forbidden(post_deliver(State(app.clone()), Path(id.clone()), verifier_h, Json(deliver_from(&wt))).await);
+        assert_eq!(git(&origin, &["rev-parse", "main"]), git(&env.repo, &["rev-parse", "main"]), "被擋的請求什麼都沒推");
+        // 同一顆既是驗證者又是執行者：不算驗證者。
+        link(&exec_bot, "gk-both", "verifier").await;
+        forbidden(post_event(State(app.clone()), Path(id.clone()), exec_h, Json(verified(Some(&wt), None))).await);
+        // AGM 角色與使用者：照常交付。
+        let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), agm_h, Json(deliver_from(&wt))).await.expect("AGM 可以 deliver");
+        assert!(out["sha"].is_string());
+        // 使用者（沒宣告 bot 身分）：已交付過，回原本那一筆。
+        let Json(again) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
+        assert_eq!(again["replayed"], true);
+    }
+
+    /// 同一個任務並發兩次 `deliver`：只推一次，後到的拿到原本那一筆（或已在 base 裡的補記），任務不能被停成交付失敗。
+    #[tokio::test]
+    async fn two_concurrent_deliveries_of_the_same_commit_do_not_pause_the_mission() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (origin, wt) = with_origin(&env);
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("concurrent", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let sha = commit_file(&wt, "a.txt");
+        post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(verified(Some(&wt), None))).await.unwrap();
+        let call = || post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt)));
+        let (a, b) = tokio::join!(call(), call());
+        let (a, b) = (a.expect("第一個"), b.expect("第二個也要成功，不是 nothing_to_deliver"));
+        assert_eq!(git(&origin, &["rev-parse", "main"]), sha);
+        assert_eq!([a.0["sha"].as_str(), b.0["sha"].as_str()], [Some(sha.as_str()), Some(sha.as_str())]);
+        let m = load(&app, &id).await.unwrap();
+        assert_eq!(m.status(), "open", "沒有被停成交付失敗：{:?}", m.paused_reason);
+        let delivered = store::events(&app.db, &id).await.unwrap().iter().filter(|e| e.kind == "delivered").count();
+        assert_eq!(delivered, 1, "只記一筆 delivered");
+    }
+
+    /// 事件的文字與 payload 有上限（會永遠留在時間軸、還會推給 AGM 讀）。
+    #[tokio::test]
+    async fn mission_events_have_a_size_cap() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(m) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("caps", "push_main"))).await.unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let ev = |text: String, payload: Option<Value>| EventIn { kind: "note".into(), text, relay_from: None, payload, sha: None, worktree: None };
+        let r = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ev("x".repeat(16 * 1024 + 1), None))).await;
+        assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
+        let r = post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ev("ok".into(), Some(json!({"blob": "y".repeat(65 * 1024)}))))).await;
+        assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
+        post_event(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(ev("x".repeat(16 * 1024), Some(json!({"k": 1}))))).await.expect("剛好在上限內");
     }
 
     /// 交付失敗停下來之後，rebase 並重驗、再交付成功：「推 main 失敗」的暫停自動解除，卡片不再寫著等你決定（review3 c1 M9）。

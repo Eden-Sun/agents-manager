@@ -1016,6 +1016,10 @@ pub async fn set_quota_reset(pool: &SqlitePool, reset_at: Option<&str>) -> Resul
     Ok(())
 }
 
+/// `handoff` 備註（每次 `PUT /supervisor/handoff` 一筆，內容是整份管理摘要）留最近幾版：它們只寫不讀（`supervisors.summary` 才是現值，
+/// 也寫在 AGM 目錄的 `handoff.md`），正式庫兩週 274 筆、10 MB，是 `supervisor_notes` 最大的一塊。
+pub const HANDOFF_NOTES_KEPT: i64 = 20;
+
 pub async fn set_summary(pool: &SqlitePool, summary: &str) -> Result<i64> {
     sqlx::query(
         "UPDATE supervisors SET summary=?, summary_version=summary_version+1, updated_at=? WHERE id=?",
@@ -1038,6 +1042,15 @@ pub async fn set_summary(pool: &SqlitePool, summary: &str) -> Result<i64> {
         .bind(crate::db::now())
         .execute(pool)
         .await?;
+    sqlx::query(
+        "DELETE FROM supervisor_notes WHERE supervisor_id=? AND kind='handoff' AND rowid NOT IN
+           (SELECT rowid FROM supervisor_notes WHERE supervisor_id=? AND kind='handoff' ORDER BY version DESC, rowid DESC LIMIT ?)",
+    )
+    .bind(SUPERVISOR_ID)
+    .bind(SUPERVISOR_ID)
+    .bind(HANDOFF_NOTES_KEPT)
+    .execute(pool)
+    .await?;
     Ok(v)
 }
 
@@ -5098,6 +5111,23 @@ mod tests {
         assert_eq!(prune_handled_events(&p, PRUNE_HANDLED_AFTER_SECS).await.unwrap(), 0);
         // 被刪掉的那種申請，之後同一句再來就是新的一則（不會被當成重播吞掉）。
         assert!(push_inbox(&p, "k:old_request", "bot_request", None, None, None, &serde_json::json!({})).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn only_the_most_recent_handoff_notes_are_kept() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        for n in 1..=(HANDOFF_NOTES_KEPT + 5) {
+            assert_eq!(set_summary(&p, &format!("第{n}版")).await.unwrap(), n);
+        }
+        let bodies: Vec<String> = sqlx::query_scalar("SELECT body FROM supervisor_notes WHERE kind='handoff' ORDER BY version")
+            .fetch_all(&p)
+            .await
+            .unwrap();
+        assert_eq!(bodies.len() as i64, HANDOFF_NOTES_KEPT);
+        assert_eq!(bodies.first().map(String::as_str), Some("第6版"), "最舊的 5 版修掉了");
+        assert_eq!(bodies.last().map(String::as_str), Some(format!("第{}版", HANDOFF_NOTES_KEPT + 5).as_str()));
+        assert_eq!(get_or_init(&p).await.unwrap().summary.as_deref(), Some(format!("第{}版", HANDOFF_NOTES_KEPT + 5).as_str()), "現值不受影響");
     }
 
     /// 處理完的 inbox 列永遠不清，而 `health_changed` 的 payload 把整份 `supervisor.assignments` 塞進去（約 280 KB 一筆）：
