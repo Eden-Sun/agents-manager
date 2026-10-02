@@ -6,13 +6,14 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { sharedMock } from '../testing/sharedMock'
+import { advanceMockTime, sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { dispatchFrameForTest, resetStoreForTest, useStore } from '../store/store'
 import { IdentitiesPanel } from './IdentitiesPanel'
 
 const mock = sharedMock
 let stopEvents: (() => void) | null = null
 
+virtualMockTime()
 afterEach(async () => {
   await unmountAll()
   stopEvents?.()
@@ -36,6 +37,7 @@ const calls = (requests: FakeRequest[], re: RegExp) => requests.filter((r) => r.
 async function open() {
   const requests = mockApi(mock)
   stopEvents = mock.openSocket({ since: () => 0, onStatus: () => {}, onFrame: (f) => dispatchFrameForTest(f) })
+  await advanceMockTime(200) // openSocket 要等 120ms 才算連上，之前的事件不會送
   await useStore.getState().refreshState()
   await useStore.getState().loadIdentityPrefs()
   await mount(<IdentitiesPanel />)

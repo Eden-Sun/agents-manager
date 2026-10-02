@@ -6,12 +6,13 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { sharedMock } from '../testing/sharedMock'
+import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { DeletedBotsPanel } from './DeletedBotsPanel'
 
 const mock = sharedMock
 
+virtualMockTime()
 afterEach(async () => {
   await unmountAll()
   useStore.setState({ notices: [] })

@@ -6,12 +6,13 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, click, imeEnter, keydown, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll } from '../testing/domHarness'
+import { act, click, imeEnter, keydown, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { sharedMock } from '../testing/sharedMock'
+import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { ChatPanel } from './ChatPanel'
 
+virtualMockTime()
 afterEach(unmountAll)
 before(setupDom)
 after(() => {
@@ -23,14 +24,6 @@ const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer te
 const prompts = (requests: FakeRequest[]) => requests.filter((r) => r.method === 'POST' && /\/bots\/[^/]+\/prompt/.test(r.path))
 const queuedBar = () => document.querySelector('.composer-queued-idle')
 
-async function until(cond: () => boolean | Promise<boolean>, what: string, ms = 6000): Promise<void> {
-  const end = Date.now() + ms
-  while (Date.now() < end) {
-    if (await cond()) return
-    await settle(50)
-  }
-  assert.fail(`等不到：${what}`)
-}
 
 // 整個檔案共用一個 mock 後端：store 會丟掉 `daemon_seq` 比較小的快照（防舊快照蓋新的），每個測試各建一個新 mock
 // 等於「daemon 重啟」，store 就不更新了。不同測試用不同的 bot，免得上一個測試留下的回合／排隊互相干擾。

@@ -11,6 +11,7 @@ import { abortError } from './transport'
 import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
 import { MockReleaseTriage } from './mockReleaseTriage'
 import { MockHerdrUpdate, type MockHerdrOpts } from './mockHerdrUpdate'
+import { later, sleep } from './mockClock'
 import { MockServerDrafts } from './mockServerDrafts'
 import { MockRemoteCargo } from './mockRemoteCargo'
 import type { HttpMethod, SocketHandlers, Transport, UploadOptions } from './transport'
@@ -853,7 +854,7 @@ export class MockTransport implements Transport {
   openSocket(handlers: SocketHandlers): () => void {
     this.handlers = handlers
     handlers.onStatus('connecting')
-    setTimeout(() => {
+    later(() => {
       if (this.handlers !== handlers) return
       this.socketOpen = true
       handlers.onStatus('open')
@@ -1123,7 +1124,7 @@ export class MockTransport implements Transport {
       `登入請開啟 https://example.invalid/login?device=MOCK-${kind.toUpperCase()}`
     const res = this.prompt(botId, { text, client_request_id: ulid('cr') }, null, reply)
     const tools = remote ? remote.tools : this.localTools
-    setTimeout(() => {
+    later(() => {
       tools[kind as BotKind] = { installed: true, path: `/usr/local/bin/${kind}`, version: '1.0.13', logged_in: true }
       this.emit('host_changed', { name: remote?.name ?? 'local', connected: true, error: null, tools })
     }, 3500)
@@ -1932,7 +1933,7 @@ export class MockTransport implements Transport {
     e.client_request_id = String(b.client_request_id ?? '')
     this.touchMission(m)
     // demo：AGM 隔一會兒回一句。
-    setTimeout(() => {
+    later(() => {
       const a = this.missionEvent(id, 'answer', '看過了：這個改動只動到文案，不影響登入流程。', null, 'bot-agm', e.id)
       a.client_request_id = `${e.client_request_id}-reply`
       this.touchMission(m)
@@ -2578,7 +2579,7 @@ export class MockTransport implements Transport {
         needs_restart = false
         this.deferredLive.add(id)
         const runId = run.id
-        setTimeout(() => {
+        later(() => {
           this.deferredLive.delete(id)
           const r = this.runs.find((x) => x.id === runId)
           if (!r) return
@@ -2687,8 +2688,8 @@ export class MockTransport implements Transport {
       [2600, 'verifying', { from }],
     ]
     if (kind === 'codex') steps.push([3200, 'restarting', { from, to }])
-    for (const [at, phase, extra] of steps) setTimeout(() => this.emit('cli_update_progress', { ...base, phase, ...extra }), at)
-    setTimeout(() => {
+    for (const [at, phase, extra] of steps) later(() => this.emit('cli_update_progress', { ...base, phase, ...extra }), at)
+    later(() => {
       for (const x of targets) {
         const run = this.activeRun(x.id)
         if (run) run.update_notice = kind === 'claude'
@@ -2743,13 +2744,13 @@ export class MockTransport implements Transport {
     const total = planned.length
     const ok: { bot_id: string; name: string; run_id: string }[] = []
     planned.forEach((t, i) => {
-      setTimeout(
+      later(
         () => {
           this.emit('bots_restart_progress', { batch_id, index: i + 1, total, ...t, status: 'restarting' })
         },
         600 + i * 1600,
       )
-      setTimeout(
+      later(
         () => {
           const run_id = this.restart(t.bot_id).run_id
           ok.push({ ...t, run_id })
@@ -2759,7 +2760,7 @@ export class MockTransport implements Transport {
         1400 + i * 1600,
       )
     })
-    if (total === 0) setTimeout(() => this.emit('bots_restart_done', { batch_id, ok: [], failed: [], skipped }), 300)
+    if (total === 0) later(() => this.emit('bots_restart_done', { batch_id, ok: [], failed: [], skipped }), 300)
     return { batch_id, total, planned, skipped }
   }
 
@@ -2848,7 +2849,7 @@ export class MockTransport implements Transport {
     }
     this.runs.push(run)
     this.emitBotStatus(botId)
-    setTimeout(() => {
+    later(() => {
       if (run.state !== 'starting') return
       run.state = 'running'
       setAgentStatus(run, 'idle')
@@ -2952,7 +2953,7 @@ export class MockTransport implements Transport {
     while (used.has(port)) port += 1
     const dir = typeof body.dir === 'string' && body.dir ? body.dir : `${bot.cwd ?? '/Users/m4p/project/agents-manager'}/web`
     const starting = this.setPreviewState(botId, { status: 'starting', port, dir, pane_id: `mock-pv-${port}`, error: null, started_at: now(), source: 'spawned', pid: null, command: 'bunx vite' })
-    setTimeout(() => {
+    later(() => {
       if (this.previews.get(botId)?.status === 'starting') this.setPreviewState(botId, { status: 'running' })
     }, 1200)
     return starting
@@ -2972,7 +2973,7 @@ export class MockTransport implements Transport {
     this.emitBotStatus(botId)
     const inFlight = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
     if (inFlight) this.updateTurn(inFlight, { status: 'failed', completed_at: now() })
-    setTimeout(() => {
+    later(() => {
       run.state = 'stopped'
       setAgentStatus(run, 'unknown')
       run.ended_at = now()
@@ -3232,13 +3233,13 @@ export class MockTransport implements Transport {
     if (lowered.includes('twoask')) {
       // 兩題 AskUserQuestion、分頁列與題目都被裁掉（issue #559，`mockTwoAsk.ts`）。
       this.twoAsk.set(botId, twoAskStart())
-      setTimeout(() => this.enterBlocked(botId), 900)
+      later(() => this.enterBlocked(botId), 900)
     } else if (lowered.includes('tinyask')) {
       // pane 太矮、claude 把 AskUserQuestion 的題目裁掉（2026-09-23 真機）：畫面只剩選項，題目只在 transcript。
       this.tinyAsk.add(botId)
-      setTimeout(() => this.enterBlocked(botId), 900)
+      later(() => this.enterBlocked(botId), 900)
     } else if (lowered.includes('blocked') || lowered.includes('rm -rf')) {
-      setTimeout(() => this.enterBlocked(botId), 900)
+      later(() => this.enterBlocked(botId), 900)
     } else if (lowered.includes('retry')) {
       // CLI retrying upstream: turn stays in flight, only signal is `turn_progress.alert`.
       const banners = [
@@ -3246,7 +3247,7 @@ export class MockTransport implements Transport {
         'API error · Retrying in 4s · attempt 2/10',
       ]
       banners.forEach((alert, i) => {
-        setTimeout(() => {
+        later(() => {
           if (turn.status !== 'in_flight') return
           this.emit('turn_progress', {
             bot_id: botId,
@@ -3259,12 +3260,12 @@ export class MockTransport implements Transport {
           })
         }, 300 * (i + 1))
       })
-      setTimeout(() => this.finishTurn(botId, turn, 'hook', '重試後成功了。'), 9000)
+      later(() => this.finishTurn(botId, turn, 'hook', '重試後成功了。'), 9000)
     } else if (lowered.includes('authfail')) {
       // 回合收在 `authentication_failed`（hookrecv `FailureReason::Auth`）：對話裡那則要長出「立即登入」。
-      setTimeout(() => this.failTurnAuth(botId, turn), 1200)
+      later(() => this.failTurnAuth(botId, turn), 1200)
     } else if (lowered.includes('fallback')) {
-      setTimeout(() => this.finishTurn(botId, turn, 'terminal_fallback'), 2600)
+      later(() => this.finishTurn(botId, turn, 'terminal_fallback'), 2600)
     } else {
       // A few `turn_progress` frames before the final reply.
       // 「圖片」：演對話裡的本機圖片（專案內顯示、專案外只寫路徑）。
@@ -3284,7 +3285,7 @@ export class MockTransport implements Transport {
       // Thinking phase: `activity` only, empty `text`. Real verb is random; only the counter shape matters.
       const thinking = ['Boogieing… (2s · ↑ 0.4k tokens)', 'Puttering… (4s · ↑ 1.2k tokens)']
       thinking.forEach((activity, i) => {
-        setTimeout(() => {
+        later(() => {
           if (turn.status !== 'in_flight') return
           this.emit('turn_progress', { bot_id: botId, run_id: run.id, turn_id: turn.id, text: '', activity, revision: i + 1 })
         }, 200 * (i + 1))
@@ -3296,7 +3297,7 @@ export class MockTransport implements Transport {
           ? lines.slice(0, Math.max(1, Math.ceil((lines.length * i) / (frames + 1)))).join('\n')
           : reply.slice(0, Math.max(1, Math.round((reply.length * i) / (frames + 1))))
       for (let i = 1; i <= frames; i++) {
-        setTimeout(() => {
+        later(() => {
           if (turn.status !== 'in_flight') return
           this.emit('turn_progress', {
             bot_id: botId,
@@ -3308,7 +3309,7 @@ export class MockTransport implements Transport {
           })
         }, 500 * i)
       }
-      setTimeout(() => this.finishTurn(botId, turn, 'hook', reply), slow ? 8000 : 500 * (frames + 1) + 400)
+      later(() => this.finishTurn(botId, turn, 'hook', reply), slow ? 8000 : 500 * (frames + 1) + 400)
     }
     return { turn_id: turn.id, message_id: userMsg.id, delivery: 'ok' }
   }
@@ -3350,7 +3351,7 @@ export class MockTransport implements Transport {
       incomplete: 0,
     })
     this.emit('turn_updated', { bot_id: botId, turn })
-    setTimeout(() => {
+    later(() => {
       if (turn.status !== 'queued') return
       if (text.includes('起不來')) {
         this.updateTurn(turn, { start_error: '本機上找不到 `claude` 執行檔（mock 演啟動失敗）' })
@@ -3375,13 +3376,13 @@ export class MockTransport implements Transport {
     const run = this.activeRun(botId)
     if (!run) return
     if (run.state !== 'running' || run.agent_status !== 'idle') {
-      setTimeout(() => this.flushWaiting(botId), 300)
+      later(() => this.flushWaiting(botId), 300)
       return
     }
     this.updateTurn(turn, { status: 'in_flight', run_id: run.id, delivery: 'ok', start_error: null, awaits_start: 0, awaits_idle: 0 })
     setAgentStatus(run, 'working')
     this.emitBotStatus(botId)
-    setTimeout(() => this.finishTurn(botId, turn, 'hook'), 1500)
+    later(() => this.finishTurn(botId, turn, 'hook'), 1500)
   }
 
   private nextReply(): string {
@@ -3458,7 +3459,7 @@ export class MockTransport implements Transport {
     const id = running ?? toStart
     if (!id) return null
     this.bulletAsk.add(id)
-    setTimeout(() => this.enterBlocked(id), toStart ? 2500 : 0)
+    later(() => this.enterBlocked(id), toStart ? 2500 : 0)
     return id
   }
 
@@ -3482,7 +3483,7 @@ export class MockTransport implements Transport {
     if (!target) return null
     const id = target
     this.tinyAsk.add(id)
-    setTimeout(() => this.enterBlocked(id), toStart ? 2500 : 0)
+    later(() => this.enterBlocked(id), toStart ? 2500 : 0)
     return id
   }
 
@@ -3496,7 +3497,7 @@ export class MockTransport implements Transport {
     const id = running ?? toStart
     if (!id) return null
     this.twoAsk.set(id, twoAskStart())
-    setTimeout(() => this.enterBlocked(id), toStart ? 2500 : 0)
+    later(() => this.enterBlocked(id), toStart ? 2500 : 0)
     return id
   }
 
@@ -3532,8 +3533,8 @@ export class MockTransport implements Transport {
         setAgentStatus(run, 'working')
         this.emitBotStatus(botId)
         const turn = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
-        if (turn) setTimeout(() => this.finishTurn(botId, turn, 'hook'), 1500)
-        else setTimeout(() => this.setIdle(botId), 1200)
+        if (turn) later(() => this.finishTurn(botId, turn, 'hook'), 1500)
+        else later(() => this.setIdle(botId), 1200)
       } else if (keys.some((k) => ['n', 'esc', 'Esc', 'ctrl+c'].includes(k))) {
         const turn = this.turns.find((t) => t.run_id === run.id && t.status === 'in_flight')
         if (turn) this.updateTurn(turn, { status: 'failed', completed_at: now() })
@@ -3959,7 +3960,7 @@ export class MockTransport implements Transport {
     const h = this.handlers
     this.socketOpen = false
     h.onStatus('closed')
-    setTimeout(() => {
+    later(() => {
       if (this.handlers !== h) return
       this.socketOpen = true
       h.onStatus('open')
@@ -3996,7 +3997,7 @@ export class MockTransport implements Transport {
     if (!run) {
       // 還沒啟動的先啟動，等它變 running（`start` 裡的計時器）再掛。
       this.start(botId)
-      setTimeout(() => this.setUpdateNotice(botId, notice), 1500)
+      later(() => this.setUpdateNotice(botId, notice), 1500)
       return
     }
     run.update_notice = notice
@@ -4035,9 +4036,6 @@ export class MockTransport implements Transport {
   }
 }
 
-function sleep(ms: number) {
-  return new Promise<void>((r) => setTimeout(r, ms))
-}
 
 function installDevHelpers(mock: MockTransport) {
   ;(globalThis as unknown as Rec).__amMock = {

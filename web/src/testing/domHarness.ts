@@ -305,12 +305,23 @@ export function fakeApi(route: (req: FakeRequest) => unknown = () => undefined):
   return requests
 }
 
-/** 輪詢到條件成立；逾時就用 `what` 當失敗訊息（比單純 `settle` 一個固定時間穩）。 */
+let pollTick: (() => Promise<void>) | null = null
+
+/** 設定 `until` 每輪輪詢要做的事（例如推進 mock 的虛擬時鐘）；`null` 取消。 */
+export function setPollTick(fn: (() => Promise<void>) | null): void {
+  pollTick = fn
+}
+
+/**
+ * 輪詢到條件成立；逾時就用 `what` 當失敗訊息。有 `setPollTick` 時每輪先推進虛擬時間再讓出一小段真時間：
+ * 「等 mock 的 8 秒回合結束」變成「輪詢幾次」，不再取決於這台機器現在多忙。
+ */
 export async function until(cond: () => boolean | Promise<boolean>, what: string, ms = 8000): Promise<void> {
   const end = Date.now() + ms
   while (Date.now() < end) {
     if (await cond()) return
-    await settle(50)
+    if (pollTick) await pollTick()
+    await settle(pollTick ? 10 : 50)
   }
   throw new Error(`等不到：${what}`)
 }

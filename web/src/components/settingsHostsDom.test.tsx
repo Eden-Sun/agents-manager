@@ -9,10 +9,11 @@ import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { click, mockApi, mount, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import type { FakeRequest } from '../testing/domHarness'
-import { sharedMock } from '../testing/sharedMock'
+import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
 import { HostsPanel } from './HostsPanel'
 
+virtualMockTime()
 afterEach(async () => {
   await unmountAll()
   useStore.setState({ notices: [] }) // 上一個測試的通知不能讓下一個測試的 `until` 誤以為已經出現
