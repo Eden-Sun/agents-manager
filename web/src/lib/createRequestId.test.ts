@@ -20,3 +20,19 @@ test('鍵符合 daemon 收的字元集與長度', () => {
   assert.match(id, /^[A-Za-z0-9\-_.:]{1,128}$/)
   settleCreateRequest('k')
 })
+
+test('帶 maxAgeMs：超過就換新的鍵（舊的重送窗口已過，同一句再送是新的動作）', () => {
+  const t0 = 1_000_000
+  const a = createRequestId('age:k', { maxAgeMs: 60_000, now: t0 })
+  assert.equal(createRequestId('age:k', { maxAgeMs: 60_000, now: t0 + 59_000 }), a, '窗口內沿用')
+  const b = createRequestId('age:k', { maxAgeMs: 60_000, now: t0 + 61_000 })
+  assert.notEqual(b, a, '超過窗口換新的')
+  assert.equal(createRequestId('age:k', { maxAgeMs: 60_000, now: t0 + 62_000 }), b)
+  settleCreateRequest('age:k')
+})
+
+test('不帶 maxAgeMs：行為跟以前一樣，一直沿用到成功（建 bot 的冪等鍵靠這個）', () => {
+  const a = createRequestId('age:legacy', { now: 1 })
+  assert.equal(createRequestId('age:legacy', { now: 99_999_999 }), a)
+  settleCreateRequest('age:legacy')
+})

@@ -6,7 +6,7 @@ import { pruneDeadKeys } from './prune'
 import { forgetBlockedExcept } from '../lib/blockedPrefetch'
 import { shellDraftKey } from './shellDraft'
 import { createResyncRunner } from './resyncQueue'
-import { createRequestId, settleCreateRequest } from '../lib/createRequestId'
+import { createRequestId, peekRequestId, settleCreateRequest } from '../lib/createRequestId'
 import { groupSendDelivered } from './groupSend'
 import { create } from 'zustand'
 import * as api from '../api'
@@ -1000,9 +1000,20 @@ export const useStore = create<StoreState>((set, get) => {
     for (const b of st.bots) runs[b.id] = st.runs.find((r) => r.bot_id === b.id) ?? null
     set((s) => {
       const turns = { ...s.turns }
+      // 快照涵蓋了本機看過的所有幀時（沒落後），它沒列的 queued 回合就是已經不在排隊了（被送出、撤回、run 結束）：
+      // 分頁在背景／斷線時漏掉那一幀，只靠 WS 補不回來，輸入框會一直顯示「排隊中」（#733：7788 與 5173 不一致）。
+      // 落後時不能清：那一則可能正好是快照之後才排進去的。
+      const listed = new Set(st.turns.map((t) => t.id))
+      const inSnapshot = new Set(st.bots.map((b) => b.id))
       for (const [botId, map] of Object.entries(turns)) {
         const runId = runs[botId]?.id
-        turns[botId] = Object.fromEntries(Object.entries(map).filter(([, t]) => t.status !== 'in_flight' || t.run_id === runId))
+        turns[botId] = Object.fromEntries(
+          Object.entries(map).filter(([id, t]) => {
+            if (t.status === 'in_flight' && t.run_id !== runId) return false
+            if (!behindFrames && t.status === 'queued' && inSnapshot.has(botId) && !listed.has(id)) return false
+            return true
+          }),
+        )
       }
       for (const t of st.turns) {
         const botId = t.bot_id ?? st.bots.find((b) => runs[b.id]?.id === t.run_id)?.id
@@ -1190,7 +1201,8 @@ export const useStore = create<StoreState>((set, get) => {
     // 要拿同一個 crid——daemon 以它冪等（API.md 11.2：重送回同一組 turn_id、不再打字）。每次都換新的鍵，
     // 等於把這個冪等關掉，N 顆 bot 各收到兩則。只有「沒收到任何回覆」的失敗才沿用；daemon 回了就作廢。
     const reqKey = `group:${projectId}:${text}\u0000${attachments.join(',')}`
-    const crid = createRequestId(reqKey)
+    // 同 `sendPrompt`：重送窗口過了就是新的動作。
+    const crid = createRequestId(reqKey, { maxAgeMs: SEND_RETRY_WINDOW_MS })
     try {
       const res = await api.sendGroupChat(projectId, text, crid, attachments)
       settleCreateRequest(reqKey)
@@ -1581,7 +1593,11 @@ export const useStore = create<StoreState>((set, get) => {
     // 只有「沒收到任何回覆」的失敗才沿用；daemon 明確回了（成功或 ApiError）就作廢，下一次是新的動作（#367）。
     const draftKey = draft ? `:${draft.action}:${draft.token}` : ''
     const reqKey = `send:${botId}:${sendNow ? 1 : 0}:${startIfStopped ? 1 : 0}:${queueIfBusy ? 1 : 0}:${text}\u0000${attachments.join(',')}${draftKey}`
-    const crid = createRequestId(reqKey)
+    // 留著的 crid 只在「剛失敗、馬上重試」時有意義：本機已經看到那一回合是終態（daemon 其實收下過、之後送完或撤回），或留太久了，
+    // 這一次就是新的動作——沿用舊 crid 會被 daemon 當成重送、回舊結果，新的這一則沒送出去，輸入框卻清空了。
+    const held = peekRequestId(reqKey)
+    if (held && sendIdIsSpent(get().turns[botId], held)) settleCreateRequest(reqKey)
+    const crid = createRequestId(reqKey, { maxAgeMs: SEND_RETRY_WINDOW_MS })
     if (draft) set((s) => markDraftBusy(s, botId, draft.action))
     try {
       const res = await api.sendPrompt(botId, text, crid, attachments, sendNow, startIfStopped, draft, queueIfBusy)
@@ -3350,6 +3366,14 @@ function dropPane(set: SetFn, host: string, paneId: string) {
 function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
   const { [key]: _dropped, ...rest } = map
   return rest
+}
+
+/** 回應遺失之後，同一句話還算「重送」的時間窗（超過就換新的 crid）。 */
+const SEND_RETRY_WINDOW_MS = 5 * 60 * 1000
+
+/** 這個 crid 在本機已經對應到一個終態的回合＝那件事做完（或撤回）了，再用它只會被 daemon 當成重送。 */
+function sendIdIsSpent(turns: Record<string, Turn> | undefined, crid: string): boolean {
+  return Object.values(turns ?? {}).some((t) => t.client_request_id === crid && t.status !== 'queued' && t.status !== 'in_flight')
 }
 
 function draftWithText(text: string, current: string): string {
