@@ -122,15 +122,24 @@ take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owne
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
   _age=$(lock_age)
+  # 鎖的 mtime 在未來（時鐘倒退、鎖是搬來的）：年齡是負的，不可信。不能掉進「小於安靜門檻」而永遠安靜跳過
+  # （runner_hung 要等時間追上才推），執行者已死的鎖也不能卡到那時才回收：記一行，死鎖照回收。
+  _age_bad=0
+  if [ "$_age" -lt 0 ]; then
+    _age_bad=1
+    log "鎖的時間在未來（${_age} 秒），時鐘倒退或鎖是搬來的，年齡不可信"
+  fi
   if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && ps -o command= -p "$_pid" 2>/dev/null | grep -q 'release-triage-kick'; then
-    if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
+    if [ "$_age_bad" = 1 ]; then
+      :   # 上面已記 log；執行者還活著，不搶、不派
+    elif [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
       alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，上游新版分診停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
     elif [ "$_age" -ge "$LOCK_QUIET_SECS" ]; then
       log "分診已有執行者（pid ${_pid}，${_age} 秒），這輪跳過"
     fi
     exit 0
   fi
-  if [ "$_age" -lt "$LOCK_STALE_SECS" ]; then
+  if [ "$_age_bad" = 0 ] && [ "$_age" -lt "$LOCK_STALE_SECS" ]; then
     log "鎖剛建立（${_age} 秒）但讀不到執行者，這輪跳過"
     exit 0
   fi

@@ -277,6 +277,25 @@ check "活鎖卡太久：推 ops-alert" "ops-alert .*\-\-reason runner_hung" "$A
 equals "活鎖卡太久：仍不搶鎖、不派" "$(assigns)" "0"
 kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
+# 7c. 鎖的時間在未來（時鐘倒退、鎖是搬來的）：年齡算出來是負的，不能因為「小於安靜門檻」就永遠安靜跳過——
+#     活鎖要記 log 說年齡不可信；執行者已死的鎖不能卡到時鐘追上才回收。
+future_lock() { python3 -c 'import os,sys,time; t=time.time()+7200; os.utime(sys.argv[1],(t,t))' "$AGM_DIR/release-triage.lock"; }
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+bash -c 'sleep 30; : # release-triage-kick' & LIVE=$!
+sleep 0.3
+mkdir "$AGM_DIR/release-triage.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/release-triage.lock/owner"; future_lock
+bash "$SCRIPT"
+equals "未來時間的活鎖：不派" "$(assigns)" "0"
+check "未來時間的活鎖：記 log 說年齡不可信" "鎖的時間在未來" "$AGM_DIR/release-triage.log"
+kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
+teardown
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+mkdir "$AGM_DIR/release-triage.lock"; echo "999999 $(date +%s)" > "$AGM_DIR/release-triage.lock/owner"; future_lock
+bash "$SCRIPT"
+equals "未來時間的死鎖：回收後照派" "$(assigns)" "1"
+teardown
 # 7b. pid 還活著但不是這支腳本（pid 被別的程序重用）：視為殘留，回收。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex

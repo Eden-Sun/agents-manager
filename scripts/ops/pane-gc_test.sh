@@ -37,7 +37,7 @@ setup() {
 #!/bin/bash
 echo "$*" >> "$FIX/calls.log"
 case "$1 $2" in
-  "pane list") cat "$FIX/panes.json" ;;
+  "pane list") [ -f "$FIX/list.stderr" ] && cat "$FIX/list.stderr" >&2; cat "$FIX/panes.json" ;;
   "pane process-info") cat "$FIX/info.$4" 2>/dev/null ;;
   "pane get") cat "$FIX/get.$3" 2>/dev/null ;;
   "pane close") echo "CLOSE $3" >> "$FIX/closed.log"; [ -f "$FIX/closefail" ] && exit 1; exit 0 ;;
@@ -56,6 +56,8 @@ STUB
 }
 teardown() { rm -rf "$ROOT"; unset FIX; }
 run() { PATH="$ROOT/fakebin:$PATH" zsh "$ROOT/agm/bin/pane-gc.sh"; echo $?; }
+# Linux 的 browser_gc_linux.py 是用 bash 跑 pane-gc.sh（不是 zsh），兩邊都要能跑。
+run_bash() { PATH="$ROOT/fakebin:$PATH" bash "$ROOT/agm/bin/pane-gc.sh"; echo $?; }
 # pane <id> <pid> <cmdline> <etime>：登記一個 pane、它的前景程式與年齡。
 pane() {
   python3 - "$FIX/panes.json" "$1" <<'PY'
@@ -174,6 +176,45 @@ PATH="$ROOT/fakebin:$PATH" zsh "$ROOT/agm/bin/pane-gc.sh" 2> "$ERRF"; equals "li
 check_no "list 回 error JSON：不噴 traceback" "Traceback" "$ERRF"
 check  "list 回 error JSON：log 帶 error code" "server_not_running" "$LOG"
 check_no "list 回 error JSON：不當成 0 個 pane 正常收尾" "pane：關掉" "$LOG"
+teardown
+
+# 8. Linux 的 browser-gc worker 用 bash 跑這支腳本：zsh 專有語法（${=var} 之類）在 bash 是 bad substitution 直接 exit 1。
+setup
+pane w1:p1 101 "claude auth login" "2-03:00:00"
+pane w1:p2 102 "claude --resume abc" "9-00:00:00"
+equals "bash 跑：exit 0" "$(run_bash 2>&1 | tail -1)" "0"
+equals "bash 跑：照樣關掉卡住的登入" "$(closed)" "1"
+check  "bash 跑：log 記關掉 1" "pane：關掉 1／幽靈 0" "$LOG"
+teardown
+
+# 9. pane list 的 JSON 內有 \n、\\ 這類跳脫（標題、cmdline）：不能因為 shell 的 echo 展開跳脫就整份判成「不是 JSON」而整輪不清。
+setup
+pane w1:p1 101 "claude auth login" "2-03:00:00"
+python3 - "$FIX/panes.json" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1])); p["result"]["panes"][0]["title"] = "a\nb\\c"; json.dump(p, open(sys.argv[1], "w"))
+PY
+equals "list 帶跳脫字元：exit 0" "$(run)" "0"
+equals "list 帶跳脫字元：照樣關掉卡住的登入" "$(closed)" "1"
+check_no "list 帶跳脫字元：不誤報不是 JSON" "回的不是 JSON" "$LOG"
+teardown
+
+# 10. herdr 在 stderr 印警告（例如有新版提示）但 stdout 是合法 JSON：照常處理，不能把 stderr 混進 JSON 而整輪不清。
+setup
+pane w1:p1 101 "claude auth login" "2-03:00:00"
+echo "herdr: a new version is available" > "$FIX/list.stderr"
+equals "stderr 有警告：exit 0" "$(run)" "0"
+equals "stderr 有警告：照樣關掉卡住的登入" "$(closed)" "1"
+check_no "stderr 有警告：不誤報" "pane list 回的不是 JSON" "$LOG"
+teardown
+
+# 11. 解析 pane list 的 python 自己壞掉（找不到、crash）：不能當成「0 個 pane」安靜收尾，要記錯誤。
+setup
+pane w1:p1 101 "claude auth login" "2-03:00:00"
+printf '#!/bin/bash\nexit 3\n' > "$ROOT/fakebin/python3"; chmod +x "$ROOT/fakebin/python3"
+equals "python 壞掉：exit 0" "$(run)" "0"
+check  "python 壞掉：log 記解析失敗" "pane list 失敗" "$LOG"
+check_no "python 壞掉：不當成 0 個 pane 正常收尾" "pane：關掉" "$LOG"
 teardown
 
 echo "$PASS passed, $FAIL failed"
