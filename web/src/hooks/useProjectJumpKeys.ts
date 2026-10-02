@@ -1,4 +1,6 @@
 import { useEffect } from 'react'
+import { dialogOpen } from '../lib/dialogOpen'
+import { isImeEnter } from '../lib/ime'
 import { orderedProjects, useStore } from '../store/store'
 
 /** 1–9：`Digit1`…`Digit9`（看實體鍵位，不看輸入法或 Shift 打出什麼字）。 */
@@ -26,10 +28,10 @@ export function useProjectJumpKeys() {
   const selectProject = useStore((s) => s.selectProject)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.isComposing || e.defaultPrevented) return
+      if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isImeEnter(e) || e.defaultPrevented) return
       const slot = slotOf(e.code)
       if (slot === null) return
-      if (document.querySelector('.modal-backdrop, .confirm-backdrop')) return
+      if (dialogOpen()) return
       const nav = document.querySelector('.sidebar-scroll')
       const shown = nav ? [...nav.querySelectorAll<HTMLElement>('.project[data-project-id]')].map((el) => el.dataset.projectId ?? '') : null
       const id = jumpTargetId(slot, shown, orderedProjects(useStore.getState()))

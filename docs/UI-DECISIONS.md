@@ -842,3 +842,13 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 - 沒有原因（舊 daemon、daemon 不知道）照舊只寫「等待回應」；claude 一般權限確認會寫「等待權限確認：<工具名>」（`permission_prompt`），不編原因。不認得的 `code` 照樣顯示 `text`：前端不維護代碼表。
 - 清除不靠前端記：原因跟著 run 物件走，選單關掉／狀態變了／run 結束，下一個 `bot_status` 就沒有它；前端另外只在 `agent_status==='blocked'` 且 run 還活著時才顯示，所以晚一格事件也不會掛著舊字。
 
+## 快捷鍵與高風險按鈕的審查結果（2026-10-02）
+
+- **全域快捷鍵只有兩組**（沒有「⌃⌃」鍵盤快捷鍵——那是重啟套用晶片上的圖示）：`⌥↑/⌥↓` 換 bot（`hooks/useBotSwitchKeys.ts`）、`Ctrl+1…9` 跳專案群組（`hooks/useProjectJumpKeys.ts`）。
+  兩組都不接：選字中的按鍵（`isComposing` 或 WebKit 在 compositionend 之後才送的 keyCode 229，共用 `lib/ime.ts`）、已被別人處理的事件；`⌥` 組不接 Shift（輸入框裡 ⌥⇧↑/↓ 是「選取到段落頭尾」）。
+- **疊層偵測統一走 `lib/dialogOpen.ts`**：`.modal-backdrop`／`.confirm-backdrop`／圖片燈箱 `.lightbox`／任何 `aria-modal="true"`（手機側邊欄抽屜 `aside.sidebar` 自己的不算）。以前只認前兩個 class，燈箱開著時快捷鍵會在背後換 bot／專案。
+- **確認框（`ConfirmDialog`）**：預設焦點在「取消」（要打字確認的在輸入框），從不在「確定」；打字確認框的 Enter 不接輸入法選字確認（用中文輸入法打完名字，選字那一下 Enter 不能把東西刪掉）；
+  確認與第二選項共用一道 800 ms 的連點門，連點只觸發一次（失敗後隔一下再按照樣能重試）。
+- **「停止 bot」（記憶體清單）兩段式**：第一下只武裝成「再按一次確定停止」，3 秒內再按才執行，放著自己解除；跟旁邊 TERM → 強制 同一個做法。
+- **送出鍵**：桌面 Enter 送出、Shift+Enter 換行，選字中的 Enter 不送（`isImeEnter`）；手機 Enter 只換行（使用者 2026-09-09 定案，不要加回來）。
+- **已知、刻意不動**：「解除卡對話」是卡死時的逃生口，不加確認；有 `aborting` 防重入。

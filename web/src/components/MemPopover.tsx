@@ -26,10 +26,16 @@ function ownerLabel(p: MemProcess): string {
 }
 
 /** 一列的動作按鈕：bot 走「停止 bot」，其餘 TERM → 「強制」。 */
-function RowAction({ p, host, onDone }: { p: MemProcess; host: string; onDone: () => void }) {
+export function RowAction({ p, host, onDone }: { p: MemProcess; host: string; onDone: () => void }) {
   const stopBot = useStore((s) => s.stopBot)
   const [busy, setBusy] = useState(false)
   const [armed, setArmed] = useState(false)
+  const [stopArmed, setStopArmed] = useState(false)
+  useEffect(() => {
+    if (!stopArmed) return
+    const t = setTimeout(() => setStopArmed(false), 3000)
+    return () => clearTimeout(t)
+  }, [stopArmed])
   const [err, setErr] = useState<string | null>(null)
 
   const run = useCallback(
@@ -53,8 +59,23 @@ function RowAction({ p, host, onDone }: { p: MemProcess; host: string; onDone: (
     const id = p.bot_id
     return (
       <div className="mem-pop-act">
-        <button type="button" disabled={busy || !id} onClick={() => id && run(() => stopBot(id))} title="走正規的停止流程，daemon 會收掉這個 run">
-          停止 bot
+        {/* 停掉一顆正在跑的 bot 會中斷它的回合：跟旁邊 TERM → 強制 一樣兩段式，第一下只武裝，3 秒內再按才執行；放著不動自己解除。 */}
+        <button
+          type="button"
+          className={stopArmed ? 'danger' : ''}
+          disabled={busy || !id}
+          onClick={() => {
+            if (!id) return
+            if (!stopArmed) {
+              setStopArmed(true)
+              return
+            }
+            setStopArmed(false)
+            void run(() => stopBot(id))
+          }}
+          title={stopArmed ? '再按一次才真的停止（會中斷它正在跑的回合）' : '走正規的停止流程，daemon 會收掉這個 run；要按兩下確認'}
+        >
+          {stopArmed ? '再按一次確定停止' : '停止 bot'}
         </button>
         {err ? <span className="mem-pop-err">{err}</span> : null}
       </div>
