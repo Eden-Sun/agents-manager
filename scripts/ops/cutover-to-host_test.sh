@@ -587,7 +587,7 @@ rm -rf "$T"
 # print_times 在沒跑任何步驟（TIMES 空）時不能死：macOS 的 /bin/bash 3.2 對 set -u 下空陣列的 "${arr[@]}" 會 unbound variable。
 # 用系統 /bin/bash 跑（Linux 上是新版 bash，等於只驗輸出；在 Mac 上才真的守住）。
 pt_out=$(/bin/bash -c 'set -u; log() { echo "$*"; }; TIMES=(); '"$(sed -n '/^print_times() {/,/^}/p' "$SCRIPT")"'; print_times' 2>&1)
-check_eq "沒跑任何步驟：print_times 只印合計、不死" "合計" "$(printf '%s\n' "$pt_out" | awk '$1=="合計"{print $1}')"
+check_eq "沒跑任何步驟：print_times 印出合計、不死" 1 "$(printf '%s\n' "$pt_out" | grep -c '合計')"
 unset pt_out
 
 echo
