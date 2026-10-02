@@ -454,7 +454,14 @@ shell 面板本來只有「打一行、Enter 送出」：TUI（`top`、`vim`、�
 - 拿掉「中止並取代」——要換題會先按 `ESC 中斷`，不需要一顆「先中止再送」。
 - 「立刻送出」改名 `插隊`（桌機手機同名）：claude 2.1.275 的 send-now 鍵，CLI 自己收掉那一輪再收下這句。
 - 「併行送入」改名 `補充`：不建新回合，直接打進 pane，併進目前這一輪。
-- `插隊`／`補充` **只給 claude**（codex／grok 不畫）；`ESC 中斷`、`解除卡對話` 每種都有。
+- `補充` **只給 claude**（codex／grok 不畫）；`ESC 中斷`、`解除卡對話` 每種都有。
+- **`插隊` 依 bot kind 分兩種**（2026-10-02，issue #748；文案在 `store/sendNowCopy.ts`）：
+  - claude：`插隊`——send-now 鍵，打斷目前那一輪、改開新回合。
+  - codex：**`插入`**——不打斷、不開新回合，字打進忙碌的 TUI，由 codex 的 `instant_interrupt`（0.159 起）併進**同一輪**；對話裡記成「補充」。
+    按鈕照樣**不看旗標與版本就畫**（理由同下面的「不擋」）：`[codex] instant_interrupt` 預設關、codex 自己那側也要開，不合資格時 daemon 回 409＋中文原因
+    （旗標關是 `send_now_unsupported_kind`、版本不足／不明是 `send_now_codex_too_old`／`..._version_unknown`），前端原樣顯示。
+  - grok／shell 不畫。
+  - 成功 `send_now: "steered"` 顯示「已插入進行中的回合」；bot 閒著時被閘門拒絕（200 帶 `send_now_*`）依 kind 講原因，**不再一律說「claude 還沒有 send-now 鍵」**。
 
 - **預設仍是排隊**：送出鍵不變（`排隊送出`），插隊是次要動作，要多按一顆才會打斷別人的回合。
 - **不擋**：這顆不看版本就顯示。前端猜不準 pane 跑的是哪一版（statusLine 才知道），猜錯會變成「按鈕明明在卻不能用」；

@@ -58,6 +58,7 @@ import { prependDraft, queuedSendFor } from './queuedSend'
 import { noteQueuedTurn, startingSend, startingSendLabel } from './startingSend'
 import { asUncommittedSend, noteInFlightTurn, uncommittedSendText } from './uncommittedSend'
 import { sendNowFellThrough } from './sendNowOutcome'
+import { sendNowNotice } from './sendNowCopy'
 import { missionRequests } from './missionRequests'
 import { MISSION_USER_PAUSE } from '../lib/missionView'
 
@@ -1611,8 +1612,9 @@ export const useStore = create<StoreState>((set, get) => {
         return fell.consumed
       }
       // 沒插成隊時 daemon 照舊送出（閒著的 bot）；為什麼沒插隊要講出來，不然使用者以為打斷了。
-      if (sendNow && res.send_now && res.send_now !== 'interrupted' && res.send_now !== 'idle') {
-        get().notify('info', '沒有插隊：這顆 bot 的 claude 還沒有 send-now 鍵（2.1.275 起），訊息照一般方式送出。')
+      if (sendNow) {
+        const note = sendNowNotice(res.send_now, get().bots.find((b) => b.id === botId)?.kind)
+        if (note) get().notify(note.level, note.text)
       }
       if (res.delivery === 'unknown') {
         get().notify('error', '訊息已送出但送達狀態未知（delivery=unknown），需先放棄該回合才能再送。')
