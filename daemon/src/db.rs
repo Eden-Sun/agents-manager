@@ -1117,6 +1117,7 @@ pub struct GroupMessage {
 pub const ACTIVE_STATES: &str = "('starting','running','stopping')";
 
 pub async fn bot(pool: &SqlitePool, id: &str) -> Result<Option<Bot>> {
+    note_per_bot_lookup();
     Ok(sqlx::query_as::<_, Bot>("SELECT * FROM bots WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
@@ -1136,13 +1137,55 @@ pub async fn project(pool: &SqlitePool, id: &str) -> Result<Option<Project>> {
     Ok(sqlx::query_as::<_, Project>("SELECT * FROM projects WHERE id = ?").bind(id).fetch_optional(pool).await?)
 }
 
+/// 測試用：這條執行緒上做了幾次「一顆 bot 一次」的查詢（`GET /api/state` 不准逐顆查，見 `api::state_query_count_tests`）。
+#[cfg(test)]
+thread_local! {
+    pub static PER_BOT_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note_per_bot_lookup() {
+    #[cfg(test)]
+    PER_BOT_LOOKUPS.with(|c| c.set(c.get() + 1));
+}
+
 pub async fn active_run(pool: &SqlitePool, bot_id: &str) -> Result<Option<Run>> {
+    note_per_bot_lookup();
     Ok(sqlx::query_as::<_, Run>(
         "SELECT * FROM runs WHERE bot_id = ? AND state IN ('starting','running','stopping') LIMIT 1",
     )
     .bind(bot_id)
     .fetch_optional(pool)
     .await?)
+}
+
+/// 每顆 bot 現在的 active run，一次讀完（`GET /api/state` 用；逐顆 [`active_run`] 是 N+1）。同一顆 bot 同時只會有一個
+/// （`runs_one_active` 唯一索引），所以直接以 bot id 為鍵。
+pub async fn active_runs_by_bot(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Run>> {
+    let runs = sqlx::query_as::<_, Run>("SELECT * FROM runs WHERE state IN ('starting','running','stopping')").fetch_all(pool).await?;
+    let mut out = std::collections::HashMap::with_capacity(runs.len());
+    for run in runs {
+        out.entry(run.bot_id.clone()).or_insert(run);
+    }
+    Ok(out)
+}
+
+/// 每顆 bot 排最前面的 `queued` 回合，一次讀完（同 [`queued_turn_for_bot`] 的排序：`created_at, id`）。
+pub async fn queued_turns_by_bot(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Turn>> {
+    use sqlx::{FromRow, Row};
+    let rows = sqlx::query(
+        "SELECT t.*, c.bot_id AS queue_bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id
+          WHERE t.status = 'queued' ORDER BY t.created_at, t.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let bot_id: String = row.try_get("queue_bot_id")?;
+        if !out.contains_key(&bot_id) {
+            out.insert(bot_id, Turn::from_row(&row)?);
+        }
+    }
+    Ok(out)
 }
 
 pub async fn run(pool: &SqlitePool, id: &str) -> Result<Option<Run>> {
@@ -1205,6 +1248,7 @@ pub async fn live_bots_on_host(pool: &SqlitePool, host: &str) -> Result<Vec<Bot>
 }
 
 pub async fn bot_host(pool: &SqlitePool, bot_id: &str) -> Result<String> {
+    note_per_bot_lookup();
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT p.host FROM bots b JOIN projects p ON p.id = b.project_id WHERE b.id = ?",
     )
@@ -1318,6 +1362,7 @@ pub async fn queued_turn(pool: &SqlitePool, conversation_id: &str) -> Result<Opt
 }
 
 pub async fn queued_turn_for_bot(pool: &SqlitePool, bot_id: &str) -> Result<Option<Turn>> {
+    note_per_bot_lookup();
     Ok(sqlx::query_as::<_, Turn>(
         "SELECT t.* FROM turns t JOIN conversations c ON c.id = t.conversation_id
          WHERE c.bot_id = ? AND t.status = 'queued' ORDER BY t.created_at, t.id LIMIT 1",
