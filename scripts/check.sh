@@ -10,7 +10,7 @@
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
 #   scripts/check.sh all        # 以上全部
-#   scripts/check.sh changed [base] # 只跑改到的部分（跟 base，預設 origin/main 比），daemon 只 cargo check；issue #716
+#   scripts/check.sh changed [base] # 只跑改到的部分（跟 base，預設 origin/main 比），daemon 做 cargo check＋改到模組的測試（CHECK_TESTS=none 關掉）；issue #716
 #
 # 注意：
 # - web 的型別檢查一定要 `tsc -p tsconfig.app.json`；根目錄的 tsconfig.json 只有
@@ -231,17 +231,33 @@ check_clippy() {
 }
 
 # 只跑改到的部分（issue #716）：跟 base（預設 origin/main）比的 commit 差異＋工作樹還沒提交的改動。
-# daemon 只做 `cargo check --all-targets`（`#[cfg(test)]` 被非測試路徑用到也抓得到）；要跑測試就用
-# CHECK_TESTS=<過濾字串>。全量測試交給 ubuntu 背景 CI，不在收尾時等。
+# daemon 做 `cargo check --all-targets`（`#[cfg(test)]` 被非測試路徑用到也抓得到），再跑「改到的模組自己的測試」
+# （`scripts/ci-daemon-filters.sh` 由路徑挑 cargo test 的過濾字串；挑法與限制見該檔）。
+# `CHECK_TESTS=<過濾字串>` 明講要跑哪些（蓋過自動挑的）、`CHECK_TESTS=none` 一個測試都不跑。全量測試交給 ubuntu 背景 CI，不在收尾時等。
 check_changed() {
-    local base="${1:-origin/main}" parts
-    parts="$({ git diff --name-only "${base}...HEAD"; git diff --name-only HEAD; git ls-files --others --exclude-standard; } | sort -u | bash scripts/ci-changed-parts.sh)"
+    local base="${1:-origin/main}" committed dirty untracked files parts filters="" nfilters=0 f
+    # 三個 git 指令各自檢查：`{ a; b; c; } | …` 的結束碼只看最後一個，base 不存在（沒 fetch、淺 clone、沒有共同祖先）時
+    # 第一個失敗被吞掉，工作樹乾淨時就印「只有文件類改動，不用跑」然後綠燈——壞 commit 過閘。看不出改了什麼就拒絕放行。
+    if ! committed="$(git diff --name-only "${base}...HEAD")"; then
+        echo "changed: 無法比較 ${base}...HEAD（${base} 不存在、沒 fetch 或沒有共同祖先？）：看不出改了什麼，拒絕放行" >&2
+        return 2
+    fi
+    if ! dirty="$(git diff --name-only HEAD)"; then
+        echo "changed: 無法列出工作樹的改動（git diff --name-only HEAD 失敗）：拒絕放行" >&2
+        return 2
+    fi
+    if ! untracked="$(git ls-files --others --exclude-standard)"; then
+        echo "changed: 無法列出未追蹤的檔案（git ls-files 失敗）：拒絕放行" >&2
+        return 2
+    fi
+    files="$(printf '%s\n%s\n%s\n' "$committed" "$dirty" "$untracked" | sort -u)"
+    parts="$(printf '%s\n' "$files" | bash scripts/ci-changed-parts.sh)"
     if [ -z "$parts" ]; then
         echo "changed: 只有文件類改動，不用跑"
         return 0
     fi
     echo "changed（base ${base}）：$(echo "$parts" | tr '\n' ' ')"
-    if [ -n "${CHECK_TESTS:-}" ] && ! echo "$parts" | grep -qx -e daemon -e full; then
+    if [ -n "${CHECK_TESTS:-}" ] && [ "${CHECK_TESTS}" != none ] && ! echo "$parts" | grep -qx -e daemon -e full; then
         echo "!! CHECK_TESTS=${CHECK_TESTS} 沒有用到：這次改動沒有 daemon 部分，不會跑任何 daemon 測試" >&2
     fi
     if echo "$parts" | grep -qx full; then
@@ -261,8 +277,22 @@ check_changed() {
         step "daemon: cargo check --all-targets"
         env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
         if [ -n "${CHECK_TESTS:-}" ]; then
-            step "daemon: cargo test ${CHECK_TESTS}"
-            run_daemon_tests "${CHECK_TESTS}"
+            if [ "${CHECK_TESTS}" = none ]; then
+                echo "daemon: CHECK_TESTS=none：不跑測試"
+            else
+                step "daemon: cargo test ${CHECK_TESTS}"
+                run_daemon_tests "${CHECK_TESTS}"
+            fi
+        else
+            filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
+            for f in $filters; do nfilters=$((nfilters + 1)); done
+            if [ "$nfilters" -gt 0 ]; then
+                step "daemon: cargo test（改到的模組：$(echo $filters)）"
+                # shellcheck disable=SC2086  # 過濾字串是 [a-z_:]，不含空白與萬用字元
+                run_daemon_tests -- $filters
+            else
+                echo "daemon: 沒有可挑的測試子集（只動了 main.rs 之類不屬於任何模組的檔案）；要跑測試用 CHECK_TESTS=<過濾字串>"
+            fi
         fi
     fi
 }

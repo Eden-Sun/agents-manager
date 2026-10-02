@@ -8,7 +8,7 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/am-check-disk-hint.XXXXXX")"
 trap '/bin/rm -rf "$tmp"' EXIT
 fx="$tmp/repo"
 mkdir -p "$fx/scripts" "$fx/web" "$fx/bin"
-cp "$ROOT/scripts/check.sh" "$ROOT/scripts/ci-changed-parts.sh" "$fx/scripts/"
+cp "$ROOT/scripts/check.sh" "$ROOT/scripts/ci-changed-parts.sh" "$ROOT/scripts/ci-daemon-filters.sh" "$fx/scripts/"
 fail=0
 bad() { printf 'FAIL: %s\n' "$*" >&2; fail=1; }
 

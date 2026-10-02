@@ -35,7 +35,7 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/am-verify-skill.XXXXXX")"
 trap '/bin/rm -rf "$tmp"' EXIT
 fx="$tmp/repo"
 mkdir -p "$fx/scripts/ops" "$fx/web" "$fx/bin" "$fx/.claude/skills/verify"
-cp "$ROOT/scripts/check.sh" "$ROOT/scripts/ci-changed-parts.sh" "$fx/scripts/"
+cp "$ROOT/scripts/check.sh" "$ROOT/scripts/ci-changed-parts.sh" "$ROOT/scripts/ci-daemon-filters.sh" "$fx/scripts/"
 cp "$SKILL" "$fx/.claude/skills/verify/SKILL.md"
 
 stub() { # <name> <body>：記錄「名稱 參數」到 $AM_TEST_LOG
@@ -85,7 +85,7 @@ run_case() { # <name> <changed path> <want regex（行首）...> -- <forbidden r
 }
 
 run_case web web/src/a.ts 'bunx tsc -p tsconfig.app.json' 'bun test' -- 'cargo' 'python3'
-run_case daemon daemon/src/api.rs 'cargo check -p agents-managerd --all-targets' -- 'cargo test' 'bun' 'python3'
+run_case daemon daemon/src/api.rs 'cargo check -p agents-managerd --all-targets' 'cargo test -p agents-managerd --locked -- api::' -- 'bun' 'python3'
 run_case ops scripts/ops/x.sh 'lint-shell-vars' 'ops-test ran' 'python3 -B scripts/agm_test\.' -- 'cargo' 'bunx tsc'
 run_case ob scripts/ob_x.txt 'python3 -B scripts/ob_test\.' 'node --test scripts/ob_browser_test\.' -- 'cargo' 'bun'
 

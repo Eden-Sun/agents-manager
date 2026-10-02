@@ -34,5 +34,23 @@ check "" "docs/goals/other-goal.md"
 check "ops ob" "scripts/chatgpt-consult.sh"
 check "ob" "scripts/chatgpt-consult.mjs"
 
+# 2026-10-02 閘門審查：不是 daemon/ 底下、但 daemon 的測試會在執行期讀的檔案，改了就要跑 daemon 的測試。
+#   cargo_shim 的測試讀 scripts/check.sh、herdr_shim 的讀 scripts/ops/lint-shell-vars.sh、claude_review 的讀 scripts/ops/*-release-task.md、
+#   supervisor::setup 的讀 scripts/ops/fixtures/patrol-runtime.json。
+check "daemon ops" "scripts/check.sh"
+check "daemon ops" "scripts/ops/lint-shell-vars.sh"
+check "daemon ops" "scripts/ops/codex-release-task.md"
+check "daemon ops" "scripts/ops/fixtures/patrol-runtime.json"
+# scripts/ 底下的 .md 不是「只有文件」：任務檔被 install-manifest／ops 測試／daemon 讀（browser-gc-task.md 等），README 也由 ops 測試釘住內容。
+check "ops" "scripts/ops/README.md"
+check "ops" "scripts/ops/browser-gc-task.md"
+# 反方向：web 的測試讀 daemon 的 fixtures；ops 的 project-transfer 測試從 daemon 的 schema 原始碼抽欄位。
+check "web daemon" "daemon/src/lifecycle/fixtures/codex-0.155-draft.ansi"
+check "daemon" "daemon/src/release_triage/fixtures/claude_2.1.276-278.md"
+for f in daemon/src/db.rs daemon/src/supervisor/store.rs daemon/src/supervisor/roles.rs daemon/src/mission/store.rs; do
+    check "daemon ops" "$f"
+done
+check "daemon" "daemon/src/api.rs"
+
 if [ "$fail" = 0 ]; then echo "ci-changed-parts: OK"; fi
 exit "$fail"
