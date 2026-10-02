@@ -28,7 +28,11 @@ SECRET_PATTERNS = (
     ("api_key", re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{24,}")),
     ("aws_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("slack_token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{20,}")),
-    ("am_token_header", re.compile(r"X-AM-(?:Bot-)?Token\s*[:=]\s*['\"]?[A-Za-z0-9._-]{16,}", re.I)),
+    ("am_token_header", re.compile(r"X-AM-(?:Bot-|Service-)?Token\s*[:=]\s*['\"]?[A-Za-z0-9._-]{16,}", re.I)),
+    # pane 的環境變數與 hook／service 憑證：只擋「名字 = 夠長的值」，單提名字不擋。
+    ("am_env_token", re.compile(r"\bAM_(?:BOT|HOOK)_TOKEN\s*[:=]\s*['\"]?[A-Za-z0-9._-]{16,}")),
+    ("bearer", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
 )
 
 
@@ -77,9 +81,15 @@ class Store:
     CLAIMABLE = """SELECT * FROM requests r WHERE status IN ('pending','waiting_quota')
         AND NOT EXISTS (SELECT 1 FROM requests u WHERE u.project_id=r.project_id AND u.status IN ('unknown','running'))"""
 
+    # 一題的長度上限：整段會原樣 insertText 進網頁輸入框（再大就是卡死分頁），也會一直留在 DB 裡。
+    MAX_QUESTION_CHARS = 100_000
+
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # `mkdir(exist_ok)` 不會改既有目錄的權限：題目與回答（可能是設計、程式碼）都在這裡，一律收成只有自己能進。
+        if self.root.stat().st_mode & 0o077:
+            os.chmod(self.root, 0o700)
         self.db = sqlite3.connect(self.root / "ob.sqlite3", timeout=30, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA busy_timeout=30000")
@@ -228,6 +238,8 @@ class Store:
         project_id(pid)
         if not rid or len(rid) > 200 or not question.strip():
             raise OBError("需要非空 request_id 與問題")
+        if len(question) > self.MAX_QUESTION_CHARS:
+            raise OBError(f"question_too_long：題目 {len(question)} 字，上限 {self.MAX_QUESTION_CHARS}；拆小或摘要後重送")
         kind = secret_in_question(question)
         if kind:
             raise OBError(f"secret_in_question：題目含有 {kind}，不能送出（不貼 token／密碼／客戶資料）；拿掉後重送，不要用新 request ID 夾帶")
