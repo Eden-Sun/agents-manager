@@ -1391,7 +1391,8 @@ def _plist_semantics(raw: bytes) -> dict:
 def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
     """唯讀比對已安裝的 ops 腳本與 repo：只跑 git 與讀檔，不改任何安裝檔。
 
-    四種落差分開報，嚴重度不同：`drift`（安裝檔不是 repo 任何一版＝有人直接改了安裝檔）、
+    四種落差分開報，嚴重度不同：`drift`（安裝檔不是 repo 任何一版＝有人直接改了安裝檔；腳本比位元組、plist／unit 比語意，
+    兩種都回頭找歷史）、
     `behind`（repo 有更新沒裝，附落後的 commit）、`missing`（對照表有、安裝端沒有）、
     `extra`（`bin/` 裡有、對照表沒有——沒有版控的腳本）。
     """
@@ -1439,6 +1440,17 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
                 # 兩邊的鍵取聯集：少一個鍵跟改一個值同樣是落差，只看其中一邊會漏掉「安裝端整個少了
                 # StandardOutPath」這種。`_error`（plist 讀不懂）也在裡面，不然報告只會說每個欄位都是
                 # None，看的人查不出真正的原因是那個檔壞了。
+                # 安裝的若是 repo 以前某一版的語意，那是「repo 較新、還沒裝」（behind），不是被人手改過（drift）：
+                # 跟下面的腳本一樣回頭找歷史。以前這裡只跟最新一版比，unit／plist 一落後就報成 drift，
+                # 而 ops-install 對 drift 的處理是「絕不覆蓋」（避免蓋掉手改的檔）——正常落後的檔也被擋下來。
+                found = None if "_error" in got else next(
+                    (c for c in _git(repo, "log", "--format=%H", ref, "--", source).split()
+                     if semantics(_git_bytes(repo, c, source)) == got), None)
+                if found is not None:
+                    titles = _git(repo, "log", "--format=%h %s", f"{found}..{ref}", "--", source).splitlines()
+                    row.update({"installed_commit": found[:8], "behind": len(titles), "commits": titles})
+                    report["behind"].append(row)
+                    continue
                 keys = sorted(set(want) | set(got))
                 row["diff"] = {k: {"repo": want.get(k), "installed": got.get(k)} for k in keys if want.get(k) != got.get(k)}
                 report["drift"].append(row)
