@@ -4479,7 +4479,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - Worker 只在 Linux daemon 啟動時同時設好 `AGM_CI_REPO_DIR`、`AGM_CI_WORK_ROOT` 才會啟動，並在每個 SHA 的 detached worktree 中執行；未設環境時 job 仍可持久排隊和查詢，但不會自動執行。
 - Fast／full 各用自己的 `CARGO_TARGET_DIR`（`<work_root>/target-fast`、`target-full`），不然 fast 會卡在 full 的 cargo build-directory 鎖上而超時。`GET /api/ci/jobs` 先依 route 過濾再套 100 筆上限；Full 收到「正在跑的那個 SHA」的請求時掛上去共用結果，不會把 pending 改成同一個 SHA 再跑一遍。
 - daemon 重啟：只有這個 worker 會把 job 設成 `running`，所以開機時還 `running` 的是被中斷的 → 放回 `queued` 重跑，並清掉上個行程留下的 detached worktree（`git worktree prune`）；沒設環境變數時什麼都不動。
-- worker 沒有跟 `ubuntu-ci.sh` 共用鎖：`AGM_CI_REPO_DIR` 不可指到 ubuntu-ci 的 `${CI_ROOT}/repo`，也不可兩邊同時對同一台機器跑 full。
+- 被重啟中斷的 job 最多 claim 3 次（`attempts`）：第 3 次又被中斷就標 `failure`、`failed_steps=["interrupted"]` 並在 `output_tail` 記原因，不再重來。終態 job 保留 30 天，worker 啟動時與之後每小時清一次；queued／running 的不清。
+- worker 沒有跟 `ubuntu-ci.sh` 共用鎖，所以同機並存有兩條防呆：`AGM_CI_REPO_DIR` 若就是 ubuntu-ci 的 `${AGM_CI_ROOT:-~/.cache/agents-manager/ci}/repo`（含 `..`、symlink 解開後相同），daemon 啟動時拒絕開 worker 並記 error log（job 仍可排隊）；兩邊同時對同一台機器跑 full 仍要由部署者避免。
 - 此功能沒有替既有 agm-host systemd timer 做 cutover；啟用 daemon worker 前，部署者要先設定兩個路徑與 build 工具 PATH，並停止舊 timer，避免重複跑 Full CI。M4 Darwin-only worker、主機排程切換與效能量測仍由另行派工處理。
 
 ## 附錄 A：herdr socket（0.8.2 / protocol 20）
