@@ -38,6 +38,14 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_TIMEOUT = 30.0
+# daemon 這一側本來就會跑很久的操作（`mission deliver`：fetch＋push＋gh；`release-triage publish`：一串 gh 呼叫、每個最久 40 秒）：
+# 沿用 30 秒的話 CLI 先逾時、daemon 卻繼續做完，呼叫端以為失敗。只有沒用 `--timeout` 明講時才放寬。
+SLOW_TIMEOUT = 300.0
+MAX_TIMEOUT = 3600.0
+# 一頁最多幾筆：daemon 自己也會夾，但 0／負數／天文數字在這裡就擋，不要原樣送出去。
+MAX_LIMIT = 1000
+MAX_ID_CHARS = 200
+MAX_DETAIL_CHARS = 2000
 # 跟 daemon 的 MAX_PROVABLE_CHARS 同一個數字：超過的內容派送時一定送不出去，daemon 入口回 422 text_too_long（#335）。
 MAX_TEXT_CHARS = 200_000
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"}
@@ -211,7 +219,7 @@ class Client:
         """
         if self._token is None:
             try:
-                body = self._raw("GET", "/api/session", None, auth=False)
+                body = self._raw("GET", "/api/session", None, auth=False, allow_text=True)
             except AgmError as e:
                 if e.kind in ("timeout", "connection_lost"):
                     raise AgmError("connect_failed", f"取 token 失敗，請求尚未送出：{e.message}", 6) from e
@@ -221,12 +229,14 @@ class Client:
                 tok = body["token"]
             elif isinstance(body, str):
                 tok = body.strip()
-            if not tok:
-                raise AgmError("no_token", "GET /api/session 沒有回 token", 3)
+            # token 要是單一一段可見字元：放進 HTTP header 的值，含換行就是 header 注入、含空白或 HTML 就根本不是 token
+            # （也避免之後 http.client 的 `Invalid header value` 錯誤把整段字印出來）。
+            if not tok or len(tok) > 512 or not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", tok):
+                raise AgmError("no_token", "GET /api/session 沒有回一個合法的 token（空的、含空白／控制字元，或不是 token 的樣子）", 3)
             self._token = tok
         return self._token
 
-    def _raw(self, method: str, path: str, body: object, auth: bool = True) -> object:
+    def _raw(self, method: str, path: str, body: object, auth: bool = True, allow_text: bool = False) -> object:
         url = self.base + path
         data = None
         headers = {"Accept": "application/json"}
@@ -254,12 +264,22 @@ class Client:
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with self._opener.open(req, timeout=self.timeout) as res:
-                return _parse(res.read())
+                parsed = _parse(res.read())
+            # 2xx 卻不是 JSON：多半是別的服務佔了這個埠（或前面的代理回了一頁 HTML）。當成功印出去、exit 0 的話，
+            # 呼叫端會把一頁 HTML 當成 daemon 的答案；只有舊式的 `/api/session`（回純文字 token）明講收字串。
+            if isinstance(parsed, str) and parsed.strip() and not allow_text:
+                raise AgmError("bad_response", f"{method} {path} 回的不是 JSON（前 80 字：{parsed.strip()[:80]!r}）", 4, status=200)
+            return parsed
         except urllib.error.HTTPError as e:
             # HTTPError 本身是個 response，讀完要關掉；不關的話連線會留著等 GC。
             with e:
                 payload = _parse(e.read())
             detail = payload if isinstance(payload, (dict, list)) else str(payload or "")
+            # 前面擋了一頁 HTML、或 daemon 吐了整份 stderr：整段灌進輸出會洗掉呼叫端要看的東西，也可能把不該印的字帶出來。
+            if isinstance(detail, str) and len(detail) > MAX_DETAIL_CHARS:
+                detail = detail[:MAX_DETAIL_CHARS] + f"…（已截斷，共 {len(detail)} 字）"
+            elif not isinstance(detail, str) and len(json.dumps(detail, ensure_ascii=False, default=str)) > MAX_DETAIL_CHARS * 4:
+                detail = {"truncated": json.dumps(detail, ensure_ascii=False, default=str)[:MAX_DETAIL_CHARS] + "…"}
             raise AgmError(
                 "http_error",
                 f"{method} {path} 回 {e.code}",
@@ -2109,8 +2129,42 @@ def cmd_bot(client: Client, cfg: dict, args) -> object:
 # ------------------------------------------------------------------ 參數解析
 
 
+class JsonArgumentParser(argparse.ArgumentParser):
+    """用法錯誤也走 `AgmError`（JSON 進 stderr、exit 2）：呼叫端（排程腳本、模型）只解析一種錯誤形狀。`--help` 不受影響。"""
+
+    def error(self, message: str):  # noqa: D102
+        raise AgmError("bad_args", message, 2, usage=self.format_usage().strip())
+
+
+def _timeout_arg(raw: str) -> float:
+    try:
+        v = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--timeout 要是數字，收到 {raw!r}")
+    if not (v == v) or v <= 0 or v > MAX_TIMEOUT:  # NaN、0、負數、inf、過大
+        raise argparse.ArgumentTypeError(f"--timeout 要在 0 到 {MAX_TIMEOUT:g} 秒之間，收到 {raw!r}")
+    return v
+
+
+def _limit_arg(raw: str) -> int:
+    try:
+        v = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"要是整數，收到 {raw!r}")
+    if not 1 <= v <= MAX_LIMIT:
+        raise argparse.ArgumentTypeError(f"要在 1 到 {MAX_LIMIT} 之間，收到 {v}")
+    return v
+
+
+def _id_arg(raw: str) -> str:
+    v = raw.strip()
+    if not v or len(v) > MAX_ID_CHARS or any(ord(c) < 32 or ord(c) == 127 for c in v):
+        raise argparse.ArgumentTypeError(f"id 不能是空的、含控制字元或超過 {MAX_ID_CHARS} 字")
+    return v
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = JsonArgumentParser(
         prog="agm",
         description="AGM 總管工具。輸出 JSON；失敗時 JSON 進 stderr 並以非 0 離開。token 由本機執行期取得，不會出現在輸出或參數裡。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2135,7 +2189,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--runtime-dir", help="覆寫設定目錄（預設讀 AGM_RUNTIME_DIR，再退回腳本上層目錄）")
-    p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help=f"HTTP 逾時秒數（預設 {DEFAULT_TIMEOUT:g}）")
+    p.add_argument("--timeout", type=_timeout_arg, default=DEFAULT_TIMEOUT, help=f"HTTP 逾時秒數（預設 {DEFAULT_TIMEOUT:g}）")
     p.add_argument("--compact", action="store_true", help="輸出成單行 JSON")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -2157,12 +2211,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--bot", help="限定 bot id")
     s.add_argument("--project", help="限定 project id")
     s.add_argument("--before", help="分頁游標")
-    s.add_argument("--limit", type=int, default=20)
+    s.add_argument("--limit", type=_limit_arg, default=20)
     s.set_defaults(func=cmd_search)
 
     s = sub.add_parser("messages", help="讀某個 bot 的對話（分頁）")
-    s.add_argument("bot_id")
-    s.add_argument("--limit", type=int, default=50)
+    s.add_argument("bot_id", type=_id_arg)
+    s.add_argument("--limit", type=_limit_arg, default=50)
     s.add_argument("--before", help="分頁游標")
     s.set_defaults(func=cmd_messages)
 
@@ -2217,7 +2271,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="驗收／阻塞／續作／取消一筆交辦（唯一能結案的路徑）",
         description="回合跑完只會進 awaiting_review。要結案就在這裡說清楚是誰、依據什麼決定的。",
     )
-    s.add_argument("assignment_id")
+    s.add_argument("assignment_id", type=_id_arg)
     s.add_argument(
         "--decision",
         required=True,
@@ -2335,7 +2389,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("inbox", help="還沒 ack 的通知（最舊在前）；--all 才含已處理的")
     s.add_argument("--all", action="store_true", help="含 state=handled 的事件（最新在前）")
     s.add_argument("--role", choices=["patrol", "responder", "mine"], help="只看某個 AGM 角色收的（mine＝runtime.json 的角色）")
-    s.add_argument("--limit", type=int, default=200, help="最多幾筆（預設 200，上限 1000）")
+    s.add_argument("--limit", type=_limit_arg, default=200, help="最多幾筆（預設 200，上限 1000）")
     s.set_defaults(func=cmd_inbox)
 
     s = sub.add_parser("whoami", help="這支 CLI 代表哪個 AGM 角色（patrol／responder）與 bot")
@@ -2349,7 +2403,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_responder)
 
     s = sub.add_parser("ack", help="確認已處理一則通知（帶角色 token 時只能 ack 自己角色收的）")
-    s.add_argument("event_id")
+    s.add_argument("event_id", type=_id_arg)
     s.set_defaults(func=cmd_ack)
 
     s = sub.add_parser("ops-alert", help="排程腳本卡住時喊人：推一則 durable 通知給巡檢（同 source+reason 每小時一則）")
@@ -2400,10 +2454,10 @@ def build_parser() -> argparse.ArgumentParser:
             "question", "answer", "revise",
         ],
     )
-    s.add_argument("mission_id", nargs="?", help="list 以外都需要")
+    s.add_argument("mission_id", nargs="?", type=_id_arg, help="list 以外都需要")
     s.add_argument("--project", help="list：專案 id")
     s.add_argument("--status", choices=["all", "open", "done", "cancelled"], help="list：篩選（已完成任務＝done）")
-    s.add_argument("--limit", type=int, help="list：筆數上限")
+    s.add_argument("--limit", type=_limit_arg, help="list：筆數上限")
     s.add_argument("--kind", choices=["report", "note", "verified"], help="event：事件種類（verified＝驗證通過，交付前必須有）")
     s.add_argument("--text", help="event：內容／complete：結果摘要")
     s.add_argument("--text-file", dest="text_file", help="從檔案讀 --text")
@@ -2446,7 +2500,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("bot", help="管理 bot：start / stop / restart / set / create / delete / restore")
     s.add_argument("op", choices=["start", "stop", "restart", "set", "create", "delete", "restore"])
-    s.add_argument("bot_id", nargs="?", help="start/stop/restart/delete/restore 的目標（delete＝停 pane 並軟刪，子 agent 一起收；restore＝還原被軟刪的子 agent，不開 run）")
+    s.add_argument("bot_id", nargs="?", type=_id_arg, help="start/stop/restart/delete/restore 的目標（delete＝停 pane 並軟刪，子 agent 一起收；restore＝還原被軟刪的子 agent，不開 run）")
     s.add_argument("--project", help="create：所屬 project id")
     s.add_argument("--name", help="create：bot 名稱")
     s.add_argument("--kind", help="create：claude / codex / grok")
@@ -2462,8 +2516,19 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _is_slow_command(args) -> bool:
+    op = getattr(args, "op", None)
+    return (args.cmd == "mission" and op == "deliver") or (args.cmd == "release-triage" and op == "publish")
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except AgmError as e:  # 用法錯誤：形狀跟其他錯誤一樣（JSON 進 stderr、exit 2）
+        json.dump(e.to_json(), sys.stderr, ensure_ascii=False, indent=None if "--compact" in raw_argv else 2)
+        sys.stderr.write("\n")
+        return e.exit_code
     indent = None if args.compact else 2
     try:
         # `issue` 只用 gh，不連 daemon：沒有 runtime.json 的 pane（一般的父 bot）也要能 claim。
@@ -2472,6 +2537,9 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "needs_client", True):
             cfg = load_runtime(args.runtime_dir)
             client = Client(daemon_url(cfg), args.timeout, bot_auth_headers(cfg))
+            # 沒用 --timeout 明講、而且是 daemon 這一側本來就跑得久的操作：放寬預設（見 SLOW_TIMEOUT）。
+            if args.timeout == DEFAULT_TIMEOUT and _is_slow_command(args):
+                client.timeout = SLOW_TIMEOUT
         out = args.func(client, cfg, args)
     except AgmError as e:
         json.dump(e.to_json(), sys.stderr, ensure_ascii=False, indent=indent)

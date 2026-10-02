@@ -30,6 +30,12 @@ import agm  # noqa: E402
 TOKEN = "test-token-do-not-leak"
 
 
+class Raw:
+    def __init__(self, text: str, content_type: str = "text/html") -> None:
+        self.text = text
+        self.content_type = content_type
+
+
 class FakeDaemon(BaseHTTPRequestHandler):
     routes: dict = {}
     seen: list = []
@@ -67,9 +73,13 @@ class FakeDaemon(BaseHTTPRequestHandler):
         self._send(*entry)
 
     def _send(self, status: int, payload: object) -> None:
-        raw = json.dumps(payload).encode()
+        # `Raw` = 原樣送出的文字（HTML、純文字…），測「daemon 回非 JSON」用。
+        if isinstance(payload, Raw):
+            raw, ctype = payload.text.encode(), payload.content_type
+        else:
+            raw, ctype = json.dumps(payload).encode(), "application/json"
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
@@ -2922,6 +2932,144 @@ class AckPathTest(unittest.TestCase):
 
     def test_a_real_ulid_is_unchanged(self):
         self.assertEqual(self.ack("01M3YJ0S4V0Y9004VFV0YJ386C"), "/api/supervisor/inbox/01M3YJ0S4V0Y9004VFV0YJ386C/ack")
+
+
+class CliHardeningTest(CliCase):
+    """審查補的：錯誤輸出的形狀、參數驗證、逾時、非 JSON 回應、Python 3.9 相容。"""
+
+    def test_usage_errors_are_json_on_stderr_not_argparse_prose(self):
+        for argv in (("messages",), ("assign",), ("nope-command",), ("messages", "b1", "--limit", "abc")):
+            code, out, err = self.run_cli(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertEqual(out, "", argv)
+            body = json.loads(err)
+            self.assertEqual(body["error"], "bad_args", (argv, err))
+            self.assertIn("message", body)
+
+    def test_the_timeout_flag_must_be_a_sane_positive_number(self):
+        for bad in ("0", "-5", "nan", "inf", "99999", "abc"):
+            code, out, err = self.run_cli("--timeout", bad, "health")
+            self.assertEqual(code, 2, bad)
+            self.assertEqual(json.loads(err)["error"], "bad_args", bad)
+        FakeDaemon.routes["GET /api/supervisor/health"] = (200, {"ok": True})
+        self.assertEqual(self.ok("--timeout", "5", "health"), {"ok": True})
+
+    def test_limit_flags_reject_non_positive_and_absurd_values(self):
+        for argv in (("messages", "b1", "--limit", "0"), ("messages", "b1", "--limit", "-1"),
+                     ("messages", "b1", "--limit", "100000"), ("search", "x", "--limit", "0")):
+            code, _out, err = self.run_cli(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertEqual(json.loads(err)["error"], "bad_args", argv)
+        self.assertEqual(FakeDaemon.seen, [], "參數錯誤不能打到 daemon")
+
+    def test_ids_must_be_non_empty_single_line_values(self):
+        for bad in ("", "  ", "a\nb", "a\x00b", "x" * 300):
+            code, _out, err = self.run_cli("messages", bad)
+            self.assertEqual(code, 2, repr(bad))
+            self.assertEqual(json.loads(err)["error"], "bad_args", repr(bad))
+        self.assertEqual(FakeDaemon.seen, [])
+
+    def test_a_200_with_a_non_json_body_is_an_error_not_a_success(self):
+        FakeDaemon.routes["GET /api/supervisor/health"] = (200, Raw("<html>some other service</html>"))
+        code, out, err = self.run_cli("health")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "", "不能把別人的 HTML 當成功印出去")
+        body = json.loads(err)
+        self.assertEqual(body["error"], "bad_response")
+        self.assertLess(len(err), 2000)
+
+    def test_a_non_json_session_answer_is_never_used_as_the_token(self):
+        for text in ("<html>nope</html>", "tok\nX-Evil: 1", "has space", ""):
+            FakeDaemon.routes["GET /api/session"] = (200, Raw(text))
+            FakeDaemon.routes["GET /api/supervisor/health"] = (200, {"ok": True})
+            code, out, err = self.run_cli("health")
+            self.assertNotEqual(code, 0, repr(text))
+            self.assertEqual(json.loads(err)["error"], "no_token", repr(text))
+            self.assertEqual(out, "")
+            self.assertNotIn("X-Evil", err)
+            self.assertFalse([r for r in FakeDaemon.seen if r["path"] == "/api/supervisor/health"], "沒有 token 就不能送出請求")
+            FakeDaemon.seen.clear()
+
+    def test_the_token_never_appears_in_error_output(self):
+        FakeDaemon.routes["GET /api/supervisor/health"] = (500, {"error": "boom"})
+        code, out, err = self.run_cli("health")
+        self.assertNotEqual(code, 0)
+        self.assertNotIn(TOKEN, err + out)
+
+    def test_a_huge_error_body_is_capped(self):
+        FakeDaemon.routes["GET /api/supervisor/health"] = (502, Raw("x" * 200_000))
+        code, _out, err = self.run_cli("health")
+        self.assertNotEqual(code, 0)
+        body = json.loads(err)
+        self.assertEqual((body["error"], body["status"]), ("http_error", 502))
+        self.assertLess(len(err), 5000, "daemon 前面擋了一頁 HTML 也不能整頁灌進輸出")
+
+    def test_a_daemon_that_is_not_running_is_a_json_error_with_exit_6(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            dead = s.getsockname()[1]
+        self.write_runtime({"daemon_url": f"http://127.0.0.1:{dead}", "manager_bot_id": "bot-agm"})
+        code, out, err = self.run_cli("health")
+        self.assertEqual((code, out), (6, ""))
+        self.assertEqual(json.loads(err)["error"], "connect_failed")
+
+    def test_slow_server_side_operations_get_a_longer_default_timeout(self):
+        from unittest import mock
+        seen = []
+
+        def fake_raw(self_, method, path, body, auth=True):
+            seen.append((path, self_.timeout))
+            return {}
+
+        with mock.patch.object(agm.Client, "_raw", fake_raw):
+            self.ok("mission", "deliver", "m1", "--worktree", "/tmp/w")
+            self.ok("release-triage", "publish")
+            self.ok("--timeout", "7", "release-triage", "publish")
+            self.ok("health")
+        self.assertEqual([t for _p, t in seen], [agm.SLOW_TIMEOUT, agm.SLOW_TIMEOUT, 7.0, agm.DEFAULT_TIMEOUT], seen)
+
+
+class PythonThreeNineTest(unittest.TestCase):
+    """m4p 只有 Python 3.9：agm.py 不能用 3.10+ 的語法或 API（`match`、執行期的 `X | Y`、`pairwise`…）。"""
+
+    SRC = Path(agm.__file__).read_text(encoding="utf-8")
+
+    def test_it_parses_as_python_3_9(self):
+        import ast
+        ast.parse(self.SRC, filename="agm.py", feature_version=(3, 9))
+
+    def test_no_runtime_union_syntax_or_3_10_apis(self):
+        import ast
+        tree = ast.parse(self.SRC)
+        # 註記裡的 `str | None` 靠 `from __future__ import annotations` 不會被求值，所以只看註記**以外**的地方。
+        annotation_nodes: set = set()
+        for node in ast.walk(tree):
+            anns = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                anns += [a.annotation for a in node.args.args + node.args.kwonlyargs + node.args.posonlyargs]
+                anns += [node.args.vararg.annotation if node.args.vararg else None, node.args.kwarg.annotation if node.args.kwarg else None, node.returns]
+            elif isinstance(node, ast.AnnAssign):
+                anns.append(node.annotation)
+            for a in anns:
+                if a is not None:
+                    annotation_nodes.update(id(n) for n in ast.walk(a))
+        self.assertIn("from __future__ import annotations", self.SRC)
+        types = {"str", "int", "float", "bool", "dict", "list", "tuple", "set", "bytes", "object", "type"}
+        problems = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr) and id(node) not in annotation_nodes:
+                for side in (node.left, node.right):
+                    if (isinstance(side, ast.Constant) and side.value is None) or (isinstance(side, ast.Name) and side.id in types):
+                        problems.append(f"第 {node.lineno} 行：執行期的 X | Y（3.10+）")
+            if isinstance(node, ast.Attribute) and node.attr in {"pairwise", "bit_count", "UTC"}:
+                problems.append(f"第 {node.lineno} 行：.{node.attr}（3.10+／3.11+）")
+            if isinstance(node, ast.Call) and any(k.arg == "strict" for k in node.keywords) and getattr(node.func, "id", "") == "zip":
+                problems.append(f"第 {node.lineno} 行：zip(strict=)（3.10+）")
+            if isinstance(node, ast.Call) and any(k.arg in ("slots", "kw_only") for k in node.keywords) and "dataclass" in ast.dump(node.func):
+                problems.append(f"第 {node.lineno} 行：dataclass(slots/kw_only)（3.10+）")
+            if isinstance(node, ast.ImportFrom) and node.module == "tomllib" or (isinstance(node, ast.Import) and any(a.name == "tomllib" for a in node.names)):
+                problems.append(f"第 {node.lineno} 行：tomllib（3.11+）")
+        self.assertEqual(problems, [])
 
 
 if __name__ == "__main__":

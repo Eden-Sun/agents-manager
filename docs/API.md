@@ -2291,6 +2291,9 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 `whoami`、`responder`（`show`／`setup`／`start`／`stop`）、`persona --role responder`、
 `issue`（`claim`／`release <n>`，見下）；輸出一律 JSON。
 
+**錯誤契約**：成功＝JSON 進 stdout、exit 0；任何失敗＝一個 JSON 物件 `{error, message, …}` 進 stderr、非 0 離開（含**用法錯誤**：缺參數、未知子命令、`--limit abc` 都是 `bad_args`／exit 2，不是 argparse 的說明文字；`--help` 照舊印說明、exit 0）。離開碼：2 參數／設定錯、3 取不到 token 或認領被占、4 daemon 回非 2xx（`http_error`，帶 `status`、`detail`）或 2xx 卻不是 JSON（`bad_response`，多半是別的服務佔了埠；不會把那頁 HTML 當成功印出去）、5 逾時／送出後斷線（mutation 是「送達未知」，不自動重試）、6 連不上 daemon。`detail` 最多 2000 字（前面擋了一頁 HTML 也不會整頁灌進輸出）。token 只在執行期向 `/api/session` 取（必須是單一段 `[A-Za-z0-9._~+/=-]`、≤512 字，否則 `no_token`），不進 argv、輸出或錯誤訊息。
+**參數驗證**：`--timeout` 要在 0～3600 秒之間（NaN、0、負數、inf 一律拒絕）；`--limit` 要在 1～1000；`bot_id`／`assignment_id`／`event_id`／`mission_id` 不能是空的、含控制字元或超過 200 字——都在本機擋下、不打到 daemon。預設逾時 30 秒；daemon 這一側本來就跑很久的 `mission deliver`（fetch＋push＋gh）與 `release-triage publish`（一串 gh 呼叫）預設放寬到 300 秒（`--timeout` 明講的照它）。`agm.py` 要能在 Python 3.9 跑（m4p 只有 3.9）：不用 `match`、執行期的 `X | Y`、`pairwise` 等 3.10+ 語法與 API，`agm_test.py` 的 `PythonThreeNineTest` 守著。
+
 `agm issue claim <n> [--repo owner/name] [--bot 名] [--child 名] [--worktree p] [--branch b]`（issue #425）**不經 daemon、不讀 `runtime.json`**，只呼叫 `gh`：
 在票上留一則「派給 …」並加 label `wip`，留言尾端帶機器讀的認領標記 `<!-- agm:issue-claim {"bot","claim_id","child","worktree","branch","at"} -->`。留言寫入後會用 REST 讀回全部留言確認結果；讀回失敗不回報成功，會追加指向本次標記的交回留言。
 認領人省略時取 `AM_AGENT_NAME`，再退 `AM_BOT_ID`，都沒有就 `no_identity`／exit 2。票已被**別的** bot 認領且最後動靜在 24 小時內 → `issue_claimed`／**exit 3**，
