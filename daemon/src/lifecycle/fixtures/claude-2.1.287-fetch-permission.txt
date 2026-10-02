@@ -1,4 +1,11 @@
-      1 x
+ ▐▛███▛█   Claude Code v2.1.287
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   /…/-home-ubuntu-project-agents-manager/bc0dc1b2-d3b4-4adb-a678-2b3815263252/scratchpad/cc2287-work
+
+
+❯ /clear
+
+❯ Use the WebFetch tool on https://example.com with prompt: What is the page title? Nothing else.
 
 ● Fetch(https://example.com)
 
@@ -7,7 +14,7 @@
  Claude wants to fetch content from example.com
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  url: https://example.com/
- prompt: What is the page title?
+ prompt: What is the page title? Nothing else.
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  Do you want to allow Claude to fetch this content?
  ❯ 1. Yes

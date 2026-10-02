@@ -5538,9 +5538,14 @@ mod delete_bot_tests {
         for n in ["alfa-k1", "alfa-k2", "alfa-k3"] {
             kids.push(a_bot(&e, n, "child").await);
         }
+        // 「寫不進去」要綁在 intent 的嘗試次數上，不能等測試自己 DROP TRIGGER：測試模式背景重試每 20ms 一次、
+        // 最多 MAX_ATTEMPTS 次，負載一高，斷言還沒跑完就把次數用光、intent 收成 failed，之後再也沒人補（#773）。
+        // handler 認領＝第 1 次、背景第 1 次重試＝第 2 次都失敗；第 3 次才寫得進去。
         sqlx::query(&format!(
-            "CREATE TRIGGER am_test_fail_first BEFORE UPDATE OF deleted_at ON bots WHEN NEW.id = '{}' BEGIN SELECT RAISE(ABORT, 'boom'); END",
-            kids[0]
+            "CREATE TRIGGER am_test_fail_first BEFORE UPDATE OF deleted_at ON bots WHEN NEW.id = '{}'
+               AND (SELECT attempts FROM intents WHERE kind = 'delete_project' AND subject_id = '{}') < 3
+             BEGIN SELECT RAISE(ABORT, 'boom'); END",
+            kids[0], e.project_id
         ))
         .execute(&app.db)
         .await
@@ -5549,8 +5554,16 @@ mod delete_bot_tests {
         for k in &kids[1..] {
             assert!(db::bot(&app.db, k).await.unwrap().unwrap().deleted_at.is_some(), "失敗的那顆後面的 child 也要收掉");
         }
-        sqlx::query("DROP TRIGGER am_test_fail_first").execute(&app.db).await.unwrap();
         assert!(crate::testing::eventually!(db::bot(&app.db, &kids[0]).await.unwrap().unwrap().deleted_at.is_some()), "寫得進去之後背景補上");
+        let intent = || async {
+            sqlx::query_as::<_, (String, i64)>("SELECT status, attempts FROM intents WHERE kind = 'delete_project' AND subject_id = ?")
+                .bind(&e.project_id)
+                .fetch_one(&app.db)
+                .await
+                .unwrap()
+        };
+        assert!(crate::testing::eventually!(intent().await.0 == "done"), "補完之後 intent 收成 done：{:?}", intent().await);
+        assert_eq!(intent().await.1, 3, "真的經過一次失敗的背景重試才補上");
     }
 
     /// #296：定案之後某顆 child 的軟刪寫不進去，不能 early return 把母 bot 的 run 留著不停。
