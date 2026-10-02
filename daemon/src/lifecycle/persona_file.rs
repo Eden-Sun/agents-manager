@@ -35,6 +35,11 @@ pub(crate) async fn launch_args(
     text: &str,
     md_configured: bool,
 ) -> Option<Vec<String>> {
+    // herdr ≥0.9 拒絕含控制字元的參數（#772）：路徑帶換行之類就不用檔案（也不寫），呼叫端退回並說一聲。
+    if shim_dir.is_some_and(|d| d.chars().any(char::is_control)) {
+        tracing::warn!(bot = %bot.name, "the bot dir path holds a control character; the persona stays inline");
+        return None;
+    }
     match bot.kind.as_str() {
         "claude" => {
             let path = super::agent_md::install_in_bot_dir(app, bot, project, shim_dir, super::agent_md::PERSONA_FILE, text).await?;
@@ -43,10 +48,11 @@ pub(crate) async fn launch_args(
         "grok" => {
             let path = super::agent_md::install_in_bot_dir(app, bot, project, shim_dir, super::agent_md::PERSONA_FILE, text).await?;
             // 同子 agent 的寫法（herdr_shim）：`--rules` 只收字串，給一行指向檔案的指示。
-            Some(vec!["--rules".into(), format!("AG Man 指示（硬規則，效力同系統指示）在 {path}：開始任何工作前先完整讀過並照做。")])
+            // 路徑用反引號框起來（跟 herdr_shim 的子 agent 同一個寫法）：有空白時才分得出哪裡到哪裡。
+            Some(vec!["--rules".into(), format!("AG Man 指示（硬規則，效力同系統指示）在 `{path}`：開始任何工作前先完整讀過並照做。")])
         }
         "codex" => {
-            if bot.args().iter().any(|a| a == "-p" || a == "--profile" || a.starts_with("--profile=")) {
+            if has_own_profile(bot) {
                 tracing::warn!(bot = %bot.name, "the bot's own codex args carry a profile; the persona stays inline");
                 return None;
             }
@@ -57,6 +63,12 @@ pub(crate) async fn launch_args(
                 tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not write the codex persona profile");
                 return None;
             }
+            if project.host == LOCAL_HOST {
+                // 內容一樣時 `write_private` 不動檔案，mtime 會越來越舊：先標成「剛用過」，掃舊檔才不會掃到自己。
+                let me = std::path::Path::new(&dir).join(format!("{name}.config.toml"));
+                let _ = std::fs::File::options().write(true).open(&me).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+                sweep_stale_local(std::path::Path::new(&dir));
+            }
             let mut args = vec!["-p".to_string(), name];
             if md_configured {
                 args.extend(["-c".into(), "project_doc_max_bytes=0".into()]);
@@ -64,6 +76,42 @@ pub(crate) async fn launch_args(
             Some(args)
         }
         _ => None,
+    }
+}
+
+/// persona 沒能交給檔案、退回 inline 時要寫進對話的 system 訊息（inline 會被 `fit_command_line` 壓進 900 bytes）。
+pub(crate) fn fallback_notice(bot: &db::Bot) -> String {
+    let own_profile = bot.kind == "codex" && has_own_profile(bot);
+    let why = if own_profile {
+        "bot 自己的 args 帶了 -p／--profile，codex 的 profile 不能搶"
+    } else {
+        "persona 檔寫不進去或路徑不能用（詳見 daemon.log）"
+    };
+    format!("母 bot 的 persona 沒能交給檔案（{why}），退回 inline：argv 會被壓進約 900 bytes，AG Man 規則與 agent md 被截斷，這顆 bot 拿到的指示是殘缺的")
+}
+
+fn has_own_profile(bot: &db::Bot) -> bool {
+    bot.args().iter().any(|a| a == "-p" || a == "--profile" || a.starts_with("--profile="))
+}
+
+/// 每顆 bot 一個 profile、只增不減：bot 刪了或換了 CODEX_HOME 就留在那裡（內容是 AG Man 規則）。寫完順手掃掉超過 30 天沒重寫的
+/// `am-parent-*.config.toml`（每次啟動都重寫，所以掃掉舊的不會害到誰）與寫到一半被殺掉的暫存檔（超過 10 分鐘）；別的檔案不碰。
+/// 遠端同一件事在 `agent_md::remote_script` 裡（同一趟 ssh）。
+fn sweep_stale_local(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let max_age = if name.starts_with("am-parent-") && name.ends_with(".config.toml") {
+            std::time::Duration::from_secs(30 * 24 * 3600)
+        } else if name.starts_with(".am-parent-") && name.contains(".tmp-") {
+            std::time::Duration::from_secs(10 * 60)
+        } else {
+            continue;
+        };
+        let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > max_age);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -161,5 +209,108 @@ mod tests {
         sqlx::query("UPDATE bots SET args_json=? WHERE id=?").bind(json!(["--profile", "mine"]).to_string()).bind(&bot.id).execute(&e.app.db).await.unwrap();
         let bot = db::bot(&e.app.db, &bot.id).await.unwrap().unwrap();
         assert!(launch_args(&e.app, &bot, &project, Some("/x/bin"), &env, text, true).await.is_none());
+    }
+
+    /// 暫存目錄自己清（#763：測試不能把目錄留在 /tmp）。
+    struct TmpDir(std::path::PathBuf);
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            let d = std::env::temp_dir().join(format!("am-test-{tag}-{}", crate::db::ulid()));
+            std::fs::create_dir_all(&d).unwrap();
+            Self(d)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 控制字元（ESC、DEL、單獨的 CR…）在 basic string 裡一律跳脫，真 TOML 解析讀回原文——跟 shim 的 profile 同一個結論
+    /// （shim 用字面字串所以要濾；這裡跳脫，所以不用濾也不會壞）。
+    #[tokio::test]
+    async fn codex_profile_survives_control_characters_too() {
+        let (e, bot, project) = fixture("codex").await;
+        let home = TmpDir::new("persona-ctl");
+        let text = "esc\u{1b}[31m del\u{7f} ff\u{0c} cr\rlone crlf\r\nend ''' \"\"\" \\u0041";
+        let env = json!({"CODEX_HOME": home.path().to_string_lossy()});
+        launch_args(&e.app, &bot, &project, Some("/x/bin"), &env, text, false).await.unwrap();
+        let t: toml::Value = toml::from_str(&std::fs::read_to_string(home.path().join(format!("{}.config.toml", codex_profile(&bot.id)))).unwrap()).unwrap();
+        assert_eq!(t["developer_instructions"].as_str().unwrap(), text);
+    }
+
+    /// grok 的那一行跟子 agent 的 `--rules`（herdr_shim）同一個寫法：路徑用反引號框起來（有空白才分得出來）。
+    #[tokio::test]
+    async fn the_grok_rules_line_frames_the_path_in_backticks() {
+        let (e, bot, project) = fixture("grok").await;
+        let dir = TmpDir::new("persona grok 全形");
+        let shim = format!("{}/bots/B1/bin", dir.path().display());
+        let args = launch_args(&e.app, &bot, &project, Some(&shim), &json!({}), "RULES", false).await.unwrap();
+        let path = format!("{}/bots/B1/persona.md", dir.path().display());
+        assert!(args[1].contains(&format!("`{path}`")), "{args:?}");
+        assert!(!args[1].chars().any(char::is_control), "herdr 不收控制字元：{args:?}");
+    }
+
+    /// 路徑含控制字元（換行）：herdr 會拒絕整個 `agent start`（#772）→ 不帶那個參數、也不寫檔，退回（呼叫端會說一聲）。
+    #[tokio::test]
+    async fn a_path_with_a_control_character_is_never_put_in_argv_or_written() {
+        for kind in ["claude", "grok"] {
+            let (e, bot, project) = fixture(kind).await;
+            let dir = TmpDir::new("persona-nl");
+            let shim = format!("{}/line\nbreak/bin", dir.path().display());
+            let args = launch_args(&e.app, &bot, &project, Some(&shim), &json!({}), "RULES", false).await;
+            assert!(args.is_none(), "{kind}: {args:?}");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "{kind}: 什麼都沒寫");
+        }
+    }
+
+    /// codex 的 profile 一顆 bot 一個檔，永遠只增不減：bot 刪了、換了 CODEX_HOME 就留在那裡（內容是 AG Man 規則）。
+    /// 每次寫完順手掃掉很久沒重寫的 `am-parent-*` 與寫到一半被殺掉的暫存檔；別的檔案（含別人的 profile）一個都不碰。
+    #[tokio::test]
+    async fn stale_parent_profiles_and_temp_files_are_swept() {
+        let (e, bot, project) = fixture("codex").await;
+        let home = TmpDir::new("persona-sweep");
+        let home = home.path();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
+        let age = |p: &std::path::Path| std::fs::File::options().write(true).open(p).unwrap().set_modified(old).unwrap();
+        let gone = home.join("am-parent-GONE.config.toml");
+        let live = home.join("am-parent-LIVE.config.toml");
+        let tmp = home.join(".am-parent-X.config.toml.tmp-4242");
+        let child = home.join("am-child-x.config.toml");
+        let mine = home.join("mine.config.toml");
+        let main_cfg = home.join("config.toml");
+        for f in [&gone, &live, &tmp, &child, &mine, &main_cfg] {
+            std::fs::write(f, "x = 1\n").unwrap();
+        }
+        for f in [&gone, &tmp, &child, &mine, &main_cfg] {
+            age(f);
+        }
+        let env = json!({"CODEX_HOME": home.to_string_lossy()});
+        launch_args(&e.app, &bot, &project, Some("/x/bin"), &env, "R", false).await.unwrap();
+        assert!(!gone.exists(), "很久沒重寫的別顆 bot 的 am-parent profile 要掃掉");
+        assert!(!tmp.exists(), "寫到一半被殺掉的暫存檔要掃掉");
+        assert!(live.exists(), "新的別顆 bot 的 profile 不能動");
+        assert!(child.exists() && mine.exists() && main_cfg.exists(), "不是 am-parent-* 的檔案一個都不能動（am-child-* 歸 herdr shim 掃）");
+        assert!(home.join(format!("{}.config.toml", codex_profile(&bot.id))).exists());
+    }
+
+    /// 遠端：送過去的 script 也順手掃（同一趟 ssh）；只掃 `am-parent-*`。
+    #[tokio::test]
+    async fn the_remote_script_sweeps_stale_parent_profiles_in_the_same_ssh() {
+        let (e, bot, mut project) = fixture("codex").await;
+        remote(&e, &mut project, "persona-box-sweep").await;
+        let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let s2 = scripts.clone();
+        crate::hosts::set_ssh_fake("persona-box-sweep", move |script| {
+            s2.lock().unwrap().push(script.to_string());
+            Ok("AM_AGENT_MD_OK\n".into())
+        });
+        launch_args(&e.app, &bot, &project, Some("/Users/x/b/bin"), &json!({}), "R", false).await.unwrap();
+        let scripts = scripts.lock().unwrap();
+        assert_eq!(scripts.len(), 1);
+        assert!(scripts[0].contains("am-parent-*.config.toml") && scripts[0].contains("-mtime +30"), "{}", scripts[0]);
     }
 }
