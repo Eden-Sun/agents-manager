@@ -4337,7 +4337,7 @@ async fn upload_attachment(
     // 2026-09-14：任何檔案都收。mime 只決定 UI 畫縮圖還是檔案晶片，agent 讀到的一律是路徑。
     let mime = if mime.is_empty() { "application/octet-stream".to_string() } else { mime };
     // `{:#}` so the ssh / filesystem cause reaches the UI.
-    let a = crate::attach::save(&app, &id, name, &mime, &body)
+    let a = crate::attach::save_bytes(&app, &id, name, &mime, body)
         .await
         .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     Ok((StatusCode::OK, Json(crate::attach::to_json(&a))).into_response())
