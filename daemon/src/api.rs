@@ -5488,6 +5488,34 @@ mod delete_bot_tests {
         assert!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some());
     }
 
+    /// #757：刪母 bot 會連它的 child 一起軟刪；「最近刪除」只列 user bot，復原母 bot 之後 child 仍是已刪、可以再個別復原
+    /// （母 bot 活了就過得了 #298 的檢查）。母 bot 復原後沒有 run（不自動重開），清單裡也不再有它。
+    #[tokio::test]
+    async fn restoring_a_deleted_parent_leaves_its_children_deleted_but_restorable() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let parent = a_bot(&e, "alfa", "user").await;
+        in_config(&e, &[(&parent, "alfa")]).await;
+        let kid = a_bot(&e, "alfa-kid", "child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id = ? WHERE id = ?").bind(&parent).bind(&kid).execute(&app.db).await.unwrap();
+
+        delete_bot(State(app.clone()), Path(parent.clone())).await.unwrap();
+        assert!(db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.is_some(), "child 跟著母 bot 一起軟刪");
+        let Json(listed) = crate::deleted_bots::list_deleted(State(app.clone())).await.unwrap();
+        let ids: Vec<&str> = listed["bots"].as_array().unwrap().iter().map(|b| b["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, [parent.as_str()], "只列 user bot：{listed}");
+
+        restore_bot(State(app.clone()), Path(parent.clone())).await.unwrap();
+        assert!(db::bot(&app.db, &parent).await.unwrap().unwrap().deleted_at.is_none());
+        assert!(db::active_run(&app.db, &parent).await.unwrap().is_none(), "復原不自動開 run");
+        assert!(db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.is_some(), "child 不跟著復原（由父 bot／AGM 自己處理）");
+        let Json(after) = crate::deleted_bots::list_deleted(State(app.clone())).await.unwrap();
+        assert!(after["bots"].as_array().unwrap().is_empty(), "復原後清單空了：{after}");
+
+        restore_bot(State(app.clone()), Path(kid.clone())).await.expect("母 bot 活了，child 可以個別復原");
+        assert!(db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.is_none());
+    }
+
     /// #301：delete_bot 定案後、停機／purge 之前，restore_bot 必須等鎖，不能插進來。
     #[tokio::test]
     async fn a_restore_waits_for_the_delete_that_holds_the_bot_lock() {
