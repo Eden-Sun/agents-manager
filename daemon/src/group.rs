@@ -195,6 +195,16 @@ pub fn strip_mentions(text: &str, members: &[Member]) -> String {
     }
 }
 
+/// 錯誤本體是 JSON 的（維護窗口、被擋的 pane、送不出去的 prompt…）：取出人看得懂的那一句，
+/// 不要把整坨 JSON 貼進對話與 `skipped[].detail`。`message` → `reason` → `error`，都沒有才退回那個值的字串。
+fn human_of(v: &Value) -> String {
+    ["message", "reason", "error"]
+        .iter()
+        .find_map(|k| v.get(*k).and_then(Value::as_str).filter(|s| !s.trim().is_empty()))
+        .map(str::to_string)
+        .unwrap_or_else(|| v.to_string())
+}
+
 /// SPEC §13.3 machine codes; the system message carries the human-readable text.
 fn skip_reason(app_err: &LcError) -> (&'static str, String) {
     match app_err {
@@ -216,13 +226,13 @@ fn skip_reason(app_err: &LcError) -> (&'static str, String) {
             (code, reason.to_string())
         }
         LcError::NotFound(w) => ("not_found", format!("not found: {w}")),
-        LcError::NotFoundValue(v) => ("not_found", v.to_string()),
+        LcError::NotFoundValue(v) => ("not_found", human_of(v)),
         LcError::Bad(m) => ("bad_request", m.clone()),
-        LcError::BadValue(v) => ("bad_request", v.to_string()),
-        LcError::Unprocessable(v) => ("unprocessable", v.to_string()),
-        LcError::Forbidden(v) => ("forbidden", v.to_string()),
-        LcError::Unavailable(v) => ("unavailable", v.to_string()),
-        LcError::Uncommitted(v) => ("uncommitted", v.to_string()),
+        LcError::BadValue(v) => ("bad_request", human_of(v)),
+        LcError::Unprocessable(v) => ("unprocessable", human_of(v)),
+        LcError::Forbidden(v) => ("forbidden", human_of(v)),
+        LcError::Unavailable(v) => ("unavailable", human_of(v)),
+        LcError::Uncommitted(v) => ("uncommitted", human_of(v)),
         LcError::Upstream(m) => ("upstream", m.clone()),
     }
 }
@@ -739,5 +749,27 @@ mod uncommitted_tests {
             resynced |= ev.kind == "resync" && ev.data["reason"] == "group_note_retired";
         }
         assert!(resynced, "刪了一則前端已經有的訊息，要發 resync");
+    }
+}
+
+#[cfg(test)]
+mod skip_text_tests {
+    use super::*;
+
+    /// 「群組訊息未送達」那則 system 訊息與 `skipped[].detail` 是給人看的：錯誤本身帶的是 JSON 的（維護窗口、被擋的 pane、
+    /// 送不出去的 prompt…），以前整坨 JSON 字串直接貼進對話。要取出人看得懂的那一句（message／reason／error）。
+    #[test]
+    fn a_skipped_note_never_shows_raw_json() {
+        let cases = [
+            (LcError::Forbidden(json!({"error": "agent_pane", "message": "這顆 pane 正在跑 agent，請從 bot 停掉"})), "這顆 pane 正在跑 agent，請從 bot 停掉"),
+            (LcError::Unavailable(json!({"error": "maintenance_state_unavailable", "reason": "窗口狀態讀不到"})), "窗口狀態讀不到"),
+            (LcError::Unprocessable(json!({"error": "delivery_unprovable", "reason": "prompt_too_long_to_prove"})), "prompt_too_long_to_prove"),
+            (LcError::BadValue(json!({"error": "remote_not_supported", "host": "m4p"})), "remote_not_supported"),
+        ];
+        for (err, expect) in cases {
+            let (code, human) = skip_reason(&err);
+            assert!(!human.contains('{') && !human.contains('"'), "{code}: 不能是原始 JSON：{human}");
+            assert!(human.contains(expect), "{code}: {human}");
+        }
     }
 }

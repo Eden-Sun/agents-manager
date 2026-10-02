@@ -273,3 +273,16 @@ test('佔槽的不是使用者自己（unknown／start／daemon／bot）時，�
     assert.equal(r.draft, '繼續', JSON.stringify(holder))
   }
 })
+
+test('群組送出被跳過的收件者：toast 講人話，草稿保留', async () => {
+  seed()
+  routeDaemon((req) =>
+    req.path.endsWith('/chat')
+      ? json({ group_id: 'g1', delivered: false, sent: [], skipped: [{ bot_id: 'b1', bot_name: 'b1', reason: 'not_running', detail: 'bot has no active run' }] })
+      : json({}),
+  )
+  const res = await useStore.getState().sendGroupChat('p1', '@b1 嗨-skip-1')
+  assert.equal(res, null, '一顆都沒送到：回 null，輸入框才保留草稿')
+  const text = useStore.getState().notices.at(-1)?.text ?? ''
+  assert.ok(text.includes('bot 未啟動') && !text.includes('no active run'), text)
+})

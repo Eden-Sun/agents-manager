@@ -3171,6 +3171,7 @@ poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label �
 （「群組訊息未送達 X：…（不會自動啟動）」）；同 crid 重送不重寫。**絕不自動啟動。**
 **例外**：那一顆的字已經送進去、只是送達結果寫不進 DB（`LcError::Uncommitted`，§6 送達那段，#149／#167）**不算略過**——放進 `sent`（`delivery:"unknown"`，
 herdr 明確拒收才是 `failed`）、不寫「未送達」，之後由 daemon 補結果；同 crid 重送走冪等分支，不再打字。
+`skipped[].detail` 與那則 system 訊息是給人看的：錯誤本體是 JSON 的（維護窗口、被擋的 pane、送不出去的 prompt…）時取 `message`→`reason`→`error` 那一句，不貼原始 JSON；web 的 toast 另把機器碼翻成中文（`groupSkipText`）。
 
 API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md`）。WS 沿用 `message_added`（含 `group_id`）與 `turn_updated`。
 
