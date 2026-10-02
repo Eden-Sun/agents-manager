@@ -3881,7 +3881,7 @@ mod external_claim_tests {
         }
         let turn: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id='t-late'").fetch_one(&env.app.db).await.unwrap();
         let tx = env.app.db.begin().await.unwrap();
-        replace_fallback_reply(&env.app, tx, &turn, "hook 原文").await.unwrap();
+        replace_fallback_reply(&env.app, tx, &turn, "hook 原文", &None, &None).await.unwrap();
         let rows: Vec<(String, String)> = sqlx::query_as("SELECT id, content FROM messages WHERE turn_id='t-late' ORDER BY rowid").fetch_all(&env.app.db).await.unwrap();
         assert_eq!(rows, vec![("m-zzz-first".to_string(), "備援一".to_string()), ("m-aaa-second".to_string(), "hook 原文".to_string())]);
     }
