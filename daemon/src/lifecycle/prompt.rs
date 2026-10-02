@@ -755,12 +755,14 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
                 ));
             }
             if crate::codex_live::rate_limit_switch_prompt_open(&screen) {
+                crate::codex_model_migration::observe_screen(app, run, &screen).await;
                 let hint = "codex 正在問要不要為了降低額度消耗切換模型；請到「終端」選擇，daemon 不會替你選，也不會把訊息打進選單。";
                 return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
             }
             // 啟動時的更新選單：不替使用者選更新、不把 prompt 打進去（Enter 會選到預設的 Update now）。
+            // 補標 blocked 並在對話裡講一次原因（`observe_screen` 每個選單只講一次）；這裡的 409 不另寫訊息，排隊的 prompt 重試也不洗版。
             if crate::codex_update::update_menu_open(&screen) {
-                // 不寫系統訊息：排隊的 prompt 會一直重試，每次都寫就是一串一樣的提示（跟 model migration 那條一樣只回 409）。
+                crate::codex_model_migration::observe_screen(app, run, &screen).await;
                 return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": crate::codex_update::MENU_HINT})));
             }
             if !crate::codex_live::close_picker(client, pane).await {
@@ -2024,6 +2026,8 @@ mod prompt_tests {
         }
         assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "不按任何鍵（Enter 會選到 Update now）");
         assert!(f.env.herdr.calls_to("pane.send_text").is_empty(), "不打字進選單");
+        let status: String = sqlx::query_scalar("SELECT agent_status FROM runs WHERE id=?").bind(&f.run_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "blocked", "herdr 判 idle 時也要顯示 blocked，網頁才看得到要去處理");
     }
 
     /// 非互動的更新方框（底下就是正常的輸入列）與對話裡引用選單原文，都不是擋路的對話框。

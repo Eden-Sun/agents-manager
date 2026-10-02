@@ -1,7 +1,9 @@
-//! Codex 0.157.0's startup model migration screen requires a person to choose an outcome.
+//! Codex 0.157.0's startup model migration screen requires a person to choose an outcome. The same goes for the
+//! other dialogs that sit in front of the composer and want a person's choice: the startup "Update available" menu
+//! (default `1. Update now`) and the rate-limit model-switch popup ([`Dialog`]).
 //!
-//! Keep the migration screen open, mark the run blocked when herdr misses the prompt, and hold
-//! queued deliveries until the user finishes the choice. This flow never sends keys to the pane.
+//! Keep the dialog open, mark the run blocked (with the reason, in the conversation) when herdr misses the prompt,
+//! and hold queued deliveries until the user finishes the choice. This flow never sends keys to the pane.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -13,7 +15,43 @@ use crate::state::App;
 const SETTLE: Duration = Duration::from_millis(800);
 
 pub const WAITING_HINT: &str = "Codex 正停在模型升級提示，請到「終端」選 Try new model 或 Use existing model。daemon 不替你選，也不會把訊息打進選單；完成選擇後排隊的訊息會繼續送出。";
-const CLOSED_NOTE: &str = "Codex 模型升級提示已關閉，排隊的訊息可繼續送出。";
+/// 啟動時的更新選單（預設選 `1. Update now`）。
+pub const UPDATE_WAITING_HINT: &str = "Codex 更新提示等待選擇：啟動時跳出「Update available」選單（預設選 1. Update now）擋在輸入列前面。請到「終端」選 2. Skip（或 3. Skip until next version）；daemon 不替你選更新，也不會把訊息打進選單；完成選擇後排隊的訊息會繼續送出。";
+/// 額度快用完時的換模型建議。
+pub const RATE_LIMIT_WAITING_HINT: &str = "Codex 正在問要不要為了降低額度消耗切換模型；請到「終端」選擇，daemon 不會替你選，也不會把訊息打進選單；完成選擇後排隊的訊息會繼續送出。";
+const CLOSED_NOTE: &str = "Codex 擋住輸入列的提示已關閉，排隊的訊息可繼續送出。";
+
+/// 擋在輸入列前面、要使用者本人選的 codex 畫面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialog {
+    Migration,
+    UpdateMenu,
+    RateLimitSwitch,
+}
+
+impl Dialog {
+    /// 畫面上現在開著的是哪一種（都不是＝`None`）。
+    pub fn of(screen: &str) -> Option<Self> {
+        if crate::tui_prompts::is_codex_model_migration_prompt(screen) {
+            Some(Self::Migration)
+        } else if crate::codex_update::update_menu_open(screen) {
+            Some(Self::UpdateMenu)
+        } else if crate::codex_live::rate_limit_switch_prompt_open(screen) {
+            Some(Self::RateLimitSwitch)
+        } else {
+            None
+        }
+    }
+
+    /// 告訴使用者「為什麼卡住、要去哪裡處理」的那句話。
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Migration => WAITING_HINT,
+            Self::UpdateMenu => UPDATE_WAITING_HINT,
+            Self::RateLimitSwitch => RATE_LIMIT_WAITING_HINT,
+        }
+    }
+}
 
 struct Episode {
     /// 由這裡補標成 `blocked` 之前的狀態；`None` = herdr 自己判的。
@@ -62,8 +100,8 @@ pub async fn observe(app: &Arc<App>, run: &db::Run) {
 }
 
 pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
-    if crate::tui_prompts::is_codex_model_migration_prompt(screen) {
-        notify_once(app, run).await;
+    if let Some(dialog) = Dialog::of(screen) {
+        notify_once(app, run, dialog).await;
         if run.agent_status == "blocked" {
             return;
         }
@@ -133,7 +171,7 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
         return;
     }
     open().lock().unwrap().remove(&run.id);
-    tracing::info!(run = %run.id, bot = %run.bot_id, "Codex 模型升級提示已關閉");
+    tracing::info!(run = %run.id, bot = %run.bot_id, "Codex 擋住輸入列的提示已關閉");
     if let Ok(conversation) = db::conversation_id(&app.db, &run.bot_id).await {
         let _ = crate::lifecycle::insert_message(
             app,
@@ -154,7 +192,7 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
     crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
 }
 
-async fn notify_once(app: &Arc<App>, run: &db::Run) {
+async fn notify_once(app: &Arc<App>, run: &db::Run, dialog: Dialog) {
     {
         let mut episodes = open().lock().unwrap();
         if episodes.contains_key(&run.id) {
@@ -162,7 +200,7 @@ async fn notify_once(app: &Arc<App>, run: &db::Run) {
         }
         episodes.insert(run.id.clone(), Episode { forced_from: None, closing: false });
     }
-    tracing::warn!(run = %run.id, bot = %run.bot_id, "Codex model migration prompt is waiting for a user choice");
+    tracing::warn!(run = %run.id, bot = %run.bot_id, ?dialog, "Codex dialog is waiting for a user choice");
     match db::conversation_id(&app.db, &run.bot_id).await {
         Ok(conversation) => {
             let _ = crate::lifecycle::insert_message(
@@ -170,7 +208,7 @@ async fn notify_once(app: &Arc<App>, run: &db::Run) {
                 &conversation,
                 None,
                 "system",
-                WAITING_HINT,
+                dialog.hint(),
                 "system",
                 false,
                 None,
@@ -257,6 +295,40 @@ mod tests {
         assert_eq!(env.herdr.calls_to("pane.send_keys").len(), 0);
         let messages = system_messages(&env.app, &bot.id).await;
         assert_eq!(messages, [WAITING_HINT, CLOSED_NOTE]);
+    }
+
+    /// 啟動時的更新選單與 rate-limit 切換選單一樣擋住輸入列、要使用者本人選：herdr 判成 idle 時要補標 blocked、
+    /// 在對話裡講原因（網頁看得到、知道去 pane 處理）、一個鍵都不按；選單關掉自動回到原本的狀態、補一句「已關閉」並放行排隊的訊息。
+    #[tokio::test]
+    async fn other_startup_dialogs_block_with_their_own_reason_and_release_when_closed() {
+        for (name, screen, reason_has) in [
+            ("update", include_str!("lifecycle/fixtures/codex-0.155-update-menu.txt"), "更新"),
+            ("rate", include_str!("lifecycle/fixtures/codex-0.157-rate-limit-switch.txt"), "切換模型"),
+        ] {
+            let env = tt::env().await;
+            let app = env.app.clone();
+            let bot = tt::claude_bot(&app, &env.project_id, &format!("codex-dialog-{name}")).await;
+            sqlx::query("UPDATE bots SET kind='codex' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
+            let run_id = tt::fake_run(&app, &bot.id).await;
+            let run = run_of(&app, &run_id).await;
+            assert_eq!(run.agent_status, "idle", "前提：herdr 判成 idle");
+
+            observe_screen(&app, &run, screen).await;
+            assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "{name}：要補標 blocked");
+            assert!(is_open(&run_id), "{name}");
+            let notes = system_messages(&app, &bot.id).await;
+            assert_eq!(notes.len(), 1, "{name}：講一次原因就好：{notes:?}");
+            assert!(notes[0].contains(reason_has) && notes[0].contains("終端"), "{name}：原因要講清楚、說去終端處理：{}", notes[0]);
+            observe_screen(&app, &run_of(&app, &run_id).await, screen).await;
+            assert_eq!(system_messages(&app, &bot.id).await.len(), 1, "{name}：同一個選單不重複講");
+            assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "{name}：不替使用者選");
+            assert!(env.herdr.calls_to("pane.send_text").is_empty(), "{name}");
+
+            observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
+            assert_eq!(run_of(&app, &run_id).await.agent_status, "idle", "{name}：關掉後回到原本的狀態");
+            assert!(!is_open(&run_id), "{name}");
+            assert_eq!(system_messages(&app, &bot.id).await.last().map(String::as_str), Some(CLOSED_NOTE), "{name}");
+        }
     }
 
     #[tokio::test]
