@@ -1534,6 +1534,8 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
 4. **接回對話**：`POST /api/bots/{id}/start?resume=native`（或 `restart?resume=native`）用 DB 記的 native session 啟動；
    接不回就回 `409 cannot_resume`、**不開新對話**。argv：claude `--resume <sid>`、grok `--resume <sid>`、codex `resume <sid>`（子命令排最前）。
    `GET /api/capabilities` 宣告 `resume_native_start`。
+   **不帶參數的 start／restart 預設也接回**（2026-10-02 使用者：console-rpa 換身分後重啟沒帶參數，起了新 session、整個失憶）：有記錄的 session 就 `--resume`，
+   接不回（沒有 session、transcript 不在）才退回開新對話、不回 409；要開新對話明確帶 `?resume=fresh`（`bin/agm bot restart --resume fresh`）。
    **接回之後、驗證之前不送 prompt**（issue #92，`lifecycle::resume_gate`）：`--resume` 帶出去不等於接回了——要等 CLI 自己
    回報 session。claude 的 `SessionStart` hook 帶的 session 跟 `runs.resume_session_id` 一樣記 `runs.resume_outcome='verified'`，
    不一樣記 `mismatch` 並插 `context_lost` 說明（CLI 默默開了新對話）；兩者都是結論，排隊的 prompt 隨即放行（hook 處理完就叫醒 flush）。
