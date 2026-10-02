@@ -852,6 +852,13 @@ async fn sweep(app: &Arc<App>, threshold: i64) {
         if decide(&f, threshold).is_err() {
             continue;
         }
+        // 網頁顯示的「背景執行中」同一本帳（claude Stop hook 的 `background_tasks`，沒有就是畫面判斷）：
+        // subagent／monitor／workflow 不是 pane 底下的行程，行程樹看不到它們。帳上有就不收，也不必再為它跑一次 ps。
+        // 只往保守的方向用：帳上說「沒有」不能放寬行程樹（沒登記在 claude 的行程照樣會在收機器時被殺）。
+        if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
+            tracing::info!(bot = %run.bot_id, background_jobs = n, "idle sweep: the web shows background work for this bot; leaving it alone");
+            continue;
+        }
         match inspect_background(app, &run).await {
             BackgroundWork::None => {}
             BackgroundWork::Running(procs) => {
@@ -1907,6 +1914,51 @@ mod tests {
         sweep(&env.app, 90).await;
         assert!(asleep(&env.app, &bot).await.is_some(), "證明沒有背景工作，照常收");
         assert!(db::active_run(&env.app.db, &bot).await.unwrap().is_none());
+    }
+
+    /// claude 的 Stop hook 報的背景工作（`background_tasks`）與網頁顯示的「背景執行中」同一本帳（`background_jobs::known`）：
+    /// subagent／monitor／workflow 這類**不是 pane 底下的行程**，行程樹看不到，以前 bot 會在它們還在跑的時候被收掉。
+    /// 帳上有背景工作就不收；帳上說沒有（hook 報過空陣列）**不能**放寬行程樹的判斷——沒有被 claude 登記的行程照樣會被收掉時殺死。
+    #[tokio::test]
+    async fn work_the_web_shows_as_running_keeps_the_bot_awake_but_a_clean_report_does_not_relax_the_process_tree() {
+        let hook = |tasks: serde_json::Value| json!({"hook_event_name": "Stop", "session_id": "s", "background_tasks": tasks});
+        let subagent = json!([{"id": "a1", "type": "subagent", "status": "running", "description": "review", "agent_type": "Explore"}]);
+
+        // 1. 行程樹乾淨，但 hook 報了一個 subagent 還在跑：不收。
+        let env = crate::testing::env().await;
+        let (bot, run_id) = idle_bot(&env, "hotel").await;
+        let _shell = provably_no_background_work(&env, &bot);
+        let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        crate::background_hook::on_stop(&env.app, &run, &hook(subagent.clone())).await;
+        sweep(&env.app, 90).await;
+        assert_left_running(&env.app, &bot, "hook 報 subagent 還在跑").await;
+
+        // 2. 畫面判斷（沒有 hook 帳的 claude／codex）記在同一本帳：一樣不收。
+        let env = crate::testing::env().await;
+        let (bot, run_id) = idle_bot(&env, "india2").await;
+        let _shell = provably_no_background_work(&env, &bot);
+        env.app.background_jobs.lock().unwrap().insert(run_id, 1);
+        sweep(&env.app, 90).await;
+        assert_left_running(&env.app, &bot, "畫面標著 1 個背景工作").await;
+
+        // 3. hook 報過「沒有」、行程樹也乾淨：照常收。
+        let env = crate::testing::env().await;
+        let (bot, run_id) = idle_bot(&env, "juliet").await;
+        let _shell = provably_no_background_work(&env, &bot);
+        let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        crate::background_hook::on_stop(&env.app, &run, &hook(json!([]))).await;
+        sweep(&env.app, 90).await;
+        assert!(asleep(&env.app, &bot).await.is_some(), "帳上乾淨、行程樹證明沒有：照常收");
+
+        // 4. hook 報「沒有」，但行程樹裡有活的背景 shell：以行程樹為準，不收。
+        let env = crate::testing::env().await;
+        let (bot, run_id) = idle_bot(&env, "kilo").await;
+        env.herdr.set_shell_pid(&format!("pane-{bot}"), 4242);
+        let _ps = test_ps::set(&bot, Ok("  900     1  4000 herdr\n 4242   900  8000 -zsh\n 4300  4242  8000 bash -c cargo build\n".to_string()));
+        let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        crate::background_hook::on_stop(&env.app, &run, &hook(json!([]))).await;
+        sweep(&env.app, 90).await;
+        assert_left_running(&env.app, &bot, "hook 說沒有、行程樹說有").await;
     }
 
     #[tokio::test]
