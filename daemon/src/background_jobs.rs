@@ -153,6 +153,19 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str, cl
     }
 }
 
+/// 現場讀一次這個 run 的畫面並記帳（一鍵重啟在計畫時與輪到時用）。巡邏每 30 秒才一輪：回合剛結束、背景工作剛丟出去的
+/// 那幾秒，帳上是「沒看過」或上一輪的 0，不能拿來當乾淨的證據。讀不到（沒有 pane、主機沒連、herdr 讀失敗）就維持原帳——
+/// 沒有新證據不改舊證據。
+pub async fn refresh(app: &Arc<App>, run: &db::Run, kind: &str) {
+    if run.state != "running" || !matches!(kind, "claude" | "codex") {
+        return;
+    }
+    let Some(pane) = run.pane_id.as_deref() else { return };
+    let Some(client) = app.herdr_for_run(run).await else { return };
+    let Ok(read) = client.pane_read(pane, "visible", 80).await else { return };
+    observe(app, run, kind, &read.text, &client, pane).await;
+}
+
 /// 這一輪沒看到的 run（結束了）不留帳。
 pub fn retain_runs(app: &App, active: &[String]) {
     app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));

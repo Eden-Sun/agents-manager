@@ -154,6 +154,16 @@ pub fn plan(cands: &[Cand]) -> (Vec<&Cand>, Vec<(&Cand, Skip)>) {
 
 async fn cand_of(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> anyhow::Result<Cand> {
     let notice = run.update_notice.as_deref().unwrap_or("");
+    // 只對「真的可能被重啟」的現場讀畫面（閒置、有待套用的更新、不是子 agent／default session）：其餘的理由先擋了，不必多一趟 herdr。
+    let may_restart = run.agent_status == "idle"
+        && !notice.trim().is_empty()
+        && bot.managed_by != "child"
+        && bot.parent_bot_id.as_deref().is_none_or(str::is_empty)
+        && !lifecycle::in_default_session(run)
+        && bot.herdr_session.as_deref() != Some("default");
+    if may_restart {
+        crate::background_jobs::refresh(app, run, &bot.kind).await;
+    }
     Ok(Cand {
         bot_id: bot.id.clone(),
         name: bot.name.clone(),
@@ -980,6 +990,11 @@ mod tests {
         assert_eq!(Skip::Child.code(), "child");
     }
 
+    /// 畫面底部標著 1 個背景 shell 的 claude 畫面（#714 的固定樣本）。
+    fn background_screen() -> String {
+        std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/claude-2.1.281-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
     /// #767：回合結束、agent 閒置，但畫面底部還標著背景工作（#714）——重啟一退 CLI，背景 shell／終端跟著沒了。
     /// 跳過，理由 `background_jobs`、label 帶數字；數字是 0 或**還沒觀察過**（daemon 剛重啟、巡邏還沒輪到）時沒有證據，不擋。
     #[test]
@@ -1006,12 +1021,14 @@ mod tests {
         let app = env.app.clone();
         let (busy, busy_run) = pending_bot(&env, "bg", "claude", "Update installed · Restart to update").await;
         let (fresh, _) = pending_bot(&env, "fresh", "claude", "Update installed · Restart to update").await;
-        app.background_jobs.lock().unwrap().insert(busy_run, 3);
+        // 計畫時現場讀畫面（不靠巡邏的帳）：busy 的畫面底部標著 1 個背景 shell。
+        env.herdr.set_screen(&format!("pane-{busy}"), &background_screen());
+        let _ = busy_run;
         let plan = spawn(&app).await.unwrap();
         let skipped = plan["skipped"].as_array().unwrap();
         let row = skipped.iter().find(|r| r["bot_id"] == busy).unwrap_or_else(|| panic!("背景工作在跑的要進 skipped：{plan}"));
         assert_eq!(row["reason"], "background_jobs", "{plan}");
-        assert_eq!(row["reason_label"], "背景執行中（3）", "{plan}");
+        assert_eq!(row["reason_label"], "背景執行中（1）", "{plan}");
         assert!(plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == fresh), "沒觀察過的不擋：{plan}");
         assert!(!plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == busy), "{plan}");
     }
@@ -1027,7 +1044,8 @@ mod tests {
         let release = hold_batch_at(&first);
         let plan = spawn(&app).await.unwrap();
         assert!(plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == late), "計畫時它還是乾淨的：{plan}");
-        app.background_jobs.lock().unwrap().insert(late_run.clone(), 1);
+        // 計畫之後它才丟出背景工作：輪到它時現場讀畫面看得到。
+        env.herdr.set_screen(&format!("pane-{late}"), &background_screen());
         release.send(()).unwrap();
         assert!(
             crate::testing::eventually!(events.lock().unwrap().iter().any(|(k, d)| k == "bots_restart_done" && d["batch_id"] == plan["batch_id"])),
@@ -1040,6 +1058,32 @@ mod tests {
         assert_eq!(skip.1["reason_label"], "背景執行中（1）");
         assert!(!evs.iter().any(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == late && d["status"] == "restarting"), "不能動它：{evs:?}");
         assert_eq!(db::active_run(&app.db, &late).await.unwrap().map(|r| r.id), Some(late_run), "它的 run 沒被動過");
+    }
+
+    /// #767 的缺口：背景工作數是巡邏（每 30 秒一輪）記下的。回合剛結束、背景工作剛丟出去的那幾秒，帳上不是「沒看過」就是
+    /// 上一輪「看過、是 0」——按 ⌃⌃ 照樣把它的長工作殺掉。計畫時與輪到時對要動的那幾顆現場讀一次畫面，不靠 30 秒前的帳。
+    #[tokio::test]
+    async fn a_stale_or_missing_background_count_is_refreshed_from_the_screen_before_deciding() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let screen = background_screen();
+        let (stale, stale_run) = pending_bot(&env, "stale", "claude", "Update installed · Restart to update").await;
+        let (unseen, _) = pending_bot(&env, "unseen", "claude", "Update installed · Restart to update").await;
+        let (clean, clean_run) = pending_bot(&env, "clean", "claude", "Update installed · Restart to update").await;
+        let quiet = std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        // 巡邏上一輪看過「乾淨」，之後才丟出背景工作；另一顆巡邏還沒輪到。
+        app.background_jobs.lock().unwrap().insert(stale_run.clone(), 0);
+        app.background_jobs.lock().unwrap().insert(clean_run.clone(), 0);
+        env.herdr.set_screen(&format!("pane-{stale}"), &screen);
+        env.herdr.set_screen(&format!("pane-{unseen}"), &screen);
+        env.herdr.set_screen(&format!("pane-{clean}"), &quiet);
+
+        let plan = spawn(&app).await.unwrap();
+        let reason = |id: &str| plan["skipped"].as_array().unwrap().iter().find(|r| r["bot_id"] == id).map(|r| r["reason"].clone());
+        assert_eq!(reason(&stale), Some(serde_json::json!("background_jobs")), "上一輪看過 0、現在畫面有背景工作：{plan}");
+        assert_eq!(reason(&unseen), Some(serde_json::json!("background_jobs")), "沒看過的，現場讀得到就有證據了：{plan}");
+        assert_eq!(reason(&clean), None, "畫面乾淨的照常重啟：{plan}");
+        assert!(plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == clean), "{plan}");
     }
 
     /// SPEC §6.5.1：重啟會關掉使用者的終端（2026-09-12 review #4）。
@@ -1676,6 +1720,13 @@ mod tests {
 
         let scoped = spawn_scoped(&app, Some(&Scope { kind: "codex".into(), host: "local".into() })).await.unwrap();
         assert!(scoped["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == cx2), "{scoped}");
+        // 先等批次真的卡在 cx（recheck 之後、`restarting` 推出之後才是 hold 點）：沒等就清它的 notice，批次的 recheck 還沒跑的話
+        // 會看到「不用重啟了」直接跳過 cx、往下輪到 cx2，cx2 就不算還排著（recheck 變慢時偶發紅）。
+        assert!(
+            crate::testing::eventually!(events.lock().unwrap().iter().any(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == cx && d["status"] == "restarting")),
+            "{:?}",
+            events.lock().unwrap()
+        );
         // 卡住的那顆（已經輪到、不算「還排著」）更新套完了：現在等著的只剩還排在那一批裡的 cx2。
         sqlx::query("UPDATE runs SET update_notice=NULL WHERE id=?").bind(&cx_run).execute(&app.db).await.unwrap();
         let all = spawn(&app).await.unwrap();
