@@ -310,7 +310,7 @@ am_lease_sleep() {
 # * 其他一切失敗（連不上、逾時、5xx、看不懂的回應）：先當暫時的，續約還有機會就繼續試；
 #   但**不能等到 daemon 的到期時間之後才動手**——那時別人可能已經拿到同一個名額。所以估一個保守的
 #   deadline（＝續約成功那個請求**送出**的時間 ＋ TTL，daemon 記的到期一定不早於它），
-#   下一次重試（隔 `_renew_every`、最久再加 curl 逾時）會落在 deadline 之後就現在停。
+#   下一次重試（失敗之後隔 `_lw_retry`＝5 秒、最久再加 curl 逾時）會落在 deadline 之後就現在停。
 # * 讀不到時間（`date +%s` 壞掉）：沒有依據可以等，第一次失敗就停。
 am_lease_watch() {
     _lw_shim=$$
@@ -319,13 +319,19 @@ am_lease_watch() {
     _ls_gap=""
     _lw_term=""
     trap 'if [ -n "$_ls_gap" ]; then _lw_term=1; else [ -z "$_ls_pid" ] || kill -KILL "$_ls_pid" 2>/dev/null; exit 0; fi' TERM
-    # 續約請求的逾時：隔多久續一次的一半，夾在 1～5 秒（正常的 TTL 下就是 5 秒）。
+    # 續約請求的逾時：隔多久續一次的一半，夾在 1～10 秒（正常的 TTL 下就是 10 秒）。負載七八十的機器上 daemon 回個續約
+    # 常常超過五秒，逾時太短就把「慢」當成「死」。
     _lw_m=$((_renew_every / 2))
     [ "$_lw_m" -ge 1 ] || _lw_m=1
-    [ "$_lw_m" -le 5 ] || _lw_m=5
+    [ "$_lw_m" -le 10 ] || _lw_m=10
+    # 續約失敗之後改成短間隔重試（不是再等一整個續約間隔）：TTL 180 秒時整個間隔是 60 秒，以前失敗之後只剩兩次機會
+    # （60、120 秒），daemon 慢兩分鐘就把完全合法的建置整棵殺掉；現在用到「再試一次也來得及」的最後一刻才放棄。
+    _lw_retry=5
+    [ "$_lw_retry" -le "$_renew_every" ] || _lw_retry=$_renew_every
+    _lw_gap=""
     while :; do
         [ -d "$_state" ] || return 0
-        am_lease_sleep "$_renew_every"
+        am_lease_sleep "${_lw_gap:-$_renew_every}"
         # shim 本身死了（被 SIGKILL，`trap` 沒機會跑）：沒有人會來放名額。cargo 還在跑就繼續續約
         # （它還在用容量，租約不能先掉）；cargo 也沒了就把名額放掉、收掉狀態目錄、自己結束——
         # 不然這個迴圈會永遠續下去，把名額佔到重開機。
@@ -341,6 +347,7 @@ am_lease_watch() {
         _lw_resp=$(curl -s -m "$_lw_m" -X POST "${_url}/renew" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" 2>/dev/null)
         if [ "$(am_json_field renewed "$_lw_resp")" = "true" ]; then
             [ -z "$_lw_sent" ] || _deadline=$((_lw_sent + _ttl))
+            _lw_gap=""
             continue
         fi
         _lw_err=$(am_json_field error "$_lw_resp")
@@ -351,10 +358,12 @@ am_lease_watch() {
                 ;;
         esac
         _lw_now=$(am_epoch)
-        if [ -z "$_lw_now" ] || [ -z "$_deadline" ] || [ $((_deadline - _lw_now)) -le $((_renew_every + _lw_m)) ]; then
+        # 下一次重試（隔 `_lw_retry`、最久再加 curl 逾時）會落在保守的 deadline 之後才停；還來得及就繼續試。
+        if [ -z "$_lw_now" ] || [ -z "$_deadline" ] || [ $((_deadline - _lw_now)) -le $((_lw_retry + _lw_m)) ]; then
             am_lease_lost "續約一直失敗，名額快到期了"
             return 0
         fi
+        _lw_gap=$_lw_retry
     done
 }
 
@@ -845,6 +854,7 @@ case "$*" in
       down) exit 7 ;;
       once_down) if [ -f '{d}/once' ]; then printf '{{"renewed":true,"expires_at":"x"}}'; else touch '{d}/once'; exit 7; fi ;;
       alternate) if [ -f '{d}/flip' ]; then rm -f '{d}/flip'; printf '{{"renewed":true,"expires_at":"x"}}'; else touch '{d}/flip'; exit 7; fi ;;
+      fail_until_*) lim=$(cat '{d}/renew-mode'); lim=${{lim#fail_until_}}; if [ $(( $(cat '{d}/clock') - 1000000 )) -lt "$lim" ]; then exit 7; else printf '{{"renewed":true,"expires_at":"x"}}'; fi ;;
     esac ;;
   *) printf '{{}}' ;;
 esac"#
@@ -1927,6 +1937,26 @@ esac
         assert!(at >= 120, "第一次失敗不是死刑（還有機會再試一次）：{at}s");
         assert!(!s.dir.join("cargo.done").exists());
         assert!(!s.alive("cargo.pid") && !s.alive("rustc.pid"), "cargo 與它的編譯器都要停");
+    }
+
+    /// 對抗式審查（整樹 `cargo test` 在高負載下十幾分鐘就被 SIGTERM，今天好幾顆 child 都是 rc=143）：daemon 在負載 70–90 的機器上
+    /// 回應慢，續約請求逾時就算失敗。以前失敗之後要等**整個續約間隔**（TTL 的三分之一）才再試一次，TTL 180 秒時只有兩次機會
+    /// （60、120 秒）：連兩次逾時，離保守的到期時間只剩一分鐘、「來不及再試」就把一個完全合法的建置整棵殺掉。
+    /// 失敗之後要改成短間隔連續重試、用到「再試一次也來得及」的最後一刻才放棄——daemon 慢了兩分鐘但在到期前回來，建置不能死。
+    #[test]
+    fn a_daemon_that_is_unresponsive_for_two_renew_intervals_but_recovers_in_time_does_not_kill_the_build() {
+        let s = Sandbox::new();
+        s.install_virtual_clock();
+        s.install_lease_curl(180);
+        s.install_cargo_until_virtual(3 * 180 + 60);
+        s.set_renew_mode("fail_until_130");
+        let env = lease_env(&s);
+        let (_, err, rc) = s.run(&as_refs(&env), &["test"]);
+        assert_eq!(rc, 0, "daemon 在 130 秒就回來了，離 180 秒的到期還早：{err}");
+        assert!(!err.contains("名額租約失效"), "{err}");
+        assert!(s.dir.join("cargo.done").exists(), "應該正常跑完");
+        let renews = std::fs::read_to_string(s.dir.join("curl.log")).unwrap().lines().filter(|l| l.contains("/renew")).count();
+        assert!(renews >= 5, "失敗之後要短間隔連續重試，不是每分鐘一次：只打了 {renews} 次");
     }
 
     /// 短暫的一次續約失敗、在到期之前下一次就成功：建置不能被誤殺；而且續約真的把租約往後延——
