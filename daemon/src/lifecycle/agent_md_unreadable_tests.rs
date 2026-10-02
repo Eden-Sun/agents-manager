@@ -1,14 +1,13 @@
-//! issue #769：`[agents]` 指了專案指示檔、但那份讀不到（遠端主機 ssh 失敗、檔案不見）時，bot 實際開出來的 env 與參數。
-//! 走真的 `start_bot`（herdr 是 mock），記下現況：**CLI 自己的指示檔照樣被關掉，注入的卻沒有專案那份**。
+//! 母 bot 的 persona（AG Man 規則＋`[agents]` 的 agent md＋bot 自己的 persona）實際怎麼交給 CLI（SPEC §6.5i、#769）。
 //!
-//! **審查時順帶發現（比 #769 更嚴重）**：`HerdrClient::agent_start` 的 `fit_command_line` 把整條 argv 壓進 900 bytes，
-//! 母 bot 的 `--append-system-prompt` 只剩約 600 bytes 就被截成「…（後略）」——AG Man 規則自己就比這長，
-//! 全域與專案的 agent md 連**讀得到的時候**都帶不進去（正式環境 pid 3515064 實測：persona 628 bytes、結尾「…（後略）」，
-//! env 卻是 `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`）。子 agent 走檔案（`--append-system-prompt-file`）不受影響。
-//! 下面兩條把這個現況寫成斷言；修好（母 bot 也改走檔案）之後，把標「現況」的斷言翻成 `contains`。
+//! 走真的 `start_bot`（herdr 是 mock）。persona 一律走**檔案**，不再塞進 argv：`HerdrClient::agent_start` 的
+//! `fit_command_line` 把整條 argv 壓進 900 bytes，inline 的 `--append-system-prompt` 只剩 ~600 bytes 就被截成「…（後略）」，
+//! 連讀得到的 agent md 都帶不進去（2026-10-02 正式環境實測 pid 3515064）。
+//! - claude：`--append-system-prompt-file <bot 目錄>/persona.md`
+//! - codex：`-p am-parent-<bot id>`＋`$CODEX_HOME/am-parent-<bot id>.config.toml` 的 `developer_instructions`
+//! - grok：`--rules` 一行指向 `<bot 目錄>/persona.md`
 //!
-//! 這是 SPEC §6.5i 與 `agent_md::tests::unset_means_not_configured_and_a_missing_file_is_reported` 明講的決定；
-//! 這裡的斷言是「現況的證據」，使用者若改決定（讀不到就不關／不啟動），這幾條要跟著改。
+//! 專案那份讀不到的行為（#769，等使用者拍板）沒動：CLI 自己的指示檔照樣關、檔案裡沒有專案那份、對話裡一則 system 訊息。
 
 use super::*;
 use crate::testing as tt;
@@ -43,13 +42,63 @@ async fn point_project_at(e: &tt::Env, file: &std::path::Path) {
         .unwrap();
 }
 
-/// (這次啟動的 env 有沒有關掉 claude 自己的 CLAUDE.md、argv 全文、對話裡的 system 訊息)
-async fn start_as(kind: &str, md: &std::path::Path) -> (bool, String, Vec<String>) {
+struct Started {
+    /// env 有沒有關掉 CLI 自己的 CLAUDE.md
+    disabled: bool,
+    args: Vec<String>,
+    system: Vec<String>,
+    /// 母 bot 實際讀到的 persona 全文（從它拿到的檔案讀回來）
+    persona: String,
+    /// 這顆 bot 的 AG Man 規則（`child_agent_rules`）
+    rules: String,
+    /// persona 檔的權限（codex 的是 `CODEX_HOME` 裡的 profile 檔）
+    mode: u32,
+}
+
+async fn start_as(kind: &str, md: &std::path::Path, user_persona: Option<&str>) -> Started {
     let e = tt::env().await;
     point_project_at(&e, md).await;
     let bot = tt::claude_bot(&e.app, &e.project_id, "probe").await;
-    sqlx::query("UPDATE bots SET kind=? WHERE id=?").bind(kind).bind(&bot.id).execute(&e.app.db).await.unwrap();
+    let codex_home = tt::scratch_dir("am-769-codex-home");
+    sqlx::query("UPDATE bots SET kind=?, persona=?, env_json=? WHERE id=?")
+        .bind(kind)
+        .bind(user_persona)
+        .bind(json!({"CODEX_HOME": codex_home.to_string_lossy()}).to_string())
+        .bind(&bot.id)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
     start_bot(&e.app, &bot.id).await.unwrap();
+    let args = last_start_args(&e);
+    let persona_path = e.app.bot_dir(&bot.id).unwrap().join("persona.md");
+    let project = db::project(&e.app.db, &e.project_id).await.unwrap().unwrap();
+    let agent = crate::config::agent_name(&project.label, &bot.id);
+    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let mut mode_of = persona_path.clone();
+    let persona = match kind {
+        "claude" => {
+            let f = after("--append-system-prompt-file").unwrap_or_else(|| panic!("claude: 沒有 --append-system-prompt-file：{args:?}"));
+            assert_eq!(std::path::Path::new(&f), persona_path, "檔案在這顆 bot 自己的目錄");
+            std::fs::read_to_string(&f).unwrap()
+        }
+        "codex" => {
+            let profile = after("-p").unwrap_or_else(|| panic!("codex: 沒有 -p：{args:?}"));
+            assert_eq!(profile, format!("am-parent-{}", bot.id));
+            mode_of = codex_home.join(format!("{profile}.config.toml"));
+            let toml: toml::Value = toml::from_str(&std::fs::read_to_string(&mode_of).unwrap()).unwrap();
+            toml["developer_instructions"].as_str().unwrap().to_string()
+        }
+        "grok" => {
+            let rules = after("--rules").unwrap_or_else(|| panic!("grok: 沒有 --rules：{args:?}"));
+            assert!(rules.contains(persona_path.to_str().unwrap()) && !rules.contains('\n'), "一行指向檔案：{rules}");
+            std::fs::read_to_string(&persona_path).unwrap()
+        }
+        other => unreachable!("{other}"),
+    };
+    let mode = {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(&mode_of).unwrap().permissions().mode() & 0o777
+    };
     let disabled = last_env(&e).get("CLAUDE_CODE_DISABLE_CLAUDE_MDS") == Some(&json!("1"));
     let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
     let system: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
@@ -57,38 +106,46 @@ async fn start_as(kind: &str, md: &std::path::Path) -> (bool, String, Vec<String
         .fetch_all(&e.app.db)
         .await
         .unwrap();
-    (disabled, last_start_args(&e).join("\u{1f}"), system)
+    Started { disabled, args, system, persona, rules: super::setup::child_agent_rules(&agent), mode }
 }
 
-/// 對照組：讀得到時，CLI 自己的檔關掉；**現況：專案那份被 `fit_command_line` 截掉，沒進 argv**（見檔頭）。
+fn assert_nothing_trimmed(kind: &str, s: &Started) {
+    assert!(s.args.iter().all(|a| !a.contains("（後略）")), "{kind}: argv 不能有被截斷的痕跡 {:?}", s.args);
+    assert!(!s.persona.contains("（後略）"), "{kind}");
+    assert!(s.persona.starts_with(&s.rules), "{kind}: AG Man 規則完整在最前面（{} bytes）", s.rules.len());
+    assert!(s.rules.len() > 900, "前提：規則本身就比 900 bytes 長，inline 一定會被截");
+}
+
+/// 讀得到：完整規則、全域與專案 agent md、bot 自己的 persona 依序都在檔案裡；CLI 自己的檔關掉。
 #[tokio::test]
-async fn a_readable_project_file_is_off_the_cli_files_but_trimmed_out_of_argv_today() {
+async fn the_parent_gets_its_whole_persona_through_a_file() {
     let dir = tt::scratch_dir("am-769-ok");
     let md = dir.join("CLAUDE.md");
     std::fs::write(&md, "PROJECT-RULES-769").unwrap();
     for kind in ["claude", "codex", "grok"] {
-        let (disabled, args, system) = start_as(kind, &md).await;
-        assert!(disabled, "{kind}: DISABLE_CLAUDE_MDS");
-        assert!(args.contains("…（後略）"), "{kind}: 現況：persona 被截斷 {args}");
-        assert!(!args.contains("PROJECT-RULES-769"), "{kind}: 現況：讀得到的專案規則也沒進 argv {args}");
-        assert!(!system.iter().any(|s| s.contains("agent md 有問題")), "{kind}: {system:?}");
-        assert_eq!(args.contains("project_doc_max_bytes=0"), kind == "codex", "{kind}: {args}");
+        let s = start_as(kind, &md, Some("MY-PERSONA-769")).await;
+        assert_nothing_trimmed(kind, &s);
+        assert!(s.disabled, "{kind}: DISABLE_CLAUDE_MDS");
+        let (rules, md_at, mine) = (s.persona.find(&s.rules), s.persona.find("PROJECT-RULES-769"), s.persona.find("MY-PERSONA-769"));
+        assert!(rules < md_at && md_at < mine && mine.is_some(), "{kind}: 規則 → agent md → persona 的順序 {}", s.persona);
+        assert!(!s.system.iter().any(|m| m.contains("agent md 有問題")), "{kind}: {:?}", s.system);
+        assert_eq!(s.args.iter().any(|a| a == "project_doc_max_bytes=0"), kind == "codex", "{kind}: {:?}", s.args);
+        assert_eq!(s.mode, 0o600, "{kind}: persona 檔只給自己讀");
     }
 }
 
-/// #769 的失敗模式：專案那份讀不到，`configured` 仍是 true。
-/// claude／codex：CLI 自己的指示檔照樣關掉（env `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`、codex `project_doc_max_bytes=0`），
-/// 注入的 argv 沒有專案規則，唯一的提示是對話裡一則 system 訊息。grok 沒有關自己檔案的機制，所以只少注入、沒有少讀。
+/// #769（行為沒動，等使用者拍板）：專案那份讀不到，CLI 自己的指示檔照樣關、檔案裡沒有專案那份、對話裡有一則 system 訊息；
+/// 但 AG Man 規則是完整的。
 #[tokio::test]
-async fn an_unreadable_project_file_still_turns_the_cli_files_off_and_injects_nothing_of_it() {
+async fn an_unreadable_project_file_still_turns_the_cli_files_off_but_the_rules_are_whole() {
     let dir = tt::scratch_dir("am-769-missing");
     let md = dir.join("no-such-CLAUDE.md");
     for kind in ["claude", "codex", "grok"] {
-        let (disabled, args, system) = start_as(kind, &md).await;
-        assert!(disabled, "{kind}: 現況：讀不到也照樣設 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1（env 不分 kind 都設）");
-        assert!(args.contains("硬規則，不是建議"), "{kind}: AG Man 規則的開頭還在 {args}");
-        assert!(!args.contains("PROJECT-RULES-769"), "{kind}");
-        assert_eq!(args.contains("project_doc_max_bytes=0"), kind == "codex", "{kind}: codex 的 AGENTS.md 也被關掉 {args}");
-        assert!(system.iter().any(|s| s.contains("agent md 有問題") && s.contains("no-such-CLAUDE.md")), "{kind}: {system:?}");
+        let s = start_as(kind, &md, None).await;
+        assert_nothing_trimmed(kind, &s);
+        assert!(s.disabled, "{kind}: 現況：讀不到也照樣設 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1（env 不分 kind 都設）");
+        assert!(!s.persona.contains("PROJECT-RULES-769"), "{kind}");
+        assert_eq!(s.args.iter().any(|a| a == "project_doc_max_bytes=0"), kind == "codex", "{kind}: codex 的 AGENTS.md 也被關掉 {:?}", s.args);
+        assert!(s.system.iter().any(|m| m.contains("agent md 有問題") && m.contains("no-such-CLAUDE.md")), "{kind}: {:?}", s.system);
     }
 }

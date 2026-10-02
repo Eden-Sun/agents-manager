@@ -753,7 +753,13 @@ async fn start_inner(
     // Remote hook injection may ssh-upload, so it must happen before workspace/tab creation.
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
-    args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str())));
+    // 母 bot 的 persona 全文走檔案：argv 在 `HerdrClient::agent_start` 會被壓進 900 bytes（見 `persona_file`）。
+    let md_text = agent_md.configured.then_some(agent_md.text.as_str());
+    let persona = super::setup::persona_text(bot, &agent, md_text);
+    match super::persona_file::launch_args(app, bot, project, shim_dir.as_deref(), &env, &persona, agent_md.configured).await {
+        Some(file_args) => args.extend(file_args),
+        None => args.extend(persona_args(bot, &agent, md_text)),
+    }
     args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     args.extend(identity_args(app, bot, &project.host).await);
     args.extend(bot.args());

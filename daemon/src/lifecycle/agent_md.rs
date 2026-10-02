@@ -90,23 +90,63 @@ pub fn compose(rules: &str, md: &str) -> String {
 /// 把子 agent 讀的那份寫進 bot 目錄（`<shim_dir>/..`），回傳路徑給 pane env 的 `AM_INSTRUCTIONS_FILE`。
 /// 寫不進去只警告：子 agent 少了這份，母 bot 照開。
 pub async fn install(app: &Arc<App>, bot: &db::Bot, project: &db::Project, shim_dir: Option<&str>, text: &str) -> Option<String> {
+    install_in_bot_dir(app, bot, project, shim_dir, CHILD_FILE, text).await
+}
+
+/// 寫 `<bot 目錄>/<file>`（0600；遠端先送過去），回傳那台主機上的絕對路徑。母 bot 的 persona 檔（[`PERSONA_FILE`]）也走這裡。
+pub async fn install_in_bot_dir(app: &Arc<App>, bot: &db::Bot, project: &db::Project, shim_dir: Option<&str>, file: &str, text: &str) -> Option<String> {
     let bot_dir = std::path::Path::new(shim_dir?).parent()?.to_string_lossy().into_owned();
-    let path = format!("{bot_dir}/{CHILD_FILE}");
-    let result = if project.host == LOCAL_HOST {
-        crate::shim_refresh::write_atomic(std::path::Path::new(&path), text).map(|_| ()).map_err(anyhow::Error::from)
-    } else {
-        match app.hosts.get(&project.host).await {
-            Some(conn) => install_remote(&conn, &path, text).await,
-            None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),
-        }
-    };
-    match result {
+    let path = format!("{bot_dir}/{file}");
+    match write_private(app, project, &path, text).await {
         Ok(()) => Some(path),
         Err(e) => {
-            tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not write the child instructions file");
+            tracing::warn!(bot = %bot.name, host = %project.host, file, error = ?e, "could not write the bot's instructions file");
             None
         }
     }
+}
+
+/// 母 bot 的 persona 全文（AG Man 規則＋agent md＋bot 自己的 persona）：argv 放不下（`fit_command_line` 的 900 bytes），改交檔案。
+pub const PERSONA_FILE: &str = "persona.md";
+
+/// 在專案所在的主機上寫一個只有自己讀得到的檔（0600，暫存檔＋換上；遠端走 ssh）。
+pub async fn write_private(app: &Arc<App>, project: &db::Project, path: &str, text: &str) -> anyhow::Result<()> {
+    if project.host == LOCAL_HOST {
+        write_private_local(std::path::Path::new(path), text)?;
+        Ok(())
+    } else {
+        match app.hosts.get(&project.host).await {
+            Some(conn) => install_remote(&conn, path, text).await,
+            None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),
+        }
+    }
+}
+
+/// 內容一樣就不動；否則 0600 的暫存檔寫好再 rename（讀的人看不到寫到一半的檔）。
+fn write_private_local(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if std::fs::read_to_string(path).ok().as_deref() == Some(text) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        return Ok(());
+    }
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{}.tmp-{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("md"), std::process::id()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        o.mode(0o600);
+    }
+    o.open(&tmp)?.write_all(text.as_bytes())?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 const REMOTE_EOF: &str = "AM_AGENT_MD_EOF";
@@ -126,7 +166,7 @@ async fn install_remote(conn: &crate::hosts::HostConn, path: &str, text: &str) -
 /// 暫存檔 + `cmp`：內容一樣就不動 mtime，跟 herdr skill 的遠端安裝同一招。
 fn remote_script(path: &str, text: &str) -> String {
     format!(
-        "set -e\nF={f}\nmkdir -p \"$(dirname \"$F\")\"\ncat > \"$F.new\" <<'{REMOTE_EOF}'\n{text}\n{REMOTE_EOF}\nif cmp -s \"$F.new\" \"$F\" 2>/dev/null; then rm -f \"$F.new\"; else mv \"$F.new\" \"$F\"; fi\nprintf 'AM_AGENT_MD_OK\\n'\n",
+        "set -e\nF={f}\nmkdir -p \"$(dirname \"$F\")\"\numask 077\ncat > \"$F.new\" <<'{REMOTE_EOF}'\n{text}\n{REMOTE_EOF}\nchmod 600 \"$F.new\"\nif cmp -s \"$F.new\" \"$F\" 2>/dev/null; then rm -f \"$F.new\"; chmod 600 \"$F\"; else mv \"$F.new\" \"$F\"; fi\nprintf 'AM_AGENT_MD_OK\\n'\n",
         f = sh_quote(path),
         text = text.trim_end(),
     )

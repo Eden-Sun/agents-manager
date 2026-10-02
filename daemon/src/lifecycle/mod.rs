@@ -33,6 +33,7 @@ pub(crate) mod dead_panes;
 mod queue;
 pub(crate) mod setup;
 pub(crate) mod agent_md;
+mod persona_file;
 mod start;
 mod stop;
 mod deferred_live;
