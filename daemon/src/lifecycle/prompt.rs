@@ -65,7 +65,10 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
 /// writes stay in one transaction, so any SQLite failure leaves `restamp_pending` set. The event
 /// carries the loaded row directly; there is no fallible post-commit lookup that can lose it.
 async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str) -> anyhow::Result<()> {
-    let mut tx = app.db.begin().await?;
+    // `BEGIN IMMEDIATE`：這個交易先讀後寫，一般（deferred）交易讀完才升級成寫入時，別的寫入者正拿著鎖，SQLite 會直接回
+    // `database is locked`（code 5／517），完全不等 busy_timeout——daemon 剛起來撞上前一顆還沒收乾淨的寫入就是這樣（正式環境
+    // 一天 10 次）。一開始就要寫入鎖，才會等。
+    let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
     let target: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT created_at, delivered_at FROM turns WHERE id=? AND restamp_pending=1",
     )
@@ -3448,6 +3451,32 @@ mod restamp_tests {
         assert!(crate::testing::eventually!(created(&app, &msg).await == first_at), "background retry uses first delivered_at");
         mark_delivery(&app, &turn, ok, "2026-09-30T14:00:00.000Z").await.unwrap();
         assert_eq!(created(&app, &msg).await, first_at, "repeated retries are idempotent");
+    }
+
+    /// 別的寫入者正拿著寫入鎖時，欠著的 restamp 要等它、不是讀完 SELECT 才在升級成寫入時直接 `database is locked`。
+    #[tokio::test]
+    async fn queued_prompt_restamp_waits_for_a_busy_writer_instead_of_failing_on_upgrade() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "q-restamp-busy").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let queued_at = "2026-09-30T13:28:31.333Z";
+        let first_at = "2026-09-30T13:38:55.000Z";
+        let (turn, msg) = turn_with_prompt(&app, &conv, queued_at, "daemon 通知").await;
+        let ok = DeliveryRecord { stored: "ok", verified: true, auto_resend: false };
+        mark_delivery(&app, &turn, ok, first_at).await.unwrap();
+        sqlx::query("UPDATE messages SET created_at=? WHERE id=?").bind(queued_at).bind(&msg).execute(&app.db).await.unwrap();
+        sqlx::query("UPDATE turns SET restamp_pending=1 WHERE id=?").bind(&turn).execute(&app.db).await.unwrap();
+
+        let mut writer = app.db.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await.unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            sqlx::query("COMMIT").execute(&mut *writer).await.unwrap();
+        });
+        super::rearm_queued_prompt_restamps(&app).await.expect("must wait out the other writer, not fail with database is locked");
+        release.await.unwrap();
+        assert_eq!(created(&app, &msg).await, first_at);
     }
 
     #[tokio::test]
