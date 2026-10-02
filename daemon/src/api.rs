@@ -1035,8 +1035,14 @@ async fn list_dirs(State(app): State<Arc<App>>, Query(q): Query<DirsQuery>) -> R
 
 async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) -> Result<Response, LcError> {
     let host = b.host.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| LOCAL_HOST.to_string());
+    if let Some(l) = b.label.as_deref() {
+        crate::bot_input::check_project_label(l.trim())?;
+    }
     let path = if host == LOCAL_HOST {
-        canonical_path(&b.path).map_err(|e| LcError::Bad(e.to_string()))?
+        crate::bot_input::check_local_project_path(&b.path)?;
+        let canonical = canonical_path(b.path.trim()).map_err(|e| LcError::Bad(e.to_string()))?;
+        crate::bot_input::check_is_dir(&canonical)?;
+        canonical
     } else {
         // SPEC §11.6.
         let conn = app.hosts.get(&host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
@@ -1172,6 +1178,7 @@ async fn patch_project(
             if l.is_empty() {
                 return Err(LcError::Bad("project label must not be empty".into()));
             }
+            crate::bot_input::check_project_label(l)?;
             Some(l.to_string())
         }
     };
@@ -1447,6 +1454,14 @@ async fn create_bot(
     if !crate::config::valid_kind(&b.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
+    // model／env／args 最後是 CLI 的 argv 與 pane 的環境變數，形狀不對在這裡就擋（`bot_input`）。
+    if let Some(m) = &b.model {
+        crate::bot_input::check_model(m)?;
+    }
+    if let Some(env) = &b.env {
+        crate::bot_input::check_env(env)?;
+    }
+    crate::bot_input::check_args(&b.args)?;
     // `cc1` is a different account on each host.
     let host = db::project(&app.db, &pid)
         .await
@@ -1779,6 +1794,15 @@ async fn patch_bot(
         {
             return Err(LcError::conflict("bot name already in use in this project", json!({"name": n})));
         }
+    }
+    if let Some(Some(m)) = &b.model {
+        crate::bot_input::check_model(m)?;
+    }
+    if let Some(env) = &b.env {
+        crate::bot_input::check_env(env)?;
+    }
+    if let Some(args) = &b.args {
+        crate::bot_input::check_args(args)?;
     }
     let restart_relevant = b.model.is_some()
         || b.effort.is_some()
@@ -6948,6 +6972,76 @@ mod bot_config_tests {
         let cfg = e.app.cfg.get().await;
         let in_cfg = cfg.projects[0].bots.iter().find(|b| b.id.as_deref() == Some(id)).unwrap().persona.clone();
         (in_cfg, db::bot(&e.app.db, id).await.unwrap().unwrap().persona)
+    }
+
+    /// 輸入檢查（`bot_input`）真的接在建立與修改 bot 的入口上：model 開頭是 `-`（會被當成 CLI 旗標）、env 設 `AM_*`、
+    /// 名稱含終端機控制字元，都是 400，而且 config.toml 與 DB 一個字都不動。
+    #[tokio::test]
+    async fn bot_create_and_patch_refuse_flag_like_models_reserved_env_and_control_characters_in_names() {
+        let e = env().await;
+        seed_project(&e).await;
+        let cfg_before = e.app.cfg.get().await;
+        for body in [
+            json!({"name": "m1", "kind": "claude", "model": "--dangerously-skip-permissions"}),
+            json!({"name": "m2", "kind": "codex", "model": "-c"}),
+            json!({"name": "m3", "kind": "claude", "model": "opus extra"}),
+            json!({"name": "e1", "kind": "claude", "env": {"AM_BOT_TOKEN": "x"}}),
+            json!({"name": "e2", "kind": "claude", "env": {"BAD-NAME": "x"}}),
+            json!({"name": "e3", "kind": "claude", "env": {"OK": "a\nb"}}),
+            json!({"name": "n1\u{1b}[31m", "kind": "claude"}),
+            json!({"name": "n2\u{202e}x", "kind": "claude"}),
+            json!({"name": "a1", "kind": "claude", "args": ["x\u{0}y"]}),
+        ] {
+            let r = add(&e, body.clone()).await;
+            assert!(matches!(r, Err(LcError::Bad(_))), "{body}: {r:?}");
+        }
+        assert_eq!(e.app.cfg.get().await, cfg_before, "被拒的請求不能留下任何東西");
+
+        let id = add(&e, json!({"name": "ok", "kind": "claude"})).await.unwrap();
+        for body in [
+            json!({"model": "--model"}),
+            json!({"env": {"AM_RUN_ID": "x"}}),
+            json!({"env": {"PATH": "a\u{7}"}}),
+            json!({"name": "bell\u{7}"}),
+            json!({"args": ["a\u{0}"]}),
+        ] {
+            let r = patch(&e, &id, body.clone()).await;
+            assert!(matches!(r, Err(LcError::Bad(_))), "{body}: {r:?}");
+        }
+        // 合法的照常：model 清空、env 設 CLAUDE_CONFIG_DIR。
+        patch(&e, &id, json!({"model": "", "env": {"CLAUDE_CONFIG_DIR": "$HOME/.claude-x"}})).await.unwrap();
+    }
+
+    /// 專案：本機路徑要絕對（相對路徑會解成 daemon 自己的工作目錄）、要是目錄、標籤不得含控制字元。
+    #[tokio::test]
+    async fn project_create_refuses_relative_paths_files_and_control_characters_in_the_label() {
+        let e = env().await;
+        let file = crate::testing::track(std::env::temp_dir().join(format!("am-botval-file-{}", db::ulid())));
+        std::fs::write(&file, "x").unwrap();
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-botval-dir-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let create = |path: String, label: Option<&str>| {
+            let app = e.app.clone();
+            let body: NewProject = serde_json::from_value(json!({"path": path, "label": label})).unwrap();
+            async move { create_project(State(app), Json(body)).await }
+        };
+        for (path, label) in [
+            (".".to_string(), None),
+            ("..".to_string(), None),
+            ("relative/dir".to_string(), None),
+            (file.to_string_lossy().into_owned(), None),
+            (dir.to_string_lossy().into_owned(), Some("bad\nlabel")),
+            (dir.to_string_lossy().into_owned(), Some("x\u{202e}y")),
+        ] {
+            let r = create(path.clone(), label).await;
+            assert!(matches!(r, Err(LcError::Bad(_))), "{path} {label:?}: {r:?}");
+        }
+        assert!(create(dir.to_string_lossy().into_owned(), Some("fine 專案")).await.is_ok());
+        let pid = e.app.cfg.get().await.projects.last().and_then(|p| p.id.clone()).unwrap();
+        let r = patch_project(State(e.app.clone()), Path(pid), Json(serde_json::from_value(json!({"label": "a\u{1b}b"})).unwrap())).await;
+        assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&file).ok();
     }
 
     #[tokio::test]
