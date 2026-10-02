@@ -162,8 +162,10 @@ run --dry-run >/dev/null
 equals "dry-run 也不把它算進會裝的" "$(grep -c '^would-install bin/a-kick.sh' "$OUT" || true)" "0"
 equals "--force 才換" "$(run --force)" "0"
 equals "強制換成 v2" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v2"
-B=$(ls -d "$DIR"/ops-install-backups/*/ | tail -1)
-equals "手改的版本在備份裡" "$(sed -n 2p "${B}bin/a-kick.sh")" "echo a-hand-edited"
+# 同一秒內的兩趟備份是 `<STAMP>/` 與 `<STAMP>-2/`，`ls | tail -1` 的字典序在 C locale 會挑到較舊的那個（macOS 上跑得快、必中）；
+# a-kick.sh 只有 --force 那趟備過，直接用它找。
+B=$(ls -d "$DIR"/ops-install-backups/*/bin/a-kick.sh | tail -1)
+equals "手改的版本在備份裡" "$(sed -n 2p "$B")" "echo a-hand-edited"
 teardown
 
 # 9. 自檢在**暫存檔**上做、過了才換：自檢跑的那一刻，安裝位置上還是舊檔（不能讓 cron／launchd 撞到沒驗過的新版）。
