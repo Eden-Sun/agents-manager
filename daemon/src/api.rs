@@ -8038,6 +8038,30 @@ mod per_principal_auth_tests {
         assert_eq!(crate::supervisor::store::approval(&e.app.db, &a1).await.unwrap().unwrap().status, "superseded");
     }
 
+    /// 2026-10-02 風暴的尾巴：拿窗口那一刻 daemon 自己的 DB 讀寫失敗（`database is locked`，正好是 daemon 重啟中）不是「窗口拒絕」，
+    /// 核准沒有任何問題；撤掉它，下一輪重開的核准就把 30 分鐘的升級計時歸零，一直忙的機群又等不到放寬。基礎設施暫時失效要留著核准、
+    /// 下一輪帶同一張再試。
+    #[tokio::test]
+    async fn daemon_swap_keeps_its_approval_when_the_window_attempt_fails_on_the_database() {
+        let e = crate::testing::env().await;
+        let svc = || Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into()));
+        let ask = || SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc123".into(), ttl_secs: None };
+        let live = || async { crate::supervisor::store::approvals(&e.app.db, 100).await.unwrap().into_iter().filter(|a| a.status == "approved").collect::<Vec<_>>() };
+
+        crate::testing::make_table_unreadable(&e.app, "supervisor_leases").await;
+        let r = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask())).await;
+        assert!(matches!(r, Err(LcError::Upstream(_) | LcError::Unavailable(_))), "{r:?}");
+        let kept = live().await;
+        assert_eq!(kept.len(), 1, "DB 暫時出錯不撤核准");
+
+        crate::testing::make_table_readable(&e.app, "supervisor_leases").await;
+        let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask())).await.unwrap();
+        assert_eq!(v["lease"]["held"], true, "{v}");
+        assert_eq!(v["approval"]["id"], kept[0].id, "下一輪沿用同一張核准");
+        let (total,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM supervisor_approvals").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(total, 1, "沒有多開核准");
+    }
+
     #[tokio::test]
     async fn daemon_swap_service_scope_accepts_only_its_fixed_probe_route() {
         let e = crate::testing::env().await;

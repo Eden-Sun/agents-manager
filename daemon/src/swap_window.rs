@@ -53,11 +53,14 @@ pub async fn approval_for(app: &Arc<App>, owner: &str, commit: &str, actor: &str
     Ok(id)
 }
 
-/// 拿不到窗口時這張核准要不要留著：只因為還有人在忙（`not_idle`）就留，計時才接得下去。
+/// 拿不到窗口時這張核准要不要留著：還有人在忙（`not_idle`），或 daemon 自己讀寫 DB 暫時失敗（`Upstream`／`Unavailable`，
+/// 例如重啟當下的 `database is locked`）——兩種都跟核准本身無關，撤掉只會讓下一輪重開的核准把升級計時歸零。
+/// 其他拒絕（別人握著窗口、核准對不上……）照舊撤，不留 approved 的殘單。
 pub fn keep_after(err: &LcError) -> bool {
     match err {
         LcError::Conflict(v) => v.get("reason").and_then(|r| r.as_str()) == Some("not_idle")
             || v.get("detail").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) == Some("not_idle"),
+        LcError::Upstream(_) | LcError::Unavailable(_) => true,
         _ => false,
     }
 }
