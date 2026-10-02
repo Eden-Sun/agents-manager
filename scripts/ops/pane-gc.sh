@@ -20,10 +20,28 @@ etime_secs() {
     else if (NF==2) print $1*60+$2; }'
 }
 
-closed=0; ghost=0
-for pid_pane in $(herdr pane list 2>/dev/null | python3 -c '
+# 先把 pane list 整份收下來再解析：排程環境（systemd）沒有 pane 的環境變數，沒帶 HERDR_SESSION 時 herdr 找的是
+# default session 的 socket，回的不是 JSON 或是 server_not_running 的 error JSON；這種情況記一行清楚的錯誤就收，
+# 不能讓 python 的 traceback 灌進 log，也不能把它當成「0 個 pane」正常收尾。
+list_out=$(herdr pane list 2>&1)
+pane_ids=$(echo "$list_out" | python3 -c '
 import json,sys
-for p in json.load(sys.stdin)["result"]["panes"]: print(p["pane_id"])'); do
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    print("ERR 回的不是 JSON"); sys.exit(0)
+try:
+    for p in d["result"]["panes"]: print(p["pane_id"])
+except Exception:
+    e=d.get("error") if isinstance(d,dict) else None
+    print("ERR", (e.get("code") if isinstance(e,dict) else None) or "沒有 result.panes")' 2>/dev/null)
+case "$pane_ids" in
+  "ERR "*)
+    echo "pane-gc: herdr pane list ${pane_ids#ERR }（排程環境要帶 HERDR_SESSION；HERDR_SESSION=${HERDR_SESSION:-未設定}）：${list_out:0:120}" >> "$LOG"
+    exit 0 ;;
+esac
+closed=0; ghost=0
+for pid_pane in ${=pane_ids}; do
   info=$(herdr pane process-info --pane "$pid_pane" 2>/dev/null)
   if [ -z "$info" ] || ! echo "$info" | grep -q '"foreground_processes"'; then
     if herdr pane get "$pid_pane" 2>&1 | grep -q pane_not_found; then

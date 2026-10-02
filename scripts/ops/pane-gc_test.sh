@@ -155,5 +155,26 @@ check  "沒有 herdr 有記 log" "herdr 不在 PATH" "$LOG"
 equals "沒有 herdr 沒呼叫任何東西" "$(wc -l < "$FIX/calls.log" | tr -d ' ')" "0"
 teardown
 
+# 7. herdr pane list 吐的不是 JSON（systemd 底下沒帶 HERDR_SESSION 時 herdr 找不到 server）：
+#    記一行清楚的錯誤、exit 0、不噴 traceback、不呼叫任何 pane 指令。
+setup
+ERRF="$ROOT/stderr"
+echo 'herdr: no server running at /x/herdr.sock' > "$FIX/panes.json"
+PATH="$ROOT/fakebin:$PATH" zsh "$ROOT/agm/bin/pane-gc.sh" 2> "$ERRF"; equals "list 非 JSON：exit 0" "$?" "0"
+check_no "list 非 JSON：不噴 traceback" "Traceback" "$ERRF"
+check_no "list 非 JSON：stderr 乾淨" "JSONDecodeError" "$ERRF"
+check  "list 非 JSON：log 記清楚的錯誤" "pane-gc: herdr pane list 回的不是 JSON" "$LOG"
+check  "list 非 JSON：log 提示 HERDR_SESSION" "HERDR_SESSION" "$LOG"
+equals "list 非 JSON：只呼叫過 pane list" "$(grep -vc '^pane list' "$FIX/calls.log" | tr -d ' ')" "0"
+teardown
+setup
+ERRF="$ROOT/stderr"
+echo '{"id":"cli:pane:list","error":{"code":"server_not_running","message":"no herdr server is running"}}' > "$FIX/panes.json"
+PATH="$ROOT/fakebin:$PATH" zsh "$ROOT/agm/bin/pane-gc.sh" 2> "$ERRF"; equals "list 回 error JSON：exit 0" "$?" "0"
+check_no "list 回 error JSON：不噴 traceback" "Traceback" "$ERRF"
+check  "list 回 error JSON：log 帶 error code" "server_not_running" "$LOG"
+check_no "list 回 error JSON：不當成 0 個 pane 正常收尾" "pane：關掉" "$LOG"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

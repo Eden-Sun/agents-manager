@@ -4,6 +4,9 @@ Description=AGM browser-gc：回收本使用者殘留的 headless Chrome 與 pan
 
 [Service]
 Type=oneshot
+# 排程沒有 pane 環境：尾端的 pane-gc.sh 跑 `herdr pane list`，不指定的話找的是 default session 的 socket，
+# 回 server_not_running。指向 daemon 用的 session（`config.rs` 的 DEFAULT_HERDR_SESSION），跟 daemon-update 一致。
+Environment=HERDR_SESSION=agents-manager
 ExecStart=/usr/bin/python3 %h/.config/agents-manager/supervisor/AGM/bin/browser_gc_linux.py
 StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/browser-gc.systemd.log
 StandardError=append:%h/.config/agents-manager/supervisor/AGM/browser-gc.systemd.log
