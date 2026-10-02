@@ -1304,7 +1304,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    一次：補的只是這一次還沒判斷完的，已經判斷過的不再碰；第一次嘗試之後才有 run 的 bot（使用者自己起過又停掉）也不再替它起。
    **開機之後掉的 autostart bot 會自動補起（`autostart_revive`）**：herdr 斷線重連或 server 重啟（herdr 更新）時，對帳發現 run 的 agent 不見，
    收成 `exited`（原因 `agent not found during reconcile`）——使用者停的是 `stopped`、在 herdr 裡關 pane 走 `pane exited` 事件，都不走這條。
-   對帳那輪結束（pass 鎖放開）後，對 `autostart=1`、非 child、沒有 active run、最後一個 run 就是這次收掉的那個的 bot 再 `start_bot` 一次，
+   對帳那輪結束（pass 鎖放開）後，對 `autostart=1`、非 child、沒有 active run、最後一個 run 就是這次收掉的那個（**而且是這一輪自己記的 exited、退出原因是 `agent not found during reconcile`**：別的路先收的——使用者的 stop、使用者在 herdr 關 pane 的 `pane exited` 事件——不算遺失，不拉起來）的 bot 再 `start_bot` 一次（**丟到背景、一顆一顆補**，不讓對帳呼叫端等：後面的事件訂閱、spool 補放、工具偵測都排在對帳之後），
    並立刻推 supervisor inbox `bot_lost`（巡檢收、叫醒；`payload.outcome` = `restarted`／`failed`／`backoff`，不等 `bot_stopped` 探針的 300 秒）。
    只在該主機的開機 autostart 跑完之後才動（開機那輪由 autostart 負責，不搶著起第二次），herdr 計畫中維護期間不動；
    退避：同一顆 bot 30 分鐘內最多重開 3 次（記憶體計數，daemon 重啟歸零），超過只推 `outcome=backoff`、不再開，交給 supervisor／探針。
