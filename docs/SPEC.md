@@ -2309,6 +2309,11 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
 6. 推 WS `message_added` / `turn_updated`。
 
 
+**安全審查補充（2026-10-02）**：① native id 的去重（`(native_session_id, native_turn_id)`）只在**這顆 bot 自己的回合**之間比，別顆 bot 先送了同一組 id 不會讓這顆的完成事件被當成重複吞掉；
+`turns_native` 唯一索引是全域的，所以這組 id 若已記在別顆 bot 的回合上，這顆的收尾**不寫 turn id**（只留 session），不撞索引、不卡收件匣重試（`hookrecv::native_evidence`，外部回合那條路同樣）。
+② StatusLine 是最新的贏：同一顆 bot 在等 bot 鎖時只留一格（後到的取代先到的），不是每一則各一個背景 task。
+③ `POST /hook/{provider}`：畸形 JSON 400、缺欄位／型別錯 422、body 超過 2 MiB 413，都不進收件匣；認證失敗一律 401（分不出沒這顆 bot 或 token 錯）；URL 的 provider 被 body 的 `provider` 蓋過，跟 bot 的 kind 不符 409。
+
 ### 6.7a claude 的提問與使用者的回答記進對話（2026-10-02 使用者）
 
 claude 用 `AskUserQuestion` 問、使用者答完（網頁或終端答的都一樣）之後，對話裡要留下每題的題目與答案；以前整段不見，對話讀起來不完整（wits-pro，m4p，三題問答完全看不到）。
