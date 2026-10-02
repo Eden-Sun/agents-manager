@@ -70,14 +70,14 @@ pub async fn authenticate(
     }
     match prove_bot(app, headers, claimed).await? {
         Proof::Verified(from) => Ok(Some(Relay { from })),
-        Proof::Absent(_) => Err(token_required()),
+        Proof::Absent => Err(token_required()),
     }
 }
 
 /// `prove_bot` 的結果：`Absent` 是「沒帶 token、bot 是活的」，要不要放行由呼叫端決定。
 enum Proof {
     Verified(String),
-    Absent(String),
+    Absent,
 }
 
 /// 一顆 bot 的 id 配上 `X-AM-Bot-Token`：`/prompt` 與 mission 端點共用的那一段（issue #409）。
@@ -104,7 +104,7 @@ async fn prove_bot(app: &Arc<App>, headers: &HeaderMap, claimed: &str) -> Result
         // 有帶但對不上（別顆的、空的、非 UTF-8），或指到不存在／已刪的 bot：同一個 403。
         // 不按「bot 存不存在」分成 400／403——那會讓狀態碼變成探測 bot id 的神諭。
         (Some(_), _) => Err(mismatch()),
-        (None, Some(b)) => Ok(Proof::Absent(b.id)),
+        (None, Some(_)) => Ok(Proof::Absent),
         (None, None) => Err(LcError::Bad(format!("relay_from must be a live bot id or `{}`", crate::agent_relay::DAEMON_SENDER))),
     }
 }
@@ -152,6 +152,6 @@ pub async fn authenticate_mission(app: &Arc<App>, headers: &HeaderMap, claimed: 
     }
     match prove_bot(app, headers, claimed).await? {
         Proof::Verified(from) => Ok(Some(from)),
-        Proof::Absent(_) => Err(token_required()),
+        Proof::Absent => Err(token_required()),
     }
 }
