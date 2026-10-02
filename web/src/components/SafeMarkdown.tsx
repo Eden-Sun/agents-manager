@@ -1,9 +1,10 @@
 import { Component, useState, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { renderMarkdown } from '../lib/markdownCache'
 import { markdownComponents } from '../lib/markdownComponents'
-import { markdownTooDeep, markdownTooLong } from '../lib/markdownGuard'
 import { markdownUrlTransform } from '../lib/markdownUrl'
+import { markdownTooDeep, markdownTooLong } from '../lib/markdownGuard'
 
 /**
  * 轉換丟例外（巢狀太深爆 stack）時退回純文字：整個 app 沒有 error boundary，沒接住的話
@@ -20,7 +21,8 @@ export class MarkdownBoundary extends Component<{ plain: ReactNode; children: Re
 }
 
 /** bot 輸出的 Markdown（不可信）：不跑原始 HTML、危險協定被清掉、連結新分頁、太長或太深都有退路。 */
-export function SafeMarkdown({ text, botId }: { text: string; botId?: string | null }) {
+/** `cache=false`：串流中的草稿每幀都是新字串，放進快取只會擠掉真正的訊息。 */
+export function SafeMarkdown({ text, botId, cache = true }: { text: string; botId?: string | null; cache?: boolean }) {
   const [forced, setForced] = useState(false)
   const plain = (note: ReactNode) => (
     <>
@@ -41,9 +43,18 @@ export function SafeMarkdown({ text, botId }: { text: string; botId?: string | n
   }
   return (
     <MarkdownBoundary key={text} plain={plain(<p className="md-plain-note">這則訊息的格式太複雜，無法轉成 Markdown，以純文字顯示。</p>)}>
+      <CachedMarkdown text={text} botId={botId} cache={cache} />
+    </MarkdownBoundary>
+  )
+}
+
+/** 走快取（重掛不重新 parse）；包成元件放在 boundary 裡面，轉換丟例外才接得住（失敗的不會進快取）。 */
+function CachedMarkdown({ text, botId, cache }: { text: string; botId?: string | null; cache: boolean }) {
+  if (!cache)
+    return (
       <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents(botId)} urlTransform={markdownUrlTransform}>
         {text}
       </Markdown>
-    </MarkdownBoundary>
-  )
+    )
+  return <>{renderMarkdown(botId, text)}</>
 }
