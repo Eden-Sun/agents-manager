@@ -46,6 +46,7 @@ class FakeTui {
   }
 
   screen(): string {
+    if (this.submitted) return '● 收到答案了，我繼續做事'
     const mark = (i: number) => (this.cursor === i ? '❯ ' : '  ')
     const out = ['前面一堆別的輸出', '─'.repeat(60), this.tabBar(), '']
     if (this.tab === 2) {
@@ -320,6 +321,7 @@ class FakeRadioTui {
   }
 
   screen(): string {
+    if (this.submitted) return '● 收到答案了，我繼續做事'
     const mark = (i: number) => (this.cursor === i ? '❯ ' : '  ')
     const out = ['前面一堆別的輸出', '─'.repeat(60), this.tabBar(), '']
     if (this.tab === 4) {
@@ -487,6 +489,7 @@ test('Type something：預載 → 貼中文多行 → Enter → 對帳出現在 
   assert.deepEqual(tui.chosen, [3, 0, 0, 0])
   assert.equal(tui.submitted, true)
   assert.deepEqual(tui.pasted, ['第一行\n第二行中文'])
+  tui.submitted = false // 交卷後畫面已離開 review，這裡要看 review 上的答案
   const review = parseChoiceMenu(tui.screen())
   assert.ok(review)
   assert.ok(review.review[0]?.answer.includes('第一行'))
@@ -585,4 +588,205 @@ test('單選頁的 Type something 照舊可以打字', () => {
   const row = menu.choices.find((c) => /type something/i.test(c.title))
   assert.ok(row)
   assert.equal(typedAnswerHere(menu, row), true)
+})
+
+/**
+ * 真機單選問卷（2026-10-02 事發：3 題單選＋送出頁，第 1 題自訂文字）。與 `FakeRadioTui` 的差別是照真機的鍵語意：
+ * 單選頁 Enter 選定後**自己跳下一個分頁**（最後一題跳到 Review）；`Type something.` 游標停上去直接貼字，Enter 才答完並跳頁。
+ * `wrap`：真機在最後一個分頁按 → 會不會繞回第一個。
+ */
+class FakeAutoRadioTui {
+  tab = 0
+  cursor = 0
+  chosen: (number | null)[] = [null, null, null]
+  typed: string[] = ['', '', '']
+  sent: string[] = []
+  pasted: string[] = []
+  submitted = false
+  wrap = false
+  /** Enter 之後畫面要再被讀幾次才換頁（模擬 TUI 重畫比 daemon 回得慢）。 */
+  lag = 0
+  private pending: { to: number; reads: number } | null = null
+
+  private readonly pages = [
+    { label: '拋單倉庫', q: 'wa_inbship_transmit_warehouse 新流程之後這段要怎麼處理？', opts: ['保留現狀 (Recommended)', '移到第三段'] },
+    { label: '目標狀態', q: '「待接收」是指 NS Inbound Shipment 的哪個狀態？', opts: ['inTransit (Recommended)', 'partiallyReceived'] },
+    { label: 'go API', q: 'go service 的 Slack API 放哪裡、怎麼認證？', opts: ['stock-server 新增端點 (Recommended)', '獨立服務'] },
+  ]
+  private readonly last = 3
+
+  private rows(): number {
+    return this.tab < this.last ? this.pages[this.tab].opts.length + 2 : 2
+  }
+
+  private tabBar(): string {
+    const cells = this.pages.map((p, i) => `${this.chosen[i] !== null ? '☒' : '☐'} ${p.label}`)
+    cells.push('✔ Submit')
+    return `←  ${cells.join('  ')}  →`
+  }
+
+  screen(): string {
+    if (this.submitted) return '● 收到答案了，我繼續做事'
+    if (this.pending && this.pending.reads-- <= 0) {
+      this.tab = this.pending.to
+      this.cursor = 0
+      this.pending = null
+    }
+    const mark = (i: number) => (this.cursor === i ? '❯ ' : '  ')
+    const out = ['前面一堆別的輸出', '─'.repeat(60), this.tabBar(), '']
+    if (this.tab === this.last) {
+      out.push('Review your answers', '')
+      this.pages.forEach((p, i) => {
+        let a = '（沒選）'
+        if (this.chosen[i] === p.opts.length) a = this.typed[i]
+        else if (this.chosen[i] !== null) a = p.opts[this.chosen[i]!]
+        out.push(` ● ${p.q}`, `   → ${a}`)
+      })
+      out.push('', 'Ready to submit your answers?', '', `${mark(0)}1. Submit answers`, `${mark(1)}2. Cancel`)
+      return out.join('\n')
+    }
+    const p = this.pages[this.tab]
+    out.push(p.q, '')
+    p.opts.forEach((o, i) => out.push(`${mark(i)}${i + 1}. ${o}`))
+    const t = p.opts.length
+    const typed = this.typed[this.tab]
+    out.push(`${mark(t)}${t + 1}. ${typed ? `${typed}${this.chosen[this.tab] === t ? ' ✔' : ''}` : 'Type something.'}`)
+    out.push('─'.repeat(60))
+    out.push(`${mark(t + 1)}${t + 2}. Chat about this`)
+    out.push('Enter to select · Tab/Arrow keys to navigate · Esc to cancel')
+    return out.join('\n')
+  }
+
+  key(k: string) {
+    this.sent.push(k)
+    if (k === 'right' || k === 'tab') {
+      if (this.tab < this.last) this.tab += 1
+      else if (this.wrap) this.tab = 0
+      else return
+      this.cursor = 0
+      return
+    }
+    if (k === 'left' || k === 'shift+tab') {
+      if (this.tab > 0) this.tab -= 1
+      else if (this.wrap) this.tab = this.last
+      else return
+      this.cursor = 0
+      return
+    }
+    if (k === 'down') {
+      this.cursor = Math.min(this.cursor + 1, this.rows() - 1)
+      return
+    }
+    if (k === 'up') {
+      this.cursor = Math.max(this.cursor - 1, 0)
+      return
+    }
+    if (this.tab === this.last) {
+      if (k === 'enter' && this.cursor === 0) this.submitted = true
+      return
+    }
+    if (k === 'enter') {
+      this.chosen[this.tab] = this.cursor
+      if (this.lag > 0) this.pending = { to: this.tab + 1, reads: this.lag }
+      else {
+        this.tab += 1
+        this.cursor = 0
+      }
+    }
+  }
+
+  paste(text: string) {
+    this.pasted.push(text)
+    if (this.tab < this.last && this.cursor === this.pages[this.tab].opts.length) this.typed[this.tab] = text
+  }
+
+  io(): Io {
+    return {
+      read: async () => parseChoiceMenu(this.screen()),
+      send: async (keys) => keys.forEach((k) => this.key(k)),
+      wait: async () => {},
+      paste: async (text) => this.paste(text),
+    }
+  }
+}
+
+for (const wrap of [false, true]) {
+  for (const lag of [0, 1, 3]) {
+    test(`真機單選問卷（Enter 自動跳頁；wrap=${wrap} lag=${lag}）：第 1 題自訂文字、2/3 題選推薦 → 交卷`, async () => {
+      const tui = new FakeAutoRadioTui()
+      tui.wrap = wrap
+      tui.lag = lag
+      const start = parseChoiceMenu(tui.screen())
+      assert.ok(start)
+      const draft = await preload(tui.io(), start)
+      assert.ok(draft)
+      const want = [[false, false, true, false], [true, false, false, false], [true, false, false, false], []]
+      tui.sent = []
+      const res = await commit(tui.io(), draft, want, undefined, ['拿掉拋單', '', '', ''])
+      assert.deepEqual(res, { ok: true })
+      assert.deepEqual(tui.chosen, [2, 0, 0])
+      assert.equal(tui.typed[0], '拿掉拋單')
+      assert.equal(tui.submitted, true, `最後沒按到 Submit answers：${tui.sent.join(',')}`)
+    })
+  }
+}
+
+const SURVEY_WANT = [[false, false, true, false], [true, false, false, false], [true, false, false, false], []]
+const SURVEY_CUSTOM = ['拿掉拋單', '', '', '']
+
+test('真機單選問卷：終端已經停在 Review（上一輪最後那顆 Enter 沒送到），再按一次送出 → 不重答、只按 Submit answers', async () => {
+  const tui = new FakeAutoRadioTui()
+  const draft = await preload(tui.io(), parseChoiceMenu(tui.screen())!)
+  assert.ok(draft)
+  // 第一輪：除了最後的 Submit answers 都照真機走完，終端停在 Review。
+  const lossy = tui.io()
+  let lost = 0
+  const first = await commit(
+    { ...lossy, send: async (keys) => { if (tui.tab === 3 && keys[0] === 'enter') lost++; else await lossy.send(keys) } },
+    draft, SURVEY_WANT, undefined, SURVEY_CUSTOM,
+  )
+  assert.equal(first.ok, false)
+  assert.equal(lost, 1)
+  assert.match(first.error ?? '', /還停在送出頁/)
+  assert.equal(tui.tab, 3)
+  assert.equal(tui.submitted, false)
+
+  tui.sent = []
+  const again = await commit(tui.io(), draft, SURVEY_WANT, undefined, SURVEY_CUSTOM)
+  assert.deepEqual(again, { ok: true })
+  assert.equal(tui.submitted, true)
+  assert.deepEqual(tui.sent, ['enter'], '答案已經在 Review 上了，不該退回去重答')
+  assert.deepEqual(tui.chosen, [2, 0, 0])
+})
+
+test('真機單選問卷：使用者在 Review 頁改了一題的答案再按送出 → 只退回去改那一題，其他不動', async () => {
+  const tui = new FakeAutoRadioTui()
+  const draft = await preload(tui.io(), parseChoiceMenu(tui.screen())!)
+  assert.ok(draft)
+  const first = await commit(tui.io(), draft, SURVEY_WANT, undefined, SURVEY_CUSTOM)
+  assert.deepEqual(first, { ok: true })
+  tui.submitted = false
+  tui.tab = 3
+  tui.cursor = 0
+  const changed = SURVEY_WANT.map((r) => r.slice())
+  changed[2] = [false, true, false, false]
+  tui.sent = []
+  const res = await commit(tui.io(), draft, changed, undefined, SURVEY_CUSTOM)
+  assert.deepEqual(res, { ok: true })
+  assert.deepEqual(tui.chosen, [2, 0, 1])
+  assert.equal(tui.submitted, true)
+  assert.equal(tui.pasted.length, 1, '第 1 題的自訂文字不重貼')
+})
+
+test('最後一顆 Enter 沒被吃掉：回一句看得懂的錯誤，不是靜靜回 ok', async () => {
+  const tui = new FakeAutoRadioTui()
+  const draft = await preload(tui.io(), parseChoiceMenu(tui.screen())!)
+  assert.ok(draft)
+  const io = tui.io()
+  const res = await commit(
+    { ...io, send: async (keys) => { if (!(tui.tab === 3 && keys[0] === 'enter')) await io.send(keys) } },
+    draft, SURVEY_WANT, undefined, SURVEY_CUSTOM,
+  )
+  assert.equal(res.ok, false)
+  assert.match(res.error ?? '', /Submit answers/)
 })

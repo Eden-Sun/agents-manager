@@ -146,12 +146,19 @@ export function BlockedDraft({
       return
     }
     const byTab = draft.pages.map((p) => custom[p.tab] ?? '')
-    const res = await commit(ioRef.current, draft, want, (done, total) => setStep({ done, total }), byTab)
+    let res: Awaited<ReturnType<typeof commit>>
+    try {
+      res = await commit(ioRef.current, draft, want, (done, total) => setStep({ done, total }), byTab)
+    } catch (e) {
+      // 沒接住的話畫面會永遠停在「送出中…」，什麼訊息都沒有（2026-10-02）。
+      res = { ok: false, error: `送出途中出錯：${e instanceof Error ? e.message : String(e)}。終端停在哪一步請看終端原文。` }
+    }
     onAnswered?.()
+    // 成功也要放開按鈕：問卷還在畫面上（同一份）時才不會卡在「送出中…」。
+    setPhase('ready')
     if (res.ok) return
     // 失敗就停手並重讀終端現況，不要假裝成功。
     setErr(res.error ?? '送出失敗。')
-    setPhase('ready')
   }
 
   const answerOf = (page: number) => {
