@@ -76,6 +76,13 @@ store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`f
     要釋放就得連未讀計數（`recountBot` 讀 `messages`）一起改，這一輪沒碰。
 - **來源標籤**：`hook` 不標；`terminal_fallback` 標「可能不完整」；系統訊息另有來源標。
 - **WS**：指數退避重連（250ms 起跳、上限 3 秒 + jitter；`transport.ts`），存活偵測（#760）：daemon 每 20 秒送 `{type:"ping"}`，前景 60 秒沒收到任何幀（或切回前景時靜默 >35 秒）就主動關掉重連（`api/socketLiveness.ts`；不能只看 `readyState`）；重連帶 `?since=<lastDurableSeq>`——**最後一則耐久事件的 seq，不是最高的那個 seq**：store 裡 `lastSeq` 跟著每一幀走，`lastDurableSeq` 只跟著會進 daemon 重播環的幀走（`seqAfterFrame`，即時幀如 `bots_restart_progress` 不推進；送成 `lastSeq` 會指到環裡沒有的號碼，重連落回保守分支多一次 resync）。daemon 那邊 `state::is_ephemeral` 加了新的即時幀，這裡的名單要一起改；`resync` 或 `project_changed`／`bot_changed` → 重新 `GET /api/state`。　**只在這個分頁見過 `ping` 之後才用靜默判半開**（舊 daemon 不送心跳，安靜時整條線沒有幀；不加這個條件的話舊 daemon 搭新前端閒置每分鐘重連、整份重抓 state 與對話）；旗標跨重連保留。
+  **重連審查（2026-10-02，`api/wsReconnect.test.ts`、`components/reconnectRefetch.test.tsx`）**：
+  ① ws 握手被拒（daemon 換 token）瀏覽器只看得到「沒開成」，所以連續 2 次沒開成就重拿 `/api/session`（至少隔 10 秒、single-flight），不再拿舊 token 重試到天荒地老；
+  ② 退避只在連線**活過 10 秒**後才歸零（開成功又馬上被關的連線不再讓退避卡在 250 ms、每次都整份重抓）；
+  ③ 延遲改成一半固定一半隨機（equal jitter，封頂仍約 3 秒），一群分頁同時重連不再全落在同一個 150 ms 內；
+  ④ 重連與 `resync` 後也重抓 pane 清單（原本只靠 `panes_changed` 與 30 秒輪詢）。
+  已確認完整的：重連會重抓 state（bot／run／turn／queued_turn／未讀與已讀標記／主機）、額度、草稿、身分停用、已載入與有開啟回合的對話；daemon 重啟後 seq 變小由 `resync` 與 `refreshState` 的 `lastSeq` 降階處理。
+  已知沒做：切回前景／`online` 的立即重連沒有抖動（多分頁同時醒來會同刻打回去）。
 - **blocked**：`BlockedModal`（全畫面，blocked 1 秒後自動彈出，只彈正在看的 bot，關過就不再彈直到下一次 blocked）與
   `BlockedPanel`（對話上方，全畫面開著時暫停輪詢）共用 `useTerminalSnapshot` 與 `usePaneKeys`。
   全畫面的鍵盤直通把 `KeyboardEvent` 翻成 herdr 鍵名（⌘ 系列留給瀏覽器，Home/End/PgUp/PgDn herdr 不收）；直通時 Esc 也送給 agent。

@@ -1,6 +1,6 @@
 import { ApiError } from './types'
 import type { ApiErrorBody } from './types'
-import { CHECK_MS, RESUME_STALE_MS, SILENCE_MS, isForeground, realLivenessDeps } from './socketLiveness'
+import { CHECK_MS, RESUME_STALE_MS, SILENCE_MS, STABLE_MS, TOKEN_REFRESH_AFTER_FAILS, TOKEN_REFRESH_MIN_GAP_MS, isForeground, realLivenessDeps } from './socketLiveness'
 import type { LivenessDeps } from './socketLiveness'
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
@@ -210,6 +210,11 @@ export class HttpTransport implements Transport {
      */
     let daemonPings = false
     let attempt = 0
+    /** 目前這條連線是什麼時候開成的（沒開成＝null）；開了不到 `STABLE_MS` 就被關不算穩定，退避不歸零。 */
+    let openedAt: number | null = null
+    /** 連續「根本沒開成」的次數：握手被拒（token 不對）瀏覽器只看得到沒開成，沒有 HTTP 狀態可看。 */
+    let failsBeforeOpen = 0
+    let lastTokenRefresh = Number.NEGATIVE_INFINITY
     let sock: WebSocket | null = null
     let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -237,7 +242,10 @@ export class HttpTransport implements Transport {
       ws.onopen = () => {
         if (sock !== ws) return
         lastActive = liveness.now()
-        attempt = 0
+        // 不在這裡把 attempt 歸零：開成功又馬上被關的連線（代理、半壞的 daemon）會讓退避永遠停在 250ms，而每次「開成功」
+        // 都整份重抓 state／對話／額度／草稿。歸零留到 onclose 確認這條線活夠久。
+        openedAt = liveness.now()
+        failsBeforeOpen = 0
         handlers.onStatus('open')
       }
       ws.onmessage = (ev: MessageEvent<string>) => {
@@ -267,10 +275,28 @@ export class HttpTransport implements Transport {
         // 已被新連線取代就不動（狀態與重連歸新的管）。
         if (closed || sock !== ws) return
         handlers.onStatus('closed')
+        if (openedAt === null) failsBeforeOpen += 1
+        else if (liveness.now() - openedAt >= STABLE_MS) attempt = 0
+        openedAt = null
         // Cap 3s: daemon usually returns fast and the UI is unusable meanwhile.
-        const delay = Math.min(3_000, 250 * 2 ** attempt) + Math.random() * 150
+        // 一半固定、一半隨機（equal jitter）：daemon 重啟時一群分頁同時重連，只加 150ms 的話全部落在同一刻。
+        const base = Math.min(3_000, 250 * 2 ** attempt)
+        const delay = base / 2 + Math.random() * (base / 2)
         attempt += 1
-        timer = setTimeout(connect, delay)
+        timer = setTimeout(() => {
+          timer = null
+          // 握手一直被拒：多半是 daemon 換了 token（HTTP 的 GET 撞 401 會自己重拿，ws 沒有狀態碼可看，所以在這裡補）。
+          // 先失敗幾次再拿（daemon 只是還沒起來時 /api/session 也不通），而且兩次之間隔開。
+          if (failsBeforeOpen >= TOKEN_REFRESH_AFTER_FAILS && liveness.now() - lastTokenRefresh >= TOKEN_REFRESH_MIN_GAP_MS) {
+            lastTokenRefresh = liveness.now()
+            void this.refreshToken().then(
+              () => {},
+              () => {},
+            ).finally(connect)
+            return
+          }
+          connect()
+        }, delay)
       }
     }
 
