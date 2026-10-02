@@ -86,6 +86,9 @@ mod native_transport_prototype;
 /// 不進正式二進位（見檔案頂端的說明與 docs/ACTOR-RUNTIME-EVAL.md）。
 #[cfg(test)]
 mod actor_runtime_eval_prototype;
+/// issue #769：專案指示檔讀不到時實際帶出的 env／參數（只在 `cargo test` 底下編）。
+#[cfg(test)]
+mod agent_md_unreadable_tests;
 /// issue #92 的端到端情境：撞額度 → 換身分 → `--resume` 接回同一段 session（只在 `cargo test` 底下編）。
 #[cfg(test)]
 mod identity_switch_tests;
