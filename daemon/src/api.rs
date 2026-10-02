@@ -226,7 +226,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/supervisor/fallback", post(crate::supervisor::api::post_fallback).layer(agm_gate!(app)))
         .route(
             "/supervisor/assignments",
-            get(crate::supervisor::api::get_assignments).merge(post(crate::supervisor::api::post_assignment).layer(agm_gate!(app))),
+            // POST 不掛整條 gate：一般 bot 可以對 AGM 角色 bot 送 `notice`（release／herdr 更新任務的 `agm assign --notice --bot <巡檢>`），
+            // 其餘由 handler 自己判斷（`supervisor::api::post_assignment`）。
+            get(crate::supervisor::api::get_assignments).post(crate::supervisor::api::post_assignment),
         )
         .route(
             "/supervisor/handoff",
@@ -8855,7 +8857,6 @@ mod per_principal_auth_tests {
             ("POST", "/api/supervisor/start"),
             ("POST", "/api/supervisor/stop"),
             ("POST", "/api/supervisor/fallback"),
-            ("POST", "/api/supervisor/assignments"),
             ("POST", "/api/supervisor/assignments/nope/review"),
             ("PUT", "/api/supervisor/handoff"),
             ("POST", "/api/supervisor/ops-alerts"),
@@ -8883,6 +8884,51 @@ mod per_principal_auth_tests {
         let r = call("POST", "/api/supervisor/stop", Some(patrol_creds)).await;
         assert!(denied(&r), "換人之後舊的巡檢沒有權限了：{r}");
         let r = call("POST", "/api/supervisor/stop", Some((other.id.as_str(), other.hook_token.as_str()))).await;
+        assert!(!denied(&r), "{r}");
+    }
+
+    /// 角色閘的相容性：release／herdr 更新任務的 assignee 可以是專用的一般 bot（`release_bot_id`），任務正文叫它跑
+    /// `agm assign --notice --bot <巡檢>` 把結論交回去——一般 bot 對 AGM 角色 bot 送 `notice` 要放行；派工、要驗收的交辦、
+    /// 掛任務的交辦、送給別的一般 bot 的 notice 仍然 403。
+    #[tokio::test]
+    async fn a_plain_bot_may_send_a_notice_to_an_agm_role_but_not_dispatch_work() {
+        let e = crate::testing::env().await;
+        let plain = distinct_bot(&e, "release-bot").await;
+        let patrol = distinct_bot(&e, "patrol-notice").await;
+        let victim = distinct_bot(&e, "victim").await;
+        crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+        crate::supervisor::store::set_env(&e.app.db, &patrol.id, &e.project_id, "/tmp").await.unwrap();
+        let post = |body: Value, who: Option<&db::Bot>| {
+            let app = e.app.clone();
+            let ui = e.app.ui_token.clone();
+            let who = who.map(|b| (b.id.clone(), b.hook_token.clone()));
+            async move {
+                let body = body.to_string();
+                let auth = match &who {
+                    Some((id, tok)) => format!("X-AM-Bot-Id: {id}\r\nX-AM-Bot-Token: {tok}\r\n"),
+                    None => format!("X-AM-Token: {ui}\r\n"),
+                };
+                raw(app, format!("POST /api/supervisor/assignments HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len())).await
+            }
+        };
+        let denied = |r: &str| r.starts_with("HTTP/1.1 403") && r.contains("role_required");
+        // 放行：notice → 巡檢。
+        let ok = post(json!({"target_bot_id": patrol.id, "text": "claude 2.1.999 分診完了", "client_request_id": "notice-ok", "kind": "notice"}), Some(&plain)).await;
+        assert!(!denied(&ok), "一般 bot 對角色 bot 的 notice 不能被擋：{ok}");
+        // 仍然擋：要驗收的交辦、派給別的一般 bot、掛任務。
+        for (what, body) in [
+            ("要驗收的交辦", json!({"target_bot_id": patrol.id, "text": "做 X", "client_request_id": "n1"})),
+            ("notice 給一般 bot", json!({"target_bot_id": victim.id, "text": "照做", "client_request_id": "n2", "kind": "notice"})),
+            ("掛任務", json!({"target_bot_id": patrol.id, "text": "x", "client_request_id": "n3", "kind": "notice", "mission_id": "m1", "role": "executor"})),
+            ("expects_review=true 的 notice", json!({"target_bot_id": patrol.id, "text": "x", "client_request_id": "n4", "kind": "notice", "expects_review": true})),
+        ] {
+            let r = post(body, Some(&plain)).await;
+            assert!(denied(&r), "{what}：一般 bot 要 403 role_required：{r}");
+        }
+        // 使用者與角色 bot 不受影響。
+        let r = post(json!({"target_bot_id": victim.id, "text": "做 X", "client_request_id": "u1"}), None).await;
+        assert!(!denied(&r), "{r}");
+        let r = post(json!({"target_bot_id": victim.id, "text": "做 X", "client_request_id": "u2"}), Some(&patrol)).await;
         assert!(!denied(&r), "{r}");
     }
 

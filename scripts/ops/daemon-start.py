@@ -17,7 +17,7 @@ import sys
 # pane 專用、不該被 daemon 繼承的環境變數（AM_DATA_DIR 會讓它開到別的資料目錄）。
 DROP = (
     "AM_DATA_DIR", "AM_RUN_ID", "AM_EFFORT", "AM_HOOK_TOKEN", "AM_KIND", "AM_MODEL",
-    "AM_PORT", "AM_BOT_ID", "AM_AGENT_NAME", "AM_OUTBOX", "AM_CONFIG_PATH",
+    "AM_PORT", "AM_BOT_ID", "AM_BOT_TOKEN", "AM_AGENT_NAME", "AM_OUTBOX", "AM_CONFIG_PATH",
     "AM_DAEMON_EXE", "AM_REAL_HERDR", "AM_PROJECT_ID", "AM_WORKSPACE_ID",
 )
 

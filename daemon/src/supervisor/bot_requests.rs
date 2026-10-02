@@ -253,16 +253,23 @@ pub const ROLE_SETUP_MARK_PREFIX_RESPONDER: &str = "agm-role-setup:responder";
 /// 跟 `persona_actor`（人設）、`require_role`（approve／ack／herdr 維護窗口）同一個角色判斷（`roles::role_of_bot`，每次讀 DB，
 /// 角色換人之後舊 bot 立刻失效）。
 pub async fn forbid_plain_bot(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<(), LcError> {
-    let Some(id) = verified_bot_id(app, headers).await? else { return Ok(()) };
-    match roles::role_of_bot(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
-        Some(_) => Ok(()),
-        None => Err(LcError::Forbidden(json!({
-            "error": "forbidden",
-            "reason": "role_required",
-            "message": "這支只給 AGM 角色（巡檢／協調者）或沒有 bot 身分的使用者：這顆 bot 證明得了自己，但它不是巡檢也不是協調者",
-            "bot_id": id,
-        }))),
+    match declared_plain_bot(app, headers).await? {
+        None => Ok(()),
+        Some(id) => Err(plain_bot_forbidden(&id, "這支只給 AGM 角色（巡檢／協調者）或沒有 bot 身分的使用者：這顆 bot 證明得了自己，但它不是巡檢也不是協調者")),
     }
+}
+
+/// 呼叫端是被證明身分、但不是任何 AGM 角色的一般 bot 就回它的 id；使用者（沒帶 bot 標頭）與角色 bot 回 `None`。
+pub async fn declared_plain_bot(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<Option<String>, LcError> {
+    let Some(id) = verified_bot_id(app, headers).await? else { return Ok(None) };
+    match roles::role_of_bot(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+        Some(_) => Ok(None),
+        None => Ok(Some(id)),
+    }
+}
+
+pub fn plain_bot_forbidden(bot_id: &str, message: &str) -> LcError {
+    LcError::Forbidden(json!({"error": "forbidden", "reason": "role_required", "message": message, "bot_id": bot_id}))
 }
 
 /// [`forbid_plain_bot`] 當 route layer 用：掛在 `post(handler).layer(…)` 上，不必改 handler 的簽名。
