@@ -6,6 +6,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
 ## 0. 認證
 
 1. `GET /api/session` 不需 token，但**連線的 TCP 對端**必須是 loopback（不看 `Host`：那是呼叫端自己填的），`Origin`（若有）的主機必須是 `127.0.0.1` / `localhost` / `[::1]`（不限 port）；**`Host`（若有）也必須是這三個名稱之一**（安全審查：DNS rebinding 的頁面對自己 origin 的 GET 不帶 `Origin`，只看 Origin 與 TCP 對端擋不住）。這條 loopback 檢查（Origin／Host／對端）套在 `/api/*` 的 auth 中介層、`/api/session` 與 `/ws`。沒有 `Host` 的請求（不是瀏覽器）照舊放行。回 `{"token":"<32 hex>","port":7788}`。
+   比對是整段、精確的（`localhost.`、`[::ffff:127.0.0.1]`、`127.1`、帶帳密或多餘冒號的寫法一律拒絕＝fail closed）。**注意**：放在本機反向代理（nginx、tailscale serve 等）後面時，TCP 對端是代理的 loopback、`Host` 若被改寫成 `localhost` 就等於這兩道檢查都沒了——不要把 7788 經代理對外公開，要對外請改 `allow_lan` 並自負網路隔離。
    開發版（`allow_lan`，見 SPEC §7.1）這兩項都直接放行：同網段誰都拿得到 token——這是使用者裁示保留的風險（`e7392dd`）。
 2. 其餘 `/api/*` 接受一種身分：User 的 `X-AM-Token`、Bot 的 `X-AM-Bot-Id`＋`X-AM-Bot-Token`、或範圍受限的 service `X-AM-Service-Id`＋`X-AM-Service-Token`。出現 Bot／service header 就表示要用該 principal；欄位不完整、token 不符、或混帶其他 principal 都拒絕，不降級成 User。沒有 Bot／service header 且 token 有效的請求是 User；這符合使用者裁示接受共用 UI token 的風險。
 3. WebSocket：`/ws?token=<token>[&since=<seq>]`。
