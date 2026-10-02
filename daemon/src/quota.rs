@@ -2367,7 +2367,6 @@ mod tests {
             effort: None,
             fast: 0,
             persona: None,
-            instruction_files: None,
             args_json: "[]".into(),
             autostart: 0,
             inject_hooks: 1,

@@ -20,9 +20,13 @@ fn fnv1a64(s: &str) -> u64 {
 }
 
 /// 啟動相關設定的版本：改任何一個都要重啟才生效的那組（`PATCH` 的 `restart_relevant`）。env 用有序 map，順序不影響結果。
+///
+/// 第五格（`Value::Null`）是 2026-10-02 移除的 `instruction_files` 留下的位置：已移除的設定不再參與版本，但格子留著、值固定 null，
+/// 這樣沒設過它的 bot（NULL，也就是幾乎全部）算出來的版本跟移除前一模一樣——升級 daemon 不會把所有執行中、沒有任何設定變動的
+/// bot（含 codex／grok）一次標成「需重啟」。代價：設過非預設值的 bot 版本會變（設定檔內容確實不同了），照實標成需重啟。
 pub fn of(bot: &db::Bot) -> String {
     let canon = json!([
-        bot.model, bot.effort, bot.fast, bot.persona, bot.instruction_files, bot.args_json,
+        bot.model, bot.effort, bot.fast, bot.persona, serde_json::Value::Null, bot.args_json,
         bot.identity, bot.env(), bot.inject_hooks, bot.auto_approve,
     ]);
     format!("{:016x}", fnv1a64(&canon.to_string()))
@@ -107,6 +111,15 @@ mod tests {
         b.autostart = 1;
         b.is_primary = 1;
         assert_eq!(of(&b), rev, "名字、autostart、釘選不需要重啟");
+    }
+
+    /// 升級 daemon 不能讓所有現役 run 變成過期：`instruction_files` 拿掉後，沒設過它的 bot 版本必須跟移除前（第五格 null）逐字相同。
+    #[tokio::test]
+    async fn dropping_instruction_files_keeps_the_revision_of_every_bot_that_never_set_it() {
+        let e = tt::env().await;
+        let b = tt::claude_bot(&e.app, &e.project_id, "rev").await;
+        let before = json!([b.model, b.effort, b.fast, b.persona, null, b.args_json, b.identity, b.env(), b.inject_hooks, b.auto_approve]);
+        assert_eq!(of(&b), format!("{:016x}", fnv1a64(&before.to_string())));
     }
 
     #[tokio::test]

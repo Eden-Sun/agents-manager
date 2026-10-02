@@ -1045,7 +1045,6 @@ mod tests {
             effort: effort.map(Into::into),
             fast: i64::from(fast),
             persona: None,
-            instruction_files: None,
             args_json: "[]".into(),
             autostart: 0,
             inject_hooks: 1,

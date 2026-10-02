@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS bots (
   effort TEXT,
   fast INTEGER NOT NULL DEFAULT 0,
   persona TEXT,
-  -- claude only（issue #213）：讀哪份專案指示檔（`agents-md` plugin 的 `instructionFiles`）。NULL＝daemon 釘的預設 `claude-md`。
+  -- 已棄用（issue #213 加、2026-10-02 使用者決定移除）：不再讀寫；欄位留著讓舊 DB 照開、也不用升 schema 版。
   instruction_files TEXT,
   args_json TEXT NOT NULL DEFAULT '[]', autostart INTEGER NOT NULL DEFAULT 0,
   inject_hooks INTEGER NOT NULL DEFAULT 1,
@@ -440,7 +440,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("runs", "subagent_json", "ALTER TABLE runs ADD COLUMN subagent_json TEXT"),
         // `resume_native` 的結論（issue #92）；見 SCHEMA 那一欄的說明與 `lifecycle::resume_gate`。
         ("runs", "resume_outcome", "ALTER TABLE runs ADD COLUMN resume_outcome TEXT"),
-        // claude bot 讀哪份專案指示檔（issue #213）；舊列 NULL＝釘在 `claude-md`，跟加這一欄之前一樣。
+        // 已棄用的 `bots.instruction_files`（issue #213，現在不讀寫）；留著 ALTER 讓更舊的 DB 開起來欄位齊全、`check_schema_drift` 不炸。
         ("bots", "instruction_files", "ALTER TABLE bots ADD COLUMN instruction_files TEXT"),
         // run 用哪個身分起來的（issue #238）；舊列 NULL＝沒記，額度照 bot 設定的身分算，跟加這一欄之前一樣。
         ("runs", "runtime_identity", "ALTER TABLE runs ADD COLUMN runtime_identity TEXT"),
@@ -914,8 +914,6 @@ pub struct Bot {
     pub fast: i64,
     /// Appended to the agent's system prompt.
     pub persona: Option<String>,
-    /// claude only: `agents-md` plugin's `instructionFiles`. NULL = `config::INSTRUCTION_FILES_DEFAULT`.
-    pub instruction_files: Option<String>,
     pub args_json: String,
     pub autostart: i64,
     pub inject_hooks: i64,
@@ -1871,8 +1869,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// schema 變更（additive）`bots.instruction_files`（issue #213）：沒有這一欄的舊 DB 開起來會補上，舊列是 NULL
-    /// （＝daemon 釘的 `claude-md`），`SELECT *` 照樣讀得進 `Bot`。少了這條 ALTER，`check_schema_drift` 會讓 daemon 起不來。
+    /// schema 變更（additive）`bots.instruction_files`（issue #213，已棄用不再讀寫）：沒有這一欄的舊 DB 開起來仍會補上，
+    /// `SELECT *` 照樣讀得進 `Bot`。少了這條 ALTER，`check_schema_drift` 會讓 daemon 起不來。
     #[tokio::test]
     async fn an_old_database_gains_bots_instruction_files_on_open() {
         let dir = std::env::temp_dir().join(format!("am-instruction-files-{}", ulid()));
@@ -1890,7 +1888,7 @@ mod tests {
         let pool = open(&path).await.expect("舊 DB 照常開起來");
         assert!(has_column(&pool, "bots", "instruction_files").await.unwrap(), "開的時候補上");
         let b = bot(&pool, "b").await.unwrap().expect("舊列還在");
-        assert_eq!(b.instruction_files, None, "舊列沒有設定：釘在預設 claude-md");
+        assert_eq!(b.name, "b");
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
     }
