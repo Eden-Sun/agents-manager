@@ -654,7 +654,7 @@ mod tests {
         let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
         let project: String = sqlx::query_scalar("SELECT path FROM projects WHERE id = ?").bind(&env.project_id).fetch_one(&env.app.db).await.unwrap();
         let project = PathBuf::from(project);
-        let elsewhere = tt::track(std::env::temp_dir().join(format!("am-attach-write-{}", crate::db::ulid())));
+        let elsewhere = crate::testing::track(std::env::temp_dir().join(format!("am-attach-write-{}", crate::db::ulid())));
         std::fs::create_dir_all(&elsewhere).unwrap();
         // `.agents-manager` 本身是連結。
         std::fs::create_dir_all(&project).unwrap();
