@@ -3821,7 +3821,8 @@ async fn restart_idle_bots(State(app): State<Arc<App>>) -> Result<Response, LcEr
 async fn restart_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Query(q): Query<StartQuery>) -> Result<Response, LcError> {
     let opts = resume_opts(&q)?;
     refuse_child_restart(&app, &id).await?;
-    // 連點兩下／兩個鈕／兩個分頁：同一顆 bot 同樣的重啟已經在進行或剛做完，後來的不再重啟一次，回同一個結果（`restart_coalesce`）。
+    // 連點兩下／兩個鈕／兩個分頁：同一顆 bot 同樣的重啟**仍在進行中**，後來的不再重啟一次，等它做完、回同一個結果（`restart_coalesce`）。
+    // 做完之後再來的是新的一次（改了設定馬上重啟要套用新設定）。
     let lead = match crate::restart_coalesce::admit(&id, &format!("{opts:?}")).await {
         crate::restart_coalesce::Admission::Joined(run_id) => {
             let mut body = started_json(&app, &run_id, &opts).await?;
@@ -7182,8 +7183,8 @@ mod bot_config_tests {
         }
     }
 
-    /// 單顆 bot 的 restart 連點兩下（c2 看到 `agent.start` 3 次）：同一顆 bot 已有 restart 在進行、或剛完成（5 秒內），
-    /// 第二個請求回同一個結果，不再重啟一次（比照一鍵重啟的合併，SPEC §6.9）。
+    /// 單顆 bot 的 restart 連點兩下（c2 看到 `agent.start` 3 次）：同一顆 bot 已有 restart **在進行中**，
+    /// 第二個請求回同一個結果，不再重啟一次（比照一鍵重啟的合併，SPEC §6.9）；做完之後再來的是新的一次。
     #[tokio::test]
     async fn a_second_restart_of_the_same_bot_is_coalesced_not_run_again() {
         let e = env().await;
@@ -7209,16 +7210,28 @@ mod bot_config_tests {
         let coalesced = [&a, &b].iter().filter(|v| v["coalesced"] == json!(true)).count();
         assert_eq!(coalesced, 1, "被合併的那個說一聲：{a} {b}");
 
-        // 剛做完（窗口內）又來一個一樣的：還是同一個結果，不再重啟。
-        let again = body(restart_bot(State(e.app.clone()), Path(id.clone()), q(None)).await.unwrap()).await;
-        assert_eq!(starts() - before, 1);
-        assert_eq!(again["run_id"], a["run_id"]);
-        assert_eq!(again["coalesced"], json!(true));
+        // 剛做完又來一個：那是另一次重啟，不是同一次（只合併「仍在進行中」的）——照做，換新的 run。
+        let second = body(restart_bot(State(e.app.clone()), Path(id.clone()), q(None)).await.unwrap()).await;
+        assert_eq!(starts() - before, 2, "做完之後的重啟不合併：{second}");
+        assert_ne!(second["run_id"], a["run_id"]);
+        assert!(second.get("coalesced").is_none(), "{second}");
 
-        // 不一樣的重啟（明確要開新對話）不是同一件事：照做。
+        // 改設定後馬上（不到一秒）重啟：必須真的重啟，而且新 run 帶的是新設定（2026-10-02：被當成同一次就沒套到）。
+        let needs_restart = |app: Arc<App>, id: String| async move {
+            let st = state_json(&app).await.unwrap();
+            st["projects"].as_array().unwrap().iter().flat_map(|p| p["bots"].as_array().unwrap().clone()).find(|b| b["id"] == json!(id)).unwrap()["needs_restart"].clone()
+        };
+        let _ = patch(&e, &id, json!({"persona": "換一份人設 B"})).await.unwrap();
+        assert_eq!(needs_restart(e.app.clone(), id.clone()).await, json!(true), "前提：改了設定、執行中的 run 還是舊的");
+        let third = body(restart_bot(State(e.app.clone()), Path(id.clone()), q(None)).await.unwrap()).await;
+        assert_eq!(starts() - before, 3, "改設定後的重啟一定要做：{third}");
+        assert_ne!(third["run_id"], second["run_id"]);
+        assert_eq!(needs_restart(e.app.clone(), id.clone()).await, json!(false), "新 run 載入的是新設定");
+
+        // 不一樣的重啟（明確要開新對話）本來就不是同一件事：照做。
         let fresh = body(restart_bot(State(e.app.clone()), Path(id.clone()), q(Some("fresh"))).await.unwrap()).await;
-        assert_eq!(starts() - before, 2, "不同的重啟種類不合併：{fresh}");
-        assert_ne!(fresh["run_id"], a["run_id"]);
+        assert_eq!(starts() - before, 4, "不同的重啟種類不合併：{fresh}");
+        assert_ne!(fresh["run_id"], third["run_id"]);
     }
 
     /// #353：改了要重啟才生效的設定，`needs_restart` 不能只存在 PATCH 的 HTTP 回應裡——回應掉了（或 daemon 之後重啟）
