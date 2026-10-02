@@ -4026,22 +4026,15 @@ async fn service_daemon_swap_restart_window(
         return Err(LcError::Bad("owner 與 commit 都必填".into()));
     }
     let ttl = b.ttl_secs.unwrap_or(900);
-    let expires = db::iso_in(ttl.clamp(30, 3600) + 300);
     let actor = format!("service({})", crate::service_auth::DAEMON_SWAP);
-    let created = crate::supervisor::store::create_approval_superseding(
-        &app.db, owner, "restart", &format!("例行自動部署換版 {commit}（daemon-swap 自動核准）"),
-        Some(commit), Some(&expires), Some(&format!("auto-deploy-restart-{}", db::ulid())), None, None,
-    )
-    .await
-    .map_err(any_err)?;
-    let id = created.approval.id;
-    crate::supervisor::store::decide_approval_from(&app.db, &id, "pending", "approved", &actor, Some("例行自動部署：建置與整樹測試在推 main 前後已由 ubuntu-ci 驗過"), None)
-        .await
-        .map_err(any_err)?;
+    // 同一張核准一輪輪沿用，升級計時才接得下去（`swap_window`）。
+    let id = crate::swap_window::approval_for(&app, owner, commit, &actor).await.map_err(any_err)?;
     match crate::supervisor::maintenance::acquire(&app, "restart", owner, &id, Some(commit), ttl, true, &[]).await {
         Ok(v) => Ok(Json(v)),
         Err(e) => {
-            let _ = crate::supervisor::store::decide_approval_from(&app.db, &id, "approved", "revoked", &actor, Some("沒拿到窗口"), None).await;
+            if !crate::swap_window::keep_after(&e) {
+                let _ = crate::supervisor::store::decide_approval_from(&app.db, &id, "approved", "revoked", &actor, Some("沒拿到窗口"), None).await;
+            }
             Err(e)
         }
     }
@@ -7859,6 +7852,36 @@ mod per_principal_auth_tests {
         )
         .await;
         assert!(matches!(&r, Err(LcError::Conflict(v)) if v["detail"]["reason"] == "not_idle" || v["reason"] == "not_idle"), "{r:?}");
+    }
+
+    /// 2026-10-01：一直有 bot 在忙時，每一輪都開新核准、拿不到就撤，升級計時每輪歸零，自動部署卡了一整晚。
+    /// 現在同 commit 沿用同一張（`not_idle` 不撤），換 commit 開新的並接續舊的等待；等滿門檻 working 就不再擋。
+    #[tokio::test]
+    async fn daemon_swap_keeps_one_approval_across_rounds_so_a_busy_fleet_still_gets_a_window() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "swap-forever-busy").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?").bind(&run).execute(&e.app.db).await.unwrap();
+        let svc = || Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into()));
+        let ask = |commit: &str| SwapWindowIn { owner: "daemon-update-kick".into(), commit: commit.into(), ttl_secs: None };
+        let approval_of = |r: &Result<Json<Value>, LcError>| match r {
+            Err(LcError::Conflict(v)) => v["safety"]["escalation_approval_id"].as_str().or(v["detail"]["safety"]["escalation_approval_id"].as_str()).map(String::from),
+            _ => None,
+        };
+        let r1 = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c1"))).await;
+        let r2 = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c1"))).await;
+        let (a1, a2) = (approval_of(&r1), approval_of(&r2));
+        assert!(a1.is_some(), "{r1:?}");
+        assert_eq!(a1, a2, "同 commit 下一輪沿用同一張核准");
+        let a1 = a1.unwrap();
+        assert_eq!(crate::supervisor::store::approval(&e.app.db, &a1).await.unwrap().unwrap().status, "approved", "not_idle 不撤");
+
+        // 那張核准已經等了 31 分鐘（把核准時間往前推）；main 又動了，換 commit 也接得下去。
+        let old = crate::db::iso_in(-31 * 60);
+        sqlx::query("UPDATE supervisor_approvals SET decided_at=?, created_at=? WHERE id=?").bind(&old).bind(&old).bind(&a1).execute(&e.app.db).await.unwrap();
+        let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask("c2"))).await.expect("等滿門檻之後 working 不再擋");
+        assert_eq!(v["lease"]["held"], true, "{v}");
+        assert_eq!(crate::supervisor::store::approval(&e.app.db, &a1).await.unwrap().unwrap().status, "superseded");
     }
 
     #[tokio::test]
