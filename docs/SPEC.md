@@ -1987,7 +1987,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - **遠端主機的 bot**（使用者 2026-10-01）：`AM_OUTBOX` 指到**那台上**的 `~/<remote root>/outbox/<bot_id>/`（跟 bot 目錄同一個實例根，
   bot.env 的自訂值一樣蓋掉；目錄由 bot 寫檔前自己 `mkdir -p`）。網頁列表與下載由 daemon 走 ssh（`outbox_remote`）：只列最上層的一般檔
   （符號連結不算，outbox 本身是符號連結就整個不列），擋檔名與內容的規則同本機；下載只收單一層檔名，內容以 base64 傳回、大小上限同本機。下載腳本**先把檔案開在 fd 3、再驗、只從 fd 讀**（#768，沒有 `O_NOFOLLOW` 的 sh 裡關掉「`-L` 檢查 → 讀檔」的競態）：`$D`／`$F` 此刻都不是符號連結、`$F` 是一般檔案，而且 `$F` 跟 fd 3 是同一個檔（GNU 用 `-ef`；macOS 的 `/dev/fd/N` 在 devfs、dev 號不同，`-ef` 恆為假，改比 `stat -L -f '%i %z %m %c'`），內容用 `head -c <上限+1> <&3` 封頂（超過由 daemon 判 `file_too_large`）；開檔時 `$F` 若是連結、之後被換回一般檔案，inode 對不上就拒絕。
-  遠端沒有 AGM 的 gc，**每次列表時順手刪掉 mtime 與 ctime 都超過 60 分鐘的檔**。連不上那台時清單回 `reason:"outbox_remote_unreachable"`。
+  遠端沒有 AGM 的 gc，**每次列表時順手刪掉 mtime 與 ctime 都超過 60 分鐘的檔**。連不上那台時清單回 `reason:"outbox_remote_unreachable"`；daemon 已知那台斷線（睡著、tailscale 斷線）時**不再打 ssh**，立刻回這個答案（不等 30／180 秒逾時）。
 - **時效**：檔案保留 1 小時（`outbox::TTL_SECS = 3600`），從**搬進 outbox 的時間**起算＝mtime 與 ctime 較晚的那個。
   只看 mtime 會出事：`mv`／`cp -p` 進來的舊檔保留舊 mtime，下一輪清理就把 bot 剛交出去的檔刪掉；ctime 是搬入那一刻（寫入、改名、chmod 也會動它，只會延長不會縮短）。
   清單的 `expires_at` 與清理用同一個規則，`modified` 仍是檔案內容的 mtime。
@@ -2761,7 +2761,7 @@ label = "foo@m4p"
    start 失敗退回 nohup（`nohup-fallback systemctl: …`）；沒有 `XDG_RUNTIME_DIR` 時補 `/run/user/<uid>`。其他情況退回 `( trap '' HUP; herdr --session <session> server & )`。
    理由：非互動 ssh 讀不到登入 Keychain（errSecInteractionNotAllowed），在那底下起的 Claude Code 會「Not logged in」；GUI 網域的 LaunchAgent 在桌面工作階段裡，Keychain 已解鎖，
    而且當掉會被 launchd 拉起。
-2. **master 連線**：`ssh -N -M -S <ctl> -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes -L <local.sock>:<remote herdr.sock> <target>`。
+2. **master 連線**：`ssh -N -M -S <ctl> -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StreamLocalBindUnlink=yes（每條 ssh 另外帶 `-o ConnectTimeout=15`，排在使用者的 `ssh_opts` 之後，使用者明寫的蓋得過） -L <local.sock>:<remote herdr.sock> <target>`。
    `<local.sock>`、`<ctl>` 放短路徑 `/tmp/agents-manager-<uid>/<host>.sock|.ctl`（macOS AF_UNIX 上限 104 bytes）。
 3. `HerdrClient::new(<local.sock>)` 取得與本機相同的 client，`ping` 成功 → `connected`。
 4. 每 10 秒 `ping`；失敗或 master 退出 → `disconnected`、指數退避（1s→30s）重建 → 成功後對該 host 對帳並重建事件訂閱。

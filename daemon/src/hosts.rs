@@ -25,6 +25,8 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const MASTER_UP_TIMEOUT: Duration = Duration::from_secs(20);
 const SSH_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 const SSH_PUT_TIMEOUT: Duration = Duration::from_secs(120);
+/// 連不出去（睡著、tailscale 斷線、封包被丟掉）時 ssh 自己放棄的秒數；沒設就等系統的 TCP 逾時（Linux 約 2 分鐘）。
+const SSH_CONNECT_TIMEOUT_SECS: u64 = 15;
 
 /// Short on purpose: AF_UNIX path limit. Namespaced by daemon instance (`startup::instance_slug`)
 /// so an isolated/alt-data-dir daemon managing the same remote host name never shares this
@@ -273,6 +275,9 @@ impl HostConn {
             v.push(cfg.ssh_port.to_string());
         }
         v.extend(cfg.ssh_opts.iter().cloned());
+        // 在使用者的選項之後：ssh 取第一個拿到的值，預設值不能擋住使用者為慢線路明寫的。
+        v.push("-o".into());
+        v.push(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"));
         v
     }
 
@@ -1541,6 +1546,21 @@ mod tests {
             herdr_session: "agents-manager".into(),
             remote_path: String::new(),
         }
+    }
+
+    /// 主機睡著／tailscale 斷線時 ssh 連不出去：沒有 ConnectTimeout 就只能等系統的 TCP 逾時（Linux 約 2 分鐘），
+    /// 所以每條 ssh 都帶 ConnectTimeout（跟 remote_cargo 的 SSH_LIVENESS_OPTS 同一個數字）。放在使用者的 `ssh_opts` **後面**：
+    /// ssh 取第一個拿到的值，使用者為慢線路明寫的 `ConnectTimeout=60` 才蓋得過去。
+    #[test]
+    fn every_ssh_leg_has_a_connect_timeout_the_users_opts_can_override() {
+        let mut c = cfg();
+        c.ssh_opts = vec!["-o".into(), "ConnectTimeout=60".into()];
+        let args = HostConn::remote(c, None).ssh_args();
+        let at = |needle: &str| args.iter().position(|a| a.starts_with(needle));
+        let ours = at("ConnectTimeout=15").expect("沒有預設的 ConnectTimeout");
+        let theirs = at("ConnectTimeout=60").expect("使用者的選項不見了");
+        assert!(theirs < ours, "使用者的要排在前面才蓋得過預設：{args:?}");
+        assert!(HostConn::remote(cfg(), None).ssh_args().iter().any(|a| a == "ConnectTimeout=15"));
     }
 
     /// 離線警示條的「離線多久」：斷線起點只在第一次斷時記下，重試失敗不往後推；連上就清掉。

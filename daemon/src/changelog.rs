@@ -133,6 +133,10 @@ pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result
         crate::hosts::sh_local_stdout(&script, VERSION_TIMEOUT, &format!("`{kind} --version`")).await?
     } else {
         let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+        // 睡著／斷線的主機：巡邏串行讀每台，不能每台都等滿 ssh 逾時（30 秒）才說讀不到。
+        if !conn.is_connected() {
+            return Err(anyhow!("host `{host}` 未連線，讀不到磁碟上的 `{kind}` 版本"));
+        }
         conn.ssh_exec_path(&script).await?
     };
     let line = out.lines().next().unwrap_or("").trim();
@@ -256,6 +260,29 @@ pub async fn lookup(app: &Arc<App>, host: &str, kind: &str, from: Option<&str>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 主機睡著／tailscale 斷線：背景巡邏（每 10 分鐘）讀磁碟版本不能對連不上的主機各等一趟 30 秒 ssh 逾時
+    /// （每個 kind、每台主機各一次，串行），直接說連不上。
+    #[tokio::test]
+    async fn reading_the_disk_version_of_a_down_host_does_not_dial_ssh() {
+        let host = "changelog-asleep";
+        let env = crate::testing::env().await;
+        let cfg = crate::config::HostCfg { name: host.into(), ssh: host.into(), ssh_port: 22, ssh_opts: vec![], herdr_session: "agents-manager".into(), remote_path: String::new(), shared_session: false };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        assert!(!conn.is_connected());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        crate::hosts::set_ssh_fake(host, move |_| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("2.1.5 (Claude Code)\n".into())
+        });
+        crate::hosts::set_ssh_delay(host, Duration::from_secs(3));
+        let started = std::time::Instant::now();
+        let err = installed_version(&env.app, host, "claude").await.unwrap_err();
+        assert!(err.to_string().contains("未連線"), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(1), "連不上的主機不能讓巡邏等：{:?}", started.elapsed());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "不該打任何 ssh");
+    }
 
     const MD: &str = "# Changelog\n\n## 2.1.5\n\n- fixed a\n- fixed b\n\n## 2.1.4\n\n- thing\n\n## Unreleased\n\nnope\n\n## 2.1.3\n\n- old\n";
 

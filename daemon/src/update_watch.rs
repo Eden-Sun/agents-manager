@@ -354,6 +354,7 @@ mod tests {
         let e = crate::testing::env().await;
         let host = "update-watch-597";
         let conn_a = e.app.hosts.insert_remote_for_test(remote_host_cfg(host, "target-a")).await;
+        conn_a.connected.store(true, std::sync::atomic::Ordering::SeqCst); // 有 pane 在巡的主機是連著的；連不上的不讀磁碟版本
         let remote_herdr = crate::testing::MockHerdr::start(conn_a.client.socket_path().to_path_buf());
         let bot = crate::testing::claude_bot(&e.app, &e.project_id, "watch").await;
         let run = crate::testing::fake_run(&e.app, &bot.id).await;
@@ -388,6 +389,7 @@ mod tests {
 
         *installed.lock().unwrap() = "2.0.0 (Claude Code)\n".to_string();
         e.app.hosts.replace_remote_for_test(&e.app, remote_host_cfg(host, "target-b")).await;
+        e.app.hosts.get(host).await.unwrap().connected.store(true, std::sync::atomic::Ordering::SeqCst);
         sweep(&e.app).await;
 
         assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2, "B 必須在 TTL 到期前重新讀版本");
