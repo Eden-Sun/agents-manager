@@ -927,11 +927,14 @@ pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate:
     if fence.conn().name != host {
         anyhow::bail!("host fence for `{}` cannot detect `{host}`", fence.conn().name);
     }
+    // 一趟探測帶著 #719 的一致性檢查（只讀），不多一次 ssh。
+    let script = format!("{PROBE_SH}\n{}", crate::host_baseline::BASELINE_SH);
     let out = if host == LOCAL_HOST {
-        run_local(PROBE_SH, PROBE_TIMEOUT).await?
+        run_local(&script, PROBE_TIMEOUT).await?
     } else {
-        fence.conn().ssh_exec_path(PROBE_SH).await?
+        fence.conn().ssh_exec_path(&script).await?
     };
+    let baseline = crate::host_baseline::BaselineReport { issues: crate::host_baseline::evaluate(&out), checked_at: crate::db::now() };
     let tools = parse_probe(&out);
     let shell_identities = parse_shell_identities(&out);
     let identities = detect_identities(app, host, fence, &tools, &shell_identities).await;
@@ -941,6 +944,7 @@ pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate:
     if !install_host_tools_fenced(app, host, ht.clone(), fence).await {
         return Err(anyhow::Error::new(Superseded { host: host.to_string() }));
     }
+    app.host_baseline.lock().await.insert(host.to_string(), baseline);
     tracing::info!(
         host,
         tools = ?ht.tools.iter().map(|(k, t)| (k.clone(), t.installed, t.logged_in)).collect::<Vec<_>>(),

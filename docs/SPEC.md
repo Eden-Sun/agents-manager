@@ -3356,6 +3356,19 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 - **永遠不清成 NULL**：讀不到、沒人認領、該 kind 沒空 env 身份 → 維持現狀。
 - **一個 pane 只問一次作業系統**（重連重播一串 `pane.agent_detected`，每個小孩每次一個 ssh 會變風暴）；讀不到或那台還沒偵測出同 kind 身份不算問過。
 
+### 16.7 主機工作環境一致性檢查（issue #719，只讀）
+使用者 2026-09-28 搬 ubuntu 時發現兩台 CLI 設定差很多（缺 statusline、全域 CLAUDE.md／RTK.md、rtk hook、codex approval_policy、缺 rtk／zsh、`.gitconfig` 內嵌 token）。
+每次工具偵測（daemon 啟動、重連、手動重新偵測）在**同一趟 ssh** 後面接一段只讀的 `BASELINE_SH`（`daemon/src/host_baseline.rs`），逐項對照基準，結果放 `hosts[].baseline`（API §12.6）。
+
+- **只報、不修**：不寫任何檔、不裝任何東西（自動安裝／同步要使用者另行同意，沒有做）。測試用假 `$HOME` 驗證跑完後目錄快照不變。
+- **基準**（寫在 `host_baseline.rs` 的常數與腳本裡，路徑一律 `$HOME`）：
+  - 工具（嚴重）：`herdr rtk zsh bun jq gh`，用登入 shell 找（跟 §16.1 同一支 `am_abs`）。claude／codex／grok 本身要不要裝由各主機決定，看 `tools`，不在這裡。
+  - 每個 claude 身分（`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`，各自檢查）：`settings.json`、`statusline-command.sh`（嚴重）、`CLAUDE.md`、`RTK.md`（提醒）；`settings.json` 有沒有 `statusLine`、`hooks`（嚴重）、`permissions`（提醒）——只看鍵在不在，不比內容。
+  - codex：`config.toml`、`hooks.json`、`approval_policy` 鍵；grok `config.toml`；herdr `config.toml`（都是提醒）。**不檢查** model／effort／service_tier（使用者規定不動）。
+  - `~/.gitconfig` 內嵌帶密碼的網址（提醒）：只回報有沒有，**不回傳內容**。
+- 檔案本身不在就不再列裡面的鍵（一個根因一行）。探測沒跑完（沒有結尾標記）＝`issues: null`（未知），一次 ssh 逾時不會在每台主機喊一排缺漏。
+- 這一版沒做：啟動時推 inbox、UI 主機面板顯示、自動安裝／同步、Mac 專用項（darwin-only）標記。
+
 ## 16b. 輸入框草稿以 daemon 為準（使用者 2026-10-01）
 
 對話輸入框還沒送出的字（bot 的 `bot:<id>`、群組的 `group:<project id>`、host shell 面板的 `shell:<host>/<pane id>`——pane 結束時清，#758）存在 `composer_drafts`（`key` 主鍵、`text`、`rev`、`updated_at`；`SCHEMA_VERSION` 34），

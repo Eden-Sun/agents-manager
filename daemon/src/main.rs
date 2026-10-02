@@ -118,6 +118,7 @@ mod testing;
 mod timestamp_compat_tests;
 #[cfg(test)]
 mod same_ms_order_tests;
+mod host_baseline;
 mod tools;
 mod trust;
 mod trusted_open;

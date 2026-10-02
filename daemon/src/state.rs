@@ -166,6 +166,8 @@ pub struct App {
     pub quota_stale: Mutex<std::collections::BTreeSet<String>>,
     /// v4.0: per-host CLI detection (`hosts[].tools`), refreshed on every (re)connect.
     pub tools: Mutex<HashMap<String, crate::tools::HostTools>>,
+    /// 每台主機的 CLI 工作環境一致性檢查結果（`hosts[].baseline`，#719）；跟著偵測一起更新，只讀、不修。
+    pub host_baseline: Mutex<HashMap<String, crate::host_baseline::BaselineReport>>,
     /// Claude Code CHANGELOG.md 全文快取（`GET /api/changelog`，10 分鐘）。
     pub changelog: crate::changelog::ChangelogCache,
     /// v4.0: project id -> GitHub origin (`None` = checked, not GitHub).
@@ -281,6 +283,7 @@ impl App {
             quotas: Mutex::new(std::collections::BTreeMap::new()),
             quota_stale: Mutex::new(std::collections::BTreeSet::new()),
             tools: Mutex::new(HashMap::new()),
+            host_baseline: Mutex::new(HashMap::new()),
             changelog: Default::default(),
             github: Mutex::new(HashMap::new()),
             issues_cache: Mutex::new(HashMap::new()),
@@ -647,6 +650,10 @@ pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) 
                 ev.insert("identities".into(), json!(d.identities));
                 ev.insert("shell_identities".into(), json!(d.shell_identities));
                 ev.insert("tools_checked_at".into(), json!(d.checked_at));
+            }
+            // 同樣是「沒有就不帶」：沒量過不等於一致。
+            if let Some(b) = app.host_baseline.lock().await.get(&conn.name) {
+                ev.insert("baseline".into(), json!(b));
             }
             app.emit("host_changed", Value::Object(ev)).await;
             emit_daemon_status(app).await;
