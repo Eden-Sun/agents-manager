@@ -1165,7 +1165,8 @@ mod scratch_leak_guard {
                     walk(&p, out);
                 } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("testing.rs") {
                     for (i, l) in std::fs::read_to_string(&p).unwrap().lines().enumerate() {
-                        if l.contains("temp_dir()") && !l.contains("testing::track(") && !l.contains("testing::scratch_dir(") {
+                        // `tt::` 是各測試模組 `use crate::testing as tt;` 的慣用別名。
+                        if l.contains("temp_dir()") && !["testing::track(", "testing::scratch_dir(", "tt::track(", "tt::scratch_dir("].iter().any(|w| l.contains(w)) {
                             out.push(format!("{}:{}: {}", p.display(), i + 1, l.trim()));
                         }
                     }
