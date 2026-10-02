@@ -71,6 +71,7 @@ mod herdr_unit;
 mod herdr_update;
 mod herdr_upgrade;
 mod herdr_version;
+mod home;
 mod hook_cmd;
 mod hook_inbox;
 mod judge;
@@ -483,6 +484,12 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // shim 只在 bot 啟動時寫，長跑的 bot 會抱著舊版好幾天（2026-09-18 的 shim 巢狀死鎖就是這樣
     // 在修正上線後還在發生）。開機就地換成這顆 binary 帶的版本，不必重啟任何 pane。
     shim_refresh::refresh_at_startup(&app).await;
+    // grok 的全域 hook 檔若指到別的資料目錄／已刪的腳本（測試或別顆 daemon 寫的），開機就修回來；沒有檔就不建。
+    match lifecycle::grok_hook::heal_at_startup(&app, None) {
+        Ok(true) => tracing::info!("repaired the grok hooks file at startup"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = ?e, "could not check the grok hooks file at startup"),
+    }
     // #88: attachments whose save() died mid-write or mid-finalize before this restart.
     attach::reconcile_orphans(&app).await;
     // 上傳了卻從沒送出的附件（`ready`、沒有訊息引用）依保留期清掉；開機一次、之後每 6 小時。

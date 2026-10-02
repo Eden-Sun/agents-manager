@@ -386,7 +386,7 @@ pub fn remote_grok_dispatch_sh(root: &str, instance: Option<&str>) -> String {
 
 /// 沒有 `--token`（issue #43、#495）：`hook_cmd::hook_token()` 在旗標是空的時候本來就會讀
 /// `AM_HOOK_TOKEN`，而上面那行已經確定它有值。claude／codex 的 `hook_cmd_parts` 也從來沒帶過它。
-fn local_grok_dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> String {
+pub(super) fn local_grok_dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> String {
     format!(
         "#!/bin/sh\n# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes.\n[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0\n{gate}exec {exe} hook grok --bot \"$AM_BOT_ID\" --port \"${{AM_PORT:-7788}}\" --data-dir {data_dir}\n",
         gate = instance_gate(instance),
@@ -400,7 +400,7 @@ fn grok_hooks_json(dispatcher: &str) -> String {
     serde_json::to_string_pretty(&json!({"hooks": {"SessionStart": entry, "Stop": entry}})).unwrap_or_default()
 }
 
-fn grok_home(env: &Value, home: &str) -> String {
+pub(super) fn grok_home(env: &Value, home: &str) -> String {
     env.get("GROK_HOME")
         .and_then(|v| v.as_str())
         .map(str::trim)
@@ -409,46 +409,8 @@ fn grok_home(env: &Value, home: &str) -> String {
         .unwrap_or_else(|| format!("{home}/.grok"))
 }
 
-/// Write only when the content differs, so grok's hook loader does not see spurious changes.
-///
-/// 權限**每次**都對齊（issue #494、#126）：內容沒變但權限太寬的（舊版寫出來的 0755／0644）也要收回來，
-/// 否則只有內容改版那一次才修得到。
-fn write_if_changed(path: &std::path::Path, content: &str, mode: u32) -> anyhow::Result<bool> {
-    let same = std::fs::read_to_string(path).map(|cur| cur == content).unwrap_or(false);
-    if !same {
-        if let Some(d) = path.parent() {
-            crate::private_files::create_private_dir(d)?;
-        }
-        std::fs::write(path, content)?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let cur = std::fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o7777);
-        if cur != Some(mode) {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-        }
-    }
-    Ok(!same)
-}
-
 fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?.to_string_lossy().to_string();
-    let dispatcher = app.data_dir.join(GROK_DISPATCH_SH);
-    let exe = app.exe.to_string_lossy().to_string();
-    let instance = app.instance();
-    let a = write_if_changed(
-        &dispatcher,
-        &local_grok_dispatch_sh(&exe, &app.data_dir.to_string_lossy(), instance.as_deref()),
-        0o700,
-    )?;
-    let hooks_path =
-        std::path::PathBuf::from(grok_home(env, &home)).join("hooks").join(grok_hooks_file(instance.as_deref()));
-    let b = write_if_changed(&hooks_path, &grok_hooks_json(&dispatcher.to_string_lossy()), 0o600)?;
-    if a || b {
-        tracing::info!(dispatcher = %dispatcher.display(), hooks = %hooks_path.display(), "grok hook installed");
-    }
-    Ok(())
+    super::grok_hook::install_local(app, env).map(|_| ())
 }
 
 /// Remote grok bot: the same two files, written over ssh after `install_remote_hook`.
@@ -1065,7 +1027,7 @@ async fn install_herdr_skill_local(cfg_dir: Option<String>, agent_name: &str) ->
     let doc = herdr_skill_doc(&herdr_skill_output("herdr", HERDR_SKILL_TIMEOUT).await?, agent_name);
     let base = match cfg_dir {
         Some(d) if !d.trim().is_empty() => std::path::PathBuf::from(d),
-        _ => dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?.join(".claude"),
+        _ => crate::home::dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?.join(".claude"),
     };
     let dir = base.join("skills").join("herdr");
     let path = dir.join("SKILL.md");
