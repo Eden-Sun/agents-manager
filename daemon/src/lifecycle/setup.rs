@@ -1086,13 +1086,19 @@ async fn install_herdr_skill_remote(
 /// `bot.persona` appended to the system prompt per kind; `child_agent_rules` comes first, then the
 /// `[agents]` agent md (§6.5i). The CLIs' own instruction files are off, so this is the bot's only source.
 /// `agent_md` None＝`[agents]` 沒設定：CLI 照舊讀自己的指示檔。
-pub(crate) fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>) -> Vec<String> {
+pub(crate) fn persona_text(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>) -> String {
     let base = super::agent_md::compose(&child_agent_rules(agent_name), agent_md.unwrap_or(""));
     let user = bot.persona.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let p = match user {
+    match user {
         Some(u) => format!("{base}\n\n{u}"),
         None => base,
-    };
+    }
+}
+
+/// Inline form of [`persona_text`]. Only the fallback: `HerdrClient::agent_start` trims the whole argv to 900 bytes, so a
+/// persona this long is cut to "…（後略）" — the normal path hands it over as a file ([`super::persona_file`]).
+pub(crate) fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>) -> Vec<String> {
+    let p = persona_text(bot, agent_name, agent_md);
     let p = p.as_str();
     match bot.kind.as_str() {
         "claude" => vec!["--append-system-prompt".into(), p.to_string()],
