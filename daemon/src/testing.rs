@@ -887,6 +887,12 @@ impl Drop for Env {
     }
 }
 
+/// 測試行程專屬的假家目錄（`crate::home::dir()` 在測試裡回它）：會寫使用者家目錄的程式碼不能碰真的 HOME。
+pub fn fake_home() -> std::path::PathBuf {
+    static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| scratch_dir("am-fake-home")).clone()
+}
+
 /// 測試自己建的暫存資料目錄（`App` 的 `data_dir`）：註冊進來，最後一個 `Arc<App>` 掉了就由 `App` 的 `Drop` 刪掉
 /// （`state.rs`）。以前這些 `app()` 輔助函式只建不刪，每跑一輪整樹測試 `/tmp` 多出上千個帶 sqlite 的目錄
 /// （2026-10-01 實測 6GB、其中 4GB 是 supervisor 測試），ubuntu-ci 在 17:20 因為 ENOSPC 紅過一輪。

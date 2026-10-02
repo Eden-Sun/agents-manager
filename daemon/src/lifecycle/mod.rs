@@ -33,6 +33,9 @@ pub(crate) mod dead_panes;
 mod queue;
 pub(crate) mod setup;
 pub(crate) mod agent_md;
+pub(crate) mod grok_hook;
+#[cfg(test)]
+mod grok_hook_tests;
 mod start;
 mod stop;
 mod deferred_live;

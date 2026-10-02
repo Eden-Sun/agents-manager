@@ -243,7 +243,7 @@ async fn config_env(app: &Arc<App>, bot: &db::Bot, host: &str, home: &str) -> BT
 /// Best effort: returns one error per store rather than refusing the start.
 /// Local host; remote bots go through [`pretrust_bots_remote`].
 pub async fn pretrust_bots(app: &Arc<App>, bots: &[db::Bot]) -> Vec<String> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::home::dir() else {
         return vec!["no home directory; cannot pre-trust the working directory".into()];
     };
     let home = home.to_string_lossy().into_owned();

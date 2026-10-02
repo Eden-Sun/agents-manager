@@ -3179,6 +3179,8 @@ grok TUI 沒有每次啟動注入 hook 的旗標（`--settings`/`--hooks`/`--plu
      兩支都**不把 token 放上命令列**（issue #43）：值只走 pane env，`AM_HOOK_TOKEN` 在這裡只用來判斷
      「是不是 daemon 開的 pane」。遠端第三個參數是固定的佔位 `-`，`hook.sh` 不讀它。
    - `<GROK_HOME>/hooks/agents-manager.json`：`SessionStart` 與 `Stop` 各一個 command hook 指向分派腳本（`timeout: 5`）。`GROK_HOME` 取自 identity.env ∪ bot.env，缺省 `~/.grok`。
+   - **自癒、不蓋掉使用者的東西**（`lifecycle/grok_hook.rs`）：只換「命令檔名是 `grok-hook.sh`」的那一項，使用者自己加的 hook 與 `hooks` 以外的鍵原樣保留（一個群組裡混著的也只拿掉我們那個）；指到這顆 daemon 的那份留在原位（冪等）。寫入是同目錄暫存檔＋`rename`（原子），權限照原檔、但群組／其他人寫得進去的收回 0600，新檔 0600。bot 啟動時裝；**daemon 開機也檢查一次**（`heal_at_startup`）：檔案在、我們那一項不是指到這顆 daemon 的 dispatcher（別顆 daemon 或測試寫的）或 dispatcher 腳本被刪了就修；沒有檔不建（沒在用 grok 的機器不裝 hook）。遠端主機的檔仍整檔覆寫（尚未做合併）。
+   - 會寫使用者家目錄的程式碼（這個 hook、預先信任 `trusted_folders.toml`、claude 的 herdr skill）一律走 `crate::home::dir()`；測試裡它是行程專屬的假家目錄，不是真的 `$HOME`（2026-10-02：測試曾把 `/tmp/am-test-…/data/grok-hook.sh` 寫進真的 `~/.grok/hooks/agents-manager.json`）。
 2. `inject_hooks = false` 時 pane 不給 `AM_HOOK_TOKEN`，分派腳本立即 exit 0（走終端備援）。
 3. 使用者自己開的 grok（無 `AM_BOT_ID`）只多一次 `sh` 啟動。Stop hook 的 stdout 必須空（JSON 會被當 decision），§4.4 已保證。
 4. 刪 bot 不移除全域 hooks 檔（沒有 grok bot 時是無害 no-op）。
