@@ -67,6 +67,15 @@
   font-weight: 650;
 }
 
+/* hook 報的明細（shell：等遠端 build · …）：比說明句輕一階，太長就截。 */
+.bg-jobs-tasks {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
 @media (max-width: 640px) {
   .bg-jobs-bar {
     flex-wrap: wrap;

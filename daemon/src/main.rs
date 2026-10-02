@@ -23,6 +23,7 @@ mod drafts;
 mod launch_rev;
 mod promote_intents;
 mod assets;
+mod background_hook;
 mod background_jobs;
 mod claude_live;
 mod attach;

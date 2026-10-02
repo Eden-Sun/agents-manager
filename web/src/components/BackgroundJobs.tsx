@@ -1,5 +1,5 @@
 import { useStore } from '../store/store'
-import { backgroundDetail, backgroundJobs, backgroundLabel, backgroundShortLabel } from '../lib/backgroundJobs'
+import { backgroundDetail, backgroundJobs, backgroundLabel, backgroundShortLabel, backgroundTaskLines, cronLabel } from '../lib/backgroundJobs'
 import './backgroundJobs.css'
 
 function useBackground(botId: string): { n: number; kind: string } {
@@ -44,12 +44,16 @@ export function BackgroundJobsBadge({
 /** 聊天最底下（輸入框上方）的一條說明：最後一則之後它其實還在動。 */
 export function BackgroundJobsBar({ botId }: { botId: string }) {
   const { n, kind } = useBackground(botId)
+  const lines = useStore((s) => backgroundTaskLines(s.runs[botId]).join('\n'))
+  const cron = useStore((s) => cronLabel(s.runs[botId]))
   if (n === 0) return null
   return (
     <div className="bg-jobs-bar" role="status">
       <span className="bg-jobs-dot" aria-hidden="true" />
       <strong>{backgroundLabel(n)}</strong>
       <span>{backgroundDetail(kind, n)}</span>
+      {lines && <span className="bg-jobs-tasks">{lines.split('\n').join(' · ')}</span>}
+      {cron && <span className="bg-jobs-tasks">{cron}</span>}
     </div>
   )
 }

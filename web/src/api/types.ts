@@ -319,6 +319,10 @@ export interface Run {
   update_notice: string | null
   /** #714：畫面底部標著還在跑的背景工作數（claude 的 shell、codex 的背景終端）；0＝沒有。沒帶當 0；`null`＝巡邏還沒看過（#767，沒有證據）。 */
   background_jobs?: number | null
+  /** claude ≥ 2.1.287 的 Stop hook 報的背景工作明細（SPEC §6.14）；null＝沒報過（舊版 claude、剛重啟，數字來自畫面判斷）；`[]`＝報過「沒有」。 */
+  background_tasks?: BackgroundTask[] | null
+  /** 同一則 Stop 報的 session 排程（/loop、ScheduleWakeup…）：只當資訊，不算背景工作。 */
+  session_crons?: SessionCron[] | null
   /**
    * 上一回合被 API 斷線截斷的那行原文；hook 與 herdr 都會報成 done，所以要看這格。
    * null = 正常收尾；下一回合開始時清掉。
@@ -1074,4 +1078,20 @@ export interface UpdateReview {
   answered_at: string
   /** `done` 才有：AGM 的結論原文。 */
   result: string
+}
+
+export interface BackgroundTask {
+  id: string
+  /** `shell`／`subagent`／`monitor`／`workflow`…（hook 報什麼就是什麼） */
+  type: string
+  status: string
+  description: string
+  command?: string
+}
+
+export interface SessionCron {
+  id: string
+  schedule: string
+  recurring: boolean
+  prompt: string
 }

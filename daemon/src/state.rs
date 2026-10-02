@@ -182,6 +182,8 @@ pub struct App {
     pub host_shells: crate::api::shell::Registry,
     /// #714：畫面底部標著的背景工作數，以 run 為鍵（`background_jobs.rs`）。
     pub background_jobs: crate::background_jobs::Counts,
+    /// claude 的 Stop hook 自己報的背景工作（`background_hook.rs`），以 run 為鍵。
+    pub background_hook: crate::background_hook::Snapshots,
     /// Per-host serialization for shell opens: the cap check stays exclusive through pane creation and registration.
     pub host_shell_open_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
@@ -291,6 +293,7 @@ impl App {
             gh_device: Mutex::new(HashMap::new()),
             host_shells: Default::default(),
             background_jobs: Default::default(),
+            background_hook: Default::default(),
             host_shell_open_locks: Mutex::new(HashMap::new()),
             #[cfg(test)]
             preview_env: Default::default(),

@@ -2690,9 +2690,16 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
   `lsof -nP -iTCP -sTCP:LISTEN -Fp`）。從 pane shell 往下找 claude 的工具 shell（命令列含 `/.claude/shell-snapshots/snapshot-`，
   取最外層），子樹裡有程序在 listen TCP 的就是 bot 起的服務，從 N 扣掉。任何一塊讀不到（herdr 沒回 shell pid、ssh 失敗、
   沒有 lsof 的遠端）都不扣：寧可多標，也不要把真的在跑的工作藏起來。codex 的背景終端照舊全算。
+- **claude 的 Stop hook 自己報（claude ≥ 2.1.287，`background_hook.rs`）**：Stop payload 多了 `background_tasks[]`（`{id, type, status, description}`，shell 另有 `command`；
+  空陣列＝沒有東西在跑）與 `session_crons[]`（`{id, schedule, recurring, prompt}`，/loop、ScheduleWakeup 之類之後會叫醒 session）。**有 `background_tasks` 的 Stop 以它為準**：
+  hookrecv 在世代圍籬之後收下（上一代的 Stop 不改這一代），回合一結束就有數字，不用等 30 秒巡邏；數字＝shell 以外的全算，shell 扣掉常駐服務（扣法同上，
+  Stop 當下先照原數字記、背景查完再修正，不卡 hook 處理）。**沒有這個鍵（舊版 claude、舊的遠端 hook）完全不碰，維持畫面判斷**；畫面判斷也沒拿掉，
+  它是巡邏的常規讀法，也用來校正過期的 hook 帳：hook 帳 60 秒內畫面不能推翻；過了之後，hook 說有、畫面（扣服務之前）完全沒有＝背景在沒有新 Stop 的情況下結束了
+  （被殺、被外部清掉），丟掉 hook 帳改用畫面；hook 說 0 的帳過了 60 秒就退場，之後只看畫面。`session_crons` 只當資訊顯示，**不算背景工作**（不擋一鍵重啟）。
+  codex 沒有這個欄位，照舊只看畫面。
 - 數字記在記憶體、以 run 為鍵（`background_jobs.rs`）：屬於這個 process，新 run 自然歸零；run 結束那一輪就丟掉；daemon 重啟後
   等下一輪巡邏補上。數字變了才推 `bot_status`。背景跑完到畫面更新之間最多晚一輪（30 秒）。
-- 投影：`run.background_jobs`（`GET /api/state` 與 `bot_status` 的 run 物件）；巡邏還沒看過這個 run 時是 `null`（不是 0）。**不改排隊／送 prompt 的語意**——agent 本身確實 idle。一鍵重啟（§6.9）會跳過 `background_jobs > 0` 的 bot（#767）；`null` 不擋。
+- 投影：`run.background_jobs`（`GET /api/state` 與 `bot_status` 的 run 物件）；巡邏還沒看過這個 run 時是 `null`（不是 0）。hook 報過的另帶 `background_source:"hook"`、`background_tasks[]`、`session_crons[]`（API.md）。**不改排隊／送 prompt 的語意**——agent 本身確實 idle。一鍵重啟（§6.9）會跳過 `background_jobs > 0` 的 bot（#767）；`null` 不擋。
 - 網頁只在 run `running` 且 `agent_status = idle` 時標（回合中燈號已經說了）：側欄那格「閒置」換成「背景 N」、輸入框上方一條說明（標題列不放，2026-09-30 使用者）（claude 說 shell、codex 說終端）。
 
 ## 7. API
