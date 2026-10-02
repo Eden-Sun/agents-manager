@@ -630,6 +630,22 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         crate::dangerous_rm::on_blocked(app, &run);
         // Codex 的模型遷移提示也等使用者本人選擇，不把後續訊息送進選單。
         crate::codex_model_migration::on_blocked(app, &run);
+        // claude 一般權限確認選單：等畫面畫完讀一次，結構化原因（`blocked_reason`）寫「等待權限確認：<工具>」。只看、不按鍵。
+        {
+            let (app2, run2) = (app.clone(), run.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                if let Ok(Some(fresh)) = crate::db::run(&app2.db, &run2.id).await {
+                    if fresh.agent_status == "blocked" {
+                        crate::blocked_reason::observe(&app2, &fresh).await;
+                    }
+                }
+            });
+        }
+    }
+    // 不再 blocked：權限框的原因跟著清（選單關了、回合繼續）。
+    if prev == "blocked" && status != "blocked" {
+        crate::blocked_reason::forget(&run.id);
     }
     // claude 2.1.281 的 Session paused 選單 herdr 判成 idle：看一眼畫面，是就補標 blocked（不按鍵）。
     if prev != "idle" && status == "idle" {

@@ -378,6 +378,56 @@ pub fn is_session_paused_menu(screen: &str) -> bool {
         .any(|l| norm_line(l) == "session paused")
 }
 
+/// claude 一般的權限確認選單（Bash／Write／Edit／Fetch／Read／MCP…）停在畫面尾巴等人選：回工具名（`Bash`、`Write`、`Fetch`、`MCP`…）。
+/// 給 blocked 的結構化原因用（`blocked_reason::observe`，「等待權限確認：Bash」）；**只是分類，不按任何鍵**。
+///
+/// 要同時有：尾巴是等人選的編號選單（輸入列不是空的）、選單上方有一條實線（`────`）框出來的標題行（`Bash command`、`Create file`、
+/// `Fetch`、`Read file  1 of 3`、`Tool use`…）、標題後面有 `Do you want to …` 那句問題。防誤刪框、Session paused、auto mode、
+/// 切換模型、問卷是別的選單，不算；回覆裡逐行引用原文時底下有空的輸入列，也不算。真畫面在 `lifecycle/fixtures/claude-2.1.28[67]-*-permission*.txt`。
+pub fn permission_prompt(screen: &str) -> Option<String> {
+    if !awaits_menu_choice(screen)
+        || dangerous_rm_prompt(screen).is_some()
+        || is_session_paused_menu(screen)
+        || is_auto_mode_offer(screen)
+        || is_switch_model_dialog(screen)
+        || is_feedback_survey(screen)
+    {
+        return None;
+    }
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let window = &raw[raw.len().saturating_sub(30)..];
+    let rule = window.iter().rposition(|l| {
+        let t = l.trim();
+        t.chars().count() >= 10 && t.chars().all(|c| c == '─')
+    })?;
+    let title_line = window.get(rule + 1)?;
+    // 標題後面（選單之前）要有那句問題。
+    if !window[rule + 1..].iter().any(|l| norm_line(l).starts_with("do you want to")) {
+        return None;
+    }
+    // `Read file                  1 of 3`：標題與計數之間隔著一大段空白，只取前半。
+    let title = title_line.trim().split("  ").next().unwrap_or("").trim();
+    let low = title.to_lowercase();
+    let tool = if low.starts_with("bash") {
+        "Bash".to_string()
+    } else if low.starts_with("create file") || low.starts_with("write") {
+        "Write".to_string()
+    } else if low.starts_with("edit") || low.starts_with("update file") {
+        "Edit".to_string()
+    } else if low.starts_with("read") {
+        "Read".to_string()
+    } else if low.starts_with("fetch") {
+        "Fetch".to_string()
+    } else if low == "tool use" {
+        "MCP".to_string()
+    } else if !title.is_empty() && title.chars().count() <= 40 {
+        title.to_string()
+    } else {
+        return None;
+    };
+    Some(tool)
+}
+
 /// onboarding 第一頁（`hasCompletedOnboarding` 被清掉、或全新的 `CLAUDE_CONFIG_DIR`）：「Choose the text style…」
 /// 七個主題選項。跟登入選單同一類：交給人處理（409 `needs_login`），不自動按——按了下一頁就是登入選單，
 /// 一樣要人。真畫面在 `lifecycle/fixtures/claude-2.1.278-onboarding-theme.txt`（2026-09-22）。
@@ -708,6 +758,10 @@ pub fn spawn_survey_watcher(app: Arc<App>) {
                 }
                 // Codex 在 starting／working 狀態也可能停在啟動遷移框；只查畫面，不替使用者選。
                 crate::codex_model_migration::observe(&app, &run).await;
+                // claude 停在一般權限確認選單：事件那一刻漏掉、或選單換了一種工具，這裡每輪重讀一次（只看、不按鍵）。
+                if run.agent_status == "blocked" {
+                    crate::blocked_reason::observe(&app, &run).await;
+                }
             }
         }
     });
@@ -1388,6 +1442,31 @@ pub fn is_feedback_survey(screen: &str) -> bool {
             assert!(!is_session_paused_menu(screen) && !stuck_at_login(screen) && !is_not_logged_in_reply(screen), "{name}");
             assert!(!is_grok_trust_dialog(screen) && !is_onboarding_theme(screen), "{name}");
         }
+    }
+
+    /// claude 一般的權限確認選單（Bash／Write／Edit／Fetch／Read／MCP）：認得「是權限框」與「哪個工具」，網頁的 blocked 原因才寫得出
+    /// 「等待權限確認：Bash」。真畫面是 2.1.286／2.1.287 的 fixture；防誤刪框、Session paused、一般輸入列、回覆裡引用原文都不算。
+    #[test]
+    fn a_claude_permission_menu_is_recognised_with_its_tool() {
+        use super::screens::*;
+        for (name, screen, tool) in [
+            ("2.1.287 bash", PERMISSION_2287_BASH, "Bash"),
+            ("2.1.287 write", PERMISSION_2287_WRITE, "Write"),
+            ("2.1.287 fetch", PERMISSION_2287_FETCH, "Fetch"),
+            ("2.1.287 mcp", PERMISSION_2287_MCP, "MCP"),
+            ("2.1.286 bash", PERMISSION_2286_BASH, "Bash"),
+            ("2.1.286 read 1/3", PERMISSION_2286_READ_1_OF_3, "Read"),
+            ("2.1.286 read 2/3", PERMISSION_2286_READ_2_OF_3, "Read"),
+            ("2.1.286 fetch", PERMISSION_2286_FETCH, "Fetch"),
+        ] {
+            assert_eq!(permission_prompt(screen).as_deref(), Some(tool), "{name}");
+        }
+        for (name, screen) in [("dangerous rm", DANGEROUS_RM), ("session paused", SESSION_PAUSED), ("auto mode", AUTO_MODE), ("idle", IDLE_CLAUDE), ("empty", "")] {
+            assert_eq!(permission_prompt(screen), None, "{name}：不是一般權限框");
+        }
+        // 回覆裡逐行引用權限框原文、底下是空的輸入列：不是真的框。
+        let quoted = format!("⏺ 剛才停在：\n  Bash command\n  Do you want to proceed?\n  1. Yes\n  2. No\n{IDLE_CLAUDE}");
+        assert_eq!(permission_prompt(&quoted), None);
     }
 
     /// grok 1.0.46 的信任框真畫面照舊認得（pretrust 沒寫到的目錄才會跳）。
