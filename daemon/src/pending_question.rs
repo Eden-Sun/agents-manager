@@ -43,7 +43,7 @@ pub(crate) fn pending_ask(log: &str) -> Option<Value> {
     pending.map(|(_, input)| input).filter(|input| input.get("questions").and_then(Value::as_array).is_some_and(|q| !q.is_empty()))
 }
 
-fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
+pub(crate) fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();

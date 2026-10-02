@@ -2278,6 +2278,27 @@ default Bot 的 prompt／keys／terminal 讀取依 Run 的 session 回到 defaul
 5. external：建 Turn（`origin=external`、`completed`）+ user Message（Codex 取 `input-messages`；Claude 沒有就省略）+ assistant Message。
 6. 推 WS `message_added` / `turn_updated`。
 
+
+### 6.7a claude 的提問與使用者的回答記進對話（2026-10-02 使用者）
+
+claude 用 `AskUserQuestion` 問、使用者答完（網頁或終端答的都一樣）之後，對話裡要留下每題的題目與答案；以前整段不見，對話讀起來不完整（wits-pro，m4p，三題問答完全看不到）。
+
+- **一則 `role=system`、`source=system` 的訊息**，`content` 是 JSON：`{"type":"ask_answers","tool_use_id":…,"answered":bool,"items":[{"header"?,"question","answer"|null,"notes"?}]}`。
+  `answer: null`＝沒有回答（整組取消、或多題裡沒答這一題）；`answered` 是「至少一題有答案」；自訂文字照原文。`messages.source` 有 CHECK，新增來源值要重建整張表，不值得，所以靠 `content.type` 認。
+  掛在**這一回合**（對話裡最新、不是 `queued` 的那筆）、`created_at` 用答完的時間（transcript 的時間戳）：排在回合中間，不是 Stop 才補進去的那一刻。它不是使用者打的 prompt：不開回合、不進送出或排隊、沒有倒回鍵。
+- **訊息 id＝`ask:<conversation_id>:<tool_use_id>`，`INSERT OR IGNORE`**：hook 重送、spool replay、Stop 補讀、PostToolUse 與補讀同時到，最後都只有一列，也只發一次 `message_added`。`tool_use_id` 要帶對話 id：fork／resume 會把整份 transcript 帶過去。
+  `supervisor::responder::answered_since` 的「這回合有沒有系統說明」要排除 `ask:` 開頭的 id（它們是正常對話內容，不是收尾說明）。
+- **資料來源（`ask_answers.rs`）**：
+  1. **回合結束時讀 transcript（主要）**：`Stop`／`StopFailure` 的 hook 處理完（`hookrecv::process` 收尾，終端打字開的外部回合要等 Stop 才建立，這時「最新的回合」才是對的那一個）之後，讀 transcript 尾巴 512 KiB，找每個有對應 `tool_result` 的 `AskUserQuestion`。claude 自己寫的 `toolUseResult` 是結構化的
+     （`questions`、`answers: {題目: 答案}`、`annotations.<題目>.notes`），網頁答的、終端答的、舊版 `The user answered:` 都一樣；取消是 `The user did not answer the questions.`／`The user doesn't want to proceed…`（`toolUseResult: "User rejected tool use"`）→ 每題記「沒有回答」。
+     **認不出形狀的 `tool_result` 一律不記**，不會把它當成取消。不需要改任何 bot 的設定：已經在跑的 session 也補得到。只收這一回合開始之後（留 2 秒時鐘餘裕）答的，fork／resume 帶來的舊提問不補。
+     本機 bot 由 daemon 讀自己這台的 transcript；遠端 transcript 在那台機器，由 `hook.sh` 讀出放進 payload 的 `agm_asks`（§11.4.2，跟 `agm_user_text` 同一套）。
+  2. **`PostToolUse`（`matcher: "AskUserQuestion"`，新啟動的 bot 才有）**：被使用者中斷的回合沒有 Stop，這是當下就留得下來的那一條路（遠端走 spool）。只在 `tool_response.answers` 認得出至少一個答案時才記；
+     取消時 claude 不觸發它，payload 形狀也沒有完整的契約，所以認不出就不記、留給回合結束的補讀——絕不先記一筆「沒有回答」把後面正確的那筆擋掉（INSERT OR IGNORE 先到先贏）。
+- **已知限制**：被使用者中斷的回合、bot 是舊 session（settings 沒有 `AskUserQuestion` 的 PostToolUse）、而且是遠端 → 沒有 Stop、也沒有 PostToolUse，這一筆記不到；下次重啟套用新 settings 之後就有。
+  取消的那一題在中斷的回合同理。
+- 網頁認 `content.type`，畫成「Claude 問／你答」卡（UI-DECISIONS「提問與回答要留在對話裡」）。
+
 ### 6.9 一鍵套用更新（批次 exit + resume）
 
 claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
@@ -2780,6 +2801,8 @@ label = "foo@m4p"
   同一支 python 另帶 `agm_origin_kind`：從尾巴往前第一筆有 `origin.kind` 的使用者條目（`human`／`task-notification`…；舊版 CLI 沒有就不帶），daemon 靠它分辨「使用者重送同一句」與「背景工作喚醒的那一輪」（§6.5 外部回合，#754）。
   `hookrecv::hook_user_text` 的順序：hook 直接帶的 → `agm_user_text` → 讀本機 `transcript_path`。沒有 `python3`、讀不到檔、不是 Stop：payload 原樣，daemon 照舊「沒證據不蓋」。
   **正在跑的遠端 bot 要等它自己重啟才換到新腳本**（上一點）。
+- **Stop／StopFailure 另帶已答完的 `AskUserQuestion`**（2026-10-02，§6.7a）：同一條件（`claude`、沒被截斷、有 `python3`）下，另一支 python 讀本機 transcript 尾巴 512 KiB，把每個有 `tool_result` 的提問
+  整理成 `agm_asks: [{id, at, items:[{header?, question, answer|null, notes?}]}]`（最多最後 20 筆、整包超過 256 KiB 不帶；答案帶孤立 surrogate 時整包不帶，理由同 `agm_user_text`）。沒有 `python3`、讀不到檔：payload 原樣。
 - **腳本不做語意判斷**：只用最粗的字串比對決定要不要報 idle，其餘照寫 spool，分類只在 `hookrecv::classify`。遠端腳本沒有測試；漏報最多晚一點被掃到，錯分類會吃掉訊息。
 - **先寫 spool，再 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated, run_id}`；`run_id` 取 `AM_RUN_ID`、只留 `[A-Za-z0-9_-]`，沒有就是空字串）。每一則寫進 `hook-spool.d/` 底下自己的檔（暫存檔寫完再 `mv` 成 `*.json`）；drain 只讀 `*.json`，寫到一半的 `.tmp.*` 碰不到。超過 1 MiB 被截斷時 payload 不再原樣嵌進去（半截物件仍以 `{` 開頭，整行會變無效 JSON）：改包成 `{"raw":"..."}`，`truncated` 仍是 `true`（#653）。舊的 `hook-spool.jsonl` 只留給還沒換腳本的那一輪，drain 仍會收。
 - `report-agent` 欄位：`$HERDR_PANE_ID`（沒有就跳過上報）；`--source agents-manager:<bot_id>`；`--agent <kind>`；`--state` 只送 `idle`（`working` 交給終端偵測，硬報會互蓋）；

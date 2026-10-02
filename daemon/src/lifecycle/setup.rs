@@ -166,6 +166,87 @@ except Exception:
       fi ;;
   esac
 fi
+# 2026-10-02: the same trick for `AskUserQuestion`. Questions claude asked and the user answered (or cancelled)
+# live in the LOCAL transcript only; carry the finished ones of the last 512 KiB as `agm_asks` (`id`, `at`, `items`
+# of `header`/`question`/`answer`) so the daemon can put them in the conversation (`ask_answers.rs`). Both Stop and
+# StopFailure; best effort like the block above (no python3 or an unreadable transcript leaves the payload as is).
+if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
+  case "$PAYLOAD" in
+    '{'*'"hook_event_name":"Stop"'*|'{'*'"hook_event_name": "Stop"'*|'{'*'"hook_event_name":"StopFailure"'*|'{'*'"hook_event_name": "StopFailure"'*)
+      if command -v python3 >/dev/null 2>&1; then
+        WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,sys
+try:
+    p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
+    path=p.get("transcript_path") or p.get("transcriptPath")
+    if p.get("hook_event_name") not in ("Stop","StopFailure") or not path:
+        raise SystemExit
+    with open(path,"rb") as f:
+        n=os.fstat(f.fileno()).st_size
+        f.seek(max(0,n-524288))
+        data=f.read().decode("utf-8","replace")
+    asked={}
+    out=[]
+    def ans(a):
+        if isinstance(a,str):
+            return a
+        if isinstance(a,list):
+            xs=[x for x in a if isinstance(x,str)]
+            return "、".join(xs) if xs else None
+        return None
+    for line in data.splitlines():
+        try:
+            v=json.loads(line)
+        except Exception:
+            continue
+        c=(v.get("message") or {}).get("content") if isinstance(v,dict) else None
+        if not isinstance(c,list):
+            continue
+        for b in c:
+            if not isinstance(b,dict):
+                continue
+            if b.get("type")=="tool_use" and b.get("name")=="AskUserQuestion" and isinstance(b.get("id"),str):
+                asked[b["id"]]=b.get("input") or {}
+            elif b.get("type")=="tool_result" and b.get("tool_use_id") in asked:
+                r=v.get("toolUseResult")
+                inp=asked[b["tool_use_id"]]
+                a=r.get("answers") if isinstance(r,dict) else None
+                if isinstance(a,dict):
+                    qs=r.get("questions") if isinstance(r.get("questions"),list) else inp.get("questions")
+                    notes=r.get("annotations") if isinstance(r.get("annotations"),dict) else {}
+                else:
+                    t=b.get("content")
+                    if isinstance(t,list):
+                        t="\n".join(x.get("text","") for x in t if isinstance(x,dict))
+                    t=t if isinstance(t,str) else ""
+                    rejected=isinstance(r,str) and "reject" in r.lower()
+                    if not (rejected or t.startswith("The user did not answer") or t.startswith("The user doesn"+chr(39)+"t want to proceed")):
+                        continue
+                    a={}
+                    qs=inp.get("questions")
+                    notes={}
+                items=[]
+                for q in (qs if isinstance(qs,list) else []):
+                    if not isinstance(q,dict) or not isinstance(q.get("question"),str):
+                        continue
+                    it={"question":q["question"],"answer":ans(a.get(q["question"]))}
+                    if isinstance(q.get("header"),str):
+                        it["header"]=q["header"]
+                    nt=(notes.get(q["question"]) or {}).get("notes") if isinstance(notes.get(q["question"]),dict) else None
+                    if isinstance(nt,str) and nt.strip():
+                        it["notes"]=nt.strip()
+                    items.append(it)
+                if items:
+                    out.append({"id":b["tool_use_id"],"at":v.get("timestamp"),"items":items})
+    out=out[-20:]
+    if out and len(json.dumps(out,ensure_ascii=False).encode("utf-8"))<=262144:  # a lone surrogate raises here: carry nothing rather than a line serde_json cannot read
+        p["agm_asks"]=out
+        sys.stdout.buffer.write(json.dumps(p,separators=(",",":")).encode("ascii"))
+except Exception:
+    pass' 2>/dev/null)
+        case "$WITH" in '{'*) PAYLOAD="$WITH" ;; esac
+      fi ;;
+  esac
+fi
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # The run this CLI process was started for: `--resume` makes an old and a new process report the
 # same session, so this is how the daemon tells their late hooks apart (issue #92). Only id-safe
@@ -595,7 +676,12 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_ap
             // "result":{...,"pane_id":...}}`），daemon 讀得到「這個 pane 是我剛剛開的」這個事實，
             // 比 §6.5a 的同 tab／名字前綴推斷更早、更精確（`spawn_hints.rs`）。`matcher: "Bash"` 只在
             // 跑 shell 指令時觸發，不是每個工具呼叫都送一次。
-            "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": hook_cmd}]}]
+            "PostToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": hook_cmd}]},
+                // 2026-10-02：使用者答完 `AskUserQuestion` 的當下就把題目與答案記進對話（`ask_answers.rs`）。回合被中斷時
+                // 沒有 Stop，這是唯一當下就留得下來的一條路；一般情況由回合結束時讀 transcript 補。
+                {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd}]}
+            ]
         },
         "statusLine": {"type": "command", "command": statusline},
         // Trial: shorter replies scrape cleaner from the terminal (§4.3) and read better in 對話.
@@ -1580,6 +1666,71 @@ mod remote_hook_tests {
         assert!(spooled(&sb3).get("agm_user_text").is_none());
     }
 
+    /// 2026-10-02：遠端 transcript 在那台機器上，`hook.sh` 在 Stop／StopFailure 前把已答完（或取消）的 `AskUserQuestion`
+    /// 讀出來放進 `agm_asks`；沒答完的、別的工具的結果不帶；孤立 surrogate 不能弄壞 spool 那一行。
+    #[test]
+    fn a_remote_stop_carries_the_finished_ask_user_question_records() {
+        let sb = Sandbox::new(false);
+        let transcript = sb.dir.join("t.jsonl");
+        let qs = serde_json::json!([{"question": "拋單怎麼處理？", "header": "拋單倉庫", "options": []}, {"question": "go API 放哪？", "header": "go API", "options": []}]);
+        let ask = |id: &str| serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "AskUserQuestion", "input": {"questions": qs}}]}});
+        let lines = [
+            ask("t1"),
+            serde_json::json!({"type": "user", "timestamp": "2026-10-02T08:34:54.635Z", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "Your questions have been answered"}]},
+                "toolUseResult": {"questions": qs, "answers": {"拋單怎麼處理？": "拿掉\"拋單\"\n第二行", "go API 放哪？": "自訂：gateway"}, "annotations": {"go API 放哪？": {"notes": "備註"}}}}),
+            ask("t2"),
+            serde_json::json!({"type": "user", "timestamp": "2026-10-02T08:40:00.000Z", "message": {"content": [{"type": "tool_result", "tool_use_id": "t2", "content": "The user did not answer the questions."}]},
+                "toolUseResult": {"questions": qs}}),
+            ask("t3"),
+        ];
+        std::fs::write(&transcript, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let payload = |event: &str| serde_json::json!({"hook_event_name": event, "session_id": "s-1", "transcript_path": transcript.to_string_lossy(), "stop_hook_active": false}).to_string();
+        let spooled = |sb: &Sandbox| -> serde_json::Value {
+            let events = sb.read("hook-spool.jsonl");
+            let last = events.lines().rev().find(|l| !l.trim().is_empty()).expect("spool 有一行").to_string();
+            serde_json::from_str::<serde_json::Value>(&last).expect("spool 行是合法 JSON")["payload"].clone()
+        };
+
+        for event in ["Stop", "StopFailure"] {
+            let sb = Sandbox::new(false);
+            let (_, ok) = sb.run(&["claude", &sb.bot, "-"], &payload(event));
+            assert!(ok);
+            let p = spooled(&sb);
+            let asks = p["agm_asks"].as_array().unwrap_or_else(|| panic!("{event}: {p}"));
+            assert_eq!(asks.len(), 2, "t3 還在等人，不帶：{p}");
+            assert_eq!(asks[0]["id"], "t1");
+            assert_eq!(asks[0]["at"], "2026-10-02T08:34:54.635Z");
+            assert_eq!(asks[0]["items"][0], serde_json::json!({"question": "拋單怎麼處理？", "header": "拋單倉庫", "answer": "拿掉\"拋單\"\n第二行"}));
+            assert_eq!(asks[0]["items"][1]["notes"], "備註");
+            assert_eq!(asks[1]["id"], "t2");
+            assert!(asks[1]["items"].as_array().unwrap().iter().all(|i| i["answer"].is_null()), "取消＝沒有回答：{p}");
+        }
+
+        // 不是回合結束的事件、讀不到 transcript：不帶。
+        let sb = Sandbox::new(false);
+        sb.run(&["claude", &sb.bot, "-"], &payload("SessionStart"));
+        assert!(spooled(&sb).get("agm_asks").is_none());
+        let sb = Sandbox::new(false);
+        sb.run(&["claude", &sb.bot, "-"], &serde_json::json!({"hook_event_name": "Stop", "session_id": "s-1", "transcript_path": "/Users/nobody/none.jsonl"}).to_string());
+        assert!(spooled(&sb).get("agm_asks").is_none());
+
+        // 答案裡有孤立 surrogate：什麼都不帶，但 spool 行仍是合法 JSON、其餘欄位不動。
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n{}\n",
+                ask("t1"),
+                "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"x\"}]},\"toolUseResult\":{\"answers\":{\"拋單怎麼處理？\":\"切斷 \\ud83d\"}}}"
+            ),
+        )
+        .unwrap();
+        let sb = Sandbox::new(false);
+        sb.run(&["claude", &sb.bot, "-"], &payload("Stop"));
+        let p = spooled(&sb);
+        assert!(p.get("agm_asks").is_none(), "{p}");
+        assert_eq!(p["session_id"], "s-1");
+    }
+
     /// transcript 裡的使用者訊息帶孤立的 surrogate 跳脫（`\\ud83d`，貼上的字被 UTF-16 切在 emoji 中間）：Python 的
     /// `json.dumps` 會原樣寫回去，但 serde_json 讀不了孤立 surrogate——整行 spool 解析失敗、Stop 事件整筆被丟，
     /// 比沒帶證據更糟。帶不進去就不帶，事件本身一定要是合法 JSON。
@@ -2345,10 +2496,14 @@ mod claude_settings_tests {
     /// issue #94：`PostToolUse` 只在 Bash 工具觸發（`matcher`），不是每個工具呼叫都送一次——那樣會把
     /// Read／Edit／Grep 這些跟子 pane 完全無關的呼叫也送進 daemon，白白增加流量。
     #[test]
-    fn post_tool_use_only_matches_the_bash_tool() {
+    fn post_tool_use_only_matches_the_bash_tool_and_ask_user_question() {
         let v = claude_settings("hook", "sl", false, true);
         assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], json!("Bash"));
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "hook");
+        // 2026-10-02：使用者答完提問當下就記進對話（`ask_answers.rs`）；只多這一個工具，其餘工具照舊不送。
+        let matchers: Vec<&str> = v["hooks"]["PostToolUse"].as_array().unwrap().iter().filter_map(|h| h["matcher"].as_str()).collect();
+        assert_eq!(matchers, ["Bash", "AskUserQuestion"]);
+        assert_eq!(v["hooks"]["PostToolUse"][1]["hooks"][0]["command"], "hook");
     }
 
     /// issue #722：2.1.283 的 fullscreen 選單與 auto mode 選單都靠「較高層設定沒寫」才跳；

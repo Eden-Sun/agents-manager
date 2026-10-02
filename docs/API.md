@@ -477,6 +477,10 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 
 `turns` 為最近 `limit+1` 筆（時間倒序），用來判斷回合是否還在跑與 delivery 警示。
 UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終端備援 · 可能不完整」；`system` 灰字系統列。
+`ask:` 開頭的訊息 id（2026-10-02，SPEC §6.7a）：claude 的 `AskUserQuestion` 與使用者的回答，`role=system`、`source=system`，`content` 是 JSON 字串
+`{"type":"ask_answers","tool_use_id":"toolu_…","answered":true,"items":[{"header":"拋單倉庫","question":"…","answer":"拿掉拋單","notes":"…"}]}`：
+`answer` 為 `null`＝沒有回答（取消／Esc／多題沒答這一題），`header`、`notes` 可省略；自訂文字照原文。`id` 是 `ask:<conversation_id>:<tool_use_id>`（同一提問重送也只有一則），`turn_id` 是當時的回合，
+`created_at` 是答完的時間。UI 畫成「Claude 問／你答」卡，不是使用者的 prompt；用 `message_added` 推送，不會開新回合。
 `rewound_at`：被對話倒回（§6.1）拿掉的時間，`null`＝還在 CLI 的對話脈絡裡。標記不刪，UI 收成淡色＋「已倒回」。
 `sent_via`：user 訊息回合中送出的方式——`send_now`＝插隊送出且真的打斷了一個回合、`supplement`＝`/text` 帶 `record` 的補充；`null`＝一般送出。UI 在泡泡上標「插隊」「補充」。
 `seq`：訊息的插入順序（SQLite rowid，單調遞增整數；`before=` 分頁也照它切）。`created_at` 只有毫秒、`id`（ULID）的隨機段在同一毫秒內不單調，所以同一毫秒的訊息靠 `seq` 定先後。三處都帶：本端點、`GET /api/projects/{id}/messages`（§13.4）每一則、WS `message_added` 的 `message`。排序鍵是 `(created_at, seq)`；`seq` 只在同一個 daemon 資料庫內可比，缺（舊 daemon）或 0 視為未知，前端退回 `id`。
