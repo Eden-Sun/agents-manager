@@ -237,7 +237,7 @@ am_child_name() {
 # one, and stop at `--` (everything after it is the agent's own argv).
 am_agent_start() {
     shift 2
-    # `--help` 只是查用法：不開 pane、不補 env。以前照樣走 spawn 流程，env 補送就打進呼叫者自己的 pane（目標預設是 $HERDR_PANE_ID）。
+    # `--help` 只是查用法：不開 pane、不補 env。以前照樣走 spawn 流程，env 補送就打進呼叫者自己的 pane（目標預設是 ${HERDR_PANE_ID}）。
     for _a in "$@"; do
         case "$_a" in
             --) break ;;
@@ -382,7 +382,7 @@ am_agent_start() {
                 [ "$_stop" = 1 ] || set -- "$@" --
                 _stop=1
                 # grok 的 `--rules` 只收字串、沒有讀檔版：給一行指向檔案的指示，讓它開工前自己讀。
-                set -- "$@" --rules "AG Man 指示（硬規則，效力同系統指示）在 $_instr：開始任何工作前先完整讀過並照做。"
+                set -- "$@" --rules "AG Man 指示（硬規則，效力同系統指示）在 ${_instr}：開始任何工作前先完整讀過並照做。"
             fi
             ;;
     esac
@@ -443,7 +443,7 @@ am_reexport_env_before_start() {
     [ -n "$_body" ] || return 0
     # #389：整串 export 一行行打進 pane 會灌滿終端畫面（沒 hook 的 bot 靠快照補回覆也會讀到）。
     # 寫進 0600 暫存檔，pane 只收一行 ` . '<檔>' && rm -f '<檔>'`（行首空白：不進 shell history）。
-    # 暫存檔放 $TMPDIR（不能是 scratchpad／outbox）或 /tmp；寫不出來才退回舊的逐行 export，環境不能丟。
+    # 暫存檔放 ${TMPDIR}（不能是 scratchpad／outbox）或 /tmp；寫不出來才退回舊的逐行 export，環境不能丟。
     _dir=${TMPDIR:-/tmp}
     case "$_dir" in
         *scratchpad* | */outbox/* | */outbox) _dir=/tmp ;;
@@ -699,7 +699,7 @@ am_forward_with_env() {
     done
     # §6.5e：`tab create` 沒指定 workspace 時落在**專案自己的** workspace，不要開到別的專案去
     # （w168 收到 wt 的 dev server 就是這樣來的）。`pane split` 以母 pane 為基準，本來就同 workspace。
-    # 先問 herdr 母 pane（$HERDR_PANE_ID）**現在**在哪個 workspace，問不到才用 AM_WORKSPACE_ID：daemon 在決定 workspace
+    # 先問 herdr 母 pane（${HERDR_PANE_ID}）**現在**在哪個 workspace，問不到才用 AM_WORKSPACE_ID：daemon 在決定 workspace
     # **之前**就把它算進 env，第一次啟動或 herdr 重開後根本沒有，舊映射失效改開新 workspace 時還是死掉的 id（review core 7）。
     if [ "$_has_workspace" = 0 ] && [ "$_sub1 $_sub2" = "tab create" ]; then
         _ws=""
@@ -1795,6 +1795,18 @@ mod tests {
         assert!(text.contains("export AM_INSTANCE='a1b2'"), "隔離實例的保留變數也補：{text}");
         assert!(text.contains("export AM_DATA_DIR='/data/iso'"), "{text}");
         assert!(text.contains("export AM_CHILD_OF='p-1'"), "子 agent 的 pane 要標出 parent：{text}");
+    }
+
+    /// macOS 的 /bin/sh 是 bash 3.2：`$VAR` 後面直接接全形標點會被併進變數名（#412）。shim 是寫在 Rust 字串裡的
+    /// shell，`scripts/ops/lint-shell-vars.sh` 掃不到它；#772 的 grok `--rules` 就因 `$_instr：` 在 Mac 上展開成空字串。
+    #[test]
+    fn the_generated_shim_passes_the_shell_var_lint() {
+        let s = Sandbox::new();
+        let f = s.dir.join("herdr.sh");
+        std::fs::write(&f, super::SHIM_SH).unwrap();
+        let lint = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/ops/lint-shell-vars.sh");
+        let out = std::process::Command::new("bash").arg(&lint).arg(&f).output().unwrap();
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 
     /// §6.5i：子 agent 的指示跟母 bot 同一份（`AM_INSTRUCTIONS_FILE`），CLI 自己的指示檔不讀；呼叫者自己帶了就尊重。
