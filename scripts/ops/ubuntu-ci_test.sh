@@ -200,5 +200,68 @@ equals "沒有被卡住（遠小於 sleep 30）" "$([ "$elapsed" -lt 20 ] && ech
 check "超時的段記成紅" "紅：web" "$FIX/gh.log"
 teardown
 
+# 7. 殘留暫存清理（#763）：只刪 $TMPDIR 底下「超過 6 小時沒動、名字以 26 碼 ULID 結尾的 am-*／agm-*」。
+#    不跟 symlink 出去、不刪裡面還有新檔的（行程可能還在用）、不誤中別人的目錄、$TMPDIR 是 HOME 或相對路徑就整個不動，
+#    而且磁碟不足的那一輪也要清（以前清理排在磁碟預檢之後：正是被這些目錄塞滿時永遠清不到）。
+U1=01ARZ3NDEKTSV4RRFFQ69G5FAV; U2=01ARZ3NDEKTSV4RRFFQ69G5FAW; U3=01ARZ3NDEKTSV4RRFFQ69G5FAX
+U4=01ARZ3NDEKTSV4RRFFQ69G5FAY; U5=01ARZ3NDEKTSV4RRFFQ69G5FAZ; U6=01ARZ3NDEKTSV4RRFFQ69G5FB0
+OLD="$(date -d '8 hours ago' +%Y%m%d%H%M)"
+setup_tmp() {
+  T="$ROOT/tmp"; mkdir -p "$T"
+  mkdir -p "$T/am-stale-$U1/sub" "$T/agm-$U2" "$T/am-busy-$U3/sub" "$T/am-fresh-$U4" "$T/am-ops-test" "$T/herdr-$U5" "$T/claude-1000" "$T/not-am-$U6" "$ROOT/outside"
+  echo keep > "$ROOT/outside/precious"; echo x > "$T/am-stale-$U1/sub/f"; echo busy > "$T/am-busy-$U3/sub/live"
+  ln -s "$ROOT/outside" "$T/am-link-$U6"
+  : > "$T/am-origin-$U5.jsonl"
+  # 內容都先做好再把時間倒回去（最後才動目錄本身）；busy 的目錄自己很舊、裡面有新檔。
+  find "$T" -mindepth 2 -exec touch -t "$OLD" {} +
+  touch -t "$(date +%Y%m%d%H%M)" "$T/am-busy-$U3/sub/live"
+  for d in am-stale-$U1 agm-$U2 am-busy-$U3 am-ops-test herdr-$U5 claude-1000 not-am-$U6 am-origin-$U5.jsonl; do touch -t "$OLD" "$T/$d"; done
+  touch -h -t "$OLD" "$T/am-link-$U6"
+  export TMPDIR="$T"
+}
+exists() { [ -e "$1" ] || [ -L "$1" ]; }
+gone() { if exists "$2"; then echo "FAIL - $1（還在）"; FAIL=$((FAIL + 1)); else echo "ok   - $1"; PASS=$((PASS + 1)); fi; }
+kept() { if exists "$2"; then echo "ok   - $1"; PASS=$((PASS + 1)); else echo "FAIL - $1（被刪了）"; FAIL=$((FAIL + 1)); fi; }
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+setup_tmp
+equals "清理那輪 exit 0" "$(run)" "0"
+gone "超過 6 小時的 am-*-ULID 目錄被清掉" "$T/am-stale-$U1"
+gone "超過 6 小時的 agm-ULID 目錄被清掉" "$T/agm-$U2"
+gone "超過 6 小時的 am-*-ULID.jsonl 殘留檔被清掉" "$T/am-origin-$U5.jsonl"
+kept "目錄自己很舊但裡面有新檔：行程可能還在用，不刪" "$T/am-busy-$U3/sub/live"
+kept "新的目錄不刪" "$T/am-fresh-$U4"
+kept "不是 ULID 結尾的 am-* 不刪" "$T/am-ops-test"
+kept "不是 am-／agm- 開頭的不刪（herdr）" "$T/herdr-$U5"
+kept "不刪 claude-*" "$T/claude-1000"
+kept "名字只是含 am-、不是開頭的不刪" "$T/not-am-$U6"
+kept "symlink 指向的目錄沒被跟進去刪" "$ROOT/outside/precious"
+kept "symlink 本身也不動（只處理真的目錄與檔案）" "$T/am-link-$U6"
+unset TMPDIR; teardown
+
+# 7b. 磁碟不足的那一輪也要清（清完才量空間；不然被塞滿時永遠清不到）。
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+setup_tmp
+export AGM_CI_MIN_FREE_GB=99999999
+equals "磁碟不足 exit 0" "$(run)" "0"
+check "仍然是磁碟不足、沒跑" "state=error" "$FIX/gh.log"
+gone "磁碟不足那一輪照樣清掉過期殘留" "$T/am-stale-$U1"
+kept "磁碟不足那一輪也不誤刪新的" "$T/am-fresh-$U4"
+export AGM_CI_MIN_FREE_GB=0
+unset TMPDIR; teardown
+
+# 7c. $TMPDIR 是 HOME 或相對路徑：整個不動（設錯就是寫錯目錄，不能照字面去刪）。
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+setup_tmp
+mkdir -p "$HOME/am-home-$U1"; touch -t "$OLD" "$HOME/am-home-$U1"
+export TMPDIR="$HOME"
+equals "TMPDIR=HOME exit 0" "$(run)" "0"
+kept "TMPDIR 是 HOME：不清" "$HOME/am-home-$U1"
+(cd "$ROOT" && export TMPDIR=tmp && run >/dev/null)
+kept "TMPDIR 是相對路徑：不清" "$T/am-stale-$U1"
+unset TMPDIR; teardown
+
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
