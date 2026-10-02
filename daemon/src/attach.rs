@@ -66,6 +66,22 @@ fn ext_for(name: &str, mime: &str) -> String {
     .to_string()
 }
 
+/// 存進 DB、回給 UI 的檔名：控制字元（含 NUL、換行）與雙向覆寫／隔離字元（`evil<RLO>gnp.exe` 會被顯示成 `evilexe.png`）拿掉，
+/// 最多 255 個字元；剩下空的就叫 `file`。不改 Unicode 本身（一般的中文檔名照舊）。真正落在磁碟上的檔名另走 [`safe_stem`]。
+pub(crate) fn clean_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(*c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+        .take(255)
+        .collect();
+    let cleaned = cleaned.trim().to_string();
+    if cleaned.is_empty() {
+        "file".into()
+    } else {
+        cleaned
+    }
+}
+
 /// Recognisable, but cannot escape the directory or upset a shell.
 fn safe_stem(name: &str) -> String {
     let base = name.rsplit('/').next().unwrap_or(name);
@@ -110,6 +126,8 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
         .filter(|project| project.deleted_at.is_none())
         .ok_or_else(|| anyhow::anyhow!("no such project"))?;
 
+    let name = clean_name(name);
+    let name = name.as_str();
     let id = db::ulid();
     let file = format!("{}-{}.{}", id, safe_stem(name), ext_for(name, mime));
     let dir = format!("{}/{}", project.path.trim_end_matches('/'), SUBDIR);
@@ -142,7 +160,7 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
     .execute(&app.db)
     .await?;
 
-    if let Err(e) = write_bytes(&host, &project.host, &dir, &agent_path, &local_path, data).await {
+    if let Err(e) = write_bytes(&host, &project.host, project.path.trim_end_matches('/'), &dir, &file, &agent_path, &local_path, data).await {
         best_effort_cleanup(&host, &local_path, &agent_path).await;
         let _ = sqlx::query("UPDATE attachments SET state = 'failed' WHERE id = ?").bind(&id).execute(&app.db).await;
         return Err(e);
@@ -158,11 +176,15 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
 /// The actual byte transfer — local write, or daemon-side copy + `ssh_put`. Split out of [`save`] so
 /// its failure path (leave `state = 'staging'`/`'failed'` for [`reconcile_orphans`], don't touch the
 /// DB row here) stays separate from the row bookkeeping.
-async fn write_bytes(host: &Arc<HostConn>, host_name: &str, dir: &str, agent_path: &str, local_path: &str, data: &[u8]) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+async fn write_bytes(host: &Arc<HostConn>, host_name: &str, project_dir: &str, dir: &str, file: &str, agent_path: &str, local_path: &str, data: &[u8]) -> Result<()> {
     if host.is_local() {
-        std::fs::create_dir_all(dir).with_context(|| format!("create {dir}"))?;
-        write_gitignore_local(dir);
-        std::fs::write(agent_path, data).with_context(|| format!("write {agent_path}"))?;
+        // 專案目錄是 agent 寫得到的地方：`.agents-manager`／`attachments` 被換成連結時不能跟進去（讀取側同一個界線）。
+        let comps = [std::ffi::OsStr::new(".agents-manager"), std::ffi::OsStr::new("attachments")];
+        let dir_fd = crate::trusted_open::create_bound_dirs(Path::new(project_dir), &comps).with_context(|| format!("create {dir}"))?;
+        // `.gitignore` 只在還沒有時寫；已經有（含被換成連結）就不動。
+        let _ = crate::trusted_open::write_new_file_in(&dir_fd, std::ffi::OsStr::new(".gitignore"), b"*\n");
+        crate::trusted_open::write_new_file_in(&dir_fd, std::ffi::OsStr::new(file), data).with_context(|| format!("write {agent_path}"))?;
     } else {
         let copy_dir = Path::new(local_path).parent().ok_or_else(|| anyhow::anyhow!("`{local_path}` has no parent directory"))?;
         std::fs::create_dir_all(copy_dir).with_context(|| format!("create {}", copy_dir.display()))?;
@@ -294,12 +316,6 @@ pub fn spawn_sweep(app: Arc<App>) {
     });
 }
 
-fn write_gitignore_local(dir: &str) {
-    let p = PathBuf::from(dir).join(".gitignore");
-    if !p.exists() {
-        let _ = std::fs::write(&p, "*\n");
-    }
-}
 
 /// Restricted to the recipient's **project**: an unrelated chat's id must not become a path here.
 /// Project (not bot) scope lets one group send share an upload with every recipient.
@@ -628,6 +644,55 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
         assert!(read(app, "att-sym").await.is_err(), "目錄被換成符號連結：不給");
         std::fs::remove_dir_all(&project).unwrap();
+    }
+
+    /// 寫入側：專案目錄是 agent 寫得到的地方，它把 `.agents-manager`（或底下的 `attachments`）換成指到別處的符號連結，
+    /// 上傳不能跟著連結把使用者的檔案寫到界線外（讀取側早就逐層 `O_NOFOLLOW`，寫入也要一致）。
+    #[tokio::test]
+    async fn an_upload_never_writes_through_a_symlinked_attachment_dir() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let project: String = sqlx::query_scalar("SELECT path FROM projects WHERE id = ?").bind(&env.project_id).fetch_one(&env.app.db).await.unwrap();
+        let project = PathBuf::from(project);
+        let elsewhere = tt::track(std::env::temp_dir().join(format!("am-attach-write-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        // `.agents-manager` 本身是連結。
+        std::fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, project.join(".agents-manager")).unwrap();
+        assert!(save(&env.app, &bot.id, "x.service", "text/plain", b"[Service]").await.is_err(), "連結目錄：不寫");
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "界線外什麼都不能出現");
+        std::fs::remove_file(project.join(".agents-manager")).unwrap();
+        // 只有 `attachments` 是連結。
+        std::fs::create_dir_all(project.join(".agents-manager")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, project.join(SUBDIR)).unwrap();
+        assert!(save(&env.app, &bot.id, "x.service", "text/plain", b"[Service]").await.is_err(), "連結的 attachments：不寫");
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        std::fs::remove_file(project.join(SUBDIR)).unwrap();
+        // 正常的還是通。
+        let a = save(&env.app, &bot.id, "ok.txt", "text/plain", b"fine").await.unwrap();
+        assert_eq!(read(&env.app, &a.id).await.unwrap().1, b"fine");
+    }
+
+    /// 存進 DB、回給 UI 的檔名：控制字元與雙向覆寫字元（`evil\u{202E}gnp.exe` 會顯示成 `evilexe.png`）拿掉，長度設上限。
+    #[test]
+    fn a_stored_attachment_name_has_no_control_or_bidi_characters_and_is_bounded() {
+        assert_eq!(clean_name("evil\u{202E}gnp.exe"), "evilgnp.exe");
+        assert_eq!(clean_name("a\0b\nc\rd\te.png"), "abcde.png");
+        assert_eq!(clean_name("\u{2066}x\u{2069}\u{200E}.txt"), "x.txt");
+        assert_eq!(clean_name("  \n "), "file");
+        assert_eq!(clean_name(&"長".repeat(1000)).chars().count(), 255);
+        assert_eq!(clean_name("報告 final.pdf"), "報告 final.pdf", "一般的 Unicode 檔名不動");
+    }
+
+    #[tokio::test]
+    async fn the_name_in_the_row_is_the_cleaned_one() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let a = save(&env.app, &bot.id, "..\\..\u{202E}/ev\0il.png", "image/png", b"png").await.unwrap();
+        let stored: String = sqlx::query_scalar("SELECT name FROM attachments WHERE id = ?").bind(&a.id).fetch_one(&env.app.db).await.unwrap();
+        assert!(!stored.chars().any(|c| c.is_control() || ('\u{202A}'..='\u{202E}').contains(&c)), "{stored:?}");
+        assert_eq!(a.name, stored);
+        assert!(a.path.contains("/.agents-manager/attachments/") && !a.path.contains(".."), "{}", a.path);
     }
 
     #[tokio::test]

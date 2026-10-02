@@ -1820,6 +1820,9 @@ body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是�
 
 - 檔案落在 `<project.path>/.agents-manager/attachments/`（agent cwd 之內，沙箱化的 CLI 才讀得到），該目錄自動寫一個 `*` 的 `.gitignore`。
 - 遠端專案經 ssh（`hosts.rs::ssh_put`）寫到遠端同路徑，daemon 另存本機副本供縮圖。
+- **寫入不跟符號連結**：本機專案的 `.agents-manager`／`attachments` 逐層 `mkdirat`＋`openat(O_NOFOLLOW)`，檔案 `O_CREAT|O_EXCL|O_NOFOLLOW`；agent 把任一層換成連結時上傳失敗、界線外不留任何東西（讀取側本來就是同一個界線）。
+- **檔名**：`name` 存進 DB、回給 UI 前拿掉控制字元（含 NUL、換行）與雙向覆寫／隔離字元（`U+202A–202E`、`U+2066–2069`、`U+200E/F`），最多 255 字元，空的叫 `file`；磁碟上的檔名另由 `<ULID>-<清過的前綴 ≤48>.<副檔名 ≤8>` 組成（只剩 `[A-Za-z0-9_-]`），不可能逃出目錄或與別的上傳撞名。
+- **同時上傳上限 4 個**（body 先整個讀進記憶體，單檔至多 50 MiB）：滿了回 **429** `{"error":"too_many_uploads","max":4}`＋`Retry-After: 2`，不排隊；連線斷掉名額就回來。
 - 不看 mime（2026-09-14 前只收 `image/*`）。空 body、超過 50 MB 或其他輸入錯誤 400；超過 50 MB + 4 KiB 由 body limit 回 413（無 JSON）；bot／project 不存在 404。
 
 #### 落地是 staging-first（issue #88，2026-09-18）

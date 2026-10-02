@@ -36,6 +36,37 @@ fn openat_raw(dirfd: i32, name: &OsStr, flags: i32) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+/// 從 `base`（信任邊界，本身可以是符號連結）逐層建立並打開 `components`：每一層 `mkdirat` 後 `openat(O_NOFOLLOW|O_DIRECTORY)`，
+/// 已經存在的符號連結（agent 在專案目錄裡換上去的）不會被跟進去，直接失敗。寫入側的 [`open_bound_dir`]。
+pub(crate) fn create_bound_dirs(base: &Path, components: &[&OsStr]) -> io::Result<File> {
+    let mut dir = open_dir(base)?;
+    for part in components {
+        let c = cstr(part)?;
+        if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), 0o755) } != 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() != io::ErrorKind::AlreadyExists {
+                return Err(e);
+            }
+        }
+        dir = openat_raw(dir.as_raw_fd(), part, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+    }
+    Ok(dir)
+}
+
+/// 在已打開的 `dir` 底下新建 `name`（`O_CREAT|O_EXCL|O_NOFOLLOW`：已經有東西——含符號連結——就失敗，不覆寫、不跟隨）並寫入。
+pub(crate) fn write_new_file_in(dir: &File, name: &OsStr, data: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    let c = cstr(name)?;
+    let fd = unsafe {
+        libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o644 as libc::c_uint)
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(data)
+}
+
 fn open_dir(path: &Path) -> io::Result<File> {
     let c = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path has an embedded NUL"))?;
@@ -118,8 +149,14 @@ where
     }
 
     let file = open(dir, name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK)?;
-    if !file.metadata()?.is_file() {
+    let opened = file.metadata()?;
+    if !opened.is_file() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a regular file"));
+    }
+    // 硬連結擋不住 `O_NOFOLLOW`（它就是一般檔案）：這些目錄裡的檔案是「搬進來」的，連結數 > 1＝同一個 inode 在別處也有名字
+    // （例如 `ln ui-token outbox/notes.txt`，名字黑名單看不出來），不給開。
+    if opened.nlink() > 1 {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "file has more than one hard link"));
     }
 
     // 一般檔案不需要非阻塞模式，且呼叫端可能會把這個 fd 交給一般的 Read 實作。
@@ -264,6 +301,20 @@ mod tests {
 
     /// 最後一段是符號連結指到界線外：`O_NOFOLLOW` 直接失敗，不會先「查到是連結」才決定不讀——查跟開是
     /// 同一個系統呼叫。
+    /// 硬連結：`O_NOFOLLOW` 擋不住（它就是一般檔案）。把別處的檔案（`ui-token`、金鑰）`ln` 進 outbox／附件目錄、
+    /// 改個無害的名字，名字黑名單就看不出來。這些目錄裡的檔案是「搬進來」的，連結數 > 1 一律不開。
+    #[test]
+    fn a_hard_linked_file_is_refused() {
+        let dir = crate::testing::scratch_dir("am-hardlink");
+        std::fs::write(dir.join("plain.txt"), b"ok").unwrap();
+        std::fs::write(dir.join("secret"), b"token").unwrap();
+        std::fs::hard_link(dir.join("secret"), dir.join("notes.txt")).unwrap();
+        let handle = std::fs::File::open(&dir).unwrap();
+        assert!(open_entry_in(&handle, OsStr::new("plain.txt")).is_ok());
+        assert!(open_entry_in(&handle, OsStr::new("notes.txt")).is_err(), "硬連結不能當成 outbox／附件的檔案");
+        assert!(open_entry_in(&handle, OsStr::new("secret")).is_err(), "另一端也是（連結數 2）");
+    }
+
     #[test]
     fn a_symlinked_final_component_is_refused() {
         let base = scratch("final-link");
