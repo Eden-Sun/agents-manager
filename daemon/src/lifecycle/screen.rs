@@ -1245,6 +1245,35 @@ gpt-5.6-luna max fast · ~/project/hermes-agents/projects/pt · Context 0% used 
         assert!(codex_usage_notice_lines(CODEX_IDLE_SPLASH).iter().any(|n| n.contains("usage limit reset")));
     }
 
+    /// #762 審查：把 `lifecycle/fixtures` 裡所有 claude 真畫面跑一遍。挑出來的回音行一定頂格、不是編號選單的游標列
+    /// （`❯ 1. Yes`）；有權限框／選單的畫面也一定挑到使用者那句真回音，不是選單。
+    #[test]
+    fn every_real_claude_screen_picks_a_column_zero_echo_never_a_menu_cursor() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle/fixtures");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("claude") || name.ends_with(".sent") || name.ends_with(".jsonl") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(entry.path()).unwrap();
+            let plain: String = raw.lines().map(crate::lifecycle::delivery::strip_ansi).collect::<Vec<_>>().join("\n");
+            let lines: Vec<&str> = plain.lines().collect();
+            if let Some(row) = crate::capture::claude::prompt_echo_row(&lines) {
+                let rest = &lines[row]["❯ ".len()..];
+                assert!(!rest.trim().is_empty(), "{name}: 回音行沒有內容：{:?}", lines[row]);
+                let numbered = rest.trim_start().split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+                assert!(!numbered, "{name}: 把選單游標列當成回音：{:?}", lines[row]);
+            }
+            let menu = lines.iter().any(|l| l.trim_start().starts_with("❯ 1. "));
+            if menu && name.contains("permission") {
+                assert!(crate::capture::claude::prompt_echo_row(&lines).is_some(), "{name}: 權限框畫面上有使用者那句回音，要挑得到");
+            }
+            checked += 1;
+        }
+        assert!(checked >= 20, "fixtures 目錄讀不到或太少：{checked}");
+    }
+
     /// #762 真畫面 `claude-2.1.281-paste-child-blocked-notice.ansi`：輸入框裡貼了一段 daemon 通知（草稿的 `❯` 後面是 U+00A0），
     /// 通知內文引了另一顆 claude 的畫面，裡面有縮排的 `  ❯ 請讀…`、`  ❯ Switch to O…`。這張畫面上**沒有**使用者回音；
     /// 以前取「最後一個 `❯ ` 開頭的行」，把引用的 `Switch to O…` 當成使用者 prompt、起點落在貼上內文中間。
