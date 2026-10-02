@@ -15,6 +15,7 @@
 # 不對就照 §18.13 的方向處理（升過 schema 預設往前修，不把舊 binary 放回去）。
 #
 # 結束碼：0 換版完成；3 前置核對不過；4 沒拿到窗口（有人在忙，下一輪再來）；5 備份失敗；
+#         10 新 binary 內嵌的 sha 不是 --sha（換版之前就中止，什麼都沒動）；
 #         6 新版起來了但升過 schema 所以往前修；7 已回滾；8 換好但窗口沒交還；9 daemon 太舊，沒有 restart-window 路由。
 set -u
 
@@ -294,6 +295,30 @@ case "$HEAD_SHA" in
     *) log "ABORT: checkout HEAD=$HEAD_SHA 不是 $SHA"; exit 3 ;;
 esac
 [ -x "$NEWBIN" ] || { log "ABORT: 找不到新 binary $NEWBIN"; exit 3; }
+# 要換上去的這顆 binary 真的是核准的那個 commit 建出來的嗎？daemon 自己驗不了（換上去的檔案只有這支腳本摸得到），
+# 所以換之前先問 binary 自己：`--version` 印 `<name> <版本> <完整 sha>[-dirty]`（clap 在進 main 之前就結束，不啟動服務）。
+# 對不上／髒樹建的／舊 binary 沒內嵌 sha（讀不出來）一律中止（rc=10）：窗口都還沒拿、舊 daemon 沒停、binary 沒動。
+# 上面的 HEAD 檢查只證明 checkout 在那一顆；binary 是不是從那個 checkout 建的，是這一步才證明。
+BIN_VERSION_LINE=$("$NEWBIN" --version 2>/dev/null | head -n 1)
+BIN_NAME=""; BIN_PKG=""; BIN_SHA=""; BIN_EXTRA=""
+read -r BIN_NAME BIN_PKG BIN_SHA BIN_EXTRA <<EOF_VERSION
+$BIN_VERSION_LINE
+EOF_VERSION
+BIN_SHA_CLEAN=${BIN_SHA%-dirty}
+case "$BIN_SHA" in
+    '') log "ABORT: 新 binary 的 --version 沒有內嵌 sha（'${BIN_VERSION_LINE}'）：說不出它是哪個 commit 建的，不換"; exit 10 ;;
+esac
+if [ -n "$BIN_EXTRA" ]; then
+    log "ABORT: 新 binary 的 --version 格式看不懂（'${BIN_VERSION_LINE}'），不換"; exit 10
+fi
+if [ "$BIN_SHA_CLEAN" != "$BIN_SHA" ]; then
+    log "ABORT: 新 binary 是髒樹建出來的（binary 內嵌 ${BIN_SHA}）：它不是 ${SHA} 這個 commit，不換"; exit 10
+fi
+case "$BIN_SHA" in
+    "$SHA"*) log "binary sha ok: 內嵌 ${BIN_SHA} 符合核准的 ${SHA}" ;;
+    *) log "ABORT: 新 binary 內嵌的 sha 是 ${BIN_SHA}，不是核准的 ${SHA}（checkout HEAD 對、但這顆 binary 不是從它建的？）；不拿窗口、不換"
+       exit 10 ;;
+esac
 # 線上 (--old) 必須是要換上的 commit 的祖先或同一顆。無法證明不是降版就拒絕（#638）。
 if ! git -C "$CHECKOUT" cat-file -e "${OLD}^{commit}" 2>/dev/null; then
     log "ABORT: 線上版本 $OLD 不在 checkout 裡，無法確認不是降版"
@@ -651,6 +676,27 @@ while [ $j -lt 30 ]; do api /api/session && { ok=1; break; }; sleep 1; j=$((j + 
 log "session ok"
 agm health >/dev/null 2>&1 || rollback "health 失敗"
 log "health ok"
+
+# 新 daemon 起來之後再用它自己的 API 複核一次（上面驗的是檔案，這裡驗的是跑起來的那個行程）：
+# `agm supervisor` 的 last_deploy.sha_full / dirty。binary 驗過了、起來的卻不是它（啟動器拉起別顆、舊行程沒停掉）也要回滾。
+# agm 自己失敗（daemon 讀不到）不在這裡判：下面讀 supervisor status 時同一個失敗會回滾，原因講得更準。
+if SUP_JSON=$(agm supervisor 2>/dev/null); then
+    DEPLOYED=$(printf '%s' "$SUP_JSON" | "$PYTHON" -c 'import json,sys
+try:
+    d = (json.load(sys.stdin) or {}).get("last_deploy") or {}
+except Exception:
+    d = {}
+print(d.get("sha_full") or "-", "dirty" if d.get("dirty") else "clean")')
+    read -r DEPLOYED_SHA DEPLOYED_DIRTY <<EOF_DEPLOYED
+$DEPLOYED
+EOF_DEPLOYED
+    case "${DEPLOYED_SHA:--}" in
+        -) rollback "新 daemon 的 /api/supervisor 沒回報 last_deploy.sha_full，複核不了它是不是核准的 ${SHA}" ;;
+        "$SHA"*) [ "${DEPLOYED_DIRTY:-clean}" = clean ] || rollback "新 daemon 回報自己是髒樹建的（${DEPLOYED_SHA}）" ;;
+        *) rollback "新 daemon 回報的 sha ${DEPLOYED_SHA} 不是核准的 ${SHA}" ;;
+    esac
+fi
+[ -z "${DEPLOYED_SHA:-}" ] || log "deployed sha ok: daemon 回報 ${DEPLOYED_SHA}"
 
 UV=$("$SQLITE" "$DB" "pragma user_version")
 log "user_version=$UV (expected $EXP_UV)"

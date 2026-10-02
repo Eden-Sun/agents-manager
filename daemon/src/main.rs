@@ -141,7 +141,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "agents-managerd", version)]
+#[command(name = "agents-managerd", version = build_info::VERSION)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

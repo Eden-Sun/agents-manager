@@ -4496,6 +4496,8 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   payload 寫明誰在等哪一則、送了幾次、最後一次的錯誤。代價講明白：極端情況下那顆 bot 要等人處理，所以喊人這段一定要在。
   登記的 bot 被刪掉 → `status=missing`（`configured:true`、`bot_present:false`），推一次 `responder_bot_missing` 給巡檢，事件照樣留在協調者的佇列等它被建回來。
 - **舊部署**（協調者未建立）：協調的事件由巡檢照 600 秒節流收，行為與之前相同；建立之後才分流。已送給巡檢的舊事件仍歸巡檢。
+- **binary 內嵌完整 sha、可驗**：`daemon/build.rs` 另外寫入 `AM_BUILD_SHA_FULL`（`git rev-parse HEAD`）與 `AM_BUILD_DIRTY`（`git status --porcelain -uno` 非空）；`agents-managerd --version` 印 `agents-managerd <版本> <完整 sha>[-dirty]`（clap 在進 main 之前結束，不啟動服務；`build_info::VERSION`／`parse_version_line`）。`last_deploy` 多帶 `sha_full`、`dirty`。拿不到 git 的建置是 `unknown`。
+  `daemon-swap.sh` 換上之前先跑 `<新 binary> --version`，內嵌 sha 要是 `--sha` 的延伸（`--sha` 可以是前綴）；對不上、`-dirty`、舊 binary 沒內嵌 sha 都以 **rc=10** 中止——窗口都還沒拿、舊 daemon 沒停、binary 沒動；`daemon-update-kick.sh` 推 `swap_binary_sha_mismatch`、記一次失敗、**不**記進 rejected（commit 沒問題，是建出來的檔不對）。新 daemon 起來後再用 `agm supervisor` 的 `last_deploy.sha_full`／`dirty` 複核一次，不符就回滾（rc=7）。daemon 本身驗不了自己換上去的是不是核准的那顆（檔案只有腳本摸得到），所以驗證放在腳本。
 - **上次成功上線**：`GET /api/supervisor` 的 `last_deploy{sha,at}`——sha 由 `daemon/build.rs` 在建置時編進 binary，
   `at` 是**這顆 sha 第一次跑起來**的時間，存在 `<data_dir>/last-deploy.json`（sha 跟檔裡一樣就沿用檔裡的時間）。
   origin/main 動了不等於上線了，這一格說的是「現在跑的是哪一版、什麼時候換上去的」。
