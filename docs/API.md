@@ -2079,7 +2079,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - body `{owner, commit, ttl_secs?}`（`deny_unknown_fields`；不接受 `exclude_bot_ids`：沒有「申請者自己那顆 bot」可排除）。daemon 開一筆 `purpose=restart`、`requester=owner`、`target_commit=commit` 的核准並**當場以 `service(daemon-swap)` 核准**
   （有效期 `ttl_secs`＋5 分鐘，不推 `approval_requested`），再走與 `POST /api/supervisor/leases/restart/acquire` **同一個** `maintenance::acquire`（`require_idle`）：
   沒有 bot 在 `working`／`in_flight`、送達臨界區沒有 prompt、沒有別人握租約才拿得到，拿到時 assignment 派送暫停。
-- 回應同 acquire：`{lease,lease_token,approval,safety}`（`lease_token` 只出現這一次）；拿不到回 acquire 的 409（`not_idle`／`lease_held`），並把剛開的核准改成 `revoked`，不留 `approved` 的殘單。
+- 回應同 acquire：`{lease,lease_token,approval,safety}`（`lease_token` 只出現這一次）；拿不到回 acquire 的 409（`not_idle`／`lease_held`），並把剛開的核准改成 `revoked`，不留 `approved` 的殘單（例外：`not_idle`、daemon 自己的 DB 暫時出錯會保留核准，下一輪沿用同一張，升級計時才不歸零）。
   續約與交還仍走 `/api/supervisor/leases/restart/{renew,release}`（要 `lease_token`，release 會把這筆核准消耗掉）。daemon-swap 的 scope 不再含 `leases/restart/acquire`：generic acquire 要事先核准的單，這條路由是唯一不需要別人核准的入口。
 
 ### 核准與租約（SPEC §18.10）
