@@ -75,6 +75,8 @@ export interface Host {
   connected: boolean
   /** 連線正常時為 null */
   error: string | null
+  /** 從什麼時候開始連不上（ISO）；連著或舊 daemon 沒這欄＝null。離線警示條算「離線多久」用。 */
+  disconnected_since: string | null
   /** 跟別的 daemon 共用這台的 herdr session（#709）；舊 daemon 沒這欄＝undefined。herdr 一鍵更新不能動這種主機。 */
   shared_session?: boolean
   /** 在本機終端 attach 同一個 herdr session 的指令 */

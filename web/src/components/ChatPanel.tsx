@@ -35,6 +35,7 @@ import { BotSwitcher } from './BotSwitcher'
 import { ConfirmDialog } from './ConfirmDialog'
 import { onTabListKeyDown } from './tabKeys'
 import { HostBadge } from './HostsPanel'
+import { HostOfflineChatNotice } from './HostOffline'
 import { UpdateBadge } from './UpdateBadge'
 import { RewindButton, RewoundTag } from './RewindButton'
 import { TurnErrorBadge } from './TurnErrorBadge'
@@ -1454,6 +1455,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
               onExpand={() => setBlockedUi((u) => ({ ...u, armed: false, open: true }))}
             />
           ) : null}
+          <HostOfflineChatNotice botId={botId} />
           <MessageList botId={botId} />
           {!active && !waitingForStart ? (
             <div className="bot-stopped-bar" role="status">

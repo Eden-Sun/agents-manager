@@ -45,6 +45,8 @@ import { RunElapsed } from './RunElapsed'
 import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
+import { HostDownState } from './HostOffline'
+import { useBotOfflineHost } from '../hooks/useHostOffline'
 import { KeepAwakeToggle } from './KeepAwakeToggle'
 import { BotNameField } from './BotNameField'
 import { ProjectNameField } from './ProjectNameField'
@@ -164,6 +166,7 @@ function BotRowImpl({
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const run = useStore((s) => s.runs[botId] ?? null)
   const { lamp, background: bgJobs, label: stateLabel } = useBotLamp(botId)
+  const hostDown = useBotOfflineHost(botId)
   // 額度 critical 時整列反灰＋警語（API.md §12.4）。botQuotaWarning 每次回新物件，不 useShallow 會無限重繪。
   const quotaWarning = useStore(
     useShallow((s) => {
@@ -384,7 +387,7 @@ function BotRowImpl({
             {showTitle ? null : compact ? (
               <BackgroundJobsBadge botId={botId} variant="mini" />
             ) : (
-              <BackgroundJobsBadge botId={botId} variant="state" fallback={<span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>} />
+              hostDown ? <HostDownState /> : <BackgroundJobsBadge botId={botId} variant="state" fallback={<span className={`bot-state ${lamp}`}>{LAMP_LABEL[lamp]}</span>} />
             )}
           </BotNameField>
         </span>
@@ -1183,7 +1186,7 @@ export function Sidebar() {
           const pDropEdge = pdrag && pdrag.id !== p.id && pdrag.overId === p.id ? pdrag.edge : null
           return (
             <section
-              className={`project${pDragging ? ' dragging' : ''}${pDropEdge ? ` drop-${pDropEdge}` : ''}`}
+              className={`project${pDragging ? ' dragging' : ''}${pDropEdge ? ` drop-${pDropEdge}` : ''}${hostUp(p.host) ? '' : ' host-down'}`}
               key={p.id}
               /* Control+1…9 要把側欄捲到這個專案（`useProjectJumpKeys`）。 */
               data-project-id={p.id}

@@ -25,6 +25,7 @@ export function HostBadge({ host, connected }: { host: string; connected: boolea
       title={connected ? `遠端主機 ${host}（已連線）` : `遠端主機 ${host}（未連線）`}
     >
       @{host}
+      {connected ? null : ' 離線'}
     </span>
   )
 }

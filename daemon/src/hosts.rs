@@ -148,6 +148,8 @@ pub struct HostConn {
     pub client: HerdrClient,
     pub connected: AtomicBool,
     pub error: Mutex<Option<String>>,
+    /// 這台從什麼時候開始連不上（`db::now()` 格式）；連著時為 `None`。daemon 起來後還沒連上過＝從建立連線物件算起。
+    down_since: std::sync::Mutex<Option<String>>,
     pub remote_home: Mutex<Option<String>>,
     master: Mutex<Option<tokio::process::Child>>,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -175,6 +177,7 @@ impl HostConn {
             client,
             connected: AtomicBool::new(false),
             error: Mutex::new(None),
+            down_since: std::sync::Mutex::new(None),
             remote_home: Mutex::new(dirs::home_dir().map(|p| p.to_string_lossy().to_string())),
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
@@ -195,6 +198,7 @@ impl HostConn {
             cfg: Some(cfg),
             connected: AtomicBool::new(false),
             error: Mutex::new(None),
+            down_since: std::sync::Mutex::new(Some(crate::db::now())),
             remote_home: Mutex::new(None),
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
@@ -226,6 +230,23 @@ impl HostConn {
 
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
+    }
+
+    /// 遠端主機斷線起點（API 的 `disconnected_since`）；本機與連著的主機一律 `None`。
+    pub fn disconnected_since(&self) -> Option<String> {
+        if self.is_local() || self.is_connected() {
+            return None;
+        }
+        self.down_since.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn mark_up(&self) {
+        *self.down_since.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// 只記第一次：重試失敗不會把斷線起點往後推。
+    fn mark_down(&self) {
+        self.down_since.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(crate::db::now);
     }
 
     pub async fn error_string(&self) -> Option<String> {
@@ -632,6 +653,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
             match attempt {
                 Ok(()) => {
                     backoff = BACKOFF_MIN;
+                    conn.mark_up();
                     conn.connected.store(true, Ordering::SeqCst);
                     *conn.error.lock().await = None;
                     crate::state::emit_host_changed(&app, &fence).await;
@@ -676,6 +698,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                             break;
                         }
                     }
+                    conn.mark_down();
                     conn.connected.store(false, Ordering::SeqCst);
                     conn.kill_master().await;
                     crate::state::emit_host_changed(&app, &fence).await;
@@ -686,6 +709,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     if conn.generation.load(Ordering::SeqCst) != generation {
                         return;
                     }
+                    conn.mark_down();
                     conn.connected.store(false, Ordering::SeqCst);
                     *conn.error.lock().await = Some(msg);
                     crate::state::emit_host_changed(&app, &fence).await;
@@ -1066,6 +1090,7 @@ impl HostManager {
             t.abort();
         }
         conn.kill_master().await;
+        conn.mark_down();
         conn.connected.store(false, Ordering::SeqCst);
         *conn.error.lock().await = None;
         let gen = conn.generation.load(Ordering::SeqCst);
@@ -1516,6 +1541,21 @@ mod tests {
             herdr_session: "agents-manager".into(),
             remote_path: String::new(),
         }
+    }
+
+    /// 離線警示條的「離線多久」：斷線起點只在第一次斷時記下，重試失敗不往後推；連上就清掉。
+    #[test]
+    fn disconnected_since_keeps_the_first_drop_and_clears_on_connect() {
+        let conn = HostConn::remote(cfg(), None);
+        let first = conn.disconnected_since().expect("還沒連上過就算離線");
+        conn.mark_down();
+        assert_eq!(conn.disconnected_since().as_deref(), Some(first.as_str()));
+        conn.mark_up();
+        conn.connected.store(true, Ordering::SeqCst);
+        assert_eq!(conn.disconnected_since(), None);
+        conn.mark_down();
+        conn.connected.store(false, Ordering::SeqCst);
+        assert!(conn.disconnected_since().is_some_and(|t| t >= first));
     }
 
     /// issue #506：`apply_config` 的套用迴圈以前沒像上面的移除迴圈那樣跳過 local，
