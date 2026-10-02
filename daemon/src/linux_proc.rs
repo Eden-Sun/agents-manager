@@ -162,7 +162,7 @@ mod tests {
 
     /// 假的 `/proc`：net/tcp、net/tcp6 照核心的欄位排，fd 是指到 `socket:[inode]` 的懸空符號連結（跟真的一樣）。
     fn fake_proc(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("am-linux-proc-{name}-{}", std::process::id()));
+        let root = crate::testing::track(std::env::temp_dir().join(format!("am-linux-proc-{name}-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("net")).unwrap();
         let hdr = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";

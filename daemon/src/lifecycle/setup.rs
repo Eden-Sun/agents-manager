@@ -1253,7 +1253,7 @@ mod hook_cmd_parts_tests {
     #[test]
     fn write_private_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join(format!("am-write-private-{}.json", std::process::id()));
+        let path = crate::testing::track(std::env::temp_dir().join(format!("am-write-private-{}.json", std::process::id())));
         std::fs::write(&path, b"old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         write_private(&path, b"{}").unwrap();
@@ -1266,7 +1266,7 @@ mod hook_cmd_parts_tests {
     #[test]
     fn write_private_replaces_atomically_and_cleans_up_on_failure() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("am-wp-atomic-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-wp-atomic-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.json");
         let alias = dir.join("alias.json");
@@ -1547,7 +1547,7 @@ mod remote_hook_tests {
 
         /// 用哪個遠端根產生腳本（正式實例＝`REMOTE_ROOT`，隔離實例＝`instances/<slug>`）。
         fn with_root(with_herdr: bool, root: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("am-hook-{}", crate::db::ulid()));
+            let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hook-{}", crate::db::ulid())));
             std::fs::create_dir_all(&dir).unwrap();
             write_exec(&dir.join("hook.sh"), &super::remote_hook_sh(root));
             if with_herdr {
@@ -1837,7 +1837,7 @@ mod remote_hook_tests {
     /// 同 id 的 bot 才不會被兩邊各記一次。正式實例的舊 pane 沒有這個變數，照舊歸正式。
     #[test]
     fn each_grok_dispatcher_only_serves_its_own_instance() {
-        let home = std::env::temp_dir().join(format!("am-grok-{}", crate::db::ulid()));
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-grok-{}", crate::db::ulid())));
         let run = |slug: Option<&str>, pane_instance: Option<&str>| -> bool {
             let root = crate::startup::remote_root_for(slug);
             let bot_dir = home.join(&root).join("bots/b1");
@@ -2564,7 +2564,7 @@ mod remote_install_permission_tests {
     async fn the_remote_install_tightens_the_bot_dir_and_repairs_old_modes() {
         let env = tt::env().await;
         let host = format!("perm-{}", crate::db::ulid());
-        let home = std::env::temp_dir().join(format!("am-perm-{}", crate::db::ulid()));
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-perm-{}", crate::db::ulid())));
         std::fs::create_dir_all(&home).unwrap();
         let conn = env
             .app

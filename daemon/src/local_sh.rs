@@ -41,7 +41,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_hung_command_times_out_and_is_killed() {
-        let pidfile = std::env::temp_dir().join(format!("am-local-sh-{}.pid", std::process::id()));
+        let pidfile = crate::testing::track(std::env::temp_dir().join(format!("am-local-sh-{}.pid", std::process::id())));
         let started = std::time::Instant::now();
         let err = output_within(&format!("echo $$ > {}; exec sleep 60", pidfile.display()), Duration::from_millis(500))
             .await

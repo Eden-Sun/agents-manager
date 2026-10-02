@@ -1427,7 +1427,7 @@ mod tests {
     use super::*;
 
     fn tmp_dir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("am-db-test-{}", ulid()));
+        let d = crate::testing::track(std::env::temp_dir().join(format!("am-db-test-{}", ulid())));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -1688,7 +1688,7 @@ mod tests {
     /// 到使用者那裡才炸成 `SELECT *` 的 FromRow 失敗、daemon 起不來。現在 migrate 自己對帳。
     #[tokio::test]
     async fn a_column_the_alter_list_forgot_is_caught_before_the_user_sees_it() {
-        let dir = std::env::temp_dir().join(format!("am-drift-{}", ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-drift-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.sqlite3");
         // 舊資料庫：`bots` 少了一堆後來才加的欄位，而且 CREATE TABLE IF NOT EXISTS 不會補。
@@ -1725,7 +1725,7 @@ mod tests {
     /// 被「框裡剛好有字」這種兩秒後就消失的原因吃掉，等於永遠補救不了。
     #[tokio::test]
     async fn a_resend_that_wrote_nothing_gives_the_budget_back() {
-        let dir = std::env::temp_dir().join(format!("am-refund-{}", ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-refund-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = open(&dir.join("t.sqlite3")).await.unwrap();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();
@@ -1784,7 +1784,7 @@ mod tests {
     /// `NULL` 或別的預設值被 `resolve`/`read`/`bind` 擋掉。
     #[tokio::test]
     async fn an_old_database_gains_attachments_state_and_backfills_ready() {
-        let dir = std::env::temp_dir().join(format!("am-attach-state-{}", ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-attach-state-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.sqlite3");
         {
@@ -1820,7 +1820,7 @@ mod tests {
     /// DB 當下還沒有的欄位）。
     #[tokio::test]
     async fn an_old_database_without_the_column_still_gets_a_working_trigger() {
-        let dir = std::env::temp_dir().join(format!("am-status-since-upgrade-{}", ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-status-since-upgrade-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.sqlite3");
         {
@@ -1846,7 +1846,7 @@ mod tests {
     /// schema 變更（additive）`turns.delivered_at`：沒有這一欄的舊 DB 開起來會補上，舊列是 NULL，`SELECT *` 照樣讀得進 `Turn`。
     #[tokio::test]
     async fn an_old_database_gains_turns_delivered_at_on_open() {
-        let dir = std::env::temp_dir().join(format!("am-delivered-at-{}", ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-delivered-at-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.sqlite3");
         {
@@ -1873,7 +1873,7 @@ mod tests {
     /// `SELECT *` 照樣讀得進 `Bot`。少了這條 ALTER，`check_schema_drift` 會讓 daemon 起不來。
     #[tokio::test]
     async fn an_old_database_gains_bots_instruction_files_on_open() {
-        let dir = std::env::temp_dir().join(format!("am-instruction-files-{}", ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-instruction-files-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.sqlite3");
         {
@@ -1897,7 +1897,7 @@ mod tests {
     /// （＝沒記，額度照 bot 設定的身分算，跟加這一欄之前一樣），`SELECT *` 照樣讀得進 `Run`。
     #[tokio::test]
     async fn an_old_database_gains_runs_runtime_identity_on_open() {
-        let dir = std::env::temp_dir().join(format!("am-runtime-identity-{}", ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-runtime-identity-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.sqlite3");
         {
@@ -1922,7 +1922,7 @@ mod tests {
     /// run 沒記的照 bot 設定的；起來時沒有身分的不算。
     #[tokio::test]
     async fn live_identities_are_the_ones_the_runs_started_with() {
-        let dir = std::env::temp_dir().join(format!("am-live-identities-{}", ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-live-identities-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = open(&dir.join("db.sqlite3")).await.unwrap();
         sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp','p',?)").bind(now()).execute(&pool).await.unwrap();

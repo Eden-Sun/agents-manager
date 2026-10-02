@@ -2159,7 +2159,7 @@ mod external_claim_tests {
     /// （真 transcript，2026-09-19 實測）：要拆回原文——不然記成外部回合時標籤會顯示給使用者，`agent_relay::claim` 也對不上。
     #[test]
     fn the_transcript_user_text_drops_the_cli_pasted_content_wrapper() {
-        let dir = std::env::temp_dir().join(format!("am-hookrecv-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hookrecv-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.jsonl");
         let log: Vec<&str> = include_str!("lifecycle/fixtures/claude_2.1.278_pasted_content.jsonl").lines().collect();
@@ -2191,7 +2191,7 @@ mod external_claim_tests {
     }
 
     async fn fixture() -> (TmpDb, sqlx::SqlitePool, String, String) {
-        let dir = std::env::temp_dir().join(format!("am-hookrecv-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hookrecv-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir.join("t.db")).await.unwrap();
         let now = db::now();
@@ -5318,7 +5318,7 @@ mod spool_claim_window_tests {
 
     impl Remote {
         fn new() -> Self {
-            let home = std::env::temp_dir().join(format!("am-claim-{}", db::ulid()));
+            let home = crate::testing::track(std::env::temp_dir().join(format!("am-claim-{}", db::ulid())));
             let d = home.join(crate::startup::REMOTE_ROOT).join("bots").join("botX");
             std::fs::create_dir_all(&d).unwrap();
             let bin = home.join("bin");

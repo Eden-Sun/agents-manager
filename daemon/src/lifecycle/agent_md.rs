@@ -165,7 +165,7 @@ mod tests {
     async fn unset_means_not_configured_and_a_missing_file_is_reported() {
         let none = collect(vec![]);
         assert!(!none.configured && none.text.is_empty() && none.problems.is_empty());
-        let dir = std::env::temp_dir().join(format!("am-agent-md-{}", std::process::id()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-agent-md-{}", std::process::id())));
         std::fs::create_dir_all(&dir).unwrap();
         let ok = dir.join("g.md");
         std::fs::write(&ok, "GLOBAL\n").unwrap();

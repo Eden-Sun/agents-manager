@@ -227,7 +227,7 @@ mod tests {
     use super::*;
 
     async fn pool() -> (SqlitePool, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("am-read-marks-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-read-marks-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         (crate::db::open(&dir.join("t.sqlite3")).await.unwrap(), dir)
     }

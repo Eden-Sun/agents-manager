@@ -128,7 +128,7 @@ mod tests {
     /// 換版前就在跑的那些：目錄 0755、spool 0644（舊 hook.sh 建的）。掃一次要全部收回來，內容不准動。
     #[test]
     fn a_sweep_tightens_directories_that_were_left_wide_open() {
-        let home = std::env::temp_dir().join(format!("am-tighten-{}", crate::db::ulid()));
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-tighten-{}", crate::db::ulid())));
         let bots = home.join(crate::startup::REMOTE_ROOT).join("bots");
         let old = bots.join("b-old");
         std::fs::create_dir_all(&old).unwrap();
@@ -160,7 +160,7 @@ mod tests {
     /// 所以用 PATH 上的 `chmod` 替身讓它一定失敗——測的是腳本怎麼處理失敗，不是 chmod 本身。
     #[test]
     fn a_directory_whose_chmod_fails_is_reported_as_failed() {
-        let home = std::env::temp_dir().join(format!("am-tighten-{}", crate::db::ulid()));
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-tighten-{}", crate::db::ulid())));
         let bad = home.join(crate::startup::REMOTE_ROOT).join("bots").join("b-bad");
         std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(bad.join("hook-spool.jsonl"), "x\n").unwrap();
@@ -220,7 +220,7 @@ mod tests {
     /// 沒有 bots 目錄（這台還沒跑過遠端 bot）不是錯。
     #[test]
     fn a_host_with_no_bot_directory_is_not_an_error() {
-        let home = std::env::temp_dir().join(format!("am-tighten-{}", crate::db::ulid()));
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-tighten-{}", crate::db::ulid())));
         std::fs::create_dir_all(&home).unwrap();
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")

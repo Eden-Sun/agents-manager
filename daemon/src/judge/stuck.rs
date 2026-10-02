@@ -255,7 +255,7 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (url, seen) = fake_jev(p).await;
-        let dir = std::env::temp_dir().join(format!("am-judge-stuck-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-judge-stuck-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let key = dir.join("key");
         std::fs::write(&key, "k-test\n").unwrap();

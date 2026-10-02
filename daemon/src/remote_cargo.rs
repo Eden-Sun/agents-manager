@@ -1825,7 +1825,7 @@ mod tests {
         if !has_program(&rsync_program()) {
             return;
         }
-        let base = std::env::temp_dir().join(format!("am-rsync-{}", std::process::id()));
+        let base = crate::testing::track(std::env::temp_dir().join(format!("am-rsync-{}", std::process::id())));
         let (src, dst) = (base.join("src"), base.join("dst"));
         for d in ["src/target", "crates/target", "target/debug"] {
             std::fs::create_dir_all(src.join(d)).unwrap();
@@ -1864,7 +1864,7 @@ mod tests {
     /// 密碼檔在資料目錄裡，推錯就是認證失敗。給了就照用。
     #[test]
     fn without_a_data_dir_the_helper_resolves_it_from_the_config_like_the_daemon() {
-        let base = std::env::temp_dir().join(format!("am-r417-{}", crate::db::ulid()));
+        let base = crate::testing::track(std::env::temp_dir().join(format!("am-r417-{}", crate::db::ulid())));
         let (beside, custom) = (base.join("conf"), base.join("conf/data"));
         std::fs::create_dir_all(&custom).unwrap();
         let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
@@ -1882,7 +1882,7 @@ mod tests {
     /// 正常啟用且沒有這些變數才轉遠端；檔案不存在／沒啟用是本來就不轉，不必吵。
     #[test]
     fn the_offload_decision_never_falls_back_silently_when_something_is_wrong() {
-        let dir = std::env::temp_dir().join(format!("am-decide-{}", std::process::id()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-decide-{}", std::process::id())));
         std::fs::create_dir_all(&dir).unwrap();
         let args = vec!["test".to_string()];
         let no_env = || Vec::<(String, String)>::new();
@@ -1950,7 +1950,7 @@ mod tests {
     /// 再在同一個子目錄下跑。以前一律同步 cwd 本身：遠端沒有鎖檔、重新解析依賴，驗的不是本機那份。
     #[test]
     fn a_subdirectory_call_syncs_the_workspace_root_and_runs_in_the_same_subdirectory() {
-        let t = std::env::temp_dir().join(format!("am-r177-{}", crate::db::ulid()));
+        let t = crate::testing::track(std::env::temp_dir().join(format!("am-r177-{}", crate::db::ulid())));
         let mk = |rel: &str, manifest: Option<&str>| {
             let d = t.join(rel);
             std::fs::create_dir_all(&d).unwrap();
@@ -2087,7 +2087,7 @@ mod tests {
     /// askpass 腳本要是 0700、內容正確，而且重複呼叫不會一直重寫。
     #[test]
     fn the_askpass_helper_is_written_once_and_is_not_world_readable() {
-        let dir = std::env::temp_dir().join(format!("am-askpass-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-askpass-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = askpass_helper(&dir).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
@@ -2161,7 +2161,7 @@ exec /bin/sh -c "$inner"
 
     /// 在 `sh` 裡真的跑遠端的腳本：`HOME` 是空沙盒、PATH 只有 `uname`，`cargo`／`rustup` 用 shell 函式假裝（不寫可執行檔，免得撞 ETXTBSY）。
     fn run_remote_sh(script: &str, fakes: &str) -> String {
-        let sandbox = std::env::temp_dir().join(format!("am-probe-{}", crate::db::ulid()));
+        let sandbox = crate::testing::track(std::env::temp_dir().join(format!("am-probe-{}", crate::db::ulid())));
         std::fs::create_dir_all(sandbox.join("bin")).unwrap();
         let uname = String::from_utf8(Command::new("sh").arg("-c").arg("command -v uname").output().unwrap().stdout).unwrap();
         std::os::unix::fs::symlink(uname.trim(), sandbox.join("bin/uname")).unwrap();
@@ -2528,7 +2528,7 @@ exec /bin/sh -c "$inner"
     }
 
     fn secret_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("am-remote-cargo-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-remote-cargo-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -2672,7 +2672,7 @@ mod guard_tests {
     const HASH: &str = "0123456789abcdef";
 
     fn base() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("am-r141-{}", crate::db::ulid()));
+        let d = crate::testing::track(std::env::temp_dir().join(format!("am-r141-{}", crate::db::ulid())));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

@@ -116,7 +116,7 @@ mod tests {
 
     #[tokio::test]
     async fn sh_local_preserves_exit_status_and_output() {
-        let tmp = std::env::temp_dir().join(format!("am-git-sh-{}", crate::db::ulid()));
+        let tmp = crate::testing::track(std::env::temp_dir().join(format!("am-git-sh-{}", crate::db::ulid())));
         std::fs::create_dir_all(&tmp).unwrap();
         let app = app_for(&tmp).await;
 

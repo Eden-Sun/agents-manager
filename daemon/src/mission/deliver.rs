@@ -362,7 +362,7 @@ mod tests {
 
     /// bare origin（main 上一個 commit）＋ 兩個 clone。
     fn fixture() -> (Tmp, std::path::PathBuf, std::path::PathBuf) {
-        let root = Tmp(std::env::temp_dir().join(format!("am-mission-deliver-{}", crate::db::ulid())));
+        let root = Tmp(crate::testing::track(std::env::temp_dir().join(format!("am-mission-deliver-{}", crate::db::ulid()))));
         std::fs::create_dir_all(root.path()).unwrap();
         let origin = root.path().join("origin.git");
         let seed = root.path().join("seed");
@@ -473,7 +473,7 @@ mod tests {
     /// 預設分支不叫 main 的專案也交得出去（以前寫死 main，一定 `fetch_failed`）。
     #[tokio::test]
     async fn the_base_branch_comes_from_the_repo_not_from_a_hardcoded_name() {
-        let root = Tmp(std::env::temp_dir().join(format!("am-mission-base-{}", crate::db::ulid())));
+        let root = Tmp(crate::testing::track(std::env::temp_dir().join(format!("am-mission-base-{}", crate::db::ulid()))));
         std::fs::create_dir_all(root.path()).unwrap();
         let origin = root.path().join("origin.git");
         let seed = root.path().join("seed");

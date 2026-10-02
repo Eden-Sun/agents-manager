@@ -1933,7 +1933,7 @@ mod resume_args_tests {
         }
 
         fn tmp() -> std::path::PathBuf {
-            let dir = std::env::temp_dir().join(format!("am-remote-stage-{}", db::ulid()));
+            let dir = crate::testing::track(std::env::temp_dir().join(format!("am-remote-stage-{}", db::ulid())));
             std::fs::create_dir_all(&dir).unwrap();
             dir
         }
@@ -2644,7 +2644,7 @@ mod tab_tests {
     /// Every start pre-trusts its cwd, or claude's "trust this project?" prompt (cursor on *No*) fails it.
     #[tokio::test]
     async fn a_fresh_working_directory_is_trusted_before_the_agent_starts() {
-        let dir = std::env::temp_dir().join(format!("am-trust-start-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-start-{}", crate::db::ulid())));
         // 工作目錄是經過符號連結進去的（macOS 的 `/tmp` 就是）；自己造一個，不靠這台機器的 tmp 剛好是不是連結
         // ——Linux 的 `/tmp` 不是，原本的 `!starts_with("/tmp/")` 在那邊必紅（#139，遠端編譯主機）。
         let repo = dir.join("real/repo");

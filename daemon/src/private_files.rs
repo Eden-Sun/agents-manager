@@ -49,7 +49,7 @@ mod tests {
 
     #[test]
     fn a_private_dir_is_0700_even_when_it_already_existed_wide_open() {
-        let root = std::env::temp_dir().join(format!("am-private-{}", crate::db::ulid()));
+        let root = crate::testing::track(std::env::temp_dir().join(format!("am-private-{}", crate::db::ulid())));
         let deep = root.join("bots").join("b1");
         create_private_dir(&deep).unwrap();
         assert_eq!(mode_of(&deep), 0o700, "新建的就是 0700");
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn an_appended_file_is_created_0600() {
         use std::io::Write as _;
-        let dir = std::env::temp_dir().join(format!("am-private-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-private-{}", crate::db::ulid())));
         create_private_dir(&dir).unwrap();
         let p = dir.join("spool.jsonl");
         append_private(&p).unwrap().write_all(b"a\n").unwrap();

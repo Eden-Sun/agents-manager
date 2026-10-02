@@ -226,7 +226,7 @@ mod tests {
     use super::*;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
-        let base = std::env::temp_dir().join(format!("am-trusted-open-{tag}-{}", crate::db::ulid()));
+        let base = crate::testing::track(std::env::temp_dir().join(format!("am-trusted-open-{tag}-{}", crate::db::ulid())));
         std::fs::create_dir_all(&base).unwrap();
         base
     }

@@ -454,7 +454,7 @@ mod tests {
     }
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("am-shell-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-shell-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let db = crate::db::open(&dir.join("t.sqlite3")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();

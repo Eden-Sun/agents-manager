@@ -356,7 +356,7 @@ mod tests {
     }
 
     fn scratch(tag: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("am-outbox-{tag}-{}", crate::db::ulid()));
+        let base = crate::testing::track(std::env::temp_dir().join(format!("am-outbox-{tag}-{}", crate::db::ulid())));
         std::fs::create_dir_all(&base).unwrap();
         std::fs::canonicalize(base).unwrap()
     }

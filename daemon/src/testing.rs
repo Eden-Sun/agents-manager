@@ -944,6 +944,13 @@ pub fn remove_at_exit(path: &std::path::Path) {
     });
 }
 
+/// 把測試自己組的暫存路徑（`temp_dir().join(…)`）登記成「行程結束時刪掉」，原樣回傳、**不建立**（有些測試要它先不存在）。
+/// 測試 panic 在 `remove_dir_all` 之前、或根本沒寫清理，都不會再留殘骸（issue #763）。
+pub fn track(path: std::path::PathBuf) -> std::path::PathBuf {
+    remove_at_exit(&path);
+    path
+}
+
 /// `true`＝這個目錄是 [`scratch_dir`] 建的、現在交還給呼叫端刪。
 pub(crate) fn release_scratch(dir: &std::path::Path) -> bool {
     scratch_registry().lock().unwrap_or_else(|e| e.into_inner()).remove(dir)
@@ -1137,5 +1144,31 @@ mod write_exec_tests {
         super::write_exec(&py, "#!/usr/bin/env python3\nprint('hi')\n");
         assert!(!std::fs::read_to_string(&py).unwrap().contains("AM_TEST_EXEC_PROBE"), "非 shell 不插守衛");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod scratch_leak_guard {
+    /// issue #763：測試裡直接 `std::env::temp_dir().join(…)` 的目錄沒有人保證會刪，整樹跑一輪 `/tmp` 多出上萬個。
+    /// 每一處都要過 `testing::track` / `testing::scratch_dir`（行程結束時一定掃掉）。
+    #[test]
+    fn no_test_builds_an_unregistered_path_under_temp_dir() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("testing.rs") {
+                    for (i, l) in std::fs::read_to_string(&p).unwrap().lines().enumerate() {
+                        if l.contains("temp_dir()") && !l.contains("testing::track(") && !l.contains("testing::scratch_dir(") {
+                            out.push(format!("{}:{}: {}", p.display(), i + 1, l.trim()));
+                        }
+                    }
+                }
+            }
+        }
+        let mut bad = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut bad);
+        assert!(bad.is_empty(), "wrap with crate::testing::track(…) or use testing::scratch_dir:\n{}", bad.join("\n"));
     }
 }

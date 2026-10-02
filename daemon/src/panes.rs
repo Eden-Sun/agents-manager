@@ -920,7 +920,7 @@ mod tests {
     /// 開機 migrate 後補齊，舊列照樣讀得出 pane 列（`row_json` 會讀這幾欄）。
     #[tokio::test]
     async fn an_old_panes_table_gains_the_new_columns_on_migrate() {
-        let dir = std::env::temp_dir().join(format!("am-panes-old-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-panes-old-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", dir.join("old.sqlite3").display())).await.unwrap();
         sqlx::query(
@@ -967,7 +967,7 @@ mod tests {
     }
 
     async fn app() -> Arc<App> {
-        let dir = std::env::temp_dir().join(format!("am-panes-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-panes-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let db = crate::db::open(&dir.join("t.sqlite3")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();

@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn a_key_file_others_can_read_is_refused() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("am-judge-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-judge-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("key");
         std::fs::write(&path, "k-test\n").unwrap();
@@ -846,7 +846,7 @@ mod tests {
     }
 
     async fn app_with(enabled: bool, projects: &[&str], endpoint: &str) -> (Arc<App>, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("am-judge-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-judge-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let key = dir.join("key");
         std::fs::write(&key, "k-test-0001\n").unwrap();
@@ -1029,7 +1029,7 @@ mod tests {
     #[test]
     fn a_pasted_key_lands_in_a_600_file_and_nowhere_else() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("am-judge-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-judge-{}", crate::db::ulid())));
         let path = dir.join("nested").join("api-key");
         let p = path.to_str().unwrap();
         assert!(key_status(p).unwrap_err().contains("unreadable"));
@@ -1094,7 +1094,7 @@ mod tests {
 
     #[test]
     fn a_staged_key_is_inert_until_published() {
-        let dir = std::env::temp_dir().join(format!("am-judge-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-judge-{}", crate::db::ulid())));
         let path = dir.join("api-key");
         let p = path.to_str().unwrap();
         write_key(p, "k-old").unwrap();

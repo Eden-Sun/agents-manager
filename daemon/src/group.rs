@@ -499,7 +499,7 @@ mod message_tests {
 
     #[tokio::test]
     async fn messages_page_by_rowid_when_ids_are_out_of_order() {
-        let dir = std::env::temp_dir().join(format!("am-group-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-group-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();

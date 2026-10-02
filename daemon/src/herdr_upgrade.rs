@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     fn swap_keeps_a_backup_and_restore_puts_it_back() {
-        let dir = std::env::temp_dir().join(format!("am-herdr-swap-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-swap-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let (install, staging) = (dir.join("herdr"), dir.join("staged"));
         std::fs::write(&install, "old").unwrap();

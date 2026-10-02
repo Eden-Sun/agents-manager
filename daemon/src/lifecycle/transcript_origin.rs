@@ -179,7 +179,7 @@ mod tests {
     }
 
     fn write_sample() -> String {
-        let path = std::env::temp_dir().join(format!("am-origin-{}.jsonl", db::ulid()));
+        let path = crate::testing::track(std::env::temp_dir().join(format!("am-origin-{}.jsonl", db::ulid())));
         std::fs::write(&path, SAMPLE).unwrap();
         crate::testing::remove_at_exit(&path);
         path.to_string_lossy().to_string()

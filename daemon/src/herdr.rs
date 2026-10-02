@@ -811,7 +811,7 @@ mod rpc_tests {
 
     /// accept 了但一個字都不回的假 herdr：socket 半開時最像的那種。
     fn wedged_socket(tag: &str) -> (PathBuf, tokio::task::JoinHandle<()>) {
-        let dir = std::env::temp_dir().join(format!("am-herdr-{tag}-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-{tag}-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -855,7 +855,7 @@ mod rpc_tests {
 
     /// 照腳本回話的假 herdr：每條連線讀一行請求，`reply` 決定回什麼；`events.subscribe` 回 ack 之後把 `events` 一行行吐出去。
     fn scripted_socket(tag: &str, reply: impl Fn(&Value) -> Value + Send + Sync + 'static, events: Vec<Value>) -> (PathBuf, tokio::task::JoinHandle<()>) {
-        let dir = std::env::temp_dir().join(format!("am-herdr-{tag}-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-{tag}-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -886,7 +886,7 @@ mod rpc_tests {
     /// 還多吐一則事件，所以結束是因為認得錯誤行，不是剛好讀到 EOF。
     #[tokio::test]
     async fn an_events_lost_error_line_ends_the_stream_instead_of_being_skipped() {
-        let dir = std::env::temp_dir().join(format!("am-herdr-lost-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-lost-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("herdr.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
