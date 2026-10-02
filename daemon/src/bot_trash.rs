@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn a_trashed_dir_comes_back_on_restore_and_expires_after_keep() {
-        let data = std::env::temp_dir().join(format!("am-trash-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-{}", crate::db::ulid())));
         let dir = data.join("bots").join("b1");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("keep.txt"), "x").unwrap();
@@ -289,7 +289,7 @@ mod tests {
     /// 最新那一份留著（剛刪掉的那顆才是最可能要還原的）。
     #[test]
     fn the_oldest_entries_go_first_once_the_trash_is_over_its_size_cap() {
-        let data = std::env::temp_dir().join(format!("am-trash-cap-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-cap-{}", crate::db::ulid())));
         let now = now_ms();
         let old = seed(&data, "b1", now - 3_000, 4_000);
         let mid = seed(&data, "b2", now - 2_000, 4_000);
@@ -309,7 +309,7 @@ mod tests {
     /// 過期的先清；清完還超量才輪到按時間淘汰，兩個數字分開回報。
     #[test]
     fn expiry_runs_before_the_size_cap() {
-        let data = std::env::temp_dir().join(format!("am-trash-both-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-both-{}", crate::db::ulid())));
         let now = now_ms();
         seed(&data, "b1", now - 10_000, 4_000); // 過期
         let mid = seed(&data, "b2", now - 2_000, 4_000);
@@ -324,7 +324,7 @@ mod tests {
     /// 名字看不懂的（別人放進來的檔案、暫存）一律不碰，免得清理誤傷。
     #[test]
     fn entries_with_unparseable_names_are_never_touched() {
-        let data = std::env::temp_dir().join(format!("am-trash-alien-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-alien-{}", crate::db::ulid())));
         std::fs::create_dir_all(root(&data).join("not-a-trash-entry")).unwrap();
         std::fs::write(root(&data).join("README"), "x").unwrap();
 
@@ -337,7 +337,7 @@ mod tests {
     /// 而且 `<id>.attachments.<ms>` 不能被當成 bot 目錄還原到 `bots/<id>/`。
     #[test]
     fn attachments_ride_the_same_trash_lifecycle_without_being_mistaken_for_the_bot_dir() {
-        let data = std::env::temp_dir().join(format!("am-trash-att-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-att-{}", crate::db::ulid())));
         let bots = data.join("bots/B1");
         let att = attachments_dir(&data, "B1");
         std::fs::create_dir_all(&bots).unwrap();
@@ -361,7 +361,7 @@ mod tests {
     /// 過期清理會把附件那份也收掉（以前 `attachments/<id>/` 永遠不會被任何人清）。
     #[test]
     fn expired_attachment_entries_are_collected_like_any_other() {
-        let data = std::env::temp_dir().join(format!("am-trash-attgc-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-attgc-{}", crate::db::ulid())));
         let att = attachments_dir(&data, "B1");
         std::fs::create_dir_all(&att).unwrap();
         std::fs::write(att.join("a.png"), vec![b'x'; 32]).unwrap();
@@ -379,7 +379,7 @@ mod tests {
     /// 回收區就看不到它，還原撈不到（`Ok(None)`），不會拿到一份注定被清空的目錄。
     #[test]
     fn an_entry_being_removed_leaves_the_trash_namespace_before_a_single_file_is_deleted() {
-        let data = std::env::temp_dir().join(format!("am-trash-race-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-race-{}", crate::db::ulid())));
         let now = now_ms();
         let entry = seed(&data, "B1", now - 1_000, 32);
         assert_eq!(latest(&data, "B1", None).as_ref(), Some(&entry), "前提：還原撈得到它");
@@ -399,7 +399,7 @@ mod tests {
     /// 反過來：還原先搶到那一份，清理的改名就 `NotFound`——一個檔都不准動，還原回來的目錄完整。
     #[test]
     fn a_restore_that_wins_the_race_keeps_every_file_and_the_gc_removes_nothing() {
-        let data = std::env::temp_dir().join(format!("am-trash-race2-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-race2-{}", crate::db::ulid())));
         let now = now_ms();
         let entry = seed(&data, "B1", now - 1_000, 32);
         let dir = data.join("bots/B1");
@@ -414,7 +414,7 @@ mod tests {
     /// 沒人收就永遠佔著磁碟。每輪開頭收一次，而且不算進任何一個計數。
     #[test]
     fn leftover_deleting_entries_from_a_crashed_sweep_are_collected_on_the_next_gc() {
-        let data = std::env::temp_dir().join(format!("am-trash-leftover-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-leftover-{}", crate::db::ulid())));
         let now = now_ms();
         let entry = seed(&data, "B1", now - 1_000, 16);
         let leftover = take_aside(&entry).expect("改名成功");
@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn dir_size_adds_up_nested_files() {
-        let data = std::env::temp_dir().join(format!("am-trash-size-{}", crate::db::ulid()));
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-size-{}", crate::db::ulid())));
         let d = data.join("x");
         std::fs::create_dir_all(d.join("a/b")).unwrap();
         std::fs::write(d.join("a/one"), vec![b'x'; 10]).unwrap();

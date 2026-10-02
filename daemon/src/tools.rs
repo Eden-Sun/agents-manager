@@ -1178,7 +1178,7 @@ mod tests {
 
     #[test]
     fn onboarding_flag_is_set_only_when_logged_in_and_missing() {
-        let dir = std::env::temp_dir().join(format!("am-onboard-{}", ulid::Ulid::new()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-onboard-{}", ulid::Ulid::new())));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join(".claude.json");
         // No account: leave it alone (the TUI has to log in anyway).
@@ -1782,7 +1782,7 @@ mod alias_path_tests {
 
     #[test]
     fn macos_local_alias_from_the_login_shell_does_not_hide_the_binary() {
-        let root = std::env::temp_dir().join(format!("am-alias-{}", crate::db::ulid()));
+        let root = crate::testing::track(std::env::temp_dir().join(format!("am-alias-{}", crate::db::ulid())));
         let bindir = root.join("bin");
         std::fs::create_dir_all(&bindir).unwrap();
         bin(&bindir, "claude", "#!/bin/sh\necho 'claude 2.1.0'\n");
@@ -1820,7 +1820,7 @@ mod alias_path_tests {
         assert!(herdr.contains("AM_HERDR herdr 0.9.1"), "{herdr}");
 
         // 登入 shell 給 alias、PATH 上也沒有：要空，不能把 alias 字串留著。
-        let bare = std::env::temp_dir().join(format!("am-alias-bare-{}", crate::db::ulid()));
+        let bare = crate::testing::track(std::env::temp_dir().join(format!("am-alias-bare-{}", crate::db::ulid())));
         std::fs::create_dir_all(&bare).unwrap();
         let out = sh(PROBE_SH, &shell, "/usr/bin:/bin");
         assert!(out.lines().any(|l| l.trim() == "AM_PATH claude"), "沒有執行檔就要是空路徑：{out}");

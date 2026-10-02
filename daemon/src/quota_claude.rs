@@ -1031,7 +1031,7 @@ mod tests {
         use crate::testing::{Fault, MockHerdr};
 
         fn herdr() -> (MockHerdr, HerdrClient, std::path::PathBuf) {
-            let dir = std::env::temp_dir().join(format!("am-qc-{}", crate::db::ulid()));
+            let dir = crate::testing::track(std::env::temp_dir().join(format!("am-qc-{}", crate::db::ulid())));
             std::fs::create_dir_all(&dir).unwrap();
             let sock = dir.join("herdr.sock");
             (MockHerdr::start(sock.clone()), HerdrClient::new(sock), dir)

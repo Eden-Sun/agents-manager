@@ -1733,7 +1733,7 @@ mod tests {
     /// transcript 只看基準點之後新增的位元組；逐字比對，截半的 UTF-8／JSON 行不會誤判。
     #[test]
     fn the_transcript_is_read_from_the_baseline_offset_and_compared_byte_for_byte() {
-        let dir = std::env::temp_dir().join(format!("am-transcript-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-transcript-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.jsonl");
         let code = "修這段：\n\nfn main() {\n    println!(\"hi\");  \n}";
@@ -1769,7 +1769,7 @@ mod tests {
     /// 只是被包含的一段不算。
     #[test]
     fn a_prompt_the_cli_wrapped_as_pasted_content_is_still_our_prompt() {
-        let dir = std::env::temp_dir().join(format!("am-transcript-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-transcript-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.jsonl");
         std::fs::write(&path, include_str!("fixtures/claude_2.1.278_pasted_content.jsonl")).unwrap();
@@ -1794,7 +1794,7 @@ mod tests {
     /// 證據矩陣（SPEC §4.4a）：provider × 本機／遠端 × 單行／多行 → 用哪種證據，或 unverified。
     #[test]
     fn the_evidence_matrix() {
-        let dir = std::env::temp_dir().join(format!("am-proof-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-proof-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let t = dir.join("t.jsonl");
         std::fs::write(&t, "").unwrap();
@@ -1870,7 +1870,7 @@ mod tests {
     /// 同一天有兩個同 session 的 rollout 取最新；超過兩週前的舊 session 也找得到；symlink 指到 sessions 外面不收。
     #[test]
     fn the_codex_rollout_lookup_prefers_the_newest_and_stays_inside_sessions() {
-        let home = std::env::temp_dir().join(format!("am-codex-lookup-{}", db::ulid()));
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-codex-lookup-{}", db::ulid())));
         let day = home.join("sessions/2026/09/14");
         let ancient = home.join("sessions/2026/01/02");
         std::fs::create_dir_all(&day).unwrap();
@@ -1915,7 +1915,7 @@ mod tests {
     /// codex rollout：只算頂層 response_item 的 user 訊息；compacted 重播、非 input_text、developer 都不算；逐字比對。
     #[test]
     fn codex_rollout_user_entries_are_read_exactly() {
-        let dir = std::env::temp_dir().join(format!("am-codex-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-codex-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("rollout.jsonl");
         let text = "第一行：先看報告\n    縮排的第二行  \n";
@@ -1940,7 +1940,7 @@ mod tests {
     /// 只認「檔名就是這個 session」的 rollout，最新的日期資料夾先找。
     #[test]
     fn the_codex_rollout_is_found_by_its_session_id() {
-        let home = std::env::temp_dir().join(format!("am-codex-home-{}", db::ulid()));
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-codex-home-{}", db::ulid())));
         let old = home.join("sessions/2026/09/01");
         let new = home.join("sessions/2026/09/14");
         std::fs::create_dir_all(&old).unwrap();

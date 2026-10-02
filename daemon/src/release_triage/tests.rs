@@ -244,7 +244,7 @@ async fn unsupported_kind_is_an_error() {
 /// 整段 CLI 流程（feed 檔＋DB 檔）：不碰網路、不碰正式 DB。
 #[tokio::test]
 async fn run_check_reads_a_feed_file_and_a_private_db() {
-    let dir = std::env::temp_dir().join(format!("am-rt-{}-{}", std::process::id(), crate::release_triage::ledger::now_ts().replace(':', "")));
+    let dir = crate::testing::track(std::env::temp_dir().join(format!("am-rt-{}-{}", std::process::id(), crate::release_triage::ledger::now_ts().replace(':', ""))));
     std::fs::create_dir_all(&dir).unwrap();
     let feed = dir.join("CHANGELOG.md");
     std::fs::write(&feed, CLAUDE_MD).unwrap();

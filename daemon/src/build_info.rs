@@ -82,7 +82,7 @@ mod tests {
     /// binary 沒換的重啟不是新的上線：`at` 要沿用上一次的。換了 sha 才是新的上線。
     #[test]
     fn only_a_new_binary_moves_the_deploy_time() {
-        let dir = std::env::temp_dir().join(format!("am-deploy-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-deploy-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
 
         let first = deployed_at(&dir, "abc1234", "2026-09-16T10:00:00Z");

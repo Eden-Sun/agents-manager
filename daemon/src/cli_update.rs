@@ -2759,7 +2759,7 @@ mod tests {
 
     #[test]
     fn claude_install_command_runs_only_a_path_stub_with_the_exact_target() {
-        let dir = std::env::temp_dir().join(format!("am-claude-install-stub-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-claude-install-stub-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
         let captured = dir.join("args");
@@ -3551,7 +3551,7 @@ mod tests {
     async fn remote_install_lock_survives_control_disconnect_until_installer_exits() {
         use tokio::io::AsyncWriteExt as _;
 
-        let dir = std::env::temp_dir().join(format!("am-cli-lock-disconnect-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-disconnect-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join("codex-install.lock").display().to_string();
         let installer_pid_file = dir.join("installer.pid");
@@ -3617,7 +3617,7 @@ mod tests {
     async fn remote_install_lock_survives_helper_sigkill_until_installer_exits() {
         use tokio::io::AsyncWriteExt as _;
 
-        let dir = std::env::temp_dir().join(format!("am-cli-lock-helper-kill-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-helper-kill-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join("codex-install.lock").display().to_string();
         let installer_pid_file = dir.join("installer.pid");
@@ -3692,7 +3692,7 @@ mod tests {
     /// A stale PID can be reused by an unrelated process. PID liveness without the lock owner's identity is not enough.
     #[tokio::test]
     async fn a_reused_pid_does_not_keep_a_stale_host_install_lock_busy() {
-        let dir = std::env::temp_dir().join(format!("am-cli-lock-pid-reuse-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-pid-reuse-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join("codex-install.lock").display().to_string();
         let marker = dir.join("installer-ran");
@@ -3720,7 +3720,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reused_process_group_id_does_not_keep_a_stale_host_install_lock_busy() {
-        let dir = std::env::temp_dir().join(format!("am-cli-lock-pgid-reuse-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-pgid-reuse-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join("codex-install.lock").display().to_string();
         let marker = dir.join("installer-ran");
@@ -3784,7 +3784,7 @@ mod tests {
     /// 探測看得到；跑完放掉；主人死掉留下的過期鎖會被拿走；裡面指令的失敗照樣傳出來。
     #[tokio::test]
     async fn the_host_lock_script_excludes_a_second_installer_and_recovers_a_stale_lock() {
-        let dir = std::env::temp_dir().join(format!("am-cli-lock-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join("codex-install.lock").display().to_string();
         let marker = dir.join("second-ran");

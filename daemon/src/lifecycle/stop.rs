@@ -910,7 +910,7 @@ mod abort_tests {
     /// `abort_turns` must work when `esc` cannot be delivered (no herdr here): the turn still leaves `in_flight`.
     #[tokio::test]
     async fn unlocks_even_when_the_keys_cannot_be_sent() {
-        let dir = std::env::temp_dir().join(format!("am-abort-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-abort-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();

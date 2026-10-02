@@ -105,7 +105,7 @@ mod tests {
         }
     }
     pub(crate) fn tmp() -> Tmp {
-        let d = std::env::temp_dir().join(format!("am-herdr-unit-{}", crate::db::ulid()));
+        let d = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-unit-{}", crate::db::ulid())));
         std::fs::create_dir_all(&d).unwrap();
         Tmp(d)
     }

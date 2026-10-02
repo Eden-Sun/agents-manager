@@ -548,7 +548,7 @@ trust_level = "trusted"
 
     #[test]
     fn canonical_resolves_symlinks_and_survives_a_missing_directory() {
-        let dir = std::env::temp_dir().join(format!("am-trust-canon-{}", std::process::id()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-canon-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("real")).unwrap();
         let link = dir.join("link");
@@ -568,7 +568,7 @@ trust_level = "trusted"
     /// 讀→合併→寫沒有互斥的話，後寫的蓋掉先寫的（那顆 bot 就跳出信任提示），暫存檔名又只有 pid，並行時還會撞檔。
     #[test]
     fn concurrent_pretrusts_of_one_store_lose_nothing() {
-        let dir = std::env::temp_dir().join(format!("am-trust-race-{}", std::process::id()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-race-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = dir.join(".claude.json");
@@ -598,7 +598,7 @@ trust_level = "trusted"
 
     #[test]
     fn mark_trusted_is_atomic_and_idempotent_on_disk() {
-        let dir = std::env::temp_dir().join(format!("am-trust-store-{}", std::process::id()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-store-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = dir.join(".claude.json");
@@ -639,7 +639,7 @@ trust_level = "trusted"
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let dir = std::env::temp_dir().join(format!("am-trust-mode-{}", std::process::id()));
+            let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-mode-{}", std::process::id())));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let store = dir.join(".claude.json");

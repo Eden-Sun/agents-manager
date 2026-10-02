@@ -606,7 +606,7 @@ mod tests {
     #[test]
     fn the_ui_token_is_owner_only_when_created_and_repaired_when_found_too_open() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("am-ui-token-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-ui-token-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ui-token");
 
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn a_chmod_that_cannot_run_is_reported_not_swallowed() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("am-ui-token-chmod-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-ui-token-chmod-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ui-token");
         std::fs::write(&path, "tok").unwrap();

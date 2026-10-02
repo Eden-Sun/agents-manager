@@ -439,7 +439,7 @@ mod tests {
     /// 只在測試的暫存 DB 驗：開一次、換成舊版的守衛、關掉重開（＝升級後的 daemon 開同一個 DB）。
     #[tokio::test]
     async fn guards_left_by_an_older_build_are_replaced_when_the_db_is_opened() {
-        let dir = std::env::temp_dir().join(format!("agm-guard-refresh-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("agm-guard-refresh-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("db.sqlite3");
         let p = crate::db::open(&path).await.unwrap();

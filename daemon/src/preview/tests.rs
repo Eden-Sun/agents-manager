@@ -1197,7 +1197,7 @@ async fn a_spawned_preview_is_still_closed_by_stop() {
 
 #[tokio::test]
 async fn opening_a_pre_v2_database_adds_the_source_and_pid_columns() {
-    let dir = std::env::temp_dir().join(format!("am-test-{}", db::ulid()));
+    let dir = crate::testing::track(std::env::temp_dir().join(format!("am-test-{}", db::ulid())));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("db.sqlite3");
     {
@@ -1238,7 +1238,7 @@ fn same_repo_by_common_dir_or_by_origin() {
 
 #[test]
 fn repo_key_parsing_resolves_a_relative_common_dir_and_treats_nothing_as_unknown() {
-    let dir = std::env::temp_dir().join(format!("am-test-{}", db::ulid()));
+    let dir = crate::testing::track(std::env::temp_dir().join(format!("am-test-{}", db::ulid())));
     std::fs::create_dir_all(dir.join(".git")).unwrap();
     let d = dir.to_string_lossy().into_owned();
     let k = parse_repo_key(&d, ".git\n", "https://h/x/y.git\n").unwrap();

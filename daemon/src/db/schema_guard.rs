@@ -322,7 +322,7 @@ mod tests {
     }
 
     fn tmp_db() -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("am-schema-guard-{}", ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-schema-guard-{}", ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("db.sqlite3");
         (dir, path)

@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn service_tokens_are_stable_and_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("am-service-token-{}", crate::db::ulid()));
+        let root = crate::testing::track(std::env::temp_dir().join(format!("am-service-token-{}", crate::db::ulid())));
         let tokens = load_or_create(&root).unwrap();
         assert_eq!(tokens.len(), IDS.len());
         for id in IDS {

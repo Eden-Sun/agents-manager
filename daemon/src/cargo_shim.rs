@@ -738,7 +738,7 @@ mod tests {
 
     impl Sandbox {
         fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!("am-cargo-shim-{}", crate::db::ulid()));
+            let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cargo-shim-{}", crate::db::ulid())));
             std::fs::create_dir_all(&dir).unwrap();
             super::install_local(&dir).unwrap();
             let fake = dir.join("real");

@@ -808,7 +808,7 @@ mod tests {
     /// 略過 notification、error 轉成 `HistoryError::Rpc`、`CODEX_HOME` 帶進子行程。
     #[tokio::test]
     async fn the_app_server_conn_speaks_jsonrpc_over_stdio() {
-        let dir = std::env::temp_dir().join(format!("agm-codex-history-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("agm-codex-history-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("codex");
         // 讀一行回一行：initialize 前先噴一則 notification；items/list 回一筆並帶 CODEX_HOME 當 item id；turns/list 回 error。

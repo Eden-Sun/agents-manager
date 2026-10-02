@@ -169,7 +169,7 @@ mod tests {
     /// 只 canonicalize 一次 `root`／`cwd`，這裡先把測試自己的 `base` 也校正成同一種拼法，兩邊字串比對才會
     /// 一致（跟 `outbox.rs` 的 `scratch()` 同一個理由）。
     fn scratch(tag: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("am-local-image-{tag}-{}", crate::db::ulid()));
+        let base = crate::testing::track(std::env::temp_dir().join(format!("am-local-image-{tag}-{}", crate::db::ulid())));
         std::fs::create_dir_all(&base).unwrap();
         std::fs::canonicalize(base).unwrap()
     }

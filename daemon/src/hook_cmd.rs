@@ -274,7 +274,7 @@ mod tests {
     /// 否則隔離的 daemon 不會重播、正式 daemon 反而吃到它（2026-09-14 事故）。
     #[test]
     fn the_spool_follows_the_injected_data_dir() {
-        let dir = std::env::temp_dir().join(format!("am-hook-spool-{}", std::process::id()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hook-spool-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(&dir);
         spool_to(&dir, "b1", &serde_json::json!({"event": "Stop"}));
 

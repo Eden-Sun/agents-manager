@@ -734,7 +734,7 @@ mod tests {
     async fn stand(mode: Mode, enabled: bool, listed: bool) -> Rig {
         let env = tt::env().await;
         let (url, seen) = fake_jev(mode).await;
-        let dir = std::env::temp_dir().join(format!("am-judge-collision-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-judge-collision-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let key = dir.join("key");
         std::fs::write(&key, "k-test\n").unwrap();
@@ -1293,7 +1293,7 @@ mod tests {
         assert_eq!(issue_numbers("fix/kd61te-g558"), vec!["558".to_string()]);
         assert!(issue_numbers("#557abc").is_empty(), "號碼後面緊接字母不是票號");
         assert!(issue_numbers("#0123").is_empty(), "前導零不是票號");
-        let dir = std::env::temp_dir().join(format!("am-branch-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-branch-{}", db::ulid())));
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/fix/demo-g7\n").unwrap();
         assert_eq!(branch_of(dir.to_str().unwrap()).as_deref(), Some("fix/demo-g7"));

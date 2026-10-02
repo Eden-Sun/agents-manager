@@ -735,7 +735,7 @@ mod tests {
     use super::*;
 
     async fn projection_error(project_id: &str, bot_id: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("am-projection-id-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-id-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let text = format!(
@@ -756,7 +756,7 @@ mod tests {
     /// daemon 下次啟動才爆，而且爆在一個使用者沒同意過的狀態上。
     #[tokio::test]
     async fn a_mutation_the_projection_would_reject_leaves_the_file_and_the_db_untouched() {
-        let dir = std::env::temp_dir().join(format!("am-cfg-validate-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cfg-validate-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(
@@ -866,7 +866,7 @@ mod tests {
     /// 同一條規則在**開機**那一次投影也要生效：手改成 `name = "local"` 的設定檔不該安靜地跑起來。
     #[tokio::test]
     async fn a_host_named_local_refuses_to_project_instead_of_hijacking_the_local_host() {
-        let dir = std::env::temp_dir().join(format!("am-hosts-local-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hosts-local-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'local'\nssh = 'me@10.0.0.2'\n";
@@ -885,7 +885,7 @@ mod tests {
     /// 手改 `config.toml` 寫進 `ssh = '-oProxyCommand=…'`：開機投影拒絕、檔案不動（跟 `name = "local"` 同一條語意）。
     #[tokio::test]
     async fn a_hand_edited_option_looking_ssh_target_refuses_to_project() {
-        let dir = std::env::temp_dir().join(format!("am-hosts-opt-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hosts-opt-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'm4p'\nssh = '-oProxyCommand=true'\n";
@@ -905,7 +905,7 @@ mod tests {
     /// `ssh " me@host "` 會原樣帶到 ssh 指令上。跟補 id／canonical path 同一條路，正規化後寫回。
     #[tokio::test]
     async fn host_ssh_and_session_are_trimmed_back_into_the_file() {
-        let dir = std::env::temp_dir().join(format!("am-hosts-trim-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hosts-trim-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(
@@ -945,7 +945,7 @@ mod tests {
 
     #[tokio::test]
     async fn projection_canonicalizes_retired_config_models_but_preserves_explicit_versions() {
-        let dir = std::env::temp_dir().join(format!("am-projection-models-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-models-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let text = "[server]\nlisten='127.0.0.1:7788'\n[[projects]]\nid='p1'\npath='/tmp'\nlabel='p'\nhost='local'\n[[projects.bots]]\nid='c'\nname='c'\nkind='codex'\nmodel='gpt-5.6-luna'\n[[projects.bots]]\nid='a'\nname='a'\nkind='claude'\nmodel='claude-opus-4-1'\n[[projects.bots]]\nid='alias'\nname='alias'\nkind='claude'\nmodel='opus'\n";
@@ -961,7 +961,7 @@ mod tests {
     /// 拿到本機那份 claude 判成 kind 不符——之後每支寫設定的 API 都 502，重啟時 daemon 起不來。
     #[tokio::test]
     async fn an_identity_name_is_resolved_on_the_bots_own_host() {
-        let dir = std::env::temp_dir().join(format!("am-projection-identity-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-identity-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let text = |bot_kind: &str| {
@@ -992,7 +992,7 @@ mod tests {
     #[tokio::test]
     async fn bulk_override_never_bypasses_the_bot_count_limit() {
         let _env = BULK_ENV.lock().await;
-        let dir = std::env::temp_dir().join(format!("am-projection-bulk-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-bulk-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1025,7 +1025,7 @@ mod tests {
     #[tokio::test]
     async fn the_bulk_allowance_does_not_outlive_the_startup_projection() {
         let _env = BULK_ENV.lock().await;
-        let dir = std::env::temp_dir().join(format!("am-projection-once-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-once-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1063,7 +1063,7 @@ mod tests {
     #[tokio::test]
     async fn a_config_swapped_under_a_running_daemon_is_refused() {
         let _env = BULK_ENV.lock().await;
-        let dir = std::env::temp_dir().join(format!("am-projection-reload-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-reload-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1094,7 +1094,7 @@ mod tests {
     /// `ConfigStore::update_guarded_at` 的 `guard` 真的接在寫檔前，不是形式上傳進去卻沒生效。
     #[tokio::test]
     async fn update_and_project_refuses_a_bulk_removal_before_writing() {
-        let dir = std::env::temp_dir().join(format!("am-uap-refuse-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-uap-refuse-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1119,7 +1119,7 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_two_missing_bots_even_when_the_ratio_is_below_thirty_percent() {
-        let dir = std::env::temp_dir().join(format!("am-projection-two-missing-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-two-missing-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1136,7 +1136,7 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_to_soft_delete_a_supervisor_child_even_with_startup_bulk_override() {
-        let dir = std::env::temp_dir().join(format!("am-projection-supervisor-child-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-supervisor-child-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1161,7 +1161,7 @@ mod tests {
     /// 整條路堵死，只是把 guard 提前到落盤前）。
     #[tokio::test]
     async fn update_and_project_writes_and_projects_a_legitimate_change() {
-        let dir = std::env::temp_dir().join(format!("am-uap-ok-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-uap-ok-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1185,7 +1185,7 @@ mod tests {
     /// #654：config 寫進一個跟 child 同名的 bot 時，DB 唯一約束會失敗。檔要退回，下一筆無關的修改才寫得進去。
     #[tokio::test]
     async fn a_name_collision_with_a_child_rolls_the_config_back() {
-        let dir = std::env::temp_dir().join(format!("am-uap-child-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-uap-child-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1239,7 +1239,7 @@ mod tests {
     }
 
     async fn seeded(name: &str, bots: &[&str]) -> (std::path::PathBuf, ConfigStore, SqlitePool) {
-        let dir = std::env::temp_dir().join(format!("am-projection-{name}-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-{name}-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
@@ -1333,7 +1333,7 @@ mod tests {
     /// 正常路徑不變：刪一顆還是刪一顆。
     #[tokio::test]
     async fn a_single_removal_still_projects() {
-        let dir = std::env::temp_dir().join(format!("am-projection-one-{}", db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-one-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();

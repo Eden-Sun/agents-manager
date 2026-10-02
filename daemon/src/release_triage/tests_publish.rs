@@ -144,7 +144,7 @@ struct FakeGh {
 
 impl FakeGh {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("am-fakegh-{tag}-{}-{}", std::process::id(), ledger::now_ts().replace(':', "")));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-fakegh-{tag}-{}-{}", std::process::id(), ledger::now_ts().replace(':', ""))));
         std::fs::create_dir_all(&dir).unwrap();
         let script = r#"#!/bin/sh
 D=$(dirname "$0")

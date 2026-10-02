@@ -649,7 +649,7 @@ mod build_cfg_tests {
 
     #[tokio::test]
     async fn loading_out_of_range_build_lease_ttl_is_rejected_with_the_valid_range() {
-        let dir = std::env::temp_dir().join(format!("am-build-lease-ttl-load-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-build-lease-ttl-load-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let mut failures = Vec::new();
@@ -674,7 +674,7 @@ mod build_cfg_tests {
     /// 稽核：`[build]` 的三個門檻只有手改 `config.toml` 一條路，而 `get()` 是記憶體快照——改了不生效。
     #[tokio::test]
     async fn a_hand_edited_build_section_is_picked_up_without_a_restart() {
-        let dir = std::env::temp_dir().join(format!("am-build-fresh-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-build-fresh-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, "[server]\nherdr_session = 'one'\n\n[build]\nmax_concurrent = 2\n").unwrap();
@@ -1274,7 +1274,7 @@ auto_start = true   # typo for autostart
 
     #[tokio::test]
     async fn noop_update_leaves_the_file_byte_identical() {
-        let dir = std::env::temp_dir().join(format!("am-config-issue38-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-config-issue38-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, SAMPLE).unwrap();
@@ -1306,7 +1306,7 @@ mod issue28_tests {
     use std::time::Duration;
 
     fn temp_config() -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("am-config-issue28-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-config-issue28-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         (dir.clone(), dir.join("config.toml"))
     }
@@ -1429,7 +1429,7 @@ mod issue507_tests {
     /// 但寫回是 `rename` 蓋過連結本身：第一次寫入連結就變成一般檔，dotfiles 那份停在舊內容。
     #[tokio::test]
     async fn writing_through_a_symlinked_config_updates_the_target_and_keeps_the_link() {
-        let root = std::env::temp_dir().join(format!("am-config-symlink-{}", crate::db::ulid()));
+        let root = crate::testing::track(std::env::temp_dir().join(format!("am-config-symlink-{}", crate::db::ulid())));
         let home = root.join("home");
         let dotfiles = root.join("dotfiles");
         std::fs::create_dir_all(&home).unwrap();
@@ -1470,7 +1470,7 @@ mod issue507_tests {
     #[tokio::test]
     async fn a_relative_symlink_resolves_beside_the_link_and_keeps_the_targets_mode() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("am-config-relsym-{}", crate::db::ulid()));
+        let root = crate::testing::track(std::env::temp_dir().join(format!("am-config-relsym-{}", crate::db::ulid())));
         let home = root.join("home");
         let dotfiles = root.join("dotfiles");
         std::fs::create_dir_all(&home).unwrap();
@@ -1498,7 +1498,7 @@ mod issue507_tests {
     /// 設定檔還不存在時（`read_file` 會寫一份預設）照原路徑建，不因為 canonicalize 失敗就爆掉。
     #[tokio::test]
     async fn a_missing_config_is_still_created_in_place() {
-        let dir = std::env::temp_dir().join(format!("am-config-missing-{}", crate::db::ulid()));
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-config-missing-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let store = ConfigStore::load(path.clone()).await.unwrap();

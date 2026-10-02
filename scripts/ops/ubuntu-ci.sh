@@ -97,6 +97,11 @@ rm -f "${CI_ROOT}/disk-low-sha"
 log="${CI_ROOT}/logs/${sha}.log"
 started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '{"sha":"%s","state":"running","started":"%s","log":"%s"}\n' "${sha}" "${started}" "$(json_str "${log}")" > "${CI_ROOT}/status.json"
+# 保險（#763）：舊版測試與被 kill 的測試行程留下的 am-*／agm-*／am-test-* 暫存目錄（名字結尾是 26 碼 ULID）會慢慢塞滿根磁碟
+# （2026-10-01 實測 44G、ubuntu-ci 因 ENOSPC 紅 19 條）。只在持有鎖時清（不會誤刪跑到一半的那一輪），超過 6 小時沒動的才刪；失敗吞掉。
+find "${TMPDIR:-/tmp}" -maxdepth 1 -mmin +360 -regextype posix-extended \
+    -regex '.*/(am|agm)-[A-Za-z0-9-]*[0-9A-HJKMNP-TV-Z]{26}(\.[a-z]+)?' -exec rm -rf {} + 2>/dev/null || true
+
 status pending "ubuntu 完整 CI 執行中"
 
 # pending 送出之後任何一步（checkout、clean、彙總）因 set -e 中斷，都不能讓 commit status 永遠停在 pending、
