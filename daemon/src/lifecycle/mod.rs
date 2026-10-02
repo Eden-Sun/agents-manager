@@ -100,6 +100,8 @@ mod purge_dirs_tests;
 /// #188：子 agent 不能走 stop + start；夾具（一顆有真 mock pane 的子 agent）給批次重啟的測試共用。
 #[cfg(test)]
 pub(crate) mod restart_kind_tests;
+#[cfg(test)]
+mod herdr_review_tests;
 
 /// Runs the daemon has typed into during **this** boot. `runs.pane_typed` is the durable record;
 /// this is the conservative in-process copy, so a row that later becomes unreadable cannot send a
