@@ -3145,7 +3145,7 @@ export class MockTransport implements Transport {
     if (queueForIdle) {
       const occupied = this.turns.find((t) => t.bot_id === botId && t.status === 'queued' && t.awaits_idle === 1)
       if (occupied) {
-        throw new ApiError(409, { error: 'conflict', reason: 'queue_slot_taken', turn_id: occupied.id }, 'conflict')
+        throw new ApiError(409, { error: 'conflict', reason: 'queue_slot_taken', turn_id: occupied.id, holder: { kind: 'user' } }, 'conflict')
       }
       const text = this.composerDrafts.gate(botId, b)
       const attachIds = Array.isArray(b.attachments) ? b.attachments.filter((x): x is string => typeof x === 'string') : []
