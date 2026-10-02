@@ -98,6 +98,7 @@ test('確認：抓失敗會退避重試；全失敗不記成「不是」，之�
 // ── 整合：真的 import store、跑 bootstrap，每次開機一個行程（見 groupUnreadBoot.harness.ts） ──
 
 const HARNESS = join(import.meta.dirname, 'groupUnreadBoot.harness.ts')
+// 每個整合測試要開一個 bun 行程、跑完 bootstrap：高負載下光啟動就可能超過 bun 預設的 5 秒。真正擋「卡死」的是下面 spawnSync 的 20 秒 timeout（會殺掉行程並讓斷言失敗），所以測試本身給 30 秒。
 
 function boot(storagePath: string, scenario: unknown): { groupUnread: Record<string, number>; botUnread: Record<string, number>; bootError: string | null; fetches: string[] } {
   const r = spawnSync(process.execPath, [HARNESS], {
@@ -136,7 +137,7 @@ const msg = (id: string, turnId: string, role: string, groupId: string | null = 
 })
 const bot = (id: string, inFlight: unknown = null) => ({ id, name: id, kind: 'claude', in_flight_turn: inFlight })
 
-test('整合：群組 prompt 在重整前送出、回覆在重整後到達，停在別專案的單 bot 頁也算；一般回合不算', () => {
+test('整合：群組 prompt 在重整前送出、回覆在重整後到達，停在別專案的單 bot 頁也算；一般回合不算', { timeout: 30_000 }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
   const storage = join(dir, 'storage.json')
   // 重整前：人停在 P2 的 O1 單 bot 頁，P1 從沒打開過；前一個分頁已經做完群組遷移。
@@ -188,7 +189,7 @@ test('整合：群組 prompt 在重整前送出、回覆在重整後到達，停
   assert.deepEqual(again.groupUnread, { P1: 2, P2: 1 })
 })
 
-test('整合：群組未讀以 daemon 的數字為準（#756）：本機舊的 group: 數字不讀，別台讀過的清掉，沒開著時回來的補上', () => {
+test('整合：群組未讀以 daemon 的數字為準（#756）：本機舊的 group: 數字不讀，別台讀過的清掉，沒開著時回來的補上', { timeout: 30_000 }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
   const storage = join(dir, 'storage.json')
   // 舊版把群組數字存在這裡（還有 99+ 的）：現在完全不認。
@@ -212,7 +213,7 @@ test('整合：群組未讀以 daemon 的數字為準（#756）：本機舊的 g
 
 /** issue #122：排隊中的 turn（起 bot 中、啟動失敗原因更新）推來的 `turn_updated` 不是「回合完成」——
  *  算進去的話未讀先多一，之後真正完成那一次又被同一個 turn id 去重吃掉。 */
-test('整合：queued 的 turn_updated 不算完成，之後真正完成才記一次未讀', () => {
+test('整合：queued 的 turn_updated 不算完成，之後真正完成才記一次未讀', { timeout: 30_000 }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
   const storage = join(dir, 'storage.json')
   writeFileSync(storage, JSON.stringify({ 'am.selection': JSON.stringify({ botId: 'O1', projectId: null }) }))
@@ -228,7 +229,7 @@ test('整合：queued 的 turn_updated 不算完成，之後真正完成才記�
 })
 
 /** issue #509 的另一半：不只是「不要標成已讀」，shell 蓋著群組時新回合要真的 `+1`。 */
-test('整合：人在前景、選著專案，但畫面是 shell 面板——群組回覆照樣記未讀', () => {
+test('整合：人在前景、選著專案，但畫面是 shell 面板——群組回覆照樣記未讀', { timeout: 30_000 }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'am-group-unread-'))
   const storage = join(dir, 'storage.json')
   const seed = (shell: boolean) =>
