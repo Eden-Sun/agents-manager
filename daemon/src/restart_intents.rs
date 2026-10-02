@@ -686,7 +686,10 @@ mod tests {
         tokio::time::sleep(crate::reconcile::recovery_retry_delay(intents::MAX_ATTEMPTS as usize) * 7).await;
         tt::make_table_readable(&app2, "intents").await;
 
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        // The deadline is only the failure bound (success returns as soon as the intent is done). It
+        // must not be tight: the recovered restart is a full stop + start, which under a loaded
+        // whole-tree run took longer than the old 3 s while the intent was still `running` (not stuck).
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
             loop {
                 if intent_status(&app2, &bot.id).await == vec!["done"] {
                     break;
