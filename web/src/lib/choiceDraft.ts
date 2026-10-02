@@ -59,7 +59,7 @@ function pageOf(menu: TuiChoiceMenu, tab: number, label: string): DraftPage {
     multi: menu.multi,
     hasSubmitRow: Boolean(menu.submit),
     review: menu.review,
-    isSubmit: menu.review.length > 0 || menu.choices.some((c) => /^submit answers$/i.test(c.title)),
+    isSubmit: isSubmitMenu(menu),
   }
 }
 
@@ -182,9 +182,17 @@ export function togglesFor(now: TuiChoiceMenu['choices'], want: boolean[]): numb
 /** 從畫面題目反查分頁位置。別用 `tabAt`：它照 ☒ 猜，按過 Submit 會跳但終端還在原地。 */
 export function locate(draft: Draft, now: TuiChoiceMenu): number | null {
   const i = draft.pages.findIndex(
-    (p) => p.question === now.question && p.choices.length === now.choices.length,
+    (p) => !p.isSubmit && p.question === now.question && p.choices.length === now.choices.length,
   )
-  return i >= 0 ? draft.pages[i].tab : null
+  if (i >= 0) return draft.pages[i].tab
+  // 送出頁在草稿裡是合成的（沒有題目、沒有選項），照題目比永遠對不上：看畫面長得像送出頁就算（2026-10-02 事發：
+  // 最後一題 Enter 之後終端已經跳到 Review，`at` 卻還停在最後一題，再按 → 就「走不到送出頁」）。
+  return isSubmitMenu(now) ? (draft.pages.find((p) => p.isSubmit)?.tab ?? null) : null
+}
+
+/** 畫面是送出頁（Review your answers／Submit answers／Cancel）。 */
+export function isSubmitMenu(now: TuiChoiceMenu): boolean {
+  return now.review.length > 0 || now.choices.some((c) => /^submit answers$/i.test(c.title))
 }
 
 export function samePage(page: DraftPage, now: TuiChoiceMenu): boolean {
@@ -219,6 +227,37 @@ async function pressUntil(io: Io, key: string, done: (now: TuiChoiceMenu | null)
   return false
 }
 
+/**
+ * Enter 之後等畫面跳頁：真機單選頁 Enter 選定會自己跳下一個分頁（最後一題跳到 Review），重畫比 daemon 回得慢，
+ * 固定等一拍就讀會讀到舊頁，後面的位置全是錯的。題目或 review 變了就算跳了；一直沒變（不跳頁的選單）回最後讀到的那份。
+ */
+async function settleAfterEnter(io: Io, before: TuiChoiceMenu): Promise<TuiChoiceMenu | null> {
+  let last: TuiChoiceMenu | null = null
+  for (let i = 0; i < SETTLE_TRIES; i++) {
+    await io.wait(SETTLE_STEP * (i === 0 ? 3 : 1))
+    const now = await io.read()
+    if (!now) continue
+    last = now
+    if (now.question !== before.question || now.review.length !== before.review.length) return now
+  }
+  return last
+}
+
+const squash = (s: string) => s.replace(/\s+/g, '')
+
+/** 從 Review 頁開始時，單選題終端上已經是想要的答案就不必再走一遍（使用者在 Review 頁又按了一次送出）。 */
+function alreadyAnswered(page: DraftPage, want: boolean[] | undefined, custom: string, review: TuiChoiceMenu['review']): boolean {
+  if (page.multi || page.isSubmit) return false
+  const idx = radioPick(want)
+  const c = idx >= 0 ? page.choices[idx] : undefined
+  if (!c || !page.question) return false
+  const row = review.find((r) => squash(r.question) === squash(page.question ?? ''))
+  if (!row) return false
+  const got = squash(row.answer)
+  const text = squash(isTypeSomething(c) ? custom : c.title)
+  return Boolean(text) && Boolean(got) && (isTypeSomething(c) ? got.includes(text) : got === text)
+}
+
 export interface CommitResult {
   ok: boolean
   error?: string
@@ -237,9 +276,9 @@ export async function commit(
   onProgress?: (done: number, total: number) => void,
   custom: string[] = [],
 ): Promise<CommitResult> {
-  const todo = draft.pages.map((p, i) => ({ p, i })).filter(({ p, i }) => pageNeedsCommit(p, want[i]))
+  const wanted = draft.pages.map((p, i) => ({ p, i })).filter(({ p, i }) => pageNeedsCommit(p, want[i]))
 
-  for (const { p, i } of todo) {
+  for (const { p, i } of wanted) {
     // `Type something` 要打字才送得出去：單選是那一項被選；複選是想勾、而終端上還沒勾（已勾的是終端打好的，留著）。
     const typing = p.multi ? typeToPaste(p, want[i]) : radioPick(want[i])
     if (typing >= 0 && isTypeSomething(p.choices[typing] ?? { title: '' }) && !(custom[p.tab] ?? '').trim()) {
@@ -257,6 +296,13 @@ export async function commit(
     return { ok: false, error: '畫面已經變了（分頁數不一樣），整批都沒送出，請重新讀取。' }
   }
   let at = locate(draft, cur) ?? draft.startTab
+
+  // 終端已經停在 Review：單選題終端上本來就是想要的答案的，不必再退回去重答。
+  const onReview = isSubmitMenu(cur)
+  const reviewNow = cur.review
+  const todo = onReview
+    ? wanted.filter(({ p, i }) => !alreadyAnswered(p, want[i], (custom[p.tab] ?? '').trim(), reviewNow))
+    : wanted
 
   let done = 0
   const total = todo.length + 1
@@ -296,8 +342,7 @@ export async function commit(
         }
       }
       await io.send(['enter'])
-      await io.wait(SETTLE_STEP * 3)
-      const now = await io.read()
+      const now = await settleAfterEnter(io, cur)
       if (!now) return { ok: false, error: `第 ${p.tab + 1} 題送出後讀不到畫面，請重新讀取。`, at: i }
       cur = now
       at = locate(draft, now) ?? at
@@ -358,8 +403,7 @@ export async function commit(
         return { ok: false, error: `第 ${p.tab + 1} 題的游標沒有停在 Submit 上，沒有按下去。`, at: i }
       }
       await io.send(['enter'])
-      await io.wait(SETTLE_STEP * 3)
-      const now = await io.read()
+      const now = await settleAfterEnter(io, cur)
       if (!now) return { ok: false, error: `第 ${p.tab + 1} 題送出後讀不到畫面，請重新讀取。`, at: i }
       cur = now
       at = locate(draft, now) ?? at
@@ -383,7 +427,16 @@ export async function commit(
   if (!landed || landed.cursor !== idx) return { ok: false, error: '游標沒有停在「Submit answers」上，沒有按下去。' }
   await io.send(['enter'])
   onProgress?.(++done, total)
-  return { ok: true }
+  // 按完要看到送出頁真的離開才算交卷；鍵沒送到（網路、daemon）或沒被吃掉時，別讓畫面靜靜停在 Review。
+  for (let i = 0; i < SETTLE_TRIES; i++) {
+    await io.wait(SETTLE_STEP * 2)
+    const now = await io.read()
+    if (!now || !isSubmitMenu(now)) return { ok: true }
+  }
+  return {
+    ok: false,
+    error: '已經送出「Submit answers」，但終端還停在送出頁（Enter 可能沒送到）。答案都填好了，請再按一次送出，或直接在終端按 Enter。',
+  }
 }
 
 export function parse(text: string | null | undefined): TuiChoiceMenu | null {
