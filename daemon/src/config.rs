@@ -1168,6 +1168,13 @@ fn parse_config(text: &str) -> Result<(ConfigFile, Vec<String>)> {
     Ok((cfg, ignored))
 }
 
+/// daemon 自己以前寫進 config.toml、後來移除的鍵（舊檔裡還留著）：照樣忽略，但不是「打錯字或新版欄位」，不必每次開機都警告。
+/// 目前只有 bot 層級的 `instruction_files`（2026-10-02 移除，見 `api.rs` 的 `a_leftover_instruction_files_key_in_config_toml_is_ignored`）。
+fn is_retired_key(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('.').collect();
+    matches!(parts.as_slice(), ["projects", i, "bots", j, "instruction_files"] if i.parse::<usize>().is_ok() && j.parse::<usize>().is_ok())
+}
+
 fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
     if !path.exists() {
         let cfg = ConfigFile::default();
@@ -1177,7 +1184,7 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
     }
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let (cfg, unknown) = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
-    for key in unknown {
+    for key in unknown.into_iter().filter(|k| !is_retired_key(k)) {
         tracing::warn!("{}: unknown key `{key}` is ignored (typo? or a newer daemon's field)", path.display());
     }
     let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
@@ -1296,7 +1303,7 @@ mod agent_name_tests {
 
 #[cfg(test)]
 mod issue38_tests {
-    use super::{parse_config, ConfigFile, ConfigStore};
+    use super::{is_retired_key, parse_config, ConfigFile, ConfigStore};
 
     const SAMPLE: &str = r#"# top comment
 [[projects]]
@@ -1326,6 +1333,18 @@ auto_start = true   # typo for autostart
 
         assert!(unknown_keys("[[identities]]\nname = \"i\"\nkind = \"claude\"\n[identities.env]\nFOO = \"1\"\n").is_empty());
         assert!(unknown_keys("").is_empty());
+    }
+
+    /// 自己以前寫過、後來移除的鍵不再每次開機警告成「打錯字」；真的打錯字的鍵照舊警告。
+    #[test]
+    fn a_retired_key_is_not_warned_about_but_a_typo_still_is() {
+        let leftover = "[[projects]]\npath = \"/tmp\"\nlabel = \"p\"\nid = \"01P\"\n[[projects.bots]]\nid = \"01B\"\nname = \"a\"\nkind = \"claude\"\ninstruction_files = \"managed-only\"\nauto_start = true\n";
+        let keys = unknown_keys(leftover);
+        assert!(keys.contains(&"projects.0.bots.0.instruction_files".to_string()), "serde 還是回報它被忽略");
+        let warned: Vec<_> = keys.iter().filter(|k| !is_retired_key(k)).collect();
+        assert_eq!(warned, ["projects.0.bots.0.auto_start"]);
+        assert!(!is_retired_key("projects.0.instruction_files"));
+        assert!(!is_retired_key("hosts.0.bots.0.instruction_files"));
     }
 
     #[test]

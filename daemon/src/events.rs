@@ -370,7 +370,9 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
                     while let Some(ev) = rx.recv().await {
                         handle_status(&app2, &hst, &sess, &ev).await;
                     }
-                    tracing::warn!(host = %hst, session = %sess, pane_id = %pid, "pane status subscription dropped");
+                    // 每次 daemon／herdr 重啟或遠端斷線，每個 pane 各掉一次（一天 237 行 WARN）；底下會自己重訂並補讀狀態，真有問題
+        // 由「host connect failed」「herdr event stream closed」那些行說，這行只是逐 pane 的旁證。
+        tracing::info!(host = %hst, session = %sess, pane_id = %pid, "pane status subscription dropped");
                 }
                 Err(e) => {
                     // 這段時間的狀態邊也漏了：之後訂閱成功要補讀，不只是「斷線後重接」才補。
