@@ -102,13 +102,14 @@ pub async fn unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
     Ok(rows.into_iter().collect())
 }
 
-/// 從 `conversations` 出發、用 `messages_conv_time` 只讀標記之後的範圍（`CROSS JOIN` 鎖住順序、`INDEXED BY` 鎖住索引）：
+/// 從 `conversations` 出發、用 `messages_assistant_unread`（只含 assistant 列的 covering 索引）只讀標記之後的範圍（`CROSS JOIN` 鎖住順序、`INDEXED BY` 鎖住索引；
+/// 查詢裡的 `m.role = 'assistant'` 要原樣留著，partial index 才用得上）：
 /// `/api/state` 每次都會問，以前是從 `messages` 全表掃起（1.7 萬則約 40～70 ms，隨訊息數線性長），已讀過的 bot 其實幾乎沒有
 /// 標記之後的訊息。`created_at >= 標記時間` 是下面那個全序條件的必要條件，只負責讓索引能 seek，結果不變。
 const UNREAD_SQL: &str = "SELECT c.bot_id, COUNT(DISTINCT COALESCE(m.turn_id, 'msg:' || m.id))
            FROM conversations c
            LEFT JOIN bot_reads r ON r.bot_id = c.bot_id
-           CROSS JOIN messages m INDEXED BY messages_conv_time
+           CROSS JOIN messages m INDEXED BY messages_assistant_unread
           WHERE m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '') AND m.role = 'assistant'
             AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND m.id > r.message_id))
           GROUP BY c.bot_id";
@@ -268,11 +269,16 @@ mod tests {
     #[tokio::test]
     async fn the_unread_queries_seek_messages_by_conversation_and_time_instead_of_scanning_them() {
         let (pool, _dir) = pool().await;
-        for (name, sql) in [("unread", UNREAD_SQL), ("group_unread", GROUP_UNREAD_SQL)] {
+        // 每顆 bot 的未讀只看 assistant 訊息，而且只要 turn_id／id／created_at：用只含 assistant 列的 covering 索引，
+        // 不必為了讀 `role` 去撈每一列（量測：1.7 萬則訊息的正式 DB 複本上 11 ms → 1 ms，結果逐位元相同）。
+        for (name, sql, index) in [
+            ("unread", UNREAD_SQL, "COVERING INDEX messages_assistant_unread"),
+            ("group_unread", GROUP_UNREAD_SQL, "INDEX messages_conv_time"),
+        ] {
             let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!("EXPLAIN QUERY PLAN {sql}")).fetch_all(&pool).await.unwrap();
             let details: Vec<&str> = plan.iter().map(|r| r.3.as_str()).collect();
             assert!(
-                details.iter().any(|d| d.starts_with("SEARCH m USING INDEX messages_conv_time (conversation_id=? AND created_at>")),
+                details.iter().any(|d| d.starts_with(&format!("SEARCH m USING {index} (conversation_id=? AND created_at>"))),
                 "{name} must range-seek messages: {details:#?}"
             );
             assert!(!details.iter().any(|d| d.starts_with("SCAN m")), "{name} must not scan messages: {details:#?}");
