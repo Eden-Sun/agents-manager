@@ -7,7 +7,15 @@ const SENT_VIA: Record<NonNullable<Message['sent_via']>, { text: string; title: 
 }
 
 /** 使用者訊息 meta 上的小標；一般送出不畫。 */
-export function SentViaTag({ msg }: { msg: Pick<Message, 'role' | 'sent_via'> }) {
+export function SentViaTag({ msg }: { msg: Pick<Message, 'role' | 'sent_via'> & { source?: Message['source'] } }) {
+  // 分享頁的 end user 送來的（SPEC「分享 bot」）：跟你自己打的分開，一眼看出是外部的人。
+  if (msg.role === 'user' && msg.source === 'share') {
+    return (
+      <span className="src-tag share-user" title="從分享連結送來的：不是你，是拿到連結的外部使用者">
+        🔗 分享使用者
+      </span>
+    )
+  }
   const label = msg.role === 'user' && msg.sent_via ? SENT_VIA[msg.sent_via] : null
   if (!label) return null
   return (

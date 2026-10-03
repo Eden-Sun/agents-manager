@@ -10,6 +10,7 @@ import type { BotKind } from './types'
 import { abortError } from './transport'
 import { TWO_ASK_QUESTIONS, twoAskKeys, twoAskScreen, twoAskStart, type TwoAskState } from './mockTwoAsk'
 import { MockReleaseTriage } from './mockReleaseTriage'
+import { MockShares } from './mockShare'
 import { MockHerdrUpdate, type MockHerdrOpts } from './mockHerdrUpdate'
 import { later, sleep } from './mockClock'
 import { MockServerDrafts } from './mockServerDrafts'
@@ -165,7 +166,7 @@ interface MockMessage {
   bot_id: string
   role: 'user' | 'assistant' | 'system'
   content: string
-  source: 'web' | 'hook' | 'transcript' | 'terminal_fallback' | 'system'
+  source: 'web' | 'hook' | 'transcript' | 'terminal_fallback' | 'system' | 'share'
   incomplete: number
   /** SPEC §13：null = 一般訊息 */
   group_id: string | null
@@ -199,6 +200,8 @@ interface MockBot {
   /** child 才有：母 bot 的 id（側欄縮排在它底下）。 */
   parent_bot_id?: string
   cwd: string | null
+  /** 分享用的受限 bot（SPEC「分享 bot」）；省略＝一般 bot。 */
+  share_profile?: 'restricted'
   /** 使用者釘選（`PATCH {primary}`）；省略 = 沒釘。 */
   is_primary?: number
   primary_position?: number
@@ -587,6 +590,10 @@ export class MockTransport implements Transport {
 
   /** 更新框的 changelog／分診／AGM 解析（`mockReleaseTriage.ts`）。 */
   readonly releaseTriage = new MockReleaseTriage()
+  readonly shares = new MockShares((id) => {
+    const b = this.bots.find((x) => x.id === id)
+    return b ? b.share_profile === 'restricted' : null
+  })
   readonly serverDrafts = new MockServerDrafts()
   readonly remoteCargo = new MockRemoteCargo()
   /** header 的 herdr 一鍵更新（`mockHerdrUpdate.ts`，`__amMock.herdrUpdate()`）。 */
@@ -765,7 +772,27 @@ export class MockTransport implements Transport {
     // 先鋪歷史再鋪示範訊息：示範的那兩則要留在最新一頁，不然翻頁才看得到就失去意義。
     this.seedLongHistory(p.id)
     this.seedGroupRelay(p.id)
+    this.seedSharedBot()
     installDevHelpers(this)
+  }
+
+  /** 分享用的受限 bot（SPEC「分享 bot」）：已開分享，對話裡有分享使用者與你自己發的訊息，截圖與分享頁 mock 用。 */
+  private seedSharedBot() {
+    const p: MockProject = {
+      id: ulid('proj'), path: '/Users/me/.local/share/agents-manager/shared-bots/support', label: '客服分享', workspace_id: null, host: 'local', github: null, created_at: now(),
+    }
+    this.projects.push(p)
+    const bot: MockBot = {
+      id: ulid('bot'), project_id: p.id, name: 'support-bot', kind: 'claude', model: null, effort: null, fast: 0, persona: '你是產品客服，回答要簡短。', args_json: '[]',
+      autostart: 0, inject_hooks: 1, auto_approve: 0, identity: null, env_json: '{}', managed_by: 'user', cwd: null, share_profile: 'restricted', created_at: now(),
+    }
+    this.bots.push(bot)
+    this.shares.seed(bot.id)
+    const base = { conversation_id: this.conv(bot.id), turn_id: null, bot_id: bot.id, incomplete: 0 }
+    this.addMessage({ ...base, role: 'user', source: 'web', content: '這顆是給客戶用的，先自我介紹一下。' })
+    this.addMessage({ ...base, role: 'assistant', source: 'hook', content: '你好，我是產品客服助理，可以回答安裝與帳號相關的問題，也可以看你上傳的設定檔。' })
+    this.addMessage({ ...base, role: 'user', source: 'share', content: '我的 config.toml 裝完之後一直說 port 被佔用，幫我看一下', attachments_json: JSON.stringify([{ id: 'att_share_demo', name: 'config.toml', mime: 'text/plain', size: 412, path: 'inbox/config.toml' }]) })
+    this.addMessage({ ...base, role: 'assistant', source: 'hook', content: '看了你的設定：`listen = "127.0.0.1:7788"` 跟另一個服務撞了。改成 `7789` 之後重開就好，我把改好的檔放在「bot 給你的檔案」裡。' })
   }
 
   /** 使用者發 vs AGM 代發並排：P4 驗收缺陷 3 是兩者畫得一樣。 */
@@ -895,6 +922,7 @@ export class MockTransport implements Transport {
     { const r = this.releaseTriage.handle(method, rawPath, q, b); if (r !== undefined) return r }
     { const r = this.serverDrafts.handle(method, rawPath, b, (t, d) => this.emit(t, d)); if (r !== undefined) return r }
     { const r = this.remoteCargo.handle(method, rawPath, b); if (r !== undefined) return r }
+    { const r = this.shares.handle(method, rawPath, b); if (r !== undefined) return r }
     // 前端已樂觀套用排序，mock 收下就好。
     // 跨裝置已讀：mock 只有一個瀏覽器，記下來就好。
     { const m = rawPath.match(/^\/projects\/([^/]+)\/group\/read$/); if (method === 'POST' && m) return { project_id: decodeURIComponent(m[1]), read_mark: { at: typeof b.at === 'string' ? b.at : new Date().toISOString(), id: typeof b.message_id === 'string' ? b.message_id : '' }, unread: 0 } }
@@ -2307,6 +2335,7 @@ export class MockTransport implements Transport {
               primary: b.is_primary === 1,
               primary_position: b.primary_position ?? 0,
               cwd: b.cwd,
+              share_profile: b.share_profile ?? null,
               // #353：mock 也從目前 run 的啟動值投影 needs_restart，讓設定面板與真 daemon 同步。
               // 排到回合結束的不算需重啟（#712）。
               live_apply_deferred: this.deferredLive.has(b.id),
@@ -2419,6 +2448,12 @@ export class MockTransport implements Transport {
       managed_by: 'user',
       cwd: typeof b.cwd === 'string' && b.cwd.trim() ? b.cwd.trim() : null,
       created_at: now(),
+    }
+    if (b.share_profile === 'restricted') {
+      // 照契約 A：只做 claude；受限 bot 不帶 bypass permissions。
+      if (bot.kind !== 'claude') throw new ApiError(409, { error: 'conflict', reason: 'unsupported_kind' }, 'unsupported kind')
+      bot.share_profile = 'restricted'
+      bot.auto_approve = 0
     }
     if (bot.identity) this.checkIdentity(bot.identity, bot.kind)
     this.bots.push(bot)

@@ -4603,6 +4603,22 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 `[build.remote]` 要拿掉（不然 cargo shim 會 ssh 回自己）；claude／codex／grok 的憑證都要是檔案（`~/.claude*/.credentials.json`、
 `~/.codex/auth.json`、`~/.grok/auth*`）。
 
+## 20. 分享 bot（使用者 2026-10-03）
+
+把一顆**專用的受限 bot** 單獨給外部 end user 用：對方只有對話、上傳檔案、下載 bot 給的檔案。對外經 Tailscale Funnel 指到獨立的分享入口 port，管理介面 7788 照舊只聽 127.0.0.1。
+欄位與端點見 API.md「分享 bot」。daemon 端（受限 bot 的權限與 env、token 雜湊、獨立 listener）另行補在本節。
+
+**前端（主 UI）**
+- 建 bot 表單多一個「用途：分享用（受限）」；只給本機專案的 claude（其他 kind／遠端專案是灰的並寫原因）。勾了就送 `share_profile: "restricted"`、`auto_approve: false`。建好不能切回一般 bot。
+- 受限 bot 的設定面板多一塊「🔗 分享給外部使用者」：開關、完整連結＋複製（只在剛開／重產時拿得到）、平常只顯示末 4 碼、建立與最後使用時間、「重產連結」與「關閉分享」（都要確認）。一般 bot 不畫這塊。
+- 對話裡 `source = "share"` 的 user 訊息標「🔗 分享使用者」。
+
+**分享頁（`web/share.html` → `dist/share.html`）**
+- 獨立 Vite entry，程式碼只在 `web/src/share/`，**不 import 主 UI 的 store／api／元件**（測試 `shareIsolation.test.ts` 釘住），也沒有任何通往主 UI 的連結。
+- token 從網址 `/s/<token>` 取（dev／mock 用 `share.html?token=`）；只打 `/s/<token>/api/…`、不帶 cookie 與 referrer。
+- 畫面：標題（bot 名稱＋在線／思考中）、對話串（bot 回覆用 GFM，但不吃 HTML、不載圖片，連結 `noopener noreferrer`）、輸入框（桌機 Enter 送出、手機 Enter 換行）、📎 上傳（單檔 25 MB）、「bot 給你的檔案」（手機是底部抽屜，桌機 ≥900px 是右側欄）。
+  送出後到 daemon 回報 working 之前就先顯示「思考中」。404 一律畫「這個分享連結已失效」，不分 token 錯或分享已關。深淺色跟系統走。
+
 ## 附錄 A：herdr socket（0.8.2 / protocol 20）
 
 - 每個請求一行 `{"id":"<string>","method","params"}`，`id` **必須是字串**；回應 `{"id","result":{"type":…}}` 或 `{"id","error":{"code","message"}}`

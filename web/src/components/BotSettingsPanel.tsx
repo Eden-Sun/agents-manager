@@ -8,6 +8,7 @@ import { startCliLogin } from '../lib/cliLogin'
 import { envDisplayText } from './identityEnv'
 import { UnsavedGuard } from './UnsavedGuard'
 import { ConfirmDialog } from './ConfirmDialog'
+import { BotShareSection } from './BotShareSection'
 import { CopyChip } from './CopyChip'
 import { KindTag } from './KindTag'
 import { ApiModelFields } from './ModelPicker'
@@ -612,6 +613,8 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
             />
           ) : null}
         </form>
+
+        <BotShareSection botId={botId} />
 
         {/* 刪除只要一顆鍵，後果寫在確認框（2026-09-13 使用者）。 */}
         <div className="bs-danger bare">

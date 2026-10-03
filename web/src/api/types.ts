@@ -10,7 +10,8 @@ export type TurnStatus = 'queued' | 'in_flight' | 'completed' | 'completed_fallb
 export type TurnDelivery = 'pending' | 'ok' | 'unknown' | 'failed'
 export type TurnOrigin = 'web' | 'external'
 export type MessageRole = 'user' | 'assistant' | 'system'
-export type MessageSource = 'web' | 'hook' | 'transcript' | 'terminal_fallback' | 'system'
+/** `share`＝分享頁的 end user 送來的（SPEC「分享 bot」），UI 標「🔗 分享使用者」。 */
+export type MessageSource = 'web' | 'hook' | 'transcript' | 'terminal_fallback' | 'system' | 'share'
 export type TerminalSource = 'visible' | 'recent_unwrapped'
 
 export interface Project {
@@ -264,6 +265,8 @@ export interface Bot {
   live_apply_deferred?: boolean
   /** null = 用 `project.path` */
   cwd: string | null
+  /** `restricted`＝分享用的受限 bot（只有它能開分享連結，SPEC「分享 bot」）；一般 bot 與舊 daemon＝null。 */
+  share_profile: 'restricted' | null
   /** 預覽模式（issue #253）：`/api/state` 帶的簡版；舊 daemon 沒有＝undefined，null＝沒開過。 */
   preview?: { status: 'off' | 'starting' | 'running' | 'failed'; port: number | null } | null
   /** 只存在於瀏覽器的佔位列（`id` 以 `pending:` 開頭），daemon 建好後被取代。 */
@@ -681,6 +684,8 @@ export interface NewBotInput {
   env?: Record<string, string>
   fast?: boolean
   persona?: string | null
+  /** 建成分享用的受限 bot；建好之後不能切換（要分享就新建一顆）。 */
+  share_profile?: 'restricted'
   /** 冪等鍵（#352）：回應遺失後同一個動作重送，daemon 拿回第一次建好的那顆而不是再建一顆；見 `lib/createRequestId.ts`。 */
   client_request_id?: string
 }
