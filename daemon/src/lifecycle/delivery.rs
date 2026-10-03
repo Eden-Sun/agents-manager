@@ -610,7 +610,15 @@ pub(crate) fn echo_row_hits(kind: &str, screen: &str, text: &str) -> usize {
     (0..end)
         .filter(|&i| {
             let row = lines[i];
-            let exact = markers.iter().any(|m| row.strip_prefix(m) == Some(text));
+            // Grok right-aligns a clock and scrollbar glyph on its real prompt echoes. Ignore only
+            // that known chrome before the exact comparison; otherwise a successful first paste
+            // looks unproven and the retry path can submit it twice.
+            let exact = if kind == "grok" {
+                let plain = crate::lifecycle::screen::strip_grok_decor(row);
+                markers.iter().any(|m| plain.strip_prefix(m) == Some(text))
+            } else {
+                markers.iter().any(|m| row.strip_prefix(m) == Some(text))
+            };
             let continued = i + 1 < end && continuation_row(lines[i + 1]);
             exact && !continued
         })
@@ -1751,6 +1759,19 @@ mod tests {
         assert_eq!(echo_row_hits("claude", &screen(&["❯  Reply with PONG"], &[]), "Reply with PONG"), 0, "多一個空白");
         // 回覆若以兩格縮排的純文字開頭，會被當成續行 → 假陰性（Unproven），不會假陽性。
         assert_eq!(echo_row_hits("claude", &screen(&["❯ ab", "  plain reply text"], &[]), "ab"), 0);
+    }
+
+    #[test]
+    fn a_grok_echo_row_ignores_its_right_aligned_clock_and_scrollbar() {
+        let screen = "❯ Reply with GROK-OK                    2:09 AM   █\n\n  ╭──────────────────────────────╮\n  │ ❯                            │\n  ╰──────── Grok 4.6 (low) ──────╯\n";
+        assert_eq!(echo_row_hits("grok", screen, "Reply with GROK-OK"), 1);
+        assert_eq!(echo_row_hits("grok", screen, "Reply with GROK-NO"), 0);
+
+        let continued = screen.replace("\n\n  ╭", "\n  plain reply text\n\n  ╭");
+        assert_eq!(echo_row_hits("grok", &continued, "Reply with GROK-OK"), 0, "續行不應被誤當完整回音");
+
+        let prose_clock = screen.replace("Reply with GROK-OK                    2:09 AM   █", "meet at 2:09 PM");
+        assert_eq!(echo_row_hits("grok", &prose_clock, "meet at 2:09 PM"), 1, "正文時間不能被當成裝飾剝掉");
     }
 
     fn user_entry(content: Value) -> String {
