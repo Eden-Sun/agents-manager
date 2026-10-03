@@ -365,7 +365,7 @@ pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
 /// `workspace.create` 回來時 pane 的 shell 常常還沒就緒（claude 探測也因此先睡 700 ms 才打字）：這時 `agent.start`
 /// 回 `agent_pane_busy`（`agent target pane … is not an available shell`），以前整輪額度探測就此失敗、停放五分鐘——
 /// 本機的 grok 額度從 09-28 起每天幾十到一百多次這樣失敗。這個錯誤只代表 shell 還沒好：等一下重試，有上限。
-const SHELL_READY_ATTEMPTS: u32 = 10;
+const SHELL_READY_ATTEMPTS: u32 = 12;
 const SHELL_READY_WAIT: Duration = if cfg!(test) { Duration::from_millis(5) } else { Duration::from_millis(500) };
 
 fn pane_busy(e: &anyhow::Error) -> bool {
@@ -497,17 +497,33 @@ mod tests {
         assert_eq!(e.herdr.calls_to("agent.start").len(), 3);
 
         let before = e.herdr.calls_to("agent.start").len();
-        for _ in 0..10 {
+        for _ in 0..SHELL_READY_ATTEMPTS {
             e.herdr.fail_next("agent.start", crate::testing::Fault::RefuseWith("agent_pane_busy"));
         }
         let err = start_when_shell_ready(&e.app.herdr, "amquotatest2", &pane.pane_id).await.unwrap_err();
         assert!(pane_busy(&err), "有上限：一直 busy 就照實回錯，{err:#}");
-        assert_eq!(e.herdr.calls_to("agent.start").len() - before, 10, "最多呼叫十次，不可再補第十一次");
+        assert_eq!(e.herdr.calls_to("agent.start").len() - before, SHELL_READY_ATTEMPTS as usize, "有上限：忙碌回應到原本上限就照實回錯");
         // 別種錯誤不重試。
         e.herdr.fail_next("agent.start", crate::testing::Fault::RefuseWith("invalid_agent_argument"));
         let before = e.herdr.calls_to("agent.start").len();
         assert!(start_when_shell_ready(&e.app.herdr, "amquotatest3", &pane.pane_id).await.is_err());
         assert_eq!(e.herdr.calls_to("agent.start").len(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn agent_start_keeps_the_previous_twelve_attempt_shell_ready_window() {
+        let e = crate::testing::env().await;
+        let (_ws, pane) = e.app.herdr.workspace_create("/tmp/p", "probe", json!({})).await.unwrap();
+        for _ in 0..10 {
+            e.herdr.fail_next("agent.start", crate::testing::Fault::RefuseWith("agent_pane_busy"));
+        }
+
+        let started = start_when_shell_ready(&e.app.herdr, "amquotatest-late", &pane.pane_id)
+            .await
+            .expect("a shell becoming ready after ten transient busy responses should still start");
+
+        assert_eq!(started.pane_id, pane.pane_id);
+        assert_eq!(e.herdr.calls_to("agent.start").len(), 11, "the previous 12-attempt limit includes the eventual success");
     }
 
     #[test]
