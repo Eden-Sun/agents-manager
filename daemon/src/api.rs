@@ -1044,11 +1044,16 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
     }
 
     // Pane inventory and host-shell routes are human-operated interfaces, not bot resources.
-    if parts.get(1) == Some(&"panes")
+    // #810 #811 #812：行程清單、recovery journal、build 佇列也是 UI 診斷面（含別人的 argv／session／holder）。
+    // kill／pane 與非 `/api` 的 acquire 不在這裡擋。
+    let user_diagnostic = parts.get(1) == Some(&"panes")
         || parts.get(1) == Some(&"drafts")
         || (parts.get(1) == Some(&"mem") && matches!(method, "GET" | "HEAD"))
-        || (parts.get(1) == Some(&"hosts") && parts.iter().any(|part| *part == "shells"))
-    {
+        || parts.get(1) == Some(&"intents")
+        || parts.get(1) == Some(&"build-slots")
+        || (parts.get(1) == Some(&"projects") && parts.get(3) == Some(&"panes"))
+        || (parts.get(1) == Some(&"hosts") && parts.iter().any(|part| *part == "shells"));
+    if user_diagnostic {
         return Err(bot_user_only());
     }
     if parts.get(1) == Some(&"bots") && parts.len() >= 4 && matches!(parts.get(3), Some(&"keys" | &"text")) {
@@ -10371,6 +10376,82 @@ mod per_principal_auth_tests {
             let user = raw(e.app.clone(), request(path, &format!("X-AM-Token: {}\r\n", e.app.ui_token))).await;
             assert!(user.starts_with("HTTP/1.1 404") && !user.contains("user_only"), "User behavior is unchanged: {path}: {user}");
         }
+    /// #810 #811 #812：行程清單、recovery journal、build 佇列是 UI 診斷面。一般 bot 讀得到別顆 bot 的 argv、
+    /// session／路徑，以及別人的 build holder。使用者仍看完整內容；pane 的 acquire 不在 `/api` 底下，維持原樣。
+    #[tokio::test]
+    async fn process_inventory_intents_and_build_slots_are_user_only() {
+        let e = crate::testing::env().await;
+        let worker = distinct_bot(&e, "scope-worker").await;
+        let victim = distinct_bot(&e, "scope-victim").await;
+        let marker = "victim-session-SECRET-PATH-/tmp/only-b";
+        sqlx::query(
+            "INSERT INTO intents (id, kind, subject_id, host, payload_json, status, last_error, created_at, updated_at, expires_at)
+             VALUES (?,'promote',?, 'local', ?, 'pending', 'victim-last-error', ?, ?, ?)",
+        )
+        .bind(db::ulid())
+        .bind(&victim.id)
+        .bind(format!(r#"{{"session_id":"{marker}","dest":"{marker}"}}"#))
+        .bind(db::now())
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, last_seen, expires_at)
+             VALUES ('victim-holder-UNIQUE', 'tok', ?, 'victim-purpose-UNIQUE', 'local', 'waiting', ?, ?, NULL)",
+        )
+        .bind(&victim.id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+        let call = |path: &str, who: &[(&str, String)]| {
+            let extra: String = who.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Connection: close\r\n\r\n")
+        };
+        let as_bot = [("X-AM-Bot-Id", worker.id.clone()), ("X-AM-Bot-Token", worker.hook_token.clone())];
+        let as_user = [("X-AM-Token", e.app.ui_token.clone())];
+        let status = |r: &str| r.split_whitespace().nth(1).unwrap_or("").to_string();
+        for path in [
+            "/api/mem/processes?host=local",
+            "/api/mem/processes?host=remote-nope",
+            "/api/intents",
+            "/api/build-slots",
+        ] {
+            let denied = raw(e.app.clone(), call(path, &as_bot)).await;
+            assert_eq!(status(&denied), "403", "bot 不能讀 {path}");
+            assert!(denied.contains("\"reason\":\"user_only\""), "{path} 應是 user_only");
+            assert!(
+                !denied.contains(marker)
+                    && !denied.contains("victim-holder-UNIQUE")
+                    && !denied.contains("victim-purpose-UNIQUE")
+                    && !denied.contains("victim-last-error"),
+                "{path} 的 403 不該帶受害者內容"
+            );
+            let user = raw(e.app.clone(), call(path, &as_user)).await;
+            if path.contains("remote-nope") {
+                assert_eq!(status(&user), "404", "未知主機仍由 handler 回 404");
+            } else {
+                assert_eq!(status(&user), "200", "使用者仍讀得到 {path}");
+            }
+        }
+        let user_intents = raw(e.app.clone(), call("/api/intents", &as_user)).await;
+        assert!(user_intents.contains(marker), "使用者仍看得到 recovery journal");
+        let user_slots = raw(e.app.clone(), call("/api/build-slots", &as_user)).await;
+        assert!(user_slots.contains("victim-holder-UNIQUE"), "使用者仍看得到全域 build 佇列");
+
+        let acquire = format!(
+            "POST /build-slots/acquire HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            worker.id,
+            worker.hook_token,
+            format!("holder=scope-worker&bot_id={}&purpose=self&host=local", worker.id).len(),
+            format!("holder=scope-worker&bot_id={}&purpose=self&host=local", worker.id),
+        );
+        let acquired = raw(e.app.clone(), acquire).await;
+        assert_ne!(status(&acquired), "403", "非 /api 的 acquire 仍給 bot");
     }
 
     /// `/hook/{provider}` 的入口：畸形／缺欄位／型別錯／過大的 body 都是乾淨的 4xx（不是 5xx、不 panic、不留一列在收件匣），

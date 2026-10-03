@@ -519,7 +519,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 
 **停用模型的回應（#400）**：POST create 與 PATCH model 若輸入剛好等於停用值，回應帶 `remapped.model.from/to`。Codex 的 `gpt-5.6-sol`、`gpt-5.6-terra` 會換成 `gpt-6-sol`，`gpt-5.6-luna` 會換成 `gpt-6-luna`；Claude 的 `opus` 會換成 `claude-opus-5-5`。其他回應不含 `remapped`；同一欄位的 PATCH 只會回報實際替換的值。
 
-**`GET /api/intents`**（#355）：持久 intent 的最近 100 筆（含已結束的，新的先）`{intents:[{id,kind,subject_id,host,payload_json,step,status,owner_boot,attempts,last_error,created_at,updated_at,expires_at}]}`。只接受 User principal 或已驗證 AGM patrol/responder role；一般 Bot 回 `403 role_required`。唯讀；`restart`／`delete_bot`／`delete_project`／`promote` 會寫（見 SPEC §3.1 的持久 intent）；child 退役另寫一列 `kind = retire_child`、`status = done` 的紀錄（payload 見 SPEC §6.5a，#554）。
+**`GET /api/intents`**（#355、#811）：持久 intent 的最近 100 筆（含已結束的，新的先）`{intents:[{id,kind,subject_id,host,payload_json,step,status,owner_boot,attempts,last_error,created_at,updated_at,expires_at}]}`。只給 UI token（Bot principal 回 `403 user_only`：payload 含其他 bot 的 session／路徑／錯誤）。唯讀；`restart`／`delete_bot`／`delete_project`／`promote` 會寫（見 SPEC §3.1 的持久 intent）；child 退役另寫一列 `kind = retire_child`、`status = done` 的紀錄（payload 見 SPEC §6.5a，#554）。
 
 **`POST /api/order`**：側欄排序 = config.toml 的陣列順序，`GET /api/state` 的順序就是權威（前端不另存）。只送要改的那一半；沒列到的維持原相對順序接在後面；
 config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_changed`。
@@ -1314,7 +1314,7 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
 `{holder, token}`。欄位各最多 200 個字元，超過回 400。其他情況一律幂等，永遠 `200 {"released":true}`（找不到、已過期、token 不對都當作「已經不是你的事了」）。
 
 ### `GET /api/build-slots`
-一般 `X-AM-Token`。現況（UI／人工查用）：
+一般 `X-AM-Token`（#812：一般 bot 403 `user_only`；acquire／renew／release 仍在 `/build-slots/*`，不在 `/api` 底下）。現況（UI／人工查用）：
 
 ```json
 {
@@ -1363,7 +1363,7 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
 - 量不到的主機用 `error` 回報，不從清單消失（UI 標星號）。每 15 秒取樣，變化超過 1 MiB 才推 `mem_updated`。
 
 ### `GET /api/mem/processes?host=local`
-`host` 省略 = `local`，不認得 404。
+`host` 省略 = `local`，不認得 404。只給 UI token（#810：一般 bot 403 `user_only`，不能讀別顆 agent 的 argv／pane／socket）。
 
 ```json
 {"host":"local","sampled_at":"2026-09-08T04:11:02Z","processes":[
