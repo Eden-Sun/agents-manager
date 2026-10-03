@@ -1144,7 +1144,7 @@ mod send_text_tests {
         let bot = tt::claude_bot(&env.app, &env.project_id, "text-mark").await;
         let run_id = tt::fake_run(&env.app, &bot.id).await;
         let pane = format!("pane-{}", bot.id);
-        let transcript = env.dir.join("text-mark.jsonl");
+        let transcript = tt::trusted_transcript(&env.app, &bot.id, &env.dir, "text-mark.jsonl").await;
         std::fs::write(&transcript, "").unwrap();
         sqlx::query("UPDATE runs SET native_session_id='sess-1', transcript_path=? WHERE id=?")
             .bind(transcript.to_str().unwrap())
