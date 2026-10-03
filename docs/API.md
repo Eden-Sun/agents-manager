@@ -1797,7 +1797,7 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 
 ### 10.4a `POST /api/bots/{id}/restore`
 軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。
-刪除時搬進 `bots-trash/` 的 bot 目錄搬回來（本機直接搬；遠端 ssh 搬，最多等 10 秒）：`bots/<id>/` 已經在原地（重新啟動過、重建了）就不動，免得蓋掉新的；
+刪除時搬進 `bots-trash/` 的 bot 目錄搬回來（本機直接搬；遠端 ssh 搬，最多等 10 秒）：`bots/<id>/` 已經是真的目錄或檔案（重新啟動過、重建了）就不動，免得蓋掉新的；原地若是 symlink，只拆掉連結本身（不刪它指到的東西）再把回收區搬回來；
 回收區那份已經過期被清掉時，還原照樣成功，目錄下次啟動重新產生——搬不回來不擋還原、只記 warn。
 child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pane 重開。這段期間 reconcile 不會只因沒有 active run 而退休；寬限期過後仍未回來就照原規則退休。到期時間與 `agent_name_taken` 保護原因記在 `supervisor_notes`，daemon 重啟後仍有效。
 

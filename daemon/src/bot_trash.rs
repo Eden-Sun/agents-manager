@@ -94,7 +94,7 @@ fn latest(data_dir: &Path, bot_id: &str, kind: Option<&str>) -> Option<PathBuf> 
         .map(|(_, p)| p)
 }
 
-/// 還原：`bots/<id>/` 還不在時把回收區最新那份搬回去。已經在（重新啟動過、重建了）就不動，免得蓋掉新的。
+/// 還原：`bots/<id>/` 還不在時把回收區最新那份搬回去。真的目錄或檔案已在就不動。symlink 只拆連結再搬回。
 pub fn restore(data_dir: &Path, bot_id: &str, dir: &Path) -> std::io::Result<Option<PathBuf>> {
     restore_kind(data_dir, bot_id, None, dir)
 }
@@ -106,8 +106,14 @@ pub fn restore(data_dir: &Path, bot_id: &str, dir: &Path) -> std::io::Result<Opt
 /// 就回 `NotFound`（`Err`），呼叫端記 warn、不擋還原——**不會**出現「回了 `Ok(Some(..))`、拿回來的目錄
 /// 卻正在被清空」。
 pub fn restore_kind(data_dir: &Path, bot_id: &str, kind: Option<&str>, dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    if dir.exists() {
-        return Ok(None);
+    // `exists` 會跟著 symlink 走。連結不是重建過的目錄：只拆連結本身（不刪目標），再把回收區搬回來。
+    // 真的目錄、檔案仍不覆蓋。
+    if let Ok(meta) = std::fs::symlink_metadata(dir) {
+        if meta.file_type().is_symlink() {
+            std::fs::remove_file(dir)?;
+        } else {
+            return Ok(None);
+        }
     }
     let Some(src) = latest(data_dir, bot_id, kind) else { return Ok(None) };
     if let Some(parent) = dir.parent() {
@@ -275,6 +281,36 @@ mod tests {
         assert_eq!(gc(&data, std::time::Duration::from_secs(3600)), 0, "還沒過期");
         assert_eq!(gc(&data, std::time::Duration::ZERO), 1);
         assert_eq!(restore(&data, "b1", &dir).unwrap(), None, "過期清掉之後沒得還原");
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    /// `bots/<id>` 若是 symlink，`Path::exists` 會跟著走、把回收區留在原地。還原必須只拆連結，
+    /// 把垃圾桶搬回原位，不能把檔案寫進連結指到的目錄。真的目錄仍不覆蓋。
+    #[test]
+    fn a_symlink_where_the_bot_dir_should_be_is_not_treated_as_a_rebuilt_directory() {
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-{}", crate::db::ulid())));
+        let dir = data.join("bots").join("b1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("keep.txt"), "secret").unwrap();
+        move_in(&data, "b1", &dir).unwrap().expect("moved");
+
+        let outside = data.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), "keep-me").unwrap();
+        std::os::unix::fs::symlink(&outside, &dir).unwrap();
+
+        let restored = restore(&data, "b1", &dir).unwrap();
+        assert!(restored.is_some(), "a symlink is not a rebuilt bot directory");
+        assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "secret");
+        assert_eq!(std::fs::read_to_string(outside.join("victim.txt")).unwrap(), "keep-me");
+        assert!(!outside.join("keep.txt").exists(), "trash must not land inside the symlink target");
+        assert!(std::fs::symlink_metadata(&dir).unwrap().is_dir());
+
+        move_in(&data, "b1", &dir).unwrap().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fresh.txt"), "new").unwrap();
+        assert_eq!(restore(&data, "b1", &dir).unwrap(), None, "a real directory is still not overwritten");
+        assert_eq!(std::fs::read_to_string(dir.join("fresh.txt")).unwrap(), "new");
         std::fs::remove_dir_all(data).unwrap();
     }
 
