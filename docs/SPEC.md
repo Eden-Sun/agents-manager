@@ -2868,6 +2868,8 @@ label = "foo@m4p"
    改指到另一台（換連線物件）或被移除。這些觀測開始前先取 `HostFence`（連線物件＋generation＋序號），寫進 `app.tools`／`app.quotas` 前確認 `HostManager::is_current`，不是就整份丟掉
    （`tools::Superseded`／額度探測回錯），**連身分清理與額度回填也不跑**——舊機器的事實不能覆寫新機器的。檢查與寫入 `app.tools` 在同一把鎖裡。
    同一 generation 內重疊的偵測（連線時與別名輪詢）以序號定序：較晚開始的先寫完，較早開始的遲到就丟掉。
+   GitHub origin（`github::spawn_detect_host`，#830）同一套：整次掃描抓住開始時的 `HostFence`，每筆 `git remote` 都走那條連線，
+   寫 `app.github` 前整批再確認權威還在；中間改指或重連就一筆不寫。同名掃描已在跑時新的要求記成補跑，這次結束後用新連線再掃，不把舊機器的 origin 留下。
    同一條規則也管請求觸發的長操作：模型清單（`models::list`，結果不進快取、回錯）、身分登入／登出 pane 的 watcher（開 pane 前取 fence；
    權威換了就放手，不看新機器上同 id 的 pane、不寫登入狀態、不關 pane）、codex 一鍵升級（§6.9；安裝走 fence 的連線，每一步讀完與改通知、
    開批次前都檢查，換了就 `superseded`）。**重連也算換權威**：這些操作一律停手，由使用者或下一輪探測重來。
