@@ -4,6 +4,31 @@
 use super::*;
 use crate::testing as tt;
 
+/// The explicit composer-submit action uses the same proof path as normal delivery and must not
+/// trust a legacy run path outside this bot's projects tree.
+#[tokio::test]
+async fn composer_submit_does_not_use_an_out_of_root_transcript_as_proof() {
+    let env = tt::env().await;
+    let app = env.app.clone();
+    let bot = tt::claude_bot(&app, &env.project_id, "draft-path-guard").await;
+    let run_id = tt::fake_run(&app, &bot.id).await;
+    let scratch = tt::track(std::env::temp_dir().join(format!("am-draft-path-{}", db::ulid())));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let outside = scratch.join("foreign.jsonl");
+    std::fs::write(&outside, "{}\n").unwrap();
+    sqlx::query("UPDATE runs SET native_session_id='session-guard', transcript_path=? WHERE id=?")
+        .bind(outside.to_string_lossy())
+        .bind(&run_id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+    let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+
+    let proof = draft_proof(&app, &client, &run, &bot, &format!("pane-{}", bot.id), "draft").await;
+    assert!(proof.is_err(), "out-of-root file cannot become composer submission proof: {proof:?}");
+}
+
 // ---- 真畫面：清框的鍵按下去之前／之後，daemon 讀得出什麼 ----
 
 const CLAUDE_DRAFT: &str = include_str!("fixtures/claude-2.1.281-draft.ansi");
@@ -121,10 +146,19 @@ async fn idle(kind: &str, composer: &[&str], transcript: bool) -> Fx {
     .unwrap();
     let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
     let log = transcript.then(|| {
-        let p = env.dir.join(format!("session-{}.jsonl", db::ulid()));
+        let p = env.dir.join("claude-config/projects/-test").join(format!("session-{}.jsonl", db::ulid()));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, "").unwrap();
         p
     });
+    if kind == "claude" && transcript {
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(json!({"CLAUDE_CONFIG_DIR": env.dir.join("claude-config").to_string_lossy()}).to_string())
+            .bind(&bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
     sqlx::query(
         "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, pane_typed, native_session_id, transcript_path, started_at)
          VALUES (?,?,'running','idle','ws-1','pane-d','draft-bot','test',1,?,?,?)",

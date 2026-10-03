@@ -133,13 +133,25 @@ pub(crate) async fn trusted_roots(app: &Arc<App>, bot: &db::Bot) -> Vec<PathBuf>
 /// hook 送來的 `transcript_path` 能不能寫進 `runs`。本機 bot：要在 [`trusted_roots`] 底下。遠端 bot 的檔案在那台、daemon 不在本機讀它
 /// （只在換身分時經 `sh_quote` 過的 ssh script 搬），所以只擋形狀（絕對路徑、無 `..`、無控制字元、`.jsonl`）。
 pub(crate) async fn transcript_allowed(app: &Arc<App>, bot: &db::Bot, path: &str) -> bool {
-    let remote = db::bot_host(&app.db, &bot.id).await.is_ok_and(|h| h != LOCAL_HOST);
-    if remote {
-        let p = Path::new(path);
-        return p.is_absolute()
-            && !path.chars().any(char::is_control)
-            && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
-            && p.extension().and_then(|e| e.to_str()) == Some("jsonl");
+    match db::bot_host(&app.db, &bot.id).await {
+        Ok(host) if host != LOCAL_HOST => {
+            let p = Path::new(path);
+            p.is_absolute()
+                && !path.chars().any(char::is_control)
+                && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+                && p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        }
+        Ok(_) => path_within_roots(path, &trusted_roots(app, bot).await),
+        // A host lookup failure gives no basis for deciding whether this daemon can read the path.
+        Err(_) => false,
+    }
+}
+
+/// A path may be retained for a remote bot, but only a local bot's own transcript may be opened
+/// on this daemon. Recheck both host and bot-owned root at each direct-read call site.
+pub(crate) async fn local_transcript_allowed(app: &Arc<App>, bot: &db::Bot, path: &str) -> bool {
+    if !matches!(db::bot_host(&app.db, &bot.id).await, Ok(host) if host == LOCAL_HOST) {
+        return false;
     }
     path_within_roots(path, &trusted_roots(app, bot).await)
 }

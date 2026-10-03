@@ -37,11 +37,15 @@ pub(crate) fn read_tail(path: &std::path::Path) -> Option<String> {
 
 /// 這個 claude run 目前這一回合是不是 CLI 自己起頭的（`origin.kind` 有寫、而且不是 `human`）。
 /// 讀不到 transcript、舊版沒有 `origin`、不是 claude ＝ `false`：照舊當成使用者在 pane 裡打的。
-pub(crate) async fn started_by_the_cli_itself(bot_kind: &str, transcript_path: Option<&str>) -> bool {
-    if bot_kind != "claude" {
+pub(crate) async fn started_by_the_cli_itself(app: &std::sync::Arc<crate::state::App>, bot: &crate::db::Bot, transcript_path: Option<&str>) -> bool {
+    if bot.kind != "claude" {
         return false;
     }
-    let Some(path) = transcript_path.filter(|p| !p.is_empty()).map(std::path::PathBuf::from) else { return false };
+    let Some(path) = transcript_path.filter(|p| !p.is_empty()) else { return false };
+    if !crate::transcript_read::local_transcript_allowed(app, bot, path).await {
+        return false;
+    }
+    let path = std::path::PathBuf::from(path);
     let kind = tokio::task::spawn_blocking(move || read_tail(&path).and_then(|log| starter_origin_kind(&log))).await.ok().flatten();
     matches!(kind.as_deref(), Some(k) if k != "human")
 }
@@ -77,8 +81,16 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "notified").await;
+        let config_dir = env.dir.join("claude-config");
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(serde_json::json!({"CLAUDE_CONFIG_DIR":config_dir.to_string_lossy()}).to_string())
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
         let run_id = tt::fake_run(&app, &bot.id).await;
-        let path = env.dir.join("session.jsonl");
+        let path = config_dir.join("projects/-test/session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, log).unwrap();
         sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?").bind(path.to_string_lossy().to_string()).bind(&run_id).execute(&app.db).await.unwrap();
         env.herdr.set_screen(&format!("pane-{}", bot.id), SCREEN_AFTER_A_NOTIFICATION_TURN);
@@ -162,20 +174,35 @@ mod tests {
         assert_eq!(user_messages(&env, &bot_id).await.last().map(String::as_str), Some("順便看一下 lint"));
     }
 
+    /// A remote run can record an absolute path that happens to exist locally; that local
+    /// collision must not be used to classify the run as a CLI-started notification.
+    #[tokio::test]
+    async fn a_remote_transcript_path_does_not_control_prompt_classification() {
+        let (env, run, bot_id) = with_transcript(SAMPLE).await;
+        sqlx::query("UPDATE projects SET host='remote-test' WHERE id=?")
+            .bind(&env.project_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let bot = db::bot(&env.app.db, &bot_id).await.unwrap().unwrap();
+
+        assert!(!started_by_the_cli_itself(&env.app, &bot, run.transcript_path.as_deref()).await,
+            "遠端 transcript 的本機同路徑檔案不能控制 prompt 分類");
+    }
+
     /// 只有 claude 的 transcript 讀得懂：codex／grok 的 run 就算有路徑也照舊。
     #[tokio::test]
     async fn only_claude_transcripts_are_read() {
-        assert!(started_by_the_cli_itself("claude", Some(&write_sample())).await);
-        assert!(!started_by_the_cli_itself("codex", Some(&write_sample())).await);
-        assert!(!started_by_the_cli_itself("grok", Some(&write_sample())).await);
-        assert!(!started_by_the_cli_itself("claude", None).await);
-        assert!(!started_by_the_cli_itself("claude", Some("/nonexistent/session.jsonl")).await);
-    }
-
-    fn write_sample() -> String {
-        let path = crate::testing::track(std::env::temp_dir().join(format!("am-origin-{}.jsonl", db::ulid())));
-        std::fs::write(&path, SAMPLE).unwrap();
-        crate::testing::remove_at_exit(&path);
-        path.to_string_lossy().to_string()
+        let (env, run, bot_id) = with_transcript(SAMPLE).await;
+        let bot = db::bot(&env.app.db, &bot_id).await.unwrap().unwrap();
+        assert!(started_by_the_cli_itself(&env.app, &bot, run.transcript_path.as_deref()).await);
+        let mut codex = bot.clone();
+        codex.kind = "codex".into();
+        assert!(!started_by_the_cli_itself(&env.app, &codex, run.transcript_path.as_deref()).await);
+        let mut grok = bot.clone();
+        grok.kind = "grok".into();
+        assert!(!started_by_the_cli_itself(&env.app, &grok, run.transcript_path.as_deref()).await);
+        assert!(!started_by_the_cli_itself(&env.app, &bot, None).await);
+        assert!(!started_by_the_cli_itself(&env.app, &bot, Some("/nonexistent/session.jsonl")).await);
     }
 }

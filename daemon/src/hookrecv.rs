@@ -65,7 +65,7 @@ pub async fn receive(
     if bot.deleted_at.is_some() {
         return (StatusCode::GONE, Json(json!({"error": "bot deleted"})));
     }
-    let provider = if body.provider.is_empty() { provider } else { body.provider.clone() };
+    let provider = if body.provider.is_empty() { provider } else { body.provider.clone() }.to_ascii_lowercase();
     // provider 要跟這顆 bot 的 kind 一致：claude bot 的 pane 裡跑 `codex exec -c notify=[… --bot $AM_BOT_ID …]`，
     // token／run id 都是從 pane 環境繼承來的、全對，codex 的 thread-id 就被當成這顆 claude bot 的 session
     // 記成 native_session_id 還標 verified（2026-09-22 AM-issuers-XH：DB 記了一個不存在的 UUIDv7，
@@ -735,14 +735,8 @@ async fn store_resent_prompt(app: &Arc<App>, bot_id: &str, conv: &str, turn: &db
 
 /// transcript 最後一則使用者訊息。只讀尾巴：回合結束時它一定在最後幾百 KB 裡。
 fn last_transcript_user_text(path: &std::path::Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
     const TAIL: u64 = 512 * 1024;
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    String::from_utf8_lossy(&buf)
+    crate::transcript_read::read_tail(path, TAIL)?
         .lines()
         .rev()
         .find_map(crate::lifecycle::transcript_user_text)
@@ -1113,9 +1107,12 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         tracing::warn!(bot = %bot.name, kind = %bot.kind, provider = %body.provider, "hook from another provider; ignored");
         return Ok(());
     }
+    // Provider matching is case-insensitive for compatibility; dispatch must use that same
+    // canonical spelling or an accepted `Claude` event is consumed as an unknown event.
+    let provider = body.provider.to_ascii_lowercase();
     let conv = db::conversation_id(&app.db, &bot.id).await?;
     let run = db::active_run(&app.db, &bot.id).await?;
-    let kind = classify(&body.provider, &body.payload);
+    let kind = classify(&provider, &body.payload);
     if matches!(kind, HookKind::StatusLine) {
         tracing::debug!(bot = %bot.name, "statusline received");
     } else {
@@ -1157,14 +1154,14 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
 
     // claude ≥ 2.1.287 的 Stop 自己報背景工作（`background_tasks`）：以它為準，不用等畫面巡邏（`background_hook.rs`）。
     // 放在世代圍籬之後：上一代的 Stop 不能改這一代的帳。
-    if body.provider == "claude" && matches!(&kind, HookKind::TurnComplete { .. }) {
+    if provider == "claude" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {
             crate::background_hook::on_stop(app, r, &body.payload).await;
         }
     }
 
     // Codex's usage-reset hint is a TUI row, not in the payload; give the pane a moment to render it.
-    if body.provider == "codex" && matches!(&kind, HookKind::TurnComplete { .. }) {
+    if provider == "codex" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {
             lifecycle::schedule_codex_notice_capture(app, &bot.id, &r.id);
         }
@@ -1322,7 +1319,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     app.emit_bot_status(&bot.id).await;
                 }
                 // #750：server fallback 後實際在跑的模型（statusLine 是權威），校正 runtime_model、不碰 bots.model。
-                if body.provider == "claude" {
+                if provider == "claude" {
                     crate::claude_live::adopt_statusline_model(app, r, &body.payload).await;
                 }
             }
@@ -1392,7 +1389,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         HookKind::Identity { session_id, transcript_path } => {
             if let Some(r) = &run {
                 // Codex/Grok are checked on their first completed turn; don't consume the request early.
-                if body.provider == "claude" {
+                if provider == "claude" {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
                 let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
@@ -1412,7 +1409,13 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
             // Stop 的 transcript_path 不只寫進 `runs`：下面還會直接讀它、把內容當成使用者訊息記進對話，所以一進來就驗。
             let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
-            if body.provider == "codex" || body.provider == "grok" {
+            // Remote paths are retained for SSH-side transcript transfer, never opened on this host.
+            let transcript_read_path = if let Some(path) = transcript_path.as_deref() {
+                if crate::transcript_read::local_transcript_allowed(app, &bot, path).await { Some(path.to_string()) } else { None }
+            } else {
+                None
+            };
+            if provider == "codex" || provider == "grok" {
                 if let Some(r) = &run {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
@@ -1457,7 +1460,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 答案不能掛到原本那則，更不能順手把它標成「已送達」（第二輪 review 送達線 #3）。看不到使用者訊息時照舊認領。
             let (target, user) = match target {
                 Some(t) if t.delivery == "unknown" => {
-                    let seen = hook_user_text(user.as_deref(), &body.payload, transcript_path.as_deref()).await;
+                    let seen = hook_user_text(user.as_deref(), &body.payload, transcript_read_path.as_deref()).await;
                     let sent = with_supplements(app, &t.id, t.prompt_text.as_deref()).await?;
                     if answers_none_of(sent.as_deref(), seen.as_deref()) {
                         tracing::info!(turn = %t.id, bot = %bot.id, "hook 的使用者訊息不是這一筆 unknown 的 prompt：不認領，記成外部回合");
@@ -1472,7 +1475,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 Some(t) => {
                     if let Some(r) = &run {
                         if let Some(late) = recent_fallback_turn(app, &r.id).await? {
-                            let seen = hook_user_text(user.as_deref(), &body.payload, transcript_path.as_deref()).await;
+                            let seen = hook_user_text(user.as_deref(), &body.payload, transcript_read_path.as_deref()).await;
                             let ours = with_supplements(app, &t.id, t.prompt_text.as_deref()).await?;
                             let late_prompt = with_supplements(app, &late.id, turn_prompt(app, &late).await?.as_deref()).await?;
                             if answers_none_of(ours.as_deref(), seen.as_deref())
@@ -1512,7 +1515,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         tx.commit().await?;
                         // 這筆就是 hook 要收的 in-flight 回合，只是 CAS 輸給備援：同一回合。
                         fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, true).await?;
-                        store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_path.as_deref()).await?;
+                        store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
                         return Ok(());
                     }
                     _ => {}
@@ -1536,7 +1539,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                             // 刮下來的回音可能被折行截斷；hook 的原文較可信，補完下半截。
                             upgrade_clipped_user_message(&mut tx, &t.id, u).await?;
                         }
-                    } else if let Some(text) = human_started_prompt(&body.payload, transcript_path.as_deref()).await {
+                    } else if let Some(text) = human_started_prompt(&body.payload, transcript_read_path.as_deref()).await {
                         added.extend(store_resent_prompt_tx(app, &mut tx, &conv, &t, run.as_ref(), &text).await?);
                     }
                 }
@@ -1559,7 +1562,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     // 跟上面 unknown 那條同一個判斷（review3 c1 L13）：hook 帶來的使用者訊息若是**別句**
                     // （使用者改到 pane 裡直接打、herdr 卡 working 沒開外部回合），答案屬於那一句，不能補進 T1、
                     // 更不能把 T1 標成 completed。對不上就往下記成外部回合；看不到使用者訊息時照舊補。
-                    let seen = hook_user_text(user.as_deref(), &body.payload, transcript_path.as_deref()).await;
+                    let seen = hook_user_text(user.as_deref(), &body.payload, transcript_read_path.as_deref()).await;
                     let prompt = with_supplements(app, &t.id, turn_prompt(app, &t).await?.as_deref()).await?;
                     if answers_none_of(prompt.as_deref(), seen.as_deref()) {
                         tracing::info!(turn = %t.id, bot = %bot.id, "遲到 hook 的使用者訊息不是這一筆備援回合的 prompt：不補，記成外部回合");
@@ -1570,7 +1573,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         // wits-ops-web：備援抓到一份工具輸出當回覆，真回覆晚 25 秒到卻被丟）。都不成立只能補空的，不蓋已有的。
                         let same = seen.is_some() || fired_within(app, &t, body.received_at.as_deref()).await?;
                         fill_or_drop_late_hook(app, &t, &body_text, &session_id, &turn_id, same).await?;
-                        store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_path.as_deref()).await?;
+                        store_resent_prompt(app, &bot.id, &conv, &t, run.as_ref(), &body.payload, transcript_read_path.as_deref()).await?;
                         return Ok(());
                     }
                 }
@@ -2204,6 +2207,7 @@ mod drain_tests {
 mod external_claim_tests {
     use super::*;
     use crate::testing as tt;
+    use std::time::Duration;
 
     #[test]
     fn hook_user_dedups_against_the_scraped_echo() {
@@ -2853,6 +2857,118 @@ mod external_claim_tests {
         assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
         let on_turn = replies(&app, &conv).await.into_iter().filter(|(t, _)| t.as_deref() == Some(turn_id.as_str())).count();
         assert_eq!(on_turn, 1, "這一回合不會變成兩則（別句那則在它自己的外部回合上）");
+    }
+
+    /// Remote transcript paths are only shape-checked because the real file lives on the remote
+    /// host. A same-shaped local file must not be read as evidence for a remote bot.
+    #[tokio::test]
+    async fn a_remote_stop_never_reads_a_local_file_at_its_transcript_path() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", "預期 prompt").await;
+        sqlx::query("UPDATE projects SET host='remote-test' WHERE id=?")
+            .bind(&env.project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let scratch = tt::track(std::env::temp_dir().join(format!("am-remote-transcript-{}", db::ulid())));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let local_collision = scratch.join("remote.jsonl");
+        let private_text = "LOCAL-ONLY-TRANSCRIPT-9274";
+        std::fs::write(
+            &local_collision,
+            format!("{}\n", json!({"type":"user","message":{"role":"user","content":private_text}})),
+        )
+        .unwrap();
+
+        process(&app, &HookBody {
+            bot_id,
+            provider: "claude".into(),
+            payload: json!({
+                "hook_event_name": "Stop",
+                "session_id": "remote-session",
+                "prompt_id": "remote-turn",
+                "transcript_path": local_collision.to_string_lossy(),
+                "last_assistant_message": "remote reply",
+            }),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        }).await.unwrap();
+
+        let leaked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id=? AND content LIKE '%LOCAL-ONLY-TRANSCRIPT-9274%'",
+        )
+        .bind(&conv)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(leaked, 0, "daemon host 的同路徑檔案不可以當成 remote transcript 讀取");
+        let target = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!((target.status.as_str(), target.delivery.as_str()), ("completed", "ok"), "看不到 remote transcript 時照原本規則認領回合");
+    }
+
+    /// Provider matching is deliberately case-insensitive; accepted casing must still dispatch
+    /// the event instead of durably consuming it as an unknown provider event.
+    #[tokio::test]
+    async fn accepted_provider_case_variants_still_process_stop_events() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _, turn_id) = unknown_turn(&app, &env.project_id, "claude", "prompt").await;
+
+        process(&app, &HookBody {
+            bot_id,
+            provider: "Claude".into(),
+            payload: json!({"hook_event_name":"Stop", "session_id":"case-session", "prompt_id":"case-turn",
+                "last_assistant_message":"case reply"}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        }).await.unwrap();
+
+        let target = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!((target.status.as_str(), target.delivery.as_str()), ("completed", "ok"));
+    }
+
+    /// The hook's custom tail reader must share transcript_read's regular-file guard; a FIFO in
+    /// the bot's own projects directory must not strand a spawn_blocking worker waiting for a writer.
+    #[tokio::test]
+    async fn a_fifo_hook_transcript_does_not_block_stop_processing() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _, _) = unknown_turn(&app, &env.project_id, "claude", "prompt").await;
+        let scratch = tt::track(std::env::temp_dir().join(format!("am-hook-fifo-{}", db::ulid())));
+        let path = own_projects_file(&app, &bot_id, &scratch, "blocked.jsonl").await;
+        assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+        let body = HookBody {
+            bot_id,
+            provider: "claude".into(),
+            payload: json!({"hook_event_name":"Stop", "session_id":"fifo-session", "prompt_id":"fifo-turn",
+                "transcript_path":path.to_string_lossy(), "last_assistant_message":"done"}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        let app_for_task = app.clone();
+        let mut task = tokio::spawn(async move { process(&app_for_task, &body).await });
+        let quickly_finished = tokio::time::timeout(Duration::from_secs(3), &mut task).await;
+        if quickly_finished.is_err() {
+            // Release a buggy blocking open before asserting, so the red test never leaks a thread.
+            let fifo = path.clone();
+            std::thread::spawn(move || drop(std::fs::OpenOptions::new().write(true).open(fifo).unwrap())).join().unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(3), &mut task).await;
+        }
+        assert!(quickly_finished.is_ok(), "FIFO path held Stop processing for over three seconds");
+        quickly_finished.unwrap().unwrap().unwrap();
     }
 
     /// 備援剛把回合關掉、沒存回覆（這個 run 已經沒有 in-flight 回合）。
@@ -4405,7 +4521,7 @@ mod external_claim_tests {
             v["toolUseResult"] = body;
             v
         };
-        let path = env.dir.join("asks.jsonl");
+        let path = own_projects_file(&app, &bot_id, &env.dir, "asks.jsonl").await;
         let lines = [
             // 這一回合開始之前就答完的（fork／resume 帶來的舊提問）：不記。
             ask("old"),
@@ -4454,7 +4570,7 @@ mod external_claim_tests {
             .bind(&long_ago).bind(&long_ago).bind(&old_turn).execute(&app.db).await.unwrap();
         let qs = json!([{"question": "要不要？", "header": "確認", "options": []}]);
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let path = env.dir.join("ext.jsonl");
+        let path = own_projects_file(&app, &bot_id, &env.dir, "ext.jsonl").await;
         std::fs::write(&path, format!("{}\n{}\n",
             json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "AskUserQuestion", "input": {"questions": qs}}]}}),
             json!({"type": "user", "timestamp": now, "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x"}]}, "toolUseResult": {"questions": qs, "answers": {"要不要？": "要"}}}),
