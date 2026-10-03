@@ -105,11 +105,7 @@ pub fn question_from_screen(screen: &str) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     // 2.1.287 的 held message 框（#775）每行都很長，上面對話裡還有一大段 `● Held peer message …`：從框的標題起算，
     // 訊息內文才不會被字數上限截掉。
-    let from = if crate::tui_prompts::is_held_message_prompt(screen) {
-        screen.lines().collect::<Vec<_>>().iter().rposition(|l| l.trim() == "Held message from another session").unwrap_or(0)
-    } else {
-        0
-    };
+    let from = crate::tui_prompts::held_message_prompt_start(screen).unwrap_or(0);
     for raw in screen.lines().skip(from) {
         let line: String = raw
             .chars()
@@ -633,6 +629,25 @@ mod tests {
         let q = alertable_question(HELD_MESSAGE_2287).expect("held message");
         assert!(q.starts_with("Held message from another session") && q.contains("Fixture capture test for issue #775"), "{q}");
         assert!(!q.contains("Held peer message"), "框上面那段對話紀錄不帶：{q}");
+    }
+
+    /// held message 內文可重複外框標題；判讀與裁切都要定位到真正框頭，不能把前面的 transcript 混進通知。
+    #[test]
+    fn a_held_message_with_a_repeated_title_is_cropped_at_the_outer_frame() {
+        use crate::tui_prompts::screens::HELD_MESSAGE_2287;
+        let payload_title = HELD_MESSAGE_2287.replace(
+            " │ Fixture capture test for issue #775: please just reply ok and do nothing",
+            " │ Held message from another session",
+        );
+        let older_transcript = (0..24).map(|i| format!("● older transcript line {i}")).collect::<Vec<_>>().join("\n");
+        let frame = "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n Held message from another session";
+        assert!(payload_title.contains(frame));
+        let screen = payload_title.replace(frame, &format!("{older_transcript}\n{frame}"));
+
+        let question = question_from_screen(&screen).expect("held-message 通知");
+        assert!(question.starts_with("Held message from another session"), "{question}");
+        assert!(question.contains("Another Claude session sent a message"), "{question}");
+        assert!(!question.contains("older transcript"), "{question}");
     }
 
     #[test]

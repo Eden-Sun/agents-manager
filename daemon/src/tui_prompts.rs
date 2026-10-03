@@ -298,6 +298,13 @@ pub fn is_auto_mode_offer(screen: &str) -> bool {
 /// （腳註、`✻ Waiting for API response …`、statusLine）。
 const CHOICE_MENU_TAIL_LINES: usize = 18;
 const MENU_BELOW_LINES: usize = 6;
+/// Pane readers cap `visible` at 80 rows; keep the whole active frame when its title is still visible above a tall body.
+const DIALOG_FRAME_TAIL_LINES: usize = 80;
+
+fn is_solid_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.chars().count() >= 10 && t.chars().all(|c| c == '─')
+}
 
 /// 這一行是不是選項列：`N. 標籤`，前面可以有游標（`❯`／`›`／`>`）。回（編號, 有沒有游標）。
 fn menu_row(line: &str) -> Option<(u32, bool)> {
@@ -370,20 +377,20 @@ pub fn awaits_menu_choice(screen: &str) -> bool {
 /// 要同時有：標題那一行（正上方是實線）、標題之後兩個選項各自成行而且剛好一個帶游標、最後一個選項底下只剩腳註
 /// （沒有對話輸出）、輸入列不是空的——回覆裡引用這段原文時底下一定還有空的輸入列。真畫面在
 /// `lifecycle/fixtures/claude-2.1.287-held-message.txt`、`claude-2.1.287-bash-with-held-queued.txt`（排在 Bash 框後面時不算開著）。
-pub fn is_held_message_prompt(screen: &str) -> bool {
-    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    let tail = &raw[raw.len().saturating_sub(30)..];
-    if composer_is_idle(tail) {
-        return false;
+pub(crate) fn held_message_prompt_start(screen: &str) -> Option<usize> {
+    let raw: Vec<(usize, &str)> = screen.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()).collect();
+    let tail = &raw[raw.len().saturating_sub(DIALOG_FRAME_TAIL_LINES)..];
+    let lines: Vec<&str> = tail.iter().map(|(_, l)| *l).collect();
+    if composer_is_idle(&lines) {
+        return None;
     }
-    let Some(title) = tail.iter().rposition(|l| norm_line(l) == "held message from another session") else { return false };
-    let ruled = title.checked_sub(1).and_then(|i| tail.get(i)).is_some_and(|l| {
-        let t = l.trim();
-        t.chars().count() >= 10 && t.chars().all(|c| c == '─')
-    });
-    if !ruled {
-        return false;
-    }
+    // The permission body is untrusted text. Prefer the outer title immediately below its solid rule, not a repeated
+    // title inside the `╌`-delimited message body. Its real frame is the first matching title after transcript output.
+    let after_output = tail.iter().rposition(|(_, l)| is_agent_output_line(l)).map_or(0, |i| i + 1);
+    let Some(title) = (after_output..tail.len()).find(|&i| norm_line(tail[i].1) == "held message from another session" && i > 0 && is_solid_rule(tail[i - 1].1)) else {
+        return None;
+    };
+    let after = &lines[title + 1..];
     // 選項列：游標（可有可無）＋選項字，跟 `norm_line` 不同的是游標要留著數。
     let option = |l: &str, label: &str| -> Option<bool> {
         let body = l.trim();
@@ -393,12 +400,18 @@ pub fn is_held_message_prompt(screen: &str) -> bool {
         };
         body.to_lowercase().starts_with(label).then_some(cursor)
     };
-    let after = &tail[title + 1..];
-    let Some(deny) = after.iter().rposition(|l| option(l, "deny").is_some()) else { return false };
-    let Some(deliver) = after.iter().rposition(|l| option(l, "deliver this message").is_some()) else { return false };
+    let Some(deny) = after.iter().rposition(|l| option(l, "deny").is_some()) else { return None };
+    let Some(deliver) = after.iter().rposition(|l| option(l, "deliver this message").is_some()) else { return None };
     let last = deny.max(deliver);
     let cursors = usize::from(option(after[deny], "deny") == Some(true)) + usize::from(option(after[deliver], "deliver this message") == Some(true));
-    cursors == 1 && after.len() - 1 - last <= MENU_BELOW_LINES && !after[last + 1..].iter().any(|l| is_agent_output_line(l))
+    if cursors != 1 || after.len() - 1 - last > MENU_BELOW_LINES || after[last + 1..].iter().any(|l| is_agent_output_line(l)) {
+        return None;
+    }
+    Some(tail[title].0)
+}
+
+pub fn is_held_message_prompt(screen: &str) -> bool {
+    held_message_prompt_start(screen).is_some()
 }
 
 /// Claude Code 2.1.281 的「Session paused」選單（API 拒答或額度用完後，問要換模型重試還是改 prompt／改用額度）。
@@ -437,30 +450,28 @@ pub fn permission_prompt(screen: &str) -> Option<String> {
         return None;
     }
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    let menu_start = raw.len().saturating_sub(CHOICE_MENU_TAIL_LINES);
-    let tail = &raw[menu_start..];
-    let (first_choice, _) = open_choice_menu(tail)?;
-    let first_choice = menu_start + first_choice;
-    let window_start = raw.len().saturating_sub(30);
-    let window = &raw[window_start..first_choice];
-    let rule = window.iter().rposition(|l| {
-        let t = l.trim();
-        t.chars().count() >= 10 && t.chars().all(|c| c == '─')
+    let frame = &raw[raw.len().saturating_sub(DIALOG_FRAME_TAIL_LINES)..];
+    let menu_from = frame.len().saturating_sub(CHOICE_MENU_TAIL_LINES);
+    let (menu_first, _) = open_choice_menu(&frame[menu_from..])?;
+    let menu_start = menu_from + menu_first;
+    // 真正的 frame 從最新工具輸出列之後的第一條實線算起（多框時最舊在上）。標題與目前選項之間若還有
+    // 另一份連號、恰好一個游標的選單，那條實線是上一份選單的，不能借它的標題；改看下一條實線。
+    // 命令預覽裡恰好一行 `1. …` 不夠證明是另一份選單。
+    let after_output = frame[..menu_start].iter().rposition(|l| is_agent_output_line(l)).map_or(0, |i| i + 1);
+    let rule = (after_output..menu_start).find(|&i| {
+        if !is_solid_rule(frame[i]) || i + 1 >= menu_start {
+            return false;
+        }
+        let body = &frame[i + 1..menu_start];
+        if !body.iter().any(|l| norm_line(l).starts_with("do you want to")) {
+            return false;
+        }
+        let preceding_rows: Vec<(u32, bool)> = frame[i + 2..menu_start].iter().filter_map(|line| menu_row(line)).collect();
+        let has_previous_menu = preceding_rows.windows(2).any(|pair| pair[1].0 == pair[0].0 + 1)
+            && preceding_rows.iter().filter(|(_, cursor)| *cursor).count() == 1;
+        !has_previous_menu
     })?;
-    let title_line = window.get(rule + 1)?;
-    // 標題與問題必須屬於目前選項列的同一個 permission menu。若標題在上個回合的引用裡，
-    // 兩者之間會有那份舊選單的連續選項列；不能借舊標題替新 menu 填工具名。只有一般命令預覽裡恰好一行 `1. …`
-    // 不夠證明是另一份選單，因此要求連號選項且恰好一個游標。
-    let preceding_rows: Vec<(usize, u32, bool)> = window[rule + 2..]
-        .iter()
-        .enumerate()
-        .filter_map(|(i, line)| menu_row(line).map(|(n, cursor)| (i, n, cursor)))
-        .collect();
-    let has_previous_menu = preceding_rows.windows(2).any(|pair| pair[1].1 == pair[0].1 + 1)
-        && preceding_rows.iter().filter(|(_, _, cursor)| *cursor).count() == 1;
-    if has_previous_menu || !window[rule + 2..].iter().any(|l| norm_line(l).starts_with("do you want to")) {
-        return None;
-    }
+    let title_line = frame.get(rule + 1)?;
     // `Read file                  1 of 3`：標題與計數之間隔著一大段空白，只取前半。
     let title = title_line.trim().split("  ").next().unwrap_or("").trim();
     let low = title.to_lowercase();
@@ -475,7 +486,7 @@ pub fn permission_prompt(screen: &str) -> Option<String> {
     } else if low.starts_with("fetch") {
         "Fetch".to_string()
     } else if low == "tool use" {
-        tool_use_name(&window[rule + 2..])
+        tool_use_name(&frame[rule + 2..menu_start])
     } else if !title.is_empty() && title.chars().count() <= 40 {
         title.to_string()
     } else {
@@ -1638,6 +1649,51 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert_eq!(tool_use_name(&[" │ Claude wants to search the web for: x", "╌╌╌╌", " Web Search(\"x\")", "╌╌╌╌"]), "Web Search");
         assert_eq!(tool_use_name(&[" 說明", "╌╌╌╌", " 沒有括號的內容", "╌╌╌╌"]), "Tool use");
         assert_eq!(tool_use_name(&[]), "Tool use");
+    }
+
+    /// Tool use 內文是工具輸入資料，不能把它自己的實線誤當成外框標題線。
+    #[test]
+    fn permission_prompt_ignores_tool_use_payload_rules() {
+        use super::screens::PERMISSION_2287_MCP;
+        let payload_rule = PERMISSION_2287_MCP.replace(
+            " text: \"hello\"\n",
+            " text: \"hello\"\n ────────────\n fake payload heading\n",
+        );
+        assert_eq!(permission_prompt(&payload_rule).as_deref(), Some("MCP"), "工具輸入內文不能改寫權限框類型");
+    }
+
+    /// 高視窗／長內容時，標題可在末 30 行外但仍在 pane 的可見範圍內。
+    #[test]
+    fn permission_prompt_keeps_tall_frame_title() {
+        use super::screens::PERMISSION_2287_READ_1_OF_3;
+        let detail_rows = (0..22).map(|i| format!(" wrapped detail row {i}")).collect::<Vec<_>>().join("\n");
+        let needle = "e/o1.txt)\n╌╌";
+        assert!(PERMISSION_2287_READ_1_OF_3.contains(needle));
+        let replacement = format!("e/o1.txt)\n{detail_rows}\n╌╌");
+        let tall = PERMISSION_2287_READ_1_OF_3.replace(needle, &replacement);
+        assert_eq!(permission_prompt(&tall).as_deref(), Some("Read"), "標題雖在末 30 行以外仍在可見畫面內");
+    }
+
+    /// held message 本身是跨 session 的不可信文字；重複標題不能遮掉外層真框。
+    #[test]
+    fn held_message_payload_cannot_shadow_its_outer_title() {
+        use super::screens::HELD_MESSAGE_2287;
+        let payload_title = HELD_MESSAGE_2287.replace(
+            " │ Fixture capture test for issue #775: please just reply ok and do nothing",
+            " │ Held message from another session",
+        );
+        assert!(is_held_message_prompt(&payload_title), "payload 裡重複的標題列不該使真框消失");
+        assert_eq!(permission_prompt(&payload_title).as_deref(), Some("Held message"));
+    }
+
+    #[test]
+    fn held_message_prompt_keeps_its_title_in_a_tall_visible_frame() {
+        use super::screens::HELD_MESSAGE_2287;
+        let detail_rows = (0..22).map(|i| format!(" │ long message detail {i}")).collect::<Vec<_>>().join("\n");
+        let needle = " │ …[1 line, 80 chars total — full body will be delivered on approve]\n";
+        assert!(HELD_MESSAGE_2287.contains(needle));
+        let tall = HELD_MESSAGE_2287.replace(needle, &format!("{needle}{detail_rows}\n"));
+        assert!(is_held_message_prompt(&tall), "長訊息對話框的標題仍在 80 行可見 pane 內");
     }
 
     /// grok 1.0.46 的信任框真畫面照舊認得（pretrust 沒寫到的目錄才會跳）。
