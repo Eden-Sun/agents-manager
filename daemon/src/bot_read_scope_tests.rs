@@ -41,6 +41,17 @@ async fn get(app: Arc<App>, path: &str, auth: &str) -> String {
     .await
 }
 
+async fn send(app: Arc<App>, method: &str, path: &str, auth: &str, payload: &str) -> String {
+    raw(
+        app,
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        ),
+    )
+    .await
+}
+
 fn body(response: &str) -> &str {
     response.split_once("\r\n\r\n").map(|(_, body)| body).unwrap_or("")
 }
@@ -52,6 +63,29 @@ fn assert_role_gate(response: &str, path: &str) {
             && (body(response).contains("\"reason\":\"role_required\"") || body(response).contains("\"reason\":\"user_only\"")),
         "ordinary bot read was not rejected at the AGM boundary for {path}: {response}"
     );
+}
+
+fn assert_user_only(response: &str, path: &str) {
+    assert!(
+        response.starts_with("HTTP/1.1 403") && body(response).contains("\"reason\":\"user_only\""),
+        "Bot principal must be rejected as user_only at {path}: {response}"
+    );
+}
+
+fn assert_no_browser_state_events(events: &mut tokio::sync::broadcast::Receiver<crate::state::WsEvent>) {
+    loop {
+        match events.try_recv() {
+            Ok(event) => assert!(
+                !matches!(event.kind.as_str(), "draft_updated" | "bot_read" | "group_read"),
+                "rejected Bot request emitted a browser-state event: {event:?}"
+            ),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => return,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(count)) => {
+                panic!("test event receiver unexpectedly lagged by {count}")
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return,
+        }
+    }
 }
 
 #[tokio::test]
@@ -257,4 +291,162 @@ async fn supervisor_management_reads_require_user_or_a_verified_agm_role() {
         let as_agm = get(e.app.clone(), path, &bot_headers(&caller)).await;
         assert!(!as_agm.contains("role_required"), "AGM role retains required management read at {path}: {as_agm}");
     }
+}
+
+#[tokio::test]
+async fn browser_drafts_and_shared_read_marks_are_user_only() {
+    let e = crate::testing::env().await;
+    let caller = distinct_bot(&e, &e.project_id, "browser-state-caller").await;
+    crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+
+    let own_draft_key = format!("bot:{}", caller.id);
+    let private_draft_key = "shell:local/private-pane";
+    crate::drafts::put(&e.app.db, &own_draft_key, "unsent-private-draft").await.unwrap();
+    crate::drafts::put(&e.app.db, private_draft_key, "unsent-shell-command").await.unwrap();
+    let conversation = db::conversation_id(&e.app.db, &caller.id).await.unwrap();
+    let at = db::now();
+    sqlx::query("INSERT INTO messages (id,conversation_id,role,content,source,created_at) VALUES (?,?, 'assistant','unread bot reply','hook',?)")
+        .bind(db::ulid())
+        .bind(&conversation)
+        .bind(&at)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    let group_turn = db::ulid();
+    sqlx::query("INSERT INTO turns (id,conversation_id,origin,status,created_at,completed_at) VALUES (?,?,'web','completed',?,?)")
+        .bind(&group_turn)
+        .bind(&conversation)
+        .bind(&at)
+        .bind(&at)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,group_id,created_at) VALUES (?,?,?,'user','group prompt','web','shared-group',?)")
+        .bind(db::ulid())
+        .bind(&conversation)
+        .bind(&group_turn)
+        .bind(&at)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,created_at) VALUES (?,?,?,'assistant','group reply','hook',?)")
+        .bind(db::ulid())
+        .bind(&conversation)
+        .bind(&group_turn)
+        .bind(&at)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(crate::read_marks::unread_counts(&e.app.db).await.unwrap().get(&caller.id), Some(&2));
+    assert_eq!(crate::read_marks::group_unread_counts(&e.app.db).await.unwrap().get(&e.project_id), Some(&1));
+    let mut events = e.app.subscribe();
+    let bot_auth = bot_headers(&caller);
+    let user_auth = format!("X-AM-Token: {}\r\n", e.app.ui_token);
+
+    for is_agm in [false, true] {
+        if is_agm {
+            crate::supervisor::store::set_env(&e.app.db, &caller.id, &e.project_id, "/tmp").await.unwrap();
+        }
+        let list = get(e.app.clone(), "/api/drafts", &bot_auth).await;
+        assert_user_only(&list, "GET /api/drafts");
+        let write = send(
+            e.app.clone(),
+            "PUT",
+            &format!("/api/drafts/bot%3A{}", caller.id),
+            &bot_auth,
+            r#"{"text":"attacker-overwrite","client_id":"worker"}"#,
+        )
+        .await;
+        assert_user_only(&write, "PUT /api/drafts/{key}");
+        let response = send(
+            e.app.clone(),
+            "POST",
+            &format!("/api/bots/{}/read", caller.id),
+            &bot_auth,
+            "{}",
+        )
+        .await;
+        assert_user_only(&response, if is_agm { "POST /api/bots/{id}/read (AGM)" } else { "POST /api/bots/{id}/read" });
+        let response = send(
+            e.app.clone(),
+            "POST",
+            &format!("/api/projects/{}/group/read", e.project_id),
+            &bot_auth,
+            "{}",
+        )
+        .await;
+        assert_user_only(&response, if is_agm { "POST /api/projects/{id}/group/read (AGM)" } else { "POST /api/projects/{id}/group/read" });
+        assert_no_browser_state_events(&mut events);
+    }
+    for (key, expected) in [(own_draft_key.as_str(), "unsent-private-draft"), (private_draft_key, "unsent-shell-command")] {
+        let text: String = sqlx::query_scalar("SELECT text FROM composer_drafts WHERE key=?")
+            .bind(key)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(text, expected, "denied Bot draft writes must not change the row");
+    }
+    let bot_mark: Option<String> = sqlx::query_scalar("SELECT read_at FROM bot_reads WHERE bot_id=?")
+        .bind(&caller.id)
+        .fetch_optional(&e.app.db)
+        .await
+        .unwrap();
+    let group_mark: Option<String> = sqlx::query_scalar("SELECT read_at FROM project_group_reads WHERE project_id=?")
+        .bind(&e.project_id)
+        .fetch_optional(&e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(bot_mark, None, "denied Bot request must not advance the bot read mark");
+    assert_eq!(group_mark, None, "denied Bot request must not advance the group read mark");
+    assert_eq!(crate::read_marks::unread_counts(&e.app.db).await.unwrap().get(&caller.id), Some(&2), "denied Bot request leaves the bot's unread badge unchanged");
+    assert_eq!(crate::read_marks::group_unread_counts(&e.app.db).await.unwrap().get(&e.project_id), Some(&1), "denied Bot request leaves the project's group unread badge unchanged");
+    assert_no_browser_state_events(&mut events);
+
+    let user_list = get(e.app.clone(), "/api/drafts", &user_auth).await;
+    assert!(user_list.starts_with("HTTP/1.1 200") && body(&user_list).contains("unsent-private-draft"), "User retains shared draft reads: {user_list}");
+    let user_write = send(
+        e.app.clone(),
+        "PUT",
+        &format!("/api/drafts/bot%3A{}", caller.id),
+        &user_auth,
+        r#"{"text":"user-updated-draft","client_id":"browser"}"#,
+    )
+    .await;
+    assert!(user_write.starts_with("HTTP/1.1 200"), "User retains draft writes: {user_write}");
+    for path in [format!("/api/bots/{}/read", caller.id), format!("/api/projects/{}/group/read", e.project_id)] {
+        let marked = send(e.app.clone(), "POST", &path, &user_auth, "{}").await;
+        assert!(marked.starts_with("HTTP/1.1 200"), "User retains read-mark updates at {path}: {marked}");
+    }
+    assert_eq!(crate::read_marks::unread_counts(&e.app.db).await.unwrap().get(&caller.id), None, "User read marks clear the bot unread badge as before");
+    assert_eq!(crate::read_marks::group_unread_counts(&e.app.db).await.unwrap().get(&e.project_id), None, "User read marks clear the group unread badge as before");
+}
+
+#[tokio::test]
+async fn memory_and_pane_preview_reads_are_user_only_for_plain_and_agm_bots() {
+    let e = crate::testing::env().await;
+    let caller = distinct_bot(&e, &e.project_id, "memory-read-caller").await;
+    crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+    let pane_id = "unrelated-private-pane";
+    e.herdr.screens.lock().unwrap().insert(pane_id.into(), "private terminal sentinel".into());
+    let bot_auth = bot_headers(&caller);
+    for is_agm in [false, true] {
+        if is_agm {
+            crate::supervisor::store::set_env(&e.app.db, &caller.id, &e.project_id, "/tmp").await.unwrap();
+        }
+        for path in [
+            "/api/mem".to_string(),
+            "/api/mem/processes?host=unknown-host".to_string(),
+            format!("/api/mem/processes/pane?host=local&pane_id={pane_id}"),
+        ] {
+            let before = e.herdr.calls.lock().unwrap().len();
+            let response = get(e.app.clone(), &path, &bot_auth).await;
+            assert_user_only(&response, &path);
+            assert_eq!(e.herdr.calls.lock().unwrap().len(), before, "denied Bot memory read must not issue a Herdr RPC at {path}");
+        }
+    }
+
+    let user_auth = format!("X-AM-Token: {}\r\n", e.app.ui_token);
+    let preview = get(e.app.clone(), &format!("/api/mem/processes/pane?host=local&pane_id={pane_id}"), &user_auth).await;
+    assert!(preview.starts_with("HTTP/1.1 200") && body(&preview).contains("private terminal sentinel"), "User retains pane preview: {preview}");
+    assert!(e.herdr.calls.lock().unwrap().iter().any(|(method, params)| method == "pane.read" && params["pane_id"] == pane_id), "User pane preview still invokes the configured Herdr session");
 }

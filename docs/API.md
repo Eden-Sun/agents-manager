@@ -951,8 +951,11 @@ bot 或 active Run 不存在 404。
 回 `{"project_id","read_mark":{"at","id","seq"},"unread"}`，並推 WS `group_read`（同形）；`at` 非 RFC 3339、`message_id` 格式錯誤或不屬於專案 → 400，專案不存在**或已軟刪** 404（跟 `/chat`、`/messages` 一致）。`seq` 是標記訊息仍存在時的插入序；已刪或舊 daemon 未提供時省略。
 `GET /api/state` 每個專案帶 `group_unread`（標記之後的**群組回覆回合**數：assistant 訊息、同回合的 user 訊息帶 `group_id`，依 `turn_id` 去重；沒有標記＝全部）與 `group_read_mark`（`{at,id,seq?}` 或 `null`）。同時間戳依訊息插入序判斷。升級建表時既有專案的標記設為當下。專案搬家（`project-transfer`）不帶群組標記，搬過去後群組未讀從全部開始。
 
+兩個 `POST .../read` 都是瀏覽器共用的已讀狀態，只接受 User principal；Bot（包含 AGM 角色）回 `403 user_only`，不會寫入標記或推事件。Service principal 不在這些路徑的 service scope 中，於全域授權時拒絕。
+
 ### 輸入框草稿 `GET /api/drafts`、`PUT /api/drafts/{key}`（使用者 2026-10-01）
 對話輸入框還沒送出的字，以 daemon 為準，各瀏覽器（手機、電腦）共用；網頁不再把草稿存在 localStorage。
+兩個端點只接受 User principal；Bot（包含 AGM 角色）回 `403 user_only`，禁止讀寫尚未送出的文字與 shell 指令草稿。Service principal 不在這些路徑的 service scope 中，於全域授權時拒絕。
 
 - `GET /api/drafts` → `{"drafts":[{"key","text","rev","updated_at"}]}`，只列有字的。
 - `PUT /api/drafts/{key}` body `{"text","client_id"?}`，`text:""`＝刪除。回 `{"key","rev","updated_at"}`。`key` 要 URL 編碼（`bot%3A<id>`）。
@@ -1339,6 +1342,8 @@ cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為
 `null`＝`[build.remote]` 沒開或還沒有人試過（**不是**連不上）。`enabled: false` 時 `target`／`checked_at`／`reason` 都是 `null`。
 
 ## 記憶體
+
+`GET /api/mem`、`GET /api/mem/processes` 與 `GET /api/mem/processes/pane` 是使用者檢查主機與 pane 的 UI 讀取面，只接受 User principal；Bot（包含 AGM 角色）回 `403 user_only`，service principal 不在這些路徑的 service scope 中。pane preview 在解析 host/session 或呼叫 Herdr 前拒絕非 User 請求。
 
 ### `GET /api/mem`
 嚴格 User-only；一般 Bot 與 AGM role Bot 都在 auth middleware 回 `403 user_only`，不會進入取樣或主機 RPC。回報 herdr 進程樹的常駐記憶體（SPEC §15），其中 `hosts`、`projects` 與 `browsers` 是跨主機彙總，包含 project 用量及瀏覽器分頁名稱與數量；Bot 不可用它盤點工作站狀態。
