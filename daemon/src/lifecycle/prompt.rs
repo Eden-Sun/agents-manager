@@ -2597,7 +2597,21 @@ mod send_now_tests {
         .unwrap();
         let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
         let run_id = db::ulid();
-        let transcript = env.dir.join(format!("session-{}.jsonl", db::ulid()));
+        let transcript = if kind == "claude" {
+            // Claude transcript evidence is trusted only inside this bot's configured project root.
+            let config_dir = env.dir.join("claude-config");
+            sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+                .bind(serde_json::json!({ "CLAUDE_CONFIG_DIR": config_dir.to_string_lossy() }).to_string())
+                .bind(&bot_id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            let transcript_dir = config_dir.join("projects/-t");
+            std::fs::create_dir_all(&transcript_dir).unwrap();
+            transcript_dir.join(format!("session-{}.jsonl", db::ulid()))
+        } else {
+            env.dir.join(format!("session-{}.jsonl", db::ulid()))
+        };
         std::fs::write(&transcript, "").unwrap();
         sqlx::query(
             "INSERT INTO runs (id, bot_id, state, agent_status, pane_id, herdr_session, native_session_id, transcript_path, status_json, started_at)

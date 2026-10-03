@@ -4612,7 +4612,7 @@ mod external_claim_tests {
         assert!(early.is_none(), "沒有當前 in-flight turn 時先不要掛到舊回合：{early:?}");
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let path = env.dir.join("external-ask.jsonl");
+        let path = own_projects_file(&app, &bot_id, &env.dir, "external-ask.jsonl").await;
         std::fs::write(
             &path,
             format!(
