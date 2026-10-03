@@ -450,3 +450,147 @@ async fn memory_and_pane_preview_reads_are_user_only_for_plain_and_agm_bots() {
     assert!(preview.starts_with("HTTP/1.1 200") && body(&preview).contains("private terminal sentinel"), "User retains pane preview: {preview}");
     assert!(e.herdr.calls.lock().unwrap().iter().any(|(method, params)| method == "pane.read" && params["pane_id"] == pane_id), "User pane preview still invokes the configured Herdr session");
 }
+
+#[tokio::test]
+async fn bot_project_timeline_and_bot_tree_reads_do_not_cross_to_siblings_or_ancestors() {
+    let e = crate::testing::env().await;
+    let parent = distinct_bot(&e, &e.project_id, "tree-parent").await;
+    let child = distinct_bot(&e, &e.project_id, "tree-child").await;
+    let grandchild = distinct_bot(&e, &e.project_id, "tree-grandchild").await;
+    let sibling = distinct_bot(&e, &e.project_id, "tree-sibling").await;
+    sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?")
+        .bind(&parent.id)
+        .bind(&child.id)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?")
+        .bind(&child.id)
+        .bind(&grandchild.id)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+    let mut markers = Vec::new();
+    for (bot, marker) in [
+        (&parent, "TREE_PARENT_MESSAGE_SECRET"),
+        (&child, "TREE_CHILD_MESSAGE_SECRET"),
+        (&grandchild, "TREE_GRANDCHILD_MESSAGE_SECRET"),
+        (&sibling, "TREE_SIBLING_MESSAGE_SECRET"),
+    ] {
+        let conversation = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?, 'assistant', ?, 'terminal_fallback', ?)")
+            .bind(db::ulid())
+            .bind(conversation)
+            .bind(marker)
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        markers.push(marker);
+    }
+
+    let parent_timeline = get(
+        e.app.clone(),
+        &format!("/api/projects/{}/messages", e.project_id),
+        &bot_headers(&parent),
+    )
+    .await;
+    assert!(parent_timeline.starts_with("HTTP/1.1 200"), "parent retains its scoped group timeline: {parent_timeline}");
+    for marker in [markers[0], markers[1], markers[2]] {
+        assert!(parent_timeline.contains(marker), "parent should read its tree's group messages ({marker}): {parent_timeline}");
+    }
+    assert!(!parent_timeline.contains(markers[3]), "project timeline leaked a sibling bot message: {parent_timeline}");
+
+    // A sibling's newest row must not consume the Bot's page limit or become a usable cursor.
+    let limited = get(
+        e.app.clone(),
+        &format!("/api/projects/{}/messages?limit=1", e.project_id),
+        &bot_headers(&parent),
+    )
+    .await;
+    assert!(limited.starts_with("HTTP/1.1 200") && limited.contains(markers[2]), "scope filtering happens before the page limit: {limited}");
+    assert!(!limited.contains(markers[3]), "the limited page leaked a sibling: {limited}");
+    let sibling_message_id: String = sqlx::query_scalar(
+        "SELECT m.id FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.bot_id=? AND m.content=?",
+    )
+    .bind(&sibling.id)
+    .bind(markers[3])
+    .fetch_one(&e.app.db)
+    .await
+    .unwrap();
+    let sibling_cursor = get(
+        e.app.clone(),
+        &format!("/api/projects/{}/messages?before={sibling_message_id}", e.project_id),
+        &bot_headers(&parent),
+    )
+    .await;
+    assert!(sibling_cursor.starts_with("HTTP/1.1 404"), "a sibling message cannot be used as a timeline cursor: {sibling_cursor}");
+    assert!(!sibling_cursor.contains(markers[3]), "foreign cursor error disclosed its message: {sibling_cursor}");
+
+    let child_state_response = get(e.app.clone(), "/api/state", &bot_headers(&child)).await;
+    assert!(child_state_response.starts_with("HTTP/1.1 200"), "child can read its scoped state: {child_state_response}");
+    let child_state = body(&child_state_response);
+    assert!(child_state.contains(&child.id) && child_state.contains(&grandchild.id), "child sees itself and descendants: {child_state}");
+    assert!(!child_state.contains(&parent.id) && !child_state.contains(&sibling.id), "child sees neither ancestor nor sibling: {child_state}");
+
+    for (target, should_read) in [(&child, true), (&grandchild, true), (&parent, false), (&sibling, false)] {
+        let response = get(
+            e.app.clone(),
+            &format!("/api/bots/{}/messages", target.id),
+            &bot_headers(&child),
+        )
+        .await;
+        if should_read {
+            assert!(response.starts_with("HTTP/1.1 200"), "child should read its own tree resource {}: {response}", target.id);
+        } else {
+            assert!(response.starts_with("HTTP/1.1 403"), "child must not read ancestor/sibling {}: {response}", target.id);
+            assert!(!response.contains("TREE_PARENT_MESSAGE_SECRET") && !response.contains("TREE_SIBLING_MESSAGE_SECRET"), "denial must not disclose message contents: {response}");
+        }
+    }
+
+    let user_timeline = get(
+        e.app.clone(),
+        &format!("/api/projects/{}/messages", e.project_id),
+        &format!("X-AM-Token: {}\r\n", e.app.ui_token),
+    )
+    .await;
+    assert!(user_timeline.starts_with("HTTP/1.1 200"), "UI timeline remains available: {user_timeline}");
+    assert!(user_timeline.contains(markers[3]), "UI keeps the full project timeline: {user_timeline}");
+}
+
+#[tokio::test]
+async fn global_memory_and_arbitrary_pane_previews_are_user_only() {
+    let e = crate::testing::env().await;
+    let caller = distinct_bot(&e, &e.project_id, "memory-read-caller").await;
+    let pane_preview = "/api/mem/processes/pane?host=local&pane_id=known-victim-pane";
+    let project_panes = format!("/api/projects/{}/panes", e.project_id);
+    let now = db::now();
+    sqlx::query(
+        "INSERT INTO panes (pane_id, host, workspace_id, tab_id, cwd, kind, project_id, purpose, foreground, last_output_at, first_seen, last_seen, owned_by, label)
+         VALUES ('w1:pPrivate','local','w1','t1','/private/PANE_CWD_SECRET','shell',?,'private-purpose','zsh',?,?,?,'user','PANE_LABEL_SECRET')",
+    )
+    .bind(&e.project_id)
+    .bind(&now)
+    .bind(&now)
+    .bind(&now)
+    .execute(&e.app.db)
+    .await
+    .unwrap();
+    let mut unexpected = Vec::new();
+    for path in ["/api/mem", pane_preview, project_panes.as_str()] {
+        let denied = get(e.app.clone(), path, &bot_headers(&caller)).await;
+        if !denied.starts_with("HTTP/1.1 403") || !body(&denied).contains("\"reason\":\"user_only\"") {
+            unexpected.push(format!("{path}: {denied}"));
+        }
+    }
+
+    let user_auth = format!("X-AM-Token: {}\r\n", e.app.ui_token);
+    let memory = get(e.app.clone(), "/api/mem", &user_auth).await;
+    assert!(memory.starts_with("HTTP/1.1 200"), "UI retains machine-wide memory data: {memory}");
+    let pane = get(e.app.clone(), pane_preview, &user_auth).await;
+    assert!(!body(&pane).contains("\"reason\":\"user_only\""), "UI pane preview path must remain accessible: {pane}");
+    let project_panes_for_user = get(e.app.clone(), &project_panes, &user_auth).await;
+    assert!(project_panes_for_user.starts_with("HTTP/1.1 200") && project_panes_for_user.contains("PANE_LABEL_SECRET"), "UI retains the project pane inventory: {project_panes_for_user}");
+    assert!(unexpected.is_empty(), "bot diagnostics leaked through unguarded read paths: {unexpected:#?}");
+}

@@ -121,15 +121,6 @@ async fn upload_slot(State(slots): State<Arc<tokio::sync::Semaphore>>, req: axum
     }
 }
 
-/// Browser-owned data and host inspection surfaces are User-only. Run this before body extractors
-/// and handlers so rejected principals cannot read or mutate shared browser state or resolve a pane.
-async fn user_only_api(req: axum::extract::Request, next: Next) -> Response {
-    if req.extensions().get::<RequestPrincipal>() != Some(&RequestPrincipal::User) {
-        return LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})).into_response();
-    }
-    next.run(req).await
-}
-
 /// AGM 的管理面 route layer：被證明身分的一般 bot 403（`supervisor::bot_requests::forbid_plain_bot`）。
 macro_rules! agm_gate {
     ($app:expr) => {
@@ -143,10 +134,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/state", get(get_state))
         .route("/projects", post(create_project))
         .route("/order", post(set_order))
-        .route("/intents", get(list_intents).layer(agm_gate!(app)))
+        .route("/intents", get(list_intents))
         // 對話輸入框的草稿（各瀏覽器共用，見 `drafts.rs`）。
-        .route("/drafts", get(crate::drafts::get_http).layer(axum::middleware::from_fn(user_only_api)))
-        .route("/drafts/{key}", axum::routing::put(crate::drafts::put_http).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/drafts", get(crate::drafts::get_http))
+        .route("/drafts/{key}", axum::routing::put(crate::drafts::put_http))
         .route("/projects/{id}", patch(patch_project).delete(delete_project_http))
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
@@ -207,23 +198,22 @@ pub fn router(app: Arc<App>) -> Router {
             "/bots/{id}/attachments",
             post(upload_attachment)
                 .layer(DefaultBodyLimit::max(crate::attach::MAX_BYTES + 4096))
-                .layer(axum::middleware::from_fn_with_state(upload_slots, upload_slot))
-                .layer(axum::middleware::from_fn(user_only_api)),
+                .layer(axum::middleware::from_fn_with_state(upload_slots, upload_slot)),
         )
-        .route("/attachments/{id}", get(get_attachment).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/attachments/{id}", get(get_attachment))
         .route("/bots/{id}/keys", post(keys_bot))
         .route("/bots/{id}/text", post(text_bot))
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/bots/{id}/pending-question", get(crate::pending_question::get_pending_question))
-        .route("/bots/{id}/local-image", get(crate::local_image::get).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/bots/{id}/local-image", get(crate::local_image::get))
         // bot 交給使用者的檔案（§6.5f）：只讀 outbox。scratchpad 不再給使用者，舊路徑明確 404。
-        .route("/bots/{id}/outbox", get(crate::outbox::list).layer(axum::middleware::from_fn(user_only_api)))
-        .route("/bots/{id}/outbox/file", get(crate::outbox::file).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/bots/{id}/outbox", get(crate::outbox::list))
+        .route("/bots/{id}/outbox/file", get(crate::outbox::file))
         .route("/bots/{id}/scratchpad", get(crate::outbox::scratchpad_gone))
         .route("/bots/{id}/scratchpad/file", get(crate::outbox::scratchpad_gone))
-        .route("/bots/{id}/read", post(crate::read_marks::post).layer(axum::middleware::from_fn(user_only_api)))
-        .route("/projects/{id}/group/read", post(crate::read_marks::post_group).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/bots/{id}/read", post(crate::read_marks::post))
+        .route("/projects/{id}/group/read", post(crate::read_marks::post_group))
         .route("/turns/{id}/abandon", post(abandon_turn))
         .route("/turns/{id}/withdraw", post(withdraw_turn))
         .route("/bots/{id}/abort", post(abort_bot))
@@ -260,10 +250,10 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/build/remote/test", post(crate::remote_cargo::test_settings))
         .route("/build/remote/install-toolchain", post(crate::remote_cargo::install_settings))
-        .route("/mem", get(get_mem).layer(axum::middleware::from_fn(user_only_api)))
-        .route("/mem/processes", get(get_mem_processes).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/mem", get(get_mem))
+        .route("/mem/processes", get(get_mem_processes))
         .route("/mem/processes/kill", post(kill_mem_process))
-        .route("/mem/processes/pane", get(get_mem_pane).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/mem/processes/pane", get(get_mem_pane))
         .route("/search/messages", get(search_messages).layer(agm_gate!(app)))
         // AGM 總管（docs/goals/agm-supervisor-environment-plan-2026-09-09.md）。
         .route("/supervisor", get(crate::supervisor::api::get_supervisor).layer(agm_gate!(app)))
@@ -718,113 +708,109 @@ pub(crate) enum RequestPrincipal {
     Service(String),
 }
 
-/// Management routes ordinary Bot principals must not invoke. AGM role bots can pass this
-/// boundary, then remain subject to their existing route/resource checks.
-const BOT_USER_ONLY_ROUTES: &[(&str, &str)] = &[
-    ("GET", "/api/fs/dirs"),
-    ("GET", "/api/bots/deleted"),
-    ("GET", "/api/build/remote"),
-    ("PUT", "/api/build/remote"),
-    ("POST", "/api/build/remote/test"),
-    ("POST", "/api/build/remote/install-toolchain"),
-    ("GET", "/api/judge/settings"),
-    ("PUT", "/api/judge/settings"),
-    ("GET", "/api/judge/shadow"),
-    ("GET", "/api/claude-update/review"),
-    ("POST", "/api/claude-update/review"),
-    ("POST", "/api/bots/{id}/credential/rotate"),
-    ("POST", "/api/bots/{id}/keys"),
-    ("POST", "/api/bots/{id}/text"),
-    ("POST", "/api/bots/restart-idle"),
-    ("PATCH", "/api/bots/{id}"),
-    ("DELETE", "/api/bots/{id}"),
-    ("POST", "/api/bots/{id}/start"),
-    ("POST", "/api/bots/{id}/restart"),
-    ("POST", "/api/bots/{id}/fork"),
-    ("POST", "/api/bots/{id}/promote"),
-    ("POST", "/api/bots/{id}/stop"),
-    ("POST", "/api/bots/{id}/rewind"),
-    ("POST", "/api/bots/{id}/interrupt"),
-    ("POST", "/api/bots/{id}/login"),
-    ("POST", "/api/bots/{id}/abort"),
-    ("POST", "/api/bots/{id}/pane/move-to-tab"),
-    ("POST", "/api/bots/{id}/attachments"),
-    ("POST", "/api/bots/{id}/read"),
-    ("POST", "/api/bots/{id}/restore"),
-    ("POST", "/api/bots/{id}/preview"),
-    ("DELETE", "/api/bots/{id}/preview"),
-    ("POST", "/api/projects"),
-    ("PATCH", "/api/projects/{id}"),
-    ("DELETE", "/api/projects/{id}"),
-    ("POST", "/api/projects/{id}/bots"),
-    ("POST", "/api/projects/{id}/github/refresh"),
-    ("POST", "/api/projects/{id}/git/commit"),
-    ("POST", "/api/projects/{id}/git/push"),
-    ("POST", "/api/projects/{id}/git/pull"),
-    ("POST", "/api/projects/{id}/group/read"),
-    ("POST", "/api/order"),
-    ("POST", "/api/hosts"),
-    ("DELETE", "/api/hosts/{name}"),
-    ("POST", "/api/hosts/{name}/reconnect"),
-    ("POST", "/api/hosts/{name}/tools/refresh"),
-    ("POST", "/api/hosts/{name}/tools/install"),
-    ("POST", "/api/hosts/{name}/identities/{identity}/login"),
-    ("POST", "/api/hosts/{name}/identities/{identity}/logout"),
-    ("POST", "/api/hosts/{name}/gh/login"),
-    ("POST", "/api/hosts/{name}/gh/cancel"),
-    ("GET", "/api/hosts/{name}/shells"),
-    ("GET", "/api/hosts/{name}/shells/{pane_id}/terminal"),
-    ("POST", "/api/hosts/{name}/shells"),
-    ("DELETE", "/api/hosts/{name}/shells/{pane_id}"),
-    ("POST", "/api/hosts/{name}/shells/{pane_id}/text"),
-    ("POST", "/api/hosts/{name}/shells/{pane_id}/keys"),
-    ("POST", "/api/identities"),
-    ("DELETE", "/api/identities/{name}"),
-    ("PUT", "/api/identities/{name}/disabled"),
-    ("GET", "/api/drafts"),
-    ("PUT", "/api/drafts/{key}"),
-    ("POST", "/api/panes/{id}/adopt"),
-    ("POST", "/api/panes/{id}/close"),
-    ("POST", "/api/panes/{id}/focus"),
-    ("GET", "/api/mem/processes"),
-    ("GET", "/api/mem"),
-    ("GET", "/api/mem/processes/pane"),
-    ("POST", "/api/mem/processes/kill"),
-    ("POST", "/api/missions/{id}/pause"),
-    ("POST", "/api/missions/{id}/resume"),
-    ("POST", "/api/missions/{id}/cancel"),
-    ("POST", "/api/quota/probe"),
-    ("POST", "/api/release-triage/dispatched"),
-    ("POST", "/api/release-triage/publish"),
-];
-
-/// Shared browser state, global memory/process summaries, and pane previews are User-only even
-/// for registered AGM roles. The AGM role exception below is for delegated management work, not
-/// acting as the shared UI user or browsing global workstation state.
-const BOT_STRICT_USER_ONLY_ROUTES: &[(&str, &str)] = &[
-    ("GET", "/api/bots/deleted"),
-    ("GET", "/api/drafts"),
-    ("PUT", "/api/drafts/{key}"),
-    ("POST", "/api/bots/{id}/read"),
-    ("POST", "/api/projects/{id}/group/read"),
-    ("GET", "/api/mem"),
-    ("GET", "/api/mem/processes/pane"),
-];
-
-fn bot_route_requires_strict_user(method: &str, path: &str) -> bool {
-    let method = if method == "HEAD" { "GET" } else { method };
-    BOT_STRICT_USER_ONLY_ROUTES
-        .iter()
-        .any(|(expected_method, pattern)| *expected_method == method && route_path_matches(pattern, path))
+/// Central policy for every Bot-principal route fence. `UserOnly` also denies registered AGM
+/// roles; `UserOrAgm` preserves delegated management access for registered roles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BotRoutePolicy {
+    UserOnly,
+    UserOrAgm,
 }
 
-fn bot_route_requires_user(method: &str, path: &str) -> bool {
-    // Axum dispatches HEAD through GET handlers, so the auth boundary must apply GET policy to
-    // HEAD before method routing can reach the same handler.
+const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
+    ("DELETE", "/api/hosts/{name}/shells/{pane_id}", BotRoutePolicy::UserOnly),
+    ("GET", "/api/attachments/{id}", BotRoutePolicy::UserOnly),
+    ("GET", "/api/bots/deleted", BotRoutePolicy::UserOnly),
+    ("GET", "/api/bots/{id}/local-image", BotRoutePolicy::UserOnly),
+    ("GET", "/api/bots/{id}/outbox", BotRoutePolicy::UserOnly),
+    ("GET", "/api/bots/{id}/outbox/file", BotRoutePolicy::UserOnly),
+    ("GET", "/api/build-slots", BotRoutePolicy::UserOnly),
+    ("GET", "/api/drafts", BotRoutePolicy::UserOnly),
+    ("GET", "/api/hosts/{name}/shells", BotRoutePolicy::UserOnly),
+    ("GET", "/api/hosts/{name}/shells/{pane_id}/terminal", BotRoutePolicy::UserOnly),
+    ("GET", "/api/intents", BotRoutePolicy::UserOnly),
+    ("GET", "/api/mem", BotRoutePolicy::UserOnly),
+    ("GET", "/api/mem/processes", BotRoutePolicy::UserOnly),
+    ("GET", "/api/mem/processes/pane", BotRoutePolicy::UserOnly),
+    ("GET", "/api/panes", BotRoutePolicy::UserOnly),
+    ("GET", "/api/projects/{id}/panes", BotRoutePolicy::UserOnly),
+    ("POST", "/api/bots/{id}/attachments", BotRoutePolicy::UserOnly),
+    ("POST", "/api/bots/{id}/keys", BotRoutePolicy::UserOnly),
+    ("POST", "/api/bots/{id}/read", BotRoutePolicy::UserOnly),
+    ("POST", "/api/bots/{id}/text", BotRoutePolicy::UserOnly),
+    ("POST", "/api/hosts/{name}/shells", BotRoutePolicy::UserOnly),
+    ("POST", "/api/hosts/{name}/shells/{pane_id}/keys", BotRoutePolicy::UserOnly),
+    ("POST", "/api/hosts/{name}/shells/{pane_id}/text", BotRoutePolicy::UserOnly),
+    ("POST", "/api/panes/{id}/adopt", BotRoutePolicy::UserOnly),
+    ("POST", "/api/panes/{id}/close", BotRoutePolicy::UserOnly),
+    ("POST", "/api/panes/{id}/focus", BotRoutePolicy::UserOnly),
+    ("POST", "/api/projects/{id}/group/read", BotRoutePolicy::UserOnly),
+    ("PUT", "/api/drafts/{key}", BotRoutePolicy::UserOnly),
+    ("GET", "/api/fs/dirs", BotRoutePolicy::UserOrAgm),
+    ("GET", "/api/build/remote", BotRoutePolicy::UserOrAgm),
+    ("PUT", "/api/build/remote", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/build/remote/test", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/build/remote/install-toolchain", BotRoutePolicy::UserOrAgm),
+    ("GET", "/api/judge/settings", BotRoutePolicy::UserOrAgm),
+    ("PUT", "/api/judge/settings", BotRoutePolicy::UserOrAgm),
+    ("GET", "/api/judge/shadow", BotRoutePolicy::UserOrAgm),
+    ("GET", "/api/claude-update/review", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/claude-update/review", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/credential/rotate", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/restart-idle", BotRoutePolicy::UserOrAgm),
+    ("PATCH", "/api/bots/{id}", BotRoutePolicy::UserOrAgm),
+    ("DELETE", "/api/bots/{id}", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/start", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/restart", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/fork", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/promote", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/stop", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/rewind", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/interrupt", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/login", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/abort", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/pane/move-to-tab", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/restore", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
+    ("DELETE", "/api/bots/{id}/preview", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/projects", BotRoutePolicy::UserOrAgm),
+    ("PATCH", "/api/projects/{id}", BotRoutePolicy::UserOrAgm),
+    ("DELETE", "/api/projects/{id}", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/projects/{id}/bots", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/projects/{id}/github/refresh", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/projects/{id}/git/commit", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/projects/{id}/git/push", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/projects/{id}/git/pull", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/order", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts", BotRoutePolicy::UserOrAgm),
+    ("DELETE", "/api/hosts/{name}", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/reconnect", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/tools/refresh", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/tools/install", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/identities/{identity}/logout", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/gh/login", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/gh/cancel", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/identities", BotRoutePolicy::UserOrAgm),
+    ("DELETE", "/api/identities/{name}", BotRoutePolicy::UserOrAgm),
+    ("PUT", "/api/identities/{name}/disabled", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/mem/processes/kill", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/missions/{id}/pause", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/missions/{id}/resume", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/missions/{id}/cancel", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/quota/probe", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/release-triage/dispatched", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/release-triage/publish", BotRoutePolicy::UserOrAgm),
+];
+
+fn bot_route_policy(method: &str, uri: &axum::http::Uri) -> Option<BotRoutePolicy> {
+    if bot_query_route_requires_user(method, uri) {
+        return Some(BotRoutePolicy::UserOrAgm);
+    }
     let method = if method == "HEAD" { "GET" } else { method };
-    BOT_USER_ONLY_ROUTES.iter().any(|(expected_method, pattern)| {
-        *expected_method == method && route_path_matches(pattern, path)
-    })
+    BOT_ROUTE_POLICIES
+        .iter()
+        .find(|(expected_method, pattern, _)| *expected_method == method && route_path_matches(pattern, uri.path()))
+        .map(|(_, _, policy)| *policy)
 }
 
 fn route_path_matches(pattern: &str, path: &str) -> bool {
@@ -918,21 +904,18 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         let uri = req.extensions().get::<OriginalUri>().map(|uri| &uri.0).unwrap_or_else(|| req.uri());
         let method = req.method().as_str();
         let path = uri.path();
-        let strict_user = bot_route_requires_strict_user(method, path);
-        let needs_user = strict_user || bot_route_requires_user(method, path) || bot_query_route_requires_user(method, uri);
-        let is_agm_role = if needs_user && !strict_user {
+        let policy = bot_route_policy(method, uri);
+        let is_agm_role = if policy == Some(BotRoutePolicy::UserOrAgm) {
             match crate::supervisor::roles::role_of_bot(&app.db, bot_id).await {
                 Ok(Some(_)) => true,
                 Ok(None) => false,
                 Err(error) => {
-                    tracing::error!(bot_id = %bot_id, error = ?error, "could not resolve AGM role for User-only route");
+                    tracing::error!(bot_id = %bot_id, error = ?error, "could not resolve AGM role for Bot route policy");
                     return StatusCode::SERVICE_UNAVAILABLE.into_response();
                 }
             }
-        } else {
-            false
-        };
-        if needs_user && (strict_user || !is_agm_role) {
+        } else { false };
+        if policy == Some(BotRoutePolicy::UserOnly) || (policy == Some(BotRoutePolicy::UserOrAgm) && !is_agm_role) {
             return bot_user_only().into_response();
         }
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
@@ -1041,23 +1024,6 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
     let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
     if parts.first() != Some(&"api") {
         return Ok(());
-    }
-
-    // Pane inventory and host-shell routes are human-operated interfaces, not bot resources.
-    // #810 #811 #812：行程清單、recovery journal、build 佇列也是 UI 診斷面（含別人的 argv／session／holder）。
-    // kill／pane 與非 `/api` 的 acquire 不在這裡擋。
-    let user_diagnostic = parts.get(1) == Some(&"panes")
-        || parts.get(1) == Some(&"drafts")
-        || (parts.get(1) == Some(&"mem") && matches!(method, "GET" | "HEAD"))
-        || parts.get(1) == Some(&"intents")
-        || parts.get(1) == Some(&"build-slots")
-        || (parts.get(1) == Some(&"projects") && parts.get(3) == Some(&"panes"))
-        || (parts.get(1) == Some(&"hosts") && parts.iter().any(|part| *part == "shells"));
-    if user_diagnostic {
-        return Err(bot_user_only());
-    }
-    if parts.get(1) == Some(&"bots") && parts.len() >= 4 && matches!(parts.get(3), Some(&"keys" | &"text")) {
-        return Err(bot_user_only());
     }
 
     let target = match (parts.get(1).copied(), parts.get(2).copied()) {
@@ -5652,10 +5618,16 @@ async fn get_project_messages(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
+    Extension(principal): Extension<RequestPrincipal>,
 ) -> Result<Json<Value>, LcError> {
     let limit: i64 = q.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100);
     let before = q.get("before").map(|s| s.as_str()).filter(|s| !s.is_empty());
-    Ok(Json(crate::group::messages(&app, &id, before, limit).await?))
+    let messages = match principal {
+        RequestPrincipal::User => crate::group::messages(&app, &id, before, limit).await?,
+        RequestPrincipal::Bot(bot_id) => crate::group::messages_for_bot_tree(&app, &id, before, limit, &bot_id).await?,
+        RequestPrincipal::Service(_) => return Err(bot_user_only()),
+    };
+    Ok(Json(messages))
 }
 
 /// SPEC §13.4: `@<bot>` / `@all` fan-out. No valid mention → 400 `{error:"no_mention", bots}`.
@@ -6303,7 +6275,14 @@ mod message_tests {
         let rowid: i64 = sqlx::query_scalar("SELECT rowid FROM messages WHERE id='m1'").fetch_one(&app.db).await.unwrap();
         assert_eq!(rest[1].1, rowid, "seq 就是 rowid，跟 before= 分頁用的同一把尺");
 
-        let Json(group) = get_project_messages(State(app.clone()), Path(e.project_id.clone()), Query(HashMap::new())).await.unwrap();
+        let Json(group) = get_project_messages(
+            State(app.clone()),
+            Path(e.project_id.clone()),
+            Query(HashMap::new()),
+            Extension(RequestPrincipal::User),
+        )
+        .await
+        .unwrap();
         assert_eq!(seqs(&group), rest, "群組時間軸帶同一個 seq");
 
         let mut rx = app.subscribe();
@@ -9589,16 +9568,49 @@ mod per_principal_auth_tests {
             );
         }
         assert_eq!(e.herdr.methods(), rpc_calls_before, "strict auth must reject before any host/session/pane RPC");
-        assert!(e.herdr.calls_to("pane.read").is_empty(), "User-only middleware must reject before pane_read");
-        assert!(e.herdr.calls_to("pane.size").is_empty(), "User-only middleware must reject before pane_size");
+        assert!(e.herdr.calls_to("pane.read").is_empty(), "central auth policy must reject before pane_read");
+        assert!(e.herdr.calls_to("pane.size").is_empty(), "central auth policy must reject before pane_size");
     }
 
     #[test]
     fn route_policy_matches_percent_decoded_static_segments() {
-        assert!(bot_route_requires_user("POST", "/api/projects/p1/%67it/push"));
-        assert!(bot_route_requires_strict_user("GET", "/api/draft%73"));
-        assert!(bot_route_requires_strict_user("HEAD", "/api/drafts"));
-        assert!(!bot_route_requires_user("POST", "/api/projects/p1/%ZZit/push"));
+        let uri = |path: &str| path.parse::<axum::http::Uri>().unwrap();
+        assert_eq!(bot_route_policy("POST", &uri("/api/projects/p1/%67it/push")), Some(BotRoutePolicy::UserOrAgm));
+        assert_eq!(bot_route_policy("GET", &uri("/api/draft%73")), Some(BotRoutePolicy::UserOnly));
+        assert_eq!(bot_route_policy("HEAD", &uri("/api/drafts")), Some(BotRoutePolicy::UserOnly));
+        assert!(!route_path_matches("/api/projects/{id}/git/push", "/api/projects/p1/%ZZit/push"));
+    }
+
+    #[test]
+    fn ui_only_routes_have_one_strict_central_bot_policy() {
+        let mut registered = std::collections::BTreeSet::new();
+        for (method, path, _) in BOT_ROUTE_POLICIES {
+            assert!(registered.insert((*method, *path)), "duplicate Bot policy entry: {method} {path}");
+        }
+        for (method, path) in [
+            ("GET", "/api/panes"),
+            ("POST", "/api/panes/w1:p1/adopt"),
+            ("GET", "/api/projects/p1/panes"),
+            ("GET", "/api/hosts/local/shells"),
+            ("GET", "/api/hosts/local/shells/w1:p1/terminal"),
+            ("POST", "/api/hosts/local/shells"),
+            ("DELETE", "/api/hosts/local/shells/w1:p1"),
+            ("POST", "/api/hosts/local/shells/w1:p1/text"),
+            ("POST", "/api/hosts/local/shells/w1:p1/keys"),
+            ("POST", "/api/bots/b1/keys"),
+            ("POST", "/api/bots/b1/text"),
+            ("POST", "/api/bots/b1/attachments"),
+            ("GET", "/api/attachments/a1"),
+            ("GET", "/api/bots/b1/local-image"),
+            ("GET", "/api/bots/b1/outbox"),
+            ("GET", "/api/bots/b1/outbox/file"),
+            ("GET", "/api/mem/processes"),
+            ("GET", "/api/intents"),
+            ("GET", "/api/build-slots"),
+        ] {
+            let uri = path.parse::<axum::http::Uri>().unwrap();
+            assert_eq!(bot_route_policy(method, &uri), Some(BotRoutePolicy::UserOnly), "{method} {path} must be covered once by the central strict Bot policy");
+        }
     }
 
     #[tokio::test]
@@ -10198,6 +10210,8 @@ mod per_principal_auth_tests {
         };
         let bot_headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot.id, bot.hook_token);
         let service_headers = "X-AM-Service-Id: unknown\r\nX-AM-Service-Token: ignored\r\n";
+        let bot_token_alone = raw_head(e.app.clone(), upgrade("/ws", &bot.hook_token, "")).await;
+        assert!(bot_token_alone.starts_with("HTTP/1.1 401"), "a Bot token alone cannot subscribe to User WebSocket events: {bot_token_alone}");
         for (identity, headers) in [
             ("Bot", bot_headers.as_str()),
             ("partial Bot", "X-AM-Bot-Token: ignored\r\n"),
@@ -10313,7 +10327,7 @@ mod per_principal_auth_tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
         });
-        for (method, pattern) in BOT_USER_ONLY_ROUTES {
+        for (method, pattern, _) in BOT_ROUTE_POLICIES {
             let path = pattern
                 .replace("{id}", &bot.id)
                 .replace("{name}", "local")
@@ -10376,6 +10390,8 @@ mod per_principal_auth_tests {
             let user = raw(e.app.clone(), request(path, &format!("X-AM-Token: {}\r\n", e.app.ui_token))).await;
             assert!(user.starts_with("HTTP/1.1 404") && !user.contains("user_only"), "User behavior is unchanged: {path}: {user}");
         }
+    }
+
     /// #810 #811 #812：行程清單、recovery journal、build 佇列是 UI 診斷面。一般 bot 讀得到別顆 bot 的 argv、
     /// session／路徑，以及別人的 build holder。使用者仍看完整內容；pane 的 acquire 不在 `/api` 底下，維持原樣。
     #[tokio::test]

@@ -41,8 +41,15 @@ pub async fn view_for_bot(app: &Arc<App>, caller: &str) -> Result<Value, LcError
         bots.retain_mut(|bot| {
             let visible = bot.get("id").and_then(Value::as_str).is_some_and(|id| visible_bots.contains(id));
             if visible {
-                for key in ["persona", "args", "identity", "env", "herdr_session", "unread", "read_mark"] {
-                    if let Some(fields) = bot.as_object_mut() {
+                if let Some(fields) = bot.as_object_mut() {
+                    let parent_is_visible = fields
+                        .get("parent_bot_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|parent| visible_bots.contains(parent));
+                    if !parent_is_visible {
+                        fields.remove("parent_bot_id");
+                    }
+                    for key in ["persona", "args", "identity", "env", "herdr_session", "unread", "read_mark"] {
                         fields.remove(key);
                     }
                 }
