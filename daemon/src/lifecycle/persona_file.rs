@@ -24,6 +24,107 @@ pub(crate) fn codex_profile(bot_id: &str) -> String {
     format!("am-parent-{}", bot_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect::<String>())
 }
 
+/// Soft-deleting a bot moves its private bot dir to trash, but the Codex profile lives outside it.
+/// Remove this bot's current profile and interrupted temp files so AG Man instructions do not outlive the bot.
+pub(crate) async fn remove_deleted_codex_profile(app: &Arc<App>, bot_id: &str, host: &str) -> anyhow::Result<()> {
+    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
+    if bot.kind != "codex" {
+        return Ok(());
+    }
+    let (home, conn) = if host == LOCAL_HOST {
+        (dirs::home_dir().ok_or_else(|| anyhow::anyhow!("local HOME is unavailable"))?.to_string_lossy().into_owned(), None)
+    } else {
+        let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+        let home = conn.home().await?;
+        (home, Some(conn))
+    };
+    let mut configured_homes = std::collections::BTreeSet::new();
+    // The bot may have changed identities since a previous start. Remove this bot-id-only profile
+    // from currently configured identity homes too; unrelated bots' profile names are untouched.
+    let identities = crate::tools::identities_for_host(app, host).await;
+    for identity in &identities {
+        if let Some(value) = identity.env.get("CODEX_HOME") {
+            let expanded = crate::config::expand_home(value, &home);
+            if std::path::Path::new(&expanded).is_absolute() {
+                configured_homes.insert(expanded);
+            }
+        }
+    }
+    let selected_identity_home = bot
+        .identity
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|name| identities.iter().find(|i| i.name == name))
+        .and_then(|i| i.env.get("CODEX_HOME"));
+    let bot_home = bot.env().get("CODEX_HOME").cloned();
+    let active_home = bot_home.as_deref().or(selected_identity_home.map(String::as_str));
+    if let Some(value) = active_home {
+        let expanded = crate::config::expand_home(value, &home);
+        if std::path::Path::new(&expanded).is_absolute() {
+            configured_homes.insert(expanded);
+        }
+    }
+    if active_home.map_or(true, |value| !std::path::Path::new(&crate::config::expand_home(value, &home)).is_absolute()) {
+        configured_homes.insert(format!("{}/.codex", home.trim_end_matches('/')));
+    }
+    let profile = format!("{}.config.toml", codex_profile(bot_id));
+    let files = configured_homes.into_iter().map(|dir| format!("{dir}/{profile}")).collect::<Vec<_>>();
+    if host == LOCAL_HOST {
+        for file in files {
+            let path = std::path::Path::new(&file);
+            remove_profile_files(path.parent().unwrap_or(std::path::Path::new(".")), &profile)?;
+        }
+        return Ok(());
+    }
+    let Some(conn) = conn else { anyhow::bail!("remote host `{host}` has no connection") };
+    let script = remote_profile_cleanup_script_from_paths(&files);
+    let out = conn.ssh_exec(&script).await?;
+    if out.trim() != "AM_AGENT_PROFILE_REMOVED" {
+        anyhow::bail!("remote Codex persona cleanup did not confirm: {}", out.trim());
+    }
+    Ok(())
+}
+
+fn remove_profile_files(dir: &std::path::Path, profile: &str) -> std::io::Result<()> {
+    fn remove_if_file(path: &std::path::Path) -> std::io::Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    remove_if_file(&dir.join(profile))?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let hidden_tmp = format!(".{profile}.tmp-");
+    let tmp = format!("{profile}.tmp-");
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let file_type = entry.file_type()?;
+        if (name.starts_with(&hidden_tmp) || name.starts_with(&tmp)) && (file_type.is_file() || file_type.is_symlink()) {
+            remove_if_file(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn remote_profile_cleanup_script_from_paths(paths: &[String]) -> String {
+    let mut script = String::from("set -e\n");
+    for path in paths {
+        script.push_str(&format!(
+            "F={}\nD=$(dirname \"$F\")\nB=$(basename \"$F\")\nrm -f \"$F\" \"$D/.$B.tmp-\"* \"$F.tmp-\"*\n",
+            crate::hosts::sh_quote(path)
+        ));
+    }
+    script.push_str("printf 'AM_AGENT_PROFILE_REMOVED\\n'\n");
+    script
+}
+
 /// 把 `text` 寫成這顆 bot 的 persona 檔並回 argv 片段；`None`＝這次用不了檔案（呼叫端退回 inline）。
 /// `env` 是這次 pane 的 env（codex 的 `CODEX_HOME` 在裡面）；`md_configured`＝`[agents]` 有指檔（codex 才要多關 AGENTS.md）。
 pub(crate) async fn launch_args(
@@ -47,9 +148,9 @@ pub(crate) async fn launch_args(
         }
         "grok" => {
             let path = super::agent_md::install_in_bot_dir(app, bot, project, shim_dir, super::agent_md::PERSONA_FILE, text).await?;
-            // 同子 agent 的寫法（herdr_shim）：`--rules` 只收字串，給一行指向檔案的指示。
-            // 路徑用反引號框起來（跟 herdr_shim 的子 agent 同一個寫法）：有空白時才分得出哪裡到哪裡。
-            Some(vec!["--rules".into(), format!("AG Man 指示（硬規則，效力同系統指示）在 `{path}`：開始任何工作前先完整讀過並照做。")])
+            // `--rules` 只收字串，給一行指向檔案的指示。code span fence 比路徑裡任何連續反引號長，
+            // 避免特殊檔名關閉 fence 後把後面的安全指示變成可執行／可忽略的普通文字。
+            Some(vec!["--rules".into(), format!("AG Man 指示（硬規則，效力同系統指示）在 {}：開始任何工作前先完整讀過並照做。", code_span(&path))])
         }
         "codex" => {
             if has_own_profile(bot) {
@@ -91,7 +192,22 @@ pub(crate) fn fallback_notice(bot: &db::Bot) -> String {
 }
 
 fn has_own_profile(bot: &db::Bot) -> bool {
-    bot.args().iter().any(|a| a == "-p" || a == "--profile" || a.starts_with("--profile="))
+    bot.args().iter().any(|a| a == "-p" || (a.starts_with("-p") && !a.starts_with("--")) || a == "--profile" || a.starts_with("--profile="))
+}
+
+fn code_span(text: &str) -> String {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for ch in text.chars() {
+        if ch == '`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    let fence = "`".repeat(longest + 1);
+    format!("{fence} {text} {fence}")
 }
 
 /// 每顆 bot 一個 profile、只增不減：bot 刪了或換了 CODEX_HOME 就留在那裡（內容是 AG Man 規則）。寫完順手掃掉超過 30 天沒重寫的
@@ -215,7 +331,7 @@ mod tests {
     struct TmpDir(std::path::PathBuf);
     impl TmpDir {
         fn new(tag: &str) -> Self {
-            let d = std::env::temp_dir().join(format!("am-test-{tag}-{}", crate::db::ulid()));
+            let d = tt::track(std::env::temp_dir().join(format!("am-test-{tag}-{}", crate::db::ulid())));
             std::fs::create_dir_all(&d).unwrap();
             Self(d)
         }
@@ -235,14 +351,17 @@ mod tests {
     async fn codex_profile_survives_control_characters_too() {
         let (e, bot, project) = fixture("codex").await;
         let home = TmpDir::new("persona-ctl");
-        let text = "esc\u{1b}[31m del\u{7f} ff\u{0c} cr\rlone crlf\r\nend ''' \"\"\" \\u0041";
+        let text = "nul\u{0} esc\u{1b}[31m del\u{7f} ff\u{0c} cr\rlone crlf\r\nnel\u{85} c1\u{9f} end ''' \"\"\" \\u0041";
         let env = json!({"CODEX_HOME": home.path().to_string_lossy()});
-        launch_args(&e.app, &bot, &project, Some("/x/bin"), &env, text, false).await.unwrap();
-        let t: toml::Value = toml::from_str(&std::fs::read_to_string(home.path().join(format!("{}.config.toml", codex_profile(&bot.id)))).unwrap()).unwrap();
+        let args = launch_args(&e.app, &bot, &project, Some("/x/bin"), &env, text, false).await.unwrap();
+        assert!(args.iter().all(|a| !a.chars().any(char::is_control)), "only safe short args go to herdr: {args:?}");
+        let serialized = std::fs::read_to_string(home.path().join(format!("{}.config.toml", codex_profile(&bot.id)))).unwrap();
+        assert!(serialized.contains("\\u0085") && serialized.contains("\\u009F"), "C1 controls should be escaped in the on-disk basic string: {serialized:?}");
+        let t: toml::Value = toml::from_str(&serialized).unwrap();
         assert_eq!(t["developer_instructions"].as_str().unwrap(), text);
     }
 
-    /// grok 的那一行跟子 agent 的 `--rules`（herdr_shim）同一個寫法：路徑用反引號框起來（有空白才分得出來）。
+    /// grok 的 `--rules` 路徑用比最長反引號多一個的 fence，特殊檔名不能閉合 code span。
     #[tokio::test]
     async fn the_grok_rules_line_frames_the_path_in_backticks() {
         let (e, bot, project) = fixture("grok").await;
@@ -250,8 +369,19 @@ mod tests {
         let shim = format!("{}/bots/B1/bin", dir.path().display());
         let args = launch_args(&e.app, &bot, &project, Some(&shim), &json!({}), "RULES", false).await.unwrap();
         let path = format!("{}/bots/B1/persona.md", dir.path().display());
-        assert!(args[1].contains(&format!("`{path}`")), "{args:?}");
+        assert!(args[1].contains(&format!("` {path} `")), "{args:?}");
         assert!(!args[1].chars().any(char::is_control), "herdr 不收控制字元：{args:?}");
+    }
+
+    #[tokio::test]
+    async fn the_grok_rules_path_cannot_close_its_code_span() {
+        let (e, bot, project) = fixture("grok").await;
+        let dir = TmpDir::new("persona-`close``path");
+        let shim = format!("{}/bots/B1/bin", dir.path().display());
+        let args = launch_args(&e.app, &bot, &project, Some(&shim), &json!({}), "RULES", false).await.unwrap();
+        let path = format!("{}/bots/B1/persona.md", dir.path().display());
+        let fence = "`".repeat(3);
+        assert!(args[1].contains(&format!("{fence} {path} {fence}")), "{args:?}");
     }
 
     /// 路徑含控制字元（換行）：herdr 會拒絕整個 `agent start`（#772）→ 不帶那個參數、也不寫檔，退回（呼叫端會說一聲）。
@@ -295,6 +425,30 @@ mod tests {
         assert!(live.exists(), "新的別顆 bot 的 profile 不能動");
         assert!(child.exists() && mine.exists() && main_cfg.exists(), "不是 am-parent-* 的檔案一個都不能動（am-child-* 歸 herdr shim 掃）");
         assert!(home.join(format!("{}.config.toml", codex_profile(&bot.id))).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_codex_profile_cleanup_treats_a_hostile_path_as_data_and_is_scoped() {
+        let root = tt::track(std::env::temp_dir().join(format!("am-test-remote-profile-cleanup-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&root).unwrap();
+        let hostile = root.join("sp ace/'q' $(touch PWN)/`ticks`/line\nbreak");
+        std::fs::create_dir_all(&hostile).unwrap();
+        let profile = hostile.join("am-parent-X.config.toml");
+        let temp = hostile.join(".am-parent-X.config.toml.tmp-leftover");
+        let remote_temp = hostile.join("am-parent-X.config.toml.tmp-leftover");
+        let neighbor = hostile.join("am-parent-Y.config.toml");
+        for p in [&profile, &temp, &remote_temp, &neighbor] {
+            std::fs::write(p, "private = true\n").unwrap();
+        }
+        let script = remote_profile_cleanup_script_from_paths(&[profile.to_string_lossy().into_owned()]);
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).current_dir(&root).output().unwrap();
+
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "AM_AGENT_PROFILE_REMOVED");
+        assert!(!profile.exists() && !temp.exists() && !remote_temp.exists());
+        assert!(neighbor.exists(), "cleanup must be scoped to this exact profile");
+        assert!(!root.join("PWN").exists(), "path is data, never shell code");
     }
 
     /// 遠端：送過去的 script 也順手掃（同一趟 ssh）；只掃 `am-parent-*`。

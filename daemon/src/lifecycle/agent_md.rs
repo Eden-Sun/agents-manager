@@ -122,29 +122,40 @@ pub async fn write_private(app: &Arc<App>, project: &db::Project, path: &str, te
     }
 }
 
-/// 內容一樣就不動；否則 0600 的暫存檔寫好再 rename（讀的人看不到寫到一半的檔）。
+/// 寫入唯一、獨佔建立的 0600 暫存檔再 rename（讀的人看不到寫到一半的檔）。
 fn write_private_local(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     use std::io::Write as _;
-    if std::fs::read_to_string(path).ok().as_deref() == Some(text) {
+    let unchanged_private_file = std::fs::symlink_metadata(path).ok().is_some_and(|meta| {
+        if !meta.file_type().is_file() || std::fs::read_to_string(path).ok().as_deref() != Some(text) {
+            return false;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            return meta.permissions().mode() & 0o7777 == 0o600;
         }
+        #[cfg(not(unix))]
+        true
+    });
+    if unchanged_private_file {
         return Ok(());
     }
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{}.tmp-{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("md"), std::process::id()));
+    let tmp = dir.join(format!(".{}.tmp-{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("md"), crate::db::ulid()));
     let mut o = std::fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
+    o.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         o.mode(0o600);
     }
     // 寫不完（磁碟滿）或換不上：暫存檔（內容是 AG Man 規則）一律收掉，不留半份在 bot 目錄／CODEX_HOME。
-    let done = o.open(&tmp).and_then(|mut f| f.write_all(text.as_bytes())).and_then(|()| std::fs::rename(&tmp, path));
+    let done = o.open(&tmp).and_then(|mut f| {
+        f.write_all(text.as_bytes())?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    });
     if done.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -159,23 +170,23 @@ async fn install_remote(conn: &crate::hosts::HostConn, path: &str, text: &str) -
     }
     let script = remote_script(path, text);
     let out = conn.ssh_exec(&script).await?;
-    if !out.contains("AM_AGENT_MD_OK") {
+    if out.trim() != "AM_AGENT_MD_OK" {
         anyhow::bail!("remote instructions install did not confirm:\n{}", out.trim());
     }
     Ok(())
 }
 
-/// 暫存檔 + `cmp`：內容一樣就不動 mtime，跟 herdr skill 的遠端安裝同一招。
+/// `mktemp` 建立唯一檔再 rename，避免可預測的暫存路徑 symlink 被跟隨；目標 symlink 也會被 rename 原子取代。
 fn remote_script(path: &str, text: &str) -> String {
-    // codex 的母 bot profile：標成剛用過（內容一樣時 mv 不會發生，mtime 會越來越舊）、掃掉很久沒重寫的別顆 bot 的 profile 與被殺掉留下的暫存檔。
+    // codex 的母 bot profile：剛 rename 的 profile 會保留；掃掉很久沒重寫的別顆 bot profile 與被殺掉留下的暫存檔。
     let is_profile = std::path::Path::new(path).file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("am-parent-") && n.ends_with(".config.toml"));
     let sweep = if is_profile {
-        "touch \"$F\"\nfind \"$(dirname \"$F\")\" -maxdepth 1 \\( -name 'am-parent-*.config.toml' -mtime +30 -o -name '.am-parent-*.tmp-*' -mmin +10 \\) -exec rm -f {} + 2>/dev/null || true\n"
+        "find \"$(dirname \"$F\")\" -maxdepth 1 \\( -name 'am-parent-*.config.toml' -mtime +30 -o -name 'am-parent-*.config.toml.tmp-*' -mmin +10 \\) -exec rm -f {} + 2>/dev/null || true\n"
     } else {
         ""
     };
     format!(
-        "set -e\nF={f}\nmkdir -p \"$(dirname \"$F\")\"\numask 077\ncat > \"$F.new\" <<'{REMOTE_EOF}'\n{text}\n{REMOTE_EOF}\nchmod 600 \"$F.new\"\nif cmp -s \"$F.new\" \"$F\" 2>/dev/null; then rm -f \"$F.new\"; chmod 600 \"$F\"; else mv \"$F.new\" \"$F\"; fi\n{sweep}printf 'AM_AGENT_MD_OK\\n'\n",
+        "set -e\nF={f}\numask 077\nmkdir -p \"$(dirname \"$F\")\"\nT=$(mktemp \"$F.tmp-XXXXXX\")\ntrap 'rm -f \"$T\"' EXIT\ntrap 'exit 1' HUP INT TERM\ncat > \"$T\" <<'{REMOTE_EOF}'\n{text}\n{REMOTE_EOF}\nchmod 600 \"$T\"\nmv -f \"$T\" \"$F\"\nT=\n{sweep}printf 'AM_AGENT_MD_OK\\n'\n",
         f = sh_quote(path),
         text = text.trim_end(),
     )
@@ -184,13 +195,14 @@ fn remote_script(path: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing as tt;
 
     /// 遠端送檔的 script 真的拿去 `sh` 跑：路徑與內容含引號、`$()`、反引號、換行、像結束標記的行，都只是資料——
     /// 不會執行任何東西、內容原樣落地、檔案 0600。
     #[test]
     fn the_remote_script_treats_path_and_text_as_data() {
         use std::os::unix::fs::PermissionsExt as _;
-        let root = std::env::temp_dir().join(format!("am-test-remote-script-{}", crate::db::ulid()));
+        let root = tt::track(std::env::temp_dir().join(format!("am-test-remote-script-{}", crate::db::ulid())));
         let evil = root.join("sp ace/'q' $(touch PWN-PATH)/`touch PWN-BQ`/line\nbreak");
         let path = evil.join("persona.md");
         let text = "a'b \"c\" \\d\n$(touch PWN-TEXT)\n`touch PWN-TEXT2`\n${HOME} $HOME\nAM_AGENT_MD_EOFX\n  AM_AGENT_MD_EOF\n\\\nend";
@@ -208,6 +220,106 @@ mod tests {
         assert!(pwned.is_empty(), "不該執行任何東西：{pwned:?}");
         assert_eq!(written.unwrap(), format!("{}\n", text.trim_end()));
         assert_eq!(mode.unwrap(), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_private_write_does_not_follow_a_preplaced_temp_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tt::track(std::env::temp_dir().join(format!("am-test-local-symlink-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&root).unwrap();
+        let victim = root.join("victim");
+        let path = root.join("persona.md");
+        let predictable_tmp = root.join(format!(".persona.md.tmp-{}", std::process::id()));
+        std::fs::write(&victim, "leave me alone").unwrap();
+        symlink(&victim, &predictable_tmp).unwrap();
+
+        write_private_local(&path, "private persona").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "leave me alone", "暫存路徑 symlink 不得改寫目標");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "private persona", "目的地要是實際 persona 檔，不是 symlink");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_private_write_replaces_a_destination_symlink_without_chmodding_its_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tt::track(std::env::temp_dir().join(format!("am-test-local-dest-link-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&root).unwrap();
+        let victim = root.join("victim");
+        let path = root.join("persona.md");
+        std::fs::write(&victim, "private persona").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, &path).unwrap();
+
+        write_private_local(&path, "private persona").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "private persona");
+        assert_eq!(std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777, 0o644, "same-content fast path must not chmod through a symlink");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_private_write_clears_special_mode_bits_on_an_unchanged_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tt::track(std::env::temp_dir().join(format!("am-test-local-mode-bits-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("persona.md");
+        std::fs::write(&path, "private persona").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o4600)).unwrap();
+
+        write_private_local(&path, "private persona").unwrap();
+
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777, 0o600, "special bits must not survive the unchanged-content fast path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_private_write_replaces_a_destination_symlink_without_chmodding_its_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tt::track(std::env::temp_dir().join(format!("am-test-remote-dest-link-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&root).unwrap();
+        let victim = root.join("victim");
+        let path = root.join("persona.md");
+        std::fs::write(&victim, "private persona\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&victim, &path).unwrap();
+        let script = remote_script(path.to_str().unwrap(), "private persona");
+
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).current_dir(&root).output().unwrap();
+
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "private persona\n");
+        assert_eq!(std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777, 0o644, "same-content fast path must not chmod through a symlink");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_private_write_does_not_follow_a_preplaced_temp_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tt::track(std::env::temp_dir().join(format!("am-test-remote-symlink-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&root).unwrap();
+        let victim = root.join("victim");
+        let path = root.join("persona.md");
+        let predictable_tmp = std::path::PathBuf::from(format!("{}.new", path.display()));
+        std::fs::write(&victim, "leave me alone").unwrap();
+        symlink(&victim, &predictable_tmp).unwrap();
+        let script = remote_script(path.to_str().unwrap(), "private persona");
+
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).current_dir(&root).output().unwrap();
+
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "leave me alone", "遠端暫存路徑 symlink 不得改寫目標");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "private persona\n", "目的地要是實際 persona 檔，不是 symlink");
     }
 
     #[test]
@@ -277,6 +389,7 @@ mod tests {
         let s = remote_script("/home/u/bots/b 1/instructions.md", "line 'one'\n");
         assert!(s.contains("F='/home/u/bots/b 1/instructions.md'"), "{s}");
         assert!(s.contains("<<'AM_AGENT_MD_EOF'\nline 'one'\nAM_AGENT_MD_EOF\n"), "{s}");
-        assert!(s.contains("mv \"$F.new\" \"$F\""));
+        assert!(s.contains("T=$(mktemp \"$F.tmp-XXXXXX\")"));
+        assert!(s.contains("mv -f \"$T\" \"$F\""));
     }
 }

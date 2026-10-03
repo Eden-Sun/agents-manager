@@ -497,6 +497,10 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
         Err(e) => tracing::warn!(bot = %bot_id, dir = %att.display(), error = %e, "could not move bot attachments to bots-trash"),
     }
     if host == LOCAL_HOST {
+        if let Err(e) = super::persona_file::remove_deleted_codex_profile(app, bot_id, host).await {
+            tracing::warn!(host, bot = %bot_id, error = %e, "could not remove the deleted bot's Codex persona profile");
+            return false;
+        }
         let Ok(dir) = app.bot_dir(bot_id) else { return false };
         // 搬進回收區而不是刪（issue #406）：restore 時搬得回來。
         return match crate::bot_trash::move_in(&app.data_dir, bot_id, &dir) {
@@ -521,6 +525,12 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
         crate::remote_purge::record(app, bot_id, host, false, Some("unknown host")).await;
         return false;
     };
+    if let Err(e) = super::persona_file::remove_deleted_codex_profile(app, bot_id, host).await {
+        let msg = format!("Codex persona cleanup failed: {e:#}");
+        tracing::warn!(host, bot = %bot_id, error = %msg, "could not remove the deleted bot's Codex persona profile");
+        crate::remote_purge::record(app, bot_id, host, false, Some(&msg)).await;
+        return false;
+    }
     // 遠端也搬進回收區而不是 `rm -rf`（issue #411）：restore 時 ssh 搬得回來。
     match crate::remote_trash::move_in(&conn, bot_id).await {
         Ok(to) => {
@@ -553,6 +563,35 @@ mod bot_dir_safety_tests {
             purge_bot_dir(&env.app, id, LOCAL_HOST).await;
             assert!(protected.exists(), "purge touched the protected directory for {id:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_codex_bot_removes_only_its_external_persona_profile_and_temps() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "codex-profile-residue").await;
+        let home = tt::scratch_dir("am-delete-codex-profile");
+        sqlx::query("UPDATE bots SET kind='codex', env_json=? WHERE id=?")
+            .bind(serde_json::json!({"CODEX_HOME": home.to_string_lossy()}).to_string())
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let profile = home.join(format!("{}.config.toml", super::super::persona_file::codex_profile(&bot.id)));
+        let tmp = home.join(format!(".{}.config.toml.tmp-leftover", super::super::persona_file::codex_profile(&bot.id)));
+        let other_profile = home.join("am-parent-other.config.toml");
+        for p in [&profile, &tmp, &other_profile] {
+            std::fs::write(p, "developer_instructions = 'secret'\n").unwrap();
+        }
+        let bot_dir = env.app.bot_dir(&bot.id).unwrap();
+        std::fs::create_dir_all(&bot_dir).unwrap();
+        std::fs::write(bot_dir.join("persona.md"), "secret").unwrap();
+
+        assert!(purge_bot_dir(&env.app, &bot.id, LOCAL_HOST).await);
+
+        assert!(!profile.exists(), "the profile is outside bots/<id>, so deletion must remove it explicitly");
+        assert!(!tmp.exists(), "an interrupted profile write can contain the same private persona");
+        assert!(other_profile.exists(), "cleanup is scoped to this bot id");
+        assert!(crate::bot_trash::latest_kind(&env.app.data_dir, &bot.id, None).is_some(), "bot restore data still goes to bots-trash");
     }
 }
 
