@@ -2454,6 +2454,15 @@ export class MockTransport implements Transport {
       if (bot.kind !== 'claude') throw new ApiError(409, { error: 'conflict', reason: 'unsupported_kind' }, 'unsupported kind')
       bot.share_profile = 'restricted'
       bot.auto_approve = 0
+      // 同 daemon：資料夾（新資料夾＝`~/shared-bots/<name>`、既有＝絕對路徑）就是它的 cwd；沒選模型＝最新 Opus（`opus` 別名）。
+      const f = (b.share_folder ?? { kind: 'new', name }) as Rec
+      if (f.kind === 'existing' && !String(f.path ?? '').startsWith('/')) {
+        throw new ApiError(400, { error: 'bad_request', reason: 'bad_share_folder', message: '既有資料夾要給絕對路徑' }, 'bad request')
+      }
+      bot.cwd = f.kind === 'existing' ? String(f.path) : `/Users/me/shared-bots/${String(f.name ?? name)}`
+      if (!bot.model) bot.model = 'opus'
+    } else if (b.share_folder) {
+      throw new ApiError(400, { error: 'bad_request', message: 'share_folder is only for share_profile `restricted`' }, 'bad request')
     }
     if (bot.identity) this.checkIdentity(bot.identity, bot.kind)
     this.bots.push(bot)

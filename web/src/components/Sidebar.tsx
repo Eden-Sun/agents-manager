@@ -46,7 +46,7 @@ import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
 import { ShareProfileField } from './ShareProfileField'
-import { shareProfileBlocked } from '../lib/shareProfile'
+import { EMPTY_SHARE_FOLDER, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
 import { HostDownState } from './HostOffline'
 import { useBotOfflineHost } from '../hooks/useHostOffline'
 import { KeepAwakeToggle } from './KeepAwakeToggle'
@@ -604,6 +604,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const [persona, setPersona] = useState('')
   const [identity, setIdentity] = useState('')
   const [shareProfile, setShareProfile] = useState(false)
+  const [shareFolder, setShareFolder] = useState<ShareFolderDraft>(EMPTY_SHARE_FOLDER)
   const [busy, setBusy] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
   const nameTouched = useRef(false)
@@ -611,7 +612,9 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   // 驗 trim 過的：打到一半的 `my ` 不該先閃紅字；送出也送 trim 過的。
   const nameOk = isValidBotName(name.trim())
   const cliOk = Boolean(tools[kind]?.installed)
-  const canSubmit = nameOk && cliOk && Boolean(pid) && !busy
+  const shareOn = shareProfile && !shareProfileBlocked(kind, host)
+  const folderIn = shareOn ? shareFolderInput(shareFolder, name) : null
+  const canSubmit = nameOk && cliOk && Boolean(pid) && !busy && !(folderIn && 'error' in folderIn)
   const hostUp = (h: string) => h === 'local' || (hosts.find((x) => x.name === h)?.connected ?? false)
   const filterQ = projectFilter.trim().toLowerCase()
   const visibleProjects = filterQ ? projects.filter((p) => p.label.toLowerCase().includes(filterQ)) : projects
@@ -663,7 +666,9 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           autostart: false,
           identity: kind === 'claude' && identity ? identity : null,
           // 受限 bot 不帶 bypass permissions（daemon 也會擋），所以 auto_approve 一起關。
-          ...(shareProfile && !shareProfileBlocked(kind, host) ? { share_profile: 'restricted' as const, auto_approve: false } : { auto_approve: true }),
+          ...(folderIn && 'value' in folderIn
+            ? { share_profile: 'restricted' as const, share_folder: folderIn.value, auto_approve: false }
+            : { auto_approve: true }),
         }).then(async (id) => {
           setBusy(false)
           if (id) {
@@ -776,7 +781,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         {!cliOk ? <span className="hint">此 kind 的 CLI 尚未安裝，無法建立</span> : null}
       </label>
       <PersonaField value={persona} onChange={setPersona} collapsible />
-      <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} />
+      <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} />
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           取消
