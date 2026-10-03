@@ -563,3 +563,10 @@ input {
     display: none;
   }
 }
+
+.sh-wait {
+  margin: 6px 0 0;
+  color: var(--sh-dim);
+  font-size: 12.5px;
+  text-align: right;
+}

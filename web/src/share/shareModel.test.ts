@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mergeMessages, ShareHttpError, shareErrorText, toShareFiles, toShareMessage, toSharePage, tokenFromLocation } from './shareModel.ts'
+import { mergeMessages, ShareHttpError, shareErrorText, toShareFiles, toShareMessage, toSharePage, toStatus, tokenFromLocation } from './shareModel.ts'
 
 const T = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd'
 
@@ -41,4 +41,10 @@ test('錯誤給 end user 的話：404＝連結失效、429 帶秒數、不洩漏
   assert.match(shareErrorText(new ShareHttpError(429, 30), 'send'), /30 秒/)
   assert.match(shareErrorText(new ShareHttpError(413), 'upload'), /25 MB/)
   assert.doesNotMatch(shareErrorText(new Error('ECONNREFUSED 127.0.0.1:7790'), 'send'), /127\.0\.0\.1/)
+})
+
+test('status 是 daemon 的 lamp：working／blocked／starting 都算「還沒回完」', () => {
+  for (const s of ['working', 'blocked', 'starting']) assert.equal(toStatus({ status: s }), 'working', s)
+  for (const s of ['idle', 'offline', 'unknown', '']) assert.equal(toStatus({ status: s }), 'idle', s)
+  assert.match(shareErrorText(new ShareHttpError(409), 'send'), /你打的字還在/)
 })
