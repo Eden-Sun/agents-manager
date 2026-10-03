@@ -45,9 +45,9 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | C | `PUT /drafts/{key}` | 網頁 | UI token（key 只收 `bot:<id>`／`group:<id>`／`shell:<host>/<pane id>`、內容 ≤ 256 KiB） | 改輸入框草稿，空字串＝清掉；不碰任何 bot | 維持 |
 | C | `POST /bots/{id}/restore`、`/identities`、`DELETE /identities/{name}`、`POST /order`、`PATCH /bots/{id}`、`PATCH /projects/{id}`、start／stop／restart／fork／promote／rewind 等其餘寫入 | 網頁、`agm` | UI token（各自的狀態機檢查） | 本機設定與行程，改得回來 | 維持 |
 | D | `POST /supervisor/herdr-maintenance/open`／`end`、`/supervisor/inbox/{id}/ack`、lease `force` 接管 | AGM 角色 pane 裡的 `agm` | `require_role`／`actor_role`（沒角色 403） | — | 已有 |
-| D | `POST /supervisor/{setup,start,stop,fallback}`、`/supervisor/responder/{setup,start,stop}`、`POST /supervisor/assignments/{id}/review`、`PUT /supervisor/handoff`、`POST /supervisor/ops-alerts`、`POST /supervisor/cli` | AGM 角色 pane 裡的 `agm`、使用者網頁／shell | route layer `bot_requests::forbid_plain_bot`：被證明身分的一般 bot（不是巡檢／協調者）→ 403 `role_required`；沒帶 bot 標頭的使用者照舊；角色判斷同 `require_role`／`persona_actor`（`roles::role_of_bot`，每次讀 DB，角色換人後舊 bot 立刻失效；角色綁 bot id，改名、改身分都不影響） | AGM 的管理面（改總管的記憶、替總管下指令、對交辦下裁示、對 AGM 喊假警報） | 已有 |
+| D | `POST /supervisor/{setup,start,stop,fallback,remote}`、`/supervisor/responder/{setup,start,stop}`、`POST /supervisor/assignments/{id}/review`、`PUT /supervisor/handoff`、`POST /supervisor/ops-alerts`、`POST /supervisor/cli`、`POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`、使用者網頁／shell | route layer `bot_requests::forbid_plain_bot`：被證明身分的一般 bot（不是巡檢／協調者）→ 403 `role_required`；沒帶 bot 標頭的使用者照舊；角色判斷同 `require_role`／`persona_actor`（`roles::role_of_bot`，每次讀 DB，角色換人後舊 bot 立刻失效；角色綁 bot id，改名、改身分都不影響）。`approvals/{id}/decide` 的 `approve` 另要 `require_role`；User 與 AGM 角色可 deny／revoke。 | AGM 的管理面（改總管的記憶、替總管下指令、對交辦下裁示、對 AGM 喊假警報、記錄遠端入口觀測） | 已有 |
 | D | `POST /supervisor/assignments` | AGM 角色與使用者；一般 bot **只能**對 AGM 角色 bot 送 `notice` | handler 內判斷（`post_assignment`）：被證明身分的一般 bot 若是要驗收的交辦、目標不是巡檢／協調者、或帶 `mission_id`／`role` → 403 `role_required`；`kind:"notice"`（或 `expects_review:false`）且目標是角色 bot → 放行（release／herdr 更新任務裡的 `agm assign --notice --bot <巡檢>` 由專用的一般 bot 執行） | 派工＝直接叫另一顆 bot 做事 | 已有 |
-| D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；人在一般 shell 跑的 `agm`（不帶身分，只剩 deny／revoke） | `approve` 要 `require_role`（沒角色 403）；`deny`／`revoke` 只有 UI token | 核准換版窗口 | 已有（#447） |
+| D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；使用者可 deny／revoke | `approve` 要 `require_role`；`deny`／`revoke` 放行 User 與 AGM 角色；被證明身分的一般 bot 403 `role_required` | 核准換版窗口 | 已有（#447） |
 | E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/relay/spawn/*`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
 | F | `POST /mem/processes/kill` | 只有網頁 | `memproc::kill` 只殺 herdr 樹內、非 herdr、非 bot 的行程 | — | 維持 |
 
@@ -2079,7 +2079,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 ### 遠端入口
 `GET /api/supervisor/remote` → `{status,stored_status,revoked,source,observed_at,observed_by,session_id,current_session_id,url,url_is_evidence,capability,ttl_secs}`。
 `status` 只有 `requested` | `verified` | `unavailable` | `unknown`（SPEC §18.12）；`capability.status` 目前 `unsupported`。觀測超過 `ttl_secs`（900）或 AGM 換 session 退回 `unknown`（`revoked` 說明），`url` 不回（`url_is_evidence:false`）。
-`POST /api/supervisor/remote {status,source,actor?,evidence?,url?}`：`url` 只收絕對的 http／https 網址（`javascript:`／`data:`／`file:`／相對路徑／含空白或控制字元的一律 400，什麼都不寫；前端會把它放進 `<a href>`）；`source` 只收 `manual`（`provider` 保留、`argv` 拒絕）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run，15 分鐘後失效。
+`POST /api/supervisor/remote {status,source,actor?,evidence?,url?}`：只接受 User 或 AGM 角色，已驗證的一般 bot 回 403 `role_required`；`url` 只收絕對的 http／https 網址（`javascript:`／`data:`／`file:`／相對路徑／含空白或控制字元的一律 400，什麼都不寫；前端會把它放進 `<a href>`）；`source` 只收 `manual`（`provider` 保留、`argv` 拒絕）；`verified`／`unavailable` 需要 actor、非空 evidence 與當前 AGM run，15 分鐘後失效。
   記下來的 `observed_by` 照 #414 的形狀（issue #463）：驗過的角色寫 `AGM:<role>`，其餘寫 `user(<自稱>)`／`user`——body 的 `actor` 只是未驗證的自稱。驗過的角色不必再帶 `actor`。
 用一個**不能作證**的來源報 `verified` → 409 `{"reason":"source_cannot_verify","source":"<送來的 source>"}`：哪些來源作得了證是 `remote::Source::can_verify` 說了算，不是呼叫端說了算。
 
@@ -2168,7 +2168,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `own:true` 就是發問者自己的。不帶 owner＝舊行為，每一把都算擋、`own` 一律 false；回傳的 `owner` 回聲讓呼叫端分得出舊 daemon 忽略了它。
   acquire 一律以自己的 `owner` 問（SPEC §18.10「自己的租約不擋自己」）。
 - `GET /api/supervisor/leases` → `{leases:[{resource,owner,approval_id,fence,target_commit,acquired_at,expires_at,released_at,held}]}`。
-- `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?,request_id?}` → `{lease,lease_token,approval,safety}`；同 lock 內重驗核准與 idle，
+- `POST /api/supervisor/leases/{rebuild|restart}/acquire {owner,approval_id,commit?,ttl_secs?,require_idle=true,exclude_bot_ids?,request_id?}` → `{lease,lease_token,approval,safety}`；帶 Bot proof 時 `owner` 必須解析回同一顆 bot（id、bot 名或 agent 名），否則 403 `requester_not_the_caller`；同 lock 內重驗核准與 idle，
   搶輸 409 `lease_held`。`owner` 必須等於核准的 `requester`，否則 409 `approval_owner_mismatch`（別人的核准開不了你的窗口，也借不走它的等待）。
   這張核准開過的窗口**過期沒 release**（執行端掛了），或已 release 卻因寫入失敗／daemon 中途死掉而沒記到 `consumed` 時，同一張再 acquire → 409 `approval_already_used`，並當場標 `consumed`（note `lease expired`）；要再開就重新申請。
   ttl 預設 900、上限 3600。`POST …/renew {owner,fence,ttl_secs?,lease_token}`、`POST …/release {owner,fence,lease_token}`；舊 fence 409 `lease_lost`；release 把核准標 `consumed`。

@@ -3990,7 +3990,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 
 - 核准是紀錄：申請者、purpose、範圍、`target_commit`、有效期、決定者、理由。acquire 逐項核對（purpose 不符、過期、撤銷、commit 不同都拒）；release 時標 `consumed`——一次核准一個窗口。
 - **核准不會永遠有效**：申請與裁示都沒給 `expires_in_secs` 的核准，核准後 24 小時失效（`Approval::effective_expiry`；明寫的有效期照寫的算）。過期的不能 acquire／renew、不計入升級計時（`oldest_live_window_approval`），租約的期限也不超過它。`target_commit`／acquire 的 `commit` 只收 7～64 碼十六進位的 git sha。daemon-swap 的自動核准（`swap_window`）只沿用、只取代**自己核准的**自動單，AGM 親手核的 restart 單不碰。
-  **核准是給申請者的**（review2 2026-09-16）：acquire 的 `owner` 必須等於 `requester`（409 `approval_owner_mismatch`），否則 bot B 能拿 bot A 的核准開窗口、連 A 的升級計時一起借走；
+  **核准是給申請者的**（review2 2026-09-16）：acquire 的 `owner` 必須等於 `requester`（409 `approval_owner_mismatch`）；帶 Bot proof 時 `owner` 還必須解析回呼叫端同一顆 bot（403 `requester_not_the_caller`），否則 bot B 能只靠 body 冒用 bot A 的 requester、拿 A 的核准開窗口並取得 lease token；
   `request_id` 的冪等比對也含 `requester`。同一張核准開過的窗口**過期沒 release**時，同一張再 acquire 回 409 `approval_already_used` 並當場消耗——
   接手過期租約只消耗「別張」核准，執行端掛掉後拿同一張重試原本會在有效期內開出第二個窗口。renew 不接受 `force`（400）。
 - **申請可以帶穩定的 `request_id`**（AGM 裁示 2026-09-16）：2026-09-16 04:05 k8bw2f 對同一顆 `ca7b22d` 送了兩筆一模一樣的 restart 申請（它解析回應時取錯欄位，以為沒送成功），AGM 只能核一筆、駁一筆。
@@ -4113,7 +4113,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 
 - 狀態只有 `requested`／`verified`（有可驗證來源）／`unavailable`（有證據說不通）／`unknown`，沒有 `active`。argv、bot 自己的文字、URL 都不能推出 `verified`。
 - 觀測綁 session（run id）且 900 秒過期；AGM 重啟或換模型後舊確認失效（`revoked: session_changed`、`observation_expired`），撤銷時不再回 `url`。
-- 人工確認走 `POST /api/supervisor/remote`，`source=manual` 且**必須帶 actor**（記成「某人宣稱過」，不是量測）。
+- 人工確認走 `POST /api/supervisor/remote`，只接受 User 或 AGM 角色，已驗證的一般 bot 回 403 `role_required`；`source=manual` 且**必須帶 actor**（記成「某人宣稱過」，不是量測）。
 - incident 只在 `unavailable` 時開。恢復 remote session 由 AGM 在沒有回合衝突的窗口安排，daemon 不自己多開 session。
 
 ### 18.13 回滾限制
