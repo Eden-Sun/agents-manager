@@ -41,23 +41,31 @@ pub fn is_ephemeral(kind: &str) -> bool {
     kind == "turn_progress"
 }
 
-/// 事件廣播給所有 UI 連線，也留在重播環裡：這些欄位名一律不外送（含巢狀）。呼叫端本來就不該放（`db::Bot::hook_token` 是
-/// `skip_serializing`），這是最後一道，防哪個 payload 手滑把整個物件塞進來。
-const SECRET_KEYS: [&str; 8] = [
-    "hook_token",
-    "ui_token",
-    "am_bot_token",
-    "am_hook_token",
-    "service_token",
-    "x-am-token",
-    "x-am-bot-token",
-    "x-am-service-token",
+/// 事件廣播給所有 UI 連線，也留在重播環裡：欄位名含 `token` 或 `secret` 一律不外送（含巢狀；token 使用量計數除外）。
+/// 呼叫端本來就不該放（`db::Bot::hook_token` 是 `skip_serializing`），這是最後一道，防哪個 payload 手滑把整個物件塞進來。
+const TOKEN_METRIC_KEYS: [&str; 9] = [
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "cached_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
 ];
+
+fn is_credential_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    // Usage counters are telemetry, not credentials. Other token/secret names are removed,
+    // including prefixes such as `token_value` and snake/camel/hyphenated spellings.
+    !TOKEN_METRIC_KEYS.contains(&key.as_str()) && (key.contains("token") || key.contains("secret"))
+}
 
 fn scrub_credentials(v: &mut Value) {
     match v {
         Value::Object(map) => {
-            map.retain(|k, _| !SECRET_KEYS.contains(&k.to_ascii_lowercase().as_str()));
+            map.retain(|k, _| !is_credential_key(k));
             map.values_mut().for_each(scrub_credentials);
         }
         Value::Array(items) => items.iter_mut().for_each(scrub_credentials),
