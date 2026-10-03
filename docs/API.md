@@ -64,6 +64,22 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 
 `service-tokens/daemon-swap.token` 與 `service-tokens/herdr-upgrade.token` 在 daemon 資料目錄建立，目錄 `0700`、檔案 `0600`；重啟不改 token。維運腳本只能讀自己的 token 檔，header 值不可放進 argv 或 log。`/api/capabilities` 含 `service_principals` 時，client 缺少 service token 應停止並修復檔案，不得再退回 User bootstrap。
 
+### Bot principal 的路徑資源範圍
+
+`/api` 的 Bot principal 只可沿已驗證 bot 的資源樹存取路徑資源。路徑中的 `%XX` 先解碼再做範圍查詢；被拒絕回 `403 bot_resource_scope`，未知資源仍由原 handler 回 404。User principal 維持原行為。
+
+| 端點 | 方法 | Bot 能否跨 bot | 應有範圍 |
+|---|---|---|---|
+| `/api/bots/{id}` 與 `/api/bots/{id}/…` | 該路由註冊的 GET／POST／PATCH／DELETE | 否；`POST /prompt` 是例外 | 本 bot、其後代 child。角色 bot 不會因此取得通用 bot API 跨讀寫權；`/prompt` 仍須通過 `relay_auth` 的 sender proof；`/keys`、`/text` 仍 User-only；上傳附件只可寫本 bot 或 child。 |
+| `/api/projects/{id}` 與 `/api/projects/{id}/…` | 該路由註冊的 GET／POST／PATCH／DELETE | 否；任務清單例外 | 專案內含本 bot 或其後代 child 即屬授權範圍。AGM 角色可跨專案使用 `GET／POST /projects/{id}/missions` 任務管理入口；Git、Issue、建立 bot 等一般專案操作不隨角色擴權。 |
+| `/api/turns/{id}/abandon`、`/withdraw`；`/api/attachments/{id}` | POST；GET | 否 | 由 turn 的 conversation 或 attachment row 反查擁有 bot，再套用本 bot／後代 child 範圍；AGM 角色不會因此取得跨 bot 的回合或附件。沒有獨立的 `/api/runs/{id}` 路由。 |
+| `/api/missions/{id}` 與 `/api/missions/{id}/…` | GET／POST | 只限任務管理或授權任務 | 本 bot／後代 child 所屬專案、派給本 bot／後代 child 的任務，或明確登記的 AGM 角色 bot；其他一般 bot 回 403。 |
+| `/api/supervisor/assignments/{id}`、`/review` | GET；POST | 只限授權交辦 | 一般 bot 只能讀自己或 child 收到的交辦；明確登記的 AGM 角色可讀交辦，`/review` 仍需既有 AGM 角色閘。 |
+| `/api/drafts`、`/api/drafts/{key}`、`/api/panes…`、`/api/hosts/{name}/shells…` | 該路由註冊的方法 | 不適用 | 草稿、pane inventory 與 host shell 是網頁操作面，Bot principal 一律 `403 user_only`。 |
+| `/api/services/daemon-swap/probe/{bot_id}`、`/api/services/herdr-upgrade/resume/{bot_id}` | POST | 不適用 | 只接受各自列明的 Service principal；Bot principal 維持 403。 |
+
+跨資源測試逐一打上述動態路徑家族的每個方法，並覆蓋 Bot A 對 Bot B、編碼 ID、同 bot、child、AGM 專用任務／交辦例外與 User principal。
+
 A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是網頁，而網頁手上的憑證就是 UI token，沒有可以要求的角色；
 加確認要嘛網頁自動帶上（等於沒加），要嘛變成新的 UI 確認步驟。怎麼收緊（綁 loopback 對端、只收瀏覽器請求、`allow_lan` 下檢查
 `Host`、或等 per-bot 憑證）是授權模型的取捨，在 #478 等使用者決定，這裡不先定。
