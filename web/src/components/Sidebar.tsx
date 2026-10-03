@@ -45,6 +45,8 @@ import { RunElapsed } from './RunElapsed'
 import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { HostBadge, HostsPanel } from './HostsPanel'
+import { ShareProfileField } from './ShareProfileField'
+import { shareProfileBlocked } from '../lib/shareProfile'
 import { HostDownState } from './HostOffline'
 import { useBotOfflineHost } from '../hooks/useHostOffline'
 import { KeepAwakeToggle } from './KeepAwakeToggle'
@@ -601,6 +603,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const [fast, setFast] = useState(false)
   const [persona, setPersona] = useState('')
   const [identity, setIdentity] = useState('')
+  const [shareProfile, setShareProfile] = useState(false)
   const [busy, setBusy] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
   const nameTouched = useRef(false)
@@ -658,8 +661,9 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           fast: kind === 'codex' ? fast : undefined,
           persona: persona.trim() || null,
           autostart: false,
-          auto_approve: true,
           identity: kind === 'claude' && identity ? identity : null,
+          // 受限 bot 不帶 bypass permissions（daemon 也會擋），所以 auto_approve 一起關。
+          ...(shareProfile && !shareProfileBlocked(kind, host) ? { share_profile: 'restricted' as const, auto_approve: false } : { auto_approve: true }),
         }).then(async (id) => {
           setBusy(false)
           if (id) {
@@ -772,6 +776,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         {!cliOk ? <span className="hint">此 kind 的 CLI 尚未安裝，無法建立</span> : null}
       </label>
       <PersonaField value={persona} onChange={setPersona} collapsible />
+      <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} />
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           取消

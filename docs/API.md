@@ -1830,6 +1830,30 @@ POST／PATCH 還收到這個欄位（舊網頁快取）時照收、直接忽略�
   `repo=<submodule path>` 相對專案根，省略 = 專案本身；不在清單或沒有 GitHub origin → 400。
 - 錯誤：`project.github` 為 `null` → `400 project has no GitHub origin`；`gh` 不存在／未登入／失敗 → 502（遠端走 `POST /api/hosts/{name}/gh/login`）；project 不存在 404。
 
+## 分享 bot（SPEC §20；前端依賴的形狀）
+
+daemon 端（契約 A–C）與前端同時開工，以下是 web 端實作所依據的欄位與回應形狀；daemon 實作若選了不同的名字，以這裡為準對齊或一併改這份與 `web/src/api/share.ts`、`web/src/share/`。
+
+**state／建 bot**
+- `bots[].share_profile`：`"restricted"`＝分享用的受限 bot；一般 bot（與舊 daemon）為 `null`。只有這種 bot 能開分享。
+- `POST /api/projects/{id}/bots` 可帶 `share_profile: "restricted"`（建好不能切換）；非 claude → `409 {"reason":"unsupported_kind"}`。UI 只在本機專案的 claude 開放這個選項，並一律送 `auto_approve: false`。
+- 訊息 `source: "share"`：分享頁 end user 送來的 user 訊息（主 UI 標「🔗 分享使用者」）。
+
+**管理（主 API，只收 UI token）**
+- `GET /api/bots/{id}/share` → `{enabled, url: null, token_hint: "…末4碼"|null, created_at, last_used_at}`。
+- `POST /api/bots/{id}/share` `{"enabled":true}` → `{enabled:true, url:"<base_url>/s/<token>", token_hint, created_at, last_used_at:null}`（已開著再開＝不變；daemon 只存雜湊，這時 `url` 是 `null`，要新連結走 rotate）；`{"enabled":false}` → `{enabled:false, url:null, …}`。
+- `POST /api/bots/{id}/share/rotate` → 同上、`url` 是新的；沒開 → `409 {"reason":"share_disabled"}`。
+- 錯誤 reason：`not_shareable`（不是受限 bot）、`share_not_configured`（沒設 `[share] base_url`）、`unsupported_kind`。UI 照 reason 換成中文。
+
+**分享入口（獨立 listener，`/s/{token}/…`；token 錯或分享關掉一律 404）**
+- `GET /s/{token}` → `dist/share.html`。這頁引用 `/assets/share-*.js|css` 與它 import 的共用 chunk（`react-dom-*`、`preload-helper-*` 等，見 `share.html` 裡的 `<script>`／`<link>`），入口要回這些靜態檔；整頁沒有 inline script／style，CSP `default-src 'self'` 即可。
+- `GET /s/{token}/api/messages?before=<id>&limit=100` → `{bot_name, status:"idle"|"working", messages:[{id, role:"user"|"assistant", text, created_at, attachments:[{name}]}], has_more}`。其他 role 不回；前端也只畫 user／assistant。
+- `POST /s/{token}/api/messages` `{text, client_request_id, attachments?: ["<upload id>"]}` → 2xx（body 不讀）。429 帶 `Retry-After`（秒）；413＝太長；409＝暫時不能送。前端單則上限 8000 字。
+- `GET /s/{token}/api/events`：SSE。`event: message` data＝同上的一則訊息；`event: status` data＝`{"status":"idle"|"working"}`。斷線（`EventSource` 進 CLOSED）前端改成每 4 秒輪詢 messages。
+- `POST /s/{token}/api/upload`：multipart 欄位 `file`，單檔 ≤ 25 MiB → `{id, name, size}`；413 太大、415 類型不收。
+- `GET /s/{token}/api/files` → `{files:[{name, size, modified_at}]}`；`GET /s/{token}/api/files/{name}`（name 已 URL encode）→ 下載（attachment＋nosniff）。
+- 前端一律 `credentials: "omit"`、`referrerPolicy: "no-referrer"`、不帶 `X-AM-Token`。
+
 ## 子 agent（bot 自己開的 pane，SPEC §6.5a–c）
 
 - daemon 起的每個 agent 帶一段預設人設 `lifecycle::child_agent_rules`（接在 `bot.persona` 前面，三種 kind 同一份）；claude 另外拿到改寫過的 herdr skill。

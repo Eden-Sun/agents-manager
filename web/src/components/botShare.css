@@ -1,0 +1,96 @@
+/* BotShareSection（Bot 設定裡的分享區塊）與建 bot 表單的「分享用（受限）」選項。 */
+
+.bs-share {
+  margin-top: 24px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.bs-share-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.bs-share-head strong {
+  font-size: 13px;
+}
+
+.bs-share-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.bs-share .hint {
+  margin: 6px 0 0;
+}
+
+.bs-share-error {
+  margin: 8px 0 0;
+  color: var(--danger);
+  font-size: 12.5px;
+}
+
+.bs-share-body {
+  margin-top: 10px;
+}
+
+.bs-share-url {
+  display: flex;
+  gap: 8px;
+}
+
+.bs-share-url input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.bs-share-hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.bs-share-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.bs-share-meta dd {
+  margin: 0;
+}
+
+.bs-share-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.share-profile-field .hint {
+  display: block;
+  margin-top: 4px;
+}
+
+.share-profile-field label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.src-tag.share-user {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}

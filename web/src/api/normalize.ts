@@ -151,7 +151,7 @@ const TURN_STATUSES = ['queued', 'in_flight', 'completed', 'completed_fallback',
 const DELIVERIES = ['pending', 'ok', 'unknown', 'failed'] as const
 const ORIGINS = ['web', 'external'] as const
 const ROLES = ['user', 'assistant', 'system'] as const
-const SOURCES = ['web', 'hook', 'transcript', 'terminal_fallback', 'system'] as const
+const SOURCES = ['web', 'hook', 'transcript', 'terminal_fallback', 'system', 'share'] as const
 const SENT_VIA = ['send_now', 'supplement', ''] as const
 
 /** 缺欄位＝舊 daemon，一律當未知（null），不猜。 */
@@ -326,6 +326,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
       return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
     })(),
     cwd: optStr(pick(v, 'cwd')),
+    share_profile: pick(v, 'share_profile') === 'restricted' ? 'restricted' : null,
     ...(() => {
       const x = pick(v, 'preview')
       if (x === undefined) return {}

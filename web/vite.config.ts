@@ -51,6 +51,8 @@ export default defineConfig({
     // React DOM is the largest single rendered module (~453 kB before final minification). Isolate it so the application
     // entry stays small; lazy Markdown keeps its parser and GFM extensions off the startup path.
     rolldownOptions: {
+      // 分享頁（SPEC「分享 bot」）是獨立 entry：`dist/share.html` 只帶 `src/share/` 的程式碼，不帶主 UI。
+      input: { main: 'index.html', share: 'share.html' },
       output: {
         codeSplitting: {
           groups: [{

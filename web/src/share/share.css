@@ -1,0 +1,565 @@
+/* 分享頁（share.html）：手機優先、跟系統深淺色走。跟主 UI 的 styles.css 完全分開，自己的 token。 */
+
+:root {
+  --sh-bg: #f6f7f9;
+  --sh-panel: #ffffff;
+  --sh-text: #1d232b;
+  --sh-dim: #5e6a78;
+  --sh-border: #dde2e9;
+  --sh-accent: #2f6fe0;
+  --sh-accent-ink: #ffffff;
+  --sh-user: #2f6fe0;
+  --sh-user-ink: #ffffff;
+  --sh-bot: #ffffff;
+  --sh-danger: #c23a28;
+  --sh-danger-soft: #fbe8e5;
+  --sh-ok: #21a35b;
+  --sh-busy: #d99a20;
+  --sh-code: rgb(27 36 48 / 7%);
+  --sh-radius: 16px;
+  --sh-font: system-ui, -apple-system, 'Segoe UI', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', sans-serif;
+  --sh-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sh-bg: #11151b;
+    --sh-panel: #1a2029;
+    --sh-text: #e6eaf0;
+    --sh-dim: #9aa5b3;
+    --sh-border: #2c3440;
+    --sh-accent: #6ea0ff;
+    --sh-accent-ink: #0d1420;
+    --sh-user: #2f5fb8;
+    --sh-user-ink: #f2f6ff;
+    --sh-bot: #1f2630;
+    --sh-danger: #ff8b78;
+    --sh-danger-soft: #38241f;
+    --sh-code: rgb(255 255 255 / 8%);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font-family: var(--sh-font);
+  font-size: 15px;
+  -webkit-text-size-adjust: 100%;
+}
+
+button,
+textarea,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+.sh-app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.sh-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+  border-bottom: 1px solid var(--sh-border);
+  background: var(--sh-panel);
+}
+
+.sh-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.sh-title h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sh-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--sh-ok);
+}
+
+.sh-dot.busy {
+  background: var(--sh-busy);
+  animation: sh-pulse 1.2s ease-in-out infinite;
+}
+
+.sh-state {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--sh-dim);
+}
+
+.sh-files-btn,
+.sh-link {
+  flex: none;
+  border: 1px solid var(--sh-border);
+  background: transparent;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sh-link {
+  border: 0;
+  padding: 4px 6px;
+  color: var(--sh-accent);
+}
+
+.sh-net {
+  flex: none;
+  padding: 6px 16px;
+  background: var(--sh-danger-soft);
+  color: var(--sh-danger);
+  font-size: 13px;
+}
+
+.sh-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+
+.sh-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overscroll-behavior: contain;
+}
+
+.sh-empty {
+  margin: 24px auto;
+  color: var(--sh-dim);
+  font-size: 14px;
+  text-align: center;
+}
+
+.sh-msg {
+  display: flex;
+  flex-direction: column;
+  max-width: min(85%, 680px);
+}
+
+.sh-msg.user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.sh-msg.assistant {
+  align-self: flex-start;
+}
+
+.sh-bubble {
+  padding: 9px 13px;
+  border-radius: var(--sh-radius);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.sh-msg.user .sh-bubble {
+  background: var(--sh-user);
+  color: var(--sh-user-ink);
+  border-bottom-right-radius: 5px;
+}
+
+.sh-msg.assistant .sh-bubble {
+  background: var(--sh-bot);
+  border: 1px solid var(--sh-border);
+  border-bottom-left-radius: 5px;
+}
+
+.sh-plain {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.sh-md > :first-child {
+  margin-top: 0;
+}
+
+.sh-md > :last-child {
+  margin-bottom: 0;
+}
+
+.sh-md p,
+.sh-md ul,
+.sh-md ol {
+  margin: 0.5em 0;
+}
+
+.sh-md ul,
+.sh-md ol {
+  padding-left: 1.4em;
+}
+
+.sh-md code {
+  font-family: var(--sh-mono);
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--sh-code);
+}
+
+.sh-md pre {
+  overflow-x: auto;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--sh-code);
+}
+
+.sh-md pre code {
+  padding: 0;
+  background: none;
+}
+
+.sh-md a {
+  color: var(--sh-accent);
+}
+
+.sh-md table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+
+.sh-md th,
+.sh-md td {
+  border: 1px solid var(--sh-border);
+  padding: 4px 8px;
+}
+
+.sh-atts {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+.sh-time {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--sh-dim);
+}
+
+.sh-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--sh-dim);
+}
+
+.sh-dots {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.sh-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: sh-pulse 1.2s ease-in-out infinite;
+}
+
+.sh-dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.sh-dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes sh-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-dot.busy,
+  .sh-dots i {
+    animation: none;
+  }
+}
+
+/* 檔案清單：手機是從底部拉起的抽屜，桌機是右側欄。 */
+.sh-side {
+  display: none;
+}
+
+.sh-side.open {
+  display: block;
+  position: absolute;
+  inset: auto 0 0;
+  max-height: 70%;
+  overflow-y: auto;
+  background: var(--sh-panel);
+  border-top: 1px solid var(--sh-border);
+  border-radius: 16px 16px 0 0;
+  box-shadow: 0 -8px 24px rgb(0 0 0 / 18%);
+}
+
+.sh-files {
+  padding: 12px 16px 16px;
+}
+
+.sh-files-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.sh-files-head strong {
+  flex: 1;
+  font-size: 14px;
+}
+
+.sh-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sh-file-list a {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--sh-border);
+  border-radius: 10px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.sh-file-list a:hover {
+  border-color: var(--sh-accent);
+}
+
+.sh-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.sh-file-name::before {
+  content: '⬇ ';
+  color: var(--sh-accent);
+}
+
+.sh-file-size {
+  flex: none;
+  font-size: 12px;
+  color: var(--sh-dim);
+}
+
+.sh-files .sh-empty {
+  margin: 8px 0;
+  text-align: left;
+  font-size: 13px;
+}
+
+.sh-composer {
+  flex: none;
+  padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--sh-border);
+  background: var(--sh-panel);
+}
+
+.sh-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.sh-input-row textarea {
+  flex: 1;
+  min-height: 42px;
+  max-height: 160px;
+  resize: none;
+  field-sizing: content;
+  padding: 10px 12px;
+  border: 1px solid var(--sh-border);
+  border-radius: 20px;
+  background: var(--sh-bg);
+  /* 16px：iOS 小於這個會在聚焦時自動放大整頁。 */
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.sh-input-row textarea:focus {
+  outline: 2px solid var(--sh-accent);
+  outline-offset: -1px;
+}
+
+.sh-attach,
+.sh-send {
+  flex: none;
+  height: 42px;
+  border-radius: 21px;
+  cursor: pointer;
+}
+
+.sh-attach {
+  width: 42px;
+  border: 1px solid var(--sh-border);
+  background: transparent;
+  font-size: 18px;
+}
+
+.sh-send {
+  padding: 0 18px;
+  border: 0;
+  background: var(--sh-accent);
+  color: var(--sh-accent-ink);
+  font-weight: 650;
+}
+
+.sh-send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sh-pending {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sh-pending li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid var(--sh-border);
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.sh-pending li.err {
+  border-color: var(--sh-danger);
+  color: var(--sh-danger);
+}
+
+.sh-pending-st {
+  color: var(--sh-dim);
+  font-size: 12px;
+}
+
+.sh-pending li.err .sh-pending-st {
+  color: inherit;
+}
+
+.sh-pending button {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.sh-send-err {
+  margin: 0 0 6px;
+  color: var(--sh-danger);
+  font-size: 13px;
+}
+
+.sh-gone {
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding: 24px;
+}
+
+.sh-gone-card {
+  max-width: 360px;
+  text-align: center;
+}
+
+.sh-gone-icon {
+  font-size: 40px;
+}
+
+.sh-gone h1 {
+  font-size: 19px;
+  margin: 12px 0 8px;
+}
+
+.sh-gone p {
+  margin: 0;
+  color: var(--sh-dim);
+  line-height: 1.6;
+}
+
+@media (min-width: 900px) {
+  .sh-list {
+    padding: 20px 24px 12px;
+  }
+
+  .sh-side,
+  .sh-side.open {
+    display: block;
+    position: static;
+    flex: none;
+    width: 280px;
+    max-height: none;
+    border-top: 0;
+    border-left: 1px solid var(--sh-border);
+    border-radius: 0;
+    box-shadow: none;
+    background: var(--sh-panel);
+    overflow-y: auto;
+  }
+
+  .sh-files-btn,
+  .sh-files-head .sh-link[aria-label] {
+    display: none;
+  }
+}
