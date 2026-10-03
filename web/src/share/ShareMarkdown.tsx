@@ -2,6 +2,7 @@ import { Component, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { markdownTooDeep, markdownTooLong } from '../lib/markdownGuard'
+import { shareSafeHref } from './shareModel'
 
 /**
  * 分享頁的 bot 回覆：GFM，但不吃 HTML、不載圖片，連結一律開新分頁且不帶 referrer。
@@ -27,11 +28,15 @@ function MarkdownBody({ text }: { text: string }) {
       disallowedElements={['img']}
       unwrapDisallowed
       components={{
-        a: ({ href, children }) => (
-          <a href={href} target="_blank" rel="noopener noreferrer nofollow">
-            {children}
-          </a>
-        ),
+        a: ({ href, children }) => {
+          const safe = shareSafeHref(href)
+          if (!safe) return <span>{children}</span>
+          return (
+            <a href={safe} target="_blank" rel="noopener noreferrer nofollow">
+              {children}
+            </a>
+          )
+        },
       }}
     >
       {text}

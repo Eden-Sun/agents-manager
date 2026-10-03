@@ -2,7 +2,7 @@
  * 分享頁的 API client：只打契約 C 的 `/s/{token}/api/…`（API.md §5.7），沒有 UI token、沒有任何主 API 路徑。
  * mock（VITE_MOCK=1）走 `shareMock.ts`，同一個介面。
  */
-import { ShareHttpError, toShareFiles, toShareMessage, toSharePage, toStatus, type ShareFile, type ShareMessage, type SharePage, type ShareStatus } from './shareModel'
+import { ShareHttpError, shareBeforeCursor, toShareFiles, toShareMessage, toSharePage, toStatus, type ShareFile, type ShareMessage, type SharePage, type ShareStatus } from './shareModel'
 
 export interface ShareEvents {
   onMessage: (m: ShareMessage) => void
@@ -36,7 +36,8 @@ export function httpShareClient(token: string): ShareClient {
   return {
     async messages(before) {
       const q = new URLSearchParams({ limit: '100' })
-      if (before) q.set('before', before)
+      const cursor = shareBeforeCursor(before)
+      if (cursor) q.set('before', cursor)
       return toSharePage(await json(`/messages?${q}`))
     },
     async send(text, clientRequestId, attachments) {
@@ -61,29 +62,48 @@ export function httpShareClient(token: string): ShareClient {
         ev.onDown()
         return () => {}
       }
-      const es = new EventSource(`${base}/events`)
-      es.onopen = () => ev.onUp?.()
-      es.addEventListener('message', (e) => {
-        try {
-          const m = toShareMessage(JSON.parse((e as MessageEvent<string>).data))
-          if (m) ev.onMessage(m)
-        } catch {
-          /* 讀不懂的一則略過 */
+      let stopped = false
+      let es: EventSource | null = null
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const bind = (sock: EventSource) => {
+        sock.onopen = () => ev.onUp?.()
+        sock.addEventListener('message', (e) => {
+          try {
+            const m = toShareMessage(JSON.parse((e as MessageEvent<string>).data))
+            if (m) ev.onMessage(m)
+          } catch {
+            /* 讀不懂的一則略過 */
+          }
+        })
+        sock.addEventListener('status', (e) => {
+          try {
+            ev.onStatus(toStatus(JSON.parse((e as MessageEvent<string>).data)))
+          } catch {
+            /* ignore */
+          }
+        })
+        // 瀏覽器自己的重連可以緊到 retry:0。關掉這條，4 秒後才再開一條，同時改輪詢。
+        sock.onerror = () => {
+          ev.onDown()
+          sock.close()
+          if (stopped || timer !== null) return
+          timer = setTimeout(() => {
+            timer = null
+            open()
+          }, 4000)
         }
-      })
-      es.addEventListener('status', (e) => {
-        try {
-          ev.onStatus(toStatus(JSON.parse((e as MessageEvent<string>).data)))
-        } catch {
-          /* ignore */
-        }
-      })
-      // 瀏覽器重連時 readyState 是 CONNECTING，不會先變 CLOSED。任一 error 都改輪詢，
-      // 讓撤銷連結的 404 走得到；onopen 再把輪詢停掉。
-      es.onerror = () => {
-        ev.onDown()
       }
-      return () => es.close()
+      const open = () => {
+        if (stopped) return
+        es = new EventSource(`${base}/events`)
+        bind(es)
+      }
+      open()
+      return () => {
+        stopped = true
+        if (timer !== null) clearTimeout(timer)
+        es?.close()
+      }
     },
   }
 }

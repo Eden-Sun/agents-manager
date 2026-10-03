@@ -1,8 +1,25 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mergeMessages, ShareHttpError, shareErrorText, toShareFiles, toShareMessage, toSharePage, toStatus, tokenFromLocation } from './shareModel.ts'
+import { mergeMessages, ShareHttpError, shareErrorText, shareSafeHref, toShareFiles, toShareMessage, toSharePage, toStatus, tokenFromLocation } from './shareModel.ts'
 
 const T = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd'
+
+test('一頁超過 100 則或單則超長文字會被截掉，不能整包塞進頁面', () => {
+  const huge = 'x'.repeat(200_000)
+  const messages = Array.from({ length: 250 }, (_, i) => ({ id: `m${i}`, role: 'assistant', text: i === 0 ? huge : 'ok', created_at: '2024-01-01T00:00:00Z' }))
+  const page = toSharePage({ bot_name: 'b', status: 'idle', has_more: true, messages })
+  assert.ok(page.messages.length <= 100)
+  assert.ok(page.messages[0].text.length < huge.length)
+  assert.match(page.messages[0].text, /內容過長/)
+})
+
+test('分享頁連結只留 http／https', () => {
+  assert.equal(shareSafeHref('https://example.com/a'), 'https://example.com/a')
+  assert.equal(shareSafeHref('javascript:alert(1)'), undefined)
+  assert.equal(shareSafeHref('data:text/html,x'), undefined)
+  assert.equal(shareSafeHref('//evil.example/x'), undefined)
+  assert.equal(shareSafeHref(' javascript:alert(1)'), undefined)
+})
 
 test('token：正式網址 /s/<token>，dev 用 ?token=；不是 base64url 的一律不認', () => {
   assert.equal(tokenFromLocation({ pathname: `/s/${T}`, search: '' }), T)
