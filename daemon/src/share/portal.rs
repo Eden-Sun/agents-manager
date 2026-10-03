@@ -310,7 +310,7 @@ async fn authorized_bot(st: &Portal, token: &str) -> Result<(String, OwnedMutexG
     Ok((bot_id, guard))
 }
 
-/// 上傳入口先驗 token、扣嘗試額度、占名額，再把 request 交給會讀取 Bytes 的 handler。
+/// 上傳入口先驗 token、占名額，占到了才扣嘗試額度，再把 request 交給會讀取 Bytes 的 handler。
 /// `_permit` 活到 `next.run` 回應結束，慢速 body 也會占著同一個名額。
 async fn upload_admission(State(st): State<Portal>, Path(token): Path<String>, mut req: axum::extract::Request, next: Next) -> Response {
     let bot_id = match bot_for(&st, &token).await {
@@ -319,11 +319,13 @@ async fn upload_admission(State(st): State<Portal>, Path(token): Path<String>, m
     };
     #[cfg(test)]
     crate::lifecycle::race_point::hit("share_upload_after_bot_for", &bot_id).await;
-    if let Some(wait) = st.limits.take(&bot_id, "upload", UPLOADS_PER_MIN, Duration::from_secs(60)) {
-        return too_many(wait, "upload");
-    }
+    // 全域上傳名額滿了就立刻拒絕。這條還沒讀 body，不算一次上傳嘗試，否則別的分享占滿名額時，
+    // 重試會把這顆 bot 的每分鐘額度扣光。
     let Ok(_permit) = st.uploads.clone().try_acquire_owned() else {
         return too_many(2, "upload");
+    };
+    if let Some(wait) = st.limits.take(&bot_id, "upload", UPLOADS_PER_MIN, Duration::from_secs(60)) {
+        return too_many(wait, "upload");
     };
     req.extensions_mut().insert(bot_id);
     next.run(req).await

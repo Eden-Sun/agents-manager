@@ -143,6 +143,40 @@ async fn issue_823_holds_both_upload_permits_until_body_read_and_rejects_a_third
 }
 
 #[tokio::test]
+async fn a_capacity_rejection_does_not_spend_the_upload_rate_limit() {
+    let (_e, token, state, addr, client) = fixture().await;
+    let uri = format!("/s/{token}/api/upload?name=x.txt");
+    let first = partial_upload(addr, &uri).await;
+    let second = partial_upload(addr, &uri).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.uploads.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("two slow bodies should hold both upload permits");
+
+    for _ in 0..UPLOADS_PER_MIN {
+        let mut rejected = partial_upload(addr, &uri).await;
+        assert_eq!(response_status(&mut rejected).await, StatusCode::TOO_MANY_REQUESTS.as_u16());
+    }
+    drop((first, second));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.uploads.available_permits() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("closing the slow bodies should return an upload permit");
+
+    assert_eq!(
+        call(&client, addr, &format!("/s/{token}/api/upload?name=note.txt"), "application/octet-stream", b"hello".to_vec()).await,
+        StatusCode::OK,
+        "concurrency rejections must not fill the per-share upload window"
+    );
+}
+
+#[tokio::test]
 async fn issue_824_invalid_uploads_spend_the_upload_rate_limit() {
     let (_e, token, _state, addr, client) = fixture().await;
     for attempt in 0..UPLOADS_PER_MIN {
