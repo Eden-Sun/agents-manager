@@ -100,7 +100,7 @@ async fn last_inbound_is_our_alert(app: &Arc<App>, bot_id: &str) -> bool {
 /// 畫面尾段壓成「它在問什麼」。
 ///
 /// 只取最後幾行有內容的：真正在等人回答的東西就畫在輸入列上面，再往上是正文。框線、游標、
-/// statusLine 與 `⏵⏵ bypass permissions` 這類固定行丟掉——那些每回合都在變，會讓指紋一直不同。
+/// statusLine 與權限模式列（`⏵⏵ bypass permissions`、`⏸ manual mode on`…）這類固定行丟掉——那些每回合都在變，會讓指紋一直不同。
 pub fn question_from_screen(screen: &str) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     // 2.1.287 的 held message 框（#775）每行都很長，上面對話裡還有一大段 `● Held peer message …`：從框的標題起算，
@@ -133,9 +133,8 @@ pub fn question_from_screen(screen: &str) -> Option<String> {
 /// 每回合都在變、對父 agent 沒有意義的固定行。
 fn is_chrome(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
-    l.starts_with("⏵⏵")
-        || l.contains("bypass permissions on")
-        || l.contains("shift+tab to cycle")
+    // 權限模式列（四種模式＋尾巴）跟備援回覆共用同一份判斷（#788），default 模式的 `⏸ manual mode on` 也在內。
+    crate::capture::claude::is_mode_row(line)
         // 使用者的 statusLine（`名字 | 專案 | 模型 31% | 5h:96%`）：每回合都在變，帶進來會讓
         // 同一個問題每次算出不同指紋，變成連珠炮。
         || (l.contains('|') && l.contains('%'))
@@ -668,6 +667,25 @@ mod tests {
         } else {
             assert!(alertable_question(survey).is_some(), "daemon 不按就一定要吵，否則靜默停擺");
         }
+    }
+
+    /// #788：2.1.288 default 權限模式的真畫面，模式列是 `⏸ manual mode on · ← for agents`（沒有 `shift+tab to cycle`）。
+    /// 它跟 `⏵⏵` 那種一樣是固定行：不能帶給 parent，尾巴換了（`? for shortcuts`、多了背景 shell）也不能算成新問題。
+    #[test]
+    fn the_default_mode_row_stays_out_of_the_question() {
+        const MANUAL: &str = include_str!("lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
+        let q = question_from_screen(MANUAL).expect("畫面上有字");
+        assert!(q.contains("DONE") && !q.contains("manual mode"), "{q}");
+        let shortcuts = MANUAL.replace("· ← for agents", "· ? for shortcuts");
+        assert_ne!(shortcuts, MANUAL, "前提：fixture 最底是這種模式列");
+        assert_eq!(fingerprint(&question_from_screen(&shortcuts).unwrap()), fingerprint(&q));
+        for row in ["⏸ plan mode on (shift+tab to cycle) · ← for agents", "⏵⏵ accept edits on · 1 shell · ← for agents"] {
+            let other = MANUAL.replace("⏸ manual mode on · ← for agents", row);
+            assert_eq!(fingerprint(&question_from_screen(&other).unwrap()), fingerprint(&q), "{row}");
+        }
+        // 回覆裡 `⏸` 開頭的句子是內容，照樣帶給 parent。
+        let paused = format!("⏺ 進度\n  ⏸ 暫停：等使用者決定要不要推\n{MANUAL}");
+        assert!(question_from_screen(&paused).unwrap().contains("⏸ 暫停：等使用者決定要不要推"));
     }
 
     /// 同一個問題只講一次；問題變了才再講。指紋認的是內容，不是時間。

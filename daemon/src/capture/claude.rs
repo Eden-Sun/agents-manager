@@ -257,22 +257,35 @@ fn is_status_chrome(s: &str) -> bool {
         || is_mode_row(s)
         || s.starts_with("Tip:")
         || s.starts_with("⎿")
-        || s.contains("shift+tab to cycle")
         || s.contains("Auto-update failed")
         || (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
         || (s.contains(" · ") && s.contains("% left"))
 }
 
-/// 輸入框底下的權限模式列。bypass／accept edits 是 `⏵⏵ … on (shift+tab to cycle)`，plan 是 `⏸ plan mode on (shift+tab to cycle)`；
+/// 輸入框底下的權限模式列。**全 daemon 只有這一份**（#788）：備援回覆（[`is_status_chrome`]／[`is_noise`]）與
+/// 子 agent 提問通知（`child_alerts::is_chrome`）都呼叫它，不要在別處再寫一份。
+///
+/// bypass／accept edits 是 `⏵⏵ … on (shift+tab to cycle)`，plan 是 `⏸ plan mode on (shift+tab to cycle)`；
 /// default 模式是 `⏸ manual mode on · ← for agents`，**沒有** `(shift+tab to cycle)`（#783，2.1.288 真畫面
-/// `claude-2.1.288-manual-mode-finished.txt`）。`⏸` 開頭的只認第一段（` · ` 之前）完全等於已觀察到的 mode row。
-fn is_mode_row(s: &str) -> bool {
+/// `claude-2.1.288-manual-mode-finished.txt`）。尾巴（` · ← for agents`、` · ? for shortcuts`、` · 1 shell`）隨狀態在變。
+///
+/// 認法：`⏵⏵` 開頭的一律算；帶 `shift+tab to cycle` 提示的一律算（窄 pane 折行時提示落在下一行也一樣）；
+/// 其餘只看第一段（` · ` 之前、去掉 `⏸`）是否**完全等於**已觀察到的模式名稱——回覆裡 `⏸` 開頭的句子、或句子中間提到
+/// `bypass permissions on` 都不算。沒有 `⏸`／`⏵⏵` 的 `bypass permissions on …` 也算（`child_alerts` 原本就認這種）。
+pub(crate) fn is_mode_row(s: &str) -> bool {
     let s = s.trim();
     if s.starts_with("⏵⏵") {
         return true;
     }
-    let Some(rest) = s.strip_prefix('⏸') else { return false };
-    matches!(rest.split(" · ").next().unwrap_or(rest).trim(), "manual mode on" | "plan mode on (shift+tab to cycle)")
+    let low = s.to_ascii_lowercase();
+    if low.contains("shift+tab to cycle") {
+        return true;
+    }
+    let rest = low.strip_prefix('⏸').unwrap_or(&low);
+    matches!(
+        rest.split(" · ").next().unwrap_or(rest).trim(),
+        "manual mode on" | "plan mode on" | "accept edits on" | "bypass permissions on"
+    )
 }
 
 fn is_zone_busy(s: &str) -> bool {
@@ -402,7 +415,6 @@ fn is_noise(s: &str) -> bool {
     s.starts_with("Claude Code v")
         || s.starts_with("Tip:")
         || s.starts_with("Ask Codex")
-        || s.contains("shift+tab to cycle")
         || s.contains("OpenAI Codex (v")
         || s.starts_with(">_ OpenAI Codex")
         || s.contains("Ask Codex to do")
@@ -458,6 +470,47 @@ mod loose_noise_tests {
         assert!(!is_mode_row("⏸ 暫停：等使用者決定 · mode on 的說明"));
         assert!(!is_noise("⏸ 暫停部署"));
         assert!(!is_noise("⏸ The manual mode on label is confusing here."));
+    }
+
+    /// #788：模式列只有 [`is_mode_row`] 一份，child_alerts 也呼叫它。四種模式（bypass／accept edits／plan／default manual）
+    /// 連同各種尾巴都認；`child_alerts` 原本認的形式（沒有 `⏵⏵` 的 `bypass permissions on`、只剩 `shift+tab to cycle`
+    /// 的折行、大小寫不同）不能退步。暫停中的回覆列、句子中間提到模式名稱的回覆都不是模式列。
+    #[test]
+    fn the_one_mode_row_check_covers_all_four_modes_and_not_a_paused_reply() {
+        for row in [
+            "⏵⏵ bypass permissions on (shift+tab to cycle)",
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+            "⏵⏵ bypass permissions on · 1 shell · ← for agents",
+            "  ⏵⏵ bypass permissions on  ",
+            "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+            "⏵⏵ accept edits on · ? for shortcuts",
+            "⏸ plan mode on (shift+tab to cycle) · ← for agents",
+            "⏸ plan mode on · ? for shortcuts",
+            "⏸ manual mode on · ← for agents",
+            "⏸ manual mode on · ? for shortcuts",
+            "⏸ manual mode on",
+            // child_alerts 原本就認的：沒有箭頭的 bypass 列、窄 pane 折下來的提示、大小寫。
+            "bypass permissions on · ← for agents",
+            "permissions on (shift+tab to cycle)",
+            "(Shift+Tab to cycle) · ← for agents",
+        ] {
+            assert!(is_mode_row(row), "{row}");
+        }
+        for reply in [
+            "⏸ 暫停：等使用者決定 · mode on 的說明",
+            "⏸ 暫停部署",
+            "⏸ Paused: waiting for the user · manual mode on is the default",
+            "⏸ The manual mode on label is confusing here.",
+            "我把 bypass permissions on 這個模式關掉了",
+            "manual mode on 是 2.1.288 的預設",
+            "",
+        ] {
+            assert!(!is_mode_row(reply), "{reply}");
+        }
+        // 2.1.288 default 模式真畫面：最底那一行就是模式列。
+        let fixture = include_str!("../lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
+        let last = fixture.lines().rev().find(|l| !l.trim().is_empty()).unwrap();
+        assert!(is_mode_row(last), "{last:?}");
     }
 
     /// #331：`*` 開頭的回覆行（markdown 項目、程式碼區塊的 ` * 註解`）被當 spinner 剝掉。

@@ -236,7 +236,7 @@ pub fn update_notice(screen: &str) -> Option<String> {
     (t.contains("update installed") && t.contains("restart to update")).then(|| UPDATE_NOTICE.to_string())
 }
 
-/// statusLine 那行加底下 `⏵⏵ bypass permissions` 一行，窄 pane 折行也在範圍內。
+/// statusLine 那行加底下的權限模式列（[`crate::capture::claude::is_mode_row`]）一行，窄 pane 折行也在範圍內。
 const TAIL_LINES: usize = 6;
 
 /// 存進 `runs.update_notice` 的字，也是 UI tooltip 原句。
@@ -888,6 +888,8 @@ pub(crate) mod screens {
     pub const REPORT_QUOTING_ONBOARDING: &str = include_str!("lifecycle/fixtures/claude-2.1.280-report-quoting-onboarding.txt");
     /// 2.1.281 真畫面：bypass 模式下 `rm -rf $(…)/*` 跳的防誤刪框，含自動拒絕的倒數（本機 2.1.281＋假 API 重現，2026-09-24）。
     pub const DANGEROUS_RM: &str = include_str!("lifecycle/fixtures/claude-2.1.281-dangerous-rm.txt");
+    /// 2.1.288 default 權限模式回合結束的真畫面（#783）：沒有 statusLine，輸入框底下只有 `⏸ manual mode on · ← for agents`。
+    pub const MANUAL_MODE_FINISHED_2288: &str = include_str!("lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt");
     /// 回合結束、輸入列空著的 claude 底部。
     pub const IDLE_CLAUDE: &str = "────────────────────\n❯\n────────────────────\n  15m2dg | agents-manager | Opus 5 31% | 5h:96%\n";
     /// 2026-09-25 cf-ox-fork-fork（2.1.281）停著的「Session paused」選單：只取選單那段，說明換成假文字。herdr 判 `idle`。
@@ -1529,6 +1531,31 @@ pub fn is_feedback_survey(screen: &str) -> bool {
             assert!(!is_switch_model_dialog(screen) && !is_auto_mode_offer(screen) && !is_feedback_survey(screen), "{name}");
             assert!(!is_session_paused_menu(screen) && !stuck_at_login(screen) && !is_not_logged_in_reply(screen), "{name}");
             assert!(!is_grok_trust_dialog(screen) && !is_onboarding_theme(screen), "{name}");
+        }
+    }
+
+    /// #788：2.1.288 default 模式回合結束的真畫面——輸入列空著、底下只有 `⏸ manual mode on` 模式列。
+    /// 那一行不是選單、不是任何框（換成其他三種模式列也一樣），空的輸入列照樣認得出來。
+    #[test]
+    fn the_2_1_288_manual_mode_screen_is_an_idle_composer_not_a_dialog() {
+        use super::screens::MANUAL_MODE_FINISHED_2288 as MANUAL;
+        let rows = [
+            "⏸ manual mode on · ← for agents",
+            "⏸ manual mode on · ? for shortcuts",
+            "⏸ plan mode on (shift+tab to cycle) · ← for agents",
+            "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+            "⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ];
+        for row in rows {
+            let screen = MANUAL.replace(rows[0], row);
+            let tail: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+            assert!(crate::capture::claude::is_mode_row(tail[tail.len() - 1]), "{row}");
+            assert!(composer_is_idle(&tail), "{row}：輸入列空著");
+            assert!(!awaits_menu_choice(&screen) && permission_prompt(&screen).is_none() && dangerous_rm_prompt(&screen).is_none(), "{row}");
+            assert!(!is_switch_model_dialog(&screen) && !is_auto_mode_offer(&screen) && !is_feedback_survey(&screen), "{row}");
+            assert!(!is_session_paused_menu(&screen) && !is_held_message_prompt(&screen) && !stuck_at_login(&screen), "{row}");
+            assert!(!is_login_menu(&screen) && !is_onboarding_theme(&screen) && !is_not_logged_in_reply(&screen), "{row}");
+            assert!(!is_grok_trust_dialog(&screen) && update_notice(&screen).is_none(), "{row}");
         }
     }
 
