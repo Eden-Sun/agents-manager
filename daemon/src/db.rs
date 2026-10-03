@@ -286,6 +286,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     // perf：`messages_assistant_unread`（未讀數只看 assistant 訊息的 partial covering 索引）。主幹現況是 36；若與 716-b 的 schema 變更同時合流，
     // 兩邊都會寫成 37 而衝突，以合流後主幹的最後一號 +1 重算指紋、併成同一版。
     (37, "5560444159e4c9a5"),
+    // 分享 bot：`shared_bots`（受限的分享用 bot 與它的工作目錄）、`bot_shares`（分享連結，只存 token 的 SHA-256）。
+    (38, "f2d07b091615d3d7"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -550,6 +552,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     crate::release_triage::ledger::migrate(pool).await?;
     crate::judge::migrate(pool).await?;
     crate::cli_update::migrate(pool).await?;
+    crate::share::store::migrate(pool).await?;
     Ok(())
 }
 
@@ -1079,6 +1082,7 @@ pub struct Turn {
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]
+#[serde(into = "MessageWire")]
 pub struct Message {
     pub id: String,
     pub conversation_id: String,
@@ -1109,6 +1113,54 @@ pub struct Message {
     /// 同毫秒的訊息靠它定先後；`before=` 分頁也是照 rowid 切。查詢要寫 `SELECT *, rowid AS seq`，沒帶就是 0（＝未知）。
     #[sqlx(default)]
     pub seq: i64,
+}
+
+/// [`Message`] 對外的樣子：只差在 `source`。分享頁 end user 送來的（`relay_from` = [`crate::share::SHARE_SENDER`]）報
+/// `share`——`messages.source` 的 CHECK 不收新值（要重建整張表），所以 DB 照存 `web`，只在輸出時改（SPEC「分享 bot」）。
+#[derive(serde::Serialize)]
+pub struct MessageWire {
+    id: String,
+    conversation_id: String,
+    turn_id: Option<String>,
+    role: String,
+    content: String,
+    source: String,
+    incomplete: i64,
+    terminal_snapshot: Option<String>,
+    group_id: Option<String>,
+    attachments_json: Option<String>,
+    relay_from: Option<String>,
+    relay_unverified: i64,
+    created_at: String,
+    updated_at: Option<String>,
+    rewound_at: Option<String>,
+    sent_via: Option<String>,
+    seq: i64,
+}
+
+impl From<Message> for MessageWire {
+    fn from(m: Message) -> Self {
+        let source = if m.role == "user" && m.relay_from.as_deref() == Some(crate::share::SHARE_SENDER) { "share".to_string() } else { m.source };
+        Self {
+            id: m.id,
+            conversation_id: m.conversation_id,
+            turn_id: m.turn_id,
+            role: m.role,
+            content: m.content,
+            source,
+            incomplete: m.incomplete,
+            terminal_snapshot: m.terminal_snapshot,
+            group_id: m.group_id,
+            attachments_json: m.attachments_json,
+            relay_from: m.relay_from,
+            relay_unverified: m.relay_unverified,
+            created_at: m.created_at,
+            updated_at: m.updated_at,
+            rewound_at: m.rewound_at,
+            sent_via: m.sent_via,
+            seq: m.seq,
+        }
+    }
 }
 
 #[derive(Debug, Clone, FromRow, serde::Serialize)]

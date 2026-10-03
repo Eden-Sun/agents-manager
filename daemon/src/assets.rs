@@ -48,6 +48,17 @@ pub async fn serve(uri: Uri) -> Response {
     }
 }
 
+/// 嵌入的 `web/dist` 裡的一個檔（分享入口用，`share::portal`）。沒嵌或沒有這個檔＝`None`，**沒有** SPA fallback。
+#[cfg(feature = "embed-ui")]
+pub fn embedded(path: &str) -> Option<Vec<u8>> {
+    WebAssets::get(path).map(|f| f.data.into_owned())
+}
+
+#[cfg(not(feature = "embed-ui"))]
+pub fn embedded(_path: &str) -> Option<Vec<u8>> {
+    None
+}
+
 #[cfg(not(feature = "embed-ui"))]
 pub async fn serve(_uri: Uri) -> Response {
     let _ = header::CONTENT_TYPE;

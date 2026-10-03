@@ -201,6 +201,9 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/login", post(login_bot))
         .route("/bots/{id}/pane/move-to-tab", post(move_bot_pane_to_tab))
         .route("/bots/{id}/prompt", post(prompt_bot))
+        // 分享 bot（SPEC「分享 bot」）：只收 UI token，handler 自己再擋一次 principal。
+        .route("/bots/{id}/share", get(crate::share::admin::get_share).post(crate::share::admin::post_share))
+        .route("/bots/{id}/share/rotate", post(crate::share::admin::post_rotate))
         .route(
             "/bots/{id}/attachments",
             post(upload_attachment)
@@ -412,6 +415,9 @@ async fn relay_pane(
         Ok(Some(b)) if b.deleted_at.is_none() && !token.is_empty() && ct_eq(token, &b.hook_token) => b,
         _ => return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"}))),
     };
+    if crate::share::refuses_bot_principal(&app.db, &bot.id).await {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "restricted_bot"})));
+    }
     // 讀不到 host 就 503 讓 shim 重試：退回 local 會把遠端 pane id 寫進本機 namespace（#243）。
     let Ok(host) = db::bot_host(&app.db, &bot.id).await else {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "bot host unreadable; retry"})));
@@ -438,6 +444,9 @@ async fn relay_announce(
     };
     if !ok {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unknown bot or bad token"})));
+    }
+    if crate::share::refuses_bot_principal(&app.db, &body.bot_id).await {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "restricted_bot"})));
     }
     // 寫給 AGM 的：協調者存在時排進它的佇列，shim 看到 `routed` 就不再打進 pane（SPEC §18.15）。
     // 路由狀態**不知道**不等於「不是 AGM」（issue #143）：查不出目標是不是 AGM、或確定是 AGM 卻寫不進佇列，
@@ -762,6 +771,10 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
                 Ok(_) => return unauthorized(),
                 Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
             };
+            // 分享用的受限 bot：它的 token 只能打自己的 hook，`/api` 一條都不給（SPEC「分享 bot」）。
+            if crate::share::refuses_bot_principal(&app.db, &bot.id).await {
+                return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "restricted_bot"}))).into_response();
+            }
             RequestPrincipal::Bot(bot.id)
         }
     } else {
@@ -1098,6 +1111,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     // §6.11：AGM 因為閒置收起來的那些。一次讀完，免得每顆 bot 再問一次資料庫。
     let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
     let previews = crate::preview::state_map(&app.db).await.map_err(any_err)?;
+    let restricted = crate::share::store::restricted_ids(&app.db).await.map_err(any_err)?;
     // 每顆 bot 的 run 與排隊中的回合各一次讀完：逐顆查是 N+1（34 顆 bot 約 30 ms，隨 bot 數線性長）。
     let mut runs = db::active_runs_by_bot(&app.db).await.map_err(any_err)?;
     let mut queued_turns = db::queued_turns_by_bot(&app.db).await.map_err(any_err)?;
@@ -1135,6 +1149,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "needs_restart": run.as_ref().is_some_and(|r| crate::launch_rev::is_stale(b, r)) && !crate::lifecycle::is_deferred(&b.id),
                 "live_apply_deferred": crate::lifecycle::is_deferred(&b.id),
                 "cwd": b.cwd,
+                // 分享用的受限 bot（SPEC「分享 bot」）；一般 bot＝null。
+                "share_profile": restricted.contains(&b.id).then_some(crate::share::store::PROFILE_RESTRICTED),
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 // #714：`run.background_jobs`＝回合結束後畫面上還標著的背景工作數（記憶體裡的，不在 DB）。
                 "run": crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str())),
@@ -1792,6 +1808,9 @@ struct NewBot {
     /// 同一個鍵換了請求內容回 409 `request_id_reused`；沒帶＝照舊每次都建。`name_auto` 時 `name` 只是提示，不算請求內容。
     #[serde(default)]
     client_request_id: Option<String>,
+    /// `"restricted"`＝分享用的受限 bot（SPEC「分享 bot」）。只在建立時決定，之後不能切換。
+    #[serde(default)]
+    share_profile: Option<String>,
 }
 
 /// Must exist **on that bot's host** (`[[identities]]` + its `ccN` aliases, SPEC §16) and match `kind`.
@@ -1847,6 +1866,14 @@ async fn create_bot(
         .map(|p| p.host)
         .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
+    let restricted = match b.share_profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => false,
+        Some(crate::share::store::PROFILE_RESTRICTED) => {
+            crate::share::cage::check_create(&b.kind, &host, &b.args, b.env.as_ref())?;
+            true
+        }
+        Some(other) => return Err(LcError::Bad(format!("share_profile must be `restricted` (got `{other}`)"))),
+    };
     #[cfg(test)]
     crate::lifecycle::race_point::hit("create_bot_after_identity_check", &pid).await;
     let (model, remapped) = remap_model(&b.kind, b.model.as_deref());
@@ -1882,6 +1909,7 @@ async fn create_bot(
             b.auto_approve.unwrap_or(true),
             identity,
             env,
+            restricted,
         ])
         .to_string()
     });
@@ -1890,6 +1918,8 @@ async fn create_bot(
     // child（reconcile 認領的）不在 config.toml，但 DB 的 `(project_id, name)` 唯一約束算它們。
     // 只看 config 會先寫進檔、投影再爆，之後這個專案每次新增／修改都 502（#654）。
     let db_names = live_bot_names(&app.db, &pid).await.map_err(any_err)?;
+    // 受限 bot：config 寫進去之前先記下來，投影出來的那一列從第一次啟動起就在籠子裡（沒有當一般 bot 起來的空窗）。
+    let workspace = if restricted { Some(crate::share::admin::reserve_restricted(&app, &id).await?) } else { None };
     let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
         let p = cfg
             .projects
@@ -1927,8 +1957,8 @@ async fn create_bot(
             persona: b.persona.clone().filter(|s| !s.trim().is_empty()),
             args: b.args.clone(),
             autostart: b.autostart,
-            inject_hooks: b.inject_hooks.unwrap_or(true),
-            auto_approve: b.auto_approve.unwrap_or(true),
+            inject_hooks: b.inject_hooks.unwrap_or(true) || restricted,
+            auto_approve: b.auto_approve.unwrap_or(true) && !restricted,
             identity: identity.clone(),
             env: env.clone(),
             herdr_session: None,
@@ -1938,6 +1968,10 @@ async fn create_bot(
         Ok(())
     })
     .await;
+    if let Some(ws) = &workspace {
+        let created = res.is_ok() && replayed.lock().unwrap().is_none();
+        crate::share::admin::finish_restricted(&app, &id, ws, created).await;
+    }
     match res {
         Ok(()) => {}
         Err(e) if e.to_string() == "request-id-reused" => {

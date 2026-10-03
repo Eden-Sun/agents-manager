@@ -626,9 +626,14 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
     if !matches!(bot.kind.as_str(), "claude" | "codex" | "grok") {
         anyhow::bail!("unknown bot kind {}", bot.kind);
     }
-    let mut out = permission_args(&bot.kind, bot.auto_approve != 0);
-    if bot.inject_hooks == 0 {
+    // 分享用的受限 bot：權限參數由 `share::cage` 決定（絕不帶 bypass），settings 一律寫（裡面是它的權限規則）。
+    let restricted = crate::share::store::workspace(&app.db, &bot.id).await?;
+    let mut out = if restricted.is_some() { Vec::new() } else { permission_args(&bot.kind, bot.auto_approve != 0) };
+    if bot.inject_hooks == 0 && restricted.is_none() {
         return Ok(out);
+    }
+    if restricted.is_some() && (bot.kind != "claude" || project.host != LOCAL_HOST) {
+        anyhow::bail!("restricted share bot must be a local claude bot");
     }
 
     // remote project: POSIX sh hook via that host's own herdr (§11.4)
@@ -668,7 +673,13 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
             let statusline = shell_join(&statusline_parts(hook_cmd_parts(app, bot, "claude")));
             // Remote Control 明講，不要靠帳號的全域 settings 決定（見 `claude_settings`）。
             let wants_remote = bot.args().iter().any(|a| a == "--remote-control");
-            let settings = claude_settings(&cmd, &statusline, wants_remote, bot.auto_approve != 0);
+            let mut settings = claude_settings(&cmd, &statusline, wants_remote, bot.auto_approve != 0);
+            if let Some(ws) = &restricted {
+                if bot.inject_hooks == 0 {
+                    settings = json!({});
+                }
+                crate::share::cage::cage_settings_for(app, &mut settings, ws, env);
+            }
             let path = dir.join("claude-settings.json");
             write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;
             vec!["--settings".into(), path.to_string_lossy().to_string(), "--verbose".into()]
