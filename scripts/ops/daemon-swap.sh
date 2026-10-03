@@ -65,6 +65,12 @@ done
 
 LOG="${SWAP_LOG:-$AGM_DIR/daemon-swap.log}"
 log() { echo "$(date '+%F %T') $*" | tee -a "$LOG"; }
+# --sha is a trust boundary: abbreviated ids must not make the checkout, built
+# binary, or post-start daemon appear to be approved.
+case "$SHA" in
+    ''|*[!0123456789abcdef]*) log "ABORT: --sha 必須是完整 40 碼小寫 commit id（收到 '${SHA}'）"; exit 10 ;;
+esac
+[ "${#SHA}" -eq 40 ] || { log "ABORT: --sha 必須是完整 40 碼小寫 commit id（收到 '${SHA}'）"; exit 10; }
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 START_PY="$SCRIPT_DIR/daemon-start.py"
 if [ ! -f "$START_PY" ] || [ ! -r "$START_PY" ]; then
@@ -290,10 +296,7 @@ SHORT=$(echo "$SHA" | cut -c1-8)
 
 # ── 1. 前置核對 ──────────────────────────────────────────────────────────────
 HEAD_SHA=$(git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)
-case "$HEAD_SHA" in
-    "$SHA"*) ;;
-    *) log "ABORT: checkout HEAD=$HEAD_SHA 不是 $SHA"; exit 3 ;;
-esac
+[ "$HEAD_SHA" = "$SHA" ] || { log "ABORT: checkout HEAD=$HEAD_SHA 不是 $SHA"; exit 3; }
 [ -x "$NEWBIN" ] || { log "ABORT: 找不到新 binary $NEWBIN"; exit 3; }
 # 要換上去的這顆 binary 真的是核准的那個 commit 建出來的嗎？daemon 自己驗不了（換上去的檔案只有這支腳本摸得到），
 # 所以換之前先問 binary 自己：`--version` 印 `<name> <版本> <完整 sha>[-dirty]`（clap 在進 main 之前就結束，不啟動服務）。
@@ -314,11 +317,8 @@ fi
 if [ "$BIN_SHA_CLEAN" != "$BIN_SHA" ]; then
     log "ABORT: 新 binary 是髒樹建出來的（binary 內嵌 ${BIN_SHA}）：它不是 ${SHA} 這個 commit，不換"; exit 10
 fi
-case "$BIN_SHA" in
-    "$SHA"*) log "binary sha ok: 內嵌 ${BIN_SHA} 符合核准的 ${SHA}" ;;
-    *) log "ABORT: 新 binary 內嵌的 sha 是 ${BIN_SHA}，不是核准的 ${SHA}（checkout HEAD 對、但這顆 binary 不是從它建的？）；不拿窗口、不換"
-       exit 10 ;;
-esac
+[ "$BIN_SHA" = "$SHA" ] && log "binary sha ok: 內嵌 ${BIN_SHA} 符合核准的 ${SHA}" \
+    || { log "ABORT: 新 binary 內嵌的 sha 是 ${BIN_SHA}，不是核准的 ${SHA}（checkout HEAD 對、但這顆 binary 不是從它建的？）；不拿窗口、不換"; exit 10; }
 # 線上 (--old) 必須是要換上的 commit 的祖先或同一顆。無法證明不是降版就拒絕（#638）。
 if ! git -C "$CHECKOUT" cat-file -e "${OLD}^{commit}" 2>/dev/null; then
     log "ABORT: 線上版本 $OLD 不在 checkout 裡，無法確認不是降版"
@@ -609,24 +609,58 @@ rollback() {
     rm -f "$AM_DATA/service-tokens/daemon-swap.token" "$AM_DATA/service-tokens/herdr-upgrade.token"
     rmdir "$AM_DATA/service-tokens" 2>/dev/null || true
     # DB 還原：daemon 已停；主檔與 -wal／-shm 要一起處理——新版留下的 WAL 配舊主檔會變成半新半舊。
-    # **原子**：先寫同目錄的暫存檔（600）、fsync，成功了才清 -wal／-shm 再 mv 覆蓋（同一個檔案系統的 rename 是原子的）。
-    # 以前是「先刪 -wal／-shm、再 cp 蓋過主檔」：cp 中途失敗（磁碟滿、被殺）就是原 DB 被截斷、它 WAL 裡 commit 過沒 checkpoint 的資料也已經刪了。
-    # 現在失敗時原 DB 與它的 -wal／-shm 一個位元組都不動，備份也還在，可以手動還原。
+    # **原子**：先寫同目錄的暫存檔（600）、fsync，再暫存 -wal／-shm，最後 rename 覆蓋主檔；同一檔案系統的 rename 是原子的。
+    # 複製或 rename 失敗時原 DB 與 sidecar 都要留住，備份也還在，可以手動還原。
     RESTORE_TMP="$DB.restore.$$"
+    WAL_HOLD="$RESTORE_TMP-wal"
+    SHM_HOLD="$RESTORE_TMP-shm"
+    RESTORE_READY=yes
+    RESTORE_ERROR="備份複製或同步失敗"
     if ( umask 077 && cp "$DBB" "$RESTORE_TMP" ) && chmod 600 "$RESTORE_TMP" \
         && "$PYTHON" -c 'import os, sys
 fd = os.open(sys.argv[1], os.O_RDONLY)
 try:
     os.fsync(fd)
 finally:
-    os.close(fd)' "$RESTORE_TMP" \
-        && rm -f "$DB-wal" "$DB-shm" && mv -f "$RESTORE_TMP" "$DB"; then
+    os.close(fd)' "$RESTORE_TMP"; then
+        if [ -e "$DB-wal" ] || [ -L "$DB-wal" ]; then
+            if mv -f "$DB-wal" "$WAL_HOLD"; then :
+            else RESTORE_READY=no; RESTORE_ERROR="無法暫存 WAL"; fi
+        fi
+        if [ "$RESTORE_READY" = yes ] && { [ -e "$DB-shm" ] || [ -L "$DB-shm" ]; }; then
+            if mv -f "$DB-shm" "$SHM_HOLD"; then :
+            else RESTORE_READY=no; RESTORE_ERROR="無法暫存 SHM"; fi
+        fi
+        if [ "$RESTORE_READY" = yes ]; then
+            if mv -f "$RESTORE_TMP" "$DB"; then
+                rm -f "$WAL_HOLD" "$SHM_HOLD"
+                RESTORE_READY=done
+            else
+                RESTORE_READY=no
+                RESTORE_ERROR="DB rename 失敗"
+            fi
+        fi
+    else
+        RESTORE_READY=no
+    fi
+    if [ "$RESTORE_READY" = done ]; then
         RU=$("$SQLITE" "$DB" "pragma user_version"); RI=$("$SQLITE" "$DB" "pragma integrity_check" | head -1)
         log "db restored from $DBB: user_version=$RU integrity=$RI"
         [ "$RI" = ok ] || log "WARN: 還原後的 DB integrity_check=$RI"
     else
         rm -f "$RESTORE_TMP"
-        log "ERROR: DB 還原失敗（備份 $DBB 複製或同步失敗）——原 DB 與它的 -wal／-shm 沒有動；備份還在，請手動還原後再啟動"
+        RESTORE_SIDECARS_OK=yes
+        if [ -e "$WAL_HOLD" ] || [ -L "$WAL_HOLD" ]; then
+            mv -f "$WAL_HOLD" "$DB-wal" || { RESTORE_SIDECARS_OK=no; log "ERROR: WAL 復原失敗，資料保留在 $WAL_HOLD"; }
+        fi
+        if [ -e "$SHM_HOLD" ] || [ -L "$SHM_HOLD" ]; then
+            mv -f "$SHM_HOLD" "$DB-shm" || { RESTORE_SIDECARS_OK=no; log "ERROR: SHM 復原失敗，資料保留在 $SHM_HOLD"; }
+        fi
+        if [ "$RESTORE_SIDECARS_OK" = yes ]; then
+            log "ERROR: DB 還原失敗（${RESTORE_ERROR}；備份 ${DBB}），原 DB 與它的 -wal／-shm 都保留；請手動還原後再啟動"
+        else
+            log "ERROR: DB 還原失敗（${RESTORE_ERROR}；備份 ${DBB}），sidecar 復原不完整，保留在上述路徑；請手動處理後再啟動"
+        fi
     fi
     if [ "$ROLLBACK_CHILDREN_KNOWN" != yes ]; then
         log "WARN: rollback restored the DB but could not determine whether newly adopted children still have live panes"
@@ -680,22 +714,21 @@ log "health ok"
 # 新 daemon 起來之後再用它自己的 API 複核一次（上面驗的是檔案，這裡驗的是跑起來的那個行程）：
 # `agm supervisor` 的 last_deploy.sha_full / dirty。binary 驗過了、起來的卻不是它（啟動器拉起別顆、舊行程沒停掉）也要回滾。
 # agm 自己失敗（daemon 讀不到）不在這裡判：下面讀 supervisor status 時同一個失敗會回滾，原因講得更準。
-if SUP_JSON=$(agm supervisor 2>/dev/null); then
-    DEPLOYED=$(printf '%s' "$SUP_JSON" | "$PYTHON" -c 'import json,sys
+SUP_JSON=$(agm supervisor 2>/dev/null) || rollback "新 daemon 的 agm supervisor 讀取失敗，無法複核 sha"
+DEPLOYED=$(printf '%s' "$SUP_JSON" | "$PYTHON" -c 'import json,sys
 try:
     d = (json.load(sys.stdin) or {}).get("last_deploy") or {}
 except Exception:
     d = {}
 print(d.get("sha_full") or "-", "dirty" if d.get("dirty") else "clean")')
-    read -r DEPLOYED_SHA DEPLOYED_DIRTY <<EOF_DEPLOYED
+read -r DEPLOYED_SHA DEPLOYED_DIRTY <<EOF_DEPLOYED
 $DEPLOYED
 EOF_DEPLOYED
-    case "${DEPLOYED_SHA:--}" in
-        -) rollback "新 daemon 的 /api/supervisor 沒回報 last_deploy.sha_full，複核不了它是不是核准的 ${SHA}" ;;
-        "$SHA"*) [ "${DEPLOYED_DIRTY:-clean}" = clean ] || rollback "新 daemon 回報自己是髒樹建的（${DEPLOYED_SHA}）" ;;
-        *) rollback "新 daemon 回報的 sha ${DEPLOYED_SHA} 不是核准的 ${SHA}" ;;
-    esac
-fi
+case "${DEPLOYED_SHA:--}" in
+    -) rollback "新 daemon 的 /api/supervisor 沒回報 last_deploy.sha_full，複核不了它是不是核准的 ${SHA}" ;;
+esac
+[ "$DEPLOYED_SHA" = "$SHA" ] || rollback "新 daemon 回報的 sha ${DEPLOYED_SHA} 不是核准的 ${SHA}"
+[ "${DEPLOYED_DIRTY:-clean}" = clean ] || rollback "新 daemon 回報自己是髒樹建的（${DEPLOYED_SHA}）"
 [ -z "${DEPLOYED_SHA:-}" ] || log "deployed sha ok: daemon 回報 ${DEPLOYED_SHA}"
 
 UV=$("$SQLITE" "$DB" "pragma user_version")

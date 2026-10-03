@@ -93,7 +93,14 @@ except OSError:
   echo $(( $(date +%s) - _born ))
 }
 TMPS=()
-cleanup() { rm -rf "$LOCK" 2>/dev/null || true; [ ${#TMPS[@]} -gt 0 ] && rm -f "${TMPS[@]}" 2>/dev/null; true; }
+TMPS_COUNT=0
+# bash 3.2 expands an empty array's length as an unbound variable under set -u.
+# Keep a scalar count so early failures can run EXIT cleanup before any mktemp.
+cleanup() {
+  rm -rf "$LOCK" 2>/dev/null || true
+  if [ "$TMPS_COUNT" -gt 0 ]; then rm -f "${TMPS[@]}" 2>/dev/null || true; fi
+  true
+}
 take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
@@ -144,7 +151,7 @@ print(tag)
 ' 2>/dev/null) || LATEST_TAG=""
 [ -n "$LATEST_TAG" ] || fail_run "查不到 ${HERDR_REPO} 的最新穩定版（gh release list）"
 
-CHANGELOG=$(mktemp "${TMPDIR:-/tmp}/herdr-changelog.XXXXXX"); TMPS+=("$CHANGELOG")
+CHANGELOG=$(mktemp "${TMPDIR:-/tmp}/herdr-changelog.XXXXXX"); TMPS+=("$CHANGELOG"); TMPS_COUNT=$((TMPS_COUNT + 1))
 if ! curl -fsSL --max-time 20 "$CHANGELOG_URL" -o "$CHANGELOG" || [ ! -s "$CHANGELOG" ]; then
   fail_run "抓不到 CHANGELOG（${CHANGELOG_URL}）"
 fi
@@ -192,7 +199,7 @@ print(d.get("herdr_update_bot_id") or d.get("release_bot_id") or d.get("responde
 fi
 [ -n "$BOT" ] || fail_run "找不到要派給誰（AGM_HERDR_UPDATE_BOT／runtime.json 的 herdr_update_bot_id、release_bot_id 或 responder_bot_id），跳過"
 
-BODY=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-update.XXXXXX"); TMPS+=("$BODY")
+BODY=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-update.XXXXXX"); TMPS+=("$BODY"); TMPS_COUNT=$((TMPS_COUNT + 1))
 {
   printf '%s' "$BRIEF"
   printf '\n---\n本機 `herdr --version`：%s ｜ 最新穩定版（gh release list -R %s）：%s\nCHANGELOG：%s\n' \
@@ -204,7 +211,7 @@ BODY=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-update.XXXXXX"); TMPS+=("$BODY")
 # （2026-09-16 claude-release-kick 出過這個事故，這裡照抄教訓）。
 # 同一個 id 也是更新框「請 AGM 解析」（kind=herdr，`daemon/src/claude_review.rs`）用的：使用者先按了，
 # 這裡再送就是同 id、不同正文的 409（帶 assignment_id／inbox_event_id）——那一版已經派過，不是失敗。
-ASSIGN_ERR=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-assign.XXXXXX"); TMPS+=("$ASSIGN_ERR")
+ASSIGN_ERR=$(mktemp "${TMPDIR:-/tmp}/agm-herdr-assign.XXXXXX"); TMPS+=("$ASSIGN_ERR"); TMPS_COUNT=$((TMPS_COUNT + 1))
 if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$BODY" \
      --request-id "agm-herdr-update-$LATEST_VERSION" >> "$LOG" 2>"$ASSIGN_ERR"; then
   cat "$ASSIGN_ERR" >> "$LOG"
