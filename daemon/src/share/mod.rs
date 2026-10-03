@@ -4,13 +4,14 @@
 //!
 //! - [`cage`]：只有建 bot 時就選「分享用（受限）」的 bot（`shared_bots` 有一列）能分享。它的 claude 用
 //!   `--restricted`（沒有 Bash／WebFetch、檔案工具只在工作目錄）＋`dontAsk`（沒預先允許的一律拒絕，不會停在權限框等人），
-//!   工作目錄是 `<data_dir>/shared-bots/<bot_id>/workspace/`，pane env 只留 hook 要的幾個，帳號目錄明確 deny。
+//!   工作目錄是建 bot 時選的資料夾（[`folder`]：新資料夾 `~/shared-bots/<名稱>` 或既有資料夾），權限是白名單（只有那個資料夾與自己的 outbox），pane env 只留 hook 要的幾個。
 //!   它的 hook token 只能打 `/hook/*`：`/api`、`/relay/*`、`/build-slots/*` 一律拒絕（[`refuses_bot_principal`]）。
 //! - [`admin`]：主 API（7788，只收 UI token）上開／關／重產連結。DB 只存 token 的 SHA-256。
 //! - [`portal`]：獨立 listener（`[share] listen`），router 上只有 `/s/{token}/…` 與分享頁的靜態檔，沒有 fallback 到主 API。
 
 pub(crate) mod admin;
 pub(crate) mod cage;
+pub(crate) mod folder;
 pub(crate) mod multipart;
 pub(crate) mod portal;
 pub(crate) mod store;

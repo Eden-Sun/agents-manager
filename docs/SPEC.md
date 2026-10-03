@@ -890,7 +890,7 @@ label = "foo"
   照字面寫等於第一次寫入就把指到 dotfiles 的連結換成一般檔，之後 daemon 的每次寫入都進不去而 `git status` 什麼都看不出來。
   資料目錄仍然留在連結所在的目錄（§3.1），兩件事不同。檔案還不存在時（第一次寫預設設定）照原路徑建。
 - 改 `listen` port 需重啟 daemon，既有 agent 的 hook 會打舊 port（靠 spool + 對帳補入）。
-- `[share]`（§20）：`listen`（分享入口的獨立 listener，只准 loopback）與 `base_url`（Funnel 的對外網址）。都不寫＝沒有分享入口；改了要重啟 daemon。
+- `[share]`（§20）：`listen`（分享入口的獨立 listener，只准 loopback）、`base_url`（Funnel 的對外網址）與 `folders_root`（受限 bot「新資料夾」的根目錄，預設 `~/shared-bots`，要在 daemon 資料目錄之外；建 bot 時當下讀）。都不寫＝沒有分享入口；`listen` 改了要重啟 daemon。
 - `[supervisor] notify_interval_secs`（預設 600）：事件照舊即時寫入 `supervisor_inbox`；被節流的只有「喚醒總管」——每 ≥ 這個秒數一次，
   把累積的未 ack 事件彙整成一則 `[AG Man 通知]`。health 偵測、watchdog、控制器 TICK 不受影響。總管 busy 時延後，送成功才開始下一個視窗。
   `0` = 不節流。上次喚醒時間存 `supervisors.last_notify_at`。改值要重啟 daemon。只管巡檢；協調者見 §18.15。
@@ -4675,7 +4675,17 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   只有 claude、只有本機專案（409 `unsupported_kind`／`unsupported_host`）；不收自訂 `args`／`env`（400 `restricted_no_custom`）；
   `auto_approve` 一律寫成 false。記在 `shared_bots`（不在 `config.toml`）：**寫 config 之前**就先記，投影出來的那一列從第一次啟動起就在籠子裡；
   建失敗或冪等重送拿回舊的那顆時收回。`/api/state` 的 bot 帶 `share_profile`（一般 bot `null`）。
-- 工作目錄 `<data_dir>/shared-bots/<bot_id>/workspace/`（0700，含 `inbox/`），`bots.cwd` 指過去；啟動時以 `shared_bots.workspace` 為準。
+- **以資料夾為單位**（使用者 2026-10-03 裁示，`share::folder`）：建 bot 時選一個資料夾，那就是它能碰的全部範圍（cwd＝它，`shared_bots.workspace` 記 canonicalize 過的路徑、`bots.cwd` 指過去）。
+  `share_folder` 兩種：`{"kind":"new","name"}`＝在 `[share] folders_root`（預設 `~/shared-bots`，必須在 daemon 資料目錄之外）底下建 `<name>`（0700；名字 `[A-Za-z0-9._-]`、英數開頭、≤ 64；已經有同名 409 `folder_exists`，冪等重送例外）；
+  `{"kind":"existing","path"}`＝本機任意既有資料夾（絕對路徑、符號連結解開後判斷），但根目錄、家目錄本身與它的上層、daemon 資料目錄（含上下層）、`~/.ssh`／`~/.config`／`~/.claude*`／`~/.codex`／`~/.grok`／`~/.aws`／`~/.gnupg`／`~/.local`…、系統目錄一律 400 `bad_share_folder`。
+  沒帶＝新資料夾、名字用 bot 名。上傳一律放 `<資料夾>/inbox/`（不存在就建，0700）。建失敗或重送時只刪「這次新建的」資料夾，既有資料夾絕不動。
+  資料夾在啟動時不見了就不啟動（不替使用者重建空的）。2026-10-03 之前建的受限 bot（資料夾在 `<data_dir>/shared-bots/<id>/workspace/`）照舊能用，不搬。
+- 模型：沒指定＝`/api/models?kind=claude` 當下列出的最新 Opus（有完整 id 挑版本最大的；只有別名就用 `opus`，claude 2.1.288 解析成 claude-opus-5-5，實測），不落回帳號預設（線上那顆就這樣跑成舊版），也不寫死版本號。
+- 資料夾的指示與記憶（`share::folder::instructions`，啟動時讀一次、`O_NOFOLLOW` 逐層打開，指到外面的符號連結不讀）：`CLAUDE.md`、`.claude/CLAUDE.md`、`AGENTS.md`，
+  加上 `memory/*.md` 與 `.claude/memory/*.md`（`MEMORY.md` 索引在前），單檔 32 KiB、合計 96 KiB，接在系統提示檔最後。不讓 claude 自己載入：`--restricted` 不讀 project／user settings，
+  claude 也就不載入資料夾的 CLAUDE.md（AGENTS.md 一般模式也不載）；就算可以，它還會一路往上讀到家目錄與帳號層的 CLAUDE.md（AG Man 的派工規則），所以 `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` 照舊、由 daemon 只讀這個資料夾的。
+  claude 的 auto-memory 在 `--restricted` 下整個關掉（`autoMemoryDirectory` 從 `--settings` 設得進去，但只有不帶 `--restricted` 才生效，實測），而 `.claude/` 底下 claude 不准它寫（明確 allow 也一樣，實測），
+  所以它自己的記憶寫在 `<資料夾>/memory/`（系統提示裡講清楚格式），下次啟動載入；`.claude/memory/` 既有的唯讀照樣載入。
 - 啟動時（`share::cage`，照 claude 2.1.288 的 `--help` 與 binary 內 settings schema，2026-10-03 實跑驗證過）：
   - argv：`--restricted --tools Read,Edit,Write,Glob,Grep,WebSearch --strict-mcp-config --permission-mode dontAsk --add-dir <outbox>`，
     加上受限版的 `--append-system-prompt-file <bot 目錄>/share-system-prompt.md`（沒有開子 agent 的規則；走檔案是因為 herdr 把啟動指令壓在 900 bytes、
@@ -4686,16 +4696,20 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
     `ToolSearch`；`--tools` 白名單之後只剩那六個，也沒有 deferred tools（實測）。
   - Bash：claude 的 sandbox 在 Linux 要 bubblewrap＋socat，agm-host 都沒有 → 照「做不到 sandbox 就整個 deny」不給 Bash。
   - WebFetch：契約允許保留，但它是 claude 行程自己發的 HTTP、打得到本機的 daemon（`/api/session` 對本機來源回 UI token），所以不給；WebSearch（伺服器端）保留。
-  - `claude-settings.json`：`permissions.defaultMode = dontAsk`（沒預先允許的一律拒絕，不會停在權限框）、`disableBypassPermissionsMode = disable`、
-    allow 工作目錄與自己的 outbox 的 Read／Edit 與 WebSearch；deny 上面那些工具，以及帳號目錄（`CLAUDE_CONFIG_DIR`，沒設＝`~/.claude` 與 `~/.claude.json`）、
-    `~/.ssh`、daemon 資料目錄最上層的檔（`ui-token`、DB、`config.toml`）與 `bots/`；拿掉 `skipDangerousModePermissionPrompt`，`remoteControlAtStartup=false`。hook 照舊。
+  - `claude-settings.json` 是**白名單**：`permissions.defaultMode = dontAsk`（沒預先允許的一律拒絕，不會停在權限框）、`disableBypassPermissionsMode = disable`、
+    allow 只有資料夾與自己的 outbox 的 Read／Edit（Read 規則也管 Glob／Grep，Edit 也管 Write）與 WebSearch。deny 只有上面那些工具、資料夾內常見的秘密檔
+    （`**/.env`、`.env.*`、`*.pem`、`*.key`、`*.p12`、`*.pfx`、`id_*`、`.netrc`、`.npmrc`、`.pypirc`、`.git-credentials` 的 Read／Edit，保險用）與指示檔（`CLAUDE.md`、`AGENTS.md`、`.claude/CLAUDE.md`）的 Edit——
+    end user 不能叫它改寫自己下次啟動的指示。**不再用 deny 猜要擋的目錄**：以前的 `Read(<data_dir>/*)` 在 claude 的 gitignore 語意下比到 `shared-bots`／`outbox` 目錄就連底下全擋，
+    deny 又優先於 allow，inbox 讀不到、outbox 寫不進（2026-10-03 線上實測）。拿掉 `skipDangerousModePermissionPrompt`，`remoteControlAtStartup=false`。hook 照舊。
+    2026-10-03 用 daemon 產生的這份 settings 跑真的 claude 2.1.288：讀得到資料夾內的檔與 inbox 的上傳、Glob 得到、寫得進 outbox 與 `memory/`；
+    ui-token、config.toml、`~/.claude`、別顆 bot 的 outbox、資料夾內的 `.env`／`.pem` 都被拒，改 CLAUDE.md／AGENTS.md 被拒；CLAUDE.md／AGENTS.md／記憶的內容都在它的系統提示裡。
   - pane env 只留 `AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_RUN_ID`、`AM_PORT`、`AM_INSTANCE`、`AM_OUTBOX`、身分（帳號）的 env 與 daemon 自己設的 claude 開關；
     `AM_BOT_TOKEN`、shim／cargo／子 agent 要的變數、bot 自訂 env、shim 的 `PATH` 都不帶；可能從 herdr server 繼承的 `AM_*` 憑證類蓋成空字串；`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`。
   - 不裝 herdr／cargo shim（不能開子 agent）、不裝 herdr skill、不讀 agent md。
   - `shared_bots` 讀不到就**不啟動**（不當成一般 bot 起）。
 - bot principal：受限 bot 的 hook token 只能打 `/hook/{provider}`。`/api` 的認證中介層、`/relay/announce`、`/relay/pane`、`/relay/spawn/*`、
   `/build-slots/acquire` 一律 403 `restricted_bot`（`shared_bots` 讀不到也擋）。
-- end user 上傳的檔放工作目錄的 `inbox/`；給 end user 的檔照舊寫 `$AM_OUTBOX`（`--add-dir` 讓它寫得進去）。
+- end user 上傳的檔放資料夾的 `inbox/`；給 end user 的檔照舊寫 `$AM_OUTBOX`（`--add-dir` 讓它寫得進去）。
 
 ### 20.2 分享連結
 
@@ -4727,7 +4741,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 ### 20.4 前端
 
 **前端（主 UI）**
-- 建 bot 表單多一個「用途：分享用（受限）」；只給本機專案的 claude（其他 kind／遠端專案是灰的並寫原因）。勾了就送 `share_profile: "restricted"`、`auto_approve: false`。建好不能切回一般 bot。
+- 建 bot 表單多一個「用途：分享用（受限）」；只給本機專案的 claude（其他 kind／遠端專案是灰的並寫原因）。勾了要選它的資料夾：「開一個新資料夾」（`~/shared-bots/<名稱>`，名稱空著＝bot 名）或「用一個既有的資料夾」（路徑＋「瀏覽…」用目錄選擇器挑，下面有警示：資料夾裡的所有檔案含 .env 之類 end user 都可能透過 bot 讀到）。
+  送 `share_profile: "restricted"`、`share_folder`、`auto_approve: false`；模型照表單選，沒選＝daemon 補最新 Opus。建好不能切回一般 bot。
 - 受限 bot 的設定面板多一塊「🔗 分享給外部使用者」：開關、完整連結＋複製（只在剛開／重產時拿得到）、平常只顯示末 4 碼、建立與最後使用時間、「重產連結」與「關閉分享」（都要確認）。一般 bot 不畫這塊。
 - 對話裡 `source = "share"` 的 user 訊息標「🔗 分享使用者」。
 

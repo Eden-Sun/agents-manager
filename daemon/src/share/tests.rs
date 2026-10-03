@@ -22,11 +22,29 @@ async fn serve(router: axum::Router) -> String {
     format!("http://{addr}")
 }
 
-/// 一顆受限 bot（照 API 建的那條路：先記 `shared_bots`、再指 cwd）。
+/// 新資料夾的根目錄指到這個 app 自己的暫存目錄（假家目錄是整個測試行程共用的，同名會互撞）。
+async fn set_folders_root(app: &Arc<App>) -> std::path::PathBuf {
+    let root = tt::scratch_dir("am-share-root");
+    let r = root.to_string_lossy().into_owned();
+    app.cfg
+        .update(|c| {
+            if c.share.folders_root.is_none() {
+                c.share.folders_root = Some(r.clone());
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    std::path::PathBuf::from(app.cfg.get().await.share.folders_root.clone().unwrap())
+}
+
+/// 一顆受限 bot（照 API 建的那條路：先記 `shared_bots`、再指 cwd），用新資料夾 `<root>/<name>`。
 async fn restricted_bot(app: &Arc<App>, project_id: &str, name: &str) -> db::Bot {
+    set_folders_root(app).await;
     let b = tt::claude_bot(app, project_id, name).await;
-    let ws = admin::reserve_restricted(app, &b.id).await.unwrap();
-    admin::finish_restricted(app, &b.id, &ws, true).await;
+    let folder = folder::ShareFolderIn::New { name: name.into() };
+    let (ws, made) = admin::reserve_restricted(app, &b.id, &folder, false).await.unwrap();
+    admin::finish_restricted(app, &b.id, &ws, made, true).await;
     db::bot(&app.db, &b.id).await.unwrap().unwrap()
 }
 
@@ -339,7 +357,8 @@ async fn a_restricted_bot_starts_caged_even_if_its_config_asks_for_more() {
     let total: usize = args.iter().map(|a| a.len() + 3).sum();
     assert!(total < 900, "整行啟動指令不被 herdr 砍（{total} bytes）：{args:?}");
     let ws = store::workspace(&e.app.db, &b.id).await.unwrap().unwrap();
-    assert!(ws.ends_with(&format!("shared-bots/{}/workspace", b.id)));
+    assert!(ws.ends_with("/pub"), "新資料夾在 folders_root 底下、用 bot 名：{ws}");
+    assert!(!ws.starts_with(&*e.app.data_dir.to_string_lossy()), "不在 daemon 資料目錄裡：{ws}");
     assert_eq!(pane["cwd"], json!(ws), "cwd 是它自己的工作目錄，不是專案 repo");
     assert!(std::path::Path::new(&ws).join("inbox").is_dir());
 
@@ -363,8 +382,11 @@ async fn a_restricted_bot_starts_caged_even_if_its_config_asks_for_more() {
     for t in ["Bash", "WebFetch", "SendMessage", "ListAgents", "PushNotification", "Agent", "Skill"] {
         assert!(deny.contains(&t), "{t} 不在 {deny:?}");
     }
-    let data = e.app.data_dir.to_string_lossy();
-    assert!(deny.contains(&format!("Read(/{data}/*)").as_str()), "daemon 資料目錄最上層（ui-token、DB）讀不到：{deny:?}");
+    // 2026-10-03 線上 bug：deny 不能蓋到自己的資料夾與 outbox（deny 優先於 allow）。白名單：allow 只有資料夾、outbox、WebSearch。
+    let outbox = env["AM_OUTBOX"].as_str().unwrap().to_string();
+    for own in [format!("{ws}/inbox/a.txt"), format!("{outbox}/out.txt")] {
+        assert!(deny_hits(&deny, &own).is_none(), "{own} 被 {:?} 擋掉", deny_hits(&deny, &own));
+    }
     let allow: Vec<&str> = p["allow"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
     assert!(allow.contains(&format!("Edit(/{ws}/**)").as_str()), "{allow:?}");
     assert!(settings.get("skipDangerousModePermissionPrompt").is_none());
@@ -372,27 +394,52 @@ async fn a_restricted_bot_starts_caged_even_if_its_config_asks_for_more() {
     assert!(settings["hooks"]["Stop"].is_array(), "hook 照舊");
 }
 
-#[tokio::test]
-async fn the_account_directory_is_denied_to_the_restricted_bot() {
+/// 使用者 2026-10-03 裁示：白名單。allow 只有資料夾（Read／Edit，也管 Glob／Grep／Write）、自己的 outbox、WebSearch；
+/// deny 只有工具、資料夾內的秘密檔、指示檔的 Edit——不再有依目錄猜的 deny（就是它把 inbox／outbox 一起擋掉）。
+#[test]
+fn the_settings_are_a_whitelist_of_the_folder_and_the_outbox() {
     let mut settings = json!({"skipDangerousModePermissionPrompt": true});
     let env = json!({"CLAUDE_CONFIG_DIR": "/home/u/.claude-cc1/", "AM_OUTBOX": "/data/outbox/B1"});
-    cage::cage_settings(&mut settings, "/data/shared-bots/B1/workspace", &env, std::path::Path::new("/data"), "/home/u");
-    let deny: Vec<&str> = settings["permissions"]["deny"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-    for want in ["Read(//home/u/.claude-cc1/**)", "Edit(//home/u/.claude-cc1/**)", "Read(//home/u/.ssh/**)", "Read(//data/bots/**)"] {
-        assert!(deny.contains(&want), "{want} 不在 {deny:?}");
+    cage::cage_settings(&mut settings, "/srv/support", &env);
+    let p = &settings["permissions"];
+    let list = |k: &str| p[k].as_array().unwrap().iter().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>();
+    assert_eq!(list("allow"), ["Read(//srv/support/**)", "Edit(//srv/support/**)", "WebSearch", "Read(//data/outbox/B1/**)", "Edit(//data/outbox/B1/**)"]);
+    let deny = list("deny");
+    let deny_ref: Vec<&str> = deny.iter().map(String::as_str).collect();
+    for path_rule in deny.iter().filter(|r| r.contains('(')) {
+        assert!(path_rule.contains("(//srv/support/"), "deny 只在資料夾裡面，不猜外面的目錄：{path_rule}");
     }
-    let allow: Vec<&str> = settings["permissions"]["allow"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-    assert!(allow.contains(&"Edit(//data/outbox/B1/**)"), "自己的 outbox 寫得進去：{allow:?}");
-    // 沒有 CLAUDE_CONFIG_DIR：預設帳號目錄與 `.claude.json`。
-    let mut s2 = json!({});
-    cage::cage_settings(&mut s2, "/w", &json!({}), std::path::Path::new("/data"), "/home/u");
-    let deny: Vec<&str> = s2["permissions"]["deny"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-    assert!(deny.contains(&"Read(//home/u/.claude/**)") && deny.contains(&"Read(//home/u/.claude.json)"), "{deny:?}");
+    for t in ["Bash", "WebFetch", "SendMessage", "PushNotification", "Agent", "Skill"] {
+        assert!(deny_ref.contains(&t), "{t}");
+    }
+    for own in ["/srv/support/inbox/01J-a.txt", "/srv/support/notes/plan.md", "/srv/support/memory/MEMORY.md", "/data/outbox/B1/out.txt"] {
+        assert_eq!(deny_hits(&deny_ref, own), None, "{own}");
+    }
+    for secret in ["/srv/support/.env", "/srv/support/app/.env.production", "/srv/support/certs/server.pem", "/srv/support/x.key", "/srv/support/.ssh/id_ed25519"] {
+        assert!(deny_hits(&deny_ref, secret).is_some(), "{secret} 要 deny 一層");
+    }
+    assert!(deny_ref.contains(&"Edit(//srv/support/CLAUDE.md)") && deny_ref.contains(&"Edit(//srv/support/AGENTS.md)"), "指示檔不准改：{deny:?}");
+    assert!(!deny_ref.contains(&"Read(//srv/support/CLAUDE.md)"), "指示檔讀得到");
+    assert_eq!(p["defaultMode"], "dontAsk");
+    assert!(settings.get("skipDangerousModePermissionPrompt").is_none());
+
     let args = cage::launch_args(&env, std::path::Path::new("/data/bots/B1/share-system-prompt.md"));
     assert_eq!(args[args.iter().position(|a| a == "--add-dir").unwrap() + 1], "/data/outbox/B1");
     assert_eq!(args.last().unwrap(), "/data/bots/B1/share-system-prompt.md");
-    let p = cage::system_prompt("/w", Some("/data/outbox/B1"), Some("你是客服"));
-    assert!(p.contains("/data/outbox/B1") && p.ends_with("你是客服") && p.contains("〔分享使用者〕"), "{p}");
+    let pr = cage::system_prompt("/srv/support", Some("/data/outbox/B1"), Some("你是客服"), "\n\n## 資料夾的指示：CLAUDE.md\n\nPELICAN");
+    assert!(pr.contains("/data/outbox/B1") && pr.contains("你是客服") && pr.contains("〔分享使用者〕") && pr.ends_with("PELICAN"), "{pr}");
+    assert!(pr.contains("/srv/support/memory/"), "{pr}");
+}
+
+#[test]
+fn the_default_model_is_the_newest_opus_the_model_list_offers() {
+    let list = |ids: &[&str]| json!({"models": ids.iter().map(|i| json!({"id": i})).collect::<Vec<_>>()});
+    assert_eq!(cage::latest_opus_in(&list(&["opus", "sonnet", "haiku"])).as_deref(), Some("opus"), "只有別名：交給 CLI 解析成最新");
+    assert_eq!(
+        cage::latest_opus_in(&list(&["claude-opus-4-8", "claude-opus-5-5", "claude-opus-4-1-20250805", "opus", "claude-sonnet-9-9"])).as_deref(),
+        Some("claude-opus-5-5")
+    );
+    assert_eq!(cage::latest_opus_in(&list(&["sonnet"])), None);
 }
 
 #[tokio::test]
@@ -526,6 +573,7 @@ async fn creating_a_restricted_bot_cages_it_before_it_exists() {
         })
         .await
         .unwrap();
+    let root = set_folders_root(&e.app).await;
     let base = serve(crate::api::router(e.app.clone())).await;
     let c = client();
     let create = |body: Value| c.post(format!("{base}/api/projects/{pid}/bots")).header("X-AM-Token", "test-token").json(&body).send();
@@ -553,8 +601,32 @@ async fn creating_a_restricted_bot_cages_it_before_it_exists() {
     assert_eq!(again["bot_id"], json!(id));
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shared_bots").fetch_one(&e.app.db).await.unwrap();
     assert_eq!(n, 1);
-    let n_dirs = std::fs::read_dir(e.app.data_dir.join("shared-bots")).unwrap().count();
-    assert_eq!(n_dirs, 1, "重送那次預留的工作目錄收掉了");
+    let n_dirs = std::fs::read_dir(&root).unwrap().count();
+    assert_eq!(n_dirs, 1, "重送拿回同一顆，資料夾只有一個、沒被刪");
+    assert!(std::path::Path::new(&ws).join("inbox").is_dir(), "重送沒有把第一次建的資料夾收掉");
+    assert_eq!(ws, std::fs::canonicalize(root.join("pub")).unwrap().to_string_lossy(), "沒指定資料夾＝新資料夾、名字用 bot 名");
+    assert!(bot.model.as_deref().is_some_and(|m| m.contains("opus")), "沒指定模型＝最新 Opus：{:?}", bot.model);
+
+    // 新資料夾撞名：409，不悄悄共用；既有資料夾：用真正的位置；危險位置 400。
+    let res = create(json!({"name": "pub3", "kind": "claude", "share_profile": "restricted", "share_folder": {"kind": "new", "name": "pub"}})).await.unwrap();
+    assert_eq!(res.status(), 409);
+    assert_eq!(res.json::<Value>().await.unwrap()["reason"], "folder_exists");
+    let site = tt::scratch_dir("am-share-site");
+    let v: Value = create(json!({"name": "site", "kind": "claude", "share_profile": "restricted", "share_folder": {"kind": "existing", "path": site.to_string_lossy()}}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let site_id = v["bot_id"].as_str().expect("既有資料夾建得起來").to_string();
+    assert_eq!(store::workspace(&e.app.db, &site_id).await.unwrap().unwrap(), std::fs::canonicalize(&site).unwrap().to_string_lossy());
+    assert!(site.join("inbox").is_dir(), "既有資料夾也補 inbox/");
+    for bad in [e.app.data_dir.to_string_lossy().into_owned(), "/".into(), "relative".into()] {
+        let res = create(json!({"name": "bad", "kind": "claude", "share_profile": "restricted", "share_folder": {"kind": "existing", "path": bad}})).await.unwrap();
+        assert_eq!(res.status(), 400, "{bad}");
+    }
+    let res = create(json!({"name": "plain", "kind": "claude", "share_folder": {"kind": "new", "name": "x"}})).await.unwrap();
+    assert_eq!(res.status(), 400, "一般 bot 不收 share_folder");
     // `/api/state` 帶 share_profile。
     let st: Value = c.get(format!("{base}/api/state")).header("X-AM-Token", "test-token").send().await.unwrap().json().await.unwrap();
     let bots = st["projects"][0]["bots"].as_array().unwrap();
@@ -709,4 +781,43 @@ async fn share_text_never_reaches_the_first_column_of_the_tui() {
             assert!(body.contains("not_accepted") && !body.contains("turn") && !body.contains(&b.id), "{body}");
         }
     }
+}
+
+/// claude 的路徑規則（gitignore 語意）的最小比對：`**` 跨層、`*`／`?` 不跨 `/`、`\x` 照字面；
+/// 規則比到某個**祖先目錄**也算擋到（目錄被排除，底下全排除）。回傳擋到它的那條規則。
+fn deny_hits<'a>(deny: &[&'a str], path: &str) -> Option<&'a str> {
+    fn m(p: &[char], s: &[char]) -> bool {
+        match p {
+            [] => s.is_empty(),
+            // `a/**/b` 也比得到 `a/b`（零層）。
+            ['*', '*', '/', rest @ ..] => m(rest, s) || (0..s.len()).any(|i| s[i] == '/' && m(rest, &s[i + 1..])),
+            ['*', '*', rest @ ..] => (0..=s.len()).any(|i| m(rest, &s[i..])),
+            ['*', rest @ ..] => (0..=s.len()).take_while(|&i| i == 0 || s[i - 1] != '/').any(|i| m(rest, &s[i..])),
+            ['?', rest @ ..] => s.first().is_some_and(|&c| c != '/') && m(rest, &s[1..]),
+            ['\\', c, rest @ ..] => s.first() == Some(c) && m(rest, &s[1..]),
+            [c, rest @ ..] => s.first() == Some(c) && m(rest, &s[1..]),
+        }
+    }
+    let mut targets = vec![path.to_string()];
+    let mut p = std::path::Path::new(path);
+    while let Some(parent) = p.parent() {
+        targets.push(parent.to_string_lossy().into_owned());
+        p = parent;
+    }
+    deny.iter().copied().find(|r| {
+        let Some(body) = r.strip_prefix("Read(/").or_else(|| r.strip_prefix("Edit(/")).and_then(|b| b.strip_suffix(')')) else { return false };
+        let pat: Vec<char> = body.chars().collect();
+        targets.iter().any(|t| m(&pat, &t.chars().collect::<Vec<_>>()))
+    })
+}
+
+#[test]
+fn deny_rules_match_like_gitignore_in_the_test_helper() {
+    // 先釘住比對器本身：舊的那條 `<data>/*` 確實把工作目錄擋掉（線上 bug 的成因），`**/` 也比得到零層。
+    assert_eq!(deny_hits(&["Read(//d/*)"], "/d/shared-bots/B/workspace/inbox/a.txt"), Some("Read(//d/*)"));
+    assert_eq!(deny_hits(&["Read(//d/*.sqlite3*)"], "/d/outbox/B/x"), None);
+    assert_eq!(deny_hits(&["Read(//d/*.sqlite3*)"], "/d/agents-manager.sqlite3-wal"), Some("Read(//d/*.sqlite3*)"));
+    assert_eq!(deny_hits(&["Read(//d/outbox/O/**)"], "/d/outbox/B/x"), None);
+    assert_eq!(deny_hits(&["Read(//d/a\\*b)"], "/d/aXb"), None);
+    assert!(deny_hits(&["Read(//d/**/.env)"], "/d/.env").is_some());
 }

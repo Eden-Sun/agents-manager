@@ -399,19 +399,17 @@ async fn send_message(State(st): State<Portal>, Path(token): Path<String>, Json(
     }
 }
 
-fn inbox_components(bot_id: &str) -> [&OsStr; 4] {
-    [OsStr::new("shared-bots"), OsStr::new(bot_id), OsStr::new("workspace"), OsStr::new("inbox")]
+/// 這顆受限 bot 的資料夾（`shared_bots.workspace`）：上傳放它底下的 `inbox/`。讀不到就當沒有（fail closed）。
+async fn folder_of(app: &Arc<App>, bot_id: &str) -> Option<std::path::PathBuf> {
+    crate::share::store::workspace(&app.db, bot_id).await.ok().flatten().map(std::path::PathBuf::from)
 }
 
 async fn inbox_has(app: &Arc<App>, bot_id: &str, name: &str) -> bool {
-    let (data, bot, name) = (app.data_dir.clone(), bot_id.to_string(), name.to_string());
-    tokio::task::spawn_blocking(move || {
-        let mut parts: Vec<&OsStr> = inbox_components(&bot).to_vec();
-        parts.push(OsStr::new(&name));
-        crate::trusted_open::open_bound_file(&data, &parts, None).is_ok()
-    })
-    .await
-    .unwrap_or(false)
+    let Some(folder) = folder_of(app, bot_id).await else { return false };
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || crate::trusted_open::open_bound_file(&folder, &[OsStr::new("inbox"), OsStr::new(&name)], None).is_ok())
+        .await
+        .unwrap_or(false)
 }
 
 async fn events(State(st): State<Portal>, Path(token): Path<String>) -> Response {
@@ -580,10 +578,11 @@ async fn upload(
         return too_many(wait, "upload");
     }
     let stored = format!("{}-{name}", db::ulid());
-    let (data_dir, bot, file_name, len) = (st.app.data_dir.clone(), bot_id.clone(), stored.clone(), data.len());
+    let Some(folder) = folder_of(&st.app, &bot_id).await else { return unavailable() };
+    let (file_name, len) = (stored.clone(), data.len());
     let saved = tokio::task::spawn_blocking(move || -> Result<(), &'static str> {
         use std::io::Write as _;
-        let dir = crate::trusted_open::create_private_bound_dirs(&data_dir, &inbox_components(&bot)).map_err(|_| "inbox_unavailable")?;
+        let dir = crate::share::folder::ensure_inbox(&folder).map_err(|_| "inbox_unavailable")?;
         let entries = crate::trusted_open::read_dir_bound(&dir).map_err(|_| "inbox_unavailable")?;
         let used: u64 = entries.iter().filter(|e| e.is_file).map(|e| e.size).sum();
         if entries.len() >= INBOX_MAX_FILES || used + len as u64 > INBOX_MAX_BYTES {
