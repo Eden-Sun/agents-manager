@@ -6032,11 +6032,22 @@ mod ws_limits_tests {
     async fn credential_fields_never_leave_in_an_event() {
         let env = crate::testing::env().await;
         let mut rx = env.app.subscribe();
-        env.app.emit("bot_changed", json!({"bot": {"id": "b1", "hook_token": "SECRET-HOOK", "nested": [{"ui_token": "SECRET-UI", "ok": 1, "X-AM-Bot-Token": "SECRET-BOT-HEADER", "X-AM-Service-Token": "SECRET-SERVICE-HEADER"}]}, "AM_BOT_TOKEN": "SECRET-BOT"})).await;
-        let ev = rx.recv().await.unwrap();
-        let wire = serde_json::to_string(&ev).unwrap();
-        assert!(!wire.contains("SECRET"), "{wire}");
-        assert!(wire.contains("\"id\":\"b1\"") && wire.contains("\"ok\":1"), "其他欄位照舊：{wire}");
+        for (kind, data) in [
+            (
+                "bot_changed",
+                json!({"bot": {"id": "b1", "hook_token": "SECRET-HOOK", "nested": [{"id": 1, "ok": 1, "input_tokens": 21, "token_value": "SECRET-RAW-TOKEN", "ui_token": "SECRET-UI", "X-AM-Bot-Token": "SECRET-BOT-HEADER", "X-AM-Service-Token": "SECRET-SERVICE-HEADER", "lease_token": "SECRET-LEASE", "access_token": "SECRET-ACCESS", "refresh_token": "SECRET-REFRESH", "client_secret": "SECRET-CLIENT", "secret": "SECRET-GENERIC"}]}, "AM_BOT_TOKEN": "SECRET-BOT"}),
+            ),
+            ("supervisor_changed", json!({"lease": {"resource": "rebuild", "lease_token": "SECRET-LEASE-EVENT"}})),
+            ("upstream_update", json!({"host": {"refresh_token": "SECRET-REFRESH-EVENT"}})),
+        ] {
+            env.app.emit(kind, data).await;
+            let ev = rx.recv().await.unwrap();
+            let wire = serde_json::to_string(&ev).unwrap();
+            assert!(!wire.contains("SECRET"), "{kind}: {wire}");
+            if kind == "bot_changed" {
+                assert!(wire.contains("\"id\":\"b1\"") && wire.contains("\"ok\":1") && wire.contains("\"input_tokens\":21"), "其他欄位與 token 計數照舊：{wire}");
+            }
+        }
         let backlog = env.app.backlog(0).await.unwrap_or_default();
         assert!(!serde_json::to_string(&backlog).unwrap().contains("SECRET"), "重播環裡也不能有");
     }
