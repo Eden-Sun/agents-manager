@@ -24,6 +24,9 @@ pub struct ShareCfg {
     pub listen: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// 受限 bot「新資料夾」的根目錄（可用 `~/`）；沒設＝`~/shared-bots`。要在 daemon 資料目錄之外。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folders_root: Option<String>,
 }
 
 impl ShareCfg {
@@ -147,27 +150,58 @@ pub async fn post_rotate(
     Ok(Json(state(&app, &id, Some(format!("{base}/s/{token}"))).await?))
 }
 
-/// 建受限 bot 的前半：工作目錄建好、`shared_bots` 記下來（在寫 config 之前）。
-pub(crate) async fn reserve_restricted(app: &Arc<App>, bot_id: &str) -> Result<String, LcError> {
-    let ws = crate::share::cage::ensure_workspace(&app.data_dir, bot_id).map_err(|e| LcError::Upstream(format!("restricted workspace: {e}")))?;
-    let ws = ws.to_string_lossy().into_owned();
-    store::insert_restricted(&app.db, bot_id, &ws).await.map_err(db_err)?;
-    Ok(ws)
+/// 建受限 bot 的前半：決定資料夾（新資料夾就建出來）、`shared_bots` 記下來（在寫 config 之前）。
+/// 回 `(資料夾, 是不是這次建的)`；`replay`＝config 裡已經有同一個 `client_request_id` 的 bot：新資料夾已經在了就照用，不回 409。
+pub(crate) async fn reserve_restricted(
+    app: &Arc<App>,
+    bot_id: &str,
+    folder: &crate::share::folder::ShareFolderIn,
+    replay: bool,
+) -> Result<(String, bool), LcError> {
+    use crate::share::folder;
+    let home = crate::share::cage::local_home();
+    let home_p = std::path::Path::new(&home);
+    let (dir, created) = match folder {
+        folder::ShareFolderIn::Existing { path } => (folder::check_existing(path, home_p, &app.data_dir)?, false),
+        folder::ShareFolderIn::New { name } => {
+            let root = folder::root(app.cfg.get().await.share.folders_root.as_deref(), &home);
+            match folder::create_new(&root, name, home_p, &app.data_dir) {
+                Ok(d) => (d, true),
+                Err(LcError::Conflict(_)) if replay => (std::fs::canonicalize(root.join(name)).unwrap_or_else(|_| root.join(name)), false),
+                Err(e) => return Err(e),
+            }
+        }
+    };
+    if let Err(e) = folder::ensure_inbox(&dir) {
+        if created {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        return Err(LcError::Upstream(format!("share folder inbox: {e}")));
+    }
+    let ws = dir.to_string_lossy().into_owned();
+    if let Err(e) = store::insert_restricted(&app.db, bot_id, &ws).await {
+        if created {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        return Err(db_err(e));
+    }
+    Ok((ws, created))
 }
 
-/// 建受限 bot 的後半：建成了就把 `bots.cwd` 指到工作目錄；沒建成（失敗、重送拿回舊的那顆）就把前半收回。
-pub(crate) async fn finish_restricted(app: &Arc<App>, bot_id: &str, workspace: &str, created: bool) {
+/// 建受限 bot 的後半：建成了就把 `bots.cwd` 指到資料夾；沒建成（失敗、重送拿回舊的那顆）就把前半收回。
+/// 資料夾只有「這次新建的」才刪：既有資料夾、重送時已經在的，一律不動。
+pub(crate) async fn finish_restricted(app: &Arc<App>, bot_id: &str, workspace: &str, created_folder: bool, created: bool) {
     if created {
         if let Err(e) = sqlx::query("UPDATE bots SET cwd = ? WHERE id = ?").bind(workspace).bind(bot_id).execute(&app.db).await {
             // 啟動時以 `shared_bots.workspace` 為準（`cage::prepare`），這裡寫不進去只影響側欄顯示的目錄。
-            tracing::warn!(bot = bot_id, error = %e, "could not point the restricted bot's cwd at its workspace");
+            tracing::warn!(bot = bot_id, error = %e, "could not point the restricted bot's cwd at its folder");
         }
         return;
     }
     if let Err(e) = store::delete_restricted(&app.db, bot_id).await {
         tracing::warn!(bot = bot_id, error = %e, "could not roll back a restricted bot reservation");
     }
-    if let Some(dir) = crate::share::cage::workspace_dir(&app.data_dir, bot_id).and_then(|w| w.parent().map(|p| p.to_path_buf())) {
-        let _ = std::fs::remove_dir_all(dir);
+    if created_folder {
+        let _ = std::fs::remove_dir_all(workspace);
     }
 }

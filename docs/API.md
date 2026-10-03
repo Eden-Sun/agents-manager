@@ -742,7 +742,11 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 - `POST /api/bots/{id}/share/rotate` → 換新 token、舊的立刻失效，回新的 `url`；沒開著 409 `share_disabled`。
 - 錯誤：bot 不存在 404；不是受限 bot 409 `not_shareable`；`[share] base_url` 沒設 409 `share_not_configured`。
 - 建受限 bot：`POST /api/projects/{id}/bots` 多一個 `share_profile:"restricted"`（只收這個值）；claude 以外 409 `unsupported_kind`、遠端專案 409 `unsupported_host`、
-  帶了 `args`／`env` 400 `restricted_no_custom`。`share_profile` 進冪等指紋。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`null`）。
+  帶了 `args`／`env` 400 `restricted_no_custom`。`share_profile` 進冪等指紋。
+  `share_folder`（只給受限 bot，一般 bot 帶了 400）：`{"kind":"new","name":"support"}`＝在 `[share] folders_root`（預設 `~/shared-bots`）建新資料夾，同名已存在 409 `folder_exists`（同一個 `client_request_id` 的重送除外）；
+  `{"kind":"existing","path":"/abs/dir"}`＝本機既有資料夾；位置不行（根目錄、家目錄與上層、daemon 資料目錄、`~/.ssh`／`~/.config`／`~/.claude*`…、系統目錄、不是絕對路徑、不存在）400 `bad_share_folder`＋`message`。
+  沒帶＝新資料夾、名字用 bot 名。`share_folder` 進冪等指紋。`model` 沒給＝最新 Opus（`/api/models` 當下列出的；只有別名時是 `opus`），寫進 bot 的 `model`。
+  config 另有 `[share] folders_root`（可用 `~/`，必須在 daemon 資料目錄之外）。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`null`）。
 - 分享使用者送來的訊息：`relay_from:"share"`、`source:"share"`（只在輸出；見 SPEC §20.3）。WS 多一種事件 `bot_share_changed {bot_id, enabled}`。
 
 分享入口（獨立 listener，`[share] listen`；token 錯／分享關了一律 `404 {"error":"not_found"}`）：

@@ -18,7 +18,6 @@
 //!   打得到 127.0.0.1／區網上的 daemon（`/api/session` 對本機來源會回 UI token）。WebSearch（伺服器端）留著。
 
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -28,24 +27,6 @@ use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::lifecycle::LcError;
 use crate::state::App;
-
-/// `<data_dir>/shared-bots/<bot_id>/workspace`。bot id 會拼進路徑：只收英數（ULID）。
-pub(crate) fn workspace_dir(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
-    if bot_id.is_empty() || !bot_id.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return None;
-    }
-    Some(data_dir.join("shared-bots").join(bot_id).join("workspace"))
-}
-
-/// 建好工作目錄與 `inbox/`（0700，逐層 `O_NOFOLLOW`）。
-pub(crate) fn ensure_workspace(data_dir: &Path, bot_id: &str) -> std::io::Result<PathBuf> {
-    let dir = workspace_dir(data_dir, bot_id).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad bot id"))?;
-    crate::trusted_open::create_private_bound_dirs(
-        data_dir,
-        &[OsStr::new("shared-bots"), OsStr::new(bot_id), OsStr::new("workspace"), OsStr::new("inbox")],
-    )?;
-    Ok(dir)
-}
 
 /// 受限 bot 目前只做 claude、只在本機（工作目錄在這台的 data dir 底下）。
 pub(crate) fn check_profile(kind: &str, host: &str) -> Result<(), LcError> {
@@ -72,7 +53,8 @@ pub(crate) async fn prepare(app: &Arc<App>, bot: &db::Bot, host: &str) -> Result
         .map_err(|e| LcError::Upstream(format!("cannot tell whether bot {} is a restricted share bot: {e}", bot.id)))?;
     let Some(ws) = ws else { return Ok(None) };
     check_profile(&bot.kind, host)?;
-    ensure_workspace(&app.data_dir, &bot.id).map_err(|e| LcError::Upstream(format!("restricted workspace {ws}: {e}")))?;
+    // 資料夾不見了就不起來（不替使用者重建一個空的）；inbox 不存在就建。
+    crate::share::folder::ensure_inbox(Path::new(&ws)).map_err(|e| LcError::Upstream(format!("restricted bot folder {ws}: {e}")))?;
     Ok(Some(ws))
 }
 
@@ -125,14 +107,6 @@ pub(crate) async fn identity_env(app: &Arc<App>, bot: &db::Bot) -> BTreeMap<Stri
     }
 }
 
-/// 帳號目錄：`CLAUDE_CONFIG_DIR`，沒設就是 `~/.claude` 與 `~/.claude.json`。
-fn account_paths(env: &Value, home: &str) -> Vec<String> {
-    match env.get("CLAUDE_CONFIG_DIR").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
-        Some(dir) => vec![dir.trim_end_matches('/').to_string()],
-        None => vec![format!("{home}/.claude"), format!("{home}/.claude.json")],
-    }
-}
-
 /// 受限 bot 拿得到的工具（`--tools`）。2026-10-03 實測：`--restricted` 加這份白名單之後工具就只剩這六個。
 pub(crate) const TOOLS: &str = "Read,Edit,Write,Glob,Grep,WebSearch";
 
@@ -159,8 +133,19 @@ fn abs_rule(tool: &str, path: &str, glob: &str) -> String {
     format!("{tool}(/{}{glob})", path.trim_end_matches('/'))
 }
 
+/// 資料夾裡常見的秘密檔：白名單已經把整個資料夾給了它，這幾種再 deny 一層當保險（既有資料夾特別需要）。
+const SECRET_FILES: &[&str] = &[".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_*", ".netrc", ".npmrc", ".pypirc", ".git-credentials"];
+/// 它的指示檔：讀得到（daemon 也會讀進系統提示），但不准改——不然 end user 叫它改寫自己的指示，下次啟動就生效。
+const INSTRUCTION_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md", ".claude/CLAUDE.md"];
+
 /// 蓋掉 daemon 寫給每顆 claude bot 的 settings 裡跟權限有關的部分（hooks／statusLine 照舊）。
-pub(crate) fn cage_settings(settings: &mut Value, workspace: &str, env: &Value, data_dir: &Path, home: &str) {
+///
+/// **白名單**（使用者 2026-10-03 裁示）：`dontAsk` 本來就拒絕沒列在 allow 的動作，所以 allow 只放它的資料夾與自己的 outbox，
+/// 不再用 deny 去猜要擋哪些目錄。以前那串 deny 有一條 `Read(<data_dir>/*)`：claude 的比對是 gitignore 語意，`*` 比到
+/// `shared-bots`／`outbox` 這兩個**目錄**就連底下全擋，deny 又優先於 allow，結果 inbox 讀不到、outbox 寫不進（線上實測）。
+/// 現在的 deny 只有工具、資料夾內的秘密檔、指示檔的 Edit，都在資料夾**裡面**，不可能蓋到 inbox 或 outbox。
+/// Read 規則也管 Glob／Grep，Edit 規則也管 Write（claude 的權限規則就是這樣分兩類，2.1.288 實測）。
+pub(crate) fn cage_settings(settings: &mut Value, workspace: &str, env: &Value) {
     if !settings.is_object() {
         *settings = json!({});
     }
@@ -171,17 +156,12 @@ pub(crate) fn cage_settings(settings: &mut Value, workspace: &str, env: &Value, 
         allow.push(abs_rule("Edit", outbox, "/**"));
     }
     let mut deny: Vec<String> = DENY_TOOLS.iter().map(|t| t.to_string()).collect();
-    let data = data_dir.to_string_lossy();
-    let mut protected: Vec<(String, &str)> = account_paths(env, home).into_iter().map(|p| (p, "/**")).collect();
-    // daemon 資料目錄最上層的檔（ui-token、DB、config.toml）與每顆 bot 的設定目錄；工作目錄在 `shared-bots/` 底下，不受影響。
-    protected.push((data.to_string(), "/*"));
-    protected.push((format!("{data}/bots"), "/**"));
-    protected.push((format!("{home}/.ssh"), "/**"));
-    for (p, glob) in &protected {
-        // `.claude.json` 是檔不是目錄：規則就寫它自己。
-        let glob = if p.ends_with(".json") { "" } else { glob };
-        deny.push(abs_rule("Read", p, glob));
-        deny.push(abs_rule("Edit", p, glob));
+    for pat in SECRET_FILES {
+        deny.push(abs_rule("Read", workspace, &format!("/**/{pat}")));
+        deny.push(abs_rule("Edit", workspace, &format!("/**/{pat}")));
+    }
+    for f in INSTRUCTION_FILES {
+        deny.push(abs_rule("Edit", workspace, &format!("/{f}")));
     }
     map.insert(
         "permissions".into(),
@@ -216,15 +196,19 @@ pub(crate) fn install_prompt(app: &App, bot: &db::Bot, workspace: &str, env: &Va
     let dir = app.bot_dir(&bot.id)?;
     crate::private_files::create_private_dir(&dir)?;
     let path = dir.join("share-system-prompt.md");
-    crate::lifecycle::setup::write_private(&path, system_prompt(workspace, outbox, bot.persona.as_deref()).as_bytes())?;
+    let folder_md = crate::share::folder::instructions(Path::new(workspace));
+    crate::lifecycle::setup::write_private(&path, system_prompt(workspace, outbox, bot.persona.as_deref(), &folder_md).as_bytes())?;
     Ok(path)
 }
 
-pub(crate) fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Option<&str>) -> String {
+/// `folder_md`＝[`crate::share::folder::instructions`]：資料夾的 CLAUDE.md／AGENTS.md 與 `.claude/memory/`，放在最後
+/// （主人寫的 persona 之後），啟動時讀一次。
+pub(crate) fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Option<&str>, folder_md: &str) -> String {
     let mut p = format!(
         "你是透過分享連結開放給外部使用者的助理。對方的訊息開頭會有「〔分享使用者〕」；對方只看得到你的文字回覆，看不到你的工具過程。\n\
-         - 你的工作目錄是 `{workspace}`。對方上傳的檔案放在工作目錄的 `inbox/`，訊息裡會寫出檔名。\n\
-         - 你沒有指令列工具，也不能讀工作目錄以外的檔案；不要嘗試，也不要透露這台機器的路徑或設定。\n"
+         - 你的工作目錄是 `{workspace}`，這個資料夾就是你能讀寫的全部範圍。對方上傳的檔案放在 `inbox/`，訊息裡會寫出檔名。\n\
+         - 你沒有指令列工具（沒有 Bash）、不能抓網頁（沒有 WebFetch，可以用 WebSearch），也不能讀工作目錄以外的檔案；不要嘗試，也不要透露這台機器的路徑或設定。\n\
+         - 你的長期記憶在 `{workspace}/memory/`：`MEMORY.md` 是索引（一行一則，連到同目錄的 md 檔）。要記住新的事就在那裡寫一個 md 檔、在 MEMORY.md 加一行；下次啟動時會自動載入（`.claude/memory/` 的舊記憶也會載入，但那裡你寫不進去）。\n"
     );
     match outbox {
         Some(o) => p.push_str(&format!("- 要交給對方的檔案寫進 `{o}`，對方的頁面會列出來讓他下載（一小時後自動清掉）。\n")),
@@ -234,17 +218,16 @@ pub(crate) fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Opti
         p.push('\n');
         p.push_str(u);
     }
+    if !folder_md.trim().is_empty() {
+        p.push_str("\n\n# 這個資料夾的指示與記憶（啟動時從資料夾讀進來的）");
+        p.push_str(folder_md);
+    }
     p
 }
 
-/// 本機的家目錄字串（拿來展開身分 env 與寫 deny 規則）。
+/// 本機的家目錄字串（拿來展開身分 env）。
 pub(crate) fn local_home() -> String {
     crate::home::dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
-}
-
-/// 給 `injected_args` 用：受限 bot 的 settings 要另外收緊。
-pub(crate) fn cage_settings_for(app: &App, settings: &mut Value, workspace: &str, env: &Value) {
-    cage_settings(settings, workspace, env, &app.data_dir, &local_home());
 }
 
 /// 建受限 bot 時要擋掉的請求內容：自訂 args／env 在籠子裡都不會生效，收下來只會讓人以為有用。
@@ -260,3 +243,38 @@ pub(crate) fn check_create(kind: &str, host: &str, args: &[String], env: Option<
     Ok(())
 }
 
+
+/// 受限 bot 沒指定模型時用的：`/api/models?kind=claude` 當下列出的最新 Opus。清單有完整 id（`claude-opus-X-Y`）就挑版本最大的，
+/// 只有別名就用 `opus`（claude 自己把它解析成當版最新的 Opus，2.1.288 實測是 claude-opus-5-5）。清單抓不到也退回 `opus`：
+/// 不寫死版本號，也不落回帳號預設（線上那顆就是這樣跑成舊版的）。
+pub(crate) async fn latest_opus(app: &Arc<App>, identity: Option<&str>) -> String {
+    match crate::models::list(app, LOCAL_HOST, "claude", identity, false).await {
+        Ok(v) => latest_opus_in(&v).unwrap_or_else(|| "opus".into()),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot list claude models for the restricted bot; using the `opus` alias");
+            "opus".into()
+        }
+    }
+}
+
+pub(crate) fn latest_opus_in(models: &Value) -> Option<String> {
+    let ids = models.get("models")?.as_array()?.iter().filter_map(|m| m.get("id").and_then(Value::as_str));
+    let mut best: Option<(Vec<u32>, String)> = None;
+    let mut alias = None;
+    for id in ids {
+        if id == "opus" {
+            alias = Some(id.to_string());
+            continue;
+        }
+        let Some(rest) = id.strip_prefix("claude-opus-") else { continue };
+        // `claude-opus-5-5`、`claude-opus-4-1-20250805`：日期（8 位數）不算版本。
+        let ver: Vec<u32> = rest.split('-').take_while(|p| p.len() < 8).map_while(|p| p.parse().ok()).collect();
+        if ver.is_empty() {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(v, _)| ver > *v) {
+            best = Some((ver, id.to_string()));
+        }
+    }
+    best.map(|(_, id)| id).or(alias)
+}

@@ -678,7 +678,7 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
                 if bot.inject_hooks == 0 {
                     settings = json!({});
                 }
-                crate::share::cage::cage_settings_for(app, &mut settings, ws, env);
+                crate::share::cage::cage_settings(&mut settings, ws, env);
             }
             let path = dir.join("claude-settings.json");
             write_private(&path, &serde_json::to_vec_pretty(&settings)?)?;

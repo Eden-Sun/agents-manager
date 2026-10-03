@@ -1965,6 +1965,9 @@ struct NewBot {
     /// `"restricted"`＝分享用的受限 bot（SPEC「分享 bot」）。只在建立時決定，之後不能切換。
     #[serde(default)]
     share_profile: Option<String>,
+    /// 受限 bot 的資料夾（`{"kind":"new","name"}`／`{"kind":"existing","path"}`）；沒帶＝新資料夾、名字用 bot 名。
+    #[serde(default)]
+    share_folder: Option<crate::share::folder::ShareFolderIn>,
 }
 
 /// Must exist **on that bot's host** (`[[identities]]` + its `ccN` aliases, SPEC §16) and match `kind`.
@@ -2031,6 +2034,15 @@ async fn create_bot(
     #[cfg(test)]
     crate::lifecycle::race_point::hit("create_bot_after_identity_check", &pid).await;
     let (model, remapped) = remap_model(&b.kind, b.model.as_deref());
+    // 受限 bot 沒指定模型：用 `/api/models` 當下列出的最新 Opus（使用者 2026-10-03：不寫死，CLI 的帳號預設會跑到舊版）。
+    let model = match (restricted, model) {
+        (true, None) => Some(crate::share::cage::latest_opus(&app, identity.as_deref()).await),
+        (_, m) => m,
+    };
+    if b.share_folder.is_some() && !restricted {
+        return Err(LcError::Bad("share_folder is only for share_profile `restricted`".into()));
+    }
+    let share_folder = restricted.then(|| b.share_folder.clone().unwrap_or(crate::share::folder::ShareFolderIn::New { name: b.name.clone() }));
     let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     check_env_names(&env)?;
@@ -2064,6 +2076,7 @@ async fn create_bot(
             identity,
             env,
             restricted,
+            share_folder,
         ])
         .to_string()
     });
@@ -2073,7 +2086,17 @@ async fn create_bot(
     // 只看 config 會先寫進檔、投影再爆，之後這個專案每次新增／修改都 502（#654）。
     let db_names = live_bot_names(&app.db, &pid).await.map_err(any_err)?;
     // 受限 bot：config 寫進去之前先記下來，投影出來的那一列從第一次啟動起就在籠子裡（沒有當一般 bot 起來的空窗）。
-    let workspace = if restricted { Some(crate::share::admin::reserve_restricted(&app, &id).await?) } else { None };
+    let workspace = match &share_folder {
+        Some(folder) => {
+            // 同一個請求鍵的重送：新資料夾已經是上一次建的，照用不回 409（真正的判斷在下面 config 鎖裡）。
+            let replay = match &create_request_id {
+                Some(c) => app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).any(|x| x.create_request_id.as_deref() == Some(c.as_str())),
+                None => false,
+            };
+            Some(crate::share::admin::reserve_restricted(&app, &id, folder, replay).await?)
+        }
+        None => None,
+    };
     let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
         let p = cfg
             .projects
@@ -2122,9 +2145,9 @@ async fn create_bot(
         Ok(())
     })
     .await;
-    if let Some(ws) = &workspace {
+    if let Some((ws, created_folder)) = &workspace {
         let created = res.is_ok() && replayed.lock().unwrap().is_none();
-        crate::share::admin::finish_restricted(&app, &id, ws, created).await;
+        crate::share::admin::finish_restricted(&app, &id, ws, *created_folder, created).await;
     }
     match res {
         Ok(()) => {}
