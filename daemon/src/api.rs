@@ -10507,6 +10507,88 @@ mod per_principal_auth_tests {
         }
     }
 
+    /// 矩陣只打 router 列出來的方法與樣板。這裡補 HEAD／OPTIONS、點路徑、編碼、
+    /// 重覆的 refresh，以及 service 憑證走別條路徑。2xx／101 才算繞過。
+    #[tokio::test]
+    async fn bot_and_service_cannot_bypass_user_only_by_method_path_or_query_shape() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "shape-bypass-bot").await;
+        e.app.service_tokens.write().unwrap().insert("daemon-swap".into(), "swap-secret".into());
+        e.app.service_tokens.write().unwrap().insert("herdr-upgrade".into(), "herdr-secret".into());
+        let bot_headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot.id, bot.hook_token);
+        let head = |request: String| {
+            let app = e.app.clone();
+            async move { raw_head(app, request).await }
+        };
+        let opened = |status: &str| status.starts_with("HTTP/1.1 2") || status.starts_with("HTTP/1.1 101");
+        let bot_shapes = [
+            "OPTIONS /api/intents HTTP/1.1",
+            "HEAD /api/intents HTTP/1.1",
+            "GET /api/intents/ HTTP/1.1",
+            "GET /api/./intents HTTP/1.1",
+            "GET /api/intents/. HTTP/1.1",
+            "GET /api/nope/../intents HTTP/1.1",
+            "GET /api/%2e%2e/intents HTTP/1.1",
+            "GET /api/intents%2f../mem HTTP/1.1",
+            "GET /api/%69ntents HTTP/1.1",
+            "GET //api/intents HTTP/1.1",
+            "GET /api/drafts%3fbot=1 HTTP/1.1",
+            "GET /api/models/../intents HTTP/1.1",
+            "POST /api/intents HTTP/1.1",
+            "GET /api/mem?refresh=1 HTTP/1.1",
+            "GET /ws?token=not-the-user-token HTTP/1.1",
+        ];
+        for start in bot_shapes {
+            let response = head(format!("{start}\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\nContent-Length: 0\r\n\r\n")).await;
+            let line = response.lines().next().unwrap_or("");
+            assert!(!opened(line), "bot shape opened a fenced route: {start} -> {line}");
+            assert!(!response.contains(&e.app.ui_token), "bot shape leaked the UI token: {start}");
+        }
+        for start in [
+            "GET /api/models?kind=codex&refresh=0&refresh=1 HTTP/1.1",
+            "GET /api/quota?refresh=&refresh=1 HTTP/1.1",
+        ] {
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                raw(e.app.clone(), format!("{start}\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n")),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("duplicate refresh hung, likely a live probe: {start}"));
+            assert!(response.contains("user_only"), "duplicate refresh must still be user_only: {start} -> {response}");
+        }
+        let upgrade = format!(
+            "GET /ws?token={} HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            e.app.ui_token
+        );
+        let mixed_ws = head(upgrade).await;
+        assert!(mixed_ws.starts_with("HTTP/1.1 401"), "websocket upgrade with bot headers plus user token: {mixed_ws}");
+
+        let service_shapes = [
+            ("daemon-swap", "swap-secret", "HEAD /api/supervisor/health HTTP/1.1"),
+            ("daemon-swap", "swap-secret", "OPTIONS /api/supervisor/health HTTP/1.1"),
+            ("daemon-swap", "swap-secret", "GET /api/supervisor/health/ HTTP/1.1"),
+            ("daemon-swap", "swap-secret", "GET /api/supervisor/./health HTTP/1.1"),
+            ("daemon-swap", "swap-secret", "GET /api/supervisor/health/../../state HTTP/1.1"),
+            ("daemon-swap", "swap-secret", "GET /api/supervisor%2fhealth HTTP/1.1"),
+            ("daemon-swap", "swap-secret", "GET /api/state HTTP/1.1"),
+            ("daemon-swap", "swap-secret", "POST /api/deploy/now HTTP/1.1"),
+            ("daemon-swap", "swap-secret", "POST /api/services/daemon-swap/probe/abc/../restart-window HTTP/1.1"),
+            ("daemon-swap", "swap-secret", "POST /api/supervisor/leases/restart/release/../acquire HTTP/1.1"),
+            ("herdr-upgrade", "herdr-secret", "GET /api/panes/../state HTTP/1.1"),
+            ("herdr-upgrade", "herdr-secret", "GET /api/capabilities/../drafts HTTP/1.1"),
+            ("herdr-upgrade", "herdr-secret", "GET /ws?token=herdr-secret HTTP/1.1"),
+        ];
+        for (id, token, start) in service_shapes {
+            let response = head(format!(
+                "{start}\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: {id}\r\nX-AM-Service-Token: {token}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+            ))
+            .await;
+            let line = response.lines().next().unwrap_or("");
+            assert!(!opened(line), "service shape was not confined: {id} {start} -> {line} {response}");
+            assert!(!response.contains(&e.app.ui_token), "service shape leaked the UI token: {start}");
+        }
+    }
+
     /// Cached Bot model reads must not turn a cache miss into an implicit CLI probe.
     /// `refresh=1` is fenced in middleware, so omitting it must not bypass the same policy.
     #[tokio::test]
