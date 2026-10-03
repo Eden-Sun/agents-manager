@@ -21,6 +21,23 @@ fn the_composer_state_reads_right_on_every_linux_screen() {
     assert_eq!(box_state("claude", DRAFT_ANSI), BoxState::NonEmpty, "打了字還沒送");
 }
 
+/// #775：2.1.287 改了淺色主題的輸入框框線與舊訊息前 `❯` 的對比。同一版在淺色／深色主題各擷一次帶顏色的畫面
+/// （2026-10-03，tmux 120x40，`--settings '{"theme":"light"}'`／`dark`，default 權限模式、沒有 statusLine）：輸入框的 `❯` 是預設前景色、
+/// `Try "…"` 提示是 SGR 2 dim，兩種主題都要讀成空框；打了字是草稿；回合結束後舊訊息那列帶底色的 `❯` 不是輸入框。
+#[test]
+fn the_composer_hint_reads_right_on_light_and_dark_themes() {
+    const LIGHT_IDLE: &str = include_str!("fixtures/claude-2.1.287-light-idle.ansi");
+    const LIGHT_DRAFT: &str = include_str!("fixtures/claude-2.1.287-light-draft.ansi");
+    const LIGHT_FINISHED: &str = include_str!("fixtures/claude-2.1.287-light-finished.ansi");
+    const DARK_IDLE_HINT: &str = include_str!("fixtures/claude-2.1.287-dark-idle-hint.ansi");
+    assert_eq!(box_state("claude", LIGHT_IDLE), BoxState::Empty, "淺色：灰提示不是草稿");
+    assert_eq!(box_state("claude", DARK_IDLE_HINT), BoxState::Empty, "深色：灰提示不是草稿");
+    assert_eq!(box_state("claude", LIGHT_DRAFT), BoxState::NonEmpty, "淺色：打了字");
+    assert_eq!(box_state("claude", LIGHT_FINISHED), BoxState::Empty, "淺色：回合結束");
+    let plain: String = LIGHT_FINISHED.lines().map(crate::lifecycle::delivery::strip_ansi).collect::<Vec<_>>().join("\n");
+    assert_eq!(last_prompt_echo_text("claude", &plain).as_deref(), Some("Reply with exactly PONG"));
+}
+
 #[test]
 fn busy_while_the_spinner_is_up_and_not_after() {
     assert!(pane_still_busy(WORKING));
