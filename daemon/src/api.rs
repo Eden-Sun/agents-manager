@@ -3297,7 +3297,7 @@ mod identity_auth_error_tests {
             .unwrap();
         crate::remote_purge::record(&app, &bot.id, host, false, Some("ssh unavailable")).await;
 
-        let err = delete_host(State(app.clone()), Path(host.into()))
+        let err = delete_host(State(app.clone()), Path(host.into()), Extension(RequestPrincipal::User))
             .await
             .expect_err(
             "do not forget the only host route to a deleted bot's still-live directory and shims",
@@ -3349,7 +3349,7 @@ mod identity_auth_error_tests {
         let bot = crate::testing::claude_bot(&app, &e.project_id, "orphan-on-remote").await;
         crate::testing::fake_run(&app, &bot.id).await;
 
-        let err = delete_host(State(app.clone()), Path(host.into()))
+        let err = delete_host(State(app.clone()), Path(host.into()), Extension(RequestPrincipal::User))
             .await
             .expect_err("a live orphan run may still be using its remote bot shim");
         let (status, body) = body_of(err).await;
@@ -3397,7 +3397,7 @@ mod identity_auth_error_tests {
         // Model a project commit after the early DB snapshot. Host removal shares project
         // creation's config lock, so this staged config entry must be detected before removal.
 
-        let err = delete_host(State(app.clone()), Path(host.into()))
+        let err = delete_host(State(app.clone()), Path(host.into()), Extension(RequestPrincipal::User))
             .await
             .expect_err(
                 "the config-lock recheck must catch a project published after the DB snapshot",
@@ -3447,6 +3447,7 @@ mod identity_auth_error_tests {
         let err = create_host(
             State(app.clone()),
             Query(DeleteQuery::default()),
+            Extension(RequestPrincipal::User),
             Json(NewHost {
                 name: host.into(),
                 ssh: "new-test-target".into(),
