@@ -7,7 +7,7 @@
 //! 同一個 run 的同一次橫幅只講一次：佇列每次重試都會再擋一次。
 
 use super::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 /// 被橫幅擋下時 `NotAttempted` 的 reason（API 回 409 帶這個 reason，佇列照可重試的規則放回去）。
@@ -17,15 +17,10 @@ pub(crate) const NOTICE: &str = "codex 畫面上有帳號安全提醒橫幅（`P
      所以這則訊息沒有送出（一個字都沒打）；daemon 也不會替你按 Esc 或任何鍵。請到「終端」處理橫幅（選一個選項，或按 Esc 關掉），\
      關掉後排著的訊息會照常重試送出。";
 
-/// 已經通知過、橫幅還沒被看到關掉的 run，以及這個 run 第幾次出現（橫幅關掉再出現要換 event_key）。
-struct Seen {
-    open: HashSet<String>,
-    gen: HashMap<String, u32>,
-}
-
-fn seen() -> &'static Mutex<Seen> {
-    static OPEN: OnceLock<Mutex<Seen>> = OnceLock::new();
-    OPEN.get_or_init(|| Mutex::new(Seen { open: HashSet::new(), gen: HashMap::new() }))
+/// 已經通知過、橫幅還沒被看到關掉的 run。
+fn open() -> &'static Mutex<HashSet<String>> {
+    static OPEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    OPEN.get_or_init(Default::default)
 }
 
 /// 畫面上有沒有「按數字選」的 inline banner。`screen` 可以是 `format: ansi` 讀到的：去掉樣式，codex 的點字動畫粒子
@@ -42,21 +37,13 @@ pub(crate) fn blocks_typing(screen: &str) -> bool {
 /// 之後同一次橫幅不再講；看到橫幅不在了就忘掉，下次再出現會再講一次。寫不進去只記 log：擋住派送本身不受影響。
 pub(crate) async fn observe(app: &Arc<App>, run: &db::Run, shown: bool) {
     if !shown {
-        let mut g = seen().lock().unwrap();
-        if g.open.remove(&run.id) {
-            *g.gen.entry(run.id.clone()).or_default() += 1;
-        }
+        open().lock().unwrap().remove(&run.id);
         return;
     }
-    let gen = {
-        let mut g = seen().lock().unwrap();
-        if !g.open.insert(run.id.clone()) {
-            return;
-        }
-        g.gen.get(&run.id).copied().unwrap_or(0)
-    };
+    if !open().lock().unwrap().insert(run.id.clone()) {
+        return;
+    }
     tracing::warn!(run = %run.id, bot = %run.bot_id, "codex 帳號安全提醒橫幅擋住派送，等人處理（不自動關）");
-    notify_inbox(app, run, gen).await;
     match db::conversation_id(&app.db, &run.bot_id).await {
         Ok(conv) => {
             if let Err(e) = insert_message(app, &conv, None, "system", NOTICE, "system", false, None).await {
@@ -101,34 +88,6 @@ async fn alert(app: &Arc<App>, run: &db::Run) {
     }
 }
 
-/// 擋下派送時同步進 AGM inbox（#789）。同一次橫幅的 event_key 相同，`INSERT OR IGNORE` 不重複；
-/// 橫幅消失再出現時 generation 加一，才再推一則。
-async fn notify_inbox(app: &Arc<App>, run: &db::Run, gen: u32) {
-    let name = sqlx::query_scalar::<_, String>("SELECT name FROM bots WHERE id=?")
-        .bind(&run.bot_id)
-        .fetch_optional(&app.db)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| run.bot_id.clone());
-    let key = format!("ops_alert:daemon:codex_security_banner:{}:{gen}", run.bot_id);
-    let payload = serde_json::json!({
-        "source": "daemon",
-        "reason": "codex_security_banner",
-        "subject": name,
-        "bot_id": run.bot_id,
-        "bot_name": name,
-        "run_id": run.id,
-        "detail": NOTICE,
-        "action": "請到該 bot 的終端處理橫幅（選一個選項，或按 Esc 關掉），然後重送被擋下的訊息。daemon 沒有代按任何鍵。",
-    });
-    match crate::supervisor::store::push_inbox(&app.db, &key, "ops_alert", None, Some(&run.bot_id), None, &payload).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {}
-        Err(e) => tracing::warn!(run = %run.id, error = ?e, "could not queue the codex security banner inbox event"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,99 +114,5 @@ mod tests {
         // 回覆裡照抄了橫幅的字（結構不完整）不是橫幅。
         let quoted = "› 貼一下提醒的原文\n\n• 原文如下：\n  Keep using Daybreak mode\n  Press a number to choose · esc to dismiss · type to continue\n\n› Ask Codex to do anything\n";
         assert!(!blocks_typing(quoted));
-    }
-
-    fn run(id: &str, bot: &str) -> db::Run {
-        db::Run {
-            id: id.into(),
-            bot_id: bot.into(),
-            state: "running".into(),
-            agent_status: "idle".into(),
-            workspace_id: None,
-            pane_id: None,
-            tab_id: None,
-            adopted: 0,
-            agent_name: None,
-            herdr_session: None,
-            agent_title: None,
-            status_line: None,
-            status_json: None,
-            runtime_model: None,
-            runtime_effort: None,
-            runtime_fast: None,
-            runtime_identity: None,
-            update_notice: None,
-            turn_error: None,
-            native_session_id: None,
-            transcript_path: None,
-            last_read_revision: None,
-            last_read_tail_hash: None,
-            started_at: "2026-01-01T00:00:00Z".into(),
-            ended_at: None,
-            resume_session_id: None,
-            resume_outcome: None,
-            agent_status_since: None,
-            subagent_json: None,
-            launch_rev: None,
-            live_rev: None,
-        }
-    }
-
-    /// #789：擋下時 inbox 一則；同一次橫幅再擋不重複；關掉再出現才再推。沒有橫幅不推。
-    #[tokio::test]
-    async fn blocking_a_delivery_also_notifies_the_agm_inbox_once_per_appearance() {
-        let env = crate::testing::env().await;
-        let now = crate::db::now();
-        let bot = format!("b-{}", crate::db::ulid());
-        let project = format!("p-{}", crate::db::ulid());
-        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES (?,?,?,?)")
-            .bind(&project)
-            .bind(format!("/tmp/{project}"))
-            .bind("p")
-            .bind(&now)
-            .execute(&env.app.db)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES (?, ?, '安全橫幅', 'codex', 't', ?)")
-            .bind(&bot)
-            .bind(&project)
-            .bind(&bot)
-            .bind(&now)
-            .execute(&env.app.db)
-            .await
-            .unwrap();
-        let run = run(&format!("r-{}", crate::db::ulid()), &bot);
-        let keys = || async {
-            sqlx::query_scalar::<_, String>("SELECT event_key FROM supervisor_inbox WHERE bot_id=? ORDER BY created_at")
-                .bind(&bot)
-                .fetch_all(&env.app.db)
-                .await
-                .unwrap()
-        };
-
-        observe(&env.app, &run, false).await;
-        assert!(keys().await.is_empty(), "沒有橫幅不推");
-
-        observe(&env.app, &run, true).await;
-        observe(&env.app, &run, true).await;
-        let once = keys().await;
-        assert_eq!(once.len(), 1, "{once:?}");
-        assert!(once[0].starts_with("ops_alert:daemon:codex_security_banner:"), "{}", once[0]);
-        let payload: serde_json::Value = serde_json::from_str(
-            &sqlx::query_scalar::<_, String>("SELECT payload_json FROM supervisor_inbox WHERE event_key=?")
-                .bind(&once[0])
-                .fetch_one(&env.app.db)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(payload["bot_id"], bot);
-        assert_eq!(payload["bot_name"], "安全橫幅");
-        assert_eq!(payload["reason"], "codex_security_banner");
-        assert!(payload["action"].as_str().unwrap().contains("重送"), "{payload}");
-
-        observe(&env.app, &run, false).await;
-        observe(&env.app, &run, true).await;
-        assert_eq!(keys().await.len(), 2, "橫幅再出現要再推一則");
     }
 }
