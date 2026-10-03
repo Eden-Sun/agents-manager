@@ -28,6 +28,15 @@ check_no() {
         echo "ok   - $1"; PASS=$((PASS + 1))
     fi
 }
+# 獨立 bot id。BSD grep 的 BRE 不把 `\|` 當「或」，用 ERE 才跟 GNU 一樣。
+check_no_ere() {
+    if grep -E -q -- "$2" "$3" 2>/dev/null; then
+        echo "FAIL - $1"; echo "      不該出現 '$2'："; grep -E -n -- "$2" "$3" | sed 's/^/      /'; FAIL=$((FAIL + 1))
+    else
+        echo "ok   - $1"; PASS=$((PASS + 1))
+    fi
+}
+standalone_bot_id='(^|[^0-9A-Za-z])H1([^0-9A-Za-z]|$)'
 check_eq() {
     if [ "$2" = "$3" ]; then echo "ok   - $1"; PASS=$((PASS + 1)); else echo "FAIL - $1（預期 '$2'，實際 '$3'）"; FAIL=$((FAIL + 1)); fi
 }
@@ -40,6 +49,22 @@ check_before() { # check_before <描述> <先出現的> <後出現的> <檔案>
         echo "FAIL - $1（'$2' 在第 ${a:-無} 行，'$3' 在第 ${b:-無} 行）"; sed 's/^/      /' "$4" | tail -40; FAIL=$((FAIL + 1))
     fi
 }
+
+# 識別字自己先對過，不依賴後面整份 dry-run。暫存路徑中段的 H1 不是 bot；獨立的 H1、以及路徑成分剛好是 H1，才算。
+IDCHK="$(mktemp -d "${TMPDIR:-/tmp}/am-cutover-id.XXXXXX")"
+printf '%s\n' "/tmp/am-check.XH1Y/out" "bot H10 stays" "prefixH1" > "$IDCHK/substr"
+printf '%s\n' "stop bot H1 now" "/api/bots/H1/stop" "/tmp/H1/data" > "$IDCHK/whole"
+if grep -E -q -- "$standalone_bot_id" "$IDCHK/substr"; then
+    echo "FAIL - 路徑或較長 id 裡的 H1 子字串不該算 bot"; FAIL=$((FAIL + 1))
+else
+    echo "ok   - 路徑或較長 id 裡的 H1 子字串不該算 bot"; PASS=$((PASS + 1))
+fi
+if grep -E -q -- "$standalone_bot_id" "$IDCHK/whole"; then
+    echo "ok   - 獨立的 H1 與路徑成分 H1 算碰到這顆 bot"; PASS=$((PASS + 1))
+else
+    echo "FAIL - 獨立的 H1 與路徑成分 H1 算碰到這顆 bot"; FAIL=$((FAIL + 1))
+fi
+rm -rf "$IDCHK"
 
 PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$PATH" python3 -B "$HERE/host-state-transfer_test.py"
 
@@ -335,8 +360,8 @@ check "在跑的 child 列出來" "在跑的 child 1 顆" "$ROOT/out"
 check "已移交的 hub 不在名單" "Agents Manager（PAM" "$ROOT/out"
 check "dry-run 列出完整設定移交" "host-state-transfer.py" "$ROOT/out"
 check_no "不再要求手動補來源 config 段落" "切換後在目標補上" "$ROOT/out"
-# mktemp 目錄名可能含 H1 這個子字串；只擋獨立的 bot id，避免暫存路徑誤判。
-check_no "已移交的 hub 不碰" "\(^\|[^0-9A-Za-z]\)H1\([^0-9A-Za-z]\|$\)" "$ROOT/out"
+# mktemp 目錄名可能含 H1 這個子字串；只擋獨立的 bot id。ERE：BSD grep 的 BRE 沒有 `\|`。
+check_no_ere "已移交的 hub 不碰" "$standalone_bot_id" "$ROOT/out"
 teardown
 
 # ---------------------------------------------------------------- 完整切換
