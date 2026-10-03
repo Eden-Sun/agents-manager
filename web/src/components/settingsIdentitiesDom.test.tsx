@@ -87,27 +87,18 @@ it('登出：取消不送請求', async () => {
 
 it('登入失敗（daemon 回 502）：跳錯誤通知、不切 shell、按鈕回到可按', async () => {
   const requests = await open()
-  const realFetch = globalThis.fetch
-  globalThis.fetch = (async (input: string, init?: { method?: string }) => {
-    if (/\/identities\/[^/]+\/login$/.test(String(input))) {
-      return new Response(JSON.stringify({ error: 'bad_gateway', message: 'herdr 沒回應' }), { status: 502 })
-    }
-    return (realFetch as (a: string, b?: unknown) => Promise<Response>)(input, init)
-  }) as unknown as typeof fetch
-  try {
-    // 先登出，才有「登入」鍵可以按。
-    await mock.request('POST', '/hosts/local/identities/cc1/logout')
-    await useStore.getState().refreshState()
-    await until(() => /未登入/.test(chip('cc1')), '回到未登入')
-    useStore.setState({ shellView: null })
-    await click(btn(row('cc1'), '登入')!)
-    await until(() => useStore.getState().notices.some((n) => n.kind === 'error'), '錯誤通知')
-    assert.equal(useStore.getState().shellView, null)
-    assert.equal(btn(row('cc1'), '登入')!.disabled, false)
-    assert.equal(calls(requests, /login/).length, 0, '請求在 fetch 層就被 502 吃掉，沒到 mock')
-  } finally {
-    globalThis.fetch = realFetch
-  }
+  // 讓請求通過正式的 fetch／HttpTransport 錯誤解析路徑；不要直接覆寫全域 fetch，免得和其它 DOM 測試的 mock 互相覆蓋。
+  mock.failNext('POST', '^/hosts/local/identities/cc1/login$', 502, { error: 'bad_gateway', message: 'herdr 沒回應' })
+  // 先登出，才有「登入」鍵可以按。
+  await mock.request('POST', '/hosts/local/identities/cc1/logout')
+  await useStore.getState().refreshState()
+  await until(() => /未登入/.test(chip('cc1')), '回到未登入')
+  useStore.setState({ shellView: null })
+  await click(btn(row('cc1'), '登入')!)
+  await until(() => useStore.getState().notices.some((n) => n.kind === 'error'), '錯誤通知')
+  assert.equal(useStore.getState().shellView, null)
+  assert.equal(btn(row('cc1'), '登入')!.disabled, false)
+  assert.equal(calls(requests, /login/).length, 1, '登入請求走到 mock daemon，收到 HTTP 502')
 })
 
 it('停用／啟用：本機按下去列上出現「停用」標記；另一個分頁的停用（WS 事件）也會跟著變', async () => {

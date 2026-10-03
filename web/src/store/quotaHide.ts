@@ -115,11 +115,15 @@ function onStorage(e: StorageEvent) {
   if (!sameMap(disk, disabled)) adopt(disk)
 }
 
-// 綁在「訂閱當下」的 window：模組載入時 window 還沒有（或之後被換掉，例如測試拆掉重建 happy-dom）就會永遠收不到 storage 事件。
+// 模組可能在 window 建立前載入；訂閱時補綁，DOM 測試重建後也要重新確認 listener。
 let storageWindow: Window | null = null
 function listenStorage() {
-  if (typeof window === 'undefined' || storageWindow === window) return
-  storageWindow = window
+  if (typeof window === 'undefined') return
+  if (storageWindow !== window) {
+    storageWindow?.removeEventListener('storage', onStorage)
+    storageWindow = window
+  }
+  // happy-dom 可能在 unregister/register 後沿用同一個 Window 物件，卻清掉事件 listener；同 callback 重複註冊會去重。
   window.addEventListener('storage', onStorage)
 }
 listenStorage()
