@@ -2521,6 +2521,7 @@ mod issue_17_tests {
 
     /// #782：codex 帳號安全提醒橫幅開著、輸入框是空的。打字的話開頭的 `1` 會被當成「選第 1 項」吃掉：一個鍵都不按（也不按
     /// Esc 關橫幅），回可重試的 `codex_security_banner`，對話裡留一則通知；佇列重試再被擋不重複通知。
+    /// #789：AGM inbox 也收到一則 `ops_alert`（帶 bot id、名稱、原因與處理方式），跟對話通知同樣去重。
     #[tokio::test]
     async fn a_codex_security_banner_blocks_delivery_without_a_single_key() {
         let screen = include_str!("fixtures/codex-0.159.3-security-setup-banner.ansi");
@@ -2536,6 +2537,7 @@ mod issue_17_tests {
                 .await
                 .unwrap()
         };
+        let alerts = || async { banner_alerts(&app).await };
 
         for _ in 0..2 {
             let out = deliver_prompt(&app, &client, &run, &bot, "1. 先看 issue 782", false, true).await.unwrap();
@@ -2545,6 +2547,26 @@ mod issue_17_tests {
         let posted = notes().await;
         assert_eq!(posted.len(), 1, "同一次橫幅只通知一次：{posted:?}");
         assert!(posted[0].contains("安全提醒橫幅") && posted[0].contains("沒有送出"), "{posted:?}");
+        let inbox = alerts().await;
+        assert_eq!(inbox.len(), 1, "同一次橫幅 inbox 也只推一則：{inbox:?}");
+        let (row_bot, state, p) = &inbox[0];
+        assert_eq!((row_bot.as_deref(), state.as_str()), (Some(bot.id.as_str()), "pending"));
+        assert_eq!(p["source"], "daemon");
+        assert_eq!(p["reason"], "codex_security_banner");
+        assert_eq!(p["bot_id"], bot.id.as_str());
+        assert_eq!(p["bot_name"], bot.name.as_str());
+        assert_eq!(p["run_id"], run.id.as_str());
+        let action = p["action"].as_str().unwrap_or_default();
+        assert!(action.contains("pane") && action.contains("橫幅") && action.contains("重送"), "{p}");
+        // 巡檢收、叫醒。
+        crate::supervisor::roles::classify(&app.db).await.unwrap();
+        let routed: (String, i64) = sqlx::query_as(
+            "SELECT role, wake FROM supervisor_inbox WHERE kind='ops_alert' AND event_key LIKE 'ops_alert:daemon:codex_security_banner:%'",
+        )
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(routed, ("patrol".to_string(), 1));
 
         // 橫幅被人關掉：照常派送，`1` 開頭的整句原封不動貼進去。
         f.env.herdr.set_screen("pane-17", "› Reply with PONG\n\n• PONG\n\n› \n\n  gpt-6.1-sol default · /tmp/x\n");
@@ -2558,6 +2580,36 @@ mod issue_17_tests {
         let out = deliver_prompt(&app, &client, &run, &bot, "1. 先看 issue 782", false, true).await.unwrap();
         assert_eq!(out, not("codex_security_banner", true));
         assert_eq!(notes().await.len(), 2);
+        let inbox = alerts().await;
+        assert_eq!(inbox.len(), 2, "橫幅消失又出現：inbox 再推一則：{inbox:?}");
+    }
+
+    /// AGM inbox 裡 #789 的橫幅事件：`(bot_id 欄, state, payload)`，照寫入順序。
+    async fn banner_alerts(app: &Arc<App>) -> Vec<(Option<String>, String, Value)> {
+        sqlx::query_as::<_, (Option<String>, String, String)>(
+            "SELECT bot_id, state, payload_json FROM supervisor_inbox
+              WHERE kind='ops_alert' AND event_key LIKE 'ops_alert:daemon:codex_security_banner:%' ORDER BY rowid",
+        )
+        .fetch_all(&app.db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(b, s, p)| (b, s, serde_json::from_str(&p).unwrap()))
+        .collect()
+    }
+
+    /// #789：沒有橫幅就照常派送，AGM inbox 不多任何一則。
+    #[tokio::test]
+    async fn a_codex_screen_without_the_banner_pushes_no_inbox_event() {
+        let f = fixture("codex", "› Reply with PONG\n\n• PONG\n\n› \n\n  gpt-6.1-sol default · /tmp/x\n").await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+
+        let out = deliver_prompt(&app, &client, &run, &bot, "1. 先看 issue 789", false, true).await.unwrap();
+        assert!(!matches!(out, Delivered::NotAttempted { .. }), "{out:?}");
+        assert!(banner_alerts(&app).await.is_empty());
     }
 
     #[tokio::test]
