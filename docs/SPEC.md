@@ -1316,7 +1316,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    一次：補的只是這一次還沒判斷完的，已經判斷過的不再碰；第一次嘗試之後才有 run 的 bot（使用者自己起過又停掉）也不再替它起。
    **開機之後掉的 autostart bot 會自動補起（`autostart_revive`）**：herdr 斷線重連或 server 重啟（herdr 更新）時，對帳發現 run 的 agent 不見，
    收成 `exited`（原因 `agent not found during reconcile`）——使用者停的是 `stopped`、在 herdr 裡關 pane 走 `pane exited` 事件，都不走這條。
-   對帳那輪結束（pass 鎖放開）後，對 `autostart=1`、非 child、沒有 active run、最後一個 run 就是這次收掉的那個（**而且是這一輪自己記的 exited、退出原因是 `agent not found during reconcile`**：別的路先收的——使用者的 stop、使用者在 herdr 關 pane 的 `pane exited` 事件——不算遺失，不拉起來）的 bot 再 `start_bot` 一次（**丟到背景、一顆一顆補**，不讓對帳呼叫端等：後面的事件訂閱、spool 補放、工具偵測都排在對帳之後），
+   對帳那輪結束（pass 鎖放開）後，對 `autostart=1`、非 child、沒有 active run、最後一個 run 就是這次收掉的那個（**而且是這一輪自己記的 exited、退出原因是 `agent not found during reconcile`**：別的路先收的——使用者的 stop、使用者在 herdr 關 pane 的 `pane exited` 事件——不算遺失，不拉起來）的 bot 再 `start_bot` 一次（**丟到背景、一顆一顆補**，不讓對帳呼叫端等：後面的事件訂閱、spool 補放、工具偵測都排在對帳之後），取得 bot lock 後會重驗遺失 run、主機與 active run；使用者在補開前已經 start/stop 或主機已移走就跳過，
    並立刻推 supervisor inbox `bot_lost`（巡檢收、叫醒；`payload.outcome` = `restarted`／`failed`／`backoff`，不等 `bot_stopped` 探針的 300 秒）。
    只在該主機的開機 autostart 跑完之後才動（開機那輪由 autostart 負責，不搶著起第二次），herdr 計畫中維護期間不動；
    退避：同一顆 bot 30 分鐘內最多嘗試補開 3 次；計數依 durable `bot_lost` inbox 事件判斷，daemon 重啟不會重設。超過只推 `outcome=backoff`、不再開，交給 supervisor／探針。
@@ -2377,7 +2377,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   背景工作那一條（#767，使用者裁示）：agent 閒置不代表沒事在跑——重啟一退 CLI，背景 shell／終端跟著沒了。計畫時判一次、輪到它時 `recheck` 再判一次
   （計畫之後才開始跑背景工作的跳過，不是失敗）；cli-update 的範圍批次走同一條，所以一併跳過。數字是**巡邏看過的**才算（`background_jobs::known`）：
   daemon 剛重啟、新 run、畫面讀不到時沒有證據，**不擋**（`None` 與「看過、是 0」不同；API 的 `run.background_jobs` 沒看過是 `null`），
-  前端確認框在這幾顆旁標「背景狀態未知」。**計畫時與輪到時，對真的可能被重啟的那幾顆（閒置、有待套用的更新、不是子 agent／default session）現場讀一次畫面**（`background_jobs::refresh`）再判：巡邏每 30 秒才一輪，回合剛結束、背景工作剛丟出去的那幾秒，帳上是沒看過或上一輪的 0，不能當乾淨的證據；現場讀不到（沒有 pane、主機沒連、herdr 讀失敗）才退回帳上的值。閒置回收（§6.11）有自己的三態判斷，不共用這一條。
+  前端確認框在這幾顆旁標「背景狀態未知」。**計畫時與輪到時，對真的可能被重啟的那幾顆（閒置、有待套用的更新、不是子 agent／default session）現場讀一次**（`background_jobs::refresh`）再判：新鮮的 Claude Stop hook 帳在 60 秒內優先，過期後 shell 數改以畫面為準；hook-only 的 subagent／monitor／workflow 保留到下一則 Stop hook。巡邏每 30 秒才一輪，回合剛結束、背景工作剛丟出去的那幾秒，帳上是沒看過或上一輪的 0，不能當乾淨的證據；現場讀不到（沒有 pane、主機沒連、herdr 讀失敗）才退回帳上的值。重啟停機前還會在最後 stop 邊界重讀帳本，接住畫面重查後才到的 Stop hook。閒置回收（§6.11）有自己的三態判斷，不共用這一條。
 
   **2026-09-22 修**：以前候選直接限定 `kind == claude`，codex 有更新時整顆連候選都不算，`header`／批次框
   上完全看不到（使用者：「codex 有更新怎沒出現在 header」）。codex 的更新通知本來就分兩種
@@ -2539,7 +2539,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   判斷之後還問過 herdr、跑過 ps，那段時間 AGM 可能剛把工作派給它；`prompt` 建回合拿的是同一把鎖，鎖裡看到的
   就是停機那一刻的事實，已經有回合、排隊、未結案交辦或更新的動作就不收，重讀本身讀不到也不收。這把鎖從最後一次
   判斷一路握到 `stop_bot_locked` 結束（判斷、寫標記、停機是同一個序列化邊界；叫醒也在這把鎖裡，看不到「已標記、
-  還沒停」的中間狀態）。背景工作那一項是鎖外問的（貴），沿用到鎖裡——安全的理由是 daemon 經手的新工作一定先建
+  還沒停」的中間狀態）。背景工作那一項是鎖外問的（貴），沿用到鎖裡，並在停機前再讀一次帳本，避免等待期間到達的 Stop hook 被漏掉——安全的理由是 daemon 經手的新工作一定先建
   turn／訊息，鎖裡重讀的 in-flight、排隊、交辦、最後動作時間看得到；一個剛開始又結束的回合會把「最後動作」推到現在。
   過了才 `bot_sleeps` 先寫一列（**先寫再停**：中間死掉留下的是
   「它應該是睡著的」，叫醒那條路會處理；反過來死在中間就變成一顆沒人知道要 `--resume` 的 bot），再走
@@ -2738,8 +2738,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
   空陣列＝沒有東西在跑）與 `session_crons[]`（`{id, schedule, recurring, prompt}`，/loop、ScheduleWakeup 之類之後會叫醒 session）。**有 `background_tasks` 的 Stop 以它為準**：
   hookrecv 在世代圍籬之後收下（上一代的 Stop 不改這一代），回合一結束就有數字，不用等 30 秒巡邏；數字＝shell 以外的全算，shell 扣掉常駐服務（扣法同上，
   Stop 當下先照原數字記、背景查完再修正，不卡 hook 處理）。**沒有這個鍵（舊版 claude、舊的遠端 hook）完全不碰，維持畫面判斷**；畫面判斷也沒拿掉，
-  它是巡邏的常規讀法，也用來校正過期的 hook 帳：hook 帳 60 秒內畫面不能推翻；過了之後，hook 說有、畫面（扣服務之前）完全沒有＝背景在沒有新 Stop 的情況下結束了
-  （被殺、被外部清掉），丟掉 hook 帳改用畫面；hook 說 0 的帳過了 60 秒就退場，之後只看畫面。`session_crons` 只當資訊顯示，**不算背景工作**（不擋一鍵重啟）。
+  它是巡邏的常規讀法，也用來校正過期的 hook 帳：hook 帳 60 秒內畫面不能推翻；過了之後整份 hook 帳退場、只採目前畫面，過期 task 明細也不再投影。`session_crons` 只當資訊顯示，**不算背景工作**（不擋一鍵重啟）。
   codex 沒有這個欄位，照舊只看畫面。
 - 數字記在記憶體、以 run 為鍵（`background_jobs.rs`）：屬於這個 process，新 run 自然歸零；run 結束那一輪就丟掉；daemon 重啟後
   等下一輪巡邏補上。數字變了才推 `bot_status`。背景跑完到畫面更新之間最多晚一輪（30 秒）。

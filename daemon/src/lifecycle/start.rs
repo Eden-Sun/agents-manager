@@ -1138,11 +1138,9 @@ async fn restart_bot_with_authority(
         ensure_current_host_fence(app, bot_id, fence).await?;
     }
     let payload = json!({"opts": opts, "from_run_id": stopping, "bot_name": bot.name});
-    let intent_id = match crate::intents::insert(&app.db, "restart", bot_id, &host, &payload, RESTART_INTENT_TTL_SECS).await {
-        // 已經有一件開著：上一個行程留下的（我們持著 bot 鎖、這次自己來做同一件事），沿用它。
-        Ok(crate::intents::Inserted::New(i)) | Ok(crate::intents::Inserted::AlreadyOpen(i)) => i.id,
-        Err(e) => return Err(LcError::Upstream(format!("cannot record the restart intent: {e:#}"))),
-    };
+    let intent_id = crate::intents::prepare_restart(&app.db, bot_id, &host, &payload, RESTART_INTENT_TTL_SECS, &app.boot_id)
+        .await
+        .map_err(|e| LcError::Upstream(format!("cannot record the restart intent: {e:#}")))?;
     #[cfg(test)]
     super::race_point::hit("restart_after_intent", bot_id).await;
     let res = restart_stop_and_start(app, bot_id, opts, stopping, fence).await;
@@ -1353,6 +1351,14 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     // 鎖裡看過閒置、還沒記 `stopping` 的那一瞬（測試在這裡讓使用者剛好開始打字）。
     #[cfg(test)]
     super::race_point::hit("child_restart_before_stopping", bot_id).await;
+    if require_idle {
+        if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
+            return Err(LcError::conflict(
+                "not_idle",
+                json!({"bot_id": bot_id, "busy": "background_jobs", "background_jobs": n}),
+            ));
+        }
+    }
     // 舊 run 跟 stop 走同一套（#146 留言）：先記「正在停」，記不下來就一步都不做；被 pane-exit 事件先收掉就不重開。
     // `require_idle`（一鍵重啟）時這一步同時是「還是閒著才准停」的許可（#346，同 `stop_for_restart_if_idle_locked`）。
     let moved = if require_idle {
@@ -3354,6 +3360,30 @@ mod idle_restart_tests {
         assert_eq!(reason(err).0, "not_idle");
         assert_eq!(db::active_run(&app.db, &kid).await.unwrap().map(|r| (r.id, r.state)), Some((run_id, "running".into())), "run 原封不動");
         assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "沒有 ctrl+c");
+    }
+
+    /// The in-pane restart has its own stop path, so a late hook report must be checked after its
+    /// idle inspection just like a bulk restart through `stop_locked`.
+    #[tokio::test]
+    async fn a_child_background_hook_report_before_stopping_blocks_the_in_pane_restart() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let kid = crate::lifecycle::restart_kind_tests::live_child(&env, "late-hook").await;
+        let run = db::run(&app.db, &kid.run_id).await.unwrap().unwrap();
+        let hook_app = app.clone();
+        crate::lifecycle::race_point::arm("child_restart_before_stopping", &kid.id, move || async move {
+            crate::background_hook::on_stop(
+                &hook_app,
+                &run,
+                &json!({"background_tasks": [{"id": "agent-1", "type": "subagent", "status": "running", "description": "review"}]}),
+            )
+            .await;
+        });
+
+        let err = restart_child_in_pane_with(&app, &kid.id, true).await.expect_err("new background work blocks the in-pane restart");
+        assert_eq!(reason(err).1, "background_jobs");
+        assert_eq!(db::active_run(&app.db, &kid.id).await.unwrap().map(|r| (r.id, r.state)), Some((kid.run_id, "running".into())));
+        assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys" || m == "agent.start"), "background work must not be interrupted");
     }
 
     /// 一鍵重啟鎖裡看過閒置、還沒記 `stopping` 的那一瞬，使用者直接在 pane 裡打字：`events::handle_status` 不拿 bot 鎖就寫

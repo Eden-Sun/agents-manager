@@ -125,31 +125,32 @@ pub(crate) async fn revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
 }
 
 async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> {
-    let Some(bot) = db::bot(&app.db, &l.bot_id).await? else { return Ok(()) };
-    if bot.deleted_at.is_some() || bot.autostart != 1 || bot.managed_by == "child" {
+    // Check once before the lock to keep the common no-op path cheap, then check again while holding
+    // the per-bot lock. A user start/stop in between must cancel this background recovery.
+    if eligible_lost_bot(app, host, l).await?.is_none() {
         return Ok(());
     }
-    if db::active_run(&app.db, &bot.id).await?.is_some() {
-        return Ok(());
-    }
-    let last: Option<(String, String, Option<String>)> =
-        sqlx::query_as("SELECT id, state, exit_reason FROM runs WHERE bot_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
-            .bind(&bot.id)
-            .fetch_optional(&app.db)
-            .await?;
-    // 最後一個 run 要就是這次被收掉的、而且退出原因真的是對帳記的「agent 不見」：`pane exited`（使用者在 herdr 裡關 pane）、
-    // 其他路徑收的 exited 都不是 herdr 掉的，不拉起來。
-    if last.as_ref().map(|(id, state, why)| (id.as_str(), state.as_str(), why.as_deref())) != Some((l.run_id.as_str(), "exited", Some(LOST_REASON))) {
-        return Ok(());
-    }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("autostart_revive_before_start", &l.bot_id).await;
+
+    let lock = app.bot_lock(&l.bot_id).await;
+    let guard = lock.lock_owned().await;
+    let Some(bot) = eligible_lost_bot(app, host, l).await? else { return Ok(()) };
     let (outcome, error) = if !take_slot(app, &bot.id).await? {
+        drop(guard);
         tracing::warn!(host, bot = %bot.name, "autostart revive: lost again within the backoff window; not restarting, only reporting");
         ("backoff", None)
     } else {
         tracing::info!(host, bot = %bot.name, "autostart revive: the agent was lost (herdr restart or reconnect); starting it again");
-        // 同 autostart_one：起的過程不跟著對帳 task 被取消。
+        // The detached start owns the bot lock through pane creation; cancelling this caller must
+        // not leave an unguarded start that can race a user stop.
         let (start_app, bot_id) = (app.clone(), bot.id.clone());
-        match tokio::spawn(async move { crate::lifecycle::start_bot(&start_app, &bot_id).await }).await {
+        match tokio::spawn(async move {
+            let _guard = guard;
+            crate::lifecycle::start_bot_locked_with(&start_app, &bot_id, crate::lifecycle::StartOpts::default()).await
+        })
+        .await
+        {
             Ok(Ok(_)) => ("restarted", None),
             Ok(Err(e)) => ("failed", Some(format!("{e:?}"))),
             Err(e) => ("failed", Some(e.to_string())),
@@ -163,6 +164,28 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         tracing::warn!(bot = %bot.name, error = ?e, "autostart revive: could not write the bot_lost inbox event");
     }
     Ok(())
+}
+
+/// Only the run reconcile just lost, still on the same host, is eligible for revival. Call before
+/// and after acquiring the bot lock.
+async fn eligible_lost_bot(app: &App, host: &str, l: &Lost) -> anyhow::Result<Option<db::Bot>> {
+    let Some(bot) = db::bot(&app.db, &l.bot_id).await? else { return Ok(None) };
+    if bot.deleted_at.is_some() || bot.autostart != 1 || bot.managed_by == "child" {
+        return Ok(None);
+    }
+    if db::bot_host(&app.db, &bot.id).await? != host || !app.host_connected(host).await || db::active_run(&app.db, &bot.id).await?.is_some() {
+        return Ok(None);
+    }
+    let last: Option<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, state, exit_reason FROM runs WHERE bot_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
+            .bind(&bot.id)
+            .fetch_optional(&app.db)
+            .await?;
+    // 使用者關 pane 或其他路徑收掉的 run，都不是這次對帳發現的遺失。
+    if last.as_ref().map(|(id, state, why)| (id.as_str(), state.as_str(), why.as_deref())) != Some((l.run_id.as_str(), "exited", Some(LOST_REASON))) {
+        return Ok(None);
+    }
+    Ok(Some(bot))
 }
 
 #[cfg(test)]
@@ -348,6 +371,41 @@ mod tests {
         assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "沒有 inbox");
     }
 
+    /// Reconcile can succeed and the remote host can disconnect while the background revival waits
+    /// for the bot lock. That is a skip, not a failed start that spends one of the retry slots.
+    #[tokio::test]
+    async fn a_remote_host_that_disconnects_before_revival_is_skipped_without_an_attempt() {
+        use std::sync::atomic::Ordering;
+
+        let env = tt::env().await;
+        let host = "revive-late-offline";
+        let cfg = config::HostCfg {
+            shared_session: false,
+            name: host.into(),
+            ssh: "127.0.0.1".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        conn.connected.store(true, Ordering::SeqCst);
+        sqlx::query("UPDATE projects SET host=? WHERE id=?").bind(host).bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let bot = autostart_bot(&env, "late-offline").await;
+        let run_id = tt::fake_run(&env.app, &bot.id).await;
+        crate::lifecycle::mark_run_exited(&env.app, &run_id, super::LOST_REASON).await;
+        env.app.autostart_hosts.lock().unwrap().insert(host.to_string(), AutostartHostStatus::Done);
+
+        let conn_after_check = conn.clone();
+        crate::lifecycle::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
+            conn_after_check.connected.store(false, Ordering::SeqCst);
+        });
+        super::revive(&env.app, host, vec![super::Lost { bot_id: bot.id.clone(), run_id }]).await;
+
+        assert_eq!(runs(&env.app, &bot.id).await.len(), 1, "offline host is not restarted");
+        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "offline is skipped, not counted as a failed attempt");
+    }
+
     /// 同一件事的第二道防線：就算有人（或之後的改動）把這顆 run 當成遺失交給 `revive`，`revive_one` 也要確認
     /// 那顆 run 的退出原因真的是對帳記的「agent 不見」，而不只是「最後一個 run 是 exited」。
     #[tokio::test]
@@ -363,6 +421,29 @@ mod tests {
 
         assert_eq!(runs(&env.app, &bot.id).await.len(), 1, "原因是 pane exited：不拉起來");
         assert!(bot_lost_events(&env.app, &bot.id).await.is_empty());
+    }
+
+    /// 使用者可在補開完成前啟動又停止 bot。資格檢查與 `start_bot` 之間要共用 bot lock 並重驗，不能推翻這次停機。
+    #[tokio::test]
+    async fn an_autostart_revival_does_not_override_a_user_start_then_stop_race() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "revive-user-stop-race").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        let lost_run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap().id;
+        crate::lifecycle::mark_run_exited(&env.app, &lost_run, super::LOST_REASON).await;
+
+        let (app, bot_id) = (env.app.clone(), bot.id.clone());
+        crate::lifecycle::race_point::arm("autostart_revive_before_start", &bot.id, move || async move {
+            let user_run = crate::lifecycle::start_bot(&app, &bot_id).await.unwrap();
+            crate::lifecycle::stop_bot(&app, &bot_id).await.unwrap();
+            assert_ne!(user_run, "");
+        });
+        super::revive(&env.app, config::LOCAL_HOST, vec![super::Lost { bot_id: bot.id.clone(), run_id: lost_run }]).await;
+
+        assert_eq!(runs(&env.app, &bot.id).await.len(), 2, "補開不能多啟動第三個 run");
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "使用者的 stop 保持有效");
+        assert!(bot_lost_events(&env.app, &bot.id).await.is_empty(), "使用者接手後不算 revive attempt");
     }
 
     /// herdr 一直在掛（每次起來又掉）：同一顆 bot 30 分鐘內最多重開 3 次，之後只通知、不再開。

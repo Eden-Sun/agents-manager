@@ -198,10 +198,10 @@ async fn resume(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
     let _g = lock.lock().await;
     // 拿到鎖之後再確認一次：這段等鎖的時間裡活著的 handler 可能已經把它收尾了（遠端重連時 recovery 與正在服務的重啟會碰到）——
     // 已經不是我們認領的那件就什麼都不做，不能在使用者已經拿到錯誤之後又替他補做。
-    match intents::get(&app.db, &intent.id).await.map_err(|e| format!("db: {e:#}"))? {
-        Some(cur) if cur.status == "running" => {}
+    let intent = match intents::get(&app.db, &intent.id).await.map_err(|e| format!("db: {e:#}"))? {
+        Some(cur) if cur.status == "running" && cur.owner_boot.as_deref() == Some(app.boot_id.as_str()) => cur,
         _ => return Ok(()),
-    }
+    };
     let payload = intent.payload();
     let opts: StartOpts = serde_json::from_value(payload.get("opts").cloned().unwrap_or_default()).unwrap_or_default();
     let from_run = payload.get("from_run_id").and_then(|v| v.as_str());
@@ -647,6 +647,94 @@ mod tests {
         assert_eq!(runs_of(&app2, &bot.id).await, 2, "the retry must not start a third run");
         assert!(db::active_run(&app2.db, &bot.id).await.unwrap().is_none(), "the user's stop is respected");
         assert_eq!(intent_status(&app2, &bot.id).await, vec!["done"]);
+    }
+
+    /// An explicit restart after an older pending retry must own its current source run. Reusing the
+    /// stale intent payload makes recovery mistake a newly stopped bot for an already superseded restart.
+    #[tokio::test]
+    async fn a_new_restart_does_not_merge_a_stale_pending_intents_source_run() {
+        let e = tt::env().await;
+        let (bot, old_run) = running_bot(&e, "restart-stale-merge").await;
+        die_at(&e, &bot.id, "restart_after_stop").await;
+        let old_intent: String = sqlx::query_scalar("SELECT id FROM intents WHERE subject_id=? AND kind='restart'")
+            .bind(&bot.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+
+        // The user brings it back and stops it; then requests a restart while it is down.
+        let app = tt::restart_app(&e).await;
+        let user_run = lifecycle::start_bot(&app, &bot.id).await.unwrap();
+        lifecycle::stop_bot(&app, &bot.id).await.unwrap();
+        assert_ne!(old_run, user_run);
+
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let notify = reached.clone();
+        race_point::arm("restart_after_stop", &bot.id, move || async move {
+            notify.notify_one();
+            std::future::pending::<()>().await
+        });
+        let (app_for_restart, bot_id) = (app.clone(), bot.id.clone());
+        let task = tokio::spawn(async move {
+            lifecycle::restart_bot_with(&app_for_restart, &bot_id, StartOpts::default()).await
+        });
+        reached.notified().await;
+        task.abort();
+        let _ = task.await;
+
+        let (new_intent, payload): (String, String) = sqlx::query_as(
+            "SELECT id, payload_json FROM intents WHERE subject_id=? AND kind='restart' AND status IN ('pending','running')",
+        )
+        .bind(&bot.id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_ne!(new_intent, old_intent, "pending retry is superseded, not merged as an active restart");
+        assert!(serde_json::from_str::<serde_json::Value>(&payload).unwrap()["from_run_id"].is_null());
+
+        recover_host(&app, LOCAL_HOST).await;
+        assert!(db::active_run(&app.db, &bot.id).await.unwrap().is_some(), "the explicit restart must be recovered");
+        assert_eq!(runs_of(&app, &bot.id).await, 3, "old, user-started, and recovered restart runs");
+    }
+
+    /// A recovery claimed by this boot is the only open restart intent an explicit restart may merge;
+    /// refresh its payload to the source run protected by the current bot lock.
+    #[tokio::test]
+    async fn a_new_restart_refreshes_a_current_boot_in_progress_intents_source_run() {
+        let e = tt::env().await;
+        let (bot, run1) = running_bot(&e, "restart-live-merge").await;
+        let inserted = crate::intents::insert(
+            &e.app.db,
+            "restart",
+            &bot.id,
+            LOCAL_HOST,
+            &json!({"opts": {}, "from_run_id": "stale-source"}),
+            900,
+        )
+        .await
+        .unwrap();
+        let id = match inserted {
+            crate::intents::Inserted::New(i) | crate::intents::Inserted::AlreadyOpen(i) => i.id,
+        };
+        sqlx::query("UPDATE intents SET status='running', owner_boot=? WHERE id=?")
+            .bind(&e.app.boot_id)
+            .bind(&id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        lifecycle::restart_bot_with(&e.app, &bot.id, StartOpts::default()).await.unwrap();
+
+        let (intent_id, status, payload): (String, String, String) =
+            sqlx::query_as("SELECT id, status, payload_json FROM intents WHERE subject_id=? AND kind='restart'")
+                .bind(&bot.id)
+                .fetch_one(&e.app.db)
+                .await
+                .unwrap();
+        assert_eq!(intent_id, id, "reuse only the in-progress intent");
+        assert_eq!(status, "done");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&payload).unwrap()["from_run_id"], run1);
+        assert_eq!(runs_of(&e.app, &bot.id).await, 2);
     }
 
     #[tokio::test]

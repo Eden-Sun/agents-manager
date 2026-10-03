@@ -123,6 +123,17 @@ async fn stop_locked(
         super::race_point::hit("stop_before_stopping", bot_id).await;
     }
 
+    // A fresh Stop hook can add background work after the caller's inspection/recheck. Recheck the
+    // run-scoped account at the last stop boundary for both idle sleep and bulk restart.
+    if only_if_idle {
+        if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
+            return Err(LcError::conflict(
+                "not_idle",
+                serde_json::json!({"bot_id": bot_id, "busy": "background_jobs", "background_jobs": n}),
+            ));
+        }
+    }
+
     // 先把「正在停」記下來，才有權動外面（#146）：記不下來就一步都不做——不收 in-flight、不送 ctrl+c、
     // 不關 pane、不撤佇列。讀完 active run 之後被不拿鎖的 pane-exit 事件先收掉的話（CAS 輸了），收尾歸那條路。
     // 來源含 `stopping`：上一次沒停成（寫不進 `stopped`、agent 沒退出）的 stop 可以原樣再按一次。
