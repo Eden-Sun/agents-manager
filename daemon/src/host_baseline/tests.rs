@@ -439,12 +439,14 @@ fn fresh(issues: Option<Vec<BaselineIssue>>, checked_at: String) -> BaselineRepo
 
 #[test]
 fn a_report_is_stale_after_a_failed_probe_or_after_more_than_one_recheck_cycle() {
+    // 對齊到毫秒：時間戳一律走 db::iso_at（毫秒寬度），邊界才不會被截斷成「早一點點」。
     let now = chrono::Utc::now();
+    let now = now - chrono::Duration::nanoseconds(i64::from(now.timestamp_subsec_nanos() % 1_000_000));
     assert!(!fresh(Some(vec![]), at(0)).snapshot(now).stale, "剛量完不算過期");
     assert!(!fresh(Some(vec![]), at(6)).snapshot(now).stale, "一個重量週期內（含偵測自己花的時間）不算過期");
     let boundary = now - chrono::Duration::minutes(375);
-    assert!(!fresh(Some(vec![]), boundary.to_rfc3339()).snapshot(now).stale, "6h15m 邊界仍有效");
-    assert!(fresh(Some(vec![]), (boundary - chrono::Duration::nanoseconds(1)).to_rfc3339()).snapshot(now).stale, "超過 6h15m 才過期");
+    assert!(!fresh(Some(vec![]), crate::db::iso_at(boundary)).snapshot(now).stale, "6h15m 邊界仍有效");
+    assert!(fresh(Some(vec![]), crate::db::iso_at(boundary - chrono::Duration::milliseconds(1))).snapshot(now).stale, "超過 6h15m 才過期");
     assert!(fresh(Some(vec![]), at(7)).snapshot(now).stale, "超過一個重量週期");
     let mut failed = fresh(Some(vec![bi("tool.rtk", CRITICAL)]), at(0));
     failed.failed_at = Some(at(0));
