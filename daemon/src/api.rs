@@ -5410,6 +5410,15 @@ async fn ws_handler(
     if !origin_is_local(&headers, app.port, app.allow_lan) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
+    // `/ws` is outside the `/api` auth middleware, but it is still a User-only endpoint.
+    // Do not silently ignore an explicit Bot/Service identity when the query also carries the
+    // shared UI token; that would let one request cross principal boundaries.
+    if ["X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Service-Id", "X-AM-Service-Token"]
+        .iter()
+        .any(|name| headers.contains_key(*name))
+    {
+        return (StatusCode::UNAUTHORIZED, "mixed credentials").into_response();
+    }
     if !ct_eq(q.get("token").map(|s| s.as_str()).unwrap_or(""), &app.ui_token) {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
@@ -9114,6 +9123,28 @@ mod per_principal_auth_tests {
         responses
     }
 
+    async fn raw_head(app: Arc<App>, request: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = super::router(app);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+        });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(request.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        let mut chunk = [0; 2048];
+        while !out.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = c.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&chunk[..n]);
+        }
+        server.abort();
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
     async fn spawn_begin(app: Arc<App>, bot_id: &str, token: &str) -> String {
         let body = format!("bot_id={bot_id}");
         raw(
@@ -9440,6 +9471,199 @@ mod per_principal_auth_tests {
         )
         .await;
         assert!(!response_json(&relay).get("reason").is_some_and(|r| r == "bot_resource_scope"), "authorized relay must reach the prompt handler: {relay}");
+    }
+
+    fn encode_path_segment(segment: &str) -> String {
+        segment
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                    (byte as char).to_string()
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect()
+    }
+
+    /// Raw HTTP targets keep encoded slashes and dot segments intact until Axum routes them.
+    /// Aliases must not reach Bot B's resource even when routing treats an encoded separator
+    /// as part of a different path parameter and returns Method Not Allowed.
+    #[tokio::test]
+    async fn bot_resource_paths_reject_router_normalization_aliases() {
+        let e = crate::testing::env().await;
+        let bot_a = distinct_bot(&e, "path-norm-a").await;
+        let project_b = db::ulid();
+        let project_b_path = e.dir.join("path-norm-project-b");
+        std::fs::create_dir_all(&project_b_path).unwrap();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,'local',?)")
+            .bind(&project_b)
+            .bind(project_b_path.to_string_lossy().to_string())
+            .bind("path-norm-project-b")
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let bot_b = crate::testing::claude_bot(&e.app, &project_b, "path-norm-b").await;
+        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?")
+            .bind(format!("tok-{}", bot_b.id))
+            .bind(&bot_b.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let bot_b = db::bot(&e.app.db, &bot_b.id).await.unwrap().unwrap();
+        let now = db::now();
+        let conversation_b = db::conversation_id(&e.app.db, &bot_b.id).await.unwrap();
+        let secret = "path-normalization-private-marker";
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant',?,'terminal_fallback',?)")
+            .bind(db::ulid())
+            .bind(&conversation_b)
+            .bind(secret)
+            .bind(&now)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        let unicode_project = "project-e\u{301}";
+        let unicode_project_path = e.dir.join("path-norm-unicode-project");
+        std::fs::create_dir_all(&unicode_project_path).unwrap();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,'local',?)")
+            .bind(unicode_project)
+            .bind(unicode_project_path.to_string_lossy().to_string())
+            .bind("path-norm-unicode-project")
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let unicode_bot = crate::testing::claude_bot(&e.app, unicode_project, "path-norm-unicode").await;
+        let unicode_conversation = db::conversation_id(&e.app.db, &unicode_bot.id).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant','unicode-normalization-private-marker','terminal_fallback',?)")
+            .bind(db::ulid())
+            .bind(&unicode_conversation)
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        let (alpha_at, alpha_byte) = bot_b.id.bytes().enumerate().find(|(_, b)| b.is_ascii_alphabetic()).expect("ULID has an alphabetic byte");
+        let encoded_upper = format!("{}%{alpha_byte:02X}{}", &bot_b.id[..alpha_at], &bot_b.id[alpha_at + 1..]);
+        let encoded_lower = format!("{}%{alpha_byte:02x}{}", &bot_b.id[..alpha_at], &bot_b.id[alpha_at + 1..]);
+        let nfc_project = "project-é";
+        let nfd_path = encode_path_segment(unicode_project);
+        let nfc_path = encode_path_segment(nfc_project);
+        let cases = [
+            ("canonical", "GET", format!("/api/bots/{}/messages", bot_b.id), true),
+            ("encoded id uppercase hex", "GET", format!("/api/bots/{encoded_upper}/messages"), true),
+            ("encoded id lowercase hex", "GET", format!("/api/bots/{encoded_lower}/messages"), true),
+            ("encoded slash folds route segments", "GET", format!("/api/bots/{}%2Fmessages", bot_b.id), true),
+            ("encoded lowercase slash", "GET", format!("/api/bots/{}%2fmessages", bot_b.id), true),
+            ("double encoded slash", "GET", format!("/api/bots/{}%252Fmessages", bot_b.id), true),
+            ("dot dot segment", "GET", format!("/api/bots/../bots/{}/messages", bot_b.id), true),
+            ("encoded dot dot segment", "GET", format!("/api/bots/%2e%2e/bots/{}/messages", bot_b.id), true),
+            ("double encoded dot dot", "GET", format!("/api/bots/%252e%252e/bots/{}/messages", bot_b.id), true),
+            ("trailing slash", "GET", format!("/api/bots/{}/messages/", bot_b.id), true),
+            ("duplicate slash", "GET", format!("/api//bots//{}//messages", bot_b.id), true),
+            ("case changed static route", "GET", format!("/api/BOTS/{}/messages", bot_b.id), true),
+            ("encoded static route", "GET", format!("/api/%62ots/{}/messages", bot_b.id), true),
+            ("query id cannot override path", "GET", format!("/api/bots/{}/messages?id={}&bot_id={}", bot_b.id, bot_a.id, bot_a.id), true),
+            ("dot traversal across API prefix", "GET", format!("/foo/../api/bots/{}/messages", bot_b.id), false),
+            ("encoded dot traversal across API prefix", "GET", format!("/foo/%2e%2e/api/bots/{}/messages", bot_b.id), false),
+            ("dot traversal inside API prefix", "GET", format!("/api/../api/bots/{}/messages", bot_b.id), true),
+            ("encoded dot traversal inside API prefix", "GET", format!("/api/%2e%2e/api/bots/{}/messages", bot_b.id), true),
+            ("project NFC alias of NFD id", "GET", format!("/api/projects/{nfc_path}/messages"), true),
+            ("project canonical NFD id", "GET", format!("/api/projects/{nfd_path}/messages"), true),
+            ("uppercase API prefix", "GET", format!("/API/bots/{}/messages", bot_b.id), false),
+            ("encoded API prefix", "GET", format!("/%61pi/bots/{}/messages", bot_b.id), false),
+            ("HEAD uses bot scope", "HEAD", format!("/api/bots/{}/messages", bot_b.id), true),
+            ("OPTIONS uses bot scope", "OPTIONS", format!("/api/bots/{}/messages", bot_b.id), true),
+            ("HEAD uses project scope", "HEAD", format!("/api/projects/{project_b}/messages"), true),
+            ("OPTIONS uses project scope", "OPTIONS", format!("/api/projects/{project_b}/messages"), true),
+        ];
+        let bot_headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot_a.id, bot_a.hook_token);
+        let requests = cases
+            .iter()
+            .map(|(_, method, path, _)| format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\nContent-Length: 0\r\n\r\n"))
+            .collect::<Vec<_>>();
+        let responses = raw_many(e.app.clone(), requests).await;
+        for ((name, method, path, in_api), response) in cases.iter().zip(&responses) {
+            assert!(!response.contains(secret), "{name} ({method} {path}) disclosed Bot B's message: {response}");
+            assert!(!response.contains("unicode-normalization-private-marker"), "{name} ({method} {path}) disclosed the NFD project's message: {response}");
+            if *in_api {
+                let status = response.split_whitespace().nth(1).unwrap_or("");
+                assert!(matches!(status, "403" | "404" | "405"), "{name} ({method} {path}) should be denied, unmatched, or method-mismatched: {response}");
+            }
+        }
+
+        let patch_body = r#"{"name":"must-not-change"}"#;
+        let encoded_separator_patch = raw(
+            e.app.clone(),
+            format!(
+                "PATCH /api/bots/{}%2Fmessages HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{patch_body}",
+                bot_b.id,
+                patch_body.len()
+            ),
+        )
+        .await;
+        assert!(
+            !encoded_separator_patch.starts_with("HTTP/1.1 2"),
+            "encoded separator must not patch Bot B: {encoded_separator_patch}"
+        );
+        let bot_b_after: String = sqlx::query_scalar("SELECT name FROM bots WHERE id=?")
+            .bind(&bot_b.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(bot_b_after, bot_b.name, "encoded separator must not mutate Bot B");
+
+        let own_with_query_override = raw(
+            e.app.clone(),
+            format!("GET /api/bots/{}/messages?bot_id={} HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n", bot_a.id, bot_b.id),
+        )
+        .await;
+        assert!(own_with_query_override.starts_with("HTTP/1.1 200"), "query parameters must not block the actual path owner: {own_with_query_override}");
+        assert!(!own_with_query_override.contains(secret), "query bot_id must not replace the path id: {own_with_query_override}");
+    }
+
+    /// `/ws` is a separate upgrade route outside the `/api` auth layer. It must not ignore a
+    /// Bot/Service principal when a query string also supplies the User token.
+    #[tokio::test]
+    async fn websocket_upgrade_rejects_mixed_bot_and_user_credentials() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "ws-path-principal").await;
+        let upgrade = |path: &str, token: &str, bot_headers: &str| {
+            format!(
+                "GET {path}?token={token} HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            )
+        };
+        let bot_headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot.id, bot.hook_token);
+        let service_headers = "X-AM-Service-Id: unknown\r\nX-AM-Service-Token: ignored\r\n";
+        for (identity, headers) in [
+            ("Bot", bot_headers.as_str()),
+            ("partial Bot", "X-AM-Bot-Token: ignored\r\n"),
+            ("Service", service_headers),
+        ] {
+            let mixed = raw_head(e.app.clone(), upgrade("/ws", &e.app.ui_token, headers)).await;
+            assert!(mixed.starts_with("HTTP/1.1 401"), "WebSocket must reject {identity} plus User credentials: {mixed}");
+        }
+
+        let aliases = [
+            "/ws/",
+            "//ws",
+            "/w%73",
+            "/ws%2f",
+            "/ws%252f",
+            "/WS",
+            "/ws/../ws",
+            "/ws/%2e%2e/ws",
+            "/foo/../ws",
+            "/api/ws",
+        ];
+        for path in aliases {
+            let response = raw_head(e.app.clone(), upgrade(path, &e.app.ui_token, "")).await;
+            assert!(!response.starts_with("HTTP/1.1 101"), "User token must not upgrade unmatched WebSocket alias {path}: {response}");
+        }
+        let user = raw_head(e.app.clone(), upgrade("/ws", &e.app.ui_token, "")).await;
+        assert!(user.starts_with("HTTP/1.1 101"), "browser User-token WebSocket remains available: {user}");
     }
 
     /// 原始按鍵／文字／開關 shell 是給人用的（網頁的鍵盤同步、shell 面板）：bot 的 hook token 驗得過身分，
