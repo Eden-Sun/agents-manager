@@ -137,9 +137,47 @@ status() {
 # 最後的結果（success／failure／error）一定要送到：送不上去就附加到 ${CI_ROOT}/unposted（每行 sha、state、description，tab 分隔），
 # 下一輪（不管有沒有新 commit、也不重跑檢查）先補送。不然 last-sha 已經前進，這個 sha 在 GitHub 上永遠停在 pending，
 # 而 status.json 卻寫著 success。
+rewrite_unposted_sha() {
+    local target="$1" action="$2" state="${3:-}" desc="${4:-}" line tmp
+    if [ "${action}" = remove ] && [ ! -s "${CI_ROOT}/unposted" ]; then
+        return 0
+    fi
+    tmp="$(mktemp "${CI_ROOT}/unposted.XXXXXX")" || return 1
+    if [ -s "${CI_ROOT}/unposted" ]; then
+        while IFS= read -r line || [ -n "${line:-}" ]; do
+            case "${line}" in
+                "${target}"$'\t'*) continue ;;
+            esac
+            if ! printf '%s\n' "${line}" >> "${tmp}"; then
+                rm -f -- "${tmp}"
+                return 1
+            fi
+        done < "${CI_ROOT}/unposted"
+    fi
+    if [ "${action}" = write ] && ! printf '%s\t%s\t%s\n' "${target}" "${state}" "${desc}" >> "${tmp}"; then
+        rm -f -- "${tmp}"
+        return 1
+    fi
+    if [ -s "${tmp}" ]; then
+        if ! mv -f -- "${tmp}" "${CI_ROOT}/unposted"; then
+            rm -f -- "${tmp}"
+            return 1
+        fi
+    elif ! rm -f -- "${tmp}" "${CI_ROOT}/unposted"; then
+        return 1
+    fi
+}
+
 final_status() {
-    if ! post_status "${sha}" "$1" "$2"; then
-        printf '%s\t%s\t%s\n' "${sha}" "$1" "$2" >> "${CI_ROOT}/unposted"
+    if post_status "${sha}" "$1" "$2"; then
+        # This completed run supersedes any older queued result for the same SHA. Leaving it behind
+        # would let a later replay overwrite this newer GitHub status.
+        if ! rewrite_unposted_sha "${sha}" remove; then
+            rewrite_unposted_sha "${sha}" write "$1" "$2"
+        fi
+    else
+        # Keep the newest final result per SHA, including when a prior result is still queued.
+        rewrite_unposted_sha "${sha}" write "$1" "$2"
     fi
 }
 

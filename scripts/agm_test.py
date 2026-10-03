@@ -2363,6 +2363,88 @@ class OpsSyncTest(CliCase):
         self.assertEqual(behind["behind"], 1)
         self.assertEqual([x["target"] for x in r["drift"]], [])
 
+    def test_ops_sync_follows_a_renamed_source_when_classifying_an_installed_version(self):
+        """來源檔改名但安裝目標沒變時，舊安裝內容仍是 repo 曾發布過的版本，應判 behind 而非 drift。"""
+        old_source = "scripts/ops/old-a.sh"
+        new_source = "scripts/ops/new-a.sh"
+        manifest = lambda source: (
+            f"{source} bin/a.sh\nscripts/ops/b.sh bin/b.sh\nscripts/ops/c.sh bin/c.sh\nscripts/ops/t.md t.md\n"
+        )
+        self.put("scripts/ops/install-manifest.tsv", manifest(old_source))
+        self.put(old_source, "#!/bin/sh\necho old release\nexit 0\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "publish old source")
+        old_commit = self.git("rev-parse", "--short=8", "HEAD")
+        self.install("bin/a.sh", "#!/bin/sh\necho old release\nexit 0\n")
+
+        (self.repo / old_source).rename(self.repo / new_source)
+        self.put(new_source, "#!/bin/sh\necho new release\nexit 0\n")
+        self.put("scripts/ops/install-manifest.tsv", manifest(new_source))
+        self.git("add", "-A")
+        self.git("commit", "-qm", "rename and update source")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+        report = self.report()
+        [row] = [row for row in report["behind"] if row["target"] == "bin/a.sh"]
+        self.assertEqual(row["installed_commit"], old_commit)
+        self.assertEqual(row["behind"], 1)
+        self.assertNotIn("bin/a.sh", [item["target"] for item in report["drift"]])
+
+    def test_ops_sync_uses_manifest_history_when_git_cannot_detect_a_source_rename(self):
+        """大幅重寫時 Git 不一定判成 rename；同一安裝目標的舊來源仍要算 behind。"""
+        old_source = "scripts/ops/old-a.sh"
+        new_source = "scripts/ops/new-a.sh"
+        manifest = lambda source: (
+            f"{source} bin/a.sh\nscripts/ops/b.sh bin/b.sh\nscripts/ops/c.sh bin/c.sh\nscripts/ops/t.md t.md\n"
+        )
+        old_contents = "#!/bin/sh\n" + ("echo legacy-version-1234567890\n" * 20)
+        self.put("scripts/ops/install-manifest.tsv", manifest(old_source))
+        self.put(old_source, old_contents)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "publish old source")
+        old_commit = self.git("rev-parse", "--short=8", "HEAD")
+        self.install("bin/a.sh", old_contents)
+
+        (self.repo / old_source).unlink()
+        self.put(new_source, "#!/bin/sh\nprintf 'unrelated rewritten source\\n'\n" * 20)
+        self.put("scripts/ops/install-manifest.tsv", manifest(new_source))
+        self.git("add", "-A")
+        self.git("commit", "-qm", "replace source without recognizable rename")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+        report = self.report()
+        [row] = [row for row in report["behind"] if row["target"] == "bin/a.sh"]
+        self.assertEqual(row["installed_commit"], old_commit)
+        self.assertEqual(row["behind"], 1)
+        self.assertNotIn("bin/a.sh", [item["target"] for item in report["drift"]])
+
+    def test_ops_sync_does_not_count_an_unmapped_reused_source_as_behind(self):
+        old_source = "scripts/ops/old-a.sh"
+        new_source = "scripts/ops/new-a.sh"
+        manifest = lambda source: (
+            f"{source} bin/a.sh\nscripts/ops/b.sh bin/b.sh\nscripts/ops/c.sh bin/c.sh\nscripts/ops/t.md t.md\n"
+        )
+        self.put("scripts/ops/install-manifest.tsv", manifest(old_source))
+        self.put(old_source, "#!/bin/sh\necho published\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "publish old source")
+        (self.repo / old_source).unlink()
+        self.put(new_source, "#!/bin/sh\necho current source\n")
+        self.put("scripts/ops/install-manifest.tsv", manifest(new_source))
+        self.git("add", "-A")
+        self.git("commit", "-qm", "move target mapping")
+
+        unpublished = "#!/bin/sh\nprintf 'hand edited bytes\\n'\n"
+        self.put(old_source, unpublished)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "reuse retired source path")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.install("bin/a.sh", unpublished)
+
+        report = self.report()
+        self.assertIn("bin/a.sh", [item["target"] for item in report["drift"]])
+        self.assertNotIn("bin/a.sh", [item["target"] for item in report["behind"]])
+
     def test_linux_reports_unlisted_agm_units_and_darwin_only_scripts_as_extra(self):
         """Linux 上沒版控的 `com.agm.*` unit＝extra；`~/Library/LaunchAgents` 不掃（那不是這台的排程）。
         只在 darwin 裝的 browser-gc 腳本出現在 Linux 的 bin/，也算 extra——它不該被裝在這裡。"""
@@ -2506,6 +2588,7 @@ class SystemdParityTest(unittest.TestCase):
 
 # 假 gh：`issue view` 吐 $GH_STATE/issue-<n>.json，其餘子命令只記進 $GH_STATE/calls.log。
 # GH_FAIL=<子命令> 讓那一個子命令失敗；GH_NO_LABEL=1 模擬 label 還不存在（`issue edit --add-label` 先失敗）。
+# GH_INJECT_* 模擬 claim/release 的留言與 label API 之間有另一個操作插隊。
 # 真的 gh 不可達：PATH 只留這個目錄與 /usr/bin:/bin，而且這支 stub 不認得的子命令一律 exit 2。
 FAKE_GH = r"""#!/usr/bin/env python3
 import datetime, json, os, re, sys
@@ -2556,6 +2639,45 @@ elif sub in ("issue comment", "issue edit", "label create"):
         raw["updatedAt"] = now
         json.dump(raw, open(path, "w"))
         open(os.path.join(state, "comment-written"), "w").close()
+    elif sub == "issue edit":
+        n = argv[2]
+        path = os.path.join(state, "issue-%s.json" % n)
+        raw = json.load(open(path))
+        labels = [x.get("name") for x in raw.get("labels", [])]
+        original_labels = list(labels)
+        comments = raw.setdefault("comments", [])
+        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        next_id = max((int(c.get("id", 0)) for c in comments), default=100) + 1
+        if "--remove-label" in argv:
+            injected = os.environ.get("GH_INJECT_NEW_CLAIM_ON_REMOVE")
+            if injected and not os.path.exists(os.path.join(state, "new-claim-injected")):
+                payload = {"bot": injected, "at": now, "claim_id": "race-new-claim", "observed_updated_at": raw.get("updatedAt")}
+                comments.append({"id": next_id, "created_at": now, "body": "<!-- agm:issue-claim %s -->" % json.dumps(payload)})
+                if "wip" not in labels:
+                    labels.append("wip")
+                raw["updatedAt"] = now
+                open(os.path.join(state, "new-claim-injected"), "w").close()
+            labels = [name for name in labels if name != argv[argv.index("--remove-label") + 1]]
+        elif "--add-label" in argv:
+            injected = os.environ.get("GH_INJECT_RELEASE_ON_ADD")
+            if injected and not os.path.exists(os.path.join(state, "release-injected")):
+                claim = next((c for c in reversed(comments) if "agm:issue-claim" in (c.get("body") or "")), None)
+                match = re.search(r"<!-- agm:issue-claim (\{.*\}) -->", claim.get("body", "")) if claim else None
+                if match:
+                    payload = json.loads(match.group(1))
+                    target = payload.get("claim_id") or str(claim.get("id"))
+                    release = {"bot": "race-release", "at": now, "claim_id": str(target)}
+                    comments.append({"id": next_id, "created_at": now, "body": "<!-- agm:issue-release %s -->" % json.dumps(release)})
+                    raw["updatedAt"] = now
+                    labels = [name for name in labels if name != "wip"]
+                    open(os.path.join(state, "release-injected"), "w").close()
+            label = argv[argv.index("--add-label") + 1]
+            if label not in labels:
+                labels.append(label)
+        raw["labels"] = [{"name": name} for name in labels]
+        if labels != original_labels:
+            raw["updatedAt"] = now
+        json.dump(raw, open(path, "w"))
     sys.stdout.write("ok\n")
 else:
     sys.stderr.write("gh: unknown %s\n" % sub)
@@ -2572,7 +2694,8 @@ def _iso(delta_secs: float) -> str:
 class IssueClaimTest(unittest.TestCase):
     """`agm issue claim/release` 不連 daemon，只跟 gh 說話。"""
 
-    ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_INJECT_COMPETITOR", "AM_AGENT_NAME", "AM_BOT_ID", "AGM_RUNTIME_DIR")
+    ENV_KEYS = ("PATH", "GH_STATE", "GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_INJECT_COMPETITOR",
+                "GH_INJECT_NEW_CLAIM_ON_REMOVE", "GH_INJECT_RELEASE_ON_ADD", "AM_AGENT_NAME", "AM_BOT_ID", "AGM_RUNTIME_DIR")
 
     def setUp(self):
         # 先存原值再改：PATH 指向的是等一下會被刪掉的暫存目錄，收尾一定要還原。
@@ -2594,7 +2717,7 @@ class IssueClaimTest(unittest.TestCase):
         os.environ["PATH"] = ":".join(p for p in (guard, str(bindir), "/usr/bin", "/bin") if p)
         os.environ["GH_STATE"] = str(self.state)
         os.environ["AM_AGENT_NAME"] = "vvyyg1"
-        for k in ("GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "AM_BOT_ID"):
+        for k in ("GH_FAIL", "GH_FAIL_MSG", "GH_NO_LABEL", "GH_INJECT_NEW_CLAIM_ON_REMOVE", "GH_INJECT_RELEASE_ON_ADD", "AM_BOT_ID"):
             os.environ.pop(k, None)
         # runtime.json 故意不存在：issue 這條路不該去讀它。
         os.environ["AGM_RUNTIME_DIR"] = str(Path(self.dir.name) / "no-such-runtime")
@@ -2757,6 +2880,16 @@ class IssueClaimTest(unittest.TestCase):
         body = [c for c in self.calls() if c[:2] == ["issue", "comment"]][0][-1]
         self.assertIn("超過 24 小時沒動靜", body)
 
+    def test_stale_claim_without_wip_label_can_still_be_taken_over(self):
+        old = _iso(-30 * 3600)
+        self.issue(413, comments=[self.claim_comment("kd61te", age_secs=30 * 3600)], updated=old)
+
+        code, out, err = self.run_cli("issue", "claim", "413")
+
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["took_over_stale_claim_from"], "kd61te")
+        self.assertEqual(agm.current_claim(json.loads((self.state / "issue-413.json").read_text()))["bot"], "vvyyg1")
+
     def test_a_stale_claim_with_recent_activity_is_still_held(self):
         # 認領留言是三天前，但這張票一小時前還被動過：那顆 bot 還在做。
         self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=72 * 3600)], updated=_iso(-3600))
@@ -2792,6 +2925,30 @@ class IssueClaimTest(unittest.TestCase):
         self.assertIn('"claim_id"', body)
         self.assertEqual([c[-2:] for c in self.calls() if c[:2] == ["issue", "edit"]], [["--remove-label", "wip"]])
 
+    def test_release_reconciles_wip_when_a_new_claim_lands_during_label_removal(self):
+        self.issue(425, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300)])
+        os.environ["GH_INJECT_NEW_CLAIM_ON_REMOVE"] = "race-winner"
+
+        code, out, err = self.run_cli("issue", "release", "425")
+
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["released"])
+        issue = json.loads((self.state / "issue-425.json").read_text())
+        self.assertEqual(agm.current_claim(issue)["bot"], "race-winner")
+        self.assertIn("wip", [label["name"] for label in issue["labels"]], "release must not remove the winner's label")
+
+    def test_claim_does_not_report_success_if_released_before_its_label_write(self):
+        self.issue(425)
+        os.environ["GH_INJECT_RELEASE_ON_ADD"] = "1"
+
+        code, _out, err = self.run_cli("issue", "claim", "425")
+
+        self.assertEqual(code, 3, err)
+        self.assertEqual(json.loads(err)["error"], "issue_claim_lost")
+        issue = json.loads((self.state / "issue-425.json").read_text())
+        self.assertIsNone(agm.current_claim(issue))
+        self.assertNotIn("wip", [label["name"] for label in issue["labels"]], "a released marker must not leave a stale label")
+
     def test_release_does_not_take_someone_elses_issue_off(self):
         self.issue(413, labels=["wip"], comments=[self.claim_comment("kd61te", age_secs=600)])
         code, _out, err = self.run_cli("issue", "release", "413")
@@ -2811,11 +2968,13 @@ class IssueClaimTest(unittest.TestCase):
         code, _out, err = self.run_cli("issue", "claim", "425")
         self.assertEqual(code, 0, err)
 
-    def test_a_broken_claim_marker_is_ignored_rather_than_trusted(self):
+    def test_a_broken_claim_marker_with_wip_fails_closed_until_released(self):
         self.issue(425, labels=["wip"], comments=[{"createdAt": _iso(-600), "body": "派給 x\n<!-- agm:issue-claim {oops -->"}])
         code, out, err = self.run_cli("issue", "claim", "425")
-        self.assertEqual(code, 0, err)
-        self.assertFalse(json.loads(out)["already"])
+        self.assertEqual(code, 3, out)
+        self.assertEqual(json.loads(err)["error"], "issue_claim_state_unknown")
+        self.assertFalse([c for c in self.calls() if c[:2] in (["issue", "comment"], ["issue", "edit"])],
+                         "marker 壞掉但 wip 還在時不能再派一顆")
 
     def test_gh_failure_is_reported_and_nothing_is_written(self):
         os.environ["GH_FAIL"] = "issue view"

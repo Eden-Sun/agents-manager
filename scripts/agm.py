@@ -1322,6 +1322,74 @@ def _blob_at(repo: Path, rev: str, path: str) -> str | None:
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _path_history(repo: Path, ref: str, path: str) -> list[tuple[str, str]]:
+    """Return commits and the path that existed there, following source-file renames."""
+    raw = _git(repo, "log", "--follow", "--format=%H%x00", "--name-only", ref, "--", path)
+    commit = None
+    rows = []
+    for line in raw.splitlines():
+        if "\0" in line:
+            commit = line.split("\0", 1)[0]
+        elif commit and line:
+            rows.append((commit, line))
+    return rows
+
+
+def _target_path_history(repo: Path, ref: str, target: str, source: str) -> list[tuple[str, str]]:
+    """Return this install target's source history, including manifest-recorded source renames.
+
+    Git's similarity-based rename detection can miss a rename when the new file is also rewritten.
+    The install manifest is the authoritative link between source paths and an installed target, so
+    use its history to discover those paths and verify that each candidate commit mapped the target
+    to the candidate path before accepting its contents as a published version.
+    """
+    manifest_commits = _git(repo, "log", "--format=%H", ref, "--", OPS_MANIFEST).split()
+    manifest_cache = {}
+
+    def mapped_source(rev: str) -> str | None:
+        if rev not in manifest_cache:
+            result = subprocess.run(
+                ["git", "-C", str(repo), "show", f"{rev}:{OPS_MANIFEST}"],
+                capture_output=True,
+                text=True,
+            )
+            # The manifest may not exist yet in older history. Such a commit cannot establish that
+            # a source was published for this target, so it contributes no mapping.
+            content = result.stdout if result.returncode == 0 else ""
+            mapping = {}
+            for line in content.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) in (2, 3):
+                    mapping[parts[1]] = parts[0]
+            manifest_cache[rev] = mapping
+        return manifest_cache[rev].get(target)
+
+    manifest_revs = list(dict.fromkeys([ref] + manifest_commits))
+    sources = {source}
+    for rev in manifest_revs:
+        historical_source = mapped_source(rev)
+        if historical_source:
+            sources.add(historical_source)
+
+    candidates = set()
+    for historical_source in sources:
+        for commit, historical_path in _path_history(repo, ref, historical_source):
+            if mapped_source(commit) == historical_path and _blob_at(repo, commit, historical_path) is not None:
+                candidates.add((commit, historical_path))
+    # A manifest can start mapping a target to an existing source without changing that source in
+    # the same commit. Include that publication point as a candidate version too.
+    for commit in manifest_revs:
+        historical_source = mapped_source(commit)
+        if historical_source and _blob_at(repo, commit, historical_source) is not None:
+            candidates.add((commit, historical_source))
+
+    order = {commit: i for i, commit in enumerate(_git(repo, "rev-list", "--topo-order", ref).split())}
+    return sorted(candidates, key=lambda item: (order.get(item[0], len(order)), item[1]))
+
+
 LAUNCHD_PREFIX = "LaunchAgents/"
 #: plist 比對**只忽略這些**，其餘全部算語意（issue #499）。
 #:
@@ -1490,17 +1558,16 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
                 # 跟下面的腳本一樣回頭找歷史。以前這裡只跟最新一版比，unit／plist 一落後就報成 drift，
                 # 而 ops-install 對 drift 的處理是「絕不覆蓋」（避免蓋掉手改的檔）——正常落後的檔也被擋下來。
                 found = None
+                history = _target_path_history(repo, ref, target, source)
                 if "_error" not in got:
-                    for c in _git(repo, "log", "--format=%H", ref, "--", source).split():
+                    for c, historical_source in history:
                         # A path may be deleted and later re-added. Its deletion commit is in the
                         # path history but has no <commit>:<path> blob to parse; keep walking back.
-                        if _blob_at(repo, c, source) is None:
-                            continue
-                        if semantics(_git_bytes(repo, c, source)) == got:
+                        if semantics(_git_bytes(repo, c, historical_source)) == got:
                             found = c
                             break
                 if found is not None:
-                    titles = _git(repo, "log", "--format=%h %s", f"{found}..{ref}", "--", source).splitlines()
+                    titles = _git(repo, "log", "--follow", "--format=%h %s", f"{found}..{ref}", "--", source).splitlines()
                     row.update({"installed_commit": found[:8], "behind": len(titles), "commits": titles})
                     report["behind"].append(row)
                     continue
@@ -1512,12 +1579,13 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
         if installed == _blob_at(repo, ref, source):
             report["ok"].append(row)
             continue
-        found = next((c for c in _git(repo, "log", "--format=%H", ref, "--", source).split()
-                      if _blob_at(repo, c, source) == installed), None)
+        history = _target_path_history(repo, ref, target, source)
+        found = next((c for c, historical_source in history
+                      if _blob_at(repo, c, historical_source) == installed), None)
         if found is None:
             report["drift"].append(row)
             continue
-        titles = _git(repo, "log", "--format=%h %s", f"{found}..{ref}", "--", source).splitlines()
+        titles = _git(repo, "log", "--follow", "--format=%h %s", f"{found}..{ref}", "--", source).splitlines()
         row.update({"installed_commit": found[:8], "behind": len(titles), "commits": titles})
         report["behind"].append(row)
     # `agm` 本身由 daemon 部署（內嵌在 binary 裡），備份檔與快取不算。
@@ -1972,6 +2040,40 @@ def current_claim(issue: dict) -> dict | None:
     }
 
 
+def issue_claim_state(args, number: int) -> tuple[dict, dict | None]:
+    issue = read_issue(args, number)
+    issue["comments"] = all_comments(args, number)
+    return issue, current_claim(issue)
+
+
+def reconcile_claim_label(args, number: int) -> tuple[dict, dict | None]:
+    """Treat the ordered comment history as the claim source of truth and repair its `wip` projection.
+
+    The comment and label APIs are separate writes. Re-read after each label change so a release that
+    lands between a claim marker and its label (or a new claim between release and label removal)
+    does not leave a successful command with the opposite state projected on the issue.
+    """
+    for _ in range(3):
+        issue, claim = issue_claim_state(args, number)
+        labels = [label.get("name") for label in issue.get("labels") or []]
+        has_label = CLAIM_LABEL in labels
+        if has_label == (claim is not None):
+            return issue, claim
+        action = "--add-label" if claim is not None else "--remove-label"
+        gh(["issue", "edit", str(number), *repo_args(args), action, CLAIM_LABEL])
+    issue, claim = issue_claim_state(args, number)
+    has_label = CLAIM_LABEL in [label.get("name") for label in issue.get("labels") or []]
+    if has_label != (claim is not None):
+        raise AgmError(
+            "issue_claim_state_raced",
+            f"#{number} 的認領留言與 {CLAIM_LABEL} label 持續變動；先不要派工，稍後重試",
+            1,
+            issue=number,
+            retryable=True,
+        )
+    return issue, claim
+
+
 def held_by_other(claim: dict | None, me: str) -> dict | None:
     """別人還按著這張票就回那筆認領；沒人、是我自己、或已經放到過期都回 None。"""
     if claim is None or claim.get("bot") == me or claim.get("stale"):
@@ -1999,9 +2101,6 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     # 認領判定要讀 REST 的全部留言，取數字 ID 排序並避免 GraphQL inline comments 截斷。
     issue["comments"] = all_comments(args, number)
     claim = current_claim(issue)
-    blocker = held_by_other(claim, me)
-    if blocker is not None:
-        raise claim_conflict(number, blocker)
     labels = [l.get("name") for l in issue.get("labels") or []]
     # 關掉的票沒有什麼好派的。`release` 還是放行：關票之後清掉留著的 label 是正常的收尾。
     if args.op == "claim" and (issue.get("state") or "").upper() != "OPEN":
@@ -2012,6 +2111,24 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
             issue=number,
             state=issue.get("state"),
         )
+    # A label without a parseable live claim is an ambiguous handoff: it may be a damaged marker
+    # or a partially completed previous claim. Do not let another bot erase that evidence and start;
+    # `release` remains the explicit repair path for this orphaned projection.
+    if args.op == "claim" and claim is None and CLAIM_LABEL in labels:
+        raise AgmError(
+            "issue_claim_state_unknown",
+            f"#{number} 有 `{CLAIM_LABEL}` label 但沒有有效認領標記；為避免重複派工，先用 `agm issue release {number}` 清理不一致狀態",
+            3,
+            issue=number,
+            claimed_by="unknown",
+        )
+    # Repair a missing projection before reporting a conflict or returning an idempotent success.
+    if claim is not None and CLAIM_LABEL not in labels and not claim.get("stale"):
+        issue, claim = reconcile_claim_label(args, number)
+        labels = [l.get("name") for l in issue.get("labels") or []]
+    blocker = held_by_other(claim, me)
+    if blocker is not None:
+        raise claim_conflict(number, blocker)
     now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     if args.op == "release":
@@ -2027,13 +2144,23 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
         gh(["issue", "comment", str(number), *repo_args(args), "--body", body])
         if CLAIM_LABEL in labels:
             gh(["issue", "edit", str(number), *repo_args(args), "--remove-label", CLAIM_LABEL])
+        reconcile_claim_label(args, number)
         return out
 
     # claim：同一顆 bot 重跑不再留第二則（重試不該洗版），但 label 掉了會補回去。
     if claim is not None and claim.get("bot") == me and not claim.get("stale"):
         if CLAIM_LABEL not in labels:
             gh(["issue", "edit", str(number), *repo_args(args), "--add-label", CLAIM_LABEL])
-        return {"issue": number, "title": issue.get("title"), "claimed": True, "already": True, "bot": me, "claim": claim}
+        issue, claim = reconcile_claim_label(args, number)
+        if claim is None:
+            raise AgmError("issue_claim_lost", f"#{number} 的認領已在 label 同步前被交回；不可派工", 3, issue=number)
+        blocker = held_by_other(claim, me)
+        if blocker is not None:
+            raise claim_conflict(number, blocker)
+        if claim.get("bot") == me and not claim.get("stale"):
+            return {"issue": number, "title": issue.get("title"), "claimed": True, "already": True, "bot": me, "claim": claim}
+        # 狀態已改變；以重新讀到的 issue/claim 繼續走一次新的 claim。
+        labels = [l.get("name") for l in issue.get("labels") or []]
 
     payload = {"bot": me, "at": now, "claim_id": uuid.uuid4().hex}
     if issue.get("updatedAt"):
@@ -2104,6 +2231,11 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
         raise AgmError("issue_claimed", f"#{number} 的認領回讀沒有確認本次標記；已交回，不可派工", 3, issue=number)
 
     gh(["issue", "edit", str(number), *repo_args(args), "--add-label", CLAIM_LABEL])
+    issue, winner = reconcile_claim_label(args, number)
+    if winner is None:
+        raise AgmError("issue_claim_lost", f"#{number} 的認領在 label 同步前已被交回；不可派工", 3, issue=number)
+    if winner.get("claim_id") != payload["claim_id"]:
+        raise claim_conflict(number, winner)
     out = {"issue": number, "title": issue.get("title"), "claimed": True, "already": False, "bot": me, "label": CLAIM_LABEL}
     out.update({k: v for k, v in payload.items() if k in ("child", "worktree", "branch")})
     if took_over:
