@@ -21,9 +21,9 @@ afterEach(async () => {
   useStore.setState({ notices: [], shellView: null })
 })
 before(setupDom)
-after(() => {
+after(async () => {
   resetStoreForTest()
-  teardownDom()
+  await teardownDom()
 })
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
@@ -95,7 +95,12 @@ it('登入失敗（daemon 回 502）：跳錯誤通知、不切 shell、按鈕�
   await until(() => /未登入/.test(chip('cc1')), '回到未登入')
   useStore.setState({ shellView: null })
   await click(btn(row('cc1'), '登入')!)
-  await until(() => useStore.getState().notices.some((n) => n.kind === 'error'), '錯誤通知')
+  assert.equal(calls(requests, /login/).length, 1, '按登入後確實送出一筆登入請求')
+  await until(
+    () => useStore.getState().notices.some((n) => n.kind === 'error') || useStore.getState().shellView !== null,
+    '登入請求有結果',
+  )
+  assert.ok(useStore.getState().notices.some((n) => n.kind === 'error'), 'HTTP 502 要跳錯誤通知')
   assert.equal(useStore.getState().shellView, null)
   assert.equal(btn(row('cc1'), '登入')!.disabled, false)
   assert.equal(calls(requests, /login/).length, 1, '登入請求走到 mock daemon，收到 HTTP 502')

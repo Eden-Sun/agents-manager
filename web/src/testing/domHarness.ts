@@ -182,9 +182,9 @@ export async function imeEnter(el: Element, how: 'composing' | 'keycode229' = 'c
 }
 
 /** 拆掉全域 DOM、還原 fetch／WebSocket／XHR，讓後面不碰 DOM 的測試檔回到原來的環境。 */
-export function teardownDom(): void {
+export async function teardownDom(): Promise<void> {
   if (!GlobalRegistrator.isRegistered) return
-  void GlobalRegistrator.unregister()
+  await GlobalRegistrator.unregister()
   globalThis.fetch = originalFetch
   ;(globalThis as { WebSocket?: unknown }).WebSocket = originalWebSocket
   ;(globalThis as { XMLHttpRequest?: unknown }).XMLHttpRequest = originalXhr

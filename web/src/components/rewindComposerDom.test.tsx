@@ -18,9 +18,9 @@ afterEach(async () => {
   if (bot) mock.composerDrafts.set(bot.id, null) // 上一個測試卡在終端的草稿不能影響下一個
 })
 before(setupDom)
-after(() => {
+after(async () => {
   resetStoreForTest() // 要在拆 DOM 之前：關 socket 會拿掉 window 上的監聽
-  teardownDom()
+  await teardownDom()
 })
 
 const mock = sharedMock

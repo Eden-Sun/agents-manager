@@ -13,9 +13,9 @@ import { ChatPanel } from './ChatPanel'
 virtualMockTime()
 afterEach(unmountAll)
 before(setupDom)
-after(() => {
+after(async () => {
   resetStoreForTest()
-  teardownDom()
+  await teardownDom()
 })
 
 test('重連（不是第一次連上）：state、額度、草稿、身分停用、已載入對話、pane 清單都重抓', { timeout: 60_000 }, async () => {

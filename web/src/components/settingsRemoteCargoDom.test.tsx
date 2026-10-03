@@ -15,9 +15,9 @@ const mock = sharedMock
 virtualMockTime()
 afterEach(unmountAll)
 before(setupDom)
-after(() => {
+after(async () => {
   resetStoreForTest()
-  teardownDom()
+  await teardownDom()
 })
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)

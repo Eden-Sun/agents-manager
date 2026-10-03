@@ -15,9 +15,9 @@ import { ChatPanel } from './ChatPanel'
 virtualMockTime()
 afterEach(unmountAll)
 before(setupDom)
-after(() => {
+after(async () => {
   resetStoreForTest() // 要在拆 DOM 之前：關 socket 會拿掉 window 上的監聽
-  teardownDom()
+  await teardownDom()
 })
 
 const textarea = () => document.querySelector<HTMLTextAreaElement>('.composer textarea')!
