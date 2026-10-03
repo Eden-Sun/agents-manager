@@ -1596,7 +1596,7 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    只有 claude 才複製（codex／grok 的對話檔不在 `projects/`，以前會被整份丟進 claude 的目錄）；來源要是 `…/projects/<cwd>/<id>.jsonl` 形狀的一般檔，projects、cwd 與檔案本身都不能是 symlink，硬連結也拒絕；`..`、控制字元與其他路徑
    （`transcript_path` 是 hook payload 記的字串）一律不複製、回 `transcript_missing` 改開新對話。來源透過已驗證的 fd 讀，目的 projects／cwd 逐層 `openat(O_NOFOLLOW)`；先寫同目錄暫存檔（0600、fsync）再以不覆寫的硬連結原子發布，複製中途失敗或被殺不會在最終路徑留半份檔；
    目標已有同名檔時：一樣不動、**比來源長（來源是它的前綴）不蓋**、是來源的前綴才蓋、分岔就把目標改名成 `<name>.jsonl.replaced-<時間>` 留在旁邊再放來源；新建目錄 0700、檔 0600
-   （不管來源權限）；附屬目錄只收一般檔與目錄。promote 另外：附屬目錄複製到一半失敗不留半份目錄。`transcript-transfer` 同理拒絕符號連結、不帶走附屬目錄裡的連結，暫存檔先清掉再 `O_EXCL` 新建。
+   （不管來源權限）；同一目標並行複製時，輸家重查已原子發布的檔並套用同一組規則，不把競爭誤報成 `transcript_missing`。附屬目錄只收一般檔與目錄。promote 另外：附屬目錄複製到一半失敗不留半份目錄。`transcript-transfer` 同理拒絕符號連結、不帶走附屬目錄裡的連結，暫存檔先清掉再 `O_EXCL` 新建。
    等的期間變成 `working`／`blocked`、有人排了派工或送了回合、接回是 `mismatch`／`unverified`／沒有 hook 可驗、使用者中斷，這一輪就取消，
    AGM 或使用者的派工因此可以先佔。排進去之後才發現 run 換掉或接回不是 `verified` 的，flush 把它撤掉並在聊天室說明。
    同一個 run 只補一次（`client_request_id = resume-nudge:<run_id>`）；等待記在行程記憶體裡，daemon 在這段時間重啟就不補。

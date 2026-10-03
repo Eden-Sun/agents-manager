@@ -76,6 +76,15 @@ pub(crate) fn is_prefix_of(a: &std::fs::File, b: &std::fs::File) -> std::io::Res
 
 /// 把 `src` 放到 `dest_dir/fname`（規則見檔頭）。
 pub fn stage_file(src: &Path, dest_dir: &Path, fname: &OsStr) -> std::io::Result<Staged> {
+    stage_file_after_missing_check(src, dest_dir, fname, || {})
+}
+
+fn stage_file_after_missing_check(
+    src: &Path,
+    dest_dir: &Path,
+    fname: &OsStr,
+    after_missing_check: impl FnOnce(),
+) -> std::io::Result<Staged> {
     if !is_claude_transcript(src) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "source is not a real Claude transcript"));
     }
@@ -95,6 +104,9 @@ pub fn stage_file(src: &Path, dest_dir: &Path, fname: &OsStr) -> std::io::Result
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
+    if existing.is_none() {
+        after_missing_check();
+    }
     if let Some(existing) = existing {
         let (sm, dm) = (from.metadata()?, existing.metadata()?);
         if sm.dev() == dm.dev() && sm.ino() == dm.ino() { return Ok(Staged::Unchanged); }
@@ -125,12 +137,30 @@ pub fn stage_file(src: &Path, dest_dir: &Path, fname: &OsStr) -> std::io::Result
         backup.push(if preserve_old { format!(".replaced-{}-{}", chrono::Utc::now().timestamp_millis(), crate::db::ulid()) } else { crate::db::ulid() });
         if let Err(e) = crate::trusted_open::rename_in(&dir, fname, &backup) {
             let _ = crate::trusted_open::unlink_in(&dir, &tmp_name);
+            // Another stager may have moved the destination after our comparison. Re-read the
+            // winner's state and apply the same prefix/divergence rules to that version.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return stage_file(src, dest_dir, fname);
+            }
             return Err(e);
         }
         backup_name = Some(backup.clone());
         if preserve_old { outcome = Staged::Diverged { set_aside: dest_dir.join(&backup) }; }
     }
     if let Err(e) = crate::trusted_open::link_in(&dir, &tmp_name, fname) {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            let _ = crate::trusted_open::unlink_in(&dir, &tmp_name);
+            // `linkat` publishes the completed, fsynced file atomically. A competing stager won
+            // the same name between our lookup and publication; verify its contents before
+            // accepting it, and retain any divergent destination according to the normal rules.
+            let retry = stage_file(src, dest_dir, fname);
+            if retry.is_ok() {
+                if let Some(backup) = backup_name.as_deref().filter(|_| !preserve_old) {
+                    crate::trusted_open::unlink_in(&dir, backup)?;
+                }
+            }
+            return retry;
+        }
         if let Some(backup) = backup_name.as_deref() {
             if crate::trusted_open::link_in(&dir, backup, fname).is_ok() { let _ = crate::trusted_open::unlink_in(&dir, backup); }
         }
@@ -290,5 +320,52 @@ mod tests {
         assert!(stage(&src, &base.join("new")).is_err());
         assert_eq!(std::fs::read_to_string(&secret).unwrap(), "private conversation");
         assert_eq!(std::fs::read_to_string(linked_dest).unwrap(), "private conversation");
+    }
+
+    #[test]
+    fn concurrent_first_stagers_both_accept_the_winning_copy() {
+        let base = root("concurrent-first-stage");
+        let src = source(&base.join("old"));
+        let dest_dir = base.join("new/projects/key");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let results = std::thread::scope(|scope| {
+            let threads = (0..2)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    let src = src.clone();
+                    let dest_dir = dest_dir.clone();
+                    scope.spawn(move || {
+                        stage_file_after_missing_check(
+                            &src,
+                            &dest_dir,
+                            OsStr::new("sid.jsonl"),
+                            || {
+                                barrier.wait();
+                            },
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert!(
+            results.iter().all(Result::is_ok),
+            "concurrent staging results: {results:?}"
+        );
+        let final_file = dest_dir.join("sid.jsonl");
+        assert_eq!(
+            std::fs::read_to_string(&final_file).unwrap(),
+            "private conversation"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dest_dir).unwrap().count(),
+            1,
+            "only the completed transcript should remain"
+        );
     }
 }
