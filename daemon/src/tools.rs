@@ -1442,9 +1442,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     fn xreview_auth_cli_cannot_inject_a_second_identity_probe_block() {
         use std::process::Command;
 
-        let dir = crate::testing::track(
-            std::env::temp_dir().join(format!("am-xreview-probe-{}", crate::db::ulid())),
-        );
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-xreview-probe-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let fake_codex = dir.join("fake-codex");
         crate::testing::write_exec(
