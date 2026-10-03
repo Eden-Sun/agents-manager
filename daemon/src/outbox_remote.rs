@@ -162,7 +162,7 @@ fn file_script(dir: &str, name: &str) -> String {
 /// 下載腳本。**先開 fd、再對同一個 fd 驗、只從這個 fd 讀**（#768）：遠端 bot 對自己的 outbox 有寫入權，
 /// 「`-L` 檢查 → `base64 < "$F"`」是兩次路徑操作，中間能把檔案（或整個目錄）換成指到 `~/.codex/auth.json` 的符號連結。
 /// 現在 `{{ … }} 3< "$F"` 先把檔案開在 fd 3（開的當下跟著連結走也沒關係），之後再驗：`$D`、`$F` 此刻都不是符號連結、`$F` 是一般檔案，
-/// 而且 `$F` 跟 fd 3 是同一個檔（GNU：`-ef` 比 dev＋inode；macOS 的 `/dev/fd/N` 在 devfs 上、dev 號不同所以 `-ef` 恆為假，改比 `stat -L -f '%d %i %z %m %c'`）。開檔那一刻 `$F` 若是連結，
+/// 而且 `$F` 跟 fd 3 是同一個檔（GNU：`-ef` 比 dev＋inode；macOS 的 `/dev/fd/N` 在 devfs 上、dev 號不同所以 `-ef` 恆為假，改比 `stat -L -f '%i %z %m %c'`）。開檔那一刻 `$F` 若是連結，
 /// fd 指到的是連結目標，之後不管 `$F` 被換成什麼，inode 對不上就拒絕；開完才換成連結則 `-L` 擋下。內容只從 fd 讀，`head -c` 封頂
 /// （超過上限由呼叫端判 `file_too_large`），不再事先 `wc -c "$F"`。開檔失敗（不存在、沒權限）也是 MISSING。
 ///
@@ -174,8 +174,8 @@ F="$D"/{n}
 am_same() {{
   [ "$F" -ef /dev/fd/3 ] && return 0
   stat -c %Y "$D" >/dev/null 2>&1 && return 1
-  a=$(stat -L -f '%d %i %z %m %c' "$F" 2>/dev/null) || return 1
-  [ -n "$a" ] && [ "$a" = "$(stat -L -f '%d %i %z %m %c' /dev/fd/3 2>/dev/null)" ]
+  a=$(stat -L -f '%i %z %m %c' "$F" 2>/dev/null) || return 1
+  [ -n "$a" ] && [ "$a" = "$(stat -L -f '%i %z %m %c' /dev/fd/3 2>/dev/null)" ]
 }}
 {{
 {gap}
@@ -445,21 +445,30 @@ mod tests {
     }
 
     /// Simulate BSD `stat`: `stat -c` is rejected and `/dev/fd/3` reports metadata on the opened
-    /// descriptor. The fake gives different devices the same inode/size/timestamps so an
-    /// incomplete comparison cannot accidentally pass on this Linux test host.
-    fn run_download_with_bsd_stat(dir: &std::path::Path, name: &str, gap: &str) -> (String, std::path::PathBuf) {
+    /// descriptor. The fake can give the pathname and descriptor different devices while keeping
+    /// or changing the inode, matching macOS devfs behavior without requiring a second filesystem.
+    fn run_download_with_bsd_stat(
+        dir: &std::path::Path,
+        name: &str,
+        gap: &str,
+        path_inode: u64,
+        fd_inode: u64,
+    ) -> (String, std::path::PathBuf) {
         let bin = crate::testing::track(std::env::temp_dir().join(format!("am-outbox-bsd-stat-{}", crate::db::ulid())));
         std::fs::create_dir_all(&bin).unwrap();
         let stat = bin.join("stat");
         std::fs::write(
             &stat,
-            r#"#!/bin/sh
+            format!(
+                r#"#!/bin/sh
 if [ "$1" = "-c" ]; then exit 1; fi
 if [ "$1" = "-L" ] && [ "$2" = "-f" ]; then
   case "$3" in
-    '%i %z %m %c') printf '42 5 100 100\\n' ;;
+    '%i %z %m %c')
+      case "$4" in /dev/fd/3) printf '{fd_inode} 5 100 100\\n' ;; *) printf '{path_inode} 5 100 100\\n' ;; esac
+      ;;
     '%d %i %z %m %c')
-      case "$4" in /dev/fd/3) printf '2 42 5 100 100\\n' ;; *) printf '1 42 5 100 100\\n' ;; esac
+      case "$4" in /dev/fd/3) printf '2 {fd_inode} 5 100 100\\n' ;; *) printf '1 {path_inode} 5 100 100\\n' ;; esac
       ;;
     *) exit 1 ;;
   esac
@@ -467,6 +476,9 @@ if [ "$1" = "-L" ] && [ "$2" = "-f" ]; then
 fi
 exec /usr/bin/stat "$@"
 "#,
+                path_inode = path_inode,
+                fd_inode = fd_inode,
+            ),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -550,15 +562,28 @@ exec /usr/bin/stat "$@"
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    /// #768's BSD fallback must compare device as well as inode and timestamps: on macOS,
-    /// `test -ef` may not identify `/dev/fd/3` as the same file, so the fallback is the guard.
+    /// On macOS `/dev/fd/3` reports the devfs device, which differs from the opened file's device.
+    /// The fallback must accept matching inode metadata despite that device mismatch.
     #[test]
-    fn macos_local_bsd_stat_compares_device_before_serving_the_open_descriptor() {
-        let base = sandbox("bsd-stat-device");
+    fn macos_local_bsd_stat_accepts_the_same_inode_across_devfs_devices() {
+        let base = sandbox("bsd-stat-same-inode");
+        let d = base.join("outbox");
+        std::fs::write(d.join("report.txt"), b"hello").unwrap();
+        let (out, shim) = run_download_with_bsd_stat(&d, "report.txt", "", 42, 42);
+        assert_eq!(served(&out).as_deref(), Some(&b"hello"[..]), "matching inode must survive a devfs device mismatch: {out}");
+        std::fs::remove_dir_all(&shim).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A file replaced after opening has a different inode even if both stats see a different
+    /// device for `/dev/fd/3`; removing the device comparison must still reject the stale fd.
+    #[test]
+    fn macos_local_bsd_stat_rejects_a_replaced_inode_across_devfs_devices() {
+        let base = sandbox("bsd-stat-replaced-inode");
         let d = base.join("outbox");
         std::os::unix::fs::symlink(base.join("secret.txt"), d.join("report.txt")).unwrap();
         let gap = "rm -f \"$F\"; printf decoy > \"$F\"";
-        let (out, shim) = run_download_with_bsd_stat(&d, "report.txt", gap);
+        let (out, shim) = run_download_with_bsd_stat(&d, "report.txt", gap, 43, 42);
         assert!(!out.contains("TOP SECRET") && served(&out).as_deref() != Some(&b"TOP SECRET"[..]), "secret descriptor was accepted: {out}");
         std::fs::remove_dir_all(&shim).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
