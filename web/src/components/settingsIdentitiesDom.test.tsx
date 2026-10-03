@@ -86,9 +86,17 @@ it('登出：取消不送請求', async () => {
 })
 
 it('登入失敗（daemon 回 502）：跳錯誤通知、不切 shell、按鈕回到可按', async () => {
-  const requests = await open()
-  // 讓請求通過正式的 fetch／HttpTransport 錯誤解析路徑；不要直接覆寫全域 fetch，免得和其它 DOM 測試的 mock 互相覆蓋。
-  mock.failNext('POST', '^/hosts/[^/]+/identities/cc1/login$', 502, { error: 'bad_gateway', message: 'herdr 沒回應' })
+  await open()
+  // 讓請求通過正式的 fetch／HttpTransport 錯誤解析路徑；直接回 HTTP 502，不讓 mock 的延遲 timer 影響這條錯誤測試。
+  const requests = mockApi({
+    request: async (method, path, body) => {
+      if (method === 'POST' && /^\/hosts\/[^/]+\/identities\/cc1\/login$/.test(path)) {
+        throw { status: 502, body: { error: 'bad_gateway', message: 'herdr 沒回應' } }
+      }
+      return mock.request(method, path, body)
+    },
+    upload: (path, file, opts) => mock.upload(path, file, opts),
+  })
   // 先登出，才有「登入」鍵可以按。
   await mock.request('POST', '/hosts/local/identities/cc1/logout')
   await useStore.getState().refreshState()
