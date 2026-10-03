@@ -110,8 +110,24 @@ fn codex_gaps_and_a_token_in_gitconfig_are_warnings() {
 fn a_missing_codex_config_does_not_also_list_its_keys() {
     let out = GOOD
         .replace("codex-file config.toml 1", "codex-file config.toml 0")
-        .replace("codex-key approval_policy 1", "codex-key approval_policy 0");
+        .replace("codex-key approval_policy 1", "codex-key approval_policy 0")
+        .replace("codex-key features.hooks 1", "codex-key features.hooks 0");
     assert_eq!(ids(&out), vec!["codex.config.toml"]);
+}
+
+#[test]
+fn codex_features_hooks_off_is_a_warning_and_default_mode_is_its_own_key() {
+    let out = format!("{GOOD}AM_BL codex-key features.hooks 0\nAM_BL claude-key default defaultMode 0\n");
+    assert!(ids(&out).contains(&"codex.config.toml:features.hooks".to_string()), "{out}");
+    assert_eq!(sev(&out, "codex.config.toml:features.hooks"), WARN);
+    assert!(ids(&out).contains(&"claude.default.settings.json:defaultMode".to_string()), "{out}");
+    assert_eq!(sev(&out, "claude.default.settings.json:defaultMode"), WARN);
+    let bare = out
+        .replace("claude-file default settings.json 1", "claude-file default settings.json 0")
+        .replace("claude-key default statusLine 1", "claude-key default statusLine 0")
+        .replace("claude-key default hooks 1", "claude-key default hooks 0")
+        .replace("claude-key default permissions 1", "claude-key default permissions 0");
+    assert!(!ids(&bare).contains(&"claude.default.settings.json:defaultMode".to_string()), "{bare}");
 }
 
 /// 假的 $HOME：自己用 Drop 刪（#763：測試暫存目錄不能外洩）。
@@ -175,10 +191,45 @@ fn the_real_script_reads_a_fake_home_and_writes_nothing() {
     assert!(!ids.contains(&"claude.default.settings.json:statusLine".to_string()), "{ids:?}");
     assert!(ids.contains(&"claude.cc2.settings.json:statusLine".to_string()), "{ids:?}");
     assert!(!ids.contains(&"codex.config.toml:approval_policy".to_string()), "{ids:?}");
+    assert!(ids.contains(&"codex.config.toml:features.hooks".to_string()), "{ids:?}");
+    assert!(ids.contains(&"claude.default.settings.json:defaultMode".to_string()), "{ids:?}");
     assert!(ids.contains(&"codex.hooks.json".to_string()), "{ids:?}");
     assert!(ids.contains(&"gitconfig.token".to_string()), "{ids:?}");
     assert!(!out.contains("s3cret"), "token must never leave the host: {out}");
     assert_eq!(snapshot(h), before, "the baseline probe is read-only");
+}
+
+#[test]
+fn an_alias_outside_the_claude_cc_glob_is_still_checked() {
+    // 票面：每個 claude 身分看它自己的 CLAUDE_CONFIG_DIR，不只有 ~/.claude 與 ~/.claude-cc<數字>。
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".claude-work")).unwrap();
+    fs::write(h.join(".claude-work/settings.json"), "{}").unwrap();
+    fs::write(h.join(".zshrc"), "alias cc5='CLAUDE_CONFIG_DIR=$HOME/.claude-work claude'\n").unwrap();
+    let out = run_probe(h, "/usr/bin:/bin");
+    let all = ids(&out);
+    assert!(all.contains(&"claude.cc5.statusline-command.sh".to_string()), "{all:?}\n{out}");
+    assert!(all.contains(&"claude.cc5.settings.json:statusLine".to_string()), "{all:?}");
+    assert!(!out.contains(".claude-work"), "路徑不輸出");
+}
+
+#[test]
+fn codex_features_hooks_true_under_a_features_table_is_present() {
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".codex")).unwrap();
+    fs::write(h.join(".codex/config.toml"), "[features]\nhooks = true\napproval_policy = \"on-request\"\n").unwrap();
+    fs::write(h.join(".codex/hooks.json"), "{}\n").unwrap();
+    let out = run_probe(h, "/usr/bin:/bin");
+    assert!(out.contains("AM_BL codex-key features.hooks 1"), "{out}");
+    assert!(!ids(&out).contains(&"codex.config.toml:features.hooks".to_string()), "{out}");
+    fs::write(h.join(".codex/config.toml"), "features.hooks = true\napproval_policy = \"on-request\"\n").unwrap();
+    let dotted = run_probe(h, "/usr/bin:/bin");
+    assert!(dotted.contains("AM_BL codex-key features.hooks 1"), "{dotted}");
+    fs::write(h.join(".codex/config.toml"), "[features]\nhooks = false\n").unwrap();
+    let off = run_probe(h, "/usr/bin:/bin");
+    assert!(off.contains("AM_BL codex-key features.hooks 0"), "{off}");
 }
 
 #[test]
