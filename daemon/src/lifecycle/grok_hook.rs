@@ -16,8 +16,8 @@ use crate::state::App;
 
 const EVENTS: [&str; 2] = ["SessionStart", "Stop"];
 
-fn is_ours(command: &str) -> bool {
-    Path::new(command.trim()).file_name().and_then(|n| n.to_str()) == Some(GROK_DISPATCH_SH)
+fn is_ours(command: &str, dispatcher: &str) -> bool {
+    command.trim() == dispatcher
 }
 
 fn our_hook(dispatcher: &str) -> Value {
@@ -38,7 +38,7 @@ pub fn hooks_json_merged(existing: Option<&str>, dispatcher: &str) -> String {
             let Some(hooks) = g.get_mut("hooks").and_then(Value::as_array_mut) else { continue };
             hooks.retain(|h| {
                 let Some(cmd) = h.get("command").and_then(Value::as_str) else { return true };
-                if !is_ours(cmd) {
+                if !is_ours(cmd, dispatcher) {
                     return true;
                 }
                 // 指到這顆 daemon 的留第一份（原地，順序不動才冪等）；舊路徑、重複的都拿掉。
@@ -91,15 +91,36 @@ fn dispatcher_text(app: &App) -> String {
     local_grok_dispatch_sh(&app.exe.to_string_lossy(), &app.data_dir.to_string_lossy(), app.instance().as_deref())
 }
 
+fn read_hook_file(path: &Path) -> anyhow::Result<Option<String>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        anyhow::bail!("{} is not a private regular hook file", path.display());
+    }
+    let mut bytes = Vec::new();
+    file.take(262_145).read_to_end(&mut bytes)?;
+    if bytes.len() > 262_144 {
+        anyhow::bail!("{} exceeds the hook file size limit", path.display());
+    }
+    Ok(Some(String::from_utf8(bytes)?))
+}
+
 /// dispatcher 腳本與 hook 檔都對了就不動。回「有沒有改到東西」。
 fn ensure(app: &App, hooks_path: &Path) -> anyhow::Result<bool> {
     let dispatcher = app.data_dir.join(GROK_DISPATCH_SH);
     let want_script = dispatcher_text(app);
-    let script_ok = std::fs::read_to_string(&dispatcher).is_ok_and(|cur| cur == want_script);
+    let script_ok = read_hook_file(&dispatcher).ok().flatten().is_some_and(|cur| cur == want_script);
     if !script_ok {
         write_atomic(&dispatcher, &want_script, 0o700)?;
     }
-    let existing = std::fs::read_to_string(hooks_path).ok();
+    let existing = read_hook_file(hooks_path)?;
     let merged = hooks_json_merged(existing.as_deref(), &dispatcher.to_string_lossy());
     let same = existing.as_deref().and_then(|t| serde_json::from_str::<Value>(t).ok()) == serde_json::from_str::<Value>(&merged).ok();
     if !same {

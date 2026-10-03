@@ -74,9 +74,26 @@ if stat -c %Y "$D" >/dev/null 2>&1; then G=1; else G=; fi
 printf 'AM_OUTBOX_OK\n'
 for f in "$D"/*; do
   [ -f "$f" ] && [ ! -L "$f" ] || continue
-  if [ -n "$G" ]; then s=$(stat -c '%s %Y %Z' "$f"); else s=$(stat -f '%z %m %c' "$f"); fi
-  h=$(od -An -tx1 -N64 "$f" | tr -d ' \n')
-  printf '%s\t%s\t%s\n' "$s" "$h" "${{f##*/}}"
+  N=${{f##*/}}
+  case "$N" in *[[:cntrl:]]*) continue;; esac
+  {{
+    exec 3< "$f" || exit 0
+    [ ! -L "$D" ] && [ ! -L "$f" ] && [ -f "$f" ] || exit 0
+    if [ -n "$G" ]; then
+      [ "$f" -ef /dev/fd/3 ] || exit 0
+      m=$(stat -L -c '%s %Y %Z' /dev/fd/3) || exit 0
+      l=$(stat -L -c '%h' /dev/fd/3) || exit 0
+    else
+      a=$(stat -L -f '%d %i %z %m %c' "$f") || exit 0
+      b=$(stat -L -f '%d %i %z %m %c' /dev/fd/3) || exit 0
+      [ "$a" = "$b" ] || exit 0
+      m=$(stat -L -f '%z %m %c' /dev/fd/3) || exit 0
+      l=$(stat -L -f '%l' /dev/fd/3) || exit 0
+    fi
+    [ "$l" = 1 ] || exit 0
+    h=$(head -c 64 <&3 | od -An -tx1 | tr -d ' \n')
+    printf '%s\t%s\t%s\n' "$m" "$h" "$N"
+  }} 2>/dev/null
 done
 "#,
         d = sh_quote(dir),
@@ -103,7 +120,7 @@ fn parse_list(out: &str, now: u64) -> Option<Vec<serde_json::Value>> {
         let (Some(Ok(size)), Some(Ok(modified))) = (meta.next().map(str::parse::<u64>), meta.next().map(str::parse::<u64>)) else { continue };
         // 第三欄 ctime＝搬進來的時間；舊格式沒有這一欄就只看 mtime。
         let changed = meta.next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0);
-        if name.is_empty() || withheld_name(&name.to_ascii_lowercase()) || content_is_withheld(&hex_bytes(hex)) {
+        if name.is_empty() || name.chars().any(char::is_control) || withheld_name(&name.to_ascii_lowercase()) || content_is_withheld(&hex_bytes(hex)) {
             continue;
         }
         files.push((name.to_string(), size, modified, modified.max(changed)));
@@ -177,9 +194,14 @@ am_same() {{
   a=$(stat -L -f '%i %z %m %c' "$F" 2>/dev/null) || return 1
   [ -n "$a" ] && [ "$a" = "$(stat -L -f '%i %z %m %c' /dev/fd/3 2>/dev/null)" ]
 }}
+am_singlelink() {{
+  if stat -c %h /dev/fd/3 >/dev/null 2>&1; then l=$(stat -L -c %h /dev/fd/3 2>/dev/null) || return 1
+  else l=$(stat -L -f %l /dev/fd/3 2>/dev/null) || return 1; fi
+  [ "$l" = 1 ]
+}}
 {{
 {gap}
-if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ] || ! am_same; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
+if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ] || ! am_same || ! am_singlelink; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
 printf 'AM_OUTBOX_FILE\n'
 head -c {cap} <&3 | base64
 }} 2>/dev/null 3< "$F" || printf 'AM_OUTBOX_MISSING\n'
@@ -515,6 +537,23 @@ exec /usr/bin/stat "$@"
         for bad in ["link.txt", "sub", "missing.txt"] {
             assert_eq!(run_download(&d, bad, "").trim(), "AM_OUTBOX_MISSING", "{bad}");
         }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn macos_local_remote_outbox_hard_links_are_neither_listed_nor_downloaded() {
+        let base = sandbox("hardlink");
+        let d = base.join("outbox");
+        std::fs::write(base.join("secret.txt"), b"private bytes").unwrap();
+        std::fs::hard_link(base.join("secret.txt"), d.join("report.txt")).unwrap();
+        let list = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(list_script(&d.to_string_lossy()))
+            .output()
+            .unwrap();
+        let listed = parse_list(&String::from_utf8_lossy(&list.stdout), 1_000).unwrap();
+        assert!(!listed.iter().any(|f| f["name"] == "report.txt"), "hard link was listed: {listed:?}");
+        assert_eq!(run_download(&d, "report.txt", "").trim(), "AM_OUTBOX_MISSING");
         std::fs::remove_dir_all(&base).unwrap();
     }
 

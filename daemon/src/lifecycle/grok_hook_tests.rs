@@ -38,8 +38,8 @@ fn the_merge_replaces_only_our_entry_and_keeps_everything_the_user_added() {
     })
     .to_string();
     let merged: Value = serde_json::from_str(&hooks_json_merged(Some(&existing), "/data/grok-hook.sh")).unwrap();
-    assert_eq!(commands(&merged, "SessionStart"), ["/home/u/my-start.sh", "/data/grok-hook.sh"], "舊的我們那項換掉、使用者的留著");
-    assert_eq!(commands(&merged, "Stop"), ["/data/grok-hook.sh"]);
+    assert_eq!(commands(&merged, "SessionStart"), ["/tmp/am-test-GONE/data/grok-hook.sh", "/home/u/my-start.sh", "/data/grok-hook.sh"], "無法證明屬於我們的舊路徑要保留");
+    assert_eq!(commands(&merged, "Stop"), ["/tmp/am-test-GONE/data/grok-hook.sh", "/data/grok-hook.sh"]);
     assert_eq!(commands(&merged, "PreToolUse"), ["/home/u/guard.sh"], "別的事件原封不動");
     assert_eq!(merged["note"], "user key outside hooks", "hooks 以外的鍵也留著");
     // 冪等：再合併一次不會長出第二項。
@@ -52,7 +52,14 @@ fn the_merge_replaces_only_our_entry_and_keeps_everything_the_user_added() {
     ]}]}})
     .to_string();
     let m: Value = serde_json::from_str(&hooks_json_merged(Some(&mixed), "/data/grok-hook.sh")).unwrap();
-    assert_eq!(commands(&m, "Stop"), ["/home/u/after-stop.sh", "/data/grok-hook.sh"]);
+    assert_eq!(commands(&m, "Stop"), ["/old/dir/grok-hook.sh", "/home/u/after-stop.sh", "/data/grok-hook.sh"]);
+}
+
+#[test]
+fn the_merge_keeps_a_user_command_with_the_same_basename() {
+    let existing = json!({"hooks": {"Stop": [user_hook("/home/u/custom/grok-hook.sh")]}}).to_string();
+    let merged: Value = serde_json::from_str(&hooks_json_merged(Some(&existing), "/data/grok-hook.sh")).unwrap();
+    assert_eq!(commands(&merged, "Stop"), ["/home/u/custom/grok-hook.sh", "/data/grok-hook.sh"]);
 }
 
 #[test]
@@ -68,9 +75,9 @@ fn hooks_file(grok_home: &Path) -> std::path::PathBuf {
     grok_home.join("hooks").join(super::setup::grok_hooks_file(None))
 }
 
-/// bot 啟動時裝：壞路徑被換成這顆 daemon 的 dispatcher、使用者的 hook 留著、權限照原檔（但不放寬到別人寫得進去）、沒有殘留暫存檔。
+/// bot 啟動時裝：不猜同名路徑屬於 daemon；保留它並加入本 daemon 項目，使用者 hook 與原權限也留著。
 #[tokio::test]
-async fn starting_a_grok_bot_repairs_a_stale_hook_path_without_touching_the_users_hooks() {
+async fn starting_a_grok_bot_keeps_unknown_same_named_hooks_and_adds_its_own() {
     let e = tt::env().await;
     let grok_home = tt::scratch_dir("am-grokhook-home");
     let path = hooks_file(&grok_home);
@@ -85,8 +92,8 @@ async fn starting_a_grok_bot_repairs_a_stale_hook_path_without_touching_the_user
 
     let dispatcher = e.app.data_dir.join("grok-hook.sh").to_string_lossy().into_owned();
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(commands(&v, "SessionStart"), ["/home/u/mine.sh".to_string(), dispatcher.clone()]);
-    assert_eq!(commands(&v, "Stop"), [dispatcher.clone()]);
+    assert_eq!(commands(&v, "SessionStart"), ["/tmp/am-test-GONE/data/grok-hook.sh".to_string(), "/home/u/mine.sh".to_string(), dispatcher.clone()]);
+    assert_eq!(commands(&v, "Stop"), ["/tmp/am-test-GONE/data/grok-hook.sh".to_string(), dispatcher.clone()]);
     assert!(Path::new(&dispatcher).is_file(), "dispatcher 本身也在");
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640, "權限照原檔");
     let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect();
@@ -97,6 +104,21 @@ async fn starting_a_grok_bot_repairs_a_stale_hook_path_without_touching_the_user
     std::fs::write(&path, stale.to_string()).unwrap();
     install_local(&e.app, &json!({"GROK_HOME": grok_home.to_string_lossy()})).unwrap();
     assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+#[tokio::test]
+async fn local_grok_install_does_not_read_through_a_hook_file_symlink() {
+    let e = tt::env().await;
+    let grok_home = tt::scratch_dir("am-grokhook-symlink");
+    let path = hooks_file(&grok_home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let victim = grok_home.join("private-settings.json");
+    std::fs::write(&victim, r#"{"note":"private target contents","hooks":{"Stop":[]}}"#).unwrap();
+    std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+    assert!(install_local(&e.app, &json!({"GROK_HOME": grok_home.to_string_lossy()})).is_err());
+    assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink(), "the untrusted hook path stays untouched");
+    assert!(std::fs::read_to_string(&victim).unwrap().contains("private target contents"));
 }
 
 /// daemon 開機：檔案在、而且我們那一項指到不是這顆 daemon 的 dispatcher（或腳本不存在）→ 換掉；沒有檔就不建
@@ -117,7 +139,7 @@ async fn daemon_start_repairs_a_wrong_hook_file_but_never_creates_or_touches_a_g
     assert!(heal_at_startup(&e.app, Some(&home)).unwrap(), "壞路徑被修");
     let dispatcher = e.app.data_dir.join("grok-hook.sh").to_string_lossy().into_owned();
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(commands(&v, "Stop"), [dispatcher.clone()]);
+    assert_eq!(commands(&v, "Stop"), ["/tmp/am-test-GONE/data/grok-hook.sh".to_string(), dispatcher.clone()]);
     assert_eq!(commands(&v, "SessionStart"), [dispatcher.clone()]);
 
     let before = std::fs::metadata(&path).unwrap().modified().unwrap();

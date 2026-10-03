@@ -5,7 +5,7 @@
 //! 一次讀的量有上限（[`read_tail`]、[`read_since`]）。
 
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,10 +18,35 @@ pub(crate) const MAX_SINCE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// 只開一般檔：FIFO 用 `O_NONBLOCK` 開就不會卡住、之後 `metadata` 說不是一般檔就退；`/dev/zero` 之類的裝置同樣被擋
 /// （它們的 `len()` 是 0，後面照 `read_to_end` 就是讀到記憶體滿）。
-fn open_regular(path: &Path) -> std::io::Result<std::fs::File> {
-    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)?;
-    if !f.metadata()?.is_file() {
+pub(crate) fn open_regular(path: &Path) -> std::io::Result<std::fs::File> {
+    let anchored = path.ancestors().find(|p| matches!(p.file_name(), Some(n) if n == "projects" || n == "sessions"));
+    let f = if let Some(root) = anchored {
+        let root_meta = std::fs::symlink_metadata(root)?;
+        if !root_meta.file_type().is_dir() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "transcript root is not a real directory"));
+        }
+        let config = root.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "transcript root has no account directory"))?;
+        let config = std::fs::canonicalize(config)?;
+        let root_name = root.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "transcript root has no name"))?;
+        let expected = config.join(root_name);
+        let resolved = std::fs::canonicalize(root)?;
+        if resolved != expected || !resolved.starts_with(&config) {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "transcript root escaped its account directory"));
+        }
+        let rel = path.strip_prefix(root).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "transcript is outside its root"))?;
+        let abs = resolved.join(rel);
+        let rel = abs.strip_prefix("/").map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "transcript path is not absolute"))?;
+        let parts = crate::trusted_open::safe_relative_components(rel).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "unsafe transcript path"))?;
+        crate::trusted_open::open_bound_file(Path::new("/"), &parts, None)?
+    } else {
+        std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path)?
+    };
+    let meta = f.metadata()?;
+    if !meta.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
+    }
+    if meta.nlink() > 1 {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "transcript has more than one hard link"));
     }
     Ok(f)
 }
@@ -63,7 +88,15 @@ pub(crate) fn path_within_roots(path: &str, roots: &[PathBuf]) -> bool {
     {
         return false;
     }
-    let under = |resolved: &Path| roots.iter().any(|r| std::fs::canonicalize(r).is_ok_and(|rc| resolved.starts_with(rc)));
+    let canonical_root = |root: &Path| {
+        let meta = std::fs::symlink_metadata(root).ok()?;
+        if !meta.file_type().is_dir() { return None; }
+        let parent = std::fs::canonicalize(root.parent()?).ok()?;
+        let expected = parent.join(root.file_name()?);
+        let resolved = std::fs::canonicalize(root).ok()?;
+        (resolved == expected).then_some(resolved)
+    };
+    let under = |resolved: &Path| roots.iter().filter_map(|r| canonical_root(r)).any(|rc| resolved.starts_with(rc));
     if !roots.iter().any(|r| p.starts_with(r)) {
         return false;
     }
@@ -78,8 +111,8 @@ pub(crate) fn path_within_roots(path: &str, roots: &[PathBuf]) -> bool {
 }
 
 /// 這顆本機 bot 的 transcript／rollout 該在哪些目錄底下：claude＝它實際用的 `CLAUDE_CONFIG_DIR`（bot 自己的 env → 身分 → `~/.claude`）的
-/// `projects/`；codex＝`CODEX_HOME/sessions/`；grok 沒有。子 agent 的身分是 pane 的 env 帶的、daemon 只能事後猜，所以多放行
-/// `~/.claude*/projects/`（仍不含別的種類、別的位置）。
+/// `projects/`；codex＝`CODEX_HOME/sessions/`；grok 沒有。子 agent 的身份如果尚未從 pane env 記錄進 DB，就先不收 transcript_path；
+/// 放行所有 `~/.claude-*` 會讓一顆 bot 用自己的 hook token 指定另一個身份的對話檔，之後 UI 的輪詢就會替它讀出來。
 pub(crate) async fn trusted_roots(app: &Arc<App>, bot: &db::Bot) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     match bot.kind.as_str() {
@@ -90,18 +123,6 @@ pub(crate) async fn trusted_roots(app: &Arc<App>, bot: &db::Bot) -> Vec<PathBuf>
                 _ => crate::lifecycle::identity_config_dir(app, LOCAL_HOST, bot.identity.as_deref()).await.ok(),
             };
             roots.extend(own.map(|d| PathBuf::from(d).join("projects")));
-            if bot.managed_by == "child" {
-                if let Some(h) = home.as_deref().map(PathBuf::from) {
-                    if let Ok(rd) = std::fs::read_dir(&h) {
-                        for ent in rd.flatten() {
-                            let name = ent.file_name().to_string_lossy().into_owned();
-                            if name == ".claude" || name.starts_with(".claude-") {
-                                roots.push(ent.path().join("projects"));
-                            }
-                        }
-                    }
-                }
-            }
         }
         "codex" => roots.extend(crate::lifecycle::codex_home(app, bot).await.map(|h| h.join("sessions"))),
         _ => {}
@@ -191,6 +212,30 @@ mod tests {
         (db::bot(&app.db, &bot.id).await.unwrap().unwrap(), run)
     }
 
+    #[tokio::test]
+    async fn an_unrecorded_child_identity_cannot_read_another_claude_identity_transcript() {
+        let e = tt::env().await;
+        let home = crate::test_home::dir();
+        let own = home.join(".claude-own");
+        let foreign = home.join(".claude-foreign");
+        let bot = tt::claude_bot(&e.app, &e.project_id, "child-read-boundary").await;
+        sqlx::query("UPDATE bots SET managed_by='child', env_json=? WHERE id=?")
+            .bind(json!({"CLAUDE_CONFIG_DIR": own.to_string_lossy()}).to_string())
+            .bind(&bot.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let own_file = own.join("projects/-work/session.jsonl");
+        let foreign_file = foreign.join("projects/-work/session.jsonl");
+        std::fs::create_dir_all(own_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(foreign_file.parent().unwrap()).unwrap();
+        std::fs::write(&own_file, "own\n").unwrap();
+        std::fs::write(&foreign_file, "foreign\n").unwrap();
+        let bot = db::bot(&e.app.db, &bot.id).await.unwrap().unwrap();
+        assert!(super::transcript_allowed(&e.app, &bot, own_file.to_str().unwrap()).await);
+        assert!(!super::transcript_allowed(&e.app, &bot, foreign_file.to_str().unwrap()).await, "child token cannot nominate another identity's transcript");
+    }
+
     async fn session_start(app: &Arc<crate::state::App>, bot: &db::Bot, run: &str, path: &str) {
         let body = HookBody {
             bot_id: bot.id.clone(),
@@ -251,6 +296,44 @@ mod tests {
         }
         std::fs::create_dir_all(root.join("projects/-real")).unwrap();
         assert!(super::path_within_roots(&root.join("projects/-real/not-yet-written.jsonl").to_string_lossy(), &roots), "還沒寫出來的檔、目錄在 root 裡：收");
+    }
+
+    #[test]
+    fn a_symlinked_projects_root_cannot_expand_the_trusted_boundary() {
+        let base = tmp("root-link");
+        let config = base.join(".claude-own");
+        let other = base.join(".claude-other");
+        std::fs::create_dir_all(other.join("projects/-work")).unwrap();
+        std::fs::write(other.join("projects/-work/foreign.jsonl"), "secret\n").unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::os::unix::fs::symlink(other.join("projects"), config.join("projects")).unwrap();
+        let forged = config.join("projects/-work/foreign.jsonl");
+        assert!(!super::path_within_roots(&forged.to_string_lossy(), &[config.join("projects")]), "projects 根 symlink 不能擴張 trusted root");
+    }
+
+    #[test]
+    fn a_symlinked_sessions_root_cannot_expand_promote_identity_lookup() {
+        let base = tmp("session-root-link");
+        let config = base.join(".claude-own");
+        let other = base.join(".claude-other");
+        std::fs::create_dir_all(other.join("sessions")).unwrap();
+        std::fs::write(other.join("sessions/123.json"), r#"{"pid":123,"sessionId":"foreign","cwd":"/work"}"#).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::os::unix::fs::symlink(other.join("sessions"), config.join("sessions")).unwrap();
+        assert!(super::open_regular(&config.join("sessions/123.json")).is_err(), "promote must not read session metadata through another identity's root");
+    }
+
+    #[test]
+    fn transcript_reader_refuses_final_symlinks_and_hard_links() {
+        let dir = tmp("aliases");
+        let source = dir.join("source.jsonl");
+        std::fs::write(&source, "private transcript\n").unwrap();
+        let symlink = dir.join("symlink.jsonl");
+        std::os::unix::fs::symlink(&source, &symlink).unwrap();
+        let hardlink = dir.join("hardlink.jsonl");
+        std::fs::hard_link(&source, &hardlink).unwrap();
+        assert!(super::open_regular(&symlink).is_err(), "一般檔讀取不能跟最終 symlink");
+        assert!(super::open_regular(&hardlink).is_err(), "transcript 不能以 hard link 跨身分別名進來");
     }
 
     /// 裝置檔（`/dev/zero`）的長度是 0、讀不完：不是一般檔就不讀。尾端讀取半行、壞 JSON 照舊由解析端跳過。

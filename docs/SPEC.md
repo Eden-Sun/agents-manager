@@ -517,8 +517,8 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
 **transcript／rollout 讀取（`transcript_read.rs`）**：`transcript_path` 是 pane 裡的 CLI（任何拿得到該 bot token 的行程）經 hook 送進來的，之後 daemon 會反覆讀它
 （回合結束判斷、AskUserQuestion 補抓、`GET /pending-question`、Stop 的使用者訊息補記…）。所以：
 - **寫入前驗路徑**（`SessionStart`／`Stop`／`StopFailure`）：本機 bot 的路徑必須是絕對、無 `..`／控制字元、副檔名 `.jsonl`，且解開符號連結後仍在**這顆 bot 自己身分**的 `CLAUDE_CONFIG_DIR/projects/`（codex：`CODEX_HOME/sessions/`）底下；
-  `managed_by='child'` 的 bot 身分由 pane env 帶、daemon 事後才猜，多放行 `~/.claude*/projects/`。不合就當沒帶（保留原值）並記一行 warn；Stop 自己用的路徑也是驗過的那份，所以別處的檔案內容進不了對話。遠端 bot 的檔案在那台機器、daemon 不在本機讀，只擋形狀。
-- **讀取只讀一般檔**：用 `O_NONBLOCK` 開、`metadata` 不是一般檔就退（FIFO 不會卡住 blocking 執行緒、`/dev/zero` 之類不會灌爆記憶體）；尾端讀取有位元組上限（各處 512 KB～8 MB），第一行被切到一半、最後一行還沒寫完、壞 JSON 行都由解析端跳過。
+  `managed_by='child'` 的 bot 若身分尚未記進 DB，就只接受已知 env／預設身分的 root，不寬放其他 `~/.claude-*`；不合就當沒帶（保留原值）並記一行 warn。Stop 自己用的路徑也是驗過的那份，所以別處的檔案內容進不了對話。遠端 bot 的檔案在那台機器、daemon 不在本機讀，只擋形狀。
+- **讀取只讀一般檔**：`projects/`／`sessions/` 必須是帳號根目錄下的真目錄，路徑逐層 `openat(O_NOFOLLOW)`；最後一段用同一個 fd 驗一般檔並讀取，拒絕硬連結（`nlink != 1`），不會因 symlink／hardlink 或檢查後換路徑讀到別處。非 transcript 路徑用 `O_NONBLOCK` 開，FIFO 不會卡住 blocking 執行緒、`/dev/zero` 之類不會灌爆記憶體；尾端讀取有位元組上限（各處 512 KB～8 MB），第一行被切到一半、最後一行還沒寫完、壞 JSON 行都由解析端跳過。
 - **基準位移之後的新內容**（送出證據、輸入框草稿）：檔案比基準短（被換掉、被截斷）或新長超過 32 MB 都回錯（＝讀不到，不是「零命中」）。
 
 **Turn 狀態轉移的單一權威**（issue #68、#125，`lifecycle::turn_controller`）：合法邊只定義在 `LEGAL_EDGES` 一處，
@@ -1575,8 +1575,8 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    `<CLAUDE_CONFIG_DIR>/projects/<cwd 目錄名>/<session>.jsonl`（`identity_config_dir`，沒設就是 `~/.claude`）——換身分時讀複製進新帳號的那份，
    不讀舊帳號那份。只讀本機：遠端主機的 bot 讀不到尾巴，不補（同 `stuck_turns`）。
    **換身分複製 transcript 的資料安全規則**（`lifecycle/transcript_stage.rs`；遠端是 `remote_stage_script`，promote 的 `stage_transcript` 共用同一組 helper，2026-10-02 對抗式審查）：
-   只有 claude 才複製（codex／grok 的對話檔不在 `projects/`，以前會被整份丟進 claude 的目錄）；來源要是 `…/projects/<cwd>/<id>.jsonl` 形狀的一般檔，符號連結與其他路徑
-   （`transcript_path` 是 hook payload 記的字串）一律不複製、回 `transcript_missing` 改開新對話；先寫同目錄的 `.` 開頭暫存檔（0600、fsync）再 `rename`，複製中途失敗或被殺不會在最終路徑留半份檔；
+   只有 claude 才複製（codex／grok 的對話檔不在 `projects/`，以前會被整份丟進 claude 的目錄）；來源要是 `…/projects/<cwd>/<id>.jsonl` 形狀的一般檔，projects、cwd 與檔案本身都不能是 symlink，硬連結也拒絕；`..`、控制字元與其他路徑
+   （`transcript_path` 是 hook payload 記的字串）一律不複製、回 `transcript_missing` 改開新對話。來源透過已驗證的 fd 讀，目的 projects／cwd 逐層 `openat(O_NOFOLLOW)`；先寫同目錄暫存檔（0600、fsync）再以不覆寫的硬連結原子發布，複製中途失敗或被殺不會在最終路徑留半份檔；
    目標已有同名檔時：一樣不動、**比來源長（來源是它的前綴）不蓋**、是來源的前綴才蓋、分岔就把目標改名成 `<name>.jsonl.replaced-<時間>` 留在旁邊再放來源；新建目錄 0700、檔 0600
    （不管來源權限）；附屬目錄只收一般檔與目錄。promote 另外：附屬目錄複製到一半失敗不留半份目錄。`transcript-transfer` 同理拒絕符號連結、不帶走附屬目錄裡的連結，暫存檔先清掉再 `O_EXCL` 新建。
    等的期間變成 `working`／`blocked`、有人排了派工或送了回合、接回是 `mismatch`／`unverified`／沒有 hook 可驗、使用者中斷，這一輪就取消，
@@ -3188,7 +3188,7 @@ grok TUI 沒有每次啟動注入 hook 的旗標（`--settings`/`--hooks`/`--plu
      兩支都**不把 token 放上命令列**（issue #43）：值只走 pane env，`AM_HOOK_TOKEN` 在這裡只用來判斷
      「是不是 daemon 開的 pane」。遠端第三個參數是固定的佔位 `-`，`hook.sh` 不讀它。
    - `<GROK_HOME>/hooks/agents-manager.json`：`SessionStart` 與 `Stop` 各一個 command hook 指向分派腳本（`timeout: 5`）。`GROK_HOME` 取自 identity.env ∪ bot.env，缺省 `~/.grok`。
-   - **自癒、不蓋掉使用者的東西**（`lifecycle/grok_hook.rs`）：只換「命令檔名是 `grok-hook.sh`」的那一項，使用者自己加的 hook 與 `hooks` 以外的鍵原樣保留（一個群組裡混著的也只拿掉我們那個）；指到這顆 daemon 的那份留在原位（冪等）。寫入是同目錄暫存檔＋`rename`（原子），權限照原檔、但群組／其他人寫得進去的收回 0600，新檔 0600。bot 啟動時裝；**daemon 開機也檢查一次**（`heal_at_startup`）：檔案在、我們那一項不是指到這顆 daemon 的 dispatcher（別顆 daemon 或測試寫的）或 dispatcher 腳本被刪了就修；沒有檔不建（沒在用 grok 的機器不裝 hook）。遠端主機的檔仍整檔覆寫（尚未做合併）。
+   - **自癒、不蓋掉使用者的東西**（`lifecycle/grok_hook.rs`）：只換命令字串與這顆 daemon dispatcher 完全相同的項目；使用者自己的 hook（包含同名 `grok-hook.sh`）與 `hooks` 以外的鍵原樣保留，無法證明屬於本 daemon 的舊路徑不刪。hooks 檔以 `O_NOFOLLOW` 讀，最多 256 KiB，拒絕 symlink、非一般檔與硬連結；寫入是同目錄暫存檔＋原子替換，權限照原檔、但群組／其他人寫得進去的收回 0600，新檔 0600。bot 啟動時裝；**daemon 開機也檢查一次**（`heal_at_startup`）：檔案在才檢查／修；沒有檔不建（沒在用 grok 的機器不裝 hook）。遠端先由已驗證 fd 限量讀取既有檔、在 daemon 端合併，再以內容 hash 確認檔案未變後原子安裝，保留其他 hook 與鍵。
    - 會寫使用者家目錄的程式碼（這個 hook、預先信任 `trusted_folders.toml`、claude 的 herdr skill）一律走 `crate::home::dir()`；測試裡它是行程專屬的假家目錄，不是真的 `$HOME`（2026-10-02：測試曾把 `/tmp/am-test-…/data/grok-hook.sh` 寫進真的 `~/.grok/hooks/agents-manager.json`）。
 2. `inject_hooks = false` 時 pane 不給 `AM_HOOK_TOKEN`，分派腳本立即 exit 0（走終端備援）。
 3. 使用者自己開的 grok（無 `AM_BOT_ID`）只多一次 `sh` 啟動。Stop hook 的 stdout 必須空（JSON 會被當 decision），§4.4 已保證。
