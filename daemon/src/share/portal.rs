@@ -198,14 +198,59 @@ fn router_with_state(st: Portal) -> Router {
         .route("/s/{token}/api/files/{name}", get(file))
         .route("/assets/{*path}", get(asset))
         .fallback(fallback)
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(st.clone(), security_headers))
         .with_state(st)
 }
 
-async fn security_headers(uri: Uri, req: axum::extract::Request, next: Next) -> Response {
-    // 分享入口只聽 loopback，外面靠 Funnel 轉進來。Host 仍可能是攻擊者的網域（DNS rebinding），
-    // 所以用跟 allow_lan 同一份名單：IP、localhost、單一標籤、`.ts.net` 等才放行。
-    let bad_host = !crate::api::origin_is_local(req.headers(), 0, true);
+/// Funnel 轉進來的 `Host` 是 `[share] base_url` 的主機名。只放行那一個，再加上本機直接打的 loopback 名稱。
+/// 不沿用 allow_lan 的後綴名單，所以別的 `.ts.net` 或任意網域過不來。
+fn authority_host(authority: &str) -> String {
+    let a = authority.trim();
+    if let Some(rest) = a.strip_prefix('[') {
+        if let Some((host, _)) = rest.split_once(']') {
+            return host.to_ascii_lowercase();
+        }
+    }
+    let host = match a.rsplit_once(':') {
+        Some((h, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => a,
+    };
+    host.trim().to_ascii_lowercase()
+}
+
+fn share_host_allowed(authority: &str, configured: Option<&str>) -> bool {
+    let host = authority_host(authority);
+    matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1") || configured.is_some_and(|want| host == want)
+}
+
+fn configured_share_host(base: &str) -> Option<String> {
+    let rest = base.strip_prefix("https://").or_else(|| base.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(inner) = authority.strip_prefix('[') {
+        inner.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let host = host.trim().to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+async fn security_headers(State(st): State<Portal>, uri: Uri, req: axum::extract::Request, next: Next) -> Response {
+    let configured = st.app.cfg.get().await.share.base().as_deref().and_then(configured_share_host);
+    let headers = req.headers();
+    let mut bad_host = false;
+    if let Some(host) = headers.get(header::HOST) {
+        bad_host = host.to_str().ok().is_none_or(|h| !share_host_allowed(h, configured.as_deref()));
+    }
+    if !bad_host {
+        if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+            match origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) {
+                Some(rest) if !rest.contains('/') && !rest.contains('@') && share_host_allowed(rest, configured.as_deref()) => {}
+                _ => bad_host = true,
+            }
+        }
+    }
     let mut res = if bad_host {
         (StatusCode::FORBIDDEN, Json(json!({"error": "bad origin"}))).into_response()
     } else {
