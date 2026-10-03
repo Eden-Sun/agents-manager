@@ -262,6 +262,40 @@ async fn a_rebound_host_cannot_open_the_share_page_or_its_event_stream() {
 }
 
 #[tokio::test]
+async fn the_share_listener_allows_only_the_configured_base_url_host() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "base-host").await;
+    let token = shared(&e.app, &b.id).await;
+    e.app
+        .cfg
+        .update(|c| {
+            c.share.base_url = Some("https://share.example.com/".into());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let base = serve(portal::router(e.app.clone())).await;
+    let addr = base.trim_start_matches("http://");
+    let status = |host: String| {
+        let addr = addr.to_string();
+        let token = token.clone();
+        async move {
+            let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+            let req = format!("GET /s/{token} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            stream.write_all(req.as_bytes()).await.unwrap();
+            let mut buf = vec![0u8; 256];
+            let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf)).await.unwrap().unwrap();
+            String::from_utf8_lossy(&buf[..n]).split_whitespace().nth(1).unwrap().parse::<u16>().unwrap()
+        }
+    };
+    assert_eq!(status("share.example.com".into()).await, 200, "Funnel 送來的 Host 就是 base_url 的主機名");
+    assert_eq!(status("share.example.com:443".into()).await, 200);
+    assert_eq!(status("other.example".into()).await, 403);
+    assert_eq!(status("not-ours.tail.ts.net".into()).await, 403, "別的 .ts.net 不能靠後綴混進來");
+}
+
+#[tokio::test]
 async fn the_share_listener_only_binds_loopback_on_its_own_port() {
     assert!(portal::check_listen("127.0.0.1:7790", 7788).is_ok());
     assert!(portal::check_listen("[::1]:7790", 7788).is_ok());

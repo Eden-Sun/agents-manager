@@ -4731,6 +4731,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 ### 20.3 分享入口（獨立 listener）
 
 - `[share] listen`（例如 `127.0.0.1:7790`）有設才開；只准 loopback、不能跟管理 API 同 port；開不起來只記 error、不擋 daemon。改了要重啟 daemon。
+  Funnel 轉進來的 `Host`／`Origin` 只准 loopback 名稱，或 `[share] base_url` 那一個主機名（含 port 的寫法只比主機名）。別的網域，包括其他 `.ts.net`，一律 403。
 - router 上**只有** `/s/{token}`（分享頁）、`/s/{token}/api/*` 與 `/assets/*`（分享頁的 js／css），沒有 fallback 到主 API、主 UI、`/ws`、`/hook`。
   分享頁是嵌入的 `web/dist/share.html`（獨立的 Vite entry），沒打包時回一頁佔位。
 - token 錯、分享關了：一律同一個 404。每個回應 `Cache-Control: no-store`（`/assets` 例外：檔名有雜湊）、`Referrer-Policy: no-referrer`、`nosniff`、
