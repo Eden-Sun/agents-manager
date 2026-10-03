@@ -18,6 +18,25 @@ export function backgroundShortLabel(n: number): string {
   return `背景 ${n}`
 }
 
+/** #774：背景跑了多久（`background_since` 到 `now`），例如「2 小時 5 分」；沒有開始時間是 null。 */
+export function backgroundAge(run: Run | null | undefined, now: number = Date.now()): string | null {
+  const since = run?.background_since ? Date.parse(run.background_since) : NaN
+  if (Number.isNaN(since)) return null
+  const min = Math.max(0, Math.floor((now - since) / 60_000))
+  if (min < 1) return '不到 1 分鐘'
+  const h = Math.floor(min / 60)
+  return h > 0 ? `${h} 小時${min % 60 ? ` ${min % 60} 分` : ''}` : `${min} 分鐘`
+}
+
+/** #774：claude 2.1.288 起終端 session 的背景指令沒有時間上限；daemon 判定標太久（`background_stuck`）時換字。 */
+export function backgroundStuck(run: Run | null | undefined): boolean {
+  return backgroundJobs(run) > 0 && run?.background_stuck === true
+}
+
+export function backgroundStuckLabel(n: number): string {
+  return `背景工作可能卡住（${n}）`
+}
+
 export function backgroundDetail(kind: string, n: number): string {
   const what = kind === 'codex' ? `${n} 個終端` : `${n} 個 shell `
   return `回合已經結束，背景還有 ${what}在跑。跑完它會自己接著回報；現在也可以照常送訊息。`

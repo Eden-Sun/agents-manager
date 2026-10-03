@@ -536,7 +536,7 @@ mod tests {
         let model = || async { db::run(&e.app.db, &run).await.unwrap().unwrap().runtime_model };
         assert_eq!(model().await, None, "第一次看到只當基準");
         let set_jobs = |n: u32| {
-            e.app.background_jobs.lock().unwrap().insert(run.clone(), n);
+            crate::background_jobs::record(&mut e.app.background_jobs.lock().unwrap(), &run, n);
         };
         set_jobs(2);
 

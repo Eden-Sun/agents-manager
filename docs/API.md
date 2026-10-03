@@ -1908,6 +1908,9 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `status_json` | statusLine 壓縮前的原始 JSON（`transcript_path` 以外整份），daemon 補 `account_email`（讀該身份設定目錄 `.claude.json` 的 `oauthAccount.emailAddress`）。變了才寫 |
 | `herdr_session` | bot 與 run 都有；一般為 `null`（沿用 host 設定），從本機 `default` session 採用的是 `"default"`（SPEC §6.5.1） |
 | `background_jobs` | 回合結束後畫面底部還標著的背景工作數（claude 模式列的 `N shell(s)`、codex 的 `N background terminal(s) running`），`0`＝巡邏看過、沒有；`null`＝巡邏還沒看過這個 run（daemon 剛重啟、新 run、畫面讀不到），沒有證據（SPEC §6.14，issue #714／#767）。只在 `GET /api/state` 與 WS `bot_status` 的 run 物件裡；記憶體裡的數字、不在 DB，daemon 重啟後最多晚一輪（30 秒）補上。不影響送 prompt |
+| `background_since` | 這一段背景從什麼時候開始（ISO 8601，數字第一次 > 0 的那一刻；N 變 M 不重算、歸零清掉）；`background_jobs` 是 0 或 `null` 時為 `null`。記憶體裡的，daemon 重啟後從重啟後第一次看到算起（下限）。SPEC §6.14，issue #774 |
+| `background_secs` | 到這次投影為止持續的秒數；沒有開始時間時 `null` |
+| `background_stuck` | 持續超過 3 小時（`background_jobs::STUCK_AFTER_SECS`）＝可能卡住或忘了收（claude 2.1.288 起終端 session 的背景指令沒有時間上限）；網頁改標「背景工作可能卡住（N）」。只是標示，daemon 不殺行程。沒有背景工作時 `false`。跨過門檻那一輪的巡邏會推一次 `bot_status` |
 | `background_source` | `"hook"`＝這個數字來自 claude Stop hook 的 `background_tasks`（≥ 2.1.287）；`null`＝畫面判斷（舊版 claude、codex、hook 帳過期被畫面校正）。SPEC §6.14 |
 | `blocked_reason` | 為什麼停在 `blocked`：`{code, text}`，`code` 是穩定的短代碼（`codex_update_menu`＝codex 啟動的更新選單、`codex_migration`＝模型升級提示、`rate_limit_switch`＝額度換模型建議、`dangerous_rm`＝claude 防誤刪確認框、`session_paused`＝claude Session paused 選單、`permission_prompt`＝claude 一般權限確認選單（`text` 帶工具名，例如「等待權限確認：Bash」；herdr 判成 blocked 那一刻與之後每 10 秒讀一次畫面分類，不按任何鍵）；之後可能增加，前端不認得的 code 照樣顯示 `text`），`text` 是一句中文說明（可能改字，別拿來判斷）。**只在 run 現在 `agent_status:"blocked"` 而且 daemon 知道原因時有值，其餘一律 `null`**（herdr 報了別的狀態、選單關掉、run 結束就跟著清掉，不殘留）。只在 `GET /api/state` 與 WS `bot_status` 的 run 物件裡；原因來自記憶體裡追蹤的擋路畫面、不在 DB。舊前端忽略這個欄位；沒有原因（畫面讀不到、不是上面幾種）仍是 `null`，只顯示「等待回應」 |
 | `background_tasks` | 只有 `background_source:"hook"` 時是陣列，否則 `null`：`[{id, type, status, description, command?}]`（`type`：`shell`／`subagent`／`monitor`／`workflow`…；最多 20 筆，`description`／`command` 各截 200 字）。**空陣列＝hook 報過「沒有」**，不是 `null`。常駐服務（listen port 的背景 shell）仍在清單裡，但不計入 `background_jobs` |
@@ -2042,7 +2045,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   讀不到額度就不動（未知不等於滿）。
 
 ### 健康與 incident
-- `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、（另有 `release_triage`：`publish = true` 時帶 `repo`／`gh_auth_ok`／`gh_auth_error`／`repo_ok`／`repo_error`／`viewer_permission`／`can_write`／`issues_enabled`／`labels_missing[]`，否則 `null`；auth 綠不等於開得出 issue，repo 看不到、只有 READ、或標籤少一個都會讓 `gh issue create` 硬失敗）
+- `GET /api/supervisor/health` → `status`（`healthy`／`degraded`／`critical`）、AGM 狀態、bot running/busy/stopped 計數、host 連線、quota、`pending_assignments`（未結案，含 `awaiting_review`／`blocked`）、`background_stuck[]`（背景工作標著超過 3 小時的 bot：`{bot_id, name, kind, run_id, background_jobs, since, secs}`，只露出、不進 `status`，SPEC §6.14／#774）、（另有 `release_triage`：`publish = true` 時帶 `repo`／`gh_auth_ok`／`gh_auth_error`／`repo_ok`／`repo_error`／`viewer_permission`／`can_write`／`issues_enabled`／`labels_missing[]`，否則 `null`；auth 綠不等於開得出 issue，repo 看不到、只有 READ、或標籤少一個都會讓 `gh issue create` 硬失敗）
   `awaiting_review`、`inbox_open`（三者分開不相加）；`manager_health{status,supervisor_status,daemon_connected}` 與 `system_health{status,open_incidents,incidents,blind_probes}`（`blind_probes` 非空＝那幾類探針上一輪查詢失敗，`status` 至少是 `unknown`），頂層 `status` 取兩者較嚴重者。
   `role_unavailable` 探針成功查到角色沒有 active run 時是已知的 `no_run`，不列為 blind，也不會阻擋同 kind incidents 收斂。
   daemon 每 30 秒檢查，指紋變化才推 WS `supervisor_health`；inbox `health_changed` 只在巡檢或協調者的嚴重度（`manager_health.status`／`responder_health.status`）或總管狀態（idle/busy 視為 running）真的改變時入列，總管 stopped/starting 期間不入列、恢復後補一則。

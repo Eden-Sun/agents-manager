@@ -325,6 +325,10 @@ export interface Run {
   update_notice: string | null
   /** #714：畫面底部標著還在跑的背景工作數（claude 的 shell、codex 的背景終端）；0＝沒有。沒帶當 0；`null`＝巡邏還沒看過（#767，沒有證據）。 */
   background_jobs?: number | null
+  /** #774：這一段背景從什麼時候開始（ISO 字串；daemon 重啟後從重啟後第一次看到算起）；沒有背景工作／舊 daemon＝`null`。 */
+  background_since?: string | null
+  /** #774：背景工作標著超過門檻（3 小時）：可能卡住或忘了收。舊 daemon 沒帶＝false。 */
+  background_stuck?: boolean
   /** 為什麼停在 blocked（daemon 的結構化原因，`code` 是穩定的短代碼、`text` 是一句話）；沒有／不知道＝`null`，舊 daemon 沒這個欄位也是 `null`。 */
   blocked_reason?: BlockedReason | null
   /** claude ≥ 2.1.287 的 Stop hook 報的背景工作明細（SPEC §6.14）；null＝沒報過（舊版 claude、剛重啟，數字來自畫面判斷）；`[]`＝報過「沒有」。 */

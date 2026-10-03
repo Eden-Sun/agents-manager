@@ -1939,7 +1939,7 @@ mod tests {
         let env = crate::testing::env().await;
         let (bot, run_id) = idle_bot(&env, "india2").await;
         let _shell = provably_no_background_work(&env, &bot);
-        env.app.background_jobs.lock().unwrap().insert(run_id, 1);
+        crate::background_jobs::record(&mut env.app.background_jobs.lock().unwrap(), &run_id, 1);
         sweep(&env.app, 90).await;
         assert_left_running(&env.app, &bot, "畫面標著 1 個背景工作").await;
 

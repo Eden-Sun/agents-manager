@@ -133,11 +133,13 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
     let mut running = 0usize;
     let mut busy = 0usize;
     let mut stopped = 0usize;
+    let mut background_stuck = Vec::new();
     for bot in &bots {
         match crate::db::active_run(&app.db, &bot.id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
             Some(run) => {
                 running += 1;
                 if run.agent_status == "working" || run.agent_status == "blocked" { busy += 1; }
+                if let Some(v) = background_stuck_entry(app, bot, &run) { background_stuck.push(v); }
             }
             None => stopped += 1,
         }
@@ -188,6 +190,9 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         "daemon": {"connected": app.connected.load(std::sync::atomic::Ordering::SeqCst)},
         "supervisor": supervisor,
         "bots": {"total": bots.len(), "running": running, "busy": busy, "stopped": stopped},
+        // issue #774：背景工作標著超過門檻（claude 2.1.288 起終端 session 的背景指令沒有時間上限）。只是露出，
+        // 不進 `status`、不自動殺：可能是正常的長工作，要人或 AGM 去看。
+        "background_stuck": background_stuck,
         "quota": crate::quota::snapshot(app).await,
         // 「接下來要做什麼、什麼一直做不成」。到期動作本來就都落在 DB 上（各自掛在自己那張表），
         // 只是以前要看得翻六張表；issue #75 驗收第 5 條。
@@ -204,6 +209,16 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         // 只是量測，沒有嚴重度、不進 `status`——要先有數字才談得上改結構。
         "timing": crate::supervisor::timing::snapshot(),
     }))
+}
+
+/// 一顆 bot 的背景工作標著「可能卡住」（`background_jobs::STUCK_AFTER_SECS`）時的一列；沒有就是 `None`。
+fn background_stuck_entry(app: &App, bot: &crate::db::Bot, run: &crate::db::Run) -> Option<Value> {
+    let n = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0)?;
+    let (since, secs, stuck) = crate::background_jobs::duration(app, &run.id)?;
+    stuck.then(|| {
+        let since = chrono::DateTime::from_timestamp_millis(since).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        json!({"bot_id": bot.id, "name": bot.name, "kind": bot.kind, "run_id": run.id, "background_jobs": n, "since": since, "secs": secs})
+    })
 }
 
 /// 協調者那一格的嚴重度。
