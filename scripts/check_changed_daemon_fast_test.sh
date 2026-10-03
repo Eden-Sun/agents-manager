@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Clean-checkout daemon fast path: rust-embed needs an index.html, but should not trigger web CI.
 set -euo pipefail
+# 外層 `CHECK_TESTS=none scripts/check.sh changed` 會把開關漏進來，讓下面每一段假 changed 都不跑測試而誤判紅（issue #813）。
+unset CHECK_TESTS CHECK_MAX_LOAD
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/am-check-changed-daemon.XXXXXX")"

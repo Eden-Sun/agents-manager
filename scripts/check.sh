@@ -10,6 +10,7 @@
 #   scripts/check.sh fmt        # cargo fmt --check（只報告，現況不乾淨）
 #   scripts/check.sh clippy     # cargo clippy（只報告，現況不乾淨）
 #   scripts/check.sh all        # 以上全部
+#   CHECK_MAX_LOAD=40 scripts/check.sh changed # 先等 1 分鐘負載 ≤ 40（逾時 CHECK_LOAD_TIMEOUT 秒、預設 1800，失敗不照跑；issue #813）
 #   scripts/check.sh changed [base] # 只跑改到的部分（跟 base，預設 origin/main 比），daemon 做 cargo check＋改到模組的測試（CHECK_TESTS=none 關掉）；issue #716
 #
 # 注意：
@@ -54,6 +55,15 @@ on_exit() {
     fi
 }
 trap on_exit EXIT
+
+# 負載閘（issue #813）：`CHECK_MAX_LOAD=<1 分鐘負載門檻>` 有設就先等負載降到門檻以下再跑（scripts/wait-load.sh），
+# 最多等 `CHECK_LOAD_TIMEOUT` 秒（預設 1800）；逾時整輪失敗（exit 124），不照跑。沒設＝不等（ubuntu-ci 與舊用法不變）。
+if [ -n "${CHECK_MAX_LOAD:-}" ]; then
+    step "負載閘：1 分鐘負載 ≤ ${CHECK_MAX_LOAD} 才跑（最多等 ${CHECK_LOAD_TIMEOUT:-1800} 秒）"
+    bash scripts/wait-load.sh --max "${CHECK_MAX_LOAD}" --timeout "${CHECK_LOAD_TIMEOUT:-1800}"
+    # 只在最外層等一次：ops 測試會在沙盒裡再叫 check.sh（那裡沒有 wait-load.sh），不能讓這個開關漏進去。
+    unset CHECK_MAX_LOAD
+fi
 
 check_web() {
     step "web: bun install --frozen-lockfile"

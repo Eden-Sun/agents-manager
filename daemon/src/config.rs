@@ -479,6 +479,11 @@ pub struct BuildCfg {
     /// 每個佔用的 `CARGO_BUILD_JOBS`：不吃 cargo 預設的「核心數」，避免兩個佔用各自吃滿全機。
     #[serde(default = "default_build_cargo_jobs")]
     pub cargo_jobs: usize,
+    /// 每個佔用的 `cargo test` 測試執行緒上限（shim 注入 `RUST_TEST_THREADS`，issue #813）；`0`＝不設（libtest 預設＝核心數）。
+    /// 名額本來就罩住整個 test run，但 `CARGO_BUILD_JOBS` 只限 rustc，不限測試執行緒：32 核上每支 test binary 開 32 個、各吃 8 核以上。
+    /// 呼叫端自己設了 `RUST_TEST_THREADS` 或帶 `--test-threads` 就尊重呼叫端。
+    #[serde(default = "default_build_test_threads")]
+    pub test_threads: usize,
     /// 名額 TTL（秒）：拿到之後這麼久沒 renew 就視為持有者已死，下一次 acquire 收回。
     #[serde(default = "default_build_lease_ttl_secs", deserialize_with = "de_build_lease_ttl_secs")]
     pub lease_ttl_secs: u64,
@@ -583,6 +588,7 @@ impl Default for BuildCfg {
         Self {
             max_concurrent: default_build_max_concurrent(),
             cargo_jobs: default_build_cargo_jobs(),
+            test_threads: default_build_test_threads(),
             lease_ttl_secs: default_build_lease_ttl_secs(),
             remote: BuildRemoteCfg::default(),
         }
@@ -596,6 +602,14 @@ fn default_build_max_concurrent() -> usize {
 fn default_build_cargo_jobs() -> usize {
     2
 }
+
+/// 跟遠端同一個數字（`default_remote_test_threads`，issue #202 在 32 vCPU 上實測 8 個執行緒最快）。
+fn default_build_test_threads() -> usize {
+    8
+}
+
+/// `test_threads` 的上限，跟 `[build.remote] test_threads` 一樣。
+pub const MAX_BUILD_TEST_THREADS: usize = 256;
 
 fn default_build_lease_ttl_secs() -> u64 {
     180
@@ -630,6 +644,11 @@ impl BuildCfg {
     /// 實際使用的租約 TTL（秒）。超出範圍是設定錯誤，呼叫端要拒絕，不能夾成負數。
     pub fn lease_ttl(&self) -> Result<i64, String> {
         checked_build_lease_ttl(self.lease_ttl_secs)
+    }
+
+    /// 實際交給 shim 的測試執行緒數：`0`＝不設，其他夾在 [`MAX_BUILD_TEST_THREADS`] 以內。
+    pub fn test_threads(&self) -> usize {
+        self.test_threads.min(MAX_BUILD_TEST_THREADS)
     }
 
     /// 環境變數覆寫（`AM_BUILD_MAX_CONCURRENT`）；看不懂、0 一律不採用，回設定檔的值，設定檔也離譜才回預設。
@@ -696,9 +715,9 @@ mod build_cfg_tests {
             N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         }
 
-        bump("[server]\nherdr_session = 'two'\n\n[build]\nmax_concurrent = 4\ncargo_jobs = 3\n");
+        bump("[server]\nherdr_session = 'two'\n\n[build]\nmax_concurrent = 4\ncargo_jobs = 3\ntest_threads = 6\n");
         let fresh = store.build_fresh().await;
-        assert_eq!((fresh.max_concurrent, fresh.cargo_jobs), (4, 3), "手改的 [build] 讀得到");
+        assert_eq!((fresh.max_concurrent, fresh.cargo_jobs, fresh.test_threads), (4, 3, 6), "手改的 [build] 讀得到");
         assert_eq!(store.get().await.build.max_concurrent, 4, "記憶體裡的 [build] 一起換");
         assert_eq!(store.get().await.server.herdr_session, "one", "其他段不熱載入（要連著投影一起處理）");
 

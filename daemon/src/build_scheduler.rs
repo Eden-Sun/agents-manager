@@ -332,6 +332,7 @@ pub async fn status(app: &Arc<App>) -> Result<Value> {
     Ok(json!({
         "max_concurrent": cfg.max_concurrent(),
         "cargo_jobs": cfg.cargo_jobs,
+        "test_threads": cfg.test_threads(),
         "lease_ttl_secs": cfg.lease_ttl().map_err(anyhow::Error::msg)?,
         "active": active,
         "slots": slots,
@@ -439,7 +440,7 @@ pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(
     match acquire(&app, body.holder.trim(), bot_id.as_deref(), body.purpose.trim(), body.host.trim()).await.map_err(up)? {
         Acquired::Granted { token, expires_at } => {
             let cfg = app.cfg.build_fresh().await;
-            Ok(Json(json!({"granted": true, "token": token, "expires_at": expires_at, "cargo_jobs": cfg.cargo_jobs, "lease_ttl_secs": cfg.lease_ttl().map_err(LcError::Bad)?})))
+            Ok(Json(json!({"granted": true, "token": token, "expires_at": expires_at, "cargo_jobs": cfg.cargo_jobs, "test_threads": cfg.test_threads(), "lease_ttl_secs": cfg.lease_ttl().map_err(LcError::Bad)?})))
         }
         Acquired::Waiting { active, since } => {
             let cfg = app.cfg.build_fresh().await;
@@ -807,6 +808,25 @@ mod tests {
         let s = status(&app).await.unwrap();
         let holders: Vec<String> = s["slots"].as_array().unwrap().iter().map(|v| v["holder"].as_str().unwrap().to_string()).collect();
         assert!(!holders.contains(&"dead-front".to_string()), "{holders:?}");
+    }
+
+    /// issue #813：拿到名額的回應與狀態都帶 `test_threads`（shim 拿它注入 `RUST_TEST_THREADS`），預設 8；設定超過上限的夾到 256。
+    #[tokio::test]
+    async fn the_grant_tells_the_shim_how_many_test_threads_a_slot_gets() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let h = auth_headers(None, Some("test-token"), None);
+        let out = post_acquire(State(app.clone()), h, Form(AcquireIn { holder: "manual:host:813".into(), bot_id: None, purpose: "test".into(), host: "local".into() }))
+            .await
+            .unwrap();
+        assert_eq!(out.0["granted"], true, "{}", out.0);
+        assert_eq!(out.0["test_threads"], 8, "{}", out.0);
+        assert_eq!(status(&app).await.unwrap()["test_threads"], 8);
+
+        let huge = crate::config::BuildCfg { test_threads: 100_000, ..crate::config::BuildCfg::default() };
+        assert_eq!(huge.test_threads(), crate::config::MAX_BUILD_TEST_THREADS);
+        let off = crate::config::BuildCfg { test_threads: 0, ..crate::config::BuildCfg::default() };
+        assert_eq!(off.test_threads(), 0, "0＝不設，交給 libtest 的預設");
     }
 
     fn auth_headers(bot_token: Option<&str>, ui_token: Option<&str>, bot_id: Option<&str>) -> HeaderMap {
