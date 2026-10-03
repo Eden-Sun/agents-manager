@@ -906,7 +906,8 @@ pane 上回過 ok 卻沒送進去（wits-c1-op-xh 14:24、15:33，第二次距 s
 - 前兩種只在本機有：讀不到這顆 bot 在哪台主機就不打（`NotAttempted(host_unreadable, retry)`，#198）——當成遠端會跳過它們改成盲打。
 - **一列回音**：單行、首尾無空白、不含 tab／控制字元／ZWJ／變體選擇符／組合字元，且在 herdr `pane.layout`
   回報的當下欄寬下保證放得進一列（ASCII 一欄、其他兩欄保守估，加 marker 與 6 欄餘裕）。送出後輸入框上方要多出
-  恰好一列 `❯ <原文>`（claude 也接受 `> `；codex 是 `› `），原樣前綴比對、不 trim，且底下沒有續行。
+  恰好一列 `❯ <原文>`（claude 也接受 `> `；codex 是 `› `），原樣前綴比對、不 trim，且底下沒有續行；Grok 的回音行先移除 TUI 加在行尾的
+  右對齊時鐘與 `█` 捲軸符號再比對。
 
 兩種 session log 都是：打字前記下檔案長度當基準，送出後只讀基準之後新增的位元組，要多一筆與送出文字**逐位元組
 相同**的 user 訊息；同時 run 仍須指向同一個 session（claude 另比對路徑），途中換了就是 `Unproven("session_changed")`；
