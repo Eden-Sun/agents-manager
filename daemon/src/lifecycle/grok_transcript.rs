@@ -11,7 +11,8 @@
 //! - **一問一答＝一個回合**：`type: user`、沒有 `synthetic_reason`、內容包在 `<user_query>` 裡的才是對話（`<user_info>`、
 //!   system reminder、壓縮摘要都不是）；之後第一則沒有 `tool_calls` 的 `assistant` 是這一問的回覆。slash 指令不會進這個檔。
 //!   回合的鑰匙是 `turns.(native_session_id, native_turn_id)`：`native_turn_id = p<prompt_index>`；壓縮後重寫進檔、
-//!   沒有 `prompt_index` 的那一問用內容雜湊 `q<hash>`。已經記過的不再記。
+//!   沒有 `prompt_index` 的那一問用穩定的 FNV `q<hash>`（不用 `DefaultHasher`，重啟才不會再記一次）。
+//!   同一句已經在這個 run 裡就不再記；`prompt_index` 被重用到另一句時改用內容鑰匙。已經記過的不再記。
 //! - **先認既有回合**：派工開的 in-flight 回合、relay 先記下的使用者訊息、畫面備援收過的回合，prompt 對得上就補進去
 //!   （備援抓的回覆換成原文），對不上才另開一筆 `external` 回合；那句是別的 agent 交辦的就照 §6.5d 標 `relay_from`。
 
@@ -36,12 +37,7 @@ impl Exchange {
     pub(crate) fn key(&self) -> String {
         match self.prompt_index {
             Some(i) => format!("p{i}"),
-            None => {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                self.prompt.trim().hash(&mut h);
-                format!("q{:016x}", h.finish())
-            }
+            None => format!("q{}", crate::supervisor::cli_refresh::short_hash(self.prompt.trim().as_bytes())),
         }
     }
 }
@@ -126,8 +122,12 @@ pub(crate) fn parse_active(text: &str) -> Vec<ActiveSession> {
 /// 而且要剛好一個、沒被別的 run 綁走。
 pub(crate) fn pick_session(active: &[ActiveSession], pane_pids: &[i32], cwd: Option<&str>, taken: &HashSet<String>) -> Option<String> {
     if !pane_pids.is_empty() {
-        let mut hits: Vec<&str> =
-            active.iter().filter(|s| pane_pids.iter().any(|p| i64::from(*p) == s.pid)).map(|s| s.session_id.as_str()).collect();
+        // 別的在跑 run 已經綁走的 session 不算：pid 重用時，過期的 active_sessions 仍會指著那顆。
+        let mut hits: Vec<&str> = active
+            .iter()
+            .filter(|s| pane_pids.iter().any(|p| i64::from(*p) == s.pid) && !taken.contains(&s.session_id))
+            .map(|s| s.session_id.as_str())
+            .collect();
         hits.dedup();
         return (hits.len() == 1).then(|| hits[0].to_string());
     }
@@ -277,7 +277,7 @@ pub(crate) async fn sync_locked(app: &Arc<App>, run_id: &str) -> anyhow::Result<
     let Some(text) = read_history(app, &host, &grok_home, &sid).await? else { return Ok(Synced::Unavailable) };
     let exchanges = parse_chat_history(&text);
     let pending = exchanges.last().filter(|e| !e.closed).map(|e| e.prompt.clone());
-    let done: HashSet<String> =
+    let mut done: HashSet<String> =
         sqlx::query_scalar::<_, String>("SELECT native_turn_id FROM turns WHERE native_session_id = ? AND native_turn_id IS NOT NULL")
             .bind(&sid)
             .fetch_all(&app.db)
@@ -287,11 +287,23 @@ pub(crate) async fn sync_locked(app: &Arc<App>, run_id: &str) -> anyhow::Result<
     let last_closed = exchanges.iter().rposition(|e| e.closed);
     let mut imported = 0;
     for (i, ex) in exchanges.iter().enumerate() {
-        if !ex.closed || done.contains(&ex.key()) {
+        if !ex.closed {
             continue;
         }
-        if import(app, &bot, &run, &host, &sid, ex, Some(i) == last_closed).await? {
+        let mut key = ex.key();
+        if done.contains(&key) {
+            // 同一把 pN 底下換了另一句（壓縮後 index 從頭用）：改用內容鑰匙，不要把新問題吞掉。
+            if recorded_prompt_matches(app, &sid, &key, &ex.prompt).await? {
+                continue;
+            }
+            key = format!("q{}", crate::supervisor::cli_refresh::short_hash(ex.prompt.trim().as_bytes()));
+            if done.contains(&key) {
+                continue;
+            }
+        }
+        if import(app, &bot, &run, &host, &sid, ex, &key, Some(i) == last_closed).await? {
             imported += 1;
+            done.insert(key);
         }
     }
     Ok(Synced::Read { imported, pending })
@@ -318,8 +330,51 @@ async fn unbound_turns(app: &Arc<App>, run_id: &str) -> anyhow::Result<Vec<(db::
     Ok(out)
 }
 
-async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &str, ex: &Exchange, newest: bool) -> anyhow::Result<bool> {
-    let key = ex.key();
+/// 這把鑰匙底下已存的使用者原文。對不上代表 `prompt_index` 被重用。
+async fn recorded_prompt_matches(app: &Arc<App>, sid: &str, key: &str, prompt: &str) -> anyhow::Result<bool> {
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT m.content FROM messages m JOIN turns t ON t.id = m.turn_id
+          WHERE t.native_session_id = ? AND t.native_turn_id = ? AND m.role = 'user'
+          ORDER BY m.created_at, m.rowid LIMIT 1",
+    )
+    .bind(sid)
+    .bind(key)
+    .fetch_optional(&app.db)
+    .await?;
+    Ok(stored.as_deref().is_some_and(|s| s.trim() == prompt.trim()))
+}
+
+async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &str, ex: &Exchange, key: &str, newest: bool) -> anyhow::Result<bool> {
+    // 壓縮重寫會丟掉 prompt_index，同一句換成內容鑰匙。已經記在這個 run 的不再開一筆。
+    let prior_users: Vec<(String, String)> = sqlx::query_as(
+        "SELECT t.id, m.content FROM turns t JOIN messages m ON m.turn_id = t.id
+          WHERE t.run_id = ? AND m.role = 'user' ORDER BY m.created_at, m.rowid",
+    )
+    .bind(&run.id)
+    .fetch_all(&app.db)
+    .await?;
+    if let Some((turn_id, _)) = prior_users.iter().find(|(_, c)| c.trim() == ex.prompt.trim()) {
+        let bound: Option<String> = sqlx::query_scalar("SELECT native_turn_id FROM turns WHERE id = ?").bind(turn_id).fetch_optional(&app.db).await?;
+        let replies: Vec<String> =
+            sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant'").bind(turn_id).fetch_all(&app.db).await?;
+        // 已綁鑰匙又有回覆：壓縮重播。還沒綁的交給下面，照舊補回合狀態。
+        if bound.is_some() {
+            if !replies.is_empty() || ex.reply.is_none() {
+                return Ok(false);
+            }
+            let conv = db::conversation_id(&app.db, &bot.id).await?;
+            let mut tx = app.db.begin().await?;
+            let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
+            if status == "in_flight" {
+                turn_controller::set_status_on(&mut tx, turn_id, "in_flight", "completed", "grok chat_history.jsonl").await?;
+            }
+            let msg = insert_message_tx(&mut tx, &conv, Some(turn_id), "assistant", ex.reply.as_deref().unwrap(), "transcript", false, None).await?;
+            tx.commit().await?;
+            emit_message_added(app, &bot.id, msg).await;
+            emit_turn(app, turn_id).await;
+            return Ok(true);
+        }
+    }
     let candidates = unbound_turns(app, &run.id).await?;
     let matched = candidates
         .iter()

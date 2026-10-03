@@ -78,6 +78,16 @@ fn slash_commands_are_not_conversation() {
 }
 
 #[test]
+fn a_cut_off_last_line_does_not_become_the_reply() {
+    let whole = one_exchange(Some(0), "問一句", "完整回覆");
+    let cut = format!("{whole}{{\"type\":\"assistant\",\"content\":\"寫到一半");
+    let ex = parse_chat_history(&cut);
+    assert_eq!(ex.len(), 1);
+    assert_eq!(ex[0].reply.as_deref(), Some("完整回覆"));
+    assert!(ex[0].closed);
+}
+
+#[test]
 fn a_truncated_echo_still_matches_its_prompt() {
     let p = "g8（repo Eden-Sun/agents-manager，父 bot agents-manager-mkng2n）。接手任務：前一顆 GPT-6-Luna 子 agent 因額度用完停在半路";
     assert!(prompt_matches("g8（repo Eden-Sun/agents-\nmanager，父 bot agents-manager- …", p));
@@ -319,4 +329,93 @@ async fn a_prompt_still_running_in_the_transcript_stays_in_flight() {
         .await
         .unwrap();
     assert_eq!(replies, vec![want[0].reply.clone().unwrap()], "只有壓縮前那一問的回覆，畫面上的選單沒被存");
+}
+
+/// 沒有 `prompt_index` 的鑰匙必須跨行程穩定。`DefaultHasher` 每趟程序一把種子，daemon 重啟會把同一句當成新回合。
+#[test]
+fn a_prompt_without_an_index_keeps_the_same_key_across_processes() {
+    let ex = parse_chat_history(COMPACTED);
+    let expect = format!("q{}", crate::supervisor::cli_refresh::short_hash(ex[0].prompt.trim().as_bytes()));
+    assert_eq!(ex[0].key(), expect);
+}
+
+fn history_file(home: &Path, cwd: &str, sid: &str) -> PathBuf {
+    home.join("sessions").join(cwd.replace('/', "%2F")).join(sid).join("chat_history.jsonl")
+}
+
+fn one_exchange(index: Option<u64>, prompt: &str, reply: &str) -> String {
+    let idx = index.map(|i| format!(",\"prompt_index\":{i}")).unwrap_or_default();
+    format!(
+        "{{\"type\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"<user_query>\\n{prompt}\\n</user_query>\"}}]{idx}}}\n{{\"type\":\"assistant\",\"content\":{reply:?}}}\n"
+    )
+}
+
+/// 壓縮把已經記過的那一問重寫成沒有 `prompt_index`：同一句不能再記一份。
+#[tokio::test]
+async fn a_compacted_replay_does_not_record_the_same_prompt_again() {
+    let prompt = "第一問的原文，壓縮後不帶 index";
+    let reply = "第一問的回覆";
+    let c = grok_child(Some(&one_exchange(Some(0), prompt, reply))).await;
+    let app = c.env.app.clone();
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
+    let cwd = c.env.repo.to_string_lossy().into_owned();
+    std::fs::write(history_file(&c.home, &cwd, SID), one_exchange(None, prompt, reply)).unwrap();
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 0, pending: None });
+    assert_eq!(messages(&app, &c.conv).await.len(), 2, "壓縮重播不能再插一組 user/assistant");
+}
+
+/// 壓縮後 grok 可能把 `prompt_index` 從頭用。舊的 `p0` 還在，新的另一句也是 0，不能被去重吞掉。
+#[tokio::test]
+async fn a_reused_prompt_index_still_records_the_new_question() {
+    let c = grok_child(Some(&one_exchange(Some(0), "舊的第一問", "舊回覆"))).await;
+    let app = c.env.app.clone();
+    sync_locked(&app, &c.run_id).await.unwrap();
+    let cwd = c.env.repo.to_string_lossy().into_owned();
+    std::fs::write(history_file(&c.home, &cwd, SID), one_exchange(Some(0), "壓縮後全新的一問", "新回覆")).unwrap();
+    let synced = sync_locked(&app, &c.run_id).await.unwrap();
+    assert_eq!(synced, Synced::Read { imported: 1, pending: None });
+    let texts: Vec<String> = messages(&app, &c.conv).await.into_iter().map(|(_, t, _, _)| t).collect();
+    assert!(texts.iter().any(|t| t == "壓縮後全新的一問"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "舊的第一問"), "{texts:?}");
+}
+
+/// pid 被重用、active_sessions 還指著別顆 run 已綁的 session：不能把那顆的對話記到這顆。
+#[tokio::test]
+async fn a_reused_pid_does_not_import_a_session_another_run_holds() {
+    let c = grok_child(None).await;
+    let app = c.env.app.clone();
+    let cwd = c.env.repo.to_string_lossy().into_owned();
+    let pane = format!("pane-{}", c.bot.id);
+    let mut proc = std::process::Command::new("sleep").arg("60").env("HERDR_PANE_ID", &pane).env("HERDR_SESSION", "test").spawn().unwrap();
+    write_session(&c.home, &cwd, SID, i64::from(proc.id() as i32), FRESH);
+    let other_bot = db::ulid();
+    sqlx::query(
+        "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, managed_by, hook_token, env_json, cwd, created_at)
+         VALUES (?,?,'other','grok','[]',0,0,'child','tok','{}',?,?)",
+    )
+    .bind(&other_bot)
+    .bind(&c.env.project_id)
+    .bind(&cwd)
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .unwrap();
+    let other = db::ulid();
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, adopted, native_session_id, started_at) VALUES (?,?,'running','idle',1,?,?)",
+    )
+    .bind(&other)
+    .bind(&other_bot)
+    .bind(SID)
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .unwrap();
+    let synced = sync_locked(&app, &c.run_id).await;
+    let _ = proc.kill();
+    let _ = proc.wait();
+    assert_eq!(synced.unwrap(), Synced::Unavailable);
+    assert!(messages(&app, &c.conv).await.is_empty(), "別顆 grok 的對話不能記到這顆");
+    let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
+    assert_ne!(run.native_session_id.as_deref(), Some(SID));
 }
