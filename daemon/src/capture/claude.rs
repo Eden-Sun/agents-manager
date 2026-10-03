@@ -269,10 +269,10 @@ fn is_status_chrome(s: &str) -> bool {
 /// default 模式是 `⏸ manual mode on · ← for agents`，**沒有** `(shift+tab to cycle)`（#783，2.1.288 真畫面
 /// `claude-2.1.288-manual-mode-finished.txt`）。尾巴（` · ← for agents`、` · ? for shortcuts`、` · 1 shell`）隨狀態在變。
 ///
-/// 認法：`⏵⏵` 開頭的一律算。其餘看第一段（` · ` 之前、去掉可選的 `⏸`）：整段就是 `(shift+tab to cycle)`，
-/// 或去掉這個後綴後**完全等於** `manual mode on`／`plan mode on`／`accept edits on`／`bypass permissions on`。
-/// 窄 pane 折下來、只剩提示的那一行也算。回覆裡中間出現 `mode on`、`bypass permissions on`，或句尾引用
-/// `plan mode on`，都不是模式列。沒有箭頭、第一段剛好是 `bypass permissions on` 的也算（`child_alerts` 原本就認）。
+/// 認法：`⏵⏵` 開頭的一律算。其餘看第一段（` · ` 之前、去掉可選的 `⏸`）：整段以 `(shift+tab to cycle)` 結尾
+///（窄 pane 折下來的提示），或**完全等於** `manual mode on`／`plan mode on`／`accept edits on`／`bypass permissions on`。
+/// 回覆裡中間出現 `mode on`、句尾引用 `plan mode on`、句子中間的 `bypass permissions on` 都不是模式列。
+/// 沒有箭頭、第一段剛好是 `bypass permissions on` 的也算（`child_alerts` 原本就認）。
 pub(crate) fn is_mode_row(s: &str) -> bool {
     let s = s.trim();
     if s.starts_with("⏵⏵") {
@@ -280,7 +280,8 @@ pub(crate) fn is_mode_row(s: &str) -> bool {
     }
     let low = s.to_ascii_lowercase();
     let rest = low.strip_prefix('⏸').unwrap_or(&low);
-    let mut seg = rest.split(" · ").next().unwrap_or(rest).trim();
+    // 第一段必須是已知模式名稱。只看結尾會把 `Quoted status: plan mode on` 當成模式列。
+    let seg = rest.split(" · ").next().unwrap_or(rest).trim();
     // 窄 pane 把提示折到下一行：第一段以 `(shift+tab to cycle)` 結尾（或只剩這段）才算，句子中間提到不算。
     if seg.ends_with("(shift+tab to cycle)") {
         return true;
@@ -474,9 +475,16 @@ mod loose_noise_tests {
         // `contains` 會把回覆「⏸ plan mode on the left…」整行當 chrome 剝掉。
         assert!(!is_mode_row("⏸ plan mode on the left is still default"));
         assert!(!is_noise("⏸ plan mode on the left is still default"));
+        let quoted_status = "⏸ Quoted status: plan mode on";
+        assert!(!is_mode_row(quoted_status), "句尾引用 mode on 也不是狀態列");
+        assert!(!is_noise(quoted_status), "句尾引用 mode on 也不能當 chrome 剝除");
         let screen = "❯ 狀態？\n⏺ 畫面底下寫著：\n  ⏸ plan mode on the left is still default\n  下一步繼續\n";
         let reply = ClaudeCapture.extract_reply(screen).unwrap();
         assert!(reply.contains("plan mode on the left is still default"), "回覆提到 mode on 不能被剝：{reply}");
+
+        let quoted_screen = "❯ 狀態？\n⏺ 引用了舊狀態列：\n  ⏸ Quoted status: plan mode on\n  下一步繼續\n";
+        let quoted_reply = ClaudeCapture.extract_reply(quoted_screen).unwrap();
+        assert!(quoted_reply.contains(quoted_status), "以 mode on 結尾的引用也不能被剝：{quoted_reply}");
     }
 
     /// #788：模式列只有 [`is_mode_row`] 一份，child_alerts 也呼叫它。四種模式（bypass／accept edits／plan／default manual）
