@@ -791,7 +791,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
 | kind | 執行中改 | 怎麼套用 |
 |---|---|---|
 | claude | 可以 | `apply_live_setting` 送 `/model <alias>`、`/effort <level>`；有對話紀錄時 `/model` 跳「Switch model?」確認框，daemon 回讀畫面按 `1`，關不掉就 Esc 並回 `needs_restart` |
-| grok | 可以 | `/model <id> [effort]`、`/effort <level>` |
+| grok | model 可以；effort 要重啟 | `/model <id>`。不送 `/effort`：grok 1.0.46 會把該指令寫成 `[models] default_reasoning_effort`，使用者自己開的 grok 也跟著變。等級只在下次啟動的 `--reasoning-effort` |
 | codex | 可以 | `/model` 兩層選單 + `/fast` 開關，見下 |
 
 **PATCH／live apply 的提交狀態機（#598、#602、#603、#604）**：
@@ -808,8 +808,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
 
 - **daemon 記 runtime**：`start_inner` 在 `agent.start` 前用 `models::model_effort_from_argv` 從最終 argv 讀回，存 `runs.runtime_model/effort/fast`
   （讀 argv 而非抄 bots：`effort_checked` 會丟掉模型不收的等級，`bot.args` 也可能自帶 `-m`）。slash 指令套用成功就同步改。
-  grok TUI 不理 `--reasoning-effort` 也不理 `~/.grok/config.toml` 的 `default_reasoning_effort`（#215，畫面仍是模型預設如 `Grok 4.6 (high)`）：
-  agent 就緒後讀框底，跟 `bots.effort` 不同就送 `/effort <level>`（已相符不打字，免得 `pane_typed` 改 prompt 路徑）。
+  grok 1.0.46（拋棄式 `GROK_HOME`）：`--reasoning-effort`／`--effort` 改這一輪框底、不寫 `config.toml`；`--always-approve` 同樣只作用這一輪。`/effort <level>` 會立刻寫入 `[models] default_reasoning_effort`，`/always-approve` 會寫入 `[ui] permission_mode = "always-approve"`。daemon 不送這兩個 slash。啟動不讀框底補等級。
 - **收編的 pane**三欄是 NULL = 不知道，UI 不比也不標。codex 例外：它把三個值印在狀態列上，reconcile 讀那行補 NULL（`reconcile::fill_codex_runtime`）——
   否則 UI 會拿 bots 頂上，而 `/fast` 是開關，不知道的 tier 等於切不掉。
   **之後也持續校正**（`codex_live::sync_runtime`，跟 `update_watch` 同一個 30 秒巡邏）：狀態列只認視窗底部（窄 pane 把 `Context N%` 折到下一行仍算同一列；再往上的引用不算）。跟記著的一樣就不再讀、不拿鎖；不一樣才拿 bot 鎖重讀後以它為準，有 `fast` 字樣＝開，整行讀得到卻沒有＝關（codex 關掉時省略那個字）；

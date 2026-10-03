@@ -562,8 +562,8 @@ pub fn grok_title_model_effort(title: &str) -> (Option<String>, Option<String>) 
     (model, effort)
 }
 
-/// grok TUI 把實際 effort 畫在框底 `╰── Grok 4.6 (high) · always-approve ─╯`（#215）。
-/// `--reasoning-effort` 與 `default_reasoning_effort` 都被 TUI 忽略，啟動後要靠這行判斷要不要補 `/effort`。
+/// grok TUI 把實際 effort 畫在框底 `╰── Grok 4.6 (high) · always-approve ─╯`。
+/// 讀這行只做觀察。啟動不再因為對不上就送 `/effort`（該 slash 會寫進 config.toml）。
 pub fn grok_effort_from_screen(screen: &str) -> Option<String> {
     for line in screen.lines() {
         let Some(idx) = line.find("Grok ").or_else(|| line.find("grok ")) else { continue };

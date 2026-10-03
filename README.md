@@ -80,7 +80,7 @@ bot 對 bot 送訊息的慣例：走 `POST /api/bots/{id}/prompt` 的要用 `X-A
 
 ![群組聊天](docs/screenshots/361-readme-group-dark.png)
 
-**Bot 設定** — 暱稱可隨時改（不必重啟）。模型 / 強度依 kind：claude 有 `--effort`（low…max，2.1+），模型與強度都能靠 TUI 的 `/model` / `/effort` 當場套用；grok 的 reasoning effort 是 per-model（4.6 才有 `xhigh`，4.5 沒有），同樣當場套用；codex 一律重啟。身份（`cc0`～`cc6`）只對 claude。
+**Bot 設定** — 暱稱可隨時改（不必重啟）。模型 / 強度依 kind：claude 有 `--effort`（low…max，2.1+），模型與強度都能靠 TUI 的 `/model` / `/effort` 當場套用；grok 的 reasoning effort 是 per-model（4.6 才有 `xhigh`，4.5 沒有），改了要重啟（`/effort` 會寫進 `~/.grok/config.toml`）；codex 一律重啟。身份（`cc0`～`cc6`）只對 claude。
 
 ![Bot 設定](docs/screenshots/353-claude-effort.png)
 

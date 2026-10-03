@@ -1356,7 +1356,7 @@ codex 的 `fast` **不再因為不知道現況而拒絕**（拿掉 `unknown_fast
   沒有 active Run，或只改 `name` / `autostart` / `primary` → `false`。前端顯示「需要重新啟動」並提供 §10.3。
 - **當場套用的例外**：只動了下列欄位、Run `running` 且不忙（非 working/blocked、無 in-flight turn）、新值不是清成 `null`（codex `fast` 例外）時，daemon 操作 TUI 並回 `false`；
   任一條件不成立或回讀對不上就回 `true`。細節見 SPEC §4.4a：
-  - grok `effort` → `/effort <level>`；grok `model` → `/model <id> [effort]`。
+  - grok `effort` 不送 slash（`/effort` 會寫進 `~/.grok/config.toml`），回 `needs_restart: true`；grok `model` → `/model <id> [effort]`。
   - claude `model` → `/model <alias>`；有對話紀錄時的「Switch model?」框 daemon 會按 `1` 確認，關不掉就 Esc 並回 `true`（不會把框留在畫面上）。
   - claude `effort` → `/effort <level>`（副作用：claude 存成該帳號新 session 的預設）。
   - codex `model` / `effort` / `fast` → 操作 `/model` 兩層選單與 `/fast` 開關（可一起改，只改 `fast` 也走這條），回讀狀態列確認，`run.runtime_*` 存讀回的值（副作用：寫進 `~/.codex/config.toml`）。
@@ -1607,7 +1607,7 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
 | kind | model | effort | fast |
 |---|---|---|---|
 | `codex` | `-m <model>` | `-c model_reasoning_effort="<effort>"` | 一律帶：`-c service_tier="priority"`（勾）或 `-c service_tier=""`（沒勾），見 SPEC §4.4a |
-| `grok` | `-m <model>` | `--reasoning-effort <effort>`（模型不支援的等級啟動時丟掉）。TUI 不理這個參數也不理 config 的 `default_reasoning_effort`（#215）：就緒後若框底不是設定的等級，daemon 補送 `/effort <level>` | 不注入 |
+| `grok` | `-m <model>` | `--reasoning-effort <effort>`（模型不支援的等級啟動時丟掉）。不補 `/effort`：該 slash 會把 `default_reasoning_effort` 寫進使用者的 config.toml | 不注入 |
 | `claude` | `--model <model>` | `--effort <effort>` | 不注入 |
 
 ### 12.3 `hosts[].attach_command`
