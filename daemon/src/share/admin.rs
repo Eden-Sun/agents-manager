@@ -60,8 +60,9 @@ fn db_err(e: sqlx::Error) -> LcError {
 
 /// 活著、而且是受限的分享用 bot。不存在 404；不是受限 bot 409 `not_shareable`。
 async fn shareable_bot(app: &Arc<App>, id: &str) -> Result<bool, LcError> {
-    let bot = crate::db::bot(&app.db, id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    if bot.as_ref().is_none_or(|b| b.deleted_at.is_some()) {
+    let bot = crate::db::bot(&app.db, id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    if project.is_none_or(|p| p.deleted_at.is_some()) {
         return Err(LcError::NotFound("bot".into()));
     }
     store::is_restricted(&app.db, id).await.map_err(db_err)
@@ -101,6 +102,8 @@ pub async fn get_share(
     Extension(principal): Extension<RequestPrincipal>,
 ) -> Result<Json<Value>, LcError> {
     user_only(&principal)?;
+    let lock = app.bot_lock(&id).await;
+    let _guard = lock.lock_owned().await;
     if !shareable_bot(&app, &id).await? {
         return Ok(Json(json!({"shareable": false, "enabled": false, "url": null, "token_hint": null, "created_at": null, "last_used_at": null})));
     }
@@ -114,6 +117,10 @@ pub async fn post_share(
     Json(body): Json<ShareIn>,
 ) -> Result<Json<Value>, LcError> {
     user_only(&principal)?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("share_admin_before_lock", &id).await;
+    let lock = app.bot_lock(&id).await;
+    let _guard = lock.lock_owned().await;
     if !shareable_bot(&app, &id).await? {
         return Err(not_shareable(&id));
     }
@@ -138,6 +145,10 @@ pub async fn post_rotate(
     Extension(principal): Extension<RequestPrincipal>,
 ) -> Result<Json<Value>, LcError> {
     user_only(&principal)?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("share_admin_before_lock", &id).await;
+    let lock = app.bot_lock(&id).await;
+    let _guard = lock.lock_owned().await;
     if !shareable_bot(&app, &id).await? {
         return Err(not_shareable(&id));
     }

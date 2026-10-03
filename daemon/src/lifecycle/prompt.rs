@@ -422,7 +422,7 @@ pub async fn prompt_from_api(
     // 「清掉再送我這則」：先清掉框裡使用者確認過的那段（`composer_draft::clear`），框空了才打字。
     clear_draft: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, false, Admission::Gated, send_now, clear_draft).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, attachment_ids, relay, false, false, Admission::Gated, send_now, clear_draft, None).await
 }
 
 /// `POST /prompt` with `queue_if_busy:true`: queue a user prompt only while the active run is busy.
@@ -451,6 +451,37 @@ pub async fn prompt_from_api_queue_if_busy(
         Admission::Gated,
         send_now,
         clear_draft,
+        None,
+    )
+    .await
+}
+
+/// Share-portal prompt route. The capability is checked inside `prompt_inner` after taking the bot lock.
+pub async fn prompt_from_share_with_token(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    queue_if_busy: bool,
+    token: &str,
+) -> LcResult<PromptOut> {
+    prompt_inner(
+        app,
+        bot_id,
+        text,
+        client_request_id,
+        None,
+        None,
+        attachment_ids,
+        relay,
+        queue_if_busy,
+        queue_if_busy,
+        Admission::Gated,
+        false,
+        None,
+        Some(token),
     )
     .await
 }
@@ -467,7 +498,7 @@ pub async fn prompt_relayed_queueable(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, false, Admission::Gated, false, None).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), true, false, Admission::Gated, false, None, None).await
 }
 
 /// 排一筆 `queued` turn 等下一回合（只有 AGM 派工走這裡）。
@@ -790,7 +821,7 @@ pub async fn prompt_grouped(
     attachment_ids: &[String],
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, false, Admission::Gated, false, None).await
+    prompt_inner(app, bot_id, text, client_request_id, group_id, deliver, attachment_ids, RelaySrc::trusted(relay_from), false, false, Admission::Gated, false, None, None).await
 }
 
 /// 插隊送出（issue #103）：照舊寫 turn／訊息進資料庫，但**不等 idle**——對 pane 送 claude 2.1.275 的
@@ -820,7 +851,7 @@ pub async fn prompt_control_plane(
     client_request_id: &str,
     relay_from: Option<&str>,
 ) -> LcResult<PromptOut> {
-    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, false, Admission::ControlPlane, false, None).await
+    prompt_inner(app, bot_id, text, client_request_id, None, None, &[], RelaySrc::trusted(relay_from), false, false, Admission::ControlPlane, false, None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -844,12 +875,21 @@ async fn prompt_inner(
     want_send_now: bool,
     // 先清掉框裡的這段草稿（使用者在網頁上按「清掉再送我這則」）。
     clear_draft: Option<&str>,
+    // 分享 capability 必須在 bot 鎖裡重驗，避免撤銷前通過的請求之後才送達。
+    share_token: Option<&str>,
 ) -> LcResult<PromptOut> {
     let deliver = deliver.unwrap_or(text);
     #[cfg(test)]
     super::race_point::hit("prompt_before_bot_lock", bot_id).await;
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    if let Some(token) = share_token {
+        let valid = crate::share::store::resolve(&app.db, token).await.map_err(up)?;
+        if valid.as_deref() != Some(bot_id) {
+            return Err(LcError::NotFound("bot".into()));
+        }
+        crate::share::store::touch(&app.db, bot_id).await;
+    }
     // #708：移交出去的專案不收 prompt（也不排隊）：送到了也是另一顆 daemon 的回合。
     crate::handoff::refuse(&app.db, bot_id).await?;
     // 這顆如果是 AGM 因為閒置收起來的（§6.11），先用 `--resume` 把它叫醒再送——「下次要用再叫醒」

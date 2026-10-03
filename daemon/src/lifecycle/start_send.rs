@@ -55,16 +55,56 @@ pub async fn prompt_starting_or_queue(
     relay: RelaySrc<'_>,
     queue_if_busy: bool,
 ) -> LcResult<PromptOut> {
+    prompt_starting_or_queue_authorized(app, bot_id, text, client_request_id, attachment_ids, relay, queue_if_busy, None).await
+}
+
+/// Share-portal variant: the token is rechecked while holding the same bot lock used by rotation and deletion.
+pub async fn prompt_starting_or_queue_with_share_token(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    queue_if_busy: bool,
+    token: &str,
+) -> LcResult<PromptOut> {
+    prompt_starting_or_queue_authorized(app, bot_id, text, client_request_id, attachment_ids, relay, queue_if_busy, Some(token)).await
+}
+
+async fn prompt_starting_or_queue_authorized(
+    app: &Arc<App>,
+    bot_id: &str,
+    text: &str,
+    client_request_id: &str,
+    attachment_ids: &[String],
+    relay: RelaySrc<'_>,
+    queue_if_busy: bool,
+    share_token: Option<&str>,
+) -> LcResult<PromptOut> {
     let accepted = {
         let lock = app.bot_lock(bot_id).await;
         let _g = lock.lock().await;
+        if let Some(token) = share_token {
+            let valid = crate::share::store::resolve(&app.db, token).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+            if valid.as_deref() != Some(bot_id) {
+                return Err(LcError::NotFound("bot".into()));
+            }
+            crate::share::store::touch(&app.db, bot_id).await;
+        }
         accept_locked(app, bot_id, text, client_request_id, attachment_ids, relay).await?
     };
     match accepted {
         Accepted::Normal if queue_if_busy => {
-            prompt_from_api_queue_if_busy(app, bot_id, text, client_request_id, attachment_ids, relay, false, None).await
+            match share_token {
+                Some(token) => super::prompt::prompt_from_share_with_token(app, bot_id, text, client_request_id, attachment_ids, relay, true, token).await,
+                None => prompt_from_api_queue_if_busy(app, bot_id, text, client_request_id, attachment_ids, relay, false, None).await,
+            }
         }
-        Accepted::Normal => prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, relay, false, None).await,
+        Accepted::Normal => match share_token {
+            Some(token) => super::prompt::prompt_from_share_with_token(app, bot_id, text, client_request_id, attachment_ids, relay, false, token).await,
+            None => prompt_from_api(app, bot_id, text, client_request_id, attachment_ids, relay, false, None).await,
+        },
         Accepted::Queued(out, mark) => {
             if let Some(mark) = mark {
                 spawn_start(app, bot_id, mark);

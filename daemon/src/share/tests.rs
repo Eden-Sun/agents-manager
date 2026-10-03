@@ -63,6 +63,62 @@ async fn set_base(app: &Arc<App>) {
         .unwrap();
 }
 
+async fn raw_upload(base: &str, token: &str, name: &str, data: Vec<u8>) -> u16 {
+    client()
+        .post(format!("{base}/s/{token}/api/upload"))
+        .query(&[("name", name)])
+        .body(data)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+async fn concurrent_quota_uploads(app: Arc<App>, bot_id: String, token: String, bytes: Vec<u8>) -> (u16, u16) {
+    let base = serve(portal::router(app)).await;
+    let url = format!("{base}/s/{token}/api/upload");
+    let second_status = Arc::new(tokio::sync::Mutex::new(None));
+    let second_done = Arc::new(tokio::sync::Notify::new());
+    let at_gate = Arc::new(tokio::sync::Notify::new());
+    let second_at_lock = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (slot, done, reached, release_gate, url2, body2) = (
+        second_status.clone(),
+        second_done.clone(),
+        at_gate.clone(),
+        release.clone(),
+        url.clone(),
+        bytes.clone(),
+    );
+    let second_waiting = second_at_lock.clone();
+    crate::lifecycle::race_point::arm("share_upload_before_authority_lock", &format!("{bot_id}:second.txt"), move || async move {
+        second_waiting.notify_one();
+    });
+    crate::lifecycle::race_point::arm("share_upload_after_authority_lock", &bot_id, move || async move {
+        tokio::spawn(async move {
+            let status = client().post(url2).query(&[("name", "second.txt")]).body(body2).send().await.unwrap().status().as_u16();
+            *slot.lock().await = Some(status);
+            done.notify_one();
+        });
+        reached.notify_one();
+        release_gate.notified().await;
+    });
+    let first_req = tokio::spawn(async move { raw_upload(&base, &token, "first.txt", bytes).await });
+    at_gate.notified().await;
+    second_at_lock.notified().await;
+    assert!(second_status.lock().await.is_none(), "the second upload waits for the first quota decision and write");
+    release.notify_one();
+    let first = first_req.await.unwrap();
+    if second_status.lock().await.is_none() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), second_done.notified())
+            .await
+            .expect("the serialized second upload should finish after the first releases its guard");
+    }
+    let second = second_status.lock().await.take().unwrap();
+    (first, second)
+}
+
 // ───────────── token ─────────────
 
 #[tokio::test]
@@ -1000,4 +1056,251 @@ fn deny_rules_match_like_gitignore_in_the_test_helper() {
     assert_eq!(deny_hits(&["Read(//d/outbox/O/**)"], "/d/outbox/B/x"), None);
     assert_eq!(deny_hits(&["Read(//d/a\\*b)"], "/d/aXb"), None);
     assert!(deny_hits(&["Read(//d/**/.env)"], "/d/.env").is_some());
+}
+
+#[tokio::test]
+async fn concurrent_uploads_cannot_exceed_the_byte_quota() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "byte-quota").await;
+    let token = shared(&e.app, &b.id).await;
+    let inbox = std::path::Path::new(&store::workspace(&e.app.db, &b.id).await.unwrap().unwrap()).join("inbox");
+    std::fs::create_dir_all(&inbox).unwrap();
+    let seed = std::fs::File::create(inbox.join("seed.txt")).unwrap();
+    seed.set_len(190 * 1024 * 1024).unwrap();
+
+    let statuses = concurrent_quota_uploads(e.app.clone(), b.id.clone(), token, vec![b'a'; 9 * 1024 * 1024]).await;
+    assert_eq!([statuses.0, statuses.1].iter().filter(|s| **s == 200).count(), 1, "statuses={statuses:?}");
+    assert_eq!([statuses.0, statuses.1].iter().filter(|s| **s == 507).count(), 1, "statuses={statuses:?}");
+    let used: u64 = std::fs::read_dir(&inbox).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum();
+    assert!(used <= portal::INBOX_MAX_BYTES, "used={used}");
+}
+
+#[tokio::test]
+async fn concurrent_uploads_cannot_exceed_the_file_quota() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "file-quota").await;
+    let token = shared(&e.app, &b.id).await;
+    let inbox = std::path::Path::new(&store::workspace(&e.app.db, &b.id).await.unwrap().unwrap()).join("inbox");
+    std::fs::create_dir_all(&inbox).unwrap();
+    for n in 0..299 {
+        std::fs::write(inbox.join(format!("seed-{n}.txt")), b"x").unwrap();
+    }
+
+    let statuses = concurrent_quota_uploads(e.app.clone(), b.id.clone(), token, b"x".to_vec()).await;
+    assert_eq!([statuses.0, statuses.1].iter().filter(|s| **s == 200).count(), 1, "statuses={statuses:?}");
+    assert_eq!([statuses.0, statuses.1].iter().filter(|s| **s == 507).count(), 1, "statuses={statuses:?}");
+    let count = std::fs::read_dir(&inbox).unwrap().count();
+    assert!(count <= portal::INBOX_MAX_FILES, "count={count}");
+}
+
+#[tokio::test]
+async fn an_upload_admitted_before_rotation_is_rejected_after_rotation() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "upload-revoke").await;
+    let old = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (entered_hook, release_hook) = (entered.clone(), release.clone());
+    crate::lifecycle::race_point::arm("share_upload_after_bot_for", &b.id, move || async move {
+        entered_hook.notify_one();
+        release_hook.notified().await;
+    });
+    let (base2, old2) = (base.clone(), old.clone());
+    let pending = tokio::spawn(async move { raw_upload(&base2, &old2, "late.txt", b"late bytes".to_vec()).await });
+    entered.notified().await;
+
+    let new = store::rotate(&e.app.db, &b.id).await.unwrap().unwrap();
+    assert_eq!(store::resolve(&e.app.db, &old).await.unwrap(), None);
+    release.notify_one();
+
+    assert_eq!(pending.await.unwrap(), 404, "舊 token 的請求不能在輪替後寫入");
+    let inbox = std::path::Path::new(&store::workspace(&e.app.db, &b.id).await.unwrap().unwrap()).join("inbox");
+    assert!(!inbox.exists() || std::fs::read_dir(inbox).unwrap().count() == 0);
+    assert_eq!(store::resolve(&e.app.db, &new).await.unwrap(), Some(b.id));
+}
+
+#[tokio::test]
+async fn a_message_admitted_before_disable_is_not_committed_after_disable() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "message-revoke").await;
+    let token = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (entered_hook, release_hook) = (entered.clone(), release.clone());
+    crate::lifecycle::race_point::arm("share_send_after_bot_for", &b.id, move || async move {
+        entered_hook.notify_one();
+        release_hook.notified().await;
+    });
+    let (base2, token2) = (base.clone(), token.clone());
+    let pending = tokio::spawn(async move {
+        client().post(format!("{base2}/s/{token2}/api/messages")).json(&json!({"text": "late message", "client_request_id": "revoke-race"})).send().await.unwrap().status().as_u16()
+    });
+    entered.notified().await;
+
+    store::disable(&e.app.db, &b.id).await.unwrap();
+    release.notify_one();
+
+    assert_eq!(pending.await.unwrap(), 404);
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE relay_from = ?").bind(SHARE_SENDER).fetch_one(&e.app.db).await.unwrap();
+    assert_eq!(n, 0, "撤銷前已通過 token lookup 的舊訊息沒有落地");
+}
+
+#[tokio::test]
+async fn a_revoked_token_cannot_emit_the_pending_sse_status() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "stream-revoke").await;
+    let token = shared(&e.app, &b.id).await;
+    let mut pending = portal::stream_for_test(&e.app, &token, &b.id, Some(json!({"status": "idle"})));
+    store::disable(&e.app.db, &b.id).await.unwrap();
+    assert!(portal::next_for_test(&mut pending).await.is_none(), "revoked pending status must not escape");
+}
+
+#[tokio::test]
+async fn a_revoked_token_cannot_emit_a_queued_sse_bus_event() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "queued-stream-revoke").await;
+    let token = shared(&e.app, &b.id).await;
+    let mut stream = portal::stream_for_test(&e.app, &token, &b.id, None);
+    store::disable(&e.app.db, &b.id).await.unwrap();
+    let ev = crate::state::WsEvent { seq: 1, kind: "bot_status".into(), data: json!({"bot_id": b.id}) };
+    assert!(portal::map_for_test(&mut stream, &ev).await.is_none(), "a queued bus event must be fenced too");
+}
+
+#[tokio::test]
+async fn deleting_then_restoring_a_shared_bot_does_not_restore_its_old_token() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "delete-restore-share").await;
+    sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&b.id).execute(&e.app.db).await.unwrap();
+    let old = shared(&e.app, &b.id).await;
+    let mut stream = portal::stream_for_test(&e.app, &old, &b.id, None);
+
+    crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+    assert_eq!(store::resolve(&e.app.db, &old).await.unwrap(), None);
+    assert!(store::share(&e.app.db, &b.id).await.unwrap().is_none(), "delete durably removes the capability");
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(1), portal::next_for_test(&mut stream)).await.unwrap().is_none(), "delete promptly kicks the old SSE");
+
+    crate::api::restore_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+    assert_eq!(store::resolve(&e.app.db, &old).await.unwrap(), None, "restore must not revive an old link");
+    let fresh = store::enable(&e.app.db, &b.id).await.unwrap().unwrap();
+    assert_ne!(fresh, old);
+}
+
+#[tokio::test]
+async fn interrupted_bot_delete_recovery_revokes_the_share_capability() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "delete-recovery-share").await;
+    let old = shared(&e.app, &b.id).await;
+    let host = db::bot_host(&e.app.db, &b.id).await.unwrap();
+    let intent = crate::delete_intents::begin(&e.app, "delete_bot", &b.id, &host, &json!({"bots": []})).await.unwrap();
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&b.id).execute(&e.app.db).await.unwrap();
+
+    let app = tt::restart_app(&e).await;
+    crate::delete_intents::recover_host(&app, &host).await;
+
+    assert_eq!(store::resolve(&app.db, &old).await.unwrap(), None);
+    assert!(store::share(&app.db, &b.id).await.unwrap().is_none());
+    assert_eq!(crate::intents::get(&app.db, &intent).await.unwrap().unwrap().status, "done");
+}
+
+#[tokio::test]
+async fn enabling_share_after_the_bot_was_deleted_fails_the_live_check() {
+    let e = tt::env().await;
+    set_base(&e.app).await;
+    let b = restricted_bot(&e.app, &e.project_id, "enable-delete-race").await;
+    sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&b.id).execute(&e.app.db).await.unwrap();
+    let base = serve(crate::api::router(e.app.clone())).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (entered_hook, release_hook) = (entered.clone(), release.clone());
+    crate::lifecycle::race_point::arm("share_admin_before_lock", &b.id, move || async move {
+        entered_hook.notify_one();
+        release_hook.notified().await;
+    });
+    let (base2, bot_id) = (base.clone(), b.id.clone());
+    let pending = tokio::spawn(async move {
+        client().post(format!("{base2}/api/bots/{bot_id}/share")).header("X-AM-Token", "test-token").json(&json!({"enabled": true})).send().await.unwrap()
+    });
+    entered.notified().await;
+    crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+    release.notify_one();
+    let response = pending.await.unwrap();
+    assert_eq!(response.status(), 404, "陳舊的 enable 不能回傳新 URL");
+    assert!(store::share(&e.app.db, &b.id).await.unwrap().is_none(), "陳舊請求不能重建 bot_shares");
+}
+
+#[tokio::test]
+async fn rotating_share_after_the_bot_was_deleted_fails_the_live_check() {
+    let e = tt::env().await;
+    set_base(&e.app).await;
+    let b = restricted_bot(&e.app, &e.project_id, "rotate-delete-race").await;
+    sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&b.id).execute(&e.app.db).await.unwrap();
+    let old = shared(&e.app, &b.id).await;
+    let base = serve(crate::api::router(e.app.clone())).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (entered_hook, release_hook) = (entered.clone(), release.clone());
+    crate::lifecycle::race_point::arm("share_admin_before_lock", &b.id, move || async move {
+        entered_hook.notify_one();
+        release_hook.notified().await;
+    });
+    let (base2, bot_id) = (base.clone(), b.id.clone());
+    let pending = tokio::spawn(async move {
+        client().post(format!("{base2}/api/bots/{bot_id}/share/rotate")).header("X-AM-Token", "test-token").send().await.unwrap()
+    });
+    entered.notified().await;
+    crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+    release.notify_one();
+    let response = pending.await.unwrap();
+    assert_eq!(response.status(), 404, "陳舊的 rotate 不能回傳新 URL");
+    assert_eq!(store::resolve(&e.app.db, &old).await.unwrap(), None);
+    assert!(store::share(&e.app.db, &b.id).await.unwrap().is_none(), "陳舊 rotate 不能重建已刪 bot 的 capability");
+}
+
+#[tokio::test]
+async fn project_deletion_makes_existing_shares_unusable_and_blocks_new_tokens() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "deleted-project-share").await;
+    let old = shared(&e.app, &b.id).await;
+    sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&e.project_id).execute(&e.app.db).await.unwrap();
+    assert_eq!(store::resolve(&e.app.db, &old).await.unwrap(), None);
+    let base = serve(crate::api::router(e.app.clone())).await;
+    let response = client()
+        .post(format!("{base}/api/bots/{}/share", b.id))
+        .header("X-AM-Token", "test-token")
+        .json(&json!({"enabled": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404, "deleted project blocks stale share management requests");
+    store::disable(&e.app.db, &b.id).await.unwrap();
+    assert_eq!(store::enable(&e.app.db, &b.id).await.unwrap(), None);
+    assert_eq!(store::rotate(&e.app.db, &b.id).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn interrupted_project_delete_recovery_revokes_all_share_capabilities() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "project-delete-recovery-share").await;
+    let old = shared(&e.app, &b.id).await;
+    let host = db::project(&e.app.db, &e.project_id).await.unwrap().unwrap().host;
+    let intent = crate::delete_intents::begin(
+        &e.app,
+        "delete_project",
+        &e.project_id,
+        &host,
+        &json!({"bots": [{"id": b.id.clone(), "managed_by": "user"}]}),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&e.project_id).execute(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&b.id).execute(&e.app.db).await.unwrap();
+
+    let app = tt::restart_app(&e).await;
+    crate::delete_intents::recover_host(&app, &host).await;
+
+    assert_eq!(store::resolve(&app.db, &old).await.unwrap(), None);
+    assert!(store::share(&app.db, &b.id).await.unwrap().is_none());
+    assert_eq!(crate::intents::get(&app.db, &intent).await.unwrap().unwrap().status, "done");
 }

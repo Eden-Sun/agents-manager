@@ -1742,7 +1742,8 @@ async fn patch_project(
 }
 
 pub(crate) async fn soft_delete_child(app: &Arc<App>, bot_id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL").bind(db::now()).bind(bot_id).execute(&app.db).await.map(|_| ())
+    sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL").bind(db::now()).bind(bot_id).execute(&app.db).await?;
+    crate::share::revoke_bot_share(app, bot_id).await
 }
 
 /// `?confirm=supervisor`：刪 AGM 的 bot／專案要明講（issue #406）。
@@ -1812,6 +1813,11 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
         crate::delete_intents::abandon(&app, &intent, "delete_in_config refused").await;
         return Err(e);
     }
+    let mut share_retry = false;
+    if let Err(e) = crate::share::revoke_project_shares(&app, &id).await {
+        tracing::error!(project = %id, error = %e, "project deleted but its share links could not all be revoked; retrying in the background");
+        share_retry = true;
+    }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("delete_project_after_commit", &id).await;
     // 輸入框草稿跟著專案走：群組草稿與每顆 bot 的草稿都清掉，其他瀏覽器也會收到清除事件。
@@ -1870,10 +1876,10 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
         }
         tracing::info!(bot = %bot.name, project = %id, "project deleted; its child bot went with it");
     }
-    let retry_failed = !failed.is_empty();
+    let retry_failed = !failed.is_empty() || share_retry;
     if retry_failed {
         // 各路徑自己的記憶體重試 task 換成 intent 的重試（#355）：intent 留著，背景用 recovery 補完（含清目錄），daemon 死掉開機也接得回。
-        crate::delete_intents::spawn_retry(app.clone(), intent.clone(), "some child bots could not be soft-deleted".into());
+        crate::delete_intents::spawn_retry(app.clone(), intent.clone(), "some project cleanup could not be completed".into());
     }
     // user bot 由 config 投影軟刪，但 bots/<id>/ 沒人清：本機要等下次開機、遠端永遠不掃（#313）。已確認皆無 active run、鎖在手。
     // 只清「確定軟刪」的；讀不到就留著。清不掉（ssh 失敗等）不算成功，列進 kept_dirs。
@@ -1890,7 +1896,7 @@ async fn delete_project(State(app): State<Arc<App>>, Path(id): Path<String>) -> 
     drop(guards);
     app.emit("project_changed", json!({"project_id": id})).await;
     if retry_failed {
-        return Err(any_err("project deleted, but some child bots could not be soft-deleted yet; retrying in the background"));
+        return Err(any_err("project deleted, but some cleanup could not be completed yet; retrying in the background"));
     }
     crate::delete_intents::complete(&app, &intent).await;
     let mut out = json!({});
@@ -2699,6 +2705,10 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     let draft_keys: Vec<String> = std::iter::once(&id).chain(children.iter().map(|c| &c.id)).map(|b| format!("bot:{b}")).collect();
     crate::drafts::clear_keys(&app, &draft_keys).await;
     let mut child_retry = false;
+    if let Err(e) = crate::share::revoke_bot_share(&app, &id).await {
+        tracing::error!(bot = %bot.name, error = %e, "bot deleted but its share capability could not be revoked; retrying in the background");
+        child_retry = true;
+    }
     // 目錄只在「確定沒有 active run」時才 purge（#210）；不確定的留著，列在回應的 `kept_dirs`，下次開機的
     // `purge_deleted_bot_dirs` 在 run 確定結束之後再收。
     let mut removed_children = Vec::new();
@@ -2737,9 +2747,9 @@ pub(crate) async fn delete_bot(State(app): State<Arc<App>>, Path(id): Path<Strin
     if bot.managed_by == "child" {
         app.emit("project_changed", json!({"project_id": bot.project_id})).await;
     }
-    // intent：有 child 軟刪沒寫成就留著、背景補完（含清目錄）；否則收成 done。
+    // intent：有 child 軟刪或 share capability 清理沒寫成就留著、背景補完；否則收成 done。
     if child_retry {
-        crate::delete_intents::spawn_retry(app.clone(), intent.clone(), "some child bots could not be soft-deleted".into());
+        crate::delete_intents::spawn_retry(app.clone(), intent.clone(), "some bot cleanup could not be completed".into());
     } else {
         crate::delete_intents::complete(&app, &intent).await;
     }
@@ -2846,6 +2856,8 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
     if bot.deleted_at.is_none() {
         return Err(LcError::conflict("bot is not deleted", json!({"bot_id": id})));
     }
+    // A restored restricted bot keeps its profile, but a public capability from before deletion never returns.
+    crate::share::revoke_bot_share(&app, &id).await.map_err(any_err)?;
     // A pending restart from before deletion is not permission to start a bot after an explicit restore.
     // The recovery worker also takes this bot lock and rechecks the intent status after acquiring it.
     sqlx::query(
@@ -6601,6 +6613,28 @@ mod delete_bot_tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn deleting_a_project_revokes_its_shared_bot_capabilities() {
+        let e = crate::testing::env().await;
+        let bot_id = a_bot(&e, "shared-project-bot", "user").await;
+        in_config(&e, &[(&bot_id, "shared-project-bot")]).await;
+        let root = crate::testing::scratch_dir("api-project-share-root");
+        let root = root.to_string_lossy().into_owned();
+        e.app.cfg.update(|cfg| {
+            cfg.share.folders_root = Some(root.clone());
+            Ok(())
+        }).await.unwrap();
+        let folder = crate::share::folder::ShareFolderIn::New { name: "shared-project-bot".into() };
+        let (workspace, created_folder) = crate::share::admin::reserve_restricted(&e.app, &bot_id, &folder, false).await.unwrap();
+        crate::share::admin::finish_restricted(&e.app, &bot_id, &workspace, created_folder, true).await;
+        let token = crate::share::store::enable(&e.app.db, &bot_id).await.unwrap().unwrap();
+
+        delete_project(State(e.app.clone()), Path(e.project_id.clone())).await.unwrap();
+
+        assert_eq!(crate::share::store::resolve(&e.app.db, &token).await.unwrap(), None);
+        assert!(crate::share::store::share(&e.app.db, &bot_id).await.unwrap().is_none(), "project deletion removes the token row");
     }
 
     async fn a_running_run(app: &Arc<App>, bot_id: &str) -> String {

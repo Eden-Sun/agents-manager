@@ -31,7 +31,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::{broadcast, OwnedMutexGuard, Semaphore};
 
 use crate::db;
 use crate::lifecycle::{self, LcError};
@@ -238,7 +238,7 @@ fn bad(reason: &str, message: &str) -> Response {
 async fn bot_for(st: &Portal, token: &str) -> Result<String, Response> {
     match resolve_token(&st.app.db, &st.token_lookups, token).await {
         Ok(Some(id)) => {
-            touch_share_if_stale(st, &id).await;
+            touch_share_if_stale(&st.app, &st.limits, &id).await;
             Ok(id)
         }
         Ok(None) => Err(not_found()),
@@ -250,21 +250,55 @@ async fn bot_for(st: &Portal, token: &str) -> Result<String, Response> {
     }
 }
 
-async fn touch_share_if_stale(st: &Portal, bot_id: &str) {
+async fn touch_share_if_stale(app: &Arc<App>, limits: &Arc<Limits>, bot_id: &str) {
     let window = Duration::from_secs(60);
-    if st.limits.take(bot_id, "touch", 1, window).is_some() {
+    if limits.take(bot_id, "touch", 1, window).is_some() {
         return;
     }
     let fresh = sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM bot_shares WHERE bot_id = ? AND last_used_at >= ?)")
         .bind(bot_id)
         .bind(db::iso_in(-60))
-        .fetch_one(&st.app.db)
+        .fetch_one(&app.db)
         .await;
     match fresh {
-        Ok(0) => store::touch(&st.app.db, bot_id).await,
+        Ok(0) => store::touch(&app.db, bot_id).await,
         Ok(_) => {}
         Err(e) => tracing::warn!(bot = %bot_id, error = %e, "share last-used telemetry check failed"),
     }
+}
+
+/// Serialize capability validation with token rotation, disable, and bot deletion.
+async fn authority_lock_app(
+    app: &Arc<App>,
+    token_lookups: &Arc<Semaphore>,
+    limits: &Arc<Limits>,
+    token: &str,
+    bot_id: &str,
+) -> Result<OwnedMutexGuard<()>, Response> {
+    let lock = app.bot_lock(bot_id).await;
+    let guard = lock.lock_owned().await;
+    match resolve_token(&app.db, token_lookups, token).await {
+        Ok(Some(id)) if id == bot_id => {
+            touch_share_if_stale(app, limits, bot_id).await;
+            Ok(guard)
+        }
+        Ok(_) => Err(not_found()),
+        Err(TokenLookupError::Saturated) => Err(unavailable()),
+        Err(TokenLookupError::Database(e)) => {
+            tracing::warn!(error = %e, "share token recheck failed");
+            Err(unavailable())
+        }
+    }
+}
+
+async fn authority_lock(st: &Portal, token: &str, bot_id: &str) -> Result<OwnedMutexGuard<()>, Response> {
+    authority_lock_app(&st.app, &st.token_lookups, &st.limits, token, bot_id).await
+}
+
+async fn authorized_bot(st: &Portal, token: &str) -> Result<(String, OwnedMutexGuard<()>), Response> {
+    let bot_id = bot_for(st, token).await?;
+    let guard = authority_lock(st, token, &bot_id).await?;
+    Ok((bot_id, guard))
 }
 
 const PLACEHOLDER_PAGE: &str = "<!doctype html><html lang=\"zh-Hant\"><head><meta charset=\"utf-8\">\
@@ -272,9 +306,10 @@ const PLACEHOLDER_PAGE: &str = "<!doctype html><html lang=\"zh-Hant\"><head><met
 <body><p>分享頁還沒打包進這個版本（web/dist/share.html）。</p></body></html>";
 
 async fn page(State(st): State<Portal>, Path(token): Path<String>) -> Response {
-    if let Err(r) = bot_for(&st, &token).await {
-        return r;
-    }
+    let (_bot_id, _authority) = match authorized_bot(&st, &token).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let html = crate::assets::embedded("share.html").unwrap_or_else(|| PLACEHOLDER_PAGE.as_bytes().to_vec());
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -303,8 +338,8 @@ async fn status_of(app: &Arc<App>, bot_id: &str) -> &'static str {
 }
 
 async fn info(State(st): State<Portal>, Path(token): Path<String>) -> Response {
-    let bot_id = match bot_for(&st, &token).await {
-        Ok(id) => id,
+    let (bot_id, _authority) = match authorized_bot(&st, &token).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
     let name = match db::bot(&st.app.db, &bot_id).await {
@@ -364,8 +399,8 @@ struct PageQuery {
 }
 
 async fn list_messages(State(st): State<Portal>, Path(token): Path<String>, Query(q): Query<PageQuery>) -> Response {
-    let bot_id = match bot_for(&st, &token).await {
-        Ok(id) => id,
+    let (bot_id, _authority) = match authorized_bot(&st, &token).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
     let db = &st.app.db;
@@ -432,6 +467,12 @@ async fn send_message(State(st): State<Portal>, Path(token): Path<String>, Json(
         Ok(id) => id,
         Err(r) => return r,
     };
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("share_send_after_bot_for", &bot_id).await;
+    let authority = match authority_lock(&st, &token, &bot_id).await {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
     let crid = b.client_request_id.trim();
     if crid.is_empty() || crid.len() > 64 || !crid.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c)) {
         return bad("bad_client_request_id", "client_request_id 要 1～64 個 [A-Za-z0-9-_.:]");
@@ -464,7 +505,8 @@ async fn send_message(State(st): State<Portal>, Path(token): Path<String>, Json(
     // 跟主 UI 的冪等鍵分開一個命名空間。
     let crid = format!("share:{crid}");
     let src = lifecycle::RelaySrc::trusted(Some(SHARE_SENDER));
-    match lifecycle::prompt_starting_or_queue(&st.app, &bot_id, &composed, &crid, &[], src, true).await {
+    drop(authority);
+    match lifecycle::prompt_starting_or_queue_with_share_token(&st.app, &bot_id, &composed, &crid, &[], src, true, &token).await {
         Ok(out) => Json(json!({"accepted": true, "message_id": out.message_id, "delivery": out.delivery})).into_response(),
         Err(LcError::NotFound(_)) => not_found(),
         // 細節（pane、run、herdr）不給外面看：只說現在收不下，等一下再試。
@@ -493,8 +535,8 @@ async fn inbox_has(app: &Arc<App>, bot_id: &str, name: &str) -> bool {
 }
 
 async fn events(State(st): State<Portal>, Path(token): Path<String>) -> Response {
-    let bot_id = match bot_for(&st, &token).await {
-        Ok(id) => id,
+    let (bot_id, authority) = match authorized_bot(&st, &token).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
     let Some(share_slot) = st.share_streams.try_acquire(&bot_id) else {
@@ -506,44 +548,60 @@ async fn events(State(st): State<Portal>, Path(token): Path<String>) -> Response
     if let Some(wait) = st.limits.take(&bot_id, "stream", 30, Duration::from_secs(60)) {
         return too_many(wait, "stream");
     }
-    let first = json!({"status": status_of(&st.app, &bot_id).await});
     let s = Stream {
         app: st.app.clone(),
         token,
         bot_id,
         token_lookups: st.token_lookups.clone(),
+        limits: st.limits.clone(),
         rx: st.app.subscribe(),
         kicks: kicks().subscribe(),
         _slot: slot,
         _share_slot: share_slot,
-        pending: Some(first),
+        pending: Some(Value::Null),
+        emit_guard: Some(authority),
+        revoked: false,
     };
     let stream = futures::stream::unfold(s, |mut s| async move { s.next().await.map(|ev| (Ok::<_, std::convert::Infallible>(ev), s)) });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(20))).into_response()
 }
 
-struct Stream {
+pub(crate) struct Stream {
     app: Arc<App>,
     token: String,
     bot_id: String,
     token_lookups: Arc<Semaphore>,
+    limits: Arc<Limits>,
     rx: broadcast::Receiver<crate::state::WsEvent>,
     kicks: broadcast::Receiver<String>,
     _slot: tokio::sync::OwnedSemaphorePermit,
     _share_slot: ShareStreamPermit,
     pending: Option<Value>,
+    emit_guard: Option<OwnedMutexGuard<()>>,
+    revoked: bool,
 }
 
 impl Stream {
     async fn still_valid(&self) -> bool {
-        matches!(resolve_token(&self.app.db, &self.token_lookups, &self.token).await, Ok(Some(id)) if id == self.bot_id)
+        authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await.is_ok()
     }
 
     /// 下一個要送的事件；`None`＝收掉這條連線（token 失效、bus 關了）。
     async fn next(&mut self) -> Option<Event> {
-        if let Some(first) = self.pending.take() {
+        if self.pending.take().is_some() {
+            let guard = match self.emit_guard.take() {
+                Some(g) => g,
+                None => match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
+                    Ok(g) => g,
+                    Err(_) => return None,
+                },
+            };
+            let first = json!({"status": status_of(&self.app, &self.bot_id).await});
+            self.emit_guard = Some(guard);
             return Some(Event::default().event("status").data(first.to_string()));
         }
+        // Keep the previous event fenced until the consumer polls for another item.
+        self.emit_guard.take();
         loop {
             let recheck = tokio::time::sleep(STREAM_RECHECK);
             tokio::select! {
@@ -552,8 +610,18 @@ impl Stream {
                         if let Some(out) = self.map(&ev).await {
                             return Some(out);
                         }
+                        if self.revoked {
+                            return None;
+                        }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => return Some(Event::default().event("resync").data("{}")),
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let guard = match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
+                            Ok(g) => g,
+                            Err(_) => return None,
+                        };
+                        self.emit_guard = Some(guard);
+                        return Some(Event::default().event("resync").data("{}"));
+                    }
                     Err(broadcast::error::RecvError::Closed) => return None,
                 },
                 k = self.kicks.recv() => {
@@ -571,11 +639,18 @@ impl Stream {
         }
     }
 
-    async fn map(&self, ev: &crate::state::WsEvent) -> Option<Event> {
+    async fn map(&mut self, ev: &crate::state::WsEvent) -> Option<Event> {
         if ev.data.get("bot_id").and_then(Value::as_str) != Some(self.bot_id.as_str()) {
             return None;
         }
-        match ev.kind.as_str() {
+        let guard = match authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await {
+            Ok(g) => g,
+            Err(_) => {
+                self.revoked = true;
+                return None;
+            }
+        };
+        let out = match ev.kind.as_str() {
             "message_added" => {
                 let m = ev.data.get("message")?;
                 let role = m.get("role").and_then(Value::as_str)?;
@@ -588,8 +663,40 @@ impl Stream {
             }
             "bot_status" => Some(Event::default().event("status").data(json!({"status": status_of(&self.app, &self.bot_id).await}).to_string())),
             _ => None,
+        };
+        if out.is_some() {
+            self.emit_guard = Some(guard);
         }
+        out
     }
+}
+
+#[cfg(test)]
+pub(crate) fn stream_for_test(app: &Arc<App>, token: &str, bot_id: &str, pending: Option<Value>) -> Stream {
+    Stream {
+        app: app.clone(),
+        token: token.to_string(),
+        bot_id: bot_id.to_string(),
+        token_lookups: Arc::new(Semaphore::new(MAX_TOKEN_LOOKUPS)),
+        limits: Arc::new(Limits::default()),
+        rx: app.subscribe(),
+        kicks: kicks().subscribe(),
+        _slot: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
+        _share_slot: Arc::new(ShareStreamLimits::default()).try_acquire(bot_id).unwrap(),
+        pending,
+        emit_guard: None,
+        revoked: false,
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn next_for_test(stream: &mut Stream) -> Option<Event> {
+    stream.next().await
+}
+
+#[cfg(test)]
+pub(crate) async fn map_for_test(stream: &mut Stream, ev: &crate::state::WsEvent) -> Option<Event> {
+    stream.map(ev).await
 }
 
 /// 收得下的檔案種類：副檔名決定，內容要對得上（圖片／PDF／Office 看檔頭，文字檔要是 UTF-8、不能有 NUL）。
@@ -640,6 +747,8 @@ async fn upload(
         Ok(id) => id,
         Err(r) => return r,
     };
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("share_upload_after_bot_for", &bot_id).await;
     let Ok(_permit) = st.uploads.clone().try_acquire_owned() else {
         return too_many(2, "upload");
     };
@@ -672,6 +781,14 @@ async fn upload(
     if let Some(wait) = st.limits.take(&bot_id, "upload", UPLOADS_PER_MIN, Duration::from_secs(60)) {
         return too_many(wait, "upload");
     }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("share_upload_before_authority_lock", &format!("{bot_id}:{name}")).await;
+    let _authority = match authority_lock(&st, &token, &bot_id).await {
+        Ok(g) => g,
+        Err(r) => return r,
+    };
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("share_upload_after_authority_lock", &bot_id).await;
     let stored = format!("{}-{name}", db::ulid());
     let Some(folder) = folder_of(&st.app, &bot_id).await else { return unavailable() };
     let (file_name, len) = (stored.clone(), data.len());
@@ -699,8 +816,8 @@ async fn upload(
 }
 
 async fn files(State(st): State<Portal>, Path(token): Path<String>) -> Response {
-    let bot_id = match bot_for(&st, &token).await {
-        Ok(id) => id,
+    let (bot_id, _authority) = match authorized_bot(&st, &token).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
     let Some(dir) = crate::outbox::dir_for(&st.app.data_dir, &bot_id) else { return not_found() };
@@ -752,8 +869,8 @@ fn take_fail_files_scan_task_for_test(bot_id: &str) -> bool {
 }
 
 async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, String)>) -> Response {
-    let bot_id = match bot_for(&st, &token).await {
-        Ok(id) => id,
+    let (bot_id, _authority) = match authorized_bot(&st, &token).await {
+        Ok(v) => v,
         Err(r) => return r,
     };
     // 只認 outbox 第一層的檔名；子目錄、`..`、隱藏檔一律不給。
