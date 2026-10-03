@@ -17,7 +17,8 @@ pub const REQUIRED_TOOLS: [&str; 6] = ["herdr", "rtk", "zsh", "bun", "jq", "gh"]
 const CLAUDE_FILES: [(&str, &str); 4] =
     [("settings.json", CRITICAL), ("statusline-command.sh", CRITICAL), ("CLAUDE.md", WARN), ("RTK.md", WARN)];
 /// `settings.json` 該有的頂層鍵（只看有沒有，不比內容：內容是各主機自己的）。
-const CLAUDE_KEYS: [(&str, &str); 3] = [("statusLine", CRITICAL), ("hooks", CRITICAL), ("permissions", WARN)];
+const CLAUDE_KEYS: [(&str, &str); 4] =
+    [("statusLine", CRITICAL), ("hooks", CRITICAL), ("permissions", WARN), ("defaultMode", WARN)];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BaselineIssue {
@@ -92,22 +93,68 @@ done
 bl_has() { [ -e "$1" ] && printf 1 || printf 0; }
 bl_plugin() { [ -f "$1" ] && grep -Eq "\"$2@[^\"]*\"[[:space:]]*:[[:space:]]*true" "$1" 2>/dev/null && printf 1 || printf 0; }
 bl_key() { [ -f "$1" ] && grep -Eq "\"$2\"[[:space:]]*:" "$1" 2>/dev/null && printf 1 || printf 0; }
-for d in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude" "$HOME"/.claude-cc[0-9]*; do
-  [ -n "$d" ] && [ -d "$d" ] || continue
-  case "$d" in "$HOME/.claude") n=default ;; "$HOME"/.claude-cc*) n=${d##*/.claude-} ;; *) n=custom ;; esac
-  # `.claude-cc<數字>*` 的 glob 什麼名字都收：身分名只認一般字元，空白、換行這類會讓欄位錯位或偽造 `AM_BL` 行的整個跳過。
-  # 路徑本身不輸出（evaluate 不用它）。
-  case "$n" in *[!A-Za-z0-9_.-]*) continue ;; esac
+# `features.hooks = true`，或 `[features]` 表裡的 `hooks = true`。false／沒寫＝0。不開 login shell。
+bl_features_hooks() {
+  [ -f "$1" ] || { printf 0; return; }
+  if grep -Eq '^[[:space:]]*features\.hooks[[:space:]]*=[[:space:]]*true([[:space:]]*#.*)?$' "$1" 2>/dev/null; then
+    printf 1; return
+  fi
+  in_features=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=$(printf '%s' "$line" | tr -d '\r')
+    case $line in
+      \[features\]*) in_features=1 ;;
+      \[*) in_features=0 ;;
+      *)
+        if [ "$in_features" = 1 ]; then
+          trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//')
+          case $trimmed in
+            'hooks = true'*|'hooks=true'*) printf 1; return ;;
+          esac
+        fi
+        ;;
+    esac
+  done < "$1"
+  printf 0
+}
+# 同一個目錄只查一次。身分名只認一般字元；路徑不印出來。
+bl_seen="|"
+bl_claude() {
+  d=$1
+  n=$2
+  case "$n" in *[!A-Za-z0-9_.-]*) return ;; esac
+  [ -n "$d" ] && [ -d "$d" ] || return
+  case "$bl_seen" in *"|$d|"*) return ;; esac
+  bl_seen="${bl_seen}${d}|"
   printf 'AM_BL claude-dir %s\n' "$n"
   for f in settings.json statusline-command.sh CLAUDE.md RTK.md; do
     printf 'AM_BL claude-file %s %s %s\n' "$n" "$f" "$(bl_has "$d/$f")"
   done
-  for k in statusLine hooks permissions; do
+  for k in statusLine hooks permissions defaultMode; do
     printf 'AM_BL claude-key %s %s %s\n' "$n" "$k" "$(bl_key "$d/settings.json" "$k")"
   done
   for pl in $MAC_ONLY_PLUGINS; do
     printf 'AM_BL claude-plugin %s %s %s\n' "$n" "$pl" "$(bl_plugin "$d/settings.json" "$pl")"
   done
+}
+for d in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude" "$HOME"/.claude-cc[0-9]*; do
+  [ -n "$d" ] && [ -d "$d" ] || continue
+  case "$d" in "$HOME/.claude") n=default ;; "$HOME"/.claude-cc*) n=${d##*/.claude-} ;; *) n=custom ;; esac
+  bl_claude "$d" "$n"
+done
+# 登入 shell 的 alias（PROBE_SH 留在 $al；單獨跑這段時改讀 ~/.zshrc，不再開一次 login shell）。
+# cc0–cc6 若 CLAUDE_CONFIG_DIR 不在上面的 glob（例如 ~/.claude-work）也要查。
+[ -n "${al:-}" ] || al=$(cat "$HOME/.zshrc" 2>/dev/null || true)
+printf '%s\n' "$al" | grep -E '(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]=' | while IFS= read -r line; do
+  name=$(printf '%s\n' "$line" | sed -n 's/.*\(cc[0-6]\)=.*/\1/p' | head -1)
+  dir=$(printf '%s\n' "$line" | sed -n 's/.*CLAUDE_CONFIG_DIR=["'\'']\{0,1\}\([^[:space:]"'\'']*\).*/\1/p' | head -1)
+  case "$dir" in
+    \$HOME/*) dir="$HOME/${dir#\$HOME/}" ;;
+    "~/"*) dir="$HOME/${dir#~/}" ;;
+  esac
+  case "$dir" in /*) ;; *) continue ;; esac
+  [ -n "$name" ] || continue
+  bl_claude "$dir" "$name"
 done
 CX="${CODEX_HOME:-$HOME/.codex}"
 printf 'AM_BL codex-file config.toml %s\n' "$(bl_has "$CX/config.toml")"
@@ -117,6 +164,7 @@ if [ -f "$CX/config.toml" ] && grep -Eq '^[[:space:]]*approval_policy[[:space:]]
 else
   printf 'AM_BL codex-key approval_policy 0\n'
 fi
+printf 'AM_BL codex-key features.hooks %s\n' "$(bl_features_hooks "$CX/config.toml")"
 printf 'AM_BL grok-file config.toml %s\n' "$(bl_has "${GROK_HOME:-$HOME/.grok}/config.toml")"
 printf 'AM_BL herdr-file config.toml %s\n' "$(bl_has "${XDG_CONFIG_HOME:-$HOME/.config}/herdr/config.toml")"
 if [ -f "$HOME/.gitconfig" ] && grep -Eq 'https?://([^/@[:space:]]+:[^/@[:space:]]+|(gh[pousr]_|github_pat_|glpat-)[A-Za-z0-9_-]+)@' "$HOME/.gitconfig" 2>/dev/null; then

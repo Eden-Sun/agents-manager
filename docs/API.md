@@ -1708,7 +1708,8 @@ Project 底下所有存活 bot 的訊息合併，以插入順序（`rowid`）倒
   最後一次偵測失敗，**或** `checked_at` 比 6 小時 15 分（一個重量週期＋15 分寬限）還舊（讀不懂也算）。`stale` 在讀取時計算（不存），
   從沒量過的主機維持 `baseline: null`，失敗不會憑空造一份。
   `issues: []` = 跟基準一致；`null` = 這趟探測沒跑完（逾時、被截斷），未知，不是「全缺」；整個 `baseline` 為 `null` = 還沒量過。
-  `id` 穩定可比對（`tool.rtk`、`claude.cc1.settings.json:statusLine`、`codex.config.toml:approval_policy`、`gitconfig.token`…）。
+  `id` 穩定可比對（`tool.rtk`、`claude.cc1.settings.json:statusLine`、`claude.<身分>.settings.json:defaultMode`、`codex.config.toml:approval_policy`、`codex.config.toml:features.hooks`、`gitconfig.token`…）。
+  claude 身分含 `~/.claude`、`~/.claude-cc<N>`，以及 alias `cc0`–`cc6` 指到的 `CLAUDE_CONFIG_DIR`（目錄可以不在那個 glob）。`features.hooks` 要是 `true`（`features.hooks = true` 或 `[features]` 裡 `hooks = true`）。
   `os` 是那台的 `uname -s`；Mac 專用項（`claude.<身分>.plugin:imessage`／`:discord`，plugin 沒啟用）只有 `os=Darwin` 才會列，Linux／不知道是什麼系統一律不列。
   有差異（`issues` 非空）時推一則 `ops_alert`（`source=daemon`，`reason=host_baseline`，`subject`＝主機名，payload 帶 `issues`、`critical` 數）進 AGM inbox；
   event_key 是 `ops_alert:daemon:host_baseline:<host>:<差異 id 集合的雜湊>`——同一份差異（與順序無關）只推一次，差異變了才再推；一致或未知（`issues: null`）不推。
