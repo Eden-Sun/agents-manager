@@ -263,6 +263,7 @@ do_preflight() {
         fi
     done < <(git -C "$SRC_REPO" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
     [ -n "$left" ] && warn "這些 worktree 有沒推的 commit 或沒提交的改動，目標看不到（切換前推上去或放棄）：${left}"
+    return 0
 }
 
 do_freeze() {
@@ -273,7 +274,7 @@ do_freeze() {
         label=$(basename "$plist" .plist)
         "$LAUNCHCTL" list "$label" >/dev/null 2>&1 || continue
         echo "$label" >> "$STATE/launchd.txt"
-        x "$LAUNCHCTL" bootout "gui/$(id -u)/$label"
+        x "$LAUNCHCTL" bootout "gui/$(id -u)/$label" || die "停用 launchd job 失敗：$label"
     done
     log "載入中的 com.agm.*：$(tr '\n' ' ' < "$STATE/launchd.txt")（dev.agents-manager.herdr-* 不動：已移交的 hub 專案還在 Mac 的 herdr 裡跑）"
 }
@@ -282,14 +283,14 @@ do_record() {
     local args=() l
     for l in "${LABELS[@]}"; do args+=(--label "$l"); done
     shelper snapshot "${args[@]}" --out "$STATE/snapshot.json" | sed 's/^/    /' || die "快照失敗"
-    write_running "$STATE/snapshot.json" "$STATE/running.json" | sed 's/^/    /'
+    write_running "$STATE/snapshot.json" "$STATE/running.json" | sed 's/^/    /' || die "在跑名單寫入失敗"
 }
 
 do_stop_bots() {
     DOWN_T0=$(date +%s); echo "$DOWN_T0" > "$STATE/down-since"
     # 先把「不要它跑」寫進去：不然看門狗會在我們停掉之後把協調者／巡檢拉回來（SPEC §18.9）。
-    x shelper api POST /api/supervisor/stop
-    x shelper api POST /api/supervisor/responder/stop
+    x shelper api POST /api/supervisor/stop || die "協調者停不下來"
+    x shelper api POST /api/supervisor/responder/stop || die "巡檢停不下來"
     local id
     for id in $(shelper active --snapshot "$STATE/snapshot.json"); do
         x shelper api POST "/api/bots/$id/stop" >/dev/null || warn "stop $id 失敗（下面等 run 結束時會再看）"
@@ -355,7 +356,8 @@ do_transcripts() {
         fi
     done
     # 協調者的工作目錄（persona、handoff.md、log）。部署檔（CLAUDE.md、runtime.json、bin/agm）由 resume 的 setup 用目標路徑重寫。
-    x "$RSYNC" -a --exclude '*.lease-token.*' --exclude '*.lock' "$SRC_DATA/supervisor/" "$TARGET:$DST_DATA/supervisor/"
+    x "$RSYNC" -a --exclude '*.lease-token.*' --exclude '*.lock' "$SRC_DATA/supervisor/" "$TARGET:$DST_DATA/supervisor/" \
+        || die "supervisor 目錄傳輸失敗：$STATE 可重跑 transcripts"
 }
 
 RSTATE_REL="cutover"
@@ -364,17 +366,27 @@ rstate() { echo "$DST_DATA/$RSTATE_REL/$(basename "$STATE")"; }
 do_ship() {
     local id files=()
     for id in $(project_ids "$STATE/snapshot.json"); do files+=("$(moved_of "$id")"); done
-    x rsh "mkdir -p -m 700 $(q "$(rstate)")"
-    x "$RSYNC" -a "${files[@]}" "$HELPER" "$STATE/snapshot.json" "$STATE/running.json" "$TARGET:$(rstate)/"
-    # 固定檔名：import 叫的是 project-transfer，PROJECT_TRANSFER 指到別的檔名時也一樣。
-    x "$RSYNC" -a "$PT" "$TARGET:$(rstate)/project-transfer"
-    x "$RSYNC" -a "$STATE/host-state/" "$TARGET:$(rstate)/host-state/"
-    x "$RSYNC" -a "$HOST_STATE_TOOL" "$TARGET:$(rstate)/host-state-transfer.py"
-    x touch "$STATE/host-state-shipped"
+    if [ "$EXECUTE" = 1 ] && [ -f "$STATE/ship-transferred" ]; then
+        log "所有 bundle 已傳完；接著清理來源副本"
+    else
+        x rsh "mkdir -p -m 700 $(q "$(rstate)")" || die "目標 cutover 目錄建立失敗"
+        x "$RSYNC" -a "${files[@]}" "$HELPER" "$STATE/snapshot.json" "$STATE/running.json" "$TARGET:$(rstate)/" \
+            || die "專案 bundle 傳輸失敗：$STATE 可重跑 ship"
+        # 固定檔名：import 叫的是 project-transfer，PROJECT_TRANSFER 指到別的檔名時也一樣。
+        x "$RSYNC" -a "$PT" "$TARGET:$(rstate)/project-transfer" || die "project-transfer 工具傳輸失敗：$STATE 可重跑 ship"
+        x "$RSYNC" -a "$STATE/host-state/" "$TARGET:$(rstate)/host-state/" || die "host-state 傳輸失敗：$STATE 可重跑 ship"
+        x "$RSYNC" -a "$HOST_STATE_TOOL" "$TARGET:$(rstate)/host-state-transfer.py" || die "host-state 工具傳輸失敗：$STATE 可重跑 ship"
+        x touch "$STATE/host-state-shipped" || die "host-state 傳輸標記寫入失敗"
+        # Write this before cleanup. If cleanup dies after removing only some local bundles,
+        # retrying ship must finish cleanup without rsync reading those removed sources.
+        x touch "$STATE/ship-transferred" || die "傳輸完成標記寫入失敗"
+    fi
     # bundle 內含對話：傳過去就刪 Mac 這份（回滾用的是 Mac 沒動過的 DB，不是 bundle）。
-    for id in $(project_ids "$STATE/snapshot.json"); do x rm -f "$(bundle_of "$id")" "$(moved_of "$id")"; done
+    for id in $(project_ids "$STATE/snapshot.json"); do
+        x rm -f "$(bundle_of "$id")" "$(moved_of "$id")" || die "已傳 bundle 的本機清理失敗：$STATE 可重跑 ship"
+    done
     # 輔助狀態包含 UI token，只保留目標端的安全副本。
-    x rm -rf "$STATE/host-state"
+    x rm -rf "$STATE/host-state" || die "已傳 host-state 的本機清理失敗：$STATE 可重跑 ship"
 }
 
 do_stop_dst() { x stop_dst_daemon || die "停不了目標 daemon"; }
@@ -478,8 +490,11 @@ do_restore() {
         db=$("$PY" -c 'import json,sys; print(next(b for b in json.load(open(sys.argv[1]))["backups"] if ".sqlite3.pre-transfer-" in b))' "$STATE/import-$first.json") || die "import-$first.json 裡找不到 DB 備份"
         cfg=$("$PY" -c 'import json,sys; print(next((b for b in json.load(open(sys.argv[1]))["backups"] if "config.toml.pre-transfer-" in b), ""))' "$STATE/import-$first.json")
         # 第一次 import 之前的樣子＝切換前的目標。daemon 停著，-wal／-shm 一起清掉才不會被重放。
-        x rsh "set -e; cp $(q "$db") $(q "$DST_DATA/agents-manager.sqlite3"); rm -f $(q "$DST_DATA/agents-manager.sqlite3-wal") $(q "$DST_DATA/agents-manager.sqlite3-shm")"
-        [ -n "$cfg" ] && x rsh "cp $(q "$cfg") $(q "$DST_DATA/config.toml")"
+        x rsh "set -e; cp $(q "$db") $(q "$DST_DATA/agents-manager.sqlite3"); rm -f $(q "$DST_DATA/agents-manager.sqlite3-wal") $(q "$DST_DATA/agents-manager.sqlite3-shm")" \
+            || die "目標 DB 還原失敗"
+        if [ -n "$cfg" ]; then
+            x rsh "cp $(q "$cfg") $(q "$DST_DATA/config.toml")" || die "目標 config.toml 還原失敗"
+        fi
     else
         log "沒有 project import 紀錄；只檢查是否要還原 host-state"
     fi
@@ -520,7 +535,8 @@ do_thaw() {
     local label
     [ -f "$STATE/launchd.txt" ] || return 0
     while read -r label; do
-        [ -n "$label" ] && x "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$label.plist"
+        [ -n "$label" ] || continue
+        x "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$label.plist" || die "launchd job 還原失敗：${label}"
     done < "$STATE/launchd.txt"
 }
 
@@ -665,7 +681,7 @@ fi
 for s in $STEPS; do
     should_run "$s" || { log "== ${s}（--from ${FROM}，跳過）"; continue; }
     step_begin "$s"
-    "do_${s//-/_}"
+    "do_${s//-/_}" || die "步驟 ${s} 失敗；修好後用 --from ${s} --state-dir ${STATE} 接著做"
     step_end "$s"
 done
 print_times

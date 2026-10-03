@@ -429,22 +429,34 @@ def install(args):
             fail("這份 backup 已 rollback，請為新的移交使用新的 backup 目錄")
         copied_now = []
         try:
+            # Journal every missing outbox path before its first write. If the process is killed
+            # after os.replace but before returning, a retry and later rollback still know which
+            # matching file belongs to this transfer. Paths already present before this install
+            # stay unclaimed so rollback never removes target-owned files.
+            planned = {item["path"] for item in meta.get("outbox_added") or []}
+            for row, item in zip(manifest.get("outbox_files") or [], outbox_plan):
+                if item["action"] == "copy" and row["path"] not in planned:
+                    meta.setdefault("outbox_added", []).append({"path": row["path"], "sha256": row["sha256"]})
+                    planned.add(row["path"])
+            write_json(backup / "backup.json", meta)
+
             atomic_write(target / "config.toml", merged_text.encode())
             atomic_write(target / "ui-token", (bundle / "ui-token").read_bytes())
             outbox_root = target / "outbox"
             if manifest.get("outbox_present") and not outbox_root.exists():
                 outbox_root.mkdir(mode=0o700)
             for row in manifest.get("outbox_files") or []:
-                if row["path"] not in {item["path"] for item in meta.get("outbox_added") or []}:
-                    rel = safe_relative(row["path"])
-                    dst = outbox_root / Path(*rel.parts)
-                    if dst.exists():
-                        continue
-                    write_new(dst, (bundle / "outbox" / Path(*rel.parts)).read_bytes(), 0o600)
-                    item = {"path": rel.as_posix(), "sha256": row["sha256"]}
+                rel = safe_relative(row["path"])
+                dst = outbox_root / Path(*rel.parts)
+                if dst.exists():
+                    continue
+                item = {"path": rel.as_posix(), "sha256": row["sha256"]}
+                if item["path"] not in planned:
                     meta.setdefault("outbox_added", []).append(item)
-                    copied_now.append(item)
+                    planned.add(item["path"])
                     write_json(backup / "backup.json", meta)
+                write_new(dst, (bundle / "outbox" / Path(*rel.parts)).read_bytes(), 0o600)
+                copied_now.append(item)
             if tomllib.loads((target / "config.toml").read_text()) != merged_obj:
                 fail("套用後 config.toml 重讀結果不符")
             meta["installed"] = True
