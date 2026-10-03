@@ -63,8 +63,7 @@ pub type Registry = Mutex<Vec<HostShell>>;
 /// `App.pane_live`：`(host, pane_id)` → 上次即時複查的時間與結果。
 pub type LiveCache = Mutex<std::collections::HashMap<(String, String), (std::time::Instant, LiveVerdict)>>;
 
-/// 打字前即時複查的結果能重用多久。鍵盤同步是一鍵一個請求，每一鍵都跑 `ps`＋`lsof` 太慢；
-/// 幾秒的窗口內剛開起來的 port 會晚一點才鎖住，換來打字不卡。
+/// `ReadOnly` 可保守重用多久。`Typeable` 不快取，否則 pane 剛開始 listen 時仍能在窗口內收到按鍵。
 const LIVE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {
@@ -213,31 +212,39 @@ pub enum LiveVerdict {
 /// 現在的 pane 在別的 tab／workspace 就當成已經不在（`Gone`）。
 pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str, expect: Option<(&str, &str)>) -> Option<LiveVerdict> {
     let key = (host.to_string(), pane_id.to_string());
-    if let Some((at, v)) = app.pane_live.lock().await.get(&key).copied() {
+    let (client, _) = client_for(app, host).await.ok()?;
+    let Some(pane) = client.pane_get(pane_id).await.ok()? else {
+        return Some(LiveVerdict::Gone);
+    };
+    if expect.is_some_and(|(ws, tab)| (!ws.is_empty() && pane.workspace_id != ws) || (!tab.is_empty() && pane.tab_id != tab)) {
+        return Some(LiveVerdict::Gone);
+    }
+    if pane.agent.as_deref().is_some_and(|a| !a.is_empty()) {
+        return Some(LiveVerdict::Agent);
+    }
+    if host != crate::config::LOCAL_HOST {
+        return Some(LiveVerdict::Typeable);
+    }
+    // Pane identity and agent ownership must be fresh because ids are reused. A cached Typeable
+    // would also allow keys for a few seconds after a server starts listening, so only cache the
+    // fail-closed ReadOnly result.
+    if let Some((at, LiveVerdict::ReadOnly)) = app.pane_live.lock().await.get(&key).copied() {
         if at.elapsed() < LIVE_TTL {
-            return Some(v);
+            return Some(LiveVerdict::ReadOnly);
         }
     }
-    let (client, _) = client_for(app, host).await.ok()?;
-    let verdict = match client.pane_get(pane_id).await.ok()? {
-        None => LiveVerdict::Gone,
-        Some(p) if expect.is_some_and(|(ws, tab)| (!ws.is_empty() && p.workspace_id != ws) || (!tab.is_empty() && p.tab_id != tab)) => LiveVerdict::Gone,
-        Some(p) if p.agent.as_deref().is_some_and(|a| !a.is_empty()) => LiveVerdict::Agent,
-        Some(_) if host != crate::config::LOCAL_HOST => LiveVerdict::Typeable,
-        Some(_) => {
-            let probe = app.probe();
-            let dump = probe.dump(app, host).await.ok()?;
-            let shell = client.pane_shell(pane_id).await.ok()?;
-            let facts = crate::panes::facts_from(&shell, &dump, pane_id)?;
-            let ports = probe.listen_ports(host, &facts.pids).await?;
-            if !ports.is_empty() {
-                LiveVerdict::ReadOnly
-            } else {
-                LiveVerdict::Typeable
-            }
-        }
-    };
-    app.pane_live.lock().await.insert(key, (std::time::Instant::now(), verdict));
+    let probe = app.probe();
+    let dump = probe.dump(app, host).await.ok()?;
+    let shell = client.pane_shell(pane_id).await.ok()?;
+    let facts = crate::panes::facts_from(&shell, &dump, pane_id)?;
+    let ports = probe.listen_ports(host, &facts.pids).await?;
+    let verdict = if !ports.is_empty() { LiveVerdict::ReadOnly } else { LiveVerdict::Typeable };
+    let mut cache = app.pane_live.lock().await;
+    if verdict == LiveVerdict::ReadOnly {
+        cache.insert(key, (std::time::Instant::now(), verdict));
+    } else {
+        cache.remove(&key);
+    }
     Some(verdict)
 }
 
@@ -360,8 +367,7 @@ pub async fn read(app: &Arc<App>, host: &str, pane_id: &str, source: &str, lines
 /// in `pane.send_text` is a pasted line break to herdr. Empty `text` + `enter` = "just press Enter".
 pub async fn send_text(app: &Arc<App>, host: &str, pane_id: &str, text: &str, enter: bool) -> LcResult<()> {
     check_text(text)?;
-    registered(app, host, pane_id, Access::Type).await?;
-    let (client, _) = client_for(app, host).await?;
+    let client = client_for_typeable(app, host, pane_id).await?;
     if !text.is_empty() {
         client.pane_send_text(pane_id, text).await.map_err(up)?;
     }
@@ -374,10 +380,20 @@ pub async fn send_text(app: &Arc<App>, host: &str, pane_id: &str, text: &str, en
 /// `POST /api/hosts/:name/shells/:pane_id/keys` — names go to herdr verbatim, like `POST /bots/:id/keys`.
 pub async fn send_keys(app: &Arc<App>, host: &str, pane_id: &str, keys: &[String]) -> LcResult<()> {
     check_keys(keys)?;
-    registered(app, host, pane_id, Access::Type).await?;
-    let (client, _) = client_for(app, host).await?;
+    let client = client_for_typeable(app, host, pane_id).await?;
     let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
     client.pane_send_keys(pane_id, &refs).await.map_err(up)
+}
+
+/// Pin validation and the following input to the same Herdr session. Resolving the current session
+/// a second time without this comparison could validate an old pane then send to a reused id elsewhere.
+async fn client_for_typeable(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<HerdrClient> {
+    let shell = registered(app, host, pane_id, Access::Type).await?;
+    let (client, session) = client_for(app, host).await?;
+    if session != shell.herdr_session {
+        return Err(LcError::NotFound("shell".into()));
+    }
+    Ok(client)
 }
 
 /// 關掉這個 daemon 自己開的 shell（登入流程之類的內部呼叫）。記憶體清單沒有時等同**沒確認**的 [`close_confirmed`]。
@@ -716,6 +732,87 @@ mod tests {
         // pane 已經不在：404。
         set(HostShell { pane_id: "ws-404:pGone".into(), ..reg(&p.tab_id, &session) }).await;
         assert_eq!(code(registered(app, "local", "ws-404:pGone", Access::Type).await), "404");
+    }
+
+    #[tokio::test]
+    async fn a_cached_typeable_verdict_does_not_authorize_after_an_agent_appears() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let session = app.session_for_host("local").await.unwrap();
+        let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+        *app.host_shells.lock().await = vec![HostShell {
+            host: "local".into(),
+            herdr_session: session,
+            workspace_id: pane.workspace_id.clone(),
+            tab_id: pane.tab_id.clone(),
+            pane_id: pane.pane_id.clone(),
+            cwd: "/tmp".into(),
+            created_at: crate::db::now(),
+        }];
+        env.herdr.set_shell_pid(&pane.pane_id, 41101);
+        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+
+        registered(app, "local", &pane.pane_id, Access::Type).await.expect("initial shell is typeable");
+        env.herdr.set_agent("kid", &pane.pane_id, false);
+
+        let result = send_text(app, "local", &pane.pane_id, "must not reach the agent", false).await;
+        assert!(matches!(result, Err(LcError::Forbidden(ref body)) if body["error"] == "agent_pane"), "agent appeared after the cached check: {result:?}");
+        assert!(env.herdr.calls_to("pane.send_text").is_empty(), "cached Typeable must not send after pane state changes");
+    }
+
+    #[tokio::test]
+    async fn a_cached_typeable_verdict_does_not_authorize_a_reused_pane_id() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let session = app.session_for_host("local").await.unwrap();
+        let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+        *app.host_shells.lock().await = vec![HostShell {
+            host: "local".into(),
+            herdr_session: session,
+            workspace_id: pane.workspace_id.clone(),
+            tab_id: pane.tab_id.clone(),
+            pane_id: pane.pane_id.clone(),
+            cwd: "/tmp".into(),
+            created_at: crate::db::now(),
+        }];
+        env.herdr.set_shell_pid(&pane.pane_id, 41101);
+        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+        registered(app, "local", &pane.pane_id, Access::Type).await.expect("initial shell is typeable");
+
+        {
+            let mut tabs = env.herdr.tabs.lock().unwrap();
+            let tab = tabs.iter_mut().find(|t| t.panes.contains(&pane.pane_id)).expect("mock pane tab");
+            tab.tab_id = "another-tab".into();
+        }
+
+        let result = send_keys(app, "local", &pane.pane_id, &["ctrl+c".to_string()]).await;
+        assert!(matches!(result, Err(LcError::NotFound(_))), "same id in another tab is not our shell: {result:?}");
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "a cached Typeable must not send to the reused id");
+    }
+
+    #[tokio::test]
+    async fn a_cached_typeable_verdict_does_not_authorize_after_the_pane_starts_listening() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let session = app.session_for_host("local").await.unwrap();
+        let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+        *app.host_shells.lock().await = vec![HostShell {
+            host: "local".into(),
+            herdr_session: session,
+            workspace_id: pane.workspace_id.clone(),
+            tab_id: pane.tab_id.clone(),
+            pane_id: pane.pane_id.clone(),
+            cwd: "/tmp".into(),
+            created_at: crate::db::now(),
+        }];
+        env.herdr.set_shell_pid(&pane.pane_id, 41101);
+        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+        registered(app, "local", &pane.pane_id, Access::Type).await.expect("initial shell is typeable");
+
+        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]).listening(41101, 3010));
+        let result = send_keys(app, "local", &pane.pane_id, &["ctrl+c".to_string()]).await;
+        assert!(matches!(result, Err(LcError::Forbidden(ref body)) if body["error"] == "read_only_pane"), "new listener must make typing read-only: {result:?}");
+        assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "a cached Typeable must not send after a listener appears");
     }
 
     /// 打字的量與鍵名：太大的一段字、一次幾百個鍵、帶換行／控制字元的鍵名，在送進 herdr 之前就擋掉。

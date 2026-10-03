@@ -43,7 +43,16 @@ pub fn is_ephemeral(kind: &str) -> bool {
 
 /// 事件廣播給所有 UI 連線，也留在重播環裡：這些欄位名一律不外送（含巢狀）。呼叫端本來就不該放（`db::Bot::hook_token` 是
 /// `skip_serializing`），這是最後一道，防哪個 payload 手滑把整個物件塞進來。
-const SECRET_KEYS: [&str; 6] = ["hook_token", "ui_token", "am_bot_token", "am_hook_token", "service_token", "x-am-token"];
+const SECRET_KEYS: [&str; 8] = [
+    "hook_token",
+    "ui_token",
+    "am_bot_token",
+    "am_hook_token",
+    "service_token",
+    "x-am-token",
+    "x-am-bot-token",
+    "x-am-service-token",
+];
 
 fn scrub_credentials(v: &mut Value) {
     match v {
