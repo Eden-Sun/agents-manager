@@ -581,6 +581,24 @@ check_eq "回滾點不對就中止（rc=3）" "3" "$rc"
 check "講出實際的 sha256" "不是 $OLDHASH" "$SWAP_LOG"
 teardown
 
+# 7a. 回滾 binary 複製途中失敗：不能留下看似有效但內容不全的正式備份，否則後續每次都會卡在 hash 不符。
+setup 10 10
+cat > "$ROOT/bin/cp" <<'STUB'
+#!/bin/bash
+if [ "$#" -eq 3 ] && [ "$1" = -p ] && [ "$2" = target/release/agents-managerd ]; then
+  printf 'partial-backup\n' > "$3"
+  exit 1
+fi
+exec /bin/cp "$@"
+STUB
+chmod +x "$ROOT/bin/cp"
+rc=$(PATH="$ROOT/bin:$PATH" run)
+check_eq "binary 備份複製失敗時 rc=3" "3" "$rc"
+check_file "binary 備份複製失敗不留下部分正式備份" no "$AGM_REPO/target/release/agents-managerd.bak-$OLD"
+check_eq "binary 備份複製失敗不留暫存檔" "0" "$(find "$AGM_REPO/target/release" -name "agents-managerd.bak-$OLD.tmp.*" | wc -l | tr -d ' ')"
+check_eq "binary 備份失敗沒有重啟 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+teardown
+
 # 8. 拿不到窗口：延後，不硬換。
 setup 10 10
 export STUB_ACQUIRE_HELD=false

@@ -336,7 +336,30 @@ fi
 
 cd "$AGM_REPO" || { log "ABORT: 進不去 $AGM_REPO"; exit 3; }
 BAK="target/release/agents-managerd.bak-$OLD"
-[ -e "$BAK" ] || cp -p target/release/agents-managerd "$BAK"
+if [ ! -e "$BAK" ]; then
+    # cp may create a short/partial file before it reports ENOSPC or another error. Never publish
+    # that as the stable rollback path: a later retry would see it and permanently refuse to replace it.
+    BAK_TMP=$(mktemp "${BAK}.tmp.XXXXXX") || { log "ABORT: 建不出回滾 binary 暫存備份"; exit 3; }
+    if ! cp -p target/release/agents-managerd "$BAK_TMP"; then
+        rm -f "$BAK_TMP"
+        log "ABORT: 回滾 binary 備份複製失敗"
+        exit 3
+    fi
+    TMP_GOT=$(shasum -a 256 "$BAK_TMP" | cut -c1-16)
+    if [ "$TMP_GOT" != "$OLDHASH" ]; then
+        rm -f "$BAK_TMP"
+        log "ABORT: 回滾 binary 暫存備份 sha256=${TMP_GOT}，不是 $OLDHASH"
+        exit 3
+    fi
+    # A concurrent invocation may have published the same OLD backup after our existence check.
+    # ln is atomic and will not overwrite an existing path; the common verification below checks either copy.
+    if ! ln "$BAK_TMP" "$BAK" && [ ! -e "$BAK" ]; then
+        rm -f "$BAK_TMP"
+        log "ABORT: 發佈回滾 binary 備份失敗"
+        exit 3
+    fi
+    rm -f "$BAK_TMP"
+fi
 GOT=$(shasum -a 256 "$BAK" | cut -c1-16)
 [ "$GOT" = "$OLDHASH" ] || { log "ABORT: 回滾用的 $BAK sha256=${GOT}，不是 $OLDHASH"; exit 3; }
 log "rollback binary $BAK verified ($OLDHASH)"
