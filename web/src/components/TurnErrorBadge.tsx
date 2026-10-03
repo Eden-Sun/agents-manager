@@ -4,8 +4,12 @@ import { projectHostName, useStore } from '../store/store'
 import { canonicalModel, quotaKey } from '../api/types'
 import './turnErrorBadge.css'
 
-/** 「改用 opus」送出去的正式 id（`opus` 是已停用別名，送了會被 daemon 換掉）。 */
-const OPUS = canonicalModel('claude', 'opus')
+/**
+ * 「改用 opus」送出去的正式 id（`opus` 是已停用別名，送了會被 daemon 換掉）。
+ * 刻意是函式、不是模組層的 `const`：正式 build 把 components 拆進 initial-ui chunk，它跟 main chunk 互相 import，
+ * 模組層呼叫 `canonicalModel` 會在 `DEPRECATED_MODELS` 還沒初始化時執行 → 整頁空白（見 moduleInitOrder.test.ts）。
+ */
+const opusId = () => canonicalModel('claude', 'opus')
 
 /**
  * 「這一回合其實斷了」的紅色 badge（SPEC §4.3a）：claude 斷線只在 pane 印一行、照常 idle，`runs.turn_error` 在此顯示。
@@ -27,7 +31,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
   })
   const currentModel = useStore((s) => s.bots.find((b) => b.id === botId)?.model ?? null)
   /** 舊資料可能還存著 `opus` 這個已停用別名，新的一律是正式 id：兩個都算「已經是 opus」（#539）。 */
-  const isOpus = currentModel === OPUS || currentModel === 'opus'
+  const isOpus = currentModel === opusId() || currentModel === 'opus'
   const patchBot = useStore((s) => s.patchBot)
   const lastUserText = useStore((s) => {
     const list = s.messages[botId] ?? []
@@ -141,7 +145,7 @@ export function TurnErrorBadge({ botId }: { botId: string }) {
               setSending(true)
               // 送正式 id，不送已停用的 `opus` 別名（#539）：送別名的話 daemon 會換掉再存，
               // 而這顆按鈕的 `currentModel === 'opus'` 從此永遠不成立，按完還是一直可按。
-              void patchBot(botId, { model: OPUS }).then((res) => {
+              void patchBot(botId, { model: opusId() }).then((res) => {
                 setSending(false)
                 if (res) {
                   setOpen(false)
