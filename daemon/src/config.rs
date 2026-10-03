@@ -1148,6 +1148,11 @@ impl ConfigStore {
         // same mtime still has a different fingerprint and gets another parse attempt.
         g.hot_fingerprint = Some(fingerprint);
         g.mtime = mtime;
+        // 空檔是合法 TOML（全部預設），卻是寫到一半或截斷後的形狀。當成解析失敗，留下記憶體裡的區段。
+        if text.trim().is_empty() {
+            tracing::warn!(path = %self.path.display(), "config.toml changed on disk but is blank; keeping the in-memory [build]/[agents]");
+            return;
+        }
         match parse_config(&text).map(|(cfg, _)| cfg) {
             Ok(cfg) => {
                 if cfg.build != g.cfg.build {
@@ -1192,6 +1197,11 @@ impl ConfigStore {
         if self.path.exists() {
             // Always merge from the current file: filesystems can preserve/coarsen mtimes, so
             // comparing metadata alone can miss a completed external atomic replacement.
+            let on_disk = std::fs::read_to_string(&self.path)
+                .context("config.toml changed on disk and could not be re-read")?;
+            if on_disk.trim().is_empty() {
+                anyhow::bail!("config.toml changed on disk but is blank; keeping the in-memory config");
+            }
             let (cfg, mtime, hot_fingerprint) = read_file(&self.path)
                 .context("config.toml changed on disk and could not be re-read")?;
             // daemon 自己寫完會把記憶體那份換成寫出去的內容，所以內容對不上＝別人改的（issue #406）。
@@ -2091,6 +2101,24 @@ model = "gpt-6"
         std::fs::write(&path, "[agents]\ninstructions_file = \"~/new.md\"\n").unwrap();
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(same_mtime).unwrap();
         assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/new.md"), "修好的設定要被重新載入，即使 mtime 沒變");
+    }
+
+    /// 寫到一半被讀到的空檔是合法 TOML（全部預設），不是解析錯誤。熱重載與 `update` 的重讀都必須留著記憶體裡的舊值。
+    #[tokio::test]
+    async fn a_blank_config_read_mid_write_keeps_the_previous_hot_sections() {
+        let (store, path) = store_with("[agents]\ninstructions_file = \"~/old.md\"\n\n[build]\ncargo_jobs = 3\n").await;
+        assert_eq!(store.build_fresh().await.cargo_jobs, 3);
+        std::fs::write(&path, " \n\n").unwrap();
+        let bumped = std::time::SystemTime::now() + std::time::Duration::from_secs(30);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(bumped).unwrap();
+        assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/old.md"));
+        assert_eq!(store.build_fresh().await.cargo_jobs, 3);
+        let err = store.update(|cfg| { cfg.server.herdr_session = "from-blank".into(); Ok(()) }).await.unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("blank"), "{message}");
+        assert_eq!(store.get().await.agents.instructions_file.as_deref(), Some("~/old.md"));
+        assert_eq!(store.get().await.build.cargo_jobs, 3);
+        assert_ne!(store.get().await.server.herdr_session, "from-blank");
     }
 
     /// 埠 0 不是合法的 ssh 埠：手改進 `[[hosts]]`／`[build.remote]` 要在寫入前就被擋，而不是等到連線才失敗。
