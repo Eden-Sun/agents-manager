@@ -269,23 +269,23 @@ fn is_status_chrome(s: &str) -> bool {
 /// default 模式是 `⏸ manual mode on · ← for agents`，**沒有** `(shift+tab to cycle)`（#783，2.1.288 真畫面
 /// `claude-2.1.288-manual-mode-finished.txt`）。尾巴（` · ← for agents`、` · ? for shortcuts`、` · 1 shell`）隨狀態在變。
 ///
-/// 認法：`⏵⏵` 開頭的一律算；帶 `shift+tab to cycle` 提示的一律算（窄 pane 折行時提示落在下一行也一樣）；
-/// 其餘只看第一段（` · ` 之前、去掉 `⏸`）是否**完全等於**已觀察到的模式名稱——回覆裡 `⏸` 開頭的句子、或句子中間提到
-/// `bypass permissions on` 都不算。沒有 `⏸`／`⏵⏵` 的 `bypass permissions on …` 也算（`child_alerts` 原本就認這種）。
+/// 認法：`⏵⏵` 開頭的一律算。其餘看第一段（` · ` 之前、去掉可選的 `⏸`）：整段就是 `(shift+tab to cycle)`，
+/// 或去掉這個後綴後**完全等於** `manual mode on`／`plan mode on`／`accept edits on`／`bypass permissions on`。
+/// 窄 pane 折下來、只剩提示的那一行也算。回覆裡中間出現 `mode on`、`bypass permissions on`，或句尾引用
+/// `plan mode on`，都不是模式列。沒有箭頭、第一段剛好是 `bypass permissions on` 的也算（`child_alerts` 原本就認）。
 pub(crate) fn is_mode_row(s: &str) -> bool {
     let s = s.trim();
     if s.starts_with("⏵⏵") {
         return true;
     }
     let low = s.to_ascii_lowercase();
-    if low.contains("shift+tab to cycle") {
+    let rest = low.strip_prefix('⏸').unwrap_or(&low);
+    let mut seg = rest.split(" · ").next().unwrap_or(rest).trim();
+    // 窄 pane 把提示折到下一行：第一段以 `(shift+tab to cycle)` 結尾（或只剩這段）才算，句子中間提到不算。
+    if seg.ends_with("(shift+tab to cycle)") {
         return true;
     }
-    let rest = low.strip_prefix('⏸').unwrap_or(&low);
-    matches!(
-        rest.split(" · ").next().unwrap_or(rest).trim(),
-        "manual mode on" | "plan mode on" | "accept edits on" | "bypass permissions on"
-    )
+    matches!(seg, "manual mode on" | "plan mode on" | "accept edits on" | "bypass permissions on")
 }
 
 fn is_zone_busy(s: &str) -> bool {
@@ -470,6 +470,13 @@ mod loose_noise_tests {
         assert!(!is_mode_row("⏸ 暫停：等使用者決定 · mode on 的說明"));
         assert!(!is_noise("⏸ 暫停部署"));
         assert!(!is_noise("⏸ The manual mode on label is confusing here."));
+        // 第一段要「以 mode on 結尾」（可再接 shift+tab），不是中間出現這幾個字。
+        // `contains` 會把回覆「⏸ plan mode on the left…」整行當 chrome 剝掉。
+        assert!(!is_mode_row("⏸ plan mode on the left is still default"));
+        assert!(!is_noise("⏸ plan mode on the left is still default"));
+        let screen = "❯ 狀態？\n⏺ 畫面底下寫著：\n  ⏸ plan mode on the left is still default\n  下一步繼續\n";
+        let reply = ClaudeCapture.extract_reply(screen).unwrap();
+        assert!(reply.contains("plan mode on the left is still default"), "回覆提到 mode on 不能被剝：{reply}");
     }
 
     /// #788：模式列只有 [`is_mode_row`] 一份，child_alerts 也呼叫它。四種模式（bypass／accept edits／plan／default manual）
