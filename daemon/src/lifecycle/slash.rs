@@ -575,10 +575,7 @@ async fn wait_for_composer_settled(
 }
 
 fn grok_model_from_screen(screen: &str) -> Option<String> {
-    screen.lines().rev().find_map(|line| {
-        let idx = line.find("Grok ").or_else(|| line.find("grok "))?;
-        crate::models::grok_title_model_effort(&line[idx..]).0
-    })
+    crate::models::grok_title_model_effort(&crate::models::grok_composer_fragment(screen)?).0
 }
 
 /// 純函式：這一次讀到的畫面是空輸入列，而且跟上一次讀到的一樣。
@@ -630,10 +627,24 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
 
 #[cfg(test)]
 mod live_slash_tests {
-    use super::{composer_settled, live_slash_command};
+    use super::{composer_settled, grok_model_from_screen, live_slash_command};
     use crate::testing as tt;
 
     const SWITCH_MODEL: &str = "Switch model?\nYour next response will be slower\n❯ 1. Yes, switch to Claude Opus 5.5\n  2. No, go back\n";
+
+    /// 窄 pane 把現在的框底拆成兩行時，不能退回對話裡引用的完整舊框。
+    #[test]
+    fn grok_model_readback_uses_the_wrapped_composer_not_a_quoted_footer() {
+        let screen = "\
+  ╰────────────── Grok 4.6 (low) · always-approve ─╯
+
+  ╭────────────────────────────────────────────────╮
+  │ ❯                                              │
+  ╰────────────── Grok
+  4.7 (high) · always-approve ─╯
+";
+        assert_eq!(grok_model_from_screen(screen).as_deref(), Some("grok-4.7"));
+    }
 
     async fn model_apply_fixture(
         env: &tt::Env,

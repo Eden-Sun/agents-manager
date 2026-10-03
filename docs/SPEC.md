@@ -773,7 +773,7 @@ claude 在對話裡印 `⎿  Set model to Sonnet 5.5 and saved …`／`⎿  Set 
 **在 TUI 裡被換掉（grok、codex 的子 agent，2026-10-03）**：grok 沒有 hook 也沒有確認行可抓，argv 只讀一次而且 TUI 不理
 `--reasoning-effort`（#215）；唯一的現況是輸入框框底 `╰── Grok 4.7 (low) · always-approve ─╯`。畫面巡邏對 grok run 拿 bot 鎖
 （同 `codex_live::sync_runtime`，不會讀到啟動補 `/effort` 或當場套用切到一半的畫面）讀 `visible` 60 行，只取視窗底部最後一個 `╰` 開頭的框（窄 pane 斷行會接到下一行的 `╯`；再往上引用的完整舊框、以及底部沒有框時畫面上的舊框都不算），含
-`Grok <版本>` 的框底（`grok_live.rs`；對話裡的 `Switched to Grok 4.7 (low effort)` 不算），只寫讀到而且跟記著的不一樣的欄位。框底跟記著的一樣就不再讀第二次、也不握 bot 鎖。讀不到框底
+`Grok <版本>` 的框底（`grok_live.rs`；對話裡的 `Switched to Grok 4.7 (low effort)` 不算）。當場套用的 grok 回讀用同一條框底，不取畫面上第一個 `Grok`。只寫讀到而且跟記著的不一樣的欄位。框底跟記著的一樣就不再讀第二次、也不握 bot 鎖。讀不到框底
 （選單蓋住、畫面清掉）、或只讀到其中一欄，其餘沿用最後已知值、不清空。一般 bot 只校正**已知**的 runtime（`NULL`＝啟動時沒指定、
 CLI 預設，拿畫面補上會多一條重啟也改不掉的假 drift），設定不動；child 未知也補。
 子 agent 的設定一律跟著 runtime 的切換（`child_runtime::follow`）：claude 見上段；codex 的狀態列校正（下面「之後也持續校正」）、

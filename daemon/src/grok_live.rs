@@ -25,6 +25,7 @@ pub struct GrokRuntime {
 }
 
 /// 視窗底部才是現在的輸入框。再往上的 `╰` 是對話裡引用的舊框，不能當現況。
+#[cfg(test)]
 const FOOTER_TAIL_LINES: usize = 8;
 
 /// 最下面那個 `╰── Grok <版本> (<強度>) …` 框底；認不出模型也認不出強度就是讀不到。
@@ -32,21 +33,7 @@ const FOOTER_TAIL_LINES: usize = 8;
 /// 窄 pane 會把框底拆成兩行（`╰── Grok` / `4.7 (low) · … ─╯`）。只看 `╰` 那一行會落到上面引用的完整舊框。
 /// 從視窗底部最後一個 `╰` 接到 `╯`（最多再兩行）再解析；底部沒有框就當讀不到，不往上找。
 pub fn parse_footer(screen: &str) -> Option<GrokRuntime> {
-    let lines: Vec<&str> = screen.lines().collect();
-    let tail = &lines[lines.len().saturating_sub(FOOTER_TAIL_LINES)..];
-    let rel = tail.iter().rposition(|line| line.trim().starts_with('╰'))?;
-    let mut joined = tail[rel].trim().to_string();
-    if !joined.contains('╯') {
-        for extra in tail.iter().skip(rel + 1).take(2) {
-            joined.push(' ');
-            joined.push_str(extra.trim());
-            if extra.contains('╯') {
-                break;
-            }
-        }
-    }
-    let idx = joined.find("Grok ").or_else(|| joined.find("grok "))?;
-    let (model, effort) = crate::models::grok_title_model_effort(&joined[idx..]);
+    let (model, effort) = crate::models::grok_title_model_effort(&crate::models::grok_composer_fragment(screen)?);
     (model.is_some() || effort.is_some()).then_some(GrokRuntime { model, effort })
 }
 
