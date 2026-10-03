@@ -54,9 +54,9 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | F | `POST /mem/processes/kill` | 只有網頁 | `memproc::kill` 只殺 herdr 樹內、非 herdr、非 bot 的行程 | — | 維持 |
 
 
-一般 Bot 對 API 文件標為網頁操作面的管理路由回 `403 user_only`；已登記的 AGM 角色只略過這道共用 Bot fence，之後仍套用既有路由、資源範圍及 handler 授權。這不會把 AGM 角色變成通用管理員。`GET /api/quota` 與 `GET /api/models` 的快取讀取維持原權限；只有 `refresh=1` 的即時探測對一般 Bot 回 `403 user_only`。
+一般 Bot 對 API 文件標為網頁操作面的管理路由回 `403 user_only`；已登記的 AGM 角色只略過這道共用 Bot fence，之後仍套用既有路由、資源範圍及 handler 授權。這不會把 AGM 角色變成通用管理員。`GET /api/quota` 讀快取快照；`GET /api/models` 對一般 Bot 只回 10 分鐘內的快取，未命中或過期回 503 `model_cache_miss`，不啟動 CLI。`refresh=1|true|yes` 的即時探測對一般 Bot 回 `403 user_only`；已登記 AGM 角色與 User 維持原有探測行為。
 
-一般 Bot 對下表標為 User-only 的管理操作回 `403 user_only`；已登記的 AGM 角色略過一般 Bot fence，之後仍受既有路由、資源範圍及 handler 授權限制。嚴格 User-only 的草稿、已讀標記、跨主機記憶體摘要、pane preview 與已刪 Bot 復原清單不接受 AGM 角色。`GET /api/quota`、`GET /api/models` 的快取讀取維持原權限，只有 `refresh=1` 對一般 Bot 回 403。release-triage 的一般 Bot 保留 `GET` 與 `POST /verdicts`（現有 worker 流程尚未具備任務綁定）；`POST /dispatched`、`POST /publish` 為一般 Bot User-only。`POST /verdicts` 任務綁定待議，見 #801。
+一般 Bot 對下表標為 User-only 的管理操作回 `403 user_only`；已登記的 AGM 角色略過一般 Bot fence，之後仍受既有路由、資源範圍及 handler 授權限制。嚴格 User-only 的草稿、已讀標記、跨主機記憶體摘要、pane preview 與已刪 Bot 復原清單不接受 AGM 角色。模型清單對一般 Bot 只讀 10 分鐘內的快取；快取未命中或過期回 503 `model_cache_miss`，不啟動 CLI；`refresh=1|true|yes` 對一般 Bot 回 403。release-triage 的一般 Bot 保留 `GET` 與 `POST /verdicts`（現有 worker 流程尚未具備任務綁定）；`POST /dispatched`、`POST /publish` 為一般 Bot User-only。`POST /verdicts` 與全域帳本視野待 #801 使用者決定。
 
 ### Service principals
 
@@ -124,25 +124,25 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/bots/{id}/terminal` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| GET | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| GET | `/api/changelog` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| GET | `/api/capabilities` | User 或 Bot principal；只回 static capability names；Service 僅可走其明列 method/path scope |
+| GET | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
 | GET | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
-| GET | `/api/deploy/status` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| GET | `/api/deploy/status` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；含全域部署、工作中 Bot、repo 與 log 路徑 |
 | GET | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/hosts/{name}/gh` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/hosts/{name}/shells` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/hosts/{name}/shells/{pane_id}/terminal` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| GET | `/api/identity-prefs` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| GET | `/api/identity-prefs` | User 或 Bot principal；只回 disabled host/kind/identity 名稱，不含 credential；Service 僅可走其明列 method/path scope |
 | GET | `/api/intents` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/judge/settings` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/judge/shadow` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/mem` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/mem/processes` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/mem/processes/pane` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| GET | `/api/missions/{id}` | User 或 Bot principal；目前讀取不按任務參與者限制 |
-| GET | `/api/missions/{id}/pick` | User 或 Bot principal；目前不按任務參與者限制；缺少 verifier Fable quota 時會暫停任務 |
-| GET | `/api/models` | User 或 Bot principal；一般 Bot 的 `refresh=1` → 403 `user_only`；快取讀取維持原權限；已登記 AGM 角色沿用原有權限 |
+| GET | `/api/missions/{id}` | User 或 Bot principal；Bot 仍受 project／mission 資源範圍；同專案內讀取不另要求任務參與者 |
+| GET | `/api/missions/{id}/pick` | User 或 Bot principal；Bot 仍受 project／mission 資源範圍；缺少 verifier Fable quota 時會暫停任務 |
+| GET | `/api/models` | User 或 Bot principal；一般 Bot 只讀 10 分鐘內快取，未命中／過期 → 503 `model_cache_miss`；`refresh=1|true|yes` → 403 `user_only`；已登記 AGM 角色沿用原有權限 |
 | GET | `/api/panes` | User 或 Service（Herdr upgrade 明列授權）；Bot 與 AGM role Bot → 403 `user_only` |
 | GET | `/api/projects/{id}/git` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/projects/{id}/issues` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
@@ -151,11 +151,11 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/projects/{id}/missions` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/projects/{id}/panes` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/projects/{id}/submodules` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| GET | `/api/quota` | User 或 Bot principal；一般 Bot 的 `refresh=1` → 403 `user_only`；快取讀取維持原權限；已登記 AGM 角色沿用原有權限 |
-| GET | `/api/release-triage` | User 或 Bot principal；release-triage 任務可用 `agm release-triage show` 查帳本；視野範圍待 #801 決定 |
+| GET | `/api/quota` | User 或 Bot principal；讀取快照；一般 Bot 的 `refresh=1|true|yes` → 403 `user_only`；已登記 AGM 角色沿用原有權限 |
+| GET | `/api/release-triage` | User 或 Bot principal；release-triage 任務可用 `agm release-triage show` 查帳本；全域或任務範圍待 #801 使用者決定 |
 | GET | `/api/search/messages` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
-| GET | `/api/session` | 無 principal；TCP loopback、Host 與 Origin 守衛 |
-| GET | `/api/state` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| GET | `/api/session` | UI bootstrap 不需 principal；TCP loopback、Host 與 Origin 守衛；帶 Bot／Service header 一律 403 `user_only`，不回傳 UI token |
+| GET | `/api/state` | User 取得全域狀態；Bot 只取得自己與 descendants 的投影並移除 global/private fields；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/approvals` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/assignments` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
@@ -175,7 +175,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/supervisor/responder` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/responder/persona` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
 | GET | `/api/supervisor/state` | User 或已登記 AGM 角色 Bot；一般 Bot → 403 `role_required`；Service 僅可走其明列 method/path scope |
-| GET | `/api/upstream-updates` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| GET | `/api/upstream-updates` | User 或 Bot principal；只讀既有 upstream version metadata snapshot，不在 GET 時抓取；Service 僅可走其明列 method/path scope |
 | GET | `/ws` | query token；TCP loopback、Host 與 Origin 守衛 |
 | HEAD | `/*` | 無 principal；前端靜態檔 fallback |
 | HEAD | `/api/attachments/{id}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
@@ -193,9 +193,9 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/build-slots` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| HEAD | `/api/changelog` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| HEAD | `/api/changelog` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；此路由會查本機或遠端 CLI 版本 |
 | HEAD | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
-| HEAD | `/api/deploy/status` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
+| HEAD | `/api/deploy/status` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only`；含全域部署、工作中 Bot、repo 與 log 路徑 |
 | HEAD | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/hosts/{name}/gh` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
@@ -313,14 +313,14 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/quota/probe` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/release-triage/dispatched` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/release-triage/publish` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/release-triage/verdicts` | User 或 Bot principal；release-triage worker 目前需提交 verdict；尚未綁定交辦身分，授權缺口待 #801 後續設計 |
+| POST | `/api/release-triage/verdicts` | User 或 Bot principal；release-triage worker 目前需提交 verdict；尚未綁定交辦身分，待 #801 使用者決定 |
 | POST | `/api/services/daemon-swap/probe/{id}` | Service `daemon-swap` only |
 | POST | `/api/services/daemon-swap/restart-window` | Service `daemon-swap` only |
 | POST | `/api/services/herdr-upgrade/notify` | Service `herdr-upgrade` only |
 | POST | `/api/services/herdr-upgrade/resume/{id}` | Service `herdr-upgrade` only |
-| POST | `/api/supervisor/approvals` | User 或 Bot；Bot 的 requester 必須是自己 |
+| POST | `/api/supervisor/approvals` | User 或 Bot；Bot 可提出自己的 approval request，requester 必須是自己；裁示仍限 AGM role |
 | POST | `/api/supervisor/approvals/{id}/decide` | User 或 AGM 角色 Bot；`approve` 僅 AGM role，`deny`／`revoke` 可由 User 或角色處理；一般 Bot 403 `role_required` |
-| POST | `/api/supervisor/assignments` | User／AGM role；一般 Bot 只能對角色 Bot 送不需驗收的 `notice` |
+| POST | `/api/supervisor/assignments` | User／AGM role 可派工；一般 Bot 只能對角色 Bot 送不需驗收的 `notice`，不可派給 Bot B |
 | POST | `/api/supervisor/assignments/{id}/review` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/cli` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/fallback` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
@@ -328,8 +328,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/supervisor/herdr-maintenance/open` | 必須是已驗證的 AGM 角色 Bot（巡檢或協調者） |
 | POST | `/api/supervisor/inbox/{id}/ack` | 必須是已驗證的 AGM 角色 Bot（巡檢或協調者） |
 | POST | `/api/supervisor/leases/{resource}/acquire` | User 或 Bot；Bot owner 必須是自己；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
-| POST | `/api/supervisor/leases/{resource}/release` | User 或 Bot；Bot owner 必須是自己；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
-| POST | `/api/supervisor/leases/{resource}/renew` | User 或 Bot；Bot owner 必須是自己；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
+| POST | `/api/supervisor/leases/{resource}/release` | User 或 Bot；Bot owner 必須是自己，即使升級前 lease 沒有 token；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
+| POST | `/api/supervisor/leases/{resource}/renew` | User 或 Bot；Bot owner 必須是自己，即使升級前 lease 沒有 token；`force` 接管必須是 AGM role；daemon-swap 只可 renew／release restart lease |
 | POST | `/api/supervisor/ops-alerts` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/persona/adopt-embedded` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/supervisor/remote` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
@@ -1897,7 +1897,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 
 ### 12.1 `GET /api/models?kind=claude|codex|grok&host=<name>&identity=<name>&refresh=1`
 
-某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。
+某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。一般 Bot 只讀新鮮快取；未命中或過期回 503 `model_cache_miss`，不執行本機或遠端 CLI。一般 Bot 帶 `refresh=1|true|yes` 回 403 `user_only`；User 與已登記 AGM 角色維持現有即時探測行為。
 `identity` 只對 claude 有意義：決定讀哪個 `CLAUDE_CONFIG_DIR/settings.json` 算 `default_effort`（SPEC §17.1）；省略或不存在 → 預設帳號（不是錯誤）。
 
 ```json
@@ -2290,6 +2290,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 - **herdr 也要給 `to`**（新版還沒裝；UI 用 `GET /api/upstream-updates` 的 `target_version`），`from` 給該主機目前版本。
 - 來源：claude `https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md`；codex `https://api.github.com/repos/openai/codex/releases`（濾掉 draft／prerelease，`rust-vX.Y.Z` + body 併成同格式）；herdr `https://raw.githubusercontent.com/herdrdev/herdr/master/CHANGELOG.md`（Keep a Changelog 的 `## [x.y.z] - date`）。各自快取 10 分鐘，認 `## x.y.z` 與 `## [x.y.z] - date`。
 - **永遠 200**；抓不到就 `found:false` + `error`，UI 必須寫「找不到 changelog」。
+- **權限**：只供 User／網頁使用；Bot（含 AGM role）回 403 `user_only`。`kind`／`host` 會決定要在本機或遠端執行哪個 CLI 的 `--version`，因此不把這個命令執行入口開給 Bot。
 
 ```json
 { "kind": "claude", "host": "local", "installed_version": "2.1.5", "from_version": "2.1.3", "found": true,
@@ -2450,6 +2451,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 ### 立即部署 `/api/deploy/*`（SPEC §18.2，使用者 2026-09-25）
 - `GET /api/deploy/status` → `{live_sha,live_full,target_sha,target_short,behind,code_commits,code_changed,commits:[{sha,subject}],commits_truncated,running,working:[{bot_id,name,is_supervisor}],log_path,kick_ready,error?}`。
+  只供 User／網頁讀取；Bot（含 AGM role）回 403 `user_only`，因為內容含全域工作中 Bot、部署 repo 與 log 路徑。
   `live_sha`＝這顆 binary 建置時的 short sha（同 `GET /api/supervisor` 的 `last_deploy.sha`），`target_sha`＝daemon 所在 repo 的 `origin/main`（完整 sha）。
   `behind`＝`live..origin/main` 的 commit 數，`code_commits`／`code_changed` 只看 `build-inputs` 的路徑（docs-only 的落後是 `code_changed:false`，規則同 kick）；`commits` 最多 30 個、最新在前，超過時 `commits_truncated:true`。
   `running`＝現在有沒有部署在跑（`null`＝沒有）：`{kind:"requested",sha,requested_at}`（按過、kick 還沒吃到、正在建置或在等安全窗口）、`{kind:"lease",resource,owner,expires_at}`（有人握著 rebuild／restart 窗口）。

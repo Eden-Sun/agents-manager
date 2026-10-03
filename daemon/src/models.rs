@@ -22,6 +22,17 @@ const REMOTE_RPC_HOLD_SECS: u32 = 6;
 
 const CLIENT_INFO: &str = r#"{"name":"agents-manager","title":"agents-manager","version":"0.1"}"#;
 
+/// Read a fresh snapshot without turning an ordinary Bot request into a CLI probe.
+pub async fn cached(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Option<Value> {
+    let key = format!("{host}/{kind}/{}", identity.unwrap_or(""));
+    app.models_cache
+        .lock()
+        .await
+        .get(&key)
+        .filter(|(at, _)| at.elapsed() < CACHE_TTL)
+        .map(|(_, value)| value.clone())
+}
+
 fn rpc_lines(id: u64, method: &str, params: &Value) -> Vec<String> {
     vec![
         format!(r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"clientInfo":{CLIENT_INFO}}}}}"#),

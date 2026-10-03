@@ -724,6 +724,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/bots/{id}/outbox", BotRoutePolicy::UserOnly),
     ("GET", "/api/bots/{id}/outbox/file", BotRoutePolicy::UserOnly),
     ("GET", "/api/build-slots", BotRoutePolicy::UserOnly),
+    ("GET", "/api/changelog", BotRoutePolicy::UserOnly),
+    ("GET", "/api/deploy/status", BotRoutePolicy::UserOnly),
     ("GET", "/api/drafts", BotRoutePolicy::UserOnly),
     ("GET", "/api/hosts/{name}/shells", BotRoutePolicy::UserOnly),
     ("GET", "/api/hosts/{name}/shells/{pane_id}/terminal", BotRoutePolicy::UserOnly),
@@ -832,7 +834,7 @@ fn bot_query_route_requires_user(method: &str, uri: &axum::http::Uri) -> bool {
     }
     Query::<HashMap<String, String>>::try_from_uri(uri)
         .ok()
-        .is_some_and(|query| query.0.get("refresh").is_some_and(|value| value == "1"))
+        .is_some_and(|query| flag(&query.0.get("refresh").cloned()))
 }
 
 fn unauthorized() -> Response {
@@ -1158,10 +1160,52 @@ async fn get_session(
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
+    // This route bootstraps the shared UI token, so it intentionally has no UI-token auth layer.
+    // Bot and Service credentials must not turn that exception into a way to obtain the UI token.
+    if ["X-AM-Bot-Id", "X-AM-Bot-Token", "X-AM-Service-Id", "X-AM-Service-Token"]
+        .iter()
+        .any(|name| headers.contains_key(*name))
+    {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "user_only"}))).into_response();
+    }
     if !peer_is_local(&peer, app.allow_lan) || !origin_is_local(&headers, app.port, app.allow_lan) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "non-local request"}))).into_response();
     }
     Json(json!({"token": app.ui_token, "port": app.port})).into_response()
+}
+
+#[cfg(test)]
+mod session_principal_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_bootstrap_keeps_ui_access_but_never_returns_the_ui_token_to_a_bot() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "session-reader").await;
+        let router = router(env.app.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+        });
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{addr}/api/session"))
+            .header("X-AM-Bot-Id", &bot.id)
+            .header("X-AM-Bot-Token", &bot.hook_token)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status, StatusCode::FORBIDDEN, "a Bot must not reach the User-token bootstrap: {body}");
+        assert!(!body.contains(&env.app.ui_token), "the User token must stay secret: {body}");
+
+        let response = client.get(format!("http://{addr}/api/session")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "the browser bootstrap remains unauthenticated on loopback");
+        assert_eq!(response.json::<Value>().await.unwrap()["token"], env.app.ui_token);
+        server.abort();
+    }
 }
 
 pub(crate) fn lamp(connected: bool, run: Option<&db::Run>) -> &'static str {
@@ -3936,7 +3980,11 @@ mod changelog_route_tests {
     }
 }
 
-async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -> Result<Json<Value>, LcError> {
+async fn get_models(
+    State(app): State<Arc<App>>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Query(q): Query<ModelsQuery>,
+) -> Result<Json<Value>, LcError> {
     if !crate::config::valid_kind(&q.kind) {
         return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
     }
@@ -3945,6 +3993,21 @@ async fn get_models(State(app): State<Arc<App>>, Query(q): Query<ModelsQuery>) -
         return Err(LcError::NotFound("host".into()));
     }
     let identity = q.identity.as_deref().filter(|s| !s.trim().is_empty());
+    if let RequestPrincipal::Bot(bot_id) = &principal {
+        if crate::supervisor::roles::role_of_bot(&app.db, bot_id).await.map_err(any_err)?.is_none() {
+            if let Some(cached) = crate::models::cached(&app, &host, &q.kind, identity).await {
+                return Ok(Json(cached));
+            }
+            return Err(LcError::Unavailable(json!({
+                "error": "model_cache_miss",
+                "message": "一般 Bot 只能讀取 10 分鐘內的模型快取；請由 User 或已登記 AGM 角色更新",
+                "host": host,
+                "kind": q.kind,
+                "identity": identity,
+                "retry_after_secs": 30,
+            })));
+        }
+    }
     let v = crate::models::list(&app, &host, &q.kind, identity, flag(&q.refresh)).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     Ok(Json(v))
 }
@@ -10407,6 +10470,10 @@ mod per_principal_auth_tests {
         for path in [
             "/api/quota?refresh=%31&host=missing-host",
             "/api/models?kind=codex&host=missing-host&refresh=1",
+            "/api/quota?refresh=true&host=missing-host",
+            "/api/quota?refresh=yes&host=missing-host",
+            "/api/models?kind=codex&host=missing-host&refresh=true",
+            "/api/models?kind=codex&host=missing-host&refresh=yes",
         ] {
             let denied = raw(e.app.clone(), request(path, &bot_headers(&ordinary))).await;
             assert!(
@@ -10427,6 +10494,87 @@ mod per_principal_auth_tests {
             let user = raw(e.app.clone(), request(path, &format!("X-AM-Token: {}\r\n", e.app.ui_token))).await;
             assert!(user.starts_with("HTTP/1.1 404") && !user.contains("user_only"), "User behavior is unchanged: {path}: {user}");
         }
+    }
+
+    /// Cached Bot model reads must not turn a cache miss into an implicit CLI probe.
+    /// `refresh=1` is fenced in middleware, so omitting it must not bypass the same policy.
+    #[tokio::test]
+    async fn a_plain_bot_model_cache_miss_does_not_spawn_the_cli() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "model-cache-miss-bot").await;
+        let missing_codex = e.dir.join("does-not-exist-codex").to_string_lossy().to_string();
+        e.app.tools.lock().await.insert(
+            LOCAL_HOST.to_string(),
+            crate::tools::HostTools {
+                tools: BTreeMap::from([("codex".into(), crate::tools::ToolInfo {
+                    installed: true,
+                    path: Some(missing_codex),
+                    version: None,
+                    logged_in: Some(true),
+                })]),
+                identities: BTreeMap::new(),
+                shell_identities: Vec::new(),
+                utc_offset_secs: None,
+                herdr_cli: None,
+                checked_at: db::now(),
+            },
+        );
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "GET /api/models?kind=codex HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nConnection: close\r\n\r\n",
+                bot.id, bot.hook_token
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 503"), "a Bot cache miss must not launch codex: {response}");
+        assert!(response.contains("model_cache_miss"), "the response should explain that an authorized refresh is needed: {response}");
+        assert!(e.app.models_cache.lock().await.is_empty(), "a denied implicit probe must not populate the cache");
+
+        let cached = json!({"kind":"codex","host":"local","source":"codex-app-server","models":[{"id":"cached-model"}]});
+        e.app.models_cache.lock().await.insert(
+            "local/codex/".into(),
+            (std::time::Instant::now(), cached.clone()),
+        );
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "GET /api/models?kind=codex HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nConnection: close\r\n\r\n",
+                bot.id, bot.hook_token
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200") && response.contains("cached-model"), "a Bot may read a fresh cached model list: {response}");
+
+        e.app.models_cache.lock().await.insert(
+            "local/codex/".into(),
+            (std::time::Instant::now() - crate::models::CACHE_TTL - std::time::Duration::from_secs(1), cached),
+        );
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "GET /api/models?kind=codex HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nConnection: close\r\n\r\n",
+                bot.id, bot.hook_token
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 503") && response.contains("model_cache_miss"), "a stale cache must not trigger an implicit probe: {response}");
+    }
+
+    /// Deployment status is the browser's global host/repo and all-Bot activity panel.
+    #[tokio::test]
+    async fn a_plain_bot_cannot_read_global_deployment_status() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "deploy-status-bot").await;
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "GET /api/deploy/status HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nConnection: close\r\n\r\n",
+                bot.id, bot.hook_token
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 403") && response.contains("user_only"), "a Bot must not read the global deploy panel: {response}");
     }
 
     /// #810 #811 #812：行程清單、recovery journal、build 佇列是 UI 診斷面。一般 bot 讀得到別顆 bot 的 argv、
@@ -11038,6 +11186,87 @@ mod per_principal_auth_tests {
 
         let allowed = call(&owner).await;
         assert!(allowed.starts_with("HTTP/1.1 200"), "申請者本人仍能開自己的 lease：{allowed}");
+    }
+
+    /// Before lease tokens were introduced, a legacy row can still accept a missing token.
+    /// That compatibility path must not let Bot A renew or release Bot B's lease with public owner/fence values.
+    #[tokio::test]
+    async fn a_bot_can_only_renew_or_release_its_own_legacy_lease() {
+        let e = crate::testing::env().await;
+        let owner = distinct_bot(&e, "legacy-lease-owner").await;
+        let attacker = distinct_bot(&e, "legacy-lease-attacker").await;
+        let mut leases = Vec::new();
+        for resource in ["rebuild", "restart"] {
+            let approval = crate::supervisor::store::create_approval(
+                &e.app.db,
+                &owner.id,
+                resource,
+                "daemon",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .approval;
+            crate::supervisor::store::decide_approval(&e.app.db, &approval.id, "approved", "AGM", None, None)
+                .await
+                .unwrap();
+            let lease = crate::supervisor::store::acquire_lease(
+                &e.app.db,
+                resource,
+                &owner.id,
+                Some(&approval.id),
+                None,
+                &db::iso_in(900),
+                false,
+                None,
+                &json!({}),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            sqlx::query("UPDATE supervisor_leases SET lease_token=NULL WHERE resource=?")
+                .bind(resource)
+                .execute(&e.app.db)
+                .await
+                .unwrap();
+            leases.push((resource.to_string(), lease.fence, lease.expires_at.clone().unwrap()));
+        }
+
+        let call = |method: &str, resource: &str, body: Value, bot: &db::Bot| {
+            let app = e.app.clone();
+            let body = body.to_string();
+            let (id, token) = (bot.id.clone(), bot.hook_token.clone());
+            let operation = if resource == "rebuild" { "renew" } else { "release" }.to_string();
+            let method = method.to_string();
+            let resource = resource.to_string();
+            async move {
+                raw(
+                    app,
+                    format!(
+                        "{method} /api/supervisor/leases/{resource}/{operation} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {id}\r\nX-AM-Bot-Token: {token}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    ),
+                )
+                .await
+            }
+        };
+        for (resource, fence, old_expiry) in &leases {
+            let operation = if resource == "rebuild" { "renew" } else { "release" };
+            let method = "POST";
+            let body = json!({"owner":owner.id,"fence":fence});
+            let denied = call(method, resource, body.clone(), &attacker).await;
+            assert!(denied.starts_with("HTTP/1.1 403") && denied.contains("requester_not_the_caller"), "Bot A must not {operation} Bot B's tokenless lease: {denied}");
+            let held = crate::supervisor::store::lease(&e.app.db, resource).await.unwrap().unwrap();
+            assert!(held.released_at.is_none(), "the rejected cross-Bot {operation} must not release the lease");
+            if operation == "renew" {
+                assert_eq!(held.expires_at.as_deref(), Some(old_expiry.as_str()), "the rejected cross-Bot renewal must not extend the lease");
+            }
+
+            let owner_call = call(method, resource, body, &owner).await;
+            assert!(owner_call.starts_with("HTTP/1.1 200"), "the actual Bot owner retains legacy lease {operation}: {owner_call}");
+        }
     }
 
     /// 角色閘的相容性：release／herdr 更新任務的 assignee 可以是專用的一般 bot（`release_bot_id`），任務正文叫它跑
