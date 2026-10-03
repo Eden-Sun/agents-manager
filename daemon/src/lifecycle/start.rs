@@ -31,6 +31,8 @@ pub struct StartOpts {
     pub resume_required: bool,
     pub fork_session: Option<String>,
     pub require_idle: bool,
+    /// Bulk update restart must re-read the live pane under the bot lock before stopping it.
+    pub refuse_background_jobs: bool,
     /// 跟 `resume_native` 一起用：不看 DB 記的 session，改接這一段（`?resume=native&session=<id>`）。
     /// 救援用：DB 記錯（例如 2026-09-22 被 codex 子行程的 thread-id 蓋掉）時，讓 AGM 指名接回真正的對話。
     pub resume_session: Option<String>,
@@ -40,9 +42,9 @@ pub struct StartOpts {
 ///
 /// 一鍵重啟在排到這顆時 recheck 過一次，但 recheck 到這裡拿到鎖之間仍有空檔：使用者剛好在那幾毫秒送出一則，
 /// 那一回合會被 ctrl+c 砍掉（review2 quota #5）。鎖內再看一次才真的關掉。
-async fn busy_reason_locked(app: &Arc<App>, bot_id: &str) -> LcResult<Option<&'static str>> {
-    let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(Some("not_running")) };
-    Ok(if run.state != "running" {
+async fn busy_reason_locked(app: &Arc<App>, bot_id: &str, refuse_background_jobs: bool) -> LcResult<Option<String>> {
+    let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok(Some("not_running".into())) };
+    let busy = if run.state != "running" {
         Some("not_running")
     } else if run.agent_status == "working" {
         Some("working")
@@ -54,7 +56,19 @@ async fn busy_reason_locked(app: &Arc<App>, bot_id: &str) -> LcResult<Option<&'s
         Some("turn_in_flight")
     } else {
         None
-    })
+    };
+    if let Some(busy) = busy {
+        return Ok(Some(busy.to_string()));
+    }
+    if refuse_background_jobs {
+        if let Some(bot) = db::bot(&app.db, bot_id).await.map_err(up)? {
+            crate::background_jobs::refresh(app, &run, &bot.kind).await;
+            if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
+                return Ok(Some(format!("background_jobs:{n}")));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn not_idle(bot_id: &str, why: &str) -> LcError {
@@ -1284,8 +1298,8 @@ async fn restart_bot_with_authority(
         ));
     }
     if opts.require_idle {
-        if let Some(why) = busy_reason_locked(app, bot_id).await? {
-            return Err(not_idle(bot_id, why));
+        if let Some(why) = busy_reason_locked(app, bot_id, opts.refuse_background_jobs).await? {
+            return Err(not_idle(bot_id, &why));
         }
     }
     // 停之前就確定接得回，免得 ctrl+c 掉之後才發現只能開新對話。
@@ -1363,17 +1377,17 @@ async fn restart_stop_and_start(
         ensure_current_host_fence(app, bot_id, fence).await?;
     }
     let stopped = match (opts.require_idle, fence) {
-        (true, Some(fence)) => super::stop::stop_for_restart_if_idle_locked_with_host_fence(app, bot_id, fence).await,
+        (true, Some(fence)) => super::stop::stop_for_restart_if_idle_locked_with_host_fence(app, bot_id, opts.refuse_background_jobs, fence).await,
         (false, Some(fence)) => super::stop::stop_for_restart_locked_with_host_fence(app, bot_id, fence).await,
-        (true, None) => super::stop::stop_for_restart_if_idle_locked(app, bot_id).await,
+        (true, None) => super::stop::stop_for_restart_if_idle_locked(app, bot_id, opts.refuse_background_jobs).await,
         (false, None) => stop_for_restart_locked(app, bot_id).await,
     };
     match stopped {
         Ok(_) => {}
         // 鎖裡看過閒置之後、記 `stopping` 之前它開始忙了（#346）：什麼都沒動，照 `busy` 對回 `not_idle`。
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("no_longer_idle") => {
-            let why = busy_reason_locked(app, bot_id).await.ok().flatten().unwrap_or("working");
-            return Err(not_idle(bot_id, why));
+            let why = busy_reason_locked(app, bot_id, opts.refuse_background_jobs).await.ok().flatten().unwrap_or_else(|| "working".to_string());
+            return Err(not_idle(bot_id, &why));
         }
         Err(e) => return Err(e),
     }
@@ -1492,8 +1506,8 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     if require_idle {
-        if let Some(why) = busy_reason_locked(app, bot_id).await? {
-            return Err(not_idle(bot_id, why));
+        if let Some(why) = busy_reason_locked(app, bot_id, false).await? {
+            return Err(not_idle(bot_id, &why));
         }
     }
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -1536,8 +1550,8 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         super::run_state::Moved::Applied => {}
         super::run_state::Moved::Lost if require_idle => {
             app.emit_bot_status(bot_id).await;
-            let why = busy_reason_locked(app, bot_id).await.ok().flatten().unwrap_or("working");
-            return Err(not_idle(bot_id, why));
+            let why = busy_reason_locked(app, bot_id, false).await.ok().flatten().unwrap_or_else(|| "working".to_string());
+            return Err(not_idle(bot_id, &why));
         }
         super::run_state::Moved::Lost => {
             app.emit_bot_status(bot_id).await;

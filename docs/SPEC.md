@@ -2398,7 +2398,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   背景工作那一條（#767，使用者裁示）：agent 閒置不代表沒事在跑——重啟一退 CLI，背景 shell／終端跟著沒了。計畫時判一次、輪到它時 `recheck` 再判一次
   （計畫之後才開始跑背景工作的跳過，不是失敗）；cli-update 的範圍批次走同一條，所以一併跳過。數字是**巡邏看過的**才算（`background_jobs::known`）：
   daemon 剛重啟、新 run、畫面讀不到時沒有證據，**不擋**（`None` 與「看過、是 0」不同；API 的 `run.background_jobs` 沒看過是 `null`），
-  前端確認框在這幾顆旁標「背景狀態未知」。**計畫時與輪到時，對真的可能被重啟的那幾顆（閒置、有待套用的更新、不是子 agent／default session）現場讀一次**（`background_jobs::refresh`）再判：新鮮的 Claude Stop hook 帳在 60 秒內優先，過期後 shell 數改以畫面為準；hook-only 的 subagent／monitor／workflow 保留到下一則 Stop hook。巡邏每 30 秒才一輪，回合剛結束、背景工作剛丟出去的那幾秒，帳上是沒看過或上一輪的 0，不能當乾淨的證據；現場讀不到（沒有 pane、主機沒連、herdr 讀失敗）才退回帳上的值。重啟停機前還會在最後 stop 邊界重讀帳本，接住畫面重查後才到的 Stop hook。閒置回收（§6.11）有自己的三態判斷，不共用這一條。
+  前端確認框在這幾顆旁標「背景狀態未知」。**計畫時與輪到時，對真的可能被重啟的那幾顆（閒置、有待套用的更新、不是子 agent／default session）現場讀一次**（`background_jobs::refresh`）再判：新鮮的 Claude Stop hook 帳在 60 秒內優先，過期後 shell 數改以畫面為準；hook-only 的 subagent／monitor／workflow 保留到下一則 Stop hook。巡邏每 30 秒才一輪，回合剛結束、背景工作剛丟出去的那幾秒，帳上是沒看過或上一輪的 0，不能當乾淨的證據；現場讀不到（沒有 pane、主機沒連、herdr 讀失敗）才退回帳上的值。鎖內檢查之後、`running → stopping` 之前再 refresh 一次，接住畫面重查後才到的 Stop hook，以及較早讀取後才啟動的背景 shell；讀到就以 `background_jobs` 跳過。閒置回收（§6.11）有自己的三態判斷，不共用這一條。
 
   **2026-09-22 修**：以前候選直接限定 `kind == claude`，codex 有更新時整顆連候選都不算，`header`／批次框
   上完全看不到（使用者：「codex 有更新怎沒出現在 header」）。codex 的更新通知本來就分兩種

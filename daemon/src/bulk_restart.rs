@@ -702,7 +702,7 @@ async fn restart_resuming_with_authority(
         }
     }
     // One lock hold for both halves — closes the 2026-09-10 23:02 race (see `restart_bot_with`).
-    let opts = StartOpts { resume_native: true, require_idle: true, ..Default::default() };
+    let opts = StartOpts { resume_native: true, require_idle: true, refuse_background_jobs: true, ..Default::default() };
     let res = match authority {
         Some(fence) => lifecycle::restart_bot_with_host_fence(app, bot_id, opts, fence).await,
         None => lifecycle::restart_bot_with(app, bot_id, opts).await,
@@ -724,7 +724,11 @@ fn busy_skip(e: &LcError) -> Option<Skip> {
         return Some(Skip::HostSuperseded);
     }
     if reason != Some("not_idle") { return None; }
-    Some(match v.get("busy").and_then(|x| x.as_str()).unwrap_or_default() {
+    let busy = v.get("busy").and_then(|x| x.as_str()).unwrap_or_default();
+    if let Some(n) = busy.strip_prefix("background_jobs:").and_then(|n| n.parse::<u32>().ok()) {
+        return Some(Skip::BackgroundJobs(n));
+    }
+    Some(match busy {
         "working" => Skip::Working,
         "blocked" => Skip::Blocked,
         "turn_in_flight" => Skip::TurnInFlight,
@@ -1094,6 +1098,66 @@ mod tests {
         }
         assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| r.id), Some(run_id), "the bot run stays live");
         assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "background work must not be interrupted");
+    }
+
+    /// 最後一次畫面檢查之後、真正拿 bot 鎖之前，背景 shell 仍可能剛好啟動；鎖內必須再看一次，不能只依賴外面的 recheck。
+    #[tokio::test]
+    async fn background_work_that_starts_after_the_final_recheck_is_caught_under_the_bot_lock() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = pending_bot(&env, "late-after-recheck", "claude", "Update installed · Restart to update").await;
+        let quiet = std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        env.herdr.set_screen(&format!("pane-{bot}"), &quiet);
+        let set_screen = env.herdr.set_screen_later();
+        let pane = format!("pane-{bot}");
+        let busy = background_screen();
+        crate::lifecycle::race_point::arm("bulk_restart_before_lookup", &bot, move || async move {
+            set_screen(&pane, &busy);
+        });
+
+        let events = collect_restart_events(&app);
+        let plan = spawn(&app).await.unwrap();
+        assert!(plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == bot), "the initial read is clean: {plan}");
+        assert!(
+            crate::testing::eventually!(events.lock().unwrap().iter().any(|(k, d)| k == "bots_restart_done" && d["batch_id"] == plan["batch_id"])),
+            "{:?}",
+            events.lock().unwrap()
+        );
+        let evs = events.lock().unwrap().clone();
+        let skip = evs.iter().find(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == bot && d["status"] == "skipped");
+        assert!(skip.is_some(), "background work began after the last outside-lock read and must be skipped: {evs:?}");
+        assert_eq!(skip.unwrap().1["reason"], "background_jobs");
+        assert_eq!(db::active_run(&app.db, &bot).await.unwrap().map(|r| r.id), Some(run), "the run with the new background shell is untouched");
+    }
+
+    /// A user can start work after the lifecycle guard but before stop commits `stopping`; refresh at the stop boundary too.
+    #[tokio::test]
+    async fn background_work_that_starts_after_the_locked_guard_is_caught_before_stop_commits() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot, run) = pending_bot(&env, "late-before-stop-commit", "claude", "Update installed · Restart to update").await;
+        let quiet = std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        env.herdr.set_screen(&format!("pane-{bot}"), &quiet);
+        let set_screen = env.herdr.set_screen_later();
+        let pane = format!("pane-{bot}");
+        let busy = background_screen();
+        crate::lifecycle::race_point::arm("stop_before_stopping", &bot, move || async move {
+            set_screen(&pane, &busy);
+        });
+
+        let events = collect_restart_events(&app);
+        let plan = spawn(&app).await.unwrap();
+        assert!(plan["planned"].as_array().unwrap().iter().any(|p| p["bot_id"] == bot), "the initial read is clean: {plan}");
+        assert!(
+            crate::testing::eventually!(events.lock().unwrap().iter().any(|(k, d)| k == "bots_restart_done" && d["batch_id"] == plan["batch_id"])),
+            "{:?}",
+            events.lock().unwrap()
+        );
+        let evs = events.lock().unwrap().clone();
+        let skip = evs.iter().find(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == bot && d["status"] == "skipped");
+        assert!(skip.is_some(), "background work began after the lifecycle guard; stop must still be refused: {evs:?}");
+        assert_eq!(skip.unwrap().1["reason"], "background_jobs");
+        assert_eq!(db::active_run(&app.db, &bot).await.unwrap().map(|r| r.id), Some(run), "the old run is untouched");
     }
 
     /// #767 的缺口：背景工作數是巡邏（每 30 秒一輪）記下的。回合剛結束、背景工作剛丟出去的那幾秒，帳上不是「沒看過」就是

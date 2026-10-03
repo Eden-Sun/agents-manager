@@ -28,7 +28,7 @@ pub(crate) fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
 
 /// [`stop_bot`] with the lock already held, so a restart stops and starts under one guard.
 pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, false, false, None).await
+    stop_locked(app, bot_id, false, false, false, None).await
 }
 
 /// 閒置回收用的 [`stop_bot_locked`]：記 `stopping` 的那一步同時是**收機許可**（issue #144）——`agent_status` 還是
@@ -39,13 +39,13 @@ pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
 /// 同一句 UPDATE 裡，跟那一句寫入由 SQLite 排序：它先落地，這裡 0 rows 不停；這裡先落地，run 已經是 `stopping`，
 /// `begin_external_turn`（在鎖裡看 `state == running`）就不會替一個正在關的 pane 開回合。
 pub async fn stop_bot_locked_if_idle(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, false, true, None).await
+    stop_locked(app, bot_id, false, true, false, None).await
 }
 
 /// 重啟那一半的 stop。差別只在 `stopped` 寫不進去之後的重試：重啟沒把 bot 開回來不是「使用者要它停」
 /// （同 `left_down_by_restart`），所以交給對帳照證據收成 `exited`，不補記 `stopped`。
 pub(crate) async fn stop_for_restart_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, false, None).await
+    stop_locked(app, bot_id, true, false, false, None).await
 }
 
 pub(crate) async fn stop_for_restart_locked_with_host_fence(
@@ -53,21 +53,22 @@ pub(crate) async fn stop_for_restart_locked_with_host_fence(
     bot_id: &str,
     fence: &crate::hosts::HostFence,
 ) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, false, Some(fence)).await
+    stop_locked(app, bot_id, true, false, false, Some(fence)).await
 }
 
 /// 一鍵重啟（`require_idle`）那一半的 stop：記 `stopping` 的那一步同時是**「還是閒著才准停」的許可**（#346，同 [`stop_bot_locked_if_idle`]），
 /// 使用者剛在 pane 裡打字（`handle_status` 不拿鎖）落在鎖裡看過閒置之後，這一句 UPDATE 輸了、什麼都不動，回 409 `no_longer_idle`。
-pub(crate) async fn stop_for_restart_if_idle_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, true, None).await
+pub(crate) async fn stop_for_restart_if_idle_locked(app: &Arc<App>, bot_id: &str, refuse_background_jobs: bool) -> LcResult<bool> {
+    stop_locked(app, bot_id, true, true, refuse_background_jobs, None).await
 }
 
 pub(crate) async fn stop_for_restart_if_idle_locked_with_host_fence(
     app: &Arc<App>,
     bot_id: &str,
+    refuse_background_jobs: bool,
     fence: &crate::hosts::HostFence,
 ) -> LcResult<bool> {
-    stop_locked(app, bot_id, true, true, Some(fence)).await
+    stop_locked(app, bot_id, true, true, refuse_background_jobs, Some(fence)).await
 }
 
 /// ctrl+c（必要時關 pane）之後，外面的 agent 到底怎麼了（#146）。只有前兩種能記成 `stopped`。
@@ -88,6 +89,7 @@ async fn stop_locked(
     bot_id: &str,
     for_restart: bool,
     only_if_idle: bool,
+    refuse_background_jobs: bool,
     host_fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -123,13 +125,14 @@ async fn stop_locked(
         super::race_point::hit("stop_before_stopping", bot_id).await;
     }
 
-    // A fresh Stop hook can add background work after the caller's inspection/recheck. Recheck the
-    // run-scoped account at the last stop boundary for both idle sleep and bulk restart.
-    if only_if_idle {
+    // 鎖內檢查之後、`running → stopping` 之前，畫面或新的 Stop hook 都可能多出背景工作。
+    // 先現場 refresh（新鮮 hook 帳仍優先），再看帳本；這一步必須在 CAS 之前。
+    if only_if_idle && refuse_background_jobs {
+        crate::background_jobs::refresh(app, &run, &bot.kind).await;
         if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
             return Err(LcError::conflict(
                 "not_idle",
-                serde_json::json!({"bot_id": bot_id, "busy": "background_jobs", "background_jobs": n}),
+                json!({"bot_id": bot_id, "busy": "background_jobs", "background_jobs": n}),
             ));
         }
     }
