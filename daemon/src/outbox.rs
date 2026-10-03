@@ -148,6 +148,28 @@ fn open_outbox_entry(base: &Path, prefix: &[&OsStr], requested: &str, owner_uid:
     Some((file, name))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ShareFileError {
+    NotFound,
+    TooLarge,
+    Unavailable,
+}
+
+fn open_share_outbox_entry(base: &Path, bot_id: &str, requested: &str, owner_uid: Option<u32>) -> Result<(std::fs::File, String), ShareFileError> {
+    let prefix = [OsStr::new("outbox"), OsStr::new(bot_id)];
+    let root = prefix.iter().fold(base.to_path_buf(), |mut p, part| {
+        p.push(part);
+        p
+    });
+    let (name, rel) = safe_outbox_path(&root, requested).ok_or(ShareFileError::NotFound)?;
+    let mut components: Vec<&OsStr> = prefix.to_vec();
+    components.extend(rel);
+    let file = trusted_open::open_bound_file(base, &components, owner_uid).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound { ShareFileError::NotFound } else { ShareFileError::Unavailable }
+    })?;
+    Ok((file, name))
+}
+
 /// 下載時的 content type。白名單以外一律 octet-stream：使用者自己的 HTML 不該在這個 origin 跑起來
 /// （token 就放在這個 origin 的 localStorage）。
 pub(crate) fn mime_of(path: &Path) -> &'static str {
@@ -225,6 +247,40 @@ pub(crate) fn scan(dir: &std::fs::File, now: u64) -> Vec<serde_json::Value> {
             json!({"name": name, "size": size, "modified": modified, "expires_at": expires_at, "remaining_secs": expires_at.saturating_sub(now)})
         })
         .collect()
+}
+
+/// 分享入口只能回傳完整且逐項驗證過的清單；讀取失敗時呼叫端回 503，而不把部分結果當成空清單。
+pub(crate) fn scan_checked(dir: &std::fs::File, now: u64) -> Result<Vec<serde_json::Value>, ()> {
+    use std::io::Read;
+    let entries = trusted_open::read_dir_bound(dir).map_err(|_| ())?;
+    let mut files = Vec::new();
+    for e in entries {
+        if !e.is_file {
+            continue;
+        }
+        let name = e.name.to_string_lossy().into_owned();
+        if withheld_name(&name.to_ascii_lowercase()) {
+            continue;
+        }
+        let mut file = trusted_open::open_entry_in(dir, &e.name).map_err(|_| ())?;
+        let mut head = [0u8; 64];
+        let n = file.read(&mut head).map_err(|_| ())?;
+        if content_is_withheld(&head[..n]) {
+            continue;
+        }
+        let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let modified = secs(e.modified);
+        files.push((name, e.size, modified, modified.max(secs(e.changed))));
+    }
+    files.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+    files.truncate(MAX_ENTRIES);
+    Ok(files
+        .into_iter()
+        .map(|(name, size, modified, landed)| {
+            let expires_at = landed + TTL_SECS;
+            json!({"name": name, "size": size, "modified": modified, "expires_at": expires_at, "remaining_secs": expires_at.saturating_sub(now)})
+        })
+        .collect())
 }
 
 fn now_secs() -> u64 {
@@ -322,6 +378,53 @@ pub async fn file(
     };
     if content_is_withheld(&data) {
         return Err(not_found());
+    }
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, mime_of(Path::new(&name)).to_string()),
+            (header::CONTENT_DISPOSITION, content_disposition(&name)),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        data,
+    )
+        .into_response())
+}
+
+/// 分享入口用的下載分類：確實不存在／遭黑名單擋下回 NotFound；可信邊界、DB、讀取或工作失敗保留成 Unavailable。
+pub(crate) async fn share_file(app: &Arc<App>, bot_id: &str, requested: &str) -> Result<Response, ShareFileError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| ShareFileError::Unavailable)?.ok_or(ShareFileError::NotFound)?;
+    let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|_| ShareFileError::Unavailable)?.ok_or(ShareFileError::NotFound)?;
+    if project.host != crate::config::LOCAL_HOST {
+        return Err(ShareFileError::NotFound);
+    }
+
+    let data_dir = app.data_dir.clone();
+    let file_bot = bot.id;
+    let requested = requested.to_string();
+    let (file, name) = tokio::task::spawn_blocking(move || {
+        let owner = std::fs::metadata(&data_dir).map_err(|_| ShareFileError::Unavailable)?.uid();
+        open_share_outbox_entry(&data_dir, &file_bot, &requested, Some(owner))
+    })
+    .await
+    .map_err(|_| ShareFileError::Unavailable)??;
+
+    let metadata = file.metadata().map_err(|_| ShareFileError::Unavailable)?;
+    if metadata.len() > MAX_BYTES {
+        return Err(ShareFileError::TooLarge);
+    }
+    let data = tokio::task::spawn_blocking(move || trusted_open::read_limited(file, MAX_BYTES))
+        .await
+        .map_err(|_| ShareFileError::Unavailable)?
+        .map_err(|e| match e {
+            trusted_open::BoundedReadError::TooLarge { .. } => ShareFileError::TooLarge,
+            trusted_open::BoundedReadError::Io => ShareFileError::Unavailable,
+        })?;
+    if content_is_withheld(&data) {
+        return Err(ShareFileError::NotFound);
     }
     Ok((
         StatusCode::OK,
@@ -446,6 +549,16 @@ mod tests {
         assert_eq!(files[0]["expires_at"], json!(modified + TTL_SECS));
         assert_eq!(scan(&fd, modified + 600)[0]["remaining_secs"], json!(TTL_SECS - 600), "放了十分鐘剩五十分鐘");
         assert_eq!(scan(&fd, modified + TTL_SECS + 1)[0]["remaining_secs"], json!(0), "過期是 0，等清理");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn checked_scan_reports_directory_read_failures_instead_of_a_complete_empty_list() {
+        let base = scratch("checked-scan-error");
+        let file_path = base.join("not-a-directory");
+        std::fs::write(&file_path, b"x").unwrap();
+        let fd = std::fs::File::open(file_path).unwrap();
+        assert!(scan_checked(&fd, 0).is_err(), "a failed enumeration is not a verified empty outbox");
         std::fs::remove_dir_all(&base).unwrap();
     }
 

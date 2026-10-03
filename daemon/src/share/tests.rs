@@ -1,6 +1,7 @@
 //! 分享 bot 的安全規則，每一條一個測試（SPEC「分享 bot」）。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -730,10 +731,189 @@ async fn downloads_come_only_from_the_bots_outbox_as_attachments() {
     assert!(r.headers()["content-disposition"].to_str().unwrap().starts_with("attachment"));
     assert_eq!(r.headers()["content-type"], "application/octet-stream");
     assert_eq!(r.headers()["x-content-type-options"], "nosniff");
+    let r = c.get(format!("{base}/s/{token}/api/files/missing.txt")).send().await.unwrap();
+    assert_eq!(r.status(), 404, "真正不存在的檔案仍是 not_found");
     for bad in ["server.pem", "x.txt", "..%2Fui-token", "%2E%2E%2F%2E%2E%2Fui-token", ".hidden"] {
         let r = c.get(format!("{base}/s/{token}/api/files/{bad}")).send().await.unwrap();
         assert_eq!(r.status(), 404, "{bad}");
     }
+}
+
+#[tokio::test]
+async fn share_files_distinguishes_missing_outbox_from_trusted_open_and_task_failures() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let token = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+
+    // 沒有輸出目錄是正常狀態；只有這種情況才回空清單。
+    let missing = c.get(format!("{base}/s/{token}/api/files")).send().await.unwrap();
+    assert_eq!(missing.status(), 200);
+    assert_eq!(missing.json::<Value>().await.unwrap()["files"], json!([]));
+
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+    std::fs::write(outbox.join("report.txt"), "report").unwrap();
+    let moved = e.dir.join("saved-outbox");
+    let outside = e.dir.join("outside-outbox");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("report.txt"), "outside").unwrap();
+    std::fs::rename(&outbox, &moved).unwrap();
+    std::os::unix::fs::symlink(&outside, &outbox).unwrap();
+
+    let listed = c.get(format!("{base}/s/{token}/api/files")).send().await.unwrap();
+    let listed_status = listed.status();
+    let listed_body = listed.text().await.unwrap();
+    let downloaded = c.get(format!("{base}/s/{token}/api/files/report.txt")).send().await.unwrap();
+    let download_status = downloaded.status();
+    let download_body = downloaded.text().await.unwrap();
+
+    std::fs::remove_file(&outbox).unwrap();
+    std::fs::rename(moved, &outbox).unwrap();
+    portal::fail_next_files_scan_task_for_test(&b.id);
+    let failed_task = c.get(format!("{base}/s/{token}/api/files")).send().await.unwrap();
+    let failed_task_status = failed_task.status();
+    let failed_task_body = failed_task.text().await.unwrap();
+    assert_eq!((listed_status.as_u16(), download_status.as_u16(), failed_task_status.as_u16()), (503, 503, 503), "trusted-open / task failures must be unavailable: {listed_body}; {download_body}; {failed_task_body}");
+    for body in [&listed_body, &download_body, &failed_task_body] {
+        assert_eq!(serde_json::from_str::<Value>(body).unwrap(), json!({"error":"unavailable"}));
+        assert!(!body.contains(&e.app.data_dir.to_string_lossy().to_string()));
+    }
+}
+
+#[tokio::test]
+async fn one_share_cannot_consume_all_sse_slots_and_closed_streams_release_its_quota() {
+    const PER_SHARE: usize = 4;
+    let e = tt::env().await;
+    let a = restricted_bot(&e.app, &e.project_id, "share-a").await;
+    let b = restricted_bot(&e.app, &e.project_id, "share-b").await;
+    let token_a = shared(&e.app, &a.id).await;
+    let token_b = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+
+    let mut opened_a = Vec::new();
+    let mut statuses_a = Vec::new();
+    for _ in 0..PER_SHARE {
+        let r = c.get(format!("{base}/s/{token_a}/api/events")).send().await.unwrap();
+        statuses_a.push(r.status().as_u16());
+        if r.status().is_success() {
+            opened_a.push(r);
+        }
+    }
+    let extra_a = c.get(format!("{base}/s/{token_a}/api/events")).send().await.unwrap();
+    let extra_status = extra_a.status().as_u16();
+    if extra_a.status().is_success() {
+        opened_a.push(extra_a);
+    }
+
+    let b_stream = c.get(format!("{base}/s/{token_b}/api/events")).send().await.unwrap();
+    let b_status = b_stream.status().as_u16();
+    let mut b_opened = (b_status == 200).then_some(b_stream);
+
+    // 關分享會喚醒並關閉既有 SSE；讀到 EOF 後 quota 必須歸還。
+    store::disable(&e.app.db, &a.id).await.unwrap();
+    portal::kick(&a.id);
+    for mut r in opened_a.drain(..) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while r.chunk().await.unwrap().is_some() {}
+        })
+        .await
+        .expect("被 kick 的 A stream 應關閉");
+    }
+    if let Some(mut r) = b_opened.take() {
+        store::disable(&e.app.db, &b.id).await.unwrap();
+        portal::kick(&b.id);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while r.chunk().await.unwrap().is_some() {}
+        })
+        .await
+        .expect("被 kick 的 B stream 應關閉");
+    }
+
+    let token_a2 = store::enable(&e.app.db, &a.id).await.unwrap().unwrap();
+    let reconnected = c.get(format!("{base}/s/{token_a2}/api/events")).send().await.unwrap();
+    let reconnect_status = reconnected.status().as_u16();
+    if reconnect_status == 200 {
+        store::disable(&e.app.db, &a.id).await.unwrap();
+        portal::kick(&a.id);
+        let mut r = reconnected;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while r.chunk().await.unwrap().is_some() {}
+        })
+        .await
+        .expect("重連 stream 也要能關閉");
+    }
+
+    assert_eq!(statuses_a, vec![200; PER_SHARE], "前四條 A stream 應成功");
+    assert!(matches!(extra_status, 429 | 503), "第五條 A stream 應受 per-share quota 阻擋，得到 {extra_status}");
+    assert_eq!(b_status, 200, "A 滿額不可阻擋 B");
+    assert_eq!(reconnect_status, 200, "A stream 關閉後應歸還 quota");
+}
+
+#[tokio::test]
+async fn fresh_share_touch_does_not_request_a_sqlite_write_lock() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "fresh-touch").await;
+    let token = shared(&e.app, &b.id).await;
+    sqlx::query("UPDATE bot_shares SET last_used_at = ? WHERE bot_id = ?").bind(db::now()).bind(&b.id).execute(&e.app.db).await.unwrap();
+    let mut writer = e.app.db.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await.unwrap();
+
+    let base = serve(portal::router(e.app.clone())).await;
+    let response = tokio::time::timeout(Duration::from_millis(500), client().get(format!("{base}/s/{token}/api/info")).send()).await;
+    sqlx::query("ROLLBACK").execute(&mut *writer).await.unwrap();
+    let response = response.expect("fresh telemetry touch must not wait for SQLite's writer lock").unwrap();
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
+async fn concurrent_well_shaped_unknown_tokens_are_rejected_before_unbounded_db_waits() {
+    let e = tt::env().await;
+    // db::open uses an eight-connection pool. Hold every connection so accepted token lookups
+    // remain in flight and the global pre-auth admission limit is observable deterministically.
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(e.app.db.acquire().await.unwrap());
+    }
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+    let malformed = tokio::time::timeout(Duration::from_millis(500), c.get(format!("{base}/s/nope/api/info")).send()).await.unwrap().unwrap();
+    assert_eq!(malformed.status(), 404, "malformed shapes must be rejected before admission or DB");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(12);
+    let mut tasks = Vec::new();
+    for i in 0..12 {
+        let c = c.clone();
+        let base = base.clone();
+        let tx = tx.clone();
+        tasks.push(tokio::spawn(async move {
+            let token = format!("{}{}", "x".repeat(42), i);
+            let response = c.get(format!("{base}/s/{token}/api/info")).send().await;
+            let _ = tx.send(response.map(|r| r.status())).await;
+        }));
+    }
+    drop(tx);
+    let early = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
+    let saw_fast_rejection = matches!(&early, Ok(Some(Ok(status))) if status.as_u16() == 503);
+    drop(held);
+    let mut statuses = Vec::new();
+    if let Ok(Some(status)) = early {
+        statuses.push(status.unwrap());
+    }
+    while statuses.len() < 12 {
+        match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(Ok(status))) => statuses.push(status),
+            Ok(Some(Err(error))) => panic!("token request failed: {error}"),
+            _ => break,
+        }
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    assert!(saw_fast_rejection, "over-budget token lookups should get 503 while pool connections are unavailable; got {statuses:?}");
+    assert_eq!(statuses.len(), 12, "accepted lookups finish after releasing the pool: {statuses:?}");
+    assert!(statuses.iter().all(|s| matches!(s.as_u16(), 404 | 503)), "unknown token remains generic 404 when admitted: {statuses:?}");
 }
 
 #[test]
