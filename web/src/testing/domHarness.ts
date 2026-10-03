@@ -223,8 +223,11 @@ export function act<T>(callback: () => T | Promise<T>): Promise<Awaited<T>> {
   }
   if (!orphans.length) return run()
   // 等有上限：那個 act 永遠不收（卡在不會 resolve 的 promise）的話，寧可照跑、讓它紅在這裡，也不要整套測試掛住。
-  const cap = new Promise((resolve) => setTimeout(resolve, ORPHAN_ACT_WAIT_MS))
-  return Promise.race([Promise.allSettled(orphans), cap]).then(run)
+  let capTimer!: ReturnType<typeof setTimeout>
+  const cap = new Promise((resolve) => {
+    capTimer = setTimeout(resolve, ORPHAN_ACT_WAIT_MS)
+  })
+  return Promise.race([Promise.allSettled(orphans), cap]).finally(() => clearTimeout(capTimer)).then(run)
 }
 
 /** 掛進 body，回容器。 */

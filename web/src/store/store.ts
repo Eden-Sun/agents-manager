@@ -329,7 +329,15 @@ export interface Notice {
 
 /** `turn_progress` 合併間隔（毫秒）：同一個 bot 在這段時間內只套用最後一個 frame。 */
 const LIVE_THROTTLE_MS = 250
-const liveThrottle = new Map<string, { apply: null | (() => void) }>()
+type LiveThrottle = { turnId: string; apply: null | (() => void); timer: ReturnType<typeof setTimeout> }
+const liveThrottle = new Map<string, LiveThrottle>()
+
+function clearLiveThrottle(botId: string, turnId?: string): void {
+  const slot = liveThrottle.get(botId)
+  if (!slot || (turnId !== undefined && slot.turnId !== turnId)) return
+  clearTimeout(slot.timer)
+  liveThrottle.delete(botId)
+}
 
 /** issue #25：「載入更早的訊息」一次補幾則（與第一頁同大小）。 */
 const PAGE_SIZE = 200
@@ -2814,6 +2822,8 @@ function turnStillOpen(status: Turn['status']): boolean {
  * 把「只做一次」的旗標與 seq 歸零、state 換回初始值，下一個測試檔才拿到乾淨的 store。
  */
 export function resetStoreForTest(): void {
+  for (const slot of liveThrottle.values()) clearTimeout(slot.timer)
+  liveThrottle.clear()
   disconnect?.()
   disconnect = null
   if (quotaSweep) clearInterval(quotaSweep)
@@ -3141,6 +3151,9 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         if (sel) void get().loadMessages(sel)
         return
       }
+      if (msg.role === 'assistant' && (!msg.turn_id || liveThrottle.get(botId)?.turnId === msg.turn_id)) {
+        clearLiveThrottle(botId, msg.turn_id ?? undefined)
+      }
       set((s) => {
         const patch: Partial<StoreState> = {}
         const more: Record<string, boolean> = {}
@@ -3185,6 +3198,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       const botId = frameBotId(data)
       const turn = toTurn(unwrap(data, 'turn'), botId ?? undefined)
       if (!turn || !botId) return
+      if (turn.status !== 'in_flight' && turn.status !== 'queued') clearLiveThrottle(botId, turn.id)
       set((s) => ({
         // issue #25：舊回合沒人讀，不剪會只增不減。
         turns: { ...s.turns, [botId]: pruneTurns({ ...(s.turns[botId] ?? {}), [turn.id]: turn }) },
@@ -3220,6 +3234,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
           // 合併到下一拍的那一幀：回合若已在這 250ms 內結束（`message_added`／`turn_updated` 清掉了
           // liveReply），別把舊的 partial 寫回去留到下一回合。認不得的 turn（還沒進 map）照套。
           if (trailing) {
+            if (prev?.turnId !== turnId) return {}
             const st = s.turns[botId]?.[turnId]?.status
             if (st !== undefined && st !== 'in_flight') return {}
           }
@@ -3227,16 +3242,18 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         })
       const slot = liveThrottle.get(pendingKey)
       if (slot) {
+        slot.turnId = turnId
         slot.apply = () => apply(true)
         return
       }
       apply(false)
-      const entry = { apply: null as null | (() => void) }
-      liveThrottle.set(pendingKey, entry)
-      setTimeout(() => {
+      const entry = { turnId, apply: null as null | (() => void), timer: 0 as unknown as ReturnType<typeof setTimeout> }
+      entry.timer = setTimeout(() => {
+        if (liveThrottle.get(pendingKey) !== entry) return
         liveThrottle.delete(pendingKey)
         entry.apply?.()
       }, LIVE_THROTTLE_MS)
+      liveThrottle.set(pendingKey, entry)
       return
     }
     case 'mem_updated': {
