@@ -11,7 +11,7 @@
 use crate::lifecycle::{LcError, LcResult};
 use anyhow::Result;
 use serde_json::json;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use std::collections::HashSet;
 
 /// 這顆 bot 所屬專案移交給誰；`None`＝這顆 daemon 管（bot 不存在也是 `None`，由呼叫端自己的 not-found 處理）。
@@ -21,6 +21,17 @@ pub async fn bot_handed_off_to(pool: &SqlitePool, bot_id: &str) -> Result<Option
     )
     .bind(bot_id)
     .fetch_optional(pool)
+    .await?
+    .flatten())
+}
+
+/// Transaction-scoped variant for callers that must keep the handoff check atomic with a write.
+pub(crate) async fn bot_handed_off_to_on(conn: &mut SqliteConnection, bot_id: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar::<_, Option<String>>(
+        "SELECT p.handed_off_to FROM bots b JOIN projects p ON p.id = b.project_id WHERE b.id = ?",
+    )
+    .bind(bot_id)
+    .fetch_optional(&mut *conn)
     .await?
     .flatten())
 }
