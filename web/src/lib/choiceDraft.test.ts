@@ -255,6 +255,23 @@ test('沒改到的那一頁不會被走過去亂按', async () => {
   assert.deepEqual(tui.pageDone, [false, true])
 })
 
+test('未送出的複選頁即使勾選沒變也要先按該頁 Submit', async () => {
+  const tui = new FakeTui()
+  tui.checked[0] = [true, false, false]
+  const start = parseChoiceMenu(tui.screen())
+  assert.ok(start)
+  const draft = await preload(tui.io(), start)
+  assert.ok(draft)
+  // 使用者保留第一頁目前的勾選；第二頁與送出頁沒有答案。
+  const want = [wantOf(draft.pages[0]), wantOf(draft.pages[1]), []]
+
+  const res = await commit(tui.io(), draft, want)
+
+  assert.deepEqual(res, { ok: true })
+  assert.equal(tui.pageDone[0], true)
+  assert.equal(tui.submitted, true)
+})
+
 test('送出前畫面換掉：整批不送，回一句看得懂的話', async () => {
   const tui = new FakeTui()
   const start = parseChoiceMenu(tui.screen())

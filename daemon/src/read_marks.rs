@@ -88,15 +88,32 @@ pub fn normalize_at(at: &str, now: &str) -> Option<String> {
 pub struct ReadMark {
     pub at: String,
     pub message_id: String,
+    /// Message rowid when the marked message still exists; ties use insertion order, not ULID order.
+    pub seq: Option<i64>,
+}
+
+pub fn json_value(mark: &ReadMark) -> Value {
+    let mut out = json!({"at": mark.at, "id": mark.message_id});
+    if let Some(seq) = mark.seq {
+        out["seq"] = json!(seq);
+    }
+    out
 }
 
 pub async fn marks(pool: &SqlitePool) -> Result<HashMap<String, ReadMark>> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT bot_id, read_at, message_id FROM bot_reads").fetch_all(pool).await?;
-    Ok(rows.into_iter().map(|(b, at, message_id)| (b, ReadMark { at, message_id })).collect())
+    let rows: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT r.bot_id, r.read_at, r.message_id, m.rowid
+           FROM bot_reads r
+           LEFT JOIN messages m ON m.id = r.message_id AND m.created_at = r.read_at
+            AND m.conversation_id IN (SELECT id FROM conversations WHERE bot_id = r.bot_id)",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(b, at, message_id, seq)| (b, ReadMark { at, message_id, seq })).collect())
 }
 
 /// 未讀回合數：標記之後的 assistant 訊息，依 `turn_id` 去重（沒 turn 的各算一則）。沒有標記＝全部未讀，
-/// 同前端（新 bot 本來就沒幾則）。`(created_at, id)` 是全序，同時間戳下 id 不大於標記的算已讀。
+/// 同前端（新 bot 本來就沒幾則）。時間戳相同時，標記訊息還在就按 rowid 比較；舊標記找不到原訊息時退回 id。
 pub async fn unread_counts(pool: &SqlitePool) -> Result<HashMap<String, i64>> {
     let rows: Vec<(String, i64)> = sqlx::query_as(UNREAD_SQL).fetch_all(pool).await?;
     Ok(rows.into_iter().collect())
@@ -110,35 +127,59 @@ const UNREAD_SQL: &str = "SELECT c.bot_id, COUNT(DISTINCT COALESCE(m.turn_id, 'm
            FROM conversations c
            LEFT JOIN bot_reads r ON r.bot_id = c.bot_id
            CROSS JOIN messages m INDEXED BY messages_assistant_unread
+           LEFT JOIN messages read_m ON read_m.id = r.message_id AND read_m.created_at = r.read_at
+            AND read_m.conversation_id = c.id
           WHERE m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '') AND m.role = 'assistant'
-            AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND m.id > r.message_id))
+            AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND
+                 CASE WHEN read_m.rowid IS NULL THEN m.id > r.message_id ELSE m.rowid > read_m.rowid END))
           GROUP BY c.bot_id";
 
-/// 只往前推：另一台裝置送來較舊的標記（離線很久才同步）不能把已讀退回未讀。`at` 先經 [`normalize_at`]。
+/// 只往前推：另一台裝置送來較舊的標記（離線很久才同步）不能把已讀退回未讀。時間先比，再用現存訊息 rowid 判同毫秒順序；`at` 先經 [`normalize_at`]。
 pub async fn mark(pool: &SqlitePool, bot_id: &str, at: &str, message_id: &str) -> Result<ReadMark> {
     let at = normalize_at(at, &crate::db::now()).ok_or_else(|| anyhow::anyhow!("at must be an RFC 3339 timestamp"))?;
     sqlx::query(
         "INSERT INTO bot_reads (bot_id, read_at, message_id) VALUES (?, ?, ?)
          ON CONFLICT(bot_id) DO UPDATE SET read_at = excluded.read_at, message_id = excluded.message_id
           WHERE excluded.read_at > bot_reads.read_at
-             OR (excluded.read_at = bot_reads.read_at AND excluded.message_id > bot_reads.message_id)",
+             OR (excluded.read_at = bot_reads.read_at AND CASE
+                  WHEN (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                         WHERE m.id = excluded.message_id AND m.created_at = excluded.read_at AND c.bot_id = excluded.bot_id) IS NOT NULL
+                   AND (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                         WHERE m.id = bot_reads.message_id AND m.created_at = bot_reads.read_at AND c.bot_id = bot_reads.bot_id) IS NOT NULL
+                  THEN (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                         WHERE m.id = excluded.message_id AND m.created_at = excluded.read_at AND c.bot_id = excluded.bot_id)
+                     > (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                         WHERE m.id = bot_reads.message_id AND m.created_at = bot_reads.read_at AND c.bot_id = bot_reads.bot_id)
+                  ELSE excluded.message_id > bot_reads.message_id END)",
     )
     .bind(bot_id)
     .bind(&at)
     .bind(message_id)
     .execute(pool)
     .await?;
-    let (at, message_id): (String, String) = sqlx::query_as("SELECT read_at, message_id FROM bot_reads WHERE bot_id = ?")
+    let (at, message_id, seq): (String, String, Option<i64>) = sqlx::query_as(
+        "SELECT r.read_at, r.message_id, m.rowid FROM bot_reads r
+          LEFT JOIN messages m ON m.id = r.message_id AND m.created_at = r.read_at
+           AND m.conversation_id IN (SELECT id FROM conversations WHERE bot_id = r.bot_id)
+         WHERE r.bot_id = ?",
+    )
         .bind(bot_id)
         .fetch_one(pool)
         .await?;
-    Ok(ReadMark { at, message_id })
+    Ok(ReadMark { at, message_id, seq })
 }
 
 pub async fn group_marks(pool: &SqlitePool) -> Result<HashMap<String, ReadMark>> {
-    let rows: Vec<(String, String, String)> =
-        sqlx::query_as("SELECT project_id, read_at, message_id FROM project_group_reads").fetch_all(pool).await?;
-    Ok(rows.into_iter().map(|(p, at, message_id)| (p, ReadMark { at, message_id })).collect())
+    let rows: Vec<(String, String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT r.project_id, r.read_at, r.message_id, m.rowid
+           FROM project_group_reads r
+           LEFT JOIN messages m ON m.id = r.message_id AND m.created_at = r.read_at
+            AND EXISTS (SELECT 1 FROM conversations c JOIN bots b ON b.id = c.bot_id
+                         WHERE c.id = m.conversation_id AND b.project_id = r.project_id)",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(p, at, message_id, seq)| (p, ReadMark { at, message_id, seq })).collect())
 }
 
 /// 群組未讀回合數（專案標題的藍色數字）：只算還活著的 bot（跟 `group::messages` 的時間軸同一個範圍，不然已刪 bot 比最後一則可見訊息新的回覆會永遠清不掉）；群組回覆＝同一個回合的 user 訊息帶 `group_id`（API.md §11.1，直接 prompt
@@ -154,12 +195,16 @@ const GROUP_UNREAD_SQL: &str = "SELECT b.project_id, COUNT(DISTINCT m.turn_id)
            CROSS JOIN conversations c ON c.bot_id = b.id
            LEFT JOIN project_group_reads r ON r.project_id = b.project_id
            CROSS JOIN messages m INDEXED BY messages_conv_time
+           LEFT JOIN messages read_m ON read_m.id = r.message_id AND read_m.created_at = r.read_at
+            AND EXISTS (SELECT 1 FROM conversations rc JOIN bots rb ON rb.id = rc.bot_id
+                         WHERE rc.id = read_m.conversation_id AND rb.project_id = b.project_id)
           WHERE m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '')
             AND b.deleted_at IS NULL AND m.role = 'assistant' AND m.turn_id IS NOT NULL
             AND EXISTS (SELECT 1 FROM messages u
                          WHERE u.conversation_id = m.conversation_id AND u.turn_id = m.turn_id
                            AND u.role = 'user' AND u.group_id IS NOT NULL)
-            AND (r.project_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND m.id > r.message_id))
+            AND (r.project_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND
+                 CASE WHEN read_m.rowid IS NULL THEN m.id > r.message_id ELSE m.rowid > read_m.rowid END))
           GROUP BY b.project_id";
 
 /// 同 [`mark`]：只往前推。
@@ -169,18 +214,33 @@ pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_i
         "INSERT INTO project_group_reads (project_id, read_at, message_id) VALUES (?, ?, ?)
          ON CONFLICT(project_id) DO UPDATE SET read_at = excluded.read_at, message_id = excluded.message_id
           WHERE excluded.read_at > project_group_reads.read_at
-             OR (excluded.read_at = project_group_reads.read_at AND excluded.message_id > project_group_reads.message_id)",
+             OR (excluded.read_at = project_group_reads.read_at AND CASE
+                  WHEN (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN bots b ON b.id = c.bot_id
+                         WHERE m.id = excluded.message_id AND m.created_at = excluded.read_at AND b.project_id = excluded.project_id) IS NOT NULL
+                   AND (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN bots b ON b.id = c.bot_id
+                         WHERE m.id = project_group_reads.message_id AND m.created_at = project_group_reads.read_at AND b.project_id = project_group_reads.project_id) IS NOT NULL
+                  THEN (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN bots b ON b.id = c.bot_id
+                         WHERE m.id = excluded.message_id AND m.created_at = excluded.read_at AND b.project_id = excluded.project_id)
+                     > (SELECT m.rowid FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN bots b ON b.id = c.bot_id
+                         WHERE m.id = project_group_reads.message_id AND m.created_at = project_group_reads.read_at AND b.project_id = project_group_reads.project_id)
+                  ELSE excluded.message_id > project_group_reads.message_id END)",
     )
     .bind(project_id)
     .bind(&at)
     .bind(message_id)
     .execute(pool)
     .await?;
-    let (at, message_id): (String, String) = sqlx::query_as("SELECT read_at, message_id FROM project_group_reads WHERE project_id = ?")
+    let (at, message_id, seq): (String, String, Option<i64>) = sqlx::query_as(
+        "SELECT r.read_at, r.message_id, m.rowid FROM project_group_reads r
+          LEFT JOIN messages m ON m.id = r.message_id AND m.created_at = r.read_at
+           AND EXISTS (SELECT 1 FROM conversations c JOIN bots b ON b.id = c.bot_id
+                        WHERE c.id = m.conversation_id AND b.project_id = r.project_id)
+         WHERE r.project_id = ?",
+    )
         .bind(project_id)
         .fetch_one(pool)
         .await?;
-    Ok(ReadMark { at, message_id })
+    Ok(ReadMark { at, message_id, seq })
 }
 
 /// 讀到的訊息 id：真的 id 是 26 字元的 ULID。這個字串整個存進 DB、又隨 `GET /api/state` 與 WS 廣播給每個分頁，
@@ -189,9 +249,32 @@ fn valid_message_id(id: &str) -> bool {
     id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
 }
 
+fn mark_at(raw: Option<String>, message_at: Option<&str>, now: &str) -> Result<String, LcError> {
+    let requested = raw
+        .filter(|s| !s.trim().is_empty())
+        .map(|at| {
+            if chrono::DateTime::parse_from_rfc3339(&at).is_err() {
+                return Err(LcError::Bad("at must be an RFC 3339 timestamp".into()));
+            }
+            normalize_at(&at, now).ok_or_else(|| LcError::Bad("at must be an RFC 3339 timestamp".into()))
+        })
+        .transpose()?;
+    let message_at = message_at
+        .map(|at| normalize_at(at, now).ok_or_else(|| LcError::Upstream("message has an invalid created_at".into())))
+        .transpose()?;
+    match (requested, message_at) {
+        (Some(requested), Some(message_at)) if requested != message_at => {
+            Err(LcError::Bad("at must match the message identified by message_id".into()))
+        }
+        (_, Some(message_at)) => Ok(message_at),
+        (Some(requested), None) => Ok(requested),
+        (None, None) => Ok(now.to_string()),
+    }
+}
+
 #[derive(Deserialize, Default)]
 pub struct MarkIn {
-    /// 讀到的最後一則訊息的 `created_at`；省略＝現在。
+    /// 讀到的最後一則訊息的 `created_at`；有 `message_id` 時省略會取該訊息時間，沒有 id 才取現在。
     pub at: Option<String>,
     pub message_id: Option<String>,
 }
@@ -202,16 +285,30 @@ pub async fn post(State(app): State<Arc<App>>, Path(id): Path<String>, body: Opt
     if crate::db::bot(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.is_none() {
         return Err(LcError::NotFound("bot".into()));
     }
-    if !valid_message_id(b.message_id.as_deref().unwrap_or("")) {
+    let message_id = b.message_id.as_deref().unwrap_or("");
+    if !valid_message_id(message_id) {
         return Err(LcError::Bad("message_id must be a message id (at most 64 characters of A-Z a-z 0-9 - _ : .)".into()));
     }
-    let at = b.at.filter(|s| !s.trim().is_empty()).unwrap_or_else(crate::db::now);
-    if chrono::DateTime::parse_from_rfc3339(&at).is_err() {
-        return Err(LcError::Bad("at must be an RFC 3339 timestamp".into()));
+    let message_at = if message_id.is_empty() {
+        None
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT m.created_at FROM messages m JOIN conversations c ON c.id = m.conversation_id
+              WHERE c.bot_id = ? AND m.id = ?",
+        )
+        .bind(&id)
+        .bind(message_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?
+    };
+    if !message_id.is_empty() && message_at.is_none() {
+        return Err(LcError::Bad("message_id must identify a message in this bot's conversation".into()));
     }
-    let m = mark(&app.db, &id, &at, b.message_id.as_deref().unwrap_or("")).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let at = mark_at(b.at, message_at.as_deref(), &crate::db::now())?;
+    let m = mark(&app.db, &id, &at, message_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let unread = unread_counts(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.get(&id).copied().unwrap_or(0);
-    let out = json!({"bot_id": id, "read_mark": {"at": m.at, "id": m.message_id}, "unread": unread});
+    let out = json!({"bot_id": id, "read_mark": json_value(&m), "unread": unread});
     app.emit("bot_read", out.clone()).await;
     Ok(Json(out))
 }
@@ -223,16 +320,30 @@ pub async fn post_group(State(app): State<Arc<App>>, Path(id): Path<String>, bod
     if crate::db::project(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.is_none_or(|p| p.deleted_at.is_some()) {
         return Err(LcError::NotFound("project".into()));
     }
-    if !valid_message_id(b.message_id.as_deref().unwrap_or("")) {
+    let message_id = b.message_id.as_deref().unwrap_or("");
+    if !valid_message_id(message_id) {
         return Err(LcError::Bad("message_id must be a message id (at most 64 characters of A-Z a-z 0-9 - _ : .)".into()));
     }
-    let at = b.at.filter(|s| !s.trim().is_empty()).unwrap_or_else(crate::db::now);
-    if chrono::DateTime::parse_from_rfc3339(&at).is_err() {
-        return Err(LcError::Bad("at must be an RFC 3339 timestamp".into()));
+    let message_at = if message_id.is_empty() {
+        None
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT m.created_at FROM messages m JOIN conversations c ON c.id = m.conversation_id
+              JOIN bots b ON b.id = c.bot_id WHERE b.project_id = ? AND m.id = ?",
+        )
+        .bind(&id)
+        .bind(message_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?
+    };
+    if !message_id.is_empty() && message_at.is_none() {
+        return Err(LcError::Bad("message_id must identify a message in this project's conversations".into()));
     }
-    let m = mark_group(&app.db, &id, &at, b.message_id.as_deref().unwrap_or("")).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let at = mark_at(b.at, message_at.as_deref(), &crate::db::now())?;
+    let m = mark_group(&app.db, &id, &at, message_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let unread = group_unread_counts(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.get(&id).copied().unwrap_or(0);
-    let out = json!({"project_id": id, "read_mark": {"at": m.at, "id": m.message_id}, "unread": unread});
+    let out = json!({"project_id": id, "read_mark": json_value(&m), "unread": unread});
     app.emit("group_read", out.clone()).await;
     Ok(Json(out))
 }
@@ -554,12 +665,136 @@ mod tests {
         }
         let stored: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM bot_reads) + (SELECT COUNT(*) FROM project_group_reads)").fetch_one(&e.app.db).await.unwrap();
         assert_eq!(stored, 0, "被拒的請求什麼都不存");
-        // 正常的 id（ULID、空字串＝只推時間）照收。
-        for id in [crate::db::ulid(), String::new()] {
-            let body = Some(Json(MarkIn { at: None, message_id: Some(id.clone()) }));
+        // 真實訊息 id 與空字串（只推時間）照收。
+        let conv = crate::db::conversation_id(&e.app.db, &bot).await.unwrap();
+        let valid_id = crate::db::ulid();
+        let at = crate::db::now();
+        sqlx::query("INSERT INTO messages (id,conversation_id,role,content,source,created_at) VALUES (?,?,'assistant','a','hook',?)")
+            .bind(&valid_id)
+            .bind(&conv)
+            .bind(&at)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        for (id, mark_at) in [(valid_id, Some(at)), (String::new(), None)] {
+            let body = Some(Json(MarkIn { at: mark_at.clone(), message_id: Some(id.clone()) }));
             assert!(post(State(e.app.clone()), Path(bot.clone()), body).await.is_ok(), "{id:?}");
-            let body = Some(Json(MarkIn { at: None, message_id: Some(id.clone()) }));
+            let body = Some(Json(MarkIn { at: mark_at, message_id: Some(id.clone()) }));
             assert!(post_group(State(e.app.clone()), Path(e.project_id.clone()), body).await.is_ok(), "{id:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_read_mark_message_must_belong_to_its_bot_or_project() {
+        let (e, bot) = app_with_bot().await;
+        let other_project = crate::db::ulid();
+        sqlx::query("INSERT INTO projects (id,path,label,created_at) VALUES (?,'/tmp/other','other',?)")
+            .bind(&other_project)
+            .bind(crate::db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let other_bot = crate::testing::claude_bot(&e.app, &other_project, "other-bot").await;
+        let same_project_bot = crate::testing::claude_bot(&e.app, &e.project_id, "same-project-bot").await;
+        let own_conv = crate::db::conversation_id(&e.app.db, &bot).await.unwrap();
+        let same_project_conv = crate::db::conversation_id(&e.app.db, &same_project_bot.id).await.unwrap();
+        let other_project_conv = crate::db::conversation_id(&e.app.db, &other_bot.id).await.unwrap();
+        let at = "2026-10-02T12:00:00.000Z";
+        for (id, conv) in [
+            ("own-message", own_conv.as_str()),
+            ("same-project-message", same_project_conv.as_str()),
+            ("other-project-message", other_project_conv.as_str()),
+        ] {
+            sqlx::query("INSERT INTO messages (id,conversation_id,role,content,source,created_at) VALUES (?,?,'assistant','a','hook',?)")
+                .bind(id)
+                .bind(conv)
+                .bind(at)
+                .execute(&e.app.db)
+                .await
+                .unwrap();
+        }
+
+        let bot_mark = |message_id: &str| {
+            Some(Json(MarkIn { at: Some(at.into()), message_id: Some(message_id.into()) }))
+        };
+        let group_mark = |message_id: &str| {
+            Some(Json(MarkIn { at: Some(at.into()), message_id: Some(message_id.into()) }))
+        };
+        assert!(matches!(post(State(e.app.clone()), Path(bot.clone()), bot_mark("same-project-message")).await, Err(LcError::Bad(_))));
+        assert!(matches!(post(State(e.app.clone()), Path(bot.clone()), bot_mark("unknown-message")).await, Err(LcError::Bad(_))));
+        assert!(matches!(post_group(State(e.app.clone()), Path(e.project_id.clone()), group_mark("other-project-message")).await, Err(LcError::Bad(_))));
+        assert!(matches!(
+            post(
+                State(e.app.clone()),
+                Path(bot.clone()),
+                Some(Json(MarkIn { at: Some("2026-10-02T12:00:01.000Z".into()), message_id: Some("own-message".into()) })),
+            )
+            .await,
+            Err(LcError::Bad(_))
+        ), "a timestamp cannot move a message-bound mark past that message");
+        let rejected: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM bot_reads) + (SELECT COUNT(*) FROM project_group_reads)")
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(rejected, 0, "foreign and mismatched marks do not write or broadcast a position");
+        assert!(post(State(e.app.clone()), Path(bot.clone()), bot_mark("own-message")).await.is_ok());
+        assert!(post_group(State(e.app.clone()), Path(e.project_id.clone()), group_mark("same-project-message")).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn same_timestamp_read_marks_follow_insert_order_when_ids_sort_backwards() {
+        let (e, bot) = app_with_bot().await;
+        let conv = crate::db::conversation_id(&e.app.db, &bot).await.unwrap();
+        let at = "2026-10-02T12:00:00.000Z";
+        for id in ["z-earlier", "a-later"] {
+            sqlx::query("INSERT INTO messages (id,conversation_id,role,content,source,created_at) VALUES (?,?,'assistant','a','hook',?)")
+                .bind(id)
+                .bind(&conv)
+                .bind(at)
+                .execute(&e.app.db)
+                .await
+                .unwrap();
+        }
+        let Json(first) = post(
+            State(e.app.clone()),
+            Path(bot.clone()),
+            Some(Json(MarkIn { at: Some(at.into()), message_id: Some("z-earlier".into()) })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["read_mark"]["id"], "z-earlier");
+        assert_eq!(unread_counts(&e.app.db).await.unwrap().get(&bot), Some(&1));
+
+        let Json(first_group) = post_group(
+            State(e.app.clone()),
+            Path(e.project_id.clone()),
+            Some(Json(MarkIn { at: Some(at.into()), message_id: Some("z-earlier".into()) })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_group["read_mark"]["id"], "z-earlier");
+
+        let Json(marked) = post(
+            State(e.app.clone()),
+            Path(bot.clone()),
+            Some(Json(MarkIn { at: Some(at.into()), message_id: Some("a-later".into()) })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(marked["read_mark"]["id"], "a-later", "同時間戳標記依 insert seq 前進，即使 id 反向");
+        let seq: i64 = sqlx::query_scalar("SELECT rowid FROM messages WHERE id='a-later'").fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(marked["read_mark"]["seq"], seq, "API 回傳同時間戳比較所用的插入序");
+
+        let Json(group_marked) = post_group(
+            State(e.app.clone()),
+            Path(e.project_id.clone()),
+            Some(Json(MarkIn { at: Some(at.into()), message_id: Some("a-later".into()) })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(group_marked["read_mark"]["id"], "a-later", "群組標記也依 insert seq 前進");
+
+        let unread = unread_counts(&e.app.db).await.unwrap().get(&bot).copied().unwrap_or(0);
+        assert_eq!(unread, 0, "a later inserted message is a later read mark even when its id sorts first");
     }
 }

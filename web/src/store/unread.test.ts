@@ -75,6 +75,18 @@ test('同毫秒以 id 最大的訊息作讀取標記，並清掉更早 id 的 as
   assert.equal(countUnreadTurns([assistant], mark ?? undefined), 0)
 })
 
+test('同毫秒有 seq 時依插入序取標記並判未讀，不依賴 ID 字典序', () => {
+  const same = '2026-09-07T00:00:02Z'
+  const earlier = { ...msg('z-earlier', 'assistant', same, 't1'), seq: 10 }
+  const later = { ...msg('a-later', 'assistant', same, 't2'), seq: 11 }
+  const mark = markOfMessages([earlier, later])
+
+  assert.equal(mark?.id, 'a-later')
+  assert.equal(countUnreadTurns([earlier, later], mark ?? undefined), 0)
+  assert.equal(isUnread(earlier, { at: same, id: 'a-later', seq: 11 }), false)
+  assert.equal(isUnread(later, { at: same, id: 'a-later', seq: 11 }), false)
+})
+
 test('markOfMessages 取時間最大的那一則（清單沒排序也一樣）', () => {
   const ms = [msg('2', 'assistant', '2026-09-07T00:00:09Z'), msg('1', 'user', '2026-09-07T00:00:01Z')]
   assert.deepEqual(markOfMessages(ms), { at: '2026-09-07T00:00:09Z', id: '2' })
@@ -94,12 +106,12 @@ test('標題只加 bot 的份——群組未讀是同一批回覆的第二份帳
   assert.equal(titleUnread({ bots, botUnread: { a: 2, b: 1 }, hiddenBotIds: [], supervisorProjectId: null }), 3)
 })
 
-test('未讀數與已讀標記存得回來（跨重整的那一段）', () => {
+test('未讀數與含插入序的已讀標記存得回來（跨重整的那一段）', () => {
   stubStorage()
   saveCounts({ bots: { b1: 2 } })
-  saveMarks({ 'bot:b1': { at: '2026-09-07T00:00:02Z', id: 'm2' } })
+  saveMarks({ 'bot:b1': { at: '2026-09-07T00:00:02Z', id: 'm2', seq: 22 } })
   assert.deepEqual(loadCounts(), { bots: { b1: 2 } })
-  assert.deepEqual(loadMarks(), { 'bot:b1': { at: '2026-09-07T00:00:02Z', id: 'm2' } })
+  assert.deepEqual(loadMarks(), { 'bot:b1': { at: '2026-09-07T00:00:02Z', id: 'm2', seq: 22 } })
 })
 
 test('群組未讀不再存本機（#756，以 daemon 為準）：舊版寫的 group: 鍵讀進來就丟，下次存檔也不帶', () => {

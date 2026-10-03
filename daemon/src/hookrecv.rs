@@ -1375,7 +1375,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         }
         // 2026-10-02 使用者：claude 問的題目與使用者的答案要留在對話裡（`ask_answers`）。
         HookKind::AskAnswered(rec) => {
-            ask_answers::record(app, &bot.id, &conv, vec![rec]).await?;
+            ask_answers::record_in_flight(app, &bot.id, &conv, vec![rec]).await?;
             Ok(())
         }
         // 2026-09-30 使用者：console-rpa（m4p）直送給 cicd 的一句被存成使用者訊息。spool 每 30 秒左右才收一次，
@@ -4580,6 +4580,63 @@ mod external_claim_tests {
         let newest: String = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(&conv).fetch_one(&app.db).await.unwrap();
         assert_ne!(newest, old_turn, "Stop 開了一個外部回合");
         assert_eq!(on.as_deref(), Some(newest.as_str()), "問答掛在新的外部回合上");
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_does_not_pin_an_external_question_to_the_previous_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, old_turn) = unknown_turn(&app, &env.project_id, "claude", "舊的一句").await;
+        let long_ago = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE turns SET status='completed', delivery='ok', created_at=?, completed_at=? WHERE id=?")
+            .bind(&long_ago)
+            .bind(&long_ago)
+            .bind(&old_turn)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let qs = json!([{"question": "要不要？", "header": "確認", "options": []}]);
+        let post = stop_failure(&bot_id, json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "external-tool-use",
+            "tool_input": {"questions": qs},
+            "tool_response": {"answers": {"要不要？": "要"}}
+        }));
+        process(&app, &post).await.unwrap();
+        let early: Option<String> = sqlx::query_scalar("SELECT turn_id FROM messages WHERE id LIKE 'ask:%'")
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+        assert!(early.is_none(), "沒有當前 in-flight turn 時先不要掛到舊回合：{early:?}");
+
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let path = env.dir.join("external-ask.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "external-tool-use", "name": "AskUserQuestion", "input": {"questions": qs}}]}}),
+                json!({"type": "user", "timestamp": now, "message": {"content": [{"type": "tool_result", "tool_use_id": "external-tool-use", "content": "answered"}]}, "toolUseResult": {"questions": qs, "answers": {"要不要？": "要"}}}),
+            ),
+        )
+        .unwrap();
+        process(&app, &claude_stop_for(&bot_id, json!({"transcript_path": path.to_string_lossy()})))
+            .await
+            .unwrap();
+
+        let on: Option<String> = sqlx::query_scalar("SELECT turn_id FROM messages WHERE id LIKE 'ask:%'")
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+        let newest: String = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_ne!(newest, old_turn, "Stop 建立了外部回合");
+        assert_eq!(on.as_deref(), Some(newest.as_str()), "PostToolUse 與 Stop 冪等合併時要掛在外部回合");
     }
 
     /// 被使用者中斷的回合沒有 Stop：PostToolUse 當下就記；遠端 bot 的 Stop 帶 `agm_asks`（`hook.sh` 從本機 transcript 讀的），

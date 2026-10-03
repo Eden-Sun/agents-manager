@@ -9,6 +9,8 @@ export function laterMark(a: ReadMark | undefined | null, b: ReadMark | undefine
   if (!a) return b ?? undefined
   if (!b) return a
   if (a.at !== b.at) return a.at > b.at ? a : b
+  if (a.seq != null && b.seq != null && a.seq !== b.seq) return a.seq > b.seq ? a : b
+  if (a.id === b.id && a.seq !== b.seq) return a.seq == null ? b : a
   return a.id >= b.id ? a : b
 }
 

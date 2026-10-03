@@ -207,23 +207,19 @@ fn normalize(at: &str) -> Option<String> {
     chrono::DateTime::parse_from_rfc3339(at).ok().map(|t| t.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-/// 把 `records` 記進 `bot` 現在這一回合（對話裡最新、已經開始的那一筆）。回傳新增了幾則。
-///
-/// 只收**這一回合開始之後**答的：fork／resume 帶過來的整份 transcript 裡舊的提問不能被補進來。
-/// 沒有任何回合（對話是空的）就不記——沒有地方放。已經記過的（同 id）不動、也不再發事件。
-pub(crate) async fn record(app: &Arc<App>, bot_id: &str, conversation_id: &str, records: Vec<AskRecord>) -> Result<usize> {
+async fn record_on_turn(
+    app: &Arc<App>,
+    bot_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    turn_started: &str,
+    records: Vec<AskRecord>,
+) -> Result<usize> {
     if records.is_empty() {
         return Ok(0);
     }
-    let turn: Option<(String, String)> = sqlx::query_as(
-        "SELECT id, created_at FROM turns WHERE conversation_id = ? AND status <> 'queued' ORDER BY created_at DESC, rowid DESC LIMIT 1",
-    )
-    .bind(conversation_id)
-    .fetch_optional(&app.db)
-    .await?;
-    let Some((turn_id, turn_started)) = turn else { return Ok(0) };
     // 兩台機器的時鐘只比到秒：留一點餘裕，寧可多收到剛好壓線的一筆（冪等會擋重複）。
-    let floor = chrono::DateTime::parse_from_rfc3339(&turn_started).ok().map(|t| t.timestamp() - 2);
+    let floor = chrono::DateTime::parse_from_rfc3339(turn_started).ok().map(|t| t.timestamp() - 2);
     let mut added = 0;
     for rec in records {
         let at = rec.at.as_deref().and_then(normalize);
@@ -240,7 +236,7 @@ pub(crate) async fn record(app: &Arc<App>, bot_id: &str, conversation_id: &str, 
         )
         .bind(&id)
         .bind(conversation_id)
-        .bind(&turn_id)
+        .bind(turn_id)
         .bind(rec.content())
         .bind(&created_at)
         .execute(&app.db)
@@ -253,6 +249,42 @@ pub(crate) async fn record(app: &Arc<App>, bot_id: &str, conversation_id: &str, 
         crate::lifecycle::emit_message_added(app, bot_id, m).await;
     }
     Ok(added)
+}
+
+/// 把回合已結束時讀到的提問記進對話裡最新已開始的回合。回傳新增了幾則。
+///
+/// Stop 也可能替終端手打的外部回合剛建立新 turn，因此這條路要在 `hookrecv::process` 收尾時才挑回合。
+pub(crate) async fn record(app: &Arc<App>, bot_id: &str, conversation_id: &str, records: Vec<AskRecord>) -> Result<usize> {
+    let Some((turn_id, turn_started)) = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, created_at FROM turns WHERE conversation_id = ? AND status <> 'queued' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&app.db)
+    .await?
+    else {
+        return Ok(0);
+    };
+    record_on_turn(app, bot_id, conversation_id, &turn_id, &turn_started, records).await
+}
+
+/// PostToolUse arrives before Stop creates a terminal-typed external turn. Attach its early copy only
+/// to a turn that is actually in flight; if there is none, Stop will record it from the transcript.
+pub(crate) async fn record_in_flight(
+    app: &Arc<App>,
+    bot_id: &str,
+    conversation_id: &str,
+    records: Vec<AskRecord>,
+) -> Result<usize> {
+    let Some((turn_id, turn_started)) = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, created_at FROM turns WHERE conversation_id = ? AND status = 'in_flight' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&app.db)
+    .await?
+    else {
+        return Ok(0);
+    };
+    record_on_turn(app, bot_id, conversation_id, &turn_id, &turn_started, records).await
 }
 
 /// 回合結束（`Stop`／`StopFailure`）的 hook 處理完之後補讀：這一回合內已經答完（或取消）的提問，一筆都不漏。

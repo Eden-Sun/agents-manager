@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toIssueDetail, toIssues, toKindQuota, toRun, toState, toTurn } from './normalize.ts'
+import { toBot, toIssueDetail, toIssues, toKindQuota, toRun, toState, toTurn } from './normalize.ts'
 
 const reading = (stale?: boolean) => toKindQuota({
   five_hour: { used_pct: 41, resets_at: '2099-01-01T00:00:00Z', low: false, critical: false },
@@ -77,15 +77,17 @@ test('#699：同名但不同 host 的 identities 都保留', () => {
 
 test('專案帶 daemon 算的群組未讀與已讀標記；舊 daemon 沒給就是 undefined／null（#756）', () => {
   const st = toState({ projects: [
-    { id: 'p1', path: '/p1', group_unread: 3, group_read_mark: { at: '2026-09-15T01:00:00.000Z', id: 'm1' }, bots: [] },
+    { id: 'p1', path: '/p1', group_unread: 3, group_read_mark: { at: '2026-09-15T01:00:00.000Z', id: 'm1', seq: 18 }, bots: [] },
     { id: 'p2', path: '/p2', bots: [] },
     { id: 'p3', path: '/p3', group_unread: -1, group_read_mark: { at: '' }, bots: [] },
   ] })
   assert.deepEqual(st.projects.map((p) => [p.group_unread, p.group_read_mark]), [
-    [3, { at: '2026-09-15T01:00:00.000Z', id: 'm1' }],
+    [3, { at: '2026-09-15T01:00:00.000Z', id: 'm1', seq: 18 }],
     [undefined, null],
     [undefined, null],
   ])
+  assert.deepEqual(toBot({ id: 'b1', read_mark: { at: '2026-09-15T02:00:00.000Z', id: 'm2', seq: 19 } })?.read_mark,
+    { at: '2026-09-15T02:00:00.000Z', id: 'm2', seq: 19 })
 })
 
 test('run.background_jobs：null＝巡邏還沒看過（保留 null）、沒帶＝舊 daemon 當 0、數字照收（#767）', () => {
