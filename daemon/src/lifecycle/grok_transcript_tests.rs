@@ -310,6 +310,38 @@ async fn a_scraped_exchange_is_replaced_by_the_transcript() {
     assert_eq!(status, "completed");
 }
 
+/// #833：備援收好、還沒綁 native_turn_id、使用者那句已經是原文。NULL 不能被讀成已綁，回覆要換成 transcript。
+#[tokio::test]
+async fn an_unbound_fallback_whose_prompt_matches_exactly_is_replaced() {
+    let c = grok_child(Some(FRESH)).await;
+    let app = c.env.app.clone();
+    let want = parse_chat_history(FRESH);
+    let tid = db::ulid();
+    sqlx::query(
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, completed_at) VALUES (?,?,?,'external','completed_fallback','ok',?,?)",
+    )
+    .bind(&tid)
+    .bind(&c.conv)
+    .bind(&c.run_id)
+    .bind(db::now())
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .unwrap();
+    insert_message(&app, &c.conv, Some(&tid), "user", &want[0].prompt, "terminal_fallback", false, None).await.unwrap();
+    insert_message(&app, &c.conv, Some(&tid), "assistant", "刮到一半的回覆…", "terminal_fallback", true, Some("snap")).await.unwrap();
+
+    sync_locked(&app, &c.run_id).await.unwrap();
+    let on_turn: Vec<(String, String)> = sqlx::query_as(
+        "SELECT content, source FROM messages WHERE turn_id = ? AND role = 'assistant' ORDER BY created_at, rowid",
+    )
+    .bind(&tid)
+    .fetch_all(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(on_turn, vec![(want[0].reply.clone().unwrap(), "transcript".into())], "{on_turn:?}");
+}
+
 /// 壓縮過的檔：重寫進來的那一問照記；派工那一問還在跑，回合留在飛，不拿畫面收。
 #[tokio::test]
 async fn a_prompt_still_running_in_the_transcript_stays_in_flight() {
