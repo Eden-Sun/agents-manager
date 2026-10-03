@@ -163,7 +163,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/missions/{id}/revise", post(crate::mission::api::post_revise))
         .route("/missions/{id}/cancel", post(crate::mission::api::post_cancel))
         .route("/missions/{id}/complete", post(crate::mission::api::post_complete))
-        .route("/missions/{id}/round", post(crate::mission::api::post_round))
+        .route("/missions/{id}/round", post(crate::mission::api::post_round).layer(agm_gate!(app)))
         .route("/missions/{id}/pick", get(crate::mission::api::get_pick))
         .route("/missions/{id}/deliver", post(crate::mission::api::post_deliver))
         .route("/identity-prefs", get(crate::mission::api::get_identity_prefs))
