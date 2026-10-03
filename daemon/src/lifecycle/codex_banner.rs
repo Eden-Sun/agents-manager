@@ -3,7 +3,8 @@
 //! 橫幅（`› 1. Set up security`／`Press a number to choose · …`，辨識見 [`super::codex_inline_banner`]）顯示中時，
 //! 輸入框看起來是空的、可以打字，但 codex 會把 prompt 開頭的數字當成「選第 N 項」吃掉，殘字留在框裡卡住之後的派送。
 //! 使用者裁示（2026-10-03）：**不要**自動按 Esc 或任何鍵關橫幅；送字前看到就整則不送（可重試的 `NotAttempted`），
-//! 並在 bot 的對話裡留一則 system 通知請人處理。同一個 run 的同一次橫幅只講一次：佇列每次重試都會再擋一次。
+//! 並在 bot 的對話裡留一則 system 通知請人處理，同時推一則 `ops_alert` 進 AGM inbox 給巡檢（#789）。
+//! 同一個 run 的同一次橫幅只講一次：佇列每次重試都會再擋一次。
 
 use super::*;
 use std::collections::HashSet;
@@ -32,8 +33,8 @@ pub(crate) fn blocks_typing(screen: &str) -> bool {
         .is_some_and(|r| lines[r].iter().any(|l| l.trim_start().starts_with("Press a number to choose")))
 }
 
-/// 送字前看到橫幅：第一次寫一則通知（`message_added` 事件推給網頁）。之後同一次橫幅不再講；看到橫幅不在了就忘掉，
-/// 下次再出現會再講一次。寫不進去只記 log：擋住派送本身不受影響。
+/// 送字前看到橫幅：第一次寫一則通知（`message_added` 事件推給網頁），也推一則 inbox 事件給巡檢（[`alert`]）。
+/// 之後同一次橫幅不再講；看到橫幅不在了就忘掉，下次再出現會再講一次。寫不進去只記 log：擋住派送本身不受影響。
 pub(crate) async fn observe(app: &Arc<App>, run: &db::Run, shown: bool) {
     if !shown {
         open().lock().unwrap().remove(&run.id);
@@ -50,6 +51,40 @@ pub(crate) async fn observe(app: &Arc<App>, run: &db::Run, shown: bool) {
             }
         }
         Err(e) => tracing::warn!(run = %run.id, error = ?e, "could not post the codex security banner notice"),
+    }
+    alert(app, run).await;
+}
+
+/// 同一次橫幅推一則 `ops_alert`（`source=daemon`、`reason=codex_security_banner`）進 AGM inbox：巡檢收、叫醒（#789）。
+/// 只寫進 bot 對話的話，沒人開著那顆 bot 的頁面就不會知道它整條佇列卡住。
+///
+/// 「同一次」由 [`observe`] 判斷（只在橫幅剛出現時叫到這裡），event_key 帶 run 與這一次的 id：
+/// 消失又出現是新的一次、新的 key；`push_inbox` 的 `INSERT OR IGNORE` 擋重送。daemon 重啟後記憶清空，
+/// 還開著的橫幅會再推一則——寧可多一則，不要漏。
+async fn alert(app: &Arc<App>, run: &db::Run) {
+    let name = match db::bot(&app.db, &run.bot_id).await {
+        Ok(Some(b)) => b.name,
+        _ => String::new(),
+    };
+    let subject = if name.is_empty() { run.bot_id.as_str() } else { name.as_str() };
+    let key = format!("ops_alert:daemon:{REASON}:{}:{}", run.id, db::ulid());
+    let payload = json!({
+        "source": "daemon",
+        "reason": REASON,
+        "subject": subject,
+        "bot_id": run.bot_id,
+        "bot_name": name,
+        "run_id": run.id,
+        "detail": format!(
+            "codex bot `{name}`（{}）畫面上有帳號安全提醒橫幅（`Press a number to choose`）：橫幅開著時打字，開頭的數字會被當成選項吃掉，daemon 已擋下派送（一個字都沒打）",
+            run.bot_id
+        ),
+        "action": "請人到這顆 bot 的「終端」pane 處理橫幅（選一個選項，或按 Esc 關掉），再重送；排隊的訊息會在橫幅關掉後自動重試。daemon 不會替你按 Esc 或任何鍵。同一次橫幅只推這一則，關掉後又出現才再推。",
+    });
+    match crate::supervisor::store::push_inbox(&app.db, &key, "ops_alert", None, Some(&run.bot_id), None, &payload).await {
+        Ok(Some(_)) => app.emit("supervisor_changed", json!({ "ops_alert": key })).await,
+        Ok(None) => {}
+        Err(e) => tracing::warn!(run = %run.id, error = %e, "could not queue the codex security banner ops_alert"),
     }
 }
 
