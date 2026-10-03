@@ -109,7 +109,8 @@ assigns() { grep -c ' assign ' "$AGM_DIR/calls.log" 2>/dev/null | tr -d ' '; }
 # 1. 兩個 kind 的 pending 都是空的：不派、不寫 log。
 setup
 mk_empty claude; mk_empty codex
-bash "$SCRIPT"
+/bin/bash "$SCRIPT" >"$ROOT/empty.out" 2>"$ROOT/empty.err"
+check_no "空 pending 的 exit cleanup 不因 Bash 3.2 空陣列報錯" "unbound variable" "$ROOT/empty.err"
 equals "pending 空：不派" "$(assigns)" "0"
 equals "pending 空：不寫 log" "$(cat "$AGM_DIR/release-triage.log" 2>/dev/null)" ""
 equals "pending 空：兩個 kind 都檢查過" "$(wc -l < "$AGM_DIR/check.log" | tr -d ' ')" "2"
@@ -507,7 +508,8 @@ mkdir -p "$ROOT/claude-versions/2.1.279"
 echo 2.1.278 > "$AGM_DIR/claude-release.last"
 echo 'CLAUDE_BINARY_DIFF_MARKER' > "$AGM_DIR/claude-release-diff-task.md"
 export CLAUDE_VERSIONS_DIR="$ROOT/claude-versions"
-bash "$SCRIPT"
+/bin/bash "$SCRIPT" 2>"$ROOT/binary-only.err"
+check_no "binary-only 的空 VARGS 不因 Bash 3.2 報錯" "unbound variable" "$ROOT/binary-only.err"
 equals "無 changelog pending 時仍派 binary-only" "$(assigns)" "1"
 check "binary-only request id 有版本" "release-triage-claude-binary-2.1.279" "$AGM_DIR/calls.log"
 check "binary-only body 說明沒有 changelog pending" "本輪沒有待分診的 changelog 版本" "$AGM_DIR/assign-body.txt"

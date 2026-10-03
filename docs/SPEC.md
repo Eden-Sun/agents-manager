@@ -1316,7 +1316,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    對帳那輪結束（pass 鎖放開）後，對 `autostart=1`、非 child、沒有 active run、最後一個 run 就是這次收掉的那個（**而且是這一輪自己記的 exited、退出原因是 `agent not found during reconcile`**：別的路先收的——使用者的 stop、使用者在 herdr 關 pane 的 `pane exited` 事件——不算遺失，不拉起來）的 bot 再 `start_bot` 一次（**丟到背景、一顆一顆補**，不讓對帳呼叫端等：後面的事件訂閱、spool 補放、工具偵測都排在對帳之後），
    並立刻推 supervisor inbox `bot_lost`（巡檢收、叫醒；`payload.outcome` = `restarted`／`failed`／`backoff`，不等 `bot_stopped` 探針的 300 秒）。
    只在該主機的開機 autostart 跑完之後才動（開機那輪由 autostart 負責，不搶著起第二次），herdr 計畫中維護期間不動；
-   退避：同一顆 bot 30 分鐘內最多重開 3 次（記憶體計數，daemon 重啟歸零），超過只推 `outcome=backoff`、不再開，交給 supervisor／探針。
+   退避：同一顆 bot 30 分鐘內最多嘗試補開 3 次；計數依 durable `bot_lost` inbox 事件判斷，daemon 重啟不會重設。超過只推 `outcome=backoff`、不再開，交給 supervisor／探針。
 
 ### 6.2 啟動 Bot（per-bot 鎖內）
 1. `INSERT runs (state='starting')`；違反 active Run 唯一索引 → 409 附既有 `run_id`。

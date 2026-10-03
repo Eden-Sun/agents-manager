@@ -284,6 +284,14 @@ check "查不到最新版有記 log" "查不到" "$AGM_DIR/herdr-update.log"
 check_no "查不到最新版不派" "assign" "$AGM_DIR/calls.log"
 teardown
 
+# 查版本失敗會在建立第一個暫存檔之前 exit；macOS bash 3.2 的 set -u 會在 EXIT trap
+# 展開空 TMPS 陣列時再噴 unbound variable，掩蓋原始失敗原因。
+setup
+export STUB_GH_TAG=""
+/bin/bash "$SCRIPT" >"$ROOT/early-failure.out" 2>"$ROOT/early-failure.err"
+check_no "建立暫存檔前失敗時 cleanup 不展開空陣列" "unbound variable" "$ROOT/early-failure.err"
+teardown
+
 # 11. 鎖（#66 review 留言：純 mkdir 鎖被 SIGKILL 就永久停擺）。鎖裡寫 pid＋時間，執行者不在就回收。
 # seed_lock <owner 那行|空字串＝舊版腳本留下的、沒有 owner 檔的鎖> <鎖已經存在幾秒>
 seed_lock() {

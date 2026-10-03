@@ -346,7 +346,14 @@ am_lease_watch() {
         _lw_sent=$(am_epoch)
         _lw_resp=$(curl -s -m "$_lw_m" -X POST "${_url}/renew" --data-urlencode "holder=${_holder}" --data-urlencode "token=${_token}" 2>/dev/null)
         if [ "$(am_json_field renewed "$_lw_resp")" = "true" ]; then
-            [ -z "$_lw_sent" ] || _deadline=$((_lw_sent + _ttl))
+            if [ -n "$_lw_sent" ]; then
+                _deadline=$((_lw_sent + _ttl))
+            else
+                # The renewal succeeded, but the pre-request clock read failed. A post-response time still gives a safe lower
+                # bound: the daemon renewed no earlier than this request's start, at most _lw_m seconds before the response.
+                _lw_done=$(am_epoch)
+                if [ -n "$_lw_done" ]; then _deadline=$((_lw_done - _lw_m + _ttl)); else _deadline=""; fi
+            fi
             _lw_gap=""
             continue
         fi
@@ -853,6 +860,7 @@ case "$*" in
       mismatch) printf '{{"error":"token_mismatch"}}' ;;
       down) exit 7 ;;
       once_down) if [ -f '{d}/once' ]; then printf '{{"renewed":true,"expires_at":"x"}}'; else touch '{d}/once'; exit 7; fi ;;
+      success_then_fail_until_*) if [ ! -f '{d}/renew-succeeded' ]; then touch '{d}/renew-succeeded'; printf '{{"renewed":true,"expires_at":"x"}}'; else lim=$(cat '{d}/renew-mode'); lim=${{lim#success_then_fail_until_}}; if [ $(( $(cat '{d}/clock') - 1000000 )) -lt "$lim" ]; then exit 7; else printf '{{"renewed":true,"expires_at":"x"}}'; fi; fi ;;
       alternate) if [ -f '{d}/flip' ]; then rm -f '{d}/flip'; printf '{{"renewed":true,"expires_at":"x"}}'; else touch '{d}/flip'; exit 7; fi ;;
       fail_until_*) lim=$(cat '{d}/renew-mode'); lim=${{lim#fail_until_}}; if [ $(( $(cat '{d}/clock') - 1000000 )) -lt "$lim" ]; then exit 7; else printf '{{"renewed":true,"expires_at":"x"}}'; fi ;;
     esac ;;
@@ -877,7 +885,7 @@ esac"#
                         "#!/bin/sh\ni=0\nwhile [ ! -e '{d}/cargo.ready' ] && [ $i -lt 500 ]; do /bin/sleep 0.02; i=$((i + 1)); done\nn=$(cat '{d}/clock')\necho $((n + ${{1%%.*}})) > '{d}/clock'\nexec /bin/sleep 0.05\n"
                     ),
                 ),
-                ("date", format!("#!/bin/sh\ncase \"$*\" in '+%s') cat '{d}/clock' ;; *) exec /bin/date \"$@\" ;; esac\n")),
+                ("date", format!("#!/bin/sh\ncase \"$*\" in '+%s') n=$(cat '{d}/date-count' 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > '{d}/date-count'; if [ -f '{d}/date-fail-at' ] && [ \"$n\" -eq \"$(cat '{d}/date-fail-at')\" ]; then exit 1; fi; cat '{d}/clock' ;; *) exec /bin/date \"$@\" ;; esac\n")),
             ];
             for (name, body) in files {
                 let path = self.dir.join("real").join(name);
@@ -892,6 +900,10 @@ esac"#
 
         fn set_renew_mode(&self, mode: &str) {
             std::fs::write(self.dir.join("renew-mode"), mode).unwrap();
+        }
+
+        fn fail_date_call(&self, call: u32) {
+            std::fs::write(self.dir.join("date-fail-at"), call.to_string()).unwrap();
         }
 
         /// 一顆一直在生新「編譯器」的 cargo：兩個背景迴圈不停 fork 出 `sleep`（一個直接生、一個包一層子 shell），
@@ -1974,6 +1986,22 @@ esac
         assert!(!err.contains("名額租約失效"), "{err}");
         assert!(s.dir.join("cargo.done").exists(), "應該正常跑完");
         assert!(s.virtual_secs() > 3 * 180, "虛擬時間要走過好幾個 TTL 才算數：{}s", s.virtual_secs());
+    }
+
+    #[test]
+    fn a_successful_renewal_without_a_send_timestamp_advances_the_conservative_deadline() {
+        let s = Sandbox::new();
+        s.install_virtual_clock();
+        s.install_lease_curl(180);
+        s.install_cargo_until_virtual(3 * 180 + 60);
+        s.fail_date_call(2); // acquire 時間可讀，第一次續約送出前的時間讀取失敗。
+        s.set_renew_mode("success_then_fail_until_170");
+        let env = lease_env(&s);
+        let (_, err, rc) = s.run(&as_refs(&env), &["build"]);
+        assert_eq!(rc, 0, "t=60 的續約已成功，daemon t=170 恢復時名額仍有效：{err}");
+        assert!(!err.contains("名額租約失效"), "{err}");
+        assert!(s.dir.join("cargo.done").exists(), "cargo 應該正常完成");
+        assert!(s.virtual_secs() > 3 * 180, "虛擬時間要走過好幾個 TTL：{}s", s.virtual_secs());
     }
 
     /// 交替失敗（一次連不上、一次成功……）的租約是健康的：每次成功都把 deadline 往後延，所以永遠撐得到下一次成功。

@@ -17,7 +17,7 @@ use crate::state::{App, AutostartHostStatus};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// 這一輪對帳收掉的 autostart bot（原因是 agent 不見）。
 #[derive(Debug, Clone)]
@@ -32,21 +32,19 @@ const LOST_REASON: &str = "agent not found during reconcile";
 const MAX_RESTARTS: usize = 3;
 const WINDOW: Duration = Duration::from_secs(30 * 60);
 
-fn attempts() -> &'static Mutex<HashMap<String, Vec<Instant>>> {
-    static A: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
-    A.get_or_init(Default::default)
-}
-
-/// 退避窗內還有名額就記一次並回 `true`。
-fn take_slot(bot_id: &str) -> bool {
-    let mut map = attempts().lock().unwrap_or_else(|e| e.into_inner());
-    let hits = map.entry(bot_id.to_string()).or_default();
-    hits.retain(|t| t.elapsed() < WINDOW);
-    if hits.len() >= MAX_RESTARTS {
-        return false;
-    }
-    hits.push(Instant::now());
-    true
+/// 30 分鐘內的啟動嘗試記在 durable `bot_lost` inbox 事件裡；daemon 重啟不能把退避額度歸零。
+async fn take_slot(app: &App, bot_id: &str) -> anyhow::Result<bool> {
+    let cutoff = db::iso_in(-(WINDOW.as_secs() as i64));
+    let hits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM supervisor_inbox
+         WHERE bot_id = ? AND kind = 'bot_lost' AND created_at >= ?
+           AND json_extract(payload_json, '$.outcome') IN ('restarted', 'failed')",
+    )
+    .bind(bot_id)
+    .bind(cutoff)
+    .fetch_one(&app.db)
+    .await?;
+    Ok(hits < MAX_RESTARTS as i64)
 }
 
 /// 還沒做完的背景補開，依 `App` 分開記（測試用它等補開收尾；平行的測試各有各的 `App`，不能共用一個計數）。
@@ -144,7 +142,7 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
     if last.as_ref().map(|(id, state, why)| (id.as_str(), state.as_str(), why.as_deref())) != Some((l.run_id.as_str(), "exited", Some(LOST_REASON))) {
         return Ok(());
     }
-    let (outcome, error) = if !take_slot(&bot.id) {
+    let (outcome, error) = if !take_slot(app, &bot.id).await? {
         tracing::warn!(host, bot = %bot.name, "autostart revive: lost again within the backoff window; not restarting, only reporting");
         ("backoff", None)
     } else {
@@ -386,5 +384,36 @@ mod tests {
         assert_eq!(events.iter().filter(|e| e["outcome"] == "restarted").count(), 3);
         assert_eq!(events.iter().filter(|e| e["outcome"] == "backoff").count(), 1);
         assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "退避之後留在停掉的狀態，交給 supervisor");
+    }
+
+    #[tokio::test]
+    async fn the_restart_limit_survives_a_daemon_restart() {
+        let env = tt::env().await;
+        let bot = autostart_bot(&env, "flappy-restart").await;
+        crate::lifecycle::start_bot(&env.app, &bot.id).await.unwrap();
+        autostart_done(&env.app);
+        // Restore the durable history a fresh daemon would see after a restart; its process-local map starts empty.
+        for attempt in 0..super::MAX_RESTARTS {
+            crate::supervisor::store::push_inbox(
+                &env.app.db,
+                &format!("bot_lost:{}:prior-{attempt}", bot.id),
+                "bot_lost",
+                None,
+                Some(&bot.id),
+                None,
+                &serde_json::json!({"outcome": "restarted"}),
+            )
+            .await
+            .unwrap();
+        }
+        herdr_forgets_everything(&env).await;
+        crate::reconcile::reconcile_host(&env.app, config::LOCAL_HOST).await.unwrap();
+        super::quiesce(&env.app).await;
+
+        assert!(db::active_run(&env.app.db, &bot.id).await.unwrap().is_none(), "重啟 daemon 不該重設 30 分鐘內 3 次的上限");
+        let events = bot_lost_events(&env.app, &bot.id).await;
+        assert_eq!(events.len(), super::MAX_RESTARTS + 1, "第 4 次遺失只留告警：{events:?}");
+        assert_eq!(events.iter().filter(|e| e["outcome"] == "restarted").count(), super::MAX_RESTARTS);
+        assert_eq!(events.iter().filter(|e| e["outcome"] == "backoff").count(), 1);
     }
 }

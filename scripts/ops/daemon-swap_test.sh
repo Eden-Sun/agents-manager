@@ -79,6 +79,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_SWAP_BINARY_ON_ACQUIRE="" # 測試窗口等待期間正式 binary 被另一趟換掉
   export SWAP_PROBE_SETTLE_TRIES=5 SWAP_PROBE_SETTLE_WAIT_SECS=0
   export STUB_AGM_STATE_FAIL="" STUB_AGM_SUPERVISOR_FAIL=""
+  export STUB_AGM_SUPERVISOR_FAIL_AT=0
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
   export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep" HERDR_BIN="$ROOT/bin/herdr"
   # 預設照 macOS 走 launchd；Linux 那幾個 case 自己改（issue #677）。不設的話在 Linux 上跑這支，
@@ -169,7 +170,8 @@ case "$sub:$op" in
       [ -n "${STUB_RELEASE_FAIL:-}" ] && { printf '{"error":"http_error","status":409,"detail":{"error":"conflict","reason":"fence_mismatch"}}'; exit 1; }
       printf '{"released":true}' ;;
   health:*)      [ -n "$STUB_HEALTH_OK" ] || exit 1; printf '{"status":"healthy"}' ;;
-  supervisor:*)  if [ -n "$STUB_AGM_SUPERVISOR_FAIL" ]; then printf '{"status":"idle"}'; exit 1; fi
+  supervisor:*)  sup_calls=$(grep -c ' supervisor' "$AGM_DIR/calls.log" 2>/dev/null || true); sup_calls=${sup_calls:-0}
+                 if [ -n "$STUB_AGM_SUPERVISOR_FAIL" ] || [ "${STUB_AGM_SUPERVISOR_FAIL_AT:-0}" = "$sup_calls" ]; then printf '{"status":"idle"}'; exit 1; fi
                  # 換版前（started 還沒出現）可用 STUB_SUPERVISOR_BEFORE 單獨指定；沒設就跟換版後同一個值。
                  if [ ! -e "$AGM_DIR/started" ] && [ -n "${STUB_SUPERVISOR_BEFORE+x}" ]; then printf '{"status":"%s"}' "$STUB_SUPERVISOR_BEFORE"; exit 0; fi
                  printf '{"status":"%s","last_deploy":{"sha":"x","sha_full":"%s","dirty":%s}}' "$STUB_SUPERVISOR" "$STUB_DAEMON_SHA" "${STUB_DAEMON_DIRTY:-false}" ;;
@@ -302,15 +304,16 @@ seed_audit() { "$REAL_SQLITE" "$ROOT/audit.sqlite3" "$1"; }   # 換版後腳本�
 
 run() {
   local approval="${1:-}"
+  local sha="${2:-$SHA}"
   # These tests assert decisions, not wall-clock waits; keep recovery cases quick without changing
   # the separate daemon-start process test below.
   (
     sleep() { :; }
     export -f sleep
     if [ -n "$approval" ]; then
-      bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --approval "$approval" --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
+      bash "$SCRIPT" --sha "$sha" --old "$OLD" --old-hash "$OLDHASH" --approval "$approval" --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
     else
-      bash "$SCRIPT" --sha "$SHA" --old "$OLD" --old-hash "$OLDHASH" --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
+      bash "$SCRIPT" --sha "$sha" --old "$OLD" --old-hash "$OLDHASH" --owner bot-me --checkout "$CHECKOUT" >/dev/null 2>&1
     fi
   )
   echo $?
@@ -456,7 +459,7 @@ check_eq "回滾後保留新舊兩份 DB 備份" "2" "$(db_backup_count)"
 check_file "-wal 一樣要清掉" no "$DAEMON_DB-wal"
 teardown
 
-# 5b. 回滾還原 DB 要原子：先寫同目錄暫存檔、fsync、成功了才清 -wal／-shm 再 mv 覆蓋。
+# 5b. 回滾還原 DB 要原子：先寫同目錄暫存檔、fsync，再暫存 sidecar，最後用 rename 覆蓋主檔。
 #     以前 `rm -f -wal -shm; cp backup DB`：cp 中途失敗（磁碟滿、被殺）就是「原 DB 被截斷＋它的 WAL 已經刪了」。
 setup 10 10
 export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
@@ -493,6 +496,26 @@ LEFT=$(ls "$ROOT" | grep -c 'restore' || true)
 check_eq "失敗後不留暫存檔" "0" "$LEFT"
 check "log 講清楚 DB 還原失敗" "DB 還原失敗" "$SWAP_LOG"
 check_no "失敗時不能說還原成功" "db restored from" "$SWAP_LOG"
+teardown
+unset STUB_MUTATE_DB
+
+# 5d. 暫存檔已備好，但替換主 DB 的 rename 失敗：原 DB 與 sidecar 都必須保留。
+setup 10 10
+export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
+mkdir -p "$ROOT/fakemv"
+cat > "$ROOT/fakemv/mv" <<'STUB'
+#!/bin/bash
+for a in "$@"; do dest=$a; done
+if [ "$dest" = "$DAEMON_DB" ]; then exit 1; fi
+exec /bin/mv "$@"
+STUB
+chmod +x "$ROOT/fakemv/mv"
+rc=$(PATH="$ROOT/fakemv:$PATH" run)
+check_eq "rename 還原失敗仍走回滾結束（rc=7）" "7" "$rc"
+check_eq "rename 失敗保留新版 DB" "mutated-by-new-binary" "$(cat "$DAEMON_DB")"
+check_eq "rename 失敗保留 WAL" "stale-wal" "$(cat "$DAEMON_DB-wal" 2>/dev/null)"
+check_eq "rename 失敗保留 SHM" "stale-shm" "$(cat "$DAEMON_DB-shm" 2>/dev/null)"
+check "rename 失敗有講清楚 DB 還原失敗" "DB 還原失敗" "$SWAP_LOG"
 teardown
 unset STUB_MUTATE_DB
 
@@ -563,6 +586,15 @@ rc=$(run)
 check_eq "agm supervisor 失敗要 rollback（rc=7）" "7" "$rc"
 check "命令回錯時不能接受它輸出的 idle" "agm supervisor 讀取失敗" "$SWAP_LOG"
 check_eq "supervisor 讀取失敗後還原舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+# 檔案 --version 已驗過，但新 daemon 的 provenance API 第一次讀失敗；後續一般狀態恢復正常也不能跳過 sha 複核。
+setup 10 10
+export STUB_AGM_SUPERVISOR_FAIL_AT=2
+rc=$(run)
+check_eq "新 daemon provenance 讀取失敗即回滾（rc=7）" "7" "$rc"
+check "provenance 讀取失敗原因清楚" "新 daemon 的 agm supervisor 讀取失敗" "$SWAP_LOG"
+check_eq "provenance 讀取失敗後還原舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
 setup 10 10
@@ -1126,7 +1158,7 @@ check "systemd-run 失敗有留 log" "WARN: systemd-run rc=1" "$SWAP_LOG"
 check_eq "起不來就照舊回滾（rc=7）" "7" "$rc"
 teardown
 
-# 39. 換 binary 之前先問新 binary 自己是哪個 commit（`--version`），跟核准的 --sha 比前綴：不符就整趟中止（rc=10），
+# 39. 換 binary 之前先問新 binary 自己是哪個 commit（`--version`），完整比對核准的 --sha：不符就整趟中止（rc=10），
 #     窗口都不拿、舊 daemon 不停、binary 不換。daemon 沒辦法驗自己換上去的是不是核准的那顆，只有這支腳本摸得到檔案。
 for case_ in "other:0000000000000000000000000000000000000000" "dirty:DIRTY" "unknown:unknown" "old:NONE"; do
   name=${case_%%:*}; val=${case_#*:}
@@ -1146,12 +1178,31 @@ for case_ in "other:0000000000000000000000000000000000000000" "dirty:DIRTY" "unk
   teardown
 done
 
-# 40. sha 對得上：完整、或核准的是前綴（--sha 比 binary 內嵌的短）都放行；換版照常完成。
+# 40. 核准 sha 必須是完整 commit id：短前綴不足以證明 checkout 和 binary 是同一顆。
+setup 10 10
+PREFIX_SHA=$(printf '%s' "$SHA" | cut -c1-7)
+rc=$(run "" "$PREFIX_SHA")
+check_eq "只給 7 碼前綴就拒絕（rc=10）" "10" "$rc"
+check_no "短前綴沒有去拿窗口" "lease acquire restart" "$AGM_DIR/calls.log"
+check_file "短前綴沒有啟動任何東西" no "$AGM_DIR/started"
+check_eq "短前綴沒有換正式 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+# 完整 sha 對得上，換版照常完成。
 setup 10 10
 export STUB_BIN_VERSION_SHA="$SHA"
 rc=$(run)
 check_eq "binary 的 sha 對上 → 照常換版（rc=0）" "0" "$rc"
 check "log 記下驗過的 sha" "binary sha ok" "$SWAP_LOG"
+teardown
+
+# binary 回報「完整核准 sha + 其他字元」不算相符；不允許前綴比對放過錯誤／偽造回報。
+setup 10 10
+export STUB_BIN_VERSION_SHA="${SHA}f"
+rc=$(run)
+check_eq "binary sha 後面多一碼要拒絕（rc=10）" "10" "$rc"
+check_no "binary sha 多一碼沒有去拿窗口" "lease acquire restart" "$AGM_DIR/calls.log"
+check_eq "binary sha 多一碼沒有換正式 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
 # 41. 新 daemon 起來後再用 API 回報的 sha 複核一次：binary 驗過了，但起來的不是它（例如啟動器拉起別顆）→ 回滾（rc=7）。
@@ -1160,6 +1211,14 @@ export STUB_DAEMON_SHA="1111111111111111111111111111111111111111"
 rc=$(run)
 check_eq "新 daemon 回報的 sha 不是核准的 → 回滾（rc=7）" "7" "$rc"
 check "log 講明是 sha 複核失敗" "回報的 sha" "$SWAP_LOG"
+teardown
+
+setup 10 10
+export STUB_DAEMON_SHA="${SHA}f"
+rc=$(run)
+check_eq "daemon 回報的 sha 多一碼要 rollback（rc=7）" "7" "$rc"
+check_eq "daemon 回報多一碼後還原舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check "daemon 回報多一碼講明 sha 不符" "回報的 sha" "$SWAP_LOG"
 teardown
 
 # 42. 新 daemon 是髒樹建的（dirty:true）→ 回滾；沒回報 sha_full 的 daemon（讀不到）也不放行。

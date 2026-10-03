@@ -117,7 +117,13 @@ except OSError:
   echo $(( $(date +%s) - _born ))
 }
 TMPS=()
-cleanup() { settle; rm -rf "$LOCK" 2>/dev/null || true; [ ${#TMPS[@]} -gt 0 ] && rm -f "${TMPS[@]}" 2>/dev/null; true; }
+TMPS_COUNT=0
+cleanup() {
+  settle
+  rm -rf "$LOCK" 2>/dev/null || true
+  if [ "$TMPS_COUNT" -gt 0 ]; then rm -f "${TMPS[@]}" 2>/dev/null || true; fi
+  true
+}
 take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
@@ -345,7 +351,7 @@ print(json.dumps(out, ensure_ascii=False, indent=2))
   [ -n "$BOT" ] || { note_fail "找不到要派給誰（AGM_RELEASE_BOT／runtime.json 的 release_bot_id 或 responder_bot_id），跳過"; exit 0; }
   quota_gate || exit 0
 
-  BODY=$(mktemp "${TMPDIR:-/tmp}/agm-release-triage.XXXXXX"); TMPS+=("$BODY")
+  BODY=$(mktemp "${TMPDIR:-/tmp}/agm-release-triage.XXXXXX"); TMPS+=("$BODY"); TMPS_COUNT=$((TMPS_COUNT + 1))
   NOTICE_ID="agm-release-triage-${KIND}-${TO}-notice"
   if [ "$BINARY_ONLY" -eq 1 ]; then
     # A changelog notice for this version may already have been sent before the installed binary changed.
@@ -381,10 +387,14 @@ import json, sys
 for p in json.load(sys.stdin)["pending"]:
     print(p["version"])
 ' 2>>"$LOG") || VERS=""
-    VARGS=()
-    while IFS= read -r _v; do [ -n "$_v" ] && VARGS+=(--version "$_v"); done <<< "$VERS"
+    VARGS=(); VARGS_COUNT=0
+    while IFS= read -r _v; do
+      [ -n "$_v" ] || continue
+      VARGS+=(--version "$_v")
+      VARGS_COUNT=$((VARGS_COUNT + 1))
+    done <<< "$VERS"
     DISPATCHED_OK=1
-    if [ ${#VARGS[@]} -gt 0 ]; then
+    if [ "$VARGS_COUNT" -gt 0 ]; then
       if "$AGM" --compact release-triage dispatched --kind "$KIND" "${VARGS[@]}" >> "$LOG" 2>&1; then
         :
       else

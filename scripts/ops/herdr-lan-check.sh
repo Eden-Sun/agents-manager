@@ -33,22 +33,30 @@ server_binaries() { # 每行一個不重複的執行檔路徑
 }
 
 BINARIES=()
+BINARY_COUNT=0
 if [ -n "$BINARY" ]; then
   BINARIES=("$BINARY")
+  BINARY_COUNT=1
 else
-  while IFS= read -r _b; do [ -n "$_b" ] && BINARIES+=("$_b"); done < <(server_binaries)
-  if [ "${#BINARIES[@]}" -gt 0 ]; then
-    echo "0/3 binary: 驗正在跑的 herdr server 執行檔（${#BINARIES[@]} 個）：${BINARIES[*]}"
+  while IFS= read -r _b; do
+    [ -n "$_b" ] || continue
+    BINARIES+=("$_b")
+    BINARY_COUNT=$((BINARY_COUNT + 1))
+  done < <(server_binaries)
+  if [ "$BINARY_COUNT" -gt 0 ]; then
+    echo "0/3 binary: 驗正在跑的 herdr server 執行檔（${BINARY_COUNT} 個）：${BINARIES[*]}"
   elif [ -e "$FALLBACK" ]; then
     _resolved=$(readlink -f "$FALLBACK" 2>/dev/null || echo "$FALLBACK")
     BINARIES=("$_resolved")
+    BINARY_COUNT=1
     echo "0/3 binary: 沒有在跑的 herdr server，退回 ${FALLBACK} → ${_resolved}"
   fi
 fi
 
 # 逐一驗：好幾個 server 跑不同路徑時，每一顆都要有授權，任何一顆沒有就 FAIL。
 IDENTIFIERS=()
-if [ "${#BINARIES[@]}" -eq 0 ]; then
+IDENTIFIER_COUNT=0
+if [ "$BINARY_COUNT" -eq 0 ]; then
   echo "1/3 identifier: FAIL 找不到在跑的 herdr server，${FALLBACK} 也不存在；請把新 binary 路徑當第一個參數"
   FAILED=1
 else
@@ -59,6 +67,7 @@ else
     if [ "$CODESIGN_RC" -eq 0 ] && [ -n "$IDENTIFIER" ]; then
       echo "1/3 identifier: ${IDENTIFIER}（${BINARY}）"
       IDENTIFIERS+=("$IDENTIFIER|$BINARY")
+      IDENTIFIER_COUNT=$((IDENTIFIER_COUNT + 1))
     else
       echo "1/3 identifier: FAIL codesign -dv 無法取出 identifier（${BINARY}）"
       [ -n "$SIGNATURE" ] && printf '%s\n' "$SIGNATURE" >&2
@@ -80,7 +89,7 @@ else
     echo "2/3 authorization: FAIL plutil -p 讀取 ${AUTH_PLIST} 失敗"
     printf '%s\n' "$AUTH_OUTPUT" >&2
     FAILED=1
-  elif [ "${#IDENTIFIERS[@]}" -eq 0 ]; then
+  elif [ "$IDENTIFIER_COUNT" -eq 0 ]; then
     echo "2/3 authorization: FAIL 沒有可比對的 identifier"
     FAILED=1
   else
