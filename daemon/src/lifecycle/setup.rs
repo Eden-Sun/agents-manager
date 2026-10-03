@@ -119,16 +119,66 @@ if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
   case "$PAYLOAD" in
     '{'*'"hook_event_name":"Stop"'*|'{'*'"hook_event_name": "Stop"'*)
       if command -v python3 >/dev/null 2>&1; then
-        WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,sys
+        WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,stat,sys
+def _am_transcript(path):
+    cfg=os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    proj=os.path.join(os.path.realpath(cfg),"projects")
+    nofollow=getattr(os,"O_NOFOLLOW",None)
+    directory=getattr(os,"O_DIRECTORY",0)
+    if not isinstance(path,str) or not os.path.isabs(path) or nofollow is None:
+        raise SystemExit
+    project_stat=os.lstat(proj)
+    if stat.S_ISLNK(project_stat.st_mode) or not stat.S_ISDIR(project_stat.st_mode) or os.path.islink(path):
+        raise SystemExit
+    dir_flags=os.O_RDONLY|directory|nofollow|os.O_NONBLOCK
+    dirfd=os.open(proj,dir_flags)
+    try:
+        opened=os.fstat(dirfd)
+        if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(project_stat.st_dev,project_stat.st_ino):
+            raise SystemExit
+        absolute=os.path.abspath(path)
+        ancestor=absolute
+        rel=None
+        while True:
+            if os.path.realpath(ancestor)==proj:
+                rel=os.path.relpath(absolute,ancestor)
+                break
+            parent=os.path.dirname(ancestor)
+            if parent==ancestor:
+                break
+            ancestor=parent
+        if rel in (None,"", "."):
+            raise SystemExit
+        parts=rel.split(os.sep)
+        if not parts or any(part in ("",".","..") for part in parts):
+            raise SystemExit
+        for part in parts[:-1]:
+            nextfd=os.open(part,dir_flags,dir_fd=dirfd)
+            if not stat.S_ISDIR(os.fstat(nextfd).st_mode):
+                os.close(nextfd)
+                raise SystemExit
+            os.close(dirfd)
+            dirfd=nextfd
+        fd=os.open(parts[-1],os.O_RDONLY|os.O_NONBLOCK|nofollow,dir_fd=dirfd)
+    finally:
+        os.close(dirfd)
+    try:
+        st=os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1:
+            raise SystemExit
+        with os.fdopen(fd,"rb") as f:
+            fd=None
+            f.seek(max(0,st.st_size-524288))
+            return f.read(524288).decode("utf-8","replace")
+    finally:
+        if fd is not None:
+            os.close(fd)
 try:
     p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
     path=p.get("transcript_path") or p.get("transcriptPath")
     if p.get("hook_event_name")!="Stop" or not path:
         raise SystemExit
-    with open(path,"rb") as f:
-        n=os.fstat(f.fileno()).st_size
-        f.seek(max(0,n-524288))
-        data=f.read().decode("utf-8","replace")
+    data=_am_transcript(path)
     users=[]
     for line in reversed(data.splitlines()):
         try:
@@ -174,16 +224,66 @@ if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
   case "$PAYLOAD" in
     '{'*'"hook_event_name":"Stop"'*|'{'*'"hook_event_name": "Stop"'*|'{'*'"hook_event_name":"StopFailure"'*|'{'*'"hook_event_name": "StopFailure"'*)
       if command -v python3 >/dev/null 2>&1; then
-        WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,sys
+        WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,stat,sys
+def _am_transcript(path):
+    cfg=os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    proj=os.path.join(os.path.realpath(cfg),"projects")
+    nofollow=getattr(os,"O_NOFOLLOW",None)
+    directory=getattr(os,"O_DIRECTORY",0)
+    if not isinstance(path,str) or not os.path.isabs(path) or nofollow is None:
+        raise SystemExit
+    project_stat=os.lstat(proj)
+    if stat.S_ISLNK(project_stat.st_mode) or not stat.S_ISDIR(project_stat.st_mode) or os.path.islink(path):
+        raise SystemExit
+    dir_flags=os.O_RDONLY|directory|nofollow|os.O_NONBLOCK
+    dirfd=os.open(proj,dir_flags)
+    try:
+        opened=os.fstat(dirfd)
+        if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(project_stat.st_dev,project_stat.st_ino):
+            raise SystemExit
+        absolute=os.path.abspath(path)
+        ancestor=absolute
+        rel=None
+        while True:
+            if os.path.realpath(ancestor)==proj:
+                rel=os.path.relpath(absolute,ancestor)
+                break
+            parent=os.path.dirname(ancestor)
+            if parent==ancestor:
+                break
+            ancestor=parent
+        if rel in (None,"", "."):
+            raise SystemExit
+        parts=rel.split(os.sep)
+        if not parts or any(part in ("",".","..") for part in parts):
+            raise SystemExit
+        for part in parts[:-1]:
+            nextfd=os.open(part,dir_flags,dir_fd=dirfd)
+            if not stat.S_ISDIR(os.fstat(nextfd).st_mode):
+                os.close(nextfd)
+                raise SystemExit
+            os.close(dirfd)
+            dirfd=nextfd
+        fd=os.open(parts[-1],os.O_RDONLY|os.O_NONBLOCK|nofollow,dir_fd=dirfd)
+    finally:
+        os.close(dirfd)
+    try:
+        st=os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1:
+            raise SystemExit
+        with os.fdopen(fd,"rb") as f:
+            fd=None
+            f.seek(max(0,st.st_size-524288))
+            return f.read(524288).decode("utf-8","replace")
+    finally:
+        if fd is not None:
+            os.close(fd)
 try:
     p=json.loads(sys.stdin.buffer.read().decode("utf-8","replace"))
     path=p.get("transcript_path") or p.get("transcriptPath")
     if p.get("hook_event_name") not in ("Stop","StopFailure") or not path:
         raise SystemExit
-    with open(path,"rb") as f:
-        n=os.fstat(f.fileno()).st_size
-        f.seek(max(0,n-524288))
-        data=f.read().decode("utf-8","replace")
+    data=_am_transcript(path)
     asked={}
     out=[]
     def ans(a):
@@ -1310,6 +1410,111 @@ mod hook_cmd_parts_tests {
             super::REMOTE_HOOK_SH_TEMPLATE.contains(r#"*'"hook_event_name":"StopFailure"'*"#),
             "hook.sh 少了 StopFailure 那一條",
         );
+    }
+
+    /// 遠端 Stop 會把 transcript 最後一句人話帶進 spool。路徑必須是這顆 bot 的
+    /// `CLAUDE_CONFIG_DIR/projects` 底下的一般檔：別的身分、或 FIFO，都不能讀。
+    #[test]
+    fn macos_local_remote_hook_reads_only_this_bots_transcript_and_does_not_block_on_a_fifo() {
+        let home = crate::testing::track(std::env::temp_dir().join(format!("am-hooksh-{}", crate::db::ulid())));
+        let own = home.join("own");
+        let other = home.join("other");
+        std::fs::create_dir_all(own.join("projects")).unwrap();
+        std::fs::create_dir_all(other.join("projects")).unwrap();
+        std::fs::create_dir_all(home.join(".claude/projects")).unwrap();
+        let line = |text: &str| format!(r#"{{"type":"user","message":{{"content":"{text}"}},"origin":{{"kind":"human"}}}}"#);
+        let own_file = own.join("projects/own.jsonl");
+        std::fs::write(&own_file, line("OWN-TEXT")).unwrap();
+        let foreign = other.join("projects/other.jsonl");
+        std::fs::write(&foreign, line("FOREIGN-TEXT")).unwrap();
+        let default_file = home.join(".claude/projects/default.jsonl");
+        std::fs::write(&default_file, line("DEFAULT-TEXT")).unwrap();
+        let fifo = own.join("projects/wait.jsonl");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let symlink = own.join("projects/link.jsonl");
+        std::os::unix::fs::symlink(&own_file, &symlink).unwrap();
+        let nested = own.join("projects/nested");
+        std::fs::create_dir(&nested).unwrap();
+        let nested_file = nested.join("nested.jsonl");
+        std::fs::write(&nested_file, line("NESTED-TEXT")).unwrap();
+        let nested_link = own.join("projects/alias");
+        std::os::unix::fs::symlink(&nested, &nested_link).unwrap();
+        let linked_config = home.join("linked-config");
+        std::fs::create_dir_all(&linked_config).unwrap();
+        std::os::unix::fs::symlink(own.join("projects"), linked_config.join("projects")).unwrap();
+        let script = home.join("hook.sh");
+        std::fs::write(&script, super::remote_hook_sh("am-root")).unwrap();
+        let spool = home.join("am-root/bots/bot-h/hook-spool.d");
+        let run = |path: &std::path::Path, config: Option<&std::path::Path>| {
+            if spool.exists() {
+                for ent in std::fs::read_dir(&spool).unwrap() {
+                    let p = ent.unwrap().path();
+                    if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                        std::fs::remove_file(p).ok();
+                    }
+                }
+            }
+            let payload = serde_json::json!({"hook_event_name":"Stop", "transcript_path":path.to_string_lossy()}).to_string();
+            let mut command = std::process::Command::new("/bin/sh");
+            command
+                .arg(&script)
+                .arg("claude")
+                .arg("bot-h")
+                .arg("-")
+                .env("HOME", &home)
+                .env_remove("HERDR_PANE_ID")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Some(config) = config {
+                command.env("CLAUDE_CONFIG_DIR", config);
+            } else {
+                command.env_remove("CLAUDE_CONFIG_DIR");
+            }
+            let mut child = command.spawn().unwrap();
+            use std::io::Write as _;
+            child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().ok();
+                    let status = child.wait().unwrap();
+                    panic!("hook.sh 必須在 3 秒內結束，不能卡在 transcript：{status}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            assert!(status.success(), "hook.sh 必須在 3 秒內成功結束：{status}");
+            let body = std::fs::read_dir(&spool)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .find(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+                .map(|e| std::fs::read_to_string(e.path()).unwrap())
+                .unwrap_or_default();
+            body
+        };
+        let foreign_body = run(&foreign, Some(&own));
+        assert!(!foreign_body.contains("FOREIGN-TEXT"), "別的 CLAUDE_CONFIG_DIR 不能進 spool：{foreign_body}");
+        let own_body = run(&own_file, Some(&own));
+        assert!(own_body.contains("OWN-TEXT"), "一般 transcript 仍要帶最後一句：{own_body}");
+        let fifo_body = run(&fifo, Some(&own));
+        assert!(!fifo_body.contains("agm_user_text"), "FIFO 不能當 transcript：{fifo_body}");
+        let symlink_body = run(&symlink, Some(&own));
+        assert!(!symlink_body.contains("agm_user_text"), "transcript symlink 不能讀：{symlink_body}");
+        let nested_link_body = run(&nested_link.join("nested.jsonl"), Some(&own));
+        assert!(!nested_link_body.contains("agm_user_text"), "projects 底下的 symlink 路徑不能讀：{nested_link_body}");
+        let hardlink = own.join("projects/hardlink.jsonl");
+        std::fs::hard_link(&own_file, &hardlink).unwrap();
+        let hardlink_body = run(&hardlink, Some(&own));
+        assert!(!hardlink_body.contains("agm_user_text"), "hardlink 不能讀：{hardlink_body}");
+        let linked_projects_body = run(&own_file, Some(&linked_config));
+        assert!(!linked_projects_body.contains("agm_user_text"), "projects symlink 不能讀：{linked_projects_body}");
+        let default_body = run(&default_file, None);
+        assert!(default_body.contains("DEFAULT-TEXT"), "CLAUDE_CONFIG_DIR 未設時要用 ~/.claude：{default_body}");
     }
 
     /// Issue #43: the hook / statusLine command line must not carry the token.
