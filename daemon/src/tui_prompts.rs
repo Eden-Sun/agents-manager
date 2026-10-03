@@ -539,6 +539,15 @@ pub fn is_grok_trust_dialog(screen: &str) -> bool {
     if composer_is_idle(tail_raw) {
         return false;
     }
+    // Grok marks its own transcript/tool output with these prefixes. They are stripped by
+    // `norm_line`, so reject them on the raw rows before an answer that quotes the complete
+    // dialog (including the y/n keys and build row) can look like the live trust screen.
+    if tail_raw.iter().any(|line| {
+        let line = line.trim_start();
+        ["⏺", "●", "⎿"].iter().any(|marker| line.starts_with(marker))
+    }) {
+        return false;
+    }
     let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     line_starts_with(&tail, "do you trust the contents of this directory")
         && tail.iter().any(|l| l == "yes, proceed y")
@@ -1024,6 +1033,24 @@ Yes, proceed\n\
 No, quit\n\
 Grok Build 1.0.46\n";
         assert!(!super::is_grok_trust_dialog(printed_text), "a lookalike without the y/n controls must never authorize a keypress");
+    }
+
+    #[test]
+    fn a_reply_printing_the_complete_trust_prompt_is_not_the_live_dialog() {
+        let printed_text = "\
+⏺ Reference from the Grok trust screen:\n\
+Do you trust the contents of this directory?\n\
+/home/user/project\n\
+Grok Build may run or modify contents in this directory,\n\
+posing security risks.\n\
+Yes, proceed                 y\n\
+No, quit                     n\n\
+Grok Build 1.0.46\n\
+● That was an example; continuing the explanation now.\n";
+        assert!(
+            !super::is_grok_trust_dialog(printed_text),
+            "a response that reproduces every visible trust control must never authorize a keypress"
+        );
     }
 
     /// grok bot 在回覆裡逐行引用這個對話框的三段字（例如報告自己怎麼處理這個誤判），輸入列其實還

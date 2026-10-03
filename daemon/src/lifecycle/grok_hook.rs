@@ -86,13 +86,28 @@ fn proven_legacy_dispatchers(existing: Option<&str>, dispatcher: &str) -> std::c
                 }
                 // 跟 hook 檔同一條：不跟著 symlink 讀，硬連結與過大檔也不算證明。
                 let Ok(Some(text)) = read_hook_file(Path::new(command)) else { continue };
-                if text.starts_with("#!/bin/sh\n# agents-manager grok dispatcher ") {
+                if is_local_daemon_dispatcher(&text) {
                     owned.insert(command.to_string());
                 }
             }
         }
     }
     owned
+}
+
+/// A basename or generic comment is user-controlled. Recognize the actual local dispatcher
+/// shape before retiring an old path; remote wrappers and unrelated user scripts stay untouched.
+fn is_local_daemon_dispatcher(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    lines.len() == 5
+        && lines[0] == "#!/bin/sh"
+        && lines[1]
+            == "# agents-manager grok dispatcher (SPEC §12). Rewritten by the daemon on every grok bot start; no-op outside daemon panes."
+        && lines[2] == "[ -n \"$AM_BOT_ID\" ] && [ -n \"$AM_HOOK_TOKEN\" ] || exit 0"
+        && (lines[3] == "[ -z \"${AM_INSTANCE:-}\" ] || exit 0"
+            || (lines[3].starts_with("[ \"${AM_INSTANCE:-}\" = ") && lines[3].ends_with(" ] || exit 0")))
+        && lines[4].starts_with("exec ")
+        && lines[4].contains(" hook grok --bot \"$AM_BOT_ID\" --port \"${AM_PORT:-7788}\" --data-dir ")
 }
 
 /// 同目錄暫存檔 → `rename`。`mode` 是新檔／換檔後的權限。
