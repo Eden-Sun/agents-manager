@@ -293,15 +293,15 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/hosts/{name}/tools/refresh` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/identities` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/mem/processes/kill` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/missions/{id}/answer` | User／AGM role；一般 Bot 只限有該 mission 交辦的自己，否則 403 `mission_participant_required`；`relay_from` 必須是自己 |
+| POST | `/api/missions/{id}/answer` | User／AGM role；一般 Bot 只限自己或後代 child 有該 mission 交辦，否則 403 `mission_participant_required`；`relay_from` 必須是自己 |
 | POST | `/api/missions/{id}/cancel` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/missions/{id}/complete` | User／AGM role／該 mission 的受派 Bot；未受派 Bot 403 `mission_participant_required`；Bot `relay_from` 必須是自己 |
+| POST | `/api/missions/{id}/complete` | User／AGM role／自己或後代 child 受派的 Bot；未受派 Bot 403 `mission_participant_required`；Bot `relay_from` 必須是自己 |
 | POST | `/api/missions/{id}/deliver` | User 或 AGM 角色 Bot；一般 Bot 403 `mission_gatekeeper_required` |
-| POST | `/api/missions/{id}/events` | User／AGM role／受派 Bot；一般 Bot 未受派 403 `mission_participant_required`；`verified` 另限 User、AGM role 或只擔任 verifier 的該 mission Bot；Bot `relay_from` 必須是自己 |
+| POST | `/api/missions/{id}/events` | User／AGM role／自己或後代 child 受派的 Bot；一般 Bot 未受派 403 `mission_participant_required`；`verified` 另限 User、AGM role 或只擔任 verifier 的該 mission Bot；Bot `relay_from` 必須是自己 |
 | POST | `/api/missions/{id}/pause` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/missions/{id}/question` | User／AGM role／該 mission 的受派 Bot；未受派 Bot 403 `mission_participant_required`；Bot `relay_from` 必須是自己 |
+| POST | `/api/missions/{id}/question` | User／AGM role／自己或後代 child 受派的 Bot；未受派 Bot 403 `mission_participant_required`；Bot `relay_from` 必須是自己 |
 | POST | `/api/missions/{id}/resume` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
-| POST | `/api/missions/{id}/revise` | User／AGM role／原 mission 的受派 Bot；未受派 Bot 403 `mission_participant_required`；Bot `relay_from` 必須是自己 |
+| POST | `/api/missions/{id}/revise` | User／AGM role／自己或後代 child 受派的 Bot；未受派 Bot 403 `mission_participant_required`；Bot `relay_from` 必須是自己 |
 | POST | `/api/missions/{id}/round` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | POST | `/api/order` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/panes/{id}/adopt` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |

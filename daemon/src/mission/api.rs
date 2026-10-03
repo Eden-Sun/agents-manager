@@ -120,8 +120,24 @@ async fn mission_access_bot(app: &Arc<App>, bot_id: Option<&str>) -> Result<Opti
 
 async fn require_mission_participant(app: &Arc<App>, mission_id: &str, bot_id: Option<&str>) -> Result<(), LcError> {
     let Some(bot_id) = bot_id else { return Ok(()) };
-    let assignments = crate::supervisor::store::mission_assignments(&app.db, mission_id).await.map_err(up)?;
-    if assignments.iter().any(|assignment| assignment.target_bot_id == bot_id) {
+    // Match the shared API path policy: a Bot can act for work assigned to itself or a child.
+    let assigned: i64 = sqlx::query_scalar(
+        "WITH RECURSIVE owned(id) AS (
+             SELECT id FROM bots WHERE id = ?
+             UNION
+             SELECT child.id FROM bots child JOIN owned parent ON child.parent_bot_id = parent.id
+         )
+         SELECT EXISTS(
+             SELECT 1 FROM supervisor_assignments a JOIN owned ON owned.id = a.target_bot_id
+             WHERE a.mission_id = ?
+         )",
+    )
+    .bind(bot_id)
+    .bind(mission_id)
+    .fetch_one(&app.db)
+    .await
+    .map_err(up)?;
+    if assigned != 0 {
         return Ok(());
     }
     Err(LcError::Forbidden(json!({
@@ -1727,6 +1743,50 @@ mod tests {
             .unwrap();
         let _ = post_cancel(State(app.clone()), Path(mission_id.clone()), headers).await.unwrap();
         assert_eq!(store::get(&app.db, &mission_id).await.unwrap().unwrap().status(), "cancelled");
+    }
+
+    /// A parent Bot's API scope includes missions assigned to its child. Middleware accepts that
+    /// scope, so the handler must use the same Bot tree instead of silently narrowing it to the
+    /// exact caller id.
+    #[tokio::test]
+    async fn a_bot_parent_can_question_a_mission_assigned_to_its_child() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(mission) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("child-mission-question", "pr")))
+            .await
+            .unwrap();
+        let mission_id = mission["id"].as_str().unwrap().to_string();
+        let (parent_id, parent_headers) = bot_with_token(&app, &env.project_id, false).await;
+        let (child_id, _) = bot_with_token(&app, &env.project_id, false).await;
+        sqlx::query("UPDATE bots SET parent_bot_id=? WHERE id=?")
+            .bind(&parent_id)
+            .bind(&child_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::supervisor::store::insert_assignment_linked(
+            &app.db,
+            None,
+            &child_id,
+            "child-mission-assignment",
+            "child owns this work",
+            &[],
+            None,
+            true,
+            Some((&mission_id, "executor")),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let result = post_question(
+            State(app),
+            Path(mission_id),
+            parent_headers,
+            Json(q("The child assignment needs clarification", "child-question-1")),
+        )
+        .await;
+        assert!(result.is_ok(), "the parent's authorized descendant scope should reach the participant route: {result:?}");
     }
 
     fn q(text: &str, crid: &str) -> QuestionIn {
