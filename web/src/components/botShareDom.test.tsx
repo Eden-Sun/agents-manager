@@ -106,3 +106,29 @@ test('建 bot 的「分享用（受限）」只給本機的 claude；mock 建 co
   assert.equal(b.share_profile, 'restricted')
   assert.equal(b.auto_approve, false, '受限 bot 不帶 bypass permissions')
 })
+
+test('建 bot 表單的資料夾：新資料夾預設 bot 名、既有資料夾要絕對路徑並警告 .env 讀得到', async () => {
+  const { shareFolderInput } = await import('../lib/shareProfile')
+  assert.deepEqual(shareFolderInput({ mode: 'new', name: '', path: '' }, 'support'), { value: { kind: 'new', name: 'support' } })
+  assert.deepEqual(shareFolderInput({ mode: 'new', name: 'kefu-1', path: '' }, 'support'), { value: { kind: 'new', name: 'kefu-1' } })
+  assert.ok('error' in shareFolderInput({ mode: 'new', name: '.hidden', path: '' }, 'x'))
+  assert.ok('error' in shareFolderInput({ mode: 'existing', name: '', path: 'relative/dir' }, 'x'))
+  assert.deepEqual(shareFolderInput({ mode: 'existing', name: '', path: ' /srv/docs ' }, 'x'), { value: { kind: 'existing', path: '/srv/docs' } })
+
+  const { ShareProfileField } = await import('./ShareProfileField')
+  let folder = { mode: 'existing' as const, name: '', path: '/srv/docs' }
+  await mount(<ShareProfileField kind="claude" host="local" value onChange={() => {}} botName="support" folder={folder} onFolder={(f) => (folder = f as typeof folder)} />)
+  assert.match(document.querySelector('.share-folder-warn')!.textContent!, /所有檔案（含 \.env 之類）/)
+  await unmountAll()
+  await mount(<ShareProfileField kind="codex" host="local" value onChange={() => {}} botName="x" folder={folder} onFolder={() => {}} />)
+  assert.equal(document.querySelector('.share-folder'), null, 'codex 不能受限，也就沒有資料夾選項')
+
+  const mock = new MockTransport()
+  const st = (await mock.request('GET', '/state')) as { projects: { id: string }[] }
+  const pid = st.projects[0].id
+  const r = (await mock.request('POST', `/projects/${pid}/bots`, { name: 'docs-share', kind: 'claude', share_profile: 'restricted', share_folder: { kind: 'existing', path: '/srv/docs' }, autostart: false })) as { bot_id: string }
+  const st2 = (await mock.request('GET', '/state')) as { projects: { bots: { id: string; cwd: string | null; model: string | null }[] }[] }
+  const b = st2.projects.flatMap((p) => p.bots).find((x) => x.id === r.bot_id)!
+  assert.equal(b.cwd, '/srv/docs')
+  assert.equal(b.model, 'opus', '沒選模型＝最新 Opus（別名交給 CLI 解析）')
+})

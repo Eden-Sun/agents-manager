@@ -94,3 +94,48 @@
   color: var(--accent-ink);
   background: var(--accent-soft);
 }
+
+.share-folder {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.share-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 22px;
+}
+
+.share-folder-row input[type='text'] {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.share-folder-prefix {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.share-folder-warn {
+  margin: 0 0 0 22px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.share-folder-err {
+  color: var(--danger);
+}
+
