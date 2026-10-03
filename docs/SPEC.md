@@ -3243,13 +3243,15 @@ bot 用 `herdr agent start --kind grok` 開的子 agent 沒有 hook（pane 環�
 
 - **找 session**：`<GROK_HOME>/active_sessions.json`（`session_id`／`pid`／`cwd`）。環境 `HERDR_PANE_ID` 是這顆 pane（有 `HERDR_SESSION` 時也要同一個
   herdr session）的行程（`memproc::pids_in_pane`；本機讀 `/proc/<pid>/environ`，遠端走同一支 ssh 行程表）是哪個 pid，就是哪個 session——
-  同一個 cwd 開好幾顆 grok 也不會認錯。讀得到 pane 的行程、名單裡卻沒有它：當作還沒開好，不猜。讀不到行程環境時才退回「bot 的 cwd 相同、
+  同一個 cwd 開好幾顆 grok 也不會認錯。名單上那個 session 若已經被別的在跑 run 綁走（pid 重用後過期列還在），不拿來用。
+  讀得到 pane 的行程、名單裡卻沒有它：當作還沒開好，不猜。讀不到行程環境時才退回「bot 的 cwd 相同、
   沒被別的在跑 run 綁走、剛好一個」，不只一個就不猜。找到的寫進 `runs.native_session_id`；之後只要它還在名單上就不再掃行程。`GROK_HOME` 同 §12.2（bot env，缺省 `~/.grok`）。
 - **讀檔**：`<GROK_HOME>/sessions/*/<session id>/chat_history.jsonl`（一般檔、非 symlink），本機與遠端都用 `sh` 讀最後 8 MiB；session id 只收英數與 `-`／`_`。
 - **一問一答**：`type: user`、沒有 `synthetic_reason`、內容有 `<user_query>…</user_query>` 的才是一問（取標籤裡的字）；`<user_info>`、system reminder、
   壓縮摘要都不是。之後第一則沒有 `tool_calls` 的 `assistant` 是回覆（帶 `tool_calls` 的旁白不算），下一問出現也算這一問結束（被打斷、沒有回覆）。
   slash 指令不進這個檔。**壓縮會重寫整個檔**：前面的問答消失，進行中那一問以沒有 `prompt_index` 的形式重新出現，所以是邊跑邊記，不是事後重讀。
-- **記成回合**：每一問的鑰匙是 `turns.native_session_id = <session id>`、`native_turn_id = p<prompt_index>`（沒有 index 用內容雜湊 `q<hash>`），記過就跳過。
+- **記成回合**：每一問的鑰匙是 `turns.native_session_id = <session id>`、`native_turn_id = p<prompt_index>`（沒有 index 用 FNV-1a `q` + 12 碼十六進位，跟 `short_hash` 同一套，跨行程穩定），記過就跳過。
+  壓縮把同一句重寫成沒有 index 時，用這個 run 已存的使用者原文對上，不另開一筆。同一把 `pN` 底下換成另一句（index 被重用）時改用內容鑰匙，不把新問題吞掉。
   結束了的一問依序：先找這個 run 還沒綁鑰匙、使用者訊息或 `prompt_text` 對得上的回合（比法同 §6.5d：忽略空白、短的一方是開頭，回音尾巴的 `…` 先拿掉）——
   在飛的收成 `completed`（沒有回覆的 `completed_fallback`）並補 assistant；備援收過的，截斷的回音與備援抓的回覆**原地**換成原文（id 不變、`source = transcript`、
   `completed_fallback → completed`），hook 寫的不動。檔裡最新結束的那一問也可以收下 working 時開的、還沒有任何 prompt 的那筆在飛回合。
