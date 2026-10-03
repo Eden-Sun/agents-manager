@@ -265,7 +265,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   但停機沒有確認、agent 可能還活著，目錄留著；讀不到 run、或收完 run 仍是 active（`exited` 寫不進去）也留著。留著的列在回應的 `kept_dirs`（`reason` 是
   `stop_not_confirmed` / `run_state_unreadable` / `run_still_active`）——刪除本身已經定案（bot 已軟刪），所以回 200 而不是錯誤；下次開機的清掃在 run 確定結束後把目錄收掉。
   **開機的殘留清掃**（`purge_deleted_bot_dirs`，reconcile／rearm 之後跑一次）只收「確定軟刪」而且「確定沒有 active run」的 `bots/<id>/`；沒有 bot 認領的目錄不碰。
-  **找得回軟刪的 bot**（#757）：`GET /api/bots/deleted` 列出軟刪的 user bot（API.md §10.4b），網頁在「環境設定→最近刪除」每列一顆「復原」，走同一支 `restore`；刪除當下 15 秒的通知照舊。
+  **找得回軟刪的 bot**（#757）：`GET /api/bots/deleted` 列出軟刪的 user bot（API.md §10.4b），網頁在「環境設定→最近刪除」每列一顆「復原」，走同一支 `restore`；刪除當下 15 秒的通知照舊。復原不自動啟動 bot；若該 bot 尚有刪除前留下的 open restart intent，復原會將其標成 `abandoned`，避免重試／開機復原違反「保持停止」的語意。child 復原時同時持有 child 與 parent 的 bot 鎖，並在同一 DB transaction 內確認 project、parent 仍存活、記下十分鐘寬限期與清除 `deleted_at`。
   **「清目錄」＝搬進回收區，不是刪**（issue #406）：本機的 `bots/<id>/` 搬到 `<資料目錄>/bots-trash/<id>.<毫秒>/`，`POST /api/bots/:id/restore` 時若 `bots/<id>/` 不在就把最新那份搬回來；
   **附件副本一起收**（issue #465）：`<資料目錄>/attachments/<bot_id>/`（遠端 bot 也有，縮圖不走 ssh）以前刪 bot 時沒有任何人動它——沒有 TTL、沒有總量上限、`reconcile_orphans` 只收 `staging`／`failed`，`ready` 的永遠留著。現在跟著搬進同一個回收區，項目名是 `<id>.attachments.<毫秒>`（結尾一樣是毫秒，所以過期與總量上限一視同仁；`<kind>` 那段讓它不會被當成 `bots/<id>/` 還原回去），`restore` 時一起搬回來——不然還原後對話還在、縮圖全破（已刪 bot 的對話本來就讀得到，API.md §10.4）。
   **沒送出的上傳也會清**：`ready`、沒有任何訊息引用（`message_id` 空且沒有訊息的 `attachments_json` 點名）、放超過 24 小時（從上傳、或最後一次被 `resolve`／撤回解綁算起）的附件，由 `attach::sweep_unreferenced` 在開機與之後每 6 小時刪掉 row 與檔案（先刪 row 才刪檔，跟 `bind` 搶同一列）；被訊息引用的絕不刪，`staging`／`failed` 仍歸開機的 `reconcile_orphans`。以前這類附件沒有任何清理（正式庫 50 筆、近 50 MB）。

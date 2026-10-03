@@ -2642,13 +2642,39 @@ pub(crate) async fn descendant_children(app: &Arc<App>, root: &str) -> anyhow::R
 /// 刪除是軟的：寫回 config.toml 條目讓 projection 清 `deleted_at`；child bot 直接清欄位。
 /// 被 `purge_bot_dir` 砍掉的工作目錄下次啟動會重新產生。
 pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
-    // 跟 delete_bot／start 同一把 per-bot 鎖（#301）：delete_bot 定案後才停機、purge，沒鎖的話還原會插進來，
-    // 事後被 purge 砍掉剛還原的 bot 的目錄與 run。
-    let _guard = app.bot_lock(&id).await.lock_owned().await;
-    let bot = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    // 跟 delete_bot／start 同一把 per-bot 鎖（#301）：child 同時拿 parent 鎖，避免 parent delete 的 child 快照漏掉
+    // 正在還原的 child。依 id 排序一次拿齊，跟 delete_bot／delete_project 的多 bot 鎖順序一致。
+    let mut attempt = 0;
+    let (bot, _guards) = loop {
+        let before = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+        let ids = std::iter::once(id.clone())
+            .chain(before.parent_bot_id.iter().filter(|p| !p.is_empty()).cloned())
+            .collect();
+        let (_, guards) = lock_bots_in_order(&app, ids).await;
+        let current = db::bot(&app.db, &id).await.map_err(any_err)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+        if current.managed_by == before.managed_by && current.parent_bot_id == before.parent_bot_id {
+            break (current, guards);
+        }
+        drop(guards);
+        attempt += 1;
+        if attempt >= 3 {
+            return Err(LcError::conflict("parent_changed", json!({"bot_id": id})));
+        }
+    };
     if bot.deleted_at.is_none() {
         return Err(LcError::conflict("bot is not deleted", json!({"bot_id": id})));
     }
+    // A pending restart from before deletion is not permission to start a bot after an explicit restore.
+    // The recovery worker also takes this bot lock and rechecks the intent status after acquiring it.
+    sqlx::query(
+        "UPDATE intents SET status='abandoned', last_error='bot restore superseded the pending restart', updated_at=?
+         WHERE kind='restart' AND subject_id=? AND status IN ('pending','running')",
+    )
+    .bind(db::now())
+    .bind(&id)
+    .execute(&app.db)
+    .await
+    .map_err(any_err)?;
     let taken: Option<String> = sqlx::query_scalar(
         "SELECT id FROM bots WHERE project_id = ? AND name = ? AND deleted_at IS NULL AND id <> ?",
     )
@@ -2674,10 +2700,27 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
         if !project_live || !parent_live {
             return Err(LcError::conflict("the project or parent bot of this child is deleted", json!({"bot_id": id})));
         }
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("restore_child_after_liveness_check", &id).await;
         // A child restored by AGM is reopened by its parent in the existing pane; allow ten minutes
         // for that asynchronous hand-off before reconcile applies the normal retirement rule.
-        crate::child_reconcile_safety::record_retirement_grace(&app.db, &id).await.map_err(any_err)?;
-        sqlx::query("UPDATE bots SET deleted_at = NULL WHERE id = ?").bind(&id).execute(&app.db).await.map_err(any_err)?;
+        let mut tx = app.db.begin().await.map_err(any_err)?;
+        crate::child_reconcile_safety::record_retirement_grace_on(&mut tx, &id).await.map_err(any_err)?;
+        let changed = sqlx::query(
+            "UPDATE bots SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL
+               AND EXISTS (SELECT 1 FROM projects p WHERE p.id = bots.project_id AND p.deleted_at IS NULL)
+               AND (bots.parent_bot_id IS NULL OR EXISTS (SELECT 1 FROM bots parent WHERE parent.id = bots.parent_bot_id AND parent.deleted_at IS NULL))",
+        )
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .map_err(any_err)?
+        .rows_affected();
+        if changed != 1 {
+            tx.rollback().await.map_err(any_err)?;
+            return Err(LcError::conflict("the project or parent bot of this child is deleted", json!({"bot_id": id})));
+        }
+        tx.commit().await.map_err(any_err)?;
     } else {
         // 讀不懂的 args／env 不能當成空的寫回 config（#295）：env 可能帶帳號設定，還原後會以錯的身分起。
         let args = serde_json::from_str(&bot.args_json).map_err(|e| LcError::conflict("bot args_json is unreadable; not restoring", json!({"bot_id": id, "error": e.to_string()})))?;
@@ -6668,6 +6711,63 @@ mod delete_bot_tests {
         assert!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some());
     }
 
+    /// Project deletion has no per-project lock. Its liveness check can pass, then the project can be deleted before the child row is restored.
+    #[tokio::test]
+    async fn a_project_deleted_after_the_child_restore_check_still_blocks_the_restore() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let parent = a_bot(&e, "live-parent", "user").await;
+        let child = a_bot(&e, "deleted-child-race", "child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id = ?, deleted_at = ? WHERE id = ?")
+            .bind(&parent)
+            .bind(db::now())
+            .bind(&child)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let (a, project) = (app.clone(), e.project_id.clone());
+        crate::lifecycle::race_point::arm("restore_child_after_liveness_check", &child, move || async move {
+            sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?")
+                .bind(db::now())
+                .bind(project)
+                .execute(&a.db)
+                .await
+                .unwrap();
+        });
+        let restored = restore_bot(State(app.clone()), Path(child.clone())).await;
+        assert!(restored.is_err(), "the project ceased to be live after the check, so restore must not succeed");
+        assert!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some(), "child must remain deleted");
+    }
+
+    #[tokio::test]
+    async fn a_parent_deleted_after_the_child_restore_check_still_blocks_the_restore() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let parent = a_bot(&e, "parent-live-at-check", "user").await;
+        let child = a_bot(&e, "deleted-child-parent-race", "child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id = ?, deleted_at = ? WHERE id = ?")
+            .bind(&parent)
+            .bind(db::now())
+            .bind(&child)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let (a, parent_id) = (app.clone(), parent.clone());
+        crate::lifecycle::race_point::arm("restore_child_after_liveness_check", &child, move || async move {
+            sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+                .bind(db::now())
+                .bind(parent_id)
+                .execute(&a.db)
+                .await
+                .unwrap();
+        });
+        let restored = restore_bot(State(app.clone()), Path(child.clone())).await;
+        assert!(restored.is_err(), "the parent ceased to be live after the check, so restore must not succeed");
+        assert!(db::bot(&app.db, &child).await.unwrap().unwrap().deleted_at.is_some(), "child must remain deleted");
+    }
+
     /// #757：刪母 bot 會連它的 child 一起軟刪；「最近刪除」只列 user bot，復原母 bot 之後 child 仍是已刪、可以再個別復原
     /// （母 bot 活了就過得了 #298 的檢查）。母 bot 復原後沒有 run（不自動重開），清單裡也不再有它。
     #[tokio::test]
@@ -6694,6 +6794,38 @@ mod delete_bot_tests {
 
         restore_bot(State(app.clone()), Path(kid.clone())).await.expect("母 bot 活了，child 可以個別復原");
         assert!(db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.is_none());
+    }
+
+    /// A restore is deliberately stopped, not auto-started. A restart intent left in its retry window must not undo that choice.
+    #[tokio::test]
+    async fn restoring_a_deleted_bot_abandons_its_pre_delete_restart_intent() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let bot = a_bot(&e, "restore-with-pending-restart", "user").await;
+        in_config(&e, &[(&bot, "restore-with-pending-restart")]).await;
+        let run = crate::testing::fake_run(&app, &bot).await;
+        let intent = match crate::intents::insert(
+            &app.db,
+            "restart",
+            &bot,
+            crate::config::LOCAL_HOST,
+            &json!({"opts": {"resume_native": true}, "from_run_id": run}),
+            900,
+        )
+        .await
+        .unwrap()
+        {
+            crate::intents::Inserted::New(i) => i.id,
+            crate::intents::Inserted::AlreadyOpen(_) => panic!("test starts without an earlier restart"),
+        };
+
+        delete_bot(State(app.clone()), Path(bot.clone())).await.unwrap();
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_none(), "delete ended the old run");
+        restore_bot(State(app.clone()), Path(bot.clone())).await.unwrap();
+
+        let status: String = sqlx::query_scalar("SELECT status FROM intents WHERE id = ?").bind(&intent).fetch_one(&app.db).await.unwrap();
+        assert_eq!(status, "abandoned", "restoring does not authorize replaying the restart that was pending before deletion");
+        assert!(db::active_run(&app.db, &bot).await.unwrap().is_none(), "restore remains stopped");
     }
 
     /// #301：delete_bot 定案後、停機／purge 之前，restore_bot 必須等鎖，不能插進來。

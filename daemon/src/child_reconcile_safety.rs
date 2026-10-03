@@ -5,6 +5,7 @@ use sqlx::SqlitePool;
 
 pub const RESTORE_GRACE_SECS: i64 = 10 * 60;
 
+#[cfg(test)]
 async fn note(pool: &SqlitePool, bot_id: &str, kind: &str, body: &str) -> Result<()> {
     sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
         .bind(crate::db::ulid())
@@ -39,9 +40,25 @@ pub async fn clear_after_successful_restart(pool: &SqlitePool, bot_id: &str) -> 
     .await
 }
 
+#[cfg(test)]
 pub async fn record_retirement_grace(pool: &SqlitePool, bot_id: &str) -> Result<String> {
     let until = crate::db::iso_in(RESTORE_GRACE_SECS);
     note(pool, bot_id, "child_retirement_grace", &until).await?;
+    Ok(until)
+}
+
+/// Record the restore grace in the same transaction as making a child live, so reconcile cannot
+/// observe a live row without its corresponding guard.
+pub async fn record_retirement_grace_on(conn: &mut sqlx::SqliteConnection, bot_id: &str) -> Result<String> {
+    let until = crate::db::iso_in(RESTORE_GRACE_SECS);
+    sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
+        .bind(crate::db::ulid())
+        .bind(bot_id)
+        .bind("child_retirement_grace")
+        .bind(&until)
+        .bind(crate::db::now())
+        .execute(conn)
+        .await?;
     Ok(until)
 }
 
