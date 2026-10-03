@@ -204,11 +204,14 @@ pub(crate) fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
     if kind == "claude" {
         return crate::capture::claude::prompt_echo_row(lines).map(|i| i + 1).unwrap_or(0);
     }
+    // codex inline banner 的選項列 `› 1. …` 不是回音（#779）。
+    let banner = if kind == "codex" { codex_inline_banner(lines) } else { None };
     lines
         .iter()
-        .rposition(|l| {
+        .enumerate()
+        .rposition(|(i, l)| {
             let t = l.trim_start();
-            t.starts_with(echo) && t.len() > echo.len() && !is_codex_idle_prompt(t)
+            t.starts_with(echo) && t.len() > echo.len() && !is_codex_idle_prompt(t) && !banner.as_ref().is_some_and(|b| b.contains(&i))
         })
         .map(|i| i + 1)
         .unwrap_or(0)
@@ -304,6 +307,88 @@ fn is_codex_idle_prompt(s: &str) -> bool {
     let t = s.trim_start();
     let body = t.strip_prefix("› ").unwrap_or(t).trim();
     body.to_ascii_lowercase().starts_with("ask codex to do")
+}
+
+/// codex inline banner 底下那一行提示的三種寫法（`bottom_pane/actionable_banner.rs`，rust-v0.159.3）。
+const CODEX_BANNER_HINTS: [&str; 3] = [
+    "Press a number to choose · esc to dismiss · type to continue",
+    "Press a number to choose",
+    "esc to dismiss · type to continue",
+];
+
+/// codex 0.159.3 起，閒置時輸入框正上方可能多一塊 inline banner（ChatGPT 登入的帳號安全設定提醒，openai/codex#49744，#779；
+/// 用量橫幅也是同一個元件）。版面照上游 snapshot：
+///
+/// ```text
+///
+///   Keep using Daybreak mode                      ← 標題＋說明，縮排兩格，最多 8 列（第 8 列是 `…`）
+///   Set up Advanced Account Security with a …
+///
+/// › 1. Set up security                            ← 動作選項，選中那列用 `›`——跟使用者回音同一個符號
+///
+///   Press a number to choose · esc to dismiss · type to continue    ← 窄 pane 會折成兩列
+///
+/// › Ask Codex to do anything
+/// ```
+///
+/// 不認的話 `› 1. Set up security` 會被當成最後一句使用者回音：回覆擷取整個落空、回音讀成「1. Set up security」，
+/// 備援還會把標題與說明當成回覆尾巴。回 banner 佔的列（標題第一列到輸入列之前，不含輸入列）；結構不完全對上就 `None`，
+/// 照舊判讀。回合進行中 codex 不畫這塊（`is_task_running` 時藏起來），所以只會出現在閒置畫面。
+pub(crate) fn codex_inline_banner(lines: &[&str]) -> Option<std::ops::Range<usize>> {
+    let blank = |i: usize| lines[i].trim().is_empty();
+    let composer = lines.iter().rposition(|l| l.starts_with('›'))?;
+    // 輸入列上面：空白列，再上去是提示（可能折行）。
+    let mut i = composer;
+    while i > 0 && blank(i - 1) {
+        i -= 1;
+    }
+    let hint_end = i;
+    while i > 0 && !blank(i - 1) && lines[i - 1].starts_with("  ") {
+        i -= 1;
+    }
+    if i == hint_end || hint_end - i > 3 {
+        return None;
+    }
+    let hint = lines[i..hint_end].iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+    let hint = hint.split_whitespace().collect::<Vec<_>>().join(" ");
+    // 最後一種是沒有動作選項的純資訊 banner。
+    let with_actions = CODEX_BANNER_HINTS.iter().position(|h| *h == hint)? != 2;
+    // 提示上面一列空白，然後是動作選項（`› 1. …`、`  2. …`，從 1 連號）。
+    if i == 0 || !blank(i - 1) {
+        return None;
+    }
+    i -= 1;
+    if with_actions {
+        let action = |l: &str| -> Option<u32> {
+            let body = l.strip_prefix("› ").or_else(|| l.strip_prefix("  "))?;
+            let (n, label) = body.split_once(". ")?;
+            (!label.trim().is_empty() && n.len() <= 2).then(|| n.parse().ok()).flatten()
+        };
+        let last = i;
+        while i > 0 && action(lines[i - 1]).is_some() {
+            i -= 1;
+        }
+        let numbers: Vec<u32> = lines[i..last].iter().filter_map(|l| action(l)).collect();
+        if numbers.is_empty() || numbers.iter().zip(1..).any(|(n, want)| *n != want) {
+            return None;
+        }
+        if lines[i..last].iter().filter(|l| l.starts_with('›')).count() != 1 {
+            return None;
+        }
+        if i > 0 && blank(i - 1) {
+            i -= 1;
+        }
+    }
+    // 標題與說明：縮排兩格、連續、最多 8 列，上面是空白列（或畫面頂端）。
+    let header_end = i;
+    while i > 0 && !blank(i - 1) && lines[i - 1].starts_with("  ") {
+        i -= 1;
+    }
+    let rows = header_end - i;
+    if rows == 0 || rows > 8 || (i > 0 && !blank(i - 1)) {
+        return None;
+    }
+    Some(i..composer)
 }
 
 /// codex 的經過時間：`45s`、`2m 5s`／`2m 05s`、`1h 2m 3s`（`fmt_elapsed_compact`、完成行的 `Worked for`）。
@@ -893,11 +978,16 @@ pub(crate) fn clean_screen(kind: &str, text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let start = after_last_prompt_echo(kind, &lines);
     let tool_rows = codex_tool_cell_mask(kind, &lines);
+    let banner_at = if kind == "codex" { codex_inline_banner(&lines).map(|b| b.start) } else { None };
     let mut out: Vec<String> = Vec::new();
     let grok = kind == "grok";
     // grok's telemetry banner wraps at pane width: skip "Help improve Grok" … "Privacy Policy." as a block.
     let mut in_banner = false;
     for (i, line) in lines.iter().enumerate().skip(start) {
+        // codex 的 inline banner（#779）是輸入框的一部分，不是回覆。
+        if banner_at == Some(i) {
+            break;
+        }
         // Codex draws every tool call with the assistant's own `•` marker; the cell is not the answer.
         if tool_rows.get(i).copied().unwrap_or(false) {
             continue;
@@ -974,7 +1064,9 @@ pub(crate) fn extract_reply(kind: &str, text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     // A2: only this turn's output — else the previous turn's `⏺` line is returned as the answer.
     let after_echo = after_last_prompt_echo(kind, &lines);
-    let tool_rows = codex_tool_cell_mask(kind, &lines);
+    // codex 的 inline banner（#779）：標題、說明、選項都不是回覆，回覆最多到它上面為止。
+    let lines = &lines[..codex_inline_banner(&lines).map_or(lines.len(), |b| b.start)];
+    let tool_rows = codex_tool_cell_mask(kind, lines);
     let is_tool_row = |i: usize| tool_rows.get(i).copied().unwrap_or(false);
     let is_reply_start = |i: usize| {
         let s = lines[i].trim_start();
@@ -2490,6 +2582,73 @@ mod codex_0157_screen_tests {
         assert_eq!(extract_reply("codex", STARTUP), None);
         assert_eq!(last_prompt_echo_text("codex", STARTUP), None);
         assert!(!pane_still_busy(STARTUP));
+    }
+}
+
+/// codex 0.159.3 的帳號安全設定提醒 inline banner（#779，openai/codex#49744）。伺服器分批開放，本機帳號還沒輪到，
+/// fixture 是照上游 rust-v0.159.3 的 snapshot（`security_setup_banner`、`security_setup_after_cutoff`、
+/// `inline_banner_wrapped_and_truncated`）排出來的版面，樣式照 `actionable_banner.rs`：標題粗體、提示 dim、選中列 `›`。
+#[cfg(test)]
+mod codex_01593_banner_tests {
+    use super::*;
+    use crate::lifecycle::{box_state, plain_without_hints, BoxState};
+
+    const BANNER: &str = include_str!("fixtures/codex-0.159.3-security-setup-banner.txt");
+    const BANNER_ANSI: &str = include_str!("fixtures/codex-0.159.3-security-setup-banner.ansi");
+
+    /// 48 欄的 pane：說明折成多列、提示折成兩列（上游 `security_setup_after_cutoff` snapshot）。
+    const NARROW: &str = "› Reply with exactly: CODEX OK\n\n\n• CODEX OK\n\n  done 3:00 AM\n\n\n  Set up security for Daybreak mode\n  Set up Advanced Account Security with a\n  hardware security key. Already Persona-\n  verified? Add your key before October 15 to\n  skip re-verification. You can keep using\n  Codex while you finish setup.\n\n› 1. Set up security\n\n  Press a number to choose · esc to dismiss ·\n  type to continue\n\n› Ask Codex to do anything\n\n  gpt-6.1-sol default · /tmp/x\n";
+
+    fn assert_reply_untouched(name: &str, screen: &str) {
+        assert_eq!(extract_reply("codex", screen).as_deref(), Some("CODEX OK"), "{name}");
+        assert_eq!(last_prompt_echo_text("codex", screen).as_deref(), Some("Reply with exactly: CODEX OK"), "{name}");
+        let cleaned = clean_screen("codex", screen).unwrap_or_default();
+        for chrome in ["Daybreak", "Advanced Account Security", "Set up security", "Press a number", "type to continue"] {
+            assert!(!cleaned.contains(chrome), "{name}: 備援把 banner 當回覆：{cleaned:?}");
+        }
+        assert!(cleaned.contains("CODEX OK"), "{name}: {cleaned:?}");
+        let live = crate::lifecycle::poller::live_reply("codex", screen).unwrap_or_default();
+        assert!(!live.contains("Daybreak") && live.contains("CODEX OK"), "{name}: {live:?}");
+        assert!(!crate::lifecycle::poller::pane_still_busy(screen), "{name}: 閒置畫面不是忙");
+    }
+
+    #[test]
+    fn the_security_setup_banner_is_not_the_reply_or_the_echo() {
+        assert_reply_untouched("wide", BANNER);
+        assert_reply_untouched("narrow", NARROW);
+        assert_reply_untouched("ansi-stripped", &plain_without_hints("codex", BANNER_ANSI));
+    }
+
+    /// 沒有動作選項的資訊 banner（`esc to dismiss · type to continue`）也一樣。
+    #[test]
+    fn an_information_banner_without_actions_is_not_the_reply() {
+        let screen = "› Reply with exactly: CODEX OK\n\n• CODEX OK\n\n\n  Heads up\n  Something changed on your account.\n\n  esc to dismiss · type to continue\n\n› Ask Codex to do anything\n";
+        assert_eq!(extract_reply("codex", screen).as_deref(), Some("CODEX OK"));
+        assert!(!clean_screen("codex", screen).unwrap_or_default().contains("Heads up"));
+    }
+
+    #[test]
+    fn the_composer_under_the_banner_is_empty_and_free_to_send() {
+        assert_eq!(box_state("codex", BANNER_ANSI), BoxState::Empty);
+        let plain = plain_without_hints("codex", BANNER_ANSI);
+        assert!(crate::tui_prompts::composer_is_idle(&plain.lines().collect::<Vec<_>>()), "{plain}");
+        for screen in [BANNER, BANNER_ANSI, plain.as_str(), NARROW] {
+            assert!(!crate::tui_prompts::awaits_menu_choice(screen), "banner 不是擋住輸入的選單：{screen}");
+            assert!(!crate::codex_live::picker_open(screen), "{screen}");
+        }
+    }
+
+    /// 結構不完整（回覆裡照抄了 banner 的字、底下沒有選項／提示）就照舊判讀，不吃掉回覆。
+    #[test]
+    fn a_reply_quoting_the_banner_is_left_alone() {
+        let screen = "› 貼一下提醒的原文\n\n• 原文如下：\n  Keep using Daybreak mode\n  Press a number to choose · esc to dismiss · type to continue\n\n› Ask Codex to do anything\n";
+        let lines: Vec<&str> = screen.lines().collect();
+        assert_eq!(codex_inline_banner(&lines), None);
+        assert!(extract_reply("codex", screen).unwrap().contains("Press a number to choose"));
+        let banner: Vec<&str> = BANNER.lines().collect();
+        let range = codex_inline_banner(&banner).expect("認得出 banner");
+        assert_eq!(banner[range.start].trim(), "Keep using Daybreak mode");
+        assert!(banner[range.end].starts_with("› Ask Codex"));
     }
 }
 
