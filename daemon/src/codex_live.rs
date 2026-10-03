@@ -314,7 +314,17 @@ pub fn rate_limit_switch_prompt_open(screen: &str) -> bool {
         && lines.iter().any(|l| l.starts_with("1. switch to "))
         && lines.iter().any(|l| l.starts_with("2. keep current model"))
         && lines.iter().any(|l| l.starts_with("3. keep current model (never show again)"))
-        && lines.last().is_some_and(|l| l.starts_with("enter select") && l.contains("esc back"))
+        && rate_limit_footer_open(&lines)
+}
+
+/// 腳註整行是 `enter select · esc back`。窄 pane 會在 `·` 後面折成兩行，最後一行就不再同時含這兩段。
+fn rate_limit_footer_open(lines: &[String]) -> bool {
+    if lines.last().is_some_and(|l| l.starts_with("enter select") && l.contains("esc back")) {
+        return true;
+    }
+    let Some(last) = lines.last() else { return false };
+    let Some(prev) = lines.get(lines.len().saturating_sub(2)) else { return false };
+    prev.starts_with("enter select") && !prev.contains("esc back") && last == "esc back"
 }
 
 /// The exact row we selected is still in a recognized picker on the latest pane read.
@@ -608,6 +618,23 @@ mod tests {
 
     /// #393：`/fast on|off` 不是 slash 形式（0.154.0 實測會被當一般 prompt 送給模型），所以只能靠開關＋讀畫面。
     /// 已知現況就只在不對時按一下；未知現況以前直接拒絕（unknown_fast_tier），現在先按一下、讀回、方向錯才再按。
+    /// 窄 pane 把 `enter select · esc back` 折成兩行時，選單仍開著，不能把 prompt 打進去。
+    #[test]
+    fn a_wrapped_rate_limit_footer_is_still_the_open_prompt() {
+        let screen = "\
+  Approaching rate limits
+  Switch to gpt-6-luna for lower credit usage?
+
+› 1. Switch to gpt-6-luna
+  2. Keep current model
+  3. Keep current model (never show again)
+
+  enter select ·
+  esc back
+";
+        assert!(rate_limit_switch_prompt_open(screen));
+    }
+
     #[test]
     fn the_plan_toggles_only_when_the_tier_is_known_to_be_wrong() {
         assert_eq!(fast_plan(Some(true), true), FastPlan::Keep);

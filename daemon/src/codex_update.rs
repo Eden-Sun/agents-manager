@@ -35,6 +35,26 @@ fn lower(s: &str) -> String {
     s.to_lowercase()
 }
 
+/// `Press enter to continue` 佔畫面尾巴幾行。窄 pane 折成 `Press enter to`／`continue` 時是 2。
+/// 行首是引用或游標（`>`／`›`／`❯`）的不算腳註。
+fn press_enter_footer_lines(raw: &[&str]) -> Option<usize> {
+    let cursorish = |line: &str| matches!(line.trim_start().chars().next(), Some('>' | '›' | '❯'));
+    let last = raw.last()?;
+    if !cursorish(last) && lower(&body(last)) == "press enter to continue" {
+        return Some(1);
+    }
+    if raw.len() >= 2 {
+        let prev = raw[raw.len() - 2];
+        if !cursorish(prev)
+            && !cursorish(last)
+            && format!("{} {}", lower(&body(prev)), lower(&body(last))) == "press enter to continue"
+        {
+            return Some(2);
+        }
+    }
+    None
+}
+
 /// `0.154.0 -> 0.155.1`（`->`、`→`、`=>`，有沒有空白都行）。只有一個版本時 `from` 是 `None`。
 fn versions_after(text: &str) -> Option<(Option<String>, String)> {
     let vs: Vec<String> = text
@@ -74,20 +94,16 @@ pub fn parse_prompt(screen: &str) -> Option<Prompt> {
 
 /// 啟動時的互動更新選單**現在就開著**（擋在輸入列前面）：預設選的是 `› 1. Update now`，畫面底下是 `Press enter to continue`。
 /// 這時對 pane 打字、按 Enter 就是替使用者按下「現在更新」（在 pane 裡跑安裝指令），prompt 也被選單吃掉。
-/// 跟 [`parse_prompt`] 不同：這裡要的是「正在擋路」，所以選單要在畫面尾巴、最後一行就是 `Press enter to continue`；
+/// 跟 [`parse_prompt`] 不同：這裡要的是「正在擋路」，所以選單要在畫面尾巴、最後一行（或窄 pane 折成的最後兩行）是 `Press enter to continue`；
 /// 非互動方框（底下就是正常的輸入列）與對話裡引用選單原文（後面接著輸入列）都不算。
 pub fn update_menu_open(screen: &str) -> bool {
     const TAIL_LINES: usize = 16;
     // Footer 與選項要取自同一個目前選單：若只在整個 viewport 搜尋，舊的引用選單加上新的啟動選單會拼成假陽性。
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    let Some(footer) = raw.last() else { return false };
-    let footer_prefix = footer.trim_start().chars().next();
-    if lower(&body(footer)) != "press enter to continue" || matches!(footer_prefix, Some('>' | '›' | '❯')) {
-        return false;
-    }
+    let Some(footer_lines) = press_enter_footer_lines(&raw) else { return false };
 
     let start = raw.len().saturating_sub(TAIL_LINES);
-    let choices: Vec<(usize, String, bool, bool)> = raw[start..raw.len() - 1]
+    let choices: Vec<(usize, String, bool, bool)> = raw[start..raw.len() - footer_lines]
         .iter()
         .enumerate()
         .filter_map(|(offset, line)| {
@@ -107,7 +123,7 @@ pub fn update_menu_open(screen: &str) -> bool {
         })
         .collect();
     let Some((last_at, _last, _, last_quoted)) = choices.last() else { return false };
-    if *last_quoted || raw.len() - 1 - *last_at != 1 {
+    if *last_quoted || raw.len() - footer_lines - *last_at != 1 {
         return false;
     }
 
@@ -280,6 +296,13 @@ pub fn running_version_of(run_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 窄 pane 把 `Press enter to continue` 折成兩行時，更新選單仍擋在輸入列前面。
+    #[test]
+    fn a_wrapped_press_enter_footer_still_means_the_update_menu_is_open() {
+        let screen = MENU.replace("  Press enter to continue\n", "  Press enter to\n  continue\n");
+        assert!(update_menu_open(&screen), "{screen}");
+    }
 
     #[test]
     fn a_finished_runs_remembered_version_is_dropped_by_the_sweep() {
