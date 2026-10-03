@@ -1004,6 +1004,8 @@ user 文字先照 CLI 自己的拆法還原（`lifecycle::pasted_content`，只�
 
 第一次貼字前會重讀輸入框；若回合結束時 Codex 把未送出的提問答案放回 composer（0.157 起），daemon 保留該答案、回可重試的 `409 composer_busy`，不把新 prompt 接在後面。自動替 TUI 選答案的操作（數字、`y`，以及方向鍵後的 Enter）會在送鍵前重讀畫面並辨認仍開著的目標提示及選項；認不出來就不按。
 
+codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`Press a number to choose · …`，辨識在 `screen::codex_inline_banner`）開著時輸入框看起來是空的，但打進去的開頭數字會被當成「選第 N 項」吃掉、殘字卡在框裡（#782）。規劃、準備、第一次貼字前三次讀框都先看它：開著就一個鍵都不按（**不**按 Esc 關它，使用者 2026-10-03 裁示），回可重試的 `NotAttempted(codex_security_banner)`（直接送的 409、排隊的放回），bot 對話插一則 system 訊息請人到終端處理，同一個 run 的同一次橫幅只插一次（`lifecycle/codex_banner.rs`）。只有資訊、沒有選項的 banner 不吃數字，不擋。
+
 **框裡卡著草稿**（2026-09-26 w16T:p3：claude 的「Edit prompt and retry」把上一則放回框裡，網頁每送一則都 409、網頁上卻沒有地方處理）：
 `composer_busy` 的 409 附上框裡現在的字（`poller::composer_text`，截到 500 字）與這個 kind 驗過的動作，網頁在輸入列上方常駐一條
 （UI-DECISIONS「輸入框卡著草稿」），給兩個動作（`lifecycle/composer_draft.rs`，API.md「輸入框卡著草稿」）：

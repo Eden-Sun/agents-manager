@@ -2510,6 +2510,47 @@ mod issue_17_tests {
         assert_eq!(f.env.herdr.pane("pane-17").unwrap().composer, draft);
     }
 
+    /// #782：codex 帳號安全提醒橫幅開著、輸入框是空的。打字的話開頭的 `1` 會被當成「選第 1 項」吃掉：一個鍵都不按（也不按
+    /// Esc 關橫幅），回可重試的 `codex_security_banner`，對話裡留一則通知；佇列重試再被擋不重複通知。
+    #[tokio::test]
+    async fn a_codex_security_banner_blocks_delivery_without_a_single_key() {
+        let screen = include_str!("fixtures/codex-0.159.3-security-setup-banner.ansi");
+        let f = fixture("codex", screen).await;
+        let app = f.env.app.clone();
+        db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let (run, bot) = run_and_bot(&f).await;
+        let client = client_for_run(&app, &run).await.unwrap();
+        let notes = || async {
+            sqlx::query_scalar::<_, String>("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
+                .bind(&f.conversation_id)
+                .fetch_all(&app.db)
+                .await
+                .unwrap()
+        };
+
+        for _ in 0..2 {
+            let out = deliver_prompt(&app, &client, &run, &bot, "1. 先看 issue 782", false, true).await.unwrap();
+            assert_eq!(out, not("codex_security_banner", true));
+        }
+        assert_eq!(count(&f, "pane.send_text") + count(&f, "pane.send_keys"), 0, "不打字、不按 Esc");
+        let posted = notes().await;
+        assert_eq!(posted.len(), 1, "同一次橫幅只通知一次：{posted:?}");
+        assert!(posted[0].contains("安全提醒橫幅") && posted[0].contains("沒有送出"), "{posted:?}");
+
+        // 橫幅被人關掉：照常派送，`1` 開頭的整句原封不動貼進去。
+        f.env.herdr.set_screen("pane-17", "› Reply with PONG\n\n• PONG\n\n› \n\n  gpt-6.1-sol default · /tmp/x\n");
+        let out = deliver_prompt(&app, &client, &run, &bot, "1. 先看 issue 782", false, true).await.unwrap();
+        assert!(!matches!(out, Delivered::NotAttempted { .. }), "{out:?}");
+        let sent = f.env.herdr.calls_to("pane.send_text");
+        assert_eq!(sent.first().map(|c| c["text"].clone()), Some(json!("1. 先看 issue 782")), "{sent:?}");
+
+        // 關掉之後又出現：再通知一次。
+        f.env.herdr.set_screen("pane-17", screen);
+        let out = deliver_prompt(&app, &client, &run, &bot, "1. 先看 issue 782", false, true).await.unwrap();
+        assert_eq!(out, not("codex_security_banner", true));
+        assert_eq!(notes().await.len(), 2);
+    }
+
     #[tokio::test]
     async fn an_agent_without_a_session_binding_is_typed_into_not_prompted() {
         let f = fixture("claude", "").await;
