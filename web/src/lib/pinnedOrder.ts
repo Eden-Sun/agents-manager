@@ -119,21 +119,63 @@ export function pickSlot(boxes: Box[], x: number, y: number, dragId: string, pre
   return { before: best.before, shift: row.slice(best.at).map((b) => b.id), after: best.at === row.length ? row[row.length - 1].id : null }
 }
 
-/** 手機主力區收合時佔幾格（4 顆一排、三排）；超過時最後一格讓給「+N」（#344；+N 見 `pinGridLayout`）。 */
-export const PIN_GRID_MAX = 12
+/** 手機主力區一排幾顆。 */
+export const PIN_GRID_COLS = 4
+/** 手機主力區收合時預設幾排（4×3＝12）；使用者可以拖主力區下緣的把手改（2026-10-03）。 */
+export const PIN_GRID_ROWS = 3
+/** 預設排數下佔幾格；超過時最後一格讓給「+N」（#344；+N 見 `pinGridLayout`）。 */
+export const PIN_GRID_MAX = PIN_GRID_COLS * PIN_GRID_ROWS
 
 /**
  * 手機主力區要畫幾顆、「+N」寫多少（2026-09-23 使用者：「手機版 header 主力只兩排，多的呢」）。
  *
- * 放得下（≤ 12，4×3）就全畫、不出 +N（2026-09-23 使用者：「主力區可以到三排 12 個，超過才要」）。超過時收合狀態
- * 只畫前 11 顆，第 12 格是「+N」（N＝藏起來的顆數），點了展開成全部；展開時全畫，另外給一格「收合」。
- * 順序仍由拖曳決定，所以前 11 顆就是使用者排在最前面的。
+ * 放得下（≤ 排數×4）就全畫、不出 +N（2026-09-23 使用者：「主力區可以到三排 12 個，超過才要」）。超過時收合狀態
+ * 少畫一顆，最後一格是「+N」（N＝藏起來的顆數），點了展開成全部；展開時全畫，另外給一格「收合」。
+ * 排數預設 3，使用者可以用拖拉改（2026-10-03 使用者：「變成可以調整的，用拖拉的方式調整最大 row 數」）。
+ * 順序仍由拖曳決定，所以畫出來的就是使用者排在最前面的。
  */
-export function pinGridLayout(count: number, expanded: boolean): { shown: number; more: number; collapsible: boolean } {
-  if (count <= PIN_GRID_MAX) return { shown: count, more: 0, collapsible: false }
+export function pinGridLayout(count: number, expanded: boolean, rows: number = PIN_GRID_ROWS): { shown: number; more: number; collapsible: boolean } {
+  const max = Math.max(1, Math.floor(rows)) * PIN_GRID_COLS
+  if (count <= max) return { shown: count, more: 0, collapsible: false }
   if (expanded) return { shown: count, more: 0, collapsible: true }
-  const shown = PIN_GRID_MAX - 1
+  const shown = max - 1
   return { shown, more: count - shown, collapsible: false }
+}
+
+/** 主力全部放得下要幾排（至少 1）。把手拖到這裡就不必再往下了。 */
+export function pinGridRowsNeeded(count: number): number {
+  return Math.max(1, Math.ceil(count / PIN_GRID_COLS))
+}
+
+/**
+ * 拖把手時的排數：起點排數加上拖了幾排高（四捨五入，過半排就跳），夾在 1 到「全部放得下」之間。
+ * `rowPx` 量不到（0）就不動。
+ */
+export function rowsFromDrag(startRows: number, dy: number, rowPx: number, count: number): number {
+  const max = pinGridRowsNeeded(count)
+  const start = Math.min(Math.max(1, startRows), max)
+  if (!(rowPx > 0)) return start
+  return Math.min(max, Math.max(1, start + Math.round(dy / rowPx)))
+}
+
+const ROWS_KEY = 'agm.pinGridRows'
+
+/** 這台裝置記的排數（每個瀏覽器各自記；讀不到就是預設 3）。 */
+export function loadPinGridRows(): number {
+  try {
+    const n = Number(localStorage.getItem(ROWS_KEY))
+    return Number.isInteger(n) && n >= 1 && n <= 50 ? n : PIN_GRID_ROWS
+  } catch {
+    return PIN_GRID_ROWS
+  }
+}
+
+export function savePinGridRows(n: number): void {
+  try {
+    localStorage.setItem(ROWS_KEY, String(n))
+  } catch {
+    /* 私密模式等：只是這次不記 */
+  }
 }
 
 /**
