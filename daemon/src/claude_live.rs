@@ -150,6 +150,15 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
     if seen == Switch::default() {
         return;
     }
+    // 鎖外那份畫面可能是網頁套用前的確認行。先拿 bot 鎖再重讀，寫進去的才是套用之後的畫面。
+    let lock = app.bot_lock(&run.bot_id).await;
+    let _g = lock.lock().await;
+    let Some(client) = app.herdr_for_run(run).await else { return };
+    let Ok(fresh) = client.pane_read(run.pane_id.as_deref().unwrap_or(""), "visible", 80).await else { return };
+    let seen = parse(&fresh.text);
+    if seen == Switch::default() {
+        return;
+    }
     let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return };
     let child = bot.managed_by == "child";
     if !child {
@@ -268,6 +277,7 @@ mod tests {
             .unwrap();
         let run_id = crate::testing::fake_run(&app, &kid.id).await;
         let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        env.herdr.set_screen(&format!("pane-{}", kid.id), SCREEN);
         observe(&app, &run, SCREEN).await;
         let b = db::bot(&app.db, &kid.id).await.unwrap().unwrap();
         assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "子 agent 的設定跟著改");
@@ -277,10 +287,13 @@ mod tests {
         let user = crate::testing::claude_bot(&app, &env.project_id, "user").await;
         let run_id = crate::testing::fake_run(&app, &user.id).await;
         let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        env.herdr.set_screen(&format!("pane-{}", user.id), SCREEN);
         observe(&app, &run, SCREEN).await;
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!(r.runtime_model, None, "第一次看到的可能是 --resume 印回來的舊行，只當基準");
-        observe(&app, &run, &format!("{SCREEN}\n❯ /model haiku\n  ⎿  Set model to Haiku 4.5 and saved\n")).await;
+        let later = format!("{SCREEN}\n❯ /model haiku\n  ⎿  Set model to Haiku 4.5 and saved\n");
+        env.herdr.set_screen(&format!("pane-{}", user.id), &later);
+        observe(&app, &run, &later).await;
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!(r.runtime_model.as_deref(), Some("claude-haiku-4-5"), "之後變了才採用");
         let b = db::bot(&app.db, &user.id).await.unwrap().unwrap();
@@ -301,6 +314,7 @@ mod tests {
             .unwrap();
         let run_id = crate::testing::fake_run(&app, &kid.id).await;
         let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        env.herdr.set_screen(&format!("pane-{}", kid.id), SCREEN);
         observe(&app, &run, SCREEN).await;
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")));
@@ -314,6 +328,7 @@ mod tests {
         let run_id = crate::testing::fake_run(&app, &user.id).await;
         start_fresh(&run_id);
         let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        env.herdr.set_screen(&format!("pane-{}", user.id), SCREEN);
         observe(&app, &run, SCREEN).await;
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "model 與 effort 都在第一輪就採用");
@@ -339,6 +354,7 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
+        env.herdr.set_screen(&format!("pane-{}", kid.id), SCREEN);
         observe(&app, &run, SCREEN).await;
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (Some("claude-sonnet-5-5"), Some("high")), "run 已寫入");
@@ -448,6 +464,7 @@ mod tests {
         let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
         let tool_output = "⏺ Bash(cat source.rs)\n  ⎿ Set model to Sonnet 5.5 and saved as your default for new sessions\n\
 ⏺ Bash(cat tests.rs)\n  ⎿ Set effort level to high (saved as your default for new sessions): output\n";
+        env.herdr.set_screen(&format!("pane-{}", kid.id), tool_output);
 
         observe(&app, &run, tool_output).await;
 
@@ -455,6 +472,40 @@ mod tests {
         assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("claude-opus-5-5"), Some("xhigh")));
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (None, None));
+    }
+
+    /// 鎖外看到的確認行可能是網頁套用前的舊畫面。寫入以鎖內重讀為準，母 bot 的設定不動（drift 仍是「需重啟」）。
+    #[tokio::test]
+    async fn a_stale_screen_snapshot_does_not_overwrite_a_switch_already_on_the_pane() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let kid = crate::testing::claude_bot(&app, &env.project_id, "kid-stale").await;
+        sqlx::query("UPDATE bots SET managed_by = 'child', model = 'claude-opus-5-5', effort = 'high' WHERE id = ?")
+            .bind(&kid.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = crate::testing::fake_run(&app, &kid.id).await;
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        let fresh = "❯ /model haiku\n  ⎿  Set model to Haiku 4.5 and saved\n";
+        env.herdr.set_screen(&format!("pane-{}", kid.id), fresh);
+        let mut rx = app.subscribe();
+        observe(&app, &run, SCREEN).await;
+        let b = db::bot(&app.db, &kid.id).await.unwrap().unwrap();
+        assert_eq!(b.model.as_deref(), Some("claude-haiku-4-5"), "採用鎖內重讀，不用呼叫端傳來的舊確認");
+        assert!(std::iter::from_fn(|| rx.try_recv().ok()).any(|f| f.kind == "bot_changed"));
+
+        let user = crate::testing::claude_bot(&app, &env.project_id, "user-stale").await;
+        sqlx::query("UPDATE bots SET model = 'claude-opus-5-5' WHERE id = ?").bind(&user.id).execute(&app.db).await.unwrap();
+        let run_id = crate::testing::fake_run(&app, &user.id).await;
+        start_fresh(&run_id);
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        env.herdr.set_screen(&format!("pane-{}", user.id), fresh);
+        observe(&app, &run, SCREEN).await;
+        let b = db::bot(&app.db, &user.id).await.unwrap().unwrap();
+        assert_eq!(b.model.as_deref(), Some("claude-opus-5-5"), "母 bot 設定不被畫面蓋掉，需重啟仍比得到");
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!(r.runtime_model.as_deref(), Some("claude-haiku-4-5"));
     }
 
     /// Linux 的 claude 把助手／工具列畫成 `● `：一出現也要清掉「剛打的 /model」，不然後面工具輸出的 `⎿  Set model to …` 會被當成確認。

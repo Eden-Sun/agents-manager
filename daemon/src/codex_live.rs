@@ -43,22 +43,45 @@ fn is_nested_effort(effort: &str) -> bool {
     matches!(effort, "max" | "ultra")
 }
 
+/// 視窗底部才是現在的狀態列。再往上同一形狀的行是啟動 banner，或回覆裡引用的舊列。
+const STATUS_TAIL_LINES: usize = 8;
+
+fn context_percent(line: &str) -> bool {
+    let Some(rest) = line.split("Context").nth(1) else { return false };
+    rest.trim_start().starts_with(|c: char| c.is_ascii_digit())
+}
+
 /// `<model> [<effort>] [fast] · <cwd> · Context …` — the only place codex states all three, so
 /// it is the read-back proving a live change landed (SPEC §4.4a).
 pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
-    // Last match wins: the startup banner has the same shape above the live line.
+    // Last match in the viewport tail wins: the startup banner and a quoted line higher up share
+    // the shape. A narrow pane wraps `Context N%` onto the next line; join that one line.
+    let lines: Vec<&str> = screen.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(STATUS_TAIL_LINES)..];
     let mut out = None;
-    for raw in screen.lines() {
-        let line = raw.trim();
-        let Some((head, _)) = line.split_once('·') else { continue };
-        if !line.contains("Context") {
+    let mut i = 0;
+    while i < tail.len() {
+        let mut line = tail[i].trim().to_string();
+        if !context_percent(&line) && line.contains('·') {
+            if let Some(next) = tail.get(i + 1) {
+                let next = next.trim();
+                if context_percent(next) {
+                    line.push(' ');
+                    line.push_str(next);
+                    i += 1;
+                }
+            }
+        }
+        i += 1;
+        if !line.contains('·') || !context_percent(&line) {
             continue;
         }
+        let Some((head, _)) = line.split_once('·') else { continue };
         let mut parts = head.split_whitespace();
         // 這一行的開頭沒有東西（`· Context …`）只是別的行：略過，不能整個函式回 None（下面才有真的狀態列）。
         // 0.157 印顯示名（`GPT-6-Luna`）而不是 id（`gpt-6-luna`）：一律轉小寫，runtime 才跟設定比得起來（#712）。
         let Some(model) = parts.next().map(str::to_ascii_lowercase) else { continue };
-        if !model.contains('-') {
+        if !model.contains('-') || !model.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_') {
             continue;
         }
         let rest: Vec<&str> = parts.collect();
@@ -116,8 +139,29 @@ pub async fn correct_runtime_from_screen(app: &crate::state::App, run_id: &str, 
     wrote
 }
 
-/// 巡邏用：拿 bot 鎖（當場套用握著同一把，不會讀到選單畫到一半），重讀畫面再校正。
-pub async fn sync_runtime(app: &std::sync::Arc<crate::state::App>, client: &HerdrClient, bot_id: &str, run_id: &str, pane_id: &str) {
+async fn hint_moves_runtime(app: &crate::state::App, run_id: &str, screen: &str) -> bool {
+    let Some(seen) = parse_status_line(screen) else { return false };
+    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return true };
+    run.runtime_model.as_deref() != Some(seen.model.as_str())
+        || run.runtime_effort != seen.effort
+        || run.runtime_fast != Some(i64::from(seen.fast))
+}
+
+/// 巡邏用。`hint` 是這一輪已經讀過的畫面：跟 runtime 一樣就不再讀、也不拿 bot 鎖。
+/// 不一樣才拿鎖（當場套用握著同一把）重讀再校正，避免把套用前的狀態列寫回去。
+pub async fn sync_runtime(
+    app: &std::sync::Arc<crate::state::App>,
+    client: &HerdrClient,
+    bot_id: &str,
+    run_id: &str,
+    pane_id: &str,
+    hint: Option<&str>,
+) {
+    if let Some(text) = hint {
+        if !hint_moves_runtime(app, run_id, text).await {
+            return;
+        }
+    }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     // 鎖裡重查：等鎖的時候這個 run 可能已經被換掉。
@@ -583,6 +627,24 @@ mod tests {
     /// 2026-09-14 實況：fork 起來的 codex 狀態列沒有 `Context` 那段，照樣要讀得到剩餘額度。
     /// #321：畫面上方有一行開頭是 `·`、又含 `Context` 的字（bot 印的、或別的 chrome），以前 `parts.next()?` 直接讓整個函式
     /// 回 None，下面真正的狀態列讀不到——改模型／強度的讀回驗證就誤判成「沒落地」。
+    #[test]
+    fn a_quoted_status_line_above_the_viewport_tail_is_not_the_runtime() {
+        let mut screen = "  gpt-6-luna max · /tmp · Context 90% used\n".to_string();
+        for _ in 0..STATUS_TAIL_LINES {
+            screen.push_str("  the model mentioned Context once\n");
+        }
+        screen.push_str("  gpt-6.1-sol high · /tmp · Context 3% used\n");
+        let rt = parse_status_line(&screen).expect("底部那行才是現況");
+        assert_eq!((rt.model.as_str(), rt.effort.as_deref()), ("gpt-6.1-sol", Some("high")));
+    }
+
+    #[test]
+    fn a_wrapped_status_line_still_reads_the_model_and_effort() {
+        let screen = "  gpt-6-luna max · /tmp ·\n  Context 3% used · 5h 90% left\n";
+        let rt = parse_status_line(screen).expect("斷行的狀態列仍是同一列");
+        assert_eq!((rt.model.as_str(), rt.effort.as_deref(), rt.fast), ("gpt-6-luna", Some("max"), false));
+    }
+
     #[test]
     fn a_stray_leading_dot_row_does_not_hide_the_real_status_line() {
         let screen = "  · Context notes: see docs\n\n  gpt-5.6-sol high · /tmp · Context 3% used\n";

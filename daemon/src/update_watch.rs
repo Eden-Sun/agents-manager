@@ -150,7 +150,9 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         let Some(client) = app.herdr_for_run(&run).await else { continue };
         if kind == "grok" {
             // grok 只看框底的模型／強度（`/model`、`/effort` 的現況），沒有更新提示與背景工作數。
-            crate::grok_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane).await;
+            // 先在鎖外讀：框底沒變就停，變了才由 sync 拿鎖重讀。
+            let Ok(read) = client.pane_read(&pane, "visible", 60).await else { continue };
+            crate::grok_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane, Some(&read.text)).await;
             continue;
         }
         // 讀不到畫面就跳過，不要把已經看到的通知清掉。
@@ -163,7 +165,7 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         }
         if kind == "codex" {
             // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。
-            crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane).await;
+            crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane, Some(&read.text)).await;
         }
         let observation_fence;
         let seen = if kind == "codex" {
@@ -795,5 +797,75 @@ mod tests {
         sweep(&e.app).await;
         let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();
         assert_eq!(b.effort.as_deref(), Some("low"));
+    }
+
+    fn pane_reads(e: &crate::testing::Env) -> usize {
+        e.herdr.calls_to("pane.read").len()
+    }
+
+    /// 框底沒變：一輪只讀一次，不再握鎖重讀。變了才重讀（套用可能已把畫面換掉）。
+    #[tokio::test]
+    async fn an_unchanged_grok_footer_is_not_read_twice() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let (_, run, pane) = grok_bot_with_run(&e, "gk-quiet", "user", "high").await;
+        sqlx::query("UPDATE runs SET runtime_model = 'grok-4.7', runtime_effort = 'high' WHERE id = ?")
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        e.herdr.set_screen(&pane, &grok_screen("high"));
+        sweep(&e.app).await;
+        assert_eq!(pane_reads(&e), 1, "沒有落差不再讀第二次");
+
+        e.herdr.set_screen(&pane, &grok_screen("low"));
+        sweep(&e.app).await;
+        assert_eq!(pane_reads(&e), 3, "這一輪先讀到落差，鎖內再讀一次");
+        let r = db::run(&e.app.db, &run).await.unwrap().unwrap();
+        assert_eq!(r.runtime_effort.as_deref(), Some("low"));
+    }
+
+    /// 網頁把 child 強度改成 low、TUI 框底仍是 high：這一輪不能把設定蓋回 high。
+    #[tokio::test]
+    async fn a_web_edit_on_a_grok_child_survives_an_unchanged_footer() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let (bot, run, pane) = grok_bot_with_run(&e, "gk-web", "child", "low").await;
+        sqlx::query("UPDATE runs SET runtime_model = 'grok-4.7', runtime_effort = 'high' WHERE id = ?")
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        e.herdr.set_screen(&pane, &grok_screen("high"));
+        sweep(&e.app).await;
+        let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();
+        assert_eq!(b.effort.as_deref(), Some("low"), "狀態列沒變，網頁上的設定留著");
+    }
+
+    /// 回覆裡的舊狀態列不把母 bot 的 runtime 改掉，需重啟不會多一條假的模型落差。
+    #[tokio::test]
+    async fn a_quoted_codex_status_line_does_not_mark_the_parent_for_restart() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let (bot, run, pane) = codex_bot_with_run(&e).await;
+        sqlx::query("UPDATE bots SET model = 'gpt-6.1-sol', effort = 'high' WHERE id = ?")
+            .bind(&bot)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET runtime_model = 'gpt-6.1-sol', runtime_effort = 'high', runtime_fast = 0 WHERE id = ?")
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let mut screen = "  gpt-6-luna max · /tmp · Context 90% used\n".to_string();
+        screen.push_str(&"  notes\n".repeat(12));
+        screen.push_str("  gpt-6.1-sol high · /tmp · Context 3% used\n");
+        e.herdr.set_screen(&pane, &screen);
+        sweep(&e.app).await;
+        let r = db::run(&e.app.db, &run).await.unwrap().unwrap();
+        assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (Some("gpt-6.1-sol"), Some("high")));
+        let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();
+        assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("gpt-6.1-sol"), Some("high")));
     }
 }

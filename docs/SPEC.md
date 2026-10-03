@@ -758,7 +758,7 @@ Codex 0.157.0 以舊模型啟動時可能顯示模型遷移選單（例如 `Meet
 
 **在 TUI 裡被換掉（claude，2026-09-29 使用者）**：母 bot 或使用者直接對 pane 打 `/model`、`/effort`（不經 AG Man）時，
 claude 在對話裡印 `⎿  Set model to Sonnet 5.5 and saved …`／`⎿  Set effort level to high …`。畫面巡邏（`update_watch`，
-30 秒一輪、`visible` 80 行）順便取最後一次的這兩行（`claude_live.rs`；只認頂格 `❯ /model …`／`❯ /effort …` 緊接著的那一行 `⎿`，
+30 秒一輪、`visible` 80 行）順便取最後一次的這兩行（`claude_live.rs`；寫入前拿 bot 鎖重讀，不用鎖外那份可能已經被網頁套用換掉的畫面；只認頂格 `❯ /model …`／`❯ /effort …` 緊接著的那一行 `⎿`，
 工具結果（`⏺ Bash(…)` 底下的 stdout）也用 `⎿`，不能單靠它（#741）；顯示名 `Sonnet 5.5` → `claude-sonnet-5-5`，
 認不出的名字不猜），寫進 `runs.runtime_model`／`runtime_effort`。收編的子 agent（`managed_by=child`，設定本來就是從 argv 抄的）
 一併改 `bots.model`／`effort`，側欄跟著變（run 與 bot 的落差分開算：bot 的 UPDATE 失敗會記 warn，下一輪只要 bot 還落後就重寫，#743）；一般 bot 只改 runtime（設定不動，重啟回到設定值，畫成 drift）。一般 bot 可能是
@@ -769,8 +769,8 @@ claude 在對話裡印 `⎿  Set model to Sonnet 5.5 and saved …`／`⎿  Set 
 
 **在 TUI 裡被換掉（grok、codex 的子 agent，2026-10-03）**：grok 沒有 hook 也沒有確認行可抓，argv 只讀一次而且 TUI 不理
 `--reasoning-effort`（#215）；唯一的現況是輸入框框底 `╰── Grok 4.7 (low) · always-approve ─╯`。畫面巡邏對 grok run 拿 bot 鎖
-（同 `codex_live::sync_runtime`，不會讀到啟動補 `/effort` 或當場套用切到一半的畫面）讀 `visible` 60 行，取最下面那個 `╰` 開頭、含
-`Grok <版本>` 的框底（`grok_live.rs`；對話裡的 `Switched to Grok 4.7 (low effort)` 不算），只寫讀到而且跟記著的不一樣的欄位。讀不到框底
+（同 `codex_live::sync_runtime`，不會讀到啟動補 `/effort` 或當場套用切到一半的畫面）讀 `visible` 60 行，只取視窗底部最後一個 `╰` 開頭的框（窄 pane 斷行會接到下一行的 `╯`；再往上引用的完整舊框、以及底部沒有框時畫面上的舊框都不算），含
+`Grok <版本>` 的框底（`grok_live.rs`；對話裡的 `Switched to Grok 4.7 (low effort)` 不算），只寫讀到而且跟記著的不一樣的欄位。框底跟記著的一樣就不再讀第二次、也不握 bot 鎖。讀不到框底
 （選單蓋住、畫面清掉）、或只讀到其中一欄，其餘沿用最後已知值、不清空。一般 bot 只校正**已知**的 runtime（`NULL`＝啟動時沒指定、
 CLI 預設，拿畫面補上會多一條重啟也改不掉的假 drift），設定不動；child 未知也補。
 子 agent 的設定一律跟著 runtime 的切換（`child_runtime::follow`）：claude 見上段；codex 的狀態列校正（下面「之後也持續校正」）、
@@ -812,7 +812,7 @@ StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發�
   agent 就緒後讀框底，跟 `bots.effort` 不同就送 `/effort <level>`（已相符不打字，免得 `pane_typed` 改 prompt 路徑）。
 - **收編的 pane**三欄是 NULL = 不知道，UI 不比也不標。codex 例外：它把三個值印在狀態列上，reconcile 讀那行補 NULL（`reconcile::fill_codex_runtime`）——
   否則 UI 會拿 bots 頂上，而 `/fast` 是開關，不知道的 tier 等於切不掉。
-  **之後也持續校正**（`codex_live::sync_runtime`，跟 `update_watch` 同一個 30 秒巡邏、拿 bot 鎖）：狀態列讀得到就以它為準，有 `fast` 字樣＝開，整行讀得到卻沒有＝關（codex 關掉時省略那個字）；
+  **之後也持續校正**（`codex_live::sync_runtime`，跟 `update_watch` 同一個 30 秒巡邏）：狀態列只認視窗底部（窄 pane 把 `Context N%` 折到下一行仍算同一列；再往上的引用不算）。跟記著的一樣就不再讀、不拿鎖；不一樣才拿 bot 鎖重讀後以它為準，有 `fast` 字樣＝開，整行讀得到卻沒有＝關（codex 關掉時省略那個字）；
   讀不到（選單開著、畫面被清）什麼都不動，不把讀不到當成 fast=false。0.157 起狀態列印顯示名（`GPT-6-Luna`）而不是 id：讀進來一律轉小寫，讀回驗證的模型比對也不分大小寫
   （#712：以前大小寫不同就 `readback_model_mismatch`，連閒著只切 fast 都退回重啟，web 也多列一行假的「模型」落差）。使用者在 TUI 手打 `/fast`／`/model`，或當場套用中途失敗，都不會讓標題列的 fast 與「需重啟」chip 卡在啟動時的舊值。
 - **身份也記 runtime**：`runs.runtime_identity` 的空字串是已知的本機預設帳號，`NULL` 是收編 pane／舊列而不知道，前端只在有值時拿它與 `bot.identity` 比；身份不同時身份徽章顯示實際值，設定值放在 drift 說明。
