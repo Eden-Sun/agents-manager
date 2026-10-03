@@ -130,6 +130,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_ACQUIRE_HELD=true STUB_SAFE=true STUB_SUPERVISOR=idle
   unset STUB_SUPERVISOR_BEFORE
   export STUB_RELEASE_FAIL=""       # 設了：lease release 回 409（模擬 fence 過期／token 對不上）
+  export STUB_RENEW_FAIL=""         # 設了：restart lease 已過期或持有權已丟失，renew 回 409
   export STUB_NAMES_BEFORE='["a","b"]' STUB_NAMES_AFTER='["a","b"]'
   export STUB_RESTART_HELD=false
   export REAL_SQLITE="${REAL_SQLITE:-$(command -v sqlite3)}"
@@ -155,6 +156,10 @@ case "$sub:$op" in
                  [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -ge "$n" ] && fl='{"bot_id":"bot-probe","turn_id":"t-1"}'
                  printf '{"safe":%s,"working":[],"delivering":[],"in_flight":[%s]}' "$STUB_SAFE" "$fl" ;;
   lease:acquire) printf '{"lease":{"held":true,"fence":9},"lease_token":"tok-legacy"}' ;;
+  lease:renew)
+      echo "lease renew restart --owner bot-me --fence 9 --ttl 900" >> "$AGM_DIR/calls.log"
+      [ -z "$STUB_RENEW_FAIL" ] || { printf '{"error":"lease_lost"}'; exit 1; }
+      printf '{"renewed":true}' ;;
   lease:status)  printf '{"leases":[{"resource":"restart","held":%s}]}' "$STUB_RESTART_HELD" ;;
   lease:release)
       # token 是怎麼進來的：記下檔案路徑、權限與讀到的內容，測試才驗得到「agm 真的讀到了
@@ -360,11 +365,23 @@ check "預期版本從 checkout 讀出來" "checkout SCHEMA_VERSION=10, db user_
 check "有換上新 binary" "new-binary" "$AGM_DIR/started-binary.log"
 check_eq ".built 寫的是這次的 sha" "$(echo "$SHA" | cut -c1-8)" "$(cat "$AGM_DIR/daemon-update.built")"
 check "啟動走 launchd（nice 0）" "submit -l am-daemon-swap" "$AGM_DIR/launchctl.log"
+check "停機前用原持有權續約 restart lease" "lease renew restart --owner bot-me --fence 9 --ttl 900" "$AGM_DIR/calls.log"
 check_no "不是在 pane 裡直接背景起" "nohup" "$SCRIPT"
 check_file "成功後保留這趟 DB 備份" yes "$(logged_db_backup)"
 check_file "成功後刪除較舊 DB 備份" no "$DAEMON_DB.bak-20000101-0000"
 check_file "成功後刪除另一份較舊 DB 備份" no "$DAEMON_DB.bak-20010101-0000"
 check_eq "成功後只保留一份 DB 備份" "1" "$(db_backup_count)"
+teardown
+
+# A lease that expires during the DB backup must not authorize the later daemon stop.
+setup 10 10
+export STUB_RENEW_FAIL=1
+rc=$(run)
+check_eq "停機前 lease renew 失敗就 defer（rc=4）" "4" "$rc"
+check "失敗的續約已留下錯誤" "換版前 restart lease 續約失敗" "$SWAP_LOG"
+check "續約失敗後仍嘗試歸還窗口" "lease release restart" "$AGM_DIR/calls.log"
+check_eq "續約失敗沒有重啟 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+check_eq "續約失敗保留舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
 # 1b. DB 備份檔權限：DB 裡有 bot 的 hook token 等憑證，備份不能是預設 umask 的 644（別的使用者讀得到）。

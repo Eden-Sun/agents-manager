@@ -724,6 +724,18 @@ if [ -e "$PREV" ]; then
     exit 5
 fi
 
+# DB backup and inventory collection may outlive the 15-minute lease. Revalidate the same fenced
+# lease immediately before stopping the daemon; if it expired or changed owners, leave the live
+# service untouched and defer this deployment.
+RENEW_OUT=$(agm lease renew restart --owner "$OWNER" --fence "$FENCE" --ttl 900 --lease-token-file "$TOKEN_FILE" 2>&1)
+RENEW_RC=$?
+if [ "$RENEW_RC" -ne 0 ]; then
+    log "ABORT: 換版前 restart lease 續約失敗 rc=${RENEW_RC}：$(printf '%s' "$RENEW_OUT" | tr -d '\n' | head -c 200)"
+    release_window "換版前 restart lease 續約失敗" || true
+    exit 4
+fi
+log "restart lease renewed before stopping daemon"
+
 OLDPID=$(dpid); log "old pid $OLDPID"
 stop_daemon "$OLDPID"
 mv target/release/agents-managerd "$PREV"
