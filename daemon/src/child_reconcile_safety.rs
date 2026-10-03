@@ -70,11 +70,18 @@ pub async fn clear_retirement_grace(pool: &SqlitePool, bot_id: &str) -> Result<(
 /// A `None` result means normal retirement rules may proceed. Read errors are returned so callers
 /// can fail closed and defer reconciliation.
 pub async fn retirement_block(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>> {
+    let mut conn = pool.acquire().await?;
+    retirement_block_on(&mut *conn, bot_id).await
+}
+
+/// The same guard lookup against a caller-owned connection, used inside the retirement write
+/// transaction so a restore cannot commit after the guard check but before the soft delete.
+pub async fn retirement_block_on(conn: &mut sqlx::SqliteConnection, bot_id: &str) -> Result<Option<String>> {
     let hold: Option<String> = sqlx::query_scalar(
         "SELECT body FROM supervisor_notes WHERE supervisor_id=? AND kind='child_retirement_hold' ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(bot_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
     if let Some(reason) = hold.filter(|s| !s.starts_with("cleared:")) {
         return Ok(Some(reason));
@@ -84,7 +91,7 @@ pub async fn retirement_block(pool: &SqlitePool, bot_id: &str) -> Result<Option<
         "SELECT body FROM supervisor_notes WHERE supervisor_id=? AND kind='child_retirement_grace' ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(bot_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
     if let Some(until) = grace {
         if crate::db::cmp_ts(&until, &crate::db::now()).is_gt() {

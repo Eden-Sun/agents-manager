@@ -42,6 +42,8 @@ pub(crate) enum Outcome {
     HandedOff,
     /// 分享用（受限）bot（SPEC §20）：外部 end user 隨時會來，自動清理一律不動它，什麼都沒寫。
     ShareBot,
+    /// A restore/restart guard appeared after this pass made its initial eligibility decision.
+    Protected,
 }
 
 /// 退役 `bot_id` 這顆 child。DB 寫不進去回 `Err`（呼叫端各自決定重試或回滾）；守衛擋下、讀不到擁有關係不是錯誤。
@@ -74,9 +76,39 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
         }
         let host = db::bot_host(&app.db, &bot.id).await?;
         let record = record_payload(app, &bot, why, mode, &at.to_string()).await?;
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("child_retire_before_transaction", bot_id).await;
         // `deleted_at` 與紀錄同生共死（#554）：同一筆交易先寫紀錄再退役，寫不進紀錄就不退役，
         // 也不讓資料庫 trigger 或讀者先看見 child 消失、稍後才有原因。
-        let mut tx = app.db.begin().await?;
+        let mut tx = db::begin_write(&app.db).await?;
+        if mode == Mode::Implicit {
+            match crate::handoff::bot_handed_off_to_on(&mut *tx, &bot.id).await {
+                Ok(Some(to)) => {
+                    tx.rollback().await?;
+                    tracing::info!(bot = %bot.name, bot_id = %bot.id, why, handed_off_to = %to, "child not retired: handoff was committed during reconcile");
+                    return Ok(Outcome::HandedOff);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tx.rollback().await?;
+                    tracing::warn!(bot = %bot.name, bot_id = %bot.id, why, error = ?error, "child kept because its handoff could not be rechecked");
+                    return Ok(Outcome::Unreadable);
+                }
+            }
+            match crate::child_reconcile_safety::retirement_block_on(&mut *tx, &bot.id).await {
+                Ok(Some(reason)) => {
+                    tx.rollback().await?;
+                    tracing::info!(bot = %bot.name, bot_id = %bot.id, why, reason, "child not retired: a retirement guard was committed during reconcile");
+                    return Ok(Outcome::Protected);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tx.rollback().await?;
+                    tracing::warn!(bot = %bot.name, bot_id = %bot.id, why, error = ?error, "child kept because its retirement guard could not be rechecked");
+                    return Ok(Outcome::Unreadable);
+                }
+            }
+        }
         crate::intents::record_done(&mut tx, RECORD_KIND, &bot.id, &host, &record).await?;
         let n = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(db::now())
@@ -373,6 +405,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recorded, 1);
+    }
+
+    /// Reconcile may decide that a child is eligible, then yield while collecting the retirement
+    /// record. A delete+restore can complete during that gap; the restore grace must be rechecked
+    /// at the write boundary so the stale retirement cannot immediately delete it again.
+    #[tokio::test]
+    async fn a_child_restored_after_reconcile_checks_it_is_not_retired_by_the_stale_pass() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let kid = a_child(&env).await;
+        let restore_app = app.clone();
+        let restore_id = kid.clone();
+        crate::lifecycle::race_point::arm(
+            "child_retire_before_transaction",
+            &kid,
+            move || async move {
+                sqlx::query("UPDATE bots SET deleted_at=? WHERE id=? AND deleted_at IS NULL")
+                    .bind(db::now())
+                    .bind(&restore_id)
+                    .execute(&restore_app.db)
+                    .await
+                    .unwrap();
+                crate::api::restore_bot(
+                    axum::extract::State(restore_app.clone()),
+                    axum::extract::Path(restore_id.clone()),
+                )
+                .await
+                .expect("the child restore completes while the reconcile pass is paused");
+            },
+        );
+
+        let outcome = retire(&app, &kid, "reconcile_agent_gone", Mode::Implicit)
+            .await
+            .unwrap();
+        assert_eq!(outcome, Outcome::Protected, "the committed restore grace blocks this stale retirement");
+        let bot = db::bot(&app.db, &kid).await.unwrap().unwrap();
+        assert!(
+            bot.deleted_at.is_none(),
+            "a stale reconcile pass must honor the committed restore"
+        );
+        let retired: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM intents WHERE kind='retire_child' AND subject_id=?",
+        )
+        .bind(&kid)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            retired, 0,
+            "a rejected retirement leaves no audit row claiming it happened"
+        );
+    }
+
+    /// Handoff can commit after reconcile's first lookup too. The old pass must recheck the
+    /// project's ownership before it records a retirement or soft-deletes the child.
+    #[tokio::test]
+    async fn a_child_handed_off_after_reconcile_checks_it_is_not_retired_by_the_stale_pass() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let kid = a_child(&env).await;
+        let handoff_app = app.clone();
+        let project_id = env.project_id.clone();
+        crate::lifecycle::race_point::arm(
+            "child_retire_before_transaction",
+            &kid,
+            move || async move {
+                sqlx::query("UPDATE projects SET handed_off_to='remote' WHERE id=?")
+                    .bind(&project_id)
+                    .execute(&handoff_app.db)
+                    .await
+                    .unwrap();
+            },
+        );
+
+        let outcome = retire(&app, &kid, "reconcile_agent_gone", Mode::Implicit).await.unwrap();
+        assert_eq!(outcome, Outcome::HandedOff, "the committed handoff blocks this stale retirement");
+        assert!(db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.is_none());
+        let retired: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intents WHERE kind='retire_child' AND subject_id=?")
+            .bind(&kid)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(retired, 0);
     }
 
     /// #554：只有 herdr 親口報的關閉、而且當下 pane 確實不在，才算刻意收掉；其餘一律不算（換版腳本會回滾）。
