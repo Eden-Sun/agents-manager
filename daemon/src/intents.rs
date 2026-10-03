@@ -118,6 +118,67 @@ pub async fn insert_pending_on(
     Ok(id)
 }
 
+/// Start an explicit restart intent without merging it into a dormant retry. A `running` intent
+/// owned by this boot is already being recovered, so refresh its payload to the state protected by
+/// the caller's bot lock. A pending or abandoned-owner intent is superseded atomically instead.
+pub async fn prepare_restart(
+    pool: &SqlitePool,
+    subject_id: &str,
+    host: &str,
+    payload: &Value,
+    ttl_secs: i64,
+    boot: &str,
+) -> Result<String> {
+    let mut tx = pool.begin().await?;
+    let existing: Option<Intent> = sqlx::query_as(
+        "SELECT * FROM intents WHERE kind='restart' AND subject_id=? AND status IN ('pending','running')",
+    )
+    .bind(subject_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let now = crate::db::now();
+    let expires = (chrono::Utc::now() + chrono::Duration::seconds(ttl_secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let id = match existing {
+        Some(i) if i.status == "running" && i.owner_boot.as_deref() == Some(boot) => {
+            let changed = sqlx::query(
+                "UPDATE intents SET host=?, payload_json=?, updated_at=?, expires_at=?
+                 WHERE id=? AND status='running' AND owner_boot=?",
+            )
+            .bind(host)
+            .bind(payload.to_string())
+            .bind(&now)
+            .bind(expires)
+            .bind(&i.id)
+            .bind(boot)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if changed != 1 {
+                anyhow::bail!("in-progress restart intent changed while it was being refreshed");
+            }
+            i.id
+        }
+        Some(i) => {
+            let changed = sqlx::query(
+                "UPDATE intents SET status='abandoned', last_error='superseded by a new explicit restart', updated_at=?
+                 WHERE id=? AND status IN ('pending','running')",
+            )
+            .bind(&now)
+            .bind(&i.id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if changed != 1 {
+                anyhow::bail!("dormant restart intent changed while it was being superseded");
+            }
+            insert_pending_on(&mut tx, "restart", subject_id, host, payload, ttl_secs).await?
+        }
+        None => insert_pending_on(&mut tx, "restart", subject_id, host, payload, ttl_secs).await?,
+    };
+    tx.commit().await?;
+    Ok(id)
+}
+
 /// 一件**當下就做完**的動作留下的紀錄：直接寫 `done`，不經 `pending`／`running`，也沒有補做這回事——存在只是為了
 /// 事後查得到「這件事是誰、為什麼做的」（#554：`retire_child`）。要跟動作本身同一個交易，所以收連線不收 pool。
 /// 跟別的 `done` 一樣由 [`sweep_finished`] 在 24 小時後收掉。

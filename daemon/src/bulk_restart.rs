@@ -729,6 +729,13 @@ fn busy_skip(e: &LcError) -> Option<Skip> {
         "blocked" => Skip::Blocked,
         "turn_in_flight" => Skip::TurnInFlight,
         "not_running" => Skip::NotRunning,
+        "background_jobs" => v
+            .get("background_jobs")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .map(Skip::BackgroundJobs)
+            .unwrap_or(Skip::UnknownStatus),
         _ => Skip::UnknownStatus,
     })
 }
@@ -1059,6 +1066,34 @@ mod tests {
         assert_eq!(skip.1["reason_label"], "背景執行中（1）");
         assert!(!evs.iter().any(|(k, d)| k == "bots_restart_progress" && d["bot_id"] == late && d["status"] == "restarting"), "不能動它：{evs:?}");
         assert_eq!(db::active_run(&app.db, &late).await.unwrap().map(|r| r.id), Some(late_run), "它的 run 沒被動過");
+    }
+
+    /// A fresh Stop hook can arrive after bulk recheck but before the locked stop transition. The
+    /// final lifecycle gate must still skip the bot instead of killing its newly reported work.
+    #[tokio::test]
+    async fn a_fresh_hook_report_after_recheck_still_skips_the_bulk_restart() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id) = pending_bot(&env, "late-hook", "claude", "Update installed · Restart to update").await;
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        let hook_app = app.clone();
+        crate::lifecycle::race_point::arm("stop_before_stopping", &bot_id, move || async move {
+            crate::background_hook::on_stop(
+                &hook_app,
+                &run,
+                &json!({"background_tasks": [{"id": "agent-1", "type": "subagent", "status": "running", "description": "review"}]}),
+            )
+            .await;
+        });
+
+        match restart_resuming(&app, &bot_id).await {
+            Restarted::Busy(Skip::BackgroundJobs(1)) => {}
+            Restarted::Busy(reason) => panic!("new background work must be reported, got {}", reason.code()),
+            Restarted::Ok(_) => panic!("new background work must not be restarted"),
+            Restarted::Failed(e) => panic!("new background work is a skip, not a failure: {e:#}"),
+        }
+        assert_eq!(db::active_run(&app.db, &bot_id).await.unwrap().map(|r| r.id), Some(run_id), "the bot run stays live");
+        assert!(!env.herdr.methods().iter().any(|m| m == "agent.send_keys" || m == "pane.close"), "background work must not be interrupted");
     }
 
     /// #767 的缺口：背景工作數是巡邏（每 30 秒一輪）記下的。回合剛結束、背景工作剛丟出去的那幾秒，帳上不是「沒看過」就是

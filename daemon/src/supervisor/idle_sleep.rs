@@ -619,6 +619,10 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
         tracing::info!(bot = %c.name, "idle sweep: the last status event said the bot is busy even though the DB says idle; leaving it running");
         return;
     }
+    if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
+        tracing::info!(bot = %c.name, background_jobs = n, "idle sweep: the background-work account changed before stopping; leaving the bot running");
+        return;
+    }
     if let Err(e) = mark_asleep(app, &fresh, session.as_deref()).await {
         tracing::warn!(bot = %c.name, error = %e, "could not record the sleep; leaving the bot running");
         return;
@@ -876,6 +880,8 @@ async fn sweep(app: &Arc<App>, threshold: i64) {
                 continue;
             }
         }
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("idle_sleep_before_sleep_one", &c.bot_id).await;
         if decide(&f, threshold).is_ok() {
             sleep_one(app, &f, session, threshold).await;
         }
@@ -1961,6 +1967,30 @@ mod tests {
         crate::background_hook::on_stop(&env.app, &run, &hook(json!([]))).await;
         sweep(&env.app, 90).await;
         assert_left_running(&env.app, &bot, "hook 說沒有、行程樹說有").await;
+    }
+
+    /// A Stop hook can update the shared background-work account after the initial screen/process
+    /// inspection. The final locked stop check must see that newer hook evidence.
+    #[tokio::test]
+    async fn a_background_hook_report_arriving_after_inspection_blocks_idle_sleep() {
+        let env = crate::testing::env().await;
+        let (bot, run_id) = idle_bot(&env, "hotel-late-hook").await;
+        let _shell = provably_no_background_work(&env, &bot);
+        let run = db::run(&env.app.db, &run_id).await.unwrap().unwrap();
+        let app = env.app.clone();
+        crate::lifecycle::race_point::arm("idle_sleep_before_sleep_one", &bot, move || async move {
+            crate::background_hook::on_stop(
+                &app,
+                &run,
+                &json!({"background_tasks": [{"id": "agent-1", "type": "subagent", "status": "running", "description": "review"}]}),
+            )
+            .await;
+        });
+
+        sweep(&env.app, 90).await;
+
+        assert_eq!(crate::background_jobs::known(&env.app, &run_id), Some(1));
+        assert_left_running(&env.app, &bot, "Stop hook added a live subagent after the first inspection").await;
     }
 
     #[tokio::test]

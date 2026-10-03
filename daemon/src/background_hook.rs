@@ -18,9 +18,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// hook 帳在這段時間內不被畫面推翻（畫面巡邏 30 秒一輪，模式列也可能慢半拍）。超過之後：hook 說有、畫面完全沒有
-/// （模式列沒有 `N shell`）＝背景在沒有新的 Stop 的情況下結束了（被殺、被外部清掉），丟掉 hook 帳改用畫面；
-/// hook 說 0 的帳過了這段就退場，之後只看畫面。
+/// hook 帳在這段時間內不被畫面推翻（畫面巡邏 30 秒一輪，模式列也可能慢半拍）。超過之後 hook 帳退場，改採目前畫面。
 pub const GRACE: Duration = Duration::from_secs(60);
 
 /// 回給前端的清單上限與單欄長度（`/api/state` 每次都帶，不能因為一個 1000 字的命令就膨脹）。
@@ -162,13 +160,12 @@ async fn refine_services(app: &Arc<App>, run: &db::Run, at: Instant) {
     }
 }
 
-/// 巡邏讀到畫面時的取捨：回傳要記的數字，必要時丟掉過期的 hook 帳。`screen` 是畫面判斷的結果（已扣常駐服務）、
-/// `screen_raw` 是扣之前的數字。沒有 hook 帳就是 `screen`。
-pub fn reconcile(app: &App, run_id: &str, screen: u32, screen_raw: u32) -> u32 {
+/// 巡邏讀到畫面時的取捨：回傳要記的數字，必要時丟掉過期的 hook 帳。`screen` 是畫面判斷的結果（已扣常駐服務）。
+pub fn reconcile(app: &App, run_id: &str, screen: u32) -> u32 {
     let mut hook = app.background_hook.lock().unwrap_or_else(|e| e.into_inner());
     let Some(snap) = hook.get(run_id) else { return screen };
     let jobs = snap.jobs();
-    if snap.at.elapsed() < GRACE || (jobs > 0 && screen_raw > 0) {
+    if snap.at.elapsed() < GRACE {
         return jobs;
     }
     hook.remove(run_id);
@@ -303,26 +300,66 @@ mod tests {
         let app = env.app.clone();
         on_stop(&app, &run, &fixture()).await;
         // 畫面（還沒更新）說 0：剛報的 hook 帳不被推翻。
-        assert_eq!(reconcile(&app, &run.id, 0, 0), 2);
+        assert_eq!(reconcile(&app, &run.id, 0), 2);
         // 過了寬限、畫面仍然完全沒有背景：背景在沒有新 Stop 的情況下結束了，丟掉 hook 帳。
         app.background_hook.lock().unwrap().get_mut(&run.id).unwrap().at = Instant::now() - GRACE - Duration::from_secs(1);
-        assert_eq!(reconcile(&app, &run.id, 0, 0), 0);
+        assert_eq!(reconcile(&app, &run.id, 0), 0);
         assert_eq!(details(&app, &run.id), (Value::Null, Value::Null), "丟掉就沒有清單了");
         // 沒有 hook 帳＝畫面的數字。
-        assert_eq!(reconcile(&app, &run.id, 3, 3), 3);
+        assert_eq!(reconcile(&app, &run.id, 3), 3);
 
-        // 過了寬限但畫面也說有：hook 照舊為準（含畫面扣不掉服務時的差異）。
+        // 過了寬限，畫面有一個 shell：以現場數字取代舊 hook 的兩個 shell。
         on_stop(&app, &run, &fixture()).await;
         app.background_hook.lock().unwrap().get_mut(&run.id).unwrap().at = Instant::now() - GRACE - Duration::from_secs(1);
-        assert_eq!(reconcile(&app, &run.id, 1, 2), 2);
+        assert_eq!(reconcile(&app, &run.id, 1), 1);
+        assert_eq!(details(&app, &run.id), (Value::Null, Value::Null), "stale shell-only details are dropped");
         // hook 說 0：寬限內畫面說 1 也是 0；過了寬限就退場、只看畫面。
         let mut empty = fixture();
         empty["background_tasks"] = json!([]);
         on_stop(&app, &run, &empty).await;
-        assert_eq!(reconcile(&app, &run.id, 1, 1), 0);
+        assert_eq!(reconcile(&app, &run.id, 1), 0);
         app.background_hook.lock().unwrap().get_mut(&run.id).unwrap().at = Instant::now() - GRACE - Duration::from_secs(1);
-        assert_eq!(reconcile(&app, &run.id, 1, 1), 1);
+        assert_eq!(reconcile(&app, &run.id, 1), 1);
         assert_eq!(details(&app, &run.id), (Value::Null, Value::Null));
+    }
+
+    /// Once the hook snapshot is stale, the pane screen owns the shell count. A finished shell must
+    /// not remain counted just because another shell from the same Stop report is still visible.
+    #[tokio::test]
+    async fn a_stale_hook_shell_count_is_replaced_by_the_current_screen_count() {
+        let (env, run) = setup().await;
+        let app = env.app.clone();
+        let payload = json!({
+            "background_tasks": [
+                {"id": "shell-1", "type": "shell", "status": "running", "description": "sleep 1"},
+                {"id": "shell-2", "type": "shell", "status": "running", "description": "sleep 2"}
+            ],
+            "session_crons": []
+        });
+        on_stop(&app, &run, &payload).await;
+        app.background_hook.lock().unwrap().get_mut(&run.id).unwrap().at = Instant::now() - GRACE - Duration::from_secs(1);
+
+        assert_eq!(reconcile(&app, &run.id, 1), 1, "the stale hook said two, but only one shell remains on screen");
+        assert_eq!(details(&app, &run.id), (Value::Null, Value::Null), "screen-derived counts must not expose stale hook task details");
+    }
+
+    /// A hook snapshot is authoritative only inside its freshness window. Once stale, even a
+    /// subagent/workflow report must yield to the current screen fallback.
+    #[tokio::test]
+    async fn a_stale_non_shell_hook_task_falls_back_to_the_current_screen() {
+        let (env, run) = setup().await;
+        let app = env.app.clone();
+        let payload = json!({
+            "background_tasks": [{
+                "id": "agent-1", "type": "subagent", "status": "running", "description": "review"
+            }],
+            "session_crons": []
+        });
+        on_stop(&app, &run, &payload).await;
+        app.background_hook.lock().unwrap().get_mut(&run.id).unwrap().at = Instant::now() - GRACE - Duration::from_secs(1);
+
+        assert_eq!(reconcile(&app, &run.id, 2), 2, "stale hook data yields to current screen count");
+        assert_eq!(details(&app, &run.id), (Value::Null, Value::Null), "stale hook details are no longer authoritative");
     }
 
     #[tokio::test]
