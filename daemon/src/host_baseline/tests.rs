@@ -215,6 +215,19 @@ fn an_alias_outside_the_claude_cc_glob_is_still_checked() {
 }
 
 #[test]
+fn an_alias_using_braced_home_expansion_is_still_checked() {
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".claude-work")).unwrap();
+    fs::write(h.join(".claude-work/settings.json"), "{}").unwrap();
+    fs::write(h.join(".zshrc"), "alias cc5='CLAUDE_CONFIG_DIR=\"${HOME}/.claude-work\" claude'\n").unwrap();
+    let out = run_probe(h, "/usr/bin:/bin");
+    let all = ids(&out);
+    assert!(all.contains(&"claude.cc5.settings.json:statusLine".to_string()), "${{HOME}} alias directory was skipped: {all:?}\n{out}");
+    assert!(!out.contains(".claude-work"), "路徑不輸出");
+}
+
+#[test]
 fn codex_features_hooks_true_under_a_features_table_is_present() {
     let home = FakeHome::new();
     let h = home.path();
@@ -230,6 +243,30 @@ fn codex_features_hooks_true_under_a_features_table_is_present() {
     fs::write(h.join(".codex/config.toml"), "[features]\nhooks = false\n").unwrap();
     let off = run_probe(h, "/usr/bin:/bin");
     assert!(off.contains("AM_BL codex-key features.hooks 0"), "{off}");
+}
+
+#[test]
+fn codex_hooks_in_another_table_or_with_a_non_boolean_value_are_not_compliant() {
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".codex")).unwrap();
+    let config = h.join(".codex/config.toml");
+    fs::write(&config, "[other]\nfeatures.hooks = true\n").unwrap();
+    let nested = run_probe(h, "/usr/bin:/bin");
+    assert!(nested.contains("AM_BL codex-key features.hooks 0"), "nested-table key must not satisfy root features.hooks: {nested}");
+    fs::write(&config, "[features]\nhooks = trueish\n").unwrap();
+    let malformed = run_probe(h, "/usr/bin:/bin");
+    assert!(malformed.contains("AM_BL codex-key features.hooks 0"), "a non-boolean value must not satisfy hooks=true: {malformed}");
+}
+
+#[test]
+fn claude_default_mode_in_an_unrelated_json_object_does_not_satisfy_permissions() {
+    let home = FakeHome::new();
+    let h = home.path();
+    fs::create_dir_all(h.join(".claude")).unwrap();
+    fs::write(h.join(".claude/settings.json"), r#"{"other":{"defaultMode":"default"}}"#).unwrap();
+    let out = run_probe(h, "/usr/bin:/bin");
+    assert!(out.contains("AM_BL claude-key default defaultMode 0"), "only permissions.defaultMode is the configured mode: {out}");
 }
 
 #[test]

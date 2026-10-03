@@ -3492,7 +3492,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 - **只報、不修**：不寫任何檔、不裝任何東西（自動安裝／同步要使用者另行同意，沒有做）。測試用假 `$HOME` 驗證跑完後目錄快照不變。
 - **基準**（寫在 `host_baseline.rs` 的常數與腳本裡，路徑一律 `$HOME`）：
   - 工具（嚴重）：`herdr rtk zsh bun jq gh`，用登入 shell 找（只認絕對路徑，跟 §16.1 的 `am_abs` 同一規則，但六個一次問完）。claude／codex／grok 本身要不要裝由各主機決定，看 `tools`，不在這裡。
-  - 每個 claude 身分（`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`，以及登入 shell alias `cc0`–`cc6` 的 `CLAUDE_CONFIG_DIR`——路徑可以不在那個 glob 裡，例如 `~/.claude-work`；PROBE_SH 留在 `$al`，沒有就讀 `~/.zshrc`，不多開一次 login shell）：`settings.json`、`statusline-command.sh`（嚴重）、`CLAUDE.md`、`RTK.md`（提醒）；`settings.json` 有沒有 `statusLine`、`hooks`（嚴重）、`permissions`、`defaultMode`（提醒）——只看鍵在不在，不比內容。
+  - 每個 claude 身分（`$CLAUDE_CONFIG_DIR`、`~/.claude`、`~/.claude-cc<N>`，以及登入 shell alias `cc0`–`cc6` 的 `CLAUDE_CONFIG_DIR`——路徑可以不在那個 glob 裡，例如 `~/.claude-work`；PROBE_SH 留在 `$al`，沒有就讀 `~/.zshrc`，不多開一次 login shell）：`settings.json`、`statusline-command.sh`（嚴重）、`CLAUDE.md`、`RTK.md`（提醒）；`settings.json` 有沒有頂層 `statusLine`、`hooks`（嚴重）、`permissions`，以及 `permissions.defaultMode`（提醒）——只看鍵在不在，不比內容。
   - codex：`config.toml`、`hooks.json`、`approval_policy` 鍵，以及 `features.hooks = true`（點號鍵或 `[features]` 表裡的 `hooks = true`；沒寫或 false 都算缺）；grok `config.toml`；herdr `config.toml`（都是提醒）。**不檢查** model／effort／service_tier（使用者規定不動）。工具只查有沒有，不鎖版本（沒有宣告的基準版）。
   - `~/.gitconfig` 內嵌帶密碼的網址（`user:pass@`，或 `ghp_…`／`github_pat_…`／`glpat-…` 當 user 的 `token@`；提醒）：只回報有沒有，**不回傳內容**。
 - 探測腳本是 POSIX sh（遠端以 `/bin/sh -s` 跑，macOS 是 bash 3.2 的 sh 模式）；六個工具只開**一次** login shell 問完（不是各開一次，避免慢 rc 把整趟推過 ssh 30 秒上限）；`~/.claude-cc<N>*` glob 收到的目錄名只認 `[A-Za-z0-9_.-]`，其餘整個跳過（空白錯位欄位、換行偽造 `AM_BL` 行）；路徑不輸出；同一個 id 只報一次（`CLAUDE_CONFIG_DIR` 指到 `~/.claude*` 時同一目錄會走兩次）。
