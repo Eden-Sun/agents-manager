@@ -33,7 +33,8 @@ case "$*" in
     [ -n "${STUB_OLD_AGM:-}" ] && { echo "agm: error: argument cmd: invalid choice: 'release-triage'" >&2; exit 2; }
     case "$*" in
       *" dispatched "*) [ -n "${STUB_DISPATCHED_FAIL:-}" ] && exit 1; printf '%s' '{"dispatched":1}' ;;
-      *" publish "*) printf '%s' "${STUB_PUBLISH_JSON:-{\"publish_enabled\":false,\"results\":[]\}}" ;;
+      *" publish "*) [ -z "${STUB_PUBLISH_SLEEP:-}" ] || sleep "$STUB_PUBLISH_SLEEP"
+        printf '%s' "${STUB_PUBLISH_JSON:-{\"publish_enabled\":false,\"results\":[]\}}" ;;
       *" show "*)
         k=$(printf '%s' "$*" | sed -n 's/.*--kind \([a-z]*\).*/\1/p')
         f="$AGM_DIR/show-$k.json"; [ -f "$f" ] && cat "$f" || printf '%s' '{"rows":[]}' ;;
@@ -68,13 +69,13 @@ PYEOF
   chmod +x "$ROOT/fake-agents-managerd"
   export AM_BINARY="$ROOT/fake-agents-managerd"
   : > "$AGM_DIR/calls.log"; : > "$AGM_DIR/assign-body.txt"
-  export STUB_ASSIGN_FAIL="" STUB_QUOTA_FAIL="" STUB_QUOTA_JSON="" STUB_DISPATCHED_FAIL="" STUB_PUBLISH_JSON="" STUB_OLD_AGM=""
+  export STUB_ASSIGN_FAIL="" STUB_QUOTA_FAIL="" STUB_QUOTA_JSON="" STUB_DISPATCHED_FAIL="" STUB_PUBLISH_JSON="" STUB_PUBLISH_SLEEP="" STUB_OLD_AGM=""
   unset AGM_RELEASE_BOT
 }
 teardown() {
   rm -rf "$ROOT"
   unset AGM_DIR AGM_REPO AM_BINARY AGM_RELEASE_BOT AGM_TRIAGE_QUOTA_MAX AGM_LOCK_STALE_SECS AGM_LOCK_HUNG_SECS AGM_LOCK_QUIET_SECS AGM_EXTRA_PATH AGM_FAIL_ALERT_AFTER CLAUDE_VERSIONS_DIR
-  unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_OLD_AGM
+  unset STUB_ASSIGN_FAIL STUB_QUOTA_FAIL STUB_QUOTA_JSON STUB_DISPATCHED_FAIL STUB_PUBLISH_JSON STUB_PUBLISH_SLEEP STUB_OLD_AGM
 }
 
 # mk_pending <kind> <to> <version…>：每版 2 條 kept、1 條 unmatched。
@@ -91,6 +92,17 @@ json.dump({"kind": kind, "from": "0.0.0", "to": to, "pending": pend}, open(path,
 PY
 }
 mk_empty() { printf '{"kind":"%s","from":"1.0.0","to":"1.0.0","pending":[]}' "$1" > "$ROOT/triage/$1.json"; }
+start_live_runner() {
+  export STUB_PUBLISH_SLEEP=30
+  bash "$SCRIPT" > "$ROOT/live-runner.log" 2>&1 &
+  LIVE=$!
+  _wait=0
+  while [ ! -s "$AGM_DIR/release-triage.lock/owner" ] && [ "$_wait" -lt 100 ]; do
+    sleep 0.05
+    _wait=$((_wait + 1))
+  done
+  [ -s "$AGM_DIR/release-triage.lock/owner" ]
+}
 
 check() {
   if grep -q -- "$2" "$3" 2>/dev/null; then echo "ok   - $1"; PASS=$((PASS + 1))
@@ -254,9 +266,7 @@ teardown
 #     兩個 timer 同時到點）：這是正常重疊，照樣擋下不派，但不寫 log——否則每個 tick 都洗一行「已有執行者（0 秒）」。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
-bash -c 'sleep 30; : # release-triage-kick' & LIVE=$!
-sleep 0.3
-mkdir "$AGM_DIR/release-triage.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/release-triage.lock/owner"
+start_live_runner
 bash "$SCRIPT"
 equals "剛拿到的活鎖：不派" "$(assigns)" "0"
 check_no "剛拿到的活鎖：不洗 log" "已有執行者" "$AGM_DIR/release-triage.log"
@@ -267,9 +277,7 @@ teardown
 #    QUIET_SECS=0＝連剛拿到的鎖也記 log，才驗得到「有記」這一條。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
-bash -c 'sleep 30; : # release-triage-kick' & LIVE=$!
-sleep 0.3
-mkdir "$AGM_DIR/release-triage.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/release-triage.lock/owner"
+start_live_runner
 export AGM_LOCK_QUIET_SECS=0
 bash "$SCRIPT"
 equals "活鎖：不派" "$(assigns)" "0"
@@ -286,9 +294,8 @@ teardown
 future_lock() { python3 -c 'import os,sys,time; t=time.time()+7200; os.utime(sys.argv[1],(t,t))' "$AGM_DIR/release-triage.lock"; }
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex
-bash -c 'sleep 30; : # release-triage-kick' & LIVE=$!
-sleep 0.3
-mkdir "$AGM_DIR/release-triage.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/release-triage.lock/owner"; future_lock
+start_live_runner
+future_lock
 bash "$SCRIPT"
 equals "未來時間的活鎖：不派" "$(assigns)" "0"
 check "未來時間的活鎖：記 log 說年齡不可信" "鎖的時間在未來" "$AGM_DIR/release-triage.log"
@@ -309,6 +316,19 @@ mkdir "$AGM_DIR/release-triage.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/relea
 export AGM_LOCK_STALE_SECS=0
 bash "$SCRIPT"
 equals "pid 被別的程序重用：回收後照派" "$(assigns)" "1"
+kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
+teardown
+
+# pid 重用後的 command line 可能帶著 kick 名稱，但只有 bash 真正以本腳本為入口才算活 runner。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+bash -c 'sleep 30; :' release-triage-kick & LIVE=$!
+sleep 0.3
+mkdir "$AGM_DIR/release-triage.lock"; echo "$LIVE $(date +%s)" > "$AGM_DIR/release-triage.lock/owner"
+export AGM_LOCK_STALE_SECS=0
+bash "$SCRIPT"
+equals "重用 PID 的 command line 含名稱也要回收" "$(assigns)" "1"
+check "重用 PID 不再被判成活 runner" "清掉殘留鎖" "$AGM_DIR/release-triage.log"
 kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
 
@@ -595,6 +615,42 @@ check "正常 kick 輸出分診公告 id" 'NOTICE_ID="agm-release-triage-${KIND}
 # 派工本身的 crid 是另一回事，不能被這次改動波及：`claude_review.rs` 用 agm-claude-release-<ver>
 # 讓網頁按鈕與 kick 冪等地指到同一筆（見該檔 :10／:142），所以那個**沒有** -notice 尾巴的 id 要留著。
 check "kick 的 changelog 派工 request-id 仍是 release-triage-<kind>-<to>" 'release-triage-${KIND}-${TO}' "$SCRIPT"
+
+# stale lock reclaim must be serialized: two ticks that both observed the dead owner
+# must not delete each other's newly acquired lock and dispatch the same batch twice.
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+mkdir -p "$ROOT/bin" "$AGM_DIR/release-triage.lock"
+echo '999999 1' > "$AGM_DIR/release-triage.lock/owner"
+cat > "$ROOT/bin/rm" <<'STUB'
+#!/bin/bash
+is_lock=0
+for arg in "$@"; do [ "$arg" = "$AGM_DIR/release-triage.lock" ] && is_lock=1; done
+if [ "$is_lock" = 1 ] && [ "${RACE_ROLE:-}" = a ] && [ ! -e "$AGM_DIR/race-a-entered" ]; then
+  : > "$AGM_DIR/race-a-entered"
+  _wait=0
+  while [ ! -e "$AGM_DIR/race-b-entered" ] && [ "$_wait" -lt 250 ]; do sleep 0.02; _wait=$((_wait + 1)); done
+elif [ "$is_lock" = 1 ] && [ "${RACE_ROLE:-}" = b ] && [ ! -e "$AGM_DIR/race-b-entered" ]; then
+  : > "$AGM_DIR/race-b-entered"
+  _wait=0
+  while { [ ! -s "$AGM_DIR/release-triage.lock/owner" ] || grep -q '^999999 ' "$AGM_DIR/release-triage.lock/owner"; } && [ "$_wait" -lt 500 ]; do
+    sleep 0.02; _wait=$((_wait + 1))
+  done
+fi
+exec /bin/rm "$@"
+STUB
+chmod +x "$ROOT/bin/rm"
+export AGM_EXTRA_PATH="$ROOT/bin" AGM_LOCK_STALE_SECS=0 STUB_PUBLISH_SLEEP=2
+RACE_ROLE=a bash "$SCRIPT" > "$ROOT/race-a.log" 2>&1 & RACE_A=$!
+: > "$AGM_DIR/race-a-started"
+_wait=0
+while [ ! -e "$AGM_DIR/race-a-entered" ] && [ "$_wait" -lt 100 ]; do sleep 0.02; _wait=$((_wait + 1)); done
+: > "$AGM_DIR/race-b-started"
+RACE_ROLE=b bash "$SCRIPT" > "$ROOT/race-b.log" 2>&1 & RACE_B=$!
+wait "$RACE_A"; wait "$RACE_B"
+equals "兩個排程都啟動" "1" "$([ -e "$AGM_DIR/race-a-started" ] && [ -e "$AGM_DIR/race-b-started" ] && echo 1 || echo 0)"
+equals "兩輪同時回收 stale lock 只派一次" "1" "$(assigns)"
+teardown
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

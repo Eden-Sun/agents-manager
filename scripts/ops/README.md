@@ -41,9 +41,8 @@ agm-host 上由 `ubuntu-ci.sh` 排程它（每 `AGM_CI_OPS_SYNC_INTERVAL` 秒，
   過了才備份到 `<AGM>/ops-install-backups/<UTC 時間>/<安裝位置>`，再 `mv`（原子替換）。
 - 被 SIGKILL 的上一次會把暫存檔 `<安裝位置>.new.<pid>` 留在安裝端：下次執行（非 `--dry-run`、拿到鎖之後）把清單內、`.new.<純數字>`、pid 已不在的清掉並印 `cleaned N`（pid 還活著的不碰）；`ops-sync --check` 也不把這種檔名報成 `extra`。
 - 同時只能有一個在裝：鎖是 `<AGM>/ops-install.lock/`（記 pid；握鎖的行程死了就接手）；拿不到鎖 exit 3、不動任何檔。同一秒內重複裝，備份目錄也不共用（`<UTC 時間>-2`…）。
-  安裝位置是 symlink 的報 `skipped`（`mv` 會把連結換成拷貝）；對照表的安裝位置跑出 `--dir`（絕對路徑、`..`）報 `failed`、不寫。
-- **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的 blob 都對不上，跟 `ops-sync --check` 的 `drift` 同一條）
-  報 `drifted`、不動它、不算失敗；kick 會另推 `ops_install_drift` 叫人看。手動 `--force` 才換（舊檔照樣備份）。
+  安裝位置是 symlink 的報 `skipped`（`mv` 會把連結換成拷貝）；父目錄是 symlink、或對照表的安裝位置跑出 `--dir`（絕對路徑、`..`）都報 `failed`、不寫，也不會沿父 symlink 清孤兒暫存檔。
+- **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的 blob 都對不上，跟 `ops-sync --check` 的 `drift` 同一條），或自檢期間目的地內容改變，報 `drifted`、不動它、不算失敗；kick 會另推 `ops_install_drift` 叫人看。手動 `--force` 才換（舊檔照樣備份）。
 - `--dry-run` 只列 `would-install`。最後一行 `changes=N failed=M drifted=K`；有失敗 exit 1。整輪成功（而且真的換了檔）會把「時間 commit」寫進 `<AGM>/ops-install.last`；有失敗的那輪**不更新**它，改把「時間 commit failed=N」記進 `ops-install.last-failed`（下一次整輪成功就刪）。這兩個檔目前沒有程式讀（kick、ops-sync 都不看），只給人查「裝到哪一版了」。
 
 **接到部署**：`daemon-update-kick.sh` 在旗標開著時，於 ① 換版成功之後、② 「沒有會進 binary 的差異」那一輪（要該 sha 的 `ubuntu-ci` 綠燈）
@@ -135,12 +134,12 @@ loginctl enable-linger "$USER"   # 沒登入也要跑（一次就好；沒開的
 | `AGM_CI_LOOKBACK` | `30` | 沿 first-parent 往回最多看幾顆（`ubuntu-ci` 只跑最新 HEAD、會跳過中間的 sha） |
 | `AM_AGENT_NAME` | `daemon-update-kick` | 租約 owner／`ops_alert` 的 source |
 | `AGM_FAIL_ALERT_AFTER` | `6` | 連續幾輪「沒能完成」推 `ops_alert check_failing`（每輪 5 分鐘＝約 30 分鐘） |
-| `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者時，超過這麼久就當殘留回收 |
+| `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者時，超過這麼久就當殘留回收；OS advisory lock 仍被持有時不回收 |
 | `AGM_LOCK_HUNG_SECS` | `7200` | 執行者還活著但卡了這麼久：推 `ops_alert runner_hung`（不搶鎖；冷建置要十幾分鐘，所以給寬） |
 | `AM_MAINTENANCE_ESCALATE_MINS`（daemon 端） | `30` | 只對 bot 申請的核准有意義（SPEC §18.10）；自動部署自開的單等待為 0，不會升級 |
 
 狀態檔（都在 `AGM_DIR`）：`daemon-update.built`（上次換上去的 short sha，`daemon-swap.sh` 寫）、`daemon-update.rejected`（換上去被回滾的完整 sha，之後不再挑）、
-`daemon-update.fails`（連續失敗輪數）、`daemon-update.lock`（防重疊）、`daemon-update.now.json`（立即部署請求）、`daemon-update.log`。
+`daemon-update.fails`（連續失敗輪數）、`daemon-update.lock`（owner 與診斷資訊）、`daemon-update.lock.guard`（核心自動釋放的防重疊 advisory lock）、`daemon-update.now.json`（立即部署請求）、`daemon-update.log`。
 `.built` 不在或指向不在 repo 的 sha 時，腳本推 `ops_alert built_unknown` 並停住——它需要知道線上是哪一版才敢往上換。
 
 同一顆 sha 建好後（`<checkout>/target/release/.built-for`）等安全窗口的那幾輪不會重建；`daemon-swap.sh` 結束碼 4（有人在忙）不算失敗，下一輪再試。
@@ -363,7 +362,7 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**�
 | `AM_BINARY` | `$AGM_REPO/target/release/agents-managerd` | 呼叫 `release-triage-check` 的二進位路徑 |
 | `AGM_RELEASE_BOT` | `runtime.json` 的 `release_bot_id`，沒有就 `responder_bot_id` | 派給誰；**不能是巡檢自己**。查不到就跳過，不亂派 |
 | `AGM_TRIAGE_QUOTA_MAX` | `85` | 被派的那顆 bot 的 5h 用量 ≥ 這個百分比就不派 |
-| `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者時，超過這麼久就當殘留回收 |
+| `AGM_LOCK_STALE_SECS` | `120` | 鎖沒有可查的執行者時，超過這麼久就當殘留回收；OS advisory lock 仍被持有時不回收 |
 | `AGM_LOCK_HUNG_SECS` | `3600` | 執行者還活著但卡了這麼久：推 `ops_alert` 喊人（不搶鎖） |
 | `AGM_EXTRA_PATH` | `/opt/homebrew/bin:/usr/local/bin` | 腳本開頭補在 `PATH` 前面的目錄；只給測試蓋掉 |
 | `CLAUDE_VERSIONS_DIR` | `~/.local/share/claude/versions` | Claude binary 版本目錄；沿用 `claude-release.last` 偵測舊版到新版 |
@@ -375,8 +374,8 @@ launchd plist 範例（`~/Library/LaunchAgents/com.agm.herdr-update.plist`；**�
 - **額度閘門**：派之前用 `bin/agm state`＋`bin/agm quota` 找被派 bot 的身分那一格（`<kind>:<identity>`，沒有就 `<kind>`），
   5h ≥ `AGM_TRIAGE_QUOTA_MAX` 或有 `limit_hit` → 不派、記一行 log、列維持 `pending`，下一輪再看。查不到（端點壞、找不到那格）**照派**並記 log，
   不因為端點壞了就永遠不做。只在真的有 changelog pending 或 binary diff 時才查，一輪只查一次。
-- **鎖**（補 #66 留言的洞）：`release-triage.lock` 裡寫 pid＋時間（同 `daemon-update-kick.sh` 的格式）。執行者不在（含 pid 被別的程序重用）就回收接手；
-  還活著但超過 `AGM_LOCK_HUNG_SECS` 推 `ops_alert`（`runner_hung`）；回收不掉推 `stale_lock`。
+- **鎖**（補 #66 留言的洞）：`release-triage.lock` 裡寫 pid＋時間（同 `daemon-update-kick.sh` 的格式），`release-triage.lock.guard` 用 OS advisory lock 串行化新舊鎖建立與殘留回收，避免重複派工。執行者不在（含 pid 被別的程序重用）且沒有行程仍持 advisory lock 時就回收接手；
+  活 runner 在 `AGM_LOCK_QUIET_SECS` 內安靜跳過，超過 `AGM_LOCK_HUNG_SECS` 推 `ops_alert`（`runner_hung`）；無法驗證的 guard owner 長時間仍持鎖也會告警；回收不掉推 `stale_lock`。
 - **依賴**（補 #66 留言的洞）：開頭自補 `PATH=/opt/homebrew/bin:/usr/local/bin:$PATH`；找不到 `python3` 推 `ops_alert`（`missing_dependency`）並寫 log，不靜默 `exit 0`。
   只依賴 `python3` 與 `bin/agm`（額度走 `agm quota`，不用 `curl`／`gh`；開 issue 是 daemon 的事）。
 - **派成功要寫回帳本**：`assign` 成功後對**這一則實際帶出去的版本**（截斷後那批，不是全部 pending）呼叫

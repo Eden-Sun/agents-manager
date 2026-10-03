@@ -73,7 +73,7 @@ setup() {
 
   export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun" CARGO_BIN="$ROOT/bin/cargo"
   export AGM_SWAP_SCRIPT="$ROOT/bin/swap.sh" AM_AGENT_NAME=daemon-update-kick
-  export STUB_GH_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL=""
+  export STUB_GH_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP=""
   export AGM_FAIL_ALERT_AFTER=3 AGM_CI_LOOKBACK=30
 
   cat > "$AGM_DIR/bin/agm" <<'STUB'
@@ -99,6 +99,7 @@ STUB
 #!/bin/bash
 echo "bun $* @ $(pwd)" >> "$AGM_DIR/build.log"
 [ -z "$STUB_BUN_FAIL" ] || exit 1
+[ -z "$STUB_BUN_SLEEP" ] || sleep "$STUB_BUN_SLEEP"
 exit 0
 STUB
   cat > "$ROOT/bin/cargo" <<'STUB'
@@ -334,11 +335,48 @@ check_eq "接手後有換版" "1" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 setup
 ci "$C3" success
-sleep 30 & SLEEPER=$!
-mkdir -p "$AGM_DIR/daemon-update.lock"; echo "$SLEEPER $(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"
+export STUB_BUN_SLEEP=30
+bash "$SCRIPT" > "$ROOT/live-runner.log" 2>&1 & SLEEPER=$!
+_wait=0
+while [ ! -s "$AGM_DIR/daemon-update.lock/owner" ] && [ "$_wait" -lt 100 ]; do
+  sleep 0.05
+  _wait=$((_wait + 1))
+done
+[ -s "$AGM_DIR/daemon-update.lock/owner" ] || { echo "FAIL - 活 runner 沒拿到鎖"; FAIL=$((FAIL + 1)); }
+_wait=0
+while [ "$(count 'bun install' "$AGM_DIR/build.log" | tr -d ' ')" = 0 ] && [ "$_wait" -lt 100 ]; do
+  sleep 0.05
+  _wait=$((_wait + 1))
+done
 run >/dev/null
-kill "$SLEEPER" 2>/dev/null
+kill "$SLEEPER" 2>/dev/null; wait "$SLEEPER" 2>/dev/null
 check_eq "活著的執行者：這輪不動" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check_eq "活著的執行者：沒有重複建置" "1" "$(count 'bun install' "$AGM_DIR/build.log")"
+teardown
+
+# A child left holding the advisory lock after the runner PID disappeared must not turn
+# into an endless quiet skip: aged, unverified guard ownership raises an alert.
+setup
+ci "$C3" success
+mkdir -p "$AGM_DIR/daemon-update.lock"
+echo "999999 $(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"w"); fcntl.flock(f,fcntl.LOCK_EX); time.sleep(30)' "$AGM_DIR/daemon-update.lock.guard" & GUARD_HOLDER=$!
+sleep 0.1
+AGM_LOCK_HUNG_SECS=0 run >/dev/null
+check "未驗證但持有 OS lock 的舊 runner 會喊人" "runner_hung" "$AGM_DIR/alerts.log"
+check_eq "guard 持有人未知時不重複部署" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+kill "$GUARD_HOLDER" 2>/dev/null; wait "$GUARD_HOLDER" 2>/dev/null
+teardown
+
+# 活 PID 的 command line 只含同名片語、不是真正 kick：不能把被重用的 PID 誤認成執行者而永遠保留鎖。
+setup
+ci "$C3" success
+bash -c 'sleep 30; : # daemon-update-kick' & SLEEPER=$!
+mkdir -p "$AGM_DIR/daemon-update.lock"; echo "$SLEEPER $(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"
+AGM_LOCK_STALE_SECS=0 run >/dev/null
+check_eq "重用 PID 的 command line 含名稱也要回收" "1" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check "重用 PID 不再被判成活 runner" "清掉殘留鎖" "$(LOG)"
+kill "$SLEEPER" 2>/dev/null; wait "$SLEEPER" 2>/dev/null
 teardown
 
 # 18. 腳本本身：不再有建置 child／核准／門檻這些東西；daemon 的 kick_ready 靠這個檔名判斷；全形標點前要有大括號。

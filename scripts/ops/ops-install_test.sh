@@ -189,6 +189,25 @@ equals "失敗後還是舊檔" "$(cat "$DIR/bin/t-tool.ts")" 'console.log("t-v1"
 check "點名" "failed bin/t-tool.ts" "$OUT"
 teardown
 
+# 9b. 自檢期間安裝端被人手改過：不能拿檢查前的版本判斷，然後覆蓋剛寫入的內容。
+setup
+printf 'scripts/ops/t-tool.ts  bin/t-tool.ts\n' >> "$REPO/scripts/ops/install-manifest.tsv"
+printf 'console.log("t-v1")\n' > "$REPO/scripts/ops/t-tool.ts"
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m ts
+install -m 755 "$REPO/scripts/ops/t-tool.ts" "$DIR/bin/t-tool.ts"
+bump t-tool.ts $'console.log("t-v2")\n'
+FAKEBIN="$ROOT/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/bun" <<'BUN'
+#!/bin/sh
+printf 'console.log("hand-edited during install")\n' > "$DEST"
+exit 0
+BUN
+chmod +x "$FAKEBIN/bun"
+equals "手改 race 不讓安裝器覆蓋 exit 0" "0" "$(DEST="$DIR/bin/t-tool.ts" PATH="$FAKEBIN:$PATH" run)"
+equals "自檢期間手改的檔保留" 'console.log("hand-edited during install")' "$(cat "$DIR/bin/t-tool.ts")"
+check "自檢期間手改有回報 drifted" "drifted bin/t-tool.ts" "$OUT"
+teardown
+
 # 11. 安裝位置是 symlink（使用者把它連到別處）：不換、不把連結吃掉，報 skipped。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
@@ -197,6 +216,20 @@ equals "symlink：exit 0" "$(run)" "0"
 check "報 skipped" "skipped bin/a-kick.sh" "$OUT"
 equals "連結還在" "$([ -L "$DIR/bin/a-kick.sh" ] && echo link)" "link"
 equals "連結指到的檔沒動" "$(sed -n 2p "$ROOT/elsewhere.sh")" "echo a-v1"
+teardown
+
+# 11b. 安裝位置的父目錄是 symlink：既不能沿它寫到 --dir 外，也不能沿它清外部孤兒暫存檔。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+mkdir -p "$ROOT/outside"
+mv "$DIR/bin" "$ROOT/outside/bin"
+ln -s "$ROOT/outside/bin" "$DIR/bin"
+DEAD=$(sh -c 'echo $$')
+printf 'outside orphan' > "$ROOT/outside/bin/a-kick.sh.new.$DEAD"
+equals "父目錄 symlink 的目的地回報失敗" "1" "$(run)"
+check "父目錄 symlink 有點名" "symlink" "$OUT"
+equals "父目錄 symlink 不能覆蓋外部檔" "echo a-v1" "$(sed -n 2p "$ROOT/outside/bin/a-kick.sh")"
+equals "父目錄 symlink 不能刪外部孤兒檔" "outside orphan" "$(cat "$ROOT/outside/bin/a-kick.sh.new.$DEAD")"
 teardown
 
 # 12. 對照表的安裝位置跑出 AGM 目錄（絕對路徑、`..`）：不寫，報 failed。

@@ -3573,7 +3573,7 @@ AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同
   角色沒設定、目錄或 `bin/` 不存在就跳過，不代建。
 - **只動 `bin/agm`**：`CLAUDE.md`、`persona.md`、`runtime.json`、身分／model／effort 一律不碰（那些只在 `agm supervisor-setup`／`responder setup` 寫；開機不走 setup）。
 - 寫不進去不擋開機：記 warn，推一則 `agm_cli_stale` inbox（路由給巡檢並喚醒），payload 帶角色、路徑、內嵌版雜湊與錯誤。
-- **`scripts/ops/*.sh`（`daemon-update-kick.sh` 等）與 `*-task.md` 沒有內嵌，不會自動更新**——改了就照 `scripts/ops/README.md` 手動 install，並留備份。
+- **`scripts/ops/*.sh`（`daemon-update-kick.sh` 等）與 `*-task.md` 沒有內嵌，不會跟 daemon binary 一起換版**——改了就照 `scripts/ops/README.md` 安裝，並留備份。
   要裝哪些、裝到哪裡只寫在 `scripts/ops/install-manifest.tsv`；`agm ops-sync --check`（issue #418）唯讀比對安裝端與 `origin/main`，
   分開報 `drift`（安裝檔不是 repo 任何一版）、`behind`（落後，附 commit）、`missing`、`extra`（`bin/` 裡沒有版控的檔；`agm` 與 `*.bak*` 不算），
   有落差 exit 1，加 `--alert` 推 `ops_alert`（`ops-sync`／`installed_out_of_sync`）。`drift`＝安裝端不是 repo 任何一版（腳本比位元組、plist／unit 比語意，都回頭找歷史；只跟最新一版比的話，unit 一落後就會被誤報成被手改過）；安裝的是舊版就是 `behind`。它不安裝任何東西，install 照舊由 AGM 核准後手動做。agm-host 上 `scripts/ops/ubuntu-ci.sh` 每輪順手排程它（預設每 6 小時最多一次、`AGM_CI_OPS_SYNC_INTERVAL` 可調，不靠新 commit 觸發），有落差由它推 `ops_alert`；檢查本身壞掉不影響 CI 結果。例外是旗標（預設關）：`scripts/ops/ops-install.sh`（備份、原子替換、自檢、壞了還原；只更新已安裝的、清單內的檔，不新增、不碰排程 unit）由 `daemon-update-kick.sh` 在換版成功後與「沒有進 binary 的差異」那輪叫起，見 `scripts/ops/README.md`。
@@ -3970,7 +3970,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
 - `assignment_undelivered` 獨立一條：每次重試 `defer` 會推 `updated_at`，stalled 看不到它。被拒的真正理由（`bot has no active run`、`needs_login`）記在 `error`。
 - **排程腳本卡住**：`scripts/ops/*` 停住而且自己解不開時走 `POST /api/supervisor/ops-alerts`，寫一則 inbox `ops_alert`（巡檢收、叫醒），
   同 `source`+`reason` 每小時最多一則。以前那幾支只寫自己的 log 就 `exit 0`——正式 daemon 從此不再自動換版而沒有任何人知道（review 2026-09-16 c1 M1）。
-  `daemon-update-kick.sh` 的鎖帶 pid 與時間：執行者不在了（強制關機、SIGKILL）就回收並接手這一輪；還活著但卡超過 `AGM_LOCK_HUNG_SECS`（7200 秒）才喊人。
+  `daemon-update-kick.sh` 與 `release-triage-kick.sh` 的目錄鎖帶 pid 與時間，另以 OS advisory lock 串行化鎖建立與殘留回收，避免兩個排程同時刪掉對方剛重建的鎖、重複建置或派工。執行者不在了（強制關機、SIGKILL）且沒有行程仍持 advisory lock 時就回收接手；活 runner 在安靜門檻內不洗 log，超過 `AGM_LOCK_HUNG_SECS`（部署 7200 秒、分診 3600 秒）才喊人。若子行程仍握著 advisory lock、owner 已無法驗證，超過 hung 門檻也會告警，不會無限安靜跳過。
   例行部署不再開核准單，所以沒有「協調者不裁示」這一種卡法（2026-09-29 拿掉 `approval_undecided`）。
   daemon 那一側更快也更準——核准開 5 分鐘改派給巡檢、開 30 分鐘開 `approval_stalled` incident。兩條都留著：
   daemon 那條要 daemon 活著且 inbox 送得出去，這條只要 launchd 還在跑。

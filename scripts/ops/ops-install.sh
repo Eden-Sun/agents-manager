@@ -92,6 +92,24 @@ known_version() { # known_version <repo 來源> <安裝端檔案>
   done | grep -q found
 }
 
+# --dir 之下的父目錄也必須是實目錄。只檢查最終檔名會漏掉 bin -> /outside 這種 symlink，
+# 安裝與孤兒 .new 清理都會沿它寫入／刪除 --dir 外的檔案。
+has_symlink_parent() { # has_symlink_parent <relative target> → 0 是 symlink、1 否
+  _rel="$1"
+  _parent=${_rel%/*}
+  [ "$_parent" = "$_rel" ] && return 1
+  _path="$DIR"
+  _parts="$_parent/"
+  while [ -n "$_parts" ]; do
+    _part=${_parts%%/*}
+    _parts=${_parts#*/}
+    [ -n "$_part" ] || continue
+    _path="$_path/$_part"
+    [ -L "$_path" ] && return 0
+  done
+  return 1
+}
+
 # 上一次被 SIGKILL（EXIT trap 沒跑）會把 `<安裝位置>.new.<pid>` 留在安裝端；pid 已經不在的就是孤兒，清掉。
 # 只看清單裡的安裝位置、名字必須是 `.new.<純數字>`、pid 還活著的不碰（別人正在裝）；--dry-run 不清。
 if [ "$DRY" = 0 ]; then
@@ -104,6 +122,7 @@ if [ "$DRY" = 0 ]; then
     tgt="$2"; plat="${3:-}"
     [ -z "$plat" ] || [ "$plat" = "$PLATFORM" ] || continue
     case "$tgt" in systemd/*|LaunchAgents/*|/*|..|../*|*/..|*/../*) continue ;; esac
+    has_symlink_parent "$tgt" && continue
     for f in "$DIR/$tgt".new.*; do
       [ -f "$f" ] || continue
       pid="${f##*.new.}"
@@ -130,6 +149,9 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
   case "$tgt" in
     /*|..|../*|*/..|*/../*) echo "failed ${tgt}（安裝位置跑出 --dir，不寫）"; echo F >> "$TMP/results"; continue ;;
   esac
+  if has_symlink_parent "$tgt"; then
+    echo "failed ${tgt}（安裝位置父目錄是 symlink，不寫）"; echo F >> "$TMP/results"; continue
+  fi
   dest="$DIR/$tgt"
   # symlink：使用者連到別處的（例如連到 repo 的腳本）。`mv` 會把連結換成一份拷貝、斷掉那條連結，所以不碰。
   if [ -L "$dest" ]; then echo "skipped ${tgt}（是 symlink，不換；連結指到哪就是哪版）"; continue; fi
@@ -138,8 +160,12 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
   if ! "$GIT" -C "$REPO" show "${COMMIT}:${src}" > "$new" 2>/dev/null; then
     echo "failed ${tgt}（${REF} 裡讀不到 ${src}）"; echo F >> "$TMP/results"; continue
   fi
-  if cmp -s "$new" "$dest"; then echo "unchanged $tgt"; continue; fi
-  if [ "$FORCE" != 1 ] && ! known_version "$src" "$dest"; then
+  snapshot="$TMP/original"
+  if ! cp "$dest" "$snapshot"; then
+    echo "failed ${tgt}（讀不了安裝端的舊檔，沒動它）"; echo F >> "$TMP/results"; continue
+  fi
+  if cmp -s "$new" "$snapshot"; then echo "unchanged $tgt"; continue; fi
+  if [ "$FORCE" != 1 ] && ! known_version "$src" "$snapshot"; then
     echo "drifted ${tgt}（安裝端的檔不是 repo 任何一版，有人手改過；沒動它。要換就先看差在哪，或加 --force，舊檔照樣會備份）"
     echo D >> "$TMP/results"; continue
   fi
@@ -155,6 +181,12 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
     rm -f "$stage"
     echo "failed ${tgt}（自檢沒過，沒換，舊版原封不動）：$(printf '%s' "$err" | head -2 | tr '\n' ' ')"
     echo F >> "$TMP/results"; continue
+  fi
+  # 自檢可能跑很久（例如 bun build）；期間若有人手改、刪掉或換成 symlink，不覆蓋那個新狀態。
+  if has_symlink_parent "$tgt" || [ -L "$dest" ] || ! cmp -s "$snapshot" "$dest"; then
+    rm -f "$stage"
+    echo "drifted ${tgt}（安裝期間目的地改變，保留現況）"
+    echo D >> "$TMP/results"; continue
   fi
   mkdir -p "$BACKUP/$(dirname "$tgt")"
   if ! cp -p "$dest" "$BACKUP/$tgt"; then rm -f "$stage"; echo "failed ${tgt}（備份不了，沒動它）"; echo F >> "$TMP/results"; continue; fi

@@ -27,6 +27,8 @@
 set -u
 set -o pipefail
 
+SELF="$(cd "$(dirname "$0")" && pwd)/${0##*/}"
+
 DIR="${AGM_DIR:-$HOME/.config/agents-manager/supervisor/AGM}"
 REPO="${AGM_REPO:-$HOME/project/agents-manager}"      # 正式 daemon 跑的那份（daemon-swap 換它的 target/release）
 DEPLOY="${AGM_DEPLOY_CHECKOUT:-$HOME/.cache/agents-manager/deploy-checkout}"   # 專用乾淨 checkout，只有這支腳本動它
@@ -94,11 +96,22 @@ ops_install_step() {
   return 0
 }
 
-# A second runner must not build or swap at the same time. 鎖裡寫 pid 與時間：被強制關機、SIGKILL 的那一輪
-# EXIT trap 沒跑，鎖會留在磁碟上——只記一行「已有執行者」就 exit 0 的話，自動換版會永久、靜默地停住。
+# A second runner must not build or swap at the same time. OS advisory lock 串行化建立／回收目錄鎖，
+# 避免兩個同時醒來的 runner 各自刪掉對方剛重建的 lock。目錄裡仍寫 pid 與時間供 hung 診斷；SIGKILL 後 OS lock 自動釋放。
 LOCK="$DIR/daemon-update.lock"
+LOCK_GUARD="$DIR/daemon-update.lock.guard"
 LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
 LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-7200}     # 執行者還活著但卡了這麼久：喊人（冷建置要十幾分鐘，給寬）
+acquire_guard() {
+  exec 9>"$LOCK_GUARD" 2>/dev/null || return 2
+  python3 -c '
+import errno, fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError as e:
+    sys.exit(1 if e.errno in (errno.EACCES, errno.EAGAIN) else 2)
+' >/dev/null 2>&1
+}
 lock_age() { # lock_age → 鎖建立到現在幾秒（讀不到就當 0）
   _born=$(python3 -c '
 import os,sys
@@ -110,6 +123,19 @@ except OSError:
   case "$_born" in ''|*[!0-9]*) _born=0 ;; esac
   [ "$_born" = 0 ] && { echo 0; return; }
   echo $(( $(date +%s) - _born ))
+}
+is_self_runner() { # is_self_runner <pid>：只認真正以這支腳本為 bash/sh 入口的行程
+  _cmd=$(ps -o command= -p "$1" 2>/dev/null) || return 1
+  RUNNER_COMMAND="$_cmd" RUNNER_SCRIPT="$SELF" python3 -c '
+import os, shlex, sys
+try:
+    argv = shlex.split(os.environ["RUNNER_COMMAND"])
+except ValueError:
+    sys.exit(1)
+if len(argv) < 2 or os.path.basename(argv[0]).lstrip("-") not in ("bash", "sh"):
+    sys.exit(1)
+sys.exit(0 if os.path.normpath(argv[1]) == os.environ["RUNNER_SCRIPT"] else 1)
+' >/dev/null 2>&1
 }
 # 連續「沒能完成」不能永遠只有 local log：連續 FAIL_ALERT_AFTER 輪（預設 6＝約 30 分鐘）推 ops_alert，
 # 完整跑完一輪清零。「還有人在跑、等安全窗口」「沒有新的綠燈 commit」是正常的等，不算失敗。
@@ -129,13 +155,41 @@ settle() {
   return 0
 }
 cleanup() { settle; rm -rf "$LOCK" 2>/dev/null || true; }
-take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
+take_lock() {
+  mkdir "$LOCK" 2>/dev/null || return 1
+  if ! echo "$$ $(date +%s)" > "$LOCK/owner"; then rm -rf "$LOCK" 2>/dev/null; return 1; fi
+  trap cleanup EXIT
+  return 0
+}
 mkdir -p "$DIR" 2>/dev/null
+_guard_rc=0
+acquire_guard || _guard_rc=$?
+if [ "$_guard_rc" -eq 1 ]; then
+  _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
+  _age=$(lock_age)
+  if [ "$_age" -lt 0 ]; then
+    log "鎖的時間在未來（${_age} 秒），時鐘倒退或鎖是搬來的，年齡不可信"
+  elif [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
+    if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
+      alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，自動部署停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
+    else
+      log "更新檢查已有執行者（pid ${_pid}，${_age} 秒），這輪跳過"
+    fi
+  elif [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
+    alert runner_hung "自動部署 runner 持有 OS lock 已 ${_age} 秒，但鎖的 owner（${_pid:-未知}）無法驗證；部署停住。請確認後必要時結束行程並移除 ${LOCK}"
+  else
+    log "另一個更新 runner 持有 OS lock（owner 尚未可驗），這輪跳過"
+  fi
+  exit 0
+elif [ "$_guard_rc" -ne 0 ]; then
+  alert lock_unavailable "無法建立或取得部署鎖（${LOCK_GUARD}），本輪跳過"
+  exit 0
+fi
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
   _age=$(lock_age)
   # 還活著的執行者（pid 在，而且真的是這支腳本）：正常重疊就安靜跳過；卡太久才喊人。
-  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && ps -o command= -p "$_pid" 2>/dev/null | grep -q 'daemon-update-kick'; then
+  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
     if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
       alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，自動部署停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
     else
