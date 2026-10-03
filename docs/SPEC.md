@@ -2139,8 +2139,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   `release` 一律幂等（找不到、已過期、token 不對都當作「已經不是你的事了」回成功），呼叫端的 `trap ... EXIT` 才能
   放心呼叫，不用先判斷還握不握著。`renew` 只有還在 `held` 且沒過期的列能續，過期了要求重新 `acquire`（不做「其實已經
   被別人拿走了」這種模糊地帶）。
-- `GET /api/build-slots`（在 `/api` 底下，一般 `X-AM-Token`）：`{max_concurrent, cargo_jobs, test_threads, lease_ttl_secs, active, slots:[...]}`，
-  UI／人工查現況用。
+- `GET /api/build-slots`（在 `/api` 底下，一般 `X-AM-Token`；Bot principal 回 `403 user_only`，#812）：`{max_concurrent, cargo_jobs, test_threads, lease_ttl_secs, active, slots:[...]}`，UI／人工查現況用。acquire／renew／release 仍在 `/build-slots/*`。
 
 #### `cargo` shim（issue 建議的 PATH wrapper；`cargo_shim.rs`，跟 `herdr_shim.rs` 同一種寫法）
 - 沒有 bot token 也沒有 UI token 檔可讀：直接不排程，印一行 stderr 說明，直接跑（issue 要求「明講的 bypass 路徑」）。
