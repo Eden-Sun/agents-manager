@@ -1772,6 +1772,8 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 2. body 最前面插 **AG Man 規則**（`lifecycle::child_agent_rules`）：先 `herdr agent list` 找自己底下閒置的 child 重用、命名、`herdr pane split --pane "$HERDR_PANE_ID"`、
    不要 `git stash`/`--autostash`、子 agent 會掛在自己底下、帳號與 hook 自動帶進子 pane；瀏覽器一律用 ego lite、一個 bot 最多一個分頁、結束就關；
    輸出檔案規則（§6.5f：scratchpad 只放中間產物、給使用者的放 `$AM_OUTBOX`、私鑰／憑證／DB 禁放）；
+   CLI 登入／OAuth 一律不開瀏覽器（使用者 2026-10-03）：`gcloud … --no-browser`、`--use-device-code`、`firebase login --no-localhost`、`GH_BROWSER=echo gh auth login --web`；
+   互動式指令放進 shell pane（`pane split`／`run`／`wait-output`），網址／碼／`--remote-bootstrap` 指令原樣交給使用者後結束回合，使用者貼回再 `send-text` 送進去、關 pane；禁止用瀏覽器代登、禁止搬 cookie；
    派工只准走 herdr pane（禁止 CLI 內建子代理：Claude 的 `Agent`／`Task`／`Workflow`、codex／grok 的同類功能，也禁止在自己 pane 另起 agent CLI——AG Man 追不到）；
    派工 prompt 必須寫明「你是 `<parent>` 的子 agent、禁止再開子 agent、要人手由 parent 決定」；有 `$AM_CHILD_OF` 的子 agent 不開子 agent，要人手在回報裡講、由 parent 決定是否另派兄弟（§6.5b）。
 

@@ -1012,7 +1012,23 @@ PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 放進去 **1 小時後自動刪除**；要長期保留的放 repo 或 `reports/`。遠端主機的 bot 也有 `$AM_OUTBOX`（在那台機器上，網頁一樣列得到）。\
 `$AM_OUTBOX` 沒有值時**禁止**改放 scratchpad，直接在對話裡講清楚檔案在哪台機器的哪個路徑。\n\
 - **私鑰、憑證、DB 一律禁止放進 scratchpad 或 `$AM_OUTBOX`**（`.pem`、`.key`、`.p12`、`.env`、`*.sqlite*`、`*.db`、DB 複本、瀏覽器 profile）。\
-驗證要用 DB 複本時，做完**必須當下刪掉**。"
+驗證要用 DB 複本時，做完**必須當下刪掉**。\n\
+\n\
+CLI 登入／OAuth（同樣是硬規則，使用者 2026-10-03 裁示）：\n\
+\n\
+- **一律用不開瀏覽器的模式**：CLI 要做 OAuth 或登入時（gcloud、gh、az、aws sso、firebase…），**禁止**讓它在這台機器開瀏覽器，\
+**禁止**用 ego 或其他瀏覽器替使用者登入，**禁止**搬瀏覽器的 cookie 或 session。\n\
+- **旗標**：`gcloud auth login --no-browser`（ADC 用 `gcloud auth application-default login --no-browser`）、`az login --use-device-code`、\
+`aws sso login --use-device-code`、`firebase login --no-localhost`、gh 用 `GH_BROWSER=echo gh auth login --web`（印出網址與一次性碼）。\
+使用者回覆手邊沒有裝 gcloud 的電腦時，gcloud 改用 `--no-launch-browser`（網址＋驗證碼，手機就能完成）。\n\
+- **這類指令會停下來等輸入**：**禁止**在自己的 shell 工具裡直接跑（會卡到逾時）。**必須**開一個 shell pane 跑：\
+`herdr pane split --pane \"$HERDR_PANE_ID\"` 開 pane、`herdr pane run <pane> \"<指令>\"` 執行、`herdr pane wait-output --match <字> <pane>`／`herdr pane read <pane>` \
+讀出網址、一次性碼或 `--remote-bootstrap` 那一行指令。\n\
+- **交給使用者**：把讀到的內容原樣放進這一回合的回覆（code block），寫清楚在哪裡做（手機或電腦打開網址；或在有瀏覽器、裝了 gcloud 的電腦跑那一行）、\
+要貼回什麼，然後**結束這一回合**等使用者。**禁止**在回合裡輪詢等待。\n\
+- **收尾**：使用者貼回結果後，用 `herdr pane send-text <pane> \"<結果>\"` 再 `herdr pane send-keys <pane> Enter` 送進去，確認登入成功（例如 `gcloud auth list`），\
+**必須**關掉那個 pane。\n\
+- 只會導回 `localhost`、沒有上述模式的 CLI：停下來在回覆裡說明，由使用者決定（例如在有瀏覽器的電腦跑 `ssh -L <埠>:localhost:<埠> <這台主機>` 再開網址）。"
     )
 }
 
@@ -1508,6 +1524,19 @@ mod model_args_tests {
         assert!(rule.contains("禁止再開子 agent"));
         assert!(rule.contains("由 parent 決定"));
         assert!(rule.contains("你是 `proj-abc123` 的子 agent"), "派工 prompt 要帶上的那句話用自己的名字");
+    }
+
+    /// 使用者 2026-10-03：CLI 要 OAuth 時一律走不開瀏覽器的模式，互動式指令放進 shell pane，網址／碼交給使用者後結束回合。
+    #[test]
+    fn oauth_logins_never_open_a_browser_and_wait_in_a_shell_pane() {
+        let rule = super::child_agent_rules("proj-abc123");
+        for want in ["gcloud auth login --no-browser", "--use-device-code", "firebase login --no-localhost", "GH_BROWSER=echo", "--no-launch-browser"] {
+            assert!(rule.contains(want), "要點名旗標：{want}");
+        }
+        assert!(rule.contains("禁止**用 ego 或其他瀏覽器替使用者登入"));
+        assert!(rule.contains("herdr pane split --pane \"$HERDR_PANE_ID\""), "互動式指令放 pane，不在 shell 工具裡卡住");
+        assert!(rule.contains("herdr pane send-text"));
+        assert!(rule.contains("**結束這一回合**"));
     }
 
     /// §6.5f（使用者 2026-09-16 裁示）：每顆 bot 都讀得到輸出規則——claude 的 skill 與三種 kind 的 persona
