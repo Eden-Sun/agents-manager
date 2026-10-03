@@ -2653,7 +2653,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 `agm issue claim <n> [--repo owner/name] [--bot 名] [--child 名] [--worktree p] [--branch b]`（issue #425）**不經 daemon、不讀 `runtime.json`**，只呼叫 `gh`：
 在票上留一則「派給 …」並加 label `wip`，留言尾端帶機器讀的認領標記 `<!-- agm:issue-claim {"bot","claim_id","child","worktree","branch","at"} -->`。留言寫入後會用 REST 讀回全部留言確認結果；讀回失敗不回報成功，會追加指向本次標記的交回留言。認領與交回也會重讀留言，讓 `wip` label 對應有效認領；若持續競爭而 3 輪仍無法同步，回 `issue_claim_state_raced`／exit 1、`retryable:true`。有 `wip` 但沒有有效認領標記時，claim 會以 `issue_claim_state_unknown`／exit 3 停下；用 release 明確清理後才能重新派工。接手過期認領時不先補遺失的 label，避免這次修復更新 issue 時間、反而把舊認領刷新成有效。
 認領人省略時取 `AM_AGENT_NAME`，再退 `AM_BOT_ID`，都沒有就 `no_identity`／exit 2。票已被**別的** bot 認領且最後動靜在 24 小時內 → `issue_claimed`／**exit 3**，
-輸出 `claimed_by` 與那筆認領，且不寫任何東西；超過 24 小時沒動靜就接手並在留言裡寫明。自己重跑是 no-op（`already:true`，不留第二則，label 掉了會補回去）。
+輸出 `claimed_by` 與那筆認領，且不寫任何東西；超過 24 小時沒動靜就接手並在留言裡寫明。同一顆 bot 再派**另一個** child／worktree／branch 也是 exit 3（不能兩顆 child 同時做同一張）。自己用相同範圍重跑是 no-op（`already:true`，不留第二則，label 掉了會補回去）；沒帶 child／worktree／branch 的重試沿用原來那筆。
 `agm issue release <n>` 拿掉 label 並留 `<!-- agm:issue-release … -->`；別人還按著的票同樣 exit 3。每次交回只結束它指向的認領；每個認領期由 REST 數字留言 ID 最小的第一則認領勝出（同秒也照此排序），輸家會追加自己的交回標記並 exit 3。過期認領允許新認領開始下一期。
 標記必須**自己佔一行**（行首只能有空白）：被「引用回覆」（`> <!-- … -->`）或夾在句子中間的標記不算，免得引用別顆 bot 的交回標記就把它的認領清掉。只清 label、沒有認領可交回時，交回標記的 `claim_id` 寫成 `label-only`（不會對上任何認領；沒有 `claim_id` 的舊標記仍是「交回當下有效的任何一筆」），讀完留言到寫入之間別人搶到的新認領不會被它清掉。
 `gh` 被限流（`rate limit`／HTTP 429）回 `gh_rate_limited`（exit 1、`retryable:true`，訊息明講「不是沒人認領」）；其他 `gh` 失敗是 `gh_failed`。兩者都不是 exit 3，呼叫端不能當成可以派工。「最後動靜」只看留言與票的 `updatedAt`，不看分支 push。
