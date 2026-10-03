@@ -127,10 +127,11 @@ pub async fn on_stop(app: &Arc<App>, run: &db::Run, payload: &Value) {
     let changed = {
         let mut hook = app.background_hook.lock().unwrap_or_else(|e| e.into_inner());
         let mut counts = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner());
-        let before = (counts.insert(run.id.clone(), n), hook.get(&run.id).map(|s| s.reported.clone()));
+        let counted = crate::background_jobs::record(&mut counts, &run.id, n);
+        let before = hook.get(&run.id).map(|s| s.reported.clone());
         let after = Some(snap.reported.clone());
         hook.insert(run.id.clone(), snap);
-        before.0 != Some(n) || before.1 != after
+        counted || before != after
     };
     if changed {
         tracing::info!(run = %run.id, bot = %run.bot_id, background_jobs = n, source = "hook", "background jobs changed");
@@ -154,7 +155,7 @@ async fn refine_services(app: &Arc<App>, run: &db::Run, at: Instant) {
         snap.services = Some(services);
         snap.jobs()
     };
-    let changed = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).insert(run.id.clone(), n) != Some(n);
+    let changed = crate::background_jobs::record(&mut app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()), &run.id, n);
     if changed {
         tracing::info!(run = %run.id, bot = %run.bot_id, background_jobs = n, services, "background jobs changed (resident services deducted)");
         app.emit_bot_status(&run.bot_id).await;

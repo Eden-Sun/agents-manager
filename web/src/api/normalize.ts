@@ -448,6 +448,8 @@ export function toRun(v: unknown, botId?: string): Run | null {
     // null＝巡邏還沒看過這個 run（#767，沒有證據）；沒帶（舊 daemon）照舊當 0。
     // （`pick` 把 null 當沒有，所以這裡直接讀欄位。）
     background_jobs: v.background_jobs === null ? null : Math.max(0, Math.floor(num(pick(v, 'background_jobs')))),
+    background_since: optStr(pick(v, 'background_since')),
+    background_stuck: bool(pick(v, 'background_stuck')),
     blocked_reason: toBlockedReason(v.blocked_reason),
     background_tasks: toBackgroundTasks(v.background_tasks),
     session_crons: toSessionCrons(v.session_crons),

@@ -2742,6 +2742,11 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
   等下一輪巡邏補上。數字變了才推 `bot_status`。背景跑完到畫面更新之間最多晚一輪（30 秒）。
 - **誰看這本帳**：一鍵重啟（§6.9）、閒置回收（§6.11，帳上有就不收，帳上沒有仍要行程樹證明沒有）、網頁。daemon 換版（`daemon-swap`、maintenance 的 `safety`）**不看**背景工作：它只殺 daemon 行程；Linux 上 herdr server 與所有 pane 在自己的 systemd unit／cgroup（`herdr@<session>.service`，`KillMode=process`，2026-10-02 實測 pane 的 cgroup 是 `app-herdr.slice`），背景 shell 不受影響。macOS 上 herdr server 是 daemon 直接 spawn 的（launchd 管不到），換版時它會不會跟著走**沒有驗證過**。herdr server 升級（`herdr_upgrade`）會殺掉所有 pane 的行程，目前它的 `busy` 只看 working／blocked／回合在飛，不看背景工作（待使用者決定）。
 - 投影：`run.background_jobs`（`GET /api/state` 與 `bot_status` 的 run 物件）；巡邏還沒看過這個 run 時是 `null`（不是 0）。hook 報過的另帶 `background_source:"hook"`、`background_tasks[]`、`session_crons[]`（API.md）。**不改排隊／送 prompt 的語意**——agent 本身確實 idle。一鍵重啟（§6.9）會跳過 `background_jobs > 0` 的 bot（#767）；`null` 不擋。
+- **跑了多久、是不是卡住（issue #774）**：claude 2.1.288 起，終端 session 的背景指令不再有時間上限（上游只對 `-p`／SDK／CI 保留），卡住或忘了收的
+  背景 shell 會讓 bot 無限期標著「背景執行中」。帳上同時記這一段背景的開始時間（數字第一次 > 0；N 變 M 不重算、歸零清掉），投影帶
+  `background_since`／`background_secs`；持續超過 3 小時（`STUCK_AFTER_SECS`）`background_stuck = true`，網頁改標「背景工作可能卡住（N）」（warn 色），
+  `GET /api/supervisor/health` 的 `background_stuck[]` 列出這些 bot（`{bot_id, name, kind, run_id, background_jobs, since, secs}`）。只是露出：不進 `status`、
+  不叫醒巡檢、**不自動殺行程**。開始時間在記憶體，daemon 重啟後從重啟後第一次看到算起（下限）。
 - 網頁只在 run `running` 且 `agent_status = idle` 時標（回合中燈號已經說了）：側欄那格「閒置」換成「背景 N」、輸入框上方一條說明（標題列不放，2026-09-30 使用者）（claude 說 shell、codex 說終端）。
 
 ## 7. API

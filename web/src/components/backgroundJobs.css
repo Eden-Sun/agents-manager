@@ -76,6 +76,23 @@
   opacity: 0.85;
 }
 
+/* #774：標太久（可能卡住）改用 warn 色，點也不再呼吸——它不是「還在動」的好消息。 */
+.bg-jobs-bar.bg-jobs-stuck {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.bg-jobs-stuck .bg-jobs-dot,
+.bg-jobs-stuck.bg-jobs-mini .bg-jobs-dot {
+  background: var(--warn);
+  animation: none;
+}
+
+.bg-jobs-state.bg-jobs-stuck,
+.bg-jobs-mini.bg-jobs-stuck {
+  color: var(--warn);
+}
+
 @media (max-width: 640px) {
   .bg-jobs-bar {
     flex-wrap: wrap;

@@ -15,6 +15,11 @@
 //! 子樹裡有程序在 listen TCP port，就是 bot 起的服務（`next dev`、`vite`…），工作其實做完了。畫面數到 N > 0 時才去
 //! 那台主機看 pane 的行程樹（本機直接讀、遠端走既有 ssh；m4p 真機：`zsh -c source …/shell-snapshots/snapshot-zsh-…`
 //! 底下的 node listen `*:3200`），扣掉這種 shell。讀不到就不扣（寧可多標，不要把真的在跑的工作藏起來）。
+//!
+//! **跑了多久**（issue #774）：claude 2.1.288 起，終端 session 的背景指令不再有時間上限，卡住或忘了收的背景 shell 會讓
+//! bot 無限期標著「背景執行中」。帳上同時記這一段背景從什麼時候開始（數字第一次 > 0 那一刻；之後 N 變 M 不重算、歸零才清），
+//! 投影帶持續多久；超過 [`STUCK_AFTER_SECS`] 改標「背景工作可能卡住」，也列在 `/api/supervisor/health` 的 `background_stuck`。
+//! 只標、不自動殺行程。開始時間在記憶體：daemon 重啟後從重啟後第一次看到算起（下限，不是真的開始時間）。
 
 use crate::db;
 use crate::state::App;
@@ -26,9 +31,45 @@ use std::time::Duration;
 /// 畫面底部看幾個非空行：claude 的模式列在最後一兩行；codex 的背景行上面還有額度警告、輸入框、狀態列、快捷鍵提示。
 const BOTTOM_LINES: usize = 8;
 
-/// `App.background_jobs`：run id → 背景工作數（**看過的**都記，含 0；沒有那一列＝巡邏還沒看過它，#767）。
+/// 背景工作持續超過這麼久就標「可能卡住」（#774）。遠端 cargo 這種正常的長工作一兩個小時就跑完；三小時還標著多半是
+/// 卡住或忘了收（例如 `sleep`、`tail -f`、沒 listen port 的 watcher）。
+pub const STUCK_AFTER_SECS: i64 = 3 * 3600;
+
+/// 一個 run 的背景帳。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entry {
+    pub n: u32,
+    /// 這一段背景第一次看到 > 0 的時間（unix 毫秒）；`n == 0` 時一定是 `None`。
+    pub since: Option<i64>,
+    /// 上一次記帳時算出的「可能卡住」：跨過門檻那一輪要推 `bot_status`，網頁才換字。
+    pub stuck: bool,
+}
+
+/// `App.background_jobs`：run id → 背景帳（**看過的**都記，含 0；沒有那一列＝巡邏還沒看過它，#767）。
 /// 掛在 App 上而不是 process 全域：同一個 process 裡的另一個 App（測試）清自己的帳時不會清到這一份。
-pub type Counts = Mutex<HashMap<String, u32>>;
+pub type Counts = Mutex<HashMap<String, Entry>>;
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn stuck_at(since: Option<i64>, now: i64) -> bool {
+    since.is_some_and(|t| now - t >= STUCK_AFTER_SECS * 1000)
+}
+
+/// 記一個數字（所有寫帳的地方都走這裡）：0→N 記下開始時間，N→M（M > 0）保留，歸零清掉。
+/// 回傳投影有沒有變（數字變了、或剛跨過「可能卡住」的門檻），變了呼叫端要推 `bot_status`。
+pub fn record(m: &mut HashMap<String, Entry>, run_id: &str, n: u32) -> bool {
+    record_at(m, run_id, n, now_ms())
+}
+
+fn record_at(m: &mut HashMap<String, Entry>, run_id: &str, n: u32, now: i64) -> bool {
+    let prev = m.get(run_id).copied();
+    let since = if n == 0 { None } else { prev.and_then(|e| e.since).or(Some(now)) };
+    let stuck = stuck_at(since, now);
+    m.insert(run_id.to_string(), Entry { n, since, stuck });
+    prev.map(|e| (e.n, e.stuck)) != Some((n, stuck))
+}
 
 /// 畫面底部標著的背景工作數；沒有＝0。
 pub fn parse(kind: &str, screen: &str) -> u32 {
@@ -65,7 +106,14 @@ pub fn get(app: &App, run_id: &str) -> u32 {
 /// 巡邏看過這個 run 之後的數字；`None`＝還沒看過（daemon 剛重啟、新 run、畫面讀不到）。**沒有證據**：
 /// 一鍵重啟不拿它擋人，確認框標「背景狀態未知」（#767）。
 pub fn known(app: &App, run_id: &str) -> Option<u32> {
-    app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).get(run_id).copied()
+    app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).get(run_id).map(|e| e.n)
+}
+
+/// 這一段背景跑了多久（#774）：`(開始時間 unix 毫秒, 已持續秒數, 可能卡住)`；沒有背景工作或沒看過是 `None`。
+pub fn duration(app: &App, run_id: &str) -> Option<(i64, i64, bool)> {
+    let since = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).get(run_id)?.since?;
+    let now = now_ms();
+    Some((since, (now - since).max(0) / 1000, stuck_at(Some(since), now)))
 }
 
 /// claude 的 Bash 工具（前景與背景都是）：`<shell> -c source ~/.claude/shell-snapshots/snapshot-<shell>-….sh …`。
@@ -151,7 +199,8 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str, cl
     let changed = {
         let mut m = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner());
         // 0 也記：「看過、乾淨」跟「沒看過」不同（#767）。從沒看過到第一次看過也算變了，要推，前端才把「未知」換掉。
-        m.insert(run.id.clone(), n) != Some(n)
+        // 數字沒變、但這一輪跨過「可能卡住」門檻（#774）也算變了。
+        record(&mut m, &run.id, n)
     };
     if changed {
         tracing::info!(run = %run.id, bot = %run.bot_id, kind, background_jobs = n, "background jobs changed");
@@ -184,6 +233,12 @@ pub fn run_json<T: serde::Serialize>(app: &App, run: &Option<T>, run_id: Option<
     if let (Some(o), Some(id)) = (v.as_object_mut(), run_id) {
         // 沒觀察過是 `null`，不是 0（#767）。
         o.insert("background_jobs".into(), known(app, id).into());
+        // #774：這一段背景從什麼時候開始、跑了多久、是不是可能卡住；沒有背景工作（或沒看過）是 null／false。
+        let d = duration(app, id);
+        let since = d.and_then(|(t, _, _)| chrono::DateTime::from_timestamp_millis(t));
+        o.insert("background_since".into(), since.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)).into());
+        o.insert("background_secs".into(), d.map(|(_, s, _)| s).into());
+        o.insert("background_stuck".into(), d.is_some_and(|(_, _, s)| s).into());
         // claude 的 Stop hook 報的明細（`background_hook.rs`）；沒報過（舊版 claude、剛重啟）都是 null，數字來自畫面。
         let (tasks, crons) = crate::background_hook::details(app, id);
         o.insert("background_source".into(), if tasks.is_null() { Value::Null } else { "hook".into() });
@@ -251,6 +306,67 @@ mod tests {
         assert_eq!(parse("codex", &fixture("codex-0.157-background-working-bg.txt")), 2);
         assert_eq!(parse("codex", &fixture("codex-0.157-background-stopped.txt")), 0);
         assert_eq!(parse("claude", &fixture("codex-0.157-background-idle-bg.txt")), 0, "kind 對不上不算");
+    }
+
+    #[test]
+    fn the_start_time_is_set_on_zero_to_n_kept_while_running_and_cleared_on_zero() {
+        let (mut m, h) = (HashMap::new(), 3_600_000);
+        assert!(record_at(&mut m, "r", 0, 0), "第一次看過（乾淨）也算變了");
+        assert_eq!(m["r"], Entry { n: 0, since: None, stuck: false });
+        assert!(record_at(&mut m, "r", 1, 10 * h));
+        assert_eq!(m["r"].since, Some(10 * h), "0→N 記下開始時間");
+        assert!(record_at(&mut m, "r", 2, 11 * h), "數字變了");
+        assert_eq!(m["r"].since, Some(10 * h), "N→M 不重算：還是同一段背景");
+        assert!(!record_at(&mut m, "r", 2, 12 * h), "沒變、也還沒到門檻：不推");
+        assert!(record_at(&mut m, "r", 2, 13 * h), "數字沒變，但跨過門檻（3 小時）：要推，網頁才換字");
+        assert!(m["r"].stuck);
+        assert!(!record_at(&mut m, "r", 2, 14 * h), "已經標過卡住：不重推");
+        assert!(record_at(&mut m, "r", 0, 15 * h));
+        assert_eq!(m["r"], Entry { n: 0, since: None, stuck: false }, "歸零清掉");
+        assert!(record_at(&mut m, "r", 1, 16 * h));
+        assert_eq!(m["r"].since, Some(16 * h), "下一段背景重新起算");
+        assert!(!m["r"].stuck);
+    }
+
+    #[tokio::test]
+    async fn a_long_running_background_is_projected_with_its_age_and_flagged_in_health() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "alfa").await;
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        let run = Some(db::run(&app.db, &run_id).await.unwrap().unwrap());
+
+        let v = run_json(&app, &run, Some(&run_id));
+        assert_eq!((v["background_since"].clone(), v["background_secs"].clone(), v["background_stuck"].clone()), (Value::Null, Value::Null, false.into()), "沒看過");
+
+        // 一小時前開始的背景：帶得出持續秒數，還不算卡住。
+        record_at(&mut app.background_jobs.lock().unwrap(), &run_id, 1, now_ms() - 3_600_000);
+        let v = run_json(&app, &run, Some(&run_id));
+        let secs = v["background_secs"].as_i64().unwrap();
+        assert!((3600..3660).contains(&secs), "持續秒數：{secs}");
+        assert!(v["background_since"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(v["background_stuck"], false);
+        let health = crate::supervisor::health::snapshot(&app).await.unwrap();
+        assert_eq!(health["background_stuck"], serde_json::json!([]), "沒到門檻不列");
+
+        // 四小時前開始：可能卡住，巡檢健康摘要列出來（但不改 status）。
+        app.background_jobs.lock().unwrap().clear();
+        record_at(&mut app.background_jobs.lock().unwrap(), &run_id, 2, now_ms() - 4 * 3_600_000);
+        let v = run_json(&app, &run, Some(&run_id));
+        assert_eq!(v["background_stuck"], true);
+        let health = crate::supervisor::health::snapshot(&app).await.unwrap();
+        let stuck = health["background_stuck"].as_array().unwrap();
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0]["bot_id"], bot.id.as_str());
+        assert_eq!(stuck[0]["background_jobs"], 2);
+        assert!(stuck[0]["secs"].as_i64().unwrap() >= 4 * 3600);
+
+        // 歸零：開始時間清掉、不再列。
+        record(&mut app.background_jobs.lock().unwrap(), &run_id, 0);
+        let v = run_json(&app, &run, Some(&run_id));
+        assert_eq!((v["background_since"].clone(), v["background_stuck"].clone()), (Value::Null, false.into()));
+        let health = crate::supervisor::health::snapshot(&app).await.unwrap();
+        assert_eq!(health["background_stuck"], serde_json::json!([]));
     }
 
     #[tokio::test]

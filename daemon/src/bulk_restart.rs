@@ -1073,8 +1073,8 @@ mod tests {
         let (clean, clean_run) = pending_bot(&env, "clean", "claude", "Update installed · Restart to update").await;
         let quiet = std::fs::read_to_string(format!("{}/src/lifecycle/fixtures/claude-2.1.281-no-background-shell.txt", env!("CARGO_MANIFEST_DIR"))).unwrap();
         // 巡邏上一輪看過「乾淨」，之後才丟出背景工作；另一顆巡邏還沒輪到。
-        app.background_jobs.lock().unwrap().insert(stale_run.clone(), 0);
-        app.background_jobs.lock().unwrap().insert(clean_run.clone(), 0);
+        crate::background_jobs::record(&mut app.background_jobs.lock().unwrap(), &stale_run, 0);
+        crate::background_jobs::record(&mut app.background_jobs.lock().unwrap(), &clean_run, 0);
         env.herdr.set_screen(&format!("pane-{stale}"), &screen);
         env.herdr.set_screen(&format!("pane-{unseen}"), &screen);
         env.herdr.set_screen(&format!("pane-{clean}"), &quiet);

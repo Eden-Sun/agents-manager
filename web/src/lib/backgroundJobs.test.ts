@@ -1,7 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { Run } from '../api/types'
-import { backgroundDetail, backgroundJobs, backgroundLabel, backgroundShortLabel, backgroundTaskLines, cronLabel } from './backgroundJobs.ts'
+import {
+  backgroundAge,
+  backgroundDetail,
+  backgroundJobs,
+  backgroundLabel,
+  backgroundShortLabel,
+  backgroundStuck,
+  backgroundStuckLabel,
+  backgroundTaskLines,
+  cronLabel,
+} from './backgroundJobs.ts'
 
 const run = (over: Partial<Run>) => ({ ...({} as Run), state: 'running', agent_status: 'idle', background_jobs: 1, ...over }) as Run
 
@@ -39,4 +49,20 @@ test('session_crons 只是資訊：一行字，沒有就不畫', () => {
   assert.equal(cronLabel(run({})), null)
   assert.equal(cronLabel(run({ session_crons: [] })), null)
   assert.equal(cronLabel(run({ session_crons: [{ id: 'c', schedule: '0 9 * * *', recurring: true, prompt: 'x' }] })), '另有 1 個排程會叫醒它')
+})
+
+test('#774：背景跑了多久與「可能卡住」', () => {
+  const now = Date.parse('2026-10-03T12:00:00.000Z')
+  const at = (iso: string) => run({ background_since: iso })
+  assert.equal(backgroundAge(run({}), now), null, '舊 daemon 沒帶開始時間')
+  assert.equal(backgroundAge(at('not a date'), now), null)
+  assert.equal(backgroundAge(at('2026-10-03T11:59:30.000Z'), now), '不到 1 分鐘')
+  assert.equal(backgroundAge(at('2026-10-03T11:15:00.000Z'), now), '45 分鐘')
+  assert.equal(backgroundAge(at('2026-10-03T09:00:00.000Z'), now), '3 小時')
+  assert.equal(backgroundAge(at('2026-10-03T07:55:00.000Z'), now), '4 小時 5 分')
+  assert.equal(backgroundStuck(run({ background_stuck: true })), true)
+  assert.equal(backgroundStuck(run({})), false, '舊 daemon 沒帶')
+  assert.equal(backgroundStuck(run({ background_stuck: true, agent_status: 'working' })), false, '回合中不標')
+  assert.equal(backgroundStuck(run({ background_stuck: true, background_jobs: 0 })), false)
+  assert.equal(backgroundStuckLabel(2), '背景工作可能卡住（2）')
 })
