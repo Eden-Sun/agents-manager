@@ -1356,19 +1356,10 @@ async fn fill_codex_runtime(app: &Arc<App>, host: &str, client: &crate::herdr::H
     };
     for (run_id, pane_id) in rows {
         let Ok(read) = client.pane_read(&pane_id, "visible", 60).await else { continue };
-        let Some(seen) = crate::codex_live::parse_status_line(&read.text) else { continue };
-        let _ = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
-            .bind(&seen.model)
-            .bind(&seen.effort)
-            .bind(i64::from(seen.fast))
-            .bind(&run_id)
-            .execute(&app.db)
-            .await;
-        if let Ok(Some(run)) = crate::db::run(&app.db, &run_id).await {
-            app.emit_bot_status(&run.bot_id).await;
+        // 同巡邏的校正：收編前就在 TUI 換過模型的 child，設定也跟著狀態列（不然 argv 抄來的舊值永遠留著）。
+        if crate::codex_live::correct_runtime_from_screen(app, &run_id, &read.text).await {
+            tracing::info!(host, run = %run_id, "codex runtime read off an adopted pane's status line");
         }
-        tracing::info!(host, run = %run_id, model = %seen.model, effort = ?seen.effort, fast = seen.fast,
-                       "codex runtime read off an adopted pane's status line");
     }
 }
 

@@ -41,6 +41,8 @@ mod child_retire;
 mod credential_spawn;
 mod codex_history;
 mod codex_live;
+mod child_runtime;
+mod grok_live;
 mod codex_model_migration;
 mod config;
 mod config_audit;

@@ -143,11 +143,16 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
     }
     for run in runs.into_iter().filter(|r| r.state == "running") {
         let kind = match db::bot(&app.db, &run.bot_id).await {
-            Ok(Some(b)) if b.kind == "claude" || b.kind == "codex" => b.kind,
+            Ok(Some(b)) if matches!(b.kind.as_str(), "claude" | "codex" | "grok") => b.kind,
             _ => continue,
         };
         let Some(pane) = run.pane_id.clone() else { continue };
         let Some(client) = app.herdr_for_run(&run).await else { continue };
+        if kind == "grok" {
+            // grok 只看框底的模型／強度（`/model`、`/effort` 的現況），沒有更新提示與背景工作數。
+            crate::grok_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane).await;
+            continue;
+        }
         // 讀不到畫面就跳過，不要把已經看到的通知清掉。
         let Ok(read) = client.pane_read(&pane, "visible", 80).await else { continue };
         // #714：同一份畫面順便看底部標的背景工作數（不另開輪詢）。
@@ -695,5 +700,100 @@ mod tests {
         assert!(go.iter().all(|c| c.bot_id != bot), "不會被自動重啟");
         let (_, why) = skip.iter().find(|(c, _)| c.bot_id == bot).expect("要在跳過清單裡才會出現在 header");
         assert_eq!(*why, crate::bulk_restart::Skip::NeedsManualInstall);
+    }
+
+    /// grok 框底的真畫面（grok 1.0.x，2026-10-03 g8 pane）：`/effort low` 之後框底跟著變。
+    fn grok_screen(effort: &str) -> String {
+        format!(
+            "  ⏺ Switched to Grok 4.7 ({effort} effort)\n\n  ╭────────────────────────────────────────────────╮\n  │ ❯                                              │\n  ╰────────────── Grok 4.7 ({effort}) · always-approve ─╯\n\n  Shift+Tab:mode  │  Ctrl+.:shortcuts\n"
+        )
+    }
+
+    async fn grok_bot_with_run(e: &crate::testing::Env, name: &str, managed_by: &str, effort: &str) -> (String, String, String) {
+        let bot = crate::testing::claude_bot(&e.app, &e.project_id, name).await;
+        sqlx::query("UPDATE bots SET kind = 'grok', managed_by = ?, model = 'grok-4.7', effort = ? WHERE id = ?")
+            .bind(managed_by)
+            .bind(effort)
+            .bind(&bot.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        (bot.id.clone(), run, format!("pane-{}", bot.id))
+    }
+
+    /// 2026-10-03 mkng2n：`herdr agent start … --kind grok -- -m grok-4.7 --reasoning-effort high` 開的 child，
+    /// 在 pane 裡 `/effort low` 之後側欄仍寫 grok-4.7-High：argv 只在收編時讀一次，框底才是現況。
+    #[tokio::test]
+    async fn a_grok_child_follows_an_effort_switch_typed_in_its_tui() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let (bot, run, pane) = grok_bot_with_run(&e, "gk-kid", "child", "high").await;
+        e.herdr.set_screen(&pane, &grok_screen("low"));
+        sweep(&e.app).await;
+        let r = db::run(&e.app.db, &run).await.unwrap().unwrap();
+        assert_eq!((r.runtime_model.as_deref(), r.runtime_effort.as_deref()), (Some("grok-4.7"), Some("low")));
+        let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();
+        assert_eq!(b.effort.as_deref(), Some("low"), "child 的設定是從 argv 抄來的，跟著 TUI 走（/api/state 的 effort）");
+
+        // 讀不到框底（選單蓋住、畫面清掉）：沿用最後已知值，不清空。
+        e.herdr.set_screen(&pane, "  Select effort\n  1. low\n  2. high\n");
+        sweep(&e.app).await;
+        let r = db::run(&e.app.db, &run).await.unwrap().unwrap();
+        assert_eq!(r.runtime_effort.as_deref(), Some("low"));
+    }
+
+    /// 一般 bot：runtime 跟著框底，設定不動（重啟回設定值，畫成 drift）；runtime 本來未知（沒設強度＝CLI 預設）就不補，
+    /// 免得多出一條「需重啟」的假 drift。
+    #[tokio::test]
+    async fn a_grok_user_bot_tracks_the_runtime_but_keeps_its_setting() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let (bot, run, pane) = grok_bot_with_run(&e, "gk-user", "user", "high").await;
+        sqlx::query("UPDATE runs SET runtime_model = 'grok-4.7', runtime_effort = 'high' WHERE id = ?")
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        e.herdr.set_screen(&pane, &grok_screen("low"));
+        sweep(&e.app).await;
+        let r = db::run(&e.app.db, &run).await.unwrap().unwrap();
+        assert_eq!(r.runtime_effort.as_deref(), Some("low"));
+        let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();
+        assert_eq!(b.effort.as_deref(), Some("high"), "一般 bot 的設定不動");
+
+        let (_, run2, pane2) = grok_bot_with_run(&e, "gk-default", "user", "high").await;
+        e.herdr.set_screen(&pane2, &grok_screen("low"));
+        sweep(&e.app).await;
+        let r = db::run(&e.app.db, &run2).await.unwrap().unwrap();
+        assert_eq!((r.runtime_model, r.runtime_effort), (None, None), "未知的 runtime 不拿畫面補");
+    }
+
+    /// codex child 在 TUI 換了模型／強度：runtime 早就跟著狀態列，child 的設定（/api/state、側欄）也要跟。
+    #[tokio::test]
+    async fn a_codex_child_follows_a_model_switch_on_its_status_line() {
+        let _serial = serial().lock().await;
+        let e = crate::testing::env().await;
+        let (bot, run, pane) = codex_bot_with_run(&e).await;
+        sqlx::query("UPDATE bots SET managed_by = 'child', model = 'gpt-6.1-sol', effort = 'high' WHERE id = ?")
+            .bind(&bot)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE runs SET runtime_model = 'gpt-6.1-sol', runtime_effort = 'high', runtime_fast = 0 WHERE id = ?")
+            .bind(&run)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        e.herdr.set_screen(&pane, "› Ask Codex\n\n  gpt-6-luna max · /tmp · Context 3% used · 5h 90% left\n");
+        sweep(&e.app).await;
+        let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();
+        assert_eq!((b.model.as_deref(), b.effort.as_deref()), (Some("gpt-6-luna"), Some("max")));
+
+        // 網頁改了 child 設定還沒套用：狀態列沒變，不能把設定蓋回去。
+        sqlx::query("UPDATE bots SET effort = 'low' WHERE id = ?").bind(&bot).execute(&e.app.db).await.unwrap();
+        sweep(&e.app).await;
+        let b = db::bot(&e.app.db, &bot).await.unwrap().unwrap();
+        assert_eq!(b.effort.as_deref(), Some("low"));
     }
 }

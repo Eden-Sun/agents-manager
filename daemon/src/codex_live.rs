@@ -85,6 +85,21 @@ pub async fn correct_runtime_from_screen(app: &crate::state::App, run_id: &str, 
     if same {
         return false;
     }
+    // child 的設定跟著 TUI 的切換（只跟這一輪變了的模型／強度；fast 照舊只看 argv，#393）。先寫設定：寫不進去就連 runtime
+    // 都不寫，下一輪仍不同才會再試。
+    let model_moved = run.runtime_model.as_deref() != Some(seen.model.as_str());
+    let effort_moved = seen.effort.is_some() && run.runtime_effort != seen.effort;
+    if let Err(e) = crate::child_runtime::follow(
+        app,
+        &run.bot_id,
+        Some(seen.model.as_str()).filter(|_| model_moved),
+        seen.effort.as_deref().filter(|_| effort_moved),
+    )
+    .await
+    {
+        tracing::warn!(run = %run_id, error = %e, "could not follow the codex switch in the child's settings, retrying next sweep");
+        return false;
+    }
     let wrote = sqlx::query("UPDATE runs SET runtime_model = ?, runtime_effort = ?, runtime_fast = ? WHERE id = ?")
         .bind(&seen.model)
         .bind(&seen.effort)

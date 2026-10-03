@@ -1964,7 +1964,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `background_tasks` | 只有 `background_source:"hook"` 時是陣列，否則 `null`：`[{id, type, status, description, command?}]`（`type`：`shell`／`subagent`／`monitor`／`workflow`…；最多 20 筆，`description`／`command` 各截 200 字）。**空陣列＝hook 報過「沒有」**，不是 `null`。常駐服務（listen port 的背景 shell）仍在清單裡，但不計入 `background_jobs` |
 | `session_crons` | 同一則 Stop 報的 session 排程 `[{id, schedule, recurring, prompt}]`（/loop、ScheduleWakeup、CronCreate），`null` 規則同上。**不計入 `background_jobs`**，只是資訊 |
 | `update_notice` | 有新版等著處理，或 `null`（SPEC §3.1）。claude：固定字串 `"Update installed · Restart to update"`（已下載，重啟就換）；單顆套用 `POST /bots/{id}/restart`，全部 `POST /bots/restart-idle`。**codex**（issue #388）：以 `codex 有新版` 開頭，`codex 有新版 0.154.0 → 0.155.1，需安裝後重啟`（**還沒安裝**，重啟換不到；要先裝）或 `codex 有新版 0.155.1（這個 run 跑的是 0.154.0），已安裝，重啟套用`；`POST /bots/restart-idle` 只收「已安裝」的 codex（「需安裝」的列進 `skipped`，`needs_manual_install`），要先裝就走 `POST /hosts/{name}/cli-update`（§12.7a，裝好接著重啟） |
-| `runtime_model` / `runtime_effort` / `runtime_fast` | run **實際**在跑的值（SPEC §4.4a），跟 `bot.*`（下次啟動的設定）分開。三個都 `null` = 不知道（收編的 pane），前端不比對不標 |
+| `runtime_model` / `runtime_effort` / `runtime_fast` | run **實際**在跑的值（SPEC §4.4a），跟 `bot.*`（下次啟動的設定）分開。三個都 `null` = 不知道（收編的 pane），前端不比對不標。執行中在 TUI 打的 `/model`、`/effort` 由畫面巡邏（約 30 秒）讀回：claude 的確認行、codex 的狀態列、grok 的輸入框框底；讀不到時沿用最後已知值。子 agent（`managed_by=child`）的 `bot.model`／`bot.effort` 跟著這些切換改，並推 `bot_changed` |
 | `runtime_identity` | run 用哪個身分起來的（issue #238）：`""`＝沒有身分（預設帳號）、`null`＝不知道（收編的 pane、升級前的舊列）。改了 `bot.identity` 之後、重啟之前兩者不同；額度一律記在這個身分上 |
 | `turn_error` | 上一回合被 API 中斷或額度拒絕時 pane 上那行原文，否則 `null`；下一回合開始清回（SPEC §4.3a）。命中時對話多一則釘在回合上的 system 訊息（`incomplete = 1`、附 `terminal_snapshot`），回合還 in_flight 就收成 failed。重送就是再 `POST /prompt` 最後一則 user 訊息 |
 

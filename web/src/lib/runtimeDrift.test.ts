@@ -109,3 +109,15 @@ test('#541：查額度用 run 實際起來的身分，沒有 active run 才退�
   assert.equal(quotaIdentity(null, run({ runtime_identity: 'cc1' })), 'cc1')
   assert.equal(quotaIdentity(bot({ identity: null }), null), null)
 })
+
+test('grok 在 TUI 打 /effort low：child 設定已跟上就不標，一般 bot 標出實際值', () => {
+  // daemon 讀框底 `Grok 4.7 (low)` 寫 runtime；child 的設定一起改（SPEC §4.4a），一般 bot 設定不動。
+  const grok: Partial<Bot> = { kind: 'grok', model: 'grok-4.7', fast: false }
+  const live = run({ runtime_model: 'grok-4.7', runtime_effort: 'low', runtime_fast: null })
+  assert.deepEqual(runtimeDrift(bot({ ...grok, effort: 'low', managed_by: 'child' }), live), [])
+  const d = runtimeDrift(bot({ ...grok, effort: 'high' }), live)
+  assert.deepEqual(
+    d.map((f) => [f.field, f.running, f.configured]),
+    [['effort', 'Low', 'High']],
+  )
+})

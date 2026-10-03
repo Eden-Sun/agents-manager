@@ -767,6 +767,19 @@ claude 在對話裡印 `⎿  Set model to Sonnet 5.5 and saved …`／`⎿  Set 
 接回、分支、收編的 run 維持第一次只當基準（那一刻起的切換在 daemon 重啟後也一樣當基準）。已知限制：切換那行在
 下一輪巡邏前就被捲出 80 行就漏掉（忙的 pane）；巡邏列舉 active run 失敗（DB 暫時讀不到）就整輪跳過，基準與背景工作帳都不動，只有成功列舉出的清單才用來清掉已結束 run 的帳（#744）；指令行先被捲出而確認行還在，也當沒有。
 
+**在 TUI 裡被換掉（grok、codex 的子 agent，2026-10-03）**：grok 沒有 hook 也沒有確認行可抓，argv 只讀一次而且 TUI 不理
+`--reasoning-effort`（#215）；唯一的現況是輸入框框底 `╰── Grok 4.7 (low) · always-approve ─╯`。畫面巡邏對 grok run 拿 bot 鎖
+（同 `codex_live::sync_runtime`，不會讀到啟動補 `/effort` 或當場套用切到一半的畫面）讀 `visible` 60 行，取最下面那個 `╰` 開頭、含
+`Grok <版本>` 的框底（`grok_live.rs`；對話裡的 `Switched to Grok 4.7 (low effort)` 不算），只寫讀到而且跟記著的不一樣的欄位。讀不到框底
+（選單蓋住、畫面清掉）、或只讀到其中一欄，其餘沿用最後已知值、不清空。一般 bot 只校正**已知**的 runtime（`NULL`＝啟動時沒指定、
+CLI 預設，拿畫面補上會多一條重啟也改不掉的假 drift），設定不動；child 未知也補。
+子 agent 的設定一律跟著 runtime 的切換（`child_runtime::follow`）：claude 見上段；codex 的狀態列校正（下面「之後也持續校正」）、
+grok 的框底校正，**這一輪 runtime 真的變了**的模型／強度才寫進 `bots.model`／`effort`——網頁改了 child 設定還沒套用時狀態列沒變，
+不會被畫面蓋回去；fast 照舊只從收編時的 argv 補（#393）。先寫設定再寫 runtime：設定寫不進去這輪整個不寫，下一輪仍不同才重試（#743 同理）。
+設定改了就推 `bot_changed`（`bot_status` 不帶設定，網頁要重抓 bots，否則 runtime 與設定已一致仍畫著 ⟳）；claude 的子 agent 跟隨也一樣推。
+收編時 reconcile 補 codex 的 NULL runtime 走同一個校正（`reconcile::fill_codex_runtime` → `codex_live::correct_runtime_from_screen`），
+收編前就在 TUI 換過模型的 child 設定也跟著狀態列。
+
 **statusLine 校正 runtime_model（claude，#750）**：有掛 hook 的 claude run，statusLine 的 `model.id` 是「實際在跑」的權威。
 CLI 被 API 拒絕而 server 端 fallback（2.1.286：同級退回上一版）時，argv 與 `bots.model` 寫 A、實際在跑 B；`hookrecv` 的
 StatusLine 分支（過世代圍籬之後，舊 run／舊 hook 進不來）發現 `model.id` 跟 `runs.runtime_model` 不同就 CAS 改寫並推 `bot_status`，
@@ -3440,7 +3453,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
    （`bots.identity` 那個抄來的值只是推測，不拿來冒充）。
 
 - **只動 `managed_by='child'`**（其他 bot 的 identity 是使用者設定、會投影回 config.toml；SQL `WHERE` 也帶著）。
-- model/effort 只補不改（argv 看不到之後打的 `/model`）；identity 補也改（那是收編時抄錯的值）。
+- 從 argv 讀 model/effort 只補不改（argv 看不到之後打的 `/model`）；之後的切換由畫面巡邏跟（§4.4a「在 TUI 裡被換掉」）。identity 補也改（那是收編時抄錯的值）。
 - **預設帳號也認得**：沒有變數、或指向 CLI 預設目錄（`~/.claude`、`~/.codex`）= 空 env 的身份（cc0），多個時 config 優先、第一個贏。
 - **永遠不清成 NULL**：讀不到、沒人認領、該 kind 沒空 env 身份 → 維持現狀。
 - **一個 pane 只問一次作業系統**（重連重播一串 `pane.agent_detected`，每個小孩每次一個 ssh 會變風暴）；讀不到或那台還沒偵測出同 kind 身份不算問過。

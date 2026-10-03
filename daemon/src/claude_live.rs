@@ -199,7 +199,11 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
             .execute(&app.db)
             .await;
         match wrote {
-            Ok(_) => changed = true,
+            Ok(_) => {
+                changed = true;
+                // `bot_status` 不帶設定，網頁收到 `bot_changed` 才重抓 bots（不然 runtime 跟設定一樣了還畫著 ⟳）。
+                app.emit("bot_changed", serde_json::json!({"bot_id": bot.id})).await;
+            }
             Err(e) => tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not follow the claude runtime switch in bots.model/effort, retrying next sweep"),
         }
     }
