@@ -24,17 +24,30 @@ pub struct GrokRuntime {
     pub effort: Option<String>,
 }
 
+/// 視窗底部才是現在的輸入框。再往上的 `╰` 是對話裡引用的舊框，不能當現況。
+const FOOTER_TAIL_LINES: usize = 8;
+
 /// 最下面那個 `╰── Grok <版本> (<強度>) …` 框底；認不出模型也認不出強度就是讀不到。
+///
+/// 窄 pane 會把框底拆成兩行（`╰── Grok` / `4.7 (low) · … ─╯`）。只看 `╰` 那一行會落到上面引用的完整舊框。
+/// 從視窗底部最後一個 `╰` 接到 `╯`（最多再兩行）再解析；底部沒有框就當讀不到，不往上找。
 pub fn parse_footer(screen: &str) -> Option<GrokRuntime> {
-    screen.lines().rev().find_map(|line| {
-        let line = line.trim();
-        if !line.starts_with('╰') {
-            return None;
+    let lines: Vec<&str> = screen.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(FOOTER_TAIL_LINES)..];
+    let rel = tail.iter().rposition(|line| line.trim().starts_with('╰'))?;
+    let mut joined = tail[rel].trim().to_string();
+    if !joined.contains('╯') {
+        for extra in tail.iter().skip(rel + 1).take(2) {
+            joined.push(' ');
+            joined.push_str(extra.trim());
+            if extra.contains('╯') {
+                break;
+            }
         }
-        let idx = line.find("Grok ").or_else(|| line.find("grok "))?;
-        let (model, effort) = crate::models::grok_title_model_effort(&line[idx..]);
-        (model.is_some() || effort.is_some()).then_some(GrokRuntime { model, effort })
-    })
+    }
+    let idx = joined.find("Grok ").or_else(|| joined.find("grok "))?;
+    let (model, effort) = crate::models::grok_title_model_effort(&joined[idx..]);
+    (model.is_some() || effort.is_some()).then_some(GrokRuntime { model, effort })
 }
 
 /// 以框底校正 `runs.runtime_*`。回傳 `true` = 有改動。
@@ -73,8 +86,24 @@ pub async fn correct_runtime_from_screen(app: &App, run_id: &str, screen: &str) 
     true
 }
 
-/// 巡邏用：拿 bot 鎖（啟動補 `/effort`、當場套用握著同一把，不會讀到切到一半的畫面），重讀畫面再校正。
-pub async fn sync_runtime(app: &Arc<App>, client: &HerdrClient, bot_id: &str, run_id: &str, pane_id: &str) {
+/// 這份畫面會不會改到 runtime。讀不到框底、或跟記著的一樣，就不必再讀、也不必拿 bot 鎖。
+async fn hint_moves_runtime(app: &App, run_id: &str, screen: &str) -> bool {
+    let Some(seen) = parse_footer(screen) else { return false };
+    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return true };
+    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return true };
+    let child = bot.managed_by == "child";
+    let moved = |seen: Option<String>, cur: Option<&str>| seen.filter(|v| (child || cur.is_some()) && cur != Some(v.as_str()));
+    moved(seen.model, run.runtime_model.as_deref()).is_some() || moved(seen.effort, run.runtime_effort.as_deref()).is_some()
+}
+
+/// 巡邏用。`hint` 是鎖外已經讀過的畫面：跟 runtime 一樣就停（多顆 bot 每 30 秒不各加一次讀、也不握著鎖等 herdr）。
+/// 不一樣才拿 bot 鎖（啟動補 `/effort`、當場套用握著同一把）重讀再校正，避免把套用前的舊框寫回去。
+pub async fn sync_runtime(app: &Arc<App>, client: &HerdrClient, bot_id: &str, run_id: &str, pane_id: &str, hint: Option<&str>) {
+    if let Some(text) = hint {
+        if !hint_moves_runtime(app, run_id, text).await {
+            return;
+        }
+    }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     if !matches!(db::active_run(&app.db, bot_id).await, Ok(Some(r)) if r.id == run_id) {
@@ -109,5 +138,33 @@ mod tests {
         assert_eq!(parse_footer("  ╰──────────────╯\n"), None, "純線條的框底不是模型");
         let quoted = format!("  ╰── Grok 4.6 (high) · always-approve ─╯\n  ⏺ 舊框\n{FOOTER_LOW}");
         assert_eq!(parse_footer(&quoted).and_then(|r| r.effort).as_deref(), Some("low"), "取最下面那個框底");
+    }
+
+    /// 回覆裡貼了完整舊框，而且窄 pane 把現在的框底拆開：不能採用上面那個 low。
+    #[test]
+    fn a_quoted_footer_above_a_wrapped_composer_is_not_the_runtime() {
+        let screen = "\
+  ⏺ 框底長這樣：
+  ╰────────────── Grok 4.7 (low) · always-approve ─╯
+
+  ╭────────────────────────────────────────────────╮
+  │ ❯                                              │
+  ╰────────────── Grok
+  4.7 (high) · always-approve ─╯
+";
+        assert_eq!(
+            parse_footer(screen),
+            Some(GrokRuntime { model: Some("grok-4.7".into()), effort: Some("high".into()) })
+        );
+    }
+
+    /// 現在的框底不在視窗底部（選單蓋住）時，上面引用的框不算現況。
+    #[test]
+    fn a_quoted_footer_with_no_composer_box_in_the_tail_is_unread() {
+        let mut screen = "  ╰────────────── Grok 4.7 (low) · always-approve ─╯\n".to_string();
+        for _ in 0..FOOTER_TAIL_LINES {
+            screen.push_str("  1. low\n");
+        }
+        assert_eq!(parse_footer(&screen), None);
     }
 }
