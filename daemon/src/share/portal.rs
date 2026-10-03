@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -178,13 +178,22 @@ pub fn router(app: Arc<App>) -> Router {
         share_streams: Arc::new(ShareStreamLimits::default()),
         token_lookups: Arc::new(Semaphore::new(MAX_TOKEN_LOOKUPS)),
     };
+    router_with_state(st)
+}
+
+fn router_with_state(st: Portal) -> Router {
     Router::new()
         .route("/s/{token}", get(page))
         .route("/s/{token}/api/info", get(info))
         .route("/s/{token}/api/messages", get(list_messages).post(send_message).layer(DefaultBodyLimit::max(64 * 1024)))
         .route("/s/{token}/api/events", get(events))
         // multipart 的邊界與標頭另外留 64 KiB；檔案本身照樣 ≤ MAX_UPLOAD（解開之後再量）。
-        .route("/s/{token}/api/upload", post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD + 64 * 1024)))
+        .route(
+            "/s/{token}/api/upload",
+            post(upload)
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD + 64 * 1024))
+                .layer(middleware::from_fn_with_state(st.clone(), upload_admission)),
+        )
         .route("/s/{token}/api/files", get(files))
         .route("/s/{token}/api/files/{name}", get(file))
         .route("/assets/{*path}", get(asset))
@@ -299,6 +308,25 @@ async fn authorized_bot(st: &Portal, token: &str) -> Result<(String, OwnedMutexG
     let bot_id = bot_for(st, token).await?;
     let guard = authority_lock(st, token, &bot_id).await?;
     Ok((bot_id, guard))
+}
+
+/// 上傳入口先驗 token、扣嘗試額度、占名額，再把 request 交給會讀取 Bytes 的 handler。
+/// `_permit` 活到 `next.run` 回應結束，慢速 body 也會占著同一個名額。
+async fn upload_admission(State(st): State<Portal>, Path(token): Path<String>, mut req: axum::extract::Request, next: Next) -> Response {
+    let bot_id = match bot_for(&st, &token).await {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("share_upload_after_bot_for", &bot_id).await;
+    if let Some(wait) = st.limits.take(&bot_id, "upload", UPLOADS_PER_MIN, Duration::from_secs(60)) {
+        return too_many(wait, "upload");
+    }
+    let Ok(_permit) = st.uploads.clone().try_acquire_owned() else {
+        return too_many(2, "upload");
+    };
+    req.extensions_mut().insert(bot_id);
+    next.run(req).await
 }
 
 const PLACEHOLDER_PAGE: &str = "<!doctype html><html lang=\"zh-Hant\"><head><meta charset=\"utf-8\">\
@@ -489,13 +517,14 @@ async fn send_message(State(st): State<Portal>, Path(token): Path<String>, Json(
     if text.is_empty() && b.attachments.is_empty() {
         return bad("empty", "沒有內容");
     }
+    // 附件檢查會排進 blocking pool，先扣額度讓無效附件不能免費放大檔案系統工作量。
+    if let Some(wait) = st.limits.take(&bot_id, "message", MESSAGES_PER_MIN, Duration::from_secs(60)) {
+        return too_many(wait, "message");
+    }
     for a in &b.attachments {
         if !stored_name_ok(a) || !inbox_has(&st.app, &bot_id, a).await {
             return bad("unknown_attachment", "附件不存在（請重新上傳）");
         }
-    }
-    if let Some(wait) = st.limits.take(&bot_id, "message", MESSAGES_PER_MIN, Duration::from_secs(60)) {
-        return too_many(wait, "message");
     }
     let mut composed = format!("{SHARE_PREFIX}{text}");
     if !b.attachments.is_empty() {
@@ -710,7 +739,9 @@ pub(crate) fn classify_upload(name: &str, data: &[u8]) -> Result<&'static str, &
         "gif" => (starts(b"GIF87a") || starts(b"GIF89a")).then_some("image/gif"),
         "webp" => (starts(b"RIFF") && data.get(8..12) == Some(b"WEBP")).then_some("image/webp"),
         "pdf" => starts(b"%PDF-").then_some("application/pdf"),
-        "docx" | "xlsx" | "pptx" => starts(b"PK\x03\x04").then_some("application/zip"),
+        "docx" => ooxml::valid_for(data, b"word/document.xml").then_some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "xlsx" => ooxml::valid_for(data, b"xl/workbook.xml").then_some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "pptx" => ooxml::valid_for(data, b"ppt/presentation.xml").then_some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         "txt" | "md" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "log" | "html" | "htm" | "py" | "js" | "ts" | "rs" | "go"
         | "java" | "c" | "h" | "cpp" | "sql" => (std::str::from_utf8(data).is_ok() && !data.contains(&0)).then_some("text/plain"),
         _ => return Err("unsupported_type"),
@@ -739,19 +770,11 @@ pub(crate) fn clean_upload_name(raw: &str) -> Option<String> {
 async fn upload(
     State(st): State<Portal>,
     Path(token): Path<String>,
+    Extension(bot_id): Extension<String>,
     Query(q): Query<HashMap<String, String>>,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
-    let bot_id = match bot_for(&st, &token).await {
-        Ok(id) => id,
-        Err(r) => return r,
-    };
-    #[cfg(test)]
-    crate::lifecycle::race_point::hit("share_upload_after_bot_for", &bot_id).await;
-    let Ok(_permit) = st.uploads.clone().try_acquire_owned() else {
-        return too_many(2, "upload");
-    };
     // 分享頁送 `FormData` 的 `file` 欄位；腳本也可以直接送原始位元組＋`?name=`。
     let content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
     let (raw_name, data): (Option<String>, Bytes) = if content_type.to_ascii_lowercase().starts_with("multipart/") {
@@ -778,9 +801,6 @@ async fn upload(
                 .into_response()
         }
     };
-    if let Some(wait) = st.limits.take(&bot_id, "upload", UPLOADS_PER_MIN, Duration::from_secs(60)) {
-        return too_many(wait, "upload");
-    }
     #[cfg(test)]
     crate::lifecycle::race_point::hit("share_upload_before_authority_lock", &format!("{bot_id}:{name}")).await;
     let _authority = match authority_lock(&st, &token, &bot_id).await {
@@ -927,3 +947,10 @@ pub(crate) fn check_listen(listen: &str, main_port: u16) -> Result<std::net::Soc
     }
     Ok(addr)
 }
+
+#[path = "portal_ooxml.rs"]
+mod ooxml;
+
+#[cfg(test)]
+#[path = "portal_upload_tests.rs"]
+mod upload_tests;
