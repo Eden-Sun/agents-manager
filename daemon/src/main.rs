@@ -66,6 +66,7 @@ mod github;
 mod group;
 mod handoff;
 mod shared_host;
+mod share;
 mod herdr;
 mod herdr_shim;
 mod herdr_maintenance;
@@ -600,6 +601,8 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
         tokio::spawn(async move { reconcile::autostart_after_reconcile(&app2, config::LOCAL_HOST, local_reconciled).await });
     }
     tracing::info!(%addr, "listening");
+    // 分享入口（SPEC §20）：`[share] listen` 有設才開，獨立的 port 與 router，跟上面的管理 API 完全分開。
+    share::portal::spawn_listener(&app, addr.port()).await;
     let _ = enable_shutdown.send(());
     server.await.context("HTTP server task panicked")??;
     // SPEC §11.3.5: close every ssh master on the way out; remote herdr servers stay alive.

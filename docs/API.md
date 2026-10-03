@@ -49,6 +49,8 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | D | `POST /supervisor/assignments` | AGM 角色與使用者；一般 bot **只能**對 AGM 角色 bot 送 `notice` | handler 內判斷（`post_assignment`）：被證明身分的一般 bot 若是要驗收的交辦、目標不是巡檢／協調者、或帶 `mission_id`／`role` → 403 `role_required`；`kind:"notice"`（或 `expects_review:false`）且目標是角色 bot → 放行（release／herdr 更新任務裡的 `agm assign --notice --bot <巡檢>` 由專用的一般 bot 執行） | 派工＝直接叫另一顆 bot 做事 | 已有 |
 | D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；使用者可 deny／revoke | `approve` 要 `require_role`；`deny`／`revoke` 放行 User 與 AGM 角色；被證明身分的一般 bot 403 `role_required` | 核准換版窗口 | 已有（#447） |
 | E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/relay/spawn/*`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
+| E | 受限 bot（SPEC §20）的 token | 分享用 bot 的 hook | 只認 `/hook/{provider}`；`/api` 全部、`/relay/*`、`/build-slots/acquire` 403 `restricted_bot` | 分享出去的 bot 被說服後能動到的範圍 | 已有 |
+| A | `GET/POST /bots/{id}/share`、`POST /bots/{id}/share/rotate` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 開放一顆受限 bot 給網路上任何拿到連結的人 | 維持 |
 | F | `POST /mem/processes/kill` | 只有網頁 | `memproc::kill` 只殺 herdr 樹內、非 herdr、非 bot 的行程 | — | 維持 |
 
 ### Service principals
@@ -455,6 +457,33 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 打字前讀不到 pane（含 herdr 讀取失敗）一律 409 `composer_unreadable`、排隊的放回，不回 502；herdr 不支援 `format=ansi` 時改用純文字讀法；
 422 類原因直接標 failed 並插 system 訊息（狀態與說明同一個 transaction）。規劃後、打字前才發現送不出而剛建的 turn 收不回來時，
 回 502（不是 409），避免以同一個 request id 重送卻只拿到 failed turn。
+
+### 5.6 分享 bot（SPEC §20）
+
+管理端點在主 API，只收 UI token（Bot／service principal 403 `user_only`）：
+
+- `GET /api/bots/{id}/share` → `{shareable, enabled, url:null, token_hint, created_at, last_used_at}`。一般 bot `shareable:false`、其餘 null。
+- `POST /api/bots/{id}/share` `{"enabled":true}` → 開啟，回同一個形狀＋完整 `url`（`<base_url>/s/<token>`，只有這一次拿得到）；已經開著就不換 token、`url:null`。
+  `{"enabled":false}` → 關掉並清 token（舊連結當下 404）。
+- `POST /api/bots/{id}/share/rotate` → 換新 token、舊的立刻失效，回新的 `url`；沒開著 409 `share_disabled`。
+- 錯誤：bot 不存在 404；不是受限 bot 409 `not_shareable`；`[share] base_url` 沒設 409 `share_not_configured`。
+- 建受限 bot：`POST /api/projects/{id}/bots` 多一個 `share_profile:"restricted"`（只收這個值）；claude 以外 409 `unsupported_kind`、遠端專案 409 `unsupported_host`、
+  帶了 `args`／`env` 400 `restricted_no_custom`。`share_profile` 進冪等指紋。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`null`）。
+- 分享使用者送來的訊息：`relay_from:"share"`、`source:"share"`（只在輸出；見 SPEC §20.3）。WS 多一種事件 `bot_share_changed {bot_id, enabled}`。
+
+分享入口（獨立 listener，`[share] listen`；token 錯／分享關了一律 `404 {"error":"not_found"}`）：
+
+| 方法與路徑 | 說明 |
+|---|---|
+| `GET /s/{token}` | 分享頁 HTML |
+| `GET /s/{token}/api/info` | `{bot_name, status}`；`status` 同 `lamp`（working／idle／starting／offline／blocked／unknown） |
+| `GET /s/{token}/api/messages?before=<message id>&limit=100` | `{bot_name, status, messages:[{id, role:"user"\|"assistant", by:"share"\|"owner"\|"bot", text, created_at, attachments:[{name}]}], has_more}`，舊→新；`limit` 1..=200；`before` 不在這段對話 400 `bad_cursor` |
+| `POST /s/{token}/api/messages` | `{text, client_request_id, attachments?:[上傳回的 id]}` → `{accepted:true, message_id, delivery}`；413 `text_too_long`（> 8000 字）；400 `empty`／`bad_client_request_id`（1..=64 個 `[A-Za-z0-9-_.:]`）／`too_many_attachments`（> 10）／`unknown_attachment`；429 `rate_limited`（每分鐘 10 則，`Retry-After`）；409 `not_accepted`（多半是上一則還在排隊：一段對話同時只排一則）；503 `unavailable` |
+| `GET /s/{token}/api/events` | SSE：`event: status` `{status}`（連上先送一次）、`event: message`（同上面的訊息形狀）、`event: resync` `{}`；同時太多條 503 `too_many_streams` |
+| `POST /s/{token}/api/upload` | `multipart/form-data` 的 `file` 欄位（分享頁的 `FormData`；一次一個檔），或原始位元組＋`?name=<檔名>` → `{id, name, size, mime}`；400 `empty`／`bad_name`／`bad_multipart`／`no_file`；413 `too_large`（> 25 MiB）；415 `unsupported`（`reason`: `unsupported_type`／`content_mismatch`）；429；507 `inbox_full` |
+| `GET /s/{token}/api/files` | `{files:[{name, size, modified_at, remaining_secs}]}`（這顆 bot 的 outbox；`modified_at` 是 RFC 3339） |
+| `GET /s/{token}/api/files/{name}` | 下載（attachment、nosniff）；不存在或被擋 404、太大 413 |
+| `GET /assets/{path}` | 分享頁的靜態檔 |
 
 ## 6. 讀訊息
 
@@ -1850,29 +1879,10 @@ POST／PATCH 還收到這個欄位（舊網頁快取）時照收、直接忽略�
   `repo=<submodule path>` 相對專案根，省略 = 專案本身；不在清單或沒有 GitHub origin → 400。
 - 錯誤：`project.github` 為 `null` → `400 project has no GitHub origin`；`gh` 不存在／未登入／失敗 → 502（遠端走 `POST /api/hosts/{name}/gh/login`）；project 不存在 404。
 
-## 分享 bot（SPEC §20；前端依賴的形狀）
+## 分享 bot（SPEC §20）
 
-daemon 端（契約 A–C）與前端同時開工，以下是 web 端實作所依據的欄位與回應形狀；daemon 實作若選了不同的名字，以這裡為準對齊或一併改這份與 `web/src/api/share.ts`、`web/src/share/`。
-
-**state／建 bot**
-- `bots[].share_profile`：`"restricted"`＝分享用的受限 bot；一般 bot（與舊 daemon）為 `null`。只有這種 bot 能開分享。
-- `POST /api/projects/{id}/bots` 可帶 `share_profile: "restricted"`（建好不能切換）；非 claude → `409 {"reason":"unsupported_kind"}`。UI 只在本機專案的 claude 開放這個選項，並一律送 `auto_approve: false`。
-- 訊息 `source: "share"`：分享頁 end user 送來的 user 訊息（主 UI 標「🔗 分享使用者」）。
-
-**管理（主 API，只收 UI token）**
-- `GET /api/bots/{id}/share` → `{enabled, url: null, token_hint: "…末4碼"|null, created_at, last_used_at}`。
-- `POST /api/bots/{id}/share` `{"enabled":true}` → `{enabled:true, url:"<base_url>/s/<token>", token_hint, created_at, last_used_at:null}`（已開著再開＝不變；daemon 只存雜湊，這時 `url` 是 `null`，要新連結走 rotate）；`{"enabled":false}` → `{enabled:false, url:null, …}`。
-- `POST /api/bots/{id}/share/rotate` → 同上、`url` 是新的；沒開 → `409 {"reason":"share_disabled"}`。
-- 錯誤 reason：`not_shareable`（不是受限 bot）、`share_not_configured`（沒設 `[share] base_url`）、`unsupported_kind`。UI 照 reason 換成中文。
-
-**分享入口（獨立 listener，`/s/{token}/…`；token 錯或分享關掉一律 404）**
-- `GET /s/{token}` → `dist/share.html`。這頁引用 `/assets/share-*.js|css` 與它 import 的共用 chunk（`react-dom-*`、`preload-helper-*` 等，見 `share.html` 裡的 `<script>`／`<link>`），入口要回這些靜態檔；整頁沒有 inline script／style，CSP `default-src 'self'` 即可。
-- `GET /s/{token}/api/messages?before=<id>&limit=100` → `{bot_name, status:"idle"|"working", messages:[{id, role:"user"|"assistant", text, created_at, attachments:[{name}]}], has_more}`。其他 role 不回；前端也只畫 user／assistant。
-- `POST /s/{token}/api/messages` `{text, client_request_id, attachments?: ["<upload id>"]}` → 2xx（body 不讀）。429 帶 `Retry-After`（秒）；413＝太長；409＝暫時不能送。前端單則上限 8000 字。
-- `GET /s/{token}/api/events`：SSE。`event: message` data＝同上的一則訊息；`event: status` data＝`{"status":"idle"|"working"}`。斷線（`EventSource` 進 CLOSED）前端改成每 4 秒輪詢 messages。
-- `POST /s/{token}/api/upload`：multipart 欄位 `file`，單檔 ≤ 25 MiB → `{id, name, size}`；413 太大、415 類型不收。
-- `GET /s/{token}/api/files` → `{files:[{name, size, modified_at}]}`；`GET /s/{token}/api/files/{name}`（name 已 URL encode）→ 下載（attachment＋nosniff）。
-- 前端一律 `credentials: "omit"`、`referrerPolicy: "no-referrer"`、不帶 `X-AM-Token`。
+管理端點、建受限 bot、`share_profile`、`source:"share"` 與分享入口 `/s/{token}/…` 的欄位與回應形狀都在 §5.6（daemon 依前端已用的名字對齊過，以 §5.6 為準）。
+前端一律 `credentials: "omit"`、`referrerPolicy: "no-referrer"`、不帶 `X-AM-Token`；分享頁引用的 `/assets/*`（含共用 chunk）由分享入口直接回。
 
 ## 子 agent（bot 自己開的 pane，SPEC §6.5a–c）
 

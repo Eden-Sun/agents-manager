@@ -312,6 +312,9 @@ pub struct ConfigFile {
     /// issue #749：codex app-server 的 thread 歷史當結構化 turn evidence（SPEC §4.4a）。預設開，可關。
     #[serde(default, skip_serializing_if = "CodexHistoryCfg::is_default")]
     pub codex_history: CodexHistoryCfg,
+    /// 分享 bot 的對外入口（SPEC「分享 bot」）。沒寫＝不開那個 listener、也不能開分享連結。
+    #[serde(default, skip_serializing_if = "crate::share::admin::ShareCfg::is_default")]
+    pub share: crate::share::admin::ShareCfg,
 }
 
 /// `[codex]`（issue #748，SPEC §6.3 第 9 點）：`instant_interrupt = true` 才讓 `send_now` 對 codex（>= 0.159.0）生效——

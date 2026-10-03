@@ -185,7 +185,13 @@ fn fail(status: StatusCode, reason: &str, message: &str) -> (StatusCode, Json<Va
 
 async fn authenticated_bot(app: &Arc<App>, bot_id: &str, token: &str) -> Result<crate::db::Bot, (StatusCode, Json<Value>)> {
     match crate::db::bot(&app.db, bot_id).await {
-        Ok(Some(bot)) if bot.deleted_at.is_none() && !token.is_empty() && crate::api::ct_eq(token, &bot.hook_token) => Ok(bot),
+        Ok(Some(bot)) if bot.deleted_at.is_none() && !token.is_empty() && crate::api::ct_eq(token, &bot.hook_token) => {
+            // 分享用的受限 bot 不能開子 agent（SPEC「分享 bot」）。
+            if crate::share::refuses_bot_principal(&app.db, &bot.id).await {
+                return Err(fail(StatusCode::FORBIDDEN, "restricted_bot", "a restricted share bot cannot spawn panes"));
+            }
+            Ok(bot)
+        }
         Ok(_) => Err(fail(StatusCode::UNAUTHORIZED, "bad_bot_proof", "unknown bot or bad token")),
         Err(e) => {
             tracing::warn!(bot = bot_id, error = %e, "credential spawn could not read bot proof");

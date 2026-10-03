@@ -65,7 +65,7 @@ pub(crate) fn ensure(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
 /// [`trusted_open::read_dir_bound`]，可信檢查跟列舉共用同一次 `openat` 鏈開出來的同一個 fd，不是
 /// 「查完路徑安全 → 再用路徑名字重新 open 一次去列」（issue #96，跟 #89 是同一個形狀）。
 /// `Ok(None)`：這一段還沒建過，不算不安全（還沒寫過、被清理收掉）。`Err(())`：符號連結或不是同一個 owner。
-fn open_trusted_dir(data_dir: &Path, dir: &Path) -> Result<Option<std::fs::File>, ()> {
+pub(crate) fn open_trusted_dir(data_dir: &Path, dir: &Path) -> Result<Option<std::fs::File>, ()> {
     use std::os::unix::fs::MetadataExt as _;
     let owner = std::fs::metadata(data_dir).map(|m| m.uid()).map_err(|_| ())?;
     let rel = dir.strip_prefix(data_dir).map_err(|_| ())?;

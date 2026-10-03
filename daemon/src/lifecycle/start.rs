@@ -911,14 +911,24 @@ async fn start_inner(
         return Err(LcError::Bad(reason));
     }
     let agent = crate::config::agent_name(&project.label, &bot.id);
-    let shim_dir = install_shim(app, bot, project).await;
+    // 分享用的受限 bot（SPEC「分享 bot」）：沒有 shim（不能開子 agent）、env 收窄、不讀 agent md／CLAUDE.md、argv 換成籠子那一套。
+    let restricted = crate::share::cage::prepare(app, bot, &host).await?;
+    let shim_dir = if restricted.is_some() { None } else { install_shim(app, bot, project).await };
     let env = match fence {
         Some(fence) => pane_env_for_fence(app, bot, &host, run_id, &agent, shim_dir.as_deref(), fence).await,
         None => pane_env(app, bot, &host, run_id, &agent, shim_dir.as_deref()).await,
     }
     .map_err(up)?;
+    let env = match &restricted {
+        Some(_) => {
+            let mut caged = env;
+            crate::share::cage::cage_env(&mut caged, &crate::share::cage::identity_env(app, bot).await, &crate::share::cage::local_home());
+            caged
+        }
+        None => env,
+    };
     // §6.5i：agent md 讀一次，母 bot 的 persona 與子 agent 的檔用同一份。
-    let agent_md = super::agent_md::load(app, project).await;
+    let agent_md = if restricted.is_some() { Default::default() } else { super::agent_md::load(app, project).await };
     if !agent_md.problems.is_empty() {
         let reason = format!("agent md 有問題，這次啟動沒帶到：{}", agent_md.problems.join("；"));
         tracing::warn!(bot = %bot.name, "{reason}");
@@ -967,15 +977,24 @@ async fn start_inner(
         return Err(LcError::Upstream(reason.into()));
     }
     // SPEC §6.5c: claude learns herdr from a skill (the CLI's own doc), not the persona.
-    install_herdr_skill(app, bot, project, &env, &agent).await;
+    if restricted.is_none() {
+        install_herdr_skill(app, bot, project, &env, &agent).await;
+    }
 
     // Remote hook injection may ssh-upload, so it must happen before workspace/tab creation.
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
-    args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), grok_rules_file.as_deref()));
-    args.extend(model_args(&effort_checked(app, bot, &project.host).await));
-    args.extend(identity_args(app, bot, &project.host).await);
-    args.extend(bot.args());
+    if let Some(ws) = &restricted {
+        // 受限 bot 不吃 bot／身分自訂的 args（那是加 `--dangerously-skip-permissions` 之類旗標的地方）。
+        let prompt = crate::share::cage::install_prompt(app, bot, ws, &env).map_err(up)?;
+        args.extend(crate::share::cage::launch_args(&env, &prompt));
+        args.extend(model_args(&effort_checked(app, bot, &project.host).await));
+    } else {
+        args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), grok_rules_file.as_deref()));
+        args.extend(model_args(&effort_checked(app, bot, &project.host).await));
+        args.extend(identity_args(app, bot, &project.host).await);
+        args.extend(bot.args());
+    }
 
     // Reopen only: resolve the previous native session after preflight. The requested id is
     // persisted before `agent.start`; hookrecv uses it to detect a provider that ignored resume.
@@ -1020,7 +1039,7 @@ async fn start_inner(
     }
     args.extend(codex_pane_guard_args(&bot.kind));
 
-    let cwd = bot_cwd(bot, project);
+    let cwd = restricted.as_deref().unwrap_or_else(|| bot_cwd(bot, project));
     // A new dir opens on "trust this project?" with the cursor on *No*: claude quits, codex eats
     // the first message. Record trust first (local, only when not yet trusted).
     // 遠端也要（#407）：換身分＝換一個從沒信任過的設定目錄，不寫的話每次都停在提示上等人按。

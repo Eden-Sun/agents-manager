@@ -889,6 +889,7 @@ label = "foo"
   照字面寫等於第一次寫入就把指到 dotfiles 的連結換成一般檔，之後 daemon 的每次寫入都進不去而 `git status` 什麼都看不出來。
   資料目錄仍然留在連結所在的目錄（§3.1），兩件事不同。檔案還不存在時（第一次寫預設設定）照原路徑建。
 - 改 `listen` port 需重啟 daemon，既有 agent 的 hook 會打舊 port（靠 spool + 對帳補入）。
+- `[share]`（§20）：`listen`（分享入口的獨立 listener，只准 loopback）與 `base_url`（Funnel 的對外網址）。都不寫＝沒有分享入口；改了要重啟 daemon。
 - `[supervisor] notify_interval_secs`（預設 600）：事件照舊即時寫入 `supervisor_inbox`；被節流的只有「喚醒總管」——每 ≥ 這個秒數一次，
   把累積的未 ack 事件彙整成一則 `[AG Man 通知]`。health 偵測、watchdog、控制器 TICK 不受影響。總管 busy 時延後，送成功才開始下一個視窗。
   `0` = 不節流。上次喚醒時間存 `supervisors.last_notify_at`。改值要重啟 daemon。只管巡檢；協調者見 §18.15。
@@ -4649,8 +4650,65 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 ## 20. 分享 bot（使用者 2026-10-03）
 
-把一顆**專用的受限 bot** 單獨給外部 end user 用：對方只有對話、上傳檔案、下載 bot 給的檔案。對外經 Tailscale Funnel 指到獨立的分享入口 port，管理介面 7788 照舊只聽 127.0.0.1。
-欄位與端點見 API.md「分享 bot」。daemon 端（受限 bot 的權限與 env、token 雜湊、獨立 listener）另行補在本節。
+把一顆**專用的受限 bot** 單獨開給 end user：一條連結、一頁獨立的分享頁，只能對話與交換檔案。拿到連結的人＝網路上任何人，
+所以下面每一條都有測試釘住（`daemon/src/share/tests.rs`）。對外走 Tailscale Funnel，只把分享入口那個 port 給 Funnel；管理 API（7788）照舊只聽本機。
+
+### 20.1 受限 bot（`share_profile = "restricted"`）
+
+- 只能在**建 bot 時**選（`POST /api/projects/{id}/bots` 帶 `share_profile:"restricted"`）；既有 bot 不能切換，要分享就新建一顆。
+  只有 claude、只有本機專案（409 `unsupported_kind`／`unsupported_host`）；不收自訂 `args`／`env`（400 `restricted_no_custom`）；
+  `auto_approve` 一律寫成 false。記在 `shared_bots`（不在 `config.toml`）：**寫 config 之前**就先記，投影出來的那一列從第一次啟動起就在籠子裡；
+  建失敗或冪等重送拿回舊的那顆時收回。`/api/state` 的 bot 帶 `share_profile`（一般 bot `null`）。
+- 工作目錄 `<data_dir>/shared-bots/<bot_id>/workspace/`（0700，含 `inbox/`），`bots.cwd` 指過去；啟動時以 `shared_bots.workspace` 為準。
+- 啟動時（`share::cage`，照 claude 2.1.288 的 `--help` 與 binary 內 settings schema，2026-10-03 實跑驗證過）：
+  - argv：`--restricted --tools Read,Edit,Write,Glob,Grep,WebSearch --strict-mcp-config --permission-mode dontAsk --add-dir <outbox>`，
+    加上受限版的 `--append-system-prompt-file <bot 目錄>/share-system-prompt.md`（沒有開子 agent 的規則；走檔案是因為 herdr 把啟動指令壓在 900 bytes、
+    超過就砍最長的參數，主人的 persona 在尾巴）與 model／effort。**不吃** bot 與身分自訂的 args（加 bypass 旗標的地方），
+    不帶 `--dangerously-skip-permissions`（`--restricted` 也會拒絕 bypass）。
+  - `--restricted`：拿掉 Bash 等會跑指令的工具與 WebFetch、不讀 user／project／local settings（`--settings` 照樣生效，hook 靠它）、檔案工具只在工作目錄。
+    只有它時還剩 `SendMessage`／`ListAgents`（傳話給同一台機器上別的 Claude session）、`PushNotification`、`Agent`、`Skill`、`Cron*`、`EnterWorktree`、
+    `ToolSearch`；`--tools` 白名單之後只剩那六個，也沒有 deferred tools（實測）。
+  - Bash：claude 的 sandbox 在 Linux 要 bubblewrap＋socat，agm-host 都沒有 → 照「做不到 sandbox 就整個 deny」不給 Bash。
+  - WebFetch：契約允許保留，但它是 claude 行程自己發的 HTTP、打得到本機的 daemon（`/api/session` 對本機來源回 UI token），所以不給；WebSearch（伺服器端）保留。
+  - `claude-settings.json`：`permissions.defaultMode = dontAsk`（沒預先允許的一律拒絕，不會停在權限框）、`disableBypassPermissionsMode = disable`、
+    allow 工作目錄與自己的 outbox 的 Read／Edit 與 WebSearch；deny 上面那些工具，以及帳號目錄（`CLAUDE_CONFIG_DIR`，沒設＝`~/.claude` 與 `~/.claude.json`）、
+    `~/.ssh`、daemon 資料目錄最上層的檔（`ui-token`、DB、`config.toml`）與 `bots/`；拿掉 `skipDangerousModePermissionPrompt`，`remoteControlAtStartup=false`。hook 照舊。
+  - pane env 只留 `AM_BOT_ID`、`AM_HOOK_TOKEN`、`AM_RUN_ID`、`AM_PORT`、`AM_INSTANCE`、`AM_OUTBOX`、身分（帳號）的 env 與 daemon 自己設的 claude 開關；
+    `AM_BOT_TOKEN`、shim／cargo／子 agent 要的變數、bot 自訂 env、shim 的 `PATH` 都不帶；可能從 herdr server 繼承的 `AM_*` 憑證類蓋成空字串；`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`。
+  - 不裝 herdr／cargo shim（不能開子 agent）、不裝 herdr skill、不讀 agent md。
+  - `shared_bots` 讀不到就**不啟動**（不當成一般 bot 起）。
+- bot principal：受限 bot 的 hook token 只能打 `/hook/{provider}`。`/api` 的認證中介層、`/relay/announce`、`/relay/pane`、`/relay/spawn/*`、
+  `/build-slots/acquire` 一律 403 `restricted_bot`（`shared_bots` 讀不到也擋）。
+- end user 上傳的檔放工作目錄的 `inbox/`；給 end user 的檔照舊寫 `$AM_OUTBOX`（`--add-dir` 讓它寫得進去）。
+
+### 20.2 分享連結
+
+- `bot_shares`：一顆 bot 至多一條。token 32 bytes 亂數（base64url，43 字），DB 只存 SHA-256 與末 4 碼提示；完整連結只在開啟／重產的那個回應裡出現一次。
+  查詢用 hash 找列、再常數時間比一次；bot 刪了、`shared_bots` 那列不見了都不認。重產＝換 hash，舊連結當下失效；關掉＝刪列。開著的 SSE 會被叫醒重新確認，失效就斷。
+- 網址＝`[share] base_url` ＋ `/s/<token>`；沒設 `base_url` 不能開（409 `share_not_configured`）。管理端點見 API.md §5.6，只收 UI token。
+
+### 20.3 分享入口（獨立 listener）
+
+- `[share] listen`（例如 `127.0.0.1:7790`）有設才開；只准 loopback、不能跟管理 API 同 port；開不起來只記 error、不擋 daemon。改了要重啟 daemon。
+- router 上**只有** `/s/{token}`（分享頁）、`/s/{token}/api/*` 與 `/assets/*`（分享頁的 js／css），沒有 fallback 到主 API、主 UI、`/ws`、`/hook`。
+  分享頁是嵌入的 `web/dist/share.html`（獨立的 Vite entry），沒打包時回一頁佔位。
+- token 錯、分享關了：一律同一個 404。每個回應 `Cache-Control: no-store`（`/assets` 例外：檔名有雜湊）、`Referrer-Policy: no-referrer`、`nosniff`、
+  `X-Frame-Options: DENY`、只允許 `'self'` 的 CSP（沒有 inline script／style）；不設任何 CORS 標頭。
+- 對話：完整歷史，但只有 user／assistant，只給 id、role、誰送的（`share`／`owner`／`bot`）、文字、時間、附件名；系統訊息、工具細節、終端快照、轉寄來源的 bot id 都不給。
+- 送訊息：走「沒在跑就先落地再啟動、忙就排隊」那條路（§6.3、`start_if_stopped`＋`queue_if_busy`），`relay_from` 記哨符 `share`（跟 `daemon` 同類）。
+  DB 的 `messages.source` 照存 `web`（CHECK 不收新值），輸出時 user 訊息的 `relay_from = share` 報 `source: "share"`，主 UI 標「🔗 分享使用者」。
+  每則 ≤ 8000 字、換行以外的控制字元拿掉（tab 換成空白）；每個分享每分鐘 10 則（429＋`Retry-After`）；驗證不過的不算次數。失敗的細節不給外面看。
+  **每則一律以 `〔分享使用者〕 ` 開頭再打進 TUI**：claude 的輸入框把第一個字當模式切換——`!` 是 bash 模式（2026-10-03 實測：`--restricted`＋`--tools` 白名單＋`dontAsk`＋deny Bash，
+  `!echo … > 檔` 照樣真的執行）、`/` 是 slash 指令（`/permissions`、`/add-dir`…）、`#` 是記憶。工具層的籠子管不到這一層，所以 end user 的字永遠不在第一個字；
+  對話列表顯示時再拿掉前綴。`@路徑` 這種檔案提及仍受檔案工具的範圍限制（實測讀不到工作目錄外）。
+- 上傳：`multipart/form-data` 的 `file` 欄位（分享頁的 `FormData`；自己寫的嚴格解析，不合形狀一律拒絕，沒有拉 form 相依），或原始位元組＋`?name=`。單檔 ≤ 25 MiB、每分鐘 20 個、同時 2 個；`inbox/` 總量 ≤ 200 MiB／300 個。
+  檔名只取最後一段、清掉控制字元與符號、不收隱藏檔與金鑰／DB 類檔名（同 outbox 的黑名單）；種類以副檔名白名單決定（文字、圖片、PDF、Office），
+  內容要對得上（檔頭；文字檔要是 UTF-8、沒有 NUL），呼叫端的 Content-Type 不採信。存成 `<ulid>-<檔名>`（0600），`inbox/` 逐層 `O_NOFOLLOW` 打開，被換成符號連結就不寫。
+  送訊息時帶的附件 id 必須真的在 `inbox/`，路徑以固定的標記行附在給 bot 的文字後面（對話列表再拆回檔名）。
+- 下載：只有這顆 bot 的 outbox 第一層，沿用 outbox 的擋法（金鑰／DB／隱藏檔不列不給、fd-bound 開檔）與下載標頭（attachment、白名單外 octet-stream、nosniff）；不給目錄路徑。
+- SSE：`status`（連上時先送一次）、`message`、`resync`（漏了，請重抓）；全部分享加起來同時 32 條，每 30 秒或被叫醒時重新確認 token。
+
+### 20.4 前端
 
 **前端（主 UI）**
 - 建 bot 表單多一個「用途：分享用（受限）」；只給本機專案的 claude（其他 kind／遠端專案是灰的並寫原因）。勾了就送 `share_profile: "restricted"`、`auto_approve: false`。建好不能切回一般 bot。
