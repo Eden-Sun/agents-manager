@@ -262,31 +262,9 @@ fn is_status_chrome(s: &str) -> bool {
         || (s.contains(" · ") && s.contains("% left"))
 }
 
-/// 輸入框底下的權限模式列。**全 daemon 只有這一份**（#788）：備援回覆（[`is_status_chrome`]／[`is_noise`]）與
-/// 子 agent 提問通知（`child_alerts::is_chrome`）都呼叫它，不要在別處再寫一份。
-///
-/// bypass／accept edits 是 `⏵⏵ … on (shift+tab to cycle)`，plan 是 `⏸ plan mode on (shift+tab to cycle)`；
-/// default 模式是 `⏸ manual mode on · ← for agents`，**沒有** `(shift+tab to cycle)`（#783，2.1.288 真畫面
-/// `claude-2.1.288-manual-mode-finished.txt`）。尾巴（` · ← for agents`、` · ? for shortcuts`、` · 1 shell`）隨狀態在變。
-///
-/// 認法：`⏵⏵` 開頭的一律算。其餘看第一段（` · ` 之前、去掉可選的 `⏸`）：整段以 `(shift+tab to cycle)` 結尾
-///（窄 pane 折下來的提示），或**完全等於** `manual mode on`／`plan mode on`／`accept edits on`／`bypass permissions on`。
-/// 回覆裡中間出現 `mode on`、句尾引用 `plan mode on`、句子中間的 `bypass permissions on` 都不是模式列。
-/// 沒有箭頭、第一段剛好是 `bypass permissions on` 的也算（`child_alerts` 原本就認）。
+/// 輸入框底下的權限模式列。判斷只有 [`crate::claude_mode::is_mode_row`] 一份（#788）。
 pub(crate) fn is_mode_row(s: &str) -> bool {
-    let s = s.trim();
-    if s.starts_with("⏵⏵") {
-        return true;
-    }
-    let low = s.to_ascii_lowercase();
-    let rest = low.strip_prefix('⏸').unwrap_or(&low);
-    // 第一段必須是已知模式名稱。只看結尾會把 `Quoted status: plan mode on` 當成模式列。
-    let seg = rest.split(" · ").next().unwrap_or(rest).trim();
-    // 窄 pane 把提示折到下一行：第一段以 `(shift+tab to cycle)` 結尾（或只剩這段）才算，句子中間提到不算。
-    if seg.ends_with("(shift+tab to cycle)") {
-        return true;
-    }
-    matches!(seg, "manual mode on" | "plan mode on" | "accept edits on" | "bypass permissions on")
+    crate::claude_mode::is_mode_row(s)
 }
 
 fn is_zone_busy(s: &str) -> bool {
