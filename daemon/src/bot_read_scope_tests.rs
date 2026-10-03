@@ -60,7 +60,8 @@ fn assert_role_gate(response: &str, path: &str) {
     assert!(
         // AGM 角色閘（role_required），或更嚴的只限網頁（user_only，例如 claude-update review）都算擋下。
         response.starts_with("HTTP/1.1 403")
-            && (body(response).contains("\"reason\":\"role_required\"") || body(response).contains("\"reason\":\"user_only\"")),
+            && (body(response).contains("\"reason\":\"role_required\"")
+                || body(response).contains("\"reason\":\"user_only\"")),
         "ordinary bot read was not rejected at the AGM boundary for {path}: {response}"
     );
 }
@@ -266,12 +267,13 @@ async fn supervisor_management_reads_require_user_or_a_verified_agm_role() {
         "/api/supervisor/responder",
         "/api/supervisor/responder/persona",
         "/api/supervisor/evidence?q=supervisor-private-assignment",
-        "/api/intents",
     ];
     for path in paths {
         let response = get(e.app.clone(), path, &bot_headers(&caller)).await;
         assert_role_gate(&response, path);
     }
+    let intents = get(e.app.clone(), "/api/intents", &bot_headers(&caller)).await;
+    assert_user_only(&intents, "/api/intents");
     let detail = get(
         e.app.clone(),
         &format!("/api/supervisor/assignments/{assignment_id}"),

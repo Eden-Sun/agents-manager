@@ -126,7 +126,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/changelog` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| GET | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| GET | `/api/claude-update/review` | User 或已驗證 AGM role；一般 Bot → 403 `user_only` |
 | GET | `/api/deploy/status` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -194,7 +194,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/changelog` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| HEAD | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| HEAD | `/api/claude-update/review` | User 或已驗證 AGM role；一般 Bot → 403 `user_only` |
 | HEAD | `/api/deploy/status` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -1139,7 +1139,7 @@ codex 的新版還沒安裝、磁碟是舊的，所以先取 `release_triage` �
 `GET /api/release-triage?kind=herdr` 回 200 空的 `rows`；`verdicts`／`dispatched`／`publish` 對 herdr 仍是 400。
 
 ### `GET /api/claude-update/review`
-只接受 User principal 或已驗證 AGM patrol/responder role；一般 Bot 回 `403 role_required`。這一版的 AGM 解析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
+只接受 User principal 或已驗證 AGM patrol/responder role；一般 Bot 回 `403 user_only`。這一版的 AGM 解析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
 「結論會回到這裡」）。`?kind=`／`?host=`／`?to=` 可指定，預設 claude、本機與上面說的新版。
 
 ```json

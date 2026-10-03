@@ -279,7 +279,7 @@ pub fn router(app: Arc<App>) -> Router {
         // 使用者在更新提示上按「請 AGM 解析」：把這一版的 changelog 派給協調者判讀（唯讀）。
         .route(
             "/claude-update/review",
-            get(crate::claude_review::get_review).layer(agm_gate!(app)).post(crate::claude_review::post_review),
+            get(crate::claude_review::get_review).post(crate::claude_review::post_review),
         )
         .route("/supervisor/incidents", get(crate::supervisor::api::get_incidents).layer(agm_gate!(app)))
         // 人設：持久版本是權威，內嵌版只在首次安裝當種子（SPEC §18.11）。
@@ -9542,6 +9542,7 @@ mod per_principal_auth_tests {
         let requests = [
             ("GET", "/api/bots/deleted", ""),
             ("HEAD", "/api/bots/deleted", ""),
+            ("GET", "/api/intents", ""),
             ("GET", "/api/mem", ""),
             ("HEAD", "/api/mem", ""),
             ("GET", "/api/drafts", ""),
