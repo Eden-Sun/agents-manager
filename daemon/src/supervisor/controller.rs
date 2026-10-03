@@ -1078,12 +1078,15 @@ async fn late_reply(app: &Arc<App>, a: &store::Assignment, turn_id: &str) {
     let report = reply.clone();
     let res = async {
         let now = crate::db::now();
-        let mut tx = app.db.begin().await?;
+        // 先讀交辦再寫：deferred 的話讀完之後別的 writer 一 commit 就 517，遲到的回覆這一輪寫不回去（#831）。
+        let mut tx = crate::db::begin_write(&app.db).await?;
         let (had_result, status, expects_review): (Option<String>, String, i64) =
             sqlx::query_as("SELECT result, status, expects_review FROM supervisor_assignments WHERE id=?")
                 .bind(&a.id)
                 .fetch_one(&mut *tx)
                 .await?;
+        #[cfg(test)]
+        crate::lifecycle::race_point::hit("late_reply_after_assignment_read", &a.id).await;
         let moved = sqlx::query(
             "UPDATE supervisor_assignments SET turn_status='completed', evidence_complete=1, result=COALESCE(result, ?), updated_at=?
               WHERE id=? AND turn_status='completed_fallback'",
@@ -4979,6 +4982,24 @@ mod late_reply_tests {
         assert_eq!((kind.as_str(), p["late_reply"].as_bool(), p["needs_review"].as_bool()), ("assignment_noticed", Some(true), Some(false)));
         let route = crate::supervisor::roles::route(kind, p, None);
         assert!(!route.wake, "通知的遲到回覆不叫醒人");
+    }
+
+    /// #831：寫回遲到回覆讀完交辦、還沒寫的那一瞬，一個不相干的 writer commit 了一筆。deferred 交易這時升級寫鎖直接 517，
+    /// 回覆這一輪寫不回去；寫鎖從讀之前就拿著，插進來的那一筆等，回覆寫回、「結果到了」推一次。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_assignment_read_and_the_write_back_does_not_lose_the_reply() {
+        let app = app().await;
+        let (a, turn_id) = fallback_assignment(&app, true).await;
+        on_turn_done(&app, &turn_id, "completed_fallback").await;
+        late_hook_fills(&app, &turn_id, "真正的回覆").await;
+        let other = crate::testing::arm_app_foreign_writer(&app, "late_reply_after_assignment_read", &a.id);
+
+        late_reply_for_turn(&app, &turn_id, "completed").await;
+
+        let row = store::assignment(&app.db, &a.id).await.unwrap().unwrap();
+        assert_eq!((row.result.as_deref(), row.turn_status.as_deref()), (Some("真正的回覆"), Some("completed")), "the late reply is written back");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the write-back holds the write lock from its read on; the other writer waits");
+        assert_eq!(inbox(&app, &a.id).await.len(), 2, "settle + result arrived");
     }
 
     /// 事件漏掉（Lagged）或重啟：每輪 reconcile 也會把等驗收交辦的遲到回覆寫回去。

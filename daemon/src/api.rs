@@ -4834,7 +4834,9 @@ async fn rotate_bot_credential(
     }
     let lock = app.bot_lock(&id).await;
     let lock_guard = lock.lock().await;
-    let mut tx = app.db.begin().await.map_err(any_err)?;
+    // 一路讀（bot、子孫、pane、重啟 intent）最後才寫 token：deferred 的話讀完之後別的 writer 一 commit 就 517，輪替被拒（#831）。
+    // 交易裡只有 DB 與記憶體裡的 fence，不等 herdr。
+    let mut tx = db::begin_write(&app.db).await.map_err(any_err)?;
     let bot = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE id=?")
         .bind(&id)
         .fetch_optional(&mut *tx)
@@ -11598,6 +11600,28 @@ mod per_principal_auth_tests {
         )
         .await;
         assert!(rotate.starts_with("HTTP/1.1 200"), "abort 之後輪替不再被 child_spawn_in_progress 擋住：{rotate}");
+    }
+
+    /// #831：輪替一路讀完（bot、子孫、pane）、還沒寫新 token 的那一瞬，一個不相干的 writer commit 了一筆。deferred 交易這時
+    /// 升級寫鎖直接 517，輪替被拒；寫鎖從讀之前就拿著，插進來的那一筆等，輪替照樣成功。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_rotation_reads_and_the_token_write_does_not_refuse_it() {
+        let e = crate::testing::env().await;
+        let parent = distinct_bot(&e, "rotate-831").await;
+        let old = parent.hook_token.clone();
+        let other = crate::testing::arm_app_foreign_writer(&e.app, "credential_rotation_after_descendant_query", &parent.id);
+        let rotate = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/credential/rotate HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                parent.id, e.app.ui_token
+            ),
+        )
+        .await;
+        assert!(rotate.starts_with("HTTP/1.1 200"), "an unrelated writer must not refuse the rotation: {rotate}");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the rotation holds the write lock from its first read on; the other writer waits");
+        let current: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id=?").bind(&parent.id).fetch_one(&e.app.db).await.unwrap();
+        assert_ne!(current, old);
     }
 
     #[tokio::test]

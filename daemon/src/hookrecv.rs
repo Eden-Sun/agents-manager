@@ -710,6 +710,8 @@ async fn store_resent_prompt_tx(
         .bind(&turn.id)
         .fetch_one(&mut **tx)
         .await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("resent_prompt_after_count_read", &turn.id).await;
     if have > 0 {
         return Ok(None);
     }
@@ -724,7 +726,8 @@ async fn store_resent_prompt(app: &Arc<App>, bot_id: &str, conv: &str, turn: &db
         return Ok(());
     }
     let Some(text) = human_started_prompt(payload, transcript_path).await else { return Ok(()) };
-    let mut tx = app.db.begin().await?;
+    // 先數有沒有使用者訊息再寫：deferred 的話數完之後別的 writer 一 commit，INSERT 就 517，那一句補不上（#831）。
+    let mut tx = db::begin_write(&app.db).await?;
     let added = store_resent_prompt_tx(app, &mut tx, conv, turn, run, &text).await?;
     tx.commit().await?;
     if let Some(m) = added {
@@ -859,12 +862,15 @@ async fn fill_or_drop_late_hook(
     native_turn_id: &Option<String>,
     same_turn: bool,
 ) -> Result<()> {
-    let mut tx = app.db.begin().await?;
+    // 先數有沒有回覆再寫：deferred 的話數完之後別的 writer（對帳每一輪都在寫）一 commit 就 517，遲到的回覆補不上（#831）。
+    let mut tx = db::begin_write(&app.db).await?;
     let has_reply: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
             .bind(&turn.id)
             .fetch_one(&mut *tx)
             .await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("late_hook_after_reply_count", &turn.id).await;
     if !body_text.trim().is_empty() && has_reply > 0 && same_turn {
         return replace_fallback_reply(app, tx, turn, body_text, session_id, native_turn_id).await;
     }
@@ -2611,6 +2617,43 @@ mod external_claim_tests {
             .await
             .unwrap();
         assert_eq!(n, 1, "不會變成兩則");
+    }
+
+    /// #831：遲到的 hook 數完回合上的回覆、還沒寫的那一瞬，一個不相干的 writer commit 了一筆。deferred 交易這時升級寫鎖
+    /// 直接 517，hook 的回覆補不上；寫鎖從讀之前就拿著，插進來的那一筆等，回覆補上一次、回合升 `completed`。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_reply_count_and_the_fill_does_not_lose_the_late_reply() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "late-hook-831").await;
+        let conversation_id = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at, completed_at)
+             VALUES (?,?,'web','completed_fallback','ok',?,?)",
+        )
+        .bind(&turn_id)
+        .bind(&conversation_id)
+        .bind(db::now())
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        let other = tt::arm_app_foreign_writer(&app, "late_hook_after_reply_count", &turn_id);
+
+        fill_or_drop_late_hook(&app, &turn, "late reply", &Some("s1".into()), &Some("n1".into()), false)
+            .await
+            .expect("an unrelated writer must not make the late hook fail");
+
+        assert_eq!(*other.lock().unwrap(), Some(false), "the fill holds the write lock from its read on; the other writer waits");
+        assert_eq!(turn_row(&app, &turn_id).await.status, "completed");
+        let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id=? AND role='assistant'")
+            .bind(&turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(replies, vec!["late reply".to_string()]);
     }
 
     #[tokio::test]
@@ -4503,6 +4546,22 @@ mod external_claim_tests {
             let stored = user_texts_on(&app, &external).await;
             assert_eq!(stored, if expect_stored { vec!["現在部 demo".to_string()] } else { vec![] }, "origin={origin}");
         }
+    }
+
+    /// #831：Stop 比備援晚到、補記使用者那一句時，數完回合上的使用者訊息、還沒寫的那一瞬，一個不相干的 writer commit 了一筆。
+    /// deferred 交易這時升級寫鎖直接 517，那一句補不上、整個 hook 回錯；寫鎖從讀之前就拿著，照樣補上一次。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_user_count_and_the_insert_does_not_lose_the_resent_prompt() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _conv, external) = an_external_turn_after_an_answered_prompt(&app, &env.project_id, true).await;
+        let other = tt::arm_app_foreign_writer(&app, "resent_prompt_after_count_read", &external);
+
+        let extra = json!({"agm_user_text": "現在部 demo", "agm_origin_kind": "human"});
+        process(&app, &claude_stop_for(&bot_id, extra)).await.expect("an unrelated writer must not make the Stop fail");
+
+        assert_eq!(*other.lock().unwrap(), Some(false), "the insert holds the write lock from its read on; the other writer waits");
+        assert_eq!(user_texts_on(&app, &external).await, vec!["現在部 demo".to_string()]);
     }
 
     /// hook 送來的 transcript 路徑要在 bot 自己身分的 `projects/` 底下才算數（`transcript_read`）：把這顆 bot 的 `CLAUDE_CONFIG_DIR` 指到 `root`，

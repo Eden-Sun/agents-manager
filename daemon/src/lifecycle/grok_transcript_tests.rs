@@ -419,3 +419,60 @@ async fn a_reused_pid_does_not_import_a_session_another_run_holds() {
     let run = db::run(&app.db, &c.run_id).await.unwrap().unwrap();
     assert_ne!(run.native_session_id.as_deref(), Some(SID));
 }
+
+/// #831：備援已收好、使用者那句不是畫面刮的回合，匯入時第一句是讀它的回覆。讀完、還沒寫的那一瞬，一個不相干的 writer commit 了
+/// 一筆：deferred 交易這時升級寫鎖直接 517，這一問記不進去；寫鎖從讀之前就拿著，照樣換成原文、回合升 `completed`。
+#[tokio::test]
+async fn an_unrelated_writer_between_the_reply_read_and_the_import_does_not_fail_it() {
+    let c = grok_child(Some(FRESH)).await;
+    let app = c.env.app.clone();
+    let want = parse_chat_history(FRESH);
+    let tid = db::ulid();
+    sqlx::query(
+        "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at, completed_at) VALUES (?,?,?,'external','completed_fallback','ok',?,?)",
+    )
+    .bind(&tid)
+    .bind(&c.conv)
+    .bind(&c.run_id)
+    .bind(db::now())
+    .bind(db::now())
+    .execute(&app.db)
+    .await
+    .unwrap();
+    // hook 記下的回音是截斷的（不是畫面刮的，不用換原文）：對得上這一問，第一句就是讀回覆。
+    let clipped: String = want[0].prompt.chars().take(30).collect::<String>() + " …";
+    insert_message(&app, &c.conv, Some(&tid), "user", &clipped, "hook", false, None).await.unwrap();
+    insert_message(&app, &c.conv, Some(&tid), "assistant", "我先讀 AG Man 指示，並在既有\nworktree 看…", "terminal_fallback", true, Some("snap")).await.unwrap();
+    let other = tt::arm_app_foreign_writer(&app, "grok_transcript_after_reply_read", &tid);
+
+    assert_eq!(sync_locked(&app, &c.run_id).await.expect("an unrelated writer must not make the import fail"), Synced::Read { imported: 2, pending: None });
+    assert_eq!(*other.lock().unwrap(), Some(false), "the import holds the write lock from its read on; the other writer waits");
+    let reply: (String, String) = sqlx::query_as("SELECT content, source FROM messages WHERE turn_id = ? AND role = 'assistant'")
+        .bind(&tid)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert_eq!((reply.0.as_str(), reply.1.as_str()), (want[0].reply.as_deref().unwrap(), "transcript"));
+    let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(&tid).fetch_one(&app.db).await.unwrap();
+    assert_eq!(status, "completed");
+}
+
+/// #831：壓縮重播的那一問已綁鑰匙、回覆卻還沒有：補回覆時先讀回合狀態再寫。讀完、還沒寫的那一瞬，一個不相干的 writer commit
+/// 了一筆：deferred 交易這時升級寫鎖直接 517，回覆補不上；寫鎖從讀之前就拿著，回覆照樣補上一次。
+#[tokio::test]
+async fn an_unrelated_writer_between_the_replay_status_read_and_the_reply_does_not_lose_it() {
+    let prompt = "第一問的原文，壓縮後不帶 index";
+    let c = grok_child(Some(&one_exchange(Some(0), prompt, "第一問的回覆"))).await;
+    let app = c.env.app.clone();
+    assert_eq!(sync_locked(&app, &c.run_id).await.unwrap(), Synced::Read { imported: 1, pending: None });
+    let turn_id: String = sqlx::query_scalar("SELECT id FROM turns WHERE conversation_id = ? AND native_turn_id IS NOT NULL").bind(&c.conv).fetch_one(&app.db).await.unwrap();
+    sqlx::query("DELETE FROM messages WHERE turn_id = ? AND role = 'assistant'").bind(&turn_id).execute(&app.db).await.unwrap();
+    let cwd = c.env.repo.to_string_lossy().into_owned();
+    std::fs::write(history_file(&c.home, &cwd, SID), one_exchange(None, prompt, "第一問的回覆")).unwrap();
+    let other = tt::arm_app_foreign_writer(&app, "grok_transcript_after_replay_status_read", &turn_id);
+
+    assert_eq!(sync_locked(&app, &c.run_id).await.expect("an unrelated writer must not make the import fail"), Synced::Read { imported: 1, pending: None });
+    assert_eq!(*other.lock().unwrap(), Some(false), "the import holds the write lock from its read on; the other writer waits");
+    let replies: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant'").bind(&turn_id).fetch_all(&app.db).await.unwrap();
+    assert_eq!(replies, vec!["第一問的回覆".to_string()]);
+}

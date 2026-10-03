@@ -2727,7 +2727,9 @@ async fn create_approval_inner(
     }
     let id = crate::db::ulid();
     let now = crate::db::now();
-    let mut tx = pool.begin().await?;
+    // 先找要取代的那一筆再寫：deferred 的話讀完之後別的 writer 一 commit，INSERT 就 517，申請整個被拒（#831）。
+    // 寫鎖從頭拿著，兩個同時的申請也排成先後，不會兩邊都讀到「沒有 pending」。
+    let mut tx = crate::db::begin_write(pool).await?;
     let mut wait_since: Option<String> = None;
     let mut superseded = None;
     // issue #421：沒帶 `supersedes` 時 daemon 自己找「同一個申請者、同一種用途、還 **pending**」的那一筆。
@@ -2750,6 +2752,8 @@ async fn create_approval_inner(
         .fetch_optional(&mut *tx)
         .await?,
     };
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("approval_after_supersede_read", requester).await;
     // 自動挑的那一筆不會讓整筆申請失敗：對不上（剛被裁示、剛過期）就只是不取代。
     let auto = auto_supersedes.is_some();
     if let Some(old_id) = supersedes.map(str::trim).filter(|s| !s.is_empty()).or(auto_supersedes.as_deref()) {
@@ -3459,7 +3463,8 @@ pub async fn resolve_incident(pool: &SqlitePool, kind: &str, resource: &str) -> 
 
 /// [`resolve_incident`]；`notify` 時同一個交易推 `incident_resolved`（#319），理由同 [`open_incident_notifying`]。
 pub async fn resolve_incident_notifying(pool: &SqlitePool, kind: &str, resource: &str, notify: bool) -> Result<Option<Incident>> {
-    let mut tx = pool.begin().await?;
+    // 先讀開著的那一筆再改：deferred 的話讀完之後別的 writer 一 commit 就 517，收不掉、這一輪的通知也沒了（#831）。
+    let mut tx = crate::db::begin_write(pool).await?;
     let row = sqlx::query_as::<_, Incident>(
         "SELECT * FROM supervisor_incidents WHERE supervisor_id=? AND kind=? AND resource=? AND status='open'",
     )
@@ -3468,6 +3473,8 @@ pub async fn resolve_incident_notifying(pool: &SqlitePool, kind: &str, resource:
     .bind(resource)
     .fetch_optional(&mut *tx)
     .await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("incident_resolve_after_read", resource).await;
     let Some(row) = row else { return Ok(None) };
     let now = crate::db::now();
     sqlx::query("UPDATE supervisor_incidents SET status='resolved', resolved_at=?, last_seen_at=? WHERE id=?")
@@ -3526,6 +3533,50 @@ mod tests {
         let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
         migrate(&p).await.unwrap();
         p
+    }
+
+    // ------------------------------------------------ issue #831：先讀後寫的交易從 BEGIN 就拿寫鎖
+
+    /// #831：重申請讀完「要取代哪一筆 pending」、還沒寫的那一瞬，一個不相干的 writer commit 了一筆。deferred 交易這時升級寫鎖
+    /// 直接 517，申請整個被拒；寫鎖從讀之前就拿著，插進來的那一筆等，新申請照建、舊的照樣被取代。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_supersede_read_and_the_write_does_not_refuse_the_approval() {
+        let e = crate::testing::env().await;
+        let p = &e.app.db;
+        let old = create_approval_notifying(p, "agm-kick-831", "rebuild", "release rebuild", Some("aaa111"), None, None, None, None, true).await.unwrap();
+        let other = crate::testing::arm_app_foreign_writer(&e.app, "approval_after_supersede_read", "agm-kick-831");
+
+        let new = create_approval_notifying(p, "agm-kick-831", "rebuild", "release rebuild", Some("bbb222"), None, None, None, None, true)
+            .await
+            .expect("an unrelated writer must not refuse the approval request");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the request holds the write lock from its read on; the other writer waits");
+        assert!(new.created);
+        assert_eq!(new.superseded.as_deref(), Some(old.approval.id.as_str()));
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_approvals WHERE requester='agm-kick-831' AND status='pending'").fetch_one(p).await.unwrap();
+        assert_eq!(pending, 1);
+    }
+
+    /// #831：收 incident 讀完開著的那一筆、還沒改的那一瞬，一個不相干的 writer commit 了一筆。deferred 交易這時 517，
+    /// incident 收不掉、這一輪的 `incident_resolved` 通知也沒了；寫鎖從讀之前就拿著，照樣收掉並通知一次。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_incident_read_and_the_resolve_does_not_fail_it() {
+        let e = crate::testing::env().await;
+        let p = &e.app.db;
+        open_incident(p, "host_disconnected", "mac-831", "warn", &serde_json::json!({})).await.unwrap();
+        let other = crate::testing::arm_app_foreign_writer(&e.app, "incident_resolve_after_read", "mac-831");
+
+        let resolved = resolve_incident_notifying(p, "host_disconnected", "mac-831", true)
+            .await
+            .expect("an unrelated writer must not make the resolve fail")
+            .expect("the open incident is resolved");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the resolve holds the write lock from its read on; the other writer waits");
+        assert_eq!(resolved.status, "resolved");
+        let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='incident_resolved' AND event_key=?")
+            .bind(format!("incident:{}:resolved", resolved.id))
+            .fetch_one(p)
+            .await
+            .unwrap();
+        assert_eq!(notices, 1);
     }
 
     // ------------------------------------------------ issue #421：重申請不再累積 pending

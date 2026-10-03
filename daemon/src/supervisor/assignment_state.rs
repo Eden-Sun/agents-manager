@@ -199,7 +199,8 @@ pub fn guard_ddl() -> String {
 /// DB 裡那一份跟現在的轉移表不同就換掉（issue #186）：以前 `IF NOT EXISTS` 只建一次，表改了舊 DB 永遠停在舊規則。
 /// DROP 與重建在同一個交易裡，換到一半失敗不會留下沒有守衛的空窗。
 pub async fn install_guard(pool: &SqlitePool) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    // `sync_trigger` 先讀現在那一份再換：deferred 的話讀完之後別的 writer 一 commit，DROP 就 517，daemon 起不來（#831）。
+    let mut tx = crate::db::begin_write(pool).await?;
     crate::db::sync_trigger(&mut tx, "supervisor_assignments_status_transition", &guard_ddl()).await?;
     tx.commit().await?;
     Ok(())
@@ -261,6 +262,26 @@ pub async fn set_status_on(conn: &mut SqliteConnection, id: &str, from: Assignme
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #831：裝守衛讀完現在那一份、還沒換的那一瞬，另一個 writer commit 了一筆。deferred 交易這時 DROP 直接 517，
+    /// daemon 起不來；寫鎖從讀之前就拿著，對方等，守衛照樣裝上。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_trigger_read_and_the_swap_does_not_fail_the_install() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-831-guard-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = crate::db::open(&dir.join("t.sqlite3")).await.unwrap();
+        sqlx::query("DROP TRIGGER supervisor_assignments_status_transition").execute(&p).await.unwrap();
+        let key = crate::db::file_key(&mut *p.acquire().await.unwrap()).await;
+        let other = crate::testing::arm_foreign_writer(std::path::Path::new(&key), "sync_trigger_after_read", &key);
+
+        install_guard(&p).await.expect("an unrelated writer must not fail the guard install");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the install holds the write lock from its read on; the other writer waits");
+        let installed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='supervisor_assignments_status_transition'")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(installed, 1);
+    }
 
     /// issue #71 點名的兩條：結案的工作不可以被弄活過來。
     #[test]

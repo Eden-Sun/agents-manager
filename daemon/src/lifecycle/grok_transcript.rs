@@ -363,8 +363,11 @@ async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &
                 return Ok(false);
             }
             let conv = db::conversation_id(&app.db, &bot.id).await?;
-            let mut tx = app.db.begin().await?;
+            // 先讀狀態再寫回覆：deferred 的話讀完之後別的 writer 一 commit 就 517，回覆補不上（#831）。
+            let mut tx = db::begin_write(&app.db).await?;
             let status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
+            #[cfg(test)]
+            super::race_point::hit("grok_transcript_after_replay_status_read", turn_id).await;
             if status == "in_flight" {
                 turn_controller::set_status_on(&mut tx, turn_id, "in_flight", "completed", "grok chat_history.jsonl").await?;
             }
@@ -389,7 +392,9 @@ async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &
             })
         });
     let conv = db::conversation_id(&app.db, &bot.id).await?;
-    let mut tx = app.db.begin().await?;
+    // 已經收好的回合（`completed_fallback`、使用者那句已是原文）第一句是讀它的回覆、之後才寫：deferred 的話讀完之後
+    // 別的 writer 一 commit 就 517，這一問這一輪記不進去（#831）。
+    let mut tx = db::begin_write(&app.db).await?;
     let mut added: Vec<db::Message> = Vec::new();
     let turn_id = match matched {
         Some((t, users)) => {
@@ -420,6 +425,8 @@ async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &
                         .bind(&t.id)
                         .fetch_all(&mut *tx)
                         .await?;
+                #[cfg(test)]
+                super::race_point::hit("grok_transcript_after_reply_read", &t.id).await;
                 match replies.first() {
                     None => added.push(insert_message_tx(&mut tx, &conv, Some(&t.id), "assistant", reply, "transcript", false, None).await?),
                     // 備援抓的（折行、`…` 截斷）換成原文，id 不變；hook 寫的不動。
