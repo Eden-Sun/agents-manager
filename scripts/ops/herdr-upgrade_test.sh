@@ -146,5 +146,13 @@ check_eq "假 wc 真的會補空白（測試有效）" "       3" "$(PATH="$ROOT
 # 腳本裡不再有直接把 wc -l 塞進字串的地方。
 if grep -n 'wc -l' "$SCRIPT" | grep -v 'count_lines\|tr -d' | grep -q .; then bad "還有沒處理前導空白的 wc -l"; else ok "沒有裸的 wc -l 進字串"; fi
 
+# resume 非 2xx 必須讓整支腳本失敗。只寫 log 再 finish OK 時，DB 裡還標 running 的 bot 會被當成已經接回。
+if grep -A 12 'POST "/api/services/herdr-upgrade/resume/' "$SCRIPT" | grep -q 'resume_fail=1' \
+  && grep -q 'resume 有呼叫失敗' "$SCRIPT"; then
+  ok "resume 非 2xx 會讓升級失敗"
+else
+  bad "resume 非 2xx 會讓升級失敗"
+fi
+
 echo "herdr-upgrade_test: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" = 0 ]

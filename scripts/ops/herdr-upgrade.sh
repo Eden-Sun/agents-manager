@@ -201,11 +201,17 @@ svc GET /api/supervisor/health 2>/dev/null | grep -Eq '"daemon": *\{"connected":
 log "daemon reconnected"
 
 # ---------------------------------------------------------------- 7. 帶 resume 把 bot 接回來
+resume_fail=0
 while IFS='|' read -r id name kind managed state status pane sid; do
   [ -n "$id" ] || continue
   code=$(svc_code POST "/api/services/herdr-upgrade/resume/$id" "$SNAP/resume-$id.json")
   log "resume $name ($kind, $managed, sid=${sid:-none}) → HTTP $code $(head -c 160 "$SNAP/resume-$id.json")"
+  case "$code" in
+    2*) ;;
+    *) resume_fail=1 ;;
+  esac
 done < "$SNAP/running.tsv"
+[ "$resume_fail" = 0 ] || finish FAIL "resume 有呼叫失敗（見 log），沒有把升級當成成功"
 
 # ---------------------------------------------------------------- 8. 驗證
 sleep 30
