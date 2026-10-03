@@ -13044,3 +13044,7 @@ mod host_target_tests {
         assert_eq!(e.app.cfg.get().await.hosts.len(), before, "什麼都沒寫");
     }
 }
+
+#[cfg(test)]
+#[path = "bot_scope_matrix.rs"]
+mod bot_scope_matrix;
