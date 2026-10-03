@@ -44,7 +44,7 @@ OWNER="${AM_AGENT_NAME:-daemon-update-kick}"
 GIT="${GIT_BIN:-/usr/bin/git}"
 GH="${GH_BIN:-gh}"
 BUN="${BUN_BIN:-bun}"
-CARGO="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
+CARGO=cargo
 SWAP="${AGM_SWAP_SCRIPT:-$DEPLOY/scripts/ops/daemon-swap.sh}"   # 從要換上的那顆 checkout 跑（不裝到 AGM 目錄）
 NICE="${NICE_BIN:-nice}"
 
@@ -319,7 +319,7 @@ else
   log "建置 ${SHORT}：web"
   ( cd "$DEPLOY/web" && "$BUN" install --frozen-lockfile && "$BUN" run build ) >> "$LOG" 2>&1 || { note_fail "web 建置失敗（${SHORT}）"; exit 0; }
   log "建置 ${SHORT}：daemon（cargo build --release）"
-  ( cd "$DEPLOY" && AM_REAL_CARGO="$CARGO" PATH="$(dirname "$CARGO"):$PATH" "$NICE" -n 10 "$CARGO" build --release -p agents-managerd ) >> "$LOG" 2>&1 \
+  ( cd "$DEPLOY" && CARGO_BUILD_JOBS=2 "$NICE" -n 19 "$CARGO" build --release -p agents-managerd ) >> "$LOG" 2>&1 \
     || { note_fail "cargo build 失敗（${SHORT}）"; exit 0; }
   [ -x "$DEPLOY/target/release/agents-managerd" ] || { note_fail "cargo build 沒產出 binary（${SHORT}）"; exit 0; }
   echo "$TARGET" > "$BUILD_MARK"
