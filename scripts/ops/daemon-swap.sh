@@ -727,10 +727,17 @@ print(status.strip())'
 PRE_SUP=$(read_supervisor_status 2>/dev/null) || PRE_SUP=""
 log "supervisor status before swap: ${PRE_SUP:-讀不到}"
 
+# Check the same-second recovery filename while the old daemon is still available. If this path
+# already exists, abort and return the lease before any stop/move can leave the service offline.
+PREV="target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)"
+if [ -e "$PREV" ]; then
+    log "ABORT: $PREV 已存在"
+    release_window "上一趟的 PREV binary 已存在" || true
+    exit 5
+fi
+
 OLDPID=$(dpid); log "old pid $OLDPID"
 stop_daemon "$OLDPID"
-PREV="target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)"
-[ -e "$PREV" ] && { log "ABORT: $PREV 已存在"; exit 5; }
 mv target/release/agents-managerd "$PREV"
 cp "$NEWBIN" target/release/agents-managerd
 start
