@@ -52,7 +52,12 @@ impl GithubInfo {
 }
 
 fn valid_owner(owner: &str) -> bool {
-    !owner.is_empty() && owner.len() <= 39 && !owner.starts_with('-') && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !owner.is_empty()
+        && owner.len() <= 39
+        && !owner.starts_with('-')
+        && !owner.ends_with('-')
+        && !owner.contains("--")
+        && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 fn valid_repo_name(repo: &str) -> bool {
@@ -84,12 +89,13 @@ pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
             host_path.strip_prefix('/').or_else(|| host_path.strip_prefix(':'))?
         }
     };
-    let mut parts = rest.trim_end_matches('/').splitn(3, '/');
+    let mut parts = rest.trim_end_matches('/').split('/');
     let owner = parts.next()?.trim();
     let repo = parts.next()?.trim().trim_end_matches(".git").trim();
     // 這兩段來自 repo 自己的 `.git/config`（不可信）：會拼進 `--repo`、API 路徑與給網頁的連結。照 GitHub 的規則收：
-    // owner 只有英數與 `-`（不以 `-` 開頭）、repo 只有英數與 `._-`。空白、引號、`<>`、開頭的 `-` 都不是合法的 GitHub 名字。
-    if !valid_owner(owner) || !valid_repo_name(repo) {
+    // owner 只有英數與單一 `-`（不以 `-` 開頭／結尾、不可連續），repo 只有英數與 `._-`。
+    // 空白、引號、`<>`、開頭 `-` 或額外 URL path 都不是合法的 GitHub repository。
+    if parts.next().is_some() || !valid_owner(owner) || !valid_repo_name(repo) {
         return None;
     }
     Some(GithubInfo { owner: owner.into(), repo: repo.into(), url: format!("https://github.com/{owner}/{repo}") })
@@ -237,7 +243,11 @@ fn gh_error(e: impl std::fmt::Display) -> LcError {
         "GitHub 上找不到（repo 或 issue 不存在，或這個帳號看不到它）"
     } else if low.contains("auth login") || low.contains("not logged") || low.contains("authentication") || low.contains("http 401") || low.contains("bad credentials") {
         "gh 未登入（gh auth login）"
-    } else if low.contains("command not found") || low.contains("no such file") || low.contains("executable file not found") {
+    } else if low.contains("command not found")
+        || low.contains("gh: not found")
+        || low.contains("no such file")
+        || low.contains("executable file not found")
+    {
         "gh 未安裝（brew install gh）"
     } else {
         "gh 指令失敗"
@@ -427,6 +437,8 @@ mod tests {
     fn a_remote_with_a_hostile_owner_or_repo_name_is_not_a_github_project() {
         for u in [
             "https://github.com/-evil/repo",
+            "https://github.com/evil-/repo",
+            "https://github.com/ev--il/repo",
             "https://github.com/owner/-repo",
             "https://github.com/ow ner/repo",
             "git@github.com:owner/re\"po.git",
@@ -442,6 +454,17 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_remote_must_not_have_extra_web_path_components() {
+        for u in [
+            "https://github.com/owner/repo/tree/main",
+            "https://github.com/owner/repo/issues/12",
+            "git@github.com:owner/repo/../other",
+        ] {
+            assert!(parse_github_remote(u).is_none(), "a browser/subpath URL is not an origin: {u}");
+        }
+    }
+
+    #[test]
     fn gh_failures_are_told_apart_and_long_output_is_capped() {
         let msg = |s: &str| match gh_error(s) {
             LcError::Upstream(m) => m,
@@ -452,6 +475,7 @@ mod tests {
         assert!(!msg("GraphQL: Could not resolve to an Issue with the number of 9999.").contains("未安裝"), "找不到 issue 不是 gh 沒安裝");
         assert!(msg("To get started with GitHub CLI, please run:  gh auth login").contains("未登入"));
         assert!(msg("sh: gh: command not found").contains("未安裝"));
+        assert!(msg("/bin/sh: 1: gh: not found").contains("未安裝"), "dash 的 command-not-found 文案應辨識成 gh 未安裝");
         assert!(msg("something odd").contains("gh 指令失敗"));
         let huge = "x".repeat(50_000);
         assert!(msg(&huge).chars().count() < 600, "錯誤訊息要截斷");

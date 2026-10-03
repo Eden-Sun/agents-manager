@@ -77,9 +77,9 @@ pub fn check_project_label(label: &str) -> Result<(), LcError> {
     Ok(())
 }
 
-/// 本機專案路徑：只收絕對路徑（或 `~`、`~/…`）。相對路徑會相對於 **daemon 自己的工作目錄**解開（`.` 就是 daemon 所在的 repo），
-/// 那不是使用者的意思。解開 symlink 與 `..` 由 `canonical_path` 做；這裡再要求它是目錄（檔案當不了 bot 的工作目錄）。
-pub fn check_local_project_path(raw: &str) -> Result<(), LcError> {
+/// 專案路徑不分主機只收絕對路徑（或 `~`、`~/…`）。相對路徑在本機會以 daemon 工作目錄為基準，遠端則會以 SSH 登入目錄為基準，
+/// 兩種都不是使用者提供的專案位置。目錄存在與 canonicalize 仍由本機／遠端的 host-specific 路徑處理。
+pub fn check_project_path(raw: &str) -> Result<(), LcError> {
     let p = raw.trim();
     if p.is_empty() {
         return Err(LcError::Bad("project path must not be empty".into()));
@@ -141,10 +141,10 @@ mod tests {
         assert!(bad(check_project_label(&"長".repeat(65))));
         assert!(check_project_label("agents-manager 專案").is_ok());
         for p in ["", "  ", ".", "..", "foo/bar", "./x", "a\0b"] {
-            assert!(bad(check_local_project_path(p)), "{p:?}");
+            assert!(bad(check_project_path(p)), "{p:?}");
         }
         for p in ["/tmp", "~", "~/project/x"] {
-            assert!(check_local_project_path(p).is_ok(), "{p:?}");
+            assert!(check_project_path(p).is_ok(), "{p:?}");
         }
         assert!(bad(check_args(&["a\0".into()])));
         assert!(check_args(&["--append-system-prompt".into(), "line1\nline2".into()]).is_ok());

@@ -78,16 +78,67 @@ pub fn parse_prompt(screen: &str) -> Option<Prompt> {
 /// 非互動方框（底下就是正常的輸入列）與對話裡引用選單原文（後面接著輸入列）都不算。
 pub fn update_menu_open(screen: &str) -> bool {
     const TAIL_LINES: usize = 16;
-    // 最後一個非空的**原始**行要是 `Press enter to continue`：`body` 會把行首的 `›`／`>` 洗掉，引用選單、或選單底下真的有輸入列
-    // （`› `）時，不看原始行就分不出來。
+    // Footer 與選項要取自同一個目前選單：若只在整個 viewport 搜尋，舊的引用選單加上新的啟動選單會拼成假陽性。
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    let last_is_footer = raw.last().is_some_and(|l| lower(&body(l)).starts_with("press enter to continue") && !l.trim_start().starts_with('>'));
-    let lines: Vec<String> = screen.lines().map(body).filter(|l| !l.is_empty()).map(|l| lower(&l)).collect();
-    let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
-    last_is_footer
-        && tail.iter().any(|l| l.starts_with("1. update now"))
-        && tail.iter().any(|l| l.starts_with("2. skip"))
-        && tail.iter().any(|l| l.starts_with("update available"))
+    let Some(footer) = raw.last() else { return false };
+    let footer_prefix = footer.trim_start().chars().next();
+    if lower(&body(footer)) != "press enter to continue" || matches!(footer_prefix, Some('>' | '›' | '❯')) {
+        return false;
+    }
+
+    let start = raw.len().saturating_sub(TAIL_LINES);
+    let choices: Vec<(usize, String, bool, bool)> = raw[start..raw.len() - 1]
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, line)| {
+            let normalized = lower(&body(line));
+            let digits: String = normalized.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() || digits.len() > 2 {
+                return None;
+            }
+            let rest = normalized[digits.len()..].strip_prefix('.')?.trim_start();
+            if rest.is_empty() {
+                return None;
+            }
+            let raw = line.trim_start();
+            let cursor = raw.starts_with('›') || raw.starts_with('❯');
+            let quoted = raw.starts_with('>');
+            Some((start + offset, format!("{}. {rest}", digits.parse::<u8>().ok()?), cursor, quoted))
+        })
+        .collect();
+    let Some((last_at, _last, _, last_quoted)) = choices.last() else { return false };
+    if *last_quoted || raw.len() - 1 - *last_at != 1 {
+        return false;
+    }
+
+    // 版本更新選單的末兩項足夠辨認一個頂端被捲走的畫面；如果只剩 1／2，則也要看到更新橫幅。
+    // 同時取最近的選項列，避免從早先的對話引文借用 1. Update now 或 2. Skip。
+    if choices.len() < 2 {
+        return false;
+    }
+    let prev = &choices[choices.len() - 2];
+    let latest = &choices[choices.len() - 1];
+    let pair_is_2_3 = !prev.3 && !latest.3 && prev.1.starts_with("2. skip") && latest.1.starts_with("3. skip until next version");
+    let pair_is_1_2 = !prev.3 && !latest.3 && prev.1.starts_with("1. update now") && latest.1.starts_with("2. skip");
+    if !pair_is_1_2 && !pair_is_2_3 {
+        return false;
+    }
+    let full_menu = pair_is_2_3
+        && choices.len() >= 3
+        && !choices[choices.len() - 3].3
+        && choices[choices.len() - 3].1.starts_with("1. update now");
+    let first_at = if full_menu { choices[choices.len() - 3].0 } else { prev.0 };
+    let cursor_count = choices.iter().rev().take(if full_menu { 3 } else { 2 }).filter(|choice| choice.2).count();
+    if full_menu || pair_is_2_3 {
+        return true;
+    }
+    if cursor_count != 1 {
+        return false;
+    }
+
+    raw[start..first_at].iter().any(|line| {
+        !line.trim_start().starts_with('>') && lower(&body(line)).starts_with("update available")
+    })
 }
 
 /// 擋下 prompt 時給使用者的話。
@@ -279,8 +330,23 @@ mod tests {
         assert!(!update_menu_open(BOXED), "非互動方框：底下就是輸入列");
         let quoted: String = MENU.lines().map(|l| format!("  > {l}\n")).collect::<String>() + "\n› \n";
         assert!(!update_menu_open(&quoted), "對話裡引用選單：後面接著輸入列");
-        assert!(!update_menu_open("› 1. Update now\n  2. Skip\n\n  Press enter to continue\n"), "沒有 Update available 那一句不算");
+        assert!(!update_menu_open("› 1. Continue\n  2. Cancel\n\n  Press enter to continue\n"), "其他啟動選單不算更新選單");
         assert!(!update_menu_open(""));
+    }
+
+    #[test]
+    fn a_scrolled_update_menu_stays_blocked_when_its_banner_is_above_the_capture() {
+        let partial = MENU.lines().skip_while(|line| !line.trim_start().starts_with("› 1. Update now")).collect::<Vec<_>>().join("\n");
+        assert!(update_menu_open(&partial), "更新橫幅捲出畫面後仍不能把 prompt 或 Enter 打進預設選項");
+    }
+
+    #[test]
+    fn an_older_quoted_update_menu_does_not_misclassify_a_new_startup_menu() {
+        let earlier = MENU.lines().map(|line| format!("  > {line}")).collect::<Vec<_>>().join("\n");
+        let screen = format!(
+            "⏺ Earlier output quoted the update menu:\n{earlier}\n\n› 1. Continue\n  2. Cancel\n\nPress enter to continue\n"
+        );
+        assert!(!update_menu_open(&screen), "分類必須依照 footer 上方目前開著的選單，不能借舊引文的標題與選項");
     }
 
     #[test]

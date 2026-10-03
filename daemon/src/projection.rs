@@ -262,6 +262,8 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
         if !crate::config::valid_kind(&i.kind) {
             bail!("invalid identity kind `{}` (must be {})", i.kind, crate::config::kinds_list());
         }
+        crate::bot_input::check_env(&i.env).map_err(|e| anyhow::Error::msg(format!("identity `{}`: {e:?}", i.name)))?;
+        crate::bot_input::check_args(&i.args).map_err(|e| anyhow::Error::msg(format!("identity `{}`: {e:?}", i.name)))?;
     }
     for p in &cfg.projects {
         if let Some(id) = p.id.as_deref() {
@@ -285,6 +287,8 @@ fn check(cfg: &crate::config::ConfigFile) -> Result<()> {
             if !crate::config::valid_kind(&b.kind) {
                 bail!("invalid bot kind `{}` (must be {})", b.kind, crate::config::kinds_list());
             }
+            crate::bot_input::check_env(&b.env).map_err(|e| anyhow::Error::msg(format!("bot `{}`: {e:?}", b.name)))?;
+            crate::bot_input::check_args(&b.args).map_err(|e| anyhow::Error::msg(format!("bot `{}`: {e:?}", b.name)))?;
             if let Some(idn) = b.identity.as_deref().filter(|s| !s.is_empty()) {
                 // A host's shell `ccN` alias is a legal binding too (API.md §10.2: the
                 // identity list is `[[identities]]` ∪ that host's `ccN`); the config never
@@ -1381,6 +1385,53 @@ mod tests {
             assert!(error.contains("invalid bot id"), "{error}");
             assert!(error.contains("worker") && error.contains("demo"), "{error}");
         }
+    }
+
+    #[test]
+    fn projection_rejects_reserved_env_and_nul_args_from_hand_edited_config() {
+        let mut cfg = crate::config::ConfigFile::default();
+        cfg.identities.push(crate::config::IdentityCfg {
+            name: "cc1".into(),
+            kind: "claude".into(),
+            host: None,
+            env: [("AM_RUN_ID".into(), "forged".into())].into(),
+            args: vec![],
+        });
+        assert!(validate(&cfg).is_err(), "身份 env 不得藉由手改 TOML 覆蓋 daemon 的 AM_* 狀態");
+        cfg.identities[0].env.clear();
+        cfg.identities[0].args.push("--flag\0injected".into());
+        assert!(validate(&cfg).is_err(), "身份 args 也不可把 NUL 帶進啟動 argv");
+
+        cfg.identities.clear();
+        cfg.projects.push(crate::config::ProjectCfg {
+            id: Some("p1".into()),
+            path: "/tmp".into(),
+            label: "demo".into(),
+            host: "local".into(),
+            bots: vec![crate::config::BotCfg {
+                id: Some("b1".into()),
+                name: "worker".into(),
+                kind: "claude".into(),
+                model: None,
+                effort: None,
+                fast: false,
+                persona: None,
+                args: vec![],
+                autostart: false,
+                inject_hooks: true,
+                auto_approve: true,
+                identity: None,
+                env: [("AM_RUN_ID".into(), "forged".into())].into(),
+                herdr_session: None,
+                create_request_id: None,
+                create_fingerprint: None,
+            }],
+            handed_off_to: None,
+        });
+        assert!(validate(&cfg).is_err(), "BotCfg env 也必須套用 API 的保留鍵驗證");
+        cfg.projects[0].bots[0].env.clear();
+        cfg.projects[0].bots[0].args.push("--flag\0injected".into());
+        assert!(validate(&cfg).is_err(), "BotCfg args 也必須拒絕 NUL");
     }
 
     // ---- issue #406 ----

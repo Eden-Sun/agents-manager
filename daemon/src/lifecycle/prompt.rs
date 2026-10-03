@@ -2035,6 +2035,25 @@ mod prompt_tests {
         assert_eq!(status, "blocked", "herdr 判 idle 時也要顯示 blocked，網頁才看得到要去處理");
     }
 
+    #[tokio::test]
+    async fn a_scrolled_codex_update_menu_is_never_answered_by_a_prompt() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        let menu = include_str!("fixtures/codex-0.155-update-menu.txt");
+        let partial = menu.lines().skip_while(|line| !line.trim_start().starts_with("› 1. Update now")).collect::<Vec<_>>().join("\n");
+        f.env.herdr.set_screen("pane-prompt-test", &partial);
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+
+        match pane_ready_for_prompt(&app, &bot, &run, &f.conv).await.unwrap_err() {
+            LcError::Conflict(body) => assert_eq!(body["reason"], "dialog_open", "{body}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "更新選單上絕不按鍵");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty(), "更新選單上絕不送 prompt");
+    }
+
     /// 非互動的更新方框（底下就是正常的輸入列）與對話裡引用選單原文，都不是擋路的對話框。
     #[tokio::test]
     async fn codex_update_banner_or_a_quoted_menu_does_not_block_delivery() {

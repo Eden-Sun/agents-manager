@@ -921,14 +921,20 @@ export function toSubmodules(raw: unknown): ProjectSubmodule[] {
 
 export function toIssues(raw: unknown): Issue[] {
   const root = isRec(raw) ? raw : {}
-  return arr(pick(root, 'issues')).map(toIssue).filter((i): i is Issue => i !== null)
+  const content_notice = str(pick(root, 'content_notice'))
+  return arr(pick(root, 'issues'))
+    .map(toIssue)
+    .filter((i): i is Issue => i !== null)
+    .map((issue) => content_notice ? { ...issue, content_notice } : issue)
 }
 
 export function toIssueDetail(raw: unknown): IssueDetail | null {
-  const root = isRec(raw) && isRec(root_issue(raw)) ? root_issue(raw) : raw
-  const base = toIssue(root)
+  const envelope = isRec(raw) ? raw : null
+  const issueRaw = envelope && isRec(root_issue(envelope)) ? root_issue(envelope) : raw
+  const base = toIssue(issueRaw)
   if (!base) return null
-  return { ...base, body: isRec(root) ? str(pick(root, 'body')) : '' }
+  const notice = envelope ? str(pick(envelope, 'content_notice')) : ''
+  return { ...base, body: isRec(issueRaw) ? str(pick(issueRaw, 'body')) : '', ...(notice ? { content_notice: notice } : {}) }
 }
 
 function root_issue(raw: Record<string, unknown>): unknown {

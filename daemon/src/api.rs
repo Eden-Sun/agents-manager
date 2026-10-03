@@ -1097,15 +1097,15 @@ async fn create_project(State(app): State<Arc<App>>, Json(b): Json<NewProject>) 
     if let Some(l) = b.label.as_deref() {
         crate::bot_input::check_project_label(l.trim())?;
     }
+    crate::bot_input::check_project_path(&b.path)?;
     let path = if host == LOCAL_HOST {
-        crate::bot_input::check_local_project_path(&b.path)?;
         let canonical = canonical_path(b.path.trim()).map_err(|e| LcError::Bad(e.to_string()))?;
         crate::bot_input::check_is_dir(&canonical)?;
         canonical
     } else {
         // SPEC §11.6.
         let conn = app.hosts.get(&host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
-        crate::hosts::remote_canonical_dir(&conn, &b.path)
+        crate::hosts::remote_canonical_dir(&conn, b.path.trim())
             .await
             .map_err(|e| LcError::Bad(format!("{e:#}")))?
     };
@@ -3719,7 +3719,8 @@ fn check_env_names(env: &BTreeMap<String, String>) -> Result<(), LcError> {
 }
 
 async fn create_identity(State(app): State<Arc<App>>, Json(b): Json<NewIdentity>) -> Result<Response, LcError> {
-    check_env_names(&b.env)?;
+    crate::bot_input::check_env(&b.env)?;
+    crate::bot_input::check_args(&b.args)?;
     if !valid_identity_name(&b.name) {
         return Err(LcError::Bad(format!("identity name must match {}", crate::config::SLUG_NAME_RE)));
     }
@@ -7357,6 +7358,9 @@ mod bot_config_tests {
             assert!(matches!(r, Err(LcError::Bad(_))), "{path} {label:?}: {r:?}");
         }
         assert!(create(dir.to_string_lossy().into_owned(), Some("fine 專案")).await.is_ok());
+        let remote_relative = NewProject { path: "relative/dir".into(), label: None, host: Some("unconfigured-remote".into()) };
+        let remote_err = create_project(State(e.app.clone()), Json(remote_relative)).await.unwrap_err();
+        assert!(matches!(&remote_err, LcError::Bad(message) if message.contains("absolute")), "遠端專案也要先拒絕相對路徑：{remote_err:?}");
         let pid = e.app.cfg.get().await.projects.last().and_then(|p| p.id.clone()).unwrap();
         let r = patch_project(State(e.app.clone()), Path(pid), Json(serde_json::from_value(json!({"label": "a\u{1b}b"})).unwrap())).await;
         assert!(matches!(r, Err(LcError::Bad(_))), "{r:?}");
@@ -7528,13 +7532,45 @@ mod bot_config_tests {
             let err = add(&e, json!({"name": "ebad", "kind": "claude", "env": { bad: "1" }})).await.unwrap_err();
             assert!(reason(err).contains(&format!("`{bad}`")), "新 bot：{bad:?}");
         }
+        let err = create_identity(State(e.app.clone()), Json(identity(json!({"AM_RUN_ID": "forged-run"}))))
+            .await
+            .expect_err("身份 env 不能覆蓋由 daemon 管理的 AM_* 狀態");
+        assert!(reason(err).contains("reserved"), "identity.env: AM_RUN_ID 應回 400 reserved");
+        let nul_args = NewIdentity {
+            name: "cc10".into(),
+            kind: "claude".into(),
+            env: BTreeMap::new(),
+            args: vec!["--flag\0injected".into()],
+            host: None,
+        };
+        let err = create_identity(State(e.app.clone()), Json(nul_args))
+            .await
+            .expect_err("identity args 也會成為 bot 啟動 argv，必須拒絕 NUL");
+        assert!(reason(err).contains("NUL"), "identity.args 的錯誤要指出 NUL");
         assert!(e.app.cfg.get().await.identities.iter().all(|i| i.name != "cc9"), "被拒的身份什麼都沒存");
+        assert!(e.app.cfg.get().await.identities.iter().all(|i| i.name != "cc10"), "含 NUL args 的身份什麼都沒存");
         let id = add(&e, json!({"name": "eok", "kind": "claude"})).await.unwrap();
         let err = patch(&e, &id, json!({"env": {"BAD NAME": "1"}})).await.unwrap_err();
         assert!(reason(err).contains("`BAD NAME`"), "patch bot");
         // 合法的照收。
         assert!(create_identity(State(e.app.clone()), Json(identity(json!({"CLAUDE_CONFIG_DIR": "$HOME/.claude-cc9", "_X1": "y"})))).await.is_ok());
         assert!(patch(&e, &id, json!({"env": {"GOOD_NAME": "1"}})).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn identity_args_reject_nul_before_persistence() {
+        let e = env().await;
+        seed_project(&e).await;
+        let input = NewIdentity {
+            name: "cc-nul".into(),
+            kind: "claude".into(),
+            env: BTreeMap::new(),
+            args: vec!["--flag\0injected".into()],
+            host: None,
+        };
+        let err = create_identity(State(e.app.clone()), Json(input)).await.unwrap_err();
+        assert!(matches!(&err, LcError::Bad(message) if message.contains("NUL")), "identity args 要拒絕 NUL：{err:?}");
+        assert!(e.app.cfg.get().await.identities.iter().all(|identity| identity.name != "cc-nul"), "被拒的身份不能落設定");
     }
 
     // ───────── 目錄瀏覽（DirPicker 背後的 `/fs/dirs`）的安全審查 ─────────
