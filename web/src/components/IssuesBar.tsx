@@ -6,6 +6,7 @@ import type { Issue, ProjectSubmodule } from '../api/types'
 import { useStore } from '../store/store'
 import type { DraftKey } from '../store/store'
 import { labelStyle } from '../lib/labelStyle'
+import { formatGithubIssuePrompt } from '../lib/githubIssuePrompt'
 import { GhLoginButton } from './GhAuth'
 import { isGhAuthError } from './ghAuthError'
 import { ISSUE_PAGE_LIMIT, openCountFromPage } from '../lib/issueCount'
@@ -183,15 +184,14 @@ export function IssuesBar({ projectId, draftKey, inputRef }: { projectId: string
     setOpen(false)
   }
 
-  const insertRef = (i: Issue) => insert(`#${i.number} ${i.title}\n${i.url}`)
+  const insertRef = (i: Issue) => insert(formatGithubIssuePrompt(i))
 
   const insertFull = async (i: Issue) => {
     setFetching(i.number)
     try {
       const d = await api.fetchIssue(projectId, i.number, repo)
-      const body = (d?.body ?? '').trim()
-      const quoted = body ? body.split('\n').map((l) => `> ${l}`).join('\n') : '> （沒有內容）'
-      insert(`#${i.number} ${i.title}\n${i.url}\n${quoted}`)
+      const body = (d?.body ?? '').trim() || '（沒有內容）'
+      insert(formatGithubIssuePrompt({ ...i, content_notice: d?.content_notice ?? i.content_notice }, body))
     } catch (e) {
       notify('error', `讀取 #${i.number} 失敗：${errorText(e)}`)
     } finally {

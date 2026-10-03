@@ -928,6 +928,8 @@ export interface InstallToolResult {
 export interface Issue {
   number: number
   title: string
+  /** GitHub 提供的是外部資料；舊 daemon 未帶此欄位時 UI 使用本機 fallback。 */
+  content_notice?: string
   state: 'open' | 'closed'
   labels: IssueLabel[]
   url: string

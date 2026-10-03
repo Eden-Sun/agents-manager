@@ -437,14 +437,28 @@ pub fn permission_prompt(screen: &str) -> Option<String> {
         return None;
     }
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    let window = &raw[raw.len().saturating_sub(30)..];
+    let menu_start = raw.len().saturating_sub(CHOICE_MENU_TAIL_LINES);
+    let tail = &raw[menu_start..];
+    let (first_choice, _) = open_choice_menu(tail)?;
+    let first_choice = menu_start + first_choice;
+    let window_start = raw.len().saturating_sub(30);
+    let window = &raw[window_start..first_choice];
     let rule = window.iter().rposition(|l| {
         let t = l.trim();
         t.chars().count() >= 10 && t.chars().all(|c| c == '─')
     })?;
     let title_line = window.get(rule + 1)?;
-    // 標題後面（選單之前）要有那句問題。
-    if !window[rule + 1..].iter().any(|l| norm_line(l).starts_with("do you want to")) {
+    // 標題與問題必須屬於目前選項列的同一個 permission menu。若標題在上個回合的引用裡，
+    // 兩者之間會有那份舊選單的連續選項列；不能借舊標題替新 menu 填工具名。只有一般命令預覽裡恰好一行 `1. …`
+    // 不夠證明是另一份選單，因此要求連號選項且恰好一個游標。
+    let preceding_rows: Vec<(usize, u32, bool)> = window[rule + 2..]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| menu_row(line).map(|(n, cursor)| (i, n, cursor)))
+        .collect();
+    let has_previous_menu = preceding_rows.windows(2).any(|pair| pair[1].1 == pair[0].1 + 1)
+        && preceding_rows.iter().filter(|(_, _, cursor)| *cursor).count() == 1;
+    if has_previous_menu || !window[rule + 2..].iter().any(|l| norm_line(l).starts_with("do you want to")) {
         return None;
     }
     // `Read file                  1 of 3`：標題與計數之間隔著一大段空白，只取前半。
@@ -1541,6 +1555,17 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         // 回覆裡逐行引用權限框原文、底下是空的輸入列：不是真的框。
         let quoted = format!("⏺ 剛才停在：\n  Bash command\n  Do you want to proceed?\n  1. Yes\n  2. No\n{IDLE_CLAUDE}");
         assert_eq!(permission_prompt(&quoted), None);
+
+        // The latest permission menu can be partially scrolled so its title is gone. Do not
+        // borrow the tool name from an earlier quoted menu still visible in scrollback.
+        let earlier = PERMISSION_2287_BASH.lines().map(|line| format!("  {line}")).collect::<Vec<_>>().join("\n");
+        let write_lines: Vec<&str> = PERMISSION_2287_WRITE.lines().collect();
+        let first_choice = write_lines.iter().position(|line| line.trim_start().starts_with("❯ 1.")).expect("Write fixture choice");
+        let partial_write = write_lines[first_choice..].join("\n");
+        let screen = format!("⏺ Earlier output quoted this Bash permission menu:\n{earlier}\n\n{partial_write}");
+        assert_eq!(permission_prompt(&screen), None, "標題不在最新 menu viewport 時不能把舊引文分類成 Bash");
+        let two_visible_menus = format!("⏺ Earlier output quoted this Bash permission menu:\n{earlier}\n\n{PERMISSION_2287_WRITE}");
+        assert_eq!(permission_prompt(&two_visible_menus).as_deref(), Some("Write"));
     }
 
     /// #775：2.1.287 的 `Tool use` 框不只 MCP（WebSearch 也是）、held message 框沒有編號、多框改成最舊在上。
