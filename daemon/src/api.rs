@@ -719,6 +719,137 @@ pub(crate) enum RequestPrincipal {
     Service(String),
 }
 
+/// Management routes ordinary Bot principals must not invoke. AGM role bots can pass this
+/// boundary, then remain subject to their existing route/resource checks.
+const BOT_USER_ONLY_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/api/fs/dirs"),
+    ("GET", "/api/bots/deleted"),
+    ("GET", "/api/build/remote"),
+    ("PUT", "/api/build/remote"),
+    ("POST", "/api/build/remote/test"),
+    ("POST", "/api/build/remote/install-toolchain"),
+    ("GET", "/api/judge/settings"),
+    ("PUT", "/api/judge/settings"),
+    ("GET", "/api/judge/shadow"),
+    ("GET", "/api/claude-update/review"),
+    ("POST", "/api/claude-update/review"),
+    ("POST", "/api/bots/{id}/credential/rotate"),
+    ("POST", "/api/bots/{id}/keys"),
+    ("POST", "/api/bots/{id}/text"),
+    ("POST", "/api/bots/restart-idle"),
+    ("PATCH", "/api/bots/{id}"),
+    ("DELETE", "/api/bots/{id}"),
+    ("POST", "/api/bots/{id}/start"),
+    ("POST", "/api/bots/{id}/restart"),
+    ("POST", "/api/bots/{id}/fork"),
+    ("POST", "/api/bots/{id}/promote"),
+    ("POST", "/api/bots/{id}/stop"),
+    ("POST", "/api/bots/{id}/rewind"),
+    ("POST", "/api/bots/{id}/interrupt"),
+    ("POST", "/api/bots/{id}/login"),
+    ("POST", "/api/bots/{id}/abort"),
+    ("POST", "/api/bots/{id}/pane/move-to-tab"),
+    ("POST", "/api/bots/{id}/attachments"),
+    ("POST", "/api/bots/{id}/read"),
+    ("POST", "/api/bots/{id}/restore"),
+    ("POST", "/api/bots/{id}/preview"),
+    ("DELETE", "/api/bots/{id}/preview"),
+    ("POST", "/api/projects"),
+    ("PATCH", "/api/projects/{id}"),
+    ("DELETE", "/api/projects/{id}"),
+    ("POST", "/api/projects/{id}/bots"),
+    ("POST", "/api/projects/{id}/github/refresh"),
+    ("POST", "/api/projects/{id}/git/commit"),
+    ("POST", "/api/projects/{id}/git/push"),
+    ("POST", "/api/projects/{id}/git/pull"),
+    ("POST", "/api/projects/{id}/group/read"),
+    ("POST", "/api/order"),
+    ("POST", "/api/hosts"),
+    ("DELETE", "/api/hosts/{name}"),
+    ("POST", "/api/hosts/{name}/reconnect"),
+    ("POST", "/api/hosts/{name}/tools/refresh"),
+    ("POST", "/api/hosts/{name}/tools/install"),
+    ("POST", "/api/hosts/{name}/identities/{identity}/login"),
+    ("POST", "/api/hosts/{name}/identities/{identity}/logout"),
+    ("POST", "/api/hosts/{name}/gh/login"),
+    ("POST", "/api/hosts/{name}/gh/cancel"),
+    ("GET", "/api/hosts/{name}/shells"),
+    ("GET", "/api/hosts/{name}/shells/{pane_id}/terminal"),
+    ("POST", "/api/hosts/{name}/shells"),
+    ("DELETE", "/api/hosts/{name}/shells/{pane_id}"),
+    ("POST", "/api/hosts/{name}/shells/{pane_id}/text"),
+    ("POST", "/api/hosts/{name}/shells/{pane_id}/keys"),
+    ("POST", "/api/identities"),
+    ("DELETE", "/api/identities/{name}"),
+    ("PUT", "/api/identities/{name}/disabled"),
+    ("GET", "/api/drafts"),
+    ("PUT", "/api/drafts/{key}"),
+    ("POST", "/api/panes/{id}/adopt"),
+    ("POST", "/api/panes/{id}/close"),
+    ("POST", "/api/panes/{id}/focus"),
+    ("GET", "/api/mem/processes"),
+    ("GET", "/api/mem"),
+    ("GET", "/api/mem/processes/pane"),
+    ("POST", "/api/mem/processes/kill"),
+    ("POST", "/api/missions/{id}/pause"),
+    ("POST", "/api/missions/{id}/resume"),
+    ("POST", "/api/missions/{id}/cancel"),
+    ("POST", "/api/quota/probe"),
+    ("POST", "/api/release-triage/dispatched"),
+    ("POST", "/api/release-triage/publish"),
+];
+
+/// Shared browser state, global memory/process summaries, and pane previews are User-only even
+/// for registered AGM roles. The AGM role exception below is for delegated management work, not
+/// acting as the shared UI user or browsing global workstation state.
+const BOT_STRICT_USER_ONLY_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/api/bots/deleted"),
+    ("GET", "/api/drafts"),
+    ("PUT", "/api/drafts/{key}"),
+    ("POST", "/api/bots/{id}/read"),
+    ("POST", "/api/projects/{id}/group/read"),
+    ("GET", "/api/mem"),
+    ("GET", "/api/mem/processes/pane"),
+];
+
+fn bot_route_requires_strict_user(method: &str, path: &str) -> bool {
+    let method = if method == "HEAD" { "GET" } else { method };
+    BOT_STRICT_USER_ONLY_ROUTES
+        .iter()
+        .any(|(expected_method, pattern)| *expected_method == method && route_path_matches(pattern, path))
+}
+
+fn bot_route_requires_user(method: &str, path: &str) -> bool {
+    // Axum dispatches HEAD through GET handlers, so the auth boundary must apply GET policy to
+    // HEAD before method routing can reach the same handler.
+    let method = if method == "HEAD" { "GET" } else { method };
+    BOT_USER_ONLY_ROUTES.iter().any(|(expected_method, pattern)| {
+        *expected_method == method && route_path_matches(pattern, path)
+    })
+}
+
+fn route_path_matches(pattern: &str, path: &str) -> bool {
+    let expected: Vec<_> = pattern.split('/').collect();
+    let Some(actual): Option<Vec<_>> = path.split('/').map(decode_api_path_segment).collect() else {
+        return false;
+    };
+    expected.len() == actual.len()
+        && expected.iter().zip(&actual).all(|(expected, actual)| {
+            (expected.starts_with('{') && expected.ends_with('}') && !actual.is_empty())
+                || *expected == actual
+        })
+}
+
+fn bot_query_route_requires_user(method: &str, uri: &axum::http::Uri) -> bool {
+    let method = if method == "HEAD" { "GET" } else { method };
+    if method != "GET" || !matches!(uri.path(), "/api/quota" | "/api/models") {
+        return false;
+    }
+    Query::<HashMap<String, String>>::try_from_uri(uri)
+        .ok()
+        .is_some_and(|query| query.0.get("refresh").is_some_and(|value| value == "1"))
+}
+
 fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, Json(json!({"error": "missing or bad API credential"}))).into_response()
 }
@@ -784,13 +915,32 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         }
         RequestPrincipal::User
     };
-    req.extensions_mut().insert(principal.clone());
     if let RequestPrincipal::Bot(bot_id) = &principal {
-        let path = req.extensions().get::<OriginalUri>().map(|uri| uri.0.path()).unwrap_or_else(|| req.uri().path());
-        if let Err(e) = authorize_bot_path(&app, bot_id, req.method().as_str(), path).await {
+        let uri = req.extensions().get::<OriginalUri>().map(|uri| &uri.0).unwrap_or_else(|| req.uri());
+        let method = req.method().as_str();
+        let path = uri.path();
+        let strict_user = bot_route_requires_strict_user(method, path);
+        let needs_user = strict_user || bot_route_requires_user(method, path) || bot_query_route_requires_user(method, uri);
+        let is_agm_role = if needs_user && !strict_user {
+            match crate::supervisor::roles::role_of_bot(&app.db, bot_id).await {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(error) => {
+                    tracing::error!(bot_id = %bot_id, error = ?error, "could not resolve AGM role for User-only route");
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            }
+        } else {
+            false
+        };
+        if needs_user && (strict_user || !is_agm_role) {
+            return bot_user_only().into_response();
+        }
+        if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
             return e.into_response();
         }
     }
+    req.extensions_mut().insert(principal.clone());
     // 會改東西的請求記下是誰發的：config.toml 的寫入 log 與刪除 intent 要引用（issue #406）。
     if matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS) {
         return next.run(req).await;
@@ -9361,6 +9511,169 @@ mod per_principal_auth_tests {
         String::from_utf8_lossy(&out).into_owned()
     }
 
+    async fn raw_at(addr: std::net::SocketAddr, request: &str) -> String {
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        c.write_all(request.as_bytes()).await.unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).await.unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn registered_agm_roles_are_still_denied_on_browser_state_routes() {
+        let e = crate::testing::env().await;
+        let patrol = distinct_bot(&e, "strict-user-only-patrol").await;
+        crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+        crate::supervisor::store::set_env(&e.app.db, &patrol.id, &e.project_id, "/tmp").await.unwrap();
+
+        let rpc_calls_before = e.herdr.methods();
+        let headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", patrol.id, patrol.hook_token);
+        let requests = [
+            ("GET", "/api/bots/deleted", ""),
+            ("HEAD", "/api/bots/deleted", ""),
+            ("GET", "/api/mem", ""),
+            ("HEAD", "/api/mem", ""),
+            ("GET", "/api/drafts", ""),
+            ("HEAD", "/api/drafts", ""),
+            ("PUT", "/api/drafts/bot:victim", r#"{"text":"overwrite","client_id":"test"}"#),
+            ("POST", &format!("/api/bots/{}/read", patrol.id), "{}"),
+            ("POST", &format!("/api/projects/{}/group/read", e.project_id), "{}"),
+            ("GET", "/api/mem/processes/pane?host=local&pane_id=w1-1&lines=20", ""),
+            ("HEAD", "/api/mem/processes/pane?host=local&pane_id=w1-1&lines=20", ""),
+        ];
+        let responses = futures::future::join_all(requests.iter().map(|(method, path, body)| {
+            let request = format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            raw(e.app.clone(), request)
+        }))
+        .await;
+
+        for ((method, path, _), response) in requests.iter().zip(responses) {
+            assert!(
+                response.starts_with("HTTP/1.1 403") && (method == &"HEAD" || response.contains("user_only")),
+                "registered AGM role must not act as User for {method} {path}: {response}"
+            );
+        }
+        assert_eq!(e.herdr.methods(), rpc_calls_before, "strict auth must reject before any host/session/pane RPC");
+        assert!(e.herdr.calls_to("pane.read").is_empty(), "User-only middleware must reject before pane_read");
+        assert!(e.herdr.calls_to("pane.size").is_empty(), "User-only middleware must reject before pane_size");
+    }
+
+    #[test]
+    fn route_policy_matches_percent_decoded_static_segments() {
+        assert!(bot_route_requires_user("POST", "/api/projects/p1/%67it/push"));
+        assert!(bot_route_requires_strict_user("GET", "/api/draft%73"));
+        assert!(bot_route_requires_strict_user("HEAD", "/api/drafts"));
+        assert!(!bot_route_requires_user("POST", "/api/projects/p1/%ZZit/push"));
+    }
+
+    #[tokio::test]
+    async fn patrol_and_responder_keep_their_scoped_agm_cli_management_routes() {
+        let e = crate::testing::env().await;
+        let patrol = distinct_bot(&e, "user-only-patrol-caller").await;
+        let responder = distinct_bot(&e, "user-only-responder-caller").await;
+        let patrol_target = distinct_bot(&e, "user-only-patrol-target").await;
+        let responder_target = distinct_bot(&e, "user-only-responder-target").await;
+        crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+        crate::supervisor::store::set_env(&e.app.db, &patrol.id, &e.project_id, "/tmp").await.unwrap();
+        crate::supervisor::roles::set_env(
+            &e.app.db,
+            crate::supervisor::roles::Role::Responder,
+            &responder.id,
+            &e.project_id,
+            "/tmp",
+        )
+        .await
+        .unwrap();
+        for (parent, child) in [(&patrol, &patrol_target), (&responder, &responder_target)] {
+            sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?")
+                .bind(&parent.id)
+                .bind(&child.id)
+                .execute(&e.app.db)
+                .await
+                .unwrap();
+        }
+        let configured_bots = [&patrol, &responder, &patrol_target, &responder_target]
+            .into_iter()
+            .map(|bot| crate::config::BotCfg {
+                id: Some(bot.id.clone()),
+                name: bot.name.clone(),
+                kind: bot.kind.clone(),
+                model: bot.model.clone(),
+                effort: bot.effort.clone(),
+                fast: bot.fast != 0,
+                persona: bot.persona.clone(),
+                args: bot.args(),
+                autostart: bot.autostart != 0,
+                inject_hooks: bot.inject_hooks != 0,
+                auto_approve: bot.auto_approve != 0,
+                identity: bot.identity.clone(),
+                env: bot.env(),
+                herdr_session: bot.herdr_session.clone(),
+                create_request_id: None,
+                create_fingerprint: None,
+            })
+            .collect();
+        let (project_id, repo) = (e.project_id.clone(), e.repo.to_string_lossy().to_string());
+        e.app
+            .cfg
+            .update(move |cfg| {
+                cfg.projects.push(crate::config::ProjectCfg {
+                    handed_off_to: None,
+                    id: Some(project_id),
+                    path: repo,
+                    label: "proj".into(),
+                    host: LOCAL_HOST.into(),
+                    bots: configured_bots,
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        for (role, bot, target) in [("patrol", &patrol, &patrol_target), ("responder", &responder, &responder_target)] {
+            let headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot.id, bot.hook_token);
+            let request = |method: &str, path: &str, body: &str| {
+                format!(
+                    "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let created_body = json!({"name": format!("agm-{role}-created"), "kind": "claude"}).to_string();
+            let created = raw(e.app.clone(), request("POST", &format!("/api/projects/{}/bots", e.project_id), &created_body)).await;
+            assert!(created.starts_with("HTTP/1.1 200"), "{role} agm bot create remains available in its project: {created}");
+
+            // Use the role bot itself here: its invalid resume option reaches the handler, while
+            // the separate child target below exercises the existing child-stop permission.
+            let started = raw(e.app.clone(), request("POST", &format!("/api/bots/{}/start?resume=invalid", bot.id), "{}")).await;
+            assert!(started.starts_with("HTTP/1.1 400") && !started.contains("user_only"), "{role} agm bot start reaches the existing validation for its child: {started}");
+            let stopped = raw(e.app.clone(), request("POST", &format!("/api/bots/{}/stop", target.id), "{}")).await;
+            assert!(stopped.starts_with("HTTP/1.1 204"), "{role} agm bot stop remains available for its child: {stopped}");
+
+            let quota = raw(e.app.clone(), request("POST", "/api/quota/probe?kind=codex", "{}")).await;
+            assert!(quota.starts_with("HTTP/1.1 400") && !quota.contains("user_only"), "{role} agm quota --probe reaches its existing validation: {quota}");
+
+            let shell = raw(e.app.clone(), request("POST", "/api/hosts/local/shells", "{}")).await;
+            assert!(shell.starts_with("HTTP/1.1 403") && shell.contains("user_only"), "AGM role does not bypass the handler's explicit shell restriction: {shell}");
+        }
+
+        // Changing the DB role mapping immediately removes the shared-fence exception.
+        let replacement = distinct_bot(&e, "user-only-patrol-replacement").await;
+        crate::supervisor::store::set_env(&e.app.db, &replacement.id, &e.project_id, "/tmp").await.unwrap();
+        let body = json!({"name": "stale-patrol", "kind": "claude"}).to_string();
+        let stale = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/projects/{}/bots HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                e.project_id, patrol.id, patrol.hook_token, body.len()
+            ),
+        )
+        .await;
+        assert!(stale.starts_with("HTTP/1.1 403") && stale.contains("user_only"), "a bot that lost the patrol role must lose the exception: {stale}");
+    }
+
     async fn spawn_begin(app: Arc<App>, bot_id: &str, token: &str) -> String {
         let body = format!("bot_id={bot_id}");
         raw(
@@ -9955,6 +10268,81 @@ mod per_principal_auth_tests {
 
             let user = raw(e.app.clone(), request(method, path, body, &as_user)).await;
             assert!(!user.contains("user_only"), "使用者本人應通過 principal gate: {method} {path}: {user}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_user_only_route_rejects_an_ordinary_bot_before_the_handler() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "user-only-route-caller").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = super::router(e.app.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+        });
+        for (method, pattern) in BOT_USER_ONLY_ROUTES {
+            let path = pattern
+                .replace("{id}", &bot.id)
+                .replace("{name}", "local")
+                .replace("{identity}", "cc1")
+                .replace("{pane_id}", "w1:p1")
+                .replace("{key}", "bot%3Atest");
+            let methods = if *method == "GET" { vec![*method, "HEAD"] } else { vec![*method] };
+            for request_method in methods {
+                let request = format!(
+                    "{request_method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{{}}",
+                    bot.id, bot.hook_token
+                );
+                let response = raw_at(addr, &request).await;
+                assert!(
+                    response.starts_with("HTTP/1.1 403")
+                        && (request_method == "HEAD" || response.contains("user_only")),
+                    "ordinary Bot passed User-only route {request_method} {path}: {response}"
+                );
+            }
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn quota_and_model_refresh_require_a_user_or_registered_agm_role() {
+        let e = crate::testing::env().await;
+        let ordinary = distinct_bot(&e, "refresh-ordinary-bot").await;
+        let patrol = distinct_bot(&e, "refresh-patrol").await;
+        crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+        crate::supervisor::store::set_env(&e.app.db, &patrol.id, &e.project_id, "/tmp")
+            .await
+            .unwrap();
+        let bot_headers = |bot: &db::Bot| {
+            format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot.id, bot.hook_token)
+        };
+        let request = |path: &str, headers: &str| {
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}Connection: close\r\n\r\n")
+        };
+
+        for path in [
+            "/api/quota?refresh=%31&host=missing-host",
+            "/api/models?kind=codex&host=missing-host&refresh=1",
+        ] {
+            let denied = raw(e.app.clone(), request(path, &bot_headers(&ordinary))).await;
+            assert!(
+                denied.starts_with("HTTP/1.1 403") && denied.contains("user_only"),
+                "ordinary Bot refresh must be rejected before handler side effects: {path}: {denied}"
+            );
+        }
+
+        let cached = raw(e.app.clone(), request("/api/models?kind=codex&host=missing-host", &bot_headers(&ordinary))).await;
+        assert!(cached.starts_with("HTTP/1.1 404"), "ordinary Bot may still read cached models; unknown host reaches validation: {cached}");
+
+        for path in [
+            "/api/quota?refresh=1&host=missing-host",
+            "/api/models?kind=codex&host=missing-host&refresh=1",
+        ] {
+            let allowed = raw(e.app.clone(), request(path, &bot_headers(&patrol))).await;
+            assert!(allowed.starts_with("HTTP/1.1 404") && !allowed.contains("user_only"), "registered AGM role retains the old refresh path: {path}: {allowed}");
+            let user = raw(e.app.clone(), request(path, &format!("X-AM-Token: {}\r\n", e.app.ui_token))).await;
+            assert!(user.starts_with("HTTP/1.1 404") && !user.contains("user_only"), "User behavior is unchanged: {path}: {user}");
         }
     }
 
@@ -11236,14 +11624,15 @@ mod caller_audit_tests {
 
     /// 真的走一次 HTTP（含 `auth` 中介層），回 `(狀態行, intent 記下的呼叫端)`。
     /// `DELETE /api/bots/{id}` with exactly these headers (no UI token added); the raw response.
-    async fn delete_raw(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)]) -> String {
+    async fn delete_raw(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)], confirm_supervisor: bool) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let router = super::router(app.clone());
         let server =
             tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await });
         let extra: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
-        let req = format!("DELETE /api/bots/{bot_id} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Connection: close\r\nContent-Length: 0\r\n\r\n");
+        let confirm = if confirm_supervisor { "?confirm=supervisor" } else { "" };
+        let req = format!("DELETE /api/bots/{bot_id}{confirm} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Connection: close\r\nContent-Length: 0\r\n\r\n");
         let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
         c.write_all(req.as_bytes()).await.unwrap();
         let mut out = String::new();
@@ -11253,8 +11642,8 @@ mod caller_audit_tests {
     }
 
     /// Delete with these headers, then read who the delete intent says asked for it.
-    async fn delete_as(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)]) -> (String, String) {
-        let out = delete_raw(app, bot_id, headers).await;
+    async fn delete_as(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)], confirm_supervisor: bool) -> (String, String) {
+        let out = delete_raw(app, bot_id, headers, confirm_supervisor).await;
         let payload: String = sqlx::query_scalar("SELECT payload_json FROM intents WHERE kind = 'delete_bot' AND subject_id = ?")
             .bind(bot_id)
             .fetch_one(&app.db)
@@ -11265,10 +11654,10 @@ mod caller_audit_tests {
     }
 
     /// As the User (shared UI token) plus these extra headers.
-    async fn delete_over_http(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)]) -> (String, String) {
+    async fn delete_over_http(app: &Arc<App>, bot_id: &str, headers: &[(&str, &str)], confirm_supervisor: bool) -> (String, String) {
         let mut all = vec![("X-AM-Token", app.ui_token.as_str())];
         all.extend_from_slice(headers);
-        delete_as(app, bot_id, &all).await
+        delete_as(app, bot_id, &all, confirm_supervisor).await
     }
 
     /// 只有 hook token 對得上才填 `bot=`；`X-AM-Caller` 不管寫什麼都只進 `caller_self_reported=`。
@@ -11281,20 +11670,22 @@ mod caller_audit_tests {
         let real = a_user_bot(&e, "charlie").await;
 
         // (1) 只會自稱：記成自稱，`bot=` 空著。
-        let (status, by) = delete_over_http(&app, &liar.id, &[("X-AM-Caller", "agm"), ("User-Agent", "curl/8")]).await;
+        let (status, by) = delete_over_http(&app, &liar.id, &[("X-AM-Caller", "agm"), ("User-Agent", "curl/8")], false).await;
         assert!(status.starts_with("HTTP/1.1 200"), "{status}");
         assert!(by.contains("caller_self_reported=agm"), "{by}");
         assert!(by.contains(" bot=-"), "沒有 hook token 就不能有身分：{by}");
         assert!(by.contains("peer=127.0.0.1:") && by.contains("ua=curl/8"), "{by}");
 
         // (2) 自稱是某顆 bot 但 token 對不上：#556 起中介層直接 401，不降級成 User，也就刪不掉、不留 intent。
-        let refused = delete_raw(&app, &impostor.id, &[("X-AM-Bot-Id", &real.id), ("X-AM-Bot-Token", "not-the-token"), ("X-AM-Caller", "agm")]).await;
+        let refused = delete_raw(&app, &impostor.id, &[("X-AM-Bot-Id", &real.id), ("X-AM-Bot-Token", "not-the-token"), ("X-AM-Caller", "agm")], false).await;
         assert!(refused.starts_with("HTTP/1.1 401"), "token 對不上不能算驗過：{refused}");
         assert!(db::bot(&app.db, &impostor.id).await.unwrap().unwrap().deleted_at.is_none(), "被拒的請求不能刪掉 bot");
 
-        // (3) 帶對 token（Bot principal，不混帶 UI token）：用驗過的身分，自稱照樣只是自稱。
+        // (3) 一般 Bot 不可呼叫管理刪除；註冊成 AGM role 後，帶對 token 可用原權限走完刪除，來源自稱照樣分欄記錄。
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        crate::supervisor::store::set_env(&app.db, &real.id, &e.project_id, "/tmp").await.unwrap();
         let token: String = sqlx::query_scalar("SELECT hook_token FROM bots WHERE id = ?").bind(&real.id).fetch_one(&app.db).await.unwrap();
-        let (_, by) = delete_as(&app, &real.id, &[("X-AM-Bot-Id", &real.id), ("X-AM-Bot-Token", &token), ("X-AM-Caller", "agm")]).await;
+        let (_, by) = delete_as(&app, &real.id, &[("X-AM-Bot-Id", &real.id), ("X-AM-Bot-Token", &token), ("X-AM-Caller", "agm")], true).await;
         assert!(by.contains(&format!("bot={}(charlie)", real.id)), "{by}");
         assert!(by.contains("caller_self_reported=agm"), "{by}");
     }

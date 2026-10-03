@@ -108,6 +108,36 @@ async fn check_relay_from(app: &Arc<App>, headers: &HeaderMap, relay_from: Optio
     crate::relay_auth::authenticate_mission(app, headers, effective).await
 }
 
+/// A User or AGM role can manage every mission. An ordinary Bot may mutate only a mission where
+/// it has an assignment; the relay proof identifies the caller but does not make it a participant.
+async fn mission_access_bot(app: &Arc<App>, bot_id: Option<&str>) -> Result<Option<String>, LcError> {
+    let Some(bot_id) = bot_id else { return Ok(None) };
+    if crate::supervisor::roles::role_of_bot(&app.db, bot_id).await.map_err(up)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(bot_id.to_owned()))
+}
+
+async fn require_mission_participant(app: &Arc<App>, mission_id: &str, bot_id: Option<&str>) -> Result<(), LcError> {
+    let Some(bot_id) = bot_id else { return Ok(()) };
+    let assignments = crate::supervisor::store::mission_assignments(&app.db, mission_id).await.map_err(up)?;
+    if assignments.iter().any(|assignment| assignment.target_bot_id == bot_id) {
+        return Ok(());
+    }
+    Err(LcError::Forbidden(json!({
+        "error": "forbidden",
+        "reason": "mission_participant_required",
+        "mission_id": mission_id,
+        "bot_id": bot_id,
+    })))
+}
+
+async fn require_header_bot_mission_participant(app: &Arc<App>, mission_id: &str, headers: &HeaderMap) -> Result<(), LcError> {
+    let bot_id = crate::supervisor::bot_requests::verified_bot_id(app, headers).await?;
+    let access_bot = mission_access_bot(app, bot_id.as_deref()).await?;
+    require_mission_participant(app, mission_id, access_bot.as_deref()).await
+}
+
 fn effective_relay_claim<'a>(headers: &'a HeaderMap, relay_from: Option<&'a str>) -> Option<&'a str> {
     relay_from
         .map(str::trim)
@@ -327,6 +357,7 @@ pub async fn post_question(
     }
     let m = load(&app, &id).await?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
+    require_header_bot_mission_participant(&app, &id, &headers).await?;
     let payload = json!({
         "mission_id": m.id,
         "project_id": m.project_id,
@@ -395,6 +426,7 @@ pub async fn post_answer(
     }
     let m = load(&app, &id).await?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
+    require_header_bot_mission_participant(&app, &id, &headers).await?;
     let is_bot_reply = from.is_some();
     // bot 的回覆一定是在回某一則追問，而且那則追問要真的屬於這筆任務。少了這個，
     // 「回覆」就變成一句沒有對象的話，UI 也串不起來。
@@ -591,6 +623,7 @@ pub async fn post_event(
     if b.kind == "verified" {
         require_gatekeeper(&app, &headers, &id, true).await?;
     }
+    require_header_bot_mission_participant(&app, &id, &headers).await?;
     let mut payload = b.payload.clone().unwrap_or_else(|| json!({}));
     let mut generation = None;
     if b.kind == "verified" {
@@ -672,6 +705,7 @@ pub async fn post_pause(
     }
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
+    require_header_bot_mission_participant(&app, &id, &headers).await?;
     let text = match b.detail.as_deref() {
         Some(d) => format!("暫停：{reason}（{d}）"),
         None => format!("暫停：{reason}"),
@@ -778,6 +812,7 @@ pub async fn post_revise(
     }
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     let parent = load(&app, &id).await?;
+    require_header_bot_mission_participant(&app, &id, &headers).await?;
     // 契約鎖死：只有已完成的成果能續作。進行中的請直接回答／等它做完（要改方向就先 cancel），
     // 取消掉的沒有成果可以接續——兩種都回明確的理由，不要讓呼叫端猜。
     if parent.completed_at.is_none() {
@@ -936,6 +971,7 @@ pub async fn post_revise(
 pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>, headers: HeaderMap) -> Result<Json<Value>, LcError> {
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
+    require_header_bot_mission_participant(&app, &id, &headers).await?;
     let by_manager = called_by_mission_manager(&app, &headers).await?;
     let before = open_assignments(&app, &id).await?;
     let announce = (!by_manager).then(|| store::Announce {
@@ -1165,6 +1201,8 @@ pub async fn post_complete(
     };
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
+    let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
+    require_header_bot_mission_participant(&app, &id, &headers).await?;
     // 停著的任務不結案：使用者的暫停不能被一句「完成」關掉（`deliver` 早就是這樣）。寫入交易裡會再判一次。
     ensure_not_paused(&id, m.paused_reason.as_deref())?;
     // 底下還有開著的交辦就不結案（issue #74）：那顆 bot 會繼續做一件已經關掉的任務，
@@ -1193,7 +1231,6 @@ pub async fn post_complete(
             }
         }
     }
-    let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
     #[cfg(test)]
     crate::lifecycle::race_point::hit("mission_complete_after_snapshot", &id).await;
     {
@@ -1613,6 +1650,46 @@ mod tests {
         h.insert("X-AM-Bot-Id", id.parse().unwrap());
         h.insert("X-AM-Bot-Token", token.parse().unwrap());
         (id, h)
+    }
+
+    #[tokio::test]
+    async fn an_unassigned_bot_cannot_cancel_another_missions_work() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let Json(mission) = post_mission(State(app.clone()), Path(env.project_id.clone()), Json(new_mission("unassigned-cancel", "pr")))
+            .await
+            .unwrap();
+        let mission_id = mission["id"].as_str().unwrap().to_string();
+        let (bot_id, headers) = bot_with_token(&app, &env.project_id, false).await;
+
+        let result = post_cancel(State(app.clone()), Path(mission_id.clone()), headers.clone()).await;
+        assert!(
+            matches!(result, Err(LcError::Forbidden(ref body)) if body["reason"] == "mission_participant_required"),
+            "an unrelated valid Bot principal must not cancel this mission: {result:?}"
+        );
+        assert_eq!(store::get(&app.db, &mission_id).await.unwrap().unwrap().status(), "open");
+
+        let assignment = crate::supervisor::store::insert_assignment_linked(
+            &app.db,
+            None,
+            &bot_id,
+            "assigned-cancel-test",
+            "work on this mission",
+            &[],
+            None,
+            true,
+            Some((&mission_id, "executor")),
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?")
+            .bind(&assignment.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let _ = post_cancel(State(app.clone()), Path(mission_id.clone()), headers).await.unwrap();
+        assert_eq!(store::get(&app.db, &mission_id).await.unwrap().unwrap().status(), "cancelled");
     }
 
     fn q(text: &str, crid: &str) -> QuestionIn {
@@ -2462,6 +2539,20 @@ mod tests {
         assert_ne!(status(&cur), "done", "冒名的 complete 不能結案");
 
         // 本人帶自己的 token；AGM 角色代 daemon 記。
+        crate::supervisor::store::insert_assignment_linked(
+            &app.db,
+            None,
+            &victim,
+            "relay-auth-participant",
+            "mission participant",
+            &[],
+            None,
+            false,
+            Some((&id, "executor")),
+            None,
+        )
+        .await
+        .unwrap();
         let Json(ev) = post_event(State(app.clone()), Path(id.clone()), victim_h, Json(note(&victim))).await.unwrap();
         assert_eq!(ev["relay_from"], json!(victim));
         let Json(ev) = post_event(State(app.clone()), Path(id.clone()), agm_h, Json(note("daemon"))).await.unwrap();
