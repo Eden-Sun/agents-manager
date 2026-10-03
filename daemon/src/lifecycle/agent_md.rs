@@ -14,6 +14,7 @@ use crate::state::App;
 
 /// bot 目錄裡給子 agent 讀的那份（AG Man 規則 + agent md，不含母 bot 自己的 persona）。
 pub const CHILD_FILE: &str = "instructions.md";
+pub const GROK_RULES_FILE: &str = "grok-rules.md";
 
 /// 讀出來的 agent md。`problems` 是讀不到或空的檔：bot 照開，但要讓人看得到少了什麼。
 /// `configured`＝`[agents]` 有指定檔：只有這時才關掉 CLI 自己的指示檔——沒設定就維持 CLI 原本的行為，
@@ -90,8 +91,30 @@ pub fn compose(rules: &str, md: &str) -> String {
 /// 把子 agent 讀的那份寫進 bot 目錄（`<shim_dir>/..`），回傳路徑給 pane env 的 `AM_INSTRUCTIONS_FILE`。
 /// 寫不進去只警告：子 agent 少了這份，母 bot 照開。
 pub async fn install(app: &Arc<App>, bot: &db::Bot, project: &db::Project, shim_dir: Option<&str>, text: &str) -> Option<String> {
+    install_named(app, bot, project, shim_dir, CHILD_FILE, text).await
+}
+
+/// grok has no rules-file flag. Stage the full startup instructions here and pass only this short path through `--rules`.
+pub async fn install_grok_rules(
+    app: &Arc<App>,
+    bot: &db::Bot,
+    project: &db::Project,
+    shim_dir: Option<&str>,
+    text: &str,
+) -> Option<String> {
+    install_named(app, bot, project, shim_dir, GROK_RULES_FILE, text).await
+}
+
+async fn install_named(
+    app: &Arc<App>,
+    bot: &db::Bot,
+    project: &db::Project,
+    shim_dir: Option<&str>,
+    filename: &str,
+    text: &str,
+) -> Option<String> {
     let bot_dir = std::path::Path::new(shim_dir?).parent()?.to_string_lossy().into_owned();
-    let path = format!("{bot_dir}/{CHILD_FILE}");
+    let path = format!("{bot_dir}/{filename}");
     let result = if project.host == LOCAL_HOST {
         crate::shim_refresh::write_atomic(std::path::Path::new(&path), text).map(|_| ()).map_err(anyhow::Error::from)
     } else {

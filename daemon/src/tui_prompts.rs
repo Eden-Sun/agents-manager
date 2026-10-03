@@ -529,7 +529,7 @@ pub fn is_onboarding_theme(screen: &str) -> bool {
 /// grok 1.0.34 開在沒信任過的目錄時跳「Do you trust the contents of this directory?」（y／n），
 /// herdr 看不出是對話框，prompt 打進去會被吃掉（2026-09-17 使用者截圖，報 composer_unreadable）。
 pub fn is_grok_trust_dialog(screen: &str) -> bool {
-    // 同 [`is_switch_model_dialog`]：標題與兩個選項各自成行，句子裡提到不算；只看最底
+    // 同 [`is_switch_model_dialog`]：標題與兩個帶鍵位的選項各自成行，句子裡提到不算；只看最底
     // [`DIALOG_TAIL_LINES`] 行；而且要求輸入列不是空的（[`composer_is_idle`]）——grok 回覆裡
     // 就算把這三段字逐行照抄（連「各自成行」這個形狀都模仿了），畫面上其實沒有真的框，
     // 稍後照樣會印出一行空的輸入列，用這個結構性事實分辨，不必再猜引文的排版像不像框
@@ -541,8 +541,13 @@ pub fn is_grok_trust_dialog(screen: &str) -> bool {
     }
     let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     line_starts_with(&tail, "do you trust the contents of this directory")
-        && line_starts_with(&tail, "yes, proceed")
-        && line_starts_with(&tail, "no, quit")
+        && tail.iter().any(|l| l == "yes, proceed y")
+        && tail.iter().any(|l| l == "no, quit n")
+        && tail.iter().any(|l| {
+            l.strip_prefix("grok build ")
+                .and_then(|v| v.split_whitespace().next())
+                .is_some_and(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        })
 }
 
 /// 確認框連同框線與 statusLine 的最大高度；再往上是正文。
@@ -1008,6 +1013,17 @@ mod tests {
         let screen = "  main ~/p/h/projects/rt\n\n⠀⠀⠀⠀⠀⠀⣀⣀⡀\nDo you trust the contents of this directory?\n                /Users/m4p/project/hermes-agents/projects/rt\n\nGrok Build may run or modify contents in this directory,\n              posing security risks.\n\nYes, proceed                 y\n                  No, quit                     n\n\nGrok Build  1.0.34 [stable]\n";
         assert!(super::is_grok_trust_dialog(screen));
         assert!(!super::is_grok_trust_dialog("> Do you trust the contents of this directory? I asked grok that yesterday."));
+    }
+
+    #[test]
+    fn grok_trust_lookalike_text_without_the_live_choice_keys_is_not_a_dialog() {
+        let printed_text = "\
+⏺ Example output from a previous trust prompt:\n\
+Do you trust the contents of this directory?\n\
+Yes, proceed\n\
+No, quit\n\
+Grok Build 1.0.46\n";
+        assert!(!super::is_grok_trust_dialog(printed_text), "a lookalike without the y/n controls must never authorize a keypress");
     }
 
     /// grok bot 在回覆裡逐行引用這個對話框的三段字（例如報告自己怎麼處理這個誤判），輸入列其實還

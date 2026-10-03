@@ -396,12 +396,16 @@ pub(super) fn local_grok_dispatch_sh(exe: &str, data_dir: &str, instance: Option
 }
 
 pub(super) fn grok_home(env: &Value, home: &str) -> String {
-    env.get("GROK_HOME")
+    let configured = env.get("GROK_HOME")
         .and_then(|v| v.as_str())
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| format!("{home}/.grok"))
+        .filter(|s| !s.is_empty());
+    if let Some(path) = configured {
+        let trimmed = path.trim_end_matches('/');
+        if trimmed.is_empty() && path.starts_with('/') { "/".into() } else { trimmed.into() }
+    } else {
+        format!("{home}/.grok")
+    }
 }
 
 fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
@@ -1169,20 +1173,31 @@ async fn install_herdr_skill_remote(
 }
 
 /// `bot.persona` appended to the system prompt per kind; `child_agent_rules` comes first, then the
-/// `[agents]` agent md (§6.5i). The CLIs' own instruction files are off, so this is the bot's only source.
+/// `[agents]` agent md (§6.5i). Grok receives a short `--rules` path pointer to a staged full-text file.
 /// `agent_md` None＝`[agents]` 沒設定：CLI 照舊讀自己的指示檔。
-pub(crate) fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>) -> Vec<String> {
+pub(crate) fn persona_text(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>) -> String {
     let base = super::agent_md::compose(&child_agent_rules(agent_name), agent_md.unwrap_or(""));
     let user = bot.persona.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let p = match user {
+    match user {
         Some(u) => format!("{base}\n\n{u}"),
         None => base,
-    };
+    }
+}
+
+fn grok_rules_reference(path: &str) -> String {
+    let path = serde_json::to_string(path).expect("a path string serializes as JSON");
+    format!("AG Man 指示（硬規則，效力同系統指示）完整存放於 JSON 路徑 {path}。開始任何工作前先完整讀取該檔並照做。")
+}
+
+pub(crate) fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&str>, grok_rules_file: Option<&str>) -> Vec<String> {
+    let p = persona_text(bot, agent_name, agent_md);
     let p = p.as_str();
     match bot.kind.as_str() {
         "claude" => vec!["--append-system-prompt".into(), p.to_string()],
         // `grok --help`: "Extra rules to append to the system prompt".
-        "grok" => vec!["--rules".into(), p.to_string()],
+        // The whole persona regularly exceeds Herdr's 900-byte shell-command budget. Keep the
+        // argv value short and let Grok read the exact, complete text staged beside this bot.
+        "grok" => vec!["--rules".into(), grok_rules_file.map(grok_rules_reference).unwrap_or_else(|| p.to_string())],
         // app-server / config schema key `developer_instructions`; the value is TOML.
         // §6.5i：`project_doc_max_bytes=0` 讓 codex 不讀 AGENTS.md，指示只有這一份。
         "codex" => {
@@ -1476,25 +1491,25 @@ mod model_args_tests {
         let rule = child_agent_rules("proj-abc123");
         b.persona = Some("回覆結尾一律加上 [PERSONA-OK]".into());
         let want = format!("{rule}\n\n回覆結尾一律加上 [PERSONA-OK]");
-        assert_eq!(persona_args(&b, "proj-abc123", None), vec!["--append-system-prompt".to_string(), want.clone()]);
+        assert_eq!(persona_args(&b, "proj-abc123", None, None), vec!["--append-system-prompt".to_string(), want.clone()]);
         b.kind = "grok".into();
-        assert_eq!(persona_args(&b, "proj-abc123", None), vec!["--rules".to_string(), want.clone()]);
+        assert_eq!(persona_args(&b, "proj-abc123", None, None), vec!["--rules".to_string(), want.clone()]);
         b.kind = "codex".into();
         b.persona = Some("line1\nsay \"hi\" \\ done".into());
         let want = format!("{rule}\n\nline1\nsay \"hi\" \\ done");
         assert_eq!(
-            persona_args(&b, "proj-abc123", None),
+            persona_args(&b, "proj-abc123", None, None),
             vec!["-c".to_string(), format!("developer_instructions={}", toml_basic_string(&want))],
             "沒設 [agents]：codex 照舊讀 AGENTS.md"
         );
         // §6.5i：agent md 夾在 AG Man 規則與 bot 自己的 persona 中間。
-        let args = persona_args(&b, "proj-abc123", Some("AGENT-MD"));
+        let args = persona_args(&b, "proj-abc123", Some("AGENT-MD"), None);
         assert_eq!(&args[2..], ["-c", "project_doc_max_bytes=0"], "§6.5i：設了 [agents] 就不讀 AGENTS.md");
         assert_eq!(args[1], format!("developer_instructions={}", toml_basic_string(&format!("{rule}\n\nAGENT-MD\n\nline1\nsay \"hi\" \\ done"))));
         // No user persona: the daemon's rule alone, never nothing.
         b.kind = "claude".into();
         b.persona = None;
-        assert_eq!(persona_args(&b, "proj-abc123", None), vec!["--append-system-prompt".to_string(), rule.clone()]);
+        assert_eq!(persona_args(&b, "proj-abc123", None, None), vec!["--append-system-prompt".to_string(), rule.clone()]);
         assert!(rule.contains("`proj-abc123-`"));
         // 瀏覽器規則：只用 ego lite、一個 bot 一個分頁、bot 結束就關分頁，task space 用自己的名字。
         assert!(rule.contains("ego lite"));
@@ -1556,11 +1571,29 @@ mod model_args_tests {
         let mut b = bot("claude", None, None, false);
         for kind in ["claude", "grok", "codex"] {
             b.kind = kind.into();
-            let args = super::persona_args(&b, "proj-abc123", None).join(" ");
+            let args = super::persona_args(&b, "proj-abc123", None, None).join(" ");
             assert!(args.contains("$AM_OUTBOX"), "{kind}: {args}");
         }
         let doc = super::herdr_skill_doc("---\nname: herdr\ndescription: x\n---\n# herdr\n", "proj-abc123");
         assert!(doc.contains("$AM_OUTBOX"), "{doc}");
+    }
+
+    #[test]
+    fn grok_can_read_the_full_rules_from_a_json_quoted_path_without_inline_markdown_injection() {
+        let mut b = bot("grok", None, None, false);
+        b.persona = Some("persona stays in the staged file".into());
+        let path = "/tmp/AG Man `stop` \"quoted\" \\ path/grok-rules.md";
+        let args = super::persona_args(&b, "proj-abc123", Some("AGENT-MD"), Some(path));
+        assert_eq!(args[0], "--rules");
+        assert!(args[1].len() < 300, "the reference stays below Herdr's shell limit: {}", args[1].len());
+        assert!(args[1].contains(&serde_json::to_string(path).unwrap()), "path is encoded as one JSON string: {}", args[1]);
+        assert!(!args[1].contains(&format!("`{path}`")), "backticks in a path cannot break out of inline code: {}", args[1]);
+        assert!(!args[1].contains("persona stays in the staged file"), "full persona text is staged, not truncated in argv");
+    }
+
+    #[test]
+    fn grok_home_keeps_a_root_directory_override_absolute() {
+        assert_eq!(super::grok_home(&serde_json::json!({"GROK_HOME": "/"}), "/home/tester"), "/");
     }
 }
 
@@ -2640,6 +2673,7 @@ mod herdr_skill_timeout_tests {
 /// #494：遠端安裝腳本把 bot 目錄與裡面的檔案收成只有自己讀得到，升級上來的舊權限也一起修。
 #[cfg(test)]
 mod remote_install_permission_tests {
+    use super::*;
     use crate::config::HostCfg;
     use crate::testing as tt;
     use std::os::unix::fs::PermissionsExt as _;
@@ -2694,6 +2728,98 @@ mod remote_install_permission_tests {
         assert_eq!(mode_of(&spool), 0o600, "升級前留下的 spool 也要修");
         assert_eq!(std::fs::read_to_string(&spool).unwrap(), "{}\n", "修權限不准動內容");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[tokio::test]
+    async fn remote_grok_install_preserves_user_hooks_and_unrelated_keys() {
+        let env = tt::env().await;
+        let host = format!("grok-hook-{}", crate::db::ulid());
+        let home = tt::scratch_dir("am-remote-grok-home");
+        let grok_home = home.join(".grok");
+        let hooks_dir = grok_home.join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::set_permissions(&hooks_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let hooks_path = hooks_dir.join(GROK_HOOKS_FILE);
+        let existing = json!({
+            "hooks": {
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "/home/u/guard.sh", "timeout": 9}]}],
+                "Stop": [{"hooks": [{"type": "command", "command": "/home/u/stop.sh", "timeout": 8}]}]
+            },
+            "user_note": "keep me"
+        });
+        std::fs::write(&hooks_path, existing.to_string()).unwrap();
+
+        let conn = env.app.hosts.insert_remote_for_test(HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "am-test".into(),
+            remote_path: String::new(),
+        }).await;
+        *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
+        crate::hosts::set_ssh_fake(&host, |script| {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output()?;
+            if !out.status.success() {
+                anyhow::bail!("script failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+
+        install_remote_grok_hook(&conn, &json!({}), None).await.unwrap();
+
+        let installed: Value = serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+        assert_eq!(mode_of(&hooks_dir), 0o700, "remote hooks directory must not let other users replace commands");
+        assert_eq!(mode_of(&hooks_path), 0o600, "remote hook JSON stays private");
+        let dispatcher = home.join(crate::startup::REMOTE_ROOT).join(GROK_DISPATCH_SH);
+        assert_eq!(mode_of(&dispatcher), 0o700, "remote dispatcher stays private and executable");
+        assert_eq!(installed["user_note"], "keep me");
+        assert_eq!(installed["hooks"]["PreToolUse"], existing["hooks"]["PreToolUse"]);
+        assert_eq!(
+            installed["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "/home/u/stop.sh",
+            "remote install preserves existing user entries"
+        );
+        assert!(installed["hooks"]["Stop"].as_array().unwrap().iter().any(|group| {
+            group["hooks"].as_array().is_some_and(|hooks| hooks.iter().any(|hook| {
+                hook["command"].as_str().is_some_and(|command| command.ends_with("/grok-hook.sh"))
+            }))
+        }));
+    }
+
+    #[tokio::test]
+    async fn remote_grok_install_refuses_a_directory_at_the_hooks_file_path() {
+        let env = tt::env().await;
+        let host = format!("grok-hook-dir-{}", crate::db::ulid());
+        let home = tt::scratch_dir("am-remote-grok-dir-home");
+        let hooks_dir = home.join(".grok/hooks");
+        let hooks_path = hooks_dir.join(GROK_HOOKS_FILE);
+        std::fs::create_dir_all(&hooks_path).unwrap();
+        let user_file = hooks_path.join("user-config.json");
+        std::fs::write(&user_file, "leave this directory alone").unwrap();
+
+        let conn = env.app.hosts.insert_remote_for_test(HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "am-test".into(),
+            remote_path: String::new(),
+        }).await;
+        *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
+        crate::hosts::set_ssh_fake(&host, |script| {
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output()?;
+            if !out.status.success() {
+                anyhow::bail!("script failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+
+        assert!(install_remote_grok_hook(&conn, &json!({}), None).await.is_err(), "a directory isn't an absent hooks file");
+        assert_eq!(std::fs::read_to_string(user_file).unwrap(), "leave this directory alone");
+        assert_eq!(std::fs::read_dir(&hooks_path).unwrap().count(), 1, "don't install a JSON file inside the user's directory");
     }
 }
 

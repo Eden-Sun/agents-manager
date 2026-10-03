@@ -1819,7 +1819,7 @@ grok `curl -fsSL https://x.ai/cli/install.sh | bash`；接著確認 `--version`�
 | kind | 注入 |
 |---|---|
 | `claude` | `--append-system-prompt "<persona>"` |
-| `grok` | `--rules "<persona>"` |
+| `grok` | 完整規則寫入 bot 目錄的 `grok-rules.md`，`--rules` 帶 JSON 引號的檔案路徑指示；使用者 persona 仍接在 daemon 與 `[agents]` 規則之後 |
 | `codex` | `-c developer_instructions=<TOML basic string>`（daemon 逃逸換行與引號） |
 
 位置在 daemon 旗標之後、model 之前。AGM 的人設另走 `/api/supervisor/persona`（總管一節）。

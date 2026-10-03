@@ -2167,6 +2167,38 @@ mod prompt_tests {
         assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
     }
 
+    /// The screen can change from a trust dialog to printed lookalike text while host trust is prepared.
+    /// A second read without the live `y` / `n` controls must never authorize the key.
+    #[tokio::test]
+    async fn a_grok_trust_lookalike_on_the_second_read_gets_no_y() {
+        let f = fixture("grok", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        let grok_home = f.env.dir.join("grok-home-lookalike");
+        std::fs::create_dir_all(&grok_home).unwrap();
+        let cwd = f.env.repo.to_string_lossy().into_owned();
+        sqlx::query("UPDATE bots SET cwd=?, env_json=? WHERE id=?")
+            .bind(&cwd)
+            .bind(json!({"GROK_HOME": grok_home.to_string_lossy()}).to_string())
+            .bind(&f.bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", "Do you trust the contents of this directory?\n  Yes, proceed                 y\n  No, quit                      n\nGrok Build 1.0.34\n");
+        let screens = f.env.herdr.screens.clone();
+        super::super::race_point::arm("grok_trust_before_answer", &f.bot_id, move || async move {
+            screens.lock().unwrap().insert(
+                "pane-prompt-test".into(),
+                "⏺ Printed example:\nDo you trust the contents of this directory?\nYes, proceed\nNo, quit\nGrok Build 1.0.46\n".into(),
+            );
+        });
+        let bot = db::bot(&app.db, &f.bot_id).await.unwrap().unwrap();
+        let run = db::active_run(&app.db, &f.bot_id).await.unwrap().unwrap();
+
+        let _ = pane_ready_for_prompt(&app, &bot, &run, &f.conv).await;
+        assert!(f.env.herdr.calls_to("pane.send_keys").is_empty(), "printed text is not live confirmation UI");
+    }
+
     #[tokio::test]
     async fn an_unreadable_screen_after_grok_trust_answer_stops_prompt_delivery() {
         let f = fixture("grok", "test").await;
