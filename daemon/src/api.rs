@@ -5040,7 +5040,7 @@ mod ws_limits_tests {
     async fn credential_fields_never_leave_in_an_event() {
         let env = crate::testing::env().await;
         let mut rx = env.app.subscribe();
-        env.app.emit("bot_changed", json!({"bot": {"id": "b1", "hook_token": "SECRET-HOOK", "nested": [{"ui_token": "SECRET-UI", "ok": 1}]}, "AM_BOT_TOKEN": "SECRET-BOT"})).await;
+        env.app.emit("bot_changed", json!({"bot": {"id": "b1", "hook_token": "SECRET-HOOK", "nested": [{"ui_token": "SECRET-UI", "ok": 1, "X-AM-Bot-Token": "SECRET-BOT-HEADER", "X-AM-Service-Token": "SECRET-SERVICE-HEADER"}]}, "AM_BOT_TOKEN": "SECRET-BOT"})).await;
         let ev = rx.recv().await.unwrap();
         let wire = serde_json::to_string(&ev).unwrap();
         assert!(!wire.contains("SECRET"), "{wire}");

@@ -2002,7 +2002,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 
 
 **安全審查補充（2026-10-02）**：① 原始 pane 輸入端點（主機 shell 的 `shells`／`text`／`keys`／`DELETE`，以及 `/bots/:id/text`、`/bots/:id/keys`）只給 `RequestPrincipal::User`，bot／service 身分 403 `user_only`；
-② 記憶體白名單（daemon 自己開的）打字前也即時複查，不再「認到就放行」：agent／在 listen／pane 已不在／同 id 但 `workspace_id`、`tab_id` 對不上（id 重用）／登記的 `herdr_session` 不是現在的 session，都擋；
+② 記憶體白名單（daemon 自己開的）打字前也即時複查，不再「認到就放行」：agent／在 listen／pane 已不在／同 id 但 `workspace_id`、`tab_id` 對不上（id 重用）／登記的 `herdr_session` 不是現在的 session，都擋；`Typeable` 不快取，避免 pane 在三秒窗口內開始 listen 後仍能收鍵；已知唯讀狀態最多快取 3 秒；
 ③ `text` ≤ 256 KiB、`keys` ≤ 64 個且鍵名 ≤ 32 字元無空白與控制字元。`panes` 表那條同樣比對 workspace／tab。實作 `shell::{registered, live_verdict, check_text, check_keys}`、`api::require_user`。
 ### 6.5f 給使用者的輸出檔案：outbox（使用者 2026-09-16 裁示）
 
