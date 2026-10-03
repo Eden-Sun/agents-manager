@@ -498,15 +498,20 @@ pub async fn watchdog_tick(app: &Arc<App>) {
     // 這個判斷要花一次額度查詢，所以算一次就記著：下面拿鎖之後重判時直接沿用（額度狀態不會因為
     // 有人按 stop 而改變，而在全域鎖裡再查一次額度只會把 controller 整拍拖住，#473）。
     let quota_unknown_retry = retry_due && quota_state(app, &bot).await == QuotaState::Unknown;
-    match watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, watchdog::past) {
+    let is_past = |at: &str| watchdog::scheduled_past(app, "responder", at);
+    match watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, is_past) {
         watchdog::Plan::Idle => {
             if matches!(liveness, "idle" | "busy") && (row.watchdog_attempts > 0 || row.watchdog_next_at.is_some()) {
                 let _ = roles::set_watchdog(&app.db, Role::Responder, 0, None, None).await;
+                watchdog::clear_schedule(app, "responder");
             }
         }
         watchdog::Plan::Wait { schedule: true } => {
             let wait = watchdog::backoff_secs(row.watchdog_attempts);
-            let _ = roles::set_watchdog(&app.db, Role::Responder, row.watchdog_attempts, Some(&watchdog::iso_in(wait)), None).await;
+            let at = watchdog::iso_in(wait);
+            if roles::set_watchdog(&app.db, Role::Responder, row.watchdog_attempts, Some(&at), None).await.is_ok() {
+                watchdog::remember_schedule(app, "responder", &at, std::time::Duration::from_secs(wait));
+            }
         }
         watchdog::Plan::Wait { schedule: false } => {}
         watchdog::Plan::GaveUp => {
@@ -527,19 +532,30 @@ pub async fn watchdog_tick(app: &Arc<App>) {
             crate::lifecycle::race_point::hit("responder_watchdog_start", &bot.id).await;
             let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
             let Ok(liveness) = super::manager_liveness(app, &bot.id).await else { return };
-            if watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, watchdog::past) != watchdog::Plan::Start {
+            if watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, |at: &str| watchdog::scheduled_past(app, "responder", at)) != watchdog::Plan::Start {
                 tracing::info!(liveness, wanted = row.desired_running, "協調者看門狗放掉這一次自動啟動：拿到鎖時狀態已經變了");
                 return;
             }
             let attempt = row.watchdog_attempts + 1;
             match start(app, Some(&format!("watchdog 自動重新啟動（第 {attempt} 次）"))).await {
                 Ok(()) => {
-                    let _ = roles::set_watchdog(&app.db, Role::Responder, attempt, Some(&watchdog::iso_in(watchdog::backoff_secs(attempt))), None).await;
+                    let wait = watchdog::backoff_secs(attempt);
+                    let at = watchdog::iso_in(wait);
+                    if roles::set_watchdog(&app.db, Role::Responder, attempt, Some(&at), None).await.is_ok() {
+                        watchdog::remember_schedule(app, "responder", &at, std::time::Duration::from_secs(wait));
+                    }
                 }
                 Err(e) => {
                     let why = format!("{e:?}");
-                    let next = (attempt < watchdog::MAX_ATTEMPTS).then(|| watchdog::iso_in(watchdog::backoff_secs(attempt)));
-                    let _ = roles::set_watchdog(&app.db, Role::Responder, attempt, next.as_deref(), Some(&why)).await;
+                    if attempt < watchdog::MAX_ATTEMPTS {
+                        let wait = watchdog::backoff_secs(attempt);
+                        let next = watchdog::iso_in(wait);
+                        if roles::set_watchdog(&app.db, Role::Responder, attempt, Some(&next), Some(&why)).await.is_ok() {
+                            watchdog::remember_schedule(app, "responder", &next, std::time::Duration::from_secs(wait));
+                        }
+                    } else if roles::set_watchdog(&app.db, Role::Responder, attempt, None, Some(&why)).await.is_ok() {
+                        watchdog::clear_schedule(app, "responder");
+                    }
                     if attempt >= watchdog::MAX_ATTEMPTS {
                         report_gave_up(app, &why).await;
                     }

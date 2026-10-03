@@ -817,13 +817,24 @@ pub async fn backfill_quota_limits_once(app: &Arc<App>, host: &str) {
 }
 
 fn retry_backfill_quota_limits(app: &Arc<App>, host: &str) {
-    if cfg!(test) {
+    if cfg!(test) || app.shutdown.is_cancelled() {
         return;
     }
     let (app, host) = (app.clone(), host.to_string());
-    tokio::spawn(async move {
-        tokio::time::sleep(BACKFILL_RETRY).await;
-        backfill_quota_limits_once(&app, &host).await;
+    let loop_app = app.clone();
+    crate::background_loop::spawn_restartable(&app, "supervisor quota backfill retry", move || {
+        let app = loop_app.clone();
+        let host = host.clone();
+        async move {
+            tokio::select! {
+                _ = app.shutdown.cancelled() => return,
+                _ = tokio::time::sleep(BACKFILL_RETRY) => {}
+            }
+            tokio::select! {
+                _ = app.shutdown.cancelled() => return,
+                _ = backfill_quota_limits_once(&app, &host) => {}
+            }
+        }
     });
 }
 
@@ -2039,6 +2050,9 @@ const CURRENT_READ_RETRY: Duration = Duration::from_secs(2);
 static TEST_PANIC_CONTROLLER_GENERATION: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
 
 #[cfg(test)]
+static TEST_CONTROLLER_ENTRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
 static TEST_CURRENT_READ_FAILURE_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 struct LiveGenerationGuard {
@@ -2055,14 +2069,29 @@ impl Drop for LiveGenerationGuard {
 /// Start the controller for `generation`. An older controller notices the mismatch on its
 /// next tick and stops, so a model switch never leaves two of them sending notifications.
 pub fn spawn(app: Arc<App>, generation: i64) {
+    if app.shutdown.is_cancelled() {
+        return;
+    }
     // One loop per generation. `start` after a `stop` keeps the generation, and the watchdog
     // goes through the same start path: without this every restart added a loop.
     if LIVE_GENERATION.swap(generation, std::sync::atomic::Ordering::SeqCst) == generation {
         return;
     }
     let latch = LiveGenerationGuard { generation };
-    tokio::spawn(async move {
+    let shutdown = app.shutdown.clone();
+    let loop_app = app.clone();
+    app.background_tasks.spawn(async move {
         let _latch = latch;
+        super::super::background_loop::restart_loop(shutdown, "supervisor controller", move || {
+            let app = loop_app.clone();
+            async move { controller_loop(app, generation).await }
+        }).await;
+    });
+}
+
+async fn controller_loop(app: Arc<App>, generation: i64) {
+        #[cfg(test)]
+        TEST_CONTROLLER_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         #[cfg(test)]
         if TEST_PANIC_CONTROLLER_GENERATION
             .compare_exchange(generation, -1, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
@@ -2089,11 +2118,15 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                     #[cfg(test)]
                     TEST_CURRENT_READ_FAILURE_SEEN.store(true, std::sync::atomic::Ordering::SeqCst);
                     tracing::warn!(error = ?error, generation, "supervisor generation could not be read; skipping this controller tick");
-                    tokio::time::sleep(CURRENT_READ_RETRY).await;
+                    tokio::select! {
+                        _ = app.shutdown.cancelled() => return,
+                        _ = tokio::time::sleep(CURRENT_READ_RETRY) => {}
+                    }
                     continue;
                 }
             }
             tokio::select! {
+                _ = app.shutdown.cancelled() => return,
                 ev = turns.recv() => match ev {
                     Ok(ev) => {
                         if ev.is_done() {
@@ -2169,7 +2202,6 @@ pub fn spawn(app: Arc<App>, generation: i64) {
                 }
             }
         }
-    });
 }
 
 /// 記一次 `roles::classify` 的結果：失敗要看得見，而且要數「連續幾拍」（#472）。
@@ -2227,19 +2259,26 @@ async fn respawn_with(app: &Arc<App>, delays: &'static [Duration]) {
         }
         Err(e) => {
             tracing::warn!(error = ?e, "cannot read the supervisor row at startup; the AGM controller will be retried in the background");
-            let app = app.clone();
-            tokio::spawn(async move {
-                for attempt in 0usize.. {
-                    tokio::time::sleep(delays[attempt.min(delays.len() - 1)]).await;
-                    match store::get_or_init(&app.db).await {
-                        Ok(sup) => {
-                            tracing::info!(attempt, "supervisor row readable again; starting the AGM controller");
-                            if sup.bot_id.is_some() {
-                                spawn(app.clone(), sup.generation);
-                            }
-                            return;
+            let loop_app = app.clone();
+            crate::background_loop::spawn_restartable(app, "supervisor controller startup retry", move || {
+                let app = loop_app.clone();
+                let shutdown = app.shutdown.clone();
+                async move {
+                    for attempt in 0usize.. {
+                        tokio::select! {
+                            _ = shutdown.cancelled() => return,
+                            _ = tokio::time::sleep(delays[attempt.min(delays.len() - 1)]) => {}
                         }
-                        Err(e) => tracing::warn!(attempt, error = ?e, "supervisor row still unreadable; will retry"),
+                        match store::get_or_init(&app.db).await {
+                            Ok(sup) => {
+                                tracing::info!(attempt, "supervisor row readable again; starting the AGM controller");
+                                if sup.bot_id.is_some() {
+                                    spawn(app.clone(), sup.generation);
+                                }
+                                return;
+                            }
+                            Err(e) => tracing::warn!(attempt, error = ?e, "supervisor row still unreadable; will retry"),
+                        }
                     }
                 }
             });
@@ -2311,17 +2350,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_panicking_controller_releases_its_live_generation_latch() {
+    async fn a_panicking_controller_is_restarted_without_losing_its_generation() {
         let _serial = CONTROLLER_TASK_TEST_LOCK.lock().await;
         let env = crate::testing::env().await;
+        let sup = store::get_or_init(&env.app.db).await.unwrap();
         const GEN: i64 = 7_300_042;
+        sqlx::query("UPDATE supervisors SET generation=? WHERE id=?").bind(GEN).bind(&sup.id).execute(&env.app.db).await.unwrap();
+        TEST_CONTROLLER_ENTRIES.store(0, std::sync::atomic::Ordering::SeqCst);
         TEST_PANIC_CONTROLLER_GENERATION.store(GEN, std::sync::atomic::Ordering::SeqCst);
 
         spawn(env.app.clone(), GEN);
         assert!(
-            crate::testing::eventually!(LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == -1),
-            "panic unwinding must restore LIVE_GENERATION so a later start can run"
+            crate::testing::eventually!(TEST_PANIC_CONTROLLER_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == -1),
+            "the injected panic must happen before checking the restart"
         );
+        assert!(
+            crate::testing::eventually!(TEST_CONTROLLER_ENTRIES.load(std::sync::atomic::Ordering::SeqCst) >= 2),
+            "a panicked controller generation must restart itself"
+        );
+        assert_eq!(LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst), GEN, "the restarted generation owns the latch");
+        sqlx::query("UPDATE supervisors SET generation=? WHERE id=?").bind(GEN + 1).bind(&sup.id).execute(&env.app.db).await.unwrap();
+        assert!(crate::testing::eventually!(LIVE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == -1), "the restarted task retires after a generation change");
         TEST_PANIC_CONTROLLER_GENERATION.store(-1, std::sync::atomic::Ordering::SeqCst);
     }
 

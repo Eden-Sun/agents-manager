@@ -4,6 +4,10 @@ set -euo pipefail
 # 外層 `CHECK_TESTS=none scripts/check.sh changed` 會把開關漏進來，讓下面每一段假 changed 都不跑測試而誤判紅（issue #813）。
 unset CHECK_TESTS CHECK_MAX_LOAD
 
+# CHECK_TESTS belongs to the outer daemon check. This contract test sets its own overrides below;
+# inheriting a caller's `CHECK_TESTS=none` would suppress the queue-module assertion.
+unset CHECK_TESTS
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/am-check-changed-daemon.XXXXXX")"
 trap '/bin/rm -rf "$tmp"' EXIT

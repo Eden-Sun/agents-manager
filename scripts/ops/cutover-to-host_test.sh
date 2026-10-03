@@ -335,7 +335,8 @@ check "在跑的 child 列出來" "在跑的 child 1 顆" "$ROOT/out"
 check "已移交的 hub 不在名單" "Agents Manager（PAM" "$ROOT/out"
 check "dry-run 列出完整設定移交" "host-state-transfer.py" "$ROOT/out"
 check_no "不再要求手動補來源 config 段落" "切換後在目標補上" "$ROOT/out"
-check_no "已移交的 hub 不碰" "H1" "$ROOT/out"
+# mktemp 目錄名可能含 H1 這個子字串；只擋獨立的 bot id，避免暫存路徑誤判。
+check_no "已移交的 hub 不碰" "\(^\|[^0-9A-Za-z]\)H1\([^0-9A-Za-z]\|$\)" "$ROOT/out"
 teardown
 
 # ---------------------------------------------------------------- 完整切換

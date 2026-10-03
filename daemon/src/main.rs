@@ -27,6 +27,7 @@ mod promote_intents;
 mod assets;
 mod background_hook;
 mod background_jobs;
+mod background_loop;
 mod claude_live;
 mod claude_mode;
 mod autostart_revive;
@@ -476,8 +477,9 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
                         let _ = tokio::signal::ctrl_c().await;
                     }
                 }
-                tracing::info!("shutting down; closing ssh masters");
-                shutdown_app.hosts.shutdown().await;
+                tracing::info!("shutting down; draining daemon background loops");
+                shutdown_app.shutdown.cancel();
+                shutdown_app.background_tasks.close();
             })
             .await
     });
@@ -605,10 +607,18 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // 分享入口（SPEC §20）：`[share] listen` 有設才開，獨立的 port 與 router，跟上面的管理 API 完全分開。
     share::portal::spawn_listener(&app, addr.port()).await;
     let _ = enable_shutdown.send(());
-    server.await.context("HTTP server task panicked")??;
-    // SPEC §11.3.5: close every ssh master on the way out; remote herdr servers stay alive.
-    app.hosts.shutdown().await;
+    // 連線收完後才等受監督的迴圈，再關 SSH masters。
+    let serve_result = server.await.context("HTTP server task panicked")?;
+    finish_serve(&app, serve_result).await?;
     Ok(())
+}
+
+async fn finish_serve<E>(app: &Arc<state::App>, serve_result: Result<(), E>) -> Result<(), E> {
+    app.shutdown.cancel();
+    app.background_tasks.close();
+    app.background_tasks.wait().await;
+    app.hosts.shutdown().await;
+    serve_result
 }
 
 #[allow(dead_code)]
@@ -636,6 +646,33 @@ fn _assert_send(_: &Arc<state::App>) {}
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[tokio::test]
+    async fn an_early_server_error_cancels_and_joins_supervisor_background_work() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_starts = starts.clone();
+        let shutdown = app.shutdown.clone();
+        crate::background_loop::spawn_restartable(&app, "shutdown test loop", move || {
+            let starts = task_starts.clone();
+            let shutdown = shutdown.clone();
+            async move {
+                starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                shutdown.cancelled().await;
+            }
+        });
+        assert!(crate::testing::eventually!(starts.load(std::sync::atomic::Ordering::SeqCst) == 1));
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            finish_serve(&app, Err(std::io::Error::other("injected accept failure"))),
+        )
+        .await;
+        assert!(result.is_ok(), "server failure must cancel background tasks before waiting for them");
+        assert!(result.unwrap().is_err(), "the original server failure must still be returned");
+        assert_eq!(app.background_tasks.len(), 0, "shutdown must join tracked work");
+    }
 
     /// issue #512：新建的 ui-token 一開始就要是 0600（不留 `write` 與 `chmod` 之間那段 0644 的窗口），
     /// 既有的過寬檔案開機時要被修回來，而且內容不能被換掉（token 本身是好的）。
