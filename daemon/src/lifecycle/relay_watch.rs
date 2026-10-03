@@ -545,6 +545,18 @@ mod tests {
         assert_eq!(run_state(&alive).await, "exited");
     }
 
+    /// 舊 pane 消失後 herdr 把同一個 id 交給別的 agent：不能再對那個 id 打字，run 要收成 exited。
+    #[tokio::test]
+    async fn a_reused_pane_id_held_by_another_agent_is_not_the_old_run() {
+        let f = fixture("reused-pane").await;
+        f.env.herdr.set_agent("someone-else", &f.pane, true);
+        let typed = super::super::send_text(&f.env.app, &f.bot_id, "hello", false, None).await;
+        assert!(typed.is_err(), "打進被別人佔走的 pane id：{typed:?}");
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty(), "一個字都不能進新 pane");
+        assert_eq!(super::super::dead_panes::sweep(&f.env.app).await, vec![f.run_id.clone()]);
+        assert_eq!(run_state(&f).await, "exited");
+    }
+
     /// announce 給一顆 pane 已經不在的收件方：收掉 run、不開回合。
     #[tokio::test]
     async fn an_announce_to_a_dead_pane_opens_no_turn_and_ends_the_run() {

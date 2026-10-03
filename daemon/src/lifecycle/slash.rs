@@ -52,6 +52,12 @@ pub async fn send_text_recorded(
         .ok_or_else(|| LcError::NotFound("pane".into()))?
         .to_string();
     let client = client_for_run(app, &run).await?;
+    if super::dead_panes::pane_target_stale(&client, &run).await {
+        return Err(LcError::conflict(
+            "pane_reused",
+            json!({"run_id": run.id, "pane_id": pane_id, "sent": false}),
+        ));
+    }
     // 併送也是 daemon 直接打進 pane（#648）。沒先記下的話，下一則 prompt 仍走 agent.prompt，
     // 那條路會回 ok 但字沒進去。寫不進去就不打。
     if !text.is_empty() || enter {
