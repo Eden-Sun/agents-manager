@@ -53,6 +53,10 @@ pub(crate) const INBOX_MAX_FILES: usize = 300;
 const MAX_ATTACHMENTS: usize = 10;
 /// 同時開著的 SSE 連線（全部分享加起來）。
 const MAX_STREAMS: usize = 32;
+/// 單一分享同時開著的 SSE 連線；避免一個連結佔滿全部全域名額。
+pub(crate) const MAX_STREAMS_PER_SHARE: usize = 4;
+/// 進 token DB 查詢之前可同時佔用的全域名額。
+const MAX_TOKEN_LOOKUPS: usize = 8;
 /// SSE 每隔多久重新確認一次 token 還有效（關分享／重產時另外會被 [`kick`] 叫醒）。
 const STREAM_RECHECK: Duration = Duration::from_secs(30);
 
@@ -73,6 +77,62 @@ pub(crate) struct Portal {
     limits: Arc<Limits>,
     uploads: Arc<Semaphore>,
     streams: Arc<Semaphore>,
+    share_streams: Arc<ShareStreamLimits>,
+    token_lookups: Arc<Semaphore>,
+}
+
+#[derive(Default)]
+struct ShareStreamLimits {
+    active: Mutex<HashMap<String, usize>>,
+}
+
+impl ShareStreamLimits {
+    fn try_acquire(self: &Arc<Self>, bot_id: &str) -> Option<ShareStreamPermit> {
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let count = active.entry(bot_id.to_string()).or_default();
+        if *count >= MAX_STREAMS_PER_SHARE {
+            return None;
+        }
+        *count += 1;
+        Some(ShareStreamPermit { owner: self.clone(), bot_id: bot_id.to_string() })
+    }
+}
+
+struct ShareStreamPermit {
+    owner: Arc<ShareStreamLimits>,
+    bot_id: String,
+}
+
+impl Drop for ShareStreamPermit {
+    fn drop(&mut self) {
+        let mut active = self.owner.active.lock().unwrap_or_else(|e| e.into_inner());
+        let remove = if let Some(count) = active.get_mut(&self.bot_id) {
+            *count -= 1;
+            *count == 0
+        } else {
+            false
+        };
+        if remove {
+            active.remove(&self.bot_id);
+        }
+    }
+}
+
+#[derive(Debug)]
+enum TokenLookupError {
+    Saturated,
+    Database(sqlx::Error),
+}
+
+async fn resolve_token(pool: &sqlx::SqlitePool, slots: &Arc<Semaphore>, token: &str) -> Result<Option<String>, TokenLookupError> {
+    // Reject malformed shapes without consuming a scarce slot or asking SQLite.
+    if !store::token_shape_ok(token) {
+        return Ok(None);
+    }
+    let permit = slots.clone().try_acquire_owned().map_err(|_| TokenLookupError::Saturated)?;
+    let resolved = store::resolve(pool, token).await.map_err(TokenLookupError::Database);
+    drop(permit);
+    resolved
 }
 
 /// 固定視窗的計數（每顆 bot、每種動作一個佇列）。只在記憶體裡：daemon 重啟就歸零，這是防灌爆，不是帳本。
@@ -115,6 +175,8 @@ pub fn router(app: Arc<App>) -> Router {
         limits: Arc::new(Limits::default()),
         uploads: Arc::new(Semaphore::new(2)),
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
+        share_streams: Arc::new(ShareStreamLimits::default()),
+        token_lookups: Arc::new(Semaphore::new(MAX_TOKEN_LOOKUPS)),
     };
     Router::new()
         .route("/s/{token}", get(page))
@@ -174,16 +236,34 @@ fn bad(reason: &str, message: &str) -> Response {
 /// token → bot id；不對就是 404。
 #[allow(clippy::result_large_err)]
 async fn bot_for(st: &Portal, token: &str) -> Result<String, Response> {
-    match store::resolve(&st.app.db, token).await {
+    match resolve_token(&st.app.db, &st.token_lookups, token).await {
         Ok(Some(id)) => {
-            store::touch(&st.app.db, &id).await;
+            touch_share_if_stale(st, &id).await;
             Ok(id)
         }
         Ok(None) => Err(not_found()),
-        Err(e) => {
+        Err(TokenLookupError::Saturated) => Err(unavailable()),
+        Err(TokenLookupError::Database(e)) => {
             tracing::warn!(error = %e, "share token lookup failed");
             Err(unavailable())
         }
+    }
+}
+
+async fn touch_share_if_stale(st: &Portal, bot_id: &str) {
+    let window = Duration::from_secs(60);
+    if st.limits.take(bot_id, "touch", 1, window).is_some() {
+        return;
+    }
+    let fresh = sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM bot_shares WHERE bot_id = ? AND last_used_at >= ?)")
+        .bind(bot_id)
+        .bind(db::iso_in(-60))
+        .fetch_one(&st.app.db)
+        .await;
+    match fresh {
+        Ok(0) => store::touch(&st.app.db, bot_id).await,
+        Ok(_) => {}
+        Err(e) => tracing::warn!(bot = %bot_id, error = %e, "share last-used telemetry check failed"),
     }
 }
 
@@ -417,6 +497,9 @@ async fn events(State(st): State<Portal>, Path(token): Path<String>) -> Response
         Ok(id) => id,
         Err(r) => return r,
     };
+    let Some(share_slot) = st.share_streams.try_acquire(&bot_id) else {
+        return too_many(10, "streams_per_share");
+    };
     let Ok(slot) = st.streams.clone().try_acquire_owned() else {
         return (StatusCode::SERVICE_UNAVAILABLE, [(header::RETRY_AFTER, "10")], Json(json!({"error": "too_many_streams"}))).into_response();
     };
@@ -424,7 +507,17 @@ async fn events(State(st): State<Portal>, Path(token): Path<String>) -> Response
         return too_many(wait, "stream");
     }
     let first = json!({"status": status_of(&st.app, &bot_id).await});
-    let s = Stream { app: st.app.clone(), token, bot_id, rx: st.app.subscribe(), kicks: kicks().subscribe(), _slot: slot, pending: Some(first) };
+    let s = Stream {
+        app: st.app.clone(),
+        token,
+        bot_id,
+        token_lookups: st.token_lookups.clone(),
+        rx: st.app.subscribe(),
+        kicks: kicks().subscribe(),
+        _slot: slot,
+        _share_slot: share_slot,
+        pending: Some(first),
+    };
     let stream = futures::stream::unfold(s, |mut s| async move { s.next().await.map(|ev| (Ok::<_, std::convert::Infallible>(ev), s)) });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(20))).into_response()
 }
@@ -433,15 +526,17 @@ struct Stream {
     app: Arc<App>,
     token: String,
     bot_id: String,
+    token_lookups: Arc<Semaphore>,
     rx: broadcast::Receiver<crate::state::WsEvent>,
     kicks: broadcast::Receiver<String>,
     _slot: tokio::sync::OwnedSemaphorePermit,
+    _share_slot: ShareStreamPermit,
     pending: Option<Value>,
 }
 
 impl Stream {
     async fn still_valid(&self) -> bool {
-        matches!(store::resolve(&self.app.db, &self.token).await, Ok(Some(id)) if id == self.bot_id)
+        matches!(resolve_token(&self.app.db, &self.token_lookups, &self.token).await, Ok(Some(id)) if id == self.bot_id)
     }
 
     /// 下一個要送的事件；`None`＝收掉這條連線（token 失效、bus 關了）。
@@ -610,16 +705,28 @@ async fn files(State(st): State<Portal>, Path(token): Path<String>) -> Response 
     };
     let Some(dir) = crate::outbox::dir_for(&st.app.data_dir, &bot_id) else { return not_found() };
     let data_dir = st.app.data_dir.clone();
+    #[cfg(test)]
+    let fail_scan = take_fail_files_scan_task_for_test(&bot_id);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let listed = tokio::task::spawn_blocking(move || match crate::outbox::open_trusted_dir(&data_dir, &dir) {
-        Ok(Some(fd)) => Some(crate::outbox::scan(&fd, now)),
-        Ok(None) => Some(Vec::new()),
-        Err(()) => None,
+    let listed = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if fail_scan {
+            panic!("injected share outbox scan task failure");
+        }
+        match crate::outbox::open_trusted_dir(&data_dir, &dir) {
+            Ok(Some(fd)) => crate::outbox::scan_checked(&fd, now),
+            Ok(None) => Ok(Vec::new()),
+            Err(()) => Err(()),
+        }
     })
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_default();
+    .await;
+    let listed = match listed {
+        Ok(Ok(files)) => files,
+        Ok(Err(())) | Err(_) => {
+            tracing::warn!(bot = %bot_id, "share outbox listing unavailable");
+            return unavailable();
+        }
+    };
     // 只給名字、大小、還剩多久；目錄路徑不給。
     let out: Vec<Value> = listed
         .iter()
@@ -631,6 +738,19 @@ async fn files(State(st): State<Portal>, Path(token): Path<String>) -> Response 
     Json(json!({"files": out})).into_response()
 }
 
+#[cfg(test)]
+static FAIL_NEXT_FILES_SCAN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(super) fn fail_next_files_scan_task_for_test(bot_id: &str) {
+    FAIL_NEXT_FILES_SCAN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).insert(bot_id.to_string());
+}
+
+#[cfg(test)]
+fn take_fail_files_scan_task_for_test(bot_id: &str) -> bool {
+    FAIL_NEXT_FILES_SCAN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id)
+}
+
 async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, String)>) -> Response {
     let bot_id = match bot_for(&st, &token).await {
         Ok(id) => id,
@@ -640,13 +760,16 @@ async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, Strin
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.starts_with('.') || name.chars().any(char::is_control) {
         return not_found();
     }
-    let q = HashMap::from([("path".to_string(), name)]);
-    match crate::outbox::file(State(st.app.clone()), Path(bot_id), Query(q)).await {
+    match crate::outbox::share_file(&st.app, &bot_id, &name).await {
         Ok(res) => res,
-        Err(LcError::Conflict(v)) if v.get("reason").and_then(Value::as_str) == Some("file_too_large") => {
+        Err(crate::outbox::ShareFileError::TooLarge) => {
             (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"error": "too_large"}))).into_response()
         }
-        Err(_) => not_found(),
+        Err(crate::outbox::ShareFileError::NotFound) => not_found(),
+        Err(crate::outbox::ShareFileError::Unavailable) => {
+            tracing::warn!(bot = %bot_id, "share outbox download unavailable");
+            unavailable()
+        }
     }
 }
 

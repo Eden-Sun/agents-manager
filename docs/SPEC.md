@@ -4730,6 +4730,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   分享頁是嵌入的 `web/dist/share.html`（獨立的 Vite entry），沒打包時回一頁佔位。
 - token 錯、分享關了：一律同一個 404。每個回應 `Cache-Control: no-store`（`/assets` 例外：檔名有雜湊）、`Referrer-Policy: no-referrer`、`nosniff`、
   `X-Frame-Options: DENY`、只允許 `'self'` 的 CSP（沒有 inline script／style）；不設任何 CORS 標頭。
+- 未成形的 token 不查 DB；有效形狀的 token 查詢全入口共用 8 個併發名額，滿額回一般 503。成功驗證後的 `last_used_at` 是遙測：每顆 bot 每分鐘最多檢查一次，先用唯讀查詢看是否已新鮮，寫入失敗不影響請求。
 - 對話：完整歷史，但只有 user／assistant，只給 id、role、誰送的（`share`／`owner`／`bot`）、文字、時間、附件名；系統訊息、工具細節、終端快照、轉寄來源的 bot id 都不給。
 - 送訊息：走「沒在跑就先落地再啟動、忙就排隊」那條路（§6.3、`start_if_stopped`＋`queue_if_busy`），`relay_from` 記哨符 `share`（跟 `daemon` 同類）。
   DB 的 `messages.source` 照存 `web`（CHECK 不收新值），輸出時 user 訊息的 `relay_from = share` 報 `source: "share"`，主 UI 標「🔗 分享使用者」。
@@ -4741,8 +4742,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   檔名只取最後一段、清掉控制字元與符號、不收隱藏檔與金鑰／DB 類檔名（同 outbox 的黑名單）；種類以副檔名白名單決定（文字、圖片、PDF、Office），
   內容要對得上（檔頭；文字檔要是 UTF-8、沒有 NUL），呼叫端的 Content-Type 不採信。存成 `<ulid>-<檔名>`（0600），`inbox/` 逐層 `O_NOFOLLOW` 打開，被換成符號連結就不寫。
   送訊息時帶的附件 id 必須真的在 `inbox/`，路徑以固定的標記行附在給 bot 的文字後面（對話列表再拆回檔名）。
-- 下載：只有這顆 bot 的 outbox 第一層，沿用 outbox 的擋法（金鑰／DB／隱藏檔不列不給、fd-bound 開檔）與下載標頭（attachment、白名單外 octet-stream、nosniff）；不給目錄路徑。
-- SSE：`status`（連上時先送一次）、`message`、`resync`（漏了，請重抓）；全部分享加起來同時 32 條，每 30 秒或被叫醒時重新確認 token。
+- 下載：只有這顆 bot 的 outbox 第一層，沿用 outbox 的擋法（金鑰／DB／隱藏檔不列不給、fd-bound 開檔）與下載標頭（attachment、白名單外 octet-stream、nosniff）；不給目錄路徑。列表只有 outbox 尚未建立時回空清單；可信目錄、列舉、檔案讀取或背景工作失敗回一般 503，不把不完整結果當空清單。真正不存在或遭黑名單擋下的單檔下載仍回 404。
+- SSE：`status`（連上時先送一次）、`message`、`resync`（漏了，請重抓）；全部分享加起來同時 32 條，每顆 bot 同時最多 4 條；滿額時該分享回 429，其他分享仍可連線。每 30 秒或被叫醒時重新確認 token，關閉連線即歸還兩層名額。
 
 ### 20.4 前端
 

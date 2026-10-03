@@ -756,11 +756,13 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 | `GET /s/{token}/api/info` | `{bot_name, status}`；`status` 同 `lamp`（working／idle／starting／offline／blocked／unknown） |
 | `GET /s/{token}/api/messages?before=<message id>&limit=100` | `{bot_name, status, messages:[{id, role:"user"\|"assistant", by:"share"\|"owner"\|"bot", text, created_at, attachments:[{name}]}], has_more}`，舊→新；`limit` 1..=200；`before` 不在這段對話 400 `bad_cursor` |
 | `POST /s/{token}/api/messages` | `{text, client_request_id, attachments?:[上傳回的 id]}` → `{accepted:true, message_id, delivery}`；413 `text_too_long`（> 8000 字）；400 `empty`／`bad_client_request_id`（1..=64 個 `[A-Za-z0-9-_.:]`）／`too_many_attachments`（> 10）／`unknown_attachment`；429 `rate_limited`（每分鐘 10 則，`Retry-After`）；409 `not_accepted`（多半是上一則還在排隊：一段對話同時只排一則）；503 `unavailable` |
-| `GET /s/{token}/api/events` | SSE：`event: status` `{status}`（連上先送一次）、`event: message`（同上面的訊息形狀）、`event: resync` `{}`；同時太多條 503 `too_many_streams` |
+| `GET /s/{token}/api/events` | SSE：`event: status` `{status}`（連上先送一次）、`event: message`（同上面的訊息形狀）、`event: resync` `{}`；總量同時 32 條、每個分享同時 4 條；單分享滿額 429 `rate_limited`，總量滿額 503 `too_many_streams` |
 | `POST /s/{token}/api/upload` | `multipart/form-data` 的 `file` 欄位（分享頁的 `FormData`；一次一個檔），或原始位元組＋`?name=<檔名>` → `{id, name, size, mime}`；400 `empty`／`bad_name`／`bad_multipart`／`no_file`；413 `too_large`（> 25 MiB）；415 `unsupported`（`reason`: `unsupported_type`／`content_mismatch`）；429；507 `inbox_full` |
-| `GET /s/{token}/api/files` | `{files:[{name, size, modified_at, remaining_secs}]}`（這顆 bot 的 outbox；`modified_at` 是 RFC 3339） |
-| `GET /s/{token}/api/files/{name}` | 下載（attachment、nosniff）；不存在或被擋 404、太大 413 |
+| `GET /s/{token}/api/files` | `{files:[{name, size, modified_at, remaining_secs}]}`（這顆 bot 的 outbox；`modified_at` 是 RFC 3339）；outbox 尚未建立時回空清單，可信目錄／列舉／背景工作失敗回一般 503 `unavailable` |
+| `GET /s/{token}/api/files/{name}` | 下載（attachment、nosniff）；不存在或被擋 404、太大 413；可信開檔、讀取、DB 或背景工作失敗回一般 503 `unavailable` |
 | `GET /assets/{path}` | 分享頁的靜態檔 |
+
+分享入口只對形狀正確的 43 字元 token 使用全域 8 個併發名額查 DB；格式錯誤仍直接回 404，滿額查詢回 503。`last_used_at` 每顆 bot 每分鐘最多做一次唯讀新鮮度檢查，只有過期才寫入；這項遙測失敗不改變驗證結果。
 
 ## 6. 讀訊息
 
