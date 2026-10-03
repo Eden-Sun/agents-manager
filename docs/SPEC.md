@@ -3253,6 +3253,7 @@ bot 用 `herdr agent start --kind grok` 開的子 agent 沒有 hook（pane 環�
   讀得到 pane 的行程、名單裡卻沒有它：當作還沒開好，不猜。讀不到行程環境時才退回「bot 的 cwd 相同、
   沒被別的在跑 run 綁走、剛好一個」，不只一個就不猜。找到的寫進 `runs.native_session_id`；之後只要它還在名單上就不再掃行程。`GROK_HOME` 同 §12.2（bot env，缺省 `~/.grok`）。
 - **讀檔**：`<GROK_HOME>/sessions/*/<session id>/chat_history.jsonl`（一般檔、非 symlink），本機與遠端都用 `sh` 讀最後 8 MiB；session id 只收英數與 `-`／`_`。
+  8 MiB 從一行中間切開時，那行與它後面、直到下一個完整 `user` 為止的 `assistant` 都丟掉，避免半行的回覆蓋掉上一問。
 - **一問一答**：`type: user`、沒有 `synthetic_reason`、內容有 `<user_query>…</user_query>` 的才是一問（取標籤裡的字）；`<user_info>`、system reminder、
   壓縮摘要都不是。之後第一則沒有 `tool_calls` 的 `assistant` 是回覆（帶 `tool_calls` 的旁白不算），下一問出現也算這一問結束（被打斷、沒有回覆）。
   slash 指令不進這個檔。**壓縮會重寫整個檔**：前面的問答消失，進行中那一問以沒有 `prompt_index` 的形式重新出現，所以是邊跑邊記，不是事後重讀。
