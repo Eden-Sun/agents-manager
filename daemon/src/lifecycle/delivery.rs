@@ -430,6 +430,13 @@ fn blank_particles(cells: Vec<Cell>, drop: bool) -> Vec<Cell> {
     cells.into_iter().map(|c| if is_particle(&c) { Cell { ch: ' ', dim: false, fg: false, fg_rgb: None, bg_rgb: None } } else { c }).collect()
 }
 
+/// 整個畫面去掉樣式，codex 的點字粒子抹回空白（只有樣式讀才分得出粒子；純文字讀原樣去樣式）。給只看版面結構、
+/// 不分提示與實字的判斷用（[`super::codex_banner::blocks_typing`]）。
+pub(crate) fn blank_codex_particles(screen: &str) -> String {
+    let styled = screen.contains("\u{1b}[");
+    screen.lines().map(|l| blank_particles(styled_cells(l), styled).into_iter().map(|c| c.ch).collect::<String>()).collect::<Vec<_>>().join("\n")
+}
+
 fn locate_composer(kind: &str, lines: &[&str], drop_particles: bool, tail: usize) -> Option<ComposerRow> {
     let glyph = composer_glyph(kind)?;
     let from = lines.len().saturating_sub(tail);
@@ -887,6 +894,23 @@ async fn agent_prompt_usable(client: &HerdrClient, target: &str) -> bool {
     }
 }
 
+/// 打第一個字之前的輸入框判斷（計畫、準備、貼字前三處共用）。codex 的帳號安全提醒橫幅開著時框看起來是空的，但打進去的
+/// 開頭數字會被當成選項吃掉（#782）：整則不送、可重試，第一次看到時通知人；不按 Esc 或任何鍵。
+async fn composer_ready(app: &Arc<App>, run: &db::Run, kind: &str, screen: &str) -> Result<(), Delivered> {
+    if kind == "codex" {
+        let banner = super::codex_banner::blocks_typing(screen);
+        super::codex_banner::observe(app, run, banner).await;
+        if banner {
+            return Err(Delivered::NotAttempted { reason: super::codex_banner::REASON, retry: true });
+        }
+    }
+    match box_state(kind, screen) {
+        BoxState::Empty => Ok(()),
+        BoxState::NonEmpty => Err(Delivered::NotAttempted { reason: "composer_busy", retry: true }),
+        BoxState::Unready => Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }),
+    }
+}
+
 /// Decide how to deliver, touching nothing: the route, the evidence and an empty box. Callers run
 /// this **before** committing a turn, so a prompt that cannot be sent never becomes one.
 pub(crate) async fn plan_delivery(
@@ -952,11 +976,7 @@ pub(crate) async fn plan_delivery(
             return Ok(Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }));
         }
     };
-    match box_state(&bot.kind, &screen) {
-        BoxState::Empty => Ok(Ok(Plan::Type { pane, proof, submit: Submit::Enter })),
-        BoxState::NonEmpty => Ok(Err(Delivered::NotAttempted { reason: "composer_busy", retry: true })),
-        BoxState::Unready => Ok(Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true })),
-    }
+    Ok(composer_ready(app, run, &bot.kind, &screen).await.map(|()| Plan::Type { pane, proof, submit: Submit::Enter }))
 }
 
 /// Current evidence count for `proof`.
@@ -1055,11 +1075,7 @@ pub(crate) async fn prepare_delivery(
             return Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true });
         }
     };
-    match box_state(&bot.kind, &before) {
-        BoxState::Empty => {}
-        BoxState::NonEmpty => return Err(Delivered::NotAttempted { reason: "composer_busy", retry: true }),
-        BoxState::Unready => return Err(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }),
-    }
+    composer_ready(app, run, &bot.kind, &before).await?;
     // The baseline is still before the first keystroke: an evidence file that vanished, was swapped
     // or became unreadable since the plan means "not attempted", never an unknown delivery
     // (sol review round eleven). Only failures after `pane_send_text` may become `unknown`.
@@ -1187,10 +1203,8 @@ pub(crate) async fn type_text(
             return Ok(Typing::Done(Delivered::NotAttempted { reason: "composer_unreadable", retry: true }));
         }
     };
-    match box_state(&bot.kind, &before) {
-        BoxState::Empty => {}
-        BoxState::NonEmpty => return Ok(Typing::Done(Delivered::NotAttempted { reason: "composer_busy", retry: true })),
-        BoxState::Unready => return Ok(Typing::Done(Delivered::NotAttempted { reason: "composer_unreadable", retry: true })),
+    if let Err(not) = composer_ready(app, run, &bot.kind, &before).await {
+        return Ok(Typing::Done(not));
     }
 
     client.pane_send_text(&pane, text).await?;

@@ -678,6 +678,7 @@ const REASON_TEXT: Record<string, string> = {
   transcript_not_ready: '沒送出：claude 還沒回報這段對話（session），稍後再送一次',
   transcript_unreadable: '沒送出：讀不到這段對話的紀錄檔，稍後再送一次',
   codex_log_not_ready: '沒送出：codex 的紀錄還沒寫出來，稍後再送一次',
+  codex_security_banner: '沒送出：codex 畫面上有帳號安全提醒橫幅（開著時打字，開頭的數字會被當成選項）。請到「終端」選一項或按 Esc 關掉，再送一次',
   no_pane_to_type_into: '沒送出：找不到這顆 bot 的終端畫面可以打字，重啟它再試',
   resume_unverified: '沒送出：這顆 bot 是接回舊對話起來的，還在確認接回的是不是原本那段（最多約兩分鐘），稍後再送一次',
   // API.md 有列、daemon 不附 `message`：讀不到這顆 bot 在哪台主機（daemon 的資料暫時讀不到），字沒打進去（#233）。

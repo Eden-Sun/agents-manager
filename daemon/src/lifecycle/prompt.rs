@@ -558,6 +558,8 @@ fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> 
             || crate::tui_prompts::is_switch_model_dialog(screen) => Some("dialog_open"),
         "grok" if crate::tui_prompts::is_grok_trust_dialog(screen) => Some("dialog_open"),
         "codex" if crate::codex_live::picker_open(screen) => Some("picker_open"),
+        // #782：帳號安全提醒橫幅開著時 agent.prompt 打進去的開頭數字一樣會被當成選項吃掉。
+        "codex" if super::codex_banner::blocks_typing(screen) => Some(super::codex_banner::REASON),
         _ => None,
     }
 }
@@ -610,6 +612,9 @@ pub(crate) async fn final_agent_prompt_guard(
         .pane_read(pane, "visible", 80)
         .await
         .map_err(|_| "pane_unreadable")?;
+    if bot.kind == "codex" {
+        super::codex_banner::observe(app, run, super::codex_banner::blocks_typing(&read.text)).await;
+    }
     if let Some(reason) = agent_prompt_dialog_reason(&bot.kind, &read.text) {
         return Err(reason);
     }
@@ -2312,6 +2317,36 @@ mod prompt_tests {
         assert_eq!(turn_count(&app, &f.conv).await, 0, "an unsent direct turn is withdrawn");
         assert!(f.env.herdr.calls_to("agent.prompt").is_empty(), "the final fence must precede agent.prompt");
         assert!(f.env.herdr.calls_to("pane.send_text").is_empty());
+    }
+
+    /// #782：agent.prompt 那條路也會把字打進 pane。帳號安全提醒橫幅在前置檢查之後才出現：最後一道圍籬擋下、可重試，
+    /// 一個鍵都不按（不按 Esc），對話留一則通知。
+    #[tokio::test]
+    async fn agent_prompt_is_fenced_by_a_codex_security_banner() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE runs SET pane_id='pane-prompt-test' WHERE id=?").bind(&f.run_id).execute(&app.db).await.unwrap();
+        f.env.herdr.set_screen("pane-prompt-test", "• PONG\n\n› \n\n  gpt-6.1-sol default · /tmp/x\n");
+        let screens = f.env.herdr.screens.clone();
+        super::super::race_point::arm("agent_prompt_before_rpc", &f.bot_id, move || async move {
+            screens.lock().unwrap().insert(
+                "pane-prompt-test".into(),
+                include_str!("fixtures/codex-0.159.3-security-setup-banner.txt").into(),
+            );
+        });
+
+        let result = prompt(&app, &f.bot_id, "1. 先看 issue 782", "codex-banner-fence").await;
+        let Err(LcError::Conflict(body)) = result else { panic!("banner must be a retryable 409: {result:?}") };
+        assert_eq!(body["reason"], "codex_security_banner", "{body}");
+        assert_eq!(body["retryable"], true, "{body}");
+        assert!(f.env.herdr.calls_to("agent.prompt").is_empty());
+        assert!(f.env.herdr.calls_to("pane.send_text").is_empty() && f.env.herdr.calls_to("pane.send_keys").is_empty());
+        let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'")
+            .bind(&f.conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+        assert!(notes.iter().any(|n| n.contains("安全提醒橫幅")), "{notes:?}");
     }
 
     #[tokio::test]
