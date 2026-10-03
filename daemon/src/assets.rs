@@ -29,6 +29,11 @@ struct WebAssets;
 #[cfg(feature = "embed-ui")]
 pub async fn serve(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
+    // `//api/x`、`//ws` 不會進 /api 的 router，但也不能拿 200 的 index.html：
+    // 呼叫端（與權限矩陣）會把 2xx 當成路由存在。跟 /api 打錯路徑一樣回 JSON 404。
+    if is_api_like(path) {
+        return crate::lifecycle::LcError::NotFound("route".into()).into_response();
+    }
     let candidate = if path.is_empty() { "index.html" } else { path };
     match WebAssets::get(candidate) {
         Some(f) => {
@@ -46,6 +51,11 @@ pub async fn serve(uri: Uri) -> Response {
                 .into_response(),
         },
     }
+}
+
+/// 去掉前導 `/` 之後是 `api`、`api/…`、`ws`、`ws/…`：這是打 API 的路徑，不是前端頁面。
+fn is_api_like(path: &str) -> bool {
+    ["api", "ws"].iter().any(|p| path == *p || path.starts_with(&format!("{p}/")))
 }
 
 /// 嵌入的 `web/dist` 裡的一個檔（分享入口用，`share::portal`）。沒嵌或沒有這個檔＝`None`，**沒有** SPA fallback。
@@ -67,4 +77,17 @@ pub async fn serve(_uri: Uri) -> Response {
         "agents-managerd was built without the `embed-ui` feature; run the Vite dev server instead",
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn api_shaped_paths_never_fall_back_to_the_spa() {
+        for p in ["api", "api/intents", "ws", "ws/x"] {
+            assert!(super::is_api_like(p), "{p}");
+        }
+        for p in ["", "index.html", "assets/app.js", "apix", "wsx/y", "bots/api"] {
+            assert!(!super::is_api_like(p), "{p}");
+        }
+    }
 }
