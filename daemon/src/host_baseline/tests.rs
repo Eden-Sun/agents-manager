@@ -185,7 +185,15 @@ fn the_real_script_reads_a_fake_home_and_writes_nothing() {
     let out = run_probe(h, "/usr/bin:/bin");
     let ids = ids(&out);
 
-    assert!(ids.contains(&"tool.rtk".to_string()), "{ids:?}");
+    // 外層 PATH 故意沒有 rtk，但登入 shell 會重讀使用者的 profile。有絕對路徑就是找到了，空的才是缺。
+    let rtk = out.lines().find(|l| l.starts_with("AM_BL tool rtk ")).expect("rtk tool line");
+    let rtk_path = &rtk["AM_BL tool rtk ".len()..];
+    if rtk_path.is_empty() {
+        assert!(ids.contains(&"tool.rtk".to_string()), "{ids:?}");
+    } else {
+        assert!(rtk_path.starts_with('/'), "{rtk}");
+        assert!(!ids.contains(&"tool.rtk".to_string()), "{ids:?}");
+    }
     assert!(ids.contains(&"claude.default.statusline-command.sh".to_string()), "{ids:?}");
     assert!(ids.contains(&"claude.default.settings.json:hooks".to_string()), "{ids:?}");
     assert!(!ids.contains(&"claude.default.settings.json:statusLine".to_string()), "{ids:?}");
@@ -315,7 +323,11 @@ fn a_hostile_directory_name_cannot_forge_probe_lines() {
     let out = run_probe(h, "/usr/bin:/bin");
     assert_eq!(out.lines().filter(|l| *l == "AM_BL end").count(), 1, "forged end marker: {out}");
     assert!(out.lines().all(|l| l.starts_with("AM_BL ")), "a line escaped the AM_BL framing: {out}");
-    assert!(!out.lines().any(|l| l.starts_with("AM_BL tool rtk") && l.len() > "AM_BL tool rtk ".len()), "{out}");
+    // 真的 rtk 可以是絕對路徑（登入 shell 的 Homebrew）。偽造是多一行，或路徑不是絕對路徑。
+    let rtk: Vec<_> = out.lines().filter(|l| l.starts_with("AM_BL tool rtk")).collect();
+    assert_eq!(rtk.len(), 1, "forged tool line: {out}");
+    let rtk_path = &rtk[0]["AM_BL tool rtk ".len()..];
+    assert!(rtk_path.is_empty() || rtk_path.starts_with('/'), "{out}");
     let all = ids(&out);
     assert!(!all.iter().any(|i| i.contains(' ') || i.contains('\n')), "{all:?}");
     assert!(!all.iter().any(|i| i.starts_with("claude.cc1") || i.starts_with("claude.cc3") || i.starts_with("claude.cc4")), "{all:?}");
