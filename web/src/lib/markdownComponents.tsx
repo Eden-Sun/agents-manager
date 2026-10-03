@@ -1,5 +1,6 @@
 import type { ComponentProps } from 'react'
 import { MarkdownImage } from '../components/MarkdownImage'
+import { safeHttpUrl } from './safeUrl'
 
 type MarkdownComponents = {
   img: (props: ComponentProps<'img'>) => React.JSX.Element
@@ -28,14 +29,17 @@ export function markdownComponents(botId: string | null | undefined): MarkdownCo
   c = {
     // bot 給的連結：一律新分頁＋noopener noreferrer，不然一按就整個 app 換頁（連同記憶體裡的 token），
     // 也不能讓對方網站拿到 opener／referrer。被 urlTransform 清掉網址的（`javascript:` 等）不留一個點了沒反應的 `<a>`。
-    a: ({ href, children }: ComponentProps<'a'>) =>
-      href ? (
-        <a href={href} target="_blank" rel="noopener noreferrer">
+    a: ({ href, children }: ComponentProps<'a'>) => {
+      // urlTransform 仍放行相對路徑與 //host。相對的 /api/session 在這個 origin 開新分頁會拿到 UI token。
+      const safe = safeHttpUrl(typeof href === 'string' ? href : undefined)
+      return safe ? (
+        <a href={safe} target="_blank" rel="noopener noreferrer">
           {children}
         </a>
       ) : (
         <span>{children}</span>
-      ),
+      )
+    },
     img: (props: ComponentProps<'img'>) => <MarkdownImage botId={botId} src={typeof props.src === 'string' ? props.src : undefined} alt={props.alt} />,
   }
   cache.set(key, c)
