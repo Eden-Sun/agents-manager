@@ -681,7 +681,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     crate::remote_perms::spawn_tighten(app.clone(), conn.name.clone());
                     // 開機那一輪跑的時候這台還沒連上，它的 autostart bot 因此從來沒被起過（review 2026-09-16）。
                     // 對帳成功才跑、每台一生一次：重連不能把使用者停掉的 bot 再開起來（core 5）。
-                    crate::reconcile::autostart_after_reconcile(&app, &conn.name, reconciled).await;
+                    autostart_after_startup_ready(&app, &conn.name, reconciled).await;
 
                     loop {
                         tokio::time::sleep(PING_INTERVAL).await;
@@ -728,6 +728,11 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
             backoff = (backoff * 2).min(BACKOFF_MAX);
         }
     })
+}
+
+async fn autostart_after_startup_ready(app: &Arc<App>, host: &str, reconciled: bool) -> bool {
+    app.wait_until_startup_ready().await;
+    crate::reconcile::autostart_after_reconcile(app, host, reconciled).await
 }
 
 /// Test seam: a fake "ssh" per host name, so remote-side effects (`rm -rf` of a bot dir …) can be observed without a network.
@@ -1264,6 +1269,28 @@ pub async fn remote_canonical_dir(conn: &HostConn, path: &str) -> Result<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_remote_autostart_pass_waits_for_the_api_readiness_transition() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let host = "remote-autostart-readiness-test";
+        app.set_startup_ready(false);
+        let pass_app = app.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let pass = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            autostart_after_startup_ready(&pass_app, host, true).await
+        });
+
+        started_rx.await.unwrap();
+        assert!(!pass.is_finished(), "remote autostart must wait while API-facing startup work is unavailable");
+        assert!(!app.autostart_hosts.lock().unwrap().contains_key(host), "pass must not claim before ready");
+
+        app.set_startup_ready(true);
+        assert!(pass.await.unwrap(), "once ready, a successful reconcile should run the host pass");
+        assert_eq!(app.autostart_hosts.lock().unwrap().get(host), Some(&crate::state::AutostartHostStatus::Done));
+    }
 
     /// A captured old host must not publish its state or combine it with the replacement's tools cache.
     #[tokio::test]

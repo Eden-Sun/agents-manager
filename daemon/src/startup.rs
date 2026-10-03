@@ -8,6 +8,17 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
+/// Reserve the HTTP endpoint before handing the listener to the post-bind startup continuation.
+/// A listener conflict must not start hosts, autostart bots, or install background pollers.
+pub async fn bind_then<F, Fut, T>(addr: std::net::SocketAddr, work: F) -> Result<T>
+where
+    F: FnOnce(tokio::net::TcpListener) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
+    work(listener).await
+}
+
 /// 沒有 `--config` 也沒有 `AM_DATA_DIR` 時的資料目錄。
 pub fn default_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config/agents-manager")
@@ -342,6 +353,24 @@ fn same_dir(a: &Path, b: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 若 listen port 已被佔用，`serve` 必須在啟動 autostart、poller 與主機 supervisor 前失敗。
+    /// 這個 future 代表 bind 後才允許執行的啟動副作用；bind 失敗時不得 poll 它。
+    #[tokio::test]
+    async fn occupied_listen_port_does_not_start_boot_side_effects() {
+        use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+
+        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = reserved.local_addr().unwrap();
+        let started = Arc::new(AtomicBool::new(false));
+        let mark_started = started.clone();
+        let result = bind_then(addr, move |_listener| async move {
+            mark_started.store(true, Ordering::SeqCst);
+            Ok::<_, anyhow::Error>(())
+        }).await;
+        assert!(result.is_err(), "occupied listener must fail startup");
+        assert!(!started.load(Ordering::SeqCst), "background startup effects must not run when bind fails");
+    }
 
     fn same(a: &Path, b: &Path) -> bool {
         same_dir(a, b).unwrap()

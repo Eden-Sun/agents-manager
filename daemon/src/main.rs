@@ -432,25 +432,52 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     if dev_lan {
         addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     }
-    let ui_token = load_or_create_ui_token(&dir)?;
-    let service_tokens = service_auth::load_or_create(&dir)?;
-    let app = state::App::new(
-        pool,
-        herdr_client,
-        default_herdr,
-        store,
-        dir.clone(),
-        exe,
-        addr.port(),
-        ui_token,
-        cfg.server.herdr_session.clone(),
-        dev_lan,
-    );
-    *app.service_tokens.write().expect("service token lock") = service_tokens;
-    app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Some(local) = app.hosts.get("local").await {
-        local.connected.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
+    let host_cfg = cfg.hosts.clone();
+    let (listener, app) = startup::bind_then(addr, |listener| async move {
+        let ui_token = load_or_create_ui_token(&dir)?;
+        let service_tokens = service_auth::load_or_create(&dir)?;
+        let app = state::App::new(
+            pool,
+            herdr_client,
+            default_herdr,
+            store,
+            dir.clone(),
+            exe,
+            addr.port(),
+            ui_token,
+            cfg.server.herdr_session.clone(),
+            dev_lan,
+        );
+        *app.service_tokens.write().expect("service token lock") = service_tokens;
+        app.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(local) = app.hosts.get("local").await {
+            local.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok::<_, anyhow::Error>((listener, app))
+    }).await?;
+
+    app.set_startup_ready(false);
+    let router = api::router(app.clone());
+    let shutdown_app = app.clone();
+    let (enable_shutdown, wait_to_enable_shutdown) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .with_graceful_shutdown(async move {
+                // Install signal handlers after initialization; during boot the API returns 503.
+                let _ = wait_to_enable_shutdown.await;
+                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+                match term.as_mut() {
+                    Some(t) => tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = t.recv() => {} },
+                    None => {
+                        let _ = tokio::signal::ctrl_c().await;
+                    }
+                }
+                tracing::info!("shutting down; closing ssh masters");
+                shutdown_app.hosts.shutdown().await;
+            })
+            .await
+    });
+    tracing::info!(%addr, "HTTP listener bound; startup requests receive 503");
     lifecycle::recover_live_apply_debts(&app).await;
     // #392：先把上一次額度讀數放回記憶體，API 開始服務時就能畫出 stale 的量表；新的探測回來後由 quota::set 蓋掉。
     // 上一輪在「占位」與「補答案」之間被收掉時留下的 pending 列，收成終態（issue #481／i339 review）。
@@ -465,7 +492,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     lifecycle::restart_hold::adopt_open_intents(&app).await;
 
     // §11.3: each remote host's supervisor reconciles on connect.
-    app.hosts.apply_config(&app, &cfg.hosts).await;
+    app.hosts.apply_config(&app, &host_cfg).await;
 
     // §6.1.3 reconcile, §6.1.4 event connections, §6.1.5 spool replay, §6.1.6 autostart.
     let local_reconciled = match reconcile::reconcile_host(&app, config::LOCAL_HOST).await {
@@ -559,35 +586,21 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     // issue #90：名額持有者沒續約（掛了、被砍）就收回，不必等下一個人來要才發現。
     build_scheduler::spawn_sweeper(app.clone());
 
-    {
-        // 這一輪只起本機：遠端一律由 `hosts.rs` 在那台連上並對帳成功之後跑（§6.1 第 6 步沒有「遠端除外」這個但書）。
-        // 以前這裡是「全部已連上的主機」，剛好先連上、但對帳失敗的遠端會被這一輪照樣起 bot（review 2026-09-16 core 5）。
-        let app2 = app.clone();
-        tokio::spawn(async move { reconcile::autostart_after_reconcile(&app2, config::LOCAL_HOST, local_reconciled).await });
-    }
-
-    let router = api::router(app.clone());
-    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
-    tracing::info!(%addr, "listening");
     // Restarting is how a restart window ends: nothing waits out the old lease (SPEC §18.10).
     supervisor::maintenance::release_restart_on_startup(&app).await;
     // 上一顆 daemon 開的 herdr 維護窗口：沒到期就重新排截止，過期就當場收尾（§6.5.2）。
     herdr_maintenance::arm_on_startup(&app).await;
+    app.set_startup_ready(true);
+    {
+        // 這一輪只起本機：遠端一律由 `hosts.rs` 在那台連上並對帳成功之後跑。
+        // API 先 ready，bot 啟動時寫入的 hooks／relay 才不會撞上 startup 503。
+        let app2 = app.clone();
+        tokio::spawn(async move { reconcile::autostart_after_reconcile(&app2, config::LOCAL_HOST, local_reconciled).await });
+    }
+    tracing::info!(%addr, "listening");
+    let _ = enable_shutdown.send(());
+    server.await.context("HTTP server task panicked")??;
     // SPEC §11.3.5: close every ssh master on the way out; remote herdr servers stay alive.
-    let shutdown_app = app.clone();
-    axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(async move {
-            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-            match term.as_mut() {
-                Some(t) => tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = t.recv() => {} },
-                None => {
-                    let _ = tokio::signal::ctrl_c().await;
-                }
-            }
-            tracing::info!("shutting down; closing ssh masters");
-            shutdown_app.hosts.shutdown().await;
-        })
-        .await?;
     app.hosts.shutdown().await;
     Ok(())
 }

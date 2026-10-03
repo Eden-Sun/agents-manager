@@ -138,6 +138,9 @@ pub struct App {
     /// 換不動）時寫進來，`supervisor::incidents` 的探針拿它開票，下一次補版成功就移除。
     /// 記憶體、重啟重算（SPEC §18.9）：daemon 一重啟每台都會重連、重補一次。
     pub remote_shim_stale: tokio::sync::Mutex<std::collections::HashMap<String, String>>,
+    /// API gate and startup bot launches wait until recovery, reconciliation, and poller setup finish.
+    pub startup_ready: std::sync::atomic::AtomicBool,
+    startup_ready_watch: tokio::sync::watch::Sender<bool>,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
     /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
@@ -254,6 +257,24 @@ impl Drop for App {
 }
 
 impl App {
+    pub fn set_startup_ready(&self, ready: bool) {
+        self.startup_ready.store(ready, Ordering::Release);
+        self.startup_ready_watch.send_replace(ready);
+    }
+
+    pub fn is_startup_ready(&self) -> bool {
+        self.startup_ready.load(Ordering::Acquire)
+    }
+
+    pub async fn wait_until_startup_ready(&self) {
+        let mut ready = self.startup_ready_watch.subscribe();
+        while !*ready.borrow_and_update() {
+            if ready.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
     pub fn probe(&self) -> Arc<dyn crate::pane_probe::PaneProbe> {
         self.pane_probe.lock().unwrap().clone()
     }
@@ -272,6 +293,7 @@ impl App {
     ) -> Arc<Self> {
         let (bus, _) = broadcast::channel(1024);
         let (turn_bus, _) = broadcast::channel(1024);
+        let (startup_ready_watch, _) = tokio::sync::watch::channel(true);
         Arc::new(Self {
             boot_id: crate::db::ulid(),
             instance: std::sync::RwLock::new(crate::startup::instance()),
@@ -292,6 +314,8 @@ impl App {
             classify_failures: std::sync::atomic::AtomicU32::new(0),
             spool_fold_stuck: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             remote_shim_stale: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            startup_ready: std::sync::atomic::AtomicBool::new(true),
+            startup_ready_watch,
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
             proc_env: Default::default(),
@@ -914,5 +938,30 @@ mod bot_lock_tests {
         assert!(std::sync::Arc::ptr_eq(&first_kept, &again_kept), "還在的 bot 的鎖不換");
         assert!(std::sync::Arc::ptr_eq(&held, &again_held), "有人握著的鎖不能被清掉再換一把（會讓兩個人同時進臨界區）");
         assert_eq!(std::sync::Arc::strong_count(&first_gone), 2, "沒了的 bot 的鎖被清掉後重新建立（表一份＋我們手上一份）");
+    }
+}
+
+#[cfg(test)]
+mod startup_gate_tests {
+    use crate::testing as tt;
+
+    #[tokio::test]
+    async fn startup_work_waits_for_the_readiness_transition() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        app.set_startup_ready(false);
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            let _ = waiting_tx.send(());
+            app.wait_until_startup_ready().await;
+            let _ = done_tx.send(());
+        });
+
+        waiting_rx.await.unwrap();
+        assert!(matches!(done_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+        env.app.set_startup_ready(true);
+        tokio::time::timeout(std::time::Duration::from_secs(1), done_rx).await.unwrap().unwrap();
+        waiter.await.unwrap();
     }
 }
