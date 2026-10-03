@@ -225,8 +225,9 @@ async fn a_force_abort_does_not_clear_after_its_run_and_pane_are_replaced() {
     let bot_id = f.bot_id.clone();
     let old_run = f.run_id.clone();
     let live = f.env.herdr.live.clone();
-    let replace = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // Land the replacement inside the settle window at a fixed point: a timed task loses to the
+    // 400 ms settle on a loaded host and lets the old binding authorize the key (#781).
+    super::super::race_point::arm("abort_after_settle", &f.bot_id, move || async move {
         sqlx::query("UPDATE runs SET state='exited' WHERE id=?")
             .bind(old_run)
             .execute(&app.db)
@@ -246,7 +247,6 @@ async fn a_force_abort_does_not_clear_after_its_run_and_pane_are_replaced() {
     });
 
     abort_turns(&f.env.app, &f.bot_id).await.unwrap();
-    replace.await.unwrap();
 
     assert!(!f.cleared(), "replacement run must receive no key: {:?}", f.env.herdr.calls_to("pane.send_keys"));
     assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["aborted prompt A"]);
@@ -265,8 +265,9 @@ async fn a_force_abort_does_not_clear_after_its_native_session_changes() {
         .unwrap();
     let app = f.env.app.clone();
     let run_id = f.run_id.clone();
-    let replace_session = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // The session changes after the candidate read matched: only the re-check right before Ctrl+C
+    // can catch it. A timed task raced the settle sleep and lost under load (#781).
+    super::super::race_point::arm("abort_before_clear_key", &f.bot_id, move || async move {
         sqlx::query("UPDATE runs SET native_session_id='session-B' WHERE id=?")
             .bind(run_id)
             .execute(&app.db)
@@ -275,7 +276,6 @@ async fn a_force_abort_does_not_clear_after_its_native_session_changes() {
     });
 
     abort_turns(&f.env.app, &f.bot_id).await.unwrap();
-    replace_session.await.unwrap();
 
     assert!(!f.cleared(), "new native session must receive no key: {:?}", f.env.herdr.calls_to("pane.send_keys"));
     assert_eq!(f.env.herdr.pane("pane-a").unwrap().composer, ["aborted prompt A"]);
