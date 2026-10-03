@@ -143,6 +143,11 @@ pub struct App {
     startup_ready_watch: tokio::sync::watch::Sender<bool>,
     pub connected: std::sync::atomic::AtomicBool,
     pub default_connected: std::sync::atomic::AtomicBool,
+    /// Cancellable background work and its join barrier for daemon shutdown.
+    pub shutdown: tokio_util::sync::CancellationToken,
+    pub background_tasks: tokio_util::task::TaskTracker,
+    /// Monotonic deadlines paired with the persisted supervisor watchdog UTC timestamps.
+    pub watchdog_deadlines: std::sync::Mutex<crate::supervisor::watchdog::DeadlineCache>,
     /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
     /// real daemon, which means `ps`; a test installs its own reader.
     pub proc_env: crate::pane_identity::ProcEnvHook,
@@ -318,6 +323,9 @@ impl App {
             startup_ready_watch,
             connected: std::sync::atomic::AtomicBool::new(false),
             default_connected: std::sync::atomic::AtomicBool::new(false),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            background_tasks: tokio_util::task::TaskTracker::new(),
+            watchdog_deadlines: std::sync::Mutex::new(Default::default()),
             proc_env: Default::default(),
             kind_probe: Default::default(),
             upstream_watch: Default::default(),

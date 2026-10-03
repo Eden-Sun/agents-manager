@@ -292,8 +292,17 @@ fn manager_down(inbox_state: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct Debounce {
     last_pushed: Option<(String, String)>,
+    /// A state waiting for its durable inbox write. Keep its key stable across retries so an
+    /// ambiguous commit cannot turn one transition into several events.
+    pending: Option<PendingHealth>,
     /// Something changed while the manager was down; it gets one snapshot when it is back.
     suppressed: bool,
+}
+
+#[derive(Debug)]
+struct PendingHealth {
+    state: (String, String),
+    event_key: String,
 }
 
 impl Debounce {
@@ -303,17 +312,57 @@ impl Debounce {
         let key = (severity.to_string(), state.to_string());
         let changed = self.last_pushed.as_ref() != Some(&key);
         if manager_down(state) {
-            if changed {
+            if changed || self.pending.is_some() {
                 self.suppressed = true;
             }
             return false;
         }
-        if changed || self.suppressed {
-            self.last_pushed = Some(key);
-            self.suppressed = false;
+        if self.pending.as_ref().is_some_and(|p| p.state == key) {
             return true;
         }
+        if changed || self.suppressed {
+            self.pending = Some(PendingHealth {
+                event_key: format!("health:{}:{}:{}", key.0, key.1, crate::db::ulid()),
+                state: key,
+            });
+            return true;
+        }
+        self.pending = None;
         false
+    }
+
+    fn pending_event_key(&self) -> Option<&str> {
+        self.pending.as_ref().map(|p| p.event_key.as_str())
+    }
+
+    /// Only call after `push_inbox` confirms the event is durable (including an already-present key).
+    fn acknowledge(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.last_pushed = Some(pending.state);
+            self.suppressed = false;
+        }
+    }
+}
+
+async fn queue_health_change(app: &Arc<App>, debounce: &mut Debounce, snapshot: &Value, severity: &str, sup_status: &str) -> bool {
+    if !debounce.observe(severity, sup_status) {
+        return false;
+    }
+    let Some(key) = debounce.pending_event_key().map(str::to_owned) else { return false };
+    let bot_id = snapshot.pointer("/supervisor/bot_id").and_then(Value::as_str);
+    match crate::supervisor::store::push_inbox(
+        &app.db, &key, "health_changed", None, bot_id, None, snapshot,
+    ).await {
+        Ok(_) => {
+            debounce.acknowledge();
+            let status = snapshot.get("status").and_then(Value::as_str).unwrap_or("unknown");
+            tracing::info!(status, supervisor = %sup_status, "supervisor health changed");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, status = ?snapshot.get("status"), supervisor = %sup_status, "health_changed inbox write failed; retrying next tick");
+            false
+        }
     }
 }
 
@@ -321,7 +370,14 @@ impl Debounce {
 /// the UI, and queues a durable inbox event only when the *state* changes (see [`Debounce`]),
 /// so AGM can reason about it without `/loop` and without wading through counters.
 pub fn spawn(app: Arc<App>) {
-    tokio::spawn(async move {
+    let loop_app = app.clone();
+    crate::background_loop::spawn_restartable(&app, "supervisor health", move || {
+        let app = loop_app.clone();
+        async move { health_loop(app).await }
+    });
+}
+
+async fn health_loop(app: Arc<App>) {
         let mut tick = tokio::time::interval(Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut previous = String::new();
@@ -330,7 +386,10 @@ pub fn spawn(app: Arc<App>) {
         // 處理完的 inbox 列的大 payload 每小時收一次（第一次在開機後的第一拍）：見 `store::compact_handled_payloads`。
         let mut last_compact: Option<std::time::Instant> = None;
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = app.shutdown.cancelled() => return,
+                _ = tick.tick() => {}
+            }
             if last_compact.is_none_or(|t| t.elapsed() >= Duration::from_secs(3600)) {
                 last_compact = Some(std::time::Instant::now());
                 match crate::supervisor::store::compact_handled_payloads(
@@ -379,17 +438,8 @@ pub fn spawn(app: Arc<App>) {
             // durable incidents with their own one-event-per-transition rule; letting them move this
             // key too would tell the manager the same thing twice.
             let severity = inbox_severity(&snapshot);
-            if !debounce.observe(&severity, &sup_status) {
-                continue;
-            }
-            let key = format!("health:{severity}:{}:{}", inbox_state(&sup_status), chrono::Utc::now().timestamp());
-            let bot_id = snapshot.pointer("/supervisor/bot_id").and_then(Value::as_str);
-            let _ = crate::supervisor::store::push_inbox(
-                &app.db, &key, "health_changed", None, bot_id, None, &snapshot,
-            ).await;
-            tracing::info!(status, supervisor = %sup_status, "supervisor health changed");
+            queue_health_change(&app, &mut debounce, &snapshot, &severity, &sup_status).await;
         }
-    });
 }
 
 #[cfg(test)]
@@ -523,26 +573,73 @@ mod tests {
     #[test]
     fn counters_do_not_make_events_only_state_does() {
         let mut d = Debounce::default();
-        assert!(d.observe("healthy", "idle"), "the first reading after boot is news");
+        assert!(observe_and_ack(&mut d, "healthy", "idle"), "the first reading after boot is news");
         // Ticks with different bot counts land here as the same (severity, state): nothing.
-        assert!(!d.observe("healthy", "idle"));
-        assert!(!d.observe("healthy", "busy"), "the manager's own busy/idle is not a state change");
+        assert!(!observe_and_ack(&mut d, "healthy", "idle"));
+        assert!(!observe_and_ack(&mut d, "healthy", "busy"), "the manager's own busy/idle is not a state change");
+        assert!(observe_and_ack(&mut d, "degraded", "idle"));
+        assert!(observe_and_ack(&mut d, "healthy", "idle"));
+        assert!(observe_and_ack(&mut d, "critical", "waiting_quota"));
+    }
+
+    #[test]
+    fn a_health_transition_is_retried_until_its_inbox_write_succeeds() {
+        let mut d = Debounce::default();
         assert!(d.observe("degraded", "idle"));
-        assert!(d.observe("healthy", "idle"));
-        assert!(d.observe("critical", "waiting_quota"));
+        assert!(d.observe("degraded", "idle"), "a failed durable write must remain due");
+        let first_key = d.pending_event_key().unwrap().to_owned();
+        assert_eq!(d.pending_event_key(), Some(first_key.as_str()), "retries must reuse the idempotency key");
+        d.acknowledge();
+        assert!(!d.observe("degraded", "idle"), "after persistence it is debounced");
+    }
+
+    fn observe_and_ack(d: &mut Debounce, severity: &str, supervisor_status: &str) -> bool {
+        let due = d.observe(severity, supervisor_status);
+        if due {
+            d.acknowledge();
+        }
+        due
+    }
+
+    #[tokio::test]
+    async fn a_failed_health_inbox_insert_retries_the_same_event_once() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        let snapshot = json!({"status":"degraded", "supervisor":{"status":"idle"}});
+        let mut debounce = Debounce::default();
+        sqlx::query("CREATE TRIGGER fail_health_changed BEFORE INSERT ON supervisor_inbox WHEN NEW.kind='health_changed' BEGIN SELECT RAISE(ABORT, 'injected health inbox failure'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+        assert!(!queue_health_change(&app, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
+        let retry_key = debounce.pending_event_key().unwrap().to_owned();
+        sqlx::query("DROP TRIGGER fail_health_changed").execute(&app.db).await.unwrap();
+        assert!(queue_health_change(&app, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
+        let stored: Option<String> = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE kind='health_changed'")
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some(retry_key.as_str()), "retry keeps the original idempotency key");
+        assert!(!queue_health_change(&app, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='health_changed'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "a successful retry is delivered once");
     }
 
     #[test]
     fn nothing_is_queued_while_the_manager_is_down_and_one_snapshot_when_it_is_back() {
         let mut d = Debounce::default();
-        assert!(d.observe("healthy", "idle"));
+        assert!(observe_and_ack(&mut d, "healthy", "idle"));
         // 5.5 hours of 30-second ticks against a dead manager: zero events, not 464.
         for _ in 0..660 {
-            assert!(!d.observe("degraded", "stopped"));
+            assert!(!observe_and_ack(&mut d, "degraded", "stopped"));
         }
-        assert!(!d.observe("degraded", "starting"));
-        assert!(d.observe("healthy", "idle"), "one snapshot once it is back, even to the same state");
-        assert!(!d.observe("healthy", "idle"));
+        assert!(!observe_and_ack(&mut d, "degraded", "starting"));
+        assert!(observe_and_ack(&mut d, "healthy", "idle"), "one snapshot once it is back, even to the same state");
+        assert!(!observe_and_ack(&mut d, "healthy", "idle"));
     }
 
     /// 協調者卡在 `waiting_quota`（degraded）而巡檢好好的：以前 debounce 只看巡檢那一半，一則事件都不會有。
@@ -556,10 +653,10 @@ mod tests {
             v
         };
         let mut d = Debounce::default();
-        assert!(d.observe(&inbox_severity(&snap("healthy", Some("healthy"))), "idle"));
-        assert!(d.observe(&inbox_severity(&snap("healthy", Some("degraded"))), "idle"), "responder waiting_quota must queue an event");
-        assert!(!d.observe(&inbox_severity(&snap("healthy", Some("degraded"))), "busy"));
-        assert!(d.observe(&inbox_severity(&snap("healthy", Some("healthy"))), "idle"), "and its recovery too");
+        assert!(observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("healthy"))), "idle"));
+        assert!(observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("degraded"))), "idle"), "responder waiting_quota must queue an event");
+        assert!(!observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("degraded"))), "busy"));
+        assert!(observe_and_ack(&mut d, &inbox_severity(&snap("healthy", Some("healthy"))), "idle"), "and its recovery too");
         // 舊 snapshot 沒有 responder_health：當 healthy，不會憑空多一則。
         assert_eq!(inbox_severity(&snap("healthy", None)), inbox_severity(&snap("healthy", Some("healthy"))));
     }

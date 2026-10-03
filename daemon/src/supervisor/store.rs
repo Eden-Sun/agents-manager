@@ -1021,26 +1021,23 @@ pub async fn set_quota_reset(pool: &SqlitePool, reset_at: Option<&str>) -> Resul
 pub const HANDOFF_NOTES_KEPT: i64 = 20;
 
 pub async fn set_summary(pool: &SqlitePool, summary: &str) -> Result<i64> {
-    sqlx::query(
-        "UPDATE supervisors SET summary=?, summary_version=summary_version+1, updated_at=? WHERE id=?",
+    let mut tx = pool.begin().await?;
+    let version: i64 = sqlx::query_scalar(
+        "UPDATE supervisors SET summary=?, summary_version=summary_version+1, updated_at=? WHERE id=? RETURNING summary_version",
     )
     .bind(summary)
     .bind(crate::db::now())
     .bind(SUPERVISOR_ID)
-    .execute(pool)
+    .fetch_one(&mut *tx)
     .await?;
-    let v: i64 = sqlx::query_scalar("SELECT summary_version FROM supervisors WHERE id=?")
-        .bind(SUPERVISOR_ID)
-        .fetch_one(pool)
-        .await?;
     sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,?,?)")
         .bind(crate::db::ulid())
         .bind(SUPERVISOR_ID)
         .bind("handoff")
         .bind(summary)
-        .bind(v)
+        .bind(version)
         .bind(crate::db::now())
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(
         "DELETE FROM supervisor_notes WHERE supervisor_id=? AND kind='handoff' AND rowid NOT IN
@@ -1049,9 +1046,10 @@ pub async fn set_summary(pool: &SqlitePool, summary: &str) -> Result<i64> {
     .bind(SUPERVISOR_ID)
     .bind(SUPERVISOR_ID)
     .bind(HANDOFF_NOTES_KEPT)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(v)
+    tx.commit().await?;
+    Ok(version)
 }
 
 // ---------------------------------------------------------------- requests
@@ -5095,6 +5093,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(notes, 2, "the earlier summary is still recoverable");
+    }
+
+    #[tokio::test]
+    async fn a_failed_handoff_note_write_does_not_commit_the_summary_version() {
+        let p = pool().await;
+        get_or_init(&p).await.unwrap();
+        set_summary(&p, "第一版").await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_handoff_note BEFORE INSERT ON supervisor_notes WHEN NEW.kind='handoff' BEGIN SELECT RAISE(ABORT, 'injected note failure'); END")
+            .execute(&p)
+            .await
+            .unwrap();
+
+        assert!(set_summary(&p, "第二版").await.is_err());
+        sqlx::query("DROP TRIGGER fail_handoff_note").execute(&p).await.unwrap();
+        let sup = get_or_init(&p).await.unwrap();
+        assert_eq!(sup.summary.as_deref(), Some("第一版"), "a summary without its audit note must roll back");
+        assert_eq!(sup.summary_version, 1, "a failed note write must not consume a version");
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_notes WHERE kind='handoff'")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert_eq!(notes, 1);
     }
 
     /// 事件表只增不減：小的事件（`compact_handled_payloads` 不碰 <16 KB）永遠留著。流水帳類（健康變化、ops 警報、bot 申請）處理完放了

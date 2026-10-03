@@ -13,7 +13,9 @@
 //! same count, and a daemon restart does not reset a failure streak to zero.
 
 use crate::state::App;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::store::{self, Supervisor};
 
@@ -94,6 +96,65 @@ pub(super) fn past(iso: &str) -> bool {
     }
 }
 
+/// In-process monotonic companion for persisted retry timestamps. The database timestamp is
+/// still authoritative across daemon restarts; once observed or scheduled in this process, a
+/// backward wall-clock adjustment cannot extend its remaining delay.
+#[derive(Debug, Default)]
+pub struct DeadlineCache {
+    entries: HashMap<&'static str, (String, Instant)>,
+}
+
+impl DeadlineCache {
+    fn schedule(&mut self, lane: &'static str, at: &str, due: Instant) {
+        self.entries.insert(lane, (at.to_string(), due));
+    }
+
+    fn clear(&mut self, lane: &'static str) {
+        self.entries.remove(lane);
+    }
+
+    fn past_at(&mut self, lane: &'static str, at: &str, wall: chrono::DateTime<chrono::Utc>, mono: Instant) -> bool {
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(at) else { return true };
+        let wall_due = parsed <= wall;
+        if wall_due {
+            return true;
+        }
+        if let Some((cached_at, deadline)) = self.entries.get(lane) {
+            if cached_at == at {
+                return mono >= *deadline;
+            }
+        }
+        let remaining = (parsed.with_timezone(&chrono::Utc) - wall).to_std().unwrap_or_default();
+        if let Some(deadline) = mono.checked_add(remaining) {
+            self.schedule(lane, at, deadline);
+            mono >= deadline
+        } else {
+            false
+        }
+    }
+}
+
+pub fn scheduled_past(app: &Arc<App>, lane: &'static str, at: &str) -> bool {
+    app.watchdog_deadlines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .past_at(lane, at, chrono::Utc::now(), Instant::now())
+}
+
+pub fn remember_schedule(app: &Arc<App>, lane: &'static str, at: &str, delay: Duration) {
+    app.watchdog_deadlines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .schedule(lane, at, Instant::now() + delay);
+}
+
+pub fn clear_schedule(app: &Arc<App>, lane: &'static str) {
+    app.watchdog_deadlines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear(lane);
+}
+
 /// One controller tick's worth of watching.
 pub async fn tick(app: &Arc<App>) {
     let Ok(sup) = store::get_or_init(&app.db).await else { return };
@@ -106,18 +167,23 @@ pub async fn tick(app: &Arc<App>) {
             return;
         }
     };
-    match plan(&sup, liveness, past) {
+    let is_past = |at: &str| scheduled_past(app, "patrol", at);
+    match plan(&sup, liveness, is_past) {
         Plan::Idle => {
             // Seen answering prompts again: the streak is over. `starting` is not enough — a
             // CLI that opens and dies would otherwise reset the count on every attempt.
             if matches!(liveness, "idle" | "busy") && (sup.watchdog_attempts > 0 || sup.watchdog_next_at.is_some()) {
                 let _ = store::set_watchdog(&app.db, 0, None).await;
+                clear_schedule(app, "patrol");
             }
         }
         Plan::Wait { schedule: true } => {
             let wait = backoff_secs(sup.watchdog_attempts);
             tracing::info!(attempts = sup.watchdog_attempts, wait, "supervisor is down and wanted; scheduling an automatic start");
-            let _ = store::set_watchdog(&app.db, sup.watchdog_attempts, Some(&iso_in(wait))).await;
+            let at = iso_in(wait);
+            if store::set_watchdog(&app.db, sup.watchdog_attempts, Some(&at)).await.is_ok() {
+                remember_schedule(app, "patrol", &at, Duration::from_secs(wait));
+            }
         }
         Plan::Wait { schedule: false } => {}
         // The manager is down, wanted, and out of automatic retries. Before 2026-09-13 this
@@ -186,7 +252,7 @@ async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
     // Re-read under the lock: `start`, `stop` or a bulk restart may have moved it meanwhile.
     let Ok(sup) = store::get_or_init(&app.db).await else { return };
     let Ok(liveness) = super::manager_liveness(app, bot_id).await else { return };
-    if plan(&sup, liveness, past) != Plan::Start {
+    if plan(&sup, liveness, |at: &str| scheduled_past(app, "patrol", at)) != Plan::Start {
         return;
     }
     let attempt = failures + 1;
@@ -196,17 +262,26 @@ async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
             tracing::info!(attempt, "supervisor watchdog started the manager");
             // Counted until it is seen idle/busy: a CLI that dies right after opening keeps
             // climbing the backoff instead of restarting every 30 seconds.
-            let _ = store::set_watchdog(&app.db, attempt, Some(&iso_in(backoff_secs(attempt)))).await;
+            let wait = backoff_secs(attempt);
+            let at = iso_in(wait);
+            if store::set_watchdog(&app.db, attempt, Some(&at)).await.is_ok() {
+                remember_schedule(app, "patrol", &at, Duration::from_secs(wait));
+            }
         }
         Err(e) => {
             let why = format!("{e:?}");
             tracing::warn!(attempt, error = %why, "supervisor watchdog failed to start the manager");
             if attempt >= MAX_ATTEMPTS {
                 let _ = store::set_watchdog(&app.db, attempt, None).await;
+                clear_schedule(app, "patrol");
                 // Same reporting as the "started but died" path: one durable event, once.
                 report_gave_up(app, &why).await;
             } else {
-                let _ = store::set_watchdog(&app.db, attempt, Some(&iso_in(backoff_secs(attempt)))).await;
+                let wait = backoff_secs(attempt);
+                let at = iso_in(wait);
+                if store::set_watchdog(&app.db, attempt, Some(&at)).await.is_ok() {
+                    remember_schedule(app, "patrol", &at, Duration::from_secs(wait));
+                }
                 let _ = store::set_status_detail(&app.db, Some(&format!("watchdog 自動啟動失敗（第 {attempt} 次）：{why}"))).await;
             }
         }
@@ -216,6 +291,18 @@ async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_watchdog_deadline_remains_due_after_the_wall_clock_moves_back() {
+        let mut cache = DeadlineCache::default();
+        let wall = chrono::DateTime::parse_from_rfc3339("2026-10-03T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let mono = Instant::now();
+        let at = "2026-10-03T12:00:30Z";
+        cache.schedule("patrol", at, mono + Duration::from_secs(30));
+
+        assert!(!cache.past_at("patrol", at, wall + chrono::Duration::seconds(29), mono + Duration::from_secs(29)));
+        assert!(cache.past_at("patrol", at, wall - chrono::Duration::minutes(5), mono + Duration::from_secs(30)));
+    }
 
     fn sup(wanted: bool, status: &str, attempts: i64, next: Option<&str>) -> Supervisor {
         Supervisor {

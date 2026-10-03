@@ -68,17 +68,34 @@ const SEEN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
 ///
 /// 同時只准一個在跑：上一輪還沒做完就直接跳過這一拍，不排隊、不疊加。
 pub fn sweep(app: &Arc<App>) {
+    if app.shutdown.is_cancelled() {
+        return;
+    }
     let Some(guard) = SweepGuard::take() else {
         tracing::debug!("judge stuck sweep: 上一輪還在跑，這一拍跳過");
         return;
     };
-    let app = app.clone();
-    tokio::spawn(async move {
-        // guard 在這個 task 結束時才放掉，**包含 panic**（i339 review #480）：
-        // 用 `store(false)` 寫在最後一行的話，只要 `sweep_once` 裡任何一步 panic 就永遠放不掉——
-        // tokio 不會因為 task panic 中止行程，所以 daemon 照常活著、sweep 從此靜靜不再跑，一行 log 都沒有。
+    let round_app = app.clone();
+    spawn_sweep_task(app, guard, async move { sweep_once(&round_app).await });
+}
+
+fn spawn_sweep_task<F>(app: &Arc<App>, guard: SweepGuard, round: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    if app.shutdown.is_cancelled() {
+        drop(guard);
+        return;
+    }
+    let shutdown = app.shutdown.clone();
+    let tasks = app.background_tasks.clone();
+    tasks.spawn(async move {
+        // guard 在這個 task 結束時才放掉，包含 panic 與取消；不會讓後續 sweep 永久卡住。
         let _guard = guard;
-        sweep_once(&app).await;
+        tokio::select! {
+            _ = shutdown.cancelled() => {}
+            _ = round => {}
+        }
     });
 }
 
@@ -232,6 +249,38 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::testing as tt;
+
+    #[tokio::test]
+    async fn a_slow_background_sweep_is_cancelled_and_joined_on_shutdown() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct DropMark(Arc<AtomicBool>);
+        impl Drop for DropMark {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let guard = SweepGuard::take().expect("test owns the single sweep slot");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let round_dropped = dropped.clone();
+        spawn_sweep_task(&app, guard, async move {
+            let _mark = DropMark(round_dropped);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+
+        app.shutdown.cancel();
+        app.background_tasks.close();
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(1), app.background_tasks.wait()).await;
+        assert!(joined.is_ok(), "daemon shutdown must join the in-flight Jev probe");
+        assert!(dropped.load(Ordering::SeqCst), "shutdown must drop the slow sweep future");
+        assert!(!SWEEPING.load(Ordering::SeqCst), "cancelling a sweep must release its concurrency guard");
+    }
 
     /// 假 Jev：回 `blocked_by_dialog` 的機率，記下收到的 body。
     async fn fake_jev(p: f64) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {

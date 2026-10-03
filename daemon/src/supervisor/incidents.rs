@@ -92,7 +92,16 @@ impl Thresholds {
 /// one by at most the threshold.
 #[derive(Debug, Default)]
 pub struct Detector {
-    since: HashMap<(String, String), i64>,
+    since: HashMap<(String, String), SeenAt>,
+    /// Conditions that crossed their debounce threshold but whose incident transaction failed.
+    /// Keep the evidence until the durable open succeeds, even if the probe clears meanwhile.
+    pending_opens: HashMap<(String, String), Observation>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SeenAt {
+    wall_seconds: i64,
+    monotonic: std::time::Instant,
 }
 
 /// What one pass decided to do.
@@ -116,12 +125,32 @@ impl Detector {
         thresholds: &Thresholds,
         now: i64,
     ) -> Plan {
+        self.plan_at(observations, open, blind, thresholds, now, std::time::Instant::now())
+    }
+
+    fn plan_at(
+        &mut self,
+        observations: &[Observation],
+        open: &[(String, String)],
+        blind: &[&str],
+        thresholds: &Thresholds,
+        now: i64,
+        monotonic_now: std::time::Instant,
+    ) -> Plan {
         let mut plan = Plan::default();
         let seen: Vec<(String, String)> = observations.iter().map(Observation::key).collect();
         for obs in observations {
             let key = obs.key();
-            let first = *self.since.entry(key.clone()).or_insert(now);
-            let held = now - first;
+            let first = *self.since.entry(key.clone()).or_insert(SeenAt { wall_seconds: now, monotonic: monotonic_now });
+            // Wall time keeps deterministic callers and old tests compatible, while the monotonic
+            // clock prevents an NTP/manual rollback from restarting a live in-memory threshold.
+            let wall_held = now.saturating_sub(first.wall_seconds).max(0);
+            let monotonic_held = monotonic_now
+                .checked_duration_since(first.monotonic)
+                .unwrap_or_default()
+                .as_secs()
+                .min(i64::MAX as u64) as i64;
+            let held = wall_held.max(monotonic_held);
             let needed = match obs.kind.as_str() {
                 "host_disconnected" => thresholds.host_disconnected_secs,
                 "bot_stopped" => thresholds.bot_stopped_secs,
@@ -131,6 +160,14 @@ impl Detector {
                 _ => 0,
             };
             if held >= needed || open.contains(&key) {
+                plan.open.push(obs.clone());
+            }
+        }
+        // A threshold-qualified incident whose transaction failed is still owed. It can be
+        // replayed after the fault disappears; `sweep` acknowledges it only after a durable open.
+        let mut planned: std::collections::HashSet<(String, String)> = plan.open.iter().map(Observation::key).collect();
+        for (key, obs) in &self.pending_opens {
+            if planned.insert(key.clone()) {
                 plan.open.push(obs.clone());
             }
         }
@@ -145,6 +182,14 @@ impl Detector {
         // does not have to start its threshold over because of one failed query.
         self.since.retain(|k, _| seen.contains(k) || blind.contains(&k.0.as_str()));
         plan
+    }
+
+    fn note_open_failed(&mut self, obs: &Observation) {
+        self.pending_opens.insert(obs.key(), obs.clone());
+    }
+
+    fn acknowledge_open(&mut self, obs: &Observation) {
+        self.pending_opens.remove(&obs.key());
     }
 }
 
@@ -626,11 +671,24 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
     for obs in plan.open {
         let detail: Value = serde_json::from_str(&obs.detail).unwrap_or_else(|_| json!({}));
         // incident 與通知同一個交易（#319）：寫不進去就不開，下一輪 detector 重來。
-        let Ok((incident, opened)) =
-            store::open_incident_notifying(&app.db, &obs.kind, &obs.resource, &obs.severity, &detail, notifiable(&obs.kind, &obs.resource, responder_configured)).await
-        else {
-            continue;
+        let (incident, opened) = match store::open_incident_notifying(
+            &app.db,
+            &obs.kind,
+            &obs.resource,
+            &obs.severity,
+            &detail,
+            notifiable(&obs.kind, &obs.resource, responder_configured),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                detector.note_open_failed(&obs);
+                tracing::warn!(kind = %obs.kind, resource = %obs.resource, error = ?e, "incident write failed; retrying this notification even if the probe clears");
+                continue;
+            }
         };
+        detector.acknowledge_open(&obs);
         if !opened {
             continue;
         }
@@ -700,6 +758,24 @@ mod tests {
         // 恢復：這一拍沒看到就關掉，不用等任何人來按。
         let open = vec![(ROLE_UNAVAILABLE_KIND.to_string(), "responder".to_string())];
         assert_eq!(d.plan(&[], &open, &[], &t, 9000).resolve, open);
+    }
+
+    #[test]
+    fn bot_stopped_threshold_keeps_elapsed_time_when_the_wall_clock_moves_back() {
+        let mut d = Detector::default();
+        let t = thresholds();
+        let seen = [obs("bot_stopped", "b1")];
+        let first = std::time::Instant::now();
+        assert!(d.plan_at(&seen, &[], &[], &t, 10_000, first).open.is_empty());
+        assert!(
+            d.plan_at(&seen, &[], &[], &t, 9_000, first + std::time::Duration::from_secs(299)).open.is_empty(),
+            "the incident should still wait for its full monotonic threshold"
+        );
+        assert_eq!(
+            d.plan_at(&seen, &[], &[], &t, 9_000, first + std::time::Duration::from_secs(300)).open.len(),
+            1,
+            "a wall-clock rollback must not defer an incident after 300 elapsed seconds"
+        );
     }
 
     /// 讀不到畫面時**不能**把已經開著的那筆當成恢復——「探針沒跑」跟「它好了」長得一樣，
@@ -979,11 +1055,22 @@ mod tests {
         sweep(&app, &mut d).await;
         assert!(store::open_incidents(&app.db).await.unwrap().is_empty(), "通知寫不進去：incident 不開，下一輪再來");
 
+        // Fault disappears before storage recovers. The threshold was already met; losing the
+        // in-memory observation here must not erase the owed notification.
+        sqlx::query("UPDATE supervisor_inbox SET notify_attempts=0 WHERE id=?")
+            .bind(&stuck)
+            .execute(&app.db)
+            .await
+            .unwrap();
         sqlx::query("DROP TRIGGER no_incident_event").execute(&app.db).await.unwrap();
         sweep(&app, &mut d).await;
-        assert!(!store::open_incidents(&app.db).await.unwrap().is_empty(), "DB 好了：incident 開起來");
+        assert!(!store::open_incidents(&app.db).await.unwrap().is_empty(), "DB 好了：已達門檻的故障即使恢復也要補開 incident");
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='incident_opened'").fetch_one(&app.db).await.unwrap();
         assert_eq!(n, 1, "而且通知一則");
+        sweep(&app, &mut d).await;
+        assert!(store::open_incidents(&app.db).await.unwrap().is_empty(), "下一拍確認恢復後就關閉 incident");
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='incident_resolved'").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 1, "補開後只推一則恢復通知");
     }
 
     /// A blind pass must not restart a threshold that was already accumulating, or a fault

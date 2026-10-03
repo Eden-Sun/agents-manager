@@ -1902,9 +1902,17 @@ pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) ->
     };
     if let Some(d) = delay {
         let (app2, host2, bot2) = (app.clone(), host.to_string(), bot_id.to_string());
-        tokio::spawn(async move {
-            tokio::time::sleep(d).await;
-            if let Err(e) = drain_remote(&app2, &host2, &bot2).await {
+        let tasks = app.background_tasks.clone();
+        tasks.spawn(async move {
+            tokio::select! {
+                _ = app2.shutdown.cancelled() => return,
+                _ = tokio::time::sleep(d) => {}
+            }
+            let drained = tokio::select! {
+                _ = app2.shutdown.cancelled() => return,
+                result = drain_remote(&app2, &host2, &bot2) => result,
+            };
+            if let Err(e) = drained {
                 tracing::debug!(bot_id = %bot2, host = %host2, error = ?e, "follow-up drain failed");
             }
         });
@@ -1914,15 +1922,32 @@ pub async fn drain_remote_coalesced(app: &Arc<App>, host: &str, bot_id: &str) ->
 
 /// SPEC §11.4.4.
 pub fn spawn_spool_scanner(app: Arc<App>) {
-    tokio::spawn(async move {
+    let loop_app = app.clone();
+    crate::background_loop::spawn_restartable(&app, "remote spool scanner", move || {
+        let app = loop_app.clone();
+        async move { spool_scanner_loop(app).await }
+    });
+}
+
+async fn spool_scanner_loop(app: Arc<App>) {
         loop {
-            tokio::time::sleep(SCAN_EVERY).await;
+            tokio::select! {
+                _ = app.shutdown.cancelled() => return,
+                _ = tokio::time::sleep(SCAN_EVERY) => {}
+            }
             for conn in app.hosts.list().await {
+                if app.shutdown.is_cancelled() {
+                    return;
+                }
                 if conn.is_local() || !conn.is_connected() {
                     continue;
                 }
                 let root = crate::startup::remote_root_for(app.instance().as_deref());
-                let pending = match conn.ssh_exec(&scan_script(&root)).await {
+                let script = scan_script(&root);
+                let pending = match tokio::select! {
+                    _ = app.shutdown.cancelled() => return,
+                    result = conn.ssh_exec(&script) => result,
+                } {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::debug!(host = %conn.name, error = ?e, "spool scan failed");
@@ -1935,16 +1960,22 @@ pub fn spawn_spool_scanner(app: Arc<App>) {
                     continue;
                 }
                 for b in db::live_bots_on_host(&app.db, &conn.name).await.unwrap_or_default() {
+                    if app.shutdown.is_cancelled() {
+                        return;
+                    }
                     if !ids.contains(b.id.as_str()) {
                         continue;
                     }
-                    if let Err(e) = drain_remote_coalesced(&app, &conn.name, &b.id).await {
+                    let drained = tokio::select! {
+                        _ = app.shutdown.cancelled() => return,
+                        result = drain_remote_coalesced(&app, &conn.name, &b.id) => result,
+                    };
+                    if let Err(e) = drained {
                         tracing::debug!(bot = %b.name, host = %conn.name, error = ?e, "scanned drain failed");
                     }
                 }
             }
         }
-    });
 }
 
 /// 掃遠端還有誰欠著 spool。根目錄跟著實例走（`App::instance`）。
@@ -2061,18 +2092,33 @@ pub async fn replay_all(app: &Arc<App>) {
 /// 重放一台 host 的 spool。列舉 bot 讀不到、或某顆 bot 的重放失敗，都不能當成「沒有 spool」：
 /// 記下來、背景重試到補齊為止（#243），沒有新的 reconnect／status 事件也會補。
 pub async fn replay_host(app: &Arc<App>, host: &str) {
-    if replay_host_pass(app, host).await {
+    if app.shutdown.is_cancelled() {
+        return;
+    }
+    let passed = tokio::select! {
+        _ = app.shutdown.cancelled() => return,
+        passed = replay_host_pass(app, host) => passed,
+    };
+    if passed {
         return;
     }
     let (app, host) = (app.clone(), host.to_string());
-    tokio::spawn(async move {
-        for _ in 0..REPLAY_RETRIES {
-            tokio::time::sleep(REPLAY_RETRY_EVERY).await;
-            if replay_host_pass(&app, &host).await {
-                return;
+    let loop_app = app.clone();
+    crate::background_loop::spawn_restartable(&app, "remote spool replay retry", move || {
+        let app = loop_app.clone();
+        let host = host.clone();
+        async move {
+            for _ in 0..REPLAY_RETRIES {
+                tokio::select! {
+                    _ = app.shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(REPLAY_RETRY_EVERY) => {}
+                }
+                if replay_host_pass(&app, &host).await {
+                    return;
+                }
             }
+            tracing::error!(host, "spool replay still failing after retries; spools stay on the host until the next reconnect");
         }
-        tracing::error!(host, "spool replay still failing after retries; spools stay on the host until the next reconnect");
     });
 }
 
@@ -2089,6 +2135,9 @@ const REPLAY_RETRY_EVERY: std::time::Duration = std::time::Duration::from_millis
 
 /// 一輪；全部成功才回 true。
 async fn replay_host_pass(app: &Arc<App>, host: &str) -> bool {
+    if app.shutdown.is_cancelled() {
+        return false;
+    }
     let bots = match db::live_bots_on_host(&app.db, host).await {
         Ok(b) => b,
         Err(e) => {
@@ -2098,7 +2147,14 @@ async fn replay_host_pass(app: &Arc<App>, host: &str) -> bool {
     };
     let mut ok = true;
     for b in bots {
-        if let Err(e) = replay_spool(app, &b.id).await {
+        if app.shutdown.is_cancelled() {
+            return false;
+        }
+        let replayed = tokio::select! {
+            _ = app.shutdown.cancelled() => return false,
+            result = replay_spool(app, &b.id) => result,
+        };
+        if let Err(e) = replayed {
             tracing::warn!(bot = %b.name, host, error = ?e, "spool replay failed; will retry");
             ok = false;
         }
@@ -2132,6 +2188,31 @@ mod drain_tests {
     #[test]
     fn an_empty_status_slot_is_no_status() {
         assert!(parse_drain_output("---AM-STATUS---\n\n").status.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_spool_scanner_exits_on_shutdown_instead_of_waiting_for_its_next_poll() {
+        let env = crate::testing::env().await;
+        spawn_spool_scanner(env.app.clone());
+        env.app.shutdown.cancel();
+        env.app.background_tasks.close();
+        tokio::time::timeout(std::time::Duration::from_secs(1), env.app.background_tasks.wait())
+            .await
+            .expect("scanner should join promptly on daemon shutdown");
+    }
+
+    #[tokio::test]
+    async fn remote_spool_retry_joins_on_shutdown_while_waiting_to_retry() {
+        let env = crate::testing::env().await;
+        sqlx::query("DROP TABLE bots").execute(&env.app.db).await.unwrap();
+        replay_host(&env.app, "remote").await;
+        assert_eq!(env.app.background_tasks.len(), 1, "the failed pass should schedule one retry task");
+
+        env.app.shutdown.cancel();
+        env.app.background_tasks.close();
+        tokio::time::timeout(std::time::Duration::from_secs(1), env.app.background_tasks.wait())
+            .await
+            .expect("spool retry must leave its delay on shutdown");
     }
 
     #[test]
