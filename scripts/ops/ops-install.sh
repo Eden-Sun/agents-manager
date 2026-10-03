@@ -23,19 +23,23 @@
 set -u
 
 REPO=""; REF=""; DIR=""; PLATFORM=""; DRY=0; FORCE=0
+usage() { echo "用法：ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run] [--force]" >&2; }
+require_value() {
+  if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then usage; exit 2; fi
+}
 while [ $# -gt 0 ]; do
   case "$1" in
-    --repo) REPO="${2:-}"; shift 2 ;;
-    --ref) REF="${2:-}"; shift 2 ;;
-    --dir) DIR="${2:-}"; shift 2 ;;
-    --platform) PLATFORM="${2:-}"; shift 2 ;;
+    --repo) require_value "$@"; REPO="$2"; shift 2 ;;
+    --ref) require_value "$@"; REF="$2"; shift 2 ;;
+    --dir) require_value "$@"; DIR="$2"; shift 2 ;;
+    --platform) require_value "$@"; PLATFORM="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     --force) FORCE=1; shift ;;
-    *) echo "用法：ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run] [--force]" >&2; exit 2 ;;
+    *) usage; exit 2 ;;
   esac
 done
 if [ -z "$REPO" ] || [ -z "$REF" ] || [ -z "$DIR" ]; then
-  echo "用法：ops-install.sh --repo <git 目錄> --ref <rev> --dir <AGM 目錄> [--platform linux|darwin] [--dry-run] [--force]" >&2
+  usage
   exit 2
 fi
 if [ -z "$PLATFORM" ]; then
@@ -46,13 +50,32 @@ COMMIT=$("$GIT" -C "$REPO" rev-parse --verify --quiet "${REF}^{commit}") || { ec
 MANIFEST=$("$GIT" -C "$REPO" show "${COMMIT}:scripts/ops/install-manifest.tsv" 2>/dev/null) || { echo "${REF} 沒有 scripts/ops/install-manifest.tsv" >&2; exit 2; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ops-install.XXXXXX")
-LOCK="$DIR/ops-install.lock"; HAVE_LOCK=0
+LOCK="$DIR/ops-install.lock"; LOCK_GUARD="$DIR/ops-install.lock.guard"; HAVE_LOCK=0
 cleanup() { rm -rf "$TMP"; [ "$HAVE_LOCK" = 1 ] && rm -rf "$LOCK"; return 0; }
 trap cleanup EXIT
-# 同時只能有一個在裝（kick 與人手動、或兩輪 kick 重疊）：兩邊同時備份、換檔會互相蓋掉。鎖是 `<AGM>/ops-install.lock/`（裡面記 pid）；
-# 握鎖的行程死了（被 SIGKILL，EXIT trap 沒跑）就算殘留，接手。--dry-run 什麼都不寫，不用鎖。
+# 同時只能有一個在裝（kick 與人手動、或兩輪 kick 重疊）：OS advisory lock 串行化目錄鎖的建立與殘留回收，
+# 避免兩個 runner 同時看見空 owner 而刪掉對方剛建立的鎖。目錄鎖裡仍記 pid；握鎖行程死了（SIGKILL）就接手。
+# --dry-run 什麼都不寫，不用鎖。
 if [ "$DRY" = 0 ]; then
   mkdir -p "$DIR" 2>/dev/null
+  acquire_guard() {
+    [ ! -L "$LOCK_GUARD" ] || return 2
+    exec 9>>"$LOCK_GUARD" || return 2
+    python3 -c '
+import errno, fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError as e:
+    sys.exit(1 if e.errno in (errno.EACCES, errno.EAGAIN) else 2)
+' >/dev/null 2>&1
+  }
+  _guard_rc=0
+  acquire_guard || _guard_rc=$?
+  if [ "$_guard_rc" -eq 1 ]; then
+    echo "busy 另一個 ops-install 正在建立或回收鎖，這次不動任何檔" >&2; exit 3
+  elif [ "$_guard_rc" -ne 0 ]; then
+    echo "busy 無法建立或取得安裝鎖（${LOCK_GUARD}），這次不動任何檔" >&2; exit 3
+  fi
   _tries=0
   until mkdir "$LOCK" 2>/dev/null; do
     _holder=$(cat "$LOCK/pid" 2>/dev/null)
@@ -190,6 +213,12 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
   fi
   mkdir -p "$BACKUP/$(dirname "$tgt")"
   if ! cp -p "$dest" "$BACKUP/$tgt"; then rm -f "$stage"; echo "failed ${tgt}（備份不了，沒動它）"; echo F >> "$TMP/results"; continue; fi
+  # 備份也可能跨過一次人工編輯；mv 前再確認仍是自檢前拍下的同一份內容。
+  if has_symlink_parent "$tgt" || [ -L "$dest" ] || ! cmp -s "$snapshot" "$dest"; then
+    rm -f "$stage"
+    echo "drifted ${tgt}（備份期間目的地改變，保留現況）"
+    echo D >> "$TMP/results"; continue
+  fi
   if ! mv -f "$stage" "$dest"; then
     rm -f "$stage"; echo "failed ${tgt}（換不進去，沒動它）"; echo F >> "$TMP/results"; continue
   fi

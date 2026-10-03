@@ -133,7 +133,8 @@ sys.exit(0 if os.path.normpath(argv[1]) == os.environ["RUNNER_SCRIPT"] else 1)
 ' >/dev/null 2>&1
 }
 acquire_guard() {
-  exec 9>"$LOCK_GUARD" 2>/dev/null || return 2
+  [ ! -L "$LOCK_GUARD" ] || return 2
+  exec 9>>"$LOCK_GUARD" || return 2
   python3 -c '
 import errno, fcntl, sys
 try:
