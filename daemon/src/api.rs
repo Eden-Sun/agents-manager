@@ -121,10 +121,9 @@ async fn upload_slot(State(slots): State<Arc<tokio::sync::Semaphore>>, req: axum
     }
 }
 
-/// Browser file surfaces carry private conversation and user-created files; a bot's hook token is
-/// not authority to read or write them. Run this before body extractors so bot uploads are rejected
-/// without buffering the request body or consuming an upload slot.
-async fn user_file_api(req: axum::extract::Request, next: Next) -> Response {
+/// Browser-owned data and host inspection surfaces are User-only. Run this before body extractors
+/// and handlers so rejected principals cannot read or mutate shared browser state or resolve a pane.
+async fn user_only_api(req: axum::extract::Request, next: Next) -> Response {
     if req.extensions().get::<RequestPrincipal>() != Some(&RequestPrincipal::User) {
         return LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})).into_response();
     }
@@ -146,8 +145,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/order", post(set_order))
         .route("/intents", get(list_intents).layer(agm_gate!(app)))
         // 對話輸入框的草稿（各瀏覽器共用，見 `drafts.rs`）。
-        .route("/drafts", get(crate::drafts::get_http))
-        .route("/drafts/{key}", axum::routing::put(crate::drafts::put_http))
+        .route("/drafts", get(crate::drafts::get_http).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/drafts/{key}", axum::routing::put(crate::drafts::put_http).layer(axum::middleware::from_fn(user_only_api)))
         .route("/projects/{id}", patch(patch_project).delete(delete_project_http))
         .route("/projects/{id}/bots", post(create_bot))
         .route("/projects/{id}/messages", get(get_project_messages))
@@ -209,22 +208,22 @@ pub fn router(app: Arc<App>) -> Router {
             post(upload_attachment)
                 .layer(DefaultBodyLimit::max(crate::attach::MAX_BYTES + 4096))
                 .layer(axum::middleware::from_fn_with_state(upload_slots, upload_slot))
-                .layer(axum::middleware::from_fn(user_file_api)),
+                .layer(axum::middleware::from_fn(user_only_api)),
         )
-        .route("/attachments/{id}", get(get_attachment).layer(axum::middleware::from_fn(user_file_api)))
+        .route("/attachments/{id}", get(get_attachment).layer(axum::middleware::from_fn(user_only_api)))
         .route("/bots/{id}/keys", post(keys_bot))
         .route("/bots/{id}/text", post(text_bot))
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/bots/{id}/pending-question", get(crate::pending_question::get_pending_question))
-        .route("/bots/{id}/local-image", get(crate::local_image::get).layer(axum::middleware::from_fn(user_file_api)))
+        .route("/bots/{id}/local-image", get(crate::local_image::get).layer(axum::middleware::from_fn(user_only_api)))
         // bot 交給使用者的檔案（§6.5f）：只讀 outbox。scratchpad 不再給使用者，舊路徑明確 404。
-        .route("/bots/{id}/outbox", get(crate::outbox::list).layer(axum::middleware::from_fn(user_file_api)))
-        .route("/bots/{id}/outbox/file", get(crate::outbox::file).layer(axum::middleware::from_fn(user_file_api)))
+        .route("/bots/{id}/outbox", get(crate::outbox::list).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/bots/{id}/outbox/file", get(crate::outbox::file).layer(axum::middleware::from_fn(user_only_api)))
         .route("/bots/{id}/scratchpad", get(crate::outbox::scratchpad_gone))
         .route("/bots/{id}/scratchpad/file", get(crate::outbox::scratchpad_gone))
-        .route("/bots/{id}/read", post(crate::read_marks::post))
-        .route("/projects/{id}/group/read", post(crate::read_marks::post_group))
+        .route("/bots/{id}/read", post(crate::read_marks::post).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/projects/{id}/group/read", post(crate::read_marks::post_group).layer(axum::middleware::from_fn(user_only_api)))
         .route("/turns/{id}/abandon", post(abandon_turn))
         .route("/turns/{id}/withdraw", post(withdraw_turn))
         .route("/bots/{id}/abort", post(abort_bot))
@@ -261,10 +260,10 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/build/remote/test", post(crate::remote_cargo::test_settings))
         .route("/build/remote/install-toolchain", post(crate::remote_cargo::install_settings))
-        .route("/mem", get(get_mem))
-        .route("/mem/processes", get(get_mem_processes))
+        .route("/mem", get(get_mem).layer(axum::middleware::from_fn(user_only_api)))
+        .route("/mem/processes", get(get_mem_processes).layer(axum::middleware::from_fn(user_only_api)))
         .route("/mem/processes/kill", post(kill_mem_process))
-        .route("/mem/processes/pane", get(get_mem_pane))
+        .route("/mem/processes/pane", get(get_mem_pane).layer(axum::middleware::from_fn(user_only_api)))
         .route("/search/messages", get(search_messages).layer(agm_gate!(app)))
         // AGM 總管（docs/goals/agm-supervisor-environment-plan-2026-09-09.md）。
         .route("/supervisor", get(crate::supervisor::api::get_supervisor).layer(agm_gate!(app)))
@@ -1047,6 +1046,7 @@ async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &s
     // Pane inventory and host-shell routes are human-operated interfaces, not bot resources.
     if parts.get(1) == Some(&"panes")
         || parts.get(1) == Some(&"drafts")
+        || (parts.get(1) == Some(&"mem") && matches!(method, "GET" | "HEAD"))
         || (parts.get(1) == Some(&"hosts") && parts.iter().any(|part| *part == "shells"))
     {
         return Err(bot_user_only());

@@ -3305,6 +3305,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - 載入更早的訊息與整頁重抓重疊時，重抓套用後才回來的舊頁丟棄；下一次從重抓後清單最舊的一則接續分頁。單 bot 與群組時間軸一致。
 - 輸入 `@` 彈出成員與 `all` 自動完成；沒有 mention 時送出鈕 disabled；列出收件者並標示將被略過的。**專案內至少一個 bot 可送就不鎖輸入框。**
 - 未打開群組時 sidebar 顯示未讀計數（打開即歸零）。**數字與已讀標記以 daemon 為準、跨裝置共用**（#756）：`project_group_reads` 存每個專案的標記，`GET /api/state` 每個專案帶 `group_unread`／`group_read_mark`（API.md `POST /api/projects/{id}/group/read`），前端只留記憶體裡的即時 +1，由下一次快照校正。已軟刪專案的標記端點回 404，upsert 也以存檔當下 project 仍存活為條件，避免併發刪除留下標記。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。群組來源以持久化的 `messages.group_id` 確認；未載入原訊息時，`client_request_id` 的 `<crid>:<bot_id>` 僅作查詢候選，再向訊息 API 查該 bot、該回合的 user 訊息，不以命名或歷史頁數當證據。daemon 的算法：標記之後、同回合 user 訊息帶 `group_id` 的 assistant 回合，依 `turn_id` 去重；相同訊息時間依 `seq` 插入序判斷。本機不再存群組計數（舊版的 `group:` 鍵忽略）。
+Bot 個別與專案群組的 `POST .../read` 都只接受 User principal；Bot（包含 AGM 角色）不能推進這些跨裝置已讀標記，service principal 的 scope 不包含這些路徑。
 
 ## 14. 每台主機各自的額度
 
@@ -3372,7 +3373,7 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 
 ### 15.1 量什麼
 整棵 **herdr 進程樹**（herdr + 底下的 pane 與 agent CLI）。樹根 = 執行檔名是 `herdr` 的 process（argv 裡剛好有這字的不算），herdr 底下再開 herdr 只算一次。
-每台主機每 15 秒 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走 ssh master），變化超過 1 MiB 才推 `mem_updated`。量不到用 `error` 回報，不從清單消失。端點 `GET /api/mem`。
+每台主機每 15 秒 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走 ssh master），變化超過 1 MiB 才推 `mem_updated`。量不到用 `error` 回報，不從清單消失。端點 `GET /api/mem`。`GET /api/mem`、`GET /api/mem/processes` 與 `GET /api/mem/processes/pane` 僅 User principal 可讀；Bot（包含 AGM 角色）在解析主機或讀 pane 前即被拒絕，service principal 的 scope 不包含這些路徑。
 
 ### 15.1a 這台機器還剩多少
 同一次取樣多帶 `hosts[].machine: {total_bytes, available_bytes}`（一次 shell 往返）：
@@ -3522,6 +3523,7 @@ CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前�
 
 對話輸入框還沒送出的字（bot 的 `bot:<id>`、群組的 `group:<project id>`、host shell 面板的 `shell:<host>/<pane id>`——pane 結束時清，#758）存在 `composer_drafts`（`key` 主鍵、`text`、`rev`、`updated_at`；`SCHEMA_VERSION` 34），
 各瀏覽器共用；不再存 localStorage（游標位置 `am.draftCursors` 仍是各瀏覽器自己的）。API 見 API.md「輸入框草稿」，實作 `daemon/src/drafts.rs`（網頁 `store/draftSync.ts`）。
+`GET /api/drafts` 與 `PUT /api/drafts/{key}` 只接受 User principal；Bot（包含 AGM 角色）不得讀取或改寫尚未送出的文字，service principal 的 scope 不包含這些路徑。
 
 - `rev` 每個 key 單調遞增，空字串寫入留墓碑（`text=''`）而不整列刪，rev 才不會從 1 重來被網頁當成舊事件丟掉。內容沒變的寫入不加 rev、不推事件。
 - 網頁：開頁與每次 WS 重連 `GET /api/drafts` 整份拉；本機打字 debounce 400 ms 後 `PUT`，**清空（送出）不等 debounce**；同一個 key 同時只有一個 PUT 在飛。
