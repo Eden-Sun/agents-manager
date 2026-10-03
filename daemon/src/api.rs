@@ -363,7 +363,16 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/build-slots/release", post(crate::build_scheduler::post_release))
         .fallback(get(crate::assets::serve))
         .with_state(app.clone())
-        .layer(axum::middleware::from_fn_with_state(app, startup_readiness))
+        .layer(axum::middleware::from_fn_with_state(app.clone(), startup_readiness))
+        // 最外層：/api 與 /ws 以外（靜態檔、hook、relay、build-slots）以前不看 Host。
+        .layer(axum::middleware::from_fn_with_state(app, reject_rebound_host))
+}
+
+async fn reject_rebound_host(State(app): State<Arc<App>>, req: axum::extract::Request, next: Next) -> Response {
+    if !origin_is_local(req.headers(), app.port, app.allow_lan) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "bad origin"}))).into_response();
+    }
+    next.run(req).await
 }
 
 async fn api_route_not_found() -> LcError {
@@ -664,7 +673,7 @@ fn extra_allowed_hosts() -> &'static [String] {
 
 /// Host 與 Origin 的名字都要過關：`allow_lan` 關著＝loopback 名稱，開著＝[`lan_host_ok`]。
 /// 任何 Origin 都放行的舊行為讓別的網頁（或 rebind 過來的網域）在 LAN 模式下拿得到 UI token。
-fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
+pub(crate) fn origin_is_local(headers: &HeaderMap, _port: u16, allow_lan: bool) -> bool {
     let name_ok = |authority: &str| if allow_lan { lan_host_ok(authority, extra_allowed_hosts()) } else { is_loopback_host(authority) };
     // DNS rebinding：同源 GET 沒有 Origin，所以 Host 也要過關（沒有 Host 的不是瀏覽器）。
     if let Some(host) = headers.get("host") {
@@ -12984,6 +12993,27 @@ mod lan_exposure_tests {
         assert!(api.starts_with("HTTP/1.1 403"), "有 token 也不行：{api}");
         let ws = raw(app, "GET /ws?token=test-token HTTP/1.1\r\nHost: 192.168.1.5:7788\r\nOrigin: http://evil.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").await;
         assert!(ws.starts_with("HTTP/1.1 403"), "別的網頁開 WebSocket：{ws}");
+    }
+
+    /// Host 檢查要蓋住認證層外面的路由。rebind 後的同源頁面讀得到靜態檔，也能對 `/hook` 發 POST；
+    /// 這兩條以前不看 Host。回應不能把送來的 token 再印出來。
+    #[tokio::test]
+    async fn lan_mode_rejects_a_rebound_host_on_static_files_and_hooks() {
+        let env = crate::testing::env().await;
+        let app = crate::testing::restart_app_lan(&env, true).await;
+        let secret = "super-secret-hook-token";
+        for req in [
+            "GET / HTTP/1.1\r\nHost: evil.example:7788\r\nConnection: close\r\n\r\n",
+            "GET /assets/index.js HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+            &format!("POST /hook/claude HTTP/1.1\r\nHost: evil.example:7788\r\nX-AM-Bot-Token: {secret}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"),
+            "GET /ws?token=test-token HTTP/1.1\r\nHost: evil.example:7788\r\nUpgrade: websocket\r\nConnection: close\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        ] {
+            let resp = raw(app.clone(), req).await;
+            assert!(resp.starts_with("HTTP/1.1 403"), "{req}\n{resp}");
+            assert!(!resp.contains(secret) && !resp.contains("test-token"), "{resp}");
+        }
+        let local = raw(app, "GET / HTTP/1.1\r\nHost: 127.0.0.1:7788\r\nConnection: close\r\n\r\n").await;
+        assert!(!local.starts_with("HTTP/1.1 403"), "loopback 靜態檔照舊：{local}");
     }
 
     /// 沒有憑證的呼叫端看到的錯誤不能帶出路徑或內部細節。
