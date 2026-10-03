@@ -64,7 +64,47 @@ pub(crate) async fn target(app: &Arc<App>, bot_id: &str) -> Result<Option<Target
     Ok(Some(Target { conn, dir }))
 }
 
+/// 兩條遠端路徑共用的 identity 與 link-count 檢查。GNU `test -ef` 比 device＋inode；
+/// BSD `/dev/fd/N` 的 device 是 devfs，故改用 lsof 讀同一 shell 中 fd 3/4 的真實 device＋inode。
+fn file_identity_helpers(lsof_path: &str) -> String {
+    let template = r#"am_same() {
+  if [ -n "$G" ]; then [ "$F" -ef /dev/fd/3 ]; return $?; fi
+  exec 4< "$F" || return 1
+  if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ]; then exec 4<&-; return 1; fi
+  lsof_bin=__AM_LSOF_PATH__
+  [ -x "$lsof_bin" ] || lsof_bin=/usr/bin/lsof
+  [ -x "$lsof_bin" ] || { exec 4<&-; return 1; }
+  ids=$("$lsof_bin" -a -p "$$" -d 3,4 -FfDi 2>/dev/null | /usr/bin/awk '
+    /^f3$/ || /^f3[^0-9]/ { fd=3; seen3=1; next }
+    /^f4$/ || /^f4[^0-9]/ { fd=4; seen4=1; next }
+    /^D/ && fd { dev[fd]=substr($0,2); next }
+    /^i/ && fd { ino[fd]=substr($0,2); next }
+    END {
+      if (seen3 && seen4 && dev[3] != "" && ino[3] != "" && dev[4] != "" && ino[4] != "" && (dev[3] "@") == (dev[4] "@") && (ino[3] "@") == (ino[4] "@")) print "same"
+      else exit 1
+    }')
+  ok=$?
+  exec 4<&-
+  [ "$ok" -eq 0 ] && [ "$ids" = same ]
+}
+am_singlelink() {
+  if [ -n "$G" ]; then l=$(stat -L -c '%h' /dev/fd/3 2>/dev/null) || return 1
+  else l=$(stat -L -f '%l' /dev/fd/3 2>/dev/null) || return 1; fi
+  [ "$l" = 1 ]
+}
+"#;
+    template.replace("__AM_LSOF_PATH__", &sh_quote(lsof_path))
+}
+
 fn list_script(dir: &str) -> String {
+    list_script_race(dir, "", "")
+}
+
+fn list_script_race(dir: &str, before_open: &str, after_open: &str) -> String {
+    list_script_race_with_lsof(dir, before_open, after_open, "/usr/sbin/lsof")
+}
+
+fn list_script_race_with_lsof(dir: &str, before_open: &str, after_open: &str, lsof_path: &str) -> String {
     format!(
         r#"D={d}
 if [ -L "$D" ]; then printf 'AM_OUTBOX_UNTRUSTED\n'; exit 0; fi
@@ -76,21 +116,20 @@ for f in "$D"/*; do
   [ -f "$f" ] && [ ! -L "$f" ] || continue
   N=${{f##*/}}
   case "$N" in *[[:cntrl:]]*) continue;; esac
+  F="$f"
+  {before_open}
   {{
-    exec 3< "$f" || exit 0
-    [ ! -L "$D" ] && [ ! -L "$f" ] && [ -f "$f" ] || exit 0
+    exec 3< "$F" || exit 0
+    {after_open}
+    [ ! -L "$D" ] && [ ! -L "$F" ] && [ -f "$F" ] || exit 0
+    {helpers}
+    am_same || exit 0
     if [ -n "$G" ]; then
-      [ "$f" -ef /dev/fd/3 ] || exit 0
       m=$(stat -L -c '%s %Y %Z' /dev/fd/3) || exit 0
-      l=$(stat -L -c '%h' /dev/fd/3) || exit 0
     else
-      a=$(stat -L -f '%i %z %m %c' "$f") || exit 0
-      b=$(stat -L -f '%i %z %m %c' /dev/fd/3) || exit 0
-      [ "$a" = "$b" ] || exit 0
       m=$(stat -L -f '%z %m %c' /dev/fd/3) || exit 0
-      l=$(stat -L -f '%l' /dev/fd/3) || exit 0
     fi
-    [ "$l" = 1 ] || exit 0
+    am_singlelink || exit 0
     h=$(head -c 64 <&3 | od -An -tx1 | tr -d ' \n')
     printf '%s\t%s\t%s\n' "$m" "$h" "$N"
   }} 2>/dev/null
@@ -98,6 +137,9 @@ done
 "#,
         d = sh_quote(dir),
         ttl_min = TTL_SECS / 60,
+        before_open = before_open,
+        after_open = after_open,
+        helpers = file_identity_helpers(lsof_path),
     )
 }
 
@@ -179,26 +221,21 @@ fn file_script(dir: &str, name: &str) -> String {
 /// 下載腳本。**先開 fd、再對同一個 fd 驗、只從這個 fd 讀**（#768）：遠端 bot 對自己的 outbox 有寫入權，
 /// 「`-L` 檢查 → `base64 < "$F"`」是兩次路徑操作，中間能把檔案（或整個目錄）換成指到 `~/.codex/auth.json` 的符號連結。
 /// 現在 `{{ … }} 3< "$F"` 先把檔案開在 fd 3（開的當下跟著連結走也沒關係），之後再驗：`$D`、`$F` 此刻都不是符號連結、`$F` 是一般檔案，
-/// 而且 `$F` 跟 fd 3 是同一個檔（GNU：`-ef` 比 dev＋inode；macOS 的 `/dev/fd/N` 在 devfs 上、dev 號不同所以 `-ef` 恆為假，改比 `stat -L -f '%i %z %m %c'`）。開檔那一刻 `$F` 若是連結，
-/// fd 指到的是連結目標，之後不管 `$F` 被換成什麼，inode 對不上就拒絕；開完才換成連結則 `-L` 擋下。內容只從 fd 讀，`head -c` 封頂
+/// 而且 `$F` 跟 fd 3 是同一個檔（GNU：`-ef` 比 dev＋inode；BSD/macOS 的 `/dev/fd/N` 經 devfs 顯示 device 不同，改由 `lsof` 比較 fd 3 與重開路徑的 fd 4 之 device＋inode；無法確認就拒絕）。開檔那一刻 `$F` 若是連結，
+/// fd 指到的是連結目標，之後不管 `$F` 被換成什麼，只要 device 或 inode 對不上就拒絕；開完才換成連結則 `-L` 擋下。內容只從 fd 讀，`head -c` 封頂
 /// （超過上限由呼叫端判 `file_too_large`），不再事先 `wc -c "$F"`。開檔失敗（不存在、沒權限）也是 MISSING。
 ///
 /// `gap` 是測試用的插入點（正式永遠是空字串）：在開檔之後、驗證之前跑一段，模擬 bot 在那一瞬間換檔。
 fn file_script_gap(dir: &str, name: &str, gap: &str) -> String {
+    file_script_gap_with_lsof(dir, name, gap, "/usr/sbin/lsof")
+}
+
+fn file_script_gap_with_lsof(dir: &str, name: &str, gap: &str, lsof_path: &str) -> String {
     format!(
         r#"D={d}
 F="$D"/{n}
-am_same() {{
-  [ "$F" -ef /dev/fd/3 ] && return 0
-  stat -c %Y "$D" >/dev/null 2>&1 && return 1
-  a=$(stat -L -f '%i %z %m %c' "$F" 2>/dev/null) || return 1
-  [ -n "$a" ] && [ "$a" = "$(stat -L -f '%i %z %m %c' /dev/fd/3 2>/dev/null)" ]
-}}
-am_singlelink() {{
-  if stat -c %h /dev/fd/3 >/dev/null 2>&1; then l=$(stat -L -c %h /dev/fd/3 2>/dev/null) || return 1
-  else l=$(stat -L -f %l /dev/fd/3 2>/dev/null) || return 1; fi
-  [ "$l" = 1 ]
-}}
+if stat -c %Y "$D" >/dev/null 2>&1; then G=1; else G=; fi
+{helpers}
 {{
 {gap}
 if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ] || ! am_same || ! am_singlelink; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
@@ -210,6 +247,7 @@ head -c {cap} <&3 | base64
         n = sh_quote(name),
         cap = MAX_BYTES + 1,
         gap = gap,
+        helpers = file_identity_helpers(lsof_path),
     )
 }
 
@@ -476,6 +514,16 @@ mod tests {
         path_inode: u64,
         fd_inode: u64,
     ) -> (String, std::path::PathBuf) {
+        run_download_with_bsd_stat_devices(dir, name, gap, 1, path_inode, 1, fd_inode, 1)
+    }
+
+    fn bsd_stat_tools(
+        path_device: u64,
+        path_inode: u64,
+        fd_device: u64,
+        fd_inode: u64,
+        nlink: u64,
+    ) -> (std::path::PathBuf, String) {
         let bin = crate::testing::track(std::env::temp_dir().join(format!("am-outbox-bsd-stat-{}", crate::db::ulid())));
         std::fs::create_dir_all(&bin).unwrap();
         let stat = bin.join("stat");
@@ -487,12 +535,13 @@ if [ "$1" = "-c" ]; then exit 1; fi
 if [ "$1" = "-L" ] && [ "$2" = "-f" ]; then
   case "$3" in
     '%i %z %m %c')
-      case "$4" in /dev/fd/3) printf '{fd_inode} 5 100 100\\n' ;; *) printf '{path_inode} 5 100 100\\n' ;; esac
+      case "$4" in /dev/fd/3) printf '{fd_inode} 5 100 100\n' ;; *) printf '{path_inode} 5 100 100\n' ;; esac
       ;;
     '%d %i %z %m %c')
-      case "$4" in /dev/fd/3) printf '2 {fd_inode} 5 100 100\\n' ;; *) printf '1 {path_inode} 5 100 100\\n' ;; esac
+      case "$4" in /dev/fd/3) printf '{fd_device} {fd_inode} 5 100 100\n' ;; *) printf '{path_device} {path_inode} 5 100 100\n' ;; esac
       ;;
-    '%l') echo 1 ;;
+    '%z %m %c') echo '5 100 100' ;;
+    '%l') printf '%s\n' '%l' >> "$AM_TEST_STAT_LOG"; echo {nlink} ;;
     *) exit 1 ;;
   esac
   exit 0
@@ -501,14 +550,117 @@ exec /usr/bin/stat "$@"
 "#,
                 path_inode = path_inode,
                 fd_inode = fd_inode,
+                path_device = path_device,
+                fd_device = fd_device,
+                nlink = nlink,
             ),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&stat, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let script = file_script_gap(&dir.to_string_lossy(), name, gap);
+
+        let lsof = bin.join("lsof");
+        std::fs::write(
+            &lsof,
+            format!(
+                "#!/bin/sh\nprintf 'p123\\nf3r\\nD{fd_device}\\ni{fd_inode}\\nf4r\\nD{path_device}\\ni{path_inode}\\n'\n",
+                path_device = path_device,
+                path_inode = path_inode,
+                fd_device = fd_device,
+                fd_inode = fd_inode,
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&lsof, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
-        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env("PATH", path).output().unwrap();
+        (bin, path)
+    }
+
+    fn run_download_with_bsd_stat_devices(
+        dir: &std::path::Path,
+        name: &str,
+        gap: &str,
+        path_device: u64,
+        path_inode: u64,
+        fd_device: u64,
+        fd_inode: u64,
+        nlink: u64,
+    ) -> (String, std::path::PathBuf) {
+        let (bin, path) = bsd_stat_tools(path_device, path_inode, fd_device, fd_inode, nlink);
+        let lsof_path = bin.join("lsof");
+        let script = file_script_gap_with_lsof(&dir.to_string_lossy(), name, gap, &lsof_path.to_string_lossy());
+        let stat_log = bin.join("stat.log");
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", path)
+            .env("AM_TEST_STAT_LOG", &stat_log)
+            .output()
+            .unwrap();
+        (String::from_utf8_lossy(&out.stdout).into_owned(), bin)
+    }
+
+    fn run_list_with_bsd_stat_devices(
+        dir: &std::path::Path,
+        before_open: &str,
+        after_open: &str,
+        path_device: u64,
+        path_inode: u64,
+        fd_device: u64,
+        fd_inode: u64,
+        nlink: u64,
+    ) -> (String, std::path::PathBuf) {
+        let (bin, path) = bsd_stat_tools(path_device, path_inode, fd_device, fd_inode, nlink);
+        let lsof_path = bin.join("lsof");
+        let script = list_script_race_with_lsof(&dir.to_string_lossy(), before_open, after_open, &lsof_path.to_string_lossy());
+        let stat_log = bin.join("stat.log");
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", path)
+            .env("AM_TEST_STAT_LOG", &stat_log)
+            .output()
+            .unwrap();
+        (String::from_utf8_lossy(&out.stdout).into_owned(), bin)
+    }
+
+    fn run_link_count_probe(gnu: bool, nlink: u64) -> (String, std::path::PathBuf) {
+        let bin = crate::testing::track(std::env::temp_dir().join(format!("am-outbox-link-probe-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&bin).unwrap();
+        let stat = bin.join("stat");
+        let stat_body = if gnu {
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "-L" ]; then shift; fi
+if [ "$1" = "-c" ] && [ "$2" = "%h" ]; then printf '%s\n' '%h' >> "$AM_TEST_STAT_LOG"; echo {nlink}; exit 0; fi
+exit 1
+"#
+            )
+        } else {
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "-L" ] && [ "$2" = "-f" ] && [ "$3" = "%l" ]; then printf '%s\n' '%l' >> "$AM_TEST_STAT_LOG"; echo {nlink}; exit 0; fi
+exit 1
+"#
+            )
+        };
+        std::fs::write(&stat, stat_body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stat, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let stat_log = bin.join("stat.log");
+        let script = format!(
+            "G={};\n{}\nexec 3</dev/null\nif am_singlelink; then echo single; else echo linked; fi\n",
+            if gnu { "1" } else { "" },
+            file_identity_helpers("/usr/sbin/lsof"),
+        );
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", path)
+            .env("AM_TEST_STAT_LOG", stat_log)
+            .output()
+            .unwrap();
         (String::from_utf8_lossy(&out.stdout).into_owned(), bin)
     }
 
@@ -602,8 +754,8 @@ exec /usr/bin/stat "$@"
         std::fs::remove_dir_all(&base).unwrap();
     }
 
-    /// On macOS `/dev/fd/3` reports the devfs device, which differs from the opened file's device.
-    /// The fallback must accept matching inode metadata despite that device mismatch.
+    /// macOS `stat` on `/dev/fd/3` reports the devfs device, so identity uses `lsof` fstat of fd 3 and a
+    /// reopened fd 4. Matching device and inode still serves the file.
     #[test]
     fn macos_local_bsd_stat_accepts_the_same_inode_across_devfs_devices() {
         let base = sandbox("bsd-stat-same-inode");
@@ -626,6 +778,59 @@ exec /usr/bin/stat "$@"
         let (out, shim) = run_download_with_bsd_stat(&d, "report.txt", gap, 43, 42);
         assert!(!out.contains("TOP SECRET") && served(&out).as_deref() != Some(&b"TOP SECRET"[..]), "secret descriptor was accepted: {out}");
         std::fs::remove_dir_all(&shim).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// 同一 inode 號與 metadata 不代表同一檔案：不同 filesystem 可重用 inode，不能因此把已開啟的外部檔案當成 outbox 項目。
+    #[test]
+    fn macos_local_bsd_stat_download_rejects_a_cross_device_inode_collision() {
+        let base = sandbox("bsd-cross-device-download");
+        let d = base.join("outbox");
+        std::os::unix::fs::symlink(base.join("secret.txt"), d.join("report.txt")).unwrap();
+        let gap = "rm -f \"$F\"; printf decoy > \"$F\"";
+        let (out, shim) = run_download_with_bsd_stat_devices(&d, "report.txt", gap, 2, 42, 1, 42, 1);
+        assert_eq!(out.trim(), "AM_OUTBOX_MISSING", "same inode/size/times on different devices must not pass: {out}");
+        std::fs::remove_dir_all(&shim).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn macos_local_bsd_stat_listing_rejects_a_cross_device_inode_collision() {
+        let base = sandbox("bsd-cross-device-list");
+        let d = base.join("outbox");
+        std::fs::write(d.join("report.txt"), b"decoy").unwrap();
+        let before_open = format!("mv \"$F\" \"$F.saved\"; ln -s '{}' \"$F\"", base.join("secret.txt").display());
+        let after_open = "rm -f \"$F\"; mv \"$F.saved\" \"$F\"";
+        let (out, shim) = run_list_with_bsd_stat_devices(&d, &before_open, after_open, 2, 42, 1, 42, 1);
+        let listed = parse_list(&out, 1_000).unwrap();
+        assert!(!listed.iter().any(|f| f["name"] == "report.txt"), "listing must reject a cross-device identity collision: {listed:?}");
+        std::fs::remove_dir_all(&shim).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn macos_local_both_gnu_h_and_bsd_l_link_count_probes_reject_hard_links() {
+        for (gnu, expected_probe) in [(true, "%h"), (false, "%l")] {
+            let (out, temp) = run_link_count_probe(gnu, 2);
+            assert_eq!(out.trim(), "linked", "GNU stat={gnu}: {out}");
+            assert_eq!(std::fs::read_to_string(temp.join("stat.log")).unwrap().trim(), expected_probe);
+            std::fs::remove_dir_all(&temp).unwrap();
+        }
+    }
+
+    /// BSD 腳本的 `%l` 必須真的接在列檔與下載上：nlink 2 跟 device 相同也不能放行。
+    #[test]
+    fn macos_local_bsd_stat_listing_and_download_reject_extra_hard_links() {
+        let base = sandbox("bsd-nlink");
+        let d = base.join("outbox");
+        std::fs::write(d.join("report.txt"), b"hello").unwrap();
+        let (out, shim) = run_download_with_bsd_stat_devices(&d, "report.txt", "", 1, 42, 1, 42, 2);
+        assert_eq!(out.trim(), "AM_OUTBOX_MISSING", "download accepted nlink 2: {out}");
+        std::fs::remove_dir_all(&shim).unwrap();
+        let (listed_out, shim_list) = run_list_with_bsd_stat_devices(&d, "", "", 1, 42, 1, 42, 2);
+        let listed = parse_list(&listed_out, 1_000).unwrap();
+        assert!(!listed.iter().any(|f| f["name"] == "report.txt"), "listing accepted nlink 2: {listed:?}");
+        std::fs::remove_dir_all(&shim_list).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
