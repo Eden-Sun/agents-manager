@@ -870,3 +870,73 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
     }
     assert!(misses.is_empty(), "允許表與 router 不一致：\n{}", misses.join("\n"));
 }
+
+/// The cross-project matrix does not catch routes that pass the project boundary. A plain Bot in
+/// the same project still must not use the review-only round endpoint on a mission assigned to a
+/// sibling Bot; the documented principal policy is User or AGM role.
+#[tokio::test]
+async fn a_same_project_bot_cannot_spend_another_missions_round() {
+    let env = crate::testing::env().await;
+    env.app.set_startup_ready(true);
+    let bot_a = crate::testing::claude_bot(&env.app, &env.project_id, "round-caller").await;
+    let bot_b = crate::testing::claude_bot(&env.app, &env.project_id, "round-owner").await;
+    sqlx::query("UPDATE bots SET hook_token='token-a' WHERE id=?")
+        .bind(&bot_a.id)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+    let mission_id = crate::db::ulid();
+    let now = crate::db::now();
+    sqlx::query("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, created_at, updated_at) VALUES (?,?,?,'scope fixture','pr','claude','wait',?,?)")
+        .bind(&mission_id)
+        .bind(&env.project_id)
+        .bind(format!("round-scope-{mission_id}"))
+        .bind(&now)
+        .bind(&now)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+    crate::supervisor::store::insert_assignment_linked(
+        &env.app.db,
+        None,
+        &bot_b.id,
+        &format!("round-assignment-{mission_id}"),
+        "Bot B owns this mission",
+        &[],
+        None,
+        false,
+        Some((&mission_id, "executor")),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let router = router(env.app.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/missions/{mission_id}/round"))
+        .header("content-type", "application/json")
+        .header("X-AM-Bot-Id", &bot_a.id)
+        .header("X-AM-Bot-Token", "token-a")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN, "a sibling Bot cannot spend the mission's review round");
+    let body = response.text().await.unwrap();
+    assert!(body.contains("\"reason\":\"role_required\""), "the documented route contract distinguishes the role gate: {body}");
+    let used: i64 = sqlx::query_scalar("SELECT rounds_used FROM missions WHERE id=?")
+        .bind(&mission_id)
+        .fetch_one(&env.app.db)
+        .await
+        .unwrap();
+    assert_eq!(used, 0, "a denied request must not advance the mission");
+}
