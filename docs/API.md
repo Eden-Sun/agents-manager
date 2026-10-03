@@ -28,8 +28,8 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 
 | 組 | 端點 | 呼叫端 | 目前守衛 | 後果 | 建議要求 |
 |---|---|---|---|---|---|
-| A | `POST /hosts/{name}/shells`、`…/shells/{pane_id}/text`、`…/keys` | 只有網頁 | UI token；text／keys 只認白名單 pane（daemon 自己開的、或 `panes` 表的 shell／service），跑 agent 的 pane 403、有 listen port 的唯讀（`shell::registered`） | 在任何已設定主機上執行任意指令 | 待裁示（見下） |
-| A | `POST /hosts/{name}/tools/install` | 只有網頁 | UI token | 叫 `via_bot_id` 那顆 agent 去裝 CLI（跟 `/bots/{id}/prompt` 等價） | 同 `/bots/{id}/prompt` |
+| A | `/hosts/{name}/shells`、`…/shells/{pane_id}/terminal|text|keys`、`…/{pane_id}` | 只有網頁 | User principal；Bot／service principal 403 `user_only`；text／keys／close 只認白名單 pane（daemon 自己開的、或 `panes` 表的 shell／service），跑 agent 的 pane 403、有 listen port 的唯讀（`shell::registered`） | shell metadata／畫面可能含使用者資料；寫入可操作主機 pane | 維持 |
+| A | `GET /hosts/{name}/gh`、`POST /hosts/{name}/gh/{login,cancel}`、`POST /hosts/{name}/identities/{identity}/{login,logout}`、`POST /hosts/{name}/tools/{refresh,install}`、`POST /hosts/{name}/reconnect` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 操作 daemon 使用者的遠端 SSH、GitHub 或 CLI 身分 | 維持 |
 | A | `POST /hosts/{name}/cli-update` | 只有網頁（確認框之後） | UI token；帶 `X-AM-Bot-Id` 或 `X-AM-Bot-Token` 一律 403 `ui_only`；指令寫死、同一台 409 | 安裝該主機共用的 Claude 或 Codex CLI；Codex 安裝後 scoped restart，Claude 留待使用者另按「重啟套用」 | 維持（網頁已有確認框） |
 | A | `POST /hosts/{name}/herdr-update` | 只有網頁（確認框之後） | UI token；帶 Bot headers 一律 403 `ui_only`；只收 local、同時只跑一個 | 換 herdr binary、重啟這顆 daemon 的 herdr server（所有 bot 中斷約 1 分鐘，子 agent 結束） | 維持（網頁已有確認框） |
 | A | `POST /bots/{id}/prompt`、`/text`、`/keys` | 網頁、`scripts/remote-loop-test.sh`、`scripts/hook-timing-test.sh`；Bot pane 內的 `agm`／shim | 網頁與測試腳本用 User `X-AM-Token`；Bot 用成對 Bot headers；`relay_from` 不能覆蓋已驗身分；寫給 AGM 的排進 inbox | 驅動任一顆 agent | 網頁維持 User；Bot principal 按 caller 身分驗證 |
@@ -40,7 +40,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | B | `POST /missions/{id}/deliver` | `agm mission deliver`（協調者） | UI token＋流程守衛：要有帶 sha 的 `verified` 事件、任務沒停；`relay_from` 同 `relay_auth` | 把驗過的 commit 交付出去 | 維持 |
 | B | `POST /deploy/now` | 只有網頁（確認框之後） | User token；有效 Bot principal 回 403 `ui_only`，無效 Bot 身分由全域中介層回 401；已有部署在跑 409、kick 沒裝或太舊 503（什麼都不寫） | 以使用者名義核准 rebuild（kick 同輪開並核准 restart）→ 重建並重啟正式 daemon；沒人 working 才換、租約、`.bak`、回滾照舊 | 維持（網頁已有確認框） |
 | C | `DELETE /bots/{id}`、`DELETE /projects/{id}` | 網頁、`agm` | User UI token 或 Bot principal；AGM 的 bot／專案另要 `?confirm=supervisor`（`supervisor_owned`） | 軟刪，`POST /bots/{id}/restore` 救得回 | 維持 |
-| C | `POST /hosts`（改 ssh 目標）、`DELETE /hosts/{name}` | 網頁 | 還有專案在用時改 ssh 要 `?confirm=repoint`、刪除 409 | 只改 config.toml | 維持 |
+| C | `POST /hosts`（新增／更新）、`DELETE /hosts/{name}` | 網頁 | User principal；Bot／service principal 403 `user_only`；還有專案在用時改 SSH 目標或 `ssh_opts` 要 `?confirm=repoint`、刪除 409 | 改 config.toml 或改現有 run 的連線權威 | 維持 |
 | C | `DELETE /hosts/{name}/shells/{pane_id}`、`POST /panes/{id}/close` | 網頁 | 服務 pane 要 `?confirm=true`；agent pane 403 | 關掉 pane | 維持 |
 | C | `PUT /drafts/{key}` | 網頁 | UI token（key 只收 `bot:<id>`／`group:<id>`／`shell:<host>/<pane id>`、內容 ≤ 256 KiB） | 改輸入框草稿，空字串＝清掉；不碰任何 bot | 維持 |
 | C | `POST /bots/{id}/restore`、`/identities`、`DELETE /identities/{name}`、`POST /order`、`PATCH /bots/{id}`、`PATCH /projects/{id}`、start／stop／restart／fork／promote／rewind 等其餘寫入 | 網頁、`agm` | UI token（各自的狀態機檢查） | 本機設定與行程，改得回來 | 維持 |
@@ -1086,6 +1086,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 
 ### `POST /api/hosts`
 新增或更新遠端主機，寫回 `[[hosts]]`，**同步等第一次連線結果**（ensure session + ssh master + ping，最長約 35 秒）才回應。
+只接受 User principal（UI token）；Bot／service principal 回 `403 user_only`。
 
 ```json
 { "name": "m4p", "ssh": "m4p@100.112.229.82", "ssh_port": 22, "herdr_session": "agents-manager", "remote_path": "/opt/homebrew/bin:$HOME/.local/bin", "ssh_opts": ["-i", "/path/to/key"] }
@@ -1111,13 +1112,13 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 內文帶 `from`／`to` 與擋下來的 `projects`，**config 一個字都不會寫**。跟 `DELETE /api/hosts/{name}` 同一條判斷：
 `apply_config` 會把連線整個換掉，但 `runs` 一列都不動——那些 run 還帶著**舊那台**開出來的 pane id，
 之後 daemon 會拿它們去問新那台（pane 不存在就把 run 收掉，剛好撞上同名 pane 就更糟）。
-只改 `remote_path`／`ssh_opts` 不算換機器，照舊放行。真的要改帶 `?confirm=repoint`。
+只改 `remote_path` 不算換機器，照舊放行。`ssh_opts` 可以改 `User`／`IdentityFile` 等 SSH 身分，故有活著的專案時任何 `ssh_opts` 變更也要帶 `?confirm=repoint`。
 
 ### `DELETE /api/hosts/{name}`
 `200 {}`；仍有 project 使用 → `409 {"reason":"host still used by projects","project_id"}`；`local` 400。刪除時推 `host_changed {"connected":false,"error":"removed"}` 與 `project_changed`。
 
 ### `POST /api/hosts/{name}/reconnect`
-強制重建 ssh master 與訂閱，回應同 `POST /api/hosts`。`local` 也可（重新 ping）。找不到 404。
+只接受 User principal（UI token）。強制重建 ssh master 與訂閱，回應同 `POST /api/hosts`。`local` 也可（重新 ping）。找不到 404。
 
 ### 遠端 project
 `POST /api/projects` 本機 `path` 只收絕對路徑（或 `~`、`~/…`；相對路徑會解成 daemon 自己的工作目錄，一律 400），解開 symlink 與 `..` 之後必須是目錄；`label`（`POST`／`PATCH`）不得含控制字元或看不見的字元、最長 64 字。`POST /api/projects` 帶 `host`（未設定的 host → 404）。遠端 `path` 不在本機 canonicalize，daemon 經 ssh 確認目錄存在並取遠端 canonical path，失敗 400。
@@ -1172,7 +1173,8 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 | DELETE | `/api/hosts/{name}/shells/{pane_id}[?confirm=true]` | `pane.close`（分頁空了一起收）。記憶體清單裡的直接關；清單沒有就照 `panes` 表關，規則同 `POST /api/panes/{id}/close`：`confirm` 沒帶＝false，服務 pane 或讀不到事實時回 `409 {"reason":"service_pane","pane":{…含 kind／listen_ports／read_only},"unverified":bool}`，agent／active run 403；兩邊都沒有 404 |
 
 - **只有使用者本人能用**（2026-10-02 安全審查）：上表加上 `POST /api/bots/{id}/text`、`POST /api/bots/{id}/keys` 共六個「原始 pane 輸入／開關」端點，bot 的 `X-AM-Bot-Id`/`X-AM-Bot-Token`
-  與 service 身分一律 `403 {"error":"forbidden","reason":"user_only"}`（bot 驗得過身分，但不該直接對 pane 打字或按鍵；要跟別顆 bot 說話走 `/prompt` 的 relay）。
+  與 service 身分一律 `403 {"error":"forbidden","reason":"user_only"}`。Host shell 的建立、清單、terminal、text、keys、close 都只接受 User principal；Bot／service principal 不能讀使用者 shell 畫面或操作 pane。
+  bot 驗得過身分，但不該直接對 pane 打字或按鍵；要跟別顆 bot 說話走 `/prompt` 的 relay。
   上限：`text` 最多 256 KiB（超過 400）；`keys` 最多 64 個、每個鍵名 ≤ 32 字元且不含空白／控制字元（400）。
 - **白名單每次打字前複查**：記憶體清單（daemon 自己開的）認到的 pane，打字前也問 herdr——裡面現在有 agent → 403 `agent_pane`、在 listen → 403 `read_only_pane`、
   pane 已不在或 **id 被重用到另一個 tab／workspace**（跟登記的 `workspace_id`／`tab_id` 對不上）→ 404、登記的 `herdr_session` 不是這台主機現在的 session → 404；`panes` 表那條同樣比對 workspace／tab。

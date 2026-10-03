@@ -38,6 +38,14 @@ pub(crate) struct Target {
     dir: String,
 }
 
+fn unreachable_body(host: &str) -> serde_json::Value {
+    json!({"reason": "outbox_remote_unreachable", "host": host})
+}
+
+fn unreachable(host: &str) -> LcError {
+    LcError::conflict("outbox_remote_unreachable", unreachable_body(host))
+}
+
 /// 這顆 bot 在遠端主機上就回它的 outbox；本機 bot 回 `None`（照舊走 [`crate::outbox`]）。
 pub(crate) async fn target(app: &Arc<App>, bot_id: &str) -> Result<Option<Target>, LcError> {
     let bot = crate::db::bot(&app.db, bot_id).await.ok().flatten().ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -45,14 +53,13 @@ pub(crate) async fn target(app: &Arc<App>, bot_id: &str) -> Result<Option<Target
     if project.host == crate::config::LOCAL_HOST {
         return Ok(None);
     }
-    let unreachable = || LcError::conflict("outbox_remote_unreachable", json!({"reason": "outbox_remote_unreachable", "host": project.host}));
-    let conn = app.hosts.get(&project.host).await.ok_or_else(unreachable)?;
+    let conn = app.hosts.get(&project.host).await.ok_or_else(|| unreachable(&project.host))?;
     // 已知連不上（睡著、tailscale 斷線）就直接說連不上：不去等一趟 ssh（列表 30 秒、下載 180 秒才逾時），
     // 網頁每開一次也不會多養一條卡住的 ssh 行程。
     if !conn.is_connected() {
-        return Err(unreachable());
+        return Err(unreachable(&project.host));
     }
-    let home = conn.home().await.map_err(|_| unreachable())?;
+    let home = conn.home().await.map_err(|_| unreachable(&project.host))?;
     let dir = remote_dir(&home, app.instance().as_deref(), &bot.id).ok_or_else(|| LcError::NotFound("bot".into()))?;
     Ok(Some(Target { conn, dir }))
 }
@@ -115,6 +122,16 @@ fn parse_list(out: &str, now: u64) -> Option<Vec<serde_json::Value>> {
 }
 
 pub(crate) async fn list(t: Target, now: u64) -> Result<Response, LcError> {
+    // `target()` and I/O are separate awaits. The supervisor can mark this connection down
+    // between them, so don't start a new SSH process after that state is already known.
+    if !t.conn.is_connected() {
+        return Ok((StatusCode::OK, axum::Json({
+            let mut body = unreachable_body(&t.conn.name);
+            body["files"] = json!([]);
+            body["ttl_secs"] = json!(TTL_SECS);
+            body
+        })).into_response());
+    }
     let body = match t.conn.ssh_exec_timeout(&list_script(&t.dir), LIST_TIMEOUT).await {
         Ok(out) => match parse_list(&out, now) {
             Some(files) => json!({"dir": t.dir, "host": t.conn.name, "ttl_secs": TTL_SECS, "files": files}),
@@ -145,7 +162,7 @@ fn file_script(dir: &str, name: &str) -> String {
 /// 下載腳本。**先開 fd、再對同一個 fd 驗、只從這個 fd 讀**（#768）：遠端 bot 對自己的 outbox 有寫入權，
 /// 「`-L` 檢查 → `base64 < "$F"`」是兩次路徑操作，中間能把檔案（或整個目錄）換成指到 `~/.codex/auth.json` 的符號連結。
 /// 現在 `{{ … }} 3< "$F"` 先把檔案開在 fd 3（開的當下跟著連結走也沒關係），之後再驗：`$D`、`$F` 此刻都不是符號連結、`$F` 是一般檔案，
-/// 而且 `$F` 跟 fd 3 是同一個檔（GNU：`-ef` 比 dev＋inode；macOS 的 `/dev/fd/N` 在 devfs 上、dev 號不同所以 `-ef` 恆為假，改比 `stat -L -f '%i %z %m %c'`）。開檔那一刻 `$F` 若是連結，
+/// 而且 `$F` 跟 fd 3 是同一個檔（GNU：`-ef` 比 dev＋inode；macOS 的 `/dev/fd/N` 在 devfs 上、dev 號不同所以 `-ef` 恆為假，改比 `stat -L -f '%d %i %z %m %c'`）。開檔那一刻 `$F` 若是連結，
 /// fd 指到的是連結目標，之後不管 `$F` 被換成什麼，inode 對不上就拒絕；開完才換成連結則 `-L` 擋下。內容只從 fd 讀，`head -c` 封頂
 /// （超過上限由呼叫端判 `file_too_large`），不再事先 `wc -c "$F"`。開檔失敗（不存在、沒權限）也是 MISSING。
 ///
@@ -157,8 +174,8 @@ F="$D"/{n}
 am_same() {{
   [ "$F" -ef /dev/fd/3 ] && return 0
   stat -c %Y "$D" >/dev/null 2>&1 && return 1
-  a=$(stat -L -f '%i %z %m %c' "$F" 2>/dev/null) || return 1
-  [ -n "$a" ] && [ "$a" = "$(stat -L -f '%i %z %m %c' /dev/fd/3 2>/dev/null)" ]
+  a=$(stat -L -f '%d %i %z %m %c' "$F" 2>/dev/null) || return 1
+  [ -n "$a" ] && [ "$a" = "$(stat -L -f '%d %i %z %m %c' /dev/fd/3 2>/dev/null)" ]
 }}
 {{
 {gap}
@@ -196,6 +213,9 @@ fn parse_file(out: &str) -> Option<Fetched> {
 }
 
 pub(crate) async fn file(t: Target, requested: &str) -> Result<Response, LcError> {
+    if !t.conn.is_connected() {
+        return Err(unreachable(&t.conn.name));
+    }
     let not_found = || LcError::NotFound("file".into());
     let name = safe_name(&t.dir, requested).ok_or_else(not_found)?;
     let out = t
@@ -307,6 +327,45 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "不該打任何 ssh");
     }
 
+    /// The target can be selected while connected and go down before the SSH command starts.
+    /// Recheck the state at the actual list/download boundary instead of dialing a host already
+    /// known to be offline.
+    #[tokio::test]
+    async fn a_target_that_went_down_before_io_never_starts_ssh() {
+        let host = "outbox-raced-down";
+        let env = crate::testing::env().await;
+        let cfg = crate::config::HostCfg {
+            name: host.into(),
+            ssh: host.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+            shared_session: false,
+        };
+        let conn = env.app.hosts.insert_remote_for_test(cfg).await;
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        crate::hosts::set_ssh_fake(host, move |_| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("AM_OUTBOX_OK\n".into())
+        });
+
+        // `target()` 已選好舊連線；監督器接著回報斷線，I/O handler 再收到這份 target。
+        conn.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+        let list = list(Target { conn: conn.clone(), dir: "/remote/outbox/bot".into() }, 0).await.unwrap();
+        let body = axum::body::to_bytes(list.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["reason"], json!("outbox_remote_unreachable"), "{body}");
+
+        match file(Target { conn, dir: "/remote/outbox/bot".into() }, "report.txt").await {
+            Err(LcError::Conflict(detail)) => assert_eq!(detail["reason"], json!("outbox_remote_unreachable"), "{detail}"),
+            other => panic!("已知離線的下載應回 409：{other:?}"),
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "host became known-down before I/O; no ssh is allowed");
+    }
+
     #[test]
     fn the_remote_dir_sits_under_the_instance_root_and_only_takes_ulids() {
         assert_eq!(remote_dir("/Users/m", None, "01ABC").as_deref(), Some("/Users/m/.config/agents-manager/outbox/01ABC"));
@@ -385,6 +444,39 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    /// Simulate BSD `stat`: `stat -c` is rejected and `/dev/fd/3` reports metadata on the opened
+    /// descriptor. The fake gives different devices the same inode/size/timestamps so an
+    /// incomplete comparison cannot accidentally pass on this Linux test host.
+    fn run_download_with_bsd_stat(dir: &std::path::Path, name: &str, gap: &str) -> (String, std::path::PathBuf) {
+        let bin = crate::testing::track(std::env::temp_dir().join(format!("am-outbox-bsd-stat-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&bin).unwrap();
+        let stat = bin.join("stat");
+        std::fs::write(
+            &stat,
+            r#"#!/bin/sh
+if [ "$1" = "-c" ]; then exit 1; fi
+if [ "$1" = "-L" ] && [ "$2" = "-f" ]; then
+  case "$3" in
+    '%i %z %m %c') printf '42 5 100 100\\n' ;;
+    '%d %i %z %m %c')
+      case "$4" in /dev/fd/3) printf '2 42 5 100 100\\n' ;; *) printf '1 42 5 100 100\\n' ;; esac
+      ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+exec /usr/bin/stat "$@"
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stat, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = file_script_gap(&dir.to_string_lossy(), name, gap);
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).env("PATH", path).output().unwrap();
+        (String::from_utf8_lossy(&out.stdout).into_owned(), bin)
+    }
+
     fn served(out: &str) -> Option<Vec<u8>> {
         match parse_file(out) {
             Some(Fetched::File(d)) => Some(d),
@@ -455,6 +547,20 @@ mod tests {
         let gap = format!("mv \"$D\" \"$D.real\"; ln -s '{}' \"$D\"", real.display());
         let out = run_download(&d2, "report.txt", &gap);
         assert!(!out.contains("TOP SECRET") && served(&out).as_deref() != Some(&b"TOP SECRET"[..]), "{out}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// #768's BSD fallback must compare device as well as inode and timestamps: on macOS,
+    /// `test -ef` may not identify `/dev/fd/3` as the same file, so the fallback is the guard.
+    #[test]
+    fn macos_local_bsd_stat_compares_device_before_serving_the_open_descriptor() {
+        let base = sandbox("bsd-stat-device");
+        let d = base.join("outbox");
+        std::os::unix::fs::symlink(base.join("secret.txt"), d.join("report.txt")).unwrap();
+        let gap = "rm -f \"$F\"; printf decoy > \"$F\"";
+        let (out, shim) = run_download_with_bsd_stat(&d, "report.txt", gap);
+        assert!(!out.contains("TOP SECRET") && served(&out).as_deref() != Some(&b"TOP SECRET"[..]), "secret descriptor was accepted: {out}");
+        std::fs::remove_dir_all(&shim).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
