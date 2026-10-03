@@ -2336,14 +2336,31 @@ mod pane_env_tests {
             assert_eq!(iso["AM_INSTANCE"], json!("a1b2"), "{host}");
         }
 
-        // identity.env、bot.env 各自寫了偽造值都蓋不過去：真的走 pane_env 的合併順序。
+        // identity.env 寫保留鍵：設定寫入就被擋（驗證在 config 層）。
+        let refused = env
+            .app
+            .cfg
+            .update(|cfg| {
+                cfg.identities = vec![crate::config::IdentityCfg {
+                    name: "cc9".into(),
+                    kind: "claude".into(),
+                    host: None,
+                    env: [("AM_DATA_DIR".to_string(), "/identity/dir".to_string())].into(),
+                    args: vec![],
+                }];
+                Ok(())
+            })
+            .await;
+        assert!(format!("{refused:?}").contains("reserved"), "identity.env 的 AM_* 要在寫入時被擋：{refused:?}");
+
+        // bot.env 的偽造值蓋不過去、identity 的一般鍵照舊生效：真的走 pane_env 的合併順序。
         env.app
             .cfg
             .update(|cfg| {
                 // 這個測試測的是 pane_env 的合併順序，不是身分的 host 範圍：兩台各放一份同名的，
                 // 本機那份不寫 host（＝現行 config.toml 的形狀），遠端那份明寫 host（SPEC §16.2）。
                 let forged = || -> std::collections::BTreeMap<String, String> {
-                    [("AM_INSTANCE", "forged-by-identity"), ("AM_DATA_DIR", "/identity/dir"), ("ID_ONLY", "kept")]
+                    [("ID_ONLY", "kept")]
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .into()
                 };
