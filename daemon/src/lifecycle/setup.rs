@@ -529,18 +529,31 @@ pub(crate) async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Pr
     }
 }
 
+/// 權限參數一律照 `auto_approve` 明講，開新對話、resume、fork、子 agent 重啟都走這一份。
+///
+/// codex 0.160.0 起 `resume` 會恢復這段對話上次存下的權限（openai/codex#49160：在 session 裡用
+/// `/permissions` 切成 Full Access 之後，不帶權限參數的 `codex resume <id>` 回來就是 YOLO），除非啟動時
+/// 明確覆寫（issue #778，0.160.0 拋棄式目錄實測：`-s`／`-c sandbox_mode=…` 都算覆寫，`/status` 回到
+/// workspace）。所以沒開 auto_approve 的 codex 也要帶非 yolo 的 sandbox。用 `-c` 不用 `-s`：
+/// 使用者在 bot 參數裡自己寫的 `-s` 比 `-c` 優先，也不會撞 clap 的「旗標重複」。approval policy 不碰，
+/// 照使用者的 config.toml。
+pub(crate) fn permission_args(kind: &str, auto_approve: bool) -> Vec<String> {
+    match (kind, auto_approve) {
+        ("claude", true) => vec!["--dangerously-skip-permissions".into()],
+        ("codex", true) => vec!["--yolo".into()],
+        // = `--permission-mode bypassPermissions` (grok 1.0.13 `--help`).
+        ("grok", true) => vec!["--always-approve".into()],
+        ("codex", false) => vec!["-c".into(), "sandbox_mode=\"workspace-write\"".into()],
+        _ => Vec::new(),
+    }
+}
+
 /// Daemon-injected CLI args that go *before* the bot's own; remote projects also upload the hook (§11.4).
 pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
-    let mut out: Vec<String> = Vec::new();
-    if bot.auto_approve != 0 {
-        match bot.kind.as_str() {
-            "claude" => out.push("--dangerously-skip-permissions".into()),
-            "codex" => out.push("--yolo".into()),
-            // = `--permission-mode bypassPermissions` (grok 1.0.13 `--help`).
-            "grok" => out.push("--always-approve".into()),
-            other => anyhow::bail!("unknown bot kind {other}"),
-        }
+    if !matches!(bot.kind.as_str(), "claude" | "codex" | "grok") {
+        anyhow::bail!("unknown bot kind {}", bot.kind);
     }
+    let mut out = permission_args(&bot.kind, bot.auto_approve != 0);
     if bot.inject_hooks == 0 {
         return Ok(out);
     }
