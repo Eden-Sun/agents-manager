@@ -65,6 +65,42 @@ fn cfg_err(e: anyhow::Error) -> LcError {
     }
 }
 
+#[cfg(test)]
+mod startup_readiness_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn requests_during_startup_receive_retryable_503() {
+        let env = crate::testing::env().await;
+        env.app.set_startup_ready(false);
+        let router = router(env.app.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/api/state"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "1");
+        assert_eq!(response.json::<Value>().await.unwrap()["error"], "starting");
+
+        env.app.set_startup_ready(true);
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/api/state"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "ready requests continue to normal auth");
+
+        server.abort();
+    }
+}
+
 /// 同時進行的附件上傳上限：body 先整個讀進記憶體（`Bytes`，單檔至多 `attach::MAX_BYTES`），不限並發就是 N × 50 MiB。
 pub(crate) const UPLOAD_CONCURRENCY: usize = 4;
 
@@ -334,7 +370,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/build-slots/renew", post(crate::build_scheduler::post_renew))
         .route("/build-slots/release", post(crate::build_scheduler::post_release))
         .fallback(get(crate::assets::serve))
-        .with_state(app)
+        .with_state(app.clone())
+        .layer(axum::middleware::from_fn_with_state(app, startup_readiness))
 }
 
 async fn api_route_not_found() -> LcError {
@@ -675,6 +712,18 @@ pub(crate) enum RequestPrincipal {
 
 fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, Json(json!({"error": "missing or bad API credential"}))).into_response()
+}
+
+async fn startup_readiness(State(app): State<Arc<App>>, req: axum::extract::Request, next: Next) -> Response {
+    if !app.is_startup_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            Json(json!({"error": "starting", "message": "daemon startup is still in progress"})),
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next: Next) -> Response {

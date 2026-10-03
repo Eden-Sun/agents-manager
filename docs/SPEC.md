@@ -1307,6 +1307,7 @@ stall watchdog 的自動補送走同一條驗證路徑，次數記在 `turns.res
    `AM_DATA_DIR` 不一致或鎖被別人佔著就**在開 DB 之前**結束，不寫任何一列。
 1. 載入 config、補寫缺少的 id、TOML→SQLite 投影（大量軟刪會被擋下，見 §3.1）。
 2. 確保 herdr session 在跑、`ping`。
+   HTTP listener 綁定後會先開始回應；recovery、對帳、事件／poller 設定與 maintenance restore 完成前，全路由（含 WebSocket）固定回 `503 {"error":"starting"}`＋`Retry-After: 1`，不讀取或改寫尚未恢復的狀態。listener 綁定失敗時不會進入這些 daemon 背景工作；本機與遠端 autostart 等 API ready 後才開始，bot 啟動中的 hook／relay 不會撞上 503。
 3. 對帳（§6.5）。
 4. 建全域事件連線與各 active Run 的狀態連線。
 5. 每個 bot 重放 spool。

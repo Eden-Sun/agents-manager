@@ -94,6 +94,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | 404 | `{"error":"not_found","what":"bot"\|"project"\|"run"\|"pane"\|"turn"\|"route"}` | 找不到；`route`＝`/api/*` 沒有這個端點（不帶 token 也一樣，不會掉到 SPA 的 index.html） |
 | 409 | `{"error":"conflict","reason":"<人類可讀>", ...extra}` | 狀態機衝突；extra 視情況含 `run_id` / `turn_id` / `bot_id` / `name` / `path` / `state` |
 | 502 | `{"error":"upstream","message":"..."}` | herdr / DB 出錯 |
+| 503 | `{"error":"starting","message":"daemon startup is still in progress"}` | listener 已開、daemon 尚未完成啟動；附 `Retry-After: 1`，稍後重試 |
 | 503 | `{"error":"start_state_uncommitted"\|"stop_state_uncommitted"\|"restart_state_uncommitted","run_id","retryable":true,"message","detail"}` | 外面的副作用已經做了（agent 起來了／停了），run 的狀態卻寫不進 DB；daemon 已排重試，run 會照 herdr 的證據收斂（SPEC §6.2、§6.4）。不是「沒做」也不是「做好了」：看 bot 狀態，或稍後重送。另一種 503 是「讀不到狀態所以一步都沒做」（`sent:false`，帶 `Retry-After`，例如 prompt 的 `maintenance_state_unavailable`），兩者 body 分得開 |
 
 所有寫 config.toml 的 API（建/改專案、建/改 bot、排序、還原、建/刪身分）套用、驗證、DB-backed 大量軟刪
