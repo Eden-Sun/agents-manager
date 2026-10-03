@@ -1570,6 +1570,10 @@ pub async fn post_lease_renew(
     if b.force {
         return Err(LcError::Bad("renew 不接受 force：延長租約要帶 acquire 當下的 lease_token；要接管請 release --force".into()));
     }
+    // A tokenless pre-migration lease is still accepted for compatibility, so owner/fence
+    // cannot be its only boundary for a Bot principal. Bind the public owner claim to the
+    // authenticated Bot before consulting or changing the lease.
+    requester_claim(&app, &headers, &b.owner).await?;
     let _g = super::lock().await;
     let ttl = b.ttl_secs.unwrap_or(super::maintenance::DEFAULT_TTL_SECS).clamp(30, super::maintenance::MAX_TTL_SECS);
     // Renewal re-checks the permission, it does not just extend the clock. An approval that was
@@ -1619,6 +1623,11 @@ pub async fn post_lease_release(
     Json(b): Json<LeaseHolderIn>,
 ) -> Result<Json<Value>, LcError> {
     let actor = super::bot_requests::actor_role(&app, &headers).await?;
+    // A valid token should not let one Bot operate another Bot's lease. AGM force-release
+    // remains governed by the role check below; ordinary non-force release is owner-bound.
+    if !b.force {
+        requester_claim(&app, &headers, &b.owner).await?;
+    }
     let proof = lease_proof(&b, actor).map_err(|e| force_warn(e, &resource, &b.owner, actor))?;
     // Consumes the approval (one yes, one window) and, for a restart window, lifts the holds it
     // placed so held assignments go out on the next pass.

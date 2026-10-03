@@ -5,8 +5,9 @@
 //! 允許表沒有這一列、或多一列沒打到，測試就失敗。
 //!
 //! `open_leak`：政策是 403，但這一輪實測仍放行（不是 401／403／404）。
-//! `Some("")` 是還沒有票的洩漏。已修好的列寫成 `UserOnly`（403 `user_only`）或
-//! `RoleRequired`（403 `role_required`）或 404，不再標洩漏。
+//! `Some("")` 是還沒有票的洩漏。已決定允許的例外用 `allow_rule` 附理由；
+//! 已封鎖的列寫成 `UserOnly`（403 `user_only`）、`RoleRequired`（403 `role_required`）、
+//! `Forbidden`、`Unauthorized` 或 404，不再標洩漏。
 //! bot 自己的 hook、relay、build-slots，以及跨 bot 的 `POST /api/bots/{id}/prompt`，表上是允許。
 
 use super::*;
@@ -22,8 +23,17 @@ enum Expect {
     UserOnly,
     /// 403，body reason 是 `role_required`。
     RoleRequired,
+    /// 401; the websocket handshake requires the UI token.
+    Unauthorized,
     /// 404。
     NotFound,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Decision {
+    Allowed,
+    Denied,
+    Pending,
 }
 
 struct Rule {
@@ -33,26 +43,52 @@ struct Rule {
     expect: Expect,
     /// `Some(票號)` 或 `Some("")`（無票）＝政策 403，現況仍允許。
     open_leak: Option<&'static str>,
+    /// Explicit reason for a reviewed Bot allow or a still-pending decision.
+    rationale: Option<&'static str>,
+    /// Policy decision may differ from this Bot-A-to-B probe's expected response for scoped access.
+    decision: Option<Decision>,
 }
 
 fn rule(method: &'static str, path: &'static str, expect: Expect, open_leak: Option<&'static str>) -> Rule {
-    Rule { method, path, expect, open_leak }
+    Rule { method, path, expect, open_leak, rationale: None, decision: None }
+}
+
+fn allow_rule(method: &'static str, path: &'static str, rationale: &'static str) -> Rule {
+    Rule { method, path, expect: Expect::Allow, open_leak: None, rationale: Some(rationale), decision: Some(Decision::Allowed) }
+}
+
+/// The route is available to ordinary Bots only within the named scope; the Bot-A-to-B probe must deny.
+fn scoped_allow_rule(method: &'static str, path: &'static str, rationale: &'static str) -> Rule {
+    Rule { method, path, expect: Expect::Forbidden, open_leak: None, rationale: Some(rationale), decision: Some(Decision::Allowed) }
+}
+
+/// The route is intentionally limited to a different principal class, so an ordinary Bot must deny.
+fn principal_allow_rule(method: &'static str, path: &'static str, rationale: &'static str) -> Rule {
+    Rule { method, path, expect: Expect::Forbidden, open_leak: None, rationale: Some(rationale), decision: Some(Decision::Allowed) }
+}
+
+fn deny_rule(method: &'static str, path: &'static str, expect: Expect, rationale: &'static str) -> Rule {
+    Rule { method, path, expect, open_leak: None, rationale: Some(rationale), decision: Some(Decision::Denied) }
+}
+
+fn pending_rule(method: &'static str, path: &'static str, ticket: &'static str, rationale: &'static str) -> Rule {
+    Rule { method, path, expect: Expect::Forbidden, open_leak: Some(ticket), rationale: Some(rationale), decision: Some(Decision::Pending) }
 }
 
 fn rules() -> Vec<Rule> {
     vec![
-        rule("GET", "/api/session", Expect::Forbidden, Some("")),
+        deny_rule("GET", "/api/session", Expect::Forbidden, "This loopback bootstrap returns the shared UI token to browsers; Bot and Service principals must not receive it."),
         rule("GET", "/api/bots/{id}/credential/rotate", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/credential/rotate", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/credential/rotate", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/credential/rotate", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/credential/rotate", Expect::Forbidden, None),
         rule("GET", "/api/supervisor", Expect::RoleRequired, None),
-        rule("POST", "/api/services/daemon-swap/restart-window", Expect::Forbidden, Some("")),
-        rule("GET", "/api/missions/{id}/pick", Expect::NotFound, None),
+        principal_allow_rule("POST", "/api/services/daemon-swap/restart-window", "This operation is allowed only to the daemon-swap Service principal; a Bot credential must be rejected."),
+        rule("GET", "/api/missions/{id}/pick", Expect::Forbidden, None),
         rule("GET", "/api/fs/dirs", Expect::Forbidden, None),
         rule("GET", "/api/supervisor/persona", Expect::RoleRequired, None),
-        rule("PUT", "/api/supervisor/persona", Expect::Forbidden, Some("#799")),
+        deny_rule("PUT", "/api/supervisor/persona", Expect::RoleRequired, "Persona is supervisory configuration; only User or a registered AGM role may change it."),
         rule("GET", "/api/judge/shadow", Expect::UserOnly, None),
         rule("POST", "/api/services/daemon-swap/probe/{id}", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/terminal", Expect::Forbidden, None),
@@ -61,7 +97,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/bots/{id}/terminal", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/terminal", Expect::Forbidden, None),
         rule("GET", "/api/supervisor/approvals", Expect::RoleRequired, None),
-        rule("POST", "/api/supervisor/approvals", Expect::Forbidden, Some("#799")),
+        allow_rule("POST", "/api/supervisor/approvals", "A Bot may request its own approval; requester_claim binds the request to that Bot and decisions remain AGM-role-only (#799)."),
         rule("POST", "/api/hosts/{name}/identities/{identity}/login", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/scratchpad", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/scratchpad", Expect::Forbidden, None),
@@ -122,7 +158,7 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/bots/{id}/pending-question", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/pending-question", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/pending-question", Expect::Forbidden, None),
-        rule("GET", "/api/capabilities", Expect::Forbidden, Some("")),
+        allow_rule("GET", "/api/capabilities", "Returns only the daemon's static capability names; no user, bot, or host state is exposed."),
         rule("POST", "/api/quota/probe", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/approvals/{id}/decide", Expect::Forbidden, None),
         rule("POST", "/api/supervisor/approvals/{id}/decide", Expect::Forbidden, None),
@@ -136,7 +172,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/supervisor/setup", Expect::Forbidden, None),
         rule("DELETE", "/api/supervisor/setup", Expect::Forbidden, None),
         rule("GET", "/api/supervisor/inbox", Expect::RoleRequired, None),
-        rule("GET", "/api/models", Expect::Forbidden, Some("#809")),
+        allow_rule("GET", "/api/models", "Ordinary Bots can read a fresh cached model snapshot only; a miss/stale cache cannot start a CLI probe (#809)."),
         rule("POST", "/api/build/remote/test", Expect::UserOnly, None),
         rule("POST", "/api/hosts/{name}/tools/refresh", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/rewind", Expect::Forbidden, None),
@@ -157,7 +193,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/projects/{id}/git/pull", Expect::Forbidden, None),
         rule("DELETE", "/api/projects/{id}/git/pull", Expect::Forbidden, None),
         rule("POST", "/api/missions/{id}/pause", Expect::UserOnly, None),
-        rule("GET", "/api/deploy/status", Expect::Forbidden, Some("")),
+        deny_rule("GET", "/api/deploy/status", Expect::UserOnly, "The response includes global Bot activity, deployment repository state, and log paths; it is for the User UI."),
         rule("GET", "/api/supervisor/incidents", Expect::RoleRequired, None),
         rule("POST", "/api/hosts/{name}/tools/install", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/responder/start", Expect::Forbidden, None),
@@ -185,17 +221,17 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/bots/{id}/preview", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/preview", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/preview", Expect::Forbidden, None),
-        rule("GET", "/api/identity-prefs", Expect::Forbidden, Some("#806")),
+        allow_rule("GET", "/api/identity-prefs", "Returns only disabled host/kind/identity preferences needed for identity selection; it contains no credentials (#806)."),
         rule("POST", "/api/panes/{id}/adopt", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/restart", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/restart", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/restart", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/restart", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/restart", Expect::Forbidden, None),
-        rule("GET", "/api/state", Expect::Forbidden, Some("#807")),
-        rule("POST", "/api/release-triage/verdicts", Expect::Forbidden, Some("#801")),
+        allow_rule("GET", "/api/state", "Bot state is projected to the caller and descendants, excluding other projects and global/private configuration (#807)."),
+        pending_rule("POST", "/api/release-triage/verdicts", "#801", "Release-triage verdict submission remains open pending the user's decision on binding it to an assigned Bot and generation."),
         rule("PUT", "/api/drafts/{key}", Expect::Forbidden, None),
-        rule("POST", "/api/supervisor/leases/{resource}/renew", Expect::Forbidden, Some("#799")),
+        scoped_allow_rule("POST", "/api/supervisor/leases/{resource}/renew", "A Bot may renew its own lease, including an upgrade-era tokenless lease; it cannot renew Bot B's lease."),
         rule("POST", "/api/hosts/{name}/gh/cancel", Expect::Forbidden, None),
         rule("POST", "/api/supervisor/persona/adopt-embedded", Expect::Forbidden, None),
         rule("POST", "/build-slots/acquire", Expect::Allow, None),
@@ -206,14 +242,14 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/projects/{id}/messages", Expect::Forbidden, None),
         rule("DELETE", "/api/projects/{id}/messages", Expect::Forbidden, None),
         rule("GET", "/api/supervisor/responder/persona", Expect::RoleRequired, None),
-        rule("PUT", "/api/supervisor/responder/persona", Expect::Forbidden, Some("#799")),
+        deny_rule("PUT", "/api/supervisor/responder/persona", Expect::RoleRequired, "Responder persona is supervisory configuration; only User or a registered AGM role may change it."),
         rule("GET", "/api/projects/{id}/issues/{number}", Expect::Forbidden, None),
         rule("POST", "/api/projects/{id}/issues/{number}", Expect::Forbidden, None),
         rule("PUT", "/api/projects/{id}/issues/{number}", Expect::Forbidden, None),
         rule("PATCH", "/api/projects/{id}/issues/{number}", Expect::Forbidden, None),
         rule("DELETE", "/api/projects/{id}/issues/{number}", Expect::Forbidden, None),
         rule("GET", "/api/drafts", Expect::Forbidden, None),
-        rule("GET", "/api/upstream-updates", Expect::Forbidden, Some("")),
+        allow_rule("GET", "/api/upstream-updates", "Returns the existing upstream update metadata snapshot; GET does not fetch or mutate remote state."),
         rule("GET", "/api/bots/{id}/promote", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/promote", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/promote", Expect::Forbidden, None),
@@ -224,8 +260,8 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/supervisor/handoff", Expect::Forbidden, None),
         rule("PATCH", "/api/supervisor/handoff", Expect::Forbidden, None),
         rule("DELETE", "/api/supervisor/handoff", Expect::Forbidden, None),
-        rule("POST", "/api/missions/{id}/question", Expect::Forbidden, Some("#803")),
-        rule("POST", "/api/missions/{id}/round", Expect::NotFound, None),
+        scoped_allow_rule("POST", "/api/missions/{id}/question", "A Bot may ask about a mission where it is assigned; this probe targets Bot B's mission and must be rejected."),
+        rule("POST", "/api/missions/{id}/round", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/restore", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/restore", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/restore", Expect::Forbidden, None),
@@ -252,7 +288,7 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/projects", Expect::UserOnly, None),
         rule("POST", "/api/missions/{id}/resume", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/responder", Expect::RoleRequired, None),
-        rule("POST", "/api/missions/{id}/events", Expect::Forbidden, Some("#803")),
+        scoped_allow_rule("POST", "/api/missions/{id}/events", "A Bot may report to a mission where it is assigned; verified events still require the verifier/gatekeeper role. This Bot-A-to-B probe must be rejected."),
         rule("GET", "/api/bots/{id}/fork", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/fork", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/fork", Expect::Forbidden, None),
@@ -284,13 +320,13 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/bots/{id}/pane/move-to-tab", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/pane/move-to-tab", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/pane/move-to-tab", Expect::Forbidden, None),
-        rule("POST", "/api/supervisor/leases/{resource}/release", Expect::Forbidden, Some("#799")),
+        scoped_allow_rule("POST", "/api/supervisor/leases/{resource}/release", "A Bot may release its own lease, including an upgrade-era tokenless lease; the owner Bot must not release Bot B's lease."),
         rule("POST", "/api/deploy/now", Expect::Forbidden, None),
         rule("POST", "/api/mem/processes/kill", Expect::UserOnly, None),
-        rule("GET", "/api/changelog", Expect::Forbidden, Some("")),
+        deny_rule("GET", "/api/changelog", Expect::UserOnly, "This User UI route runs a local or remote CLI version check and must not be a Bot command-execution entry point."),
         rule("POST", "/relay/announce", Expect::Allow, None),
         rule("POST", "/api/build/remote/install-toolchain", Expect::UserOnly, None),
-        rule("GET", "/ws", Expect::Forbidden, Some("")),
+        deny_rule("GET", "/ws", Expect::Unauthorized, "The WebSocket carries global UI events and accepts the UI token; Bot credentials do not authorize a subscription."),
         rule("POST", "/api/hosts/{name}/gh/login", Expect::Forbidden, None),
         rule("PUT", "/api/identities/{name}/disabled", Expect::UserOnly, None),
         rule("POST", "/api/bots/restart-idle", Expect::UserOnly, None),
@@ -349,7 +385,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/projects/{id}/github/refresh", Expect::Forbidden, None),
         rule("DELETE", "/api/projects/{id}/github/refresh", Expect::Forbidden, None),
         rule("DELETE", "/api/identities/{name}", Expect::UserOnly, None),
-        rule("POST", "/api/supervisor/leases/{resource}/acquire", Expect::Forbidden, Some("#799")),
+        scoped_allow_rule("POST", "/api/supervisor/leases/{resource}/acquire", "A Bot may acquire a lease only for an approved request owned by itself; it cannot acquire a lease for Bot B."),
         rule("POST", "/api/panes/{id}/close", Expect::Forbidden, None),
         rule("GET", "/api/supervisor/responder/stop", Expect::Forbidden, None),
         rule("POST", "/api/supervisor/responder/stop", Expect::Forbidden, None),
@@ -357,11 +393,11 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/supervisor/responder/stop", Expect::Forbidden, None),
         rule("DELETE", "/api/supervisor/responder/stop", Expect::Forbidden, None),
         rule("POST", "/api/turns/{id}/withdraw", Expect::NotFound, None),
-        rule("POST", "/api/missions/{id}/complete", Expect::Forbidden, Some("#803")),
+        scoped_allow_rule("POST", "/api/missions/{id}/complete", "An assigned Bot may complete its own mission when workflow and delivery gates pass; this Bot-A-to-B probe must be rejected."),
         rule("POST", "/api/supervisor/herdr-maintenance/end", Expect::Forbidden, None),
-        rule("GET", "/api/release-triage", Expect::Forbidden, Some("#801")),
-        rule("POST", "/api/services/herdr-upgrade/notify", Expect::Forbidden, Some("")),
-        rule("GET", "/api/quota", Expect::Forbidden, Some("#808")),
+        pending_rule("GET", "/api/release-triage", "#801", "Release-triage ledger visibility remains open pending the user's decision on whether it is global or assignment-scoped."),
+        principal_allow_rule("POST", "/api/services/herdr-upgrade/notify", "This notification path is allowed only to the herdr-upgrade Service principal; a Bot credential must be rejected."),
+        allow_rule("GET", "/api/quota", "Reads the cached quota snapshot; refresh requests are centrally limited to User or registered AGM roles (#808)."),
         rule("GET", "/api/projects/{id}/group/read", Expect::Forbidden, None),
         rule("POST", "/api/projects/{id}/group/read", Expect::Forbidden, None),
         rule("PUT", "/api/projects/{id}/group/read", Expect::Forbidden, None),
@@ -372,7 +408,7 @@ fn rules() -> Vec<Rule> {
         rule("PUT", "/api/bots/{id}/prompt", Expect::Forbidden, None),
         rule("PATCH", "/api/bots/{id}/prompt", Expect::Forbidden, None),
         rule("DELETE", "/api/bots/{id}/prompt", Expect::Forbidden, None),
-        rule("POST", "/api/missions/{id}/answer", Expect::Forbidden, Some("#803")),
+        scoped_allow_rule("POST", "/api/missions/{id}/answer", "An assigned Bot may answer its own mission's question; this Bot-A-to-B probe must be rejected."),
         rule("GET", "/api/bots/{id}/text", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/text", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/text", Expect::Forbidden, None),
@@ -389,9 +425,9 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/hosts/{name}/cli-update", Expect::Forbidden, None),
         rule("POST", "/api/turns/{id}/abandon", Expect::NotFound, None),
         rule("GET", "/api/supervisor/assignments", Expect::RoleRequired, None),
-        rule("POST", "/api/supervisor/assignments", Expect::Forbidden, Some("#799")),
-        rule("POST", "/api/missions/{id}/revise", Expect::Forbidden, Some("#803")),
-        rule("POST", "/api/missions/{id}/deliver", Expect::Forbidden, Some("#803")),
+        scoped_allow_rule("POST", "/api/supervisor/assignments", "An ordinary Bot may send a notice to a registered AGM role; it may not dispatch work to Bot B, ask for review, or attach a mission."),
+        scoped_allow_rule("POST", "/api/missions/{id}/revise", "An assigned Bot may open a revision for its own completed mission; this Bot-A-to-B probe must be rejected."),
+        deny_rule("POST", "/api/missions/{id}/deliver", Expect::Forbidden, "Delivery is a gatekeeper operation for User/AGM, not a general participant report; an ordinary Bot must not publish a mission."),
         rule("GET", "/api/projects/{id}/bots", Expect::Forbidden, None),
         rule("POST", "/api/projects/{id}/bots", Expect::Forbidden, None),
         rule("PUT", "/api/projects/{id}/bots", Expect::Forbidden, None),
@@ -417,7 +453,7 @@ fn rules() -> Vec<Rule> {
         rule("GET", "/api/supervisor/herdr-maintenance", Expect::RoleRequired, None),
         rule("POST", "/api/hosts/{name}/reconnect", Expect::Forbidden, None),
         rule("POST", "/api/services/herdr-upgrade/resume/{id}", Expect::Forbidden, None),
-        rule("GET", "/api/missions/{id}", Expect::NotFound, None),
+        rule("GET", "/api/missions/{id}", Expect::Forbidden, None),
         rule("GET", "/api/bots/{id}/read", Expect::Forbidden, None),
         rule("POST", "/api/bots/{id}/read", Expect::Forbidden, None),
         rule("PUT", "/api/bots/{id}/read", Expect::Forbidden, None),
@@ -552,7 +588,7 @@ fn router_paths_and_methods(debug: &str) -> Vec<(String, String)> {
     out
 }
 
-fn fill(template: &str, bot_b: &str, project_b: &str) -> String {
+fn fill(template: &str, bot_b: &str, project_b: &str, mission_b: &str) -> String {
     let mut s = template.to_string();
     while let Some(start) = s.find('{') {
         let end = s[start..].find('}').map(|i| start + i).unwrap_or(s.len() - 1);
@@ -561,7 +597,7 @@ fn fill(template: &str, bot_b: &str, project_b: &str) -> String {
         let value = match (before.rsplit('/').next().unwrap_or(""), key) {
             ("bots", "id") => bot_b,
             ("projects", "id") => project_b,
-            ("missions", "id") => "mission-b",
+            ("missions", "id") => mission_b,
             ("turns", "id") => "turn-b",
             ("attachments", "id") => "att-b",
             ("assignments", "id") => "asg-b",
@@ -594,7 +630,7 @@ fn observed(status: StatusCode, body: &str) -> Result<Expect, StatusCode> {
     } else if status == StatusCode::NOT_FOUND {
         Ok(Expect::NotFound)
     } else if status == StatusCode::UNAUTHORIZED {
-        Err(status)
+        Ok(Expect::Unauthorized)
     } else {
         Ok(Expect::Allow)
     }
@@ -606,6 +642,26 @@ fn matches_expect(expect: Expect, got: Expect) -> bool {
         Expect::Forbidden => matches!(got, Expect::Forbidden | Expect::UserOnly | Expect::RoleRequired),
         other => got == other,
     }
+}
+
+fn request_body(method: &str, template: &str, bot_a: &str, bot_b: &str) -> String {
+    let body = match (method, template) {
+        ("PUT", "/api/supervisor/persona" | "/api/supervisor/responder/persona") => json!({"text":"matrix persona", "expected_version":0}),
+        ("POST", "/api/supervisor/approvals") => json!({"requester":bot_a, "purpose":"rebuild", "scope":"matrix review"}),
+        ("POST", "/api/supervisor/assignments") => json!({"target_bot_id":bot_b, "text":"cross-bot task", "client_request_id":"matrix-cross-bot-task", "kind":"task"}),
+        ("POST", "/api/supervisor/leases/{resource}/acquire") => json!({"owner":bot_b, "approval_id":"approval-b", "require_idle":false}),
+        ("POST", "/api/supervisor/leases/{resource}/renew" | "/api/supervisor/leases/{resource}/release") => json!({"owner":bot_b, "fence":1}),
+        ("POST", "/api/missions/{id}/question") => json!({"text":"cross-mission question", "client_request_id":"matrix-question"}),
+        ("POST", "/api/missions/{id}/events") => json!({"kind":"note", "text":"cross-mission event"}),
+        ("POST", "/api/missions/{id}/complete") => json!({"result_summary":"cross-mission completion"}),
+        ("POST", "/api/missions/{id}/answer") => json!({"text":"cross-mission answer", "client_request_id":"matrix-answer", "reply_to":"question-b"}),
+        ("POST", "/api/missions/{id}/revise") => json!({"text":"cross-mission revision", "client_request_id":"matrix-revision"}),
+        ("POST", "/api/missions/{id}/deliver") => json!({"worktree":"/tmp"}),
+        ("POST", "/api/services/daemon-swap/restart-window") => json!({"owner":"daemon-update-kick", "commit":"abcdef0", "ttl_secs":600}),
+        ("POST", "/api/services/herdr-upgrade/notify") => json!({"text":"matrix notification"}),
+        _ => json!({}),
+    };
+    serde_json::to_string(&body).unwrap()
 }
 
 #[tokio::test]
@@ -631,6 +687,58 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
         .execute(&env.app.db)
         .await
         .unwrap();
+    env.app.models_cache.lock().await.insert(
+        "local/codex/".into(),
+        (std::time::Instant::now(), json!({"kind":"codex", "host":"local", "models":[{"id":"cached-model"}]})),
+    );
+
+    // A real foreign mission with an assignment to Bot B makes the mission probes distinguish
+    // participant authorization from a nonexistent-id 404.
+    let mission_b = crate::db::ulid();
+    sqlx::query("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, created_at, updated_at) VALUES (?,?,?,'scope fixture','pr','claude','wait',?,?)")
+        .bind(&mission_b)
+        .bind("pb")
+        .bind(format!("matrix-{}", mission_b))
+        .bind(&now)
+        .bind(&now)
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+    let assignment_b = crate::supervisor::store::insert_assignment(
+        &env.app.db,
+        None,
+        &bot_b.id,
+        &format!("matrix-assignment-{}", mission_b),
+        "Bot B owns this mission",
+        &[],
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    crate::supervisor::store::set_mission_link(&env.app.db, &assignment_b.id, &mission_b, "executor")
+        .await
+        .unwrap();
+
+    // #801 stays deliberately open pending the user's decision, but exercise a real verdict
+    // against a seeded ledger row so the matrix proves the write endpoint is reachable.
+    let sections = crate::release_triage::source_sections("claude", include_str!("release_triage/fixtures/claude_2.1.276-278.md"));
+    let section = sections.iter().find(|section| section.version == "2.1.277").unwrap();
+    let entries = crate::release_triage::build_entries("claude", section).unwrap();
+    crate::release_triage::ledger::insert_version(&env.app.db, "claude", "2.1.277", &entries)
+        .await
+        .unwrap();
+    let release_submission = json!({
+        "kind":"claude",
+        "version":"2.1.277",
+        "verdicts":entries.iter().filter(|entry| entry.bucket != crate::release_triage::Bucket::Dropped).map(|entry| json!({
+            "entry_id":entry.id,
+            "verdict":"none",
+            "reason":"scope matrix",
+            "module":"none"
+        })).collect::<Vec<_>>(),
+        "issues":[]
+    }).to_string();
 
     let router = router(env.app.clone());
     let discovered = router_paths_and_methods(&format!("{router:?}"));
@@ -648,16 +756,48 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
     let table = rules();
     let mut seen = vec![false; table.len()];
     for (method, template) in &discovered {
-        let uri = fill(template, &bot_b.id, "pb");
-        let res = client
+        // The principal middleware checks a real foreign mission before Axum can return 405,
+        // so unsupported verbs would look like unlisted protected endpoints. Probe those verbs
+        // with a nonexistent mission first; registered handlers reach their own 404/validation.
+        if template.starts_with("/api/missions/") && !table.iter().any(|r| r.method == method && r.path == template) {
+            let probe_uri = fill(template, &bot_b.id, "pb", "no-such-mission");
+            let probe_body = request_body(method, template, &bot_a.id, &bot_b.id);
+            let probe = client
+                .request(method.parse().unwrap(), format!("http://127.0.0.1:{port}{probe_uri}"))
+                .header("content-type", "application/json")
+                .header("X-AM-Bot-Id", &bot_a.id)
+                .header("X-AM-Bot-Token", "token-a")
+                .body(probe_body)
+                .send()
+                .await
+                .unwrap();
+            if probe.status() == StatusCode::METHOD_NOT_ALLOWED {
+                continue;
+            }
+        }
+        let mut uri = fill(template, &bot_b.id, "pb", &mission_b);
+        if template == "/api/models" {
+            uri.push_str("?kind=codex");
+        }
+        let body = if method == "POST" && template == "/api/release-triage/verdicts" {
+            release_submission.clone()
+        } else {
+            request_body(method, template, &bot_a.id, &bot_b.id)
+        };
+        let mut request = client
             .request(method.parse().unwrap(), format!("http://127.0.0.1:{port}{uri}"))
             .header("content-type", "application/json")
             .header("X-AM-Bot-Id", &bot_a.id)
             .header("X-AM-Bot-Token", "token-a")
-            .body("{}")
-            .send()
-            .await
-            .unwrap();
+            .body(body);
+        if template == "/ws" {
+            request = request
+                .header("connection", "Upgrade")
+                .header("upgrade", "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+        }
+        let res = request.send().await.unwrap();
         let status = StatusCode::from_u16(res.status().as_u16()).unwrap();
         let body = res.text().await.unwrap_or_default();
         if status == StatusCode::METHOD_NOT_ALLOWED {
@@ -670,6 +810,30 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
         seen[idx] = true;
         let rule = &table[idx];
         let got = observed(status, &body).unwrap_or_else(|s| panic!("{method} {template} 出現未分類的 {s}"));
+        if matches!(rule.decision, Some(Decision::Allowed | Decision::Pending)) {
+            assert!(rule.rationale.is_some_and(|reason| !reason.trim().is_empty()), "{method} {template} 的允許／待決判定必須附理由");
+        }
+        if let Some(reason) = rule.rationale {
+            assert!(!reason.trim().is_empty(), "{method} {template} 的權限判定必須附理由");
+        }
+        if template == "/api/state" {
+            let state: Value = serde_json::from_str(&body).unwrap_or_else(|e| panic!("Bot /api/state 必須回 JSON：{e}: {body}"));
+            let visible: Vec<&Value> = state["projects"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|project| project["bots"].as_array().into_iter().flatten())
+                .collect();
+            assert!(visible.iter().any(|bot| bot["id"] == bot_a.id), "filtered state keeps the caller: {body}");
+            assert!(visible.iter().all(|bot| bot["id"] != bot_b.id), "filtered state must not include Bot B: {body}");
+            assert!(state.get("hosts").is_none() && state.get("identities").is_none(), "Bot state excludes global host and identity data: {body}");
+            for bot in visible {
+                for field in ["persona", "args", "identity", "env", "herdr_session", "unread", "read_mark"] {
+                    assert!(bot.get(field).is_none(), "Bot state must omit {field}: {bot}");
+                }
+            }
+            assert!(!body.contains("token-a") && !body.contains("hook_token"), "Bot state excludes credential fields: {body}");
+        }
         if rule.path == "/" {
             assert!(
                 matches!(got, Expect::Allow | Expect::NotFound),
@@ -678,6 +842,7 @@ async fn bot_a_against_bot_b_matches_the_allow_table() {
             continue;
         }
         if let Some(ticket) = rule.open_leak {
+            assert_eq!(rule.decision, Some(Decision::Pending), "open_leak 必須保留待決判定");
             assert_eq!(rule.expect, Expect::Forbidden, "{method} {template} 的 open_leak 只用於政策 403");
             let label = if ticket.is_empty() { "無票" } else { ticket };
             assert!(
