@@ -372,6 +372,59 @@ class OperatorTests(unittest.TestCase):
         proc.assert_not_called()
         self.assertEqual(self.s.get(job["id"])["status"], "running")
 
+    def test_browser_cli_is_started_in_its_own_process_group_for_timeout_cleanup(self):
+        """逾時要能收掉 ego-browser 生的 MCP 子行程，不能只殺 CLI 父行程。"""
+        self.ask()
+        job = self.s.claim()
+        observed = {}
+
+        def stop_before_launch(*_args, **kwargs):
+            observed.update(kwargs)
+            raise RuntimeError("stubbed before any browser launch")
+
+        with patch.object(operator, "ego_lite_running", return_value=True), \
+                patch.object(operator, "run_process", side_effect=stop_before_launch):
+            with self.assertRaisesRegex(RuntimeError, "stubbed before any browser launch"):
+                operator.browser_consult(self.s, job["id"], self.config(), token=job["claim_token"])
+        self.assertIsNot(observed.get("new_session", True), False,
+                         "ego-browser must use the same isolated process group that timeout cleanup kills")
+
+    def test_timeout_kills_descendants_holding_child_output_pipes(self):
+        """忽略 TERM 的 MCP 子行程若繼承 stdout/stderr，逾時最終必須 KILL 整個群組並返回。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "child.pid"
+            scripts = str(Path(__file__).resolve().parent)
+            child = (
+                "import os,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                "open(sys.argv[1],'w').write(str(os.getpid())); time.sleep(60)"
+            )
+            parent = (
+                "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); "
+                "time.sleep(60)"
+            )
+            runner = r'''import os,sys,subprocess
+sys.path.insert(0, sys.argv[1])
+from ob_operator import run_process
+try:
+    run_process([sys.executable, "-c", sys.argv[2], sys.argv[3], sys.argv[4]],
+                cwd=sys.argv[5], env=os.environ.copy(), timeout=0.15)
+except subprocess.TimeoutExpired:
+    print("timeout returned", flush=True)
+'''
+            proc = subprocess.Popen([sys.executable, "-c", runner, scripts, parent, child, str(marker), tmp],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+            try:
+                out, err = proc.communicate(timeout=8)
+            except subprocess.TimeoutExpired:
+                # Isolate and reap any broken implementation's helper tree without endangering the test runner.
+                os.killpg(proc.pid, 9)
+                out, err = proc.communicate(timeout=3)
+                self.fail(f"run_process hung after its timeout; stdout={out!r}, stderr={err!r}")
+            self.assertEqual(proc.returncode, 0, err)
+            self.assertIn("timeout returned", out)
+            self.assertTrue(marker.exists(), "the fake MCP child must have started before timeout cleanup")
+
     def test_operate_marks_browser_not_running_as_retryable_failed_not_unknown(self):
         """未送出的單不能被誤判成 `unknown`（那會擋住同 project 的後續單、還得靠 collect 才能解開）。"""
         self.ask()

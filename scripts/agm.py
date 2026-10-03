@@ -261,10 +261,14 @@ class Client:
             else:
                 headers["X-AM-Token"] = self.token()
                 headers.update(self._extra)
+        credential_values = tuple(
+            value for name, value in headers.items()
+            if name.lower() in {"x-am-token", "x-am-bot-token", "x-am-service-token"} and value
+        )
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with self._opener.open(req, timeout=self.timeout) as res:
-                parsed = _parse(res.read())
+                parsed = _redact_credentials(_parse(res.read()), credential_values)
             # 2xx 卻不是 JSON：多半是別的服務佔了這個埠（或前面的代理回了一頁 HTML）。當成功印出去、exit 0 的話，
             # 呼叫端會把一頁 HTML 當成 daemon 的答案；只有舊式的 `/api/session`（回純文字 token）明講收字串。
             if isinstance(parsed, str) and parsed.strip() and not allow_text:
@@ -273,7 +277,7 @@ class Client:
         except urllib.error.HTTPError as e:
             # HTTPError 本身是個 response，讀完要關掉；不關的話連線會留著等 GC。
             with e:
-                payload = _parse(e.read())
+                payload = _redact_credentials(_parse(e.read()), credential_values)
             detail = payload if isinstance(payload, (dict, list)) else str(payload or "")
             # 前面擋了一頁 HTML、或 daemon 吐了整份 stderr：整段灌進輸出會洗掉呼叫端要看的東西，也可能把不該印的字帶出來。
             if isinstance(detail, str) and len(detail) > MAX_DETAIL_CHARS:
@@ -375,6 +379,22 @@ def _parse(raw: bytes) -> object:
         return json.loads(text)
     except json.JSONDecodeError:
         return text
+
+
+def _redact_credentials(value: object, credentials: tuple[str, ...]) -> object:
+    """Never print a credential just because a local API error or response reflected its auth header."""
+    if isinstance(value, str):
+        for credential in credentials:
+            value = value.replace(credential, "[redacted]")
+        return value
+    if isinstance(value, list):
+        return [_redact_credentials(item, credentials) for item in value]
+    if isinstance(value, dict):
+        return {
+            _redact_credentials(key, credentials): _redact_credentials(item, credentials)
+            for key, item in value.items()
+        }
+    return value
 
 
 def optional_get(client: Client, path: str, query: dict | None = None) -> object | None:
