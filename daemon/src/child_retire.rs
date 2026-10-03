@@ -66,8 +66,10 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
         }
         let host = db::bot_host(&app.db, &bot.id).await?;
         let record = record_payload(app, &bot, why, mode, &at.to_string()).await?;
-        // `deleted_at` 與紀錄同生共死（#554）：寫不進紀錄就不退役，不留「刪了、卻查不到為什麼」。
+        // `deleted_at` 與紀錄同生共死（#554）：同一筆交易先寫紀錄再退役，寫不進紀錄就不退役，
+        // 也不讓資料庫 trigger 或讀者先看見 child 消失、稍後才有原因。
         let mut tx = app.db.begin().await?;
+        crate::intents::record_done(&mut tx, RECORD_KIND, &bot.id, &host, &record).await?;
         let n = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(db::now())
             .bind(&bot.id)
@@ -75,9 +77,10 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
             .await?
             .rows_affected();
         if n == 0 {
+            // 可能另一條路已先退役；撤掉這筆本來就不該留下的重複紀錄。
+            tx.rollback().await?;
             return Ok(Outcome::AlreadyGone);
         }
-        crate::intents::record_done(&mut tx, RECORD_KIND, &bot.id, &host, &record).await?;
         tx.commit().await?;
         tracing::info!(bot = %bot.name, bot_id = %bot.id, why, cause = %record["cause"], caller = %at, http = %crate::config_audit::http_caller(), ?mode, "child retired");
         app.emit("project_changed", json!({"project_id": bot.project_id})).await;
@@ -315,13 +318,40 @@ mod tests {
         assert_eq!(status, "done");
         assert_eq!(host, crate::config::LOCAL_HOST);
         let deleted_at = db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.unwrap();
-        assert!(created_at >= &deleted_at, "紀錄時間不早於 deleted_at：{created_at} vs {deleted_at}");
+        assert!(created_at <= &deleted_at, "先記錄再退役：{created_at} vs {deleted_at}");
         let p: serde_json::Value = serde_json::from_str(payload).unwrap();
         assert_eq!(p["why"], "promoted");
         assert_eq!(p["cause"], "promoted", "promote 是明講的動作：{p}");
         assert_eq!(p["mode"], "explicit");
         assert_eq!(p["requested_by"], "-");
         assert!(p["call_site"].as_str().unwrap().contains(&format!("{}:{here}:", file!())), "{p}");
+    }
+
+    /// A DB reader or trigger must never observe the child disappear before its retirement record.
+    #[tokio::test]
+    async fn retirement_record_is_inserted_before_soft_delete() {
+        let env = tt::env().await;
+        let kid = a_child(&env).await;
+        sqlx::query(
+            "CREATE TRIGGER retire_child_record_precedes_delete
+             BEFORE UPDATE OF deleted_at ON bots
+             WHEN NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM intents WHERE kind = 'retire_child' AND subject_id = NEW.id)
+             BEGIN SELECT RAISE(ABORT, 'retire_child record must precede bot disappearance'); END",
+        )
+        .execute(&env.app.db)
+        .await
+        .unwrap();
+
+        assert_eq!(retire(&env.app, &kid, "promoted", Mode::Explicit).await.unwrap(), Outcome::Retired);
+        let bot = db::bot(&env.app.db, &kid).await.unwrap().unwrap();
+        assert!(bot.deleted_at.is_some());
+        let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM intents WHERE kind='retire_child' AND subject_id=? AND status='done'")
+            .bind(&kid)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(recorded, 1);
     }
 
     /// #554：只有 herdr 親口報的關閉、而且當下 pane 確實不在，才算刻意收掉；其餘一律不算（換版腳本會回滾）。

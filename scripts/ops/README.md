@@ -252,8 +252,9 @@ install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/superv
   而且有刪除 API 留下的 `delete_bot`／`delete_project` intent（subject 是它、它的專案，或 payload 快照裡有它），DB 唯讀查。
   只有 deleted_at、沒有 intent（重啟後 reconcile 退役、投影軟刪）照樣回滾（issue #553：2026-09-24 父 bot 在窗口內刪 child i263 被誤判回滾）。
   父 bot 用 `herdr pane close` 收 child（不呼叫 DELETE）時，daemon 退役那顆會寫 `retire_child` 紀錄；只認 subject 是它、窗口內、
-  `cause` 是 `pane_closed`（herdr 報過關閉事件、當下 pane 也不在）或 `promoted` 的。`agent_missing`／`unconfirmed`／`herdr_restarted`
-  是換版會弄丟 child 的樣子，照樣回滾（issue #554，判準見 SPEC §6.5a）。
+  `cause` 是 `pane_closed`（herdr 報過關閉事件、當下 pane 也不在）或 `promoted` 的。開機 reconcile 的 `unconfirmed` child 另有窄例外：
+  intent 說 pane 已 gone、父 bot 仍有 active run 且留在 after 名單，腳本最多重讀 5 秒等 intent 落地；母 bot 消失、pane 還在的 `agent_missing`、
+  `herdr_restarted` 與其他 `unconfirmed` 仍回滾（issue #834，判準見 SPEC §6.5a）。
 - `agm supervisor` 讀取失敗、status 空白或不屬於 `starting`／`idle`／`busy` 都回滾；新版 bot 名單也必須成功讀回且非空。
   例外（issue #771）：停 daemon 前先讀一次 status；**換版前就是 `waiting_quota`、換版後仍是**視為額度等待、與新版無關，不回滾（log 會寫明）。換版前健康、換版後才 `waiting_quota`，或換版前讀不到，照樣回滾。
   以前因這條被回滾而進了 `daemon-update.rejected` 的 sha（2026-10-02 的 09a2438d）不會自動解除：確認它是無辜的後，從該檔刪掉那一行（`grep -vx <完整 sha> daemon-update.rejected`）下一輪就會再挑。

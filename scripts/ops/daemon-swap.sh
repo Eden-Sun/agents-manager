@@ -768,8 +768,9 @@ fi
 # 重啟後 reconcile 找不到 pane 而退役 child、或投影軟刪，也會寫 deleted_at，那正是這一步要抓的遺失。
 # 父 bot 用 `herdr pane close` 收 child（不呼叫 DELETE）時，daemon 退役那顆 child 會寫一筆 retire_child 紀錄（#554）；
 # 一般只認 subject 就是它、而且 cause 是 pane_closed（herdr 報過關閉事件、當下 pane 也不在）或 promoted 的。
-# `unconfirmed`／`parent_replaced_child` 只有在 payload 指向的父 bot 仍有 active run、且它窗口內收編了新的 child 時才放過：
-# 這是父 bot 換掉 quota 用盡 child 的明確證據。沒有這兩個證據的 unconfirmed，以及 agent_missing／herdr_restarted，照樣回滾。
+# `unconfirmed`／`parent_replaced_child` 原本只有在父 bot 仍有 active run、且窗口內收編新 child 時才放過。
+# 開機 reconcile 的另一種窄例外是：有 parent 的 child 確認 pane 已 gone、父 bot 仍有 active run 且仍在 after 名單；
+# 最多重查 5 秒等同一輪 reconcile 的 intent 落地。母 bot 消失、pane 還在的 agent_missing、herdr_restarted 與其他 unconfirmed 仍回滾。
 # 判準見 SPEC §6.5a。
 # 讀 DB 一律 -readonly；讀不到、id 格式不對都當成「沒有刪除紀錄」，照樣回滾。
 deleted_on_purpose() { # $1=bot id → 印 1 才算
@@ -790,14 +791,66 @@ deleted_on_purpose() { # $1=bot id → 印 1 才算
                 AND EXISTS (SELECT 1 FROM bots s WHERE s.managed_by = 'child' AND s.deleted_at IS NULL
                   AND s.parent_bot_id = p.id AND s.id != b.id AND s.created_at >= '$SWAP_T0'))))))" 2>/dev/null
 }
+reconcile_retired_child_parent() { # $1=bot id → 印出經 reconcile 退役、pane 已 gone 且 parent 還 active 的 parent id
+    case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+    "$SQLITE" -readonly "$DB" "SELECT p.id FROM bots b
+      JOIN intents i ON i.kind = 'retire_child' AND i.status = 'done' AND i.subject_id = b.id
+        AND i.created_at >= '$SWAP_T0'
+      JOIN bots p ON p.id = b.parent_bot_id AND p.id = json_extract(i.payload_json, '\$.parent_bot_id')
+      WHERE b.id = '$1' AND b.managed_by = 'child' AND b.deleted_at IS NOT NULL AND b.deleted_at >= '$SWAP_T0'
+        AND json_extract(i.payload_json, '\$.mode') = 'implicit'
+        AND json_extract(i.payload_json, '\$.why') IN ('reconcile_agent_gone', 'reconcile_run_already_ended')
+        AND json_extract(i.payload_json, '\$.cause') = 'unconfirmed'
+        AND json_extract(i.payload_json, '\$.pane') = 'gone'
+        AND p.deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = p.id AND r.state IN ('starting', 'running', 'stopping'))
+      LIMIT 1" 2>/dev/null
+}
+live_child_parent() { # $1=bot id → 印出 live parent id，供短暫重查 intent
+    case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+    "$SQLITE" -readonly "$DB" "SELECT p.id FROM bots b JOIN bots p ON p.id = b.parent_bot_id
+      WHERE b.id = '$1' AND b.managed_by = 'child' AND p.deleted_at IS NULL LIMIT 1" 2>/dev/null
+}
+after_has_bot() { # $1=bot id
+    case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+    printf '%s\n' "$AFTER_ROWS" | cut -f1 | grep -qxF -- "$1"
+}
 MISSING=""; DELETED=""
-while IFS="$(printf '\t')" read -r id name; do
-    [ -n "$id$name" ] || continue
-    printf '%s\n' "$AFTER_ROWS" | cut -f1 | grep -qxF -- "$id" && continue
-    if [ "$(deleted_on_purpose "$id")" = 1 ]; then DELETED="$DELETED$name "; else MISSING="$MISSING$name "; fi
-done <<EOF
-$BEFORE_ROWS
-EOF
+classify_missing() {
+    MISSING=""; DELETED=""; WAITING=""; WAITING_IDS=""
+    while IFS="$(printf '\t')" read -r id name; do
+        [ -n "$id$name" ] || continue
+        after_has_bot "$id" && continue
+        if [ "$(deleted_on_purpose "$id")" = 1 ]; then
+            DELETED="$DELETED$name "
+        else
+            parent_id=$(reconcile_retired_child_parent "$id")
+            if [ -n "$parent_id" ] && after_has_bot "$parent_id"; then
+                DELETED="$DELETED$name "
+            else
+                parent_id=$(live_child_parent "$id")
+                if [ -n "$parent_id" ] && after_has_bot "$parent_id"; then
+                    WAITING="$WAITING$name "
+                    WAITING_IDS="$WAITING_IDS$id "
+                else
+                    MISSING="$MISSING$name "
+                fi
+            fi
+        fi
+    done <<< "$BEFORE_ROWS"
+}
+classify_missing
+rechecks=0
+while [ -n "$(echo "$WAITING_IDS" | tr -d ' ')" ] && [ "$rechecks" -lt 5 ]; do
+    rechecks=$((rechecks + 1))
+    log "reconcile child retirement pending for [$WAITING]; rechecking state and intent (${rechecks}/5)"
+    sleep 1
+    if ! AFTER_ROWS=$(bot_rows) || [ -z "$AFTER_ROWS" ]; then
+        rollback "重查時新版後 agm state 讀取失敗或 bot 名單為空"
+    fi
+    classify_missing
+done
+MISSING="$MISSING$WAITING"
 log "bots before=$(printf '%s\n' "$BEFORE_ROWS" | grep -c .) after=$(printf '%s\n' "$AFTER_ROWS" | grep -c .) missing=[$MISSING] deleted_in_window=[$DELETED]"
 [ -n "$(echo "$MISSING" | tr -d ' ')" ] && rollback "有 bot 不見了（沒有刪除紀錄）：$MISSING"
 

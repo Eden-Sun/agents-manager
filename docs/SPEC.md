@@ -1674,12 +1674,13 @@ herdr 還列著這個 agent（pane 被搬走）的不算，會被重新收編。
 | `promoted` | `promoted`／`promote_recovered` | 刻意，不回滾 |
 | `agent_missing` | pane 還在，只是 daemon 認不出裡面的 agent | 回滾 |
 | `herdr_restarted` | `herdr_maintenance_closed`：herdr 計畫中重啟之後沒回來 | 回滾 |
-| `unconfirmed` | 其餘：pane 不在但沒有人親眼看到它被關（對帳才發現、定時問到 `pane_not_found`、升級前結束的 run 沒有原因）、問不到 herdr | 回滾 |
+| `unconfirmed`，開機 reconcile 的 child 退役 | `mode=implicit`、`why` 是 `reconcile_agent_gone`／`reconcile_run_already_ended`、`pane=gone`；payload 指向的 parent 仍有 active run，且仍在換版後名單 | 預期退役，不回滾；最多重查 5 秒等 intent 落地 |
+| 其他 `unconfirmed` | pane 不在但沒有人親眼看到它被關、問不到 herdr，或父 bot 不在／沒有 active run | 回滾 |
 
-依據：`daemon-swap.sh` 只重啟 daemon、herdr 不動，換版本身關不掉任何 pane。換版能弄丟 child 的形狀只有兩種：pane 還在、新 daemon 認不出裡面的 agent（`agent_missing`）；
-或新 daemon 連到不對的 herdr（例如算錯 socket 自己起了一顆空的 server），那顆 server 對每個 pane 都回 `pane_not_found`——單看「pane 不在」分不出來，所以要再加上
-「herdr 發過關閉事件」：空的 server 不會替它沒有的 pane 發事件。daemon 自己關的 pane 不會冒充：對帳收的孤兒 pane 屬於早就結束的 run（事件到時 CAS 輸掉、不寫原因），
-停止／刪除則本來就是有人明講的動作。代價：父 bot 在 daemon 停著的那幾秒關掉 pane，沒有人收到事件，只會是 `unconfirmed`，那一趟換版照樣回滾——寧可多回滾一次，不放過弄丟的。
+依據：`daemon-swap.sh` 只重啟 daemon、herdr 不動，換版本身關不掉任何 pane。pane 還在、新 daemon 認不出裡面的 agent（`agent_missing`）仍回滾；
+pane 已 gone 但沒有關閉事件時，只容許窄例外：新 daemon 的 reconcile 寫下 `unconfirmed` 退役紀錄、child 有 parent、父 bot 的 run 仍 active，且父 bot 仍在新版名單。
+這涵蓋啟動對帳把已消失的 child 收起來、intent 稍後才可讀到的情形；如果連父 bot 也不見、父 run 已結束、pane 還在，或資料庫／名單讀取失敗，仍回滾。
+新版連到空的 herdr 通常也會讓父 bot 的 active run 結束，因此不符合這條 child 例外。`daemon-swap.sh` 只在缺少 child 且父 bot 仍可見時，重讀 state 與 intent 最多 5 次、每次間隔 1 秒；逾時仍當遺失回滾。
 
 ### 6.5a-1 子 agent 卡住時通知父 agent（`child_alerts`，使用者 2026-09-18）
 
