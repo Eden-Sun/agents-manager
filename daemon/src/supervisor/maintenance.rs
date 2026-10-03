@@ -301,27 +301,32 @@ pub async fn release(
 ) -> anyhow::Result<bool> {
     // 憑證對不對在任何寫入之前決定：`release_lease` 只認 owner＋fence，而那兩個是公開欄位
     // （`lease status` 就看得到），光憑它們等於誰都能把別人正在換 binary 的窗口收掉。
-    let stored = store::lease_token(&app.db, resource).await?;
-    if !proof.allows(stored.as_deref()) {
+    // Keep the exact row whose token was proved and whose approval this call may consume. Looking
+    // it up again after marking it released can race a new acquire and consume the next holder's
+    // approval instead.
+    let Some(held) = store::lease(&app.db, resource).await? else { return Ok(false) };
+    if !proof.allows(held.lease_token.as_deref()) {
         anyhow::bail!("lease_token_mismatch");
     }
-    if stored.is_none() {
+    if held.lease_token.is_none() {
         tracing::warn!(resource, owner, "released a lease created before lease tokens existed; no proof was possible");
     }
     let released = if proof.is_forced() {
-        store::force_release_lease(&app.db, resource).await?
+        store::force_release_lease(&app.db, resource, held.fence).await?
     } else {
         store::release_lease(&app.db, resource, owner, fence).await?
     };
+    #[cfg(test)]
     if released {
-        if let Some(l) = store::lease(&app.db, resource).await? {
-            if let Some(ap) = l.approval_id.as_deref() {
-                if let Ok(Some(a)) = store::approval(&app.db, ap).await {
-                    if a.status == "approved" {
-                        // 走有稽核的那支：`decide_approval` 是無條件 UPDATE，不寫 supervisor_notes，
-                        // 而且會把 `decided_at` 覆寫成消耗時間——升級判定（§18.10）的計時就是看那一欄。
-                        let _ = store::decide_approval_from(&app.db, ap, "approved", "consumed", owner, Some("lease released"), None).await;
-                    }
+        crate::lifecycle::race_point::hit("lease_release_after_mark", resource).await;
+    }
+    if released {
+        if let Some(ap) = held.approval_id.as_deref() {
+            if let Ok(Some(a)) = store::approval(&app.db, ap).await {
+                if a.status == "approved" {
+                    // 走有稽核的那支：`decide_approval` 是無條件 UPDATE，不寫 supervisor_notes，
+                    // 而且會把 `decided_at` 覆寫成消耗時間——升級判定（§18.10）的計時就是看那一欄。
+                    let _ = store::decide_approval_from(&app.db, ap, "approved", "consumed", owner, Some("lease released"), None).await;
                 }
             }
         }
@@ -993,6 +998,57 @@ mod tests {
         let released = release(app, "rebuild", "ops", fence, store::LeaseProof::Token(&token)).await;
         assert!(matches!(released, Ok(false)) || released.is_err(), "{released:?}");
         assert!(store::lease(&app.db, "rebuild").await.unwrap().unwrap().held_at(&crate::db::now()), "新持有者的租約還在");
+    }
+
+    /// A replacement lease may be acquired after the old row is released but before its approval
+    /// is consumed. The release path must consume the approval attached to the released fence,
+    /// never whichever row happens to be current when it resumes.
+    #[tokio::test]
+    async fn releasing_an_old_lease_does_not_consume_the_next_holders_approval() {
+        let e = crate::testing::env().await;
+        let app = &e.app;
+        let first_approval = approved_window(app, 0).await;
+        let next_approval = approved_window(app, 0).await;
+        let first = store::acquire_lease(
+            &app.db,
+            "rebuild",
+            "ops",
+            Some(&first_approval),
+            None,
+            &iso_in(300),
+            false,
+            None,
+            &json!({}),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let token = first.lease_token.clone().unwrap();
+        let next_app = app.clone();
+        let next_id = next_approval.clone();
+        crate::lifecycle::race_point::arm("lease_release_after_mark", "rebuild", move || async move {
+            let replacement = store::acquire_lease(
+                &next_app.db,
+                "rebuild",
+                "ops",
+                Some(&next_id),
+                None,
+                &iso_in(300),
+                false,
+                None,
+                &json!({}),
+            )
+            .await
+            .unwrap();
+            assert!(replacement.is_some(), "the released slot accepts a new, separately approved lease");
+        });
+
+        assert!(release(app, "rebuild", "ops", first.fence, store::LeaseProof::Token(&token)).await.unwrap());
+        let current = store::lease(&app.db, "rebuild").await.unwrap().unwrap();
+        assert_eq!(current.approval_id.as_deref(), Some(next_approval.as_str()));
+        assert!(current.released_at.is_none(), "the new holder remains active");
+        assert_eq!(store::approval(&app.db, &next_approval).await.unwrap().unwrap().status, "approved",
+            "releasing fence {} must not consume the replacement's approval", first.fence);
     }
 
     /// 核准後一直等不到全靜止時才放寬，而且只放寬「思考中」這一項。
