@@ -59,7 +59,7 @@ herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上�
 側欄 bot 列可由列本身取得焦點後按 Enter／Space 選取；列內選單與按鈕保留各自的鍵盤操作。確認框由 portal 顯示時，其點擊不切換目前 bot；點列內一般內容仍可選取 bot。
 
 Bot 跨裝置已讀位置以訊息 `(created_at, seq)` 比較；同一時間戳下依 daemon rowid 插入序判斷，避免 ULID 同毫秒隨機段造成未讀數和畫面順序不同。非空 `message_id` 必須屬於目標 bot 對話或群組專案，且 `at` 必須對應該訊息時間；標記訊息已刪時保留時間與 id 供舊標記相容。
-`GET /api/state` 對 Bot principal 只列自己與後代 child，並移除未讀數與 read marks。
+`GET /api/state` 對 Bot principal 只列自己與後代 child，並移除 persona、args、identity、env、herdr session、未讀數與 read marks；若 caller 是 child，state 不揭露 tree 以外 parent 的 bot id。UI User principal 維持完整快照。
 
 **「跑了多久」的起點（issue #93）**：`runs.agent_status_since`，`agent_status` 真的改變時由 DB trigger
 （`runs_agent_status_since`）蓋成當下時間，同值重寫（同一行 pane 狀態重複出現）不算改變。取捨：
@@ -1844,7 +1844,8 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    信任邊界照實寫：hook token 也在同一個 unix 使用者讀得到的檔案裡（bot 目錄的 settings），這一層擋的是「以為可以代別人發言」的 agent 與誤用，
    不是同機的惡意行程。
    **Bot principal 的路徑資源範圍**（2026-10-03）：所有以 bot／project／turn／mission／assignment／attachment 識別資源的 `/api` 路徑，都在共用 auth layer 以驗證過的 Bot id 查授權，不採信額外 header 或未解碼的 URI 別名。一般 bot 只可讀寫自己、後代 child、自己／後代所在專案、派給自己／後代的任務與交辦；turn／attachment 先反查其擁有 bot 再判。AGM 角色不會因此取得通用 bot、project、turn 或 attachment 跨資源權限；明確的跨資源管理入口限於 `GET／POST /api/projects/{id}/missions`、`/api/missions/{id}…` 與 `/api/supervisor/assignments/{id}` 的讀取／角色限定 review。唯一可直接指定其他 bot 的 Bot 路由是 `POST /api/bots/{id}/prompt`，仍須 `relay_auth` 驗 sender proof；附件上傳不繼承 prompt 的跨 bot 例外。`/api/drafts[/{key}]`、`/api/panes…` 與 `/api/hosts/{name}/shells…` 是網頁面，Bot principal `403 user_only`；User 維持原行為。Service principal 仍只依各自明列的 service path 授權。
-   **Bot principal 的操作類別**（2026-10-03，`api::BOT_USER_ONLY_ROUTES`）：資源範圍只回答「能碰哪個 bot／project」，不代表可做所有管理動作。API.md 完整路由表標為 User-only 的操作，普通 Bot 一律在共用 auth layer 回 `403 user_only`；已登記的 AGM 角色只越過這道普通 Bot fence，之後仍依原有路由、資源範圍與 handler 規則授權，沒有通用管理權。嚴格 User-only，AGM 角色也拒絕：`GET／PUT /api/drafts[/{key}]`、`POST /api/bots/{id}/read`、`POST /api/projects/{id}/group/read`、`GET /api/bots/deleted`、`GET /api/mem` 與 `GET /api/mem/processes/pane`；拒絕發生在 handler／主機 RPC 之前。`/api/bots/deleted` 是含跨專案識別資料的 UI 復原清單；`/api/mem` 彙整所有主機、專案用量與瀏覽器分頁，不能用來跨主機盤點。`GET /api/quota`、`GET /api/models` 的快取讀取維持原權限，只有 `refresh=1` 對普通 Bot 回 403，AGM 沿用原權限。release-triage 的 `dispatched`／`publish` 對普通 Bot 回 403；`GET` 與 `verdicts` 仍保留 Bot 呼叫以相容現行分診工作，但 submit 尚未綁定具體交辦的 Bot 與世代，授權缺口記錄於 #801，待補完整任務綁定。
+   Bot 對 `/api/bots/{id}/messages`、`/terminal` 與 `/api/turns/{id}/…` 只可沿自己的 bot-tree 存取；`/api/projects/{id}/messages` 的 Bot 時間軸只含自己與 descendants 的訊息，先 scope 再分頁，外部游標 404。子 Bot 可讀自己與自己的 descendants，不可讀 parent 或 sibling。Bot 收到 `/api/state` 也是自己與 descendants 的投影，ancestor 不可見時不回傳 `parent_bot_id`。`/ws` 僅接受 UI token，Bot／Service principal 不能用 token query 或混合 credentials 訂閱全域事件；獨立分享 SSE 只送指定 bot 的 user／assistant 訊息與狀態。
+   **Bot principal 的操作類別**（2026-10-03，`api::BOT_ROUTE_POLICIES`）：Bot 資源範圍只回答「能碰哪個 bot／project」，不代表可做所有管理動作。API.md 完整路由表標為 User-only 的路徑由同一個 auth policy 在 handler 前拒絕；Bot（含 AGM 角色）均回 `403 user_only`。這包括 `/api/drafts[/{key}]`、read marks、已刪 bot 清單、全機 memory/process inventory 與 pane preview、recovery intents、build-slot 清單、使用者檔案（attachments/local-image/outbox）、pane inventory/actions、host shells、bot keys/text 與附件上傳。Service principal 繼續只依明列的 service scope 授權；`GET /api/panes` 的 Herdr upgrade service scope 保留。其他 User-only 管理路徑只拒絕一般 Bot，AGM 角色仍受各自資源與 handler 規則限制。拒絕在 handler／主機 RPC／上傳 body extractor 前發生。`GET /api/quota`、`GET /api/models` 的快取讀取維持原權限，只有 `refresh=1` 對一般 Bot 回 403，AGM 沿用原權限。release-triage 的 `dispatched`／`publish` 對一般 Bot 回 403；`GET` 與 `verdicts` 仍保留 Bot 呼叫以相容現行分診工作，但 submit 尚未綁定具體交辦的 Bot 與世代，授權缺口記錄於 #801，待補完整任務綁定.
    **mission 端點**（`events`／`question`／`answer`／`revise`／`complete`／`deliver`）的 `relay_from` 共用同一段 token 比對（#409，`relay_auth::authenticate_mission`），
    差在兩格：沒帶 token 直接 403 `relay_from_token_required`（沒有相容期——唯一帶 `relay_from` 的呼叫端 `bin/agm` 在角色自己的 pane 裡一律帶 token，web 從不帶）；
    `relay_from:"daemon"` 只給驗證過的 AGM 角色 bot（`X-AM-Bot-Id`＋`X-AM-Bot-Token`，`agm mission … --as-daemon`），其他一律 403 `relay_from_reserved`。
@@ -2139,7 +2140,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   `release` 一律幂等（找不到、已過期、token 不對都當作「已經不是你的事了」回成功），呼叫端的 `trap ... EXIT` 才能
   放心呼叫，不用先判斷還握不握著。`renew` 只有還在 `held` 且沒過期的列能續，過期了要求重新 `acquire`（不做「其實已經
   被別人拿走了」這種模糊地帶）。
-- `GET /api/build-slots`（在 `/api` 底下，一般 `X-AM-Token`；Bot principal 回 `403 user_only`，#812）：`{max_concurrent, cargo_jobs, test_threads, lease_ttl_secs, active, slots:[...]}`，UI／人工查現況用。acquire／renew／release 仍在 `/build-slots/*`。
+- `GET /api/build-slots`（在 `/api` 底下，一般 `X-AM-Token`；Bot principal 回 `403 user_only`，#812）：`{max_concurrent, cargo_jobs, test_threads, lease_ttl_secs, active, slots:[...]}`，UI／人工查現況用。Bot 的 acquire／renew／release 仍在 `/build-slots/*`。
 
 #### `cargo` shim（issue 建議的 PATH wrapper；`cargo_shim.rs`，跟 `herdr_shim.rs` 同一種寫法）
 - 沒有 bot token 也沒有 UI token 檔可讀：直接不排程，印一行 stderr 說明，直接跑（issue 要求「明講的 bypass 路徑」）。
@@ -3297,6 +3298,7 @@ herdr 明確拒收才是 `failed`）、不寫「未送達」，之後由 daemon 
 `skipped[].detail` 與那則 system 訊息是給人看的：錯誤本體是 JSON 的（維護窗口、被擋的 pane、送不出去的 prompt…）時取 `message`→`reason`→`error` 那一句，不貼原始 JSON；web 的 toast 另把機器碼翻成中文（`groupSkipText`）。
 
 API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md`）。WS 沿用 `message_added`（含 `group_id`）與 `turn_updated`。
+Bot token 讀群組時間軸時只會取得自己與 descendant bots 的訊息；同專案 sibling 的訊息與游標不可跨讀。UI token 維持完整的專案時間軸。
 
 ### 13.4 前端
 - sidebar Project 標題可點進群組視圖；標題列顯示專案名、群組標籤、host 徽章與成員燈號列（點成員跳到單獨對話）。
@@ -3372,7 +3374,8 @@ codex 5 分、claude 60 秒、grok 30 秒；每輪對 `local` + 每台已連線�
 
 ### 15.1 量什麼
 整棵 **herdr 進程樹**（herdr + 底下的 pane 與 agent CLI）。樹根 = 執行檔名是 `herdr` 的 process（argv 裡剛好有這字的不算），herdr 底下再開 herdr 只算一次。
-每台主機每 15 秒 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走 ssh master），變化超過 1 MiB 才推 `mem_updated`。量不到用 `error` 回報，不從清單消失。端點 `GET /api/mem`。`GET /api/mem`、`GET /api/mem/processes` 與 `GET /api/mem/processes/pane` 僅 User principal 可讀；Bot（包含 AGM 角色）在解析主機或讀 pane 前即被拒絕，service principal 的 scope 不包含這些路徑。
+每台主機每 15 秒 `ps -Awwo pid=,ppid=,rss=,args=`（遠端走 ssh master），變化超過 1 MiB 才推 `mem_updated`。量不到用 `error` 回報，不從清單消失。端點 `GET /api/mem`。
+`GET /api/mem`、`GET /api/mem/processes` 與任意 pane 畫面預覽僅 User principal 可讀；Bot（包含 AGM 角色）在解析主機或讀 pane 前即被拒絕，Service principal 的 scope 不包含這些路徑。Bot 讀取自己的 bot tree 中的終端，應使用其有權限的 `/api/bots/{id}/terminal`。
 
 ### 15.1a 這台機器還剩多少
 同一次取樣多帶 `hosts[].machine: {total_bytes, available_bytes}`（一次 shell 往返）：
@@ -3402,7 +3405,7 @@ macOS 的 `ps -E` 會把環境值中的換行印成字面 `\012`，不切斷 pid
 | `unknown` | 都讀不到 | 同 `pane` |
 
 只列 `claude`/`codex`/`grok`/`node`/`bash`/`zsh`/`sh`/`fish` 且 `subtree_bytes ≥ 8 MiB` 的，其餘併進父程序；依 `subtree_bytes` 排序（「砍這個能省多少」）。
-owner 格可點開唯讀的 pane 畫面（`GET /api/mem/processes/pane`，`pane.read visible`，每 2 秒重讀，不給打字）；bot 列不給看（有自己的終端分頁）。
+owner 格可點開唯讀的 pane 畫面（`GET /api/mem/processes/pane`，`pane.read visible`，每 2 秒重讀，不給打字）；pane list 與 preview 都只接受 UI token，bot 列改用自己的 `/api/bots/{id}/terminal`。
 
 砍之前**一定重新取樣**再判定，不信前端送來的那列（pid 會回收）：不在樹裡 400、`herdr` 本身 400、`owner=bot` 409（走 `POST /bots/{id}/stop` 才會記錄）。目標 pid 的環境讀不到（`ps -E` 壞了、環境段空、Linux 的 `environ` 讀不了）時 owner 會退成 `unknown`，不能把它當「沒主人」放行——回 502、不送訊號。砍完立刻取樣推 `mem_updated`。
 

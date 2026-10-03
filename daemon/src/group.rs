@@ -352,24 +352,57 @@ pub enum Response400 {
 
 /// `GET /api/projects/:id/messages?before=&limit=` (SPEC §13.4), paginated by SQLite rowid.
 pub async fn messages(app: &Arc<App>, project_id: &str, before: Option<&str>, limit: i64) -> LcResult<Value> {
+    messages_scoped(app, project_id, before, limit, None).await
+}
+
+/// Bot principals may read the same group timeline shape, but only for themselves and their
+/// descendants. Project membership alone must not turn the collection route into sibling access.
+pub async fn messages_for_bot_tree(
+    app: &Arc<App>,
+    project_id: &str,
+    before: Option<&str>,
+    limit: i64,
+    root_bot_id: &str,
+) -> LcResult<Value> {
+    messages_scoped(app, project_id, before, limit, Some(root_bot_id)).await
+}
+
+async fn messages_scoped(
+    app: &Arc<App>,
+    project_id: &str,
+    before: Option<&str>,
+    limit: i64,
+    root_bot_id: Option<&str>,
+) -> LcResult<Value> {
     let project = db::project(&app.db, project_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|p| p.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("project".into()))?;
     let limit = limit.clamp(1, 500);
+    // The recursive scope is part of the SQL predicate so LIMIT and cursors are applied only
+    // after hidden sibling rows have been excluded. An empty root is used for the unscoped UI query.
+    const TREE: &str = "WITH RECURSIVE owned(id) AS (
+             SELECT id FROM bots WHERE id = ?
+             UNION
+             SELECT child.id FROM bots child JOIN owned parent ON child.parent_bot_id = parent.id
+         ) ";
     const BASE: &str = "SELECT m.*, m.rowid AS seq, b.id AS bot_id, b.name AS bot_name FROM messages m
          JOIN conversations c ON c.id = m.conversation_id
          JOIN bots b ON b.id = c.bot_id
-         WHERE b.project_id = ? AND b.deleted_at IS NULL";
+         WHERE b.project_id = ? AND b.deleted_at IS NULL AND (? = 0 OR b.id IN (SELECT id FROM owned))";
+    let tree_root = root_bot_id.unwrap_or("");
+    let scoped = i64::from(root_bot_id.is_some());
     // 游標要是這個專案某顆 bot 的訊息（已刪的也算：清單載入後才刪 bot，照樣翻得下去）；被刪掉的、別個專案的 → 404＋reason（#766）。
     let before_rowid = match before {
         Some(message_id) => {
-            let at: Option<(i64, String)> = sqlx::query_as(
-                "SELECT m.rowid, b.project_id FROM messages m JOIN conversations c ON c.id = m.conversation_id
-                   JOIN bots b ON b.id = c.bot_id WHERE m.id = ?",
-            )
+            let at: Option<(i64, String)> = sqlx::query_as(&format!(
+                "{TREE}SELECT m.rowid, b.project_id FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                   JOIN bots b ON b.id = c.bot_id WHERE m.id = ? AND (? = 0 OR b.id IN (SELECT id FROM owned))"
+            ))
+            .bind(tree_root)
             .bind(message_id)
+            .bind(scoped)
             .fetch_optional(&app.db)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?;
@@ -384,14 +417,18 @@ pub async fn messages(app: &Arc<App>, project_id: &str, before: Option<&str>, li
         None => None,
     };
     let rows = match before_rowid {
-        Some(rowid) => sqlx::query_as::<_, db::GroupMessage>(&format!("{BASE} AND m.rowid < ? ORDER BY m.rowid DESC LIMIT ?"))
+        Some(rowid) => sqlx::query_as::<_, db::GroupMessage>(&format!("{TREE}{BASE} AND m.rowid < ? ORDER BY m.rowid DESC LIMIT ?"))
+            .bind(tree_root)
             .bind(&project.id)
+            .bind(scoped)
             .bind(rowid)
             .bind(limit + 1)
             .fetch_all(&app.db)
             .await,
-        None => sqlx::query_as::<_, db::GroupMessage>(&format!("{BASE} ORDER BY m.rowid DESC LIMIT ?"))
+        None => sqlx::query_as::<_, db::GroupMessage>(&format!("{TREE}{BASE} ORDER BY m.rowid DESC LIMIT ?"))
+            .bind(tree_root)
             .bind(&project.id)
+            .bind(scoped)
             .bind(limit + 1)
             .fetch_all(&app.db)
             .await,
