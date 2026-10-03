@@ -8,3 +8,11 @@ down = "run -q -p xtask --bin xtask -- down"
 # scripts/sccache-wrapper.sh。cargo 把這個相對路徑當成相對於這個 config 檔的專案根目錄解讀，
 # 跟目前的 CARGO_TARGET_DIR（每個 worktree 各自一份，這個設定完全不動它）無關。
 rustc-wrapper = "scripts/sccache-wrapper.sh"
+
+[env]
+# `cargo test` 的測試執行緒上限（issue #813）：libtest 預設開到核心數，32 核的 agm-host 上每支 test binary 80 個執行緒、
+# 吃 8 核以上，好幾支同時跑就把整台推到 load 100+。cargo shim 會依名額注入同一個值（`[build] test_threads`），
+# 這裡罩的是**不經過 shim** 的 cargo（ubuntu-ci、把 `~/.cargo/bin` 擺到 PATH 前面的腳本、非受管的 shell）。
+# 8 是 issue #202 在 32 vCPU 上量的最快值（32 個執行緒 283 秒、8 個 168～176 秒）。
+# 沒有 `force`：呼叫端自己設的 `RUST_TEST_THREADS` 優先，命令列的 `--test-threads` 又優先於它。改這個值不會觸發重新編譯。
+RUST_TEST_THREADS = "8"

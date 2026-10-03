@@ -2129,7 +2129,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
 #### API（不在 `/api` 底下的三支：bot pane 帶自己的 per-bot token；人工 host shell 用 UI token）
 - `POST /build-slots/acquire {holder, bot_id?, purpose?, host?}`：Bot 用 `X-AM-Bot-Id`、`X-AM-Bot-Token` 與相同的 body `bot_id`（驗證同一顆 bot
   的 `hook_token`；舊 shim 在 body 有 id、只有 token header 時相容），或人工 host shell 用 `X-AM-Token`（一般 UI token，讀 `~/.config/agents-manager/ui-token`）。
-  Bot 身分欄位出現後，缺漏、錯誤、header/body id 不同或混帶 UI token 都回 403、不降級。兩者都沒有 → 401。回 `{granted:true, token, expires_at, cargo_jobs, lease_ttl_secs}` 或
+  Bot 身分欄位出現後，缺漏、錯誤、header/body id 不同或混帶 UI token 都回 403、不降級。兩者都沒有 → 401。回 `{granted:true, token, expires_at, cargo_jobs, test_threads, lease_ttl_secs}` 或
   `{granted:false, active, max_concurrent, since, retry_after_secs}`——**額滿是正常的執行期狀態，不是失敗**，回 200 不是 4xx。
   同一個 holder 對已經握著、還沒過期的名額重 call 是幂等的（回同一份憑證），逾時後重問一次是安全的。
 - `POST /build-slots/renew {holder, token}`、`POST /build-slots/release {holder, token}`：**不另外驗 bot／UI
@@ -2137,7 +2137,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   `release` 一律幂等（找不到、已過期、token 不對都當作「已經不是你的事了」回成功），呼叫端的 `trap ... EXIT` 才能
   放心呼叫，不用先判斷還握不握著。`renew` 只有還在 `held` 且沒過期的列能續，過期了要求重新 `acquire`（不做「其實已經
   被別人拿走了」這種模糊地帶）。
-- `GET /api/build-slots`（在 `/api` 底下，一般 `X-AM-Token`）：`{max_concurrent, cargo_jobs, lease_ttl_secs, active, slots:[...]}`，
+- `GET /api/build-slots`（在 `/api` 底下，一般 `X-AM-Token`）：`{max_concurrent, cargo_jobs, test_threads, lease_ttl_secs, active, slots:[...]}`，
   UI／人工查現況用。
 
 #### `cargo` shim（issue 建議的 PATH wrapper；`cargo_shim.rs`，跟 `herdr_shim.rs` 同一種寫法）
@@ -2187,6 +2187,12 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   `the_check_script_env_still_offloads_without_leaking_the_data_dir` 拿 `check.sh` 實際那一行去跑 shim，把兩邊綁在一起。
   daemon 連不上時遠端編譯照樣能跑（它不需要 daemon）。
 - `CARGO_BUILD_JOBS` 由 daemon 的 acquire 回應決定（`build.cargo_jobs`，預設 2），不吃 cargo 自己抓核心數的預設值。
+- **測試執行緒跟著名額走（issue #813）**：名額罩住整個 `cargo test`（cargo 退出才放，含 test binary 執行階段），但 `CARGO_BUILD_JOBS` 只限 rustc；
+  libtest 預設開到核心數，32 核上每支 test binary 約 80 個執行緒、吃 8 核以上，6 個名額加起來遠超過整台機器。所以 `test`／`t` 在呼叫端沒設
+  `RUST_TEST_THREADS` 時，shim 注入 acquire 回應的 `test_threads`（`build.test_threads`，預設 8；回應沒有這個欄位的舊 daemon 也用 8；`0`＝不注入）。
+  呼叫端自己設的 `RUST_TEST_THREADS`、命令列的 `--test-threads` 都優先。不經過 shim 的 `cargo test`（ubuntu-ci、把 `~/.cargo/bin` 擺到 PATH 前面的腳本、
+  非受管 shell）在這個 repo 裡由 `.cargo/config.toml` 的 `[env] RUST_TEST_THREADS = "8"` 兜底（不 `force`，環境變數優先）。
+  8 沿用 issue #202 在 32 vCPU 上量到的最快值（`[build.remote] test_threads` 同一個數字）。
 - 建置跑完（不管成功失敗）都會 release；`trap ... EXIT INT TERM` 保證中斷／被砍也會放。
 - **租約失效就停（issue #128）**：TTL 租約有兩件事必須同時成立——daemon 能在持有者死掉時收回容量，**而且活著但租約已失效的持有者
   必須停止使用容量**。以前續約迴圈把失敗全吞掉，daemon 暫時連不上超過 TTL、名額被收回後 B 拿到同一個名額，A 卻還在編：
@@ -2222,8 +2228,8 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
 #### 設定（`config.toml` 的 `[build]`，`config::BuildCfg`）
 - `max_concurrent`（預設 2，`AM_BUILD_MAX_CONCURRENT` 可覆寫，0／看不懂一律回預設——0 不是「停用排程」，是「誰都拿不到
   名額」，整台機器的受管建置會卡死，跟 `panes.idle_close_secs` 同一條防呆規矩）、`cargo_jobs`（預設 2）、
-  `lease_ttl_secs`（預設 180，續約間隔取它的 1/3）。
-  這三個沒有 API 可寫，唯一的設定方式是手改 `config.toml`，所以 scheduler 每次拿名額／續約／看狀態都走 `ConfigStore::build_fresh`：
+  `test_threads`（預設 8，`0`＝不注入、最多 256；issue #813）、`lease_ttl_secs`（預設 180，續約間隔取它的 1/3）。
+  這幾個沒有 API 可寫，唯一的設定方式是手改 `config.toml`，所以 scheduler 每次拿名額／續約／看狀態都走 `ConfigStore::build_fresh`：
   設定檔內容變了就重讀（包含 mtime 不變的替換），**只**換 `[build]` 這一段，不用重啟；讀不了或解析失敗（半寫、打錯字、`lease_ttl_secs` 超出範圍）保留原值，同一份錯誤內容只記一次 WARN。
   `[agents]` 同樣熱重載（`ConfigStore::agents_fresh`，bot 啟動讀指示檔時走它）：手改 `[agents.projects]` 不必重啟 daemon，重啟 bot 就生效；壞檔保留原值，內容修好後會再載入。
   其他段（含 `[[hosts]]`）仍只在啟動與 `ConfigStore::update` 時載入（要連著 TOML→SQLite 投影一起處理）。已發出的名額不受影響：`max_concurrent` 調小時不收回已持有的，只是不再放新的。

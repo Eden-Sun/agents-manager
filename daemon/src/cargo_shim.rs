@@ -107,6 +107,15 @@ am_remote_cargo_eligible() {
     esac
 }
 
+# 會跑 libtest 測試的子指令（issue #813）：名額本來就罩住整個 test run（cargo 退出才放），但 `CARGO_BUILD_JOBS` 只限 rustc，
+# 測試執行緒照 libtest 預設開到核心數——32 核上每支 test binary 80 個執行緒、吃 8 核以上，6 個名額加起來遠超過整台機器。
+am_cargo_runs_tests() {
+    case "$1" in
+        t | test) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # 外部編譯（`remote-cargo` helper）需要的兩樣東西；缺哪個就回哪個的名字，空字串＝齊了。
 # `AM_DAEMON_EXE` 指到的檔案不能執行（binary 被換掉／搬走）也算缺。
 # `AM_DATA_DIR` 不在裡面（issue #417）：`scripts/check.sh` 為了不讓測試吃到正式資料目錄會清掉它，
@@ -603,6 +612,14 @@ am_cargo() {
     _ttl=$(am_json_field lease_ttl_secs "$_resp")
     case "$_jobs" in *[!0-9]* | '') _jobs=2 ;; esac
     case "$_ttl" in *[!0-9]* | '') _ttl=180 ;; esac
+    # 測試執行緒上限跟著名額走（issue #813）：呼叫端自己設了 `RUST_TEST_THREADS` 就尊重（`--test-threads` 本來就優先於環境變數）；
+    # 沒設才注入名額回應的 `test_threads`。舊 daemon 的回應沒有這個欄位＝用預設 8；`0`＝daemon 明講不設，交給 libtest 的預設。
+    _test_env=""
+    if am_cargo_runs_tests "$_sub" && [ -z "${RUST_TEST_THREADS:-}" ]; then
+        _tt=$(am_json_field test_threads "$_resp")
+        case "$_tt" in *[!0-9]* | '') _tt=8 ;; esac
+        [ "$_tt" -eq 0 ] || _test_env="RUST_TEST_THREADS=$_tt"
+    fi
     # 續約間隔取 TTL 的三分之一：daemon 端的 sweep 也是等好幾個間隔才收，一次沒續到不會立刻掉名額。
     _renew_every=$((_ttl / 3))
     [ "$_renew_every" -ge 1 ] || _renew_every=1
@@ -659,7 +676,8 @@ am_cargo() {
         am_lease_lost_exit
     fi
 
-    env AM_BUILD_SLOT_HELD=1 AM_REAL_CARGO="$_real" CARGO_BUILD_JOBS="$_jobs" \
+    # `$_test_env` 不加引號：空的就不展開成任何參數，有值時是一個不含空白的 `RUST_TEST_THREADS=N`。
+    env AM_BUILD_SLOT_HELD=1 AM_REAL_CARGO="$_real" CARGO_BUILD_JOBS="$_jobs" $_test_env \
         sh -c "$_guard_sh" am-guarded "$_state/pid" "$_real" "$@"
     _cargo_rc=$?
     if am_lease_lost_now "$_cargo_rc"; then
@@ -814,6 +832,9 @@ mod tests {
             }
             // 假的 $HOME：不能真的去讀開發機自己的 ui-token（會讓測試偷偷通過或偷偷失敗）。
             cmd.env("HOME", self.dir.join("fake-home"));
+            // 這支測試本身就在 `cargo test` 底下跑（repo 的 `.cargo/config.toml [env]` 或外層 shim 給的值，issue #813）：
+            // 漏進來就變成「呼叫端自己設了」，shim 不會再注入。需要的測試自己設。
+            cmd.env_remove("RUST_TEST_THREADS");
             cmd
         }
 
@@ -1769,6 +1790,76 @@ esac
         let peaks: Vec<u32> = std::fs::read_to_string(s.dir.join("peak.log")).unwrap().lines().filter_map(|l| l.trim().parse().ok()).collect();
         assert_eq!(peaks.len(), 4, "四個都要跑完：{peaks:?}");
         assert_eq!(peaks.iter().max(), Some(&2), "本機同時在跑的編譯要剛好壓在 2（不是 1＝排太嚴、也不是 3+＝名額沒管到）：{peaks:?}");
+    }
+
+    /// issue #813 的驗收：名額用滿時，第 N+1 支 `cargo test` 的**執行階段**（test binary 在跑的時候）也要等，不能跟前面的同時跑；
+    /// 而且每支 test binary 都拿到名額回應的 `RUST_TEST_THREADS`。**真的** router（`max_concurrent=1`、`test_threads=3`）＋真的 curl＋真的 shim。
+    /// 假 cargo 先「編譯」一下，再起一顆獨立的「test binary」子行程跑一秒、等它結束才退出——跟真的 `cargo test` 一樣，名額要罩到 test binary 跑完。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_next_cargo_test_waits_until_the_previous_test_binary_has_finished_and_gets_the_thread_cap() {
+        let env = crate::testing::env().await;
+        env.app
+            .cfg
+            .update(|c| {
+                c.build.max_concurrent = 1;
+                c.build.test_threads = 3;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let (port, server) = serve_router(env.app.clone());
+
+        let s = Sandbox::new();
+        let d = s.dir.display();
+        write_exec(
+            s.dir.join("real/testbin"),
+            format!(
+                "#!/bin/sh\nmkdir -p '{d}/running'\n: > '{d}/running/'$$\necho \"$(ls '{d}/running' | wc -l | tr -d ' ') RUST_TEST_THREADS=${{RUST_TEST_THREADS-unset}}\" >> '{d}/testbin.log'\n/bin/sleep 1\nrm -f '{d}/running/'$$\n"
+            ),
+        );
+        write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\n/bin/sleep 0.2\n'{d}/real/testbin'\n"));
+        let shims = start_shims(&s, port, 3, &[]);
+        let results = finish_shims(&s, shims).await;
+        server.abort();
+        for (rc, err) in &results {
+            assert_eq!(*rc, 0, "{err}");
+        }
+        let log = std::fs::read_to_string(s.dir.join("testbin.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 3, "三支都要跑完：{log}");
+        for l in &lines {
+            assert_eq!(*l, "1 RUST_TEST_THREADS=3", "test binary 在跑時不能有別支同時在跑，且要拿到名額的執行緒上限：{log}");
+        }
+    }
+
+    /// issue #813：`RUST_TEST_THREADS` 只注入 `test`／`t`，而且只在呼叫端沒設的時候；名額回應沒有這個欄位（舊 daemon）＝預設 8，
+    /// 回 `0`＝daemon 明講不設。
+    #[test]
+    fn the_test_thread_cap_follows_the_grant_and_never_overrides_the_caller() {
+        let s = Sandbox::new();
+        let d = s.dir.display();
+        write_exec(s.dir.join("real/cargo"), format!("#!/bin/sh\necho \"$1 RUST_TEST_THREADS=${{RUST_TEST_THREADS-unset}}\" >> '{d}/rtt.log'\n"));
+        let managed = [("AM_BOT_ID", "b1"), ("AM_HOOK_TOKEN", "tok"), ("AM_PORT", "1")];
+        let cases: [(&str, &[(&str, &str)], &str, &str); 6] = [
+            (r#","test_threads":4"#, &[], "test", "test RUST_TEST_THREADS=4"),
+            (r#","test_threads":4"#, &[], "t", "t RUST_TEST_THREADS=4"),
+            (r#","test_threads":4"#, &[("RUST_TEST_THREADS", "16")], "test", "test RUST_TEST_THREADS=16"),
+            (r#","test_threads":4"#, &[], "check", "check RUST_TEST_THREADS=unset"),
+            (r#","test_threads":0"#, &[], "test", "test RUST_TEST_THREADS=unset"),
+            ("", &[], "test", "test RUST_TEST_THREADS=8"),
+        ];
+        for (field, extra, sub, want) in cases {
+            let _ = std::fs::remove_file(s.dir.join("rtt.log"));
+            s.install_fake_curl(&format!(
+                "case \"$*\" in *acquire*) printf '{{\"granted\":true,\"token\":\"tok-1\",\"cargo_jobs\":2,\"lease_ttl_secs\":30{field}}}' ;; *) printf '{{}}' ;; esac"
+            ));
+            let mut env: Vec<(&str, &str)> = managed.to_vec();
+            env.extend_from_slice(extra);
+            let (_, err, rc) = s.run(&env, &[sub, "-p", "agents-managerd"]);
+            assert_eq!(rc, 0, "{field} {sub}: {err}");
+            let got = std::fs::read_to_string(s.dir.join("rtt.log")).unwrap();
+            assert_eq!(got.trim(), want, "回應 `{field}`、呼叫端 {extra:?}、子指令 {sub}");
+        }
     }
 
     /// issue #128（重開）的驗收：`max_concurrent=1`，排程器整個沒開（沒有人在聽那個埠），同時起兩顆**受管的** bot 的 cargo——
