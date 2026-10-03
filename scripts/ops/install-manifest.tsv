@@ -19,6 +19,7 @@ scripts/ops/ci-watch-task.md        ci-watch-task.md
 scripts/ops/claude-release-task.md  claude-release-task.md
 scripts/ops/claude-release-diff-task.md  claude-release-diff-task.md
 scripts/ops/release-triage-task.md  release-triage-task.md
+scripts/ops/release-issue-task.md  release-issue-task.md
 
 # macOS browser-gc 會喚醒操作 ego-browser 的 child；Linux GUI／OB worker 暫不實作（#718）。
 # Linux 安裝獨立的 browser_gc_linux.py，只回收本使用者的 headless Chrome 與安全的舊 profile，並跑 pane-gc；

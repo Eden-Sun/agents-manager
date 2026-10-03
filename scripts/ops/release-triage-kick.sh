@@ -193,6 +193,54 @@ for r in res:
 ' 2>/dev/null | while IFS= read -r _l; do log "$_l"; done
 done
 
+# 開出去的 issue 交給 AGM 接手實作（2026-10-03 使用者：「changelog 會自動解析，應該直接開對應 issue 來接」）。
+# 帳本裡每張**新開**的 issue（`comment`＝只在既有 issue 留言的不算）交辦一次：request-id `release-issue-<編號>` 由 daemon 去重，
+# 交辦成功才記進狀態檔，下一輪不再送；只看 14 天內開的，舊帳不翻。派給同一顆分診 bot（協調者／巡檢），由它照平常流程派 child。
+ISSUE_TASK="$DIR/release-issue-task.md"
+HANDED="$DIR/release-issue-handed"
+if [ -n "$BOT" ] && [ -f "$ISSUE_TASK" ]; then
+  for KIND in claude codex; do
+    SHOW=$("$AGM" --compact release-triage show --kind "$KIND" 2>/dev/null) || continue
+    TODO=$(printf '%s' "$SHOW" | HANDED="$HANDED" python3 -c '
+import json, os, sys, datetime
+try:
+    rows = json.load(sys.stdin).get("rows") or []
+except ValueError:
+    sys.exit(0)
+try:
+    done = set(open(os.environ["HANDED"]).read().split())
+except OSError:
+    done = set()
+cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
+for r in rows:
+    for i in r.get("issues") or []:
+        if i.get("comment") or not i.get("number") or str(i["number"]) in done:
+            continue
+        try:
+            at = datetime.datetime.fromisoformat(str(i.get("created_at", "")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if at < cutoff:
+            continue
+        print("%s\t%s\t%s\t%s" % (i["number"], i.get("url") or "", r.get("kind") or "", r.get("version") or ""))
+' 2>/dev/null) || TODO=""
+    # 不接在管線後面：管線裡的 while 是 subshell，`note_fail` 設的 ROUND_FAIL 會丟掉。
+    while IFS=$'\t' read -r _num _url _kind _ver; do
+      [ -n "$_num" ] || continue
+      _body=$(mktemp "${TMPDIR:-/tmp}/agm-release-issue.XXXXXX")
+      { cat "$ISSUE_TASK"; printf '\n\n---\n本次：%s %s 分診開的 issue #%s %s\n' "$_kind" "$_ver" "$_num" "$_url"; } > "$_body"
+      if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$_body" \
+           --request-id "release-issue-${_num}" >> "$LOG" 2>&1; then
+        echo "$_num" >> "$HANDED"
+        log "${_kind} ${_ver}：issue #${_num} 已交給 ${BOT} 接手"
+      else
+        note_fail "issue #${_num} 交辦失敗（${_kind} ${_ver}），下一輪再試"
+      fi
+      rm -f "$_body"
+    done <<< "$TODO"
+  done
+fi
+
 # 額度閘門（issue #204 §3）：該 bot 身分的 5h ≥ 門檻或有 limit_hit → 不派，列維持 pending，下一輪再看。
 # 查不到（端點壞、找不到這顆 bot 的額度格）照派並記 log，不要因為端點壞了就永遠不做。
 # 只在真的有 pending 時才查（沒事的輪次不打 API），且一輪只查一次（兩個 kind 派給同一顆 bot）。

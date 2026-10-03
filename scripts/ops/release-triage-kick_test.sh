@@ -24,7 +24,7 @@ echo "$*" >> "$AGM_DIR/calls.log"
 DEFAULT_QUOTA='{"kinds":{"claude":{"five_hour":{"used_pct":10.0},"limit_hit":null}}}'
 for a in "$@"; do
   case "$a" in
-    --compact|--bot|--review-by|--text-file|--request-id|--source|--reason|--detail|--kind|--version|assign|quota|state|ops-alert|release-triage|dispatched|publish) ;;
+    --compact|--bot|--review-by|--text-file|--request-id|--source|--reason|--detail|--kind|--version|assign|quota|state|ops-alert|release-triage|dispatched|publish|show) ;;
     --*) echo "agm: error: unrecognized arguments: $a" >&2; exit 2 ;;
   esac
 done
@@ -34,6 +34,9 @@ case "$*" in
     case "$*" in
       *" dispatched "*) [ -n "${STUB_DISPATCHED_FAIL:-}" ] && exit 1; printf '%s' '{"dispatched":1}' ;;
       *" publish "*) printf '%s' "${STUB_PUBLISH_JSON:-{\"publish_enabled\":false,\"results\":[]\}}" ;;
+      *" show "*)
+        k=$(printf '%s' "$*" | sed -n 's/.*--kind \([a-z]*\).*/\1/p')
+        f="$AGM_DIR/show-$k.json"; [ -f "$f" ] && cat "$f" || printf '%s' '{"rows":[]}' ;;
     esac ;;
   *" quota"*|"--compact quota")
     [ -n "${STUB_QUOTA_FAIL:-}" ] && exit 1
@@ -545,6 +548,33 @@ export STUB_ASSIGN_FAIL=""
 bash "$SCRIPT"
 equals "下一輪 binary diff 重試成功後才前進" "$(cat "$AGM_DIR/claude-release.last")" "2.1.279"
 equals "binary diff assign 失敗後重試" "$(grep -c 'release-triage-claude-binary-2.1.279' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+teardown
+
+# 2026-10-03：分診開出的 issue 交給分診 bot 接手——新開的交一次、留言型與 14 天前的不交、交辦失敗下一輪再試。
+setup
+mk_empty claude; mk_empty codex
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat > "$AGM_DIR/show-claude.json" <<JSON
+{"rows":[{"kind":"claude","version":"2.1.288","issues":[
+  {"number":901,"url":"https://x/901","created_at":"$NOW","comment":false},
+  {"number":902,"url":"https://x/902","created_at":"$NOW","comment":true},
+  {"number":903,"url":"https://x/903","created_at":"2020-01-01T00:00:00Z","comment":false}]}]}
+JSON
+export STUB_ASSIGN_FAIL=1
+bash "$SCRIPT"
+equals "交辦失敗不記成已交" "$(cat "$AGM_DIR/release-issue-handed" 2>/dev/null)" ""
+export STUB_ASSIGN_FAIL=""
+bash "$SCRIPT"
+equals "新開的 issue 交給分診 bot" "$(grep -c 'request-id release-issue-901' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+equals "只在既有 issue 留言的不交" "$(grep -c 'release-issue-902' "$AGM_DIR/calls.log" | tr -d ' ')" "0"
+equals "14 天前開的不翻舊帳" "$(grep -c 'release-issue-903' "$AGM_DIR/calls.log" | tr -d ' ')" "0"
+equals "交過的記在狀態檔" "$(cat "$AGM_DIR/release-issue-handed")" "901"
+check "交辦正文帶 issue 編號" "issue #901 https://x/901" "$AGM_DIR/assign-body.txt"
+check "交辦正文是接手 issue 的那份任務" "請接手把它做完" "$AGM_DIR/assign-body.txt"
+grep -q -- "--bot bot-resp .*release-issue-901\|release-issue-901.*--bot bot-resp\|--bot bot-release .*release-issue-901" "$AGM_DIR/calls.log" && PASS=$((PASS+1)) || { FAIL=$((FAIL+1)); echo "FAIL: 交給分診 bot"; grep release-issue "$AGM_DIR/calls.log"; }
+bash "$SCRIPT"
+equals "交過的下一輪不再送" "$(grep -c 'release-issue-901' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
 teardown
 
 # issue #519：合併分診只用一個通知 id；binary-only 留著獨立命名空間，避免舊 changelog 通知衝突。

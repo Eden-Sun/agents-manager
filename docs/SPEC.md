@@ -3703,6 +3703,12 @@ gh 健檢露在 `/api/supervisor/health` 的 `release_triage`（`publish = false
 `gh issue create --label` 對不存在的標籤是硬失敗，所以 `release-triage`／`upstream:claude`／`upstream:codex`／`triage:guard`／`triage:adopt` 少一個，第一次 publish 就會整版停在 `judged`。
 `publish` 重試沒有 daemon 內定時器，由 kick 呼叫上述端點。
 
+**開出去的 issue 由 AGM 接手**（2026-10-03 使用者：「changelog 會自動解析，應該直接開對應 issue 來接」）：kick 每輪在 publish 重試之後讀帳本
+（`agm release-triage show --kind`），把 14 天內**新開**的 issue（`comment` 的不算）逐張交給同一顆分診 bot（`agm assign --review-by patrol`，
+正文是 `release-issue-task.md`＋issue 編號與網址），request-id `release-issue-<編號>` 由 daemon 去重；交辦成功才寫進 `release-issue-handed`
+（AGM 目錄，一行一個編號），下一輪不再送，失敗下一輪再試。接手的 bot 照既有派工流程派 child 實作、留言並關 issue。agm-host 的
+`config.toml` 自 2026-10-03 起 `[release_triage] publish = true`、`repo = "Eden-Sun/agents-manager"`。
+
 **乾跑（`POST /api/release-triage/publish {dry_run:true}`／`agm release-triage publish --dry-run`）**：打開 `publish` 之前就要能證明「這一版會開哪幾張、內文長什麼樣、重跑會不會開第二張」，
 不必先拿正式 repo 試開一張。它是唯一在 `publish = false` 時也會啟動 gh 的路徑（由人明確觸發，kick 不跑它），且**只讀**：`auth status`／`repo view`／`label list`／`issue list`，
 一張 issue 都不開、帳本一個字都不寫。`action` 是 `comment` 的提案，`body` 是真跑會貼的**那則留言**（沒有 `title`／`labels`），不是整張 issue 的內文。每個提案回一個 `action`（`create`｜`comment`｜`existing`｜`already_logged`｜`skipped_version_limit`｜`deferred_daily_limit`｜`remote_unknown`）
