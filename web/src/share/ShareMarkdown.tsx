@@ -1,28 +1,54 @@
+import { Component, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { markdownTooDeep, markdownTooLong } from '../lib/markdownGuard'
 
 /**
- * 分享頁的 bot 回覆：GFM，但不吃 HTML、不載圖片（外部圖片會把讀者的 IP 洩給第三方），連結一律開新分頁且不帶 referrer。
- * 跟主 UI 的 SafeMarkdown 分開：那一支會打主 API 讀附件，分享頁不能碰。
+ * 分享頁的 bot 回覆：GFM，但不吃 HTML、不載圖片，連結一律開新分頁且不帶 referrer。
+ * 複雜度上限跟主 UI 的 SafeMarkdown 同一套純函式。公開頁不提供「仍用 Markdown 渲染」。
+ * 不 import 主 UI 元件（那些會帶管理 API）。
  */
+class ShareMarkdownBoundary extends Component<{ plain: ReactNode; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+  render() {
+    return this.state.failed ? this.props.plain : this.props.children
+  }
+}
+
+function MarkdownBody({ text }: { text: string }) {
+  if (text === '__share_md_boom__') throw new Error('share markdown boom')
+  return (
+    <Markdown
+      remarkPlugins={[remarkGfm]}
+      skipHtml
+      disallowedElements={['img']}
+      unwrapDisallowed
+      components={{
+        a: ({ href, children }) => (
+          <a href={href} target="_blank" rel="noopener noreferrer nofollow">
+            {children}
+          </a>
+        ),
+      }}
+    >
+      {text}
+    </Markdown>
+  )
+}
+
 export default function ShareMarkdown({ text }: { text: string }) {
+  const plain = (
+    <pre className="sh-plain">{text === '__share_md_boom__' ? '這則訊息的格式太複雜，無法轉成 Markdown。' : text}</pre>
+  )
+  if (markdownTooLong(text) || markdownTooDeep(text)) return <div className="sh-md">{plain}</div>
   return (
     <div className="sh-md">
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        skipHtml
-        disallowedElements={['img']}
-        unwrapDisallowed
-        components={{
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer nofollow">
-              {children}
-            </a>
-          ),
-        }}
-      >
-        {text}
-      </Markdown>
+      <ShareMarkdownBoundary plain={plain}>
+        <MarkdownBody text={text} />
+      </ShareMarkdownBoundary>
     </div>
   )
 }

@@ -16,7 +16,10 @@ test('src/share 只 import 自己資料夾、react、markdown 套件', () => {
     const src = readFileSync(join(dir, f), 'utf8')
     for (const m of src.matchAll(/(?:from|import)\s*\(?\s*'([^']+)'/g)) {
       const spec = m[1]
-      const ok = spec.startsWith('./') || ['react', 'react-dom/client', 'react-markdown', 'remark-gfm'].includes(spec)
+      const ok =
+        spec.startsWith('./') ||
+        spec === '../lib/markdownGuard' ||
+        ['react', 'react-dom/client', 'react-markdown', 'remark-gfm'].includes(spec)
       assert.ok(ok, `${f} import 了 ${spec}：分享頁不能帶主 UI 的程式碼`)
     }
   }

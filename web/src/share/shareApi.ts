@@ -7,8 +7,10 @@ import { ShareHttpError, toShareFiles, toShareMessage, toSharePage, toStatus, ty
 export interface ShareEvents {
   onMessage: (m: ShareMessage) => void
   onStatus: (s: ShareStatus) => void
-  /** 推播斷了（或不支援）：呼叫端改成輪詢。 */
+  /** 推播斷了（或不支援）：呼叫端改成輪詢。CONNECTING 的重連錯誤也算，不能只等 CLOSED。 */
   onDown: () => void
+  /** 連上了：可以停掉輪詢。 */
+  onUp?: () => void
 }
 
 export interface ShareClient {
@@ -60,6 +62,7 @@ export function httpShareClient(token: string): ShareClient {
         return () => {}
       }
       const es = new EventSource(`${base}/events`)
+      es.onopen = () => ev.onUp?.()
       es.addEventListener('message', (e) => {
         try {
           const m = toShareMessage(JSON.parse((e as MessageEvent<string>).data))
@@ -75,9 +78,10 @@ export function httpShareClient(token: string): ShareClient {
           /* ignore */
         }
       })
-      // EventSource 自己會重連；連續斷掉（例如 404：分享被關）才交給輪詢去判斷。
+      // 瀏覽器重連時 readyState 是 CONNECTING，不會先變 CLOSED。任一 error 都改輪詢，
+      // 讓撤銷連結的 404 走得到；onopen 再把輪詢停掉。
       es.onerror = () => {
-        if (es.readyState === EventSource.CLOSED) ev.onDown()
+        ev.onDown()
       }
       return () => es.close()
     },
