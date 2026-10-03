@@ -279,12 +279,35 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
             .execute(pool)
             .await?;
     }
-    // Additive columns for databases created before they existed (same pattern as `db::migrate`).
+    // These columns carry facts that cannot be reconstructed once the column itself exists.
+    // Keep each ALTER and its one-time legacy backfill in one write transaction so an
+    // interrupted startup retries both steps instead of silently skipping the backfill.
+    add_column_with_backfill(
+        pool,
+        "supervisors",
+        "desired_running",
+        "ALTER TABLE supervisors ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0",
+        Some("UPDATE supervisors SET desired_running=1 WHERE bot_id IS NOT NULL AND generation>0"),
+    )
+    .await?;
+    add_column_with_backfill(
+        pool,
+        "supervisor_assignments",
+        "turn_status",
+        "ALTER TABLE supervisor_assignments ADD COLUMN turn_status TEXT",
+        Some("UPDATE supervisor_assignments SET turn_status='completed' WHERE status='completed'"),
+    )
+    .await?;
+    add_column_with_backfill(
+        pool,
+        "supervisor_assignments",
+        "legacy_closed",
+        "ALTER TABLE supervisor_assignments ADD COLUMN legacy_closed INTEGER NOT NULL DEFAULT 0",
+        Some("UPDATE supervisor_assignments SET legacy_closed=1 WHERE status IN ('completed','failed','cancelled')"),
+    )
+    .await?;
+    // Remaining additive columns have no one-shot data backfill.
     for (col, ddl) in [
-        // 1 once the user has started the manager, 0 after `supervisor-stop`. The watchdog only
-        // brings back a manager that is *supposed* to be running: a fresh `setup` stays down
-        // until a human starts it once, and an explicit stop stays stopped.
-        ("desired_running", "ALTER TABLE supervisors ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0"),
         // Consecutive automatic starts that did not bring the manager back, and when the next
         // one is due. Shared through the row so a second controller loop sees the same count.
         ("watchdog_attempts", "ALTER TABLE supervisors ADD COLUMN watchdog_attempts INTEGER NOT NULL DEFAULT 0"),
@@ -321,20 +344,9 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     ] {
         if !has_column(pool, "supervisors", col).await? {
             sqlx::query(ddl).execute(pool).await?;
-            if col == "desired_running" {
-                // A manager that was started before this column existed (generation > 0 is
-                // only ever bumped by `start`) was never told to stop, so it is still wanted.
-                sqlx::query("UPDATE supervisors SET desired_running=1 WHERE bot_id IS NOT NULL AND generation>0")
-                    .execute(pool)
-                    .await?;
-            }
         }
     }
     for (col, ddl) in [
-        // The turn's own last word, kept apart from the lifecycle status: `completed`,
-        // `completed_fallback`, `failed`, `dispatch_failed`. Losing it was how "the turn
-        // ended" turned into "the job is done".
-        ("turn_status", "ALTER TABLE supervisor_assignments ADD COLUMN turn_status TEXT"),
         // 0 when the result was scraped off the terminal instead of reported by a hook. An
         // assignment is never accepted automatically, and least of all on this evidence.
         ("evidence_complete", "ALTER TABLE supervisor_assignments ADD COLUMN evidence_complete INTEGER"),
@@ -345,10 +357,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         // The assignment that carries this one's unfinished part forward, and the pointer back.
         ("followup_assignment_id", "ALTER TABLE supervisor_assignments ADD COLUMN followup_assignment_id TEXT"),
         ("follow_up_of", "ALTER TABLE supervisor_assignments ADD COLUMN follow_up_of TEXT"),
-        // Closed under the pre-review semantics: the turn ended and the row was called
-        // `completed` without anyone accepting it. Kept closed (a backfill must not re-open a
-        // month of work) but never presented as an acceptance. See docs/SPEC.md §18.
-        ("legacy_closed", "ALTER TABLE supervisor_assignments ADD COLUMN legacy_closed INTEGER NOT NULL DEFAULT 0"),
         // Files / modules this assignment was handed, so an overlap with another open
         // assignment can at least be reported to AGM (§18.4).
         ("ownership_json", "ALTER TABLE supervisor_assignments ADD COLUMN ownership_json TEXT"),
@@ -372,21 +380,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     ] {
         if !has_column(pool, "supervisor_assignments", col).await? {
             sqlx::query(ddl).execute(pool).await?;
-            if col == "legacy_closed" {
-                sqlx::query(
-                    "UPDATE supervisor_assignments SET legacy_closed=1
-                       WHERE status IN ('completed','failed','cancelled')",
-                )
-                .execute(pool)
-                .await?;
-            }
-            if col == "turn_status" {
-                // Rows closed by the old `on_turn_done` really did see a completed turn; that
-                // fact is recoverable, the acceptance is not.
-                sqlx::query("UPDATE supervisor_assignments SET turn_status='completed' WHERE status='completed'")
-                    .execute(pool)
-                    .await?;
-            }
         }
     }
     for (col, ddl) in [
@@ -434,6 +427,18 @@ async fn table_exists(pool: &SqlitePool, table: &str) -> Result<bool> {
         .fetch_one(pool)
         .await?;
     Ok(n > 0)
+}
+
+async fn add_column_with_backfill(pool: &SqlitePool, table: &str, col: &str, ddl: &str, backfill: Option<&str>) -> Result<()> {
+    let mut tx = crate::db::begin_write(pool).await?;
+    if !crate::db::has_column(&mut *tx, table, col).await? {
+        sqlx::query(ddl).execute(&mut *tx).await?;
+        if let Some(backfill) = backfill {
+            sqlx::query(backfill).execute(&mut *tx).await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 pub(super) async fn has_column(pool: &SqlitePool, table: &str, col: &str) -> Result<bool> {
@@ -4591,6 +4596,135 @@ mod tests {
         set_status_detail(&p, Some("x")).await.unwrap();
         let s = get_or_init(&p).await.unwrap();
         assert_eq!((s.status.as_str(), s.status_detail.as_deref()), ("", Some("x")), "detail alone leaves status");
+    }
+
+    /// If startup stops after adding `desired_running` but before its backfill, a later startup
+    /// must not mistake the column for a completed migration and leave a previously started AGM
+    /// permanently disabled.
+    #[tokio::test]
+    async fn interrupted_desired_running_migration_rolls_back_and_recovers() {
+        let p = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for stmt in DDL.split(";\n") {
+            let s = stmt.trim();
+            if !s.is_empty() {
+                sqlx::query(s).execute(&p).await.unwrap();
+            }
+        }
+        sqlx::query("INSERT INTO supervisors (id, bot_id, generation, created_at, updated_at) VALUES ('AGM','b1',2,'t','t')")
+            .execute(&p).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_supervisor_migration BEFORE UPDATE ON supervisors BEGIN SELECT RAISE(ABORT, 'interrupted'); END")
+            .execute(&p).await.unwrap();
+
+        assert!(
+            migrate(&p).await.is_err(),
+            "fault injection stops the backfill"
+        );
+        assert!(
+            !has_column(&p, "supervisors", "desired_running")
+                .await
+                .unwrap(),
+            "column and backfill must be one atomic migration"
+        );
+        sqlx::query("DROP TRIGGER fail_supervisor_migration")
+            .execute(&p)
+            .await
+            .unwrap();
+        migrate(&p)
+            .await
+            .expect("the next startup must resume the migration");
+        let desired: i64 =
+            sqlx::query_scalar("SELECT desired_running FROM supervisors WHERE id='AGM'")
+                .fetch_one(&p)
+                .await
+                .unwrap();
+        assert_eq!(desired, 1, "the previously started manager remains wanted");
+    }
+
+    /// The closed-assignment compatibility backfills share the same interruption window as
+    /// `desired_running`: an added column alone is not proof its old rows were transformed.
+    #[tokio::test]
+    async fn interrupted_turn_status_backfill_rolls_back_and_recovers() {
+        let p = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for stmt in DDL.split(";\n") {
+            let s = stmt.trim();
+            if !s.is_empty() {
+                sqlx::query(s).execute(&p).await.unwrap();
+            }
+        }
+        // Skip the earlier supervisor-column backfills so this injected failure lands on the
+        // legacy assignment migration below.
+        sqlx::query(
+            "ALTER TABLE supervisors ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&p)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO supervisor_assignments (id,supervisor_id,target_bot_id,client_request_id,text,status,created_at,updated_at)
+                     VALUES ('a1','AGM','b1','c1','x','completed','t','t')")
+            .execute(&p).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_assignment_migration BEFORE UPDATE OF turn_status ON supervisor_assignments BEGIN SELECT RAISE(ABORT, 'interrupted'); END")
+            .execute(&p).await.unwrap();
+
+        assert!(
+            migrate(&p).await.is_err(),
+            "fault injection stops the turn_status backfill"
+        );
+        assert!(
+            !has_column(&p, "supervisor_assignments", "turn_status")
+                .await
+                .unwrap(),
+            "the column and recovered value must roll back together"
+        );
+        sqlx::query("DROP TRIGGER fail_assignment_migration")
+            .execute(&p)
+            .await
+            .unwrap();
+        migrate(&p)
+            .await
+            .expect("the next startup must resume the assignment migration");
+        let row: (Option<String>, i64) = sqlx::query_as(
+            "SELECT turn_status, legacy_closed FROM supervisor_assignments WHERE id='a1'",
+        )
+        .fetch_one(&p)
+        .await
+        .unwrap();
+        assert_eq!(row, (Some("completed".into()), 1));
+    }
+
+    /// The `legacy_closed` one-time backfill must also roll back its added column if startup is
+    /// interrupted. Pre-add `turn_status` so the injected failure lands on this migration.
+    #[tokio::test]
+    async fn interrupted_legacy_closed_backfill_rolls_back_and_recovers() {
+        let p = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        for stmt in DDL.split(";\n") {
+            let s = stmt.trim();
+            if !s.is_empty() {
+                sqlx::query(s).execute(&p).await.unwrap();
+            }
+        }
+        sqlx::query("ALTER TABLE supervisors ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0").execute(&p).await.unwrap();
+        sqlx::query("ALTER TABLE supervisor_assignments ADD COLUMN turn_status TEXT").execute(&p).await.unwrap();
+        sqlx::query("INSERT INTO supervisor_assignments (id,supervisor_id,target_bot_id,client_request_id,text,status,created_at,updated_at)
+                     VALUES ('a1','AGM','b1','c1','x','completed','t','t')")
+            .execute(&p).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_legacy_closed_migration BEFORE UPDATE OF legacy_closed ON supervisor_assignments BEGIN SELECT RAISE(ABORT, 'interrupted'); END")
+            .execute(&p).await.unwrap();
+
+        assert!(migrate(&p).await.is_err(), "fault injection stops the legacy_closed backfill");
+        assert!(!has_column(&p, "supervisor_assignments", "legacy_closed").await.unwrap(), "the column and backfill must roll back together");
+        sqlx::query("DROP TRIGGER fail_legacy_closed_migration").execute(&p).await.unwrap();
+        migrate(&p).await.expect("the next startup must resume the legacy_closed migration");
+        let closed: i64 = sqlx::query_scalar("SELECT legacy_closed FROM supervisor_assignments WHERE id='a1'")
+            .fetch_one(&p).await.unwrap();
+        assert_eq!(closed, 1);
     }
 
     /// The ACK / mark_delivered race. The manager reads the digest out of the prompt and acks
