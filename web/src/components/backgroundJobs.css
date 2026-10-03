@@ -93,10 +93,66 @@
   color: var(--warn);
 }
 
+/* 摘要列是按鈕（手機點開說明），長相照舊是一行字。 */
+.bg-jobs-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bg-jobs-age {
+  flex: none;
+  opacity: 0.85;
+}
+
+.bg-jobs-age::before {
+  content: '· ';
+}
+
+/* 桌機：說明句接在同一列後面；摘要列裡的「跑多久」說明句已經講了，不重複。 */
+.bg-jobs-bar .bg-jobs-age {
+  display: none;
+}
+
+.bg-jobs-detail {
+  min-width: 0;
+}
+
+/* 2026-10-03 使用者：手機上那塊藍色太佔空間——只留一行摘要，說明點開才看。 */
 @media (max-width: 640px) {
   .bg-jobs-bar {
     flex-wrap: wrap;
-    padding: 8px 14px;
+    gap: 2px 8px;
+    padding: 4px 14px;
+    font-size: 12.5px;
+    line-height: 1.35;
+  }
+
+  .bg-jobs-summary {
+    flex: 1 1 100%;
+    white-space: nowrap;
+  }
+
+  .bg-jobs-bar .bg-jobs-age {
+    display: inline;
+  }
+
+  .bg-jobs-detail {
+    display: none;
+  }
+
+  .bg-jobs-bar.open .bg-jobs-detail {
+    display: block;
+    flex: 1 1 100%;
+    opacity: 0.9;
   }
 }
 

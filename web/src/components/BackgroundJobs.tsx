@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useStore } from '../store/store'
 import {
   backgroundAge,
@@ -59,21 +60,29 @@ export function BackgroundJobsBadge({
   )
 }
 
-/** 聊天最底下（輸入框上方）的一條說明：最後一則之後它其實還在動。 */
+/**
+ * 聊天最底下（輸入框上方）的一條說明：最後一則之後它其實還在動。
+ * 手機只畫一行（燈＋狀態＋跑多久＋第一個工作），說明句與排程收起來、點一下才展開（2026-10-03 使用者：藍色那塊太佔空間）。
+ */
 export function BackgroundJobsBar({ botId }: { botId: string }) {
   const { n, kind, age, stuck } = useBackground(botId)
   const lines = useStore((s) => backgroundTaskLines(s.runs[botId]).join('\n'))
   const cron = useStore((s) => cronLabel(s.runs[botId]))
+  const [open, setOpen] = useState(false)
   if (n === 0) return null
+  const detail = stuck ? `已持續 ${age ?? '超過 3 小時'}，可能卡住或忘了收；要停就到 pane 裡處理。` : backgroundDetail(kind, n) + ageText(age)
   return (
-    <div className={`bg-jobs-bar${stuck ? ' bg-jobs-stuck' : ''}`} role="status">
-      <span className="bg-jobs-dot" aria-hidden="true" />
-      <strong>{stuck ? backgroundStuckLabel(n) : backgroundLabel(n)}</strong>
-      <span>
-        {stuck ? `已持續 ${age ?? '超過 3 小時'}，可能卡住或忘了收；要停就到 pane 裡處理。` : backgroundDetail(kind, n) + ageText(age)}
+    <div className={`bg-jobs-bar${stuck ? ' bg-jobs-stuck' : ''}${open ? ' open' : ''}`} role="status">
+      <button type="button" className="bg-jobs-summary" aria-expanded={open} title={detail} onClick={() => setOpen((v) => !v)}>
+        <span className="bg-jobs-dot" aria-hidden="true" />
+        <strong>{stuck ? backgroundStuckLabel(n) : backgroundLabel(n)}</strong>
+        {age && <span className="bg-jobs-age">{age}</span>}
+        {lines && <span className="bg-jobs-tasks">{lines.split('\n').join(' · ')}</span>}
+      </button>
+      <span className="bg-jobs-detail">
+        {detail}
+        {cron ? ` ${cron}` : ''}
       </span>
-      {lines && <span className="bg-jobs-tasks">{lines.split('\n').join(' · ')}</span>}
-      {cron && <span className="bg-jobs-tasks">{cron}</span>}
     </div>
   )
 }
