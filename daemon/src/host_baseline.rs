@@ -82,7 +82,8 @@ MAC_ONLY_PLUGINS="imessage discord"
 printf 'AM_BL os %s\n' "$(uname -s 2>/dev/null)"
 # 六個工具一次問完：每次 `$SHELL -lic` 都要讀完整個 rc（nvm／conda 動輒數秒），PROBE_SH 自己已經開了好幾次，
 # 再各開六次會把整趟探測推過 ssh 的 30 秒上限，連原本的 tools 偵測都跟著失敗。只認絕對路徑（alias 的字串不算，#666）。
-bl_paths=$( "${SHELL:-/bin/sh}" -lic 'for t in herdr rtk zsh bun jq gh; do printf "AM_BLP %s %s\n" "$t" "$(command -v "$t" 2>/dev/null | tail -1)"; done' 2>/dev/null </dev/null | grep '^AM_BLP ' )
+# HISTFILE=/dev/null：macOS /bin/sh 是 bash 3.2，-i 會把 history 寫進 $HOME。這支腳本必須只讀。
+bl_paths=$( HISTFILE=/dev/null "${SHELL:-/bin/sh}" -lic 'for t in herdr rtk zsh bun jq gh; do printf "AM_BLP %s %s\n" "$t" "$(command -v "$t" 2>/dev/null | tail -1)"; done' 2>/dev/null </dev/null | grep '^AM_BLP ' )
 bl_jq_path=$(printf '%s\n' "$bl_paths" | sed -n 's/^AM_BLP jq //p' | tail -1)
 case "$bl_jq_path" in /*) [ -x "$bl_jq_path" ] || bl_jq_path="" ;; *) bl_jq_path=$(command -v jq 2>/dev/null || true) ;; esac
 for t in herdr rtk zsh bun jq gh; do
