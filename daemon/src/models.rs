@@ -573,16 +573,31 @@ pub fn grok_title_model_effort(title: &str) -> (Option<String>, Option<String>) 
     (model, effort)
 }
 
+/// 視窗底部最後一個 `╰` 接到 `╯`（窄 pane 會拆成最多再兩行）。再往上的 `╰` 或
+/// `Switched to Grok …` 是對話裡的舊值。
+pub fn grok_composer_fragment(screen: &str) -> Option<String> {
+    const TAIL_LINES: usize = 8;
+    let lines: Vec<&str> = screen.lines().collect();
+    let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
+    let rel = tail.iter().rposition(|line| line.trim().starts_with('╰'))?;
+    let mut joined = tail[rel].trim().to_string();
+    if !joined.contains('╯') {
+        for extra in tail.iter().skip(rel + 1).take(2) {
+            joined.push(' ');
+            joined.push_str(extra.trim());
+            if extra.contains('╯') {
+                break;
+            }
+        }
+    }
+    let idx = joined.find("Grok ").or_else(|| joined.find("grok "))?;
+    Some(joined[idx..].to_string())
+}
+
 /// grok TUI 把實際 effort 畫在框底 `╰── Grok 4.6 (high) · always-approve ─╯`。
 /// 讀這行只做觀察。啟動不再因為對不上就送 `/effort`（該 slash 會寫進 config.toml）。
 pub fn grok_effort_from_screen(screen: &str) -> Option<String> {
-    for line in screen.lines() {
-        let Some(idx) = line.find("Grok ").or_else(|| line.find("grok ")) else { continue };
-        if let (_, Some(e)) = grok_title_model_effort(&line[idx..]) {
-            return Some(e);
-        }
-    }
-    None
+    grok_title_model_effort(&grok_composer_fragment(screen)?).1
 }
 
 #[cfg(test)]
@@ -780,6 +795,19 @@ mod tests {
         let medium = "  ╰──────────────────────────────── Grok 4.6 (medium) · always-approve ─╯\n";
         assert_eq!(grok_effort_from_screen(medium).as_deref(), Some("medium"));
         assert_eq!(grok_effort_from_screen("claude composer, no grok footer"), None);
+    }
+
+    /// `/effort` 之後對話裡還留著上一則 `Switched to … (low effort)`。回讀必須用框底，不能用上面那則。
+    #[test]
+    fn grok_effort_readback_uses_the_composer_not_an_earlier_switch_line() {
+        let screen = "\
+  ⏺ Switched to Grok 4.7 (low effort)
+
+  ╭────────────────────────────────────────────────╮
+  │ ❯                                              │
+  ╰────────────── Grok 4.7 (high) · always-approve ─╯
+";
+        assert_eq!(grok_effort_from_screen(screen).as_deref(), Some("high"));
     }
 
     /// Real `settings.json` shapes seen on this machine and on m4p, 2026-09-07: an account
