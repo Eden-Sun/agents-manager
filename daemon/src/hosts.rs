@@ -752,6 +752,8 @@ fn ssh_fake_for(host: &str) -> Option<SshFake> {
 async fn forget_host_observations(app: &Arc<App>, name: &str) {
     let prefix = format!("{name}/");
     app.tools.lock().await.remove(name);
+    app.host_baseline.lock().await.remove(name);
+    app.remote_shim_stale.lock().await.remove(name);
     let removed: Vec<String> = {
         let mut quotas = app.quotas.lock().await;
         let removed = quotas.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
@@ -1359,6 +1361,49 @@ mod tests {
         let ev = seen.expect("丟掉的額度 key 要發 quota_updated");
         assert!(ev.data["quota"].is_null(), "{}", ev.data);
         assert_eq!(ev.data["host"], host);
+    }
+
+    #[tokio::test]
+    async fn xreview_forgetting_a_host_also_drops_its_baseline_and_stale_shim_incident() {
+        let env = crate::testing::env().await;
+        let host = "forget-observations-test";
+        env.app.host_baseline.lock().await.insert(
+            host.into(),
+            crate::host_baseline::BaselineReport {
+                os: Some("Linux".into()),
+                issues: Some(vec![]),
+                checked_at: crate::db::now(),
+                failed_at: None,
+                error: None,
+                stale: false,
+            },
+        );
+        env.app
+            .remote_shim_stale
+            .lock()
+            .await
+            .insert(host.into(), "old host shim could not be refreshed".into());
+        env.app
+            .remote_shim_stale
+            .lock()
+            .await
+            .insert("other-host".into(), "keep this other host".into());
+
+        forget_host_observations(&env.app, host).await;
+
+        assert!(
+            !env.app.host_baseline.lock().await.contains_key(host),
+            "a same-name replacement must not inherit another machine's baseline"
+        );
+        let stale = env.app.remote_shim_stale.lock().await;
+        assert!(
+            !stale.contains_key(host),
+            "removed hosts must not keep reporting stale shim incidents"
+        );
+        assert_eq!(
+            stale.get("other-host").map(String::as_str),
+            Some("keep this other host")
+        );
     }
 
     #[tokio::test]

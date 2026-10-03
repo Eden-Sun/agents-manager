@@ -875,6 +875,13 @@ async fn prompt_inner(
     }
     // 已軟刪的 bot 不收 prompt（#338）：pane 可能還活著（停機中、停機失敗保留 run），打進去是打進使用者已經刪掉的東西。
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    // 專案刪除時的 child 清理可能因 DB 暫時故障而重試：那段期間 child row 可能仍是 live，但
+    // 專案已定案刪除。檢查放在 per-bot 鎖內，避免驗過之後剛好被 delete_project 軟刪仍送進舊 pane。
+    db::project(&app.db, &bot.project_id)
+        .await
+        .map_err(up)?
+        .filter(|p| p.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
     let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
     // Resolve first so an unknown id is a plain 400, not an undelivered turn.
     let files = crate::attach::resolve(app, bot_id, attachment_ids)
@@ -1250,6 +1257,29 @@ mod prompt_tests {
         bot_id: String,
         conv: String,
         run_id: String,
+    }
+
+    #[tokio::test]
+    async fn xreview_prompt_refuses_a_live_bot_after_its_project_is_deleted() {
+        let f = fixture("codex", "test").await;
+        let app = f.env.app.clone();
+        sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?")
+            .bind(db::now())
+            .bind(&f.env.project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let err = prompt(&app, &f.bot_id, "must not reach the old pane", "xreview-project-deleted")
+            .await
+            .expect_err("a live child row under a deleted project must not accept prompt delivery");
+        assert!(matches!(err, LcError::NotFound(ref what) if what == "project"), "unexpected error: {err:?}");
+        let turns: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id = ?")
+            .bind(&f.conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(turns, 0, "the rejected prompt must not create a turn");
     }
 
     /// #341：排隊用的 turn INSERT 真的寫不進去（不是唯一約束衝突）不能被說成「已經有一筆在排」的 409；真的重複才是 409。

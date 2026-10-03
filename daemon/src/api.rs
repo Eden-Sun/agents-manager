@@ -2474,6 +2474,29 @@ async fn live_projects_on_host(app: &Arc<App>, host: &str) -> Result<Vec<db::Pro
     Ok(db::live_projects(&app.db).await.map_err(any_err)?.into_iter().filter(|p| p.host == host).collect())
 }
 
+/// Bot work that keeps a host generation relevant after its project has been soft-deleted.
+/// Shared-session hosts intentionally keep the other daemon's remote bot directories, so only
+/// their live bot rows and active runs block host removal/repointing.
+async fn host_bots_requiring_attention(app: &Arc<App>, host: &str) -> Result<Vec<String>, LcError> {
+    let require_remote_purge = !crate::shared_host::is_shared(app, host).await;
+    Ok(sqlx::query_scalar(
+        "SELECT b.id FROM bots b JOIN projects p ON p.id = b.project_id
+         WHERE p.host = ? AND (
+           b.deleted_at IS NULL
+           OR EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = b.id AND r.state IN ('starting','running','stopping'))
+           OR (? = 1 AND NOT EXISTS (
+             SELECT 1 FROM remote_bot_dir_purges rp WHERE rp.bot_id = b.id AND rp.purged_at IS NOT NULL
+           ))
+         )
+         ORDER BY b.id",
+    )
+    .bind(host)
+    .bind(if require_remote_purge { 1_i64 } else { 0_i64 })
+    .fetch_all(&app.db)
+    .await
+    .map_err(any_err)?)
+}
+
 async fn create_host(
     State(app): State<Arc<App>>,
     Query(q): Query<DeleteQuery>,
@@ -2519,9 +2542,12 @@ async fn create_host(
     // run 被判成不見了收掉；重則新機器上剛好有同樣的 pane id（herdr 的 id 是每個實例自己編的），
     // prompt 與按鍵就送進一顆完全不相干的 pane。刪掉只是「連線沒了」，改掉是「連線還在、但接到別台」。
     let existing = app.cfg.get().await.hosts.into_iter().find(|h| h.name == cfg.name);
-    if let Some(old) = existing.filter(|old| repoints_host(old, &cfg)) {
-        let live = live_projects_on_host(&app, &b.name).await?;
-        if !live.is_empty() && q.confirm.as_deref() != Some("repoint") {
+    let is_repoint = existing.as_ref().is_some_and(|old| repoints_host(old, &cfg));
+    let repoint_bots = if is_repoint {
+        let projects = live_projects_on_host(&app, &b.name).await?;
+        let bots = host_bots_requiring_attention(&app, &b.name).await?;
+        if (!projects.is_empty() || !bots.is_empty()) && q.confirm.as_deref() != Some("repoint") {
+            let old = existing.as_ref().expect("is_repoint implies an existing host");
             return Err(LcError::conflict(
                 "host still used by projects",
                 json!({
@@ -2529,23 +2555,63 @@ async fn create_host(
                     "host": b.name,
                     "from": {"ssh": old.ssh, "ssh_port": old.ssh_port, "herdr_session": old.herdr_session},
                     "to": {"ssh": cfg.ssh, "ssh_port": cfg.ssh_port, "herdr_session": cfg.herdr_session},
-                    "projects": live.iter().map(|p| json!({"id": p.id, "label": p.label})).collect::<Vec<_>>(),
-                    "hint": "先把這些專案移走或刪掉；真的要改就帶 ?confirm=repoint（既有的 run 會留著舊機器的 pane id）",
+                    "projects": projects.iter().map(|p| json!({"id": p.id, "label": p.label})).collect::<Vec<_>>(),
+                    "bot_ids": bots,
+                    "hint": "先移走專案、停止孤兒 bot，並等遠端 bot 目錄清理完成；真的要改就帶 ?confirm=repoint（既有的 run 會留著舊機器的 pane id）",
                 }),
             ));
         }
-    }
+        bots
+    } else {
+        Vec::new()
+    };
     let c2 = cfg.clone();
-    app.cfg
+    let confirm_repoint = q.confirm.as_deref() == Some("repoint");
+    let update = app
+        .cfg
         .update(move |f| {
+            // Project registration/deletion also commits through this config lock. Recheck there
+            // so a project that lands after the async DB snapshot cannot slip past confirmation.
+            if !confirm_repoint
+                && f.hosts.iter().find(|h| h.name == c2.name).is_some_and(|old| repoints_host(old, &c2))
+                && f.projects.iter().any(|p| p.host == c2.name)
+            {
+                anyhow::bail!("host_repoint_in_use");
+            }
             match f.hosts.iter_mut().find(|h| h.name == c2.name) {
                 Some(existing) => *existing = c2,
                 None => f.hosts.push(c2),
             }
             Ok(())
         })
-        .await
-        .map_err(any_err)?;
+        .await;
+    if let Err(e) = update {
+        if e.to_string() == "host_repoint_in_use" {
+            let old = existing.as_ref().expect("a raced repoint retains its old host config");
+            let projects: Vec<_> = app
+                .cfg
+                .get()
+                .await
+                .projects
+                .into_iter()
+                .filter(|p| p.host == cfg.name)
+                .map(|p| json!({"id": p.id, "label": p.label}))
+                .collect();
+            return Err(LcError::conflict(
+                "host still used by projects",
+                json!({
+                    "reason": "host_repoint_in_use",
+                    "host": b.name,
+                    "from": {"ssh": old.ssh, "ssh_port": old.ssh_port, "herdr_session": old.herdr_session},
+                    "to": {"ssh": cfg.ssh, "ssh_port": cfg.ssh_port, "herdr_session": cfg.herdr_session},
+                    "projects": projects,
+                    "bot_ids": repoint_bots,
+                    "hint": "先移走專案、停止孤兒 bot，並等遠端 bot 目錄清理完成；真的要改就帶 ?confirm=repoint（既有的 run 會留著舊機器的 pane id）",
+                }),
+            ));
+        }
+        return Err(any_err(e));
+    }
     let hosts = app.cfg.get().await.hosts;
     let changed_hosts = app.hosts.apply_config(&app, &hosts).await;
     let (connected, error) = if changed_hosts.contains(&b.name) {
@@ -2575,14 +2641,41 @@ async fn delete_host(
             return Err(LcError::conflict("host still used by projects", json!({"project_id": p.id})));
         }
     }
+    // Project deletion may leave a soft-deleted bot's remote directory (including its herdr/cargo shims)
+    // waiting for `remote_purge`, or a late child may still have an active run. Removing the host row
+    // would discard the only route needed to stop that run and finish cleaning its directory.
+    let pending_bots = host_bots_requiring_attention(&app, &name).await?;
+    if !pending_bots.is_empty() {
+        return Err(LcError::conflict(
+            "host has bots requiring cleanup",
+            json!({
+                "reason": "host_bot_cleanup_pending",
+                "host": name,
+                "bot_ids": pending_bots,
+                "hint": "先停止孤兒 bot，並等遠端 bot 目錄與 shim 清理完成，再移除主機",
+            }),
+        ));
+    }
     let n2 = name.clone();
-    app.cfg
+    let remove = app
+        .cfg
         .update(move |f| {
+            // Project registration shares this config lock. Recheck while holding it so a project
+            // committed after the DB snapshot cannot be left pointing at a host we just removed.
+            if f.projects.iter().any(|p| p.host == n2) {
+                anyhow::bail!("host_still_used_by_projects");
+            }
             f.hosts.retain(|h| h.name != n2);
             Ok(())
         })
-        .await
-        .map_err(any_err)?;
+        .await;
+    if let Err(e) = remove {
+        if e.to_string() == "host_still_used_by_projects" {
+            let project_id = app.cfg.get().await.projects.into_iter().find(|p| p.host == name).and_then(|p| p.id);
+            return Err(LcError::conflict("host still used by projects", json!({"project_id": project_id})));
+        }
+        return Err(any_err(e));
+    }
     app.hosts.remove(&app, &name).await;
     app.emit("project_changed", json!({})).await;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
@@ -2881,6 +2974,221 @@ mod identity_auth_error_tests {
             .expect("?confirm=repoint is the documented escape hatch");
         let after = e.app.cfg.get().await.hosts.into_iter().find(|h| h.name == "zz92").unwrap();
         assert_eq!(after.ssh, "new-box");
+    }
+
+    #[tokio::test]
+    async fn xreview_deleting_a_host_is_refused_while_a_deleted_bots_remote_shim_is_unpurged() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let host = "zz92-cleanup";
+        app.cfg
+            .update(|f| {
+                f.hosts.push(HostCfg {
+                    shared_session: false,
+                    name: host.into(),
+                    ssh: "unused-test-host".into(),
+                    ssh_port: 22,
+                    ssh_opts: vec![],
+                    herdr_session: "agents-manager".into(),
+                    remote_path: String::new(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET host = ?, deleted_at = ? WHERE id = ?")
+            .bind(host)
+            .bind(crate::db::now())
+            .bind(&e.project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let bot = crate::testing::claude_bot(&app, &e.project_id, "deleted-on-remote").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+            .bind(crate::db::now())
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        crate::remote_purge::record(&app, &bot.id, host, false, Some("ssh unavailable")).await;
+
+        let err = delete_host(State(app.clone()), Path(host.into()))
+            .await
+            .expect_err(
+            "do not forget the only host route to a deleted bot's still-live directory and shims",
+        );
+        let (status, body) = body_of(err).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["reason"], "host_bot_cleanup_pending", "{body}");
+        assert!(
+            body["bot_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id == &bot.id),
+            "{body}"
+        );
+        assert!(
+            app.cfg.get().await.hosts.iter().any(|h| h.name == host),
+            "a failed cleanup check must not remove the host config"
+        );
+    }
+
+    #[tokio::test]
+    async fn xreview_deleting_a_host_is_refused_for_a_live_orphan_bot_in_a_deleted_project() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let host = "zz92-orphan";
+        app.cfg
+            .update(|f| {
+                f.hosts.push(HostCfg {
+                    shared_session: false,
+                    name: host.into(),
+                    ssh: "unused-test-host".into(),
+                    ssh_port: 22,
+                    ssh_opts: vec![],
+                    herdr_session: "agents-manager".into(),
+                    remote_path: String::new(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET host = ?, deleted_at = ? WHERE id = ?")
+            .bind(host)
+            .bind(crate::db::now())
+            .bind(&e.project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let bot = crate::testing::claude_bot(&app, &e.project_id, "orphan-on-remote").await;
+        crate::testing::fake_run(&app, &bot.id).await;
+
+        let err = delete_host(State(app.clone()), Path(host.into()))
+            .await
+            .expect_err("a live orphan run may still be using its remote bot shim");
+        let (status, body) = body_of(err).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["reason"], "host_bot_cleanup_pending", "{body}");
+        assert!(
+            body["bot_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id == &bot.id),
+            "{body}"
+        );
+        assert!(app.cfg.get().await.hosts.iter().any(|h| h.name == host));
+    }
+
+    #[tokio::test]
+    async fn xreview_delete_host_rechecks_projects_while_removing_the_host_config() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let host = "zz92-config-project-race";
+        app.cfg
+            .update(|f| {
+                f.hosts.push(HostCfg {
+                    shared_session: false,
+                    name: host.into(),
+                    ssh: "unused-test-host".into(),
+                    ssh_port: 22,
+                    ssh_opts: vec![],
+                    herdr_session: "agents-manager".into(),
+                    remote_path: String::new(),
+                });
+                f.projects.push(crate::config::ProjectCfg {
+                    id: Some("01CONFIGRACE".into()),
+                    path: "/tmp/xreview-host-config-race".into(),
+                    label: "config race".into(),
+                    host: host.into(),
+                    bots: vec![],
+                    handed_off_to: None,
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // Model a project commit after the early DB snapshot. Host removal shares project
+        // creation's config lock, so this staged config entry must be detected before removal.
+
+        let err = delete_host(State(app.clone()), Path(host.into()))
+            .await
+            .expect_err(
+                "the config-lock recheck must catch a project published after the DB snapshot",
+            );
+        let (status, body) = body_of(err).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["project_id"], "01CONFIGRACE", "{body}");
+        assert!(
+            app.cfg.get().await.hosts.iter().any(|h| h.name == host),
+            "failed removal must preserve the host config"
+        );
+    }
+
+    #[tokio::test]
+    async fn xreview_repoint_confirmation_covers_an_active_orphan_run() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let host = "zz92-repoint-orphan";
+        app.cfg
+            .update(|f| {
+                f.hosts.push(HostCfg {
+                    shared_session: false,
+                    name: host.into(),
+                    ssh: "old-test-target".into(),
+                    ssh_port: 22,
+                    ssh_opts: vec![],
+                    herdr_session: "agents-manager".into(),
+                    remote_path: String::new(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET host = ?, deleted_at = ? WHERE id = ?")
+            .bind(host)
+            .bind(crate::db::now())
+            .bind(&e.project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let bot = crate::testing::claude_bot(&app, &e.project_id, "orphan-run").await;
+        crate::testing::fake_run(&app, &bot.id).await;
+        crate::hosts::set_ssh_fake(host, |_script| {
+            anyhow::bail!("test guard: never contact a remote host")
+        });
+
+        let err = create_host(
+            State(app.clone()),
+            Query(DeleteQuery::default()),
+            Json(NewHost {
+                name: host.into(),
+                ssh: "new-test-target".into(),
+                ssh_port: None,
+                ssh_opts: None,
+                herdr_session: None,
+                remote_path: None,
+                shared_session: None,
+            }),
+        )
+        .await
+        .expect_err("an active run hidden under a deleted project must still require explicit repoint confirmation");
+        let (status, body) = body_of(err).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["reason"], "host_repoint_in_use", "{body}");
+        assert_eq!(body["bot_ids"][0], bot.id, "{body}");
+        assert_eq!(
+            app.cfg
+                .get()
+                .await
+                .hosts
+                .iter()
+                .find(|h| h.name == host)
+                .unwrap()
+                .ssh,
+            "old-test-target"
+        );
     }
 
     /// API.md：host 不存在是 404。沒寫 host 的身分在遠端也生效，所以找不到主機時不能先走到
