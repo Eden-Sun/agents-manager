@@ -67,20 +67,28 @@ pub(crate) async fn target(app: &Arc<App>, bot_id: &str) -> Result<Option<Target
 /// 兩條遠端路徑共用的 identity 與 link-count 檢查。GNU `test -ef` 比 device＋inode；
 /// BSD `/dev/fd/N` 的 device 是 devfs，故改用 lsof 讀同一 shell 中 fd 3/4 的真實 device＋inode。
 fn file_identity_helpers(lsof_path: &str) -> String {
+    file_identity_helpers_with_paths(lsof_path, "/usr/bin/lsof")
+}
+
+fn file_identity_helpers_with_paths(lsof_path: &str, fallback_lsof_path: &str) -> String {
     let template = r#"am_same() {
   if [ -n "$G" ]; then [ "$F" -ef /dev/fd/3 ]; return $?; fi
   exec 4< "$F" || return 1
   if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ]; then exec 4<&-; return 1; fi
   lsof_bin=__AM_LSOF_PATH__
-  [ -x "$lsof_bin" ] || lsof_bin=/usr/bin/lsof
+  [ -x "$lsof_bin" ] || lsof_bin=__AM_LSOF_FALLBACK__
   [ -x "$lsof_bin" ] || { exec 4<&-; return 1; }
-  ids=$("$lsof_bin" -a -p "$$" -d 3,4 -FfDi 2>/dev/null | /usr/bin/awk '
-    /^f3$/ || /^f3[^0-9]/ { fd=3; seen3=1; next }
-    /^f4$/ || /^f4[^0-9]/ { fd=4; seen4=1; next }
-    /^D/ && fd { dev[fd]=substr($0,2); next }
-    /^i/ && fd { ino[fd]=substr($0,2); next }
+  lsof_out=$("$lsof_bin" -a -p "$$" -d 3,4 -FfDi 2>/dev/null) || { exec 4<&-; return 1; }
+  ids=$(printf '%s\n' "$lsof_out" | /usr/bin/awk '
+    /^f3$/ || /^f3[^0-9]/ { if (seen3++) bad=1; fd=3; next }
+    /^f4$/ || /^f4[^0-9]/ { if (seen4++) bad=1; fd=4; next }
+    /^f[0-9]/ { bad=1; fd=0; next }
+    /^D/ && fd { if (seen_dev[fd]++) bad=1; dev[fd]=substr($0,2); next }
+    /^i/ && fd { if (seen_ino[fd]++) bad=1; ino[fd]=substr($0,2); next }
     END {
-      if (seen3 && seen4 && dev[3] != "" && ino[3] != "" && dev[4] != "" && ino[4] != "" && (dev[3] "@") == (dev[4] "@") && (ino[3] "@") == (ino[4] "@")) print "same"
+      if (seen3 == 1 && seen4 == 1 && !bad && seen_dev[3] == 1 && seen_ino[3] == 1 && seen_dev[4] == 1 && seen_ino[4] == 1 &&
+          dev[3] ~ /^0x[[:xdigit:]]+$/ && dev[4] ~ /^0x[[:xdigit:]]+$/ && ino[3] ~ /^[0-9]+$/ && ino[4] ~ /^[0-9]+$/ &&
+          dev[3] == dev[4] && ino[3] == ino[4]) print "same"
       else exit 1
     }')
   ok=$?
@@ -93,7 +101,9 @@ am_singlelink() {
   [ "$l" = 1 ]
 }
 "#;
-    template.replace("__AM_LSOF_PATH__", &sh_quote(lsof_path))
+    template
+        .replace("__AM_LSOF_PATH__", &sh_quote(lsof_path))
+        .replace("__AM_LSOF_FALLBACK__", &sh_quote(fallback_lsof_path))
 }
 
 fn list_script(dir: &str) -> String {
@@ -563,7 +573,7 @@ exec /usr/bin/stat "$@"
         std::fs::write(
             &lsof,
             format!(
-                "#!/bin/sh\nprintf 'p123\\nf3r\\nD{fd_device}\\ni{fd_inode}\\nf4r\\nD{path_device}\\ni{path_inode}\\n'\n",
+                "#!/bin/sh\nprintf 'p123\\nf3r\\nD0x{fd_device:x}\\ni{fd_inode}\\nf4r\\nD0x{path_device:x}\\ni{path_inode}\\n'\n",
                 path_device = path_device,
                 path_inode = path_inode,
                 fd_device = fd_device,
@@ -574,6 +584,13 @@ exec /usr/bin/stat "$@"
         std::fs::set_permissions(&lsof, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
         (bin, path)
+    }
+
+    fn install_lsof(bin: &std::path::Path, script: &str) {
+        let lsof = bin.join("lsof");
+        std::fs::write(&lsof, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&lsof, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     fn run_download_with_bsd_stat_devices(
@@ -831,6 +848,99 @@ exit 1
         let listed = parse_list(&listed_out, 1_000).unwrap();
         assert!(!listed.iter().any(|f| f["name"] == "report.txt"), "listing accepted nlink 2: {listed:?}");
         std::fs::remove_dir_all(&shim_list).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// 不完整／失敗的 lsof 即使先吐出看似相同的 fd identity，也不能因 awk 的成功狀態而放行。
+    #[test]
+    fn macos_local_lsof_partial_output_then_slow_failure_is_rejected_by_listing_and_download() {
+        let base = sandbox("lsof-partial-failure");
+        let d = base.join("outbox");
+        std::fs::write(d.join("report.txt"), b"hello").unwrap();
+        let lsof = "#!/bin/sh\nprintf 'f3r\\nD0x1\\ni42\\nf4r\\nD0x1\\ni42\\n'\nsleep 0.05\nexit 7\n";
+
+        let (download_bin, path) = bsd_stat_tools(1, 42, 1, 42, 1);
+        install_lsof(&download_bin, lsof);
+        let download_script = file_script_gap_with_lsof(&d.to_string_lossy(), "report.txt", "", &download_bin.join("lsof").to_string_lossy());
+        let download = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(download_script)
+            .env("PATH", &path)
+            .env("AM_TEST_STAT_LOG", download_bin.join("stat.log"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&download.stdout).trim(), "AM_OUTBOX_MISSING", "failed lsof output must not authorize download");
+
+        let (list_bin, path) = bsd_stat_tools(1, 42, 1, 42, 1);
+        install_lsof(&list_bin, lsof);
+        let list_script = list_script_race_with_lsof(&d.to_string_lossy(), "", "", &list_bin.join("lsof").to_string_lossy());
+        let listed = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(list_script)
+            .env("PATH", path)
+            .env("AM_TEST_STAT_LOG", list_bin.join("stat.log"))
+            .output()
+            .unwrap();
+        let files = parse_list(&String::from_utf8_lossy(&listed.stdout), 1_000).unwrap();
+        assert!(!files.iter().any(|f| f["name"] == "report.txt"), "failed lsof output must not authorize listing: {files:?}");
+
+        std::fs::remove_dir_all(&download_bin).unwrap();
+        std::fs::remove_dir_all(&list_bin).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn macos_local_lsof_unknown_device_format_is_rejected_by_listing_and_download() {
+        let base = sandbox("lsof-unknown-device");
+        let d = base.join("outbox");
+        std::fs::write(d.join("report.txt"), b"hello").unwrap();
+        let lsof = "#!/bin/sh\nprintf 'f3r\\nD?\\ni42\\nf4r\\nD?\\ni42\\n'\n";
+
+        let (download_bin, path) = bsd_stat_tools(1, 42, 1, 42, 1);
+        install_lsof(&download_bin, lsof);
+        let download_script = file_script_gap_with_lsof(&d.to_string_lossy(), "report.txt", "", &download_bin.join("lsof").to_string_lossy());
+        let download = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(download_script)
+            .env("PATH", &path)
+            .env("AM_TEST_STAT_LOG", download_bin.join("stat.log"))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&download.stdout).trim(), "AM_OUTBOX_MISSING", "unknown device IDs cannot prove identity");
+
+        let (list_bin, path) = bsd_stat_tools(1, 42, 1, 42, 1);
+        install_lsof(&list_bin, lsof);
+        let list_script = list_script_race_with_lsof(&d.to_string_lossy(), "", "", &list_bin.join("lsof").to_string_lossy());
+        let listed = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(list_script)
+            .env("PATH", path)
+            .env("AM_TEST_STAT_LOG", list_bin.join("stat.log"))
+            .output()
+            .unwrap();
+        let files = parse_list(&String::from_utf8_lossy(&listed.stdout), 1_000).unwrap();
+        assert!(!files.iter().any(|f| f["name"] == "report.txt"), "unknown device IDs cannot prove identity: {files:?}");
+
+        std::fs::remove_dir_all(&download_bin).unwrap();
+        std::fs::remove_dir_all(&list_bin).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn macos_local_missing_lsof_fails_closed() {
+        let base = sandbox("lsof-missing");
+        let d = base.join("outbox");
+        let file = d.join("report.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let helpers = file_identity_helpers_with_paths("/missing/primary-lsof", "/missing/fallback-lsof");
+        let script = format!(
+            "D={}; F={}; G=;\n{}\nexec 3< \"$F\"\nif am_same; then echo same; else echo unverified; fi\n",
+            sh_quote(&d.to_string_lossy()),
+            sh_quote(&file.to_string_lossy()),
+            helpers,
+        );
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "unverified");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

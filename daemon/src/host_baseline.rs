@@ -16,7 +16,7 @@ pub const REQUIRED_TOOLS: [&str; 6] = ["herdr", "rtk", "zsh", "bun", "jq", "gh"]
 /// 每個 claude 身分的設定目錄裡該有的檔案：`(檔名, 嚴重度)`。
 const CLAUDE_FILES: [(&str, &str); 4] =
     [("settings.json", CRITICAL), ("statusline-command.sh", CRITICAL), ("CLAUDE.md", WARN), ("RTK.md", WARN)];
-/// `settings.json` 該有的頂層鍵（只看有沒有，不比內容：內容是各主機自己的）。
+/// `settings.json` 該有的鍵（只看有沒有，不比內容：內容是各主機自己的）。
 const CLAUDE_KEYS: [(&str, &str); 4] =
     [("statusLine", CRITICAL), ("hooks", CRITICAL), ("permissions", WARN), ("defaultMode", WARN)];
 
@@ -83,6 +83,8 @@ printf 'AM_BL os %s\n' "$(uname -s 2>/dev/null)"
 # 六個工具一次問完：每次 `$SHELL -lic` 都要讀完整個 rc（nvm／conda 動輒數秒），PROBE_SH 自己已經開了好幾次，
 # 再各開六次會把整趟探測推過 ssh 的 30 秒上限，連原本的 tools 偵測都跟著失敗。只認絕對路徑（alias 的字串不算，#666）。
 bl_paths=$( "${SHELL:-/bin/sh}" -lic 'for t in herdr rtk zsh bun jq gh; do printf "AM_BLP %s %s\n" "$t" "$(command -v "$t" 2>/dev/null | tail -1)"; done' 2>/dev/null </dev/null | grep '^AM_BLP ' )
+bl_jq_path=$(printf '%s\n' "$bl_paths" | sed -n 's/^AM_BLP jq //p' | tail -1)
+case "$bl_jq_path" in /*) [ -x "$bl_jq_path" ] || bl_jq_path="" ;; *) bl_jq_path=$(command -v jq 2>/dev/null || true) ;; esac
 for t in herdr rtk zsh bun jq gh; do
   p=$(printf '%s\n' "$bl_paths" | sed -n "s/^AM_BLP $t //p" | tail -1)
   case "$p" in /*) ;; *) p="" ;; esac
@@ -92,30 +94,36 @@ for t in herdr rtk zsh bun jq gh; do
 done
 bl_has() { [ -e "$1" ] && printf 1 || printf 0; }
 bl_plugin() { [ -f "$1" ] && grep -Eq "\"$2@[^\"]*\"[[:space:]]*:[[:space:]]*true" "$1" 2>/dev/null && printf 1 || printf 0; }
-bl_key() { [ -f "$1" ] && grep -Eq "\"$2\"[[:space:]]*:" "$1" 2>/dev/null && printf 1 || printf 0; }
+bl_key() {
+  [ -f "$1" ] || { printf 0; return; }
+  [ -n "$bl_jq_path" ] && [ -x "$bl_jq_path" ] || { printf 0; return; }
+  if [ "$2" = defaultMode ]; then
+    "$bl_jq_path" -e 'type == "object" and (.permissions | type == "object" and has("defaultMode"))' "$1" >/dev/null 2>&1 && printf 1 || printf 0
+  else
+    "$bl_jq_path" -e --arg key "$2" 'type == "object" and has($key)' "$1" >/dev/null 2>&1 && printf 1 || printf 0
+  fi
+}
 # `features.hooks = true`，或 `[features]` 表裡的 `hooks = true`。false／沒寫＝0。不開 login shell。
 bl_features_hooks() {
   [ -f "$1" ] || { printf 0; return; }
-  if grep -Eq '^[[:space:]]*features\.hooks[[:space:]]*=[[:space:]]*true([[:space:]]*#.*)?$' "$1" 2>/dev/null; then
-    printf 1; return
-  fi
-  in_features=0
-  while IFS= read -r line || [ -n "$line" ]; do
-    line=$(printf '%s' "$line" | tr -d '\r')
-    case $line in
-      \[features\]*) in_features=1 ;;
-      \[*) in_features=0 ;;
-      *)
-        if [ "$in_features" = 1 ]; then
-          trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//')
-          case $trimmed in
-            'hooks = true'*|'hooks=true'*) printf 1; return ;;
-          esac
-        fi
-        ;;
-    esac
-  done < "$1"
-  printf 0
+  /usr/bin/awk '
+    BEGIN { root = 1 }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      sub(/^[[:blank:]]*/, "", line)
+      if (line == "" || line ~ /^#/) next
+      if (line ~ /^\[/) {
+        in_features = (line ~ /^\[features\][[:blank:]]*(#.*)?$/)
+        root = 0
+        next
+      }
+      sub(/[[:blank:]]+#.*/, "", line)
+      if ((root && line ~ /^features\.hooks[[:blank:]]*=[[:blank:]]*true[[:blank:]]*$/) ||
+          (in_features && line ~ /^hooks[[:blank:]]*=[[:blank:]]*true[[:blank:]]*$/)) found = 1
+    }
+    END { exit !found }
+  ' "$1" && printf 1 || printf 0
 }
 # 同一個目錄只查一次。身分名只認一般字元；路徑不印出來。
 bl_seen="|"
@@ -149,6 +157,7 @@ printf '%s\n' "$al" | grep -E '(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]=' | wh
   name=$(printf '%s\n' "$line" | sed -n 's/.*\(cc[0-6]\)=.*/\1/p' | head -1)
   dir=$(printf '%s\n' "$line" | sed -n 's/.*CLAUDE_CONFIG_DIR=["'\'']\{0,1\}\([^[:space:]"'\'']*\).*/\1/p' | head -1)
   case "$dir" in
+    '${HOME}/'*) dir="$HOME/${dir#'${HOME}/'}" ;;
     \$HOME/*) dir="$HOME/${dir#\$HOME/}" ;;
     "~/"*) dir="$HOME/${dir#~/}" ;;
   esac
