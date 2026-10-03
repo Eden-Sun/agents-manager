@@ -208,10 +208,11 @@ const GROUP_UNREAD_SQL: &str = "SELECT b.project_id, COUNT(DISTINCT m.turn_id)
           GROUP BY b.project_id";
 
 /// 同 [`mark`]：只往前推。
-pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_id: &str) -> Result<ReadMark> {
+pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_id: &str) -> Result<Option<ReadMark>> {
     let at = normalize_at(at, &crate::db::now()).ok_or_else(|| anyhow::anyhow!("at must be an RFC 3339 timestamp"))?;
     sqlx::query(
-        "INSERT INTO project_group_reads (project_id, read_at, message_id) VALUES (?, ?, ?)
+        "INSERT INTO project_group_reads (project_id, read_at, message_id)
+         SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM projects WHERE id = ? AND deleted_at IS NULL)
          ON CONFLICT(project_id) DO UPDATE SET read_at = excluded.read_at, message_id = excluded.message_id
           WHERE excluded.read_at > project_group_reads.read_at
              OR (excluded.read_at = project_group_reads.read_at AND CASE
@@ -228,8 +229,16 @@ pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_i
     .bind(project_id)
     .bind(&at)
     .bind(message_id)
+    .bind(project_id)
     .execute(pool)
     .await?;
+    let live: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM projects WHERE id = ? AND deleted_at IS NULL)")
+        .bind(project_id)
+        .fetch_one(pool)
+        .await?;
+    if !live {
+        return Ok(None);
+    }
     let (at, message_id, seq): (String, String, Option<i64>) = sqlx::query_as(
         "SELECT r.read_at, r.message_id, m.rowid FROM project_group_reads r
           LEFT JOIN messages m ON m.id = r.message_id AND m.created_at = r.read_at
@@ -240,7 +249,7 @@ pub async fn mark_group(pool: &SqlitePool, project_id: &str, at: &str, message_i
         .bind(project_id)
         .fetch_one(pool)
         .await?;
-    Ok(ReadMark { at, message_id, seq })
+    Ok(Some(ReadMark { at, message_id, seq }))
 }
 
 /// 讀到的訊息 id：真的 id 是 26 字元的 ULID。這個字串整個存進 DB、又隨 `GET /api/state` 與 WS 廣播給每個分頁，
@@ -320,6 +329,8 @@ pub async fn post_group(State(app): State<Arc<App>>, Path(id): Path<String>, bod
     if crate::db::project(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))?.is_none_or(|p| p.deleted_at.is_some()) {
         return Err(LcError::NotFound("project".into()));
     }
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("group_read_after_liveness_check", &id).await;
     let message_id = b.message_id.as_deref().unwrap_or("");
     if !valid_message_id(message_id) {
         return Err(LcError::Bad("message_id must be a message id (at most 64 characters of A-Z a-z 0-9 - _ : .)".into()));
@@ -342,6 +353,7 @@ pub async fn post_group(State(app): State<Arc<App>>, Path(id): Path<String>, bod
     }
     let at = mark_at(b.at, message_at.as_deref(), &crate::db::now())?;
     let m = mark_group(&app.db, &id, &at, message_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let Some(m) = m else { return Err(LcError::NotFound("project".into())) };
     let unread = group_unread_counts(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.get(&id).copied().unwrap_or(0);
     let out = json!({"project_id": id, "read_mark": json_value(&m), "unread": unread});
     app.emit("group_read", out.clone()).await;
@@ -497,12 +509,12 @@ mod tests {
             sqlx::query("UPDATE messages SET group_id = 'g-1' WHERE role = 'user' AND turn_id = ?").bind(tid).execute(&pool).await.unwrap();
         }
         assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&2), "t1、t3 是群組回合；同回合兩則 assistant 算一個");
-        let m = mark_group(&pool, "p", "2026-09-15T01:00:00.000Z", "a0-t1").await.unwrap();
+        let m = mark_group(&pool, "p", "2026-09-15T01:00:00.000Z", "a0-t1").await.unwrap().unwrap();
         assert_eq!(m.at, "2026-09-15T01:00:00.000Z");
         assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&2), "a1-t1 的 id 較大仍未讀，t3 也是");
         mark_group(&pool, "p", "2026-09-15T01:00:00.000Z", "a1-t1").await.unwrap();
         assert_eq!(group_unread_counts(&pool).await.unwrap().get("p"), Some(&1));
-        let m = mark_group(&pool, "p", "2026-09-15T00:30:00.000Z", "").await.unwrap();
+        let m = mark_group(&pool, "p", "2026-09-15T00:30:00.000Z", "").await.unwrap().unwrap();
         assert_eq!(m.at, "2026-09-15T01:00:00.000Z", "較舊的標記不倒退");
         assert_eq!(group_marks(&pool).await.unwrap().get("p").map(|m| m.message_id.as_str()), Some("a1-t1"));
         mark_group(&pool, "p", "2026-09-15T03:00:00.000Z", "a1-t3").await.unwrap();
@@ -648,6 +660,29 @@ mod tests {
         assert!(matches!(err, LcError::NotFound(_)), "{err:?}");
         let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_group_reads WHERE project_id = ?").bind(&e.project_id).fetch_one(&e.app.db).await.unwrap();
         assert_eq!(stored, 0);
+    }
+
+    #[tokio::test]
+    async fn a_project_deleted_after_group_read_validation_is_not_marked_or_broadcast() {
+        let (e, _) = app_with_bot().await;
+        let (app, project_id) = (e.app.clone(), e.project_id.clone());
+        let delete_project_id = project_id.clone();
+        crate::lifecycle::race_point::arm("group_read_after_liveness_check", &project_id, move || async move {
+            sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?")
+                .bind(crate::db::now())
+                .bind(delete_project_id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        });
+        let err = post_group(State(e.app.clone()), Path(e.project_id.clone()), None).await.unwrap_err();
+        assert!(matches!(err, LcError::NotFound(_)), "a deleted project must still be hidden: {err:?}");
+        let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project_group_reads WHERE project_id = ?")
+            .bind(&e.project_id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(stored, 0, "racing deletion must not leave a read mark");
     }
 
     /// `message_id` 是任意字串、整個存進 DB、又由 `GET /api/state` 與 WS 廣播給每個分頁：一個 1 MB 的 id 就把每次快照撐大。
