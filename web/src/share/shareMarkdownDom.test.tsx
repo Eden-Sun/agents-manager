@@ -51,7 +51,7 @@ test('引用超過 20 層顯示純文字', async () => {
 })
 
 test('javascript:、data: 與協定相對連結不能變成可點的 href', async () => {
-  for (const text of ['[點](javascript:alert(1))', '[點](data:text/html,x)', '[點](//evil.example/x)', '[點](https://evil.example/x)']) {
+  for (const text of ['[點](javascript:alert(1))', '[點](data:text/html,x)', '[點](//evil.example/x)', '[點](/api/session)', '[點](https://evil.example/x)']) {
     const root = await mount(<ShareMarkdown text={text} />)
     const href = root.querySelector('a')?.getAttribute('href') ?? ''
     if (text.includes('https://evil')) assert.equal(href, 'https://evil.example/x')

@@ -38,6 +38,7 @@ test('危險協定與原始 HTML 不會變成可執行的元素或屬性', async
     '<svg onload=alert(1)>',
     '![x](javascript:alert(1))',
     '![x](data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=)',
+    '```"><img src=x onerror=alert(1)>\ncode\n```',
   ]
   for (const md of payloads) {
     const root = await render(md)
@@ -67,6 +68,15 @@ test('被清掉網址的連結不留一個點了沒反應的 <a>，字還在', a
   const root = await render('[點我](javascript:alert(1))')
   assert.equal(root.querySelectorAll('a').length, 0)
   assert.match(root.textContent ?? '', /點我/)
+})
+
+test('同一個 origin 的相對連結與協定相對連結不能變成可點的 href', async () => {
+  for (const md of ['[token](/api/session)', '[token](//evil.example/x)', '[token](mailto:a@b.c)']) {
+    const root = await render(md)
+    assert.equal(root.querySelectorAll('a').length, 0, md)
+    assert.match(root.textContent ?? '', /token/)
+    await unmountAll()
+  }
 })
 
 test('太長的訊息預設純文字（不跑 Markdown），按了才展開', async () => {
