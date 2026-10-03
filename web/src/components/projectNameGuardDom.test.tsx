@@ -7,9 +7,9 @@ import { ProjectNameField } from './ProjectNameField'
 
 before(setupDom)
 afterEach(unmountAll)
-after(() => {
+after(async () => {
   resetStoreForTest()
-  teardownDom()
+  await teardownDom()
 })
 
 const unload = () => {

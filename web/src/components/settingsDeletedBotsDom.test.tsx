@@ -18,9 +18,9 @@ afterEach(async () => {
   useStore.setState({ notices: [] })
 })
 before(setupDom)
-after(() => {
+after(async () => {
   resetStoreForTest()
-  teardownDom()
+  await teardownDom()
 })
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)

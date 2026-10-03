@@ -44,9 +44,9 @@ afterEach(async () => {
   localStorage.clear()
 })
 before(setupDom)
-after(() => {
+after(async () => {
   resetStoreForTest()
-  teardownDom()
+  await teardownDom()
 })
 
 const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_000 }, fn)
@@ -93,7 +93,7 @@ it('#755 happy-dom 重建後仍接收別的分頁 storage 事件', async () => {
     setQuotaDisabled(STRIP_KEY, false, null)
   })
   await unmountAll()
-  teardownDom()
+  await teardownDom()
   setupDom()
 
   await open()

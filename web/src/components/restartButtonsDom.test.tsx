@@ -14,9 +14,9 @@ before(setupDom)
 afterEach(async () => {
   await unmountAll()
 })
-after(() => {
+after(async () => {
   resetStoreForTest()
-  teardownDom()
+  await teardownDom()
 })
 
 const bot = { id: 'b1', name: 'b1', project_id: 'p1', kind: 'claude', model: 'opus', effort: null, fast: false, identity: null, live_apply_deferred: false } as unknown as Bot

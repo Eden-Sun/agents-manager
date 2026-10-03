@@ -19,9 +19,9 @@ afterEach(async () => {
   useStore.setState({ notices: [] }) // 上一個測試的通知不能讓下一個測試的 `until` 誤以為已經出現
 })
 before(setupDom)
-after(() => {
+after(async () => {
   resetStoreForTest()
-  teardownDom()
+  await teardownDom()
 })
 
 const mock = sharedMock
