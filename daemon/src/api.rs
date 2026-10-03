@@ -723,6 +723,12 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         RequestPrincipal::User
     };
     req.extensions_mut().insert(principal.clone());
+    if let RequestPrincipal::Bot(bot_id) = &principal {
+        let path = req.extensions().get::<OriginalUri>().map(|uri| uri.0.path()).unwrap_or_else(|| req.uri().path());
+        if let Err(e) = authorize_bot_path(&app, bot_id, req.method().as_str(), path).await {
+            return e.into_response();
+        }
+    }
     // 會改東西的請求記下是誰發的：config.toml 的寫入 log 與刪除 intent 要引用（issue #406）。
     if matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS) {
         return next.run(req).await;
@@ -732,6 +738,236 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
     let service = match &principal { RequestPrincipal::Service(id) => Some(id.as_str()), _ => None };
     let caller = crate::config_audit::describe_request(&req, verified.as_deref(), service);
     crate::config_audit::HTTP_CALLER.scope(caller, next.run(req)).await
+}
+
+fn bot_user_only() -> LcError {
+    LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"}))
+}
+
+fn bot_scope_denied(bot_id: &str) -> LcError {
+    LcError::Forbidden(json!({"error": "forbidden", "reason": "bot_resource_scope", "bot_id": bot_id}))
+}
+
+async fn bot_descends_from_or_is(app: &Arc<App>, caller: &str, target: &str) -> Result<bool, LcError> {
+    let found: i64 = sqlx::query_scalar(
+        "WITH RECURSIVE owned(id) AS (
+             SELECT id FROM bots WHERE id = ?
+             UNION
+             SELECT child.id FROM bots child JOIN owned parent ON child.parent_bot_id = parent.id
+         )
+         SELECT EXISTS(SELECT 1 FROM owned WHERE id = ?)",
+    )
+    .bind(caller)
+    .bind(target)
+    .fetch_one(&app.db)
+    .await
+    .map_err(any_err)?;
+    Ok(found != 0)
+}
+
+async fn project_in_bot_tree(app: &Arc<App>, caller: &str, project_id: &str) -> Result<bool, LcError> {
+    let found: i64 = sqlx::query_scalar(
+        "WITH RECURSIVE owned(id) AS (
+             SELECT id FROM bots WHERE id = ?
+             UNION
+             SELECT child.id FROM bots child JOIN owned parent ON child.parent_bot_id = parent.id
+         )
+         SELECT EXISTS(
+             SELECT 1 FROM bots b JOIN owned ON owned.id = b.id WHERE b.project_id = ?
+         )",
+    )
+    .bind(caller)
+    .bind(project_id)
+    .fetch_one(&app.db)
+    .await
+    .map_err(any_err)?;
+    Ok(found != 0)
+}
+
+async fn bot_role_may_cross(app: &Arc<App>, bot_id: &str) -> Result<bool, LcError> {
+    crate::supervisor::roles::role_of_bot(&app.db, bot_id)
+        .await
+        .map(|role| role.is_some())
+        .map_err(any_err)
+}
+
+async fn bot_may_access_bot(app: &Arc<App>, caller: &str, target: &str) -> Result<bool, LcError> {
+    bot_descends_from_or_is(app, caller, target).await
+}
+
+fn decode_api_path_segment(segment: &str) -> Option<String> {
+    fn hex(byte: u8) -> Option<u8> {
+        (byte as char).to_digit(16).map(|digit| digit as u8)
+    }
+    let input = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i] == b'%' {
+            let (Some(high), Some(low)) = (input.get(i + 1).and_then(|b| hex(*b)), input.get(i + 2).and_then(|b| hex(*b))) else {
+                return None;
+            };
+            decoded.push(high * 16 + low);
+            i += 3;
+        } else {
+            decoded.push(input[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// Enforce ownership on routes whose path identifier resolves to a bot, project, turn,
+/// attachment, mission, or assignment. User and service principals retain their existing route
+/// behavior; AGM role bots keep their explicitly delegated cross-resource scope.
+async fn authorize_bot_path(app: &Arc<App>, caller: &str, method: &str, path: &str) -> Result<(), LcError> {
+    let decoded: Vec<String> = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(decode_api_path_segment)
+        .collect::<Option<_>>()
+        .ok_or_else(|| bot_scope_denied(caller))?;
+    let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
+    if parts.first() != Some(&"api") {
+        return Ok(());
+    }
+
+    // Pane inventory and host-shell routes are human-operated interfaces, not bot resources.
+    if parts.get(1) == Some(&"panes")
+        || parts.get(1) == Some(&"drafts")
+        || (parts.get(1) == Some(&"hosts") && parts.iter().any(|part| *part == "shells"))
+    {
+        return Err(bot_user_only());
+    }
+    if parts.get(1) == Some(&"bots") && parts.len() >= 4 && matches!(parts.get(3), Some(&"keys" | &"text")) {
+        return Err(bot_user_only());
+    }
+
+    let target = match (parts.get(1).copied(), parts.get(2).copied()) {
+        (Some("bots"), Some(id)) if !matches!(id, "deleted" | "restart-idle") => {
+            // Sending a prompt is the intentional cross-bot route. `prompt_bot` verifies the
+            // sender's Bot proof and relay metadata before it can write to the recipient.
+            if method == "POST" && parts.get(3) == Some(&"prompt") {
+                return Ok(());
+            }
+            if db::bot(&app.db, id).await.map_err(any_err)?.is_some() {
+                if bot_may_access_bot(app, caller, id).await? {
+                    return Ok(());
+                }
+                Some("bot")
+            } else {
+                None
+            }
+        }
+        (Some("projects"), Some(id)) => {
+            if db::project(&app.db, id).await.map_err(any_err)?.is_some() {
+                let mission_collection = parts.len() == 4
+                    && parts.get(3) == Some(&"missions")
+                    && matches!(method, "GET" | "POST");
+                if project_in_bot_tree(app, caller, id).await?
+                    || (mission_collection && bot_role_may_cross(app, caller).await?)
+                {
+                    return Ok(());
+                }
+                Some("project")
+            } else {
+                None
+            }
+        }
+        (Some("turns"), Some(id)) => {
+            let owner: Option<String> = sqlx::query_scalar(
+                "SELECT c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?",
+            )
+            .bind(id)
+            .fetch_optional(&app.db)
+            .await
+            .map_err(any_err)?;
+            if let Some(owner) = owner {
+                if bot_may_access_bot(app, caller, &owner).await? {
+                    return Ok(());
+                }
+                Some("turn")
+            } else {
+                None
+            }
+        }
+        (Some("attachments"), Some(id)) => {
+            let owner: Option<String> = sqlx::query_scalar("SELECT bot_id FROM attachments WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&app.db)
+                .await
+                .map_err(any_err)?;
+            if let Some(owner) = owner {
+                if bot_may_access_bot(app, caller, &owner).await? {
+                    return Ok(());
+                }
+                Some("attachment")
+            } else {
+                None
+            }
+        }
+        (Some("missions"), Some(id)) => {
+            let project_id: Option<String> = sqlx::query_scalar("SELECT project_id FROM missions WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&app.db)
+                .await
+                .map_err(any_err)?;
+            if let Some(project_id) = project_id {
+                let in_project = project_in_bot_tree(app, caller, &project_id).await?;
+                let assigned: i64 = sqlx::query_scalar(
+                    "WITH RECURSIVE owned(id) AS (
+                         SELECT id FROM bots WHERE id = ?
+                         UNION
+                         SELECT child.id FROM bots child JOIN owned parent ON child.parent_bot_id = parent.id
+                     )
+                     SELECT EXISTS(
+                         SELECT 1 FROM supervisor_assignments a JOIN owned ON owned.id = a.target_bot_id WHERE a.mission_id = ?
+                     )",
+                )
+                .bind(caller)
+                .bind(id)
+                .fetch_one(&app.db)
+                .await
+                .map_err(any_err)?;
+                if in_project || assigned != 0 || bot_role_may_cross(app, caller).await? {
+                    return Ok(());
+                }
+                Some("mission")
+            } else {
+                None
+            }
+        }
+        (Some("supervisor"), Some("assignments")) if parts.len() >= 4 => {
+            let id = parts[3];
+            let owner: Option<String> = sqlx::query_scalar("SELECT target_bot_id FROM supervisor_assignments WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&app.db)
+                .await
+                .map_err(any_err)?;
+            if let Some(owner) = owner {
+                let explicit_supervisor_route = (parts.len() == 4 && method == "GET")
+                    || (parts.len() == 5 && parts.get(4) == Some(&"review") && method == "POST");
+                if bot_may_access_bot(app, caller, &owner).await?
+                    || (explicit_supervisor_route && bot_role_may_cross(app, caller).await?)
+                {
+                    return Ok(());
+                }
+                Some("assignment")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    match target {
+        Some(resource) => Err(LcError::Forbidden(json!({
+            "error": "forbidden",
+            "reason": "bot_resource_scope",
+            "resource": resource,
+            "bot_id": caller,
+        }))),
+        None => Ok(()),
+    }
 }
 
 async fn get_session(
@@ -8859,6 +9095,25 @@ mod per_principal_auth_tests {
         out
     }
 
+    async fn raw_many(app: Arc<App>, requests: Vec<String>) -> Vec<String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = super::router(app);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await
+        });
+        let mut responses = Vec::with_capacity(requests.len());
+        for request in requests {
+            let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+            c.write_all(request.as_bytes()).await.unwrap();
+            let mut out = String::new();
+            c.read_to_string(&mut out).await.unwrap();
+            responses.push(out);
+        }
+        server.abort();
+        responses
+    }
+
     async fn spawn_begin(app: Arc<App>, bot_id: &str, token: &str) -> String {
         let body = format!("bot_id={bot_id}");
         raw(
@@ -8885,6 +9140,306 @@ mod per_principal_auth_tests {
 
     fn response_json(response: &str) -> Value {
         serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap_or("{}")).unwrap()
+    }
+
+    /// Every routed path whose identifier resolves to a bot, project, run/turn, mission,
+    /// attachment, assignment, or bot-owned pane is exercised here. A valid Bot A credential
+    /// must not cross into Bot B's project or bot-owned data; the prompt route is the one
+    /// explicit cross-bot exception because relay authentication authorizes its recipient.
+    #[tokio::test]
+    async fn bot_path_resources_are_scoped_to_the_authenticated_bot() {
+        let e = crate::testing::env().await;
+        let bot_a = distinct_bot(&e, "scope-a").await;
+        let project_b = db::ulid();
+        let project_b_path = e.dir.join("project-b");
+        std::fs::create_dir_all(&project_b_path).unwrap();
+        std::fs::write(project_b_path.join("x.png"), b"fixture image").unwrap();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?,?,?,'local',?)")
+            .bind(&project_b)
+            .bind(project_b_path.to_string_lossy().to_string())
+            .bind("project-b")
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let bot_b = crate::testing::claude_bot(&e.app, &project_b, "scope-b").await;
+        sqlx::query("UPDATE bots SET hook_token=? WHERE id=?")
+            .bind(format!("tok-{}", bot_b.id))
+            .bind(&bot_b.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let bot_b = db::bot(&e.app.db, &bot_b.id).await.unwrap().unwrap();
+        let now = db::now();
+        let run_b = crate::testing::fake_run(&e.app, &bot_b.id).await;
+        let turn_b = db::ulid();
+        let conversation_b = db::conversation_id(&e.app.db, &bot_b.id).await.unwrap();
+        sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, created_at) VALUES (?,?,'assistant','B-private-scope-fixture','terminal_fallback',?)")
+            .bind(db::ulid())
+            .bind(&conversation_b)
+            .bind(&now)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'web','queued','pending',?)")
+            .bind(&turn_b)
+            .bind(&conversation_b)
+            .bind(&run_b)
+            .bind(&now)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let attachment_b = db::ulid();
+        let attachment_path = project_b_path.join(".agents-manager").join("attachments").join("x.txt");
+        std::fs::create_dir_all(attachment_path.parent().unwrap()).unwrap();
+        std::fs::write(&attachment_path, b"B attachment").unwrap();
+        sqlx::query("INSERT INTO attachments (id, bot_id, name, mime, size, local_path, agent_path, host, state, created_at) VALUES (?,?,'x.txt','text/plain',1,?,'/tmp/x','local','ready',?)")
+            .bind(&attachment_b)
+            .bind(&bot_b.id)
+            .bind(attachment_path.to_string_lossy().to_string())
+            .bind(&now)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let outbox_b = crate::outbox::ensure(&e.app.data_dir, &bot_b.id).unwrap();
+        std::fs::write(outbox_b.join("x.txt"), b"B outbox fixture").unwrap();
+        let mission_b = db::ulid();
+        sqlx::query("INSERT INTO missions (id, project_id, client_request_id, text, delivery_mode, executor_kind, on_5h_limit, created_at, updated_at) VALUES (?,?,?,'scope fixture','pr','claude','wait',?,?)")
+            .bind(&mission_b)
+            .bind(&project_b)
+            .bind(format!("scope-{}", mission_b))
+            .bind(&now)
+            .bind(&now)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let assignment_b = db::ulid();
+        sqlx::query("INSERT INTO supervisor_assignments (id, supervisor_id, target_bot_id, client_request_id, text, created_at, updated_at) VALUES (?,'main',?,?, 'scope fixture',?,?)")
+            .bind(&assignment_b)
+            .bind(&bot_b.id)
+            .bind(format!("scope-{}", assignment_b))
+            .bind(&now)
+            .bind(&now)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let pane_b = format!("scope-pane-{}", &bot_b.id[..8]);
+        sqlx::query("INSERT INTO panes (pane_id, host, kind, owner_bot_id, project_id, last_output_at, first_seen, last_seen) VALUES (?,'local','shell',?,?,?, ?,?)")
+            .bind(&pane_b)
+            .bind(&bot_b.id)
+            .bind(&project_b)
+            .bind(&now)
+            .bind(&now)
+            .bind(&now)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let draft_key_b = format!("bot:{}", bot_b.id);
+        crate::drafts::put(&e.app.db, &draft_key_b, "B-private-draft").await.unwrap();
+
+        // Prove an actual disclosure before running the full route matrix. This stays first so
+        // an unguarded destructive handler cannot make later cases appear protected by 404.
+        let bot_headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot_a.id, bot_a.hook_token);
+        let leaked = raw(
+            e.app.clone(),
+            format!(
+                "GET /api/bots/{}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n",
+                bot_b.id
+            ),
+        )
+        .await;
+        assert!(leaked.starts_with("HTTP/1.1 403") || leaked.starts_with("HTTP/1.1 404"), "Bot A read Bot B's messages: {leaked}");
+        let encoded_bot = format!("%{:02X}{}", bot_b.id.as_bytes()[0], &bot_b.id[1..]);
+        let encoded_leak = raw(
+            e.app.clone(),
+            format!(
+                "GET /api/bots/{encoded_bot}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(encoded_leak.starts_with("HTTP/1.1 403") || encoded_leak.starts_with("HTTP/1.1 404"), "percent-encoded Bot B id bypassed scope: {encoded_leak}");
+        let drafts_leak = raw(
+            e.app.clone(),
+            format!("GET /api/drafts HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n"),
+        )
+        .await;
+        assert!(drafts_leak.starts_with("HTTP/1.1 403") || drafts_leak.starts_with("HTTP/1.1 404"), "Bot A read the shared drafts list: {drafts_leak}");
+
+        // This is also the review table: all handlers registered against an identifier that
+        // resolves to another bot/project are listed, including mixed-method route families.
+        let paths = [
+            ("GET", "/api/drafts"), ("PUT", "/api/drafts/bot%3A{bot}"),
+            ("PATCH", "/api/projects/{project}"), ("DELETE", "/api/projects/{project}"),
+            ("POST", "/api/projects/{project}/bots"), ("GET", "/api/projects/{project}/messages"),
+            ("GET", "/api/projects/{project}/panes"), ("POST", "/api/projects/{project}/chat"),
+            ("GET", "/api/projects/{project}/missions"), ("POST", "/api/projects/{project}/missions"),
+            ("POST", "/api/projects/{project}/github/refresh"), ("GET", "/api/projects/{project}/submodules"),
+            ("GET", "/api/projects/{project}/git"), ("POST", "/api/projects/{project}/git/commit"),
+            ("POST", "/api/projects/{project}/git/push"), ("POST", "/api/projects/{project}/git/pull"),
+            ("GET", "/api/projects/{project}/issues"), ("GET", "/api/projects/{project}/issues/1"),
+            ("PATCH", "/api/bots/{bot}"), ("DELETE", "/api/bots/{bot}"),
+            ("POST", "/api/bots/{bot}/start"), ("POST", "/api/bots/{bot}/restart"),
+            ("POST", "/api/bots/{bot}/credential/rotate"), ("POST", "/api/bots/{bot}/fork"),
+            ("POST", "/api/bots/{bot}/promote"), ("POST", "/api/bots/{bot}/stop"),
+            ("POST", "/api/bots/{bot}/rewind"), ("GET", "/api/bots/{bot}/preview"),
+            ("POST", "/api/bots/{bot}/preview"), ("DELETE", "/api/bots/{bot}/preview"),
+            ("POST", "/api/bots/{bot}/interrupt"), ("POST", "/api/bots/{bot}/login"),
+            ("POST", "/api/bots/{bot}/pane/move-to-tab"), ("POST", "/api/bots/{bot}/attachments"),
+            ("POST", "/api/bots/{bot}/keys"), ("POST", "/api/bots/{bot}/text"),
+            ("GET", "/api/bots/{bot}/messages"), ("GET", "/api/bots/{bot}/terminal"),
+            ("GET", "/api/bots/{bot}/pending-question"), ("GET", "/api/bots/{bot}/local-image?path=x.png"),
+            ("GET", "/api/bots/{bot}/outbox"), ("GET", "/api/bots/{bot}/outbox/file?path=x.txt"),
+            ("GET", "/api/bots/{bot}/scratchpad"), ("GET", "/api/bots/{bot}/scratchpad/file?path=x.txt"),
+            ("POST", "/api/bots/{bot}/read"), ("POST", "/api/bots/{bot}/abort"),
+            ("POST", "/api/bots/{bot}/restore"), ("GET", "/api/attachments/{attachment}"),
+            ("POST", "/api/projects/{project}/group/read"),
+            ("POST", "/api/turns/{turn}/abandon"), ("POST", "/api/turns/{turn}/withdraw"),
+            ("POST", "/api/turns/{encoded_turn}/withdraw"),
+            ("GET", "/api/missions/{mission}"), ("POST", "/api/missions/{mission}/events"),
+            ("GET", "/api/missions/{encoded_mission}"),
+            ("POST", "/api/missions/{mission}/pause"), ("POST", "/api/missions/{mission}/resume"),
+            ("POST", "/api/missions/{mission}/question"), ("POST", "/api/missions/{mission}/answer"),
+            ("POST", "/api/missions/{mission}/revise"), ("POST", "/api/missions/{mission}/cancel"),
+            ("POST", "/api/missions/{mission}/complete"), ("POST", "/api/missions/{mission}/round"),
+            ("GET", "/api/missions/{mission}/pick?role=executor"), ("POST", "/api/missions/{mission}/deliver"),
+            ("GET", "/api/supervisor/assignments/{assignment}"),
+            ("GET", "/api/supervisor/assignments/{encoded_assignment}"),
+            ("POST", "/api/supervisor/assignments/{assignment}/review"),
+            ("POST", "/api/panes/{pane}/adopt"), ("POST", "/api/panes/{pane}/close"),
+            ("POST", "/api/panes/{pane}/focus"),
+            ("POST", "/api/services/daemon-swap/probe/{bot}"), ("POST", "/api/services/herdr-upgrade/resume/{bot}"),
+            ("GET", "/api/attachments/{encoded_attachment}"), ("GET", "/api/projects/{encoded_project}/git"),
+        ];
+        let encoded_project = format!("%{:02X}{}", project_b.as_bytes()[0], &project_b[1..]);
+        let encoded_turn = format!("%{:02X}{}", turn_b.as_bytes()[0], &turn_b[1..]);
+        let encoded_mission = format!("%{:02X}{}", mission_b.as_bytes()[0], &mission_b[1..]);
+        let encoded_assignment = format!("%{:02X}{}", assignment_b.as_bytes()[0], &assignment_b[1..]);
+        let encoded_attachment = format!("%{:02X}{}", attachment_b.as_bytes()[0], &attachment_b[1..]);
+        let requests = paths.into_iter().map(|(method, template)| {
+            let path = template
+                .replace("{encoded_project}", &encoded_project)
+                .replace("{encoded_turn}", &encoded_turn)
+                .replace("{encoded_mission}", &encoded_mission)
+                .replace("{encoded_assignment}", &encoded_assignment)
+                .replace("{encoded_attachment}", &encoded_attachment)
+                .replace("{bot}", &bot_b.id)
+                .replace("{project}", &project_b)
+                .replace("{attachment}", &attachment_b)
+                .replace("{turn}", &turn_b)
+                .replace("{mission}", &mission_b)
+                .replace("{assignment}", &assignment_b)
+                .replace("{pane}", &pane_b);
+            let body = if matches!(method, "GET" | "DELETE") {
+                String::new()
+            } else if path.starts_with("/api/drafts/") {
+                r#"{"text":"cross-bot overwrite","client_id":"scope"}"#.into()
+            } else {
+                "{}".into()
+            };
+            (method, format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ))
+        }).collect::<Vec<_>>();
+        let responses = raw_many(e.app.clone(), requests.iter().map(|(_, request)| request.clone()).collect()).await;
+        assert_eq!(responses.len(), requests.len());
+        for ((method, request), response) in requests.iter().zip(&responses) {
+            assert!(response.starts_with("HTTP/1.1 403") || response.starts_with("HTTP/1.1 404"), "Bot A crossed into Bot B resource ({method} {}): {response}", request.lines().next().unwrap_or(""));
+        }
+        let draft_after: String = sqlx::query_scalar("SELECT text FROM composer_drafts WHERE key=?")
+            .bind(&draft_key_b)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(draft_after, "B-private-draft", "cross-bot draft writes must be rejected before mutation");
+
+        // The same resource remains visible to the User principal, and a parent may access a
+        // child resource that carries the parent's delegated authority.
+        let as_user = raw(
+            e.app.clone(),
+            format!(
+                "GET /api/bots/{}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\n\r\n",
+                bot_b.id, e.app.ui_token
+            ),
+        )
+        .await;
+        assert!(as_user.starts_with("HTTP/1.1 200") && as_user.contains("B-private-scope-fixture"), "User behavior stays unchanged: {as_user}");
+        let drafts_as_user = raw(
+            e.app.clone(),
+            format!("GET /api/drafts HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Token: {}\r\nConnection: close\r\n\r\n", e.app.ui_token),
+        )
+        .await;
+        assert!(drafts_as_user.starts_with("HTTP/1.1 200") && drafts_as_user.contains("B-private-draft"), "User can still read shared drafts: {drafts_as_user}");
+        let child = crate::testing::claude_bot(&e.app, &e.project_id, "scope-child").await;
+        sqlx::query("UPDATE bots SET parent_bot_id=?, managed_by='child' WHERE id=?")
+            .bind(&bot_a.id)
+            .bind(&child.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let child_read = raw(
+            e.app.clone(),
+            format!(
+                "GET /api/bots/{}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n",
+                child.id
+            ),
+        )
+        .await;
+        assert!(child_read.starts_with("HTTP/1.1 200"), "parent may access its child resource: {child_read}");
+        let bot_b_headers = format!("X-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\n", bot_b.id, bot_b.hook_token);
+        let own_read = raw(
+            e.app.clone(),
+            format!("GET /api/bots/{}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_b_headers}Connection: close\r\n\r\n", bot_b.id),
+        )
+        .await;
+        assert!(own_read.starts_with("HTTP/1.1 200") && own_read.contains("B-private-scope-fixture"), "Bot B can still access its own resource: {own_read}");
+        crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE supervisors SET bot_id=? WHERE id='AGM'")
+            .bind(&bot_a.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        let role_read = raw(
+            e.app.clone(),
+            format!("GET /api/bots/{}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n", bot_b.id),
+        )
+        .await;
+        assert!(role_read.starts_with("HTTP/1.1 403") || role_read.starts_with("HTTP/1.1 404"), "AGM role token must not inherit generic cross-bot message access: {role_read}");
+        let role_project_write = raw(
+            e.app.clone(),
+            format!("POST /api/projects/{project_b}/bots HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Content-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"),
+        )
+        .await;
+        assert!(role_project_write.starts_with("HTTP/1.1 403") || role_project_write.starts_with("HTTP/1.1 404"), "AGM role must not inherit generic cross-project bot creation: {role_project_write}");
+        let role_project_missions = raw(
+            e.app.clone(),
+            format!("GET /api/projects/{project_b}/missions HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n"),
+        )
+        .await;
+        assert!(role_project_missions.starts_with("HTTP/1.1 200"), "AGM role may list missions across projects: {role_project_missions}");
+        let role_mission = raw(
+            e.app.clone(),
+            format!("GET /api/missions/{mission_b} HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n"),
+        )
+        .await;
+        assert!(role_mission.starts_with("HTTP/1.1 200"), "mission API explicitly supports AGM role access: {role_mission}");
+        let role_assignment = raw(
+            e.app.clone(),
+            format!("GET /api/supervisor/assignments/{assignment_b} HTTP/1.1\r\nHost: 127.0.0.1\r\n{bot_headers}Connection: close\r\n\r\n"),
+        )
+        .await;
+        assert!(role_assignment.starts_with("HTTP/1.1 200"), "AGM role may read supervisory assignments across bots: {role_assignment}");
+
+        // A different bot may intentionally prompt B; that route performs its own relay proof.
+        let relay = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/bots/{}/prompt HTTP/1.1\r\nHost: 127.0.0.1\r\n{}Content-Type: application/json\r\nConnection: close\r\nContent-Length: 15\r\n\r\n{{\"text\":\"ping\"}}",
+                bot_b.id, bot_headers
+            ),
+        )
+        .await;
+        assert!(!response_json(&relay).get("reason").is_some_and(|r| r == "bot_resource_scope"), "authorized relay must reach the prompt handler: {relay}");
     }
 
     /// 原始按鍵／文字／開關 shell 是給人用的（網頁的鍵盤同步、shell 面板）：bot 的 hook token 驗得過身分，

@@ -1822,6 +1822,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    指向本人就沒有來源可標，UI 會畫出「A → A」；daemon 的 child 警示是 child → 母代，本來就是兩顆不同的 bot。
    信任邊界照實寫：hook token 也在同一個 unix 使用者讀得到的檔案裡（bot 目錄的 settings），這一層擋的是「以為可以代別人發言」的 agent 與誤用，
    不是同機的惡意行程。
+   **Bot principal 的路徑資源範圍**（2026-10-03）：所有以 bot／project／turn／mission／assignment／attachment 識別資源的 `/api` 路徑，都在共用 auth layer 以驗證過的 Bot id 查授權，不採信額外 header 或未解碼的 URI 別名。一般 bot 只可讀寫自己、後代 child、自己／後代所在專案、派給自己／後代的任務與交辦；turn／attachment 先反查其擁有 bot 再判。AGM 角色不會因此取得通用 bot、project、turn 或 attachment 跨資源權限；明確的跨資源管理入口限於 `GET／POST /api/projects/{id}/missions`、`/api/missions/{id}…` 與 `/api/supervisor/assignments/{id}` 的讀取／角色限定 review。唯一可直接指定其他 bot 的 Bot 路由是 `POST /api/bots/{id}/prompt`，仍須 `relay_auth` 驗 sender proof；附件上傳不繼承 prompt 的跨 bot 例外。`/api/drafts[/{key}]`、`/api/panes…` 與 `/api/hosts/{name}/shells…` 是網頁面，Bot principal `403 user_only`；User 維持原行為。Service principal 仍只依各自明列的 service path 授權。
    **mission 端點**（`events`／`question`／`answer`／`revise`／`complete`／`deliver`）的 `relay_from` 共用同一段 token 比對（#409，`relay_auth::authenticate_mission`），
    差在兩格：沒帶 token 直接 403 `relay_from_token_required`（沒有相容期——唯一帶 `relay_from` 的呼叫端 `bin/agm` 在角色自己的 pane 裡一律帶 token，web 從不帶）；
    `relay_from:"daemon"` 只給驗證過的 AGM 角色 bot（`X-AM-Bot-Id`＋`X-AM-Bot-Token`，`agm mission … --as-daemon`），其他一律 403 `relay_from_reserved`。
