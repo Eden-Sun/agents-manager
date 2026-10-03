@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { useState } from 'react'
 import { act, mount, setupDom, teardownDom, unmountAll } from './domHarness'
 import { endCurrentTest, runTestBody } from './testScope'
+import { installManualTimers } from './manualTimers'
 
 afterEach(unmountAll)
 before(setupDom)
@@ -63,4 +64,30 @@ test('測試 body 中途自己 unmountAll（例如模擬換一個分頁）不算
   await unmountAll()
   const host = await mount(<p>新分頁</p>)
   assert.equal(host.textContent, '新分頁')
+})
+
+test('孤兒 act 已收束時取消 5 秒保險計時器', async () => {
+  const timers = installManualTimers()
+  let release!: () => void
+  let leftover!: Promise<unknown>
+  try {
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    runTestBody('留下孤兒 act', () => {
+      leftover = act(async () => {
+        await gate
+      })
+    })
+    const outcome = leftover.catch((e: unknown) => e)
+    endCurrentTest()
+
+    const next = act(() => {})
+    assert.equal(timers.clock.pending, 1, '等待孤兒 act 時只有一個 5 秒上限 timer')
+    release()
+    await next
+    await outcome
+    assert.equal(timers.clock.pending, 0, '孤兒已完成就不應留 timer 在後續測試期間')
+  } finally {
+    release?.()
+    timers.restore()
+  }
 })

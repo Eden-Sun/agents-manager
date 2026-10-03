@@ -5,9 +5,10 @@
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
+import { useState } from 'react'
 import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { resetStoreForTest, useStore } from '../store/store'
-import type { Bot, Message, Run } from '../api/types'
+import type { Bot, Message, Project, Run } from '../api/types'
 
 before(setupDom)
 after(teardownDom)
@@ -17,6 +18,8 @@ afterEach(async () => {
 })
 
 const { Bubble } = await import('./ChatPanel')
+const { RunElapsed } = await import('./RunElapsed')
+const { runElapsedCacheSizeForTest } = await import('../lib/runElapsedCache')
 const { clearMarkdownCache, markdownCacheStats, MARKDOWN_CACHE_MAX_ENTRIES } = await import('../lib/markdownCache')
 
 const bot = { id: 'b1', name: 'b1', kind: 'claude', project_id: 'p1', herdr_session: 'agents-manager' } as Bot
@@ -88,6 +91,39 @@ test('Markdown 快取有上限：超過則數就丟最久沒用的，丟掉的�
   assert.equal(markdownCacheStats().parses, before, '最近的還在')
   renderMarkdown('b1', '# 標題 0')
   assert.equal(markdownCacheStats().parses, before + 1, '最舊的被丟掉了')
+})
+
+test('RunElapsed fallback 快取有上限，並在 bot 退役後清掉它的時間戳', async () => {
+  const bots = Array.from({ length: 400 }, (_, i) => ({ id: `elapsed-cache-${i}`, name: `elapsed-cache-${i}`, kind: 'claude', project_id: 'p1' }) as Bot)
+  const runs = Object.fromEntries(bots.map((b) => [b.id, { id: `r-${b.id}`, bot_id: b.id, state: 'running', agent_status: 'working' } as Run]))
+  useStore.setState({
+    connected: true,
+    projects: [{ id: 'p1', label: 'p', path: '/p', host: 'local' } as Project],
+    bots,
+    runs,
+    turns: {},
+  })
+  let now = 1_000
+  const realNow = Date.now
+  Date.now = () => now
+  let rerender!: () => void
+  function ManyElapsed() {
+    const [, setPulse] = useState(0)
+    rerender = () => setPulse((n) => n + 1)
+    return <div>{bots.map((b) => <RunElapsed key={b.id} botId={b.id} />)}</div>
+  }
+  try {
+    await mount(<ManyElapsed />)
+    assert.equal(runElapsedCacheSizeForTest(), 300, 'the fallback timestamp map stops growing at its cap')
+    now += 5 * 60_000
+    await act(async () => rerender())
+    const activeLabels = [...document.querySelectorAll('.run-elapsed')].map((el) => el.textContent)
+    assert.equal(activeLabels[0], '5m00', 'an active mounted row keeps its own fallback even after global eviction')
+    await act(async () => useStore.setState({ bots: [], runs: {} }))
+    assert.equal(runElapsedCacheSizeForTest(), 0, 'removing the bots releases all timestamps still present in the cache')
+  } finally {
+    Date.now = realNow
+  }
 })
 
 test('不同 bot 的同一段文字不共用（圖片元件綁 bot id）', async () => {
