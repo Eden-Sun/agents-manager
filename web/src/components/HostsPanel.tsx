@@ -276,6 +276,12 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
   const [session, setSession] = useState<string>(HOST_DEFAULTS.herdr_session)
   const [remotePath, setRemotePath] = useState<string>(HOST_DEFAULTS.remote_path)
   const [sshOpts, setSshOpts] = useState('')
+  const [cleanAdvanced, setCleanAdvanced] = useState<{ sshPort: string; session: string; remotePath: string; sshOpts: string }>({
+    sshPort: String(HOST_DEFAULTS.ssh_port),
+    session: HOST_DEFAULTS.herdr_session,
+    remotePath: HOST_DEFAULTS.remote_path,
+    sshOpts: '',
+  })
   const [advanced, setAdvanced] = useState(false)
   const [busy, setBusy] = useState(false)
 
@@ -286,7 +292,14 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
   const sessionHint = sessionProblem(session.trim() || HOST_DEFAULTS.herdr_session)
   const ok = nameOk && ssh.trim().length > 0 && !sshHint && !portHint && !sessionHint
   // 打了一半的新主機：關分頁會丟掉。
-  useUnsavedGuard(Boolean(name || ssh.trim()))
+  useUnsavedGuard(
+    name !== '' ||
+      ssh !== '' ||
+      sshPort !== cleanAdvanced.sshPort ||
+      session !== cleanAdvanced.session ||
+      remotePath !== cleanAdvanced.remotePath ||
+      sshOpts !== cleanAdvanced.sshOpts,
+  )
 
   return (
     <form
@@ -294,21 +307,23 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
       onSubmit={(e) => {
         e.preventDefault()
         if (!ok || busy) return
+        const submitted = { name, sshText: ssh, sshPort, session, remotePath, sshOpts }
         setBusy(true)
         onResult(null)
         void addHost({
-          name,
-          ssh: ssh.trim(),
-          ssh_port: Number(sshPort.trim()),
-          herdr_session: session.trim() || HOST_DEFAULTS.herdr_session,
-          remote_path: remotePath.trim(),
-          ...(sshOpts.trim() ? { ssh_opts: sshOpts.trim().split(/\s+/) } : {}),
+          name: submitted.name,
+          ssh: submitted.sshText.trim(),
+          ssh_port: Number(submitted.sshPort.trim()),
+          herdr_session: submitted.session.trim() || HOST_DEFAULTS.herdr_session,
+          remote_path: submitted.remotePath.trim(),
+          ...(submitted.sshOpts.trim() ? { ssh_opts: submitted.sshOpts.trim().split(/\s+/) } : {}),
         }).then((res) => {
           setBusy(false)
           onResult(res)
           if (res) {
-            setName('')
-            setSsh('')
+            setName((current) => (current === submitted.name ? '' : current))
+            setSsh((current) => (current === submitted.sshText ? '' : current))
+            setCleanAdvanced({ sshPort: submitted.sshPort, session: submitted.session, remotePath: submitted.remotePath, sshOpts: submitted.sshOpts })
           }
         })
       }}
@@ -475,16 +490,22 @@ function RemoteCargoPanel() {
   const problems = remoteCargoProblems(form)
   const blocked = problems.length > 0
   // 改了沒存就關分頁會丟掉：跟「按儲存會送出的值」比（空白、`022` 這種打法不同、存下去一樣的不算）。
-  useUnsavedGuard(Boolean(saved) && remoteCargoUnsaved(saved!, form))
+  // 初次讀取失敗時仍可編輯；用表單初值當比較基準，不能讓 saved=null 關掉保護。
+  const unsaved = saved
+    ? remoteCargoUnsaved(saved, form)
+    : enabled || host !== '' || user !== '' || port !== '22' || root !== DEFAULT_REMOTE_ROOT || jobs !== '4' || password !== '' || clearPassword
+  useUnsavedGuard(unsaved)
 
   // `test()` 借用這段來先存表單；busy 全程由呼叫端（`save` 或 `test`）自己用 `lock` 包一次，
   // 這裡不碰 busy，才不會在 `test()` 還沒做完時就把旗標撥回 false（見 `lib/nestableBusy.ts`）。
   const persist = async (): Promise<boolean> => {
     setMessage('')
+    const submitted = form
     try {
-      const cfg = await api.saveRemoteCargoSettings(toRemoteCargoInput(form))
-      setPassword('')
-      setClearPassword(false)
+      const cfg = await api.saveRemoteCargoSettings(toRemoteCargoInput(submitted))
+      // While the request is in flight, keep a newer password or clear toggle the user typed.
+      setPassword((current) => (current === submitted.password ? '' : current))
+      setClearPassword((current) => (current === submitted.clearPassword ? false : current))
       setPasswordSet(cfg.password_set)
       setSaved(cfg)
       setMessage('✓ 已儲存。新啟動的本機 Bot 會自動使用外部 Cargo verification。')

@@ -164,3 +164,106 @@ it('有沒存的改動時關分頁會被攔（beforeunload）；存了就不攔'
   await until(() => message().startsWith('✓ 已儲存'), '存好了')
   assert.equal(unload(), false, '存完不攔')
 })
+
+it('新增主機表單：只改進階欄位、名稱與 ssh 還空白時也會攔 beforeunload', async () => {
+  await open()
+  const form = document.querySelector<HTMLFormElement>('.hosts-panel > form')!
+  const unload = () => {
+    const ev = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(ev)
+    return ev.defaultPrevented
+  }
+  assert.equal(unload(), false, '初始表單沒有未儲存值')
+  await click([...form.querySelectorAll('button')].find((b) => b.textContent?.includes('進階'))!)
+  const port = [...form.querySelectorAll<HTMLInputElement>('input')].find((i) => i.parentElement?.textContent?.includes('ssh_port'))!
+  await typeInto(port, '2223')
+  assert.equal(unload(), true, '進階欄位的使用者輸入也不能無提示丟掉')
+})
+
+it('外部 Cargo 初始讀取失敗後仍可編輯；未儲存值要攔 beforeunload', async () => {
+  const realFetch = globalThis.fetch
+  mockApi(mock)
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    if (String(input) === '/api/build/remote' && (init?.method ?? 'GET') === 'GET') {
+      return new Response(JSON.stringify({ message: 'read failed' }), { status: 503 })
+    }
+    return realFetch(input, init)
+  }) as unknown as typeof fetch
+  try {
+    await mount(<HostsPanel />)
+    await until(() => document.querySelector('.remote-cargo-settings') !== null, '讀取失敗後仍顯示表單')
+    const host = document.querySelector<HTMLInputElement>('.remote-cargo-grid input')!
+    await typeInto(host, 'builder.example')
+    const ev = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(ev)
+    assert.equal(ev.defaultPrevented, true, 'saved 為 null 也不能漏掉已編輯的設定')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+it('新增主機完成時不清掉送出後又輸入的下一筆主機名稱', async () => {
+  const requests = await open()
+  const originalFetch = globalThis.fetch
+  let release!: () => void
+  let markStarted!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const started = new Promise<void>((resolve) => { markStarted = resolve })
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    if (String(input) === '/api/hosts' && init?.method === 'POST') {
+      markStarted()
+      await held
+    }
+    return originalFetch(input, init)
+  }) as unknown as typeof fetch
+  try {
+    const form = document.querySelector<HTMLFormElement>('.hosts-panel > form')!
+    const inputs = [...form.querySelectorAll<HTMLInputElement>('input')]
+    const name = inputs.find((i) => i.parentElement?.textContent?.includes('名稱'))!
+    const ssh = inputs.find((i) => i.placeholder?.includes('@'))!
+    await typeInto(name, 'first-host')
+    await typeInto(ssh, 'builder@example.test')
+    await click([...form.querySelectorAll('button')].find((b) => b.textContent?.includes('新增並連線'))!)
+    await started
+    await typeInto(name, 'next-host')
+    release()
+    await until(() => requests.some((r) => r.method === 'POST' && r.path === '/api/hosts'), '新增主機完成')
+    await until(() => document.querySelector('.hosts-panel > .host-result') !== null, '主機結果畫出來')
+    assert.equal(name.value, 'next-host', '完成先前請求時不能覆蓋使用者後打的字')
+  } finally {
+    release()
+    globalThis.fetch = originalFetch
+  }
+})
+
+it('外部 Cargo 儲存完成時不清掉送出後又輸入的新密碼', async () => {
+  await open({ enabled: true, host: 'build.example', user: 'builder' })
+  const originalFetch = globalThis.fetch
+  let release!: () => void
+  let markStarted!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const started = new Promise<void>((resolve) => { markStarted = resolve })
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    if (String(input) === '/api/build/remote' && init?.method === 'PUT') {
+      markStarted()
+      await held
+    }
+    return originalFetch(input, init)
+  }) as unknown as typeof fetch
+  try {
+    const password = field('SSH 密碼') as HTMLInputElement
+    await typeInto(password, 'first-pass')
+    await click(btn('儲存')!)
+    await started
+    await typeInto(password, 'next-pass')
+    release()
+    await until(() => message().startsWith('✓ 已儲存'), '原密碼儲存完成')
+    assert.equal(password.value, 'next-pass', '較晚輸入的新密碼不能被舊儲存回應清空')
+    const ev = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(ev)
+    assert.equal(ev.defaultPrevented, true, '新密碼仍是未儲存變更')
+  } finally {
+    release()
+    globalThis.fetch = originalFetch
+  }
+})

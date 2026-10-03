@@ -288,10 +288,11 @@ function NewIdentityForm() {
   const [name, setName] = useState('')
   const [kind, setKind] = useState<BotKind>('claude')
   const [envText, setEnvText] = useState(ENV_PREFILL.claude)
+  const [cleanPreset, setCleanPreset] = useState({ kind: 'claude' as BotKind, envText: ENV_PREFILL.claude })
   const [busy, setBusy] = useState(false)
   const nameOk = /^[a-z][a-z0-9_-]{0,31}$/.test(name)
   const envCheck = checkEnvText(envText)
-  useUnsavedGuard(Boolean(name))
+  useUnsavedGuard(name !== '' || kind !== cleanPreset.kind || envText !== cleanPreset.envText)
 
   return (
     <form
@@ -299,10 +300,14 @@ function NewIdentityForm() {
       onSubmit={(e) => {
         e.preventDefault()
         if (!nameOk || busy || envCheck.errors.length > 0) return
+        const submitted = { name, kind, envText }
         setBusy(true)
-        void addIdentity({ name, kind, env: envCheck.env }).then((ok) => {
+        void addIdentity({ name: submitted.name, kind: submitted.kind, env: envCheck.env }).then((ok) => {
           setBusy(false)
-          if (ok) setName('')
+          if (ok) {
+            setName((current) => (current === submitted.name ? '' : current))
+            setCleanPreset({ kind: submitted.kind, envText: submitted.envText })
+          }
         })
       }}
     >

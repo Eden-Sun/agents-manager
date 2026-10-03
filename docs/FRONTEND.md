@@ -70,7 +70,7 @@ store 與元件就直接 import 它（例：`store.ts` 的 `toPreviewEvent`、`f
     現在只在確認框打開的當下才數（`RewindControl` 的 `afterOf`），不可倒回的泡泡只掛一個布林 selector。新加的泡泡功能不要在 selector 裡 `find`／`filter` 整段訊息。
   - **點擊才用的東西（`notify` 這類）用 `useStore.getState()`**，不為它掛 selector。
   - **Markdown 解析快取**（`lib/markdownCache.tsx`）：換 bot 再換回來，清單整個重掛，每則 assistant 訊息的 parse＋轉 React 樹約 3–5 ms；
-    快取 `react-markdown` 的輸出樹（鍵＝原文＋bot id），上限 300 則／100 萬字，單則超過 5 萬字不快取，LRU。`Bubble` 的 `memo` 只擋同一次掛載內的重 render。
+    快取 `react-markdown` 的輸出樹（鍵＝原文＋bot id＋元件／URL transform 身分），上限 300 則／100 萬字，單則超過 5 萬字不快取，LRU；手動展開的超長／太深訊息不快取，渲染失敗的樹會淘汰。`Bubble` 的 `memo` 只擋同一次掛載內的重 render。
   - **`turn_progress`（每個 run 每秒約 4 幀）不為 seq 單獨 `set`**：`lastSeq` 沒有人訂閱，只記在模組變數、併進下一次耐久幀／快照；liveReply 本來就 250 ms 節流。
   - 沒做、已知：清單沒有虛擬化（上限 500 則 DOM）；逛過的 bot 的訊息陣列（各最多 500 則）留在 store 裡，只有 bot 被刪才釋放（`prune.ts`）——
     要釋放就得連未讀計數（`recountBot` 讀 `messages`）一起改，這一輪沒碰。
