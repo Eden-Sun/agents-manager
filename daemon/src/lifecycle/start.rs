@@ -504,45 +504,185 @@ async fn stage_cross_identity_transcript_remote(app: &Arc<App>, bot: &db::Bot, h
 /// 每一段都當危險字串處理。`ssh_exec` 只回 stdout（沒有 exit code），靠印出的 `AM_*` 標記讓呼叫端
 /// 判斷結果，跟 `install_remote_hook` 那類既有遠端安裝腳本「檢查確認字串有沒有出現」是同一套做法。
 fn remote_stage_script(old_projects: &str, new_projects: &str, cwd_key: &str, fname: &str, stem: Option<&str>) -> String {
-    let old_cwd_dir = format!("{old_projects}/{cwd_key}");
-    let new_cwd_dir = format!("{new_projects}/{cwd_key}");
-    let src = format!("{old_cwd_dir}/{fname}");
-    let dest = format!("{new_cwd_dir}/{fname}");
-    // 附屬目錄：`umask 077` 之下 `cp -R` 建出來的目錄 0700、檔 0600（不保留來源權限）；符號連結不展開。
-    let companion = stem
-        .map(|s| {
-            let from = format!("{old_cwd_dir}/{s}");
-            format!(
-                "if [ -d {from} ]; then cp -R {from} {to} 2>/dev/null || true; fi\n",
-                from = sh_quote(&from),
-                to = sh_quote(&format!("{new_cwd_dir}/"))
-            )
-        })
-        .unwrap_or_default();
-    // 資料安全（對抗式審查）：`umask 077`；來源要是一般檔（符號連結不跟）；先複製到同目錄的暫存檔再 `mv`，複製到一半被殺
-    // 最終路徑上不會有半份檔；目標已經有同名檔：一樣或比來源長（來源是它的前綴）就不動，是來源的前綴就蓋，
-    // 分岔就把目標改名留在旁邊（`….jsonl.replaced-<秒>`，不以 .jsonl 結尾）。`head -c N | cmp -s - file`：GNU／BSD 都能用。
+    let companion = stem.map(remote_companion_script).unwrap_or_default();
     format!(
-        "set -e\n\
-         umask 077\n\
-         if [ \"$(readlink -f {old} 2>/dev/null || printf '%s' {old})\" = \"$(readlink -f {new} 2>/dev/null || printf '%s' {new})\" ]; then printf 'AM_SAME\\n'; exit 0; fi\n\
-         {{ [ -f {src} ] && [ ! -L {src} ]; }} || {{ printf 'AM_MISSING\\n'; exit 0; }}\n\
-         mkdir -p {new_cwd_dir} || {{ printf 'AM_MKDIR_FAILED\\n'; exit 0; }}\n\
-         if [ -f {dest} ] && [ ! -L {dest} ]; then\n\
-           s=$(wc -c < {src} | tr -d ' '); d=$(wc -c < {dest} | tr -d ' ')\n\
-           if [ \"$d\" -ge \"$s\" ] && head -c \"$s\" {dest} | cmp -s - {src}; then printf 'AM_STAGED\\n'; exit 0; fi\n\
-           if ! {{ [ \"$d\" -lt \"$s\" ] && head -c \"$d\" {src} | cmp -s - {dest}; }}; then mv {dest} {dest}.replaced-$(date +%s) || {{ printf 'AM_COPY_FAILED\\n'; exit 0; }}; fi\n\
-         fi\n\
-         t={new_cwd_dir}/.stage-$$\n\
-         if ! cp {src} \"$t\"; then rm -f \"$t\"; printf 'AM_COPY_FAILED\\n'; exit 0; fi\n\
-         chmod 600 \"$t\"\n\
-         mv \"$t\" {dest} || {{ rm -f \"$t\"; printf 'AM_COPY_FAILED\\n'; exit 0; }}\n\
-         {companion}printf 'AM_STAGED\\n'\n",
+        r#"set -e
+umask 077
+OLD={old}
+NEW={new}
+K={key}
+N={name}
+T=
+DT=
+cleanup() {{ [ -z "$T" ] || rm -f "$T"; [ -z "$DT" ] || rm -f "$DT"; }}
+trap cleanup EXIT HUP INT TERM
+am_missing() {{ printf 'AM_MISSING\n'; exit 0; }}
+am_mkdir_failed() {{ printf 'AM_MKDIR_FAILED\n'; exit 0; }}
+am_copy_failed() {{ printf 'AM_COPY_FAILED\n'; exit 0; }}
+am_same() {{
+  if stat -c %Y "$1" >/dev/null 2>&1; then [ "$1" -ef "$2" ]
+  else a=$(stat -L -f '%d %i' "$1" 2>/dev/null) || return 1; b=$(stat -L -f '%d %i' "$2" 2>/dev/null) || return 1; [ "$a" = "$b" ]; fi
+}}
+am_singlelink() {{
+  if stat -L -c %h "$1" >/dev/null 2>&1; then l=$(stat -L -c %h "$1" 2>/dev/null) || return 1
+  else l=$(stat -L -f %l "$1" 2>/dev/null) || return 1; fi
+  [ "$l" = 1 ]
+}}
+am_size() {{
+  if stat -L -c %s "$1" >/dev/null 2>&1; then stat -L -c %s "$1"
+  else stat -L -f %z "$1"; fi
+}}
+case "$K" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
+case "$N" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
+case "$N" in *.jsonl) ;; *) am_missing;; esac
+[ ! -L "$OLD" ] && [ -d "$OLD" ] || am_missing
+cd "$OLD" 2>/dev/null || am_missing
+[ ! -L "$OLD" ] && am_same "$OLD" . || am_missing
+OLD_REAL=$(pwd -P)
+[ ! -L "$K" ] && [ -d "$K" ] || am_missing
+cd "$K" 2>/dev/null || am_missing
+[ ! -L "$OLD/$K" ] && am_same "$OLD/$K" . || am_missing
+[ ! -L "$N" ] && [ -f "$N" ] || am_missing
+exec 3< "$N" || am_missing
+am_same "$N" /dev/fd/3 && am_singlelink /dev/fd/3 || am_missing
+SRC_DIR=$OLD/$K
+SRC_NAME=$N
+exec 5< . || am_missing
+am_same "$SRC_DIR" /dev/fd/5 || am_missing
+if [ -d "$NEW" ]; then
+  NEW_REAL=$(cd "$NEW" 2>/dev/null && pwd -P) || am_missing
+  [ "$NEW_REAL" = "$OLD_REAL" ] && {{ printf 'AM_SAME\n'; exit 0; }}
+fi
+mkdir -p "$NEW" 2>/dev/null || am_mkdir_failed
+[ ! -L "$NEW" ] && [ -d "$NEW" ] || am_mkdir_failed
+cd "$NEW" 2>/dev/null || am_mkdir_failed
+if [ -L "$NEW" ]; then
+  NEW_REAL=$(pwd -P)
+  [ "$NEW_REAL" = "$OLD_REAL" ] && {{ printf 'AM_SAME\n'; exit 0; }}
+  am_mkdir_failed
+fi
+am_same "$NEW" . || am_mkdir_failed
+if [ -L "$K" ]; then am_mkdir_failed; fi
+if [ ! -e "$K" ]; then mkdir "$K" 2>/dev/null || am_mkdir_failed; fi
+[ -d "$K" ] && [ ! -L "$K" ] || am_mkdir_failed
+cd "$K" 2>/dev/null || am_mkdir_failed
+[ ! -L "$NEW/$K" ] && am_same "$NEW/$K" . || am_mkdir_failed
+DEST=$N
+exec 6< . || am_mkdir_failed
+am_same "$NEW/$K" /dev/fd/6 || am_mkdir_failed
+T=$(mktemp .stage-XXXXXX) || am_copy_failed
+if ! cat <&3 > "$T"; then am_copy_failed; fi
+chmod 600 "$T" || am_copy_failed
+s=$(am_size "$T") || am_copy_failed
+replace_old=
+preserve_old=
+if [ -e "$DEST" ] || [ -L "$DEST" ]; then
+  [ ! -L "$DEST" ] && [ -f "$DEST" ] || am_missing
+  exec 4< "$DEST" || am_missing
+  am_same "$DEST" /dev/fd/4 && am_singlelink /dev/fd/4 || am_missing
+  DT=$(mktemp .stage-dest-XXXXXX) || am_copy_failed
+  if ! cat <&4 > "$DT"; then am_copy_failed; fi
+  chmod 600 "$DT" || am_copy_failed
+  d=$(am_size "$DT") || am_copy_failed
+  if [ "$d" -ge "$s" ] && head -c "$s" "$DT" | cmp -s - "$T"; then printf 'AM_STAGED\n'; exit 0; fi
+  replace_old=1
+  if [ "$d" -lt "$s" ] && head -c "$d" "$T" | cmp -s - "$DT"; then preserve_old=; else preserve_old=1; fi
+fi
+BACKUP=
+if [ -n "$replace_old" ]; then
+  stamp=$(date +%s)
+  BACKUP="$DEST.replaced-$stamp-$$"
+  [ ! -e "$BACKUP" ] && [ ! -L "$BACKUP" ] || BACKUP="$DEST.replaced-$stamp-$$-1"
+  mv "$DEST" "$BACKUP" || am_copy_failed
+fi
+if ! ln "$T" "$DEST"; then
+  if [ -n "$BACKUP" ] && [ ! -e "$DEST" ] && [ ! -L "$DEST" ]; then mv "$BACKUP" "$DEST" || true; fi
+  am_copy_failed
+fi
+rm -f "$T"
+T=
+if [ -n "$BACKUP" ] && [ -z "$preserve_old" ]; then rm -f "$BACKUP"; fi
+{companion}printf 'AM_STAGED\n'
+"#,
         old = sh_quote(old_projects),
         new = sh_quote(new_projects),
-        src = sh_quote(&src),
-        new_cwd_dir = sh_quote(&new_cwd_dir),
-        dest = sh_quote(&dest),
+        key = sh_quote(cwd_key),
+        name = sh_quote(fname),
+        companion = companion,
+    )
+}
+
+fn remote_companion_script(stem: &str) -> String {
+    format!(
+        r#"STEM={stem}
+if [ ! -e "$STEM" ] && [ ! -L "$STEM" ]; then
+  C=$(mktemp -d .companion-stage-XXXXXX) || C=
+  if [ -n "$C" ] && python3 - "$STEM" "$C" <<'AM_COMPANION_PY'
+import errno, os, secrets, stat, sys
+stem, temp = sys.argv[1:]
+srcbase, dstbase = 5, 6
+src = os.open(stem, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=srcbase)
+dst = os.open(temp, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=dstbase)
+def copy_dir(source, target):
+    for name in os.listdir(source):
+        try:
+            before = os.stat(name, dir_fd=source, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISDIR(before.st_mode):
+            try:
+                os.mkdir(name, 0o700, dir_fd=target)
+                s = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=source)
+                d = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=target)
+            except OSError:
+                continue
+            opened = os.fstat(s)
+            if (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino):
+                copy_dir(s, d)
+            os.close(s); os.close(d)
+        elif stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
+            try:
+                s = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source)
+            except OSError:
+                continue
+            opened = os.fstat(s)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                os.close(s); continue
+            temp_name = ".am-" + secrets.token_hex(16)
+            try:
+                out = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=target)
+                while True:
+                    data = os.read(s, 1024 * 1024)
+                    if not data: break
+                    view = memoryview(data)
+                    while view:
+                        n = os.write(out, view)
+                        view = view[n:]
+                os.fsync(out); os.close(out)
+                try: os.link(temp_name, name, src_dir_fd=target, dst_dir_fd=target, follow_symlinks=False)
+                except FileExistsError: pass
+            finally:
+                try: os.unlink(temp_name, dir_fd=target)
+                except OSError: pass
+                os.close(s)
+copy_dir(src, dst)
+os.fsync(dst)
+os.close(src); os.close(dst)
+AM_COMPANION_PY
+  then
+    if python3 - "$C" "$STEM" <<'AM_COMPANION_RENAME_PY'
+import os, sys
+temp, name = sys.argv[1:]
+try: os.stat(name, dir_fd=6, follow_symlinks=False)
+except FileNotFoundError: os.rename(temp, name, src_dir_fd=6, dst_dir_fd=6)
+else: raise SystemExit(1)
+AM_COMPANION_RENAME_PY
+    then C=; fi
+  fi
+  [ -z "$C" ] || rm -rf "$C"
+fi
+"#,
+        stem = sh_quote(stem),
     )
 }
 
@@ -2268,6 +2408,7 @@ mod resume_args_tests {
             assert!(!crate::lifecycle::transcript_stage::has_claude_transcript_shape("/home/u/.codex/auth.json"));
             assert!(!crate::lifecycle::transcript_stage::has_claude_transcript_shape("/home/u/.claude/projects/k/sid.txt"));
             assert!(!crate::lifecycle::transcript_stage::has_claude_transcript_shape("/home/u/.claude/other/k/sid.jsonl"));
+            assert!(!crate::lifecycle::transcript_stage::has_claude_transcript_shape("/home/u/.claude/projects/../auth.jsonl"), "remote staging must reject a traversal cwd component");
             assert!(crate::lifecycle::transcript_stage::has_claude_transcript_shape("/home/u/.claude-cc1/projects/-Users-x/sid.jsonl"));
         }
 
@@ -2342,6 +2483,78 @@ mod resume_args_tests {
             let _ = std::fs::remove_dir_all(&base);
         }
 
+        #[test]
+        fn a_remote_projects_symlink_cannot_import_a_transcript_from_another_tree() {
+            let base = tmp();
+            let real = base.join("private-projects");
+            std::fs::create_dir_all(real.join("k")).unwrap();
+            std::fs::write(real.join("k/sid.jsonl"), "private transcript").unwrap();
+            let old = base.join("old-projects");
+            std::os::unix::fs::symlink(&real, &old).unwrap();
+            let new = base.join("new-projects");
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_MISSING"), "{out}");
+            assert!(!new.exists(), "transcript outside the owned projects tree was copied");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn a_remote_destination_cwd_symlink_cannot_write_into_another_tree() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("k")).unwrap();
+            std::fs::write(old.join("k/sid.jsonl"), "private transcript").unwrap();
+            let outside = base.join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            let new = base.join("new-projects");
+            std::fs::create_dir(&new).unwrap();
+            std::os::unix::fs::symlink(&outside, new.join("k")).unwrap();
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_MKDIR_FAILED") || out.contains("AM_MISSING"), "{out}");
+            assert!(!outside.join("sid.jsonl").exists(), "destination cwd symlink was followed");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn a_remote_hard_linked_source_is_not_treated_as_a_transcript() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("k")).unwrap();
+            let secret = base.join("credential");
+            std::fs::write(&secret, "sensitive value").unwrap();
+            std::fs::hard_link(&secret, old.join("k/sid.jsonl")).unwrap();
+            let new = base.join("new-projects");
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_MISSING"), "{out}");
+            assert!(!new.exists(), "hard-linked credential was copied as a transcript");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn a_source_swapped_to_a_symlink_at_copy_time_is_not_read() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("k")).unwrap();
+            let src = old.join("k/sid.jsonl");
+            std::fs::write(&src, "ordinary transcript").unwrap();
+            let secret = base.join("credential");
+            std::fs::write(&secret, "sensitive value").unwrap();
+            let new = base.join("new-projects");
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+            let injected = format!(
+                "cat() {{ rm -f {src}; ln -s {secret} {src}; command cat \"$@\"; }}\n{script}",
+                src = crate::hosts::sh_quote(&src.to_string_lossy()),
+                secret = crate::hosts::sh_quote(&secret.to_string_lossy()),
+            );
+            let out = run_script_locally(&injected);
+            assert!(out.contains("AM_STAGED"), "{out}");
+            assert_eq!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap(), "ordinary transcript", "TOCTOU swap must keep reading the opened fd");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
         /// `[ -f "$SRC" ]` 那道守衛真的擋住了：來源檔不存在時不會往下跑 `mkdir`／`cp`，
         /// 只印 `AM_MISSING`，也不會建出目的目錄。
         #[test]
@@ -2383,8 +2596,7 @@ mod resume_args_tests {
         #[test]
         fn shell_metacharacters_in_a_directory_name_are_not_executed() {
             let base = tmp();
-            let canary = base.join("pwned-if-expanded");
-            let weird_cwd = format!("it's-$(touch {})-cwd", canary.display());
+            let weird_cwd = "it's-$(printf pwned)-cwd";
             let old = base.join("old-projects");
             std::fs::create_dir_all(old.join(&weird_cwd)).unwrap();
             std::fs::write(old.join(&weird_cwd).join("sid.jsonl"), "hello").unwrap();
@@ -2394,7 +2606,6 @@ mod resume_args_tests {
             let out = run_script_locally(&script);
             assert!(out.contains("AM_STAGED"), "{out}");
             assert_eq!(std::fs::read_to_string(new.join(&weird_cwd).join("sid.jsonl")).unwrap(), "hello");
-            assert!(!canary.exists(), "$(...) 被當成指令展開執行了，quoting 沒有真的把它擋住");
 
             let _ = std::fs::remove_dir_all(&base);
         }

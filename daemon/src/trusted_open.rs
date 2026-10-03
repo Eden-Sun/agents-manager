@@ -26,6 +26,14 @@ fn cstr(part: &OsStr) -> io::Result<CString> {
     CString::new(part.as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path component has an embedded NUL"))
 }
 
+fn entry_cstr(name: &OsStr) -> io::Result<CString> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes == b"." || bytes == b".." || bytes.contains(&b'/') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a single directory entry name"));
+    }
+    cstr(name)
+}
+
 fn openat_raw(dirfd: i32, name: &OsStr, flags: i32) -> io::Result<File> {
     let c = cstr(name)?;
     // `O_CLOEXEC`：這個 fd 不該被 bot 自己的子行程繼承到。
@@ -39,24 +47,68 @@ fn openat_raw(dirfd: i32, name: &OsStr, flags: i32) -> io::Result<File> {
 /// 從 `base`（信任邊界，本身可以是符號連結）逐層建立並打開 `components`：每一層 `mkdirat` 後 `openat(O_NOFOLLOW|O_DIRECTORY)`，
 /// 已經存在的符號連結（agent 在專案目錄裡換上去的）不會被跟進去，直接失敗。寫入側的 [`open_bound_dir`]。
 pub(crate) fn create_bound_dirs(base: &Path, components: &[&OsStr]) -> io::Result<File> {
-    let mut dir = open_dir(base)?;
+    create_bound_dirs_mode(base, components, 0o755)
+}
+
+pub(crate) fn create_private_bound_dirs(base: &Path, components: &[&OsStr]) -> io::Result<File> {
+    create_bound_dirs_mode(base, components, 0o700)
+}
+
+fn create_bound_dirs_mode(base: &Path, components: &[&OsStr], mode: libc::mode_t) -> io::Result<File> {
+    let mut dir = match open_dir(base) {
+        Ok(dir) => dir,
+        Err(e) if mode == 0o700 && e.kind() == io::ErrorKind::NotFound => create_private_base(base, mode)?,
+        Err(e) => return Err(e),
+    };
     for part in components {
-        let c = cstr(part)?;
-        if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), 0o755) } != 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() != io::ErrorKind::AlreadyExists {
-                return Err(e);
-            }
-        }
-        dir = openat_raw(dir.as_raw_fd(), part, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+        dir = create_bound_child(&dir, part, mode)?;
     }
     Ok(dir)
+}
+
+fn create_private_base(base: &Path, mode: libc::mode_t) -> io::Result<File> {
+    let mut probe = base;
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match std::fs::canonicalize(probe) {
+            Ok(real) => {
+                if !std::fs::metadata(&real)?.is_dir() {
+                    return Err(io::Error::new(io::ErrorKind::NotADirectory, "private directory base is not a directory"));
+                }
+                let rel = real.strip_prefix("/").map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "private base is not absolute"))?;
+                let parts = safe_relative_components(rel).unwrap_or_default();
+                let mut dir = open_bound_dir(Path::new("/"), &parts, None)?;
+                for name in missing.iter().rev() {
+                    dir = create_bound_child(&dir, name, mode)?;
+                }
+                return Ok(dir);
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let name = probe.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "private base has no existing ancestor"))?;
+                let _ = entry_cstr(name)?;
+                missing.push(name.to_os_string());
+                probe = probe.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "private base has no existing ancestor"))?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn create_bound_child(dir: &File, name: &OsStr, mode: libc::mode_t) -> io::Result<File> {
+    let c = entry_cstr(name)?;
+    if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), mode) } != 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::AlreadyExists {
+            return Err(e);
+        }
+    }
+    openat_raw(dir.as_raw_fd(), name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)
 }
 
 /// 在已打開的 `dir` 底下新建 `name`（`O_CREAT|O_EXCL|O_NOFOLLOW`：已經有東西——含符號連結——就失敗，不覆寫、不跟隨）並寫入。
 pub(crate) fn write_new_file_in(dir: &File, name: &OsStr, data: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
-    let c = cstr(name)?;
+    let c = entry_cstr(name)?;
     let fd = unsafe {
         libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o644 as libc::c_uint)
     };
@@ -65,6 +117,64 @@ pub(crate) fn write_new_file_in(dir: &File, name: &OsStr, data: &[u8]) -> io::Re
     }
     let mut file = unsafe { File::from_raw_fd(fd) };
     file.write_all(data)
+}
+
+pub(crate) fn create_new_file_in(dir: &File, name: &OsStr, mode: u32) -> io::Result<File> {
+    let c = entry_cstr(name)?;
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, mode as libc::c_uint) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+pub(crate) fn rename_in(dir: &File, old: &OsStr, new: &OsStr) -> io::Result<()> {
+    let old = entry_cstr(old)?;
+    let new = entry_cstr(new)?;
+    let rc = unsafe { libc::renameat(dir.as_raw_fd(), old.as_ptr(), dir.as_raw_fd(), new.as_ptr()) };
+    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+pub(crate) fn unlink_in(dir: &File, name: &OsStr) -> io::Result<()> {
+    let name = entry_cstr(name)?;
+    let rc = unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
+    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+pub(crate) fn link_in(dir: &File, old: &OsStr, new: &OsStr) -> io::Result<()> {
+    let old = entry_cstr(old)?;
+    let new = entry_cstr(new)?;
+    let rc = unsafe { libc::linkat(dir.as_raw_fd(), old.as_ptr(), dir.as_raw_fd(), new.as_ptr(), 0) };
+    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+pub(crate) fn open_dir_entry_in(dir: &File, name: &OsStr) -> io::Result<File> {
+    let _ = entry_cstr(name)?;
+    openat_raw(dir.as_raw_fd(), name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+}
+
+pub(crate) fn create_dir_entry_in(dir: &File, name: &OsStr, mode: u32) -> io::Result<File> {
+    let c = entry_cstr(name)?;
+    if unsafe { libc::mkdirat(dir.as_raw_fd(), c.as_ptr(), mode as libc::mode_t) } != 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::AlreadyExists { return Err(e); }
+    }
+    open_dir_entry_in(dir, name)
+}
+
+pub(crate) fn remove_tree_in(dir: &File, name: &OsStr) -> io::Result<()> {
+    let c = entry_cstr(name)?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir.as_raw_fd(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 { return Err(io::Error::last_os_error()); }
+    if (st.st_mode & libc::S_IFMT) != libc::S_IFDIR { return unlink_in(dir, name); }
+    let child = match open_dir_entry_in(dir, name) {
+        Ok(child) => child,
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) => return unlink_in(dir, name),
+        Err(e) => return Err(e),
+    };
+    for entry in read_dir_bound(&child)? {
+        if entry.is_dir { remove_tree_in(&child, &entry.name)?; } else { unlink_in(&child, &entry.name)?; }
+    }
+    let rc = unsafe { libc::unlinkat(dir.as_raw_fd(), c.as_ptr(), libc::AT_REMOVEDIR) };
+    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
 fn open_dir(path: &Path) -> io::Result<File> {
@@ -102,6 +212,7 @@ pub(crate) fn safe_relative_components(requested: &Path) -> Option<Vec<&OsStr>> 
 pub(crate) fn open_bound_dir(base: &Path, components: &[&OsStr], owner_uid: Option<u32>) -> io::Result<File> {
     let mut dir = open_dir(base)?;
     for part in components {
+        let _ = entry_cstr(part)?;
         dir = openat_raw(dir.as_raw_fd(), part, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
         if let Some(uid) = owner_uid {
             if dir.metadata()?.uid() != uid {
@@ -138,7 +249,7 @@ where
 {
     // 先檢查名字目前指向的一般檔案，避免對 FIFO 做一般的 blocking open。之後名字仍可能被換掉，
     // 所以 open 本身也必須帶 O_NONBLOCK，並在同一個已開啟的 fd 上再 fstat 一次。
-    let name_c = cstr(name)?;
+    let name_c = entry_cstr(name)?;
     let mut before: libc::stat = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::fstatat(dir.as_raw_fd(), name_c.as_ptr(), &mut before, libc::AT_SYMLINK_NOFOLLOW) };
     if rc != 0 {
@@ -193,6 +304,8 @@ pub(crate) fn read_limited<R: Read>(reader: R, max_bytes: u64) -> Result<Vec<u8>
 pub(crate) struct BoundEntry {
     pub name: OsString,
     pub is_file: bool,
+    pub is_dir: bool,
+    pub is_symlink: bool,
     pub size: u64,
     pub modified: SystemTime,
     /// inode 最後一次變動（搬進來、改名、chmod、寫入都會動）：`mv`／`cp -p` 進來的舊檔 mtime 不變、ctime 是搬入那一刻。
@@ -213,6 +326,19 @@ pub(crate) struct BoundEntry {
 /// 獨立的 open file description（位置各自獨立），`dir` 本身不管列幾次都不受影響；`"."` 是固定的
 /// 自我參照，不是外部可控、可以被換掉的名字，這一步沒有引入新的路徑解析風險。
 pub(crate) fn read_dir_bound(dir: &File) -> io::Result<Vec<BoundEntry>> {
+    let mut out: Vec<BoundEntry> = Vec::new();
+    let _ = read_dir_bound_while(dir, |entry| {
+        out.push(entry);
+        true
+    })?;
+    Ok(out)
+}
+
+/// 同 [`read_dir_bound`]，但逐項交給呼叫端；回傳 `false` 表示呼叫端提早停下，避免只要回有限清單卻先把整個大目錄裝進記憶體。
+pub(crate) fn read_dir_bound_while<F>(dir: &File, mut visit: F) -> io::Result<bool>
+where
+    F: FnMut(BoundEntry) -> bool,
+{
     let reopened = openat_raw(dir.as_raw_fd(), OsStr::new("."), libc::O_RDONLY | libc::O_DIRECTORY)?;
     let raw = reopened.as_raw_fd();
     let dp = unsafe { libc::fdopendir(raw) };
@@ -229,20 +355,19 @@ pub(crate) fn read_dir_bound(dir: &File) -> io::Result<Vec<BoundEntry>> {
     }
     let _guard = DirGuard(dp);
 
-    let mut out = Vec::new();
     loop {
         // 這個 DIR* 只有這個函式自己用（剛從 fdopendir 拿到，沒有分享給別的執行緒），單純的
         // `readdir`（不是 `readdir_r`）沒有資料競爭的疑慮。
         let entry = unsafe { libc::readdir(dp) };
         if entry.is_null() {
-            break; // 到底了；讀不出更多東西一律當作到底，跟 `std::fs::read_dir` 出錯時 `.flatten()` 跳過一樣寧可少列不要出錯。
+            return Ok(true); // 到底了；讀不出更多東西一律當作到底，跟 `std::fs::read_dir` 出錯時 `.flatten()` 跳過一樣寧可少列不要出錯。
         }
         let name_bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
         if name_bytes == b"." || name_bytes == b".." {
             continue;
         }
         let name = OsString::from_vec(name_bytes.to_vec());
-        let Ok(name_c) = cstr(&name) else { continue };
+        let Ok(name_c) = entry_cstr(&name) else { continue };
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         // AT_SYMLINK_NOFOLLOW：查符號連結本身，不跟著它走——符號連結不列是既有規則，這裡沿用，
         // 不會因為連結指到一個大檔案就把假的大小/mtime 交出去。
@@ -250,12 +375,16 @@ pub(crate) fn read_dir_bound(dir: &File) -> io::Result<Vec<BoundEntry>> {
         if rc != 0 {
             continue; // 讀到名字之後、fstat 之前又被刪掉：跳過，不是錯誤。
         }
-        let is_file = (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
+        let kind = st.st_mode & libc::S_IFMT;
+        let is_file = kind == libc::S_IFREG;
+        let is_dir = kind == libc::S_IFDIR;
+        let is_symlink = kind == libc::S_IFLNK;
         let modified = SystemTime::UNIX_EPOCH + Duration::new(st.st_mtime.max(0) as u64, st.st_mtime_nsec.clamp(0, 999_999_999) as u32);
         let changed = SystemTime::UNIX_EPOCH + Duration::new(st.st_ctime.max(0) as u64, st.st_ctime_nsec.clamp(0, 999_999_999) as u32);
-        out.push(BoundEntry { name, is_file, size: st.st_size.max(0) as u64, modified, changed });
+        if !visit(BoundEntry { name, is_file, is_dir, is_symlink, size: st.st_size.max(0) as u64, modified, changed }) {
+            return Ok(false);
+        }
     }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -313,6 +442,34 @@ mod tests {
         assert!(open_entry_in(&handle, OsStr::new("plain.txt")).is_ok());
         assert!(open_entry_in(&handle, OsStr::new("notes.txt")).is_err(), "硬連結不能當成 outbox／附件的檔案");
         assert!(open_entry_in(&handle, OsStr::new("secret")).is_err(), "另一端也是（連結數 2）");
+    }
+
+    #[test]
+    fn a_directory_entry_name_cannot_escape_its_open_directory() {
+        let base = scratch("entry-traversal");
+        std::fs::create_dir_all(base.join("root")).unwrap();
+        std::fs::write(base.join("secret.txt"), "outside").unwrap();
+        let dir = File::open(base.join("root")).unwrap();
+        assert!(open_entry_in(&dir, OsStr::new("../secret.txt")).is_err());
+        assert!(write_new_file_in(&dir, OsStr::new("../escaped.txt"), b"no").is_err());
+        assert!(create_new_file_in(&dir, OsStr::new("../escaped.txt"), 0o600).is_err());
+        assert!(link_in(&dir, OsStr::new("secret.txt"), OsStr::new("../escaped.txt")).is_err());
+        assert!(!base.join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn cleanup_unlinks_a_symlink_without_visiting_its_target() {
+        let base = scratch("cleanup-link");
+        let root = base.join("root");
+        std::fs::create_dir(&root).unwrap();
+        let target = base.join("outside");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("secret"), "keep").unwrap();
+        std::os::unix::fs::symlink(&target, root.join("link")).unwrap();
+        let dir = File::open(&root).unwrap();
+        remove_tree_in(&dir, OsStr::new("link")).unwrap();
+        assert!(!root.join("link").exists());
+        assert_eq!(std::fs::read_to_string(target.join("secret")).unwrap(), "keep");
     }
 
     #[test]
@@ -445,6 +602,23 @@ mod tests {
         std::fs::write(base.join("root/b.txt"), b"there").unwrap();
         assert_eq!(names_of(&read_dir_bound(&dir).unwrap()), vec!["a.txt", "b.txt"], "同一個 fd 可以再列一次，看得到後來新增的檔案");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn directory_listing_can_stop_without_collecting_the_rest() {
+        let base = scratch("bounded-dir-walk");
+        for name in ["one", "two", "three"] {
+            std::fs::write(base.join(name), b"x").unwrap();
+        }
+        let dir = File::open(&base).unwrap();
+        let mut visited = 0;
+        let complete = read_dir_bound_while(&dir, |_| {
+            visited += 1;
+            visited < 2
+        })
+        .unwrap();
+        assert!(!complete, "consumer requested an early stop");
+        assert_eq!(visited, 2, "entries after the limit were not materialized");
     }
 
     /// `open_entry_in` 只認已經打開的目錄 fd 底下那一個項目：一般檔案放行，符號連結（就算指到界線外的

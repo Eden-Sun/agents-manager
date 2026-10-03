@@ -1172,10 +1172,11 @@ pub(crate) fn dir_list_script(path: Option<&str>, hidden: bool) -> String {
 P=$(pwd -P)
 case "$P" in *[[:cntrl:]]*) printf 'AM_ERR=directory name has control characters\n'; exit 0;; esac
 H=$(cd -- "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")
-case "$P" in
-  "$H"/.ssh|"$H"/.ssh/*|"$H"/.gnupg|"$H"/.gnupg/*|"$H"/.aws|"$H"/.aws/*|"$H"/.kube|"$H"/.kube/*|"$H"/.config/agents-manager|"$H"/.config/agents-manager/*|"$H"/.claude|"$H"/.claude/*|"$H"/.claude-*|"$H"/.codex|"$H"/.codex/*|"$H"/.grok|"$H"/.grok/*)
-    printf 'AM_ERR=forbidden directory\n'; exit 0;;
-esac
+for S in "$H"/.ssh "$H"/.gnupg "$H"/.aws "$H"/.kube "$H"/.config/agents-manager "$H"/.claude "$H"/.claude-* "$H"/.codex "$H"/.grok; do
+  [ -d "$S" ] || continue
+  R=$(cd -- "$S" 2>/dev/null && pwd -P) || continue
+  case "$P" in "$R"|"$R"/*) printf 'AM_ERR=forbidden directory\n'; exit 0;; esac
+done
 printf 'AM_HOME=%s\n' "$HOME"
 printf 'AM_PATH=%s\n' "$P"
 printf 'AM_PARENT=%s\n' "$(dirname -- "$P")"

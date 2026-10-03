@@ -1003,13 +1003,72 @@ fn fs_dir_denied(path: &std::path::Path, home: &std::path::Path, data_dir: &std:
         return true;
     }
     const UNDER_HOME: [&str; 8] = [".ssh", ".gnupg", ".aws", ".kube", ".config/agents-manager", ".claude", ".codex", ".grok"];
-    if UNDER_HOME.iter().any(|d| path.starts_with(home.join(d))) {
+    if UNDER_HOME.iter().any(|d| {
+        let root = home.join(d);
+        path.starts_with(&root) || std::fs::canonicalize(&root).is_ok_and(|root| path.starts_with(root))
+    }) {
         return true;
+    }
+    if let Ok(entries) = std::fs::read_dir(home) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(".claude-") {
+                let root = entry.path();
+                if path.starts_with(&root) || std::fs::canonicalize(root).is_ok_and(|root| path.starts_with(root)) {
+                    return true;
+                }
+            }
+        }
     }
     path.strip_prefix(home)
         .ok()
         .and_then(|rest| rest.components().next())
         .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with(".claude-"))
+}
+
+fn local_dir_entries(path: &std::path::Path, hidden: bool) -> std::io::Result<(Vec<Value>, bool)> {
+    use std::os::unix::io::AsRawFd as _;
+    let components = if path == std::path::Path::new("/") {
+        Vec::new()
+    } else {
+        crate::trusted_open::safe_relative_components(path.strip_prefix("/").map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "directory path is not absolute"))?)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "unsafe directory path"))?
+    };
+    let dir = crate::trusted_open::open_bound_dir(std::path::Path::new("/"), &components, None)?;
+    let fd_path = std::path::PathBuf::from(format!("/dev/fd/{}", dir.as_raw_fd()));
+    let mut names: Vec<(String, std::ffi::OsString, bool)> = Vec::new();
+    let completed = crate::trusted_open::read_dir_bound_while(&dir, |entry| {
+        let name = entry.name.to_string_lossy().to_string();
+        if name.chars().any(char::is_control) || (name.starts_with('.') && !hidden) {
+            return true;
+        }
+        let follows_to_dir = entry.is_symlink && std::fs::metadata(fd_path.join(&entry.name)).is_ok_and(|m| m.is_dir());
+        if !entry.is_dir && !follows_to_dir {
+            return true;
+        }
+        if names.len() >= crate::hosts::DIR_LIST_LIMIT * 10 {
+            return false;
+        }
+        names.push((name, entry.name, entry.is_symlink));
+        true
+    })?;
+    let mut truncated = !completed;
+    names.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    if names.len() > crate::hosts::DIR_LIST_LIMIT {
+        names.truncate(crate::hosts::DIR_LIST_LIMIT);
+        truncated = true;
+    }
+    let out = names
+        .into_iter()
+        .map(|(name, entry_name, is_symlink)| {
+            let has_git = !is_symlink
+                && crate::trusted_open::open_dir_entry_in(&dir, &entry_name).ok().is_some_and(|child| {
+                    crate::trusted_open::read_dir_bound(&child).is_ok_and(|entries| entries.iter().any(|e| e.name == std::ffi::OsStr::new(".git")))
+                });
+            let full = if path == std::path::Path::new("/") { format!("/{name}") } else { format!("{}/{name}", path.display()) };
+            json!({"name": name, "path": full, "git": has_git})
+        })
+        .collect();
+    Ok((out, truncated))
 }
 
 async fn list_dirs(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>, Query(q): Query<DirsQuery>) -> Result<Json<Value>, LcError> {
@@ -1041,43 +1100,7 @@ async fn list_dirs(State(app): State<Arc<App>>, Extension(principal): Extension<
     }
     let (rd, truncated) = tokio::task::spawn_blocking({
         let path = path.clone();
-        move || -> std::io::Result<(Vec<Value>, bool)> {
-            // 先只收名字（不 stat `.git`）：上萬個子目錄時，要 stat 的只有最後留下的前 N 個。
-            let mut names: Vec<String> = Vec::new();
-            let mut truncated = false;
-            for ent in std::fs::read_dir(&path)? {
-                let Ok(ent) = ent else { continue };
-                let name = ent.file_name().to_string_lossy().to_string();
-                // 含控制字元的名字不列（跟遠端同一條規則：畫面與協定都不該被目錄名字帶著走）。
-                if name.chars().any(char::is_control) || (name.starts_with('.') && !hidden) {
-                    continue;
-                }
-                let Ok(ft) = ent.file_type() else { continue };
-                let is_dir = if ft.is_symlink() { ent.path().is_dir() } else { ft.is_dir() };
-                if !is_dir {
-                    continue;
-                }
-                if names.len() >= crate::hosts::DIR_LIST_LIMIT * 10 {
-                    truncated = true;
-                    break;
-                }
-                names.push(name);
-            }
-            names.sort_by_key(|n| n.to_lowercase());
-            if names.len() > crate::hosts::DIR_LIST_LIMIT {
-                names.truncate(crate::hosts::DIR_LIST_LIMIT);
-                truncated = true;
-            }
-            let out = names
-                .into_iter()
-                .map(|name| {
-                    let full = path.join(&name);
-                    let has_git = full.join(".git").exists();
-                    json!({"name": name, "path": full.to_string_lossy(), "git": has_git})
-                })
-                .collect();
-            Ok((out, truncated))
-        }
+        move || local_dir_entries(&path, hidden)
     })
     .await
     .map_err(any_err)?
@@ -1840,8 +1863,12 @@ async fn patch_unprojected_bot(app: &Arc<App>, id: &str, b: &PatchBot, effort: &
 async fn patch_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
     Json(mut b): Json<PatchBot>,
 ) -> Result<Response, LcError> {
+    if (b.identity.is_some() || b.env.is_some()) && principal != RequestPrincipal::User {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
     if let Some(env) = &b.env {
         check_env_names(env)?;
     }
@@ -7283,7 +7310,7 @@ mod bot_config_tests {
     }
 
     async fn patch(e: &Env, id: &str, body: Value) -> Result<Value, LcError> {
-        let res = patch_bot(State(e.app.clone()), Path(id.to_string()), Json(serde_json::from_value(body).unwrap())).await?;
+        let res = patch_bot(State(e.app.clone()), Path(id.to_string()), Extension(RequestPrincipal::User), Json(serde_json::from_value(body).unwrap())).await?;
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
         Ok(serde_json::from_slice(&bytes).unwrap())
     }
@@ -7573,6 +7600,23 @@ mod bot_config_tests {
         assert!(e.app.cfg.get().await.identities.iter().all(|identity| identity.name != "cc-nul"), "被拒的身份不能落設定");
     }
 
+    #[tokio::test]
+    async fn a_bot_token_cannot_switch_its_identity_or_cli_config_directory() {
+        let e = env().await;
+        seed_project(&e).await;
+        let id = add(&e, json!({"name": "identity-guard", "kind": "claude"})).await.unwrap();
+        let before = db::bot(&e.app.db, &id).await.unwrap().unwrap();
+        for body in [json!({"identity": null}), json!({"env": {"CLAUDE_CONFIG_DIR": e.dir.join("foreign").to_string_lossy()}})] {
+            let err = patch_bot(State(e.app.clone()), Path(id.clone()), Extension(RequestPrincipal::Bot(id.clone())), Json(serde_json::from_value(body).unwrap()))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
+        }
+        let after = db::bot(&e.app.db, &id).await.unwrap().unwrap();
+        assert_eq!(after.identity, before.identity);
+        assert_eq!(after.env_json, before.env_json);
+    }
+
     // ───────── 目錄瀏覽（DirPicker 背後的 `/fs/dirs`）的安全審查 ─────────
 
     fn dirs_user() -> Extension<RequestPrincipal> {
@@ -7635,6 +7679,20 @@ mod bot_config_tests {
         assert_eq!(v["truncated"], json!(false));
     }
 
+    #[test]
+    fn dirs_does_not_follow_a_path_replaced_by_a_symlink_after_authorization() {
+        let base = tt::scratch_dir("am-test-dirs-swap");
+        let browse = base.join("browse");
+        let protected = base.join("protected");
+        std::fs::create_dir_all(browse.join("visible")).unwrap();
+        std::fs::create_dir_all(protected.join("credential-dir")).unwrap();
+        let authorized_path = std::fs::canonicalize(&browse).unwrap();
+        std::fs::rename(&browse, base.join("browse-before-swap")).unwrap();
+        std::os::unix::fs::symlink(&protected, &browse).unwrap();
+
+        assert!(local_dir_entries(&authorized_path, false).is_err(), "the reopened path must refuse the swapped symlink");
+    }
+
     /// 錯誤訊息不替人把符號連結解開、講出真正的位置。
     #[tokio::test]
     async fn dirs_the_not_a_directory_error_does_not_reveal_where_a_symlink_points() {
@@ -7691,6 +7749,14 @@ mod bot_config_tests {
         for denied in ["~/.ssh", "~/.ssh/inner", "~/.config/agents-manager", "~/.config/agents-manager/bots"] {
             let err = run(denied).unwrap_err().to_string();
             assert!(err.contains("forbidden"), "{denied}: {err}");
+        }
+        let secret = home.join("secret-store");
+        std::fs::create_dir_all(secret.join("inner")).unwrap();
+        std::fs::remove_dir_all(home.join(".ssh")).unwrap();
+        std::os::unix::fs::symlink(&secret, home.join(".ssh")).unwrap();
+        for denied in ["~/secret-store", "~/secret-store/inner"] {
+            let err = run(denied).unwrap_err().to_string();
+            assert!(err.contains("forbidden"), "symlink alias {denied}: {err}");
         }
         let v = run("~/many").unwrap();
         assert_eq!(v["entries"].as_array().unwrap().len(), 2000);
@@ -9959,7 +10025,7 @@ mod mixed_store_tests {
     }
 
     async fn patch(e: &Env, id: &str, body: Value) -> Result<Response, LcError> {
-        patch_bot(State(e.app.clone()), Path(id.to_string()), Json(serde_json::from_value(body).unwrap())).await
+        patch_bot(State(e.app.clone()), Path(id.to_string()), Extension(RequestPrincipal::User), Json(serde_json::from_value(body).unwrap())).await
     }
 
     async fn pin_state(e: &Env, id: &str) -> (i64, i64) {

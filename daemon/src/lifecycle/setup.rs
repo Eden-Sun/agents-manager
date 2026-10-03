@@ -395,11 +395,6 @@ pub(super) fn local_grok_dispatch_sh(exe: &str, data_dir: &str, instance: Option
     )
 }
 
-fn grok_hooks_json(dispatcher: &str) -> String {
-    let entry = json!([{"hooks": [{"type": "command", "command": dispatcher, "timeout": 5}]}]);
-    serde_json::to_string_pretty(&json!({"hooks": {"SessionStart": entry, "Stop": entry}})).unwrap_or_default()
-}
-
 pub(super) fn grok_home(env: &Value, home: &str) -> String {
     env.get("GROK_HOME")
         .and_then(|v| v.as_str())
@@ -420,14 +415,25 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option
     // 按實例分址：共用一個 dispatcher 的話，兩顆 daemon 會互相把它改寫成指向自己（sol 三輪）。
     let dispatcher = format!("{home}/{root}/{GROK_DISPATCH_SH}");
     let hooks_dir = format!("{}/hooks", grok_home(env, &home));
+    let read = conn.ssh_exec(&remote_grok_read_script(&hooks_dir, &grok_hooks_file(instance))).await?;
+    let existing = parse_remote_grok_file(&read)?;
+    let merged = super::grok_hook::hooks_json_merged(existing.as_ref().map(|(text, _)| text.as_str()), &dispatcher);
+    let expected = existing.as_ref().map(|(_, hash)| hash.as_str());
     let script = format!(
-        // `$G` 是使用者自己的 `~/.grok/hooks`，只收我們寫的那個檔，不動別人的目錄（issue #494）。
-        "set -e\numask 077\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\ncat > \"$W\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod 700 \"$W\"\nG={g}\nmkdir -p \"$G\"\ncat > \"$G/{file}\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nchmod 600 \"$G/{file}\"\nprintf 'AM_GROK_INSTALLED\\n'\n",
+        // `$G` 是使用者自己的 `~/.grok/hooks`：在 daemon 端合併、保留其他項目，再以同目錄原子替換；
+        // 遠端檔案在讀取後若被改過，hash fence 會拒絕覆蓋。
+        "set -e\numask 077\nW={w}\nmkdir -p \"$(dirname \"$W\")\"\nWT=$(mktemp \"$W.tmp.XXXXXX\")\ncat > \"$WT\" <<'AM_WRAP_EOF'\n{wrap}AM_WRAP_EOF\nchmod 700 \"$WT\"\nmv -f \"$WT\" \"$W\"\nG={g}\nmkdir -p \"$G\"\n[ ! -L \"$G\" ] && [ -d \"$G\" ] || {{ printf 'AM_GROK_UNTRUSTED\\n'; exit 0; }}\ncd \"$G\"\nF={file}\n{guard}\nT=$(mktemp .agents-manager.XXXXXX)\ntrap 'rm -f \"$T\"' EXIT HUP INT TERM\ncat > \"$T\" <<'AM_JSON_EOF'\n{json}\nAM_JSON_EOF\nchmod 600 \"$T\"\n{guard}\n{publish}\nprintf 'AM_GROK_INSTALLED\\n'\n",
         w = sh_quote(&dispatcher),
         wrap = remote_grok_dispatch_sh(&root, instance),
         g = sh_quote(&hooks_dir),
-        file = grok_hooks_file(instance),
-        json = grok_hooks_json(&dispatcher),
+        file = sh_quote(&grok_hooks_file(instance)),
+        guard = remote_grok_expect_script(&grok_hooks_file(instance), expected),
+        publish = if expected.is_some() {
+            format!("mv -f \"$T\" \"$F\"")
+        } else {
+            "ln \"$T\" \"$F\" && rm -f \"$T\" || { printf 'AM_GROK_CHANGED\\n'; exit 0; }".into()
+        },
+        json = merged,
     );
     let out = conn.ssh_exec(&script).await?;
     if !out.contains("AM_GROK_INSTALLED") {
@@ -435,6 +441,69 @@ async fn install_remote_grok_hook(conn: &HostConn, env: &Value, instance: Option
     }
     tracing::info!(host = %conn.name, hooks_dir, "remote grok hook installed");
     Ok(())
+}
+
+fn remote_grok_read_script(hooks_dir: &str, file: &str) -> String {
+    format!(
+        r#"G={g}
+F="$G"/{f}
+am_bad() {{ printf 'AM_GROK_UNTRUSTED\n'; exit 0; }}
+[ -L "$G" ] && am_bad
+if [ ! -e "$F" ] && [ ! -L "$F" ]; then printf 'AM_GROK_MISSING\n'; exit 0; fi
+[ ! -L "$F" ] && [ -f "$F" ] || am_bad
+{{
+  exec 3< "$F" || am_bad
+  if stat -c %Y "$F" >/dev/null 2>&1; then
+    a=$(stat -L -c '%d %i %h %s' "$F") || am_bad
+    b=$(stat -L -c '%d %i %h %s' /dev/fd/3) || am_bad
+  else
+    a=$(stat -L -f '%d %i %l %z' "$F") || am_bad
+    b=$(stat -L -f '%d %i %l %z' /dev/fd/3) || am_bad
+  fi
+  [ "$a" = "$b" ] || am_bad
+  set -- $b
+  [ "$3" = 1 ] && [ "$4" -le 262144 ] || am_bad
+  [ ! -L "$G" ] && [ ! -L "$F" ] || am_bad
+  printf 'AM_GROK_FILE\n'
+  head -c 262145 <&3 | base64
+}} 2>/dev/null
+"#,
+        g = sh_quote(hooks_dir),
+        f = sh_quote(file),
+    )
+}
+
+fn parse_remote_grok_file(out: &str) -> anyhow::Result<Option<(String, String)>> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let (head, body) = out.split_once('\n').unwrap_or((out, ""));
+    if head == "AM_GROK_MISSING" {
+        return Ok(None);
+    }
+    if head != "AM_GROK_FILE" {
+        anyhow::bail!("remote grok hooks file is not a safe regular file: {}", out.trim());
+    }
+    let encoded: String = body.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
+    if bytes.len() > 262_144 {
+        anyhow::bail!("remote grok hooks file is too large");
+    }
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    Ok(Some((String::from_utf8(bytes)?, hash)))
+}
+
+fn remote_grok_expect_script(file: &str, expected: Option<&str>) -> String {
+    match expected {
+        Some(hash) => format!(
+            "F={f}\n[ ! -L \"$F\" ] && [ -f \"$F\" ] || {{ printf 'AM_GROK_CHANGED\\n'; exit 0; }}\nif command -v sha256sum >/dev/null 2>&1; then NOW=$(sha256sum \"$F\" | awk '{{print $1}}'); else NOW=$(shasum -a 256 \"$F\" | awk '{{print $1}}'); fi\n[ \"$NOW\" = {hash} ] || {{ printf 'AM_GROK_CHANGED\\n'; exit 0; }}\n",
+            f = sh_quote(file),
+            hash = sh_quote(hash),
+        ),
+        None => format!(
+            "F={f}\n[ ! -e \"$F\" ] && [ ! -L \"$F\" ] || {{ printf 'AM_GROK_CHANGED\\n'; exit 0; }}\n",
+            f = sh_quote(file),
+        ),
+    }
 }
 
 pub struct RemoteHookPaths {
@@ -2596,5 +2665,88 @@ mod remote_install_permission_tests {
         assert_eq!(mode_of(&spool), 0o600, "升級前留下的 spool 也要修");
         assert_eq!(std::fs::read_to_string(&spool).unwrap(), "{}\n", "修權限不准動內容");
         let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
+mod remote_grok_merge_tests {
+    use crate::config::HostCfg;
+    use crate::testing as tt;
+    use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn remote_grok_install_preserves_user_hooks_in_its_shared_file() {
+        let env = tt::env().await;
+        let host = format!("grok-merge-{}", crate::db::ulid());
+        let home = tt::scratch_dir("am-remote-grok-merge");
+        let grok_home = home.join(".grok");
+        let hooks = grok_home.join("hooks").join(super::grok_hooks_file(None));
+        std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+        std::fs::write(&hooks, json!({
+            "note": "keep this",
+            "hooks": {
+                "SessionStart": [{"hooks": [{"type": "command", "command": "/home/u/grok-hook.sh", "timeout": 9}]}],
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "/home/u/guard.sh"}]}]
+            }
+        }).to_string()).unwrap();
+
+        let conn = env.app.hosts.insert_remote_for_test(HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "am-test".into(),
+            remote_path: String::new(),
+        }).await;
+        *conn.remote_home.lock().await = Some(home.to_string_lossy().into_owned());
+        let remote_home = home.to_string_lossy().into_owned();
+        let fake_home = remote_home.clone();
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .env("HOME", &fake_home)
+                .output()?;
+            if !out.status.success() {
+                anyhow::bail!("remote script failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+
+        super::install_remote_grok_hook(&conn, &json!({"GROK_HOME": grok_home.to_string_lossy()}), None).await.unwrap();
+        let actual: Value = serde_json::from_slice(&std::fs::read(&hooks).unwrap()).unwrap();
+        assert_eq!(actual["note"], "keep this");
+        let commands = |event: &str| -> Vec<String> {
+            actual["hooks"][event].as_array().into_iter().flatten()
+                .flat_map(|g| g["hooks"].as_array().into_iter().flatten())
+                .filter_map(|h| h["command"].as_str().map(str::to_owned)).collect()
+        };
+        assert_eq!(commands("SessionStart").iter().filter(|s| *s == "/home/u/grok-hook.sh").count(), 1);
+        assert!(commands("SessionStart").iter().any(|s| s.ends_with("/grok-hook.sh") && s.starts_with(remote_home.as_str())));
+        assert_eq!(commands("PreToolUse"), ["/home/u/guard.sh"]);
+    }
+
+    #[test]
+    fn remote_grok_reader_caps_growth_after_the_fd_size_check() {
+        use base64::Engine as _;
+        let base = tt::scratch_dir("am-remote-grok-growth");
+        let hooks_dir = base.join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hooks = hooks_dir.join(super::grok_hooks_file(None));
+        std::fs::write(&hooks, b"{}\n").unwrap();
+        let append = crate::hosts::sh_quote(&hooks.to_string_lossy());
+        let script = format!(
+            "stat() {{ command stat \"$@\"; rc=$?; case \"$*\" in *\"%d %i %h %s /dev/fd/3\"*) dd if=/dev/zero bs=300000 count=1 >> {append} 2>/dev/null;; esac; return \"$rc\"; }}\n{}",
+            super::remote_grok_read_script(&hooks_dir.to_string_lossy(), &super::grok_hooks_file(None)),
+        );
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let (marker, encoded) = stdout.split_once('\n').unwrap();
+        assert_eq!(marker, "AM_GROK_FILE");
+        let encoded: String = encoded.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        assert!(bytes.len() <= 262_145, "remote hook file grew past the read cap: {} bytes", bytes.len());
     }
 }

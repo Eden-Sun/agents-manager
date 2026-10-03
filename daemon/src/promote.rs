@@ -18,12 +18,13 @@ use crate::config::{valid_bot_name, BotCfg, BOT_NAME_RE, LOCAL_HOST};
 use crate::db;
 use crate::lifecycle::{self, LcError, StartOpts};
 use crate::state::App;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
@@ -78,7 +79,10 @@ async fn locate_live(app: &Arc<App>, run: &db::Run) -> Result<Located, LcError> 
         let Some(pid) = p.pid.filter(|p| *p > 0) else { continue };
         let Some(env) = reader.env_of(app, LOCAL_HOST, pid).await else { continue };
         let Some(dir) = config_dir_of(&env) else { continue };
-        let Ok(raw) = std::fs::read_to_string(FsPath::new(&dir).join("sessions").join(format!("{pid}.json"))) else { continue };
+        let session_path = FsPath::new(&dir).join("sessions").join(format!("{pid}.json"));
+        let Ok(mut session_file) = crate::transcript_read::open_regular(&session_path) else { continue };
+        let Ok(bytes) = crate::trusted_open::read_limited(&mut session_file, 1024 * 1024) else { continue };
+        let Ok(raw) = String::from_utf8(bytes) else { continue };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
         if v.get("pid").and_then(|x| x.as_i64()) != Some(pid) {
             continue;
@@ -126,8 +130,14 @@ struct Staged {
 
 impl Staged {
     fn undo(&self) {
+        let Some(cwd_dir) = self.dest.parent() else { return };
+        let Some(projects_dir) = cwd_dir.parent() else { return };
+        let Some(config_dir) = projects_dir.parent() else { return };
+        let Some(cwd_key) = cwd_dir.file_name() else { return };
+        let parts = [std::ffi::OsStr::new("projects"), cwd_key];
+        let Ok(parent) = crate::trusted_open::open_bound_dir(config_dir, &parts, None) else { return };
         for p in self.created.iter().rev() {
-            let _ = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+            if let Some(name) = p.file_name() { let _ = crate::trusted_open::remove_tree_in(&parent, name); }
         }
     }
 }
@@ -139,41 +149,65 @@ fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result
     let dest = dest_dir.join(format!("{session_id}.jsonl"));
     let mut staged = Staged { created: vec![], dest: dest.clone() };
     let bad = |e: std::io::Error| refuse("transcript_copy_failed", json!({"message": e.to_string()}));
-    // 來源是 DB／sessions 檔記的路徑：要是 `projects/<cwd>/<id>.jsonl` 形狀的一般檔，符號連結不跟（不能拿它複製任意檔案成對話）。
     if !ts::is_claude_transcript(src) {
         return Err(refuse("transcript_copy_failed", json!({"message": "來源不是 projects/<cwd>/<id>.jsonl 的一般檔"})));
     }
-    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(src), std::fs::canonicalize(&dest)) {
-        if a == b {
-            return Ok(staged);
-        }
-    }
-    if dest.exists() {
-        let same = std::fs::read(src).ok().zip(std::fs::read(&dest).ok()).is_some_and(|(a, b)| a == b);
-        if same {
+    let Some(projects_dir) = dest_dir.parent().filter(|p| p.file_name() == Some(std::ffi::OsStr::new("projects"))) else {
+        return Err(refuse("transcript_copy_failed", json!({"message": "目的目錄不是 projects/<cwd>"})));
+    };
+    let Some(config_dir) = projects_dir.parent() else { return Err(refuse("transcript_copy_failed", json!({"message": "目的 projects 沒有帳號根目錄"}))) };
+    let Some(cwd_key) = dest_dir.file_name() else { return Err(refuse("transcript_copy_failed", json!({"message": "目的 cwd 不存在"}))) };
+    let parts = [std::ffi::OsStr::new("projects"), cwd_key];
+    let dest_fd = crate::trusted_open::create_private_bound_dirs(config_dir, &parts).map_err(bad)?;
+    let src_fd = crate::transcript_read::open_regular(src).map_err(bad)?;
+    let dest_name = dest.file_name().ok_or_else(|| refuse("transcript_copy_failed", json!({"message": "目的 transcript 名稱不存在"})))?;
+    let current = match crate::trusted_open::open_entry_in(&dest_fd, dest_name) {
+        Ok(f) => Some(f),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(bad(e)),
+    };
+    if let Some(existing) = current {
+        let (sm, dm) = (src_fd.metadata().map_err(bad)?, existing.metadata().map_err(bad)?);
+        if sm.dev() == dm.dev() && sm.ino() == dm.ino()
+            || sm.len() == dm.len() && ts::is_prefix_of(&src_fd, &existing).map_err(bad)?
+        {
             return Ok(staged);
         }
         return Err(refuse("transcript_exists", json!({"path": dest.to_string_lossy()})));
     }
-    ts::private_create_dir_all(dest_dir).map_err(bad)?;
-    let tmp = dest_dir.join(format!(".promote-{}.tmp", db::ulid()));
-    if let Err(e) = ts::write_private_copy(src, &tmp) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(bad(e));
-    }
-    if let Err(e) = std::fs::rename(&tmp, &dest) {
-        let _ = std::fs::remove_file(&tmp);
+    let mut tmp_name = std::ffi::OsString::from(".promote-");
+    tmp_name.push(db::ulid());
+    tmp_name.push(".tmp");
+    let copied = (|| {
+        use std::io::Write as _;
+        let mut from = src_fd;
+        let mut to = crate::trusted_open::create_new_file_in(&dest_fd, &tmp_name, 0o600)?;
+        std::io::copy(&mut from, &mut to)?;
+        to.flush()?;
+        to.sync_all()?;
+        crate::trusted_open::link_in(&dest_fd, &tmp_name, dest_name)?;
+        crate::trusted_open::unlink_in(&dest_fd, &tmp_name)
+    })();
+    if let Err(e) = copied {
+        let _ = crate::trusted_open::unlink_in(&dest_fd, &tmp_name);
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(refuse("transcript_exists", json!({"path": dest.to_string_lossy()})));
+        }
         return Err(bad(e));
     }
     staged.created.push(dest);
     // 同名附屬目錄（subagent 對話等）：沒有就跳過，複製失敗不影響主對話，但不留下半份目錄。
     if let (Some(parent), Some(stem)) = (src.parent(), src.file_stem()) {
-        let (cs, cd) = (parent.join(stem), dest_dir.join(stem));
-        if cs.is_dir() && !cd.exists() {
+        let cs = parent.join(stem);
+        let source_is_dir = std::fs::symlink_metadata(&cs).is_ok_and(|m| m.file_type().is_dir());
+        let destination_exists = crate::trusted_open::open_dir_entry_in(&dest_fd, stem).is_ok()
+            || crate::trusted_open::open_entry_in(&dest_fd, stem).is_ok();
+        if source_is_dir && !destination_exists {
+            let cd = dest_dir.join(stem);
             match ts::copy_dir_private(&cs, &cd) {
                 Ok(()) => staged.created.push(cd),
                 Err(_) => {
-                    let _ = std::fs::remove_dir_all(&cd);
+                    let _ = crate::trusted_open::remove_tree_in(&dest_fd, stem);
                 }
             }
         }
@@ -244,8 +278,12 @@ pub(crate) fn user_bot_cfg(child: &db::Bot, new_id: &str, name: &str, model: &Op
 pub async fn promote_bot(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    Extension(principal): Extension<crate::api::RequestPrincipal>,
     body: Option<Json<PromoteReq>>,
 ) -> Result<Response, LcError> {
+    if principal != crate::api::RequestPrincipal::User {
+        return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "user_only"})));
+    }
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let lock = app.bot_lock(&id).await;
     let _g = lock.lock().await;
@@ -556,9 +594,26 @@ mod tests {
     }
 
     async fn promote(r: &Rig, req: PromoteReq) -> Result<Value, LcError> {
-        let res = promote_bot(State(r.e.app.clone()), Path(r.child.clone()), Some(Json(req))).await?;
+        let res = promote_bot(State(r.e.app.clone()), Path(r.child.clone()), Extension(crate::api::RequestPrincipal::User), Some(Json(req))).await?;
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
         Ok(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_bot_token_cannot_promote_a_child() {
+        let r = rig(true).await;
+        let err = promote_bot(
+            State(r.e.app.clone()),
+            Path(r.child.clone()),
+            Extension(crate::api::RequestPrincipal::Bot(r.child.clone())),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, LcError::Forbidden(_)), "only the UI user can promote a child: {err:?}");
+        assert!(!r.dest().exists());
+        assert_eq!(db::active_run(&r.e.app.db, &r.child).await.unwrap().unwrap().state, "running");
+        assert!(r.e.app.cfg.get().await.projects[0].bots.is_empty());
     }
 
     fn reason(e: LcError) -> String {
@@ -795,7 +850,9 @@ mod tests {
             std::future::pending::<()>().await
         });
         let (app, id) = (r.e.app.clone(), r.child.clone());
-        let h = tokio::spawn(async move { promote_bot(State(app), Path(id), None).await.map(|_| ()) });
+        let h = tokio::spawn(async move {
+            promote_bot(State(app), Path(id), Extension(crate::api::RequestPrincipal::User), None).await.map(|_| ())
+        });
         reached.notified().await;
         h.abort();
         let _ = h.await;

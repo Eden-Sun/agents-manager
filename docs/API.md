@@ -647,11 +647,11 @@ bot 或 active Run 不存在 404。
  "files":[{"name":"tracking.tsv","size":18432,"modified":1789600000,"expires_at":1789603600,"remaining_secs":2520}]}
 ```
 
-- 只列**第一層的一般檔案**（不遞迴；子目錄與符號連結不列），新的排前面，最多 300 筆。
+- 只列**第一層的一般檔案**（不遞迴；子目錄、符號連結與硬連結不列），新的排前面，最多 300 筆。
 - `expires_at` = mtime 與 ctime（檔案搬進 outbox 的時間）較晚的那個 + `ttl_secs`（`modified` 仍是 mtime）；`remaining_secs` 是回應當下還剩幾秒，到期是 0（AGM 的 `com.agm.outbox-gc` 每 10 分鐘才清一次，0 的檔案還會出現一下）。前端從回應那一刻往下扣，不拿瀏覽器時鐘比 `expires_at`。
 - **一律不列**：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env` `.token` `.keychain`、`id_rsa*` 等，以及 `auth.json`、`credentials.json`、`application_default_credentials.json`、`hosts.yml`、`ui-token`），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案。規則本來就禁止放這些，這是第二道。
 - 目錄不存在（還沒寫過、被清理收掉）→ `200` 空清單。bot 不存在 404。
-- **遠端主機的 bot**：outbox 在那台機器上（`~/<remote root>/outbox/<bot_id>/`），daemon 走 ssh 列，回應多一個 `host`；只列最上層的一般檔，私鑰／憑證／DB 一樣不列；列表時順手刪掉超過 `ttl_secs` 的檔（遠端沒有 AGM 的 gc）。outbox 是符號連結 → `reason:"outbox_untrusted"`；連不上那台 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_remote_unreachable","host":…}`。舊版 daemon 回的 `reason:"outbox_remote"` 已不再出現。
+- **遠端主機的 bot**：outbox 在那台機器上（`~/<remote root>/outbox/<bot_id>/`），daemon 走 ssh 列，回應多一個 `host`；只列最上層的一般檔，symlink／hardlink 與私鑰／憑證／DB 一樣不列；列表與下載都從已驗證的 fd 讀，硬連結要求 link count 為 1；列表時順手刪掉超過 `ttl_secs` 的檔（遠端沒有 AGM 的 gc）。outbox 是符號連結 → `reason:"outbox_untrusted"`；連不上那台 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_remote_unreachable","host":…}`。舊版 daemon 回的 `reason:"outbox_remote"` 已不再出現。
 - `outbox` 或 `<bot_id>` 這兩段是符號連結、或擁有者跟資料目錄不同 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_untrusted"}`，下載 404：界線不能跟著連結搬到別處（例如 `~/.codex`）。
 
 ### `GET /api/bots/{id}/outbox/file?path=<檔名>`
@@ -1874,7 +1874,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 ### `GET /api/attachments/{id}`
 回原始位元組。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。只有 `state='ready'`
 的附件讀得到，`staging`／`failed` 一律 404。讀檔走 `trusted_open`（逐層 `openat(O_NOFOLLOW)`、fd 讀、50 MiB 上限）：本機 bot 的附件放在專案目錄（agent 寫得到），
-被換成符號連結（指到界線外的檔案或 `/dev/zero`）一律讀不到。
+被換成符號連結（指到界線外的檔案或 `/dev/zero`）或硬連結一律讀不到。
 
 送出去的 `Content-Type` **不是**上傳時收到的那個（那是呼叫端自己給的，`POST …/attachments` 刻意什麼都收）：
 走白名單，`image/png|jpeg|gif|webp`、`image/svg+xml`、`application/pdf`、`text/plain` 之外一律
