@@ -1469,9 +1469,16 @@ def ops_sync_report(repo: Path, ref: str, agm_dir: Path) -> dict:
                 # 安裝的若是 repo 以前某一版的語意，那是「repo 較新、還沒裝」（behind），不是被人手改過（drift）：
                 # 跟下面的腳本一樣回頭找歷史。以前這裡只跟最新一版比，unit／plist 一落後就報成 drift，
                 # 而 ops-install 對 drift 的處理是「絕不覆蓋」（避免蓋掉手改的檔）——正常落後的檔也被擋下來。
-                found = None if "_error" in got else next(
-                    (c for c in _git(repo, "log", "--format=%H", ref, "--", source).split()
-                     if semantics(_git_bytes(repo, c, source)) == got), None)
+                found = None
+                if "_error" not in got:
+                    for c in _git(repo, "log", "--format=%H", ref, "--", source).split():
+                        # A path may be deleted and later re-added. Its deletion commit is in the
+                        # path history but has no <commit>:<path> blob to parse; keep walking back.
+                        if _blob_at(repo, c, source) is None:
+                            continue
+                        if semantics(_git_bytes(repo, c, source)) == got:
+                            found = c
+                            break
                 if found is not None:
                     titles = _git(repo, "log", "--format=%h %s", f"{found}..{ref}", "--", source).splitlines()
                     row.update({"installed_commit": found[:8], "behind": len(titles), "commits": titles})

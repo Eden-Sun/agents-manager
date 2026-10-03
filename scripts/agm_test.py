@@ -2010,6 +2010,44 @@ class OpsSyncTest(CliCase):
         self.assertNotIn("bin/c.sh.new.4242", extras)
         self.assertIn("bin/c.sh.new.notapid", extras)
 
+    def test_systemd_history_search_skips_a_commit_where_the_source_was_deleted(self):
+        """歷史路徑可能經過刪除再新增；那個刪除 commit 沒有可供語意解析的 blob，應繼續找更舊版本。"""
+        source = "scripts/ops/example.service"
+        target = "systemd/com.agm.example.service"
+        v1 = "[Unit]\nDescription=version one\n[Service]\nExecStart=/bin/true\n"
+        v2 = "[Unit]\nDescription=version two\n[Service]\nExecStart=/bin/true\n"
+        v3 = "[Unit]\nDescription=version three\n[Service]\nExecStart=/bin/true\n"
+        self.put("scripts/ops/install-manifest.tsv",
+                 "# comment\nscripts/ops/a.sh bin/a.sh\nscripts/ops/b.sh bin/b.sh\n"
+                 "scripts/ops/c.sh bin/c.sh\nscripts/ops/t.md t.md\n"
+                 f"{source} {target} linux\n")
+        self.put(source, v1)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "service version one")
+        v1_commit = self.git("rev-parse", "--short=8", "HEAD")
+        installed = self.units / "com.agm.example.service"
+        installed.write_text(v1, encoding="utf-8")
+        self.put(source, v2)
+        self.git("commit", "-qam", "service version two")
+        (self.repo / source).unlink()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "temporarily remove service")
+        self.put(source, v3)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "restore service at version three")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        os.environ["AGM_OPS_PLATFORM"] = "linux"
+
+        code, out, err = self.run_cli("ops-sync", "--check", "--repo", str(self.repo))
+        self.assertEqual(code, 1, err)
+        report = json.loads(out)
+        [row] = [row for row in report["behind"] if row["target"] == target]
+        self.assertEqual(row["behind"], 3)
+        self.assertEqual(row["installed_commit"], v1_commit)
+        self.assertEqual({commit.split(" ", 1)[1] for commit in row["commits"]}, {
+            "service version two", "temporarily remove service", "restore service at version three",
+        })
+
     def test_each_kind_of_gap_is_reported_separately_and_exits_nonzero(self):
         self.install("bin/a.sh", "a v1\n")            # 落後兩個 commit
         self.install("bin/b.sh", "b 有人直接改了\n")    # repo 任何一版都不是

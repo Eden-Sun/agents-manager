@@ -23,7 +23,11 @@ esac
 SH
 cat >"$fx/bin/cargo" <<'SH'
 #!/usr/bin/env bash
-exit "${AM_TEST_CARGO_RC:-0}"
+rc="${AM_TEST_CARGO_RC:-0}"
+if [ "${1:-}" = test ] && [ "$rc" = 0 ]; then
+    echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+fi
+exit "$rc"
 SH
 cat >"$fx/bin/df" <<'SH'
 #!/usr/bin/env bash

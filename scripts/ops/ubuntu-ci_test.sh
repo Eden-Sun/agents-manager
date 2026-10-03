@@ -211,17 +211,19 @@ teardown
 #    而且磁碟不足的那一輪也要清（以前清理排在磁碟預檢之後：正是被這些目錄塞滿時永遠清不到）。
 U1=01ARZ3NDEKTSV4RRFFQ69G5FAV; U2=01ARZ3NDEKTSV4RRFFQ69G5FAW; U3=01ARZ3NDEKTSV4RRFFQ69G5FAX
 U4=01ARZ3NDEKTSV4RRFFQ69G5FAY; U5=01ARZ3NDEKTSV4RRFFQ69G5FAZ; U6=01ARZ3NDEKTSV4RRFFQ69G5FB0
+U7=Z1ARZ3NDEKTSV4RRFFQ69G5FAV # ULID overflow: the first base32 digit may only be 0 through 7.
 OLD="$(date -d '8 hours ago' +%Y%m%d%H%M)"
 setup_tmp() {
   T="$ROOT/tmp"; mkdir -p "$T"
-  mkdir -p "$T/am-stale-$U1/sub" "$T/agm-$U2" "$T/am-busy-$U3/sub" "$T/am-fresh-$U4" "$T/am-ops-test" "$T/herdr-$U5" "$T/claude-1000" "$T/not-am-$U6" "$ROOT/outside"
+  mkdir -p "$T/am-stale-$U1/sub" "$T/agm-$U2" "$T/am-busy-$U3/sub" "$T/am-fresh-$U4" "$T/am-ops-test" "$T/am-invalid-ulid-$U7/sub" "$T/herdr-$U5" "$T/claude-1000" "$T/not-am-$U6" "$ROOT/outside"
   echo keep > "$ROOT/outside/precious"; echo x > "$T/am-stale-$U1/sub/f"; echo busy > "$T/am-busy-$U3/sub/live"
+  echo keep > "$T/am-invalid-ulid-$U7/sub/file"
   ln -s "$ROOT/outside" "$T/am-link-$U6"
   : > "$T/am-origin-$U5.jsonl"
   # 內容都先做好再把時間倒回去（最後才動目錄本身）；busy 的目錄自己很舊、裡面有新檔。
   find "$T" -mindepth 2 -exec touch -t "$OLD" {} +
   touch -t "$(date +%Y%m%d%H%M)" "$T/am-busy-$U3/sub/live"
-  for d in am-stale-$U1 agm-$U2 am-busy-$U3 am-ops-test herdr-$U5 claude-1000 not-am-$U6 am-origin-$U5.jsonl; do touch -t "$OLD" "$T/$d"; done
+  for d in am-stale-$U1 agm-$U2 am-busy-$U3 am-invalid-ulid-$U7 am-ops-test herdr-$U5 claude-1000 not-am-$U6 am-origin-$U5.jsonl; do touch -t "$OLD" "$T/$d"; done
   touch -h -t "$OLD" "$T/am-link-$U6"
   export TMPDIR="$T"
 }
@@ -238,6 +240,7 @@ gone "超過 6 小時的 am-*-ULID.jsonl 殘留檔被清掉" "$T/am-origin-$U5.j
 kept "目錄自己很舊但裡面有新檔：行程可能還在用，不刪" "$T/am-busy-$U3/sub/live"
 kept "新的目錄不刪" "$T/am-fresh-$U4"
 kept "不是 ULID 結尾的 am-* 不刪" "$T/am-ops-test"
+kept "超出 ULID 時間範圍的首字元不當成 ULID 刪除" "$T/am-invalid-ulid-$U7"
 kept "不是 am-／agm- 開頭的不刪（herdr）" "$T/herdr-$U5"
 kept "不刪 claude-*" "$T/claude-1000"
 kept "名字只是含 am-、不是開頭的不刪" "$T/not-am-$U6"
@@ -269,6 +272,49 @@ kept "TMPDIR 是 HOME：不清" "$HOME/am-home-$U1"
 kept "TMPDIR 是相對路徑：不清" "$T/am-stale-$U1"
 unset TMPDIR; teardown
 
+# 7d. TMPDIR 不得藉由 symlink 或 HOME 子目錄把清理範圍導到使用者檔案。
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+setup_tmp
+ln -s "$T" "$ROOT/tmp-link"
+export TMPDIR="$ROOT/tmp-link"
+equals "TMPDIR 是 symlink 時 exit 0" "$(run)" "0"
+kept "不沿 TMPDIR symlink 刪除目標中的暫存目錄" "$T/am-stale-$U1"
+kept "TMPDIR symlink 本身不動" "$ROOT/tmp-link"
+unset TMPDIR; teardown
+
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+mkdir -p "$HOME/tmp"
+mkdir -p "$HOME/tmp/am-home-child-$U1/sub"
+echo keep > "$HOME/tmp/am-home-child-$U1/sub/file"
+find "$HOME/tmp" -mindepth 2 -exec touch -t "$OLD" {} +
+touch -t "$OLD" "$HOME/tmp/am-home-child-$U1"
+export TMPDIR="$HOME/tmp"
+equals "TMPDIR 在 HOME 底下時 exit 0" "$(run)" "0"
+kept "不清理 HOME 子目錄裡的舊 ULID 暫存" "$HOME/tmp/am-home-child-$U1"
+unset TMPDIR; teardown
+
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+mkdir -p "$ROOT/am-root-child-$U1/sub"
+echo keep > "$ROOT/am-root-child-$U1/sub/file"
+find "$ROOT/am-root-child-$U1" -exec touch -t "$OLD" {} +
+export TMPDIR="$ROOT"
+equals "TMPDIR 是 HOME 祖先時 exit 0" "$(run)" "0"
+kept "不清理 HOME 祖先底下的同名 ULID 暫存" "$ROOT/am-root-child-$U1"
+unset TMPDIR; teardown
+
+setup
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+mkdir -p "$ROOT/am-root-home-$U1/sub"
+echo keep > "$ROOT/am-root-home-$U1/sub/file"
+find "$ROOT/am-root-home-$U1" -exec touch -t "$OLD" {} +
+export TMPDIR="$ROOT" HOME=/
+equals "HOME=/ 時清理 exit 0" "$(run)" "0"
+kept "HOME=/ 時不清理任何暫存路徑" "$ROOT/am-root-home-$U1"
+unset TMPDIR; teardown
+
 # 8. 最後一則 commit status 暫時寫不上去（GitHub 連不上）：以前只印一行就算了、last-sha 照樣前進，
 #    這個 sha 在 GitHub 上永遠停在 pending（status.json 卻說 success）。現在先重試，還不行就記下來，下一輪補送（不重跑）。
 setup
@@ -282,15 +328,26 @@ teardown
 setup
 echo 99 > "$FIX/gh.failn"   # 整輪 GitHub 都連不上
 equals "GitHub 整輪連不上 CI 也 exit 0" "$(run)" "0"
-check "結果記下來等補送" "$SHA\|success\|$(git -C "$ROOT/work" rev-parse HEAD)" "$CI/unposted" 2>/dev/null || true
+SHA1=$(git -C "$ROOT/work" rev-parse HEAD)
+check "結果記下來等補送" "$SHA1\|success\|" "$CI/unposted"
 [ -s "$CI/unposted" ] && echo "ok   - 有 unposted 記錄" && PASS=$((PASS + 1)) || { echo "FAIL - 沒有 unposted 記錄"; FAIL=$((FAIL + 1)); }
 check_no "GitHub 沒收到任何 status" "state=" "$FIX/gh.log"
+
+# Another commit can finish while GitHub is still unavailable. Keep both completed results queued;
+# overwriting the single unposted row makes the earlier tested SHA stay pending forever.
+(cd "$ROOT/work" && echo 2 > f && git add f && git commit -q -m c2 && git push -q origin main)
+equals "第二個離線 SHA 的 CI exit 0" "$(run)" "0"
+SHA2=$(git -C "$ROOT/work" rev-parse HEAD)
+check "unposted 保留第一個已測 SHA" "$SHA1\|success\|" "$CI/unposted"
+check "unposted 也記下第二個已測 SHA" "$SHA2\|success\|" "$CI/unposted"
+
 echo 0 > "$FIX/gh.failn"
 equals "GitHub 回來後下一輪 exit 0" "$(run)" "0"
 check "補送了 success（同一個 sha，不重跑）" "state=success" "$FIX/gh.log"
-check "補送的是那個 sha" "statuses/$(git -C "$ROOT/work" rev-parse HEAD)" "$FIX/gh.log"
+check "補送第一個 SHA" "statuses/$SHA1" "$FIX/gh.log"
+check "補送第二個 SHA" "statuses/$SHA2" "$FIX/gh.log"
 [ ! -e "$CI/unposted" ] && echo "ok   - 補送完清掉記錄" && PASS=$((PASS + 1)) || { echo "FAIL - unposted 還在"; FAIL=$((FAIL + 1)); }
-equals "沒有重跑檢查（log 只有一份 daemon 結尾）" "$(grep -c '\[ubuntu-ci\] daemon rc=' "$CI/logs/$(git -C "$ROOT/work" rev-parse HEAD).log")" "1"
+equals "沒有重跑第二個 SHA 的檢查（log 只有一份 daemon 結尾）" "$(grep -c '\[ubuntu-ci\] daemon rc=' "$CI/logs/$SHA2.log")" "1"
 teardown
 
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"

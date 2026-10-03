@@ -48,6 +48,13 @@ if [ "${1:-}" = test ] && [ -n "${AM_TEST_CARGO_FAIL_ON_TEST:-}" ]; then
     echo "test foo::bar ... FAILED" >&2
     exit 101
 fi
+if [ "${1:-}" = test ]; then
+    if [ "${AM_TEST_CARGO_ZERO_TESTS:-0}" = 1 ]; then
+        echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+    else
+        echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+    fi
+fi
 if [ -f web/dist/index.html ]; then
     printf 'web-dist-stub-present\n' >>"$AM_TEST_CARGO_LOG"
 else
@@ -83,9 +90,6 @@ echo 'changed daemon fast path uses and cleans a temporary web/dist stub'
 fail() { printf '%s\n' "$1" >&2; exit 1; }
 cargo_tests() { grep -E '^test ' "$AM_TEST_CARGO_LOG" || true; }
 
-# main.rs 不是模組：沒有可挑的測試子集，只有 cargo check。
-[ -z "$(cargo_tests)" ] || fail "main.rs 改動不該跑 cargo test：$(cargo_tests)"
-
 # 改了某個模組：除了 cargo check，還要跑那個模組自己的測試（以前只有 check，壞掉的行為過閘）。
 : >"$AM_TEST_CARGO_LOG"
 export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
@@ -109,6 +113,30 @@ CHECK_TESTS=none changed >/dev/null || fail "CHECK_TESTS=none 失敗"
 CHECK_TESTS=prompt:: changed >/dev/null || fail "CHECK_TESTS=prompt:: 失敗"
 grep -qx 'test -p agents-managerd --locked prompt::' "$AM_TEST_CARGO_LOG" || fail "CHECK_TESTS 沒照給的跑：$(cat "$AM_TEST_CARGO_LOG")"
 
+# A typo or stale CHECK_TESTS override can make cargo test succeed after selecting zero tests.
+export AM_TEST_CARGO_ZERO_TESTS=1
+if output="$(CHECK_TESTS=definitely_not_a_test changed 2>&1)"; then
+    fail "CHECK_TESTS 選到零個測試卻放行：$output"
+fi
+printf '%s' "$output" | grep -q '沒有選到任何測試' || fail "零測試失敗沒有說明原因：$output"
+unset AM_TEST_CARGO_ZERO_TESTS
+
+# Build scripts, manifests, common test helpers, and embedded fixture/data edits need the whole suite.
+for path in daemon/build.rs Cargo.toml Cargo.lock .cargo/config.toml rust-toolchain.toml daemon/Cargo.toml \
+    daemon/src/testing.rs daemon/src/lib.rs daemon/tests/fixtures/capture/claude/input.txt \
+    daemon/src/lifecycle/fixtures/codex-0.157-model-migration.txt daemon/src/release_triage/rules.toml; do
+    : >"$AM_TEST_CARGO_LOG"
+    export AM_TEST_DIFF_HEAD="$path"
+    output="$(changed 2>&1)" || fail "$path 的 changed 失敗：$output"
+    grep -qx 'test -p agents-managerd --locked' "$AM_TEST_CARGO_LOG" \
+        || fail "$path 沒有跑完整 daemon 測試：$(cat "$AM_TEST_CARGO_LOG")"
+done
+: >"$AM_TEST_CARGO_LOG"
+export AM_TEST_DIFF_HEAD=$'daemon/build.rs\ndaemon/src/lifecycle/queue.rs'
+output="$(changed 2>&1)" || fail "build.rs 與模組一起改時 changed 失敗：$output"
+grep -qx 'test -p agents-managerd --locked' "$AM_TEST_CARGO_LOG" \
+    || fail "global sentinel 和模組 filter 混合時沒有跑完整 suite：$(cat "$AM_TEST_CARGO_LOG")"
+
 # 測試紅要讓 changed 紅（結束碼不能被 pipe 吞掉）。
 export AM_TEST_CARGO_FAIL_ON_TEST=1
 if changed >/dev/null; then fail "cargo test 失敗但 changed 回了 0"; fi
@@ -118,11 +146,17 @@ unset AM_TEST_CARGO_FAIL_ON_TEST
 # 第一個壞了會被吞掉，工作樹乾淨時印「只有文件類改動，不用跑」然後綠燈。
 export AM_TEST_DIFF_HEAD=''
 export AM_TEST_GIT_FAIL='diff --name-only origin/main...HEAD'
-if out="$(changed)"; then fail "base 比不出來卻放行了：$out"; fi
+if out="$(changed)"; then fail "base 比不出來卻放行了：$out"; else rc=$?; fi
+[ "$rc" = 2 ] || fail "base git diff 失敗應回 2，實際 ${rc}：${out}"
 printf '%s' "$out" | grep -q 'origin/main' || fail "沒有說是 base 的問題：$out"
 unset AM_TEST_GIT_FAIL
+export AM_TEST_GIT_FAIL='diff --name-only HEAD'
+if out="$(changed)"; then fail "工作樹 git diff 失敗卻放行了：$out"; else rc=$?; fi
+[ "$rc" = 2 ] || fail "工作樹 git diff 失敗應回 2，實際 ${rc}：${out}"
+unset AM_TEST_GIT_FAIL
 export AM_TEST_GIT_FAIL='ls-files --others --exclude-standard'
-if out="$(changed)"; then fail "ls-files 失敗卻放行了：$out"; fi
+if out="$(changed)"; then fail "ls-files 失敗卻放行了：$out"; else rc=$?; fi
+[ "$rc" = 2 ] || fail "git ls-files 失敗應回 2，實際 ${rc}：${out}"
 unset AM_TEST_GIT_FAIL
 
 # 只改 docs/SPEC.md：跑 SPEC 契約測試（Jev 角色政策那幾句），但不跑 ops 整包、也不碰 cargo。
@@ -146,6 +180,14 @@ printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' || fail "改 carg
 export AM_TEST_DIFF_HEAD=daemon/src/lifecycle/queue.rs
 output="$(changed)" || fail "改 queue.rs 的 changed 失敗"
 printf '%s' "$output" | grep -q 'macos-local' && fail "改 queue.rs 不該提醒 macos-local：$output"
+
+# The hint selector also covers module source below the first nested directory.
+mkdir -p "$fixture/daemon/src/supervisor/deep"
+printf 'fn macos_local_nested_probe() {}\n' >"$fixture/daemon/src/supervisor/deep/roles.rs"
+export AM_TEST_DIFF_HEAD=daemon/src/supervisor/deep/roles.rs
+output="$(changed)" || fail "改巢狀平台敏感模組的 changed 失敗：$output"
+printf '%s' "$output" | grep -q 'scripts/check.sh macos-local' \
+    || fail "巢狀模組有 macos_local_ 測試卻沒提醒：$output"
 
 # web：改任何一個檔（含共用的 store／lib 與設定檔）都是整套——型別檢查、lint、**全部**測試（不是同目錄的）、build。
 # 這支只是釘住現況：以後有人想為了快把 bun test 縮成只跑相關檔，這裡會紅。

@@ -21,11 +21,21 @@ check "supervisor::" "daemon/src/supervisor/mod.rs"
 check "supervisor::controller::" "daemon/src/supervisor/controller.rs"
 # 測試檔就在自己的模組底下（foo/tests.rs → foo::tests::，包含在 foo:: 裡）。
 check "host_baseline::tests::" "daemon/src/host_baseline/tests.rs"
-# main.rs／lib.rs 不是模組：沒有可挑的子集（cargo check 已經涵蓋編譯）。
-check "" "daemon/src/main.rs"
-# fixtures：歸給它所在的模組。
-check "lifecycle::" "daemon/src/lifecycle/fixtures/claude-2.1.281-draft.ansi"
-check "release_triage::" "daemon/src/release_triage/fixtures/claude_2.1.276-278.md"
+# Build inputs, crate wiring, shared test helpers, and include data can affect tests across modules.
+check "__all__" "daemon/build.rs"
+check "__all__" "Cargo.toml"
+check "__all__" "Cargo.lock"
+check "__all__" ".cargo/config.toml"
+check "__all__" "rust-toolchain.toml"
+check "__all__" "daemon/Cargo.toml"
+check "__all__" "daemon/tests/fixtures/capture/claude/input.txt"
+check "__all__" "daemon/src/testing.rs"
+check "__all__" "daemon/src/test_home.rs"
+check "__all__" "daemon/src/main.rs"
+check "__all__" "daemon/src/lib.rs"
+check "__all__" "daemon/src/lifecycle/fixtures/claude-2.1.281-draft.ansi"
+check "__all__" "daemon/src/release_triage/rules.toml"
+check "__all__ lifecycle::queue::" "daemon/build.rs" "daemon/src/lifecycle/queue.rs"
 # 多個檔案：去重、排序。
 check "lifecycle::prompt:: lifecycle::queue::" "daemon/src/lifecycle/queue.rs" "daemon/src/lifecycle/prompt.rs" "daemon/src/lifecycle/queue.rs"
 # daemon 以外、但 daemon 的測試會讀的檔案（跟 ci-changed-parts.sh 同一份清單）。

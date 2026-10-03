@@ -74,6 +74,10 @@ run_daemon_tests() {
     local log rc=0 red
     log="$(mktemp "${TMPDIR:-/tmp}/am-check-daemon.XXXXXX")"
     env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p agents-managerd --locked "$@" 2>&1 | tee "$log" || rc=$?
+    if [ "$rc" = 0 ] && ! grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$log"; then
+        echo "daemon: cargo test 沒有選到任何測試（檢查 CHECK_TESTS 或 scripts/ci-daemon-filters.sh 的過濾字串），拒絕放行" >&2
+        rc=2
+    fi
     if [ "$rc" != 0 ]; then
         red="$(grep -E '^test .* \.\.\. FAILED$' "$log" | awk '{print $2}' || true)"
         if [ -n "$red" ]; then
@@ -249,9 +253,8 @@ EOF
 }
 
 # 只跑改到的部分（issue #716）：跟 base（預設 origin/main）比的 commit 差異＋工作樹還沒提交的改動。
-# daemon 做 `cargo check --all-targets`（`#[cfg(test)]` 被非測試路徑用到也抓得到），再跑「改到的模組自己的測試」
-# （`scripts/ci-daemon-filters.sh` 由路徑挑 cargo test 的過濾字串；挑法與限制見該檔）。
-# `CHECK_TESTS=<過濾字串>` 明講要跑哪些（蓋過自動挑的）、`CHECK_TESTS=none` 一個測試都不跑。全量測試交給 ubuntu 背景 CI，不在收尾時等。
+# daemon 做 `cargo check --all-targets`（`#[cfg(test)]` 被非測試路徑用到也抓得到），再跑改到的模組測試；build inputs、crate wiring、共用 helper、embedded data 會跑整套。
+# `scripts/ci-daemon-filters.sh` 由路徑挑測試過濾字串；選到零個測試會失敗。`CHECK_TESTS=<過濾字串>` 蓋過自動挑的、`CHECK_TESTS=none` 明確略過。全量 CI 仍交給 ubuntu 背景跑。
 check_changed() {
     local base="${1:-origin/main}" committed dirty untracked files parts filters="" nfilters=0 f
     # 三個 git 指令各自檢查：`{ a; b; c; } | …` 的結束碼只看最後一個，base 不存在（沒 fetch、淺 clone、沒有共同祖先）時
@@ -309,12 +312,17 @@ check_changed() {
             fi
         else
             filters="$(printf '%s\n' "$files" | bash scripts/ci-daemon-filters.sh)"
-            for f in $filters; do nfilters=$((nfilters + 1)); done
+            if printf '%s\n' "$filters" | grep -qx '__all__'; then
+                step "daemon: cargo test（build／crate-wide test input）"
+                run_daemon_tests
+            else
+                for f in $filters; do nfilters=$((nfilters + 1)); done
+            fi
             if [ "$nfilters" -gt 0 ]; then
                 step "daemon: cargo test（改到的模組：$(echo $filters)）"
                 # shellcheck disable=SC2086  # 過濾字串是 [a-z_:]，不含空白與萬用字元
                 run_daemon_tests -- $filters
-            else
+            elif ! printf '%s\n' "$filters" | grep -qx '__all__'; then
                 echo "daemon: 沒有可挑的測試子集（只動了 main.rs 之類不屬於任何模組的檔案）；要跑測試用 CHECK_TESTS=<過濾字串>"
             fi
         fi
