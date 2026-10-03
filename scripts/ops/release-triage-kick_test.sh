@@ -319,6 +319,17 @@ equals "pid 被別的程序重用：回收後照派" "$(assigns)" "1"
 kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 teardown
 
+# guard 路徑若是 symlink 必須 fail closed，不能截斷外部目標或派工。
+setup
+mk_pending claude 2.1.278 2.1.278; mk_empty codex
+printf 'preserve outside guard target\n' > "$ROOT/guard-target"
+ln -s "$ROOT/guard-target" "$AGM_DIR/release-triage.lock.guard"
+bash "$SCRIPT"
+equals "guard symlink 目標原封不動" "$(cat "$ROOT/guard-target")" "preserve outside guard target"
+check "guard symlink 推 lock_unavailable" "lock_unavailable" "$AGM_DIR/calls.log"
+equals "guard symlink 下不派" "0" "$(assigns)"
+teardown
+
 # pid 重用後的 command line 可能帶著 kick 名稱，但只有 bash 真正以本腳本為入口才算活 runner。
 setup
 mk_pending claude 2.1.278 2.1.278; mk_empty codex

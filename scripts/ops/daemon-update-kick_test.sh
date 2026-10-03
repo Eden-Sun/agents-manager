@@ -349,9 +349,21 @@ while [ "$(count 'bun install' "$AGM_DIR/build.log" | tr -d ' ')" = 0 ] && [ "$_
   _wait=$((_wait + 1))
 done
 run >/dev/null
+check_no "正常重疊的活 runner 安靜跳過" "更新檢查已有執行者" "$(LOG)"
 kill "$SLEEPER" 2>/dev/null; wait "$SLEEPER" 2>/dev/null
 check_eq "活著的執行者：這輪不動" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 check_eq "活著的執行者：沒有重複建置" "1" "$(count 'bun install' "$AGM_DIR/build.log")"
+teardown
+
+# guard 路徑被換成 symlink 時 fail closed，不可截斷其目標或繼續部署。
+setup
+ci "$C3" success
+printf 'preserve outside guard target\n' > "$ROOT/guard-target"
+ln -s "$ROOT/guard-target" "$AGM_DIR/daemon-update.lock.guard"
+run >/dev/null
+check_eq "guard symlink 目標原封不動" "preserve outside guard target" "$(cat "$ROOT/guard-target")"
+check "guard symlink 推 lock_unavailable" "lock_unavailable" "$AGM_DIR/alerts.log"
+check_eq "guard symlink 下不部署" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 teardown
 
 # A child left holding the advisory lock after the runner PID disappeared must not turn

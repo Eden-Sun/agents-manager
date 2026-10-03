@@ -145,6 +145,21 @@ teardown
 # 7. 用法錯誤：缺必要參數 exit 2。
 setup
 equals "沒帶 --dir exit 2" "$(bash "$SCRIPT" --repo "$REPO" >"$OUT" 2>&1; echo $?)" "2"
+run_missing_value() {
+  python3 - "$SCRIPT" "$1" <<'PY'
+import subprocess, sys
+try:
+    result = subprocess.run(["bash", sys.argv[1], sys.argv[2]], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, timeout=2)
+except subprocess.TimeoutExpired:
+    print("timeout")
+else:
+    print(result.returncode)
+PY
+}
+for _option in --repo --ref --dir --platform; do
+  equals "${_option} 缺值快速回 usage" "$(run_missing_value "$_option")" "2"
+done
 teardown
 
 # 8. drift：安裝端的檔不是 repo 任何一版（有人手改過）＝不覆蓋，報 drifted，其他支照裝；--force 才換（照樣先備份）。
@@ -208,6 +223,23 @@ equals "自檢期間手改的檔保留" 'console.log("hand-edited during install
 check "自檢期間手改有回報 drifted" "drifted bin/t-tool.ts" "$OUT"
 teardown
 
+# 9c. 安裝端在最後一次比對後、備份期間被手改：不能讓後續 mv 覆蓋這份修改。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+FAKEBIN="$ROOT/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/cp" <<'CP'
+#!/bin/sh
+/bin/cp "$@" || exit $?
+case "$*" in
+  *ops-install-backups*) printf '#!/bin/bash\necho hand-edited-during-backup\n' > "$DEST" ;;
+esac
+CP
+chmod +x "$FAKEBIN/cp"
+equals "備份期間手改仍回報成功 exit 0" "0" "$(DEST="$DIR/bin/a-kick.sh" PATH="$FAKEBIN:$PATH" run)"
+equals "備份期間手改的檔保留" "echo hand-edited-during-backup" "$(sed -n 2p "$DIR/bin/a-kick.sh")"
+check "備份期間手改有回報 drifted" "drifted bin/a-kick.sh" "$OUT"
+teardown
+
 # 11. 安裝位置是 symlink（使用者把它連到別處）：不換、不把連結吃掉，報 skipped。
 setup
 bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
@@ -264,6 +296,57 @@ kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
 equals "殘留的鎖（pid 已死）：接手照裝" "$(run)" "0"
 equals "裝上了" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v2"
 gone "裝完放掉鎖" "$DIR/ops-install.lock"
+teardown
+
+# 10a. guard 路徑若被換成 symlink，必須 fail closed，不能截斷連結目標。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+printf 'preserve outside guard target\n' > "$ROOT/guard-target"
+ln -s "$ROOT/guard-target" "$DIR/ops-install.lock.guard"
+equals "guard symlink 不可取得鎖 exit 3" "$(run)" "3"
+equals "guard symlink 目標原封不動" "$(cat "$ROOT/guard-target")" "preserve outside guard target"
+equals "guard symlink 下安裝檔不動" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v1"
+teardown
+
+# 10b. 第一個 runner 建好鎖目錄、尚未寫 pid 時被排程停住，第二個 runner 不可把它當殘鎖搶走。
+setup
+bump a-kick.sh $'#!/bin/bash\necho a-v2\n'
+FAKEBIN="$ROOT/fakebin"; mkdir -p "$FAKEBIN"
+FIRST_CREATED="$ROOT/first-created" ALLOW_FIRST="$ROOT/allow-first" SECOND_CREATED="$ROOT/second-created"
+export FIRST_CREATED ALLOW_FIRST SECOND_CREATED
+cat > "$FAKEBIN/mkdir" <<'MKDIR'
+#!/bin/sh
+case "$*" in
+  *ops-install.lock)
+    /bin/mkdir "$@" || exit $?
+    if [ ! -e "$FIRST_CREATED" ]; then
+      : > "$FIRST_CREATED"
+      while [ ! -e "$ALLOW_FIRST" ]; do /bin/sleep 0.02; done
+    else
+      : > "$SECOND_CREATED"
+    fi
+    ;;
+  *) exec /bin/mkdir "$@" ;;
+esac
+MKDIR
+chmod +x "$FAKEBIN/mkdir"
+PATH="$FAKEBIN:$PATH" bash "$SCRIPT" --repo "$REPO" --ref HEAD --dir "$DIR" --platform linux >"$ROOT/first.out" 2>&1 & FIRST=$!
+_wait=0
+while [ ! -e "$FIRST_CREATED" ] && [ "$_wait" -lt 250 ]; do sleep 0.02; _wait=$((_wait + 1)); done
+if [ ! -e "$FIRST_CREATED" ]; then
+  echo "FAIL - 第一個 runner 沒建鎖"; FAIL=$((FAIL + 1))
+  : > "$ALLOW_FIRST"; wait "$FIRST" 2>/dev/null
+else
+  PATH="$FAKEBIN:$PATH" bash "$SCRIPT" --repo "$REPO" --ref HEAD --dir "$DIR" --platform linux >"$ROOT/second.out" 2>&1 & SECOND=$!
+  _wait=0
+  while [ ! -e "$SECOND_CREATED" ] && kill -0 "$SECOND" 2>/dev/null && [ "$_wait" -lt 250 ]; do sleep 0.02; _wait=$((_wait + 1)); done
+  : > "$ALLOW_FIRST"
+  wait "$FIRST" 2>/dev/null; FIRST_RC=$?
+  if wait "$SECOND" 2>/dev/null; then SECOND_RC=0; else SECOND_RC=$?; fi
+  equals "鎖尚未寫 owner 時第二 runner exit 3" "$SECOND_RC" "3"
+  gone "第二 runner 沒有重建鎖目錄" "$ROOT/second-created"
+  check "第一 runner 完成更新" "installed bin/a-kick.sh" "$ROOT/first.out"
+fi
 teardown
 
 # 14. kick 自己更新自己：正在跑的那支腳本被換掉（`mv` 換 inode，bash 手上還是舊檔），後面的行照常跑完，不會讀到新檔的中段。

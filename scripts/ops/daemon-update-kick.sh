@@ -103,7 +103,8 @@ LOCK_GUARD="$DIR/daemon-update.lock.guard"
 LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
 LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-7200}     # 執行者還活著但卡了這麼久：喊人（冷建置要十幾分鐘，給寬）
 acquire_guard() {
-  exec 9>"$LOCK_GUARD" 2>/dev/null || return 2
+  [ ! -L "$LOCK_GUARD" ] || return 2
+  exec 9>>"$LOCK_GUARD" || return 2
   python3 -c '
 import errno, fcntl, sys
 try:
@@ -172,13 +173,9 @@ if [ "$_guard_rc" -eq 1 ]; then
   elif [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
     if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
       alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，自動部署停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
-    else
-      log "更新檢查已有執行者（pid ${_pid}，${_age} 秒），這輪跳過"
     fi
   elif [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
     alert runner_hung "自動部署 runner 持有 OS lock 已 ${_age} 秒，但鎖的 owner（${_pid:-未知}）無法驗證；部署停住。請確認後必要時結束行程並移除 ${LOCK}"
-  else
-    log "另一個更新 runner 持有 OS lock（owner 尚未可驗），這輪跳過"
   fi
   exit 0
 elif [ "$_guard_rc" -ne 0 ]; then
@@ -192,8 +189,6 @@ if ! take_lock; then
   if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
     if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
       alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，自動部署停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
-    else
-      log "更新檢查已有執行者（pid ${_pid}，${_age} 秒），這輪跳過"
     fi
     exit 0
   fi

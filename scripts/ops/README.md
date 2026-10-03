@@ -40,9 +40,9 @@ agm-host 上由 `ubuntu-ci.sh` 排程它（每 `AGM_CI_OPS_SYNC_INTERVAL` 秒，
   沒過就丟掉暫存檔、報 `failed`、安裝位置的舊檔一個位元都沒動（不會讓排程撞到沒驗過的新版）、其他支照裝。
   過了才備份到 `<AGM>/ops-install-backups/<UTC 時間>/<安裝位置>`，再 `mv`（原子替換）。
 - 被 SIGKILL 的上一次會把暫存檔 `<安裝位置>.new.<pid>` 留在安裝端：下次執行（非 `--dry-run`、拿到鎖之後）把清單內、`.new.<純數字>`、pid 已不在的清掉並印 `cleaned N`（pid 還活著的不碰）；`ops-sync --check` 也不把這種檔名報成 `extra`。
-- 同時只能有一個在裝：鎖是 `<AGM>/ops-install.lock/`（記 pid；握鎖的行程死了就接手）；拿不到鎖 exit 3、不動任何檔。同一秒內重複裝，備份目錄也不共用（`<UTC 時間>-2`…）。
+- 同時只能有一個在裝：`<AGM>/ops-install.lock.guard` 的 OS advisory lock 串行化鎖目錄建立與殘留回收；`<AGM>/ops-install.lock/` 記 pid，SIGKILL 後可接手。拿不到鎖 exit 3、不動任何檔。同一秒內重複裝，備份目錄也不共用（`<UTC 時間>-2`…）。
   安裝位置是 symlink 的報 `skipped`（`mv` 會把連結換成拷貝）；父目錄是 symlink、或對照表的安裝位置跑出 `--dir`（絕對路徑、`..`）都報 `failed`、不寫，也不會沿父 symlink 清孤兒暫存檔。
-- **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的 blob 都對不上，跟 `ops-sync --check` 的 `drift` 同一條），或自檢期間目的地內容改變，報 `drifted`、不動它、不算失敗；kick 會另推 `ops_install_drift` 叫人看。手動 `--force` 才換（舊檔照樣備份）。
+- **手改過的不覆蓋**：安裝端的檔不是 repo 任何一版（`git log <ref> -- <來源>` 的 blob 都對不上，跟 `ops-sync --check` 的 `drift` 同一條），或自檢／備份期間目的地內容改變，報 `drifted`、不動它、不算失敗；kick 會另推 `ops_install_drift` 叫人看。手動 `--force` 才換（舊檔照樣備份）。
 - `--dry-run` 只列 `would-install`。最後一行 `changes=N failed=M drifted=K`；有失敗 exit 1。整輪成功（而且真的換了檔）會把「時間 commit」寫進 `<AGM>/ops-install.last`；有失敗的那輪**不更新**它，改把「時間 commit failed=N」記進 `ops-install.last-failed`（下一次整輪成功就刪）。這兩個檔目前沒有程式讀（kick、ops-sync 都不看），只給人查「裝到哪一版了」。
 
 **接到部署**：`daemon-update-kick.sh` 在旗標開著時，於 ① 換版成功之後、② 「沒有會進 binary 的差異」那一輪（要該 sha 的 `ubuntu-ci` 綠燈）
