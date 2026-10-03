@@ -8,14 +8,20 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { act, click, mockApi, mount, settle, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { MockTransport } from '../api/mock'
 import { ApiError } from '../api/types'
-import { useStore } from '../store/store'
+import { resetStoreForTest, useStore } from '../store/store'
 import { BotShareSection } from './BotShareSection'
 import { SentViaTag } from './SentViaTag'
 import { shareProfileBlocked } from '../lib/shareProfile'
 
-afterEach(unmountAll)
+afterEach(async () => {
+  await unmountAll()
+  resetStoreForTest()
+})
 before(setupDom)
-after(teardownDom)
+after(async () => {
+  resetStoreForTest()
+  await teardownDom()
+})
 
 async function setup() {
   const mock = new MockTransport()
@@ -46,6 +52,10 @@ test('mock 契約：一般 bot 開分享 409 not_shareable；完整 url 只在�
   assert.match(r.url, /\/s\/[A-Za-z0-9_-]{43}$/, '32 bytes base64url')
   const off = (await mock.request('POST', `/bots/${shared.id}/share`, { enabled: false })) as { enabled: boolean }
   assert.equal(off.enabled, false)
+})
+
+test('分享面板測試的 store stub 不會留給下一條測試', () => {
+  assert.equal(useStore.getState().notify, useStore.getInitialState().notify)
 })
 
 test('一般 bot 的設定裡沒有分享區塊', async () => {
