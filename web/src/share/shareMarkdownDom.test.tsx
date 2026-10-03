@@ -50,6 +50,15 @@ test('引用超過 20 層顯示純文字', async () => {
   assert.match(root.textContent ?? '', /deep/)
 })
 
+test('javascript:、data: 與協定相對連結不能變成可點的 href', async () => {
+  for (const text of ['[點](javascript:alert(1))', '[點](data:text/html,x)', '[點](//evil.example/x)', '[點](https://evil.example/x)']) {
+    const root = await mount(<ShareMarkdown text={text} />)
+    const href = root.querySelector('a')?.getAttribute('href') ?? ''
+    if (text.includes('https://evil')) assert.equal(href, 'https://evil.example/x')
+    else assert.equal(root.querySelector('a'), null, text)
+  }
+})
+
 test('短的 GFM 仍渲染表格、程式碼與連結', async () => {
   const root = await mount(<ShareMarkdown text={'| a | b |\n| - | - |\n| 1 | 2 |\n\n`code` 與 [連結](https://example.com)'} />)
   assert.ok(root.querySelector('table'))

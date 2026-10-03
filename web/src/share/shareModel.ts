@@ -30,6 +30,10 @@ export interface ShareFile {
 /** 單則文字上限（daemon 另有自己的上限，超過回 413）；單檔 25 MiB 同契約 C。 */
 export const SHARE_TEXT_MAX = 8000
 export const SHARE_FILE_MAX = 25 * 1024 * 1024
+/** 一頁最多畫這麼多則；多的丟掉，避免一份超大 JSON 把分頁整個掛上。 */
+export const SHARE_PAGE_MAX = 100
+/** 單則進畫面的字數上限。再長就截斷，避免一則幾 MB 的 `<pre>`。 */
+export const SHARE_TEXT_STORE_MAX = 100_000
 
 /** token 只認 base64url（契約 B：≥32 bytes 隨機）。 */
 const TOKEN_RE = /^[A-Za-z0-9_-]{16,128}$/
@@ -54,7 +58,7 @@ export function toShareMessage(v: unknown): ShareMessage | null {
   return {
     id,
     role,
-    text: str(o.text) || str(o.content),
+    text: capShareText(str(o.text) || str(o.content)),
     created_at: str(o.created_at),
     attachments: atts.map((a) => ({ name: typeof a === 'string' ? a : str(rec(a).name) })).filter((a) => a.name),
   }
@@ -72,7 +76,7 @@ export function toSharePage(v: unknown): SharePage {
   return {
     bot_name: str(o.bot_name) || str(rec(o.bot).name),
     status: toStatus(o.status),
-    messages: msgs.map(toShareMessage).filter((m): m is ShareMessage => m !== null),
+    messages: msgs.slice(0, SHARE_PAGE_MAX).map(toShareMessage).filter((m): m is ShareMessage => m !== null),
     has_more: o.has_more === true,
   }
 }
@@ -86,6 +90,31 @@ export function toShareFiles(v: unknown): ShareFile[] {
       return name ? { name, size: typeof o.size === 'number' ? o.size : 0, modified_at: str(o.modified_at) || str(o.mtime) || null } : null
     })
     .filter((f): f is ShareFile => f !== null)
+}
+
+function capShareText(s: string): string {
+  if (s.length <= SHARE_TEXT_STORE_MAX) return s
+  return `${s.slice(0, SHARE_TEXT_STORE_MAX)}\n…（內容過長，已截斷）`
+}
+
+/**
+ * 分享頁連結只留絕對的 http／https。`javascript:`、`data:`、`//host` 都不給，
+ * 避免 bot 回覆在這個 origin 上執行，或把帶 token 的網址送去別的站。
+ */
+/** 分頁游標只收單一 id。空白、斜線、另一段 query 都不送，避免 before 被拿去指到別的路徑。 */
+export function shareBeforeCursor(id: string | undefined): string | undefined {
+  if (!id || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) return undefined
+  return id
+}
+
+export function shareSafeHref(href: string | null | undefined): string | undefined {
+  if (!href || href !== href.trim() || /[\u0000-\u0020]/.test(href)) return undefined
+  try {
+    const u = new URL(href)
+    return u.protocol === 'http:' || u.protocol === 'https:' ? href : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** 依 id 去重、照時間排（同時間照 id）；新的覆蓋舊的同 id。 */

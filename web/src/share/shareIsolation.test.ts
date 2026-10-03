@@ -40,10 +40,16 @@ test('httpShareClient 只打 /s/<token>/api/…、credentials omit、no-referrer
     await c.files()
     await c.upload(new File(['x'], 'a.txt'))
     assert.equal(c.fileUrl('../../etc/passwd'), '/s/TOKEN_abcdefghijklmnop/api/files/..%2F..%2Fetc%2Fpasswd', '檔名一律 encode，不能變成路徑')
+    await c.messages('m1')
+    await c.messages('../other-share')
+    await c.messages('id with space')
   } finally {
     globalThis.fetch = orig
   }
-  assert.equal(calls.length, 4)
+  assert.equal(calls.length, 7)
+  assert.ok(calls[4].url.includes('before=m1'), calls[4].url)
+  assert.equal(calls[5].url.includes('before='), false, calls[5].url)
+  assert.equal(calls[6].url.includes('before='), false, calls[6].url)
   for (const { url, init } of calls) {
     assert.ok(url.startsWith('/s/TOKEN_abcdefghijklmnop/api/'), url)
     assert.equal(init.credentials, 'omit')
@@ -51,6 +57,34 @@ test('httpShareClient 只打 /s/<token>/api/…、credentials omit、no-referrer
     assert.equal(new Headers(init.headers).get('X-AM-Token'), null)
   }
   assert.deepEqual(JSON.parse(String(calls[1].init.body)), { text: 'hi', client_request_id: 'crid', attachments: ['att1'] })
+})
+
+test('SSE 錯誤不會立刻重開一堆連線', () => {
+  const opened: { closed: boolean; onerror: (() => void) | null }[] = []
+  class Fake {
+    onerror: (() => void) | null = null
+    onopen: (() => void) | null = null
+    closed = false
+    constructor(_url: string) {
+      opened.push(this)
+    }
+    addEventListener() {}
+    close() {
+      this.closed = true
+    }
+  }
+  const orig = globalThis.EventSource
+  globalThis.EventSource = Fake as unknown as typeof EventSource
+  try {
+    const stop = httpShareClient('TOKEN_abcdefghijklmnop').subscribe({ onMessage() {}, onStatus() {}, onDown() {} })
+    assert.equal(opened.length, 1)
+    for (let i = 0; i < 20; i++) opened[0].onerror?.()
+    assert.equal(opened.length, 1, '同一輪 error 不能再 new EventSource')
+    assert.equal(opened[0].closed, true)
+    stop()
+  } finally {
+    globalThis.EventSource = orig
+  }
 })
 
 test('HTTP 錯誤帶 status 與 Retry-After', async () => {
