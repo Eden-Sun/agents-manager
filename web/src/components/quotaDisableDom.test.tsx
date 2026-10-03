@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { click, mockApi, mount, act, setupDom, teardownDom, unmountAll, until } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
-import { QUOTA_DISABLED_KEY } from '../store/quotaHide'
+import { QUOTA_DISABLED_KEY, setQuotaDisabled } from '../store/quotaHide'
 import { QuotaStrip } from './QuotaStrip'
 
 const mock = sharedMock
@@ -84,6 +84,21 @@ it('#755 別的分頁勾了：storage 事件讓這一頁的勾選跟上；別的
   await until(() => stripBox().checked, '別的分頁勾的在這一頁也勾上')
   await otherTabWrites({})
   await until(() => !stripBox().checked, '別的分頁解除，這一頁也解除')
+})
+
+it('#755 happy-dom 重建後仍接收別的分頁 storage 事件', async () => {
+  await open()
+  await act(async () => {
+    localStorage.clear()
+    setQuotaDisabled(STRIP_KEY, false, null)
+  })
+  await unmountAll()
+  teardownDom()
+  setupDom()
+
+  await open()
+  await otherTabWrites({ [STRIP_KEY]: Date.now() + 3_600_000 })
+  await until(() => stripBox().checked, '重建 DOM 後別的分頁勾的在這一頁也勾上')
 })
 
 it('#755 這個分頁勾 cc0，不能洗掉別的分頁剛勾、這個分頁還沒收到事件的 cc1', async () => {
