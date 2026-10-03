@@ -1848,7 +1848,8 @@ mod resume_args_tests {
         .await
         .unwrap();
         let sandbox = ["-c", "sandbox_mode=\"workspace-write\""];
-        for auto_approve in [0, 1] {
+        // First resume with Full Access, then turn auto_approve off and resume that same saved session again.
+        for auto_approve in [1, 0] {
             sqlx::query("UPDATE bots SET auto_approve=? WHERE id=?").bind(auto_approve).bind(&bot.id).execute(&e.app.db).await.unwrap();
             let resume = StartOpts { resume_native: true, ..Default::default() };
             let fork = StartOpts { fork_session: Some("codex-source".into()), ..Default::default() };
