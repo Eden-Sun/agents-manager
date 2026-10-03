@@ -84,8 +84,8 @@ for f in "$D"/*; do
       m=$(stat -L -c '%s %Y %Z' /dev/fd/3) || exit 0
       l=$(stat -L -c '%h' /dev/fd/3) || exit 0
     else
-      a=$(stat -L -f '%d %i %z %m %c' "$f") || exit 0
-      b=$(stat -L -f '%d %i %z %m %c' /dev/fd/3) || exit 0
+      a=$(stat -L -f '%i %z %m %c' "$f") || exit 0
+      b=$(stat -L -f '%i %z %m %c' /dev/fd/3) || exit 0
       [ "$a" = "$b" ] || exit 0
       m=$(stat -L -f '%z %m %c' /dev/fd/3) || exit 0
       l=$(stat -L -f '%l' /dev/fd/3) || exit 0
@@ -492,6 +492,7 @@ if [ "$1" = "-L" ] && [ "$2" = "-f" ]; then
     '%d %i %z %m %c')
       case "$4" in /dev/fd/3) printf '2 {fd_inode} 5 100 100\\n' ;; *) printf '1 {path_inode} 5 100 100\\n' ;; esac
       ;;
+    '%l') echo 1 ;;
     *) exit 1 ;;
   esac
   exit 0
