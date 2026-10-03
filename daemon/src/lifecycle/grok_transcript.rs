@@ -354,7 +354,13 @@ async fn import(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, sid: &
     .fetch_all(&app.db)
     .await?;
     if let Some((turn_id, _)) = prior_users.iter().find(|(_, c)| c.trim() == ex.prompt.trim()) {
-        let bound: Option<String> = sqlx::query_scalar("SELECT native_turn_id FROM turns WHERE id = ?").bind(turn_id).fetch_optional(&app.db).await?;
+        // SQLite 的 NULL 用 `String` 解會變成 `Some("")`（#833），未綁鑰匙的回合就被當成已綁。
+        let bound: Option<String> = sqlx::query_scalar::<_, Option<String>>("SELECT native_turn_id FROM turns WHERE id = ?")
+            .bind(turn_id)
+            .fetch_optional(&app.db)
+            .await?
+            .flatten()
+            .filter(|s| !s.is_empty());
         let replies: Vec<String> =
             sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'assistant'").bind(turn_id).fetch_all(&app.db).await?;
         // 已綁鑰匙又有回覆：壓縮重播。還沒綁的交給下面，照舊補回合狀態。
