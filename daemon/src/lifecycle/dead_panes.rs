@@ -10,7 +10,52 @@ use super::*;
 pub(crate) async fn pane_gone(app: &Arc<App>, run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.as_deref() else { return false };
     let Ok(client) = client_for_run(app, run).await else { return false };
-    matches!(client.pane_get(pane).await, Ok(None))
+    match client.pane_get(pane).await {
+        Ok(None) => true,
+        // 同一個 id 已經掛著別的 agent：舊 pane 不在了，不能再當成這顆 run。
+        Ok(Some(_)) => pane_id_reused(&client, run).await,
+        Err(_) => false,
+    }
+}
+
+/// herdr 把已消失的 pane id 交給別的 agent。這顆 run 的 agent 已經不在，查不到就不算證據。
+/// agent 還活著、只是換了 pane 時回 false：run 不該因此被收掉，但 [`pane_target_stale`] 仍拒絕打進舊 id。
+pub(crate) async fn pane_id_reused(client: &HerdrClient, run: &db::Run) -> bool {
+    let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    let Some(name) = run.agent_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) else {
+        return false;
+    };
+    let ours = match client.agent_get(name).await {
+        Ok(agent) => agent,
+        Err(_) => return false,
+    };
+    if ours.as_ref().is_some_and(|agent| agent.pane_id == pane) {
+        return false;
+    }
+    if ours.is_some() {
+        return false;
+    }
+    match client.agent_get(pane).await {
+        Ok(Some(other)) => other.name.as_deref() != Some(name),
+        _ => false,
+    }
+}
+
+/// 這個 pane id 不能再收這顆 run 的字：被別的 agent 佔走，或自己的 agent 已經在別的 pane。
+pub(crate) async fn pane_target_stale(client: &HerdrClient, run: &db::Run) -> bool {
+    let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    let Some(name) = run.agent_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) else {
+        return false;
+    };
+    match client.agent_get(name).await {
+        Ok(Some(agent)) => agent.pane_id != pane,
+        Ok(None) => pane_id_reused(client, run).await,
+        Err(_) => false,
+    }
 }
 
 /// 掃所有 running 的 run，pane 明確不在的收成 exited；回收掉的 run id。

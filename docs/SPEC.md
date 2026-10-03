@@ -1835,8 +1835,10 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    補 Enter 前先確認 pane 還在（`pane.get` 回 `pane_not_found`＝收件方死了：收掉那顆 run、不重試、announce 時也不開回合）；
    補完 Enter 而 pane 的 revision 沒變＝鍵沒送到那個行程，不再重試。
    90 秒內字既沒進輸入列、agent 也沒接手，回合標 `failed` 並留一則系統說明。
-   **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited，
-   不看 RPC 失敗（不是證據）、herdr 計畫中的維護期間不動（§6.5.2）；補上對帳只在開機／重連／事件時才跑、pane-exit 事件漏了就一直畫成活的那個洞。盯梢的時間由呼叫端傳入、pane 走 herdr client，測試不睡覺。
+   **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited。
+   pane id 還在、但這顆 run 的 agent 已經不在、而且這個 id 上是別的 agent（herdr 重用 id）也收成 exited；RPC 失敗不是證據。
+   打字（`send_text` 與 prompt 的 type 路徑）在這兩種情況，以及自己的 agent 已經換到別的 pane 時，不把字送進舊 id。
+   herdr 計畫中的維護期間不動（§6.5.2）；補上對帳只在開機／重連／事件時才跑、pane-exit 事件漏了就一直畫成活的那個洞。盯梢的時間由呼叫端傳入、pane 走 herdr client，測試不睡覺。
 6. **`POST /api/bots/{id}/prompt` 與 mission 的 `relay_from` 是來源標記，不是 principal**（issue #339、#409、#556，`relay_auth.rs`）：User 沿用共用 UI token；User 未帶 Bot 身分 header 且 prompt `relay_from` 指活 bot 時，一律 403 `relay_from_token_required`（#339 相容期已在 #410 結束；歷史訊息的 `relay_unverified = 1` 保留，UI 照舊標「未驗證」）。Bot principal 必須帶成對 `X-AM-Bot-Id`＋`X-AM-Bot-Token`，後者驗該 bot 現行的 `hook_token`（pane 的 `AM_BOT_TOKEN`；hook 開關另控制 `AM_HOOK_TOKEN`）。`X-AM-Bot-Id` 或 token header 一旦出現就選了 Bot principal；欄位缺少、值錯、或混帶 UI/service 身分都拒絕，不得降為 User。Bot 省略或留空 `relay_from` 時由 daemon 以驗證過的 id 標記；明確自稱別顆 bot 回 403 `relay_from_mismatch`。
    User 請求帶 `X-AM-Bot-Id`／`X-AM-Bot-Token` 卻無有效 Bot principal 時，在 auth 中介層先回 401，不進相容分支。未帶 Bot 身分 header 且有有效 `X-AM-Token` 的請求是 User；這保留使用者裁示接受的共用 UI token／`allow_lan` 風險，並不提供額外的人類證明。Bot 憑證沿用 hook token，User 用 credential rotation 立即失效；活 bot 重啟取得新值，停止 bot 下次啟動取得。
    `relay_from:"daemon"` 從 Bot／User HTTP 請求一律 403 `relay_from_reserved`——daemon 自己的訊息（通知、digest、child 警示、派工）都在行程內直接寫，不走 HTTP，而 `daemon` 會繞過 AGM 協調者的收件匣（§18.15）。維運腳本（`daemon-swap.sh`、`herdr-upgrade.sh`）走 service principal，不自稱 `relay_from`。

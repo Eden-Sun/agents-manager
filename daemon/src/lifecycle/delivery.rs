@@ -1076,6 +1076,10 @@ pub(crate) async fn prepare_delivery(
         Plan::AgentPrompt { target } => return Ok(Ready::AgentPrompt { target }),
         Plan::Type { pane, proof, submit } => (pane, proof, submit),
     };
+    if super::dead_panes::pane_target_stale(client, run).await {
+        tracing::warn!(run = %run.id, pane, "refusing to type into a pane id herdr reused");
+        return Err(Delivered::NotAttempted { reason: "pane_reused", retry: false });
+    }
     // Persist "this pane gets typed into" before the first keystroke (sol review round three #2).
     crate::lifecycle::remember_pane_typed(&run.id);
     // 寫不進去時一個字都還沒打：跟其他「打第一個字之前」的失敗一樣是可重試的 NotAttempted。以前回 `Err`，
