@@ -635,6 +635,8 @@ bot 或 active Run 不存在 404。
 - `DELETE /api/bots/{id}`、`DELETE /api/projects/{id}` 成功後 daemon 會把該 bot（含一併刪掉的 child）、該專案的 `group:` 草稿清成空字串，並推 `draft_updated`（`client_id:""`）。bot 復原後 key 沿用，rev 接著加。
 
 ### `GET /api/bots/{id}/local-image?path=<路徑>`
+檔案讀寫 API（本路由、下方 outbox 兩路由，以及 §10.4 的附件上傳／下載）只接受 User principal；bot token 一律 `403 {"error":"forbidden","reason":"user_only"}`。附件上傳在讀取 body 與取得上傳名額之前就拒絕 bot principal。
+
 對話 Markdown 裡的本機圖片（`![](docs/shot.png)`、`/Users/…/x.png`、`file://…`）。相對路徑先以該 bot 的工作目錄（`bots.cwd`，child 的 worktree）為底、那裡沒有再退回**專案目錄**；
 字面路徑讀不到時再試 `%XX` 解碼後的（Markdown 渲染會把中文檔名、空白編碼）。**允許範圍一律是專案目錄**：符號連結解開後仍須在專案目錄內，副檔名限 `png/jpg/jpeg/gif/webp`（不含 svg），≤ 20 MiB；檢查大小後又長大的檔案也會在讀取上限被拒絕。回圖片位元組與對應 `Content-Type`。
 專案外、非圖片、非一般檔案（含 FIFO）、不存在、太大、遠端主機的專案一律 `404 {"what":"image"}`；缺 `path` 400；bot 不存在 404。前端讀不到就把路徑寫成文字，不畫破圖。
@@ -1844,6 +1846,7 @@ CLI agent 只吃文字，所以附件是先把檔案放到 bot 所在主機，�
 **任何檔案都收**——mime 只決定 UI 畫縮圖還是檔案晶片，agent 拿到的一律是路徑。
 
 ### `POST /api/bots/{id}/attachments?name=<檔名>`
+需要 User principal（bot principal 回 `403 user_only`）。
 body 直接是檔案位元組（**不是** multipart），`Content-Type` 就是該檔的 MIME；沒帶時當
 `application/octet-stream`。
 
@@ -1872,7 +1875,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 搶同一列，bind 先贏就什麼都不動。**被訊息引用的絕不刪**；`staging`／`failed` 仍歸 `reconcile_orphans`（開機）。開機跑一次，之後每 6 小時。
 
 ### `GET /api/attachments/{id}`
-回原始位元組。要 `X-AM-Token`，UI 用 fetch 轉 object URL，不能直接放 `<img src>`。只有 `state='ready'`
+回原始位元組。需要 User principal／UI 的 `X-AM-Token`，bot principal 回 `403 user_only`；UI 用 fetch 轉 object URL，不能直接放 `<img src>`。只有 `state='ready'`
 的附件讀得到，`staging`／`failed` 一律 404。讀檔走 `trusted_open`（逐層 `openat(O_NOFOLLOW)`、fd 讀、50 MiB 上限）：本機 bot 的附件放在專案目錄（agent 寫得到），
 被換成符號連結（指到界線外的檔案或 `/dev/zero`）或硬連結一律讀不到。
 
