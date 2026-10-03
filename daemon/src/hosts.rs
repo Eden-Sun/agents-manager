@@ -772,6 +772,13 @@ async fn forget_host_observations(app: &Arc<App>, name: &str) {
     }
     app.models_cache.lock().await.retain(|k, _| !k.starts_with(&prefix));
     app.host_shells.lock().await.retain(|s| s.host != name);
+    // GitHub origin 跟 tools／額度一樣是這台機器的觀測（#830）。改指或刪除時清掉，舊連線的掃描不能再寫回來。
+    if let Ok(projects) = crate::db::live_projects(&app.db).await {
+        let mut github = app.github.lock().await;
+        for project in projects.into_iter().filter(|project| project.host == name) {
+            github.remove(&project.id);
+        }
+    }
 }
 
 /// Test seam: make every ssh leg to this host take that long *asynchronously* — a host that accepts the

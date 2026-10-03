@@ -2876,7 +2876,7 @@ label = "foo@m4p"
    權威換了就放手，不看新機器上同 id 的 pane、不寫登入狀態、不關 pane）、codex 一鍵升級（§6.9；安裝走 fence 的連線，每一步讀完與改通知、
    開批次前都檢查，換了就 `superseded`）。**重連也算換權威**：這些操作一律停手，由使用者或下一輪探測重來。
 8. **同名主機換連線時，舊連線量到的快取當場作廢**（issue #347）：`apply_config` 換掉既有同名連線（設定變了，可能已指到另一台）與移除主機一樣，
-   清掉 `app.tools[host]`（身分、登入、herdr CLI 版本）、`app.host_baseline[host]`、該 host 的 shim 補版 incident、`<host>/…` 額度（連重啟快取列）、`<host>/<kind>/<identity>` 模型快取、這台的 shell 清單，
+   清掉 `app.tools[host]`（身分、登入、herdr CLI 版本）、`app.host_baseline[host]`、該 host 的 shim 補版 incident、`<host>/…` 額度（連重啟快取列）、`<host>/<kind>/<identity>` 模型快取、這台的 shell 清單、以及這台專案的 GitHub origin 快取（#830），
    新連線上線後由偵測與探測重新填。先換連線再清：清完之後才發布的舊觀測過不了第 7 點的檢查（額度的檢查在 `app.quotas` 鎖裡做）。
    單純重連（同一條設定）不清。
 

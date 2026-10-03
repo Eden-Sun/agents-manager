@@ -800,4 +800,72 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
+
+    /// #830 殘留：上一輪已經寫進快取的 origin，在掃描中主機被刪或改名（同名改指）時要當場作廢，
+    /// 而且作廢之後舊連線的 `git remote` 不能再寫回來。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn github_cache_is_dropped_when_the_host_disappears_mid_scan() {
+        use crate::testing as tt;
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let host = format!("gh-gone-{}", db::ulid());
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let id = db::ulid();
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(&id)
+            .bind("/repo/p")
+            .bind("p")
+            .bind(&host)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+        app.github.lock().await.insert(id.clone(), Some(parse_github_remote("git@github.com:owner/a.git").unwrap()));
+        let phase = Arc::new((std::sync::Mutex::new(0u8), std::sync::Condvar::new()));
+        crate::hosts::set_ssh_fake(&host, {
+            let phase = phase.clone();
+            move |_script| {
+                let (lock, cv) = &*phase;
+                let mut g = lock.lock().unwrap();
+                *g = 1;
+                cv.notify_all();
+                while *g == 1 {
+                    g = cv.wait(g).unwrap();
+                }
+                Ok("git@github.com:owner/a.git\n".into())
+            }
+        });
+        spawn_detect_host(app.clone(), host.clone());
+        {
+            let (lock, cv) = &*phase;
+            let mut g = lock.lock().unwrap();
+            let start = std::time::Instant::now();
+            while *g == 0 && start.elapsed() < Duration::from_secs(5) {
+                let (next, _) = cv.wait_timeout(g, Duration::from_millis(50)).unwrap();
+                g = next;
+            }
+            assert_eq!(*g, 1, "掃描要先進入 ssh");
+        }
+        app.hosts.remove(&app, &host).await;
+        let cached = app.github.lock().await.get(&id).cloned();
+        assert!(cached.as_ref().and_then(|g| g.as_ref()).is_none(), "主機刪了不能留下舊 origin：{cached:?}");
+        {
+            let (lock, cv) = &*phase;
+            let mut g = lock.lock().unwrap();
+            *g = 2;
+            cv.notify_all();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let cached = app.github.lock().await.get(&id).cloned();
+        assert!(cached.as_ref().and_then(|g| g.as_ref()).is_none(), "舊連線回來也不能寫回：{cached:?}");
+    }
 }
