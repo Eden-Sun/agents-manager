@@ -89,12 +89,14 @@ impl PublishAction {
 pub struct PublishIntent {
     pub action: PublishAction,
     pub target_number: Option<i64>,
+    pub created_at: String,
 }
 
 #[derive(FromRow)]
 struct RawPublishIntent {
     action: String,
     target_number: Option<i64>,
+    created_at: String,
 }
 
 impl TryFrom<RawPublishIntent> for PublishIntent {
@@ -105,8 +107,16 @@ impl TryFrom<RawPublishIntent> for PublishIntent {
         if (action == PublishAction::Create) != raw.target_number.is_none() {
             return Err(anyhow!("帳本裡的 publish intent action 與 target 不一致"));
         }
-        Ok(Self { action, target_number: raw.target_number })
+        Ok(Self { action, target_number: raw.target_number, created_at: raw.created_at })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct RecentCreateIntent {
+    pub kind: String,
+    pub version: String,
+    pub marker: String,
+    pub created_at: String,
 }
 
 /// Persist the marker and its intended side effect before calling GitHub. A marker cannot silently
@@ -137,7 +147,7 @@ pub async fn ensure_publish_intent(
     .execute(&mut *tx)
     .await?;
     let raw = sqlx::query_as::<_, RawPublishIntent>(
-        "SELECT action, target_number FROM release_triage_publish_intents WHERE kind = ? AND version = ? AND marker = ?",
+        "SELECT action, target_number, created_at FROM release_triage_publish_intents WHERE kind = ? AND version = ? AND marker = ?",
     )
     .bind(kind)
     .bind(version)
@@ -155,7 +165,7 @@ pub async fn ensure_publish_intent(
 /// Read the durable side-effect intent used to recover provenance after a lost ledger write.
 pub async fn publish_intent(pool: &SqlitePool, kind: &str, version: &str, marker: &str) -> Result<Option<PublishIntent>> {
     let raw = sqlx::query_as::<_, RawPublishIntent>(
-        "SELECT action, target_number FROM release_triage_publish_intents WHERE kind = ? AND version = ? AND marker = ?",
+        "SELECT action, target_number, created_at FROM release_triage_publish_intents WHERE kind = ? AND version = ? AND marker = ?",
     )
     .bind(kind)
     .bind(version)
@@ -163,6 +173,20 @@ pub async fn publish_intent(pool: &SqlitePool, kind: &str, version: &str, marker
     .fetch_optional(pool)
     .await?;
     raw.map(PublishIntent::try_from).transpose()
+}
+
+/// Recent create intents are the durable evidence needed to reconcile a GitHub create whose
+/// following `issue_numbers_json` write was lost. Callers still verify the marker against GitHub
+/// before counting or recovering an intent.
+pub async fn recent_create_intents(pool: &SqlitePool) -> Result<Vec<RecentCreateIntent>> {
+    let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    Ok(sqlx::query_as::<_, RecentCreateIntent>(
+        "SELECT kind, version, marker, created_at FROM release_triage_publish_intents
+         WHERE action = 'create' AND created_at >= ? ORDER BY created_at",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub fn now_ts() -> String {
