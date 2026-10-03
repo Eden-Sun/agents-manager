@@ -811,6 +811,13 @@ live_child_parent() { # $1=bot id → 印出 live parent id，供短暫重查 in
     "$SQLITE" -readonly "$DB" "SELECT p.id FROM bots b JOIN bots p ON p.id = b.parent_bot_id
       WHERE b.id = '$1' AND b.managed_by = 'child' AND p.deleted_at IS NULL LIMIT 1" 2>/dev/null
 }
+# 這顆 bot 自己的退役／刪除紀錄已經看得到（不管合不合格）。不合格就不必再空等 intent 落地。
+retire_record_visible() { # $1=bot id → 印出筆數；讀失敗印空，呼叫端當成「已有紀錄」不再等
+    case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+    "$SQLITE" -readonly "$DB" "SELECT count(*) FROM intents i WHERE i.subject_id = '$1'
+      AND i.created_at >= '$SWAP_T0' AND i.status != 'abandoned'
+      AND i.kind IN ('retire_child', 'delete_bot', 'delete_project')" 2>/dev/null
+}
 after_has_bot() { # $1=bot id
     case "$1" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
     printf '%s\n' "$AFTER_ROWS" | cut -f1 | grep -qxF -- "$1"
@@ -829,7 +836,8 @@ classify_missing() {
                 DELETED="$DELETED$name "
             else
                 parent_id=$(live_child_parent "$id")
-                if [ -n "$parent_id" ] && after_has_bot "$parent_id"; then
+                # 只等「紀錄還沒落地」。agent_missing 這類已經寫明的不合格原因立刻回滾。
+                if [ -n "$parent_id" ] && after_has_bot "$parent_id" && [ "$(retire_record_visible "$id")" = 0 ]; then
                     WAITING="$WAITING$name "
                     WAITING_IDS="$WAITING_IDS$id "
                 else

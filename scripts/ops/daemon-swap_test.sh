@@ -176,7 +176,15 @@ case "$sub:$op" in
                  # 換版前（started 還沒出現）可用 STUB_SUPERVISOR_BEFORE 單獨指定；沒設就跟換版後同一個值。
                  if [ ! -e "$AGM_DIR/started" ] && [ -n "${STUB_SUPERVISOR_BEFORE+x}" ]; then printf '{"status":"%s"}' "$STUB_SUPERVISOR_BEFORE"; exit 0; fi
                  printf '{"status":"%s","last_deploy":{"sha":"x","sha_full":"%s","dirty":%s}}' "$STUB_SUPERVISOR" "$STUB_DAEMON_SHA" "${STUB_DAEMON_DIRTY:-false}" ;;
-  state:*)       if [ -e "$AGM_DIR/started" ]; then phase=after; names="$STUB_NAMES_AFTER"; else phase=before; names="$STUB_NAMES_BEFORE"; fi
+  state:*)       if [ -e "$AGM_DIR/started" ]; then
+                   phase=after
+                   n=$(cat "$ROOT/after-state-reads" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$ROOT/after-state-reads"
+                   if [ -n "${STUB_AFTER_READS_BEFORE_DROP:-}" ] && [ "$n" -gt "$STUB_AFTER_READS_BEFORE_DROP" ]; then
+                     names="$STUB_NAMES_AFTER_LATER"
+                   else
+                     names="$STUB_NAMES_AFTER"
+                   fi
+                 else phase=before; names="$STUB_NAMES_BEFORE"; fi
                  [ "$STUB_AGM_STATE_FAIL" != "$phase" ] || { printf '{}'; exit 1; }
                  printf '{"bots":['; sep=""
                  for n in $(printf '%s' "$names" | tr -d '[]"' | tr ',' ' '); do printf '%s{"id":"id-%s","name":"%s"}' "$sep" "$n" "$n"; sep=","; done
@@ -1134,6 +1142,45 @@ rc=$(run)
 check_eq "母 bot 消失仍回滾（rc=7）" "7" "$rc"
 check "母 bot 仍列在 missing" 'missing=\[kid mom \]' "$SWAP_LOG"
 teardown
+
+# 34a2. Intent 一直不來：重查有上限，第 5 次之後回滾，不能一直等。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+           ('id-kid','kid','p1',NULL,'child','id-mom','2000-01-01T00:00:00.000Z');
+  INSERT INTO runs VALUES ('id-mom','running');"
+rc=$(run)
+check_eq "intent 永遠不來：滿 5 次重查後回滾（rc=7）" "7" "$rc"
+check "重查停在 5/5" "rechecking state and intent (5/5)" "$SWAP_LOG"
+check_no "不會有第 6 次重查" "rechecking state and intent (6/5)" "$SWAP_LOG"
+teardown
+
+# 34a3. 不合格的退役紀錄已經看得到（pane 還在／agent_missing）就立刻回滾，不再空等 5 秒。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+           ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
+  INSERT INTO runs VALUES ('id-mom','running');
+  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"agent_missing\",\"mode\":\"implicit\",\"pane\":\"present\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+rc=$(run)
+check_eq "已看見 agent_missing：立刻回滾（rc=7）" "7" "$rc"
+check_no "不合格的 intent 不該進入重查" "rechecking state and intent" "$SWAP_LOG"
+teardown
+
+# 34a4. 重查期間母子一起從名單消失、intent 仍沒有：回滾，不能把 child 當成預期退役。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]' STUB_NAMES_AFTER_LATER='["a"]' STUB_AFTER_READS_BEFORE_DROP=1
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+           ('id-kid','kid','p1',NULL,'child','id-mom','2000-01-01T00:00:00.000Z');
+  INSERT INTO runs VALUES ('id-mom','running');"
+rc=$(run)
+check_eq "重查中母子一起消失：回滾（rc=7）" "7" "$rc"
+check "母與 child 都在 missing" 'missing=\[kid mom \]' "$SWAP_LOG"
+teardown
+unset STUB_NAMES_AFTER_LATER STUB_AFTER_READS_BEFORE_DROP
 
 # 34c. parent row alone is insufficient evidence for an unconfirmed child: its run must still be active.
 setup 10 10
