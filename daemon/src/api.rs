@@ -144,7 +144,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/state", get(get_state))
         .route("/projects", post(create_project))
         .route("/order", post(set_order))
-        .route("/intents", get(list_intents))
+        .route("/intents", get(list_intents).layer(agm_gate!(app)))
         // 對話輸入框的草稿（各瀏覽器共用，見 `drafts.rs`）。
         .route("/drafts", get(crate::drafts::get_http))
         .route("/drafts/{key}", axum::routing::put(crate::drafts::put_http))
@@ -265,10 +265,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/mem/processes", get(get_mem_processes))
         .route("/mem/processes/kill", post(kill_mem_process))
         .route("/mem/processes/pane", get(get_mem_pane))
-        .route("/search/messages", get(search_messages))
+        .route("/search/messages", get(search_messages).layer(agm_gate!(app)))
         // AGM 總管（docs/goals/agm-supervisor-environment-plan-2026-09-09.md）。
-        .route("/supervisor", get(crate::supervisor::api::get_supervisor))
-        .route("/supervisor/health", get(crate::supervisor::api::get_health))
+        .route("/supervisor", get(crate::supervisor::api::get_supervisor).layer(agm_gate!(app)))
+        .route("/supervisor/health", get(crate::supervisor::api::get_health).layer(agm_gate!(app)))
         // AGM 的管理面：被證明身分的一般 bot 一律 403 `role_required`（`bot_requests::forbid_plain_bot`）。
         .route("/supervisor/setup", post(crate::supervisor::api::post_setup).layer(agm_gate!(app)))
         .route("/supervisor/start", post(crate::supervisor::api::post_start).layer(agm_gate!(app)))
@@ -278,63 +278,63 @@ pub fn router(app: Arc<App>) -> Router {
             "/supervisor/assignments",
             // POST 不掛整條 gate：一般 bot 可以對 AGM 角色 bot 送 `notice`（release／herdr 更新任務的 `agm assign --notice --bot <巡檢>`），
             // 其餘由 handler 自己判斷（`supervisor::api::post_assignment`）。
-            get(crate::supervisor::api::get_assignments).post(crate::supervisor::api::post_assignment),
+            get(crate::supervisor::api::get_assignments).layer(agm_gate!(app)).post(crate::supervisor::api::post_assignment),
         )
         .route(
             "/supervisor/handoff",
-            get(crate::supervisor::api::get_handoff).merge(axum::routing::put(crate::supervisor::api::put_handoff).layer(agm_gate!(app))),
+            get(crate::supervisor::api::get_handoff).layer(agm_gate!(app)).merge(axum::routing::put(crate::supervisor::api::put_handoff).layer(agm_gate!(app))),
         )
-        .route("/supervisor/assignments/{id}", get(crate::supervisor::api::get_assignment))
+        .route("/supervisor/assignments/{id}", get(crate::supervisor::api::get_assignment).layer(agm_gate!(app)))
         // 回合結束只到 awaiting_review；驗收／阻塞／續作／取消都走這支（SPEC §18.3）。
         .route("/supervisor/assignments/{id}/review", post(crate::supervisor::api::post_review).layer(agm_gate!(app)))
         // 使用者在更新提示上按「請 AGM 解析」：把這一版的 changelog 派給協調者判讀（唯讀）。
         .route(
             "/claude-update/review",
-            get(crate::claude_review::get_review).post(crate::claude_review::post_review),
+            get(crate::claude_review::get_review).layer(agm_gate!(app)).post(crate::claude_review::post_review),
         )
-        .route("/supervisor/incidents", get(crate::supervisor::api::get_incidents))
+        .route("/supervisor/incidents", get(crate::supervisor::api::get_incidents).layer(agm_gate!(app)))
         // 人設：持久版本是權威，內嵌版只在首次安裝當種子（SPEC §18.11）。
         .route(
             "/supervisor/persona",
-            get(crate::supervisor::api::get_persona).put(crate::supervisor::api::put_persona),
+            get(crate::supervisor::api::get_persona).layer(agm_gate!(app)).put(crate::supervisor::api::put_persona),
         )
         .route("/supervisor/persona/adopt-embedded", post(crate::supervisor::api::post_persona_adopt))
-        .route("/supervisor/build-inputs", get(crate::supervisor::api::get_build_inputs))
+        .route("/supervisor/build-inputs", get(crate::supervisor::api::get_build_inputs).layer(agm_gate!(app)))
         // 左上角「立即部署」：落後多少、有沒有在跑；按下去交給既有的 daemon-update-kick（SPEC §18.2）。
         .route("/deploy/status", get(crate::deploy_now::get_status))
         .route("/deploy/now", post(crate::deploy_now::post_now))
         // 遠端入口：argv 只算 requested，宣稱通了要有帶 actor 的觀測（SPEC §18.12）。
         .route(
             "/supervisor/remote",
-            get(crate::supervisor::api::get_remote)
+            get(crate::supervisor::api::get_remote).layer(agm_gate!(app))
                 .merge(post(crate::supervisor::api::post_remote_observation).layer(agm_gate!(app))),
         )
         // 重建／重啟的核准與執行租約（SPEC §18.10）。
         .route(
             "/supervisor/approvals",
-            get(crate::supervisor::api::get_approvals).post(crate::supervisor::api::post_approval),
+            get(crate::supervisor::api::get_approvals).layer(agm_gate!(app)).post(crate::supervisor::api::post_approval),
         )
         .route(
             "/supervisor/approvals/{id}/decide",
             post(crate::supervisor::api::post_approval_decision).layer(agm_gate!(app)),
         )
-        .route("/supervisor/maintenance/safety", get(crate::supervisor::api::get_maintenance_safety))
-        .route("/supervisor/leases", get(crate::supervisor::api::get_leases))
+        .route("/supervisor/maintenance/safety", get(crate::supervisor::api::get_maintenance_safety).layer(agm_gate!(app)))
+        .route("/supervisor/leases", get(crate::supervisor::api::get_leases).layer(agm_gate!(app)))
         .route("/supervisor/leases/{resource}/acquire", post(crate::supervisor::api::post_lease_acquire))
         .route("/supervisor/leases/{resource}/renew", post(crate::supervisor::api::post_lease_renew))
         .route("/supervisor/leases/{resource}/release", post(crate::supervisor::api::post_lease_release))
-        .route("/supervisor/inbox", get(crate::supervisor::api::get_inbox))
+        .route("/supervisor/inbox", get(crate::supervisor::api::get_inbox).layer(agm_gate!(app)))
         .route("/supervisor/inbox/{id}/ack", post(crate::supervisor::api::post_inbox_ack))
-        .route("/supervisor/state", get(crate::supervisor::api::get_sanitized_state))
+        .route("/supervisor/state", get(crate::supervisor::api::get_sanitized_state).layer(agm_gate!(app)))
         // 已安裝的 bin/agm vs 這顆 binary 內嵌的那份（SPEC §18.2a）：GET 比對、POST 就地換版，
         // 不必等下一次開機（issue #532）。
         .route(
             "/supervisor/cli",
-            get(crate::supervisor::cli_refresh::get_cli).merge(post(crate::supervisor::cli_refresh::post_cli_refresh).layer(agm_gate!(app))),
+            get(crate::supervisor::cli_refresh::get_cli).layer(agm_gate!(app)).merge(post(crate::supervisor::cli_refresh::post_cli_refresh).layer(agm_gate!(app))),
         )
         // 排程腳本卡住時喊人（SPEC §18.9）：只寫一則 durable inbox 事件。
         .route("/supervisor/ops-alerts", post(crate::supervisor::api::post_ops_alert).layer(agm_gate!(app)))
-        .route("/supervisor/evidence", get(crate::supervisor_evidence::search))
+        .route("/supervisor/evidence", get(crate::supervisor_evidence::search).layer(agm_gate!(app)))
         .merge(crate::supervisor::responder_api::routes(app.clone()))
         .merge(crate::release_triage::http::routes())
         .merge(crate::upstream_update::routes())
@@ -349,7 +349,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/services/daemon-swap/restart-window", post(service_daemon_swap_restart_window))
         .route("/services/herdr-upgrade/resume/{id}", post(service_herdr_upgrade_resume))
         .route("/services/herdr-upgrade/notify", post(service_herdr_upgrade_notify))
-        .route("/supervisor/herdr-maintenance", get(crate::herdr_maintenance::get))
+        .route("/supervisor/herdr-maintenance", get(crate::herdr_maintenance::get).layer(agm_gate!(app)))
         .route("/supervisor/herdr-maintenance/open", post(crate::herdr_maintenance::open))
         .route("/supervisor/herdr-maintenance/end", post(crate::herdr_maintenance::end))
         .layer(axum::middleware::from_fn_with_state(app.clone(), auth))
@@ -1343,8 +1343,12 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     }))
 }
 
-async fn get_state(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(state_json(&app).await?))
+async fn get_state(State(app): State<Arc<App>>, Extension(principal): Extension<RequestPrincipal>) -> Result<Json<Value>, LcError> {
+    match principal {
+        RequestPrincipal::User => Ok(Json(state_json(&app).await?)),
+        RequestPrincipal::Bot(bot_id) => Ok(Json(crate::bot_state::view_for_bot(&app, &bot_id).await?)),
+        RequestPrincipal::Service(_) => Err(bot_user_only()),
+    }
 }
 
 /// issue #73 reopen：daemon 裡所有寫 config.toml 的 mutation（Project／Bot／identity）都走

@@ -390,6 +390,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 
 User principal 一次取回整棵樹。前端啟動、收到 `resync`、`project_changed` / `bot_changed` 時重拉。Bot principal 取得受限投影：只保留自己與 descendants 所在的 projects/bots，並移除全域 `restart_batch`、`cli_updates`、`herdr_updates`、`default_connected`、`herdr_session`、`hosts`、`identities`；每顆可見 bot 移除 `persona`、`args`、`identity`、`env`、`herdr_session`、`unread`、`read_mark`，專案移除 `group_unread`／`group_read_mark`。Service principal 依各自明列的 path scope，不可讀 `/api/state`。
 
+UI User principal 保留下方完整快照。Bot principal（包括 AGM 角色 bot）只收到自己與後代 child 所在的專案及 bot；不含其他專案、主機清單或全域 identities。Bot view 會刪除 `persona`、`args`、`identity`、`env`、`herdr_session` 與使用者共用的 `unread`／read marks，也不回傳頂層 `restart_batch`、`cli_updates`、`herdr_updates`、`default_connected`、`herdr_session`、`hosts`、`identities`。Bot principal 的 `/api/state` 因而不是下方 User JSON 的完整形狀；Service principal 依既有 scope 不可呼叫此路徑。
+
 `restart_batch`（issue #492）：現在正在跑的那一批一鍵重啟（§6.9）的 `batch_id`，沒有就是 `null`。
 唯讀，只為了對帳——進度本身走 WS（`bots_restart_progress` / `bots_restart_done`），而 `done` 有兩條收不到的路
 （批次跑到一半 daemon 重啟；客戶端落到全量 `resync`，那條走 `refreshState`、backlog 整段不重播），
@@ -517,7 +519,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 
 **停用模型的回應（#400）**：POST create 與 PATCH model 若輸入剛好等於停用值，回應帶 `remapped.model.from/to`。Codex 的 `gpt-5.6-sol`、`gpt-5.6-terra` 會換成 `gpt-6-sol`，`gpt-5.6-luna` 會換成 `gpt-6-luna`；Claude 的 `opus` 會換成 `claude-opus-5-5`。其他回應不含 `remapped`；同一欄位的 PATCH 只會回報實際替換的值。
 
-**`GET /api/intents`**（#355）：持久 intent 的最近 100 筆（含已結束的，新的先）`{intents:[{id,kind,subject_id,host,payload_json,step,status,owner_boot,attempts,last_error,created_at,updated_at,expires_at}]}`。唯讀；`restart`／`delete_bot`／`delete_project`／`promote` 會寫（見 SPEC §3.1 的持久 intent）；child 退役另寫一列 `kind = retire_child`、`status = done` 的紀錄（payload 見 SPEC §6.5a，#554）。
+**`GET /api/intents`**（#355）：持久 intent 的最近 100 筆（含已結束的，新的先）`{intents:[{id,kind,subject_id,host,payload_json,step,status,owner_boot,attempts,last_error,created_at,updated_at,expires_at}]}`。只接受 User principal 或已驗證 AGM patrol/responder role；一般 Bot 回 `403 role_required`。唯讀；`restart`／`delete_bot`／`delete_project`／`promote` 會寫（見 SPEC §3.1 的持久 intent）；child 退役另寫一列 `kind = retire_child`、`status = done` 的紀錄（payload 見 SPEC §6.5a，#554）。
 
 **`POST /api/order`**：側欄排序 = config.toml 的陣列順序，`GET /api/state` 的順序就是權威（前端不另存）。只送要改的那一半；沒列到的維持原相對順序接在後面；
 config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_changed`。
@@ -915,6 +917,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 （命中字前後各約 90 字）。`q` trim 後為空就回 `{q:"", bots:[]}`（不是錯誤）；`limit` 1–1000，預設 200，
 **活的 bot 排在已刪的前面**，各自依 `hits` 由多到少，所以命中較多的已刪 bot 不會把活 bot 擠出 `limit`（#766）；每列帶 `bot_deleted`。同一顆 bot 的 `snippet` 取最新一則命中（同毫秒以後寫入的為準）。字面子字串比對，`%`、`_`、`\` 是字元不是萬用字元。含已刪 bot 的歷史。
 
+此全域搜尋只接受 User principal 或已驗證的 AGM patrol/responder role；一般 Bot 回 `403 role_required`。role 查詢失敗時拒絕請求，不降級為可讀。
+
 **跟 `GET /api/supervisor/evidence` 的分工**（兩支都在搜同一張 `messages` 表，但回答的是不同問題）：
 
 | | `search/messages` | `supervisor/evidence` |
@@ -1129,7 +1133,7 @@ codex 的新版還沒安裝、磁碟是舊的，所以先取 `release_triage` �
 `GET /api/release-triage?kind=herdr` 回 200 空的 `rows`；`verdicts`／`dispatched`／`publish` 對 herdr 仍是 400。
 
 ### `GET /api/claude-update/review`
-這一版的 AGM 解析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
+只接受 User principal 或已驗證 AGM patrol/responder role；一般 Bot 回 `403 role_required`。這一版的 AGM 解析到哪了——更新框一打開就讀，**有結論就直接印在框裡**（使用者 2026-09-19：不要只給一句
 「結論會回到這裡」）。`?kind=`／`?host=`／`?to=` 可指定，預設 claude、本機與上面說的新版。
 
 ```json
@@ -2334,6 +2338,8 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 
 全部走 `X-AM-Token`。未部署的 daemon 對這些路徑回 404（前端用 404 判斷「這台不支援」）。
 
+讀取 AGM 控制面資料也只接受 User principal 或已驗證的 AGM patrol/responder role；一般 Bot 對 supervisor 摘要、health、assignments、handoff、incidents、persona、build inputs、remote、approvals、maintenance safety、leases、inbox、state、CLI 狀態、herdr maintenance、responder 狀態／persona、Claude update review 與 evidence 回 `403 role_required`。role 查詢失敗時拒絕請求。`/api/supervisor`、health、state、leases 與 maintenance safety 仍可由 service principal 在其各自明列的 service scope 中讀取；此例外不擴大 Bot 權限。
+
 ### 狀態、啟停、模型切換
 - `GET /api/supervisor` → `{configured,bot_id,project_id,model:"fable"|"opus",model_arg,identity:"cc0",effort:"low",status,status_detail,generation,cwd,quota_reset_at,remote:{…},pending_count,assignments:[]}`。
   `status`：`not_configured` | `stopped` | `starting` | `idle` | `busy` | `waiting_quota` | `failed`。`pending_count` = 未結案 assignment + 未 ack inbox。`remote` 同 `GET /api/supervisor/remote`。
@@ -2604,7 +2610,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
 - `GET /api/supervisor/state` → 給 `agm` CLI 的精簡全域狀態：projects、bots（run 的 `agent_status`、`native_session_id`、`runtime_model/effort`、`pane_id`、`queued_turns`、`host_connected`、`asleep`、`lamp`）、未結案 assignment、待處理 inbox。不含 env、hook token、args、persona 全文。
   `lamp` 跟 `GET /api/state` 是同一個函式算的（`api.rs` 的 `lamp`，吃 `bot_connected`＝bot → host → herdr session），呼叫端照抄就好：CLI 這邊只看得到主機層的 `host_connected`，自己推的話同一台主機上 session 掉了的那顆會分岔（issue #514）。
 - `GET /api/supervisor/handoff` 與 `GET /api/supervisor` 的 `assignments`：最近一頁**加上**掉在頁外的未結案交辦，所以 `open_assignments` 不會少報（issue #515）。
-- `GET /api/supervisor/evidence?q=<文字>&bot_id=&project_id=&before=<cursor>&limit=20` → `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,relay_from,relay_unverified,content,source,incomplete,rewound_at,created_at,truncated}],has_more,next_cursor}`；`rewound_at` 非 `null` ＝這則被對話倒回標掉（網頁畫成「已倒回」），內容仍在歷史裡但不是有效決定。`relay_from` 是訊息的來源 bot id 或 `null`；對 `role=user` 訊息，`null` 表示使用者直接輸入。`relay_unverified` 是 `true` 時表示 #410 之前相容期內 User principal 自稱的 bot 來源（現已拒絕，只剩歷史訊息）。`agm search` 遇到舊 daemon 沒回這兩欄時會輸出兩欄為 `null`，保留「來源未知」而不是把它當成使用者訊息。
+- `GET /api/supervisor/evidence?q=<文字>&bot_id=&project_id=&before=<cursor>&limit=20` → `{messages:[{id,bot_id,bot_name,project_id,project_label,bot_deleted,turn_id,role,relay_from,relay_unverified,content,source,incomplete,rewound_at,created_at,truncated}],has_more,next_cursor}`；User 與已驗證 AGM patrol/responder role 可讀；一般 Bot 回 `403 role_required`。`rewound_at` 非 `null` ＝這則被對話倒回標掉（網頁畫成「已倒回」），內容仍在歷史裡但不是有效決定。`relay_from` 是訊息的來源 bot id 或 `null`；對 `role=user` 訊息，`null` 表示使用者直接輸入。`relay_unverified` 是 `true` 時表示 #410 之前相容期內 User principal 自稱的 bot 來源（現已拒絕，只剩歷史訊息）。`agm search` 遇到舊 daemon 沒回這兩欄時會輸出兩欄為 `null`，保留「來源未知」而不是把它當成使用者訊息。
   `q` 必填（trim 後 1–500 字），字面子字串（`%`、`_` 不是萬用字元）；`limit` 1–100；含已刪 bot 的歷史。依 `(created_at DESC,id DESC)`，`next_cursor` 原樣放回 `before`。
   每筆 content 最多 16,000 字（超過 `truncated:true`）。空查詢、過長、壞 cursor 400。只提供證據，不把命中當完成或適合度。
 

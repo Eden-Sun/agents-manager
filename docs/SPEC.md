@@ -59,6 +59,7 @@ herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上�
 側欄 bot 列可由列本身取得焦點後按 Enter／Space 選取；列內選單與按鈕保留各自的鍵盤操作。確認框由 portal 顯示時，其點擊不切換目前 bot；點列內一般內容仍可選取 bot。
 
 Bot 跨裝置已讀位置以訊息 `(created_at, seq)` 比較；同一時間戳下依 daemon rowid 插入序判斷，避免 ULID 同毫秒隨機段造成未讀數和畫面順序不同。非空 `message_id` 必須屬於目標 bot 對話或群組專案，且 `at` 必須對應該訊息時間；標記訊息已刪時保留時間與 id 供舊標記相容。
+`GET /api/state` 對 Bot principal 只列自己與後代 child，並移除未讀數與 read marks。
 
 **「跑了多久」的起點（issue #93）**：`runs.agent_status_since`，`agent_status` 真的改變時由 DB trigger
 （`runs_agent_status_since`）蓋成當下時間，同值重寫（同一行 pane 狀態重複出現）不算改變。取捨：
@@ -3555,6 +3556,8 @@ claude 的預設強度來自**帳號的 `settings.json`**：
 ## 18. 總管（AGM）運維規範
 
 AGM 的運維職責以本節為準，不靠任何 bot 的記憶。persona 是同一份規則的執行期投影（§18.11），launchd（Linux 主機是 systemd，§18.2e）腳本是實作；不一致時**以實際腳本行為為準**，再把本節改對。
+
+AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、persona、approval／incident／lease 與維護狀態、證據搜尋）只給 User 或已驗證的 patrol/responder role；一般 Bot 回 `403 role_required`，role 查詢失敗時拒絕，不降級放行。明確列入 service scope 的快照仍供對應 daemon service 讀取；這不授予一般 Bot 管理面視野。
 
 ### 18.1 開發用 dev server（5173）
 
