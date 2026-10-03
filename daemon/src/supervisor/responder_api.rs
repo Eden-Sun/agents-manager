@@ -22,11 +22,17 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 /// 掛在 `/api` 底下、auth layer 之內。setup／start／stop 是 AGM 的管理面：被證明身分的一般 bot 403（`forbid_plain_bot`）。
 pub fn routes(app: Arc<App>) -> Router<Arc<App>> {
     Router::new()
-        .route("/supervisor/responder", get(get_responder))
+        .route(
+            "/supervisor/responder",
+            get(get_responder).layer(axum::middleware::from_fn_with_state(app.clone(), super::bot_requests::gate_plain_bots)),
+        )
         .route("/supervisor/responder/setup", post(post_setup).layer(axum::middleware::from_fn_with_state(app.clone(), super::bot_requests::gate_plain_bots)))
         .route("/supervisor/responder/start", post(post_start).layer(axum::middleware::from_fn_with_state(app.clone(), super::bot_requests::gate_plain_bots)))
         .route("/supervisor/responder/stop", post(post_stop).layer(axum::middleware::from_fn_with_state(app.clone(), super::bot_requests::gate_plain_bots)))
-        .route("/supervisor/responder/persona", get(get_persona).put(put_persona))
+        .route(
+            "/supervisor/responder/persona",
+            get(get_persona).layer(axum::middleware::from_fn_with_state(app, super::bot_requests::gate_plain_bots)).put(put_persona),
+        )
 }
 
 async fn get_responder(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {

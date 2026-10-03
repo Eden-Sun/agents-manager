@@ -15,6 +15,9 @@ mod exec_retry;
 mod cargo_shim;
 mod agent_relay;
 mod api;
+#[cfg(test)]
+mod bot_read_scope_tests;
+mod bot_state;
 mod pending_question;
 mod identity_kind;
 mod intents;
