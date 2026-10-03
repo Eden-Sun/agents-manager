@@ -15,10 +15,12 @@ export type UnreadKey = `bot:${string}` | `group:${string}`
 export const botKey = (botId: string): UnreadKey => `bot:${botId}`
 export const groupKey = (projectId: string): UnreadKey => `group:${projectId}`
 
-/** `(at, id)` 是讀取位置的全序；同一時間戳以 id 決定先後。 */
+/** `(at, seq)` 是新 daemon 的讀取位置全序；舊資料沒有 seq 時，同一時間戳退回 id。 */
 export interface ReadMark {
   at: string
   id: string
+  /** daemon rowid for stable same-millisecond ordering; missing on marks from older versions. */
+  seq?: number
 }
 
 function isRec(v: unknown): v is Record<string, unknown> {
@@ -35,7 +37,8 @@ export function loadMarks(): Record<string, ReadMark> {
       const at = v.at
       const id = v.id
       if (typeof at !== 'string' || !at) continue
-      out[k] = { at, id: typeof id === 'string' ? id : '' }
+      const seq = v.seq
+      out[k] = { at, id: typeof id === 'string' ? id : '', ...(typeof seq === 'number' && Number.isFinite(seq) ? { seq } : {}) }
     }
     return out
   } catch {
@@ -97,11 +100,13 @@ export function completesTurn(msg: Pick<Message, 'role'>): boolean {
 }
 
 /** 沒有標記 = 什麼都沒讀過。 */
-export function isUnread(msg: Pick<Message, 'id' | 'created_at'>, mark: ReadMark | undefined): boolean {
+export function isUnread(msg: Pick<Message, 'id' | 'created_at' | 'seq'>, mark: ReadMark | undefined): boolean {
   if (!mark) return true
   if (msg.created_at > mark.at) return true
-  // 時間戳可能相同；全序中不晚於標記的訊息都算已讀。
-  return msg.created_at === mark.at && msg.id > mark.id
+  if (msg.created_at !== mark.at) return false
+  // 新 daemon 帶 rowid；同毫秒依訊息真正寫入的次序，不依 ULID 的隨機段。
+  if (msg.seq != null && mark.seq != null) return msg.seq > mark.seq
+  return msg.id > mark.id
 }
 
 /** 以回合計數：同回合多則 assistant 訊息算一個；沒 turn_id 的各算一個。 */
@@ -128,7 +133,11 @@ export function completionKey(msg: Pick<Message, 'id' | 'turn_id'>, knownTurnIds
 export function markOfMessages(messages: readonly Message[]): ReadMark | null {
   let best: ReadMark | null = null
   for (const m of messages) {
-    if (!best || m.created_at > best.at || (m.created_at === best.at && m.id > best.id)) best = { at: m.created_at, id: m.id }
+    const laterAt = !best || m.created_at > best.at
+    const laterTie = best && m.created_at === best.at && (
+      m.seq != null && best.seq != null ? m.seq > best.seq : m.id > best.id
+    )
+    if (laterAt || laterTie) best = { at: m.created_at, id: m.id, ...(m.seq == null ? {} : { seq: m.seq }) }
   }
   return best
 }

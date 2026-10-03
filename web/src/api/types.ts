@@ -26,7 +26,7 @@ export interface Project {
   handed_off_to?: string | null
   /** 專案群組的未讀回合數與已讀標記（daemon 算、跨裝置共用；舊 daemon 沒給）。 */
   group_unread?: number
-  group_read_mark?: { at: string; id: string } | null
+  group_read_mark?: { at: string; id: string; seq?: number } | null
   created_at: string
 }
 
@@ -273,7 +273,7 @@ export interface Bot {
   /** daemon 算的未讀回合數（跨裝置共用，2026-09-15）；舊 daemon 沒有這欄就是 undefined。 */
   unread?: number
   /** daemon 存的已讀位置（跨裝置共用）；null＝還沒有。 */
-  read_mark?: { at: string; id: string } | null
+  read_mark?: { at: string; id: string; seq?: number } | null
   created_at: string
 }
 

@@ -74,6 +74,12 @@ type Rec = Record<string, unknown>
 
 const isRec = (v: unknown): v is Rec => typeof v === 'object' && v !== null && !Array.isArray(v)
 
+function readMark(v: unknown): { at: string; id: string; seq?: number } | null {
+  if (!isRec(v) || typeof v.at !== 'string' || !v.at) return null
+  const mark = { at: v.at, id: typeof v.id === 'string' ? v.id : '' }
+  return typeof v.seq === 'number' && Number.isFinite(v.seq) ? { ...mark, seq: v.seq } : mark
+}
+
 function str(v: unknown, fallback = ''): string {
   if (typeof v === 'string') return v
   if (typeof v === 'number' || typeof v === 'boolean') return String(v)
@@ -277,7 +283,7 @@ export function toProject(v: unknown): Project | null {
       const m = pick(v, 'group_read_mark')
       return {
         group_unread: typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined,
-        group_read_mark: isRec(m) && typeof m.at === 'string' && m.at ? { at: m.at, id: typeof m.id === 'string' ? m.id : '' } : null,
+        group_read_mark: readMark(m),
       }
     })(),
     created_at: str(v.created_at),
@@ -340,7 +346,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
       const m = pick(v, 'read_mark')
       return {
         unread: typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined,
-        read_mark: isRec(m) && typeof m.at === 'string' && m.at ? { at: m.at, id: typeof m.id === 'string' ? m.id : '' } : null,
+        read_mark: readMark(m),
       }
     })(),
     created_at: str(v.created_at),

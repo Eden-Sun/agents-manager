@@ -851,7 +851,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "lamp": lamp(bot_connected, run.as_ref()),
                 // 跨裝置共用的未讀回合數與已讀標記（read_marks.rs）。
                 "unread": unread.get(&b.id).copied().unwrap_or(0),
-                "read_mark": read_marks.get(&b.id).map(|m| json!({"at": m.at, "id": m.message_id})),
+                "read_mark": read_marks.get(&b.id).map(crate::read_marks::json_value),
             }));
         }
         out.push(json!({
@@ -860,7 +860,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             "handed_off_to": p.handed_off_to,
             // 群組未讀與已讀標記跨裝置共用（read_marks.rs，#756）。
             "group_unread": group_unread.get(&p.id).copied().unwrap_or(0),
-            "group_read_mark": group_marks.get(&p.id).map(|m| json!({"at": m.at, "id": m.message_id})),
+            "group_read_mark": group_marks.get(&p.id).map(crate::read_marks::json_value),
             "github": crate::github::cached(app, &p.id).await,
             "bots": bl,
         }));

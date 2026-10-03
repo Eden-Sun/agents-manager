@@ -58,7 +58,7 @@ herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上�
 
 側欄 bot 列可由列本身取得焦點後按 Enter／Space 選取；列內選單與按鈕保留各自的鍵盤操作。確認框由 portal 顯示時，其點擊不切換目前 bot；點列內一般內容仍可選取 bot。
 
-Bot 跨裝置已讀位置以 `(created_at, message_id)` 字典序比較；同一時間戳下，id 不大於標記的訊息都算已讀，前端標記與 daemon 未讀數採相同順序。
+Bot 跨裝置已讀位置以訊息 `(created_at, seq)` 比較；同一時間戳下依 daemon rowid 插入序判斷，避免 ULID 同毫秒隨機段造成未讀數和畫面順序不同。非空 `message_id` 必須屬於目標 bot 對話或群組專案，且 `at` 必須對應該訊息時間；標記訊息已刪時保留時間與 id 供舊標記相容。
 
 **「跑了多久」的起點（issue #93）**：`runs.agent_status_since`，`agent_status` 真的改變時由 DB trigger
 （`runs_agent_status_since`）蓋成當下時間，同值重寫（同一行 pane 狀態重複出現）不算改變。取捨：
@@ -3246,7 +3246,7 @@ API：`GET /api/projects/:id/messages`、`POST /api/projects/:id/chat`（`API.md
 - 時間軸：bot 回覆／system 訊息帶 bot 名徽章（依 kind 配色）；user 副本折疊顯示 `→ @a, @b`；每個仍在回覆的成員各一個 typing 指示。
 - 載入更早的訊息與整頁重抓重疊時，重抓套用後才回來的舊頁丟棄；下一次從重抓後清單最舊的一則接續分頁。單 bot 與群組時間軸一致。
 - 輸入 `@` 彈出成員與 `all` 自動完成；沒有 mention 時送出鈕 disabled；列出收件者並標示將被略過的。**專案內至少一個 bot 可送就不鎖輸入框。**
-- 未打開群組時 sidebar 顯示未讀計數（打開即歸零）。**數字與已讀標記以 daemon 為準、跨裝置共用**（#756）：`project_group_reads` 存每個專案的標記，`GET /api/state` 每個專案帶 `group_unread`／`group_read_mark`（API.md `POST /api/projects/{id}/group/read`），前端只留記憶體裡的即時 +1，由下一次快照校正。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。群組來源以持久化的 `messages.group_id` 確認；未載入原訊息時，`client_request_id` 的 `<crid>:<bot_id>` 僅作查詢候選，再向訊息 API 查該 bot、該回合的 user 訊息，不以命名或歷史頁數當證據。daemon 的算法同前端舊規則：標記之後、同回合 user 訊息帶 `group_id` 的 assistant 回合，依 `turn_id` 去重。本機不再存群組計數（舊版的 `group:` 鍵忽略）。
+- 未打開群組時 sidebar 顯示未讀計數（打開即歸零）。**數字與已讀標記以 daemon 為準、跨裝置共用**（#756）：`project_group_reads` 存每個專案的標記，`GET /api/state` 每個專案帶 `group_unread`／`group_read_mark`（API.md `POST /api/projects/{id}/group/read`），前端只留記憶體裡的即時 +1，由下一次快照校正。**只算群組回覆**（2026-09-15）：回的是群組訊息的那一回合（該 bot 對話裡有同 `turn_id`、帶 `group_id` 的 user 訊息）完成才 +1；成員各自的單獨對話不算。群組來源以持久化的 `messages.group_id` 確認；未載入原訊息時，`client_request_id` 的 `<crid>:<bot_id>` 僅作查詢候選，再向訊息 API 查該 bot、該回合的 user 訊息，不以命名或歷史頁數當證據。daemon 的算法：標記之後、同回合 user 訊息帶 `group_id` 的 assistant 回合，依 `turn_id` 去重；相同訊息時間依 `seq` 插入序判斷。本機不再存群組計數（舊版的 `group:` 鍵忽略）。
 
 ## 14. 每台主機各自的額度
 

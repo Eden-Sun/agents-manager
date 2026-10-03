@@ -276,7 +276,16 @@ export async function commit(
   onProgress?: (done: number, total: number) => void,
   custom: string[] = [],
 ): Promise<CommitResult> {
-  const wanted = draft.pages.map((p, i) => ({ p, i })).filter(({ p, i }) => pageNeedsCommit(p, want[i]))
+  const wanted = draft.pages.map((p, i) => ({ p, i })).filter(({ p, i }) => {
+    if (pageNeedsCommit(p, want[i])) return true
+    // 目前勾選可能是 TUI 還沒按該頁 Submit 的暫存答案；即使使用者保留原樣，也要先提交這頁。
+    return (
+      p.multi &&
+      p.hasSubmitRow &&
+      !draft.tabs[p.tab]?.done &&
+      (want[i] ?? wantOf(p)).some(Boolean)
+    )
+  })
 
   for (const { p, i } of wanted) {
     // `Type something` 要打字才送得出去：單選是那一項被選；複選是想勾、而終端上還沒勾（已勾的是終端打好的，留著）。

@@ -614,14 +614,14 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 bot 或 active Run 不存在 404。
 
 ### `POST /api/bots/{id}/read`
-跨裝置共用的已讀位置（2026-09-15）。body `{"at":"<讀到的最後一則 created_at>","message_id":"<那則 id>"}`，兩者可省（`at` 省略＝現在）；標記**只按 `(at, message_id)` 字典序往前推**，較舊的送來不會倒退。同一時間戳時，id 不大於標記的訊息算已讀，較大的 id 才算未讀。
-回 `{"bot_id","read_mark":{"at","id"},"unread"}`，並推 WS `bot_read`（同形）讓其他分頁／裝置重拉 state。`at` 不是 RFC 3339 → 400；`message_id` 不是 id（超過 64 字元、或含 `A-Za-z0-9-_:.` 以外的字元；空字串＝只推時間）→ 400，什麼都不存（這個字串會進 DB、隨 `GET /api/state` 與 WS 廣播給每個分頁）；bot 不存在 404。有效時間先轉為 UTC 毫秒 `Z` 格式，晚於 daemon 現在的值夾到現在，避免裝置時鐘錯誤永久遮住新訊息；回傳 `read_mark.at` 為正規化後的值。
-`GET /api/state` 每顆 bot 帶 `unread`（標記之後的 assistant 訊息依回合去重的數目；沒有標記＝全部）與 `read_mark`（`{at,id}` 或 `null`）。升級建表時既有 bot 的標記設為當下，舊訊息不算未讀。
+跨裝置共用的已讀位置（2026-09-15）。body `{"at":"<讀到的最後一則 created_at>","message_id":"<那則 id>"}`，兩者可省；非空 `message_id` 必須指向這顆 bot 對話裡的訊息，提供 `at` 時必須和該訊息時間相同，不符 → 400。省略 `at` 時，有訊息 id 就取該訊息時間；沒有 id 才取現在。標記**只往前推**，較舊的送來不會倒退。相同時間戳的訊息依 daemon 插入序 `seq`（rowid）比較，較晚寫入的才在標記之後。
+回 `{"bot_id","read_mark":{"at","id","seq"},"unread"}`，並推 WS `bot_read`（同形）讓其他分頁／裝置重拉 state。`at` 不是 RFC 3339 → 400；`message_id` 超過 64 字元、含 `A-Za-z0-9-_:.` 以外的字元，或不在這顆 bot 對話裡 → 400，什麼都不存（空字串＝只推時間）；bot 不存在 404。有效時間先轉為 UTC 毫秒 `Z` 格式，晚於 daemon 現在的值夾到現在，避免裝置時鐘錯誤永久遮住新訊息；回傳 `read_mark.at` 為正規化後的值。標記訊息仍存在時會帶 `seq`；訊息已刪或舊 daemon 未提供時省略。
+`GET /api/state` 每顆 bot 帶 `unread`（標記之後的 assistant 訊息依回合去重的數目；沒有標記＝全部）與 `read_mark`（`{at,id,seq?}` 或 `null`）。升級建表時既有 bot 的標記設為當下，舊訊息不算未讀。
 
 ### `POST /api/projects/{id}/group/read`
-專案群組的已讀位置（#756），語意同上：body `{"at","message_id"}` 可省，標記只往前推、時間先正規化並夾到現在。
-回 `{"project_id","read_mark":{"at","id"},"unread"}`，並推 WS `group_read`（同形）；`at` 非 RFC 3339、`message_id` 不是 id → 400，專案不存在**或已軟刪** 404（跟 `/chat`、`/messages` 一致）。
-`GET /api/state` 每個專案帶 `group_unread`（標記之後的**群組回覆回合**數：assistant 訊息、同回合的 user 訊息帶 `group_id`，依 `turn_id` 去重；沒有標記＝全部）與 `group_read_mark`（`{at,id}` 或 `null`）。升級建表時既有專案的標記設為當下。專案搬家（`project-transfer`）不帶群組標記，搬過去後群組未讀從全部開始。
+專案群組的已讀位置（#756），語意同上：非空 `message_id` 必須指向這個專案任一 bot 的訊息（含已軟刪 bot 留下的歷史），提供 `at` 時必須等於該訊息時間；省略 `at` 時，有 id 取訊息時間，沒有 id 取現在。標記只往前推、時間先正規化並夾到現在。
+回 `{"project_id","read_mark":{"at","id","seq"},"unread"}`，並推 WS `group_read`（同形）；`at` 非 RFC 3339、`message_id` 格式錯誤或不屬於專案 → 400，專案不存在**或已軟刪** 404（跟 `/chat`、`/messages` 一致）。`seq` 是標記訊息仍存在時的插入序；已刪或舊 daemon 未提供時省略。
+`GET /api/state` 每個專案帶 `group_unread`（標記之後的**群組回覆回合**數：assistant 訊息、同回合的 user 訊息帶 `group_id`，依 `turn_id` 去重；沒有標記＝全部）與 `group_read_mark`（`{at,id,seq?}` 或 `null`）。同時間戳依訊息插入序判斷。升級建表時既有專案的標記設為當下。專案搬家（`project-transfer`）不帶群組標記，搬過去後群組未讀從全部開始。
 
 ### 輸入框草稿 `GET /api/drafts`、`PUT /api/drafts/{key}`（使用者 2026-10-01）
 對話輸入框還沒送出的字，以 daemon 為準，各瀏覽器（手機、電腦）共用；網頁不再把草稿存在 localStorage。
