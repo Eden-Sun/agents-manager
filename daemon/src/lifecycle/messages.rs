@@ -106,12 +106,16 @@ pub async fn insert_message_full(
     group_id: Option<&str>,
     relay_from: Option<&str>,
 ) -> anyhow::Result<db::Message> {
-    let mut tx = app.db.begin().await?;
+    // 先讀 owner 再寫訊息（#613 要它們同一個交易）：deferred 的話讀完之後別的 writer 一 commit，INSERT 就 517，
+    // `let _ =` 的呼叫端連說明訊息都默默丟了（#822）。
+    let mut tx = db::begin_write(&app.db).await?;
     let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
         .bind(conversation_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow::anyhow!("conversation {conversation_id} has no owner"))?;
+    #[cfg(test)]
+    super::race_point::hit("insert_message_after_owner_read", conversation_id).await;
     let id = db::ulid();
     let now = db::now();
     sqlx::query(
@@ -286,6 +290,34 @@ mod tests {
         assert_eq!(event.data["bot_id"], bot.id);
         assert_eq!(event.data["message"]["id"], retried.id);
         assert!(matches!(events.try_recv(), Err(TryRecvError::Empty)), "the retry emits exactly one message event");
+    }
+
+    /// #822：讀完 owner、還沒 INSERT 訊息的那一瞬，一個不相干的 writer commit 了一筆。deferred 交易這時 INSERT 直接 517，
+    /// `let _ = insert_message(..)` 的呼叫端連說明訊息都默默丟了。寫鎖從讀之前就拿著：插進來的那一筆等，訊息寫進去一次、
+    /// 事件帶對的 owner。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_owner_read_and_the_insert_does_not_lose_the_message() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "message-owner-831").await;
+        let conversation_id = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let mut events = app.subscribe();
+        let other = tt::arm_app_foreign_writer(&app, "insert_message_after_owner_read", &conversation_id);
+
+        let m = insert_message(&app, &conversation_id, None, "system", "說明", "system", false, None)
+            .await
+            .expect("an unrelated writer must not make the message insert fail");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the insert holds the write lock from its owner read on; the other writer waits");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=?").bind(&conversation_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(rows, 1);
+        let event = loop {
+            let ev = events.recv().await.unwrap();
+            if ev.kind == "message_added" {
+                break ev;
+            }
+        };
+        assert_eq!(event.data["bot_id"], bot.id, "the event carries the owner read in the same transaction");
+        assert_eq!(event.data["message"]["id"], m.id);
     }
 
     #[tokio::test]
