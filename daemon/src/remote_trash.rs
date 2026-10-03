@@ -44,11 +44,11 @@ pub async fn move_in(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
     }
 }
 
-/// 還原：遠端 `bots/<id>/` 還不在時，把回收區裡這顆最新的那份搬回去。回從哪裡搬回來；沒得搬回 `None`。
+/// 還原：遠端 `bots/<id>/` 還不在時，把回收區裡這顆最新的那份搬回去。symlink 只拆連結再搬回；真目錄或檔案已在回 `None`。
 pub async fn restore(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
     let dir = crate::lifecycle::remote_bot_dir(conn, bot_id).await?.dir;
     let script = format!(
-        "set -e\nD={d}\nT={t}\nif [ -e \"$D\" ]; then printf 'AM_KEPT\\n'; exit 0; fi\nbest=\nbm=0\nfor e in \"$T\"/{id}.*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e##*.}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nmkdir -p \"$(dirname \"$D\")\"\nmv \"$best\" \"$D\"\nprintf 'AM_RESTORED %s\\n' \"$best\"\n",
+        "set -e\nD={d}\nT={t}\nif [ -L \"$D\" ]; then rm \"$D\"; fi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then printf 'AM_KEPT\\n'; exit 0; fi\nbest=\nbm=0\nfor e in \"$T\"/{id}.*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e##*.}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nmkdir -p \"$(dirname \"$D\")\"\nmv \"$best\" \"$D\"\nprintf 'AM_RESTORED %s\\n' \"$best\"\n",
         d = sh_quote(&dir),
         t = sh_quote(&trash_dir(conn).await?),
         id = sh_quote(bot_id),
@@ -262,6 +262,37 @@ mod tests {
         }
         restore_for(&app, &bot.id).await;
         assert_eq!(std::fs::read_to_string(root.join("bots").join(&bot.id).join("tag")).unwrap(), "new");
+    }
+
+    /// 遠端 `bots/<id>` 是 symlink 時 `[ -e ]` 為真，還原會回 AM_KEPT、回收區留著。必須只拆連結再搬回，
+    /// 不能把垃圾桶 `mv` 進連結指到的目錄。真目錄仍 AM_KEPT。
+    #[tokio::test]
+    async fn a_remote_symlink_is_not_a_rebuilt_bot_dir() {
+        let (env, root) = remote("trashbox-symlink").await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "alfa").await;
+        let dir = root.join("bots").join(&bot.id);
+        let trash = root.join("bots-trash").join(format!("{}.1000", bot.id));
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(trash.join("keep.txt"), "secret").unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), "keep-me").unwrap();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &dir).unwrap();
+
+        restore_for(&app, &bot.id).await;
+        assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).unwrap(), "secret");
+        assert_eq!(std::fs::read_to_string(outside.join("victim.txt")).unwrap(), "keep-me");
+        assert!(!outside.join("keep.txt").exists());
+        assert!(std::fs::symlink_metadata(&dir).unwrap().is_dir());
+
+        std::fs::rename(&dir, root.join("bots-trash").join(format!("{}.2000", bot.id))).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fresh.txt"), "new").unwrap();
+        restore_for(&app, &bot.id).await;
+        assert_eq!(std::fs::read_to_string(dir.join("fresh.txt")).unwrap(), "new");
+        assert!(root.join("bots-trash").join(format!("{}.2000", bot.id)).join("keep.txt").exists());
     }
 
     /// 主機連上時清掉放超過保留期的；新的、名字不合規矩的都不碰。
