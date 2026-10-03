@@ -406,7 +406,7 @@ fn timestamp_is_recent(timestamp: &str) -> bool {
 /// Find create intents from the last 24 hours which have no IssueRef yet but are visible remotely.
 /// A durable intent alone is not enough: failed GitHub calls also leave intents behind, so count
 /// and recover only ones whose marker (or exact daemon title after a marker edit) is on GitHub.
-async fn confirmed_unlogged_creates(pool: &SqlitePool, remote: &Remote) -> Result<Vec<ConfirmedCreate>> {
+async fn confirmed_unlogged_creates(pool: &SqlitePool, gh: &Gh, remote: &Remote) -> Result<Vec<ConfirmedCreate>> {
     let rows = ledger::list(pool, None, None).await?;
     let logged: std::collections::HashSet<String> = rows.iter().flat_map(|r| r.issues.iter().map(|i| i.marker.clone())).collect();
     let intents = ledger::recent_create_intents(pool).await?;
@@ -421,7 +421,13 @@ async fn confirmed_unlogged_creates(pool: &SqlitePool, remote: &Remote) -> Resul
         let Some(proposal) = proposals_of(row).into_iter().find(|p| marker(&row.kind, &row.version, &p.entry_ids) == intent.marker) else {
             continue;
         };
-        let Some((number, url)) = remote.find(&intent.marker, &title(&row.kind, &row.version, &proposal)) else {
+        let expected_title = title(&row.kind, &row.version, &proposal);
+        let found = find_existing(gh, remote, &intent.marker, &expected_title).await.map_err(|e| anyhow!(e))?;
+        let found = match found {
+            Some(found) => Some(found),
+            None => find_unlogged_create_by_title(gh, &expected_title).await.map_err(|e| anyhow!(e))?,
+        };
+        let Some((number, url)) = found else {
             continue;
         };
         confirmed.push(ConfirmedCreate {
@@ -440,12 +446,32 @@ async fn confirmed_unlogged_creates(pool: &SqlitePool, remote: &Remote) -> Resul
     Ok(confirmed)
 }
 
+/// A marker can be edited out after an issue was created. `Remote::find` can still match its exact
+/// daemon title while it is in the immediate label page; for a displaced issue, use the stable
+/// kind/version title prefix in GitHub's title search and then require the full exact title locally.
+async fn find_unlogged_create_by_title(gh: &Gh, expected_title: &str) -> Result<Option<(i64, String)>, String> {
+    let prefix = expected_title.split_once(':').map(|(prefix, _)| prefix.trim()).unwrap_or(expected_title);
+    let search = format!("in:title \"{prefix}\"");
+    let listed = gh
+        .run(&["issue", "list", "--repo", &gh.repo, "--state", "all", "--search", &search, "--json", "number,url,title,body", "-L", "20"])
+        .await?;
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_str(listed.trim()).map_err(|e| format!("gh issue list 回的不是 JSON：{e}"))?;
+    Ok(parsed
+        .iter()
+        .find(|v| {
+            v.get("title").and_then(|t| t.as_str()) == Some(expected_title)
+                && !v.get("body").and_then(|b| b.as_str()).unwrap_or_default().contains(MARKER_PREFIX)
+        })
+        .and_then(|v| Some((v.get("number")?.as_i64()?, v.get("url")?.as_str()?.to_string()))))
+}
+
 /// Restore the ledger side of a recent create when GitHub confirms its durable intent. This runs
 /// before another version can use the cross-version daily cap, so a lost write cannot make the
 /// ledger and the cap disagree until the original version happens to be retried.
-async fn reconcile_confirmed_creates(pool: &SqlitePool, remote: &Remote) -> Result<std::collections::HashSet<String>> {
+async fn reconcile_confirmed_creates(pool: &SqlitePool, gh: &Gh, remote: &Remote) -> Result<std::collections::HashSet<String>> {
     let mut unreconciled = std::collections::HashSet::new();
-    for confirmed in confirmed_unlogged_creates(pool, remote).await? {
+    for confirmed in confirmed_unlogged_creates(pool, gh, remote).await? {
         let Some(mut row) = ledger::get(pool, &confirmed.kind, &confirmed.version).await? else {
             unreconciled.insert(confirmed.issue.marker);
             continue;
@@ -466,7 +492,7 @@ async fn reconcile_confirmed_creates(pool: &SqlitePool, remote: &Remote) -> Resu
 const MARKER_PREFIX: &str = "release-triage:";
 
 /// 帳本裡所有版本開過（或認領過）的 issue 號碼：`duplicate_of` 的合法目標之一（另一個是遠端的 release-triage 清單）。
-async fn ledger_issue_numbers(pool: &SqlitePool) -> Result<std::collections::HashSet<i64>> {
+pub(super) async fn ledger_issue_numbers(pool: &SqlitePool) -> Result<std::collections::HashSet<i64>> {
     Ok(ledger::list(pool, None, None)
         .await?
         .iter()
@@ -552,7 +578,7 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         Ok(r) => r,
         Err(e) => return record_err(&issues, e).await,
     };
-    let unreconciled_remote_markers = match reconcile_confirmed_creates(pool, &remote).await {
+    let unreconciled_remote_markers = match reconcile_confirmed_creates(pool, &gh, &remote).await {
         Ok(markers) => markers,
         Err(e) => return record_err(&issues, format!("無法把遠端已建立的 issue 對回帳本：{e:#}")).await,
     };
@@ -757,7 +783,7 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
             if can_ask && remote.is_none() && remote_err.is_none() && !already(p, &issues) {
                 match Remote::load(&gh).await {
                     Ok(r) => {
-                        let recovered = confirmed_unlogged_creates(pool, &r).await?;
+                        let recovered = confirmed_unlogged_creates(pool, &gh, &r).await?;
                         caps.created_today += recovered.len();
                         recovered_remote_markers.extend(recovered.into_iter().map(|c| c.issue.marker));
                         remote = Some(r);

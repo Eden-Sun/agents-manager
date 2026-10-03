@@ -604,6 +604,67 @@ bash "$SCRIPT"
 equals "交過的下一輪不再送" "$(grep -c 'release-issue-901' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
 teardown
 
+# A malformed naive timestamp in one old row must not abort the whole handoff batch and starve later issues.
+setup
+mk_empty claude; mk_empty codex
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat > "$AGM_DIR/show-claude.json" <<JSON
+{"rows":[{"kind":"claude","version":"2.1.288","issues":[
+  {"number":904,"url":"https://x/904","created_at":"2026-10-02T12:00:00","comment":false},
+  {"number":905,"url":"https://x/905","created_at":"$NOW","comment":false}]}]}
+JSON
+bash "$SCRIPT"
+equals "naive 時間戳只略過該列" "$(grep -c 'request-id release-issue-904' "$AGM_DIR/calls.log" | tr -d ' ')" "0"
+equals "naive 時間戳不阻斷後續 issue 補送" "$(grep -c 'request-id release-issue-905' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
+equals "略過的畸形時間戳 issue 仍讓本輪可見為失敗" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" "1"
+teardown
+
+# Missing handoff prerequisites must retain the new issue for retry and raise the normal failure status.
+setup
+mk_empty claude; mk_empty codex
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat > "$AGM_DIR/show-claude.json" <<JSON
+{"rows":[{"kind":"claude","version":"2.1.288","issues":[
+  {"number":906,"url":"https://x/906","created_at":"$NOW","comment":false}]}]}
+JSON
+printf '{}\n' > "$AGM_DIR/runtime.json"
+bash "$SCRIPT"
+equals "收件 bot 遺失：不派也不記已交" "$(cat "$AGM_DIR/release-issue-handed" 2>/dev/null)" ""
+equals "收件 bot 遺失：狀態記一輪失敗" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" "1"
+cp "$HERE/fixtures/patrol-runtime.json" "$AGM_DIR/runtime.json"
+rm -f "$AGM_DIR/release-issue-task.md"
+bash "$SCRIPT"
+equals "交接任務檔遺失：狀態累計失敗" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" "2"
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+bash "$SCRIPT"
+equals "補回前置條件後 issue 仍能交接" "$(grep -c 'request-id release-issue-906' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
+equals "交接成功清除失敗狀態" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" ""
+equals "交接成功記錄 issue" "$(cat "$AGM_DIR/release-issue-handed" 2>/dev/null)" "906"
+teardown
+
+# Assignment success without a durable handed marker must stay visible and retryable.
+setup
+mk_empty claude; mk_empty codex
+cp "$HERE/release-issue-task.md" "$AGM_DIR/release-issue-task.md"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat > "$AGM_DIR/show-claude.json" <<JSON
+{"rows":[{"kind":"claude","version":"2.1.288","issues":[
+  {"number":907,"url":"https://x/907","created_at":"$NOW","comment":false}]}]}
+JSON
+mkdir "$AGM_DIR/release-issue-handed"
+bash "$SCRIPT" 2>"$ROOT/state-write.err"
+equals "狀態檔不可寫：assignment 只試一次" "$(grep -c 'request-id release-issue-907' "$AGM_DIR/calls.log" | tr -d ' ')" "1"
+equals "狀態檔不可寫：記成失敗待重試" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" "1"
+check_no "狀態檔不可寫：不宣稱已交接" "issue #907 已交給" "$AGM_DIR/release-triage.log"
+rmdir "$AGM_DIR/release-issue-handed"
+bash "$SCRIPT"
+equals "狀態檔恢復後沿用同 request id 重試" "$(grep -c 'request-id release-issue-907' "$AGM_DIR/calls.log" | tr -d ' ')" "2"
+equals "狀態檔恢復後記錄 issue" "$(cat "$AGM_DIR/release-issue-handed")" "907"
+equals "交接成功清掉狀態檔失敗" "$(cat "$AGM_DIR/release-triage.fails" 2>/dev/null)" ""
+teardown
+
 # issue #519：合併分診只用一個通知 id；binary-only 留著獨立命名空間，避免舊 changelog 通知衝突。
 TRIAGE_TASK="$HERE/release-triage-task.md"
 CLAUDE_TASK="$HERE/claude-release-diff-task.md"
