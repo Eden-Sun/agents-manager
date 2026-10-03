@@ -350,5 +350,22 @@ check "補送第二個 SHA" "statuses/$SHA2" "$FIX/gh.log"
 equals "沒有重跑第二個 SHA 的檢查（log 只有一份 daemon 結尾）" "$(grep -c '\[ubuntu-ci\] daemon rc=' "$CI/logs/$SHA2.log")" "1"
 teardown
 
+# A delayed status for a SHA must not overwrite a newer result for the same SHA. Re-run the
+# current SHA while its older queued failure cannot post; the fresh success should retire that row.
+setup
+BASE_SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+(cd "$ROOT/work" && echo 1 > f && git add f && git commit -q -m c2 && git push -q origin main)
+SHA=$(git -C "$ROOT/work" rev-parse HEAD)
+mkdir -p "$CI"
+echo "$BASE_SHA" > "$CI/last-sha"
+printf '%s\tfailure\told offline result\n' "$SHA" > "$CI/unposted"
+echo 3 > "$FIX/gh.failn"   # 補送舊 failure 的三次 retry 失敗；本輪的新 pending/success 可以寫入
+equals "同 SHA 重跑時新結果 exit 0" "$(run)" "0"
+check "同 SHA 的新 success 有送出" "statuses/$SHA.*state=success" "$FIX/gh.log"
+equals "下一輪不再補送被新 success 取代的舊 failure" "$(run)" "0"
+check_no "最後的 commit status 沒被舊 failure 倒灌" "statuses/$SHA.*state=failure" "$FIX/gh.log"
+[ ! -e "$CI/unposted" ] && echo "ok   - 同 SHA 的舊結果已清除" && PASS=$((PASS + 1)) || { echo "FAIL - 同 SHA 的舊結果還在"; FAIL=$((FAIL + 1)); }
+teardown
+
 echo "ubuntu-ci_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
