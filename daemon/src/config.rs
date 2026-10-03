@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1058,6 +1059,8 @@ pub struct ConfigStore {
 struct Loaded {
     cfg: ConfigFile,
     mtime: Option<SystemTime>,
+    hot_fingerprint: Option<[u8; 32]>,
+    hot_read_error: Option<(Option<SystemTime>, String)>,
 }
 
 impl ConfigStore {
@@ -1065,8 +1068,8 @@ impl ConfigStore {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        let (cfg, mtime) = read_file(&path)?;
-        Ok(Self { path, inner: tokio::sync::Mutex::new(Loaded { cfg, mtime }) })
+        let (cfg, mtime, hot_fingerprint) = read_file(&path)?;
+        Ok(Self { path, inner: tokio::sync::Mutex::new(Loaded { cfg, mtime, hot_fingerprint: Some(hot_fingerprint), hot_read_error: None }) })
     }
 
     pub async fn get(&self) -> ConfigFile {
@@ -1075,16 +1078,16 @@ impl ConfigStore {
 
     /// `[build]` 的最新值。`max_concurrent`／`cargo_jobs`／`lease_ttl_secs` 沒有任何 API 寫得進去，唯一的設定方式就是手改
     /// `config.toml`；而 [`Self::get`] 回的是記憶體那份，手改要等重啟、或下一次不相干的 API 寫入順手重讀才進得來——什麼時候生效
-    /// 沒有人說得準。build scheduler 每次拿名額／續約／看狀態都走這支：檔案的 mtime 變了就重讀，**只**換 `[build]` 那一段
+    /// 沒有人說得準。build scheduler 每次拿名額／續約／看狀態都走這支：檔案內容變了就重讀，**只**換 `[build]` 那一段
     /// （其他段要連著 TOML→SQLite 投影一起處理，仍然只在啟動與 [`Self::update`] 時載入）。檔案讀不了或解析失敗（半寫、打錯字）
-    /// 就保留記憶體裡原本的值並記一次 WARN（同一個 mtime 不重複報）。
+    /// 就保留記憶體裡原本的值並記一次 WARN（同一份壞內容不重複報）。
     pub async fn build_fresh(&self) -> BuildCfg {
         let mut g = self.inner.lock().await;
         self.refresh_hot_sections(&mut g);
         g.cfg.build.clone()
     }
 
-    /// `[agents]` 的最新值（bot 啟動時讀指示檔的設定）。跟 [`Self::build_fresh`] 同一條規矩：mtime 變了就重讀、只換 `[agents]`，
+    /// `[agents]` 的最新值（bot 啟動時讀指示檔的設定）。跟 [`Self::build_fresh`] 同一條規矩：內容變了就重讀、只換 `[agents]`，
     /// 手改 `config.toml` 的 `[agents.projects]` 不必重啟 daemon（SPEC §6.5i：改完重啟 bot 就生效）。
     pub async fn agents_fresh(&self) -> AgentsCfg {
         let mut g = self.inner.lock().await;
@@ -1092,14 +1095,38 @@ impl ConfigStore {
         g.cfg.agents.clone()
     }
 
-    /// 檔案 mtime 變了就重讀一次，只換可以熱換的區段（`[build]`、`[agents]`）。同一個 mtime 只試一次：壞檔不會每次都重讀、重報。
+    /// 檔案內容變了就重讀一次，只換可以熱換的區段（`[build]`、`[agents]`）。mtime 只用來判斷讀取錯誤是否改變；
+    /// 內容指紋也會偵測相同 mtime 的原子替換，以及壞檔在相同 mtime 下被修好。
     fn refresh_hot_sections(&self, g: &mut Loaded) {
         let mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
-        if mtime.is_none() || mtime == g.mtime {
+        if mtime.is_none() {
             return;
         }
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => {
+                g.hot_read_error = None;
+                text
+            }
+            Err(e) => {
+                let error = format!("{e:#}");
+                let changed = g.hot_read_error.as_ref().is_none_or(|(old_mtime, old_error)| *old_mtime != mtime || old_error != &error);
+                if changed {
+                    tracing::warn!(path = %self.path.display(), error = %error, "config.toml changed on disk but could not be read; keeping the in-memory [build]/[agents]");
+                }
+                g.hot_read_error = Some((mtime, error));
+                return;
+            }
+        };
+        let fingerprint = config_fingerprint(&text);
+        if g.hot_fingerprint == Some(fingerprint) {
+            g.mtime = mtime;
+            return;
+        }
+        // Cache even malformed content so it warns once, while a later corrected file with the
+        // same mtime still has a different fingerprint and gets another parse attempt.
+        g.hot_fingerprint = Some(fingerprint);
         g.mtime = mtime;
-        match std::fs::read_to_string(&self.path).map_err(anyhow::Error::from).and_then(|t| parse_config(&t).map(|(cfg, _)| cfg)) {
+        match parse_config(&text).map(|(cfg, _)| cfg) {
             Ok(cfg) => {
                 if cfg.build != g.cfg.build {
                     tracing::info!(path = %self.path.display(), before = ?g.cfg.build, after = ?cfg.build, "config.toml [build] changed on disk; using the new values");
@@ -1110,7 +1137,7 @@ impl ConfigStore {
                     g.cfg.agents = cfg.agents;
                 }
             }
-            Err(e) => tracing::warn!(path = %self.path.display(), error = %format!("{e:#}"), "config.toml changed on disk but could not be read; keeping the in-memory [build]/[agents]"),
+            Err(e) => tracing::warn!(path = %self.path.display(), error = %format!("{e:#}"), "config.toml changed on disk but could not be parsed; keeping the in-memory [build]/[agents]"),
         }
     }
 
@@ -1143,7 +1170,7 @@ impl ConfigStore {
         if self.path.exists() {
             // Always merge from the current file: filesystems can preserve/coarsen mtimes, so
             // comparing metadata alone can miss a completed external atomic replacement.
-            let (cfg, mtime) = read_file(&self.path)
+            let (cfg, mtime, hot_fingerprint) = read_file(&self.path)
                 .context("config.toml changed on disk and could not be re-read")?;
             // daemon 自己寫完會把記憶體那份換成寫出去的內容，所以內容對不上＝別人改的（issue #406）。
             if cfg != g.cfg {
@@ -1153,6 +1180,8 @@ impl ConfigStore {
             }
             g.cfg = cfg;
             g.mtime = mtime;
+            g.hot_fingerprint = Some(hot_fingerprint);
+            g.hot_read_error = None;
         }
         let mut next = g.cfg.clone();
         let out = f(&mut next)?;
@@ -1170,6 +1199,8 @@ impl ConfigStore {
         if next != g.cfg {
             write_atomic(&self.path, &next)?;
             g.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
+            g.hot_fingerprint = std::fs::read_to_string(&self.path).ok().map(|text| config_fingerprint(&text));
+            g.hot_read_error = None;
             crate::config_audit::log_write(at, &self.path, &g.cfg, &next);
         }
         g.cfg = next;
@@ -1193,12 +1224,13 @@ fn is_retired_key(path: &str) -> bool {
     matches!(parts.as_slice(), ["projects", i, "bots", j, "instruction_files"] if i.parse::<usize>().is_ok() && j.parse::<usize>().is_ok())
 }
 
-fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
+fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>, [u8; 32])> {
     if !path.exists() {
         let cfg = ConfigFile::default();
         write_atomic(path, &cfg)?;
         let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-        return Ok((cfg, mtime));
+        let text = std::fs::read_to_string(path).with_context(|| format!("read {} after creating it", path.display()))?;
+        return Ok((cfg, mtime, config_fingerprint(&text)));
     }
     let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let (cfg, unknown) = parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
@@ -1206,7 +1238,11 @@ fn read_file(path: &Path) -> Result<(ConfigFile, Option<SystemTime>)> {
         tracing::warn!("{}: unknown key `{key}` is ignored (typo? or a newer daemon's field)", path.display());
     }
     let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-    Ok((cfg, mtime))
+    Ok((cfg, mtime, config_fingerprint(&text)))
+}
+
+fn config_fingerprint(text: &str) -> [u8; 32] {
+    Sha256::digest(text.as_bytes()).into()
 }
 
 /// 寫回 `config.toml`：只改動被改的值，使用者手寫的註解、排版與（打錯字或新版才有的）未知鍵都留著（[`render_preserving`]）。
@@ -2008,6 +2044,31 @@ model = "gpt-6"
         let t2 = t + std::time::Duration::from_secs(5);
         std::fs::File::options().write(true).open(&path).unwrap().set_modified(t2).unwrap();
         assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/new.md"));
+    }
+
+    #[tokio::test]
+    async fn a_same_mtime_agents_edit_is_picked_up_from_its_content() {
+        let (store, path) = store_with("[agents]\ninstructions_file = \"~/old.md\"\n").await;
+        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, "[agents]\ninstructions_file = \"~/new.md\"\n").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(original_mtime).unwrap();
+        assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/new.md"), "原子替換或粗粒度檔案系統可能保留 mtime");
+    }
+
+    /// A malformed intermediate save must not poison the mtime cache when a same-mtime atomic
+    /// replacement fixes it (coarse or preserved mtimes are possible on synced config files).
+    #[tokio::test]
+    async fn a_fixed_agents_file_is_reloaded_after_a_bad_same_mtime_save() {
+        let (store, path) = store_with("[agents]\ninstructions_file = \"~/old.md\"\n").await;
+        let same_mtime = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+
+        std::fs::write(&path, "[agents\ninstructions_file = \"~/bad.md\"\n").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(same_mtime).unwrap();
+        assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/old.md"), "壞檔期間沿用上一份設定");
+
+        std::fs::write(&path, "[agents]\ninstructions_file = \"~/new.md\"\n").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(same_mtime).unwrap();
+        assert_eq!(store.agents_fresh().await.instructions_file.as_deref(), Some("~/new.md"), "修好的設定要被重新載入，即使 mtime 沒變");
     }
 
     /// 埠 0 不是合法的 ssh 埠：手改進 `[[hosts]]`／`[build.remote]` 要在寫入前就被擋，而不是等到連線才失敗。

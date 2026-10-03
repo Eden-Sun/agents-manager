@@ -1065,6 +1065,7 @@ marker 列與框的邊之間多出任何一列（含空白列）、marker 後多
 或 agent 尚未 idle，則落地一筆 `awaits_idle=1` 的 queued turn。三種 turn 都走 `lifecycle::queue::flush_queued_locked`，
 依 `created_at, id` 領取，一次只送一筆；`awaits_idle=1` 必須等 run 的 agent 狀態明確為 `idle`，`unknown` 不算 idle。已軟刪的 bot 即使 run 還在跑也不領排著的 prompt：flush 撤掉它（`bot 已被刪除，排著的 prompt 不再送出`），跟直送 prompt 擋已刪 bot（#338）一致。
 同一對話仍只有一筆 queued（`turns_one_queued`）；同一顆 bot 再送忙碌中的 web 訊息會回 `queue_slot_taken`，不覆蓋佇列。
+兩個分頁同句送出時，web 只有在 daemon 明確回 `holder.kind="user"`、沒有附件，而且已排佇列正文與本次文字只差頭尾空白時，才視為另一分頁已排入；holder 缺漏或未知就把本次輸入退回草稿，不猜它是使用者自己的佇列。
 daemon 重啟會重掛所有 queued turn，包括沒有 `next_flush_at` 的列，回到 idle 後照原順序接續送出。
 
 界線：每個對話最多一筆 `queued`（`turns_one_queued`），同一筆交辦重試回同一筆（`turns_client_req`），撞到就回 409 照舊退避；
@@ -2196,8 +2197,8 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   名額」，整台機器的受管建置會卡死，跟 `panes.idle_close_secs` 同一條防呆規矩）、`cargo_jobs`（預設 2）、
   `lease_ttl_secs`（預設 180，續約間隔取它的 1/3）。
   這三個沒有 API 可寫，唯一的設定方式是手改 `config.toml`，所以 scheduler 每次拿名額／續約／看狀態都走 `ConfigStore::build_fresh`：
-  檔案 mtime 變了就重讀，**只**換 `[build]` 這一段，不用重啟；讀不了或解析失敗（半寫、打錯字、`lease_ttl_secs` 超出範圍）保留原值、記一次 WARN。
-  `[agents]` 同樣熱重載（`ConfigStore::agents_fresh`，bot 啟動讀指示檔時走它）：手改 `[agents.projects]` 不必重啟 daemon，重啟 bot 就生效；壞檔保留原值。
+  設定檔內容變了就重讀（包含 mtime 不變的替換），**只**換 `[build]` 這一段，不用重啟；讀不了或解析失敗（半寫、打錯字、`lease_ttl_secs` 超出範圍）保留原值，同一份錯誤內容只記一次 WARN。
+  `[agents]` 同樣熱重載（`ConfigStore::agents_fresh`，bot 啟動讀指示檔時走它）：手改 `[agents.projects]` 不必重啟 daemon，重啟 bot 就生效；壞檔保留原值，內容修好後會再載入。
   其他段（含 `[[hosts]]`）仍只在啟動與 `ConfigStore::update` 時載入（要連著 TOML→SQLite 投影一起處理）。已發出的名額不受影響：`max_concurrent` 調小時不收回已持有的，只是不再放新的。
 
 #### 跟 `cargo-slot.sh` 並存（issue #90 交辦時的現況）

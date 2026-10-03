@@ -1689,7 +1689,9 @@ export const useStore = create<StoreState>((set, get) => {
         await Promise.all([get().refreshState(), get().loadMessages(botId)])
         const holder = slotHolderFrom(e.body)
         const queuedNow = queuedSendFor(get(), botId)
-        if ((!holder || holder.kind === 'user') && attachments.length === 0 && queuedNow && queuedNow.text.trim() === text.trim()) {
+        // Only a confirmed user-owned slot proves this was the other tab's send. Older daemons
+        // omit `holder`; its source is ambiguous, so restoring once is safer than swallowing input.
+        if (holder?.kind === 'user' && attachments.length === 0 && queuedNow && queuedNow.text.trim() === text.trim()) {
           get().notify('info', '這一句已經在排隊中（可能是另一個分頁剛送出的），沒有再送一次')
           return true
         }
