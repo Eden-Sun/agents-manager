@@ -202,7 +202,7 @@ pub fn defang(text: &str) -> String {
 fn quote(entries: &[Entry], ids: &[String]) -> String {
     ids.iter()
         .filter_map(|id| entries.iter().find(|e| &e.id == id))
-        .map(|e| format!("> {}", defang(&e.text)))
+        .map(|e| defang(&e.text).split('\n').map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n"))
         .collect::<Vec<_>>()
         .join("\n>\n")
 }
@@ -329,10 +329,18 @@ impl Caps {
         }
     }
 
-    /// Count a new issue, including a remote create recovered after its ledger write was lost.
+    /// Count a remote create recovered after its ledger write was lost. Version caps count it
+    /// regardless of age; the rolling daily cap only counts it when the original intent is recent.
     fn note_created(&mut self) {
         self.in_row += 1;
         self.created_today += 1;
+    }
+
+    fn note_recovered_create(&mut self, count_daily: bool) {
+        self.in_row += 1;
+        if count_daily {
+            self.created_today += 1;
+        }
     }
 }
 
@@ -381,6 +389,77 @@ impl Remote {
             })
             .and_then(pick)
     }
+}
+
+#[derive(Debug, Clone)]
+struct ConfirmedCreate {
+    kind: String,
+    version: String,
+    issue: IssueRef,
+}
+
+fn timestamp_is_recent(timestamp: &str) -> bool {
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+    chrono::DateTime::parse_from_rfc3339(timestamp).is_ok_and(|t| t.with_timezone(&chrono::Utc) >= cutoff)
+}
+
+/// Find create intents from the last 24 hours which have no IssueRef yet but are visible remotely.
+/// A durable intent alone is not enough: failed GitHub calls also leave intents behind, so count
+/// and recover only ones whose marker (or exact daemon title after a marker edit) is on GitHub.
+async fn confirmed_unlogged_creates(pool: &SqlitePool, remote: &Remote) -> Result<Vec<ConfirmedCreate>> {
+    let rows = ledger::list(pool, None, None).await?;
+    let logged: std::collections::HashSet<String> = rows.iter().flat_map(|r| r.issues.iter().map(|i| i.marker.clone())).collect();
+    let intents = ledger::recent_create_intents(pool).await?;
+    let mut confirmed = Vec::new();
+    for intent in intents {
+        if logged.contains(&intent.marker) || !timestamp_is_recent(&intent.created_at) {
+            continue;
+        }
+        let Some(row) = rows.iter().find(|r| r.kind == intent.kind && r.version == intent.version) else {
+            continue;
+        };
+        let Some(proposal) = proposals_of(row).into_iter().find(|p| marker(&row.kind, &row.version, &p.entry_ids) == intent.marker) else {
+            continue;
+        };
+        let Some((number, url)) = remote.find(&intent.marker, &title(&row.kind, &row.version, &proposal)) else {
+            continue;
+        };
+        confirmed.push(ConfirmedCreate {
+            kind: intent.kind,
+            version: intent.version,
+            issue: IssueRef {
+                marker: intent.marker,
+                entry_ids: proposal.entry_ids,
+                number,
+                url,
+                created_at: intent.created_at,
+                comment: false,
+            },
+        });
+    }
+    Ok(confirmed)
+}
+
+/// Restore the ledger side of a recent create when GitHub confirms its durable intent. This runs
+/// before another version can use the cross-version daily cap, so a lost write cannot make the
+/// ledger and the cap disagree until the original version happens to be retried.
+async fn reconcile_confirmed_creates(pool: &SqlitePool, remote: &Remote) -> Result<std::collections::HashSet<String>> {
+    let mut unreconciled = std::collections::HashSet::new();
+    for confirmed in confirmed_unlogged_creates(pool, remote).await? {
+        let Some(mut row) = ledger::get(pool, &confirmed.kind, &confirmed.version).await? else {
+            unreconciled.insert(confirmed.issue.marker);
+            continue;
+        };
+        if row.status != Status::Judged || row.issues.iter().any(|i| i.marker == confirmed.issue.marker) {
+            unreconciled.insert(confirmed.issue.marker);
+            continue;
+        }
+        row.issues.push(confirmed.issue);
+        if !ledger::save_publish(pool, &row.kind, &row.version, &row.issues, Status::Judged, row.publish_error.as_deref()).await? {
+            unreconciled.insert(row.issues.last().unwrap().marker.clone());
+        }
+    }
+    Ok(unreconciled)
 }
 
 /// issue 內文結尾隱藏標記的前綴；`Remote::find` 用它判斷「內文還有沒有標記」。
@@ -473,6 +552,13 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         Ok(r) => r,
         Err(e) => return record_err(&issues, e).await,
     };
+    let unreconciled_remote_markers = match reconcile_confirmed_creates(pool, &remote).await {
+        Ok(markers) => markers,
+        Err(e) => return record_err(&issues, format!("無法把遠端已建立的 issue 對回帳本：{e:#}")).await,
+    };
+    // Reconciliation may have recovered an issue from this version as well as older versions.
+    // Refresh before calculating caps and checking which proposals are already handled.
+    issues = ledger::get(pool, kind, version).await?.map(|r| r.issues).unwrap_or(issues);
 
     let (mut created, mut commented, mut existing) = (0usize, 0usize, 0usize);
     let mut skipped: Vec<String> = Vec::new();
@@ -482,7 +568,7 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
     let mut caps = Caps {
         in_row: issues.iter().filter(|i| !i.comment).count(),
         comments: comments_in(&issues),
-        created_today: ledger::created_in_last_day(pool).await?,
+        created_today: ledger::created_in_last_day(pool).await? + unreconciled_remote_markers.len(),
         deferred_hit: false,
     };
     let known_numbers = ledger_issue_numbers(pool).await?;
@@ -503,12 +589,15 @@ pub async fn publish_version(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: &s
         let action = caps.plan(p, found.as_ref(), dup_known);
         caps.note(action);
         if recovered_create {
-            caps.note_created();
+            caps.note_recovered_create(
+                intent.as_ref().is_some_and(|i| timestamp_is_recent(&i.created_at)) && !unreconciled_remote_markers.contains(&mk),
+            );
         }
         match action {
             PlanAction::Existing => {
                 let (number, url) = found.expect("Existing 就是查到了");
-                issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number, url, created_at: ledger::now_ts(), comment: !recovered_create });
+                let created_at = if recovered_create { intent.as_ref().unwrap().created_at.clone() } else { ledger::now_ts() };
+                issues.push(IssueRef { marker: mk, entry_ids: p.entry_ids.clone(), number, url, created_at, comment: !recovered_create });
                 ledger::save_publish(pool, kind, version, &issues, Status::Judged, None).await?;
                 existing += 1;
                 continue;
@@ -636,6 +725,7 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
     // 才抓：全部提案都已經在帳本裡時一次 gh 都不叫（同 publish_version 的提早返回）。
     let mut remote: Option<Remote> = None;
     let mut remote_err: Option<String> = None;
+    let mut recovered_remote_markers = std::collections::HashSet::new();
 
     // **24 小時上限是跨版本的**：真跑每呼叫一次 publish_version 就重讀一次帳本，所以第 2 版看得到第 1 版
     // 剛開的那幾張。乾跑若每版都用同一個初始值重開 Caps，3 版以上就會說「每版都能開 4 張」（共 12），
@@ -666,11 +756,17 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
             });
             if can_ask && remote.is_none() && remote_err.is_none() && !already(p, &issues) {
                 match Remote::load(&gh).await {
-                    Ok(r) => remote = Some(r),
+                    Ok(r) => {
+                        let recovered = confirmed_unlogged_creates(pool, &r).await?;
+                        caps.created_today += recovered.len();
+                        recovered_remote_markers.extend(recovered.into_iter().map(|c| c.issue.marker));
+                        remote = Some(r);
+                    }
                     Err(e) => remote_err = Some(e),
                 }
             }
             let mut recovered_create = false;
+            let mut recovered_intent_recent = false;
             let action = if already(p, &issues) {
                 PlanAction::AlreadyLogged
             } else if !can_ask {
@@ -687,9 +783,9 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
                     }
                     Ok(found) => {
                         if found.is_some() {
-                            recovered_create = ledger::publish_intent(pool, &row.kind, &row.version, &mk)
-                                .await?
-                                .is_some_and(|i| i.action == ledger::PublishAction::Create);
+                            let intent = ledger::publish_intent(pool, &row.kind, &row.version, &mk).await?;
+                            recovered_create = intent.as_ref().is_some_and(|i| i.action == ledger::PublishAction::Create);
+                            recovered_intent_recent = intent.as_ref().is_some_and(|i| timestamp_is_recent(&i.created_at));
                         }
                         let dup_known = p.duplicate_of.is_some_and(|d| remote.has_number(d) || known_numbers.contains(&d));
                         let a = caps.plan(p, found.as_ref(), dup_known);
@@ -707,7 +803,7 @@ pub async fn preflight(pool: &SqlitePool, cfg: &ReleaseTriageCfg, kind: Option<&
             };
             caps.note(action);
             if recovered_create {
-                caps.note_created();
+                caps.note_recovered_create(recovered_intent_recent && !recovered_remote_markers.contains(&mk));
             }
             // 真跑會把 existing／comment／create 都寫進帳本的 issue 清單，下一個提案的 `already` 看得到它。
             if matches!(action, PlanAction::Existing | PlanAction::Comment | PlanAction::Create) {
