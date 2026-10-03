@@ -291,13 +291,34 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
+/// **先讀後寫的交易一律用這支開**（`BEGIN IMMEDIATE`，#814／#723／#831）。
+///
+/// `pool.begin()` 是 deferred：第一句讀拿到讀快照，之後第一句寫才升級成寫交易。WAL 下這個升級**不跑 busy handler**：
+/// 讀完之後別的 writer 剛 commit 過（快照過期，517 BUSY_SNAPSHOT）或正拿著寫鎖（SQLITE_BUSY），就直接
+/// `database is locked`，`busy_timeout` 完全不管用——負載越高、背景寫入越多越容易撞到。這支在 BEGIN 就拿寫鎖，
+/// 撞到只會等 `busy_timeout`，讀到的東西到 commit 之前也不會被別人改掉。
+///
+/// 第一句就是寫（INSERT／UPDATE／DELETE，含沒改到任何列的）的交易不用：那一句本身就照 busy handler 等鎖。
+/// 寫鎖整個交易都握著，裡面不要等網路、herdr 或別的鎖。
+pub async fn begin_write(pool: &SqlitePool) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
+}
+
+/// 測試用：這條連線開的是哪個 DB 檔。沒有 bot／turn 可以當 race point 鑰匙的地方（各模組的 migrate）拿它當鑰匙，
+/// 平行跑的別的測試開自己的 DB，不會吃到這個測試掛的動作。
+#[cfg(test)]
+pub(crate) async fn file_key(conn: &mut sqlx::SqliteConnection) -> String {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as("PRAGMA database_list").fetch_all(&mut *conn).await.unwrap_or_default();
+    rows.into_iter().find(|(_, name, _)| name == "main").map(|(_, _, file)| file).unwrap_or_default()
+}
+
 /// 裝一個 trigger，DB 裡那一份跟 `ddl` 不同就換掉（issue #186）。
 ///
 /// 守衛的內容是由轉移表產生的（`turn_controller::guard_ddl`、`assignment_state::guard_ddl`）。以前用
 /// `CREATE TRIGGER IF NOT EXISTS`：只有第一次建得進去，之後轉移表改了（新增或拿掉一條合法邊），舊 DB 裡那一份已經存在，
 /// 守衛就永遠停在舊規則——新的合法轉移被擋下、拿掉的照樣放行。這裡每次開 DB 都拿 `sqlite_master.sql`（SQLite 存的是去掉
 /// `IF NOT EXISTS` 的原文）跟現在的 DDL 比，不同才 DROP 再建，舊 DB 不必等人手動重建。呼叫端要在同一個交易裡：
-/// 換到一半失敗整批回滾，不會留下一段沒有守衛的空窗。守衛內容變了一樣要升 [`SCHEMA_VERSION`]（issue #72）：
+/// 換到一半失敗整批回滾，不會留下一段沒有守衛的空窗。這裡先讀後寫，交易要用 [`begin_write`] 開（#831）。守衛內容變了一樣要升 [`SCHEMA_VERSION`]（issue #72）：
 /// 不然舊 binary 開到這個 DB，會照它自己的轉移表把守衛換回舊規則。
 pub(crate) async fn sync_trigger(conn: &mut sqlx::SqliteConnection, name: &str, ddl: &str) -> Result<()> {
     let want = ddl.trim().replacen("CREATE TRIGGER IF NOT EXISTS ", "CREATE TRIGGER ", 1);
@@ -305,6 +326,8 @@ pub(crate) async fn sync_trigger(conn: &mut sqlx::SqliteConnection, name: &str, 
         .bind(name)
         .fetch_optional(&mut *conn)
         .await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("sync_trigger_after_read", &file_key(&mut *conn).await).await;
     if have.flatten().as_deref() == Some(want.as_str()) {
         return Ok(());
     }
@@ -381,8 +404,12 @@ async fn apply_migrations_failing_after_spawn_hints_drop(pool: &SqlitePool) -> R
 }
 
 async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: bool) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    // 先讀版本再套 schema：deferred 的話讀完之後別的 writer（換版時還沒收完的舊 daemon）一 commit，第一句 DDL 就 517，
+    // daemon 起不來（#831）。
+    let mut tx = begin_write(pool).await?;
     let stored_version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&mut *tx).await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("schema_after_version_read", &file_key(&mut tx).await).await;
     anyhow::ensure!(
         stored_version <= SCHEMA_VERSION,
         "資料庫的 schema 版本是 {stored_version}，這顆 daemon 只認得到 {SCHEMA_VERSION}（比較舊）。\
@@ -1539,6 +1566,32 @@ mod tests {
         let d = crate::testing::track(std::env::temp_dir().join(format!("am-db-test-{}", ulid())));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// 還沒 migrate 的 WAL 檔（跟 [`open`] 同樣的連線設定），連同它的 race point 鑰匙。
+    async fn bare_wal_pool() -> (SqlitePool, String) {
+        let file = tmp_dir().join("t.sqlite3");
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", file.display()))
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(10));
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+        let key = file_key(&mut *pool.acquire().await.unwrap()).await;
+        (pool, key)
+    }
+
+    /// #831：migrate 讀完 `user_version`、還沒套 schema 的那一瞬，另一個 writer（換版時還沒收完的舊 daemon）commit 了一筆。
+    /// deferred 交易這時第一句 DDL 直接 517，daemon 起不來；寫鎖從讀之前就拿著，對方等，migrate 照樣套完。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_version_read_and_the_schema_does_not_fail_the_migration() {
+        let (pool, key) = bare_wal_pool().await;
+        let other = crate::testing::arm_foreign_writer(Path::new(&key), "schema_after_version_read", &key);
+        apply_migrations(&pool).await.expect("an unrelated writer must not fail the migration");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the migration holds the write lock from its version read on; the other writer waits");
+        assert!(columns(&pool, "turns").await.contains(&"awaits_idle".to_string()));
+        pool.close().await;
     }
 
     async fn columns(pool: &SqlitePool, table: &str) -> Vec<String> {

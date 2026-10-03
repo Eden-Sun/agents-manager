@@ -81,7 +81,7 @@ async fn store_debt(pool: &SqlitePool, debt: &RuntimeDebt) -> Result<(), sqlx::E
 async fn commit_debt(pool: &SqlitePool, run_id: &str) -> Result<Option<RuntimeDebt>, sqlx::Error> {
     // 先讀後寫：deferred 交易升級寫鎖時 SQLite 不跑 busy handler，背景重試與另一個 writer 同時動就直接
     // `database is locked`／BUSY_SNAPSHOT（#723）。BEGIN 就拿寫鎖，撞到只會等 busy_timeout。
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let debt = sqlx::query_as::<_, RuntimeDebt>("SELECT * FROM live_apply_debts WHERE run_id = ?")
         .bind(run_id)
         .fetch_optional(&mut *tx)

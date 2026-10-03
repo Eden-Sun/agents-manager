@@ -132,7 +132,7 @@ pub async fn prepare_restart(
     // 先讀後寫：deferred 交易讀完再升級寫鎖時 SQLite 不跑 busy handler，讀完之後別的 writer（對帳每一輪都在寫 runs）
     // 剛 commit 或正拿著寫鎖，就直接回 `database is locked`／517 BUSY_SNAPSHOT，整個重啟被拒（#814，同 #723）。
     // BEGIN 就拿寫鎖，撞到只會等 busy_timeout。
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let existing: Option<Intent> = sqlx::query_as(
         "SELECT * FROM intents WHERE kind='restart' AND subject_id=? AND status IN ('pending','running')",
     )

@@ -1110,6 +1110,42 @@ macro_rules! eventually {
 }
 pub(crate) use eventually;
 
+/// #831：「讀完、還沒寫」那一瞬插進一個**不相干**的 writer（沿用 #814 的手法）。在 `point`／`key` 掛一個一次性的動作：
+/// 另開一條連線、`busy_timeout = 0`（不等鎖），拿得到寫鎖就當場寫一筆並 commit。
+///
+/// 動作跑完後格子裡是 `Some(true)`＝插進去了（deferred 交易就是這樣：讀快照因此過期，之後升級寫鎖直接
+/// 517 BUSY_SNAPSHOT）、`Some(false)`＝被擋（交易從 BEGIN 就拿著寫鎖，[`db::begin_write`]）、`None`＝沒走到那個點。
+/// 寫的是一張只有測試用的表：真的改到頁面才會讓快照過期，`UPDATE … WHERE 0` 那種不算。
+pub fn arm_foreign_writer(file: &std::path::Path, point: &'static str, key: &str) -> Arc<StdMutex<Option<bool>>> {
+    use sqlx::ConnectOptions;
+    let seen = Arc::new(StdMutex::new(None::<bool>));
+    let (file, cell) = (file.to_path_buf(), seen.clone());
+    crate::lifecycle::race_point::arm(point, key, move || async move {
+        let mut other = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&file)
+            .busy_timeout(std::time::Duration::ZERO)
+            .connect()
+            .await
+            .unwrap();
+        let wrote = async {
+            sqlx::query("BEGIN IMMEDIATE").execute(&mut other).await?;
+            sqlx::query("CREATE TABLE IF NOT EXISTS am_test_foreign_writes (at TEXT NOT NULL)").execute(&mut other).await?;
+            sqlx::query("INSERT INTO am_test_foreign_writes (at) VALUES (?)").bind(db::now()).execute(&mut other).await?;
+            sqlx::query("COMMIT").execute(&mut other).await?;
+            Ok::<_, sqlx::Error>(())
+        }
+        .await
+        .is_ok();
+        *cell.lock().unwrap() = Some(wrote);
+    });
+    seen
+}
+
+/// [`arm_foreign_writer`] 對著 `app` 的 DB。
+pub fn arm_app_foreign_writer(app: &Arc<App>, point: &'static str, key: &str) -> Arc<StdMutex<Option<bool>>> {
+    arm_foreign_writer(app.db.connect_options().get_filename(), point, key)
+}
+
 /// 讀取故障的注入：`table` 的 SELECT 全部壞掉（`no such table`），到 [`make_table_readable`] 為止。
 /// 連線池的每條連線各有自己的 schema 快取：先在**同一條**連線上讀一次 `sqlite_master` 刷新，再 ALTER；
 /// 不然剛好抽到沒看過上一次改動的連線，`ALTER` 在編譯階段就 `no such table`（時有時無）。

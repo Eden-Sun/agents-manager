@@ -80,7 +80,9 @@ pub(super) async fn queue_awaiting_idle(
     relay: prompt::RelaySrc<'_>,
     files: &[Attachment],
 ) -> LcResult<prompt::PromptOut> {
-    let mut tx = app.db.begin().await.map_err(up)?;
+    // 先讀槽再寫：bot 鎖只排得住這顆 bot 自己，擋不住別的 writer（對帳、收件匣）在讀與寫之間 commit；deferred 交易
+    // 這時升級寫鎖直接 517，空著的槽也把使用者的 prompt 拒掉（#821）。
+    let mut tx = db::begin_write(&app.db).await.map_err(up)?;
     let existing: Option<String> = sqlx::query_scalar(
         "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 ORDER BY created_at, id LIMIT 1",
     )
@@ -88,6 +90,8 @@ pub(super) async fn queue_awaiting_idle(
     .fetch_optional(&mut *tx)
     .await
     .map_err(up)?;
+    #[cfg(test)]
+    super::race_point::hit("busy_queue_after_slot_read", conversation_id).await;
     if let Some(turn_id) = existing {
         drop(tx);
         return Err(slot_taken(app, &turn_id).await);
@@ -154,4 +158,68 @@ pub(super) async fn queue_awaiting_idle(
         delivery: "queued".into(),
         send_now: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing as tt;
+    use std::sync::Mutex as StdMutex;
+
+    async fn admit(app: &Arc<App>, conv: &str, bot_id: &str, text: &str, crid: &str) -> LcResult<prompt::PromptOut> {
+        queue_awaiting_idle(app, conv, bot_id, text, text, crid, None, prompt::RelaySrc::trusted(None), &[]).await
+    }
+
+    async fn queued(app: &Arc<App>, conv: &str) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1),
+                    (SELECT COUNT(*) FROM messages m JOIN turns t ON t.id = m.turn_id WHERE t.conversation_id=? AND t.awaits_idle=1 AND m.role='user')",
+        )
+        .bind(conv)
+        .bind(conv)
+        .fetch_one(&app.db)
+        .await
+        .unwrap()
+    }
+
+    /// #821：讀完「槽是空的」、還沒 INSERT 的那一瞬，一個不相干的 writer（對帳、收件匣）commit 了一筆。deferred 交易這時升級
+    /// 寫鎖直接 517 BUSY_SNAPSHOT，空著的槽也把 prompt 拒掉；寫鎖要從讀之前就拿著，插進來的那一筆等，prompt 照收、只收一次。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_slot_read_and_the_insert_does_not_refuse_the_prompt() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "busy-831").await;
+        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let other = tt::arm_app_foreign_writer(&e.app, "busy_queue_after_slot_read", &conv);
+
+        let out = admit(&e.app, &conv, &bot.id, "稍後送出", "busy-831-1").await.expect("a free slot must not be refused because another writer committed");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the admission holds the write lock from its read on; the other writer waits");
+        assert_eq!(out.delivery, "queued");
+        assert_eq!(queued(&e.app, &conv).await, (1, 1), "the queued turn and its user message commit exactly once");
+    }
+
+    /// #821：真的有第二個排隊請求在同一瞬搶同一個槽時，它照舊拿到 `queue_slot_taken`（不是 `database is locked`），
+    /// 槽裡只有先到的那一筆。不拿 bot 鎖，兩個 admission 直接在 DB 上碰。
+    #[tokio::test]
+    async fn a_second_request_racing_for_the_slot_still_gets_queue_slot_taken() {
+        let e = tt::env().await;
+        let bot = tt::claude_bot(&e.app, &e.project_id, "busy-831-race").await;
+        let conv = db::conversation_id(&e.app.db, &bot.id).await.unwrap();
+        let second = Arc::new(StdMutex::new(None));
+        let (app, c, b, slot) = (e.app.clone(), conv.clone(), bot.id.clone(), second.clone());
+        race_point::arm("busy_queue_after_slot_read", &conv, move || async move {
+            let h = tokio::spawn(async move { admit(&app, &c, &b, "再一則", "busy-831-b").await });
+            *slot.lock().unwrap() = Some(h);
+        });
+
+        let first = admit(&e.app, &conv, &bot.id, "先到的", "busy-831-a").await.expect("the first admission takes the slot");
+        let h = second.lock().unwrap().take().expect("the race point ran");
+        match h.await.unwrap() {
+            Err(LcError::Conflict(body)) => {
+                assert_eq!(body["reason"], "queue_slot_taken", "{body}");
+                assert_eq!(body["turn_id"], first.turn_id.as_str(), "{body}");
+            }
+            other => panic!("the racing request must be refused as queue_slot_taken, got {:?}", other.map(|o| o.turn_id)),
+        }
+        assert_eq!(queued(&e.app, &conv).await, (1, 1));
+    }
 }

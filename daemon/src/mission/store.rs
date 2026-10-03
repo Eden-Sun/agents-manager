@@ -600,7 +600,7 @@ pub async fn write_reply(
     let fingerprint = reply_fingerprint(kind, text, relay_from, reply_to);
     // Reserve the writer before reading. Deferred read transactions can fail their
     // write upgrade with SQLITE_BUSY_SNAPSHOT under WAL even with a busy timeout.
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = crate::db::begin_write(pool).await?;
 
     // 重放**優先於**狀態：重送多半發生在任務已經被放行之後（網路慢、使用者連點），那時候它已經
     // 不是 paused 了。先看狀態就會把一個正確的重送擋成 not_paused。查詢在交易內做，所以它跟下面的
@@ -747,7 +747,7 @@ fn resumed_note(extra: Option<i64>) -> (String, serde_json::Value) {
 /// AGM 自己呼叫 resume 因此不會把自己叫醒。
 pub async fn resume_and_wake(pool: &SqlitePool, mission_id: &str, payload_of: impl Fn(&str) -> serde_json::Value) -> Result<bool> {
     let now = crate::db::now();
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let m: Option<Mission> = sqlx::query_as::<_, Mission>("SELECT * FROM missions WHERE id = ?").bind(mission_id).fetch_optional(&mut *tx).await?;
     let Some(m) = m else { return Ok(false) };
     let extra = extra_round_for(&m);
@@ -811,7 +811,7 @@ pub async fn resume(pool: &SqlitePool, id: &str) -> Result<bool> {
 /// 只在任務正停在 `reasons` 其中之一時解除暫停，回傳被解除的那個原因。別的原因的暫停（使用者按的、
 /// 等人回答的）不動——解除它們要走 resume／answer。
 pub async fn clear_pause_if(pool: &SqlitePool, id: &str, reasons: &[&str]) -> Result<Option<String>> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let current: Option<Option<String>> = sqlx::query_scalar(
         "SELECT paused_reason FROM missions WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
     )
@@ -883,7 +883,7 @@ async fn pause_tx(
     daemon: bool,
 ) -> Result<bool> {
     let now = crate::db::now();
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     if daemon && held_by_user(&mut tx, id).await? {
         return Ok(true);
     }
@@ -945,7 +945,7 @@ pub async fn pause_on(
 /// 底下還開著的交辦由呼叫端接著走 supervisor 的 cancel 收掉（不在這裡直接改交辦）。
 pub async fn cancel_announced(pool: &SqlitePool, id: &str, announce: Option<Announce<'_>>) -> Result<bool> {
     let now = crate::db::now();
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let n = sqlx::query("UPDATE missions SET cancelled_at = ?, updated_at = ? WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL")
         .bind(&now)
         .bind(&now)
@@ -1008,7 +1008,7 @@ pub async fn cancel_open_for_project(pool: &SqlitePool, project_id: &str, reason
     let mut done = 0;
     for id in open {
         let now = crate::db::now();
-        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::db::begin_write(pool).await?;
         // 條件重放在 UPDATE 裡：讀完到寫入之間別人剛好結案／取消了就當沒這回事，不補第二則事件。
         let n = sqlx::query(
             "UPDATE missions SET cancelled_at = ?, updated_at = ? WHERE id = ? AND completed_at IS NULL AND cancelled_at IS NULL",
@@ -1097,7 +1097,7 @@ pub enum Guarded<T, E> {
 
 /// 開寫入交易、讀出**還開著**的任務與它的交辦、事件。任務不存在或已結案回 `None`（交易直接丟掉）。
 async fn open_snapshot(pool: &SqlitePool, id: &str) -> Result<Option<(sqlx::Transaction<'static, sqlx::Sqlite>, Snapshot)>> {
-    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = crate::db::begin_write(pool).await?;
     let mission: Option<Mission> = sqlx::query_as("SELECT * FROM missions WHERE id = ?").bind(id).fetch_optional(&mut *tx).await?;
     let Some(mission) = mission.filter(|m| m.completed_at.is_none() && m.cancelled_at.is_none()) else { return Ok(None) };
     let assignments = sqlx::query_as::<_, crate::supervisor::store::Assignment>(

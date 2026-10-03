@@ -68,7 +68,7 @@ async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str) -> anyhow::Result<
     // `BEGIN IMMEDIATE`：這個交易先讀後寫，一般（deferred）交易讀完才升級成寫入時，別的寫入者正拿著鎖，SQLite 會直接回
     // `database is locked`（code 5／517），完全不等 busy_timeout——daemon 剛起來撞上前一顆還沒收乾淨的寫入就是這樣（正式環境
     // 一天 10 次）。一開始就要寫入鎖，才會等。
-    let mut tx = app.db.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = db::begin_write(&app.db).await?;
     let target: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT created_at, delivered_at FROM turns WHERE id=? AND restamp_pending=1",
     )
