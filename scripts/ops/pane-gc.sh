@@ -9,6 +9,19 @@ set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="$DIR/browser-gc.log"
 MAX_AGE=${PANE_GC_MAX_AGE:-86400}
+case "$MAX_AGE" in
+  *[!0-9]*) echo "pane-gc: PANE_GC_MAX_AGE 不是正整數，跳過 pane 回收" >> "$LOG"; exit 0 ;;
+esac
+while [ "${MAX_AGE#0}" != "$MAX_AGE" ]; do MAX_AGE=${MAX_AGE#0}; done
+[ -n "$MAX_AGE" ] || MAX_AGE=0
+if [ "$MAX_AGE" = 0 ]; then
+  echo "pane-gc: PANE_GC_MAX_AGE 不是正整數，跳過 pane 回收" >> "$LOG"
+  exit 0
+fi
+if [ "${#MAX_AGE}" -gt 9 ]; then
+  echo "pane-gc: PANE_GC_MAX_AGE 超出範圍，跳過 pane 回收" >> "$LOG"
+  exit 0
+fi
 # launchd 的 PATH 只有 /usr/bin:/bin；herdr 裝在 homebrew 或 ~/.local/bin。
 export PATH="/opt/homebrew/bin:/Users/m4p/.local/bin:$PATH"
 command -v herdr >/dev/null || { echo "pane-gc: herdr 不在 PATH" >> "$LOG"; exit 0; }
@@ -26,7 +39,9 @@ etime_secs() {
 # 只拿 stdout 解析（stderr 的警告不能混進 JSON）；用 printf 不用 echo（zsh 的 echo 會展開 JSON 裡的 \n、\\）。
 # 解析程式一定先印 OK 或 ERR：什麼都沒印＝解析程式自己壞了，不是「0 個 pane」。
 # 這支腳本 macOS 用 zsh 跑、Linux 的 browser_gc_linux.py 用 bash 跑，所以只能用兩邊都一樣的語法。
-errf=$(mktemp "${TMPDIR:-/tmp}/pane-gc.XXXXXX") || errf=/dev/null
+errf=$(mktemp "${TMPDIR:-/tmp}/pane-gc.XXXXXX" 2>/dev/null) || errf=""
+if [ -n "$errf" ]; then errf_owned=1; else errf=/dev/null; errf_owned=0; fi
+cleanup_errf() { if [ "$errf_owned" = 1 ]; then rm -f "$errf"; fi; }
 list_out=$(herdr pane list 2>"$errf")
 parsed=$(printf '%s\n' "$list_out" | python3 -c '
 import json,sys
@@ -46,12 +61,12 @@ case "$parsed" in
 "*) pane_ids=${parsed#OK} ;;
   "ERR "*)
     echo "pane-gc: herdr pane list ${parsed#ERR }（排程環境要帶 HERDR_SESSION；HERDR_SESSION=${HERDR_SESSION:-未設定}）：$(printf '%s %s' "$list_out" "$(head -c 120 "$errf" 2>/dev/null)" | head -c 120)" >> "$LOG"
-    rm -f "$errf"; exit 0 ;;
+    cleanup_errf; exit 0 ;;
   *)
     echo "pane-gc: 解析 herdr pane list 失敗（python3 沒有輸出，不是 0 個 pane）" >> "$LOG"
-    rm -f "$errf"; exit 0 ;;
+    cleanup_errf; exit 0 ;;
 esac
-rm -f "$errf"
+cleanup_errf
 closed=0; ghost=0
 for pid_pane in $(printf '%s\n' "$pane_ids"); do
   info=$(herdr pane process-info --pane "$pid_pane" 2>/dev/null)

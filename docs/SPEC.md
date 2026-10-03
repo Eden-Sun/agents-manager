@@ -299,7 +299,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   `worktree create/open` 也會開 workspace，但沒有 `--env`：那個 root pane 由 herdr server 開、拿不到任何 `AM_*`，hook 不會觸發（dispatcher 要 `AM_BOT_ID`＋`AM_HOOK_TOKEN`），所以不會送錯實例，只是不被追蹤。
 - **路徑解析不猜**：`normalize` 逐段 canonicalize，只有「這一段真的不存在」才當成還沒建立的尾巴；dangling symlink、symlink 迴圈等解析失敗一律拒絕啟動，不會被下一個 `..` pop 掉而錯映到別的目錄。
 - **herdr client**：
-  - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應。
+  - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應；回應必須帶回相同的 `id`，且必須恰有 `result` 或 `error` 其中一個，缺少／對不上 `id` 或回應封套矛盾就是 protocol error，不接受為成功結果或「確定未執行」。
   - 事件訂閱是長連線：**一條全域**（`pane.exited`、`pane.closed`、`workspace.closed`、`pane.agent_detected`）+ **每個 active Run 一條**
     `pane.agent_status_changed`（必須帶 `pane_id`，Run 結束時關）。事件行 `{"event","data"}`，名稱點號／底線兩種寫法都要認。
     斷線指數退避重連，重連後對帳（§6.5）。串流中途的 JSON-RPC error 行（herdr 0.9.2+ 讀太慢會回 `events_lost` 再關連線）視同斷線：
@@ -1999,6 +1999,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - GC 已經搬進 daemon（`panes::gc_host`，跟著 reconcile 每輪跑）。`bin/pane-gc.sh` **只留互動式登入 pane 那條**——
   它本來就只關「卡住超過 24 小時的 claude/gcloud/codex 登入」，閒置 zsh 一律不動，所以不必改；
   兩邊責任不重疊（登入 pane 有前景程式，daemon 的 GC 只碰行程樹只有 shell 的）。
+  預設門檻是 86400 秒；`PANE_GC_MAX_AGE` 只接受正整數，0、負數、非數字或超出範圍時記錄原因並跳過，不會把登入 pane 當成到期項目。
 - 門檻與「不動使用者手開」寫在 config（`[panes] idle_close_secs` 預設 21600、`scratch_name` 預設 `scratch`、
   `close_log_lines` 預設 20），不寫死。`idle_close_secs` 另外要能用環境變數覆寫（與 §18.8 的保險絲門檻同一套規矩：看不懂／0／負數一律回預設——一個手滑的值不該把 GC 變成「立刻關」）。
   **設定檔的值同一條規矩**，另有下限 600 秒：低於下限（含 0——不是「停用」）的環境變數不採用、退回設定檔；設定檔的值低於下限就回預設 21600。
@@ -2267,9 +2268,9 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   argv 帶 `-p am-child-<bot id>`＋`-c project_doc_max_bytes=0`（呼叫者自己帶了 `-p`／`--profile` 就不補，stderr 講沒帶到指示）；
   grok 的 `--rules` 也沒有讀檔版，給一行「先完整讀 `<路徑>` 並照做」。呼叫者自己帶了同類參數就尊重。
   daemon 自己開 bot 時（`HerdrClient::agent_start`）同理把 persona 裡的所有控制字元折成空白。
-  **注入的細節（#772 審查）**：① codex profile 寫進去前先濾掉 TOML 字面字串不收的控制字元（只留 tab、換行；ESC、DEL、單獨的 CR、換頁都濾掉——不濾的話
+  **注入的細節（#772 審查）**：① codex profile 寫進去前先濾掉 TOML 字面字串不收的控制字元（C0／C1 只留 tab、換行；ESC、DEL、NEL、單獨的 CR、換頁都濾掉——不濾的話
   真 codex 讀到會 `TOML parse error` 整個起不來）；結尾的單引號、反斜線、中文照舊保留。② profile 是 0600（內容是 AG Man 規則），暫存檔＋`mv` 換上，
-  同一顆 bot 同時開多個 codex child 讀到的永遠是完整一份；每次寫完順手掃掉超過 10 分鐘的 `am-child-*.config.toml.*` 暫存檔與超過 30 天沒重寫的 `am-child-*` profile
+  暫存檔用同目錄的隨機新檔，先確保權限 0600 再 `mv`，避免舊暫存檔或 symlink 被覆寫；同一顆 bot 同時開多個 codex child 讀到的永遠是完整一份；每次寫完順手掃掉超過 10 分鐘的 `am-child-*.config.toml.*` 暫存檔與超過 30 天沒重寫的 `am-child-*` profile
   （每次開 child 都重寫，掃掉不會害到誰；CODEX_HOME 裡別的檔案不碰）。③ CODEX_HOME 寫不進去（是檔案、唯讀）：子 agent 照開、沒帶指示、stderr 講一聲。
   ④ 注入的值（指示檔路徑、`AM_MODEL`、`AM_EFFORT`）含控制字元就不帶那個參數並在 stderr 講（`am_arg_ok`）——herdr 會因為一個壞參數拒絕整個 `agent start`。
   ⑤ 指示檔路徑含空白、全形字、引號時仍是單一 argv 元素；grok 那句話把路徑用反引號框起來。

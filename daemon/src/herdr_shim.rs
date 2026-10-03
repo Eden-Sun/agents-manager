@@ -70,7 +70,12 @@ am_child_of_value() {
 # 注入的參數值不能含控制字元：herdr ≥0.9 只要有一個參數壞掉就拒絕整個 `agent start`（invalid_agent_argument，#772），
 # 子 agent 就開不起來。寧可不帶那個參數、說一聲。
 am_arg_ok() {
-    [ "$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177')" = "$1" ]
+    [ "$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177')" = "$1" ] || return 1
+    # Rust char::is_control also rejects UTF-8 C1 controls (U+0080..U+009F), which are the
+    # byte pairs C2 80..C2 9F. Match those bytes in the C locale without rejecting other UTF-8.
+    _am_c1_pattern=$(printf '\302[\200-\237]')
+    if printf '%s' "$1" | LC_ALL=C grep -q "$_am_c1_pattern"; then return 1; fi
+    return 0
 }
 
 # 檔案內容 → TOML 多行字面字串（三個單引號包起來），給 codex 的 `developer_instructions`（§6.5i）。
@@ -78,7 +83,9 @@ am_arg_ok() {
 # TOML 多行字面字串不收控制字元（只有 tab 與換行可以；真 codex 讀到壞掉的 profile 整個起不來），所以先濾掉再包。
 am_toml_string_of_file() {
     _q3="'''"
+    _am_c1_pattern=$(printf '\302[\200-\237]')
     _body=$(LC_ALL=C tr -d '\000-\010\013-\037\177' < "$1" 2>/dev/null) || return 1
+    _body=$(printf '%s' "$_body" | LC_ALL=C sed "s/${_am_c1_pattern}//g") || return 1
     case "$_body" in
         *"$_q3"*) return 1 ;;
     esac
@@ -95,21 +102,25 @@ am_codex_instructions_profile() {
     _home=${CODEX_HOME:-$HOME/.codex}
     _name="am-child-$(printf '%s' "${AM_BOT_ID:-${AM_AGENT_NAME:-local}}" | tr -c 'A-Za-z0-9_-' '_')"
     _dst="$_home/$_name.config.toml"
-    _tmp="$_dst.$$"
     mkdir -p "$_home" 2>/dev/null
-    if ( umask 077; printf 'developer_instructions = %s\n' "$_toml" > "$_tmp" ) 2>/dev/null && mv -f "$_tmp" "$_dst" 2>/dev/null; then
+    # A predictable PID suffix may collide with a stale file or symlink; mktemp creates a fresh
+    # same-directory inode, and chmod closes the permission gap before the atomic rename.
+    _tmp=$(umask 077; mktemp "${_dst}.XXXXXX" 2>/dev/null) || _tmp=""
+    if [ -n "$_tmp" ] && ( umask 077; printf 'developer_instructions = %s\n' "$_toml" > "$_tmp" ) 2>/dev/null \
+        && chmod 600 "$_tmp" 2>/dev/null && mv -f "$_tmp" "$_dst" 2>/dev/null; then
         am_sweep_codex_profiles "$_home"
         printf '%s' "$_name"
         return 0
     fi
-    rm -f "$_tmp"
+    [ -z "$_tmp" ] || rm -f "$_tmp"
     return 2
 }
 
 # 殘留清理：寫到一半被殺掉的暫存檔（超過 10 分鐘）、超過 30 天沒重寫的 `am-child-*` profile。profile 每次開 child 都重寫，
 # 所以掃掉舊的不會害到誰；只認 `am-child-*.config.toml*`，CODEX_HOME 裡別的檔案（config.toml、自己的 profile）不碰。
 am_sweep_codex_profiles() {
-    find "$1" -maxdepth 1 \( -name 'am-child-*.config.toml.*' -mmin +10 -o -name 'am-child-*.config.toml' -mtime +30 \) -exec rm -f {} + 2>/dev/null
+    # find rounds ages down to whole minutes/days; +9 and +29 implement the 10-minute / 30-day cutoffs.
+    find "$1" -maxdepth 1 \( -name 'am-child-*.config.toml.*' -mmin +9 -o -name 'am-child-*.config.toml' -mtime +29 \) -exec rm -f {} + 2>/dev/null
     return 0
 }
 
@@ -2232,17 +2243,23 @@ mod tests {
     /// 結尾的單引號照舊保留。
     #[test]
     fn the_codex_profile_is_valid_toml_whatever_control_characters_the_instructions_hold() {
-        let cases: [&[u8]; 5] = [
+        let cases: [&[u8]; 6] = [
             b"rule\x1b[31mred\x1b[0m\x7f\x0c end\r\nnext\rlone-cr\ttab \\ \xe4\xb8\xad\xe6\x96\x87\n",
             b"ends with one quote '\n",
             b"ends with two quotes ''\n",
             b"has '' and ' inside, but never three\n",
             b"\nstarts with a blank line\n",
+            b"C1 controls \xc2\x80\xc2\x85\xc2\x9f between text\n",
         ];
         let expected = |raw: &[u8]| -> String {
-            // 跟 shim 的規則一樣：濾掉 TOML 字面字串不收的控制字元，保留 \t \n。
-            let kept: Vec<u8> = raw.iter().copied().filter(|b| !matches!(b, 0..=8 | 11..=31 | 127)).collect();
-            String::from_utf8(kept).unwrap().trim_end_matches('\n').to_string()
+            // TOML 字面字串只保留 tab／換行；Cc 類別的其餘 Unicode 字元也要濾掉。
+            String::from_utf8(raw.to_vec())
+                .unwrap()
+                .chars()
+                .filter(|c| *c == '\t' || *c == '\n' || !c.is_control())
+                .collect::<String>()
+                .trim_end_matches('\n')
+                .to_string()
         };
         for (i, raw) in cases.iter().enumerate() {
             let s = Sandbox::new();
@@ -2266,7 +2283,10 @@ mod tests {
         let s = Sandbox::new();
         let (f, home) = codex_child(&s, b"rules\n");
         std::fs::create_dir_all(&home).unwrap();
-        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
+        let now = std::time::SystemTime::now();
+        let old_tmp = now - std::time::Duration::from_secs(10 * 60 + 5);
+        let old_profile_at = now - std::time::Duration::from_secs(30 * 24 * 3600 + 5);
+        let old_unmanaged = now - std::time::Duration::from_secs(40 * 24 * 3600);
         let age = |p: &Path, t: std::time::SystemTime| std::fs::File::options().write(true).open(p).unwrap().set_modified(t).unwrap();
         let stale_tmp = home.join("am-child-b1.config.toml.4242");
         let old_profile = home.join("am-child-gone.config.toml");
@@ -2276,9 +2296,10 @@ mod tests {
         for p in [&stale_tmp, &old_profile, &fresh_profile, &mine, &main_cfg] {
             std::fs::write(p, "x = 1\n").unwrap();
         }
-        for p in [&stale_tmp, &old_profile, &mine, &main_cfg] {
-            age(p, old);
-        }
+        age(&stale_tmp, old_tmp);
+        age(&old_profile, old_profile_at);
+        age(&mine, old_unmanaged);
+        age(&main_cfg, old_unmanaged);
         let (_, err, rc) = start_codex(&s, &f, &home, "b1");
         assert_eq!(rc, 0, "{err}");
         let mode = std::fs::metadata(home.join("am-child-b1.config.toml")).unwrap().permissions().mode() & 0o777;
@@ -2289,6 +2310,34 @@ mod tests {
         assert!(mine.exists() && main_cfg.exists(), "不是 am-child-* 的檔案一個都不能動");
         let left: Vec<String> = std::fs::read_dir(&home).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert!(!left.iter().any(|n| n.starts_with("am-child-b1.config.toml.")), "沒有暫存檔殘留：{left:?}");
+    }
+
+    /// 可預測的 PID 暫存路徑若被預放 symlink，`>` 會改寫目標檔，`mv` 還會把 symlink 變成 profile。
+    #[test]
+    fn a_preexisting_codex_temp_symlink_cannot_redirect_or_expose_profile_data() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let s = Sandbox::new();
+        let (f, home) = codex_child(&s, b"private rules\n");
+        let fake_mkdir = s.dir.join("real/mkdir");
+        write_script(
+            &fake_mkdir,
+            "if [ \"$1\" = -p ]; then\n\
+               /bin/mkdir -p \"$2\" || exit $?\n\
+               shim_pid=$(/bin/ps -o ppid= -p \"$PPID\" | tr -d ' ')\n\
+               tmp=\"$2/am-child-b1.config.toml.$shim_pid\"\n\
+               printf untouched > \"$2/outside\"\n\
+               ln -s \"$2/outside\" \"$tmp\"\n\
+               exit 0\n\
+             fi\n\
+             exit 2\n",
+        );
+        let (_, err, rc) = start_codex(&s, &f, &home, "b1");
+        assert_eq!(rc, 0, "{err}");
+        let profile = home.join("am-child-b1.config.toml");
+        assert_eq!(std::fs::read_to_string(home.join("outside")).unwrap(), "untouched", "暫存檔不能讓重導向改寫 symlink 目標");
+        assert!(!std::fs::symlink_metadata(&profile).unwrap().file_type().is_symlink(), "Codex profile 必須是實檔");
+        assert_eq!(std::fs::metadata(&profile).unwrap().permissions().mode() & 0o777, 0o600, "既有暫存檔也要在 rename 前收成 0600");
+        assert!(std::fs::read_to_string(profile).unwrap().contains("private rules"));
     }
 
     /// CODEX_HOME 寫不進去（是個檔案、或唯讀）：子 agent 照開、只是沒帶指示，而且不留任何東西。
@@ -2307,9 +2356,12 @@ mod tests {
         let ro = s.dir.join("ro-home");
         std::fs::create_dir_all(&ro).unwrap();
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
-        if std::fs::write(ro.join("probe"), "").is_ok() {
-            return; // root 照樣寫得進唯讀目錄：這一段在 root 下沒有意義。
-        }
+        // Root can bypass directory mode bits. Make mktemp model the OS denial for this CODEX_HOME,
+        // while leaving the shim's unrelated env temp file available to the test.
+        write_script(
+            &s.dir.join("real/mktemp"),
+            "case \"$1\" in *ro-home/am-child-*) exit 1 ;; esac\nexec /usr/bin/mktemp \"$@\"\n",
+        );
         let (out, err, rc) = start_codex(&s, &f, &ro, "b1");
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(rc, 0, "{err}");
@@ -2392,7 +2444,7 @@ mod tests {
             assert!(!out.iter().any(|a| a.starts_with("--append-system-prompt") || a == "--rules"), "{kind}: {out:?}");
             assert!(err.contains("控制字元"), "{kind}: 要說一聲：{err}");
         }
-        for model in ["opus\n", "op\tus", "opus\u{1b}[0m"] {
+        for model in ["opus\n", "op\tus", "opus\u{1b}[0m", "opus\u{85}model"] {
             let (out, err, rc) = s.run_full(
                 &[("AM_AGENT_NAME", "p-1"), ("AM_KIND", "claude"), ("AM_MODEL", model)],
                 &["agent", "start", "kid", "--kind", "claude", "--pane", "w1:p9"],

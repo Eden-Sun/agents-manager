@@ -217,5 +217,50 @@ check  "python 壞掉：log 記解析失敗" "pane list 失敗" "$LOG"
 check_no "python 壞掉：不當成 0 個 pane 正常收尾" "pane：關掉" "$LOG"
 teardown
 
+# 12. 壞掉或負數的年齡設定要 fail closed；負數不能讓任何登入 pane 立即符合回收條件。
+for bad_age in -1 0 invalid; do
+  setup
+  pane w1:p1 101 "claude auth login" "2-03:00:00"
+  ERRF="$ROOT/stderr"
+  PANE_GC_MAX_AGE="$bad_age" PATH="$ROOT/fakebin:$PATH" zsh "$ROOT/agm/bin/pane-gc.sh" 2> "$ERRF"
+  equals "年齡設定 '$bad_age'：exit 0" "$?" "0"
+  equals "年齡設定 '$bad_age'：不關 pane" "$(closed)" "0"
+  check "年齡設定 '$bad_age'：記錄跳過原因" "PANE_GC_MAX_AGE" "$LOG"
+  teardown
+done
+
+# 13. mktemp 失敗時 stderr 暫存退到 /dev/null；它不是腳本擁有的檔案，不能拿 rm 清理。
+setup
+printf '#!/bin/sh\nexit 1\n' > "$ROOT/fakebin/mktemp"; chmod +x "$ROOT/fakebin/mktemp"
+cat > "$ROOT/fakebin/rm" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FIX/rm.log"
+case " $* " in *" /dev/null "*) exit 0 ;; esac
+exec /bin/rm "$@"
+STUB
+chmod +x "$ROOT/fakebin/rm"
+echo 'herdr: no server running at /x/herdr.sock' > "$FIX/panes.json"
+PATH="$ROOT/fakebin:$PATH" zsh "$ROOT/agm/bin/pane-gc.sh" >/dev/null 2>&1
+check_no "mktemp 失敗：不嘗試刪除 /dev/null" "/dev/null" "$FIX/rm.log"
+check "mktemp 失敗：照樣記 list 錯誤" "pane list 回的不是 JSON" "$LOG"
+teardown
+
+# 14. python3 解析器本身失敗也走同一個暫存檔 cleanup；fallback /dev/null 不能被刪除。
+setup
+printf '#!/bin/sh\nexit 1\n' > "$ROOT/fakebin/mktemp"; chmod +x "$ROOT/fakebin/mktemp"
+cat > "$ROOT/fakebin/rm" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FIX/rm.log"
+case " $* " in *" /dev/null "*) exit 0 ;; esac
+exec /bin/rm "$@"
+STUB
+printf '#!/bin/sh\nexit 3\n' > "$ROOT/fakebin/python3"
+chmod +x "$ROOT/fakebin/mktemp" "$ROOT/fakebin/rm" "$ROOT/fakebin/python3"
+echo '{"result":{"panes":[]}}' > "$FIX/panes.json"
+PATH="$ROOT/fakebin:$PATH" zsh "$ROOT/agm/bin/pane-gc.sh" >/dev/null 2>&1
+check_no "parser 失敗：不嘗試刪除 /dev/null" "/dev/null" "$FIX/rm.log"
+check "parser 失敗：記錄解析錯誤" "pane list 失敗" "$LOG"
+teardown
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

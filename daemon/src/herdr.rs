@@ -233,10 +233,26 @@ struct RawError {
 
 #[derive(Debug, Deserialize)]
 struct RawResponse {
-    #[allow(dead_code)]
     id: Option<String>,
     result: Option<Value>,
     error: Option<RawError>,
+}
+
+fn validate_response_id(response: &RawResponse, expected: &str, method: &str) -> Result<()> {
+    if response.id.as_deref() != Some(expected) {
+        bail!(
+            "herdr {method} response id mismatch: expected {expected}, got {}",
+            response.id.as_deref().unwrap_or("<missing>")
+        );
+    }
+    Ok(())
+}
+
+fn validate_response_payload(response: &RawResponse, method: &str) -> Result<()> {
+    match (response.result.is_some(), response.error.is_some()) {
+        (true, false) | (false, true) => Ok(()),
+        _ => bail!("herdr {method} response has invalid response envelope: expected exactly one of result/error"),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -341,7 +357,7 @@ impl HerdrClient {
 
     pub async fn call_timeout(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
         let id = self.next_id();
-        let req = json!({"id": id, "method": method, "params": params});
+        let req = json!({"id": id.clone(), "method": method, "params": params});
         let fut = async {
             let mut stream = UnixStream::connect(&self.socket)
                 .await
@@ -358,6 +374,8 @@ impl HerdrClient {
             }
             let resp: RawResponse = serde_json::from_str(buf.trim_end())
                 .with_context(|| format!("parse herdr response for {method}: {}", snippet(method, &buf)))?;
+            validate_response_id(&resp, &id, method)?;
+            validate_response_payload(&resp, method)?;
             if let Some(e) = resp.error {
                 return Err(HerdrError { code: e.code, message: e.message }.into());
             }
@@ -673,7 +691,8 @@ impl HerdrClient {
 
     /// Channel closes when the connection drops; caller reconnects.
     pub async fn subscribe(&self, subscriptions: Vec<Value>) -> Result<mpsc::Receiver<Event>> {
-        let req = json!({"id": self.next_id(), "method": "events.subscribe", "params": {"subscriptions": subscriptions}});
+        let id = self.next_id();
+        let req = json!({"id": id.clone(), "method": "events.subscribe", "params": {"subscriptions": subscriptions}});
         // **只包握手**：連線、送出、讀 ack。後面讀事件的那條是長連線，本來就該一直等，不能包。
         let handshake = async {
             let mut stream = UnixStream::connect(&self.socket).await.context("connect herdr socket for subscribe")?;
@@ -686,6 +705,8 @@ impl HerdrClient {
             reader.read_line(&mut first).await?;
             let ack: RawResponse =
                 serde_json::from_str(first.trim_end()).with_context(|| format!("parse subscribe ack: {}", snippet("events.subscribe", &first)))?;
+            validate_response_id(&ack, &id, "events.subscribe")?;
+            validate_response_payload(&ack, "events.subscribe")?;
             if let Some(e) = ack.error {
                 return Err(HerdrError { code: e.code, message: e.message }.into());
             }
@@ -846,6 +867,110 @@ mod rpc_tests {
         assert!(format!("{err:#}").contains("timed out"), "{err:#}");
         server.abort();
         std::fs::remove_dir_all(sock.parent().unwrap()).ok();
+    }
+
+    /// 每個 RPC 都是獨立 socket；仍須核對 response id，否則過期／錯誤回應會被當成本次成功結果。
+    #[tokio::test]
+    async fn an_rpc_response_with_a_missing_or_different_id_is_rejected_as_ambiguous() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-wrong-id-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let replies: &[&[u8]] = &[
+                b"{\"result\":{\"pong\":true}}\n",
+                b"{\"id\":\"stale-request\",\"result\":{\"pong\":true}}\n",
+                b"{\"id\":\"stale-request\",\"error\":{\"code\":\"not_found\",\"message\":\"stale error\"}}\n",
+            ];
+            for reply in replies {
+                let (conn, _) = listener.accept().await.unwrap();
+                let (r, mut w) = conn.into_split();
+                let mut line = String::new();
+                BufReader::new(r).read_line(&mut line).await.unwrap();
+                w.write_all(reply).await.unwrap();
+            }
+        });
+        let client = HerdrClient::new(&sock);
+        for case in ["missing", "different", "different error"] {
+            let err = client.call_timeout("ping", json!({}), Duration::from_secs(2)).await.expect_err("response id 不符的回應不能算成功");
+            let message = format!("{err:#}");
+            assert!(message.contains("response id"), "{case} id 要清楚指出 protocol 不符：{message}");
+            assert!(!never_applied(&err), "{case} id 對不上時，無法知道本次請求有沒有執行");
+        }
+        server.await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// subscribe 的握手 ack 同樣必須對上本次 request id，否則會接上一條錯誤串流。
+    #[tokio::test]
+    async fn a_subscribe_ack_with_a_different_id_is_rejected() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-subscribe-wrong-id-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let (r, mut w) = conn.into_split();
+            let mut line = String::new();
+            BufReader::new(r).read_line(&mut line).await.unwrap();
+            w.write_all(b"{\"id\":\"stale-subscribe\",\"result\":{\"type\":\"subscription_started\"}}\n").await.unwrap();
+        });
+        let client = HerdrClient::new(&sock);
+        let err = client.subscribe(vec![json!({"type": "pane.exited"})]).await.expect_err("錯誤 ack 不能建立訂閱");
+        let message = format!("{err:#}");
+        assert!(message.contains("response id"), "要清楚指出 protocol id 不符：{message}");
+        server.await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// JSON-RPC 回應封套必須且只能有 result/error 其中之一；畸形封套不能被當成安全可重試的 herdr 錯誤。
+    #[tokio::test]
+    async fn an_rpc_response_with_both_result_and_error_is_ambiguous() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-invalid-envelope-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let (r, mut w) = conn.into_split();
+            let mut line = String::new();
+            BufReader::new(r).read_line(&mut line).await.unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            let reply = json!({
+                "id": req["id"],
+                "result": {"pong": true},
+                "error": {"code": "not_found", "message": "this cannot be a valid response"}
+            });
+            w.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+        });
+        let client = HerdrClient::new(&sock);
+        let err = client.call_timeout("ping", json!({}), Duration::from_secs(2)).await.expect_err("矛盾的回應不能被接受");
+        assert!(format!("{err:#}").contains("invalid response"), "應回 protocol error：{err:#}");
+        assert!(!never_applied(&err), "同時帶 result/error 的畸形回應不能證明請求沒執行");
+        server.await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// subscribe ack 缺少 result/error 時不是成功握手，必須觸發呼叫端重訂閱。
+    #[tokio::test]
+    async fn a_subscribe_ack_without_result_or_error_is_rejected() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-subscribe-empty-ack-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let (r, mut w) = conn.into_split();
+            let mut line = String::new();
+            BufReader::new(r).read_line(&mut line).await.unwrap();
+            let req: Value = serde_json::from_str(&line).unwrap();
+            w.write_all(format!("{{\"id\":{}}}\n", req["id"]).as_bytes()).await.unwrap();
+        });
+        let client = HerdrClient::new(&sock);
+        let err = client.subscribe(vec![json!({"type": "pane.exited"})]).await.expect_err("空 ack 不能建立訂閱");
+        assert!(format!("{err:#}").contains("invalid response"), "應回 protocol error：{err:#}");
+        server.await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// 照腳本回話的假 herdr：每條連線讀一行請求，`reply` 決定回什麼；`events.subscribe` 回 ack 之後把 `events` 一行行吐出去。
