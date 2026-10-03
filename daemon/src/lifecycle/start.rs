@@ -1438,15 +1438,7 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         super::race_point::hit("child_restart_between_runs", bot_id).await;
     }
 
-    let mut args: Vec<String> = Vec::new();
-    if bot.auto_approve != 0 {
-        match bot.kind.as_str() {
-            "claude" => args.push("--dangerously-skip-permissions".into()),
-            "codex" => args.push("--yolo".into()),
-            "grok" => args.push("--always-approve".into()),
-            _ => {}
-        }
-    }
+    let mut args = super::setup::permission_args(&bot.kind, bot.auto_approve != 0);
     // 模型／強度用 `bots` 上 §4.4a 從子 agent argv 讀回的；讀不到就讓 CLI 用預設。
     args.extend(model_args(&effort_checked(app, &bot, &host).await));
     args.extend(bot.args());
@@ -1691,6 +1683,56 @@ mod resume_args_tests {
         assert_eq!(&args[..2], ["resume", "codex-previous"], "{args:?}");
         assert!(args.contains(&"--no-daemon".into()), "resumed Codex must not reuse a shared app server: {args:?}");
         assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "resumed Codex turn tips must stay off: {args:?}");
+    }
+
+    /// codex 0.160.0 的 resume 會恢復上次存的權限，除非明確覆寫（issue #778）：auto_approve 0／1 ×
+    /// resume／fork 四種組合都要把權限明講，關掉 auto_approve 的不能因為接回 Full Access 的對話變成 yolo。
+    #[tokio::test]
+    async fn codex_resume_and_fork_pin_permissions_to_auto_approve() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "codex").await;
+        sqlx::query("UPDATE bots SET kind='codex', identity=NULL WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at)
+             VALUES (?,?,'stopped','idle','codex-previous','2026-09-07T00:00:00Z','2026-09-07T00:01:00Z')",
+        )
+        .bind(db::ulid())
+        .bind(&bot.id)
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+        let sandbox = ["-c", "sandbox_mode=\"workspace-write\""];
+        for auto_approve in [0, 1] {
+            sqlx::query("UPDATE bots SET auto_approve=? WHERE id=?").bind(auto_approve).bind(&bot.id).execute(&e.app.db).await.unwrap();
+            let resume = StartOpts { resume_native: true, ..Default::default() };
+            let fork = StartOpts { fork_session: Some("codex-source".into()), ..Default::default() };
+            for (opts, head) in [(resume, ["resume", "codex-previous"]), (fork, ["fork", "codex-source"])] {
+                start_bot_with(&e.app, &bot.id, opts).await.unwrap();
+                let args = started_args(&e).pop().unwrap();
+                stop_bot(&e.app, &bot.id).await.unwrap();
+                assert_eq!(&args[..2], head, "{args:?}");
+                let yolo = args.iter().filter(|a| *a == "--yolo").count();
+                let pinned = args.windows(2).filter(|w| *w == sandbox).count();
+                if auto_approve == 0 {
+                    assert_eq!((yolo, pinned), (0, 1), "auto_approve=0 must pin a non-yolo sandbox: {args:?}");
+                } else {
+                    assert_eq!((yolo, pinned), (1, 0), "auto_approve=1 must stay yolo: {args:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn permission_args_follow_auto_approve() {
+        use super::super::setup::permission_args;
+        assert_eq!(permission_args("codex", true), vec!["--yolo"]);
+        assert_eq!(permission_args("codex", false), vec!["-c", "sandbox_mode=\"workspace-write\""]);
+        assert_eq!(permission_args("claude", true), vec!["--dangerously-skip-permissions"]);
+        assert_eq!(permission_args("grok", true), vec!["--always-approve"]);
+        // claude 的非 auto 權限由 settings 的 permissions.defaultMode 釘（#722）；grok 沒有 resume 恢復權限的問題。
+        assert!(permission_args("claude", false).is_empty());
+        assert!(permission_args("grok", false).is_empty());
+        assert!(permission_args("gemini", true).is_empty());
     }
 
     /// `resume_native` 沒要求一定要接（`resume_required=false`）、接不回時照舊退回開新對話——但這件
