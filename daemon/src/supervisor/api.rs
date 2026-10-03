@@ -389,9 +389,14 @@ pub async fn post_review(
                 None => None,
             };
             let identical = f.as_ref().is_some_and(|f| {
+                let mut requested_ownership = if b.ownership.is_empty() { a.ownership() } else { b.ownership.clone() };
+                let mut recorded_ownership = f.ownership();
+                requested_ownership.sort();
+                recorded_ownership.sort();
                 b.followup_request_id.as_deref().map(str::trim) == Some(f.client_request_id.as_str())
                     && b.followup_text.as_deref().map(str::trim) == Some(f.text.as_str())
                     && b.followup_bot_id.as_deref().unwrap_or(&a.target_bot_id) == f.target_bot_id
+                    && requested_ownership == recorded_ownership
             });
             if !identical {
                 return Err(LcError::conflict("this assignment already has a different continuation",
@@ -2904,6 +2909,12 @@ mod review_boundary_tests {
             assert_eq!(result.is_ok(), should_pass);
             if let Err(e) = result { assert!(format!("{e:?}").contains("followup_mismatch")); }
         }
+        let changed_ownership: ReviewIn = serde_json::from_value(json!({"decision":"followup",
+            "followup_request_id":"follow-1","followup_text":"continue","ownership":["different/path"]})).unwrap();
+        let err = post_review(State(app.clone()), Path(parent.id.clone()), HeaderMap::new(), Json(changed_ownership))
+            .await
+            .expect_err("same followup id and text with changed ownership is not an identical replay");
+        assert!(matches!(&err, LcError::Conflict(v) if v["reason"] == "followup_mismatch"), "{err:?}");
         assert_eq!(store::list_assignments(&app.db, 20).await.unwrap().len(), 2);
         assert_eq!(store::reviews(&app.db, &parent.id).await.unwrap().len(), 1);
 

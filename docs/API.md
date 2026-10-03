@@ -2229,7 +2229,7 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   `actor` 同 `approvals/{id}/decide`：驗過角色才寫得出 `AGM:<role>`，其餘記 `user` 或 `user(<自稱>)`（issue #414）。
   已驗證 bot 的角色查詢若遇 DB 錯誤，回可重試的 server error，且不更新 assignment、不留下 review/audit 列；重試時保留驗證出的角色歸屬。
   **唯一的結案路徑**。`accept`→`completed`、`fail`→`failed`、`cancel`→`cancelled`、`block`→`blocked`、`followup`→原本 `superseded` 並以 `followup_request_id` 另開 `follow_up_of` 的新交辦（不改寫已送出的 text）。
-  同 decision 重送冪等；followup 重送須同 request ID、文字與目標，不同 409 `followup_mismatch`。`followup_request_id` 已經是別件交辦的 → 409 `followup_request_id_taken`（`{client_request_id,assignment_id}`，換一個 id）。
+  同 decision 重送冪等；followup 重送須同 request ID、文字、目標與 ownership（ownership 留空時沿用原交辦的 ownership），不同回 409 `followup_mismatch`。`followup_request_id` 已經是別件交辦的 → 409 `followup_request_id_taken`（`{client_request_id,assignment_id}`，換一個 id）。
   續作沿用父交辦的 `expects_review`（通知的續作仍是通知）、`review_role` 與任務連結。已結案 409 `already_closed`；還在跑只接受 `cancel`（409 `still_executing`，且 cancel 不中止回合）。
   交辦掛在群組任務上時回應多 `mission_next: {mission_id, next, flow}`：裁示之後任務的下一步（同 `GET /api/missions/{id}` 的 `next`／`flow`）。
   決定成 `cancelled`／`superseded`／`failed` 時，交辦名下還在 `queued` 的 turn 一併撤銷（標 `failed`、插 system 訊息、釋放 queued 名額），回應多 `revoked_turn_id`；已經 `in_flight`／送出的不動、也不帶這個欄位（SPEC §4.4a）。
