@@ -256,14 +256,18 @@ pub fn router(app: Arc<App>) -> Router {
         // 遠端入口：argv 只算 requested，宣稱通了要有帶 actor 的觀測（SPEC §18.12）。
         .route(
             "/supervisor/remote",
-            get(crate::supervisor::api::get_remote).post(crate::supervisor::api::post_remote_observation),
+            get(crate::supervisor::api::get_remote)
+                .merge(post(crate::supervisor::api::post_remote_observation).layer(agm_gate!(app))),
         )
         // 重建／重啟的核准與執行租約（SPEC §18.10）。
         .route(
             "/supervisor/approvals",
             get(crate::supervisor::api::get_approvals).post(crate::supervisor::api::post_approval),
         )
-        .route("/supervisor/approvals/{id}/decide", post(crate::supervisor::api::post_approval_decision))
+        .route(
+            "/supervisor/approvals/{id}/decide",
+            post(crate::supervisor::api::post_approval_decision).layer(agm_gate!(app)),
+        )
         .route("/supervisor/maintenance/safety", get(crate::supervisor::api::get_maintenance_safety))
         .route("/supervisor/leases", get(crate::supervisor::api::get_leases))
         .route("/supervisor/leases/{resource}/acquire", post(crate::supervisor::api::post_lease_acquire))
@@ -8885,6 +8889,109 @@ mod per_principal_auth_tests {
         assert!(denied(&r), "換人之後舊的巡檢沒有權限了：{r}");
         let r = call("POST", "/api/supervisor/stop", Some((other.id.as_str(), other.hook_token.as_str()))).await;
         assert!(!denied(&r), "{r}");
+    }
+
+    /// 審批只能由使用者收回，或由 AGM 角色處理；一般 bot 的有效 token 不能借 `actor_role(None)` 冒充使用者去 deny／revoke。
+    #[tokio::test]
+    async fn a_plain_bot_cannot_deny_or_revoke_supervisor_approvals() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "approval-decision-bot").await;
+        let pending = crate::supervisor::store::create_approval(&e.app.db, "requester-a", "rebuild", "daemon", Some("abc1234"), None, None)
+            .await
+            .unwrap()
+            .approval;
+        let approved = crate::supervisor::store::create_approval(&e.app.db, "requester-b", "restart", "daemon", Some("def5678"), None, None)
+            .await
+            .unwrap()
+            .approval;
+        crate::supervisor::store::decide_approval(&e.app.db, &approved.id, "approved", "AGM", None, None)
+            .await
+            .unwrap();
+
+        for (id, decision, expected_status) in [(&pending.id, "deny", "pending"), (&approved.id, "revoke", "approved")] {
+            let body = json!({"decision": decision}).to_string();
+            let response = raw(
+                e.app.clone(),
+                format!(
+                    "POST /api/supervisor/approvals/{id}/decide HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    bot.id,
+                    bot.hook_token,
+                    body.len()
+                ),
+            )
+            .await;
+            assert!(response.starts_with("HTTP/1.1 403"), "bot 的 {decision} 應被拒絕：{response}");
+            assert!(response.contains("role_required"), "{response}");
+            let row = crate::supervisor::store::approval(&e.app.db, id).await.unwrap().unwrap();
+            assert_eq!(row.status, expected_status, "被拒絕的 {decision} 不能改審批狀態");
+        }
+    }
+
+    /// `/supervisor/remote` 寫的是 AGM 的遠端入口觀測；有效的一般 bot token 不該被 `actor_role(None)` 當成 User。
+    #[tokio::test]
+    async fn a_plain_bot_cannot_write_supervisor_remote_observations() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "remote-observation-bot").await;
+        let body = json!({"status": "requested", "source": "manual", "actor": "self-claimed"}).to_string();
+        let response = raw(
+            e.app.clone(),
+            format!(
+                "POST /api/supervisor/remote HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {}\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                bot.id,
+                bot.hook_token,
+                body.len()
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 403"), "一般 bot 不能寫入 remote observation：{response}");
+        assert!(response.contains("role_required"), "{response}");
+        let actor: Option<String> = sqlx::query_scalar("SELECT remote_actor FROM supervisors WHERE id=?")
+            .bind(crate::supervisor::store::SUPERVISOR_ID)
+            .fetch_optional(&e.app.db)
+            .await
+            .unwrap()
+            .flatten();
+        assert_eq!(actor, None, "被拒絕的請求不應寫入觀測");
+    }
+
+    /// acquire 的 owner 不能只靠 body 自稱：否則另一顆 bot 能拿受害者已核准的 approval 開出它的 lease。
+    #[tokio::test]
+    async fn a_bot_can_only_acquire_a_lease_for_its_own_approval() {
+        let e = crate::testing::env().await;
+        let owner = distinct_bot(&e, "lease-owner").await;
+        let attacker = distinct_bot(&e, "lease-attacker").await;
+        let approval = crate::supervisor::store::create_approval(&e.app.db, &owner.id, "rebuild", "daemon", None, None, None)
+            .await
+            .unwrap()
+            .approval;
+        crate::supervisor::store::decide_approval(&e.app.db, &approval.id, "approved", "AGM", None, None)
+            .await
+            .unwrap();
+
+        let body = json!({"owner": owner.id, "approval_id": approval.id, "require_idle": false}).to_string();
+        let call = |bot: &db::Bot| {
+            let app = e.app.clone();
+            let body = body.clone();
+            let (id, token) = (bot.id.clone(), bot.hook_token.clone());
+            async move {
+                raw(
+                    app,
+                    format!(
+                        "POST /api/supervisor/leases/rebuild/acquire HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Id: {id}\r\nX-AM-Bot-Token: {token}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    ),
+                )
+                .await
+            }
+        };
+
+        let denied = call(&attacker).await;
+        assert!(denied.starts_with("HTTP/1.1 403"), "一般 bot 不能冒用核准的 requester：{denied}");
+        assert!(denied.contains("requester_not_the_caller"), "{denied}");
+        assert!(crate::supervisor::store::lease(&e.app.db, "rebuild").await.unwrap().is_none(), "拒絕時不能開 lease");
+
+        let allowed = call(&owner).await;
+        assert!(allowed.starts_with("HTTP/1.1 200"), "申請者本人仍能開自己的 lease：{allowed}");
     }
 
     /// 角色閘的相容性：release／herdr 更新任務的 assignee 可以是專用的一般 bot（`release_bot_id`），任務正文叫它跑

@@ -1463,8 +1463,12 @@ fn yes() -> bool {
 pub async fn post_lease_acquire(
     State(app): State<Arc<App>>,
     Path(resource): Path<String>,
+    headers: HeaderMap,
     Json(b): Json<AcquireIn>,
 ) -> Result<Json<Value>, LcError> {
+    // Body 的 owner 與 approval requester 相等仍不夠：被證明身分的一般 bot 只能替自己開窗口，
+    // 否則任何 bot 都能借另一顆 bot 已獲核准的 approval 拿走 lease token。
+    requester_claim(&app, &headers, &b.owner).await?;
     Ok(Json(
         super::maintenance::acquire_with_request(
             &app,
