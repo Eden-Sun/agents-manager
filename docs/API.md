@@ -126,7 +126,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | GET | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | GET | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/changelog` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| GET | `/api/claude-update/review` | User 或已驗證 AGM role；一般 Bot → 403 `user_only` |
+| GET | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
 | GET | `/api/deploy/status` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | GET | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | GET | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -194,7 +194,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | HEAD | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | HEAD | `/api/capabilities` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/changelog` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
-| HEAD | `/api/claude-update/review` | User 或已驗證 AGM role；一般 Bot → 403 `user_only` |
+| HEAD | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已驗證 AGM role 可讀 |
 | HEAD | `/api/deploy/status` | User 或 Bot principal；Service 僅可走其明列 method/path scope |
 | HEAD | `/api/drafts` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | HEAD | `/api/fs/dirs` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
