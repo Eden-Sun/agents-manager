@@ -64,6 +64,14 @@ const MAX_ROWS_PER_BOT: usize = 32;
 /// holder／purpose／host 的長度上限（字元）：呼叫端給的字串原樣進 DB 再顯示在網頁。
 const MAX_FIELD_CHARS: usize = 200;
 
+fn has_oversized_fields(fields: &[&str]) -> bool {
+    fields.iter().any(|f| f.chars().count() > MAX_FIELD_CHARS)
+}
+
+fn field_limit_error() -> LcError {
+    LcError::Bad(format!("build-slot 欄位最多 {MAX_FIELD_CHARS} 個字元"))
+}
+
 /// 背景 sweep 的間隔：跟 `lifecycle::stuck_turns` 的節奏一致（見那邊的說明）。
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
 
@@ -418,8 +426,8 @@ pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(
     if body.holder.trim().is_empty() {
         return Err(LcError::Bad("holder 不能是空的".into()));
     }
-    if [&body.holder, &body.purpose, &body.host].iter().any(|f| f.chars().count() > MAX_FIELD_CHARS) {
-        return Err(LcError::Bad(format!("holder／purpose／host 最多 {MAX_FIELD_CHARS} 個字元")));
+    if has_oversized_fields(&[&body.holder, &body.purpose, &body.host]) {
+        return Err(field_limit_error());
     }
     let bot_id = authenticate(&app, &headers, body.bot_id.as_deref()).await?;
     match acquire(&app, body.holder.trim(), bot_id.as_deref(), body.purpose.trim(), body.host.trim()).await.map_err(up)? {
@@ -446,6 +454,9 @@ pub async fn post_acquire(State(app): State<Arc<App>>, headers: HeaderMap, Form(
 /// renew／release 不另外驗 bot／UI token：`acquire` 發出來的 `token` 本身就是憑證（跟 lease_token
 /// 同一個道理——知道那個 token 就等於是那個持有者），少一層 header 檢查，shim 續約迴圈也簡單一點。
 pub async fn post_renew(State(app): State<Arc<App>>, Form(body): Form<RenewIn>) -> Result<Json<Value>, LcError> {
+    if has_oversized_fields(&[&body.holder, &body.token]) {
+        return Err(field_limit_error());
+    }
     match renew(&app, body.holder.trim(), &body.token).await.map_err(up)? {
         Ok(expires_at) => Ok(Json(json!({"renewed": true, "expires_at": expires_at}))),
         Err(RenewErr::NotFound) => Err(LcError::NotFound("build_slot".into())),
@@ -454,6 +465,12 @@ pub async fn post_renew(State(app): State<Arc<App>>, Form(body): Form<RenewIn>) 
 }
 
 pub async fn post_release(State(app): State<Arc<App>>, Form(body): Form<ReleaseIn>) -> (axum::http::StatusCode, Json<Value>) {
+    if has_oversized_fields(&[&body.holder, &body.token]) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({"released": false, "error": "bad_request", "message": format!("build-slot 欄位最多 {MAX_FIELD_CHARS} 個字元")})),
+        );
+    }
     // 寫不進去不能回 released:true（#327）：名額會佔到 TTL，呼叫端要知道，才有機會重試；至少 log 留痕。
     match release(&app, body.holder.trim(), &body.token).await {
         Ok(()) => (axum::http::StatusCode::OK, Json(json!({"released": true}))),
@@ -566,6 +583,24 @@ mod tests {
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM build_slots").fetch_one(&app.db).await.unwrap();
         assert_eq!(rows, 0, "被擋下來的不能留下任何一列");
         let _ = post_acquire(State(app.clone()), h, Form(ok("h", "p", "local"))).await.unwrap();
+    }
+
+    /// The acquire form is not the only path accepting an untrusted holder: renew/release carry it too.
+    /// Keep the same field bound there so a caller cannot bypass the DB/log cap with a long holder.
+    #[tokio::test]
+    async fn oversized_holders_are_rejected_by_renew_and_release_too() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let Acquired::Granted { token, .. } = acquire(&app, "held", None, "test", "local").await.unwrap() else { panic!() };
+        let huge = "h".repeat(MAX_FIELD_CHARS + 1);
+
+        let renew_error = post_renew(State(app.clone()), Form(RenewIn { holder: huge.clone(), token: token.clone() })).await.unwrap_err();
+        assert!(matches!(renew_error, LcError::Bad(_)), "renew bypassed the holder field cap: {renew_error:?}");
+
+        let (code, body) = post_release(State(app.clone()), Form(ReleaseIn { holder: huge, token: token.clone() })).await;
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "release bypassed the holder field cap: {body:?}");
+        assert_eq!(body.0["released"], false);
+        assert!(matches!(renew(&app, "held", &token).await.unwrap(), Ok(_)), "rejected oversized requests must leave the real lease intact");
     }
 
     /// 核心驗收條件（issue #90）：N 個同時的 acquire，只有設定的名額數真的拿到，其餘回 waiting。

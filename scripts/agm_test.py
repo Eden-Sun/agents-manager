@@ -3034,6 +3034,36 @@ class CliHardeningTest(CliCase):
         self.assertNotEqual(code, 0)
         self.assertNotIn(TOKEN, err + out)
 
+    def test_a_daemon_error_cannot_reflect_the_session_token_to_cli_output(self):
+        from unittest.mock import patch
+
+        service_token_file = Path(self.dir.name) / "service.token"
+        service_token_file.write_text("service-secret-token-0123456789abcdef\n", encoding="utf-8")
+        service_token_file.chmod(0o600)
+        cases = (
+            (TOKEN, {}),
+            ("bot-secret-token-0123456789abcdef", {"AM_BOT_ID": "bot-agm", "AM_BOT_TOKEN": "bot-secret-token-0123456789abcdef"}),
+            ("service-secret-token-0123456789abcdef", {
+                "AM_SERVICE_ID": "daemon-swap", "AM_SERVICE_TOKEN_FILE": str(service_token_file),
+            }),
+        )
+        for secret, env in cases:
+            with self.subTest(auth=env or "ui"), patch.dict(os.environ, env):
+                FakeDaemon.routes["GET /api/supervisor/health"] = (500, {
+                    "error": "request_failed", "message": f"bad credential {secret}",
+                    "details": {"echo": secret, "nested": [f"Bearer {secret}"]},
+                })
+                code, out, err = self.run_cli("health")
+                self.assertNotEqual(code, 0)
+                self.assertEqual(out, "")
+                self.assertNotIn(secret, err, "daemon-controlled error detail must not echo the credential used for this request")
+
+                FakeDaemon.routes["GET /api/supervisor/health"] = (200, {"debug": {"auth": secret}})
+                code, out, err = self.run_cli("health")
+                self.assertEqual(code, 0, err)
+                self.assertNotIn(secret, out, "successful daemon responses must not reflect the credential either")
+                self.assertIn("[redacted]", out)
+
     def test_a_huge_error_body_is_capped(self):
         FakeDaemon.routes["GET /api/supervisor/health"] = (502, Raw("x" * 200_000))
         code, _out, err = self.run_cli("health")

@@ -39,20 +39,20 @@ def clean_env(config):
     return env
 
 
-def run_process(argv, *, cwd, env, timeout, stdin=None, new_session=True):
+def run_process(argv, *, cwd, env, timeout, stdin=None):
     proc = subprocess.Popen(argv, cwd=cwd, env=env, text=True, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=new_session)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     try:
         out, err = proc.communicate(stdin, timeout=timeout)
         return proc.returncode, out, err
     except BaseException:
         # Kill the whole process group, including MCP/browser children, on timeout or stop.
         try:
-            os.killpg(proc.pid, signal.SIGTERM) if new_session else proc.terminate()
+            os.killpg(proc.pid, signal.SIGTERM)
             proc.communicate(timeout=5)
         except (ProcessLookupError, subprocess.TimeoutExpired):
             try:
-                os.killpg(proc.pid, signal.SIGKILL) if new_session else proc.kill()
+                os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             proc.communicate()
@@ -159,7 +159,7 @@ def browser_consult(store, ident, config, collect=False, token=None):
         script = "globalThis.CONSULT_ARGS = " + json.dumps(args, ensure_ascii=False) + ";\n"
         script += (HERE / "chatgpt-consult.mjs").read_text()
         code, out, err = run_process([config["ego_binary"], "nodejs"], cwd=store.root,
-                                     env=clean_env(config), timeout=720, stdin=script, new_session=False)
+                                     env=clean_env(config), timeout=720, stdin=script)
         progress = journal_state(store, ident)
         if progress and progress.get("phase") == "done":
             return store.finish(ident, progress["answer"], progress["url"], token)

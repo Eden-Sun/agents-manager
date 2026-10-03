@@ -971,13 +971,13 @@ rustup 的 minimal profile 不含它——UI 據此提示「按安裝補上」�
   來時只給排隊排最早的 holder（`since` 最早，同值比 `holder`），就算這一刻剛好也在問、名額也剛好空著一樣要等。
 
 ### `POST /build-slots/renew`（表單）
-`{holder, token}`。**不驗 bot／UI token**，`token` 本身就是憑證。只有還在 `held` 且沒過期的名額能續：
+`{holder, token}`。`holder` 與 `token` 各最多 200 個字元，超過回 400。**不驗 bot／UI token**，`token` 本身就是憑證。只有還在 `held` 且沒過期的名額能續：
 `200 {"renewed":true,"expires_at"}`；找不到這一列（沒拿過／已過期被收回）→ `404`；`token` 不對 → `403 {"error":"token_mismatch"}`。
 cargo shim 把這兩個明確的拒絕（`not_found`／`token_mismatch`）視為**名額已失去**，立刻停掉前景的 cargo 行程樹、退 75（issue #128，SPEC §6.5g）；
 其他失敗（連不上、5xx）在到期前一直重試，撐到保守估的 deadline 仍續不上也停。
 
 ### `POST /build-slots/release`（表單）
-`{holder, token}`。一律幂等，永遠 `200 {"released":true}`（找不到、已過期、token 不對都當作「已經不是你的事了」）。
+`{holder, token}`。欄位各最多 200 個字元，超過回 400。其他情況一律幂等，永遠 `200 {"released":true}`（找不到、已過期、token 不對都當作「已經不是你的事了」）。
 
 ### `GET /api/build-slots`
 一般 `X-AM-Token`。現況（UI／人工查用）：
