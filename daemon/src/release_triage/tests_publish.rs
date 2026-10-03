@@ -182,6 +182,7 @@ case "$1 $2" in
     # 才測得出「列表看得到、搜尋還搜不到」那個空窗。
     case " $* " in
       *" --label "*) if [ -f "$D/created_issue.json" ]; then cat "$D/created_issue.json"; else cat "$D/labelled.json" 2>/dev/null || echo "[]"; fi ;;
+      *" in:title "*) cat "$D/title-search.json" 2>/dev/null || echo "[]" ;;
       *) if [ -f "$D/list.json" ]; then cat "$D/list.json"; else echo "[]"; fi ;;
     esac;;
   "issue create")
@@ -584,6 +585,121 @@ async fn a_remote_create_with_a_lost_ledger_write_counts_before_a_different_vers
     assert_eq!(recovered.issues.len(), 1, "the cross-version check should reconcile the lost ledger row");
     assert_eq!(recovered.issues[0].marker, recovered_marker);
     assert_eq!((recovered.issues[0].number, recovered.issues[0].comment), (101, false));
+    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), MAX_PER_DAY);
+}
+
+#[tokio::test]
+async fn a_lost_create_beyond_the_label_list_limit_still_blocks_a_different_version() {
+    let p = pool().await;
+    let gh = FakeGh::new("create-ledger-crash-beyond-page");
+    let es = seed(&p, &[("guard", &[0], None)]).await;
+    seed_created_refs(&p, "2.1.270", 7).await;
+    seed_version(&p, "2.1.278", &[("guard", &[1], None)]).await;
+    let lost_marker = issue::marker("claude", "2.1.277", &[judged(&es)[0].id.clone()]);
+    let _intent = ledger::ensure_publish_intent(
+        &p,
+        "claude",
+        "2.1.277",
+        &lost_marker,
+        ledger::PublishAction::Create,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The immediate label listing is capped at 200 and has been displaced by newer labelled issues.
+    let displaced: Vec<serde_json::Value> = (0..200)
+        .map(|n| {
+            json!({
+                "number": 1000 + n,
+                "url": format!("https://github.com/o/r/issues/{}", 1000 + n),
+                "title": format!("newer {n}"),
+                "body": "<!-- release-triage: unrelated -->"
+            })
+        })
+        .collect();
+    std::fs::write(gh.dir.join("labelled.json"), serde_json::to_vec(&displaced).unwrap()).unwrap();
+    // The marker search can find the old page entry. Searches for the later version's different marker
+    // still return no matching body, so this only supplies cross-version recovery evidence.
+    std::fs::write(
+        gh.dir.join("list.json"),
+        serde_json::to_vec(&json!([{
+            "number": 101,
+            "url": "https://github.com/o/r/issues/101",
+            "title": "orphaned create",
+            "body": format!("<!-- release-triage: {lost_marker} -->")
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let later = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.278").await.unwrap();
+    assert!(matches!(later, Outcome::Deferred { .. }), "the ninth create must be deferred: {later:?}");
+    assert_eq!(gh.count("issue create"), 0, "a recent create beyond the first 200 labelled issues still counts");
+    let recovered = ledger::get(&p, "claude", "2.1.277").await.unwrap().unwrap();
+    assert_eq!(recovered.issues.len(), 1, "the displaced lost ledger row should be reconciled");
+    assert_eq!(recovered.issues[0].marker, lost_marker);
+    assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), MAX_PER_DAY);
+}
+
+#[tokio::test]
+async fn a_lost_create_beyond_the_label_list_limit_is_found_after_its_marker_was_edited_out() {
+    let p = pool().await;
+    let gh = FakeGh::new("create-ledger-crash-title-fallback-beyond-page");
+    let es = seed(&p, &[("guard", &[0], None)]).await;
+    seed_created_refs(&p, "2.1.270", 7).await;
+    seed_version(&p, "2.1.278", &[("guard", &[1], None)]).await;
+    let proposal = StoredProposal {
+        entry_ids: vec![judged(&es)[0].id.clone()],
+        triage: "guard".into(),
+        title: "提案0".into(),
+        goal: "g".into(),
+        suggestion: "s".into(),
+        acceptance: "a".into(),
+        duplicate_of: None,
+    };
+    let lost_marker = issue::marker("claude", "2.1.277", &proposal.entry_ids);
+    let lost_title = issue::title("claude", "2.1.277", &proposal);
+    ledger::ensure_publish_intent(&p, "claude", "2.1.277", &lost_marker, ledger::PublishAction::Create, None)
+        .await
+        .unwrap();
+
+    let displaced: Vec<serde_json::Value> = (0..200)
+        .map(|n| {
+            json!({
+                "number": 2000 + n,
+                "url": format!("https://github.com/o/r/issues/{}", 2000 + n),
+                "title": format!("newer {n}"),
+                "body": "<!-- release-triage: unrelated -->"
+            })
+        })
+        .collect();
+    std::fs::write(gh.dir.join("labelled.json"), serde_json::to_vec(&displaced).unwrap()).unwrap();
+    std::fs::write(gh.dir.join("list.json"), "[]").unwrap();
+    std::fs::write(
+        gh.dir.join("title-search.json"),
+        serde_json::to_vec(&json!([{
+            "number": 102,
+            "url": "https://github.com/o/r/issues/102",
+            "title": lost_title,
+            "body": "the hidden marker was manually removed"
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let preview = issue::preflight(&p, &gh.cfg(true), Some("claude"), Some("2.1.278")).await.unwrap();
+    assert_eq!(
+        (preview["would_create"].as_u64(), preview["existing"].as_u64(), preview["blocked_by_caps"].as_u64()),
+        (Some(0), Some(0), Some(1)),
+        "dry-run also counts the marker-edited create outside the immediate label page: {preview}"
+    );
+    let later = issue::publish_version(&p, &gh.cfg(true), "claude", "2.1.278").await.unwrap();
+    assert!(matches!(later, Outcome::Deferred { .. }), "the ninth create must be deferred: {later:?}");
+    assert_eq!(gh.count("issue create"), 0, "an edited marker does not erase a confirmed recent create from the daily cap");
+    let recovered = ledger::get(&p, "claude", "2.1.277").await.unwrap().unwrap();
+    assert_eq!(recovered.issues.len(), 1, "the displaced lost ledger row should be reconciled by its exact daemon title");
+    assert_eq!((recovered.issues[0].number, recovered.issues[0].marker.as_str()), (102, lost_marker.as_str()));
     assert_eq!(ledger::created_in_last_day(&p).await.unwrap(), MAX_PER_DAY);
 }
 

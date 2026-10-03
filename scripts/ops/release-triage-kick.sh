@@ -254,48 +254,84 @@ done
 # 交辦成功才記進狀態檔，下一輪不再送；只看 14 天內開的，舊帳不翻。派給同一顆分診 bot（協調者／巡檢），由它照平常流程派 child。
 ISSUE_TASK="$DIR/release-issue-task.md"
 HANDED="$DIR/release-issue-handed"
-if [ -n "$BOT" ] && [ -f "$ISSUE_TASK" ]; then
-  for KIND in claude codex; do
-    SHOW=$("$AGM" --compact release-triage show --kind "$KIND" 2>/dev/null) || continue
-    TODO=$(printf '%s' "$SHOW" | HANDED="$HANDED" python3 -c '
+for KIND in claude codex; do
+  if ! SHOW=$("$AGM" --compact release-triage show --kind "$KIND" 2>/dev/null); then
+    note_fail "release-triage show --kind ${KIND} 失敗，尚未交接的 issue 留待下一輪"
+    continue
+  fi
+  TODO=$(printf '%s' "$SHOW" | HANDED="$HANDED" python3 -c '
 import json, os, sys, datetime
 try:
-    rows = json.load(sys.stdin).get("rows") or []
-except ValueError:
-    sys.exit(0)
+    data = json.load(sys.stdin)
+except (ValueError, TypeError):
+    sys.exit(1)
+if not isinstance(data, dict) or not isinstance(data.get("rows"), list):
+    sys.exit(1)
+rows = data["rows"]
 try:
     done = set(open(os.environ["HANDED"]).read().split())
 except OSError:
     done = set()
 cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)
 for r in rows:
+    if not isinstance(r, dict) or not isinstance(r.get("issues", []), list):
+        sys.exit(1)
     for i in r.get("issues") or []:
+        if not isinstance(i, dict):
+            sys.exit(1)
         if i.get("comment") or not i.get("number") or str(i["number"]) in done:
             continue
         try:
             at = datetime.datetime.fromisoformat(str(i.get("created_at", "")).replace("Z", "+00:00"))
         except ValueError:
+            print("invalid_timestamp\t%s\t%s\t%s\t%s" % (i["number"], i.get("url") or "", r.get("kind") or "", r.get("version") or ""))
+            continue
+        if at.tzinfo is None or at.utcoffset() is None:
+            print("invalid_timestamp\t%s\t%s\t%s\t%s" % (i["number"], i.get("url") or "", r.get("kind") or "", r.get("version") or ""))
             continue
         if at < cutoff:
             continue
-        print("%s\t%s\t%s\t%s" % (i["number"], i.get("url") or "", r.get("kind") or "", r.get("version") or ""))
-' 2>/dev/null) || TODO=""
-    # 不接在管線後面：管線裡的 while 是 subshell，`note_fail` 設的 ROUND_FAIL 會丟掉。
-    while IFS=$'\t' read -r _num _url _kind _ver; do
-      [ -n "$_num" ] || continue
-      _body=$(mktemp "${TMPDIR:-/tmp}/agm-release-issue.XXXXXX")
-      { cat "$ISSUE_TASK"; printf '\n\n---\n本次：%s %s 分診開的 issue #%s %s\n' "$_kind" "$_ver" "$_num" "$_url"; } > "$_body"
-      if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$_body" \
-           --request-id "release-issue-${_num}" >> "$LOG" 2>&1; then
-        echo "$_num" >> "$HANDED"
+        print("ready\t%s\t%s\t%s\t%s" % (i["number"], i.get("url") or "", r.get("kind") or "", r.get("version") or ""))
+' 2>/dev/null)
+  if [ "$?" -ne 0 ]; then
+    note_fail "release-triage show --kind ${KIND} 回傳資料無法解析，尚未交接的 issue 留待下一輪"
+    continue
+  fi
+  [ -n "$TODO" ] || continue
+  if [ -z "$BOT" ]; then
+    note_fail "release-triage ${KIND} 有尚未交接的 issue，但找不到收件 bot（AGM_RELEASE_BOT／runtime.json）"
+    continue
+  fi
+  if [ ! -f "$ISSUE_TASK" ]; then
+    note_fail "release-triage ${KIND} 有尚未交接的 issue，但找不到 ${ISSUE_TASK}"
+    continue
+  fi
+  # 不接在管線後面：管線裡的 while 是 subshell，`note_fail` 設的 ROUND_FAIL 會丟掉。
+  while IFS=$'\t' read -r _state _num _url _kind _ver; do
+    if [ "$_state" = invalid_timestamp ]; then
+      note_fail "issue #${_num} 的建立時間格式錯誤或沒有時區（${_kind} ${_ver}），留待修正後重試"
+      continue
+    fi
+    if [ "$_state" != ready ]; then
+      note_fail "release-triage show --kind ${KIND} 產生無法識別的交接列，留待下一輪"
+      continue
+    fi
+    [ -n "$_num" ] || continue
+    _body=$(mktemp "${TMPDIR:-/tmp}/agm-release-issue.XXXXXX")
+    { cat "$ISSUE_TASK"; printf '\n\n---\n本次：%s %s 分診開的 issue #%s %s\n' "$_kind" "$_ver" "$_num" "$_url"; } > "$_body"
+    if "$AGM" --compact assign --bot "$BOT" --review-by patrol --text-file "$_body" \
+         --request-id "release-issue-${_num}" >> "$LOG" 2>&1; then
+      if printf '%s\n' "$_num" >> "$HANDED"; then
         log "${_kind} ${_ver}：issue #${_num} 已交給 ${BOT} 接手"
       else
-        note_fail "issue #${_num} 交辦失敗（${_kind} ${_ver}），下一輪再試"
+        note_fail "issue #${_num} 已送出但寫不了交接狀態 ${HANDED}，下一輪沿用同 request-id 對帳重試"
       fi
-      rm -f "$_body"
-    done <<< "$TODO"
-  done
-fi
+    else
+      note_fail "issue #${_num} 交辦失敗（${_kind} ${_ver}），下一輪再試"
+    fi
+    rm -f "$_body"
+  done <<< "$TODO"
+done
 
 # 額度閘門（issue #204 §3）：該 bot 身分的 5h ≥ 門檻或有 limit_hit → 不派，列維持 pending，下一輪再看。
 # 查不到（端點壞、找不到這顆 bot 的額度格）照派並記 log，不要因為端點壞了就永遠不做。

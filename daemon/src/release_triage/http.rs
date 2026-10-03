@@ -78,8 +78,7 @@ async fn post_verdicts(State(app): State<Arc<App>>, Json(sub): Json<Submission>)
     // 模型填錯或幻覺出別的 issue／PR 編號時整份退回，不能把留言貼到不相干的地方。
     let dups: Vec<i64> = proposals.iter().filter_map(|p| p.duplicate_of).collect();
     if !dups.is_empty() {
-        let known: std::collections::BTreeSet<i64> =
-            ledger::list(&app.db, None, None).await.map_err(up)?.iter().flat_map(|r| r.issues.iter().map(|i| i.number)).collect();
+        let known = issue::ledger_issue_numbers(&app.db).await.map_err(up)?;
         let problems: Vec<String> = dups
             .iter()
             .filter(|d| !known.contains(d))
@@ -308,10 +307,16 @@ mod tests {
         other.truncate(1);
         ledger::insert_version(&app.db, "claude", "2.1.276", &other).await.unwrap();
         sqlx::query("UPDATE release_triage SET issue_numbers_json = ? WHERE kind = 'claude' AND version = '2.1.276'")
-            .bind(r#"[{"marker":"claude@2.1.276#x","entry_ids":["x"],"number":123,"url":"u","created_at":"2026-09-01T00:00:00.000Z","comment":false}]"#)
+            .bind(r#"[
+                {"marker":"claude@2.1.276#comment","entry_ids":["x"],"number":555,"url":"","created_at":"2026-09-01T00:00:00.000Z","comment":true},
+                {"marker":"claude@2.1.276#x","entry_ids":["x"],"number":123,"url":"u","created_at":"2026-09-01T00:00:00.000Z","comment":false}
+            ]"#)
             .execute(&app.db)
             .await
             .unwrap();
+        let err = submit(Some(555)).await.expect_err("只有留言記錄而沒有原 issue 記錄，不算合法 duplicate_of");
+        assert!(matches!(err, LcError::BadValue(_)), "{err:?}");
+        assert_eq!(ledger::get(&app.db, "claude", "2.1.277").await.unwrap().unwrap().status, Status::Pending);
         let ok = submit(Some(123)).await.expect("帳本裡有的 issue 照收");
         assert_eq!(ok.0["status"], "judged");
     }

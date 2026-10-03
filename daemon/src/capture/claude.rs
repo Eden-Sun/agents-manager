@@ -265,10 +265,14 @@ fn is_status_chrome(s: &str) -> bool {
 
 /// 輸入框底下的權限模式列。bypass／accept edits 是 `⏵⏵ … on (shift+tab to cycle)`，plan 是 `⏸ plan mode on (shift+tab to cycle)`；
 /// default 模式是 `⏸ manual mode on · ← for agents`，**沒有** `(shift+tab to cycle)`（#783，2.1.288 真畫面
-/// `claude-2.1.288-manual-mode-finished.txt`）。`⏸` 開頭的只認第一段（` · ` 之前）是 `… mode on` 的。
+/// `claude-2.1.288-manual-mode-finished.txt`）。`⏸` 開頭的只認第一段（` · ` 之前）完全等於已觀察到的 mode row。
 fn is_mode_row(s: &str) -> bool {
     let s = s.trim();
-    s.starts_with("⏵⏵") || s.strip_prefix('⏸').is_some_and(|rest| rest.split(" · ").next().unwrap_or(rest).contains(" mode on"))
+    if s.starts_with("⏵⏵") {
+        return true;
+    }
+    let Some(rest) = s.strip_prefix('⏸') else { return false };
+    matches!(rest.split(" · ").next().unwrap_or(rest).trim(), "manual mode on" | "plan mode on (shift+tab to cycle)")
 }
 
 fn is_zone_busy(s: &str) -> bool {
@@ -453,6 +457,7 @@ mod loose_noise_tests {
         }
         assert!(!is_mode_row("⏸ 暫停：等使用者決定 · mode on 的說明"));
         assert!(!is_noise("⏸ 暫停部署"));
+        assert!(!is_noise("⏸ The manual mode on label is confusing here."));
     }
 
     /// #331：`*` 開頭的回覆行（markdown 項目、程式碼區塊的 ` * 註解`）被當 spinner 剝掉。
