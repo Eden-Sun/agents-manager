@@ -459,6 +459,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     background_since: optStr(pick(v, 'background_since')),
     background_stuck: bool(pick(v, 'background_stuck')),
     blocked_reason: toBlockedReason(v.blocked_reason),
+    prompt_suggestion: optStr(v.prompt_suggestion),
     background_tasks: toBackgroundTasks(v.background_tasks),
     session_crons: toSessionCrons(v.session_crons),
     turn_error: optStr(pick(v, 'turn_error')),

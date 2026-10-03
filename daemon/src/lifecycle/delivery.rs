@@ -597,6 +597,39 @@ pub(crate) fn plain_without_hints(kind: &str, screen: &str) -> String {
     plain.join("\n")
 }
 
+/// 建議下一句最長幾個字：Claude 的建議是一句短話；比這長的多半不是建議，不拿來顯示、也不拿來一鍵送出。
+pub(crate) const SUGGESTION_MAX_CHARS: usize = 500;
+
+/// claude 輸入框裡那句灰字「建議下一句」（prompt suggestion，Tab 收下、Enter 送出）的文字；沒有、或框裡有使用者打的字＝`None`。
+/// 判斷跟 [`box_state`] 走同一條路（[`hint_rows`]：marker 那一列看得見的字**全部**是提示、框要看得到下緣），所以
+/// 「框被算成空的」與「這裡取得出建議」永遠是同一個結論；差別只在這裡把提示的字交出來。
+/// 只有樣式讀（`format: ansi`）分得出灰字：純文字讀回 `None`，不猜（同樣的字可能是使用者打的）。
+///
+/// 窄 pane 把建議折成兩列以上時，續行的字接在後面：兩側都是 ASCII 補一個空白、其餘直接接（中文沒有詞間空白）。
+/// 這是顯示用的最佳猜測——一鍵送出時對比用的是去掉空白的字，真正記進對話的是 session log 的原文。
+pub(crate) fn prompt_suggestion(kind: &str, screen: &str) -> Option<String> {
+    if kind != "claude" || !screen.contains('\u{1b}') || box_state(kind, screen) != BoxState::Empty {
+        return None;
+    }
+    let lines: Vec<&str> = screen.lines().collect();
+    let c = locate_composer(kind, &lines, false, composer_tail(kind, &lines))?;
+    let content = marker_row_content(kind, &c, false);
+    let more = hint_rows(&c, &content, &lines, false)?;
+    let mut text: String = content.iter().map(|(ch, _)| *ch).collect::<String>().trim().to_string();
+    for row in &lines[c.idx + 1..c.idx + 1 + more] {
+        let cells: String = styled_cells(row).into_iter().map(|x| x.ch).filter(|ch| *ch != '│').collect();
+        let part = cells.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if text.chars().next_back().is_some_and(|a| a.is_ascii()) && part.chars().next().is_some_and(|b| b.is_ascii()) {
+            text.push(' ');
+        }
+        text.push_str(part);
+    }
+    (!text.is_empty() && text.chars().count() <= SUGGESTION_MAX_CHARS).then_some(text)
+}
+
 fn continuation_row(row: &str) -> bool {
     row.strip_prefix("  ").map(|rest| !rest.trim().is_empty()).unwrap_or(false)
         && !row.trim_start().starts_with(['⏺', '✻', '⎿', '●', '─', '│'])
@@ -1649,6 +1682,48 @@ mod tests {
         assert_eq!(box_state("claude", &mixed), BoxState::NonEmpty, "同一行混了正常字");
         let mixed_front = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize", "x\u{1b}[2mInitialize");
         assert_eq!(box_state("claude", &mixed_front), BoxState::NonEmpty, "正常字在前");
+    }
+
+    /// 網頁要顯示的「建議下一句」：真畫面（2.1.280）的灰字取得出來，跟 [`box_state`] 的「框是空的」是同一個結論；
+    /// 純文字讀、使用者打的字、混了實字的一行、別的 kind 都取不出來（寧可不顯示，不把草稿當建議）。
+    #[test]
+    fn prompt_suggestion_is_the_dim_text_in_the_empty_box() {
+        assert_eq!(prompt_suggestion("claude", CLAUDE_280_SUGGESTION).as_deref(), Some("Initialize git"));
+        let cjk = CLAUDE_280_SUGGESTION.replace("Initialize git", "推給agm強制部署");
+        assert_eq!(prompt_suggestion("claude", &cjk).as_deref(), Some("推給agm強制部署"));
+        // 純文字讀（沒有 ESC）：分不出，不猜。
+        let plain: String = CLAUDE_280_SUGGESTION.lines().map(strip_ansi).collect::<Vec<_>>().join("\n");
+        assert!(plain.contains("Initialize git"), "前提：純文字裡看得到那幾個字");
+        assert_eq!(prompt_suggestion("claude", &plain), None);
+        // 使用者打的字（沒有 dim）、同一行混了實字、別的 kind。
+        let typed = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize git", "Initialize git");
+        assert_eq!(prompt_suggestion("claude", &typed), None, "打的字不是建議");
+        let mixed = CLAUDE_280_SUGGESTION.replace("Initialize git\u{1b}[0m", "Initialize git\u{1b}[0mx");
+        assert_eq!(prompt_suggestion("claude", &mixed), None, "同一行混了正常字");
+        assert_eq!(prompt_suggestion("codex", CLAUDE_280_SUGGESTION), None);
+        // 空框（沒有任何字）也不是建議。
+        assert_eq!(prompt_suggestion("claude", &CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize git\u{1b}[0m", "")), None);
+        // 長度上限：不拿一大段當成建議。
+        let long = CLAUDE_280_SUGGESTION.replace("Initialize git", &"長".repeat(SUGGESTION_MAX_CHARS + 1));
+        assert_eq!(prompt_suggestion("claude", &long), None);
+    }
+
+    /// 窄 pane 把建議折成兩列：續行接在後面；兩側都是 ASCII 補一個空白，中文直接接。
+    #[test]
+    fn a_wrapped_prompt_suggestion_is_joined_into_one_line() {
+        let wrapped = |first: &str, second: &str| {
+            CLAUDE_280_SUGGESTION.replace(
+                "\u{1b}[2mInitialize git\u{1b}[0m\r\n",
+                &format!("\u{1b}[2m{first}\u{1b}[0m\r\n  \u{1b}[2m{second}\u{1b}[0m\r\n"),
+            )
+        };
+        let screen = wrapped("Run the full test", "suite again");
+        assert_ne!(screen, CLAUDE_280_SUGGESTION, "fixture 換行的寫法變了，這個測試要跟著改");
+        assert_eq!(prompt_suggestion("claude", &screen).as_deref(), Some("Run the full test suite again"));
+        assert_eq!(prompt_suggestion("claude", &wrapped("跑一次完整", "測試再收尾")).as_deref(), Some("跑一次完整測試再收尾"));
+        // 續行裡有實字：整句是草稿，不是建議。
+        let typed_tail = CLAUDE_280_SUGGESTION.replace("\u{1b}[2mInitialize git\u{1b}[0m\r\n", "\u{1b}[2mInitialize git\u{1b}[0m\r\n  typed\r\n");
+        assert_eq!(prompt_suggestion("claude", &typed_tail), None);
     }
 
     /// 讀純文字判斷輸入框的地方（`composer_text`、`tui_prompts::composer_is_idle`）跟 [`box_state`] 同一個結論：

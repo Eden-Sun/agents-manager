@@ -1057,9 +1057,22 @@ codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`
 `relay_watch` 的補 Enter、`stop` 中斷後清框的 `ctrl+c`、`paste_check`）與 `judge::stuck`（`tui_prompts::composer_is_idle`）。以前它們讀純文字，
 建議句常常就是剛送過的那一句，會被當成「我們的字還留在框裡」去補 Enter、或被當成框擋著去問 Jev。
 實測 claude 2.1.280：只有建議句時按 Enter **不會**送出建議句（daemon 按 Enter 不會誤送它）。
-**啟動時就關掉建議句**：claude 的 pane env 帶 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`（本機、遠端同一份 `pane_env`；herdr shim 傳給子 pane；
-放在 identity／bot env 之前，bot env 可以蓋回去）。不用 `--prompt-suggestions false`：那個旗標只收 `--print --output-format stream-json`，
-互動模式帶了 claude 直接起不來（2.1.280 實測，`"false"` 確實關得掉、`"true"` 會畫出建議句）。只對新開的 run 有效，既有的 pane 靠上面的判斷。
+**建議句不再被全域關掉**（2026-10-03，使用者要在網頁看到並一鍵送出，見下一段）：以前 claude 的 pane env 帶 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`
+（2026-09-23 AM-2-M 的 409 之後加的）；現在所有看輸入框的地方都用樣式讀分得出灰字，就拿掉這個覆蓋，建議句跟著 CLI 與帳號自己的設定走（會多一次背景的模型呼叫）。
+個別 bot 不想要，在 bot env 設 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`（`"false"` 關得掉；不用 `--prompt-suggestions false`：那個旗標只收 `--print --output-format stream-json`，
+互動模式帶了 claude 直接起不來，2.1.280 實測）。只對新開的 run 有效。
+**網頁看得到、一鍵送出建議句**（2026-10-03，使用者：「要一模一樣 tab + enter 送出」；`prompt_suggestion.rs`、`lifecycle/suggestion.rs`）：
+- **讀**：`delivery::prompt_suggestion`（跟 `box_state` 同一條 `hint_rows` 判斷，所以「框算空」與「取得出建議」永遠同結論）從**樣式讀**取出灰字；純文字讀、使用者打的字、
+  混了實字、別的 kind、超過 500 字都是 `None`。記在記憶體（run id → 文字，不存 DB），投影成 `run.prompt_suggestion`（API.md；只在 `agent_status=idle` 帶，其餘 `null`），
+  變了才推 `bot_status`。節奏沿用既有的畫面巡邏、**沒有新的輪詢迴圈**：① idle 邊之後 1.5／3.5／7／14 秒各補讀一次、看到就停（建議是 Stop 之後 claude 另外算的，當下通常還沒畫；每個 idle 邊最多 4 次讀）；
+  ② `update_watch` 的 30 秒巡邏本來就讀一份純文字畫面——輸入列是空的就不再讀，輸入列有字才多讀一次樣式畫面分辨「灰字」與「草稿」（順便抓到使用者在終端打字、建議消失）；③ 離開 idle（回合開始）就忘掉。讀不到畫面什麼都不動。
+- **送**（`POST /bots/{id}/suggestion/accept`，只有使用者本人）：**對 pane 送 Tab 再送 Enter**，全程在 bot 鎖內：先過一般送出的閘門（維護窗口、回合在飛、對話框、接回未驗證…，`composer_draft::submit_gates`），
+  重讀樣式畫面，建議還在而且跟 body 的字相同（比對去掉空白）才按 Tab——否則 409 `suggestion_gone`／`suggestion_changed`，**一個鍵都不按**；Tab 之後等重畫再讀，框裡要變成那一句（真字、不再是灰字）；
+  然後走「送出框裡那段」的既有流程（`composer_draft::submit_locked`：回合＋使用者訊息在 Enter **之前**寫進 DB、證明送達、掛 stall／progress）。**記錄**：`origin=web`、訊息 `source=web`、`sent_via` 空——跟網頁送出的 prompt 完全一樣
+  （不新增 `sent_via` 值：那欄有 CHECK，加值要重建 messages 表，而且使用者要的就是「跟打字送出沒有兩樣」），所以不是外部回合、也不重複記兩則，對話窗、未讀、回合追蹤照舊；訊息內容換成 session log 的原文。同一個 `client_request_id` 重送回原本那一筆、不再按鍵。
+- **Tab 之後對不上時的還原**（Tab 已經把那句放進框裡，鍵收不回來）：框裡**還是**那一句、只是後面的閘門擋下（回合撤回、一個字都沒送出）→ 補一個 `ctrl+c` 清成乾淨的空框（`composer_draft::clear`，它自己再驗一次框裡就是那一句、沒有回合在跑才按），
+  回應帶 `suggestion_restored:true`；代價是 CLI 那句灰字沒了（下個回合結束才會再有）。框裡是**別的字**（使用者剛好在終端打字）→ 一個鍵都不按，409 `draft_changed` 帶那段草稿與 token，走既有的草稿流程。Tab 沒生效（兩次重讀框都還是空的）→ 409 `tab_not_accepted`，沒有東西要還原。
+  Tab 之後讀不到畫面 → 409 `composer_unreadable`，不再按任何鍵。`suggestion_*`、`tab_not_accepted` 與 Tab 之後的 409 都帶 `sent:false` 與 `tab_sent`（有沒有按過 Tab）。
 **codex 的點字動畫**（v0.154.0／gpt-6-astra 起）：輸入列與上下各一列撒著會動的點字 `⠁⠂⠄⠈⠐⠠⢀`（U+2800–U+28FF），每顆都帶自己的前景色、不是 dim，而且蓋在空白格上——包括 `›` 後那一格、草稿字與字之間的空格。只有 **codex＋styled 讀法**時，帶前景色、非 dim 的點字視同原本那格空白：marker 列擦掉點字後只剩 dim 內容或空白就是空框，下一列只剩縮排與點字就算空白列。沒有顏色或 dim 的點字、任何一般字元照樣是內容；純文字讀法不放寬（分不出是不是打的）；claude／grok 不套這條。真畫面 fixture：`daemon/src/lifecycle/fixtures/codex_astra_particles_{empty,draft}.ansi`。
 
 herdr 回錯且訊息明確提到 `format`（舊版或遠端不認得這個參數）時退回純文字讀法——沒有樣式可看，佔位字自然判非空；herdr

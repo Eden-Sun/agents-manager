@@ -53,7 +53,7 @@ pub(crate) fn shown(draft: &str) -> (String, bool) {
 }
 
 /// 把完整、已由 composer parser 正規化的文字和所屬 run/pane 綁成固定長度識別碼。
-fn draft_token(run_id: &str, pane: &str, draft: &str) -> String {
+pub(super) fn draft_token(run_id: &str, pane: &str, draft: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"agents-manager:composer-draft:v1\0");
     for part in [run_id, pane, draft] {
@@ -82,12 +82,12 @@ fn draft_fields(kind: &str, run: &db::Run, draft: Option<&str>) -> Value {
     }
 }
 
-fn pane_of(run: &db::Run) -> Option<String> {
+pub(super) fn pane_of(run: &db::Run) -> Option<String> {
     run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()).map(str::to_string)
 }
 
 /// 框的狀態＋框裡的字（跟送 prompt 前的檢查同一種讀法：帶樣式，TUI 自己畫的提示不算字）。
-async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Result<(BoxState, Option<String>, u64)> {
+pub(super) async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> anyhow::Result<(BoxState, Option<String>, u64)> {
     let read = super::delivery::read_styled_snapshot(client, pane, SCAN_SOURCE, DELIVER_SCAN_LINES).await?;
     if read.pane_id != pane {
         anyhow::bail!("pane.read returned pane {} while reading {pane}", read.pane_id);
@@ -115,7 +115,7 @@ async fn planned_authority_matches(app: &Arc<App>, run: &db::Run, proof: Option<
     }
 }
 
-fn refusal(reason: &str, run: &db::Run, retryable: bool, kind: &str, draft: Option<&str>) -> LcError {
+pub(super) fn refusal(reason: &str, run: &db::Run, retryable: bool, kind: &str, draft: Option<&str>) -> LcError {
     let mut extra = json!({"run_id": run.id, "retryable": retryable, "sent": false});
     if let (Some(o), Some(f)) = (extra.as_object_mut(), draft_fields(kind, run, draft).as_object()) {
         o.extend(f.clone());
@@ -123,7 +123,7 @@ fn refusal(reason: &str, run: &db::Run, retryable: bool, kind: &str, draft: Opti
     LcError::conflict(reason, extra)
 }
 
-fn unreadable(run: &db::Run) -> LcError {
+pub(super) fn unreadable(run: &db::Run) -> LcError {
     not_attempted_error(&run.id, Delivered::NotAttempted { reason: "composer_unreadable", retry: true })
 }
 
@@ -328,11 +328,52 @@ async fn withdraw_unsubmitted(app: &Arc<App>, bot_id: &str, run: &db::Run, turn_
     }
 }
 
+/// 送出框裡那段（或接受建議）之前的閘門：維護窗口、run 在跑、不在對話框、沒有進行中的回合、接回已驗證、畫面可送、沒有送達不明的回合。
+/// 一個鍵都不按；回傳要送進去的那個 run。接受建議在按 Tab **之前**先過一次，不然閘門擋下時框裡已經多了一段字。
+pub(super) async fn submit_gates(app: &Arc<App>, bot_id: &str, bot: &db::Bot, conv: &str) -> LcResult<db::Run> {
+    if let Some(refusal) = maintenance_refusal(app, Admission::Gated).await {
+        return Err(refusal);
+    }
+    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::conflict("bot has no active run", json!({})))?;
+    if run.state != "running" {
+        return Err(LcError::conflict("run is not running", json!({"run_id": run.id, "state": run.state})));
+    }
+    if run.agent_status == "blocked" {
+        return Err(LcError::conflict("agent is blocked; answer the prompt first", json!({"run_id": run.id})));
+    }
+    if let Some(t) = db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
+        return Err(LcError::conflict("a turn is already in flight", json!({"turn_id": t.id})));
+    }
+    if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, bot, &run, conv).await {
+        return Err(LcError::conflict(
+            "resume_unverified",
+            json!({"run_id": run.id, "session_id": expected, "retry_after_s": left.as_secs().max(1)}),
+        ));
+    }
+    pane_ready_for_prompt(app, bot, &run, conv).await?;
+    if let Some(t) = sqlx::query_as::<_, db::Turn>(
+        "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
+    )
+    .bind(&conv)
+    .fetch_optional(&app.db)
+    .await
+    .map_err(up)?
+    {
+        return Err(LcError::conflict("a previous turn has unknown delivery; abandon it first", json!({"turn_id": t.id})));
+    }
+    Ok(run)
+}
+
 /// `POST /bots/{id}/prompt` 帶 `submit_draft`：送出框裡那段。跟一般 prompt 同一套前提（冪等、維護窗口、回合在飛、
 /// 接回未驗證、畫面上開著的選單、unknown 回合）；差別只在不打字、改按 Enter，訊息內容是框裡那段。
 pub async fn submit(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> LcResult<PromptOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
+    submit_locked(app, bot_id, expect_token, client_request_id).await
+}
+
+/// [`submit`]，呼叫端已經握著這顆 bot 的鎖（接受建議下一句：先按 Tab、確認框裡就是那句，再在同一把鎖裡送出，`suggestion.rs`）。
+pub(super) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> LcResult<PromptOut> {
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
         tracing::warn!(bot = %bot_id, error = %e, "上一次打斷欠著的收尾還是寫不進去");
     }
@@ -356,36 +397,7 @@ pub async fn submit(app: &Arc<App>, bot_id: &str, expect_token: &str, client_req
     {
         return answer_for_turn(app, &t).await;
     }
-    if let Some(refusal) = maintenance_refusal(app, Admission::Gated).await {
-        return Err(refusal);
-    }
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::conflict("bot has no active run", json!({})))?;
-    if run.state != "running" {
-        return Err(LcError::conflict("run is not running", json!({"run_id": run.id, "state": run.state})));
-    }
-    if run.agent_status == "blocked" {
-        return Err(LcError::conflict("agent is blocked; answer the prompt first", json!({"run_id": run.id})));
-    }
-    if let Some(t) = db::in_flight_turn(&app.db, &run.id).await.map_err(up)? {
-        return Err(LcError::conflict("a turn is already in flight", json!({"turn_id": t.id})));
-    }
-    if let super::resume_gate::Gate::Waiting { expected, left } = super::resume_gate::check(app, &bot, &run, &conv).await {
-        return Err(LcError::conflict(
-            "resume_unverified",
-            json!({"run_id": run.id, "session_id": expected, "retry_after_s": left.as_secs().max(1)}),
-        ));
-    }
-    pane_ready_for_prompt(app, &bot, &run, &conv).await?;
-    if let Some(t) = sqlx::query_as::<_, db::Turn>(
-        "SELECT * FROM turns WHERE conversation_id=? AND delivery='unknown' AND status='in_flight' LIMIT 1",
-    )
-    .bind(&conv)
-    .fetch_optional(&app.db)
-    .await
-    .map_err(up)?
-    {
-        return Err(LcError::conflict("a previous turn has unknown delivery; abandon it first", json!({"turn_id": t.id})));
-    }
+    let run = submit_gates(app, bot_id, &bot, &conv).await?;
     let client = client_for_run(app, &run).await?;
     let Some(pane) = pane_of(&run) else {
         return Err(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));

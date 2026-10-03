@@ -336,6 +336,8 @@ export interface Run {
   background_stuck?: boolean
   /** 為什麼停在 blocked（daemon 的結構化原因，`code` 是穩定的短代碼、`text` 是一句話）；沒有／不知道＝`null`，舊 daemon 沒這個欄位也是 `null`。 */
   blocked_reason?: BlockedReason | null
+  /** claude 輸入框裡那句灰字「建議下一句」（`run.prompt_suggestion`）；只在 idle 才有，其他一律 `null`，舊 daemon 沒這個欄位也是 `null`。 */
+  prompt_suggestion?: string | null
   /** claude ≥ 2.1.287 的 Stop hook 報的背景工作明細（SPEC §6.14）；null＝沒報過（舊版 claude、剛重啟，數字來自畫面判斷）；`[]`＝報過「沒有」。 */
   background_tasks?: BackgroundTask[] | null
   /** 同一則 Stop 報的 session 排程（/loop、ScheduleWakeup…）：只當資訊，不算背景工作。 */

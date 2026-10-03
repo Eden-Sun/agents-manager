@@ -102,6 +102,8 @@ pub struct LivePane {
     pub codex: bool,
     /// claude's suggested next prompt: drawn dim in an empty composer, gone once anything is typed.
     pub suggestion: Option<String>,
+    /// A TUI that ignores Tab: the dim suggestion stays where it was.
+    pub swallow_tab: bool,
     /// claude 2.1.277+（#205）：Enter 時框裡有這些字就先拿掉、清過的字留在框裡，底下顯示 review 提示；再按一次才送出。
     pub strips_on_enter: Option<fn(char) -> bool>,
     /// 上面那個 review 提示（畫在框的下緣之後）。
@@ -634,6 +636,12 @@ impl MockHerdr {
                                         "enter" if !p.swallow_enter => submit_composer(p),
                                         _ if send_now && !p.swallow_enter => submit_composer(p),
                                         "ctrl+c" => p.composer.clear(),
+                                        // claude：空框裡的灰字建議，Tab 把它收進框裡（真正的字，不再是灰字）。
+                                        "tab" if !p.swallow_tab && p.composer.is_empty() => {
+                                            if let Some(s) = p.suggestion.take() {
+                                                p.composer = vec![s];
+                                            }
+                                        }
                                         _ => {}
                                     }
                                     prev.clone_from(k);

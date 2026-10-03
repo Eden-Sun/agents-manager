@@ -248,6 +248,9 @@ pub fn run_json<T: serde::Serialize>(app: &App, run: &Option<T>, run_id: Option<
         // 舊的前端忽略這個欄位。
         let blocked = o.get("agent_status").and_then(Value::as_str) == Some("blocked");
         o.insert("blocked_reason".into(), if blocked { crate::blocked_reason::json(id) } else { Value::Null });
+        // claude 輸入框裡那句灰字「建議下一句」（`prompt_suggestion.rs`）：只在 idle 帶，其他一律 null。
+        let status = o.get("agent_status").and_then(Value::as_str).map(str::to_owned);
+        o.insert("prompt_suggestion".into(), crate::prompt_suggestion::json(id, status.as_deref()));
     }
     v
 }

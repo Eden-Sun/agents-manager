@@ -111,6 +111,8 @@ interface MockRun {
   ended_at: string | null
   /** `agent_status` 最後一次真的改變的時間，只有 `setAgentStatus` 會動它（issue #93）。 */
   agent_status_since: string | null
+  /** claude 輸入框裡的灰字「建議下一句」（`run.prompt_suggestion`）；只在 idle 有，離開 idle 就清掉。 */
+  prompt_suggestion?: string | null
 }
 
 /** 同值重寫不算改變：mock 也要跟 daemon 的 trigger 同一套規則，不然本地開發永遠測不到「跑了多久」。 */
@@ -118,6 +120,7 @@ function setAgentStatus(run: MockRun, status: MockRun['agent_status']) {
   if (run.agent_status === status) return
   run.agent_status = status
   run.agent_status_since = now()
+  if (status !== 'idle') run.prompt_suggestion = null
 }
 
 /** Real-session values so the status bar is exercised at a realistic width. */
@@ -1075,6 +1078,7 @@ export class MockTransport implements Transport {
     if (action === 'abort') return this.abort(botId)
         if (action === 'login') return this.login(botId)
         if (action === 'prompt') return this.prompt(botId, b)
+        if (action === 'suggestion' && seg[3] === 'accept') return this.acceptSuggestion(botId, b)
         if (action === 'keys') return this.keys(botId, b)
         if (action === 'text') return this.text(botId, b)
         if (action === 'pane' && seg[3] === 'move-to-tab') return this.movePaneToTab(botId)
@@ -2911,6 +2915,8 @@ export class MockTransport implements Transport {
         run.status_line = 'tony… | OP5 | 26% | 5h 85% | 7d 27% | $18.67'
         // 帶 update_notice，演 UpdateBadge。
         if (this.bot(botId).name === 'am-claude') run.update_notice = 'Update installed · Restart to update'
+        // 演建議下一句（claude 回合結束後輸入框裡的灰字）。
+        if (this.bot(botId).name === 'am-claude') run.prompt_suggestion = '跑一次完整測試，確認都綠再收尾'
         // 這顆在忙，批次重啟會跳過（SPEC §6.9）。
         if (this.bot(botId).name === 'am-claude-2') {
           run.update_notice = 'Update installed · Restart to update'
@@ -3596,6 +3602,31 @@ export class MockTransport implements Transport {
   }
 
   /** Enter 是分開的一顆鍵。 */
+  /** 一鍵送出建議下一句（`POST /bots/:id/suggestion/accept`）：對不上就 409、不送；對上了照一般 prompt 開回合。 */
+  setPromptSuggestion(botId: string, text: string | null) {
+    const run = this.activeRun(botId)
+    if (!run) return
+    run.prompt_suggestion = text
+    this.emitBotStatus(botId)
+  }
+
+  private acceptSuggestion(botId: string, b: Rec) {
+    this.refuseHandedOff(botId)
+    const run = this.activeRun(botId)
+    if (!run) throw new ApiError(409, { error: 'conflict', reason: 'bot has no active run' }, 'conflict')
+    if (typeof b.expect_run_id === 'string' && b.expect_run_id !== run.id) {
+      throw new ApiError(409, { error: 'conflict', reason: 'run mismatch', run_id: run.id, sent: false }, 'conflict')
+    }
+    const want = String(b.suggestion ?? '').trim()
+    const now = run.agent_status === 'idle' ? (run.prompt_suggestion ?? null) : null
+    if (!now) throw new ApiError(409, { error: 'conflict', reason: 'suggestion_gone', run_id: run.id, sent: false, tab_sent: false }, 'suggestion_gone')
+    if (now.replace(/\s/g, '') !== want.replace(/\s/g, '')) {
+      throw new ApiError(409, { error: 'conflict', reason: 'suggestion_changed', run_id: run.id, sent: false, tab_sent: false, suggestion: now }, 'suggestion_changed')
+    }
+    run.prompt_suggestion = null
+    return this.prompt(botId, { text: now, client_request_id: b.client_request_id })
+  }
+
   private text(botId: string, b: Rec) {
     const run = this.activeRun(botId)
     if (!run) throw new ApiError(409, { reason: 'Bot 未在執行中' }, 'conflict')
@@ -4112,6 +4143,8 @@ function installDevHelpers(mock: MockTransport) {
     paneSqueeze: (n = 5) => mock.setForeignPanes(n),
     // 下一個符合的請求回錯：`__amMock.failNext('POST', 'identities/.*/login', 409, {reason: '…', message: '…'})`
     failNext: (method: HttpMethod, pattern: string, status: number, body: Rec = {}) => mock.failNext(method, pattern, status, body),
+    // claude 輸入框裡的灰字建議下一句：`__amMock.suggestion('am-claude', '跑完整測試')`（`null` 清掉；bot 要是 idle 才看得到）
+    suggestion: (botIdOrName: string, text: string | null) => mock.setPromptSuggestion(mock.botIdByName(botIdOrName) ?? botIdOrName, text),
     // bot 的輸入框卡著一段沒送出的字：之後送 prompt 回 409 composer_busy（`null` 清掉）
     composerDraft: (botIdOrName: string, text: string | null) => mock.composerDrafts.set(mock.botIdByName(botIdOrName) ?? botIdOrName, text),
     // 更新框：清掉某個 kind 的分診帳本（演「尚未分析」）、給 bot 掛更新通知
