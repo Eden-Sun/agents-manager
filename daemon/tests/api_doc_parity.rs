@@ -67,7 +67,7 @@ fn api_route_methods_match_documented_inventory() {
         documented.values().all(|policy| !policy.trim().is_empty()),
         "every documented route needs a permission description"
     );
-    for route in user_only_routes(API_RS) {
+    for (route, policy_kind) in bot_route_policies(API_RS) {
         let mut expected = vec![route.clone()];
         if route.0 == "GET" {
             expected.push(("HEAD".to_owned(), route.1.clone()));
@@ -79,52 +79,51 @@ fn api_route_methods_match_documented_inventory() {
                     expected_route.0, expected_route.1
                 )
             });
-            assert!(
-                policy.starts_with("User-only"),
-                "permission mismatch for {} {}: source enforces User-only, docs say {policy}",
-                expected_route.0,
-                expected_route.1
-            );
-        }
-    }
-    for route in strict_user_only_routes(API_RS) {
-        let mut expected = vec![route.clone()];
-        if route.0 == "GET" {
-            expected.push(("HEAD".to_owned(), route.1.clone()));
-        }
-        for expected_route in expected {
-            let policy = documented.get(&expected_route).unwrap_or_else(|| {
-                panic!(
-                    "strict User-only route missing from API.md: {} {}",
+            match policy_kind.as_str() {
+                "UserOnly" => assert!(
+                    policy.contains("Bot")
+                        && policy.contains("403 `user_only`")
+                        && (policy.contains("AGM role 均") || policy.contains("AGM role Bot")),
+                    "strict User-only policy must explicitly deny AGM roles for {} {}: {policy}",
                     expected_route.0, expected_route.1
-                )
-            });
-            assert!(
-                policy.starts_with("User-only") && policy.contains("AGM role 均"),
-                "strict User-only policy must explicitly deny AGM roles for {} {}: {policy}",
-                expected_route.0,
-                expected_route.1
-            );
+                ),
+                "UserOrAgm" => assert!(
+                    policy.contains("一般 Bot → 403 `user_only`")
+                        && (policy.contains("AGM role") || policy.contains("AGM 角色")),
+                    "UserOrAgm policy must deny plain Bots and preserve registered AGM access for {} {}: {policy}",
+                    expected_route.0, expected_route.1
+                ),
+                other => panic!("unknown central Bot route policy {other} for {} {}", expected_route.0, expected_route.1),
+            }
         }
     }
 }
 
-fn strict_user_only_routes(source: &str) -> BTreeSet<(String, String)> {
-    const START: &str = "const BOT_STRICT_USER_ONLY_ROUTES: &[(&str, &str)] = &[";
+fn bot_route_policies(source: &str) -> BTreeMap<(String, String), String> {
+    const START: &str = "const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[";
     let start = source
         .find(START)
-        .expect("api.rs must keep the strict User-only route policy at the auth boundary");
+        .expect("api.rs must keep Bot route policy at the auth boundary");
     let tail = &source[start + START.len()..];
     let end = tail
         .find("];\n")
-        .expect("strict User-only route policy must be closed");
-    let mut routes = BTreeSet::new();
+        .expect("Bot route policy must be closed");
+    let mut routes = BTreeMap::new();
     for line in tail[..end].lines() {
         let values: Vec<_> = line.split('"').skip(1).step_by(2).collect();
         if values.len() == 2 {
+            let policy = if line.contains("BotRoutePolicy::UserOnly") {
+                "UserOnly"
+            } else if line.contains("BotRoutePolicy::UserOrAgm") {
+                "UserOrAgm"
+            } else {
+                panic!("unknown Bot route policy variant: {line}");
+            };
             assert!(
-                routes.insert((values[0].to_owned(), values[1].to_owned())),
-                "duplicate strict User-only route: {line}"
+                routes
+                    .insert((values[0].to_owned(), values[1].to_owned()), policy.to_owned())
+                    .is_none(),
+                "duplicate Bot route policy: {line}"
             );
         }
     }
@@ -306,28 +305,6 @@ fn documented_routes(docs: &str) -> BTreeMap<(String, String), String> {
                 .is_none(),
             "duplicate documented route {path}"
         );
-    }
-    routes
-}
-
-fn user_only_routes(source: &str) -> BTreeSet<(String, String)> {
-    const START: &str = "const BOT_USER_ONLY_ROUTES: &[(&str, &str)] = &[";
-    let start = source
-        .find(START)
-        .expect("api.rs must keep the User-only route policy at the auth boundary");
-    let tail = &source[start + START.len()..];
-    let end = tail
-        .find("];\n")
-        .expect("User-only route policy must be closed");
-    let mut routes = BTreeSet::new();
-    for line in tail[..end].lines() {
-        let values: Vec<_> = line.split('"').skip(1).step_by(2).collect();
-        if values.len() == 2 {
-            assert!(
-                routes.insert((values[0].to_owned(), values[1].to_owned())),
-                "duplicate User-only route: {line}"
-            );
-        }
     }
     routes
 }
