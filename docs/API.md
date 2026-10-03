@@ -299,6 +299,8 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 { "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<自己的 bot id>", "attachments"?: ["<attachment id>"], "send_now"?: true, "start_if_stopped"?: true, "queue_if_busy"?: true }
 ```
 
+收件 bot 與所屬 project 都必須存在且未刪除，否則回 `404`；project 狀態會在 bot lock 內重驗，避免刪除中的孤兒 bot 收到 prompt。
+
   - Bot principal 一定要帶成對 `X-AM-Bot-Id`、`X-AM-Bot-Token`，且不能混帶 `X-AM-Token`。`AM_BOT_TOKEN` 是每個 bot 都注入的 API 憑證；目前重用 `bots.hook_token`，可由 User 用 credential rotation 立即失效並重啟該 bot。若任一活著的後代 pane 還繼承母 bot 的 token，輪替先以 `409 live_children_use_credential` 拒絕，不撤舊值。`AM_HOOK_TOKEN` 只在 hook-enabled pane 注入。網頁沒有 Bot headers，仍以共用 UI token 作 User principal。
   - `relay_from` 是來源標記，不能覆蓋 principal。省略時：User 請求記為使用者；Bot 請求由 daemon 補成已驗證的 `X-AM-Bot-Id`。Bot 若提供 `relay_from`，只能是自己的 id，否則 403 `relay_from_mismatch`。#339 的未驗證相容期已在 #410 結束：User 沒帶 Bot proof 就自稱活 bot 來源一律 403 `relay_from_token_required`（歷史訊息的 `relay_unverified = 1` 保留）。
 
@@ -1110,14 +1112,14 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 開機那一次投影則直接拒絕啟動並說明——以前這條路全部放行，而一列 `name = "local"` 會把本機那顆連線換成 ssh 遠端。
 
 **更新到「指去另一台機器」要先清空**（issue #544）：同名更新若改動了 `ssh`／`ssh_port`／`herdr_session`
-（＝這個名字指到哪台機器），而該主機上還有活著的專案 → `409 conflict`，`reason` 是 `host_repoint_in_use`，
-內文帶 `from`／`to` 與擋下來的 `projects`，**config 一個字都不會寫**。跟 `DELETE /api/hosts/{name}` 同一條判斷：
+（＝這個名字指到哪台機器），而該主機上還有活著的專案、孤兒 bot 的 active run，或未完成的遠端 bot 目錄清理 → `409 conflict`，`reason` 是 `host_repoint_in_use`，
+內文帶 `from`／`to`、`projects` 與必要時的 `bot_ids`，**config 一個字都不會寫**。專案設定鎖內會再檢查一次，避免同時新增的專案漏過確認。跟 `DELETE /api/hosts/{name}` 同一條判斷：
 `apply_config` 會把連線整個換掉，但 `runs` 一列都不動——那些 run 還帶著**舊那台**開出來的 pane id，
 之後 daemon 會拿它們去問新那台（pane 不存在就把 run 收掉，剛好撞上同名 pane 就更糟）。
 只改 `remote_path` 不算換機器，照舊放行。`ssh_opts` 可以改 `User`／`IdentityFile` 等 SSH 身分，故有活著的專案時任何 `ssh_opts` 變更也要帶 `?confirm=repoint`。
 
 ### `DELETE /api/hosts/{name}`
-`200 {}`；仍有 project 使用 → `409 {"reason":"host still used by projects","project_id"}`；`local` 400。刪除時推 `host_changed {"connected":false,"error":"removed"}` 與 `project_changed`。
+`200 {}`；仍有 project 使用 → `409 {"reason":"host still used by projects","project_id"}`；host 上仍有未刪 bot、active run，或尚未完成遠端 bot 目錄（含 shims）清理 → `409 {"reason":"host_bot_cleanup_pending","bot_ids":[…]}`；`local` 400。只在清理完成後移除 host 設定與連線。刪除時推 `host_changed {"connected":false,"error":"removed"}` 與 `project_changed`。
 
 ### `POST /api/hosts/{name}/reconnect`
 只接受 User principal（UI token）。強制重建 ssh master 與訂閱，回應同 `POST /api/hosts`。`local` 也可（重新 ping）。找不到 404。
@@ -1792,7 +1794,7 @@ WS（每則帶 `update_id`／`host`／`target_version`）：`herdr_update_progre
 ### 12.7 透過現有 agent 安裝 `POST /api/hosts/{name}/tools/install`
 `{ "kind": "grok", "via_bot_id": "01M1…" }`：daemon 組一則安裝 prompt（官方安裝方式：claude `curl -fsSL https://claude.ai/install.sh | bash`、codex `npm i -g @openai/codex`、
 grok `curl -fsSL https://x.ai/cli/install.sh | bash`；接著確認 `--version`、執行登入並原樣印出登入 URL），走 §5 送給 `via_bot_id`。
-回 `200 {"turn_id","message_id","delivery"}`。bot 不存在 404；不屬於該 host 400；bot 不可送 → §5 的 409；`kind` 不合法 400。登入時 pane 會 `blocked`，使用者在終端快照處理；完成後打 tools/refresh。
+回 `200 {"turn_id","message_id","delivery"}`。bot／所屬專案不存在或已刪除 404；bot 不屬於該 host 400；bot 不可送 → §5 的 409；`kind` 不合法 400。登入時 pane 會 `blocked`，使用者在終端快照處理；完成後打 tools/refresh。
 
 ### 12.8 bot 人設 `bot.persona`
 `string | null`：附加到 agent system prompt 尾端的文字，不動專案裡共用的 `CLAUDE.md` / `AGENTS.md`。TOML `persona = """…"""`；POST 可省、PATCH 可改（`null`/`""` 清除，有 active Run 列入 `needs_restart`）。

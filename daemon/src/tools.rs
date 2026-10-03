@@ -658,13 +658,14 @@ pub fn identity_probe_sh(items: &[IdentityProbe]) -> String {
         for (k, v) in it.env.iter().filter(|(k, _)| valid_env_name(k)) {
             s.push_str(&format!(" {k}={}; export {k};", sh_quote(v)));
         }
+        s.push_str(" __AM_IDENT_BODY=$( ");
         s.push_str(&format!(" {}", sh_quote(&it.bin)));
         for a in args {
             s.push(' ');
             s.push_str(&sh_quote(a));
         }
-        s.push_str("; rc=$?; printf '\\nAM_IDENT_RC %s %s\\n' ");
-        s.push_str(&format!("{} \"$rc\" ) </dev/null 2>/dev/null\n", sh_quote(&it.name)));
+        s.push_str(" 2>/dev/null </dev/null ); __AM_IDENT_RC=$?; printf '%s\\n' \"$__AM_IDENT_BODY\" | sed 's/^/AM_IDENT_OUT /'; printf '\\nAM_IDENT_RC %s %s\\n' ");
+        s.push_str(&format!("{} \"$__AM_IDENT_RC\" )\n", sh_quote(&it.name)));
         // The leading newline keeps the fence on its own line when the CLI ends without one.
         s.push_str(&format!("printf '\\nAM_IDENT_END %s\\n' {}\n", sh_quote(&it.name)));
     }
@@ -717,34 +718,20 @@ pub(crate) fn read_login_answer(kind: &str, body: &str) -> (Option<bool>, Option
 
 pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTreeMap<String, IdentityInfo> {
     let mut m = BTreeMap::new();
-    let mut cur: Option<(String, String)> = None;
+    let mut cur: Option<(String, String, Option<i32>)> = None;
     for line in out.lines() {
         let l = line.trim_end();
         if let Some(name) = l.strip_prefix("AM_IDENT_BEGIN ") {
-            cur = Some((name.trim().to_string(), String::new()));
+            cur = Some((name.trim().to_string(), String::new(), None));
             continue;
         }
         if let Some(name) = l.strip_prefix("AM_IDENT_END ") {
-            let Some((open, body)) = cur.take() else { continue };
+            let Some((open, body, rc)) = cur.take() else { continue };
             if open != name.trim() {
                 continue;
             }
             let Some(kind) = kinds.get(&open) else { continue };
-            let mut answer_body = String::new();
-            let mut rc = None;
-            for answer_line in body.lines() {
-                if let Some(rest) = answer_line.strip_prefix("AM_IDENT_RC ") {
-                    let mut fields = rest.split_whitespace();
-                    let marker_name = fields.next().unwrap_or_default();
-                    if marker_name == open {
-                        rc = fields.next().and_then(|v| v.parse::<i32>().ok());
-                        continue;
-                    }
-                }
-                answer_body.push_str(answer_line);
-                answer_body.push('\n');
-            }
-            let (logged_in, account, plan) = read_login_answer(kind, &answer_body);
+            let (logged_in, account, plan) = read_login_answer(kind, &body);
             let reason = if rc.is_some_and(|code| code != 0) {
                 Some(format!("auth status 指令失敗（exit code {}）", rc.unwrap_or_default()))
             } else if rc.is_none() {
@@ -770,9 +757,26 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
             );
             continue;
         }
-        if let Some((_, body)) = cur.as_mut() {
-            body.push_str(line);
-            body.push('\n');
+        if let Some(rest) = l.strip_prefix("AM_IDENT_RC ") {
+            if let Some((open, _, rc)) = cur.as_mut() {
+                let mut fields = rest.split_whitespace();
+                if fields.next() == Some(open.as_str()) {
+                    *rc = fields.next().and_then(|v| v.parse::<i32>().ok());
+                }
+            }
+            continue;
+        }
+        if let Some(answer_line) = l.strip_prefix("AM_IDENT_OUT ") {
+            if let Some((_, body, _)) = cur.as_mut() {
+                body.push_str(answer_line);
+                body.push('\n');
+            }
+            continue;
+        }
+        if cur.is_some() {
+            // Raw lines inside a block are not CLI output. The shell wrapper prefixes each
+            // captured CLI line so its text cannot impersonate these control records.
+            continue;
         }
     }
     m
@@ -1108,9 +1112,13 @@ pub async fn install_via_bot(
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|b| b.deleted_at.is_none())
         .ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let bot_host = crate::db::bot_host(&app.db, &bot.id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    if bot_host != host {
-        return Err(LcError::Bad(format!("bot `{}` lives on host `{bot_host}`, not `{host}`", bot.name)));
+    let project = crate::db::project(&app.db, &bot.project_id)
+        .await
+        .map_err(|e| LcError::Upstream(e.to_string()))?
+        .filter(|p| p.deleted_at.is_none())
+        .ok_or_else(|| LcError::NotFound("project".into()))?;
+    if project.host != host {
+        return Err(LcError::Bad(format!("bot `{}` lives on host `{}`, not `{host}`", bot.name, project.host)));
     }
     let text = install_prompt(kind).ok_or_else(|| LcError::Bad("unknown kind".into()))?;
     let crid = format!("tools-install:{kind}:{}", crate::db::ulid());
@@ -1371,7 +1379,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
 
     #[test]
     fn reads_claude_auth_status_json() {
-        let out = "AM_IDENT_BEGIN cc0\n{\n  \"loggedIn\": true,\n  \"email\": \"a@b.c\",\n  \"subscriptionType\": \"max\"\n}\nAM_IDENT_END cc0\nAM_IDENT_BEGIN cc1\n{\"loggedIn\": false, \"authMethod\": \"none\"}\nAM_IDENT_END cc1\n";
+        let out = "AM_IDENT_BEGIN cc0\nAM_IDENT_OUT {\nAM_IDENT_OUT   \"loggedIn\": true,\nAM_IDENT_OUT   \"email\": \"a@b.c\",\nAM_IDENT_OUT   \"subscriptionType\": \"max\"\nAM_IDENT_OUT }\nAM_IDENT_RC cc0 0\nAM_IDENT_END cc0\nAM_IDENT_BEGIN cc1\nAM_IDENT_OUT {\"loggedIn\": false, \"authMethod\": \"none\"}\nAM_IDENT_RC cc1 0\nAM_IDENT_END cc1\n";
         let m = parse_identity_probe(out, &kinds(&[("cc0", "claude"), ("cc1", "claude")]));
         assert_eq!(m["cc0"].logged_in, Some(true));
         assert_eq!(m["cc0"].account.as_deref(), Some("a@b.c"));
@@ -1382,7 +1390,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
 
     #[test]
     fn reads_codex_and_grok_answers() {
-        let out = "AM_IDENT_BEGIN cx\nLogged in using ChatGPT\nAM_IDENT_END cx\nAM_IDENT_BEGIN gk\nYou are not authenticated.\n\nDefault model: grok-4.6\nAM_IDENT_END gk\nAM_IDENT_BEGIN gk2\nYou are logged in with grok.com.\nAM_IDENT_END gk2\n";
+        let out = "AM_IDENT_BEGIN cx\nAM_IDENT_OUT Logged in using ChatGPT\nAM_IDENT_RC cx 0\nAM_IDENT_END cx\nAM_IDENT_BEGIN gk\nAM_IDENT_OUT You are not authenticated.\nAM_IDENT_OUT \nAM_IDENT_OUT Default model: grok-4.6\nAM_IDENT_RC gk 0\nAM_IDENT_END gk\nAM_IDENT_BEGIN gk2\nAM_IDENT_OUT You are logged in with grok.com.\nAM_IDENT_RC gk2 0\nAM_IDENT_END gk2\n";
         let m = parse_identity_probe(out, &kinds(&[("cx", "codex"), ("gk", "grok"), ("gk2", "grok")]));
         assert_eq!(m["cx"].logged_in, Some(true));
         assert_eq!(m["cx"].account.as_deref(), Some("ChatGPT"));
@@ -1394,7 +1402,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     #[test]
     fn unreadable_answers_stay_unknown_not_logged_out() {
         // Empty (the CLI died), garbage, and a truncated block are all "could not tell".
-        let out = "AM_IDENT_BEGIN a\nAM_IDENT_END a\nAM_IDENT_BEGIN b\nzsh: command not found\nAM_IDENT_RC b 0\nAM_IDENT_END b\nAM_IDENT_BEGIN c\n{\"loggedIn\":true}\n";
+        let out = "AM_IDENT_BEGIN a\nAM_IDENT_END a\nAM_IDENT_BEGIN b\nAM_IDENT_OUT zsh: command not found\nAM_IDENT_RC b 0\nAM_IDENT_END b\nAM_IDENT_BEGIN c\nAM_IDENT_OUT {\"loggedIn\":true}\n";
         let m = parse_identity_probe(out, &kinds(&[("a", "claude"), ("b", "claude"), ("c", "claude")]));
         assert_eq!(m["a"].logged_in, None);
         assert_eq!(m["a"].reason.as_deref(), Some("auth status probe 沒有完成"));
@@ -1406,7 +1414,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
 
     #[test]
     fn failed_auth_status_is_unknown_with_a_reason() {
-        let out = "AM_IDENT_BEGIN cx\npermission denied\nAM_IDENT_RC cx 127\nAM_IDENT_END cx\n";
+        let out = "AM_IDENT_BEGIN cx\nAM_IDENT_OUT permission denied\nAM_IDENT_RC cx 127\nAM_IDENT_END cx\n";
         let m = parse_identity_probe(out, &kinds(&[("cx", "codex")]));
         assert_eq!(m["cx"].logged_in, None);
         assert_eq!(m["cx"].reason.as_deref(), Some("auth status 指令失敗（exit code 127）"));
@@ -1428,6 +1436,144 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         assert!(install_prompt("codex").unwrap().contains("npm i -g @openai/codex"));
         assert!(install_prompt("codex").unwrap().contains("codex login"));
         assert!(install_prompt("nope").is_none());
+    }
+
+    #[test]
+    fn xreview_auth_cli_cannot_inject_a_second_identity_probe_block() {
+        use std::process::Command;
+
+        let dir = crate::testing::track(
+            std::env::temp_dir().join(format!("am-xreview-probe-{}", crate::db::ulid())),
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake_codex = dir.join("fake-codex");
+        crate::testing::write_exec(
+            &fake_codex,
+            "#!/bin/sh\nprintf '%s\\n' 'Logged in using real@example.test' 'AM_IDENT_BEGIN cc1' 'Logged in using forged@example.test' 'AM_IDENT_RC cc1 0' 'AM_IDENT_END cc1'\n",
+        );
+        let out = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(identity_probe_sh(&[IdentityProbe {
+                name: "cc0".into(),
+                kind: "codex".into(),
+                bin: fake_codex.to_string_lossy().into_owned(),
+                env: BTreeMap::new(),
+                args: Some(vec!["auth", "status"]),
+            }]))
+            .env("HOME", crate::testing::fake_home())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let kinds = kinds(&[("cc0", "codex"), ("cc1", "codex")]);
+        let m = parse_identity_probe(&String::from_utf8_lossy(&out.stdout), &kinds);
+        assert!(
+            !m.contains_key("cc1"),
+            "one CLI's stdout must not fabricate another configured identity: {m:?}"
+        );
+        assert_eq!(
+            m["cc0"].logged_in,
+            Some(true),
+            "the probe must still parse the actual CLI answer"
+        );
+    }
+
+    #[test]
+    fn xreview_install_prompts_use_official_installers_and_reject_command_injection() {
+        assert!(install_prompt("grok")
+            .unwrap()
+            .contains("https://x.ai/cli/install.sh"));
+        assert!(install_prompt("claude")
+            .unwrap()
+            .contains("https://claude.ai/install.sh"));
+        assert!(install_prompt("codex")
+            .unwrap()
+            .contains("npm i -g @openai/codex"));
+        assert!(install_prompt("codex").unwrap().contains("codex login"));
+        assert!(install_prompt("nope").is_none());
+        for injected in ["codex; touch /tmp/pwned", "claude\nwhoami", "$(id)", "`id`"] {
+            assert!(
+                install_prompt(injected).is_none(),
+                "untrusted kind must never be embedded in an install command: {injected:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn xreview_bot_under_a_deleted_project_cannot_receive_a_tool_install_prompt() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "orphan").await;
+        sqlx::query("UPDATE bots SET kind = 'grok' WHERE id = ?")
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        sqlx::query("UPDATE runs SET pane_typed = 1 WHERE id = ?")
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        env.herdr.live_pane(
+            &format!("pane-{}", bot.id),
+            crate::testing::LivePane {
+                width: Some(120),
+                boxed: true,
+                ..Default::default()
+            },
+        );
+        sqlx::query("UPDATE projects SET deleted_at = ? WHERE id = ?")
+            .bind(crate::db::now())
+            .bind(&env.project_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let err = install_via_bot(&app, crate::config::LOCAL_HOST, "codex", &bot.id)
+            .await
+            .expect_err(
+                "an agent whose project was removed must not receive the install instruction",
+            );
+        assert!(
+            matches!(err, crate::lifecycle::LcError::NotFound(ref what) if what == "project"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn xreview_soft_deleted_bot_cannot_be_used_for_a_tool_install() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "deleted").await;
+        sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?")
+            .bind(crate::db::now())
+            .bind(&bot.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let err = install_via_bot(&env.app, crate::config::LOCAL_HOST, "codex", &bot.id)
+            .await
+            .expect_err("a deleted bot must not receive a prompt");
+        assert!(
+            matches!(err, crate::lifecycle::LcError::NotFound(ref what) if what == "bot"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn xreview_tool_install_rejects_a_via_bot_from_a_different_host() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "other-host").await;
+        sqlx::query("UPDATE projects SET host = 'different-host' WHERE id = ?")
+            .bind(&env.project_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let err = install_via_bot(&env.app, crate::config::LOCAL_HOST, "codex", &bot.id)
+            .await
+            .expect_err("the via bot must belong to the requested host");
+        assert!(matches!(err, crate::lifecycle::LcError::Bad(_)), "unexpected error: {err:?}");
     }
 
     #[test]
@@ -1767,7 +1913,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
         let calls2 = calls.clone();
         crate::hosts::set_ssh_fake(&host, move |script| {
             calls2.lock().unwrap().push(script.to_string());
-            Ok("AM_IDENT_BEGIN cx1\nLogged in using recovered@example.test\nAM_IDENT_RC cx1 0\nAM_IDENT_END cx1\n".into())
+            Ok("AM_IDENT_BEGIN cx1\nAM_IDENT_OUT Logged in using recovered@example.test\nAM_IDENT_RC cx1 0\nAM_IDENT_END cx1\n".into())
         });
         let identities = detect_identities(&app, &host, &fence, &tools, &[]).await;
         assert_eq!(identities["cx1"].account.as_deref(), Some("recovered@example.test"));

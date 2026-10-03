@@ -2843,7 +2843,7 @@ label = "foo@m4p"
    權威換了就放手，不看新機器上同 id 的 pane、不寫登入狀態、不關 pane）、codex 一鍵升級（§6.9；安裝走 fence 的連線，每一步讀完與改通知、
    開批次前都檢查，換了就 `superseded`）。**重連也算換權威**：這些操作一律停手，由使用者或下一輪探測重來。
 8. **同名主機換連線時，舊連線量到的快取當場作廢**（issue #347）：`apply_config` 換掉既有同名連線（設定變了，可能已指到另一台）與移除主機一樣，
-   清掉 `app.tools[host]`（身分、登入、herdr CLI 版本）、`<host>/…` 額度（連重啟快取列）、`<host>/<kind>/<identity>` 模型快取、這台的 shell 清單，
+   清掉 `app.tools[host]`（身分、登入、herdr CLI 版本）、`app.host_baseline[host]`、該 host 的 shim 補版 incident、`<host>/…` 額度（連重啟快取列）、`<host>/<kind>/<identity>` 模型快取、這台的 shell 清單，
    新連線上線後由偵測與探測重新填。先換連線再清：清完之後才發布的舊觀測過不了第 7 點的檢查（額度的檢查在 `app.quotas` 鎖裡做）。
    單純重連（同一條設定）不清。
 
@@ -2944,7 +2944,7 @@ claude 的 statusLine 每次重繪都呼叫、沒有回合語意，不進 spool�
 ### 11.6 API 與 UI
 
 - **herdr 版本**（`hosts[].herdr`，API §12.6b）：server 版本與 protocol 取自 ping、CLI 版本取自工具偵測的 `herdr --version`；兩者不同或 protocol 未驗證時 hosts 面板用警告色標出，讀不到顯示「未知」。訂閱重建成功後與每 60 秒重 ping／重探 CLI，有變就推 `host_changed`，讀不到即 `null`（#254）。
-- `GET /api/state` 帶 `hosts: [{name, ssh, herdr_session, connected, error?}]`、`projects[].host`；`POST /api/hosts`、`DELETE /api/hosts/:name`（需無 project 使用）、`POST /api/hosts/:name/reconnect`；
+- `GET /api/state` 帶 `hosts: [{name, ssh, herdr_session, connected, error?}]`、`projects[].host`；`POST /api/hosts`、`DELETE /api/hosts/:name`（需無 live project、active orphan run 與未完成的遠端 bot 目錄／shim 清理；共用 session 不清外部擁有的 bot 目錄）、`POST /api/hosts/:name/reconnect`；
   `POST /api/projects` 可帶 `host`。WS `daemon_status {herdr_connected, hosts}`、`host_changed`。細節見 `API.md`。
 - GitHub CLI 登入狀態是 `true`／`false`／`null`：JSON 探測不支援時以 `gh api user` 確認作用中帳號，仍無法判定就保留未知。未知不等於登出；`auto` 走裝置碼，不複製本機 token。只有遠端狀態明確且未登入、且本機登入狀態確認可用時，`auto` 才能把本機 token 複製到遠端。
 - UI：sidebar Project 標題顯示 host 徽章（本機不顯示）；新增 Project 表單有主機下拉，目錄選擇器跟著切換；主機管理表單列出連線狀態與重連；host 斷線時其 bot 燈號灰。有專案掛著的遠端主機離線時，主畫面頂端紅色警示條寫出主機、離線多久（`hosts[].disconnected_since`）、影響幾顆 bot（點開可選那顆）與「立即重連」；側欄該專案左側紅線、bot 反灰且狀態字為「主機離線」，徽章為 `@<host> 離線`；打開那台上的 bot，聊天區頂端有離線橫幅、輸入框提示送不出去（UI-DECISIONS「遠端主機離線要一眼看得到」）。
