@@ -157,7 +157,8 @@ async fn a_stale_hook_is_replaced_only_when_its_script_proves_agents_manager_own
     let path = hooks_file(&grok_home);
     let old_dir = tt::scratch_dir("am-grokhook-old-data");
     let old_dispatcher = old_dir.join("grok-hook.sh");
-    std::fs::write(&old_dispatcher, "#!/bin/sh\n# agents-manager grok dispatcher (old install)\nexit 0\n").unwrap();
+    let old_script = super::setup::local_grok_dispatch_sh("/old/agents-managerd", "/old/data", None);
+    std::fs::write(&old_dispatcher, old_script).unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let user_same_name = "/home/u/scripts/grok-hook.sh";
     let existing = json!({"hooks": {"Stop": [{"hooks": [
@@ -171,6 +172,33 @@ async fn a_stale_hook_is_replaced_only_when_its_script_proves_agents_manager_own
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let dispatcher = e.app.data_dir.join("grok-hook.sh").to_string_lossy().into_owned();
     assert_eq!(commands(&v, "Stop"), [dispatcher.as_str(), user_same_name]);
+}
+
+#[tokio::test]
+async fn a_user_dispatcher_cannot_claim_ownership_with_the_generic_header_prefix() {
+    let e = tt::env().await;
+    let grok_home = tt::scratch_dir("am-grokhook-lookalike-home");
+    let path = hooks_file(&grok_home);
+    let user_dir = tt::scratch_dir("am-grokhook-lookalike-script");
+    let user_dispatcher = user_dir.join("grok-hook.sh");
+    std::fs::write(
+        &user_dispatcher,
+        "#!/bin/sh\n# agents-manager grok dispatcher for an unrelated user hook\nprintf 'user hook\\n'\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let existing = json!({"hooks": {"Stop": [{"hooks": [{
+        "type": "command", "command": user_dispatcher.to_string_lossy(), "timeout": 5
+    }]}]}});
+    std::fs::write(&path, existing.to_string()).unwrap();
+
+    install_local(&e.app, &json!({"GROK_HOME": grok_home.to_string_lossy()})).unwrap();
+
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let commands = commands(&v, "Stop");
+    assert!(commands.iter().any(|command| command == user_dispatcher.to_str().unwrap()), "a user-owned same-name hook stays installed: {commands:?}");
+    assert!(commands.iter().any(|command| command == &e.app.data_dir.join("grok-hook.sh").to_string_lossy()), "the current daemon dispatcher is still installed: {commands:?}");
+    assert!(std::fs::read_to_string(user_dispatcher).unwrap().contains("user hook"), "the unrelated script stays untouched");
 }
 
 /// daemon 開機：檔案在、而且已確認屬於我們的 entry 指到舊 dispatcher（或腳本不存在）→ 換掉；沒有檔就不建
