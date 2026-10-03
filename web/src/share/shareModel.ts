@@ -62,7 +62,8 @@ export function toShareMessage(v: unknown): ShareMessage | null {
 
 export function toStatus(v: unknown): ShareStatus {
   const s = typeof v === 'string' ? v : str(rec(v).status)
-  return s === 'working' || s === 'thinking' ? 'working' : 'idle'
+  // daemon 的 status 是 lamp（API.md §5.6）：blocked（等擁有者在終端處理）與 starting 對 end user 一樣是「還沒回完、先別送」。
+  return s === 'working' || s === 'thinking' || s === 'blocked' || s === 'starting' ? 'working' : 'idle'
 }
 
 export function toSharePage(v: unknown): SharePage {
@@ -118,7 +119,8 @@ export function shareErrorText(e: unknown, what: 'send' | 'upload' | 'load'): st
     if (e.status === 429) return e.retryAfter ? `傳得太快了，請 ${e.retryAfter} 秒後再試。` : '傳得太快了，請稍等一下再試。'
     if (e.status === 413) return what === 'upload' ? '檔案太大了（單檔上限 25 MB）。' : '訊息太長了，請分成幾段送。'
     if (e.status === 415) return '不支援這種檔案。'
-    if (e.status === 409) return '對方正在忙，請稍後再送。'
+    // 一段對話同時只排一則（409 not_accepted）：上一則還沒回完。
+    if (e.status === 409) return '上一則還沒回完，等 bot 回完再送；你打的字還在。'
   }
   if (what === 'upload') return '上傳失敗，請再試一次。'
   if (what === 'send') return '送出失敗，請再試一次；你打的字還在。'

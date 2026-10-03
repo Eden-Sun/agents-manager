@@ -15,7 +15,7 @@ export function ShareProfileField({ kind, host, value, onChange }: { kind: BotKi
       <span className="hint">
         {blocked ??
           (value
-            ? '只能在自己的工作目錄讀寫、不能開子 agent、不帶你的憑證；建好後可在設定裡開分享連結給外部使用者。之後不能改回一般 bot。'
+            ? '只能讀寫自己工作目錄的檔案；不能跑指令（沒有 Bash）、不能抓網頁（沒有 WebFetch，可以用 WebSearch）、不能開子 agent、不帶你的憑證。建好後可在設定裡開分享連結。之後不能改回一般 bot。'
             : '要把這顆 bot 分享給外部使用者時才勾。')}
       </span>
     </div>

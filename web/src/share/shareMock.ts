@@ -27,6 +27,7 @@ export function mockShareClient(token: string): ShareClient {
     { name: '安裝步驟.md', size: 2_310, modified_at: ago(120), body: '# 安裝步驟\n' },
   ]
   let status: ShareStatus = 'idle'
+  let replying = false
   let subs: ShareEvents[] = []
   const guard = async () => {
     await new Promise((r) => setTimeout(r, 120))
@@ -54,10 +55,14 @@ export function mockShareClient(token: string): ShareClient {
       await guard()
       if (text.length > SHARE_TEXT_MAX) throw new ShareHttpError(413)
       if (text.includes('429')) throw new ShareHttpError(429, 30)
+      // 同 daemon：一段對話同時只排一則，上一則還沒回完就 409 not_accepted。
+      if (status === 'working' || replying) throw new ShareHttpError(409)
+      replying = true
       push({ id: id(), role: 'user', text, created_at: new Date().toISOString(), attachments: attachments.map((a) => ({ name: uploads.get(a) ?? a })) })
       setTimeout(() => setStatus('working'), 300)
       setTimeout(() => {
         push({ id: id(), role: 'assistant', text: `收到：「${text.slice(0, 40)}」。這是 mock 的回覆。`, created_at: new Date().toISOString(), attachments: [] })
+        replying = false
         setStatus('idle')
       }, 2600)
     },

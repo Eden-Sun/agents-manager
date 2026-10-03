@@ -8,7 +8,7 @@ import { act, click, mount, settle, setupDom, teardownDom, unmountAll } from '..
 import { ShareApp } from './ShareApp'
 import { httpShareClient, type ShareClient, type ShareEvents } from './shareApi'
 import { mockShareClient } from './shareMock'
-import type { ShareMessage, ShareStatus } from './shareModel'
+import { ShareHttpError, type ShareMessage, type ShareStatus } from './shareModel'
 
 const POLL_WAIT = 4200
 
@@ -257,6 +257,54 @@ test('輪詢恢復後 EventSource 又 open，就不要一直打 messages', { tim
     globalThis.EventSource = orig
     globalThis.fetch = origFetch
   }
+})
+
+async function typeText(text: string) {
+  const ta = document.querySelector('textarea')!
+  await act(async () => {
+    const set = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ta), 'value')!.set!
+    set.call(ta, text)
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  return ta
+}
+
+test('bot 思考中（含 blocked）：送出鈕停用、寫「等 bot 回完再送」，回完才能送', async () => {
+  let live: ShareEvents | null = null
+  const base = mockShareClient(TOKEN)
+  const client: ShareClient = { ...base, subscribe: (ev) => ((live = ev), () => {}) }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  await typeText('下一題')
+  const send = document.querySelector<HTMLButtonElement>('.sh-send')!
+  assert.equal(send.disabled, false)
+  await act(async () => live!.onStatus('working' as ShareStatus))
+  assert.equal(send.disabled, true)
+  assert.match(document.querySelector('.sh-wait')!.textContent!, /等 bot 回完再送/)
+  await act(async () => live!.onStatus('idle' as ShareStatus))
+  assert.equal(send.disabled, false)
+  assert.equal(document.querySelector('.sh-wait'), null)
+})
+
+test('還是撞到 409（上一則還在排）：字留在輸入框、提示等回完再送', async () => {
+  const base = mockShareClient(TOKEN)
+  let sent = 0
+  const client: ShareClient = {
+    ...base,
+    send: async () => {
+      sent++
+      throw new ShareHttpError(409)
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  const ta = await typeText('這段很長的問題不能被吃掉')
+  await click(document.querySelector('.sh-send')!)
+  await settle(300)
+  assert.equal(sent, 1)
+  assert.equal(ta.value, '這段很長的問題不能被吃掉')
+  assert.match(document.querySelector('.sh-send-err')!.textContent!, /等 bot 回完再送；你打的字還在/)
+  assert.equal(document.querySelector('.sh-thinking'), null, '沒送出去就不該卡在思考中')
 })
 
 test('連結失效（404）：只有失效說明，沒有輸入框', async () => {

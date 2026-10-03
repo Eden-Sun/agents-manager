@@ -211,7 +211,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const uploading = pending.some((p) => !p.id && !p.error)
   const ready = pending.filter((p) => p.id)
   const tooLong = text.length > SHARE_TEXT_MAX
-  const canSend = !sending && !uploading && !tooLong && (text.trim().length > 0 || ready.length > 0)
+  // bot 還沒回完不給送：daemon 一段對話同時只排一則，再送會 409（API.md §5.6）。
+  const canSend = !busy && !sending && !uploading && !tooLong && (text.trim().length > 0 || ready.length > 0)
 
   const loadOlder = async () => {
     const oldest = messages[0]?.id
@@ -255,6 +256,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
         stopLive.current()
         setState('gone')
       }
+      // 409：上一則還在排，字與附件都留著（setText／清附件只在成功時做），重抓一次讓「思考中」對上 daemon 的狀態。
+      if (e instanceof ShareHttpError && e.status === 409) void load()
       setSendError(shareErrorText(e, 'send'))
     } finally {
       setSending(false)
@@ -380,10 +383,15 @@ export function ShareApp({ client }: { client: ShareClient }) {
               }
             }}
           />
-          <button type="submit" className="sh-send" disabled={!canSend}>
+          <button type="submit" className="sh-send" disabled={!canSend} title={busy ? '等 bot 回完再送' : undefined}>
             {sending ? '送出中…' : '送出'}
           </button>
         </div>
+        {busy && !sending ? (
+          <p className="sh-wait" role="status">
+            等 bot 回完再送（可以先打好）
+          </p>
+        ) : null}
       </form>
     </div>
   )
