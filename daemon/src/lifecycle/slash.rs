@@ -102,7 +102,10 @@ pub(super) async fn insert_supplement(app: &Arc<App>, bot_id: &str, turn: &db::T
 /// TUI slash command for a live setting, or `None` (caller reports `needs_restart`).
 fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>) -> Option<String> {
     match (kind, field) {
-        ("grok", "effort") | ("claude", "effort") => Some(format!("/effort {}", value.to_ascii_lowercase())),
+        // grok 1.0.46：`/effort` 立刻把 `[models] default_reasoning_effort` 寫進 `GROK_HOME` 的
+        // config.toml（使用者自己開的 grok 也會沿用）。等級只走啟動參數 `--reasoning-effort`。
+        ("grok", "effort") => None,
+        ("claude", "effort") => Some(format!("/effort {}", value.to_ascii_lowercase())),
         ("grok", "model") => {
             let mut line = format!("/model {value}");
             if let Some(e) = effort.map(str::trim).filter(|s| !s.is_empty()) {
@@ -116,8 +119,8 @@ fn live_slash_command(kind: &str, field: &str, value: &str, effort: Option<&str>
     }
 }
 
-/// 不重啟就套用設定（SPEC §4.4a）。grok `effort`/`model`、claude `model`/`effort` 走一行 slash
-/// 指令；codex 的 `/model` 是不吃參數的選單、`/fast` 是開關，走 [`crate::codex_live`]
+/// 不重啟就套用設定（SPEC §4.4a）。grok `model`、claude `model`/`effort` 走一行 slash
+/// 指令；grok `effort` 不送 `/effort`（會寫進 config.toml）。codex 的 `/model` 是不吃參數的選單、`/fast` 是開關，走 [`crate::codex_live`]
 /// 送鍵讀畫面再回讀狀態列（2026-09-09 實測）。副作用：claude（2.1.263 實測）與 codex 都會把
 /// 選擇存成帳號之後新 session 的預設。
 /// 回傳 `None` = 已套用；`Some(理由)` = 退回重啟。理由一路帶回 `live_apply` 並寫 log——
@@ -386,54 +389,16 @@ async fn apply_live_setting_inner(
     })
 }
 
-/// #215：grok TUI 不理啟動參數 `--reasoning-effort`（也不理 `default_reasoning_effort`）。
-/// agent 就緒後讀框底 `Grok 4.6 (high)`；跟 bot 設定不同才送 `/effort`（已相符就不要打字，否則 `pane_typed` 會改 prompt 路徑）。
-/// 呼叫端必須已握 bot 鎖、run 已是 running。slash 失敗不讓 start 失敗——agent 已經在跑。
+/// grok 的等級只靠啟動參數 `--reasoning-effort`（grok 1.0.46 實測會改這一輪框底，且不寫 config.toml）。
+/// 不再補 `/effort`：那個 slash 會把 `[models] default_reasoning_effort` 寫進使用者的 `GROK_HOME`。
+/// 參數留著是因為 start 仍會呼叫；送 slash 的舊路徑（#215）已停用。
 pub(crate) async fn apply_grok_startup_effort(
-    app: &Arc<App>,
-    bot: &db::Bot,
-    run_id: &str,
-    pane_id: &str,
-    client: &HerdrClient,
+    _app: &Arc<App>,
+    _bot: &db::Bot,
+    _run_id: &str,
+    _pane_id: &str,
+    _client: &HerdrClient,
 ) -> Result<(), String> {
-    if bot.kind != "grok" {
-        return Ok(());
-    }
-    let Some(wanted) = bot
-        .effort
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase())
-    else {
-        return Ok(());
-    };
-    let screen = client
-        .pane_read(pane_id, "visible", 60)
-        .await
-        .map_err(|e| format!("pane_read_failed: {e:#}"))?
-        .text;
-    if crate::models::grok_effort_from_screen(&screen).as_deref() == Some(wanted.as_str()) {
-        return Ok(());
-    }
-    let line = format!("/effort {wanted}");
-    mark_pane_typed(app, run_id).await?;
-    send_slash_line(client, pane_id, &line)
-        .await
-        .map_err(|e| format!("{e:?}"))?;
-    let settled = wait_for_composer_settled(client, pane_id, "grok")
-        .await
-        .map_err(|e| format!("settle_read_failed: {e:?}"))?
-        .ok_or_else(|| "composer_not_settled".to_string())?;
-    if crate::models::grok_effort_from_screen(&settled).as_deref() != Some(wanted.as_str()) {
-        return Err("effort_readback_mismatch".into());
-    }
-    let _ = sqlx::query("UPDATE runs SET runtime_effort = ? WHERE id = ?")
-        .bind(&wanted)
-        .bind(run_id)
-        .execute(&app.db)
-        .await;
-    tracing::info!(bot = %bot.id, line, "grok TUI ignored --reasoning-effort; applied via slash");
     Ok(())
 }
 
@@ -903,7 +868,7 @@ mod live_slash_tests {
         assert!(
             super::apply_grok_startup_effort(&env.app, &bot, &run_id, pane, &env.app.herdr)
                 .await
-                .is_err()
+                .is_ok()
         );
         assert!(env.herdr.calls_to("pane.send_text").is_empty());
         assert!(env.herdr.calls_to("pane.send_keys").is_empty());
@@ -995,7 +960,8 @@ mod live_slash_tests {
     fn grok_effort_and_model() {
         assert_eq!(
             live_slash_command("grok", "effort", "HIGH", None).as_deref(),
-            Some("/effort high")
+            None,
+            "/effort 會把 default_reasoning_effort 寫進 GROK_HOME 的 config.toml"
         );
         assert_eq!(
             live_slash_command("grok", "model", "grok-4.6", Some("high")).as_deref(),

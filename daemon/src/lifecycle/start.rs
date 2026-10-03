@@ -1212,10 +1212,9 @@ async fn start_inner(
     if bot.kind == "codex" {
         schedule_codex_notice_capture(app, &bot.id, run_id);
     }
-    // grok TUI 不理 `--reasoning-effort`（#215）：就緒後看框底，不對就補 `/effort`。失敗只記 log，agent 已經在跑。
-    if let Err(e) = super::apply_grok_startup_effort(app, &bot, run_id, &pane_id, &client).await {
-        tracing::warn!(bot = %bot.id, error = %e, "could not apply grok effort via /effort after start");
-    }
+    // 不補 `/effort`：grok 1.0.46 會把該 slash 寫進 config.toml 的 default_reasoning_effort。
+    // 這一輪的等級只靠上面 argv 的 `--reasoning-effort`。
+    let _ = super::apply_grok_startup_effort(app, &bot, run_id, &pane_id, &client).await;
     app.emit_bot_status(&bot.id).await;
     Ok(())
 }
@@ -3794,7 +3793,7 @@ mod run_state_commit_tests {
     }
 }
 
-/// #215：grok TUI 不理 `--reasoning-effort`，啟動後畫面還是模型預設 high；daemon 要在就緒後補 `/effort`。
+/// grok 啟動不准送 `/effort`（會持久化 `default_reasoning_effort`）。等級只在 argv。
 #[cfg(test)]
 mod grok_startup_effort_tests {
     use super::start_bot;
@@ -3830,16 +3829,17 @@ mod grok_startup_effort_tests {
             .collect()
     }
 
-    /// 啟動後標示 high、設定是 medium → 送出 /effort medium。
+    /// grok 1.0.46 拋棄式 `GROK_HOME`：`/effort` 會把 `[models] default_reasoning_effort` 寫進
+    /// 使用者的 config.toml；`--reasoning-effort` 只改這一輪框底、不寫檔。框底還是 high 也不准補 slash。
     #[tokio::test]
-    async fn a_grok_bot_set_to_medium_gets_effort_slash_when_the_tui_shows_high() {
+    async fn a_grok_bot_set_to_medium_does_not_persist_effort_with_a_slash() {
         let e = tt::env().await;
         e.herdr.set_screen("*", GROK_HIGH);
         let bot = grok_bot(&e.app, &e.project_id, Some("medium")).await;
         start_bot(&e.app, &bot.id).await.unwrap();
-        assert_eq!(sent_effort_slash(&e), vec!["/effort medium".to_string()], "TUI 還在 high，要補 slash");
+        assert!(sent_effort_slash(&e).is_empty(), "不准送 /effort，那會寫進 ~/.grok/config.toml");
         let run = db::active_run(&e.app.db, &bot.id).await.unwrap().unwrap();
-        assert_eq!(run.runtime_effort.as_deref(), Some("medium"));
+        assert_eq!(run.runtime_effort.as_deref(), Some("medium"), "等級只來自 --reasoning-effort");
     }
 
     /// 畫面已經是設定的等級：不要再打字（pane_typed 會改 prompt 路徑）。
