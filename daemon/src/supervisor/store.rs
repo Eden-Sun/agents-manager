@@ -2239,14 +2239,16 @@ pub const PRUNE_HANDLED_AFTER_SECS: i64 = 60 * 24 * 3600;
 pub const PRUNABLE_KINDS: [&str; 3] = ["health_changed", "ops_alert", "bot_request"];
 
 /// `compact_handled_payloads` 只壓大於 16 KB 的 payload、而且永遠不刪列：小的事件（每小時一則的 `ops_alert`、bot 的申請…）
-/// 一年下來仍是一張只增不減的表。流水帳類的事件處理完放了 60 天就整列刪掉；其他種類、還沒處理完的（pending／delivered／gave_up）、
+/// 一年下來仍是一張只增不減的表。流水帳類的事件處理完放了 60 天就整列刪掉；host baseline 的永久去重 key 例外保留；其他種類、還沒處理完的（pending／delivered／gave_up）、
 /// 比較新的一個字都不動。回刪了幾列。
 pub async fn prune_handled_events(pool: &SqlitePool, older_than_secs: i64) -> Result<u64> {
     let cutoff = crate::db::iso_in(-older_than_secs);
     let ts = crate::db::ts_sql("updated_at");
     let kinds = PRUNABLE_KINDS.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(",");
     let res = sqlx::query(&format!(
-        "DELETE FROM supervisor_inbox WHERE supervisor_id = ? AND state = 'handled' AND kind IN ({kinds}) AND {ts} <= ?"
+        "DELETE FROM supervisor_inbox
+          WHERE supervisor_id = ? AND state = 'handled' AND kind IN ({kinds}) AND {ts} <= ?
+            AND NOT (kind = 'ops_alert' AND event_key GLOB 'ops_alert:daemon:host_baseline:*')"
     ))
     .bind(SUPERVISOR_ID)
     .bind(cutoff)

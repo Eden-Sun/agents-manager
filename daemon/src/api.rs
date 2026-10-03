@@ -2425,10 +2425,10 @@ struct NewHost {
     shared_session: Option<bool>,
 }
 
-/// 這次更新會不會改變「這個名字指到哪台機器」。`remote_path`／`ssh_opts` 只影響在同一台上怎麼跑，
-/// 改它們不會把既有的 run 接到別台去，所以不擋（issue #544）。
+/// 這次更新會不會改變「這個名字指到哪台機器或 SSH 身分」。`ssh_opts` 可以改 `User`、`IdentityFile` 等登入身分，
+/// 因此有 live project 時任何 `ssh_opts` 變更都要明確確認；`remote_path` 只影響同一台上的工具路徑。
 fn repoints_host(old: &HostCfg, new: &HostCfg) -> bool {
-    old.ssh != new.ssh || old.ssh_port != new.ssh_port || old.herdr_session != new.herdr_session
+    old.ssh != new.ssh || old.ssh_port != new.ssh_port || old.herdr_session != new.herdr_session || old.ssh_opts != new.ssh_opts
 }
 
 /// 主機上還活著的專案。`delete_host` 用同一條判斷（`api.rs` 的 `host still used by projects`）。
@@ -2439,8 +2439,10 @@ async fn live_projects_on_host(app: &Arc<App>, host: &str) -> Result<Vec<db::Pro
 async fn create_host(
     State(app): State<Arc<App>>,
     Query(q): Query<DeleteQuery>,
+    Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<NewHost>,
 ) -> Result<Response, LcError> {
+    require_user(&principal)?;
     if b.name == LOCAL_HOST {
         return Err(LcError::Bad("`local` is reserved for this machine".into()));
     }
@@ -2521,7 +2523,12 @@ async fn create_host(
     Ok((StatusCode::OK, Json(json!({"name": b.name, "connected": connected, "error": error}))).into_response())
 }
 
-async fn delete_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+async fn delete_host(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
     if name == LOCAL_HOST {
         return Err(LcError::Bad("`local` cannot be removed".into()));
     }
@@ -2543,12 +2550,22 @@ async fn delete_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> R
     Ok((StatusCode::OK, Json(json!({}))).into_response())
 }
 
-async fn reconnect_host(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+async fn reconnect_host(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
     let (connected, error) = app.hosts.reconnect(&app, &name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
     Ok((StatusCode::OK, Json(json!({"name": name, "connected": connected, "error": error}))).into_response())
 }
 
-async fn refresh_tools(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+async fn refresh_tools(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
     let fence = app.hosts.fence(&name).await.ok_or_else(|| LcError::NotFound("host".into()))?;
     let ht = crate::tools::detect_with_fence(&app, &name, &fence).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     crate::state::emit_host_changed(&app, &fence).await;
@@ -2575,8 +2592,10 @@ struct InstallTool {
 async fn install_tool(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<InstallTool>,
 ) -> Result<Response, LcError> {
+    require_user(&principal)?;
     let out = crate::tools::install_via_bot(&app, &name, &b.kind, &b.via_bot_id).await?;
     Ok((StatusCode::OK, Json(json!({"turn_id": out.turn_id, "message_id": out.message_id, "delivery": out.delivery})))
         .into_response())
@@ -2586,7 +2605,9 @@ async fn install_tool(
 async fn login_identity(
     State(app): State<Arc<App>>,
     Path((name, identity)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
 ) -> Result<Response, LcError> {
+    require_user(&principal)?;
     identity_auth(app, name, identity, false).await
 }
 
@@ -2595,7 +2616,9 @@ async fn login_identity(
 async fn logout_identity(
     State(app): State<Arc<App>>,
     Path((name, identity)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
 ) -> Result<Response, LcError> {
+    require_user(&principal)?;
     identity_auth(app, name, identity, true).await
 }
 
@@ -2677,7 +2700,7 @@ mod identity_auth_error_tests {
     async fn missing_cli_is_409_identity_login_unavailable() {
         let e = crate::testing::env().await;
         with_identity(&e.app, "cc1", "claude").await;
-        let err = login_identity(State(e.app.clone()), Path(("local".into(), "cc1".into())))
+        let err = login_identity(State(e.app.clone()), Path(("local".into(), "cc1".into())), Extension(RequestPrincipal::User))
             .await
             .expect_err("no CLI on PATH must not open a pane");
         let (status, body) = body_of(err).await;
@@ -2737,7 +2760,7 @@ mod identity_auth_error_tests {
 
     /// issue #544：`POST /api/hosts` 同時是新增與更新。把 `ssh` 改成指到**另一台機器**時，
     /// 要跟 `delete_host` 一樣先確認主機上沒有活著的專案——`apply_config` 換掉連線但不動 `runs`，
-    /// 那些 run 還帶著舊機器的 pane id。只改 `remote_path`／`ssh_opts` 不會換機器，照樣放行。
+    /// 那些 run 還帶著舊機器的 pane id。只改 `remote_path` 不會換機器，照樣放行；`ssh_opts` 可能切換登入身分。
     #[tokio::test]
     async fn repointing_a_host_with_live_projects_is_refused_but_cosmetic_edits_are_not() {
         let e = crate::testing::env().await;
@@ -2793,7 +2816,7 @@ mod identity_auth_error_tests {
         // 1. 改 ssh（換機器）→ 409，而且什麼都沒寫進去。
         let mut repoint = mk(&host);
         repoint.ssh = "new-box".into();
-        let err = create_host(State(e.app.clone()), Query(DeleteQuery::default()), Json(repoint))
+        let err = create_host(State(e.app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(repoint))
             .await
             .expect_err("repointing a host in use must be refused");
         let (status, body) = body_of(err).await;
@@ -2806,7 +2829,7 @@ mod identity_auth_error_tests {
         // 2. 只改不會換機器的欄位（remote_path）→ 放行。
         let mut cosmetic = mk(&host);
         cosmetic.remote_path = Some("/opt/bin".into());
-        create_host(State(e.app.clone()), Query(DeleteQuery::default()), Json(cosmetic))
+        create_host(State(e.app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(cosmetic))
             .await
             .expect("cosmetic edits are not a repoint");
         let after = e.app.cfg.get().await.hosts.into_iter().find(|h| h.name == "zz92").unwrap();
@@ -2815,7 +2838,7 @@ mod identity_auth_error_tests {
         // 3. 明確確認就放行（沿用 ?confirm= 的先例）。
         let mut forced = mk(&host);
         forced.ssh = "new-box".into();
-        create_host(State(e.app.clone()), Query(DeleteQuery { confirm: Some("repoint".into()) }), Json(forced))
+        create_host(State(e.app.clone()), Query(DeleteQuery { confirm: Some("repoint".into()) }), Extension(RequestPrincipal::User), Json(forced))
             .await
             .expect("?confirm=repoint is the documented escape hatch");
         let after = e.app.cfg.get().await.hosts.into_iter().find(|h| h.name == "zz92").unwrap();
@@ -2828,7 +2851,7 @@ mod identity_auth_error_tests {
     async fn unknown_host_is_404_host_not_cli_missing() {
         let e = crate::testing::env().await;
         with_identity(&e.app, "work", "codex").await;
-        let err = login_identity(State(e.app.clone()), Path(("no-such-host".into(), "work".into())))
+        let err = login_identity(State(e.app.clone()), Path(("no-such-host".into(), "work".into())), Extension(RequestPrincipal::User))
             .await
             .expect_err("unknown host");
         let (status, body) = body_of(err).await;
@@ -2838,7 +2861,12 @@ mod identity_auth_error_tests {
     }
 }
 
-async fn get_gh_status(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+async fn get_gh_status(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
     let v = crate::gh_auth::status(&app, &name).await?;
     Ok((StatusCode::OK, Json(v)).into_response())
 }
@@ -2852,13 +2880,20 @@ struct GhLoginBody {
 async fn login_gh(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
     Json(b): Json<GhLoginBody>,
 ) -> Result<Response, LcError> {
+    require_user(&principal)?;
     let v = crate::gh_auth::login(&app, &name, b.mode.as_deref(), b.user.as_deref()).await?;
     Ok((StatusCode::OK, Json(v)).into_response())
 }
 
-async fn cancel_gh(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+async fn cancel_gh(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
     let v = crate::gh_auth::cancel(&app, &name).await?;
     Ok((StatusCode::OK, Json(v)).into_response())
 }
@@ -2880,7 +2915,12 @@ async fn open_host_shell(
     Ok((StatusCode::OK, Json(json!(s))).into_response())
 }
 
-async fn list_host_shells(State(app): State<Arc<App>>, Path(name): Path<String>) -> Result<Response, LcError> {
+async fn list_host_shells(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
     let shells = shell::list(&app, &name).await?;
     Ok((StatusCode::OK, Json(json!({"host": name, "shells": shells, "max": shell::MAX_PER_HOST}))).into_response())
 }
@@ -2888,8 +2928,10 @@ async fn list_host_shells(State(app): State<Arc<App>>, Path(name): Path<String>)
 async fn get_host_shell_terminal(
     State(app): State<Arc<App>>,
     Path((name, pane_id)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, LcError> {
+    require_user(&principal)?;
     let source = q.get("source").cloned().unwrap_or_else(|| "visible".into());
     let lines: u32 = q.get("lines").and_then(|s| s.parse().ok()).unwrap_or(200).clamp(1, 2000);
     Ok(Json(shell::read(&app, &name, &pane_id, &source, lines).await?))
@@ -3106,9 +3148,9 @@ mod project_tests {
             remote_path: None,
             shared_session: shared,
         };
-        create_host(State(app.clone()), Query(DeleteQuery::default()), Json(update(None))).await.unwrap();
+        create_host(State(app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(update(None))).await.unwrap();
         assert!(app.cfg.get().await.hosts.iter().any(|h| h.name == "sh1" && h.shared_session), "沒帶就沿用");
-        create_host(State(app.clone()), Query(DeleteQuery::default()), Json(update(Some(false)))).await.unwrap();
+        create_host(State(app.clone()), Query(DeleteQuery::default()), Extension(RequestPrincipal::User), Json(update(Some(false)))).await.unwrap();
         assert_eq!(flag(app.clone()).await, json!(false));
     }
 
@@ -4138,8 +4180,8 @@ async fn rotate_bot_credential(
     Ok((StatusCode::OK, Json(json!({"credential_rotated": true, "restarted": true, "run_id": run_id}))).into_response())
 }
 
-/// 原始按鍵／文字／開關 shell 只有使用者本人（UI token）能用：bot 的 hook token 只證明「我是那顆 bot」，
-/// 不該拿來直接對任何 pane 打字或按鍵。
+/// UI-only actions require the actual user principal: a bot's hook token proves which bot called,
+/// but does not authorize host administration, reading a user's shell, or raw pane control.
 fn require_user(principal: &RequestPrincipal) -> Result<(), LcError> {
     if *principal == RequestPrincipal::User {
         return Ok(());
@@ -8461,6 +8503,45 @@ mod per_principal_auth_tests {
         }
     }
 
+    /// Host management runs SSH with the daemon user's credentials, and the host shell GETs can
+    /// expose a user's terminal. These are UI operations, so a valid bot hook token is not enough.
+    #[tokio::test]
+    async fn host_management_and_shell_read_endpoints_are_user_only() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "host-api-bot").await;
+        let as_bot = [("X-AM-Bot-Id", bot.id.clone()), ("X-AM-Bot-Token", bot.hook_token.clone())];
+        let as_user = [("X-AM-Token", e.app.ui_token.clone())];
+        let cases = [
+            ("GET", "/api/hosts/local/shells", ""),
+            ("GET", "/api/hosts/local/shells/w1:p1/terminal?source=visible&lines=5", ""),
+            ("POST", "/api/hosts", r#"{"name":"blocked","ssh":""}"#),
+            ("DELETE", "/api/hosts/no-such-host", ""),
+            ("POST", "/api/hosts/no-such-host/reconnect", ""),
+            ("POST", "/api/hosts/no-such-host/tools/refresh", ""),
+            ("POST", "/api/hosts/no-such-host/tools/install", r#"{"kind":"claude","via_bot_id":"none"}"#),
+            ("POST", "/api/hosts/no-such-host/identities/cc1/login", ""),
+            ("POST", "/api/hosts/no-such-host/identities/cc1/logout", ""),
+            ("GET", "/api/hosts/no-such-host/gh", ""),
+            ("POST", "/api/hosts/no-such-host/gh/login", "{}"),
+            ("POST", "/api/hosts/no-such-host/gh/cancel", ""),
+        ];
+        let request = |method: &str, path: &str, body: &str, who: &[(&str, String)]| {
+            let extra: String = who.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        for (method, path, body) in cases {
+            let denied = raw(e.app.clone(), request(method, path, body, &as_bot)).await;
+            assert!(denied.starts_with("HTTP/1.1 403"), "bot 不能呼叫 {method} {path}: {denied}");
+            assert!(denied.contains("user_only"), "{denied}");
+
+            let user = raw(e.app.clone(), request(method, path, body, &as_user)).await;
+            assert!(!user.contains("user_only"), "使用者本人應通過 principal gate: {method} {path}: {user}");
+        }
+    }
+
     /// `/hook/{provider}` 的入口：畸形／缺欄位／型別錯／過大的 body 都是乾淨的 4xx（不是 5xx、不 panic、不留一列在收件匣），
     /// 認證失敗一律 401，provider 跟 bot 的 kind 不符 409；正常的一則收下一列，重送不長第二列。
     #[tokio::test]
@@ -10787,6 +10868,29 @@ mod host_target_tests {
     use super::*;
     use crate::config::host_target_problem;
 
+    /// `ssh_opts` is not purely cosmetic: `User` and `IdentityFile` can attach existing runs to a
+    /// different remote account. A live project's pane ids must not cross that identity change
+    /// without the same explicit repoint confirmation as a new ssh target.
+    #[test]
+    fn changing_ssh_identity_options_is_a_host_repoint() {
+        let old = HostCfg {
+            name: "build-box".into(),
+            ssh: "build-box".into(),
+            ssh_port: 22,
+            ssh_opts: vec!["-o".into(), "User=alice".into(), "-i".into(), "/keys/alice".into()],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+            shared_session: false,
+        };
+        let mut changed_user = old.clone();
+        changed_user.ssh_opts[1] = "User=bob".into();
+        assert!(repoints_host(&old, &changed_user), "SSH User changes the pane authority");
+
+        let mut changed_key = old.clone();
+        changed_key.ssh_opts[3] = "/keys/bob".into();
+        assert!(repoints_host(&old, &changed_key), "IdentityFile can select another remote account");
+    }
+
     /// `POST /api/hosts` 的 `ssh` 是 ssh 的一個 argv、`herdr_session` 會進遠端路徑與 plist：形狀不對一律 400，不寫進 config。
     #[test]
     fn a_host_target_cannot_smuggle_an_ssh_option_or_a_path() {
@@ -10853,6 +10957,7 @@ mod host_target_tests {
         let err = create_host(
             State(e.app.clone()),
             Query(DeleteQuery::default()),
+            Extension(RequestPrincipal::User),
             Json(NewHost { name: "evil2".into(), ssh: "me@10.0.0.9".into(), ssh_port: None, ssh_opts: Some(opts(&["-o", "ProxyCommand=touch /tmp/pwned"])), herdr_session: None, remote_path: None, shared_session: None }),
         )
         .await
@@ -10868,6 +10973,7 @@ mod host_target_tests {
         let err = create_host(
             State(e.app.clone()),
             Query(DeleteQuery::default()),
+            Extension(RequestPrincipal::User),
             Json(NewHost { name: "evil1".into(), ssh: "-oProxyCommand=true".into(), ssh_port: None, ssh_opts: None, herdr_session: None, remote_path: None, shared_session: None }),
         )
         .await

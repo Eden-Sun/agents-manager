@@ -265,12 +265,20 @@ fn a_token_used_as_the_url_user_is_also_flagged_without_echoing_it() {
     assert!(!ids(&run_probe(h, "/usr/bin:/bin")).contains(&"gitconfig.token".to_string()));
 }
 
-fn snapshot(root: &std::path::Path) -> Vec<(String, u64)> {
-    fn walk(p: &std::path::Path, root: &std::path::Path, acc: &mut Vec<(String, u64)>) {
+fn snapshot(root: &std::path::Path) -> Vec<(String, Vec<u8>, u32, i64, i64)> {
+    fn walk(p: &std::path::Path, root: &std::path::Path, acc: &mut Vec<(String, Vec<u8>, u32, i64, i64)>) {
         for e in fs::read_dir(p).unwrap().flatten() {
             let path = e.path();
             let meta = e.metadata().unwrap();
-            acc.push((path.strip_prefix(root).unwrap().display().to_string(), meta.len()));
+            use std::os::unix::fs::MetadataExt;
+            let data = if meta.is_file() { fs::read(&path).unwrap() } else { vec![] };
+            acc.push((
+                path.strip_prefix(root).unwrap().display().to_string(),
+                data,
+                meta.mode(),
+                meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
+                meta.ctime() * 1_000_000_000 + meta.ctime_nsec(),
+            ));
             if meta.is_dir() {
                 walk(&path, root, acc);
             }
@@ -391,6 +399,29 @@ async fn notify_pushes_one_inbox_event_per_distinct_difference() {
     assert_eq!(inbox_keys(app).await.len(), 2, "consistent / unknown pushes nothing");
 }
 
+#[tokio::test]
+async fn a_handled_baseline_alert_keeps_its_permanent_dedupe_key_after_retention() {
+    let env = crate::testing::env().await;
+    let app = &env.app;
+    let baseline = report(Some(vec![bi("tool.rtk", CRITICAL)]));
+    notify(app, "ubuntu", &baseline).await;
+    let key = inbox_keys(app).await.into_iter().next().expect("alert inserted");
+    assert!(key.starts_with("ops_alert:daemon:host_baseline:ubuntu:"), "{key}");
+    sqlx::query("UPDATE supervisor_inbox SET state='handled', updated_at=? WHERE event_key=?")
+        .bind(crate::db::iso_in(-61 * 24 * 3600))
+        .bind(&key)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let pruned = crate::supervisor::store::prune_handled_events(&app.db, crate::supervisor::store::PRUNE_HANDLED_AFTER_SECS)
+        .await
+        .unwrap();
+    assert_eq!(pruned, 0, "baseline event_key is permanent even after it is handled");
+    notify(app, "ubuntu", &baseline).await;
+    assert_eq!(inbox_keys(app).await, vec![key], "a repaired-then-regressed difference must stay deduplicated");
+}
+
 #[test]
 fn mac_only_plugins_match_the_script() {
     assert!(BASELINE_SH.contains(&format!("MAC_ONLY_PLUGINS=\"{}\"", MAC_ONLY_PLUGINS.join(" "))));
@@ -411,6 +442,9 @@ fn a_report_is_stale_after_a_failed_probe_or_after_more_than_one_recheck_cycle()
     let now = chrono::Utc::now();
     assert!(!fresh(Some(vec![]), at(0)).snapshot(now).stale, "剛量完不算過期");
     assert!(!fresh(Some(vec![]), at(6)).snapshot(now).stale, "一個重量週期內（含偵測自己花的時間）不算過期");
+    let boundary = now - chrono::Duration::minutes(375);
+    assert!(!fresh(Some(vec![]), boundary.to_rfc3339()).snapshot(now).stale, "6h15m 邊界仍有效");
+    assert!(fresh(Some(vec![]), (boundary - chrono::Duration::nanoseconds(1)).to_rfc3339()).snapshot(now).stale, "超過 6h15m 才過期");
     assert!(fresh(Some(vec![]), at(7)).snapshot(now).stale, "超過一個重量週期");
     let mut failed = fresh(Some(vec![bi("tool.rtk", CRITICAL)]), at(0));
     failed.failed_at = Some(at(0));
