@@ -250,7 +250,11 @@ async fn claude_prompt_id(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Optio
     if bot.kind != "claude" || db::bot_host(&app.db, &bot.id).await.ok()? != LOCAL_HOST {
         return None;
     }
-    let path = std::path::PathBuf::from(run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?);
+    let raw_path = run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?;
+    if !crate::transcript_read::local_transcript_allowed(app, bot, raw_path).await {
+        return None;
+    }
+    let path = std::path::PathBuf::from(raw_path);
     let log = tokio::task::spawn_blocking(move || read_tail(&path)).await.ok()??;
     claude_last_prompt_id(&log)
 }
@@ -365,7 +369,11 @@ async fn session_log(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<Str
     }
     match bot.kind.as_str() {
         "claude" => {
-            let path = std::path::PathBuf::from(run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?);
+            let raw_path = run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?;
+            if !crate::transcript_read::local_transcript_allowed(app, bot, raw_path).await {
+                return None;
+            }
+            let path = std::path::PathBuf::from(raw_path);
             tokio::task::spawn_blocking(move || read_tail(&path)).await.ok()?
         }
         "codex" => {
@@ -527,6 +535,30 @@ mod retain_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Interrupt evidence must come from this local bot's own transcript, not a legacy run path
+    /// that happens to point at another local JSONL file.
+    #[tokio::test]
+    async fn interrupt_readers_ignore_a_transcript_outside_the_bots_projects_dir() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "interrupt-path-guard").await;
+        let run_id = crate::testing::fake_run(&app, &bot.id).await;
+        let scratch = crate::testing::track(std::env::temp_dir().join(format!("am-interrupt-path-{}", db::ulid())));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let outside = scratch.join("foreign.jsonl");
+        std::fs::write(&outside, json!({"type":"user","promptId":"FOREIGN-PROMPT-6091","timestamp":"2026-09-16T12:01:00.000Z","message":{"content":"[Request interrupted by user]"}}).to_string()).unwrap();
+        sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?")
+            .bind(outside.to_string_lossy())
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+
+        assert_eq!(session_log(&app, &bot, &run).await, None);
+        assert_eq!(claude_prompt_id(&app, &bot, &run).await, None);
+    }
 
     /// 2b0fe98 的 `a_broken_grace_env_falls_back_to_sixty_seconds` 改成測解析函式：原本在測試裡 `set_var`，
     /// 寬限現在有更多平行測試會讀，全域環境變數會互相干擾。
@@ -756,7 +788,16 @@ mod tests {
         let run = crate::testing::fake_run(&app, &bot.id).await;
         env.herdr.set_agent("agent", &format!("pane-{}", bot.id), true);
         let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
-        let transcript = app.data_dir.join(format!("{}.jsonl", bot.id));
+        let config_dir = env.dir.join("claude-config");
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(json!({"CLAUDE_CONFIG_DIR": config_dir.to_string_lossy()}).to_string())
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let transcript_dir = config_dir.join("projects/-test");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript = transcript_dir.join(format!("{}.jsonl", bot.id));
         let lines = [
             json!({"type": "user", "promptId": "p-old", "message": {"role": "user", "content": "上一則"}}),
             json!({"type": "user", "promptId": "p-a", "message": {"role": "user", "content": "跑測試"}}),

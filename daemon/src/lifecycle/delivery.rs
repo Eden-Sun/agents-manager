@@ -945,6 +945,18 @@ pub(crate) async fn plan_delivery(
             return Ok(Err(Delivered::NotAttempted { reason: "host_unreadable", retry: true }));
         }
     };
+    let transcript_path = if let Some(path) = run.transcript_path.as_deref() {
+        if bot.kind == "claude"
+            && host_is_local
+            && !crate::transcript_read::local_transcript_allowed(app, bot, path).await
+        {
+            None
+        } else {
+            Some(path)
+        }
+    } else {
+        None
+    };
     let pane_cols = client.pane_size(&pane).await.ok().flatten().map(|(w, _)| w);
     let codex_log = match (bot.kind.as_str(), host_is_local, run.native_session_id.as_deref()) {
         ("codex", true, Some(session)) => match codex_home(app, bot).await {
@@ -958,7 +970,7 @@ pub(crate) async fn plan_delivery(
         host_is_local,
         hooks: bot.inject_hooks != 0,
         session_id: run.native_session_id.as_deref(),
-        transcript_path: run.transcript_path.as_deref(),
+        transcript_path,
         codex_log,
         waited_for_log,
         pane_cols,
@@ -2022,6 +2034,34 @@ mod api_tests {
         (bot_id, conv, run_id)
     }
 
+    /// A local Claude run with a legacy untrusted DB path must wait for its own transcript rather
+    /// than treating an arbitrary same-host JSONL file as delivery evidence.
+    #[tokio::test]
+    async fn delivery_does_not_select_an_out_of_root_transcript_as_proof() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _, run_id) = idle_bot(&env, "claude").await;
+        let bot = db::bot(&app.db, &bot_id).await.unwrap().unwrap();
+        let scratch = tt::track(std::env::temp_dir().join(format!("am-delivery-path-{}", db::ulid())));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let outside = scratch.join("foreign.jsonl");
+        std::fs::write(&outside, "{}\n").unwrap();
+        sqlx::query("UPDATE runs SET native_session_id='session-guard', transcript_path=? WHERE id=?")
+            .bind(outside.to_string_lossy())
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        env.herdr.live_pane("pane-api", tt::LivePane { width: Some(120), ..Default::default() });
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+
+        let plan = plan_delivery(&app, &client, &run, &bot, "deliver this", true, false).await.unwrap();
+        assert!(matches!(plan, Ok(Plan::Type { proof: Proof::EchoRow | Proof::Unverified, .. })
+            | Err(Delivered::NotAttempted { reason: "transcript_not_ready", retry: true })),
+            "out-of-root file cannot become a transcript proof: {plan:?}");
+    }
+
     async fn turns(app: &Arc<App>, conv: &str) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id = ?").bind(conv).fetch_one(&app.db).await.unwrap()
     }
@@ -2125,7 +2165,16 @@ mod api_tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let (bot_id, conv, run_id) = idle_bot(&env, "claude").await;
-        let t = env.dir.join("locked.jsonl");
+        let config_dir = env.dir.join("claude-config");
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(json!({"CLAUDE_CONFIG_DIR": config_dir.to_string_lossy()}).to_string())
+            .bind(&bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let transcript_dir = config_dir.join("projects/-test");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let t = transcript_dir.join("locked.jsonl");
         std::fs::write(&t, "").unwrap();
         sqlx::query("UPDATE runs SET native_session_id = 's-locked', transcript_path = ? WHERE id = ?")
             .bind(t.to_str().unwrap())

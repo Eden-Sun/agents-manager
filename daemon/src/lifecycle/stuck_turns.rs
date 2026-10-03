@@ -302,7 +302,11 @@ async fn proven_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, turn: &db::T
 async fn logged_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[String]) -> Option<String> {
     match bot.kind.as_str() {
         "claude" => {
-            let path = std::path::PathBuf::from(run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?);
+            let raw_path = run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?;
+            if !crate::transcript_read::local_transcript_allowed(app, bot, raw_path).await {
+                return None;
+            }
+            let path = std::path::PathBuf::from(raw_path);
             let log = tokio::task::spawn_blocking(move || read_tail(&path, LOG_TAIL_BYTES)).await.ok()??;
             claude_reply_after(&log, sent)
         }
@@ -400,6 +404,34 @@ pub(crate) fn codex_reply_after(log: &str, sent: &[String]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::testing as tt;
+
+    /// Old or poisoned run rows must not let a local Claude completion be inferred from an
+    /// arbitrary daemon-local JSONL file.
+    #[tokio::test]
+    async fn a_stuck_turn_does_not_import_reply_from_outside_the_bots_projects_dir() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "stuck-path-guard").await;
+        let run_id = tt::fake_run(&app, &bot.id).await;
+        let scratch = tt::track(std::env::temp_dir().join(format!("am-stuck-path-{}", db::ulid())));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let outside = scratch.join("foreign.jsonl");
+        let log = [
+            claude_user("requested prompt"),
+            claude_assistant("end_turn", json!([{"type":"text","text":"FOREIGN-REPLY-5592"}])),
+        ].join("\n");
+        std::fs::write(&outside, log).unwrap();
+        sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?")
+            .bind(outside.to_string_lossy())
+            .bind(&run_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let run = db::run(&app.db, &run_id).await.unwrap().unwrap();
+
+        let reply = logged_reply(&app, &bot, &run, &["requested prompt".into()]).await;
+        assert_eq!(reply, None, "任意本機 JSONL 不能冒充 bot 的回覆證據");
+    }
 
     /// run 結束時多半是 idle：只在「看到非 idle」才清的計時表，結束的 run 會一直留著（run id 每次都是新的，只增不減）。
     /// 巡邏每輪把不再 active 的 run 帶走（呼叫端傳的是 DB 裡還活著的 run id）。
@@ -539,6 +571,19 @@ mod tests {
         .unwrap();
         insert_message(&app, &conv, Some(&turn_id), "user", prompt, "web", false, None).await.unwrap();
         Fixture { env, bot_id: bot.id, run_id, turn_id }
+    }
+
+    async fn own_transcript(f: &Fixture) -> std::path::PathBuf {
+        let config_dir = f.env.dir.join("claude-config");
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(serde_json::json!({"CLAUDE_CONFIG_DIR": config_dir.to_string_lossy()}).to_string())
+            .bind(&f.bot_id)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        let dir = config_dir.join("projects/-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("transcript.jsonl")
     }
 
     /// 2026-09-26 cf-ox-fork-fork：Session paused 選單關掉、run 回到 idle、沒有回覆——不等 5 分鐘，馬上收，
@@ -692,7 +737,7 @@ mod tests {
     async fn a_reply_proven_by_the_transcript_completes_the_turn_and_is_backfilled() {
         let f = stuck("部署 6b84fa5").await;
         let app = f.env.app.clone();
-        let path = f.env.dir.join("transcript.jsonl");
+        let path = own_transcript(&f).await;
         let log = [
             claude_user("部署 6b84fa5"),
             claude_assistant("end_turn", json!([{"type": "text", "text": "部署完成：pid 42894"}])),
@@ -717,7 +762,7 @@ mod tests {
     async fn a_prompt_the_cli_wrapped_as_pasted_content_still_proves_the_reply() {
         let f = stuck("請只回覆 OK 兩個字母，不要多說任何其他的話，也不要使用任何工具。").await;
         let app = f.env.app.clone();
-        let path = f.env.dir.join("transcript.jsonl");
+        let path = own_transcript(&f).await;
         let log: Vec<&str> = include_str!("fixtures/claude_2.1.278_pasted_content.jsonl").lines().take(2).collect();
         assert!(log[0].contains("<pasted_content id=\\\"c4ab\\\">"), "fixture 第一列就是包起來的那一則");
         std::fs::write(&path, log.join("\n") + "\n").unwrap();
@@ -737,7 +782,7 @@ mod tests {
     async fn a_stuck_turn_whose_proof_cannot_be_read_is_left_for_the_next_sweep() {
         let f = stuck("部署 6b84fa5").await;
         let app = f.env.app.clone();
-        let path = f.env.dir.join("transcript.jsonl");
+        let path = own_transcript(&f).await;
         let log = [claude_user("部署 6b84fa5"), claude_assistant("end_turn", json!([{"type": "text", "text": "部署完成：pid 42894"}]))].join("\n");
         std::fs::write(&path, log + "\n").unwrap();
         sqlx::query("UPDATE runs SET transcript_path = ? WHERE id = ?").bind(path.to_string_lossy()).bind(&f.run_id).execute(&app.db).await.unwrap();

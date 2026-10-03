@@ -217,6 +217,18 @@ async fn draft_proof(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &
         Ok(p) => p.is_some_and(|p| p.host == LOCAL_HOST),
         Err(_) => return Err(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "host_unreadable", retry: true })),
     };
+    let transcript_path = if let Some(path) = run.transcript_path.as_deref() {
+        if bot.kind == "claude"
+            && host_is_local
+            && !crate::transcript_read::local_transcript_allowed(app, bot, path).await
+        {
+            None
+        } else {
+            Some(path)
+        }
+    } else {
+        None
+    };
     let codex_log = match (bot.kind.as_str(), host_is_local, run.native_session_id.as_deref()) {
         ("codex", true, Some(session)) => match codex_home(app, bot).await {
             Some(h) => codex_session_log_async(h, session.to_string()).await,
@@ -229,7 +241,7 @@ async fn draft_proof(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &
         host_is_local,
         hooks: bot.inject_hooks != 0,
         session_id: run.native_session_id.as_deref(),
-        transcript_path: run.transcript_path.as_deref(),
+        transcript_path,
         codex_log,
         waited_for_log: false,
         pane_cols: client.pane_size(pane).await.ok().flatten().map(|(w, _)| w),

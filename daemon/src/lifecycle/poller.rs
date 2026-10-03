@@ -271,7 +271,7 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     // claude 自己起頭的回合（背景 shell 的 task notification）畫面上沒有新的回音，最後一個是上一則使用者 prompt，
     // 已經記在上一回合底下——不是這一回合的 user 訊息（issue #224，`transcript_origin`）。
     let by_the_cli = match db::bot(&app.db, &run.bot_id).await {
-        Ok(Some(bot)) => super::transcript_origin::started_by_the_cli_itself(&bot.kind, run.transcript_path.as_deref()).await,
+        Ok(Some(bot)) => super::transcript_origin::started_by_the_cli_itself(app, &bot, run.transcript_path.as_deref()).await,
         _ => false,
     };
     let echo = if by_the_cli { None } else { pane_prompt_echo(app, &run).await };
@@ -2180,7 +2180,16 @@ mod issue_17_tests {
 
     /// A claude run bound to a session whose transcript the live pane writes on Enter.
     async fn with_transcript(f: &Fixture, pane: crate::testing::LivePane) -> std::path::PathBuf {
-        let t = f.env.dir.join(format!("session-{}.jsonl", db::ulid()));
+        let config_dir = f.env.dir.join("claude-config");
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(serde_json::json!({"CLAUDE_CONFIG_DIR": config_dir.to_string_lossy()}).to_string())
+            .bind(&f.bot_id)
+            .execute(&f.env.app.db)
+            .await
+            .unwrap();
+        let transcript_dir = config_dir.join("projects/-test");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let t = transcript_dir.join(format!("session-{}.jsonl", db::ulid()));
         std::fs::write(&t, "").unwrap();
         sqlx::query("UPDATE runs SET native_session_id = 'sess-1', transcript_path = ? WHERE id = ?")
             .bind(t.to_str().unwrap())
@@ -2643,10 +2652,19 @@ mod issue_17_tests {
         let f = fixture("claude", "__READ_ERROR__").await;
         let app = f.env.app.clone();
         db::set_pane_typed(&app.db, &f.run_id).await.unwrap();
+        let config_dir = f.env.dir.join("claude-config");
+        sqlx::query("UPDATE bots SET env_json=? WHERE id=?")
+            .bind(serde_json::json!({"CLAUDE_CONFIG_DIR": config_dir.to_string_lossy()}).to_string())
+            .bind(&f.bot_id)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let transcript_dir = config_dir.join("projects/-test");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let t = transcript_dir.join("t.jsonl");
+        std::fs::write(&t, "").unwrap();
         let (run, bot) = run_and_bot(&f).await;
         let client = client_for_run(&app, &run).await.unwrap();
-        let t = f.env.dir.join("t.jsonl");
-        std::fs::write(&t, "").unwrap();
         let run = db::Run { native_session_id: Some("s".into()), transcript_path: Some(t.to_str().unwrap().into()), ..run };
         let out = deliver_prompt(&app, &client, &run, &bot, "Reply with PONG please", false, false).await.unwrap();
         assert_eq!(out, not("composer_unreadable", true));

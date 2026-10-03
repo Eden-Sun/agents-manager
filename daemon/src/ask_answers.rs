@@ -279,7 +279,9 @@ pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hookrecv::HookB
             .or_else(|| run.as_ref().and_then(|r| r.transcript_path.clone()))
             .filter(|p| !p.trim().is_empty());
         if let (true, Some(path)) = (local, path) {
-            records = from_local_transcript(&path).await;
+            if crate::transcript_read::local_transcript_allowed(app, &bot, &path).await {
+                records = from_local_transcript(&path).await;
+            }
         }
     }
     if let Err(e) = record(app, &bot.id, &conv, records).await {
@@ -401,5 +403,49 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].items[0].answer.as_deref(), Some("a"));
         assert!(carried(&json!({})).is_empty());
+    }
+
+    /// Stop's follow-up transcript read must apply the same bot-owned path check as hookrecv;
+    /// otherwise a token holder can import an arbitrary local JSONL file into this conversation.
+    #[tokio::test]
+    async fn a_stop_does_not_import_ask_answers_from_outside_the_bots_projects_dir() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "ask-path-guard").await;
+        crate::testing::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let turn = db::ulid();
+        sqlx::query("INSERT INTO turns (id, conversation_id, origin, status, delivery, created_at) VALUES (?,?, 'web','in_flight','ok',?)")
+            .bind(&turn)
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+
+        let scratch = crate::testing::track(std::env::temp_dir().join(format!("am-ask-path-{}", db::ulid())));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let outside = scratch.join("foreign.jsonl");
+        let log = [ask("foreign-tool-id", qs()), answered("foreign-tool-id", &db::now(), json!({"拋單怎麼處理？": "FOREIGN-ANSWER-3187"}))].join("\n");
+        std::fs::write(&outside, log).unwrap();
+
+        let body = crate::hookrecv::HookBody {
+            bot_id: bot.id.clone(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name":"Stop", "transcript_path":outside.to_string_lossy()}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        };
+        after_turn_end(&app, &body).await;
+
+        let imported: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND content LIKE '%FOREIGN-ANSWER-3187%'")
+            .bind(&conv)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(imported, 0, "外部 JSONL 的答案不能混進本機 bot 對話");
+        let still_here: Option<String> = sqlx::query_scalar("SELECT id FROM turns WHERE id=?").bind(&turn).fetch_optional(&app.db).await.unwrap();
+        assert_eq!(still_here.as_deref(), Some(turn.as_str()));
     }
 }
