@@ -129,13 +129,19 @@ pub async fn prepare_restart(
     ttl_secs: i64,
     boot: &str,
 ) -> Result<String> {
-    let mut tx = pool.begin().await?;
+    // 先讀後寫：deferred 交易讀完再升級寫鎖時 SQLite 不跑 busy handler，讀完之後別的 writer（對帳每一輪都在寫 runs）
+    // 剛 commit 或正拿著寫鎖，就直接回 `database is locked`／517 BUSY_SNAPSHOT，整個重啟被拒（#814，同 #723）。
+    // BEGIN 就拿寫鎖，撞到只會等 busy_timeout。
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let existing: Option<Intent> = sqlx::query_as(
         "SELECT * FROM intents WHERE kind='restart' AND subject_id=? AND status IN ('pending','running')",
     )
     .bind(subject_id)
     .fetch_optional(&mut *tx)
     .await?;
+    // 讀完舊 intent、還沒寫的那一瞬（測試在這裡讓另一個 writer 插進來）。
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("restart_intent_after_read", subject_id).await;
     let now = crate::db::now();
     let expires = (chrono::Utc::now() + chrono::Duration::seconds(ttl_secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let id = match existing {
@@ -493,6 +499,31 @@ mod tests {
         // 兩件都有人被通知（放棄不會沒人知道）。
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind = 'intent_failed'").fetch_one(&p).await.unwrap();
         assert_eq!(n, 2);
+        p.close().await;
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// #814：重啟讀完舊 intent、還沒寫的那一瞬，另一個 writer（對帳每一輪的 `UPDATE runs`）commit 了一筆。deferred 交易
+    /// 這時升級寫鎖不跑 busy handler，直接 BUSY_SNAPSHOT，重啟整個被拒（ubuntu-ci 在負載下的
+    /// `restarts_racing_a_reconcile_loop_always_come_back`）。寫鎖要從讀之前就拿著：插進來的那一筆要等，重啟不能失敗。
+    #[tokio::test]
+    async fn a_writer_landing_between_the_read_and_the_write_does_not_refuse_the_restart() {
+        use sqlx::{ConnectOptions, sqlite::SqliteConnectOptions};
+        use std::str::FromStr;
+        let (p, dir) = pool().await;
+        let subject = format!("bot-814-{}", crate::db::ulid());
+        let other_wrote = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
+        let (url, seen) = (format!("sqlite://{}", dir.join("t.sqlite").display()), other_wrote.clone());
+        crate::lifecycle::race_point::arm("restart_intent_after_read", &subject, move || async move {
+            // 另一條連線、不等鎖：拿得到寫鎖就當場 commit（deferred 時正是這樣），拿不到＝被重啟的交易擋著。
+            let mut other = SqliteConnectOptions::from_str(&url).unwrap().busy_timeout(std::time::Duration::ZERO).connect().await.unwrap();
+            let wrote = insert_pending_on(&mut other, "restart", "another-bot", "local", &json!({}), 900).await.is_ok();
+            *seen.lock().unwrap() = Some(wrote);
+        });
+
+        let id = prepare_restart(&p, &subject, "local", &json!({}), 900, "boot-A").await.expect("a concurrent writer must not refuse the restart");
+        assert_eq!(*other_wrote.lock().unwrap(), Some(false), "the restart holds the write lock from its read on; the other writer waits");
+        assert_eq!(get(&p, &id).await.unwrap().unwrap().status, "pending");
         p.close().await;
         std::fs::remove_dir_all(dir).ok();
     }

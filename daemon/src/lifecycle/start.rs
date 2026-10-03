@@ -2831,7 +2831,7 @@ mod resume_args_tests {
         for i in 0..15 {
             let started = match crate::lifecycle::restart_bot_with(&e.app, &pm.id, StartOpts::default()).await {
                 Ok(id) => id,
-                Err(_) => panic!("restart {i} was refused while a reconcile was running"),
+                Err(e) => panic!("restart {i} was refused while a reconcile was running: {e:?}"),
             };
             let active = db::active_run(&e.app.db, &pm.id).await.unwrap().expect("a run after the restart");
             assert_eq!(active.id, started, "restart {i}: the active run is the one the restart started, not an adopted leftover");
