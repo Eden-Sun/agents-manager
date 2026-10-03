@@ -1680,7 +1680,7 @@ herdr 還列著這個 agent（pane 被搬走）的不算，會被重新收編。
 依據：`daemon-swap.sh` 只重啟 daemon、herdr 不動，換版本身關不掉任何 pane。pane 還在、新 daemon 認不出裡面的 agent（`agent_missing`）仍回滾；
 pane 已 gone 但沒有關閉事件時，只容許窄例外：新 daemon 的 reconcile 寫下 `unconfirmed` 退役紀錄、child 有 parent、父 bot 的 run 仍 active，且父 bot 仍在新版名單。
 這涵蓋啟動對帳把已消失的 child 收起來、intent 稍後才可讀到的情形；如果連父 bot 也不見、父 run 已結束、pane 還在，或資料庫／名單讀取失敗，仍回滾。
-新版連到空的 herdr 通常也會讓父 bot 的 active run 結束，因此不符合這條 child 例外。`daemon-swap.sh` 只在缺少 child 且父 bot 仍可見時，重讀 state 與 intent 最多 5 次、每次間隔 1 秒；逾時仍當遺失回滾。
+新版連到空的 herdr 通常也會讓父 bot 的 active run 結束，因此不符合這條 child 例外。`daemon-swap.sh` 只在缺少 child、父 bot 仍可見、而且這顆 child 自己的 `retire_child`／刪除 intent 都還沒出現時，重讀 state 與 intent 最多 5 次、每次間隔 1 秒；逾時、母 bot 中途消失，或已經看見不合格的原因（例如 `agent_missing`），都當遺失回滾。
 
 ### 6.5a-1 子 agent 卡住時通知父 agent（`child_alerts`，使用者 2026-09-18）
 
