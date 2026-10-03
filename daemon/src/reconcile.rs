@@ -1210,6 +1210,20 @@ async fn adopt_child(
     if app.isolated() {
         anyhow::bail!("隔離實例不認領既有子 agent（`{child_name}` 的 hook 指向別的資料目錄）；請在這顆 daemon 底下重開");
     }
+    // Deletion locks the parent together with its snapshot of descendants. Adoption must share
+    // that lock so it cannot insert a child after delete_bot/delete_project took their snapshot.
+    let _parent_guard = app.bot_lock(&parent.id).await.lock_owned().await;
+    // `parents` is a reconcile snapshot and may be stale while waiting for the lock. Recheck both
+    // sides of the ownership boundary before updating an existing child or inserting a new one.
+    let owner: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT b.project_id, b.deleted_at, p.deleted_at FROM bots b JOIN projects p ON p.id = b.project_id WHERE b.id = ?",
+    )
+    .bind(&parent.id)
+    .fetch_optional(&app.db)
+    .await?;
+    if !matches!(owner, Some((ref project_id, None, None)) if project_id == &parent.project_id) {
+        anyhow::bail!("parent bot or project was deleted before adopting `{child_name}`");
+    }
     let now = db::now();
     let full_name = child_name_from_agent(name);
     let existing: Option<String> = sqlx::query_scalar(
@@ -1662,6 +1676,73 @@ mod compat_tests {
             .fetch_optional(&app.db)
             .await
             .unwrap()
+    }
+
+    async fn assert_adoption_waits_for_delete_lock_and_rechecks(project_deleted: bool) {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let parent_id = a_bot(&env, "adoption-parent").await;
+        let parent = db::bot(&app.db, &parent_id).await.unwrap().unwrap();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, _root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let pane = client.tab_create(&ws.workspace_id, "/tmp/p", "kid", json!({})).await.unwrap();
+        let agent: crate::herdr::AgentInfo = serde_json::from_value(json!({
+            "name": "proj-adoption-parent-kid", "agent": "claude", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": pane.tab_id, "pane_id": pane.pane_id, "cwd": "/tmp/p"
+        }))
+        .unwrap();
+
+        // delete_bot holds this lock across its snapshot, soft delete, and cleanup. Adoption must
+        // queue behind it and then reject the stale parent/project snapshot after deletion.
+        let guard = app.bot_lock(&parent.id).await.lock_owned().await;
+        let (app2, client2, parent2, agent2) = (app.clone(), client.clone(), parent.clone(), agent.clone());
+        let mut adoption = tokio::spawn(async move {
+            super::adopt_child(&app2, "local", &client2, "test", &agent2, "proj-adoption-parent-kid", &parent2, "kid", "claude").await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut adoption).await.is_err(),
+            "adoption must share the parent lock instead of inserting a child during delete"
+        );
+        if project_deleted {
+            sqlx::query("UPDATE projects SET deleted_at=? WHERE id=?")
+                .bind(db::now())
+                .bind(&parent.project_id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?")
+                .bind(db::now())
+                .bind(&parent.id)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+        drop(guard);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), adoption).await.unwrap().unwrap();
+        assert!(result.is_err(), "stale reconciliation state must not resurrect a deleted owner: {result:?}");
+        let bots: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bots WHERE parent_bot_id=?")
+            .bind(&parent.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id IN (SELECT id FROM bots WHERE parent_bot_id=?)")
+            .bind(&parent.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(bots, 0, "deleted parent/project must not acquire an orphan child");
+        assert_eq!(runs, 0, "rejected adoption must not leave a live run");
+    }
+
+    #[tokio::test]
+    async fn child_adoption_waits_for_parent_delete_lock_and_rechecks_parent_liveness() {
+        assert_adoption_waits_for_delete_lock_and_rechecks(false).await;
+    }
+
+    #[tokio::test]
+    async fn child_adoption_waits_for_project_delete_lock_and_rechecks_project_liveness() {
+        assert_adoption_waits_for_delete_lock_and_rechecks(true).await;
     }
 
     /// 重啟時卡在送出途中的那一筆，開機要有人收尾——否則那顆 bot 之後每則 prompt 都 409，

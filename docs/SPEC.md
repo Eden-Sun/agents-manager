@@ -258,6 +258,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   刪除模式的閘門是嚴格的：除了這次拿掉的 id，只要還有任何一列會不見就 409 `delete_refused`，不套小量門檻、不吃 `AM_ALLOW_BULK_DELETE`。
   所有投影與刪除共用同一把鎖，兩支 DELETE 並發時不會互相把對方的刪除當成未授權、也不會替對方放行。
   **先定案、再停機**：`DELETE /api/bots/:id` 全程拿著該 bot 的 per-bot 鎖（start 用同一把，拿到時 bot 已刪 → NotFound），會 409 的只有定案那一步、那時什麼都還沒停；
+  `reconcile::adopt_child` 也拿同一把 parent 鎖，並在等鎖後重查 parent 與 project 的軟刪狀態，避免刪除快照之後又收編出孤兒 child。
   定案後才停 child 與自己、軟刪 child、清目錄，所以停機期間 TOML 再怎麼變都不會留下「已停、未刪」（child 由母 agent 開、daemon 重開不了，事後回滾本來就做不到）。
   **目錄只在「確定」時才清**（#210）：定案之前先確認讀得到這顆與每個 child 的 active run，讀不到 → 502、什麼都不動，可原樣再按一次。定案之後每顆 bot 的 `bots/<id>/`
   只在「停機成功、而且停完再讀一次確定沒有 active run」時才 purge。停機失敗（主機連不上、agent 沒退出）時 run 照舊強制收成 `exited`（已軟刪的 bot 不進對帳，不收就沒有人收），
@@ -2039,6 +2040,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 
 #### API 與 UI
 - `GET /api/bots/{id}/outbox`、`GET /api/bots/{id}/outbox/file?path=`（API.md）：**只讀 outbox，完全不讀 scratchpad**。
+  檔案 API（含 `local-image`、outbox、附件上傳／下載）只接受 User principal；bot principal 回 `403 user_only`。附件上傳在讀 body 與取得上傳名額前拒絕 bot principal。
   列第一層一般檔案（符號連結、子目錄不列），每個帶 `expires_at`／`remaining_secs`；下載路徑解開後必須在該 bot 的 outbox 內，
   指到 scratchpad 的絕對路徑或符號連結一律 404。禁放清單在 daemon 端再擋一次（檔名＋檔頭：`SQLite format 3`、PEM 私鑰），不列、下載 404。
 - 舊的 `/api/bots/{id}/scratchpad*` 明確 404。
