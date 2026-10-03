@@ -14,6 +14,8 @@
 #   AGM_DIR、AGM_REPO、AM_BINARY、AGM_RELEASE_BOT、AGM_TRIAGE_QUOTA_MAX、AGM_LOCK_STALE_SECS、
 #   AGM_LOCK_HUNG_SECS、AGM_LOCK_QUIET_SECS、AGM_FAIL_ALERT_AFTER 可覆寫（測試用）。
 set -u
+
+SELF="$(cd "$(dirname "$0")" && pwd)/${0##*/}"
 PATH="${AGM_EXTRA_PATH-/opt/homebrew/bin:/usr/local/bin}:$PATH"; export PATH   # AGM_EXTRA_PATH 只給測試蓋掉
 
 DIR="${AGM_DIR:-${HOME:-/nonexistent}/.config/agents-manager/supervisor/AGM}"
@@ -98,6 +100,7 @@ command -v python3 >/dev/null 2>&1 || { alert missing_dependency "找不到 pyth
 # 鎖：兩個執行者同時派會送出重複交辦。鎖裡寫 pid 與時間（抄 daemon-update-kick.sh 的格式）：
 # SIGKILL／斷電那一輪 EXIT trap 沒跑，鎖會留在磁碟上——執行者不在就回收接手；還活著但卡太久才喊人。
 LOCK="$DIR/release-triage.lock"
+LOCK_GUARD="$DIR/release-triage.lock.guard"
 LOCK_STALE_SECS=${AGM_LOCK_STALE_SECS:-120}    # 沒有 pid 可查時，超過這麼久就算殘留
 LOCK_HUNG_SECS=${AGM_LOCK_HUNG_SECS:-3600}     # 執行者還活著但卡了這麼久：喊人
 # 執行者剛拿到鎖不到這麼久就撞上＝同一秒內兩個排程一起到點（com.agm.release-triage 與相容入口
@@ -116,6 +119,29 @@ except OSError:
   [ "$_born" = 0 ] && { echo 0; return; }
   echo $(( $(date +%s) - _born ))
 }
+is_self_runner() { # is_self_runner <pid>：只認真正以這支腳本為 bash/sh 入口的行程
+  _cmd=$(ps -o command= -p "$1" 2>/dev/null) || return 1
+  RUNNER_COMMAND="$_cmd" RUNNER_SCRIPT="$SELF" python3 -c '
+import os, shlex, sys
+try:
+    argv = shlex.split(os.environ["RUNNER_COMMAND"])
+except ValueError:
+    sys.exit(1)
+if len(argv) < 2 or os.path.basename(argv[0]).lstrip("-") not in ("bash", "sh"):
+    sys.exit(1)
+sys.exit(0 if os.path.normpath(argv[1]) == os.environ["RUNNER_SCRIPT"] else 1)
+' >/dev/null 2>&1
+}
+acquire_guard() {
+  exec 9>"$LOCK_GUARD" 2>/dev/null || return 2
+  python3 -c '
+import errno, fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError as e:
+    sys.exit(1 if e.errno in (errno.EACCES, errno.EAGAIN) else 2)
+' >/dev/null 2>&1
+}
 TMPS=()
 TMPS_COUNT=0
 cleanup() {
@@ -125,6 +151,30 @@ cleanup() {
   true
 }
 take_lock() { mkdir "$LOCK" 2>/dev/null && { echo "$$ $(date +%s)" > "$LOCK/owner"; trap cleanup EXIT; return 0; }; return 1; }
+mkdir -p "$DIR" 2>/dev/null
+_guard_rc=0
+acquire_guard || _guard_rc=$?
+if [ "$_guard_rc" -eq 1 ]; then
+  _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
+  _age=$(lock_age)
+  if [ "$_age" -lt 0 ]; then
+    log "鎖的時間在未來（${_age} 秒），時鐘倒退或鎖是搬來的，年齡不可信"
+  elif [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
+    if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
+      alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，上游新版分診停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
+    elif [ "$_age" -ge "$LOCK_QUIET_SECS" ]; then
+      log "分診已有執行者（pid ${_pid}，${_age} 秒），這輪跳過"
+    fi
+  elif [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
+    alert runner_hung "release runner 持有 OS lock 已 ${_age} 秒，但鎖的 owner（${_pid:-未知}）無法驗證；分診停住。請確認後必要時結束行程並移除 ${LOCK}"
+  elif [ "$_age" -ge "$LOCK_QUIET_SECS" ]; then
+    log "另一個 release runner 持有 OS lock（owner 尚未可驗，${_age} 秒），這輪跳過"
+  fi
+  exit 0
+elif [ "$_guard_rc" -ne 0 ]; then
+  alert lock_unavailable "無法建立或取得分診鎖（${LOCK_GUARD}），本輪跳過"
+  exit 0
+fi
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
   _age=$(lock_age)
@@ -135,7 +185,7 @@ if ! take_lock; then
     _age_bad=1
     log "鎖的時間在未來（${_age} 秒），時鐘倒退或鎖是搬來的，年齡不可信"
   fi
-  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && ps -o command= -p "$_pid" 2>/dev/null | grep -q 'release-triage-kick'; then
+  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
     if [ "$_age_bad" = 1 ]; then
       :   # 上面已記 log；執行者還活著，不搶、不派
     elif [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
