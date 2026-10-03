@@ -1266,8 +1266,9 @@ pub async fn reconcile(app: &Arc<App>) {
 /// 所屬任務已經取消、自己卻還開著的交辦（issue #185）：取消任務時逐件 `review cancel`，有一件失敗（DB 暫時寫不進去）
 /// 就一直開著——#171 之後派送不會再送它，但也沒有別的路會收它，永遠佔著「未結交辦」。這裡補做取消那一步的同一個裁示。
 ///
-/// 只收**沒在跑**的：`delivered`／`unknown` 的回合可能還在跑，等它結束、收到 `awaiting_review` 之後下一輪再收，不在回合
-/// 中途把追蹤斷掉。走 `post_review` 同一條路（同一把 supervisor 鎖、同一份稽核），收過的就不再是開著的，可重入。
+/// 只收**沒在跑**的：`delivered`／`unknown` 通常代表回合可能還在跑，等它結束、收到 `awaiting_review` 之後下一輪再收，
+/// 不在回合中途把追蹤斷掉。例外是 turn 明確仍為 `queued`：它尚未被認領，取消任務後必須撤掉，不能等 bot 恢復時才送出。
+/// 走 `post_review` 同一條路（同一把 supervisor 鎖、同一份稽核），收過的就不再是開著的，可重入。
 async fn collect_cancelled_missions(app: &Arc<App>) {
     let idle: Vec<&str> = super::assignment_state::ALL
         .iter()
@@ -1277,7 +1278,9 @@ async fn collect_cancelled_missions(app: &Arc<App>) {
     let marks = vec!["?"; idle.len()].join(",");
     let sql = format!(
         "SELECT a.* FROM supervisor_assignments a JOIN missions m ON m.id = a.mission_id
-          WHERE a.supervisor_id = ? AND m.cancelled_at IS NOT NULL AND a.status IN ({marks})
+          WHERE a.supervisor_id = ? AND m.cancelled_at IS NOT NULL
+            AND (a.status IN ({marks}) OR (a.status IN ('delivered','unknown')
+                 AND EXISTS (SELECT 1 FROM turns t WHERE t.id = a.turn_id AND t.status = 'queued')))
           ORDER BY a.created_at, a.rowid LIMIT 50"
     );
     let mut q = sqlx::query_as::<_, store::Assignment>(&sql).bind(store::SUPERVISOR_ID);
@@ -5298,6 +5301,38 @@ mod mission_state_dispatch_tests {
             dispatch(&app, &aid).await;
         }
         assert_eq!(typed(&env, &pane), 1, "等 AGM 處理的暫停不擋派送");
+    }
+
+    /// 任務取消後，`delivered` 不一定代表回合正在跑：派工遇到忙碌 bot 時會把已建的 turn
+    /// 排在持久佇列裡（`delivery='queued'`）。若取消當下的 review 中斷，collector 必須辨認這
+    /// 個尚未認領的 turn 並撤回；否則它會在任務已取消後才送出，而交辦也一直占著未結清單。
+    #[tokio::test]
+    async fn a_cancelled_mission_retracts_an_assignment_turn_still_queued_for_delivery() {
+        let (env, mission, aid, _) = mission_with_queued_assignment("cancel-queued-turn").await;
+        let app = env.app.clone();
+        let assignment = store::assignment(&app.db, &aid).await.unwrap().unwrap();
+        let conversation = crate::db::conversation_id(&app.db, &assignment.target_bot_id).await.unwrap();
+        let turn_id = "cancelled-mission-still-queued";
+        sqlx::query(
+            "INSERT INTO turns (id,conversation_id,origin,status,delivery,client_request_id,created_at,prompt_text)
+             VALUES (?,?,'web','queued','pending',?,?, '做 X')",
+        )
+        .bind(turn_id)
+        .bind(conversation)
+        .bind(format!("{aid}:initial"))
+        .bind(crate::db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        assert!(store::mark_delivered(&app.db, &aid, turn_id, "queued").await.unwrap());
+        assert!(crate::mission::store::cancel(&app.db, &mission).await.unwrap());
+
+        reconcile(&app).await;
+
+        let after = store::assignment(&app.db, &aid).await.unwrap().unwrap();
+        let turn_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(after.status, "cancelled", "未認領的 queued turn 隸屬已取消任務，應被補收");
+        assert_eq!(turn_status, "failed", "補收要撤回 prompt，不能讓它之後被送出");
     }
 }
 

@@ -4211,7 +4211,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   #473 保留這個鎖範圍：沒有可恢復的派送中狀態時，不把 prompt 送出移到鎖外；若量測顯示 API 排隊，先增加可由 `client_request_id` 冪等恢復的派送認領，再縮短臨界區。
   逐件 `review cancel` 有一件失敗（DB 暫時寫不進去）時，那件會一直開著：controller 的對帳（`controller::reconcile`，每個 tick）
   把「所屬任務已取消、沒在跑」的交辦補做同一個裁示（`post_review` cancel，`source=mission_cancel`），可重入；`delivered`／`unknown`
-  的回合可能還在跑，等它結束、收到 `awaiting_review` 再收（issue #185）。
+  且 turn 為 `in_flight`（或沒有可確認的 queued turn）的回合可能還在跑，等它結束、收到 `awaiting_review` 再收；若 turn 明確仍為 `queued`，則立刻補做取消並撤回 prompt，避免任務取消後才送出（issue #185）。
 
 需要人判斷的（`ask_user`、`no_independent_reviewer`、findings、要不要再一輪）仍然在 AGM 這一側，daemon 不碰。
 與 ownership 衝突的差別：那個是字串比對猜出來的，所以只回報不強制（§18.4）；這兩條是查得到的事實。
