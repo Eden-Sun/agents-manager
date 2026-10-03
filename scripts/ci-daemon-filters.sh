@@ -5,8 +5,7 @@
 # 為什麼要有：`changed` 以前對 daemon 只做 `cargo check --all-targets`，測試要自己記得用 CHECK_TESTS 挑——一天內好幾次
 # 靠另外跑測試才抓到壞掉的 commit。整包 daemon 測試要十幾分鐘不能放進收尾，所以挑「改到的模組自己的測試」：
 #   - daemon/src/a/b.rs → `a::b::`；a/mod.rs → `a::`；頂層 x.rs → `x::`；測試檔 a/tests.rs → `a::tests::`。
-#   - daemon/src/**/fixtures/* → 它所在的模組（`lifecycle/fixtures/x` → `lifecycle::`）。
-#   - main.rs／lib.rs 不是模組，沒有子集（cargo check 涵蓋編譯）。
+#   - build scripts、crate wiring、共用測試 helper、被嵌入的非 Rust 資料與 daemon/tests 變更，回報 `__all__` 跑全套。
 #   - daemon 以外、但 daemon 的測試會在執行期讀的檔案（跟 ci-changed-parts.sh 同一份清單，兩邊要一起改）：
 #     scripts/check.sh → cargo_shim、lint-shell-vars.sh → herdr_shim、release-task.md → claude_review、
 #     ops/fixtures → supervisor::setup、agm.py 與 persona 文件（被 include_str! 編進 setup/responder）。
@@ -16,16 +15,23 @@ set -euo pipefail
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in
-        daemon/src/main.rs | daemon/src/lib.rs) ;;
+        # Build inputs, crate wiring, and shared test setup can invalidate tests across modules.
+        # Return an all-suite sentinel: cargo check alone does not exercise those behaviors.
+        Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/* | daemon/Cargo.toml | daemon/build.rs \
+            | daemon/src/main.rs | daemon/src/lib.rs | daemon/src/testing.rs | daemon/src/test_home.rs | daemon/tests/*)
+            printf '__all__\n'
+            ;;
         daemon/src/*)
             rel="${f#daemon/src/}"
             case "$rel" in
-                */fixtures/*) rel="${rel%%/fixtures/*}.rs" ;;
-                fixtures/*) continue ;;
+                */fixtures/* | fixtures/*)
+                    printf '__all__\n'
+                    continue
+                    ;;
             esac
             case "$rel" in
                 *.rs) ;;
-                *) continue ;;
+                *) printf '__all__\n'; continue ;;
             esac
             mod="${rel%.rs}"
             mod="${mod%/mod}"

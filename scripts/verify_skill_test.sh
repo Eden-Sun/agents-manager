@@ -43,7 +43,7 @@ stub() { # <name> <body>：記錄「名稱 參數」到 $AM_TEST_LOG
     chmod +x "$fx/bin/$1"
 }
 stub bun; stub bunx; stub python3; stub node
-stub cargo 'if [ -n "${AM_TEST_CARGO_FAIL:-}" ]; then exit 1; fi'
+stub cargo 'if [ -n "${AM_TEST_CARGO_FAIL:-}" ]; then exit 1; fi; if [ "${1:-}" = test ]; then echo "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"; fi'
 cat >"$fx/bin/git" <<'SH'
 #!/usr/bin/env bash
 case "$*" in

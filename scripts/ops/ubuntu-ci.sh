@@ -54,14 +54,52 @@ post_status() {
     return 1
 }
 
-# 上一輪沒送上去的最後結果（見 final_status）先補送：要在「同一個 sha 就退出」之前，不然 main 靜止時永遠補不到。
+retain_unposted_line() {
+    if ! printf '%s\n' "$2" >> "$1"; then
+        echo "ubuntu-ci: 補送佇列暫存寫失敗，保留原 unposted" >&2
+        return 1
+    fi
+}
+defer_unposted_line() {
+    if ! retain_unposted_line "$1" "$2"; then
+        rm -f -- "$1"
+        return 1
+    fi
+}
+
+# 上一輪沒送上去的結果（見 final_status）先逐筆補送：要在「同一個 sha 就退出」之前，不然 main 靜止時永遠補不到。
 post_unposted() {
-    local usha ustate udesc
+    local line usha rest ustate udesc retry_file invalid=0
     [ -s "${CI_ROOT}/unposted" ] || return 0
-    IFS=$'\t' read -r usha ustate udesc < "${CI_ROOT}/unposted" || true
-    [ -n "${usha}" ] && [ -n "${ustate}" ] || { rm -f "${CI_ROOT}/unposted"; return 0; }
-    if post_status "${usha}" "${ustate}" "${udesc}"; then
-        rm -f "${CI_ROOT}/unposted"
+    retry_file="$(mktemp "${CI_ROOT}/unposted.XXXXXX")" || return 1
+    while IFS= read -r line || [ -n "${line:-}" ]; do
+        [ -n "${line}" ] || continue
+        case "${line}" in
+            *$'\t'*) usha="${line%%$'\t'*}"; rest="${line#*$'\t'}" ;;
+            *) invalid=1; defer_unposted_line "${retry_file}" "${line}" || return 1; continue ;;
+        esac
+        case "${rest}" in
+            *$'\t'*) ustate="${rest%%$'\t'*}"; udesc="${rest#*$'\t'}" ;;
+            *) invalid=1; defer_unposted_line "${retry_file}" "${line}" || return 1; continue ;;
+        esac
+        case "${usha}" in *[!0-9a-f]*|'') invalid=1; defer_unposted_line "${retry_file}" "${line}" || return 1; continue ;; esac
+        [ "${#usha}" = 40 ] || { invalid=1; defer_unposted_line "${retry_file}" "${line}" || return 1; continue; }
+        case "${ustate}" in pending|success|failure|error) ;; *) invalid=1; defer_unposted_line "${retry_file}" "${line}" || return 1; continue ;; esac
+        if ! post_status "${usha}" "${ustate}" "${udesc}"; then
+            defer_unposted_line "${retry_file}" "${line}" || return 1
+        fi
+    done < "${CI_ROOT}/unposted"
+    [ "${invalid}" = 0 ] || echo "ubuntu-ci: unposted 有格式錯誤記錄，已保留供檢查（${CI_ROOT}/unposted）" >&2
+    if [ -s "${retry_file}" ]; then
+        if ! mv -f -- "${retry_file}" "${CI_ROOT}/unposted"; then
+            echo "ubuntu-ci: 無法更新補送佇列，保留原 unposted" >&2
+            return 1
+        fi
+    else
+        if ! rm -f -- "${retry_file}" "${CI_ROOT}/unposted"; then
+            echo "ubuntu-ci: 無法清除已補送的佇列" >&2
+            return 1
+        fi
     fi
 }
 post_unposted || true
@@ -96,12 +134,12 @@ status() {
     post_status "${sha}" "$1" "$2" || true
 }
 
-# 最後的結果（success／failure／error）一定要送到：送不上去就記在 ${CI_ROOT}/unposted（一行：sha、state、description，tab 分隔），
+# 最後的結果（success／failure／error）一定要送到：送不上去就附加到 ${CI_ROOT}/unposted（每行 sha、state、description，tab 分隔），
 # 下一輪（不管有沒有新 commit、也不重跑檢查）先補送。不然 last-sha 已經前進，這個 sha 在 GitHub 上永遠停在 pending，
 # 而 status.json 卻寫著 success。
 final_status() {
     if ! post_status "${sha}" "$1" "$2"; then
-        printf '%s\t%s\t%s\n' "${sha}" "$1" "$2" > "${CI_ROOT}/unposted"
+        printf '%s\t%s\t%s\n' "${sha}" "$1" "$2" >> "${CI_ROOT}/unposted"
     fi
 }
 
@@ -120,22 +158,30 @@ json_str() {
 #   - 只認 ${TMPDIR}（沒設用 /tmp）底下第一層；${TMPDIR} 不是絕對路徑、不存在、或解析後是 / 或 ${HOME} 就整個不動（設錯不能照字面去刪）。
 #   - 只處理真的目錄與一般檔案（find 預設不跟 symlink，-type d／f 也排除 symlink 本身），rm 不會跟進 symlink 刪到別處。
 #   - 超過 6 小時沒動：目錄自己的 mtime 只在直接子項增減時才變，所以裡面還有 6 小時內動過的東西就跳過（有行程可能還在用）。
-#   - 名字必須以 am- 或 agm- 開頭、並以 26 碼 ULID（可再接一個 .副檔名）結尾；沒有 ULID 的 am-*（如 am-ops-test）、herdr-*、claude-* 都不碰。
+#   - 名字必須以 am- 或 agm- 開頭、並以有效的 26 碼 ULID（可再接一個 .副檔名）結尾；沒有 ULID 的 am-*（如 am-ops-test）、herdr-*、claude-* 都不碰。
 # 僅 Linux（GNU find 的 -regextype；整支腳本本來就用 flock／timeout）：BSD find 不認得它時整段失敗被吞掉，等於不清、不會誤刪。
 sweep_stale_tmp() {
-    local root real home_real d
+    local root logical real home_real d
     root="${TMPDIR:-/tmp}"
     case "${root}" in /*) ;; *) return 0 ;; esac
+    logical="$(cd "${root}" 2>/dev/null && pwd -L)" || return 0
     real="$(cd "${root}" 2>/dev/null && pwd -P)" || return 0
+    # Reject a symlinked TMPDIR (including a symlink in a parent component); never sweep through it.
+    [ "${logical}" = "${real}" ] || return 0
     home_real="$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P || true)"
     case "${real}" in /|"${home_real}") return 0 ;; esac
+    if [ -n "${home_real}" ]; then
+        case "${home_real}" in /) return 0 ;; esac
+        case "${real}/" in "${home_real}/"*) return 0 ;; esac
+        case "${home_real}/" in "${real}/"*) return 0 ;; esac
+    fi
     while IFS= read -r -d '' d; do
         if [ -d "${d}" ] && [ -n "$(find "${d}" -mmin -360 -print -quit 2>/dev/null)" ]; then
             continue
         fi
         rm -rf -- "${d}" 2>/dev/null || true
     done < <(find "${real}" -mindepth 1 -maxdepth 1 \( -type d -o -type f \) -mmin +360 -regextype posix-extended \
-        -regex '.*/(am|agm)-[A-Za-z0-9-]*[0-9A-HJKMNP-TV-Z]{26}(\.[a-z]+)?' -print0 2>/dev/null || true)
+        -regex '.*/(am|agm)-[A-Za-z0-9-]*[0-7][0-9A-HJKMNP-TV-Z]{25}(\.[a-z]+)?' -print0 2>/dev/null || true)
 }
 sweep_stale_tmp || true
 
