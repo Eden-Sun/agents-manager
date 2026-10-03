@@ -550,11 +550,11 @@ case "$K" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
 case "$N" in ''|.|..|*/*|*[[:cntrl:]]*) am_missing;; esac
 case "$N" in *.jsonl) ;; *) am_missing;; esac
 [ ! -L "$OLD" ] && [ -d "$OLD" ] || am_missing
-cd "$OLD" 2>/dev/null || am_missing
+cd -- "$OLD" 2>/dev/null || am_missing
 [ ! -L "$OLD" ] && am_same "$OLD" . || am_missing
 OLD_REAL=$(pwd -P)
 [ ! -L "$K" ] && [ -d "$K" ] || am_missing
-cd "$K" 2>/dev/null || am_missing
+cd -- "$K" 2>/dev/null || am_missing
 [ ! -L "$OLD/$K" ] && am_same "$OLD/$K" . || am_missing
 [ ! -L "$N" ] && [ -f "$N" ] || am_missing
 exec 3< "$N" || am_missing
@@ -564,12 +564,12 @@ SRC_NAME=$N
 exec 5< . || am_missing
 am_same "$SRC_DIR" /dev/fd/5 || am_missing
 if [ -d "$NEW" ]; then
-  NEW_REAL=$(cd "$NEW" 2>/dev/null && pwd -P) || am_missing
+  NEW_REAL=$(cd -- "$NEW" 2>/dev/null && pwd -P) || am_missing
   [ "$NEW_REAL" = "$OLD_REAL" ] && {{ printf 'AM_SAME\n'; exit 0; }}
 fi
 mkdir -p "$NEW" 2>/dev/null || am_mkdir_failed
 [ ! -L "$NEW" ] && [ -d "$NEW" ] || am_mkdir_failed
-cd "$NEW" 2>/dev/null || am_mkdir_failed
+cd -- "$NEW" 2>/dev/null || am_mkdir_failed
 if [ -L "$NEW" ]; then
   NEW_REAL=$(pwd -P)
   [ "$NEW_REAL" = "$OLD_REAL" ] && {{ printf 'AM_SAME\n'; exit 0; }}
@@ -577,9 +577,9 @@ if [ -L "$NEW" ]; then
 fi
 am_same "$NEW" . || am_mkdir_failed
 if [ -L "$K" ]; then am_mkdir_failed; fi
-if [ ! -e "$K" ]; then mkdir "$K" 2>/dev/null || am_mkdir_failed; fi
+if [ ! -e "$K" ]; then mkdir -- "$K" 2>/dev/null || am_mkdir_failed; fi
 [ -d "$K" ] && [ ! -L "$K" ] || am_mkdir_failed
-cd "$K" 2>/dev/null || am_mkdir_failed
+cd -- "$K" 2>/dev/null || am_mkdir_failed
 [ ! -L "$NEW/$K" ] && am_same "$NEW/$K" . || am_mkdir_failed
 DEST=$N
 exec 6< . || am_mkdir_failed
@@ -2667,6 +2667,22 @@ mod resume_args_tests {
             let out = run_script_locally(&script);
             assert!(out.contains("AM_MKDIR_FAILED"), "{out}");
 
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        /// Claude 的 projects 目錄名是 `-Users-…`。`cd "$K"` 會把前導 `-` 當成選項，搬檔被判成不存在。
+        #[test]
+        fn a_project_dir_whose_name_starts_with_a_dash_is_still_staged() {
+            let base = tmp();
+            let cwd = "-Users-m4p-project";
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join(cwd)).unwrap();
+            std::fs::write(old.join(cwd).join("sid.jsonl"), "hello").unwrap();
+            let new = base.join("new-projects");
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), cwd, "sid.jsonl", None);
+            let out = run_script_locally(&script);
+            assert!(out.contains("AM_STAGED"), "{out}");
+            assert_eq!(std::fs::read_to_string(new.join(cwd).join("sid.jsonl")).unwrap(), "hello");
             let _ = std::fs::remove_dir_all(&base);
         }
 
