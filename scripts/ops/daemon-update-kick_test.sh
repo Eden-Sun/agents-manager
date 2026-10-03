@@ -16,6 +16,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/daemon-update-kick.sh"
 GITBIN=$(command -v git)
+BASE_PATH="$PATH"
 PASS=0
 FAIL=0
 
@@ -71,7 +72,8 @@ setup() {
   printf 'old-binary\n' > "$AGM_REPO/target/release/agents-managerd"
   echo "$(echo "$C0" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
 
-  export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun" CARGO_BIN="$ROOT/bin/cargo"
+  export PATH="$ROOT/bin:$BASE_PATH"
+  export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun"
   export AGM_SWAP_SCRIPT="$ROOT/bin/swap.sh" AM_AGENT_NAME=daemon-update-kick
   export STUB_GH_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP=""
   export AGM_FAIL_ALERT_AFTER=3 AGM_CI_LOOKBACK=30
@@ -104,7 +106,7 @@ exit 0
 STUB
   cat > "$ROOT/bin/cargo" <<'STUB'
 #!/bin/bash
-echo "cargo $* @ $(pwd) AM_REAL_CARGO=${AM_REAL_CARGO:-} PATH_HEAD=${PATH%%:*}" >> "$AGM_DIR/build.log"
+echo "cargo $* @ $(pwd) AM_REAL_CARGO=${AM_REAL_CARGO:-} PATH_HEAD=${PATH%%:*} CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-}" >> "$AGM_DIR/build.log"
 [ -z "$STUB_CARGO_FAIL" ] || exit 1
 mkdir -p target/release
 git rev-parse HEAD > target/release/agents-managerd
@@ -120,8 +122,8 @@ STUB
   : > "$AGM_DIR/agm.log"; : > "$AGM_DIR/gh.log"; : > "$AGM_DIR/build.log"; : > "$AGM_DIR/swap.log"; : > "$AGM_DIR/alerts.log"
   : > "$AGM_DIR/daemon-update.log"
 }
-teardown() { [ -n "${KEEP:-}" ] && echo "KEPT $ROOT" && return; rm -rf "$ROOT"; }
-run() { bash "$SCRIPT" >/dev/null 2>&1; echo $?; }
+teardown() { [ -n "${KEEP:-}" ] && echo "KEPT $ROOT" && return; rm -rf "$ROOT"; PATH="$BASE_PATH"; export PATH; }
+run() { ( unset AM_REAL_CARGO; bash "$SCRIPT" >/dev/null 2>&1 ); echo $?; }
 ci() { echo "$2" > "$ROOT/ci/$1"; }   # ci <sha> <state>
 LOG() { echo "$AGM_DIR/daemon-update.log"; }
 
@@ -145,7 +147,7 @@ check_eq "rc=0" "0" "$rc"
 check "問的是 ubuntu-ci 的 commit status" "repos/Eden-Sun/agents-manager/commits/$C3/status" "$AGM_DIR/gh.log"
 check "web 建置在專用 checkout" "bun run build @ $ROOT/deploy/web" "$AGM_DIR/build.log"
 check "cargo 建置在專用 checkout" "cargo build --release -p agents-managerd @ $ROOT/deploy" "$AGM_DIR/build.log"
-check "cargo 帶 AM_REAL_CARGO 與 cargo 的 PATH" "AM_REAL_CARGO=$ROOT/bin/cargo PATH_HEAD=$ROOT/bin" "$AGM_DIR/build.log"
+check "cargo uses PATH shim without AM_REAL_CARGO" "AM_REAL_CARGO= PATH_HEAD=$ROOT/bin CARGO_BUILD_JOBS=2" "$AGM_DIR/build.log"
 check_eq "專用 checkout 停在目標 sha" "$C3" "$("$GITBIN" -C "$ROOT/deploy" rev-parse HEAD)"
 check "換版的 sha" "--sha $C3" "$AGM_DIR/swap.log"
 check "換版的舊版是 .built" "--old $(echo "$C0" | cut -c1-8)" "$AGM_DIR/swap.log"
