@@ -801,9 +801,8 @@ async fn start_inner(
             // 退回 inline：argv 會被壓進 900 bytes、規則被截斷。不能只記 log——對話裡留一則，使用者／AGM 才知道這顆拿到的指示是殘缺的。
             let notice = super::persona_file::fallback_notice(bot);
             tracing::warn!(bot = %bot.name, "{notice}");
-            if let Ok(conv) = db::conversation_id(&app.db, &bot.id).await {
-                let _ = insert_message(app, &conv, None, "system", &notice, "system", false, None).await;
-            }
+            let conv = db::conversation_id(&app.db, &bot.id).await.map_err(up)?;
+            insert_message(app, &conv, None, "system", &notice, "system", false, None).await.map_err(up)?;
             args.extend(persona_args(bot, &agent, md_text));
         }
     }
@@ -1769,6 +1768,38 @@ mod resume_args_tests {
         .await
         .unwrap();
         assert!(note.contains("接不回"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn a_persona_fallback_that_cannot_be_recorded_aborts_before_the_agent_starts() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "codex-own-profile").await;
+        sqlx::query("UPDATE bots SET kind='codex', args_json=? WHERE id=?")
+            .bind(serde_json::json!(["-p", "users-profile"]).to_string())
+            .bind(&bot.id)
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER refuse_persona_fallback BEFORE INSERT ON messages
+             WHEN instr(NEW.content, '母 bot 的 persona 沒能交給檔案') > 0
+             BEGIN SELECT RAISE(ABORT, 'injected: cannot record fallback'); END",
+        )
+        .execute(&e.app.db)
+        .await
+        .unwrap();
+
+        let err = start_bot(&e.app, &bot.id).await.expect_err("must not start with an unreported, truncated inline persona");
+
+        assert!(matches!(err, LcError::Upstream(_)), "{err:?}");
+        let methods = e.herdr.methods();
+        assert!(!methods.contains(&"agent.start".into()), "fallback evidence failed, but the bot was launched: {methods:?}");
+        let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1")
+            .bind(&bot.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(state, "exited", "failed evidence must not leave a starting run behind");
     }
 
     /// 這個 bot 自己身分的 `projects/` 底下的 transcript 路徑（檔還沒寫）：身分的 config dir 就是它所在的那一份，
