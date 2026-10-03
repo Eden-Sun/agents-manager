@@ -573,3 +573,34 @@
     cursor: pointer;
   }
 }
+
+/* 手機主力區下緣的把手（2026-10-03 使用者）：上下拖調整最多幾排。整條都能抓，中間一小段灰條提示。 */
+@media (max-width: 720px) {
+  .unread-bar-wrap.pin-resizable {
+    flex-wrap: wrap;
+  }
+
+  .pin-rows-handle {
+    flex: 1 1 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 12px;
+    background: var(--bg-sunken);
+    cursor: ns-resize;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .pin-rows-handle span {
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border-strong, var(--border));
+  }
+
+  .pin-rows-handle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+}

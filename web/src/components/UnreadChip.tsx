@@ -18,7 +18,7 @@ import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { clipAfterRows, layoutBoxes, lineBudget, moreTitle } from '../lib/chipOverflow'
 import { chipTracked } from '../lib/supervisorProject'
-import { pinGridLayout, sortPinned } from '../lib/pinnedOrder'
+import { loadPinGridRows, pinGridLayout, pinGridRowsNeeded, rowsFromDrag, savePinGridRows, sortPinned } from '../lib/pinnedOrder'
 import { useChipFlip } from './useChipFlip'
 import { orderedBotIds, useStore } from '../store/store'
 import { useBotLamp } from '../hooks/useBotLamp'
@@ -234,9 +234,10 @@ export function UnreadChip() {
     () => sortPinned(bots.filter((b) => b.primary && !b.pending).map((b, i) => ({ id: b.id, position: b.primary_position, index: i }))).map((x) => x.id),
     [bots],
   )
-  // 手機：4 顆一排、收合時三排；超過 12 顆時第 12 格是「+N」，點了展開全部（`pinGridLayout`）。桌機全畫。
+  // 手機：4 顆一排、收合時預設三排（下緣把手可拖，記在這台裝置）；放不下時最後一格是「+N」，點了展開全部（`pinGridLayout`）。桌機全畫。
   const [pinExpanded, setPinExpanded] = useState(false)
-  const pinLayout = pinGridLayout(pinnedItems.length, pinExpanded)
+  const [pinRows, setPinRows] = useState(loadPinGridRows)
+  const pinLayout = pinGridLayout(pinnedItems.length, pinExpanded, pinRows)
   const shownPinned = useMemo(
     () => (narrow ? pinnedItems.slice(0, pinLayout.shown) : pinnedItems),
     [narrow, pinnedItems, pinLayout.shown],
@@ -263,6 +264,13 @@ export function UnreadChip() {
           hidden={hiddenPinned}
           collapsible={pinLayout.collapsible}
           onToggle={() => setPinExpanded((v) => !v)}
+          rows={pinRows}
+          total={pinnedItems.length}
+          onRows={(n, done) => {
+            setPinRows(n)
+            if (done) savePinGridRows(n)
+          }}
+          resizable={!pinExpanded}
         />
         <ScrollRow items={otherItems} label="在跑或剛完成的 bot" selectedBotId={selectedBotId} />
       </>
@@ -314,6 +322,10 @@ function PinGrid({
   hidden = [],
   collapsible = false,
   onToggle,
+  rows,
+  total = 0,
+  onRows,
+  resizable = false,
 }: {
   items: ChipItem[]
   dnd: PinnedDnd
@@ -322,13 +334,29 @@ function PinGrid({
   /** 展開中：最後多一格「收合」。 */
   collapsible?: boolean
   onToggle?: () => void
+  /** 收合時最多幾排；下緣把手上下拖改（2026-10-03 使用者）。 */
+  rows?: number
+  /** 主力總顆數（含藏起來的）：決定最多拖到幾排。 */
+  total?: number
+  /** 拖動中即時回報（`done=false`），放開時 `done=true` 才記下來。 */
+  onRows?: (n: number, done: boolean) => void
+  resizable?: boolean
 }) {
+  const gridRef = useRef<HTMLDivElement | null>(null)
+  const drag = useRef<{ y: number; rows: number; rowPx: number } | null>(null)
   if (items.length === 0) return null
+  // 只有一排放得下全部時沒東西可調。
+  const canResize = resizable && onRows && rows !== undefined && pinGridRowsNeeded(total) > 1
+  const rowPx = () => {
+    const chip = gridRef.current?.querySelector<HTMLElement>('.unread-chip')
+    const gap = gridRef.current ? parseFloat(getComputedStyle(gridRef.current).rowGap) || 0 : 0
+    return chip ? chip.offsetHeight + gap : 0
+  }
   // 藏起來的裡面有要你回答／未讀，+N 就吃那個顏色，不然看不出被藏的那顆在等你（跟桌機 `+N` 的提示同一個規則）。
   const moreState = hidden.some((h) => h.needsReply) ? ' needs-reply' : hidden.some((h) => h.unread > 0) ? ' unread' : ''
   return (
-    <div className="unread-bar-wrap row">
-      <div className="unread-pin-grid" role="status" aria-live="polite" aria-label="主力 bot">
+    <div className={`unread-bar-wrap row${canResize ? ' pin-resizable' : ''}`}>
+      <div className="unread-pin-grid" ref={gridRef} role="status" aria-live="polite" aria-label="主力 bot">
         {items.map((it) => (
           <Chip key={it.id} it={it} dnd={dnd} lamp />
         ))}
@@ -344,7 +372,7 @@ function PinGrid({
             <span className="unread-chip-name">+{hidden.length}</span>
           </button>
         ) : collapsible ? (
-          <button type="button" className="unread-chip pin-more" aria-expanded title="收合成三排" onClick={onToggle}>
+          <button type="button" className="unread-chip pin-more" aria-expanded title={`收合成 ${rows ?? 3} 排`} onClick={onToggle}>
             <span className="unread-chip-name">收合</span>
           </button>
         ) : null}
@@ -352,6 +380,48 @@ function PinGrid({
           {dnd.announce}
         </span>
       </div>
+      {canResize ? (
+        <div
+          className="pin-rows-handle"
+          role="slider"
+          tabIndex={0}
+          aria-label="主力區最多幾排（上下拖）"
+          aria-valuemin={1}
+          aria-valuemax={pinGridRowsNeeded(total)}
+          aria-valuenow={Math.min(rows, pinGridRowsNeeded(total))}
+          aria-valuetext={`${Math.min(rows, pinGridRowsNeeded(total))} 排`}
+          title="上下拖，調整主力區最多幾排"
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId)
+            drag.current = { y: e.clientY, rows: Math.min(rows, pinGridRowsNeeded(total)), rowPx: rowPx() }
+          }}
+          onPointerMove={(e) => {
+            const d = drag.current
+            if (!d) return
+            const n = rowsFromDrag(d.rows, e.clientY - d.y, d.rowPx, total)
+            if (n !== rows) onRows(n, false)
+          }}
+          onPointerUp={(e) => {
+            const d = drag.current
+            drag.current = null
+            if (d) onRows(rowsFromDrag(d.rows, e.clientY - d.y, d.rowPx, total), true)
+          }}
+          onPointerCancel={() => {
+            drag.current = null
+          }}
+          onKeyDown={(e) => {
+            const cur = Math.min(rows, pinGridRowsNeeded(total))
+            const next = e.key === 'ArrowDown' ? cur + 1 : e.key === 'ArrowUp' ? cur - 1 : cur
+            const n = Math.min(pinGridRowsNeeded(total), Math.max(1, next))
+            if (n !== cur) {
+              e.preventDefault()
+              onRows(n, true)
+            }
+          }}
+        >
+          <span aria-hidden="true" />
+        </div>
+      ) : null}
     </div>
   )
 }

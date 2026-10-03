@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { PIN_GRID_MAX, dropBefore, endBefore, moveBefore, moveStep, pickSlot, pinGridLayout, sortPinned, DROP_STICKY_PX, type Box } from './pinnedOrder'
+import { PIN_GRID_MAX, rowsFromDrag, pinGridRowsNeeded, dropBefore, endBefore, moveBefore, moveStep, pickSlot, pinGridLayout, sortPinned, DROP_STICKY_PX, type Box } from './pinnedOrder'
 
 test('sortPinned: 照 primary_position，同值照原順序', () => {
   const items = [
@@ -88,4 +88,23 @@ test('手機主力區：三排 12 顆放得下全畫；超過收合時畫 11 顆
   assert.deepEqual(pinGridLayout(15, false), { shown: 11, more: 4, collapsible: false })
   assert.deepEqual(pinGridLayout(13, true), { shown: 13, more: 0, collapsible: true })
   assert.deepEqual(pinGridLayout(12, true), { shown: 12, more: 0, collapsible: false }, '沒東西可收合就不給收合格')
+})
+
+test('主力區排數可調：排數×4 放得下就全畫，超過才 +N（2026-10-03）', () => {
+  assert.deepEqual(pinGridLayout(9, false, 2), { shown: 7, more: 2, collapsible: false }, '兩排 8 格：第 8 格讓給 +2')
+  assert.deepEqual(pinGridLayout(8, false, 2), { shown: 8, more: 0, collapsible: false })
+  assert.deepEqual(pinGridLayout(13, false, 4), { shown: 13, more: 0, collapsible: false }, '四排放得下 13 顆')
+  assert.deepEqual(pinGridLayout(5, false, 1), { shown: 3, more: 2, collapsible: false }, '一排：第 4 格是 +2')
+  assert.deepEqual(pinGridLayout(13, false, 0), pinGridLayout(13, false, 1), '0 排當 1 排')
+})
+
+test('拖把手：過半排就跳，夾在 1 到全部放得下之間', () => {
+  assert.equal(pinGridRowsNeeded(0), 1)
+  assert.equal(pinGridRowsNeeded(13), 4)
+  assert.equal(rowsFromDrag(3, 20, 34, 20), 4, '往下拖超過半排＋1')
+  assert.equal(rowsFromDrag(3, 16, 34, 20), 3, '不到半排不動')
+  assert.equal(rowsFromDrag(3, -80, 34, 20), 1, '往上拖到底是 1 排')
+  assert.equal(rowsFromDrag(3, 500, 34, 13), 4, '13 顆最多 4 排，再拖也不會多')
+  assert.equal(rowsFromDrag(3, 40, 0, 20), 3, '量不到排高就不動')
+  assert.equal(rowsFromDrag(9, 0, 34, 13), 4, '記的排數比需要的多：從需要的那排算起')
 })
