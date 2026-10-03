@@ -80,6 +80,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export SWAP_PROBE_SETTLE_TRIES=5 SWAP_PROBE_SETTLE_WAIT_SECS=0
   export STUB_AGM_STATE_FAIL="" STUB_AGM_SUPERVISOR_FAIL=""
   export STUB_AGM_SUPERVISOR_FAIL_AT=0
+  export STUB_DELAY_RETIRE_INTENT_FOR=""
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
   export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep" HERDR_BIN="$ROOT/bin/herdr"
   # 預設照 macOS 走 launchd；Linux 那幾個 case 自己改（issue #677）。不設的話在 Linux 上跑這支，
@@ -227,6 +228,19 @@ case "$q" in
   .backup*) [ -z "${STUB_BACKUP_FAIL:-}" ] || exit 1; dest=${q#.backup }; cp "$db" "$dest"; cp "$ROOT/uv" "$dest.uv" ;;
   *) # 其他查詢（換版後比對刪除紀錄）交給真的 sqlite3，查 seed_audit 種的那份；要求一定是唯讀開的。
      [ "$db" = "$DAEMON_DB" ] && [ -n "$ro" ] || { echo "non-readonly query: $q" >> "$AGM_DIR/sqlite-rw.log"; exit 1; }
+     # Regression fixture: a reconcile retire intent becomes visible after the first
+     # deleted_on_purpose lookup, matching the boot-time race from issue #834.
+     case "$q" in
+       "SELECT count(*) FROM bots b WHERE b.id = '$STUB_DELAY_RETIRE_INTENT_FOR'"*)
+         if [ -n "$STUB_DELAY_RETIRE_INTENT_FOR" ]; then
+           n=$(cat "$ROOT/delayed-retire-lookups" 2>/dev/null || echo 0); n=$((n + 1))
+           echo "$n" > "$ROOT/delayed-retire-lookups"
+           if [ "$n" -ge 2 ] && [ ! -e "$ROOT/delayed-retire-inserted" ]; then
+             "$REAL_SQLITE" "$ROOT/audit.sqlite3" "INSERT INTO intents VALUES ('it-delayed','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+             : > "$ROOT/delayed-retire-inserted"
+           fi
+         fi ;;
+     esac
      "$REAL_SQLITE" -readonly "$ROOT/audit.sqlite3" "$q" ;;
 esac
 STUB
@@ -1090,6 +1104,47 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at) VALUES ('id-mom','m
 rc=$(run)
 check_eq "父 bot 活著且有窗口內 successor 的 unconfirmed child 不回滾（rc=0）" "0" "$rc"
 check_no "有 successor 時不回滾" "ROLLBACK" "$SWAP_LOG"
+teardown
+
+# 34a. 開機 reconcile 先讓 child 從 state 名單消失、稍後才記 retire_child：父 bot 仍在 after 名單且有 active run，
+#      換版檢查要重查到 intent 後放過這顆 child，不把新 sha 誤列 rejected（issue #834）。
+setup 10 10
+export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]'
+export STUB_DELAY_RETIRE_INTENT_FOR=id-kid
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+           ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
+  INSERT INTO runs VALUES ('id-mom','running');"
+rc=$(run)
+check_eq "reconcile intent 晚到但父仍活著：不回滾（rc=0）" "0" "$rc"
+check "延後出現的 intent 被認成 expected retire" 'missing=\[\] deleted_in_window=\[kid \]' "$SWAP_LOG"
+check_no "intent 競態不誤回滾" "ROLLBACK" "$SWAP_LOG"
+teardown
+
+# 34b. unconfirmed child retirement needs the live parent to remain in the new roster and have an active run.
+#      The parent's own disappearance stays a rollback even if its child has a reconcile record.
+setup 10 10
+export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+           ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
+  INSERT INTO runs VALUES ('id-mom','running');
+  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+rc=$(run)
+check_eq "母 bot 消失仍回滾（rc=7）" "7" "$rc"
+check "母 bot 仍列在 missing" 'missing=\[kid mom \]' "$SWAP_LOG"
+teardown
+
+# 34c. parent row alone is insufficient evidence for an unconfirmed child: its run must still be active.
+setup 10 10
+export STUB_NAMES_BEFORE='["a","mom","kid"]' STUB_NAMES_AFTER='["a","mom"]'
+seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bot_id,created_at)
+    VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
+           ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
+  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"unconfirmed\",\"mode\":\"implicit\",\"pane\":\"gone\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+rc=$(run)
+check_eq "父 row 存在但沒有 active run：child 仍回滾（rc=7）" "7" "$rc"
+check "沒有 active parent run 時 child 保持 missing" 'missing=\[kid \]' "$SWAP_LOG"
 teardown
 
 # 35. rollback 還原 DB 前要辨認窗口中新 daemon 收編的 child，並在還原後明確警示它仍有 live pane。
