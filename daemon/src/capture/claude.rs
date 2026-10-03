@@ -254,13 +254,21 @@ fn is_status_chrome(s: &str) -> bool {
     super::is_activity_shape(s)
         || is_done_row(s)
         || is_update_banner(s)
-        || s.starts_with("⏵⏵")
+        || is_mode_row(s)
         || s.starts_with("Tip:")
         || s.starts_with("⎿")
         || s.contains("shift+tab to cycle")
         || s.contains("Auto-update failed")
         || (s.contains(" | ") && (s.contains("5h:") || s.contains("7d:")))
         || (s.contains(" · ") && s.contains("% left"))
+}
+
+/// 輸入框底下的權限模式列。bypass／accept edits 是 `⏵⏵ … on (shift+tab to cycle)`，plan 是 `⏸ plan mode on (shift+tab to cycle)`；
+/// default 模式是 `⏸ manual mode on · ← for agents`，**沒有** `(shift+tab to cycle)`（#783，2.1.288 真畫面
+/// `claude-2.1.288-manual-mode-finished.txt`）。`⏸` 開頭的只認第一段（` · ` 之前）是 `… mode on` 的。
+fn is_mode_row(s: &str) -> bool {
+    let s = s.trim();
+    s.starts_with("⏵⏵") || s.strip_prefix('⏸').is_some_and(|rest| rest.split(" · ").next().unwrap_or(rest).contains(" mode on"))
 }
 
 fn is_zone_busy(s: &str) -> bool {
@@ -374,7 +382,7 @@ fn is_noise(s: &str) -> bool {
     if s.contains("Auto-update failed") {
         return true;
     }
-    if is_update_banner(s) {
+    if is_update_banner(s) || is_mode_row(s) {
         return true;
     }
     if s.chars()
@@ -429,6 +437,22 @@ mod loose_noise_tests {
         // 真的狀態列照舊是雜訊。
         assert!(is_noise("gpt-5.6-sol high · ~/p · Context 3% used · 5h 82% left · weekly 97% left"));
         assert!(is_noise("· 5h 82% left · weekly 97% left"));
+    }
+
+    /// #783：四種權限模式列（2.1.288 真機 shift+tab 輪一圈）都是輸入框底下的 chrome；回覆裡 `⏸` 開頭的句子不是。
+    #[test]
+    fn every_permission_mode_row_is_chrome_but_a_paused_reply_row_is_not() {
+        for row in [
+            "⏸ manual mode on · ← for agents",
+            "⏸ manual mode on · ? for shortcuts",
+            "⏸ plan mode on (shift+tab to cycle) · ← for agents",
+            "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+            "⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ] {
+            assert!(is_status_chrome(row) && is_noise(row), "{row}");
+        }
+        assert!(!is_mode_row("⏸ 暫停：等使用者決定 · mode on 的說明"));
+        assert!(!is_noise("⏸ 暫停部署"));
     }
 
     /// #331：`*` 開頭的回覆行（markdown 項目、程式碼區塊的 ` * 註解`）被當 spinner 剝掉。
