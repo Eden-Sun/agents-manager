@@ -4673,7 +4673,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 ## 20. 分享 bot（使用者 2026-10-03）
 
 把一顆**專用的受限 bot** 單獨開給 end user：一條連結、一頁獨立的分享頁，只能對話與交換檔案。拿到連結的人＝網路上任何人，
-所以下面每一條都有測試釘住（`daemon/src/share/tests.rs`）。對外走 Tailscale Funnel，只把分享入口那個 port 給 Funnel；管理 API（7788）照舊只聽本機。
+所以下面每一條都有測試釘住（`daemon/src/share/tests.rs`、`daemon/src/share/portal_upload_tests.rs`）。對外走 Tailscale Funnel，只把分享入口那個 port 給 Funnel；管理 API（7788）照舊只聽本機。
 
 ### 20.1 受限 bot（`share_profile = "restricted"`）
 
@@ -4735,13 +4735,13 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - 對話：完整歷史，但只有 user／assistant，只給 id、role、誰送的（`share`／`owner`／`bot`）、文字、時間、附件名；系統訊息、工具細節、終端快照、轉寄來源的 bot id 都不給。
 - 送訊息：走「沒在跑就先落地再啟動、忙就排隊」那條路（§6.3、`start_if_stopped`＋`queue_if_busy`），`relay_from` 記哨符 `share`（跟 `daemon` 同類）。
   DB 的 `messages.source` 照存 `web`（CHECK 不收新值），輸出時 user 訊息的 `relay_from = share` 報 `source: "share"`，主 UI 標「🔗 分享使用者」。
-  每則 ≤ 8000 字、換行以外的控制字元拿掉（tab 換成空白）；每個分享每分鐘 10 則（429＋`Retry-After`）；驗證不過的不算次數。失敗的細節不給外面看。
+  每則 ≤ 8000 字、換行以外的控制字元拿掉（tab 換成空白）；每個分享每分鐘 10 次（429＋`Retry-After`）。便宜的 JSON 形狀、文字長度與空訊息檢查在扣額前；之後的附件檔案檢查也會扣額，即使附件不存在。失敗的細節不給外面看。
   **每則一律以 `〔分享使用者〕 ` 開頭再打進 TUI**：claude 的輸入框把第一個字當模式切換——`!` 是 bash 模式（2026-10-03 實測：`--restricted`＋`--tools` 白名單＋`dontAsk`＋deny Bash，
   `!echo … > 檔` 照樣真的執行）、`/` 是 slash 指令（`/permissions`、`/add-dir`…）、`#` 是記憶。工具層的籠子管不到這一層，所以 end user 的字永遠不在第一個字；
   對話列表顯示時再拿掉前綴。`@路徑` 這種檔案提及仍受檔案工具的範圍限制（實測讀不到工作目錄外）。
-- 上傳：`multipart/form-data` 的 `file` 欄位（分享頁的 `FormData`；自己寫的嚴格解析，不合形狀一律拒絕，沒有拉 form 相依），或原始位元組＋`?name=`。單檔 ≤ 25 MiB、每分鐘 20 個、同時 2 個；每顆 bot 的 `inbox/` 配額檢查與檔案建立由同一把 bot 鎖序列化，總量 ≤ 200 MiB／300 個，不接受兩個並發上傳共用過期的配額快照。
+- 上傳：先驗 token、扣每個分享每分鐘 20 次的額度，再占全站 2 個名額之一，之後才讀取有大小上限的 body；名額持有到 body 讀取、驗證與儲存結束。無效內容也會扣額，避免分類工作可無限重試。`multipart/form-data` 的 `file` 欄位（分享頁的 `FormData`；自己寫的嚴格解析，不合形狀一律拒絕，沒有拉 form 相依），或原始位元組＋`?name=`。單檔 ≤ 25 MiB；每顆 bot 的 `inbox/` 配額檢查與檔案建立由同一把 bot 鎖序列化，總量 ≤ 200 MiB／300 個，不接受兩個並發上傳共用過期的配額快照。
   檔名只取最後一段、清掉控制字元與符號、不收隱藏檔與金鑰／DB 類檔名（同 outbox 的黑名單）；種類以副檔名白名單決定（文字、圖片、PDF、Office），
-  內容要對得上（檔頭；文字檔要是 UTF-8、沒有 NUL），呼叫端的 Content-Type 不採信。存成 `<ulid>-<檔名>`（0600），`inbox/` 逐層 `O_NOFOLLOW` 打開，被換成符號連結就不寫。
+  內容要對得上（檔頭；文字檔要是 UTF-8、沒有 NUL；Office 要有 `[Content_Types].xml`、`_rels/.rels` 與對應的 Word／Excel／PowerPoint 主文件項目）。ZIP central directory 限 4096 項與 1 MiB，不解壓檔案，拒絕重疊、異常路徑與超過 512 MiB 的展開總量；回傳 Office 專屬 MIME。呼叫端的 Content-Type 不採信。存成 `<ulid>-<檔名>`（0600），`inbox/` 逐層 `O_NOFOLLOW` 打開，被換成符號連結就不寫。
   送訊息時帶的附件 id 必須真的在 `inbox/`，路徑以固定的標記行附在給 bot 的文字後面（對話列表再拆回檔名）。
 - 下載：只有這顆 bot 的 outbox 第一層，沿用 outbox 的擋法（金鑰／DB／隱藏檔不列不給、fd-bound 開檔）與下載標頭（attachment、白名單外 octet-stream、nosniff）；不給目錄路徑。列表只有 outbox 尚未建立時回空清單；可信目錄、列舉、檔案讀取或背景工作失敗回一般 503，不把不完整結果當空清單。真正不存在或遭黑名單擋下的單檔下載仍回 404。
 - SSE：`status`（連上時先送一次）、`message`、`resync`（漏了，請重抓）；全部分享加起來同時 32 條，每顆 bot 同時最多 4 條；滿額時該分享回 429，其他分享仍可連線。每個送出的事件都在 bot 鎖內重驗 token；每 30 秒或被叫醒時也重新確認，關閉連線即歸還兩層名額。
