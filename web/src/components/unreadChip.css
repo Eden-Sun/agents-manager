@@ -582,21 +582,21 @@
     overflow: visible;
   }
 
+  /* 一顆小圓鈕，一半壓在主力區下緣、靠右；跟一般 app 的「拖這裡調高度」同一種長相。 */
   .pin-rows-handle {
     position: absolute;
-    right: 8px;
+    right: 10px;
     bottom: -11px;
     z-index: 5;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    width: 30px;
-    height: 14px;
-    border: 1px solid var(--border-strong, var(--border));
-    border-top: 0;
-    border-radius: 0 0 8px 8px;
-    background: var(--bg-sunken);
-    box-shadow: 0 2px 4px rgb(0 0 0 / 0.12);
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border: 1px solid var(--border-strong);
+    border-radius: 50%;
+    background: var(--bg-panel);
+    color: var(--text-dim);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.15);
     cursor: ns-resize;
     touch-action: none;
     user-select: none;
@@ -606,14 +606,13 @@
   .pin-rows-handle::before {
     content: '';
     position: absolute;
-    inset: -10px -8px;
+    inset: -10px;
+    border-radius: 50%;
   }
 
-  .pin-rows-handle span {
-    width: 14px;
-    height: 3px;
-    border-radius: 2px;
-    background: var(--border-strong, var(--border));
+  .pin-rows-handle:active {
+    color: var(--accent);
+    border-color: var(--accent);
   }
 
   .pin-rows-handle:focus-visible {

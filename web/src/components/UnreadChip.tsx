@@ -419,7 +419,9 @@ function PinGrid({
             }
           }}
         >
-          <span aria-hidden="true" />
+          <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3.5 4.5 6 2l2.5 2.5M3.5 7.5 6 10l2.5-2.5" />
+          </svg>
         </div>
       ) : null}
     </div>
