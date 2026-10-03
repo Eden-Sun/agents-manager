@@ -919,12 +919,38 @@ async fn start_inner(
         if let Some(map) = env.as_object_mut() {
             map.insert("CLAUDE_CODE_DISABLE_CLAUDE_MDS".into(), serde_json::json!("1"));
         }
-        let child_md = super::agent_md::compose(&super::setup::child_agent_rules(&agent), &agent_md.text);
-        if let Some(path) = super::agent_md::install(app, bot, project, shim_dir.as_deref(), &child_md).await {
-            if let Some(map) = env.as_object_mut() {
-                map.insert("AM_INSTRUCTIONS_FILE".into(), serde_json::json!(path));
-            }
+    }
+    // Grok's `--rules` accepts only a string, while Herdr trims every launch to 900 bytes to stay
+    // below the PTY shell limit. Stage the full startup persona in a file and pass its short path.
+    // Grok also needs the child-rules file when no custom [agents] document is configured.
+    let child_md = super::agent_md::compose(
+        &super::setup::child_agent_rules(&agent),
+        agent_md.configured.then_some(agent_md.text.as_str()).unwrap_or(""),
+    );
+    let child_instructions_path = if agent_md.configured || bot.kind == "grok" {
+        super::agent_md::install(app, bot, project, shim_dir.as_deref(), &child_md).await
+    } else {
+        None
+    };
+    let child_instructions_ready = child_instructions_path.is_some();
+    if let Some(path) = child_instructions_path {
+        if let Some(map) = env.as_object_mut() {
+            map.insert("AM_INSTRUCTIONS_FILE".into(), serde_json::json!(path));
         }
+    }
+    let grok_rules_file = if bot.kind == "grok" {
+        let full_persona = super::setup::persona_text(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()));
+        super::agent_md::install_grok_rules(app, bot, project, shim_dir.as_deref(), &full_persona).await
+    } else {
+        None
+    };
+    if bot.kind == "grok" && (!child_instructions_ready || grok_rules_file.is_none()) {
+        let reason = "無法把 Grok 的完整啟動指示寫進 bot 目錄；拒絕以遭截斷的 --rules 啟動";
+        tracing::error!(bot = %bot.name, "{reason}");
+        if let Ok(conv) = db::conversation_id(&app.db, &bot.id).await {
+            let _ = insert_message(app, &conv, None, "system", reason, "system", false, None).await;
+        }
+        return Err(LcError::Upstream(reason.into()));
     }
     // SPEC §6.5c: claude learns herdr from a skill (the CLI's own doc), not the persona.
     install_herdr_skill(app, bot, project, &env, &agent).await;
@@ -932,7 +958,7 @@ async fn start_inner(
     // Remote hook injection may ssh-upload, so it must happen before workspace/tab creation.
     let injected = injected_args(app, bot, project, &env).await.map_err(up)?;
     let mut args = injected;
-    args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str())));
+    args.extend(persona_args(bot, &agent, agent_md.configured.then_some(agent_md.text.as_str()), grok_rules_file.as_deref()));
     args.extend(model_args(&effort_checked(app, bot, &project.host).await));
     args.extend(identity_args(app, bot, &project.host).await);
     args.extend(bot.args());
@@ -1829,6 +1855,27 @@ mod resume_args_tests {
         assert_eq!(&args[..2], ["resume", "codex-previous"], "{args:?}");
         assert!(args.contains(&"--no-daemon".into()), "resumed Codex must not reuse a shared app server: {args:?}");
         assert!(args.windows(2).any(|w| w == ["-c", "tui.show_tooltips=false"]), "resumed Codex turn tips must stay off: {args:?}");
+    }
+
+    #[tokio::test]
+    async fn grok_start_passes_a_short_rules_file_pointer_without_truncating_the_rules() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "grok-rules").await;
+        let persona = "Keep this configured persona intact: $(echo GROK-PERSONA)";
+        sqlx::query("UPDATE bots SET kind='grok', persona=? WHERE id=?").bind(persona).bind(&bot.id).execute(&e.app.db).await.unwrap();
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+
+        let args = started_args(&e).pop().unwrap();
+        let at = args.iter().position(|a| a == "--rules").expect("Grok gets --rules");
+        let pointer = &args[at + 1];
+        assert!(pointer.contains("grok-rules.md"), "the argv carries a file pointer, not a truncated prompt: {pointer}");
+        assert!(pointer.len() < 300, "the directive fits Herdr's command-line budget: {}", pointer.len());
+
+        let rules_file = e.app.data_dir.join("bots").join(&bot.id).join("grok-rules.md");
+        let full_rules = std::fs::read_to_string(&rules_file).expect("the full instructions are staged beside the bot");
+        assert!(full_rules.contains("需要開子任務或平行工作時"), "base rules survive outside the shell argv");
+        assert!(full_rules.contains(persona), "configured persona survives outside the shell argv");
     }
 
     /// codex 0.160.0 的 resume 會恢復上次存的權限，除非明確覆寫（issue #778）：auto_approve 0／1 ×

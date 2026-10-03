@@ -3189,9 +3189,10 @@ agm-host 的 daemon 以 `m4p` 接手 Mac 的專案，session 都是 `agents-mana
 | `auto_approve` | `--always-approve`（= `--permission-mode bypassPermissions`） |
 | `model` | `-m <model>` |
 | `effort` | `--reasoning-effort <level>` |
+| AG Man／`[agents]`／bot persona | 完整文字寫到 bot 目錄的 `grok-rules.md`，`--rules` 只帶 JSON 引號的檔案路徑指示（避免超過 Herdr shell 命令上限而被截斷） |
 | hooks | 無 argv（§12.2） |
 
-argv 順序：daemon 旗標 → model → identity.args → bot.args。新目錄可能出現 trust 對話框 → `blocked`，UI 送鍵處理。遙測 banner 不阻塞輸入。
+argv 順序：daemon 旗標 → model → identity.args → bot.args。新目錄可能出現 trust 對話框 → `blocked`，daemon 只在最新畫面仍有 Grok 標題、`y`／`n` 選項與版本列時代按 `y`。遙測 banner 不阻塞輸入。
 
 ### 12.2 hook 注入：全域 hooks 檔 + env 分派
 grok TUI 沒有每次啟動注入 hook 的旗標（`--settings`/`--hooks`/`--plugin-dir` 都不收）；hook 只能來自 `<GROK_HOME>/hooks/*.json`（全域、永遠信任）、
@@ -3208,7 +3209,7 @@ grok TUI 沒有每次啟動注入 hook 的旗標（`--settings`/`--hooks`/`--plu
      兩支都**不把 token 放上命令列**（issue #43）：值只走 pane env，`AM_HOOK_TOKEN` 在這裡只用來判斷
      「是不是 daemon 開的 pane」。遠端第三個參數是固定的佔位 `-`，`hook.sh` 不讀它。
    - `<GROK_HOME>/hooks/agents-manager.json`：`SessionStart` 與 `Stop` 各一個 command hook 指向分派腳本（`timeout: 5`）。`GROK_HOME` 取自 identity.env ∪ bot.env，缺省 `~/.grok`。
-   - **自癒、不蓋掉使用者的東西**（`lifecycle/grok_hook.rs`）：只換命令字串與這顆 daemon dispatcher 完全相同的項目；使用者自己的 hook（包含同名 `grok-hook.sh`）與 `hooks` 以外的鍵原樣保留，無法證明屬於本 daemon 的舊路徑不刪。hooks 檔以 `O_NOFOLLOW` 讀，最多 256 KiB，拒絕 symlink、非一般檔與硬連結；寫入是同目錄暫存檔＋原子替換，權限照原檔、但群組／其他人寫得進去的收回 0600，新檔 0600。bot 啟動時裝；**daemon 開機也檢查一次**（`heal_at_startup`）：檔案在才檢查／修；沒有檔不建（沒在用 grok 的機器不裝 hook）。遠端先由已驗證 fd 限量讀取既有檔、在 daemon 端合併，再以內容 hash 確認檔案未變後原子安裝，保留其他 hook 與鍵。
+   - **自癒、不蓋掉使用者的東西**（`lifecycle/grok_hook.rs`）：只換命令字串與這顆 daemon dispatcher 完全相同的項目，或舊資料目錄裡腳本仍帶 agents-manager dispatcher 標頭、因而證明歸屬的 entry。只同名 `grok-hook.sh`、無法證明的使用者腳本原樣保留。已證實的 entry 修回 `type`、`command` 與 `timeout`。使用者自己的 hook 與 `hooks` 以外的鍵原樣保留。hooks 檔以 `O_NOFOLLOW` 讀，最多 256 KiB，拒絕 symlink、非一般檔與硬連結；寫入是同目錄暫存檔＋原子替換。dispatcher 固定 0700；hook 檔權限照原檔、但群組／其他人寫得進去的收回 0600，新檔 0600；內容相同時也檢查並修復權限。bot 啟動時裝；**daemon 開機也檢查一次**（`heal_at_startup`）：檔案在才檢查／修；沒有檔不建（沒在用 grok 的機器不裝 hook）。沒有家目錄且未明確設定 `GROK_HOME` 時不退回 `/.grok`。遠端先由已驗證 fd 限量讀取既有檔、在 daemon 端合併，再以內容 hash 確認檔案未變後原子安裝，保留其他 hook 與鍵。
    - 會寫使用者家目錄的程式碼（這個 hook、預先信任 `trusted_folders.toml`、claude 的 herdr skill）一律走 `crate::home::dir()`；測試裡它是行程專屬的假家目錄，不是真的 `$HOME`（2026-10-02：測試曾把 `/tmp/am-test-…/data/grok-hook.sh` 寫進真的 `~/.grok/hooks/agents-manager.json`）。
 2. `inject_hooks = false` 時 pane 不給 `AM_HOOK_TOKEN`，分派腳本立即 exit 0（走終端備援）。
 3. 使用者自己開的 grok（無 `AM_BOT_ID`）只多一次 `sh` 啟動。Stop hook 的 stdout 必須空（JSON 會被當 decision），§4.4 已保證。
