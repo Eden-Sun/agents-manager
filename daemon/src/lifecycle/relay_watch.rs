@@ -82,7 +82,7 @@ pub(crate) async fn resolve(app: &Arc<App>, from_bot: &str, to_agent: &str) -> a
 }
 
 /// 開進行中的回合。已經有回合在飛（收件方正忙，字會排在它後面）就不開，UI 本來就看得到。寫不進去只記 log，不擋補 Enter。
-async fn open_turn(app: &Arc<App>, run: &db::Run, from_bot: &str, text: &str) -> Option<String> {
+pub(super) async fn open_turn(app: &Arc<App>, run: &db::Run, from_bot: &str, text: &str) -> Option<String> {
     match try_open_turn(app, run, from_bot, text).await {
         Ok(tid) => tid,
         Err(e) => {
@@ -96,10 +96,24 @@ async fn try_open_turn(app: &Arc<App>, run: &db::Run, from_bot: &str, text: &str
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
     let Some(run) = db::run(&app.db, &run.id).await? else { return Ok(None) };
-    if run.state != "running" || db::in_flight_turn(&app.db, &run.id).await?.is_some() {
+    if run.state != "running" {
+        return Ok(None);
+    }
+    // 沒有 hook 的 grok 由它的對話檔記回合（§12.5）：slash 指令不是對話；收件方忙著時這句先記下，等對話檔出現它再收進自己的回合。
+    let transcript = run.adopted != 0 && db::bot(&app.db, &run.bot_id).await?.is_some_and(|b| b.kind == "grok" && b.inject_hooks == 0);
+    if transcript && super::grok_transcript::is_slash_command(text) {
         return Ok(None);
     }
     let conv = db::conversation_id(&app.db, &run.bot_id).await?;
+    if db::in_flight_turn(&app.db, &run.id).await?.is_some() {
+        if transcript {
+            let mut tx = app.db.begin().await?;
+            let msg = insert_message_relayed_tx(&mut tx, &conv, None, "user", text, "hook", false, None, Some(from_bot)).await?;
+            tx.commit().await?;
+            emit_message_added(app, &run.bot_id, msg).await;
+        }
+        return Ok(None);
+    }
     let tid = db::ulid();
     let mut tx = app.db.begin().await?;
     sqlx::query("INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, created_at) VALUES (?,?,?,'external','in_flight','ok',?)")

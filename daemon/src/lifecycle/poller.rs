@@ -1400,7 +1400,7 @@ async fn arm_fallback_after(app: &Arc<App>, run_id: &str, bot_id: &str, delay: D
 ///
 /// `expected_turn`：呼叫端排定（或輪詢）當下看的那一回合，`None`＝排定當下沒有回合在飛。到點時在飛的不是它（排定之後才開的新回合）就不收
 /// ——畫面上最後一段回覆屬於上一回合，留給新回合自己的 hook／下一次 edge／poller（issue #216）。
-async fn try_fallback(app: &Arc<App>, run_id: &str, expected_turn: Option<&str>) -> anyhow::Result<bool> {
+pub(super) async fn try_fallback(app: &Arc<App>, run_id: &str, expected_turn: Option<&str>) -> anyhow::Result<bool> {
     let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
     let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(false) };
     if expected_turn != Some(turn.id.as_str()) {
@@ -1411,6 +1411,10 @@ async fn try_fallback(app: &Arc<App>, run_id: &str, expected_turn: Option<&str>)
         return Ok(false);
     }
     let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
+    // §12.5：沒有 hook 的 grok 先問它自己的對話檔，畫面只是備援。
+    if let Some(done) = super::grok_transcript::settle_in_flight(app, &bot, &run, &turn).await {
+        return Ok(done);
+    }
 
     // Read the pane before claiming: a failure after claiming left `completed_fallback` with no
     // message, no `turn_updated`, no queue flush. Failing here keeps it in flight for the next edge.
@@ -1468,7 +1472,7 @@ async fn try_fallback(app: &Arc<App>, run_id: &str, expected_turn: Option<&str>)
         let sent = turn_echo_texts(app, &turn.id).await?;
         #[cfg(test)]
         super::race_point::hit("fallback_after_echo", &turn.id).await;
-        match screen_reply(&bot.kind, &fresh, &sent) {
+        match screen_reply(&bot.kind, &fresh, &sent).filter(|r| bot.kind != "grok" || !super::grok_transcript::is_startup_screen(r)) {
             None => None,
             Some(reply) => Some(if is_shredded(&reply) {
                 // Shredded = too narrow to read; name the pane and width so it's actionable.
@@ -1609,7 +1613,7 @@ const ADOPTED_CAPTURE_DELAY: Duration = Duration::from_secs(2);
 /// up mid-answer, so `working -> idle` arrives with no turn in flight and the reply was dropped.
 /// `seed` (adoption-time capture) only writes into an empty conversation, since re-adoption
 /// happens on every restart / reconnect. Caller holds the bot lock; returns whether stored.
-async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) -> anyhow::Result<bool> {
+pub(super) async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) -> anyhow::Result<bool> {
     let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
     let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
     if !is_hookless(&bot, &run) || run.state != "running" {
@@ -1622,6 +1626,14 @@ async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) 
     // An in-flight turn belongs to `try_fallback`; capturing too would store it twice.
     if db::in_flight_turn(&app.db, run_id).await?.is_some() {
         return Ok(false);
+    }
+    // §12.5：grok 的對話檔讀得到就不刮畫面。
+    if bot.kind == "grok" {
+        match super::grok_transcript::sync_locked(app, run_id).await {
+            Ok(super::grok_transcript::Synced::Read { imported, .. }) => return Ok(imported > 0),
+            Ok(super::grok_transcript::Synced::Unavailable) => {}
+            Err(e) => tracing::warn!(run = %run_id, error = ?e, "grok transcript unreadable; falling back to the pane"),
+        }
     }
     let Some(pane_id) = run.pane_id.clone() else { return Ok(false) };
     let conv = db::conversation_id(&app.db, &run.bot_id).await?;
@@ -1653,7 +1665,8 @@ async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, seed: bool) 
         (_, None) => String::new(),
     };
     // Unlike `try_fallback`, no turn waits to be closed, so no 「（終端沒有可辨識的回覆）」 bubble.
-    if reply.trim().is_empty() || is_shredded(&reply) {
+    // grok 的啟動選單不是回覆（§12.5）。
+    if reply.trim().is_empty() || is_shredded(&reply) || (bot.kind == "grok" && super::grok_transcript::is_startup_screen(&reply)) {
         remember_pane_cursor(app, run_id, &read).await?;
         return Ok(false);
     }
