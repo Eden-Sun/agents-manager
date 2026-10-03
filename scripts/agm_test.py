@@ -2903,6 +2903,21 @@ class IssueClaimTest(unittest.TestCase):
         self.assertTrue(got["already"])
         self.assertFalse([c for c in self.calls() if c[:2] == ["issue", "comment"]], "重跑不洗版")
 
+    def test_same_bot_cannot_hand_one_issue_to_a_second_child(self):
+        self.issue(425, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300, child="child-a", worktree="/w/a", branch="fix/a")])
+        code, out, err = self.run_cli("issue", "claim", "425", "--child", "child-b", "--worktree", "/w/b", "--branch", "fix/b")
+        self.assertEqual(code, 3, err)
+        e = json.loads(err)
+        self.assertEqual(e["error"], "issue_claimed")
+        self.assertEqual(e["claimed_by"], "vvyyg1")
+        self.assertIn("child-a", e["message"])
+        self.assertFalse([c for c in self.calls() if c[:2] in (["issue", "comment"], ["issue", "edit"])], "第二個 child 不能再寫一筆認領")
+
+    def test_same_child_reclaim_stays_idempotent(self):
+        self.issue(425, labels=["wip"], comments=[self.claim_comment("vvyyg1", age_secs=300, child="child-a")])
+        got = json.loads(self.run_cli("issue", "claim", "425", "--child", "child-a")[1])
+        self.assertTrue(got["already"])
+
     def test_reclaiming_my_own_issue_puts_a_missing_label_back(self):
         self.issue(425, comments=[self.claim_comment("vvyyg1", age_secs=300)])
         self.assertTrue(json.loads(self.run_cli("issue", "claim", "425")[1])["already"])

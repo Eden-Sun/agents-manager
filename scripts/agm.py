@@ -2074,9 +2074,20 @@ def reconcile_claim_label(args, number: int) -> tuple[dict, dict | None]:
     return issue, claim
 
 
-def held_by_other(claim: dict | None, me: str) -> dict | None:
-    """別人還按著這張票就回那筆認領；沒人、是我自己、或已經放到過期都回 None。"""
-    if claim is None or claim.get("bot") == me or claim.get("stale"):
+def claim_scope_mismatch(claim: dict, args) -> bool:
+    """同一顆 bot 底下，child／worktree／branch 有講而且跟現況不同，就算另一筆認領。沒講的欄位當重試。"""
+    for key in ("child", "worktree", "branch"):
+        requested = getattr(args, key, None)
+        if requested and requested != claim.get(key):
+            return True
+    return False
+
+
+def held_by_other(claim: dict | None, me: str, args) -> dict | None:
+    """別人還按著這張票就回那筆認領；沒人、是我自己且範圍沒變、或已經放到過期都回 None。"""
+    if claim is None or claim.get("stale"):
+        return None
+    if claim.get("bot") == me and not claim_scope_mismatch(claim, args):
         return None
     return claim
 
@@ -2126,7 +2137,7 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
     if claim is not None and CLAIM_LABEL not in labels and not claim.get("stale"):
         issue, claim = reconcile_claim_label(args, number)
         labels = [l.get("name") for l in issue.get("labels") or []]
-    blocker = held_by_other(claim, me)
+    blocker = held_by_other(claim, me, args)
     if blocker is not None:
         raise claim_conflict(number, blocker)
     now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -2154,7 +2165,7 @@ def cmd_issue(_client, _cfg: dict, args) -> object:
         issue, claim = reconcile_claim_label(args, number)
         if claim is None:
             raise AgmError("issue_claim_lost", f"#{number} 的認領已在 label 同步前被交回；不可派工", 3, issue=number)
-        blocker = held_by_other(claim, me)
+        blocker = held_by_other(claim, me, args)
         if blocker is not None:
             raise claim_conflict(number, blocker)
         if claim.get("bot") == me and not claim.get("stale"):
