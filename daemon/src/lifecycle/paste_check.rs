@@ -100,7 +100,7 @@ mod tests {
         let env = tt::env().await;
         let app = env.app.clone();
         let bot = tt::claude_bot(&app, &env.project_id, "long-paste").await;
-        let transcript = env.dir.join(format!("session-{}.jsonl", db::ulid()));
+        let transcript = tt::trusted_transcript(&app, &bot.id, &env.dir, &format!("session-{}.jsonl", db::ulid())).await;
         std::fs::write(&transcript, "").unwrap();
         let pane = format!("pane-{}", bot.id);
         sqlx::query(

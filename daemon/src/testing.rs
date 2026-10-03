@@ -888,6 +888,25 @@ impl Drop for Env {
 }
 
 /// 測試行程專屬的假家目錄（`crate::home::dir()` 在測試裡回它）：會寫使用者家目錄的程式碼不能碰真的 HOME。
+/// 本機 claude bot 的 transcript 只有在它自己的 `CLAUDE_CONFIG_DIR/projects/` 底下才被信任（hook／讀取端的信任邊界）。
+/// 測試要放 transcript 時用這個：把 bot 的 `CLAUDE_CONFIG_DIR` 指到 `root/claude-config`（保留既有 env），回傳裡面的路徑。
+pub async fn trusted_transcript(app: &crate::state::App, bot_id: &str, root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let config_dir = root.join("claude-config");
+    let env_json: Option<String> = sqlx::query_scalar("SELECT env_json FROM bots WHERE id = ?").bind(bot_id).fetch_one(&app.db).await.unwrap();
+    let mut env: serde_json::Map<String, serde_json::Value> =
+        env_json.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+    env.insert("CLAUDE_CONFIG_DIR".into(), serde_json::Value::String(config_dir.to_string_lossy().into_owned()));
+    sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
+        .bind(serde_json::Value::Object(env).to_string())
+        .bind(bot_id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let dir = config_dir.join("projects/-t");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(name)
+}
+
 pub fn fake_home() -> std::path::PathBuf {
     // 跟 `test_home` 換掉的 `$HOME` 同一個：兩條路（`home::dir()` 與讀 `$HOME` 的 `dirs::home_dir()`）都要落在同一處。
     crate::test_home::dir().to_path_buf()

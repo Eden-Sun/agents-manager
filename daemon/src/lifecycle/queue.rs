@@ -1583,7 +1583,7 @@ mod flush_queue_tests {
         let f = queued("test").await;
         let app = f.env.app.clone();
         f.env.herdr.live_pane("pane-1", crate::testing::LivePane { width: Some(120), ..Default::default() });
-        let path = f.env.dir.join("t.jsonl");
+        let path = tt::trusted_transcript(&app, &f.bot_id, &f.env.dir, "t.jsonl").await;
         let write = |at: chrono::DateTime<chrono::Utc>| {
             let marker = json!({"type": "user", "timestamp": at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), "interruptedMessageId": "m",
                                 "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}});

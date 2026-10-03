@@ -916,7 +916,7 @@ mod tests {
     }
     /// 這個 run 的 transcript（本機 claude）。
     async fn transcript(b: &Busy, lines: &[String]) -> std::path::PathBuf {
-        let path = b.env.dir.join(format!("t-{}.jsonl", db::ulid()));
+        let path = tt::trusted_transcript(&b.env.app, &b.bot.id, &b.env.dir, &format!("t-{}.jsonl", db::ulid())).await;
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         sqlx::query("UPDATE runs SET transcript_path=? WHERE id=?").bind(path.to_string_lossy()).bind(&b.run).execute(&b.env.app.db).await.unwrap();
         path
