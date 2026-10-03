@@ -155,3 +155,46 @@ it('新增身份表單：env 打錯的行逐行說明並鎖住送出（不靜靜
   assert.equal(submit.disabled, true)
   assert.equal(calls(requests, /\/identities$/).length, 0, '一個請求都沒送')
 })
+
+it('新增身份表單：還沒命名時改了 env 也會攔 beforeunload', async () => {
+  await open()
+  const envBox = document.querySelector<HTMLTextAreaElement>('.identities-panel form textarea')!
+  const unload = () => {
+    const ev = new Event('beforeunload', { cancelable: true })
+    window.dispatchEvent(ev)
+    return ev.defaultPrevented
+  }
+  assert.equal(unload(), false, '初始表單沒有未儲存值')
+  await typeInto(envBox, 'CLAUDE_CONFIG_DIR=/tmp/not-a-real-config')
+  assert.equal(unload(), true, '環境值是使用者輸入，即使名稱還空白也不能無提示丟掉')
+})
+
+it('新增身份完成時不清掉送出後又輸入的下一個身份名稱', async () => {
+  const requests = await open()
+  const originalFetch = globalThis.fetch
+  let release!: () => void
+  let markStarted!: () => void
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const started = new Promise<void>((resolve) => { markStarted = resolve })
+  globalThis.fetch = (async (input: string, init?: RequestInit) => {
+    if (String(input) === '/api/identities' && init?.method === 'POST') {
+      markStarted()
+      await held
+    }
+    return originalFetch(input, init)
+  }) as unknown as typeof fetch
+  try {
+    const name = [...document.querySelectorAll<HTMLInputElement>('.identities-panel form input[type=text]')].find((i) => i.placeholder === 'cc1')!
+    await typeInto(name, 'cc10')
+    await click([...document.querySelectorAll('.identities-panel form button')].find((b) => b.textContent === '新增身份')!)
+    await started
+    await typeInto(name, 'cc11')
+    release()
+    await until(() => requests.some((r) => r.method === 'POST' && r.path === '/api/identities'), '新增身份完成')
+    await until(() => Boolean(row('cc10')), '新身份出現在清單')
+    assert.equal(name.value, 'cc11', '完成先前請求時不能覆蓋使用者後打的字')
+  } finally {
+    release()
+    globalThis.fetch = originalFetch
+  }
+})

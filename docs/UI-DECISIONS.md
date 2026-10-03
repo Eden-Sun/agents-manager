@@ -667,7 +667,7 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 
 - **新增身份的 env 文字框不靜靜丟掉打錯的行**（2026-10-02 審查）：少打 `=`、key 帶空白或數字開頭、重複的 key，逐行列出錯在第幾行並鎖住「新增身份」——丟掉的話身份的 env 變空的，悄悄用了預設帳號。身份列與 tooltip 顯示 env 時，名字含 KEY／TOKEN／SECRET／PASSW／CREDENTIAL 的值遮成 `••••••`（會被截圖、被旁人看到）。⟳ 重啟徽章在 `needs_restart` 為真、但改的是已知落差欄位（model／effort／fast／identity）以外的東西（人設、args、env）時也留著，顯示「設定已改需重啟」，不只在設定面板開著時才看得到。
 - **主機與外部 Cargo 表單的欄位檢查跟 daemon 同一條規則**（2026-10-02 審查，`lib/hostForm`、`lib/remoteCargoForm`）：ssh 目標（不能空、不能 `-` 開頭、`@` 後面也不行、不能有空白）、herdr_session（1–64 字英數開頭）、port（1–65535 的整數）、外部 Cargo 的主機／帳號（`A-Za-z0-9._-`，主機可有 `:`，不能 `-` 開頭）、工作目錄（`A-Za-z0-9._-/`，不含 `..`）、cargo jobs（1–64，daemon 會把更大的悄悄截成 64）。不合就在欄位下講原因、鎖住送出，**不再把打錯的數字悄悄收斂成預設值**（以前 port「2222x」變成 22，連到別的埠、也沒有任何提示）。
-- **關分頁／重整的 `beforeunload` 確認**（`hooks/useUnsavedGuard`）：Bot 設定面板有未儲存變更、外部 Cargo 表單改了沒存（比對「按儲存會送出的值」）、新增主機／新增身份打了一半、專案改名打到一半時，瀏覽器會問一聲；存了、改回原樣、面板關掉就不攔。面板自己的「放棄未儲存？」只擋得住面板內的關閉。
+- **關分頁／重整的 `beforeunload` 確認**（`hooks/useUnsavedGuard`）：Bot 設定面板有未儲存變更、外部 Cargo 表單改了沒存（比對「按儲存會送出的值」，初始讀取失敗則比對表單預設值）、新增主機／新增身份的任何欄位打了一半（也包含名稱仍空白的進階欄位／env）、專案改名打到一半時，瀏覽器會問一聲；存了、改回原樣、面板關掉就不攔。儲存請求等待期間較晚輸入的欄位不被舊回應清掉。面板自己的「放棄未儲存？」只擋得住面板內的關閉。
 - **claude 一律在獨立的主機 shell 跑 `claude auth login`**（SPEC §16.3a），不送 `/login` 進 bot 的 pane：有身份走 daemon 的 `…/identities/{identity}/login`（env 由 daemon 照主機偵測到的設定組、`$HOME` 在那台展開，登完重驗、收 pane），沒綁身份開 shell 打不帶 env 的那行。
   入口三個：auth 失敗那則訊息、Bot 設定的「登入 / 切換帳號」、額度 popover「未登入」列。grok 這次不動，仍把 `/login` 送進 bot（使用者要改的是 claude）。
 - **auth 失敗那則訊息底下兩顆鍵**：「立即登入」（primary）與「登入好了，重試」。重試＝重新偵測身份，確定還沒登入就只提示；否則重送上一則使用者訊息。
@@ -827,7 +827,7 @@ claude 的 `AskUserQuestion`（網頁或終端答的都一樣）答完之後，�
 
 - 一律走 `SafeMarkdown`：react-markdown 不開原始 HTML（不用 rehype-raw）、網址走 `markdownUrlTransform`（`javascript:`／`data:`／`vbscript:` 清成空字串；只對 `<img src>` 放行 `file:`）。
 - **連結一律 `target="_blank" rel="noopener noreferrer"`**；被清掉網址的連結不留 `<a>`，字還在。以前沒有，bot 給的連結一按就整個 app 換頁。
-- **太長（> 2 萬字）或巢狀太深（引用 > 20 層、行首縮排 > 80 格）預設純文字**，附「以 Markdown 顯示」讓使用者自己展開：remark 對某些輸入是平方時間（`*a` 重複 2 萬次卡 22 秒），巢狀引用 6000 層卡 87 秒、更深遞迴爆 stack。轉換真的丟例外由 error boundary 退回純文字（整個 app 沒有 error boundary，沒接住就白畫面且重新整理也白）。
+- **太長（> 2 萬字）或巢狀太深（引用 > 20 層、行首縮排 > 80 格）預設純文字**，附「以 Markdown 顯示」讓使用者自己展開：remark 對某些輸入是平方時間（`*a` 重複 2 萬次卡 22 秒），巢狀引用 6000 層卡 87 秒、更深遞迴爆 stack；即使手動展開也不快取。轉換或輸出元件 render 真的丟例外由 boundary 退回純文字並淘汰壞樹（整個 app 沒有其他 error boundary，沒接住就白畫面且重新整理也白）。
 - 不是 Markdown 的欄位（bot／專案名、檔名、通知）一律文字節點，不用 `innerHTML`；`document.title` 只帶未讀數；沒有用 Notification API。
 - 放進 `<a href>` 的外來網址（遠端入口、交付 PR、issue）先過 `safeHttpUrl`，只收絕對 http／https；daemon 端 `POST /api/supervisor/remote` 也擋。
 
