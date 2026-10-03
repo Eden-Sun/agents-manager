@@ -128,9 +128,27 @@ fn is_option_row(line: &str) -> bool {
 fn sits_on_empty_composer(below: &[&str]) -> bool {
     below
         .iter()
+        .filter(|l| !crate::claude_mode::is_mode_row(l))
         .map(|l| l.chars().filter(|c| !"│┃╭╮╰╯─━▔ \t".contains(*c)).collect::<String>())
         .find(|rest| !rest.is_empty())
         .is_some_and(|rest| matches!(rest.as_str(), "❯" | "›" | ">"))
+}
+
+#[cfg(test)]
+mod mode_row_tests {
+    use super::*;
+
+    /// #788：模式列夾在問卷與空輸入列之間，不能把「底下是空框」判掉。2.1.288 default 真畫面那一行。
+    #[test]
+    fn a_manual_mode_row_does_not_hide_the_empty_composer_under_a_survey() {
+        let row = include_str!("lifecycle/fixtures/claude-2.1.288-manual-mode-finished.txt")
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap();
+        assert!(row.contains("manual mode on"), "{row}");
+        assert!(sits_on_empty_composer(&[row, "❯"]));
+    }
 }
 
 pub fn is_feedback_survey(screen: &str) -> bool {
@@ -335,7 +353,9 @@ fn open_choice_menu(tail: &[&str]) -> Option<(usize, usize)> {
         return None;
     }
     let last = tail.iter().rposition(|l| menu_row(l).is_some())?;
-    if tail.len() - 1 - last > MENU_BELOW_LINES || tail[last + 1..].iter().any(|l| is_agent_output_line(l) && !l.trim_start().starts_with('✻')) {
+    // 模式列是固定 chrome（#788），不佔「選單底下還有幾行」的額度。
+    let below: Vec<&&str> = tail[last + 1..].iter().filter(|l| !crate::claude_mode::is_mode_row(l)).collect();
+    if below.len() > MENU_BELOW_LINES || below.iter().any(|l| is_agent_output_line(l) && !l.trim_start().starts_with('✻')) {
         return None;
     }
     let (mut want, mut cursors, mut first, mut gap) = (menu_row(tail[last])?.0, 0, last, 0);

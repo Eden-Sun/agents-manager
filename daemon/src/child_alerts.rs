@@ -129,8 +129,9 @@ pub fn question_from_screen(screen: &str) -> Option<String> {
 /// 每回合都在變、對父 agent 沒有意義的固定行。
 fn is_chrome(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
-    // 權限模式列（四種模式＋尾巴）跟備援回覆共用同一份判斷（#788），default 模式的 `⏸ manual mode on` 也在內。
-    crate::capture::claude::is_mode_row(line)
+    // 權限模式列跟備援回覆共用 [`crate::claude_mode::is_mode_row`]（#788）。
+    // 不要再用「句中出現 bypass／shift+tab」：回覆提到 mode on 不是模式列。
+    crate::claude_mode::is_mode_row(line)
         // 使用者的 statusLine（`名字 | 專案 | 模型 31% | 5h:96%`）：每回合都在變，帶進來會讓
         // 同一個問題每次算出不同指紋，變成連珠炮。
         || (l.contains('|') && l.contains('%'))
@@ -658,6 +659,11 @@ mod tests {
         // statusLine 與 bypass 那行每回合都在變，帶進來會讓指紋一直不同。
         assert!(!q.contains("bypass permissions"), "{q}");
         assert!(!q.contains("5h:96%"), "{q}");
+        // #788：default 模式列沒有 shift+tab，也要從指紋裡拿掉（跟 capture 同一份判斷）。
+        let manual = format!("{PERMISSION}  ⏸ manual mode on · ← for agents\n");
+        let qm = alertable_question(&manual).unwrap();
+        assert!(!qm.contains("manual mode"), "{qm}");
+        assert_eq!(fingerprint(&q), fingerprint(&qm));
         // 框線不要。
         assert!(!q.contains('│'), "{q}");
     }

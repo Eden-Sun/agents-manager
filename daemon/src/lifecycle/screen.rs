@@ -286,7 +286,7 @@ fn echo_continuation<'a>(kind: &str, line: &'a str) -> Option<&'a str> {
 
 /// Is this line TUI chrome (banner, boxes, rules, status bar, spinner) rather than content?
 pub(crate) fn is_noise(s: &str) -> bool {
-    crate::capture::claude::PARSER.noise_line(s) || is_codex_status_row(s)
+    crate::claude_mode::is_mode_row(s) || crate::capture::claude::PARSER.noise_line(s) || is_codex_status_row(s)
 }
 
 /// codex 狀態列：`gpt-… · <cwd> · Context … · 5h … left`。0.155.1 還沒跑完一回合時只有
