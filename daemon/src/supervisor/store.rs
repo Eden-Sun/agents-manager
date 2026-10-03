@@ -3335,10 +3335,11 @@ pub async fn release_lease(pool: &SqlitePool, resource: &str, owner: &str, fence
 
 /// 強制釋放：不比對 owner／fence（持有者可能已經不在了，那正是要強制的理由）。
 /// 呼叫端負責留稽核紀錄。
-pub async fn force_release_lease(pool: &SqlitePool, resource: &str) -> Result<bool> {
-    Ok(sqlx::query("UPDATE supervisor_leases SET released_at=? WHERE resource=? AND released_at IS NULL")
+pub async fn force_release_lease(pool: &SqlitePool, resource: &str, fence: i64) -> Result<bool> {
+    Ok(sqlx::query("UPDATE supervisor_leases SET released_at=? WHERE resource=? AND fence=? AND released_at IS NULL")
         .bind(crate::db::now())
         .bind(resource)
+        .bind(fence)
         .execute(pool)
         .await?
         .rows_affected()
