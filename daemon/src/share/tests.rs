@@ -236,6 +236,32 @@ async fn every_portal_response_carries_the_lockdown_headers_and_no_cors() {
 }
 
 #[tokio::test]
+async fn a_rebound_host_cannot_open_the_share_page_or_its_event_stream() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "rebind").await;
+    let token = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let addr = base.trim_start_matches("http://");
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!("GET /s/{token}/api/events HTTP/1.1\r\nHost: evil.example:7790\r\nConnection: close\r\n\r\n");
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = vec![0u8; 512];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf)).await.unwrap().unwrap();
+    let head = String::from_utf8_lossy(&buf[..n]);
+    assert!(head.starts_with("HTTP/1.1 403"), "分享 SSE 也要擋 rebind Host：{head}");
+    assert!(!head.contains(&token), "{head}");
+    let page = format!("GET /s/{token} HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n");
+    let mut page_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    page_stream.write_all(page.as_bytes()).await.unwrap();
+    let mut page_buf = vec![0u8; 512];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(2), page_stream.read(&mut page_buf)).await.unwrap().unwrap();
+    let page_head = String::from_utf8_lossy(&page_buf[..n]);
+    assert!(page_head.starts_with("HTTP/1.1 403"), "分享頁本身也要擋：{page_head}");
+    assert!(!page_head.contains(&token), "{page_head}");
+}
+
+#[tokio::test]
 async fn the_share_listener_only_binds_loopback_on_its_own_port() {
     assert!(portal::check_listen("127.0.0.1:7790", 7788).is_ok());
     assert!(portal::check_listen("[::1]:7790", 7788).is_ok());

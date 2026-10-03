@@ -203,7 +203,14 @@ fn router_with_state(st: Portal) -> Router {
 }
 
 async fn security_headers(uri: Uri, req: axum::extract::Request, next: Next) -> Response {
-    let mut res = next.run(req).await;
+    // 分享入口只聽 loopback，外面靠 Funnel 轉進來。Host 仍可能是攻擊者的網域（DNS rebinding），
+    // 所以用跟 allow_lan 同一份名單：IP、localhost、單一標籤、`.ts.net` 等才放行。
+    let bad_host = !crate::api::origin_is_local(req.headers(), 0, true);
+    let mut res = if bad_host {
+        (StatusCode::FORBIDDEN, Json(json!({"error": "bad origin"}))).into_response()
+    } else {
+        next.run(req).await
+    };
     let asset_ok = uri.path().starts_with("/assets/") && res.status() == StatusCode::OK;
     let h = res.headers_mut();
     // 這個入口沒有任何 CORS：就算哪條路由不小心加了，也在這裡拿掉。
