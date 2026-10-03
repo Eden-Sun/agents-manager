@@ -1716,6 +1716,15 @@ https://chatgpt.com/codex/settings/usage to purchase more credits or try again a
     }
 
     #[test]
+    fn live_alert_ignores_identifiers_that_contain_retry_and_error() {
+        // 2026-10-03 console-rpa：heredoc 寫測試檔，畫面上的函式名被掛成黃色重試警示。
+        let screen = "⏺ Bash(cat > tests/test_ctbc.py <<'EOF'\n      def test_otp_rejected_on_retry_still_propagates_stage_error():\n      EOF)\n";
+        assert_eq!(live_alert("claude", screen), None);
+        let real = "✻ API error · Retrying in 3s · attempt 1/10\n";
+        assert_eq!(live_alert("claude", real).as_deref(), Some("API error · Retrying in 3s · attempt 1/10"));
+    }
+
+    #[test]
     fn live_alert_ignores_the_agent_talking_about_errors() {
         // Prose that merely mentions an error is not a banner: no retry token.
         assert!(live_alert("claude", "I fixed the error in the parser.").is_none());

@@ -586,6 +586,16 @@ pub(crate) fn live_activity(kind: &str, text: &str) -> Option<String> {
 /// Retry / API-error banner (`API error · Retrying in 3s · attempt 1/10`, codex `stream error: …;
 /// retrying 2/5`) as `turn_progress.alert`, since the spinner makes a stuck turn look healthy.
 /// Shape, not wording: short + *error* + retry/attempt token, or opens with `API error`.
+/// `word` 在 `s` 裡以獨立的字出現：前後不是英數字也不是 `_`（所以 `stage_error`、`on_retry` 不算，`API error:` 算）。
+fn has_word(s: &str, word: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    s.match_indices(word).any(|(i, _)| {
+        let before = s[..i].chars().next_back();
+        let after = s[i + word.len()..].chars().next();
+        !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    })
+}
+
 pub(crate) fn live_alert(kind: &str, text: &str) -> Option<String> {
     const RETRY_TOKENS: [&str; 6] = ["retry", "retrying", "attempt", "reconnect", "重試", "retries"];
     // Codex hard limit may wrap across narrow-pane rows: multi-line scanner.
@@ -622,7 +632,9 @@ pub(crate) fn live_alert(kind: &str, text: &str) -> Option<String> {
             continue;
         }
         let low = s.to_ascii_lowercase();
-        let says_error = low.contains("error") || low.contains("錯誤") || low.contains("overloaded");
+        // 要是獨立的字：`def test_otp_rejected_on_retry_still_propagates_stage_error():` 這種程式名稱（底線連在一起）
+        // 同時含 retry 與 error，以前被當成重試橫幅掛在回覆下面（2026-10-03 console-rpa 用 heredoc 寫測試檔）。
+        let says_error = has_word(&low, "error") || low.contains("錯誤") || has_word(&low, "overloaded");
         if !says_error {
             continue;
         }
@@ -630,7 +642,7 @@ pub(crate) fn live_alert(kind: &str, text: &str) -> Option<String> {
         if s.contains('{') || s.contains('}') || s.matches('|').count() >= 2 {
             continue;
         }
-        let retrying = RETRY_TOKENS.iter().any(|t| low.contains(t));
+        let retrying = RETRY_TOKENS.iter().any(|t| if t.is_ascii() { has_word(&low, t) } else { low.contains(t) });
         if !retrying && !low.starts_with("api error") {
             continue;
         }
