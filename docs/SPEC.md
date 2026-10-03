@@ -1593,7 +1593,7 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    結尾是模型回覆、使用者打的字（含 `[Request interrupted by user…]`）、空檔、讀不到的都不補。檔案照這顆 bot 實際帳號找：
    `<CLAUDE_CONFIG_DIR>/projects/<cwd 目錄名>/<session>.jsonl`（`identity_config_dir`，沒設就是 `~/.claude`）——換身分時讀複製進新帳號的那份，
    不讀舊帳號那份。只讀本機：遠端主機的 bot 讀不到尾巴，不補（同 `stuck_turns`）。
-   **換身分複製 transcript 的資料安全規則**（`lifecycle/transcript_stage.rs`；遠端是 `remote_stage_script`，promote 的 `stage_transcript` 共用同一組 helper，2026-10-02 對抗式審查）：
+   **換身分複製 transcript 的資料安全規則**（`lifecycle/transcript_stage.rs`；遠端是 `remote_stage_script`，promote 的 `stage_transcript` 共用同一組 helper，2026-10-02 對抗式審查）。遠端腳本的 `cd`／`mkdir` 帶 `--`，所以 cwd 目錄名以 `-` 開頭（Claude 的 `-Users-…`）仍會搬，不會被 shell 當成選項而回 `transcript_missing`：
    只有 claude 才複製（codex／grok 的對話檔不在 `projects/`，以前會被整份丟進 claude 的目錄）；來源要是 `…/projects/<cwd>/<id>.jsonl` 形狀的一般檔，projects、cwd 與檔案本身都不能是 symlink，硬連結也拒絕；`..`、控制字元與其他路徑
    （`transcript_path` 是 hook payload 記的字串）一律不複製、回 `transcript_missing` 改開新對話。來源透過已驗證的 fd 讀，目的 projects／cwd 逐層 `openat(O_NOFOLLOW)`；先寫同目錄暫存檔（0600、fsync）再以不覆寫的硬連結原子發布，複製中途失敗或被殺不會在最終路徑留半份檔；
    目標已有同名檔時：一樣不動、**比來源長（來源是它的前綴）不蓋**、是來源的前綴才蓋、分岔就把目標改名成 `<name>.jsonl.replaced-<時間>` 留在旁邊再放來源；新建目錄 0700、檔 0600
