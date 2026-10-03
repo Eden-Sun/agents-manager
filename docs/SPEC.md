@@ -627,6 +627,8 @@ hook body 另外帶 `run_id`＝這個 CLI 行程 pane env 的 `AM_RUN_ID`（本�
   - 沒有游標時要求畫面上有 prompt 回音（否則整個 scrollback 變一則訊息）；擷取不到只推游標、不寫訊息。
   - 去重：游標 + 與上一則 assistant 比對（herdr 同一輪可能報兩次 idle；重啟會讀到同一畫面）；單則上限 6000 字；認領時的補記只在對話為空時做一次。
     上一則讀不到就不寫（#193），不當成「還沒有回覆」。
+  - **grok 例外**：沒有 hook 的 grok run 先讀 grok 自己的 `chat_history.jsonl`（§12.5），讀得到就不刮畫面；找不到 session／檔案時才退回上面這一套，
+    而且 grok 的啟動選單（`New worktree ctrl+w`／`Resume session ctrl+r`／`Quit ctrl+q`）不當回覆存。
 
 ### 4.3b 回合結束沒被偵測到：reconcile 收尾（AGM 2026-09-16）
 上面兩個觸發點都會漏：hook 沒來；快照備援只收 `delivery = ok`、畫面殘留 spinner 就放手、事件漏掉 `working → idle` 那一邊就根本沒排。
@@ -1823,7 +1825,9 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
 5. **announce 之後盯收件方**（#380、#680，`lifecycle::relay_watch`）：`to_agent`（herdr agent 名或 pane id）只在寄件 bot 所在的 host 與 herdr session 解析；
    舊 run 沒記 session 時以該 host 的設定為準。只有唯一一顆 running run 符合才盯梢；bot 的資料庫名稱不是 herdr 目標，多筆相符時略過、不猜一筆。
    找到目標時，daemon 立刻開一個進行中的 `external` 回合（使用者訊息帶 `relay_from`；收件方已有回合在飛就不開），側欄與標題列看得出在跑，
-   收尾照既有 hook／終端備援。同時背景每 2 秒看一次那顆 pane：宣告的字還留在輸入列（`composer_holds_prompt`，比對文字）、
+   收尾照既有 hook／終端備援。收件方是**沒有 hook 的 grok**（§12.5）時另有兩條：單行的 slash 指令（`/effort high` 這類）不是對話，不開回合、不記訊息；
+   收件方忙著（已有回合在飛）時這句先記成**還沒有回合**的使用者訊息（帶 `relay_from`），等 grok 對話檔出現這一問時收進它自己的回合——
+   以前這句直接丟掉，父 bot 的第一份長交辦因此沒進對話（2026-10-03 g8）。同時背景每 2 秒看一次那顆 pane：宣告的字還留在輸入列（`composer_holds_prompt`，比對文字）、
    agent 仍 idle 滿 4 秒就補一次 Enter（最多 2 次；使用者自己打的字不是宣告的那句，不動）；agent 開始 working 或回合被收掉就收工；
    補 Enter 前先確認 pane 還在（`pane.get` 回 `pane_not_found`＝收件方死了：收掉那顆 run、不重試、announce 時也不開回合）；
    補完 Enter 而 pane 的 revision 沒變＝鍵沒送到那個行程，不再重試。
@@ -3224,6 +3228,29 @@ grok TUI 沒有每次啟動注入 hook 的旗標（`--settings`/`--hooks`/`--plu
 
 ### 12.4 身份隔離
 `GROK_HOME`（預設 `~/.grok`）等同 Claude 的 `CLAUDE_CONFIG_DIR`：config、`auth.json`、`sessions/`、`hooks/` 都跟著走；hooks 檔寫到該 `GROK_HOME/hooks/`。
+
+### 12.5 沒有 hook 的 grok：讀 `chat_history.jsonl`（`lifecycle::grok_transcript`，2026-10-03）
+bot 用 `herdr agent start --kind grok` 開的子 agent 沒有 hook（pane 環境是父 bot 的身分），以前只能刮畫面：第一則是啟動選單、
+父 bot 的交辦沒記、回覆被窄 pane 折行加 `…` 截斷，一小時的工作只留三則回覆。grok 自己有結構化的對話檔，所以對 `runs.adopted = 1`、
+`bots.inject_hooks = 0` 的 grok run，**對話檔是主要來源、畫面只是備援**。檔案只讀，不改不刪。
+
+- **找 session**：`<GROK_HOME>/active_sessions.json`（`session_id`／`pid`／`cwd`）。環境 `HERDR_PANE_ID` 是這顆 pane（有 `HERDR_SESSION` 時也要同一個
+  herdr session）的行程（`memproc::pids_in_pane`；本機讀 `/proc/<pid>/environ`，遠端走同一支 ssh 行程表）是哪個 pid，就是哪個 session——
+  同一個 cwd 開好幾顆 grok 也不會認錯。讀得到 pane 的行程、名單裡卻沒有它：當作還沒開好，不猜。讀不到行程環境時才退回「bot 的 cwd 相同、
+  沒被別的在跑 run 綁走、剛好一個」，不只一個就不猜。找到的寫進 `runs.native_session_id`；之後只要它還在名單上就不再掃行程。`GROK_HOME` 同 §12.2（bot env，缺省 `~/.grok`）。
+- **讀檔**：`<GROK_HOME>/sessions/*/<session id>/chat_history.jsonl`（一般檔、非 symlink），本機與遠端都用 `sh` 讀最後 8 MiB；session id 只收英數與 `-`／`_`。
+- **一問一答**：`type: user`、沒有 `synthetic_reason`、內容有 `<user_query>…</user_query>` 的才是一問（取標籤裡的字）；`<user_info>`、system reminder、
+  壓縮摘要都不是。之後第一則沒有 `tool_calls` 的 `assistant` 是回覆（帶 `tool_calls` 的旁白不算），下一問出現也算這一問結束（被打斷、沒有回覆）。
+  slash 指令不進這個檔。**壓縮會重寫整個檔**：前面的問答消失，進行中那一問以沒有 `prompt_index` 的形式重新出現，所以是邊跑邊記，不是事後重讀。
+- **記成回合**：每一問的鑰匙是 `turns.native_session_id = <session id>`、`native_turn_id = p<prompt_index>`（沒有 index 用內容雜湊 `q<hash>`），記過就跳過。
+  結束了的一問依序：先找這個 run 還沒綁鑰匙、使用者訊息或 `prompt_text` 對得上的回合（比法同 §6.5d：忽略空白、短的一方是開頭，回音尾巴的 `…` 先拿掉）——
+  在飛的收成 `completed`（沒有回覆的 `completed_fallback`）並補 assistant；備援收過的，截斷的回音與備援抓的回覆**原地**換成原文（id 不變、`source = transcript`、
+  `completed_fallback → completed`），hook 寫的不動。檔裡最新結束的那一問也可以收下 working 時開的、還沒有任何 prompt 的那筆在飛回合。
+  都對不上就開一筆 `external` 回合：relay 先記下、還沒有回合的那則使用者訊息（§6.5d 第 5 點）對得上就收進來，否則新記一則（`source = transcript`，
+  §6.5d 的報備認得出寄件者就標 `relay_from`）；回覆 `source = transcript`。
+- **呼叫點**：`working → idle` 沒有回合在飛時（`capture_hookless_turn_locked`）先讀檔，讀得到就不刮畫面；有回合在飛時（`try_fallback`）也先讀檔——
+  回合被收掉就結束；檔裡這一問還沒結束就留在飛（輪詢器下一輪再看，§4.3b 兜底）；沒有 prompt 的回合、檔裡又沒有在跑的一問，只收回合、不存畫面；
+  這一問根本不在檔裡、或讀不到檔，才照 §4.3 看畫面。
 
 ### 12.6 額度：`/usage` 探測
 grok 沒有 usage 子命令或 RPC，數字只在 TUI 的 `/usage` 對話框裡，所以開**用完即丟**的 workspace 探測，跑在**專屬 herdr session `am-quota`**（需要時起、永不 attach）：

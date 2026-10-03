@@ -149,6 +149,8 @@ fn parse_linux_environ(encoded: &str) -> Option<ProcessEnv> {
                 "HERDR_PANE_ID"
             } else if entry_key == b"HERDR_SOCKET_PATH" {
                 "HERDR_SOCKET_PATH"
+            } else if entry_key == b"HERDR_SESSION" {
+                "HERDR_SESSION"
             } else {
                 continue;
             };
@@ -471,6 +473,23 @@ pub fn pane_facts_for_shell(out: &str, pane_id: &str, shell_pid: i32) -> Option<
     Some(f)
 }
 
+/// 環境裡 `HERDR_PANE_ID` 是這顆 pane 的行程（grok 子 agent 的 session 對 pane，`lifecycle::grok_transcript`）。
+/// pane id 只在一個 herdr session 內唯一：環境有 `HERDR_SESSION` 而且跟 `herdr_session` 不同的不算；沒有這個變數的照 pane id 認。
+pub(crate) fn pids_in_pane(out: &str, pane_id: &str, herdr_session: Option<&str>) -> Vec<i32> {
+    let (_, env_section) = split_sections(out);
+    let mut pids: Vec<i32> = parse_env(env_section)
+        .into_iter()
+        .filter(|(_, env)| env_value(env, "HERDR_PANE_ID").as_deref() == Some(pane_id))
+        .filter(|(_, env)| match (env_value(env, "HERDR_SESSION"), herdr_session) {
+            (Some(have), Some(want)) => have == want,
+            _ => true,
+        })
+        .map(|(pid, _)| pid)
+        .collect();
+    pids.sort_unstable();
+    pids
+}
+
 /// Resident memory by bot, from one dump: every process in the herdr tree that carries `AM_BOT_ID`
 /// counts once (its own RSS, not its subtree — children inherit the variable and count themselves),
 /// with the panes those processes run in. Bot ids only; the caller maps them to projects.
@@ -786,6 +805,23 @@ mod tests {
     fn linux_env_dump(record: &str) -> String {
         let (tree, _) = DUMP.split_once("---AM-ENV---\n").unwrap();
         format!("{tree}---AM-ENV---\n---AM-LINUX-ENV---\n{record}\n")
+    }
+
+    /// grok 子 agent 對 session 用：同一個 pane id 在別的 herdr session 不算，沒有 `HERDR_SESSION` 的照 pane id 認。
+    #[test]
+    fn pids_in_pane_respects_the_herdr_session() {
+        let rec = |pid: i32, env: &[u8]| format!("  {pid} NUL:{}", STANDARD.encode(env));
+        let dump = linux_env_dump(&[
+            rec(402, b"HERDR_PANE_ID=wX:p1B\0HERDR_SESSION=agents-manager\0"),
+            rec(403, b"HERDR_PANE_ID=wX:p1B\0HERDR_SESSION=other\0"),
+            rec(404, b"HERDR_PANE_ID=wX:p1B\0"),
+            rec(405, b"HERDR_PANE_ID=wX:p1C\0HERDR_SESSION=agents-manager\0"),
+        ]
+        .join("\n"));
+        assert_eq!(pids_in_pane(&dump, "wX:p1B", Some("agents-manager")), vec![402, 404]);
+        assert_eq!(pids_in_pane(&dump, "wX:p1B", None), vec![402, 403, 404]);
+        // macOS `ps -E` 的文字環境。
+        assert_eq!(pids_in_pane(DUMP, "w2:p1", None), vec![404, 405]);
     }
 
     #[test]

@@ -34,6 +34,7 @@ mod queue;
 pub(crate) mod setup;
 pub(crate) mod agent_md;
 pub(crate) mod grok_hook;
+pub(crate) mod grok_transcript;
 #[cfg(test)]
 mod grok_hook_tests;
 mod start;
