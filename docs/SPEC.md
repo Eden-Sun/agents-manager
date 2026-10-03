@@ -4242,6 +4242,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   之後派的交辦才屬於新的一代——位置在交辦清單裡比，不比毫秒時間戳（AGM 背靠背呼叫時會撞在同一格）；這個欄位之前的舊事件退回用時間比。
 - **一代之內**：執行者被接受 → reviewer 被接受（或已經派過驗證者＝審查這關 AGM 放行了）→ 驗證者被接受並記 `verified(commit)` →
   `delivered(同一個 commit)` → 可結案。驗完又派了執行者（rebase、補改）回到**驗證**那一關，審查不重來。
+- **一般 Bot 記 `verified` 的資格**：只限目前這一代最後一件交辦的 verifier，且該交辦不能是 failed、cancelled 或 superseded；同一顆 Bot 不能也擔任過這個任務的 executor。資格在 `verified` 寫入交易的 snapshot 裡重查，舊一代 verifier 或失敗的 verifier 不能替新成果背書。
 - **失敗與重試**：交辦被 `fail`／`cancel`（bot 沒把工作做完）＝同一個角色再派一次，不換關、不算一輪；
   工作做完但**成果**不行（am-review changes、am-verify 沒過）＝接受那件交辦、`mission round`，下一代從執行者重做。
 - **分工**：交辦自己的 `status` 歸 #71（`supervisor::assignment_state`），任務流程只讀、不寫；要動交辦一律走 supervisor 的入口。
