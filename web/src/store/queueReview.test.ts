@@ -274,6 +274,16 @@ test('佔槽的不是使用者自己（unknown／start／daemon／bot）時，�
   }
 })
 
+test('舊 daemon 沒回 holder 時，同一句也必須退回輸入框，不能猜佔槽的是使用者', async () => {
+  seed()
+  routeDaemon(slotRoutes(null, '繼續'))
+  // 另一顆已驗證 bot 可以透過舊版 API 佔 awaits_idle 槽；另一個分頁先清掉了共用草稿。
+  useStore.getState().setDraft(draftKey, '')
+  const ok = await useStore.getState().sendPrompt('b1', '繼續', [], false, false, undefined, true)
+  assert.equal(ok, false, '舊 daemon 沒有 holder，來源不明時不能當成這句已送出')
+  assert.equal(useStore.getState().drafts[draftKey], '繼續', '使用者輸入要留在草稿')
+})
+
 test('群組送出被跳過的收件者：toast 講人話，草稿保留', async () => {
   seed()
   routeDaemon((req) =>
