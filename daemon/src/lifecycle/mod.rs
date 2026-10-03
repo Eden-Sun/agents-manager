@@ -176,7 +176,7 @@ pub(crate) async fn recover_live_apply_debts(app: &Arc<App>) {
 pub(crate) use live_apply_debt::retry_once as retry_live_apply_bookkeeping_once;
 pub(crate) use delivery::*;
 pub(crate) use start::*;
-pub(crate) use start_send::{prompt_starting_or_queue, withdraw_turn};
+pub(crate) use start_send::{prompt_starting_or_queue, prompt_starting_or_queue_with_share_token, withdraw_turn};
 pub(crate) use composer_draft::submit as submit_composer_draft;
 pub(crate) use stop::*;
 pub(crate) use interrupt_grace::{note_user_interrupt_of, settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};

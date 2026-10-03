@@ -111,11 +111,18 @@ fn hint(token: &str) -> String {
 /// 開分享。已經開著就不動（回 `None`）：重按開關不該讓已經發出去的連結失效，要換請走 [`rotate`]。
 pub(crate) async fn enable(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
     let token = new_token();
-    let done = sqlx::query("INSERT OR IGNORE INTO bot_shares (bot_id, token_hash, token_hint, created_at) VALUES (?,?,?,?)")
+    let done = sqlx::query(
+        "INSERT OR IGNORE INTO bot_shares (bot_id, token_hash, token_hint, created_at)
+         SELECT ?,?,?,? WHERE EXISTS (
+           SELECT 1 FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
+             JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL WHERE r.bot_id = ?
+         )",
+    )
         .bind(bot_id)
         .bind(token_hash(&token))
         .bind(hint(&token))
         .bind(db::now())
+        .bind(bot_id)
         .execute(pool)
         .await?;
     Ok((done.rows_affected() == 1).then_some(token))
@@ -124,7 +131,12 @@ pub(crate) async fn enable(pool: &SqlitePool, bot_id: &str) -> Result<Option<Str
 /// 換新 token：舊的 hash 被蓋掉，同一刻起舊連結 404。沒開著＝`None`。
 pub(crate) async fn rotate(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
     let token = new_token();
-    let done = sqlx::query("UPDATE bot_shares SET token_hash = ?, token_hint = ?, rotated_at = ? WHERE bot_id = ?")
+    let done = sqlx::query(
+        "UPDATE bot_shares SET token_hash = ?, token_hint = ?, rotated_at = ? WHERE bot_id = ? AND EXISTS (
+           SELECT 1 FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
+             JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL WHERE r.bot_id = bot_shares.bot_id
+         )",
+    )
         .bind(token_hash(&token))
         .bind(hint(&token))
         .bind(db::now())
@@ -149,6 +161,7 @@ pub(crate) async fn resolve(pool: &SqlitePool, token: &str) -> Result<Option<Str
         "SELECT s.bot_id, s.token_hash FROM bot_shares s
            JOIN shared_bots r ON r.bot_id = s.bot_id
            JOIN bots b ON b.id = s.bot_id AND b.deleted_at IS NULL
+           JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL
           WHERE s.token_hash = ?",
     )
     .bind(&want)
@@ -165,4 +178,26 @@ pub(crate) async fn touch(pool: &SqlitePool, bot_id: &str) {
         .bind(db::iso_in(-60))
         .execute(pool)
         .await;
+}
+
+/// Permanently revoke the current public capability while retaining the restricted-bot profile.
+pub(crate) async fn revoke_bot(pool: &SqlitePool, bot_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM bot_shares WHERE bot_id = ?").bind(bot_id).execute(pool).await.map(|_| ())
+}
+
+pub(crate) async fn project_share_ids(pool: &SqlitePool, project_id: &str) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT s.bot_id FROM bot_shares s JOIN bots b ON b.id = s.bot_id WHERE b.project_id = ?",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub(crate) async fn revoke_project(pool: &SqlitePool, project_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM bot_shares WHERE bot_id IN (SELECT id FROM bots WHERE project_id = ?)")
+        .bind(project_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }

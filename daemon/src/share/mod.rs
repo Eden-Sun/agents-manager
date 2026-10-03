@@ -23,6 +23,21 @@ mod tests;
 /// 輸出時 `source` 改報 `share`（`db::Message` 的序列化），UI 標「🔗 分享使用者」。
 pub(crate) const SHARE_SENDER: &str = "share";
 
+/// Revoke a bot's public share link after its lifecycle has been decided.
+pub(crate) async fn revoke_bot_share(app: &std::sync::Arc<crate::state::App>, bot_id: &str) -> Result<(), sqlx::Error> {
+    portal::kick(bot_id);
+    store::revoke_bot(&app.db, bot_id).await
+}
+
+/// Revoke all share links in a deleted project and close their active event streams.
+pub(crate) async fn revoke_project_shares(app: &std::sync::Arc<crate::state::App>, project_id: &str) -> Result<(), sqlx::Error> {
+    let ids = store::project_share_ids(&app.db, project_id).await?;
+    for bot_id in ids {
+        portal::kick(&bot_id);
+    }
+    store::revoke_project(&app.db, project_id).await
+}
+
 /// 受限 bot 的 hook token 只用來打自己的 hook：其他任何拿 bot 身分進來的路一律擋。讀不到 DB 也擋（fail closed）。
 pub(crate) async fn refuses_bot_principal(db: &sqlx::SqlitePool, bot_id: &str) -> bool {
     !matches!(store::is_restricted(db, bot_id).await, Ok(false))

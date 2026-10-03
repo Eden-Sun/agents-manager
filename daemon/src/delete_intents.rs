@@ -168,9 +168,11 @@ async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
+    crate::share::revoke_bot_share(app, &parent).await.map_err(|e| format!("cannot revoke bot share {parent}: {e}"))?;
     let host = intent.host.clone();
     // 快照裡的 child（深的先）：停、軟刪、清目錄。
     for (cid, _) in &children {
+        crate::share::revoke_bot_share(app, cid).await.map_err(|e| format!("cannot revoke child share {cid}: {e}"))?;
         let Some(c) = db::bot(&app.db, cid).await.map_err(db_err)? else { continue };
         let settled = stop_for_delete_locked(app, cid).await;
         if c.deleted_at.is_none() {
@@ -208,6 +210,7 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
+    crate::share::revoke_project_shares(app, &project_id).await.map_err(|e| format!("cannot revoke project shares: {e}"))?;
     let host = intent.host.clone();
     for (bid, managed_by) in &bots {
         let Some(b) = db::bot(&app.db, bid).await.map_err(db_err)? else { continue };
