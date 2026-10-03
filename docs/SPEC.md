@@ -2988,6 +2988,7 @@ export 先對來源 DB 做 SQLite online backup 到暫存目錄、從快照讀�
 ——A 的 agent 還在跑時 B 開機不能自己再起一份，接手完再由使用者打開。
 
 **冪等與拒絕**：已存在的 id 跳過、config 裡已有這個專案 id 就不再追加，所以同一份 bundle 重跑 import 不會多列、不換 token。
+已存在的 config 專案若還帶 `handed_off_to`，import 會在同一個停機窗口清掉這個舊 owner；其他 project 欄位與 bot 設定保留。
 下列情況在寫入前就拒絕、什麼都不動：B 的 config 沒有 `[[hosts]] name = <--host>`；B 已有別的專案佔著同一個 `(host, path)`；
 B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先升 B；整批都是 NULL 的來源獨有欄——例如已移除 Team 功能留下的 `bots.team_id`／`team_role`——略過並列進 warnings）；`--host local` 卻沒有一條 `--path-map` 換得到專案 path（§11.9a）。插到一半撞約束（例如 `turns_native` 重號）整批回滾。
 `--dry-run` 整套跑完再回滾，不寫 config／附件、不備份。
@@ -3001,7 +3002,7 @@ B 的表少了 bundle 裡**有非 NULL 值**的欄位（來源比目標新，先
    把 bundle 傳到 B（內含對話，不放 outbox／scratchpad；hook token 在 export 時就清掉了；傳完刪 A 上那份）。
 4. B：確認 config 有 `[[hosts]] name = "m4p"` 且連得上；停 B 的 daemon；`--dry-run` 看摘要；再正式跑
    `scripts/ops/project-transfer import --bundle hub.json.gz --host m4p`（`handed_off_to` 在 B 上清成 NULL，由 B 管）。
-   B 的 config.toml 已經有同 id 的專案時（重跑）config 不會被改，所以 bundle 裡的 user bot 必須本來就在那個專案底下；缺的話整批拒絕（DB 回滾），
+   B 的 config.toml 已經有同 id 的專案時（重跑）不再追加或改動既有欄位，只清掉 `handed_off_to`；bundle 裡的 user bot 必須本來就在那個專案底下；缺的話整批拒絕（DB 回滾），
    不然只有 DB 有那些 bot，下次開機投影就把它們當「不在 config」軟刪。
 5. B：起 B 的 daemon，逐顆 `POST /api/bots/{id}/start?resume=native` 接回同一段對話（B 用 ssh 到 A 機檢查 `transcript_path`），
    確認 B 側收得到回覆再做下一顆。child 由母 agent 開，不在 B 上單獨接回。全部接完後需要的 bot 在 B 打開 autostart。
@@ -3082,9 +3083,9 @@ import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 
 它們的 agent 仍在 Mac 的 herdr（`dev.agents-manager.herdr-*` launchd job）裡跑，所以那幾個 herdr job 不停。
 工具是 `scripts/ops/cutover-to-host.sh`（在 Mac 跑；輔助 `cutover-helper.py` 在兩邊跑，到目標是經 ssh 從 stdin 餵原始碼），把 §11.9／§11.9a 的步驟串起來；`host-state-transfer.py` 隨 cutover 在兩邊執行，補上專案 bundle 以外的主機狀態。
 
-`host-state-transfer.py snapshot` 將來源完整 `config.toml`（路徑依 cutover map 改寫）、`ui-token`、`outbox` 檔案與 identity 設定目錄清單封成權限受限的 bundle。identity 清單只列設定路徑與目錄是否存在，**不讀、不複製憑證內容**。目標套用時以來源 config 的非 `projects` 段落為準，只保留目標已存在的 `projects`；沒有的 project rows 留給後續 `project-transfer` 匯入。outbox 同名但內容不同就停止，避免覆寫。安裝與 rollback 都要先取得目標 `daemon.lock`，而且不讀寫 SQLite。
+`host-state-transfer.py snapshot` 將來源完整 `config.toml`（路徑依 cutover map 改寫）、`ui-token`、`outbox` 檔案與 identity 設定目錄清單封成權限受限的 bundle。identity 清單只列設定路徑與目錄是否存在，**不讀、不複製憑證內容**。目標套用時以來源 config 的非 `projects` 段落為準，只保留目標已存在的 `projects`；沒有的 project rows 留給後續 `project-transfer` 匯入。outbox 同名但內容不同就停止，避免覆寫。安裝會先把缺少的 outbox 路徑與雜湊寫進備份日誌，再逐檔複製；中斷後可重跑，rollback 只移除內容仍相符的移入檔。安裝與 rollback 都要先取得目標 `daemon.lock`，而且不讀寫 SQLite。
 
-**預設 dry-run**：唯讀的檢查照做（GET、ssh 看一眼），會改東西的每一步只印出來；`--execute` 才真的做。真的做時自己脫離成背景行程
+**預設 dry-run**：唯讀的檢查照做（GET、ssh 看一眼），會改東西的每一步只印出來；`--execute` 才真的做。必要的寫入或傳輸失敗會停止該步驟並保留狀態目錄內可重跑的資料；`ship` 只有在所有傳輸成功後才刪 Mac 上的 bundle。真的做時自己脫離成背景行程
 （`setsid`＋`nohup`，log 在狀態目錄的 `run.log`）——`stop-bots` 會停掉這兩個專案的每一顆 bot，從 bot 的 pane 叫起來的腳本會跟著被收掉；
 確定不會被收掉（一般終端機）才用 `--foreground`。狀態目錄 `~/.config/agents-manager/cutover/<時間>/`（700）放快照、在跑名單、每步耗時與 import 摘要；
 中途失敗修好後 `--from <步驟> --state-dir <同一個>` 接著做（`preflight` 唯讀、每次都跑）。
@@ -3099,7 +3100,7 @@ import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 
 | `stop-src` | Mac | 7788 的 listener 是 `agents-managerd` 才 `kill`，等 `daemon.lock` 放開 |
 | `export` | Mac | `project-transfer export`，協調者專案加 `--with-supervisor`；host-state snapshot 完整設定、UI token、outbox 與 identity 路徑清單 |
 | `transcripts` | Mac→目標 | `transcript-transfer --target ubuntu@agm-host`，map：repo（`/Users/m4p/project/agents-manager`→`/home/ubuntu/project/agents-manager`）與資料目錄（`~/.config/agents-manager`→`/home/ubuntu/.config/agents-manager`，AGM-DM-GRUP 的 path 與協調者 cwd 在這底下）；`rsync` supervisor 目錄（不帶 `*.lease-token.*`、`*.lock`）。結束碼 2 時只擋 conflicts／refused 與「在跑名單裡的 bot 最後一段對話找不到」；更早的舊 session 在 Mac 上已經沒有檔（例：協調者專案 3 段）的只警告、記下個數給 import 的閘門 |
-| `ship` | Mac→目標 | 改好路徑的 project bundle、host-state bundle（含 UI token）、工具、快照、在跑名單 `rsync` 到目標 `~/.config/agents-manager/cutover/<時間>/`（700），傳完刪 Mac 上兩種 bundle；host-state bundle 只留目標安全狀態目錄供 verify／rollback 使用 |
+| `ship` | Mac→目標 | 改好路徑的 project bundle、host-state bundle（含 UI token）、工具、快照、在跑名單 `rsync` 到目標 `~/.config/agents-manager/cutover/<時間>/`（700）；所有傳輸成功後才刪 Mac 上兩種 bundle，失敗可用相同狀態目錄重跑；host-state bundle 只留目標安全狀態目錄供 verify／rollback 使用 |
 | `stop-dst` | 目標 | 7788 的 listener（`ss`）是 `agents-managerd` 才殺，等 `daemon.lock` 放開。hub 專案在這之後到 `start-dst` 之間也暫停 |
 | `import` | 目標 | 所有 project bundle 先 `--dry-run`：transcript 不在的段數多於上一步記下的舊 session 數就停（對話沒搬到）；再先套用 host-state（來源非 project config、UI token、無衝突 outbox），最後正式 `import --host local --path-map …`（協調者專案加 `--with-supervisor`）。摘要與 `*.pre-transfer-*`／host-state 備份留在狀態目錄 |
 | `start-dst` | 目標 | 記下 `daemon.log` 行數，`systemd-run --user --collect -p Type=forking -p KillMode=process daemon-start.py`（§18.2e 同一套；沒有 `XDG_RUNTIME_DIR` 補 `/run/user/<uid>`），等 `/api/session` |

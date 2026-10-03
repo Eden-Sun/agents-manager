@@ -710,7 +710,12 @@ chmod +x "$STARTER_ROOT/target/release/agents-managerd"
 # canary-gap: 這一行就是在測「啟動器自己推出來的 PATH」，帶進 canary 目錄會讓下面那條
 # 精確比對的斷言失敗。這段只跑 daemon-start.py 與一個印 env 的假 agents-managerd，
 # 沒有任何破壞性指令；真 binary 就算可達也沒有東西會叫到它。
-STARTER_ENV_DUMP="$STARTER_ROOT/env" AM_DATA_DIR=/should/be/dropped PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$STARTER_ROOT/home" \
+STARTER_ENV_DUMP="$STARTER_ROOT/env" AM_DATA_DIR=/should/be/dropped AM_BOT_TOKEN=private-bot-token \
+  AM_HOOK_TOKEN=private-hook-token AM_CHILD_OF=parent-agent AM_INSTANCE=instance-7 \
+  AM_INSTRUCTIONS_FILE=/private/instructions.md CLAUDE_CONFIG_DIR=/private/claude-home \
+  CODEX_HOME=/private/codex-home GROK_HOME=/private/grok-home CLAUDE_CODE_CHILD_SESSION=child-session \
+  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 \
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$STARTER_ROOT/home" \
   /usr/bin/python3 "$HERE/daemon-start.py" "$STARTER_ROOT" "$STARTER_ROOT/daemon.log"
 # `daemon-start.py` 刻意 fork + setsid 脫離、父行程先結束，所以上面那行 python3 回來**不代表**
 # 孫行程已經跑完 `env > "$STARTER_ENV_DUMP"`。機器忙的時候它排不到 CPU：原本只等 10 × 0.2 ＝ 2 秒，
@@ -727,7 +732,11 @@ if [ -s "$STARTER_ROOT/env" ]; then
   check "啟動器帶出的 PATH 含 /opt/homebrew/bin" "^PATH=$STARTER_ROOT/home/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin$" "$STARTER_ROOT/env"
   # `check_no` 找不到字串就算過，所以**一定要先確定 dump 真的寫出來了**：檔案不存在時它照樣綠，
   # 逾時就變成一條看不出來的假綠（issue #433，只有上面那條 PATH 會露出來）。
-  check_no "啟動器真的丟掉 AM_DATA_DIR" "^AM_DATA_DIR=" "$STARTER_ROOT/env"
+  for key in AM_DATA_DIR AM_BOT_TOKEN AM_HOOK_TOKEN AM_CHILD_OF AM_INSTANCE AM_INSTRUCTIONS_FILE \
+      CLAUDE_CONFIG_DIR CODEX_HOME GROK_HOME CLAUDE_CODE_CHILD_SESSION \
+      CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION CLAUDE_CODE_DISABLE_CLAUDE_MDS; do
+    check_no "啟動器真的丟掉 ${key}" "^${key}=" "$STARTER_ROOT/env"
+  done
 else
   echo "FAIL - 啟動器沒有在 ${STARTER_WAIT_SECS} 秒內寫出 env dump（$STARTER_ROOT/env）"
   echo "      fork+setsid 的孫行程可能還沒排到 CPU（機器忙），或根本沒起來。daemon.log："

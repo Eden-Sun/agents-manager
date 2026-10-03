@@ -480,6 +480,47 @@ def compose_config(text, block):
     return new_text, want
 
 
+def clear_existing_handoff(text, project_id):
+    """Clear only this imported project's stale owner while preserving the config text otherwise."""
+    old = tomllib_loads(text)
+    projects = old.get("projects") or []
+    index = next((i for i, project in enumerate(projects) if project.get("id") == project_id), None)
+    if index is None:
+        raise RuntimeError(f"config.toml 找不到既有專案 {project_id}")
+    if "handed_off_to" not in projects[index]:
+        return text, old, False
+
+    lines = text.splitlines(keepends=True)
+    header = re.compile(r"^\s*\[\[?([^]\[]+)\]\]?\s*(?:#.*)?$")
+    project_starts = []
+    for i, line in enumerate(lines):
+        match = header.match(line)
+        if match and match.group(1).strip().strip('"') == "projects":
+            project_starts.append(i)
+    if index >= len(project_starts):
+        raise RuntimeError(f"config.toml 找不到專案 {project_id} 的原始區塊")
+
+    start = project_starts[index]
+    end = project_starts[index + 1] if index + 1 < len(project_starts) else len(lines)
+    root_end = start + 1
+    while root_end < end and not header.match(lines[root_end]):
+        root_end += 1
+    key = re.compile(r"^\s*handed_off_to\s*=")
+    key_line = next((i for i in range(start + 1, root_end) if key.match(lines[i])), None)
+    if key_line is None:
+        raise RuntimeError(f"config.toml 的專案 {project_id} 有 handed_off_to，但找不到原始欄位")
+
+    del lines[key_line]
+    new_text = "".join(lines)
+    want = tomllib_loads(new_text)
+    expected_projects = [dict(project) for project in projects]
+    expected_projects[index].pop("handed_off_to", None)
+    expected = {**old, "projects": expected_projects}
+    if want != expected:
+        raise RuntimeError(f"清除專案 {project_id} 的 handed_off_to 後，config.toml 的其他內容意外改變")
+    return new_text, want, True
+
+
 def atomic_write(path, text):
     real = os.path.realpath(path)
     mode = os.stat(real).st_mode & 0o777 if os.path.exists(real) else 0o600
@@ -732,12 +773,18 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
                 raise RuntimeError(f"目標 config.toml 已經有專案 {existing.get('id')}，但它底下沒有這些 bot：{', '.join(lacking)}；"
                                    f"先在 config 的那個專案底下加上它們（id 要跟 bundle 一樣），或把那個專案區塊移掉讓 import 自己寫")
         config_written = False
+        handoff_cleared = existing is not None and "handed_off_to" in existing
+        new_text = want = None
         if existing is None:
             with open(config_path) as f:
                 text = f.read()
             # dry-run 也組一次、驗一次：寫出去會讓 daemon 起不來的 config 在 dry-run 就該看得到。
             new_text, want = compose_config(text, toml_block(t["projects"][0], live_user_bots, args.host))
-        if existing is None and not args.dry_run:
+        elif handoff_cleared:
+            with open(config_path) as f:
+                text = f.read()
+            new_text, want, _ = clear_existing_handoff(text, t["projects"][0]["id"])
+        if new_text is not None and not args.dry_run:
             cfg_backup = f"{config_path}.pre-transfer-{stamp()}"
             shutil.copy2(os.path.realpath(config_path), cfg_backup)
             backups.append(cfg_backup)
@@ -783,7 +830,8 @@ def write_db(conn, bundle, t, files, cfg, existing, config_path, args, notes, no
         "skipped_existing": skipped,
         "skipped_unique": unique_skips,
         "supervisor": sup_report,
-        "config": "already present" if existing is not None else ("would append" if args.dry_run else "appended"),
+        "config": ("handoff cleared" if handoff_cleared else "already present") if existing is not None
+        else ("would append" if args.dry_run else "appended"),
         "config_bots": [b["name"] for b in live_user_bots],
         "attachment_files_written": written,
         "missing_attachment_files": [m["id"] for m in bundle["missing_files"]],

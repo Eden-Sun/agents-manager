@@ -27,7 +27,7 @@ use crate::state::App;
 /// never be matched against a hint that has nothing to do with it.
 const MAX_AGE_SECS: i64 = 10 * 60;
 
-fn cutoff() -> String {
+pub(crate) fn cutoff() -> String {
     (chrono::Utc::now() - chrono::Duration::seconds(MAX_AGE_SECS)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 

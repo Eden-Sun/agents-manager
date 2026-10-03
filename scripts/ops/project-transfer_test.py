@@ -364,6 +364,21 @@ class ProjectTransferTest(unittest.TestCase):
         self.assertEqual(dict(c.execute("SELECT id, hook_token FROM bots").fetchall()), tokens, "重跑不換 token")
         self.assertEqual(slurp(self.cfg, "r"), cfg_before)
 
+    def test_import_clears_a_stale_handoff_flag_on_an_existing_config_project(self):
+        """Import resets projects.handed_off_to; a pre-existing config row must not restore the old owner on restart."""
+        self.export()
+        put(self.cfg, TARGET_CONFIG + (
+            '\n[[projects]]\nid = "%s"\npath = "/Users/m4p/project/hub"\nlabel = "智選hub"\nhost = "m4p"\n'
+            'handed_off_to = "previous-owner"\n\n[[projects.bots]]\nid = "%s"\nname = "hub-main"\nkind = "claude"\n'
+        ) % (PID, B1))
+
+        out = json.loads(self.imp().stdout)
+        self.assertEqual(out["config"], "handoff cleared")
+        c = self.tgt()
+        self.assertIsNone(c.execute("SELECT handed_off_to FROM projects WHERE id = ?", (PID,)).fetchone()[0])
+        imported = {p["id"]: p for p in tomllib.loads(slurp(self.cfg, "r"))["projects"]}[PID]
+        self.assertNotIn("handed_off_to", imported, "config projection must not reapply the stale handoff")
+
     def test_dry_run_writes_nothing(self):
         self.export()
         db0, cfg0 = digest(self.tgt_path), digest(self.cfg)

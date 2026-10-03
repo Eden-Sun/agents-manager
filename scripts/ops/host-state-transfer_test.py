@@ -132,6 +132,52 @@ autostart = false
         self.assertIn('"outbox_files": 2', out.stdout)
         self.command("verify", "--bundle", self.bundle, "--target-data", self.target)
 
+    def test_bundle_backup_and_installed_secrets_are_private(self):
+        self.snapshot()
+        self.assertEqual(self.bundle.stat().st_mode & 0o777, 0o700)
+        for path in self.bundle.iterdir():
+            if path.is_file():
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600, path.name)
+        self.install()
+        self.assertEqual(self.backup.stat().st_mode & 0o777, 0o700)
+        for name in ("backup.json", "config.toml", "ui-token"):
+            path = self.backup / name
+            if path.exists():
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600, path.name)
+        for path in (self.target / "config.toml", self.target / "ui-token"):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600, path.name)
+
+    def test_install_retry_after_process_dies_between_outbox_write_and_journal_is_rollbackable(self):
+        """Simulate SIGKILL after an atomic outbox file appears but before install can return."""
+        self.snapshot()
+        crash = r'''
+import importlib.util, os, sys
+from pathlib import Path
+tool, bundle, target, backup = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("host_state_transfer", tool)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+write_new = module.write_new
+def interrupted(path, data, mode):
+    result = write_new(path, data, mode)
+    if "outbox" in Path(path).parts and Path(path).name == "report.txt":
+        os._exit(79)
+    return result
+module.write_new = interrupted
+sys.argv = [tool, "install", "--bundle", bundle, "--target-data", target, "--backup-dir", backup]
+module.main()
+'''
+        crashed = subprocess.run([sys.executable, "-c", crash, str(TOOL), str(self.bundle), str(self.target), str(self.backup)],
+                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(crashed.returncode, 79, crashed.stderr + crashed.stdout)
+        partial = self.target / "outbox" / "bot-a" / "report.txt"
+        self.assertEqual(partial.read_text(), "deliverable")
+
+        self.install()  # `--from import` retry must safely complete this interrupted install.
+        self.command("restore", "--backup-dir", self.backup, "--target-data", self.target)
+        self.assertFalse(partial.exists(), "rollback must remove the file installed before the crash")
+        self.assertFalse((self.target / "outbox" / "root.bin").exists())
+
     def test_install_leaves_missing_project_rows_for_project_transfer(self):
         (self.target / "config.toml").write_text('[server]\ndata_dir = "/target/data"\n')
         self.snapshot()

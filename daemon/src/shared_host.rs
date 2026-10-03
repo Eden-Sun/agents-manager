@@ -63,9 +63,28 @@ pub async fn owned(app: &Arc<App>, host: &str) -> Result<Owned> {
         o.tabs.extend(tab);
         o.panes.extend(pane);
     }
-    o.panes.extend(crate::spawn_hints::for_host(app, host).await?.into_keys());
-    let previews: Vec<String> =
-        sqlx::query_scalar("SELECT pane_id FROM bot_previews WHERE host = ? AND pane_id IS NOT NULL").bind(host).fetch_all(&app.db).await?;
+    let hints: Vec<String> = sqlx::query_scalar(
+        "SELECT h.pane_id FROM spawn_hints h
+         JOIN bots b ON b.id = h.bot_id JOIN projects p ON p.id = b.project_id
+         WHERE h.host = ? AND p.host = ? AND p.deleted_at IS NULL AND p.handed_off_to IS NULL
+           AND b.deleted_at IS NULL AND h.created_at >= ?",
+    )
+    .bind(host)
+    .bind(host)
+    .bind(crate::spawn_hints::cutoff())
+    .fetch_all(&app.db)
+    .await?;
+    o.panes.extend(hints);
+    let previews: Vec<String> = sqlx::query_scalar(
+        "SELECT v.pane_id FROM bot_previews v
+         JOIN bots b ON b.id = v.bot_id JOIN projects p ON p.id = b.project_id
+         WHERE v.host = ? AND p.host = ? AND p.deleted_at IS NULL AND p.handed_off_to IS NULL
+           AND b.deleted_at IS NULL AND v.pane_id IS NOT NULL",
+    )
+    .bind(host)
+    .bind(host)
+    .fetch_all(&app.db)
+    .await?;
     o.panes.extend(previews);
     for s in app.host_shells.lock().await.iter().filter(|s| s.host == host) {
         o.workspaces.insert(s.workspace_id.clone());
@@ -383,6 +402,51 @@ pub(crate) mod tests {
         }
         assert!(o.workspaces.contains("wS"));
         assert!(!o.workspaces.contains("wT"), "移交出去的專案不是自己的");
+    }
+
+    /// Handoff removes a project's workspace and active runs from the local ownership set. Its
+    /// auxiliary pane records must be filtered by the same ownership boundary on shared sessions.
+    #[tokio::test]
+    async fn owned_excludes_hints_and_previews_from_handed_off_projects() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let sh = shared_host(&env, true).await;
+        let mine = tt::claude_bot(&app, &sh.project_id, "mine").await;
+        let handed_off = db::ulid();
+        sqlx::query(
+            "INSERT INTO projects (id, path, label, host, handed_off_to, created_at) VALUES (?, '/tmp/handed-off', 'old', ?, 'other-daemon', ?)",
+        )
+        .bind(&handed_off)
+        .bind(HOST)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let theirs = tt::claude_bot(&app, &handed_off, "theirs").await;
+        for (bot, pane) in [(&mine, "wM:p1"), (&theirs, "wT:p1")] {
+            sqlx::query("INSERT INTO spawn_hints (pane_id, host, bot_id, created_at) VALUES (?, ?, ?, ?)")
+                .bind(pane)
+                .bind(HOST)
+                .bind(&bot.id)
+                .bind(db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO bot_previews (bot_id, host, pane_id, status, updated_at) VALUES (?, ?, ?, 'running', ?)")
+                .bind(&bot.id)
+                .bind(HOST)
+                .bind(pane.replace(":p", ":preview"))
+                .bind(db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+
+        let owned = super::owned(&app, HOST).await.unwrap();
+        assert!(owned.panes.contains("wM:p1"), "own spawn hint stays owned");
+        assert!(owned.panes.contains("wM:preview1"), "own preview stays owned");
+        assert!(!owned.panes.contains("wT:p1"), "handed-off spawn hint belongs to the other daemon");
+        assert!(!owned.panes.contains("wT:preview1"), "handed-off preview belongs to the other daemon");
     }
 
     #[test]

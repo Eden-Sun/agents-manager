@@ -171,17 +171,38 @@ printf '%s\n' "$last" >> "$ROOT/ssh.log"
 unset -f systemd-run systemctl 2>/dev/null
 PATH="$ROOT/rbin:$PATH" exec bash -c "$last"
 EOF
-    cat > "$ROOT/bin/rsync" <<'EOF'
+cat > "$ROOT/bin/rsync" <<'EOF'
 #!/bin/bash
 echo "rsync $*" >> "$ROOT/rsync.log"
+if [ -n "${RSYNC_FAIL_MATCH:-}" ]; then
+    case "$*" in *"$RSYNC_FAIL_MATCH"*) echo "injected rsync failure" >&2; exit 23 ;; esac
+fi
 srcs=(); while [ $# -gt 0 ]; do case "$1" in -a) ;; --exclude) shift ;; *) srcs+=("$1") ;; esac; shift; done
 n=${#srcs[@]}; dest="${srcs[$((n - 1))]}"; dest="${dest#*:}"; unset "srcs[$((n - 1))]"
+for s in "${srcs[@]}"; do [ -e "$s" ] || { echo "missing rsync source: $s" >&2; exit 23; }; done
 # 跟真 rsync 一樣：目的地不以 / 結尾、來源只有一個檔＝複製成那個名字。
 if [ "${#srcs[@]}" = 1 ] && [ -f "${srcs[0]}" ] && [ "${dest%/}" = "$dest" ]; then
     mkdir -p "$(dirname "$dest")"; cp "${srcs[0]}" "$dest"; exit 0
 fi
 mkdir -p "$dest"
 for s in "${srcs[@]}"; do case "$s" in */) cp -R "$s." "$dest/" ;; *) cp -R "$s" "$dest/" ;; esac; done
+EOF
+    cat > "$ROOT/bin/touch" <<'EOF'
+#!/bin/bash
+if [ -n "${CUTOVER_CRASH_AFTER_SHIP_MARKER:-}" ]; then
+    for path in "$@"; do
+        case "$path" in
+            */ship-transferred)
+                /usr/bin/touch "$path"
+                state=${path%/*}
+                /bin/rm -f "$state/PAM.json.gz" "$state/PAM-moved.json.gz"
+                kill -KILL "$PPID"
+                exit 0
+                ;;
+        esac
+    done
+fi
+exec /usr/bin/touch "$@"
 EOF
     cat > "$ROOT/bin/launchctl" <<'EOF'
 #!/bin/bash
@@ -272,7 +293,7 @@ EOF
     export CUTOVER_SRC_DATA="$SRC_DATA" CUTOVER_DST_DATA="$DST_DATA" DST_DATA_T="$DST_DATA"
     export CUTOVER_SRC_API="http://127.0.0.1:$SRC_PORT" CUTOVER_DST_API="http://127.0.0.1:$DST_PORT"
     export CUTOVER_DAEMON_WAIT_SECS=5 CUTOVER_STOP_WAIT_SECS=10
-    unset CUTOVER_DETACHED PT_OLD PT_WARN_TRANSCRIPT TT_RC TT_MISSING TT_CONFLICT DST_ERROR_AFTER_START
+    unset CUTOVER_DETACHED PT_OLD PT_WARN_TRANSCRIPT TT_RC TT_MISSING TT_CONFLICT DST_ERROR_AFTER_START RSYNC_FAIL_MATCH CUTOVER_CRASH_AFTER_SHIP_MARKER
 }
 
 teardown() {
@@ -284,7 +305,11 @@ teardown() {
 
 run() { # run <輸出檔> <參數…>
     local out="$1"; shift
-    bash "$SCRIPT" "$@" > "$out" 2>&1
+    if [ -n "${CUTOVER_CRASH_AFTER_SHIP_MARKER:-}" ]; then
+        PATH="$ROOT/bin:$PATH" bash "$SCRIPT" "$@" > "$out" 2>&1
+    else
+        bash "$SCRIPT" "$@" > "$out" 2>&1
+    fi
     echo $? > "$out.rc"
 }
 
@@ -475,6 +500,48 @@ check "印出背景 pid 與 log" "背景執行（pid" "$ROOT/out"
 ST=$(ls -d "$ROOT"/src-data/cutover/*)
 for i in $(seq 50); do grep -q FATAL "$ST/run.log" 2>/dev/null && break; sleep 0.1; done
 check "背景那一份帶著同一個狀態目錄在跑" "#720" "$ST/run.log"
+teardown
+
+# ---------------------------------------------------------------- ship retry after partial local cleanup
+
+echo "# ship 寫完 transferred marker、清理到一半遭中斷：重跑同一步"
+setup
+export CUTOVER_CRASH_AFTER_SHIP_MARKER=1
+run "$ROOT/out" cutover --execute --foreground
+check_eq "ship 中斷的行程結束碼是 SIGKILL" 137 "$(cat "$ROOT/out.rc")"
+unset CUTOVER_CRASH_AFTER_SHIP_MARKER
+ST=$(ls -d "$ROOT"/src-data/cutover/*)
+check "全部傳輸成功後先留下完成標記" "ship-transferred" "$ROOT/out"
+[ -f "$ST/ship-transferred" ]; check_eq "傳輸完成標記留在狀態目錄" 0 $?
+[ ! -e "$ST/PAM.json.gz" ] && [ ! -e "$ST/PAM-moved.json.gz" ] && [ -f "$ST/PAGM.json.gz" ]; \
+    check_eq "清理確實中途停止" 0 $?
+rsync_before=$(wc -l < "$ROOT/rsync.log")
+run "$ROOT/retry" cutover --execute --foreground --from ship --state-dir "$ST"
+check_eq "重跑 ship 成功" 0 "$(cat "$ROOT/retry.rc")"
+check "重跑沿用傳輸完成標記" "所有 bundle 已傳完" "$ROOT/retry"
+rsync_after=$(wc -l < "$ROOT/rsync.log")
+check_eq "重跑不重傳已完成 bundle" "$rsync_before" "$rsync_after"
+RSTATE="$DST_DATA/cutover/$(basename "$ST")"
+[ -f "$RSTATE/PAM-moved.json.gz" ] && [ -f "$RSTATE/PAGM-moved.json.gz" ]; \
+    check_eq "目標保有完整兩份 bundle" 0 $?
+[ ! -e "$ST/PAGM.json.gz" ] && [ ! -e "$ST/PAGM-moved.json.gz" ] && [ ! -d "$ST/host-state" ]; \
+    check_eq "重跑清完剩餘來源副本" 0 $?
+teardown
+
+# ---------------------------------------------------------------- ship failure must stop before deleting recovery material
+
+echo "# ship 中途 rsync 失敗：保留來源 bundle 並停在 ship"
+setup
+export RSYNC_FAIL_MATCH="host-state/"
+run "$ROOT/out" cutover --execute --foreground
+check_eq "ship 失敗結束碼非 0" 1 "$(cat "$ROOT/out.rc")"
+ST=$(ls -d "$ROOT"/src-data/cutover/*)
+check "失敗在 host-state 傳輸" "injected rsync failure" "$ROOT/out"
+[ -f "$ST/PAM.json.gz" ] && [ -f "$ST/PAM-moved.json.gz" ]; check_eq "Mac 專案 bundle 留著可重跑" 0 $?
+[ -f "$ST/host-state/manifest.json" ]; check_eq "來源 host-state bundle 留著可重跑" 0 $?
+[ -e "$ST/host-state-shipped" ]; check_eq "沒有標成 host-state 已傳好" 1 $?
+kill -0 "$DST_PID" 2>/dev/null; check_eq "失敗後沒有停目標 daemon" 0 $?
+check_no "失敗後沒有正式 import" "import --bundle" "$ROOT/ssh.log"
 teardown
 
 # ---------------------------------------------------------------- rollback
