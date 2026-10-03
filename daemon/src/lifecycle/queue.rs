@@ -345,9 +345,12 @@ async fn defer_queued_turn(
     {
         super::race_point::hit("defer_before_return", turn_id).await;
     }
-    let mut tx = app.db.begin().await?;
+    // 先讀重試次數再寫：deferred 的話讀完之後別的 writer 一 commit 就 517，這一筆放不回佇列、只能記成欠著（#831）。
+    let mut tx = db::begin_write(&app.db).await?;
     let (retries, crid): (i64, Option<String>) =
         sqlx::query_as("SELECT flush_retries, client_request_id FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
+    #[cfg(test)]
+    super::race_point::hit("defer_after_retries_read", turn_id).await;
     // daemon 自己排的通知擋在佇列頭，後面的使用者訊息就排不到：它的上限短得多（#562）。
     let notice = super::daemon_notice::is_daemon_notice(crid.as_deref());
     if retries >= if notice { super::daemon_notice::RETRY_LIMIT } else { QUEUE_RETRY_LIMIT } {
@@ -2322,6 +2325,23 @@ mod flush_queue_tests {
         assert_eq!(t.status, "failed", "別的路徑收掉的就是收掉了");
         assert_eq!((t.flush_retries, t.next_flush_at.clone()), (0, None), "沒有放回去，就不記一次重試");
         assert!(!queue_retry_timer_armed(&f.bot_id), "沒有東西在排隊，不掛 retry timer");
+    }
+
+    /// #831：放回佇列讀完重試次數、還沒寫的那一瞬，一個不相干的 writer commit 了一筆。deferred 交易這時升級寫鎖直接 517，
+    /// 這一筆放不回去；寫鎖從讀之前就拿著，插進來的那一筆等，照樣放回佇列、記一次重試。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_retry_read_and_the_put_back_does_not_fail_it() {
+        let f = queued("no-such-session").await;
+        let app = f.env.app.clone();
+        forget_queue_retry_timer(&f.bot_id);
+        let other = crate::testing::arm_app_foreign_writer(&app, "defer_after_retries_read", &f.turn_id);
+
+        flush_queued_locked(&app, &f.bot_id).await.expect("the flush itself does not error");
+
+        assert_eq!(*other.lock().unwrap(), Some(false), "the put-back holds the write lock from its read on; the other writer waits");
+        let t = turn(&app, &f.turn_id).await;
+        assert_eq!((t.status.as_str(), t.flush_retries), ("queued", 1), "put back on the queue with one retry spent");
+        assert!(queue_retry_timer_armed(&f.bot_id), "the retry timer is armed for it");
     }
 
     /// Once the RPC went out, a failure is not requeued (could deliver twice); `delivery='unknown'`

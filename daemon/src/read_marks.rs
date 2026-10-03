@@ -22,10 +22,13 @@ use crate::state::App;
 /// 檢查、建表、補標記與修正舊標記在同一個交易裡：以前建表成功但 seed 失敗時，下次啟動看到表已存在就永遠不補，
 /// 升級前的訊息全部變未讀。
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    // 先看表在不在再建：deferred 的話讀完之後別的 writer 一 commit，CREATE 就 517，daemon 起不來（#831）。
+    let mut tx = crate::db::begin_write(pool).await?;
     let existed: Option<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' AND name='bot_reads'")
         .fetch_optional(&mut *tx)
         .await?;
+    #[cfg(test)]
+    crate::lifecycle::race_point::hit("read_marks_after_table_read", &crate::db::file_key(&mut tx).await).await;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bot_reads (
            bot_id TEXT PRIMARY KEY, read_at TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT ''
@@ -368,6 +371,22 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-read-marks-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         (crate::db::open(&dir.join("t.sqlite3")).await.unwrap(), dir)
+    }
+
+    /// #831：migrate 看完 `bot_reads` 在不在、還沒建的那一瞬，另一個 writer commit 了一筆。deferred 交易這時 CREATE 直接
+    /// 517，daemon 起不來；寫鎖從讀之前就拿著，對方等，表照樣建好、既有 bot 照樣標成已讀。
+    #[tokio::test]
+    async fn an_unrelated_writer_between_the_table_read_and_the_create_does_not_fail_the_migration() {
+        let (p, _dir) = pool().await;
+        seed(&p).await;
+        sqlx::query("DROP TABLE bot_reads").execute(&p).await.unwrap();
+        let key = crate::db::file_key(&mut *p.acquire().await.unwrap()).await;
+        let other = crate::testing::arm_foreign_writer(std::path::Path::new(&key), "read_marks_after_table_read", &key);
+
+        migrate(&p).await.expect("an unrelated writer must not fail the migration");
+        assert_eq!(*other.lock().unwrap(), Some(false), "the migration holds the write lock from its read on; the other writer waits");
+        let seeded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bot_reads WHERE bot_id='b'").fetch_one(&p).await.unwrap();
+        assert_eq!(seeded, 1);
     }
 
     async fn seed(pool: &SqlitePool) {
