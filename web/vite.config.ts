@@ -48,5 +48,24 @@ export default defineConfig({
     // M8 embeds this with rust-embed.
     outDir: 'dist',
     emptyOutDir: true,
+    // React DOM is the largest single rendered module (~453 kB before final minification). Isolate it so the application
+    // entry stays small; lazy Markdown keeps its parser and GFM extensions off the startup path.
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [{
+            name: 'react-dom',
+            test: /node_modules[\\/]react-dom[\\/]/,
+            includeDependenciesRecursively: false,
+          }, {
+            name: 'initial-ui',
+            test: /src[\\/]components[\\/]/,
+            tags: ['$initial'],
+            minSize: 20 * 1024,
+            includeDependenciesRecursively: false,
+          }],
+        },
+      },
+    },
   },
 })

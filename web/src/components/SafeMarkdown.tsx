@@ -1,10 +1,7 @@
-import { Component, Fragment, useState, type ReactNode } from 'react'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { discardMarkdown, renderMarkdown } from '../lib/markdownCache'
-import { markdownComponents } from '../lib/markdownComponents'
-import { markdownUrlTransform } from '../lib/markdownUrl'
+import { Component, Fragment, lazy, Suspense, useState, type ReactNode } from 'react'
 import { markdownTooDeep, markdownTooLong } from '../lib/markdownGuard'
+
+const CachedMarkdown = lazy(() => import('./SafeMarkdownContent'))
 
 /**
  * 轉換丟例外（巢狀太深爆 stack）時退回純文字：整個 app 沒有 error boundary，沒接住的話
@@ -21,6 +18,11 @@ export class MarkdownBoundary extends Component<{ plain: ReactNode; children: Re
   render() {
     return this.state.failed ? this.props.plain : this.props.children
   }
+}
+
+/** Lazy Markdown 下載期間同步保留原文，避免訊息樹一片空白；解析 chunk 到達後再換成格式化樹。 */
+export function MarkdownSuspense({ text, children }: { text: string; children: ReactNode }) {
+  return <Suspense fallback={<pre className="md-plain">{text}</pre>}>{children}</Suspense>
 }
 
 /** bot 輸出的 Markdown（不可信）：不跑原始 HTML、危險協定被清掉、連結新分頁、太長或太深都有退路。 */
@@ -51,21 +53,18 @@ export function SafeMarkdown({ text, botId, cache = true }: { text: string; botI
       <MarkdownBoundary
         key={text}
         plain={plain(<p className="md-plain-note">這則訊息的格式太複雜，無法轉成 Markdown，以純文字顯示。</p>)}
-        onError={shouldCache ? () => discardMarkdown(botId, text) : undefined}
+        onError={shouldCache ? () => {
+          // Keep the fallback shell free of react-markdown. In the render-error case this module
+          // is already loaded; the microtask removes the failed tree before the next user event.
+          void import('../lib/markdownCache')
+            .then(({ discardMarkdown }) => discardMarkdown(botId, text))
+            .catch(() => {})
+        } : undefined}
       >
-        <CachedMarkdown text={text} botId={botId} cache={shouldCache} />
+        <MarkdownSuspense text={text}>
+          <CachedMarkdown text={text} botId={botId} cache={shouldCache} />
+        </MarkdownSuspense>
       </MarkdownBoundary>
     </Fragment>
   )
-}
-
-/** 走快取（重掛不重新 parse）；包成元件放在 boundary 裡面，轉換丟例外才接得住（失敗的不會進快取）。 */
-function CachedMarkdown({ text, botId, cache }: { text: string; botId?: string | null; cache: boolean }) {
-  if (!cache)
-    return (
-      <Markdown remarkPlugins={[remarkGfm]} components={markdownComponents(botId)} urlTransform={markdownUrlTransform}>
-        {text}
-      </Markdown>
-    )
-  return <>{renderMarkdown(botId, text)}</>
 }
