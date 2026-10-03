@@ -658,6 +658,8 @@ async fn clear_restored_prompt(app: &Arc<App>, client: &HerdrClient, run: &db::R
     let Some(pane) = run.pane_id.as_deref().map(str::trim).filter(|p| !p.is_empty()) else { return };
     let Some(expected_prompt) = expected_prompt.filter(|p| !p.trim().is_empty()) else { return };
     tokio::time::sleep(Duration::from_millis(400)).await;
+    #[cfg(test)]
+    super::race_point::hit("abort_after_settle", &bot.id).await;
     if !abort_binding_is_current(app, run).await {
         return;
     }
