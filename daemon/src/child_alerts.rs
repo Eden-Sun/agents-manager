@@ -103,7 +103,14 @@ async fn last_inbound_is_our_alert(app: &Arc<App>, bot_id: &str) -> bool {
 /// statusLine 與 `⏵⏵ bypass permissions` 這類固定行丟掉——那些每回合都在變，會讓指紋一直不同。
 pub fn question_from_screen(screen: &str) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
-    for raw in screen.lines() {
+    // 2.1.287 的 held message 框（#775）每行都很長，上面對話裡還有一大段 `● Held peer message …`：從框的標題起算，
+    // 訊息內文才不會被字數上限截掉。
+    let from = if crate::tui_prompts::is_held_message_prompt(screen) {
+        screen.lines().collect::<Vec<_>>().iter().rposition(|l| l.trim() == "Held message from another session").unwrap_or(0)
+    } else {
+        0
+    };
+    for raw in screen.lines().skip(from) {
         let line: String = raw
             .chars()
             // `╌`：2.1.286 起權限框夾住指令的虛線（#746），整行都是它，丟掉才不會佔掉尾段的行數。
@@ -608,6 +615,25 @@ mod tests {
         let q = alertable_question(DANGEROUS_RM_2286_MULTILINE).expect("防誤刪框要通知");
         assert!(q.contains("Dangerous rm operation") && q.contains("touch m1.txt"), "{q}");
         assert!(message_for("am-x", &q).contains("只有使用者本人能核准"));
+    }
+
+    /// 2.1.287（#775）：工具呼叫／訊息內文夾在 `╌` 虛線之間、多框最舊在上。帶給 parent 的那段要有畫面上那一框的內容與計數。
+    #[test]
+    fn a_2_1_287_prompt_reaches_the_parent_with_its_call_and_count() {
+        use crate::tui_prompts::screens::*;
+        let q = alertable_question(PERMISSION_2287_READ_1_OF_3).expect("Read 1 of 3");
+        assert!(q.contains("1 of 3") && q.contains("o1.txt") && !q.contains('╌'), "{q}");
+        let q = alertable_question(PERMISSION_2287_READ_2_OF_3).expect("Read 2 of 3");
+        assert!(q.contains("2 of 3") && q.contains("o2.txt"), "{q}");
+        let q = alertable_question(PERMISSION_2287_BASH_QUEUE_FIRST).expect("排隊的 Bash");
+        assert!(q.contains("touch q1.txt") && q.contains("Do you want to proceed?") && q.contains("4. No"), "{q}");
+        let q = alertable_question(PERMISSION_2287_MCP).expect("MCP");
+        assert!(q.contains("text: \"hello\"") && q.contains("3. No"), "{q}");
+        let q = alertable_question(PERMISSION_2287_WEBSEARCH).expect("WebSearch");
+        assert!(q.contains("Web Search(\"claude code changelog\")"), "{q}");
+        let q = alertable_question(HELD_MESSAGE_2287).expect("held message");
+        assert!(q.starts_with("Held message from another session") && q.contains("Fixture capture test for issue #775"), "{q}");
+        assert!(!q.contains("Held peer message"), "框上面那段對話紀錄不帶：{q}");
     }
 
     #[test]

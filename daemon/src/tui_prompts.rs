@@ -360,7 +360,45 @@ fn open_choice_menu(tail: &[&str]) -> Option<(usize, usize)> {
 /// 備援把 `2. Edit prompt and retry with …` 存成了回覆）。
 pub fn awaits_menu_choice(screen: &str) -> bool {
     let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
-    open_choice_menu(&raw[raw.len().saturating_sub(CHOICE_MENU_TAIL_LINES)..]).is_some()
+    open_choice_menu(&raw[raw.len().saturating_sub(CHOICE_MENU_TAIL_LINES)..]).is_some() || is_held_message_prompt(screen)
+}
+
+/// 2.1.287 的 held message 框：別的 session 用 SendMessage 送來、但兩邊權限模式不同，訊息被扣住等使用者決定（#775）。
+/// 長這樣：實線下一行 `Held message from another session`、來源與說明、`Message body …:`、兩條 `╌` 虛線夾住訊息內文，
+/// 最底是**沒有編號**的兩個選項 `❯ Deny — …`／`Deliver this message to Claude`，[`open_choice_menu`] 認不到。
+///
+/// 要同時有：標題那一行（正上方是實線）、標題之後兩個選項各自成行而且剛好一個帶游標、最後一個選項底下只剩腳註
+/// （沒有對話輸出）、輸入列不是空的——回覆裡引用這段原文時底下一定還有空的輸入列。真畫面在
+/// `lifecycle/fixtures/claude-2.1.287-held-message.txt`、`claude-2.1.287-bash-with-held-queued.txt`（排在 Bash 框後面時不算開著）。
+pub fn is_held_message_prompt(screen: &str) -> bool {
+    let raw: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &raw[raw.len().saturating_sub(30)..];
+    if composer_is_idle(tail) {
+        return false;
+    }
+    let Some(title) = tail.iter().rposition(|l| norm_line(l) == "held message from another session") else { return false };
+    let ruled = title.checked_sub(1).and_then(|i| tail.get(i)).is_some_and(|l| {
+        let t = l.trim();
+        t.chars().count() >= 10 && t.chars().all(|c| c == '─')
+    });
+    if !ruled {
+        return false;
+    }
+    // 選項列：游標（可有可無）＋選項字，跟 `norm_line` 不同的是游標要留著數。
+    let option = |l: &str, label: &str| -> Option<bool> {
+        let body = l.trim();
+        let (cursor, body) = match body.chars().next() {
+            Some(c @ ('❯' | '›' | '>')) => (true, body[c.len_utf8()..].trim_start()),
+            _ => (false, body),
+        };
+        body.to_lowercase().starts_with(label).then_some(cursor)
+    };
+    let after = &tail[title + 1..];
+    let Some(deny) = after.iter().rposition(|l| option(l, "deny").is_some()) else { return false };
+    let Some(deliver) = after.iter().rposition(|l| option(l, "deliver this message").is_some()) else { return false };
+    let last = deny.max(deliver);
+    let cursors = usize::from(option(after[deny], "deny") == Some(true)) + usize::from(option(after[deliver], "deliver this message") == Some(true));
+    cursors == 1 && after.len() - 1 - last <= MENU_BELOW_LINES && !after[last + 1..].iter().any(|l| is_agent_output_line(l))
 }
 
 /// Claude Code 2.1.281 的「Session paused」選單（API 拒答或額度用完後，問要換模型重試還是改 prompt／改用額度）。
@@ -380,11 +418,15 @@ pub fn is_session_paused_menu(screen: &str) -> bool {
 
 /// claude 一般的權限確認選單（Bash／Write／Edit／Fetch／Read／MCP…）停在畫面尾巴等人選：回工具名（`Bash`、`Write`、`Fetch`、`MCP`…）。
 /// 給 blocked 的結構化原因用（`blocked_reason::observe`，「等待權限確認：Bash」）；**只是分類，不按任何鍵**。
+/// `Tool use` 框分得出 MCP 與其他工具（[`tool_use_name`]）；跨 session 的 held message 框回 `Held message`（[`is_held_message_prompt`]）。
 ///
 /// 要同時有：尾巴是等人選的編號選單（輸入列不是空的）、選單上方有一條實線（`────`）框出來的標題行（`Bash command`、`Create file`、
 /// `Fetch`、`Read file  1 of 3`、`Tool use`…）、標題後面有 `Do you want to …` 那句問題。防誤刪框、Session paused、auto mode、
 /// 切換模型、問卷是別的選單，不算；回覆裡逐行引用原文時底下有空的輸入列，也不算。真畫面在 `lifecycle/fixtures/claude-2.1.28[67]-*-permission*.txt`。
 pub fn permission_prompt(screen: &str) -> Option<String> {
+    if is_held_message_prompt(screen) {
+        return Some("Held message".to_string());
+    }
     if !awaits_menu_choice(screen)
         || dangerous_rm_prompt(screen).is_some()
         || is_session_paused_menu(screen)
@@ -419,13 +461,32 @@ pub fn permission_prompt(screen: &str) -> Option<String> {
     } else if low.starts_with("fetch") {
         "Fetch".to_string()
     } else if low == "tool use" {
-        "MCP".to_string()
+        tool_use_name(&window[rule + 2..])
     } else if !title.is_empty() && title.chars().count() <= 40 {
         title.to_string()
     } else {
         return None;
     };
     Some(tool)
+}
+
+/// `Tool use` 框（MCP 與其他沒有專屬畫面的工具，2.1.287 起工具呼叫夾在兩條 `╌` 虛線之間，#775）是哪個工具。
+/// MCP：標題下一行是 `demo — Echo Tool: (MCP)`，回 `MCP`。其他工具（如 WebSearch）：虛線之間第一行是
+/// `Web Search("…")`，取括號前的名字；認不出來就回 `Tool use`，不再一律當成 MCP。`body` 從標題下一行起算。
+fn tool_use_name(body: &[&str]) -> String {
+    let dashes = |l: &&str| {
+        let t = l.trim();
+        !t.is_empty() && t.chars().all(|c| c == '╌')
+    };
+    let open = body.iter().position(dashes);
+    if body[..open.unwrap_or(body.len())].iter().any(|l| l.trim_end().ends_with("(MCP)")) {
+        return "MCP".to_string();
+    }
+    let call = open.and_then(|i| body.get(i + 1)).map(|l| l.trim()).unwrap_or("");
+    match call.split_once('(') {
+        Some((name, _)) if !name.trim().is_empty() && name.trim().chars().count() <= 40 => name.trim().to_string(),
+        _ => "Tool use".to_string(),
+    }
 }
 
 /// onboarding 第一頁（`hasCompletedOnboarding` 被清掉、或全新的 `CLAUDE_CONFIG_DIR`）：「Choose the text style…」
@@ -840,6 +901,19 @@ pub(crate) mod screens {
     pub const PERMISSION_2287_WRITE: &str = include_str!("lifecycle/fixtures/claude-2.1.287-write-permission.txt");
     pub const PERMISSION_2287_FETCH: &str = include_str!("lifecycle/fixtures/claude-2.1.287-fetch-permission.txt");
     pub const PERMISSION_2287_MCP: &str = include_str!("lifecycle/fixtures/claude-2.1.287-mcp-permission.txt");
+    /// 2.1.287 同樣方式（2026-10-03，tmux 120x40，`--setting-sources project --permission-mode default`，#775）：
+    /// WebSearch 也是 `Tool use` 框，但標題下面沒有 `(MCP)`，虛線之間是 `Web Search("…")`。
+    pub const PERMISSION_2287_WEBSEARCH: &str = include_str!("lifecycle/fixtures/claude-2.1.287-websearch-permission.txt");
+    /// 三個平行 Bash 一起等權限：2.1.287 起最舊的排最上面（先是 q1，按掉之後換 q2）；Bash 框沒有 `N of M` 計數。
+    pub const PERMISSION_2287_BASH_QUEUE_FIRST: &str = include_str!("lifecycle/fixtures/claude-2.1.287-bash-queue-first.txt");
+    pub const PERMISSION_2287_BASH_QUEUE_SECOND: &str = include_str!("lifecycle/fixtures/claude-2.1.287-bash-queue-second.txt");
+    /// 三個平行 Read：`Read file … 1 of 3` 是 o1（2.1.286 的 `1 of 3` 是最後送出的 o3），按掉後 `2 of 3` 是 o2。
+    pub const PERMISSION_2287_READ_1_OF_3: &str = include_str!("lifecycle/fixtures/claude-2.1.287-read-permission-1-of-3.txt");
+    pub const PERMISSION_2287_READ_2_OF_3: &str = include_str!("lifecycle/fixtures/claude-2.1.287-read-permission-2-of-3.txt");
+    /// 別的 session（權限模式不同）SendMessage 進來，被扣住等使用者決定：選項沒有編號。
+    pub const HELD_MESSAGE_2287: &str = include_str!("lifecycle/fixtures/claude-2.1.287-held-message.txt");
+    /// Bash 框開著時又來一則 held message：舊的 Bash 框在上，held message 只在對話裡記一行 `● Held peer message …`。
+    pub const PERMISSION_2287_BASH_WITH_HELD_QUEUED: &str = include_str!("lifecycle/fixtures/claude-2.1.287-bash-with-held-queued.txt");
     /// 2026-10-02 grok 1.0.46 在沒信任過的目錄的真畫面（拋棄式 tmux；信任框置中，標題與選項各自成行，最底一行是版本）。
     pub const GROK_1046_TRUST: &str = include_str!("lifecycle/fixtures/grok-1.0.46-trust-dialog.txt");
     /// 2026-09-23 m12 的 pane（巡檢交辦時抄的原文，路徑中段被抄錄者省略成 `…`）。
@@ -1467,6 +1541,51 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         // 回覆裡逐行引用權限框原文、底下是空的輸入列：不是真的框。
         let quoted = format!("⏺ 剛才停在：\n  Bash command\n  Do you want to proceed?\n  1. Yes\n  2. No\n{IDLE_CLAUDE}");
         assert_eq!(permission_prompt(&quoted), None);
+    }
+
+    /// #775：2.1.287 的 `Tool use` 框不只 MCP（WebSearch 也是）、held message 框沒有編號、多框改成最舊在上。
+    /// 框種要分得出來，排隊時讀到的是畫面上那一框（最舊的），後面排隊的不算開著。
+    #[test]
+    fn the_2_1_287_tool_use_held_message_and_queued_prompts_are_told_apart() {
+        use super::screens::*;
+        for (name, screen, tool) in [
+            ("websearch", PERMISSION_2287_WEBSEARCH, "Web Search"),
+            ("mcp", PERMISSION_2287_MCP, "MCP"),
+            ("bash queue first", PERMISSION_2287_BASH_QUEUE_FIRST, "Bash"),
+            ("bash queue second", PERMISSION_2287_BASH_QUEUE_SECOND, "Bash"),
+            ("read 1/3", PERMISSION_2287_READ_1_OF_3, "Read"),
+            ("read 2/3", PERMISSION_2287_READ_2_OF_3, "Read"),
+            ("bash with held queued", PERMISSION_2287_BASH_WITH_HELD_QUEUED, "Bash"),
+            ("held message", HELD_MESSAGE_2287, "Held message"),
+        ] {
+            assert_eq!(permission_prompt(screen).as_deref(), Some(tool), "{name}");
+            assert!(awaits_menu_choice(screen), "{name}：等人選，不是回合結束");
+            assert_eq!(dangerous_rm_prompt(screen), None, "{name}");
+            assert!(!is_session_paused_menu(screen) && !is_auto_mode_offer(screen) && !is_feedback_survey(screen), "{name}");
+        }
+        assert!(is_held_message_prompt(HELD_MESSAGE_2287));
+        assert!(!is_held_message_prompt(PERMISSION_2287_BASH_WITH_HELD_QUEUED), "排在 Bash 框後面的 held message 還沒開");
+        // 排隊時畫面上的是最舊的那一框。
+        assert!(PERMISSION_2287_BASH_QUEUE_FIRST.contains("\n touch q1.txt\n") && PERMISSION_2287_BASH_QUEUE_SECOND.contains("\n touch q2.txt\n"));
+        // 回覆裡逐行引用 held message 框、底下是空的輸入列：不是真的框。
+        let quoted = format!(
+            "● 剛才停在：\n────────────────\n Held message from another session\n ❯ Deny — drop it and tell the sender it was declined\n   Deliver this message to Claude\n{IDLE_CLAUDE}"
+        );
+        assert!(!is_held_message_prompt(&quoted) && permission_prompt(&quoted).is_none() && !awaits_menu_choice(&quoted));
+        // 沒有游標（選完了、框在收）、或選項底下還在跑對話輸出：都不算開著。
+        let no_cursor = HELD_MESSAGE_2287.replace(" ❯ Deny", "   Deny");
+        assert!(!is_held_message_prompt(&no_cursor));
+        let below = format!("{HELD_MESSAGE_2287}\n● 繼續做事\n");
+        assert!(!is_held_message_prompt(&below));
+    }
+
+    /// `Tool use` 框的工具名：MCP 看標題下一行的 `(MCP)`，其他看虛線之間那一行括號前的名字，認不出來不再假裝是 MCP。
+    #[test]
+    fn a_tool_use_prompt_names_its_tool() {
+        assert_eq!(tool_use_name(&[" demo — Echo Tool: (MCP)", "╌╌╌╌", " text: \"hello\"", "╌╌╌╌"]), "MCP");
+        assert_eq!(tool_use_name(&[" │ Claude wants to search the web for: x", "╌╌╌╌", " Web Search(\"x\")", "╌╌╌╌"]), "Web Search");
+        assert_eq!(tool_use_name(&[" 說明", "╌╌╌╌", " 沒有括號的內容", "╌╌╌╌"]), "Tool use");
+        assert_eq!(tool_use_name(&[]), "Tool use");
     }
 
     /// grok 1.0.46 的信任框真畫面照舊認得（pretrust 沒寫到的目錄才會跳）。
