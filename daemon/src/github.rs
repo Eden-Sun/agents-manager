@@ -9,7 +9,7 @@ use crate::state::App;
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,26 +22,53 @@ const ERROR_CHARS: usize = 400;
 
 #[derive(Default)]
 struct HostDetectionRegistry {
-    in_flight: std::sync::Mutex<HashSet<(PathBuf, String)>>,
+    /// 進行中的掃描。`rerun`：這次還沒結束又有人要求掃同一台（例如 repoint 之後）。
+    in_flight: std::sync::Mutex<HashMap<(PathBuf, String), bool>>,
 }
 
 struct HostDetectionClaim {
     registry: Arc<HostDetectionRegistry>,
     key: (PathBuf, String),
+    open: bool,
 }
 
 impl HostDetectionRegistry {
     fn claim(self: &Arc<Self>, data_dir: &Path, host: &str) -> Option<HostDetectionClaim> {
         let key = (data_dir.to_path_buf(), host.to_string());
-        if !self.in_flight.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone()) {
+        let mut guard = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(rerun) = guard.get_mut(&key) {
+            *rerun = true;
             return None;
         }
-        Some(HostDetectionClaim { registry: self.clone(), key })
+        guard.insert(key.clone(), false);
+        Some(HostDetectionClaim { registry: self.clone(), key, open: true })
+    }
+}
+
+impl HostDetectionClaim {
+    /// 這次掃完。有人在中途又要求一次就回 `true`（名額繼續留著）；否則放掉名額。
+    fn finish(&mut self) -> bool {
+        if !self.open {
+            return false;
+        }
+        let mut guard = self.registry.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.get(&self.key).copied().unwrap_or(false) {
+            if let Some(rerun) = guard.get_mut(&self.key) {
+                *rerun = false;
+            }
+            return true;
+        }
+        guard.remove(&self.key);
+        self.open = false;
+        false
     }
 }
 
 impl Drop for HostDetectionClaim {
     fn drop(&mut self) {
+        if !self.open {
+            return;
+        }
         self.registry.in_flight.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
     }
 }
@@ -190,40 +217,137 @@ pub fn strip_ansi(s: &str) -> String {
     out
 }
 
-pub async fn detect_project(app: &Arc<App>, p: &db::Project) -> Option<GithubInfo> {
-    let script = format!("{PATH_FIX}git -C {} remote get-url origin 2>/dev/null", sh_quote(&p.path));
-    let out = match run_on_host(app, &p.host, &script, GIT_TIMEOUT).await {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::debug!(project = %p.label, host = %p.host, error = %e, "git remote lookup failed");
-            return None;
-        }
-    };
-    let info = parse_github_remote(out.lines().next().unwrap_or(""));
-    app.github.lock().await.insert(p.id.clone(), info.clone());
-    info
+fn origin_script(path: &str) -> String {
+    format!("{PATH_FIX}git -C {} remote get-url origin 2>/dev/null", sh_quote(path))
 }
 
-/// Spawned, off the reconcile path.
-pub fn spawn_detect_host(app: Arc<App>, host: String) {
-    // Reconcile can be triggered repeatedly while a host is slow. One in-flight scan per app and
-    // host keeps those passes from building a queue of identical DB reads and `git` processes.
-    let Some(claim) = host_detection_registry().claim(&app.data_dir, &host) else {
-        return;
+fn info_from_origin(out: &str) -> Option<GithubInfo> {
+    parse_github_remote(out.lines().next().unwrap_or(""))
+}
+
+async fn publish_github(app: &Arc<App>, id: &str, info: &Option<GithubInfo>) -> bool {
+    let mut cache = app.github.lock().await;
+    let before = cache.get(id).cloned();
+    let changed = before.as_ref() != Some(info);
+    cache.insert(id.to_string(), info.clone());
+    changed
+}
+
+/// 本機沒有改指。遠端把 `HostFence` 記在探測之前，寫快取前再確認還是這一帶（#830、#347）。
+pub async fn detect_project(app: &Arc<App>, p: &db::Project) -> Option<GithubInfo> {
+    if p.host == LOCAL_HOST {
+        let out = match run_on_host(app, &p.host, &origin_script(&p.path), GIT_TIMEOUT).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::debug!(project = %p.label, host = %p.host, error = %e, "git remote lookup failed");
+                return None;
+            }
+        };
+        let info = info_from_origin(&out);
+        publish_github(app, &p.id, &info).await;
+        return info;
+    }
+    let Some(fence) = app.hosts.fence(&p.host).await else {
+        return None;
     };
-    tokio::spawn(async move {
-        let _claim = claim;
-        let projects = db::live_projects(&app.db).await.unwrap_or_default();
+    match probe_fenced(app, &fence, &p.path).await {
+        Probe::Stale => None,
+        Probe::Done(info) => {
+            if commit_fenced(app, &fence, &[(p.id.clone(), info.clone())]).await.is_some() {
+                info
+            } else {
+                None
+            }
+        }
+    }
+}
+
+enum Probe {
+    /// 權威已換，呼叫端什麼都不要寫。
+    Stale,
+    Done(Option<GithubInfo>),
+}
+
+/// 在抓住的那條連線上跑 `git remote`。回來時世代變了就整筆作廢，不把舊機器的 origin 寫進快取。
+async fn probe_fenced(app: &Arc<App>, fence: &crate::hosts::HostFence, path: &str) -> Probe {
+    if !app.hosts.is_current(fence).await {
+        return Probe::Stale;
+    }
+    let out = match fence.conn().ssh_exec_path_timeout(&origin_script(path), GIT_TIMEOUT).await {
+        Ok(o) => o,
+        Err(e) => {
+            if !app.hosts.is_current(fence).await {
+                return Probe::Stale;
+            }
+            tracing::debug!(host = %fence.conn().name, error = %e, "git remote lookup failed");
+            return Probe::Done(None);
+        }
+    };
+    if !app.hosts.is_current(fence).await {
+        return Probe::Stale;
+    }
+    Probe::Done(info_from_origin(&out))
+}
+
+/// 整批一起寫。序號被較新的掃描用掉，或寫之前權威換了，就一筆都不寫。`Some` 是有沒有跟快取不同。
+async fn commit_fenced(app: &Arc<App>, fence: &crate::hosts::HostFence, rows: &[(String, Option<GithubInfo>)]) -> Option<bool> {
+    if !app.hosts.is_current(fence).await || !fence.claim_publish() || !app.hosts.is_current(fence).await {
+        return None;
+    }
+    let mut changed = false;
+    for (id, info) in rows {
+        if publish_github(app, id, info).await {
+            changed = true;
+        }
+    }
+    Some(changed)
+}
+
+async fn detect_host_once(app: &Arc<App>, host: &str) {
+    let projects = db::live_projects(&app.db).await.unwrap_or_default().into_iter().filter(|p| p.host == host).collect::<Vec<_>>();
+    if host == LOCAL_HOST {
         let mut changed = false;
-        for p in projects.into_iter().filter(|p| p.host == host) {
+        for p in projects {
             let before = app.github.lock().await.get(&p.id).cloned();
-            let after = detect_project(&app, &p).await;
+            let after = detect_project(app, &p).await;
             if before.as_ref() != Some(&after) {
                 changed = true;
             }
         }
         if changed {
             app.emit("project_changed", json!({})).await;
+        }
+        return;
+    }
+    let Some(fence) = app.hosts.fence(host).await else {
+        return;
+    };
+    let mut rows = Vec::with_capacity(projects.len());
+    for p in &projects {
+        match probe_fenced(app, &fence, &p.path).await {
+            Probe::Stale => return,
+            Probe::Done(info) => rows.push((p.id.clone(), info)),
+        }
+    }
+    if commit_fenced(app, &fence, &rows).await == Some(true) {
+        app.emit("project_changed", json!({})).await;
+    }
+}
+
+/// Spawned, off the reconcile path.
+pub fn spawn_detect_host(app: Arc<App>, host: String) {
+    // Reconcile can be triggered repeatedly while a host is slow. One in-flight scan per app and
+    // host keeps those passes from building a queue of identical DB reads and `git` processes.
+    // 掃描中又來一次（repoint、重連）不丟掉：這次結束後用當時的連線再掃（#830）。
+    let Some(mut claim) = host_detection_registry().claim(&app.data_dir, &host) else {
+        return;
+    };
+    tokio::spawn(async move {
+        loop {
+            detect_host_once(&app, &host).await;
+            if !claim.finish() {
+                break;
+            }
         }
     });
 }
@@ -564,5 +688,116 @@ mod tests {
         drop(first);
         assert!(registry.claim(Path::new("/app-a"), "local").is_some(), "a later reconcile can scan after the current scan finishes");
         drop((other_host, other_app));
+    }
+
+    /// #830：掃描進行中把 H 從 A 改指到 B。A 的 `git remote` 回來不得寫進快取，合併中的 B 必須補跑。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_repoint_during_github_detection_does_not_publish_the_old_host() {
+        use crate::testing as tt;
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let host = format!("gh-fence-{}", db::ulid());
+        let cfg = |ssh: &str| crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: ssh.into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+        };
+        app.hosts.insert_remote_for_test(cfg("target-a")).await;
+        let mut ids = Vec::new();
+        for label in ["p1", "p2"] {
+            let id = db::ulid();
+            sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES (?, ?, ?, ?, ?)")
+                .bind(&id)
+                .bind(format!("/repo/{label}"))
+                .bind(label)
+                .bind(&host)
+                .bind(db::now())
+                .execute(&app.db)
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        let phase = Arc::new((std::sync::Mutex::new(0u8), std::sync::Condvar::new()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        crate::hosts::set_ssh_fake(&host, {
+            let phase = phase.clone();
+            let calls = calls.clone();
+            move |_script| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (lock, cv) = &*phase;
+                let mut g = lock.lock().unwrap();
+                if *g == 0 {
+                    *g = 1;
+                    cv.notify_all();
+                    while *g == 1 {
+                        g = cv.wait(g).unwrap();
+                    }
+                    return Ok("git@github.com:owner/a.git\n".into());
+                }
+                if *g == 2 {
+                    *g = 3;
+                    cv.notify_all();
+                    while *g == 3 {
+                        g = cv.wait(g).unwrap();
+                    }
+                }
+                Ok("git@github.com:owner/b.git\n".into())
+            }
+        });
+        spawn_detect_host(app.clone(), host.clone());
+        {
+            let (lock, cv) = &*phase;
+            let mut g = lock.lock().unwrap();
+            let start = std::time::Instant::now();
+            while *g == 0 && start.elapsed() < Duration::from_secs(5) {
+                let (next, t) = cv.wait_timeout(g, Duration::from_millis(50)).unwrap();
+                g = next;
+                if t.timed_out() && start.elapsed() >= Duration::from_secs(5) {
+                    break;
+                }
+            }
+            assert_eq!(*g, 1, "A 的探測要先開始");
+        }
+        app.hosts.replace_remote_for_test(&app, cfg("target-b")).await;
+        spawn_detect_host(app.clone(), host.clone());
+        {
+            let (lock, cv) = &*phase;
+            let mut g = lock.lock().unwrap();
+            *g = 2;
+            cv.notify_all();
+            drop(g);
+        }
+        {
+            let (lock, cv) = &*phase;
+            let mut g = lock.lock().unwrap();
+            let start = std::time::Instant::now();
+            while *g == 2 && start.elapsed() < Duration::from_secs(5) {
+                let (next, _) = cv.wait_timeout(g, Duration::from_millis(50)).unwrap();
+                g = next;
+            }
+            assert_eq!(*g, 3, "B 的掃描要在 A 放行後補跑，不能被合併丟掉");
+            for id in &ids {
+                let cur = app.github.lock().await.get(id).cloned();
+                assert!(cur.as_ref().and_then(|g| g.as_ref()).is_none_or(|i| i.repo != "a"), "repoint 之後不能留下 A：{cur:?}");
+            }
+            *g = 4;
+            cv.notify_all();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let ok = {
+                let cache = app.github.lock().await;
+                ids.iter().all(|id| cache.get(id).and_then(|g| g.as_ref()).is_some_and(|i| i.owner == "owner" && i.repo == "b"))
+            };
+            if ok {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "最終應是 B 的 origin，calls={}", calls.load(std::sync::atomic::Ordering::SeqCst));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
