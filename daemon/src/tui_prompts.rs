@@ -293,10 +293,34 @@ pub fn is_codex_model_migration_prompt(screen: &str) -> bool {
             || l.starts_with("codex just got an upgrade. introducing")
             || l.starts_with("gpt-5.4 is no longer available")
     });
-    let has_footer = tail.last().is_some_and(|l| l.starts_with("enter/esc confirm") || l.starts_with("enter/esc continue"));
+    let footer = migration_footer(&tail);
     let has_migration_choices =
         line_starts_with(&tail, "1. try new model") && line_starts_with(&tail, "2. use existing model");
-    copy && has_footer && (has_migration_choices || tail.last().is_some_and(|l| l.starts_with("enter/esc continue")))
+    copy && footer.is_some() && (has_migration_choices || footer == Some("continue"))
+}
+
+/// `enter/esc confirm · ctrl+c quit`（或 `continue`）。窄 pane 在 `·` 後面折行時，上一行仍以 `enter/esc …` 開頭、下一行是 `ctrl+c …`。
+fn migration_footer(tail: &[String]) -> Option<&'static str> {
+    fn kind(line: &str) -> Option<&'static str> {
+        if line.starts_with("enter/esc confirm") {
+            Some("confirm")
+        } else if line.starts_with("enter/esc continue") {
+            Some("continue")
+        } else {
+            None
+        }
+    }
+    if let Some(k) = tail.last().and_then(|l| kind(l)) {
+        return Some(k);
+    }
+    if tail.len() >= 2 {
+        let prev = &tail[tail.len() - 2];
+        let last = tail.last().unwrap();
+        if kind(prev).is_some() && last.starts_with("ctrl+c") {
+            return kind(prev);
+        }
+    }
+    None
 }
 
 /// Claude Code 2.1.278 首次啟動的「Auto mode」推銷框（2026-09-22 build child 卡在這裡半小時：herdr 判 idle、
@@ -570,13 +594,18 @@ pub fn is_grok_trust_dialog(screen: &str) -> bool {
     }
     let tail: Vec<String> = tail_raw.iter().map(|l| norm_line(l)).collect();
     line_starts_with(&tail, "do you trust the contents of this directory")
-        && tail.iter().any(|l| l == "yes, proceed y")
-        && tail.iter().any(|l| l == "no, quit n")
+        && exact_or_wrapped_pair(&tail, "yes, proceed y")
+        && exact_or_wrapped_pair(&tail, "no, quit n")
         && tail.iter().any(|l| {
             l.strip_prefix("grok build ")
                 .and_then(|v| v.split_whitespace().next())
                 .is_some_and(|v| v.chars().next().is_some_and(|c| c.is_ascii_digit()))
         })
+}
+
+/// 選項整行是 `yes, proceed y`。窄 pane 把鍵位折到下一行時，相鄰兩行接起來仍是那一句。
+fn exact_or_wrapped_pair(lines: &[String], exact: &str) -> bool {
+    lines.iter().any(|l| l == exact) || lines.windows(2).any(|w| format!("{} {}", w[0], w[1]) == exact)
 }
 
 /// 確認框連同框線與 statusLine 的最大高度；再往上是正文。
@@ -1044,6 +1073,23 @@ mod tests {
         assert!(!super::is_grok_trust_dialog("> Do you trust the contents of this directory? I asked grok that yesterday."));
     }
 
+    /// 窄 pane 把 `Yes, proceed                 y` 折成標籤與按鍵兩行時，仍是信任框。
+    #[test]
+    fn a_wrapped_grok_trust_key_is_still_the_dialog() {
+        let screen = "\
+Do you trust the contents of this directory?
+/Users/m4p/project
+
+Yes, proceed
+                 y
+No, quit
+                 n
+
+Grok Build  1.0.34
+";
+        assert!(super::is_grok_trust_dialog(screen));
+    }
+
     #[test]
     fn grok_trust_lookalike_text_without_the_live_choice_keys_is_not_a_dialog() {
         let printed_text = "\
@@ -1371,6 +1417,14 @@ Grok Build 1.0.46\n\
         assert!(!is_codex_model_migration_prompt(&quoted), "an assistant quote followed by a composer is not a modal");
         let no_footer = screen.replace("enter/esc confirm · ctrl+c quit", "");
         assert!(!is_codex_model_migration_prompt(&no_footer), "the migration copy alone is not a prompt");
+    }
+
+    /// 窄 pane 把 `enter/esc confirm · ctrl+c quit` 折成兩行時，遷移選單仍開著。
+    #[test]
+    fn a_wrapped_migration_footer_is_still_the_prompt() {
+        let screen = include_str!("lifecycle/fixtures/codex-0.157-model-migration.txt")
+            .replace("  enter/esc confirm · ctrl+c quit", "  enter/esc confirm ·\n  ctrl+c quit");
+        assert!(is_codex_model_migration_prompt(&screen), "{screen}");
     }
 
     /// 這顆 bot 回報完上面那個修正之後的真畫面尾段（2026-09-18，w168:p91）：畫面上沒有框，只是
