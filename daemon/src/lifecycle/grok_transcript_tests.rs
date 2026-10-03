@@ -78,6 +78,18 @@ fn slash_commands_are_not_conversation() {
 }
 
 #[test]
+fn a_cut_off_first_line_does_not_overwrite_the_previous_reply() {
+    let prev = one_exchange(Some(0), "第一問", "第一答");
+    let cut = format!(
+        "{prev}xxxx{{\"type\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"<user_query>\\n第二問\\n</user_query>\"}}],\"prompt_index\":1}}\n{{\"type\":\"assistant\",\"content\":\"第二答\"}}\n"
+    );
+    let ex = parse_chat_history(&cut);
+    assert_eq!(ex.len(), 1, "被切到的那一問整段丟掉，不另開：{ex:#?}");
+    assert_eq!(ex[0].prompt, "第一問");
+    assert_eq!(ex[0].reply.as_deref(), Some("第一答"), "切剩的 assistant 不能蓋掉上一問");
+}
+
+#[test]
 fn a_cut_off_last_line_does_not_become_the_reply() {
     let whole = one_exchange(Some(0), "問一句", "完整回覆");
     let cut = format!("{whole}{{\"type\":\"assistant\",\"content\":\"寫到一半");

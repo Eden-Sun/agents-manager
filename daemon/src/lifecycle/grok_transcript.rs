@@ -69,10 +69,20 @@ fn user_query(v: &Value) -> Option<String> {
 
 pub(crate) fn parse_chat_history(text: &str) -> Vec<Exchange> {
     let mut out: Vec<Exchange> = Vec::new();
+    // `tail -c` 會從一行中間切開。切剩的半行解析失敗後，後面的 assistant 仍是那一問的，
+    // 不能接到上一問把回覆蓋掉。下一個完整的 user 才重新接上。
+    let mut gap = false;
     for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            gap = true;
+            continue;
+        };
         match v.get("type").and_then(Value::as_str) {
             Some("user") => {
+                gap = false;
                 let Some(prompt) = user_query(&v) else { continue };
                 if let Some(prev) = out.last_mut() {
                     prev.closed = true;
@@ -80,6 +90,9 @@ pub(crate) fn parse_chat_history(text: &str) -> Vec<Exchange> {
                 out.push(Exchange { prompt, prompt_index: v.get("prompt_index").and_then(Value::as_u64), reply: None, closed: false });
             }
             Some("assistant") => {
+                if gap {
+                    continue;
+                }
                 let Some(cur) = out.last_mut() else { continue };
                 if v.get("tool_calls").and_then(Value::as_array).is_some_and(|c| !c.is_empty()) {
                     continue;
