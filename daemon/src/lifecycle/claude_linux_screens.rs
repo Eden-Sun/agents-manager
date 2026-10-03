@@ -51,6 +51,19 @@ fn the_fallback_reply_is_the_text_not_the_status_rows() {
     assert!(cleaned.contains("PONG") && !cleaned.contains("Churned") && !cleaned.contains("bypass permissions"), "{cleaned:?}");
 }
 
+/// #783：default 權限模式、沒有 statusLine 時，輸入框底下只有一行模式列 `⏸ manual mode on · ← for agents`（2.1.288 真畫面，
+/// 2026-10-03，tmux 120x40，`--permission-mode default`、`statusLine` 輸出空白）。它不帶 `(shift+tab to cycle)`，
+/// 以前認不出是輸入框底下的 chrome：找不到輸入框，備援把規則線、空框跟這行一起接在回覆後面。
+#[test]
+fn the_manual_mode_row_is_not_part_of_the_fallback_reply() {
+    const MANUAL: &str = include_str!("fixtures/claude-2.1.288-manual-mode-finished.txt");
+    assert_eq!(extract_reply("claude", MANUAL).as_deref(), Some("PONG\n  DONE"));
+    let cleaned = clean_screen("claude", MANUAL).unwrap();
+    assert!(cleaned.contains("PONG") && !cleaned.contains("manual mode") && !cleaned.contains("Crunched"), "{cleaned:?}");
+    assert!(!pane_still_busy(MANUAL));
+    assert_eq!(last_prompt_echo_text("claude", MANUAL).as_deref(), Some("Reply with exactly two lines: PONG and then DONE. Do not use any tools."));
+}
+
 #[test]
 fn the_prompt_echo_is_found_on_a_dot_marker_screen() {
     let echo = last_prompt_echo_text("claude", FINISHED).expect("有回音");
