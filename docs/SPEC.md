@@ -4660,8 +4660,8 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 **分享頁（`web/share.html` → `dist/share.html`）**
 - 獨立 Vite entry，程式碼只在 `web/src/share/`，**不 import 主 UI 的 store／api／元件**（測試 `shareIsolation.test.ts` 釘住），也沒有任何通往主 UI 的連結。
 - token 從網址 `/s/<token>` 取（dev／mock 用 `share.html?token=`）；只打 `/s/<token>/api/…`、不帶 cookie 與 referrer。
-- 畫面：標題（bot 名稱＋在線／思考中）、對話串（bot 回覆用 GFM，但不吃 HTML、不載圖片，連結 `noopener noreferrer`）、輸入框（桌機 Enter 送出、手機 Enter 換行）、📎 上傳（單檔 25 MB）、「bot 給你的檔案」（手機是底部抽屜，桌機 ≥900px 是右側欄）。
-  送出後到 daemon 回報 working 之前就先顯示「思考中」。404 一律畫「這個分享連結已失效」，不分 token 錯或分享已關。深淺色跟系統走。
+- 畫面：標題（bot 名稱＋在線／思考中）、對話串（bot 回覆用 GFM，但不吃 HTML、不載圖片，連結 `noopener noreferrer`；超過 2 萬字或引用／縮排超過 `markdownGuard` 上限時改純文字，不提供「仍用 Markdown」；單則轉換失敗只退回那則）、輸入框（桌機 Enter 送出、手機 Enter 換行）、📎 上傳（單檔 25 MB）、「bot 給你的檔案」（手機是底部抽屜，桌機 ≥900px 是右側欄）。
+  `has_more` 時可「載入較早訊息」（`before`＝目前最舊 id），載入舊頁不把視窗捲回最底。送出當下就顯示「思考中」；這一輪 SSE 或之後抓到的 idle 會清掉，POST 較晚 resolve 不會再打開。SSE 任一 error（含仍在 CONNECTING）就改輪詢，`open` 後停；輪詢看到 404 關掉 EventSource 並畫失效。404 一律畫「這個分享連結已失效」，不分 token 錯或分享已關。深淺色跟系統走。
 
 ## 附錄 A：herdr socket（0.8.2 / protocol 20）
 

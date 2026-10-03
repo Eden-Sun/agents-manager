@@ -100,21 +100,37 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const [sendError, setSendError] = useState<string | null>(null)
   const [filesOpen, setFilesOpen] = useState(false)
   const [poll, setPoll] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [olderError, setOlderError] = useState<string | null>(null)
   // 送出後到 daemon 說「思考中」之前也算在忙，不然按完送出畫面一片靜。
+  // 世代號：SSE 若在 POST resolve 之前先到，不能再被後到的 resolve 設回 true。
   const [awaiting, setAwaiting] = useState(false)
+  const awaitGen = useRef(0)
+  const sendAt = useRef<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const stick = useRef(true)
+  const stopLive = useRef<() => void>(() => {})
+  const sawOlder = useRef(false)
 
   const fail = useCallback((e: unknown) => {
-    if (e instanceof ShareHttpError && e.status === 404) setState('gone')
-    else setNetError(shareErrorText(e, 'load'))
+    if (e instanceof ShareHttpError && e.status === 404) {
+      stopLive.current()
+      setState('gone')
+    } else setNetError(shareErrorText(e, 'load'))
   }, [])
 
   const applyPage = useCallback((page: SharePage) => {
     setBotName(page.bot_name)
     setStatus(page.status)
     setMessages((cur) => mergeMessages(cur, page.messages))
+    if (!sawOlder.current) setHasMore(page.has_more)
+    const at = sendAt.current
+    // 還沒看到這一輪的 working 或新 assistant 之前，idle 的舊頁不能把「思考中」清掉。
+    if (at && (page.status === 'working' || page.messages.some((m) => m.role === 'assistant' && m.created_at >= at))) {
+      setAwaiting(false)
+    }
     setNetError(null)
     setState('ready')
   }, [])
@@ -138,7 +154,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
       (f) => setFiles(f),
       () => {},
     )
-    return client.subscribe({
+    const stop = client.subscribe({
       onMessage: (m) => {
         setMessages((cur) => mergeMessages(cur, [m]))
         if (m.role === 'assistant') {
@@ -148,10 +164,17 @@ export function ShareApp({ client }: { client: ShareClient }) {
       },
       onStatus: (s) => {
         setStatus(s)
-        if (s === 'working') setAwaiting(false)
+        // 只在這一輪送出之後的 working／idle 清掉。POST resolve 不再把 awaiting 設回 true。
+        if (sendAt.current) setAwaiting(false)
       },
       onDown: () => setPoll(true),
+      onUp: () => setPoll(false),
     })
+    stopLive.current = stop
+    return () => {
+      stop()
+      stopLive.current = () => {}
+    }
   }, [client, applyPage, fail, loadFiles])
 
   useEffect(() => {
@@ -190,20 +213,48 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const tooLong = text.length > SHARE_TEXT_MAX
   const canSend = !sending && !uploading && !tooLong && (text.trim().length > 0 || ready.length > 0)
 
+  const loadOlder = async () => {
+    const oldest = messages[0]?.id
+    if (!oldest || loadingOlder) return
+    stick.current = false
+    setLoadingOlder(true)
+    setOlderError(null)
+    try {
+      const page = await client.messages(oldest)
+      sawOlder.current = true
+      setMessages((cur) => mergeMessages(cur, page.messages))
+      setHasMore(page.has_more)
+      setState('ready')
+    } catch (e) {
+      if (e instanceof ShareHttpError && e.status === 404) {
+        stopLive.current()
+        setState('gone')
+      } else setOlderError(shareErrorText(e, 'load'))
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+
   const submit = async () => {
     if (!canSend) return
+    const gen = ++awaitGen.current
+    sendAt.current = new Date().toISOString()
+    setAwaiting(true)
     setSending(true)
     setSendError(null)
     try {
       await client.send(text.trim(), newRequestId(), ready.map((p) => p.id!))
       setText('')
       setPending((p) => p.filter((x) => !x.id))
-      setAwaiting(true)
       stick.current = true
-      // 推播會補；輪詢模式或推播慢一拍時自己抓一次。
-      void load()
+      // 不在這裡 setAwaiting(true)：SSE 可能已經先把這一世代清掉。
+      if (awaitGen.current === gen) void load()
     } catch (e) {
-      if (e instanceof ShareHttpError && e.status === 404) setState('gone')
+      if (awaitGen.current === gen) setAwaiting(false)
+      if (e instanceof ShareHttpError && e.status === 404) {
+        stopLive.current()
+        setState('gone')
+      }
       setSendError(shareErrorText(e, 'send'))
     } finally {
       setSending(false)
@@ -250,6 +301,19 @@ export function ShareApp({ client }: { client: ShareClient }) {
             stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
           }}
         >
+          {hasMore ? (
+            <button type="button" className="sh-link sh-older" disabled={loadingOlder} onClick={() => void loadOlder()}>
+              {loadingOlder ? '載入中…' : '載入較早訊息'}
+            </button>
+          ) : null}
+          {olderError ? (
+            <p className="sh-send-err" role="alert">
+              {olderError}{' '}
+              <button type="button" className="sh-link" onClick={() => void loadOlder()}>
+                重試
+              </button>
+            </p>
+          ) : null}
           {state === 'loading' ? <p className="sh-empty">載入中…</p> : null}
           {state === 'ready' && messages.length === 0 ? <p className="sh-empty">打個招呼開始對話吧。</p> : null}
           {messages.map((m) => (
