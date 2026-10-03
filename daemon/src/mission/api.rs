@@ -561,20 +561,48 @@ async fn verified_commit(app: &Arc<App>, m: &store::Mission, b: &EventIn) -> Res
     }
 }
 
-/// `verified` 與 `deliver` 是把東西推上主幹的兩道關卡，不是任何一顆 bot 都能按的：被證明身分的**一般 bot**（沒有 AGM 角色）
-/// 不能記 `verified` 也不能 `deliver`——否則執行者自己驗自己、自己交付，把審查整個繞過去。放行的是使用者（沒宣告 bot 身分）、
-/// AGM 角色（巡檢／協調者），以及——只對 `verified`——這個任務的**驗證者**（而且同一顆不能同時是這個任務的執行者）。
-async fn require_gatekeeper(app: &Arc<App>, headers: &HeaderMap, mission_id: &str, verifier_may: bool) -> Result<(), LcError> {
-    let Some(bot) = crate::supervisor::bot_requests::verified_bot_id(app, headers).await? else { return Ok(()) };
+/// `verified` 與 `deliver` 是把東西推上主幹的兩道關卡，不是任何一顆 bot 都能按的：被證明身分的一般 bot
+/// 不能記 `verified` 也不能 `deliver`。只有目前流程最後一件交辦就是它的 verifier、且它沒有擔任過 executor，
+/// 才能記驗證；判定會在事件寫入交易裡重查，避免舊一輪或失敗的 verifier 把新成果標成已驗證。使用者與 AGM 角色可以兩者皆做。
+fn is_current_mission_verifier(
+    assignments: &[crate::supervisor::store::Assignment],
+    events: &[store::MissionEvent],
+    bot_id: &str,
+) -> bool {
+    let generation_start = events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "round")
+        .map(|event| flow::assignments_before(event, assignments))
+        .unwrap_or(0)
+        .min(assignments.len());
+    let Some(current) = assignments[generation_start..].last() else { return false };
+    let current_role = current.mission_role.as_deref().unwrap_or("executor");
+    current.target_bot_id == bot_id
+        && current_role == "verifier"
+        && !matches!(current.status.as_str(), "failed" | "cancelled" | "superseded")
+        && !assignments.iter().any(|a| a.target_bot_id == bot_id && a.mission_role.as_deref().unwrap_or("executor") == "executor")
+}
+
+/// 先分清一般 Bot 與 User／AGM。一般 Bot 的 verifier 資格會交給 `add_event_checked` 在寫入交易的 snapshot 驗。
+async fn require_gatekeeper(app: &Arc<App>, headers: &HeaderMap, mission_id: &str, verifier_may: bool) -> Result<Option<String>, LcError> {
+    let Some(bot) = crate::supervisor::bot_requests::verified_bot_id(app, headers).await? else { return Ok(None) };
     if crate::supervisor::bot_requests::actor_role(app, headers).await?.is_some() {
-        return Ok(());
+        return Ok(None);
     }
     if verifier_may {
+        // Preserve the existing gatekeeper response for bots with no verifier assignment (or
+        // that also executed work). The authoritative current-assignment check is repeated in
+        // the write transaction below.
         let assignments = crate::supervisor::store::mission_assignments(&app.db, mission_id).await.map_err(up)?;
-        let role_of = |a: &crate::supervisor::store::Assignment| a.mission_role.clone().unwrap_or_else(|| "executor".into());
-        let mine = |role: &str| assignments.iter().any(|a| a.target_bot_id == bot && role_of(a) == role);
-        if mine("verifier") && !mine("executor") {
-            return Ok(());
+        let is_verifier = assignments
+            .iter()
+            .any(|a| a.target_bot_id == bot && a.mission_role.as_deref().unwrap_or("executor") == "verifier");
+        let is_executor = assignments
+            .iter()
+            .any(|a| a.target_bot_id == bot && a.mission_role.as_deref().unwrap_or("executor") == "executor");
+        if is_verifier && !is_executor {
+            return Ok(Some(bot));
         }
     }
     Err(LcError::Forbidden(json!({
@@ -620,9 +648,7 @@ pub async fn post_event(
     let m = load(&app, &id).await?;
     ensure_open(&m)?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
-    if b.kind == "verified" {
-        require_gatekeeper(&app, &headers, &id, true).await?;
-    }
+    let verifier_bot = if b.kind == "verified" { require_gatekeeper(&app, &headers, &id, true).await? } else { None };
     require_header_bot_mission_participant(&app, &id, &headers).await?;
     let mut payload = b.payload.clone().unwrap_or_else(|| json!({}));
     let mut generation = None;
@@ -644,9 +670,20 @@ pub async fn post_event(
     crate::lifecycle::race_point::hit("mission_event_before_write", &id).await;
     // 上面的 `ensure_open`、驗 commit、算代都在交易外（git 不進交易）：寫入那一刻再確認任務還開著、`verified` 還在
     // 它驗的那一代（issue #74 重開）。
-    let written = store::add_event_checked(&app.db, &id, &b.kind, b.text.trim(), from.as_deref(), &payload, |s| match generation {
-        Some(g) => super::workflow::ensure_same_generation(s, g),
-        None => Ok(()),
+    let written = store::add_event_checked(&app.db, &id, &b.kind, b.text.trim(), from.as_deref(), &payload, |s| {
+        if let Some(bot) = verifier_bot.as_deref() {
+            if !is_current_mission_verifier(&s.assignments, &s.events, bot) {
+                return Err(LcError::Forbidden(json!({
+                    "error": "forbidden",
+                    "reason": "mission_gatekeeper_required",
+                    "message": "verified 只給使用者、AGM 角色，以及目前這一代最後一件交辦的驗證者",
+                })));
+            }
+        }
+        match generation {
+            Some(g) => super::workflow::ensure_same_generation(s, g),
+            None => Ok(()),
+        }
     })
     .await
     .map_err(up)?;
@@ -1417,7 +1454,7 @@ pub async fn post_deliver(
     // 任務停著（使用者按了暫停、等人回答、輪數用完…）就不交付。只有先前那次交付失敗停下的可以重試（review3 c1 M10）。
     ensure_not_paused(&id, m.paused_reason.as_deref())?;
     let from = check_relay_from(&app, &headers, b.relay_from.as_deref()).await?;
-    require_gatekeeper(&app, &headers, &id, false).await?;
+    let _gatekeeper = require_gatekeeper(&app, &headers, &id, false).await?;
     let (assignments, events) = super::workflow::inputs(&app, &id).await?;
     let f = flow::derive(&assignments, &events);
     let Some((verified, stale)) = f.latest_verified.clone() else {
@@ -2939,6 +2976,149 @@ mod tests {
         let Json(out) = post_deliver(State(app.clone()), Path(id.clone()), HeaderMap::new(), Json(deliver_from(&wt))).await.unwrap();
         assert_eq!(out["sha"], json!(b));
         assert_eq!(git(&origin, &["rev-parse", "main"]), b);
+    }
+
+    /// 上一輪的驗證者身分不能沿用到新的執行成果。
+    #[tokio::test]
+    async fn a_verifier_from_an_old_executor_generation_cannot_verify_new_work() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (_, worktree) = with_origin(&env);
+        let Json(m) = post_mission(
+            State(app.clone()),
+            Path(env.project_id.clone()),
+            Json(new_mission("stale-verifier", "push_main")),
+        )
+        .await
+        .unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let (old_executor, _) = bot_with_token(&app, &env.project_id, false).await;
+        let (verifier, verifier_headers) = bot_with_token(&app, &env.project_id, false).await;
+        let (new_executor, _) = bot_with_token(&app, &env.project_id, false).await;
+
+        let add = |bot: String, request: String, role: &'static str| {
+            let (app, id) = (app.clone(), id.clone());
+            async move {
+                let a = crate::supervisor::store::insert_assignment_linked(
+                    &app.db,
+                    None,
+                    &bot,
+                    &request,
+                    "mission work",
+                    &[],
+                    None,
+                    true,
+                    Some((&id, role)),
+                    None,
+                )
+                .await
+                .unwrap();
+                sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE id=?")
+                    .bind(&a.id)
+                    .execute(&app.db)
+                    .await
+                    .unwrap();
+            }
+        };
+        add(old_executor, "old-executor".into(), "executor").await;
+        add(verifier, "old-verifier".into(), "verifier").await;
+
+        let _ = commit_file(&worktree, "first-round.txt");
+        let _ = post_event(
+            State(app.clone()),
+            Path(id.clone()),
+            verifier_headers.clone(),
+            Json(verified(Some(&worktree), None)),
+        )
+        .await
+        .expect("the verifier assigned to the current work may verify it");
+
+        // A newly accepted executor invalidates the previous verification. The old verifier
+        // assignment remains in history, but it must not authorize a fresh verification event.
+        add(new_executor, "new-executor".into(), "executor").await;
+        let _ = commit_file(&worktree, "second-round.txt");
+        let err = post_event(
+            State(app.clone()),
+            Path(id.clone()),
+            verifier_headers,
+            Json(verified(Some(&worktree), None)),
+        )
+        .await
+        .expect_err("a verifier from before the latest executor must no longer be authorized");
+        assert!(
+            matches!(err, LcError::Forbidden(ref body) if body["reason"] == "mission_gatekeeper_required"),
+            "stale verifier should be denied, got {err:?}"
+        );
+        let verified_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND kind='verified'")
+            .bind(&id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(verified_count, 1, "the stale verifier must not restore a fresh verification");
+    }
+
+    #[tokio::test]
+    async fn a_failed_verifier_assignment_cannot_record_verification() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (_, worktree) = with_origin(&env);
+        let Json(m) = post_mission(
+            State(app.clone()),
+            Path(env.project_id.clone()),
+            Json(new_mission("failed-verifier", "push_main")),
+        )
+        .await
+        .unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let (executor, _) = bot_with_token(&app, &env.project_id, false).await;
+        let (verifier, verifier_headers) = bot_with_token(&app, &env.project_id, false).await;
+        let link = |bot: String, request: &'static str, role: &'static str| {
+            let (app, id) = (app.clone(), id.clone());
+            async move {
+                crate::supervisor::store::insert_assignment_linked(
+                    &app.db,
+                    None,
+                    &bot,
+                    request,
+                    "mission work",
+                    &[],
+                    None,
+                    true,
+                    Some((&id, role)),
+                    None,
+                )
+                .await
+                .unwrap()
+                .id
+            }
+        };
+        let _ = link(executor, "failed-executor", "executor").await;
+        let verifier_assignment = link(verifier, "failed-verifier", "verifier").await;
+        sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?")
+            .bind(&verifier_assignment)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let _ = commit_file(&worktree, "failed-verifier.txt");
+
+        let err = post_event(
+            State(app.clone()),
+            Path(id.clone()),
+            verifier_headers,
+            Json(verified(Some(&worktree), None)),
+        )
+        .await
+        .expect_err("a verifier whose assignment failed must not pass the verification gate");
+        assert!(
+            matches!(err, LcError::Forbidden(ref body) if body["reason"] == "mission_gatekeeper_required"),
+            "failed verifier should be denied, got {err:?}"
+        );
+        let verified_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND kind='verified'")
+            .bind(&id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(verified_count, 0, "a failed verifier must not write a verification event");
     }
 
     /// 推上主幹的兩道關卡（`verified`、`deliver`）：被證明身分的一般 bot（例如執行者）不能自己驗證、自己交付；
