@@ -576,6 +576,36 @@ check_eq "binary 備份複製失敗不留暫存檔" "0" "$(find "$AGM_REPO/targe
 check_eq "binary 備份失敗沒有重啟 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
 teardown
 
+# 7b. 同秒的 PREV 名稱已被上一趟佔用：必須在 stop_daemon 前發現，否則拒絕換版時會把線上 daemon 留停。
+setup 10 10
+cat > "$ROOT/bin/date" <<'STUB'
+#!/bin/bash
+if [ "$*" = +%Y%m%d-%H%M%S ]; then echo 20990101-010101; else exec /bin/date "$@"; fi
+STUB
+chmod +x "$ROOT/bin/date"
+PREV_STAMP=20990101-010101
+PREV_PATH="$AGM_REPO/target/release/agents-managerd.prev-$OLD-$PREV_STAMP"
+printf 'older previous binary\n' > "$PREV_PATH"
+STOP_MARKER="$ROOT/daemon-stopped"
+python3 -c 'import signal,sys,time
+marker = sys.argv[1]
+def stop(*_):
+    open(marker, "w").write("stopped")
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+time.sleep(120)' "$STOP_MARKER" &
+STUB_PID=$!
+export STUB_PID
+rc=$(PATH="$ROOT/bin:$PATH" run)
+check_eq "既有 PREV 時安全中止（rc=5）" "5" "$rc"
+check_file "PREV 撞名時不停止舊 daemon" no "$STOP_MARKER"
+check_eq "PREV 撞名時不啟動新 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+check_eq "舊 binary 保持原樣" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+kill -TERM "$STUB_PID" 2>/dev/null || true
+wait "$STUB_PID" 2>/dev/null || true
+unset STUB_PID
+teardown
+
 # 8. 拿不到窗口：延後，不硬換。
 setup 10 10
 export STUB_ACQUIRE_HELD=false
