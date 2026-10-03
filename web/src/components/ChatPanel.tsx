@@ -40,6 +40,7 @@ import { RewindButton, RewoundTag } from './RewindButton'
 import { TurnErrorBadge } from './TurnErrorBadge'
 import { AuthLoginAction } from './AuthLoginAction'
 import { ComposerDraftBar } from './ComposerDraftBar'
+import { SuggestionBar } from './SuggestionBar'
 import { isAuthFailure } from '../lib/authFailure'
 import { parseAskAnswers } from '../lib/askAnswers'
 import { AskAnswersCard } from './AskAnswersCard'
@@ -811,6 +812,7 @@ function Composer({
           files.clear()
         }}
       />
+      <SuggestionBar botId={botId} attachments={files.ids.length} />
       {starting ? (
         <div className="composer-queued" role="status">
           <span className="composer-queued-label">{startingSendLabel(starting, hasRun)}</span>

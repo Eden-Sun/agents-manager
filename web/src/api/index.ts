@@ -598,6 +598,25 @@ export async function sendPrompt(
   }
 }
 
+/**
+ * 一鍵送出 claude 的建議下一句（`POST /bots/:id/suggestion/accept`）：daemon 對 pane 送 Tab 把灰字收進輸入框、確認後送 Enter，
+ * 跟終端一模一樣；`suggestion` 是畫面上看到的那句，跟 daemon 現在讀到的不同就 409、一個鍵都不按。回傳跟 `sendPrompt` 同形。
+ */
+export async function acceptSuggestion(botId: string, suggestion: string, expectRunId: string | null, clientRequestId: string): Promise<PromptResult> {
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/suggestion/accept`, {
+    suggestion,
+    client_request_id: clientRequestId,
+    ...(expectRunId ? { expect_run_id: expectRunId } : {}),
+  })
+  const o = isRec(raw) ? raw : {}
+  return {
+    turn_id: str(pick(o, 'turn_id')),
+    message_id: str(pick(o, 'message_id')) || null,
+    delivery: str(pick(o, 'delivery'), 'pending') as PromptResult['delivery'],
+    send_now: null,
+  }
+}
+
 export async function sendKeys(botId: string, keys: string[], expectRunId: string | null): Promise<void> {
   await transport.request('POST', `/bots/${encodeURIComponent(botId)}/keys`, {
     keys,

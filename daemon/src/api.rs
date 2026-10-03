@@ -203,6 +203,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/attachments/{id}", get(get_attachment))
         .route("/bots/{id}/keys", post(keys_bot))
         .route("/bots/{id}/text", post(text_bot))
+        .route("/bots/{id}/suggestion/accept", post(accept_suggestion))
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/bots/{id}/pending-question", get(crate::pending_question::get_pending_question))
@@ -5528,6 +5529,28 @@ async fn text_bot(
     let m = lifecycle::send_text_recorded(&app, &id, &b.text, b.enter.unwrap_or(true), b.expect_run_id, record).await?;
     let body = if record { json!({ "message_id": m.map(|m| m.id) }) } else { json!({}) };
     Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+#[derive(Deserialize)]
+struct SuggestionAcceptIn {
+    /// 網頁看到的那句建議（`run.prompt_suggestion`）；畫面上的建議跟它不完全相同就 409，不送任何鍵。
+    suggestion: String,
+    expect_run_id: Option<String>,
+    client_request_id: Option<String>,
+}
+
+/// `POST /api/bots/:id/suggestion/accept`：對 pane 送 Tab 把 claude 的灰字建議收進輸入框，確認後送 Enter（跟終端一模一樣）。
+/// 只有使用者自己：bot 的 token 不能替人收下建議（`lifecycle::suggestion`）。
+async fn accept_suggestion(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(b): Json<SuggestionAcceptIn>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    let crid = b.client_request_id.unwrap_or_else(db::ulid);
+    let out = lifecycle::accept_prompt_suggestion(&app, &id, &b.suggestion, b.expect_run_id.as_deref(), &crid).await?;
+    Ok((StatusCode::OK, Json(out)).into_response())
 }
 
 /// issue #122／#733：撤回還在等 bot 起來或閒下來的訊息，回傳原文與附件供輸入框還原。已經送出去的撤不回來（409）。

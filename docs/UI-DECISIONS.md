@@ -505,6 +505,16 @@ bot 的終端輸入框裡留著一段沒送出的字（claude 的「Edit prompt 
 - 草稿動作遇到 `503 delivery_state_uncommitted` 時也要解鎖：`sent:false` 保留草稿列並清掉 busy，`sent:true`／`null` 則收掉草稿列，避免使用者對已送出或送達不明的字再按一次。
 - 截圖：`docs/screenshots/composer-draft/`（mock：`__amMock.composerDraft('<bot>', '<字>')`）。
 
+## claude 的「建議下一句」：輸入列上方一行，點一下 Tab＋Enter 送出（2026-10-03，使用者：「加入 claude 的建議下一步的 prompt，要一模一樣 tab + enter 送出」）
+
+claude（2.1.280 起）回合結束後在終端輸入框畫一句灰字建議，終端按 Tab 收下、Enter 送出。網頁看得到這一句、能一鍵送出，而且**送出方式跟終端一模一樣**：daemon 對 pane 送 Tab 再送 Enter（SPEC §4.4a「建議下一句」），不是把字打進去。
+
+- **位置與長相**：輸入列上方一行（`SuggestionBar`），灰色虛線框的整條按鈕：左邊小字 `Tab ⏎`（提示這等於終端的兩個鍵），右邊是建議（單行、過長截斷，完整內容在 tooltip）。不另佔一塊版面；手機同一行、整條都是點擊區（至少 36px 高），沒有第二顆按鈕。
+- **什麼時候顯示**：claude、run 在跑且 `agent_status` 是 idle、daemon 給了 `run.prompt_suggestion`，**而且**輸入框沒字、沒附件、沒有回合在跑／排隊、沒有「框裡卡著草稿」那一條。使用者開始打字就收起來（不跟他的字搶位置）。回合一開始（不再 idle）daemon 就把它清成 `null`。
+- **按下去**：按鈕禁用、文字換成「送出中…」；成功＝照一般網頁 prompt 的樣子開一個回合、對話窗出現一則使用者訊息（內容是 CLI 實際收到的原文），輸入列鎖成回合進行中。失敗＝跳通知講原因（`suggestion_gone` 建議已被用掉或終端輸入框有字、`suggestion_changed` 換成別句了、`tab_not_accepted`、`composer_unreadable`…），而且按了 Tab 的情況要明講終端變成什麼樣（「已按 Tab，框裡那句也清掉了」／「那句還留在終端的輸入框裡」）；框裡是使用者自己打的字時沿用「框裡卡著草稿」那一條讓人處理。
+- **不翻案**：不自動送、不預先填進網頁輸入框（使用者要的是終端那兩個鍵）；`CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` 的全域覆蓋拿掉（SPEC §4.4a），個別 bot 要關在 bot env 設 `false`。
+- 看畫面：`VITE_MOCK=1` 下 `__amMock.suggestion('<bot>', '<字>')`（`am-claude` 啟動後預設就有一句）。
+
 ## herdr 版本顯示在 hosts 面板（2026-09-19）
 
 升級 herdr 時使用者要能在 UI 確認結果，所以每台主機（含本機）的那一列多一行小字 `herdr 0.9.1 · protocol 22`（等寬、`text-dim`）。

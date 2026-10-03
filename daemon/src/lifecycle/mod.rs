@@ -45,6 +45,7 @@ mod slash;
 mod delivery;
 mod codex_banner;
 mod composer_draft;
+mod suggestion;
 mod busy_send;
 /// 「輸入框有沒有字」的同一支判斷，給 lifecycle 以外的地方（judge 的卡住畫面）用。
 pub(crate) use delivery::{plain_without_hints, read_styled};
@@ -178,6 +179,7 @@ pub(crate) use delivery::*;
 pub(crate) use start::*;
 pub(crate) use start_send::{prompt_starting_or_queue, prompt_starting_or_queue_with_share_token, withdraw_turn};
 pub(crate) use composer_draft::submit as submit_composer_draft;
+pub(crate) use suggestion::accept as accept_prompt_suggestion;
 pub(crate) use stop::*;
 pub(crate) use interrupt_grace::{note_user_interrupt_of, settle_interrupt_echo, FailureEvidence as InterruptFailureEvidence};
 pub(crate) use interruption::{adopt_interrupted_on_restart, adopt_turns_of_ended_runs, adopt_unbound_send_nows, settle_locked as settle_interruption, Evidence as InterruptEvidence};

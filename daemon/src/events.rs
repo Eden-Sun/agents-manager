@@ -673,6 +673,13 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         }
     }
 
+    // 建議下一句只在 idle 有意義：回合開始（或停在對話框）就忘掉；回到 idle 的前幾秒補讀（claude 另外算出來的，Stop 當下還沒畫）。
+    if status != "idle" {
+        crate::prompt_suggestion::forget(&run.id);
+    } else if prev != "idle" {
+        crate::prompt_suggestion::on_idle(app, &run);
+    }
+
     // §4.3: working -> idle arms the terminal fallback. `blocked` never does.
     if prev == "working" && status == "idle" {
         crate::lifecycle::arm_fallback(app, &run.id, &run.bot_id).await;

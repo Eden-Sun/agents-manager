@@ -888,13 +888,10 @@ pub(crate) async fn pane_env_for_fence(
     }
     env.insert("CLAUDE_CODE_CHILD_SESSION".into(), json!(""));
     env.insert("CLAUDECODE".into(), json!(""));
-    // claude 2.1.280 回合結束後在輸入框畫一句 dim 的「建議下一句」（prompt suggestion），Esc／Ctrl-U／Ctrl-C 都清不掉；
-    // 讀純文字的檢查會當成有人在打字（2026-09-23 AM-2-M 被擋成 409 composer_busy）。`--prompt-suggestions` 只收
-    // `--print`＋stream-json，互動模式帶了會直接起不來，所以用 env（2.1.280 實測 "false" 關得掉）。本機遠端同一份 pane env；
-    // 放在 identity／bot env 之前：真的想要建議句的人可以在 bot env 蓋回去。
-    if bot.kind == "claude" {
-        env.insert("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION".into(), json!("false"));
-    }
+    // claude 2.1.280 回合結束後在輸入框畫一句 dim 的「建議下一句」（prompt suggestion，Tab 收下、Enter 送出）。以前這裡用
+    // `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` 全關（2026-09-23 AM-2-M：純文字檢查把灰字當草稿、擋成 409 `composer_busy`）；
+    // 現在所有檢查都用樣式讀分得出灰字（`delivery::box_state`），而網頁要顯示它、一鍵送出（2026-10-03 使用者），
+    // 所以不再覆蓋：跟著 CLI 與帳號自己的設定走。不想要的人在 bot env 設 `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`。
 
     // Identities are per host (SPEC §16): `cc1` means that machine's config dir.
     if let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
@@ -2352,30 +2349,27 @@ mod pane_env_tests {
         }
     }
 
-    /// claude 2.1.280 的「建議下一句」本機、遠端都關掉（env，不是 `--prompt-suggestions`：那個旗標只收 `--print`）；
-    /// 別的 kind 不帶；bot env 可以蓋回去。
+    /// claude 2.1.280 的「建議下一句」不再被 AG Man 關掉（網頁要顯示、一鍵送出，2026-10-03）：本機、遠端 pane 都不帶這個 env，
+    /// 跟著 CLI 自己的設定走；bot env 設 `false` 的照樣關得掉。
     #[tokio::test]
-    async fn claude_panes_start_with_prompt_suggestions_off() {
+    async fn claude_panes_leave_prompt_suggestions_to_the_cli() {
         let env = tt::env().await;
         let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
         remote_home(&env.app, "box", "/home/remote").await;
         for host in [LOCAL_HOST, "box"] {
             let e = pane_env(&env.app, &bot, host, "run-1", "proj-alfa", None).await.unwrap();
-            assert_eq!(e["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], json!("false"), "{host}");
+            assert!(e.get("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION").is_none(), "{host}");
         }
-        let mut codex = bot.clone();
-        codex.kind = "codex".into();
-        assert!(pane_env(&env.app, &codex, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap().get("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION").is_none());
 
         sqlx::query("UPDATE bots SET env_json = ? WHERE id = ?")
-            .bind(r#"{"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION":"true"}"#)
+            .bind(r#"{"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION":"false"}"#)
             .bind(&bot.id)
             .execute(&env.app.db)
             .await
             .unwrap();
         let bot = db::bot(&env.app.db, &bot.id).await.unwrap().unwrap();
         let e = pane_env(&env.app, &bot, LOCAL_HOST, "run-1", "proj-alfa", None).await.unwrap();
-        assert_eq!(e["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], json!("true"), "使用者自己要開就尊重");
+        assert_eq!(e["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"], json!("false"), "使用者自己要關就尊重");
     }
 
     /// #92 live-SSH：CLI 只裝在遠端的 `~/.local/bin`（`remote_path` 就是為這個設的），pane 的 PATH 卻寫死成

@@ -139,6 +139,7 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
     #[cfg(not(test))]
     {
         crate::codex_update::retain_runs(&active);
+        crate::prompt_suggestion::retain_runs(&active);
         prune_process_state(app, &active).await;
     }
     for run in runs.into_iter().filter(|r| r.state == "running") {
@@ -162,6 +163,8 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         if kind == "claude" {
             // 同一份畫面順便看 `/model`、`/effort` 的確認行（沒掛 hook 的子 agent 只有這個訊號）。
             crate::claude_live::observe(app, &run, &read.text).await;
+            // 輸入框有字才多讀一次樣式畫面，看是不是灰字「建議下一句」（網頁一鍵送出用）。
+            crate::prompt_suggestion::observe_sweep(app, &run, &read.text, &client, &pane).await;
         }
         if kind == "codex" {
             // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。

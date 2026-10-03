@@ -59,6 +59,7 @@ import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
 import { prependDraft, queuedSendFor } from './queuedSend'
 import { noteQueuedTurn, startingSend, startingSendLabel } from './startingSend'
 import { asUncommittedSend, noteInFlightTurn, uncommittedSendText } from './uncommittedSend'
+import { suggestionFailureText } from './promptSuggestion'
 import { sendNowFellThrough } from './sendNowOutcome'
 import { sendNowNotice } from './sendNowCopy'
 import { missionRequests } from './missionRequests'
@@ -546,6 +547,8 @@ export interface StoreState {
   /** 409 `composer_busy` 帶回來的框內草稿，輸入列旁邊顯示到使用者處理或取消（`store/composerDraft.ts`）。 */
   composerDrafts: Record<string, ComposerDraftBlock>
   dismissComposerDraft: (botId: string) => void
+  /** 一鍵送出 claude 的建議下一句（`run.prompt_suggestion`）：daemon 對 pane 送 Tab 再送 Enter，跟終端一模一樣。`true`＝送出了；失敗已跳通知。 */
+  acceptSuggestion: (botId: string) => Promise<boolean>
   sendKeys: (botId: string, keys: string[]) => Promise<void>
   /** 多行內容要走這裡：`sendKeys` 吃鍵名，`\n` 不是鍵名（見 `store/alongside.ts`）。 */
   /** `record`：見 `api.sendText`（網頁的「補充」才帶）。 */
@@ -1724,6 +1727,54 @@ export const useStore = create<StoreState>((set, get) => {
 
   dismissComposerDraft(botId) {
     set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
+  },
+
+  async acceptSuggestion(botId) {
+    const run = get().runs[botId]
+    const suggestion = run?.prompt_suggestion
+    if (!run || !suggestion) return false
+    // 同一句建議在同一個 run 上重按（回應遺失）要拿同一個 crid，daemon 才認得是同一件事（跟 `sendPrompt` 同一套）。
+    const reqKey = `suggest:${botId}:${run.id}:${suggestion}`
+    const crid = createRequestId(reqKey, { maxAgeMs: SEND_RETRY_WINDOW_MS })
+    let sent = false
+    await guarded(
+      set,
+      get,
+      `suggest:${botId}`,
+      async () => {
+        try {
+          const res = await api.acceptSuggestion(botId, suggestion, run.id, crid)
+          settleCreateRequest(reqKey)
+          if (res.delivery === 'unknown') get().notify('error', '訊息已送出但送達狀態未知（delivery=unknown），需先放棄該回合才能再送。')
+          if (res.delivery === 'failed') {
+            get().notify('error', '訊息未送達（delivery=failed），請確認 agent 狀態後重試。')
+            void get().loadMessages(botId)
+            return
+          }
+          // daemon 只在回合真的開出去後回 ok／unverified／unknown（不會排隊）。
+          if (res.delivery !== 'queued') set((s) => noteInFlightTurn(s, botId, res.turn_id, crid, run.id, res.delivery as TurnDelivery))
+          sent = true
+        } catch (e) {
+          if (e instanceof ApiError) settleCreateRequest(reqKey)
+          // 框裡有使用者打的字／Tab 之後框裡是別的字：照既有的草稿流程留一條，讓人處理。
+          const block = draftBlockFrom(e)
+          if (block) set((s) => ({ composerDrafts: { ...s.composerDrafts, [botId]: block } }))
+          const un = asUncommittedSend(e)
+          if (un) {
+            get().notify('error', uncommittedSendText(un))
+            if (un.sent !== false && un.delivery) {
+              set((s) => noteInFlightTurn(s, botId, un.turnId, crid, run.id, un.delivery === 'unknown' ? 'unknown' : 'pending'))
+              sent = true
+            }
+            return
+          }
+          get().notify('error', suggestionFailureText(e, errText(e)))
+          // 狀態（建議換了／不見了）由 daemon 的 bot_status 推過來；補一次保險，不等下一幀。
+          void get().refreshState()
+        }
+      },
+    )
+    return sent
   },
 
   async sendKeys(botId, keys) {
