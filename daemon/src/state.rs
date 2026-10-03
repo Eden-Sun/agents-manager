@@ -565,6 +565,12 @@ impl App {
         self.seq.load(Ordering::SeqCst)
     }
 
+    /// Hold event publication at the ring boundary while a test checks DB/event ordering.
+    #[cfg(test)]
+    pub(crate) async fn hold_event_ring_for_test(&self) -> impl Drop + '_ {
+        self.ring.lock().await
+    }
+
     /// Backlog since `since` (exclusive). `None` = cannot satisfy, client must resync.
     pub async fn backlog(&self, since: u64) -> Option<Vec<WsEvent>> {
         let ring = self.ring.lock().await;

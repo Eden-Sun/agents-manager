@@ -919,16 +919,23 @@ async fn a_spawned_preview_whose_server_dies_after_running_fails_without_anyone_
     r.fake.listen(5180);
     assert!(spawn_watcher(r.e.app.clone(), bot.clone()));
     assert!(testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "running"));
-    // starting → running 之後監看還在（以前這裡就結束了）。
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // 用 watcher 實際完成的輪次同步：running 之後再輪兩次，不能以固定 sleep 猜排程已執行。
+    let running_tick = watcher_ticks(&bot);
+    assert!(
+        testing::eventually!(watcher_ticks(&bot) >= running_tick + 2),
+        "running 之後 watcher 沒有繼續輪詢"
+    );
     assert!(is_watched(&bot), "監看在 running 之後就結束了");
     let seq = r.e.app.current_seq();
+    let ring_hold = r.e.app.hold_event_ring_for_test().await;
     r.fake.unlisten(5180);
     assert!(
         testing::eventually!(row(&r.e.app.db, &bot).await.unwrap().unwrap().status == "failed"),
         "vite 掛了（pane 還在、port 不再 listen），沒人 GET 就沒人發現"
     );
-    assert!(r.e.app.current_seq() > seq, "preview_changed 有發出去");
+    assert_eq!(r.e.app.current_seq(), seq, "DB 狀態可以先於 WS 事件可見");
+    drop(ring_hold);
+    assert!(testing::eventually!(r.e.app.current_seq() > seq), "preview_changed 有發出去");
     // failed 是終點：監看結束，之後重試（POST）才會再掛一個。
     assert!(testing::eventually!(!is_watched(&bot)));
 }
