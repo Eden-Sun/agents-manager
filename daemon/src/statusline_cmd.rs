@@ -7,11 +7,15 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use std::{io, thread};
+
+use std::os::unix::process::CommandExt;
 
 const TOTAL_BUDGET: Duration = Duration::from_millis(1_900);
 const STDIN_BUDGET: Duration = Duration::from_millis(600);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const MAX_PAYLOAD: usize = 1024 * 1024;
+const MAX_STATUSLINE_OUTPUT: usize = 64 * 1024;
 
 pub struct StatuslineArgs {
     pub bot: String,
@@ -30,12 +34,12 @@ pub fn run(args: StatuslineArgs) {
 
 fn inner(args: StatuslineArgs) {
     let deadline = Instant::now() + TOTAL_BUDGET;
-    let input = read_stdin_capped(STDIN_BUDGET);
+    let (input, truncated) = read_stdin_capped(STDIN_BUDGET);
 
     // Before the POST so the text can ride along; it is the pane's own output, so no delay.
     let status_line = user_statusline_command().and_then(|cmd| relay_user_command(&cmd, &input, deadline));
 
-    let poster = slim_payload(&input, status_line.as_deref()).map(|payload| {
+    let poster = if truncated { None } else { slim_payload(&input, status_line.as_deref()) }.map(|payload| {
         let body = serde_json::json!({
             "bot_id": args.bot,
             "provider": "claude",
@@ -107,16 +111,23 @@ pub fn statusline_command_from_settings(text: &str) -> Option<String> {
     Some(cmd)
 }
 
-/// Killed at the deadline.
-fn relay_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<String> {
-    let mut child = match Command::new("/bin/sh")
+struct CommandOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+/// Run in a process group so timing out also terminates ordinary child processes started by the
+/// user's shell command. The reader always drains stdout, while retaining only a bounded prefix.
+fn run_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<CommandOutput> {
+    let mut command = Command::new("/bin/sh");
+    command
         .arg("-c")
         .arg(cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-    {
+        .process_group(0);
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "agents-managerd statusline: spawn user command: {e}");
@@ -130,46 +141,119 @@ fn relay_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<Strin
         });
     }
     let stdout = child.stdout.take();
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
+    let (tx, rx) = std::sync::mpsc::channel::<io::Result<CommandOutput>>();
+    thread::spawn(move || {
+        let mut buf = Vec::with_capacity(MAX_STATUSLINE_OUTPUT);
+        let mut truncated = false;
+        let mut chunk = [0u8; 8192];
         if let Some(mut s) = stdout {
-            let _ = s.read_to_end(&mut buf);
+            loop {
+                match s.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let keep = (MAX_STATUSLINE_OUTPUT - buf.len()).min(n);
+                        buf.extend_from_slice(&chunk[..keep]);
+                        truncated |= keep < n;
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                }
+            }
         }
-        let _ = tx.send(buf);
+        let _ = tx.send(Ok(CommandOutput {
+            bytes: buf,
+            truncated,
+        }));
     });
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    match rx.recv_timeout(remaining) {
-        Ok(buf) => {
-            let _ = child.wait();
-            {
-                let mut out = std::io::stdout().lock();
-                let _ = out.write_all(&buf);
-                let _ = out.flush();
-            }
-            let text = crate::github::strip_ansi(&String::from_utf8_lossy(&buf));
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                None
-            } else {
-                Some(text)
+    let pgid = child.id() as i32;
+    let mut child_exited = false;
+    let mut output = None;
+    loop {
+        if !child_exited {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    child_exited = true;
+                    // The shell can exit while a background descendant still holds stdout open.
+                    // Reap the whole group before waiting for the reader's EOF.
+                    kill_process_group(pgid);
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    kill_process_group(pgid);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
             }
         }
-        Err(_) => {
+        if output.is_none() {
+            match rx.try_recv() {
+                Ok(Ok(buf)) => output = Some(buf),
+                Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    kill_process_group(pgid);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if child_exited {
+            if let Some(buf) = output {
+                return Some(buf);
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            kill_process_group(pgid);
             let _ = child.kill();
             let _ = child.wait();
-            None
+            return None;
         }
+        thread::sleep(remaining.min(Duration::from_millis(5)));
     }
 }
 
-fn read_stdin_capped(budget: Duration) -> String {
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut buf = Vec::with_capacity(8192);
-        let mut handle = std::io::stdin().lock().take(MAX_PAYLOAD as u64);
-        let _ = handle.read_to_end(&mut buf);
-        let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+fn kill_process_group(pgid: i32) {
+    // SAFETY: `pgid` is the pid of the child spawned with `process_group(0)` above.
+    let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+}
+
+fn relay_user_command(cmd: &str, input: &str, deadline: Instant) -> Option<String> {
+    let output = run_user_command(cmd, input, deadline)?;
+    {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(&output.bytes);
+        let _ = out.flush();
+    }
+    if output.truncated {
+        return None;
+    }
+    let text = crate::github::strip_ansi(&String::from_utf8_lossy(&output.bytes));
+    let text = text.trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn read_capped<R: Read>(reader: R, max: usize) -> io::Result<(Vec<u8>, bool)> {
+    let mut buf = Vec::with_capacity(max.min(8192));
+    reader
+        .take((max as u64).saturating_add(1))
+        .read_to_end(&mut buf)?;
+    let truncated = buf.len() > max;
+    buf.truncate(max);
+    Ok((buf, truncated))
+}
+
+fn read_stdin_capped(budget: Duration) -> (String, bool) {
+    let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
+    thread::spawn(move || {
+        let input = read_capped(std::io::stdin().lock(), MAX_PAYLOAD)
+            .map(|(buf, truncated)| (String::from_utf8_lossy(&buf).into_owned(), truncated))
+            .unwrap_or_default();
+        let _ = tx.send(input);
     });
     rx.recv_timeout(budget).unwrap_or_default()
 }
@@ -226,5 +310,49 @@ mod tests {
             statusline_command_from_settings(r#"{"statusLine":{"command":"/a/agents-managerd statusline --bot b"}}"#),
             None
         );
+    }
+
+    #[test]
+    fn a_user_command_cannot_escape_the_deadline_after_closing_stdout() {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let started = Instant::now();
+        let _ = relay_user_command("exec 1>&-; sleep 2", "{}", deadline);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "statusline waited for a child after stdout closed"
+        );
+    }
+
+    #[test]
+    fn user_command_output_is_bounded_while_stdout_is_still_drained() {
+        let output = run_user_command(
+            "head -c 131072 /dev/zero | tr '\\000' x",
+            "{}",
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        assert_eq!(output.bytes.len(), MAX_STATUSLINE_OUTPUT);
+        assert!(output.truncated);
+    }
+
+    #[test]
+    fn oversized_stdin_is_detected_and_only_the_prefix_is_kept() {
+        let input = vec![b'x'; 32];
+        let (kept, truncated) = read_capped(input.as_slice(), 16).unwrap();
+        assert_eq!(kept, vec![b'x'; 16]);
+        assert!(truncated);
+        let (kept, truncated) = read_capped(input.as_slice(), 32).unwrap();
+        assert_eq!(kept, input);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn statusline_output_cannot_escape_its_json_field() {
+        let injected = "\"},\"provider\":\"grok\",\"payload\":{\"secret\":\"x\"}";
+        let payload = slim_payload(r#"{"session_id":"s"}"#, Some(injected)).unwrap();
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let decoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded["status_line"], injected);
+        assert!(decoded.get("provider").is_none());
     }
 }

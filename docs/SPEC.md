@@ -737,7 +737,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 - **消費者只有一個**（`hook_inbox::spawn_worker`）：收下的一方 commit 完只負責叫醒它，不自己處理，因此不必為「同一列被兩邊同時處理」另加 claim 欄位。
 - **延遲**：本機 hook 的關鍵路徑多一次 INSERT＋COMMIT（本機 SQLite，遠小於 §4.4 的 2 秒 HTTP 預算）；處理仍是背景的，送端不會被配對邏輯卡住。worker 靠 notify 叫醒，正常情況下延遲與以前的「spawn 立刻處理」同級，另有 5 秒輪詢當保險。
 - **保留**：處理完的列留 24 小時供查「這則到底進來過沒有」，之後由 worker 順手刪掉。
-- **StatusLine 不進來**：它是單槽、最新的贏的重繪訊號（遠端就是寫 `hook-status.json`，不是 spool 佇列），送端 `statusline_cmd` fire-and-forget 不看回應也不重送。每次重繪寫一列只換來大量寫入，換不到任何保證；掉一格的代價就是晚一次重繪。
+- **StatusLine 不進來**：它是單槽、最新的贏的重繪訊號（遠端就是寫 `hook-status.json`，不是 spool 佇列），送端 `statusline_cmd` fire-and-forget 不看回應也不重送。每次重繪寫一列只換來大量寫入，換不到任何保證；掉一格的代價就是晚一次重繪。本機送端讀 stdin 最多 1 MiB，超過就不回報；使用者 statusline 命令最多轉送 64 KiB，超過時仍轉送這段前綴但不把它存成 daemon 狀態。它與子行程共用 1.9 秒總預算，逾時會終止整個 process group。
 
 ### 4.4a 模型／強度／fast／身份：runtime 與設定
 
