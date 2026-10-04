@@ -364,6 +364,25 @@ check_no "不再要求手動補來源 config 段落" "切換後在目標補上" 
 check_no_ere "已移交的 hub 不碰" "$standalone_bot_id" "$ROOT/out"
 teardown
 
+echo "# preflight：來源 python3 太舊時說清楚，不等 host-state-transfer.py 的 import 失敗"
+setup
+cat > "$ROOT/bin/python-old" <<'EOF'
+#!/bin/sh
+case "$1" in
+    -c) case "$2" in *sys.version_info*) exit 1 ;; esac ;;
+    */host-state-transfer.py) echo "ImportError: No module named tomllib" >&2; exit 1 ;;
+esac
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$ROOT/bin/python-old"
+export PYTHON_BIN="$ROOT/bin/python-old"
+run "$ROOT/old-python.out" cutover
+check_eq "舊版來源 python3 在 preflight 拒絕" 1 "$(cat "$ROOT/old-python.out.rc")"
+check "指出來源需要 Python 3.11" "來源 python3 要 3.11 以上" "$ROOT/old-python.out"
+check_no "舊版來源 python3 時沒有寫 API" "POST\|PATCH" "$ROOT/src-api.log"
+unset PYTHON_BIN
+teardown
+
 # ---------------------------------------------------------------- 完整切換
 
 echo "# --execute：完整切換的順序與內容"

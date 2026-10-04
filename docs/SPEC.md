@@ -3161,7 +3161,7 @@ import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 
 
 | 步驟 | 在哪 | 做什麼 |
 |---|---|---|
-| `preflight` | 兩邊 | 兩個專案各剛好一個、都還沒設 `handed_off_to`（設了＝上一次沒做完，要 `--from` 或 rollback）；project-transfer 要有 `--with-supervisor`（#720，`--execute` 沒有就拒絕）；目標 python ≥ 3.11、有 DB／config、release binary、`daemon-start.py`、`systemd-run`。只警告：在跑的 child、目標沒裝 `herdr@.service`（#677）、目標 checkout 不含這支腳本的版本（先 pull＋build，否則 import 可能因欄位不足被拒）、Mac 各 worktree 沒推的 commit／沒提交的改動（目標看不到）、目標 config 已有這些專案 id。來源非 project config 會由 host-state 搬移，不再要求手動補段落 |
+| `preflight` | 兩邊 | 兩個專案各剛好一個、都還沒設 `handed_off_to`（設了＝上一次沒做完，要 `--from` 或 rollback）；project-transfer 要有 `--with-supervisor`（#720，`--execute` 沒有就拒絕）；來源與目標 python 都要 ≥ 3.11（來源可用 `PYTHON_BIN` 指定）、目標有 DB／config、release binary、`daemon-start.py`、`systemd-run`。只警告：在跑的 child、目標沒裝 `herdr@.service`（#677）、目標 checkout 不含這支腳本的版本（先 pull＋build，否則 import 可能因欄位不足被拒）、Mac 各 worktree 沒推的 commit／沒提交的改動（目標看不到）、目標 config 已有這些專案 id。來源非 project config 會由 host-state 搬移，不再要求手動補段落 |
 | `freeze` | Mac | `launchctl bootout` 載入中的 `com.agm.*`（換版 kick 不能在切換中途換 binary 或把 daemon 拉起來），記在 `launchd.txt` 給回滾 |
 | `record` | Mac | 快照兩個專案；**在跑名單**＝run 活著的 user bot（child 不單獨接回，由母 bot 重開；`CUTOVER_NO_RESUME` 預設排除 `agm-pxf2pv-browser-gc`——它操作 ego-browser，Linux 主機沒有桌面，§18.2e），加上協調者／巡檢原本是否在跑 |
 | `stop-bots` | Mac | 先 `POST /api/supervisor/stop`、`…/responder/stop` 把「不要它跑」寫進去（不然看門狗會把它們拉回來，§18.9），再逐顆 `POST /api/bots/{id}/stop`（child 先、parent 後），等 run 全部結束（預設 180 秒）。停機窗口從這裡起算 |
