@@ -16,7 +16,7 @@ case "$OUTBOX" in "$OUTBOX_BASE"|"$OUTBOX_BASE/"*) ;; *) reject_outbox "OUTBOX �
 # The lexical guard is not enough: a symlinked parent makes the trusted-looking path resolve
 # somewhere else. Check each component, including optional subdirectories in AM_OUTBOX_ROOT.
 for part in "$HOME/.config" "$HOME/.config/agents-manager" "$OUTBOX_BASE"; do
-  [ ! -L "$part" ] || reject_outbox "OUTBOX 路徑含 symlink（$part）"
+  [ ! -L "$part" ] || reject_outbox "OUTBOX 路徑含 symlink（${part}）"
 done
 remaining=${OUTBOX#"$OUTBOX_BASE"}
 current="$OUTBOX_BASE"
@@ -25,7 +25,7 @@ while [ -n "$remaining" ]; do
   component=${remaining%%/*}
   [ -n "$component" ] || break
   current="$current/$component"
-  [ ! -L "$current" ] || reject_outbox "OUTBOX 路徑含 symlink（$current）"
+  [ ! -L "$current" ] || reject_outbox "OUTBOX 路徑含 symlink（${current}）"
   case "$remaining" in */*) remaining=${remaining#*/} ;; *) remaining= ;; esac
 done
 # Anchor subsequent relative find paths to the opened directory. A parent swapped after `cd`
