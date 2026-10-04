@@ -7,7 +7,9 @@ import assert from 'node:assert/strict'
 import { act, click, mockApi, mount, settle, setupDom, teardownDom, typeInto, unmountAll, until } from '../testing/domHarness'
 import { sharedMock, virtualMockTime } from '../testing/sharedMock'
 import { resetStoreForTest, useStore } from '../store/store'
+import type { Bot, Project, Run } from '../api/types.ts'
 import { ChatPanel } from './ChatPanel'
+import { SuggestionBar } from './SuggestionBar'
 
 virtualMockTime()
 afterEach(unmountAll)
@@ -92,7 +94,19 @@ test('不是閒著、不是 claude 的 bot：不顯示', async () => {
 
 test('CLI 建議文字以純文字顯示，HTML 標籤不會變成 DOM', async () => {
   const payload = '<img src=x onerror=alert(1)> & <svg onload=alert(2)>'
-  await openChat('am-claude', payload)
+  resetStoreForTest()
+  useStore.setState({
+    connected: true,
+    projects: [{ id: 'p1', label: 'p', path: '/p', host: 'local' } as Project],
+    bots: [{ id: 'b1', name: 'b1', project_id: 'p1', kind: 'claude' } as Bot],
+    runs: { b1: { id: 'r1', bot_id: 'b1', state: 'running', agent_status: 'idle', prompt_suggestion: payload } as Run },
+    drafts: { 'bot:b1': '' },
+    turns: {},
+    messages: {},
+    composerDrafts: {},
+    busy: {},
+  })
+  await mount(<SuggestionBar botId="b1" attachments={0} />)
   const el = button()!
   assert.equal(el.querySelector('img, svg'), null, 'CLI 內容不得建立可執行元素')
   assert.ok(el.textContent?.includes(payload), '原字串照樣可見')
