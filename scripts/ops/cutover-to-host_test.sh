@@ -364,7 +364,7 @@ check_no "不再要求手動補來源 config 段落" "切換後在目標補上" 
 check_no_ere "已移交的 hub 不碰" "$standalone_bot_id" "$ROOT/out"
 teardown
 
-echo "# preflight：來源 python3 太舊時說清楚，不等 host-state-transfer.py 的 import 失敗"
+echo "# preflight：來源版本太舊時明確拒絕，避免模組載入時才失敗"
 setup
 cat > "$ROOT/bin/python-old" <<'EOF'
 #!/bin/sh
