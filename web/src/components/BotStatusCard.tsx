@@ -48,7 +48,7 @@ export function BotStatusCard({
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const run = useStore((s) => s.runs[botId] ?? null)
   const activity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
-  const { lamp, background, label, blockedReason } = useBotLamp(botId)
+  const { lamp, background, label, blockedReason, kids } = useBotLamp(botId)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -78,7 +78,7 @@ export function BotStatusCard({
     <div className="bot-status-card chip-legend" role="dialog" aria-label={`${bot.name} 的狀態`} onClick={(e) => e.stopPropagation()}>
       <div className="chip-legend-head">
         <span className="bot-status-name">
-          <StatusLamp lamp={lamp} background={background} />
+          <StatusLamp lamp={lamp} background={background} kids={kids} />
           <strong>{bot.name}</strong>
         </span>
         {anchor ? null : (

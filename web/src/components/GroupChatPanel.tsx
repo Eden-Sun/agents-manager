@@ -109,7 +109,7 @@ function MemberStrip({ projectId }: { projectId: string }) {
 
 /** Icon only: names are the sidebar's job; the name is one hover away. */
 function MemberChip({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
-  const { lamp, background, label } = useBotLamp(bot.id)
+  const { lamp, background, label, kids } = useBotLamp(bot.id)
   // listitem 放外層殼（display: contents），role 蓋在 button 上 AT 會唸成清單項目而非按鈕。
   return (
     <span role="listitem" className="li-wrap">
@@ -121,7 +121,7 @@ function MemberChip({ bot, onOpen }: { bot: Bot; onOpen: () => void }) {
         onClick={onOpen}
       >
         <KindIcon kind={bot.kind} />
-        <StatusLamp lamp={lamp} background={background} title={`${bot.name}：${label}`} />
+        <StatusLamp lamp={lamp} background={background} kids={kids} title={`${bot.name}：${label}`} />
       </button>
     </span>
   )

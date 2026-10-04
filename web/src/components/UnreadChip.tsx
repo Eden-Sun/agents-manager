@@ -86,9 +86,9 @@ const LAMP_SHOWN = new Set<Lamp>(['working', 'blocked', 'unknown', 'disconnected
 
 /** 側欄同一顆燈（`botLamp`）：working 會脈動、blocked 紅、斷線灰。 */
 function ChipLamp({ id }: { id: string }) {
-  const { lamp, background } = useBotLamp(id)
-  // idle 平常不畫；但回合結束後背景還有工作在跑（#714）就是值得注意的狀態，不能看起來像停了。
-  return LAMP_SHOWN.has(lamp) || background > 0 ? <StatusLamp lamp={lamp} background={background} /> : null
+  const { lamp, background, kids } = useBotLamp(id)
+  // idle 平常不畫；子 agent 還在跑（轉圈）或背景還有工作（一般綠點，#714）才畫，不能看起來像停了。
+  return LAMP_SHOWN.has(lamp) || background > 0 || kids > 0 ? <StatusLamp lamp={lamp} background={background} kids={kids} /> : null
 }
 
 /** 有滑鼠可以 hover 的裝置（手機的 tap 也會觸發 mouseenter，不能拿來開浮卡）。 */
