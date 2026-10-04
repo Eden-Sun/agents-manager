@@ -129,7 +129,7 @@ macOS launchd 的 `daemon-update` PATH 也要保留 `~/.local/bin`，因為 `dae
 | --- | --- | --- |
 | `AGM_DIR` | `~/.config/agents-manager/supervisor/AGM` | 總管 cwd（`bin/agm`、log、state 都在這） |
 | `AGM_REPO` | `~/project/agents-manager` | 正式 daemon 跑的那份（`daemon-swap.sh` 換它的 `target/release`）；也是專用 checkout 的 origin URL 來源 |
-| `AGM_DEPLOY_CHECKOUT` | `~/.cache/agents-manager/deploy-checkout` | 專用、乾淨的 checkout（第一次自動 `git clone`）。只有這支腳本動它，不碰主樹與別人的 worktree；`target/` 與 `node_modules` 留著讓建置增量 |
+| `AGM_DEPLOY_CHECKOUT` | `~/.cache/agents-manager/deploy-checkout` | 專用、乾淨的 checkout（第一次先 clone 到同目錄暫存位置，成功後才移到正式路徑）。每輪使用前都核對 origin 等於正式 repo 的 origin；路徑已存在但不是 clone 或來源不符時保留現況並停止。只有這支腳本動它，不碰主樹與別人的 worktree；`target/` 與 `node_modules` 留著讓建置增量 |
 | `AGM_GH_REPO` | `Eden-Sun/agents-manager` | 問 commit status 的 repo |
 | `AGM_CI_CONTEXT` | `ubuntu-ci` | 看哪一條 status |
 | `AGM_CI_LOOKBACK` | `30` | 沿 first-parent 往回最多看幾顆（`ubuntu-ci` 只跑最新 HEAD、會跳過中間的 sha） |
