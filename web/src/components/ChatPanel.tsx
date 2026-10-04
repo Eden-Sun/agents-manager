@@ -65,6 +65,7 @@ import { PrimaryStar } from './PrimaryStar'
 import { ShareLinkButton } from './ShareLinkButton'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
+import { ComposerCostHint } from './ComposerCostHint'
 import { StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
 import { SafeMarkdown } from './SafeMarkdown'
@@ -909,6 +910,7 @@ function Composer({
           ) : null}
         </div>
       ) : null}
+      <ComposerCostHint botId={botId} />
       <AttachTray items={files.items} onRemove={files.remove} onRetry={files.retry} disabled={sending} />
       <div className="composer-box">
         <AttachPicker onFiles={files.add} disabled={state.disabled || sending} />

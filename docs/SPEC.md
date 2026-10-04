@@ -2341,6 +2341,15 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
 - **網頁**（`lib/cacheClock.ts`、`cacheClock.css`）：只畫在主力晶片上（桌機主力組、手機主力格），每 15 秒重算。整顆晶片一層淡的等級色調，剩餘／TTL 那段（由左往右）再疊深一層，
   色調：剩 > 15 分綠、5–15 分黃、< 5 分紅；到期＝已涼，回到原本的底色。tooltip 加一行「快取約 N 分後到期（上次活動 HH:MM）」／「快取已涼（上次活動 HH:MM）」；
   回合進行中滿條。grok、沒有紀錄的不畫。狀態不存 localStorage。
+- **輸入框上方的提示（`prompt_cache.rs`、`ComposerCostHint`；使用者 2026-10-04）**：送出之前就讓人看到代價。只做 claude 與 codex，grok 完全不顯示。
+  run JSON 另帶 `prompt_cache`（API.md）：claude 從 `runs.status_json` 的 statusLine `prompt_cache`（≥ 2.1.289）與 `context_window` 挑精簡欄位（**不外送原文**，
+  `source:"statusline"`）；沒有這塊（舊版 claude）為 `null`。codex 沒有 statusLine，巡邏（`update_watch::sweep_runs`，30 秒）對每顆本機 codex run 讀它的
+  rollout（`$CODEX_HOME/sessions/…/rollout-*-<native_session_id>.jsonl`，沿用 `codex_session_log`）**新增的整行**——記路徑與位移，不整檔重讀；第一次只讀檔尾 256 KB——
+  取最後一筆 `event_msg`／`token_count` 的 `info`：`last_token_usage.input_tokens`＝這次請求讀進去的整段 context（也是 `recache_tokens_if_cold` 的近似）、
+  `cached_input_tokens`÷`input_tokens`＝命中率、`input_tokens`÷`model_context_window`＝context %；到期＝該事件 `timestamp`＋`cache_ttl_secs`（推算，
+  `source:"rollout_estimate"`，網頁字面加「約」）。讀數變了才推 `bot_status`；換 session 作廢舊位移與讀數，run 結束由巡邏清掉。
+  網頁：有 `prompt_cache` 就一律用它判熱冷（`warm`＋`expires_at`，閒置時 `warm:true` 也以時間為準），冷了寫「送出這則會重寫約 N K」；
+  沒有（舊版 claude、codex 還沒讀到 rollout、舊 daemon）才退回 `last_api_at`＋`cache_ttl_secs` 推算。回合進行中不顯示過期。只提示，不擋送出。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
 

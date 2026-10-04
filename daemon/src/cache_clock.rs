@@ -106,6 +106,7 @@ pub fn annotate(run_json: &mut Value, kind: &str, last_turn: Option<&LastTurn>) 
     let at = derive(kind, status.as_deref(), since.as_deref(), last_turn, line.as_deref(), &db::now());
     o.insert("last_api_at".into(), at.into());
     o.insert("cache_ttl_secs".into(), ttl_secs(kind).into());
+    crate::prompt_cache::annotate(run_json, kind, chrono::Utc::now().timestamp_millis());
 }
 
 const LAST_TURN_SQL: &str = "SELECT c.bot_id, t.status, t.completed_at FROM conversations c

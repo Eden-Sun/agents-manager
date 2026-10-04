@@ -8,6 +8,7 @@ mod ask_answers;
 mod blocked_reason;
 mod bot_input;
 mod cache_clock;
+mod prompt_cache;
 mod bot_trash;
 mod deleted_bots;
 mod build_info;

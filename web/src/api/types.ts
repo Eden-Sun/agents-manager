@@ -363,6 +363,8 @@ export interface Run {
   last_api_at?: string | null
   /** 這種 kind 的 prompt cache 存活秒數（claude／codex 3600）；`null`＝不知道（grok），不畫倒數。 */
   cache_ttl_secs?: number | null
+  /** claude／codex 的快取與 context 精簡欄位；沒有資料（舊版 claude、grok、舊 daemon）為 null／未帶。 */
+  prompt_cache?: PromptCacheInfo | null
 }
 
 /** `POST /api/bots/restart-idle`，SPEC §6.9。 */
@@ -423,6 +425,26 @@ export interface StatusInfo {
   cwd: string | null
   version: string | null
   session_name: string | null
+  /** claude ≥ 2.1.289 statusLine 的 `prompt_cache`（精簡版）；舊版 claude／沒有這塊為 undefined。 */
+  prompt_cache?: PromptCacheInfo | null
+}
+
+/**
+ * 輸入框「送出代價」提示用的精簡欄位。daemon 的 `run.prompt_cache`（claude 取自 statusLine、codex 由 rollout 推算，
+ * `source` 分辨）；舊 daemon 沒有時，claude 退用 statusLine 原 JSON 裡的 `prompt_cache`（`source` 為 null）。
+ * `expires_at` 是 epoch 秒；`recache_tokens_if_cold`＝冷了要重寫多少 token（codex 用最近一次 input_tokens 近似）。
+ */
+export interface PromptCacheInfo {
+  warm: boolean | null
+  expires_at: number | null
+  ttl_secs: number | null
+  recache_tokens_if_cold: number | null
+  caching_observed: boolean | null
+  source: 'statusline' | 'rollout_estimate' | null
+  hit_ratio: number | null
+  context_used_pct: number | null
+  context_used_tokens: number | null
+  context_size: number | null
 }
 
 export interface Turn {
