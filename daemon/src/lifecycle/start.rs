@@ -771,13 +771,58 @@ pub(crate) async fn context_lost(app: &Arc<App>, bot: &db::Bot, why: &str) -> Lc
         &conv,
         None,
         "system",
-        &format!("⚠️ 接不回原本的對話（{reason}），已經開了新的對話——前面的脈絡沒有帶過來。"),
+        &format!("{CONTEXT_LOST_PREFIX}（{reason}），已經開了新的對話——前面的脈絡沒有帶過來。"),
         "system",
         false,
         None,
     )
     .await;
     Ok(())
+}
+
+/// [`context_lost`] 那則通知的開頭；[`retire_context_lost`] 靠它認出要撤的訊息。
+pub(crate) const CONTEXT_LOST_PREFIX: &str = "⚠️ 接不回原本的對話";
+
+/// 之後真的接回了 `session_id` 那段對話（resume 驗證為 `verified`）：那段對話中斷後插的「接不回」通知已經不是事實，撤掉
+/// （2026-10-04 使用者：「接回之後不需要再提示原本的失敗」——m4p 十顆 bot 修好後接回，聊天室還掛著前一晚的警告）。
+/// 範圍是「最後一個用過這段 session 的**其他** run 結束之後」插的通知；從沒用過就不動。刪了就發 `resync`，前端重抓。
+pub(crate) async fn retire_context_lost(app: &Arc<App>, bot_id: &str, current_run: &str, session_id: &str) {
+    let ended: Option<String> = match sqlx::query_scalar(
+        "SELECT ended_at FROM runs WHERE bot_id = ? AND id <> ? AND native_session_id = ? AND ended_at IS NOT NULL
+          ORDER BY started_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(bot_id)
+    .bind(current_run)
+    .bind(session_id)
+    .fetch_optional(&app.db)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(bot = %bot_id, error = %e, "could not look up the resumed session's last run");
+            return;
+        }
+    };
+    let Some(ended) = ended else { return };
+    let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return };
+    let deleted = sqlx::query(
+        "DELETE FROM messages WHERE conversation_id = ? AND role = 'system' AND source = 'system' AND created_at >= ?
+            AND substr(content, 1, length(?)) = ?",
+    )
+    .bind(&conv)
+    .bind(&ended)
+    .bind(CONTEXT_LOST_PREFIX)
+    .bind(CONTEXT_LOST_PREFIX)
+    .execute(&app.db)
+    .await;
+    match deleted {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::info!(bot = %bot_id, session = %session_id, n = r.rows_affected(), "resumed the lost conversation; retired its context-lost notes");
+            app.emit("resync", json!({"reason": "context_lost_retired", "bot_id": bot_id})).await;
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(bot = %bot_id, error = %e, "could not retire context-lost notes"),
+    }
 }
 
 /// A bot pane's start dir: `bots.cwd` (adopted child) or the project path.
@@ -3998,4 +4043,53 @@ pub(crate) async fn resume_restart_locked(app: &Arc<App>, bot_id: &str, opts: St
         schedule_flush_queued(app, bot_id);
     }
     started
+}
+
+/// 2026-10-04 使用者：「接回之後不需要再提示原本的失敗」。
+#[cfg(test)]
+mod retire_context_lost_tests {
+    use super::*;
+
+    async fn notes(app: &Arc<App>, conv: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id = ? AND role = 'system' ORDER BY created_at, rowid")
+            .bind(conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn resuming_the_lost_session_retires_only_the_notes_written_after_it_ended() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        // 很久以前另一次失敗（別段 session）：不能被這次接回撤掉。
+        let _ = insert_message(&app, &conv, None, "system", "⚠️ 接不回原本的對話（舊的），已經開了新的對話——前面的脈絡沒有帶過來。", "system", false, None).await;
+        sqlx::query("UPDATE messages SET created_at = '2026-10-01T00:00:00.000Z' WHERE conversation_id = ?").bind(&conv).execute(&app.db).await.unwrap();
+        // 用過 S 的那個 run 在 10-04 00:19:32 結束，緊接著插了失敗通知與一則一般系統訊息。
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at, ended_at, native_session_id)
+             VALUES ('run-old', ?, 'exited', 'idle', 'ws', 'p', 'a', 't', '2026-10-03T02:27:05.470Z', '2026-10-04T00:19:32.795Z', 'S')",
+        )
+        .bind(&bot.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        context_lost(&app, &bot, "transcript_missing").await.unwrap();
+        let _ = insert_message(&app, &conv, None, "system", "Claude Code 已更新到 2.1.290", "system", false, None).await;
+        let current = crate::testing::fake_run(&app, &bot.id).await;
+        assert_eq!(notes(&app, &conv).await.len(), 3);
+
+        // 接回別段 session：不動。
+        retire_context_lost(&app, &bot.id, &current, "OTHER").await;
+        assert_eq!(notes(&app, &conv).await.len(), 3);
+
+        // 接回 S：只撤 S 結束之後那則「接不回」。
+        retire_context_lost(&app, &bot.id, &current, "S").await;
+        let left = notes(&app, &conv).await;
+        assert_eq!(left.len(), 2, "{left:?}");
+        assert!(left[0].contains("（舊的）"), "更早、別段的失敗通知留著");
+        assert!(left[1].contains("已更新"), "不是失敗通知的系統訊息不動");
+    }
 }
