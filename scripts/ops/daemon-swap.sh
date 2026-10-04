@@ -95,14 +95,18 @@ service_capability() {
     [ -n "${SWAP_CAP_CMD:-}" ] && { "$SWAP_CAP_CMD"; return; }
     "$PYTHON" - "$PORT" <<'PY'
 import json, sys, urllib.error, urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+        return None
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 base = f"http://127.0.0.1:{sys.argv[1]}"
 try:
-    with urllib.request.urlopen(base + "/api/session", timeout=3) as response:
+    with opener.open(base + "/api/session", timeout=3) as response:
         token = json.load(response).get("token", "")
     if not token:
         raise RuntimeError("session response has no UI token")
     request = urllib.request.Request(base + "/api/capabilities", headers={"X-AM-Token": token})
-    with urllib.request.urlopen(request, timeout=3) as response:
+    with opener.open(request, timeout=3) as response:
         capabilities = json.load(response).get("capabilities", [])
     if "service_principals" not in capabilities:
         print("bootstrap")
@@ -224,6 +228,10 @@ agm_probe() { # agm_probe <bot id> → "<http code> <body>"
     [ -n "${SWAP_PROBE_CMD:-}" ] && { "$SWAP_PROBE_CMD" "$1"; return; }
     "$PYTHON" - "$PORT" "$SERVICE_TOKEN_FILE" "$1" "$SERVICE_MODE" <<'PY'
 import json, os, stat, sys, urllib.error, urllib.parse, urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+        return None
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 port, token_path, bot, mode = sys.argv[1:]
 base = f"http://127.0.0.1:{port}"
 if mode == "service":
@@ -246,14 +254,14 @@ if mode == "service":
     data = b""
 else:
     # 舊 daemon 不認 service token：只在明確 --approval 的 bootstrap 使用 User 身分自測。
-    with urllib.request.urlopen(base + "/api/session") as response:
+    with opener.open(base + "/api/session") as response:
         tok = json.load(response)["token"]
     headers = {"X-AM-Token": tok, "Content-Type": "application/json"}
     url = base + f"/api/bots/{urllib.parse.quote(bot, safe='')}/prompt"
     data = json.dumps({"text": "[build 自測，回 ok 即可，不要做任何事]"}).encode("utf-8")
 req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 try:
-    r = urllib.request.urlopen(req)
+    r = opener.open(req)
     print(r.status, r.read().decode("utf-8", "replace")[:200])
 except urllib.error.HTTPError as e:
     print(e.code, e.read().decode("utf-8", "replace")[:200])
@@ -273,6 +281,10 @@ restart_window() {
     [ -n "${SWAP_WINDOW_CMD:-}" ] && { "$SWAP_WINDOW_CMD" "$OWNER" "$SHA"; return; }
     "$PYTHON" - "$PORT" "$SERVICE_TOKEN_FILE" "$OWNER" "$SHA" <<'PY'
 import json, os, stat, sys, urllib.error, urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+        return None
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 port, token_path, owner, sha = sys.argv[1:]
 try:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -288,7 +300,7 @@ try:
     body = json.dumps({"owner": owner, "commit": sha, "ttl_secs": 900}).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{port}/api/services/daemon-swap/restart-window", data=body, headers=headers, method="POST")
     try:
-        print(urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "replace"))
+        print(opener.open(req, timeout=30).read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as e:
         print(e.read().decode("utf-8", "replace"))
 except Exception as e:
