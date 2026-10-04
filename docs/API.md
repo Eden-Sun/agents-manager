@@ -352,7 +352,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/relay/spawn/finish` | Bot per-bot `X-AM-Bot-Token`；body 身分／permit 需和驗證憑證一致 |
 | PUT | `/api/build/remote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/drafts/{key}` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
-| PUT | `/api/identities/{name}/disabled` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| PUT | `/api/identities/{name}/disabled` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | PUT | `/api/judge/settings` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | PUT | `/api/supervisor/handoff` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
 | PUT | `/api/supervisor/persona` | User 或 AGM 角色 Bot；一般 Bot 403 `role_required` |
