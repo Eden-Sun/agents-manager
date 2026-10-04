@@ -936,6 +936,47 @@ exit 1
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    /// A listing also performs the remote TTL sweep, so a parent symlink must be rejected before
+    /// `find` can remove a stale file outside the trusted outbox tree.
+    #[cfg(unix)]
+    #[test]
+    fn macos_local_remote_listing_does_not_gc_through_a_symlinked_outbox_parent() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let base = sandbox("gc-symlink-parent");
+        let home = base.join("home");
+        let real_config = base.join("external-config");
+        let outbox = real_config.join("agents-manager/outbox/01BOT");
+        std::fs::create_dir_all(&outbox).unwrap();
+        let stale = outbox.join("stale.txt");
+        std::fs::write(&stale, b"keep outside").unwrap();
+        std::process::Command::new("touch").args(["-t", "200001010000"]).arg(&stale).status().unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        symlink(&real_config, home.join(".config")).unwrap();
+
+        let linked_outbox = home.join(".config/agents-manager/outbox/01BOT");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let find = bin.join("find");
+        std::fs::write(
+            &find,
+            "#!/bin/sh\nexec /usr/bin/find \"$1\" -maxdepth 1 -type f -mmin +0 -exec rm -f {} +\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&find, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(list_script_race_with_lsof(&linked_outbox.to_string_lossy(), "", "", "/usr/sbin/lsof"))
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stale.exists(), "the remote listing GC must not delete through a parent symlink");
+        assert!(stdout.starts_with("AM_OUTBOX_UNTRUSTED"), "symlinked parent must fail closed: {stdout}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     /// #768：檢查之後、讀檔之前，bot 把檔案換成指到界線外的符號連結。以前 `base64 < "$F"` 照著連結讀出來。
     #[test]
     fn macos_local_a_symlink_swapped_in_after_the_check_is_never_served() {
