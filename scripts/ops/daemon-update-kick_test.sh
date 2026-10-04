@@ -57,9 +57,10 @@ setup() {
   # 不讓測試碰真實 ~/.cargo/bin/cargo；用 PATH 上的 stub 模擬 build-slot shim，另放一顆
   # 只供舊式絕對路徑呼叫的假 cargo，這樣可辨認腳本是否繞過 PATH。
   export HOME="$ROOT/home"
+  SHIM_DIR="$HOME/.config/agents-manager/bots/test-bot/bin"
   unset CARGO_BIN
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" AGM_DEPLOY_CHECKOUT="$ROOT/deploy"
-  mkdir -p "$AGM_DIR/bin" "$ROOT/bin" "$ROOT/ci" "$HOME/.cargo/bin"
+  mkdir -p "$AGM_DIR/bin" "$ROOT/bin" "$ROOT/ci" "$HOME/.cargo/bin" "$SHIM_DIR"
   "$GITBIN" init -q --bare -b main "$ORIGIN"
   "$GITBIN" clone -q "$ORIGIN" "$WORK" 2>/dev/null
   "$GITBIN" -C "$WORK" config user.email t@t; "$GITBIN" -C "$WORK" config user.name t
@@ -106,8 +107,9 @@ echo "bun $* @ $(pwd)" >> "$AGM_DIR/build.log"
 [ -z "$STUB_BUN_SLEEP" ] || sleep "$STUB_BUN_SLEEP"
 exit 0
 STUB
-  cat > "$ROOT/bin/cargo" <<'STUB'
+  cat > "$SHIM_DIR/cargo" <<'STUB'
 #!/bin/bash
+# AM_SHIM_MARKER: isolated cargo build-slot shim
 if [ "${AM_REAL_CARGO+x}" = x ]; then am_real_cargo=set; else am_real_cargo=unset; fi
 echo "cargo $* @ $(pwd) AM_REAL_CARGO_STATE=$am_real_cargo PATH_HEAD=${PATH%%:*} CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-unset} CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-unset}" >> "$AGM_DIR/build.log"
 case " $* " in *" build "*)
@@ -117,15 +119,25 @@ git rev-parse HEAD > target/release/agents-managerd
 chmod +x target/release/agents-managerd
 ;; esac
 STUB
-  ln -s "$ROOT/bin/cargo" "$HOME/.cargo/bin/cargo"
+  cat > "$HOME/.cargo/bin/cargo" <<'RAW'
+#!/bin/bash
+if [ "${AM_REAL_CARGO+x}" = x ]; then am_real_cargo=set; else am_real_cargo=unset; fi
+echo "cargo $* @ $(pwd) AM_REAL_CARGO_STATE=$am_real_cargo PATH_HEAD=${PATH%%:*} CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-unset} CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-unset}" >> "$AGM_DIR/build.log"
+case " $* " in *" build "*)
+  [ -z "$STUB_CARGO_FAIL" ] || exit 1
+  mkdir -p target/release
+  git rev-parse HEAD > target/release/agents-managerd
+  chmod +x target/release/agents-managerd
+;; esac
+RAW
   cat > "$ROOT/bin/swap.sh" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/swap.log"
 [ "$STUB_SWAP_RC" != 0 ] || echo "$(echo "$2" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
 exit "$STUB_SWAP_RC"
 STUB
-  chmod +x "$AGM_DIR/bin/agm" "$ROOT/bin/"*
-  export PATH="$ROOT/bin:$PATH"
+  chmod +x "$AGM_DIR/bin/agm" "$ROOT/bin/"* "$SHIM_DIR/cargo" "$HOME/.cargo/bin/cargo"
+  export PATH="$HOME/.cargo/bin:$PATH"
   : > "$AGM_DIR/agm.log"; : > "$AGM_DIR/gh.log"; : > "$AGM_DIR/build.log"; : > "$AGM_DIR/swap.log"; : > "$AGM_DIR/alerts.log"
   : > "$AGM_DIR/daemon-update.log"
 }
@@ -154,7 +166,7 @@ check_eq "rc=0" "0" "$rc"
 check "問的是 ubuntu-ci 的 commit status" "repos/Eden-Sun/agents-manager/commits/$C3/status" "$AGM_DIR/gh.log"
 check "web 建置在專用 checkout" "bun run build @ $ROOT/deploy/web" "$AGM_DIR/build.log"
 check "cargo 建置在專用 checkout" "cargo build --locked --release -p agents-managerd @ $ROOT/deploy" "$AGM_DIR/build.log"
-check "cargo build 經 PATH 上的 shim" "PATH_HEAD=$ROOT/bin" "$AGM_DIR/build.log"
+check "cargo build 將 build-slot shim 放到 PATH 首位" "PATH_HEAD=$SHIM_DIR" "$AGM_DIR/build.log"
 check_no "cargo 不設定 AM_REAL_CARGO 繞過 shim" "AM_REAL_CARGO_STATE=set" "$AGM_DIR/build.log"
 check "cargo build 使用 --locked" "cargo build --locked --release -p agents-managerd" "$AGM_DIR/build.log"
 check "先 clean daemon crate 讓新 web/dist 重嵌" "cargo clean -p agents-managerd --release" "$AGM_DIR/build.log"
@@ -174,6 +186,16 @@ check "換版指向專用 checkout" "--checkout $ROOT/deploy" "$AGM_DIR/swap.log
 check_no "不帶核准單" "approval" "$AGM_DIR/swap.log"
 check_no "不申請核准、不派工" "approval\|assign\|lease" "$AGM_DIR/agm.log"
 check_eq "主樹 HEAD 沒被動" "$C3" "$("$GITBIN" -C "$AGM_REPO" rev-parse HEAD)"
+teardown
+
+# 排程 PATH 雖有 ~/.cargo/bin，卻沒有任何 bot cargo shim 時 fail closed，不退回真 cargo。
+setup
+ci "$C3" success
+rm -f "$SHIM_DIR/cargo"
+rc=$(run)
+check_eq "缺 cargo shim 不建置" "0" "$(count 'cargo build --locked' "$AGM_DIR/build.log")"
+check_eq "缺 cargo shim 不換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+check "缺 cargo shim 推明確警示" "cargo_shim_missing" "$AGM_DIR/alerts.log"
 teardown
 
 # 3. HEAD 還在跑（pending）：往前一顆找到綠燈的那顆；中間 docs-only 不會被當成候選。
