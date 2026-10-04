@@ -3365,14 +3365,14 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 | 事件 | 結果 |
 |---|---|
 | `SessionStart`／`PreInvocation` | Identity：`conversationId`→`runs.native_session_id`、`transcriptPath`→`runs.transcript_path`（只收 `~/.gemini/antigravity-cli/brain/` 底下的 `.jsonl`，`transcript_read::trusted_roots`）。對話是**第一則 prompt 才建立**，`SessionStart` 沒有文件、不一定來，所以第一個 `PreInvocation` 補身分 |
-| `state`（statusLine） | StatusLine（單槽、最新的贏、不進收件匣）：只在有 `conversation_id` 時補身分（對話建立前路徑是占位的，不記）；`agent_state`／`tool_confirmation_pending`／`quota` 第二階段才接 |
+| `state`（statusLine） | StatusLine（單槽、最新的贏、不進收件匣）：只在有 `conversation_id` 時補 `native_session_id`；**不記它的 `transcript_path`**（真機給的是 `~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl` 摘要版、另一個目錄，完整的 `transcript_full.jsonl` 只有 hook 的 `transcriptPath` 帶得出來）；`agent_state`／`tool_confirmation_pending`／`quota` 第二階段才接 |
 | `Stop` 有 `error` 文字，或 `terminationReason == "ERROR"` | TurnFailed：`error` 文字進 `classify_failure`（429／quota→額度、auth／API key→帳號、其他→API；`Interrupted` 不算失敗） |
 | `Stop` 且 `fullyIdle == false` | Ignore（背景工作還在跑，回合還沒真的結束） |
 | 其他 `Stop` | TurnComplete：`assistant`＝`lastAssistantMessage`、`user`＝`lastUserMessage`；**不給 `turn_id`**（`executionNum` 跨回合是否唯一沒驗過，當去重鑰匙會吃掉之後的回合） |
 | 其他 | Ignore。`terminationReason` 的值域不可假設（官方 `model_stop`／`max_steps_exceeded`／`error`，實測 `ERROR`，第三方 `NO_TOOL_CALL`），只認 `ERROR` |
 
 ### 12a.4 畫面判讀：會停下來等人的畫面一律 blocked、不送字、不按鍵
-`agy_screen::blocking_dialog`（只看畫面最底 24 行）：登入（`Select login method:`／未登入歡迎頁）、色彩頁（`Choose your color scheme:`）、條款頁（`Terms of Service & Data Use`——**預設已勾選「允許 Google 收集並使用我的 Interactions 資料」，一個 Enter 就切換同意與否**）、信任框（`Do you trust the contents of this project?` ＋選項）、工具權限框（`Run this command?`／`Allow access to this URL?`／`Allow calling this tool?`，文案取自 CHANGELOG，**未實測**）。認法：標題整行吻合（前面最多一個圖示）；而且**輸入列（單獨一個 `>`）還在就不算框**——agy 在回覆裡抄這些字時畫面上沒有框。
+`agy_screen::blocking_dialog`（只看畫面最底 24 行）：登入（`Select login method:`／未登入歡迎頁）、色彩頁（`Choose your color scheme:`）、條款頁（`Terms of Service & Data Use`——**預設已勾選「允許 Google 收集並使用我的 Interactions 資料」，一個 Enter 就切換同意與否**）、信任框（`Do you trust the contents of this project?` ＋選項）、工具權限框（`Requesting permission for:` … `Run this command?` 加 `> 1. Yes, run command` 等四個選項——**真機 1.2.16 實測**；`Allow access to this URL?`／`Allow calling this tool?` 取自 CHANGELOG，未見過）。真機上 herdr 自己也把這個框判成 `blocked`；daemon 的補標只負責 herdr 判 idle 的那些（登入框等）。認法：標題整行吻合（前面最多一個圖示）；而且**輸入列（單獨一個 `>`）還在就不算框**——agy 在回覆裡抄這些字時畫面上沒有框。
 - 送 prompt 前（`prompt::pane_ready_for_prompt`、`agent.prompt` 路徑）：登入→409 `needs_login`，其餘→409 `dialog_open`，各插一則 system 說明；一個字都不送。
 - herdr 判 `idle` 時（`session_paused` 的巡邏，原本只看 claude）：補標 `blocked`、`blocked_reason.code = agy_dialog`（`text` 說明是哪一種），框關掉就還原；一個鍵都不按。
 - 輸入框判讀（`delivery::box_state("agy")`）：頂部橫幅、一條分隔線、`>` 輸入框、分隔線——跟 claude 現行的框同形狀；樣式讀時 dim 的佔位字算空，純文字讀不放寬。
@@ -3382,7 +3382,7 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 
 ### 12a.6 送達與回覆
 - **送達證據**：本機、run 已有 `native_session_id` 與存在的 `transcript_path` 時用 `Proof::Transcript { LogFormat::Agy }`——`transcript_full.jsonl` 裡基準位移之後出現一筆 `type:"USER_INPUT"`、`<USER_REQUEST>` 標籤內原文（頭尾空白不算差異）與這句一字不差。**第一則 prompt 沒有 transcript 可證**（對話是它建立的）→ `Unverified`（照打照送、標「請人工確認」、不重送），之後每一則都有。agy 自己有訊息佇列（`pending_input_count`），忙碌中送字可能被收進它的佇列——第二階段核對。
-- **回覆**：`Stop` 的 `lastAssistantMessage`（§12a.2）。模型回覆的 transcript 步驟型別**未實測**（需登入後取樣，附錄 G.5）：目前收 `type` 含 `PLANNER_RESPONSE` 或 `NOTIFY_USER` 的步驟、內容是字串或含 `response`／`text`／`message`／`content`／`notification` 欄位的物件，取 `USER_INPUT` 之後最後一段；認不得就略過，回合照收但沒有回覆文字（log 看 `hook.log`）。
+- **回覆**：`Stop` 的 `lastAssistantMessage`（§12a.2）。模型回覆是 transcript 裡 `source:"MODEL"`、`type:"PLANNER_RESPONSE"` 的步驟（真機實測，內容是字串；`NOTIFY_USER` 沒見過但一併收），取 `USER_INPUT` 之後最後一段；認不得就略過，回合照收但沒有回覆文字（log 看 `hook.log`）。真機實測（2026-10-04，agm-host，登入的 Google AI Plus 帳號，隔離 daemon＋獨立 herdr session）：PONG 一問一答 `delivery:"unverified"`（第一則）→ 同一個 run 的第二則 `delivery_verified=1`（`LogFormat::Agy` 證據）；要跑 `ls` 時權限框 → run `blocked`、`blocked_reason.code=agy_dialog`、再送字 409 `agent is blocked`，回答後回合照收。
 - `cache_clock::ttl_secs("agy") = None`（TUI 路徑沒有 cache 讀數，網頁不畫倒數）。
 
 ### 12a.7 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
@@ -5057,10 +5057,10 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 `settings.json` 的 `statusLine`／`title`＝`{"type":"command","command":…}`（可選 `stack_with_default`、`enabled`、`padding`）：agent 狀態改變時 TUI 執行該指令、stdin 給 JSON（`agent_state`、`tool_confirmation_pending`、`pending_input_count`、`conversation_id`、`transcript_path`、model、context 用量，登入後有 `quota`、`plan_tier`、`email`）。
 
 ### G.5 對話紀錄
-`brain/<id>/.system_generated/logs/transcript_full.jsonl`：使用者輸入那一行 `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":…,"content":"<USER_REQUEST>\n…\n</USER_REQUEST>\n<ADDITIONAL_METADATA>…"}`。模型回覆與工具步驟的 `type`／欄位**未實測**（binary 內有 `PLANNER_RESPONSE`、`RUN_COMMAND`、`NOTIFY_USER` 等 `CORTEX_STEP_TYPE_*`）。不要讀 `.db`。
+`brain/<id>/.system_generated/logs/transcript_full.jsonl`：使用者輸入那一行 `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":…,"content":"<USER_REQUEST>\n…\n</USER_REQUEST>\n<ADDITIONAL_METADATA>…"}`。模型回覆那一行：`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":…,"input_tokens":11824,"cache_read_tokens":0,"output_tokens":27,"content":"PONG"}`（登入後實測）；工具步驟的型別沒收（binary 內有 `RUN_COMMAND`、`NOTIFY_USER` 等 `CORTEX_STEP_TYPE_*`）。statusLine 的 `transcript_path` 是 `~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl`（摘要版、**另一個目錄**）。不要讀 `.db`。
 
 ### G.6 TUI 與偵測
-首次啟動序列（herdr 每一頁都判 `idle`）：登入選單 → 色彩頁 → 條款頁（預設已勾選）→ 信任框；選 No 直接退出。主畫面：頂部橫幅（版本、憑證種類、模型、cwd）、分隔線、`>` 輸入框、分隔線。herdr 內建 agy manifest（2026.06.24.1）找的是舊的權限框文案，1.2.16 已改（`Run this command?` 等），真正的等待核准可能被當成 idle／working。退出：`/quit`、`ctrl+d` 兩次；`esc` 中斷生成。
+首次啟動序列（herdr 每一頁都判 `idle`）：登入選單 → 色彩頁 → 條款頁（預設已勾選）→ 信任框；選 No 直接退出。主畫面：頂部橫幅（版本、憑證種類、模型、cwd）、分隔線、`>` 輸入框、分隔線。herdr 內建 agy manifest（2026.06.24.1）找的是舊的權限框文案；真機上 1.2.16 的權限框（`Requesting permission for:` … `Run this command?`）herdr 仍判成 `blocked`，但登入／條款／色彩／信任頁判 idle。真機的登入後主畫面：橫幅 `Antigravity CLI 1.2.16`／帳號 `<email> (Google AI Plus)`／模型／cwd，`>` 輸入列夾在兩條分隔線中間，底下 `? for shortcuts`。退出：`/quit`、`ctrl+d` 兩次；`esc` 中斷生成。
 
 ### G.7 環境變數與自動更新
 `AGY_CLI_DISABLE_AUTO_UPDATE=true` 關背景自我更新（官方文件列出；**沒有在有新版時實測**）。其他官方列出的：`GEMINI_API_KEY`（搭配 `modelProvider:"gemini"`）、`GOOGLE_GEMINI_BASE_URL`。AG Man 不依賴未文件化的 `AGY_*`。

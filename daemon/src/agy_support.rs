@@ -126,9 +126,9 @@ pub fn user_text(line: &str) -> Option<String> {
     user_request(v.get("content")?.as_str()?)
 }
 
-/// 一行 transcript 若是給使用者看的模型文字，回那段文字。**未實測**（設計 §6：登入後才取得樣本）：binary 內的步驟型別有
-/// `PLANNER_RESPONSE`（模型回覆）與 `NOTIFY_USER`（agent 主動通知），兩者都收；內容是字串就直接用，是物件就試常見的文字欄位。
-/// 認不出來就略過——寧可少讀，不要把工具輸出當成回覆。
+/// 一行 transcript 若是給使用者看的模型文字，回那段文字。真機（1.2.16，2026-10-04）：`{"source":"MODEL","type":"PLANNER_RESPONSE",
+/// "status":"DONE","content":"PONG","input_tokens":…}`，內容是字串，工具呼叫夾在中間時最後一則才是給使用者的答案。`NOTIFY_USER`
+/// （agent 主動通知）**沒見過**，照 binary 內的型別名一併收；內容是物件就試常見的文字欄位。認不出來就略過——寧可少讀，不要把工具輸出當成回覆。
 pub fn assistant_text(line: &str) -> Option<String> {
     let v: Value = serde_json::from_str(line).ok()?;
     let ty = v.get("type").and_then(Value::as_str)?.to_ascii_uppercase();
