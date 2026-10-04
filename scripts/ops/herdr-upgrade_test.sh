@@ -191,7 +191,7 @@ check_eq "ANSI 行與純文字行都算，太舊的不算" "2" "$got"
 sed -n '/^count_lines() {$/,/^}$/p' "$SCRIPT" > "$ROOT/count_lines.sh"
 if grep -q '^count_lines() {' "$ROOT/count_lines.sh"; then ok "腳本有 count_lines()"; else bad "腳本沒有 count_lines()（行數字串沒處理 BSD 的前導空白）"; fi
 mkdir -p "$ROOT/bsdbin"
-printf '#!/bin/sh\n/usr/bin/wc "$@" | sed "s/^/       /"\n' > "$ROOT/bsdbin/wc"; chmod 755 "$ROOT/bsdbin/wc"
+printf '#!/bin/sh\nn=$(/usr/bin/wc "$@" | tr -d " ")\nprintf "       %%s\\n" "$n"\n' > "$ROOT/bsdbin/wc"; chmod 755 "$ROOT/bsdbin/wc"
 printf 'a\nb\nc\n' > "$ROOT/three.txt"
 got=$(PATH="$ROOT/bsdbin:$PATH" bash -c '. "$1"; count_lines "$2"' _ "$ROOT/count_lines.sh" "$ROOT/three.txt" 2>/dev/null)
 check_eq "BSD 風格的 wc 輸出被去掉前導空白" "3" "$got"
