@@ -588,6 +588,7 @@ fn agent_prompt_dialog_reason(kind: &str, screen: &str) -> Option<&'static str> 
         "claude" if crate::tui_prompts::is_auto_mode_offer(screen)
             || crate::tui_prompts::is_switch_model_dialog(screen) => Some("dialog_open"),
         "grok" if crate::tui_prompts::is_grok_trust_dialog(screen) => Some("dialog_open"),
+        "agy" => crate::agy_screen::blocking_dialog(screen).map(|d| d.reason()),
         "codex" if crate::codex_live::picker_open(screen) => Some("picker_open"),
         // #782：帳號安全提醒橫幅開著時 agent.prompt 打進去的開頭數字一樣會被當成選項吃掉。
         "codex" if super::codex_banner::blocks_typing(screen) => Some(super::codex_banner::REASON),
@@ -728,6 +729,14 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
                     tracing::info!(run = %run.id, "closed a leftover claude model-switch confirmation before delivering a prompt");
                 }
             }
+        }
+    }
+    // agy 的登入框、色彩頁、條款頁、信任框、權限框 herdr 全判 idle：認到就不送、也不按任何鍵（條款頁一個 Enter 就切換同意與否）。
+    if bot.kind == "agy" {
+        if let Some(dialog) = crate::agy_screen::blocking_dialog(&screen) {
+            let hint = dialog.label();
+            let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
+            return Err(LcError::conflict(dialog.reason(), json!({"run_id": run.id, "message": hint})));
         }
     }
     // grok's folder-trust dialog is not recognized by herdr, so trust the bot's actual host/cwd before answering `y`.

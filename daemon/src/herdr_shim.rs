@@ -1170,9 +1170,10 @@ mod tests {
     #[test]
     fn every_env_key_the_daemon_injects_reaches_child_panes_or_is_deliberately_left_out() {
         // 刻意不傳。
-        const LEFT_OUT: [(&str, &str); 2] = [
+        const LEFT_OUT: [(&str, &str); 3] = [
             ("CLAUDE_CODE_CHILD_SESSION", "空字串：daemon 用來洗掉它自己環境裡的 claude 標記；herdr server 開的子 pane 本來就沒有"),
             ("CLAUDECODE", "同上"),
+            ("AGY_CLI_DISABLE_AUTO_UPDATE", "只給 agy bot 自己的 pane；agy 的 child agent 是第二階段（設計 #16），到時候要傳"),
         ];
         let listed: Vec<&str> = super::SHIM_SH
             .lines()

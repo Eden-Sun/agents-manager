@@ -1982,6 +1982,43 @@ mod resume_args_tests {
         assert!(full_rules.contains(persona), "configured persona survives outside the shell argv");
     }
 
+    /// agy 啟動：`--dangerously-skip-permissions`（auto_approve）、`--model <slug>`、不帶 resume／persona 旗標；pane env 關掉自動更新；
+    /// 信任框預寫進**假 HOME** 的 `settings.json`、hook 與 statusLine 裝在假 HOME（絕不碰真的 `~/.gemini`）。
+    #[tokio::test]
+    async fn agy_start_pins_permissions_model_env_trust_and_hooks_in_the_fake_home() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "agy-start").await;
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.1-pro-high', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+
+        start_bot(&e.app, &bot.id).await.unwrap();
+
+        let args = started_args(&e).pop().unwrap();
+        assert!(args.contains(&"--dangerously-skip-permissions".into()), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--model", "gemini-3.1-pro-high"]), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--rules" || a == "--resume" || a == "-c" || a == "--conversation"), "第一階段沒有 resume／persona 旗標：{args:?}");
+        let started = e.herdr.calls_to("agent.start");
+        assert_eq!(started.last().unwrap()["kind"], "agy");
+        let env_of = |method: &str| e.herdr.calls_to(method).into_iter().find_map(|p| p.get("env").cloned());
+        let pane_env = env_of("tab.create").or_else(|| env_of("pane.split")).or_else(|| env_of("workspace.create")).expect("a pane was created with env");
+        assert_eq!(pane_env["AGY_CLI_DISABLE_AUTO_UPDATE"], "true", "agy 的自我更新每個 pane 都關掉：{pane_env}");
+
+        let home = crate::home::dir().unwrap();
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(crate::agy_support::settings_path(&home)).unwrap()).unwrap();
+        let cwd = crate::trust::canonical(&e.repo.to_string_lossy());
+        assert!(settings["trustedWorkspaces"].as_array().unwrap().iter().any(|v| v.as_str() == Some(cwd.as_str())), "{settings}");
+        assert_eq!(settings["statusLine"]["type"], "command");
+        let hooks: Value = serde_json::from_str(&std::fs::read_to_string(crate::agy_support::hooks_path(&home)).unwrap()).unwrap();
+        assert_eq!(hooks["agents-manager"]["Stop"][0]["type"], "command");
+        assert!(e.app.data_dir.join(crate::agy_support::DISPATCH_SH).is_file());
+    }
+
+    /// 第一階段不做 resume／fork：agy 回 `unsupported_kind`，不是 panic、也不是亂帶旗標。
+    #[test]
+    fn agy_resume_and_fork_are_unsupported_not_a_panic() {
+        assert_eq!(resume_args_by_kind("agy", "c-1"), Err("unsupported_kind"));
+        assert_eq!(super::fork_args_by_kind("agy", "c-1"), Err("unsupported_kind"));
+    }
+
     /// codex 0.160.0 的 resume 會恢復上次存的權限，除非明確覆寫（issue #778）：auto_approve 0／1 ×
     /// resume／fork 四種組合都要把權限明講，關掉 auto_approve 的不能因為接回 Full Access 的對話變成 yolo。
     #[tokio::test]

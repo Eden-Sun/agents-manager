@@ -50,6 +50,8 @@ mod credential_spawn;
 mod codex_history;
 mod codex_live;
 mod child_runtime;
+mod agy_screen;
+mod agy_support;
 mod grok_live;
 mod codex_model_migration;
 mod config;
@@ -175,7 +177,7 @@ enum Cmd {
     },
     /// Hook callback invoked by the agent CLI. Always exits 0 with empty stdout.
     Hook {
-        /// claude | codex | grok (claude and grok deliver the payload on stdin, codex via argv)
+        /// claude | codex | grok | agy (claude, grok and agy deliver the payload on stdin, codex via argv)
         provider: String,
         #[arg(long)]
         bot: String,
@@ -187,6 +189,9 @@ enum Cmd {
         /// 這顆 hook 屬於哪顆 daemon 的資料目錄（daemon 啟動 bot 時寫進 hook.sh）。
         #[arg(long, default_value = "")]
         data_dir: String,
+        /// agy 的 payload 不帶事件名，由 hooks.json／statusLine 的指令參數（dispatcher 的 `$1`）告訴我們。
+        #[arg(long, default_value = "")]
+        event: String,
         /// Codex passes the event JSON as the last argv element.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         payload: Vec<String>,
@@ -265,9 +270,9 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Hook { provider, bot, token, port, data_dir, payload } => {
+        Cmd::Hook { provider, bot, token, port, data_dir, event, payload } => {
             let payload_arg = if provider == "codex" { payload.last().cloned() } else { None };
-            hook_cmd::run(hook_cmd::HookArgs { provider, bot, token, port, data_dir, payload_arg });
+            hook_cmd::run(hook_cmd::HookArgs { provider, bot, token, port, data_dir, event, payload_arg });
             std::process::exit(0);
         }
         Cmd::Statusline { bot, token, port, data_dir: _ } => {
