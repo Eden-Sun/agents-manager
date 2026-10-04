@@ -7,10 +7,12 @@
 //! `at` 是**這顆 binary 第一次跑起來**的時間，不是這個 process 起來的時間（review 2026-09-16 c3 L3）：
 //! binary 沒換的重啟（launchd 拉回、restart 窗口、手動重啟）會把它往前推，上線前提出的重建申請
 //! 就從 chip 與清單上消失，而腳本照 `daemon-update.built` 的 mtime 仍然數得到它們。
-//! 記在資料目錄的 `last-deploy.json`；sha 跟上次一樣就沿用上次的時間。
+//! 記在資料目錄的 `last-deploy.json`；sha 跟目前記錄一樣就沿用上次的時間，也保留前一版的時間，
+//! 讓換版驗證失敗回滾後不會把同一顆舊 binary 誤記成剛部署。
 
 use std::path::Path;
 use std::sync::OnceLock;
+use std::{fs::OpenOptions, io::Write};
 
 /// 建置時由 `build.rs` 寫進來的 short sha；拿不到 git 時是 `unknown`。
 pub const BUILD_SHA: &str = env!("AM_BUILD_SHA");
@@ -59,10 +61,11 @@ pub fn started_at() -> String {
 
 /// 這顆 binary 第一次跑起來的時間，持久化在 `<data_dir>/last-deploy.json`。
 ///
-/// * 檔裡的 sha 跟現在這顆一樣 → 沿用檔裡的時間（binary 沒換的重啟不算新的上線）。
-/// * 不一樣、讀不到、或壞掉 → 現在就是上線時間，寫回去。
+/// * 檔裡目前的 sha 跟現在這顆一樣 → 沿用目前時間（binary 沒換的重啟不算新的上線）。
+/// * 現在這顆是記錄中的前一版 → 沿用那一版的時間，供部署驗證失敗回滾。
+/// * 新 sha、讀不到或壞掉 → 現在就是上線時間，並把目前記錄保留為前一版。
 /// * sha 是 `unknown`（沒有 git 的建置）→ 分不出版本，一律用 process 起來的時間，也不寫檔。
-/// * 寫不進去（唯讀目錄）→ 照樣回這一次的時間，只是下次重啟會再算一次。
+/// * 原子寫不成功（唯讀目錄等）→ 照樣回推算出的時間，只是下次重啟會再算一次。
 fn deployed_at(data_dir: &Path, sha: &str, now: &str) -> String {
     if sha.is_empty() || sha == "unknown" {
         return now.to_string();
@@ -70,20 +73,50 @@ fn deployed_at(data_dir: &Path, sha: &str, now: &str) -> String {
     let path = data_dir.join(FILE);
     let stored = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| {
-            let at = v.get("at").and_then(serde_json::Value::as_str)?.to_string();
-            let seen = v.get("sha").and_then(serde_json::Value::as_str)?;
-            (seen == sha && !at.trim().is_empty()).then_some(at)
-        });
-    if let Some(at) = stored {
-        return at;
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let current = stored.as_ref().and_then(deploy_record);
+    if let Some((_, at)) = current.as_ref().filter(|(seen, _)| seen == sha) {
+        return at.clone();
     }
-    let body = serde_json::json!({"sha": sha, "at": now}).to_string();
-    if let Err(e) = std::fs::write(&path, body) {
+    let previous = stored.as_ref().and_then(|v| v.get("previous")).and_then(deploy_record);
+    let at = previous
+        .as_ref()
+        .filter(|(seen, _)| seen == sha)
+        .map(|(_, at)| at.clone())
+        .unwrap_or_else(|| now.to_string());
+
+    let body = serde_json::json!({
+        "sha": sha,
+        "at": at.clone(),
+        "previous": current.map(|(sha, at)| serde_json::json!({"sha": sha, "at": at})),
+    })
+    .to_string();
+    if let Err(e) = write_last_deploy(&path, body.as_bytes()) {
         tracing::warn!(path = %path.display(), error = %e, "could not record this binary's deploy time; it will be recomputed on the next start");
     }
-    now.to_string()
+    at
+}
+
+fn deploy_record(value: &serde_json::Value) -> Option<(String, String)> {
+    let sha = value.get("sha").and_then(serde_json::Value::as_str)?.to_string();
+    let at = value.get("at").and_then(serde_json::Value::as_str)?.to_string();
+    (!sha.is_empty() && !at.trim().is_empty()).then_some((sha, at))
+}
+
+/// Replace the record atomically so a killed daemon cannot truncate the only persisted deploy time.
+fn write_last_deploy(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let temp = parent.join(format!(".{FILE}.{}.{}.tmp", std::process::id(), crate::db::ulid()));
+    let result = (|| {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        file.write_all(body)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
 }
 
 /// `{sha, sha_full, dirty, at}`：現在跑的是哪一版，以及它是什麼時候上線的。
@@ -162,6 +195,24 @@ mod tests {
         let before = std::fs::read_to_string(dir.join(FILE)).unwrap();
         assert_eq!(deployed_at(&dir, "unknown", "2026-09-17T11:00:00Z"), "2026-09-17T11:00:00Z");
         assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), before);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 候選版曾啟動但 swap 後續驗證失敗時會回滾。舊 binary 再起來要沿用它原本的上線時間，
+    /// 不能因為 `last-deploy.json` 只有一格而把它算成新部署。
+    #[test]
+    fn rollback_to_a_previously_seen_sha_restores_its_original_deploy_time() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-deploy-rollback-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let old_at = deployed_at(&dir, "oldsha", "2026-10-01T10:00:00Z");
+        assert_eq!(old_at, "2026-10-01T10:00:00Z");
+        assert_eq!(deployed_at(&dir, "candidate", "2026-10-04T12:00:00Z"), "2026-10-04T12:00:00Z");
+        assert_eq!(
+            deployed_at(&dir, "oldsha", "2026-10-04T12:05:00Z"),
+            old_at,
+            "rollback restarts the same old binary; it is not a new deployment"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
