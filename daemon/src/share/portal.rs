@@ -44,13 +44,23 @@ pub(crate) const MAX_TEXT_CHARS: usize = 8000;
 pub(crate) const MESSAGES_PER_MIN: usize = 10;
 /// 單檔上限 25 MiB。
 pub(crate) const MAX_UPLOAD: usize = 25 * 1024 * 1024;
-/// 每分鐘最多上傳幾個檔。
-pub(crate) const UPLOADS_PER_MIN: usize = 20;
+/// 每分鐘最多上傳幾個檔。分享頁一次選一整批手機照片是常態（客訴 2026-10-04：選 3 張以上就「傳得太快了」），
+/// 一則最多 [`MAX_ATTACHMENTS`] 張，再留一倍給重傳；分享頁遇到 429 會照 `Retry-After` 自己等、自己重試。
+pub(crate) const UPLOADS_PER_MIN: usize = 40;
 /// `inbox/` 的總量上限（位元組、檔數）：滿了要等 bot 的主人清掉。
 pub(crate) const INBOX_MAX_BYTES: u64 = 200 * 1024 * 1024;
 pub(crate) const INBOX_MAX_FILES: usize = 300;
-/// 一則訊息最多帶幾個附件。
-const MAX_ATTACHMENTS: usize = 10;
+/// 一則訊息最多帶幾個附件：手機相簿一次選十幾張照片要能一則送出（原本 10，2026-10-04 調高）。
+const MAX_ATTACHMENTS: usize = 20;
+/// 全站同時讀取幾個上傳 body（每個最多 [`MAX_UPLOAD`]，佔記憶體）。
+const UPLOAD_SLOTS: usize = 2;
+/// 名額滿了的上傳排隊等多久：等的時候 body 還沒讀、不扣這個分享的每分鐘額度；等不到才 429。
+#[cfg(not(test))]
+const UPLOAD_QUEUE_WAIT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const UPLOAD_QUEUE_WAIT: Duration = Duration::from_millis(300);
+/// 全站最多幾個上傳同時在排隊；再多的立刻 429（排隊的連線也是資源）。
+const UPLOAD_QUEUE_MAX: usize = 64;
 /// 同時開著的 SSE 連線（全部分享加起來）。
 const MAX_STREAMS: usize = 32;
 /// 單一分享同時開著的 SSE 連線；避免一個連結佔滿全部全域名額。
@@ -80,6 +90,10 @@ pub(crate) struct Portal {
     app: Arc<App>,
     limits: Arc<Limits>,
     uploads: Arc<Semaphore>,
+    /// 排隊等 [`Portal::uploads`] 的名額（[`UPLOAD_QUEUE_MAX`]）。
+    upload_queue: Arc<Semaphore>,
+    /// 排隊最多等多久（測試可改）。
+    upload_wait: Duration,
     streams: Arc<Semaphore>,
     share_streams: Arc<ShareStreamLimits>,
     token_lookups: Arc<Semaphore>,
@@ -177,7 +191,9 @@ pub fn router(app: Arc<App>) -> Router {
     let st = Portal {
         app,
         limits: Arc::new(Limits::default()),
-        uploads: Arc::new(Semaphore::new(2)),
+        uploads: Arc::new(Semaphore::new(UPLOAD_SLOTS)),
+        upload_queue: Arc::new(Semaphore::new(UPLOAD_QUEUE_MAX)),
+        upload_wait: UPLOAD_QUEUE_WAIT,
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
         share_streams: Arc::new(ShareStreamLimits::default()),
         token_lookups: Arc::new(Semaphore::new(MAX_TOKEN_LOOKUPS)),
@@ -378,10 +394,19 @@ async fn upload_admission(State(st): State<Portal>, Path(token): Path<String>, m
     };
     #[cfg(test)]
     crate::lifecycle::race_point::hit("share_upload_after_bot_for", &bot_id).await;
-    // 全域上傳名額滿了就立刻拒絕。這條還沒讀 body，不算一次上傳嘗試，否則別的分享占滿名額時，
-    // 重試會把這顆 bot 的每分鐘額度扣光。
-    let Ok(_permit) = st.uploads.clone().try_acquire_owned() else {
-        return too_many(2, "upload");
+    // 全域上傳名額滿了就排隊等（分享頁一次選好幾張照片時會同時送來）。等的時候還沒讀 body，不算一次上傳嘗試，
+    // 否則別的分享占滿名額時，重試會把這顆 bot 的每分鐘額度扣光。排隊的人太多、或等太久才 429。
+    let _permit = match st.uploads.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            let Ok(_queued) = st.upload_queue.clone().try_acquire_owned() else {
+                return too_many(5, "upload");
+            };
+            match tokio::time::timeout(st.upload_wait, st.uploads.clone().acquire_owned()).await {
+                Ok(Ok(p)) => p,
+                _ => return too_many(5, "upload"),
+            }
+        }
     };
     if let Some(wait) = st.limits.take(&bot_id, "upload", UPLOADS_PER_MIN, Duration::from_secs(60)) {
         return too_many(wait, "upload");

@@ -412,3 +412,65 @@ test('resync（對話被倒回）：整頁重抓並取代手上的清單；前�
   await settle(50)
   assert.equal(document.querySelectorAll('.sh-msg').length, 1, '倒回掉的那則要消失')
 })
+
+/** 客訴 2026-10-04：一次選 5 個檔，原本同時送出、第三張起「傳得太快了」。現在一張接一張、看得到第幾張／共幾張，429 自己重試。 */
+test('一次選好幾個檔：依序上傳、顯示第幾張，429 自動重試、不顯示「太快」', async () => {
+  let inFlight = 0
+  let maxInFlight = 0
+  let calls = 0
+  const order: string[] = []
+  const client = mockShareClient(TOKEN)
+  client.upload = async (f: File) => {
+    calls++
+    inFlight++
+    maxInFlight = Math.max(maxInFlight, inFlight)
+    await new Promise((r) => setTimeout(r, 150))
+    inFlight--
+    if (calls === 2) throw new ShareHttpError(429, 1)
+    order.push(f.name)
+    return { id: `att-${f.name}`, name: f.name }
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  const input = document.querySelector('input[type=file]') as HTMLInputElement
+  const picked = [1, 2, 3, 4, 5].map((i) => new File([`photo ${i}`], `p${i}.txt`, { type: 'text/plain' }))
+  await act(async () => {
+    Object.defineProperty(input, 'files', { configurable: true, value: picked })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  await settle(20)
+  assert.match(document.querySelector('.sh-pending')!.textContent!, /第 1 張／共 5 張/)
+  assert.match(document.querySelector('.sh-pending')!.textContent!, /等待中/)
+  // act 外完成的上傳要到下一個 act 才 render：分段等，每段都讓佇列往前走。
+  for (let i = 0; i < 40 && document.querySelectorAll('.sh-pending li.ok').length < 5; i++) await settle(100)
+  assert.equal(maxInFlight, 1, '一次只傳一張')
+  assert.deepEqual(order, ['p1.txt', 'p2.txt', 'p3.txt', 'p4.txt', 'p5.txt'])
+  assert.equal(calls, 6, '第 2 張 429 之後自己再傳一次')
+  assert.doesNotMatch(document.body.textContent!, /太快/)
+  assert.equal(document.querySelectorAll('.sh-pending li.ok').length, 5)
+})
+
+test('真的沒傳上去：寫「這張沒傳上去」，按「再試一次」重傳那一張', async () => {
+  let fail = true
+  const client = mockShareClient(TOKEN)
+  client.upload = async (f: File) => {
+    if (fail) throw new Error('network down')
+    return { id: 'att-x', name: f.name }
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  const input = document.querySelector('input[type=file]') as HTMLInputElement
+  await act(async () => {
+    Object.defineProperty(input, 'files', { configurable: true, value: [new File(['x'], 'x.txt', { type: 'text/plain' })] })
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  await settle(50)
+  await settle(50)
+  assert.match(document.querySelector('.sh-pending')!.textContent!, /這張沒傳上去/)
+  fail = false
+  await click(document.querySelector('.sh-retry')!)
+  await settle(50)
+  await settle(50)
+  assert.equal(document.querySelectorAll('.sh-pending li.ok').length, 1)
+  assert.equal(document.querySelector('.sh-retry'), null)
+})
