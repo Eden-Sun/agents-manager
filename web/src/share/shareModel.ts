@@ -92,6 +92,15 @@ export function toShareFiles(v: unknown): ShareFile[] {
     .filter((f): f is ShareFile => f !== null)
 }
 
+/** daemon 替 end user 訊息加的前綴與附件標記（daemon 輸出時已拿掉；這裡再擋一次，舊版 daemon 或 bot 照抄時也不會出現）。 */
+const SHARE_MARKS = ['〔分享使用者上傳的檔案，在工作目錄的 inbox/ 底下〕', '〔分享使用者〕 ', '〔分享使用者〕']
+
+export function stripShareMarks(s: string): string {
+  let out = s
+  for (const m of SHARE_MARKS) out = out.split(m).join('')
+  return out
+}
+
 function capShareText(s: string): string {
   if (s.length <= SHARE_TEXT_STORE_MAX) return s
   return `${s.slice(0, SHARE_TEXT_STORE_MAX)}\n…（內容過長，已截斷）`

@@ -756,12 +756,12 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 |---|---|
 | `GET /s/{token}` | 分享頁 HTML |
 | `GET /s/{token}/api/info` | `{bot_name, status}`；`status` 同 `lamp`（working／idle／starting／offline／blocked／unknown） |
-| `GET /s/{token}/api/messages?before=<message id>&limit=100` | `{bot_name, status, messages:[{id, role:"user"\|"assistant", by:"share"\|"owner"\|"bot", text, created_at, attachments:[{name}]}], has_more}`，舊→新；`limit` 1..=200；`before` 不在這段對話 400 `bad_cursor` |
+| `GET /s/{token}/api/messages?before=<message id>&limit=100` | `{bot_name, status, messages:[{id, role:"user"\|"assistant", by:"share"\|"bot", text, created_at, attachments:[{name}]}], has_more}`，舊→新；**只有 end user 與 bot 的對話**：倒回的（`rewound_at` 非空）與擁有者從 AG Man 送的（或別顆 bot 轉來的）user 訊息一律不回；end user 訊息拿掉 daemon 加的 `〔分享使用者〕 ` 前綴，bot 回覆裡若照抄了前綴或附件標記行也拿掉（只過濾顯示）；`limit` 1..=200；`before` 不在這段對話 400 `bad_cursor` |
 | `POST /s/{token}/api/messages` | `{text, client_request_id, attachments?:[上傳回的 id]}` → `{accepted:true, message_id, delivery}`；413 `text_too_long`（> 8000 字）；400 `empty`／`bad_client_request_id`（1..=64 個 `[A-Za-z0-9-_.:]`）／`too_many_attachments`（> 10）／`unknown_attachment`；429 `rate_limited`（每分享每分鐘 10 次；便宜的 JSON、字數與空訊息檢查通過後，附件查驗也計次，`Retry-After`）；409 `not_accepted`（多半是上一則還在排隊：一段對話同時只排一則）；503 `unavailable` |
-| `GET /s/{token}/api/events` | SSE：`event: status` `{status}`（連上先送一次）、`event: message`（同上面的訊息形狀）、`event: resync` `{}`；總量同時 32 條、每個分享同時 4 條；單分享滿額 429 `rate_limited`，總量滿額 503 `too_many_streams` |
+| `GET /s/{token}/api/events` | SSE：`event: status` `{status}`（連上先送一次）、`event: message`（同上面的訊息形狀與過濾：擁有者送的不推）、`event: resync` `{}`（漏了事件，或擁有者倒回了對話：請整頁重抓、以重抓結果取代手上的清單）；總量同時 32 條、每個分享同時 4 條；單分享滿額 429 `rate_limited`，總量滿額 503 `too_many_streams` |
 | `POST /s/{token}/api/upload` | `multipart/form-data` 的 `file` 欄位（分享頁的 `FormData`；一次一個檔），或原始位元組＋`?name=<檔名>` → `{id, name, size, mime}`；每顆 bot 的 200 MiB／300 檔配額檢查與檔案建立會序列化；400 `empty`／`bad_name`／`bad_multipart`／`no_file`；413 `too_large`（> 25 MiB）；415 `unsupported`（`reason`: `unsupported_type`／`content_mismatch`）；429（每分享每分鐘 20 次，驗 token 後、讀取 body 前計次，無效內容也計次；全站最多同時讀取 2 個上傳 body）；507 `inbox_full`。Office 檔需符合 OOXML ZIP 項目結構，`mime` 回傳 Word／Excel／PowerPoint 專屬類型。 |
 | `GET /s/{token}/api/files` | `{files:[{name, size, modified_at, remaining_secs}]}`（這顆 bot 的 outbox；`modified_at` 是 RFC 3339）；outbox 尚未建立時回空清單，可信目錄／列舉／背景工作失敗回一般 503 `unavailable` |
-| `GET /s/{token}/api/files/{name}` | 下載（attachment、nosniff）；不存在或被擋 404、太大 413；可信開檔、讀取、DB 或背景工作失敗回一般 503 `unavailable` |
+| `GET /s/{token}/api/files/{name}` | 下載（attachment、nosniff）；不存在或被擋 404、太大 413；可信開檔、讀取、DB 或背景工作失敗回一般 503 `unavailable`。`?inline=1`：**只對圖片**（svg／png／jpg／jpeg／gif／webp）改回 `Content-Disposition: inline`、正確 MIME（svg＝`image/svg+xml`）、`nosniff` 與 `Content-Security-Policy: sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'`（直接開成文件時 SVG 裡的 script 不跑、origin 是 opaque）；其他種類與 `inline` 不是 `1` 時照舊 attachment＋頁面的 CSP。其餘 query（如分享頁加的 `v=`）忽略 |
 | `GET /assets/{path}` | 分享頁的靜態檔 |
 
 分享入口只對形狀正確的 43 字元 token 使用全域 8 個併發名額查 DB；格式錯誤仍直接回 404，滿額查詢回 503。`last_used_at` 每顆 bot 每分鐘最多做一次唯讀新鮮度檢查，只有過期才寫入；這項遙測失敗不改變驗證結果。

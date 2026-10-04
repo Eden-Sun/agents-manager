@@ -6,11 +6,11 @@
 //! |---|---|
 //! | `GET /s/{token}` | 分享頁（嵌入的 `web/dist/share.html`；還沒打包時是一頁佔位） |
 //! | `GET /s/{token}/api/info` | `{bot_name, status}` |
-//! | `GET /s/{token}/api/messages?before=&limit=` | `{bot_name, status, messages, has_more}`：完整對話（只有 user／assistant；只給 id、role、誰送的、text、`created_at`、附件名） |
+//! | `GET /s/{token}/api/messages?before=&limit=` | `{bot_name, status, messages, has_more}`：end user 與 bot 的對話（end user 送的 user 與 assistant；倒回的、擁有者送的不給；只給 id、role、誰送的、text、`created_at`、附件名） |
 //! | `POST /s/{token}/api/messages` | `{text, client_request_id, attachments?}` → 照一般送訊息流程（停著就起、忙就排隊），來源記成分享使用者 |
 //! | `GET /s/{token}/api/events` | SSE：`message`（新訊息）、`status`（思考中／閒置…）、`resync`（漏了，請重抓） |
 //! | `POST /s/{token}/api/upload` | `multipart/form-data` 的 `file` 欄位（或原始位元組＋`?name=`）；存進工作目錄的 `inbox/`，回 `{id, name, size, mime}` |
-//! | `GET /s/{token}/api/files`、`GET /s/{token}/api/files/{name}` | 這顆 bot 的 outbox（沿用 outbox 的擋法與下載標頭） |
+//! | `GET /s/{token}/api/files`、`GET /s/{token}/api/files/{name}` | 這顆 bot 的 outbox（沿用 outbox 的擋法與下載標頭）；`?inline=1` 只對圖片回 inline（[`inline_image`]） |
 //! | `GET /assets/{*path}` | 分享頁的 js／css（嵌入的 `web/dist/assets/`） |
 //!
 //! token 錯、分享關了、bot 刪了：一律同一個 404（不洩漏存在與否）。每個回應都帶 `Cache-Control: no-store`（assets 除外，
@@ -67,6 +67,10 @@ pub(crate) const SHARE_PREFIX: &str = "〔分享使用者〕 ";
 
 /// 送給 bot 的訊息裡，附件清單前面的那一行。對話列表靠它把附件從文字裡拆出來（[`split_attachments`]）。
 pub(crate) const ATTACH_MARK: &str = "〔分享使用者上傳的檔案，在工作目錄的 inbox/ 底下〕";
+
+/// `?inline=1` 的圖片回應用這份 CSP，取代頁面的 [`CSP`]：網址被直接開成文件時（SVG 會是一份 DOM），
+/// `sandbox` 不帶 `allow-scripts` 讓裡面的 script 不跑、origin 變成 opaque，碰不到分享頁的 token。
+const INLINE_IMAGE_CSP: &str = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
 
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; \
                    font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
@@ -266,7 +270,10 @@ async fn security_headers(State(st): State<Portal>, uri: Uri, req: axum::extract
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
     h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CSP));
+    // 唯一的例外是 inline 圖片自己設的 sandbox CSP（比頁面的更嚴），其餘一律覆蓋成頁面的。
+    if h.get(header::CONTENT_SECURITY_POLICY).is_none_or(|v| v != INLINE_IMAGE_CSP) {
+        h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(CSP));
+    }
     h.insert("Cross-Origin-Opener-Policy", HeaderValue::from_static("same-origin"));
     h.insert("Cross-Origin-Resource-Policy", HeaderValue::from_static("same-origin"));
     res
@@ -451,11 +458,26 @@ fn display_name(stored: &str) -> &str {
     }
 }
 
+/// 這則 user／assistant 訊息給不給分享頁看：end user 自己送的與 bot 的回覆；倒回的、擁有者（或別顆 bot）送的都不給。
+pub(crate) fn shown_to_share(role: &str, relay_from: Option<&str>, rewound_at: Option<&str>) -> bool {
+    rewound_at.is_none() && (role == "assistant" || (role == "user" && relay_from == Some(SHARE_SENDER)))
+}
+
+/// bot 回覆若照抄了我們加的前綴或附件標記行，顯示前拿掉（只過濾顯示，不改 bot 也不改 DB）。
+fn strip_internal_marks(text: &str) -> String {
+    let tag = SHARE_PREFIX.trim_end();
+    if !text.contains(tag) && !text.contains(ATTACH_MARK) {
+        return text.to_string();
+    }
+    text.replace(ATTACH_MARK, "").replace(SHARE_PREFIX, "").replace(tag, "")
+}
+
 /// 一則訊息對外的樣子：只有這幾個欄位。工具細節、turn、終端快照、系統訊息、轉寄來源的 bot id 都不給。
 pub(crate) fn public_message(id: &str, role: &str, content: &str, attachments_json: Option<&str>, relay_from: Option<&str>, at: &str) -> Value {
     let (text, mut names) = if role == "user" { split_attachments(content) } else { (content.to_string(), Vec::new()) };
     let text = match (role, relay_from) {
         ("user", Some(SHARE_SENDER)) => text.strip_prefix(SHARE_PREFIX).map(str::to_string).unwrap_or(text),
+        ("assistant", _) => strip_internal_marks(&text),
         _ => text,
     };
     if let Some(list) = attachments_json.and_then(|s| serde_json::from_str::<Value>(s).ok()) {
@@ -501,14 +523,18 @@ async fn list_messages(State(st): State<Portal>, Path(token): Path<String>, Quer
         },
         None => None,
     };
+    // 分享頁只有 end user 與 bot 的對話（使用者 2026-10-04）：已倒回的不給；擁有者從 AG Man 送的（與別顆 bot 轉來的）
+    // user 訊息是後台交代，也不給——只留 assistant 與 relay_from = share 的 user（[`shown_to_share`] 同一套規則）。
     /// id、role、content、attachments_json、relay_from、created_at。
     type Row = (String, String, String, Option<String>, Option<String>, String);
     let rows: Result<Vec<Row>, _> = sqlx::query_as(
         "SELECT id, role, content, attachments_json, relay_from, created_at FROM messages
-          WHERE conversation_id = ? AND role IN ('user','assistant') AND rowid < ?
+          WHERE conversation_id = ? AND rewound_at IS NULL
+            AND (role = 'assistant' OR (role = 'user' AND relay_from = ?)) AND rowid < ?
           ORDER BY rowid DESC LIMIT ?",
     )
     .bind(&conv)
+    .bind(SHARE_SENDER)
     .bind(before.unwrap_or(i64::MAX))
     .bind(limit + 1)
     .fetch_all(db)
@@ -737,13 +763,15 @@ impl Stream {
             "message_added" => {
                 let m = ev.data.get("message")?;
                 let role = m.get("role").and_then(Value::as_str)?;
-                if role != "user" && role != "assistant" {
+                let s = |k: &str| m.get(k).and_then(Value::as_str);
+                if !shown_to_share(role, s("relay_from"), s("rewound_at")) {
                     return None;
                 }
-                let s = |k: &str| m.get(k).and_then(Value::as_str);
                 let out = public_message(s("id")?, role, s("content").unwrap_or(""), s("attachments_json"), s("relay_from"), s("created_at").unwrap_or(""));
                 Some(Event::default().event("message").data(out.to_string()))
             }
+            // 擁有者在 AG Man 倒回對話：分享頁手上那幾則要消失，請它整頁重抓（重抓的清單已排除倒回的）。
+            "messages_rewound" => Some(Event::default().event("resync").data("{}")),
             "bot_status" => Some(Event::default().event("status").data(json!({"status": status_of(&self.app, &self.bot_id).await}).to_string())),
             _ => None,
         };
@@ -942,7 +970,26 @@ fn take_fail_files_scan_task_for_test(bot_id: &str) -> bool {
     FAIL_NEXT_FILES_SCAN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).remove(bot_id)
 }
 
-async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, String)>) -> Response {
+#[derive(Deserialize)]
+struct FileQuery {
+    inline: Option<String>,
+}
+
+/// `?inline=1` 能 inline 的圖片：副檔名 → 正確的 MIME。白名單以外（HTML、PDF、文字…）照樣是附件，
+/// 分享頁用 `<img>` 預覽 bot 做的圖卡要靠這個（SVG 平常的下載是 `application/octet-stream`，`<img>` 畫不出來）。
+pub(crate) fn inline_image(name: &str) -> Option<&'static str> {
+    let ext = std::path::Path::new(name).extension().and_then(OsStr::to_str)?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return None,
+    })
+}
+
+async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, String)>, Query(q): Query<FileQuery>) -> Response {
     let (bot_id, _authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
@@ -952,7 +999,18 @@ async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, Strin
         return not_found();
     }
     match crate::outbox::share_file(&st.app, &bot_id, &name).await {
-        Ok(res) => res,
+        Ok(mut res) => {
+            if let (Some("1"), Some(mime)) = (q.inline.as_deref(), inline_image(&name)) {
+                let h = res.headers_mut();
+                h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+                let disposition = crate::outbox::content_disposition(&name).replacen("attachment", "inline", 1);
+                if let Ok(v) = HeaderValue::from_str(&disposition) {
+                    h.insert(header::CONTENT_DISPOSITION, v);
+                }
+                h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(INLINE_IMAGE_CSP));
+            }
+            res
+        }
         Err(crate::outbox::ShareFileError::TooLarge) => {
             (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"error": "too_large"}))).into_response()
         }

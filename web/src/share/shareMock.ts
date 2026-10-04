@@ -9,6 +9,14 @@ const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString()
 let n = 0
 const id = () => `msg_mock_${Date.now().toString(36)}_${(n++).toString(36)}`
 
+/** 受限 bot 做的圖卡長這樣：只能寫 SVG，含中文與 emoji。 */
+const MOCK_CARD = `<svg xmlns="http://www.w3.org/2000/svg" width="540" height="540" viewBox="0 0 540 540">
+<rect width="540" height="540" rx="36" fill="#fff4d6"/>
+<circle cx="430" cy="120" r="70" fill="#ffc94d"/>
+<text x="60" y="260" font-size="64" font-weight="700" fill="#5b3a00">星期日早安 ☀️</text>
+<text x="60" y="340" font-size="30" fill="#7a5a1c">慢慢來，今天也是好日子 🌿</text>
+</svg>`
+
 export function mockShareClient(token: string): ShareClient {
   const expired = token.startsWith('expired_')
   const messages: ShareMessage[] = [
@@ -17,15 +25,18 @@ export function mockShareClient(token: string): ShareClient {
     {
       id: 'm3',
       role: 'assistant',
-      text: '看了你的設定：`listen = "127.0.0.1:7788"` 跟另一個服務撞了。\n\n1. 改成 `7789`\n2. 重開服務\n\n改好的檔放在「bot 給你的檔案」裡，直接下載覆蓋就好。',
+      text: '看了你的設定：`listen = "127.0.0.1:7788"` 跟另一個服務撞了。\n\n1. 改成 `7789`\n2. 重開服務\n\n改好的檔放在「bot 給你的檔案」裡，直接存下來覆蓋就好。',
       created_at: ago(39),
       attachments: [],
     },
+    { id: 'm4', role: 'assistant', text: '另外幫你做了一張早安圖卡，就在下面。按「分享」可以直接傳給朋友。', created_at: ago(30), attachments: [] },
   ]
   const files: (ShareFile & { body: string })[] = [
     { name: 'config.toml', size: 418, modified_at: ago(39), body: 'listen = "127.0.0.1:7789"\n' },
     { name: '安裝步驟.md', size: 2_310, modified_at: ago(120), body: '# 安裝步驟\n' },
+    { name: '星期日早安圖卡.svg', size: MOCK_CARD.length, modified_at: ago(30), body: MOCK_CARD },
   ]
+  const previews = new Map<string, string>()
   let status: ShareStatus = 'idle'
   let replying = false
   let subs: ShareEvents[] = []
@@ -80,6 +91,21 @@ export function mockShareClient(token: string): ShareClient {
     fileUrl(name) {
       const f = files.find((x) => x.name === name)
       return URL.createObjectURL(new Blob([f?.body ?? ''], { type: 'application/octet-stream' }))
+    },
+    previewUrl(name) {
+      const f = files.find((x) => x.name === name)
+      let url = previews.get(name)
+      if (!url) {
+        url = URL.createObjectURL(new Blob([f?.body ?? ''], { type: /\.svg$/i.test(name) ? 'image/svg+xml' : 'application/octet-stream' }))
+        previews.set(name, url)
+      }
+      return url
+    },
+    async fileBlob(name) {
+      await guard()
+      const f = files.find((x) => x.name === name)
+      if (!f) throw new ShareHttpError(404)
+      return new Blob([f.body])
     },
     subscribe(ev) {
       subs.push(ev)

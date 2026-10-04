@@ -30,6 +30,8 @@ function clientWith(text: string): ShareClient {
       return []
     },
     fileUrl: () => '/s/t/api/files/u',
+    previewUrl: () => '/s/t/api/files/u?inline=1',
+    fileBlob: async () => new Blob([]),
     subscribe: () => () => {},
   }
 }

@@ -1,5 +1,7 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ShareClient } from './shareApi'
+import { displayName, imagesByMessage, isImageName } from './shareImage'
+import { ShareButton, ShareImageViewer, ShareThumb } from './ShareImages'
 import {
   fmtSize,
   mergeMessages,
@@ -7,6 +9,7 @@ import {
   SHARE_TEXT_MAX,
   ShareHttpError,
   shareErrorText,
+  stripShareMarks,
   type ShareFile,
   type ShareMessage,
   type SharePage,
@@ -14,6 +17,8 @@ import {
 } from './shareModel'
 
 const ShareMarkdown = lazy(() => import('./ShareMarkdown'))
+
+const NO_IMAGES: ShareFile[] = []
 
 /** 推播斷了才輪詢；分頁在背景時放慢。 */
 const POLL_MS = 4000
@@ -31,16 +36,17 @@ function newRequestId(): string {
   return `share-${Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')}`
 }
 
-function Bubble({ m }: { m: ShareMessage }) {
+function Bubble({ m, images, client, onOpen }: { m: ShareMessage; images: ShareFile[]; client: ShareClient; onOpen: (f: ShareFile) => void }) {
+  const text = stripShareMarks(m.text)
   return (
     <div className={`sh-msg ${m.role}`}>
       <div className="sh-bubble">
         {m.role === 'assistant' ? (
-          <Suspense fallback={<p className="sh-plain">{m.text}</p>}>
-            <ShareMarkdown text={m.text} />
+          <Suspense fallback={<p className="sh-plain">{text}</p>}>
+            <ShareMarkdown text={text} />
           </Suspense>
         ) : (
-          <p className="sh-plain">{m.text}</p>
+          <p className="sh-plain">{text}</p>
         )}
         {m.attachments.length > 0 ? (
           <ul className="sh-atts">
@@ -49,13 +55,35 @@ function Bubble({ m }: { m: ShareMessage }) {
             ))}
           </ul>
         ) : null}
+        {images.length > 0 ? (
+          <div className="sh-imgs">
+            {images.map((f) => (
+              <figure key={f.name} className="sh-img">
+                <ShareThumb file={f} client={client} onOpen={onOpen} big />
+                <ShareButton file={f} client={client} />
+              </figure>
+            ))}
+          </div>
+        ) : null}
       </div>
       {m.created_at ? <time className="sh-time">{new Date(m.created_at).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false })}</time> : null}
     </div>
   )
 }
 
-function FilesPanel({ files, client, onRefresh, onClose }: { files: ShareFile[]; client: ShareClient; onRefresh: () => void; onClose?: () => void }) {
+function FilesPanel({
+  files,
+  client,
+  onRefresh,
+  onClose,
+  onOpen,
+}: {
+  files: ShareFile[]
+  client: ShareClient
+  onRefresh: () => void
+  onClose?: () => void
+  onOpen: (f: ShareFile) => void
+}) {
   return (
     <section className="sh-files" aria-label="bot 給你的檔案">
       <div className="sh-files-head">
@@ -74,11 +102,22 @@ function FilesPanel({ files, client, onRefresh, onClose }: { files: ShareFile[];
       ) : (
         <ul className="sh-file-list">
           {files.map((f) => (
-            <li key={f.name}>
-              <a href={client.fileUrl(f.name)} download={f.name} rel="noreferrer">
-                <span className="sh-file-name">{f.name}</span>
-                <span className="sh-file-size">{fmtSize(f.size)}</span>
-              </a>
+            <li key={f.name} className={isImageName(f.name) ? 'img' : undefined}>
+              {isImageName(f.name) ? <ShareThumb file={f} client={client} onOpen={onOpen} /> : null}
+              {isImageName(f.name) ? (
+                // 圖對 end user 就是「一張圖」：不顯示副檔名、不給原檔，動作只有「分享／存到手機」。
+                <div className="sh-file-png">
+                  <button type="button" className="sh-file-name sh-file-open" onClick={() => onOpen(f)}>
+                    {displayName(f.name)}
+                  </button>
+                  <ShareButton file={f} client={client} />
+                </div>
+              ) : (
+                <a href={client.fileUrl(f.name)} download={f.name} rel="noreferrer">
+                  <span className="sh-file-name">{f.name}</span>
+                  <span className="sh-file-size">{fmtSize(f.size)}</span>
+                </a>
+              )}
             </li>
           ))}
         </ul>
@@ -99,6 +138,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [viewing, setViewing] = useState<ShareFile | null>(null)
+  const closeViewer = useCallback(() => setViewing(null), [])
   const [poll, setPoll] = useState(false)
   const [hasMore, setHasMore] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -167,6 +208,15 @@ export function ShareApp({ client }: { client: ShareClient }) {
         // 只在這一輪送出之後的 working／idle 清掉。POST resolve 不再把 awaiting 設回 true。
         if (sendAt.current) setAwaiting(false)
       },
+      // 漏了事件或對話被倒回：整頁重抓，以重抓結果取代手上的清單（倒回的那幾則要消失，合併不會刪）。
+      onResync: () => {
+        client.messages().then((page) => {
+          sawOlder.current = false
+          setMessages(mergeMessages([], page.messages))
+          applyPage(page)
+          void loadFiles()
+        }, fail)
+      },
       onDown: () => setPoll(true),
       onUp: () => setPoll(false),
     })
@@ -186,6 +236,8 @@ export function ShareApp({ client }: { client: ShareClient }) {
   }, [poll, state, load])
 
   const busy = status === 'working' || awaiting
+  // bot 這一回合做的圖（與回覆裡提到的）直接畫在那則回覆下面。
+  const imagesOf = useMemo(() => imagesByMessage(messages, files), [messages, files])
 
   useEffect(() => {
     const el = listRef.current
@@ -320,7 +372,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
           {state === 'loading' ? <p className="sh-empty">載入中…</p> : null}
           {state === 'ready' && messages.length === 0 ? <p className="sh-empty">打個招呼開始對話吧。</p> : null}
           {messages.map((m) => (
-            <Bubble key={m.id} m={m} />
+            <Bubble key={m.id} m={m} images={imagesOf.get(m.id) ?? NO_IMAGES} client={client} onOpen={setViewing} />
           ))}
           {busy ? (
             <div className="sh-msg assistant">
@@ -336,7 +388,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
           ) : null}
         </div>
         <aside className={`sh-side${filesOpen ? ' open' : ''}`}>
-          <FilesPanel files={files} client={client} onRefresh={() => void loadFiles()} onClose={() => setFilesOpen(false)} />
+          <FilesPanel files={files} client={client} onRefresh={() => void loadFiles()} onClose={() => setFilesOpen(false)} onOpen={setViewing} />
         </aside>
       </div>
       <form
@@ -393,6 +445,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
           </p>
         ) : null}
       </form>
+      {viewing ? <ShareImageViewer file={viewing} client={client} onClose={closeViewer} /> : null}
     </div>
   )
 }

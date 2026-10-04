@@ -339,37 +339,79 @@ async fn add_message(app: &Arc<App>, bot_id: &str, role: &str, content: &str, re
 }
 
 #[tokio::test]
-async fn the_history_only_shows_user_and_assistant_text() {
+async fn the_history_only_shows_the_end_user_and_the_bot() {
     let e = tt::env().await;
     let b = restricted_bot(&e.app, &e.project_id, "pub").await;
     let token = shared(&e.app, &b.id).await;
-    add_message(&e.app, &b.id, "user", "主人自己打的", None).await;
+    add_message(&e.app, &b.id, "user", "主人自己打的後台交代", None).await;
     add_message(&e.app, &b.id, "system", "agent md 有問題：/home/ubuntu/secret", None).await;
     add_message(&e.app, &b.id, "user", &format!("{}看這個\n\n{}\n- inbox/01ARZ3NDEKTSV4RRFFQ69G5FAV-報表.csv", portal::SHARE_PREFIX, portal::ATTACH_MARK), Some(SHARE_SENDER)).await;
-    add_message(&e.app, &b.id, "assistant", "好的", None).await;
+    add_message(&e.app, &b.id, "assistant", &format!("好的，你說「{}看這個」{}", portal::SHARE_PREFIX, portal::ATTACH_MARK), None).await;
     add_message(&e.app, &b.id, "user", "AGM 派來的", Some("01OTHERBOTID")).await;
+    add_message(&e.app, &b.id, "user", "倒回掉的那句", Some(SHARE_SENDER)).await;
+    add_message(&e.app, &b.id, "assistant", "倒回掉的回覆", None).await;
+    sqlx::query("UPDATE messages SET rewound_at = ? WHERE content LIKE '倒回掉的%'").bind(db::now()).execute(&e.app.db).await.unwrap();
     let base = serve(portal::router(e.app.clone())).await;
     let v: Value = client().get(format!("{base}/s/{token}/api/messages")).send().await.unwrap().json().await.unwrap();
     let msgs = v["messages"].as_array().unwrap();
-    assert_eq!(msgs.len(), 4, "系統訊息不給：{v}");
+    assert_eq!(msgs.len(), 2, "只有 end user 與 bot：系統、擁有者、別顆 bot 轉來的、倒回的都不給：{v}");
     for m in msgs {
         let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["attachments", "by", "created_at", "id", "role", "text"], "只有這幾個欄位：{m}");
     }
     let text = v.to_string();
-    for leak in ["SECRET-SNAPSHOT", "/home/ubuntu", "01OTHERBOTID", "conversation_id", "turn_id"] {
+    for leak in ["SECRET-SNAPSHOT", "/home/ubuntu", "01OTHERBOTID", "conversation_id", "turn_id", "主人", "AGM", "倒回", "owner", "分享使用者"] {
         assert!(!text.contains(leak), "{leak} 漏出去了：{text}");
     }
-    assert_eq!(msgs[0]["by"], "owner");
-    assert_eq!(msgs[1]["by"], "share");
-    assert_eq!(msgs[1]["text"], "看這個");
-    assert_eq!(msgs[1]["attachments"], json!([{"name": "報表.csv"}]));
+    assert_eq!(msgs[0]["by"], "share");
+    assert_eq!(msgs[0]["text"], "看這個", "end user 看到的是自己打的原文，沒有前綴");
+    assert_eq!(msgs[0]["attachments"], json!([{"name": "報表.csv"}]));
+    assert_eq!(msgs[1]["by"], "bot");
+    assert_eq!(msgs[1]["text"], "好的，你說「看這個」", "bot 照抄的前綴與標記行顯示前拿掉");
     assert_eq!(v["bot_name"], "pub");
     assert_eq!(v["status"], "offline");
-    assert_eq!(msgs[2]["by"], "bot");
     // 分頁：before 只能是這段對話裡的訊息。
     let r = client().get(format!("{base}/s/{token}/api/messages?before=01NOTAMESSAGE")).send().await.unwrap();
     assert_eq!(r.status(), 400);
+}
+
+#[tokio::test]
+async fn the_event_stream_only_pushes_the_end_user_and_the_bot() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let token = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let mut r = client().get(format!("{base}/s/{token}/api/events")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let msg = |id: &str, role: &str, content: &str, relay: Option<&str>| {
+        json!({"bot_id": b.id, "message": {"id": id, "role": role, "content": content, "relay_from": relay, "created_at": "2026-10-04T00:00:00Z"}})
+    };
+    // 先等連上（第一個 status 事件），之後發的事件才收得到。
+    let mut seen = String::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !seen.contains("event: status") {
+            seen.push_str(&String::from_utf8_lossy(&r.chunk().await.unwrap().unwrap()));
+        }
+    })
+    .await
+    .unwrap();
+    e.app.emit("message_added", msg("m-owner", "user", "後台交代：別提價格", None)).await;
+    e.app.emit("message_added", msg("m-relay", "user", "AGM 派來的", Some("01OTHERBOTID"))).await;
+    e.app.emit("message_added", msg("m-share", "user", &format!("{}早安", portal::SHARE_PREFIX), Some(SHARE_SENDER))).await;
+    e.app.emit("message_added", msg("m-bot", "assistant", "早安！", None)).await;
+    e.app.emit("messages_rewound", json!({"bot_id": b.id, "message_id": "m-share"})).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !seen.contains("event: resync") {
+            seen.push_str(&String::from_utf8_lossy(&r.chunk().await.unwrap().unwrap()));
+        }
+    })
+    .await
+    .expect("倒回要送 resync");
+    assert!(seen.contains("m-share") && seen.contains("m-bot"), "{seen}");
+    assert!(seen.contains("\"text\":\"早安\""), "前綴拿掉：{seen}");
+    for leak in ["m-owner", "後台", "m-relay", "AGM", "分享使用者", "owner"] {
+        assert!(!seen.contains(leak), "{leak} 不能推給 end user：{seen}");
+    }
 }
 
 #[tokio::test]
@@ -901,6 +943,50 @@ async fn downloads_come_only_from_the_bots_outbox_as_attachments() {
         let r = c.get(format!("{base}/s/{token}/api/files/{bad}")).send().await.unwrap();
         assert_eq!(r.status(), 404, "{bad}");
     }
+}
+
+#[tokio::test]
+async fn inline_only_serves_images_inline_and_sandboxed() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+    std::fs::write(outbox.join("早安圖卡.svg"), "<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>").unwrap();
+    std::fs::write(outbox.join("photo.PNG"), b"\x89PNG\r\n").unwrap();
+    std::fs::write(outbox.join("report.html"), "<script>alert(1)</script>").unwrap();
+    std::fs::write(outbox.join("notes.txt"), "hi").unwrap();
+    std::fs::write(outbox.join("doc.pdf"), "%PDF-1.4").unwrap();
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+    let svg = c.get(format!("{base}/s/{token}/api/files/%E6%97%A9%E5%AE%89%E5%9C%96%E5%8D%A1.svg?inline=1")).send().await.unwrap();
+    assert_eq!(svg.status(), 200);
+    let h = svg.headers();
+    assert_eq!(h["content-type"], "image/svg+xml");
+    assert!(h["content-disposition"].to_str().unwrap().starts_with("inline; "), "{:?}", h["content-disposition"]);
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    let csp = h["content-security-policy"].to_str().unwrap();
+    assert!(csp.starts_with("sandbox;") && !csp.contains("allow-scripts") && csp.contains("default-src 'none'"), "{csp}");
+    assert_eq!(h["cache-control"], "no-store");
+    let png = c.get(format!("{base}/s/{token}/api/files/photo.PNG?inline=1")).send().await.unwrap();
+    assert_eq!(png.headers()["content-type"], "image/png");
+    assert!(png.headers()["content-disposition"].to_str().unwrap().starts_with("inline"));
+    // 沒帶 inline：SVG 照舊是 octet-stream 附件、頁面的 CSP。
+    let plain = c.get(format!("{base}/s/{token}/api/files/%E6%97%A9%E5%AE%89%E5%9C%96%E5%8D%A1.svg")).send().await.unwrap();
+    assert_eq!(plain.headers()["content-type"], "application/octet-stream");
+    assert!(plain.headers()["content-disposition"].to_str().unwrap().starts_with("attachment"));
+    assert!(plain.headers()["content-security-policy"].to_str().unwrap().starts_with("default-src 'self'"));
+    // 非圖片帶 inline=1（或 inline=true）也不能 inline：HTML 不能在這個 origin 被當文件打開。
+    for (name, inline) in [("report.html", "1"), ("notes.txt", "1"), ("doc.pdf", "1"), ("photo.PNG", "true")] {
+        let r = c.get(format!("{base}/s/{token}/api/files/{name}?inline={inline}")).send().await.unwrap();
+        assert_eq!(r.status(), 200, "{name}");
+        assert!(r.headers()["content-disposition"].to_str().unwrap().starts_with("attachment"), "{name} 不能 inline");
+        assert!(r.headers()["content-security-policy"].to_str().unwrap().starts_with("default-src 'self'"), "{name}");
+        if name == "report.html" {
+            assert_eq!(r.headers()["content-type"], "application/octet-stream");
+        }
+    }
+    let gone = c.get(format!("{base}/s/{token}/api/files/missing.svg?inline=1")).send().await.unwrap();
+    assert_eq!(gone.status(), 404);
 }
 
 #[tokio::test]

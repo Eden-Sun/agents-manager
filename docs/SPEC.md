@@ -4740,7 +4740,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - token 錯、分享關了：一律同一個 404。每個回應 `Cache-Control: no-store`（`/assets` 例外：檔名有雜湊）、`Referrer-Policy: no-referrer`、`nosniff`、
   `X-Frame-Options: DENY`、只允許 `'self'` 的 CSP（沒有 inline script／style）；不設任何 CORS 標頭。
 - 未成形的 token 不查 DB；有效形狀的 token 查詢全入口共用 8 個併發名額，滿額回一般 503。成功驗證後的 `last_used_at` 是遙測：每顆 bot 每分鐘最多檢查一次，先用唯讀查詢看是否已新鮮，寫入失敗不影響請求。
-- 對話：完整歷史，但只有 user／assistant，只給 id、role、誰送的（`share`／`owner`／`bot`）、文字、時間、附件名；系統訊息、工具細節、終端快照、轉寄來源的 bot id 都不給。
+- 對話：**只有 end user 與 bot 的對話**（使用者 2026-10-04：「這個 share 就該是 for user-only」）——end user 送的 user 訊息（`relay_from = share`）與 assistant；倒回的（`rewound_at` 非空）、擁有者從 AG Man 送的、別顆 bot 轉來的一律不給，列表與 SSE 同一條規則（`shown_to_share`）。只給 id、role、誰送的（`share`／`bot`）、文字、時間、附件名；系統訊息、工具細節、終端快照、轉寄來源的 bot id 都不給。end user 的訊息顯示時拿掉 `〔分享使用者〕 ` 前綴（她看到的是自己打的原文）；bot 回覆若照抄了前綴或附件標記行也拿掉（只過濾顯示，不改 bot 與 DB）。擁有者倒回對話時 SSE 送 `resync`，分享頁整頁重抓並取代手上的清單。
 - 送訊息：走「沒在跑就先落地再啟動、忙就排隊」那條路（§6.3、`start_if_stopped`＋`queue_if_busy`），`relay_from` 記哨符 `share`（跟 `daemon` 同類）。
   DB 的 `messages.source` 照存 `web`（CHECK 不收新值），輸出時 user 訊息的 `relay_from = share` 報 `source: "share"`，主 UI 標「🔗 分享使用者」。
   每則 ≤ 8000 字、換行以外的控制字元拿掉（tab 換成空白）；每個分享每分鐘 10 次（429＋`Retry-After`）。便宜的 JSON 形狀、文字長度與空訊息檢查在扣額前；之後的附件檔案檢查也會扣額，即使附件不存在。失敗的細節不給外面看。
@@ -4752,6 +4752,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   內容要對得上（檔頭；文字檔要是 UTF-8、沒有 NUL；Office 要有 `[Content_Types].xml`、`_rels/.rels` 與對應的 Word／Excel／PowerPoint 主文件項目）。ZIP central directory 限 4096 項與 1 MiB，不解壓檔案，拒絕重疊、異常路徑與超過 512 MiB 的展開總量；回傳 Office 專屬 MIME。呼叫端的 Content-Type 不採信。存成 `<ulid>-<檔名>`（0600），`inbox/` 逐層 `O_NOFOLLOW` 打開，被換成符號連結就不寫。
   送訊息時帶的附件 id 必須真的在 `inbox/`，路徑以固定的標記行附在給 bot 的文字後面（對話列表再拆回檔名）。
 - 下載：只有這顆 bot 的 outbox 第一層，沿用 outbox 的擋法（金鑰／DB／隱藏檔不列不給、fd-bound 開檔）與下載標頭（attachment、白名單外 octet-stream、nosniff）；不給目錄路徑。列表只有 outbox 尚未建立時回空清單；可信目錄、列舉、檔案讀取或背景工作失敗回一般 503，不把不完整結果當空清單。真正不存在或遭黑名單擋下的單檔下載仍回 404。
+  `?inline=1` 只對圖片類（svg／png／jpg／jpeg／gif／webp）回 inline＋正確 MIME＋`nosniff`＋`sandbox` CSP（不帶 `allow-scripts`），給分享頁 `<img>` 預覽；其他種類一律照舊 attachment（測試 `inline_only_serves_images_inline_and_sandboxed` 釘住）。入口的頁面 CSP 只對這份 sandbox CSP 讓路，其餘回應一律覆蓋成頁面的。
 - SSE：`status`（連上時先送一次）、`message`、`resync`（漏了，請重抓）；全部分享加起來同時 32 條，每顆 bot 同時最多 4 條；滿額時該分享回 429，其他分享仍可連線。每個送出的事件都在 bot 鎖內重驗 token；每 30 秒或被叫醒時也重新確認，關閉連線即歸還兩層名額。
 
 ### 20.4 前端
@@ -4769,6 +4770,14 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - token 從網址 `/s/<token>` 取（dev／mock 用 `share.html?token=`）；只打 `/s/<token>/api/…`、不帶 cookie 與 referrer。
 - 畫面：標題（bot 名稱＋在線／思考中）、對話串（bot 回覆用 GFM，但不吃 HTML、不載圖片，連結 `noopener noreferrer`；超過 2 萬字或引用／縮排超過 `markdownGuard` 上限時改純文字，不提供「仍用 Markdown」；單則轉換失敗只退回那則）、輸入框（桌機 Enter 送出、手機 Enter 換行）、📎 上傳（單檔 25 MB）、「bot 給你的檔案」（手機是底部抽屜，桌機 ≥900px 是右側欄）。
   `has_more` 時可「載入較早訊息」（`before`＝目前最舊 id；只送單一 id，斜線與空白直接丟掉），一頁最多留 100 則、單則超過 10 萬字截斷。載入舊頁不把視窗捲回最底。連結只留 http／https。送出當下就顯示「思考中」；這一輪 SSE 或之後抓到的 idle 會清掉，POST 較晚 resolve 不會再打開。SSE 任一 error（含仍在 CONNECTING）就改輪詢，`open` 後停；輪詢看到 404 關掉 EventSource 並畫失效。404 一律畫「這個分享連結已失效」，不分 token 錯或分享已關。深淺色跟系統走。
+  **圖片**（使用者 2026-10-04）：分享頁的使用者是不懂電腦的長輩，**畫面上不出現任何格式名稱或技術字**（PNG、SVG、下載、檔案格式…），也不出現「擁有者」「管理者」「後台」。
+  受限 bot 沒有 Bash，做圖卡只能寫 SVG，所以在瀏覽器把它轉成點陣圖再交出去；SVG 原檔從不出現在畫面上。
+  - **圖直接出現在對話裡**：bot 那一回合在 outbox 新增／更新的圖，以檔案時間找它之後的第一則訊息——是 bot 的就畫在那則下面；是 end user 的（或後面沒有訊息）就看檔案之前緊鄰的那則，是 bot 的（回完話才寫的圖）畫在那則、是 end user 的（這一回合還沒回）先不畫。bot 回覆文字裡提到的檔名（要真的在 outbox 裡）也畫。每則最多 6 張，`<img src="…?inline=1&v=<時間-大小>">`，點了放大（Esc／點背景關）。
+  - 每張圖下面一顆大按鈕：手機（`pointer: coarse`）且 `navigator.canShare({files})` 時叫「**分享**」（Web Share API 帶圖片檔：傳 LINE、存相簿；使用者取消不算失敗），否則叫「**存到手機**」（直接存點陣圖）。點陣圖原樣交出；SVG 交出的是 `<同名>.png`。對話、「bot 給你的檔案」、放大檢視都是同一顆。
+  - 「bot 給你的檔案」裡的圖：縮圖＋名稱（不顯示副檔名）＋同一顆按鈕，不給原檔連結；非圖片照舊是下載連結。
+  - SVG 轉點陣圖：抓原檔 → 根 `<svg>` 沒有 width／height 就從 viewBox 補上 → 經 blob: 的 `<img>` 畫到 canvas，2x 解析度（單邊 ≤ 8192、總像素 ≤ 16M），背景照 SVG 原樣。每個檔（同版本）只轉一次、一出現就先轉好（點陣圖也先抓好），因為 `navigator.share` 要在點擊的同一個手勢裡呼叫。
+  - 安全：SVG 一律只經 `<img>`（blob: 或同源 `?inline=1`）或 canvas，**絕不**插進 DOM；引用外部資源（`#id`／`data:` 以外的 href、`url()`、`@import`）或 `<foreignObject>` 的 SVG 不轉（`<img>` 不載外部資源、canvas 可能被汙染），只顯示「這張圖沒辦法分享」。頁面 CSP 本來就有 `img-src 'self' data: blob:`，不必放寬。
+  - end user 訊息裡 daemon 加的前綴、附件標記，顯示前前端再拿掉一次（daemon 已拿掉；舊版 daemon 或 bot 照抄時也不會出現）。SSE 收到 `resync` 就整頁重抓並取代手上的清單。
   一段對話同時只排一則：status 是 working／blocked／starting（含剛送出還沒回）時送出鈕停用、下方寫「等 bot 回完再送」，仍可先打；萬一還是 409 `not_accepted`，字與附件留在輸入框、提示等回完再送，並重抓一次狀態。
 
 ## 附錄 A：herdr socket（0.8.2 / protocol 20）
