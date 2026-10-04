@@ -517,6 +517,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     };
     // Runs are adopted by now, so any Turn that outlived the restart can get its poller back.
     reconcile::rearm_progress(&app).await;
+    lifecycle::relay_watch::rearm_host(&app, config::LOCAL_HOST).await;
     // #564：上一顆 daemon 沒收尾的 codex 安裝，等那台的安裝鎖放掉再收尾（不重跑安裝）。
     cli_update::recover_at_startup(&app).await;
     // #61: directories of bots deleted before every deletion path purged them.

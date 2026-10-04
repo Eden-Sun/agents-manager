@@ -253,16 +253,92 @@ pub(crate) async fn on_resolved_announce(app: &Arc<App>, from_bot: &str, text: &
         return;
     }
     let turn_id = open_turn(app, &run, from_bot, text).await;
-    let mut w = Watch { run_id: run.id.clone(), bot_id: run.bot_id.clone(), text: text.to_string(), turn_id, started: Instant::now(), held_since: None, nudges: 0, rev_at_nudge: None };
+    spawn_watch(
+        app,
+        Watch { run_id: run.id.clone(), bot_id: run.bot_id.clone(), text: text.to_string(), turn_id, started: Instant::now(), held_since: None, nudges: 0, rev_at_nudge: None },
+    );
+}
+
+/// Restore composer delivery watchers from the durable relay turns after startup or host reconnect.
+pub(crate) async fn rearm_host(app: &Arc<App>, host: &str) {
+    match restore_open_watches(app, host).await {
+        Ok(watches) => {
+            for watch in watches {
+                spawn_watch(app, watch);
+            }
+        }
+        Err(error) => tracing::warn!(%error, host, "could not restore open relay delivery watchers"),
+    }
+}
+
+async fn restore_open_watches(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<Watch>> {
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT t.id, r.id, r.bot_id, m.content
+           FROM turns t
+           JOIN runs r ON r.id = t.run_id
+           JOIN bots b ON b.id = r.bot_id
+           JOIN projects p ON p.id = b.project_id
+           JOIN messages m ON m.turn_id = t.id AND m.role = 'user' AND m.relay_from IS NOT NULL
+          WHERE t.origin = 'external' AND t.status = 'in_flight'
+            AND r.state = 'running' AND b.deleted_at IS NULL AND p.host = ?1",
+    )
+    .bind(host)
+    .fetch_all(&app.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(turn_id, run_id, bot_id, text)| Watch {
+            run_id,
+            bot_id,
+            text,
+            turn_id: Some(turn_id),
+            started: Instant::now(),
+            held_since: None,
+            nudges: 0,
+            rev_at_nudge: None,
+        })
+        .collect())
+}
+
+fn spawn_watch(app: &Arc<App>, mut watch: Watch) {
+    if app.shutdown.is_cancelled() {
+        return;
+    }
+    let key = watch.turn_id.clone().unwrap_or_else(|| format!("{}:{}", watch.run_id, db::ulid()));
+    {
+        let mut active = app.relay_watchers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !active.insert(key.clone()) {
+            return;
+        }
+    }
     let app = app.clone();
-    tokio::spawn(async move {
+    let tasks = app.background_tasks.clone();
+    tasks.spawn(async move {
+        let _registration = WatchRegistration { app: app.clone(), key };
         loop {
-            tokio::time::sleep(POLL).await;
-            if matches!(step(&app, &mut w, Instant::now()).await, Step::Done | Step::GaveUp) {
+            tokio::select! {
+                _ = app.shutdown.cancelled() => return,
+                _ = tokio::time::sleep(POLL) => {}
+            }
+            // Do not cancel an in-flight pane RPC or DB update: graceful shutdown joins this
+            // tracked task after the current tick completes, then it exits without another poll.
+            let result = step(&app, &mut watch, Instant::now()).await;
+            if app.shutdown.is_cancelled() || matches!(result, Step::Done | Step::GaveUp) {
                 return;
             }
         }
     });
+}
+
+struct WatchRegistration {
+    app: Arc<App>,
+    key: String,
+}
+
+impl Drop for WatchRegistration {
+    fn drop(&mut self) {
+        self.app.relay_watchers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.key);
+    }
 }
 
 #[cfg(test)]
@@ -319,6 +395,43 @@ mod tests {
         assert_eq!(resolve(&app, &sender.id, "agent").await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "agent 名對得到");
         assert_eq!(resolve(&app, &sender.id, &f.pane).await.unwrap().map(|r| r.id), Some(f.run_id.clone()), "pane id 對得到");
         assert!(resolve(&app, &sender.id, "沒有這個人").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_relay_watch_is_tracked_and_stops_at_graceful_shutdown() {
+        let f = fixture("tracked-relay-watch").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "tracked-relay-sender").await;
+        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+
+        on_resolved_announce(&app, &sender.id, TEXT, Some(run)).await;
+        assert_eq!(app.background_tasks.len(), 1, "the delivery watcher must belong to the daemon shutdown barrier");
+
+        app.shutdown.cancel();
+        app.background_tasks.close();
+        tokio::time::timeout(Duration::from_secs(1), app.background_tasks.wait())
+            .await
+            .expect("a relay watcher must leave promptly at shutdown");
+        assert_eq!(app.background_tasks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_open_external_turn_rearms_its_composer_watch_after_restart() {
+        let f = fixture("rearmed-relay-watch").await;
+        let app = f.env.app.clone();
+        let sender = tt::claude_bot(&app, &f.env.project_id, "rearmed-relay-sender").await;
+        let run = db::run(&app.db, &f.run_id).await.unwrap().unwrap();
+        let turn_id = open_turn(&app, &run, &sender.id, TEXT).await.expect("persist the external turn before shutdown");
+        f.env.herdr.live_pane(&f.pane, tt::LivePane { composer: vec![TEXT.into()], width: Some(120), ..Default::default() });
+
+        let mut restored = restore_open_watches(&app, "local").await.unwrap();
+        assert_eq!(restored.len(), 1, "startup must reconstruct the open external turn from SQLite");
+        let mut watch = restored.pop().unwrap();
+        assert_eq!(watch.turn_id.as_deref(), Some(turn_id.as_str()));
+        let t0 = Instant::now();
+        assert_eq!(step(&app, &mut watch, t0).await, Step::Waiting, "first observe the restored composer");
+        assert_eq!(step(&app, &mut watch, t0 + NUDGE_AFTER).await, Step::Nudged, "a prompt left in the composer must still receive Enter");
+        assert_eq!(keys_sent(&f), 1);
     }
 
     #[tokio::test]
