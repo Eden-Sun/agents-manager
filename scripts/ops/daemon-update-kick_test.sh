@@ -343,6 +343,11 @@ run >/dev/null
 check "推 swap_binary_sha_mismatch" "swap_binary_sha_mismatch" "$AGM_DIR/alerts.log"
 check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
 check_no "sha 不符不記進 rejected" "$C3" "$AGM_DIR/daemon-update.rejected"
+check_eq "rc=10 清除錯誤 binary 的 build marker" "no" "$([ -f "$ROOT/deploy/target/release/.built-for" ] && echo yes || echo no)"
+export STUB_SWAP_RC=0
+run >/dev/null
+check_eq "rc=10 後同 sha 會重建再試" "2" "$(count 'cargo build --locked' "$AGM_DIR/build.log")"
+check "同 sha 重建後可成功部署" "--sha $C3" "$AGM_DIR/swap.log"
 teardown
 
 # 17. 殘留鎖（執行者已不在）超過門檻就回收；還活著的執行者則跳過。
