@@ -408,7 +408,7 @@ Vite + React + TypeScript + Zustand，只做 daemon 狀態的投影；正式版 
 - **provider 要等於 bot 的 kind**（2026-09-22）：hook 的路由只靠 `bot_id`＋`hook_token`，而這兩個是 pane 環境變數、任何子行程都繼承得到；claude bot 的 pane 裡跑 `codex exec` 帶 notify，codex 的 thread-id 就會被記成這顆 claude bot 的 `native_session_id` 還標 `verified`，之後 `--resume` 一個不存在的 id 立刻退出。所以 `/hook/{provider}` 與 spool 重播都先比 provider 與 `bots.kind`，不一致就丟掉（HTTP 409 `provider_mismatch`）。救援路徑：`?resume=native&session=<id>` 指名接回真正那段。
 
 **Claude Code**：`--settings <abs>`，檔案 `~/.config/agents-manager/bots/<bot_id>/claude-settings.json`，註冊 `SessionStart`、`Stop`、`StopFailure`、
-`SubagentStart`、`SubagentStop` 五個 hook，command 為 `/abs/agents-managerd hook claude --bot <bot_id> --token <t> --port <port>`
+`SubagentStart`、`SubagentStop` 五個 hook，另有 `PostToolUse` 的 Bash／AskUserQuestion matcher；command 為 `/abs/agents-managerd hook claude --bot <bot_id> --token <t> --port <port>`，每個 command hook 的 timeout 設為 5 秒。
 （五個指向同一支，分類在 daemon 的 `hookrecv::classify` 裡做——`hook_cmd.rs` 是通用轉發，不看事件名字）。
 `stop_hook_active = true` 的 Stop 忽略。
 stdin：SessionStart 含 `session_id`、`transcript_path`、`cwd`；Stop 另含 `prompt_id`、`last_assistant_message`、`stop_hook_active`。
@@ -2948,12 +2948,12 @@ label = "foo@m4p"
   **正在跑的遠端 bot 要等它自己重啟才換到新腳本**（上一點）。
 - **Stop／StopFailure 另帶已答完的 `AskUserQuestion`**（2026-10-02，§6.7a）：同一條件（`claude`、沒被截斷、有 `python3`）下，另一支 python 讀本機 transcript 尾巴 512 KiB，把每個有 `tool_result` 的提問
   整理成 `agm_asks: [{id, at, items:[{header?, question, answer|null, notes?}]}]`（最多最後 20 筆、整包超過 256 KiB 不帶；答案帶孤立 surrogate 時整包不帶，理由同 `agm_user_text`）。讀檔的路徑邊界與 `agm_user_text` 同一套。沒有 `python3`、讀不到檔：payload 原樣。
-- **腳本不做語意判斷**：只用最粗的字串比對決定要不要報 idle，其餘照寫 spool，分類只在 `hookrecv::classify`。遠端腳本沒有測試；漏報最多晚一點被掃到，錯分類會吃掉訊息。
-- **先寫 spool，再 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated, run_id}`；`run_id` 取 `AM_RUN_ID`、只留 `[A-Za-z0-9_-]`，沒有就是空字串）。每一則寫進 `hook-spool.d/` 底下自己的檔（暫存檔寫完再 `mv` 成 `*.json`）；drain 只讀 `*.json`，寫到一半的 `.tmp.*` 碰不到。超過 1 MiB 被截斷時 payload 不再原樣嵌進去（半截物件仍以 `{` 開頭，整行會變無效 JSON）：改包成 `{"raw":"..."}`，`truncated` 仍是 `true`（#653）。舊的 `hook-spool.jsonl` 只留給還沒換腳本的那一輪，drain 仍會收。
+- **腳本的狀態提示是 best-effort**：有 `python3` 時只解析頂層 JSON 欄位，決定是否立即喚醒 host；事件缺漏、格式錯誤或未知時不猜狀態，照寫 spool 讓 scanner／終端偵測補上。payload 的權威分類仍只在 `hookrecv::classify`。有效物件會壓成單行 JSON；無效 UTF-8 與孤立 surrogate 會替換成 U+FFFD，格式錯誤或非物件 payload 會包成 `{"raw":"…"}`，確保 spool 行仍是合法 UTF-8 JSON。
+- **先寫 spool，再背景執行 `report-agent`**（反過來 daemon 收到事件時 spool 還沒那行）。herdr RPC 預設最長等 15 秒，hook 不等它；失敗由 spool scanner／終端偵測補上。spool 行格式同 §4.4（`{bot_id, provider, payload, received_at, truncated, run_id}`；`run_id` 取 `AM_RUN_ID`、只留 `[A-Za-z0-9_-]`，沒有就是空字串）。每一則寫進 `hook-spool.d/` 底下自己的檔（暫存檔寫完再 `mv` 成 `*.json`）；drain 只讀 `*.json`，寫到一半的 `.tmp.*` 碰不到。超過 1 MiB 被截斷時 payload 不再原樣嵌進去（半截物件仍以 `{` 開頭，整行會變無效 JSON）：改包成 `{"raw":"..."}`，`truncated` 仍是 `true`（#653）。舊的 `hook-spool.jsonl` 只留給還沒換腳本的那一輪，drain 仍會收。
 - `report-agent` 欄位：`$HERDR_PANE_ID`（沒有就跳過上報）；`--source agents-manager:<bot_id>`；`--agent <kind>`；`--state` 只送 `idle`（`working` 交給終端偵測，硬報會互蓋）；
   `--seq` 有 `python3` 用 `time.time_ns()`，否則 `date +%s`×1000 + `$DIR/hook-seq` 計數；`--agent-session-id`／`--agent-session-path` 有才帶；`--message` 不填。
 - 找 herdr：`${AM_REAL_HERDR:-}` → `command -v herdr`；都沒有就只寫 spool、記 `hook.log`、exit 0（30 秒掃描會補）。`HERDR_SESSION` 有值時帶 `--session`。
-- 契約同 §4.4：≤ 3 秒、永遠 exit 0、空 stdout（grok 的 Stop hook 會把 stdout 當 decision）。
+- 契約同 §4.4：≤ 3 秒、永遠 exit 0、空 stdout（grok 的 Stop hook 會把 stdout 當 decision）；本機 Claude 每個 command hook 另設 5 秒硬 timeout。
 - **權限**：bot 目錄 0700、`hook.sh` 0700、`claude-settings.json`／spool／`.replaying`／`hook-status.json` 0600（#494、#501）。
   腳本自己 `umask 077`（跑使用者的 statusLine 命令前還原），安裝那一趟另外 `chmod` 一次，所以升級上來的
   0755／0644 也會被修回去。spool 裡是完整的 hook payload，不能交給那台機器的 umask 決定誰讀得到。

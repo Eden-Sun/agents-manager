@@ -528,7 +528,10 @@ else
 fi
 [ -n "$SID" ] && set -- "$@" --agent-session-id "$SID"
 [ -n "$TP" ] && set -- "$@" --agent-session-path "$TP"
-am_herdr "$@" >/dev/null 2>>"$DIR/hook.log"
+# Herdr's client-side RPC deadline is 15 s, longer than provider hook budgets. The durable spool
+# is already visible; let the report wake the drain in the background so a slow socket cannot
+# hold Claude, Codex, or Grok open. The scanner and terminal poller cover a missed report.
+am_herdr "$@" </dev/null >/dev/null 2>>"$DIR/hook.log" &
 exit 0
 "#;
 
@@ -905,29 +908,29 @@ fn claude_settings(hook_cmd: &str, statusline: &str, wants_remote: bool, auto_ap
         "permissions": {"defaultMode": if auto_approve { "bypassPermissions" } else { "default" }},
         "remoteControlAtStartup": wants_remote,
         "hooks": {
-            "SessionStart": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
+            "SessionStart": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             // 回合**失敗**收尾（API／auth／額度…）也是一級訊號，不是只有答完才算結束（issue #79）。
             // 沒有它的話，失敗的回合要等 §4.3 備援或 stuck watchdog 才被發現，中間一直掛在 in_flight。
             // 舊版 claude 不認得這個鍵就忽略它，不影響既有兩個 hook。
-            "StopFailure": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
+            "StopFailure": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             // issue #82：claude 原生的 in-process Task 工具子代理的第二路訊號（`agent_id`／
             // `agent_type`／`agent_transcript_path`），純可見性，寫進 `runs.subagent_json`——**不是**
             // §6.5a 血緣認領要的那種子 agent：這裡的「子代理」是同一個行程裡的 Task 工具呼叫，沒有自己
             // 的 pane；AGM 的 child bot（`herdr pane split` 開出來的獨立 pane）本來就沒有 hook（§4.3），
             // 這兩個鍵永遠不會替 child bot 觸發，也就不可能影響哪個 pane 歸誰。
-            "SubagentStart": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
-            "SubagentStop": [{"hooks": [{"type": "command", "command": hook_cmd}]}],
+            "SubagentStart": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
+            "SubagentStop": [{"hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}],
             // issue #94：這顆 bot 自己的 Bash 工具跑 `herdr pane split`／`agent start` 時，那條指令的
             // stdout 就是 herdr 自己回的 JSON（`{"id":"cli:pane:split"/"cli:agent:start",
             // "result":{...,"pane_id":...}}`），daemon 讀得到「這個 pane 是我剛剛開的」這個事實，
             // 比 §6.5a 的同 tab／名字前綴推斷更早、更精確（`spawn_hints.rs`）。`matcher: "Bash"` 只在
             // 跑 shell 指令時觸發，不是每個工具呼叫都送一次。
             "PostToolUse": [
-                {"matcher": "Bash", "hooks": [{"type": "command", "command": hook_cmd}]},
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]},
                 // 2026-10-02：使用者答完 `AskUserQuestion` 的當下就把題目與答案記進對話（`ask_answers.rs`）。回合被中斷時
                 // 沒有 Stop，這是唯一當下就留得下來的一條路；一般情況由回合結束時讀 transcript 補。
-                {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd}]}
+                {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": hook_cmd, "timeout": 5}]}
             ]
         },
         "statusLine": {"type": "command", "command": statusline},
@@ -1487,8 +1490,19 @@ mod hook_cmd_parts_tests {
         }
     }
 
-    /// 遠端走 `hook.sh`：失敗收尾的回合一樣不再是 working，要向 herdr 報 idle（`"Stop"` 那個
-    /// pattern 帶了收尾的引號，配不到 `StopFailure`）。
+    #[test]
+    fn every_claude_command_hook_has_a_five_second_timeout() {
+        let v = claude_settings("hook", "sl", false, true);
+        for (event, groups) in v["hooks"].as_object().expect("hooks") {
+            for group in groups.as_array().expect("hook groups") {
+                for hook in group["hooks"].as_array().expect("hooks in group") {
+                    assert_eq!(hook["timeout"], 5, "{event}: {hook}");
+                }
+            }
+        }
+    }
+
+    /// Remote event parsing keeps the failure end event as an idle hint too.
     #[test]
     fn the_remote_dispatcher_reports_idle_for_a_failed_turn_too() {
         assert!(
@@ -1987,6 +2001,17 @@ mod remote_hook_tests {
                 .collect()
         }
 
+        fn wait_calls(&self, expected: usize) -> Vec<String> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let calls = self.calls();
+                if calls.len() >= expected || std::time::Instant::now() >= deadline {
+                    return calls;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+
         /// Runs `hook.sh <argv…>` with `stdin`, answering `(stdout, exit_ok)`.
         fn run(&self, argv: &[&str], stdin: &str) -> (String, bool) {
             self.run_with_env(argv, stdin, &[])
@@ -2330,7 +2355,7 @@ mod remote_hook_tests {
         assert_eq!(spool.lines().count(), 1);
         assert!(spool.contains(r#""bot_id":"b-test""#) && spool.contains(r#""provider":"claude""#));
         assert!(spool.contains(r#""hook_event_name":"Stop""#));
-        let calls = sb.calls();
+        let calls = sb.wait_calls(1);
         assert_eq!(calls.len(), 1, "one report per turn end: {calls:?}");
         let c = &calls[0];
         assert!(c.contains("--session am-test "), "{c}");
@@ -2342,6 +2367,65 @@ mod remote_hook_tests {
         assert!(c.contains("--agent-session-path /tmp/t.jsonl"), "{c}");
         // `--message` costs a fork and never reaches the subscriber (§11.4.1).
         assert!(!c.contains("--message"), "{c}");
+    }
+
+    #[test]
+    fn claude_stop_failure_spools_then_reports_idle() {
+        let sb = Sandbox::new(true);
+        let payload = r#"{"hook_event_name":"StopFailure","session_id":"sf-1","reason":"API Error: 500"}"#;
+        let (_, ok) = sb.run(&["claude", &sb.bot, "tok"], payload);
+        assert!(ok);
+        let calls = sb.wait_calls(1);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].contains("--state idle ") && calls[0].contains("--agent-session-id sf-1"), "{calls:?}");
+        let text = sb.read("hook-spool.jsonl");
+        assert!(text.contains("StopFailure"), "failure event is spooled too: {text}");
+    }
+
+    #[test]
+    fn macos_local_remote_hook_returns_before_a_stalled_herdr_report() {
+        let sb = Sandbox::new(true);
+        write_exec(
+            &sb.dir.join("herdr"),
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$HOME/herdr.pid\"\nexec sleep 120\n",
+        );
+        let payload = r#"{"type":"agent-turn-complete","thread-id":"slow"}"#;
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg(sb.dir.join("hook.sh"))
+            .args(["codex", sb.bot.as_str(), "-", payload])
+            .env("HOME", &sb.dir)
+            .env("HERDR_PANE_ID", "p1")
+            .env("AM_TEST_LOG", sb.dir.join("herdr.log"))
+            .env("AM_REAL_HERDR", sb.dir.join("herdr"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let started = std::time::Instant::now();
+        let mut child = command.spawn().unwrap();
+        let deadline = started + std::time::Duration::from_secs(8);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().ok();
+                break child.wait().unwrap();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let pid_path = sb.dir.join("herdr.pid");
+        let pid_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !pid_path.exists() && std::time::Instant::now() < pid_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if let Ok(pid) = std::fs::read_to_string(&pid_path) {
+            let _ = Command::new("/bin/kill").args(["-KILL", pid.trim()]).status();
+        }
+        assert!(status.success(), "hook must exit successfully without waiting on herdr: {status}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(8), "hook waited for a blocked herdr report");
+        assert!(sb.read("hook-spool.jsonl").contains("agent-turn-complete"), "spool commits before the report");
+        assert!(pid_path.exists(), "the report still starts in the background");
     }
 
     #[test]
@@ -2357,7 +2441,7 @@ mod remote_hook_tests {
     fn grok_end_turn_reports_idle() {
         let sb = Sandbox::new(true);
         sb.run(&["grok", &sb.bot, "tok"], r#"{"hookEventName":"stop","reason":"end_turn","sessionId":"g-9"}"#);
-        let calls = sb.calls();
+        let calls = sb.wait_calls(1);
         assert_eq!(calls.len(), 1);
         assert!(calls[0].contains("--agent grok ") && calls[0].contains("--state idle "), "{:?}", calls);
         assert!(calls[0].contains("--agent-session-id g-9"), "{:?}", calls);
@@ -2373,11 +2457,12 @@ mod remote_hook_tests {
         assert_eq!(spool.lines().count(), 1);
         assert!(spool.contains(r#""bot_id":"b-test""#), "{spool}");
         assert!(!spool.contains("tok"), "no token, real or placeholder, is written anywhere: {spool}");
-        assert_eq!(sb.calls().len(), 1);
+        assert_eq!(sb.wait_calls(1).len(), 1);
         let payload = r#"{"type":"agent-turn-complete","thread-id":"c-4"}"#;
         sb.run(&["codex", &sb.bot, super::REMOTE_TOKEN_SLOT, payload], "");
         assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 2);
-        assert!(sb.calls()[1].contains("--agent-session-id c-4"), "{:?}", sb.calls());
+        let calls = sb.wait_calls(2);
+        assert!(calls[1].contains("--agent-session-id c-4"), "{calls:?}");
     }
 
     #[test]
@@ -2386,7 +2471,7 @@ mod remote_hook_tests {
         let payload = r#"{"type":"agent-turn-complete","thread-id":"c-3"}"#;
         sb.run(&["codex", &sb.bot, "tok", payload], "");
         assert!(sb.read("hook-spool.jsonl").contains("agent-turn-complete"));
-        let calls = sb.calls();
+        let calls = sb.wait_calls(1);
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert!(calls[0].contains("--state idle ") && calls[0].contains("--agent-session-id c-3"), "{calls:?}");
     }
@@ -2628,14 +2713,14 @@ mod remote_hook_tests {
         let sb = Sandbox::new(true);
         sb.run(&["claude", &sb.bot, "tok"], STOP);
         sb.run(&["claude", &sb.bot, "tok"], STOP);
-        let seqs: Vec<u128> = sb
-            .calls()
+        let calls = sb.wait_calls(2);
+        let seqs: Vec<u128> = calls
             .iter()
             .map(|c| {
                 c.split(" --seq ").nth(1).unwrap().split_whitespace().next().unwrap().parse::<u128>().unwrap()
             })
             .collect();
-        assert_eq!(seqs.len(), 2, "{:?}", sb.calls());
+        assert_eq!(seqs.len(), 2, "{calls:?}");
         assert!(seqs[1] > seqs[0], "herdr drops a seq that did not grow: {seqs:?}");
     }
 
