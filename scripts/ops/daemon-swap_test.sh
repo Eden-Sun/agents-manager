@@ -408,6 +408,15 @@ check_eq "續約失敗沒有重啟 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" 
 check_eq "續約失敗保留舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
 teardown
 
+# Successful verification with an unwritable deployed-sha marker must not report rc=0 as if the gate advanced.
+setup 10 10
+mkdir "$AGM_DIR/daemon-update.built"
+rc=$(run)
+check_eq "built marker 寫入失敗回報 rc=11" "11" "$rc"
+check "built marker 寫入失敗明確記錄" "部署成功但寫入 daemon-update.built 失敗" "$SWAP_LOG"
+check "健康的新 binary 保持在線" "new-binary" "$AGM_DIR/started-binary.log"
+check_no "marker 失敗不回滾健康 binary" "ROLLBACK requested" "$SWAP_LOG"
+teardown
 # 1b. DB 備份檔權限：DB 裡有 bot 的 hook token 等憑證，備份不能是預設 umask 的 644（別的使用者讀得到）。
 #     備份是腳本自己建的，不論呼叫端的 umask 是什麼都要 600。
 setup 10 10

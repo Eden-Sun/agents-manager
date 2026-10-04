@@ -75,7 +75,7 @@ setup() {
   export PATH="$ROOT/bin:$BASE_PATH"
   export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun"
   export AGM_SWAP_SCRIPT="$ROOT/bin/swap.sh" AM_AGENT_NAME=daemon-update-kick
-  export STUB_GH_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP=""
+  export STUB_GH_FAIL="" STUB_SWAP_RC=0 STUB_BUILT_BLOCK="" STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP=""
   export AGM_FAIL_ALERT_AFTER=3 AGM_CI_LOOKBACK=30
 
   cat > "$AGM_DIR/bin/agm" <<'STUB'
@@ -116,6 +116,7 @@ STUB
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/swap.log"
 [ "$STUB_SWAP_RC" != 0 ] || echo "$(echo "$2" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
+[ -z "$STUB_BUILT_BLOCK" ] || { rm -f "$AGM_DIR/daemon-update.built"; mkdir "$AGM_DIR/daemon-update.built"; }
 exit "$STUB_SWAP_RC"
 STUB
   chmod +x "$AGM_DIR/bin/agm" "$ROOT/bin/"*
@@ -222,6 +223,17 @@ check "下一輪略過被回滾的那顆" "之前換上去被回滾過" "$(LOG)"
 check "改換往前的綠燈" "--sha $C1" "$AGM_DIR/swap.log"
 teardown
 
+# 7b. rollback list writes are durable deploy state: report a failed rejection write instead of claiming this sha is safely skipped.
+setup
+ci "$C3" success
+export STUB_SWAP_RC=7
+mkdir "$AGM_DIR/daemon-update.rejected"
+run >/dev/null
+check "回滾後 rejected 寫入失敗有明確 log" "rejected 清單寫入失敗" "$(LOG)"
+check "回滾通知指出下一輪可能重試" "可能重新挑選" "$(LOG)"
+check_eq "rejected 寫入失敗計入失敗輪次" "1" "$(cat "$AGM_DIR/daemon-update.fails" 2>/dev/null || echo 0)"
+teardown
+
 # 8. 往前修（rc=6）：補寫 .built，推 ops_alert。
 setup
 ci "$C3" success
@@ -229,6 +241,26 @@ export STUB_SWAP_RC=6
 run >/dev/null
 check_eq ".built 補上" "$(echo "$C3" | cut -c1-8)" "$(cat "$AGM_DIR/daemon-update.built")"
 check "推 swap_forward_fixed" "swap_forward_fixed" "$AGM_DIR/alerts.log"
+teardown
+
+# 8b. Forward-fix succeeded but the .built marker cannot be updated: raise an actionable alert and keep the failure visible.
+setup
+ci "$C3" success
+export STUB_SWAP_RC=6 STUB_BUILT_BLOCK=1
+run >/dev/null
+check "built marker 寫入失敗有明確 log" "daemon-update.built 寫入失敗" "$(LOG)"
+check "built marker 寫入失敗推 ops_alert" "swap_built_marker_failed" "$AGM_DIR/alerts.log"
+check_eq "built marker 寫入失敗計入失敗輪次" "1" "$(cat "$AGM_DIR/daemon-update.fails" 2>/dev/null || echo 0)"
+teardown
+
+# 8c. daemon-swap reports marker persistence failure after successful verification; kick retries the marker and alerts if it still cannot persist.
+setup
+ci "$C3" success
+export STUB_SWAP_RC=11 STUB_BUILT_BLOCK=1
+run >/dev/null
+check "swap rc=11 標記寫入失敗有明確 log" "daemon-update.built 寫入失敗" "$(LOG)"
+check "swap rc=11 標記寫入失敗推 ops_alert" "swap_built_marker_failed" "$AGM_DIR/alerts.log"
+check_eq "swap rc=11 標記寫入失敗計入失敗輪次" "1" "$(cat "$AGM_DIR/daemon-update.fails" 2>/dev/null || echo 0)"
 teardown
 
 # 8d. rollback cannot safely restore the old binary; preserve DB state and raise manual-recovery alert.
