@@ -3607,7 +3607,7 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
   4. 換版交給 `daemon-swap.sh`（從這個 checkout 跑，不裝到 AGM 目錄）。**沒有 bot 在 `working`、送達臨界區沒有 prompt、沒有別人握租約**才換，換前一刻再查一次；備份舊 binary 與 DB、重啟後驗 `/api/session`／`agm health`／`agm supervisor`／bot 名單，
      失敗回滾（升過 schema 預設往前修，§18.13）、成功寫 `daemon-update.built`。窗口由 `POST /api/services/daemon-swap/restart-window` 開（API.md）：daemon-swap 服務身分自己開一筆立即核准的 `restart` 單、再走**同一個** `maintenance::acquire`，
      所以保護其他 bot 的部分一條都沒拆——持有 `restart` 租約期間 assignment 派送暫停、`lease_token` 與 fence 照舊（§18.10）。停止舊 daemon 前以同一 token／fence 續約；備份等操作超過租期或持有權已變時會交還窗口並延後，不會在失去窗口後停止服務。**等太久照樣縮小封鎖面**（§18.10 的 30 分鐘，2026-10-02 修回）：計時綁在核准上，所以同一個 owner 同 commit 一輪輪**沿用同一張**自動核准（`swap_window`，活 6 小時），只因 `not_idle`、或 daemon 自己讀寫 DB 暫時失敗（`Upstream`／`Unavailable`，例如重啟當下的 `database is locked`）拿不到窗口時不撤；main 動了換 commit 就開新的並 `supersedes` 舊的，等待時間接過來。以前每輪開新單、拿不到就撤，計時每輪歸零——2026-10-01 一直有 bot 在忙，自動部署從 15:18 卡到隔天。其他原因拿不到窗口照舊撤掉。
-     `daemon-swap.sh` 結束碼 4（有人在忙）不算失敗；6（往前修）補寫 `.built` 並推 `ops_alert`；7（已回滾）推 `ops_alert` 並記進 `.rejected`；9（線上 daemon 太舊且呼叫端沒有明確的 `--approval` bootstrap）推 `ops_alert`。若啟動器 `daemon-start.py` 不在同一 checkout 或不可讀，先以 3 中止，舊 daemon 不會被停掉。
+     `daemon-swap.sh` 結束碼 4（有人在忙）不算失敗；6（往前修）由 kick 補寫 `.built` 並推 `ops_alert`；7（已回滾）推 `ops_alert` 並記進 `.rejected`（寫入失敗會告警下一輪可能重試）；9（線上 daemon 太舊且呼叫端沒有明確的 `--approval` bootstrap）推 `ops_alert`；11 表示新 binary 已驗證在線、但 `.built` 更新失敗，kick 會重試寫入並告警；12 表示舊 binary 無法安全恢復，保留 DB 與備份、daemon 停止並要求人工處理；13 表示新 binary 發佈失敗後舊 binary 已恢復、但舊 daemon 沒能重新啟動，DB 與 binary 一致並推人工處理告警。若啟動器 `daemon-start.py` 不在同一 checkout 或不可讀，先以 3 中止，舊 daemon 不會被停掉。
   5. 任何失敗推 `ops_alert`（同 `source`+`reason` 每小時最多一則，§18.9），並寫 `daemon-update.log`；連續 `AGM_FAIL_ALERT_AFTER`（6）輪沒能完成推 `check_failing`。「有人在忙」「沒有新的綠燈 commit」是正常的等，不算失敗。
   鎖帶 pid 與時間（執行者不在了就回收，還活著卡超過 `AGM_LOCK_HUNG_SECS`＝7200 秒才喊人）。讀不到線上版本（`.built` 不在或 sha 不在 repo）推 `built_unknown` 並停住。
 - **可動手的判準是沒有 bot 在 `working`**（`lease safety` 的 `run.agent_status`），不是 `health.busy ≤ 1`：busy 含 `blocked`，而 blocked 可能等使用者好幾小時，重啟也不會打斷它。
@@ -3620,9 +3620,11 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
   3. 備份舊 binary 為 `target/release/agents-managerd.bak-<old>`（hash 對得上才算數）與 DB（`integrity_check` 通過）。
      DB 備份 `<db>.bak-<YYYYMMDD-HHMMSS>`：**權限 600**（DB 裡有 bot 的 hook token，不看呼叫端 umask）、**已經有同名檔就拒絕（結束碼 5）**不覆蓋（`.backup` 對既有檔是整個覆蓋，會把上一趟換版前唯一的好備份蓋成已 migrate 過的）；備份失敗與已存在都先交還 restart 窗口再結束。成功後只留最新一份。
      **回滾還原 DB 是原子的**：先 `cp` 到同目錄暫存檔 `<db>.restore.<pid>`（600）、fsync，成功了才刪 `-wal`／`-shm` 再 `mv` 覆蓋；`cp` 或 fsync 失敗時原 DB 與它的 `-wal`／`-shm` 一個位元組都不動、暫存檔清掉、log 記 `DB 還原失敗`，備份還在可手動還原。
+     新 binary 先複製到正式 binary 同目錄的暫存檔並比對完整 SHA-256；失敗時舊 daemon 尚未停止。成功後以硬連結保留舊 binary，再用同檔案系統的原子 rename 發佈新 binary，避免部分複製內容出現在 live 路徑；rename 失敗會恢復舊 binary 並重啟，無法重啟時回 rc=13 並告警。
      **停 daemon 之前先擋**（結束碼 3）：讀不到 DB 的 `user_version`、或 DB 的 schema 版本比要換上的 binary 認得的還新（換上去一定被版本閘擋下，停機後才發現就晚了）。
-  4. 重啟後 30 秒內驗 `/api/session` 與 `agm health`。daemon 起來即自動釋放 `restart` 租約，被 hold 的交辦馬上派送——**重啟後無等待期**（§18.10）。
-  5. 45 秒後確認 `agm supervisor` 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。任一項不對用 `.bak` 回滾；這批若升了 `SCHEMA_VERSION`，DB 要連同備份一起還原（§18.13，只換 binary 會被版本閘擋下）。
+  4. 重啟後 30 秒內驗 `/api/session` 與 `agm health`。daemon 起來即自動釋放 `restart` 租約，被 hold 的交辦馬上派送——**重啟後無等待期**（§18.10）。所有部署驗證完成後以暫存檔加原子 rename 更新 `.built`；寫入失敗回 rc=11，保留 DB 備份並告警，避免把舊部署游標當成成功。
+  5. 45 秒後確認 `agm supervisor` 不是 stopped、running 名單沒少、沒有 bot 被無故關 pane。任一項不對用 `.bak` 回滾；這批若升了 `SCHEMA_VERSION`，DB 要連同備份一起還原（§18.13，只換 binary 會被版本閘擋下）。若舊 binary 無法安全恢復，回 rc=12，不還原 DB、不啟動不完整狀態，保留備份並告警人工處理。
+     名單差異裡的刻意刪除需同時有窗口內 `deleted_at` 與相符的 `delete_bot`／`delete_project` intent；intent 在窗口前開始但窗口內更新或仍為 pending/running 也算，窗口前已完成的舊 intent 不算。
   期間不要同時觸發 claude 更新批次重啟。
 - 動 migration 的版本：上線前對正式 DB 的副本跑一次 migrate（推 main 前的驗證負責），換版時 `daemon-swap.sh` 另做 DB 備份。
 - **立即部署**（使用者 2026-09-25：「agm排以外，要我可以在左上角直接點立即部署」；2026-09-29 隨例行部署簡化）：網頁左上角在線上 binary 落後 origin/main **且有程式碼差異**
