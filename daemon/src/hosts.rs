@@ -382,18 +382,13 @@ impl HostConn {
         let sess = &cfg.herdr_session;
         let shared = u8::from(shared);
         let q = sh_quote(sess);
-        // The plist is XML: `&`, `<`, `>` in a path would break the whole file, not just PATH.
-        let path_prefix = if cfg.remote_path.trim().is_empty() {
-            String::new()
-        } else {
-            format!("{}:", cfg.remote_path.trim().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"))
-        };
         let script = format!(
             r#"printf 'AM_HOME=%s\n' "$HOME"
 S={q}
 SHARED={shared}
 SOCK="$HOME/.config/herdr/sessions/$S/herdr.sock"
 LABEL="dev.agents-manager.herdr-$S"
+xml_escape() {{ printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }}
 running() {{ herdr session list 2>/dev/null | grep -q "^$S[[:space:]].*running"; }}
 HERDR_BIN=$(command -v herdr 2>/dev/null)
 CONSOLE_USER=$(stat -f %Su /dev/console 2>/dev/null || true)
@@ -422,17 +417,21 @@ if [ "$MODE" = systemd ]; then
 fi
 if [ "$MODE" = launchd ]; then
   PL="$HOME/Library/LaunchAgents/$LABEL.plist"
+  umask 077
   mkdir -p "$HOME/Library/LaunchAgents"
   if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
     printf 'AM_MODE=launchd-existing\n'
   else
+    XML_LABEL=$(xml_escape "$LABEL")
+    XML_HERDR_BIN=$(xml_escape "$HERDR_BIN")
+    XML_PATH=$(xml_escape "$PATH")
     cat > "$PL" <<AM_PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$HERDR_BIN</string><string>--session</string><string>$S</string><string>server</string></array>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path_prefix}$PATH</string></dict>
+  <key>Label</key><string>$XML_LABEL</string>
+  <key>ProgramArguments</key><array><string>$XML_HERDR_BIN</string><string>--session</string><string>$S</string><string>server</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>$XML_PATH</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Interactive</string>
@@ -440,15 +439,20 @@ if [ "$MODE" = launchd ]; then
   <key>StandardErrorPath</key><string>/tmp/herdr-$S.log</string>
 </dict></plist>
 AM_PLIST
-    if running; then
-      # A server started the old way (nohup) is still up: stop it so launchd owns the next one.
-      herdr --session "$S" server stop >/dev/null 2>&1 || true
-      sleep 1
-    fi
-    if launchctl bootstrap "gui/$(id -u)" "$PL" 2>/tmp/am-launchctl.err; then
-      printf 'AM_MODE=launchd\n'
+    if chmod 600 "$PL" 2>/dev/null; then
+      if running; then
+        # A server started the old way (nohup) is still up: stop it so launchd owns the next one.
+        herdr --session "$S" server stop >/dev/null 2>&1 || true
+        sleep 1
+      fi
+      if launchctl bootstrap "gui/$(id -u)" "$PL" 2>/tmp/am-launchctl.err; then
+        printf 'AM_MODE=launchd\n'
+      else
+        printf 'AM_MODE=nohup-fallback launchctl: %s\n' "$(tr '\n' ' ' </tmp/am-launchctl.err)"
+        MODE=nohup
+      fi
     else
-      printf 'AM_MODE=nohup-fallback launchctl: %s\n' "$(tr '\n' ' ' </tmp/am-launchctl.err)"
+      printf 'AM_MODE=nohup-fallback launchd plist permissions\n'
       MODE=nohup
     fi
   fi
@@ -1800,6 +1804,56 @@ mod shared_session_script_tests {
         crate::testing::write_exec(bin.join(name), format!("#!/bin/sh\n{body}\n"));
     }
 
+    fn generated_launchd_plist() -> (String, String, u32, u32, u32) {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = std::path::PathBuf::from(format!("/tmp/am-rs-{}", &crate::db::ulid()[18..]));
+        let home = root.join("home & files");
+        let bin = home.join("bin & tools");
+        let (log, capture) = (root.join("log"), root.join("captured.plist"));
+        std::fs::create_dir_all(&bin).unwrap();
+        let sock_dir = home.join(".config/herdr/sessions/test");
+        std::fs::create_dir_all(&sock_dir).unwrap();
+        let _sock = std::os::unix::net::UnixListener::bind(sock_dir.join("herdr.sock")).unwrap();
+        fake(&bin, "herdr", r#"echo "herdr $*" >> "$AM_LOG"; [ "$1" = session ] && [ "$2" = list ] && echo "test running"; exit 0"#);
+        fake(&bin, "uname", "echo Darwin");
+        fake(&bin, "stat", "id -un");
+        fake(
+            &bin,
+            "launchctl",
+            r#"echo "launchctl $*" >> "$AM_LOG"; [ "$1" = print ] && exit 1; [ "$1" = bootstrap ] && cp "$3" "$AM_CAPTURE"; exit 0"#,
+        );
+        fake(&bin, "sleep", "exit 0");
+        let cfg = HostCfg {
+            name: "sh1".into(),
+            ssh: "sh1.invalid".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "test".into(),
+            remote_path: String::new(),
+            shared_session: false,
+        };
+        let command = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("umask 000; {}", HostConn::remote_session_script(&cfg, false)))
+            .env_clear()
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HOME", &home)
+            .env("AM_LOG", &log)
+            .env("AM_CAPTURE", &capture)
+            .output()
+            .unwrap();
+        assert!(command.status.success(), "{}", String::from_utf8_lossy(&command.stderr));
+        let plist = std::fs::read_to_string(&capture).unwrap();
+        let meta = std::fs::metadata(&capture).unwrap();
+        let dir_mode = std::fs::metadata(home.join("Library/LaunchAgents")).unwrap().mode() & 0o777;
+        let bin_path = bin.join("herdr").to_string_lossy().into_owned();
+        let mode = meta.mode() & 0o777;
+        let uid = meta.uid();
+        std::fs::remove_dir_all(&root).ok();
+        (plist, bin_path, mode, dir_mode, uid)
+    }
+
     /// 假的 macOS：herdr 說 session 在跑（nohup 起的，launchd 沒有它）——正是以前會 `server stop` 交給 launchd 的形狀。
     fn run(shared: bool) -> (String, String) {
         let root = std::path::PathBuf::from(format!("/tmp/am-rs-{}", &crate::db::ulid()[18..]));
@@ -1845,6 +1899,22 @@ mod shared_session_script_tests {
 
         let (out, calls) = run(false);
         assert!(calls.contains("server stop"), "不共用時照舊交給 launchd（對照組）：{calls}\n{out}");
+    }
+
+    #[test]
+    fn macos_local_generated_launchd_plist_xml_escapes_paths_with_xml_metacharacters() {
+        let (plist, bin_path, _, _, _) = generated_launchd_plist();
+        let escaped = bin_path.replace('&', "&amp;");
+        assert!(plist.contains(&escaped), "plist did not XML-escape the executable path: {plist}");
+        assert!(!plist.contains(&bin_path), "plist still contains the unescaped executable path: {plist}");
+    }
+
+    #[test]
+    fn macos_local_generated_launchd_plist_and_directory_are_private_under_a_permissive_umask() {
+        let (_, _, file_mode, dir_mode, owner) = generated_launchd_plist();
+        assert_eq!(owner, unsafe { libc::geteuid() }, "launch agent plist must belong to the SSH user");
+        assert_eq!(file_mode & 0o077, 0, "launch agent plist must not be group/world accessible");
+        assert_eq!(dir_mode & 0o022, 0, "new LaunchAgents directory must not be group/world writable");
     }
 }
 
