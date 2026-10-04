@@ -27,6 +27,13 @@ export function byInsert(a: { id: string; seq?: number }, b: { id: string; seq?:
   return bySeqThenId(a, b)
 }
 
+/** 最早插入的一則：before 游標依 rowid 切頁，不一定是依 created_at 顯示時排在最前的那則。 */
+export function oldestByInsert<T extends { id: string; seq?: number }>(items: readonly T[]): T | undefined {
+  let oldest: T | undefined
+  for (const item of items) if (!oldest || byInsert(item, oldest) < 0) oldest = item
+  return oldest
+}
+
 /**
  * 從尾端往前找插入點（接在最後是 O(1)）；重複項排序鍵相同，掃到插入點前必遇到，不必另外去重。
  * 已有同 id 回 `null`（不用動 state）。
