@@ -99,6 +99,22 @@ write_built_marker() { # write_built_marker <short sha>; publish by same-directo
     if ! mv -f "$tmp" "$marker"; then rm -f "$tmp"; return 1; fi
     return 0
 }
+write_rejected_marker() { # write_rejected_marker <full sha>; persist rollback decision before stopping services
+    local sha="$1" marker="$AGM_DIR/daemon-update.rejected" tmp trailing_newlines
+    [ ! -L "$marker" ] || return 1
+    if [ -e "$marker" ] && [ ! -f "$marker" ]; then return 1; fi
+    tmp=$(mktemp "$AGM_DIR/daemon-update.rejected.tmp.XXXXXX") || return 1
+    if [ -f "$marker" ] && ! cat "$marker" > "$tmp"; then rm -f "$tmp"; return 1; fi
+    if ! grep -qxF -- "$sha" "$tmp"; then
+        if [ -s "$tmp" ]; then
+            trailing_newlines=$(tail -c 1 "$tmp" | wc -l | tr -d '[:space:]')
+            if [ "$trailing_newlines" = 0 ]; then printf '\n' >> "$tmp" || { rm -f "$tmp"; return 1; }; fi
+        fi
+        printf '%s\n' "$sha" >> "$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+    if ! mv -f "$tmp" "$marker"; then rm -f "$tmp"; return 1; fi
+    return 0
+}
 service_capability() {
     # 測試用：注入假的能力探測，才不用真的打 daemon。
     [ -n "${SWAP_CAP_CMD:-}" ] && { "$SWAP_CAP_CMD"; return; }
@@ -704,6 +720,11 @@ rollback() {
             log "forward-fix 無法安全暫存或發佈候選 binary"
         fi
         log "forward-fix 失敗：新 binary 起不來，改還原 binary 與 DB"
+    fi
+    if write_rejected_marker "$SHA"; then
+        log "候選 sha 已在 rollback 前寫入 rejected 清單"
+    else
+        log "WARN: rollback 前 rejected 清單寫入失敗；kick 結束後會再試並告警"
     fi
     stop_daemon "$(dpid)"
     if ! restore_rollback_binary; then
