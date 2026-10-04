@@ -894,7 +894,9 @@ esac"#
         /// 虛擬時鐘：把 PATH 上的 `sleep`／`date` 換成假的。`sleep N` 只把時鐘往前撥 N 秒（真的只睡 50ms，讓別的行程有機會跑），
         /// `date +%s` 讀這個時鐘。租約守衛的決定（要不要停）只看這兩個，所以測試**不吃機器負載**、不用真的等 TTL——
         /// 用真時鐘＋幾秒的 TTL 時，餘裕只有一兩秒，本機同時有人在編譯就會誤判。
-        /// 只有背景的守衛在睡覺，時鐘只有一個寫入者。
+        /// 只有背景的守衛在睡覺，時鐘只有一個寫入者；但讀的人很多（假 cargo、假 `date`、測試本身），而且 shim 收尾時會
+        /// SIGKILL 守衛正在跑的 `sleep`。所以時鐘（與 `date-count`）一律先寫暫存檔再 `mv` 換上去：`echo … > clock` 會先把檔案
+        /// 截成 0 bytes 再寫，讀在那一瞬間就讀到空字串，寫入者剛好在那時被殺，時鐘就永遠是空的（issue #857）。
         fn install_virtual_clock(&self) {
             let d = self.dir.display();
             std::fs::write(self.dir.join("clock"), "1000000").unwrap();
@@ -903,10 +905,10 @@ esac"#
                     "sleep",
                     // 等假 cargo 發出 ready 才撥時鐘：不然守衛在 cargo 還沒起來時就先判完了，殺樹的測試會空過。
                     format!(
-                        "#!/bin/sh\ni=0\nwhile [ ! -e '{d}/cargo.ready' ] && [ $i -lt 500 ]; do /bin/sleep 0.02; i=$((i + 1)); done\nn=$(cat '{d}/clock')\necho $((n + ${{1%%.*}})) > '{d}/clock'\nexec /bin/sleep 0.05\n"
+                        "#!/bin/sh\ni=0\nwhile [ ! -e '{d}/cargo.ready' ] && [ $i -lt 500 ]; do /bin/sleep 0.02; i=$((i + 1)); done\nn=$(cat '{d}/clock')\necho $((n + ${{1%%.*}})) > '{d}/clock.$$' && mv -f '{d}/clock.$$' '{d}/clock'\nexec /bin/sleep 0.05\n"
                     ),
                 ),
-                ("date", format!("#!/bin/sh\ncase \"$*\" in '+%s') n=$(cat '{d}/date-count' 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > '{d}/date-count'; if [ -f '{d}/date-fail-at' ] && [ \"$n\" -eq \"$(cat '{d}/date-fail-at')\" ]; then exit 1; fi; cat '{d}/clock' ;; *) exec /bin/date \"$@\" ;; esac\n")),
+                ("date", format!("#!/bin/sh\ncase \"$*\" in '+%s') n=$(cat '{d}/date-count' 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > '{d}/date-count.$$' && mv -f '{d}/date-count.$$' '{d}/date-count'; if [ -f '{d}/date-fail-at' ] && [ \"$n\" -eq \"$(cat '{d}/date-fail-at')\" ]; then exit 1; fi; cat '{d}/clock' ;; *) exec /bin/date \"$@\" ;; esac\n")),
             ];
             for (name, body) in files {
                 let path = self.dir.join("real").join(name);
@@ -2110,6 +2112,40 @@ esac
         assert!(!err.contains("名額租約失效"), "{err}");
         assert!(s.dir.join("cargo.done").exists(), "應該正常跑完");
         assert!(s.virtual_secs() > 3 * 180, "{}s", s.virtual_secs());
+    }
+
+    /// issue #857：假 `sleep` 撥時鐘時旁邊一直有人在讀，shim 收尾時還會 SIGKILL 它——不管讀在哪一瞬間、殺在哪一瞬間，
+    /// 時鐘都不能讀到空字串（`echo … > clock` 先截空再寫，舊版在這裡間歇讀到空的、或被殺後留下空檔）。
+    #[test]
+    fn the_virtual_clock_never_reads_empty_while_its_writer_is_killed_mid_tick() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        let s = Sandbox::new();
+        s.install_virtual_clock();
+        std::fs::write(s.dir.join("cargo.ready"), "").unwrap();
+        let clock = s.dir.join("clock");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (clock, stop) = (clock.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut empty = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    if std::fs::read_to_string(&clock).unwrap().trim().is_empty() {
+                        empty += 1;
+                    }
+                }
+                empty
+            })
+        };
+        for i in 0..400u64 {
+            let mut tick = Command::new(s.dir.join("real/sleep")).arg("1").spawn().unwrap();
+            std::thread::sleep(Duration::from_micros(i % 13 * 150));
+            let _ = tick.kill();
+            tick.wait().unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(reader.join().unwrap(), 0, "讀到空的時鐘");
+        assert!(s.virtual_secs() >= 0, "時鐘被殺在半途就壞掉了");
     }
 
     /// issue #151：呼叫 shim 的那一端（agent 的 shell、被砍的測試行程）不在了，等名額的迴圈不能變成永遠在等的孤兒。
