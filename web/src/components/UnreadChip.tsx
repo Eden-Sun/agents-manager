@@ -27,6 +27,7 @@ import type { Lamp } from '../api/types'
 import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
 import { cacheState, type CacheState } from '../lib/cacheClock'
 import { useCacheTick } from '../hooks/useCacheTick'
+import { ChipLegend } from './ChipLegend'
 import './unreadChip.css'
 import './cacheClock.css'
 
@@ -256,7 +257,8 @@ export function UnreadChip() {
   const hiddenPinned = useMemo(() => (narrow ? pinnedItems.slice(pinLayout.shown) : []), [narrow, pinnedItems, pinLayout.shown])
   const visiblePinned = useMemo(() => shownPinned.map((it) => it.id), [shownPinned])
   const names = useMemo(() => Object.fromEntries(pinnedItems.map((it) => [it.id, it.name])), [pinnedItems])
-  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary)
+  const [legend, setLegend] = useState(false)
+  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary, () => setLegend(true))
   const ordered = useMemo(() => [...pinnedItems, ...otherItems], [pinnedItems, otherItems])
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)
@@ -284,6 +286,7 @@ export function UnreadChip() {
           resizable={!pinExpanded}
         />
         <ScrollRow items={otherItems} label="在跑或剛完成的 bot" selectedBotId={selectedBotId} />
+        {legend ? <ChipLegend onClose={() => setLegend(false)} /> : null}
       </>
     )
   }
@@ -322,6 +325,20 @@ export function UnreadChip() {
           {expanded ? '收合' : `+${hidden}`}
         </button>
       ) : null}
+      {/* 電腦版：晶片列尾端一顆「?」開顏色說明（2026-10-04 使用者：電腦版你自己想）。 */}
+      {/* 電腦版：滑鼠停在「?」上就顯示（2026-10-04 使用者：「電腦就是 hover」）；鍵盤聚焦也開。 */}
+      <button
+        type="button"
+        className="chip-legend-btn"
+        aria-label="主力晶片的顏色說明"
+        onMouseEnter={() => setLegend(true)}
+        onMouseLeave={() => setLegend(false)}
+        onFocus={() => setLegend(true)}
+        onBlur={() => setLegend(false)}
+      >
+        ?
+      </button>
+      {legend ? <ChipLegend hover onClose={() => setLegend(false)} /> : null}
     </div>
   )
 }

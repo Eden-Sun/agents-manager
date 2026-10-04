@@ -44,6 +44,8 @@ export function usePinnedDrag(
   visibleOrder: string[],
   names: Record<string, string>,
   commit: (order: string[]) => void,
+  /** 觸控長按後沒移動就放開（2026-10-04 使用者：「主力長按說明顏色意義」）；拖曳照舊是長按後移動。 */
+  onHold?: () => void,
 ): PinnedDnd {
   const [drag, setDrag] = useState<{ id: string; before: string | null; ready: boolean; dx: number; dy: number; shift: string[]; after: string | null; gap: number } | null>(null)
   // 上一個鎖定的落點（遲滯）。
@@ -51,9 +53,9 @@ export function usePinnedDrag(
   const [announce, setAnnounce] = useState('')
   const suppress = useRef(false)
   // 事件處理在 window 上，讀最新的順序要靠 ref。
-  const latest = useRef({ fullOrder, visibleOrder, commit })
+  const latest = useRef({ fullOrder, visibleOrder, commit, onHold })
   useEffect(() => {
-    latest.current = { fullOrder, visibleOrder, commit }
+    latest.current = { fullOrder, visibleOrder, commit, onHold }
   })
   const cleanup = useRef<(() => void) | null>(null)
   useEffect(() => () => cleanup.current?.(), [])
@@ -75,6 +77,8 @@ export function usePinnedDrag(
     const touch = e.pointerType !== 'mouse'
     const start = { x: e.clientX, y: e.clientY }
     let dragging = false
+    // 長按進入拖曳之後有沒有真的移動：沒移動就放開＝看說明，不是重排。
+    let moved = false
     let timer: ReturnType<typeof setTimeout> | null = null
 
     const stopTouchScroll = (ev: TouchEvent) => ev.preventDefault()
@@ -106,6 +110,8 @@ export function usePinnedDrag(
         if (far < MOUSE_SLOP) return
         begin()
       }
+      if (touch && !moved && Math.hypot(dx, dy) <= TOUCH_SLOP) return
+      moved = true
       const slot = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before)
       const gap = Math.round(chip.getBoundingClientRect().width) + 8
       held.current = { before: slot.before }
@@ -115,6 +121,15 @@ export function usePinnedDrag(
       const was = dragging
       end()
       if (!was) return
+      if (touch && !moved) {
+        setDrag(null)
+        // 放開後同一個 task 的 click 也吞掉，不然說明開了又順便跳到那顆 bot。
+        setTimeout(() => {
+          suppress.current = false
+        }, 0)
+        latest.current.onHold?.()
+        return
+      }
       const picked = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before).before
       // 放到可見的最後面：插在被藏起來的第一顆前面，不跳到它們後面（手機主力區有 8 顆上限）。
       const { fullOrder: full, visibleOrder: shown } = latest.current
