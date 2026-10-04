@@ -880,6 +880,7 @@ button:disabled {
   --kind-claude: #c2603c;
   --kind-codex: #10a37f;
   --kind-grok: #7c5cff;
+  --kind-agy: #1a73e8;
 }
 
 /* 深色：跟隨系統時看 prefers-color-scheme；左上角主題鈕切到「深」時用 data-theme 強制（2026-09-15）。 */
@@ -888,6 +889,7 @@ button:disabled {
     --kind-claude: #e08a6b;
     --kind-codex: #19c39c;
     --kind-grok: #9b83ff;
+    --kind-agy: #7aa7ff;
   }
 }
 
@@ -895,6 +897,7 @@ button:disabled {
   --kind-claude: #e08a6b;
   --kind-codex: #19c39c;
   --kind-grok: #9b83ff;
+  --kind-agy: #7aa7ff;
 }
 
 /* 收成一顆 `⋯` 固定一格，不疊在名字上也不靠 hover：overlay + hover:none 兩份規則曾在寬度變化時壞一邊。 */
