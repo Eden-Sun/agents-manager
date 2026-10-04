@@ -3,7 +3,7 @@
  */
 import test, { afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
+import { act, mount, setupDom, teardownDom, unmountAll } from '../testing/domHarness'
 import { useStore } from '../store/store'
 import { UnreadChip } from './UnreadChip'
 
@@ -39,25 +39,40 @@ function seed() {
 }
 
 const chip = (id: string) => document.querySelector<HTMLElement>(`.unread-chip[data-bot-id="${id}"]`)!
+/** 主力晶片在能 hover 的裝置上沒有原生 tooltip，快取倒數改在 hover 狀態卡裡（2026-10-04）：停一下、讀卡片、移開。 */
+async function hoverText(id: string): Promise<string> {
+  const el = chip(id)
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+    el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }))
+    await new Promise((r) => setTimeout(r, 450))
+  })
+  const text = el.title || (document.querySelector('.bot-status-card')?.textContent ?? '')
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }))
+    el.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }))
+  })
+  return text
+}
 
 test('主力晶片：底色依剩餘時間填色、綠黃紅分級；已涼回一般底色並在 tooltip 標已涼', async () => {
   seed()
   await mount(<UnreadChip />)
   assert.ok(chip('fresh').classList.contains('cache-fresh'))
   assert.equal(chip('fresh').style.getPropertyValue('--cache-fill'), '75.0%')
-  assert.match(chip('fresh').title, /快取約 45 分後到期（上次活動 \d\d:\d\d）/)
+  assert.match(await hoverText('fresh'), /快取約 45 分後到期（上次活動 \d\d:\d\d）/)
   assert.ok(chip('warn').classList.contains('cache-warn'))
   assert.ok(chip('low').classList.contains('cache-low'))
   // 已涼：沒有任何 cache- class、沒有填色，tooltip 講已涼。
   assert.ok(![...chip('cold').classList].some((c) => c.startsWith('cache-')))
   assert.equal(chip('cold').style.getPropertyValue('--cache-fill'), '')
-  assert.match(chip('cold').title, /快取已涼/)
+  assert.match(await hoverText('cold'), /快取已涼/)
   // 回合進行中＝滿條。
   assert.ok(chip('busy').classList.contains('cache-fresh'))
   assert.equal(chip('busy').style.getPropertyValue('--cache-fill'), '100.0%')
   // grok 不顯示。
   assert.ok(![...chip('grok').classList].some((c) => c.startsWith('cache-')))
-  assert.doesNotMatch(chip('grok').title, /快取/)
+  assert.doesNotMatch(await hoverText('grok'), /快取/)
   // 非主力（沒釘、在跑）不畫。
   const other = [...document.querySelectorAll<HTMLElement>('.unread-chip')].find((el) => el.textContent?.includes('other'))!
   assert.ok(![...other.classList].some((c) => c.startsWith('cache-')))
