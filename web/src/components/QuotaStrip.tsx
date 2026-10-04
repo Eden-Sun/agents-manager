@@ -25,7 +25,8 @@ import './quotaStrip.css'
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`). Every kind stays visible;
  * only its windows collapse. Fill length carries the level so it survives greyscale.
  * 桌機每個帳號都畫完整量表，不收進 `+N`（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
- * grok、agy 只有週窗（SPEC §12.6、§12a.7），每種 kind 只畫實際回報的窗口；agy 有兩個桶（Gemini／Claude+GPT）各畫一格。
+ * grok、agy 只有週窗（SPEC §12.6、§12a.7），每種 kind 只畫實際回報的窗口。agy 的兩個桶（Gemini／Claude+GPT）合成一格、
+ * 兩條：`G`、`C+G`（2026-10-04 使用者：「兩種放一起顯示，不然佔空間」）。
  * 額度按主機分開（SPEC §14），一次只顯示一台；遠端 key 帶 `<host>/` 前綴，先投影成裸 key。
  */
 
@@ -141,14 +142,34 @@ function staleSuffix(q: KindQuota | null, now: number): string {
   return `（上次讀數${age ? `，${age}前` : ''}）`
 }
 
-/** agy 的兩個桶用人看得懂的名字；其他 kind 照身分名。 */
-function entryShort(entry: QuotaEntry): string {
-  if (entry.kind === 'agy') return entry.identity === AGY_CLAUDE_GPT ? 'Claude+GPT' : 'Gemini'
-  return entry.identity ?? entry.kind
+/** agy 的第二個桶（Claude+GPT）跟 Gemini 畫在同一格（`agy` 那格），讀它的 store key。 */
+function useAgyClaudeGpt(entry: QuotaEntry, host: string): KindQuota | null {
+  return useStore((s) => (entry.kind === 'agy' ? s.quota[quotaKey(host, `agy:${AGY_CLAUDE_GPT}`)] ?? null : null))
+}
+
+/** agy 一格兩條：Gemini＝`agy` 的週窗、Claude+GPT＝`agy:claude-gpt` 的週窗。 */
+const AGY_BUCKETS = [
+  { win: 'G', name: 'Gemini' },
+  { win: 'C+G', name: 'Claude+GPT' },
+] as const
+
+function agyLabel(q: KindQuota | null, q2: KindQuota | null): string {
+  const parts: string[] = [KIND_LABEL.agy]
+  for (const [b, w] of [[AGY_BUCKETS[0], q?.seven_day], [AGY_BUCKETS[1], q2?.seven_day]] as const) {
+    const pct = remaining(w)
+    if (pct === null) continue
+    parts.push(`${b.name} 每週剩餘 ${pct}%${w?.resets_at ? `（${fmtTime(w.resets_at)} 重置）` : ''}`)
+  }
+  if (parts.length === 1) parts.push('額度尚未取得')
+  return parts.join('，')
+}
+
+function worse(a: 'ok' | 'warn' | 'crit', b: 'ok' | 'warn' | 'crit'): 'ok' | 'warn' | 'crit' {
+  const r = { ok: 0, warn: 1, crit: 2 }
+  return r[b] > r[a] ? b : a
 }
 
 function entryLabel(entry: QuotaEntry): string {
-  if (entry.kind === 'agy') return `${KIND_LABEL.agy} · ${entryShort(entry)}`
   return entry.identity ? `${KIND_LABEL[entry.kind]} · ${entry.identity}` : KIND_LABEL[entry.kind]
 }
 
@@ -242,7 +263,8 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
 
   for (const key of Object.keys(quota).sort()) {
     const entry = parseQuotaKey(key)
-    if (!entry || !entry.identity || entry.kind === 'claude') continue
+    // agy 的 claude-gpt 桶畫在 `agy` 那格裡，不另開一格。
+    if (!entry || !entry.identity || entry.kind === 'claude' || entry.kind === 'agy') continue
     if (quota[key] == null) continue
     push(entry)
   }
@@ -256,13 +278,15 @@ function RiskDot({ level }: { level: Level }) {
 }
 
 /** `F` 是 Max 方案的 Fable 週窗，只有 claude 有。 */
-type WindowName = '5h' | '7d' | '週' | 'F'
+type WindowName = '5h' | '7d' | '週' | 'F' | 'G' | 'C+G'
 
 const WINDOW_MS: Record<WindowName, number> = {
   '5h': 5 * 3_600_000,
   '7d': 7 * 86_400_000,
   '週': 7 * 86_400_000,
   F: 7 * 86_400_000,
+  G: 7 * 86_400_000,
+  'C+G': 7 * 86_400_000,
 }
 
 /** 重置刻度位置＝剩餘時間 ÷ 窗口長度（剩 3h／5h → 60%）。 */
@@ -427,18 +451,29 @@ function Gauge({
   onOpen: () => void
 }) {
   const q = useEntryQuota(entry, host)
+  const q2 = useAgyClaudeGpt(entry, host)
+  const agy = entry.kind === 'agy'
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
+  const seven2 = remaining(q2?.seven_day)
   // 上下邊框量表只有手機畫（2026-09-11 使用者：桌機已有 bar），且每一格都畫（2026-09-13 使用者）。
-  const borderWindows = compact ? [
+  const borderWindows = compact ? (agy ? [
+    { edge: 'top', label: 'Gemini', window: q?.seven_day, pct: seven },
+    { edge: 'bottom', label: 'Claude+GPT', window: q2?.seven_day, pct: seven2 },
+  ] : [
     { edge: 'top', label: '5H', window: q?.five_hour, pct: five },
     { edge: 'bottom', label: weekLabel(entry.kind).toUpperCase(), window: q?.seven_day, pct: seven },
-  ].filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []
+  ]).filter((w) => w.pct !== null && Number.isFinite(w.pct)) : []
   const fable = remaining(q?.fable)
   const now = useMinuteNow()
   const disabledMap = useDisabledQuota()
   let windows: WindowBar[]
+  if (agy) {
+    // agy 兩個桶都只有週窗，手機與收合也兩條都寫：各自管不同模型，挑一條會藏掉另一邊用完。
+    windows = [windowBar('G', seven, q?.seven_day, q?.updated_at), windowBar('C+G', seven2, q2?.seven_day, q2?.updated_at)]
+    if (seven2 === null && q2 == null) windows = windows.slice(0, 1)
+  } else
   // 手機一格只寫一個窗口，否則 390px 放五格會長高（2026-09-12 使用者）。預設 7d（決定今天能否開工），
   // 5h／F 被 daemon 標 low／critical 且更急時才取代，不並列；完整數字在 tooltip 與 sheet。
   if (compact && seven !== null) {
@@ -470,7 +505,8 @@ function Gauge({
       windows.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
   }
-  const title = `${hostLabel(host)} · ${label(entry, q, loggedOut, now)}`
+  const title = `${hostLabel(host)} · ${agy ? agyLabel(q, q2) : label(entry, q, loggedOut, now)}`
+  const level = agy ? worse(worst(q), worst(q2)) : worst(q)
   const off = isQuotaDisabled(disabledMap, quotaDisableKey(host, entry.kind, entry.identity))
   const withOff = off ? `${title}（已暫時停用，底下的 Bot 收在側欄外）` : title
   // 量表是速率視窗，codex credits 用完時仍滿格卻一直 hit limit，所以畫在格子上（2026-09-12 使用者）。
@@ -481,7 +517,7 @@ function Gauge({
 
   return (
     <span
-      className={`quota-hp ${entry.kind} ${worst(q)}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' quota-blocked' : ''}${q?.stale ? ' stale' : ''}`}
+      className={`quota-hp ${entry.kind} ${level}${focused ? ' focused' : ''}${borderWindows.length ? ' quota-framed' : ''}${off ? ' off' : ''}${blocked ? ' quota-blocked' : ''}${q?.stale ? ' stale' : ''}`}
       title={blocked ? `${accessibleTitle}\n\n${blockedLine(blocked)}` : accessibleTitle}
       aria-current={focused ? 'true' : undefined}
       // input／button 的點擊放行，否則量表按鈕會一次開一次關。
@@ -507,13 +543,13 @@ function Gauge({
         <span className="quota-kind" aria-hidden="true">
           <KindIcon kind={entry.kind} />
         </span>
-        {compact && !entry.identity && entry.kind !== 'agy' ? null : (
+        {compact && !entry.identity ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-            {entryShort(entry)}
+            {entry.identity ?? entry.kind}
           </span>
         )}
         {/* 開關放左欄名稱下方，整格不會因它變高。 */}
-        {entry.kind === 'agy' && entry.identity ? null : <StripDisableToggle entry={entry} host={host} />}
+        <StripDisableToggle entry={entry} host={host} />
       </span>
       <button
         type="button"
@@ -746,6 +782,7 @@ function PopWindow({
 
 function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   const q = useEntryQuota(entry, host)
+  const q2 = useAgyClaudeGpt(entry, host)
   const now = useMinuteNow()
   const known = useStore((s) => {
     if (entry.identity && quotaKey(host, `${entry.kind}:${entry.identity}`) in s.quota) return true
@@ -754,7 +791,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   const supported = QUERYABLE.includes(entry.kind)
   const loggedOut = useLoggedOut(entry, host)
   const five = remaining(q?.five_hour)
-  const seven = remaining(q?.seven_day)
+  const seven = remaining(q?.seven_day) ?? remaining(q2?.seven_day)
   const disabledMap = useDisabledQuota()
   const key = quotaDisableKey(host, entry.kind, entry.identity)
   const off = isQuotaDisabled(disabledMap, key)
@@ -767,7 +804,6 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
       onClick={(e) => {
         if (!e.currentTarget.contains(e.target as Node)) return
         if ((e.target as HTMLElement).closest('input, button, a, select, textarea')) return
-        if (entry.kind === 'agy' && entry.identity) return
         toggle()
       }}
     >
@@ -776,9 +812,9 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
           <KindIcon kind={entry.kind} />
         </span>
         <span className="quota-name">{entryLabel(entry)}</span>
-        {supported ? <RiskDot level={worst(q)} /> : null}
+        {supported ? <RiskDot level={entry.kind === 'agy' ? worse(worst(q), worst(q2)) : worst(q)} /> : null}
         {q?.plan ? <span className="quota-plan">{q.plan}</span> : null}
-        {entry.kind === 'agy' && entry.identity ? null : <DisableToggle on={off} label={entryLabel(entry)} onToggle={toggle} />}
+        <DisableToggle on={off} label={entryLabel(entry)} onToggle={toggle} />
       </div>
       {q?.stale ? <p className="quota-stale-note">{staleSuffix(q, now)}，新的探測回來後會更新</p> : null}
       {!supported ? (
@@ -802,6 +838,12 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
           ) : null}
         </>
       ) : (
+        entry.kind === 'agy' ? (
+          <>
+            <PopWindow icon="📅" name={AGY_BUCKETS[0].name} win="G" w={q?.seven_day} now={now} />
+            <PopWindow icon="📅" name={AGY_BUCKETS[1].name} win="C+G" w={q2?.seven_day} now={now} />
+          </>
+        ) : (
         <>
           <PopWindow icon="⏱" name="5h" win="5h" w={q?.five_hour} now={now} />
           <PopWindow icon="📅" name={weekLabel(entry.kind)} win="7d" w={q?.seven_day} now={now} />
@@ -809,6 +851,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
           <PopLimitHit hit={q?.limit_hit} />
           <PopResetCredits credits={q?.reset_credits} now={now} />
         </>
+        )
       )}
     </div>
   )

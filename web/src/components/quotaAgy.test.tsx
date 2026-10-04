@@ -41,7 +41,7 @@ test('weeklyOnlyKind：grok 與 agy 只有週窗', () => {
   assert.equal(weeklyOnlyKind('codex'), false)
 })
 
-test('額度條有兩格 agy：Gemini 剩 98%、Claude+GPT 剩 100%，都只有「週」，第二格沒有停用勾選', { timeout: 30_000 }, async () => {
+test('agy 兩個桶合成一格：G（Gemini）剩 98%、C+G（Claude+GPT）剩 100%，都只有週窗', { timeout: 30_000 }, async () => {
   mockApi(sharedMock)
   await useStore.getState().refreshState()
   await useStore.getState().loadQuota()
@@ -49,19 +49,15 @@ test('額度條有兩格 agy：Gemini 剩 98%、Claude+GPT 剩 100%，都只有�
     useStore.setState((s) => ({ quota: { ...s.quota, agy: agyQuota(2, 160), 'agy:claude-gpt': agyQuota(0, 160) } }) as never)
   })
   await mount(<QuotaStrip />)
-  await until(() => document.querySelectorAll('.quota-hp.agy').length === 2, '兩格 agy')
-  const cells = [...document.querySelectorAll<HTMLElement>('.quota-hp.agy')]
-  const titles = cells.map((c) => c.getAttribute('title') ?? '')
-  const gemini = titles.find((t) => t.includes('Gemini'))!
-  const claudeGpt = titles.find((t) => t.includes('Claude+GPT'))!
-  assert.ok(gemini && claudeGpt, titles.join(' | '))
-  assert.match(gemini, /每週剩餘 98%/)
-  assert.match(claudeGpt, /每週剩餘 100%/)
-  for (const t of titles) assert.doesNotMatch(t, /5 小時|7 天/, '只有週窗：' + t)
-  const names = cells.map((c) => c.querySelector('.quota-identity')?.textContent)
-  assert.deepEqual(names.sort(), ['Claude+GPT', 'Gemini'])
-  const claudeCell = cells.find((c) => c.querySelector('.quota-identity')?.textContent === 'Claude+GPT')!
-  const geminiCell = cells.find((c) => c.querySelector('.quota-identity')?.textContent === 'Gemini')!
-  assert.equal(claudeCell.querySelector('.quota-cell-toggle'), null, '第二個桶不是身分，不能停用')
-  assert.ok(geminiCell.querySelector('.quota-cell-toggle'), 'Gemini 那格照 kind 可以停用')
+  await until(() => document.querySelectorAll('.quota-hp.agy').length === 1, '一格 agy')
+  await act(async () => {})
+  assert.equal(document.querySelectorAll('.quota-hp.agy').length, 1, '不再拆成兩格')
+  const cell = document.querySelector<HTMLElement>('.quota-hp.agy')!
+  const title = cell.getAttribute('title') ?? ''
+  assert.match(title, /Gemini 每週剩餘 98%/)
+  assert.match(title, /Claude\+GPT 每週剩餘 100%/)
+  assert.doesNotMatch(title, /5 小時|7 天/, '只有週窗：' + title)
+  const names = [...cell.querySelectorAll('.quota-window-name')].map((n) => n.textContent)
+  assert.deepEqual(names, ['G', 'C+G'], cell.innerHTML)
+  assert.ok(cell.querySelector('.quota-cell-toggle'), '整格照 kind 可以停用')
 })
