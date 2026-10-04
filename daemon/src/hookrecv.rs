@@ -993,6 +993,9 @@ async fn consume_resume_session(
             .await
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     }
+    if !mismatch {
+        lifecycle::retire_context_lost(app, &bot.id, &run.id, expected).await;
+    }
     // 閘門在等的就是這一則：排著的 prompt 現在可以送了（對不上的話，上面那則說明已經先進聊天室）。
     lifecycle::schedule_flush_queued(app, &bot.id);
     // 續行提示從接回驗過、畫面閒置起算 10 秒；對不上的就地取消（#424）。
