@@ -141,6 +141,46 @@ mod tests {
         }
     }
 
+    /// 2026-10-04 真機（agy 1.2.16，登入後，沒開 auto_approve）：要跑 `ls` 時的權限框。
+    const REAL_PERMISSION: &str = "\
+      ▄▀▀▄        Antigravity CLI 1.2.16
+     ▀▀▀▀▀▀       me@example.com (Google AI Plus)
+────────────────────────────────────────────────────────
+> Run the shell command `ls` in the current directory and tell me the output.
+
+● Bash(ls) (ctrl+o to expand)
+
+Command
+────────────────────────────────────────────────────────
+
+Requesting permission for:
+   ls
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'ls'
+  3. Yes, and always allow for commands that start with 'ls' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel
+";
+    /// 同一個 pane 閒著的真畫面：輸入列單獨一個 `>`，底下一條分隔線與 `? for shortcuts`。
+    const REAL_IDLE: &str = "\
+      ▄▀▀▄        Antigravity CLI 1.2.16
+     ▀▀▀▀▀▀       me@example.com (Google AI Plus)
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+? for shortcuts                                              Gemini 3.8 Flash (Medium)
+";
+
+    #[test]
+    fn the_real_1_2_16_permission_screen_is_a_dialog_and_the_idle_one_is_not() {
+        assert_eq!(blocking_dialog(REAL_PERMISSION), Some(AgyDialog::Permission));
+        assert_eq!(blocking_dialog(REAL_IDLE), None);
+    }
+
     #[test]
     fn only_login_is_needs_login_and_every_dialog_has_words_for_a_person() {
         assert_eq!(AgyDialog::Login.reason(), "needs_login");
