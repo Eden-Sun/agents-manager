@@ -1,0 +1,28 @@
+/* components/ComposerCostHint.tsx：輸入框上方一行小字；窄視窗只截尾、不換行。 */
+.composer-cost {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 2px 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.composer-cost-ctx {
+  flex: none;
+}
+.composer-cost-cache {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composer-cost-ctx + .composer-cost-cache::before {
+  content: '· ';
+}
+/* 已過期＝警示色（--warn 深淺兩種模式都已量過對比）。 */
+.composer-cost-cache.cold {
+  color: var(--warn);
+  font-weight: 600;
+}

@@ -141,6 +141,7 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         crate::codex_update::retain_runs(&active);
         crate::prompt_suggestion::retain_runs(&active);
         crate::cache_clock::retain_runs(&active);
+        crate::prompt_cache::retain_runs(&active);
         prune_process_state(app, &active).await;
     }
     for run in runs.into_iter().filter(|r| r.state == "running") {
@@ -170,6 +171,8 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
         if kind == "codex" {
             // 狀態列是 runtime 的權威，每輪校正（讀不到就不動）。
             crate::codex_live::sync_runtime(app, &client, &run.bot_id, &run.id, &pane, Some(&read.text)).await;
+            // 輸入框上方的快取／context 提示：讀 rollout 新增的 token_count（`prompt_cache`）。
+            crate::prompt_cache::refresh_codex(app, &run).await;
         }
         let observation_fence;
         let seen = if kind == "codex" {

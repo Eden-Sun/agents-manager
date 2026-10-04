@@ -41,6 +41,7 @@ import type {
   Project,
   Run,
   RunState,
+  PromptCacheInfo,
   StatusInfo,
   TerminalSnapshot,
   TerminalSource,
@@ -424,6 +425,33 @@ export function toStatusInfo(v: unknown): StatusInfo | null {
     cwd: optStr(pick(workspace, 'current_dir')) ?? optStr(raw.cwd),
     version: optStr(raw.version),
     session_name: optStr(raw.session_name),
+    prompt_cache: toPromptCache(raw.prompt_cache),
+  }
+}
+
+/** `"1h"`／`"5m"`／`"300s"` → 秒；認不得回 null。 */
+function ttlSecsOf(v: unknown): number | null {
+  if (typeof v === 'number' && v > 0) return v
+  const m = typeof v === 'string' ? /^(\d+)\s*([smh])$/.exec(v.trim()) : null
+  return m ? Number(m[1]) * { s: 1, m: 60, h: 3600 }[m[2] as 's' | 'm' | 'h'] : null
+}
+
+/** daemon 的 `run.prompt_cache`，或 claude statusLine 原 JSON 裡的 `prompt_cache`（`ttl:"1h"`）；沒有或形狀不對回 undefined。 */
+export function toPromptCache(v: unknown): PromptCacheInfo | undefined {
+  if (!isRec(v)) return undefined
+  const num = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) ? x : null)
+  const flag = (x: unknown): boolean | null => (typeof x === 'boolean' ? x : null)
+  return {
+    warm: flag(v.warm),
+    expires_at: num(v.expires_at),
+    ttl_secs: ttlSecsOf(v.ttl_secs ?? v.ttl),
+    recache_tokens_if_cold: num(v.recache_tokens_if_cold),
+    caching_observed: flag(v.caching_observed),
+    source: v.source === 'statusline' || v.source === 'rollout_estimate' ? v.source : null,
+    hit_ratio: num(v.hit_ratio),
+    context_used_pct: num(v.context_used_pct),
+    context_used_tokens: num(v.context_used_tokens),
+    context_size: num(v.context_size),
   }
 }
 
@@ -475,6 +503,7 @@ export function toRun(v: unknown, botId?: string): Run | null {
     ended_at: optStr(v.ended_at),
     agent_status_since: optStr(pick(v, 'agent_status_since')),
     last_api_at: optStr(pick(v, 'last_api_at')),
+    prompt_cache: toPromptCache(v.prompt_cache) ?? null,
     cache_ttl_secs: typeof v.cache_ttl_secs === 'number' && v.cache_ttl_secs > 0 ? v.cache_ttl_secs : null,
   }
 }
