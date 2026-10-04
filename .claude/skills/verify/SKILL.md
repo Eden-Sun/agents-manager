@@ -23,6 +23,6 @@ scripts/check.sh changed
 
 - **綠**：才可以 commit，回報時如實寫「`scripts/check.sh changed` 通過」。
 - **紅或中途失敗**：不可宣稱已驗證、不可說 ready-to-commit。先修到綠；修不了就在回報裡寫出 blocker（哪個步驟、錯誤訊息）。
-- 別人的 WIP 讓編譯掛掉、而你的改動本身沒問題時，照 repo `CLAUDE.md`「驗證」那段，對你 staged 的內容驗，不要碰別人的檔。
+- 別人的 WIP 讓編譯掛掉、而你的改動本身沒問題時，照 repo `AGENTS.md`「驗證」那段，對你 staged 的內容驗，不要碰別人的檔。
 
-詳細規則見 repo 根目錄 `CLAUDE.md` 的「驗證」與「提交」。
+詳細規則見 repo 根目錄 `AGENTS.md` 的「驗證」與「提交」。

@@ -9,7 +9,7 @@
 //      下緣才開始）。
 //   4. 390px 沒有整頁橫向捲動（`documentElement.scrollWidth === innerWidth`）。
 //
-// 跑法（要有真 daemon 的 dev server，見 CLAUDE.md）：
+// 跑法（要有真 daemon 的 dev server，見 AGENTS.md）：
 //   cd web && npx vite            # 5173
 //   node scripts/verify-header-chrome.mjs
 //   OUT=docs/screenshots/header-chrome node scripts/verify-header-chrome.mjs   # 順便存圖

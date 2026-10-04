@@ -20,7 +20,7 @@ def project_id(value):
     return value
 
 
-# CLAUDE.md：不貼 token／密碼／客戶資料。題目會一字不漏送到第三方的網頁，所以在入口擋明確長得像憑證的內容；
+# AGENTS.md：不貼 token／密碼／客戶資料。題目會一字不漏送到第三方的網頁，所以在入口擋明確長得像憑證的內容；
 # 規則刻意窄（要有夠長的值），一般的技術討論（「sk-xxx 格式」「X-AM-Token header」）不會被誤擋。
 SECRET_PATTERNS = (
     ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),

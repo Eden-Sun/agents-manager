@@ -113,7 +113,7 @@ event-sourcing／snapshot 機制，否則外部看不到——這既是額外的
 
 ## 什麼情況會改變這個結論
 
-- 如果將來多顆 daemon 行程真的需要同時管同一份 SQLite（目前是硬性禁止的，見 CLAUDE.md／SPEC 多處
+- 如果將來多顆 daemon 行程真的需要同時管同一份 SQLite（目前是硬性禁止的，見 AGENTS.md／SPEC 多處
   「絕對不要起第二顆 daemon」），單一 in-process mutex 就不夠了，那時候的解法也不是 actor，
   而是換掉共享儲存本身（例如換成真正支援多寫入者協調的資料庫）。
 - 如果 `bot_lock` 實測真的成為熱路徑瓶頸（目前沒有任何量測支持這個假設；本次評估也沒有新增量測，

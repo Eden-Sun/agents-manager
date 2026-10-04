@@ -2077,7 +2077,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - **禁放清單**：私鑰、憑證、DB 一律不得放 scratchpad 或 outbox——`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、
   `id_rsa*`／`id_ed25519*`、`*.sqlite*`、`*.db`（含 `-wal`／`-shm`／`.bak`）、DB 複本、瀏覽器 profile。要長期保留的東西進 repo 或 `reports/`。
 - **規則三條**（寫進 `lifecycle::child_agent_rules`，claude skill 與三種 kind 的 persona 共用，所以不在本 repo 的 bot 也讀得到；
-  本 repo 的 CLAUDE.md 另有同一節）：
+  本 repo 的 AGENTS.md 另有同一節）：
   1. scratchpad 只放中間產物，不給使用者，不可放私鑰／憑證／DB 複本。
   2. 要給使用者的檔案放 `$AM_OUTBOX`，1 小時後由 AGM 清掉；長期保留的進 repo 或 `reports/`。
   3. 私鑰／憑證／DB 一律不得進 scratchpad 或 outbox。
@@ -2303,7 +2303,7 @@ codex 讀到的又是另一份。現在指示只有一個來源——config 指�
 instructions_file = "~/.config/agents-manager/agents/global.md"   # 全域，每顆 bot 都讀
 
 [agents.projects]                                                  # key＝專案 id 或 label（id 優先）
-agents-manager = "/home/u/project/agents-manager/CLAUDE.md"
+agents-manager = "/home/u/project/agents-manager/AGENTS.md"
 pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照順序接；CLAUDE.md 的 @匯入不展開，要就都列
 ```
 
