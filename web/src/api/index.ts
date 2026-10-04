@@ -73,7 +73,7 @@ export async function fetchState(): Promise<AppState> {
   return toState(await transport.request('GET', '/state'))
 }
 
-/** API.md §6: `before` = 目前最舊一則的 id（往前翻，issue #25）。 */
+/** API.md §6: `before` = 已載入訊息中 rowid 最小一則的 id（往前翻，issue #25）。 */
 export async function fetchMessages(
   botId: string,
   limit = 200,
