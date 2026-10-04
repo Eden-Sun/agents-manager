@@ -5199,7 +5199,7 @@ async fn service_daemon_swap_restart_window(
     match crate::supervisor::maintenance::acquire(&app, "restart", owner, &id, Some(commit), ttl, true, &[]).await {
         Ok(v) => Ok(Json(v)),
         Err(e) => {
-            if !crate::swap_window::keep_after(&e) {
+            if !crate::swap_window::keep_after(&e) && !crate::swap_window::held_by_approval(&e, &id) {
                 let _ = crate::supervisor::store::decide_approval_from(&app.db, &id, "approved", "revoked", &actor, Some("沒拿到窗口"), None).await;
             }
             Err(e)
@@ -10967,6 +10967,38 @@ mod per_principal_auth_tests {
             format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Service-Id: {id}\r\nX-AM-Service-Token: {token}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn a_concurrent_swap_retry_does_not_revoke_the_live_window_approval() {
+        let e = crate::testing::env().await;
+        crate::testing::track(e.dir.clone());
+        let body = || SwapWindowIn { owner: "daemon-update-kick".into(), commit: "abc1234".into(), ttl_secs: Some(600) };
+        let svc = || Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into()));
+        let Json(first) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(body())).await.unwrap();
+        let approval_id = first["approval"]["id"].as_str().unwrap().to_string();
+        let second = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(body())).await;
+        assert!(matches!(&second, Err(LcError::Conflict(v)) if v["reason"] == "lease_held"), "second swap waits for the existing lease: {second:?}");
+        assert_eq!(
+            crate::supervisor::store::approval(&e.app.db, &approval_id).await.unwrap().unwrap().status,
+            "approved",
+            "the active swap owns this approval until it releases its lease"
+        );
+        let renew = crate::supervisor::api::post_lease_renew(
+            State(e.app.clone()),
+            Path("restart".into()),
+            HeaderMap::new(),
+            Json(crate::supervisor::api::LeaseHolderIn {
+                owner: "daemon-update-kick".into(),
+                fence: first["lease"]["fence"].as_i64().unwrap(),
+                ttl_secs: Some(600),
+                lease_token: first["lease_token"].as_str().map(str::to_string),
+                force: false,
+                reason: None,
+            }),
+        )
+        .await;
+        assert!(renew.is_ok(), "the first swap must retain the ability to renew: {renew:?}");
     }
 
     #[tokio::test]
