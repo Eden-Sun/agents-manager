@@ -1,5 +1,5 @@
 import { useStore } from '../store/store'
-import { effortLabel } from '../api/types'
+import { effortLabel, effortShort } from '../api/types'
 import { shortModel } from '../lib/shortModel'
 import { driftTitle, runtimeDrift, runtimeSettingsKnown } from '../lib/runtimeDrift'
 
@@ -7,7 +7,7 @@ import { driftTitle, runtimeDrift, runtimeSettingsKnown } from '../lib/runtimeDr
  * The model a bot is on, with its reasoning effort. Separator `-` (`opus-高`) is user-specified — do not
  * change it without asking. `fast` / `thinking` stay in the tooltip: a third segment gets ellipsized.
  */
-export function ModelTag({ botId }: { botId: string }) {
+export function ModelTag({ botId, short = false }: { botId: string; /** 精簡列：強度只寫縮寫（全名在 tooltip）。 */ short?: boolean }) {
   const bot = useStore((s) => s.bots.find((b) => b.id === botId) ?? null)
   const run = useStore((s) => s.runs[botId] ?? null)
   const reported = useStore((s) => s.runs[botId]?.status ?? null)
@@ -18,6 +18,7 @@ export function ModelTag({ botId }: { botId: string }) {
   const live = runtimeSettingsKnown(run)
   const effort = reported?.effort ?? (live ? run!.runtime_effort : bot.effort)
   const chipExtra = effort ? effortLabel(effort) : ''
+  const shownExtra = effort ? (short ? effortShort(effort) : chipExtra) : ''
   const fast = reported?.fast_mode ?? (live ? (run!.runtime_fast ?? bot.fast) : bot.fast)
   const detail = [chipExtra, fast ? 'fast' : null, reported?.thinking ? 'thinking' : null].filter(Boolean).join(' · ')
 
@@ -35,7 +36,7 @@ export function ModelTag({ botId }: { botId: string }) {
     >
       {shown ?? 'CLI 預設'}
       {/* 分隔符在 CSS 的 `.model-tag-extra::before`，不要在這裡再加一個。 */}
-      {chipExtra ? <span className="model-tag-extra">{chipExtra}</span> : null}
+      {shownExtra ? <span className="model-tag-extra">{shownExtra}</span> : null}
       {drift.length ? (
         <span className="model-tag-stale" aria-label="需重啟才生效">
           ⟳
