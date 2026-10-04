@@ -54,8 +54,13 @@ pub const EXCLUSIVE: [&str; 1] = ["restart"];
 ///
 /// 為什麼要有這條：這台機器上隨時有人在跟 bot 講話，「任何 bot 在回合中就不換」在這個負載下
 /// 等同永遠不安全——2026-09-15 那筆核准因此卡了 11 小時。放寬有界線，不是「有人講話也照換」。
-pub const ESCALATE_AFTER_MINS: i64 = 30;
-/// 覆寫上面那個門檻（分鐘）。0、負數或看不懂的值一律當沒設，回到 30。
+///
+/// 2026-10-04 使用者：「太久，改成 5 分鐘或者累積三個版本」——原本 30 分鐘，AGM 底下 l1–l8 一直在忙時每次部署都等滿；
+/// 另見 [`ESCALATE_BEHIND_COMMITS`]。
+pub const ESCALATE_AFTER_MINS: i64 = 5;
+/// 線上 binary 落後 origin/main 這麼多個「動到程式碼」的 commit 就不再等，直接放寬（同上，使用者 2026-10-04）。
+pub const ESCALATE_BEHIND_COMMITS: u64 = 3;
+/// 覆寫上面那個門檻（分鐘）。0、負數或看不懂的值一律當沒設，回到預設。
 pub const ESCALATE_ENV: &str = "AM_MAINTENANCE_ESCALATE_MINS";
 
 pub fn escalate_after_secs() -> i64 {
@@ -102,7 +107,35 @@ pub async fn escalation_for(app: &Arc<App>, approval_id: Option<&str>) -> Result
     let waited = waited_secs(since, &now);
     // 使用者在 header 按了「現在換版」：只放寬這次部署的自動核准（`deploy_wait`，使用者 2026-10-04）。
     let by_user = crate::deploy_wait::user_escalated_for(app, &a);
-    Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated: by_user || waited >= escalate_after_secs() }))
+    let escalated = by_user || waited >= escalate_after_secs() || behind_escalates(behind_code_commits(app).await);
+    Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated }))
+}
+
+/// 線上 binary 落後 origin/main 幾個動到程式碼的 commit（同部署狀態 `GET /api/deploy/status` 的 `code_commits`）。
+/// 安全檢查每 15 秒就問一次，算一次要跑幾個 git，所以快取 60 秒；算不出來（沒有 repo、線上 sha 不明）當 0——不知道就不放寬。
+pub fn behind_escalates(code_commits: u64) -> bool {
+    code_commits >= ESCALATE_BEHIND_COMMITS
+}
+
+async fn behind_code_commits(app: &Arc<App>) -> u64 {
+    // 單元測試不看測試 checkout 落後 origin/main 多少（那跟受測行為無關、而且會讓結果隨 repo 狀態飄）；規則本身由
+    // `behind_escalates` 的純函式測試釘住。
+    if cfg!(test) {
+        return 0;
+    }
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, u64)>> = std::sync::Mutex::new(None);
+    if let Some((at, n)) = *CACHE.lock().unwrap_or_else(|p| p.into_inner()) {
+        if at.elapsed() < std::time::Duration::from_secs(60) {
+            return n;
+        }
+    }
+    let ctx = crate::deploy_now::Ctx::of(app);
+    let n = match crate::deploy_now::behind(&ctx.repo, &ctx.live_sha).await {
+        Ok(v) => v.get("code_commits").and_then(serde_json::Value::as_u64).unwrap_or(0),
+        Err(_) => 0,
+    };
+    *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = Some((std::time::Instant::now(), n));
+    n
 }
 
 /// 還握著的租約。縮小封鎖面時這是**唯一**新增的阻擋條件：窗口一次只給一個人。
@@ -805,11 +838,13 @@ mod tests {
     /// 升級門檻的環境變數：只有「正整數」算數，其他一律回預設 30 分鐘。
     #[test]
     fn a_broken_threshold_env_falls_back_to_thirty_minutes() {
-        assert_eq!(parse_escalate_mins(None), 30);
+        assert!(!behind_escalates(2) && behind_escalates(3) && behind_escalates(10), "累積三個程式碼 commit 就放寬（使用者 2026-10-04）");
+        assert_eq!(parse_escalate_mins(None), ESCALATE_AFTER_MINS);
+        assert_eq!(ESCALATE_AFTER_MINS, 5, "使用者 2026-10-04：5 分鐘");
         assert_eq!(parse_escalate_mins(Some("45")), 45);
         assert_eq!(parse_escalate_mins(Some("  45 ")), 45);
         for bad in ["0", "-5", "abc", "", "30m"] {
-            assert_eq!(parse_escalate_mins(Some(bad)), 30, "{bad:?} 不該被當成門檻");
+            assert_eq!(parse_escalate_mins(Some(bad)), ESCALATE_AFTER_MINS, "{bad:?} 不該被當成門檻");
         }
     }
 
@@ -1072,15 +1107,15 @@ mod tests {
         assert_eq!(s["waited_secs"], serde_json::Value::Null);
         assert_eq!(s["working"].as_array().unwrap().len(), 1);
 
-        // 2. 剛核准 10 分鐘：還沒到門檻，一樣不安全。
-        let id = approved_window(app, 10).await;
+        // 2. 剛核准 2 分鐘：還沒到門檻（5 分鐘），一樣不安全。
+        let id = approved_window(app, 2).await;
         let s = safety(app, &[]).await.unwrap();
-        assert_eq!(s["escalated"], false, "10 分鐘就放寬的話這條規則等於沒有界線");
+        assert_eq!(s["escalated"], false, "還沒到門檻就放寬的話這條規則等於沒有界線");
         assert_eq!(s["safe"], false);
-        assert!(s["waited_secs"].as_i64().unwrap() >= 600);
+        assert!(s["waited_secs"].as_i64().unwrap() >= 120);
         assert_eq!(s["escalation_approval_id"], id);
 
-        // 3. 等超過 30 分鐘：思考中不再擋。
+        // 3. 等超過門檻：思考中不再擋。
         sqlx::query("UPDATE supervisor_approvals SET decided_at=? WHERE id=?")
             .bind((chrono::Utc::now() - chrono::Duration::minutes(40)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
             .bind(&id).execute(&app.db).await.unwrap();
@@ -1088,7 +1123,7 @@ mod tests {
         assert_eq!((s["escalated"].as_bool(), s["safe"].as_bool()), (Some(true), Some(true)));
         assert!(s["waited_secs"].as_i64().unwrap() >= 2400);
         assert_eq!(s["working"].as_array().unwrap().len(), 1, "還是照實回報誰在跑，只是不再擋");
-        assert_eq!(s["escalate_after_secs"], 1800);
+        assert_eq!(s["escalate_after_secs"], ESCALATE_AFTER_MINS * 60);
     }
 
     /// 放寬只會放寬：全靜止時是 safe 的窗口，等超過門檻之後不能變成 unsafe。

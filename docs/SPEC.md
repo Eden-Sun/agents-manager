@@ -4194,7 +4194,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   另存一欄、比 id 不比字串；現階段不加欄位（2026-09-24 裁示，避免再動 schema）。真正的界線仍是共用 UI token
   （見 #432），那要 per-bot token 才解得掉。
 - **等太久就縮小封鎖面**（AGM 裁示 2026-09-16）：在這台機器的負載下「任何 bot 在回合中就不換」等同永遠不安全——2026-09-15 那筆核准卡了 11 小時，每 5 分鐘那一輪都撞到有人在講話。
-  所以同一筆**已核准、未消耗**的 `rebuild`／`restart` 申請，從**核准時間**（`decided_at`；換 commit 接續的見下）起連續等超過門檻（常數 30 分鐘，`AM_MAINTENANCE_ESCALATE_MINS` 可調；0、負數或看不懂的值當沒設）之後，安全窗口改判「縮小封鎖面」：
+  所以同一筆**已核准、未消耗**的 `rebuild`／`restart` 申請，從**核准時間**（`decided_at`；換 commit 接續的見下）起連續等超過門檻（常數 5 分鐘——使用者 2026-10-04「太久，改成 5 分鐘或者累積三個版本」，原本 30 分鐘；**另外**線上 binary 落後 origin/main ≥ 3 個動到程式碼的 commit 也直接放寬（`ESCALATE_BEHIND_COMMITS`，算法同 `GET /api/deploy/status` 的 `code_commits`，快取 60 秒）；`AM_MAINTENANCE_ESCALATE_MINS` 可調；0、負數或看不懂的值當沒設）之後，安全窗口改判「縮小封鎖面」：
   - **誰等太久就放寬誰**（AGM 裁示 2026-09-16）：`acquire` 只看**當下這筆核准自己**等了多久，別人放著沒用掉的核准不算數——否則一張被遺忘的核准等於把所有人的窗口都打開。
     唯讀的 `safety` 帶 `?approval=<id>`（CLI `agm lease safety --approval <id>`）時同樣只看那一筆；不帶（純查詢，還不知道會用哪一筆）才退回看最早那筆還活著的核准。回傳的 `escalation_approval_id` 就是這次計時用的那一筆。
     認不得、已消耗、被撤、過期或還沒決定的核准一律不計時（＝不放寬）。
@@ -4228,8 +4228,8 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   「⏳ 部署等 N 分」＋toast）與 inbox `deploy_waiting`（巡檢收、叫醒，由它經 Remote Control 告訴使用者）；內容是要上的 commit、等了多久、被誰擋
   （working／送達中的 bot 名、讀不到狀態、別人的租約）、預計幾點自動放寬。之後只有擋的人換了、拿到窗口、換好（新 daemon 開機確認跑的是那顆）或放棄才更新同一則
   （同一個 `id`、`rev` 遞增），不洗版；狀態存 `<data_dir>/deploy-wait.json`，跨過換版那次重啟。`GET /api/state` 的 `deploy_wait` 供重整對帳。
-  使用者調度（只收 UI token）：「現在換版」＝這次部署的自動核准當成已等滿 30 分鐘（working 不擋，送達臨界區、別人的租約、讀不到狀態照樣擋），只認同一個 owner、
-  `decided_by=service(daemon-swap)` 的核准，AGM 親手核的與下一次部署都不受影響，並順手叫排程器跑一輪；「先等」＝收起通知，30 分鐘照樣自動放寬。
+  使用者調度（只收 UI token）：「現在換版」＝這次部署的自動核准當成已等滿門檻（working 不擋，送達臨界區、別人的租約、讀不到狀態照樣擋），只認同一個 owner、
+  `decided_by=service(daemon-swap)` 的核准，AGM 親手核的與下一次部署都不受影響，並順手叫排程器跑一輪；「先等」＝收起通知，到門檻照樣自動放寬。
   放寬持續到**這次部署結束**（換好或放棄），拿到窗口在換（`Swapping`）時仍算數；daemon-swap 拿到窗口後換 binary 前的複查（§3a）帶 restart-window 回應裡的
   `approval.id` 問 `lease safety --approval <id> --owner <owner>`，跟 acquire 同一套判斷——working 不擋，送達臨界區、別人的租約、讀不到狀態照擋
   （issue #840：以前複查不帶核准、放寬又只認「還在等」，acquire 剛給的放寬被複查推翻，只要隨時有人 working 就永遠換不上）。

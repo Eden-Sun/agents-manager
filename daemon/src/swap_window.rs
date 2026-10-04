@@ -1,6 +1,6 @@
 //! 例行自動部署換版窗口的核准（`POST /api/services/daemon-swap/restart-window`，SPEC §18.10）。
 //!
-//! 窗口要等「沒人在 working」，等滿 [`crate::supervisor::maintenance::escalate_after_secs`]（30 分）之後 working
+//! 窗口要等「沒人在 working」，等滿 [`crate::supervisor::maintenance::escalate_after_secs`]（5 分；或線上落後 ≥3 個程式碼 commit）之後 working
 //! 才不再擋——但計時綁在**同一張核准**上。以前每一輪 daemon-swap 都開一張新的、拿不到窗口就撤掉，計時每輪歸零：
 //! 2026-10-01 一直有 bot 在忙，自動部署從 15:18 卡到隔天還沒換成版（每則 DEFER 的 `escalates_at` 都是當下 +30 分）。
 //!
