@@ -151,7 +151,12 @@ record_rejected() { # record_rejected <full sha>; atomic rewrite so an interrupt
   tmp=$(mktemp "$DIR/daemon-update.rejected.tmp.XXXXXX") || return 1
   if [ -f "$REJECTED" ] && ! cat "$REJECTED" > "$tmp"; then rm -f "$tmp"; return 1; fi
   if ! grep -qxF -- "$target" "$tmp"; then
-    { printf '\n'; printf '%s\n' "$target"; } >> "$tmp" || { rm -f "$tmp"; return 1; }
+    if [ -s "$tmp" ]; then
+      local trailing_newlines
+      trailing_newlines=$(tail -c 1 "$tmp" | wc -l | tr -d '[:space:]')
+      if [ "$trailing_newlines" = 0 ]; then printf '\n' >> "$tmp" || { rm -f "$tmp"; return 1; }; fi
+    fi
+    printf '%s\n' "$target" >> "$tmp" || { rm -f "$tmp"; return 1; }
   fi
   if ! mv -f "$tmp" "$REJECTED"; then rm -f "$tmp"; return 1; fi
   return 0
