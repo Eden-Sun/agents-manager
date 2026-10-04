@@ -455,7 +455,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
           <textarea
             value={text}
             rows={1}
-            placeholder={busy ? '對方思考中，可以先打下一則…' : '輸入訊息…'}
+            placeholder={busy ? 'AI 思考中，可以先打下一則…' : '輸入訊息…'}
             aria-label="訊息"
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
