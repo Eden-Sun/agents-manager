@@ -72,7 +72,7 @@ setup() {
   printf 'old-binary\n' > "$AGM_REPO/target/release/agents-managerd"
   echo "$(echo "$C0" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
 
-  export PATH="$ROOT/bin:$BASE_PATH"
+  export PATH="$ROOT/bin:${AM_CANARY_DIR:+$AM_CANARY_DIR:}$BASE_PATH"
   export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun"
   export AGM_SWAP_SCRIPT="$ROOT/bin/swap.sh" AM_AGENT_NAME=daemon-update-kick
   export STUB_GH_FAIL="" STUB_SWAP_RC=0 STUB_BUILT_BLOCK="" STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP=""
@@ -123,7 +123,7 @@ STUB
   : > "$AGM_DIR/agm.log"; : > "$AGM_DIR/gh.log"; : > "$AGM_DIR/build.log"; : > "$AGM_DIR/swap.log"; : > "$AGM_DIR/alerts.log"
   : > "$AGM_DIR/daemon-update.log"
 }
-teardown() { [ -n "${KEEP:-}" ] && echo "KEPT $ROOT" && return; rm -rf "$ROOT"; PATH="$BASE_PATH"; export PATH; }
+teardown() { [ -n "${KEEP:-}" ] && echo "KEPT $ROOT" && return; rm -rf "$ROOT"; PATH="${AM_CANARY_DIR:+$AM_CANARY_DIR:}$BASE_PATH"; export PATH; }
 run() { ( unset AM_REAL_CARGO; bash "$SCRIPT" >/dev/null 2>&1 ); echo $?; }
 ci() { echo "$2" > "$ROOT/ci/$1"; }   # ci <sha> <state>
 LOG() { echo "$AGM_DIR/daemon-update.log"; }
