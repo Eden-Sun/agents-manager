@@ -631,6 +631,53 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
     Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() })
 }
 
+/// 手動 compact（2026-10-04 使用者：「可以對某個 bot 下 compact，按鈕做在 context 旁邊」）：claude 與 codex 都有 `/compact`；
+/// grok 沒有同名指令，不猜。
+pub fn compact_slash_command(kind: &str) -> Option<&'static str> {
+    match kind {
+        "claude" | "codex" => Some("/compact"),
+        _ => None,
+    }
+}
+
+/// 對正在跑、閒著的 bot 送 `/compact`。跟 [`login`] 同一個 gate（沒在跑、忙著、回合在飛、找不到 pane 都不送，回 409 說理由）
+/// 與打字節奏；daemon 不等壓縮做完——之後的 statusLine 會回報新的 context 用量。
+pub async fn compact(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
+    let lock = app.bot_lock(bot_id).await;
+    let _g = lock.lock().await;
+    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let Some(line) = compact_slash_command(&bot.kind) else {
+        return Err(LcError::BadValue(json!({
+            "error": "compact_unsupported",
+            "kind": bot.kind,
+            "message": format!("{} has no /compact command", bot.kind),
+        })));
+    };
+    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| {
+        LcError::conflict(SlashBlocked::NotRunning.reason(), json!({ "bot_id": bot_id }))
+    })?;
+    let in_flight = db::in_flight_turn(&app.db, &run.id).await.map_err(up)?.is_some();
+    let pane_id = slash_gate(&run, in_flight)
+        .map_err(|b| LcError::conflict(b.reason(), json!({"bot_id": bot_id, "run_id": run.id})))?;
+    let client = client_for_run(app, &run).await?;
+    mark_pane_typed(app, &run.id).await.map_err(LcError::Upstream)?;
+    send_slash_line(&client, &pane_id, line).await?;
+    tracing::info!(bot_id, kind = %bot.kind, "sent /compact");
+    Ok(LoginOut { run_id: run.id, kind: bot.kind, command: line.to_string() })
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::compact_slash_command;
+
+    #[test]
+    fn compact_is_offered_for_claude_and_codex_only() {
+        assert_eq!(compact_slash_command("claude"), Some("/compact"));
+        assert_eq!(compact_slash_command("codex"), Some("/compact"));
+        assert_eq!(compact_slash_command("grok"), None);
+    }
+}
+
 #[cfg(test)]
 mod live_slash_tests {
     use super::{composer_settled, grok_model_from_screen, live_slash_command};

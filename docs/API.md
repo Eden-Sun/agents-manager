@@ -256,6 +256,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/interrupt` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/keys` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/bots/{id}/login` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| POST | `/api/bots/{id}/compact` | 同上（User-only；AGM 角色可） |
 | POST | `/api/bots/{id}/pane/move-to-tab` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/preview` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/promote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -556,6 +557,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 | POST | `/api/turns/{id}/abandon` | — | `200 {}`；只有 `in_flight`（含 `delivery=unknown`）可放棄，其餘在 per-bot lock 內 CAS 判定為 `409 {"reason":"turn is neither in-flight nor of unknown delivery","turn_id"}`（不新增 system message） |
 | POST | `/api/turns/{id}/withdraw` | — | `200 {"text","attachments":[<attachment id>,…]}`；撤回一則還沒送出的 `queued`——標 `failed`＋一則 system 說明，不送，並回傳使用者原文與附件 ID 讓前端放回輸入框。只收三種：bot 沒在跑時送、還在等它起來的（`awaits_start:1`，issue #122）、回合中送出後等 bot 閒下來的 web prompt（`awaits_idle:1`，issue #733），以及 daemon 自己排的通知（`client_request_id` 前綴 `child-blocked:`／`resume-nudge:`，issue #562：擋在佇列頭時讓使用者的訊息先走）。其他（已被佇列領走、使用者排的訊息、AGM 的派工…）一律 `409 {"reason":"turn is not waiting for its bot to start","turn_id","status"}`、原樣不動（已經打進去的不能假裝沒送） |
 | POST | `/api/bots/{id}/login` | — | `200 {"run_id","kind","command":"/login"}`，見 §4.1 |
+| POST | `/api/bots/{id}/compact` | — | 對閒著的 bot 送 `/compact`（claude、codex；grok → 400 `compact_unsupported`）。`200 {"run_id","kind","command":"/compact"}`；沒在跑（`not_running`）、忙著（`agent_busy`）、回合在飛（`turn_in_flight`）、找不到 pane（`no_pane`）→ 409（同 `/login` 的 gate）。不等壓縮完成，新的 context 用量由 statusLine 回報（2026-10-04 使用者：context 旁的「壓縮」鈕） |
 
 - `keys` 的鍵名由 herdr 驗證，常用 `enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。
 - **文字用 `/text` 不用 `/keys`**：`\n` 不是鍵名。`/text` 走 `pane.send_text`（herdr 眼中的貼上，換行保留），`enter`（預設 true）後另送 `enter` 鍵才是送出。
