@@ -238,7 +238,7 @@ install -m 755 scripts/ops/daemon-update-kick.sh ~/.config/agents-manager/superv
 - 預期 schema 版本從 checkout 的 `SCHEMA_HISTORY` 讀，不寫死；讀不到就中止。
 - 回滾還原 DB 前先停 daemon、清掉 `-wal`／`-shm`，還原後自驗 `user_version` 與 `integrity_check`。
 - 所有部署驗證成功後，保留這趟 DB 備份並清除同一 DB 的舊 `.bak-*`；abort／rollback 不清理備份。
-- 停 daemon 一律走 `stop_daemon`：TERM、最多等 30 秒、還在就 KILL。rollback（含往前修那次重啟）以前只 TERM 後固定 sleep 5，新 daemon 還沒退就覆蓋 binary、刪 `-wal`／`-shm`、蓋掉 DB；現在跟換版主線同一套。
+- 停 daemon 一律走 `stop_daemon`：換版前必須找到唯一匹配的舊行程；TERM 最多等 30 秒、再 KILL 並確認 pid 消失。找不到、找到多顆或 KILL 後仍存活都以 rc=11 中止，不覆蓋 binary、不還原 DB。rollback（含往前修那次重啟）停不掉 daemon 也會保留現場。
 - 升過 schema 的失敗**預設往前修**（沿用新 binary，exit 6），只有新 binary 起不來才還原 binary＋DB（exit 7）。
 - 啟動走 `launchctl submit` ＋ `daemon-start.py`（fork + setsid）：daemon 是 ppid=1、nice 0。
   在 pane 裡直接背景起會繼承 pane 忙碌時的 nice 5，非 root 降不回去。
