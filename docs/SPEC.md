@@ -2155,7 +2155,7 @@ rustup 換位置或遠端主機上反而是錯的——讓 shim 每次在 pane �
   `{granted:false, active, max_concurrent, since, retry_after_secs}`——**額滿是正常的執行期狀態，不是失敗**，回 200 不是 4xx。
   同一個 holder 對已經握著、還沒過期的名額重 call 是幂等的（回同一份憑證），逾時後重問一次是安全的。
 - `POST /build-slots/renew {holder, token}`、`POST /build-slots/release {holder, token}`：**不另外驗 bot／UI
-  token**，`token` 本身就是憑證（跟 `lease_token` 同一個道理）——知道 acquire 發的那個值就等於是那個持有者。
+  token**，`token` 本身就是憑證（128 位元隨機值，不用可排序的資料庫 ULID）——知道 acquire 發的那個值就等於是那個持有者。
   `release` 一律幂等（找不到、已過期、token 不對都當作「已經不是你的事了」回成功），呼叫端的 `trap ... EXIT` 才能
   放心呼叫，不用先判斷還握不握著。`renew` 只有還在 `held` 且沒過期的列能續，過期了要求重新 `acquire`（不做「其實已經
   被別人拿走了」這種模糊地帶）。
