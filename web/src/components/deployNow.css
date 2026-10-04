@@ -96,22 +96,15 @@
   font-size: 12px;
 }
 
-/* 「部署中」與「部署等 N 分」：桌機並排；手機上下疊，不把標題列擠爆（2026-10-04 使用者：「這個超版，部署可以一上一下」）。 */
+/* 「部署中」與「部署等 N 分」一律上下疊：側欄窄，並排會蓋到中間的 RAM 格（2026-10-04 使用者：手機「這個超版，部署可以一上一下」；桌機截圖同樣疊到 RAM）。 */
 .head-deploy {
   display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   min-width: 0;
 }
 
 .head-deploy:empty {
   display: none;
-}
-
-@media (max-width: 720px) {
-  .head-deploy {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 2px;
-  }
 }
