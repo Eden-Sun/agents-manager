@@ -102,6 +102,7 @@ mod pane_identity;
 mod preview;
 mod preview_bind;
 mod primary_order;
+mod login_assist;
 mod pane_probe;
 mod prompt_suggestion;
 mod probe_ws;

@@ -1002,6 +1002,61 @@ export async function sendHostShellText(host: string, paneId: string, text: stri
   )
 }
 
+/** daemon 為 claude 身分登入開的 pane 上，從畫面取出的登入進度（#838）；網址只在這個回應裡，不進事件。 */
+export interface LoginStatus {
+  host: string
+  pane_id: string
+  identity: string
+  /** 登入網站的網址（daemon 驗過是 claude 的 https OAuth 網址）；CLI 還沒印出來＝`null`。 */
+  url: string | null
+  /** 畫面最後一行正是「Paste code here if prompted >」。 */
+  awaiting_code: boolean
+  code_sent: boolean
+  /** CLI 吐出的 `Login failed: …`。 */
+  failure: string | null
+}
+
+/** `null`＝這顆 pane 不是（或已不是）daemon 開的登入 pane（404）。其他錯誤照丟。 */
+export async function fetchLoginStatus(host: string, paneId: string): Promise<LoginStatus | null> {
+  try {
+    const raw = await transport.request('GET', `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/login`)
+    const o = isRec(raw) ? raw : {}
+    return {
+      host: str(pick(o, 'host'), host),
+      pane_id: str(pick(o, 'pane_id'), paneId),
+      identity: str(pick(o, 'identity')),
+      url: str(pick(o, 'url')) || null,
+      awaiting_code: o.awaiting_code === true,
+      code_sent: o.code_sent === true,
+      failure: str(pick(o, 'failure')) || null,
+    }
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null
+    throw e
+  }
+}
+
+export interface LoginCodeResult {
+  /** `failed`＝CLI 說登入失敗（`message`）；`finished`＝CLI 結束了（成功與否看身分列重驗）；`pending`＝還在等 CLI 回應。 */
+  outcome: 'failed' | 'finished' | 'pending'
+  message: string | null
+}
+
+/** 把網站給的 code 打進登入 pane 並按 Enter；畫面不在等 code 時 daemon 回 409 `not_awaiting_code`、一個字都不送。 */
+export async function submitLoginCode(host: string, paneId: string, code: string): Promise<LoginCodeResult> {
+  const raw = await transport.request(
+    'POST',
+    `/hosts/${encodeURIComponent(host || 'local')}/shells/${encodeURIComponent(paneId)}/login/code`,
+    { code },
+  )
+  const o = isRec(raw) ? raw : {}
+  const outcome = str(pick(o, 'outcome'))
+  return {
+    outcome: outcome === 'failed' || outcome === 'pending' ? outcome : 'finished',
+    message: str(pick(o, 'message')) || null,
+  }
+}
+
 export async function sendHostShellKeys(host: string, paneId: string, keys: string[]): Promise<void> {
   await transport.request(
     'POST',
