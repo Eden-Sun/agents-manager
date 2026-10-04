@@ -968,3 +968,7 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 
 - **外部 Cargo 主機**（環境設定→主機）：「啟用外部 Cargo verification」沒勾時，只顯示標題、說明、勾選框與「儲存」（取消啟用也要能存）；主機／帳號／port／jobs／工作目錄／密碼與「測試連線」勾選後才展開。隱藏不等於清空：欄位 state 與已存值原樣保留，取消勾選再儲存只送 `enabled:false`，host／user 等照舊、沒打密碼就不帶 `password`。表單有不合法值時，錯誤清單照常顯示（即使欄位收起來），以免儲存鍵被擋卻看不到原因。
 - **「AGM 總管」入口**：使用者說這個功能沒用、從來沒點過，側欄的按鈕與 Modal 拿掉。`SupervisorPanel`、`api/supervisor.ts`、daemon 端點都留著（元件只是不掛載）；AGM bot 本身與它的對話照常。原本只有這裡能做的操作改走 CLI：`agm supervisor`（狀態、遠端入口、交辦）、`agm supervisor-{setup,start,stop,fallback}`、`agm responder …`、`agm health`（故障）。
+
+## shell 裡自己跑的 agent 照樣能打字（2026-10-04 使用者）
+
+使用者在本機 shell pane 手動跑 agy，面板變「正在跑 agent，請走 bot 對話」、鍵盤直通灰掉，登入選單、貼授權碼、選主題／條款都打不進去。現在 daemon 只對**屬於 bot 的 pane**（有 active run、或 bot 剛起出它的 spawn hint）回 403 `agent_pane`；使用者自己在 shell 裡跑起來的 agent（herdr 認得出來但沒有 bot 的 run）照常可打字、可開鍵盤直通。受管 bot 的 pane 維持「走 bot 對話」。前端不用改：它只照 daemon 的 403 鎖面板。

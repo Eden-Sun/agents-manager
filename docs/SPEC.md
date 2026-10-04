@@ -1968,7 +1968,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
   遠端不算 port（見「資料與 API」），所以**遠端退回表上已知的事實**：`kind='service'` 或記過 listen port 就唯讀（AGM 2026-09-16 驗收）。
   **有 active run 的 pane 一律 403**：掃描可能在 agent 還沒被
   herdr 認出來的空檔把 bot 的 pane 記成 shell，那一刻也不能讓按鍵繞過回合那條線（§6.5.1／§6.9 的教訓）。
-- **表是快取，動手前即時再看一次**（review 2026-09-16 core 4）：打字前問 herdr `pane.get`（裡面現在有 agent → 403 `agent_pane`；
+- **表是快取，動手前即時再看一次**（review 2026-09-16 core 4）：打字前問 herdr `pane.get`（裡面現在有 **bot 的** agent［有 active run 或 spawn hint］→ 403 `agent_pane`；使用者自己在 shell 跑的 agent〔例如 agy 的登入選單〕不擋，2026-10-04；
   pane 不在 → 404）並在本機重對 listen port（有 → 403 `read_only_pane`），結果重用 3 秒（鍵盤同步一鍵一個請求）。
   **問不到就不打**（比照 GC「讀不到就不關」，AGM 2026-09-16 驗收）：herdr 沒回、`ps`／`lsof` 失敗或逾時、herdr 沒報 shell pid →
   409 `pane_state_unknown`（`retryable: true`），請人稍後再試，不默默放行。
