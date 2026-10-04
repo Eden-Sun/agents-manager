@@ -127,8 +127,34 @@ mkdir -p "$OB/b" "$ROOT/outside"
 echo x > "$ROOT/outside/precious.txt"; old "$ROOT/outside/precious.txt"
 ln -s "$ROOT/outside" "$OB/linkdir"
 ln -s "$ROOT/outside/precious.txt" "$OB/b/linkfile"
+ln "$ROOT/outside/precious.txt" "$OB/b/shared"
 run >/dev/null
 exists "目錄 symlink 的目標檔不被刪" "$ROOT/outside/precious.txt"
+gone   "outbox 的 hardlink 項目只解除自己那個連結" "$OB/b/shared"
+exists "外部 hardlink 仍指向原檔" "$ROOT/outside/precious.txt"
+teardown
+
+# 4b. outbox 根目錄自己被換成 symlink 時，拒絕工作並明確記錄，不可靜默跳過清理。
+setup
+mv "$OB" "$ROOT/real-outbox"
+mkdir -p "$ROOT/outside/botA"
+echo x > "$ROOT/outside/botA/precious.txt"; old "$ROOT/outside/botA/precious.txt"
+ln -s "$ROOT/outside" "$OB"
+equals "symlinked outbox root is refused" "$(run)" "1"
+check "symlinked outbox root refusal is logged" "OUTBOX 路徑含 symlink" "$LOG"
+exists "symlinked outbox root target is untouched" "$ROOT/outside/botA/precious.txt"
+teardown
+
+# 4c. 任一父目錄 symlink 都會讓 lexical path guard 指向 outbox 外的真實目錄；拒絕後不能刪那裡的檔。
+setup
+REAL_CONFIG="$ROOT/real-config"
+mv "$HOME/.config/agents-manager" "$REAL_CONFIG"
+mkdir -p "$REAL_CONFIG/outbox/botA"
+echo x > "$REAL_CONFIG/outbox/botA/precious.txt"; old "$REAL_CONFIG/outbox/botA/precious.txt"
+ln -s "$REAL_CONFIG" "$HOME/.config/agents-manager"
+equals "symlinked outbox parent is refused" "$(run)" "1"
+check "symlinked outbox parent refusal is logged" "OUTBOX 路徑含 symlink" "$LOG"
+exists "symlinked outbox parent target is untouched" "$REAL_CONFIG/outbox/botA/precious.txt"
 teardown
 
 # 5. 護欄：AM_OUTBOX_ROOT 不在預期路徑就拒絕、exit 1、什麼都不刪、記 log。

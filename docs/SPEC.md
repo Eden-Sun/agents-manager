@@ -2071,7 +2071,7 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
   只看 mtime 會出事：`mv`／`cp -p` 進來的舊檔保留舊 mtime，下一輪清理就把 bot 剛交出去的檔刪掉；ctime 是搬入那一刻（寫入、改名、chmod 也會動它，只會延長不會縮短）。
   清單的 `expires_at` 與清理用同一個規則，`modified` 仍是檔案內容的 mtime。
 - **清理者**：AGM 的 launchd `com.agm.outbox-gc`（`supervisor/AGM/bin/outbox-gc.sh`）每 10 分鐘刪掉 `-mindepth 2` 底下
-  mtime 與 ctime **都**超過 60 分鐘的檔，並收掉空目錄（`OUTBOX_GC_NOW` 是測試用的時鐘接縫）。**daemon 不清**。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
+  mtime 與 ctime **都**超過 60 分鐘的檔，並收掉空目錄（`OUTBOX_GC_NOW` 是測試用的時鐘接縫）。**daemon 不清**。清理會拒絕 outbox 根目錄或其路徑父項是 symlink，並在進入目錄後用相對路徑清理；遇到 symlinked 路徑會記錄並失敗，不沿路徑刪到外面。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
   bot **寫之前一律 `mkdir -p "$AM_OUTBOX"`**。
 - **分享用 bot 例外**（§20.5，使用者 2026-10-04）：它的 outbox 整個不清。daemon 在那顆的 outbox 放標記檔 `.am-share-keep`（建立、每次啟動、daemon 開機時補；
   bot 或專案刪掉時拿掉，回到 1 小時），`outbox-gc.sh` 看到就跳過整個目錄；清單回 `ttl_secs:null`、`kept:true`、每個檔 `expires_at`／`remaining_secs` 為 null，網頁不畫倒數。
