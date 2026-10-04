@@ -55,6 +55,13 @@ am_bot_token() {
     if [ -n "${AM_BOT_TOKEN:-}" ]; then printf '%s' "$AM_BOT_TOKEN"; else printf '%s' "${AM_HOOK_TOKEN:-}"; fi
 }
 
+# Keep bot credentials out of curl's process arguments; curl reads this header from stdin.
+am_curl_bot() {
+    _tok=$(am_bot_token)
+    [ -n "$_tok" ] || return 77
+    printf 'X-AM-Bot-Token: %s\n' "$_tok" | curl -H @- "$@"
+}
+
 # 子 agent 的標記（使用者 2026-09-30）：bot 開出來的 pane 一律帶 `AM_CHILD_OF=<母 agent 名>`，
 # 子代自己再開的 pane 沿用同一個值（不往下疊）。有這個值的 pane 就是子 agent，`agent start` 直接拒絕：
 # 子 agent 不再有子 agent，要人手由 parent 決定另派兄弟，狀態才都掛在同一層被追蹤。
@@ -148,8 +155,7 @@ am_spawn_begin() {
         printf 'agents-manager: 無法確認憑證輪替狀態，拒絕建立會繼承 bot credential 的 pane\n' >&2
         return 75
     fi
-    _out=$(curl -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/begin" \
-        -H "X-AM-Bot-Token: $_tok" \
+    _out=$(am_curl_bot -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/begin" \
         --data-urlencode "bot_id=${AM_BOT_ID}" \
         --data-urlencode "timeout_ms=${_AM_SPAWN_TIMEOUT_MS:-}" 2>/dev/null)
     _rc=$?
@@ -181,8 +187,7 @@ am_spawn_finish() {
         printf 'agents-manager: 無法登記憑證繼承 pane；保留 spawn fence\n' >&2
         return 75
     fi
-    _out=$(curl -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/finish" \
-        -H "X-AM-Bot-Token: $_tok" \
+    _out=$(am_curl_bot -s -m 2 -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/finish" \
         --data-urlencode "bot_id=${AM_BOT_ID}" \
         --data-urlencode "permit_id=${_AM_SPAWN_PERMIT}" \
         --data-urlencode "pane_id=${_pane}" \
@@ -202,8 +207,7 @@ am_spawn_abort() {
     [ -n "${AM_BOT_ID:-}" ] || return 0
     _tok=$(am_bot_token)
     if [ -n "$_tok" ] && [ -n "${AM_PORT:-}" ] && command -v curl >/dev/null 2>&1; then
-        curl -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/abort" \
-            -H "X-AM-Bot-Token: $_tok" \
+        am_curl_bot -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/spawn/abort" \
             --data-urlencode "bot_id=${AM_BOT_ID}" \
             --data-urlencode "permit_id=${_AM_SPAWN_PERMIT}" >/dev/null 2>&1 || true
     fi
@@ -622,8 +626,7 @@ am_agent_prompt() {
             # 第一次 2 秒；再問就給久一點（daemon 可能已經排進佇列、只是回得慢）。沒帶 request id 的申請 daemon 以內容指紋去重，重問不會變兩筆。
             if [ "$_try" = 1 ]; then _m=2; else _m=15; fi
             # 表單編碼：prompt 內容有引號、換行、`&` 都不會壞，也不必在 sh 裡拼 JSON。`-w` 在回應後面補一行 HTTP 狀態碼。
-            _out=$(curl -s -m "$_m" -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
-                -H "X-AM-Bot-Token: $(am_bot_token)" \
+            _out=$(am_curl_bot -s -m "$_m" -w '\n%{http_code}' -X POST "http://127.0.0.1:${AM_PORT}/relay/announce" \
                 --data-urlencode "bot_id=${AM_BOT_ID}" \
                 --data-urlencode "to_agent=${_name}" \
                 --data-urlencode "text=${_text}" \
@@ -810,8 +813,7 @@ am_forward_with_env() {
         # workspace_created 只有 `root_pane` 帶 pane_id）。冒號兩邊有沒有空白都認。
         _pane=$(printf '%s' "$_out" | tr ',' '\n' | sed -n 's/.*"pane_id" *: *"\([^"]*\)".*/\1/p' | head -n 1)
         [ -n "$_pane" ] || exit 0
-        curl -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/pane" \
-            -H "X-AM-Bot-Token: $(am_bot_token)" \
+        am_curl_bot -s -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/pane" \
             --data-urlencode "bot_id=${AM_BOT_ID}" \
             --data-urlencode "pane_id=${_pane}" \
             --data-urlencode "purpose=${_purpose}" >/dev/null 2>&1 || true
@@ -2128,6 +2130,60 @@ mod tests {
             log.display()
         ));
         log
+    }
+
+    #[test]
+    fn spawn_gate_credentials_are_not_exposed_in_curl_arguments() {
+        let s = Sandbox::new();
+        let argv_log = s.dir.join("curl-argv.log");
+        let headers_log = s.dir.join("curl-headers.log");
+        s.install_fake_curl(&format!(
+            "printf '%s\\n' \"$*\" >> '{}'\n\
+             cat >> '{}'\n\
+             case \"$*\" in\n\
+               */relay/spawn/begin*) printf '{{\"permit_id\":\"test-permit\"}}\\n200'; exit 0 ;;\n\
+               */relay/spawn/finish*) printf '{{\"registered\":true}}\\n200'; exit 0 ;;\n\
+               */relay/spawn/abort*) printf '{{\"released\":true}}\\n200'; exit 0 ;;\n\
+             esac\n",
+            argv_log.display(),
+            headers_log.display()
+        ));
+        write_script(
+            &s.dir.join("real/herdr"),
+            "if [ \"$1 $2\" = \"pane get\" ]; then exit 1; fi\n\
+             if [ -n \"$AM_TEST_HERDR_RC\" ]; then exit \"$AM_TEST_HERDR_RC\"; fi\n\
+             printf '%s\\n' '{\"pane_id\":\"w1:p2\"}'\n",
+        );
+        let token = "test-secret-token-should-not-be-in-argv";
+        let common = [
+            ("AM_BOT_ID", "b1"),
+            ("AM_BOT_TOKEN", token),
+            ("AM_PORT", "7788"),
+        ];
+        let (out, err, rc) = s.run_full(&common, &["pane", "split", "--pane", "w1:p1"]);
+        assert_eq!(rc, 0, "{out:?} {err}");
+        assert!(!out.join("\n").contains(token), "{out:?}");
+        assert!(!err.contains(token), "{err}");
+
+        let failing = [
+            ("AM_BOT_ID", "b1"),
+            ("AM_BOT_TOKEN", token),
+            ("AM_PORT", "7788"),
+            ("AM_TEST_HERDR_RC", "5"),
+        ];
+        let (out, err, rc) = s.run_full(&failing, &["pane", "split", "--pane", "w1:p1"]);
+        assert_eq!(rc, 5, "{out:?} {err}");
+        assert!(!out.join("\n").contains(token), "{out:?}");
+        assert!(!err.contains(token), "{err}");
+
+        let argv = std::fs::read_to_string(argv_log).unwrap();
+        assert!(!argv.contains(token), "credential leaked through curl argv: {argv}");
+        let headers = std::fs::read_to_string(headers_log).unwrap();
+        assert_eq!(
+            headers.matches(&format!("X-AM-Bot-Token: {token}")).count(),
+            4,
+            "begin, finish, begin, abort must receive the header over stdin: {headers}"
+        );
     }
 
     /// #664：agent start 失敗要 abort，不能把 permit 留到 daemon 重啟。
