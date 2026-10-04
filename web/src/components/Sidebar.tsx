@@ -1114,10 +1114,13 @@ export function Sidebar() {
           <div className="head-brand-title">
             <h1 title="Agents Manager">AG Man</h1>
             {MOCK_MODE ? <span className="mock-badge">MOCK</span> : null}
-            {/* 立即部署（2026-09-25 使用者）：落後且有程式碼差異才出現。放標題列、只寫 `⇪N`：放第二列會把 RAM 格擠到跟兩側重疊。 */}
-            <DeployNowBadge />
-            {/* 部署等換版窗口超過 3 分鐘（2026-10-04 使用者）：讓使用者調度。 */}
-            <DeployWaitChip />
+            {/* 兩顆部署標籤包一起：手機上下疊（2026-10-04 使用者：「部署中」「部署等 N 分」並排把標題列擠爆）。 */}
+            <span className="head-deploy">
+              {/* 立即部署（2026-09-25 使用者）：落後且有程式碼差異才出現。放標題列、只寫 `⇪N`：放第二列會把 RAM 格擠到跟兩側重疊。 */}
+              <DeployNowBadge />
+              {/* 部署等換版窗口超過 3 分鐘（2026-10-04 使用者）：讓使用者調度。 */}
+              <DeployWaitChip />
+            </span>
             {/* 手機 menu 也放一鍵重啟（2026-09-30 使用者：打開 menu 時標題列那顆被蓋住，看到 Bot 帶更新箭頭卻找不到按鈕）。 */}
             {phone ? <UpdateQuotaChip /> : null}
           </div>
