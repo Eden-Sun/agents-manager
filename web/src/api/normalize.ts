@@ -326,7 +326,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
       return typeof n === 'number' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
     })(),
     cwd: optStr(pick(v, 'cwd')),
-    share_profile: pick(v, 'share_profile') === 'restricted' ? 'restricted' : null,
+    share_profile: ((p) => (p === 'restricted' || p === 'trusted' ? p : null))(pick(v, 'share_profile')),
     share_enabled: bool(pick(v, 'share_enabled')),
     ...(() => {
       const x = pick(v, 'preview')

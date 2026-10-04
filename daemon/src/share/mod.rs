@@ -65,7 +65,7 @@ pub(crate) async fn revoke_project_shares(app: &std::sync::Arc<crate::state::App
 /// 回 `Some(bot_id)`＝擋下；讀不到也擋（fail closed，跟 [`refuses_bot_principal`] 同一個規矩）。重啟不擋：停了會自己起回來。
 pub(crate) async fn guards_from_bot_principal(db: &sqlx::SqlitePool, method: &str, path: &str) -> Option<String> {
     let segs: Vec<&str> = path.trim_end_matches('/').split('/').skip(1).collect();
-    let protected = |id: String| async move { (!matches!(store::is_restricted(db, &id).await, Ok(false))).then_some(id) };
+    let protected = |id: String| async move { (!matches!(store::is_share_bot(db, &id).await, Ok(false))).then_some(id) };
     match (method, segs.as_slice()) {
         ("DELETE", ["api", "bots", id]) | ("POST", ["api", "bots", id, "stop"]) => protected((*id).to_string()).await,
         ("DELETE", ["api", "projects", id]) => {
@@ -84,7 +84,8 @@ pub(crate) async fn guards_from_bot_principal(db: &sqlx::SqlitePool, method: &st
     }
 }
 
-/// 受限 bot 的 hook token 只用來打自己的 hook：其他任何拿 bot 身分進來的路一律擋。讀不到 DB 也擋（fail closed）。
+/// 受限 bot 的 hook token 只用來打自己的 hook（信任分享不算）：其他任何拿 bot 身分進來的路一律擋。讀不到 DB 也擋（fail closed）。
 pub(crate) async fn refuses_bot_principal(db: &sqlx::SqlitePool, bot_id: &str) -> bool {
-    !matches!(store::is_restricted(db, bot_id).await, Ok(false))
+    // 信任分享（trusted）是一般 bot 的權限：bot 身分照常能用；只有受限的關在籠子裡。
+    !matches!(store::is_caged(db, bot_id).await, Ok(false))
 }

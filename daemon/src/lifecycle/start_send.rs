@@ -294,7 +294,7 @@ async fn start_with(app: &Arc<App>, bot_id: &str, mark: Starting) {
 /// 它停過，要接回原本那段對話再送（`resume_native`；接不回照舊開新對話，訊息不能卡住）。讀不到是不是分享用 bot 也接回：
 /// 對一般 bot 只差在「先試著接回」，對分享用 bot 開新對話就是把對方的脈絡丟掉。其他 bot 照舊開新對話。
 async fn start_stopped(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
-    let opts = if matches!(crate::share::store::is_restricted(&app.db, bot_id).await, Ok(false)) {
+    let opts = if matches!(crate::share::store::is_share_bot(&app.db, bot_id).await, Ok(false)) {
         StartOpts::default()
     } else {
         StartOpts { resume_native: true, ..Default::default() }

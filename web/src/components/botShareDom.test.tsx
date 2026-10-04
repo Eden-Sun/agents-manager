@@ -179,6 +179,12 @@ test('側欄：分享用 bot 名字旁 🔗，分享中亮起；一般 bot 沒�
   await setOn(true)
   assert.ok(marks()[0].classList.contains('on'), '分享中亮起')
   assert.equal(marks()[0].getAttribute('aria-label'), '分享中')
+  assert.equal(marks()[0].textContent, '🔗')
+  // 信任分享：🔓、另一個樣式，一眼跟受限的分得出來。
+  await act(async () => useStore.setState((s) => ({ bots: s.bots.map((b) => (b.id === shared.id ? { ...b, share_profile: 'trusted' as const } : b)) })))
+  assert.equal(marks()[0].textContent, '🔓')
+  assert.ok(marks()[0].classList.contains('trusted'))
+  assert.equal(marks()[0].getAttribute('aria-label'), '信任分享中')
 })
 
 test('分享使用者的訊息標「🔗 分享使用者」，自己發的不標', () => {
@@ -212,10 +218,10 @@ test('建 bot 表單的資料夾：新資料夾預設 bot 名、既有資料夾�
 
   const { ShareProfileField } = await import('./ShareProfileField')
   let folder = { mode: 'existing' as const, name: '', path: '/srv/docs' }
-  await mount(<ShareProfileField kind="claude" host="local" value onChange={() => {}} botName="support" folder={folder} onFolder={(f) => (folder = f as typeof folder)} />)
+  await mount(<ShareProfileField kind="claude" host="local" value="restricted" onChange={() => {}} botName="support" folder={folder} onFolder={(f) => (folder = f as typeof folder)} />)
   assert.match(document.querySelector('.share-folder-warn')!.textContent!, /所有檔案（含 \.env 之類）/)
   await unmountAll()
-  await mount(<ShareProfileField kind="codex" host="local" value onChange={() => {}} botName="x" folder={folder} onFolder={() => {}} />)
+  await mount(<ShareProfileField kind="codex" host="local" value="restricted" onChange={() => {}} botName="x" folder={folder} onFolder={() => {}} />)
   assert.equal(document.querySelector('.share-folder'), null, 'codex 不能受限，也就沒有資料夾選項')
 
   const mock = new MockTransport()
@@ -226,4 +232,45 @@ test('建 bot 表單的資料夾：新資料夾預設 bot 名、既有資料夾�
   const b = st2.projects.flatMap((p) => p.bots).find((x) => x.id === r.bot_id)!
   assert.equal(b.cwd, '/srv/docs')
   assert.equal(b.model, 'opus', '沒選模型＝最新 Opus（別名交給 CLI 解析）')
+})
+
+test('信任分享：選了要在確認框勾「只分享給絕對信任的人」才算數，資料夾預設專案目錄；mock 沒帶 confirm 400', async () => {
+  const { ShareProfileField } = await import('./ShareProfileField')
+  let value: 'restricted' | 'trusted' | null = null
+  let folder = { mode: 'new' as 'new' | 'existing', name: '', path: '' }
+  await mount(
+    <ShareProfileField
+      kind="claude"
+      host="local"
+      value={value}
+      onChange={(v) => (value = v)}
+      botName="ops"
+      folder={folder}
+      onFolder={(f) => (folder = f)}
+      projectPath="/home/me/project/app"
+    />,
+  )
+  const radios = [...document.querySelectorAll<HTMLInputElement>('input[name="share-profile"]')]
+  assert.deepEqual(radios.map((r) => r.parentElement!.textContent!.trim()), ['不分享', '分享用（受限）', '🔓 信任分享'])
+  await click(radios[2])
+  const dialog = document.querySelector('[role="alertdialog"]')!
+  assert.match(dialog.textContent!, /拿到連結的人可以透過它操作這台機器上的任何東西/)
+  const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent === '建立信任分享')!
+  assert.equal(confirmBtn.disabled, true, '沒勾不能確認')
+  assert.equal(value, null)
+  await click(dialog.querySelector<HTMLInputElement>('input[type="checkbox"]')!)
+  assert.equal(confirmBtn.disabled, false)
+  await click(confirmBtn)
+  assert.equal(value, 'trusted')
+  assert.deepEqual(folder, { mode: 'existing', name: '', path: '/home/me/project/app' }, '資料夾預設專案目錄')
+
+  const mock = new MockTransport()
+  const st = (await mock.request('GET', '/state')) as { projects: { id: string }[] }
+  const pid = st.projects[0].id
+  await assert.rejects(mock.request('POST', `/projects/${pid}/bots`, { name: 't-share', kind: 'claude', share_profile: 'trusted', autostart: false }), (e) => e instanceof ApiError && e.status === 400)
+  const ok = (await mock.request('POST', `/projects/${pid}/bots`, { name: 't-share', kind: 'claude', share_profile: 'trusted', confirm_trusted: true, autostart: false, auto_approve: true })) as { bot_id: string }
+  const st2 = (await mock.request('GET', '/state')) as { projects: { bots: { id: string; share_profile: string | null; auto_approve: boolean }[] }[] }
+  const b = st2.projects.flatMap((p) => p.bots).find((x) => x.id === ok.bot_id)!
+  assert.equal(b.share_profile, 'trusted')
+  assert.equal(b.auto_approve, true, '信任分享照 bot 設定')
 })

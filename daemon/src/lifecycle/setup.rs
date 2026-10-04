@@ -627,7 +627,8 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
         anyhow::bail!("unknown bot kind {}", bot.kind);
     }
     // 分享用的受限 bot：權限參數由 `share::cage` 決定（絕不帶 bypass），settings 一律寫（裡面是它的權限規則）。
-    let restricted = crate::share::store::workspace(&app.db, &bot.id).await?;
+    // 信任分享（trusted）不算：照一般 bot 的權限參數。
+    let restricted = crate::share::store::caged_workspace(&app.db, &bot.id).await?;
     let mut out = if restricted.is_some() { Vec::new() } else { permission_args(&bot.kind, bot.auto_approve != 0) };
     if bot.inject_hooks == 0 && restricted.is_none() {
         return Ok(out);

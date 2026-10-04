@@ -139,3 +139,32 @@
   color: var(--danger);
 }
 
+
+.share-profile-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+.share-profile-trusted {
+  color: var(--warn);
+}
+
+.share-trusted-ack {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.bs-share-trusted {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.5;
+}

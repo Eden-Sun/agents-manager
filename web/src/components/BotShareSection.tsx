@@ -8,12 +8,13 @@ import './botShare.css'
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString('zh-TW', { hour12: false }) : '—')
 
 /**
- * Bot 設定裡的「分享」區塊（SPEC「分享 bot」）：只有分享用（受限）的 bot 才畫。
+ * Bot 設定裡的「分享」區塊（SPEC「分享 bot」）：只有分享用的 bot（受限或信任分享）才畫。
  * 開／關、隨時顯示完整連結＋複製、重產（舊的立刻失效）。舊版開的分享只有雜湊，提示重產一次。
  * 聊天區頂端的「🔗 分享」改了狀態會發 `bot_share_changed` → `share_enabled` 變 → 這裡重抓。
  */
 export function BotShareSection({ botId }: { botId: string }) {
-  const restricted = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile === 'restricted')
+  const profile = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile ?? null)
+  const restricted = profile !== null
   const sharing = useStore((s) => s.bots.find((b) => b.id === botId)?.share_enabled === true)
   const notify = useStore((s) => s.notify)
   const [share, setShare] = useState<ShareState | null>(null)
@@ -55,7 +56,7 @@ export function BotShareSection({ botId }: { botId: string }) {
   return (
     <section className="bs-share" aria-label="分享">
       <div className="bs-share-head">
-        <strong>🔗 分享給外部使用者</strong>
+        <strong>{profile === 'trusted' ? '🔓 信任分享給外部使用者' : '🔗 分享給外部使用者'}</strong>
         <label className="bs-share-toggle">
           <input
             type="checkbox"
@@ -67,6 +68,11 @@ export function BotShareSection({ botId }: { botId: string }) {
           {enabled ? '分享中' : '未分享'}
         </label>
       </div>
+      {profile === 'trusted' ? (
+        <p className="bs-share-trusted" role="note">
+          拿到連結的人可以透過這顆 bot 操作這台機器上的任何東西（跑指令、改檔、git…）。只分享給絕對信任的人。
+        </p>
+      ) : null}
       <p className="hint">
         拿到連結的人＝網路上任何人：可以跟這顆 bot 對話、上傳檔案、下載它給的檔案，看得到完整對話歷史；看不到 AG Man 的其他東西。
       </p>

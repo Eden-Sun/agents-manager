@@ -300,7 +300,7 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
         is_supervisor: sup.contains(&bot.id),
         is_primary: bot.is_primary != 0,
         // 讀不到就回 Err（issue #123）：漏認的分享用 bot 會被當成一般 worker 收掉。
-        is_share_bot: crate::share::store::is_restricted(&app.db, &bot.id).await?,
+        is_share_bot: crate::share::store::is_share_bot(&app.db, &bot.id).await?,
         state: run.state.clone(),
         agent_status: run.agent_status.clone(),
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),

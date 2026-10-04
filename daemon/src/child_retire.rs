@@ -62,7 +62,7 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
         }
         // 2026-10-04 使用者：「let AGM 不清除這類 bot」。分享用 bot 不會是 child（建 bot 時才選、managed_by=user），
         // 這裡是唯一入口上的保險：哪天有一條路誤把它當 child，也不會被隱式軟刪。讀不到＝不退役。
-        if mode == Mode::Implicit && !matches!(crate::share::store::is_restricted(&app.db, &bot.id).await, Ok(false)) {
+        if mode == Mode::Implicit && !matches!(crate::share::store::is_share_bot(&app.db, &bot.id).await, Ok(false)) {
             tracing::info!(bot = %bot.name, bot_id = %bot.id, why, "bot not retired: it is a share bot (or that could not be read)");
             return Ok(Outcome::ShareBot);
         }

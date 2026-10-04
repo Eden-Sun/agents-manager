@@ -48,10 +48,17 @@ pub(crate) fn check_profile(kind: &str, host: &str) -> Result<(), LcError> {
 /// 啟動前：這顆是不是受限 bot。是的話回它的工作目錄（順手補建），而且 kind／host 不合就不准起來。
 /// 讀不到 `shared_bots` 一律不啟動——寧可起不來，也不要把受限 bot 當一般 bot 起（fail closed）。
 pub(crate) async fn prepare(app: &Arc<App>, bot: &db::Bot, host: &str) -> Result<Option<String>, LcError> {
-    let ws = crate::share::store::workspace(&app.db, &bot.id)
+    let ws = crate::share::store::caged_workspace(&app.db, &bot.id)
         .await
         .map_err(|e| LcError::Upstream(format!("cannot tell whether bot {} is a restricted share bot: {e}", bot.id)))?;
-    let Some(ws) = ws else { return Ok(None) };
+    let Some(ws) = ws else {
+        // 信任分享（trusted）不進籠子，照一般 bot 起；但 outbox 一樣不給 gc 清、上傳的 inbox 一樣要在。
+        if let Ok(Some(dir)) = crate::share::store::workspace(&app.db, &bot.id).await {
+            let _ = crate::share::folder::ensure_inbox(Path::new(&dir));
+            crate::outbox::mark_share_keep(&app.data_dir, &bot.id);
+        }
+        return Ok(None);
+    };
     check_profile(&bot.kind, host)?;
     // 資料夾不見了就不起來（不替使用者重建一個空的）；inbox 不存在就建。
     crate::share::folder::ensure_inbox(Path::new(&ws)).map_err(|e| LcError::Upstream(format!("restricted bot folder {ws}: {e}")))?;

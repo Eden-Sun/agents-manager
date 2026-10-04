@@ -203,8 +203,8 @@ interface MockBot {
   /** child 才有：母 bot 的 id（側欄縮排在它底下）。 */
   parent_bot_id?: string
   cwd: string | null
-  /** 分享用的受限 bot（SPEC「分享 bot」）；省略＝一般 bot。 */
-  share_profile?: 'restricted'
+  /** 分享用 bot（SPEC §20）：受限或信任分享；省略＝一般 bot。 */
+  share_profile?: 'restricted' | 'trusted'
   /** 使用者釘選（`PATCH {primary}`）；省略 = 沒釘。 */
   is_primary?: number
   primary_position?: number
@@ -596,7 +596,7 @@ export class MockTransport implements Transport {
   readonly shares = new MockShares(
     (id) => {
       const b = this.bots.find((x) => x.id === id)
-      return b ? b.share_profile === 'restricted' : null
+      return b ? b.share_profile != null : null
     },
     (id, enabled) => this.emit('bot_share_changed', { bot_id: id, enabled }),
   )
@@ -1515,7 +1515,7 @@ export class MockTransport implements Transport {
     const ttl = 3600
     if (bot.kind === 'grok') return { files: [], ttl_secs: ttl, reason: 'outbox_remote' }
     // 分享用 bot（SPEC §20）的 outbox 不清：`kept`、不帶到期。
-    const kept = bot.share_profile === 'restricted'
+    const kept = bot.share_profile != null
     const now = Math.floor(Date.now() / 1000)
     const file = (name: string, size: number, age: number) => ({
       name,
@@ -2472,8 +2472,16 @@ export class MockTransport implements Transport {
       }
       bot.cwd = f.kind === 'existing' ? String(f.path) : `/Users/me/shared-bots/${String(f.name ?? name)}`
       if (!bot.model) bot.model = 'opus'
+    } else if (b.share_profile === 'trusted') {
+      // 同 daemon：要帶 confirm_trusted；只用既有資料夾（省略＝專案目錄）；權限照 bot 設定。
+      if (b.confirm_trusted !== true) throw new ApiError(400, { error: 'bad_request', reason: 'confirm_trusted_required' }, 'bad request')
+      if (bot.kind !== 'claude') throw new ApiError(409, { error: 'conflict', reason: 'unsupported_kind' }, 'unsupported kind')
+      const f = (b.share_folder ?? null) as Rec | null
+      if (f && f.kind !== 'existing') throw new ApiError(400, { error: 'bad_request', message: 'trusted share bots use an existing folder' }, 'bad request')
+      bot.share_profile = 'trusted'
+      bot.cwd = f ? String(f.path) : (this.projects.find((p) => p.id === projectId)?.path ?? null)
     } else if (b.share_folder) {
-      throw new ApiError(400, { error: 'bad_request', message: 'share_folder is only for share_profile `restricted`' }, 'bad request')
+      throw new ApiError(400, { error: 'bad_request', message: 'share_folder is only for a share_profile' }, 'bad request')
     }
     if (bot.identity) this.checkIdentity(bot.identity, bot.kind)
     this.bots.push(bot)
