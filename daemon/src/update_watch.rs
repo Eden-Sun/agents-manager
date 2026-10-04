@@ -140,6 +140,7 @@ async fn sweep_runs(app: &Arc<App>, runs: anyhow::Result<Vec<db::Run>>) {
     {
         crate::codex_update::retain_runs(&active);
         crate::prompt_suggestion::retain_runs(&active);
+        crate::cache_clock::retain_runs(&active);
         prune_process_state(app, &active).await;
     }
     for run in runs.into_iter().filter(|r| r.state == "running") {

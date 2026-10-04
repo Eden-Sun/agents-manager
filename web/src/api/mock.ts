@@ -117,11 +117,19 @@ interface MockRun {
   agent_status_since: string | null
   /** claude 輸入框裡的灰字「建議下一句」（`run.prompt_suggestion`）；只在 idle 有，離開 idle 就清掉。 */
   prompt_suggestion?: string | null
+  /** 快取倒數（SPEC §6.5j）：最後一次 API 活動；claude／codex 才有 TTL。 */
+  last_api_at?: string | null
+  cache_ttl_secs?: number | null
 }
+
+/** mock 的快取倒數：各顆 bot 錯開「上次活動」幾分鐘前，綠／黃／紅／已涼都演得到。 */
+const MOCK_CACHE_AGE_MIN = [3, 48, 57, 75, 20, 10]
 
 /** 同值重寫不算改變：mock 也要跟 daemon 的 trigger 同一套規則，不然本地開發永遠測不到「跑了多久」。 */
 function setAgentStatus(run: MockRun, status: MockRun['agent_status']) {
   if (run.agent_status === status) return
+  // 回合收尾就是一次 API 活動（daemon 取回合 `completed_at`）。
+  if (run.agent_status === 'working' && run.cache_ttl_secs) run.last_api_at = now()
   run.agent_status = status
   run.agent_status_since = now()
   if (status !== 'idle') run.prompt_suggestion = null
@@ -2955,6 +2963,11 @@ export class MockTransport implements Transport {
       run.state = 'running'
       setAgentStatus(run, 'idle')
       run.native_session_id = ulid('sess')
+      if (this.bot(botId).kind !== 'grok') {
+        run.cache_ttl_secs = 3600
+        const age = MOCK_CACHE_AGE_MIN[this.runs.indexOf(run) % MOCK_CACHE_AGE_MIN.length]
+        run.last_api_at = new Date(Date.now() - age * 60_000).toISOString()
+      }
       // Only claude ships a statusLine hook; ChatPanel rebuilds others' from the store.
       if (this.bot(botId).kind === 'claude') {
         run.status = claudeStatusJson(this.projects.find((p) => p.id === this.bot(botId).project_id)?.path ?? '~')

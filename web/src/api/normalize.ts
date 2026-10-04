@@ -474,6 +474,8 @@ export function toRun(v: unknown, botId?: string): Run | null {
     started_at: str(v.started_at),
     ended_at: optStr(v.ended_at),
     agent_status_since: optStr(pick(v, 'agent_status_since')),
+    last_api_at: optStr(pick(v, 'last_api_at')),
+    cache_ttl_secs: typeof v.cache_ttl_secs === 'number' && v.cache_ttl_secs > 0 ? v.cache_ttl_secs : null,
   }
 }
 

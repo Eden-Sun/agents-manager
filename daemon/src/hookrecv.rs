@@ -1319,6 +1319,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 let rich = serde_json::to_string(&rich).ok();
                 let changed = text != r.status_line.as_deref() || rich != r.status_json;
                 if changed {
+                    // 快取倒數（`cache_clock`）：API 指紋真的動了才算一次 API 活動，閒置重繪不算。
+                    crate::cache_clock::on_statusline(&r.id, r.status_json.as_deref(), rich.as_deref(), &db::now());
                     let _ = sqlx::query("UPDATE runs SET status_line = COALESCE(?, status_line), status_json = ? WHERE id = ?")
                         .bind(text)
                         .bind(&rich)
