@@ -155,13 +155,26 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
 
     let dir = path.parent().ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
     let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("trust");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    }
+    #[cfg(not(unix))]
     std::fs::create_dir_all(dir)?;
     // pid 之外再加一個遞增號：同一個行程裡並行的兩次寫入不能共用暫存檔（互相截斷、改名撞 ENOENT）。
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = dir.join(format!(".{name}.am-trust.{}.{}.tmp", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
 
     let res = (|| -> Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut f = options.open(&tmp)?;
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
         drop(f);
@@ -286,6 +299,20 @@ const REMOTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 /// 讀到寫之間被 CLI 改掉時重讀幾次。只給真的 race 用（`AM_TRUST_CHANGED`）：ssh 失敗是直接回錯，不在這裡重試。
 const REMOTE_RACE_ATTEMPTS: usize = 2;
 
+fn remote_write_script(store_q: &str, sum_q: &str, body: &str) -> String {
+    let mut delim = String::from("AM_TRUST_EOF");
+    while body.contains(&delim) {
+        delim.push('_');
+    }
+    format!(
+        "set -e\numask 077\nF={store_q}\nD=$(dirname \"$F\")\nmkdir -p \"$D\"\ncur=missing\nif [ -f \"$F\" ]; then cur=$(cksum < \"$F\"); fi\n\
+         if [ \"$cur\" != {sum_q} ]; then printf 'AM_TRUST_CHANGED\\n'; exit 0; fi\n\
+         T=\"$D/.$(basename \"$F\").am-trust.$$.tmp\"\ntrap 'rm -f \"$T\"' EXIT\ncat > \"$T\" <<'{delim}'\n{body}\n{delim}\n\
+         if [ -f \"$F\" ]; then chmod \"$(stat -c %a \"$F\" 2>/dev/null || stat -f %Lp \"$F\")\" \"$T\" 2>/dev/null || true; fi\n\
+         mv -f \"$T\" \"$F\"\nprintf 'AM_TRUST_OK\\n'\n",
+    )
+}
+
 /// 同 [`pretrust_bots`]，檔案在遠端：經 ssh 讀、在這裡合併（規則只有一份）、再經 ssh 寫回（#407）。
 pub async fn pretrust_bots_remote(app: &Arc<App>, host: &str, bots: &[db::Bot]) -> Vec<String> {
     pretrust_bots_remote_within(app, host, bots, REMOTE_BUDGET).await
@@ -374,18 +401,7 @@ async fn mark_trusted_remote(conn: &crate::hosts::HostConn, kind: &str, store: &
         let real_paths: Vec<String> = real_paths.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
         let Some(next) = merged(kind, &existing, &real_paths)? else { return Ok(false) };
         let body = next.strip_suffix('\n').unwrap_or(&next);
-        let mut delim = String::from("AM_TRUST_EOF");
-        while body.contains(&delim) {
-            delim.push('_');
-        }
-        let write = format!(
-            "set -e\nF={f}\nD=$(dirname \"$F\")\nmkdir -p \"$D\"\ncur=missing\nif [ -f \"$F\" ]; then cur=$(cksum < \"$F\"); fi\n\
-             if [ \"$cur\" != {sum} ]; then printf 'AM_TRUST_CHANGED\\n'; exit 0; fi\n\
-             T=\"$D/.$(basename \"$F\").am-trust.$$.tmp\"\ntrap 'rm -f \"$T\"' EXIT\numask 077\ncat > \"$T\" <<'{delim}'\n{body}\n{delim}\n\
-             if [ -f \"$F\" ]; then chmod \"$(stat -c %a \"$F\" 2>/dev/null || stat -f %Lp \"$F\")\" \"$T\" 2>/dev/null || true; fi\n\
-             mv -f \"$T\" \"$F\"\nprintf 'AM_TRUST_OK\\n'\n",
-            sum = sh_quote(&sum),
-        );
+        let write = remote_write_script(&f, &sh_quote(&sum), body);
         let out = conn.ssh_exec(&write).await?;
         if out.contains("AM_TRUST_OK") {
             tracing::info!(host = %conn.name, kind, store, paths = ?real_paths, "pre-trusted agent workspace directories on the remote");
@@ -651,6 +667,36 @@ trust_level = "trusted"
             assert_eq!(mode, 0o600, "mode changed to {mode:o}");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_local_trust_store_is_created_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-new-file-{}", crate::db::ulid())));
+        let store = dir.join(".claude.json");
+        assert!(mark_trusted("claude", &store, &["/workspace".into()]).unwrap());
+        let mode = std::fs::metadata(&store).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "new trust store inherited a permissive umask: {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_identity_trust_directory_is_created_0700() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-trust-new-dir-{}", crate::db::ulid())));
+        let store = dir.join(".codex/config.toml");
+        assert!(mark_trusted("codex", &store, &["/workspace".into()]).unwrap());
+        let mode = std::fs::metadata(dir.join(".codex")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "new identity directory inherited a permissive umask: {mode:o}");
+    }
+
+    #[test]
+    fn remote_trust_write_sets_private_umask_before_creating_directories() {
+        let script = remote_write_script("'/home/bot/.claude.json'", "'missing'", "body");
+        let private_umask = script.find("umask 077").expect("remote write must set a private umask");
+        let mkdir = script.find("mkdir -p").expect("remote write must create its parent");
+        assert!(private_umask < mkdir, "remote mkdir runs before private umask:\n{script}");
     }
 }
 
