@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { effortLabel } from '../api/types'
 import { useBotLamp } from '../hooks/useBotLamp'
@@ -30,7 +30,7 @@ function headline(h: ChipHints, label: string, blockedReason: string): string {
 
 /**
  * 主力 bot 現在的狀態（2026-10-04 使用者：「hover 至主力的 bot 時，就說明目前 context 狀態」）。
- * 電腦：滑鼠停在主力晶片上；手機：長按不動放開。`anchor` 有值＝貼在那顆晶片下方的浮卡，沒有＝手機底部彈出。
+ * 電腦：滑鼠停在主力晶片上；手機：長按（一到就開，手指接著移動＝改成拖曳、收卡）。`anchor` 有值＝貼在那顆晶片下方的浮卡，沒有＝手機底部彈出。
  */
 export function BotStatusCard({
   botId,
@@ -49,6 +49,8 @@ export function BotStatusCard({
   const run = useStore((s) => s.runs[botId] ?? null)
   const activity = useStore((s) => cleanLiveActivity(liveReplyOf(s, botId)?.activity))
   const { lamp, background, label, blockedReason, kids } = useBotLamp(botId)
+  // 手機的卡是長按當下就開的：手指放開那一下的 click 會落在剛蓋上來的暗底。只有在暗底上按下去的才算「點外面關掉」。
+  const downOnBackdrop = useRef(false)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -147,7 +149,16 @@ export function BotStatusCard({
     )
   }
   return createPortal(
-    <div className="chip-legend-backdrop" onClick={onClose}>
+    <div
+      className="chip-legend-backdrop"
+      onPointerDown={(e) => {
+        downOnBackdrop.current = e.target === e.currentTarget
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && downOnBackdrop.current) onClose()
+        downOnBackdrop.current = false
+      }}
+    >
       {card}
     </div>,
     document.body,

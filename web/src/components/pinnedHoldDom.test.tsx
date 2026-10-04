@@ -1,6 +1,6 @@
 /**
- * 主力晶片長按（2026-10-04 使用者：「手機版主力長按說明顏色意義」）：觸控長按不移動、放開＝開說明（onHold），
- * 長按後移動＝照舊拖曳，不開說明。
+ * 主力晶片長按（2026-10-04 使用者：「手機版主力長按說明顏色意義」）：長按一到就開狀態卡（onHold(id)），
+ * 接著移動＝收卡改拖曳（onHold(null)）；不動放開＝卡片留著（使用者：「長按與 drag 相衝」）。
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
@@ -14,8 +14,8 @@ afterEach(async () => {
 })
 after(teardownDom)
 
-const holds: number[] = []
-function Strip({ onHold }: { onHold: () => void }) {
+const holds: (string | null)[] = []
+function Strip({ onHold }: { onHold: (id: string | null) => void }) {
   const dnd = usePinnedDrag(['a', 'b'], ['a', 'b'], { a: 'a', b: 'b' }, () => {}, onHold)
   return (
     <div className="unread-pin-grid">
@@ -32,22 +32,25 @@ const ptr = (type: string, x: number, y: number) =>
   new PointerEvent(type, { bubbles: true, clientX: x, clientY: y, pointerType: 'touch', button: 0 })
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-test('觸控長按不動、放開：開說明', async () => {
+test('觸控長按一到就開卡、不動放開卡片留著', async () => {
   holds.length = 0
-  await mount(<Strip onHold={() => holds.push(1)} />)
+  await mount(<Strip onHold={(id) => holds.push(id)} />)
   const chip = document.querySelector<HTMLElement>('[data-bot-id="a"]')!
   await act(async () => {
     chip.dispatchEvent(ptr('pointerdown', 10, 10))
     await wait(420)
+  })
+  assert.deepEqual(holds, ['a'], '還按著就開卡')
+  await act(async () => {
     window.dispatchEvent(ptr('pointermove', 13, 11))
     window.dispatchEvent(ptr('pointerup', 13, 11))
   })
-  assert.equal(holds.length, 1)
+  assert.deepEqual(holds, ['a'])
 })
 
-test('觸控長按後移動：是拖曳，不開說明', async () => {
+test('觸控長按後移動：收卡改拖曳', async () => {
   holds.length = 0
-  await mount(<Strip onHold={() => holds.push(1)} />)
+  await mount(<Strip onHold={(id) => holds.push(id)} />)
   const chip = document.querySelector<HTMLElement>('[data-bot-id="a"]')!
   await act(async () => {
     chip.dispatchEvent(ptr('pointerdown', 10, 10))
@@ -55,7 +58,7 @@ test('觸控長按後移動：是拖曳，不開說明', async () => {
     window.dispatchEvent(ptr('pointermove', 60, 10))
     window.dispatchEvent(ptr('pointerup', 60, 10))
   })
-  assert.equal(holds.length, 0)
+  assert.deepEqual(holds, ['a', null])
 })
 
 test('說明用晶片與燈號的真 class 畫範例，Esc 關掉', async () => {

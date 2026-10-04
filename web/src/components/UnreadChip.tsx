@@ -288,9 +288,9 @@ export function UnreadChip() {
   const visiblePinned = useMemo(() => shownPinned.map((it) => it.id), [shownPinned])
   const names = useMemo(() => Object.fromEntries(pinnedItems.map((it) => [it.id, it.name])), [pinnedItems])
   const [legend, setLegend] = useState(false)
-  // 主力 bot 狀態卡（2026-10-04 使用者）：電腦 hover（`at`＝晶片位置），手機長按不動放開（`at` 為 null，底部彈出）。
+  // 主力 bot 狀態卡（2026-10-04 使用者）：電腦 hover（`at`＝晶片位置），手機長按一到就開（`at` 為 null，底部彈出；接著移動＝拖曳、收卡）。
   const [peek, setPeek] = useState<{ id: string; at: DOMRect | null } | null>(null)
-  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary, (id) => setPeek({ id, at: null }))
+  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary, (id) => setPeek(id ? { id, at: null } : null))
   const onPeek = useCallback((id: string | null, at?: DOMRect) => setPeek(id ? { id, at: at ?? null } : null), [])
   const peekItem = peek ? pinnedItems.find((it) => it.id === peek.id) ?? null : null
   const peekCard =

@@ -2,6 +2,8 @@
  * 主力那列（★）的拖曳與鍵盤重排（issue #344）。用 pointer events 而不是 HTML5 DnD：後者在觸控上不會動。
  * - 滑鼠：按住移動超過 5px 開始拖。
  * - 觸控：長按 350ms 才開始拖（之前手指移動超過 10px 視為捲動，取消）——手機那排本來就是橫捲。
+ *   長按一到就先開狀態卡（`onHold(id)`），手指接著移動＝收卡（`onHold(null)`）改拖曳；不動放開＝卡片留著。
+ *   以前要等放開才判斷「是說明還是拖曳」，兩個手勢搶同一個放開（2026-10-04 使用者：「長按與 drag 相衝」）。
  * - 鍵盤：聚焦晶片後 Ctrl+←／→ 移一格，並用 live region 報位置。
  * 順序計算在 `lib/pinnedOrder.ts`（純函式、有測試）。
  */
@@ -44,8 +46,8 @@ export function usePinnedDrag(
   visibleOrder: string[],
   names: Record<string, string>,
   commit: (order: string[]) => void,
-  /** 觸控長按後沒移動就放開（2026-10-04 使用者：「主力長按說明顏色意義」）；拖曳照舊是長按後移動。 */
-  onHold?: (id: string) => void,
+  /** 觸控長按一到＝`id`（開狀態卡）；接著移動變成拖曳＝`null`（收卡）。 */
+  onHold?: (id: string | null) => void,
 ): PinnedDnd {
   const [drag, setDrag] = useState<{ id: string; before: string | null; ready: boolean; dx: number; dy: number; shift: string[]; after: string | null; gap: number } | null>(null)
   // 上一個鎖定的落點（遲滯）。
@@ -88,6 +90,10 @@ export function usePinnedDrag(
       held.current = { before: undefined }
       setDrag({ id, before: null, ready: false, dx: 0, dy: 0, shift: [], after: null, gap: 0 })
       window.addEventListener('touchmove', stopTouchScroll, { passive: false })
+      if (touch) {
+        navigator.vibrate?.(10)
+        latest.current.onHold?.(id)
+      }
     }
     const end = () => {
       if (timer) clearTimeout(timer)
@@ -111,6 +117,7 @@ export function usePinnedDrag(
         begin()
       }
       if (touch && !moved && Math.hypot(dx, dy) <= TOUCH_SLOP) return
+      if (touch && !moved) latest.current.onHold?.(null)
       moved = true
       const slot = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before)
       const gap = Math.round(chip.getBoundingClientRect().width) + 8
@@ -123,11 +130,10 @@ export function usePinnedDrag(
       if (!was) return
       if (touch && !moved) {
         setDrag(null)
-        // 放開後同一個 task 的 click 也吞掉，不然說明開了又順便跳到那顆 bot。
+        // 放開後同一個 task 的 click 也吞掉，不然卡片開了又順便跳到那顆 bot。卡片在長按一到時就開了。
         setTimeout(() => {
           suppress.current = false
         }, 0)
-        latest.current.onHold?.(id)
         return
       }
       const picked = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before).before
@@ -149,6 +155,7 @@ export function usePinnedDrag(
       const was = dragging
       end()
       if (was) {
+        if (touch && !moved) latest.current.onHold?.(null)
         setDrag(null)
         suppress.current = false
       }
