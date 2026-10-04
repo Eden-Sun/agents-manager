@@ -48,6 +48,31 @@ it('讀回已存的設定到表單；密碼不回傳，只顯示「已安全儲�
   assert.doesNotMatch(document.body.innerHTML, /hunter2/)
 })
 
+it('沒勾選啟用時只剩標題、說明與勾選框；勾選才展開，取消勾選再儲存不會清掉已存的值', async () => {
+  const requests = await open({ enabled: false, host: 'build.example', user: 'builder', ssh_port: 2222, cargo_jobs: 6, password: 'old' })
+  const hidden = () =>
+    ['.remote-cargo-grid', 'input[type=password]', '.remote-cargo-settings .field:not(.checkbox-field)'].some((q) => document.querySelector(q) !== null) ||
+    btn('測試連線') !== undefined
+  assert.equal(hidden(), false, '沒勾選：主機、帳號、port、jobs、目錄、密碼、測試連線都不顯示')
+  assert.match(panel().textContent ?? '', /外部 Cargo 主機/)
+  assert.match(panel().textContent ?? '', /啟用外部 Cargo verification/)
+  assert.equal(panel().querySelectorAll('input').length, 1, '只剩那個勾選框')
+
+  const enable = panel().querySelector<HTMLInputElement>('input[type=checkbox]')!
+  await click(enable)
+  assert.equal(field('主機').value, 'build.example', '展開後仍是已存的值')
+  assert.equal(field('SSH port').value, '2222')
+  assert.notEqual(btn('測試連線'), undefined)
+
+  await click(enable)
+  assert.equal(hidden(), false, '取消勾選又收起來')
+  await click(btn('儲存')!)
+  await until(() => sent(requests, 'PUT', /build\/remote/).length === 1, '送出 PUT')
+  const body = sent(requests, 'PUT', /build\/remote/)[0].body as Record<string, unknown>
+  assert.deepEqual([body.enabled, body.host, body.user, body.ssh_port, body.cargo_jobs], [false, 'build.example', 'builder', 2222, 6])
+  assert.equal('password' in body, false, '沒動密碼就不帶：不會被清掉')
+})
+
 it('啟用卻沒填主機／帳號：儲存鍵停用；填好後儲存，body 是收斂過的值，密碼欄清空', async () => {
   const requests = await open()
   const enable = panel().querySelector<HTMLInputElement>('input[type=checkbox]')!
@@ -192,6 +217,7 @@ it('外部 Cargo 初始讀取失敗後仍可編輯；未儲存值要攔 beforeun
   try {
     await mount(<HostsPanel />)
     await until(() => document.querySelector('.remote-cargo-settings') !== null, '讀取失敗後仍顯示表單')
+    await click(panel().querySelector<HTMLInputElement>('input[type=checkbox]')!)
     const host = document.querySelector<HTMLInputElement>('.remote-cargo-grid input')!
     await typeInto(host, 'builder.example')
     const ev = new Event('beforeunload', { cancelable: true })

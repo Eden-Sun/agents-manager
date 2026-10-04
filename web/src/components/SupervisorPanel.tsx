@@ -1,6 +1,10 @@
 /**
  * AGM 總管的入口面板。
  *
+ * **目前沒有掛在任何地方**（2026-10-04 使用者：這個功能沒用、從來沒點過，側欄入口與 Modal 拿掉）。元件、
+ * `api/supervisor.ts` 與 daemon 端點都留著；要的話把 `<SupervisorPanel />` 放進 Modal 就回來。
+ * 同樣的操作 CLI 都有：`agm supervisor`（狀態）、`agm supervisor-{setup,start,stop,fallback}`、`agm responder …`、`agm health`。
+ *
  * 這裡**不做**新的聊天室：總管就是一顆 bot，要跟它說話請開它既有的對話。這個面板只
  * 負責「環境在什麼狀態、要不要建立／啟動、遠端入口通不通、手上有哪些交辦」。
  *

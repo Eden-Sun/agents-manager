@@ -963,3 +963,8 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 - 資料以 daemon 的 `run.prompt_cache` 為準（claude＝statusLine 的 `prompt_cache`，codex＝rollout 最近一筆 `token_count` 推算）；`warm`＋`expires_at` 判熱冷，
   閒置時 `warm:true` 過了 `expires_at` 也算冷。舊 daemon／舊版 claude／codex 還沒讀到 rollout 才退回 `last_api_at`＋`cache_ttl_secs` 推算（`lib/cacheClock.ts`）。
   token 數以 daemon 算好的為準（statusLine 的 `total_input_tokens` 是累計值，最後才用）。
+
+## 外部 Cargo 沒勾選就收起來；側欄拿掉「AGM 總管」（2026-10-04 使用者）
+
+- **外部 Cargo 主機**（環境設定→主機）：「啟用外部 Cargo verification」沒勾時，只顯示標題、說明、勾選框與「儲存」（取消啟用也要能存）；主機／帳號／port／jobs／工作目錄／密碼與「測試連線」勾選後才展開。隱藏不等於清空：欄位 state 與已存值原樣保留，取消勾選再儲存只送 `enabled:false`，host／user 等照舊、沒打密碼就不帶 `password`。表單有不合法值時，錯誤清單照常顯示（即使欄位收起來），以免儲存鍵被擋卻看不到原因。
+- **「AGM 總管」入口**：使用者說這個功能沒用、從來沒點過，側欄的按鈕與 Modal 拿掉。`SupervisorPanel`、`api/supervisor.ts`、daemon 端點都留著（元件只是不掛載）；AGM bot 本身與它的對話照常。原本只有這裡能做的操作改走 CLI：`agm supervisor`（狀態、遠端入口、交辦）、`agm supervisor-{setup,start,stop,fallback}`、`agm responder …`、`agm health`（故障）。

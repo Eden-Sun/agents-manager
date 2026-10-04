@@ -358,35 +358,35 @@ function NewHostForm({ onResult }: { onResult: (r: HostResult | null) => void })
       </button>
       {advanced ? (
         <>
-          <label className="field">
-            <span>ssh_port</span>
-            <input type="text" value={sshPort} spellCheck={false} onChange={(e) => setSshPort(e.target.value)} />
-            {portHint ? <span className="hint">{portHint}</span> : null}
-          </label>
-          <label className="field">
-            <span>herdr_session（遠端 named session）</span>
-            <input type="text" value={session} spellCheck={false} onChange={(e) => setSession(e.target.value)} />
-            {sessionHint ? <span className="hint">{sessionHint}</span> : null}
-          </label>
-          <label className="field">
-            <span>remote_path（非互動 ssh shell 要前置的 PATH）</span>
-            <input
-              type="text"
-              value={remotePath}
-              spellCheck={false}
-              onChange={(e) => setRemotePath(e.target.value)}
-            />
-          </label>
-          <label className="field">
-            <span>ssh_opts（額外 ssh 參數，以空白分隔）</span>
-            <input
-              type="text"
-              value={sshOpts}
-              placeholder="-i ~/.ssh/id_ed25519"
-              spellCheck={false}
-              onChange={(e) => setSshOpts(e.target.value)}
-            />
-          </label>
+            <label className="field">
+              <span>ssh_port</span>
+              <input type="text" value={sshPort} spellCheck={false} onChange={(e) => setSshPort(e.target.value)} />
+              {portHint ? <span className="hint">{portHint}</span> : null}
+            </label>
+            <label className="field">
+              <span>herdr_session（遠端 named session）</span>
+              <input type="text" value={session} spellCheck={false} onChange={(e) => setSession(e.target.value)} />
+              {sessionHint ? <span className="hint">{sessionHint}</span> : null}
+            </label>
+            <label className="field">
+              <span>remote_path（非互動 ssh shell 要前置的 PATH）</span>
+              <input
+                type="text"
+                value={remotePath}
+                spellCheck={false}
+                onChange={(e) => setRemotePath(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>ssh_opts（額外 ssh 參數，以空白分隔）</span>
+              <input
+                type="text"
+                value={sshOpts}
+                placeholder="-i ~/.ssh/id_ed25519"
+                spellCheck={false}
+                onChange={(e) => setSshOpts(e.target.value)}
+              />
+            </label>
         </>
       ) : null}
 
@@ -586,54 +586,61 @@ function RemoteCargoPanel() {
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
         <span>啟用外部 Cargo verification</span>
       </label>
-      <div className="remote-cargo-grid">
-        <label className="field">
-          <span>主機 / IP</span>
-          <input value={host} placeholder="192.168.1.20" spellCheck={false} onChange={(e) => setHost(e.target.value)} />
-        </label>
-        <label className="field">
-          <span>SSH 帳號</span>
-          <input value={user} placeholder="builder" spellCheck={false} onChange={(e) => setUser(e.target.value)} />
-        </label>
-        <label className="field">
-          <span>SSH port</span>
-          <input value={port} spellCheck={false} onChange={(e) => setPort(e.target.value)} />
-        </label>
-        <label className="field">
-          <span>遠端 cargo jobs</span>
-          <input value={jobs} spellCheck={false} onChange={(e) => setJobs(e.target.value)} />
-        </label>
-      </div>
-      <label className="field">
-        <span>遠端工作目錄</span>
-        <input value={root} spellCheck={false} onChange={(e) => setRoot(e.target.value)} />
-      </label>
-      <label className="field">
-        <span>SSH 密碼（可留空使用 key / ssh-agent）</span>
-        <input
-          type="password"
-          value={password}
-          autoComplete="new-password"
-          placeholder={passwordSet ? '已安全儲存；留空不變' : '未設定'}
-          onChange={(e) => {
-            setPassword(e.target.value)
-            if (e.target.value) setClearPassword(false)
-          }}
-        />
-        <span className="hint">
-          密碼不寫入 config.toml、不回傳前端；daemon 只存 0600 secret file。密碼模式優先用 sshpass，沒有就走 ssh 自己的 askpass（OpenSSH 8.4+）。
-        </span>
-      </label>
-      {passwordSet ? (
-        <label className="field checkbox-field">
-          <input type="checkbox" checked={clearPassword} onChange={(e) => setClearPassword(e.target.checked)} />
-          <span>清除已存密碼，改用 SSH key / agent</span>
-        </label>
+      {/* 沒勾選就只留標題、說明與勾選框；隱藏不等於清空，欄位 state 與已存值原樣保留。 */}
+      {enabled ? (
+        <>
+          <div className="remote-cargo-grid">
+            <label className="field">
+              <span>主機 / IP</span>
+              <input value={host} placeholder="192.168.1.20" spellCheck={false} onChange={(e) => setHost(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>SSH 帳號</span>
+              <input value={user} placeholder="builder" spellCheck={false} onChange={(e) => setUser(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>SSH port</span>
+              <input value={port} spellCheck={false} onChange={(e) => setPort(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>遠端 cargo jobs</span>
+              <input value={jobs} spellCheck={false} onChange={(e) => setJobs(e.target.value)} />
+            </label>
+          </div>
+          <label className="field">
+            <span>遠端工作目錄</span>
+            <input value={root} spellCheck={false} onChange={(e) => setRoot(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>SSH 密碼（可留空使用 key / ssh-agent）</span>
+            <input
+              type="password"
+              value={password}
+              autoComplete="new-password"
+              placeholder={passwordSet ? '已安全儲存；留空不變' : '未設定'}
+              onChange={(e) => {
+                setPassword(e.target.value)
+                if (e.target.value) setClearPassword(false)
+              }}
+            />
+            <span className="hint">
+              密碼不寫入 config.toml、不回傳前端；daemon 只存 0600 secret file。密碼模式優先用 sshpass，沒有就走 ssh 自己的 askpass（OpenSSH 8.4+）。
+            </span>
+          </label>
+          {passwordSet ? (
+            <label className="field checkbox-field">
+              <input type="checkbox" checked={clearPassword} onChange={(e) => setClearPassword(e.target.checked)} />
+              <span>清除已存密碼，改用 SSH key / agent</span>
+            </label>
+          ) : null}
+        </>
       ) : null}
       <div className="form-actions">
-        <button type="button" className="btn" disabled={busy || blocked || !host.trim() || !user.trim()} onClick={() => void test()}>
-          測試連線
-        </button>
+        {enabled ? (
+          <button type="button" className="btn" disabled={busy || blocked || !host.trim() || !user.trim()} onClick={() => void test()}>
+            測試連線
+          </button>
+        ) : null}
         <button type="button" className="btn primary" disabled={busy || blocked || (enabled && (!host.trim() || !user.trim()))} onClick={() => void save()}>
           {busy ? '處理中…' : '儲存'}
         </button>
