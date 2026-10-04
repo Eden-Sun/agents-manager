@@ -1,14 +1,14 @@
 //! 部署等換版窗口等太久就告訴使用者、讓使用者調度（使用者裁示 2026-10-04：「等待部署超過 3 分鐘，馬上通知 user 調度」，SPEC §18.10）。
 //!
 //! 例行自動部署與「立即部署」最後都走 daemon-swap → `POST /api/services/daemon-swap/restart-window`：要等沒有人 working、
-//! 沒有人在送達臨界區才換版，拿不到就 DEFER，同一張核准等滿 30 分鐘才放寬。使用者常常不知道它卡在等誰。所以：
+//! 沒有人在送達臨界區才換版，拿不到就 DEFER，同一張核准等滿門檻（5 分鐘，或線上落後 ≥3 個程式碼 commit）才放寬。使用者常常不知道它卡在等誰。所以：
 //!
 //! - **一次部署**＝同一個 owner（`daemon-update-kick`）連續在試的那段：每次試窗口都回報到這裡（[`observe`]），換 commit 或換核准
 //!   都算同一次；換版拿到窗口、換版完成、或 [`STALE_SECS`] 沒再試（kick 放棄、請求取消）才算結束。
 //! - 從開始等窗口（核准的 `waiting_since`）起滿 [`NOTIFY_AFTER_SECS`] 還沒拿到，就**通知一次**：WS `deploy_wait`（網頁 header＋toast）
 //!   與 supervisor inbox `deploy_waiting`（巡檢收、叫醒；它有使用者手機上的 Remote Control）。之後只有擋的人換了、拿到窗口、
 //!   換版完成或放棄才更新（同一個 `id`，`rev` 遞增），不每 15 秒洗一則。
-//! - 使用者在 header 按「現在換版」＝這次部署直接放寬（[`user_escalated_for`]，等同等滿 30 分鐘：working 不擋，送達臨界區、
+//! - 使用者在 header 按「現在換版」＝這次部署直接放寬（[`user_escalated_for`]，等同等滿門檻：working 不擋，送達臨界區、
 //!   別人的租約、讀不到狀態照樣擋），只對這次部署的自動核准有效；「先等」＝收起通知。
 //! - 狀態存在 `<data_dir>/deploy-wait.json`：換版本身就是重啟 daemon，新 daemon 開機讀回來才報得出「換好了」或「回滾了」。
 
@@ -445,7 +445,7 @@ pub async fn post_escalate(
     Ok(axum::Json(v))
 }
 
-/// `POST /api/deploy/wait/dismiss {id}`：「先等」，header 收起來。部署照樣在等，30 分鐘照樣自動放寬。
+/// `POST /api/deploy/wait/dismiss {id}`：「先等」，header 收起來。部署照樣在等，到門檻照樣自動放寬。
 pub async fn post_dismiss(
     axum::extract::State(app): axum::extract::State<Arc<App>>,
     axum::Extension(p): axum::Extension<crate::api::RequestPrincipal>,
