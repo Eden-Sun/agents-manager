@@ -231,6 +231,34 @@ async fn identity_login_reservations_serialize_open_and_release_when_closed() {
     forget(&env.app, "local", "w1:p1");
     assert!(reserve(&env.app, "local", "cc9").is_ok(), "closing a pane releases the identity");
 }
+
+#[tokio::test]
+async fn a_code_sent_once_cannot_be_submitted_again_while_the_prompt_is_still_visible() {
+    let f = login_pane(UNWRAPPED).await;
+    f.env
+        .app
+        .login_panes
+        .lock()
+        .unwrap()
+        .get_mut(&("local".into(), f.pane.clone()))
+        .unwrap()
+        .code_sent = true;
+
+    let later = f.env.herdr.set_screen_later();
+    let pane = f.pane.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        later(&pane, FAILED);
+    });
+    let result = submit_code(&f.env.app, "local", &f.pane, "second-code").await;
+
+    assert!(
+        matches!(&result, Err(LcError::Conflict(body)) if body["reason"] == "code_already_sent"),
+        "a pending or repeated browser request must not type a second code: {result:?}"
+    );
+    assert!(f.typed().is_empty() && f.keys().is_empty(), "one pane gets one code submission");
+}
+
 /// 畫面還在等 code：code 整個打進 pane、再按 Enter；之後 CLI 吐出 `Login failed` 就把那一句回給網頁。
 #[tokio::test]
 async fn a_code_is_typed_only_while_the_prompt_is_the_last_line() {
