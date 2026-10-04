@@ -812,7 +812,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/gh/cancel", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/identities", BotRoutePolicy::UserOrAgm),
     ("DELETE", "/api/identities/{name}", BotRoutePolicy::UserOrAgm),
-    ("PUT", "/api/identities/{name}/disabled", BotRoutePolicy::UserOrAgm),
+    ("PUT", "/api/identities/{name}/disabled", BotRoutePolicy::UserOnly),
     ("POST", "/api/mem/processes/kill", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/missions/{id}/pause", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/missions/{id}/resume", BotRoutePolicy::UserOrAgm),
