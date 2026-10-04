@@ -123,7 +123,7 @@ interface MockRun {
 }
 
 /** mock 的快取倒數：各顆 bot 錯開「上次活動」幾分鐘前，綠／黃／紅／已涼都演得到。 */
-const MOCK_CACHE_AGE_MIN = [3, 48, 57, 75, 20, 10]
+const MOCK_CACHE_AGE_MIN = [3, 48, 57, 30, 50, 75]
 
 /** 同值重寫不算改變：mock 也要跟 daemon 的 trigger 同一套規則，不然本地開發永遠測不到「跑了多久」。 */
 function setAgentStatus(run: MockRun, status: MockRun['agent_status']) {
