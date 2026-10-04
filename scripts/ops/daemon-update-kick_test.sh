@@ -231,6 +231,16 @@ check_eq ".built 補上" "$(echo "$C3" | cut -c1-8)" "$(cat "$AGM_DIR/daemon-upd
 check "推 swap_forward_fixed" "swap_forward_fixed" "$AGM_DIR/alerts.log"
 teardown
 
+# 8d. rollback cannot safely restore the old binary; preserve DB state and raise manual-recovery alert.
+setup
+ci "$C3" success
+export STUB_SWAP_RC=12
+run >/dev/null
+check "rollback incomplete 有明確 log" "舊 binary 無法安全恢復" "$(LOG)"
+check "rollback incomplete 推 ops_alert" "swap_rollback_incomplete" "$AGM_DIR/alerts.log"
+check_eq "rollback incomplete 計入失敗輪次" "1" "$(cat "$AGM_DIR/daemon-update.fails" 2>/dev/null || echo 0)"
+teardown
+
 # 9. 建置失敗：不換版、記失敗。
 setup
 ci "$C3" success
