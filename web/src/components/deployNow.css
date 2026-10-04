@@ -26,6 +26,7 @@
 
 /* 位置：側欄標題列「AG Man」右邊，只寫 `⇪N`（2026-09-25 使用者截圖：放第二列時 pane／部署／主題鈕把左欄撐到 160px，
    中間的 RAM 格只剩 16px、疊到兩側）。 */
+.head-brand-title > .head-deploy,
 .head-brand-title > .deploy-badge {
   margin-left: auto;
 }
