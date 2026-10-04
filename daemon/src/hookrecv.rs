@@ -1334,20 +1334,16 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         // `tool_confirmation_pending`／`quota` 之後（第二階段）才接；下面那段是 claude 的 rate_limits 與帳號，不能套在它身上。
         HookKind::StatusLine if provider == "agy" => {
             let s = |a: &str, b: &str| body.payload.get(a).or_else(|| body.payload.get(b)).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
-            // 對話還沒建立時 statusLine 的路徑是占位的：沒有 conversation id 就什麼都不記。
+            // 只記 conversation id（沒有的話什麼都不記）。**不記它的 `transcript_path`**：真機（1.2.16）statusLine 給的是
+            // `~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl`（摘要版、另一個目錄），
+            // 完整的 `transcript_full.jsonl` 只有 hook 的 `transcriptPath` 帶得出來。
             if let (Some(r), Some(conv)) = (&run, s("conversationId", "conversation_id")) {
-                let transcript_path = vetted_transcript(app, &bot, s("transcriptPath", "transcript_path")).await;
-                let result = sqlx::query(
-                    "UPDATE runs SET native_session_id = ?, transcript_path = COALESCE(?, transcript_path)
-                      WHERE id = ? AND (native_session_id IS NOT ? OR transcript_path IS NOT COALESCE(?, transcript_path))",
-                )
-                .bind(conv)
-                .bind(&transcript_path)
-                .bind(&r.id)
-                .bind(conv)
-                .bind(&transcript_path)
-                .execute(&app.db)
-                .await?;
+                let result = sqlx::query("UPDATE runs SET native_session_id = ? WHERE id = ? AND native_session_id IS NOT ?")
+                    .bind(conv)
+                    .bind(&r.id)
+                    .bind(conv)
+                    .execute(&app.db)
+                    .await?;
                 if result.rows_affected() > 0 {
                     app.emit_bot_status(&bot.id).await;
                 }
@@ -6365,14 +6361,15 @@ mod agy_tests {
         let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
         assert_eq!(r.native_session_id.as_deref(), Some(conv.as_str()));
         assert_eq!(r.transcript_path.as_deref(), Some(tp.to_str().unwrap()));
-        // statusLine 也補身分，但占位路徑（沒有對話之前）不記。
+        // statusLine 也補對話 id（沒有對話之前什麼都不記）。
         let (bot2, run2, _t2) = agy_turn(&app, &env.project_id).await;
         process(&app, &body(&bot2, json!({"hookEventName": "state", "conversation_id": "", "transcript_path": "/placeholder/transcript_full.jsonl"}))).await.unwrap();
         let r2 = db::run(&app.db, &run2).await.unwrap().unwrap();
         assert_eq!((r2.native_session_id, r2.transcript_path), (None, None), "對話還沒建立：不記");
-        process(&app, &body(&bot2, json!({"hookEventName": "state", "conversation_id": conv, "transcript_path": tp}))).await.unwrap();
+        process(&app, &body(&bot2, json!({"hookEventName": "state", "conversation_id": conv, "transcript_path": "/h/.gemini/antigravity/brain/x/.system_generated/logs/transcript.jsonl"}))).await.unwrap();
         let r2 = db::run(&app.db, &run2).await.unwrap().unwrap();
         assert_eq!(r2.native_session_id.as_deref(), Some(conv.as_str()));
+        assert_eq!(r2.transcript_path, None, "statusLine 的 transcript_path 是摘要版、另一個目錄：不記，只有 hook 的 transcriptPath（transcript_full.jsonl）算");
     }
 
     #[tokio::test]
