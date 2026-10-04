@@ -522,6 +522,37 @@ check_eq "回滾後保留新舊兩份 DB 備份" "2" "$(db_backup_count)"
 check_file "-wal 一樣要清掉" no "$DAEMON_DB-wal"
 teardown
 
+# If both atomic PREV restore and backup staging fail, preserve the current binary/DB pair and stop for manual recovery.
+setup 10 10
+export STUB_HEALTH_OK="" STUB_MUTATE_DB=1
+cat > "$ROOT/bin/mv" <<'STUB'
+#!/bin/bash
+src=""; dest=""
+for a in "$@"; do
+  case "$a" in -*) ;; *) if [ -z "$src" ]; then src="$a"; else dest="$a"; fi ;; esac
+done
+case "$src:$dest" in target/release/agents-managerd.prev-*:target/release/agents-managerd) exit 1 ;; esac
+exec /bin/mv "$@"
+STUB
+cat > "$ROOT/bin/cp" <<'STUB'
+#!/bin/bash
+if [ "$#" -eq 3 ] && [ "$1" = -p ] && [[ "$2" = target/release/agents-managerd.bak-* ]]; then
+  printf 'partial-rollback\n' > "$3"
+  exit 1
+fi
+exec /bin/cp "$@"
+STUB
+chmod +x "$ROOT/bin/mv" "$ROOT/bin/cp"
+rc=$(PATH="$ROOT/bin:$PATH" run)
+check_eq "rollback restore 失敗安全中止（rc=12）" "12" "$rc"
+check "rollback restore 失敗有明確 log" "ROLLBACK binary restore failed" "$SWAP_LOG"
+check_eq "rollback restore 失敗不留下部分 live binary" "yes" "$(cmp -s "$CHECKOUT/target/release/agents-managerd" "$AGM_REPO/target/release/agents-managerd" && echo yes || echo no)"
+check_eq "rollback restore 失敗保留新版 DB" "mutated-by-new-binary" "$(cat "$DAEMON_DB")"
+check_eq "rollback restore 失敗不再啟動 daemon" "1" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+check_file "rollback restore 失敗保留 service token" yes "$AM_DATA/service-tokens/daemon-swap.token"
+check_file "rollback restore 失敗保留 DB 備份" yes "$(logged_db_backup)"
+teardown
+
 # 5b. 回滾還原 DB 要原子：先寫同目錄暫存檔、fsync，再暫存 sidecar，最後用 rename 覆蓋主檔。
 #     以前 `rm -f -wal -shm; cp backup DB`：cp 中途失敗（磁碟滿、被殺）就是「原 DB 被截斷＋它的 WAL 已經刪了」。
 setup 10 10
