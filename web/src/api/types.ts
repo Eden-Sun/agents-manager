@@ -1,8 +1,8 @@
 /** Wire types for the daemon API. Source of truth: SPEC §7, appendix C, `daemon/src/api.rs`, docs/API.md; shape drift is absorbed in `normalize.ts`. */
 
-export type BotKind = 'claude' | 'codex' | 'grok'
+export type BotKind = 'claude' | 'codex' | 'grok' | 'agy'
 /** SPEC §12 */
-export const BOT_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok']
+export const BOT_KINDS: readonly BotKind[] = ['claude', 'codex', 'grok', 'agy']
 
 export type RunState = 'starting' | 'running' | 'stopping' | 'stopped' | 'exited'
 export type AgentStatus = 'idle' | 'working' | 'blocked' | 'unknown'
@@ -767,6 +767,23 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）
   grok: ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],
+  // agy 1.2.16：effort 變體已經在 slug 裡（`-high`／`-low`…），所以沒有獨立的強度檔。`agy models` 的實際清單（2026-10-04 使用者登入後），最前面是預設；daemon `agy_static_models` 同一份。
+  agy: [
+    'gemini-3.8-flash-medium',
+    'gemini-3.8-flash-high',
+    'gemini-3.8-flash-low',
+    'gemini-3.7-flash-high',
+    'gemini-3.7-flash-medium',
+    'gemini-3.7-flash-low',
+    'gemini-3.6-flash-high',
+    'gemini-3.6-flash-medium',
+    'gemini-3.6-flash-low',
+    'gemini-3.1-pro-high',
+    'gemini-3.1-pro-low',
+    'claude-sonnet-4-6',
+    'claude-opus-4-6-thinking',
+    'gpt-oss-120b-medium',
+  ],
 }
 
 /**

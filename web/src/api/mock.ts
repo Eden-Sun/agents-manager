@@ -350,6 +350,7 @@ const TOOLS_ALL_OK: Record<BotKind, MockTool> = {
   claude: { installed: true, path: '/opt/homebrew/bin/claude', version: '2.1.40', logged_in: true },
   codex: { installed: true, path: '/opt/homebrew/bin/codex', version: '0.68.0', logged_in: true },
   grok: { installed: true, path: '/Users/me/.local/bin/grok', version: '1.0.13', logged_in: null },
+  agy: { installed: true, path: '/Users/me/.local/bin/agy', version: '1.2.16', logged_in: null },
 }
 
 /** Codex 0.157.0 catalogue after retired 5.6 ids are hidden; claude effort 每個 alias 同一組。 */
@@ -402,6 +403,22 @@ const MODELS: Record<BotKind, Rec[]> = {
     { id: 'grok-4.7-build-fast', display_name: 'Grok 4.7 Fast', description: '較快變體', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
     { id: 'grok-4.6', display_name: 'Grok 4.6', description: '上一代', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high', 'xhigh'], service_tiers: [] },
     { id: 'grok-4.5', display_name: 'Grok 4.5', description: '上一代', is_default: false, default_effort: 'high', efforts: ['low', 'medium', 'high'], service_tiers: [] },
+  ],
+  agy: [
+    { id: 'gemini-3.8-flash-medium', display_name: 'gemini-3.8-flash-medium', description: '', is_default: true, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.8-flash-high', display_name: 'gemini-3.8-flash-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.8-flash-low', display_name: 'gemini-3.8-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.7-flash-high', display_name: 'gemini-3.7-flash-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.7-flash-medium', display_name: 'gemini-3.7-flash-medium', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.7-flash-low', display_name: 'gemini-3.7-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.6-flash-high', display_name: 'gemini-3.6-flash-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.6-flash-medium', display_name: 'gemini-3.6-flash-medium', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.6-flash-low', display_name: 'gemini-3.6-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.1-pro-high', display_name: 'gemini-3.1-pro-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gemini-3.1-pro-low', display_name: 'gemini-3.1-pro-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'claude-sonnet-4-6', display_name: 'claude-sonnet-4-6', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'claude-opus-4-6-thinking', display_name: 'claude-opus-4-6-thinking', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
+    { id: 'gpt-oss-120b-medium', display_name: 'gpt-oss-120b-medium', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
   ],
 }
 
@@ -536,6 +553,7 @@ export class MockTransport implements Transport {
     claude: { ...TOOLS_ALL_OK.claude },
     codex: { ...TOOLS_ALL_OK.codex, logged_in: false },
     grok: { installed: false, path: null, version: null, logged_in: null },
+    agy: { ...TOOLS_ALL_OK.agy },
   }
   /** cc1 未登入演「未登入」標記；cc2 來自 zshrc alias（SPEC §16），演兩種來源的差別。 */
   /** 停用名單，鍵是 `host|kind|name`（真 daemon 存在 `identity_prefs`）。 */
@@ -1728,7 +1746,7 @@ export class MockTransport implements Transport {
       error: null,
       disconnected_since: now(),
       // grok missing (exercises the tools hint).
-      tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null } },
+      tools: { claude: { ...TOOLS_ALL_OK.claude }, codex: { ...TOOLS_ALL_OK.codex }, grok: { installed: false, path: null, version: null, logged_in: null }, agy: { installed: false, path: null, version: null, logged_in: null } },
       identities: {
         ...Object.fromEntries(
           this.identities.map((i) => [
