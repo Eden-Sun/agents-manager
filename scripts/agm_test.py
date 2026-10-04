@@ -2569,6 +2569,21 @@ class SystemdParityTest(unittest.TestCase):
                 for key, want_value in self.SYSTEMD_ONLY.get(name, {}).items():
                     self.assertEqual(svc.get(key), want_value, key)
 
+    def test_daemon_update_path_includes_cargo_bun_and_herdr_locations(self):
+        import plistlib
+
+        plist = plistlib.loads((self.REPO / "scripts/ops/launchd/com.agm.daemon-update.plist").read_bytes())
+        launchd_path = plist["EnvironmentVariables"]["PATH"].split(":")
+        for directory in ("/Users/m4p/.cargo/bin", "/Users/m4p/.bun/bin", "/Users/m4p/.local/bin"):
+            with self.subTest(platform="launchd", directory=directory):
+                self.assertIn(directory, launchd_path)
+
+        service = (self.REPO / "scripts/ops/systemd/com.agm.daemon-update.service").read_text(encoding="utf-8")
+        [systemd_path] = re.findall(r"^Environment=PATH=(.+)$", service, re.M)
+        for directory in ("%h/.cargo/bin", "%h/.bun/bin", "%h/.local/bin"):
+            with self.subTest(platform="systemd", directory=directory):
+                self.assertIn(directory, systemd_path.split(":"))
+
     def test_every_unit_is_in_the_manifest_as_linux_and_darwin_only_rows_are_marked(self):
         rows = {}
         for line in (self.REPO / agm.OPS_MANIFEST).read_text(encoding="utf-8").splitlines():

@@ -5,7 +5,7 @@
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>/Users/m4p/.bun/bin:/Users/m4p/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<string>/Users/m4p/.local/bin:/Users/m4p/.bun/bin:/Users/m4p/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 	</dict>
 	<key>Label</key>
 	<string>com.agm.daemon-update</string>

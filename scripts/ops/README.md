@@ -117,6 +117,7 @@ loginctl enable-linger "$USER"   # 沒登入也要跑（一次就好；沒開的
 
 `daemon-update` 的 `Environment=` 有 PATH（`%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`）
 與 `HERDR_SESSION=agents-manager`；新主機的工具不在這些位置就改安裝那份，`ops-sync` 不會報（`Environment=` 只看在不在，不比內容；安裝端少了 `HERDR_SESSION` 也一樣不會報，要自己重裝或補 drop-in）。
+macOS launchd 的 `daemon-update` PATH 也要保留 `~/.local/bin`，因為 `daemon-swap.sh` 會呼叫安裝在那裡的 herdr。
 `HERDR_SESSION` 只有 systemd unit 帶：Linux 主機只跑 daemon 用的 session、沒有 default server，排程又沒有 pane 環境，
 不指定的話 `daemon-swap.sh` 的 `herdr pane list` 會回 `server_not_running` 而中止換版。daemon 改用別的 session 名時這裡跟著改。
 
