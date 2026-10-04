@@ -10,7 +10,7 @@ daemon 預設 `http://127.0.0.1:7788`（`config.toml` 的 `server.listen`）。�
    開發版（`allow_lan`，見 SPEC §7.1）**對端**不限：同網段誰都拿得到 token——這是使用者裁示保留的風險（`e7392dd`）；但 `Host`／`Origin`（若有）的主機名仍要過關：IP 字面值、`localhost`、單一標籤主機名、`.local`／`.ts.net`／`.home.arpa`／`.lan`／`.internal`／`.localdomain`，或環境變數 `AM_ALLOWED_HOSTS`（逗號分隔）明列的主機名；其他（例如被 DNS rebind 過來的 `evil.example`）一律 403。
 2. 其餘 `/api/*` 接受一種身分：User 的 `X-AM-Token`、Bot 的 `X-AM-Bot-Id`＋`X-AM-Bot-Token`、或範圍受限的 service `X-AM-Service-Id`＋`X-AM-Service-Token`。出現 Bot／service header 就表示要用該 principal；欄位不完整、token 不符、或混帶其他 principal 都拒絕，不降級成 User。沒有 Bot／service header 且 token 有效的請求是 User；這符合使用者裁示接受共用 UI token 的風險。
 3. WebSocket：精確路徑 `/ws?token=<token>[&since=<seq>]`，只接受 User token；Bot／service 身分 header 即使同時帶有效 query token 也回 401，不會忽略另一個 principal。尾斜線、重複斜線、大小寫或 percent-encoded 路徑別名不等同 `/ws`。
-4. `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/spawn/*` 仍用 per-bot 的 `X-AM-Bot-Token`。Bot pane 一律注入 `AM_BOT_TOKEN`；hook 開關只控制 `AM_HOOK_TOKEN`。兩者目前是同一個 `bots.hook_token`。User 可用 `POST /bots/{id}/credential/rotate` 立即輪替：舊值立刻失效，執行中的 bot 會重啟以取得新值，停止中的 bot 下次啟動時取得。若有任何仍活著的 child／grandchild pane 繼承該母 bot 的憑證，回 `409 {"reason":"live_children_use_credential","children":[...]}` 且不改 token、不重啟，待後代 pane 都停止後再重試。`/hook/{provider}` 的 provider 還必須等於那顆 bot 的 `kind`，否則 `409 {"error":"provider_mismatch","bot_kind","provider"}`：bot pane 裡起的別種 CLI 子行程（例如 claude bot 裡跑 `codex exec -c notify=…`）繼承了 `AM_BOT_ID`／token，不擋就會把自己的 session id 記成這顆 bot 的（2026-09-22）。
+4. `/hook/*`、`/relay/announce`、`/relay/pane`、`/relay/kids`、`/relay/spawn/*` 仍用 per-bot 的 `X-AM-Bot-Token`。Bot pane 一律注入 `AM_BOT_TOKEN`；hook 開關只控制 `AM_HOOK_TOKEN`。兩者目前是同一個 `bots.hook_token`。User 可用 `POST /bots/{id}/credential/rotate` 立即輪替：舊值立刻失效，執行中的 bot 會重啟以取得新值，停止中的 bot 下次啟動時取得。若有任何仍活著的 child／grandchild pane 繼承該母 bot 的憑證，回 `409 {"reason":"live_children_use_credential","children":[...]}` 且不改 token、不重啟，待後代 pane 都停止後再重試。`/hook/{provider}` 的 provider 還必須等於那顆 bot 的 `kind`，否則 `409 {"error":"provider_mismatch","bot_kind","provider"}`：bot pane 裡起的別種 CLI 子行程（例如 claude bot 裡跑 `codex exec -c notify=…`）繼承了 `AM_BOT_ID`／token，不擋就會把自己的 session id 記成這顆 bot 的（2026-09-22）。
 
 Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daemon 不檢查 `Host`；proxy 從本機連過來，對端就是 loopback。
 
@@ -48,7 +48,7 @@ Vite proxy 要把 `/api`、`/ws`（含 upgrade）、`/hook` 轉到 daemon。daem
 | D | `POST /supervisor/{setup,start,stop,fallback,remote}`、`/supervisor/responder/{setup,start,stop}`、`POST /supervisor/assignments/{id}/review`、`PUT /supervisor/handoff`、`POST /supervisor/ops-alerts`、`POST /supervisor/cli`、`POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`、使用者網頁／shell | route layer `bot_requests::forbid_plain_bot`：被證明身分的一般 bot（不是巡檢／協調者）→ 403 `role_required`；沒帶 bot 標頭的使用者照舊；角色判斷同 `require_role`／`persona_actor`（`roles::role_of_bot`，每次讀 DB，角色換人後舊 bot 立刻失效；角色綁 bot id，改名、改身分都不影響）。`approvals/{id}/decide` 的 `approve` 另要 `require_role`；User 與 AGM 角色可 deny／revoke。 | AGM 的管理面（改總管的記憶、替總管下指令、對交辦下裁示、對 AGM 喊假警報、記錄遠端入口觀測） | 已有 |
 | D | `POST /supervisor/assignments` | AGM 角色與使用者；一般 bot **只能**對 AGM 角色 bot 送 `notice` | handler 內判斷（`post_assignment`）：被證明身分的一般 bot 若是要驗收的交辦、目標不是巡檢／協調者、或帶 `mission_id`／`role` → 403 `role_required`；`kind:"notice"`（或 `expects_review:false`）且目標是角色 bot → 放行（release／herdr 更新任務裡的 `agm assign --notice --bot <巡檢>` 由專用的一般 bot 執行） | 派工＝直接叫另一顆 bot 做事 | 已有 |
 | D | `POST /supervisor/approvals/{id}/decide` | AGM 角色 pane 裡的 `agm`；使用者可 deny／revoke | `approve` 要 `require_role`；`deny`／`revoke` 放行 User 與 AGM 角色；被證明身分的一般 bot 403 `role_required` | 核准換版窗口 | 已有（#447） |
-| E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/relay/spawn/*`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
+| E | `/hook/{provider}`、`/relay/announce`、`/relay/pane`、`/relay/kids`、`/relay/spawn/*`、`/build-slots/*` | bot pane 裡的 hook／shim | 不在 `/api` 底下，驗 per-bot `X-AM-Bot-Token` | — | 已有 |
 | E | 受限 bot（SPEC §20）的 token | 分享用 bot 的 hook | 只認 `/hook/{provider}`；`/api` 全部、`/relay/*`、`/build-slots/acquire` 403 `restricted_bot` | 分享出去的 bot 被說服後能動到的範圍 | 已有 |
 | A | `GET/POST /bots/{id}/share`、`POST /bots/{id}/share/rotate` | 只有網頁 | User principal；Bot／service principal 403 `user_only` | 開放一顆受限 bot 給網路上任何拿到連結的人 | 維持 |
 | F | `POST /mem/processes/kill` | 只有網頁 | `memproc::kill` 只殺 herdr 樹內、非 herdr、非 bot 的行程 | — | 維持 |
@@ -353,6 +353,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/build-slots/renew` | User 或 Bot token；Bot holder 必須是自己 |
 | POST | `/hook/{provider}` | Bot per-bot `X-AM-Bot-Token`；provider 必須等於該 Bot kind |
 | POST | `/relay/announce` | Bot per-bot `X-AM-Bot-Token`；body 身分／permit 需和驗證憑證一致 |
+| POST | `/relay/kids` | Bot per-bot `X-AM-Bot-Token`；只回 body `bot_id` 自己底下的子 agent |
 | POST | `/relay/pane` | Bot per-bot `X-AM-Bot-Token`；body 身分／permit 需和驗證憑證一致 |
 | POST | `/relay/spawn/abort` | Bot per-bot `X-AM-Bot-Token`；body 身分／permit 需和驗證憑證一致 |
 | POST | `/relay/spawn/begin` | Bot per-bot `X-AM-Bot-Token`；body 身分／permit 需和驗證憑證一致 |
@@ -1114,6 +1115,12 @@ port 存活探測同時連 `127.0.0.1` 與 `::1`，因此只綁 IPv6 loopback �
 `bot_id`／`pane_id`／`purpose`，header `X-AM-Bot-Token`；shim 開完 pane 後自己呼叫（`herdr … --purpose <文字>`）。
 只記用途：pane 還沒被掃到就先建一列，**已經有 owner 的不會被改寫**（歸屬永遠由掃描時的 `AM_BOT_ID` 決定）。
 token 不對 401；其他失敗照樣回 200（`recorded:false`），少一個用途字串不該讓 bot 開 pane 失敗。
+
+### `POST /relay/kids`（表單，bot shim 專用）
+`bot_id`，header `X-AM-Bot-Token`。shim 在 `herdr agent list` 之後呼叫（呼叫者本身是子 agent＝有 `AM_CHILD_OF` 時不叫），把回應原樣印到 stderr。
+回 `text/plain`：這顆 bot 底下（`parent_bot_id`）每顆活著的子 agent 一行 `名稱  agent_status  cache 狀態`，閒置且 prompt cache 還熱的排最前（剩最久的先），
+接著跑著的、冷掉的、沒在跑的。cache 剩餘＝`cache_clock` 的 `last_api_at`＋TTL（claude／codex 3600 秒，grok 不明）。沒有子 agent 回空字串。
+token 不對 401，restricted 分享 bot 403，讀 DB 失敗 503（shim 都只是不印）。
 
 ### `POST /relay/spawn/begin`、`POST /relay/spawn/finish` 與 `POST /relay/spawn/abort`（表單，bot shim 專用）
 pane split／tab create／workspace create 與 `agent start` 在呼叫 herdr 前，shim 以 `X-AM-Bot-Token` 送 `begin` 的 `bot_id`（`agent start` 另帶 `timeout_ms`＝它的 `--timeout`，沒帶為空）；daemon 回 `200 {"permit_id":"…"}` 才可繼續。credential rotation 進行中回 `409 credential_rotation_pending`，Bot proof 或 DB 讀取失敗回 401／503；shim 一律不呼叫 herdr。

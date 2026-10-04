@@ -825,6 +825,20 @@ am_forward_with_env() {
     exec "$AM_HERDR" "$_sub1" "$_sub2" "$@"
 }
 
+# `agent list` 之後把子 agent 的 prompt cache 還熱多久印到 stderr（使用者 2026-10-04：派工優先用 cache 還熱的 child，
+# 省 token）。herdr 的 JSON 原封不動在 stdout、exit code 照舊；問不到 daemon、或自己就是子 agent（不能派工），就不印。
+am_agent_list() {
+    "$AM_HERDR" "$@"
+    _rc=$?
+    if [ -z "${AM_CHILD_OF:-}" ] && [ -n "${AM_BOT_ID:-}" ] && [ -n "${AM_PORT:-}" ] && [ -n "$(am_bot_token)" ] \
+        && command -v curl >/dev/null 2>&1; then
+        _kids=$(am_curl_bot -s -f -m 2 -X POST "http://127.0.0.1:${AM_PORT}/relay/kids" \
+            --data-urlencode "bot_id=${AM_BOT_ID}" 2>/dev/null) || _kids=""
+        [ -z "$_kids" ] || printf '%s\n' "$_kids" >&2
+    fi
+    exit "$_rc"
+}
+
 AM_HERDR=$(am_real_herdr | head -n 1)
 if [ -z "$AM_HERDR" ]; then
     printf 'agents-manager: 找不到真正的 herdr（把它的路徑放進 AM_REAL_HERDR）\n' >&2
@@ -834,6 +848,7 @@ fi
 case "${1:-} ${2:-}" in
     "agent start") am_agent_start "$@" ;;
     "agent prompt") am_agent_prompt "$@" ;;
+    "agent list") am_agent_list "$@" ;;
     # `workspace create` 也會開一個 root pane（herdr 0.8.2 有 `--env`）。`worktree create/open` 同樣開 workspace，
     # 但沒有 `--env` 可帶：那個 pane 由 herdr server 開，什麼 AM_* 都拿不到，hook 不會觸發，也就不會送錯實例。
     "pane split" | "pane new" | "tab create" | "workspace create") am_forward_with_env "$@" ;;
@@ -1101,6 +1116,25 @@ mod tests {
         assert!(out.is_empty(), "herdr must not run when the gate refuses: {out:?} {err}");
         assert_eq!(rc, 75, "a closed gate is an explicit retryable refusal: {err}");
         assert!(err.contains("沒有建立子 pane"), "{err}");
+    }
+
+    /// 使用者 2026-10-04：`agent list` 後面附上子 agent 的 cache 狀態（stderr），stdout 與 exit code 照 herdr。
+    #[test]
+    fn agent_list_appends_the_childrens_cache_state_on_stderr() {
+        let s = Sandbox::new();
+        s.install_fake_curl("case \"$*\" in *relay/kids*) printf 'agents-manager: cache\\n  p-a  idle  cache 熱\\n' ;; *) exit 7 ;; esac");
+        let env = [("AM_BOT_ID", "b1"), ("AM_BOT_TOKEN", "tok"), ("AM_PORT", "7788"), ("AM_TEST_HERDR_RC", "3")];
+        let (out, err, rc) = s.run_full(&env, &["agent", "list"]);
+        assert_eq!(out, ["agent", "list"], "herdr 的輸出原封不動：{err}");
+        assert_eq!(rc, 3, "exit code 照 herdr");
+        assert!(err.contains("p-a  idle  cache 熱"), "{err}");
+
+        // 子 agent 不能派工，不必看；daemon 問不到也只是不印。
+        let (_, err, _) = s.run_full(&[("AM_CHILD_OF", "p"), env[0], env[1], env[2]], &["agent", "list"]);
+        assert!(!err.contains("cache"), "{err}");
+        s.install_fake_curl("exit 7");
+        let (out, err, rc) = s.run_full(&env[..3], &["agent", "list"]);
+        assert_eq!((out.len(), rc, err.as_str()), (2, 0, ""));
     }
 
     /// §6.5f：子 pane 寫的檔案也要落在母 bot 的 outbox，使用者才在同一個地方看得到。

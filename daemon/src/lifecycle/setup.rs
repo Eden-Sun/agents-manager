@@ -1201,7 +1201,10 @@ codex 的子代理、grok 的同類功能），也**禁止**在自己的 pane �
 那些 AG Man 看不到、追不到狀態、收不掉。要交給 codex 就開 `--kind codex` 的 herdr 子 agent。\
 只在拋棄式目錄驗證 CLI 本身的行為（例如試新旗標）不算派工。\n\
 - **先找閒置的 child**：開新的子 agent 之前，**必須先跑** `herdr agent list`，看自己底下有沒有 `idle` / `done` 的子 agent。\
-有就用 `herdr agent prompt <名稱> \"…\"` 把下一份工作交下去。**禁止**每件事都開一顆新的；只有使用者明確要求新開時才可以。\n\
+有就用 `herdr agent prompt <名稱> \"…\"` 把下一份工作交下去。**禁止**每件事都開一顆新的；只有使用者明確要求新開時才可以。\
+**先挑 prompt cache 還熱的**：`herdr agent list` 的 stderr 會附上每顆子 agent 的 cache 還剩幾分（claude／codex 約 60 分）。\
+有好幾顆閒置的，先交給 cache 還熱、剩最久的那顆（接著用省掉重讀整段 context 的 token）；cache 已冷的跟新開差不多貴，\
+只有跟手上工作脈絡相關時才值得重用。\n\
 - **命名**：`herdr agent start <名稱> …` 的名稱**必須**以 `{agent_name}-` 為前綴（例：`{agent_name}-review`、`{agent_name}-ui`）。\
 PATH 上的 herdr 會幫你補，但你自己要寫對。\n\
 - **開 pane**：一律 `herdr pane split --pane \"$HERDR_PANE_ID\"`（或 `--current`）。\
