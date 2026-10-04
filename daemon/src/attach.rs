@@ -306,12 +306,17 @@ pub async fn sweep_unreferenced(app: &Arc<App>, keep_secs: i64) -> usize {
             return 0;
         }
     };
+    #[cfg(test)]
+    if let Some((id, _, _, _)) = rows.first() {
+        crate::lifecycle::race_point::hit("attachment_sweep_after_candidates", id).await;
+    }
     let mut swept = 0;
     for (id, local_path, agent_path, host_name) in rows {
         let won = sqlx::query(&format!(
-            "DELETE FROM attachments AS a WHERE a.id = ? AND a.state = 'ready' AND a.message_id IS NULL AND {named}"
+            "DELETE FROM attachments AS a WHERE a.id = ? AND a.state = 'ready' AND a.message_id IS NULL AND {created} <= ? AND {named}"
         ))
         .bind(&id)
+        .bind(&cutoff)
         .execute(&app.db)
         .await;
         match won {
@@ -347,6 +352,9 @@ pub async fn resolve(app: &Arc<App>, bot_id: &str, ids: &[String]) -> Result<Vec
         return Ok(Vec::new());
     }
     let bot = db::bot(&app.db, bot_id).await?.ok_or_else(|| anyhow::anyhow!("no such bot"))?;
+    // Serialize lookup+refresh against the orphan sweeper. If the sweep wins first, the row is
+    // gone before this lookup; if resolve wins, refreshing created_at fences its stale candidate.
+    let mut tx = db::begin_write(&app.db).await?;
     let mut out = Vec::new();
     for id in ids {
         let row = sqlx::query_as::<_, (String, String, String, i64, String)>(
@@ -356,18 +364,23 @@ pub async fn resolve(app: &Arc<App>, bot_id: &str, ids: &[String]) -> Result<Vec
         )
         .bind(id)
         .bind(&bot.project_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(&mut *tx)
         .await?;
         match row {
             Some((id, name, mime, size, path)) => {
                 // 正要被用了：重新算「沒人用」的時間，resolve 到 bind 之間輪到清理也不會把三天前上傳的它當孤兒刪掉
                 // （`created_at` 除了清理沒有別的讀者，所以它就是「最後一次被用到」）。
-                let _ = sqlx::query("UPDATE attachments SET created_at = ? WHERE id = ? AND message_id IS NULL").bind(db::now()).bind(&id).execute(&app.db).await;
+                let _ = sqlx::query("UPDATE attachments SET created_at = ? WHERE id = ? AND message_id IS NULL")
+                    .bind(db::now())
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await;
                 out.push(Attachment { id, name, mime, size, path })
             }
             None => bail!("unknown attachment `{id}`"),
         }
     }
+    tx.commit().await?;
     Ok(out)
 }
 
@@ -885,6 +898,37 @@ mod tests {
         assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 0, "剛被 resolve 的附件正要綁上訊息，不能當孤兒");
         bind(&env.app, &msg_id, &files).await.expect("resolve 到 bind 之間被清掉的話，這裡會失敗");
         assert!(std::path::Path::new(&a.path).exists());
+    }
+
+    /// A candidate can be resolved after the sweep's initial SELECT but before its DELETE; the
+    /// refresh must fence that stale snapshot so an upload being sent is not collected.
+    #[tokio::test]
+    async fn resolving_after_the_sweep_snapshot_keeps_the_attachment_until_bind() {
+        let env = tt::env().await;
+        let bot = tt::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let a = save(&env.app, &bot.id, "old-after-snapshot.png", "image/png", b"aaa").await.unwrap();
+        sqlx::query("UPDATE attachments SET created_at = ? WHERE id = ?")
+            .bind(db::iso_in(-3 * 86_400))
+            .bind(&a.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+        let resolving_app = env.app.clone();
+        let resolving_bot = bot.id.clone();
+        let resolving_id = a.id.clone();
+        crate::lifecycle::race_point::arm("attachment_sweep_after_candidates", &a.id, move || async move {
+            let resolved = resolve(&resolving_app, &resolving_bot, &[resolving_id]).await.unwrap();
+            assert_eq!(resolved.len(), 1);
+        });
+
+        assert_eq!(sweep_unreferenced(&env.app, 24 * 3600).await, 0, "a refreshed candidate is not expired");
+        let row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE id = ?")
+            .bind(&a.id)
+            .fetch_one(&env.app.db)
+            .await
+            .unwrap();
+        assert_eq!(row, 1, "the row remains available for bind");
+        assert!(std::path::Path::new(&a.path).exists(), "the bytes remain available for bind");
     }
 
     /// 同上，另一條路：送出後撤回（`retract_unsent_turn`）會把附件解綁，同一個 `client_request_id` 馬上原樣重送。
