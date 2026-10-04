@@ -4243,6 +4243,7 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   `escalates_at` 每輪往後推 5 分鐘，忙碌的機群永遠等不到放寬。等滿門檻後 acquire 與 §3a 複查（同一張核准的 safety）一樣只剩送達臨界區、
   別人的租約、讀不到狀態會擋。
   被擋的 bot 名字可以點，直接跳過去看它在忙什麼。AGM 看到 `deploy_waiting` 也要立刻轉告使用者、請使用者調度，不自己默默等（兩份 persona）。
+- 自動部署的專用 checkout 來源必須等於正式 repo 的 `origin` URL；不符或讀不到就告警並停止 fetch、建置與部署。首次 clone 放在同目錄暫存目錄，成功後才移到正式 checkout 路徑；失敗時清掉暫存 clone，不留下會阻塞重試的半成品。正式路徑若已存在但不是 clone，保留原物並告警，不自動刪除。
 - 運維腳本在 `scripts/ops/`，附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，假 CLI + 暫存 repo）。
 - 邊界：租約只約束走 API 與這些腳本的路徑，shell 仍可直接 kill daemon 或 `cargo build --release`。租約讓「問過 AGM」在執行期間持續成立，不取代它。
 
