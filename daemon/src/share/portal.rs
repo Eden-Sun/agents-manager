@@ -1055,7 +1055,8 @@ async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, Strin
         return not_found();
     }
     match crate::outbox::share_file(&st.app, &bot_id, &name).await {
-        Ok(mut res) => {
+        Ok(res) => {
+            let mut res = if inline_image(&name) == Some("image/svg+xml") { embed_photos(&st.app, &bot_id, res).await } else { res };
             if let (Some("1"), Some(mime)) = (q.inline.as_deref(), inline_image(&name)) {
                 let h = res.headers_mut();
                 h.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
@@ -1075,6 +1076,26 @@ async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, Strin
             tracing::warn!(bot = %bot_id, "share outbox download unavailable");
             unavailable()
         }
+    }
+}
+
+/// bot 做的 SVG 用相對路徑引用資料夾裡的照片（`<image href="inbox/…">`）：送出前嵌成 data URI（[`crate::share::compose`]）。
+/// 原檔不改；資料夾讀不到或沒有要嵌的就原樣送。
+async fn embed_photos(app: &Arc<App>, bot_id: &str, res: Response) -> Response {
+    let (mut parts, body) = res.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, crate::outbox::MAX_BYTES as usize).await else { return unavailable() };
+    if !crate::share::compose::wants_embed(&bytes) {
+        return Response::from_parts(parts, axum::body::Body::from(bytes));
+    }
+    let Some(folder) = folder_of(app, bot_id).await else { return Response::from_parts(parts, axum::body::Body::from(bytes)) };
+    let src = bytes.clone();
+    let out = tokio::task::spawn_blocking(move || crate::share::compose::embed(&src, &folder)).await.ok().flatten();
+    match out {
+        Some(svg) => {
+            parts.headers.remove(header::CONTENT_LENGTH);
+            Response::from_parts(parts, axum::body::Body::from(svg))
+        }
+        None => Response::from_parts(parts, axum::body::Body::from(bytes)),
     }
 }
 

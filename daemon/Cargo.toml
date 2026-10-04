@@ -39,6 +39,8 @@ chrono-tz = "0.10"
 dirs = "5"
 # flock(2)：同一個資料目錄只准一顆 daemon（startup.rs）
 libc = "0.2"
+# 分享入口把 SVG 引用的照片縮圖嵌成 data URI（share/compose.rs）。
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 
 [dev-dependencies]
 # paused Tokio time for timer tests (lifecycle/queue.rs): same tokio crate, test builds only.

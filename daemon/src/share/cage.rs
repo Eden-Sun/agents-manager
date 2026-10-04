@@ -220,7 +220,15 @@ pub(crate) fn system_prompt(workspace: &str, outbox: Option<&str>, persona: Opti
          - 你的長期記憶在 `{workspace}/memory/`：`MEMORY.md` 是索引（一行一則，連到同目錄的 md 檔）。要記住新的事就在那裡寫一個 md 檔、在 MEMORY.md 加一行；下次啟動時會自動載入（`.claude/memory/` 的舊記憶也會載入，但那裡你寫不進去）。\n"
     );
     match outbox {
-        Some(o) => p.push_str(&format!("- 要交給對方的檔案寫進 `{o}`，對方的頁面會列出來讓他下載（一小時後自動清掉）。\n")),
+        Some(o) => {
+            p.push_str(&format!("- 要交給對方的檔案寫進 `{o}`，對方的頁面會列出來讓他下載（一小時後自動清掉）。\n"));
+            // share/compose.rs：入口送出 SVG 時把相對路徑的 <image> 嵌成 data URI。
+            p.push_str(
+                "- 要把對方的照片放進你做的圖（SVG）：用相對於工作目錄的路徑引用，例如 `<image href=\"inbox/檔名.jpeg\" x=\"40\" y=\"40\" width=\"400\" height=\"300\" preserveAspectRatio=\"xMidYMid slice\"/>`，\
+                 對方的頁面會自動把照片合成進去（只認工作目錄裡的 JPEG／PNG／WebP／GIF；網址、絕對路徑、`..` 都不會載入）。\
+                 先用 Read 看過照片的內容與長寬比再決定框的大小與裁切；要圓角或圓形框就用 `<clipPath>` 包一個 `<rect rx=…>` 或 `<circle>`，再在 `<image>` 加 `clip-path=\"url(#id)\"`。\n",
+            );
+        }
         None => p.push_str("- 這次沒有可以交檔案給對方的目錄，只能用文字回覆。\n"),
     }
     if let Some(u) = persona.map(str::trim).filter(|s| !s.is_empty()) {
