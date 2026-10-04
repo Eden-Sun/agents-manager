@@ -364,6 +364,11 @@ case "$SWAP_RC" in
     alert swap_binary_sha_mismatch "要換上 ${SHORT} 的 binary 內嵌的 sha 不是它（或髒樹建的、或舊 binary 沒內嵌 sha），換版中止、窗口沒拿、線上沒動。請看 ${DIR}/daemon-swap.log"
     ROUND_FAIL="${ROUND_FAIL:-新 binary 的內嵌 sha 對不上 ${SHORT}}"
     ;;
+  12)
+    note_fail "daemon-swap 無法安全恢復舊 binary：DB 未還原、daemon 停止，需人工處理"
+    alert swap_rollback_incomplete "換版失敗且舊 binary 無法安全恢復；daemon 已停止、DB 與 binary 備份保留，請人工恢復後確認狀態。細節見 ${DIR}/daemon-swap.log"
+    [ "$NOW" = 1 ] && drop_now "rollback 不完整，待人工恢復"
+    ;;
   9)
     alert swap_daemon_too_old "線上 daemon 太舊，沒有 restart-window 路由，自動換版做不了。要先手動換過一次含這條路由的 binary（scripts/ops/README.md）"
     ROUND_FAIL="${ROUND_FAIL:-線上 daemon 太舊，沒有 restart-window 路由}"

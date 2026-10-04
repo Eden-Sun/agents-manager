@@ -603,6 +603,35 @@ for line in sys.stdin:
         print("%s (%s)" % (name, ident))' "$BEFORE_ROWS"
 }
 
+restore_rollback_binary() { # restore old binary without exposing a partially copied live path
+    local live="target/release/agents-managerd" got tmp
+    got=$(shasum -a 256 "$live" 2>/dev/null | cut -c1-16)
+    [ "$got" = "$OLDHASH" ] && return 0
+
+    # PREV is the original live file moved aside before installing the new binary. Restore it
+    # with a same-filesystem rename; keep the separately verified BAK available for future recovery.
+    if [ -f "$PREV" ]; then
+        got=$(shasum -a 256 "$PREV" 2>/dev/null | cut -c1-16)
+        if [ "$got" = "$OLDHASH" ]; then
+            mv -f "$PREV" "$live" && {
+                got=$(shasum -a 256 "$live" 2>/dev/null | cut -c1-16)
+                [ "$got" = "$OLDHASH" ] && return 0
+            }
+        fi
+    fi
+    got=$(shasum -a 256 "$live" 2>/dev/null | cut -c1-16)
+    [ "$got" = "$OLDHASH" ] && return 0
+
+    # PREV may be missing; stage and hash-check the backup before publishing it.
+    tmp=$(mktemp "target/release/agents-managerd.rollback.XXXXXX") || return 1
+    if ! cp -p "$BAK" "$tmp"; then rm -f "$tmp"; return 1; fi
+    got=$(shasum -a 256 "$tmp" 2>/dev/null | cut -c1-16)
+    if [ "$got" != "$OLDHASH" ]; then rm -f "$tmp"; return 1; fi
+    if ! mv -f "$tmp" "$live"; then rm -f "$tmp"; return 1; fi
+    got=$(shasum -a 256 "$live" 2>/dev/null | cut -c1-16)
+    [ "$got" = "$OLDHASH" ]
+}
+
 rollback() {
     log "ROLLBACK requested: $*"
     # Capture children adopted by the new daemon before restoring the backup. Their panes can outlive
@@ -626,7 +655,10 @@ rollback() {
         log "forward-fix 失敗：新 binary 起不來，改還原 binary 與 DB"
     fi
     stop_daemon "$(dpid)"
-    cp -p "$BAK" target/release/agents-managerd
+    if ! restore_rollback_binary; then
+        log "ERROR: ROLLBACK binary restore failed; live DB and service credentials are untouched, daemon remains stopped; verified PREV/BAK and DB backup are available for manual recovery"
+        exit 12
+    fi
     # The old daemon cannot load or accept service principals. Remove credentials it generated before
     # the rollback so a stale token file is not mistaken for a working credential.
     rm -f "$AM_DATA/service-tokens/daemon-swap.token" "$AM_DATA/service-tokens/herdr-upgrade.token"
