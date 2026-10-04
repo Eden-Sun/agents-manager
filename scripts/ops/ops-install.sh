@@ -100,7 +100,23 @@ changes=0; failed=0
 # 自檢（在暫存檔上做，種類看安裝位置的副檔名）。不在安裝目錄產生任何東西（py 不用 py_compile，它會寫 __pycache__）。
 selfcheck() { # selfcheck <安裝位置> <要檢查的檔案>
   case "$1" in
-    *.sh) bash -n "$2" 2>&1 ;;
+    *.sh)
+      _shebang=""
+      IFS= read -r _shebang < "$2" 2>/dev/null || true
+      case "$_shebang" in
+        '#!/bin/zsh'*|'#!/usr/bin/env zsh'*|'#! /bin/zsh'*|'#! /usr/bin/env zsh'*|'#!'*'/zsh'*)
+          if command -v zsh >/dev/null 2>&1; then
+            zsh -n "$2" 2>&1
+          else
+            echo "SKIPPED_NO_ZSH"
+            return 2
+          fi
+          ;;
+        *)
+          bash -n "$2" 2>&1
+          ;;
+      esac
+      ;;
     *.py) python3 -B -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$2" 2>&1 ;;
     *.ts) if command -v bun >/dev/null 2>&1; then bun build --target=bun --outfile=/dev/null "$2" 2>&1 >/dev/null; fi ;;
     *) return 0 ;;
@@ -200,7 +216,14 @@ printf '%s\n' "$MANIFEST" | while IFS= read -r line || [ -n "$line" ]; do
     rm -f "$stage"; echo "failed ${tgt}（寫不進去，沒動它）"; echo F >> "$TMP/results"; continue
   fi
   # 先在暫存檔上自檢：沒過就丟掉，安裝位置上的舊檔沒被碰過。
-  if ! err=$(selfcheck "$tgt" "$stage"); then
+  _sc_rc=0
+  err=$(selfcheck "$tgt" "$stage") || _sc_rc=$?
+  if [ "$_sc_rc" -eq 2 ] && [ "$err" = "SKIPPED_NO_ZSH" ]; then
+    rm -f "$stage"
+    sed -e '$d' "$TMP/results" > "$TMP/results.tmp" 2>/dev/null && mv "$TMP/results.tmp" "$TMP/results"
+    echo "skipped ${tgt}（未安裝 zsh，跳過自檢與安裝，舊版原封不動）"
+    continue
+  elif [ "$_sc_rc" -ne 0 ]; then
     rm -f "$stage"
     echo "failed ${tgt}（自檢沒過，沒換，舊版原封不動）：$(printf '%s' "$err" | head -2 | tr '\n' ' ')"
     echo F >> "$TMP/results"; continue
