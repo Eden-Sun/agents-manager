@@ -66,7 +66,7 @@ pub trait Ops: Send + Sync {
     /// 下載好的 `path` 對得上 release 公布的 sha256 嗎。**在執行它之前**（`--version` 就是執行）；對不上、或查不到公布值都是 `Err`。
     fn verify_download<'a>(&'a self, version: &'a str, path: &'a Path) -> BoxFuture<'a, Result<(), String>>;
     /// 換 binary **之前**確認重啟這條路走得通（server 真的是 systemd／launchd 在管的）。`Err`＝什麼都不動。
-    fn preflight_restart<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<(), String>>;
+    fn preflight_restart<'a>(&'a self, session: &'a str, install: &'a Path) -> BoxFuture<'a, Result<(), String>>;
     /// `<path> --version` 讀到的版本（`0.9.3`）。
     fn binary_version<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, String>>;
     /// 重啟 `session` 的 herdr server（只動這一個 session）。
@@ -391,7 +391,7 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
         Ok(p) => p,
         Err(e) => return out.fail("install_path_unsupported", e),
     };
-    if let Err(e) = ops.preflight_restart(&ctx.session).await {
+    if let Err(e) = ops.preflight_restart(&ctx.session, &install).await {
         return out.fail("restart_unsupported", format!("{e}；什麼都沒動，請自己重啟 herdr server"));
     }
     out.from = ops.binary_version(&install).await.ok();
@@ -673,6 +673,25 @@ fn session_ok(s: &str) -> bool {
     !s.is_empty() && !s.starts_with('.') && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+/// launchd `program` must resolve to the file being replaced, otherwise kickstart reloads another binary.
+fn ensure_launchd_program(output: &str, install: &Path) -> Result<(), String> {
+    let program = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("program = ").map(str::trim))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "launchd did not report a program path".to_string())?;
+    let launched = std::fs::canonicalize(program).map_err(|e| format!("resolve launchd program {program}: {e}"))?;
+    let installing = std::fs::canonicalize(install).map_err(|e| format!("resolve updater binary {}: {e}", install.display()))?;
+    if launched == installing {
+        Ok(())
+    } else {
+        Err(format!(
+            "launchd runs {}, but updater would replace {}; refusing to restart a different binary",
+            launched.display(), installing.display()
+        ))
+    }
+}
+
 async fn command_output(mut cmd: tokio::process::Command, timeout: Duration) -> Result<String, String> {
     cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
     // 驗的常常是 daemon 自己剛複製／換進去的 binary：同一個行程裡別的任務在寫入 fd 還開著時 fork，exec 會回 `ETXTBSY`（#189），
@@ -737,7 +756,7 @@ impl Ops for Real {
 
     /// Linux：`herdr@<session>.service` 要是 active（daemon 自己 spawn 的 server `systemctl restart` 會另外起一顆搶 socket）；
     /// macOS：launchd job 要存在。
-    fn preflight_restart<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<(), String>> {
+    fn preflight_restart<'a>(&'a self, session: &'a str, install: &'a Path) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             if !session_ok(session) {
                 return Err(format!("session 名 `{session}` 不能當 systemd/launchd 名稱"));
@@ -747,7 +766,10 @@ impl Ops for Real {
             if cfg!(target_os = "macos") {
                 let mut cmd = tokio::process::Command::new("launchctl");
                 cmd.args(["print", &format!("gui/{uid}/dev.agents-manager.herdr-{session}")]);
-                command_output(cmd, Duration::from_secs(15)).await.map(|_| ()).map_err(|e| format!("launchd job dev.agents-manager.herdr-{session} 不存在（server 不是 launchd 在管的？）：{e}"))
+                let output = command_output(cmd, Duration::from_secs(15))
+                    .await
+                    .map_err(|e| format!("launchd job dev.agents-manager.herdr-{session} 不存在（server 不是 launchd 在管的？）：{e}"))?;
+                ensure_launchd_program(&output, install).map_err(|e| format!("launchd job binary 不符：{e}"))
             } else {
                 let unit = format!("herdr@{session}.service");
                 let mut cmd = tokio::process::Command::new("systemctl");
@@ -920,7 +942,7 @@ mod tests {
                 }
             })
         }
-        fn preflight_restart<'a>(&'a self, _session: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        fn preflight_restart<'a>(&'a self, _session: &'a str, _install: &'a Path) -> BoxFuture<'a, Result<(), String>> {
             Box::pin(async move { self.preflight_err.lock().unwrap().clone().map_or(Ok(()), Err) })
         }
         fn restart_server<'a>(&'a self, session: &'a str) -> BoxFuture<'a, Result<(), String>> {
@@ -1286,6 +1308,26 @@ mod tests {
         assert!(bak.exists(), ".bak 留著");
         let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name()).filter(|n| n.to_string_lossy().starts_with('.')).collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn launchd_restart_preflight_rejects_a_different_program() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-herdr-launchd-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let install = dir.join(".local/bin/herdr");
+        let launched = dir.join("homebrew/bin/herdr");
+        std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(launched.parent().unwrap()).unwrap();
+        std::fs::write(&install, "private copy").unwrap();
+        std::fs::write(&launched, "package manager copy").unwrap();
+
+        let job = format!("path = /tmp/job.plist\nprogram = {}\narguments = {{\n  {}\n}}\n", launched.display(), launched.display());
+        let mismatch = ensure_launchd_program(&job, &install);
+        assert!(mismatch.is_err(), "preflight must not restart a job that launches a different herdr binary: {mismatch:?}");
+
+        let matching = format!("program = {}\n", install.display());
+        assert!(ensure_launchd_program(&matching, &install).is_ok());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
