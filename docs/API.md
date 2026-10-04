@@ -1633,6 +1633,7 @@ claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並�
 |---|---|
 | identity 不存在 | `404 {"what":"identity"}` |
 | 該 kind 的 CLI 不在偵測到的 PATH | `409 {"reason":"identity_login_unavailable","host","identity","kind","message"}`（`message` 是人話；`reason` 是機器 key，不能再用 `reason` 放中文否則會蓋掉） |
+| 同 host／identity 已有 claude 登入流程 | `409 {"reason":"identity_login_in_progress","host","identity","message"}`；先完成或關閉原登入終端 |
 | host 不存在 / 未連線 / pane 建立失敗 | `404 {"what":"host"}` / 502 |
 
 ### 手機版登入協助：`GET …/shells/{pane_id}/login`、`POST …/shells/{pane_id}/login/code`（#838，2026-10-04）
