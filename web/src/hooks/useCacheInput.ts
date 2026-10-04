@@ -13,6 +13,7 @@ export function useCacheInput(botId: string): CacheInput {
         promptCache: r?.prompt_cache ?? null,
         status: r?.status ?? null,
         lastApiAt: r?.last_api_at ?? null,
+        keptAliveAt: r?.cache_kept_alive_at ?? null,
         ttlSecs: r?.cache_ttl_secs ?? null,
         working: r?.agent_status === 'working' || composerState(s, botId).inFlightTurnId !== null,
       }

@@ -363,6 +363,8 @@ export interface Run {
   last_api_at?: string | null
   /** 這種 kind 的 prompt cache 存活秒數（claude／codex 3600）；`null`＝不知道（grok），不畫倒數。 */
   cache_ttl_secs?: number | null
+  /** 主力的 cache 續命／到點壓縮讓 cache 實際變熱的時間（SPEC §6.5k）；網頁用它算顏色，`last_api_at` 仍是真實年齡。`null`＝沒做過。 */
+  cache_kept_alive_at?: string | null
   /** claude／codex 的快取與 context 精簡欄位；沒有資料（舊版 claude、grok、舊 daemon）為 null／未帶。 */
   prompt_cache?: PromptCacheInfo | null
 }

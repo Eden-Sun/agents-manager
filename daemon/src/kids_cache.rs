@@ -142,7 +142,7 @@ mod tests {
     fn a_child_is_warm_for_an_hour_after_its_last_turn() {
         let now = db::parse_ts("2026-10-04T12:00:00.000Z").unwrap();
         let run = || Some(RunView { id: "r-kids-cache-test", agent_status: "idle", status_since: None });
-        let turn = LastTurn { status: "done".into(), completed_at: Some("2026-10-04T11:40:00.000Z".into()) };
+        let turn = LastTurn { status: "done".into(), completed_at: Some("2026-10-04T11:40:00.000Z".into()), ..Default::default() };
         let kid = kid("c".into(), "claude", run(), Some(&turn), now);
         assert_eq!(kid.warm_secs, Some(2400));
         assert_eq!(kid.idle_secs, Some(1200));
