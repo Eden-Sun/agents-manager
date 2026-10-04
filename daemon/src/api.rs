@@ -3417,20 +3417,27 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         crate::tools::identity_login_command(&idn.kind, &env)
             .ok_or_else(|| LcError::Bad(format!("kind {} 沒有登入指令", idn.kind)))?
     };
-    let opened = app.hosts.run_if_current(&fence, async {
-        let shell = shell::open(&app, &name, None).await?;
-        if let Err(e) = shell::send_text(&app, &name, &shell.pane_id, &command, true).await {
-            let _ = shell::close(&app, &name, &shell.pane_id).await;
+    let login_reservation = if !logout && idn.kind == "claude" {
+        Some(crate::login_assist::reserve(&app, &name, &identity)?)
+    } else {
+        None
+    };
+    let app_for_open = app.clone();
+    let name_for_open = name.clone();
+    let command_for_open = command.clone();
+    let opened = app.hosts.run_if_current(&fence, async move {
+        let shell = shell::open(&app_for_open, &name_for_open, None).await?;
+        if let Err(e) = shell::send_text(&app_for_open, &name_for_open, &shell.pane_id, &command_for_open, true).await {
+            let _ = shell::close(&app_for_open, &name_for_open, &shell.pane_id).await;
             return Err(e);
+        }
+        if let Some(reservation) = login_reservation {
+            reservation.register(&shell.pane_id, &shell.created_at);
         }
         Ok::<_, LcError>(shell)
     }).await;
     let shell = opened
         .ok_or_else(|| LcError::Upstream(format!("host `{name}` changed before identity authentication started")))??;
-    // 手機版重新登入（#838）：claude 的登入 pane 讓網頁取網址、送 code。登出與別的 kind 不記。
-    if !logout && idn.kind == "claude" {
-        crate::login_assist::register(&app, &name, &shell.pane_id, &identity, &shell.created_at);
-    }
     crate::tools::spawn_identity_login_watch(app, name, shell.pane_id.clone(), identity, idn.kind, logout, fence);
     Ok((StatusCode::OK, Json(json!(shell))).into_response())
 }

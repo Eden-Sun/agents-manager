@@ -238,6 +238,8 @@ pub struct App {
     pub host_shell_open_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// claude 身分的登入 pane（手機版登入協助，`login_assist.rs`）：`(host, pane_id)` → 帳。只在記憶體。
     pub login_panes: crate::login_assist::Registry,
+    /// 開啟 claude 身分登入 pane 的短期排他 reservation，完成註冊後轉成 `login_panes` entry。
+    pub login_reservations: crate::login_assist::Reservations,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
     pub pane_live: crate::api::shell::LiveCache,
     /// 預覽（`preview.rs`）的行程／port 查詢，測試換成假貨；正式是 herdr＋本機 TCP。
@@ -377,6 +379,7 @@ impl App {
             background_hook: Default::default(),
             host_shell_open_locks: Mutex::new(HashMap::new()),
             login_panes: Default::default(),
+            login_reservations: Default::default(),
             #[cfg(test)]
             preview_env: Default::default(),
             pane_live: Default::default(),

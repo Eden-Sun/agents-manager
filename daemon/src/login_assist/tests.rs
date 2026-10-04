@@ -124,7 +124,7 @@ struct Fx {
 async fn login_pane(screen: &str) -> Fx {
     let env = tt::env().await;
     let shell = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
-    register(&env.app, "local", &shell.pane_id, "cc9", &shell.created_at);
+    reserve(&env.app, "local", "cc9").unwrap().register(&shell.pane_id, &shell.created_at);
     env.herdr.set_screen(&shell.pane_id, screen);
     // 打字前 daemon 會即時問 herdr／行程樹這顆 pane 現在的樣子（`shell::live_verdict`）：給一棵沒有 listen port 的樹。
     env.herdr.set_shell_pid(&shell.pane_id, 41101);
@@ -176,7 +176,7 @@ async fn only_registered_login_panes_are_served() {
     assert!(env.herdr.calls_to("pane.send_text").is_empty());
 
     // 登記過，但帳上那顆 shell 的身分（created_at）對不上＝pane id 被別的 shell 重用。
-    register(&env.app, "local", &plain.pane_id, "cc9", "some-other-shell");
+    reserve(&env.app, "local", "cc9").unwrap().register(&plain.pane_id, "some-other-shell");
     assert!(matches!(status(&env.app, "local", &plain.pane_id).await, Err(LcError::NotFound(_))));
     assert!(!is_registered(&env.app, "local", &plain.pane_id), "對不上就順手清掉");
 
@@ -188,6 +188,49 @@ async fn only_registered_login_panes_are_served() {
     assert!(matches!(status(&f.env.app, "local", &f.pane).await, Err(LcError::NotFound(_))));
 }
 
+#[tokio::test]
+async fn a_second_live_pane_for_the_same_host_identity_is_rejected() {
+    let env = tt::env().await;
+    let first = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
+    let second = crate::api::shell::open(&env.app, "local", Some("/tmp")).await.unwrap();
+    reserve(&env.app, "local", "cc9").unwrap().register(&first.pane_id, &first.created_at);
+    let conflict = match reserve(&env.app, "local", "cc9") {
+        Err(error) => error,
+        Ok(_) => panic!("a second live pane for this identity was reserved"),
+    };
+    assert!(matches!(conflict, LcError::Conflict(body) if body["reason"] == "identity_login_in_progress"));
+
+    assert!(is_registered(&env.app, "local", &first.pane_id));
+    assert!(
+        !is_registered(&env.app, "local", &second.pane_id),
+        "same host and identity must not have two live OAuth code entry panes"
+    );
+}
+
+#[tokio::test]
+async fn identity_login_reservations_serialize_open_and_release_when_closed() {
+    let env = tt::env().await;
+    let first = reserve(&env.app, "local", "cc9").unwrap();
+    let conflict = match reserve(&env.app, "local", "cc9") {
+        Err(error) => error,
+        Ok(_) => panic!("same identity was reserved twice"),
+    };
+    assert!(matches!(conflict, LcError::Conflict(body) if body["reason"] == "identity_login_in_progress"));
+    drop(first);
+
+    let second = reserve(&env.app, "local", "cc9").unwrap();
+    second.register("w1:p1", "shell-1");
+    let conflict = match reserve(&env.app, "local", "cc9") {
+        Err(error) => error,
+        Ok(_) => panic!("an active login pane did not keep the identity reservation"),
+    };
+    assert!(matches!(conflict, LcError::Conflict(body) if body["reason"] == "identity_login_in_progress"));
+    let other_host = reserve(&env.app, "remote", "cc9").unwrap();
+    drop(other_host);
+
+    forget(&env.app, "local", "w1:p1");
+    assert!(reserve(&env.app, "local", "cc9").is_ok(), "closing a pane releases the identity");
+}
 /// 畫面還在等 code：code 整個打進 pane、再按 Enter；之後 CLI 吐出 `Login failed` 就把那一句回給網頁。
 #[tokio::test]
 async fn a_code_is_typed_only_while_the_prompt_is_the_last_line() {

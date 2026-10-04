@@ -776,6 +776,7 @@ async fn forget_host_observations(app: &Arc<App>, name: &str) {
     }
     app.models_cache.lock().await.retain(|k, _| !k.starts_with(&prefix));
     app.host_shells.lock().await.retain(|s| s.host != name);
+    crate::login_assist::forget_host(app, name);
     // GitHub origin 跟 tools／額度一樣是這台機器的觀測（#830）。改指或刪除時清掉，舊連線的掃描不能再寫回來。
     if let Ok(projects) = crate::db::live_projects(&app.db).await {
         let mut github = app.github.lock().await;
@@ -1738,6 +1739,9 @@ mod tests {
             crate::quota::set(app, h, "codex", reading()).await;
             app.models_cache.lock().await.insert(format!("{h}/codex/"), (std::time::Instant::now(), json!({})));
             app.host_shells.lock().await.push(shell(h));
+            if h == "inv-347" {
+                crate::login_assist::reserve(app, h, "cc9").unwrap().register("w1:p1", &shell(h).created_at);
+            }
         }
         let cached_rows = |key: &'static str| async move {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM quota_cache WHERE key = ?").bind(key).fetch_one(&app.db).await.unwrap()
@@ -1751,6 +1755,7 @@ mod tests {
         assert_eq!(cached_rows("inv-347/codex").await, 0, "重啟快取列也要清，不然下次開機又種回來");
         assert!(!app.models_cache.lock().await.contains_key("inv-347/codex/"), "舊機器的模型清單要丟");
         assert!(!app.host_shells.lock().await.iter().any(|s| s.host == "inv-347"), "舊機器上的 shell 不能拿來對新機器的 pane");
+        assert!(!crate::login_assist::is_registered(app, "inv-347", "w1:p1"), "舊機器上的登入 pane 也不能阻擋或指向新機器");
         assert!(app.tools.lock().await.contains_key("other-347"), "別台不動");
         assert!(app.quotas.lock().await.contains_key("other-347/codex"));
         assert!(app.models_cache.lock().await.contains_key("other-347/codex/"));

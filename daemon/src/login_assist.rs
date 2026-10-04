@@ -18,7 +18,7 @@
 
 use crate::state::App;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,15 +45,75 @@ pub struct Entry {
 
 /// `App.login_panes`：掛在 App 上而不是 process 全域（同一個 process 裡的另一個 App，例如測試，pane id 會撞）。
 pub type Registry = Mutex<HashMap<(String, String), Entry>>;
+pub type Reservations = Mutex<HashSet<(String, String)>>;
 
-/// `identity_auth` 開好 claude 的登入 pane 之後記一筆。
-pub fn register(app: &App, host: &str, pane_id: &str, identity: &str, shell_created_at: &str) {
-    let mut m = app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
-    m.retain(|_, e| e.opened.elapsed() < MAX_AGE);
-    m.insert(
-        (host.to_string(), pane_id.to_string()),
-        Entry { identity: identity.to_string(), shell_created_at: shell_created_at.to_string(), opened: Instant::now(), code_sent: false },
-    );
+/// Held while `identity_auth` opens and registers the pane. Active panes take over the same
+/// `(host, identity)` key, so another request cannot start a competing OAuth flow in the gap.
+pub struct IdentityReservation {
+    app: Arc<App>,
+    key: (String, String),
+    active: bool,
+}
+
+impl IdentityReservation {
+    pub fn register(mut self, pane_id: &str, shell_created_at: &str) {
+        let mut reservations = self.app.login_reservations.lock().unwrap_or_else(|e| e.into_inner());
+        let mut panes = self.app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
+        panes.insert(
+            (self.key.0.clone(), pane_id.to_string()),
+            Entry {
+                identity: self.key.1.clone(),
+                shell_created_at: shell_created_at.to_string(),
+                opened: Instant::now(),
+                code_sent: false,
+            },
+        );
+        drop(panes);
+        reservations.remove(&self.key);
+        drop(reservations);
+        self.active = false;
+    }
+}
+
+impl Drop for IdentityReservation {
+    fn drop(&mut self) {
+        if self.active {
+            self.app.login_reservations.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
+        }
+    }
+}
+
+/// Claim a single active Claude login flow for this host and configured identity. The host is part
+/// of the key because identity env expansion and its credential directory are host-local.
+pub fn reserve(app: &Arc<App>, host: &str, identity: &str) -> LcResult<IdentityReservation> {
+    let key = (host.to_string(), identity.to_string());
+    let mut reservations = app.login_reservations.lock().unwrap_or_else(|e| e.into_inner());
+    if reservations.contains(&key) {
+        return Err(identity_login_in_progress(host, identity));
+    }
+    let panes = app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
+    let active = panes.iter().any(|((entry_host, _), entry)| {
+        entry_host == host && entry.identity == identity && entry.opened.elapsed() < MAX_AGE
+    });
+    if active {
+        return Err(identity_login_in_progress(host, identity));
+    }
+    reservations.insert(key.clone());
+    Ok(IdentityReservation { app: app.clone(), key, active: true })
+}
+
+fn identity_login_in_progress(host: &str, identity: &str) -> LcError {
+    LcError::conflict(
+        "identity_login_in_progress",
+        json!({"host": host, "identity": identity, "message": "這個身分已有登入程序；先完成或關閉原登入終端再重試"}),
+    )
+}
+
+/// Host reconfiguration invalidates the old pane authority and any opening login reservation.
+pub fn forget_host(app: &App, host: &str) {
+    let mut reservations = app.login_reservations.lock().unwrap_or_else(|e| e.into_inner());
+    reservations.retain(|(entry_host, _)| entry_host != host);
+    app.login_panes.lock().unwrap_or_else(|e| e.into_inner()).retain(|(entry_host, _), _| entry_host != host);
 }
 
 /// pane 關了（watcher 收尾、手動關）。
