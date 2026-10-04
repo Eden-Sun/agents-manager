@@ -408,6 +408,11 @@ case "$SWAP_RC" in
     alert swap_rollback_incomplete "換版失敗且舊 binary 無法安全恢復；daemon 已停止、DB 與 binary 備份保留，請人工恢復後確認狀態。細節見 ${DIR}/daemon-swap.log"
     [ "$NOW" = 1 ] && drop_now "rollback 不完整，待人工恢復"
     ;;
+  13)
+    note_fail "候選 binary 發佈失敗，舊 binary 已恢復但 daemon 未能重啟"
+    alert swap_publish_recovery_failed "候選 binary 無法原子發佈；舊 binary 與 DB 保持一致，但舊 daemon 未能重新提供服務。請人工啟動並確認狀態，細節見 ${DIR}/daemon-swap.log"
+    [ "$NOW" = 1 ] && drop_now "候選 binary 發佈失敗且 daemon 未重啟"
+    ;;
   9)
     alert swap_daemon_too_old "線上 daemon 太舊，沒有 restart-window 路由，自動換版做不了。要先手動換過一次含這條路由的 binary（scripts/ops/README.md）"
     ROUND_FAIL="${ROUND_FAIL:-線上 daemon 太舊，沒有 restart-window 路由}"
