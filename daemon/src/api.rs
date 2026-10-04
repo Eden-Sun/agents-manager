@@ -363,6 +363,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/relay/spawn/abort", post(crate::credential_spawn::abort))
         // §6.5e：bot 開完 pane 後回報用途（歸屬另外從行程環境推斷）。
         .route("/relay/pane", post(relay_pane))
+        // 母 bot 的 `herdr agent list` 附上子 agent 的 cache 還熱多久（kids_cache）。
+        .route("/relay/kids", post(relay_kids))
         // issue #90：cargo shim 用（bot 的 hook token，或人工 host shell 的一般 X-AM-Token）。
         .route("/build-slots/acquire", post(crate::build_scheduler::post_acquire))
         .route("/build-slots/renew", post(crate::build_scheduler::post_renew))
@@ -431,6 +433,34 @@ async fn relay_pane(
         Err(e) => {
             tracing::warn!(pane = %body.pane_id, error = ?e, "could not record a pane purpose");
             (StatusCode::OK, Json(json!({"pane_id": body.pane_id, "recorded": false})))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct RelayKids {
+    bot_id: String,
+}
+
+/// 純文字：shim 原樣印到 stderr（見 `kids_cache`）。沒有子 agent＝空字串。
+async fn relay_kids(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Form(body): axum::extract::Form<RelayKids>,
+) -> (StatusCode, String) {
+    let token = headers.get("X-AM-Bot-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    match db::bot(&app.db, &body.bot_id).await {
+        Ok(Some(b)) if b.deleted_at.is_none() && !token.is_empty() && ct_eq(token, &b.hook_token) => {}
+        _ => return (StatusCode::UNAUTHORIZED, String::new()),
+    }
+    if crate::share::refuses_bot_principal(&app.db, &body.bot_id).await {
+        return (StatusCode::FORBIDDEN, String::new());
+    }
+    match crate::kids_cache::text_for(&app, &body.bot_id).await {
+        Ok(text) => (StatusCode::OK, text),
+        Err(e) => {
+            tracing::warn!(bot = %body.bot_id, error = ?e, "could not list child cache state");
+            (StatusCode::SERVICE_UNAVAILABLE, String::new())
         }
     }
 }

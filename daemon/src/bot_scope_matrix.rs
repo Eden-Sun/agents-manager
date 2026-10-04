@@ -171,6 +171,7 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/supervisor/approvals/{id}/decide", Expect::Forbidden, None),
         rule("DELETE", "/api/supervisor/approvals/{id}/decide", Expect::Forbidden, None),
         rule("POST", "/relay/pane", Expect::Allow, None),
+        rule("POST", "/relay/kids", Expect::Allow, None),
         rule("GET", "/api/supervisor/setup", Expect::Forbidden, None),
         rule("POST", "/api/supervisor/setup", Expect::Forbidden, None),
         rule("PUT", "/api/supervisor/setup", Expect::Forbidden, None),
