@@ -98,6 +98,36 @@ async fn a_trusted_share_bot_starts_as_an_ordinary_bot_without_the_cage() {
 }
 
 #[tokio::test]
+async fn a_trusted_share_link_stays_inside_the_portal_api_surface() {
+    let e = tt::env().await;
+    let (b, _) = trusted_bot(&e.app, &e.project_id, "portal-boundary").await;
+    let token = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+
+    let info: Value = c
+        .get(format!("{base}/s/{token}/api/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["bot_name"], b.name);
+    assert_eq!(info.as_object().unwrap().len(), 2, "分享頁只拿 bot_name 與 status，不拿 profile 或主 UI 狀態：{info}");
+
+    let state = c.get(format!("{base}/s/{token}/api/state")).send().await.unwrap();
+    assert_eq!(state.status(), reqwest::StatusCode::NOT_FOUND, "trusted 連結不能進主 UI API");
+    let accept = c
+        .post(format!("{base}/s/{token}/api/bots/{}/suggestion/accept", b.id))
+        .json(&json!({"suggestion": "stale", "client_request_id": "share-attempt"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accept.status(), reqwest::StatusCode::NOT_FOUND, "trusted 連結不能直接呼叫 accept 路由");
+}
+
+#[tokio::test]
 async fn a_trusted_share_bot_is_kept_out_of_idle_sleep_and_outbox_expiry() {
     let e = tt::env().await;
     let (b, _) = trusted_bot(&e.app, &e.project_id, "desk").await;
