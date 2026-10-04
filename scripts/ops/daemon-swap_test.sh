@@ -82,6 +82,7 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_AGM_SUPERVISOR_FAIL_AT=0
   export STUB_DELAY_RETIRE_INTENT_FOR=""
   export STUB_PID=99999
+  export STUB_PID_AFTER_START=""
   export STUB_NO_PID=""
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
   export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep" HERDR_BIN="$ROOT/bin/herdr"
@@ -323,10 +324,14 @@ echo "$STUB_UV_AFTER_START" > "$ROOT/uv"
 exit "${STUB_SYSTEMD_RUN_RC:-0}"
 STUB
 
-  cat > "$ROOT/bin/pgrep" <<'STUB'
+cat > "$ROOT/bin/pgrep" <<'STUB'
 #!/bin/bash
 [ -z "${STUB_NO_PID:-}" ] || exit 1
-echo "${STUB_PID:-99999}"
+if [ -n "${STUB_PID_AFTER_START:-}" ] && [ -e "$AGM_DIR/started" ]; then
+  printf '%s\n' "$STUB_PID_AFTER_START"
+else
+  printf '%s\n' "${STUB_PID:-99999}"
+fi
 STUB
 
   cat > "$ROOT/bin/probe" <<'STUB'
@@ -1413,6 +1418,16 @@ check_eq "rollback KILL 後仍存活就以 rc=11 停手" "11" "$rc"
 check "rollback KILL 後仍存活時新版 binary 留在原位" "new-binary" "$AGM_REPO/target/release/agents-managerd"
 check_eq "rollback KILL 後仍存活時新版 DB 不被還原" "mutated-by-new-binary" "$(cat "$DAEMON_DB")"
 check_no "rollback KILL 後仍存活時不進行 DB restore" "db restored from" "$SWAP_LOG"
+teardown
+
+# 39g. rollback 期間多出第二顆 daemon：不能只停第一顆就覆寫 binary／DB。
+setup 10 10
+export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1 STUB_PID_AFTER_START=$'99998\n99997'
+rc=$(run_capture)
+check_eq "rollback 發現多顆 daemon 就以 rc=11 停手" "11" "$rc"
+check_eq "rollback 多顆 daemon 時正式 binary 不還原" "$(shasum -a 256 "$CHECKOUT/target/release/agents-managerd" | awk '{print $1}')" "$(shasum -a 256 "$AGM_REPO/target/release/agents-managerd" | awk '{print $1}')"
+check_eq "rollback 多顆 daemon 時新版 DB 不被還原" "mutated-by-new-binary" "$(cat "$DAEMON_DB")"
+check_no "rollback 多顆 daemon 時不進行 DB restore" "db restored from" "$SWAP_LOG"
 teardown
 
 # 36. Linux（issue #677）：重啟改走 `systemd-run --user` 的 transient unit，不叫 launchctl。
