@@ -38,10 +38,33 @@ for pat in 'const PORT = 5173' "const pinned = join(HOME, '.local/bin/node')"; d
   grep -q -- "${pat}" "${SRC}" || { echo "FAIL - 原腳本找不到 '${pat}'，測試的替換要更新"; exit 1; }
 done
 
-# 測試用 port：挑一個沒人在聽的。5173 絕對不准用。
+# 測試用 port：挑一個沒人在聽、也沒有別份這支測試佔著的。5173 絕對不准用。
+# 只看「現在有沒有人在聽」不夠：各段之間 port 是空的，同一台機器上兩份測試（CI 跟某顆 bot 的
+# check.sh）會挑到同一個 port，一份的 serve／teardown 打到另一份的情境——健康那組被當成
+# 「沒人聽」去起 vite，log 多出別份測試 curl 進來的存取紀錄（#836）。所以整支跑完前用鎖目錄
+# 佔住這個 port（mkdir 是原子的；macOS 沒有 flock），鎖的主人死了就收回。
+PORT_LOCK=""
+release_port() { [ -n "$PORT_LOCK" ] && rm -rf "$PORT_LOCK"; }
+trap release_port EXIT
+claim_port() { # <port>：拿到鎖回 0
+  local lock="${TMPDIR:-/tmp}/agm-dev-server-kick_test.$1.lock" owner
+  if ! mkdir "$lock" 2>/dev/null; then
+    owner="$(cat "$lock/pid" 2>/dev/null)"
+    # 剛 mkdir、還沒寫 pid 的那一瞬間也算有人在用；只有寫了 pid 而且那顆已經不在才收回。
+    [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null || return 1
+    rm -rf "$lock"
+    mkdir "$lock" 2>/dev/null || return 1
+  fi
+  echo "$$" > "$lock/pid"
+  if lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; then rm -rf "$lock"; return 1; fi
+  PORT_LOCK="$lock"
+}
 PORT=""
-for p in 53173 53174 53175 53176; do
-  if ! lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then PORT="$p"; break; fi
+for _ in $(seq 1 120); do   # 別份在跑就等它（最多約 2 分鐘），不要直接跳過整組
+  for p in 53173 53174 53175 53176; do
+    if claim_port "$p"; then PORT="$p"; break 2; fi
+  done
+  sleep 1
 done
 [ -n "$PORT" ] || { echo "skip - 找不到空的測試 port"; echo "0 passed, 0 failed"; exit 0; }
 
