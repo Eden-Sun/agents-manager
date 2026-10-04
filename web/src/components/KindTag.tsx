@@ -6,7 +6,7 @@ import './kindTag.css'
 import { KIND_LABEL, KIND_DESC } from './kindMeta'
 /** v4.0: a bot's kind as glyph or word. Acceptance scripts key on `.kind-tag.<kind>`, so it stays the same in both modes. */
 
-/** Monochrome glyphs (currentColor): claude = star burst, codex = the OpenAI mark, grok = the xAI mark. */
+/** Monochrome glyphs (currentColor): claude = star burst, codex = the OpenAI mark, grok = the xAI mark, agy = an up arrow. */
 export function KindIcon({ kind }: { kind: BotKind }) {
   switch (kind) {
     case 'claude':
@@ -32,6 +32,13 @@ export function KindIcon({ kind }: { kind: BotKind }) {
           <path d="M2.8 2.5 21.2 21.5" />
           <path d="M21.2 2.5 15 8.9" />
           <path d="M9 15.1 2.8 21.5" />
+        </svg>
+      )
+    case 'agy':
+      // Antigravity：一個向上的箭頭（反重力），單色。
+      return (
+        <svg viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M8 14V2.5M3.2 7.3 8 2.5l4.8 4.8" />
         </svg>
       )
   }
@@ -93,10 +100,10 @@ export function KindDisplayToggle() {
     <div className="kind-display" role="radiogroup" aria-label="kind 標示方式" onKeyDown={onKeyDown}>
       <span className="kind-display-label">kind 標示</span>
       <div className="tabs small">
-        <button type="button" className="tab" role="radio" data-mode="icon" aria-checked={mode === 'icon'} tabIndex={mode === 'icon' ? 0 : -1} onClick={() => setKindDisplay('icon')} title="以圖示顯示 claude / codex / grok">
+        <button type="button" className="tab" role="radio" data-mode="icon" aria-checked={mode === 'icon'} tabIndex={mode === 'icon' ? 0 : -1} onClick={() => setKindDisplay('icon')} title="以圖示顯示 claude / codex / grok / agy">
           圖示
         </button>
-        <button type="button" className="tab" role="radio" data-mode="text" aria-checked={mode === 'text'} tabIndex={mode === 'text' ? 0 : -1} onClick={() => setKindDisplay('text')} title="以文字顯示 claude / codex / grok">
+        <button type="button" className="tab" role="radio" data-mode="text" aria-checked={mode === 'text'} tabIndex={mode === 'text' ? 0 : -1} onClick={() => setKindDisplay('text')} title="以文字顯示 claude / codex / grok / agy">
           文字
         </button>
       </div>
