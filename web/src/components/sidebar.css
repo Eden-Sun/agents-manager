@@ -833,33 +833,60 @@ p.project-quota-hidden {
   margin-left: 0;
 }
 
-/* 子 agent 精簡列（2026-10-04 使用者：「改用緊湊的方式表示這些資訊」）：身分與模型拼成一顆分段標籤（`cc0│opus-M`），
-   強度縮寫在 ModelTag 的 `short`。只有前面真的有身分標籤時才接（codex 子列常常沒有身分，模型標籤要保持完整圓角）；
-   kind 圖示保留方框（拿掉方框時 codex 圖示縮成一個點，同日使用者：「長得有點怪」）。 */
-.bot-row.compact .bot-sub {
-  gap: 0;
+/* `.compact.compact`：main 的 styles.css 比這支晚載入，同權重的舊規則會蓋過來，所以多一級。
+   子 agent 精簡列（2026-10-04 使用者：「改用緊湊的方式表示這些資訊」→「身分可以在 model 下方小字標就好」）：
+   模型標籤（強度縮寫，ModelTag 的 `short`）一列，身分用小字放在它正下方，不再佔一顆標籤的寬度。額度 chip 跟模型同一列。 */
+.bot-row.compact.compact .bot-sub {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: auto auto;
+  align-items: center;
+  justify-items: start;
+  column-gap: 4px;
+  row-gap: 0;
+  height: auto;
 }
 
-.bot-row.compact .bot-sub > .identity-badge:has(+ .model-tag),
-.bot-row.compact .bot-sub > .identity-diverged:has(+ .model-tag) {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-  padding-right: 4px;
-}
-
-.bot-row.compact .bot-sub > .identity-badge + .model-tag,
-.bot-row.compact .bot-sub > .identity-diverged + .model-tag {
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  border-left-width: 0;
-  padding-left: 4px;
-}
-
-.bot-row.compact .bot-sub > .model-tag {
+.bot-row.compact.compact .bot-sub > .model-tag,
+.bot-row.compact.compact .bot-sub > .bot-quota-chip,
+.bot-row.compact.compact .bot-sub > .bot-quota-warn {
+  grid-row: 1;
   min-width: 0;
 }
 
-.bot-row.compact .bot-sub > .bot-quota-chip,
-.bot-row.compact .bot-sub > .bot-quota-warn {
-  margin-left: 4px;
+.bot-row.compact.compact .bot-sub > .identity-badge,
+.bot-row.compact.compact .bot-sub > .identity-diverged {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  height: auto;
+  max-height: none;
+  padding: 0 0 0 2px;
+  border: 0;
+  background: none;
+  font-size: 9px;
+  line-height: 10px;
+  color: var(--text-dim);
+}
+
+.bot-row.compact.compact .bot-sub > .identity-diverged .identity-badge {
+  height: auto;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 9px;
+  line-height: 10px;
+  color: var(--text-dim);
+}
+
+/* 兩行要塞進 32px 列高：中段上下留白從 5px 收到 2px（kind 圖示右上的更新記號仍有 2px），模型標籤 17px＋身分 10px。 */
+.bot-row.compact.compact .bot-main {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
+
+.bot-row.compact.compact .bot-sub > .model-tag {
+  height: 17px;
+  max-height: 17px;
+  line-height: 17px;
 }
