@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// codex 自己的升級提示寫的那一句（`Run sh -c '…' to update.`）。只有這一條，不收參數。
-pub const CODEX_INSTALL: &str = "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh";
+pub const CODEX_INSTALL: &str = "curl --proto '=https' --proto-redir '=https' -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh";
 pub const CODEX_INSTALL_LOCK: &str = "$HOME/.agents-manager-codex-install.lock";
 pub const CLAUDE_INSTALL_LOCK: &str = "$HOME/.agents-manager-claude-install.lock";
 
@@ -3604,6 +3604,14 @@ mod tests {
     fn the_host_lock_path_keeps_home_expansion_in_the_remote_shell() {
         assert_eq!(shell_lock_path(CODEX_INSTALL_LOCK), "\"$HOME/.agents-manager-codex-install.lock\"");
         assert_eq!(shell_lock_path("/tmp/a'b"), "'/tmp/a'\\''b'");
+    }
+
+    #[test]
+    fn codex_installer_forbids_non_https_redirects_before_piping_to_shell() {
+        assert_eq!(
+            CODEX_INSTALL,
+            "curl --proto '=https' --proto-redir '=https' -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh"
+        );
     }
 
     #[tokio::test]
