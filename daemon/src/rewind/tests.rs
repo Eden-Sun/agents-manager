@@ -963,3 +963,109 @@ async fn a_foreign_draft_met_while_clearing_a_dropped_refill_never_reaches_the_l
         assert!(!log.contains(needle), "草稿內容不能進 log（{needle}）：{log}");
     }
 }
+
+// ───────────── 重啟後接到倒回點（`anchor`） ─────────────
+
+/// rig 那三則的 transcript：u1(A) → a1 → u2(SECOND) → a2 → u3(C) → a3，最後是 CLI 自己補的 last-prompt。
+fn transcript_of_rig(sid: &str) -> String {
+    let user = |u: &str, p: Option<&str>, text: &str| {
+        json!({"type": "user", "uuid": u, "parentUuid": p, "sessionId": sid, "message": {"role": "user", "content": text}}).to_string()
+    };
+    let reply = |u: &str, p: &str| {
+        json!({"type": "assistant", "uuid": u, "parentUuid": p, "sessionId": sid, "message": {"role": "assistant", "content": [{"type": "text", "text": "OK"}]}})
+            .to_string()
+    };
+    [
+        user("u1", None, A),
+        reply("a1", "u1"),
+        user("u2", Some("a1"), SECOND),
+        reply("a2", "u2"),
+        user("u3", Some("a2"), C),
+        reply("a3", "u3"),
+        json!({"type": "last-prompt", "leafUuid": "a3", "sessionId": sid}).to_string(),
+    ]
+    .join("\n")
+        + "\n"
+}
+
+async fn rig_with_transcript(sid: &str) -> (Rig, std::path::PathBuf) {
+    let r = rig().await;
+    let path = tt::scratch_dir("rewind-resume").join(format!("{sid}.jsonl"));
+    std::fs::write(&path, transcript_of_rig(sid)).unwrap();
+    sqlx::query("UPDATE runs SET native_session_id = ?, transcript_path = ? WHERE id = ?")
+        .bind(sid)
+        .bind(path.to_string_lossy().to_string())
+        .bind(&r.run)
+        .execute(&r.e.app.db)
+        .await
+        .unwrap();
+    (r, path)
+}
+
+fn anchors_in(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path).unwrap().lines().filter(|l| l.contains("\"rewound\":true")).map(String::from).collect()
+}
+
+/// 2026-10-04 ai-cc：倒回之後 `--resume` 接回舊分支。倒回時記下倒回點（SECOND 的 parentUuid＝a1）；重啟的
+/// `native_resume_plan`（CLI 已經結束）才補進 transcript，補一次就好；重啟前的檢查（CLI 還開著）不補。
+#[tokio::test]
+async fn the_next_resume_after_a_rewind_starts_from_the_rewind_point() {
+    let sid = "5e551011-0000-4000-8000-000000000001";
+    let (r, path) = rig_with_transcript(sid).await;
+    let tui = FakeTui::new(&[A, SECOND, C], Faults::default());
+    call(&r, &r.ids[2], &tui).await.unwrap();
+    let row: (String, Option<String>, i64) =
+        sqlx::query_as("SELECT bot_id, leaf_uuid, transcript_len FROM rewind_anchors WHERE session_id = ?").bind(sid).fetch_one(&r.e.app.db).await.unwrap();
+    assert_eq!(row, (r.bot.clone(), Some("a1".to_string()), transcript_of_rig(sid).len() as i64));
+    assert!(anchors_in(&path).is_empty(), "CLI 還開著：寫了也會被它結束時那行舊 leaf 蓋掉，先不寫");
+
+    // CLI 結束時補的那行（舊分支的尾巴）。
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{}\n", json!({"type": "last-prompt", "leafUuid": "a3", "sessionId": sid})).as_bytes()))
+        .unwrap();
+    let bot = db::bot(&r.e.app.db, &r.bot).await.unwrap().unwrap();
+    let _ = lifecycle::native_resume_plan(&r.e.app, &bot, crate::config::LOCAL_HOST, true, None).await.unwrap();
+    assert!(anchors_in(&path).is_empty(), "重啟前的檢查不寫");
+    // 停掉了（CLI 已經結束），接著開回來。
+    sqlx::query("UPDATE runs SET state = 'stopped', ended_at = ? WHERE id = ?").bind(db::now()).bind(&r.run).execute(&r.e.app.db).await.unwrap();
+    let _ = lifecycle::native_resume_plan(&r.e.app, &bot, crate::config::LOCAL_HOST, false, None).await.unwrap();
+    assert_eq!(anchors_in(&path), vec![anchor::line(sid, &Some("a1".into()))]);
+    assert!(std::fs::read_to_string(&path).unwrap().ends_with(&format!("{}\n", anchor::line(sid, &Some("a1".into())))), "錨點在檔尾");
+    let _ = lifecycle::native_resume_plan(&r.e.app, &bot, crate::config::LOCAL_HOST, false, None).await.unwrap();
+    assert_eq!(anchors_in(&path).len(), 1, "補過就不再補");
+
+    // 接回之後有了新回合：CLI 從倒回點長出新分支，錨點作廢、紀錄刪掉，之後的 resume 不再碰檔案。
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| {
+            std::io::Write::write_all(
+                &mut f,
+                format!("{}\n", json!({"type": "user", "uuid": "u4", "parentUuid": "a1", "message": {"role": "user", "content": "new"}})).as_bytes(),
+            )
+        })
+        .unwrap();
+    let _ = lifecycle::native_resume_plan(&r.e.app, &bot, crate::config::LOCAL_HOST, false, None).await.unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rewind_anchors").fetch_one(&r.e.app.db).await.unwrap();
+    assert_eq!(left, 0);
+    assert_eq!(anchors_in(&path).len(), 1);
+}
+
+/// 第一則也能倒：接回空對話（`leafUuid: null`）。transcript 裡找不到那一則（或 run 沒記 transcript）就不記，倒回照樣成功。
+#[tokio::test]
+async fn rewinding_the_first_prompt_pins_an_empty_conversation_and_a_missing_prompt_pins_nothing() {
+    let sid = "5e551011-0000-4000-8000-000000000002";
+    let (r, _path) = rig_with_transcript(sid).await;
+    let tui = FakeTui::new(&[A, SECOND, C], Faults::default());
+    call(&r, &r.ids[0], &tui).await.unwrap();
+    let leaf: Option<Option<String>> = sqlx::query_scalar("SELECT leaf_uuid FROM rewind_anchors WHERE session_id = ?").bind(sid).fetch_optional(&r.e.app.db).await.unwrap();
+    assert_eq!(leaf, Some(None));
+
+    let r = rig().await;
+    let tui = FakeTui::new(&[A, SECOND, C], Faults::default());
+    call(&r, &r.ids[2], &tui).await.unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rewind_anchors WHERE bot_id = ?").bind(&r.bot).fetch_one(&r.e.app.db).await.unwrap();
+    assert_eq!(n, 0, "沒有 transcript：不記");
+}

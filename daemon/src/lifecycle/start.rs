@@ -325,6 +325,11 @@ pub(crate) async fn native_resume_plan(
     if session_id.trim().is_empty() {
         return Ok(Err("no_session_id"));
     }
+    // 倒回過、之後沒有新回合：先把倒回點補進 transcript（換身分的話在複製之前），`--resume` 才不會接回舊分支（SPEC §6.13）。
+    // 重啟前的檢查（`include_active`）那時 CLI 還開著，它結束時會蓋掉，不在那裡補。
+    if !include_active && bot.kind == "claude" {
+        crate::rewind::anchor::ensure(app, &session_id).await;
+    }
     // No transcript = cannot resume: `--resume` prints "No conversation found" and exits
     // right after a "successful" restart (2026-09-11 restart-idle repro). Also stages the file
     // into the current identity's config dir when it moved — local and remote both (issue #95:
@@ -1030,6 +1035,9 @@ async fn start_inner(
     // fork 本來就會拿到新 id。
     if let Some(from) = opts.fork_session.as_deref() {
         let fork = fork_args_by_kind(&bot.kind, from).map_err(|why| LcError::Bad(format!("cannot fork: {why}")))?;
+        if bot.kind == "claude" {
+            crate::rewind::anchor::ensure(app, from).await;
+        }
         if bot.kind == "codex" {
             let mut forked = fork;
             forked.extend(args);
@@ -1666,6 +1674,9 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
         Some((sid, _)) => resume_args_by_kind(&bot.kind, &sid).ok().map(|a| (sid, a)),
         None => None,
     };
+    if let (Some((sid, _)), "claude") = (resume.as_ref(), bot.kind.as_str()) {
+        crate::rewind::anchor::ensure(app, sid).await;
+    }
     if let Some((_, resume_args)) = resume.clone() {
         if bot.kind == "codex" {
             let mut resumed = resume_args;

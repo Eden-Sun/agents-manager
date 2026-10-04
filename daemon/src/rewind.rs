@@ -597,10 +597,13 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
         Some(t) => turn_dropped(app, t).await.map_err(up)?,
         None => false,
     };
+    // 真的按了 Restore 的那一則（被丟掉的那種會改倒到下一則，或根本不按）：下一次 resume 要接到它之前（`anchor`）。
+    let mut restored = Some((target.clone(), skip));
     let done = match drive(pane.as_ref(), &target, skip).await {
         Ok(d) => d,
         Err(Fail::NotInMenu | Fail::ComposerBusy) if dropped => {
             let next = next_in_context(app, &conv, &msg.id).await.map_err(up)?;
+            restored = next.clone();
             match rewind_dropped(pane.as_ref(), &target, next).await {
                 Ok(d) => {
                     tracing::info!(bot = %bot.name, "rewind: the target was interrupted before any output and never stayed in the context");
@@ -620,6 +623,10 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
     let _ = lifecycle::insert_message(app, &conv, None, "system", &note, "system", false, None).await;
     app.emit("messages_rewound", json!({"bot_id": bot_id, "message_id": msg.id, "rewound_at": now})).await;
     tracing::info!(bot = %bot.name, hidden, pane_cleared = done.pane_cleared, "rewound the conversation");
+    // 還握著鎖：下一則還沒打進去，transcript 的長度就是「倒回當時」。
+    if let Some((text, skip)) = &restored {
+        anchor::record(app, &bot, &run, text, *skip).await;
+    }
     Ok(json!({
         "rewound": true,
         "message_id": msg.id,
@@ -717,6 +724,8 @@ async fn busy_reason(app: &Arc<App>, bot_id: &str, run: &db::Run) -> LcResult<Op
         None
     })
 }
+
+pub(crate) mod anchor;
 
 #[cfg(test)]
 mod tests;
