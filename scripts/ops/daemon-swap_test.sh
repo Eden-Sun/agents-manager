@@ -81,6 +81,8 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_AGM_STATE_FAIL="" STUB_AGM_SUPERVISOR_FAIL=""
   export STUB_AGM_SUPERVISOR_FAIL_AT=0
   export STUB_DELAY_RETIRE_INTENT_FOR=""
+  export STUB_PID=99999
+  export STUB_NO_PID=""
   export AGM_BIN="$ROOT/bin/agm" SQLITE_BIN="$ROOT/bin/sqlite3" CURL_BIN="$ROOT/bin/curl"
   export LAUNCHCTL_BIN="$ROOT/bin/launchctl" PGREP_BIN="$ROOT/bin/pgrep" HERDR_BIN="$ROOT/bin/herdr"
   # 預設照 macOS 走 launchd；Linux 那幾個 case 自己改（issue #677）。不設的話在 Linux 上跑這支，
@@ -287,6 +289,7 @@ STUB
 
   cat > "$ROOT/bin/pgrep" <<'STUB'
 #!/bin/bash
+[ -z "${STUB_NO_PID:-}" ] || exit 1
 echo "${STUB_PID:-99999}"
 STUB
 
@@ -1235,6 +1238,65 @@ check_eq "daemon 裝死的 rollback 仍完成（rc=7）" "7" "$rc"
 check "rollback 停不掉新 daemon 時補 KILL" "^kill -KILL" "$AGM_DIR/kills.log"
 check_eq "只補一次 KILL（換版主線那次 daemon 正常退出）" "1" "$(grep -c '^kill -KILL' "$AGM_DIR/kills.log")"
 check_eq "KILL 之後 binary 才還原" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+teardown
+
+# 39c. KILL 之後仍查得到舊 daemon：不可以換 binary、啟新 daemon 或碰 DB。
+setup 10 10
+: > "$AGM_DIR/kills.log"
+kill() {
+  echo "kill $*" >> "$AGM_DIR/kills.log"
+  # 模擬卡在不可中斷的核心等待：TERM 與 KILL 都送出，但 pid 一直存在。
+  [ "$1" = -0 ] && return 0
+  return 0
+}
+export -f kill
+rc=$(run_capture)
+unset -f kill
+check_eq "KILL 後仍存活就以 rc=11 中止" "11" "$rc"
+check_eq "KILL 後仍存活時正式 binary 不動" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "KILL 後仍存活時不啟動另一顆 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+check "KILL 後仍存活時明確記錄拒絕換檔" "daemon is still alive after SIGKILL" "$SWAP_LOG"
+teardown
+
+# 39d. daemon API 可用但 pid pattern 找不到舊行程：沒有證明舊 daemon 已退出前不得動正式 binary。
+setup 10 10
+export STUB_NO_PID=1
+rc=$(run_capture)
+check_eq "舊 daemon pid 找不到就以 rc=11 中止" "11" "$rc"
+check_eq "舊 daemon pid 找不到時正式 binary 不動" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "舊 daemon pid 找不到時不啟動另一顆 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+check "舊 daemon pid 找不到時記錄拒絕換檔" "could not identify the running daemon pid" "$SWAP_LOG"
+teardown
+
+# 39e. 多個同命令列 daemon 時只殺一個會留下 writer；辨認出重複 pid 就拒絕換版。
+setup 10 10
+export STUB_PID=$'99999\n99998'
+rc=$(run_capture)
+check_eq "有多個 matching daemon pid 就以 rc=11 中止" "11" "$rc"
+check_eq "有多個 daemon pid 時正式 binary 不動" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "有多個 daemon pid 時不啟動另一顆 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+check "多個 daemon pid 時記錄拒絕換檔" "found 2 matching daemon processes" "$SWAP_LOG"
+teardown
+
+# 39f. rollback 時 KILL 後 pid 仍存活：不可還原 binary 或 DB 到活著的新版底下。
+setup 10 10
+export STUB_SUPERVISOR=stopped STUB_MUTATE_DB=1
+: > "$AGM_DIR/kills.log"
+kill() {
+  echo "kill $*" >> "$AGM_DIR/kills.log"
+  if [ "$1" = -0 ]; then
+    [ "$(grep -c '^kill -TERM' "$AGM_DIR/kills.log")" -ge 2 ] && return 0
+    return 1
+  fi
+  return 0
+}
+export -f kill
+rc=$(run_capture)
+unset -f kill
+check_eq "rollback KILL 後仍存活就以 rc=11 停手" "11" "$rc"
+check "rollback KILL 後仍存活時新版 binary 留在原位" "new-binary" "$AGM_REPO/target/release/agents-managerd"
+check_eq "rollback KILL 後仍存活時新版 DB 不被還原" "mutated-by-new-binary" "$(cat "$DAEMON_DB")"
+check_no "rollback KILL 後仍存活時不進行 DB restore" "db restored from" "$SWAP_LOG"
 teardown
 
 # 36. Linux（issue #677）：重啟改走 `systemd-run --user` 的 transient unit，不叫 launchctl。
