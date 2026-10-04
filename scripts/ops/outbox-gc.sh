@@ -18,7 +18,17 @@ CUTOFF=$((NOW - MAX_AGE_MIN * 60))
 REF=$(mktemp "${TMPDIR:-/tmp}/outbox-gc-ref.XXXXXX") || exit 1
 trap 'rm -f "$REF"' EXIT
 touch -t "$(date -r "$CUTOFF" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$CUTOFF" +%Y%m%d%H%M.%S)" "$REF" || exit 1
-removed=$(find "$OUTBOX" -mindepth 2 -type f ! -newer "$REF" ! -newercm "$REF" -print -delete 2>/dev/null | wc -l | tr -d ' ')
+# 分享用 bot（SPEC §20）的 outbox 整個不清（使用者 2026-10-04）：它的 end user 是外部的人（例如長輩），隔天、隔幾天才回來
+# 拿 bot 給的檔是常態，一小時就清等於檔案給了也拿不到。daemon 在那種 bot 的 outbox 放標記檔 `.am-share-keep`（啟動、建立、
+# 開機時補），這裡看到就跳過整個目錄；檔案由擁有者自己整理，bot 刪掉時跟著收。逐個 bot 目錄走：`-delete` 隱含 `-depth`，
+# 同一條 find 裡 `-prune` 不生效。`*(N/)` 只認真的目錄，不跟符號連結（跟原本的 find 一樣）。
+SHARE_MARK=.am-share-keep
+removed=0
+for d in "$OUTBOX"/*(N/); do
+  [ -e "$d/$SHARE_MARK" ] && continue
+  n=$(find "$d" -type f ! -newer "$REF" ! -newercm "$REF" -print -delete 2>/dev/null | wc -l | tr -d ' ')
+  removed=$((removed + n))
+done
 find "$OUTBOX" -mindepth 1 -type d -empty -delete 2>/dev/null
 [ "$removed" != "0" ] && echo "$(date '+%F %T') 清掉 $removed 個超過 ${MAX_AGE_MIN} 分鐘的檔案" >> "$LOG"
 exit 0

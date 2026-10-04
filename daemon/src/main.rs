@@ -609,6 +609,7 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     tracing::info!(%addr, "listening");
     // 分享入口（SPEC §20）：`[share] listen` 有設才開，獨立的 port 與 router，跟上面的管理 API 完全分開。
     share::portal::spawn_listener(&app, addr.port()).await;
+    share::keep_share_outboxes(&app).await;
     let _ = enable_shutdown.send(());
     // 連線收完後才等受監督的迴圈，再關 SSH masters。
     let serve_result = server.await.context("HTTP server task panicked")?;

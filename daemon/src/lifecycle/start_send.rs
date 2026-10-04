@@ -6,7 +6,8 @@
 //! 現在 `POST /prompt` 帶 `start_if_stopped`、而這顆 bot 沒有在跑（沒有 active run、或 run 還在 `starting`）時：
 //! 1. 在 bot 鎖裡把 turn（`queued`、`awaits_start=1`、要送的 `prompt_text`）＋使用者訊息＋附件綁定寫進**同一個交易**，
 //!    commit 之後才回 `delivery: "queued"`。同一個 `client_request_id` 再送一次回同一筆（重整、重送都不會多一則）。
-//! 2. 啟動是之後的副作用（[`kick`]）：睡著的走 `idle_sleep::wake` 接回原本的 session，其他的 `start_bot`。不在請求裡等。
+//! 2. 啟動是之後的副作用（[`kick`]）：睡著的走 `idle_sleep::wake` 接回原本的 session，分享用 bot 以 `resume_native` 接回，
+//!    其他的 `start_bot`。不在請求裡等。
 //! 3. bot 起來、閒下來，由既有的佇列 flush 送出：CAS claim 保證只送一次，resume／額度／維護窗口的閘門照舊。
 //!    瀏覽器不再留一份等著送，所以 WS 幀、重整、重按啟動都不會變成第二次送出。
 //!
@@ -257,7 +258,7 @@ async fn start_with(app: &Arc<App>, bot_id: &str, mark: Starting) {
     set_start_error(app, bot_id, None, false).await;
     let res = match crate::supervisor::idle_sleep::wake(app, bot_id, "有一則訊息等著它起來送").await {
         Ok(true) => Started::Yes,
-        Ok(false) => match start_bot(app, bot_id).await {
+        Ok(false) => match start_stopped(app, bot_id).await {
             Ok(_) => Started::Yes,
             // 別人（使用者按了啟動、AGM）剛好先起了：一樣是「起來了」。
             Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("active run already exists") => Started::Yes,
@@ -287,6 +288,18 @@ async fn start_with(app: &Arc<App>, bot_id: &str, mark: Starting) {
             set_start_error(app, bot_id, Some(&why), false).await;
         }
     }
+}
+
+/// 沒睡著、就是停了的那顆。分享用 bot（SPEC §20）是 daemon 重啟、主機重開、pane 被關之後停的——外部 end user 不知道
+/// 它停過，要接回原本那段對話再送（`resume_native`；接不回照舊開新對話，訊息不能卡住）。讀不到是不是分享用 bot 也接回：
+/// 對一般 bot 只差在「先試著接回」，對分享用 bot 開新對話就是把對方的脈絡丟掉。其他 bot 照舊開新對話。
+async fn start_stopped(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
+    let opts = if matches!(crate::share::store::is_restricted(&app.db, bot_id).await, Ok(false)) {
+        StartOpts::default()
+    } else {
+        StartOpts { resume_native: true, ..Default::default() }
+    };
+    start_bot_with(app, bot_id, opts).await
 }
 
 enum Started {

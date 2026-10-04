@@ -86,6 +86,21 @@ run_at 61 >/dev/null
 gone   "搬進來超過 60 分鐘才刪" "$OB/b/moved-in.pdf"
 teardown
 
+# 2c. 分享用 bot 的 outbox（daemon 放了 `.am-share-keep`）整個不清：end user 隔天才回來拿是常態（使用者 2026-10-04）。
+setup
+mkdir -p "$OB/share/sub" "$OB/plain"
+: > "$OB/share/.am-share-keep"; old "$OB/share/.am-share-keep"
+echo x > "$OB/share/report.pdf"; old "$OB/share/report.pdf"
+echo x > "$OB/share/sub/deep.pdf"; old "$OB/share/sub/deep.pdf"
+echo x > "$OB/plain/old.txt"; old "$OB/plain/old.txt"
+equals "正常跑 exit 0" "$(run_at 100000)" "0"
+exists "分享用 bot 的檔幾天後還在" "$OB/share/report.pdf"
+exists "分享用 bot 子目錄的檔也在" "$OB/share/sub/deep.pdf"
+exists "標記檔本身不清" "$OB/share/.am-share-keep"
+gone   "一般 bot 照常清" "$OB/plain/old.txt"
+check  "log 只算一般 bot 那 1 個" "清掉 1 個超過 60 分鐘" "$LOG"
+teardown
+
 # 3. 不碰不該碰的：outbox 外面的私鑰、DB、scratchpad、別的 bot 資料，即使很舊。
 setup
 mkdir -p "$OB/b" "$HOME/.config/agents-manager/bots/x" "$ROOT/scratch"

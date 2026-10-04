@@ -742,6 +742,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 - `POST /api/bots/{id}/share/rotate` → 換新 token、舊的立刻失效，回新的 `url`；沒開著 409 `share_disabled`。
 - 啟用、停用、輪替與 bot 刪除共用 per-bot 鎖；操作在鎖內重查存活狀態，已刪 bot 回 404。刪除 bot／專案會清除公開 token 列；還原 bot 不會恢復舊連結，必須重新啟用。
 - 錯誤：bot 或其專案不存在／已刪除 404；不是受限 bot 409 `not_shareable`；`[share] base_url` 沒設 409 `share_not_configured`。
+- 分享用 bot 不給 AGM 清（SPEC §20.5）：Bot principal（AGM 角色）打 `DELETE /api/bots/{id}`、`POST /api/bots/{id}/stop`，或 `DELETE /api/projects/{id}` 而專案裡有活著的分享用 bot → `403 {"reason":"share_bot_protected","bot_id"}`；重啟不擋，使用者照常。
 - 建受限 bot：`POST /api/projects/{id}/bots` 多一個 `share_profile:"restricted"`（只收這個值）；claude 以外 409 `unsupported_kind`、遠端專案 409 `unsupported_host`、
   帶了 `args`／`env` 400 `restricted_no_custom`。`share_profile` 進冪等指紋。
   `share_folder`（只給受限 bot，一般 bot 帶了 400）：`{"kind":"new","name":"support"}`＝在 `[share] folders_root`（預設 `~/shared-bots`）建新資料夾，同名已存在 409 `folder_exists`（同一個 `client_request_id` 的重送除外）；
@@ -760,7 +761,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 | `POST /s/{token}/api/messages` | `{text, client_request_id, attachments?:[上傳回的 id]}` → `{accepted:true, message_id, delivery}`；413 `text_too_long`（> 8000 字）；400 `empty`／`bad_client_request_id`（1..=64 個 `[A-Za-z0-9-_.:]`）／`too_many_attachments`（> 10）／`unknown_attachment`；429 `rate_limited`（每分享每分鐘 10 次；便宜的 JSON、字數與空訊息檢查通過後，附件查驗也計次，`Retry-After`）；409 `not_accepted`（多半是上一則還在排隊：一段對話同時只排一則）；503 `unavailable` |
 | `GET /s/{token}/api/events` | SSE：`event: status` `{status}`（連上先送一次）、`event: message`（同上面的訊息形狀與過濾：擁有者送的不推）、`event: resync` `{}`（漏了事件，或擁有者倒回了對話：請整頁重抓、以重抓結果取代手上的清單）；總量同時 32 條、每個分享同時 4 條；單分享滿額 429 `rate_limited`，總量滿額 503 `too_many_streams` |
 | `POST /s/{token}/api/upload` | `multipart/form-data` 的 `file` 欄位（分享頁的 `FormData`；一次一個檔），或原始位元組＋`?name=<檔名>` → `{id, name, size, mime}`；每顆 bot 的 200 MiB／300 檔配額檢查與檔案建立會序列化；400 `empty`／`bad_name`／`bad_multipart`／`no_file`；413 `too_large`（> 25 MiB）；415 `unsupported`（`reason`: `unsupported_type`／`content_mismatch`）；429（每分享每分鐘 20 次，驗 token 後、讀取 body 前計次，無效內容也計次；全站最多同時讀取 2 個上傳 body）；507 `inbox_full`。Office 檔需符合 OOXML ZIP 項目結構，`mime` 回傳 Word／Excel／PowerPoint 專屬類型。 |
-| `GET /s/{token}/api/files` | `{files:[{name, size, modified_at, remaining_secs}]}`（這顆 bot 的 outbox；`modified_at` 是 RFC 3339）；outbox 尚未建立時回空清單，可信目錄／列舉／背景工作失敗回一般 503 `unavailable` |
+| `GET /s/{token}/api/files` | `{files:[{name, size, modified_at}]}`（這顆 bot 的 outbox；`modified_at` 是 RFC 3339；分享用 bot 的 outbox 不清，所以沒有倒數）；outbox 尚未建立時回空清單，可信目錄／列舉／背景工作失敗回一般 503 `unavailable` |
 | `GET /s/{token}/api/files/{name}` | 下載（attachment、nosniff）；不存在或被擋 404、太大 413；可信開檔、讀取、DB 或背景工作失敗回一般 503 `unavailable`。`?inline=1`：**只對圖片**（svg／png／jpg／jpeg／gif／webp）改回 `Content-Disposition: inline`、正確 MIME（svg＝`image/svg+xml`）、`nosniff` 與 `Content-Security-Policy: sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'`（直接開成文件時 SVG 裡的 script 不跑、origin 是 opaque）；其他種類與 `inline` 不是 `1` 時照舊 attachment＋頁面的 CSP。其餘 query（如分享頁加的 `v=`）忽略 |
 | `GET /assets/{path}` | 分享頁的靜態檔 |
 
@@ -984,6 +985,7 @@ bot 或 active Run 不存在 404。
 ```
 
 - 只列**第一層的一般檔案**（不遞迴；子目錄、符號連結與硬連結不列），新的排前面，最多 300 筆。
+- 分享用 bot（SPEC §20.5）：outbox 不清，回 `ttl_secs:null`、`kept:true`，每個檔 `expires_at`／`remaining_secs` 為 `null`。
 - `expires_at` = mtime 與 ctime（檔案搬進 outbox 的時間）較晚的那個 + `ttl_secs`（`modified` 仍是 mtime）；`remaining_secs` 是回應當下還剩幾秒，到期是 0（AGM 的 `com.agm.outbox-gc` 每 10 分鐘才清一次，0 的檔案還會出現一下）。前端從回應那一刻往下扣，不拿瀏覽器時鐘比 `expires_at`。
 - **一律不列**：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env` `.token` `.keychain`、`id_rsa*` 等，以及 `auth.json`、`credentials.json`、`application_default_credentials.json`、`hosts.yml`、`ui-token`），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案。規則本來就禁止放這些，這是第二道。
 - 目錄不存在（還沒寫過、被清理收掉）→ `200` 空清單。bot 不存在 404。

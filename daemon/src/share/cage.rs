@@ -55,6 +55,8 @@ pub(crate) async fn prepare(app: &Arc<App>, bot: &db::Bot, host: &str) -> Result
     check_profile(&bot.kind, host)?;
     // 資料夾不見了就不起來（不替使用者重建一個空的）；inbox 不存在就建。
     crate::share::folder::ensure_inbox(Path::new(&ws)).map_err(|e| LcError::Upstream(format!("restricted bot folder {ws}: {e}")))?;
+    // outbox 不給 AGM 的 gc 清（使用者 2026-10-04）：每次啟動補一次標記，bot 自己刪掉也回得來。
+    crate::outbox::mark_share_keep(&app.data_dir, &bot.id);
     Ok(Some(ws))
 }
 
