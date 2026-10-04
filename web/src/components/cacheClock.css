@@ -1,4 +1,6 @@
-/* 主力晶片的快取倒數（SPEC §6.5j，`lib/cacheClock.ts`）：晶片原本的底色就是倒數——由左往右填「剩餘／TTL」那麼寬，
+/* 主力晶片的快取倒數（SPEC §6.5j，`lib/cacheClock.ts`）：晶片原本的底色就是倒數——兩層色調：
+   整顆一層淡的（看得出現在是哪一級），剩餘那段（由左往右「剩餘／TTL」那麼寬）再疊一層深的（看得出還剩多少）。
+   只有比例的話，剩不到 5 分鐘時紅色只佔晶片寬度的 8% 以下、幾乎看不見（2026-10-04 ego 截圖），所以要整顆那一層。
    色調照剩餘時間綠（> 15 分）→ 黃（5–15 分）→ 紅（< 5 分）；已涼不加 class，回到一般底色、只在 tooltip 講。
    只動 `background-image`／`background-size`，盒子、字、版面一概不動，不加任何佔位元素。
    選擇器 0,3,0 且這份在 `unreadChip.css` 之後載入：各狀態（未讀實心藍、要回答、hover、選中）用 `background:` 簡寫
@@ -16,27 +18,32 @@
 }
 
 .unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low) {
-  --cache-tint: color-mix(in srgb, var(--cache-hue) var(--cache-tint-pct, 22%), transparent);
-  background-image: linear-gradient(var(--cache-tint), var(--cache-tint));
-  background-size: var(--cache-fill, 100%) 100%;
+  --cache-strong: color-mix(in srgb, var(--cache-hue) var(--cache-strong-pct, 20%), transparent);
+  --cache-faint: color-mix(in srgb, var(--cache-hue) var(--cache-faint-pct, 10%), transparent);
+  background-image: linear-gradient(var(--cache-strong), var(--cache-strong)), linear-gradient(var(--cache-faint), var(--cache-faint));
+  background-size: var(--cache-fill, 100%) 100%, 100% 100%;
   background-repeat: no-repeat;
   background-position: left center;
 }
 
-/* 中性底（閒置、在跑、等子 agent）原本是淡字：疊了色調後 12px 字在淺色模式掉到 4.5:1 以下，字往 `--text` 靠一半。 */
+/* 中性底（閒置、在跑、等子 agent）原本是淡字：疊了色調後 12px 字在淺色模式掉到 4.5:1 以下，字往 `--text` 靠一半；
+   hover 的底更亮（深色模式 `--bg-active`），黃色那級會掉到 4.3:1，hover 時直接用 `--text`。 */
 .unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low):not(.unread, .needs-reply, .current) {
   color: color-mix(in srgb, var(--text) 55%, var(--text-dim));
 }
 
-/* 實心底（未讀藍、要回答 hover 的紅）上只疊薄薄一層：字是反白的，色調太濃會把對比吃掉。 */
-.unread-chip.pinned.unread:is(.cache-fresh, .cache-warn, .cache-low),
-.unread-chip.pinned.needs-reply:is(.cache-fresh, .cache-warn, .cache-low):hover {
-  --cache-tint-pct: 14%;
+.unread-chip.pinned:is(.cache-fresh, .cache-warn, .cache-low):not(.unread, .needs-reply, .current):hover {
+  color: var(--text);
 }
 
-/* 要回答（淡紅底紅字）：色調壓到 14%、字往 `--text` 靠四分之一，兩種模式都維持 5:1 以上（原本淺色只有 4.5:1）。
-   hover 換實心紅反白，回到上一條的 14% 與原本的白字。 */
+/* 實心底（未讀藍、要回答 hover 的紅）與淡紅底上只疊薄薄一層（合起來約 15%）：字是反白或紅的，色調太濃會把對比吃掉。 */
+.unread-chip.pinned.unread:is(.cache-fresh, .cache-warn, .cache-low),
+.unread-chip.pinned.needs-reply:is(.cache-fresh, .cache-warn, .cache-low) {
+  --cache-strong-pct: 9%;
+  --cache-faint-pct: 6%;
+}
+
+/* 要回答（淡紅底紅字）：字往 `--text` 靠四分之一，兩種模式都維持 5:1 以上（原本淺色只有 4.5:1）。hover 換實心紅反白，照原本的白字。 */
 .unread-chip.pinned.needs-reply:is(.cache-fresh, .cache-warn, .cache-low):not(:hover) {
-  --cache-tint-pct: 14%;
   color: color-mix(in srgb, var(--danger) 75%, var(--text));
 }

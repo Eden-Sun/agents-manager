@@ -2337,7 +2337,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   最近一筆非 queued 回合的 `completed_at`；claude statusLine 的 API 指紋（`cost.total_api_duration_ms`、`context_window` 的用量）真的變了的那一刻
   （閒置重繪不算，記憶體帳，daemon 重啟後退回回合時間）；`blocked` 的 `agent_status_since`。回合進行中＝熱，給投影當下的時間。
   TTL：claude、codex 3600 秒；grok 不知道，不帶。回合收尾時（`emit_turn` 收成終態）多推一次 `bot_status`，倒數從真正的收尾時間開始。
-- **網頁**（`lib/cacheClock.ts`、`cacheClock.css`）：只畫在主力晶片上（桌機主力組、手機主力格），每 15 秒重算。剩餘／TTL 決定底色由左往右填多寬，
+- **網頁**（`lib/cacheClock.ts`、`cacheClock.css`）：只畫在主力晶片上（桌機主力組、手機主力格），每 15 秒重算。整顆晶片一層淡的等級色調，剩餘／TTL 那段（由左往右）再疊深一層，
   色調：剩 > 15 分綠、5–15 分黃、< 5 分紅；到期＝已涼，回到原本的底色。tooltip 加一行「快取約 N 分後到期（上次活動 HH:MM）」／「快取已涼（上次活動 HH:MM）」；
   回合進行中滿條。grok、沒有紀錄的不畫。狀態不存 localStorage。
 
