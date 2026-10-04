@@ -98,13 +98,79 @@ am_raw() {
        | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk '{printf "%s\\n", $0}')
   printf '{"raw":"%s"}' "$ESC"
 }
-case "$PAYLOAD" in
-  '{'*)
-    if [ "$TRUNC" = true ]; then PAYLOAD=$(am_raw "$PAYLOAD"); fi
-    ;;
-  '') PAYLOAD=null ;;
-  *) PAYLOAD=$(am_raw "$PAYLOAD") ;;
-esac
+# A remote spool line must stay valid UTF-8, single-line JSON. Parse the complete input so leading
+# JSON whitespace, malformed objects, and truncated objects cannot bypass the normalizer.
+if command -v python3 >/dev/null 2>&1; then
+  NORMALIZED=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
+raw=sys.stdin.buffer.read()
+if not raw:
+    sys.stdout.write("null")
+    raise SystemExit
+text=raw.decode("utf-8","replace")
+def reject_constant(value):
+    raise ValueError("non-standard JSON constant")
+def finite_float(value):
+    import math
+    result=float(value)
+    if not math.isfinite(result):
+        raise ValueError("non-finite JSON number")
+    return result
+if sys.argv[1]=="true":
+    value={"raw":text}
+else:
+    try:
+        value=json.loads(text,parse_constant=reject_constant,parse_float=finite_float)
+        if not isinstance(value,dict):
+            value={"raw":text}
+    except Exception:
+        value={"raw":text}
+def clean(v):
+    if isinstance(v,str):
+        out=[]
+        i=0
+        while i<len(v):
+            cp=ord(v[i])
+            if 0xd800<=cp<=0xdbff:
+                if i+1<len(v) and 0xdc00<=ord(v[i+1])<=0xdfff:
+                    low=ord(v[i+1])
+                    out.append(chr(0x10000+((cp-0xd800)<<10)+(low-0xdc00)))
+                    i+=2
+                    continue
+                out.append("\ufffd")
+            elif 0xdc00<=cp<=0xdfff:
+                out.append("\ufffd")
+            else:
+                out.append(v[i])
+            i+=1
+        return "".join(out)
+    if isinstance(v,list):
+        return [clean(x) for x in v]
+    if isinstance(v,dict):
+        return {clean(k):clean(x) for k,x in v.items()}
+    return v
+safe=clean(value)
+sys.stdout.buffer.write(json.dumps(safe,separators=(",",":"),ensure_ascii=False).encode("utf-8"))' "$TRUNC" 2>/dev/null)
+  [ -n "$NORMALIZED" ] && PAYLOAD="$NORMALIZED"
+else
+  # Without Python, keep the prior POSIX path but recognize objects preceded by JSON whitespace.
+  if [ -z "$PAYLOAD" ]; then
+    PAYLOAD=null
+  elif [ "$TRUNC" = true ]; then
+    PAYLOAD=$(am_raw "$PAYLOAD")
+  else
+    LEADING=${PAYLOAD%%[![:space:]]*}
+    REST=${PAYLOAD#"$LEADING"}
+    case "$REST" in
+      '{'*) ;;
+      *) PAYLOAD=$(am_raw "$PAYLOAD") ;;
+    esac
+    # JSON whitespace may span physical lines; JSONL stores one complete event per line.
+    PAYLOAD=$(printf '%s' "$PAYLOAD" | tr -d '\011\012\015')
+  fi
+  if command -v iconv >/dev/null 2>&1 && ! printf '%s' "$PAYLOAD" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+    PAYLOAD='{"raw":"invalid UTF-8 hook payload"}'
+  fi
+fi
 # issue #753: a Stop hook carries no user message, and the daemon cannot read this machine's
 # transcript, so a Stop that arrives after the daemon's terminal fallback closed the turn could not
 # be shown to belong to that turn. Read the last human message out of the LOCAL transcript here and
@@ -117,7 +183,7 @@ esac
 # when the origin is `human`.
 if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
   case "$PAYLOAD" in
-    '{'*'"hook_event_name":"Stop"'*|'{'*'"hook_event_name": "Stop"'*)
+    *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*)
       if command -v python3 >/dev/null 2>&1; then
         WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,stat,sys
 def _am_transcript(path):
@@ -222,7 +288,7 @@ fi
 # StopFailure; best effort like the block above (no python3 or an unreadable transcript leaves the payload as is).
 if [ "$PROVIDER" = "claude" ] && [ "$TRUNC" = false ]; then
   case "$PAYLOAD" in
-    '{'*'"hook_event_name":"Stop"'*|'{'*'"hook_event_name": "Stop"'*|'{'*'"hook_event_name":"StopFailure"'*|'{'*'"hook_event_name": "StopFailure"'*)
+    *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*|*'"hook_event_name":"StopFailure"'*|*'"hook_event_name": "StopFailure"'*)
       if command -v python3 >/dev/null 2>&1; then
         WITH=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,os,stat,sys
 def _am_transcript(path):
@@ -397,32 +463,53 @@ am_seq() {
   printf '%s\n' "$_n" > "$DIR/hook-seq" 2>/dev/null
   printf '%s%03d\n' "$(date +%s)" "$_n"
 }
-# One string field out of a single-line JSON object. Coarse on purpose (see below).
+# Read a top-level string field from the normalized JSON object. Missing, nested, or wrong-type
+# fields produce no argument; user-controlled nested tool data cannot masquerade as event metadata.
 am_str() {
-  printf '%s' "$PAYLOAD" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+  command -v python3 >/dev/null 2>&1 || return 0
+  printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
+try:
+    p=json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    v=p.get(sys.argv[1]) if isinstance(p,dict) else None
+    if isinstance(v,str):
+        sys.stdout.buffer.write(v.encode("utf-8"))
+except Exception:
+    pass' "$1" 2>/dev/null
 }
-# The classification that matters lives in the daemon (`hookrecv::classify`). All this needs
-# to decide is "did a turn just end" — a wrong guess here would only cost a late sweep, while
-# a wrong guess about *content* would swallow a reply.
+# The authoritative classification lives in the daemon. This parsed top-level hint only wakes
+# the host promptly; missing fields or invalid payloads leave the spool intact for normal polling.
 STATE=""
 START=0
-case "$PROVIDER" in
-  claude)
-    case "$PAYLOAD" in *'"hook_event_name":"Stop"'*|*'"hook_event_name": "Stop"'*) STATE=idle ;; esac
-    # 失敗收尾的回合一樣不再是 working（issue #79）。`"Stop"` 那個 pattern 帶了收尾的引號，配不到 StopFailure。
-    case "$PAYLOAD" in *'"hook_event_name":"StopFailure"'*|*'"hook_event_name": "StopFailure"'*) STATE=idle ;; esac
-    case "$PAYLOAD" in *'"stop_hook_active":true'*|*'"stop_hook_active": true'*) STATE="" ;; esac
-    case "$PAYLOAD" in *'"hook_event_name":"SessionStart"'*|*'"hook_event_name": "SessionStart"'*) START=1 ;; esac
-    ;;
-  codex)
-    case "$PAYLOAD" in *'"type":"agent-turn-complete"'*|*'"type": "agent-turn-complete"'*) STATE=idle ;; esac
-    ;;
-  grok)
-    case "$PAYLOAD" in *'"hookEventName":"stop"'*|*'"hook_event_name":"stop"'*) STATE=idle ;; esac
-    case "$PAYLOAD" in *'"reason":"shutdown"'*|*'"stopHookActive":true'*|*'"stop_hook_active":true'*) STATE="" ;; esac
-    case "$PAYLOAD" in *'"hookEventName":"session_start"'*|*'"hook_event_name":"session_start"'*) START=1 ;; esac
-    ;;
-esac
+if command -v python3 >/dev/null 2>&1; then
+  EVENT=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
+try:
+    p=json.loads(sys.stdin.buffer.read().decode("utf-8"))
+    if not isinstance(p,dict):
+        raise SystemExit
+    provider=sys.argv[1]
+    if provider=="claude":
+        event=p.get("hook_event_name")
+        if event=="SessionStart":
+            print("session")
+        elif event in ("Stop","StopFailure") and p.get("stop_hook_active") is not True:
+            print("idle")
+    elif provider=="codex" and p.get("type")=="agent-turn-complete":
+        print("idle")
+    elif provider=="grok":
+        event=p.get("hookEventName",p.get("hook_event_name"))
+        if isinstance(event,str):
+            event=event.lower()
+            if event in ("session_start","sessionstart"):
+                print("session")
+            elif event=="stop" and p.get("reason","end_turn")=="end_turn" and p.get("stopHookActive",p.get("stop_hook_active")) is not True:
+                print("idle")
+except Exception:
+    pass' "$PROVIDER" 2>/dev/null)
+  case "$EVENT" in
+    session) START=1 ;;
+    idle) STATE=idle ;;
+  esac
+fi
 [ "$START" = 1 ] || [ -n "$STATE" ] || exit 0
 SID=$(am_str session_id)
 [ -n "$SID" ] || SID=$(am_str sessionId)
@@ -1407,7 +1494,7 @@ mod hook_cmd_parts_tests {
     #[test]
     fn the_remote_dispatcher_reports_idle_for_a_failed_turn_too() {
         assert!(
-            super::REMOTE_HOOK_SH_TEMPLATE.contains(r#"*'"hook_event_name":"StopFailure"'*"#),
+            super::REMOTE_HOOK_SH_TEMPLATE.contains(r#"event in ("Stop","StopFailure")"#),
             "hook.sh 少了 StopFailure 那一條",
         );
     }
@@ -1816,7 +1903,7 @@ mod model_args_tests {
 #[cfg(test)]
 mod remote_hook_tests {
     //! SPEC §11.4.2 — runs `REMOTE_HOOK_SH` with `/bin/sh` against a fake `$HOME` and `herdr`.
-    //! Classification stays coarse; the real one is `hookrecv::classify`.
+    //! The shell parses top-level event hints; authoritative classification is `hookrecv::classify`.
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
@@ -1909,6 +1996,11 @@ mod remote_hook_tests {
 
         /// Same, with extra pane env on top of the fixed test environment.
         fn run_with_env(&self, argv: &[&str], stdin: &str, extra: &[(&str, &str)]) -> (String, bool) {
+            self.run_with_env_bytes(argv, stdin.as_bytes(), extra)
+        }
+
+        /// Byte input verifies that invalid provider UTF-8 still produces a valid spool JSON line.
+        fn run_with_env_bytes(&self, argv: &[&str], stdin: &[u8], extra: &[(&str, &str)]) -> (String, bool) {
             let mut cmd = Command::new("/bin/sh");
             cmd.arg(self.dir.join("hook.sh"));
             cmd.args(argv);
@@ -1927,7 +2019,7 @@ mod remote_hook_tests {
             }
             cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut ch = cmd.spawn().unwrap();
-            ch.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+            ch.stdin.take().unwrap().write_all(stdin).unwrap();
             let out = ch.wait_with_output().unwrap();
             (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
         }
@@ -1941,7 +2033,9 @@ mod remote_hook_tests {
     #[test]
     fn a_remote_stop_carries_the_last_user_message_from_the_local_transcript() {
         let sb = Sandbox::new(false);
-        let transcript = sb.dir.join("t.jsonl");
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let transcript = project_dir.join("t.jsonl");
         let line = |v: serde_json::Value| format!("{v}\n");
         std::fs::write(
             &transcript,
@@ -1989,7 +2083,9 @@ mod remote_hook_tests {
     #[test]
     fn a_remote_stop_carries_the_finished_ask_user_question_records() {
         let sb = Sandbox::new(false);
-        let transcript = sb.dir.join("t.jsonl");
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let transcript = project_dir.join("t.jsonl");
         let qs = serde_json::json!([{"question": "拋單怎麼處理？", "header": "拋單倉庫", "options": []}, {"question": "go API 放哪？", "header": "go API", "options": []}]);
         let ask = |id: &str| serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": "AskUserQuestion", "input": {"questions": qs}}]}});
         let lines = [
@@ -2010,7 +2106,6 @@ mod remote_hook_tests {
         };
 
         for event in ["Stop", "StopFailure"] {
-            let sb = Sandbox::new(false);
             let (_, ok) = sb.run(&["claude", &sb.bot, "-"], &payload(event));
             assert!(ok);
             let p = spooled(&sb);
@@ -2033,6 +2128,10 @@ mod remote_hook_tests {
         assert!(spooled(&sb).get("agm_asks").is_none());
 
         // 答案裡有孤立 surrogate：什麼都不帶，但 spool 行仍是合法 JSON、其餘欄位不動。
+        let sb = Sandbox::new(false);
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let transcript = project_dir.join("t.jsonl");
         std::fs::write(
             &transcript,
             format!(
@@ -2042,8 +2141,14 @@ mod remote_hook_tests {
             ),
         )
         .unwrap();
-        let sb = Sandbox::new(false);
-        sb.run(&["claude", &sb.bot, "-"], &payload("Stop"));
+        let lone_surrogate = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "s-1",
+            "transcript_path": transcript.to_string_lossy(),
+            "stop_hook_active": false,
+        })
+        .to_string();
+        sb.run(&["claude", &sb.bot, "-"], &lone_surrogate);
         let p = spooled(&sb);
         assert!(p.get("agm_asks").is_none(), "{p}");
         assert_eq!(p["session_id"], "s-1");
@@ -2055,7 +2160,9 @@ mod remote_hook_tests {
     #[test]
     fn a_lone_surrogate_in_the_transcript_never_breaks_the_spool_line() {
         let sb = Sandbox::new(false);
-        let transcript = sb.dir.join("t.jsonl");
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let transcript = project_dir.join("t.jsonl");
         std::fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"貼上的字 \\ud83d 被切斷\"}}\n").unwrap();
         let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s-1", "transcript_path": transcript.to_string_lossy(), "stop_hook_active": false, "last_assistant_message": "回覆"}).to_string();
         let (_, ok) = sb.run(&["claude", &sb.bot, "-"], &stop);
@@ -2087,7 +2194,9 @@ mod remote_hook_tests {
 
         // 使用者打的一句，中間有工具結果：起點是 human。
         let sb = Sandbox::new(false);
-        let t = sb.dir.join("human.jsonl");
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let t = project_dir.join("human.jsonl");
         std::fs::write(&t, [human("現在部 demo"), reply.clone(), tool_result.clone()].concat()).unwrap();
         sb.run(&["claude", &sb.bot, "-"], &stop(&t));
         let p = spooled(&sb);
@@ -2095,7 +2204,9 @@ mod remote_hook_tests {
 
         // 背景工作完成喚醒的一輪：起點是 task-notification（文字仍是最後一則使用者條目，daemon 看起點決定不存）。
         let sb = Sandbox::new(false);
-        let t = sb.dir.join("wake.jsonl");
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let t = project_dir.join("wake.jsonl");
         std::fs::write(&t, [human("現在部 demo"), reply, wake, tool_result].concat()).unwrap();
         sb.run(&["claude", &sb.bot, "-"], &stop(&t));
         let p = spooled(&sb);
@@ -2103,7 +2214,9 @@ mod remote_hook_tests {
 
         // 舊版 CLI 沒有 origin：只帶文字，不帶起點（沒有證據）。
         let sb = Sandbox::new(false);
-        let t = sb.dir.join("old.jsonl");
+        let project_dir = sb.dir.join(".claude/projects/project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let t = project_dir.join("old.jsonl");
         std::fs::write(&t, line(serde_json::json!({"type": "user", "message": {"role": "user", "content": "舊版"}}))).unwrap();
         sb.run(&["claude", &sb.bot, "-"], &stop(&t));
         let p = spooled(&sb);
@@ -2284,11 +2397,88 @@ mod remote_hook_tests {
     fn session_start_only_reports_the_session() {
         let sb = Sandbox::new(true);
         sb.run(&["claude", &sb.bot, "tok"], r#"{"hook_event_name":"SessionStart","session_id":"s-2"}"#);
-        let calls = sb.calls();
+        let calls = sb.wait_calls(1);
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert!(calls[0].contains("pane report-agent-session p1 "), "{calls:?}");
         assert!(!calls[0].contains("--state"), "a session start says nothing about the state: {calls:?}");
         assert_eq!(sb.read("hook-spool.jsonl").lines().count(), 1);
+    }
+
+    #[test]
+    fn remote_event_hints_ignore_nested_fields_and_tolerate_missing_metadata() {
+        let sb = Sandbox::new(true);
+        // Before top-level JSON parsing, the nested event name incorrectly triggered an idle report.
+        sb.run(
+            &["claude", &sb.bot, "tok"],
+            r#"{"metadata":{"hook_event_name":"Stop","session_id":"nested"},"hook_event_name":"PostToolUse"}"#,
+        );
+        assert!(sb.calls().is_empty(), "nested data must not impersonate the event: {:?}", sb.calls());
+
+        // Malformed JSON whose prefix looks like Stop must be spooled safely without a false report.
+        sb.run(&["claude", &sb.bot, "tok"], r#"{"hook_event_name":"Stop""#);
+        assert!(sb.calls().is_empty(), "incomplete JSON is not a Stop event: {:?}", sb.calls());
+
+        // Provider JSON may contain legal leading whitespace; it must stay an object for classification.
+        sb.run(
+            &["claude", &sb.bot, "tok"],
+            " \n {\"hook_event_name\":\"SessionStart\",\"session_id\":\"s-start\"} \n",
+        );
+        let calls = sb.wait_calls(1);
+        assert_eq!(calls.len(), 1, "leading whitespace must not turn an object into raw text: {calls:?}");
+        assert!(calls[0].contains("pane report-agent-session p1 ") && calls[0].contains("--agent-session-id s-start"), "{calls:?}");
+
+        // A valid Stop without optional session fields still reports idle and remains spoolable.
+        sb.run(&["claude", &sb.bot, "tok"], r#"{"hook_event_name":"Stop"}"#);
+        let calls = sb.wait_calls(2);
+        assert_eq!(calls.len(), 2, "missing optional fields must not break event handling: {calls:?}");
+        assert!(calls[1].contains("--state idle "), "{calls:?}");
+        assert!(!calls[1].contains("--agent-session-id"), "missing session id stays absent: {calls:?}");
+        let text = sb.read("hook-spool.jsonl");
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 4);
+        for line in lines {
+            let _: crate::hookrecv::HookBody = serde_json::from_str(line).unwrap_or_else(|e| panic!("spool event remains valid JSON ({e}): {line}"));
+        }
+    }
+
+    #[test]
+    fn remote_hook_repairs_invalid_utf8_before_spooling_json() {
+        let sb = Sandbox::new(false);
+        let mut payload = br#"{"hook_event_name":"PostToolUse","bad":"before"#.to_vec();
+        payload.push(0xff);
+        payload.extend_from_slice(br#"after"}"#);
+        let (_, ok) = sb.run_with_env_bytes(&["claude", &sb.bot, "-"], &payload, &[]);
+        assert!(ok);
+        let text = sb.read("hook-spool.jsonl");
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let body: crate::hookrecv::HookBody = serde_json::from_str(lines[0]).expect("invalid input bytes must become valid JSON");
+        assert_eq!(body.payload["bad"], "before\u{fffd}after");
+        assert!(!body.truncated, "UTF-8 repair is separate from payload-size truncation");
+    }
+
+    #[test]
+    fn remote_hook_preserves_escaped_surrogate_pairs_and_repairs_lone_surrogates() {
+        let sb = Sandbox::new(false);
+        let payload = r#"{"hook_event_name":"PostToolUse","pair":"\ud83d\ude00","lone":"\ud83d"}"#;
+        let (_, ok) = sb.run(&["claude", &sb.bot, "-"], payload);
+        assert!(ok);
+        let text = sb.read("hook-spool.jsonl");
+        let line = text.lines().next().expect("one spool line");
+        let body: crate::hookrecv::HookBody = serde_json::from_str(line).expect("surrogates must not invalidate spool JSON");
+        assert_eq!(body.payload["pair"], "😀", "a valid escaped pair is one Unicode scalar");
+        assert_eq!(body.payload["lone"], "\u{fffd}", "a lone surrogate is replaced");
+    }
+
+    #[test]
+    fn empty_remote_payload_is_spooled_as_json_null() {
+        let sb = Sandbox::new(false);
+        let (_, ok) = sb.run(&["claude", &sb.bot, "-"], "");
+        assert!(ok);
+        let text = sb.read("hook-spool.jsonl");
+        let line = text.lines().next().expect("empty payload still leaves a spool event");
+        let body: crate::hookrecv::HookBody = serde_json::from_str(line).expect("spool line remains valid JSON");
+        assert!(body.payload.is_null(), "{body:?}");
     }
 
     #[test]
