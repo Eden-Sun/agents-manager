@@ -60,6 +60,7 @@ import { prependDraft, queuedSendFor } from './queuedSend'
 import { noteQueuedTurn, startingSend, startingSendLabel } from './startingSend'
 import { asUncommittedSend, noteInFlightTurn, uncommittedSendText } from './uncommittedSend'
 import { suggestionFailureText } from './promptSuggestion'
+import { dismissKey, pruneDismissed, type PendingLogin } from '../lib/loginPrompt'
 import { sendNowFellThrough } from './sendNowOutcome'
 import { sendNowNotice } from './sendNowCopy'
 import { missionRequests } from './missionRequests'
@@ -547,6 +548,13 @@ export interface StoreState {
   /** 409 `composer_busy` 帶回來的框內草稿，輸入列旁邊顯示到使用者處理或取消（`store/composerDraft.ts`）。 */
   composerDrafts: Record<string, ComposerDraftBlock>
   dismissComposerDraft: (botId: string) => void
+  /**
+   * 「被登出」提示關掉過的記錄：`host/identity` → 那一次登出的識別（`lib/loginPrompt`）。只存這一頁的記憶體：
+   * 關掉是「這個畫面先別吵我」，不是跨裝置的事實；重整或換一台裝置會再看到（身分真的還登出著的話）。不用 localStorage、也不存 daemon。
+   */
+  loginPromptDismissed: Record<string, string>
+  dismissLoginPrompt: (host: string, identity: string, episode: string) => void
+  pruneLoginPromptDismissed: (pending: PendingLogin[]) => void
   /** 一鍵送出 claude 的建議下一句（`run.prompt_suggestion`）：daemon 對 pane 送 Tab 再送 Enter，跟終端一模一樣。`true`＝送出了；失敗已跳通知。 */
   acceptSuggestion: (botId: string) => Promise<boolean>
   sendKeys: (botId: string, keys: string[]) => Promise<void>
@@ -922,6 +930,7 @@ export const useStore = create<StoreState>((set, get) => {
   hiddenBotIds: [],
   liveReply: {},
   composerDrafts: {},
+  loginPromptDismissed: {},
 
   selectedProjectId: initialSelection.projectId,
   groupMessages: {},
@@ -1729,6 +1738,15 @@ export const useStore = create<StoreState>((set, get) => {
 
   dismissComposerDraft(botId) {
     set((s) => ({ composerDrafts: withoutKey(s.composerDrafts, botId) }))
+  },
+
+  dismissLoginPrompt(host, identity, episode) {
+    set((s) => ({ loginPromptDismissed: { ...s.loginPromptDismissed, [dismissKey(host, identity)]: episode } }))
+  },
+
+  pruneLoginPromptDismissed(pending) {
+    const next = pruneDismissed(get().loginPromptDismissed, pending)
+    if (next !== get().loginPromptDismissed) set({ loginPromptDismissed: next })
   },
 
   async acceptSuggestion(botId) {

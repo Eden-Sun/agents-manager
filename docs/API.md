@@ -1605,6 +1605,9 @@ env 值的 `$HOME`、`${HOME}` 與開頭 `~` 展開成**該 host 的 home**。id
 
 - 頂層 `identities` 是 config.toml 那一份（沒設定 `[]`）；`hosts[].shell_identities` 是那台登入 shell alias 認出的 `cc0`…`cc6`（env 為字面值、`args` 永遠 `[]`）。
 - `hosts[].identities.<name>`：`logged_in` 為 `true`/`false`/`null`（`null` = 未知，帶 `reason`）；`source` 為 `config`（可編輯）或 `shell`（唯讀）；`config_dir` 用那台 home 展開，預設帳號沒有。
+  **`login_needed`**（#838 補充，2026-10-04，沒有就不帶）：`{"since": ISO, "via": "turn_auth_failure"}`＝daemon 記下「這個身分要重新登入」——綁著它的 claude bot 的回合因授權失敗收尾（hook `StopFailure` 分類成 Auth，或 `Stop` 的最後一句整則只剩 `Not logged in · Please run /login`）。
+  **遠端 claude 的探測一律問不出「未登入」**（ssh 沒有 GUI session、讀不到 Keychain，探測的 false 被丟掉），所以這是 m4p 之類遠端主機被登出時唯一的訊號；本機也靠它抓到「探測說已登入、API 卻 401」的過期憑證。標記時 daemon 立刻重探該身分並推 `host_changed`（`GET /api/state`、`host_changed`、`POST …/tools/refresh` 都帶）。
+  `since` 是這一次的識別（同一次不會變；清掉後再發生是新的一次），網頁拿它判斷「關掉過的是同一次」。清掉的時機：該身分被探測成已登入（從非已登入變過來）、登入 watcher 收尾時重驗已登入、登入協助貼完 code 且 CLI 沒報失敗（`finished`）、綁著它的 bot 又正常答完一回合。沒綁身分的 bot 不處理；記憶體帳，daemon 重啟後由探測與下一次授權失敗補回。
 - 同名時的優先序（`tools::merge_identities`）：明寫這一台的 config → 本機才有：沒寫 host 的 config → 那台的 shell `ccN` → 遠端才有：沒寫 host 的 config（名字是 `ccN` 時等那台偵測過才給）。identity 存在性在**該 bot／專案的 host 上**檢查，找不到 → `404 {"what":"identity"}`。
 - 每個 bot 都有 `identity`（`string|null`）與 `env`（預設 `{}`）。
 - **身分有 kind，bot 只能帶同 kind 的身分**（2026-09-14 使用者指正：`cc0`／`cc1`／`cc2` 是 Claude Code 的帳號代號，跟

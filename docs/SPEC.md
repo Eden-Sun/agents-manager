@@ -3610,6 +3610,12 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 claude 用子命令而不是 `claude /login`：後者起一整個 REPL、登完也不退出，下面的「CLI 結束」永遠等不到，pane 要到 15 分鐘上限才收。
 pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內容不進 daemon log 或 WS 事件。CLI 結束（成功或失敗）後重新探測該身份再關 pane；建立或登入失敗走同一條清理路徑。
 
+**被登出時主動提示**（#838 補充，使用者 2026-10-04：「應該要偵測到有被登出就提示我登入，而不是去身份裡面點」；`login_prompt.rs`、網頁 `lib/loginPrompt.ts`）：網頁在主畫面最上面放一條「cc1（m4p）已登出 → 立即登入」，來源有兩個——
+① 身分探測（`identities[].logged_in === false`，host 快照原本就有，網頁自己看）；② daemon 記的 `login_needed`：綁著身分的 claude bot 回合授權失敗（hook `StopFailure` 分類成 `FailureReason::Auth`，或 `Stop` 的最後一句整則只剩 `Not logged in · Please run /login`，引用那句話的回報不算）。
+**② 是遠端 claude 唯一的來源**：遠端 claude 的探測問不出「未登入」（`tools::login_answer_to_cache` 刻意丟掉 false），m4p 的 cc1 被登出時只有回合會說。標記時立刻 `recheck_identity_login` 重探該身分（不等探測週期）並推 `host_changed`；記憶體帳 `App.login_needed`，`(host, identity) → {since, via}`，隨 `hosts[].identities.<name>.login_needed` 出去（API.md §8）。
+只提示**有 bot 綁著它**（同一台主機）、claude、而且那台主機連得上的身分；沒綁身分的 bot（用預設帳號）沒有「哪個身分」可講，不處理。清掉的時機：探測把它從非已登入變成已登入、登入 watcher 收尾重驗已登入、登入協助貼完 code 且 CLI 沒報失敗、綁著它的 bot 又正常答完一回合。
+「立即登入」＝`loginIdentity`（打開上面的登入協助面板）。「先關掉」只存**這一頁的記憶體**（不存 daemon、不用 localStorage——關掉是「這個畫面先別吵我」，不是跨裝置的事實；兩台裝置各自關各自的），以 `since`（探測來源用固定字 `probe`）比對「同一次登出」：同一次不重複洗版，登入成功後記錄清掉，下一次被登出（或新的一次授權失敗）會再提示。沒有新增 API 路由。
+
 **手機版登入協助**（#838，使用者 2026-10-04：「手機版重新登入已失效的 claude，應該要更容易地跳出登入網站、輸入 token，用 m4p 的 cc1 驗證」；`login_assist.rs`）：同一 `(host, identity)` 同時只開一條 Claude 登入流程；在記憶體先 reservation，pane 開好後轉成 `(host, pane_id) → identity`（連同 shell 的 `created_at`，pane id 被重用時對不上；pane 關閉或 host 改指時清）。重複請求在開 pane 前回 `409 identity_login_in_progress`。
 網頁用 `GET …/shells/{pane_id}/login` 取出從畫面讀到的 OAuth 網址（`recent_unwrapped`；只交 claude 的 https authorize 網址）與「是否正在等 code」，用 `POST …/login/code` 把 code 打進**那顆登入 pane** 並按 Enter。守衛：只服務登記過的登入 pane；送前現讀畫面，**最後一個非空行必須正好是 `Paste code here if prompted >`**
 （2.1.289 真畫面：CLI 收到錯 code 會在同一行接 `Login failed: Request failed with status code 400` 然後退出，所以提示後面有字＝不在等）、前景程序必須還是 `claude`，對不上 409 `not_awaiting_code`、一個字都不送；code 只收 OAuth code 的字元集。網址與 code 不進 log／事件（同上一段 pane 快照的規則）。

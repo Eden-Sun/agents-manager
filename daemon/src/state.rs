@@ -242,6 +242,8 @@ pub struct App {
     pub login_panes: crate::login_assist::Registry,
     /// 開啟 claude 身分登入 pane 的短期排他 reservation，完成註冊後轉成 `login_panes` entry。
     pub login_reservations: crate::login_assist::Reservations,
+    /// 回合授權失敗記下的「這個身分要重新登入」（`login_prompt.rs`）：`(host, identity)` → 帳。只在記憶體。
+    pub login_needed: crate::login_prompt::Registry,
     /// 被 trace 的 pane 打字前的即時複查結果，幾秒內重用（`shell::live_verdict`）。
     pub pane_live: crate::api::shell::LiveCache,
     /// 預覽（`preview.rs`）的行程／port 查詢，測試換成假貨；正式是 herdr＋本機 TCP。
@@ -383,6 +385,7 @@ impl App {
             host_shell_open_locks: Mutex::new(HashMap::new()),
             login_panes: Default::default(),
             login_reservations: Default::default(),
+            login_needed: Default::default(),
             #[cfg(test)]
             preview_env: Default::default(),
             pane_live: Default::default(),
@@ -764,7 +767,7 @@ pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) 
             // Absent, not null: a client treats a present-but-empty `tools` as "nothing installed".
             if let Some(d) = detected {
                 ev.insert("tools".into(), json!(d.tools));
-                ev.insert("identities".into(), json!(d.identities));
+                ev.insert("identities".into(), crate::login_prompt::identities_json(app, &conn.name, &d.identities));
                 ev.insert("shell_identities".into(), json!(d.shell_identities));
                 ev.insert("tools_checked_at".into(), json!(d.checked_at));
             }

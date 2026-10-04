@@ -314,3 +314,34 @@ async fn a_malformed_code_is_a_400_before_anything_is_read() {
     }
     assert!(f.typed().is_empty() && f.keys().is_empty());
 }
+
+/// 主動提示（`login_prompt`）：貼完 code、CLI 收下後結束（沒報失敗）→ 提示到此為止；`Login failed` 則照舊留著。
+#[tokio::test]
+async fn a_finished_login_clears_the_login_prompt_but_a_failed_one_keeps_it() {
+    for (screen_after, cleared) in [("user@host:~$ \n", true), (FAILED, false)] {
+        let f = login_pane(UNWRAPPED).await;
+        // 這台主機的身分表要有 cc9，快照才帶得出記號。
+        f.env.app.tools.lock().await.insert(
+            "local".into(),
+            crate::tools::HostTools {
+                tools: Default::default(),
+                identities: Default::default(),
+                shell_identities: vec![],
+                utc_offset_secs: None,
+                herdr_cli: None,
+                checked_at: crate::db::now(),
+            },
+        );
+        crate::login_prompt::mark(&f.env.app, "local", "cc9", crate::login_prompt::VIA_TURN);
+        let later = f.env.herdr.set_screen_later();
+        let pane = f.pane.clone();
+        let after = screen_after.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            later(&pane, &after);
+        });
+        let out = submit_code(&f.env.app, "local", &f.pane, "fake-code#1").await.unwrap();
+        assert_eq!(out["outcome"], if cleared { "finished" } else { "failed" });
+        assert_eq!(crate::login_prompt::get(&f.env.app, "local", "cc9").is_none(), cleared);
+    }
+}

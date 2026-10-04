@@ -1224,6 +1224,18 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         }
     }
 
+    // 登入失效的主動提示（#838，`login_prompt.rs`）：沒登入時回合只回 `Not logged in · Please run /login`（走 `Stop`，不是 `StopFailure`）
+    // ＝授權失敗；綁著身分的 bot 正常答完一回合＝那個身分是通的。
+    if provider == "claude" && admitted.is_some() {
+        if let HookKind::TurnComplete { assistant: Some(a), .. } = &kind {
+            if crate::login_prompt::is_not_logged_in_line(a) {
+                crate::login_prompt::on_auth_failure(app, &bot).await;
+            } else if !a.trim().is_empty() {
+                crate::login_prompt::on_turn_ok(app, &bot).await;
+            }
+        }
+    }
+
     // Codex's usage-reset hint is a TUI row, not in the payload; give the pane a moment to render it.
     if provider == "codex" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {
@@ -1260,6 +1272,10 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 lifecycle::settle_interruption(app, &bot.id, lifecycle::InterruptEvidence::Echo).await?;
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 是使用者中斷的回聲：不算失敗");
                 return Ok(());
+            }
+            // 登入失效：記下這個身分要重新登入、立刻重探它（網頁會跳提示，`login_prompt.rs`）。同一則重送只記一次。
+            if reason == FailureReason::Auth && provider == "claude" && admitted.is_some() {
+                crate::login_prompt::on_auth_failure(app, &bot).await;
             }
             // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
             let seen = match (&session_id, &turn_id) {
