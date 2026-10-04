@@ -2524,7 +2524,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 換 binary → 在維護窗口（§6.5.2）裡重啟這顆 daemon 的 herdr server → 頂層 bot `resume_native` 接回。**只做 local**；遠端（尤其 `shared_session`，
 別顆 daemon 也在用那台的 herdr）一律 409。同一顆 daemon 同時只跑一個，進行中的狀態只在記憶體（`GET /api/state` 的 `herdr_updates`）。**跟 CLI 安裝（cli-update，API §12.7a）互斥**：同一台有 `running` 的 cli-update 列就 409 `cli_update_in_progress`；herdr 更新在跑時 `POST /hosts/local/cli-update` 回 409 `herdr_update_in_progress`（兩邊都是先佔自己的位、再看對方，同時開的最壞結果是互相退讓）。更新後不需要另外重寫 shim：shim 內容來自 daemon binary（開機與遠端連線時 `shim_refresh`），binary 路徑不變，接回的 bot 啟動時也會重裝自己的 shim。
 
-1. `downloading`：先做重啟前的檢查（Linux `systemctl --user is-active herdr@<session>.service` 要是 active、macOS `launchctl print` 要有 job；server 不是它們在管的，`restart` 會另外起一顆搶 socket，
+1. `downloading`：先做重啟前的檢查（Linux `systemctl --user is-active herdr@<session>.service` 要是 active、macOS `launchctl print` 要有 job，而且 `program` 必須解析到即將替換的 binary；server 不是它們在管的，`restart` 會另外起一顆搶 socket，或 job 會重啟另一份 binary，
    不通就 `restart_unsupported`，連下載都不做）。release asset（`herdr-{linux,macos}-{x86_64,aarch64}`，curl 只准 https、含導向）下載到 `<data_dir>/herdr-staging/<ver>/herdr`，**先驗 sha256**（GitHub release API `assets[].digest`；herdr 沒另外發 checksum 檔；
    對不上或查不到公布值＝`checksum_mismatch`，檔案刪掉、**沒有執行它**），再 `--version` 必須等於目標，否則 `version_mismatch`，現行 binary 不動。現行 binary 只認 herdr 安裝器那種一般檔案（`~/.local/bin/herdr` 優先）；symlink（套件管理器裝的）不自動換，`install_path_unsupported`。
 2. `waiting_idle`：頂層 bot 沒有 `working`／`blocked`／回合在飛才往下（子 agent 反正會沒，不等），最多 30 分鐘；逾時 `busy_timeout`，窗口都沒開、什麼都沒動。
