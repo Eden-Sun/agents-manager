@@ -75,27 +75,6 @@
   font-size: 12px;
 }
 
-/* 電腦版晶片列尾端的「?」。 */
-.chip-legend-btn {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 1px solid var(--border-strong);
-  border-radius: 50%;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 18px;
-  cursor: pointer;
-}
-
-.chip-legend-btn:hover {
-  color: var(--text);
-  border-color: var(--text-dim);
-}
-
 @media (max-width: 720px) {
   .chip-legend-backdrop {
     align-items: end;
@@ -108,15 +87,59 @@
   }
 }
 
-/* 電腦版 hover：不蓋暗底、不攔滑鼠（滑鼠移開「?」就收），卡片靠右上、在晶片列下方。 */
-.chip-legend-backdrop.hover {
-  display: block;
-  background: none;
+/* 主力 bot 狀態卡（2026-10-04 使用者：hover／長按主力 bot 說明它現在的狀態）。 */
+.bot-status-float {
+  position: fixed;
+  z-index: 60;
+  width: 320px;
   pointer-events: none;
 }
 
-.chip-legend-backdrop.hover .chip-legend {
-  position: fixed;
-  top: 96px;
-  right: 16px;
+.bot-status-float .chip-legend {
+  width: 100%;
+}
+
+.bot-status-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bot-status-headline {
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+
+.bot-status-rows {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  margin: 0;
+}
+
+.bot-status-rows dt {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.bot-status-rows dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.bot-status-legend {
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-ink);
+  font-size: 12px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+/* 浮卡不吃滑鼠（移開晶片就收）：裡面的「顏色代表什麼」在電腦上不顯示，手機底部卡才有。 */
+.bot-status-float .bot-status-legend {
+  display: none;
 }

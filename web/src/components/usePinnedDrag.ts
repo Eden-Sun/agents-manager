@@ -45,7 +45,7 @@ export function usePinnedDrag(
   names: Record<string, string>,
   commit: (order: string[]) => void,
   /** 觸控長按後沒移動就放開（2026-10-04 使用者：「主力長按說明顏色意義」）；拖曳照舊是長按後移動。 */
-  onHold?: () => void,
+  onHold?: (id: string) => void,
 ): PinnedDnd {
   const [drag, setDrag] = useState<{ id: string; before: string | null; ready: boolean; dx: number; dy: number; shift: string[]; after: string | null; gap: number } | null>(null)
   // 上一個鎖定的落點（遲滯）。
@@ -127,7 +127,7 @@ export function usePinnedDrag(
         setTimeout(() => {
           suppress.current = false
         }, 0)
-        latest.current.onHold?.()
+        latest.current.onHold?.(id)
         return
       }
       const picked = pickSlot(boxesOf(chip), ev.clientX, ev.clientY, id, held.current.before).before

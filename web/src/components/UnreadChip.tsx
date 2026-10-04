@@ -28,6 +28,7 @@ import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
 import { cacheState, type CacheState } from '../lib/cacheClock'
 import { useCacheTick } from '../hooks/useCacheTick'
 import { ChipLegend } from './ChipLegend'
+import { BotStatusCard, type ChipHints } from './BotStatusCard'
 import './unreadChip.css'
 import './cacheClock.css'
 
@@ -90,7 +91,17 @@ function ChipLamp({ id }: { id: string }) {
   return LAMP_SHOWN.has(lamp) || background > 0 ? <StatusLamp lamp={lamp} background={background} /> : null
 }
 
-function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean }) {
+/** 有滑鼠可以 hover 的裝置（手機的 tap 也會觸發 mouseenter，不能拿來開浮卡）。 */
+const canHover = () => typeof window !== 'undefined' && window.matchMedia?.('(hover: hover)').matches === true
+/** 滑鼠停多久才開狀態卡：掃過晶片列不該每顆都閃一下。 */
+const PEEK_DELAY_MS = 400
+
+function chipHints(it: ChipItem): ChipHints {
+  return { current: it.current, unread: it.unread, needsReply: it.needsReply, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.cache?.title ?? null }
+}
+
+function Chip({ it, dnd, lamp, onPeek }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean; /** 主力晶片：hover 開狀態卡（`null`＝收起）。 */ onPeek?: (id: string | null, at?: DOMRect) => void }) {
+  const peekTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const drag = it.pinned ? dnd : undefined
   const dragging = drag?.dragId != null && drag.dragId !== it.id
   const shifted = dragging && drag.shifted.includes(it.id)
@@ -103,7 +114,26 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
     <button
       type="button"
       className={`${chipClass(it)}${cache ? ` cache-${cache.level}` : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
-      title={it.cache ? `${it.title}\n${it.cache.title}` : it.title}
+      // 主力晶片在能 hover 的裝置上改用狀態卡，不再疊一個瀏覽器原生 tooltip。
+      title={onPeek && canHover() ? undefined : it.cache ? `${it.title}\n${it.cache.title}` : it.title}
+      onMouseEnter={
+        onPeek
+          ? (e) => {
+              if (!canHover()) return
+              const el = e.currentTarget
+              peekTimer.current = setTimeout(() => onPeek(it.id, el.getBoundingClientRect()), PEEK_DELAY_MS)
+            }
+          : undefined
+      }
+      onMouseLeave={
+        onPeek
+          ? () => {
+              if (peekTimer.current) clearTimeout(peekTimer.current)
+              peekTimer.current = null
+              onPeek(null)
+            }
+          : undefined
+      }
       data-bot-id={it.pinned ? it.id : undefined}
       style={
         drag?.dragId === it.id
@@ -258,7 +288,24 @@ export function UnreadChip() {
   const visiblePinned = useMemo(() => shownPinned.map((it) => it.id), [shownPinned])
   const names = useMemo(() => Object.fromEntries(pinnedItems.map((it) => [it.id, it.name])), [pinnedItems])
   const [legend, setLegend] = useState(false)
-  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary, () => setLegend(true))
+  // 主力 bot 狀態卡（2026-10-04 使用者）：電腦 hover（`at`＝晶片位置），手機長按不動放開（`at` 為 null，底部彈出）。
+  const [peek, setPeek] = useState<{ id: string; at: DOMRect | null } | null>(null)
+  const dnd = usePinnedDrag(fullPinned, visiblePinned, names, movePrimary, (id) => setPeek({ id, at: null }))
+  const onPeek = useCallback((id: string | null, at?: DOMRect) => setPeek(id ? { id, at: at ?? null } : null), [])
+  const peekItem = peek ? pinnedItems.find((it) => it.id === peek.id) ?? null : null
+  const peekCard =
+    peek && peekItem ? (
+      <BotStatusCard
+        botId={peek.id}
+        hints={chipHints(peekItem)}
+        anchor={peek.at}
+        onClose={() => setPeek(null)}
+        onLegend={() => {
+          setPeek(null)
+          setLegend(true)
+        }}
+      />
+    ) : null
   const ordered = useMemo(() => [...pinnedItems, ...otherItems], [pinnedItems, otherItems])
   const barRef = useRef<HTMLDivElement | null>(null)
   const [expanded, setExpanded] = useState(false)
@@ -286,6 +333,7 @@ export function UnreadChip() {
           resizable={!pinExpanded}
         />
         <ScrollRow items={otherItems} label="在跑或剛完成的 bot" selectedBotId={selectedBotId} />
+        {peekCard}
         {legend ? <ChipLegend onClose={() => setLegend(false)} /> : null}
       </>
     )
@@ -307,7 +355,7 @@ export function UnreadChip() {
               style={!expanded && clipPx[name] > 0 ? { maxHeight: clipPx[name], overflow: 'hidden' } : undefined}
             >
               {group.map((it) => (
-                <Chip key={it.id} it={it} dnd={pinned ? dnd : undefined} />
+                <Chip key={it.id} it={it} dnd={pinned ? dnd : undefined} onPeek={pinned ? onPeek : undefined} />
               ))}
               {pinned ? <span className="sr-only" aria-live="polite">{dnd.announce}</span> : null}
             </div>
@@ -326,19 +374,8 @@ export function UnreadChip() {
         </button>
       ) : null}
       {/* 電腦版：晶片列尾端一顆「?」開顏色說明（2026-10-04 使用者：電腦版你自己想）。 */}
-      {/* 電腦版：滑鼠停在「?」上就顯示（2026-10-04 使用者：「電腦就是 hover」）；鍵盤聚焦也開。 */}
-      <button
-        type="button"
-        className="chip-legend-btn"
-        aria-label="主力晶片的顏色說明"
-        onMouseEnter={() => setLegend(true)}
-        onMouseLeave={() => setLegend(false)}
-        onFocus={() => setLegend(true)}
-        onBlur={() => setLegend(false)}
-      >
-        ?
-      </button>
-      {legend ? <ChipLegend hover onClose={() => setLegend(false)} /> : null}
+      {peekCard}
+      {legend ? <ChipLegend onClose={() => setLegend(false)} /> : null}
     </div>
   )
 }
