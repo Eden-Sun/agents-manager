@@ -459,9 +459,14 @@ except Exception:
 l = d.get("lease") or {}
 a = d.get("approval") or {}
 aid = a.get("id") if isinstance(a, dict) else None
-print(l.get("held"), l.get("fence"), d.get("lease_token") or l.get("lease_token") or "-", aid if isinstance(aid, str) and aid and " " not in aid else "-")')
+s = d.get("safety") or {}
+s = s if isinstance(s, dict) else {}
+eap = s.get("escalation_approval_id")
+tok = lambda v: v if isinstance(v, str) and v and " " not in v else "-"
+print(l.get("held"), l.get("fence"), d.get("lease_token") or l.get("lease_token") or "-", tok(aid),
+      "yes" if s.get("escalated") is True else "no", tok(eap))')
     HELD=$(echo "$PARSED" | cut -d' ' -f1); FENCE=$(echo "$PARSED" | cut -d' ' -f2); TOKEN=$(echo "$PARSED" | cut -d' ' -f3)
-    WAP=$(echo "$PARSED" | cut -d' ' -f4)
+    WAP=$(echo "$PARSED" | cut -d' ' -f4); ACQ_ESC=$(echo "$PARSED" | cut -d' ' -f5); ACQ_ESC_AP=$(echo "$PARSED" | cut -d' ' -f6)
     [ "$HELD" = True ] && break
     WHY=$(printf '%s' "$OUT" | "$PYTHON" -c 'import json,sys
 try:
@@ -488,10 +493,27 @@ save_token "$TOKEN"
 [ "$WINDOW_MODE" = service ] && [ "${WAP:--}" != - ] && WINDOW_APPROVAL="$WAP"
 
 # 跟 acquire 同一套判斷：放寬生效（同一張核准等滿門檻，或使用者按了「現在換版」）時 working 不擋，
-# 送達臨界區、別人的租約、讀不到狀態照擋——這些都由 daemon 的 safety 決定，這裡不自己重算。
-SAFE=$(lease_safety | "$PYTHON" -c 'import json,sys
+# 送達臨界區、別人的租約、讀不到狀態照擋。
+#
+# 放寬沿用 acquire 的結論（issue #840 第二輪，2026-10-04 08:02／08:07／08:12 實測）：線上還是舊 daemon 時，它的放寬
+# 只認「還在等」——窗口一拿到（Swapping）使用者的「現在換版」就不算了；每輪 3a ABORT 交還窗口又把核准消耗掉，等待計時
+# 每輪重來（acquire 的 waited 永遠是 15 秒）。修好的 daemon 要先換上去才生效，等於永遠換不上。所以：
+# daemon 在鎖內給這張窗口時已經判定放寬（回應的 `safety.escalated`，而且計時綁的就是開窗口的那張核准），放寬在同一次部署裡
+# 只會增加、不會收回——複查只再確認放寬後**仍然要擋**的三樣：送達臨界區、別人的租約、讀不到狀態的 bot。這三樣舊 daemon 都有回。
+# 任何一個欄位缺了就不沿用（fail closed）。
+SAFE=$(lease_safety | ACQ_ESC="$ACQ_ESC" ACQ_ESC_AP="${ACQ_ESC_AP:--}" ACQ_AP="${WAP:--}" "$PYTHON" -c 'import json,os,sys
 d = json.load(sys.stdin)
-print(d.get("safe"), [w.get("name") for w in d.get("working") or []], d.get("delivering"), "escalated=%s" % d.get("escalated"))')
+safe = d.get("safe") is True
+esc = d.get("escalated")
+carried = ""
+if not safe and os.environ.get("ACQ_ESC") == "yes" and os.environ.get("ACQ_AP", "-") != "-" \
+        and os.environ.get("ACQ_ESC_AP") == os.environ.get("ACQ_AP"):
+    fields = ("delivering", "unreadable", "held_leases")
+    if all(isinstance(d.get(k), list) for k in fields):
+        others = [l for l in d["held_leases"] if not (isinstance(l, dict) and l.get("own") is True)]
+        if not d["delivering"] and not d["unreadable"] and not others:
+            safe, carried = True, " (沿用 acquire 的放寬)"
+print(safe, [w.get("name") for w in d.get("working") or []], d.get("delivering"), "escalated=%s%s" % (esc, carried))')
 log "3a recheck: $SAFE"
 case "$SAFE" in
     True*) ;;

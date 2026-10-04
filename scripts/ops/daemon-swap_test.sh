@@ -132,6 +132,8 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_WINDOW_APPROVAL=ap-auto-1
   # 設了就改用 daemon 的判斷模擬 3a 複查：這顆 bot working／送達中，`STUB_ESCALATED_APPROVAL` 那一張核准已放寬。
   export STUB_RECHECK_WORKING="" STUB_RECHECK_DELIVERING="" STUB_ESCALATED_APPROVAL=""
+  # 舊 daemon 的形狀：acquire 回應說放寬了（這張核准），複查的 safety 卻說 escalated=false（Swapping 後放寬不算）。
+  export STUB_WINDOW_ESCALATED_BY="" STUB_RECHECK_UNREADABLE="" STUB_RECHECK_OTHER_LEASE="" STUB_RECHECK_NO_FIELDS=""
   unset STUB_SUPERVISOR_BEFORE
   export STUB_RELEASE_FAIL=""       # 設了：lease release 回 409（模擬 fence 過期／token 對不上）
   export STUB_NAMES_BEFORE='["a","b"]' STUB_NAMES_AFTER='["a","b"]'
@@ -167,9 +169,16 @@ case "$sub:$op" in
                    esc=false; [ -n "$ap" ] && [ "$ap" = "${STUB_ESCALATED_APPROVAL:-}" ] && esc=true
                    wk=""; [ -n "${STUB_RECHECK_WORKING:-}" ] && wk="{\"bot_id\":\"id-$STUB_RECHECK_WORKING\",\"name\":\"$STUB_RECHECK_WORKING\"}"
                    dl=""; [ -n "${STUB_RECHECK_DELIVERING:-}" ] && dl="{\"bot_id\":\"id-$STUB_RECHECK_DELIVERING\",\"name\":\"$STUB_RECHECK_DELIVERING\",\"turn_id\":\"t-9\"}"
+                   ur=""; [ -n "${STUB_RECHECK_UNREADABLE:-}" ] && ur="{\"bot_id\":\"id-$STUB_RECHECK_UNREADABLE\",\"name\":\"$STUB_RECHECK_UNREADABLE\"}"
+                   hl='{"resource":"restart","owner":"bot-me","own":true,"fence":9}'
+                   [ -n "${STUB_RECHECK_OTHER_LEASE:-}" ] && hl="$hl,{\"resource\":\"rebuild\",\"owner\":\"$STUB_RECHECK_OTHER_LEASE\",\"own\":false,\"fence\":3}"
                    safe=false
-                   if [ -z "$dl" ] && { [ -z "$wk" ] || [ "$esc" = true ]; }; then safe=true; fi
-                   printf '{"safe":%s,"escalated":%s,"working":[%s],"delivering":[%s],"in_flight":[%s]}' "$safe" "$esc" "$wk" "$dl" "$fl"
+                   if [ -z "$dl" ] && [ -z "$ur" ] && [ -z "${STUB_RECHECK_OTHER_LEASE:-}" ] && { [ -z "$wk" ] || [ "$esc" = true ]; }; then safe=true; fi
+                   if [ -n "${STUB_RECHECK_NO_FIELDS:-}" ]; then
+                     printf '{"safe":%s,"escalated":%s,"working":[%s],"delivering":[%s],"in_flight":[%s]}' "$safe" "$esc" "$wk" "$dl" "$fl"
+                   else
+                     printf '{"safe":%s,"escalated":%s,"working":[%s],"delivering":[%s],"unreadable":[%s],"held_leases":[%s],"in_flight":[%s]}' "$safe" "$esc" "$wk" "$dl" "$ur" "$hl" "$fl"
+                   fi
                  else
                    printf '{"safe":%s,"working":[],"delivering":[],"in_flight":[%s]}' "$STUB_SAFE" "$fl"
                  fi ;;
@@ -236,7 +245,11 @@ if [ -n "${STUB_SWAP_BINARY_ON_ACQUIRE:-}" ] && [ ! -e "$AGM_DIR/changed-live" ]
   printf 'newer-live-binary\n' > "$AGM_REPO/target/release/agents-managerd"
   : > "$AGM_DIR/changed-live"
 fi
-if [ -n "${STUB_WINDOW_APPROVAL:-}" ]; then
+if [ -n "${STUB_WINDOW_ESCALATED_BY:-}" ]; then
+  # acquire 在鎖內判定放寬時，回應的 safety 帶 escalated 與計時用的那張核准（舊 daemon 97803818 起就有）。
+  printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1","approval":{"id":"%s"},"safety":{"safe":true,"escalated":true,"escalation_approval_id":"%s"}}' \
+    "$STUB_ACQUIRE_HELD" "$STUB_WINDOW_APPROVAL" "$STUB_WINDOW_ESCALATED_BY"
+elif [ -n "${STUB_WINDOW_APPROVAL:-}" ]; then
   printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1","approval":{"id":"%s"}}' "$STUB_ACQUIRE_HELD" "$STUB_WINDOW_APPROVAL"
 else
   printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1"}' "$STUB_ACQUIRE_HELD"
@@ -897,6 +910,47 @@ setup 10 10
 export STUB_RECHECK_WORKING=busy-bot STUB_ESCALATED_APPROVAL=ap-other
 rc=$(run)
 check_eq "放寬的是別張核准：不替這張開門（rc=4）" "4" "$rc"
+teardown
+
+# 16c3. issue #840 第二輪（2026-10-04 08:02／08:07／08:12）：線上是舊 daemon，acquire 已在鎖內判定放寬（使用者按了「現在換版」），
+# 複查的 safety 卻回 escalated=false（舊 daemon 拿到窗口後放寬就不算了）。修好的 daemon 換不上去就永遠生效不了，所以腳本沿用 acquire 的放寬。
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot STUB_WINDOW_ESCALATED_BY=ap-auto-1
+rc=$(run)
+check_eq "舊 daemon：acquire 已放寬、複查說沒放寬，有 working 仍能換版（rc=0）" "0" "$rc"
+check "log 寫明沿用 acquire 的放寬" "3a recheck: True \['busy-bot'\] \[\] escalated=False (沿用 acquire 的放寬)" "$SWAP_LOG"
+check "沿用放寬後真的換了 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot STUB_WINDOW_ESCALATED_BY=ap-auto-1 STUB_RECHECK_DELIVERING=typing-bot
+rc=$(run)
+check_eq "沿用放寬時送達臨界區照擋（rc=4）" "4" "$rc"
+check_no "送達中不換 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot STUB_WINDOW_ESCALATED_BY=ap-auto-1 STUB_RECHECK_OTHER_LEASE=someone-else
+rc=$(run)
+check_eq "沿用放寬時別人的租約照擋（rc=4）" "4" "$rc"
+teardown
+
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot STUB_WINDOW_ESCALATED_BY=ap-auto-1 STUB_RECHECK_UNREADABLE=ghost
+rc=$(run)
+check_eq "沿用放寬時讀不到狀態照擋（rc=4）" "4" "$rc"
+teardown
+
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot STUB_WINDOW_ESCALATED_BY=ap-other
+rc=$(run)
+check_eq "acquire 的放寬計時綁的不是開窗口那張：不沿用（rc=4）" "4" "$rc"
+teardown
+
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot STUB_WINDOW_ESCALATED_BY=ap-auto-1 STUB_RECHECK_NO_FIELDS=1
+rc=$(run)
+check_eq "複查缺 unreadable／held_leases 欄位：不沿用（fail closed，rc=4）" "4" "$rc"
 teardown
 
 setup 10 10
