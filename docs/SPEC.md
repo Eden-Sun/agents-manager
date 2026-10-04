@@ -59,7 +59,7 @@ herdr 0.9.2 起（上游 #4507），codex 畫面沒有任何偵測規則對上�
 側欄 bot 列可由列本身取得焦點後按 Enter／Space 選取；列內選單與按鈕保留各自的鍵盤操作。確認框由 portal 顯示時，其點擊不切換目前 bot；點列內一般內容仍可選取 bot。
 
 Bot 跨裝置已讀位置以訊息 `(created_at, seq)` 比較；同一時間戳下依 daemon rowid 插入序判斷，避免 ULID 同毫秒隨機段造成未讀數和畫面順序不同。非空 `message_id` 必須屬於目標 bot 對話或群組專案，且 `at` 必須對應該訊息時間；標記訊息已刪時保留時間與 id 供舊標記相容。
-`GET /api/state` 對 Bot principal 只列自己與後代 child，並移除 persona、args、identity、env、herdr session、未讀數與 read marks；若 caller 是 child，state 不揭露 tree 以外 parent 的 bot id。UI User principal 維持完整快照。
+`GET /api/state` 對 Bot principal 只列自己與後代 child，並移除 persona、args、identity、env、herdr session、未讀數、read marks，以及含全域部署阻擋者的 `deploy_wait`；若 caller 是 child，state 不揭露 tree 以外 parent 的 bot id。UI User principal 維持完整快照。
 
 **「跑了多久」的起點（issue #93）**：`runs.agent_status_since`，`agent_status` 真的改變時由 DB trigger
 （`runs_agent_status_since`）蓋成當下時間，同值重寫（同一行 pane 狀態重複出現）不算改變。取捨：

@@ -83,7 +83,7 @@ Service token 由 daemon 在資料目錄建立於 `service-tokens/`（目錄 `07
 | `/api/missions/{id}` 與 `/api/missions/{id}/…` | GET／POST | 只限任務管理或授權任務 | 本 bot／後代 child 所屬專案、派給本 bot／後代 child 的任務，或明確登記的 AGM 角色 bot；其他一般 bot 回 403。 |
 | `/api/search/messages`、敏感的 `/api/supervisor…` GET | GET | User／AGM 角色 | 這些跨 bot 或內含管理狀態的讀取只限 User 與已登記 AGM 角色；一般 Bot 回 403 `role_required`，Service 仍受明列 path scope 限制。 |
 | `/api/supervisor/assignments/{id}`、`/review` | GET；POST | 只限授權交辦 | 一般 Bot 的 GET 由 AGM gate 拒絕；User 與已登記 AGM 角色可讀。`/review` 仍需既有 AGM 角色閘。 |
-| `/api/state` | GET | User 或 Bot principal | User 取得完整狀態；Bot 只取得自己與 descendants 所在的 projects/bots，並移除全域 hosts／identities／updates／default session 資訊及 Bot 設定秘密、已讀狀態。 |
+| `/api/state` | GET | User 或 Bot principal | User 取得完整狀態；Bot 只取得自己與 descendants 所在的 projects/bots，並移除全域 hosts／identities／updates／deploy wait／default session 資訊及 Bot 設定秘密、已讀狀態。 |
 | `/api/bots/deleted`、`/api/drafts[/{key}]`、read-mark、memory/process、`/api/intents`、`/api/build-slots` | GET／PUT／POST | 僅 User | 跨 bot／主機診斷、recovery journal、build 佇列、草稿、read marks 與 pane preview 是 UI 狀態；Bot（含 AGM 角色）一律 `403 user_only`。 |
 | `/api/attachments/{id}`、bot attachments/local-image/outbox、bot keys/text、pane inventory/actions、host shells | 該路由註冊的方法 | 僅 User | 使用者檔案、終端輸入與人用 pane 資料不授權給 Bot token；Bot（含 AGM 角色）一律 `403 user_only`。 |
 | API.md 其餘標 User-only 的管理操作 | 該路由註冊的方法 | 一般 Bot 不允許 | 中央 Bot route policy 回 `403 user_only`；只有標明 User-only even for AGM 的路徑會連 AGM 角色一併拒絕。 |

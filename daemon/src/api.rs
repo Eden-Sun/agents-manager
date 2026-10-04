@@ -10808,6 +10808,41 @@ mod per_principal_auth_tests {
         assert!(response.starts_with("HTTP/1.1 403") && response.contains("user_only"), "a Bot must not read the global deploy panel: {response}");
     }
 
+    #[tokio::test]
+    async fn a_bot_state_snapshot_does_not_expose_global_deploy_wait_details() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "deploy-wait-scope-bot").await;
+        *e.app.deploy_wait.lock().unwrap() = Some(crate::deploy_wait::Wait {
+            id: "private-wait-id".into(),
+            owner: "daemon-update-kick".into(),
+            approval_id: "private-approval-id".into(),
+            commit: "private-deploy-commit-sha".into(),
+            since: db::now(),
+            last_attempt_at: db::now(),
+            blockers: vec![crate::deploy_wait::Blocker {
+                bot_id: Some("private-blocker-bot-id".into()),
+                name: "private-blocker-bot-name".into(),
+                why: "working".into(),
+            }],
+            escalates_at: None,
+            user_escalated: false,
+            notified_at: Some(db::now()),
+            dismissed: false,
+            phase: crate::deploy_wait::Phase::Waiting,
+            rev: 1,
+            ended_at: None,
+        });
+
+        let bot_response = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &bot.hook_token)]).await;
+        assert!(bot_response.starts_with("HTTP/1.1 200"), "the Bot may still read its scoped state: {bot_response}");
+        for marker in ["private-wait-id", "private-deploy-commit-sha", "private-blocker-bot-id", "private-blocker-bot-name"] {
+            assert!(!bot_response.contains(marker), "global deployment detail leaked to Bot state: {marker}: {bot_response}");
+        }
+
+        let user_response = state(e.app.clone(), &[("X-AM-Token", &e.app.ui_token)]).await;
+        assert!(user_response.contains("private-blocker-bot-name"), "the UI user keeps the deployment wait details: {user_response}");
+    }
+
     /// #810 #811 #812：行程清單、recovery journal、build 佇列是 UI 診斷面。一般 bot 讀得到別顆 bot 的 argv、
     /// session／路徑，以及別人的 build holder。使用者仍看完整內容；pane 的 acquire 不在 `/api` 底下，維持原樣。
     #[tokio::test]

@@ -26,7 +26,7 @@ pub async fn view_for_bot(app: &Arc<App>, caller: &str) -> Result<Value, LcError
     let Some(object) = state.as_object_mut() else {
         return Err(LcError::Upstream("state snapshot is not an object".into()));
     };
-    for key in ["restart_batch", "cli_updates", "herdr_updates", "default_connected", "herdr_session", "hosts", "identities"] {
+    for key in ["restart_batch", "cli_updates", "herdr_updates", "deploy_wait", "default_connected", "herdr_session", "hosts", "identities"] {
         object.remove(key);
     }
 
