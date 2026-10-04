@@ -4517,12 +4517,13 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
             crate::quota::for_each_host(hosts, move |host| {
                 let app = app2.clone();
                 async move {
-                    let (codex, claude, grok) = tokio::join!(
+                    let (codex, claude, grok, agy) = tokio::join!(
                         crate::quota::refresh_codex(&app, &host),
                         crate::quota_claude::refresh_claude(&app, &host),
                         crate::quota_grok::refresh_grok(&app, &host),
+                        crate::quota_agy::refresh_agy(&app, &host),
                     );
-                    for (kind, res) in [("codex", codex), ("claude", claude), ("grok", grok)] {
+                    for (kind, res) in [("codex", codex), ("claude", claude), ("grok", grok), ("agy", agy)] {
                         if let Err(e) = res {
                             tracing::warn!(host = %host, kind, error = %e, "quota refresh failed");
                         }

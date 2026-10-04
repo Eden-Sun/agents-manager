@@ -3338,7 +3338,7 @@ poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label �
 ## 12a. agy 支援（Google Antigravity CLI，使用者 2026-10-04）
 
 `kind = "agy"`：Antigravity CLI（`~/.local/bin/agy`，Go 單一執行檔；Google 自 2026-06-18 起對個人用戶停了 Gemini CLI，改用它）。herdr 內建 `agy` agent manifest，`agent.start {kind: "agy"}` 可用，但那份偵測規則是舊版（附錄 G.6），所以 daemon 自己認會停下來等人的畫面（§12a.4）。
-**第一階段（MVP）**：建立／啟動／送 prompt／讀回覆／狀態判讀，**本機、單一身分**（用使用者預設 `$HOME` 的 `~/.gemini`，沒有 per-bot HOME、沒有身分切換）。登入是 Google OAuth，**由使用者自己在 agy TUI 裡登入一次**，AG Man 不代按登入、不代答條款頁。resume／fork／額度／自動更新／child agent／persona 屬第二階段（設計：`docs/design/agy-cli-support.md` §3.2），這幾條在 agy 上一律回 `unsupported_kind`（不 panic）。
+**第一階段（MVP）**：建立／啟動／送 prompt／讀回覆／狀態判讀，**本機、單一身分**（用使用者預設 `$HOME` 的 `~/.gemini`，沒有 per-bot HOME、沒有身分切換）。登入是 Google OAuth，**由使用者自己在 agy TUI 裡登入一次**，AG Man 不代按登入、不代答條款頁。resume／fork／自動更新／child agent／persona 屬第二階段（額度已做，§12a.7）（設計：`docs/design/agy-cli-support.md` §3.2），這幾條在 agy 上一律回 `unsupported_kind`（不 panic）。
 
 ### 12a.1 啟動
 | 項目 | 注入 |
@@ -3385,8 +3385,14 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 - **回覆**：`Stop` 的 `lastAssistantMessage`（§12a.2）。模型回覆是 transcript 裡 `source:"MODEL"`、`type:"PLANNER_RESPONSE"` 的步驟（真機實測，內容是字串；`NOTIFY_USER` 沒見過但一併收），取 `USER_INPUT` 之後最後一段；認不得就略過，回合照收但沒有回覆文字（log 看 `hook.log`）。真機實測（2026-10-04，agm-host，登入的 Google AI Plus 帳號，隔離 daemon＋獨立 herdr session）：PONG 一問一答 `delivery:"unverified"`（第一則）→ 同一個 run 的第二則 `delivery_verified=1`（`LogFormat::Agy` 證據）；要跑 `ls` 時權限框 → run `blocked`、`blocked_reason.code=agy_dialog`、再送字 409 `agent is blocked`，回答後回合照收。
 - `cache_clock::ttl_secs("agy") = None`（TUI 路徑沒有 cache 讀數，網頁不畫倒數）。
 
-### 12a.7 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
-resume（`--conversation=<uuid>`／`-c`）與 `bulk_restart`／`idle_sleep`、`/fork`、額度（statusLine `quota` 的每模型 bucket、每週窗）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、child agent（herdr shim `--kind agy`）、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
+### 12a.7 額度：`agy -p "/usage"`（`quota_agy.rs`）
+數字來自 `agy -p "/usage" --output-format json`——唯讀指令，**不開對話、不耗額度**，所以不開探測 pane（跟 grok 不同）：`d=$(mktemp -d); cd "$d"; AGY_CLI_DISABLE_AUTO_UPDATE=true <agy 路徑> -p /usage --output-format json </dev/null; rm -rf "$d"`，cwd 是拋棄式暫存目錄、不碰信任清單、40 秒逾時（`sh_local` 整個 process group 一起收）。本機直接跑，遠端經 `ssh_exec_path` 跑同一段；那台沒裝 agy（`tools` 偵測到的路徑為空）就不探測、不報錯。
+回應（真機 1.2.16）的 `response` 是 tab 分隔的列 `<桶名>\t<窗名>\t<剩餘%>\t<重置時間 RFC3339>`，兩個**每週**桶（`Gemini Models`、`Claude and GPT models`）。解析：桶名含 `gemini`→key `agy`、含 `claude`／`gpt`→key `agy:claude-gpt`（「kind:子帳號」慣例，子帳號名 `claude-gpt` 不是身分）；窗名要含 `week` 才收（別的窗名不猜是 5h 還是 7d）；剩餘 % → `seven_day.used_pct = 100 − 剩餘`（夾 0–100）、重置時間讀不出來就 `None`；`five_hour`／`fable`／`plan` 一律 `None`，`source = "agy-usage"`。格式變了（不是 JSON、沒有 `response`、沒有可讀的桶）→ 解析回 `None`、呼叫端回錯、**不寫任何東西**，舊讀數留著（過 `STALE_AFTER` 自己標陳舊）。
+輪詢每 5 分鐘（`AGY_POLL`，每週桶變動很慢，每次要起一個 200 MB 的執行檔），失敗冷卻 15 分鐘；`GET /api/quota?refresh=1` 不走冷卻、一律真的探測。`quota::set` 的「分開那格收斂到裸 key 就清掉」只清查得到身分、而且身分共用預設帳號的 `agy:<身分>`；`agy:claude-gpt` 查不到身分，所以不會被 `agy` 的寫入清掉（有測試）。
+網頁（`QuotaStrip`）：兩格 agy（`Gemini`／`Claude+GPT`），只有「週」窗（`store/quotaLookup.weeklyOnlyKind`：grok 與 agy）；第二格不是身分，沒有停用勾選。agy bot 在側欄的反灰／黃燈看的是 `agy`（Gemini）那桶。
+
+### 12a.8 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
+resume（`--conversation=<uuid>`／`-c`）與 `bulk_restart`／`idle_sleep`、`/fork`、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、child agent（herdr shim `--kind agy`）、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
 
 ## 13. 專案群組聊天
 
