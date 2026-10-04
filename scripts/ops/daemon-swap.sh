@@ -15,8 +15,8 @@
 # 不對就照 §18.13 的方向處理（升過 schema 預設往前修，不把舊 binary 放回去）。
 #
 # 結束碼：0 換版完成；3 前置核對不過；4 沒拿到窗口（有人在忙，下一輪再來）；5 備份失敗；
-#         10 新 binary 內嵌的 sha 不是 --sha（換版之前就中止，什麼都沒動）；
-#         6 新版起來了但升過 schema 所以往前修；7 已回滾；8 換好但窗口沒交還；9 daemon 太舊，沒有 restart-window 路由。
+#         6 新版起來了但升過 schema 所以往前修；7 已回滾；8 換好但窗口沒交還；9 daemon 太舊，沒有 restart-window 路由；
+#         10 新 binary 內嵌的 sha 不是 --sha；11 新 binary 已驗證在線但部署 sha 標記寫入失敗；12 rollback binary 無法安全恢復，DB 不動、daemon 保持停止；13 舊 binary 已恢復但 daemon 無法啟動。
 set -u
 
 AGM_DIR="${AGM_DIR:-$HOME/.config/agents-manager/supervisor/AGM}"
@@ -162,7 +162,13 @@ esac
 # 「只在 acquire 回應出現一次、任何 API 都查不到」的一次性憑證——抄走就能收掉別人正在換 binary 的窗口。
 # 寫進 0600 的檔，`agm` 用 --lease-token-file 讀；離開時不管成敗都刪掉。
 TOKEN_FILE=""
-cleanup_token() { [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"; return 0; }
+STAGED_NEW=""
+NEWBIN_HASH=""
+cleanup_token() {
+    [ -n "$TOKEN_FILE" ] && rm -f "$TOKEN_FILE"
+    [ -n "$STAGED_NEW" ] && rm -f "$STAGED_NEW"
+    return 0
+}
 trap cleanup_token EXIT
 
 save_token() { # $1=token
@@ -328,6 +334,8 @@ if [ "$BIN_SHA_CLEAN" != "$BIN_SHA" ]; then
 fi
 [ "$BIN_SHA" = "$SHA" ] && log "binary sha ok: 內嵌 ${BIN_SHA} 符合核准的 ${SHA}" \
     || { log "ABORT: 新 binary 內嵌的 sha 是 ${BIN_SHA}，不是核准的 ${SHA}（checkout HEAD 對、但這顆 binary 不是從它建的？）；不拿窗口、不換"; exit 10; }
+NEWBIN_HASH=$(shasum -a 256 "$NEWBIN" 2>/dev/null | awk '{print $1}')
+[ -n "$NEWBIN_HASH" ] || { log "ABORT: 讀不到新 binary 的 sha256"; exit 10; }
 # 線上 (--old) 必須是要換上的 commit 的祖先或同一顆。無法證明不是降版就拒絕（#638）。
 if ! git -C "$CHECKOUT" cat-file -e "${OLD}^{commit}" 2>/dev/null; then
     log "ABORT: 線上版本 $OLD 不在 checkout 裡，無法確認不是降版"
@@ -641,6 +649,24 @@ restore_rollback_binary() { # restore old binary without exposing a partially co
     [ "$got" = "$OLDHASH" ]
 }
 
+stage_candidate_binary() { # copy and verify candidate in the live binary's directory before downtime
+    local got
+    STAGED_NEW=$(mktemp "target/release/agents-managerd.new.XXXXXX") || return 1
+    if ! cp -p "$NEWBIN" "$STAGED_NEW"; then rm -f "$STAGED_NEW"; STAGED_NEW=""; return 1; fi
+    got=$(shasum -a 256 "$STAGED_NEW" 2>/dev/null | awk '{print $1}')
+    if [ "$got" != "$NEWBIN_HASH" ]; then rm -f "$STAGED_NEW"; STAGED_NEW=""; return 1; fi
+    return 0
+}
+
+publish_candidate_binary() { # atomically replace live binary with the previously verified candidate
+    local got
+    [ -n "$STAGED_NEW" ] || stage_candidate_binary || return 1
+    if ! mv -f "$STAGED_NEW" target/release/agents-managerd; then return 1; fi
+    STAGED_NEW=""
+    got=$(shasum -a 256 target/release/agents-managerd 2>/dev/null | awk '{print $1}')
+    [ "$got" = "$NEWBIN_HASH" ]
+}
+
 rollback() {
     log "ROLLBACK requested: $*"
     # Capture children adopted by the new daemon before restoring the backup. Their panes can outlive
@@ -655,11 +681,15 @@ rollback() {
     if [ "$BUMPED" = yes ]; then
         log "schema bumped $PRE_UV -> ${EXP_UV}：先往前修（舊 binary 開不了這個 DB）"
         stop_daemon "$(dpid)"
-        cp "$NEWBIN" target/release/agents-managerd; start; sleep 3
-        j=0; while [ $j -lt 30 ]; do api /api/session && break; sleep 1; j=$((j + 1)); done
-        if api /api/session; then
-            log "forward-fix ok：新 binary 服務中 pid $(dpid)，DB 留在 $EXP_UV 沒有還原"
-            exit 6
+        if publish_candidate_binary; then
+            start; sleep 3
+            j=0; while [ $j -lt 30 ]; do api /api/session && break; sleep 1; j=$((j + 1)); done
+            if api /api/session; then
+                log "forward-fix ok：新 binary 服務中 pid $(dpid)，DB 留在 $EXP_UV 沒有還原"
+                exit 6
+            fi
+        else
+            log "forward-fix 無法安全暫存或發佈候選 binary"
         fi
         log "forward-fix 失敗：新 binary 起不來，改還原 binary 與 DB"
     fi
@@ -765,6 +795,13 @@ if [ -e "$PREV" ]; then
     exit 5
 fi
 
+# Verify a complete candidate copy before stopping the live daemon. A failed cp must never publish a partial executable.
+if ! stage_candidate_binary; then
+    log "ABORT: 新 binary 暫存複製或 sha256 驗證失敗；舊 daemon 尚未停止"
+    release_window "新 binary 暫存失敗" || true
+    exit 5
+fi
+
 # DB backup and inventory collection may outlive the 15-minute lease. Revalidate the same fenced
 # lease immediately before stopping the daemon; if it expired or changed owners, leave the live
 # service untouched and defer this deployment.
@@ -777,10 +814,32 @@ if [ "$RENEW_RC" -ne 0 ]; then
 fi
 log "restart lease renewed before stopping daemon"
 
+# Keep the exact live inode at PREV while an atomic rename publishes the staged new binary.
+if ! ln target/release/agents-managerd "$PREV"; then
+    log "ABORT: 無法建立 PREV binary 硬連結；舊 daemon 尚未停止"
+    release_window "PREV binary 建立失敗" || true
+    exit 5
+fi
+
 OLDPID=$(dpid); log "old pid $OLDPID"
 stop_daemon "$OLDPID"
-mv target/release/agents-managerd "$PREV"
-cp "$NEWBIN" target/release/agents-managerd
+if ! publish_candidate_binary; then
+    log "ERROR: 新 binary 原子發佈失敗；恢復舊 binary 並重啟舊 daemon"
+    if ! restore_rollback_binary; then
+        log "ERROR: 新 binary 發佈失敗後無法恢復舊 binary；DB 保持原狀、daemon 停止"
+        exit 12
+    fi
+    [ -z "$STAGED_NEW" ] || { rm -f "$STAGED_NEW"; STAGED_NEW=""; }
+    rm -f "$PREV"
+    start
+    j=0; while [ $j -lt 30 ]; do api /api/session && break; sleep 1; j=$((j + 1)); done
+    if api /api/session; then
+        log "舊 binary 已恢復並重新提供服務；本次部署中止"
+        exit 5
+    fi
+    log "ERROR: 舊 binary 已恢復但 daemon 未重新提供服務；DB 與 binary 一致，需人工啟動"
+    exit 13
+fi
 start
 sleep 2
 NEWPID=$(dpid)

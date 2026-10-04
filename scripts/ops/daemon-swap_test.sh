@@ -394,6 +394,47 @@ check "built marker 寫入失敗明確記錄" "部署成功但寫入 daemon-upda
 check "健康的新 binary 保持在線" "new-binary" "$AGM_DIR/started-binary.log"
 check_no "marker 失敗不回滾健康 binary" "ROLLBACK requested" "$SWAP_LOG"
 teardown
+
+# A failed copy of the candidate must be caught before starting or publishing a partial executable.
+setup 10 10
+cat > "$ROOT/bin/cp" <<'STUB'
+#!/bin/bash
+src="$1"; dest="$2"
+[ "$src" != -p ] || { src="$2"; dest="$3"; }
+if [ "$src" = "$CHECKOUT/target/release/agents-managerd" ] \
+  && { [ "$dest" = target/release/agents-managerd ] || [[ "$dest" = target/release/agents-managerd.new.* ]]; }; then
+  printf 'partial-new-binary\n' > "$dest"
+  exit 1
+fi
+exec /bin/cp "$@"
+STUB
+chmod +x "$ROOT/bin/cp"
+rc=$(PATH="$ROOT/bin:$PATH" run)
+check_eq "candidate staging 複製失敗中止部署（rc=5）" "5" "$rc"
+check_eq "candidate 複製失敗保留舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "candidate 複製失敗不啟動 daemon" "0" "$(wc -l < "$AGM_DIR/starts.log" | tr -d ' ')"
+check_file "candidate 複製失敗不更新 .built" no "$AGM_DIR/daemon-update.built"
+teardown
+
+# If the atomic publish fails after stopping the daemon, the original binary must still be restartable.
+setup 10 10
+cat > "$ROOT/bin/mv" <<'STUB'
+#!/bin/bash
+src="$1"; dest="$2"
+[ "$src" != -f ] || { src="$2"; dest="$3"; }
+case "$src:$dest" in
+  target/release/agents-managerd.new.*:target/release/agents-managerd) exit 1 ;;
+esac
+exec /bin/mv "$@"
+STUB
+chmod +x "$ROOT/bin/mv"
+rc=$(PATH="$ROOT/bin:$PATH" run)
+check_eq "candidate 原子 rename 失敗中止部署（rc=5）" "5" "$rc"
+check_eq "rename 失敗仍留舊 binary" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check_eq "rename 失敗只重啟舊 binary" "old-binary" "$(tail -1 "$AGM_DIR/started-binary.log")"
+check_file "rename 失敗不更新 .built" no "$AGM_DIR/daemon-update.built"
+teardown
+
 # 1b. DB 備份檔權限：DB 裡有 bot 的 hook token 等憑證，備份不能是預設 umask 的 644（別的使用者讀得到）。
 #     備份是腳本自己建的，不論呼叫端的 umask 是什麼都要 600。
 setup 10 10
