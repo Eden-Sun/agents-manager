@@ -3499,6 +3499,11 @@ printf '%s\n' "$al" | grep -E "(^|[[:space:]])(alias[[:space:]]+)?cc[0-6]="
 claude 用子命令而不是 `claude /login`：後者起一整個 REPL、登完也不退出，下面的「CLI 結束」永遠等不到，pane 要到 15 分鐘上限才收。
 pane 的終端快照是 UI 顯示 device code / URL 的唯一通道；這些內容不進 daemon log 或 WS 事件。CLI 結束（成功或失敗）後重新探測該身份再關 pane；建立或登入失敗走同一條清理路徑。
 
+**手機版登入協助**（#838，使用者 2026-10-04：「手機版重新登入已失效的 claude，應該要更容易地跳出登入網站、輸入 token，用 m4p 的 cc1 驗證」；`login_assist.rs`）：claude 的登入 pane（登出與別的 kind 不算）開好後，daemon 在記憶體記 `(host, pane_id) → identity`（連同 shell 的 `created_at`，pane id 被重用時對不上；pane 關了就清）。
+網頁用 `GET …/shells/{pane_id}/login` 取出從畫面讀到的 OAuth 網址（`recent_unwrapped`；只交 claude 的 https authorize 網址）與「是否正在等 code」，用 `POST …/login/code` 把 code 打進**那顆登入 pane** 並按 Enter。守衛：只服務登記過的登入 pane；送前現讀畫面，**最後一個非空行必須正好是 `Paste code here if prompted >`**
+（2.1.289 真畫面：CLI 收到錯 code 會在同一行接 `Login failed: Request failed with status code 400` 然後退出，所以提示後面有字＝不在等）、前景程序必須還是 `claude`，對不上 409 `not_awaiting_code`、一個字都不送；code 只收 OAuth code 的字元集。網址與 code 不進 log／事件（同上一段 pane 快照的規則）。
+送出後等 CLI 反應最多 8 秒，把 `Login failed` 帶回網頁（pane 會被 watcher 收掉）；成功與否仍由 watcher 的重驗決定（遠端 claude 問不出登入狀態的既有限制不變，UI 會講「請以實際使用為準」）。沒綁身份的 bot 重新登入（網頁自己開 shell 打指令）不經這條路，仍在終端完成。
+
 `POST …/logout` 走同一條路（同一個臨時 pane、同一組 env 前綴），指令換成 `claude auth logout`、`codex logout` 或 `grok logout`。
 環境前綴與登入共用同一段程式：少帶 `CLAUDE_CONFIG_DIR` 就會登出別的帳號。清掉的是那個身份設定目錄裡的憑證——執行中的 bot 不受影響，下次啟動才會停在登入畫面，所以 UI 先問一次並說明有幾顆 bot 綁著它。
 CLI 結束後重驗一次登入狀態並寫回快取；快取有變時用目前的 HostFence 推標準 `host_changed` 主機快照，讓 UI 立即更新身份狀態（API §8）。**登出**的 pane 在重驗問不出來時（遠端 claude 一律問不出來）直接記未登入並清掉 `account`／`plan`，不然列上會一直顯示「已登入」、登出鈕也還按得下去。

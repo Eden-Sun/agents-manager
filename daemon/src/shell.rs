@@ -420,6 +420,7 @@ pub async fn close_confirmed(app: &Arc<App>, host: &str, pane_id: &str, confirme
     };
     crate::lifecycle::close_pane_and_tab(&client, Some(&shell.workspace_id), Some(&shell.tab_id), pane_id).await;
     app.host_shells.lock().await.retain(|s| s.host != host || s.pane_id != pane_id);
+    crate::login_assist::forget(app, host, pane_id);
     tracing::info!(host, pane_id, "closed a host shell");
     Ok(())
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ClipboardEvent as ReactClipboardEvent, KeyboardEvent as ReactKeyboardEvent } from 'react'
 import * as api from '../api'
+import { ClaudeLoginAssist } from './ClaudeLoginAssist'
 import { herdrKeyFromEvent, useShellKeys } from '../hooks/usePaneKeys'
 import { keySyncActive, shellForbidden, shellStateUnknown } from '../lib/shellAccess'
 import { isImeEnter } from '../lib/ime'
@@ -376,6 +377,7 @@ export function HostShellPanel({
       )}
 
       <div className="shell-pane">
+        <ClaudeLoginAssist host={host} paneId={paneId} />
         <div className="term-bar shell-bar">
           {embedded ? (
             <span className="hint" title={cwd}>

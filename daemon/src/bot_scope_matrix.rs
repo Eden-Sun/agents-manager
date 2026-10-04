@@ -446,6 +446,8 @@ fn rules() -> Vec<Rule> {
         rule("PATCH", "/api/supervisor/fallback", Expect::Forbidden, None),
         rule("DELETE", "/api/supervisor/fallback", Expect::Forbidden, None),
         rule("POST", "/api/hosts/{name}/shells/{pane_id}/text", Expect::Forbidden, None),
+        rule("GET", "/api/hosts/{name}/shells/{pane_id}/login", Expect::Forbidden, None),
+        rule("POST", "/api/hosts/{name}/shells/{pane_id}/login/code", Expect::Forbidden, None),
         rule("GET", "/api/projects/{id}/submodules", Expect::Forbidden, None),
         rule("POST", "/api/projects/{id}/submodules", Expect::Forbidden, None),
         rule("PUT", "/api/projects/{id}/submodules", Expect::Forbidden, None),

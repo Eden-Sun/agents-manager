@@ -683,6 +683,11 @@ cc1 的 bot 好幾個回合都收在 `authentication_failed`，對話只寫「�
 - **auth 失敗那則訊息底下兩顆鍵**：「立即登入」（primary）與「登入好了，重試」。重試＝重新偵測身份，確定還沒登入就只提示；否則重送上一則使用者訊息。
   不做自動重送：登入要人到瀏覽器授權，什麼時候好只有人知道；按一下的成本很低，自動重送猜錯會多燒一個失敗回合。
 - **只掛在最後一則 auth 失敗**，之後出現正常回覆就收起來——一顆連錯五次的 bot 不該長出五排按鈕。agent 回覆只認「整則就是 `Not logged in · …/login`」那一行，引用那句話的回報不算（同 SPEC §18 協調者登入偵測的教訓）。
+- **手機版直接給「打開登入網站」與 code 輸入框**（2026-10-04，使用者：「手機版重新登入已失效的 claude，應該要更容易地跳出登入網站、輸入 token，用 m4p 的 cc1 驗證」，#838）：claude 身分按「登入」開出的 shell 面板最上方多一條協助條（`ClaudeLoginAssist`）——
+  主按鈕「打開登入網站」（`<a target="_blank" rel="noopener noreferrer">`，網址是 daemon 從登入畫面取出的 OAuth 網址；CLI 還沒印出來時停用）、一個 code 輸入框（`autocapitalize/autocorrect` 關、等寬字）＋「送出 code」。送出鈕只在 daemon 說畫面**正在等 code**、格式合 OAuth code 時才能按；
+  下面一行說明隨階段換字（等網址／去登入網站／貼 code／已送出／失敗）。CLI 說失敗就把 `Login failed: …` 顯示在輸入框下面、輸入框保留可再貼；CLI 結束、pane 被收掉後，條上改顯示重驗後的結果（已登入（帳號）／還是未登入／這台問不出登入狀態），附「重新偵測」。
+  手機：條放在終端上方、按鈕與輸入框 ≥40px 高、窄螢幕一欄（打開網站整列、輸入框＋送出一列），不必捲到終端或選取任何字。桌機照舊看得到下面的終端。一般 shell、別種 CLI 的登入 pane 不畫這條（第一次問 404 就不再輪詢）。網址與 code 不存 store／localStorage。
+  mock：`loginIdentity` 對 claude 會開出這樣的登入 pane，送 `bad…` 開頭的 code 演失敗，其他當成功。
 - 截圖：`docs/screenshots/auth-cli-login/`（`scripts/auth-login-shots.mjs`，`MOBILE=1` 出手機那組；mock 模式：`__amMock.loggedOut('am-claude', 'cc1')` 後送含 `authfail` 的訊息）。
   ![桌機](screenshots/auth-cli-login/desktop-auth-fail.png) ![手機](screenshots/auth-cli-login/phone-auth-fail.png)
 

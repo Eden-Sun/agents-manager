@@ -236,6 +236,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/shells/{pane_id}", delete(close_host_shell))
         .route("/hosts/{name}/shells/{pane_id}/terminal", get(get_host_shell_terminal))
         .route("/hosts/{name}/shells/{pane_id}/text", post(host_shell_text))
+        .route("/hosts/{name}/shells/{pane_id}/login", get(host_shell_login_status))
+        .route("/hosts/{name}/shells/{pane_id}/login/code", post(host_shell_login_code))
         .route("/hosts/{name}/shells/{pane_id}/keys", post(host_shell_keys))
         .route("/models", get(get_models))
         .route("/changelog", get(get_changelog))
@@ -756,6 +758,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/shells", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/shells/{pane_id}/keys", BotRoutePolicy::UserOnly),
     ("POST", "/api/hosts/{name}/shells/{pane_id}/text", BotRoutePolicy::UserOnly),
+    ("GET", "/api/hosts/{name}/shells/{pane_id}/login", BotRoutePolicy::UserOnly),
+    ("POST", "/api/hosts/{name}/shells/{pane_id}/login/code", BotRoutePolicy::UserOnly),
     ("POST", "/api/panes/{id}/adopt", BotRoutePolicy::UserOnly),
     ("POST", "/api/panes/{id}/close", BotRoutePolicy::UserOnly),
     ("POST", "/api/panes/{id}/focus", BotRoutePolicy::UserOnly),
@@ -3417,6 +3421,10 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
     }).await;
     let shell = opened
         .ok_or_else(|| LcError::Upstream(format!("host `{name}` changed before identity authentication started")))??;
+    // 手機版重新登入（#838）：claude 的登入 pane 讓網頁取網址、送 code。登出與別的 kind 不記。
+    if !logout && idn.kind == "claude" {
+        crate::login_assist::register(&app, &name, &shell.pane_id, &identity, &shell.created_at);
+    }
     crate::tools::spawn_identity_login_watch(app, name, shell.pane_id.clone(), identity, idn.kind, logout, fence);
     Ok((StatusCode::OK, Json(json!(shell))).into_response())
 }
@@ -3925,6 +3933,35 @@ async fn host_shell_text(
     require_user(&principal)?;
     shell::send_text(&app, &name, &pane_id, &b.text, b.enter.unwrap_or(true)).await?;
     Ok((StatusCode::OK, Json(json!({}))).into_response())
+}
+
+/// `GET /api/hosts/:name/shells/:pane_id/login`：daemon 為 claude 身分登入開的 pane 上，從畫面取出的 OAuth 網址與進度（`login_assist.rs`）。
+/// 網址不進 log／事件，所以不快取。不是登入 pane 一律 404。
+async fn host_shell_login_status(
+    State(app): State<Arc<App>>,
+    Path((name, pane_id)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    let v = crate::login_assist::status(&app, &name, &pane_id).await?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(v)).into_response())
+}
+
+#[derive(Deserialize)]
+struct LoginCodeIn {
+    code: String,
+}
+
+/// `POST /api/hosts/:name/shells/:pane_id/login/code`：畫面還在等 code 才把它打進登入 pane 並按 Enter。
+async fn host_shell_login_code(
+    State(app): State<Arc<App>>,
+    Path((name, pane_id)): Path<(String, String)>,
+    Extension(principal): Extension<RequestPrincipal>,
+    Json(b): Json<LoginCodeIn>,
+) -> Result<Response, LcError> {
+    require_user(&principal)?;
+    let v = crate::login_assist::submit_code(&app, &name, &pane_id, &b.code).await?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(v)).into_response())
 }
 
 /// Not `KeysIn`: a shell has no run, so accepting `expect_run_id` would be a lie.
