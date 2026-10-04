@@ -189,6 +189,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/preview", get(preview_get).post(preview_start).delete(preview_stop))
         .route("/bots/{id}/interrupt", post(interrupt_bot))
         .route("/bots/{id}/login", post(login_bot))
+        .route("/bots/{id}/compact", post(compact_bot))
         .route("/bots/{id}/pane/move-to-tab", post(move_bot_pane_to_tab))
         .route("/bots/{id}/prompt", post(prompt_bot))
         // 分享 bot（SPEC「分享 bot」）：只收 UI token，handler 自己再擋一次 principal。
@@ -787,6 +788,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/bots/{id}/rewind", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/interrupt", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/login", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/compact", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/abort", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/pane/move-to-tab", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/restore", BotRoutePolicy::UserOrAgm),
@@ -5399,6 +5401,12 @@ async fn abort_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resul
 /// 只把 `/login` 送進去；完成與否由 `tools/refresh` 重新偵測。
 async fn login_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let out = lifecycle::login(&app, &id).await?;
+    Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+/// `POST /api/bots/{id}/compact`：對閒著的 bot 送 `/compact`（網頁 context 旁的「壓縮」鈕，2026-10-04 使用者）。
+async fn compact_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
+    let out = lifecycle::compact(&app, &id).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
 }
 

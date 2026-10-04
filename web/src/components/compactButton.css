@@ -1,0 +1,23 @@
+/* context 旁的「壓縮」鈕（2026-10-04 使用者）：跟狀態列同高的小字按鈕，不搶版面。 */
+.compact-btn {
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.compact-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.compact-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

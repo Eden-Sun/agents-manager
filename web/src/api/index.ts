@@ -564,6 +564,13 @@ export async function loginBot(botId: string): Promise<{ command: string; kind: 
   return { command: str(pick(o, 'command'), '/login'), kind: str(pick(o, 'kind')) }
 }
 
+/** 對閒著的 bot 送 `/compact`（claude、codex；2026-10-04 使用者：context 旁的「壓縮」鈕）。不等壓縮完成。 */
+export async function compactBot(botId: string): Promise<{ command: string; kind: string }> {
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/compact`)
+  const o = isRec(raw) ? raw : {}
+  return { command: str(pick(o, 'command'), '/compact'), kind: str(pick(o, 'kind')) }
+}
+
 /** `sendNow`＝插隊送出（issue #103）：對方回合中時打斷它，而不是回 409。只有 claude ≥ 2.1.275
  *  的 run 認得那顆鍵，其他情況 daemon 照舊 409，body 帶 `send_now_refused`。
  *  `startIfStopped`＝bot 沒在跑時 daemon 先收下（`delivery: queued`）再自己啟動它（issue #122）。 */
