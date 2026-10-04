@@ -3652,13 +3652,13 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
      （`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`）；`ubuntu-ci` 只跑最新 HEAD、會跳過中間的 sha，所以要往回找。走到線上那顆（`daemon-update.built`）或已經沒有 binary 差異就停；
      `daemon-update.rejected` 裡的 sha（換上去被回滾過）不再挑。`gh` 問不到＝這輪不動並記失敗。
   3. 在**專用、乾淨的 checkout**（`AGM_DEPLOY_CHECKOUT`，預設 `~/.cache/agents-manager/deploy-checkout`；只有這支腳本動它，不碰主樹與別人的 worktree）
-     `checkout --detach <sha>`、`bun install --frozen-lockfile && bun run build`，再透過 PATH 上的 cargo build-slot shim 執行 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 nice -n 19 cargo clean -p agents-managerd --release` 與 `cargo build --locked --release -p agents-managerd`。
+     `checkout --detach <sha>`、`bun install --frozen-lockfile && bun run build`，再透過 PATH 上的 cargo build-slot shim 執行 `cargo clean -p agents-managerd --release` 與 `cargo build --locked --release -p agents-managerd`；兩個 Cargo 指令都設 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2` 並以 `nice -n 19` 執行。
      clean 讓 `rust_embed` 把剛產生的 `web/dist` 重嵌；`--locked` 讓 binary 的依賴版本固定在該 commit 的 `Cargo.lock`。同一顆 sha 已建好（`target/release/.built-for`）就不重建，等安全窗口那幾輪不會每 5 分鐘編一次。
   4. 換版交給 `daemon-swap.sh`（從這個 checkout 跑，不裝到 AGM 目錄）。**沒有 bot 在 `working`、送達臨界區沒有 prompt、沒有別人握租約**才換，換前一刻再查一次；備份舊 binary 與 DB、重啟後驗 `/api/session`／`agm health`／`agm supervisor`／bot 名單，
      失敗回滾（升過 schema 預設往前修，§18.13）、成功寫 `daemon-update.built`。窗口由 `POST /api/services/daemon-swap/restart-window` 開（API.md）：daemon-swap 服務身分自己開一筆立即核准的 `restart` 單、再走**同一個** `maintenance::acquire`，
      所以保護其他 bot 的部分一條都沒拆——持有 `restart` 租約期間 assignment 派送暫停、`lease_token` 與 fence 照舊（§18.10）。**等太久照樣縮小封鎖面**（§18.10 的 30 分鐘，2026-10-02 修回）：計時綁在核准上，所以同一個 owner 同 commit 一輪輪**沿用同一張**自動核准（`swap_window`，活 6 小時），只因 `not_idle`、或 daemon 自己讀寫 DB 暫時失敗（`Upstream`／`Unavailable`，例如重啟當下的 `database is locked`）拿不到窗口時不撤；main 動了換 commit 就開新的並 `supersedes` 舊的，等待時間接過來。以前每輪開新單、拿不到就撤，計時每輪歸零——2026-10-01 一直有 bot 在忙，自動部署從 15:18 卡到隔天。其他原因拿不到窗口照舊撤掉。
      `daemon-swap.sh` 的本機 API 呼叫忽略環境 proxy，並拒絕 redirect，避免把 UI／service token 轉送到別的主機。
-     `daemon-swap.sh` 結束碼 4（有人在忙）不算失敗；6（往前修）補寫 `.built` 並推 `ops_alert`；7（已回滾）推 `ops_alert` 並記進 `.rejected`；9（線上 daemon 太舊且呼叫端沒有明確的 `--approval` bootstrap）推 `ops_alert`。若啟動器 `daemon-start.py` 不在同一 checkout 或不可讀，先以 3 中止，舊 daemon 不會被停掉。
+     `daemon-swap.sh` 結束碼 4（有人在忙）不算失敗；6（往前修）補寫 `.built` 並推 `ops_alert`；7（已回滾）推 `ops_alert` 並記進 `.rejected`；9（線上 daemon 太舊且呼叫端沒有明確的 `--approval` bootstrap）推 `ops_alert`；10（binary 內嵌 sha 不符）不記進 `.rejected`，清除該 sha 的 `.built-for`，下一輪清 crate 重建後再試。若啟動器 `daemon-start.py` 不在同一 checkout 或不可讀，先以 3 中止，舊 daemon 不會被停掉。
   5. 任何失敗推 `ops_alert`（同 `source`+`reason` 每小時最多一則，§18.9），並寫 `daemon-update.log`；連續 `AGM_FAIL_ALERT_AFTER`（6）輪沒能完成推 `check_failing`。「有人在忙」「沒有新的綠燈 commit」是正常的等，不算失敗。
   鎖帶 pid 與時間（執行者不在了就回收，還活著卡超過 `AGM_LOCK_HUNG_SECS`＝7200 秒才喊人）。讀不到線上版本（`.built` 不在或 sha 不在 repo）推 `built_unknown` 並停住。
 - **可動手的判準是沒有 bot 在 `working`**（`lease safety` 的 `run.agent_status`），不是 `health.busy ≤ 1`：busy 含 `blocked`，而 blocked 可能等使用者好幾小時，重啟也不會打斷它。

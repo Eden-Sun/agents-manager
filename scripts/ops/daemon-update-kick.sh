@@ -365,6 +365,8 @@ case "$SWAP_RC" in
     ;;
   10)
     # 換版之前就擋下、什麼都沒動：這次建出來的 binary 不是 ${SHORT} 這顆 commit 的（沒重建？髒樹？），不是 commit 本身有問題，所以不記進 rejected。
+    # 失敗的 binary 仍有 .built-for；清掉標記讓同一 sha 下一輪從乾淨的 daemon crate 重建，而不是永遠重試同一個壞產物。
+    rm -f "$BUILD_MARK"
     alert swap_binary_sha_mismatch "要換上 ${SHORT} 的 binary 內嵌的 sha 不是它（或髒樹建的、或舊 binary 沒內嵌 sha），換版中止、窗口沒拿、線上沒動。請看 ${DIR}/daemon-swap.log"
     ROUND_FAIL="${ROUND_FAIL:-新 binary 的內嵌 sha 對不上 ${SHORT}}"
     ;;
