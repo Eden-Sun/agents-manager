@@ -54,8 +54,12 @@ commit() { # commit <檔案> <訊息>：在 WORK 提交並推到 origin，回 sh
 setup() {
   ROOT=$(mktemp -d); export ROOT
   ORIGIN="$ROOT/origin.git"; WORK="$ROOT/work"
+  # 不讓測試碰真實 ~/.cargo/bin/cargo；用 PATH 上的 stub 模擬 build-slot shim，另放一顆
+  # 只供舊式絕對路徑呼叫的假 cargo，這樣可辨認腳本是否繞過 PATH。
+  export HOME="$ROOT/home"
+  unset CARGO_BIN
   export AGM_DIR="$ROOT/agm" AGM_REPO="$ROOT/repo" AGM_DEPLOY_CHECKOUT="$ROOT/deploy"
-  mkdir -p "$AGM_DIR/bin" "$ROOT/bin" "$ROOT/ci"
+  mkdir -p "$AGM_DIR/bin" "$ROOT/bin" "$ROOT/ci" "$HOME/.cargo/bin"
   "$GITBIN" init -q --bare -b main "$ORIGIN"
   "$GITBIN" clone -q "$ORIGIN" "$WORK" 2>/dev/null
   "$GITBIN" -C "$WORK" config user.email t@t; "$GITBIN" -C "$WORK" config user.name t
@@ -71,7 +75,7 @@ setup() {
   printf 'old-binary\n' > "$AGM_REPO/target/release/agents-managerd"
   echo "$(echo "$C0" | cut -c1-8)" > "$AGM_DIR/daemon-update.built"
 
-  export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun" CARGO_BIN="$ROOT/bin/cargo"
+  export GIT_BIN="$GITBIN" GH_BIN="$ROOT/bin/gh" BUN_BIN="$ROOT/bin/bun"
   export AGM_SWAP_SCRIPT="$ROOT/bin/swap.sh" AM_AGENT_NAME=daemon-update-kick
   export STUB_GH_FAIL="" STUB_SWAP_RC=0 STUB_CARGO_FAIL="" STUB_BUN_FAIL="" STUB_BUN_SLEEP=""
   export AGM_FAIL_ALERT_AFTER=3 AGM_CI_LOOKBACK=30
@@ -104,12 +108,16 @@ exit 0
 STUB
   cat > "$ROOT/bin/cargo" <<'STUB'
 #!/bin/bash
-echo "cargo $* @ $(pwd) AM_REAL_CARGO=${AM_REAL_CARGO:-} PATH_HEAD=${PATH%%:*}" >> "$AGM_DIR/build.log"
-[ -z "$STUB_CARGO_FAIL" ] || exit 1
+if [ "${AM_REAL_CARGO+x}" = x ]; then am_real_cargo=set; else am_real_cargo=unset; fi
+echo "cargo $* @ $(pwd) AM_REAL_CARGO_STATE=$am_real_cargo PATH_HEAD=${PATH%%:*} CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-unset} CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-unset}" >> "$AGM_DIR/build.log"
+case " $* " in *" build "*)
+  [ -z "$STUB_CARGO_FAIL" ] || exit 1
 mkdir -p target/release
 git rev-parse HEAD > target/release/agents-managerd
 chmod +x target/release/agents-managerd
+;; esac
 STUB
+  ln -s "$ROOT/bin/cargo" "$HOME/.cargo/bin/cargo"
   cat > "$ROOT/bin/swap.sh" <<'STUB'
 #!/bin/bash
 echo "$*" >> "$AGM_DIR/swap.log"
@@ -117,6 +125,7 @@ echo "$*" >> "$AGM_DIR/swap.log"
 exit "$STUB_SWAP_RC"
 STUB
   chmod +x "$AGM_DIR/bin/agm" "$ROOT/bin/"*
+  export PATH="$ROOT/bin:$PATH"
   : > "$AGM_DIR/agm.log"; : > "$AGM_DIR/gh.log"; : > "$AGM_DIR/build.log"; : > "$AGM_DIR/swap.log"; : > "$AGM_DIR/alerts.log"
   : > "$AGM_DIR/daemon-update.log"
 }
@@ -144,8 +153,19 @@ rc=$(run)
 check_eq "rc=0" "0" "$rc"
 check "問的是 ubuntu-ci 的 commit status" "repos/Eden-Sun/agents-manager/commits/$C3/status" "$AGM_DIR/gh.log"
 check "web 建置在專用 checkout" "bun run build @ $ROOT/deploy/web" "$AGM_DIR/build.log"
-check "cargo 建置在專用 checkout" "cargo build --release -p agents-managerd @ $ROOT/deploy" "$AGM_DIR/build.log"
-check "cargo 帶 AM_REAL_CARGO 與 cargo 的 PATH" "AM_REAL_CARGO=$ROOT/bin/cargo PATH_HEAD=$ROOT/bin" "$AGM_DIR/build.log"
+check "cargo 建置在專用 checkout" "cargo build --locked --release -p agents-managerd @ $ROOT/deploy" "$AGM_DIR/build.log"
+check "cargo build 經 PATH 上的 shim" "PATH_HEAD=$ROOT/bin" "$AGM_DIR/build.log"
+check_no "cargo 不設定 AM_REAL_CARGO 繞過 shim" "AM_REAL_CARGO_STATE=set" "$AGM_DIR/build.log"
+check "cargo build 使用 --locked" "cargo build --locked --release -p agents-managerd" "$AGM_DIR/build.log"
+check "先 clean daemon crate 讓新 web/dist 重嵌" "cargo clean -p agents-managerd --release" "$AGM_DIR/build.log"
+check "cargo 命令關 incremental 並限制 jobs" "CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2" "$AGM_DIR/build.log"
+_clean_line=$(grep -n 'cargo clean -p agents-managerd --release' "$AGM_DIR/build.log" | cut -d: -f1)
+_build_line=$(grep -n 'cargo build --locked --release -p agents-managerd' "$AGM_DIR/build.log" | cut -d: -f1)
+if [ -n "$_clean_line" ] && [ -n "$_build_line" ] && [ "$_clean_line" -lt "$_build_line" ]; then
+  echo "ok   - clean 在 web build 後、cargo build 前"; PASS=$((PASS + 1))
+else
+  echo "FAIL - clean 在 web build 後、cargo build 前"; FAIL=$((FAIL + 1))
+fi
 check_eq "專用 checkout 停在目標 sha" "$C3" "$("$GITBIN" -C "$ROOT/deploy" rev-parse HEAD)"
 check "換版的 sha" "--sha $C3" "$AGM_DIR/swap.log"
 check "換版的舊版是 .built" "--old $(echo "$C0" | cut -c1-8)" "$AGM_DIR/swap.log"
@@ -235,7 +255,7 @@ ci "$C3" success
 export STUB_CARGO_FAIL=1
 rc=$(run)
 check_eq "rc=0" "0" "$rc"
-check "log 記 cargo build 失敗" "cargo build 失敗" "$(LOG)"
+check "log 記 cargo build --locked 失敗" "cargo build --locked 失敗" "$(LOG)"
 check_eq "沒換版" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
 check_eq "有失敗計數" "1" "$(cat "$AGM_DIR/daemon-update.fails")"
 teardown
