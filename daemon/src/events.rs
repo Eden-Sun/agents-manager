@@ -8,10 +8,24 @@ use crate::state::App;
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long `handle_status` waits for a remote drain before letting the fallback arm (§11.4.3).
 const DRAIN_BUDGET: Duration = Duration::from_secs(4);
+const HERDR_SUBSCRIBE_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const HERDR_SUBSCRIBE_MAX_BACKOFF: Duration = Duration::from_secs(10);
+const HERDR_SUBSCRIBE_STABLE_FOR: Duration = Duration::from_secs(30);
+
+/// A short-lived subscription is still a failed connection attempt. Only a stable stream earns a
+/// reset, otherwise a flapping local herdr can make every global and per-pane watcher reconnect at
+/// the initial 250 ms interval forever.
+fn herdr_subscribe_retry_delay(current: Duration, connected_for: Option<Duration>) -> Duration {
+    if connected_for.is_some_and(|uptime| uptime >= HERDR_SUBSCRIBE_STABLE_FOR) {
+        HERDR_SUBSCRIBE_INITIAL_BACKOFF
+    } else {
+        current
+    }
+}
 
 fn norm(name: &str) -> String {
     name.replace('.', "_")
@@ -47,7 +61,7 @@ pub async fn spawn_global(app: Arc<App>) {
 async fn global_loop(app: Arc<App>, host: String, session: String) {
     let is_local_main = host == LOCAL_HOST && session == app.herdr_session.as_str();
     let is_local_default = host == LOCAL_HOST && session == "default";
-    let mut backoff = Duration::from_millis(250);
+    let mut backoff = HERDR_SUBSCRIBE_INITIAL_BACKOFF;
     loop {
         let Some(client) = app.herdr_for_session(&host, &session).await else {
             tracing::info!(host = %host, "host gone; stopping global subscription");
@@ -59,9 +73,9 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
             json!({"type": "workspace.closed"}),
             json!({"type": "pane.agent_detected"}),
         ];
+        let mut connected_for = None;
         match client.subscribe(subs).await {
             Ok(mut rx) => {
-                backoff = Duration::from_millis(250);
                 if is_local_main {
                     app.connected.store(true, Ordering::SeqCst);
                     crate::state::emit_daemon_status(&app).await;
@@ -84,9 +98,11 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                     // 遠端 supervisor 連上那一輪對帳失敗、這裡才成功（連線沒斷）：欠著的一生一次 autostart 在這補（#259）。本機由開機那一輪負責。
                     reconcile_and_autostart(&app, &host, host != LOCAL_HOST).await;
                 }
+                let connected_at = Instant::now();
                 while let Some(ev) = rx.recv().await {
                     handle_global(&app, &host, &session, &ev).await;
                 }
+                connected_for = Some(connected_at.elapsed());
                 if is_local_main {
                     app.connected.store(false, Ordering::SeqCst);
                     crate::state::emit_daemon_status(&app).await;
@@ -113,8 +129,9 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
             tracing::info!(host = %host, "host disconnected; global subscription yields to the supervisor");
             return;
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(10));
+        let delay = herdr_subscribe_retry_delay(backoff, connected_for);
+        tokio::time::sleep(delay).await;
+        backoff = (delay * 2).min(HERDR_SUBSCRIBE_MAX_BACKOFF);
     }
 }
 
@@ -351,7 +368,7 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
     let sess = session.to_string();
     let own = key.clone();
     let handle = tokio::spawn(async move {
-        let mut backoff = Duration::from_millis(250);
+        let mut backoff = HERDR_SUBSCRIBE_INITIAL_BACKOFF;
         let mut resubscribing = false;
         // 只有「證明 run 已經結束」那一種離開才算收掉這個 pane；拿不到 client（遠端斷線、session 對不上）離開時 run 還活著，
         // 等著重放的狀態事件與 pane 的鎖都還要用（`forget_watcher`）。
@@ -359,17 +376,19 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
         loop {
             let Some(client) = app2.herdr_for_session(&hst, &sess).await else { break };
             let subs = vec![json!({"type": "pane.agent_status_changed", "pane_id": pid})];
+            let mut connected_for = None;
             match client.subscribe(subs).await {
                 Ok(mut rx) => {
-                    backoff = Duration::from_millis(250);
                     tracing::info!(host = %hst, session = %sess, pane_id = %pid, "watching pane agent status");
                     if resubscribing {
                         resync_pane_status(&app2, &client, &hst, &sess, &pid).await;
                     }
                     resubscribing = true;
+                    let connected_at = Instant::now();
                     while let Some(ev) = rx.recv().await {
                         handle_status(&app2, &hst, &sess, &ev).await;
                     }
+                    connected_for = Some(connected_at.elapsed());
                     // 每次 daemon／herdr 重啟或遠端斷線，每個 pane 各掉一次（一天 237 行 WARN）；底下會自己重訂並補讀狀態，真有問題
         // 由「host connect failed」「herdr event stream closed」那些行說，這行只是逐 pane 的旁證。
         tracing::info!(host = %hst, session = %sess, pane_id = %pid, "pane status subscription dropped");
@@ -393,8 +412,9 @@ pub async fn watch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pa
                     Err(e) => tracing::warn!(host = %hst, pane_id = %pid, error = ?e, "watcher cannot read the pane's runs; keeping it"),
                 },
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_secs(10));
+            let delay = herdr_subscribe_retry_delay(backoff, connected_for);
+            tokio::time::sleep(delay).await;
+            backoff = (delay * 2).min(HERDR_SUBSCRIBE_MAX_BACKOFF);
         }
         forget_watcher(&app2, own, generation, run_ended).await;
     });
@@ -774,6 +794,26 @@ async fn poll_titles(app: &Arc<App>, host: &str, session: &str, fallback_session
 mod tests {
     use super::*;
     use crate::testing as tt;
+
+    #[test]
+    fn herdr_subscription_backoff_resets_only_after_a_stable_stream() {
+        let current = Duration::from_secs(4);
+        assert_eq!(
+            herdr_subscribe_retry_delay(current, Some(Duration::from_secs(29))),
+            current,
+            "短暫成功後又斷線仍按退避延遲重試"
+        );
+        assert_eq!(
+            herdr_subscribe_retry_delay(current, Some(HERDR_SUBSCRIBE_STABLE_FOR)),
+            HERDR_SUBSCRIBE_INITIAL_BACKOFF,
+            "穩定連線才重設延遲"
+        );
+        assert_eq!(
+            herdr_subscribe_retry_delay(current, None),
+            current,
+            "連線建立失敗也不重設延遲"
+        );
+    }
 
     async fn run_state(app: &Arc<App>, run: &str) -> String {
         sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(run).fetch_one(&app.db).await.unwrap()

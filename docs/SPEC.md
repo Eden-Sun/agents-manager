@@ -304,7 +304,7 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   - socket：`~/.config/herdr/sessions/<session>/herdr.sock`；每個 RPC 一條新連線，送一行 `{"id","method","params"}`、讀一行回應；回應必須帶回相同的 `id`，且必須恰有 `result` 或 `error` 其中一個，缺少／對不上 `id` 或回應封套矛盾就是 protocol error，不接受為成功結果或「確定未執行」。
   - 事件訂閱是長連線：**一條全域**（`pane.exited`、`pane.closed`、`workspace.closed`、`pane.agent_detected`）+ **每個 active Run 一條**
     `pane.agent_status_changed`（必須帶 `pane_id`，Run 結束時關）。事件行 `{"event","data"}`，名稱點號／底線兩種寫法都要認。
-    斷線指數退避重連，重連後對帳（§6.5）。串流中途的 JSON-RPC error 行（herdr 0.9.2+ 讀太慢會回 `events_lost` 再關連線）視同斷線：
+    斷線指數退避重連；訂閱串流穩定至少 30 秒才重設退避，避免連上即斷時每 250 ms 重試。重連後對帳（§6.5）。串流中途的 JSON-RPC error 行（herdr 0.9.2+ 讀太慢會回 `events_lost` 再關連線）視同斷線：
     記一行帶 `code` 的 warn、結束該串流，不跳過繼續讀；全域訂閱重連後照常對帳，Run 的狀態訂閱重連後補讀一次 `pane.get` 當下狀態、照狀態事件處理。
   - 連上先 `ping`；`protocol != 20` 只警告。未知欄位與事件容忍；`docs/herdr-schema.json` 為契約參考。
     **未知的 `agent_status` 值**（herdr 之後新增）一律當 `unknown`：client 解析（`AgentStatus`）與狀態事件寫 `runs.agent_status` 都是——前者不讓一個奇怪的值拖垮整份 `agent.list`，後者不讓 CHECK 擋掉整句 UPDATE。
