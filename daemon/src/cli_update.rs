@@ -3832,6 +3832,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_transient_process_lookup_error_never_makes_a_live_install_lock_look_free() {
+        use std::os::unix::fs::symlink;
+
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-vanished-member-{}", db::ulid())));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let pgid = unsafe { libc::getpgrp() };
+        let vanished_pid = 2_147_483_646;
+        let owner_pid = 2_147_483_645;
+        let nonce = "live-owner-nonce";
+        let lock = dir.join("codex-install.lock");
+        symlink(format!("{pgid}:{nonce}"), &lock).unwrap();
+        let fake_ps = format!(
+            "#!/bin/sh\ncase \"$*\" in\n  '-A -o pid= -o pgid=') printf '{vanished_pid} {pgid}\\n{owner_pid} {pgid}\\n';;\n  '-ww -p {vanished_pid} -o command=') exit 1;;\n  '-ww -p {owner_pid} -o command=') printf '%s\\n' 'AM_CODEX_INSTALL_OWNER={nonce}';;\n  *) exec /bin/ps \"$@\";;\nesac\n"
+        );
+        crate::testing::write_exec(bin.join("ps"), fake_ps);
+
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(probe_script(&lock.display().to_string()))
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        let probe_text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let contender_ran = dir.join("contender-ran");
+        let contender = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(locked_script(&lock.display().to_string(), &format!(": > '{}'", contender_ran.display())))
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let contender_text = format!("{}{}", String::from_utf8_lossy(&contender.stdout), String::from_utf8_lossy(&contender.stderr));
+
+        let held_or_unknown = (output.status.success() && probe_text.trim() == format!("busy {pgid}"))
+            || (output.status.code() == Some(70) && probe_text.trim() == "unknown");
+        assert!(held_or_unknown, "a vanished snapshot member is busy or unknown, never free: {probe_text}");
+        assert!(!contender.status.success(), "the contender must fail closed: {contender_text}");
+        assert!(contender_text.contains(LOCKED_MARK), "the lock uncertainty must block a contender: {contender_text}");
+        assert!(!contender_ran.exists(), "the contender must not enter its install section");
+    }
+
     /// The `/bin/sh` process here stands in for the remote command shell started by SSH.
     /// Killing that control process must not release the host lock while its fake installer lives.
     #[tokio::test]
@@ -3877,7 +3920,10 @@ mod tests {
         control.wait().await.unwrap();
 
         let probe = local_sh(&probe_script(&lock), Duration::from_secs(30)).await;
-        let busy = probe.as_ref().ok().and_then(|out| parse_probe(out).ok()) == Some(true);
+        let held_or_unknown = match &probe {
+            Ok(out) => parse_probe(out).is_ok_and(|busy| busy),
+            Err(error) => error.contains("unknown") && error.contains("70"),
+        };
         let second = local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(30)).await;
         let second_was_excluded = second.as_ref().is_err_and(|err| err.contains(LOCKED_MARK) && err.contains("75"));
         let contender_did_not_run = !second_ran.exists();
@@ -3893,7 +3939,7 @@ mod tests {
         let second_ran_after_release = second_ran.exists();
         std::fs::remove_dir_all(&dir).ok();
 
-        assert!(busy, "a dropped SSH control process must not make the live installer lock stale: {probe:?}");
+        assert!(held_or_unknown, "a dropped SSH control process must leave the lock busy or conservatively unknown: {probe:?}");
         assert!(second_was_excluded, "a second install stays excluded while the fake remote installer lives: {second:?}");
         assert!(contender_did_not_run, "the contender must not enter its install section");
         assert!(released, "the helper's cleanup signal must follow lock release: {released_probe:?}");
