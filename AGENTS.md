@@ -1,6 +1,6 @@
 # agents-manager — agent 工作規則
 
-這份給所有在這個 repo 裡工作的 agent（claude / codex / grok，含 AG Man 派出的子 agent）。AG Man 的 bot 不直接讀 CLAUDE.md：這份由 config 的 `[agents.projects]` 注入（SPEC §6.5i），改了重啟 bot 生效。人類讀的說明在 `README.md`，規格在 `docs/SPEC.md`，API 在 `docs/API.md`，前端在 `docs/FRONTEND.md`，UI 取捨在 `docs/UI-DECISIONS.md`。
+這份給所有在這個 repo 裡工作的 agent（claude / codex / grok，含 AG Man 派出的子 agent）。檔名是 `AGENTS.md`（2026-10-04 使用者：「改使用 agents md」，原本叫 CLAUDE.md）：AG Man 的 bot 由 config 的 `[agents.projects]` 注入這份（SPEC §6.5i），改了重啟 bot 生效；直接在 repo 裡開的 claude 沒有 CLAUDE.md 時會自己讀 AGENTS.md、codex 本來就讀它。人類讀的說明在 `README.md`，規格在 `docs/SPEC.md`，API 在 `docs/API.md`，前端在 `docs/FRONTEND.md`，UI 取捨在 `docs/UI-DECISIONS.md`。
 
 ## 修正 Bot 直接向 AGM 申請（使用者授權，2026-09-12）
 
@@ -13,7 +13,7 @@
 
 ## 專案長相
 - `daemon/`：Rust（axum + sqlx/SQLite），唯一狀態源；透過 herdr socket 管 pane，hook 為主、終端快照為備援。
-- `web/`：React + zustand，只做投影；dev 用 `cd web && npx vite`（5173，走真 daemon），mock 用 `VITE_MOCK=1`。
+- `web/`：React + Vite（SPA，沒有 Next.js）＋ zustand，只做投影；dev 版 `agm:5173` 由 `com.agm.dev-server` 維持（`bun run dev`，代理到真 daemon），mock 用 `VITE_MOCK=1`。
 - 正式 UI 嵌在 daemon 二進位裡：前端改完要 `bun run build` **再** `cargo build --release -p agents-managerd` 才會進到 7788。
 
 ## 開工前
@@ -29,12 +29,13 @@
 - 只改任務需要的檔案與行；共用檔（`store.ts`、`ChatPanel.tsx`、`Sidebar.tsx`、`styles.css`、`api.rs`、`lifecycle.rs`）hunk 要小，新邏輯優先獨立成新檔。
 - 不要翻案 `docs/UI-DECISIONS.md` 已定案的決定；新的取捨補寫進去。
 - 改了 API 要同步 `docs/API.md`；改了行為要同步 `docs/SPEC.md`。
+- **新增 API 路由＝在 `daemon/src/bot_scope_matrix.rs` 的允許表登記**（bot principal 是 Allow 還是 Forbidden），推之前跑 `cargo test -p agents-managerd -- bot_scope_matrix`。漏登記 `bot_a_against_bot_b_matches_the_allow_table` 會報 UNLISTED、main CI 變紅（2026-10-04 #839）。
 - 不要加新功能、不要順手重構任務以外的東西。
 - **新增／修改資料表、欄位、索引、trigger（含各子模組的 `migrate`）＝升 `SCHEMA_VERSION`**：在 `daemon/src/db.rs` 的 `SCHEMA_HISTORY` 最後加一行 `(N+1, "<指紋>")`（指紋照 `schema_guard` 測試失敗訊息給的值），不准改既有那幾行。沒升版＝pin 測試紅，而且舊 binary 會照開一個它不懂的 schema。已合流的別人的 schema 變更沒升版時，以主幹現況重算、併進同一版，不要只顧自己那一行。
 
 ## 驗證（收尾前必跑）
 - Claude 端另有 project skill `verify`（`.claude/skills/verify/`，issue #747）在 commit 前叫起同一個 `scripts/check.sh changed`；它只是這條規則的入口，不另有判斷，Ubuntu Full CI 仍非同步。
-- 收尾跑 `scripts/check.sh changed`（issue #716）：只跑改到的部分（跟 `origin/main` 比），daemon 做 `cargo check --all-targets` 再跑**改到的模組自己的測試**（`scripts/ci-daemon-filters.sh` 由路徑挑；跨模組的連帶影響抓不到，交給 ubuntu-ci）；要明講跑哪些加 `CHECK_TESTS=<過濾字串>`、不跑測試用 `CHECK_TESTS=none`。改動範圍大、或改到共用基礎時再跑整樹 `scripts/check.sh`。
+- 收尾跑 `scripts/check.sh changed`（issue #716）：只跑改到的部分（跟 `origin/main` 比），daemon 做 `cargo check --all-targets` 再跑**改到的模組自己的測試**（`scripts/ci-daemon-filters.sh` 由路徑挑；跨模組的連帶影響抓不到，交給 ubuntu-ci）；要明講跑哪些加 `CHECK_TESTS=<過濾字串>`（**只收一個**過濾字串；用空白分開好幾個會一個測試都選不到、check.sh 拒絕放行——要多個模組就另外 `cargo test -p agents-managerd -- a b c`）、不跑測試用 `CHECK_TESTS=none`。改動範圍大、或改到共用基礎時再跑整樹 `scripts/check.sh`。
 - **主機負載高時等它降下來，用共用的閘，不要自己手寫迴圈**（issue #813）：`CHECK_MAX_LOAD=40 scripts/check.sh changed`，或在任何 cargo 前面接 `scripts/wait-load.sh --max 40 && …`。逾時（`CHECK_LOAD_TIMEOUT`／`--timeout`，預設 1800 秒）一律回非 0、後面的指令不跑——手寫迴圈逾時回成功、在 load≈152 照跑的事故就是這樣來的（#789）。也不要為了快把 `~/.cargo/bin` 擺到 PATH 前面或設 `AM_REAL_CARGO` 繞過 cargo shim：那樣不佔名額，整樹 `cargo test` 直接疊在別人的名額上。
 - 整樹測試「單跑都綠、整樹偶發紅」：`scripts/flaky-sweep.sh -n 5 -c 2`（高並行連跑 N 輪、可同時開多份製造負載，列出紅過的測試與次數、有紅 exit 1、一輪都沒跑到或少跑 exit 2）；修完要用它連跑證明不再紅。**本機預設禁跑**（協調者 2026-09-24 裁示）：它繞過 cargo shim、開高 `--test-threads` 又同時開好幾份，要驗 flaky 走遠端編譯主機或 CI；真的要在本機跑得在命令列加 `--i-know`（唯一的同意方式，沒有環境變數繞法）並先跟協調者講一聲。
 - daemon 個別指令：`cargo build --release -p agents-managerd`、`cargo test -p agents-managerd`、`cargo clippy -p agents-managerd`（目前既有 32 個 warning，暫不加 `-D warnings`）。
@@ -42,7 +43,7 @@
 - shell 腳本裡變數後面接全形標點一律寫 `${VAR}`：macOS 的 bash 3.2 會把標點併進變數名，`set -u` 下直接 unbound variable 而中止。`scripts/ops/lint-shell-vars.sh`（`scripts/check.sh ops` 與 CI 的 ops job 都會跑）會擋住。
 - 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時，要在 Mac 本機跑 `scripts/check.sh macos-local`；不要為了驗證去等或觸發 GitHub Actions（使用者 2026-09-28：CI 一律在 agm-host 或 Mac 本機跑）。新測試若散在其他模組，函式名加 `macos_local_` 前綴，讓入口自動納入。
 - 工作樹裡別人的 WIP 讓編譯掛掉時，對**你 staged 的內容**驗：`git archive` 出來或用 `git stash --keep-index` 以外的方式，總之不能碰別人的檔。
-- UI 改動要看真畫面：`OUT=/tmp/shots node scripts/ui-goal-shots.mjs`（headless Chrome 七張）或 ego-browser；截圖放 `docs/screenshots/<feature>/`。
+- UI 改動要看真畫面：**一律用 ego lite（`ego-browser`）**，禁止自己開 Chrome／headless（AG Man 硬規則；`scripts/ui-goal-shots.mjs` 會自己起 headless Chrome，不准用）；截圖放 `docs/screenshots/<feature>/`。沒有 ego 可用就只做 DOM／純函式測試，回報時講清楚沒看過真畫面。
 - daemon 在 `127.0.0.1:7788`，token 在 `~/.config/agents-manager/ui-token`，header `X-AM-Token`。
 - **完整 CI 在 ubuntu 背景跑，不要等**（issue #716，使用者 2026-09-28）：agm-host 上的 `scripts/ops/ubuntu-ci.sh` 每分鐘撿最新的 main HEAD 跑整樹 `scripts/check.sh`（同時只跑一輪、中間的 sha 不補跑），結果寫成 commit status `ubuntu-ci`。推完就去做下一件事；之後用 `gh api repos/Eden-Sun/agents-manager/commits/<sha>/status -q '.statuses[]|select(.context=="ubuntu-ci")'` 看結果。GitHub Actions 只剩 PR 與每日排程，**任何收尾、驗收、restart 判斷都不等它**（使用者 2026-09-28）。
 
@@ -80,7 +81,7 @@ nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.
 ## 給使用者的檔案：outbox，不是 scratchpad（使用者 2026-09-16）
 - scratchpad 只放中間產物，不再當成給使用者的輸出目錄。
 - 要交給使用者的檔案放 outbox：`$AM_OUTBOX`＝`~/.config/agents-manager/outbox/<AM_BOT_ID>/`（本機 bot 啟動時 daemon 注入並建好，子 pane 繼承；沒有這個變數的舊 pane 自己拼同一個路徑）。空目錄會被清理收掉，**寫之前一律 `mkdir -p "$AM_OUTBOX"`**。只保留 1 小時（從檔案**搬進** outbox 起算，`mv`／`cp -p` 進來的舊檔不會立刻被清），AGM 的 `com.agm.outbox-gc` 每 10 分鐘清掉超過 1 小時的檔；要長期保留的放 repo 或 `reports/`。網頁「檔案暫存」只列 outbox 的檔案，scratchpad 一律看不到（SPEC §6.5f）。
-- 私鑰、憑證、DB（含 DB 複本、瀏覽器 profile 這類會帶 cookie／token 的目錄）一律不得放 scratchpad 或 outbox；headless 瀏覽器的 `--user-data-dir` 用完就刪。複本 migrate 之類要用 DB 複本的驗證，做完當下刪掉複本。
+- 私鑰、憑證、DB（含 DB 複本、瀏覽器 profile 這類會帶 cookie／token 的目錄）一律不得放 scratchpad 或 outbox；瀏覽器一律走 ego lite，不自己開 headless、不留 profile 目錄。複本 migrate 之類要用 DB 複本的驗證，做完當下刪掉複本。
 
 ## 回報格式
 三到五行：做了什麼（commit hash）、怎麼驗的（數字）、要派工者做的事（例如重啟 daemon）、沒做到的與原因。不要貼整段 diff。

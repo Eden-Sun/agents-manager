@@ -46,7 +46,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.s.project(B)["url"], UB)
 
     def test_a_question_carrying_a_credential_is_refused_and_never_stored(self):
-        """CLAUDE.md：不貼 token／密碼。題目會一字不漏送到第三方網頁，所以在入口擋，不留在佇列與 DB 裡。"""
+        """AGENTS.md：不貼 token／密碼。題目會一字不漏送到第三方網頁，所以在入口擋，不留在佇列與 DB 裡。"""
         token_file = Path(self.tmp.name) / "ui-token"
         token_file.write_text("a-live-ui-token-0123456789abcdef\n")
         secrets = {

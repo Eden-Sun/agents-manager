@@ -245,7 +245,7 @@ check_clippy() {
 }
 
 # 平台敏感的 daemon 模組（macos-local 的測試組：cli_update::tests、cargo_shim::tests，以及函式名帶 macos_local_ 的）改了：
-# 非 macOS 上跑不了 macos-local（check.sh macos-local 會明確拒絕），至少要明講，不能安靜綠燈讓人以為都驗過了（CLAUDE.md：
+# 非 macOS 上跑不了 macos-local（check.sh macos-local 會明確拒絕），至少要明講，不能安靜綠燈讓人以為都驗過了（AGENTS.md：
 # 改動 shell／行程／signal 或 BSD 與 GNU 工具差異時要在 Mac 本機跑）。只提醒不擋：Mac 上同樣只提醒，因為它要幾分鐘。
 macos_local_hint() {
     local f hit=""

@@ -1,6 +1,6 @@
 # 共用編譯快取（sccache，issue #91）
 
-多顆 agent 各自一個 worktree、各自一個 `CARGO_TARGET_DIR`（見 `CLAUDE.md`「開工前」），是刻意的：
+多顆 agent 各自一個 worktree、各自一個 `CARGO_TARGET_DIR`（見 `AGENTS.md`「開工前」），是刻意的：
 避免大家搶同一份 `target/` 的鎖、也讓半成品互不干擾。代價是同樣沒改過的依賴（`axum`、`sqlx`、
 `tokio`…）在每個 worktree 各編一次，而這台機器的 rustc 併發又被壓到 2（`scripts/cargo-slot.sh`），
 編譯常常是整條產線的瓶頸。

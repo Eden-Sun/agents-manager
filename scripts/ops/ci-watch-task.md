@@ -15,4 +15,4 @@ AGM 定期交辦：main 的 GitHub CI 紅了（`ci-watch-kick.sh` 偵測到並�
 - 驗證不等 GitHub Actions（使用者 2026-09-28）：修的那幾條先在本機（Linux 限定的就在 agm-host，macOS 限定的在 Mac 跑 `scripts/check.sh macos-local`）跑到綠再推；推完看 commit status `ubuntu-ci`（`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`，log 在 agm-host `~/.cache/agents-manager/ci/logs/<sha>.log`），你負責的那幾條還在就繼續修。
 - 紅的不是你造成、也修不了：在 issue 留言指出哪一條、哪個 sha，回報派工者。
 - `ubuntu-ci` 轉綠後在 issue 留言驗證用的 sha，**由你關 issue**（盯哨不會自動關）。
-- 全程繁體中文；遵守 repo 的 `CLAUDE.md`（自己的 worktree、不重啟 daemon、只 add 自己的檔）。
+- 全程繁體中文；遵守 repo 的 `AGENTS.md`（自己的 worktree、不重啟 daemon、只 add 自己的檔）。
