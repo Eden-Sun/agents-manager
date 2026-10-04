@@ -435,6 +435,18 @@ check_eq "guard 持有人未知時不重複部署" "0" "$(wc -l < "$AGM_DIR/swap
 kill "$GUARD_HOLDER" 2>/dev/null; wait "$GUARD_HOLDER" 2>/dev/null
 teardown
 
+# A dead owner with a future-dated lock cannot be safely reclaimed, but must not be silently skipped forever.
+setup
+ci "$C3" success
+mkdir -p "$AGM_DIR/daemon-update.lock"
+echo "999999 $(date +%s)" > "$AGM_DIR/daemon-update.lock/owner"
+python3 -c 'import os,sys,time; t=time.time()+3600; os.utime(sys.argv[1], (t,t))' "$AGM_DIR/daemon-update.lock"
+AGM_LOCK_STALE_SECS=0 run >/dev/null
+check "未來 mtime 的死 runner 鎖推時間異常告警" "runner_clock_skew" "$AGM_DIR/alerts.log"
+check "未來 mtime 的鎖有明確記錄" "時間在未來" "$(LOG)"
+check_eq "未來 mtime 的鎖不重複部署" "0" "$(wc -l < "$AGM_DIR/swap.log" | tr -d ' ')"
+teardown
+
 # 活 PID 的 command line 只含同名片語、不是真正 kick：不能把被重用的 PID 誤認成執行者而永遠保留鎖。
 setup
 ci "$C3" success
