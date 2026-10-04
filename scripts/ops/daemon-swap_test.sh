@@ -1335,7 +1335,7 @@ seed_audit "INSERT INTO bots (id,name,project_id,deleted_at,managed_by,parent_bo
     VALUES ('id-mom','mom','p1',NULL,'user',NULL,'2000-01-01T00:00:00.000Z'),
            ('id-kid','kid','p1','2099-01-01T00:00:02.000Z','child','id-mom','2000-01-01T00:00:00.000Z');
   INSERT INTO runs VALUES ('id-mom','running');
-  INSERT INTO intents VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"agent_missing\",\"mode\":\"implicit\",\"pane\":\"present\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
+  INSERT INTO intents (id,kind,subject_id,payload_json,status,created_at) VALUES ('it1','retire_child','id-kid','{\"why\":\"reconcile_agent_gone\",\"cause\":\"agent_missing\",\"mode\":\"implicit\",\"pane\":\"present\",\"parent_bot_id\":\"id-mom\"}','done','2099-01-01T00:00:01.000Z');"
 rc=$(run)
 check_eq "已看見 agent_missing：立刻回滾（rc=7）" "7" "$rc"
 check_no "不合格的 intent 不該進入重查" "rechecking state and intent" "$SWAP_LOG"
