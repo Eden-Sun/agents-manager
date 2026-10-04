@@ -950,14 +950,16 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 
 使用者：「可以對某個 bot 下 compact，按鈕做在 context 旁邊」。對話頁狀態列的 context 用量旁一顆小「壓縮」鈕，送 `/compact`（`POST /api/bots/{id}/compact`，claude／codex；grok 沒有這個指令所以不畫）。只有 bot 在跑而且閒著才能按；被擋時用人話說原因（回合中、忙著、沒在跑）。不等壓縮完成，新的用量由 statusLine 回報。
 
-## 輸入框上方的 context／快取提示（2026-10-04 使用者）
+## 快取狀態：狀態列常駐、輸入框只在冷時警示（2026-10-04 使用者）
 
-- 送出之前就讓人看到代價：輸入框正上方常駐一行小字（`ComposerCostHint`），
-  `context 45%（約 450K）· 快取還熱（剩 N 分）`。**只做 claude 與 codex，grok 整行不畫。**
-- 資料以 daemon 的 `run.prompt_cache` 為準（claude＝statusLine 的 `prompt_cache`／`context_window`；codex＝rollout 最近一筆 `token_count` 推算，
-  所以字面加「約」：`快取還熱（約剩 N 分）`、`快取已過期（約閒置 X）`）。`warm`＋`expires_at` 判熱冷，閒置時 `warm:true` 過了 `expires_at` 也算冷。
-  舊 daemon／舊版 claude／codex 還沒讀到 rollout 才退回 `last_api_at`＋`cache_ttl_secs` 推算（`lib/cacheClock.ts`）。
-- 已過期改警示色（`--warn`、粗體）：`快取已過期（閒置 X 小時 Y 分），送出這則會重寫約 N K`（N＝`recache_tokens_if_cold`；退回推算時寫「重新讀入整段 context（約 NNNK）」）。
-  回合進行中快取一直被刷新，只寫「快取還熱（回合進行中）」，不顯示過期。context 讀不到整段不畫；token 數以 daemon 算好的為準（statusLine 的 `total_input_tokens` 是累計值，最後才用）。
-- 只提示：不擋送出、不跳確認框、不加任何按鈕。
-- 手機寬度一行放得下：快取段換短版（`快取熱 剩 N 分`、`快取已過期，送出重寫 459K`），再不夠就單行截尾；完整句留在 `title`。
+- 先做的是輸入框上方常駐一行 context＋快取，使用者看了現有畫面更正：**聊天區上方的狀態列已經有 context（`81% · 811k/1M`），不要在輸入框旁再做一份。**
+  現況：
+  - **狀態列**（`StatusCache`，接在 context 那段後面）：`快取 熱（剩 23 分）`／`快取 已冷`；回合進行中寫「熱」。
+    codex 是 rollout 推估，字面加「約」（`熱（約剩 23 分）`、`已冷（約）`），tooltip 說明依 rollout 推估；codex 沒有 statusLine，context 也在這裡補成同一段格式（`context 6.8% · 18k/258k`）。
+  - **輸入框**（`ComposerCostHint`）：平常完全不顯示；**只有快取已冷、而且不在回合中**才在輸入框上方出一行警示色（`--warn`、粗體）：
+    `快取已過期，送出這則會重寫約 811K`（N＝`recache_tokens_if_cold`，codex 用最近一次 `input_tokens` 近似；沒有數字寫「整段 context」）。
+    不擋送出、不跳確認框、不加按鈕；窄視窗單行截尾，完整句在 `title`。
+- 只做 claude 與 codex，grok 完全不顯示。
+- 資料以 daemon 的 `run.prompt_cache` 為準（claude＝statusLine 的 `prompt_cache`，codex＝rollout 最近一筆 `token_count` 推算）；`warm`＋`expires_at` 判熱冷，
+  閒置時 `warm:true` 過了 `expires_at` 也算冷。舊 daemon／舊版 claude／codex 還沒讀到 rollout 才退回 `last_api_at`＋`cache_ttl_secs` 推算（`lib/cacheClock.ts`）。
+  token 數以 daemon 算好的為準（statusLine 的 `total_input_tokens` 是累計值，最後才用）。

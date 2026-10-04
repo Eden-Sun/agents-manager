@@ -2341,7 +2341,7 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
 - **網頁**（`lib/cacheClock.ts`、`cacheClock.css`）：只畫在主力晶片上（桌機主力組、手機主力格），每 15 秒重算。整顆晶片一層淡的等級色調，剩餘／TTL 那段（由左往右）再疊深一層，
   色調：剩 > 15 分綠、5–15 分黃、< 5 分紅；到期＝已涼，回到原本的底色。tooltip 加一行「快取約 N 分後到期（上次活動 HH:MM）」／「快取已涼（上次活動 HH:MM）」；
   回合進行中滿條。grok、沒有紀錄的不畫。狀態不存 localStorage。
-- **輸入框上方的提示（`prompt_cache.rs`、`ComposerCostHint`；使用者 2026-10-04）**：送出之前就讓人看到代價。只做 claude 與 codex，grok 完全不顯示。
+- **快取狀態的顯示（`prompt_cache.rs`、`StatusCache`、`ComposerCostHint`；使用者 2026-10-04）**：送出之前就讓人看到代價——狀態列常駐「快取 熱（剩 N 分）／已冷」，輸入框只在冷時警示（UI-DECISIONS）。只做 claude 與 codex，grok 完全不顯示。
   run JSON 另帶 `prompt_cache`（API.md）：claude 從 `runs.status_json` 的 statusLine `prompt_cache`（≥ 2.1.289）與 `context_window` 挑精簡欄位（**不外送原文**，
   `source:"statusline"`）；沒有這塊（舊版 claude）為 `null`。codex 沒有 statusLine，巡邏（`update_watch::sweep_runs`，30 秒）對每顆本機 codex run 讀它的
   rollout（`$CODEX_HOME/sessions/…/rollout-*-<native_session_id>.jsonl`，沿用 `codex_session_log`）**新增的整行**——記路徑與位移，不整檔重讀；第一次只讀檔尾 256 KB——

@@ -66,6 +66,7 @@ import { ShareLinkButton } from './ShareLinkButton'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
 import { ComposerCostHint } from './ComposerCostHint'
+import { StatusCache } from './StatusCache'
 import { StatusLamp } from './StatusLamp'
 import { DELIVERY_HINT_TEXT, DELIVERY_WARN_TEXT, deliveryNotice } from '../lib/deliveryNotice'
 import { SafeMarkdown } from './SafeMarkdown'
@@ -1098,6 +1099,7 @@ function StatusLineBar({ botId, status, text }: { botId: string; status: StatusI
           <CompactButton botId={botId} />
         </SlItem>
       ) : null}
+      <StatusCache botId={botId} status={status} />
       {/* 花費不放（2026-09-12 使用者）。版本貼最右，窄視窗先讓位。 */}
       {status.version ? (
         <SlItem k="版本" className="sl-version">
