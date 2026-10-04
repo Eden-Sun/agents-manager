@@ -1,7 +1,7 @@
 # Antigravity CLI（agy）支援：調查與設計（第一階段）
 
-> 狀態：設計稿（2026-10-04）。還沒有任何功能碼。實作完成後，仍有效的決定併進 `docs/SPEC.md`（新的 §「agy 支援」與附錄「agy CLI 事實」）、
-> `docs/API.md`，這份檔案就刪掉（AGENTS.md：文件只寫現況）。
+> 狀態：MVP（§3.1，本機單一身分）已實作，現況寫在 `docs/SPEC.md` §12a 與附錄 G、`docs/API.md`；這份檔案**只剩第二階段（§3.2）與還沒驗的風險／取樣清單（§4、§6）仍有效**，第二階段做完就刪掉（AGENTS.md：文件只寫現況）。
+> MVP 與本檔不同的決定（使用者 2026-10-04）：只用預設 `$HOME` 的 `~/.gemini`（不做 per-bot HOME、不做 `ag1`／`ag2` 身分切換與身分 UI），登入由使用者自己在 TUI 做，AG Man 不代按。
 >
 > 這份取代 Gemini CLI 那份設計（`dfdb89dd`，`docs/design/gemini-cli-support.md`）。Google 自 2026-06-18 起對個人用戶停了 Gemini CLI，
 > 目標改為 agy。AG Man 端的整合點盤點（kind／DB／啟動參數／畫面判讀／送達／hook／額度／更新／web／測試隔離／文件）沿用該份，這裡只重寫「agy 怎麼接」。

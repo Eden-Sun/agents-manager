@@ -708,7 +708,7 @@ Jev 不負責回合收尾、額度記帳或競態判斷；這些依 run、turn�
 - **第四個場景：完成回報的證據旗標**（issue #558，`judge::report`，#263 離線重放只接的兩題）。交辦從在途收成、而且 `result` 是 hook 回報的完成回覆（`completed`，含遲到才補上的那則；`completed_fallback` 從終端機刮下來的不送——#263 的髒資料就是交辦原文加額度橫幅，兩題都判錯）時，背景問一次 Jev：`claims_verified`（回報有沒有宣稱測試、建置、型別檢查或 CI 通過）與 `asks_parent_action`（要不要收件者動手或裁示）。題目是 `reports/jev-spike/report-evidence/` 量過的原文；state 只有遮罩後的回報（上限 12,000 字），不送交辦原文與 bot／專案識別。門檻 0.8：`claims_verified` < 0.8 或 `asks_parent_action` ≥ 0.8 就推 inbox `judge_report_evidence`（歸這筆交辦的驗收者，**不叫醒**：#263 樣本裡約一半的回報會標「缺驗證」，旗標搭下一次送達一起看；離線樣本上「缺驗證」precision 17/19、「要你動手」7/7），子 bot 有 `parent_bot_id` 時再在父 bot 聊天室留一則系統訊息。**不改交辦狀態、不重派、不按鍵**。關著、專案不在名單、或這次呼叫失敗：不標旗（失敗仍占一筆帳本，`error` 有原因）。同一筆交辦只問一次。帳本 `regex_verdict='report_evidence'`，`assignment_id` 指回 `supervisor_assignments.result`，兩個機率分欄存放（不寫進 `jev_is_live_ui`）；事後對準確率就拿這兩欄對回報。`cleared_at` 不蓋這一類。問答不在控制迴圈裡等（#480）。
 - 模型釘 `jev-1.13.0`。離線量測與題目來源在 `reports/jev-spike/`。Jev 的答案目前**不**作為否決票；要升級得先看帳本的數字。
 
-### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok`）最低契約
+### 4.4 hook 子命令（`agents-managerd hook claude|codex|grok|agy`）最低契約
 
 1. wall-clock ≤ 3 秒；**永遠 exit 0、永遠空 stdout**。
 2. stdin（claude、grok）上限 1 MiB，超過截斷標 `truncated`；codex 取 argv 最後一個。
@@ -3335,6 +3335,59 @@ poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label �
 解析（`quota_grok.rs`）：標題 `<window> limit (<plan>)`，window 含 `week` → `seven_day`、含 `hour` → `five_hour`；百分比只認同列有 `█`/`░` 的（避開 Context usage 分頁）；
 `Resets:` 沒年份，本機按 daemon 時區、遠端按 `tools::detect` 記下的 UTC offset（`HostTools.utc_offset_secs`）解析；偏移未知就保留百分比並令 `resets_at = None`，不猜。本機或遠端時區下都補當年、已過期超過一天就進位隔年，輸出 RFC3339 UTC。頻率：啟動一次，之後每 30 秒（使用者指定）；`GET /api/quota?refresh=1` 也觸發。
 
+## 12a. agy 支援（Google Antigravity CLI，使用者 2026-10-04）
+
+`kind = "agy"`：Antigravity CLI（`~/.local/bin/agy`，Go 單一執行檔；Google 自 2026-06-18 起對個人用戶停了 Gemini CLI，改用它）。herdr 內建 `agy` agent manifest，`agent.start {kind: "agy"}` 可用，但那份偵測規則是舊版（附錄 G.6），所以 daemon 自己認會停下來等人的畫面（§12a.4）。
+**第一階段（MVP）**：建立／啟動／送 prompt／讀回覆／狀態判讀，**本機、單一身分**（用使用者預設 `$HOME` 的 `~/.gemini`，沒有 per-bot HOME、沒有身分切換）。登入是 Google OAuth，**由使用者自己在 agy TUI 裡登入一次**，AG Man 不代按登入、不代答條款頁。resume／fork／額度／自動更新／child agent／persona 屬第二階段（設計：`docs/design/agy-cli-support.md` §3.2），這幾條在 agy 上一律回 `unsupported_kind`（不 panic）。
+
+### 12a.1 啟動
+| 項目 | 注入 |
+|---|---|
+| `auto_approve` | `--dangerously-skip-permissions`；沒開就不帶（agy 的 `toolPermission` 照它自己的預設 `request-review`） |
+| `model` | `--model <slug>`（slug 含 effort 變體，如 `gemini-3.1-pro-high`；解析失敗互動模式只警告、退回預設）。`effort` 沒有獨立旗標（`efforts_for_kind("agy") = []`，帶了 400） |
+| pane env | `AGY_CLI_DISABLE_AUTO_UPDATE=true`（agy 預設背景自我更新；版本由 AG Man 管，每個 agy pane 都關，包括使用者手動在 bot pane 裡開的；bot env 可蓋掉）。`AM_*` 照舊 |
+| hooks／信任 | 無 argv，寫設定檔（§12a.2、§12a.5） |
+| persona／AG Man 指示 | **第一階段沒有**（agy 沒有 argv 的 system prompt 管道；repo 的 `AGENTS.md` 它會自己從 cwd 往上讀）。第二階段見設計 #15 |
+| resume／fork／`--effort` | 第二階段；`resume_args_by_kind`／`fork_args_by_kind` 回 `unsupported_kind` |
+
+`bots.kind` 的 CHECK 收 `'agy'`：舊庫就地放寬（`db::widen_bots_kind_check`——在交易裡改 `sqlite_master.sql` 並遞增 `schema_version`，不重建 `bots`，因為十七張表指著它；放寬後的定義跟全新 DB 一字不差），`SCHEMA_VERSION` 42。
+
+### 12a.2 hook 與 statusLine：全域設定檔 + env 分派
+agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini CLI）共用的 `~/.gemini`，所以跟 grok（§12.2）同一個做法：**資料目錄裡一支 dispatcher `agy-hook.sh <事件>`**（bot 啟動時改寫），設定檔指向它，pane env 沒有 `AM_BOT_ID`／`AM_HOOK_TOKEN`（或 `AM_INSTANCE` 不符）就什麼都不做——使用者自己開的 agy 不受影響。
+- `~/.gemini/config/hooks.json` 的具名 hook **`agents-manager`**（隔離實例 `agents-manager-<slug>`）：`SessionStart`／`PreInvocation`／`Stop` 三個事件，**扁平** handler 陣列（`{"type":"command","command":"'<dispatcher>' <事件>","timeout":5}`；`PreToolUse`／`PostToolUse` 才要包 `{matcher,hooks}`，形狀錯了 agy 會整個丟掉這個檔——單元測試釘住形狀）。整個具名鍵是我們的，別的具名 hook、別的頂層鍵原樣保留。
+- `~/.gemini/antigravity-cli/settings.json` 的 `statusLine`＝`{"type":"command","command":"'<dispatcher>' state","stack_with_default":true}`（疊在 agy 內建狀態列下面，dispatcher 對 `state` 什麼都不印）。**只在沒設或本來就是我們的時候寫**；使用者自己的 `statusLine` 不碰（那顆 bot 就沒有狀態信標，hook 與畫面判讀照常）。
+- 兩個檔都：只 merge 自己那一項、其他一個字不改、**讀不懂就不覆寫**（agy 自己遇到解析失敗也拒絕覆寫；安裝失敗只記 warn，bot 照常啟動）、原子寫入（同目錄暫存檔 `rename`）、與信任清單共用同一把鎖（`trust::update_file`，settings.json 兩邊都寫）。
+- **dispatcher 永遠 exit 0；hook 事件永遠只印 `{}`**——hook 是同步的、會卡住 agent loop，stdout 會被 agy 當成決策（`{"decision":"continue"}` 會擋住停止），所以 daemon 子行程的 stdout 也導去 `/dev/null`。
+- `agents-managerd hook agy --bot … --event <事件>`：agy 的 payload 沒有事件名，子行程把 `--event` 放進 `hookEventName`；`Stop` 另外讀 `transcriptPath`（只讀最後 2 MiB、只收 `.jsonl`）把最近一回合的 `lastUserMessage`／`lastAssistantMessage` 放進 payload（`agy_support::last_exchange`）。讀不到就不放，事件照送。
+- 測試一律走 `crate::home::dir()`（測試行程的假 HOME），寫 `~/.gemini` 的程式碼都有「寫到假 HOME」的測試，絕不碰真的。
+
+### 12a.3 事件分類（`hookrecv::classify("agy")`）
+| 事件 | 結果 |
+|---|---|
+| `SessionStart`／`PreInvocation` | Identity：`conversationId`→`runs.native_session_id`、`transcriptPath`→`runs.transcript_path`（只收 `~/.gemini/antigravity-cli/brain/` 底下的 `.jsonl`，`transcript_read::trusted_roots`）。對話是**第一則 prompt 才建立**，`SessionStart` 沒有文件、不一定來，所以第一個 `PreInvocation` 補身分 |
+| `state`（statusLine） | StatusLine（單槽、最新的贏、不進收件匣）：只在有 `conversation_id` 時補身分（對話建立前路徑是占位的，不記）；`agent_state`／`tool_confirmation_pending`／`quota` 第二階段才接 |
+| `Stop` 有 `error` 文字，或 `terminationReason == "ERROR"` | TurnFailed：`error` 文字進 `classify_failure`（429／quota→額度、auth／API key→帳號、其他→API；`Interrupted` 不算失敗） |
+| `Stop` 且 `fullyIdle == false` | Ignore（背景工作還在跑，回合還沒真的結束） |
+| 其他 `Stop` | TurnComplete：`assistant`＝`lastAssistantMessage`、`user`＝`lastUserMessage`；**不給 `turn_id`**（`executionNum` 跨回合是否唯一沒驗過，當去重鑰匙會吃掉之後的回合） |
+| 其他 | Ignore。`terminationReason` 的值域不可假設（官方 `model_stop`／`max_steps_exceeded`／`error`，實測 `ERROR`，第三方 `NO_TOOL_CALL`），只認 `ERROR` |
+
+### 12a.4 畫面判讀：會停下來等人的畫面一律 blocked、不送字、不按鍵
+`agy_screen::blocking_dialog`（只看畫面最底 24 行）：登入（`Select login method:`／未登入歡迎頁）、色彩頁（`Choose your color scheme:`）、條款頁（`Terms of Service & Data Use`——**預設已勾選「允許 Google 收集並使用我的 Interactions 資料」，一個 Enter 就切換同意與否**）、信任框（`Do you trust the contents of this project?` ＋選項）、工具權限框（`Run this command?`／`Allow access to this URL?`／`Allow calling this tool?`，文案取自 CHANGELOG，**未實測**）。認法：標題整行吻合（前面最多一個圖示）；而且**輸入列（單獨一個 `>`）還在就不算框**——agy 在回覆裡抄這些字時畫面上沒有框。
+- 送 prompt 前（`prompt::pane_ready_for_prompt`、`agent.prompt` 路徑）：登入→409 `needs_login`，其餘→409 `dialog_open`，各插一則 system 說明；一個字都不送。
+- herdr 判 `idle` 時（`session_paused` 的巡邏，原本只看 claude）：補標 `blocked`、`blocked_reason.code = agy_dialog`（`text` 說明是哪一種），框關掉就還原；一個鍵都不按。
+- 輸入框判讀（`delivery::box_state("agy")`）：頂部橫幅、一條分隔線、`>` 輸入框、分隔線——跟 claude 現行的框同形狀；樣式讀時 dim 的佔位字算空，純文字讀不放寬。
+
+### 12a.5 信任：預寫，不代按
+`trust::store_path("agy")` ＝ `~/.gemini/antigravity-cli/settings.json`（只認 `$HOME`），`trustedWorkspaces`（絕對路徑陣列，接受信任框後 agy 自己寫的鍵）merge 進去、已在就不重寫、讀不懂就不覆寫。`pretrust_for_start` 在開 pane 之前寫；沒寫成只記 warn，信任框出現時走 §12a.4（blocked，不代按）。
+
+### 12a.6 送達與回覆
+- **送達證據**：本機、run 已有 `native_session_id` 與存在的 `transcript_path` 時用 `Proof::Transcript { LogFormat::Agy }`——`transcript_full.jsonl` 裡基準位移之後出現一筆 `type:"USER_INPUT"`、`<USER_REQUEST>` 標籤內原文（頭尾空白不算差異）與這句一字不差。**第一則 prompt 沒有 transcript 可證**（對話是它建立的）→ `Unverified`（照打照送、標「請人工確認」、不重送），之後每一則都有。agy 自己有訊息佇列（`pending_input_count`），忙碌中送字可能被收進它的佇列——第二階段核對。
+- **回覆**：`Stop` 的 `lastAssistantMessage`（§12a.2）。模型回覆的 transcript 步驟型別**未實測**（需登入後取樣，附錄 G.5）：目前收 `type` 含 `PLANNER_RESPONSE` 或 `NOTIFY_USER` 的步驟、內容是字串或含 `response`／`text`／`message`／`content`／`notification` 欄位的物件，取 `USER_INPUT` 之後最後一段；認不得就略過，回合照收但沒有回覆文字（log 看 `hook.log`）。
+- `cache_clock::ttl_secs("agy") = None`（TUI 路徑沒有 cache 讀數，網頁不畫倒數）。
+
+### 12a.7 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
+resume（`--conversation=<uuid>`／`-c`）與 `bulk_restart`／`idle_sleep`、`/fork`、額度（statusLine `quota` 的每模型 bucket、每週窗）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、child agent（herdr shim `--kind agy`）、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
+
 ## 13. 專案群組聊天
 
 ### 13.1 資料模型
@@ -4985,3 +5038,29 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 ### F.4 身份隔離
 `GROK_HOME` 覆寫設定目錄（`config.toml`、`auth.json`、`sessions/`、`hooks/`、`plugins/`、`memory/`），沒有 `GROK_CONFIG_DIR`。其他 env：`XAI_API_KEY`、`GROK_SANDBOX`、`GROK_FOLDER_TRUST=0`。
+
+## 附錄 G：agy CLI 事實（1.2.16，2026-10-04 實測）
+
+實測＝install 的 stable manifest、拋棄式假 HOME 未登入跑 TUI；**登入後才驗得到的**不在這裡（設計文件 §6 的取樣清單）。
+
+### G.1 安裝與執行檔
+- manifest：`https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/<platform>.json`（`linux_amd64`、`linux_amd64_musl`、`linux_arm64`、`darwin_arm64`…）給 `{version, url, sha512}`；tarball 解開是 200 MB 的靜態 Go 執行檔 `antigravity`，複製成 `~/.local/bin/agy`。**不要跑官方 `install.sh`**（最後一步 `agy install` 會改 shell profile 與 purge alias）：照這幾步手動做並驗 sha512。
+- agy 需要 CPU 的 `pclmulqdq`：QEMU 預設 CPU model 沒有，啟動即 `FATAL ERROR: This binary was compiled with pclmul enabled`（agm-host 的 VM CPU 改過後可跑，1.2.16 `--version` 正常）。子命令：`agent(s)`、`changelog`、`install`、`mcp`、`models`（要登入）、`plugin(s)`、`update`…；**沒有 `login`／`logout`／`status`**，登入只在 TUI 裡。
+
+### G.2 設定目錄只認 `$HOME`
+`~/.gemini/antigravity-cli/`（`settings.json`、`brain/<conversation-id>/`、`conversations/<id>.db`、`cache/onboarding.json`、`log/`、`updater/`）與 `~/.gemini/config/`（`hooks.json`、`mcp_config.json`、`rules/`、`AGENTS.md`）。`XDG_*`、`ANTIGRAVITY_EXECUTABLE_DATA_DIR` 都無效；與 Gemini CLI 共用 `~/.gemini`。`settings.json` 被 agy 隨時重排版回寫；解析失敗它拒絕覆寫。
+
+### G.3 hooks（`~/.gemini/config/hooks.json`）
+頂層 key＝hook 名稱；`PreInvocation`／`PostInvocation`／`Stop` 是扁平 handler 陣列，`PreToolUse`／`PostToolUse` 要包 `{matcher,hooks}`。`SessionStart` 沒有文件但 1.2.16 會觸發。共通 stdin（camelCase）：`conversationId`、`modelName`、`transcriptPath`、`artifactDirectoryPath`、`workspacePaths[]`；`Stop` 另有 `executionNum`、`terminationReason`、`error`、`fullyIdle`。**payload 沒有事件名、沒有 prompt 文字、沒有助理回覆文字。** hook 同步執行、逾時預設 30 秒；工作目錄是 hooks.json 所在資料夾；子行程繼承整份 pane env；stdout `{}` 被接受。`ANTIGRAVITY_CONVERSATION_ID` 會設給 hook 子行程。
+
+### G.4 statusLine／title
+`settings.json` 的 `statusLine`／`title`＝`{"type":"command","command":…}`（可選 `stack_with_default`、`enabled`、`padding`）：agent 狀態改變時 TUI 執行該指令、stdin 給 JSON（`agent_state`、`tool_confirmation_pending`、`pending_input_count`、`conversation_id`、`transcript_path`、model、context 用量，登入後有 `quota`、`plan_tier`、`email`）。
+
+### G.5 對話紀錄
+`brain/<id>/.system_generated/logs/transcript_full.jsonl`：使用者輸入那一行 `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":…,"content":"<USER_REQUEST>\n…\n</USER_REQUEST>\n<ADDITIONAL_METADATA>…"}`。模型回覆與工具步驟的 `type`／欄位**未實測**（binary 內有 `PLANNER_RESPONSE`、`RUN_COMMAND`、`NOTIFY_USER` 等 `CORTEX_STEP_TYPE_*`）。不要讀 `.db`。
+
+### G.6 TUI 與偵測
+首次啟動序列（herdr 每一頁都判 `idle`）：登入選單 → 色彩頁 → 條款頁（預設已勾選）→ 信任框；選 No 直接退出。主畫面：頂部橫幅（版本、憑證種類、模型、cwd）、分隔線、`>` 輸入框、分隔線。herdr 內建 agy manifest（2026.06.24.1）找的是舊的權限框文案，1.2.16 已改（`Run this command?` 等），真正的等待核准可能被當成 idle／working。退出：`/quit`、`ctrl+d` 兩次；`esc` 中斷生成。
+
+### G.7 環境變數與自動更新
+`AGY_CLI_DISABLE_AUTO_UPDATE=true` 關背景自我更新（官方文件列出；**沒有在有新版時實測**）。其他官方列出的：`GEMINI_API_KEY`（搭配 `modelProvider:"gemini"`）、`GOOGLE_GEMINI_BASE_URL`。AG Man 不依賴未文件化的 `AGY_*`。

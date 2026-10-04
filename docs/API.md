@@ -514,7 +514,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 | POST | `/api/projects` | `{"path":"/abs/or/~/path","label"?:"foo","host"?:"m4p"}`（`label` 預設目錄名） | `200 {"project_id"}`；路徑不存在 400；重複 409 |
 | DELETE | `/api/projects/{id}` | — | `200 {}`；仍有 active Run → 409 |
 | PATCH | `/api/projects/{id}` | `{"label"?:"新名字","handed_off_to"?:"agm-host"\|null}` | `200 {"project_id","needs_restart":false}`；label trim 後為空 400。不擋 active run（agent 身分取自 bot id，label 只影響**下次啟動**的 `agent_name` slug）。`handed_off_to`（#708，SPEC §6.5h）：字串＝移交給那台主機的 daemon（trim 後寫進 config.toml），`null`＝收回（當場排一輪對帳接手），不帶＝不動；空字串或非字串 400。設定當下不停、不關任何 pane |
-| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, auto_approve?, client_request_id?}` | `200 {"bot_id","name"}`；名稱重複 409，但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的）。提交已禁用模型時仍成功，並回 `remapped`（見下）。**`client_request_id`（冪等鍵，1..128 個 `[A-Za-z0-9-_.:]`，#352）**：同一個專案裡同一個鍵＋同樣的請求內容重送（回應遺失後重試），回第一次建好的那顆 `{"bot_id","name","replayed":true}`，不再建第二顆；同一個鍵換了請求內容（`name_auto:true` 時 `name` 只是提示、不算內容）回 409 `request_id_reused`（帶原本那顆的 `bot_id`）；沒帶＝照舊每次都建。鍵記在 config.toml 該 bot 的 `create_request_id`／`create_fingerprint`（daemon 持久，bot 刪除即失效） |
+| POST | `/api/projects/{id}/bots` | `{"name","kind":"claude"\|"codex"\|"grok"\|"agy","args":[],"autostart":false,"inject_hooks":true,"name_auto":false, model?, effort?, fast?, identity?, persona?, auto_approve?, client_request_id?}` | `200 {"bot_id","name"}`；名稱重複 409，但 `name_auto:true` 時自動往後找 `<base>-<n>`（回應 `name` 是實際用的）。提交已禁用模型時仍成功，並回 `remapped`（見下）。**`client_request_id`（冪等鍵，1..128 個 `[A-Za-z0-9-_.:]`，#352）**：同一個專案裡同一個鍵＋同樣的請求內容重送（回應遺失後重試），回第一次建好的那顆 `{"bot_id","name","replayed":true}`，不再建第二顆；同一個鍵換了請求內容（`name_auto:true` 時 `name` 只是提示、不算內容）回 409 `request_id_reused`（帶原本那顆的 `bot_id`）；沒帶＝照舊每次都建。鍵記在 config.toml 該 bot 的 `create_request_id`／`create_fingerprint`（daemon 持久，bot 刪除即失效） |
 | PATCH | `/api/bots/{id}` | 見 §10.2 | `200 {"needs_restart":bool}`；提交已禁用模型時另帶 `remapped` |
 | POST | `/api/bots/{id}/fork` | `{"name"?}` | 見 §10.3b |
 | POST | `/api/bots/{id}/promote` | `{"name"?,"model"?,"effort"?}` | 子 agent 升級成頂層 bot，見 §10.3c；停用模型被替換時回 `remapped` |
@@ -690,6 +690,7 @@ turn JSON 帶 `awaits_start`（1＝bot 沒在跑時收下、在等它起來，is
 | `dialog_open` | claude 的「Switch model?」確認框（herdr 判成 idle；Enter 會替使用者按 Yes） | 按 Esc（No, go back）再送；退不掉才回 409 + system 訊息 |
 | `dangerous_rm_pending` | claude 2.1.281 的防誤刪框「Dangerous rm operation on …: <目標> / Do you want to proceed?」（bypass 模式也會跳，約 2 分鐘自動拒絕） | **不按任何鍵**（只有人能核准）：回 `{"reason":"dangerous_rm_pending","run_id","target","warning","message"}`，對話插一則帶目標與指令的 system 訊息（同一個框只插一次）；框關掉後排著的照常送（SPEC §3.1） |
 | `dialog_open` | claude 2.1.278 首次啟動的「Auto mode … Yes, set auto mode as my default permission mode／No, keep bypass permissions」推銷框（herdr 判 idle；2026-09-22 build child 卡了半小時） | 送 Down＋Enter 選「No, keep bypass permissions」再送；還在才回 409 + system 訊息 |
+| `needs_login`／`dialog_open` | agy 的登入框（`Select login method:`）→ `needs_login`；首次啟動的色彩頁、「Terms of Service & Data Use」條款頁、「Do you trust the contents of this project?」信任框、工具權限確認框 → `dialog_open`（herdr 全判 idle；`tui_prompts` 之外另有 `agy_screen`） | **不按任何鍵、不送字**（條款頁一個 Enter 就切換「允許 Google 使用 Interactions 資料」）：回 409 `{"reason","run_id","message"}` + system 訊息，要使用者本人到「終端」分頁處理；run 同時被補標 `blocked`（`blocked_reason.code = agy_dialog`） |
 | `dialog_open` | grok 1.0.34 的「Do you trust the contents of this directory?」 | 先把 bot 的 cwd（沒有就專案目錄）寫進**那台主機**的信任紀錄（`trust::pretrust_for_start`，遠端經 ssh），畫面還在才按 `y`；還在才回 409 + system 訊息。讀不到 bot 在哪台主機、或讀不到專案目錄（不是「沒有」）時一個鍵都不按、不寫信任，直接 409（不插 system 訊息，排隊的 prompt 每次重試都會走到這裡），讀得回來再照常處理（#243） |
 
 **排隊中的 prompt 送出時也過這幾道**：claim 之後、`agent.prompt` 之前中了就把 turn 放回 `queued`（清 `run_id`）並插同一則 system 訊息，等下一個 idle 再試。
@@ -1560,7 +1561,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
 ```toml
 [[identities]]
 name = "cc1"                         # [a-z][a-z0-9_-]{0,31}
-kind = "claude"                      # claude | codex | grok
+kind = "claude"                      # claude | codex | grok | agy
 # host = "m4p"                       # 選填；省略＝只適用本機。鍵是 (host, name)：
                                      # 同名的 cc1 在別台是別的帳號（SPEC §16.2）
 args = []
@@ -1671,18 +1672,18 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 |---|---|---|
 | `name` | string | 暱稱：1–32 字、允許 CJK，不可含 `@ , : ;`；空白只能是單一個半形空白、夾在中間（頭尾、連續、tab／換行不行，2026-09-19）；專案內唯一（重複 409 `bot name already in use in this project`）。執行中也可改，不影響 herdr |
 | `agent_name` | string（唯讀） | herdr 內的 agent 名：有 active Run 時是實際啟動的名稱，否則是下次會用的 `<project slug>-<bot id 尾 6 碼>` |
-| `kind` | `claude` \| `codex` \| `grok` | 其他值 400 `kind must be claude, codex or grok` |
+| `kind` | `claude` \| `codex` \| `grok` \| `agy` | 其他值 400 `kind must be claude, codex, grok or agy`。`agy`＝Google Antigravity CLI（SPEC §12a），第一階段只跑本機、單一身分 |
 | `model` | string \| null | `null` = CLI 自己決定；不做白名單驗證，空白字串正規化成 `null` |
-| `effort` | string \| null | 依 kind 驗證，其他值 400。claude `low\|medium\|high\|xhigh\|max`；grok `low\|medium\|high\|xhigh`；codex `none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra` |
+| `effort` | string \| null | 依 kind 驗證，其他值 400。claude `low\|medium\|high\|xhigh\|max`；grok `low\|medium\|high\|xhigh`；**agy 沒有獨立的強度**（強度包在模型 slug 裡，`gemini-3.1-pro-high`／`-low`；帶 `effort` 一律 400）；codex `none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra` |
 | `fast` | bool | §12.2 |
-| `auto_approve` | bool，預設 `true` | 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`、grok `--always-approve` |
+| `auto_approve` | bool，預設 `true` | 注入略過權限確認的旗標：claude `--dangerously-skip-permissions`、codex `--yolo`、grok `--always-approve`、agy `--dangerously-skip-permissions` |
 | `inject_hooks` | bool，預設 `true` | `false` 時回覆走終端備援 |
 | `primary` | bool，預設 `false` | 純顯示用釘選（標題列下面那一列排最前）。不影響 argv/env，永遠 `needs_restart:false`；不進 config.toml（`bots.is_primary`），child bot 也能釘，手機與電腦同步；新釘的排到主力那列最後（`primary_position`，見 `POST /api/order`）。**不能跟會寫 config.toml 的欄位（name／autostart／model／effort／args／identity／env…）同一個 PATCH 送**（config 內的 bot）：混送 400、什麼都不寫，分兩次（#350，兩個 store 不可能同一個交易）；child bot 全在 DB，不受此限 |
 | `identity` / `env` | 見身份一節 | |
 | `persona` | §12.8 | |
 | `managed_by` / `parent_bot_id` | 唯讀 | `user` = config.toml 的 bot；`child` = bot 自己開的子 agent（§子 agent） |
 
-啟動 argv 順序（前端可據此預覽）：daemon 旗標（auto_approve、hooks、persona）→ model（claude `--model`、codex/grok `-m`）→ effort（claude `--effort`、grok `--reasoning-effort`、
+啟動 argv 順序（前端可據此預覽）：daemon 旗標（auto_approve、hooks、persona）→ model（claude／agy `--model`、codex/grok `-m`）→ effort（claude `--effort`、grok `--reasoning-effort`、
 codex `-c model_reasoning_effort="<level>"`）→ identity.args → bot.args。
 
 ### 10.2 `PATCH /api/bots/{id}`
@@ -1854,7 +1855,7 @@ daemon 記在行程內（5 分鐘、認領一次就用掉），該句回音進�
 若 announce 沒被角色 bot 路由攔截，盯梢解析只看寄件 bot 所在 host／herdr session 的 `agent_name` 或 pane id；舊 run 缺 session 時採用 host 設定。
 bot 資料庫名稱不算 herdr 目標，且只有唯一一筆 running run 符合才開始盯梢。
 
-### 10.6 hook 端點 `POST /hook/{claude|codex|grok}`
+### 10.6 hook 端點 `POST /hook/{claude|codex|grok|agy}`
 body `{bot_id, provider, payload, received_at, truncated?, run_id?}`，header `X-AM-Bot-Token`。`run_id` 是送出這則 hook 的 CLI 行程
 啟動時的 `AM_RUN_ID`；只用來判世代（`--resume` 前後兩個行程回報同一個 session，SPEC「世代圍籬」），缺了就只看 session。
 **`200` ＝ 事件已經寫進 `hook_events` 並 commit**（不是「已經處理完」，配對由 worker 背景做；SPEC §4.4b）；
@@ -1862,6 +1863,7 @@ body `{bot_id, provider, payload, received_at, truncated?, run_id?}`，header `X
 寫不進收件匣回 **503**，送端必須把同一份 body spool 起來稍後重送（SPEC §4.4 第 4 點）；`401` token 不對、bot 不存在（兩者回同一個 body，沒有有效 token 的人分不出 bot id 存在與否）；`410` 只給 token 正確但 bot 已刪除者。
 StatusLine 例外：不進收件匣，照舊 fire-and-forget 回 200。grok 的 `payload` 是 stdin JSON（`hookEventName`、`sessionId`、`promptId`、
 `transcriptPath`、`lastAssistantMessage`、`reason`、`stopHookActive`）；`reason ≠ end_turn` 與 `session_end` 忽略，`session_start` 只回填 `native_session_id`（SPEC §12.3）。
+agy 的 `payload` 是 stdin JSON（camelCase：`conversationId`、`transcriptPath`、`terminationReason`、`error`、`fullyIdle`…）再加 hook 子行程補的 `hookEventName`（`SessionStart`／`PreInvocation`／`Stop`／`state`；agy 自己不帶事件名）與 `Stop` 的 `lastAssistantMessage`／`lastUserMessage`（讀 transcript）。`state`（statusLine，snake_case）跟 StatusLine 一樣不進收件匣。分類見 SPEC §12a.3。
 
 ## 11. 專案群組聊天（SPEC §13）
 
@@ -1934,7 +1936,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 
 ## 12. 模型、fast、attach、額度、工具、人設、GitHub
 
-### 12.1 `GET /api/models?kind=claude|codex|grok&host=<name>&identity=<name>&refresh=1`
+### 12.1 `GET /api/models?kind=claude|codex|grok|agy&host=<name>&identity=<name>&refresh=1`
 
 某 host 上某 kind 可用的模型。`host` 省略 = `local`；快取 10 分鐘（key = host+kind+identity），`refresh=1` 強制重抓；遠端經 ssh 跑同一條管線。一般 Bot 只讀新鮮快取；未命中或過期回 503 `model_cache_miss`，不執行本機或遠端 CLI。一般 Bot 帶 `refresh=1|true|yes` 回 403 `user_only`；User 與已登記 AGM 角色維持現有即時探測行為。
 `identity` 只對 claude 有意義：決定讀哪個 `CLAUDE_CONFIG_DIR/settings.json` 算 `default_effort`（SPEC §17.1）；省略或不存在 → 預設帳號（不是錯誤）。
@@ -1951,6 +1953,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 | `codex` | `codex-app-server` | `codex app-server` JSON-RPC `model/list` | 每個模型的 `supportedReasoningEfforts` | 每個模型的 `serviceTiers`（目前只有 `priority` = Fast） |
 | `grok` | `grok-cli` | `grok models` + `~/.grok/models_cache.json` 的 per-model `reasoning_efforts`（無 cache 退回 low/medium/high） | 依模型 | `[]` |
 | `claude` | `static` | `opus / sonnet / haiku / fable` | 每個 alias 都是 `low…max` 五級 | `[]` |
+| `agy` | `static` | `agy models` 的實際清單（`gemini-3.8-flash-{high,medium,low}`、`gemini-3.7-flash-…`、`gemini-3.6-flash-…`、`gemini-3.1-pro-{high,low}`、`claude-sonnet-4-6`、`claude-opus-4-6-thinking`、`gpt-oss-120b-medium`；預設 `gemini-3.8-flash-medium`；第一階段寫死） | `[]`（強度在 slug 裡） | `[]` |
 
 `GET /api/models` 提供可選 alias 清單；bot 的 `model` 設定則會交給對應 CLI。Claude 可設定 alias（例如 `opus`）或完整 CLI 模型名（例如 `claude-opus-5-5`），完整名稱不必出現在 alias 清單；Codex 的模型名（例如 `gpt-6-luna`）同樣交給 `-m`。精確舊值 `gpt-5.6-sol`／`gpt-5.6-terra`／`gpt-5.6-luna` 不列在 Codex 清單，送入 create 或 PATCH 時會回報並採用上面的遷移目標。CLI 不會先以 `/api/models` 限制 PATCH 的其他模型字串。
 
@@ -2299,7 +2302,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `background_secs` | 到這次投影為止持續的秒數；沒有開始時間時 `null` |
 | `background_stuck` | 持續超過 3 小時（`background_jobs::STUCK_AFTER_SECS`）＝可能卡住或忘了收（claude 2.1.288 起終端 session 的背景指令沒有時間上限）；網頁改標「背景工作可能卡住（N）」。只是標示，daemon 不殺行程。沒有背景工作時 `false`。跨過門檻那一輪的巡邏會推一次 `bot_status` |
 | `background_source` | `"hook"`＝這個數字來自 claude Stop hook 的 `background_tasks`（≥ 2.1.287）；`null`＝畫面判斷（舊版 claude、codex、hook 帳過期被畫面校正）。SPEC §6.14 |
-| `blocked_reason` | 為什麼停在 `blocked`：`{code, text}`，`code` 是穩定的短代碼（`codex_update_menu`＝codex 啟動的更新選單、`codex_migration`＝模型升級提示、`rate_limit_switch`＝額度換模型建議、`dangerous_rm`＝claude 防誤刪確認框、`session_paused`＝claude Session paused 選單、`permission_prompt`＝claude 一般權限確認選單（`text` 帶工具名，例如「等待權限確認：Bash」，MCP 工具是 `MCP`、WebSearch 這類 `Tool use` 框是 `Web Search`，別的 session 送來被扣住等核准的訊息是「等待權限確認：Held message」；herdr 判成 blocked 那一刻與之後每 10 秒讀一次畫面分類，不按任何鍵）；之後可能增加，前端不認得的 code 照樣顯示 `text`），`text` 是一句中文說明（可能改字，別拿來判斷）。**只在 run 現在 `agent_status:"blocked"` 而且 daemon 知道原因時有值，其餘一律 `null`**（herdr 報了別的狀態、選單關掉、run 結束就跟著清掉，不殘留）。只在 `GET /api/state` 與 WS `bot_status` 的 run 物件裡；原因來自記憶體裡追蹤的擋路畫面、不在 DB。舊前端忽略這個欄位；沒有原因（畫面讀不到、不是上面幾種）仍是 `null`，只顯示「等待回應」 |
+| `blocked_reason` | 為什麼停在 `blocked`：`{code, text}`，`code` 是穩定的短代碼（`codex_update_menu`＝codex 啟動的更新選單、`codex_migration`＝模型升級提示、`rate_limit_switch`＝額度換模型建議、`dangerous_rm`＝claude 防誤刪確認框、`session_paused`＝claude Session paused 選單、`agy_dialog`＝agy 的登入／條款／色彩／信任／權限對話框（`text` 說明哪一種）、`permission_prompt`＝claude 一般權限確認選單（`text` 帶工具名，例如「等待權限確認：Bash」，MCP 工具是 `MCP`、WebSearch 這類 `Tool use` 框是 `Web Search`，別的 session 送來被扣住等核准的訊息是「等待權限確認：Held message」；herdr 判成 blocked 那一刻與之後每 10 秒讀一次畫面分類，不按任何鍵）；之後可能增加，前端不認得的 code 照樣顯示 `text`），`text` 是一句中文說明（可能改字，別拿來判斷）。**只在 run 現在 `agent_status:"blocked"` 而且 daemon 知道原因時有值，其餘一律 `null`**（herdr 報了別的狀態、選單關掉、run 結束就跟著清掉，不殘留）。只在 `GET /api/state` 與 WS `bot_status` 的 run 物件裡；原因來自記憶體裡追蹤的擋路畫面、不在 DB。舊前端忽略這個欄位；沒有原因（畫面讀不到、不是上面幾種）仍是 `null`，只顯示「等待回應」 |
 | `prompt_suggestion` | claude 輸入框裡那句灰字「建議下一句」（字串），可以用 `POST /api/bots/{id}/suggestion/accept` 一鍵送出（Tab＋Enter）。**只在 run 現在 `agent_status:"idle"`、輸入框裡只有那句灰字時有值，其餘一律 `null`**（回合開始、使用者在終端打了字、不是 claude、讀不到樣式畫面、超過 500 字、daemon 還沒讀到）；idle 邊之後 1.5／3.5／7／14 秒補讀、之後跟著 30 秒的畫面巡邏，內容變了或消失才推 `bot_status`。記憶體帳、不在 DB；舊前端忽略這個欄位 |
 | `last_api_at` | 這顆 bot 最後一次 API 活動（ISO 8601，`db::iso_at` 格式），推算 prompt cache 還熱不熱（SPEC §6.5j）：最近一筆送出去的回合 `completed_at`、claude statusLine 的用量欄位（`cost.total_api_duration_ms`／`context_window`）真的變了的那一刻、`blocked` 的 `agent_status_since`，取最晚；回合進行中（`agent_status:"working"` 或有 in-flight 回合）＝投影當下的時間。沒有任何紀錄或 grok 為 `null`。回合收尾會另推一次 `bot_status` 讓它跟上 |
 | `cache_ttl_secs` | 這種 kind 的 prompt cache 存活秒數：claude、codex `3600`，grok `null`（不知道，網頁不畫倒數）。舊前端忽略這兩個欄位 |
