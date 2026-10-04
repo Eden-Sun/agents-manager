@@ -11202,6 +11202,67 @@ mod per_principal_auth_tests {
         assert_eq!(crate::supervisor::store::approval(&e.app.db, &a1).await.unwrap().unwrap().status, "superseded");
     }
 
+    /// 2026-10-04 08:41～09:22：每一輪都在瞬間閒置時拿到窗口、§3a 換版前複查又看到有人 working 而交還；交還消耗了核准，
+    /// 下一輪重開一張，`escalates_at` 每輪往後推，忙碌的機群永遠升級不了。現在交還後的下一張接續等待（計時不歸零），
+    /// 等滿門檻之後 working 不再擋——acquire 與 3a 複查（同一張核准的 `safety`）都一樣。
+    #[tokio::test]
+    async fn a_window_given_back_by_the_swap_recheck_does_not_reset_the_escalation_clock() {
+        let e = crate::testing::env().await;
+        let bot = distinct_bot(&e, "swap-flicker").await;
+        let run = crate::testing::fake_run(&e.app, &bot.id).await;
+        let set = |status: &'static str| {
+            let (db, run) = (e.app.db.clone(), run.clone());
+            async move { sqlx::query("UPDATE runs SET agent_status=? WHERE id=?").bind(status).bind(&run).execute(&db).await.unwrap() }
+        };
+        let svc = || Extension(RequestPrincipal::Service(crate::service_auth::DAEMON_SWAP.into()));
+        let owner = "daemon-update-kick";
+        let ask = || SwapWindowIn { owner: owner.into(), commit: "d4d4d4d4".into(), ttl_secs: None };
+        let approval = |id: &str| {
+            let (db, id) = (e.app.db.clone(), id.to_string());
+            async move { crate::supervisor::store::approval(&db, &id).await.unwrap().unwrap() }
+        };
+        let recheck = |id: &str| {
+            let (app, id) = (e.app.clone(), id.to_string());
+            async move { crate::supervisor::maintenance::safety_as(&app, &[], Some(&id), Some(owner)).await.unwrap() }
+        };
+
+        // 第一輪：瞬間閒置，拿到窗口；3a 複查時又有人在忙、還沒放寬 → 交還。
+        let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask())).await.expect("閒置時拿得到");
+        let a1 = v["approval"]["id"].as_str().unwrap().to_string();
+        set("working").await;
+        let s = recheck(&a1).await;
+        assert_eq!(s["safe"], false, "{s}");
+        let fence = v["lease"]["fence"].as_i64().unwrap();
+        let token = v["lease_token"].as_str().unwrap();
+        assert!(crate::supervisor::maintenance::release(&e.app, "restart", owner, fence, crate::supervisor::store::LeaseProof::Token(token)).await.unwrap());
+        let a1 = approval(&a1).await;
+        assert_eq!(a1.status, "consumed", "一次核准一個窗口：交還照樣消耗");
+        let since = a1.waiting_since().unwrap().to_string();
+
+        // 第二輪：同一個 commit 開新的一張，等待起點接續第一張；escalates_at 沒有往後推。
+        let r = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask())).await;
+        let Err(LcError::Conflict(d)) = &r else { panic!("{r:?}") };
+        let d = if d.get("detail").is_some() { &d["detail"] } else { d };
+        assert_eq!(d["reason"], "not_idle", "{d}");
+        let a2 = d["safety"]["escalation_approval_id"].as_str().unwrap().to_string();
+        assert_ne!(a2, a1.id);
+        assert_eq!(approval(&a2).await.waiting_since(), Some(since.as_str()), "接續第一張的等待");
+        let eta = chrono::DateTime::parse_from_rfc3339(d["escalates_at"].as_str().unwrap()).unwrap();
+        let want = chrono::DateTime::parse_from_rfc3339(&since).unwrap() + chrono::Duration::seconds(crate::supervisor::maintenance::escalate_after_secs());
+        assert!((eta - want).num_seconds().abs() <= 2, "escalates_at {eta} 應該還是 {want}");
+
+        // 等滿門檻（把第一張的等待往前推 31 分鐘）：即使還有人 working，窗口給得出來，3a 複查也放行。
+        let old = crate::db::iso_in(-31 * 60);
+        sqlx::query("UPDATE supervisor_approvals SET wait_since=? WHERE id=?").bind(&old).bind(&a2).execute(&e.app.db).await.unwrap();
+        let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask())).await.expect("等滿門檻後 working 不擋");
+        assert_eq!(v["approval"]["id"], a2.as_str(), "同一張沿用");
+        assert_eq!(v["safety"]["escalated"], true, "{v}");
+        let s = recheck(&a2).await;
+        assert_eq!(s["safe"], true, "3a 複查吃得到同一張核准的放寬：{s}");
+        assert_eq!(s["escalated"], true, "{s}");
+        assert!(!s["working"].as_array().unwrap().is_empty(), "還有人在忙，放行是因為放寬：{s}");
+    }
+
     /// 2026-10-02 風暴的尾巴：拿窗口那一刻 daemon 自己的 DB 讀寫失敗（`database is locked`，正好是 daemon 重啟中）不是「窗口拒絕」，
     /// 核准沒有任何問題；撤掉它，下一輪重開的核准就把 30 分鐘的升級計時歸零，一直忙的機群又等不到放寬。基礎設施暫時失效要留著核准、
     /// 下一輪帶同一張再試。
