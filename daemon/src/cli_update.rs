@@ -82,9 +82,17 @@ fn shell_lock_path(lock: &str) -> String {
 /// 把 `inner` 包進主機端的安裝鎖（POSIX sh：遠端是 `ssh … /bin/sh -s`，本機是 `/bin/sh -c`）。
 /// 鎖被佔走的訊息寫到 stderr：遠端失敗時 `ssh_exec` 只帶 stderr 回來。
 fn locked_script(lock: &str, inner: &str) -> String {
+    locked_script_with_cleanup_marker(lock, inner, None)
+}
+
+/// Variant used by the process-lifetime test to observe the helper's EXIT cleanup without polling PIDs.
+fn locked_script_with_cleanup_marker(lock: &str, inner: &str, cleanup_marker: Option<&str>) -> String {
     let nonce = crate::db::ulid();
     let lock = shell_lock_path(lock);
     let inner = crate::hosts::sh_quote(inner);
+    let cleanup_marker = cleanup_marker
+        .map(|path| format!("  : > {}\n", crate::hosts::sh_quote(path)))
+        .unwrap_or_default();
     let worker = format!(
         r#"LOCK_NONCE='{nonce}'
 L={lock}
@@ -98,6 +106,7 @@ export AM_CODEX_INSTALL_OWNER
 cleanup() {{
   [ "$(readlink "$L" 2>/dev/null)" = "$GROUP_ID:$LOCK_NONCE" ] && rm -f "$L"
   kill -0 "$PARENT_PID" 2>/dev/null || rm -f "$OUT"
+{cleanup_marker}
 }}
 trap cleanup EXIT
 trap '' HUP INT TERM
@@ -3579,62 +3588,63 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-disconnect-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let lock = dir.join("codex-install.lock").display().to_string();
-        let installer_pid_file = dir.join("installer.pid");
+        let installer_waiting = dir.join("installer-waiting");
         let second_ran = dir.join("second-ran");
-        let release_file = dir.join("release-installer");
+        let release_channel = dir.join("release-installer.fifo");
+        let cleanup_done = dir.join("cleanup-done");
         let inner = format!(
-            "(while [ ! -e '{}' ]; do sleep 0.05; done) & echo $! > '{}'; wait",
-            release_file.display(),
-            installer_pid_file.display()
+            ": > '{}'; exec 3<'{}'; IFS= read -r _ <&3",
+            installer_waiting.display(),
+            release_channel.display()
         );
+        use std::os::unix::ffi::OsStrExt as _;
+        let c_fifo = std::ffi::CString::new(release_channel.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0, "create installer release channel");
 
         let mut control = tokio::process::Command::new("/bin/sh")
             .arg("-s")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .unwrap();
         let mut input = control.stdin.take().unwrap();
-        input.write_all(locked_script(&lock, &inner).as_bytes()).await.unwrap();
+        input.write_all(locked_script_with_cleanup_marker(&lock, &inner, Some(cleanup_done.to_str().unwrap())).as_bytes()).await.unwrap();
         drop(input);
-        for _ in 0..200 {
-            if installer_pid_file.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let installer_pid: u32 = std::fs::read_to_string(&installer_pid_file).expect("fake installer started").trim().parse().unwrap();
+        assert!(crate::testing::eventually!(installer_waiting.exists()), "the fake installer must reach its release channel");
+        let release_channel_for_writer = release_channel.clone();
+        let release_writer = tokio::task::spawn_blocking(move || {
+            std::fs::OpenOptions::new().write(true).open(release_channel_for_writer).unwrap()
+        })
+        .await
+        .expect("open installer release channel");
 
         control.start_kill().unwrap(); // Unix `start_kill` uses SIGKILL; do not run the wrapper's EXIT trap.
         control.wait().await.unwrap();
-        assert_eq!(unsafe { libc::kill(installer_pid as i32, 0) }, 0, "the fake installer outlives the SSH control shell");
 
-        let probe = local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap();
-        assert!(parse_probe(&probe).unwrap(), "a dropped SSH control process must not make the live installer lock stale: {probe}");
-        let second = local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(5)).await;
-        let err = second.expect_err("a second install stays excluded while the fake remote installer lives");
-        assert!(err.contains(LOCKED_MARK) && err.contains("75"), "{err}");
-        assert!(!second_ran.exists(), "the contender must not enter its install section");
+        let probe = local_sh(&probe_script(&lock), Duration::from_secs(30)).await;
+        let busy = probe.as_ref().ok().and_then(|out| parse_probe(out).ok()) == Some(true);
+        let second = local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(30)).await;
+        let second_was_excluded = second.as_ref().is_err_and(|err| err.contains(LOCKED_MARK) && err.contains("75"));
+        let contender_did_not_run = !second_ran.exists();
 
-        std::fs::write(&release_file, "release").unwrap();
-        for _ in 0..300 {
-            if unsafe { libc::kill(installer_pid as i32, 0) } != 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_ne!(unsafe { libc::kill(installer_pid as i32, 0) }, 0, "fake installer should finish");
-        for _ in 0..200 {
-            if !parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(!parse_probe(&local_sh(&probe_script(&lock), Duration::from_secs(5)).await.unwrap()).unwrap(), "lock becomes recoverable after the installer exits");
-        local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(5)).await.expect("a completed installer must release the lock");
-        assert!(second_ran.exists());
+        let mut release_writer = tokio::fs::File::from_std(release_writer);
+        release_writer.write_all(b"release\n").await.unwrap();
+        drop(release_writer);
+        assert!(crate::testing::eventually!(cleanup_done.exists()), "the helper must signal after releasing its lock");
+
+        let released_probe = local_sh(&probe_script(&lock), Duration::from_secs(30)).await;
+        let released = released_probe.as_ref().ok().and_then(|out| parse_probe(out).ok()) == Some(false);
+        let reacquired = local_sh(&locked_script(&lock, &format!("touch '{}'", second_ran.display())), Duration::from_secs(30)).await.is_ok();
+        let second_ran_after_release = second_ran.exists();
         std::fs::remove_dir_all(&dir).ok();
+
+        assert!(busy, "a dropped SSH control process must not make the live installer lock stale: {probe:?}");
+        assert!(second_was_excluded, "a second install stays excluded while the fake remote installer lives: {second:?}");
+        assert!(contender_did_not_run, "the contender must not enter its install section");
+        assert!(released, "the helper's cleanup signal must follow lock release: {released_probe:?}");
+        assert!(reacquired && second_ran_after_release, "a completed installer must release the lock: {reacquired}");
     }
 
     /// Killing the process that created the lock must not release it while an installer child survives.
