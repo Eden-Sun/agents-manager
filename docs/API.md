@@ -987,7 +987,7 @@ bot 或 active Run 不存在 404。
 - **一律不列**：隱藏檔、資料庫與旁檔（檔名含 `.sqlite`，或 `.db` 結尾／`.db-`／`.db.`）、金鑰與憑證（`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env` `.token` `.keychain`、`id_rsa*` 等，以及 `auth.json`、`credentials.json`、`application_default_credentials.json`、`hosts.yml`、`ui-token`），以及檔頭是 `SQLite format 3` 或 PEM 私鑰的檔案。規則本來就禁止放這些，這是第二道。
 - 目錄不存在（還沒寫過、被清理收掉）→ `200` 空清單。bot 不存在 404。
 - **遠端主機的 bot**：outbox 在那台機器上（`~/<remote root>/outbox/<bot_id>/`），daemon 走 ssh 列，回應多一個 `host`；只列最上層的一般檔，symlink／hardlink 與私鑰／憑證／DB 一樣不列；列表與下載都從已驗證的 fd 讀，硬連結要求 link count 為 1；列表時順手刪掉超過 `ttl_secs` 的檔（遠端沒有 AGM 的 gc）。outbox 是符號連結 → `reason:"outbox_untrusted"`；連不上那台 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_remote_unreachable","host":…}`。舊版 daemon 回的 `reason:"outbox_remote"` 已不再出現。
-- `outbox` 或 `<bot_id>` 這兩段是符號連結、或擁有者跟資料目錄不同 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_untrusted"}`，下載 404：界線不能跟著連結搬到別處（例如 `~/.codex`）。
+- 本機的 `outbox` 或 `<bot_id>` 是符號連結、擁有者跟資料目錄不同，或遠端 outbox 路徑任一元件是符號連結、無法列舉或清單回應缺少完整協定標記 → `200 {"files":[],"ttl_secs":3600,"reason":"outbox_untrusted"}`，下載 404：界線不能跟著連結搬到別處（例如 `~/.codex`），也不把遠端讀取失敗或截斷輸出當成空清單。
 
 ### `GET /api/bots/{id}/outbox/file?path=<檔名>`
 下載 outbox 裡的一個檔案。`path` 解開符號連結後必須仍在該 bot 的 outbox 內、是一般檔案、路徑上沒有隱藏目錄、也不是上面「一律不列」的那幾類，否則 `404 {"what":"file"}`（指到 scratchpad 的絕對路徑或符號連結一樣 404）；缺 `path` 400；bot 不存在 404；遠端主機的 bot 走 ssh 取檔，只收最上層的單一檔名（含 `/` 的一律 404），連不上那台 409 `outbox_remote_unreachable`；大於 64 MiB，或檢查大小後又長大的檔案，409 `file_too_large`。

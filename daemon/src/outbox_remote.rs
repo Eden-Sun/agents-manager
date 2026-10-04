@@ -3,7 +3,7 @@
 //! 以前遠端 bot 沒有 `AM_OUTBOX`，網頁只說「檔案不在這台機器，列不出來」。現在遠端 pane 也拿到 `AM_OUTBOX`，
 //! 指到**那台主機上**的 `~/<remote root>/outbox/<bot_id>/`（跟 bot 目錄同一個實例根），網頁列表與下載走 ssh：
 //!
-//! - 只列 outbox 最上層的一般檔（`find -type f` 的語意：符號連結不算），outbox 本身是符號連結就整個不列。
+//! - 只列 outbox 最上層的一般檔（`find -type f` 的語意：符號連結不算）；outbox 路徑任一元件是符號連結就整個不列。
 //! - 跟本機同一套擋法：`outbox::withheld_name`（私鑰／憑證／DB／隱藏檔）不列也不給，內容開頭像私鑰或 SQLite 的也一樣。
 //! - 下載只收單一層檔名（沒有 `/`、不以 `.` 開頭），大小上限同本機；內容用 base64 傳回來，二進位檔不會被 UTF-8 弄壞。
 //! - 遠端沒有 AGM 的 `outbox-gc`：每次列表時順手刪掉超過一小時（[`crate::outbox::TTL_SECS`]，mtime 與 ctime 都要過）的檔，跟本機的承諾一致。
@@ -27,10 +27,26 @@ const FILE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// 遠端那台上這顆 bot 的 outbox（絕對路徑）。bot id 只收英數（ULID），跟本機 [`crate::outbox::dir_for`] 同一條。
 pub(crate) fn remote_dir(home: &str, instance: Option<&str>, bot_id: &str) -> Option<String> {
-    if bot_id.is_empty() || !bot_id.chars().all(|c| c.is_ascii_alphanumeric()) || home.trim().is_empty() {
+    if bot_id.is_empty()
+        || !bot_id.chars().all(|c| c.is_ascii_alphanumeric())
+        || !home.starts_with('/')
+        || home.chars().any(char::is_control)
+    {
         return None;
     }
-    Some(format!("{home}/{}/outbox/{bot_id}", crate::startup::remote_root_for(instance)))
+    let mut parts = Vec::new();
+    for part in home.split('/') {
+        if part.is_empty() {
+            continue;
+        }
+        if part == "." || part == ".." {
+            return None;
+        }
+        parts.push(part);
+    }
+    let normalized_home = if parts.is_empty() { "/".to_string() } else { format!("/{}", parts.join("/")) };
+    let prefix = if normalized_home == "/" { "" } else { &normalized_home };
+    Some(format!("{prefix}/{}/outbox/{bot_id}", crate::startup::remote_root_for(instance)))
 }
 
 pub(crate) struct Target {
@@ -106,6 +122,37 @@ am_singlelink() {
         .replace("__AM_LSOF_FALLBACK__", &sh_quote(fallback_lsof_path))
 }
 
+/// Resolve the remote outbox once, reject symlinked path components, then use the shell's pinned
+/// working directory for all subsequent relative opens. This avoids re-resolving `$D` after checks.
+fn directory_identity_helpers() -> &'static str {
+    r#"am_enter_dir() {
+  case "$D" in /*) ;; *) return 1 ;; esac
+  CDPATH= cd -P / 2>/dev/null || return 1
+  rest=${D#/}
+  physical=/
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      */*) part=${rest%%/*}; rest=${rest#*/} ;;
+      *) part=$rest; rest= ;;
+    esac
+    [ -n "$part" ] || continue
+    if [ ! -d "$part" ]; then
+      if [ -e "$part" ] || [ -L "$part" ]; then return 1; else return 2; fi
+    fi
+    [ ! -L "$part" ] || return 1
+    if [ "$physical" = "/" ]; then expected="/$part"; else expected="$physical/$part"; fi
+    CDPATH= cd -P "$part" 2>/dev/null || return 1
+    physical=$(pwd -P) || return 1
+    [ "$physical" = "$expected" ] || return 1
+  done
+  [ "$D" -ef . ]
+}
+am_dir_same() {
+  [ ! -L "$D" ] && [ "$D" -ef . ]
+}
+"#
+}
+
 fn list_script(dir: &str) -> String {
     list_script_race(dir, "", "")
 }
@@ -117,39 +164,53 @@ fn list_script_race(dir: &str, before_open: &str, after_open: &str) -> String {
 fn list_script_race_with_lsof(dir: &str, before_open: &str, after_open: &str, lsof_path: &str) -> String {
     format!(
         r#"D={d}
-if [ -L "$D" ]; then printf 'AM_OUTBOX_UNTRUSTED\n'; exit 0; fi
-if [ ! -d "$D" ]; then printf 'AM_OUTBOX_OK\n'; exit 0; fi
-find "$D" -maxdepth 1 -type f -mmin +{ttl_min} -cmin +{ttl_min} -exec rm -f {{}} + 2>/dev/null
-if stat -c %Y "$D" >/dev/null 2>&1; then G=1; else G=; fi
+{dir_helpers}
+am_enter_dir
+enter_status=$?
+case "$enter_status" in
+  0) ;;
+  2) printf 'AM_OUTBOX_OK\nAM_OUTBOX_DONE\n'; exit 0 ;;
+  *) printf 'AM_OUTBOX_UNTRUSTED\n'; exit 0 ;;
+esac
+if ! find . -maxdepth 1 -type f -mmin +{ttl_min} -cmin +{ttl_min} -exec rm -f {{}} + 2>/dev/null; then
+  printf 'AM_OUTBOX_UNTRUSTED\n'
+  exit 0
+fi
+if stat -c %Y . >/dev/null 2>&1; then G=1; else G=; fi
 printf 'AM_OUTBOX_OK\n'
-for f in "$D"/*; do
+am_list_entry() {{
+  exec 3<&-
+  exec 3< "$F" || return 0
+  {after_open}
+  if ! am_dir_same || [ -L "$F" ] || [ ! -f "$F" ]; then exec 3<&-; return 0; fi
+  {helpers}
+  if ! am_same; then exec 3<&-; return 0; fi
+  if [ -n "$G" ]; then
+    m=$(stat -L -c '%s %Y %Z' /dev/fd/3) || {{ exec 3<&-; return 0; }}
+  else
+    m=$(stat -L -f '%z %m %c' /dev/fd/3) || {{ exec 3<&-; return 0; }}
+  fi
+  if ! am_singlelink; then exec 3<&-; return 0; fi
+  h=$(head -c 64 <&3 | od -An -tx1 | tr -d ' \n')
+  printf '%s\t%s\t%s\n' "$m" "$h" "$N"
+  exec 3<&-
+}}
+for f in ./*; do
   [ -f "$f" ] && [ ! -L "$f" ] || continue
   N=${{f##*/}}
   case "$N" in *[[:cntrl:]]*) continue;; esac
   F="$f"
   {before_open}
-  {{
-    exec 3< "$F" || exit 0
-    {after_open}
-    [ ! -L "$D" ] && [ ! -L "$F" ] && [ -f "$F" ] || exit 0
-    {helpers}
-    am_same || exit 0
-    if [ -n "$G" ]; then
-      m=$(stat -L -c '%s %Y %Z' /dev/fd/3) || exit 0
-    else
-      m=$(stat -L -f '%z %m %c' /dev/fd/3) || exit 0
-    fi
-    am_singlelink || exit 0
-    h=$(head -c 64 <&3 | od -An -tx1 | tr -d ' \n')
-    printf '%s\t%s\t%s\n' "$m" "$h" "$N"
-  }} 2>/dev/null
+  am_list_entry 2>/dev/null
 done
+printf 'AM_OUTBOX_DONE\n'
 "#,
         d = sh_quote(dir),
         ttl_min = TTL_SECS / 60,
         before_open = before_open,
         after_open = after_open,
         helpers = file_identity_helpers(lsof_path),
+        dir_helpers = directory_identity_helpers(),
     )
 }
 
@@ -157,22 +218,23 @@ fn hex_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()).collect()
 }
 
-/// `list_script` 的輸出 → 跟本機 `outbox::scan` 同形狀的清單。`None`＝outbox 是符號連結（不可信）。
+/// `list_script` 的輸出 → 跟本機 `outbox::scan` 同形狀的清單。`None`＝不可信或未完整列舉。
 fn parse_list(out: &str, now: u64) -> Option<Vec<serde_json::Value>> {
-    let mut lines = out.lines();
-    match lines.next() {
-        Some("AM_OUTBOX_OK") => {}
-        _ => return None,
-    }
+    let payload = out.strip_prefix("AM_OUTBOX_OK\n")?.strip_suffix("AM_OUTBOX_DONE\n")?;
     let mut files: Vec<(String, u64, u64, u64)> = Vec::new();
-    for line in lines {
+    for line in payload.lines() {
         let mut parts = line.splitn(3, '\t');
         let (Some(meta), Some(hex), Some(name)) = (parts.next(), parts.next(), parts.next()) else { continue };
         let mut meta = meta.split_whitespace();
         let (Some(Ok(size)), Some(Ok(modified))) = (meta.next().map(str::parse::<u64>), meta.next().map(str::parse::<u64>)) else { continue };
         // 第三欄 ctime＝搬進來的時間；舊格式沒有這一欄就只看 mtime。
         let changed = meta.next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0);
-        if name.is_empty() || name.chars().any(char::is_control) || withheld_name(&name.to_ascii_lowercase()) || content_is_withheld(&hex_bytes(hex)) {
+        if name.is_empty()
+            || name.contains('/')
+            || name.chars().any(char::is_control)
+            || withheld_name(&name.to_ascii_lowercase())
+            || content_is_withheld(&hex_bytes(hex))
+        {
             continue;
         }
         files.push((name.to_string(), size, modified, modified.max(changed)));
@@ -344,7 +406,7 @@ mod tests {
             Ok(if script.contains("| base64") {
                 format!("AM_OUTBOX_FILE\n{b64}\n")
             } else {
-                "AM_OUTBOX_OK\n7 2000\t89504e4700ff10\tshot.png\n".into()
+                "AM_OUTBOX_OK\n7 2000\t89504e4700ff10\tshot.png\nAM_OUTBOX_DONE\n".into()
             })
         });
         let resp = crate::outbox::list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap();
@@ -439,6 +501,9 @@ mod tests {
     #[test]
     fn the_remote_dir_sits_under_the_instance_root_and_only_takes_ulids() {
         assert_eq!(remote_dir("/Users/m", None, "01ABC").as_deref(), Some("/Users/m/.config/agents-manager/outbox/01ABC"));
+        assert_eq!(remote_dir("/Users/m/", None, "01ABC").as_deref(), Some("/Users/m/.config/agents-manager/outbox/01ABC"));
+        assert_eq!(remote_dir("relative-home", None, "01ABC"), None, "remote home must be absolute");
+        assert_eq!(remote_dir("/Users/m\nlink", None, "01ABC"), None, "control characters cannot be part of a remote home path");
         assert_eq!(remote_dir("/Users/m", Some("iso"), "01ABC").as_deref(), Some("/Users/m/.config/agents-manager/instances/iso/outbox/01ABC"));
         assert_eq!(remote_dir("/Users/m", None, "../x"), None);
         assert_eq!(remote_dir("", None, "01ABC"), None);
@@ -449,7 +514,7 @@ mod tests {
         let pem = "-----BEGIN PRIVATE KEY-----".bytes().map(|b| format!("{b:02x}")).collect::<String>();
         let sqlite = "SQLite format 3\0".bytes().map(|b| format!("{b:02x}")).collect::<String>();
         let out = format!(
-            "AM_OUTBOX_OK\n10 1000\t68656c6c6f\treport.md\n20 2000\t00\tshot.png\n5 3000\t{pem}\tlooks-innocent.txt\n5 3000\t{sqlite}\tdata.bin\n7 3000\t00\tid_rsa\n9 3000\t00\tprod.sqlite3\nbroken line\n"
+            "AM_OUTBOX_OK\n10 1000\t68656c6c6f\treport.md\n20 2000\t00\tshot.png\n5 3000\t{pem}\tlooks-innocent.txt\n5 3000\t{sqlite}\tdata.bin\n7 3000\t00\tid_rsa\n9 3000\t00\tprod.sqlite3\nbroken line\nAM_OUTBOX_DONE\n"
         );
         let files = parse_list(&out, 2500).unwrap();
         let names: Vec<&str> = files.iter().map(|f| f["name"].as_str().unwrap()).collect();
@@ -458,13 +523,74 @@ mod tests {
         assert_eq!(files[1]["expires_at"], json!(1000 + TTL_SECS));
         assert!(parse_list("AM_OUTBOX_UNTRUSTED\n", 0).is_none());
         assert!(parse_list("", 0).is_none(), "沒有確認字就不當成成功");
-        assert_eq!(parse_list("AM_OUTBOX_OK\n", 0).unwrap().len(), 0);
+        assert_eq!(parse_list("AM_OUTBOX_OK\nAM_OUTBOX_DONE\n", 0).unwrap().len(), 0);
+        assert!(parse_list("AM_OUTBOX_OK\n", 0).is_none(), "missing completion marker means a partial listing");
+    }
+
+    #[test]
+    fn remote_list_script_does_not_claim_success_for_an_unreadable_outbox() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = sandbox("unreadable-list");
+        let dir = base.join("outbox");
+        std::fs::write(dir.join("report.txt"), b"report").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let stdout = run_list(&dir);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            parse_list(&stdout, 1_000).is_none(),
+            "an unreadable outbox must not be reported as a verified empty list: {stdout:?}"
+        );
+        let missing = base.join("not-created");
+        assert_eq!(parse_list(&run_list_raw(&missing), 1_000).unwrap().len(), 0, "a verifiably missing path remains an empty list");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn remote_list_does_not_report_an_unsearchable_ancestor_as_an_empty_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = sandbox("unsearchable-parent");
+        let locked = base.join("locked");
+        let dir = locked.join("outbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.txt"), b"report").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let stdout = run_list_raw(&dir);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            parse_list(&stdout, 1_000).is_none(),
+            "an inaccessible ancestor is untrusted, not a verified missing directory: {stdout:?}"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn remote_list_parser_rejects_forged_path_records() {
+        let forged = "AM_OUTBOX_OK\n10 1000 1000\t00\tprivate/report.md\nAM_OUTBOX_DONE\n";
+        let files = parse_list(forged, 1_000).unwrap();
+        assert!(files.is_empty(), "remote records can only name one outbox entry: {files:?}");
+    }
+
+    #[test]
+    fn remote_list_script_cannot_turn_a_control_filename_into_extra_records() {
+        let base = sandbox("control-name");
+        let dir = base.join("outbox");
+        let forged_name = "noise.txt\n10 1000 1000\t00\tspoofed.txt";
+        std::fs::write(dir.join(forged_name), b"x").unwrap();
+
+        let stdout = run_list(&dir);
+        let files = parse_list(&stdout, 1_000).unwrap();
+        assert!(files.iter().all(|f| f["name"] != "spoofed.txt"), "control bytes must not forge records: {stdout:?}");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// 第三欄是 ctime（搬進來的時間）：到期從 mtime 與 ctime 較晚的那個起算，`modified` 還是 mtime。
     #[test]
     fn a_remote_file_expires_from_the_later_of_mtime_and_ctime() {
-        let out = "AM_OUTBOX_OK\n10 1000 3000\t00\tmoved-in.pdf\n10 2000 1500\t00\tclock-skew.txt\n";
+        let out = "AM_OUTBOX_OK\n10 1000 3000\t00\tmoved-in.pdf\n10 2000 1500\t00\tclock-skew.txt\nAM_OUTBOX_DONE\n";
         let files = parse_list(out, 3100).unwrap();
         let by = |n: &str| files.iter().find(|f| f["name"] == n).unwrap().clone();
         assert_eq!(by("moved-in.pdf")["modified"], json!(1000));
@@ -508,10 +634,29 @@ mod tests {
     }
 
     /// 在本機用 `sh` 跑遠端的下載腳本（`gap` 在檢查與讀檔之間換檔，模擬遠端 bot 的競態），回腳本輸出。
-    fn run_download(dir: &std::path::Path, name: &str, gap: &str) -> String {
+    fn run_download_raw(dir: &std::path::Path, name: &str, gap: &str) -> String {
         let script = file_script_gap(&dir.to_string_lossy(), name, gap);
         let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn run_download(dir: &std::path::Path, name: &str, gap: &str) -> String {
+        let physical = std::fs::canonicalize(dir).unwrap();
+        run_download_raw(&physical, name, gap)
+    }
+
+    fn run_list_raw(dir: &std::path::Path) -> String {
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(list_script(&dir.to_string_lossy()))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn run_list(dir: &std::path::Path) -> String {
+        let physical = std::fs::canonicalize(dir).unwrap();
+        run_list_raw(&physical)
     }
 
     /// Simulate BSD `stat`: `stat -c` is rejected and `/dev/fd/3` reports metadata on the opened
