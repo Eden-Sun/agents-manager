@@ -1835,6 +1835,7 @@ fn bots_dir(bot_id: &str, root: &str) -> Result<String> {
 /// #500：`am_fold` 沒把 `.claim` 收掉（`.replaying` 寫不進去、磁碟滿）時**不准摘新的 spool**——
 /// 這支腳本沒有 `set -e`、`am_fold` 的回傳值也沒人看，直接 `mv` 會把那份唯一的副本蓋掉，而且是無聲的。
 /// 這一輪就只讀 `.replaying`，spool 留到下一輪，跟本機 `fold_spool(...)?` 的 `?` 行為對齊。
+/// `hook-spool.d/.tmp.*` 只有先寫完再 rename 才會成為事件；清掉超過一天的暫存檔可回收被強制終止的寫入殘留，保留正在寫的檔。
 ///
 /// `hook-status.json` 是例外，照舊讀完就刪：它是單槽、最新的贏的訊號（不是佇列），
 /// 掉一格只是晚一次重繪——理由與本機 StatusLine 不進收件匣是同一個（[`crate::hook_inbox`]）。
@@ -1856,6 +1857,7 @@ fn claim_script(bot_id: &str, root: &str) -> Result<String> {
          rd=\"$d/hook-spool.replaying\"\n\
          mkdir -p \"$rd\" 2>/dev/null || printf '{stuck} %s\\n' 0\n\
          if [ -d \"$sd\" ]; then\n\
+         find \"$sd\" -type f -name '.tmp.*' -mtime +0 -exec rm -f {{}} \\; 2>/dev/null\n\
          for g in \"$sd\"/*.json; do\n\
          [ -f \"$g\" ] || continue\n\
          mv \"$g\" \"$rd/\" || printf '{stuck} %s\\n' \"$(wc -c < \"$g\" | tr -d ' ')\";\n\
@@ -6051,6 +6053,31 @@ mod spool_claim_window_tests {
         let staging = r.spool.with_extension("jsonl.replaying");
         let mode = std::fs::metadata(&staging).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o600, ".replaying 只給自己讀");
+    }
+
+    /// An interrupted remote writer can leave a private `.tmp.*` file that replay never sees.
+    /// Drain should remove only old abandoned temp files and preserve a fresh writer's file.
+    #[test]
+    fn macos_local_remote_claim_cleans_stale_temp_spool_files() {
+        let r = Remote::new();
+        let root = crate::startup::REMOTE_ROOT;
+        let sd = r.spool.parent().unwrap().join("hook-spool.d");
+        std::fs::create_dir_all(&sd).unwrap();
+        let stale = sd.join(".tmp.abandoned");
+        let fresh = sd.join(".tmp.active");
+        std::fs::write(&stale, "partial secret payload").unwrap();
+        std::fs::write(&fresh, "active writer payload").unwrap();
+        let status = std::process::Command::new("touch")
+            .args(["-t", "200001010000"])
+            .arg(&stale)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        r.sh(&claim_script("botX", root).unwrap());
+
+        assert!(!stale.exists(), "abandoned private temp files should be cleaned");
+        assert!(fresh.exists(), "recent temp files may still belong to an active writer");
     }
 
     /// 摘下來還沒併進 `.replaying` 就斷線：`.claim` 下一輪要被收回來，不是留在遠端沒人管。
