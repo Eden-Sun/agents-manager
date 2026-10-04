@@ -4212,6 +4212,9 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   （同一個 `id`、`rev` 遞增），不洗版；狀態存 `<data_dir>/deploy-wait.json`，跨過換版那次重啟。`GET /api/state` 的 `deploy_wait` 供重整對帳。
   使用者調度（只收 UI token）：「現在換版」＝這次部署的自動核准當成已等滿 30 分鐘（working 不擋，送達臨界區、別人的租約、讀不到狀態照樣擋），只認同一個 owner、
   `decided_by=service(daemon-swap)` 的核准，AGM 親手核的與下一次部署都不受影響，並順手叫排程器跑一輪；「先等」＝收起通知，30 分鐘照樣自動放寬。
+  放寬持續到**這次部署結束**（換好或放棄），拿到窗口在換（`Swapping`）時仍算數；daemon-swap 拿到窗口後換 binary 前的複查（§3a）帶 restart-window 回應裡的
+  `approval.id` 問 `lease safety --approval <id> --owner <owner>`，跟 acquire 同一套判斷——working 不擋，送達臨界區、別人的租約、讀不到狀態照擋
+  （issue #840：以前複查不帶核准、放寬又只認「還在等」，acquire 剛給的放寬被複查推翻，只要隨時有人 working 就永遠換不上）。
   被擋的 bot 名字可以點，直接跳過去看它在忙什麼。AGM 看到 `deploy_waiting` 也要立刻轉告使用者、請使用者調度，不自己默默等（兩份 persona）。
 - 運維腳本在 `scripts/ops/`，附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，假 CLI + 暫存 repo）。
 - 邊界：租約只約束走 API 與這些腳本的路徑，shell 仍可直接 kill daemon 或 `cargo build --release`。租約讓「問過 AGM」在執行期間持續成立，不取代它。

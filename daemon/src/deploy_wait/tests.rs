@@ -136,8 +136,17 @@ async fn now_please_relaxes_only_this_deployment() {
     crate::supervisor::store::decide_approval_from(&app.db, &theirs.id, "pending", "approved", "AGM", None, None).await.unwrap();
     assert_eq!(esc(theirs.id.clone()).await, Some(false), "別人的核准不受影響");
 
-    // 這次部署拿到窗口、換好了：下一次部署從頭算。
+    // 拿到窗口、還在換（Swapping）：daemon-swap 換 binary 前用同一張核准複查（§3a），放寬不能在這裡消失（issue #840）。
     observe(app, OWNER, &id, SHA, Ok(())).await;
+    assert_eq!(current(app).unwrap().phase, Phase::Swapping);
+    assert_eq!(esc(id.clone()).await, Some(true), "拿到窗口後複查：放寬還在");
+    // 窗口交還、下一輪又沒拿到：還是同一次部署，放寬照舊。
+    observe(app, OWNER, &id, SHA, Err(&not_idle(&[("b1", "alpha")]))).await;
+    assert_eq!(esc(id.clone()).await, Some(true), "同一次部署重試：放寬還在");
+
+    // 這次部署換好了：下一次部署從頭算。
+    observe(app, OWNER, &id, SHA, Ok(())).await;
+    app.deploy_wait.lock().unwrap().as_mut().unwrap().phase = Phase::Done;
     assert_eq!(esc(id.clone()).await, Some(false), "這次部署結束，放寬跟著結束");
     app.deploy_wait.lock().unwrap().as_mut().unwrap().last_attempt_at = crate::db::iso_in(-(STALE_SECS + 1));
     let fresh = approval_waiting(app, "fedcba9876543", 10).await;
@@ -197,4 +206,46 @@ async fn a_wait_nobody_retries_is_given_up_and_says_so_once() {
     let rows = inbox(app).await;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].1["deploy_wait"]["phase"], "abandoned");
+}
+
+/// issue #840 實況（2026-10-04 06:28／06:32／06:37）：使用者按了「現在換版」，restart 窗口每次都拿到，
+/// daemon-swap 換 binary 前的 §3a 複查卻又因為有人 working 而 ABORT——拿到窗口後 phase 變成 `Swapping`，放寬跟著不見。
+/// 複查用同一張核准、同一個 owner 問 safety，要跟 acquire 給出同一個答案；送達臨界區照樣擋。
+#[tokio::test]
+async fn the_recheck_after_taking_the_window_keeps_the_users_go_ahead() {
+    let e = tt::env().await;
+    let app = &e.app;
+    let now = crate::db::now();
+    // 一顆正在思考的 bot（working、turn 已送達）：全靜止模式會擋。
+    sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('busy',?,'busy','claude','tok-busy',?)")
+        .bind(&e.project_id).bind(&now).execute(&app.db).await.unwrap();
+    sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,started_at) VALUES ('busy','busy','running','working',?)")
+        .bind(&now).execute(&app.db).await.unwrap();
+    sqlx::query("INSERT INTO conversations (id,bot_id,created_at) VALUES ('busy','busy',?)").bind(&now).execute(&app.db).await.unwrap();
+    sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,delivery,created_at) VALUES ('busy','busy','busy','web','in_flight','ok',?)")
+        .bind(&now).execute(&app.db).await.unwrap();
+
+    let id = approval_waiting(app, SHA, 240).await;
+    let recheck = |app: Arc<App>, id: String| async move {
+        crate::supervisor::maintenance::safety_as(&app, &[], Some(&id), Some(OWNER)).await.unwrap()
+    };
+    // 沒放寬：working 照樣擋，窗口拿不到。
+    let refused = crate::supervisor::maintenance::acquire(app, "restart", OWNER, &id, Some(SHA), 900, true, &[]).await.unwrap_err();
+    observe(app, OWNER, &id, SHA, Err(&refused)).await;
+    assert_eq!(recheck(app.clone(), id.clone()).await["safe"], false, "沒放寬時 working 照擋");
+
+    // 使用者按「現在換版」→ 拿到窗口（phase 變 Swapping）→ 複查：還是安全的。
+    escalate(app, &current(app).unwrap().id).await.unwrap();
+    crate::supervisor::maintenance::acquire(app, "restart", OWNER, &id, Some(SHA), 900, true, &[]).await.unwrap();
+    observe(app, OWNER, &id, SHA, Ok(())).await;
+    assert_eq!(current(app).unwrap().phase, Phase::Swapping);
+    let s = recheck(app.clone(), id.clone()).await;
+    assert_eq!((s["safe"].as_bool(), s["escalated"].as_bool()), (Some(true), Some(true)), "複查不能推翻 acquire 給的放寬：{s}");
+    assert_eq!(s["working"][0]["bot_id"], "busy", "working 還在，只是不擋");
+
+    // 送達臨界區照擋：daemon 正在往 pane 打字。
+    sqlx::query("UPDATE turns SET delivery='pending' WHERE id='busy'").execute(&app.db).await.unwrap();
+    let s = recheck(app.clone(), id.clone()).await;
+    assert_eq!(s["safe"], false, "放寬了，送達臨界區仍然要擋：{s}");
+    assert_eq!(s["delivering"][0]["bot_id"], "busy");
 }

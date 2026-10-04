@@ -371,12 +371,21 @@ async fn announce(app: &Arc<App>, a: Announce, w: &Wait) {
     }
 }
 
-/// 這張核准要不要因為使用者按了「現在換版」而放寬：只認這次部署（同一個 owner、還在等）的**自動**核准
+/// 這張核准要不要因為使用者按了「現在換版」而放寬：只認這次部署（同一個 owner、還在等或已拿到窗口在換）的**自動**核准
 /// （daemon-swap 自己核的）。AGM 親手核的、別的 owner 的、下一次部署的一律不算。
+///
+/// 拿到窗口（`Swapping`）之後還要算數（issue #840）：daemon-swap 換 binary 前會用同一張核准再問一次 safety（§3a），
+/// 以前只認 `Waiting`，複查時放寬已經不見，working 又把 acquire 剛給的窗口推翻，只要隨時有人 working 就永遠換不上。
+/// 這次部署結束（`Done`／`Abandoned`）放寬才跟著結束。
 pub fn user_escalated_for(app: &App, a: &crate::supervisor::store::Approval) -> bool {
     let g = app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let auto = format!("service({})", crate::service_auth::DAEMON_SWAP);
-    g.as_ref().is_some_and(|w| w.user_escalated && w.phase == Phase::Waiting && w.owner == a.requester && a.decided_by.as_deref() == Some(auto.as_str()))
+    g.as_ref().is_some_and(|w| {
+        w.user_escalated
+            && matches!(w.phase, Phase::Waiting | Phase::Swapping)
+            && w.owner == a.requester
+            && a.decided_by.as_deref() == Some(auto.as_str())
+    })
 }
 
 #[derive(Deserialize)]
