@@ -1418,6 +1418,14 @@ async fn sync_pane_model(app: &Arc<App>, host: &str, client: &crate::herdr::Herd
             }
         }
     }
+    // agy：`--model` 就是啟動時實際用的模型（強度在 slug 裡），run 也記；只補空的（網頁沒有 runtime 會畫成「CLI 預設」）。
+    if let (true, Some(m)) = (bot.kind == "agy", model.as_deref()) {
+        let _ = sqlx::query("UPDATE runs SET runtime_model = ? WHERE bot_id = ? AND state IN ('starting','running') AND runtime_model IS NULL")
+            .bind(m)
+            .bind(&bot.id)
+            .execute(&app.db)
+            .await;
+    }
     let model = model.filter(|_| bot.model.is_none());
     let effort = effort.filter(|_| bot.effort.is_none());
     if model.is_none() && effort.is_none() && fast.is_none() {
@@ -3172,6 +3180,50 @@ mod compat_tests {
         sqlx::query("UPDATE bots SET model='sonnet' WHERE id=?").bind(&kid.id).execute(&app.db).await.unwrap();
         super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
         assert_eq!(db::bot(&app.db, &kid.id).await.unwrap().unwrap().model.as_deref(), Some("sonnet"));
+    }
+
+    /// 2026-10-04 a1：agy 子 agent 的 `bots.model` 從 argv 補得到，但 `runs.runtime_model` 一直是 null，網頁畫成「CLI 預設」。
+    /// `--model` 就是它啟動時實際用的模型：run 也要記（只補空的，不覆蓋之後別的來源寫的）。
+    #[tokio::test]
+    async fn an_agy_child_run_records_the_model_its_argv_names_as_its_runtime_model() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let parent = a_bot(&env, "alfa").await;
+        let parent_agent = crate::config::agent_name("proj", &parent);
+        let kid_agent = format!("{parent_agent}-a1");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({"name": parent_agent, "agent": "claude", "agent_status": "idle", "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": kid_agent, "agent": "agy", "agent_status": "idle", "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id, "cwd": "/tmp/p"}),
+        ];
+        env.herdr.set_argv(&root.pane_id, &["claude", "--model", "haiku"]);
+        env.herdr.set_argv(&kid_pane.pane_id, &["agy", "--dangerously-skip-permissions", "--model", "gemini-3.8-flash-medium"]);
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let kid = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id = ?").bind(&parent).fetch_one(&app.db).await.expect("adopted");
+        assert_eq!((kid.kind.as_str(), kid.model.as_deref()), ("agy", Some("gemini-3.8-flash-medium")));
+        let run = run_of(&app, &kid.id).await.unwrap();
+        assert_eq!(run.runtime_model.as_deref(), Some("gemini-3.8-flash-medium"), "run 也記 argv 的模型");
+        // 之後別的來源寫過的不蓋。
+        sqlx::query("UPDATE runs SET runtime_model = 'gemini-3.1-pro-high' WHERE id = ?").bind(&run.id).execute(&app.db).await.unwrap();
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+        assert_eq!(run_of(&app, &kid.id).await.unwrap().runtime_model.as_deref(), Some("gemini-3.1-pro-high"));
     }
 
     /// 2026-09-14 使用者指正：codex 子 agent 從 claude 母 bot 抄了 `cc1`，quota 就長出 `codex:cc1`。

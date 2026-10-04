@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { effortLabel } from '../api/types'
 import { useBotLamp } from '../hooks/useBotLamp'
 import { backgroundTaskLines } from '../lib/backgroundJobs'
+import { contextLabel } from '../lib/contextLabel'
 import { shortModel } from '../lib/shortModel'
 import { liveReplyOf, useStore } from '../store/store'
 import { cleanLiveActivity } from '../store/liveText'
@@ -67,14 +68,7 @@ export function BotStatusCard({
   const model = shortModel(bot.kind, run?.runtime_model ?? bot.model ?? status?.model_name ?? null)
   const effort = status?.effort ?? run?.runtime_effort ?? bot.effort
   const identity = run?.runtime_identity ?? bot.identity
-  const ctx =
-    status?.context_used_pct != null
-      ? `${Math.round(status.context_used_pct)}%${
-          status.context_used_tokens != null && status.context_size != null
-            ? `（${Math.round(status.context_used_tokens / 1000)}k / ${Math.round(status.context_size / 1000)}k）`
-            : ''
-        }`
-      : null
+  const ctx = contextLabel(status)
 
   const card = (
     <div className="bot-status-card chip-legend" role="dialog" aria-label={`${bot.name} 的狀態`} onClick={(e) => e.stopPropagation()}>

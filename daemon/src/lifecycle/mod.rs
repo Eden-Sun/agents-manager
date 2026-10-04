@@ -35,6 +35,7 @@ pub(crate) mod setup;
 pub(crate) mod agent_md;
 pub(crate) mod grok_hook;
 pub(crate) mod agy_hook;
+pub(crate) mod agy_session;
 #[cfg(test)]
 mod agy_tests;
 pub(crate) mod grok_transcript;

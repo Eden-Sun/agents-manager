@@ -133,16 +133,18 @@ mod delivery_and_screen {
 
     #[test]
     fn the_first_prompt_has_no_transcript_to_prove_it_but_later_ones_do() {
-        // 對話是第一則 prompt 才建立：還沒有 session／transcript → 照打照送、記成未驗證，不擋也不重送。
-        assert_eq!(choose_proof(&inputs(None, None, true), "say OK").unwrap(), Proof::Unverified);
+        // 對話是第一則 prompt 才建立：還沒有 session／transcript。單行放得下的靠送出後那列 `> 原文` 回音；多行或太長的照打照送、
+        // 記成未驗證，不擋也不重送。
+        assert_eq!(choose_proof(&inputs(None, None, true), "say OK").unwrap(), Proof::EchoRow);
+        assert_eq!(choose_proof(&inputs(None, None, true), "line one\nline two").unwrap(), Proof::Unverified);
         let dir = tt::scratch_dir("am-agy-proof");
         let t = dir.join("transcript_full.jsonl");
         std::fs::write(&t, format!("{USER}\n")).unwrap();
         let p = choose_proof(&inputs(Some("c-1"), Some(t.to_str().unwrap()), true), "say OK").unwrap();
         assert_eq!(p, Proof::Transcript { format: LogFormat::Agy, path: t.clone(), session_id: "c-1".into() });
         // 檔案不在（路徑是占位）／遠端：沒有無損證據。
-        assert_eq!(choose_proof(&inputs(Some("c-1"), Some("/nope/transcript_full.jsonl"), true), "x").unwrap(), Proof::Unverified);
-        assert_eq!(choose_proof(&inputs(Some("c-1"), Some(t.to_str().unwrap()), false), "x").unwrap(), Proof::Unverified);
+        assert_eq!(choose_proof(&inputs(Some("c-1"), Some("/nope/transcript_full.jsonl"), true), "x\ny").unwrap(), Proof::Unverified);
+        assert_eq!(choose_proof(&inputs(Some("c-1"), Some(t.to_str().unwrap()), false), "x\ny").unwrap(), Proof::Unverified);
     }
 
     #[test]
@@ -219,5 +221,68 @@ mod blocked_screens {
         assert_eq!(run_of().await.agent_status, "idle", "框關掉：還原成補標前的狀態");
         assert!(crate::blocked_reason::of(&run_id).is_none());
         assert!(e.herdr.calls_to("pane.send_keys").is_empty() && e.herdr.calls_to("pane.send_text").is_empty(), "一個鍵都不按");
+    }
+}
+
+mod screen_reply_tests {
+    use crate::lifecycle::poller::{pane_awaits_input, screen_reply};
+    use crate::lifecycle::screen::{clean_screen, last_prompt_echo_text};
+
+    const RULE: &str = "────────────────────────────────────────────────────────────";
+
+    /// 2026-10-04 a1（子 agent，沒有 hook）真機的版面，email 換成假的：shell 的 am-env 行、啟動指令、banner（帶帳號與方案）、
+    /// 使用者 prompt 的回音、工具列 `●`、思考 `▸ Thought…`＋思考內文、最後才是回答，底下是輸入列與 `? for shortcuts`。
+    fn pane(with_echo: bool) -> String {
+        let shell = "ubuntu@ubuntu:~/project/x$  . /tmp/am-env.AbCd12 && rm -f /tmp/am-env.AbCd12\n\
+ubuntu@ubuntu:~/project/x$ agy --dangerously-skip-permissions --model gemini-3.8-flash-medium\n\n\
+      ▄▀▀▄        Antigravity CLI 1.2.16\n\
+     ▀▀▀▀▀▀       me@example.com (Google AI Plus)\n\
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Medium)\n\
+   ▄▀▀    ▀▀▄     /home/ubuntu/project/x\n\
+  ▄▀▀      ▀▀▄\n\n";
+        let echo = if with_echo { format!("{RULE}\n> 你是 agents-manager 的子 agent。請修好 foo\n  第二行的說明\n\n") } else { String::new() };
+        format!(
+            "{shell}{echo}● Read(foo.sh) (ctrl+o to expand)\n▸ Thought for 5s, 430 tokens\n  The script fails with a syntax error on line 54, matching the report.\n\n  已完成：修好了 foo。\n  測試通過。\n\n{RULE}\n>\n{RULE}\n  ● [16:37:02] bash scripts/check.sh ops running\n{RULE}\n? for shortcuts                                              Gemini 3.8 Fl\n"
+        )
+    }
+
+    const SENT: &str = "你是 agents-manager 的子 agent。請修好 foo\n第二行的說明";
+
+    fn assert_clean(reply: &str) {
+        for leak in ["me@example.com", "Google AI Plus", "am-env", "agy --dangerously", "Antigravity CLI", "ubuntu@ubuntu", "for shortcuts", "Thought for", "Read(foo.sh)", "▄▀", "check.sh ops running", "子 agent。請修好"] {
+            assert!(!reply.contains(leak), "回覆不能帶 `{leak}`：{reply}");
+        }
+    }
+
+    #[test]
+    fn the_reply_is_only_the_answer_not_the_shell_banner_echo_tools_or_thinking() {
+        let reply = screen_reply("agy", &pane(true), &[SENT.to_string()]).expect("a reply");
+        assert_eq!(reply, "已完成：修好了 foo。\n測試通過。");
+        assert_clean(&reply);
+    }
+
+    /// 回音捲出畫面（長回答）：還是不能把 shell 行與 banner（含帳號、方案）當回覆。
+    #[test]
+    fn without_a_visible_echo_the_banner_and_shell_lines_still_stay_out_of_the_reply() {
+        let screen = pane(false);
+        let reply = screen_reply("agy", &screen, &[SENT.to_string()]).expect("a reply");
+        assert_clean(&reply);
+        assert!(reply.contains("已完成：修好了 foo。"), "{reply}");
+        let cleaned = clean_screen("agy", &screen).unwrap();
+        assert_clean(&cleaned.replace("Thought for", "").replace("Read(foo.sh)", ""));
+    }
+
+    #[test]
+    fn the_prompt_echo_and_the_empty_composer_are_recognised() {
+        assert_eq!(last_prompt_echo_text("agy", &pane(true)).as_deref().map(|s| s.lines().next().unwrap()), Some("你是 agents-manager 的子 agent。請修好 foo"));
+        assert!(pane_awaits_input("agy", &pane(true)), "輸入列只有 `>`＝等輸入");
+        let working = pane(true).replace("\n>\n", "\n> typing…\n");
+        assert!(!pane_awaits_input("agy", &working));
+    }
+
+    #[test]
+    fn a_screen_with_nothing_but_chrome_has_no_reply() {
+        let idle = format!("ubuntu@ubuntu:~$ agy\n\n      ▄▀▀▄        Antigravity CLI 1.2.16\n     ▀▀▀▀▀▀       me@example.com (Google AI Plus)\n\n{RULE}\n>\n{RULE}\n? for shortcuts   Gemini 3.8 Fl\n");
+        assert_eq!(screen_reply("agy", &idle, &[]), None);
     }
 }

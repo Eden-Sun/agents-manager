@@ -1628,7 +1628,7 @@ pub(super) async fn capture_hookless_turn_locked(app: &Arc<App>, run_id: &str, s
         return Ok(false);
     }
     // §12.5：grok 的對話檔讀得到就不刮畫面。
-    if bot.kind == "grok" {
+    if matches!(bot.kind.as_str(), "grok" | "agy") {
         match super::grok_transcript::sync_locked(app, run_id).await {
             Ok(super::grok_transcript::Synced::Read { imported, .. }) => return Ok(imported > 0),
             Ok(super::grok_transcript::Synced::Unavailable) => {}

@@ -163,6 +163,111 @@ pub fn last_exchange(jsonl: &str) -> Exchange {
     out
 }
 
+/// 一問一答：`USER_INPUT` 與它之後最後一段 `PLANNER_RESPONSE`（`lifecycle::grok_transcript` 把它記成回合，沒有 hook 的 agy child 靠這個）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Turn {
+    /// `USER_INPUT` 的 `step_index`：同一段對話內單調遞增、不重複，拿來當回合鑰匙。
+    pub step_index: u64,
+    pub prompt: String,
+    pub reply: Option<String>,
+    /// 結束了：後面接了下一問（被打斷也算），或最後一則紀錄就是給使用者的回覆（沒有工具步驟接在後面＝還在跑）。
+    pub closed: bool,
+}
+
+pub fn parse_turns(jsonl: &str) -> Vec<Turn> {
+    struct Cur {
+        turn: Turn,
+        reply_is_last: bool,
+    }
+    let mut done: Vec<Turn> = Vec::new();
+    let mut cur: Option<Cur> = None;
+    let finish = |c: Cur, by_next: bool, done: &mut Vec<Turn>| {
+        let mut t = c.turn;
+        t.closed = by_next || (t.reply.is_some() && c.reply_is_last);
+        done.push(t);
+    };
+    for line in jsonl.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if let Some(prompt) = user_text(line) {
+            if let Some(c) = cur.take() {
+                finish(c, true, &mut done);
+            }
+            let step_index = v.get("step_index").and_then(Value::as_u64).unwrap_or(done.len() as u64);
+            cur = Some(Cur { turn: Turn { step_index, prompt, reply: None, closed: false }, reply_is_last: false });
+            continue;
+        }
+        let Some(c) = cur.as_mut() else { continue };
+        // 還在產生的步驟（`status` 不是 DONE）不是最終回覆。
+        let finished = v.get("status").and_then(Value::as_str).is_none_or(|s| s.eq_ignore_ascii_case("DONE"));
+        match assistant_text(line).filter(|_| finished) {
+            Some(text) => {
+                c.turn.reply = Some(text);
+                c.reply_is_last = true;
+            }
+            None => c.reply_is_last = false,
+        }
+    }
+    if let Some(c) = cur.take() {
+        finish(c, false, &mut done);
+    }
+    done
+}
+
+/// 最後一筆模型回覆的 `input_tokens`＝那次請求讀進去的整段 context（真機：新對話第一問 11824）。
+pub fn last_input_tokens(jsonl: &str) -> Option<i64> {
+    jsonl.lines().rev().find_map(|l| {
+        let v: Value = serde_json::from_str(l).ok()?;
+        assistant_text(l)?;
+        v.get("input_tokens").and_then(Value::as_i64).filter(|n| *n > 0)
+    })
+}
+
+/// `runs.status_json` 給網頁讀的精簡版（claude statusLine 的形狀，`normalize` 認得）：模型，與 context 的 token 數。
+/// **視窗大小沒有可靠的來源**（agy 不給），所以不填百分比，不編數字。
+pub fn status_json(model: Option<&str>, context_tokens: Option<i64>) -> Option<String> {
+    if model.is_none() && context_tokens.is_none() {
+        return None;
+    }
+    let mut v = json!({});
+    if let Some(m) = model {
+        v["model"] = json!({"id": m, "display_name": m});
+    }
+    if let Some(n) = context_tokens {
+        // 鍵名照 claude statusLine（網頁 `normalizeStatus` 讀 `total_input_tokens`）。
+        v["context_window"] = json!({"total_input_tokens": n});
+    }
+    Some(v.to_string())
+}
+
+/// 一條 `/proc/<pid>/fd/*` 的連結目標若是這個 agy 開著的對話資料庫（`…/antigravity-cli/conversations/<id>.db`，含 `-wal`／`-shm`），回對話 id。
+pub fn conversation_from_link(link: &str) -> Option<String> {
+    let name = link.rsplit_once("/antigravity-cli/conversations/")?.1;
+    let id = name.strip_suffix(".db").or_else(|| name.strip_suffix(".db-wal")).or_else(|| name.strip_suffix(".db-shm"))?;
+    (!id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then(|| id.to_string())
+}
+
+/// 這些行程開著的對話（本機；`proc_root` 是 `/proc`，測試給假的）。同一段對話可能被好幾個 fd 指到，去重。
+pub fn open_conversations(proc_root: &Path, pids: &[i32]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for pid in pids {
+        let Ok(rd) = std::fs::read_dir(proc_root.join(pid.to_string()).join("fd")) else { continue };
+        for e in rd.flatten() {
+            let Ok(target) = std::fs::read_link(e.path()) else { continue };
+            if let Some(id) = conversation_from_link(&target.to_string_lossy()) {
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 完整對話紀錄的位置（hook 的 `transcriptPath` 同一個檔）。
+pub fn transcript_path(home: &Path, conversation_id: &str) -> PathBuf {
+    home.join(".gemini").join("antigravity-cli").join("brain").join(conversation_id).join(".system_generated").join("logs").join("transcript_full.jsonl")
+}
+
 /// 讀檔尾端最多 `max` 個位元組（對話紀錄會長大；第一行可能被截斷，解析不了就會被略過）。
 pub fn read_tail(path: &Path, max: u64) -> std::io::Result<String> {
     use std::io::{Read as _, Seek as _, SeekFrom};
@@ -285,5 +390,81 @@ mod tests {
         assert!(tail.len() <= 1000);
         assert_eq!(last_exchange(&tail).user.as_deref(), Some("reply with OK"));
         assert!(read_tail(&dir.join("missing"), 10).is_err());
+    }
+
+    fn step(i: u64, ty: &str, content: &str) -> String {
+        json!({"step_index": i, "source": if ty == "USER_INPUT" { "USER_EXPLICIT" } else { "MODEL" }, "type": ty, "status": "DONE", "content": content}).to_string()
+    }
+    fn user_step(i: u64, text: &str) -> String {
+        step(i, "USER_INPUT", &format!("<USER_REQUEST>\n{text}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>x</ADDITIONAL_METADATA>"))
+    }
+
+    #[test]
+    fn turns_are_one_question_one_final_answer_and_a_trailing_tool_step_means_still_running() {
+        let text = [
+            user_step(0, "first"),
+            step(1, "PLANNER_RESPONSE", "looking"),
+            step(2, "RUN_COMMAND", "ls"),
+            step(3, "PLANNER_RESPONSE", "the answer"),
+            user_step(4, "second"),
+            step(5, "PLANNER_RESPONSE", "thinking out loud"),
+            step(6, "RUN_COMMAND", "git status"),
+        ]
+        .join("\n");
+        let turns = parse_turns(&text);
+        assert_eq!(turns.len(), 2);
+        assert_eq!((turns[0].step_index, turns[0].prompt.as_str(), turns[0].reply.as_deref(), turns[0].closed), (0, "first", Some("the answer"), true));
+        assert_eq!((turns[1].step_index, turns[1].reply.as_deref(), turns[1].closed), (4, Some("thinking out loud"), false), "最後是工具步驟＝還在跑");
+        // 最後一則就是回覆：結束了。
+        let done = [user_step(0, "q"), step(1, "PLANNER_RESPONSE", "OK")].join("\n");
+        assert!(parse_turns(&done)[0].closed);
+        // 沒有回覆的一問（被下一問打斷）也算結束；最後一問沒回覆還沒結束。
+        let interrupted = [user_step(0, "a"), user_step(1, "b")].join("\n");
+        let t = parse_turns(&interrupted);
+        assert_eq!((t[0].closed, t[0].reply.clone(), t[1].closed), (true, None, false));
+        // 還在產生的回覆（status 不是 DONE）、壞行、第一行被截斷都不致命。
+        let partial = format!("{{\"half\n{}\n{}", user_step(0, "q"), json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"RUNNING","content":"half an ans"}));
+        let p = parse_turns(&partial);
+        assert_eq!((p.len(), p[0].reply.clone(), p[0].closed), (1, None, false));
+        assert!(parse_turns("").is_empty());
+    }
+
+    #[test]
+    fn the_context_size_is_the_last_replys_input_tokens() {
+        let text = [
+            user_step(0, "q"),
+            json!({"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"a","input_tokens":11824,"output_tokens":27}).to_string(),
+            json!({"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","content":"b","input_tokens":20000}).to_string(),
+        ]
+        .join("\n");
+        assert_eq!(last_input_tokens(&text), Some(20000));
+        assert_eq!(last_input_tokens(&user_step(0, "q")), None);
+        assert_eq!(status_json(None, None), None);
+        let v: Value = serde_json::from_str(&status_json(Some("gemini-3.8-flash-medium"), Some(20000)).unwrap()).unwrap();
+        assert_eq!(v["model"]["id"], "gemini-3.8-flash-medium");
+        assert_eq!(v["context_window"]["total_input_tokens"], 20000);
+        assert!(v["context_window"].get("used_percentage").is_none(), "視窗大小不知道：不填百分比");
+    }
+
+    #[test]
+    fn an_open_conversation_is_read_off_the_agy_processs_file_descriptors() {
+        assert_eq!(
+            conversation_from_link("/home/u/.gemini/antigravity-cli/conversations/1dd2eb9a-b927-4407-afc2-159d15d03138.db-wal").as_deref(),
+            Some("1dd2eb9a-b927-4407-afc2-159d15d03138")
+        );
+        for bad in ["/home/u/.gemini/antigravity-cli/conversation_summaries.db", "/tmp/conversations/x.db", "/home/u/.gemini/antigravity-cli/conversations/a b.db", "/home/u/.gemini/antigravity-cli/conversations/.db"] {
+            assert_eq!(conversation_from_link(bad), None, "{bad}");
+        }
+        let proc_root = crate::testing::scratch_dir("am-agy-proc");
+        let fd = proc_root.join("4242").join("fd");
+        std::fs::create_dir_all(&fd).unwrap();
+        for (n, target) in [("3", "/home/u/.gemini/antigravity-cli/conversations/c-1.db"), ("4", "/home/u/.gemini/antigravity-cli/conversations/c-1.db-wal"), ("5", "/dev/null")] {
+            std::os::unix::fs::symlink(target, fd.join(n)).unwrap();
+        }
+        assert_eq!(open_conversations(&proc_root, &[4242, 9999]), ["c-1"], "去重、略過不是對話的 fd、沒有的 pid 不致命");
+        assert_eq!(
+            transcript_path(Path::new("/h"), "c-1"),
+            PathBuf::from("/h/.gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl")
+        );
     }
 }

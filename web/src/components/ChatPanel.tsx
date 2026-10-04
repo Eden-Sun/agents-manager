@@ -1150,7 +1150,8 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       const b = s.bots.find((x) => x.id === s.selectedBotId)
       if (!b) return null
       const r = s.runs[b.id] ?? null
-      if (r?.status) return r.status
+      // agy 的 `run.status` 只有模型與 context token 數（daemon 的精簡版，沒有額度）：額度的週窗仍由下面推導，context 疊上去。
+      if (r?.status && b.kind !== 'agy') return r.status
       if (b.kind === 'claude') return null
       // 額度按主機分（SPEC §14）：狀態列講的是這隻 bot，就看它那台的列。
       const host = projectHostName(s, b.project_id)
@@ -1162,7 +1163,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       const path = s.projects.find((p) => p.id === b.project_id)?.path ?? null
       // SPEC §4.4a：用 run 實際啟動值（`run.runtime_*`），不是下次啟動才生效的 bot 設定。
       const live = runtimeSettingsKnown(r)
-      return derivedStatus(
+      const derived = derivedStatus(
         b.kind,
         live ? r!.runtime_model : b.model,
         live ? r!.runtime_effort : b.effort,
@@ -1171,6 +1172,9 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         q,
         tool?.version ?? null,
       )
+      return b.kind === 'agy' && r?.status && derived
+        ? { ...derived, context_used_pct: r.status.context_used_pct, context_used_tokens: r.status.context_used_tokens, context_size: r.status.context_size }
+        : derived
     }),
   )
   const modelExtra = modelExtraOf(statusInfo)

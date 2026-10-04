@@ -274,7 +274,7 @@ pub(crate) enum Synced {
 }
 
 fn is_transcript_run(bot: &db::Bot, run: &db::Run) -> bool {
-    bot.kind == "grok" && run.adopted != 0 && bot.inject_hooks == 0 && run.state == "running"
+    matches!(bot.kind.as_str(), "grok" | "agy") && run.adopted != 0 && bot.inject_hooks == 0 && run.state == "running"
 }
 
 /// 讀這個 run 的 grok 對話檔，把結束了的每一問記成回合。呼叫端拿著 bot 鎖。
@@ -285,10 +285,21 @@ pub(crate) async fn sync_locked(app: &Arc<App>, run_id: &str) -> anyhow::Result<
         return Ok(Synced::Unavailable);
     }
     let host = db::bot_host(&app.db, &bot.id).await?;
-    let grok_home = grok_home_for(app, &bot, &host).await?;
-    let Some(sid) = session_for(app, &bot, &run, &host, &grok_home).await? else { return Ok(Synced::Unavailable) };
-    let Some(text) = read_history(app, &host, &grok_home, &sid).await? else { return Ok(Synced::Unavailable) };
-    let exchanges = parse_chat_history(&text);
+    let (sid, exchanges) = if bot.kind == "agy" {
+        // agy（SPEC §12a.9）：session 從 pane 裡行程開著的對話資料庫認，對話在 `transcript_full.jsonl`。
+        let Some((sid, text)) = super::agy_session::load(app, &run, &host).await? else { return Ok(Synced::Unavailable) };
+        super::agy_session::record_status(app, &bot, &run, &text).await;
+        let turns = crate::agy_support::parse_turns(&text)
+            .into_iter()
+            .map(|t| Exchange { prompt: t.prompt, prompt_index: Some(t.step_index), reply: t.reply, closed: t.closed })
+            .collect();
+        (sid, turns)
+    } else {
+        let grok_home = grok_home_for(app, &bot, &host).await?;
+        let Some(sid) = session_for(app, &bot, &run, &host, &grok_home).await? else { return Ok(Synced::Unavailable) };
+        let Some(text) = read_history(app, &host, &grok_home, &sid).await? else { return Ok(Synced::Unavailable) };
+        (sid, parse_chat_history(&text))
+    };
     let pending = exchanges.last().filter(|e| !e.closed).map(|e| e.prompt.clone());
     let mut done: HashSet<String> =
         sqlx::query_scalar::<_, String>("SELECT native_turn_id FROM turns WHERE native_session_id = ? AND native_turn_id IS NOT NULL")
