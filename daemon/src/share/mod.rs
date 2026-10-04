@@ -15,6 +15,7 @@ pub(crate) mod folder;
 pub(crate) mod multipart;
 pub(crate) mod portal;
 pub(crate) mod store;
+pub(crate) mod svg_check;
 
 #[cfg(test)]
 mod tests;

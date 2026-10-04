@@ -515,6 +515,34 @@ async fn a_portal_message_starts_the_restricted_bot_in_its_cage() {
     assert!(args.contains(&"--restricted".into()), "{args:?}");
 }
 
+/// bot 把 .svg 寫壞（屬性之間少空格）：分享頁讀清單時查到，以後台訊息提醒 bot 一次（同一個錯誤不重送），分享頁看不到那則；
+/// 修好之後不再提醒。
+#[tokio::test]
+async fn a_broken_svg_in_the_outbox_gets_one_backstage_reminder() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+    std::fs::write(outbox.join("card.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\">\n<text x=\"540\" y=\"380\"font-size=\"100\">嗨</text>\n</svg>").unwrap();
+    let base = serve(portal::router(e.app.clone())).await;
+    let listed = client().get(format!("{base}/s/{token}/api/files")).send().await.unwrap();
+    assert_eq!(listed.status(), 200, "讀清單照常");
+    // 背景那一輪不等，直接查兩次：只送一則。
+    for _ in 0..2 {
+        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("壞掉的檔");
+        assert_eq!((err.line, err.col), (2, 22));
+    }
+    let reminders: Vec<(String, Option<String>)> = sqlx::query_as("SELECT content, relay_from FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'").fetch_all(&e.app.db).await.unwrap();
+    assert_eq!(reminders.len(), 1, "同一個檔同一個錯誤只提醒一次：{reminders:?}");
+    assert!(reminders[0].0.contains("圖檔 card.svg 第 2 行第 22 欄格式壞了"), "{}", reminders[0].0);
+    assert_eq!(reminders[0].1.as_deref(), Some(crate::agent_relay::DAEMON_SENDER), "以 daemon 名義（擁有者那一類）送");
+    let page: Value = client().get(format!("{base}/s/{token}/api/messages")).send().await.unwrap().json().await.unwrap();
+    assert!(!page.to_string().contains("card.svg"), "分享頁看不到這則後台訊息：{page}");
+
+    std::fs::write(outbox.join("card.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"540\" y=\"380\" font-size=\"100\">嗨</text></svg>").unwrap();
+    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了就不再提醒");
+}
+
 /// daemon 重啟、主機重開之後分享用 bot 停著：end user 送一則來，替它起來時接回原本那段對話（`--resume`），仍在籠子裡。
 #[tokio::test]
 async fn a_portal_message_to_a_stopped_share_bot_resumes_its_last_session() {

@@ -123,6 +123,19 @@ export function pngCanvasSize(w: number, h: number, scale = 2): { w: number; h: 
   return { w: Math.max(1, Math.floor(w * s)), h: Math.max(1, Math.floor(h * s)) }
 }
 
+/**
+ * 是不是合法的 XML（bot 改圖寫壞，例如屬性之間少空格，瀏覽器整張畫不出來）。先問 `DOMParser`：比等 `<img>` 解碼失敗快，
+ * 也不靠 `onerror` 一定會觸發。沒有 `DOMParser` 的環境當作合法，交給解碼那一關。
+ */
+export function svgWellFormed(text: string): boolean {
+  if (typeof DOMParser === 'undefined') return true
+  try {
+    return new DOMParser().parseFromString(text, 'image/svg+xml').getElementsByTagName('parsererror').length === 0
+  } catch {
+    return false
+  }
+}
+
 export class SvgTaintedError extends Error {
   constructor() {
     super('svg_tainted')

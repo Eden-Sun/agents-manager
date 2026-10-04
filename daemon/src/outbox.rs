@@ -436,6 +436,22 @@ pub async fn file(
 
 /// 分享入口用的下載分類：確實不存在／遭黑名單擋下回 NotFound；可信邊界、DB、讀取或工作失敗保留成 Unavailable。
 pub(crate) async fn share_file(app: &Arc<App>, bot_id: &str, requested: &str) -> Result<Response, ShareFileError> {
+    let (name, data) = share_file_bytes(app, bot_id, requested).await?;
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, mime_of(Path::new(&name)).to_string()),
+            (header::CONTENT_DISPOSITION, content_disposition(&name)),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        data,
+    )
+        .into_response())
+}
+
+/// [`share_file`] 的讀檔那一段（同一條 fd-bound 鏈、同樣的上限與黑名單），回（檔名, 內容）。分享頁下載與 `.svg` 檢查共用。
+pub(crate) async fn share_file_bytes(app: &Arc<App>, bot_id: &str, requested: &str) -> Result<(String, Vec<u8>), ShareFileError> {
     use std::os::unix::fs::MetadataExt as _;
 
     let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| ShareFileError::Unavailable)?.ok_or(ShareFileError::NotFound)?;
@@ -468,17 +484,7 @@ pub(crate) async fn share_file(app: &Arc<App>, bot_id: &str, requested: &str) ->
     if content_is_withheld(&data) {
         return Err(ShareFileError::NotFound);
     }
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, mime_of(Path::new(&name)).to_string()),
-            (header::CONTENT_DISPOSITION, content_disposition(&name)),
-            (header::CACHE_CONTROL, "private, no-store".to_string()),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
-        ],
-        data,
-    )
-        .into_response())
+    Ok((name, data))
 }
 
 /// 舊的 `/bots/{id}/scratchpad*`：scratchpad 不再給使用者（使用者 2026-09-16 裁示）。明確回 404，

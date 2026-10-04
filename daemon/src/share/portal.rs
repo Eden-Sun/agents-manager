@@ -1008,6 +1008,8 @@ async fn files(State(st): State<Portal>, Path(token): Path<String>) -> Response 
             json!({"name": f["name"], "size": f["size"], "modified_at": modified_at})
         })
         .collect();
+    // 清單上的 .svg 有新版就在背景查一次是不是合法 XML，壞了自動提醒 bot（`svg_check`，SPEC §20）。
+    crate::share::svg_check::spawn_check(&st.app, &bot_id, &out);
     Json(json!({"files": out})).into_response()
 }
 
