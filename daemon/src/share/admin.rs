@@ -1,7 +1,8 @@
 //! 分享連結的管理端點，在主 API（7788）上，只收 UI token（SPEC「分享 bot」、API.md）：
 //!
-//! - `GET  /api/bots/{id}/share` → `{shareable, enabled, url:null, token_hint, created_at, last_used_at}`
-//! - `POST /api/bots/{id}/share` `{"enabled":true|false}` → 開（回完整 `url`，只有這一次）／關（清掉 token）
+//! - `GET  /api/bots/{id}/share` → `{shareable, enabled, url, needs_rotate, token_hint, created_at, last_used_at}`：開著就回完整 `url`
+//!   （舊資料只有 hash：`url:null`、`needs_rotate:true`，重產一次就有）
+//! - `POST /api/bots/{id}/share` `{"enabled":true|false}` → 開（已經開著就沿用同一條）／關（清掉 token）
 //! - `POST /api/bots/{id}/share/rotate` → 換新 token，舊連結當下失效，回新的 `url`
 
 use std::sync::Arc;
@@ -84,12 +85,17 @@ async fn base_url(app: &Arc<App>) -> Result<String, LcError> {
     })
 }
 
-async fn state(app: &Arc<App>, id: &str, url: Option<String>) -> Result<Value, LcError> {
+/// 目前的分享狀態。開著就從 DB 存的 token 組完整網址；`base_url` 沒設時 `url:null`（開不了新的，但舊列照樣報狀態）。
+async fn state(app: &Arc<App>, id: &str) -> Result<Value, LcError> {
     let row = store::share(&app.db, id).await.map_err(db_err)?;
+    let base = app.cfg.get().await.share.base();
+    let url = row.as_ref().and_then(|r| r.token.as_deref()).zip(base).map(|(t, b)| format!("{b}/s/{t}"));
     Ok(json!({
         "shareable": true,
         "enabled": row.is_some(),
         "url": url,
+        // 加 `token` 欄之前開的分享只有 hash：連結照樣能用，但拿不回完整網址，重產一次就有。
+        "needs_rotate": row.as_ref().is_some_and(|r| r.token.is_none()),
         "token_hint": row.as_ref().map(|r| r.token_hint.clone()),
         "created_at": row.as_ref().map(|r| r.created_at.clone()),
         "last_used_at": row.as_ref().and_then(|r| r.last_used_at.clone()),
@@ -105,9 +111,9 @@ pub async fn get_share(
     let lock = app.bot_lock(&id).await;
     let _guard = lock.lock_owned().await;
     if !shareable_bot(&app, &id).await? {
-        return Ok(Json(json!({"shareable": false, "enabled": false, "url": null, "token_hint": null, "created_at": null, "last_used_at": null})));
+        return Ok(Json(json!({"shareable": false, "enabled": false, "url": null, "needs_rotate": false, "token_hint": null, "created_at": null, "last_used_at": null})));
     }
-    Ok(Json(state(&app, &id, None).await?))
+    Ok(Json(state(&app, &id).await?))
 }
 
 pub async fn post_share(
@@ -128,15 +134,14 @@ pub async fn post_share(
         store::disable(&app.db, &id).await.map_err(db_err)?;
         crate::share::portal::kick(&id);
         app.emit("bot_share_changed", json!({"bot_id": id, "enabled": false})).await;
-        return Ok(Json(state(&app, &id, None).await?));
+        return Ok(Json(state(&app, &id).await?));
     }
-    let base = base_url(&app).await?;
-    let token = store::enable(&app.db, &id).await.map_err(db_err)?;
-    if token.is_some() {
+    base_url(&app).await?;
+    // 已經開著：不換 token（已經發出去的連結照樣能用），回的是同一條網址。
+    if store::enable(&app.db, &id).await.map_err(db_err)?.is_some() {
         app.emit("bot_share_changed", json!({"bot_id": id, "enabled": true})).await;
     }
-    // 已經開著：不換 token（已經發出去的連結照樣能用），完整網址也拿不回來，要新連結請 rotate。
-    Ok(Json(state(&app, &id, token.map(|t| format!("{base}/s/{t}"))).await?))
+    Ok(Json(state(&app, &id).await?))
 }
 
 pub async fn post_rotate(
@@ -152,13 +157,13 @@ pub async fn post_rotate(
     if !shareable_bot(&app, &id).await? {
         return Err(not_shareable(&id));
     }
-    let base = base_url(&app).await?;
-    let Some(token) = store::rotate(&app.db, &id).await.map_err(db_err)? else {
+    base_url(&app).await?;
+    if store::rotate(&app.db, &id).await.map_err(db_err)?.is_none() {
         return Err(LcError::conflict("share_disabled", json!({"bot_id": id, "message": "分享沒開著，先開分享"})));
-    };
+    }
     crate::share::portal::kick(&id);
     app.emit("bot_share_changed", json!({"bot_id": id, "enabled": true})).await;
-    Ok(Json(state(&app, &id, Some(format!("{base}/s/{token}"))).await?))
+    Ok(Json(state(&app, &id).await?))
 }
 
 /// 建受限 bot 的前半：決定資料夾（新資料夾就建出來）、`shared_bots` 記下來（在寫 config 之前）。

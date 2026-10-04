@@ -590,10 +590,13 @@ export class MockTransport implements Transport {
 
   /** 更新框的 changelog／分診／AGM 解析（`mockReleaseTriage.ts`）。 */
   readonly releaseTriage = new MockReleaseTriage()
-  readonly shares = new MockShares((id) => {
-    const b = this.bots.find((x) => x.id === id)
-    return b ? b.share_profile === 'restricted' : null
-  })
+  readonly shares = new MockShares(
+    (id) => {
+      const b = this.bots.find((x) => x.id === id)
+      return b ? b.share_profile === 'restricted' : null
+    },
+    (id, enabled) => this.emit('bot_share_changed', { bot_id: id, enabled }),
+  )
   readonly serverDrafts = new MockServerDrafts()
   readonly remoteCargo = new MockRemoteCargo()
   /** header 的 herdr 一鍵更新（`mockHerdrUpdate.ts`，`__amMock.herdrUpdate()`）。 */
@@ -2336,6 +2339,7 @@ export class MockTransport implements Transport {
               primary_position: b.primary_position ?? 0,
               cwd: b.cwd,
               share_profile: b.share_profile ?? null,
+              share_enabled: this.shares.isEnabled(b.id),
               // #353：mock 也從目前 run 的啟動值投影 needs_restart，讓設定面板與真 daemon 同步。
               // 排到回合結束的不算需重啟（#712）。
               live_apply_deferred: this.deferredLive.has(b.id),

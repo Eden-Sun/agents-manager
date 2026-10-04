@@ -6,7 +6,7 @@
 //!   `--restricted`（沒有 Bash／WebFetch、檔案工具只在工作目錄）＋`dontAsk`（沒預先允許的一律拒絕，不會停在權限框等人），
 //!   工作目錄是建 bot 時選的資料夾（[`folder`]：新資料夾 `~/shared-bots/<名稱>` 或既有資料夾），權限是白名單（只有那個資料夾與自己的 outbox），pane env 只留 hook 要的幾個。
 //!   它的 hook token 只能打 `/hook/*`：`/api`、`/relay/*`、`/build-slots/*` 一律拒絕（[`refuses_bot_principal`]）。
-//! - [`admin`]：主 API（7788，只收 UI token）上開／關／重產連結。DB 只存 token 的 SHA-256。
+//! - [`admin`]：主 API（7788，只收 UI token）上開／關／重產連結、隨時拿回完整連結（DB 存 token 原文與 SHA-256，入口用 hash 查）。
 //! - [`portal`]：獨立 listener（`[share] listen`），router 上只有 `/s/{token}/…` 與分享頁的靜態檔，沒有 fallback 到主 API。
 
 pub(crate) mod admin;

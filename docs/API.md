@@ -735,8 +735,9 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 
 管理端點在主 API，只收 UI token（Bot／service principal 403 `user_only`）：
 
-- `GET /api/bots/{id}/share` → `{shareable, enabled, url:null, token_hint, created_at, last_used_at}`。一般 bot `shareable:false`、其餘 null。
-- `POST /api/bots/{id}/share` `{"enabled":true}` → 開啟，回同一個形狀＋完整 `url`（`<base_url>/s/<token>`，只有這一次拿得到）；已經開著就不換 token、`url:null`。
+- `GET /api/bots/{id}/share` → `{shareable, enabled, url, needs_rotate, token_hint, created_at, last_used_at}`。分享中 `url`＝完整連結（`<base_url>/s/<token>`，隨時拿得回）；
+  加 `bot_shares.token` 之前開的分享只有 hash：連結照樣能用，但 `url:null`、`needs_rotate:true`，rotate 一次就有。`base_url` 沒設時 `url:null`、`needs_rotate:false`。一般 bot `shareable:false`、其餘 null／false。
+- `POST /api/bots/{id}/share` `{"enabled":true}` → 開啟，回同一個形狀（含完整 `url`）；已經開著就不換 token、回同一條 `url`。
   `{"enabled":false}` → 關掉並清 token（舊連結當下 404）。
 - `POST /api/bots/{id}/share/rotate` → 換新 token、舊的立刻失效，回新的 `url`；沒開著 409 `share_disabled`。
 - 啟用、停用、輪替與 bot 刪除共用 per-bot 鎖；操作在鎖內重查存活狀態，已刪 bot 回 404。刪除 bot／專案會清除公開 token 列；還原 bot 不會恢復舊連結，必須重新啟用。
@@ -746,7 +747,7 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
   `share_folder`（只給受限 bot，一般 bot 帶了 400）：`{"kind":"new","name":"support"}`＝在 `[share] folders_root`（預設 `~/shared-bots`）建新資料夾，同名已存在 409 `folder_exists`（同一個 `client_request_id` 的重送除外）；
   `{"kind":"existing","path":"/abs/dir"}`＝本機既有資料夾；位置不行（根目錄、家目錄與上層、daemon 資料目錄、`~/.ssh`／`~/.config`／`~/.claude*`…、系統目錄、不是絕對路徑、不存在）400 `bad_share_folder`＋`message`。
   沒帶＝新資料夾、名字用 bot 名。`share_folder` 進冪等指紋。`model` 沒給＝最新 Opus（`/api/models` 當下列出的；只有別名時是 `opus`），寫進 bot 的 `model`。
-  config 另有 `[share] folders_root`（可用 `~/`，必須在 daemon 資料目錄之外）。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`null`）。
+  config 另有 `[share] folders_root`（可用 `~/`，必須在 daemon 資料目錄之外）。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`null`）與 `share_enabled`（分享連結開著＝true）。
 - 分享使用者送來的訊息：`relay_from:"share"`、`source:"share"`（只在輸出；見 SPEC §20.3）。WS 多一種事件 `bot_share_changed {bot_id, enabled}`。
 
 分享入口（獨立 listener，`[share] listen`；token 錯／分享關了一律 `404 {"error":"not_found"}`）：

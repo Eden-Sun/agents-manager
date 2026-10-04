@@ -1,6 +1,6 @@
 /**
  * mock 的分享管理端點（API.md §5.6）：`GET/POST /bots/{id}/share`、`POST /bots/{id}/share/rotate`。
- * 規則照契約：只有 `share_profile = restricted` 的 bot 能開（其他 409 `not_shareable`）；完整 url 只在開／重產那一次回。
+ * 規則照契約：只有 `share_profile = restricted` 的 bot 能開（其他 409 `not_shareable`）；開著就回完整 url（daemon 存 token 原文）。
  */
 import { ApiError } from './types'
 
@@ -27,21 +27,29 @@ export class MockShares {
   private shares = new Map<string, Share>()
   private restricted: (botId: string) => boolean | null
 
-  constructor(restricted: (botId: string) => boolean | null) {
+  private changed: (botId: string, enabled: boolean) => void
+
+  constructor(restricted: (botId: string) => boolean | null, changed: (botId: string, enabled: boolean) => void = () => {}) {
     this.restricted = restricted
+    this.changed = changed
   }
 
-  /** 種子資料：已經開著的分享（GET 只看得到末 4 碼）。 */
+  isEnabled(botId: string): boolean {
+    return this.shares.has(botId)
+  }
+
+  /** 種子資料：已經開著的分享。 */
   seed(botId: string) {
     this.shares.set(botId, { token: newToken(), created_at: new Date(Date.now() - 86_400_000).toISOString(), last_used_at: new Date(Date.now() - 600_000).toISOString() })
   }
 
-  private view(botId: string, withUrl: boolean): Rec {
+  private view(botId: string): Rec {
     const s = this.shares.get(botId)
-    if (!s) return { enabled: false, url: null, token_hint: null, created_at: null, last_used_at: null }
+    if (!s) return { enabled: false, url: null, needs_rotate: false, token_hint: null, created_at: null, last_used_at: null }
     return {
       enabled: true,
-      url: withUrl ? `${MOCK_SHARE_BASE}/s/${s.token}` : null,
+      url: `${MOCK_SHARE_BASE}/s/${s.token}`,
+      needs_rotate: false,
       token_hint: `…${s.token.slice(-4)}`,
       created_at: s.created_at,
       last_used_at: s.last_used_at,
@@ -55,21 +63,23 @@ export class MockShares {
     const r = this.restricted(botId)
     if (r === null) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
     if (!r) throw new ApiError(409, { error: 'conflict', reason: 'not_shareable' }, 'not shareable')
-    if (method === 'GET' && !m[2]) return this.view(botId, false)
+    if (method === 'GET' && !m[2]) return this.view(botId)
     if (method === 'POST' && m[2]) {
       if (!this.shares.has(botId)) throw new ApiError(409, { error: 'conflict', reason: 'share_disabled' }, 'share disabled')
       this.shares.set(botId, { token: newToken(), created_at: new Date().toISOString(), last_used_at: null })
-      return this.view(botId, true)
+      this.changed(botId, true)
+      return this.view(botId)
     }
     if (method === 'POST') {
       if (b.enabled === true) {
-        // 已開著：不換 token，也拿不到完整連結（daemon 只存雜湊）。
-        if (this.shares.has(botId)) return this.view(botId, false)
+        // 已開著：不換 token，回同一條。
+        if (this.shares.has(botId)) return this.view(botId)
         this.shares.set(botId, { token: newToken(), created_at: new Date().toISOString(), last_used_at: null })
-        return this.view(botId, true)
+        this.changed(botId, true)
+        return this.view(botId)
       }
-      this.shares.delete(botId)
-      return this.view(botId, false)
+      if (this.shares.delete(botId)) this.changed(botId, false)
+      return this.view(botId)
     }
     return undefined
   }

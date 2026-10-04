@@ -9,10 +9,12 @@ const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString('zh-TW',
 
 /**
  * Bot 設定裡的「分享」區塊（SPEC「分享 bot」）：只有分享用（受限）的 bot 才畫。
- * 開／關、複製連結、重產（舊的立刻失效）。完整連結只在開或重產的那一刻拿得到，之後只剩末 4 碼。
+ * 開／關、隨時顯示完整連結＋複製、重產（舊的立刻失效）。舊版開的分享只有雜湊，提示重產一次。
+ * 聊天區頂端的「🔗 分享」改了狀態會發 `bot_share_changed` → `share_enabled` 變 → 這裡重抓。
  */
 export function BotShareSection({ botId }: { botId: string }) {
   const restricted = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile === 'restricted')
+  const sharing = useStore((s) => s.bots.find((b) => b.id === botId)?.share_enabled === true)
   const notify = useStore((s) => s.notify)
   const [share, setShare] = useState<ShareState | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -29,7 +31,7 @@ export function BotShareSection({ botId }: { botId: string }) {
     return () => {
       alive = false
     }
-  }, [botId, restricted])
+  }, [botId, restricted, sharing])
 
   if (!restricted) return null
 
@@ -83,11 +85,15 @@ export function BotShareSection({ botId }: { botId: string }) {
                   複製連結
                 </button>
               </div>
-              <p className="hint">完整連結只顯示這一次（daemon 只存雜湊）；關掉設定後就只看得到末四碼，忘了就重產。</p>
+              <p className="hint">聊天區頂端的「🔗 複製連結」也能隨時複製。</p>
             </>
+          ) : share?.needs_rotate ? (
+            <p className="bs-share-hint">
+              目前的連結結尾 <code>{share.token_hint ?? '…'}</code>，是舊版開的（只存雜湊），拿不回完整網址；「重產連結」一次之後就會一直顯示在這裡。
+            </p>
           ) : (
             <p className="bs-share-hint">
-              目前的連結結尾 <code>{share?.token_hint ?? '…'}</code>。完整連結只在產生時顯示，要再拿一次請「重產連結」。
+              目前的連結結尾 <code>{share?.token_hint ?? '…'}</code>。config.toml 的 [share] base_url 沒設，組不出完整網址。
             </p>
           )}
           <dl className="bs-share-meta">

@@ -1,5 +1,6 @@
 /**
- * 分享 bot（SPEC「分享 bot」）的主 UI：受限 bot 的設定裡才有分享區塊；開 → 拿到完整連結、關掉設定再看只剩末 4 碼；
+ * 分享 bot（SPEC「分享 bot」）的主 UI：受限 bot 的設定裡才有分享區塊，分享中隨時顯示完整連結；
+ * 聊天區頂端的「🔗 分享」只給受限 bot（未分享＝開啟並複製、分享中＝複製、▾ 選單重產／關閉都要確認）；側欄名字旁 🔗。
  * 重產要確認、新連結跟舊的不同；關閉要確認。分享使用者的訊息標「🔗 分享使用者」。mock 的端點規則同契約 B。
  */
 import test, { after, afterEach, before } from 'node:test'
@@ -10,6 +11,7 @@ import { MockTransport } from '../api/mock'
 import { ApiError } from '../api/types'
 import { resetStoreForTest, useStore } from '../store/store'
 import { BotShareSection } from './BotShareSection'
+import { ShareLinkButton, ShareMark } from './ShareLinkButton'
 import { SentViaTag } from './SentViaTag'
 import { shareProfileBlocked } from '../lib/shareProfile'
 
@@ -26,7 +28,7 @@ after(async () => {
 async function setup() {
   const mock = new MockTransport()
   mockApi(mock)
-  const st = (await mock.request('GET', '/state')) as { projects: { bots: { id: string; name: string; share_profile: string | null }[] }[] }
+  const st = (await mock.request('GET', '/state')) as { projects: { bots: { id: string; name: string; share_profile: string | null; share_enabled: boolean }[] }[] }
   const bots = st.projects.flatMap((p) => p.bots)
   const shared = bots.find((b) => b.share_profile === 'restricted')!
   const plain = bots.find((b) => b.share_profile === null)!
@@ -41,17 +43,21 @@ async function setup() {
 
 const btn = (label: string) => [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === label)!
 
-test('mock 契約：一般 bot 開分享 409 not_shareable；完整 url 只在開／重產時回', async () => {
+test('mock 契約：一般 bot 開分享 409 not_shareable；分享中 GET 回完整 url', async () => {
   const { mock, shared, plain } = await setup()
   await assert.rejects(mock.request('POST', `/bots/${plain.id}/share`, { enabled: true }), (e) => e instanceof ApiError && (e.body as { reason: string }).reason === 'not_shareable')
-  const g = (await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean; url: string | null; token_hint: string }
+  const g = (await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean; url: string | null; token_hint: string; needs_rotate: boolean }
   assert.equal(g.enabled, true)
-  assert.equal(g.url, null, 'GET 不回完整連結')
-  assert.match(g.token_hint, /^….{4}$/)
+  assert.match(g.url!, /\/s\/[A-Za-z0-9_-]{43}$/, 'GET 也回完整連結')
+  assert.equal(g.needs_rotate, false)
+  assert.equal(g.token_hint, `…${g.url!.slice(-4)}`)
   const r = (await mock.request('POST', `/bots/${shared.id}/share/rotate`)) as { url: string }
   assert.match(r.url, /\/s\/[A-Za-z0-9_-]{43}$/, '32 bytes base64url')
-  const off = (await mock.request('POST', `/bots/${shared.id}/share`, { enabled: false })) as { enabled: boolean }
+  assert.notEqual(r.url, g.url)
+  assert.equal(((await mock.request('GET', `/bots/${shared.id}/share`)) as { url: string }).url, r.url, '重產後 GET 回新的那條')
+  const off = (await mock.request('POST', `/bots/${shared.id}/share`, { enabled: false })) as { enabled: boolean; url: string | null }
   assert.equal(off.enabled, false)
+  assert.equal(off.url, null)
 })
 
 test('分享面板測試的 store stub 不會留給下一條測試', () => {
@@ -65,25 +71,114 @@ test('一般 bot 的設定裡沒有分享區塊', async () => {
   assert.equal(document.querySelector('.bs-share'), null)
 })
 
-test('受限 bot：已開只看到末 4 碼；重產（確認後）拿到完整新連結；關閉（確認後）', async () => {
+test('受限 bot：分享中隨時看得到完整連結；重產（確認後）換成新連結；關閉（確認後）', async () => {
   const { shared } = await setup()
   await mount(<BotShareSection botId={shared.id} />)
   await settle(150)
   const sec = document.querySelector('.bs-share')!
   assert.ok(sec, '受限 bot 要有分享區塊')
-  assert.equal(sec.querySelector('input[aria-label="分享連結"]'), null, '平常沒有完整連結')
-  assert.match(sec.querySelector('.bs-share-hint')!.textContent!, /結尾 …/)
+  const before = sec.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')!.value
+  assert.match(before, /^https:\/\/.+\/s\/[A-Za-z0-9_-]{43}$/, '一打開設定就有完整連結')
+  assert.ok(btn('複製連結'))
   await click(btn('重產連結'))
   assert.match(document.body.textContent!, /舊連結立刻失效/)
   await click(btn('重產'))
   await settle(150)
   const url = document.querySelector<HTMLInputElement>('input[aria-label="分享連結"]')!.value
   assert.match(url, /^https:\/\/.+\/s\/[A-Za-z0-9_-]{43}$/)
+  assert.notEqual(url, before)
   await click(btn('關閉分享'))
   await click([...document.querySelectorAll('button')].filter((b) => b.textContent?.trim() === '關閉分享').at(-1)!)
   await settle(150)
   assert.equal(document.querySelector('input[aria-label="分享連結"]'), null, '關掉之後不留已失效的連結')
   assert.equal(document.querySelector<HTMLInputElement>('.bs-share-toggle input')!.checked, false)
+})
+
+test('舊資料只有雜湊：設定面板提示重產一次', async () => {
+  const { shared } = await setup()
+  const { rawTransport } = await import('../api/index')
+  const orig = rawTransport.request.bind(rawTransport)
+  rawTransport.request = (async (m: string, p: string, b?: unknown) => {
+    const r = await orig(m as never, p, b as never)
+    return m === 'GET' && p.endsWith('/share') ? { ...(r as object), url: null, needs_rotate: true } : r
+  }) as typeof rawTransport.request
+  try {
+    await mount(<BotShareSection botId={shared.id} />)
+    await settle(150)
+    assert.equal(document.querySelector('input[aria-label="分享連結"]'), null)
+    assert.match(document.querySelector('.bs-share-hint')!.textContent!, /舊版開的.*「重產連結」一次/)
+  } finally {
+    rawTransport.request = orig
+  }
+})
+
+test('聊天區頂端「🔗 分享」：一般 bot 沒有；未分享按下＝開啟並複製，分享中＝複製，▾ 選單重產與關閉都要確認', async () => {
+  const { mock, shared, plain } = await setup()
+  await mount(<ShareLinkButton botId={plain.id} />)
+  assert.equal(document.querySelector('.share-link'), null, '一般 bot 沒有分享按鈕')
+  await unmountAll()
+
+  await mock.request('POST', `/bots/${shared.id}/share`, { enabled: false })
+  const msgs: string[] = []
+  const copied: string[] = []
+  const nav = navigator as unknown as { clipboard?: unknown }
+  const origClip = nav.clipboard
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (t: string) => void copied.push(t) } })
+  const origExec = document.execCommand
+  document.execCommand = () => false
+  const setOn = (on: boolean) => act(async () => useStore.setState((s) => ({ bots: s.bots.map((b) => (b.id === shared.id ? { ...b, share_enabled: on } : b)) })))
+  try {
+    await act(async () => useStore.setState({ notify: (_k: string, m: string) => void msgs.push(m) } as never))
+    await setOn(false)
+    await mount(<ShareLinkButton botId={shared.id} />)
+    assert.equal(btn('🔗 分享').getAttribute('aria-label'), '開啟分享並複製連結')
+    assert.equal(document.querySelector('.share-link-more'), null, '沒分享時沒有選單')
+    await click(btn('🔗 分享'))
+    await settle(50)
+    const g = (await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean; url: string }
+    assert.equal(g.enabled, true, '按下就開啟')
+    assert.deepEqual(copied, [g.url], '開啟後複製完整連結')
+    assert.match(msgs.at(-1)!, /已開啟分享並複製連結/)
+
+    await setOn(true)
+    await settle(50)
+    await click(btn('🔗 複製連結'))
+    await settle(20)
+    assert.deepEqual(copied, [g.url, g.url], '分享中按下＝複製同一條')
+
+    await click(document.querySelector('.share-link-more')!)
+    await click(btn('重產連結'))
+    assert.match(document.body.textContent!, /舊連結立刻失效/, '重產要確認')
+    await click(btn('重產'))
+    await settle(50)
+    const g2 = (await mock.request('GET', `/bots/${shared.id}/share`)) as { url: string }
+    assert.notEqual(g2.url, g.url)
+    assert.equal(copied.at(-1), g2.url, '重產後複製新連結')
+
+    await click(document.querySelector('.share-link-more')!)
+    await click(btn('關閉分享'))
+    assert.match(document.body.textContent!, /連結立刻失效/, '關閉要確認')
+    await click([...document.querySelectorAll('button')].filter((b) => b.textContent?.trim() === '關閉分享').at(-1)!)
+    await settle(50)
+    assert.equal(((await mock.request('GET', `/bots/${shared.id}/share`)) as { enabled: boolean }).enabled, false)
+  } finally {
+    document.execCommand = origExec
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: origClip })
+  }
+})
+
+test('側欄：分享用 bot 名字旁 🔗，分享中亮起；一般 bot 沒有', async () => {
+  const { shared, plain } = await setup()
+  assert.equal(shared.share_enabled, true, 'mock 的種子分享開著，/state 照實投影')
+  const setOn = (on: boolean) => act(async () => useStore.setState((s) => ({ bots: s.bots.map((b) => (b.id === shared.id ? { ...b, share_enabled: on } : b)) })))
+  await setOn(false)
+  await mount(<><ShareMark botId={shared.id} /><ShareMark botId={plain.id} /></>)
+  const marks = () => [...document.querySelectorAll('.share-mark')]
+  assert.equal(marks().length, 1, '一般 bot 不標')
+  assert.ok(marks()[0].classList.contains('off'))
+  await setOn(true)
+  assert.ok(marks()[0].classList.contains('on'), '分享中亮起')
+  assert.equal(marks()[0].getAttribute('aria-label'), '分享中')
 })
 
 test('分享使用者的訊息標「🔗 分享使用者」，自己發的不標', () => {

@@ -1286,6 +1286,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
     let previews = crate::preview::state_map(&app.db).await.map_err(any_err)?;
     let restricted = crate::share::store::restricted_ids(&app.db).await.map_err(any_err)?;
+    let sharing = crate::share::store::shared_ids(&app.db).await.map_err(any_err)?;
     // 每顆 bot 的 run 與排隊中的回合各一次讀完：逐顆查是 N+1（34 顆 bot 約 30 ms，隨 bot 數線性長）。
     let mut runs = db::active_runs_by_bot(&app.db).await.map_err(any_err)?;
     let mut queued_turns = db::queued_turns_by_bot(&app.db).await.map_err(any_err)?;
@@ -1325,6 +1326,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "cwd": b.cwd,
                 // 分享用的受限 bot（SPEC「分享 bot」）；一般 bot＝null。
                 "share_profile": restricted.contains(&b.id).then_some(crate::share::store::PROFILE_RESTRICTED),
+                // 分享連結開著（`bot_shares` 有一列）；變了發 `bot_share_changed`。
+                "share_enabled": sharing.contains(&b.id),
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 // #714：`run.background_jobs`＝回合結束後畫面上還標著的背景工作數（記憶體裡的，不在 DB）。
                 "run": crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str())),

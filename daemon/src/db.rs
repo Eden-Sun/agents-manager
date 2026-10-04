@@ -288,6 +288,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (37, "5560444159e4c9a5"),
     // 分享 bot：`shared_bots`（受限的分享用 bot 與它的工作目錄）、`bot_shares`（分享連結，只存 token 的 SHA-256）。
     (38, "f2d07b091615d3d7"),
+    // 分享 bot：`bot_shares.token`（token 原文，管理端隨時拿得回完整連結；NULL＝只有 hash 的舊列）。
+    (39, "827c54df62168fe1"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

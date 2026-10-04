@@ -44,6 +44,7 @@ import { SidebarPanes, SidebarUnownedPanes } from './SidebarPanes'
 import { RunElapsed } from './RunElapsed'
 import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
+import { ShareMark } from './ShareLinkButton'
 import { HostBadge, HostsPanel } from './HostsPanel'
 import { ShareProfileField } from './ShareProfileField'
 import { EMPTY_SHARE_FOLDER, shareFolderInput, shareProfileBlocked, type ShareFolderDraft } from '../lib/shareProfile'
@@ -380,6 +381,7 @@ function BotRowImpl({
           {/* 選取中的列，點名字才改名。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={selected} hint={herdrIdentity(run, bot.agent_name)?.title}>
             {compact ? null : <PersonaMark persona={bot.persona} />}
+            <ShareMark botId={botId} />
             {/* 燈號說 idle 但回合是斷的，不能只留 tooltip；重送在 header chip。 */}
             {turnError ? (
               <span className="bot-turn-error" title={`${turnError}｜這一回合被 API 中斷，回應不完整。點進去可以重送上一則`}>

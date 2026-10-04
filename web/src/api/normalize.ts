@@ -327,6 +327,7 @@ export function toBot(v: unknown, projectId?: string): Bot | null {
     })(),
     cwd: optStr(pick(v, 'cwd')),
     share_profile: pick(v, 'share_profile') === 'restricted' ? 'restricted' : null,
+    share_enabled: bool(pick(v, 'share_enabled')),
     ...(() => {
       const x = pick(v, 'preview')
       if (x === undefined) return {}

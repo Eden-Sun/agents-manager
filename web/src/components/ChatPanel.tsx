@@ -60,6 +60,7 @@ import { runtimeIdentity, runtimeSettingsKnown } from '../lib/runtimeDrift'
 import { shortModel } from '../lib/shortModel'
 import { QuotaStrip } from './QuotaStrip'
 import { PrimaryStar } from './PrimaryStar'
+import { ShareLinkButton } from './ShareLinkButton'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { UnreadChip } from './UnreadChip'
 import { StatusLamp } from './StatusLamp'
@@ -1268,6 +1269,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
             >
               <GearIcon />
             </button>
+            <ShareLinkButton botId={botId} />
             <PersonaMark persona={bot.persona} />
             <HostBadge host={hostName} connected={hostUp} />
             <UpdateBadge botId={botId} />

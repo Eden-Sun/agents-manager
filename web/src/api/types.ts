@@ -267,6 +267,8 @@ export interface Bot {
   cwd: string | null
   /** `restricted`＝分享用的受限 bot（只有它能開分享連結，SPEC「分享 bot」）；一般 bot 與舊 daemon＝null。 */
   share_profile: 'restricted' | null
+  /** 分享連結開著（側欄的 🔗 亮起）；舊 daemon 沒這欄＝false。 */
+  share_enabled: boolean
   /** 預覽模式（issue #253）：`/api/state` 帶的簡版；舊 daemon 沒有＝undefined，null＝沒開過。 */
   preview?: { status: 'off' | 'starting' | 'running' | 'failed'; port: number | null } | null
   /** 只存在於瀏覽器的佔位列（`id` 以 `pending:` 開頭），daemon 建好後被取代。 */
