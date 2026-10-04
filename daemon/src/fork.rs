@@ -136,6 +136,10 @@ pub async fn fork_bot(
 async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
     let source = db::bot(&app.db, &op.source_bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let new_id = op.target_bot_id.clone();
+    // Hold the target lock before projecting it into the sidebar; a fresh `/start` must not beat
+    // the fork launch and make an unrelated session look like a successful fork.
+    let target_lock = app.bot_lock(&new_id).await;
+    let _target_guard = target_lock.lock().await;
 
     if op.state == "planned" {
         let used_name = std::sync::Mutex::new(op.name.clone());
@@ -178,6 +182,8 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
         }
         op.name = used_name.into_inner().unwrap_or_default();
         app.emit("bot_changed", json!({"bot_id": new_id})).await;
+        #[cfg(test)]
+        lifecycle::race_point::hit("fork_after_bot_changed", &new_id).await;
 
         // 分叉之前的訊息不會複製過來（CLI 裡有，AG Man 的對話紀錄在來源那顆）。
         if let Ok(conv) = db::conversation_id(&app.db, &new_id).await {
@@ -202,7 +208,7 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
 
     if op.state == "created" {
         let opts = StartOpts { fork_session: Some(op.session_id.clone()), ..Default::default() };
-        let (run_id, start_error) = start_fork_target(app, &new_id, opts).await?;
+        let (run_id, start_error) = start_fork_target_locked(app, &new_id, opts).await?;
         if let Some(error) = start_error.as_deref() {
             tracing::warn!(source = %source.name, fork = %op.name, error, "forked bot was created but did not start");
         }
@@ -234,9 +240,7 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
 /// Start a fork under the target bot lock. A durable `starting` run can outlive a daemon crash
 /// before `agent.start`; only a live pane proves the launch completed. Restart the normal way so
 /// lifecycle can retire an orphaned active run before retrying the same fork session.
-async fn start_fork_target(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> Result<(Option<String>, Option<String>), LcError> {
-    let lock = app.bot_lock(bot_id).await;
-    let _guard = lock.lock().await;
+async fn start_fork_target_locked(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> Result<(Option<String>, Option<String>), LcError> {
     let existing: Option<db::Run> = sqlx::query_as("SELECT * FROM runs WHERE bot_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
         .bind(bot_id)
         .fetch_optional(&app.db)
@@ -590,6 +594,58 @@ mod tests {
         assert_eq!(out["bot_id"], target.as_str());
         assert_eq!(fork_bot_count(&e).await, 2, "沒有插第二顆");
         assert_eq!(fork_starts(&e), 1);
+    }
+
+    /// `bot_changed` refreshes the sidebar while the fork target is not started yet. A manual
+    /// start racing that refresh must wait for the fork lock, or the daemon can accept a blank
+    /// conversation run as proof that the fork succeeded.
+    #[tokio::test]
+    async fn a_visible_fork_target_cannot_be_started_without_its_source_session() {
+        let e = env().await;
+        let src = source_bot(&e, "claude", "alfa", "user").await;
+        let target = db::ulid();
+        fork_ops::insert(&e.app.db, &planned_op(&src, &target)).await.unwrap();
+
+        let (visible_tx, visible_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        lifecycle::race_point::arm("fork_after_bot_changed", &target, move || async move {
+            let _ = visible_tx.send(());
+            let _ = release_rx.await;
+        });
+        let (manual_start_tx, manual_start_rx) = tokio::sync::oneshot::channel();
+        lifecycle::race_point::arm("restart_before_agent_start", &target, move || async move {
+            let _ = manual_start_tx.send(());
+        });
+
+        let app = e.app.clone();
+        let source = src.clone();
+        let fork_task = tokio::spawn(async move {
+            let res = fork_bot(
+                State(app),
+                Path(source),
+                Some(Json(ForkReq { name: None, client_request_id: Some("req-crash".into()) })),
+            )
+            .await
+            .unwrap();
+            let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        });
+        visible_rx.await.expect("新 bot 已推送到側欄");
+
+        let manual_app = e.app.clone();
+        let manual_id = target.clone();
+        let manual_task = tokio::spawn(async move { lifecycle::start_bot(&manual_app, &manual_id).await });
+        // With the target lock held before projection, the manual start stays outside lifecycle
+        // until the fork has launched; without it, this hook proves the blank start won the race.
+        let _manual_reached_agent_start = tokio::time::timeout(std::time::Duration::from_millis(500), manual_start_rx).await.is_ok();
+
+        let _ = release_tx.send(());
+        let out = fork_task.await.unwrap();
+        let manual = manual_task.await.unwrap();
+        assert_eq!(out["bot_id"], target);
+        assert!(out["start_error"].is_null(), "fork launches successfully: {out}");
+        assert_eq!(fork_starts(&e), 1, "manual start must not replace the source-session fork");
+        assert!(manual.is_err(), "the competing start sees the fork run instead of opening a blank session");
     }
 
     /// A daemon crash after the run row is inserted but before `agent.start` must not make a
