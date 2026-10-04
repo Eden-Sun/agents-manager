@@ -533,13 +533,29 @@ trap cleanup EXIT HUP INT TERM
 am_missing() {{ printf 'AM_MISSING\n'; exit 0; }}
 am_mkdir_failed() {{ printf 'AM_MKDIR_FAILED\n'; exit 0; }}
 am_copy_failed() {{ printf 'AM_COPY_FAILED\n'; exit 0; }}
+# 第二個參數是 `/dev/fd/N`（已開啟的檔案）時，BSD（macOS）的 `stat` 回的是 devfs 的裝置編號、不是檔案所在的磁碟，
+# 跟路徑那邊永遠對不上——2026-10-04 m4p 十顆 claude bot 更新 Claude 重啟時全部被當成「紀錄檔不見」、開了新對話。
+# 所以 fd 一律用 `fstat` 讀（python3，跟下面附屬目錄複製同一個相依）；GNU 的 `/dev/fd/N` 是指向真檔的連結，`-ef` 照舊。
+am_fd_is() {{
+  python3 - "$@" <<'AM_FD_PY'
+import os, sys
+fd = int(sys.argv[2])
+st = os.fstat(fd)
+if sys.argv[1] == "nlink1":
+    sys.exit(0 if st.st_nlink == 1 else 1)
+p = os.stat(sys.argv[3])
+sys.exit(0 if (p.st_dev, p.st_ino) == (st.st_dev, st.st_ino) else 1)
+AM_FD_PY
+}}
 am_same() {{
-  if stat -c %Y "$1" >/dev/null 2>&1; then [ "$1" -ef "$2" ]
-  else a=$(stat -L -f '%d %i' "$1" 2>/dev/null) || return 1; b=$(stat -L -f '%d %i' "$2" 2>/dev/null) || return 1; [ "$a" = "$b" ]; fi
+  if stat -c %Y "$1" >/dev/null 2>&1; then [ "$1" -ef "$2" ]; return; fi
+  case "$2" in /dev/fd/[0-9]*) am_fd_is same "${{2#/dev/fd/}}" "$1"; return;; esac
+  a=$(stat -L -f '%d %i' "$1" 2>/dev/null) || return 1; b=$(stat -L -f '%d %i' "$2" 2>/dev/null) || return 1; [ "$a" = "$b" ]
 }}
 am_singlelink() {{
-  if stat -L -c %h "$1" >/dev/null 2>&1; then l=$(stat -L -c %h "$1" 2>/dev/null) || return 1
-  else l=$(stat -L -f %l "$1" 2>/dev/null) || return 1; fi
+  if stat -L -c %h "$1" >/dev/null 2>&1; then l=$(stat -L -c %h "$1" 2>/dev/null) || return 1; [ "$l" = 1 ]; return; fi
+  case "$1" in /dev/fd/[0-9]*) am_fd_is nlink1 "${{1#/dev/fd/}}"; return;; esac
+  l=$(stat -L -f %l "$1" 2>/dev/null) || return 1
   [ "$l" = 1 ]
 }}
 am_size() {{
@@ -2544,6 +2560,54 @@ mod resume_args_tests {
             assert_eq!(aside.len(), 1, "{aside:?}");
             assert!(!aside[0].ends_with(".jsonl"), "{aside:?}");
             assert_eq!(std::fs::read_to_string(new.join("k").join(&aside[0])).unwrap(), "{\"a\":1}\n{\"dest\":1}\n");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        /// 假的 BSD `stat`：不認 `-c`（逼腳本走 macOS 那條路），`-f` 照 macOS 的行為——對 `/dev/fd/N` 回 devfs 的裝置編號
+        /// （2026-10-04 m4p 實測：檔案 dev 16777234、`/dev/fd/3` dev 1318745794，inode 相同）。
+        fn bsd_stat_dir() -> std::path::PathBuf {
+            let dir = tmp().join("bsd-bin");
+            std::fs::create_dir_all(&dir).unwrap();
+            let shim = dir.join("stat");
+            std::fs::write(
+                &shim,
+                r#"#!/bin/sh
+fmt=; path=
+while [ $# -gt 0 ]; do
+  case "$1" in -c) exit 1;; -L) ;; -f) fmt=$2; shift;; *) path=$1;; esac
+  shift
+done
+gfmt=$(printf '%s' "$fmt" | sed -e 's/%l/%h/g' -e 's/%z/%s/g')
+case "$path" in
+  /dev/fd/*) out=$(/usr/bin/stat -L -c "$gfmt" "$path") || exit 1; printf '%s\n' "$out" | sed 's/^[0-9]* /1318745794 /' ;;
+  *) /usr/bin/stat -L -c "$gfmt" "$path" ;;
+esac
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            dir
+        }
+
+        /// 2026-10-04：macOS 上 `/dev/fd/N` 的裝置編號是 devfs 的，以前比對永遠失敗 → `AM_MISSING` → 每次重啟都開新對話。
+        #[test]
+        fn a_bsd_host_stages_the_transcript_instead_of_calling_it_missing() {
+            let base = tmp();
+            let old = base.join("old-projects");
+            std::fs::create_dir_all(old.join("k")).unwrap();
+            std::fs::write(old.join("k/sid.jsonl"), "{\"a\":1}\n").unwrap();
+            let new = base.join("new-projects");
+            let script = remote_stage_script(&old.to_string_lossy(), &new.to_string_lossy(), "k", "sid.jsonl", None);
+            let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(&script).env("PATH", path).output().unwrap();
+            let out = String::from_utf8_lossy(&out.stdout).into_owned();
+            assert!(out.contains("AM_STAGED"), "BSD stat 的 /dev/fd 裝置編號不同也要搬得過去：{out}");
+            assert_eq!(std::fs::read_to_string(new.join("k/sid.jsonl")).unwrap(), "{\"a\":1}\n");
+            // 同一個 projects（console-rpa 的情形：身分沒換）回 AM_SAME。
+            let same = remote_stage_script(&old.to_string_lossy(), &old.to_string_lossy(), "k", "sid.jsonl", None);
+            let path = format!("{}:{}", bsd_stat_dir().display(), std::env::var("PATH").unwrap_or_default());
+            let out = std::process::Command::new("/bin/sh").arg("-c").arg(&same).env("PATH", path).output().unwrap();
+            assert!(String::from_utf8_lossy(&out.stdout).contains("AM_SAME"), "{}", String::from_utf8_lossy(&out.stdout));
             let _ = std::fs::remove_dir_all(&base);
         }
 
