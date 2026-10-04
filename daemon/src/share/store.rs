@@ -1,4 +1,9 @@
-//! 分享 bot 的兩張表：`shared_bots`（哪些 bot 是受限的分享用 bot、它的工作目錄）與 `bot_shares`（開著的分享連結）。
+//! 分享 bot 的表：`shared_bots`（哪些 bot 是分享用 bot、哪一種、它的工作目錄）、`bot_shares`（開著的分享連結）與
+//! `share_reply_visible`（擁有者送的哪幾則，bot 的回覆仍要給分享頁看）。
+//!
+//! 分享用 bot 有兩種（SPEC §20.1）：`restricted`（受限：套 `share::cage` 的籠子）與 `trusted`（信任分享，使用者 2026-10-04：
+//! 權限就是一般 bot，只分享給絕對信任的人）。凡是「是不是分享 bot」的判斷（AGM 不清、outbox 不過期、停掉自動 resume、
+//! 分享入口）兩種都算，用 [`is_share_bot`]；只有「要不要關進籠子」看 [`caged_workspace`]。
 //!
 //! token 是 capability：32 bytes 亂數（base64url，43 字）。DB 存 SHA-256（hex，入口查表＋常數時間比對用）、末 4 碼提示
 //! 與原文（`token`，讓管理端隨時拿得回完整連結；跟 `bots.hook_token` 同一個 0600 DB、同一等級）。重產＝換掉 hash 與原文，
@@ -15,22 +20,34 @@ use sqlx::SqlitePool;
 use crate::db;
 
 pub(crate) const PROFILE_RESTRICTED: &str = "restricted";
+pub(crate) const PROFILE_TRUSTED: &str = "trusted";
+
+const SHARED_BOTS_SQL: &str = "CREATE TABLE IF NOT EXISTS shared_bots (
+           bot_id TEXT PRIMARY KEY,
+           -- restricted＝受限（籠子）、trusted＝信任分享（一般 bot 的權限）。建 bot 時決定，之後不能切換（要分享就新建一顆）。
+           profile TEXT NOT NULL CHECK (profile IN ('restricted','trusted')),
+           -- 它的 cwd：受限的是檔案工具唯一碰得到的地方（另加自己的 outbox）；兩種都把上傳的檔放在這裡的 `inbox/`。
+           workspace TEXT NOT NULL,
+           created_at TEXT NOT NULL
+         )";
 /// token 原文的長度（32 bytes → base64url 無 padding）。
 pub(crate) const TOKEN_LEN: usize = 43;
 
 pub async fn migrate(pool: &SqlitePool) -> Result<()> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS shared_bots (
-           bot_id TEXT PRIMARY KEY,
-           -- 目前只有一種：分享用的受限 bot。建 bot 時決定，之後不能切換（要分享就新建一顆）。
-           profile TEXT NOT NULL CHECK (profile IN ('restricted')),
-           -- `<data_dir>/shared-bots/<bot_id>/workspace`：它的 cwd，也是檔案工具唯一碰得到的地方（另加自己的 outbox）。
-           workspace TEXT NOT NULL,
-           created_at TEXT NOT NULL
-         )",
-    )
-    .execute(pool)
-    .await?;
+    // 只收 'restricted' 的舊表：SQLite 改不了 CHECK，換名、照新定義建、搬資料、刪舊表（同一個交易）。
+    // 先換名再建，新表的定義才跟全新 DB 一字不差（schema_guard 比的是它）。
+    let old_sql: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'shared_bots'").fetch_optional(pool).await?;
+    if old_sql.is_some_and(|sql| !sql.contains("'trusted'")) {
+        let mut tx = db::begin_write(pool).await?;
+        sqlx::query("ALTER TABLE shared_bots RENAME TO shared_bots_v1").execute(&mut *tx).await?;
+        sqlx::query(SHARED_BOTS_SQL).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO shared_bots (bot_id, profile, workspace, created_at) SELECT bot_id, profile, workspace, created_at FROM shared_bots_v1")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DROP TABLE shared_bots_v1").execute(&mut *tx).await?;
+        tx.commit().await?;
+    }
+    sqlx::query(SHARED_BOTS_SQL).execute(pool).await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bot_shares (
            bot_id TEXT PRIMARY KEY,
@@ -46,6 +63,16 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS share_reply_visible (
+           -- 擁有者（或別顆 bot）送給分享 bot 的 user 訊息：預設那一回合 bot 的回覆也不給分享頁看，
+           -- 送的時候帶 `share_reply_visible:true` 才記在這裡（API.md §5.6）。
+           message_id TEXT PRIMARY KEY,
+           created_at TEXT NOT NULL
+         )",
+    )
+    .execute(pool)
+    .await?;
     let has_token: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bot_shares') WHERE name = 'token')").fetch_one(pool).await?;
     if !has_token {
         sqlx::query("ALTER TABLE bot_shares ADD COLUMN token TEXT").execute(pool).await?;
@@ -53,17 +80,34 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn is_restricted(pool: &SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
+/// 分享用 bot（受限或信任分享）。
+pub(crate) async fn is_share_bot(pool: &SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
     Ok(workspace(pool, bot_id).await?.is_some())
 }
 
-/// 受限 bot 的工作目錄；不是受限 bot＝`None`。
+/// 分享用 bot 的工作目錄（上傳的 `inbox/` 在這裡）；不是分享用 bot＝`None`。
 pub(crate) async fn workspace(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar("SELECT workspace FROM shared_bots WHERE bot_id = ?").bind(bot_id).fetch_optional(pool).await
 }
 
-pub(crate) async fn restricted_ids(pool: &SqlitePool) -> Result<HashSet<String>, sqlx::Error> {
-    Ok(sqlx::query_scalar::<_, String>("SELECT bot_id FROM shared_bots").fetch_all(pool).await?.into_iter().collect())
+/// 要關進籠子的（受限）bot 的工作目錄；信任分享與一般 bot＝`None`。
+pub(crate) async fn caged_workspace(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT workspace FROM shared_bots WHERE bot_id = ? AND profile = ?").bind(bot_id).bind(PROFILE_RESTRICTED).fetch_optional(pool).await
+}
+
+/// 受限的 bot（hook token 只准打自己的 hook）。
+pub(crate) async fn is_caged(pool: &SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
+    Ok(caged_workspace(pool, bot_id).await?.is_some())
+}
+
+/// 每顆分享用 bot 的種類（`restricted`／`trusted`）；投影給主 UI 的 `share_profile`。
+pub(crate) async fn profiles(pool: &SqlitePool) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
+    Ok(sqlx::query_as::<_, (String, String)>("SELECT bot_id, profile FROM shared_bots").fetch_all(pool).await?.into_iter().collect())
+}
+
+/// 擁有者這一則送給分享 bot 的訊息：這一回合 bot 的回覆照樣給分享頁看。
+pub(crate) async fn mark_reply_visible(pool: &SqlitePool, message_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT OR IGNORE INTO share_reply_visible (message_id, created_at) VALUES (?,?)").bind(message_id).bind(db::now()).execute(pool).await.map(|_| ())
 }
 
 /// 分享開著的 bot（`bot_shares` 有一列）；側欄的 🔗 亮不亮用。
@@ -71,11 +115,17 @@ pub(crate) async fn shared_ids(pool: &SqlitePool) -> Result<HashSet<String>, sql
     Ok(sqlx::query_scalar::<_, String>("SELECT bot_id FROM bot_shares").fetch_all(pool).await?.into_iter().collect())
 }
 
-/// 建 bot **之前**先記下來：config 一寫進去、投影出那一列之後，任何一次啟動都已經是受限的，沒有「先當一般 bot 起來」的空窗。
+#[cfg(test)]
 pub(crate) async fn insert_restricted(pool: &SqlitePool, bot_id: &str, workspace: &str) -> Result<(), sqlx::Error> {
+    insert_share_bot(pool, bot_id, PROFILE_RESTRICTED, workspace).await
+}
+
+/// 建 bot **之前**先記下來：config 一寫進去、投影出那一列之後，任何一次啟動都已經是受限的，沒有「先當一般 bot 起來」的空窗。
+/// `profile` 是 [`PROFILE_RESTRICTED`] 或 [`PROFILE_TRUSTED`]。
+pub(crate) async fn insert_share_bot(pool: &SqlitePool, bot_id: &str, profile: &str, workspace: &str) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO shared_bots (bot_id, profile, workspace, created_at) VALUES (?,?,?,?)")
         .bind(bot_id)
-        .bind(PROFILE_RESTRICTED)
+        .bind(profile)
         .bind(workspace)
         .bind(db::now())
         .execute(pool)
@@ -83,7 +133,7 @@ pub(crate) async fn insert_restricted(pool: &SqlitePool, bot_id: &str, workspace
         .map(|_| ())
 }
 
-/// 建 bot 失敗時收回 [`insert_restricted`]。
+/// 建 bot 失敗時收回 [`insert_share_bot`]。
 pub(crate) async fn delete_restricted(pool: &SqlitePool, bot_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM shared_bots WHERE bot_id = ?").bind(bot_id).execute(pool).await?;
     sqlx::query("DELETE FROM bot_shares WHERE bot_id = ?").bind(bot_id).execute(pool).await?;

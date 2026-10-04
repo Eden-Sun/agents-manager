@@ -302,6 +302,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (39, "827c54df62168fe1"),
     // claude 倒回：`rewind_anchors`（下一次 resume 之前補進 transcript 的倒回點）。
     (40, "715f4def20647528"),
+    // 信任分享：`shared_bots.profile` 收 'trusted'（重建表改 CHECK）、`share_reply_visible`（擁有者送的哪幾則回覆仍給分享頁看）。
+    (41, "7891fefaecfdb8e0"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

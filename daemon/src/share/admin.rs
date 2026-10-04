@@ -59,20 +59,20 @@ fn db_err(e: sqlx::Error) -> LcError {
     LcError::Upstream(format!("share store: {e}"))
 }
 
-/// 活著、而且是受限的分享用 bot。不存在 404；不是受限 bot 409 `not_shareable`。
+/// 活著、而且是分享用 bot（受限或信任分享）。不存在 404；不是分享用 bot 409 `not_shareable`。
 async fn shareable_bot(app: &Arc<App>, id: &str) -> Result<bool, LcError> {
     let bot = crate::db::bot(&app.db, id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
     let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     if project.is_none_or(|p| p.deleted_at.is_some()) {
         return Err(LcError::NotFound("bot".into()));
     }
-    store::is_restricted(&app.db, id).await.map_err(db_err)
+    store::is_share_bot(&app.db, id).await.map_err(db_err)
 }
 
 fn not_shareable(id: &str) -> LcError {
     LcError::conflict(
         "not_shareable",
-        json!({"bot_id": id, "message": "只有建立時選「分享用（受限）」的 bot 能分享；既有 bot 不能切換，要分享請新建一顆"}),
+        json!({"bot_id": id, "message": "只有建立時選「分享用（受限）」或「信任分享」的 bot 能分享；既有 bot 不能切換，要分享請新建一顆"}),
     )
 }
 
@@ -166,11 +166,12 @@ pub async fn post_rotate(
     Ok(Json(state(&app, &id).await?))
 }
 
-/// 建受限 bot 的前半：決定資料夾（新資料夾就建出來）、`shared_bots` 記下來（在寫 config 之前）。
+/// 建分享用 bot（受限或信任分享）的前半：決定資料夾（新資料夾就建出來）、`shared_bots` 記下來（在寫 config 之前）。
 /// 回 `(資料夾, 是不是這次建的)`；`replay`＝config 裡已經有同一個 `client_request_id` 的 bot：新資料夾已經在了就照用，不回 409。
-pub(crate) async fn reserve_restricted(
+pub(crate) async fn reserve_share_bot(
     app: &Arc<App>,
     bot_id: &str,
+    profile: &str,
     folder: &crate::share::folder::ShareFolderIn,
     replay: bool,
 ) -> Result<(String, bool), LcError> {
@@ -195,13 +196,18 @@ pub(crate) async fn reserve_restricted(
         return Err(LcError::Upstream(format!("share folder inbox: {e}")));
     }
     let ws = dir.to_string_lossy().into_owned();
-    if let Err(e) = store::insert_restricted(&app.db, bot_id, &ws).await {
+    if let Err(e) = store::insert_share_bot(&app.db, bot_id, profile, &ws).await {
         if created {
             let _ = std::fs::remove_dir_all(&dir);
         }
         return Err(db_err(e));
     }
     Ok((ws, created))
+}
+
+#[cfg(test)]
+pub(crate) async fn reserve_restricted(app: &Arc<App>, bot_id: &str, folder: &crate::share::folder::ShareFolderIn, replay: bool) -> Result<(String, bool), LcError> {
+    reserve_share_bot(app, bot_id, store::PROFILE_RESTRICTED, folder, replay).await
 }
 
 /// 建受限 bot 的後半：建成了就把 `bots.cwd` 指到資料夾；沒建成（失敗、重送拿回舊的那顆）就把前半收回。

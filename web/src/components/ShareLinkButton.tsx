@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { fetchShare, rotateShare, setShareEnabled, shareErrorText, type ShareState } from '../api/share'
 import { copyText } from '../lib/copyText'
+import { shareIcon } from '../lib/shareProfile'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
 import './shareLinkButton.css'
@@ -13,11 +14,12 @@ function noUrlText(s: ShareState): string {
 }
 
 /**
- * 分享用（受限）bot 的聊天區頂端「🔗 分享」（SPEC「分享 bot」）：一般 bot 不畫。
+ * 分享用 bot 的聊天區頂端「🔗 分享」（SPEC「分享 bot」）：一般 bot 不畫。信任分享（trusted）是 🔓、另一個顏色，一眼分得出來。
  * 未分享時按下＝開啟並複製連結；分享中按下＝複製連結。旁邊的 ▾ 選單可重產／關閉（都要確認）。
  */
 export function ShareLinkButton({ botId }: { botId: string }) {
-  const restricted = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile === 'restricted')
+  const profile = useStore((s) => s.bots.find((b) => b.id === botId)?.share_profile ?? null)
+  const restricted = profile !== null
   const enabled = useStore((s) => s.bots.find((b) => b.id === botId)?.share_enabled === true)
   const notify = useStore((s) => s.notify)
   const [share, setShare] = useState<ShareState | null>(null)
@@ -84,13 +86,13 @@ export function ShareLinkButton({ botId }: { botId: string }) {
     <span className="share-link" ref={wrapRef}>
       <button
         type="button"
-        className={`btn share-link-main${enabled ? ' on' : ''}`}
+        className={`btn share-link-main${enabled ? ' on' : ''}${profile === 'trusted' ? ' trusted' : ''}`}
         disabled={busy}
         aria-label={enabled ? '複製分享連結' : '開啟分享並複製連結'}
-        title={enabled ? `分享中${share?.enabled && share.url ? `：${share.url}` : ''}。點一下複製連結` : '開啟分享，連結會複製到剪貼簿'}
+        title={`${profile === 'trusted' ? '信任分享：拿到連結的人可以透過它操作這台機器。' : ''}${enabled ? `分享中${share?.enabled && share.url ? `：${share.url}` : ''}。點一下複製連結` : '開啟分享，連結會複製到剪貼簿'}`}
         onClick={onMain}
       >
-        🔗 {enabled ? '複製連結' : '分享'}
+        {shareIcon(profile)} {enabled ? '複製連結' : '分享'}
       </button>
       {enabled ? (
         <button
@@ -159,17 +161,19 @@ export function ShareLinkButton({ botId }: { botId: string }) {
   )
 }
 
-/** 側欄 bot 名字旁的 🔗：分享用（受限）bot 才有，分享中亮起。 */
+/** 側欄 bot 名字旁的標記：受限 🔗、信任分享 🔓（另一個顏色）；分享中亮起。 */
 export function ShareMark({ botId }: { botId: string }) {
+  const profile = useStore((s) => s.bots.find((x) => x.id === botId)?.share_profile ?? null)
   const mark = useStore((s) => {
     const b = s.bots.find((x) => x.id === botId)
-    return b?.share_profile !== 'restricted' ? null : b.share_enabled ? 'on' : 'off'
+    return !b?.share_profile ? null : b.share_enabled ? 'on' : 'off'
   })
   if (!mark) return null
-  const label = mark === 'on' ? '分享中' : '分享用 bot（未分享）'
+  const trusted = profile === 'trusted'
+  const label = mark === 'on' ? (trusted ? '信任分享中' : '分享中') : trusted ? '信任分享 bot（未分享）' : '分享用 bot（未分享）'
   return (
-    <span className={`share-mark ${mark}`} role="img" aria-label={label} title={label}>
-      🔗
+    <span className={`share-mark ${mark}${trusted ? ' trusted' : ''}`} role="img" aria-label={label} title={label}>
+      {shareIcon(profile)}
     </span>
   )
 }

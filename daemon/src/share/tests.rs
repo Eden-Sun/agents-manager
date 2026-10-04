@@ -322,11 +322,27 @@ async fn the_share_listener_only_binds_loopback_on_its_own_port() {
 
 // ───────────── 對話 ─────────────
 
-async fn add_message(app: &Arc<App>, bot_id: &str, role: &str, content: &str, relay_from: Option<&str>) {
+async fn add_message(app: &Arc<App>, bot_id: &str, role: &str, content: &str, relay_from: Option<&str>) -> String {
+    add_turn_message(app, bot_id, None, role, content, relay_from).await
+}
+
+/// 同 [`add_message`]，可指定 `turn_id`（同一回合的 user 與 assistant 共用）。回訊息 id。
+async fn add_turn_message(app: &Arc<App>, bot_id: &str, turn_id: Option<&str>, role: &str, content: &str, relay_from: Option<&str>) -> String {
     let conv = db::conversation_id(&app.db, bot_id).await.unwrap();
-    sqlx::query("INSERT INTO messages (id, conversation_id, role, content, source, relay_from, terminal_snapshot, created_at) VALUES (?,?,?,?,?,?,?,?)")
-        .bind(db::ulid())
+    if let Some(t) = turn_id {
+        sqlx::query("INSERT OR IGNORE INTO turns (id, conversation_id, origin, status, created_at) VALUES (?,?,'web','completed',?)")
+            .bind(t)
+            .bind(&conv)
+            .bind(db::now())
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+    let id = db::ulid();
+    sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, relay_from, terminal_snapshot, created_at) VALUES (?,?,?,?,?,?,?,?,?)")
+        .bind(&id)
         .bind(conv)
+        .bind(turn_id)
         .bind(role)
         .bind(content)
         .bind(if role == "system" { "system" } else { "web" })
@@ -336,6 +352,7 @@ async fn add_message(app: &Arc<App>, bot_id: &str, role: &str, content: &str, re
         .execute(&app.db)
         .await
         .unwrap();
+    id
 }
 
 #[tokio::test]
@@ -395,10 +412,16 @@ async fn the_event_stream_only_pushes_the_end_user_and_the_bot() {
     })
     .await
     .unwrap();
-    e.app.emit("message_added", msg("m-owner", "user", "後台交代：別提價格", None)).await;
+    // bot 的回覆要看觸發它的那一則（DB 裡的），所以 assistant 那幾則要真的寫進去。
+    let owner_reply = add_turn_message(&e.app, &b.id, Some("t-owner"), "user", "後台交代：別提價格", None).await;
+    let owner_ok = add_turn_message(&e.app, &b.id, Some("t-owner"), "assistant", "ok-to-owner", None).await;
+    let share_msg = add_turn_message(&e.app, &b.id, Some("t-share"), "user", &format!("{}早安", portal::SHARE_PREFIX), Some(SHARE_SENDER)).await;
+    let bot_msg = add_turn_message(&e.app, &b.id, Some("t-share"), "assistant", "早安！", None).await;
+    e.app.emit("message_added", msg(&owner_reply, "user", "後台交代：別提價格", None)).await;
+    e.app.emit("message_added", msg(&owner_ok, "assistant", "ok-to-owner", None)).await;
     e.app.emit("message_added", msg("m-relay", "user", "AGM 派來的", Some("01OTHERBOTID"))).await;
-    e.app.emit("message_added", msg("m-share", "user", &format!("{}早安", portal::SHARE_PREFIX), Some(SHARE_SENDER))).await;
-    e.app.emit("message_added", msg("m-bot", "assistant", "早安！", None)).await;
+    e.app.emit("message_added", msg(&share_msg, "user", &format!("{}早安", portal::SHARE_PREFIX), Some(SHARE_SENDER))).await;
+    e.app.emit("message_added", msg(&bot_msg, "assistant", "早安！", None)).await;
     e.app.emit("messages_rewound", json!({"bot_id": b.id, "message_id": "m-share"})).await;
     tokio::time::timeout(Duration::from_secs(3), async {
         while !seen.contains("event: resync") {
@@ -407,9 +430,9 @@ async fn the_event_stream_only_pushes_the_end_user_and_the_bot() {
     })
     .await
     .expect("倒回要送 resync");
-    assert!(seen.contains("m-share") && seen.contains("m-bot"), "{seen}");
+    assert!(seen.contains(&share_msg) && seen.contains(&bot_msg), "{seen}");
     assert!(seen.contains("\"text\":\"早安\""), "前綴拿掉：{seen}");
-    for leak in ["m-owner", "後台", "m-relay", "AGM", "分享使用者", "owner"] {
+    for leak in [owner_reply.as_str(), owner_ok.as_str(), "後台", "ok-to-owner", "m-relay", "AGM", "分享使用者", "owner"] {
         assert!(!seen.contains(leak), "{leak} 不能推給 end user：{seen}");
     }
 }
@@ -1600,3 +1623,6 @@ async fn interrupted_project_delete_recovery_revokes_all_share_capabilities() {
     assert!(store::share(&app.db, &b.id).await.unwrap().is_none());
     assert_eq!(crate::intents::get(&app.db, &intent).await.unwrap().unwrap().status, "done");
 }
+
+#[path = "trusted_tests.rs"]
+mod trusted;

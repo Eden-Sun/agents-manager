@@ -6,7 +6,7 @@ import { BOT_NAME_HINT, isValidBotName } from '../lib/botName'
 import { useShallow } from 'zustand/react/shallow'
 import * as api from '../api'
 import { MOCK_MODE } from '../api'
-import type { Bot, BotKind, Lamp, MessageHit } from '../api/types'
+import type { Bot, BotKind, Lamp, MessageHit, ShareProfile } from '../api/types'
 import { BOT_KINDS, LOCAL_HOST } from '../api/types'
 import { identityBadgeVisible } from '../lib/identityBadgeVisible'
 import { eventIsFromCurrentTarget, eventTargetIsInsideCurrentTarget } from '../lib/domEvents'
@@ -606,7 +606,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   const [fast, setFast] = useState(false)
   const [persona, setPersona] = useState('')
   const [identity, setIdentity] = useState('')
-  const [shareProfile, setShareProfile] = useState(false)
+  const [shareProfile, setShareProfile] = useState<ShareProfile | null>(null)
   const [shareFolder, setShareFolder] = useState<ShareFolderDraft>(EMPTY_SHARE_FOLDER)
   const [busy, setBusy] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
@@ -615,8 +615,9 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
   // 驗 trim 過的：打到一半的 `my ` 不該先閃紅字；送出也送 trim 過的。
   const nameOk = isValidBotName(name.trim())
   const cliOk = Boolean(tools[kind]?.installed)
-  const shareOn = shareProfile && !shareProfileBlocked(kind, host)
+  const shareOn = shareProfile !== null && !shareProfileBlocked(kind, host)
   const folderIn = shareOn ? shareFolderInput(shareFolder, name) : null
+  const projectPath = projects.find((p) => p.id === pid)?.path
   const canSubmit = nameOk && cliOk && Boolean(pid) && !busy && !(folderIn && 'error' in folderIn)
   const hostUp = (h: string) => h === 'local' || (hosts.find((x) => x.name === h)?.connected ?? false)
   const filterQ = projectFilter.trim().toLowerCase()
@@ -668,10 +669,12 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
           persona: persona.trim() || null,
           autostart: false,
           identity: kind === 'claude' && identity ? identity : null,
-          // 受限 bot 不帶 bypass permissions（daemon 也會擋），所以 auto_approve 一起關。
-          ...(folderIn && 'value' in folderIn
+          // 受限 bot 不帶 bypass permissions（daemon 也會擋），所以 auto_approve 一起關；信任分享照一般 bot。
+          ...(folderIn && 'value' in folderIn && shareProfile === 'restricted'
             ? { share_profile: 'restricted' as const, share_folder: folderIn.value, auto_approve: false }
-            : { auto_approve: true }),
+            : folderIn && 'value' in folderIn && shareProfile === 'trusted'
+              ? { share_profile: 'trusted' as const, share_folder: folderIn.value, confirm_trusted: true, auto_approve: true }
+              : { auto_approve: true }),
         }).then(async (id) => {
           setBusy(false)
           if (id) {
@@ -784,7 +787,7 @@ function NewBotForm({ onDone, initialProjectId }: { onDone: () => void; initialP
         {!cliOk ? <span className="hint">此 kind 的 CLI 尚未安裝，無法建立</span> : null}
       </label>
       <PersonaField value={persona} onChange={setPersona} collapsible />
-      <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} />
+      <ShareProfileField kind={kind} host={host} value={shareProfile} onChange={setShareProfile} botName={name.trim()} folder={shareFolder} onFolder={setShareFolder} projectPath={projectPath} />
       <div className="form-actions">
         <button type="button" className="btn" onClick={onDone}>
           取消

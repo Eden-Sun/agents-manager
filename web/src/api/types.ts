@@ -265,8 +265,8 @@ export interface Bot {
   live_apply_deferred?: boolean
   /** null = 用 `project.path` */
   cwd: string | null
-  /** `restricted`＝分享用的受限 bot（只有它能開分享連結，SPEC「分享 bot」）；一般 bot 與舊 daemon＝null。 */
-  share_profile: 'restricted' | null
+  /** 分享用 bot（只有它能開分享連結，SPEC §20）：`restricted`＝受限、`trusted`＝信任分享（一般 bot 的權限）；一般 bot 與舊 daemon＝null。 */
+  share_profile: ShareProfile | null
   /** 分享連結開著（側欄的 🔗 亮起）；舊 daemon 沒這欄＝false。 */
   share_enabled: boolean
   /** 預覽模式（issue #253）：`/api/state` 帶的簡版；舊 daemon 沒有＝undefined，null＝沒開過。 */
@@ -675,6 +675,9 @@ export interface DirListing {
 }
 
 /** 受限 bot 能碰的全部範圍：新資料夾（建在 `[share] folders_root`，預設 `~/shared-bots/<name>`）或本機既有資料夾。 */
+/** 分享用 bot 的兩種（SPEC §20.1）。 */
+export type ShareProfile = 'restricted' | 'trusted'
+
 export type ShareFolderIn = { kind: 'new'; name: string } | { kind: 'existing'; path: string }
 
 export interface NewBotInput {
@@ -693,10 +696,12 @@ export interface NewBotInput {
   env?: Record<string, string>
   fast?: boolean
   persona?: string | null
-  /** 建成分享用的受限 bot；建好之後不能切換（要分享就新建一顆）。 */
-  share_profile?: 'restricted'
-  /** 受限 bot 的資料夾（API.md §5.6）；省略＝新資料夾、名字用 bot 名。 */
+  /** 建成分享用 bot（受限或信任分享）；建好之後不能切換（要分享就新建一顆）。 */
+  share_profile?: ShareProfile
+  /** 分享用 bot 的資料夾（API.md §5.6）：受限省略＝新資料夾、名字用 bot 名；信任分享只收既有資料夾，省略＝專案目錄。 */
   share_folder?: ShareFolderIn
+  /** 信任分享一定要帶 true（daemon 沒帶回 400 `confirm_trusted_required`）。 */
+  confirm_trusted?: boolean
   /** 冪等鍵（#352）：回應遺失後同一個動作重送，daemon 拿回第一次建好的那顆而不是再建一顆；見 `lib/createRequestId.ts`。 */
   client_request_id?: string
 }

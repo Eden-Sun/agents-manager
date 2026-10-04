@@ -458,10 +458,28 @@ fn display_name(stored: &str) -> &str {
     }
 }
 
-/// 這則 user／assistant 訊息給不給分享頁看：end user 自己送的與 bot 的回覆；倒回的、擁有者（或別顆 bot）送的都不給。
+/// 這則 user 訊息給不給分享頁看：只有 end user 自己送的；倒回的、擁有者（或別顆 bot）送的都不給。
 pub(crate) fn shown_to_share(role: &str, relay_from: Option<&str>, rewound_at: Option<&str>) -> bool {
-    rewound_at.is_none() && (role == "assistant" || (role == "user" && relay_from == Some(SHARE_SENDER)))
+    rewound_at.is_none() && role == "user" && relay_from == Some(SHARE_SENDER)
 }
+
+/// 分享頁看得到的訊息（`m` 是 messages 的別名），列表與 SSE 共用：
+/// - end user 自己送的 user 訊息（`relay_from = 'share'`）；
+/// - bot 的回覆，除非觸發那一回合的 user 訊息是擁有者（或別顆 bot）送的、而且沒有帶 `share_reply_visible`（使用者 2026-10-04：
+///   後台交代 bot 的「ok」不該出現在 end user 的對話裡）。觸發訊息＝同一個 turn 的第一則 user；沒有 turn 的看它前面最近一則 user。
+///   前面沒有任何 user（開場白）照樣給。
+/// 倒回的一律不給。`'share'` 是 [`SHARE_SENDER`]（測試釘住兩者一致）。
+pub(crate) const VISIBLE_SQL: &str = "m.rewound_at IS NULL AND (
+       (m.role = 'user' AND m.relay_from = 'share')
+       OR (m.role = 'assistant' AND COALESCE((
+             SELECT IFNULL(t.relay_from, '') = 'share' OR EXISTS (SELECT 1 FROM share_reply_visible v WHERE v.message_id = t.id)
+               FROM messages t
+              WHERE t.id = COALESCE(
+                      (SELECT u.id FROM messages u WHERE m.turn_id IS NOT NULL AND u.turn_id = m.turn_id AND u.role = 'user' ORDER BY u.rowid LIMIT 1),
+                      (SELECT p.id FROM messages p WHERE p.conversation_id = m.conversation_id AND p.role = 'user' AND p.rowid < m.rowid
+                        ORDER BY p.rowid DESC LIMIT 1))
+           ), 1))
+     )";
 
 /// bot 回覆若照抄了我們加的前綴或附件標記行，顯示前拿掉（只過濾顯示，不改 bot 也不改 DB）。
 fn strip_internal_marks(text: &str) -> String {
@@ -523,18 +541,16 @@ async fn list_messages(State(st): State<Portal>, Path(token): Path<String>, Quer
         },
         None => None,
     };
-    // 分享頁只有 end user 與 bot 的對話（使用者 2026-10-04）：已倒回的不給；擁有者從 AG Man 送的（與別顆 bot 轉來的）
-    // user 訊息是後台交代，也不給——只留 assistant 與 relay_from = share 的 user（[`shown_to_share`] 同一套規則）。
+    // 分享頁只有 end user 與 bot 的對話（使用者 2026-10-04）：規則見 [`VISIBLE_SQL`]，SSE 用同一段。
     /// id、role、content、attachments_json、relay_from、created_at。
     type Row = (String, String, String, Option<String>, Option<String>, String);
-    let rows: Result<Vec<Row>, _> = sqlx::query_as(
-        "SELECT id, role, content, attachments_json, relay_from, created_at FROM messages
-          WHERE conversation_id = ? AND rewound_at IS NULL
-            AND (role = 'assistant' OR (role = 'user' AND relay_from = ?)) AND rowid < ?
-          ORDER BY rowid DESC LIMIT ?",
-    )
+    let sql = format!(
+            "SELECT m.id, m.role, m.content, m.attachments_json, m.relay_from, m.created_at FROM messages m
+              WHERE m.conversation_id = ? AND m.rowid < ? AND {VISIBLE_SQL}
+              ORDER BY m.rowid DESC LIMIT ?"
+    );
+    let rows: Result<Vec<Row>, _> = sqlx::query_as(&sql)
     .bind(&conv)
-    .bind(SHARE_SENDER)
     .bind(before.unwrap_or(i64::MAX))
     .bind(limit + 1)
     .fetch_all(db)
@@ -764,7 +780,20 @@ impl Stream {
                 let m = ev.data.get("message")?;
                 let role = m.get("role").and_then(Value::as_str)?;
                 let s = |k: &str| m.get(k).and_then(Value::as_str);
-                if !shown_to_share(role, s("relay_from"), s("rewound_at")) {
+                let shown = match role {
+                    "user" => shown_to_share(role, s("relay_from"), s("rewound_at")),
+                    // bot 的回覆要看觸發它的那一則（[`VISIBLE_SQL`]）。讀不到就不推（fail closed），重抓時照列表的規則補回來。
+                    "assistant" => match s("id") {
+                        Some(id) => sqlx::query_scalar::<_, bool>(&format!("SELECT EXISTS(SELECT 1 FROM messages m WHERE m.id = ? AND {VISIBLE_SQL})"))
+                            .bind(id)
+                            .fetch_one(&self.app.db)
+                            .await
+                            .unwrap_or(false),
+                        None => false,
+                    },
+                    _ => false,
+                };
+                if !shown {
                     return None;
                 }
                 let out = public_message(s("id")?, role, s("content").unwrap_or(""), s("attachments_json"), s("relay_from"), s("created_at").unwrap_or(""));

@@ -2566,7 +2566,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   | 條件 | `reason` | 為什麼 |
   |---|---|---|
   | 是總管自己那幾顆（`supervisors.bot_id` 或 `supervisor_roles` 的 patrol／responder） | `supervisor` | 巡邏的人不收自己，watchdog 反正會把它們拉回來 |
-  | 分享用（受限）bot（`shared_bots` 有一列，§20） | `share_bot` | 2026-10-04 使用者：「let AGM 不清除這類 bot」。外部 end user 隨時會來，不知道它被收起來、旁邊也沒人按啟動 |
+  | 分享用 bot（受限或信任分享，`shared_bots` 有一列，§20） | `share_bot` | 2026-10-04 使用者：「let AGM 不清除這類 bot」。外部 end user 隨時會來，不知道它被收起來、旁邊也沒人按啟動 |
   | 主力 bot（`bots.is_primary`，側欄打星號的） | `primary` | 2026-09-18 使用者：「主力 bot 超時也不先 kill」。主力是隨時會切回去的那幾顆，叫醒要等 `--resume`，比省下的 RAM 更貴 |
   | `managed_by = 'team'` | `team_member` | 成員的 run 由 team 排程記著 |
   | `managed_by = 'child'` | `child` | pane 是父 agent 開的，daemon 起不回來（§6.5a），收掉就真的沒了 |
@@ -4759,6 +4759,18 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   `/build-slots/acquire` 一律 403 `restricted_bot`（`shared_bots` 讀不到也擋）。
 - end user 上傳的檔放資料夾的 `inbox/`；給 end user 的檔照舊寫 `$AM_OUTBOX`（`--add-dir` 讓它寫得進去）。
 
+### 20.1a 信任分享（`share_profile = "trusted"`，使用者 2026-10-04）
+
+- 分享對象是**絕對信任的人**時用：一顆**可以操作整個 project** 的 bot，他下的指令會真的動東西（shell、build、測試、git、dev server）。
+- 只能在**建 bot 時**選（`share_profile:"trusted"`），而且一定要帶 `confirm_trusted:true`（沒帶 400 `confirm_trusted_required`；帶給別的 profile 400）。既有 bot 不能切過去。
+  只有 claude、只有本機專案（同受限的 409）。資料夾只收**既有資料夾**（`{"kind":"existing","path"}`，同一套危險位置檢查；`kind:"new"` 400），沒帶＝專案目錄；那就是它的 cwd。
+- **不套籠子**：權限就是一般 bot——`auto_approve`／bypass 照 bot 設定、Bash 等工具全開、照常讀專案的 agent md／`[agents.projects]`、裝 shim 與 herdr skill、bot 身分（`AM_BOT_TOKEN`）照常能打 API。
+  `shared_bots.profile = 'trusted'`；判斷「要不要關進籠子」只看 `profile = 'restricted'`（`store::caged_workspace`／`is_caged`），`cage::prepare` 對它回 `None`。
+- **跟受限一樣適用**的（凡是判斷「是不是分享 bot」的地方都用 `store::is_share_bot`，兩種都算）：分享連結與入口、只呈現 end user 與 bot 的對話、`〔分享使用者〕` 前綴、
+  AGM 不能刪／停（`guards_from_bot_principal`）、不收進閒置睡眠（`share_bot`）、child 退役擋下、outbox 不過期（`.am-share-keep`）、停了先試著接回原對話（`resume_native`）、hook 一律注入。
+  上傳一樣放 `<資料夾>/inbox/`（資料夾是專案目錄時就是專案底下的 `inbox/`）。
+- `shared_bots.profile` 原本 CHECK 只收 `'restricted'`：開機時換名、照新定義建表、搬資料、刪舊表（schema v41）。
+
 ### 20.2 分享連結
 
 - `bot_shares`：一顆 bot 至多一條。token 32 bytes 亂數（base64url，43 字），DB 存 SHA-256（入口查表用）、末 4 碼提示與原文 `token`（跟 `bots.hook_token` 同一個 0600 DB、同一等級），
@@ -4776,7 +4788,10 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 - token 錯、分享關了：一律同一個 404。每個回應 `Cache-Control: no-store`（`/assets` 例外：檔名有雜湊）、`Referrer-Policy: no-referrer`、`nosniff`、
   `X-Frame-Options: DENY`、只允許 `'self'` 的 CSP（沒有 inline script／style）；不設任何 CORS 標頭。
 - 未成形的 token 不查 DB；有效形狀的 token 查詢全入口共用 8 個併發名額，滿額回一般 503。成功驗證後的 `last_used_at` 是遙測：每顆 bot 每分鐘最多檢查一次，先用唯讀查詢看是否已新鮮，寫入失敗不影響請求。
-- 對話：**只有 end user 與 bot 的對話**（使用者 2026-10-04：「這個 share 就該是 for user-only」）——end user 送的 user 訊息（`relay_from = share`）與 assistant；倒回的（`rewound_at` 非空）、擁有者從 AG Man 送的、別顆 bot 轉來的一律不給，列表與 SSE 同一條規則（`shown_to_share`）。只給 id、role、誰送的（`share`／`bot`）、文字、時間、附件名；系統訊息、工具細節、終端快照、轉寄來源的 bot id 都不給。end user 的訊息顯示時拿掉 `〔分享使用者〕 ` 前綴（她看到的是自己打的原文）；bot 回覆若照抄了前綴或附件標記行也拿掉（只過濾顯示，不改 bot 與 DB）。擁有者倒回對話時 SSE 送 `resync`，分享頁整頁重抓並取代手上的清單。
+- 對話：**只有 end user 與 bot 的對話**（使用者 2026-10-04：「這個 share 就該是 for user-only」）——end user 送的 user 訊息（`relay_from = share`）與 assistant；倒回的（`rewound_at` 非空）、擁有者從 AG Man 送的、別顆 bot 轉來的一律不給，列表與 SSE 同一條規則（`portal::VISIBLE_SQL`）。只給 id、role、誰送的（`share`／`bot`）、文字、時間、附件名；系統訊息、工具細節、終端快照、轉寄來源的 bot id 都不給。end user 的訊息顯示時拿掉 `〔分享使用者〕 ` 前綴（她看到的是自己打的原文）；bot 回覆若照抄了前綴或附件標記行也拿掉（只過濾顯示，不改 bot 與 DB）。擁有者倒回對話時 SSE 送 `resync`，分享頁整頁重抓並取代手上的清單。
+  **擁有者回合的回覆預設也不給**（使用者 2026-10-04：後台交代 bot 的「ok」不該出現在 end user 的對話裡）：bot 的回覆看觸發那一回合的 user 訊息（同一個 turn 的第一則 user；沒有 turn 的看它前面最近一則 user），
+  是擁有者（或別顆 bot）送的就不給，除非送的時候帶了 `share_reply_visible:true`（`POST /api/bots/{id}/prompt`，只對分享用 bot 有意義；記在 `share_reply_visible`）。前面沒有任何 user 的（開場白）照給。
+  列表與 SSE 共用同一段 SQL（`portal::VISIBLE_SQL`）；SSE 讀不到就不推（fail closed），重抓時照列表補回來。
 - 送訊息：走「沒在跑就先落地再啟動、忙就排隊」那條路（§6.3、`start_if_stopped`＋`queue_if_busy`），`relay_from` 記哨符 `share`（跟 `daemon` 同類）。
   DB 的 `messages.source` 照存 `web`（CHECK 不收新值），輸出時 user 訊息的 `relay_from = share` 報 `source: "share"`，主 UI 標「🔗 分享使用者」。
   每則 ≤ 8000 字、換行以外的控制字元拿掉（tab 換成空白）；每個分享每分鐘 10 次（429＋`Retry-After`）。便宜的 JSON 形狀、文字長度與空訊息檢查在扣額前；之後的附件檔案檢查也會扣額，即使附件不存在。失敗的細節不給外面看。
@@ -4794,11 +4809,11 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 ### 20.4 前端
 
 **前端（主 UI）**
-- 建 bot 表單多一個「用途：分享用（受限）」；只給本機專案的 claude（其他 kind／遠端專案是灰的並寫原因）。勾了要選它的資料夾：「開一個新資料夾」（`~/shared-bots/<名稱>`，名稱空著＝bot 名）或「用一個既有的資料夾」（路徑＋「瀏覽…」用目錄選擇器挑，下面有警示：資料夾裡的所有檔案含 .env 之類 end user 都可能透過 bot 讀到）。
+- 建 bot 表單的「用途」三選一：不分享／分享用（受限）／🔓 信任分享；分享的兩種只給本機專案的 claude（其他 kind／遠端專案是灰的並寫原因）。選信任分享先跳確認框、要勾「只分享給絕對信任的人」才算數，資料夾預設專案目錄、只收既有資料夾，送 `share_profile:"trusted"`、`confirm_trusted:true`，`auto_approve` 照表單。受限的如下：勾了要選它的資料夾：「開一個新資料夾」（`~/shared-bots/<名稱>`，名稱空著＝bot 名）或「用一個既有的資料夾」（路徑＋「瀏覽…」用目錄選擇器挑，下面有警示：資料夾裡的所有檔案含 .env 之類 end user 都可能透過 bot 讀到）。
   送 `share_profile: "restricted"`、`share_folder`、`auto_approve: false`；模型照表單選，沒選＝daemon 補最新 Opus。建好不能切回一般 bot。
-- 受限 bot 的設定面板多一塊「🔗 分享給外部使用者」：開關、分享中隨時顯示完整連結＋複製（舊資料只有雜湊時提示重產一次）、建立與最後使用時間、「重產連結」與「關閉分享」（都要確認）。一般 bot 不畫這塊。
+- 分享用 bot 的設定面板多一塊「🔗 分享給外部使用者」（信任分享是「🔓 信任分享給外部使用者」＋一行警告）：開關、分享中隨時顯示完整連結＋複製（舊資料只有雜湊時提示重產一次）、建立與最後使用時間、「重產連結」與「關閉分享」（都要確認）。一般 bot 不畫這塊。
 - 受限 bot 的聊天區頂端（⚙ 右邊）有一顆「🔗 分享」：未分享時按下＝開啟並複製連結；分享中顯示「🔗 複製連結」（亮起），按下＝複製，旁邊 ▾ 選單可「重產連結」／「關閉分享」（都要確認，重產後自動複製新連結）。一般 bot 沒有這顆。
-- 側欄受限 bot 名字旁標 🔗：分享中亮起、未分享是灰的；狀態來自 `/api/state` 的 `share_enabled`，`bot_share_changed` 觸發重抓。
+- 側欄分享用 bot 名字旁標 🔗（受限）或 🔓（信任分享，警示色）：分享中亮起、未分享是灰的；聊天頂端的分享鈕同樣換圖示與顏色。狀態來自 `/api/state` 的 `share_profile`／`share_enabled`，`bot_share_changed` 觸發重抓。
 - 對話裡 `source = "share"` 的 user 訊息標「🔗 分享使用者」。
 
 **分享頁（`web/share.html` → `dist/share.html`）**

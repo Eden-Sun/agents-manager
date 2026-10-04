@@ -1294,7 +1294,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     // §6.11：AGM 因為閒置收起來的那些。一次讀完，免得每顆 bot 再問一次資料庫。
     let asleep = crate::supervisor::idle_sleep::all_asleep(app).await;
     let previews = crate::preview::state_map(&app.db).await.map_err(any_err)?;
-    let restricted = crate::share::store::restricted_ids(&app.db).await.map_err(any_err)?;
+    let share_profiles = crate::share::store::profiles(&app.db).await.map_err(any_err)?;
     let sharing = crate::share::store::shared_ids(&app.db).await.map_err(any_err)?;
     // 每顆 bot 的 run 與排隊中的回合各一次讀完：逐顆查是 N+1（34 顆 bot 約 30 ms，隨 bot 數線性長）。
     let mut runs = db::active_runs_by_bot(&app.db).await.map_err(any_err)?;
@@ -1333,8 +1333,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "needs_restart": run.as_ref().is_some_and(|r| crate::launch_rev::is_stale(b, r)) && !crate::lifecycle::is_deferred(&b.id),
                 "live_apply_deferred": crate::lifecycle::is_deferred(&b.id),
                 "cwd": b.cwd,
-                // 分享用的受限 bot（SPEC「分享 bot」）；一般 bot＝null。
-                "share_profile": restricted.contains(&b.id).then_some(crate::share::store::PROFILE_RESTRICTED),
+                // 分享用 bot（SPEC §20）：`restricted`／`trusted`；一般 bot＝null。
+                "share_profile": share_profiles.get(&b.id),
                 // 分享連結開著（`bot_shares` 有一列）；變了發 `bot_share_changed`。
                 "share_enabled": sharing.contains(&b.id),
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
@@ -2006,12 +2006,16 @@ struct NewBot {
     /// 同一個鍵換了請求內容回 409 `request_id_reused`；沒帶＝照舊每次都建。`name_auto` 時 `name` 只是提示，不算請求內容。
     #[serde(default)]
     client_request_id: Option<String>,
-    /// `"restricted"`＝分享用的受限 bot（SPEC「分享 bot」）。只在建立時決定，之後不能切換。
+    /// `"restricted"`＝分享用的受限 bot、`"trusted"`＝信任分享（一般 bot 的權限，SPEC §20.1）。只在建立時決定，之後不能切換。
     #[serde(default)]
     share_profile: Option<String>,
-    /// 受限 bot 的資料夾（`{"kind":"new","name"}`／`{"kind":"existing","path"}`）；沒帶＝新資料夾、名字用 bot 名。
+    /// 分享用 bot 的資料夾（`{"kind":"new","name"}`／`{"kind":"existing","path"}`）。受限：沒帶＝新資料夾、名字用 bot 名；
+    /// 信任分享：只收既有資料夾，沒帶＝專案目錄。
     #[serde(default)]
     share_folder: Option<crate::share::folder::ShareFolderIn>,
+    /// 信任分享一定要帶 `true`：拿到連結的人可以透過它操作這台機器上的任何東西（使用者 2026-10-04）。
+    #[serde(default)]
+    confirm_trusted: bool,
 }
 
 /// Must exist **on that bot's host** (`[[identities]]` + its `ccN` aliases, SPEC §16) and match `kind`.
@@ -2067,14 +2071,34 @@ async fn create_bot(
         .map(|p| p.host)
         .unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     let identity = check_identity(&app, &host, &b.identity, &b.kind).await?;
-    let restricted = match b.share_profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        None => false,
+    let share_profile = match b.share_profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
         Some(crate::share::store::PROFILE_RESTRICTED) => {
             crate::share::cage::check_create(&b.kind, &host, &b.args, b.env.as_ref())?;
-            true
+            Some(crate::share::store::PROFILE_RESTRICTED)
         }
-        Some(other) => return Err(LcError::Bad(format!("share_profile must be `restricted` (got `{other}`)"))),
+        Some(crate::share::store::PROFILE_TRUSTED) => {
+            if !b.confirm_trusted {
+                return Err(LcError::BadValue(json!({
+                    "error": "bad_request",
+                    "reason": "confirm_trusted_required",
+                    "message": "信任分享：拿到連結的人可以透過它操作這台機器上的任何東西，建立時要帶 confirm_trusted:true",
+                })));
+            }
+            crate::share::cage::check_profile(&b.kind, &host)?;
+            if matches!(b.share_folder, Some(crate::share::folder::ShareFolderIn::New { .. })) {
+                return Err(LcError::Bad("trusted share bots use an existing folder (share_folder.kind must be `existing`)".into()));
+            }
+            Some(crate::share::store::PROFILE_TRUSTED)
+        }
+        Some(other) => return Err(LcError::Bad(format!("share_profile must be `restricted` or `trusted` (got `{other}`)"))),
     };
+    if b.confirm_trusted && share_profile != Some(crate::share::store::PROFILE_TRUSTED) {
+        return Err(LcError::Bad("confirm_trusted is only for share_profile `trusted`".into()));
+    }
+    // 受限＝關進籠子（`share::cage`）；信任分享是一般 bot 的權限，只有分享入口與「分享 bot」的保護跟受限一樣。
+    let restricted = share_profile == Some(crate::share::store::PROFILE_RESTRICTED);
+    let share_bot = share_profile.is_some();
     #[cfg(test)]
     crate::lifecycle::race_point::hit("create_bot_after_identity_check", &pid).await;
     let (model, remapped) = remap_model(&b.kind, b.model.as_deref());
@@ -2083,10 +2107,20 @@ async fn create_bot(
         (true, None) => Some(crate::share::cage::latest_opus(&app, identity.as_deref()).await),
         (_, m) => m,
     };
-    if b.share_folder.is_some() && !restricted {
-        return Err(LcError::Bad("share_folder is only for share_profile `restricted`".into()));
+    if b.share_folder.is_some() && !share_bot {
+        return Err(LcError::Bad("share_folder is only for a share_profile".into()));
     }
-    let share_folder = restricted.then(|| b.share_folder.clone().unwrap_or(crate::share::folder::ShareFolderIn::New { name: b.name.clone() }));
+    let share_folder = match share_profile {
+        Some(crate::share::store::PROFILE_TRUSTED) => match b.share_folder.clone() {
+            Some(f) => Some(f),
+            None => {
+                let path = db::project(&app.db, &pid).await.map_err(any_err)?.map(|p| p.path).ok_or_else(|| LcError::NotFound("project".into()))?;
+                Some(crate::share::folder::ShareFolderIn::Existing { path })
+            }
+        },
+        Some(_) => Some(b.share_folder.clone().unwrap_or(crate::share::folder::ShareFolderIn::New { name: b.name.clone() })),
+        None => None,
+    };
     let effort = crate::config::normalize_effort(&b.kind, b.effort.as_deref()).map_err(LcError::Bad)?;
     let env: BTreeMap<String, String> = b.env.clone().unwrap_or_default();
     check_env_names(&env)?;
@@ -2121,6 +2155,7 @@ async fn create_bot(
             env,
             restricted,
             share_folder,
+            share_profile,
         ])
         .to_string()
     });
@@ -2137,7 +2172,7 @@ async fn create_bot(
                 Some(c) => app.cfg.get().await.projects.iter().flat_map(|p| p.bots.iter()).any(|x| x.create_request_id.as_deref() == Some(c.as_str())),
                 None => false,
             };
-            Some(crate::share::admin::reserve_restricted(&app, &id, folder, replay).await?)
+            Some(crate::share::admin::reserve_share_bot(&app, &id, share_profile.unwrap_or(crate::share::store::PROFILE_RESTRICTED), folder, replay).await?)
         }
         None => None,
     };
@@ -2178,7 +2213,8 @@ async fn create_bot(
             persona: b.persona.clone().filter(|s| !s.trim().is_empty()),
             args: b.args.clone(),
             autostart: b.autostart,
-            inject_hooks: b.inject_hooks.unwrap_or(true) || restricted,
+            // 分享入口靠 hook 收 bot 的回覆：分享用 bot（兩種）一律注入。
+            inject_hooks: b.inject_hooks.unwrap_or(true) || share_bot,
             auto_approve: b.auto_approve.unwrap_or(true) && !restricted,
             identity: identity.clone(),
             env: env.clone(),
@@ -5361,6 +5397,10 @@ struct PromptIn {
     submit_draft: bool,
     #[serde(default)]
     expect_draft_token: Option<String>,
+    /// 只對分享用 bot 有意義（SPEC §20）：擁有者送的訊息分享頁本來就看不到，這一回合 bot 的回覆預設也不給看；
+    /// 帶 `true`＝這一則觸發的回覆照樣出現在分享頁（例如替 bot 補一句要對 end user 說的話）。
+    #[serde(default)]
+    share_reply_visible: bool,
 }
 
 async fn prompt_bot(
@@ -5410,6 +5450,12 @@ async fn prompt_bot(
     } else {
         lifecycle::prompt_from_api(&app, &id, &b.text, &crid, &b.attachments, src, b.send_now, expect).await?
     };
+    if b.share_reply_visible && matches!(crate::share::store::is_share_bot(&app.db, &id).await, Ok(true)) {
+        // 記不下來只是回覆不出現在分享頁（預設行為），訊息本身已經送出，不回錯。
+        if let Err(e) = crate::share::store::mark_reply_visible(&app.db, &out.message_id).await {
+            tracing::warn!(bot = %id, error = %e, "could not mark the share reply as visible");
+        }
+    }
     Ok((StatusCode::OK, Json(out)).into_response())
 }
 
@@ -7924,7 +7970,7 @@ mod prompt_route_tests {
     }
 
     async fn call(e: &crate::testing::Env, bot: &str, text: String, crid: &str) -> (StatusCode, Value) {
-        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None };
+        let body = PromptIn { text, client_request_id: Some(crid.into()), attachments: vec![], relay_from: None, ack: false, reply_to: None, send_now: false, start_if_stopped: false, queue_if_busy: false, clear_draft: false, submit_draft: false, expect_draft_token: None, share_reply_visible: false };
         let resp = match prompt_bot(State(e.app.clone()), Path(bot.to_string()), HeaderMap::new(), Json(body)).await {
             Ok(r) => r,
             Err(err) => err.into_response(),
@@ -12640,6 +12686,7 @@ mod relay_from_auth_tests {
             clear_draft: false,
             submit_draft: false,
             expect_draft_token: None,
+            share_reply_visible: false,
         };
         let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Json(body)).await {
             Ok(r) => r,
@@ -12668,6 +12715,7 @@ mod relay_from_auth_tests {
             clear_draft: false,
             submit_draft: false,
             expect_draft_token: None,
+            share_reply_visible: false,
         };
         let resp = match prompt_bot(State(app.clone()), Path(to.to_string()), h, Json(body)).await {
             Ok(r) => r,
@@ -12752,6 +12800,7 @@ mod relay_from_auth_tests {
             clear_draft: false,
             submit_draft: false,
             expect_draft_token: None,
+            share_reply_visible: false,
         };
         let err = prompt_bot(State(f.e.app.clone()), Path(stopped.id.clone()), HeaderMap::new(), Json(body)).await.expect_err("unsigned relay");
         assert!(matches!(err, LcError::Forbidden(_)), "{err:?}");
@@ -12778,6 +12827,7 @@ mod relay_from_auth_tests {
                 clear_draft: clear,
                 submit_draft: submit,
                 expect_draft_token: expect.map(str::to_string),
+                share_reply_visible: false,
             };
             // 轉送要帶那顆 bot 自己的 token（#410 後沒帶就是 403），這樣測的才是「草稿動作不給轉送」那一條。
             let mut headers = HeaderMap::new();

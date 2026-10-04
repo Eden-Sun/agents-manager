@@ -82,3 +82,20 @@
   opacity: 0.35;
   filter: grayscale(1);
 }
+
+/* 信任分享（trusted）：🔓＋警示色，跟受限的 🔗（accent）一眼分得出來。 */
+.share-link-main.trusted {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.share-link-main.trusted.on,
+.share-link-main.trusted.on + .share-link-more {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.share-mark.trusted.on {
+  filter: drop-shadow(0 0 1px var(--warn));
+}

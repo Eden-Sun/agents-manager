@@ -591,8 +591,10 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 `POST /api/bots/{id}/prompt`
 
 ```json
-{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<自己的 bot id>", "attachments"?: ["<attachment id>"], "send_now"?: true, "start_if_stopped"?: true, "queue_if_busy"?: true }
+{ "text": "Reply with exactly PONG", "client_request_id": "<前端產生的唯一字串>", "relay_from": "<自己的 bot id>", "attachments"?: ["<attachment id>"], "send_now"?: true, "start_if_stopped"?: true, "queue_if_busy"?: true, "share_reply_visible"?: true }
 ```
+
+`share_reply_visible`（只對分享用 bot 有意義，其他 bot 忽略）：擁有者送的訊息分享頁本來就看不到，這一回合 bot 的回覆預設也不給看；帶 `true`＝這一則觸發的回覆照樣出現在分享頁（SPEC §20.3）。
 
 收件 bot 與所屬 project 都必須存在且未刪除，否則回 `404`；project 狀態會在 bot lock 內重驗，避免刪除中的孤兒 bot 收到 prompt。
 
@@ -746,12 +748,15 @@ codex 的 rollout 還沒寫出來時先放回等 3 次（只算這個原因，�
 - 啟用、停用、輪替與 bot 刪除共用 per-bot 鎖；操作在鎖內重查存活狀態，已刪 bot 回 404。刪除 bot／專案會清除公開 token 列；還原 bot 不會恢復舊連結，必須重新啟用。
 - 錯誤：bot 或其專案不存在／已刪除 404；不是受限 bot 409 `not_shareable`；`[share] base_url` 沒設 409 `share_not_configured`。
 - 分享用 bot 不給 AGM 清（SPEC §20.5）：Bot principal（AGM 角色）打 `DELETE /api/bots/{id}`、`POST /api/bots/{id}/stop`，或 `DELETE /api/projects/{id}` 而專案裡有活著的分享用 bot → `403 {"reason":"share_bot_protected","bot_id"}`；重啟不擋，使用者照常。
-- 建受限 bot：`POST /api/projects/{id}/bots` 多一個 `share_profile:"restricted"`（只收這個值）；claude 以外 409 `unsupported_kind`、遠端專案 409 `unsupported_host`、
+- 建分享用 bot：`POST /api/projects/{id}/bots` 多一個 `share_profile:"restricted"|"trusted"`（其他值 400）。
+  **信任分享**（`"trusted"`，SPEC §20.1a）：一定要帶 `confirm_trusted:true`（沒帶 400 `confirm_trusted_required`；帶給受限或一般 bot 400），只有 claude／本機（同下面的 409），
+  `share_folder` 只收 `{"kind":"existing","path"}`（`new` 400），沒帶＝專案目錄；權限照 bot 設定（`auto_approve` 不改寫），不吃下面受限 bot 的限制。
+  **受限**（`"restricted"`）：claude 以外 409 `unsupported_kind`、遠端專案 409 `unsupported_host`、
   帶了 `args`／`env` 400 `restricted_no_custom`。`share_profile` 進冪等指紋。
   `share_folder`（只給受限 bot，一般 bot 帶了 400）：`{"kind":"new","name":"support"}`＝在 `[share] folders_root`（預設 `~/shared-bots`）建新資料夾，同名已存在 409 `folder_exists`（同一個 `client_request_id` 的重送除外）；
   `{"kind":"existing","path":"/abs/dir"}`＝本機既有資料夾；位置不行（根目錄、家目錄與上層、daemon 資料目錄、`~/.ssh`／`~/.config`／`~/.claude*`…、系統目錄、不是絕對路徑、不存在）400 `bad_share_folder`＋`message`。
   沒帶＝新資料夾、名字用 bot 名。`share_folder` 進冪等指紋。`model` 沒給＝最新 Opus（`/api/models` 當下列出的；只有別名時是 `opus`），寫進 bot 的 `model`。
-  config 另有 `[share] folders_root`（可用 `~/`，必須在 daemon 資料目錄之外）。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`null`）與 `share_enabled`（分享連結開著＝true）。
+  config 另有 `[share] folders_root`（可用 `~/`，必須在 daemon 資料目錄之外）。`GET /api/state` 的 bot 帶 `share_profile`（`"restricted"`／`"trusted"`／`null`）與 `share_enabled`（分享連結開著＝true）。
 - 分享使用者送來的訊息：`relay_from:"share"`、`source:"share"`（只在輸出；見 SPEC §20.3）。WS 多一種事件 `bot_share_changed {bot_id, enabled}`。
 
 分享入口（獨立 listener，`[share] listen`；token 錯／分享關了一律 `404 {"error":"not_found"}`）：

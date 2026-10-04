@@ -1,11 +1,14 @@
-import type { BotKind, ShareFolderIn } from '../api/types'
+import type { BotKind, ShareFolderIn, ShareProfile } from '../api/types'
 
-/** 能不能建成分享用（受限）的 bot：daemon 只做了 claude、而且資料夾在本機（SPEC §20）。null＝可以。 */
+/** 能不能建成分享用的 bot（受限或信任分享）：daemon 只做了 claude、而且資料夾在本機（SPEC §20）。null＝可以。 */
 export function shareProfileBlocked(kind: BotKind, host: string): string | null {
-  if (kind !== 'claude') return '分享用的受限 bot 目前只支援 claude'
-  if (host && host !== 'local') return '分享用的受限 bot 只能建在本機的專案'
+  if (kind !== 'claude') return '分享用的 bot 目前只支援 claude'
+  if (host && host !== 'local') return '分享用的 bot 只能建在本機的專案'
   return null
 }
+
+/** 側欄與聊天頂端的標記：受限 🔗、信任分享 🔓（顏色另外區分，`share-mark trusted`）。 */
+export const shareIcon = (p: ShareProfile | null | undefined): string => (p === 'trusted' ? '🔓' : '🔗')
 
 /** 建 bot 表單裡「它的資料夾」的草稿：新資料夾（名字，空的＝用 bot 名）或既有資料夾（絕對路徑）。 */
 export interface ShareFolderDraft {
