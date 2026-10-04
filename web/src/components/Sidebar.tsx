@@ -378,6 +378,17 @@ function BotRowImpl({
           <span className={`bot-kind-wrap${hasUpdate ? ' has-update' : ''}`}>
             <KindTag kind={bot.kind} className="bot-kind" />
             <UpdateBadge botId={botId} variant="dot" />
+            {/* 精簡列：身分用小字放在 kind 圖示正下方（2026-10-04 使用者：「在 kind 下就好了」）。 */}
+            {compact && showIdentity ? (
+              <span className="kind-identity">
+                <IdentityBadge
+                  name={runningIdentity === undefined ? bot.identity : runningIdentity}
+                  showDefault
+                  kind={bot.kind}
+                  unknown={identityUnknown}
+                />
+              </span>
+            ) : null}
           </span>
           {/* 選取中的列，點名字才改名。 */}
           <BotNameField botId={botId} name={bot.name} variant="row" armed={selected} hint={herdrIdentity(run, bot.agent_name)?.title}>
@@ -404,8 +415,8 @@ function BotRowImpl({
           </span>
         ) : null}
         <span className="bot-sub">
-          {/* 身份一定要標，同 CLI 兩帳號才分得出來。 */}
-          {!showIdentity ? null : divergedChildren ? (
+          {/* 身份一定要標，同 CLI 兩帳號才分得出來。精簡列放在 kind 圖示正下方（上面 bot-kind-wrap），這裡不重複。 */}
+          {!showIdentity || compact ? null : divergedChildren ? (
             <span
               className="identity-diverged"
               title={`底下有子 bot 用別的帳號（母 ${bot.identity ?? 'cc0'}、子 ${divergedChildren.identities}：${divergedChildren.names}）——額度分開算，注意別把那個帳號用光`}
