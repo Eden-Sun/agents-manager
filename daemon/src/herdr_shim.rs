@@ -15,6 +15,9 @@ pub const SHIM_SH: &str = r##"#!/bin/sh
 # POSIX sh only — a pane's shell may be zsh, bash, dash or ash — and no `set -e`: a shim that
 # aborts is worse than one that forwards.
 
+# Its herdr `--env` arguments carry bot tokens, so shell xtrace must not copy them into logs.
+set +x
+
 # The real herdr: `$AM_REAL_HERDR` if the daemon resolved one, else the first `herdr` on PATH
 # that is not this directory (otherwise we would exec ourselves forever).
 am_real_herdr() {
@@ -2183,6 +2186,22 @@ mod tests {
             headers.matches(&format!("X-AM-Bot-Token: {token}")).count(),
             4,
             "begin, finish, begin, abort must receive the header over stdin: {headers}"
+        );
+
+        // Debug tracing is often enabled while diagnosing a shim. It must not print token values.
+        let shim = s.dir.join("bin/herdr");
+        let sourced_shim = s.dir.join("bin/herdr-sourced");
+        std::fs::rename(&shim, &sourced_shim).unwrap();
+        write_script(
+            &shim,
+            &format!("set -x\n. '{}' \"$@\"\n", sourced_shim.display()),
+        );
+        let (out, err, rc) = s.run_full(&common, &["pane", "split", "--pane", "w1:p1"]);
+        assert_eq!(rc, 0, "{out:?} {err}");
+        assert!(!out.join("\n").contains(token), "{out:?}");
+        assert!(
+            !err.contains(token),
+            "credential leaked through shell tracing: {err}"
         );
     }
 
