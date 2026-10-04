@@ -48,7 +48,7 @@ pub async fn move_in(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
 pub async fn restore(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
     let dir = crate::lifecycle::remote_bot_dir(conn, bot_id).await?.dir;
     let script = format!(
-        "set -e\nD={d}\nT={t}\nif [ -L \"$D\" ]; then rm \"$D\"; fi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then printf 'AM_KEPT\\n'; exit 0; fi\nbest=\nbm=0\nfor e in \"$T\"/{id}.*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e##*.}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nmkdir -p \"$(dirname \"$D\")\"\nmv \"$best\" \"$D\"\nprintf 'AM_RESTORED %s\\n' \"$best\"\n",
+        "set -e\nD={d}\nT={t}\nif [ -L \"$D\" ]; then rm \"$D\"; fi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then printf 'AM_KEPT\\n'; exit 0; fi\nif [ -L \"$T\" ] || [ ! -d \"$T\" ]; then printf 'AM_NONE\\n'; exit 0; fi\ncd \"$T\" || {{ printf 'AM_NONE\\n'; exit 0; }}\ntrash=$T\nbest=\nbm=0\nfor e in {id}.*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e##*.}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nmkdir -p \"$(dirname \"$D\")\"\nmv \"$best\" \"$D\"\nprintf 'AM_RESTORED %s/%s\\n' \"$trash\" \"$best\"\n",
         d = sh_quote(&dir),
         t = sh_quote(&trash_dir(conn).await?),
         id = sh_quote(bot_id),
@@ -80,6 +80,8 @@ pub async fn gc(conn: &HostConn, keep: Duration, max_bytes: u64) -> Result<(usiz
     // 不是這個形狀的一律不動——那不是我們放的。`$T` 本身有空白也沒關係，只有 basename 進 sort。
     let script = format!(
         "T={t}\nC={cutoff}\nMAXK={max_kb}\nn=0\nev=0\n\
+         if [ -L \"$T\" ] || [ ! -d \"$T\" ]; then printf 'AM_TRASH_GC 0 0\\n'; exit 0; fi\n\
+         cd \"$T\" || {{ printf 'AM_TRASH_GC 0 0\\n'; exit 0; }}\nT=.\n\
          # 列出「我們放的、可以按大小淘汰的」：<毫秒> <KB> <basename>。抽成函式是因為 `case` 的樣式\n\
          # 帶 `)`，寫在 $(...) 裡會被 shell 當成命令替換的結尾（macOS /bin/sh 實測語法錯誤）。\n\
          am_list() {{\n\
@@ -370,6 +372,43 @@ mod tests {
 
         assert_eq!(gc(&conn, Duration::ZERO, 0).await.unwrap(), (0, 0));
         assert_eq!(entries(&trash), vec!["README".to_string(), "not-a-trash-entry".into()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_gc_does_not_follow_a_symlinked_trash_root_outside_the_instance() {
+        use std::os::unix::fs::symlink;
+
+        let (env, root) = remote("trashbox-root-link").await;
+        let conn = env.app.hosts.get("trashbox-root-link").await.unwrap();
+        let outside = root.join("outside");
+        let victim = outside.join("b1.1");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), "outside data").unwrap();
+        symlink(&outside, root.join("bots-trash")).unwrap();
+
+        gc(&conn, Duration::ZERO, 0).await.unwrap();
+
+        assert!(victim.join("keep.txt").exists(), "remote GC must never traverse the trash-root symlink");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_restore_does_not_take_an_entry_through_a_symlinked_trash_root() {
+        use std::os::unix::fs::symlink;
+
+        let (env, root) = remote("trashbox-restore-root-link").await;
+        let conn = env.app.hosts.get("trashbox-restore-root-link").await.unwrap();
+        let outside = root.join("outside");
+        let external = outside.join("b1.9999999999999");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("keep.txt"), "outside data").unwrap();
+        symlink(&outside, root.join("bots-trash")).unwrap();
+
+        assert_eq!(restore(&conn, "b1").await.unwrap(), None);
+
+        assert!(external.join("keep.txt").exists(), "restore must not move an entry reached through the trash-root symlink");
+        assert!(!root.join("bots/b1").exists(), "an outside entry must not be restored as a bot directory");
     }
 
     /// 名字帶空白的（只可能是人手動放的，`move_in` 造的是 `<ULID>.<毫秒>`）：第二道的排序以行為單位，
