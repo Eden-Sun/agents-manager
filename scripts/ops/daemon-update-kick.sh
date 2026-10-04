@@ -144,6 +144,27 @@ FAILS="$DIR/daemon-update.fails"
 FAIL_ALERT_AFTER=${AGM_FAIL_ALERT_AFTER:-6}
 ROUND_FAIL=""
 note_fail() { ROUND_FAIL="${ROUND_FAIL:-$1}"; log "$1"; }
+record_rejected() { # record_rejected <full sha>; atomic rewrite so an interrupted append cannot leave a partial row
+  local target="$1" tmp
+  [ ! -L "$REJECTED" ] || return 1
+  if [ -e "$REJECTED" ] && [ ! -f "$REJECTED" ]; then return 1; fi
+  tmp=$(mktemp "$DIR/daemon-update.rejected.tmp.XXXXXX") || return 1
+  if [ -f "$REJECTED" ] && ! cat "$REJECTED" > "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! grep -qxF -- "$target" "$tmp"; then
+    { printf '\n'; printf '%s\n' "$target"; } >> "$tmp" || { rm -f "$tmp"; return 1; }
+  fi
+  if ! mv -f "$tmp" "$REJECTED"; then rm -f "$tmp"; return 1; fi
+  return 0
+}
+write_built_marker() { # write_built_marker <short sha>; atomically advance the deployed commit gate
+  local sha="$1" tmp
+  [ ! -L "$BUILT" ] || return 1
+  if [ -e "$BUILT" ] && [ ! -f "$BUILT" ]; then return 1; fi
+  tmp=$(mktemp "$DIR/daemon-update.built.tmp.XXXXXX") || return 1
+  if ! printf '%s\n' "$sha" > "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! mv -f "$tmp" "$BUILT"; then rm -f "$tmp"; return 1; fi
+  return 0
+}
 settle() {
   if [ -n "$ROUND_FAIL" ]; then
     _n=$(cat "$FAILS" 2>/dev/null)
@@ -346,13 +367,21 @@ case "$SWAP_RC" in
     ;;
   6)
     # 新版起來了、只是升過 schema 所以往前修；daemon-swap 沒寫 .built，這裡補上，否則下一輪會對同一顆重做一遍。
-    echo "$SHORT" > "$BUILT"
-    alert swap_forward_fixed "換上 ${SHORT} 後驗證沒過，但升過 schema 不能放回舊 binary，已往前修：新 binary 服務中。請看 ${DIR}/daemon-swap.log 確認"
+    if write_built_marker "$SHORT"; then
+      alert swap_forward_fixed "換上 ${SHORT} 後驗證沒過，但升過 schema 不能放回舊 binary，已往前修：新 binary 服務中。請看 ${DIR}/daemon-swap.log 確認"
+    else
+      note_fail "daemon-update.built 寫入失敗：前向修復的 ${SHORT} 已在線，下一輪可能重試部署"
+      alert swap_built_marker_failed "前向修復的 ${SHORT} 已在線，但 daemon-update.built 寫入失敗、下一輪可能重試部署。請修復 ${BUILT} 並確認部署狀態"
+    fi
     [ "$NOW" = 1 ] && drop_now "往前修"
     ;;
   7)
-    echo "$TARGET" >> "$REJECTED"
-    alert swap_rolled_back "換上 ${SHORT} 失敗、已回滾到 ${BUILT_SHA}；之後不再自動挑這顆。請看 ${DIR}/daemon-swap.log"
+    if record_rejected "$TARGET"; then
+      alert swap_rolled_back "換上 ${SHORT} 失敗、已回滾到 ${BUILT_SHA}；之後不再自動挑這顆。請看 ${DIR}/daemon-swap.log"
+    else
+      note_fail "rejected 清單寫入失敗：${SHORT} 已回滾但下一輪可能重新挑選"
+      alert swap_rolled_back "換上 ${SHORT} 失敗、已回滾到 ${BUILT_SHA}，但 rejected 清單寫入失敗、下一輪可能重新挑選。請修復 ${REJECTED} 後確認部署狀態"
+    fi
     [ "$NOW" = 1 ] && drop_now "已回滾"
     ;;
   8)
@@ -363,6 +392,16 @@ case "$SWAP_RC" in
     # 換版之前就擋下、什麼都沒動：這次建出來的 binary 不是 ${SHORT} 這顆 commit 的（沒重建？髒樹？），不是 commit 本身有問題，所以不記進 rejected。
     alert swap_binary_sha_mismatch "要換上 ${SHORT} 的 binary 內嵌的 sha 不是它（或髒樹建的、或舊 binary 沒內嵌 sha），換版中止、窗口沒拿、線上沒動。請看 ${DIR}/daemon-swap.log"
     ROUND_FAIL="${ROUND_FAIL:-新 binary 的內嵌 sha 對不上 ${SHORT}}"
+    ;;
+  11)
+    if write_built_marker "$SHORT"; then
+      log "daemon-swap 的部署 sha 標記失敗，kick 已修復為 ${SHORT}"
+      alert swap_built_marker_repaired "新 binary ${SHORT} 已驗證並在線；daemon-swap 寫入部署 sha 標記失敗，但 kick 已修復 ${BUILT}"
+    else
+      note_fail "daemon-update.built 寫入失敗：已驗證並在線的 ${SHORT} 無法記成部署版本，下一輪可能重試"
+      alert swap_built_marker_failed "新 binary ${SHORT} 已驗證並在線，但 daemon-update.built 寫入失敗、下一輪可能重試部署。請修復 ${BUILT} 並確認部署狀態"
+    fi
+    [ "$NOW" = 1 ] && drop_now "已部署但 marker 曾失敗"
     ;;
   12)
     note_fail "daemon-swap 無法安全恢復舊 binary：DB 未還原、daemon 停止，需人工處理"
