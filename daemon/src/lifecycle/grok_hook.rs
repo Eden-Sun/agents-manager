@@ -111,7 +111,7 @@ fn is_local_daemon_dispatcher(text: &str) -> bool {
 }
 
 /// 同目錄暫存檔 → `rename`。`mode` 是新檔／換檔後的權限。
-fn write_atomic(path: &Path, content: &str, mode: u32) -> anyhow::Result<()> {
+pub(super) fn write_atomic(path: &Path, content: &str, mode: u32) -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     let dir = path.parent().ok_or_else(|| anyhow::anyhow!("{} has no parent", path.display()))?;

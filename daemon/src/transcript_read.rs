@@ -125,6 +125,8 @@ pub(crate) async fn trusted_roots(app: &Arc<App>, bot: &db::Bot) -> Vec<PathBuf>
             roots.extend(own.map(|d| PathBuf::from(d).join("projects")));
         }
         "codex" => roots.extend(crate::lifecycle::codex_home(app, bot).await.map(|h| h.join("sessions"))),
+        // agy：設定目錄只認 `$HOME`（沒有身分切換），對話在 `brain/<id>/.system_generated/logs/`。
+        "agy" => roots.extend(crate::home::dir().map(|h| h.join(".gemini").join("antigravity-cli").join("brain"))),
         _ => {}
     }
     roots

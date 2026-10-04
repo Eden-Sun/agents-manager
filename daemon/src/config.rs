@@ -827,7 +827,9 @@ pub const ID_RE: &str = "[A-Za-z0-9_-]{1,64}";
 pub const BOT_NAME_RE: &str = "1–32 個字，不可含 @ , : ;，空白只能單一個、夾在中間";
 
 /// SPEC §2, §12. Also the herdr `agent.start` `kind` value.
-pub const KINDS: [&str; 3] = ["claude", "codex", "grok"];
+///
+/// `agy` = Antigravity CLI（Google；2026-06-18 起取代對個人用戶停服的 Gemini CLI）。可執行檔就叫 `agy`，herdr 的 agent kind 同名。
+pub const KINDS: [&str; 4] = ["claude", "codex", "grok", "agy"];
 
 /// grok `xhigh` needs grok-4.6+ (verified); per-model lists may be narrower, `effort_checked` drops rejects.
 /// claude `--effort` since 2.1 (verified 2.1.263); an unknown value only warns and falls back to default.
@@ -836,6 +838,8 @@ pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
         "claude" => &["low", "medium", "high", "xhigh", "max"],
         "grok" => &["low", "medium", "high", "xhigh"],
         "codex" => &["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+        // agy：effort 已經包在模型 slug 裡（`gemini-3.1-pro-high`／`-low`…），`--effort` 旗標留到第二階段。
+        "agy" => &[],
         _ => &[],
     }
 }
@@ -1515,6 +1519,8 @@ mod v40_tests {
         assert_eq!(normalize_effort("grok", Some(" High ")).unwrap(), Some("high".into()));
         assert_eq!(normalize_effort("grok", Some("xhigh")).unwrap(), Some("xhigh".into()));
         assert!(normalize_effort("grok", Some("max")).is_err());
+        assert!(normalize_effort("agy", Some("high")).is_err(), "agy 的 effort 在模型 slug 裡，沒有獨立旗標");
+        assert_eq!(normalize_effort("agy", None).unwrap(), None);
         assert_eq!(normalize_effort("codex", Some("xhigh")).unwrap(), Some("xhigh".into()));
         assert_eq!(normalize_effort("codex", Some("none")).unwrap(), Some("none".into()));
         assert!(normalize_effort("codex", Some("turbo")).is_err());

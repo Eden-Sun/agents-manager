@@ -407,7 +407,7 @@ mod account_tests {
 
 /// 這一則事件的 native session id，三家 provider 的鍵名都認（世代圍籬用它證明歸屬）。
 fn hook_session_id(p: &Value) -> Option<&str> {
-    ["session_id", "sessionId", "thread-id"]
+    ["session_id", "sessionId", "thread-id", "conversationId", "conversation_id"]
         .iter()
         .find_map(|k| p.get(*k).and_then(|v| v.as_str()))
         .map(str::trim)
@@ -555,6 +555,42 @@ fn classify(provider: &str, p: &Value) -> HookKind {
                     }
                 }
                 other => HookKind::Ignore(other.to_string()),
+            }
+        }
+        // agy（設計 A.6／§2 #6）：payload 沒有事件名，hook 子行程把 dispatcher 的參數放在 `hookEventName`（`hook_cmd::enrich_agy_payload`）；
+        // `Stop` 另帶 `lastAssistantMessage`／`lastUserMessage`（從 transcript 讀的）。camelCase 是 hook、snake_case 是 statusLine。
+        "agy" => {
+            let either = |camel: &str, snake: &str| s(camel).or_else(|| s(snake)).map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            let conv = either("conversationId", "conversation_id");
+            let path = either("transcriptPath", "transcript_path");
+            match s("hookEventName").unwrap_or_default().to_ascii_lowercase().as_str() {
+                // 對話是第一則 prompt 才建立：`SessionStart` 沒文件、不一定來，第一個 `PreInvocation` 補身分。
+                "sessionstart" | "preinvocation" => HookKind::Identity { session_id: conv, transcript_path: path },
+                // statusLine：每次 agent 狀態改變一則，單槽、最新的贏（不進收件匣）。
+                "state" => HookKind::StatusLine,
+                "stop" => {
+                    let reason = s("terminationReason").unwrap_or_default();
+                    let error = s("error").map(|e| e.trim().to_string()).filter(|e| !e.is_empty());
+                    // 值域不可假設（官方 `model_stop`／`max_steps_exceeded`／`error`，實測 `ERROR`，第三方 `NO_TOOL_CALL`）：
+                    // 有錯誤文字、或原因是 error 才算失敗；其他一律當正常結束。
+                    if error.is_some() || reason.eq_ignore_ascii_case("error") {
+                        let detail = error.or_else(|| Some(reason.clone()).filter(|r| !r.is_empty()));
+                        return HookKind::TurnFailed {
+                            session_id: conv,
+                            // `executionNum` 是不是跨回合唯一沒有驗過：當去重鑰匙會把之後的回合吃掉，所以不給。
+                            turn_id: None,
+                            transcript_path: path,
+                            reason: classify_failure(detail.as_deref()),
+                            detail,
+                        };
+                    }
+                    // 背景工作還在跑（`fullyIdle:false`）＝回合還沒真的結束，等最後那一個 Stop。
+                    if p.get("fullyIdle").and_then(Value::as_bool) == Some(false) {
+                        return HookKind::Ignore("agy stop with background work still running".into());
+                    }
+                    HookKind::TurnComplete { session_id: conv, turn_id: None, transcript_path: path, assistant: s("lastAssistantMessage"), user: s("lastUserMessage") }
+                }
+                other => HookKind::Ignore(format!("agy event `{other}`")),
             }
         }
         other => HookKind::Ignore(format!("unknown provider {other}")),
@@ -1311,6 +1347,30 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             lifecycle::emit_message_added(app, &bot.id, message).await;
             lifecycle::emit_turn(app, &t.id).await;
             tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, "StopFailure：回合收成失敗");
+            Ok(())
+        }
+        // agy 的 statusLine 只用來補身分（對話一建立就有 `conversation_id`／`transcript_path`）。它的 `agent_state`／
+        // `tool_confirmation_pending`／`quota` 之後（第二階段）才接；下面那段是 claude 的 rate_limits 與帳號，不能套在它身上。
+        HookKind::StatusLine if provider == "agy" => {
+            let s = |a: &str, b: &str| body.payload.get(a).or_else(|| body.payload.get(b)).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+            // 對話還沒建立時 statusLine 的路徑是占位的：沒有 conversation id 就什麼都不記。
+            if let (Some(r), Some(conv)) = (&run, s("conversationId", "conversation_id")) {
+                let transcript_path = vetted_transcript(app, &bot, s("transcriptPath", "transcript_path")).await;
+                let result = sqlx::query(
+                    "UPDATE runs SET native_session_id = ?, transcript_path = COALESCE(?, transcript_path)
+                      WHERE id = ? AND (native_session_id IS NOT ? OR transcript_path IS NOT COALESCE(?, transcript_path))",
+                )
+                .bind(conv)
+                .bind(&transcript_path)
+                .bind(&r.id)
+                .bind(conv)
+                .bind(&transcript_path)
+                .execute(&app.db)
+                .await?;
+                if result.rows_affected() > 0 {
+                    app.emit_bot_status(&bot.id).await;
+                }
+            }
             Ok(())
         }
         HookKind::StatusLine => {
@@ -6227,5 +6287,194 @@ mod host_unreadable_replay_tests {
         assert!(!spool.exists(), "DB 恢復後背景重試要把 spool 收進來");
         assert!(!staging.exists(), "收完才刪 .replaying：{staging:?}");
         assert_eq!(inbox_rows(&env).await, 1, "恰好收一次");
+    }
+}
+
+/// agy（Antigravity CLI）：payload 沒有事件名（hook 子行程放進 `hookEventName`），`Stop` 也沒有助理文字（`lastAssistantMessage` 是子行程讀 transcript 補的）。
+#[cfg(test)]
+mod agy_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    /// 實測 1.2.16 的 Stop（trimmed）加上 hook 子行程補的兩個欄位。
+    fn stop(extra: Value) -> Value {
+        let mut v = json!({"hookEventName": "Stop", "conversationId": "c-1", "modelName": "gemini-3.1-pro-low",
+            "transcriptPath": "/h/.gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl",
+            "workspacePaths": ["/w"], "executionNum": 0, "terminationReason": "NO_TOOL_CALL", "fullyIdle": true});
+        for (k, val) in extra.as_object().unwrap() {
+            v[k] = val.clone();
+        }
+        v
+    }
+
+    #[test]
+    fn a_normal_stop_is_a_turn_with_the_reply_the_hook_process_read_and_no_dedup_key() {
+        match classify("agy", &stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "say OK"}))) {
+            HookKind::TurnComplete { session_id, turn_id, transcript_path, assistant, user } => {
+                assert_eq!(session_id.as_deref(), Some("c-1"));
+                assert_eq!(turn_id, None, "`executionNum` 跨回合是不是唯一沒驗過：當去重鑰匙會吃掉之後的回合");
+                assert!(transcript_path.unwrap().ends_with("transcript_full.jsonl"));
+                assert_eq!((assistant.as_deref(), user.as_deref()), (Some("OK"), Some("say OK")));
+            }
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        // terminationReason 的值域不可假設：不認得的值照樣是正常結束。
+        assert!(matches!(classify("agy", &stop(json!({"terminationReason": "model_stop"}))), HookKind::TurnComplete { .. }));
+        assert!(matches!(classify("agy", &stop(json!({"terminationReason": "SOMETHING_NEW"}))), HookKind::TurnComplete { .. }));
+    }
+
+    #[test]
+    fn a_stop_with_background_work_still_running_is_not_the_end_of_the_turn() {
+        assert!(matches!(classify("agy", &stop(json!({"fullyIdle": false}))), HookKind::Ignore(_)));
+    }
+
+    #[test]
+    fn an_error_stop_fails_the_turn_and_the_error_text_is_classified() {
+        match classify("agy", &stop(json!({"terminationReason": "ERROR", "error": "429 RESOURCE_EXHAUSTED: quota exceeded"}))) {
+            HookKind::TurnFailed { session_id, reason, detail, .. } => {
+                assert_eq!(session_id.as_deref(), Some("c-1"));
+                assert_eq!(reason, FailureReason::RateLimit);
+                assert!(detail.unwrap().contains("quota exceeded"));
+            }
+            other => panic!("expected TurnFailed, got {other:?}"),
+        }
+        assert!(matches!(classify("agy", &stop(json!({"terminationReason": "ERROR"}))), HookKind::TurnFailed { .. }), "原因是 ERROR、沒有錯誤文字也算失敗");
+    }
+
+    #[test]
+    fn session_start_and_the_first_pre_invocation_both_give_the_identity_and_state_is_a_status_line() {
+        for ev in ["SessionStart", "PreInvocation"] {
+            let v = json!({"hookEventName": ev, "conversationId": "c-9", "transcriptPath": "/t/transcript_full.jsonl", "invocationNum": 0});
+            match classify("agy", &v) {
+                HookKind::Identity { session_id, transcript_path } => {
+                    assert_eq!(session_id.as_deref(), Some("c-9"), "{ev}");
+                    assert_eq!(transcript_path.as_deref(), Some("/t/transcript_full.jsonl"));
+                }
+                other => panic!("{ev}: expected Identity, got {other:?}"),
+            }
+        }
+        assert!(matches!(classify("agy", &json!({"hookEventName": "state", "conversation_id": "c-9"})), HookKind::StatusLine));
+        // 沒有事件名（手動跑、舊 dispatcher）：不猜。
+        assert!(matches!(classify("agy", &json!({"conversationId": "c-9"})), HookKind::Ignore(_)));
+        assert!(matches!(classify("agy", &json!({"hookEventName": "PostInvocation"})), HookKind::Ignore(_)));
+    }
+
+    async fn agy_turn(app: &Arc<App>, project_id: &str) -> (String, String, String) {
+        let bot_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, created_at)
+             VALUES (?,?,?,'agy','[]',0,1,'tok',?)",
+        )
+        .bind(&bot_id)
+        .bind(project_id)
+        .bind(format!("agy-{}", &bot_id[bot_id.len() - 8..]))
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+        let run_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','working','ws-1','pane-1','agent','test',?)",
+        )
+        .bind(&run_id)
+        .bind(&bot_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        let turn_id = db::ulid();
+        sqlx::query(
+            "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, prompt_text, created_at)
+             VALUES (?,?,?,'web','in_flight','ok','say OK',?)",
+        )
+        .bind(&turn_id)
+        .bind(&conv)
+        .bind(&run_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        (bot_id, run_id, turn_id)
+    }
+
+    fn body(bot_id: &str, payload: Value) -> HookBody {
+        HookBody { bot_id: bot_id.into(), provider: "agy".into(), payload, received_at: None, truncated: false, run_id: None }
+    }
+
+    async fn replies(app: &Arc<App>, turn_id: &str) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT role, content FROM messages WHERE turn_id=? AND role IN ('assistant','system') ORDER BY created_at")
+            .bind(turn_id)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_stop_completes_the_in_flight_turn_with_the_transcript_reply() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _run, turn_id) = agy_turn(&app, &env.project_id).await;
+        process(&app, &body(&bot_id, stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "say OK"})))).await.unwrap();
+        let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(t.status, "completed");
+        assert_eq!(replies(&app, &turn_id).await, [("assistant".to_string(), "OK".to_string())]);
+        // 同一則重送（spool 重播）：回合已收，不會長出第二個回覆。
+        process(&app, &body(&bot_id, stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "say OK"})))).await.unwrap();
+        assert_eq!(replies(&app, &turn_id).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_error_stop_closes_the_turn_as_failed_with_the_agy_error_in_the_note() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, _run, turn_id) = agy_turn(&app, &env.project_id).await;
+        process(&app, &body(&bot_id, stop(json!({"terminationReason": "ERROR", "error": "API key not valid"})))).await.unwrap();
+        let t: db::Turn = sqlx::query_as("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(t.status, "failed");
+        let notes = replies(&app, &turn_id).await;
+        assert!(notes.iter().any(|(role, c)| role == "system" && c.contains("API key not valid")), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn the_first_pre_invocation_records_the_conversation_and_a_transcript_under_the_agy_brain_dir() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id, _turn) = agy_turn(&app, &env.project_id).await;
+        let conv = format!("c-{}", db::ulid());
+        let logs = crate::home::dir().unwrap().join(format!(".gemini/antigravity-cli/brain/{conv}/.system_generated/logs"));
+        std::fs::create_dir_all(&logs).unwrap();
+        let tp = logs.join("transcript_full.jsonl");
+        std::fs::write(&tp, "").unwrap();
+        process(&app, &body(&bot_id, json!({"hookEventName": "PreInvocation", "conversationId": conv, "transcriptPath": tp, "invocationNum": 0}))).await.unwrap();
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!(r.native_session_id.as_deref(), Some(conv.as_str()));
+        assert_eq!(r.transcript_path.as_deref(), Some(tp.to_str().unwrap()));
+        // statusLine 也補身分，但占位路徑（沒有對話之前）不記。
+        let (bot2, run2, _t2) = agy_turn(&app, &env.project_id).await;
+        process(&app, &body(&bot2, json!({"hookEventName": "state", "conversation_id": "", "transcript_path": "/placeholder/transcript_full.jsonl"}))).await.unwrap();
+        let r2 = db::run(&app.db, &run2).await.unwrap().unwrap();
+        assert_eq!((r2.native_session_id, r2.transcript_path), (None, None), "對話還沒建立：不記");
+        process(&app, &body(&bot2, json!({"hookEventName": "state", "conversation_id": conv, "transcript_path": tp}))).await.unwrap();
+        let r2 = db::run(&app.db, &run2).await.unwrap().unwrap();
+        assert_eq!(r2.native_session_id.as_deref(), Some(conv.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_transcript_path_outside_the_agy_brain_dir_is_not_recorded() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id, _turn) = agy_turn(&app, &env.project_id).await;
+        process(&app, &body(&bot_id, json!({"hookEventName": "SessionStart", "conversationId": "c-evil", "transcriptPath": "/etc/passwd.jsonl"}))).await.unwrap();
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        assert_eq!(r.native_session_id.as_deref(), Some("c-evil"));
+        assert_eq!(r.transcript_path, None, "bot 自己的 hook token 不能指定任意檔案當 transcript");
+    }
+
+    #[tokio::test]
+    async fn a_hook_from_another_provider_is_refused_for_an_agy_bot() {
+        assert!(provider_matches_kind("agy", "agy"));
+        assert!(!provider_matches_kind("claude", "agy") && !provider_matches_kind("agy", "claude"));
     }
 }

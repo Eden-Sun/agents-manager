@@ -1,4 +1,4 @@
-//! `agents-managerd hook claude|codex|grok` — the hook child process (SPEC §4.4, §12).
+//! `agents-managerd hook claude|codex|grok|agy` — the hook child process (SPEC §4.4, §12).
 //!
 //! Contract (do not change the signatures): synchronous, never panics, caller exits 0; POST
 //! with `X-AM-Bot-Token`, spool the same body to `bots/<bot_id>/hook-spool.jsonl` on failure.
@@ -28,6 +28,8 @@ pub struct HookArgs {
     /// 這顆 hook 屬於哪一顆 daemon 的資料目錄。空字串＝回頭看 `AM_DATA_DIR`，再沒有才是預設目錄。
     /// 寫死在 argv 裡：pane env 只保護「這顆 daemon 新開的 pane」，舊 pane 沒有新 env（sol 複審二輪）。
     pub data_dir: String,
+    /// agy：事件名（`SessionStart`／`PreInvocation`／`Stop`／`state`），payload 自己不帶。其他 provider 忽略。
+    pub event: String,
     /// codex: the last argv JSON string; claude / grok: None (payload comes from stdin)
     pub payload_arg: Option<String>,
 }
@@ -70,7 +72,10 @@ fn inner(args: HookArgs) {
         None => read_stdin_capped(STDIN_BUDGET),
     };
 
-    let payload = parse_payload(&text);
+    let mut payload = parse_payload(&text);
+    if args.provider == "agy" {
+        enrich_agy_payload(&mut payload, &args.event);
+    }
     let run_id = std::env::var("AM_RUN_ID").ok();
     let body = hook_body(&args.bot, &args.provider, payload, &now_rfc3339(), truncated, run_id.as_deref());
 
@@ -116,6 +121,30 @@ fn hook_body(
         body["run_id"] = serde_json::json!(rid);
     }
     body
+}
+
+/// agy 的 payload 沒有事件名（`hooks.json` 的指令參數才有），`Stop` 也沒有助理回覆文字——回覆在 `transcriptPath`（`transcript_full.jsonl`）。
+/// hook 子行程跟 transcript 在同一台機器上，所以這裡讀（只讀尾端、同步、很小），把事件名與最近一回合的問答放進 payload；
+/// 讀不到就不放，daemon 照樣收得到事件（回合照收，只是沒有回覆文字）。其他事件只補事件名。
+fn enrich_agy_payload(payload: &mut serde_json::Value, event: &str) {
+    const TAIL_BYTES: u64 = 2 * 1024 * 1024;
+    let Some(obj) = payload.as_object_mut() else { return };
+    let event = event.trim();
+    if !event.is_empty() {
+        obj.insert("hookEventName".into(), serde_json::json!(event));
+    }
+    if event != "Stop" {
+        return;
+    }
+    let Some(path) = obj.get("transcriptPath").and_then(|v| v.as_str()).filter(|p| p.ends_with(".jsonl")) else { return };
+    let Ok(tail) = crate::agy_support::read_tail(std::path::Path::new(path), TAIL_BYTES) else { return };
+    let ex = crate::agy_support::last_exchange(&tail);
+    if let Some(a) = ex.assistant {
+        obj.insert("lastAssistantMessage".into(), serde_json::json!(a));
+    }
+    if let Some(u) = ex.user {
+        obj.insert("lastUserMessage".into(), serde_json::json!(u));
+    }
 }
 
 /// Non-object → `{"raw": "<text>"}` so the daemon still sees something.
@@ -338,5 +367,44 @@ mod tests {
         assert_eq!(truncate_utf8(s, 4), "aa");
         assert_eq!(truncate_utf8(s, 5), "aa\u{4f60}");
         assert_eq!(truncate_utf8(s, 99), s);
+    }
+
+    /// agy：payload 沒有事件名、`Stop` 沒有回覆文字——hook 子行程補事件名，並從 transcript 讀最近一回合的問答放進 payload。
+    #[test]
+    fn an_agy_stop_gets_its_event_name_and_the_reply_read_from_the_transcript() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hook-agy-{}", crate::db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = dir.join("transcript_full.jsonl");
+        std::fs::write(
+            &t,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\nsay OK\n</USER_REQUEST>\n<ADDITIONAL_METADATA>x</ADDITIONAL_METADATA>"}"#, "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","content":"OK"}"#, "\n",
+            ),
+        )
+        .unwrap();
+        let mut p = serde_json::json!({"conversationId": "c-1", "transcriptPath": t, "fullyIdle": true});
+        enrich_agy_payload(&mut p, "Stop");
+        assert_eq!(p["hookEventName"], "Stop");
+        assert_eq!(p["lastAssistantMessage"], "OK");
+        assert_eq!(p["lastUserMessage"], "say OK");
+
+        // 其他事件只補事件名，不碰 transcript。
+        let mut p = serde_json::json!({"conversationId": "c-1", "transcriptPath": t});
+        enrich_agy_payload(&mut p, "PreInvocation");
+        assert_eq!(p["hookEventName"], "PreInvocation");
+        assert!(p.get("lastAssistantMessage").is_none());
+
+        // 讀不到（路徑是占位、不是 .jsonl）：事件照樣送，只是沒有回覆文字。
+        let mut p = serde_json::json!({"transcriptPath": "/no/such/transcript_full.jsonl"});
+        enrich_agy_payload(&mut p, "Stop");
+        assert_eq!(p["hookEventName"], "Stop");
+        assert!(p.get("lastAssistantMessage").is_none());
+        let mut p = serde_json::json!({"transcriptPath": "/etc/passwd"});
+        enrich_agy_payload(&mut p, "Stop");
+        assert!(p.get("lastAssistantMessage").is_none(), "只讀 .jsonl");
+        // 非物件 payload（`{"raw": …}` 以外的怪東西）不會 panic。
+        let mut p = serde_json::json!([1, 2]);
+        enrich_agy_payload(&mut p, "Stop");
     }
 }

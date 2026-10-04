@@ -806,6 +806,8 @@ pub(crate) fn permission_args(kind: &str, auto_approve: bool) -> Vec<String> {
         ("codex", true) => vec!["--yolo".into()],
         // = `--permission-mode bypassPermissions` (grok 1.0.13 `--help`).
         ("grok", true) => vec!["--always-approve".into()],
+        // agy 1.2.16 `--help`: "自動核准所有工具權限"。沒開就不帶：`toolPermission` 留 agy 自己的預設（`request-review`）。
+        ("agy", true) => vec!["--dangerously-skip-permissions".into()],
         ("codex", false) => vec!["-c".into(), "sandbox_mode=\"workspace-write\"".into()],
         _ => Vec::new(),
     }
@@ -813,7 +815,7 @@ pub(crate) fn permission_args(kind: &str, auto_approve: bool) -> Vec<String> {
 
 /// Daemon-injected CLI args that go *before* the bot's own; remote projects also upload the hook (§11.4).
 pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
-    if !matches!(bot.kind.as_str(), "claude" | "codex" | "grok") {
+    if !matches!(bot.kind.as_str(), "claude" | "codex" | "grok" | "agy") {
         anyhow::bail!("unknown bot kind {}", bot.kind);
     }
     // 分享用的受限 bot：權限參數由 `share::cage` 決定（絕不帶 bypass），settings 一律寫（裡面是它的權限規則）。
@@ -834,6 +836,10 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
             .get(&project.host)
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
+        // agy 第一階段只做本機（設定檔、hook dispatcher、transcript 都在本機讀寫）。
+        if bot.kind == "agy" {
+            anyhow::bail!("agy bots run on the local host only for now (remote hosts are phase two)");
+        }
         let paths = install_remote_hook(&conn, bot, app.instance().as_deref()).await?;
         let hook_args: Vec<String> = match bot.kind.as_str() {
             // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
@@ -883,6 +889,15 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
         // SPEC §12: the hook is global (dispatched through the pane env), not an argv flag.
         "grok" => {
             install_local_grok_hook(app, env)?;
+            vec![]
+        }
+        // agy：全域的 `~/.gemini/config/hooks.json`（具名項 `agents-manager`）＋ `settings.json` 的 statusLine，
+        // 指令都是同一支 dispatcher，pane env 沒有 `AM_BOT_ID` 就什麼都不做（使用者自己開的 agy 不受影響）。
+        // 裝不成（使用者的設定檔壞了、唯讀…）不擋啟動：少的只是 hook 回報，畫面判讀與 transcript 還在。
+        "agy" => {
+            if let Err(e) = super::agy_hook::install_local(app) {
+                tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "could not install the agy hooks; the bot starts without them");
+            }
             vec![]
         }
         other => anyhow::bail!("unknown bot kind {other}"),
@@ -1079,6 +1094,11 @@ pub(crate) async fn pane_env_for_fence(
     }
     env.insert("CLAUDE_CODE_CHILD_SESSION".into(), json!(""));
     env.insert("CLAUDECODE".into(), json!(""));
+    // agy 預設會在背景自我更新（200 MB 的執行檔、版本一個月跳十幾版）：版本由 AG Man 管，每個 agy pane 都關掉它，
+    // 包括使用者手動在 bot pane 裡再開的。放在自訂 env 合併之前——明講要開的人可以在 bot env 蓋掉。
+    if bot.kind == "agy" {
+        env.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), json!("true"));
+    }
     // claude 2.1.280 回合結束後在輸入框畫一句 dim 的「建議下一句」（prompt suggestion，Tab 收下、Enter 送出）。以前這裡用
     // `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` 全關（2026-09-23 AM-2-M：純文字檢查把灰字當草稿、擋成 409 `composer_busy`）；
     // 現在所有檢查都用樣式讀分得出灰字（`delivery::box_state`），而網頁要顯示它、一鍵送出（2026-10-03 使用者），
@@ -1443,6 +1463,8 @@ pub(crate) fn model_args(bot: &db::Bot) -> Vec<String> {
         match bot.kind.as_str() {
             "claude" => out.extend(["--model".to_string(), m.to_string()]),
             "codex" | "grok" => out.extend(["-m".to_string(), m.to_string()]),
+            // agy：slug 已含 effort 變體（`gemini-3.1-pro-high`）；解析失敗時互動模式只警告、退回預設。
+            "agy" => out.extend(["--model".to_string(), m.to_string()]),
             _ => {}
         }
     }
@@ -1755,6 +1777,15 @@ mod model_args_tests {
         assert_eq!(model_args(&bot("codex", Some("gpt-5.6-sol-preview"), None, false)), vec!["-m", "gpt-5.6-sol-preview", "-c", "service_tier=\"\""]);
         assert_eq!(model_args(&bot("claude", Some("opus"), None, false)), vec!["--model", "claude-opus-5-5"]);
         assert_eq!(model_args(&bot("claude", Some("claude-opus-4-1"), None, false)), vec!["--model", "claude-opus-4-1"]);
+    }
+
+    #[test]
+    fn agy_takes_its_permission_flag_and_a_model_slug_but_no_effort_or_fast() {
+        assert_eq!(super::permission_args("agy", true), vec!["--dangerously-skip-permissions"]);
+        assert!(super::permission_args("agy", false).is_empty(), "沒開 auto_approve 就不帶，agy 自己的 toolPermission 照預設");
+        assert_eq!(model_args(&bot("agy", Some("gemini-3.1-pro-high"), None, true)), vec!["--model", "gemini-3.1-pro-high"]);
+        assert!(model_args(&bot("agy", None, None, false)).is_empty());
+        assert!(super::persona_args(&bot("agy", None, None, false), "x", None, None).is_empty(), "agy 沒有 argv 的 persona 管道（第二階段）");
     }
 
     #[test]
