@@ -543,6 +543,7 @@ rc=$(run)
 check_eq "沒升 schema 的失敗走回滾（rc=7）" "7" "$rc"
 check_no "不會講往前修" "forward-fix" "$SWAP_LOG"
 check_eq "binary 換回舊的" "old-binary" "$(cat "$AGM_REPO/target/release/agents-managerd")"
+check "swap 回滾時先持久化 rejected sha" "$SHA" "$AGM_DIR/daemon-update.rejected"
 check_file "回滾後保留這趟 DB 備份" yes "$(logged_db_backup)"
 check_file "回滾後保留舊 DB 備份" yes "$DAEMON_DB.bak-20000101-0000"
 check_eq "回滾後保留新舊兩份 DB 備份" "2" "$(db_backup_count)"
