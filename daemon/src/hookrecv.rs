@@ -182,7 +182,6 @@ async fn relay_source(app: &Arc<App>, run: Option<&db::Run>, echo: &str) -> Opti
     crate::agent_relay::claim(&host, agent, echo)
 }
 
-#[derive(Debug)]
 enum HookKind {
     /// Never creates a Turn.
     Identity { session_id: Option<String>, transcript_path: Option<String> },
@@ -224,6 +223,26 @@ enum HookKind {
     /// 打不到 `/relay/announce`，只能跟 hook 走同一條 spool。寄件者就是這則 body 的 bot（spool 在它自己的目錄）。
     RelayAnnounce { to_agent: String, text: String },
     Ignore(String),
+}
+
+impl std::fmt::Debug for HookKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            HookKind::Identity { .. } => "Identity",
+            HookKind::TurnComplete { .. } => "TurnComplete",
+            HookKind::TurnFailed { .. } => "TurnFailed",
+            HookKind::StatusLine => "StatusLine",
+            HookKind::SubagentEvent { .. } => "SubagentEvent",
+            HookKind::SpawnHint { .. } => "SpawnHint",
+            HookKind::AskAnswered(_) => "AskAnswered",
+            HookKind::RelayAnnounce { .. } => "RelayAnnounce",
+            HookKind::Ignore(reason) => {
+                let _ = reason;
+                "Ignore"
+            }
+        };
+        f.write_str(name)
+    }
 }
 
 /// `StopFailure` 說的是哪一種失敗。分得出來就留著（`rate limit` 跟其他錯誤要分得開），
@@ -1189,8 +1208,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     }
 
     match kind {
-        HookKind::Ignore(reason) => {
-            tracing::debug!(reason, "hook ignored");
+        HookKind::Ignore(_) => {
+            tracing::debug!("hook ignored");
             Ok(())
         }
         // issue #79：回合失敗是一級訊號。收掉那一筆 in-flight turn 並把原因寫進對話，
@@ -1203,7 +1222,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             if reason == FailureReason::Interrupted {
                 // 回聲證明打斷的鍵生效了：還在等證據的那一筆在這裡收（#147）。
                 lifecycle::settle_interruption(app, &bot.id, lifecycle::InterruptEvidence::Echo).await?;
-                tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是使用者中斷的回聲：不算失敗");
+                tracing::info!(bot = %bot.name, ?reason, "StopFailure 是使用者中斷的回聲：不算失敗");
                 return Ok(());
             }
             // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
@@ -1242,7 +1261,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         .map(|t| t.with_timezone(&chrono::Utc)),
                 };
                 if lifecycle::settle_interrupt_echo(app, &bot.id, &r.id, &ev, in_flight.as_ref()).await? {
-                    tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 是被中斷那一回合的回聲：不算失敗");
+                    tracing::info!(bot = %bot.name, ?reason, "StopFailure 是被中斷那一回合的回聲：不算失敗");
                     return Ok(());
                 }
             }
@@ -1268,7 +1287,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 return Ok(());
             };
             let Some(t) = db::in_flight_turn(&app.db, &r.id).await? else {
-                tracing::info!(bot = %bot.name, ?reason, detail, "StopFailure 但沒有 in-flight turn：後到的訊號，不開新回合");
+                tracing::info!(bot = %bot.name, ?reason, "StopFailure 但沒有 in-flight turn：後到的訊號，不開新回合");
                 return Ok(());
             };
             // CAS 在 `status='in_flight'` 上：後到的 Stop／§4.3 備援若已經把它收掉，這裡就什麼都不做，
@@ -1291,7 +1310,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 撞限在上面（進這一支之前）就記好了：畫面那條路（`turn_error::capture`）要等讀 pane 才記得到，常常比 flush 晚。
             lifecycle::emit_message_added(app, &bot.id, message).await;
             lifecycle::emit_turn(app, &t.id).await;
-            tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, detail, "StopFailure：回合收成失敗");
+            tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, "StopFailure：回合收成失敗");
             Ok(())
         }
         HookKind::StatusLine => {
@@ -1675,6 +1694,46 @@ fn parse_drain_output(text: &str) -> Drained<'_> {
     out
 }
 
+fn spool_line_log_context(line: &str) -> String {
+    format!("malformed spool record: {} bytes (payload omitted)", line.len())
+}
+
+#[cfg(test)]
+mod spool_log_privacy_tests {
+    use super::{spool_line_log_context, FailureReason, HookKind};
+
+    #[test]
+    fn malformed_spool_log_context_does_not_repeat_payload_text() {
+        let secret = r#"{"payload":{"prompt":"PRIVATE-HOOK-PROMPT-641"}}"#;
+        let context = spool_line_log_context(secret);
+        assert!(!context.contains("PRIVATE-HOOK-PROMPT-641"));
+        assert!(context.contains(&secret.len().to_string()));
+    }
+
+    #[test]
+    fn hook_kind_debug_does_not_repeat_payload_values() {
+        let secret = "PRIVATE-HOOK-PROMPT-982";
+        let kind = HookKind::TurnComplete {
+            session_id: Some("session".into()),
+            turn_id: Some("turn".into()),
+            transcript_path: Some("/private/transcript.jsonl".into()),
+            assistant: Some(secret.into()),
+            user: Some(secret.into()),
+        };
+        assert!(!format!("{kind:?}").contains(secret));
+
+        let failed = HookKind::TurnFailed {
+            session_id: None,
+            turn_id: None,
+            transcript_path: None,
+            reason: FailureReason::Unknown,
+            detail: Some(secret.into()),
+        };
+        assert!(!format!("{failed:?}").contains(secret));
+        assert!(!format!("{:?}", HookKind::Ignore(secret.into())).contains(secret));
+    }
+}
+
 /// SPEC §11.4.3.
 pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<usize> {
     if !valid_id(bot_id) {
@@ -1706,7 +1765,7 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
                 n += 1;
             }
             // A4: 解不開的行再 claim 幾次也一樣，留著只會擋住 ack；記一筆丟掉。
-            Err(e) => tracing::warn!(error = %e, line, "unparseable remote spool line; dropped"),
+            Err(_) => tracing::warn!(record = %spool_line_log_context(line), "unparseable remote spool line; dropped"),
         }
     }
     // 第二趟：本機已經 commit 了，才准刪遠端那份。ack 失敗＝`.replaying` 還在，下一輪重來。
@@ -2081,7 +2140,7 @@ pub async fn replay_spool(app: &Arc<App>, bot_id: &str) -> Result<usize> {
                 crate::hook_inbox::accept(&app.db, &b, crate::hook_inbox::Source::Spool).await?;
                 n += 1;
             }
-            Err(e) => tracing::warn!(error = %e, line, "unparseable spool line"),
+            Err(_) => tracing::warn!(record = %spool_line_log_context(line), "unparseable spool line"),
         }
     }
     // 只有在上面每一行都 commit 進 hook_events 之後，才刪掉這份唯一的副本。

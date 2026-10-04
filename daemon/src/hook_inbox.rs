@@ -283,9 +283,14 @@ fn clip(s: &str) -> String {
     s[..end].to_string()
 }
 
-/// 1s、2s、4s…最多 5 分鐘。
+fn unparseable_body_reason() -> &'static str {
+    "unparseable hook body"
+}
+
+/// 失敗次數 1、2、3…分別等 1s、2s、4s…，最多 256 秒。
 fn backoff(attempts: i64) -> Duration {
-    let secs = 1u64 << attempts.clamp(0, 8) as u32;
+    let exponent = attempts.saturating_sub(1).clamp(0, 8) as u32;
+    let secs = 1u64 << exponent;
     Duration::from_secs(secs.min(300))
 }
 
@@ -338,9 +343,9 @@ pub async fn drain_once(app: &Arc<App>) -> Result<usize> {
                         mark_failed(&app.db, &row.id, attempts, &format!("{e:#}")).await?;
                     }
                 },
-                Err(e) => {
-                    tracing::error!(id = %row.id, error = %e, "hook event body unparseable; dropped");
-                    mark_dead(&app.db, &row.id, &format!("unparseable body: {e}")).await?;
+                Err(_) => {
+                    tracing::error!(id = %row.id, "hook event body unparseable; dropped");
+                    mark_dead(&app.db, &row.id, unparseable_body_reason()).await?;
                 }
             }
         }
@@ -581,6 +586,30 @@ mod tests {
         assert_eq!(pending(&p, later, 10).await.unwrap().len(), 1, "退避過了要再試");
     }
 
+    #[tokio::test]
+    async fn last_error_does_not_echo_an_invalid_hook_body() {
+        let p = pool().await;
+        let b = body("bad", "2026-09-17T12:00:00.000Z");
+        accept(&p, &b, Source::Http).await.unwrap();
+        let id: String = sqlx::query_scalar("SELECT id FROM hook_events LIMIT 1").fetch_one(&p).await.unwrap();
+        let secret = "PRIVATE-HOOK-PROMPT-398";
+        let invalid_body = serde_json::to_string(secret).unwrap();
+        sqlx::query("UPDATE hook_events SET body_json = ? WHERE id = ?").bind(&invalid_body).bind(&id).execute(&p).await.unwrap();
+        let stored_body: String = sqlx::query_scalar("SELECT body_json FROM hook_events WHERE id = ?").bind(&id).fetch_one(&p).await.unwrap();
+        let error = serde_json::from_str::<HookBody>(&stored_body).unwrap_err();
+        assert!(error.to_string().contains(secret), "the invalid type error demonstrates the payload echo");
+        mark_dead(&p, &id, unparseable_body_reason()).await.unwrap();
+        let last_error: String = sqlx::query_scalar("SELECT last_error FROM hook_events WHERE id = ?").bind(&id).fetch_one(&p).await.unwrap();
+        assert!(!last_error.contains(secret), "stored last_error exposed invalid body contents: {last_error}");
+    }
+
+    #[test]
+    fn retry_delay_uses_the_one_based_failure_count() {
+        assert_eq!(backoff(1), Duration::from_secs(1), "第一次失敗後等 1 秒");
+        assert_eq!(backoff(2), Duration::from_secs(2));
+        assert_eq!(backoff(99), Duration::from_secs(256));
+    }
+
     /// 收件匣照**寫入順序**出列（`rowid`），不看 ULID。
     #[tokio::test]
     async fn events_come_out_in_write_order() {
@@ -615,7 +644,9 @@ mod tests {
     #[test]
     fn the_backoff_grows_and_is_capped() {
         assert_eq!(backoff(0), Duration::from_secs(1));
-        assert_eq!(backoff(3), Duration::from_secs(8));
+        assert_eq!(backoff(1), Duration::from_secs(1));
+        assert_eq!(backoff(2), Duration::from_secs(2));
+        assert_eq!(backoff(3), Duration::from_secs(4));
         assert_eq!(backoff(99), Duration::from_secs(256), "8 次之後就到頂");
     }
 }
