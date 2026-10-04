@@ -222,6 +222,17 @@ stop_daemon() { # stop_daemon <pid>（空的就什麼都不做）
     log "ERROR: daemon pid ${pid} is still alive after SIGKILL"
     return 1
 }
+stop_daemon_for_rollback() {
+    local pids count
+    pids=$(daemon_pids)
+    count=$(printf '%s\n' "$pids" | awk 'NF { n++ } END { print n + 0 }')
+    if [ "$count" -gt 1 ]; then
+        log "ERROR: found ${count} matching daemon processes during rollback"
+        return 1
+    fi
+    [ "$count" -eq 0 ] && return 0
+    stop_daemon "$pids"
+}
 api() { "$CURL" -sf -o /dev/null "http://127.0.0.1:$PORT$1"; }
 agm_probe() { # agm_probe <bot id> → "<http code> <body>"
     # 測試用：注入一支假的送達器，才不用真的打 daemon。
@@ -602,7 +613,7 @@ rollback() {
     # 起不來（2026-09-20 實際發生過）。預設往前修，只有新 binary 真的起不來才動 DB。
     if [ "$BUMPED" = yes ]; then
         log "schema bumped $PRE_UV -> ${EXP_UV}：先往前修（舊 binary 開不了這個 DB）"
-        if ! stop_daemon "$(dpid)"; then
+        if ! stop_daemon_for_rollback; then
             log "ERROR: cannot forward-fix while daemon is still alive; binary and DB left untouched"
             exit 11
         fi
@@ -614,7 +625,7 @@ rollback() {
         fi
         log "forward-fix 失敗：新 binary 起不來，改還原 binary 與 DB"
     fi
-    if ! stop_daemon "$(dpid)"; then
+    if ! stop_daemon_for_rollback; then
         log "ERROR: cannot roll back while daemon is still alive; binary and DB left untouched"
         exit 11
     fi
