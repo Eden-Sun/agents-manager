@@ -272,6 +272,8 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/build/remote/test` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/claude-update/review` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/deploy/now` | User-only；Bot → 403 `ui_only` |
+| POST | `/api/deploy/wait/escalate` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only` |
+| POST | `/api/deploy/wait/dismiss` | User-only；一般 Bot 與 AGM role Bot 均 → 403 `user_only` |
 | POST | `/api/hosts` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/hosts/{name}/cli-update` | User-only；Bot → 403 `ui_only` |
 | POST | `/api/hosts/{name}/gh/cancel` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -2468,6 +2470,17 @@ CLI：`agents-managerd release-triage-check --kind <claude|codex> [--since <ver>
   - `503 kick_not_installed`／`kick_outdated`：kick 沒裝或還不認得立即模式（檔裡沒有 `daemon-update.now.json`），先 install，什麼都不寫。
   - `503 kick_start_failed`／`request_write_failed`：請求檔刪掉，可以直接重按。
   同一時間只受理一次（連點兩下第二下是 409）。
+
+### 部署等太久：通知與調度 `/api/deploy/wait/*`（SPEC §18.10，使用者 2026-10-04）
+- 一次部署（同一個 owner 連續在試 restart-window；換 commit、換核准都算同一次）從開始等窗口起滿 3 分鐘還沒拿到，daemon 通知一次：
+  WS `deploy_wait {wait, first:true}` 與 supervisor inbox `deploy_waiting`（巡檢收、叫醒；`payload.text` 是給人看的一句話）。之後只在擋的人換了、拿到窗口、
+  換版完成（新 daemon 開機確認跑的是那顆）或放棄（15 分鐘沒再試、換版後回滾）時更新：同一個 `id`、`rev` 遞增，inbox 的 `event_key` 是 `deploy_waiting:<id>:<rev>`。
+- `wait`（也在 `GET /api/state` 的 `deploy_wait`；沒通知過是 `null`，結束的再留 10 分鐘）：
+  `{id, commit, since, waited_secs, blockers:[{bot_id|null, name, why:"working"|"delivering"|"unreadable"|"lease"}], escalates_at|null, user_escalated, dismissed, phase:"waiting"|"swapping"|"done"|"abandoned", rev, notified_at, ended_at, summary}`。
+- `POST /api/deploy/wait/escalate {id}`：「現在換版」。這次部署的**自動**核准（`decided_by=service(daemon-swap)`、同一個 owner）當成已等滿放寬門檻：working 不擋，
+  送達臨界區、別人的租約、讀不到狀態照樣擋；AGM 親手核的、別的 owner、下一次部署都不受影響。順手叫排程器跑一輪（失敗只記 log）。回 `wait`。
+- `POST /api/deploy/wait/dismiss {id}`：「先等」，`dismissed:true`、header 收起來；部署照樣在等，30 分鐘照樣自動放寬。
+- 兩條都只收 UI token：Bot（含 AGM 角色）403 `user_only`。`id` 不是目前這次部署 404；已經不在等（換版中、結束）409 `deploy_not_waiting`。
 
 ### 換版窗口 `POST /api/services/daemon-swap/restart-window`（SPEC §18.2、§18.10，2026-09-29）
 - 只給 `daemon-swap` 服務身分（`X-AM-Service-Id: daemon-swap` ＋ `X-AM-Service-Token`；token 檔 `service-tokens/daemon-swap.token`，範圍見 `service_auth::allows`）。其他身分（使用者、bot、`herdr-upgrade`）一律 403。

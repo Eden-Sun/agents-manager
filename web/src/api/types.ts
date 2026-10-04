@@ -538,6 +538,8 @@ export interface AppState {
   cli_updates: { update_id: string; host: string }[] | undefined
   /** 在跑的 herdr 一鍵更新（SPEC §6.9）；`undefined`＝舊 daemon 沒這欄＝不知道。 */
   herdr_updates: { update_id: string; host: string; target_version: string; phase: string; started_at: string }[] | undefined
+  /** 等換版窗口超過 3 分鐘、已通知的那次部署（SPEC §18.10），原樣交給 `store/deployWait.ts`；`undefined`＝舊 daemon 沒這欄。 */
+  deploy_wait: unknown
   connected: boolean
   /** The user's Herdr default session; separate from the manager session. */
   default_connected: boolean

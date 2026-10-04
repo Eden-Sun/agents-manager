@@ -24,6 +24,7 @@ mod intents;
 mod restart_intents;
 mod delete_intents;
 mod deploy_now;
+mod deploy_wait;
 mod drafts;
 mod launch_rev;
 mod promote_intents;
@@ -599,6 +600,9 @@ async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> Resul
     supervisor::maintenance::release_restart_on_startup(&app).await;
     // 上一顆 daemon 開的 herdr 維護窗口：沒到期就重新排截止，過期就當場收尾（§6.5.2）。
     herdr_maintenance::arm_on_startup(&app).await;
+    // 上一顆 daemon 等換版窗口等到一半（或就是這次換版）：讀回來，換好了／回滾了要告訴使用者（SPEC §18.10）。
+    deploy_wait::startup(&app).await;
+    deploy_wait::spawn_ticker(&app);
     app.set_startup_ready(true);
     {
         // 這一輪只起本機：遠端一律由 `hosts.rs` 在那台連上並對帳成功之後跑。

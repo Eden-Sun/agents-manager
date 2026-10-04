@@ -59,6 +59,7 @@
 OLD=$(lsof -nP -iTCP:7788 -sTCP:LISTEN -t | head -1); [ -n "$OLD" ] && kill $OLD; sleep 2
 nohup ./target/release/agents-managerd serve >> ~/.config/agents-manager/daemon.log 2>&1 & disown
 ```
+部署（自動或立即）等換版窗口超過 3 分鐘，daemon 會通知使用者（側欄「⏳ 部署等 N 分」＋AGM），由使用者按「現在換版」或「先等」調度（SPEC §18.10）；agent 不要自己 kill daemon 繞過窗口。
 
 ## 用 herdr 開子 agent
 - **派任何 issue 之前先認領**（#425）：`python3 scripts/agm.py issue claim <n> --child <子 agent 名> --worktree <path> --branch <b>`（部署過的總管用 `bin/agm issue claim …`）。回 exit 3 就是別的 bot 正在做——**不要派**，看它印出的 `claimed_by` 去協調。24 小時都沒動靜的認領才可以接手（它會自己判斷並在留言裡講）。child 收尾（或你決定不做了）時 `agm issue release <n>`；票關掉就不用。

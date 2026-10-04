@@ -18,7 +18,7 @@
 5. 一次申請只給一個裁示。同一件事已有 pending 的 approval／assignment 就回報它的 ID 與狀態，不另開一筆；對方重複催問時只回目前狀態。需要平行工作時指定每個 bot 的 ownership、完成條件與驗證責任；同檔多人時協調 hunk 邊界或隔離 worktree，不准覆蓋、stash、reset 或代收別人的 WIP。
 6. 派 issue 相關的工作之前先 `bin/agm issue claim <n> --child <名> --worktree <p> --branch <b>` 認領：exit 3 代表別的 bot 正在做，**不要再派第二顆**，照它印的 `claimed_by` 去協調（24 小時沒動靜的認領才可接手）；child 收尾或決定不做時 `bin/agm issue release <n>`（issue #425）。派工與回覆一律走持久紀錄：交辦 `bin/agm assign`（穩定 `--request-id`，重試沿用同一個；逾時先 `assignments` 對帳），只是把話告訴 bot 用 `--notice`。巡檢自己的例行維運（gc、健康追查）用 `--review-by patrol`，其餘預設由你驗收。優先重用同 context 的既有 child；一般 worker 預設 cc0/opus/low，使用者指定優先。
 7. 交辦回報要看證據再 `bin/agm review`：API 送達、turn 結束、測試通過、提交、推送、部署是不同進度；終端備援抓到的內容不完整時明說。卡住先看最後回覆、turn／delivery、pane 狀態與錯誤，有新證據才重試。
-8. 重建／重啟遵守 SPEC §18.2 的固定條件（乾淨 HEAD worktree、整樹測試、等沒有其他 bot working、備份 .bak、重啟後驗 session 與 health、失敗回滾）。核准用 `bin/agm approval decide`；同一筆核准只會有一個角色成功決定，daemon 回 409 就表示已被決定，先讀現況不要重送。
+8. 重建／重啟遵守 SPEC §18.2 的固定條件（乾淨 HEAD worktree、整樹測試、等沒有其他 bot working、備份 .bak、重啟後驗 session 與 health、失敗回滾）。核准用 `bin/agm approval decide`；同一筆核准只會有一個角色成功決定，daemon 回 409 就表示已被決定，先讀現況不要重送。部署等換版窗口超過 3 分鐘時（`deploy_waiting` 由巡檢收），你看到部署卡著也要經巡檢 AGM 立刻告訴使用者、請使用者調度，不自己默默等，也不要代替使用者放寬（SPEC §18.10）。
 9. 群組任務依 SPEC §18.14 的 runbook：規劃→執行者→reviewer→驗證者→交付→回報，每步一件交辦掛在 mission 上，身分由 daemon 的 pick 決定；輪數上限、驗證者沒 Fable、交付非 fast-forward、指示不清就停下問人。
 10. `inbox_gave_up`＝某一則通知補送到放棄（送了 5 次沒人 ack，或開著太久）：那是**巡檢**沒收下的事件。
     先看 `bin/agm inbox --all` 裡的 event_id 與 `waiting_for`（誰在等），確認巡檢還在不在、讀不讀得到，處理完直接 ack 那一則；

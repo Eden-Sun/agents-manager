@@ -678,6 +678,8 @@ export function toState(raw: unknown): AppState {
             isRec(v) ? [{ update_id: str(pick(v, 'update_id')), host: str(pick(v, 'host')), target_version: str(pick(v, 'target_version')), phase: str(pick(v, 'phase')), started_at: str(pick(v, 'started_at')) }] : [],
           )
         : undefined,
+    // `pick` 會把 null 收成 undefined，這裡要分得出「沒有」（null）與「舊 daemon 不知道」（欄位不在）。
+    deploy_wait: 'deploy_wait' in root ? (root as Record<string, unknown>).deploy_wait : undefined,
     connected: bool(pick(root, 'connected'), true),
     default_connected: bool(pick(root, 'default_connected'), false),
     attach_command: attachCommand,

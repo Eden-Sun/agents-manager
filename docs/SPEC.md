@@ -4186,6 +4186,15 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   照核准的那顆建，HEAD 留到下一輪（issue #439：main 每 5 分鐘一動、kick 每 5 分鐘一輪，已核准的那張每輪被取代就永遠派不出去）。只有還在 pending 的才換成新 commit。
 - 例行更新腳本的順序是**先取回／申請自己的核准，再問 `lease safety --approval <id>`**：升級是綁在那筆核准等了多久，
   不帶就是用「最早那筆還活著的核准」判斷自己要不要繼續，升級在這條路上等於死碼（review 2026-09-16）。
+- **部署等太久就請使用者調度**（使用者 2026-10-04：「等待部署超過 3 分鐘，馬上通知 user 調度」，`daemon/src/deploy_wait.rs`）：
+  例行自動部署與立即部署都走 daemon-swap → restart-window，每次試窗口都回報。**一次部署**＝同一個 owner 連續在試的那段（換 commit、換核准都算同一次；
+  拿到窗口換好、15 分鐘沒再試、或換版後回滾才結束）。從開始等窗口（核准的 `waiting_since`）滿 **3 分鐘**還沒拿到就通知一次：WS `deploy_wait`（網頁側欄標題列
+  「⏳ 部署等 N 分」＋toast）與 inbox `deploy_waiting`（巡檢收、叫醒，由它經 Remote Control 告訴使用者）；內容是要上的 commit、等了多久、被誰擋
+  （working／送達中的 bot 名、讀不到狀態、別人的租約）、預計幾點自動放寬。之後只有擋的人換了、拿到窗口、換好（新 daemon 開機確認跑的是那顆）或放棄才更新同一則
+  （同一個 `id`、`rev` 遞增），不洗版；狀態存 `<data_dir>/deploy-wait.json`，跨過換版那次重啟。`GET /api/state` 的 `deploy_wait` 供重整對帳。
+  使用者調度（只收 UI token）：「現在換版」＝這次部署的自動核准當成已等滿 30 分鐘（working 不擋，送達臨界區、別人的租約、讀不到狀態照樣擋），只認同一個 owner、
+  `decided_by=service(daemon-swap)` 的核准，AGM 親手核的與下一次部署都不受影響，並順手叫排程器跑一輪；「先等」＝收起通知，30 分鐘照樣自動放寬。
+  被擋的 bot 名字可以點，直接跳過去看它在忙什麼。AGM 看到 `deploy_waiting` 也要立刻轉告使用者、請使用者調度，不自己默默等（兩份 persona）。
 - 運維腳本在 `scripts/ops/`，附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，假 CLI + 暫存 repo）。
 - 邊界：租約只約束走 API 與這些腳本的路徑，shell 仍可直接 kill daemon 或 `cargo build --release`。租約讓「問過 AGM」在執行期間持續成立，不取代它。
 
@@ -4445,7 +4454,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
 | 入口 | 使用者 web／手機 Remote Control（**唯一**的 remote） | 沒有 remote；只有 daemon 的通知 |
 | 目錄 | `supervisor/AGM` | `supervisor/AGM-responder`（記在 `bots.cwd`；claude session 以 cwd 為鍵，共用會互相接到對方的 session 與 `persona.md`） |
 | 專案 | 巡檢的專案 | **同一個**（見下）；側欄上兩個角色在同一塊 |
-| 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`bot_shim_stale`、`bot_lost`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
+| 收什麼 | `health_changed`、`incident_*`（`notify_exhausted` 除外）、`bot_restart_failed`、`supervisor_restart_retry`、`responder_watchdog_gave_up`、`responder_bot_missing`、`agm_cli_stale`、`bot_shim_stale`、`bot_lost`、`deploy_waiting`、`pane_unowned`、`review_role=patrol` 的交辦回報、不認得的種類 | `bot_request`、`approval_requested`、`mission_*`、其餘交辦回報（含 `assignment_undeliverable`）；巡檢自己倒下的 `watchdog_gave_up` 與 `notify_exhausted` 的 `incident_*` |
 | 喚醒節流 | `notify_interval_secs`（600） | 短窗批次 `responder_batch_secs`（15）：最舊的待辦等滿、且距上次喚醒也滿才叫 |
 
 **協調者的健康算進頂層 `status`**（review 2026-09-16）：它是 bot 申請、核准請求與所有 `mission_*` 的唯一收件人，

@@ -194,6 +194,8 @@ fn rules() -> Vec<Rule> {
         rule("DELETE", "/api/projects/{id}/git/pull", Expect::Forbidden, None),
         rule("POST", "/api/missions/{id}/pause", Expect::UserOnly, None),
         deny_rule("GET", "/api/deploy/status", Expect::UserOnly, "The response includes global Bot activity, deployment repository state, and log paths; it is for the User UI."),
+        deny_rule("POST", "/api/deploy/wait/escalate", Expect::UserOnly, "Relaxing a waiting deployment is the user's dispatch decision (SPEC 18.10); AGM must ask the user, not press it."),
+        deny_rule("POST", "/api/deploy/wait/dismiss", Expect::UserOnly, "Hiding the deploy-wait notice is the user's own UI action (SPEC 18.10)."),
         rule("GET", "/api/supervisor/incidents", Expect::RoleRequired, None),
         rule("POST", "/api/hosts/{name}/tools/install", Expect::UserOnly, None),
         rule("GET", "/api/supervisor/responder/start", Expect::Forbidden, None),

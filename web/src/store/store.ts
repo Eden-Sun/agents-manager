@@ -43,6 +43,7 @@ import type { ProjectPane } from '../api'
 import { joinRunningBatch, reconcileBatch, restartProgress } from './restartBatch'
 import { cliUpdateDone, cliUpdateDoneMany, cliUpdateProgressMany, reconcileCliUpdates, type CliUpdate } from './cliUpdate'
 import { applyHerdrSnapshot, onHerdrFrame } from './herdrUpdate'
+import { applyDeployWaitSnapshot, onDeployWaitFrame } from './deployWait'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
@@ -1095,6 +1096,7 @@ export const useStore = create<StoreState>((set, get) => {
       }
     })
     applyHerdrSnapshot(st.herdr_updates)
+    applyDeployWaitSnapshot(st.deploy_wait)
     {
       const s = get()
       const next = serverUnread(s.bots, s.botUnread, (id) => viewingBot(s, id) && windowActive(), unsentReads)
@@ -3320,6 +3322,12 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       return
     }
     // herdr 一鍵更新（SPEC §6.9）：狀態在自己的 store（`herdrUpdate.ts`），這裡只跳通知、跑完重抓快照。
+    // 部署等換版窗口超過 3 分鐘（SPEC §18.10）：狀態在 `deployWait.ts`，這裡只跳通知。
+    case 'deploy_wait': {
+      const n = onDeployWaitFrame(data)
+      if (n) get().notify(n.kind, n.text)
+      return
+    }
     case 'herdr_update_progress':
     case 'herdr_update_done': {
       if (!isRec(data)) return

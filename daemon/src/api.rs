@@ -292,6 +292,8 @@ pub fn router(app: Arc<App>) -> Router {
         // 左上角「立即部署」：落後多少、有沒有在跑；按下去交給既有的 daemon-update-kick（SPEC §18.2）。
         .route("/deploy/status", get(crate::deploy_now::get_status))
         .route("/deploy/now", post(crate::deploy_now::post_now))
+        .route("/deploy/wait/escalate", post(crate::deploy_wait::post_escalate))
+        .route("/deploy/wait/dismiss", post(crate::deploy_wait::post_dismiss))
         // 遠端入口：argv 只算 requested，宣稱通了要有帶 actor 的觀測（SPEC §18.12）。
         .route(
             "/supervisor/remote",
@@ -735,6 +737,8 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("GET", "/api/build-slots", BotRoutePolicy::UserOnly),
     ("GET", "/api/changelog", BotRoutePolicy::UserOnly),
     ("GET", "/api/deploy/status", BotRoutePolicy::UserOnly),
+    ("POST", "/api/deploy/wait/escalate", BotRoutePolicy::UserOnly),
+    ("POST", "/api/deploy/wait/dismiss", BotRoutePolicy::UserOnly),
     ("GET", "/api/drafts", BotRoutePolicy::UserOnly),
     ("GET", "/api/hosts/{name}/shells", BotRoutePolicy::UserOnly),
     ("GET", "/api/hosts/{name}/shells/{pane_id}/terminal", BotRoutePolicy::UserOnly),
@@ -1365,6 +1369,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
         // 還沒收尾的 codex 升級（同一個理由：`cli_update_done` 收不到時的對帳來源）；存在 DB，daemon 重啟後也還在（#564）。
         "cli_updates": crate::cli_update::running_list(app).await,
         "herdr_updates": crate::herdr_upgrade::running_list(app),
+        // 等換版窗口超過 3 分鐘、已通知使用者的那一次部署（SPEC §18.10）；WS `deploy_wait` 收不到時的對帳來源。
+        "deploy_wait": crate::deploy_wait::view(app),
         "connected": connected,
         "default_connected": app.default_connected.load(Ordering::SeqCst),
         "herdr_session": app.herdr_session,
@@ -5204,8 +5210,13 @@ async fn service_daemon_swap_restart_window(
     // 同一張核准一輪輪沿用，升級計時才接得下去（`swap_window`）。
     let id = crate::swap_window::approval_for(&app, owner, commit, &actor).await.map_err(any_err)?;
     match crate::supervisor::maintenance::acquire(&app, "restart", owner, &id, Some(commit), ttl, true, &[]).await {
-        Ok(v) => Ok(Json(v)),
+        Ok(v) => {
+            crate::deploy_wait::observe(&app, owner, &id, commit, Ok(())).await;
+            Ok(Json(v))
+        }
         Err(e) => {
+            // 等太久要告訴使用者、讓使用者調度（SPEC §18.10，使用者 2026-10-04）。
+            crate::deploy_wait::observe(&app, owner, &id, commit, Err(&e)).await;
             if !crate::swap_window::keep_after(&e) {
                 let _ = crate::supervisor::store::decide_approval_from(&app.db, &id, "approved", "revoked", &actor, Some("沒拿到窗口"), None).await;
             }
