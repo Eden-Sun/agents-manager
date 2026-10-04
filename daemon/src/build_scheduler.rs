@@ -99,6 +99,11 @@ fn now_str() -> String {
     crate::db::now()
 }
 
+/// Slot tokens are bearer secrets, so they must not use the public monotonic ULID generator.
+fn new_slot_token() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
+
 fn expires_at_after(cfg: &crate::config::BuildCfg) -> Result<String> {
     let secs = cfg.lease_ttl().map_err(anyhow::Error::msg)?;
     let delta = chrono::Duration::try_seconds(secs).ok_or_else(|| anyhow::anyhow!("lease_ttl_secs {secs} is out of range"))?;
@@ -205,7 +210,7 @@ pub async fn acquire(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose
                 .await?;
         let someone_is_ahead = ahead.is_some_and(|(ahead_since, ahead_holder)| (ahead_since.as_str(), ahead_holder.as_str()) < (my_since.as_str(), holder));
         if !someone_is_ahead {
-            let token = crate::db::ulid();
+            let token = new_slot_token();
             let expires_at = expires_at_after(&cfg)?;
             sqlx::query(
                 "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, last_seen, expires_at)
@@ -716,6 +721,16 @@ mod tests {
         assert_eq!(t1, t2);
     }
 
+    /// A build-slot token is a bearer secret. It must not reuse the daemon's public, monotonic ULID
+    /// generator, whose next value can be predicted from any ID exposed in the same millisecond.
+    #[tokio::test]
+    async fn build_slot_tokens_are_independent_128_bit_bearer_secrets() {
+        let env = tt::env().await;
+        let Acquired::Granted { token, .. } = acquire(&env.app, "secret-check", None, "test", "local").await.unwrap() else { panic!() };
+        assert_eq!(token.len(), 32, "slot bearer tokens need 128 random bits, not a timestamped ULID: {token}");
+        assert!(token.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()), "slot token must be lower-case hex: {token}");
+    }
+
     /// renew 要對得上 token 才續得動；沒有這一列（沒拿過／已被收回）一律要求重新 acquire。
     #[tokio::test]
     async fn renew_checks_the_token_and_refuses_a_slot_nobody_holds() {
@@ -732,6 +747,24 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let Ok(new_exp) = renew(&app, "me", &token).await.unwrap() else { panic!() };
         assert!(new_exp > first_exp, "續約要往後延");
+    }
+
+    #[tokio::test]
+    async fn a_forged_token_cannot_release_another_holders_slot() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let Acquired::Granted { token, .. } = acquire(&app, "victim", Some("BOTA"), "test", "local").await.unwrap() else { panic!() };
+
+        // Release is intentionally idempotent and reports success for an unknown token. Check the
+        // stored lease itself so an unauthenticated caller cannot free somebody else's capacity.
+        let (code, body) = post_release(
+            State(app.clone()),
+            Form(ReleaseIn { holder: "victim".into(), token: "guessed-token".into() }),
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(body.0["released"], true);
+        assert!(matches!(renew(&app, "victim", &token).await.unwrap(), Ok(_)), "the valid lease must remain held");
     }
 
     /// sweep 收掉過期的 held 與太久沒 poll 的 waiting；還在正常範圍內的 waiting 不動（正在排隊，只是隊伍長）。
