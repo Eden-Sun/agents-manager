@@ -242,6 +242,29 @@ fn not_awaiting(why: &str) -> LcError {
     )
 }
 
+fn code_already_sent() -> LcError {
+    LcError::conflict(
+        "code_already_sent",
+        json!({"sent": false, "message": "這個登入終端已送過 code；請等結果，或關閉終端後重新登入"}),
+    )
+}
+
+fn claim_code_send(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<()> {
+    let key = (host.to_string(), pane_id.to_string());
+    let mut panes = app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = panes
+        .get_mut(&key)
+        .filter(|e| e.opened.elapsed() < MAX_AGE)
+        .ok_or_else(|| LcError::NotFound("login pane".into()))?;
+    if entry.code_sent {
+        return Err(code_already_sent());
+    }
+    // Claim before the RPC: concurrent POSTs must not both reach the pane. On an ambiguous RPC
+    // failure the User closes/reopens the pane instead of risking a duplicate one-time code.
+    entry.code_sent = true;
+    Ok(())
+}
+
 /// `POST /api/hosts/:name/shells/:pane_id/login/code`：確認畫面還在等 code 才把它打進去、按 Enter。
 /// 回 `{sent:true, outcome}`：`failed`（帶 `message`＝CLI 的 `Login failed: …`）／`finished`（CLI 結束了或 pane 已收掉，成功與否看身分列重驗）／`pending`。
 pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) -> LcResult<Value> {
@@ -250,6 +273,9 @@ pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) 
         return Err(LcError::Bad("code 只能有英數字與 _ . ~ # : / + = % -，最長 1024 字".into()));
     }
     let t = target(app, host, pane_id).await?;
+    if t.code_sent {
+        return Err(code_already_sent());
+    }
     let screen = read_screen(app, host, pane_id).await?;
     if !screen.awaiting_code {
         return Err(not_awaiting(if screen.url.is_some() { "提示已經不在畫面最後一行" } else { "畫面上還沒有等 code 的提示" }));
@@ -265,10 +291,8 @@ pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) 
     if !alive {
         return Err(not_awaiting("claude 已經不在這個終端裡跑了"));
     }
+    claim_code_send(app, host, pane_id)?;
     crate::api::shell::send_text(app, host, pane_id, code, true).await?;
-    if let Some(e) = app.login_panes.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&(host.to_string(), pane_id.to_string())) {
-        e.code_sent = true;
-    }
     tracing::info!(host, pane_id, identity = %t.identity, "a login code was typed into the login pane");
     // 等 CLI 的反應：`Login failed` 要在 pane 被收掉之前讀走。
     let deadline = Instant::now() + OUTCOME_WAIT;

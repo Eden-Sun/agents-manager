@@ -1650,6 +1650,7 @@ claude 用 `auth login` 子命令（2.1.281：開瀏覽器、同時印網址並�
 | code 空、超過 1024 字、或有 OAuth code 不會有的字元（只收 `A-Za-z0-9_.~#:/+=%-`，去頭尾空白） | `400`，什麼都沒讀 |
 | 不是登入 pane | `404 {"what":"login pane"}` |
 | 畫面最後一行不是等 code 的提示，或 pane 的前景程序已經不是 `claude`（讀畫面到打字之間 CLI 結束，字會落進 shell） | `409 {"reason":"not_awaiting_code","sent":false,"message","retryable":true}`，一個字、一個鍵都沒送 |
+| 這顆 pane 已送過 code（包含並行或重送的 POST） | `409 {"reason":"code_already_sent","sent":false,"message"}`，不讀畫面、不再送字；關閉終端後重新登入 |
 | 通過 | `pane.send_text`（code 一次整段）＋另送 `enter`，等 CLI 反應最多 8 秒：畫面出現 `Login failed` → `outcome:"failed"`＋`message`（pane 隨後會被收掉，網頁來不及再讀）；提示消失或 pane 已收掉 → `finished`（成功與否看身分列的重驗，這裡不猜）；還在等 → `pending` |
 
 **網址與 code 不進 daemon log 或事件**：網址只在 `GET …/login` 的回應裡，code 只經過 `…/login/code` 的 body 到 `pane.send_text`；沒有任何 tracing 帶它們、不推 WS、網頁也不存。CLI 結束後的重驗、關 pane 仍是既有的登入 watcher（SPEC §16.3a），完成後推 `host_changed` 讓身分列更新。本機與遠端主機（例如 m4p）同一條路。
