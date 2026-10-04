@@ -42,7 +42,6 @@ import { IdentitiesPanel, IdentityBadge } from './IdentitiesPanel'
 import { Modal } from './Modal'
 import { SidebarPanes, SidebarUnownedPanes } from './SidebarPanes'
 import { RunElapsed } from './RunElapsed'
-import { SupervisorPanel } from './SupervisorPanel'
 import { IdentityOptions, PersonaField, PersonaMark } from './BotSettingsPanel'
 import { ShareMark } from './ShareLinkButton'
 import { HostBadge, HostsPanel } from './HostsPanel'
@@ -943,7 +942,7 @@ export function Sidebar() {
   const selectedProjectId = useStore((s) => s.selectedProjectId)
   const selectProject = useStore((s) => s.selectProject)
   const removeProject = useStore((s) => s.removeProject)
-  const [open, setOpen] = useState<'project' | 'env' | 'agm' | null>(null)
+  const [open, setOpen] = useState<'project' | 'env' | null>(null)
   // config 身份＋本機 shell 認到的 ccN（SPEC §16）。
   const configuredIdentities = useStore((s) => s.identities)
   const localIdentityStatus = useStore((s) => s.localIdentityStatus)
@@ -1409,18 +1408,6 @@ export function Sidebar() {
         {/* 對不到專案的 pane（含 scratch）放這裡，不掛在任何專案底下（SPEC §6.5e）。 */}
         <SidebarUnownedPanes />
 
-        {/* 總管面板不是聊天室，對話從面板裡開。 */}
-        <button
-          type="button"
-          className="disclosure"
-          aria-haspopup="dialog"
-          aria-expanded={open === 'agm'}
-          onClick={() => setOpen('agm')}
-        >
-          <GearIcon /> AGM 總管
-          <span className="disclosure-note">找先前做過的 bot、交辦與追蹤</span>
-        </button>
-
         <button
           type="button"
           className="disclosure"
@@ -1481,10 +1468,6 @@ export function Sidebar() {
           if (id) void removeProject(id)
         }}
       />
-
-      <Modal open={open === 'agm'} title="AGM 總管" width={560} onClose={() => setOpen(null)}>
-        <SupervisorPanel onOpenChat={() => setOpen(null)} />
-      </Modal>
 
       <Modal open={open === 'env'} title="環境設定" width={720} onClose={() => setOpen(null)}>
         <div className="env-panel">
