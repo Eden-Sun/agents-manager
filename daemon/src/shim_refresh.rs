@@ -45,20 +45,25 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<bool> {
     }
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{}.tmp-{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("shim"), std::process::id()));
-    std::fs::write(&tmp, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(SHIM_MODE))?;
-    }
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(true),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("shim");
+    let tmp = dir.join(format!(".{name}.tmp-{}", ulid::Ulid::new()));
+    let write_result = (|| {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(SHIM_MODE))?;
         }
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
     }
+    Ok(true)
 }
 
 /// 內容已經對的檔案：權限不是 [`SHIM_MODE`] 就 chmod 回去（原子的，不必碰內容）。非 Unix 沒有這回事。
@@ -214,7 +219,7 @@ pub(crate) fn remote_sync_script(bot_dirs: &[String], names: &[&str], create_mis
             chmod 755 "$f" 2>/dev/null
             continue
         fi
-        tmp="$B/.$name.tmp-$$"
+        tmp=$(mktemp "$B/.$name.tmp-XXXXXX") || {{ echo "AM_SHIM_FAILED $D $name"; continue; }}
         if cp "$T/$name" "$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$f"; then
             echo "AM_SHIM_UPDATED $D $name"
         else
@@ -493,6 +498,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
     }
 
+    /// A predictable temp name can already be a symlink; writing it must not truncate its target.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_does_not_follow_a_colliding_temporary_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let data = tmp();
+        let target = data.join("precious-file");
+        let path = data.join("herdr");
+        let temporary = data.join(format!(".herdr.tmp-{}", std::process::id()));
+        std::fs::write(&target, "keep this content\n").unwrap();
+        symlink(&target, &temporary).unwrap();
+
+        assert!(write_atomic(&path, "#!/bin/sh\n# fresh shim\n").unwrap());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep this content\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "#!/bin/sh\n# fresh shim\n");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
     /// 內容不同：仍是暫存檔 + rename，**不是**就地截斷。舊 inode（正在跑那支 shim 的行程手上還開著）
     /// 內容原封不動，只有目錄項換掉；新的一份權限是 0755。
     #[cfg(unix)]
@@ -679,6 +704,38 @@ mod tests {
         let again = parse_remote_sync(&run_sync(&[&b1, &b2, &b3, &b4], &["herdr", "cargo"], false)).unwrap();
         assert_eq!(again, RemoteSync::default());
         assert_eq!(mtime(&b2.join("bin/herdr")), b2_mtime);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Remote sync must not let a preexisting predictable temp symlink redirect `cp` into another file.
+    #[cfg(unix)]
+    #[test]
+    fn remote_sync_does_not_follow_a_colliding_temporary_symlink() {
+        let d = tmp();
+        let bot = d.join("bot");
+        let bin = bot.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let target = d.join("precious-file");
+        let temporary = bin.join(".herdr.tmp-");
+        std::fs::write(&target, "keep this content\n").unwrap();
+        write_shim(&bin.join("herdr"), "#!/bin/sh\n# old shim\n", 0o755);
+
+        let dirs = vec![bot.to_string_lossy().into_owned()];
+        let script = remote_sync_script(&dirs, &["herdr"], false);
+        let setup = format!(
+            "tmp={}$$\nln -s {} \"$tmp\" || exit 77\ntest -L \"$tmp\" || exit 77\n{}",
+            crate::hosts::sh_quote(&temporary.to_string_lossy()),
+            crate::hosts::sh_quote(&target.to_string_lossy()),
+            script
+        );
+        let out = run_script(&setup, None);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "keep this content\n",
+            "remote copy must not follow a temp symlink: {out}"
+        );
+        assert_eq!(std::fs::read_to_string(bin.join("herdr")).unwrap(), crate::herdr_shim::SHIM_SH);
+        assert!(!std::fs::symlink_metadata(bin.join("herdr")).unwrap().file_type().is_symlink());
         let _ = std::fs::remove_dir_all(&d);
     }
 
