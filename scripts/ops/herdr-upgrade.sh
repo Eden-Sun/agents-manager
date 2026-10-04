@@ -43,6 +43,19 @@ log() { echo "$(date -u +%FT%TZ) $*" | tee -a "$LOG"; }
 count_lines() {
   wc -l < "$1" | tr -d ' '
 }
+# 只在所有 active run 都不忙時重啟 server。除了狀態事件，DB 的 in_flight turn 是獨立的保護欄：
+# agent_status 更新有延遲時不能把仍在送出的回合當成 idle。
+busy_bots() {
+  awk -F'|' '$6 == "working" || $6 == "blocked" || $9 == "1" { printf "%s ", $2 }' "$1"
+}
+# 讀取失敗必須由呼叫端中止，不能把空快照當成「沒有 bot」繼續停 server。
+read_running_snapshot() {
+  sqlite3 -readonly "$1" \
+    "SELECT b.id, b.name, b.kind, b.managed_by, r.state, r.agent_status, r.pane_id, r.native_session_id,
+            CASE WHEN EXISTS (SELECT 1 FROM turns t WHERE t.run_id = r.id AND t.status = 'in_flight') THEN 1 ELSE 0 END
+       FROM bots b JOIN runs r ON r.bot_id=b.id AND r.state IN ('starting','running','stopping')
+      WHERE b.deleted_at IS NULL ORDER BY b.name"
+}
 # svc <METHOD> <path> [輸出檔] [JSON body 檔]：以 service principal 打 daemon。回應 body 寫到輸出檔（沒給就 stdout），
 # stderr 最後一行是 HTTP 狀態碼（連不上是 000）；憑證檔缺或不安全時最後一行是 CRED、exit 3，什麼都不送。
 svc() {
@@ -106,7 +119,12 @@ notify() {
 import json, sys
 print(json.dumps({"text": sys.argv[1]}))
 EOF
-  svc_code POST /api/services/herdr-upgrade/notify "$SNAP/notify-resp.json" "$SNAP/notify.json" >/dev/null
+  local code
+  code=$(svc_code POST /api/services/herdr-upgrade/notify "$SNAP/notify-resp.json" "$SNAP/notify.json")
+  case "$code" in
+    2??) ;;
+    *) log "WARN notify failed (HTTP ${code:-unknown}); see daemon health and responder availability" ;;
+  esac
 }
 finish() {
   local status=$1; shift
@@ -137,10 +155,9 @@ log "preflight ok"
 # ---------------------------------------------------------------- 2. 快照（要讓使用者事先知道會關掉什麼）
 svc GET /api/supervisor/state "$SNAP/state.json" 2>/dev/null
 svc GET /api/panes "$SNAP/panes.json" 2>/dev/null
-sqlite3 -readonly "$HOME/.config/agents-manager/agents-manager.sqlite3" \
-  "SELECT b.id, b.name, b.kind, b.managed_by, r.state, r.agent_status, r.pane_id, r.native_session_id
-     FROM bots b JOIN runs r ON r.bot_id=b.id AND r.state IN ('starting','running','stopping')
-    WHERE b.deleted_at IS NULL ORDER BY b.name" > "$SNAP/running.tsv"
+if ! read_running_snapshot "$HOME/.config/agents-manager/agents-manager.sqlite3" > "$SNAP/running.tsv"; then
+  finish ABORT "讀取 active bot 快照失敗；沒有開始升級"
+fi
 python3 - "$SNAP/panes.json" > "$SNAP/non-agent-panes.txt" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1])); d = d.get("panes", d)
@@ -149,9 +166,9 @@ for p in d:
 EOF
 cp -p "$HCFG" "$SNAP/herdr-config.toml.bak"
 log "snapshot: $(count_lines "$SNAP/running.tsv") running bots, $(count_lines "$SNAP/non-agent-panes.txt") non-agent panes → $SNAP"
-# 還在回合中的 bot 不能停（同 daemon 重啟判準）
-BUSY=$(awk -F'|' '$6=="working"{print $2}' "$SNAP/running.tsv" | tr '\n' ' ')
-[ -z "$BUSY" ] || finish ABORT "還有 bot 在 working：$BUSY"
+# 還在回合中或等使用者處理的 bot 不能停（同 daemon 重啟判準）。
+BUSY=$(busy_bots "$SNAP/running.tsv")
+[ -z "$BUSY" ] || finish ABORT "還有 bot 忙著：$BUSY"
 
 [ $GO = 1 ] || finish OK "dry run 完成，沒有改動"
 
@@ -202,7 +219,7 @@ log "daemon reconnected"
 
 # ---------------------------------------------------------------- 7. 帶 resume 把 bot 接回來
 resume_fail=0
-while IFS='|' read -r id name kind managed state status pane sid; do
+while IFS='|' read -r id name kind managed state status pane sid in_flight; do
   [ -n "$id" ] || continue
   code=$(svc_code POST "/api/services/herdr-upgrade/resume/$id" "$SNAP/resume-$id.json")
   log "resume $name ($kind, $managed, sid=${sid:-none}) → HTTP $code $(head -c 160 "$SNAP/resume-$id.json")"

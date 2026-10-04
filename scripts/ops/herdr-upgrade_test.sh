@@ -118,6 +118,59 @@ check_no "不打通用 start" "start?resume" "$SCRIPT"
 check_no "不讀含 env 的 /api/state" '/api/state"' "$SCRIPT"
 check_no "service token 不放 curl 參數" "curl -s -m 20 -H \"X-AM-Service-Token" "$SCRIPT"
 
+# 重啟前所有 active run 都要避開 working、blocked 與回合狀態仍 in_flight 的 bot。
+# 後者可能在 agent_status 更新前短暫仍顯示 idle；只看 status 會把回合中途的 pane 一起砍掉。
+if grep -q '^busy_bots() {' "$SCRIPT"; then
+  sed -n '/^busy_bots() {$/,/^}$/p' "$SCRIPT" > "$ROOT/busy.sh"
+  printf 'w|worker|claude|user|running|working|p1|s1|0\nb|blocked|claude|user|running|blocked|p2|s2|0\ni|inflight|claude|user|running|idle|p3|s3|1\ni0|idle|claude|user|running|idle|p4|s4|0\n' > "$ROOT/running.tsv"
+  got=$(bash -c '. "$1"; busy_bots "$2"' _ "$ROOT/busy.sh" "$ROOT/running.tsv" | sed 's/[[:space:]]*$//')
+  check_eq "working、blocked、in-flight 都列為 busy，idle 不列" "worker blocked inflight" "$got"
+else
+  bad "有可測的 busy_bots 判斷（需涵蓋 working／blocked／in-flight）"
+fi
+if grep -q "FROM turns" "$SCRIPT" && grep -q 'busy_bots.*running.tsv' "$SCRIPT"; then
+  ok "active-run snapshot 帶入 in-flight turn 並交給 busy 判斷"
+else
+  bad "active-run snapshot 帶入 in-flight turn 並交給 busy 判斷"
+fi
+
+# sqlite 讀快照失敗時不能因 set -u 以外沒有 set -e 而把空檔當「沒有 bot」繼續升級。
+if grep -q '^read_running_snapshot() {' "$SCRIPT"; then
+  sed -n '/^read_running_snapshot() {$/,/^}$/p' "$SCRIPT" > "$ROOT/read-snapshot.sh"
+  mkdir -p "$ROOT/sqlitebin"
+  cat > "$ROOT/sqlitebin/sqlite3" <<'STUB'
+#!/bin/sh
+[ -n "${STUB_SQLITE_FAIL:-}" ] && exit 19
+printf 'snapshot-row\n'
+STUB
+  chmod +x "$ROOT/sqlitebin/sqlite3"
+  check_eq "快照命令錯誤能傳回非零" "19" "$(PATH="$ROOT/sqlitebin:$PATH" STUB_SQLITE_FAIL=1 bash -c '. "$1"; read_running_snapshot db' _ "$ROOT/read-snapshot.sh" >/dev/null; echo $?)"
+  check_eq "快照命令成功保留內容" "snapshot-row" "$(PATH="$ROOT/sqlitebin:$PATH" bash -c '. "$1"; read_running_snapshot db' _ "$ROOT/read-snapshot.sh")"
+else
+  bad "running snapshot 有可測的 sqlite 包裝（失敗不得當成空名單）"
+fi
+if grep -q 'if ! read_running_snapshot ' "$SCRIPT"; then
+  ok "sqlite 快照失敗會中止升級"
+else
+  bad "sqlite 快照失敗會中止升級"
+fi
+
+# 失敗／成功都會呼叫 notify；通知 endpoint 不可用時，至少要把送達失敗留在本機升級 log。
+sed -n '/^notify() {$/,/^}$/p' "$SCRIPT" > "$ROOT/notify.sh"
+mkdir -p "$ROOT/notify-snap"
+NOTIFY_LOG="$ROOT/notify.log" STUB_NOTIFY_CODE=503 bash -c '
+  . "$1"
+  SNAP="$2"; API_BASE=http://unused; SERVICE_TOKEN_FILE=unused
+  log() { printf "%s\n" "$*" >> "$NOTIFY_LOG"; }
+  svc_code() { printf "%s\n" "$STUB_NOTIFY_CODE"; }
+  notify test-notification
+' _ "$ROOT/notify.sh" "$ROOT/notify-snap"
+if grep -q 'notify.*503\|503.*notify' "$ROOT/notify.log" 2>/dev/null; then
+  ok "notify 非 2xx 會記錄送達失敗"
+else
+  bad "notify 非 2xx 會記錄送達失敗"
+fi
+
 # #671：行首 ANSI 不能讓 5 分鐘內的 ERROR 被算成 0。先去色再比時間。
 LOGF="$ROOT/daemon.log"
 CUTOFF="2026-09-27T00:05:00"
