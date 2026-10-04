@@ -513,9 +513,8 @@ async fn relay_announce(
         }
     };
     crate::agent_relay::announce(&host, &body.bot_id, &body.to_agent, &body.text);
-    // #380：收件方 UI 看得出在跑，字卡在輸入列時補 Enter；resolve 已在回 2xx 前確認，後續盯梢仍背景做。
-    let (app2, from, text) = (app.clone(), body.bot_id.clone(), body.text.clone());
-    tokio::spawn(async move { crate::lifecycle::relay_watch::on_resolved_announce(&app2, &from, &text, relay_run).await });
+    // #380：收件方 UI 看得出在跑，字卡在輸入列時補 Enter；先登記受關機屏障管理的 watcher，再回 2xx。
+    crate::lifecycle::relay_watch::on_resolved_announce(&app, &body.bot_id, &body.text, relay_run).await;
     (StatusCode::OK, Json(json!({})))
 }
 
