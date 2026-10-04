@@ -12061,6 +12061,97 @@ mod per_principal_auth_tests {
         assert_eq!(db::bot(&e.app.db, &parent.id).await.unwrap().unwrap().hook_token, old, "the sibling pane keeps a valid proof until closed");
     }
 
+    #[tokio::test]
+    async fn concurrent_replay_of_a_spawn_permit_registers_only_one_pane() {
+        let e = crate::testing::env().await;
+        let parent = distinct_bot(&e, "concurrent-spawn-permit-replay").await;
+        let begin = spawn_begin(e.app.clone(), &parent.id, &parent.hook_token).await;
+        assert!(begin.starts_with("HTTP/1.1 200"), "{begin}");
+        let permit = response_json(&begin)["permit_id"].as_str().unwrap().to_string();
+
+        // Both requests pass the permit check before either finishes its async pane registration.
+        let (a, b) = tokio::join!(
+            spawn_finish(e.app.clone(), &parent.id, &parent.hook_token, &permit, "w1:p-replay-a"),
+            spawn_finish(e.app.clone(), &parent.id, &parent.hook_token, &permit, "w1:p-replay-b"),
+        );
+        let success_count = [a.as_str(), b.as_str()].iter().filter(|r| r.starts_with("HTTP/1.1 200")).count();
+        assert_eq!(success_count, 1, "exactly one replay may consume the permit: a={a}; b={b}");
+        let registered: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM panes WHERE host='local' AND owner_bot_id=? AND pane_id IN ('w1:p-replay-a','w1:p-replay-b')",
+        )
+        .bind(&parent.id)
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+        assert_eq!(registered, 1, "losing replay must not leave a second credential-bearing pane registered");
+    }
+
+    #[tokio::test]
+    async fn spawn_credentials_cannot_be_used_for_another_bots_identity() {
+        let e = crate::testing::env().await;
+        let bot_a = distinct_bot(&e, "spawn-auth-a").await;
+        let bot_b = distinct_bot(&e, "spawn-auth-b").await;
+
+        let forged_begin = spawn_begin(e.app.clone(), &bot_b.id, &bot_a.hook_token).await;
+        assert!(forged_begin.starts_with("HTTP/1.1 401"), "Bot A cannot reserve credentials as Bot B: {forged_begin}");
+
+        let valid_begin = spawn_begin(e.app.clone(), &bot_a.id, &bot_a.hook_token).await;
+        assert!(valid_begin.starts_with("HTTP/1.1 200"), "{valid_begin}");
+        let permit = response_json(&valid_begin)["permit_id"].as_str().unwrap().to_string();
+        let forged_finish = spawn_finish(e.app.clone(), &bot_b.id, &bot_a.hook_token, &permit, "w1:p-cross-bot").await;
+        assert!(forged_finish.starts_with("HTTP/1.1 401"), "Bot A cannot register a credential-bearing pane for Bot B: {forged_finish}");
+
+        let body = format!("bot_id={}&permit_id={permit}", bot_b.id);
+        let forged_abort = raw(
+            e.app.clone(),
+            format!(
+                "POST /relay/spawn/abort HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                bot_a.hook_token,
+                body.len()
+            ),
+        )
+        .await;
+        assert!(forged_abort.starts_with("HTTP/1.1 401"), "Bot A cannot consume Bot B's permit: {forged_abort}");
+
+        let release = raw(
+            e.app.clone(),
+            format!(
+                "POST /relay/spawn/abort HTTP/1.1\r\nHost: 127.0.0.1\r\nX-AM-Bot-Token: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                bot_a.hook_token,
+                format!("bot_id={}&permit_id={permit}", bot_a.id).len(),
+                format!("bot_id={}&permit_id={permit}", bot_a.id)
+            ),
+        )
+        .await;
+        assert!(release.starts_with("HTTP/1.1 200") && release.contains("\"released\":true"), "Bot A can clean up its own permit: {release}");
+
+        let registered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes WHERE pane_id='w1:p-cross-bot'")
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(registered, 0, "denied cross-bot finish has no side effect");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_parent_cannot_finish_or_start_with_its_inherited_proof() {
+        let e = crate::testing::env().await;
+        let parent = distinct_bot(&e, "spawn-deleted-parent").await;
+        let permit_response = spawn_begin(e.app.clone(), &parent.id, &parent.hook_token).await;
+        assert!(permit_response.starts_with("HTTP/1.1 200"), "{permit_response}");
+        let permit = response_json(&permit_response)["permit_id"].as_str().unwrap().to_string();
+        sqlx::query("UPDATE bots SET deleted_at=? WHERE id=?").bind(db::now()).bind(&parent.id).execute(&e.app.db).await.unwrap();
+
+        let begin = spawn_begin(e.app.clone(), &parent.id, &parent.hook_token).await;
+        assert!(begin.starts_with("HTTP/1.1 401"), "deleted parent's token is revoked for future children: {begin}");
+        let finish = spawn_finish(e.app.clone(), &parent.id, &parent.hook_token, &permit, "w1:p-after-delete").await;
+        assert!(finish.starts_with("HTTP/1.1 401"), "an in-flight child cannot complete with a deleted parent's token: {finish}");
+        let registered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM panes WHERE pane_id='w1:p-after-delete'")
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(registered, 0, "deleted parent's in-flight finish has no registration side effect");
+    }
+
     /// #664：shim 回報 herdr 沒開出 pane 時，abort 放開 permit，輪替不再 409。
     #[tokio::test]
     async fn aborting_a_spawn_permit_lets_rotation_proceed() {
