@@ -426,5 +426,57 @@ gone "沒有 .last" "$DIR/ops-install.last"
 check "有 .last-failed" "failed=1" "$DIR/ops-install.last-failed"
 teardown
 
+# 17. zsh 腳本自檢通過：依 shebang 用 zsh -n 自檢（含 zsh glob qualifier 等特性語法），成功換新。
+setup
+printf 'scripts/ops/z-gc.sh  bin/z-gc.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
+printf '#!/bin/zsh\necho z-v1\n' > "$REPO/scripts/ops/z-gc.sh"
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m z1
+install -m 755 "$REPO/scripts/ops/z-gc.sh" "$DIR/bin/z-gc.sh"
+bump z-gc.sh $'#!/bin/zsh\nfor d in "$DIR"/*(N/); do :; done\necho z-v2\n'
+equals "zsh 腳本通過 exit 0" "$(run)" "0"
+check "zsh 腳本裝了" "installed bin/z-gc.sh" "$OUT"
+equals "zsh 腳本內容是 v2" "$(sed -n 3p "$DIR/bin/z-gc.sh")" "echo z-v2"
+teardown
+
+# 18. 系統沒裝 zsh 時：依 shebang 認出是 zsh，該檔報 skipped（不是 failed），舊版原封不動，exit 0。
+setup
+printf 'scripts/ops/z-gc.sh  bin/z-gc.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
+printf '#!/usr/bin/env zsh\necho z-v1\n' > "$REPO/scripts/ops/z-gc.sh"
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m z1
+install -m 755 "$REPO/scripts/ops/z-gc.sh" "$DIR/bin/z-gc.sh"
+bump z-gc.sh $'#!/usr/bin/env zsh\nfor d in "$DIR"/*(N/); do :; done\necho z-v2\n'
+FAKEBIN="$ROOT/fakebin"; mkdir -p "$FAKEBIN"
+for _entry in $(echo "$PATH" | tr ':' ' '); do
+  [ -d "$_entry" ] || continue
+  for _f in "$_entry"/*; do
+    [ -x "$_f" ] || continue
+    _b="${_f##*/}"
+    [ "$_b" = "zsh" ] && continue
+    [ -e "$FAKEBIN/$_b" ] || ln -s "$_f" "$FAKEBIN/$_b" 2>/dev/null || true
+  done
+done
+# canary-gap: 測試環境刻意排除 zsh 直譯器以驗證 skipped 行為；AM_CANARY_DIR 仍保留以維持破壞性指令護欄
+equals "沒裝 zsh exit 0" "$(PATH="$FAKEBIN${AM_CANARY_DIR:+:$AM_CANARY_DIR}" run)" "0"
+check "zsh 檔報 skipped" "skipped bin/z-gc.sh" "$OUT"
+check_no "沒有 failed" "failed bin/z-gc.sh" "$OUT"
+equals "舊版原封不動" "$(sed -n 2p "$DIR/bin/z-gc.sh")" "echo z-v1"
+gone "沒有留下暫存檔" "$DIR/bin/z-gc.sh.new"
+teardown
+
+# 19. 壞的 bash 腳本仍自檢失敗（exit 1，舊版原封不動）；壞的 zsh 腳本有 zsh 時也自檢失敗。
+setup
+printf 'scripts/ops/z-bad.sh  bin/z-bad.sh\n' >> "$REPO/scripts/ops/install-manifest.tsv"
+printf '#!/bin/zsh\necho z-v1\n' > "$REPO/scripts/ops/z-bad.sh"
+"$GITBIN" -C "$REPO" add -A; "$GITBIN" -C "$REPO" commit -q -m zbad
+install -m 755 "$REPO/scripts/ops/z-bad.sh" "$DIR/bin/z-bad.sh"
+bump a-kick.sh $'#!/bin/bash\nif then fi (\n'
+bump z-bad.sh $'#!/bin/zsh\nif then fi (\n'
+equals "壞腳本 exit 1" "$(run)" "1"
+check "壞的 bash 腳本報 failed" "failed bin/a-kick.sh" "$OUT"
+check "壞的 zsh 腳本報 failed" "failed bin/z-bad.sh" "$OUT"
+equals "bash 舊檔原封不動" "$(sed -n 2p "$DIR/bin/a-kick.sh")" "echo a-v1"
+equals "zsh 舊檔原封不動" "$(sed -n 2p "$DIR/bin/z-bad.sh")" "echo z-v1"
+teardown
+
 echo "ops-install_test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
