@@ -120,6 +120,7 @@ interface MockRun {
   /** 快取倒數（SPEC §6.5j）：最後一次 API 活動；claude／codex 才有 TTL。 */
   last_api_at?: string | null
   cache_ttl_secs?: number | null
+  cache_kept_alive_at?: string | null
 }
 
 /** mock 的快取倒數：各顆 bot 錯開「上次活動」幾分鐘前，綠／黃／紅／已涼都演得到。 */

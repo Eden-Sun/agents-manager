@@ -106,6 +106,7 @@ mod models;
 mod pane_identity;
 mod preview;
 mod preview_bind;
+mod primary_keepalive;
 mod primary_order;
 mod login_assist;
 mod pane_probe;

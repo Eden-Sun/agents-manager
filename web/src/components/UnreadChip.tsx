@@ -254,7 +254,7 @@ export function UnreadChip() {
         kidsRunning: nKids,
         working: status === 'working',
         title: botTitle(b.name, pinned, n, needsReply, kids, current) + (nKids > 0 ? `（${kidsText(nKids)}）` : ''),
-        cache: pinned ? cacheState(runs[b.id]?.last_api_at, runs[b.id]?.cache_ttl_secs, now, status === 'working') : null,
+        cache: pinned ? cacheState(runs[b.id]?.last_api_at, runs[b.id]?.cache_ttl_secs, now, status === 'working', runs[b.id]?.cache_kept_alive_at) : null,
       })
     }
     return out

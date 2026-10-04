@@ -2351,6 +2351,23 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   網頁：有 `prompt_cache` 就一律用它判熱冷（`warm`＋`expires_at`，閒置時 `warm:true` 也以時間為準），冷了寫「送出這則會重寫約 N K」；
   沒有（舊版 claude、codex 還沒讀到 rollout、舊 daemon）才退回 `last_api_at`＋`cache_ttl_secs` 推算。回合進行中不顯示過期。只提示，不擋送出。
 
+### 6.5k 主力 bot 的 prompt cache 續命與到點壓縮（`primary_keepalive.rs`，使用者 2026-10-04）
+
+使用者原話：「主力的規則如下：當 cache 至 58 分鐘時，下一個 prompt "any updates"，來讓 cache 延長，且 cache 時間照樣上數，達 110 分鐘時，強制做壓縮」。
+
+- **對象**：`bots.is_primary = 1`、kind 是 claude 或 codex（grok、agy 不做）、有 `running` 的 run、`agent_status == "idle"`、沒有在飛或排隊的回合。`blocked`（停在問題／權限提示）、`working`、`unknown` 絕不送——
+  送字進去會變成回答那個問題。主力本來就不被 idle_sleep 收起來。
+- **cache 年齡**＝距離 §6.5j `last_api_at` 的推算（最後一次**真的**活動）。**續命回合本身不算活動**：續命回合的 `turns.client_request_id` 是 `keepalive:<錨點>`（不加欄位，這個前綴本身就持久、跨 daemon 重啟認得出來），
+  `cache_clock` 的最近回合 SQL 排除它；續命期間 claude statusLine 的 API 指紋變化與 `working` 也不算（`primary_keepalive::window_open`，送出前開、回合收尾後寬限 20 秒、最長 15 分鐘）。
+  所以送完續命年齡照樣往上數，直到使用者送真的 prompt 或 bot 自己有真的活動，錨點才更新、計數重來。
+- **58 分（`KEEPALIVE_AFTER_SECS`）**：年齡 ≥ 58 分、而且這個錨點之後還沒續過（有沒有比錨點晚的 `keepalive:` 回合）：走一般送 prompt 的路徑（`lifecycle::prompt`，聊天室看得到）送 `any updates`，
+  `client_request_id = keepalive:<錨點>`（同一錨點冪等）。送不出去（對方忙、被維護窗口擋）下一輪再試。
+- **110 分（`COMPACT_AFTER_SECS`）**：年齡 ≥ 110 分、而且這個錨點之後還沒壓縮過：呼叫 `lifecycle::compact`（`/compact`，與 context 旁的壓縮鈕同一支）；成功後在對話裡記一則系統訊息
+  （「主力 cache 到點壓縮：…」，同時是持久的「這個錨點壓縮過了」記號）。被拒（agent_busy 等）下一輪再試。
+- **巡邏**：`supervisor::controller` 的控制迴圈每拍呼叫 `primary_keepalive::tick`，自己節流成 30 秒一次、丟背景跑（測試版不跑）。
+- **顯示**：`last_api_at` 因此是真實年齡（網頁 tooltip 的「上次活動」與數字照樣上數）；run JSON 另帶 `cache_kept_alive_at`（API.md）＝最近一次成功續命回合（或到點壓縮）讓 cache 實際變熱的時間，
+  網頁（`cacheState`）用 `max(last_api_at, cache_kept_alive_at)` 算顏色與剩餘，所以 60 分不會誤判變冷。
+
 ### 6.5.1 採用使用者的 Herdr `default` session
 
 daemon 另外唯讀觀察本機 Herdr `default` session（`~/.config/herdr/herdr.sock`），不替它啟動 server。啟動、事件重連與定期輪詢時：
