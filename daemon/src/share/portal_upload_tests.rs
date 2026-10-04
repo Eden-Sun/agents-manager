@@ -10,6 +10,11 @@ use super::*;
 use crate::testing as tt;
 
 async fn fixture() -> (tt::Env, String, Portal, SocketAddr, reqwest::Client) {
+    fixture_with(UPLOAD_QUEUE_WAIT).await
+}
+
+/// `upload_wait`：名額滿了排隊等多久。
+async fn fixture_with(upload_wait: Duration) -> (tt::Env, String, Portal, SocketAddr, reqwest::Client) {
     let e = tt::env().await;
     let b = tt::claude_bot(&e.app, &e.project_id, "share-upload-tests").await;
     let root = tt::scratch_dir("am-share-upload-root");
@@ -36,7 +41,9 @@ async fn fixture() -> (tt::Env, String, Portal, SocketAddr, reqwest::Client) {
     let state = Portal {
         app: e.app.clone(),
         limits: Arc::new(Limits::default()),
-        uploads: Arc::new(Semaphore::new(2)),
+        uploads: Arc::new(Semaphore::new(UPLOAD_SLOTS)),
+        upload_queue: Arc::new(Semaphore::new(UPLOAD_QUEUE_MAX)),
+        upload_wait,
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
         share_streams: Arc::new(ShareStreamLimits::default()),
         token_lookups: Arc::new(Semaphore::new(MAX_TOKEN_LOOKUPS)),
@@ -121,6 +128,7 @@ async fn issue_823_rejects_an_invalid_token_before_polling_the_upload_body() {
     );
 }
 
+/// 名額滿了的第三個排隊等；等不到（測試 300ms）才 429，而且一樣沒讀 body。
 #[tokio::test]
 async fn issue_823_holds_both_upload_permits_until_body_read_and_rejects_a_third_unread() {
     let (_e, token, state, addr, _client) = fixture().await;
@@ -144,7 +152,7 @@ async fn issue_823_holds_both_upload_permits_until_body_read_and_rejects_a_third
 
 #[tokio::test]
 async fn a_capacity_rejection_does_not_spend_the_upload_rate_limit() {
-    let (_e, token, state, addr, client) = fixture().await;
+    let (_e, token, state, addr, client) = fixture_with(Duration::from_millis(20)).await;
     let uri = format!("/s/{token}/api/upload?name=x.txt");
     let first = partial_upload(addr, &uri).await;
     let second = partial_upload(addr, &uri).await;
@@ -204,7 +212,7 @@ async fn issue_824_invalid_uploads_spend_the_upload_rate_limit() {
         )
         .await,
         StatusCode::TOO_MANY_REQUESTS,
-        "the 21st invalid attempt must be charged"
+        "the attempt past UPLOADS_PER_MIN must be charged"
     );
 }
 
@@ -449,4 +457,51 @@ fn issue_826_office_uploads_require_bounded_ooxml_zip_structure_and_return_offic
         Err("content_mismatch"),
         "central-directory size limit is enforced"
     );
+}
+
+/// 客訴 2026-10-04：分享頁一次選好幾張照片、同時送出，第三張起就 429「傳得太快了」。名額（2 個）都被慢的 body 占著時，
+/// 同時再來 5 個上傳要排隊等、不 429；名額一空出來就輪到，7 個全部存進 `inbox/`。
+#[tokio::test]
+async fn five_uploads_at_once_queue_for_the_two_slots_instead_of_failing() {
+    let (_e, token, state, addr, client) = fixture_with(Duration::from_secs(30)).await;
+    let slow = format!("/s/{token}/api/upload?name=slow.txt");
+    let mut first = partial_upload(addr, &slow).await;
+    let mut second = partial_upload(addr, &slow).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.uploads.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("two slow bodies should hold both upload permits");
+
+    let queued: Vec<_> = (0..5)
+        .map(|i| {
+            let (client, uri) = (client.clone(), format!("/s/{token}/api/upload?name=photo-{i}.txt"));
+            tokio::spawn(async move { call(&client, addr, &uri, "application/octet-stream", format!("photo {i}").into_bytes()).await })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(queued.iter().all(|h| !h.is_finished()), "名額滿了要排隊，不能先回 429");
+
+    // 慢的兩個把 body 送完：名額空出來，排隊的依序進去。
+    for s in [&mut first, &mut second] {
+        s.write_all(&vec![b'a'; 1_048_576]).await.unwrap();
+    }
+    assert_eq!(response_status(&mut first).await, 200);
+    assert_eq!(response_status(&mut second).await, 200);
+    for h in queued {
+        assert_eq!(h.await.unwrap(), StatusCode::OK);
+    }
+    let bot_id: String = sqlx::query_scalar("SELECT id FROM bots WHERE name = 'share-upload-tests'").fetch_one(&state.app.db).await.unwrap();
+    let inbox = folder_of(&state.app, &bot_id).await.unwrap().join("inbox");
+    assert_eq!(std::fs::read_dir(inbox).unwrap().count(), 7);
+}
+
+/// 一則訊息帶一整批照片（上限 [`MAX_ATTACHMENTS`]）、每分鐘上傳額度（[`UPLOADS_PER_MIN`]）都要容得下「一次選 10 張」再加重傳。
+#[test]
+fn a_batch_of_ten_phone_photos_fits_the_limits() {
+    assert!(MAX_ATTACHMENTS >= 10);
+    assert!(UPLOADS_PER_MIN >= 2 * 10, "10 張再重傳一輪也不撞每分鐘額度");
+    assert!(INBOX_MAX_FILES >= 10 && INBOX_MAX_BYTES >= 10 * 8 * 1024 * 1024, "10 張原尺寸 8 MB 的照片放得下");
 }

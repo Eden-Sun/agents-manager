@@ -2,10 +2,10 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { ShareClient } from './shareApi'
 import { displayName, imagesByMessage, isImageName } from './shareImage'
 import { ShareButton, ShareImageViewer, ShareThumb } from './ShareImages'
+import { uploadErrorText, uploadPatiently, uploadRetryable } from './shareUpload'
 import {
   fmtSize,
   mergeMessages,
-  SHARE_FILE_MAX,
   SHARE_TEXT_MAX,
   ShareHttpError,
   shareErrorText,
@@ -23,11 +23,15 @@ const NO_IMAGES: ShareFile[] = []
 /** 推播斷了才輪詢；分頁在背景時放慢。 */
 const POLL_MS = 4000
 
+/** 選了的檔：一次只傳一個（`active`），其餘排著等；`id` 有了＝傳好了，`error`＝這張沒傳上去（`retry`＝可以再試一次）。 */
 interface Pending {
   key: string
   name: string
+  file: File
   id: string | null
   error: string | null
+  retry: boolean
+  active: boolean
 }
 
 function newRequestId(): string {
@@ -151,6 +155,7 @@ export function ShareApp({ client }: { client: ShareClient }) {
   const sendAt = useRef<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const uploadBusy = useRef(false)
   const stick = useRef(true)
   const stopLive = useRef<() => void>(() => {})
   const sawOlder = useRef(false)
@@ -244,23 +249,44 @@ export function ShareApp({ client }: { client: ShareClient }) {
     if (el && stick.current) el.scrollTop = el.scrollHeight
   }, [messages, busy])
 
+  // 一次選好幾張照片：一張接一張傳（客訴 2026-10-04：同時送出時第三張起就「傳得太快了」）。429 在 `uploadPatiently` 裡自己等著重試。
   const pick = (list: FileList | null) => {
-    for (const f of Array.from(list ?? [])) {
-      const key = `${f.name}-${f.size}-${Math.random()}`
-      if (f.size > SHARE_FILE_MAX) {
-        setPending((p) => [...p, { key, name: f.name, id: null, error: '超過 25 MB' }])
-        continue
-      }
-      setPending((p) => [...p, { key, name: f.name, id: null, error: null }])
-      client.upload(f).then(
-        (r) => setPending((p) => p.map((x) => (x.key === key ? { ...x, id: r.id, name: r.name } : x))),
-        (e) => setPending((p) => p.map((x) => (x.key === key ? { ...x, error: shareErrorText(e, 'upload') } : x))),
-      )
-    }
+    const picked = Array.from(list ?? []).map((f) => ({ key: `${f.name}-${f.size}-${Math.random()}`, name: f.name, file: f, id: null, error: null, retry: false, active: false }))
+    if (picked.length) setPending((p) => [...p, ...picked])
     if (fileInput.current) fileInput.current.value = ''
   }
 
+  useEffect(() => {
+    if (uploadBusy.current) return
+    const next = pending.find((p) => !p.id && !p.error && !p.active)
+    if (!next) return
+    uploadBusy.current = true
+    const patch = (fields: Partial<Pending>) => setPending((p) => p.map((x) => (x.key === next.key ? { ...x, ...fields } : x)))
+    patch({ active: true })
+    uploadPatiently(client, next.file).then(
+      (r) => {
+        uploadBusy.current = false
+        patch({ id: r.id, name: r.name, active: false })
+      },
+      (e) => {
+        uploadBusy.current = false
+        if (e instanceof ShareHttpError && e.status === 404) {
+          stopLive.current()
+          setState('gone')
+        }
+        patch({ error: uploadErrorText(e), retry: uploadRetryable(e), active: false })
+      },
+    )
+  }, [pending, client])
+
   const uploading = pending.some((p) => !p.id && !p.error)
+  // 「第幾張／共幾張」：這一批還沒送出的檔（傳好的、排著的、失敗的都算）。
+  const pendingStatus = (p: Pending): string => {
+    if (p.error) return p.error
+    if (p.id) return ''
+    if (!p.active) return '等待中'
+    return pending.length > 1 ? `上傳中（第 ${pending.indexOf(p) + 1} 張／共 ${pending.length} 張）` : '上傳中…'
+  }
   const ready = pending.filter((p) => p.id)
   const tooLong = text.length > SHARE_TEXT_MAX
   // bot 還沒回完不給送：daemon 一段對話同時只排一則，再送會 409（API.md §5.6）。
@@ -403,7 +429,12 @@ export function ShareApp({ client }: { client: ShareClient }) {
             {pending.map((p) => (
               <li key={p.key} className={p.error ? 'err' : p.id ? 'ok' : 'up'}>
                 <span>📎 {p.name}</span>
-                <span className="sh-pending-st">{p.error ?? (p.id ? '' : '上傳中…')}</span>
+                <span className="sh-pending-st">{pendingStatus(p)}</span>
+                {p.error && p.retry ? (
+                  <button type="button" className="sh-retry" onClick={() => setPending((x) => x.map((y) => (y.key === p.key ? { ...y, error: null, retry: false } : y)))}>
+                    再試一次
+                  </button>
+                ) : null}
                 <button type="button" aria-label={`移除 ${p.name}`} onClick={() => setPending((x) => x.filter((y) => y.key !== p.key))}>
                   ✕
                 </button>

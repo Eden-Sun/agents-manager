@@ -4814,7 +4814,9 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   **每則一律以 `〔分享使用者〕 ` 開頭再打進 TUI**：claude 的輸入框把第一個字當模式切換——`!` 是 bash 模式（2026-10-03 實測：`--restricted`＋`--tools` 白名單＋`dontAsk`＋deny Bash，
   `!echo … > 檔` 照樣真的執行）、`/` 是 slash 指令（`/permissions`、`/add-dir`…）、`#` 是記憶。工具層的籠子管不到這一層，所以 end user 的字永遠不在第一個字；
   對話列表顯示時再拿掉前綴。`@路徑` 這種檔案提及仍受檔案工具的範圍限制（實測讀不到工作目錄外）。
-- 上傳：先驗 token、扣每個分享每分鐘 20 次的額度，再占全站 2 個名額之一，之後才讀取有大小上限的 body；名額持有到 body 讀取、驗證與儲存結束。無效內容也會扣額，避免分類工作可無限重試。`multipart/form-data` 的 `file` 欄位（分享頁的 `FormData`；自己寫的嚴格解析，不合形狀一律拒絕，沒有拉 form 相依），或原始位元組＋`?name=`。單檔 ≤ 25 MiB；每顆 bot 的 `inbox/` 配額檢查與檔案建立由同一把 bot 鎖序列化，總量 ≤ 200 MiB／300 個，不接受兩個並發上傳共用過期的配額快照。
+- 上傳：先驗 token、占全站 2 個名額之一（同時讀取的 body 每個最多 25 MiB），占到了才扣每個分享每分鐘 40 次的額度，之後才讀取有大小上限的 body；名額持有到 body 讀取、驗證與儲存結束。無效內容也會扣額，避免分類工作可無限重試。
+  **名額滿了排隊等**（客訴 2026-10-04：長輩一次選好幾張照片，第三張起就「傳得太快了」）：最多等 60 秒，等的時候 body 還沒讀、不扣額度；全站最多 64 個在排隊，再多的或等不到才 429＋`Retry-After: 5`。
+  每分鐘 40 次與每則 20 個附件（原本 20／10）是為了「一次選 10 張照片」再加一輪重傳也不撞上限；`inbox/` 的 200 MiB／300 個不變（分享頁會先把照片縮小）。`multipart/form-data` 的 `file` 欄位（分享頁的 `FormData`；自己寫的嚴格解析，不合形狀一律拒絕，沒有拉 form 相依），或原始位元組＋`?name=`。單檔 ≤ 25 MiB；每顆 bot 的 `inbox/` 配額檢查與檔案建立由同一把 bot 鎖序列化，總量 ≤ 200 MiB／300 個，不接受兩個並發上傳共用過期的配額快照。
   檔名只取最後一段、清掉控制字元與符號、不收隱藏檔與金鑰／DB 類檔名（同 outbox 的黑名單）；種類以副檔名白名單決定（文字、圖片、PDF、Office），
   內容要對得上（檔頭；文字檔要是 UTF-8、沒有 NUL；Office 要有 `[Content_Types].xml`、`_rels/.rels` 與對應的 Word／Excel／PowerPoint 主文件項目）。ZIP central directory 限 4096 項與 1 MiB，不解壓檔案，拒絕重疊、異常路徑與超過 512 MiB 的展開總量；回傳 Office 專屬 MIME。呼叫端的 Content-Type 不採信。存成 `<ulid>-<檔名>`（0600），`inbox/` 逐層 `O_NOFOLLOW` 打開，被換成符號連結就不寫。
   送訊息時帶的附件 id 必須真的在 `inbox/`，路徑以固定的標記行附在給 bot 的文字後面（對話列表再拆回檔名）。
@@ -4835,7 +4837,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 **分享頁（`web/share.html` → `dist/share.html`）**
 - 獨立 Vite entry，程式碼只在 `web/src/share/`，**不 import 主 UI 的 store／api／元件**（測試 `shareIsolation.test.ts` 釘住），也沒有任何通往主 UI 的連結。
 - token 從網址 `/s/<token>` 取（dev／mock 用 `share.html?token=`）；只打 `/s/<token>/api/…`、不帶 cookie 與 referrer。
-- 畫面：標題（bot 名稱＋在線／思考中）、對話串（bot 回覆用 GFM，但不吃 HTML、不載圖片，連結 `noopener noreferrer`；超過 2 萬字或引用／縮排超過 `markdownGuard` 上限時改純文字，不提供「仍用 Markdown」；單則轉換失敗只退回那則）、輸入框（桌機 Enter 送出、手機 Enter 換行）、📎 上傳（單檔 25 MB）、「bot 給你的檔案」（手機是底部抽屜，桌機 ≥900px 是右側欄）。
+- 畫面：標題（bot 名稱＋在線／思考中）、對話串（bot 回覆用 GFM，但不吃 HTML、不載圖片，連結 `noopener noreferrer`；超過 2 萬字或引用／縮排超過 `markdownGuard` 上限時改純文字，不提供「仍用 Markdown」；單則轉換失敗只退回那則）、輸入框（桌機 Enter 送出、手機 Enter 換行）、📎 上傳（單檔 25 MB，見下方「上傳」）、「bot 給你的檔案」（手機是底部抽屜，桌機 ≥900px 是右側欄）。
   `has_more` 時可「載入較早訊息」（`before`＝目前最舊 id；只送單一 id，斜線與空白直接丟掉），一頁最多留 100 則、單則超過 10 萬字截斷。載入舊頁不把視窗捲回最底。連結只留 http／https。送出當下就顯示「思考中」；這一輪 SSE 或之後抓到的 idle 會清掉，POST 較晚 resolve 不會再打開。SSE 任一 error（含仍在 CONNECTING）就改輪詢，`open` 後停；輪詢看到 404 關掉 EventSource 並畫失效。404 一律畫「這個分享連結已失效」，不分 token 錯或分享已關。深淺色跟系統走。
   **圖片**（使用者 2026-10-04）：分享頁的使用者是不懂電腦的長輩，**畫面上不出現任何格式名稱或技術字**（PNG、SVG、下載、檔案格式…），也不出現「擁有者」「管理者」「後台」。
   受限 bot 沒有 Bash，做圖卡只能寫 SVG，所以在瀏覽器把它轉成點陣圖再交出去；SVG 原檔從不出現在畫面上。
@@ -4845,6 +4847,11 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   - SVG 轉點陣圖：抓原檔 → 根 `<svg>` 沒有 width／height 就從 viewBox 補上 → 經 blob: 的 `<img>` 畫到 canvas，2x 解析度（單邊 ≤ 8192、總像素 ≤ 16M），背景照 SVG 原樣。每個檔（同版本）只轉一次、一出現就先轉好（點陣圖也先抓好），因為 `navigator.share` 要在點擊的同一個手勢裡呼叫。
   - 安全：SVG 一律只經 `<img>`（blob: 或同源 `?inline=1`）或 canvas，**絕不**插進 DOM；引用外部資源（`#id`／`data:` 以外的 href、`url()`、`@import`）或 `<foreignObject>` 的 SVG 不轉（`<img>` 不載外部資源、canvas 可能被汙染），只顯示「這張圖沒辦法分享」。頁面 CSP 本來就有 `img-src 'self' data: blob:`，不必放寬。
   - end user 訊息裡 daemon 加的前綴、附件標記，顯示前前端再拿掉一次（daemon 已拿掉；舊版 daemon 或 bot 照抄時也不會出現）。SSE 收到 `resync` 就整頁重抓並取代手上的清單。
+  **上傳**（客訴 2026-10-04，`shareUpload.ts`）：一次選好幾個檔就**一張接一張傳**，每張旁邊寫「上傳中（第 N 張／共 M 張）」或「等待中」；遇到 429 照 `Retry-After` 自己等著重試（單次最多等 30 秒、最多 12 次），
+  「太快」從不顯示給使用者。真的失敗才寫「這張沒傳上去」＋「再試一次」（打不開的照片、太大、不收的種類不給重試，只給移除）。還有檔沒傳完時送出鈕停用。
+  **手機照片先整理**：受限 bot 只能用 Read 看圖，claude 的 Read 只認 png／jpg／jpeg／gif／webp（2.1.289 binary 實查），daemon 也不收 HEIC，所以 HEIC／HEIF 在瀏覽器裡（`createImageBitmap`，照 EXIF 轉正）
+  畫成 JPEG（品質 0.85、透明處鋪白、檔名改 `.jpg`），長邊超過 2048 一併縮小；JPEG 長邊超過 2048 也縮（縮完反而變大就送原檔）——模型看圖本來就會縮，原尺寸 3–8 MB 只是讓手機網路等更久、更快塞滿 `inbox/`。
+  PNG／GIF／WebP（截圖）原樣送，轉 JPEG 會糊掉字。瀏覽器解不開的 HEIC 寫「這張照片打不開，請換一張或改用截圖」。25 MB 上限在整理之後才量。
   一段對話同時只排一則：status 是 working／blocked／starting（含剛送出還沒回）時送出鈕停用、下方寫「等 bot 回完再送」，仍可先打；萬一還是 409 `not_accepted`，字與附件留在輸入框、提示等回完再送，並重抓一次狀態。
 
 ### 20.5 分享用 bot 不清（使用者 2026-10-04：「let AGM 不清除這類 bot」）
