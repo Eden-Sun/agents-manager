@@ -42,6 +42,8 @@ const CLI_LOGIN: Record<BotKind, string> = {
   claude: 'claude auth login',
   codex: 'codex login',
   grok: 'grok login',
+  // agy 沒有 `login` 子命令，登入只在 TUI 裡（使用者自己做，AG Man 不代按）。
+  agy: 'agy',
 }
 
 /** 打進主機 shell 的一行。身份本體是 env，不帶就登到預設帳號，所以有 env 就加 `env K=V …` 前綴。 */

@@ -232,6 +232,10 @@
   color: var(--kind-grok);
 }
 
+.quota-hp.agy .quota-kind {
+  color: var(--kind-agy);
+}
+
 /* Selection is shown by the gauge frame only; never replace the kind's brand colour with accent. */
 
 .quota-hp.focused.claude .quota-kind {

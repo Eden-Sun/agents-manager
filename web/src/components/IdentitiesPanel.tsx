@@ -281,6 +281,8 @@ const ENV_PREFILL: Record<BotKind, string> = {
   claude: 'CLAUDE_CONFIG_DIR=$HOME/.claude-',
   codex: 'CODEX_HOME=$HOME/.codex-',
   grok: 'GROK_HOME=$HOME/.grok-',
+  // agy 的設定目錄只認 `$HOME`、沒有環境變數可換（第一階段單一身分，這個表單不提供 agy）。
+  agy: '',
 }
 
 function NewIdentityForm() {

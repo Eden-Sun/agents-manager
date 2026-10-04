@@ -158,6 +158,12 @@
   color: #3a3a3a;
 }
 
+.bot-badge.agy {
+  background: #e8f0fe;
+  border-color: #b6cffa;
+  color: #1a56b0;
+}
+
 .bot-badge.all {
   background: var(--accent-soft);
   border-color: transparent;
@@ -183,6 +189,12 @@
     border-color: #555;
     color: #d6d6d6;
   }
+
+  :root:not([data-theme="light"]) .bot-badge.agy {
+    background: #1b2638;
+    border-color: #2f4a7a;
+    color: #9bbcf5;
+  }
 }
 
 :root[data-theme="dark"] .bot-badge.claude {
@@ -201,6 +213,12 @@
   background: #2a2a2a;
   border-color: #555;
   color: #d6d6d6;
+}
+
+:root[data-theme="dark"] .bot-badge.agy {
+  background: #1b2638;
+  border-color: #2f4a7a;
+  color: #9bbcf5;
 }
 
 .msg-speaker {

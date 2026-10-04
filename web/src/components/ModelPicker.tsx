@@ -13,8 +13,9 @@ import './modelPicker.css'
 /** v4.0 model / effort / fast from `GET /api/models?kind=&host=`; falls back to static `MODEL_OPTIONS` on failure. */
 
 function staticModels(kind: BotKind): ModelInfo[] {
+  // agy：強度已經在模型 slug 裡（`-high`／`-low`），沒有獨立的強度檔。
   const efforts =
-    kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : [...CLAUDE_EFFORT_OPTIONS]
+    kind === 'agy' ? [] : kind === 'grok' ? [...EFFORT_OPTIONS] : kind === 'codex' ? [...CODEX_EFFORT_OPTIONS] : [...CLAUDE_EFFORT_OPTIONS]
   return MODEL_OPTIONS[kind].map((id, i) => ({
     id,
     display_name: id,
