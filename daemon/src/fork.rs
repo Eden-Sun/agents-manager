@@ -201,25 +201,11 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
     }
 
     if op.state == "created" {
-        // 啟動送出後、記結果之前死掉：目標已經有 run 就是啟動過了，再開一次會對 provider 再分岔一次。
-        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM runs WHERE bot_id = ? ORDER BY started_at DESC, id DESC LIMIT 1")
-            .bind(&new_id)
-            .fetch_optional(&app.db)
-            .await
-            .map_err(up)?;
-        let (run_id, start_error) = match existing {
-            Some(run) => (Some(run), None),
-            None => {
-                let opts = StartOpts { fork_session: Some(op.session_id.clone()), ..Default::default() };
-                match lifecycle::start_bot_with(app, &new_id, opts).await {
-                    Ok(run) => (Some(run), None),
-                    Err(e) => {
-                        tracing::warn!(source = %source.name, fork = %op.name, error = ?e, "forked bot was created but did not start");
-                        (None, Some(format!("{e:?}")))
-                    }
-                }
-            }
-        };
+        let opts = StartOpts { fork_session: Some(op.session_id.clone()), ..Default::default() };
+        let (run_id, start_error) = start_fork_target(app, &new_id, opts).await?;
+        if let Some(error) = start_error.as_deref() {
+            tracing::warn!(source = %source.name, fork = %op.name, error, "forked bot was created but did not start");
+        }
         let state = if run_id.is_some() { "started" } else { "failed" };
         fork_ops::set_state(&app.db, &op.client_request_id, state, &op.name, run_id.as_deref(), start_error.as_deref()).await.map_err(up)?;
         op.state = state.into();
@@ -242,7 +228,48 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
             "start_error": op.start_error,
         })),
     )
-        .into_response())
+    .into_response())
+}
+
+/// Start a fork under the target bot lock. A durable `starting` run can outlive a daemon crash
+/// before `agent.start`; only a live pane proves the launch completed. Restart the normal way so
+/// lifecycle can retire an orphaned active run before retrying the same fork session.
+async fn start_fork_target(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> Result<(Option<String>, Option<String>), LcError> {
+    let lock = app.bot_lock(bot_id).await;
+    let _guard = lock.lock().await;
+    let existing: Option<db::Run> = sqlx::query_as("SELECT * FROM runs WHERE bot_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
+        .bind(bot_id)
+        .fetch_optional(&app.db)
+        .await
+        .map_err(up)?;
+
+    if let Some(run) = existing {
+        if matches!(run.state.as_str(), "starting" | "running" | "stopping") {
+            let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+            if lifecycle::run_alive(app, &run, &bot).await {
+                return Ok((Some(run.id), None));
+            }
+            // `restart_start` runs with this lock held and reconciles an active run whose pane is gone.
+        } else if run.native_session_id.is_some() {
+            // A session id proves the forked CLI reached its hooks before exiting; never fork it again.
+            return Ok((Some(run.id), None));
+        } else {
+            // The daemon may have stopped between a failed launch and persisting `fork_ops.failed`.
+            // Avoid a second provider fork when the outcome is unknown; the UI receives this error.
+            return Ok((
+                None,
+                Some(format!(
+                    "啟動結果未能確認：既有 run `{}` 已是 `{}` 且沒有 session 記錄；為避免重複分岔，沒有再次啟動。請檢查這顆 bot，必要時手動啟動。",
+                    run.id, run.state
+                )),
+            ));
+        }
+    }
+
+    match lifecycle::restart_start(app, bot_id, opts, None).await {
+        Ok(run) => Ok((Some(run), None)),
+        Err(e) => Ok((None, Some(format!("{e:?}")))),
+    }
 }
 
 #[cfg(test)]
@@ -563,6 +590,54 @@ mod tests {
         assert_eq!(out["bot_id"], target.as_str());
         assert_eq!(fork_bot_count(&e).await, 2, "沒有插第二顆");
         assert_eq!(fork_starts(&e), 1);
+    }
+
+    /// A daemon crash after the run row is inserted but before `agent.start` must not make a
+    /// retry report a successful fork while the target has no pane or live agent.
+    #[tokio::test]
+    async fn a_stale_starting_run_is_recovered_before_a_fork_is_reported_started() {
+        let e = env().await;
+        let src = source_bot(&e, "claude", "alfa", "user").await;
+        let target = db::ulid();
+        let source_cfg_id = src.clone();
+        let target_cfg_id = target.clone();
+        e.app
+            .cfg
+            .update(move |cfg| {
+                let bots = &mut cfg.projects[0].bots;
+                let src_cfg = bots.iter().find(|b| b.id.as_deref() == Some(&source_cfg_id)).unwrap().clone();
+                bots.push(BotCfg {
+                    id: Some(target_cfg_id),
+                    name: "alfa-fork".into(),
+                    autostart: false,
+                    create_request_id: None,
+                    create_fingerprint: None,
+                    ..src_cfg
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        crate::projection::project_config(&e.app.cfg, &e.app.db).await.unwrap();
+        let mut op = planned_op(&src, &target);
+        op.state = "created".into();
+        fork_ops::insert(&e.app.db, &op).await.unwrap();
+
+        let stale_run = db::ulid();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, started_at) VALUES (?,?,'starting','unknown',?)")
+            .bind(&stale_run)
+            .bind(&target)
+            .bind(db::now())
+            .execute(&e.app.db)
+            .await
+            .unwrap();
+
+        let out = fork_with(&e, &src, None, Some("req-crash")).await.unwrap();
+        assert_ne!(out["run_id"], stale_run, "不應把沒有 pane 的 starting 列當成功結果");
+        assert!(out["start_error"].is_null(), "復原重啟成功：{out}");
+        let old_state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id = ?").bind(&stale_run).fetch_one(&e.app.db).await.unwrap();
+        assert_eq!(old_state, "exited", "舊的孤兒 starting run 要先收掉");
+        assert_eq!(fork_starts(&e), 1, "只對 provider 分岔一次");
     }
 
     /// 啟動成功、回應與結果紀錄之前死掉：目標已經有 run，重送回那個 run，不再對 provider 分岔一次。
