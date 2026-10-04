@@ -107,3 +107,16 @@
     padding-bottom: max(14px, env(safe-area-inset-bottom));
   }
 }
+
+/* 電腦版 hover：不蓋暗底、不攔滑鼠（滑鼠移開「?」就收），卡片靠右上、在晶片列下方。 */
+.chip-legend-backdrop.hover {
+  display: block;
+  background: none;
+  pointer-events: none;
+}
+
+.chip-legend-backdrop.hover .chip-legend {
+  position: fixed;
+  top: 96px;
+  right: 16px;
+}

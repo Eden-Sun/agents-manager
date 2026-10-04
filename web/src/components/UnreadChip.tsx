@@ -326,10 +326,19 @@ export function UnreadChip() {
         </button>
       ) : null}
       {/* 電腦版：晶片列尾端一顆「?」開顏色說明（2026-10-04 使用者：電腦版你自己想）。 */}
-      <button type="button" className="chip-legend-btn" title="顏色代表什麼" aria-label="主力晶片的顏色說明" onClick={() => setLegend(true)}>
+      {/* 電腦版：滑鼠停在「?」上就顯示（2026-10-04 使用者：「電腦就是 hover」）；鍵盤聚焦也開。 */}
+      <button
+        type="button"
+        className="chip-legend-btn"
+        aria-label="主力晶片的顏色說明"
+        onMouseEnter={() => setLegend(true)}
+        onMouseLeave={() => setLegend(false)}
+        onFocus={() => setLegend(true)}
+        onBlur={() => setLegend(false)}
+      >
         ?
       </button>
-      {legend ? <ChipLegend onClose={() => setLegend(false)} /> : null}
+      {legend ? <ChipLegend hover onClose={() => setLegend(false)} /> : null}
     </div>
   )
 }

@@ -8,7 +8,7 @@ import './chipLegend.css'
  * 範例直接套晶片與燈號的真 class，顏色永遠跟晶片列一致，不另外寫一份色票。
  * 手機：主力晶片長按不移動、放開就開（長按後移動仍是拖曳排序）；電腦：晶片列尾端的「?」。
  */
-export function ChipLegend({ onClose }: { onClose: () => void }) {
+export function ChipLegend({ onClose, hover = false }: { onClose: () => void; /** 電腦版：滑鼠停在「?」上顯示，不蓋底、不吃點擊，移開就收。 */ hover?: boolean }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -17,7 +17,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
   return createPortal(
-    <div className="chip-legend-backdrop" onClick={onClose}>
+    <div className={`chip-legend-backdrop${hover ? ' hover' : ''}`} onClick={onClose}>
       <div className="chip-legend" role="dialog" aria-label="主力晶片的顏色說明" onClick={(e) => e.stopPropagation()}>
         <div className="chip-legend-head">
           <strong>顏色代表什麼</strong>
