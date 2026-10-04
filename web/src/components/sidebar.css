@@ -832,3 +832,37 @@ p.project-quota-hidden {
 .head-brand-meta > .theme-toggle + .conn {
   margin-left: 0;
 }
+
+/* 子 agent 精簡列（2026-10-04 使用者：「改用緊湊的方式表示這些資訊」）：
+   kind 圖示拿掉方框只留圖；身分與模型拼成一顆分段標籤（`cc0│opus·M`），強度縮寫在 ModelTag 的 `short`。 */
+.bot-row.compact .bot-ident .kind-tag,
+.bot-row.compact .bot-ident .bot-kind {
+  border-color: transparent;
+  background: transparent;
+  padding: 0;
+  width: 14px;
+}
+
+.bot-row.compact .bot-sub {
+  gap: 0;
+}
+
+.bot-row.compact .bot-sub > .identity-badge,
+.bot-row.compact .bot-sub > .identity-diverged {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  padding-right: 4px;
+}
+
+.bot-row.compact .bot-sub > .model-tag {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left-width: 0;
+  padding-left: 4px;
+  min-width: 0;
+}
+
+.bot-row.compact .bot-sub > .bot-quota-chip,
+.bot-row.compact .bot-sub > .bot-quota-warn {
+  margin-left: 4px;
+}

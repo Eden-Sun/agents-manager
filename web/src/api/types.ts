@@ -750,6 +750,12 @@ export function effortLabel(level: string): string {
   return level ? level.charAt(0).toUpperCase() + level.slice(1) : level
 }
 
+/** 精簡列用的強度縮寫（2026-10-04 使用者：子 agent 列「改用緊湊的方式表示」）：Medium→M、High→H、Xhigh→XH；`max` 本來就短。 */
+export function effortShort(level: string): string {
+  const short: Record<string, string> = { low: 'L', medium: 'M', high: 'H', xhigh: 'XH', minimal: 'Min', none: '-' }
+  return short[level.toLowerCase()] ?? effortLabel(level)
+}
+
 export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   // 由輕到重（2026-09-09 使用者決定）；`sortModels` 以此排序 API 清單。停用別名一律寫替換後的正式 id（#539）。
   claude: ['haiku', 'sonnet', 'claude-opus-5-5', 'fable'],

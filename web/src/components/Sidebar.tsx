@@ -436,7 +436,7 @@ function BotRowImpl({
             </span>
           ) : (
             <>
-              <ModelTag botId={botId} />
+              <ModelTag botId={botId} short={compact} />
               {/* 黃燈：與頂端 QuotaStrip 一致；critical 走上面的警語。 */}
               {quotaLevel ? (
                 <span
