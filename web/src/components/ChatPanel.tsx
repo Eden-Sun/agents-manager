@@ -1116,7 +1116,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
   // 這顆 bot 的未讀：看著就清掉，只在人離開時亮。
   const headUnread = useStore((s) => (s.selectedBotId ? (s.botUnread[s.selectedBotId] ?? 0) : 0))
   const phone = useMediaQuery(PHONE_QUERY)
-  const { lamp, background: bgJobs, label: stateLabel } = useBotLamp(botId)
+  const { lamp, background: bgJobs, label: stateLabel, kids: kidsRunning } = useBotLamp(botId)
   const hostName = useStore((s) => projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null))
   const hostUp = useStore((s) => {
     const name = projectHostName(s, s.bots.find((b) => b.id === s.selectedBotId)?.project_id ?? null)
@@ -1254,7 +1254,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
         </button>
         <div className="main-title">
           <div className="main-title-row">
-            <StatusLamp lamp={lamp} background={bgJobs} />
+            <StatusLamp lamp={lamp} background={bgJobs} kids={kidsRunning} />
             {/* kind logo 放第二行 model 左邊（2026-09-11 使用者），不佔名字寬度。 */}
             {phone ? <BotSwitcher botId={botId} name={bot.name} /> : <BotNameField botId={botId} name={bot.name} />}
             {/* 手機的「claude 有更新」放 ★ 左邊（2026-09-19 使用者）；桌面仍在額度列最左。 */}

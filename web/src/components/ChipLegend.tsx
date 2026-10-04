@@ -74,8 +74,8 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
             <span>藍、會擴散：執行中</span>
           </li>
           <li>
-            <StatusLamp lamp="idle" background={1} title="背景執行中" />
-            <span>綠點外圈轉藍弧：回合結束，背景還在跑</span>
+            <StatusLamp lamp="idle" kids={1} title="子 agent 還在跑" />
+            <span>綠點外圈轉藍弧：它閒著，但底下的子 agent 還在跑（只有背景 shell 不轉，旁邊寫「背景 N」）</span>
           </li>
           <li>
             <StatusLamp lamp="blocked" title="等你回答" />

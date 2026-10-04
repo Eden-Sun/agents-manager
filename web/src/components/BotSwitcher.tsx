@@ -97,8 +97,8 @@ export function BotSwitcher({ botId, name }: { botId?: string; name: string }) {
 
 /** 每列自己訂閱自己的燈：selector 回傳字串才穩定，回傳整張 map 會讓 zustand 每次 render 都換新物件而無限重繪。 */
 function RowLamp({ botId }: { botId: string }) {
-  const { lamp, background } = useBotLamp(botId)
-  return <StatusLamp lamp={lamp} background={background} />
+  const { lamp, background, kids } = useBotLamp(botId)
+  return <StatusLamp lamp={lamp} background={background} kids={kids} />
 }
 
 export function BotSwitcherMenu({

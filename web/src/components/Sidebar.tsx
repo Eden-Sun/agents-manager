@@ -170,7 +170,7 @@ function BotRowImpl({
   renderProbe('BotRow')
   const bot = useStore((s) => s.bots.find((b) => b.id === botId))
   const run = useStore((s) => s.runs[botId] ?? null)
-  const { lamp, background: bgJobs, label: stateLabel, blockedReason } = useBotLamp(botId)
+  const { lamp, background: bgJobs, label: stateLabel, blockedReason, kids: kidsRunning } = useBotLamp(botId)
   const hostDown = useBotOfflineHost(botId)
   // 額度 critical 時整列反灰＋警語（API.md §12.4）。botQuotaWarning 每次回新物件，不 useShallow 會無限重繪。
   const quotaWarning = useStore(
@@ -328,7 +328,7 @@ function BotRowImpl({
       {/* 燈號在上、收合鈕在正下方（使用者 2026-09-13），子列縮排才對齊父列。 */}
       <span className="bot-gutter">
         <span className="bot-gutter-top">
-          <StatusLamp lamp={lamp} background={bgJobs} title={`${bot.name}：${stateLabel}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
+          <StatusLamp lamp={lamp} background={bgJobs} kids={kidsRunning} title={`${bot.name}：${stateLabel}${agentTitle && !showTitle ? ` · ${agentTitle}` : ''}`} />
           {/* 黃點：紅色留給「要你本人回答」。 */}
           {kidsWait ? (
             <span

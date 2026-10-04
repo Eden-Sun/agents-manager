@@ -65,7 +65,7 @@ test('說明用晶片與燈號的真 class 畫範例，Esc 關掉', async () => 
   for (const cls of ['needs-reply', 'unread', 'waits-kids', 'working', 'current']) {
     assert.ok(dialog.querySelector(`.unread-chip.${cls}`), `少了 ${cls} 的範例`)
   }
-  assert.ok(dialog.querySelector('.lamp-bg'), '背景執行中的燈')
+  assert.ok(dialog.querySelector('.lamp-bg'), '子 agent 還在跑的轉圈燈')
   await act(async () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
   })

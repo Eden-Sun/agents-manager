@@ -24,9 +24,13 @@ test('只有燈號是 idle 才改字：執行中、等待回應、斷線不被�
   assert.equal(botStateLabel('disconnected', run()), LAMP_LABEL.disconnected, '斷線時 daemon 讀不到畫面，背景數字不可信')
 })
 
-test('StatusLamp 帶 background：燈多一圈、tooltip 與 aria-label 寫背景執行中', () => {
+test('StatusLamp：只有背景工作不轉圈（字寫背景執行中）；閒著但子 agent 在跑才轉', () => {
+  // 2026-10-04 使用者：「沒有 child 也在轉，轉個毛」。
   const html = renderToStaticMarkup(<StatusLamp lamp="idle" background={3} />)
-  assert.match(html, /lamp-bg/)
+  assert.doesNotMatch(html, /lamp-bg/, '只有背景 shell：一般綠點')
+  assert.match(renderToStaticMarkup(<StatusLamp lamp="idle" kids={2} />), /lamp-bg[^>]*子 agent 還在跑（2）|子 agent 還在跑（2）[^>]*lamp-bg|lamp-bg/)
+  assert.ok(renderToStaticMarkup(<StatusLamp lamp="idle" kids={2} />).includes('子 agent 還在跑（2）'))
+  assert.doesNotMatch(renderToStaticMarkup(<StatusLamp lamp="working" kids={2} />), /lamp-bg/, '自己在跑就是 working 燈，不疊轉圈')
   assert.ok(html.includes(`aria-label="${backgroundLabel(3)}"`), html)
   assert.ok(html.includes(`title="${backgroundLabel(3)}"`), html)
   // 沒有背景工作、或不是 idle：跟以前一樣。
