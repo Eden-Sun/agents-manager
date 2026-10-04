@@ -1779,7 +1779,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
     寫不出來（目錄不存在、唯讀）才退回舊的逐行 export——環境不能丟。source 失敗時檔案不刪（`&&`），方便查。
 - `herdr pane split` / `pane new` / `tab create`：原樣轉發並補 `--env`，帶下 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`AM_BOT_ID`、`AM_BOT_TOKEN`、`AM_HOOK_TOKEN`、`AM_PORT`、`AM_RUN_ID`、
   `AM_AGENT_NAME`、`AM_KIND`、`AM_MODEL`、`AM_EFFORT`、`AM_PROJECT_ID`、`AM_WORKSPACE_ID`、`AM_OUTBOX`、`AM_DAEMON_EXE`、`AM_CONFIG_PATH`、`AM_REAL_HERDR`、`PATH`——herdr 的 pane 是 **server** 生的、不繼承呼叫端 shell，沒這段子 pane 會用預設帳號起來、拿不到 hook token。
-  shim 向 daemon 發送受 bot token 保護的請求時，將 `X-AM-Bot-Token` 經 curl 標頭 stdin 傳入，不放在 curl 的程序參數或錯誤訊息裡。
+  shim 將 `X-AM-Bot-Token` 經 curl 標頭 stdin 傳入，不放在 curl 的程序參數或錯誤訊息裡；含 token 的 `herdr --env` 轉發前會關閉 shell xtrace，避免 debug log 記下參數。
   `AM_DAEMON_EXE`／`AM_CONFIG_PATH`（issue #138）是 cargo shim 把 check／test／clippy 轉到外部編譯主機（#104）的前提：漏了它們，每個子 agent 的 cargo 都靜默留在本機。
   傳遞清單（`AM_RESERVED_ENV_KEYS`）與 daemon 注入端（`lifecycle/setup.rs` 的 `env.insert`）綁了一條測試：daemon 注入的每個 key 要嘛在清單裡、要嘛明列成「刻意不傳」。
   呼叫端自己給的同名 `--env` 不動。
@@ -3150,6 +3150,7 @@ import 完、起 daemon 之前，在目標跑 setup 產生角色目錄，再把 
 剩下的 `Agents Manager` 與 `AGM-DM-GRUP` 改在 agm-host **本機**跑，之後 Mac 的 daemon 不再開；已移交的 hub 專案（§11.9，`host = "m4p"`）不動，
 它們的 agent 仍在 Mac 的 herdr（`dev.agents-manager.herdr-*` launchd job）裡跑，所以那幾個 herdr job 不停。
 工具是 `scripts/ops/cutover-to-host.sh`（在 Mac 跑；輔助 `cutover-helper.py` 在兩邊跑，到目標是經 ssh 從 stdin 餵原始碼），把 §11.9／§11.9a 的步驟串起來；`host-state-transfer.py` 隨 cutover 在兩邊執行，補上專案 bundle 以外的主機狀態。
+`cutover-helper.py` 只接受 loopback API 位址，忽略環境 proxy、不跟隨轉址，並在印出回應前遮蔽 UI token。
 
 `host-state-transfer.py snapshot` 將來源完整 `config.toml`（路徑依 cutover map 改寫）、`ui-token`、`outbox` 檔案與 identity 設定目錄清單封成權限受限的 bundle。identity 清單只列設定路徑與目錄是否存在，**不讀、不複製憑證內容**。目標套用時以來源 config 的非 `projects` 段落為準，只保留目標已存在的 `projects`；沒有的 project rows 留給後續 `project-transfer` 匯入。outbox 同名但內容不同就停止，避免覆寫。安裝會先把缺少的 outbox 路徑與雜湊寫進備份日誌，再逐檔複製；中斷後可重跑，rollback 只移除內容仍相符的移入檔。安裝與 rollback 都要先取得目標 `daemon.lock`，而且不讀寫 SQLite。
 
