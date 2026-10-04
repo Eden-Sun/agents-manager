@@ -23,9 +23,11 @@ import sqlite3
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ACTIVE = ("starting", "running", "stopping")
+LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"}
 
 
 def die(msg, code=1):
@@ -42,22 +44,57 @@ def token(args):
         die(f"讀不到 UI token {path}：{e}")
 
 
+def check_loopback(base):
+    try:
+        parts = urllib.parse.urlsplit(base)
+        host = (parts.hostname or "").lower()
+        has_credentials = parts.username is not None or parts.password is not None
+    except ValueError:
+        die("daemon base URL 格式錯誤")
+    if parts.scheme not in ("http", "https") or host not in LOOPBACK_HOSTS or has_credentials:
+        die("daemon base URL 必須是沒有帳密的 loopback 位址")
+    if parts.query or parts.fragment:
+        die("daemon base URL 不可帶 query 或 fragment")
+    return base.rstrip("/")
+
+
+def redact(value, secret):
+    if not secret:
+        return value
+    if isinstance(value, str):
+        return value.replace(secret, "[redacted]")
+    if isinstance(value, list):
+        return [redact(item, secret) for item in value]
+    if isinstance(value, dict):
+        return {redact(key, secret): redact(item, secret) for key, item in value.items()}
+    return value
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+        return None
+
+
 def call(args, method, path, body=None):
     """回 (http code, 解析過的 JSON 或原文)。連不上回 (0, 錯誤字串)。"""
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(args.base.rstrip("/") + path, data=data, method=method,
-                                 headers={"X-AM-Token": token(args), "Content-Type": "application/json"})
+    base = check_loopback(args.base)
+    secret = token(args)
+    req = urllib.request.Request(base + path, data=data, method=method,
+                                 headers={"X-AM-Token": secret, "Content-Type": "application/json"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     try:
-        with urllib.request.urlopen(req, timeout=args.timeout_http) as r:
+        with opener.open(req, timeout=args.timeout_http) as r:
             code, raw = r.status, r.read()
     except urllib.error.HTTPError as e:
         code, raw = e.code, e.read()
     except (urllib.error.URLError, OSError) as e:
         return 0, str(e)
     try:
-        return code, json.loads(raw or b"null")
+        parsed = json.loads(raw or b"null")
     except ValueError:
-        return code, raw.decode(errors="replace")
+        parsed = raw.decode(errors="replace")
+    return code, redact(parsed, secret)
 
 
 def get_state(args):
