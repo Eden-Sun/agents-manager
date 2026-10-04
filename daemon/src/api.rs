@@ -1303,6 +1303,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     // 每顆 bot 的 run 與排隊中的回合各一次讀完：逐顆查是 N+1（34 顆 bot 約 30 ms，隨 bot 數線性長）。
     let mut runs = db::active_runs_by_bot(&app.db).await.map_err(any_err)?;
     let mut queued_turns = db::queued_turns_by_bot(&app.db).await.map_err(any_err)?;
+    // 快取倒數（`cache_clock`）：每顆 bot 最近一筆送出去的回合，一次讀完。
+    let last_turns = crate::cache_clock::last_turns_by_bot(&app.db).await.map_err(any_err)?;
     let mut out = Vec::new();
     for p in projects {
         let mut bl = Vec::new();
@@ -1311,6 +1313,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             let queued_turn = queued_turns.remove(&b.id);
             // host 就是這個專案的 host（`db::bot_host` 的 JOIN 同一個欄位），不必再讀 bot／bot_host 兩次。
             let bot_connected = app.bot_connected_on(b, &p.host).await;
+            let mut run_v = crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str()));
+            crate::cache_clock::annotate(&mut run_v, &b.kind, last_turns.get(&b.id));
             bl.push(json!({
                 "id": b.id,
                 "project_id": b.project_id,
@@ -1343,7 +1347,8 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
                 "share_enabled": sharing.contains(&b.id),
                 "agent_name": run.as_ref().and_then(|r| r.agent_name.clone()).unwrap_or_else(|| crate::config::agent_name(&p.label, &b.id)),
                 // #714：`run.background_jobs`＝回合結束後畫面上還標著的背景工作數（記憶體裡的，不在 DB）。
-                "run": crate::background_jobs::run_json(app, &run, run.as_ref().map(|r| r.id.as_str())),
+                // `run.last_api_at`／`run.cache_ttl_secs`：快取倒數（`cache_clock`）。
+                "run": run_v,
                 // §6.11：停著是因為 AGM 收起來省 RAM，不是壞掉也不是使用者關的；下次要用會自動
                 // 用 `--resume` 叫醒。`null` = 不是這種停。
                 // 預覽模式（§6.12）：`{status, port}`；沒開（或 off）是 `null`。

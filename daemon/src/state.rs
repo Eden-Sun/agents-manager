@@ -689,11 +689,15 @@ impl App {
             tracing::warn!(bot_id, "bot_status not emitted: bot host unreadable");
             return;
         };
+        let mut run_v = crate::background_jobs::run_json(self, &run, run.as_ref().map(|r| r.id.as_str()));
+        // 讀不到最近回合就只靠記憶體帳推算（`cache_clock`）：這只是倒數的提示，不值得為它擋掉整個 frame。
+        let last_turn = crate::cache_clock::last_turn_for_bot(&self.db, bot_id).await.ok().flatten();
+        crate::cache_clock::annotate(&mut run_v, &bot.kind, last_turn.as_ref());
         self.emit(
             "bot_status",
             json!({
                 "bot_id": bot.id,
-                "run": crate::background_jobs::run_json(self, &run, run.as_ref().map(|r| r.id.as_str())),
+                "run": run_v,
                 "host": host,
                 "herdr_session": bot.herdr_session,
                 "connected": self.bot_connected(bot_id).await,

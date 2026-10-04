@@ -359,6 +359,10 @@ export interface Run {
   ended_at: string | null
   /** `agent_status` 最後一次真的改變的時間（daemon 觀察到的，不是這頁看到的）；issue #93。 */
   agent_status_since: string | null
+  /** 最後一次 API 活動（回合收尾、statusLine 用量變了、停在提示上；回合進行中＝現在），推算 prompt cache 還熱不熱；`null`＝沒紀錄。SPEC §6.5j。 */
+  last_api_at?: string | null
+  /** 這種 kind 的 prompt cache 存活秒數（claude／codex 3600）；`null`＝不知道（grok），不畫倒數。 */
+  cache_ttl_secs?: number | null
 }
 
 /** `POST /api/bots/restart-idle`，SPEC §6.9。 */

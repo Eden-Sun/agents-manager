@@ -1,0 +1,55 @@
+/**
+ * 主力晶片的 prompt cache 倒數（SPEC §6.5j）：晶片原本的底色就是倒數，不另加元素、不改尺寸。
+ *
+ * daemon 在 run 上帶 `last_api_at`（最後一次 API 活動）與 `cache_ttl_secs`（claude／codex 3600，grok 不帶）；
+ * 這裡只做算術：剩餘＝`last_api_at + ttl - now`，回合進行中＝滿。網頁每 15 秒重算一次（`CACHE_TICK_MS`）。
+ * 門檻：剩 > 15 分鐘綠、5–15 分鐘黃、< 5 分鐘紅、到期＝「已涼」（回到一般底色，只在 tooltip 講）。
+ */
+
+export const CACHE_TICK_MS = 15_000
+
+export type CacheLevel = 'fresh' | 'warn' | 'low' | 'cold'
+
+export interface CacheState {
+  level: CacheLevel
+  /** 剩餘秒數（≥ 0）。 */
+  remainingSecs: number
+  /** 剩餘佔 TTL 的比例，0–1；底色由左往右填這麼多。 */
+  frac: number
+  /** tooltip 用的一句話。 */
+  title: string
+}
+
+const WARN_SECS = 15 * 60
+const LOW_SECS = 5 * 60
+
+export function cacheLevel(remainingSecs: number): CacheLevel {
+  if (remainingSecs <= 0) return 'cold'
+  if (remainingSecs < LOW_SECS) return 'low'
+  if (remainingSecs <= WARN_SECS) return 'warn'
+  return 'fresh'
+}
+
+function hhmm(t: Date): string {
+  return `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+}
+
+/**
+ * 算一顆 bot 現在的快取狀態；TTL 不明（grok、舊 daemon）或沒有任何活動紀錄回 `null`（不畫）。
+ * `working`＝回合進行中，一律滿條。
+ */
+export function cacheState(lastApiAt: string | null | undefined, ttlSecs: number | null | undefined, nowMs: number, working = false): CacheState | null {
+  if (!ttlSecs || ttlSecs <= 0) return null
+  const at = lastApiAt ? Date.parse(lastApiAt) : NaN
+  if (working) {
+    const when = Number.isFinite(at) ? `（上次活動 ${hhmm(new Date(at))}）` : ''
+    return { level: 'fresh', remainingSecs: ttlSecs, frac: 1, title: `回合進行中，快取是熱的${when}` }
+  }
+  if (!Number.isFinite(at)) return null
+  // 時鐘差一點（daemon 比這台快）時不讓剩餘超過 TTL。
+  const remainingSecs = Math.max(0, Math.min(ttlSecs, Math.round((at + ttlSecs * 1000 - nowMs) / 1000)))
+  const level = cacheLevel(remainingSecs)
+  const last = `上次活動 ${hhmm(new Date(at))}`
+  const title = level === 'cold' ? `快取已涼（${last}）` : `快取約 ${Math.max(1, Math.ceil(remainingSecs / 60))} 分後到期（${last}）`
+  return { level, remainingSecs, frac: remainingSecs / ttlSecs, title }
+}

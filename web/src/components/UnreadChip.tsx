@@ -25,7 +25,10 @@ import { useBotLamp } from '../hooks/useBotLamp'
 import { StatusLamp } from './StatusLamp'
 import type { Lamp } from '../api/types'
 import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
+import { cacheState, type CacheState } from '../lib/cacheClock'
+import { useCacheTick } from '../hooks/useCacheTick'
 import './unreadChip.css'
+import './cacheClock.css'
 
 /** 與 `unreadChip.css` 斷點同值。 */
 const NARROW_QUERY = '(max-width: 720px)'
@@ -57,6 +60,8 @@ interface ChipItem {
   kidsRunning: number
   working: boolean
   title: string
+  /** 主力晶片的快取倒數（`lib/cacheClock.ts`）；grok、沒紀錄、非主力是 `null`。 */
+  cache: CacheState | null
 }
 
 /** 子 agent 在跑：分叉圖示（形狀跟燈／點不同）＋多顆時的數字；文字說明在 `title` 與 sr-only。 */
@@ -90,18 +95,21 @@ function Chip({ it, dnd, lamp }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean
   const shifted = dragging && drag.shifted.includes(it.id)
   // 落點標示：讓位的那一格（`drop-before`，標示畫在這顆左邊的空位）；落在行尾則畫在那一行最後一顆右邊（`drop-after`）。
   const mark = dragging && drag.before !== undefined ? (drag.after === it.id ? ' drop-after' : drag.after == null && drag.before === it.id ? ' drop-before' : '') : ''
+  // 快取倒數畫在底色上（`cacheClock.css`）：已涼不填，回到一般底色。
+  const cache = it.cache && it.cache.level !== 'cold' ? it.cache : null
+  const fill = cache ? ({ '--cache-fill': `${(cache.frac * 100).toFixed(1)}%` } as CSSProperties) : undefined
   return (
     <button
       type="button"
-      className={`${chipClass(it)}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
-      title={it.title}
+      className={`${chipClass(it)}${cache ? ` cache-${cache.level}` : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
+      title={it.cache ? `${it.title}\n${it.cache.title}` : it.title}
       data-bot-id={it.pinned ? it.id : undefined}
       style={
         drag?.dragId === it.id
-          ? { transform: `translate(${drag.offset.x}px, ${drag.offset.y}px) scale(1.06)` }
+          ? { ...fill, transform: `translate(${drag.offset.x}px, ${drag.offset.y}px) scale(1.06)` }
           : dragging
-            ? ({ '--drop-w': `${drag.gap}px`, transform: shifted ? `translateX(${drag.gap}px)` : undefined } as CSSProperties)
-            : undefined
+            ? ({ ...fill, '--drop-w': `${drag.gap}px`, transform: shifted ? `translateX(${drag.gap}px)` : undefined } as CSSProperties)
+            : fill
       }
       aria-current={it.current ? 'true' : undefined}
       aria-describedby={drag ? PIN_HINT_ID : undefined}
@@ -180,6 +188,8 @@ export function UnreadChip() {
   const keptId = keepSelectedRow(selectedBotId, botUnread)
 
   const narrow = useMediaQuery(NARROW_QUERY)
+  // 快取倒數每 15 秒重算；沒有主力就不跑計時器。
+  const now = useCacheTick(bots.some((b) => b.primary))
 
   const items = useMemo(() => {
     const tracked = (b: Bot) => chipTracked(b, supervisorProjectId)
@@ -213,10 +223,11 @@ export function UnreadChip() {
         kidsRunning: nKids,
         working: status === 'working',
         title: botTitle(b.name, pinned, n, needsReply, kids, current) + (nKids > 0 ? `（${kidsText(nKids)}）` : ''),
+        cache: pinned ? cacheState(runs[b.id]?.last_api_at, runs[b.id]?.cache_ttl_secs, now, status === 'working') : null,
       })
     }
     return out
-  }, [supervisorProjectId, botUnread, bots, hiddenBotIds, keptId, runs, selectBot, selectedBotId])
+  }, [supervisorProjectId, botUnread, bots, hiddenBotIds, keptId, runs, selectBot, selectedBotId, now])
 
   // 固定順序（#344）：主力組照 `primary_position`，其餘組照側欄順序；未讀／忙碌／卡住只用顏色與角標表示、不再讓晶片跳位。
   const pinnedItems = useMemo(() => sortPinned(items.filter((it) => it.pinned)), [items])

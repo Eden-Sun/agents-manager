@@ -2328,6 +2328,19 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   ⑤ 指示檔路徑含空白、全形字、引號時仍是單一 argv 元素；grok 那句話把路徑用反引號框起來。
 - **讀不到不擋啟動**：檔案不存在或是空檔時 bot 照開，warn 並在對話裡寫一則 system 訊息講少了哪個檔。
 
+### 6.5j 主力晶片的 prompt cache 倒數（使用者 2026-10-04）
+
+閒置太久回來，claude／codex 的 prompt cache 已經冷了，下一回合要整份重寫（量過：claude 1 小時 TTL、每次 API 呼叫重設，閒置 < 60 分 0–1% 冷、
+> 1 小時 81–91% 冷、回來時重寫 30–40 萬 token；codex（luna）< 1 小時命中 91–98%、> 2 小時多半冷）。主力（★）晶片的底色就是倒數，提示快取什麼時候到期。
+
+- **daemon**（`cache_clock.rs`）：run JSON 帶 `last_api_at` 與 `cache_ttl_secs`（API.md「run 的附加欄位」）。不加欄位，用現有資料推算、取最晚：
+  最近一筆非 queued 回合的 `completed_at`；claude statusLine 的 API 指紋（`cost.total_api_duration_ms`、`context_window` 的用量）真的變了的那一刻
+  （閒置重繪不算，記憶體帳，daemon 重啟後退回回合時間）；`blocked` 的 `agent_status_since`。回合進行中＝熱，給投影當下的時間。
+  TTL：claude、codex 3600 秒；grok 不知道，不帶。回合收尾時（`emit_turn` 收成終態）多推一次 `bot_status`，倒數從真正的收尾時間開始。
+- **網頁**（`lib/cacheClock.ts`、`cacheClock.css`）：只畫在主力晶片上（桌機主力組、手機主力格），每 15 秒重算。剩餘／TTL 決定底色由左往右填多寬，
+  色調：剩 > 15 分綠、5–15 分黃、< 5 分紅；到期＝已涼，回到原本的底色。tooltip 加一行「快取約 N 分後到期（上次活動 HH:MM）」／「快取已涼（上次活動 HH:MM）」；
+  回合進行中滿條。grok、沒有紀錄的不畫。狀態不存 localStorage。
+
 ### 6.5.1 採用使用者的 Herdr `default` session
 
 daemon 另外唯讀觀察本機 Herdr `default` session（`~/.config/herdr/herdr.sock`），不替它啟動 server。啟動、事件重連與定期輪詢時：
