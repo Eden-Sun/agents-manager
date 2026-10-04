@@ -3652,7 +3652,7 @@ AGM 控制面讀取（總管摘要、health、handoff、assignments、inbox、pe
      （`gh api repos/Eden-Sun/agents-manager/commits/<sha>/status`）；`ubuntu-ci` 只跑最新 HEAD、會跳過中間的 sha，所以要往回找。走到線上那顆（`daemon-update.built`）或已經沒有 binary 差異就停；
      `daemon-update.rejected` 裡的 sha（換上去被回滾過）不再挑。`gh` 問不到＝這輪不動並記失敗。
   3. 在**專用、乾淨的 checkout**（`AGM_DEPLOY_CHECKOUT`，預設 `~/.cache/agents-manager/deploy-checkout`；只有這支腳本動它，不碰主樹與別人的 worktree）
-     `checkout --detach <sha>`、`bun install --frozen-lockfile && bun run build`，再透過 PATH 上的 cargo build-slot shim 執行 `cargo clean -p agents-managerd --release` 與 `cargo build --locked --release -p agents-managerd`；兩個 Cargo 指令都設 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2` 並以 `nice -n 19` 執行。
+     `checkout --detach <sha>`、`bun install --frozen-lockfile && bun run build`，再透過 PATH 上的 cargo build-slot shim 執行 `cargo clean -p agents-managerd --release` 與 `cargo build --locked --release -p agents-managerd`；排程會找 `$HOME/.config/agents-manager/bots/*/bin/cargo` 裡帶 shim marker 的可執行檔，只在 Cargo 命令執行時把它放到 PATH 首位，找不到就告警並停止，不退回直接 cargo。兩個 Cargo 指令都設 `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2` 並以 `nice -n 19` 執行。
      clean 讓 `rust_embed` 把剛產生的 `web/dist` 重嵌；`--locked` 讓 binary 的依賴版本固定在該 commit 的 `Cargo.lock`。同一顆 sha 已建好（`target/release/.built-for`）就不重建，等安全窗口那幾輪不會每 5 分鐘編一次。
   4. 換版交給 `daemon-swap.sh`（從這個 checkout 跑，不裝到 AGM 目錄）。**沒有 bot 在 `working`、送達臨界區沒有 prompt、沒有別人握租約**才換，換前一刻再查一次；備份舊 binary 與 DB、重啟後驗 `/api/session`／`agm health`／`agm supervisor`／bot 名單，
      失敗回滾（升過 schema 預設往前修，§18.13）、成功寫 `daemon-update.built`。窗口由 `POST /api/services/daemon-swap/restart-window` 開（API.md）：daemon-swap 服務身分自己開一筆立即核准的 `restart` 單、再走**同一個** `maintenance::acquire`，

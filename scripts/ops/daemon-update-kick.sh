@@ -48,6 +48,17 @@ CARGO="cargo"                                           # 一律走 PATH 上的 
 SWAP="${AGM_SWAP_SCRIPT:-$DEPLOY/scripts/ops/daemon-swap.sh}"   # 從要換上的那顆 checkout 跑（不裝到 AGM 目錄）
 NICE="${NICE_BIN:-nice}"
 
+cargo_shim_dir() {
+  for _candidate in "$HOME"/.config/agents-manager/bots/*/bin/cargo; do
+    [ -f "$_candidate" ] && [ -x "$_candidate" ] || continue
+    if head -n 12 "$_candidate" 2>/dev/null | grep -q 'AM_SHIM_MARKER'; then
+      printf '%s\n' "${_candidate%/cargo}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
 # 卡住了、自己解不開時喊人：一則 durable inbox 事件（同 source+reason 每小時一則，daemon 去重）。
@@ -313,6 +324,11 @@ BUILD_MARK="$DEPLOY/target/release/.built-for"
 if [ "$(cat "$BUILD_MARK" 2>/dev/null)" = "$TARGET" ] && [ -x "$DEPLOY/target/release/agents-managerd" ]; then
   log "${SHORT} 已經建好，直接換版"
 else
+  CARGO_SHIM_DIR=$(cargo_shim_dir) || {
+    alert cargo_shim_missing "排程環境找不到 build-slot cargo shim（~/.config/agents-manager/bots/*/bin/cargo），不退回直接 cargo；請確認 daemon 已寫入 shim"
+    note_fail "cargo build-slot shim 不存在，${SHORT} 未建置"
+    exit 0
+  }
   rm -f "$BUILD_MARK"
   "$GIT" -C "$DEPLOY" checkout -q --force --detach "$TARGET" >> "$LOG" 2>&1 || { note_fail "checkout ${SHORT} 失敗"; exit 0; }
   "$GIT" -C "$DEPLOY" clean -fdq >> "$LOG" 2>&1 || true   # 沒有 -x：target／node_modules（被 ignore）留著，增量建置才快
@@ -321,9 +337,9 @@ else
   # rust_embed 在編譯時讀 web/dist；只跑 cargo build 會重用舊的 daemon crate，讓新版 UI 沒嵌進 binary。
   # 只清 daemon package，保留其他依賴快取；--locked 防止 Cargo.lock 漂移成與 commit 不同的 binary。
   log "建置 ${SHORT}：daemon（cargo clean 後 cargo build --locked --release）"
-  ( cd "$DEPLOY" && CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 "$NICE" -n 19 "$CARGO" clean -p agents-managerd --release ) >> "$LOG" 2>&1 \
+  ( cd "$DEPLOY" && PATH="$CARGO_SHIM_DIR:$PATH" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 "$NICE" -n 19 "$CARGO" clean -p agents-managerd --release ) >> "$LOG" 2>&1 \
     || { note_fail "cargo clean 失敗（${SHORT}）"; exit 0; }
-  ( cd "$DEPLOY" && CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 "$NICE" -n 19 "$CARGO" build --locked --release -p agents-managerd ) >> "$LOG" 2>&1 \
+  ( cd "$DEPLOY" && PATH="$CARGO_SHIM_DIR:$PATH" CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 "$NICE" -n 19 "$CARGO" build --locked --release -p agents-managerd ) >> "$LOG" 2>&1 \
     || { note_fail "cargo build --locked 失敗（${SHORT}）"; exit 0; }
   [ -x "$DEPLOY/target/release/agents-managerd" ] || { note_fail "cargo build 沒產出 binary（${SHORT}）"; exit 0; }
   echo "$TARGET" > "$BUILD_MARK"
