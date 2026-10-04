@@ -391,6 +391,33 @@ pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, S
         .collect()
 }
 
+/// agy 1.2.16 的模型 slug：2026-10-04 使用者登入（Google OAuth）後 `agy models` 的實際清單。effort 變體已經在 slug 裡，所以 `efforts` 是空的。
+/// 寫死的原因：`agy models` 要登入才答、清單隨帳號不同；第二階段改成讀 `agy models --output-format json`。最前面那個是預設。
+pub fn agy_static_models() -> Vec<Value> {
+    [
+        ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
+        ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+        ("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
+        ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)"),
+        ("gemini-3.7-flash-medium", "Gemini 3.7 Flash (Medium)"),
+        ("gemini-3.7-flash-low", "Gemini 3.7 Flash (Low)"),
+        ("gemini-3.6-flash-high", "Gemini 3.6 Flash (High)"),
+        ("gemini-3.6-flash-medium", "Gemini 3.6 Flash (Medium)"),
+        ("gemini-3.6-flash-low", "Gemini 3.6 Flash (Low)"),
+        ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
+        ("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)"),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+        ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
+        ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, (id, name))| {
+        json!({"id": id, "display_name": name, "description": "", "is_default": i == 0, "default_effort": null, "efforts": [], "service_tiers": []})
+    })
+    .collect()
+}
+
 /// Uncached. `identity` (claude only) picks whose `settings.json` the "預設" hint comes from.
 pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<Value> {
     let (source, models) = match kind {
@@ -429,6 +456,7 @@ pub async fn fetch(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str
             let (global, per_model) = read_claude_effort_settings(app, host, config_dir.as_deref()).await?;
             ("static", claude_static_models(global.as_deref(), &per_model))
         }
+        "agy" => ("static", agy_static_models()),
         other => bail!("unknown kind `{other}`"),
     };
     Ok(json!({
@@ -795,6 +823,20 @@ mod tests {
         let medium = "  ╰──────────────────────────────── Grok 4.6 (medium) · always-approve ─╯\n";
         assert_eq!(grok_effort_from_screen(medium).as_deref(), Some("medium"));
         assert_eq!(grok_effort_from_screen("claude composer, no grok footer"), None);
+    }
+
+    /// agy 的清單是寫死的 slug，effort 已在 slug 裡：每個模型的 `efforts` 都是空的（`--effort` 留給第二階段），有且只有一個預設。
+    #[test]
+    fn agy_models_are_static_slugs_without_separate_efforts() {
+        let models = agy_static_models();
+        assert!(models.len() >= 3);
+        assert_eq!(models.iter().filter(|m| m["is_default"] == true).count(), 1);
+        for m in &models {
+            let id = m["id"].as_str().unwrap();
+            assert!(id.starts_with("gemini-") || id.starts_with("claude-") || id.starts_with("gpt-oss-"), "{id}");
+            assert_eq!(m["efforts"], json!([]));
+        }
+        assert_eq!(model_effort_from_argv("agy", &["agy".into(), "--model".into(), "gemini-3.1-pro-high".into()]).0.as_deref(), Some("gemini-3.1-pro-high"));
     }
 
     /// `/effort` 之後對話裡還留著上一則 `Switched to … (low effort)`。回讀必須用框底，不能用上面那則。

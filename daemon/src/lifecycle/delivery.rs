@@ -88,6 +88,9 @@ pub(crate) enum LogFormat {
     /// codex `sessions/YYYY/MM/DD/rollout-…-<session>.jsonl`:
     /// `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text",…}]}}`.
     Codex,
+    /// agy `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript_full.jsonl`:
+    /// `{"type":"USER_INPUT","content":"<USER_REQUEST>\n…\n</USER_REQUEST>…"}`（原文被標籤包著，[`crate::agy_support::user_text`] 剝掉）。
+    Agy,
 }
 
 /// The evidence a delivery will be judged by.
@@ -214,6 +217,8 @@ fn composer_glyph(kind: &str) -> Option<char> {
     match kind {
         "claude" | "grok" => Some('❯'),
         "codex" => Some('›'),
+        // agy：頂部橫幅、一條分隔線、`>` 輸入框、分隔線（設計 A.8，1.2.16 實測）——跟 claude 現行的輸入框同一個形狀。
+        "agy" => Some('>'),
         _ => None,
     }
 }
@@ -511,7 +516,7 @@ pub(crate) fn box_state_within(kind: &str, screen: &str, tail: usize) -> BoxStat
         .collect();
     let edge = match (kind, c.boxed) {
         (_, true) => rest.iter().take(tail).position(|r| is_box_bottom(r)),
-        ("claude", false) => rest.iter().take(tail).position(|r| is_rule_row(r)),
+        ("claude" | "agy", false) => rest.iter().take(tail).position(|r| is_rule_row(r)),
         // codex draws no frame: the composer ends at the first row that is not an indented
         // continuation (a blank row, the status line, or the end of the screen).
         ("codex", false) => Some(rest.iter().position(|r| r.trim().is_empty() || !r.starts_with("  ")).unwrap_or(rest.len())),
@@ -537,7 +542,7 @@ fn marker_row_content(kind: &str, c: &ComposerRow, particles: bool) -> Vec<(char
         content.remove(0);
     }
     // codex 的純文字讀法不放寬（分不出點字是不是打的，sol 第九輪 #2）：只有 boxed／有點字／claude 才剝 padding。
-    if c.boxed || particles || kind == "claude" {
+    if c.boxed || particles || kind == "claude" || kind == "agy" {
         while matches!(content.last(), Some((ch, _)) if ch.is_whitespace()) {
             content.pop();
         }
@@ -663,6 +668,7 @@ pub(crate) fn log_user_text(format: LogFormat, line: &str) -> Option<String> {
     match format {
         LogFormat::Claude => transcript_user_text(line),
         LogFormat::Codex => codex_user_text(line),
+        LogFormat::Agy => crate::agy_support::user_text(line),
     }
 }
 
@@ -724,6 +730,7 @@ pub(crate) fn log_hits_since(format: LogFormat, path: &std::path::Path, offset: 
     let ours = |t: &String| match format {
         LogFormat::Claude => super::pasted_content::is_sent(t, text),
         LogFormat::Codex => t == text,
+        LogFormat::Agy => t.trim() == text.trim(),
     };
     Ok(body.lines().filter_map(|l| log_user_text(format, l)).filter(ours).count())
 }
@@ -824,6 +831,14 @@ pub(crate) fn choose_proof(i: &ProofInputs, text: &str) -> Result<Proof, Deliver
             if let (Some(session), Some(path)) = (session, path) {
                 if std::path::Path::new(path).is_file() {
                     return Ok(Proof::Transcript { format: LogFormat::Claude, path: path.into(), session_id: session.to_string() });
+                }
+            }
+        }
+        // agy 的對話是第一則 prompt 才建立：第一則沒有 transcript 可證（`Unverified`，照打照送），之後每一則都有。
+        ("agy", true) => {
+            if let (Some(session), Some(path)) = (session, path) {
+                if std::path::Path::new(path).is_file() {
+                    return Ok(Proof::Transcript { format: LogFormat::Agy, path: path.into(), session_id: session.to_string() });
                 }
             }
         }
@@ -987,7 +1002,7 @@ pub(crate) async fn plan_delivery(
         }
     };
     let transcript_path = if let Some(path) = run.transcript_path.as_deref() {
-        if bot.kind == "claude"
+        if matches!(bot.kind.as_str(), "claude" | "agy")
             && host_is_local
             && !crate::transcript_read::local_transcript_allowed(app, bot, path).await
         {
@@ -1063,7 +1078,7 @@ pub(crate) async fn same_session(app: &Arc<App>, run_id: &str, proof: &Proof) ->
             let same_id = r.native_session_id.as_deref() == Some(session_id.as_str());
             // codex has no transcript_path column value; its log is named for the session id.
             let same_path = match format {
-                LogFormat::Claude => r.transcript_path.as_deref().map(std::path::Path::new) == Some(path.as_path()),
+                LogFormat::Claude | LogFormat::Agy => r.transcript_path.as_deref().map(std::path::Path::new) == Some(path.as_path()),
                 LogFormat::Codex => true,
             };
             same_id && same_path

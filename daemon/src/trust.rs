@@ -53,6 +53,8 @@ pub fn store_path(kind: &str, env: &BTreeMap<String, String>, home: &str) -> Opt
             let dir = var("GROK_HOME").unwrap_or_else(|| format!("{home}/.grok"));
             Some(PathBuf::from(dir).join("trusted_folders.toml"))
         }
+        // agy 的設定目錄只認 `$HOME`（沒有任何環境變數能改，設計 A.3），所以不看 identity env。
+        "agy" => Some(crate::agy_support::settings_path(Path::new(home))),
         _ => None,
     }
 }
@@ -187,6 +189,7 @@ fn merged(kind: &str, existing: &str, paths: &[String]) -> Result<Option<String>
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
             grok_merge(existing, paths, now)
         }
+        "agy" => crate::agy_support::trusted_workspaces_merge(existing, paths),
         _ => Ok(None),
     }
 }
@@ -208,18 +211,27 @@ fn read_store(store: &Path) -> Result<String> {
 
 /// No-op (file not rewritten) when already trusted.
 pub fn mark_trusted(kind: &str, store: &Path, paths: &[String]) -> Result<bool> {
+    let changed = update_file(store, |existing| merged(kind, existing, paths))?;
+    if changed {
+        tracing::info!(kind, store = %store.display(), ?paths, "pre-trusted agent workspace directories");
+    }
+    Ok(changed)
+}
+
+/// 讀 → `merge`（回 `None`＝不用改）→ 原子寫回，同一個鎖、同一套「讀到寫之間檔案被改就重讀」。agy 的 `settings.json`
+/// 同時放信任清單與 `statusLine`，兩邊都從這裡寫，才不會互相蓋掉。回「有沒有寫」。
+pub(crate) fn update_file(store: &Path, merge: impl Fn(&str) -> Result<Option<String>>) -> Result<bool> {
     let _one_at_a_time = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     for _ in 0..LOCAL_RACE_ATTEMPTS {
         let existing = read_store(store)?;
-        let Some(next) = merged(kind, &existing, paths)? else { return Ok(false) };
+        let Some(next) = merge(&existing)? else { return Ok(false) };
         if read_store(store)? != existing {
             continue;
         }
         write_atomic(store, &next)?;
-        tracing::info!(kind, store = %store.display(), ?paths, "pre-trusted agent workspace directories");
         return Ok(true);
     }
-    bail!("{} kept changing while pre-trusting it", store.display())
+    bail!("{} kept changing while updating it", store.display())
 }
 
 /// Identity env then bot env (`lifecycle::pane_env` minus daemon vars, which name no config dir).
@@ -433,6 +445,32 @@ mod tests {
             PathBuf::from("/home/u/alt/config.toml")
         );
         assert!(store_path("shell", &env(&[]), "/home/u").is_none());
+    }
+
+    /// agy 的設定目錄只認 `$HOME`：身分／bot env 的任何變數都改不了它。
+    #[test]
+    fn agy_store_is_the_settings_json_under_home_and_ignores_env() {
+        let want = PathBuf::from("/home/u/.gemini/antigravity-cli/settings.json");
+        assert_eq!(store_path("agy", &env(&[]), "/home/u").unwrap(), want);
+        assert_eq!(store_path("agy", &env(&[("GROK_HOME", "/x"), ("XDG_CONFIG_HOME", "/y")]), "/home/u").unwrap(), want);
+    }
+
+    #[test]
+    fn marking_a_workspace_trusted_for_agy_merges_into_the_users_settings_and_is_idempotent() {
+        let dir = crate::testing::scratch_dir("am-trust-agy");
+        let store = dir.join(".gemini/antigravity-cli/settings.json");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(&store, r#"{"colorScheme":"light","statusLine":{"type":"command","command":"/x"}}"#).unwrap();
+        assert!(mark_trusted("agy", &store, &["/w/a".into()]).unwrap());
+        assert!(!mark_trusted("agy", &store, &["/w/a".into()]).unwrap(), "已信任：不重寫");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        assert_eq!(v["trustedWorkspaces"], json!(["/w/a"]));
+        assert_eq!(v["colorScheme"], "light");
+        assert_eq!(v["statusLine"]["command"], "/x", "statusLine 是另一條路的事，信任寫入不碰");
+        // 壞掉的檔不覆寫。
+        std::fs::write(&store, "{ nope").unwrap();
+        assert!(mark_trusted("agy", &store, &["/w/b".into()]).is_err());
+        assert_eq!(std::fs::read_to_string(&store).unwrap(), "{ nope");
     }
 
     #[test]

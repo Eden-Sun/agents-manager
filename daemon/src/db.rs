@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE UNIQUE INDEX IF NOT EXISTS projects_host_path_live ON projects(host, path) WHERE deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS bots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok')),
+  name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('claude','codex','grok','agy')),
   model TEXT,
   effort TEXT,
   fast INTEGER NOT NULL DEFAULT 0,
@@ -304,6 +304,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (40, "715f4def20647528"),
     // 信任分享：`shared_bots.profile` 收 'trusted'（重建表改 CHECK）、`share_reply_visible`（擁有者送的哪幾則回覆仍給分享頁看）。
     (41, "7891fefaecfdb8e0"),
+    // agy（Antigravity CLI）：`bots.kind` 的 CHECK 收 'agy'（既有庫就地放寬，不重建 bots——十七張表指著它）。
+    (42, "e3b7ca73b8056a33"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -582,6 +584,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     // trigger 由它生成。二十來處 `UPDATE turns SET status` 各自帶的 CAS guard 照舊，這是它們的下限，
     // 而且未來新寫的路徑繞不過去——終局的回合不可能被改回進行中。
     crate::lifecycle::turn_controller::install_guard(&mut tx).await.context("create turns_status_transition trigger")?;
+    widen_bots_kind_check(&mut tx).await?;
     tx.commit().await?;
     crate::supervisor::store::migrate(pool).await?;
     crate::read_marks::migrate(pool).await?;
@@ -596,6 +599,37 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     crate::judge::migrate(pool).await?;
     crate::cli_update::migrate(pool).await?;
     crate::share::store::migrate(pool).await?;
+    Ok(())
+}
+
+/// `bots.kind` 的 CHECK 加上 'agy'。舊庫的 `bots` 表是 `CREATE TABLE IF NOT EXISTS` 留下來的舊定義，收不下新的 kind。
+///
+/// 不重建 `bots`：十七張表 `REFERENCES bots(id)`，`foreign_keys` 開著時 `ALTER TABLE … RENAME` 會把子表的外鍵一起改名、`DROP TABLE`
+/// 又會觸發 `ON DELETE` 檢查。SQLite 文件對「只放寬 CHECK」給的做法就是在交易裡改 `sqlite_master.sql` 並遞增 `schema_version`
+/// （其他連線看到版本變了就會重讀 schema）；既有的列都滿足放寬後的約束，不必搬資料。改完的文字與全新 DB 的 `SCHEMA` 一字不差，
+/// `schema_guard` 對得起來。
+async fn widen_bots_kind_check(conn: &mut sqlx::SqliteConnection) -> Result<()> {
+    const OLD: &str = "CHECK (kind IN ('claude','codex','grok'))";
+    const NEW: &str = "CHECK (kind IN ('claude','codex','grok','agy'))";
+    let sql: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'bots'").fetch_optional(&mut *conn).await?;
+    let Some(sql) = sql else { return Ok(()) };
+    if sql.contains(NEW) {
+        return Ok(());
+    }
+    // 沒有 kind 的 CHECK（更舊的庫、手工建的）＝沒有東西擋 agy，不必放寬。有 CHECK 卻長得不認得才不敢動。
+    if !sql.contains("CHECK (kind IN") && !sql.contains("CHECK(kind IN") {
+        return Ok(());
+    }
+    anyhow::ensure!(sql.contains(OLD), "bots 表的 kind CHECK 長得不認得，不敢就地放寬：{sql}");
+    let widened = sql.replacen(OLD, NEW, 1);
+    let version: i64 = sqlx::query_scalar("PRAGMA schema_version").fetch_one(&mut *conn).await?;
+    sqlx::query("PRAGMA writable_schema = ON").execute(&mut *conn).await?;
+    let updated = sqlx::query("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'bots'").bind(&widened).execute(&mut *conn).await;
+    // 不論成敗都要關回去；`schema_version` 的 PRAGMA 不收 bind 參數，值是剛讀出來的整數。
+    let bumped = sqlx::query(&format!("PRAGMA schema_version = {}", version + 1)).execute(&mut *conn).await;
+    sqlx::query("PRAGMA writable_schema = OFF").execute(&mut *conn).await?;
+    updated.context("widen bots.kind CHECK")?;
+    bumped.context("bump schema_version after widening bots.kind CHECK")?;
     Ok(())
 }
 
@@ -1615,6 +1649,61 @@ mod tests {
             .fetch_all(pool)
             .await
             .unwrap()
+    }
+
+    /// agy：v41 以前的庫，`bots.kind` 的 CHECK 只收三種。開機時就地放寬成四種：既有的 bot 與指著它的列原樣在、外鍵沒壞、
+    /// 之後收得下 `agy`，而且放寬後的定義跟全新 DB 一字不差（`schema_guard`）；再開一次不動。
+    #[tokio::test]
+    async fn opening_a_pre_agy_db_widens_the_bots_kind_check_in_place() {
+        let dir = tmp_dir();
+        let path = dir.join("pre-agy.sqlite3");
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        let old = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.unwrap();
+        for stmt in SCHEMA.replace("'claude','codex','grok','agy'", "'claude','codex','grok'").split(";\n") {
+            let s = stmt.trim();
+            if !s.is_empty() {
+                sqlx::query(s).execute(&old).await.unwrap();
+            }
+        }
+        sqlx::query("INSERT INTO projects (id, path, label, host, created_at) VALUES ('p1','/tmp/p','p','local','2026-10-01T00:00:00Z')").execute(&old).await.unwrap();
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b1','p1','old','grok','tok','2026-10-01T00:00:00Z')").execute(&old).await.unwrap();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, started_at) VALUES ('r1','b1','stopped','2026-10-01T00:00:00Z')").execute(&old).await.unwrap();
+        assert!(
+            sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b2','p1','x','agy','tok','2026-10-01T00:00:00Z')").execute(&old).await.is_err(),
+            "the old CHECK refuses agy"
+        );
+        sqlx::query("PRAGMA user_version = 41").execute(&old).await.unwrap();
+        old.close().await;
+
+        let current = open(&path).await.expect("a pre-agy DB must open");
+        sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b2','p1','new','agy','tok','2026-10-01T00:00:00Z')")
+            .execute(&current)
+            .await
+            .expect("the widened CHECK accepts agy");
+        assert!(
+            sqlx::query("INSERT INTO bots (id, project_id, name, kind, hook_token, created_at) VALUES ('b3','p1','bad','gemini','tok','2026-10-01T00:00:00Z')").execute(&current).await.is_err(),
+            "unknown kinds are still refused"
+        );
+        let kept: Vec<(String, String)> = sqlx::query_as("SELECT id, kind FROM bots ORDER BY id").fetch_all(&current).await.unwrap();
+        assert_eq!(kept, [("b1".into(), "grok".into()), ("b2".into(), "agy".into())]);
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE bot_id = 'b1'").fetch_one(&current).await.unwrap();
+        assert_eq!(runs, 1, "the child table still points at bots");
+        let violations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check").fetch_one(&current).await.unwrap();
+        assert_eq!(violations, 0);
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&current).await.unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        schema_guard::check_drift(&current).await.expect("the widened table must match schema_guard");
+        current.close().await;
+        // Idempotent: a second open does not touch it.
+        let again = open(&path).await.expect("reopen");
+        let sql: String = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name = 'bots'").fetch_one(&again).await.unwrap();
+        assert_eq!(sql.matches("'agy'").count(), 1);
+        again.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// issue #635: migrate the official v29 DDL, including its bots foreign key, rows and

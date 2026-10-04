@@ -39,7 +39,7 @@ fi"#;
 
 /// Everything else stays folded into its parent's `subtree_bytes` instead of turning the list
 /// into a process explorer.
-const LISTED: &[&str] = &["claude", "codex", "grok", "node", "bash", "zsh", "sh", "fish"];
+const LISTED: &[&str] = &["claude", "codex", "grok", "agy", "node", "bash", "zsh", "sh", "fish"];
 
 /// Below this a row is noise; its bytes still count towards the parent's subtree.
 const MIN_SUBTREE: u64 = 8 * 1024 * 1024;

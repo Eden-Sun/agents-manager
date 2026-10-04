@@ -29,6 +29,8 @@ const SETTLE: Duration = Duration::from_millis(800);
 struct Forced {
     prev: String,
     epoch: u64,
+    /// agy 的對話框（登入／條款／信任／權限…）的說明；claude 的 Session paused 是 `None`（`blocked_reason` 用固定的字）。
+    label: Option<&'static str>,
 }
 
 fn forced() -> &'static Mutex<HashMap<String, Forced>> {
@@ -54,6 +56,11 @@ pub fn is_forced(run_id: &str) -> bool {
     forced().lock().unwrap().contains_key(run_id)
 }
 
+/// agy 對話框的說明（這個 run 是由這裡補標、而且卡在 agy 的對話框時）。
+pub fn agy_label(run_id: &str) -> Option<&'static str> {
+    forced().lock().unwrap().get(run_id).and_then(|f| f.label)
+}
+
 /// herdr 轉成 `idle` 那一刻（[`crate::events`]）：等畫面畫完再看。自己開背景工作，不擋事件迴圈。
 pub fn on_idle(app: &Arc<App>, run: &db::Run) {
     let (app, run) = (app.clone(), run.clone());
@@ -66,19 +73,34 @@ pub fn on_idle(app: &Arc<App>, run: &db::Run) {
     });
 }
 
-/// 讀一次畫面、照結果補標或還原（巡邏與 `idle` 邊共用）。只看 claude；讀不到畫面什麼都不動——讀不到不等於選單關了。
+/// 讀一次畫面、照結果補標或還原（巡邏與 `idle` 邊共用）。claude 看 Session paused 選單，agy 看它會停下來等人的對話框
+/// （[`crate::agy_screen`]）；讀不到畫面什麼都不動——讀不到不等於選單關了。
 pub async fn observe(app: &Arc<App>, run: &db::Run) {
-    if !matches!(db::bot(&app.db, &run.bot_id).await, Ok(Some(b)) if b.kind == "claude") {
-        return;
-    }
+    let kind = match db::bot(&app.db, &run.bot_id).await {
+        Ok(Some(b)) if matches!(b.kind.as_str(), "claude" | "agy") => b.kind,
+        _ => return,
+    };
     let Some(pane) = run.pane_id.as_deref().filter(|p| !p.trim().is_empty()) else { return };
     let Some(client) = app.herdr_for_run(run).await else { return };
     let Ok(read) = client.pane_read(pane, "visible", 80).await else { return };
-    observe_screen(app, run, &read.text).await;
+    if kind == "agy" {
+        observe_agy_screen(app, run, &read.text).await;
+    } else {
+        observe_screen(app, run, &read.text).await;
+    }
+}
+
+pub(crate) async fn observe_agy_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
+    let dialog = crate::agy_screen::blocking_dialog(screen);
+    observe_with(app, run, dialog.is_some(), dialog.map(|d| d.label())).await;
 }
 
 pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
-    if crate::tui_prompts::is_session_paused_menu(screen) {
+    observe_with(app, run, crate::tui_prompts::is_session_paused_menu(screen), None).await;
+}
+
+async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&'static str>) {
+    if open {
         if run.agent_status == "blocked" {
             return; // herdr 自己判的（或已經補過）：不動。
         }
@@ -92,8 +114,13 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
             .unwrap_or(false);
         if marked {
             let epoch = next_epoch();
-            forced().lock().unwrap().entry(run.id.clone()).or_insert(Forced { prev, epoch: 0 }).epoch = epoch;
-            tracing::warn!(run = %run.id, bot = %run.bot_id, "claude 停在 Session paused 選單：補標 blocked，等使用者自己選（不自動按）");
+            {
+                let mut m = forced().lock().unwrap();
+                let f = m.entry(run.id.clone()).or_insert(Forced { prev, epoch: 0, label });
+                f.epoch = epoch;
+                f.label = label;
+            }
+            tracing::warn!(run = %run.id, bot = %run.bot_id, dialog = label, "停在等人回答的選單／對話框：補標 blocked，等使用者自己選（不自動按）");
             app.emit_bot_status(&run.bot_id).await;
         }
         return;
