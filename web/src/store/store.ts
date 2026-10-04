@@ -2952,6 +2952,40 @@ export async function reloadLoadedConversations(get: GetFn): Promise<void> {
   if (proj) await get().loadGroupMessages(proj)
 }
 
+/** A restored or moved bot may have messages outside a previously loaded group's newest page. */
+async function mergeLatestGroupPage(set: SetFn, get: GetFn, projectId: string): Promise<void> {
+  try {
+    const atRequestStart = new Map((get().groupMessages[projectId] ?? []).map((message) => [message.id, message]))
+    const page = await api.fetchProjectMessages(projectId)
+    noteGroupPrompts(page.messages)
+    set((s) => {
+      if (!s.loadedProjects[projectId]) return {}
+      const current = s.groupMessages[projectId] ?? []
+      const currentById = new Map(current.map((message) => [message.id, message]))
+      const activeBots = new Set(s.bots.filter((bot) => bot.project_id === projectId).map((bot) => bot.id))
+      const byId = new Map(current.map((message) => [message.id, message]))
+      for (const message of page.messages) {
+        // A same-ID WS update or bot deletion can land while this snapshot is in flight. Preserve
+        // the newer local row, and never resurrect a member that left the project in the meantime.
+        if (!activeBots.has(message.bot_id)) continue
+        const latest = currentById.get(message.id)
+        byId.set(message.id, latest && latest !== atRequestStart.get(message.id) ? latest : message)
+      }
+      const merged = sortByInsert([...byId.values()])
+      const cut = capList(merged, capFor(s.messageCapFloors, projectId))
+      return {
+        groupMessages: {
+          ...s.groupMessages,
+          [projectId]: reuseUnchanged(s.groupMessages[projectId] ?? [], cut.list),
+        },
+        moreMessages: { ...s.moreMessages, [projectId]: page.has_more || cut.trimmed },
+      }
+    })
+  } catch (e) {
+    get().notify('error', `載入群組訊息失敗：${errText(e)}`)
+  }
+}
+
 const resyncTrigger = (() => {
   let ctx: { set: SetFn; get: GetFn } | null = null
   const runner = createResyncRunner(async () => {
@@ -3452,9 +3486,40 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'project_changed':
     case 'bot_read':
     case 'group_read':
-    case 'bot_share_changed':
-    case 'bot_changed': {
+    case 'bot_share_changed': {
       void get().refreshState()
+      return
+    }
+    case 'bot_changed': {
+      const botId = isRec(data) ? str(pick(data, 'bot_id')) : ''
+      const before = botId ? get().bots.find((b) => b.id === botId) : undefined
+      void get().refreshState().then(() => {
+        const after = botId ? get().bots.find((b) => b.id === botId) : undefined
+        if (before?.name === after?.name && before?.project_id === after?.project_id) return
+        // 群組訊息快取帶著 bot_name，而 API 排除已刪除 bot。同步已載入的快取時保留使用者翻出的歷史。
+        const projects = new Set([before?.project_id, after?.project_id].filter((id): id is string => Boolean(id)))
+        for (const projectId of projects) {
+          if (!get().loadedProjects[projectId]) continue
+          const activeHere = after?.project_id === projectId
+          set((s) => {
+            const current = s.groupMessages[projectId]
+            if (!current) return {}
+            const next = activeHere
+              ? current.map((message) =>
+                  message.bot_id === botId && message.bot_name !== after.name
+                    ? { ...message, bot_name: after.name }
+                    : message,
+                )
+              : current.filter((message) => message.bot_id !== botId)
+            return next.some((message, index) => message !== current[index]) || next.length !== current.length
+              ? { groupMessages: { ...s.groupMessages, [projectId]: next } }
+              : {}
+          })
+          if (activeHere && (!before || before.project_id !== after.project_id)) {
+            void mergeLatestGroupPage(set, get, projectId)
+          }
+        }
+      })
       return
     }
     default:
