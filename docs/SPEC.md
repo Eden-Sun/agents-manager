@@ -1849,6 +1849,7 @@ agent 自己 `herdr agent prompt <名字> …` 時 daemon 沒參與，那句話�
    補 Enter 前先確認 pane 還在（`pane.get` 回 `pane_not_found`＝收件方死了：收掉那顆 run、不重試、announce 時也不開回合）；
    補完 Enter 而 pane 的 revision 沒變＝鍵沒送到那個行程，不再重試。
    90 秒內字既沒進輸入列、agent 也沒接手，回合標 `failed` 並留一則系統說明。
+   watcher 由 daemon 的 `TaskTracker` 管理；shutdown 會等目前的 pane RPC／DB 更新完成，再停止後續輪詢。未完成的 relay external turn 保留在 DB，daemon 啟動或該 host 重連且完成 reconcile 後，依回合與使用者訊息重建 watcher。
    **死 pane 的 run**（`lifecycle::dead_panes`，隨 60 秒的 stuck-turn sweeper 跑）：herdr 明確回 `pane_not_found` 的 running run 收成 exited。
    pane id 還在、但這顆 run 的 agent 已經不在、而且這個 id 上是別的 agent（herdr 重用 id）也收成 exited；RPC 失敗不是證據。
    打字（`send_text` 與 prompt 的 type 路徑）在這兩種情況，以及自己的 agent 已經換到別的 pane 時，不把字送進舊 id。
