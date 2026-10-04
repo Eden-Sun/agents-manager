@@ -128,6 +128,10 @@ setup() { # setup <checkout 的 SCHEMA_VERSION> <DB 目前的 user_version>
   export STUB_UV_AFTER_START="$1"  # 新 binary 起來之後 DB 會被 migrate 到這個版本
   export STUB_SESSION_OK=1 STUB_SESSION_OK_AFTER_FORWARD=1 STUB_HEALTH_OK=1
   export STUB_ACQUIRE_HELD=true STUB_SAFE=true STUB_SUPERVISOR=idle
+  # restart-window 回應裡 daemon 開窗口用的核准（空＝舊 daemon，回應不帶 approval）。
+  export STUB_WINDOW_APPROVAL=ap-auto-1
+  # 設了就改用 daemon 的判斷模擬 3a 複查：這顆 bot working／送達中，`STUB_ESCALATED_APPROVAL` 那一張核准已放寬。
+  export STUB_RECHECK_WORKING="" STUB_RECHECK_DELIVERING="" STUB_ESCALATED_APPROVAL=""
   unset STUB_SUPERVISOR_BEFORE
   export STUB_RELEASE_FAIL=""       # 設了：lease release 回 409（模擬 fence 過期／token 對不上）
   export STUB_NAMES_BEFORE='["a","b"]' STUB_NAMES_AFTER='["a","b"]'
@@ -153,7 +157,22 @@ done
 case "$sub:$op" in
   lease:safety)  n=$(grep -cE "lease (safety|acquire restart)" "$AGM_DIR/calls.log"); fl=""
                  [ "${STUB_PROBE_INFLIGHT_TIMES:-0}" -ge "$n" ] && fl='{"bot_id":"bot-probe","turn_id":"t-1"}'
-                 printf '{"safe":%s,"working":[],"delivering":[],"in_flight":[%s]}' "$STUB_SAFE" "$fl" ;;
+                 if [ -n "${STUB_RECHECK_WORKING:-}${STUB_RECHECK_DELIVERING:-}" ]; then
+                   # 照 daemon `safety_as` 的判斷：全靜止 || （放寬 && 沒人在送達臨界區）。放寬綁 `--approval` 那一張。
+                   ap=""; nxt=0
+                   for a in "$@"; do
+                     [ "$nxt" = 1 ] && { ap="$a"; nxt=0; continue; }
+                     [ "$a" = "--approval" ] && nxt=1
+                   done
+                   esc=false; [ -n "$ap" ] && [ "$ap" = "${STUB_ESCALATED_APPROVAL:-}" ] && esc=true
+                   wk=""; [ -n "${STUB_RECHECK_WORKING:-}" ] && wk="{\"bot_id\":\"id-$STUB_RECHECK_WORKING\",\"name\":\"$STUB_RECHECK_WORKING\"}"
+                   dl=""; [ -n "${STUB_RECHECK_DELIVERING:-}" ] && dl="{\"bot_id\":\"id-$STUB_RECHECK_DELIVERING\",\"name\":\"$STUB_RECHECK_DELIVERING\",\"turn_id\":\"t-9\"}"
+                   safe=false
+                   if [ -z "$dl" ] && { [ -z "$wk" ] || [ "$esc" = true ]; }; then safe=true; fi
+                   printf '{"safe":%s,"escalated":%s,"working":[%s],"delivering":[%s],"in_flight":[%s]}' "$safe" "$esc" "$wk" "$dl" "$fl"
+                 else
+                   printf '{"safe":%s,"working":[],"delivering":[],"in_flight":[%s]}' "$STUB_SAFE" "$fl"
+                 fi ;;
   lease:acquire) printf '{"lease":{"held":true,"fence":9},"lease_token":"tok-legacy"}' ;;
   lease:status)  printf '{"leases":[{"resource":"restart","held":%s}]}' "$STUB_RESTART_HELD" ;;
   lease:release)
@@ -217,7 +236,11 @@ if [ -n "${STUB_SWAP_BINARY_ON_ACQUIRE:-}" ] && [ ! -e "$AGM_DIR/changed-live" ]
   printf 'newer-live-binary\n' > "$AGM_REPO/target/release/agents-managerd"
   : > "$AGM_DIR/changed-live"
 fi
-printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1"}' "$STUB_ACQUIRE_HELD"
+if [ -n "${STUB_WINDOW_APPROVAL:-}" ]; then
+  printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1","approval":{"id":"%s"}}' "$STUB_ACQUIRE_HELD" "$STUB_WINDOW_APPROVAL"
+else
+  printf '{"lease":{"held":%s,"fence":9},"lease_token":"tok-1"}' "$STUB_ACQUIRE_HELD"
+fi
 STUB
   cat > "$ROOT/bin/cap" <<'STUB'
 #!/bin/bash
@@ -835,13 +858,52 @@ setup 10 10
 rc=$(run)
 check_eq "沒有核准單也能換版（rc=0）" "0" "$rc"
 check "窗口帶的是 owner 與 commit" "lease acquire restart --owner bot-me --commit $SHA" "$AGM_DIR/calls.log"
-check_no "safety 查詢不帶 --approval" "lease safety.*--approval" "$AGM_DIR/calls.log"
+check "3a 複查綁 restart-window 開窗口的那張核准" "lease safety --approval ap-auto-1 --owner bot-me" "$AGM_DIR/calls.log"
 teardown
 
 setup 10 10
 rc=$(run ap-1)
 check_eq "新 daemon 接受舊 task 傳入的 --approval（rc=0）" "0" "$rc"
 check_no "restart-window 模式忽略舊 approval" "lease acquire restart.*--approval" "$AGM_DIR/calls.log"
+check_no "複查也不拿舊 task 的 approval" "lease safety.*--approval ap-1" "$AGM_DIR/calls.log"
+teardown
+
+# 16c2. issue #840：使用者按「現在換版」或等滿門檻之後，3a 複查跟 acquire 同一套判斷。
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot STUB_ESCALATED_APPROVAL=ap-auto-1
+rc=$(run)
+check_eq "放寬生效時有 bot working 仍能換版（rc=0）" "0" "$rc"
+check "複查 log 看得出是放寬後的判斷" "3a recheck: True \['busy-bot'\] \[\] escalated=True" "$SWAP_LOG"
+check "放寬後真的換了 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot STUB_RECHECK_DELIVERING=typing-bot STUB_ESCALATED_APPROVAL=ap-auto-1
+rc=$(run)
+check_eq "放寬了但有人在送達臨界區：照擋（rc=4）" "4" "$rc"
+check "送達中擋下時 log 寫明複查不安全" "ABORT: 換 binary 前複查不安全" "$SWAP_LOG"
+check "送達中擋下時交還窗口" "lease release restart" "$AGM_DIR/calls.log"
+check_no "送達中擋下時不換 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot
+rc=$(run)
+check_eq "沒放寬時 working 照樣擋（rc=4）" "4" "$rc"
+check_no "沒放寬時不換 binary" "submit" "$AGM_DIR/launchctl.log"
+teardown
+
+setup 10 10
+export STUB_RECHECK_WORKING=busy-bot STUB_ESCALATED_APPROVAL=ap-other
+rc=$(run)
+check_eq "放寬的是別張核准：不替這張開門（rc=4）" "4" "$rc"
+teardown
+
+setup 10 10
+export STUB_WINDOW_APPROVAL=""
+rc=$(run)
+check_eq "舊 daemon 窗口回應沒有 approval 也照常換版（rc=0）" "0" "$rc"
+check_no "沒有 approval 時複查不帶 --approval" "lease safety.*--approval" "$AGM_DIR/calls.log"
 teardown
 
 # 16e. 沒有 restart-window 的舊 daemon 只在明確給 approval 時走舊 User lease acquire。

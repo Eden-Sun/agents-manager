@@ -47,6 +47,7 @@ SETTLE_TRIES="${SWAP_PROBE_SETTLE_TRIES:-12}"      # 自測回合收尾最多等
 SETTLE_WAIT="${SWAP_PROBE_SETTLE_WAIT_SECS:-5}"
 
 SHA=""; OLD=""; OLDHASH=""; APPROVAL=""; OWNER=""; CHECKOUT=""
+WINDOW_APPROVAL=""   # restart-window 模式下 daemon 開窗口用的核准 id（從窗口回應讀；舊 task 傳的 --approval 不算）
 while [ $# -gt 0 ]; do
     case "$1" in
         --sha) SHA="$2"; shift 2 ;;
@@ -198,6 +199,10 @@ agm() {
 lease_safety() {
     if [ "$WINDOW_MODE" = legacy ]; then
         agm lease safety --approval "$APPROVAL" --owner "$OWNER" --exclude-bot "$OWNER"
+    elif [ -n "$WINDOW_APPROVAL" ]; then
+        # 拿到窗口之後的 §3a 複查：綁 restart-window 開窗口用的**那一張**核准，跟 acquire 同一套判斷（issue #840）。
+        # 不帶的話放寬要靠「最早那筆活著的核准」與使用者的「現在換版」碰巧對上，複查會把 acquire 剛給的放寬推翻。
+        agm lease safety --approval "$WINDOW_APPROVAL" --owner "$OWNER"
     else
         agm lease safety --owner "$OWNER"
     fi
@@ -452,8 +457,11 @@ try:
 except Exception:
     print("False - -"); raise SystemExit
 l = d.get("lease") or {}
-print(l.get("held"), l.get("fence"), d.get("lease_token") or l.get("lease_token") or "-")')
+a = d.get("approval") or {}
+aid = a.get("id") if isinstance(a, dict) else None
+print(l.get("held"), l.get("fence"), d.get("lease_token") or l.get("lease_token") or "-", aid if isinstance(aid, str) and aid and " " not in aid else "-")')
     HELD=$(echo "$PARSED" | cut -d' ' -f1); FENCE=$(echo "$PARSED" | cut -d' ' -f2); TOKEN=$(echo "$PARSED" | cut -d' ' -f3)
+    WAP=$(echo "$PARSED" | cut -d' ' -f4)
     [ "$HELD" = True ] && break
     WHY=$(printf '%s' "$OUT" | "$PYTHON" -c 'import json,sys
 try:
@@ -476,10 +484,14 @@ done
 [ "$HELD" = True ] || { log "DEFER: 拿不到 restart 窗口（試了 $WINDOW_TRIES 次，最後 reason=${WHY:-unparsed}）"; exit 4; }
 log "restart lease fence=$FENCE token=$([ "$TOKEN" != - ] && echo saved || echo MISSING)"
 save_token "$TOKEN"
+# 舊 daemon 的窗口回應沒有 approval：照舊不帶，複查退回「最早那筆活著的核准」。
+[ "$WINDOW_MODE" = service ] && [ "${WAP:--}" != - ] && WINDOW_APPROVAL="$WAP"
 
+# 跟 acquire 同一套判斷：放寬生效（同一張核准等滿門檻，或使用者按了「現在換版」）時 working 不擋，
+# 送達臨界區、別人的租約、讀不到狀態照擋——這些都由 daemon 的 safety 決定，這裡不自己重算。
 SAFE=$(lease_safety | "$PYTHON" -c 'import json,sys
 d = json.load(sys.stdin)
-print(d.get("safe"), [w.get("name") for w in d.get("working") or []], d.get("delivering"))')
+print(d.get("safe"), [w.get("name") for w in d.get("working") or []], d.get("delivering"), "escalated=%s" % d.get("escalated"))')
 log "3a recheck: $SAFE"
 case "$SAFE" in
     True*) ;;
