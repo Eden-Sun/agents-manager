@@ -2101,7 +2101,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 - 背景 worker 收到已驗證的請求 `kind`，在讀版本或執行安裝前必須與 durable job 列完全一致；kind 查詢錯誤、kind 不一致或 recovery 遇到不支援的 kind 時以 `internal_error` 收尾，不呼叫 CLI 指令。列已不存在時以 `superseded` 收尾，也不呼叫 CLI 指令。Recovery 在主機探測前也會重讀並核對啟動掃描讀到的 kind，只使用持久列裡明確記錄的 `codex`／`claude`，沒有預設 kind。
 - 本機直接 `/bin/sh -c`，遠端走既有的 ssh 執行路徑（`ssh_exec_path_timeout`）；逾時 5 分鐘（遠端逾時只砍得掉本機那條 ssh，那台的安裝可能還在跑）。
   安裝指令包在**主機端按 kind 分開的鎖**裡（`$HOME/.agents-manager-codex-install.lock` 或 `$HOME/.agents-manager-claude-install.lock`，symlink 指向持鎖 process group 與 nonce）：
-  鎖被活著的安裝拿著時不跑，`cli_update_done` 回 `already_running`。
+  鎖被活著的安裝拿著時不跑，`cli_update_done` 回 `already_running`。過期鎖回收由主機端 `.reaper` sidecar 的核心 `flock` 序列化，避免兩個 reaper 在確認舊鎖後互刪新鎖；sidecar 是鎖檔，不代表仍在安裝。
   輸出逐次附加到 `<data_dir>/cli-update.log`。
 
 WS（`update_id`／`host`／`kind`／`target_version`／`log_path` 每則都帶）：`cli_update_progress` 的 `phase` 依序 `checking`（讀安裝前版本）→ `installing`（帶 `from`）→
