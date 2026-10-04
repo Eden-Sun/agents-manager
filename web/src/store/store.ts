@@ -3393,6 +3393,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
     case 'project_changed':
     case 'bot_read':
     case 'group_read':
+    case 'bot_share_changed':
     case 'bot_changed': {
       void get().refreshState()
       return

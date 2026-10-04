@@ -4725,9 +4725,10 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 
 ### 20.2 分享連結
 
-- `bot_shares`：一顆 bot 至多一條。token 32 bytes 亂數（base64url，43 字），DB 只存 SHA-256 與末 4 碼提示；完整連結只在開啟／重產的那個回應裡出現一次。
+- `bot_shares`：一顆 bot 至多一條。token 32 bytes 亂數（base64url，43 字），DB 存 SHA-256（入口查表用）、末 4 碼提示與原文 `token`（跟 `bots.hook_token` 同一個 0600 DB、同一等級），
+  管理端分享中隨時拿得回完整連結（2026-10-04 使用者：連結只顯示一次＝找不到可以分享的連結）。加 `token` 欄（schema v39）之前開的分享只有 hash：開機後照舊可用，管理端回 `url:null`＋`needs_rotate:true`，重產一次就有。
 -  查詢用 hash 找列、再常數時間比一次；bot 或專案刪了、`shared_bots` 那列不見了都不認。每個 portal 請求在副作用前於 bot 鎖內重驗 token；同一把鎖也序列化輪替、停用與刪除，因此已拿鎖的操作先完成，撤銷先拿鎖時舊 token 不再生效。管理端啟用與輪替也在鎖內重查 bot 存活狀態。
--  重產＝換 hash，舊連結當下失效；關閉或刪除 bot／專案會刪除公開 token 列並叫醒 SSE。刪除保留 `shared_bots` 的受限 profile；還原 bot 不會恢復刪除前的 token，必須明確重新啟用。開著的 SSE 在初始狀態、每個 bus 事件、resync 與週期重查時都驗證權限，失效就斷。
+-  重產＝換 hash 與原文，舊連結當下失效；關閉或刪除 bot／專案會刪除公開 token 列並叫醒 SSE。刪除保留 `shared_bots` 的受限 profile；還原 bot 不會恢復刪除前的 token，必須明確重新啟用。開著的 SSE 在初始狀態、每個 bus 事件、resync 與週期重查時都驗證權限，失效就斷。
 - 網址＝`[share] base_url` ＋ `/s/<token>`；沒設 `base_url` 不能開（409 `share_not_configured`）。管理端點見 API.md §5.6，只收 UI token。
 
 ### 20.3 分享入口（獨立 listener）
@@ -4758,7 +4759,9 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 **前端（主 UI）**
 - 建 bot 表單多一個「用途：分享用（受限）」；只給本機專案的 claude（其他 kind／遠端專案是灰的並寫原因）。勾了要選它的資料夾：「開一個新資料夾」（`~/shared-bots/<名稱>`，名稱空著＝bot 名）或「用一個既有的資料夾」（路徑＋「瀏覽…」用目錄選擇器挑，下面有警示：資料夾裡的所有檔案含 .env 之類 end user 都可能透過 bot 讀到）。
   送 `share_profile: "restricted"`、`share_folder`、`auto_approve: false`；模型照表單選，沒選＝daemon 補最新 Opus。建好不能切回一般 bot。
-- 受限 bot 的設定面板多一塊「🔗 分享給外部使用者」：開關、完整連結＋複製（只在剛開／重產時拿得到）、平常只顯示末 4 碼、建立與最後使用時間、「重產連結」與「關閉分享」（都要確認）。一般 bot 不畫這塊。
+- 受限 bot 的設定面板多一塊「🔗 分享給外部使用者」：開關、分享中隨時顯示完整連結＋複製（舊資料只有雜湊時提示重產一次）、建立與最後使用時間、「重產連結」與「關閉分享」（都要確認）。一般 bot 不畫這塊。
+- 受限 bot 的聊天區頂端（⚙ 右邊）有一顆「🔗 分享」：未分享時按下＝開啟並複製連結；分享中顯示「🔗 複製連結」（亮起），按下＝複製，旁邊 ▾ 選單可「重產連結」／「關閉分享」（都要確認，重產後自動複製新連結）。一般 bot 沒有這顆。
+- 側欄受限 bot 名字旁標 🔗：分享中亮起、未分享是灰的；狀態來自 `/api/state` 的 `share_enabled`，`bot_share_changed` 觸發重抓。
 - 對話裡 `source = "share"` 的 user 訊息標「🔗 分享使用者」。
 
 **分享頁（`web/share.html` → `dist/share.html`）**

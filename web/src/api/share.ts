@@ -2,15 +2,17 @@
  * 分享 bot 的管理端點（主 API、只收 UI token；SPEC「分享 bot」、API.md §5.6）：
  * `GET/POST /api/bots/{id}/share`、`POST /api/bots/{id}/share/rotate`。
  *
- * 完整連結只在剛開／重產那一次回來（daemon 只存 token 的 hash），平常只有 `token_hint`（末 4 碼）。
+ * 分享中就回完整連結（daemon 存 token 原文）；加這個功能之前開的分享只有 hash，`url:null`＋`needs_rotate:true`，重產一次就有。
  */
 import { rawTransport } from './index'
 import { ApiError } from './types'
 
 export interface ShareState {
   enabled: boolean
-  /** 完整連結；只有剛開／重產的回應才有，之後的 GET 一律 null。 */
+  /** 完整連結；分享中就有。null＝沒開、舊資料只有 hash（看 `needs_rotate`）或 `[share] base_url` 沒設。 */
   url: string | null
+  /** 舊資料只有 hash、拿不回完整網址：重產一次就好。 */
+  needs_rotate: boolean
   /** `…末4碼`，讓人認得現在是哪一條連結。 */
   token_hint: string | null
   created_at: string | null
@@ -24,6 +26,7 @@ export function toShareState(raw: unknown): ShareState {
   return {
     enabled: o.enabled === true,
     url: optStr(o.url),
+    needs_rotate: o.needs_rotate === true,
     token_hint: optStr(o.token_hint),
     created_at: optStr(o.created_at),
     last_used_at: optStr(o.last_used_at),

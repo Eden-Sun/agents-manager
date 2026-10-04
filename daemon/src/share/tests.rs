@@ -122,20 +122,34 @@ async fn concurrent_quota_uploads(app: Arc<App>, bot_id: String, token: String, 
 // ───────────── token ─────────────
 
 #[tokio::test]
-async fn tokens_are_32_random_bytes_and_only_their_hash_is_stored() {
+async fn tokens_are_32_random_bytes_kept_recoverable_and_looked_up_by_hash() {
     let e = tt::env().await;
     let b = restricted_bot(&e.app, &e.project_id, "pub").await;
     let token = shared(&e.app, &b.id).await;
     assert_eq!(token.len(), store::TOKEN_LEN);
     assert!(store::token_shape_ok(&token));
     assert_ne!(token, store::new_token(), "每次都是新的亂數");
-    let (hash, hint): (String, String) = sqlx::query_as("SELECT token_hash, token_hint FROM bot_shares WHERE bot_id = ?").bind(&b.id).fetch_one(&e.app.db).await.unwrap();
+    let (hash, hint, kept): (String, String, Option<String>) =
+        sqlx::query_as("SELECT token_hash, token_hint, token FROM bot_shares WHERE bot_id = ?").bind(&b.id).fetch_one(&e.app.db).await.unwrap();
     assert_eq!(hash, store::token_hash(&token));
     assert_eq!(hash.len(), 64);
-    assert!(!hash.contains(&token) && hint.len() < 8, "DB 裡沒有 token 原文：{hint}");
-    let dump: Vec<(String,)> = sqlx::query_as("SELECT token_hash || token_hint || created_at FROM bot_shares").fetch_all(&e.app.db).await.unwrap();
-    assert!(dump.iter().all(|(row,)| !row.contains(&token)));
+    assert!(!hash.contains(&token) && hint.len() < 8, "hash／hint 不含原文：{hint}");
+    assert_eq!(kept.as_deref(), Some(token.as_str()), "原文存著，管理端才拿得回完整連結");
     assert_eq!(store::resolve(&e.app.db, &token).await.unwrap(), Some(b.id.clone()));
+}
+
+/// 加 `token` 欄之前的 DB：`bot_shares` 沒有這一欄。開機 migrate 補上，舊列只有 hash 照樣能用。
+#[tokio::test]
+async fn a_hash_only_share_from_before_the_token_column_keeps_working() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let token = shared(&e.app, &b.id).await;
+    sqlx::query("UPDATE bot_shares SET token = NULL WHERE bot_id = ?").bind(&b.id).execute(&e.app.db).await.unwrap();
+    sqlx::query("ALTER TABLE bot_shares DROP COLUMN token").execute(&e.app.db).await.unwrap();
+    store::migrate(&e.app.db).await.unwrap();
+    store::migrate(&e.app.db).await.unwrap();
+    assert_eq!(store::resolve(&e.app.db, &token).await.unwrap(), Some(b.id.clone()), "舊連結開機後照舊可用");
+    assert_eq!(store::share(&e.app.db, &b.id).await.unwrap().unwrap().token, None);
 }
 
 #[tokio::test]
@@ -653,22 +667,56 @@ async fn the_share_admin_api_only_shares_restricted_bots_for_the_user() {
     assert!(url.starts_with("https://box.tail.ts.net/s/"), "{url}");
     let token = url.rsplit('/').next().unwrap();
     assert_eq!(on["token_hint"], json!(format!("…{}", &token[token.len() - 4..])));
-    let g: Value = user(c.get(format!("{base}/api/bots/{}/share", r.id))).send().await.unwrap().json().await.unwrap();
+    let get = || async { user(c.get(format!("{base}/api/bots/{}/share", r.id))).send().await.unwrap().json::<Value>().await.unwrap() };
+    let g = get().await;
     assert_eq!(g["enabled"], true);
-    assert_eq!(g["url"], Value::Null, "平常拿不回完整連結");
-    assert!(!g.to_string().contains(token));
+    assert_eq!(g["url"], json!(url), "分享中隨時拿得回完整連結");
+    assert_eq!(g["needs_rotate"], false);
+    let again: Value = user(c.post(format!("{base}/api/bots/{}/share", r.id))).json(&json!({"enabled": true})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(again["url"], json!(url), "再開一次沿用同一條");
 
     // 一般 bot 拿自己的 token 也不能管分享。
     let res = c.post(format!("{base}/api/bots/{}/share/rotate", r.id)).header("X-AM-Bot-Id", &plain.id).header("X-AM-Bot-Token", "plain-tok").send().await.unwrap();
     assert_eq!(res.status(), 403);
 
+    let portal_base = serve(portal::router(e.app.clone())).await;
+    let page = |t: String| {
+        let c = c.clone();
+        let portal_base = portal_base.clone();
+        async move { c.get(format!("{portal_base}/s/{t}/api/info")).header("Host", "box.tail.ts.net").send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(page(token.to_string()).await, 200);
     let rot: Value = user(c.post(format!("{base}/api/bots/{}/share/rotate", r.id))).send().await.unwrap().json().await.unwrap();
-    let new_token = rot["url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+    let new_url = rot["url"].as_str().unwrap().to_string();
+    let new_token = new_url.rsplit('/').next().unwrap().to_string();
     assert_ne!(new_token, token);
-    assert_eq!(store::resolve(&e.app.db, token).await.unwrap(), None);
+    assert_eq!(get().await["url"], json!(new_url), "重產後 GET 回新的那條");
+    assert_eq!(page(token.to_string()).await, 404, "重產後舊連結 404");
+    assert_eq!(page(new_token.clone()).await, 200);
     let off: Value = user(c.post(format!("{base}/api/bots/{}/share", r.id))).json(&json!({"enabled": false})).send().await.unwrap().json().await.unwrap();
     assert_eq!(off["enabled"], false);
-    assert_eq!(store::resolve(&e.app.db, &new_token).await.unwrap(), None);
+    assert_eq!(off["url"], Value::Null);
+    assert_eq!(get().await["url"], Value::Null, "關掉之後 GET 沒有連結");
+    assert_eq!(page(new_token).await, 404, "關閉後 404");
+}
+
+#[tokio::test]
+async fn the_admin_api_asks_for_one_rotate_when_only_the_hash_survived() {
+    let e = tt::env().await;
+    let r = restricted_bot(&e.app, &e.project_id, "pub").await;
+    set_base(&e.app).await;
+    let token = shared(&e.app, &r.id).await;
+    sqlx::query("UPDATE bot_shares SET token = NULL WHERE bot_id = ?").bind(&r.id).execute(&e.app.db).await.unwrap();
+    let base = serve(crate::api::router(e.app.clone())).await;
+    let c = client();
+    let g: Value = c.get(format!("{base}/api/bots/{}/share", r.id)).header("X-AM-Token", "test-token").send().await.unwrap().json().await.unwrap();
+    assert_eq!(g["enabled"], true);
+    assert_eq!(g["url"], Value::Null, "舊資料只有 hash，拿不回網址");
+    assert_eq!(g["needs_rotate"], true);
+    assert_eq!(g["token_hint"], json!(format!("…{}", &token[token.len() - 4..])));
+    let rot: Value = c.post(format!("{base}/api/bots/{}/share/rotate", r.id)).header("X-AM-Token", "test-token").send().await.unwrap().json().await.unwrap();
+    assert!(rot["url"].as_str().unwrap().starts_with("https://box.tail.ts.net/s/"));
+    assert_eq!(rot["needs_rotate"], false);
 }
 
 #[tokio::test]

@@ -1,7 +1,8 @@
 //! 分享 bot 的兩張表：`shared_bots`（哪些 bot 是受限的分享用 bot、它的工作目錄）與 `bot_shares`（開著的分享連結）。
 //!
-//! token 是 capability：32 bytes 亂數（base64url，43 字），DB 只存 SHA-256（hex）與末 4 碼提示；完整 token 只在
-//! 剛開／重產的那一個回應裡出現一次。重產＝換掉 hash，舊連結當下失效；關掉＝刪掉那一列。
+//! token 是 capability：32 bytes 亂數（base64url，43 字）。DB 存 SHA-256（hex，入口查表＋常數時間比對用）、末 4 碼提示
+//! 與原文（`token`，讓管理端隨時拿得回完整連結；跟 `bots.hook_token` 同一個 0600 DB、同一等級）。重產＝換掉 hash 與原文，
+//! 舊連結當下失效；關掉＝刪掉那一列。加 `token` 欄之前開的分享只有 hash：入口照樣認，管理端拿不回網址（`token` NULL），重產一次就有。
 
 use std::collections::HashSet;
 
@@ -33,16 +34,22 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bot_shares (
            bot_id TEXT PRIMARY KEY,
-           -- SHA-256(token) 的 hex；原文不落地。
+           -- SHA-256(token) 的 hex：入口用它查表。
            token_hash TEXT NOT NULL UNIQUE,
            token_hint TEXT NOT NULL,
            created_at TEXT NOT NULL,
            rotated_at TEXT,
-           last_used_at TEXT
+           last_used_at TEXT,
+           -- token 原文，管理端組完整網址用。NULL＝加這欄之前開的（只有 hash），重產一次就有。
+           token TEXT
          )",
     )
     .execute(pool)
     .await?;
+    let has_token: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_table_info('bot_shares') WHERE name = 'token')").fetch_one(pool).await?;
+    if !has_token {
+        sqlx::query("ALTER TABLE bot_shares ADD COLUMN token TEXT").execute(pool).await?;
+    }
     Ok(())
 }
 
@@ -57,6 +64,11 @@ pub(crate) async fn workspace(pool: &SqlitePool, bot_id: &str) -> Result<Option<
 
 pub(crate) async fn restricted_ids(pool: &SqlitePool) -> Result<HashSet<String>, sqlx::Error> {
     Ok(sqlx::query_scalar::<_, String>("SELECT bot_id FROM shared_bots").fetch_all(pool).await?.into_iter().collect())
+}
+
+/// 分享開著的 bot（`bot_shares` 有一列）；側欄的 🔗 亮不亮用。
+pub(crate) async fn shared_ids(pool: &SqlitePool) -> Result<HashSet<String>, sqlx::Error> {
+    Ok(sqlx::query_scalar::<_, String>("SELECT bot_id FROM bot_shares").fetch_all(pool).await?.into_iter().collect())
 }
 
 /// 建 bot **之前**先記下來：config 一寫進去、投影出那一列之後，任何一次啟動都已經是受限的，沒有「先當一般 bot 起來」的空窗。
@@ -83,10 +95,12 @@ pub(crate) struct ShareRow {
     pub token_hint: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
+    /// NULL＝舊資料（只有 hash），拿不回完整網址。
+    pub token: Option<String>,
 }
 
 pub(crate) async fn share(pool: &SqlitePool, bot_id: &str) -> Result<Option<ShareRow>, sqlx::Error> {
-    sqlx::query_as("SELECT token_hint, created_at, last_used_at FROM bot_shares WHERE bot_id = ?").bind(bot_id).fetch_optional(pool).await
+    sqlx::query_as("SELECT token_hint, created_at, last_used_at, token FROM bot_shares WHERE bot_id = ?").bind(bot_id).fetch_optional(pool).await
 }
 
 pub(crate) fn new_token() -> String {
@@ -108,12 +122,12 @@ fn hint(token: &str) -> String {
     format!("…{}", &token[token.len().saturating_sub(4)..])
 }
 
-/// 開分享。已經開著就不動（回 `None`）：重按開關不該讓已經發出去的連結失效，要換請走 [`rotate`]。
+/// 開分享。已經開著就不動（回 `None`，網址照 [`share`] 存的拿）：重按開關不該讓已經發出去的連結失效，要換請走 [`rotate`]。
 pub(crate) async fn enable(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
     let token = new_token();
     let done = sqlx::query(
-        "INSERT OR IGNORE INTO bot_shares (bot_id, token_hash, token_hint, created_at)
-         SELECT ?,?,?,? WHERE EXISTS (
+        "INSERT OR IGNORE INTO bot_shares (bot_id, token_hash, token_hint, created_at, token)
+         SELECT ?,?,?,?,? WHERE EXISTS (
            SELECT 1 FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
              JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL WHERE r.bot_id = ?
          )",
@@ -122,23 +136,25 @@ pub(crate) async fn enable(pool: &SqlitePool, bot_id: &str) -> Result<Option<Str
         .bind(token_hash(&token))
         .bind(hint(&token))
         .bind(db::now())
+        .bind(&token)
         .bind(bot_id)
         .execute(pool)
         .await?;
     Ok((done.rows_affected() == 1).then_some(token))
 }
 
-/// 換新 token：舊的 hash 被蓋掉，同一刻起舊連結 404。沒開著＝`None`。
+/// 換新 token：舊的 hash 與原文一起被蓋掉，同一刻起舊連結 404。沒開著＝`None`。
 pub(crate) async fn rotate(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
     let token = new_token();
     let done = sqlx::query(
-        "UPDATE bot_shares SET token_hash = ?, token_hint = ?, rotated_at = ? WHERE bot_id = ? AND EXISTS (
+        "UPDATE bot_shares SET token_hash = ?, token_hint = ?, token = ?, rotated_at = ? WHERE bot_id = ? AND EXISTS (
            SELECT 1 FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
              JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL WHERE r.bot_id = bot_shares.bot_id
          )",
     )
         .bind(token_hash(&token))
         .bind(hint(&token))
+        .bind(&token)
         .bind(db::now())
         .bind(bot_id)
         .execute(pool)
