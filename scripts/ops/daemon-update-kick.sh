@@ -196,6 +196,7 @@ if [ "$_guard_rc" -eq 1 ]; then
   _age=$(lock_age)
   if [ "$_age" -lt 0 ]; then
     log "鎖的時間在未來（${_age} 秒），時鐘倒退或鎖是搬來的，年齡不可信"
+    alert runner_clock_skew "部署鎖 ${LOCK} 的時間戳在未來，無法安全判斷持有者是否逾時；本輪不回收鎖，請檢查系統時鐘與鎖狀態"
   elif [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
     if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
       alert runner_hung "上一輪（pid ${_pid}）已經跑了 ${_age} 秒還沒結束，自動部署停住。請確認它在做什麼，必要時結束它並移除 ${LOCK}"
@@ -211,6 +212,11 @@ fi
 if ! take_lock; then
   _pid=$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)
   _age=$(lock_age)
+  if [ "$_age" -lt 0 ]; then
+    log "鎖的時間在未來（${_age} 秒），時鐘倒退或鎖是搬來的，年齡不可信"
+    alert runner_clock_skew "部署鎖 ${LOCK} 的時間戳在未來，無法安全判斷持有者是否逾時；本輪不回收鎖，請檢查系統時鐘與鎖狀態"
+    exit 0
+  fi
   # 還活著的執行者（pid 在，而且真的是這支腳本）：正常重疊就安靜跳過；卡太久才喊人。
   if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null && is_self_runner "$_pid"; then
     if [ "$_age" -ge "$LOCK_HUNG_SECS" ]; then
