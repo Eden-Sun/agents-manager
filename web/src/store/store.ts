@@ -46,7 +46,7 @@ import { applyHerdrSnapshot, onHerdrFrame } from './herdrUpdate'
 import { gateFrame } from './frameSeen'
 import { applyUpstreamItem, loadUpstreamUpdates, type UpstreamItem } from './upstreamUpdate'
 import { dropHostModels, modelsKey, shouldFetchModels, type ModelsCache } from './modelsCache'
-import { byInsert, byTime, capList, insertSorted, keptAfterPage, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
+import { byInsert, byTime, capList, insertSorted, keptAfterPage, oldestByInsert, pruneTurns, reuseUnchanged, upsertSorted } from './lists'
 import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
@@ -1382,7 +1382,9 @@ export const useStore = create<StoreState>((set, get) => {
 
   async loadEarlierMessages(botId) {
     const s0 = get()
-    const oldest = s0.messages[botId]?.[0]
+    // The visible first message is sorted by created_at; a daemon clock correction can make it
+    // newer by rowid than other loaded messages. The API cursor itself is an insertion-order rowid.
+    const oldest = oldestByInsert(s0.messages[botId] ?? [])
     if (!oldest || s0.loadingMore[botId]) return
     const generation = messagePageGeneration('bot', botId)
     let lost: unknown
@@ -1393,7 +1395,7 @@ export const useStore = create<StoreState>((set, get) => {
         if (generation !== messagePageGeneration('bot', botId)) return {}
         const have = new Set((s.messages[botId] ?? []).map((m) => m.id))
         const older = page.messages.filter((m) => !have.has(m.id))
-        const merged = [...older, ...(s.messages[botId] ?? [])]
+        const merged = sortByTime([...older, ...(s.messages[botId] ?? [])])
         return {
           messages: { ...s.messages, [botId]: merged },
           // 舊頁不灌 `turns`：它只服務 in-flight / unknown 判斷（issue #25 `pruneTurns`）。
