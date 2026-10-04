@@ -3662,6 +3662,14 @@ export class MockTransport implements Transport {
 
   /** Enter 是分開的一顆鍵。 */
   /** 一鍵送出建議下一句（`POST /bots/:id/suggestion/accept`）：對不上就 409、不送；對上了照一般 prompt 開回合。 */
+  /** 快取倒數的「上次活動」改成幾分鐘前（`__amMock.cacheAge`，截圖用）；沒有 run 或 grok 不動。 */
+  setCacheAge(botId: string, minutesAgo: number) {
+    const run = this.activeRun(botId)
+    if (!run?.cache_ttl_secs) return
+    run.last_api_at = new Date(Date.now() - minutesAgo * 60_000).toISOString()
+    this.emitBotStatus(botId)
+  }
+
   setPromptSuggestion(botId: string, text: string | null) {
     const run = this.activeRun(botId)
     if (!run) return
@@ -4224,6 +4232,8 @@ function installDevHelpers(mock: MockTransport) {
     // 截圖用：`__amMock.runtime('am-codex', {runtime_model: 'GPT-6-Luna', runtime_fast: true, agent_status: 'working'})`
     runtime: (botIdOrName: string, patch: { runtime_model?: string | null; runtime_fast?: boolean; agent_status?: MockRun['agent_status'] }) =>
       mock.setRuntime(mock.botIdByName(botIdOrName) ?? botIdOrName, patch),
+    // 截圖用：快取倒數的上次活動改成幾分鐘前（`__amMock.cacheAge('am-claude', 75)`＝已涼）。
+    cacheAge: (botIdOrName: string, minutesAgo: number) => mock.setCacheAge(mock.botIdByName(botIdOrName) ?? botIdOrName, minutesAgo),
     // 截圖用：直接 PATCH 設定（`__amMock.patchBot('am-codex', {model: 'gpt-6-luna'})`），回 daemon 的回應。
     patchBot: (botIdOrName: string, body: Rec) =>
       mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, body),
