@@ -1506,6 +1506,18 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
             }
+            // agy 沒有 claude 那種 statusLine 數字：模型與 context 的 token 數（hook 子行程讀 transcript 帶來的）記成網頁讀得懂的精簡 `status_json`。
+            if provider == "agy" {
+                if let Some(r) = &run {
+                    let model = r.runtime_model.as_deref().or(bot.model.as_deref());
+                    if let Some(json) = crate::agy_support::status_json(model, body.payload.get("lastInputTokens").and_then(Value::as_i64)) {
+                        if r.status_json.as_deref() != Some(json.as_str()) {
+                            sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&json).bind(&r.id).execute(&app.db).await?;
+                            app.emit_bot_status(&bot.id).await;
+                        }
+                    }
+                }
+            }
             // Codex has no SessionStart; grok's carries no transcript path.
             if let Some(r) = &run {
                 sqlx::query(
@@ -6419,6 +6431,19 @@ mod agy_tests {
         // 同一則重送（spool 重播）：回合已收，不會長出第二個回覆。
         process(&app, &body(&bot_id, stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "say OK"})))).await.unwrap();
         assert_eq!(replies(&app, &turn_id).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stop_records_the_model_and_context_tokens_for_the_status_card() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, run_id, _turn) = agy_turn(&app, &env.project_id).await;
+        sqlx::query("UPDATE bots SET model = 'gemini-3.8-flash-medium' WHERE id = ?").bind(&bot_id).execute(&app.db).await.unwrap();
+        process(&app, &body(&bot_id, stop(json!({"lastAssistantMessage": "OK", "lastUserMessage": "say OK", "lastInputTokens": 11824})))).await.unwrap();
+        let r = db::run(&app.db, &run_id).await.unwrap().unwrap();
+        let st: Value = serde_json::from_str(r.status_json.as_deref().expect("status_json")).unwrap();
+        assert_eq!(st["model"]["id"], "gemini-3.8-flash-medium");
+        assert_eq!(st["context_window"]["total_input_tokens"], 11824);
     }
 
     #[tokio::test]

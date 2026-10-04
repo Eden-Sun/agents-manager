@@ -138,6 +138,9 @@ fn enrich_agy_payload(payload: &mut serde_json::Value, event: &str) {
     }
     let Some(path) = obj.get("transcriptPath").and_then(|v| v.as_str()).filter(|p| p.ends_with(".jsonl")) else { return };
     let Ok(tail) = crate::agy_support::read_tail(std::path::Path::new(path), TAIL_BYTES) else { return };
+    if let Some(n) = crate::agy_support::last_input_tokens(&tail) {
+        obj.insert("lastInputTokens".into(), serde_json::json!(n));
+    }
     let ex = crate::agy_support::last_exchange(&tail);
     if let Some(a) = ex.assistant {
         obj.insert("lastAssistantMessage".into(), serde_json::json!(a));
@@ -379,7 +382,7 @@ mod tests {
             &t,
             concat!(
                 r#"{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>\nsay OK\n</USER_REQUEST>\n<ADDITIONAL_METADATA>x</ADDITIONAL_METADATA>"}"#, "\n",
-                r#"{"step_index":1,"type":"PLANNER_RESPONSE","content":"OK"}"#, "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","content":"OK","input_tokens":11824}"#, "\n",
             ),
         )
         .unwrap();
@@ -388,6 +391,7 @@ mod tests {
         assert_eq!(p["hookEventName"], "Stop");
         assert_eq!(p["lastAssistantMessage"], "OK");
         assert_eq!(p["lastUserMessage"], "say OK");
+        assert_eq!(p["lastInputTokens"], 11824, "context 大小＝最後一筆回覆讀進去的 token 數");
 
         // 其他事件只補事件名，不碰 transcript。
         let mut p = serde_json::json!({"conversationId": "c-1", "transcriptPath": t});

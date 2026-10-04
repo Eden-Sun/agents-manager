@@ -165,6 +165,8 @@ pub(crate) fn echo_markers(kind: &str) -> &'static [&'static str] {
         "claude" => &["❯ ", "> "],
         "grok" => &["❯ "],
         "codex" => &["› "],
+        // agy 送出之後，使用者那句回音是 `> 原文`（1.2.16 真機）：第一則 prompt 沒有 transcript 可證時，單行放得下的靠這一列。
+        "agy" => &["> "],
         _ => &[],
     }
 }

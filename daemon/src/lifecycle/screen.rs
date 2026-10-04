@@ -193,6 +193,8 @@ pub(crate) fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
     match kind {
         "claude" | "grok" => Some("❯ "),
         "codex" => Some("› "),
+        // agy：使用者那句回音是 `> 原文`（1.2.16 真機）；輸入列是單獨一個 `>`。
+        "agy" => Some("> "),
         _ => None,
     }
 }
@@ -200,6 +202,9 @@ pub(crate) fn prompt_echo_prefix(kind: &str) -> Option<&'static str> {
 /// Index after the last prompt echo (`❯ …` / `› …`), or 0 when not on screen.
 pub(crate) fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
     let Some(echo) = prompt_echo_prefix(kind) else { return 0 };
+    if kind == "agy" {
+        return agy_after_echo(lines);
+    }
     // claude 的回音是第 0 欄的 `❯ `；回覆與貼上內文裡縮排引用的不算（issue #762，認法在 `capture::claude`）。
     if kind == "claude" {
         return crate::capture::claude::prompt_echo_row(lines).map(|i| i + 1).unwrap_or(0);
@@ -215,6 +220,53 @@ pub(crate) fn after_last_prompt_echo(kind: &str, lines: &[&str]) -> usize {
         })
         .map(|i| i + 1)
         .unwrap_or(0)
+}
+
+/// agy 的輸入區是「分隔線、`>` 輸入列、分隔線」：回音只在**輸入區上面**找（輸入列裡打到一半的字不是回音）。
+/// 最後一個回音之後才是這一回合的輸出；回音捲出畫面（長回答）就從啟動 banner 之後算（banner 帶帳號 email 與方案，絕不能進聊天紀錄）。
+fn agy_composer_top(lines: &[&str]) -> usize {
+    let is_rule = |l: &str| {
+        let t = l.trim();
+        !t.is_empty() && t.chars().all(|c| "─━".contains(c))
+    };
+    (0..lines.len().saturating_sub(1))
+        .rev()
+        .find(|&i| is_rule(lines[i]) && lines.get(i + 1).is_some_and(|n| n.trim_start().starts_with('>')))
+        .unwrap_or(lines.len())
+}
+
+fn agy_after_echo(lines: &[&str]) -> usize {
+    let top = agy_composer_top(lines);
+    if let Some(i) = (0..top).rev().find(|&i| {
+        let t = lines[i].trim_start();
+        t.starts_with("> ") && t.len() > 2
+    }) {
+        return i + 1;
+    }
+    // 沒有回音：banner（`▄▀▀▄ Antigravity CLI …` 到它底下的 logo 尾巴）之後。
+    match (0..top).find(|&i| is_agy_chrome(lines[i].trim()) && lines[i].contains("Antigravity CLI")) {
+        Some(b) => (b + 1..top).find(|&i| !lines[i].trim().is_empty() && !is_agy_chrome(lines[i].trim())).unwrap_or(top),
+        None => 0,
+    }
+}
+
+/// `● Bash(ls) (ctrl+o to expand)`／`● Read(file)`：工具呼叫列（`● 工具名(` 開頭，或帶展開提示）。
+fn is_agy_tool_row(t: &str) -> bool {
+    let Some(rest) = t.strip_prefix("● ") else { return false };
+    rest.contains("(ctrl+o") || rest.split_once('(').is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ':')))
+}
+
+/// agy 畫面上不是回答的東西：shell 提示與我們打進去的環境載入／啟動指令、banner（logo、版本、**帳號與方案**、模型、cwd）、輸入區底下的提示列。
+fn is_agy_chrome(s: &str) -> bool {
+    let s = s.trim();
+    s.starts_with('▄')
+        || s.starts_with('▀')
+        || s.contains("Antigravity CLI")
+        || s.contains("am-env")
+        || s.starts_with("agy ")
+        || s == "agy"
+        || s.starts_with("? for shortcuts")
+        || (s.contains('@') && s.split_whitespace().next().is_some_and(|w| w.contains(':') && (w.contains("$") || w.ends_with('$') || w.ends_with('#'))))
 }
 
 /// What the user typed on the last prompt echo, prefix stripped — the only source of the user
@@ -981,9 +1033,34 @@ pub(crate) fn clean_screen(kind: &str, text: &str) -> Option<String> {
     let banner_at = if kind == "codex" { codex_inline_banner(&lines).map(|b| b.start) } else { None };
     let mut out: Vec<String> = Vec::new();
     let grok = kind == "grok";
+    let agy = kind == "agy";
+    let agy_end = if agy { agy_composer_top(&lines) } else { lines.len() };
+    // agy：`▸ Thought for …` 底下那一段思考內文不是回答，到空行為止。
+    let mut in_thought = false;
     // grok's telemetry banner wraps at pane width: skip "Help improve Grok" … "Privacy Policy." as a block.
     let mut in_banner = false;
     for (i, line) in lines.iter().enumerate().skip(start) {
+        if agy {
+            // 輸入區（上面那條分隔線）就是輸出的盡頭。
+            if i >= agy_end {
+                break;
+            }
+            let t = line.trim();
+            if t.starts_with('▸') {
+                in_thought = true;
+                continue;
+            }
+            if in_thought {
+                if t.is_empty() {
+                    in_thought = false;
+                }
+                continue;
+            }
+            // 工具列 `● Bash(ls) (ctrl+o to expand)`、banner、shell 行都不是回答。
+            if is_agy_chrome(t) || is_agy_tool_row(t) {
+                continue;
+            }
+        }
         // codex 的 inline banner（#779）是輸入框的一部分，不是回覆。
         if banner_at == Some(i) {
             break;

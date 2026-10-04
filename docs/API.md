@@ -2305,7 +2305,7 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 |---|---|
 | `agent_title` | herdr `agent.list` 的 `terminal_title_stripped`（agent 自己替工作取的名字）。herdr 沒有標題事件，daemon 每 4 秒輪詢，變了才寫並推。前後的 `-` 去掉；只是 CLI 名字（`Claude Code`、`codex`）當 `null`。run 結束不清，UI 只在 run 活著時讀 |
 | `status_line` | 使用者自己的 claude `statusLine` 命令輸出（ANSI 已去）。daemon 的 `agents-managerd statusline` 代跑它並把同一份輸出放進 POST `/hook/claude` 的 payload。只有 claude；沒設 `statusLine.command` 為 `null`；變了才寫 |
-| `status_json` | statusLine 壓縮前的原始 JSON（`transcript_path` 以外整份），daemon 補 `account_email`（讀該身份設定目錄 `.claude.json` 的 `oauthAccount.emailAddress`）。變了才寫 |
+| `status_json` | statusLine 壓縮前的原始 JSON（`transcript_path` 以外整份），daemon 補 `account_email`（讀該身份設定目錄 `.claude.json` 的 `oauthAccount.emailAddress`）。變了才寫。**agy** 沒有 statusLine 數字，是精簡版 `{"model":{"id","display_name"},"context_window":{"total_input_tokens":N}}`（N＝最後一筆回覆的 `input_tokens`；視窗大小不知道，沒有 `used_percentage`；SPEC §12a.9） |
 | `herdr_session` | bot 與 run 都有；一般為 `null`（沿用 host 設定），從本機 `default` session 採用的是 `"default"`（SPEC §6.5.1） |
 | `background_jobs` | 回合結束後畫面底部還標著的背景工作數（claude 模式列的 `N shell(s)`、codex 的 `N background terminal(s) running`），`0`＝巡邏看過、沒有；`null`＝巡邏還沒看過這個 run（daemon 剛重啟、新 run、畫面讀不到），沒有證據（SPEC §6.14，issue #714／#767）。只在 `GET /api/state` 與 WS `bot_status` 的 run 物件裡；記憶體裡的數字、不在 DB，daemon 重啟後最多晚一輪（30 秒）補上。不影響送 prompt |
 | `background_since` | 這一段背景從什麼時候開始（ISO 8601，數字第一次 > 0 的那一刻；N 變 M 不重算、歸零清掉）；`background_jobs` 是 0 或 `null` 時為 `null`。記憶體裡的，daemon 重啟後從重啟後第一次看到算起（下限）。SPEC §6.14，issue #774 |

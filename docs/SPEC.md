@@ -3409,8 +3409,15 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 輪詢每 5 分鐘（`AGY_POLL`，每週桶變動很慢，每次要起一個 200 MB 的執行檔），失敗冷卻 15 分鐘；`GET /api/quota?refresh=1` 不走冷卻、一律真的探測。`quota::set` 的「分開那格收斂到裸 key 就清掉」只清查得到身分、而且身分共用預設帳號的 `agy:<身分>`；`agy:claude-gpt` 查不到身分，所以不會被 `agy` 的寫入清掉（有測試）。
 網頁（`QuotaStrip`）：agy **一格兩條**——`G`＝`agy`（Gemini）、`C+G`＝`agy:claude-gpt`（Claude 與 GPT），都只有週窗（`store/quotaLookup.weeklyOnlyKind`：grok 與 agy）；手機與收合也兩條都寫，popover 列兩行，停用勾選管整格（2026-10-04 使用者：「兩種放一起顯示，不然佔空間」）。agy bot 在側欄的反灰／黃燈看的是 `agy`（Gemini）那桶。
 
+### 12a.9 子 agent（`herdr agent start --kind agy`，沒有 hook，2026-10-04 a1）
+hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher 看 pane env 的 `AM_BOT_ID`／`AM_HOOK_TOKEN`）；子 agent 的 pane env 是**父 bot 的**，它的 hook 會被當成別種 provider 擋掉（409 `provider_mismatch`），所以跟 grok 子 agent（§12.5）一樣**改讀對話檔**，不去替子 agent 補寫設定檔（全域 `hooks.json`／`settings.json` 是使用者的、也繞不過 env）：
+- **session 對 pane**（`lifecycle/agy_session.rs`，只做本機）：agy 的行程一直開著 `~/.gemini/antigravity-cli/conversations/<id>.db`，pane 內行程（`memproc::pids_in_pane`，環境 `HERDR_PANE_ID` 指回 pane）的 `/proc/<pid>/fd` 連結就是對話 id。記過而且還開著的不換；`/clear` 之後換成還開著、紀錄檔最新的那段；別的在跑 run 綁走的不給；都沒有就維持畫面備援。找到的記在 `runs.native_session_id` 與 `runs.transcript_path`（`…/brain/<id>/.system_generated/logs/transcript_full.jsonl`）。
+- **一問一答＝一個回合**（`agy_support::parse_turns`，沿用 `grok_transcript` 的記帳：先認既有回合、畫面備援抓的回覆換成原文、鑰匙 `native_turn_id = p<USER_INPUT 的 step_index>`）：回覆是該問之後**最後一則** `PLANNER_RESPONSE`；最後一則紀錄是工具步驟（`RUN_COMMAND`…）＝還在跑、不收；`status` 不是 `DONE` 的步驟不算最終回覆。
+- 模型與 context：`runs.runtime_model` 在收編時補 `--model`（只補空的，`reconcile::sync_pane_model`）；`runs.status_json` 寫精簡版 `{"model":{"id"},"context_window":{"total_input_tokens":N}}`（N＝最後一筆回覆的 `input_tokens`，真機新對話第一問 11824）。**視窗大小沒有可靠來源，所以不填百分比**；網頁的 context 一行寫「約 Nk tokens」。AG Man 自己啟動的 agy bot 同樣的 `status_json` 由 `Stop` hook 帶的 `lastInputTokens` 寫。
+- **畫面備援**（transcript 讀不到時，`screen.rs`）：回音是 `> 原文`、輸入區是「分隔線、`>` 輸入列、分隔線」；回覆只取最後一個回音之後到輸入區上緣之間、去掉 `● 工具名(…)` 工具列、`▸ Thought for …` 與它底下那段思考內文；回音捲出畫面時從啟動 banner 之後算。shell 提示行、我們打進去的 `. /tmp/am-env.… && rm -f …` 與啟動指令、banner（logo、**帳號 email 與方案**、模型、cwd）、輸入區底下的 `? for shortcuts` 一律不進聊天紀錄。送出之後的 `> 原文` 單行回音也是第一則 prompt 的送達證據（`echo_markers("agy")`）。
+
 ### 12a.8 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
-resume（`--conversation=<uuid>`／`-c`）與 `bulk_restart`／`idle_sleep`、`/fork`、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、child agent（herdr shim `--kind agy`）、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
+resume（`--conversation=<uuid>`／`-c`）與 `bulk_restart`／`idle_sleep`、`/fork`、遠端的子 agent（§12a.9 只做本機）、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
 
 ## 13. 專案群組聊天
 

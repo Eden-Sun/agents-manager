@@ -100,7 +100,7 @@ async fn try_open_turn(app: &Arc<App>, run: &db::Run, from_bot: &str, text: &str
         return Ok(None);
     }
     // 沒有 hook 的 grok 由它的對話檔記回合（§12.5）：slash 指令不是對話；收件方忙著時這句先記下，等對話檔出現它再收進自己的回合。
-    let transcript = run.adopted != 0 && db::bot(&app.db, &run.bot_id).await?.is_some_and(|b| b.kind == "grok" && b.inject_hooks == 0);
+    let transcript = run.adopted != 0 && db::bot(&app.db, &run.bot_id).await?.is_some_and(|b| matches!(b.kind.as_str(), "grok" | "agy") && b.inject_hooks == 0);
     if transcript && super::grok_transcript::is_slash_command(text) {
         return Ok(None);
     }
