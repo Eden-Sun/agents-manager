@@ -86,7 +86,7 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
             <span>灰：主機斷線、讀不到</span>
           </li>
         </ul>
-        <p className="chip-legend-tip">手機：長按晶片後拖曳可以排順序；長按不動放開就是這份說明。</p>
+        <p className="chip-legend-tip">手機：長按晶片會跳出它的狀態卡，手指不放直接拖就能排順序。</p>
       </div>
     </div>,
     document.body,
