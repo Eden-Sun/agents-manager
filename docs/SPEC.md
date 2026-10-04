@@ -4670,7 +4670,7 @@ AGM 是使用者唯一的手機入口，但 `--remote-control AGM` 只是 argv �
   **什麼算 dirty**（2026-10-02 在拋棄式 clone 照 `daemon-update-kick.sh` 的做法——`checkout --force --detach`、`git clean -fdq`、`bun install --frozen-lockfile && bun run build`、`cargo build --release -p agents-managerd`（沒有 `--locked`）——實測）：只看**已追蹤**檔案的改動；`target/`、`web/dist`、`web/node_modules`、沒追蹤的檔案都不算，web 與 cargo 建置完 `git status` 是空的，`--version` 印乾淨的完整 sha，增量重建換 commit 後 sha 跟著換。真的改了追蹤檔（例如 `Cargo.lock` 被改寫）才會是 `-dirty`，build log 會有 `warning: agents-managerd@…: build tree is dirty (N tracked file(s) changed): M <檔>` 指出是誰。`git status` 用 `--no-optional-locks`，不跟部署 checkout 上別的 git 指令搶 index。
   `daemon-swap.sh` 換上之前先跑 `<新 binary> --version`，內嵌 sha 要是 `--sha` 的延伸（`--sha` 可以是前綴）；對不上、`-dirty`、舊 binary 沒內嵌 sha 都以 **rc=10** 中止——窗口都還沒拿、舊 daemon 沒停、binary 沒動；`daemon-update-kick.sh` 推 `swap_binary_sha_mismatch`、記一次失敗、**不**記進 rejected（commit 沒問題，是建出來的檔不對）。新 daemon 起來後再用 `agm supervisor` 的 `last_deploy.sha_full`／`dirty` 複核一次，不符就回滾（rc=7）。daemon 本身驗不了自己換上去的是不是核准的那顆（檔案只有腳本摸得到），所以驗證放在腳本。
 - **上次成功上線**：`GET /api/supervisor` 的 `last_deploy{sha,at}`——sha 由 `daemon/build.rs` 在建置時編進 binary，
-  `at` 是**這顆 sha 第一次跑起來**的時間，存在 `<data_dir>/last-deploy.json`（sha 跟檔裡一樣就沿用檔裡的時間）。
+  `at` 是**這顆 sha 第一次跑起來**的時間，存在 `<data_dir>/last-deploy.json`（目前 sha 重啟沿用目前時間；另保留前一 sha 的時間，部署驗證失敗回滾時沿用舊值；以同目錄原子替換寫入）。
   origin/main 動了不等於上線了，這一格說的是「現在跑的是哪一版、什麼時候換上去的」。
   以前 `at` 是 process 起來的時間，binary 沒換的重啟（launchd 拉回、restart 窗口、手動重啟）也會把它往前推，
   上線前提出的重建申請就從 chip 與清單上消失，而腳本照 `daemon-update.built` 的 mtime 仍然數得到（review 2026-09-16 c3 L3）。
