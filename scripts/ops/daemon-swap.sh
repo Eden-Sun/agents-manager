@@ -90,6 +90,15 @@ prune_old_db_backups() {
         fi
     done
 }
+write_built_marker() { # write_built_marker <short sha>; publish by same-directory atomic rename
+    local sha="$1" marker="$AGM_DIR/daemon-update.built" tmp
+    [ ! -L "$marker" ] || return 1
+    if [ -e "$marker" ] && [ ! -f "$marker" ]; then return 1; fi
+    tmp=$(mktemp "$AGM_DIR/daemon-update.built.tmp.XXXXXX") || return 1
+    if ! printf '%s\n' "$sha" > "$tmp"; then rm -f "$tmp"; return 1; fi
+    if ! mv -f "$tmp" "$marker"; then rm -f "$tmp"; return 1; fi
+    return 0
+}
 service_capability() {
     # 測試用：注入假的能力探測，才不用真的打 daemon。
     [ -n "${SWAP_CAP_CMD:-}" ] && { "$SWAP_CAP_CMD"; return; }
@@ -953,8 +962,14 @@ log "bots before=$(printf '%s\n' "$BEFORE_ROWS" | grep -c .) after=$(printf '%s\
 ERRS=$(tail -c "+$((OFF + 1))" "$DLOG" 2>/dev/null | grep -cE '\bERROR\b|drift')
 log "daemon.log since restart: ERROR/drift lines=$ERRS"
 
-echo "$SHORT" > "$AGM_DIR/daemon-update.built"
-prune_old_db_backups
-log "DONE .built=$SHORT pid=$(dpid) db_backup=$DBB"
+BUILT_WRITE_FAILED=0
+if write_built_marker "$SHORT"; then
+    prune_old_db_backups
+    log "DONE .built=$SHORT pid=$(dpid) db_backup=$DBB"
+else
+    BUILT_WRITE_FAILED=1
+    log "ERROR: 部署成功但寫入 daemon-update.built 失敗；新 binary 已通過驗證並在線，DB 備份保留在 $DBB"
+fi
 # 換版成功、但窗口沒交還：下一個人拿不到窗口，要看得出來（issue #477）。
 [ "$RELEASE_FAILED" = 0 ] || { log "EXIT 8: 換版成功，但 restart 窗口沒有交還成功（見上面的 rc）"; exit 8; }
+[ "$BUILT_WRITE_FAILED" = 0 ] || { log "EXIT 11: 新 binary 健康在線，但部署 sha 標記沒有更新"; exit 11; }
