@@ -63,10 +63,17 @@ fn lock_owner_check() -> &'static str {
   case "$owner" in *:*) pgid=${owner%%:*}; nonce=${owner#*:} ;; *) return 1 ;; esac
   case "$nonce" in ''|*:* ) return 1 ;; esac
   case "$pgid" in ''|0|*[!0-9]*) return 1 ;; esac
-  kill -0 "-$pgid" 2>/dev/null || return 1
-  members=$(ps -A -o pid= -o pgid= 2>/dev/null | awk -v pgid="$pgid" '$2 == pgid { print $1 }') || return 1
+  rows=$(ps -A -o pid= -o pgid= 2>/dev/null) || return 2
+  members=$(printf '%s\n' "$rows" | awk -v pgid="$pgid" '
+    NF == 0 { next }
+    NF != 2 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ { bad=1; next }
+    { seen=1; if ($2 == pgid) print $1 }
+    END { if (bad || !seen) exit 2 }
+  ') || return 2
+  [ -n "$members" ] || return 1
   for member in $members; do
-    cmd=$(ps -ww -p "$member" -o command= 2>/dev/null) || continue
+    cmd=$(ps -ww -p "$member" -o command= 2>/dev/null) || return 2
+    [ -n "$cmd" ] || return 2
     case "$cmd" in *"AM_CODEX_INSTALL_OWNER=$nonce"*) return 0 ;; esac
   done
   return 1
@@ -89,7 +96,12 @@ fn locked_script(lock: &str, inner: &str) -> String {
     let reclaim = crate::hosts::sh_quote(&format!(
         r#"{owner_check}
 p=$(readlink "$L" 2>/dev/null)
-if [ -n "$p" ] && lock_owner_alive "$p"; then echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; fi
+if [ -n "$p" ]; then
+  lock_owner_alive "$p"
+  owner_status=$?
+  if [ "$owner_status" -eq 0 ]; then echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; fi
+  if [ "$owner_status" -gt 1 ]; then echo "{LOCKED_MARK} owner probe unavailable" >&2; exit {LOCKED_EXIT}; fi
+fi
 rm -f "$L"
 ln -s "$GROUP_ID:$LOCK_NONCE" "$L" 2>/dev/null || {{ p=$(readlink "$L" 2>/dev/null); echo "{LOCKED_MARK} pid=${{p%%:*}}" >&2; exit {LOCKED_EXIT}; }}
 "#,
@@ -153,7 +165,7 @@ exit "$status"
 /// 那台的安裝鎖現在有沒有活著的主人：印 `busy <pid>` 或 `free`。
 fn probe_script(lock: &str) -> String {
     format!(
-        r#"L={lock}; {owner_check}; p=$(readlink "$L" 2>/dev/null); if [ -n "$p" ] && lock_owner_alive "$p"; then echo "busy ${{p%%:*}}"; else echo free; fi"#,
+        r#"L={lock}; {owner_check}; p=$(readlink "$L" 2>/dev/null); if [ -z "$p" ]; then echo free; else lock_owner_alive "$p"; status=$?; if [ "$status" -eq 0 ]; then echo "busy ${{p%%:*}}"; elif [ "$status" -eq 1 ]; then echo free; else echo unknown; exit 70; fi; fi"#,
         lock = shell_lock_path(lock),
         owner_check = lock_owner_check(),
     )
@@ -3665,6 +3677,61 @@ mod tests {
 
         assert!(first_status.success() || second_status.success(), "one contender must acquire the stale lock");
         assert!(!both_entered, "stale-lock cleanup must not remove a newer installer's lock");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_or_unrecognized_process_list_never_releases_a_live_install_lock() {
+        let dir = crate::testing::track(std::env::temp_dir().join(format!("am-cli-lock-probe-fail-closed-{}", db::ulid())));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for (label, bad_ps) in [
+            ("unavailable", "#!/bin/sh\ncase \"$*\" in *\"-A -o pid=\"*) exit 1;; esac\nexec /bin/ps \"$@\"\n"),
+            ("format", "#!/bin/sh\ncase \"$*\" in *\"-A -o pid=\"*) printf 'PID PGID\\n'; exit 0;; esac\nexec /bin/ps \"$@\"\n"),
+        ] {
+            let case_dir = dir.join(label);
+            let bin = case_dir.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            crate::testing::write_exec(bin.join("ps"), bad_ps);
+            let lock = case_dir.join("codex-install.lock");
+            let started = case_dir.join("owner-started");
+            let release = case_dir.join("release-owner");
+            let contender_ran = case_dir.join("contender-ran");
+
+            let inner = format!(": > '{}'; while [ ! -e '{}' ]; do sleep 0.01; done", started.display(), release.display());
+            let mut owner = tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(locked_script(&lock.display().to_string(), &inner))
+                .kill_on_drop(true)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            for _ in 0..300 {
+                if started.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(started.exists(), "the owner installer must hold the lock before probing `{label}`");
+
+            let inner = format!(": > '{}'", contender_ran.display());
+            let contender = tokio::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(locked_script(&lock.display().to_string(), &inner))
+                .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()))
+                .kill_on_drop(true)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let output = tokio::time::timeout(Duration::from_secs(5), contender.wait_with_output()).await.unwrap().unwrap();
+            let message = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+
+            std::fs::write(&release, "finish").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), owner.wait()).await.unwrap().unwrap();
+            assert!(message.contains(LOCKED_MARK), "uncertain process-list result must fail closed for `{label}`: {message}");
+            assert!(!contender_ran.exists(), "a failed process-list probe must not remove the live lock (`{label}`)");
+        }
     }
 
     /// The `/bin/sh` process here stands in for the remote command shell started by SSH.
