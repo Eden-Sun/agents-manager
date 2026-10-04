@@ -198,6 +198,16 @@ CREATE TABLE IF NOT EXISTS composer_drafts (
   rev INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );
+-- claude 倒回（SPEC §6.13）的倒回點：TUI 的 /rewind 不寫 transcript，下一次 --resume／fork 之前補一行錨點（`rewind/anchor.rs`）。
+-- leaf_uuid NULL＝倒回到空對話；transcript_len＝倒回當時的長度，之後長出 user／assistant 列＝有新回合，作廢。
+CREATE TABLE IF NOT EXISTS rewind_anchors (
+  session_id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  transcript_path TEXT NOT NULL,
+  leaf_uuid TEXT,
+  transcript_len INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
@@ -290,6 +300,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (38, "f2d07b091615d3d7"),
     // 分享 bot：`bot_shares.token`（token 原文，管理端隨時拿得回完整連結；NULL＝只有 hash 的舊列）。
     (39, "827c54df62168fe1"),
+    // claude 倒回：`rewind_anchors`（下一次 resume 之前補進 transcript 的倒回點）。
+    (40, "715f4def20647528"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

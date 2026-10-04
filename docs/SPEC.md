@@ -2732,7 +2732,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
 - **範圍**：只收 claude；codex／grok 409 `unsupported_kind`。子 agent 也可以（daemon 本來就對子 agent 的 pane 打字）；從使用者自己 default session 匯入的
   不行（§6.5.1：只看不代打）。bot 要在跑而且**閒著**（idle、沒有在飛或排隊的回合）；從檢查到打完字都**持 bot 鎖**，期間 prompt 進不來。群組發言（`group_id`）網頁不給按。
 - **做法：驅動 TUI 自己的 `/rewind`**（使用者 2026-09-23 裁示）。同一個 session、同一個 jsonl 內分支：session id 不變、不多一個檔、**不重啟**，被倒掉的原文 CLI 會自己放回輸入列。
-  不用的做法：`--resume-session-at`（2.1.280 只在 print 模式生效，help 原文「Ignored outside print mode」）；daemon 自己截斷 transcript 另存新 session 再 `--resume`
+  不用的做法：`--resume-session-at`（2.1.280 只在 print 模式生效，help 原文「Ignored outside print mode」；2.1.289 互動模式實測仍忽略）；daemon 自己截斷 transcript 另存新 session 再 `--resume`
   （要理解 transcript 格式、要重啟、換 session id——#405 第一版，已放棄）。
 - **每一步讀畫面確認才按下一步**（claude 2.1.280 實機畫面：`daemon/src/rewind/claude_2.1.280_rewind_*.txt`）：
   1. 輸入列要空、畫面上沒有開著的 rewind 選單，否則 409 `composer_busy`／`rewind_ui_open`，一個字都不打。畫面一律帶樣式讀（`read_styled`）再經
@@ -2754,6 +2754,17 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
      輸入列裡的不是那一則就不清，回應 `pane_cleared: false`，網頁通知叫人到終端清。
   - 打字前先記 `runs.pane_typed`（同 §4.4a 的 slash 指令：直接對 pane 打過字的 run 之後的 prompt 走打字路線）；記不下來就不打。
 - **標記**：`messages.rewound_at`——那則與之後的（同一個 conversation、rowid 不小於它）標上時間，**不刪**；對話加一則 system 說明。推 WS `messages_rewound`。
+- **重啟後也要停在倒回點**（2026-10-04 ai-cc：倒回後 8 秒 `restart?resume=native`，被倒掉的問答又回到 context；`daemon/src/rewind/anchor.rs`）。
+  claude 2.1.289 實測：TUI 的 `/rewind` **不寫 transcript**，下一則送出時才從倒回點分岔；倒回後沒送東西就結束，CLI 結束時還補一行指向舊分支尾巴的
+  `last-prompt`，`--resume` 就接回舊分支。互動模式的 `--resume-session-at` 照舊被忽略。CLI 自己認得的倒回錨點是
+  `{"type":"last-prompt","leafUuid":<uuid>,"explicit":true,"rewound":true}`（`leafUuid:null`＝空對話）：transcript 最後一個 `last-prompt` 是它時，
+  `--resume`／`--fork-session` 都從那裡接，之後新回合從它長、不送訊息再重啟也保得住；CLI 還開著時寫進去會被它結束時那行蓋掉。所以：
+  - 倒回成功時（還握著 bot 鎖）沿 transcript 目前這條鏈由新到舊找那一則（第一行比對＋跟選單一樣跳過較新的同一句，全文 `squash` 後要相同；`<pasted_content>` 先拆），
+    記它的 `parentUuid` 與當時 transcript 的長度進 `rewind_anchors`（以 session id 為鍵，留最新一筆）。被丟掉的那則（步驟 3 的例外）記的是真的按了 Restore 的那一則；沒按就不記。
+  - 下一次照這段 session 起 CLI 之前——`native_resume_plan`（只在 CLI 已經結束的那一次，重啟前的檢查不算；換身分時在複製 transcript 之前）、
+    子 agent 原地重啟、fork 的來源——長度之後沒有新的 user／assistant 列（非 sidechain）而且最後一個 `last-prompt` 不是錨點，就把錨點補在檔尾；
+    有新回合＝CLI 已經從倒回點長出新分支，紀錄刪掉。fork 時來源還開著也照補：來源結束時蓋掉的話，它自己下一次 resume 會再補。
+  - 只做本機 bot（遠端 transcript 在別台，不補）；run 沒記 session／transcript、找不到那一則、讀寫檔失敗都只記 log，倒回本身照樣成功，重啟行為同修之前。
 - **不做的**：`Summarize from here／up to here`、還原程式碼（`--rewind-files`）、codex／grok。
 
 - **輸入列有字**（2026-10-01 使用者：cf-ox-2 倒回連兩次 `composer_busy`，只叫人去終端清）：409 帶 `draft`（那段字），網頁跳確認框給人看、按「清掉再倒回」重送並帶 `clear_composer`＋`expect_composer`；daemon 在 bot 鎖裡重讀輸入列，只有完整草稿相同才 ctrl+c 清掉（草稿裡的空白列也算草稿，整段讀到框的下緣分隔線為止；只正規化 CRLF/LF 換行，空白與圖片佔位差異都算不同；等提示消失）再照常倒回，對不上回 `composer_changed`、不動。清掉的字不送出、不放回網頁輸入框。daemon log 只記草稿是否存在與字元數，不記草稿內容。
