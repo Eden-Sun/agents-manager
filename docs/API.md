@@ -268,6 +268,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/stop` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/share` | User-only；Bot／Service principal（含 AGM role Bot）→ 403 `user_only` |
 | POST | `/api/bots/{id}/share/rotate` | User-only；Bot／Service principal（含 AGM role Bot）→ 403 `user_only` |
+| POST | `/api/bots/{id}/suggestion/accept` | User-only（handler `require_user`）；Bot 與 AGM role 均 → 403 `user_only`；Service 也 → 403 `user_only`。它對使用者的輸入框按 Tab＋Enter，等於替使用者送訊息 |
 | POST | `/api/bots/{id}/text` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/build/remote/install-toolchain` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/build/remote/test` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
