@@ -89,3 +89,12 @@ test('不是閒著、不是 claude 的 bot：不顯示', async () => {
   await openChat('am-claude-2')
   assert.equal(bar(), null, '沒有建議的 bot 沒有那一條')
 })
+
+test('CLI 建議文字以純文字顯示，HTML 標籤不會變成 DOM', async () => {
+  const payload = '<img src=x onerror=alert(1)> & <svg onload=alert(2)>'
+  await openChat('am-claude', payload)
+  const el = button()!
+  assert.equal(el.querySelector('img, svg'), null, 'CLI 內容不得建立可執行元素')
+  assert.ok(el.textContent?.includes(payload), '原字串照樣可見')
+  assert.ok(el.title.startsWith(payload), 'title 也保持為字串內容')
+})
