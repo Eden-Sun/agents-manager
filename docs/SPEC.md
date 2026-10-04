@@ -2444,7 +2444,7 @@ claude 下載新版後只能靠重啟套用（`runs.update_notice`，§3.1）。
   確認後 `POST /api/hosts/{name}/cli-update {kind:"codex",target_version}`（API §12.7a，`cli_update.rs`），daemon 綁定這一版（#569）：
   0. `target_version` 要等於 daemon 眼中那台「需安裝」通知的最新目標，不同（舊分頁、剛有新版、已經裝好沒有「需安裝」）409 `stale_target`，什麼都不跑；
   1. 讀安裝前的 `codex --version`（讀不到就不裝）；已經 `>= target_version` 就不跑安裝指令，直接到第 4 步（`already_installed:true`）；
-  2. 在那台跑**寫死的**官方安裝指令 `curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`（本機 `/bin/sh -c`，遠端走既有 ssh 執行路徑；逾時 5 分鐘；輸出寫 `<data_dir>/cli-update.log`）；
+  2. 在那台跑**寫死的**官方安裝指令 `curl --proto '=https' --proto-redir '=https' -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh`（僅允許 HTTPS 下載與重新導向；本機 `/bin/sh -c`，遠端走既有 ssh 執行路徑；逾時 5 分鐘；輸出寫 `<data_dir>/cli-update.log`）；
   3. 重新讀 `codex --version`，**真的變新而且 `>= target_version`** 才往下——安裝失敗、讀不到、版本沒變、或升了但沒到目標（`target_not_reached`，
      CDN 還沒傳到、PATH 上是別顆）：一顆 bot 都不重啟，`cli_update_done` 帶 `reason` 講原因、通知不動；比目標還新照成功走；
   4. 把那台 codex run 的通知改成「已安裝，重啟套用」，接著開一鍵重啟，**範圍只限那台主機的 codex**（`bulk_restart::spawn_scoped`；claude 與別台不在這批），之後照上面的規則與事件走。
