@@ -52,7 +52,7 @@ import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
-import { quotaForIdentity } from './quotaLookup'
+import { quotaForIdentity, weeklyOnlyKind } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
 import { paneReadOnly } from '../lib/shellAccess'
 import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
@@ -3656,7 +3656,7 @@ export function botQuotaWarning(
   const q = quotaForIdentity(quota, host, kind, identity, identities)
   if (!q) return null
   const five = q.five_hour?.critical ? { pct: Math.max(0, Math.round(100 - q.five_hour.used_pct)), window: '5h' as const } : null
-  const sevenWindow: QuotaWarningWindow = kind === 'grok' ? '週' : '7d'
+  const sevenWindow: QuotaWarningWindow = weeklyOnlyKind(kind) ? '週' : '7d'
   const seven = q.seven_day?.critical
     ? { pct: Math.max(0, Math.round(100 - q.seven_day.used_pct)), window: sevenWindow }
     : null
@@ -3695,7 +3695,7 @@ export function botQuotaLevel(
     w && (w.low || w.critical)
       ? { level: (w.critical ? 'crit' : 'warn') as 'warn' | 'crit', pct: Math.max(0, Math.round(100 - w.used_pct)), window: name }
       : null
-  const hits = [pick(q.five_hour, '5h'), pick(q.seven_day, kind === 'grok' ? '週' : '7d'), onFable ? pick(q.fable, 'F') : null].filter(
+  const hits = [pick(q.five_hour, '5h'), pick(q.seven_day, weeklyOnlyKind(kind) ? '週' : '7d'), onFable ? pick(q.fable, 'F') : null].filter(
     (x): x is QuotaLevel => x !== null,
   )
   if (hits.length === 0) return null

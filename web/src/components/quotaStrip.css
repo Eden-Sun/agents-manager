@@ -250,6 +250,10 @@
   color: var(--kind-grok);
 }
 
+.quota-hp.focused.agy .quota-kind {
+  color: var(--kind-agy);
+}
+
 .quota-hp.focused .quota-identity {
   color: var(--text);
 }
@@ -541,6 +545,10 @@
 
 .quota-pop-head .quota-kind.grok {
   color: var(--kind-grok);
+}
+
+.quota-pop-head .quota-kind.agy {
+  color: var(--kind-agy);
 }
 
 .quota-plan {

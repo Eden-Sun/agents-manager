@@ -1992,7 +1992,9 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
       "reset_credits": null, "plan": null, "updated_at": "…", "stale": false, "source": "statusline", "account": null, "host": "local" },
     "claude:cc1": { "…": "同上，account = \"cc1\"" },
     "m4p/claude": { "…": "m4p 上讀到的同一組欄位，host = \"m4p\"" },
-    "grok": { "five_hour": null, "seven_day": {"used_pct": 14.0, "resets_at": "…", "low": false, "critical": false}, "plan": "SuperGrok", "updated_at": "…", "source": "grok-usage", "host": "local" }
+    "grok": { "five_hour": null, "seven_day": {"used_pct": 14.0, "resets_at": "…", "low": false, "critical": false}, "plan": "SuperGrok", "updated_at": "…", "source": "grok-usage", "host": "local" },
+    "agy": { "five_hour": null, "seven_day": {"used_pct": 2.0, "resets_at": "…", "low": false, "critical": false}, "plan": null, "updated_at": "…", "source": "agy-usage", "host": "local" },
+    "agy:claude-gpt": { "…": "agy 的第二個每週桶（Claude 與 GPT-OSS）；`agy` 是 Gemini 那桶。`claude-gpt` 不是身分，只是這把 key 的子帳號名" }
 } }
 ```
 
@@ -2036,6 +2038,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
     （`Current session` / `Current week (all models)` / `Current week (Fable)`，其他 model 週列忽略）；`plan` 取 `subscriptionType`。
     每個有獨立 `CLAUDE_CONFIG_DIR` 的身份各探一次（該主機清單，含 shell `ccN`）；60 秒內剛被 statusLine 更新**且**登入狀態已知的跳過；沒登入的 park 30 分鐘、其他失敗 5 分鐘。
   - `grok-usage`：`am-quota` session 的 TUI `/usage` 探測，只有週額度（`seven_day`），`plan` 取 `Weekly limit (SuperGrok)` 括號。
+  - `agy-usage`：`agy -p "/usage" --output-format json`（唯讀、不開對話、不耗額度；拋棄式暫存 cwd、關自動更新、40 秒逾時、每 5 分鐘，失敗冷卻 15 分鐘），**兩個每週桶各一把 key**：`agy`＝Gemini、`agy:claude-gpt`＝Claude 與 GPT-OSS，都只填 `seven_day`（`five_hour`／`fable` 為 `null`），`plan` 為 `null`。`?refresh=1` 也會探測 agy。沒裝 agy 的主機（含遠端）不探測、不報錯，兩把 key 都是 `null`；探測失敗不覆蓋舊讀數（`stale` 自己會亮）。SPEC §12a.7。
 
 ### 12.5 WS `quota_updated`
 

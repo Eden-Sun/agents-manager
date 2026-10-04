@@ -11,6 +11,17 @@
 import { quotaKey } from '../api/types'
 import type { BotKind, Identity, KindQuota, QuotaMap } from '../api/types'
 
+/**
+ * 只回報**每週**窗（存在 `seven_day`、畫成「週」，不叫 7d）的 kind：grok（SPEC §12.6）與 agy（SPEC §12a.7，兩個桶：
+ * key `agy`＝Gemini、`agy:claude-gpt`＝Claude 與 GPT）。
+ */
+export function weeklyOnlyKind(kind: BotKind): boolean {
+  return kind === 'grok' || kind === 'agy'
+}
+
+/** agy 的第二個桶用身分形狀的 key（`agy:claude-gpt`），但它不是身分：沒有登入狀態、不能停用。 */
+export const AGY_CLAUDE_GPT = 'claude-gpt'
+
 /** 共用工具預設帳號的身分名。 */
 export const DEFAULT_IDENTITY = 'cc0'
 

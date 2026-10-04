@@ -9,7 +9,7 @@ import { identitiesOfHost, identityStatusOfHost, quotaClaimantsOf, toolsOfHost, 
 import { PHONE_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import './mobileQuota.css'
 import { isQuotaDisabled, quotaDisableKey, setQuotaDisabled, useDisabledQuota } from '../store/quotaHide'
-import { quotaBaseKey } from '../store/quotaLookup'
+import { AGY_CLAUDE_GPT, quotaBaseKey, weeklyOnlyKind } from '../store/quotaLookup'
 import { KindIcon } from './KindTag'
 import { KIND_LABEL } from './kindMeta'
 import { QuotaLoginShell } from './QuotaLoginShell'
@@ -25,11 +25,11 @@ import './quotaStrip.css'
  * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`). Every kind stays visible;
  * only its windows collapse. Fill length carries the level so it survives greyscale.
  * 桌機每個帳號都畫完整量表，不收進 `+N`（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
- * grok 只有週窗（SPEC §12.6），每種 kind 只畫實際回報的窗口。
+ * grok、agy 只有週窗（SPEC §12.6、§12a.7），每種 kind 只畫實際回報的窗口；agy 有兩個桶（Gemini／Claude+GPT）各畫一格。
  * 額度按主機分開（SPEC §14），一次只顯示一台；遠端 key 帶 `<host>/` 前綴，先投影成裸 key。
  */
 
-const QUERYABLE: BotKind[] = ['claude', 'codex', 'grok']
+const QUERYABLE: BotKind[] = ['claude', 'codex', 'grok', 'agy']
 
 type QuotaEntry = { key: string; fullKey: string; kind: BotKind; identity: string | null }
 
@@ -141,7 +141,14 @@ function staleSuffix(q: KindQuota | null, now: number): string {
   return `（上次讀數${age ? `，${age}前` : ''}）`
 }
 
+/** agy 的兩個桶用人看得懂的名字；其他 kind 照身分名。 */
+function entryShort(entry: QuotaEntry): string {
+  if (entry.kind === 'agy') return entry.identity === AGY_CLAUDE_GPT ? 'Claude+GPT' : 'Gemini'
+  return entry.identity ?? entry.kind
+}
+
 function entryLabel(entry: QuotaEntry): string {
+  if (entry.kind === 'agy') return `${KIND_LABEL.agy} · ${entryShort(entry)}`
   return entry.identity ? `${KIND_LABEL[entry.kind]} · ${entry.identity}` : KIND_LABEL[entry.kind]
 }
 
@@ -152,14 +159,14 @@ function label(entry: QuotaEntry, q: KindQuota | null, loggedOut = false, now = 
   if (five === null && seven === null) parts.push(loggedOut ? '這台主機偵測不到登入，額度尚未取得' : '額度尚未取得')
   if (five !== null) parts.push(`5 小時剩餘 ${five}%`)
   if (seven !== null) {
-    parts.push(entry.kind === 'grok' ? `每週剩餘 ${seven}%` : `7 天剩餘 ${seven}%`)
+    parts.push(weeklyOnlyKind(entry.kind) ? `每週剩餘 ${seven}%` : `7 天剩餘 ${seven}%`)
   }
   const fable = remaining(q?.fable)
   if (fable !== null) parts.push(`Fable 每週剩餘 ${fable}%`)
   if (q?.five_hour?.resets_at) parts.push(`5 小時 ${fmtTime(q.five_hour.resets_at)} 重置`)
   if (q?.seven_day?.resets_at) {
     parts.push(
-      entry.kind === 'grok'
+      weeklyOnlyKind(entry.kind)
         ? `每週 ${fmtTime(q.seven_day.resets_at)} 重置`
         : `7 天 ${fmtTime(q.seven_day.resets_at)} 重置`,
     )
@@ -229,7 +236,7 @@ function collectEntries(quotaAll: QuotaMap, identities: Identity[], host: string
     push(entry)
   }
 
-  for (const kind of ['codex', 'grok'] as const) {
+  for (const kind of ['codex', 'grok', 'agy'] as const) {
     if (kind in quota) push({ key: kind, kind, identity: null })
   }
 
@@ -396,9 +403,9 @@ function moreUrgent(w: WindowBar, best: WindowBar): boolean {
   return (w.pct ?? 100) < (best.pct ?? 100)
 }
 
-/** grok only reports a weekly window (stored in seven_day) — never call it 7d. */
+/** grok、agy only report a weekly window (stored in seven_day) — never call it 7d. */
 function weekLabel(kind: BotKind): '7d' | '週' {
-  return kind === 'grok' ? '週' : '7d'
+  return weeklyOnlyKind(kind) ? '週' : '7d'
 }
 
 function Gauge({
@@ -450,7 +457,7 @@ function Gauge({
     const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
     windows = [windowBar(w.name === '7d' ? weekLabel(entry.kind) : w.name, w.pct, src, q?.updated_at)]
   } else if (five === null && seven === null) {
-    windows = [windowBar(entry.kind === 'grok' ? '週' : '5h', null, null, q?.updated_at)]
+    windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)]
   } else {
     windows = []
     if (five !== null) {
@@ -500,13 +507,13 @@ function Gauge({
         <span className="quota-kind" aria-hidden="true">
           <KindIcon kind={entry.kind} />
         </span>
-        {compact && !entry.identity ? null : (
+        {compact && !entry.identity && entry.kind !== 'agy' ? null : (
           <span className={`quota-identity${loggedOut ? ' logged-out' : ''}`} aria-hidden="true">
-            {entry.identity ?? entry.kind}
+            {entryShort(entry)}
           </span>
         )}
         {/* 開關放左欄名稱下方，整格不會因它變高。 */}
-        <StripDisableToggle entry={entry} host={host} />
+        {entry.kind === 'agy' && entry.identity ? null : <StripDisableToggle entry={entry} host={host} />}
       </span>
       <button
         type="button"
@@ -760,6 +767,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
       onClick={(e) => {
         if (!e.currentTarget.contains(e.target as Node)) return
         if ((e.target as HTMLElement).closest('input, button, a, select, textarea')) return
+        if (entry.kind === 'agy' && entry.identity) return
         toggle()
       }}
     >
@@ -770,7 +778,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         <span className="quota-name">{entryLabel(entry)}</span>
         {supported ? <RiskDot level={worst(q)} /> : null}
         {q?.plan ? <span className="quota-plan">{q.plan}</span> : null}
-        <DisableToggle on={off} label={entryLabel(entry)} onToggle={toggle} />
+        {entry.kind === 'agy' && entry.identity ? null : <DisableToggle on={off} label={entryLabel(entry)} onToggle={toggle} />}
       </div>
       {q?.stale ? <p className="quota-stale-note">{staleSuffix(q, now)}，新的探測回來後會更新</p> : null}
       {!supported ? (
@@ -781,7 +789,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
             {/* 登入偵測在該主機 herdr pane 裡跑、看得到 Keychain，所以「沒登入」可信。 */}
             {loggedOut
               ? `${hostLabel(host)} 上這個帳號未登入。`
-              : entry.kind === 'grok'
+              : weeklyOnlyKind(entry.kind)
                 ? '背景查詢中'
                 : `尚未取得（啟動一個 ${KIND_LABEL[entry.kind]} bot 後回報）`}
           </p>
