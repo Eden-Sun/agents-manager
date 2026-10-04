@@ -39,6 +39,9 @@ const WINDOW_MIN: Duration = Duration::from_secs(60);
 const WINDOW_MAX: Duration = Duration::from_secs(15 * 60);
 /// 回合收尾後，statusLine 還會再來幾次重繪；視窗再撐這麼久才關。
 const WINDOW_GRACE: Duration = Duration::from_secs(20);
+/// 到點壓縮之後這麼久內冒出來的「活動」算壓縮自己造成的（`/compact` 讓 statusLine 指紋變、hook 報 working），
+/// 不當成新的錨點；否則閒置的主力每兩小時就續命＋壓縮一輪，永遠停不下來。真的活動晚於這段才重新計時。
+pub const COMPACT_ECHO_SECS: i64 = 10 * 60;
 
 #[derive(Debug, Clone, Copy)]
 struct Window {
@@ -96,6 +99,11 @@ pub enum Step {
     Compact,
 }
 
+/// 純規則：錨點是不是到點壓縮自己的回音（壓縮後 [`COMPACT_ECHO_SECS`] 內）。是的話這一輪什麼都不做。
+pub fn is_compact_echo(anchor: chrono::DateTime<chrono::Utc>, last_compact: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+    last_compact.is_some_and(|c| anchor >= c - chrono::Duration::seconds(5) && anchor <= c + chrono::Duration::seconds(COMPACT_ECHO_SECS))
+}
+
 /// 純規則：年齡（秒）與「這個錨點之後做過沒」決定下一步。壓縮優先（年齡到了 110 分，續命已經沒有意義）。
 pub fn decide(age_secs: i64, kept_since_anchor: bool, compacted_since_anchor: bool) -> Step {
     if age_secs >= COMPACT_AFTER_SECS && !compacted_since_anchor {
@@ -125,9 +133,9 @@ pub struct Plan {
     pub age_secs: i64,
 }
 
-async fn newer_than(pool: &sqlx::SqlitePool, sql: &str, bot_id: &str, anchor: chrono::DateTime<chrono::Utc>) -> anyhow::Result<bool> {
+async fn latest(pool: &sqlx::SqlitePool, sql: &str, bot_id: &str) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
     let at: Option<String> = sqlx::query_scalar(sql).bind(bot_id).fetch_one(pool).await?;
-    Ok(at.as_deref().and_then(db::parse_ts).is_some_and(|t| t > anchor))
+    Ok(at.as_deref().and_then(db::parse_ts))
 }
 
 /// 判斷這顆主力現在要不要動。`None`＝不對象（不是主力、忙著、沒有任何活動紀錄…）。只讀，不送任何東西。
@@ -154,24 +162,27 @@ pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::Dat
     if age_secs < KEEPALIVE_AFTER_SECS {
         return Ok(None);
     }
-    let kept = newer_than(
+    let kept = latest(
         &app.db,
         "SELECT MAX(t.created_at) FROM turns t JOIN conversations c ON c.id = t.conversation_id
           WHERE c.bot_id = ? AND t.client_request_id LIKE 'keepalive:%'",
         &bot.id,
-        anchor_t,
     )
-    .await?;
-    let compacted = newer_than(
+    .await?
+    .is_some_and(|t| t > anchor_t);
+    let last_compact = latest(
         &app.db,
         &format!(
             "SELECT MAX(m.created_at) FROM messages m JOIN conversations c ON c.id = m.conversation_id
               WHERE c.bot_id = ? AND m.role = 'system' AND m.content LIKE '{COMPACT_NOTE_PREFIX}%'"
         ),
         &bot.id,
-        anchor_t,
     )
     .await?;
+    if is_compact_echo(anchor_t, last_compact) {
+        return Ok(None);
+    }
+    let compacted = last_compact.is_some_and(|t| t > anchor_t);
     Ok(Some(Plan { step: decide(age_secs, kept, compacted), anchor, age_secs }))
 }
 
@@ -191,7 +202,11 @@ async fn act(app: &Arc<App>, bot: &db::Bot, run: &db::Run, plan: &Plan) {
                 }
             }
         }
-        Step::Compact => match crate::lifecycle::compact(app, &bot.id).await {
+        Step::Compact => match {
+            // 同續命：壓縮造成的 statusLine 變化與 working 不算活動（另見 `is_compact_echo`）。
+            open_window(&run.id);
+            crate::lifecycle::compact(app, &bot.id).await
+        } {
             Ok(_) => {
                 tracing::info!(bot = %bot.name, age_min = plan.age_secs / 60, "primary cache age reached the limit: sent /compact");
                 let note = format!("{COMPACT_NOTE_PREFIX}cache 年齡已 {} 分鐘，自動送出 /compact", plan.age_secs / 60);
@@ -201,7 +216,10 @@ async fn act(app: &Arc<App>, bot: &db::Bot, run: &db::Run, plan: &Plan) {
                     }
                 }
             }
-            Err(e) => tracing::info!(bot = %bot.name, error = ?e, "primary cache compaction not sent this round; will retry"),
+            Err(e) => {
+                drop_window(&run.id);
+                tracing::info!(bot = %bot.name, error = ?e, "primary cache compaction not sent this round; will retry");
+            }
         },
     }
 }
@@ -271,6 +289,17 @@ mod tests {
     #[test]
     fn thresholds_are_58_and_110_minutes() {
         assert_eq!((KEEPALIVE_AFTER_SECS, COMPACT_AFTER_SECS), (3480, 6600));
+    }
+
+    #[test]
+    fn the_compactions_own_activity_is_not_a_new_anchor() {
+        let c = db::parse_ts("2026-10-04T12:00:00.000Z").unwrap();
+        let at = |m: i64| c + chrono::Duration::minutes(m);
+        assert!(is_compact_echo(at(0), Some(c)));
+        assert!(is_compact_echo(at(3), Some(c)), "/compact 讓 statusLine 變、報 working");
+        assert!(!is_compact_echo(at(30), Some(c)), "之後真的有活動就重新計時");
+        assert!(!is_compact_echo(at(-120), Some(c)), "壓縮之前的錨點照常");
+        assert!(!is_compact_echo(at(0), None));
     }
 
     #[test]
