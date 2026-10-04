@@ -44,7 +44,7 @@ OWNER="${AM_AGENT_NAME:-daemon-update-kick}"
 GIT="${GIT_BIN:-/usr/bin/git}"
 GH="${GH_BIN:-gh}"
 BUN="${BUN_BIN:-bun}"
-CARGO="${CARGO_BIN:-$HOME/.cargo/bin/cargo}"
+CARGO="cargo"                                           # 一律走 PATH 上的 build-slot shim
 SWAP="${AGM_SWAP_SCRIPT:-$DEPLOY/scripts/ops/daemon-swap.sh}"   # 從要換上的那顆 checkout 跑（不裝到 AGM 目錄）
 NICE="${NICE_BIN:-nice}"
 
@@ -318,9 +318,13 @@ else
   "$GIT" -C "$DEPLOY" clean -fdq >> "$LOG" 2>&1 || true   # 沒有 -x：target／node_modules（被 ignore）留著，增量建置才快
   log "建置 ${SHORT}：web"
   ( cd "$DEPLOY/web" && "$BUN" install --frozen-lockfile && "$BUN" run build ) >> "$LOG" 2>&1 || { note_fail "web 建置失敗（${SHORT}）"; exit 0; }
-  log "建置 ${SHORT}：daemon（cargo build --release）"
-  ( cd "$DEPLOY" && AM_REAL_CARGO="$CARGO" PATH="$(dirname "$CARGO"):$PATH" "$NICE" -n 10 "$CARGO" build --release -p agents-managerd ) >> "$LOG" 2>&1 \
-    || { note_fail "cargo build 失敗（${SHORT}）"; exit 0; }
+  # rust_embed 在編譯時讀 web/dist；只跑 cargo build 會重用舊的 daemon crate，讓新版 UI 沒嵌進 binary。
+  # 只清 daemon package，保留其他依賴快取；--locked 防止 Cargo.lock 漂移成與 commit 不同的 binary。
+  log "建置 ${SHORT}：daemon（cargo clean 後 cargo build --locked --release）"
+  ( cd "$DEPLOY" && CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 "$NICE" -n 19 "$CARGO" clean -p agents-managerd --release ) >> "$LOG" 2>&1 \
+    || { note_fail "cargo clean 失敗（${SHORT}）"; exit 0; }
+  ( cd "$DEPLOY" && CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 "$NICE" -n 19 "$CARGO" build --locked --release -p agents-managerd ) >> "$LOG" 2>&1 \
+    || { note_fail "cargo build --locked 失敗（${SHORT}）"; exit 0; }
   [ -x "$DEPLOY/target/release/agents-managerd" ] || { note_fail "cargo build 沒產出 binary（${SHORT}）"; exit 0; }
   echo "$TARGET" > "$BUILD_MARK"
   log "建好 ${SHORT}"
