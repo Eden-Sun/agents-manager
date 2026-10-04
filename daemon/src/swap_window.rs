@@ -5,8 +5,8 @@
 //! 2026-10-01 一直有 bot 在忙，自動部署從 15:18 卡到隔天還沒換成版（每則 DEFER 的 `escalates_at` 都是當下 +30 分）。
 //!
 //! 現在：同一個 owner 還活著的那張**自動**核准（`decided_by` 是這個服務自己；AGM 親手核的不碰、不取代），commit 一樣就**沿用**；main 動了換 commit 就開新的並 `supersedes` 舊的
-//! （`wait_since` 接過來，計時不歸零）。拿不到窗口只因為還有人在忙（`not_idle`）時**不撤**，下一輪帶同一張再試；
-//! 其他原因（別人握著窗口、送達臨界區……）照舊撤掉，不留 approved 的殘單。核准本身活 [`APPROVAL_TTL_SECS`]，
+//! （`wait_since` 接過來，計時不歸零）。拿不到窗口只因為還有人在忙（`not_idle`）時**不撤**，下一輪帶同一張再試；同一窗口已由這張核准持有時也不撤，否則並發重試會讓第一個持有者無法續約；
+//! 其他原因（不同核准握窗口、送達臨界區……）照舊撤掉，不留 approved 的殘單。核准本身活 [`APPROVAL_TTL_SECS`]，
 //! 要比升級門檻長，否則等不到放寬就先過期。
 
 use std::sync::Arc;
@@ -62,6 +62,19 @@ pub fn keep_after(err: &LcError) -> bool {
         LcError::Conflict(v) => v.get("reason").and_then(|r| r.as_str()) == Some("not_idle")
             || v.get("detail").and_then(|d| d.get("reason")).and_then(|r| r.as_str()) == Some("not_idle"),
         LcError::Upstream(_) | LcError::Unavailable(_) => true,
+        _ => false,
+    }
+}
+
+/// A retry can find the same active lease that an earlier request acquired with this
+/// reused approval. Revoking that approval would invalidate the first holder's renewals.
+pub fn held_by_approval(err: &LcError, approval_id: &str) -> bool {
+    match err {
+        LcError::Conflict(v) => {
+            v.get("reason").and_then(|r| r.as_str()) == Some("lease_held")
+                && v.pointer("/lease/held").and_then(serde_json::Value::as_bool) == Some(true)
+                && v.pointer("/lease/approval_id").and_then(serde_json::Value::as_str) == Some(approval_id)
+        }
         _ => false,
     }
 }
