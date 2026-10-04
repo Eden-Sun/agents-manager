@@ -10,6 +10,8 @@
 //! daemon 常駐好幾天很常見，回收區會一路長（review d77434c0 #2）。
 
 use crate::state::App;
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +31,28 @@ pub fn keep_duration() -> Duration {
 
 pub fn root(data_dir: &Path) -> PathBuf {
     data_dir.join("bots-trash")
+}
+
+fn open_root(data_dir: &Path) -> std::io::Result<File> {
+    crate::trusted_open::open_bound_dir(data_dir, &[OsStr::new("bots-trash")], None)
+}
+
+fn create_root(data_dir: &Path) -> std::io::Result<File> {
+    crate::trusted_open::create_bound_dirs(data_dir, &[OsStr::new("bots-trash")])
+}
+
+fn path_parent(data_dir: &Path, path: &Path, create: bool) -> std::io::Result<(File, OsString)> {
+    let relative = path.strip_prefix(data_dir).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is outside the data directory"))?;
+    let components = crate::trusted_open::safe_relative_components(relative).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no safe entry name"))?;
+    let (name, parent) = components.split_last().expect("safe relative components are nonempty");
+    let dir = if parent.is_empty() {
+        crate::trusted_open::open_bound_dir(data_dir, &[], None)?
+    } else if create {
+        crate::trusted_open::create_bound_dirs(data_dir, parent)?
+    } else {
+        crate::trusted_open::open_bound_dir(data_dir, parent, None)?
+    };
+    Ok((dir, name.to_os_string()))
 }
 
 fn now_ms() -> u128 {
@@ -60,13 +84,18 @@ pub fn move_in(data_dir: &Path, bot_id: &str, dir: &Path) -> std::io::Result<Opt
 
 /// 同 [`move_in`]，但收的是這顆 bot 的其他目錄（`kind`，目前只有 [`ATTACHMENTS`]）。
 pub fn move_in_kind(data_dir: &Path, bot_id: &str, kind: Option<&str>, dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    if !dir.exists() {
+    let (source_parent, source_name) = match path_parent(data_dir, dir, false) {
+        Ok(parent) => parent,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    if !crate::trusted_open::entry_exists_in(&source_parent, &source_name)? {
         return Ok(None);
     }
-    let root = root(data_dir);
-    std::fs::create_dir_all(&root)?;
-    let dest = root.join(entry_name(bot_id, kind));
-    std::fs::rename(dir, &dest)?;
+    let trash = create_root(data_dir)?;
+    let name = OsString::from(entry_name(bot_id, kind));
+    crate::trusted_open::rename_between(&source_parent, &source_name, &trash, &name)?;
+    let dest = root(data_dir).join(name);
     Ok(Some(dest))
 }
 
@@ -77,21 +106,27 @@ pub fn latest_kind(data_dir: &Path, bot_id: &str, kind: Option<&str>) -> Option<
 }
 
 fn latest(data_dir: &Path, bot_id: &str, kind: Option<&str>) -> Option<PathBuf> {
+    let root_dir = open_root(data_dir).ok()?;
+    latest_name_in(&root_dir, bot_id, kind).map(|name| root(data_dir).join(name))
+}
+
+fn latest_name_in(root_dir: &File, bot_id: &str, kind: Option<&str>) -> Option<OsString> {
     let prefix = match kind {
         Some(k) => format!("{bot_id}.{k}."),
         None => format!("{bot_id}."),
     };
-    std::fs::read_dir(root(data_dir))
+    crate::trusted_open::read_dir_bound(root_dir)
         .ok()?
-        .flatten()
+        .into_iter()
         .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
+            if !e.is_dir { return None; }
+            let name = e.name.to_str()?;
             // `<id>.attachments.<ms>` 在 kind=None 時 strip 出來是 `attachments.<ms>`，parse 失敗＝不是 bot 目錄。
             let ms: u128 = name.strip_prefix(&prefix)?.parse().ok()?;
-            Some((ms, e.path()))
+            Some((ms, e.name))
         })
         .max_by_key(|(ms, _)| *ms)
-        .map(|(_, p)| p)
+        .map(|(_, name)| name)
 }
 
 /// 還原：`bots/<id>/` 還不在時把回收區最新那份搬回去。真的目錄或檔案已在就不動。symlink 只拆連結再搬回。
@@ -106,41 +141,61 @@ pub fn restore(data_dir: &Path, bot_id: &str, dir: &Path) -> std::io::Result<Opt
 /// 就回 `NotFound`（`Err`），呼叫端記 warn、不擋還原——**不會**出現「回了 `Ok(Some(..))`、拿回來的目錄
 /// 卻正在被清空」。
 pub fn restore_kind(data_dir: &Path, bot_id: &str, kind: Option<&str>, dir: &Path) -> std::io::Result<Option<PathBuf>> {
-    // `exists` 會跟著 symlink 走。連結不是重建過的目錄：只拆連結本身（不刪目標），再把回收區搬回來。
-    // 真的目錄、檔案仍不覆蓋。
-    if let Ok(meta) = std::fs::symlink_metadata(dir) {
-        if meta.file_type().is_symlink() {
-            std::fs::remove_file(dir)?;
+    let Ok(trash) = open_root(data_dir) else { return Ok(None) };
+    let Some(name) = latest_name_in(&trash, bot_id, kind) else { return Ok(None) };
+    let (dest_parent, dest_name) = path_parent(data_dir, dir, true)?;
+    if let Some(entry) = crate::trusted_open::read_dir_bound(&dest_parent)?.into_iter().find(|entry| entry.name == dest_name) {
+        if entry.is_symlink {
+            crate::trusted_open::unlink_in(&dest_parent, &dest_name)?;
         } else {
             return Ok(None);
         }
     }
-    let Some(src) = latest(data_dir, bot_id, kind) else { return Ok(None) };
-    if let Some(parent) = dir.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::rename(&src, dir)?;
+    if crate::trusted_open::entry_exists_in(&dest_parent, &dest_name)? { return Ok(None); }
+    crate::trusted_open::rename_between(&trash, &name, &dest_parent, &dest_name)?;
+    let src = root(data_dir).join(name);
     Ok(Some(src))
 }
 
 /// 回收區裡的每一份：`(搬進來的毫秒, 路徑, 佔用位元組)`，最舊的在前。名字看不懂的（別人放的檔）不理。
+#[cfg(test)]
 fn entries(data_dir: &Path) -> Vec<(u128, PathBuf, u64)> {
-    let Ok(dir) = std::fs::read_dir(root(data_dir)) else { return Vec::new() };
-    let mut out: Vec<(u128, PathBuf, u64)> = dir
-        .flatten()
+    let Ok(root_dir) = open_root(data_dir) else { return Vec::new() };
+    entries_in(&root_dir).into_iter().map(|(ms, name, size)| (ms, root(data_dir).join(name), size)).collect()
+}
+
+fn entries_in(root_dir: &File) -> Vec<(u128, OsString, u64)> {
+    let mut out: Vec<(u128, OsString, u64)> = crate::trusted_open::read_dir_bound(root_dir)
+        .unwrap_or_default()
+        .into_iter()
         .filter_map(|e| {
-            let name = e.file_name().to_str()?.to_string();
+            if !e.is_dir && !e.is_symlink { return None; }
+            let name = e.name.to_str()?;
             let ms: u128 = name.rsplit_once('.')?.1.parse().ok()?;
-            let path = e.path();
-            let size = dir_size(&path);
-            Some((ms, path, size))
+            let size = if e.is_dir {
+                crate::trusted_open::open_dir_entry_in(root_dir, &e.name).map(|dir| bound_dir_size(&dir)).unwrap_or(0)
+            } else {
+                e.size
+            };
+            Some((ms, e.name, size))
         })
         .collect();
     out.sort_by_key(|(ms, _, _)| *ms);
     out
 }
 
+fn bound_dir_size(dir: &File) -> u64 {
+    crate::trusted_open::read_dir_bound(dir).unwrap_or_default().into_iter().map(|entry| {
+        if entry.is_dir {
+            crate::trusted_open::open_dir_entry_in(dir, &entry.name).map(|child| bound_dir_size(&child)).unwrap_or(0)
+        } else {
+            entry.size
+        }
+    }).sum()
+}
+
 /// 目錄佔用的位元組（遞迴，只算檔案；讀不到的當 0——清理的判斷寧可低估也不要因為一個壞檔就整批不清）。
+#[cfg(test)]
 fn dir_size(path: &Path) -> u64 {
     let Ok(md) = std::fs::symlink_metadata(path) else { return 0 };
     if !md.is_dir() {
@@ -162,10 +217,10 @@ const DELETING_SUFFIX: &str = "deleting";
 /// 而還原那一步回的是 `Ok(Some(..))`。改成 rename-then-delete 之後，兩邊搶的是同一個 `rename`：
 /// 還原先成功，這裡的 rename 就 `NotFound`、一個檔都不會動；這裡先成功，還原的 rename `NotFound`、
 /// 回 `Err` 讓 `restore_bot` 記一行 warn（跟遠端那份的行為一致，`remote_trash::gc` 的 doc）。
-fn remove(path: &Path) -> bool {
-    let Some(staged) = take_aside(path) else { return false };
-    if let Err(err) = std::fs::remove_dir_all(&staged) {
-        tracing::warn!(dir = %staged.display(), error = %err, "could not remove a bots-trash entry that was set aside");
+fn remove(root_dir: &File, name: &OsStr) -> bool {
+    let Some(staged) = take_aside(root_dir, name) else { return false };
+    if let Err(err) = crate::trusted_open::remove_tree_in(root_dir, &staged) {
+        tracing::warn!(dir = %name.to_string_lossy(), error = %err, "could not remove a bots-trash entry that was set aside");
     }
     // rename 成功就代表這一份已經不在回收區裡（還原也撈不到了）：即使 remove_dir_all 沒清乾淨，
     // 剩下的殘骸由下一輪的 [`sweep_leftovers`] 收，對呼叫端來說這一份確實清掉了。
@@ -174,15 +229,15 @@ fn remove(path: &Path) -> bool {
 
 /// [`remove`] 的第一步：把這一份改名成看不見的 `*.deleting`。回 `None`＝沒拿到（多半是還原或另一輪 gc
 /// 先把它搬走了），呼叫端**一個檔都不准動**。
-fn take_aside(path: &Path) -> Option<PathBuf> {
-    let name = path.file_name().and_then(|n| n.to_str())?;
-    let staged = path.with_file_name(format!("{name}.{}.{DELETING_SUFFIX}", now_ms()));
-    match std::fs::rename(path, &staged) {
+fn take_aside(root_dir: &File, name: &OsStr) -> Option<OsString> {
+    let name_str = name.to_str()?;
+    let staged = OsString::from(format!("{name_str}.{}.{DELETING_SUFFIX}", now_ms()));
+    match crate::trusted_open::rename_in(root_dir, name, &staged) {
         Ok(()) => Some(staged),
         // `NotFound`＝別人先拿走了，本來就不該由這裡清，不是錯。
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(dir = %path.display(), error = %err, "could not set a bots-trash entry aside for removal");
+                tracing::warn!(dir = %name.to_string_lossy(), error = %err, "could not set a bots-trash entry aside for removal");
             }
             None
         }
@@ -196,16 +251,16 @@ fn take_aside(path: &Path) -> Option<PathBuf> {
 /// **收掉之前它們不算進 [`MAX_BYTES`]**（[`entries`] 看不到＝`dir_size` 不會加到它們），而 gc 只在開機清掃
 /// 與 [`spawn_gc`] 每天那一次跑：daemon 剛好死在那個窗口的話，磁碟上會多出一份總量上限沒算到的殘骸，
 /// 最久到隔天才收。追磁碟對不上時先看回收區裡有沒有 `*.deleting`。
-fn sweep_leftovers(data_dir: &Path) {
-    let Ok(dir) = std::fs::read_dir(root(data_dir)) else { return };
-    for e in dir.flatten() {
-        let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
+fn sweep_leftovers(root_dir: &File) {
+    let Ok(entries) = crate::trusted_open::read_dir_bound(root_dir) else { return };
+    for e in entries {
+        let Some(name) = e.name.to_str() else { continue };
         if !name.ends_with(&format!(".{DELETING_SUFFIX}")) {
             continue;
         }
-        if let Err(err) = std::fs::remove_dir_all(e.path()) {
+        if let Err(err) = crate::trusted_open::remove_tree_in(root_dir, &e.name) {
             if err.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(dir = %e.path().display(), error = %err, "could not remove a leftover bots-trash .deleting entry");
+                tracing::warn!(dir = %name, error = %err, "could not remove a leftover bots-trash .deleting entry");
             }
         }
     }
@@ -220,24 +275,25 @@ pub fn gc(data_dir: &Path, keep: Duration) -> usize {
 /// 兩道一起跑：先清過期的，再看總量——還超過 `max_bytes` 就從**最舊的**開始清到降下來。
 /// 回傳 `(過期清掉幾份, 因為超量再清掉幾份)`。
 pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64) -> (usize, usize) {
-    sweep_leftovers(data_dir);
+    let Ok(root_dir) = open_root(data_dir) else { return (0, 0) };
+    sweep_leftovers(&root_dir);
     let cutoff = now_ms().saturating_sub(keep.as_millis());
-    let mut live: Vec<(u128, PathBuf, u64)> = Vec::new();
+    let mut live: Vec<(u128, OsString, u64)> = Vec::new();
     let (mut expired, mut evicted) = (0, 0);
-    for (ms, path, size) in entries(data_dir) {
-        if ms <= cutoff && remove(&path) {
+    for (ms, name, size) in entries_in(&root_dir) {
+        if ms <= cutoff && remove(&root_dir, &name) {
             expired += 1;
         } else {
-            live.push((ms, path, size));
+            live.push((ms, name, size));
         }
     }
     let mut total: u64 = live.iter().map(|(_, _, size)| *size).sum();
     // 最舊的先走；最新那一份永遠留著（剛刪掉的那顆才是最可能要還原的，留著才有意義）。
-    for (_, path, size) in live.iter().take(live.len().saturating_sub(1)) {
+    for (_, name, size) in live.iter().take(live.len().saturating_sub(1)) {
         if total <= max_bytes {
             break;
         }
-        if remove(path) {
+        if remove(&root_dir, name) {
             evicted += 1;
             total = total.saturating_sub(*size);
         }
@@ -370,6 +426,24 @@ mod tests {
         std::fs::remove_dir_all(&data).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn gc_does_not_follow_a_symlinked_trash_root_outside_the_data_dir() {
+        use std::os::unix::fs::symlink;
+
+        let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-root-link-{}", crate::db::ulid())));
+        let outside = crate::testing::track(std::env::temp_dir().join(format!("am-trash-outside-{}", crate::db::ulid())));
+        let victim = outside.join("b1.1");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), "outside data").unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        symlink(&outside, root(&data)).unwrap();
+
+        gc_with_cap(&data, Duration::ZERO, 0);
+
+        assert!(victim.join("keep.txt").exists(), "GC must never traverse the trash root symlink");
+    }
+
     /// #465：附件副本要跟 `bots/<id>/` 一起進回收區、受同一套過期與總量上限，還原時一起搬回來，
     /// 而且 `<id>.attachments.<ms>` 不能被當成 bot 目錄還原到 `bots/<id>/`。
     #[test]
@@ -422,7 +496,8 @@ mod tests {
         assert_eq!(latest(&data, "B1", None).as_ref(), Some(&entry), "前提：還原撈得到它");
 
         // 清理的第一步（改名）做完、remove_dir_all 還沒跑：裡面的檔一個都還在。
-        let staged = take_aside(&entry).expect("gc 拿到了這一份");
+        let root_dir = open_root(&data).unwrap();
+        let staged = root(&data).join(take_aside(&root_dir, entry.file_name().unwrap()).expect("gc 拿到了這一份"));
         assert!(staged.join("blob").exists(), "還沒刪任何東西");
         assert_eq!(entries(&data).len(), 0, "回收區的帳看不到正在清的那一份");
         assert_eq!(latest(&data, "B1", None), None, "還原也撈不到");
@@ -442,7 +517,8 @@ mod tests {
         let dir = data.join("bots/B1");
 
         assert_eq!(restore(&data, "B1", &dir).unwrap(), Some(entry.clone()), "還原先到");
-        assert!(!remove(&entry), "清理沒拿到那一份");
+        let root_dir = open_root(&data).unwrap();
+        assert!(!remove(&root_dir, entry.file_name().unwrap()), "清理沒拿到那一份");
         assert_eq!(std::fs::read(dir.join("blob")).unwrap().len(), 32, "還原回來的目錄一個位元組都沒少");
         std::fs::remove_dir_all(&data).unwrap();
     }
@@ -454,7 +530,8 @@ mod tests {
         let data = crate::testing::track(std::env::temp_dir().join(format!("am-trash-leftover-{}", crate::db::ulid())));
         let now = now_ms();
         let entry = seed(&data, "B1", now - 1_000, 16);
-        let leftover = take_aside(&entry).expect("改名成功");
+        let root_dir = open_root(&data).unwrap();
+        let leftover = root(&data).join(take_aside(&root_dir, entry.file_name().unwrap()).expect("改名成功"));
         assert!(leftover.exists() && entries(&data).is_empty(), "前提：留下一份誰都看不到的殘骸");
 
         let keep = seed(&data, "B2", now - 500, 16);

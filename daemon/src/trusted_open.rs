@@ -133,6 +133,23 @@ pub(crate) fn rename_in(dir: &File, old: &OsStr, new: &OsStr) -> io::Result<()> 
     if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
+pub(crate) fn rename_between(from_dir: &File, old: &OsStr, to_dir: &File, new: &OsStr) -> io::Result<()> {
+    let old = entry_cstr(old)?;
+    let new = entry_cstr(new)?;
+    let rc = unsafe { libc::renameat(from_dir.as_raw_fd(), old.as_ptr(), to_dir.as_raw_fd(), new.as_ptr()) };
+    if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+pub(crate) fn entry_exists_in(dir: &File, name: &OsStr) -> io::Result<bool> {
+    let name = entry_cstr(name)?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir.as_raw_fd(), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+        return Ok(true);
+    }
+    let err = io::Error::last_os_error();
+    if err.kind() == io::ErrorKind::NotFound { Ok(false) } else { Err(err) }
+}
+
 pub(crate) fn unlink_in(dir: &File, name: &OsStr) -> io::Result<()> {
     let name = entry_cstr(name)?;
     let rc = unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
