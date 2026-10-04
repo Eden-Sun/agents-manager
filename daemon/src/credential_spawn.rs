@@ -34,16 +34,24 @@ fn permit_ttl(timeout_ms: &str) -> Duration {
 }
 
 /// 一張 permit：何時開的、有效多久。
-#[derive(Clone, Copy)]
 struct Permit {
     at: Instant,
     ttl: Duration,
+    pane_id: Option<String>,
+    finishing: bool,
 }
 
 impl Permit {
     fn alive(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.at) < self.ttl
+        self.finishing || now.saturating_duration_since(self.at) < self.ttl
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FinishClaimError {
+    Missing,
+    PaneMismatch,
+    InProgress,
 }
 
 #[derive(Default)]
@@ -79,15 +87,69 @@ impl Gate {
             return Err(());
         }
         self.sweep(bot_id, Instant::now());
-        self.permits.entry(bot_id.to_string()).or_default().insert(permit_id.to_string(), Permit { at: Instant::now(), ttl });
+        self.permits.entry(bot_id.to_string()).or_default().insert(
+            permit_id.to_string(),
+            Permit { at: Instant::now(), ttl, pane_id: None, finishing: false },
+        );
         Ok(())
     }
 
+    #[cfg(test)]
     fn permit_active(&self, bot_id: &str, permit_id: &str) -> bool {
         self.permits.get(bot_id).is_some_and(|permits| permits.get(permit_id).is_some_and(|p| p.alive(Instant::now())))
     }
 
+    /// Bind a permit before any asynchronous registration. A replay with a different pane must
+    /// never get as far as the DB write, even when two finish requests arrive together.
+    fn claim_finish(&mut self, bot_id: &str, permit_id: &str, pane_id: &str) -> Result<(), FinishClaimError> {
+        self.sweep(bot_id, Instant::now());
+        let permit = self
+            .permits
+            .get_mut(bot_id)
+            .and_then(|permits| permits.get_mut(permit_id))
+            .filter(|p| p.alive(Instant::now()))
+            .ok_or(FinishClaimError::Missing)?;
+        if permit.finishing {
+            return Err(FinishClaimError::InProgress);
+        }
+        if permit.pane_id.as_deref().is_some_and(|bound| bound != pane_id) {
+            return Err(FinishClaimError::PaneMismatch);
+        }
+        permit.pane_id.get_or_insert_with(|| pane_id.to_string());
+        permit.finishing = true;
+        Ok(())
+    }
+
+    /// An abort can only discard an untouched permit; once finish started, its registration must
+    /// either complete or return an error and release the claim for a retry.
     fn release(&mut self, bot_id: &str, permit_id: &str) -> bool {
+        if self.permits.get(bot_id).and_then(|permits| permits.get(permit_id)).is_some_and(|p| p.finishing) {
+            return false;
+        }
+        self.remove(bot_id, permit_id)
+    }
+
+    fn complete_finish(&mut self, bot_id: &str, permit_id: &str, pane_id: &str) -> bool {
+        let valid = self
+            .permits
+            .get(bot_id)
+            .and_then(|permits| permits.get(permit_id))
+            .is_some_and(|p| p.finishing && p.pane_id.as_deref() == Some(pane_id));
+        valid && self.remove(bot_id, permit_id)
+    }
+
+    fn unclaim_finish(&mut self, bot_id: &str, permit_id: &str, pane_id: &str) {
+        if let Some(p) = self
+            .permits
+            .get_mut(bot_id)
+            .and_then(|permits| permits.get_mut(permit_id))
+            .filter(|p| p.pane_id.as_deref() == Some(pane_id))
+        {
+            p.finishing = false;
+        }
+    }
+
+    fn remove(&mut self, bot_id: &str, permit_id: &str) -> bool {
         let Some(permits) = self.permits.get_mut(bot_id) else { return false };
         let removed = permits.remove(permit_id).is_some();
         if permits.is_empty() {
@@ -101,6 +163,49 @@ impl Gate {
     fn age_permit(&mut self, bot_id: &str, permit_id: &str, age: Duration) {
         if let Some(p) = self.permits.get_mut(bot_id).and_then(|p| p.get_mut(permit_id)) {
             p.at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+        }
+    }
+}
+
+/// Drop resets a failed or cancelled `finish` so the same pane can be retried, while keeping the
+/// pane binding. A successful finish consumes the permit atomically after recording the pane.
+struct FinishClaim {
+    app: Arc<App>,
+    bot_id: String,
+    permit_id: String,
+    pane_id: String,
+    completed: bool,
+}
+
+impl FinishClaim {
+    fn begin(app: &Arc<App>, bot_id: &str, permit_id: &str, pane_id: &str) -> Result<Self, FinishClaimError> {
+        app.credential_spawn_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .claim_finish(bot_id, permit_id, pane_id)?;
+        Ok(Self { app: app.clone(), bot_id: bot_id.to_string(), permit_id: permit_id.to_string(), pane_id: pane_id.to_string(), completed: false })
+    }
+
+    fn complete(mut self) -> bool {
+        let released = self
+            .app
+            .credential_spawn_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .complete_finish(&self.bot_id, &self.permit_id, &self.pane_id);
+        self.completed = released;
+        released
+    }
+}
+
+impl Drop for FinishClaim {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.app
+                .credential_spawn_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unclaim_finish(&self.bot_id, &self.permit_id, &self.pane_id);
         }
     }
 }
@@ -143,13 +248,6 @@ impl Drop for RotationFence {
 fn reserve(app: &Arc<App>, bot_id: &str, permit_id: &str, ttl: Duration) -> Result<(), ()> {
     let mut gate = app.credential_spawn_gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     gate.reserve(bot_id, permit_id, ttl)
-}
-
-fn permit_active(app: &Arc<App>, bot_id: &str, permit_id: &str) -> bool {
-    app.credential_spawn_gate
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .permit_active(bot_id, permit_id)
 }
 
 fn release(app: &Arc<App>, bot_id: &str, permit_id: &str) -> bool {
@@ -230,12 +328,22 @@ pub async fn finish(
         Ok(bot) => bot,
         Err(response) => return response,
     };
-    if !permit_active(&app, &body.bot_id, &body.permit_id) {
-        return fail(StatusCode::CONFLICT, "spawn_permit_missing", "spawn permit is missing; rotation safety is unknown");
-    }
-    if body.pane_id.trim().is_empty() {
+    let pane_id = body.pane_id.trim();
+    if pane_id.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "pane_id_missing", "herdr did not identify the created pane; spawn remains fenced");
     }
+    let claim = match FinishClaim::begin(&app, &body.bot_id, &body.permit_id, pane_id) {
+        Ok(claim) => claim,
+        Err(FinishClaimError::Missing) => {
+            return fail(StatusCode::CONFLICT, "spawn_permit_missing", "spawn permit is missing; rotation safety is unknown");
+        }
+        Err(FinishClaimError::PaneMismatch) => {
+            return fail(StatusCode::CONFLICT, "spawn_permit_mismatch", "spawn permit is already bound to another pane");
+        }
+        Err(FinishClaimError::InProgress) => {
+            return fail(StatusCode::CONFLICT, "spawn_finish_in_progress", "spawn permit is already being finished");
+        }
+    };
     let host = match crate::db::bot_host(&app.db, &bot.id).await {
         Ok(host) => host,
         Err(e) => {
@@ -250,16 +358,16 @@ pub async fn finish(
             return fail(StatusCode::SERVICE_UNAVAILABLE, "run_unreadable", "parent pane could not be checked; spawn remains fenced");
         }
     };
-    if parent_pane.as_deref() != Some(body.pane_id.as_str()) {
-        if let Err(e) = crate::panes::note_purpose(&app, &host, &body.pane_id, &bot, body.purpose.trim()).await {
-            tracing::warn!(bot = %bot.id, pane = %body.pane_id, error = %e, "credential-bearing pane could not be registered");
+    if parent_pane.as_deref() != Some(pane_id) {
+        if let Err(e) = crate::panes::note_purpose(&app, &host, pane_id, &bot, body.purpose.trim()).await {
+            tracing::warn!(bot = %bot.id, pane = %pane_id, error = %e, "credential-bearing pane could not be registered");
             return fail(StatusCode::SERVICE_UNAVAILABLE, "pane_registration_failed", "created pane could not be registered; spawn remains fenced");
         }
     }
-    if !release(&app, &body.bot_id, &body.permit_id) {
+    if !claim.complete() {
         return fail(StatusCode::CONFLICT, "spawn_permit_missing", "spawn permit changed while registering the pane");
     }
-    (StatusCode::OK, Json(json!({"pane_id": body.pane_id, "registered": true})))
+    (StatusCode::OK, Json(json!({"pane_id": pane_id, "registered": true})))
 }
 
 /// `POST /relay/spawn/abort`: drop a permit when herdr did not create a pane (#664).
@@ -306,6 +414,24 @@ mod tests {
         gate.age_permit(bot, "stuck", PERMIT_TTL + Duration::from_secs(1));
         gate.begin_rotation(bot).unwrap();
         assert!(!gate.permit_active(bot, "stuck"));
+    }
+
+    #[test]
+    fn a_spawn_permit_is_bound_to_one_pane_and_abort_cannot_race_finish() {
+        let mut gate = Gate::default();
+        let bot = "single-pane";
+        let permit = "one-use";
+        gate.reserve(bot, permit, PERMIT_TTL).unwrap();
+
+        gate.claim_finish(bot, permit, "w1:p1").unwrap();
+        assert!(!gate.release(bot, permit), "abort must not remove a pane registration while finish is in progress");
+        assert_eq!(gate.claim_finish(bot, permit, "w1:p2"), Err(FinishClaimError::InProgress));
+
+        gate.unclaim_finish(bot, permit, "w1:p1");
+        assert_eq!(gate.claim_finish(bot, permit, "w1:p2"), Err(FinishClaimError::PaneMismatch));
+        gate.claim_finish(bot, permit, "w1:p1").unwrap();
+        assert!(gate.complete_finish(bot, permit, "w1:p1"));
+        assert_eq!(gate.claim_finish(bot, permit, "w1:p1"), Err(FinishClaimError::Missing));
     }
 
     fn bot_headers() -> axum::http::HeaderMap {
