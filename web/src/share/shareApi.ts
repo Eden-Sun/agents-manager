@@ -9,6 +9,8 @@ export interface ShareEvents {
   onStatus: (s: ShareStatus) => void
   /** 推播斷了（或不支援）：呼叫端改成輪詢。CONNECTING 的重連錯誤也算，不能只等 CLOSED。 */
   onDown: () => void
+  /** 漏了事件或對話被倒回：整頁重抓並取代手上的清單。 */
+  onResync?: () => void
   /** 連上了：可以停掉輪詢。 */
   onUp?: () => void
 }
@@ -19,6 +21,10 @@ export interface ShareClient {
   upload(file: File): Promise<{ id: string; name: string }>
   files(): Promise<ShareFile[]>
   fileUrl(name: string): string
+  /** 圖片預覽用的網址（`?inline=1`，只有圖片類 daemon 才回 inline）；`version` 變了瀏覽器才重抓。 */
+  previewUrl(name: string, version?: string): string
+  /** 檔案內容（SVG 轉 PNG、手機分享用）。 */
+  fileBlob(name: string): Promise<Blob>
   subscribe(ev: ShareEvents): () => void
 }
 
@@ -57,6 +63,14 @@ export function httpShareClient(token: string): ShareClient {
       return toShareFiles(await json('/files'))
     },
     fileUrl: (name) => `${base}/files/${encodeURIComponent(name)}`,
+    previewUrl: (name, version) => {
+      const q = new URLSearchParams({ inline: '1' })
+      if (version) q.set('v', version)
+      return `${base}/files/${encodeURIComponent(name)}?${q}`
+    },
+    async fileBlob(name) {
+      return (await check(await fetch(`${base}/files/${encodeURIComponent(name)}`, init))).blob()
+    },
     subscribe(ev) {
       if (typeof EventSource === 'undefined') {
         ev.onDown()
@@ -82,6 +96,7 @@ export function httpShareClient(token: string): ShareClient {
             /* ignore */
           }
         })
+        sock.addEventListener('resync', () => ev.onResync?.())
         // 瀏覽器自己的重連可以緊到 retry:0。關掉這條，4 秒後才再開一條，同時改輪詢。
         sock.onerror = () => {
           ev.onDown()

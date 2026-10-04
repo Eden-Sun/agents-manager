@@ -22,8 +22,8 @@ test('載入對話與檔案；沒有通往主 UI 的連結', async () => {
   await mount(<ShareApp client={mockShareClient(TOKEN)} />)
   await settle(300)
   assert.equal(document.querySelector('.sh-title h1')!.textContent, 'support-bot')
-  assert.equal(document.querySelectorAll('.sh-msg').length, 3)
-  assert.deepEqual([...document.querySelectorAll('.sh-file-name')].map((x) => x.textContent), ['config.toml', '安裝步驟.md'])
+  assert.equal(document.querySelectorAll('.sh-msg').length, 4)
+  assert.deepEqual([...document.querySelectorAll('.sh-file-name')].map((x) => x.textContent), ['config.toml', '安裝步驟.md', '星期日早安圖卡'])
   for (const a of document.querySelectorAll('a')) {
     const href = a.getAttribute('href') ?? ''
     assert.ok(href.startsWith('blob:') || href.startsWith('/s/') || /^https?:\/\//.test(href), `可疑連結 ${href}`)
@@ -80,6 +80,8 @@ test('超過一頁時可載入較早訊息，不重複、不把人捲回最底',
       return []
     },
     fileUrl: () => '/s/t/api/files/a',
+    previewUrl: () => '/s/t/api/files/a?inline=1',
+    fileBlob: async () => new Blob([]),
     subscribe: () => () => {},
   }
   await mount(<ShareApp client={client} />)
@@ -129,6 +131,8 @@ test('送出期間 SSE 先到齊，不能在 POST resolve 之後又卡回思考�
       return []
     },
     fileUrl: () => '/s/t/api/files/a',
+    previewUrl: () => '/s/t/api/files/a?inline=1',
+    fileBlob: async () => new Blob([]),
     subscribe(ev) {
       subs.push(ev)
       return () => {
@@ -312,4 +316,99 @@ test('連結失效（404）：只有失效說明，沒有輸入框', async () =>
   await settle(300)
   assert.match(document.body.textContent!, /這個分享連結已失效/)
   assert.equal(document.querySelector('textarea'), null)
+})
+
+test('圖片：bot 那一回合做的圖直接畫在回覆下面，按鈕是「分享／存到手機」，畫面上沒有格式名稱或技術字', async () => {
+  // 轉檔停在進行中：按鈕先出現（轉好前 disabled）。happy-dom 沒有 canvas，不讓它走到失敗。
+  await mount(<ShareApp client={{ ...mockShareClient(TOKEN), fileBlob: () => new Promise<Blob>(() => {}) }} />)
+  await settle(300)
+  const bubble = [...document.querySelectorAll('.sh-msg.assistant')].at(-1)!
+  assert.ok(bubble.querySelector('.sh-imgs .sh-thumb.big img'), 'bot 這一回合做的圖要直接畫在那則回覆下面')
+  assert.equal(bubble.querySelector('.sh-png-btn')?.textContent, '存到手機', '桌機（不能分享檔案）退回「存到手機」')
+  assert.equal(document.querySelectorAll('.sh-msg.assistant')[0].querySelector('.sh-imgs'), null, '別回合的回覆不掛這張圖')
+  const row = [...document.querySelectorAll('.sh-file-list li')].find((li) => li.textContent?.includes('星期日早安圖卡'))!
+  assert.ok(row.querySelector('.sh-thumb img'), '清單上的圖要有縮圖')
+  assert.equal(row.querySelector('a'), null, '圖不給原檔連結')
+  assert.equal(row.querySelector('.sh-png-btn')?.textContent, '存到手機')
+  assert.equal([...document.querySelectorAll('.sh-file-list li')].filter((li) => li.querySelector('.sh-thumb')).length, 1, '非圖片沒有縮圖')
+  for (const img of document.querySelectorAll('img')) assert.ok(/^blob:|\/s\//.test(img.getAttribute('src') ?? ''), '圖只經 <img> 的 blob／同源網址')
+  assert.equal(document.querySelector('svg text'), null, '向量圖內容不能進 DOM')
+
+  await click(row.querySelector('.sh-thumb')!)
+  const viewer = document.querySelector('.sh-viewer')!
+  assert.ok(viewer, '點縮圖放大')
+  assert.equal(viewer.querySelector('.sh-viewer-name')!.textContent, '星期日早安圖卡')
+  assert.equal(viewer.querySelector('.sh-png-btn')!.textContent, '存到手機')
+  assert.equal(viewer.querySelector('a'), null, '放大檢視也不給原檔')
+  // 長輩看的畫面：任何格式名稱或技術字都不准出現（看得到的字與按鈕說明）。
+  const visible = `${document.body.textContent} ${[...document.querySelectorAll('[aria-label],[title]')].map((x) => `${x.getAttribute('aria-label') ?? ''} ${x.getAttribute('title') ?? ''}`).join(' ')}`
+  for (const word of ['PNG', 'SVG', 'png', 'svg', '下載', '格式', '擁有者', '管理者', '後台', '分享使用者']) {
+    assert.ok(!visible.includes(word), `畫面上出現了「${word}」`)
+  }
+  await act(async () => {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+  })
+  assert.equal(document.querySelector('.sh-viewer'), null, 'Esc 關掉')
+})
+
+test('能分享檔案的手機上，按鈕叫「分享」', async () => {
+  const origMatch = window.matchMedia
+  const nav = navigator as Navigator & { canShare?: unknown; share?: unknown }
+  const origShare = nav.share
+  const origCan = nav.canShare
+  window.matchMedia = ((q: string) => ({ matches: q.includes('coarse'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia
+  Object.defineProperty(nav, 'share', { value: async () => {}, configurable: true })
+  Object.defineProperty(nav, 'canShare', { value: () => true, configurable: true })
+  try {
+    const card = { name: '早安.png', size: 3, modified_at: null }
+    await mount(<ShareApp client={{ ...mockShareClient(TOKEN), files: async () => [card], fileBlob: async () => new Blob(['png'], { type: 'image/png' }) }} />)
+    await settle(300)
+    assert.equal(document.querySelector('.sh-file-list .sh-png-btn')!.textContent, '分享')
+  } finally {
+    window.matchMedia = origMatch
+    Object.defineProperty(nav, 'share', { value: origShare, configurable: true })
+    Object.defineProperty(nav, 'canShare', { value: origCan, configurable: true })
+  }
+})
+
+test('引用外部資源的向量圖：不給按鈕，只說沒辦法分享', async () => {
+  const base = mockShareClient(TOKEN)
+  const evil = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="https://evil.example/x.png"/></svg>'
+  const client: ShareClient = {
+    ...base,
+    files: async () => [{ name: 'ext.svg', size: evil.length, modified_at: null }],
+    fileBlob: async () => new Blob([evil]),
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  const row = document.querySelector('.sh-file-list li')!
+  assert.equal(row.querySelector('.sh-png-btn'), null)
+  assert.equal(row.querySelector('.sh-png-note')!.textContent, '這張圖沒辦法分享')
+})
+
+test('resync（對話被倒回）：整頁重抓並取代手上的清單；前綴不顯示', async () => {
+  let ev: ShareEvents | null = null
+  let page: ShareMessage[] = [
+    { id: 'a', role: 'user', text: '〔分享使用者〕 早安', created_at: '2026-10-04T00:00:00Z', attachments: [] },
+    { id: 'b', role: 'assistant', text: '早安！', created_at: '2026-10-04T00:00:01Z', attachments: [] },
+  ]
+  const client: ShareClient = {
+    ...mockShareClient(TOKEN),
+    messages: async () => ({ bot_name: 'b', status: 'idle', messages: page, has_more: false }),
+    files: async () => [],
+    subscribe(e) {
+      ev = e
+      return () => {}
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(100)
+  assert.equal(document.querySelectorAll('.sh-msg').length, 2)
+  assert.equal(document.querySelector('.sh-msg.user')!.textContent!.includes('分享使用者'), false, '她看到的是自己打的原文')
+  page = [page[0]]
+  await act(async () => {
+    ev!.onResync?.()
+  })
+  await settle(50)
+  assert.equal(document.querySelectorAll('.sh-msg').length, 1, '倒回掉的那則要消失')
 })
