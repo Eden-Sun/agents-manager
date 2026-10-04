@@ -1311,7 +1311,7 @@ rustup 的 minimal profile 不含它——UI 據此提示「按安裝補上」�
 ### `POST /build-slots/acquire`（表單）
 `{holder, bot_id?, purpose?, host?}`。Bot 請求用 `X-AM-Bot-Id`、`X-AM-Bot-Token` 與相同的 body `bot_id`；舊 shim 在 body 有 `bot_id`、只有 token header 時仍相容。人工 host shell 不帶 Bot 身分與 body `bot_id` 時用 `X-AM-Token`。Bot 身分不完整、token 錯、header/body id 不同或混帶 UI token → 403，不能降級成 User。`holder` 空字串 400；`holder`／`purpose`／`host` 各最多 200 個字元，超過 400（被擋的不留任何一列）。
 
-- 拿到：`200 {"granted":true,"token","expires_at","cargo_jobs","test_threads","lease_ttl_secs"}`。`test_threads`＝`[build] test_threads`（預設 8，`0`＝不設，最多 256）：
+- 拿到：`200 {"granted":true,"token","expires_at","cargo_jobs","test_threads","lease_ttl_secs"}`。`token` 是 128 位元隨機 bearer secret；`test_threads`＝`[build] test_threads`（預設 8，`0`＝不設，最多 256）：
   shim 對 `cargo test` 在呼叫端沒設 `RUST_TEST_THREADS` 時注入它（issue #813）。同一個 `holder` 對已經握著、
   沒過期的名額重 call 是幂等的，回同一份憑證。
 - Bot token 只能重用該 bot 自己的 `holder`；若該字串已屬於另一顆 bot（或人工呼叫），回 `403`
