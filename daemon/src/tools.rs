@@ -444,7 +444,12 @@ pub(crate) async fn record_identity_login_fenced(
     if plan.is_some() {
         info.plan = plan;
     }
-    before != (info.logged_in, info.account.clone(), info.plan.clone())
+    let changed = before != (info.logged_in, info.account.clone(), info.plan.clone());
+    // 從非已登入變成已登入：回合授權失敗記下的「要重新登入」（`login_prompt`）到此為止。呼叫端因為 `changed` 會推快照。
+    if info.logged_in == Some(true) && before.0 != Some(true) {
+        crate::login_prompt::clear(app, host, name);
+    }
+    changed
 }
 
 /// 這次重驗的答案要不要寫回快取。遠端讀到「未登入」只有 **claude** 不可信（ssh 沒有 GUI session、
@@ -588,6 +593,10 @@ pub fn spawn_identity_login_watch(
             saw_cli |= cli_active;
             if (saw_cli && !cli_active) || (!saw_cli && tokio::time::Instant::now() >= startup_deadline) {
                 let after = recheck_identity_login_fenced(&app, &host, &name, &fence).await;
+                // 登入跑完、重驗說已登入：提示到此為止（快取原本就是已登入時 `record` 不會動它，這裡補清）。
+                if !logout && after == Some(true) {
+                    crate::login_prompt::clear_and_push(&app, &host, &name).await;
+                }
                 if logout && logout_result(after) == Some(false) {
                     let changed =
                         record_identity_logged_out(&app, &host, &name, "剛剛在這台主機登出（重驗問不出來時照登出算）", &fence).await;

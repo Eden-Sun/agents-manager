@@ -226,9 +226,16 @@ export function toIdentityStatusMap(raw: unknown): IdentityStatusMap {
       plan: optStr(pick(v, 'plan')),
       source: str(pick(v, 'source')) === 'shell' ? 'shell' : 'config',
       config_dir: optStr(pick(v, 'config_dir')),
+      login_needed: toLoginNeeded(v.login_needed),
     }
   }
   return out
+}
+
+function toLoginNeeded(raw: unknown): { since: string; via: string } | null {
+  if (!isRec(raw)) return null
+  const since = optStr(raw.since)
+  return since ? { since, via: str(raw.via) } : null
 }
 
 /** 缺的 kind 視為未知，不誤報「缺少」。 */

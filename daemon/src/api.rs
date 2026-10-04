@@ -1306,7 +1306,7 @@ async fn hosts_list(app: &Arc<App>) -> Vec<Value> {
             "attach_command": crate::config::attach_command(c.cfg.as_ref(), &app.herdr_session),
             "tools": t.map(|x| json!(x.tools)),
             // Login state *on this host*, `[[identities]]` + this host's `ccN` aliases (SPEC §16).
-            "identities": t.map(|x| json!(x.identities)),
+            "identities": t.map(|x| crate::login_prompt::identities_json(app, &c.name, &x.identities)),
             // Env unexpanded, as written.
             "shell_identities": t.map(|x| json!(x.shell_identities)),
             "tools_checked_at": t.map(|x| x.checked_at.clone()),
@@ -3371,7 +3371,7 @@ async fn refresh_tools(
         Json(json!({
             "name": name,
             "tools": ht.tools,
-            "identities": ht.identities,
+            "identities": crate::login_prompt::identities_json(&app, &name, &ht.identities),
             "shell_identities": ht.shell_identities,
             "tools_checked_at": ht.checked_at,
             "baseline": app.host_baseline.lock().await.get(&name).map(|b| b.snapshot(chrono::Utc::now())),

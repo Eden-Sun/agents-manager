@@ -135,6 +135,11 @@ export interface IdentityStatus {
   source: 'config' | 'shell'
   /** `cc0` 這種預設帳號沒有 */
   config_dir: string | null
+  /**
+   * daemon 記下「這個身分要重新登入」（#838 補充：綁著它的 bot 回合因授權失敗收尾；遠端 claude 探測問不出未登入，這是唯一來源）。
+   * `since` 是這一次的識別（網頁拿它判斷「關掉過的是同一次」）；沒有／舊 daemon＝null。
+   */
+  login_needed?: { since: string; via: string } | null
 }
 
 /** key = 身份名稱。缺的身份代表這台主機還沒偵測過。 */

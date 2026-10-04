@@ -299,15 +299,22 @@ pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) 
     loop {
         tokio::time::sleep(OUTCOME_POLL).await;
         match read_screen(app, host, pane_id).await {
-            Err(_) => return Ok(json!({"sent": true, "outcome": "finished", "message": Value::Null})),
+            Err(_) => return Ok(finished(app, host, &t.identity).await),
             Ok(s) if s.failure.is_some() => return Ok(json!({"sent": true, "outcome": "failed", "message": s.failure})),
-            Ok(s) if !s.awaiting_code => return Ok(json!({"sent": true, "outcome": "finished", "message": Value::Null})),
+            Ok(s) if !s.awaiting_code => return Ok(finished(app, host, &t.identity).await),
             Ok(_) => {}
         }
         if Instant::now() >= deadline {
             return Ok(json!({"sent": true, "outcome": "pending", "message": Value::Null}));
         }
     }
+}
+
+/// CLI 收下 code 之後結束了、沒報失敗：主動提示（`login_prompt`）到此為止。
+/// 偶爾是「失敗訊息來不及讀、pane 就被收掉」被當成 finished——那時提示會少一次，下一次授權失敗或探測會再把它叫回來。
+async fn finished(app: &Arc<App>, host: &str, identity: &str) -> Value {
+    crate::login_prompt::clear_and_push(app, host, identity).await;
+    json!({"sent": true, "outcome": "finished", "message": Value::Null})
 }
 
 #[cfg(test)]
