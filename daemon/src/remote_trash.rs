@@ -22,7 +22,40 @@ fn now_ms() -> u128 {
 
 /// 這台主機、這個實例的回收區（`<home>/<root>/bots-trash`），跟 `remote_bot_dir` 同一個根。
 async fn trash_dir(conn: &HostConn) -> Result<String> {
-    Ok(format!("{}/{}/bots-trash", conn.home().await?, crate::startup::remote_root_for(crate::startup::instance().as_deref())))
+    Ok(trash_dir_for(&conn.home().await?))
+}
+
+fn trash_dir_for(home: &str) -> String {
+    format!("{home}/{}/bots-trash", crate::startup::remote_root_for(crate::startup::instance().as_deref()))
+}
+
+/// Check every component below the trusted home and pin later GC/restore paths to the opened directory.
+fn trash_root_guard(home: &str, fallback: &str) -> String {
+    format!(
+        r#"H={home}
+trash_untrusted() {{ {fallback}; exit 0; }}
+case "$H" in /*) ;; *) trash_untrusted ;; esac
+case "$T" in "$H"/*) ;; *) trash_untrusted ;; esac
+relative=${{T#"$H"/}}
+current="$H"
+while [ -n "$relative" ]; do
+  component=${{relative%%/*}}
+  case "$component" in ''|.|..) trash_untrusted ;; esac
+  current="$current/$component"
+  [ ! -L "$current" ] || trash_untrusted
+  case "$relative" in */*) relative=${{relative#*/}} ;; *) relative= ;; esac
+done
+if [ ! -d "$T" ]; then trash_untrusted; fi
+home_real=$(CDPATH= cd "$H" 2>/dev/null && pwd -P) || trash_untrusted
+trash_real=$(CDPATH= cd "$T" 2>/dev/null && pwd -P) || trash_untrusted
+expected="$home_real/${{T#"$H"/}}"
+[ "$trash_real" = "$expected" ] || trash_untrusted
+CDPATH= cd "$T" 2>/dev/null || trash_untrusted
+T=.
+"#,
+        home = sh_quote(home),
+        fallback = fallback,
+    )
 }
 
 /// 把遠端的 `bots/<id>/` 搬進回收區。回搬到哪裡；目錄本來就不在回 `None`。
@@ -47,10 +80,14 @@ pub async fn move_in(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
 /// 還原：遠端 `bots/<id>/` 還不在時，把回收區裡這顆最新的那份搬回去。symlink 只拆連結再搬回；真目錄或檔案已在回 `None`。
 pub async fn restore(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
     let dir = crate::lifecycle::remote_bot_dir(conn, bot_id).await?.dir;
+    let home = conn.home().await?;
+    let trash_dir = trash_dir_for(&home);
+    let guard = trash_root_guard(&home, "printf 'AM_NONE\\n'");
     let script = format!(
-        "set -e\nD={d}\nT={t}\nif [ -L \"$D\" ]; then rm \"$D\"; fi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then printf 'AM_KEPT\\n'; exit 0; fi\nif [ -L \"$T\" ] || [ ! -d \"$T\" ]; then printf 'AM_NONE\\n'; exit 0; fi\ncd \"$T\" || {{ printf 'AM_NONE\\n'; exit 0; }}\ntrash=$T\nbest=\nbm=0\nfor e in {id}.*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e##*.}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nmkdir -p \"$(dirname \"$D\")\"\nmv \"$best\" \"$D\"\nprintf 'AM_RESTORED %s/%s\\n' \"$trash\" \"$best\"\n",
+        "set -e\nD={d}\nT={t}\ntrash=$T\n{guard}if [ -L \"$D\" ]; then rm \"$D\"; fi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then printf 'AM_KEPT\\n'; exit 0; fi\nbest=\nbm=0\nfor e in {id}.*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e##*.}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nmkdir -p \"$(dirname \"$D\")\"\nmv \"$best\" \"$D\"\nprintf 'AM_RESTORED %s/%s\\n' \"$trash\" \"$best\"\n",
         d = sh_quote(&dir),
-        t = sh_quote(&trash_dir(conn).await?),
+        t = sh_quote(&trash_dir),
+        guard = guard,
         id = sh_quote(bot_id),
     );
     let out = conn.ssh_exec_timeout(&script, RESTORE_TIMEOUT).await?;
@@ -76,12 +113,13 @@ pub async fn restore(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
 pub async fn gc(conn: &HostConn, keep: Duration, max_bytes: u64) -> Result<(usize, usize)> {
     let cutoff = now_ms().saturating_sub(keep.as_millis());
     let max_kb = max_bytes / 1024;
+    let home = conn.home().await?;
+    let trash_dir = trash_dir_for(&home);
+    let guard = trash_root_guard(&home, "printf 'AM_TRASH_GC 0 0\\n'");
     // basename 是 `move_in` 造的 `<bot_id>.<毫秒>`（ULID，不含空白），所以第二道可以用行為單位排序；
     // 不是這個形狀的一律不動——那不是我們放的。`$T` 本身有空白也沒關係，只有 basename 進 sort。
     let script = format!(
-        "T={t}\nC={cutoff}\nMAXK={max_kb}\nn=0\nev=0\n\
-         if [ -L \"$T\" ] || [ ! -d \"$T\" ]; then printf 'AM_TRASH_GC 0 0\\n'; exit 0; fi\n\
-         cd \"$T\" || {{ printf 'AM_TRASH_GC 0 0\\n'; exit 0; }}\nT=.\n\
+        "T={t}\n{guard}C={cutoff}\nMAXK={max_kb}\nn=0\nev=0\n\
          # 列出「我們放的、可以按大小淘汰的」：<毫秒> <KB> <basename>。抽成函式是因為 `case` 的樣式\n\
          # 帶 `)`，寫在 $(...) 裡會被 shell 當成命令替換的結尾（macOS /bin/sh 實測語法錯誤）。\n\
          am_list() {{\n\
@@ -113,7 +151,8 @@ pub async fn gc(conn: &HostConn, keep: Duration, max_bytes: u64) -> Result<(usiz
         \x20 done\n\
          fi\n\
          printf 'AM_TRASH_GC %s %s\\n' \"$n\" \"$ev\"\n",
-        t = sh_quote(&trash_dir(conn).await?),
+        t = sh_quote(&trash_dir),
+        guard = guard,
     );
     let out = conn.ssh_exec(&script).await?;
     out.lines()
@@ -394,6 +433,25 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn remote_gc_does_not_follow_a_symlinked_parent_outside_the_instance() {
+        use std::os::unix::fs::symlink;
+
+        let (env, root) = remote("trashbox-parent-link").await;
+        let conn = env.app.hosts.get("trashbox-parent-link").await.unwrap();
+        let home = root.parent().unwrap().parent().unwrap();
+        let outside_config = env.dir.join("outside-config");
+        let victim = outside_config.join("agents-manager/bots-trash/b1.1");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), "outside data").unwrap();
+        symlink(&outside_config, home.join(".config")).unwrap();
+
+        gc(&conn, Duration::ZERO, 0).await.unwrap();
+
+        assert!(victim.join("keep.txt").exists(), "remote GC must never traverse a parent symlink");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn remote_restore_does_not_take_an_entry_through_a_symlinked_trash_root() {
         use std::os::unix::fs::symlink;
 
@@ -409,6 +467,26 @@ mod tests {
 
         assert!(external.join("keep.txt").exists(), "restore must not move an entry reached through the trash-root symlink");
         assert!(!root.join("bots/b1").exists(), "an outside entry must not be restored as a bot directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_restore_does_not_follow_a_symlinked_parent_outside_the_instance() {
+        use std::os::unix::fs::symlink;
+
+        let (env, root) = remote("trashbox-parent-link-restore").await;
+        let conn = env.app.hosts.get("trashbox-parent-link-restore").await.unwrap();
+        let home = root.parent().unwrap().parent().unwrap();
+        let outside_config = env.dir.join("outside-config");
+        let external = outside_config.join("agents-manager/bots-trash/b1.9999999999999");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("keep.txt"), "outside data").unwrap();
+        symlink(&outside_config, home.join(".config")).unwrap();
+
+        assert_eq!(restore(&conn, "b1").await.unwrap(), None);
+
+        assert!(external.join("keep.txt").exists(), "restore must not move an entry through a parent symlink");
+        assert!(!outside_config.join("agents-manager/bots/b1").exists(), "outside entries must not be restored as bots");
     }
 
     /// 名字帶空白的（只可能是人手動放的，`move_in` 造的是 `<ULID>.<毫秒>`）：第二道的排序以行為單位，
