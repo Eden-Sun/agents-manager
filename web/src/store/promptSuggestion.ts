@@ -32,6 +32,7 @@ export const SUGGESTION_REASON_TEXT: Record<string, string> = {
   composer_unreadable: '讀不到終端的輸入框，沒有送出；到「終端」分頁看一下',
   suggestion_unsupported: '這種 bot 沒有建議下一句',
   'run mismatch': '這顆 bot 剛重啟過，建議已經過期，沒有送出',
+  'agent is busy': 'Claude 正忙，這句建議已過期，沒有送出',
 }
 
 /** 把失敗講成人話；Tab 已經按了而且送不出去時，說清楚終端變成什麼樣。 */

@@ -84,6 +84,12 @@ pub async fn accept(
     if expect_run_id.is_some_and(|id| id != run.id) {
         return Err(LcError::conflict("run mismatch", json!({"run_id": run.id, "sent": false})));
     }
+    if run.agent_status != "idle" {
+        return Err(LcError::conflict(
+            "agent is busy",
+            json!({"run_id": run.id, "agent_status": run.agent_status, "sent": false}),
+        ));
+    }
     let client = client_for_run(app, &run).await?;
     let Some(pane) = composer_draft::pane_of(&run) else {
         return Err(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));

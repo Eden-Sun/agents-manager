@@ -1066,7 +1066,7 @@ codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`
   混了實字、別的 kind、超過 500 字都是 `None`。記在記憶體（run id → 文字，不存 DB），投影成 `run.prompt_suggestion`（API.md；只在 `agent_status=idle` 帶，其餘 `null`），
   變了才推 `bot_status`。節奏沿用既有的畫面巡邏、**沒有新的輪詢迴圈**：① idle 邊之後 1.5／3.5／7／14 秒各補讀一次、看到就停（建議是 Stop 之後 claude 另外算的，當下通常還沒畫；每個 idle 邊最多 4 次讀）；
   ② `update_watch` 的 30 秒巡邏本來就讀一份純文字畫面——輸入列是空的就不再讀，輸入列有字才多讀一次樣式畫面分辨「灰字」與「草稿」（順便抓到使用者在終端打字、建議消失）；③ 離開 idle（回合開始）就忘掉。讀不到畫面什麼都不動。
-- **送**（`POST /bots/{id}/suggestion/accept`，只有使用者本人）：**對 pane 送 Tab 再送 Enter**，全程在 bot 鎖內：先過一般送出的閘門（維護窗口、回合在飛、對話框、接回未驗證…，`composer_draft::submit_gates`），
+- **送**（`POST /bots/{id}/suggestion/accept`，只有使用者本人；集中路由政策與 handler 都拒絕 Bot／Service）：**對 pane 送 Tab 再送 Enter**，全程在 bot 鎖內：先過一般送出的閘門（維護窗口、回合在飛、對話框、接回未驗證…，`composer_draft::submit_gates`），並重查 run 仍是 `idle`；忙碌或狀態未知時回 `409 agent is busy`、一個鍵都不按，
   重讀樣式畫面，建議還在而且跟 body 的字相同（比對去掉空白）才按 Tab——否則 409 `suggestion_gone`／`suggestion_changed`，**一個鍵都不按**；Tab 之後等重畫再讀，框裡要變成那一句（真字、不再是灰字）；
   然後走「送出框裡那段」的既有流程（`composer_draft::submit_locked`：回合＋使用者訊息在 Enter **之前**寫進 DB、證明送達、掛 stall／progress）。**記錄**：`origin=web`、訊息 `source=web`、`sent_via` 空——跟網頁送出的 prompt 完全一樣
   （不新增 `sent_via` 值：那欄有 CHECK，加值要重建 messages 表，而且使用者要的就是「跟打字送出沒有兩樣」），所以不是外部回合、也不重複記兩則，對話窗、未讀、回合追蹤照舊；訊息內容換成 session log 的原文。同一個 `client_request_id` 重送回原本那一筆、不再按鍵。

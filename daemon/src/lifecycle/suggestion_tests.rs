@@ -190,6 +190,24 @@ async fn the_gates_refuse_before_tab() {
     assert!(matches!(g.accept("   ", "c4").await, Err(LcError::Bad(_))));
 }
 
+/// A stale UI can still carry an old suggestion after the run starts working. The daemon must
+/// recheck the live run state before pressing Tab, even if the pane still paints the old hint.
+#[tokio::test]
+async fn a_busy_run_cannot_accept_a_stale_suggestion() {
+    let f = idle(Some(SUGGESTION)).await;
+    sqlx::query("UPDATE runs SET agent_status='working' WHERE id=?")
+        .bind(&f.run_id)
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+
+    let body = conflict(f.accept(SUGGESTION, "c1").await);
+    assert_eq!(body["reason"], "agent is busy", "{body}");
+    assert_eq!(body["sent"], false, "{body}");
+    assert!(f.keys().is_empty(), "忙碌的 run 一個鍵都不按");
+    assert_eq!(f.count("turns").await, 0, "不建立回合");
+}
+
 /// Tab 沒生效（框還是空的）：只按過 Tab，沒有東西要還原，不按 Enter、不開回合。
 #[tokio::test]
 async fn a_tab_the_cli_ignores_is_reported_and_never_followed_by_enter() {
