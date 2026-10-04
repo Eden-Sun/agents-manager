@@ -215,6 +215,7 @@ export STUB_SWAP_RC=7
 run >/dev/null
 check "推 swap_rolled_back" "swap_rolled_back" "$AGM_DIR/alerts.log"
 check "記進 rejected" "$C3" "$AGM_DIR/daemon-update.rejected"
+check_eq "rejected 首筆不產生空白列" "1" "$(wc -l < "$AGM_DIR/daemon-update.rejected" | tr -d ' ')"
 : > "$AGM_DIR/swap.log"
 ci "$C1" success
 export STUB_SWAP_RC=0
