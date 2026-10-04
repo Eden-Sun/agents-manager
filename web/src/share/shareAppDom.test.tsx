@@ -386,6 +386,59 @@ test('引用外部資源的向量圖：不給按鈕，只說沒辦法分享', as
   assert.equal(row.querySelector('.sh-png-note')!.textContent, '這張圖沒辦法分享')
 })
 
+test('載不出來的圖（bot 寫壞、網路斷）：講「還在修」不嚇人、不給按鈕；跟引用外部資源的講法不同', async () => {
+  const base = mockShareClient(TOKEN)
+  // 標籤沒配好（測試環境的 DOMParser 認得的那種壞法；真瀏覽器連屬性之間少空格也認得）。
+  const broken = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><g><text x="5" y="5">嗨</text></svg>'
+  const evil = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><image href="https://evil.example/x.png"/></svg>'
+  const client: ShareClient = {
+    ...base,
+    files: async () => [
+      { name: 'broken.svg', size: broken.length, modified_at: '2026-10-04T00:00:00Z' },
+      { name: 'offline.png', size: 3, modified_at: '2026-10-04T00:00:00Z' },
+      { name: 'ext.svg', size: evil.length, modified_at: '2026-10-04T00:00:00Z' },
+    ],
+    fileBlob: async (name) => {
+      if (name === 'offline.png') throw new Error('network')
+      return new Blob([name === 'ext.svg' ? evil : broken])
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  const note = (name: string) => [...document.querySelectorAll('.sh-file-list li')].find((li) => li.textContent?.includes(name.replace(/\.\w+$/, '')))!.querySelector('.sh-png-note')?.textContent
+  assert.equal(note('broken.svg'), '這張圖還在修，請稍等')
+  assert.equal(note('offline.png'), '這張圖還在修，請稍等')
+  assert.equal(note('ext.svg'), '這張圖沒辦法分享', '外部資源照舊')
+  assert.equal(document.querySelectorAll('.sh-file-list .sh-png-btn').length, 0, '都不給按鈕')
+})
+
+test('檔案換版（bot 修好、SSE resync 重抓清單）就重試：「還在修」變回按鈕', async () => {
+  let ev: ShareEvents | null = null
+  let fixed = false
+  const client: ShareClient = {
+    ...mockShareClient(TOKEN),
+    files: async () => [{ name: '早安.png', size: fixed ? 4 : 3, modified_at: fixed ? '2026-10-04T00:01:00Z' : '2026-10-04T00:00:00Z' }],
+    fileBlob: async () => {
+      if (!fixed) throw new Error('decode')
+      return new Blob(['png!'], { type: 'image/png' })
+    },
+    subscribe(e) {
+      ev = e
+      return () => {}
+    },
+  }
+  await mount(<ShareApp client={client} />)
+  await settle(300)
+  assert.equal(document.querySelector('.sh-file-list .sh-png-note')!.textContent, '這張圖還在修，請稍等')
+  fixed = true
+  await act(async () => {
+    ev!.onResync?.()
+  })
+  await settle(300)
+  assert.ok(document.querySelector('.sh-file-list .sh-png-btn'), '修好的那一版有按鈕')
+  assert.equal(document.querySelector('.sh-file-list .sh-png-note'), null)
+})
+
 test('resync（對話被倒回）：整頁重抓並取代手上的清單；前綴不顯示', async () => {
   let ev: ShareEvents | null = null
   let page: ShareMessage[] = [
