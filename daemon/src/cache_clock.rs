@@ -140,6 +140,7 @@ mod tests {
         assert_eq!(ttl_secs("claude"), Some(3600));
         assert_eq!(ttl_secs("codex"), Some(3600));
         assert_eq!(ttl_secs("grok"), None);
+        assert_eq!(ttl_secs("agy"), None, "agy 的 TUI 路徑沒有 cache 讀數（設計 #19），網頁不畫倒數");
     }
 
     #[test]

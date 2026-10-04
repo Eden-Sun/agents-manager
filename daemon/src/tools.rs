@@ -108,7 +108,7 @@ am_abs() {
   case "$_p" in /*) ;; *) _p="" ;; esac
   printf '%s' "$_p"
 }
-for k in claude codex grok; do
+for k in claude codex grok agy; do
   p=$(am_abs "$k")
   printf 'AM_PATH %s %s\n' "$k" "$p"
   if [ -n "$p" ]; then
@@ -1423,7 +1423,8 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     /// claude 例外（見 [`claude_is_not_asked_over_ssh`]）；其餘每種 CLI 都要有一條 ssh 問法。
     #[test]
     fn every_other_kind_has_a_login_question() {
-        for k in crate::config::KINDS.iter().filter(|k| **k != "claude") {
+        // agy 沒有 `login`／`status` 子命令（`agy models` 要登入才答、登入框會卡住 ssh）：已登入與否之後從 statusLine 的 `email` 讀（第二階段）。
+        for k in crate::config::KINDS.iter().filter(|k| !matches!(**k, "claude" | "agy")) {
             assert!(login_status_args(k).is_some(), "{k} has no login status command");
         }
         assert!(login_status_args("nope").is_none());

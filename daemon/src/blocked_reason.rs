@@ -66,6 +66,9 @@ pub fn of(run_id: &str) -> Option<Reason> {
     if crate::dangerous_rm::is_open(run_id) {
         return Some(Reason { code: "dangerous_rm", text: "claude 防誤刪（Dangerous rm）確認框等待回答".into() });
     }
+    if let Some(text) = crate::session_paused::agy_label(run_id) {
+        return Some(Reason { code: "agy_dialog", text: text.into() });
+    }
     if crate::session_paused::is_forced(run_id) {
         return Some(Reason { code: "session_paused", text: "claude Session paused 選單等待選擇".into() });
     }
