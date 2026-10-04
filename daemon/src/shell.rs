@@ -219,7 +219,9 @@ pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str, expe
     if expect.is_some_and(|(ws, tab)| (!ws.is_empty() && pane.workspace_id != ws) || (!tab.is_empty() && pane.tab_id != tab)) {
         return Some(LiveVerdict::Gone);
     }
-    if pane.agent.as_deref().is_some_and(|a| !a.is_empty()) {
+    // herdr 認出 agent 不等於這顆 pane 歸 bot：使用者自己在 shell 裡跑 agy／claude（登入選單、貼授權碼）也會被認出來，
+    // 那時鎖輸入就沒人打得進去（2026-10-04）。只有 bot 的 pane 才擋；查不到歸屬就當成 bot 的（讀不到不放行）。
+    if pane.agent.as_deref().is_some_and(|a| !a.is_empty()) && pane_is_bot_managed(app, host, pane_id).await.unwrap_or(true) {
         return Some(LiveVerdict::Agent);
     }
     if host != crate::config::LOCAL_HOST {
@@ -246,6 +248,16 @@ pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str, expe
         cache.remove(&key);
     }
     Some(verdict)
+}
+
+/// 這顆 pane 現在歸某顆 bot：有 active run，或 bot 剛用 `herdr pane split`／`agent start` 起出它、還沒被收編成 run
+/// （spawn hint，§6.5a）。受管 pane 的輸入走 bot 對話，不從 shell 面板打進去（§6.5.1／§6.9）。
+async fn pane_is_bot_managed(app: &Arc<App>, host: &str, pane_id: &str) -> anyhow::Result<bool> {
+    let session = app.session_for_host(host).await.unwrap_or_default();
+    if !db::active_runs_for_pane(&app.db, host, pane_id, &session, &session).await?.is_empty() {
+        return Ok(true);
+    }
+    Ok(crate::spawn_hints::for_host(app, host).await?.contains_key(pane_id))
 }
 
 fn read_only_error(ports: &[u16]) -> LcError {
@@ -608,6 +620,69 @@ mod tests {
         std::fs::remove_dir_all(&app.data_dir).ok();
     }
 
+    /// 這顆 pane 屬於一顆 bot（有 active run）——跟使用者自己在 shell 裡跑起來的 agent 不同。
+    async fn give_pane_to_a_bot(app: &Arc<App>, pane_id: &str) {
+        let now = crate::db::now();
+        sqlx::query("INSERT OR IGNORE INTO projects (id,path,label,host,created_at) VALUES ('pb','/tmp/pb','pb','local',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT OR IGNORE INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('bb','pb','bb','claude','t',?)").bind(&now).execute(&app.db).await.unwrap();
+        sqlx::query("INSERT INTO runs (id, bot_id, state, agent_status, pane_id, started_at) VALUES (?, 'bb','running','idle',?,?)")
+            .bind(format!("run-{pane_id}"))
+            .bind(pane_id)
+            .bind(&now)
+            .execute(&app.db)
+            .await
+            .unwrap();
+    }
+
+    /// 使用者回報（2026-10-04）：在 host shell 裡手動跑 agy，面板就變「正在跑 agent，請走 bot 對話」、鍵盤直通灰掉，
+    /// 登入選單、貼授權碼都打不進去。pane 是使用者自己的 shell、沒有任何 bot 的 run 時，herdr 認出 agent 不能鎖輸入；
+    /// 受管 bot 的 pane（有 run、或剛被 bot 用 `herdr agent start --pane` 起出來的 spawn hint）維持擋。
+    #[tokio::test]
+    async fn an_agent_the_user_started_in_their_own_shell_stays_typeable_but_a_bots_pane_does_not() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let session = app.session_for_host("local").await.unwrap();
+        let mut panes = Vec::new();
+        for _ in 0..3 {
+            let (_, p) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+            panes.push(p);
+        }
+        *app.pane_probe.lock().unwrap() = Arc::new(crate::pane_probe::Fixed::tree(&[(41101, 1, "-zsh")]));
+        for p in &panes {
+            env.herdr.set_shell_pid(&p.pane_id, 41101);
+            env.herdr.set_agent("agy", &p.pane_id, false);
+        }
+        let reg = |p: &crate::herdr::PaneInfo| HostShell {
+            host: "local".into(),
+            herdr_session: session.clone(),
+            workspace_id: p.workspace_id.clone(),
+            tab_id: p.tab_id.clone(),
+            pane_id: p.pane_id.clone(),
+            cwd: "/tmp".into(),
+            created_at: crate::db::now(),
+        };
+        *app.host_shells.lock().await = panes.iter().map(reg).collect();
+
+        // 使用者自己的 shell：沒有 run、沒有 hint → 打得進去，字與鍵都真的送到 herdr。
+        let mine = &panes[0];
+        send_text(app, "local", &mine.pane_id, "4/0AX-code", true).await.expect("user-run agent in own shell is typeable");
+        send_keys(app, "local", &mine.pane_id, &["down".to_string(), "enter".to_string()]).await.expect("keys too");
+        assert!(!env.herdr.calls_to("pane.send_text").is_empty());
+
+        // bot 的 pane（有 active run）：照舊擋。
+        let bots = &panes[1];
+        give_pane_to_a_bot(app, &bots.pane_id).await;
+        let r = send_text(app, "local", &bots.pane_id, "nope", false).await;
+        assert!(matches!(r, Err(LcError::Forbidden(ref b)) if b["error"] == "agent_pane"), "run on pane: {r:?}");
+
+        // bot 剛起出來、還沒被收編成 run 的 pane（spawn hint）：也擋。
+        let hinted = &panes[2];
+        sqlx::query("INSERT INTO bots (id,project_id,name,kind,hook_token,created_at) VALUES ('hb','pb','hb','claude','t2',?)").bind(crate::db::now()).execute(&app.db).await.unwrap();
+        crate::spawn_hints::record(app, "hb", &hinted.pane_id).await.unwrap();
+        let r = send_keys(app, "local", &hinted.pane_id, &["enter".to_string()]).await;
+        assert!(matches!(r, Err(LcError::Forbidden(ref b)) if b["error"] == "agent_pane"), "spawn hint: {r:?}");
+    }
+
     /// review 2026-09-16 core 4：打字前即時問 herdr 並在本機重對 listen port。表上記成 shell，但現在在 listen、
     /// 裡面現在有 agent、或 pane 已經不在，都不能照表放行；表上記過 port、現在沒有了（server 停了）也不該擋。
     #[tokio::test]
@@ -665,8 +740,9 @@ mod tests {
         track("ws-9:pGone".into(), "ws-9".into(), "ws-9:t1".into(), None).await;
         assert!(matches!(registered(app, "local", "ws-9:pGone", Access::Type).await, Err(LcError::NotFound(_))));
 
-        // 裡面現在有 agent：403。
+        // 裡面現在有 bot 的 agent：403。
         env.herdr.set_agent("kid", &vim.pane_id, false);
+        give_pane_to_a_bot(app, &vim.pane_id).await;
         app.pane_live.lock().await.clear();
         match registered(app, "local", &vim.pane_id, Access::Type).await {
             Err(LcError::Forbidden(body)) => assert_eq!(body["error"], "agent_pane"),
@@ -721,9 +797,10 @@ mod tests {
         set(reg(&p.tab_id, "some-old-session")).await;
         assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "404", "session 不同");
 
-        // 打字前 pane 裡被起了 agent。
+        // 打字前 pane 裡被 bot 起了 agent。
         set(reg(&p.tab_id, &session)).await;
         env.herdr.set_agent("kid", &p.pane_id, false);
+        give_pane_to_a_bot(app, &p.pane_id).await;
         app.pane_live.lock().await.clear();
         assert_eq!(code(registered(app, "local", &p.pane_id, Access::Type).await), "agent_pane");
 
@@ -755,6 +832,7 @@ mod tests {
 
         registered(app, "local", &pane.pane_id, Access::Type).await.expect("initial shell is typeable");
         env.herdr.set_agent("kid", &pane.pane_id, false);
+        give_pane_to_a_bot(app, &pane.pane_id).await;
 
         let result = send_text(app, "local", &pane.pane_id, "must not reach the agent", false).await;
         assert!(matches!(result, Err(LcError::Forbidden(ref body)) if body["error"] == "agent_pane"), "agent appeared after the cached check: {result:?}");

@@ -1535,7 +1535,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
   與 service 身分一律 `403 {"error":"forbidden","reason":"user_only"}`。Host shell 的建立、清單、terminal、text、keys、close 都只接受 User principal；Bot／service principal 不能讀使用者 shell 畫面或操作 pane。
   bot 驗得過身分，但不該直接對 pane 打字或按鍵；要跟別顆 bot 說話走 `/prompt` 的 relay。
   上限：`text` 最多 256 KiB（超過 400）；`keys` 最多 64 個、每個鍵名 ≤ 32 字元且不含空白／控制字元（400）。
-- **白名單每次打字前複查**：記憶體清單（daemon 自己開的）認到的 pane，打字前也問 herdr——裡面現在有 agent → 403 `agent_pane`、在 listen → 403 `read_only_pane`、
+- **白名單每次打字前複查**：記憶體清單（daemon 自己開的）認到的 pane，打字前也問 herdr——裡面現在有**bot 的** agent（pane 有 active run、或 bot 剛起出它的 spawn hint；使用者自己在 shell 裡跑的 agent 不算，照樣打得進去）→ 403 `agent_pane`、在 listen → 403 `read_only_pane`、
   pane 已不在或 **id 被重用到另一個 tab／workspace**（跟登記的 `workspace_id`／`tab_id` 對不上）→ 404、登記的 `herdr_session` 不是這台主機現在的 session → 404；`panes` 表那條同樣比對 workspace／tab。
 - 建立：先借該主機某 project 的 workspace 開新 tab，借不到才 `workspace.create`（標籤 `shell`，不寫回 `projects.workspace_id`）。回的 `cwd` 是 herdr 實際開起來的目錄。
 - **鍵盤同步**（UI 的「鍵盤同步」開關）沒有新端點：每一下按鍵是一次 `…/keys`（`herdrKeyFromEvent` 譯成 herdr 鍵名），貼上是一次 `…/text` 且 `enter:false`。
@@ -1547,7 +1547,7 @@ Project 可在另一台機器，daemon 透過 SSH 轉發連遠端 herdr。`host`
   `403 {"error":"read_only_pane","listen_ports":[…],"message":"…"}`；沒 port 的（含跑著 vim 的 `service`）可以打字。
   遠端不算 port，退回表上的事實：`kind=service` 或記過 port 就 403 `read_only_pane`。
   有 active run 的 pane 一律 `403 {"error":"agent_pane","message":"…"}`（連看都不給）。沒被 trace 的 pane 照舊 404。
-  `text`／`keys` 之前即時問 herdr：裡面現在有 agent 403 `agent_pane`、pane 不在 404、本機重對到 port 403 `read_only_pane`；`Typeable` 不快取，已知唯讀狀態最多快取 3 秒；
+  `text`／`keys` 之前即時問 herdr：裡面現在有 bot 的 agent 403 `agent_pane`（使用者自己跑起來的 agent 不擋，登入選單／貼授權碼要打得進去）、pane 不在 404、本機重對到 port 403 `read_only_pane`；`Typeable` 不快取，已知唯讀狀態最多快取 3 秒；
   **問不到就不放行**（herdr 沒回、`ps`／`lsof` 失敗或逾時、沒報 shell pid）：
   `409 {"error":"conflict","reason":"pane_state_unknown","retryable":true,"message":"無法確認這顆 pane 現在的狀態…，請稍後再試"}`。
   `DELETE` 同樣認兩份（daemon 重啟後面板自己開的 shell 只剩 `panes` 表認得；以前找不到就回 200、什麼都沒關），走 `panes` 表那條要照 `confirm`。
