@@ -16,6 +16,7 @@
 #
 # 結束碼：0 換版完成；3 前置核對不過；4 沒拿到窗口（有人在忙，下一輪再來）；5 備份失敗；
 #         10 新 binary 內嵌的 sha 不是 --sha（換版之前就中止，什麼都沒動）；
+#         11 無法證明舊 daemon 已退出（binary 與 DB 都不動）。
 #         6 新版起來了但升過 schema 所以往前修；7 已回滾；8 換好但窗口沒交還；9 daemon 太舊，沒有 restart-window 路由。
 set -u
 
@@ -211,7 +212,8 @@ lease_safety() {
         agm lease safety --owner "$OWNER"
     fi
 }
-dpid() { "$PGREP" -f '^\./target/release/agents-managerd serve$' | head -1; }
+daemon_pids() { "$PGREP" -f '^\./target/release/agents-managerd serve$' 2>/dev/null || true; }
+dpid() { daemon_pids | head -1; }
 # 停 daemon：TERM、最多等 30 秒、還在就 KILL。換版主線與 rollback 共用——rollback 以前只 TERM 後固定 sleep 5，
 # 新 daemon 還沒退就覆蓋 binary、刪 -wal／-shm、蓋掉 DB，等於在活著的 daemon 底下動它的資料。
 stop_daemon() { # stop_daemon <pid>（空的就什麼都不做）
@@ -220,7 +222,14 @@ stop_daemon() { # stop_daemon <pid>（空的就什麼都不做）
     kill -TERM "$pid" 2>/dev/null
     while [ $j -lt 30 ]; do kill -0 "$pid" 2>/dev/null || return 0; sleep 1; j=$((j + 1)); done
     kill -KILL "$pid" 2>/dev/null; sleep 1
-    return 0
+    # SIGKILL 也可能無法立刻收掉卡在核心 I/O 的行程。不要只靠固定 sleep 就覆蓋 binary 或還原 DB。
+    j=0
+    while [ $j -lt 5 ]; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 1; j=$((j + 1))
+    done
+    log "ERROR: daemon pid ${pid} is still alive after SIGKILL"
+    return 1
 }
 api() { "$CURL" -sf -o /dev/null "http://127.0.0.1:$PORT$1"; }
 agm_probe() { # agm_probe <bot id> → "<http code> <body>"
@@ -639,7 +648,10 @@ rollback() {
     # 起不來（2026-09-20 實際發生過）。預設往前修，只有新 binary 真的起不來才動 DB。
     if [ "$BUMPED" = yes ]; then
         log "schema bumped $PRE_UV -> ${EXP_UV}：先往前修（舊 binary 開不了這個 DB）"
-        stop_daemon "$(dpid)"
+        if ! stop_daemon "$(dpid)"; then
+            log "ERROR: cannot forward-fix while daemon is still alive; binary and DB left untouched"
+            exit 11
+        fi
         cp "$NEWBIN" target/release/agents-managerd; start; sleep 3
         j=0; while [ $j -lt 30 ]; do api /api/session && break; sleep 1; j=$((j + 1)); done
         if api /api/session; then
@@ -648,7 +660,10 @@ rollback() {
         fi
         log "forward-fix 失敗：新 binary 起不來，改還原 binary 與 DB"
     fi
-    stop_daemon "$(dpid)"
+    if ! stop_daemon "$(dpid)"; then
+        log "ERROR: cannot roll back while daemon is still alive; binary and DB left untouched"
+        exit 11
+    fi
     cp -p "$BAK" target/release/agents-managerd
     # The old daemon cannot load or accept service principals. Remove credentials it generated before
     # the rollback so a stale token file is not mistaken for a working credential.
@@ -738,8 +753,24 @@ print(status.strip())'
 PRE_SUP=$(read_supervisor_status 2>/dev/null) || PRE_SUP=""
 log "supervisor status before swap: ${PRE_SUP:-讀不到}"
 
-OLDPID=$(dpid); log "old pid $OLDPID"
-stop_daemon "$OLDPID"
+OLDPIDS=$(daemon_pids)
+OLDPID_COUNT=$(printf '%s\n' "$OLDPIDS" | awk 'NF { n++ } END { print n + 0 }')
+if [ "$OLDPID_COUNT" -eq 0 ]; then
+    log "ABORT: could not identify the running daemon pid; refusing to replace binary"
+    release_window "找不到線上 daemon 的 pid" || true
+    exit 11
+fi
+if [ "$OLDPID_COUNT" -ne 1 ]; then
+    log "ABORT: found ${OLDPID_COUNT} matching daemon processes; refusing to stop only one"
+    release_window "找到多顆線上 daemon" || true
+    exit 11
+fi
+OLDPID=$(printf '%s\n' "$OLDPIDS" | head -1); log "old pid $OLDPID"
+if ! stop_daemon "$OLDPID"; then
+    log "ABORT: daemon is still alive after SIGKILL; refusing to replace binary"
+    release_window "線上 daemon 無法停止" || true
+    exit 11
+fi
 PREV="target/release/agents-managerd.prev-$OLD-$(date +%Y%m%d-%H%M%S)"
 [ -e "$PREV" ] && { log "ABORT: $PREV 已存在"; exit 5; }
 mv target/release/agents-managerd "$PREV"
