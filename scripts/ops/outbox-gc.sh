@@ -8,7 +8,34 @@ LOG="$DIR/outbox-gc.log"
 OUTBOX="${AM_OUTBOX_ROOT:-$HOME/.config/agents-manager/outbox}"
 MAX_AGE_MIN=${OUTBOX_MAX_AGE_MIN:-60}
 [ -d "$OUTBOX" ] || exit 0
-case "$OUTBOX" in *..*) echo "$(date '+%F %T') 拒絕：OUTBOX 帶 .. $OUTBOX" >> "$LOG"; exit 1 ;; "$HOME/.config/agents-manager/outbox"|"$HOME/.config/agents-manager/outbox/"*) ;; *) echo "$(date '+%F %T') 拒絕：OUTBOX 不在預期路徑 $OUTBOX" >> "$LOG"; exit 1 ;; esac
+reject_outbox() { echo "$(date '+%F %T') 拒絕：$1 $OUTBOX" >> "$LOG"; exit 1; }
+case "$OUTBOX" in *..*) reject_outbox "OUTBOX 帶 .." ;; esac
+while [ "$OUTBOX" != "/" ] && [ "${OUTBOX%/}" != "$OUTBOX" ]; do OUTBOX=${OUTBOX%/}; done
+OUTBOX_BASE="$HOME/.config/agents-manager/outbox"
+case "$OUTBOX" in "$OUTBOX_BASE"|"$OUTBOX_BASE/"*) ;; *) reject_outbox "OUTBOX 不在預期路徑" ;; esac
+# The lexical guard is not enough: a symlinked parent makes the trusted-looking path resolve
+# somewhere else. Check each component, including optional subdirectories in AM_OUTBOX_ROOT.
+for part in "$HOME/.config" "$HOME/.config/agents-manager" "$OUTBOX_BASE"; do
+  [ ! -L "$part" ] || reject_outbox "OUTBOX 路徑含 symlink（$part）"
+done
+remaining=${OUTBOX#"$OUTBOX_BASE"}
+current="$OUTBOX_BASE"
+while [ -n "$remaining" ]; do
+  remaining=${remaining#/}
+  component=${remaining%%/*}
+  [ -n "$component" ] || break
+  current="$current/$component"
+  [ ! -L "$current" ] || reject_outbox "OUTBOX 路徑含 symlink（$current）"
+  case "$remaining" in */*) remaining=${remaining#*/} ;; *) remaining= ;; esac
+done
+# Anchor subsequent relative find paths to the opened directory. A parent swapped after `cd`
+# cannot redirect cleanup through the original absolute pathname.
+HOME_REAL=$(cd "$HOME" 2>/dev/null && pwd -P) || reject_outbox "無法解析 HOME"
+EXPECTED_REAL="$HOME_REAL/.config/agents-manager/outbox${OUTBOX#"$OUTBOX_BASE"}"
+cd "$OUTBOX" 2>/dev/null || reject_outbox "無法進入 OUTBOX"
+OUTBOX_REAL=$(pwd -P) || reject_outbox "無法解析 OUTBOX"
+[ "$OUTBOX_REAL" = "$EXPECTED_REAL" ] || reject_outbox "OUTBOX 實際位置不符預期"
+OUTBOX=.
 # 保留期從「檔案進到 outbox」起算，不是檔案內容的 mtime：`mv`／`cp -p` 進來的舊檔 mtime 還是很久以前，只看 mtime 會在下一輪就清掉
 # bot 剛交出去的檔。ctime 是搬入（或最後一次改 metadata）的時間，mtime 與 ctime 都超過才刪（跟 daemon 列表的 expires_at 同一個規則）。
 # `OUTBOX_GC_NOW`（epoch 秒）是測試用的時鐘接縫：測試沒辦法把 ctime 往回改，只能把「現在」往後撥。
