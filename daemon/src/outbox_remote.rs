@@ -80,31 +80,38 @@ pub(crate) async fn target(app: &Arc<App>, bot_id: &str) -> Result<Option<Target
     Ok(Some(Target { conn, dir }))
 }
 
-/// 兩條遠端路徑共用的 identity 與 link-count 檢查。GNU `test -ef` 比 device＋inode；
-/// BSD `/dev/fd/N` 的 device 是 devfs，故改用 lsof 讀同一 shell 中 fd 3/4 的真實 device＋inode。
+/// 兩條遠端路徑共用的 identity 與 link-count 檢查。除 inode 外也確認 fd 解析出的實際檔名仍是 outbox 內指定項目，
+/// 避免在 `-L` 檢查後換回 symlink 時只靠路徑與 fd 比對而讀到外部檔。GNU Linux 讀 `/proc/self/fd`；BSD/macOS 用 lsof。
 fn file_identity_helpers(lsof_path: &str) -> String {
     file_identity_helpers_with_paths(lsof_path, "/usr/bin/lsof")
 }
 
 fn file_identity_helpers_with_paths(lsof_path: &str, fallback_lsof_path: &str) -> String {
     let template = r#"am_same() {
-  if [ -n "$G" ]; then [ "$F" -ef /dev/fd/3 ]; return $?; fi
+  expected=$(pwd -P)/${F#./}
+  if [ -n "$G" ]; then
+    actual=$(readlink "/proc/self/fd/3") || return 1
+    [ "$actual" = "$expected" ] && [ "$F" -ef /dev/fd/3 ]
+    return $?
+  fi
   exec 4< "$F" || return 1
-  if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ]; then exec 4<&-; return 1; fi
+  if ! am_dir_same || [ -L "$F" ] || [ ! -f "$F" ]; then exec 4<&-; return 1; fi
   lsof_bin=__AM_LSOF_PATH__
   [ -x "$lsof_bin" ] || lsof_bin=__AM_LSOF_FALLBACK__
   [ -x "$lsof_bin" ] || { exec 4<&-; return 1; }
-  lsof_out=$("$lsof_bin" -a -p "$$" -d 3,4 -FfDi 2>/dev/null) || { exec 4<&-; return 1; }
-  ids=$(printf '%s\n' "$lsof_out" | /usr/bin/awk '
+  lsof_out=$("$lsof_bin" -a -p "$$" -d 3,4 -FfDin 2>/dev/null) || { exec 4<&-; return 1; }
+  ids=$(printf '%s\n' "$lsof_out" | /usr/bin/awk -v expected="$expected" '
     /^f3$/ || /^f3[^0-9]/ { if (seen3++) bad=1; fd=3; next }
     /^f4$/ || /^f4[^0-9]/ { if (seen4++) bad=1; fd=4; next }
     /^f[0-9]/ { bad=1; fd=0; next }
     /^D/ && fd { if (seen_dev[fd]++) bad=1; dev[fd]=substr($0,2); next }
     /^i/ && fd { if (seen_ino[fd]++) bad=1; ino[fd]=substr($0,2); next }
+    /^n/ && fd { if (seen_name[fd]++) bad=1; name[fd]=substr($0,2); next }
     END {
-      if (seen3 == 1 && seen4 == 1 && !bad && seen_dev[3] == 1 && seen_ino[3] == 1 && seen_dev[4] == 1 && seen_ino[4] == 1 &&
+      if (seen3 == 1 && seen4 == 1 && !bad && seen_dev[3] == 1 && seen_ino[3] == 1 && seen_name[3] == 1 &&
+          seen_dev[4] == 1 && seen_ino[4] == 1 && seen_name[4] == 1 &&
           dev[3] ~ /^0x[[:xdigit:]]+$/ && dev[4] ~ /^0x[[:xdigit:]]+$/ && ino[3] ~ /^[0-9]+$/ && ino[4] ~ /^[0-9]+$/ &&
-          dev[3] == dev[4] && ino[3] == ino[4]) print "same"
+          dev[3] == dev[4] && ino[3] == ino[4] && name[3] == expected && name[4] == expected) print "same"
       else exit 1
     }')
   ok=$?
@@ -303,14 +310,22 @@ fn file_script_gap(dir: &str, name: &str, gap: &str) -> String {
 }
 
 fn file_script_gap_with_lsof(dir: &str, name: &str, gap: &str, lsof_path: &str) -> String {
+    file_script_race_with_lsof(dir, name, gap, "", lsof_path)
+}
+
+fn file_script_race_with_lsof(dir: &str, name: &str, gap: &str, after_path_checks: &str, lsof_path: &str) -> String {
     format!(
         r#"D={d}
-F="$D"/{n}
-if stat -c %Y "$D" >/dev/null 2>&1; then G=1; else G=; fi
+{dir_helpers}
+if ! am_enter_dir; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
+F=./{n}
+if stat -c %Y . >/dev/null 2>&1; then G=1; else G=; fi
 {helpers}
 {{
 {gap}
-if [ -L "$D" ] || [ -L "$F" ] || [ ! -f "$F" ] || ! am_same || ! am_singlelink; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
+if ! am_dir_same || [ -L "$F" ] || [ ! -f "$F" ]; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
+{after_path_checks}
+if ! am_same || ! am_singlelink; then printf 'AM_OUTBOX_MISSING\n'; exit 0; fi
 printf 'AM_OUTBOX_FILE\n'
 head -c {cap} <&3 | base64
 }} 2>/dev/null 3< "$F" || printf 'AM_OUTBOX_MISSING\n'
@@ -319,7 +334,9 @@ head -c {cap} <&3 | base64
         n = sh_quote(name),
         cap = MAX_BYTES + 1,
         gap = gap,
+        after_path_checks = after_path_checks,
         helpers = file_identity_helpers(lsof_path),
+        dir_helpers = directory_identity_helpers(),
     )
 }
 
@@ -613,7 +630,7 @@ mod tests {
         let s = list_script("/U/m x/outbox/01A");
         assert!(s.contains("D='/U/m x/outbox/01A'") && s.contains("-mmin +60") && s.contains("-cmin +60") && s.contains("printf '%s\\t%s\\t%s\\n'"), "{s}");
         let f = file_script("/U/o", "it's.md");
-        assert!(f.contains(r#"F="$D"/'it'\''s.md'"#) && f.contains(&format!("head -c {}", MAX_BYTES + 1)) && f.contains("3< \"$F\""), "{f}");
+        assert!(f.contains(r#"F=./'it'\''s.md'"#) && f.contains("am_enter_dir") && f.contains(&format!("head -c {}", MAX_BYTES + 1)) && f.contains("3< \"$F\""), "{f}");
     }
 
     #[test]
@@ -718,7 +735,14 @@ exec /usr/bin/stat "$@"
         std::fs::write(
             &lsof,
             format!(
-                "#!/bin/sh\nprintf 'p123\\nf3r\\nD0x{fd_device:x}\\ni{fd_inode}\\nf4r\\nD0x{path_device:x}\\ni{path_inode}\\n'\n",
+                r#"#!/bin/sh
+pid=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-p" ]; then pid=$2; shift 2; else shift; fi
+done
+if [ -d /proc ] && [ ! -e "/proc/$pid/fd/3" ]; then exit 1; fi
+printf 'p%s\nf3r\nD0x{fd_device:x}\ni{fd_inode}\nn%s\nf4r\nD0x{path_device:x}\ni{path_inode}\nn%s\n' "$pid" "$AM_TEST_FD3_NAME" "$AM_TEST_FD4_NAME"
+"#,
                 path_device = path_device,
                 path_inode = path_inode,
                 fd_device = fd_device,
@@ -750,13 +774,17 @@ exec /usr/bin/stat "$@"
     ) -> (String, std::path::PathBuf) {
         let (bin, path) = bsd_stat_tools(path_device, path_inode, fd_device, fd_inode, nlink);
         let lsof_path = bin.join("lsof");
-        let script = file_script_gap_with_lsof(&dir.to_string_lossy(), name, gap, &lsof_path.to_string_lossy());
+        let physical = std::fs::canonicalize(dir).unwrap();
+        let script = file_script_gap_with_lsof(&physical.to_string_lossy(), name, gap, &lsof_path.to_string_lossy());
+        let expected_name = format!("{}/{}", physical.display(), name);
         let stat_log = bin.join("stat.log");
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(script)
             .env("PATH", path)
             .env("AM_TEST_STAT_LOG", &stat_log)
+            .env("AM_TEST_FD3_NAME", &expected_name)
+            .env("AM_TEST_FD4_NAME", &expected_name)
             .output()
             .unwrap();
         (String::from_utf8_lossy(&out.stdout).into_owned(), bin)
@@ -774,13 +802,17 @@ exec /usr/bin/stat "$@"
     ) -> (String, std::path::PathBuf) {
         let (bin, path) = bsd_stat_tools(path_device, path_inode, fd_device, fd_inode, nlink);
         let lsof_path = bin.join("lsof");
-        let script = list_script_race_with_lsof(&dir.to_string_lossy(), before_open, after_open, &lsof_path.to_string_lossy());
+        let physical = std::fs::canonicalize(dir).unwrap();
+        let script = list_script_race_with_lsof(&physical.to_string_lossy(), before_open, after_open, &lsof_path.to_string_lossy());
+        let expected_name = format!("{}/report.txt", physical.display());
         let stat_log = bin.join("stat.log");
         let out = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(script)
             .env("PATH", path)
             .env("AM_TEST_STAT_LOG", &stat_log)
+            .env("AM_TEST_FD3_NAME", &expected_name)
+            .env("AM_TEST_FD4_NAME", &expected_name)
             .output()
             .unwrap();
         (String::from_utf8_lossy(&out.stdout).into_owned(), bin)
@@ -861,14 +893,46 @@ exit 1
         let d = base.join("outbox");
         std::fs::write(base.join("secret.txt"), b"private bytes").unwrap();
         std::fs::hard_link(base.join("secret.txt"), d.join("report.txt")).unwrap();
-        let list = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(list_script(&d.to_string_lossy()))
-            .output()
-            .unwrap();
-        let listed = parse_list(&String::from_utf8_lossy(&list.stdout), 1_000).unwrap();
+        let listed = parse_list(&run_list(&d), 1_000).unwrap();
         assert!(!listed.iter().any(|f| f["name"] == "report.txt"), "hard link was listed: {listed:?}");
         assert_eq!(run_download(&d, "report.txt", "").trim(), "AM_OUTBOX_MISSING");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn macos_local_remote_download_rejects_a_symlink_restored_between_path_checks() {
+        let base = sandbox("check-race");
+        let d = base.join("outbox");
+        let secret = base.join("secret.txt");
+        std::fs::write(&secret, b"TOP SECRET").unwrap();
+        std::os::unix::fs::symlink(&secret, d.join("report.txt")).unwrap();
+        let physical = std::fs::canonicalize(&d).unwrap();
+        let opened_from_outside = "rm -f \"$F\"; printf decoy > \"$F\"";
+        let restored_symlink = format!("rm -f \"$F\"; ln -s {} \"$F\"", sh_quote(&secret.to_string_lossy()));
+        let script = file_script_race_with_lsof(&physical.to_string_lossy(), "report.txt", opened_from_outside, &restored_symlink, "/usr/sbin/lsof");
+        let result = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().unwrap();
+        let out = String::from_utf8_lossy(&result.stdout).into_owned();
+        assert_eq!(served(&out), None, "a symlink restored after the path checks leaked its already-open target: {out}");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn remote_outbox_rejects_symlinked_parent_components_for_list_and_download() {
+        let base = sandbox("parent-link");
+        let outside = base.join("outside");
+        let outside_bot = outside.join("BOT01");
+        std::fs::create_dir_all(&outside_bot).unwrap();
+        std::fs::write(outside_bot.join("report.txt"), b"outside secret").unwrap();
+        let linked_parent = base.join("outbox-parent-link");
+        std::os::unix::fs::symlink(&outside, &linked_parent).unwrap();
+        let dir = linked_parent.join("BOT01");
+        assert!(!std::fs::symlink_metadata(&dir).unwrap().file_type().is_symlink(), "the final component itself is a regular directory");
+
+        let download = run_download_raw(&dir, "report.txt", "");
+        let listing = run_list_raw(&dir);
+        let leaked = parse_list(&listing, 1_000).is_some_and(|files| files.iter().any(|f| f["name"] == "report.txt"));
+        assert_eq!(download.trim(), "AM_OUTBOX_MISSING", "download followed an ancestor symlink: {download:?}");
+        assert!(!leaked, "listing followed an ancestor symlink: {listing:?}");
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -906,7 +970,7 @@ exit 1
         std::fs::write(real.join("report.txt"), b"TOP SECRET").unwrap();
         let d = base.join("outbox-link");
         std::os::unix::fs::symlink(&real, &d).unwrap();
-        let out = run_download(&d, "report.txt", "");
+        let out = run_download_raw(&d, "report.txt", "");
         assert_eq!(out.trim(), "AM_OUTBOX_MISSING", "{out}");
         let d2 = base.join("outbox");
         std::fs::write(d2.join("report.txt"), b"hello").unwrap();
@@ -998,32 +1062,61 @@ exit 1
 
     /// 不完整／失敗的 lsof 即使先吐出看似相同的 fd identity，也不能因 awk 的成功狀態而放行。
     #[test]
+    fn macos_local_bsd_stat_rejects_an_open_fd_named_outside_the_outbox() {
+        let base = sandbox("bsd-fd-name");
+        let d = base.join("outbox");
+        std::fs::write(d.join("report.txt"), b"hello").unwrap();
+        let (bin, path) = bsd_stat_tools(1, 42, 1, 42, 1);
+        let lsof_path = bin.join("lsof");
+        let physical = std::fs::canonicalize(&d).unwrap();
+        let script = file_script_gap_with_lsof(&physical.to_string_lossy(), "report.txt", "", &lsof_path.to_string_lossy());
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", path)
+            .env("AM_TEST_STAT_LOG", bin.join("stat.log"))
+            .env("AM_TEST_FD3_NAME", "/outside/private-key")
+            .env("AM_TEST_FD4_NAME", "/outside/private-key")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "AM_OUTBOX_MISSING", "fd path outside the outbox was accepted");
+        std::fs::remove_dir_all(&bin).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn macos_local_lsof_partial_output_then_slow_failure_is_rejected_by_listing_and_download() {
         let base = sandbox("lsof-partial-failure");
         let d = base.join("outbox");
         std::fs::write(d.join("report.txt"), b"hello").unwrap();
-        let lsof = "#!/bin/sh\nprintf 'f3r\\nD0x1\\ni42\\nf4r\\nD0x1\\ni42\\n'\nsleep 0.05\nexit 7\n";
+        let lsof = "#!/bin/sh\nprintf 'f3r\\nD0x1\\ni42\\nn%s\\nf4r\\nD0x1\\ni42\\nn%s\\n' \"$AM_TEST_FD3_NAME\" \"$AM_TEST_FD4_NAME\"\nsleep 0.05\nexit 7\n";
 
         let (download_bin, path) = bsd_stat_tools(1, 42, 1, 42, 1);
         install_lsof(&download_bin, lsof);
-        let download_script = file_script_gap_with_lsof(&d.to_string_lossy(), "report.txt", "", &download_bin.join("lsof").to_string_lossy());
+        let physical = std::fs::canonicalize(&d).unwrap();
+        let expected_name = format!("{}/report.txt", physical.display());
+        let download_script = file_script_gap_with_lsof(&physical.to_string_lossy(), "report.txt", "", &download_bin.join("lsof").to_string_lossy());
         let download = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(download_script)
             .env("PATH", &path)
             .env("AM_TEST_STAT_LOG", download_bin.join("stat.log"))
+            .env("AM_TEST_FD3_NAME", &expected_name)
+            .env("AM_TEST_FD4_NAME", &expected_name)
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&download.stdout).trim(), "AM_OUTBOX_MISSING", "failed lsof output must not authorize download");
 
         let (list_bin, path) = bsd_stat_tools(1, 42, 1, 42, 1);
         install_lsof(&list_bin, lsof);
-        let list_script = list_script_race_with_lsof(&d.to_string_lossy(), "", "", &list_bin.join("lsof").to_string_lossy());
+        let list_script = list_script_race_with_lsof(&physical.to_string_lossy(), "", "", &list_bin.join("lsof").to_string_lossy());
         let listed = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(list_script)
             .env("PATH", path)
             .env("AM_TEST_STAT_LOG", list_bin.join("stat.log"))
+            .env("AM_TEST_FD3_NAME", &expected_name)
+            .env("AM_TEST_FD4_NAME", &expected_name)
             .output()
             .unwrap();
         let files = parse_list(&String::from_utf8_lossy(&listed.stdout), 1_000).unwrap();
@@ -1039,28 +1132,34 @@ exit 1
         let base = sandbox("lsof-unknown-device");
         let d = base.join("outbox");
         std::fs::write(d.join("report.txt"), b"hello").unwrap();
-        let lsof = "#!/bin/sh\nprintf 'f3r\\nD?\\ni42\\nf4r\\nD?\\ni42\\n'\n";
+        let lsof = "#!/bin/sh\nprintf 'f3r\\nD?\\ni42\\nn%s\\nf4r\\nD?\\ni42\\nn%s\\n' \"$AM_TEST_FD3_NAME\" \"$AM_TEST_FD4_NAME\"\n";
 
         let (download_bin, path) = bsd_stat_tools(1, 42, 1, 42, 1);
         install_lsof(&download_bin, lsof);
-        let download_script = file_script_gap_with_lsof(&d.to_string_lossy(), "report.txt", "", &download_bin.join("lsof").to_string_lossy());
+        let physical = std::fs::canonicalize(&d).unwrap();
+        let expected_name = format!("{}/report.txt", physical.display());
+        let download_script = file_script_gap_with_lsof(&physical.to_string_lossy(), "report.txt", "", &download_bin.join("lsof").to_string_lossy());
         let download = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(download_script)
             .env("PATH", &path)
             .env("AM_TEST_STAT_LOG", download_bin.join("stat.log"))
+            .env("AM_TEST_FD3_NAME", &expected_name)
+            .env("AM_TEST_FD4_NAME", &expected_name)
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&download.stdout).trim(), "AM_OUTBOX_MISSING", "unknown device IDs cannot prove identity");
 
         let (list_bin, path) = bsd_stat_tools(1, 42, 1, 42, 1);
         install_lsof(&list_bin, lsof);
-        let list_script = list_script_race_with_lsof(&d.to_string_lossy(), "", "", &list_bin.join("lsof").to_string_lossy());
+        let list_script = list_script_race_with_lsof(&physical.to_string_lossy(), "", "", &list_bin.join("lsof").to_string_lossy());
         let listed = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(list_script)
             .env("PATH", path)
             .env("AM_TEST_STAT_LOG", list_bin.join("stat.log"))
+            .env("AM_TEST_FD3_NAME", &expected_name)
+            .env("AM_TEST_FD4_NAME", &expected_name)
             .output()
             .unwrap();
         let files = parse_list(&String::from_utf8_lossy(&listed.stdout), 1_000).unwrap();
@@ -1075,13 +1174,13 @@ exit 1
     fn macos_local_missing_lsof_fails_closed() {
         let base = sandbox("lsof-missing");
         let d = base.join("outbox");
-        let file = d.join("report.txt");
-        std::fs::write(&file, b"hello").unwrap();
+        std::fs::write(d.join("report.txt"), b"hello").unwrap();
+        let physical = std::fs::canonicalize(&d).unwrap();
         let helpers = file_identity_helpers_with_paths("/missing/primary-lsof", "/missing/fallback-lsof");
         let script = format!(
-            "D={}; F={}; G=;\n{}\nexec 3< \"$F\"\nif am_same; then echo same; else echo unverified; fi\n",
-            sh_quote(&d.to_string_lossy()),
-            sh_quote(&file.to_string_lossy()),
+            "D={};\n{}\nam_enter_dir || exit 1\nF=./report.txt; G=;\n{}\nexec 3< \"$F\"\nif am_same; then echo same; else echo unverified; fi\n",
+            sh_quote(&physical.to_string_lossy()),
+            directory_identity_helpers(),
             helpers,
         );
         let out = std::process::Command::new("/bin/sh").arg("-c").arg(script).output().unwrap();
