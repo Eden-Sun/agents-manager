@@ -218,6 +218,8 @@ echo 'target daemon did not answer /api/session' >&2; exit 1"
 
 do_preflight() {
     command -v "$PY" >/dev/null || die "找不到 $PY"
+    "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+        || die "來源 python3 要 3.11 以上（tomllib）；必要時設定 PYTHON_BIN"
     [ -f "$SRC_DATA/ui-token" ] || die "讀不到 $SRC_DATA/ui-token"
     [ -f "$SRC_DATA/config.toml" ] || die "讀不到 $SRC_DATA/config.toml"
     [ -f "$HOST_STATE_TOOL" ] || die "找不到 host state 工具：$HOST_STATE_TOOL"
