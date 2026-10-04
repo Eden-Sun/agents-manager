@@ -1743,7 +1743,7 @@ daemon 每次起 pane 前把 POSIX `sh` 包裝腳本裝到 `<bot 目錄>/bin/her
 **開機時就地換版**（`shim_refresh`，2026-09-18）：shim 以前只在 bot 啟動時寫，所以長跑的 bot（AGM、協調者、使用者的專案 bot）
 在新版 daemon 上線之後手上還是舊 shim——`ee98f6cf` 上線當天，AGM 那顆的 `bin/cargo` 還是幾小時前的舊版，照樣踩到 shim 巢狀死鎖。
 daemon 啟動時掃 `<data_dir>/bots/*/bin`，把**已經存在**的 `herdr`／`cargo` 換成這顆 binary 帶的版本：shim 只是檔案，
-換掉不必重啟 pane（下一次在 pane 裡打 `cargo` 就是新版）。寫入一律暫存檔 + rename（同目錄、原子），
+換掉不必重啟 pane（下一次在 pane 裡打 `cargo` 就是新版）。寫入使用同目錄 ULID 暫存檔、`create_new` 排他建立再 rename（原子），不跟隨預置 symlink，也不讓並行刷新共用暫存檔，
 正在執行的舊 shim 沿用舊 inode 不受影響；**內容一樣就不重寫**，免得每次重啟把 mtime 洗掉、看不出哪些真的換過版。
 內容與權限**分開判**（issue #126）：內容已是現行版、但權限掉了（舊版 `install_local` 寫完才 chmod，中間死掉會留下 0644，
 pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內容；內容與權限都對才是真的 no-op。
@@ -1755,7 +1755,7 @@ pane 打 `cargo` 就 permission denied）時，只 chmod 回 0755，不重寫內
 `remote_sync_script`（POSIX sh，走 `sh -s`）：
 
 - **內容來源與本機是同一份**（`shim_refresh::shims()`）——本機開機掃描與遠端同步不會各改各的、飄成兩套；
-- 逐支 `cmp -s` 比對：**內容一樣不重寫**（不洗 mtime，只確保權限 0755）；內容不同才「暫存檔（同目錄）＋chmod＋`mv -f`」——rename 是原子的，
+- 逐支 `cmp -s` 比對：**內容一樣不重寫**（不洗 mtime，只確保權限 0755）；內容不同才用 `mktemp` 在同目錄排他建立唯一暫存檔，再 `chmod`＋`mv -f`——rename 是原子的，不跟隨預置 symlink，也不讓並行刷新共用暫存檔，
   正在跑的舊 shim 沿用舊 inode，下一次打 `cargo`／`herdr` 才拿到新版；
 - **SSH 中途斷線不會留下半支可執行檔**：內容先寫進遠端暫存目錄並核對位元組數，複合命令（迴圈）要整段收到才會執行，複製失敗就刪暫存檔、
   舊檔不動；斷線當下寫了一半的暫存檔沒有可執行位，超過 10 分鐘的殘留下一次會被掃掉；輸出沒有結尾標記（`AM_SHIM_SYNC_DONE`）就不當成功；
