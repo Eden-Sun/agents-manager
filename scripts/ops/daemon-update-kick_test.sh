@@ -273,6 +273,16 @@ check "rollback incomplete 推 ops_alert" "swap_rollback_incomplete" "$AGM_DIR/a
 check_eq "rollback incomplete 計入失敗輪次" "1" "$(cat "$AGM_DIR/daemon-update.fails" 2>/dev/null || echo 0)"
 teardown
 
+# A publish recovery that restored the old binary but could not restart the daemon needs immediate operator attention.
+setup
+ci "$C3" success
+export STUB_SWAP_RC=13
+run >/dev/null
+check "舊 binary 重啟失敗有明確 log" "舊 binary 已恢復但 daemon 未能重啟" "$(LOG)"
+check "candidate publish recovery failure 推 ops_alert" "swap_publish_recovery_failed" "$AGM_DIR/alerts.log"
+check_eq "candidate publish recovery failure 計入失敗輪次" "1" "$(cat "$AGM_DIR/daemon-update.fails" 2>/dev/null || echo 0)"
+teardown
+
 # 9. 建置失敗：不換版、記失敗。
 setup
 ci "$C3" success
