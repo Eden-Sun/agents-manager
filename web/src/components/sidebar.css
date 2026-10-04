@@ -834,59 +834,33 @@ p.project-quota-hidden {
 }
 
 /* `.compact.compact`：main 的 styles.css 比這支晚載入，同權重的舊規則會蓋過來，所以多一級。
-   子 agent 精簡列（2026-10-04 使用者：「改用緊湊的方式表示這些資訊」→「身分可以在 model 下方小字標就好」）：
-   模型標籤（強度縮寫，ModelTag 的 `short`）一列，身分用小字放在它正下方，不再佔一顆標籤的寬度。額度 chip 跟模型同一列。 */
-.bot-row.compact.compact .bot-sub {
-  display: grid;
-  grid-auto-flow: column;
-  grid-template-rows: auto auto;
+   子 agent 精簡列（2026-10-04 使用者：「改用緊湊的方式表示這些資訊」→「身分在 kind 下就好了」）：
+   身分用小字放在 kind 圖示正下方（`.kind-identity`），模型標籤一行、強度縮寫（ModelTag 的 `short`）。 */
+.bot-row.compact.compact .bot-kind-wrap {
+  flex-direction: column;
   align-items: center;
-  justify-items: start;
-  column-gap: 4px;
-  row-gap: 0;
-  height: auto;
+  gap: 0;
 }
 
-.bot-row.compact.compact .bot-sub > .model-tag,
-.bot-row.compact.compact .bot-sub > .bot-quota-chip,
-.bot-row.compact.compact .bot-sub > .bot-quota-warn {
-  grid-row: 1;
-  min-width: 0;
+.bot-row.compact.compact .kind-identity {
+  display: block;
+  line-height: 9px;
 }
 
-.bot-row.compact.compact .bot-sub > .identity-badge,
-.bot-row.compact.compact .bot-sub > .identity-diverged {
-  grid-row: 2;
-  grid-column: 1 / -1;
-  height: auto;
-  max-height: none;
-  padding: 0 0 0 2px;
-  border: 0;
-  background: none;
-  font-size: 9px;
-  line-height: 10px;
-  color: var(--text-dim);
-}
-
-.bot-row.compact.compact .bot-sub > .identity-diverged .identity-badge {
+.bot-row.compact.compact .kind-identity .identity-badge {
+  display: inline;
   height: auto;
   max-height: none;
   padding: 0;
   border: 0;
   background: none;
-  font-size: 9px;
-  line-height: 10px;
+  font-size: 8.5px;
+  line-height: 9px;
   color: var(--text-dim);
 }
 
-/* 兩行要塞進 32px 列高：中段上下留白從 5px 收到 2px（kind 圖示右上的更新記號仍有 2px），模型標籤 17px＋身分 10px。 */
+/* kind 18px＋身分 9px 要塞進 32px 列高：中段上下留白從 5px 收到 2px（更新記號仍凸得出去）。 */
 .bot-row.compact.compact .bot-main {
   padding-top: 2px;
   padding-bottom: 2px;
-}
-
-.bot-row.compact.compact .bot-sub > .model-tag {
-  height: 17px;
-  max-height: 17px;
-  line-height: 17px;
 }
