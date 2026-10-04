@@ -12,7 +12,7 @@ import './outboxFiles.css'
  * 使用者在這裡點一下就下載得到——那些檔案在 daemon 這台機器上，手機上本來拿不到。
  *
  * **只讀 outbox，不讀 scratchpad**（使用者 2026-09-16 裁示：scratchpad 暴露過私鑰與正式 DB 複本）。
- * 檔案放進去 1 小時後由 AGM 清掉，所以每個檔案標出還剩多久。
+ * 檔案放進去 1 小時後由 AGM 清掉，所以每個檔案標出還剩多久；分享用 bot（SPEC §20）的不清，不畫倒數。
  *
  * 只讀：這一段不刪檔、不改檔。上面那半（拖進來的暫存）是要**送進**對話的東西，這半是**從** bot 拿出來的。
  */
@@ -24,6 +24,8 @@ export function OutboxFiles() {
   const [files, setFiles] = useState<OutboxFile[]>([])
   const [reason, setReason] = useState<string | null>(null)
   const [dir, setDir] = useState('')
+  /** 分享用 bot 的 outbox：不會被清，不畫倒數。 */
+  const [kept, setKept] = useState(false)
   /** 讀到清單的那一刻：剩餘秒數從這裡往下扣。 */
   const [fetchedAt, setFetchedAt] = useState(0)
   /** 已經讀完哪一顆的清單。用它而不是 `loading` 旗標：effect 裡同步 setState 會多跑一輪 render。 */
@@ -58,6 +60,7 @@ export function OutboxFiles() {
     setFiles([])
     setReason(null)
     setDir('')
+    setKept(false)
     setLoadedFor(null)
     setPeek(null)
   }
@@ -87,6 +90,7 @@ export function OutboxFiles() {
       setFiles(out.files)
       setReason(out.reason)
       setDir(out.dir)
+      setKept(out.kept === true)
       setFetchedAt(Date.now())
       setNow(Date.now())
       setLoadedFor(botId)
@@ -148,7 +152,7 @@ export function OutboxFiles() {
       </div>
       {files.length === 0 ? (
         <p className={`outbox-empty${reason === LOAD_FAILED ? ' failed' : ''}`} role={reason === LOAD_FAILED ? 'alert' : undefined}>
-          {botId && loadedFor !== botId ? '讀取中…' : emptyReason(reason, Boolean(botId))}
+          {botId && loadedFor !== botId ? '讀取中…' : emptyReason(reason, Boolean(botId), kept)}
         </p>
       ) : (
         <ul className="outbox-list" role="list">
@@ -168,8 +172,9 @@ export function OutboxFiles() {
                   onBlur={hidePeek}
                 >
                   <span className="outbox-name">{f.name}</span>
-                  <span className={`outbox-meta${left <= 600 ? ' soon' : ''}`}>
-                    {fileSize(f.size)} · {remainingLabel(left)}
+                  <span className={`outbox-meta${left !== null && left <= 600 ? ' soon' : ''}`}>
+                    {fileSize(f.size)}
+                    {left === null ? '' : ` · ${remainingLabel(left)}`}
                     {busy === f.name ? ' · 下載中…' : ''}
                   </span>
                 </button>

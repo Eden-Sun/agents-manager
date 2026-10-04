@@ -2058,6 +2058,8 @@ listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LI
 - **清理者**：AGM 的 launchd `com.agm.outbox-gc`（`supervisor/AGM/bin/outbox-gc.sh`）每 10 分鐘刪掉 `-mindepth 2` 底下
   mtime 與 ctime **都**超過 60 分鐘的檔，並收掉空目錄（`OUTBOX_GC_NOW` 是測試用的時鐘接縫）。**daemon 不清**。空目錄會被收掉，所以 daemon 啟動時建的目錄不保證還在：
   bot **寫之前一律 `mkdir -p "$AM_OUTBOX"`**。
+- **分享用 bot 例外**（§20.5，使用者 2026-10-04）：它的 outbox 整個不清。daemon 在那顆的 outbox 放標記檔 `.am-share-keep`（建立、每次啟動、daemon 開機時補；
+  bot 或專案刪掉時拿掉，回到 1 小時），`outbox-gc.sh` 看到就跳過整個目錄；清單回 `ttl_secs:null`、`kept:true`、每個檔 `expires_at`／`remaining_secs` 為 null，網頁不畫倒數。
 - **禁放清單**：私鑰、憑證、DB 一律不得放 scratchpad 或 outbox——`.pem` `.key` `.p12` `.pfx` `.jks` `.keystore` `.ppk` `.kdbx` `.env`、
   `id_rsa*`／`id_ed25519*`、`*.sqlite*`、`*.db`（含 `-wal`／`-shm`／`.bak`）、DB 複本、瀏覽器 profile。要長期保留的東西進 repo 或 `reports/`。
 - **規則三條**（寫進 `lifecycle::child_agent_rules`，claude skill 與三種 kind 的 persona 共用，所以不在本 repo 的 bot 也讀得到；
@@ -2551,6 +2553,7 @@ header 的 herdr 徽章確認後 `POST /api/hosts/{name}/herdr-update`（API §1
   | 條件 | `reason` | 為什麼 |
   |---|---|---|
   | 是總管自己那幾顆（`supervisors.bot_id` 或 `supervisor_roles` 的 patrol／responder） | `supervisor` | 巡邏的人不收自己，watchdog 反正會把它們拉回來 |
+  | 分享用（受限）bot（`shared_bots` 有一列，§20） | `share_bot` | 2026-10-04 使用者：「let AGM 不清除這類 bot」。外部 end user 隨時會來，不知道它被收起來、旁邊也沒人按啟動 |
   | 主力 bot（`bots.is_primary`，側欄打星號的） | `primary` | 2026-09-18 使用者：「主力 bot 超時也不先 kill」。主力是隨時會切回去的那幾顆，叫醒要等 `--resume`，比省下的 RAM 更貴 |
   | `managed_by = 'team'` | `team_member` | 成員的 run 由 team 排程記著 |
   | `managed_by = 'child'` | `child` | pane 是父 agent 開的，daemon 起不回來（§6.5a），收掉就真的沒了 |
@@ -4779,6 +4782,20 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   - 安全：SVG 一律只經 `<img>`（blob: 或同源 `?inline=1`）或 canvas，**絕不**插進 DOM；引用外部資源（`#id`／`data:` 以外的 href、`url()`、`@import`）或 `<foreignObject>` 的 SVG 不轉（`<img>` 不載外部資源、canvas 可能被汙染），只顯示「這張圖沒辦法分享」。頁面 CSP 本來就有 `img-src 'self' data: blob:`，不必放寬。
   - end user 訊息裡 daemon 加的前綴、附件標記，顯示前前端再拿掉一次（daemon 已拿掉；舊版 daemon 或 bot 照抄時也不會出現）。SSE 收到 `resync` 就整頁重抓並取代手上的清單。
   一段對話同時只排一則：status 是 working／blocked／starting（含剛送出還沒回）時送出鈕停用、下方寫「等 bot 回完再送」，仍可先打；萬一還是 409 `not_accepted`，字與附件留在輸入框、提示等回完再送，並重抓一次狀態。
+
+### 20.5 分享用 bot 不清（使用者 2026-10-04：「let AGM 不清除這類 bot」）
+
+它是給外部 end user 隨時來用的：對方不知道它被收起來、旁邊也沒人按啟動，常常隔天才回來。所以 AGM／daemon 的自動清理一律不動它：
+
+- **閒置收起**（§6.11）：`decide` 的 `share_bot`，排在 `supervisor` 之後、`primary` 之前；認的是 `shared_bots` 有一列，讀不到就這輪不收。
+- **隱式退役**（`child_retire`，對帳 agent 不見／run 早就結束、維護窗口收尾）：分享用 bot 不會是 child，入口仍多一道保險，回 `ShareBot`、不軟刪。
+- **AGM 經 API**：AGM 角色本來只碰得到自己 bot 樹（`bot_resource_scope`）；另外 Bot principal 打 `DELETE /api/bots/{id}`、`POST /api/bots/{id}/stop`、
+  `DELETE /api/projects/{id}`（專案裡有活著的分享用 bot）一律 403 `share_bot_protected`。重啟照准（會自己起回來）；使用者（UI token）照常能停能刪。
+- **outbox**：不給 `outbox-gc.sh` 清（§6.5f 分享用 bot 例外）。
+- **停了自動接回**：pane 被關、daemon 重啟、主機重開之後它就是停著（對帳只把 run 收成 exited，不刪 bot）。end user 送來一則時照「先落地、再啟動」
+  （`start_send`）：睡著的走 `idle_sleep::wake`，停著的分享用 bot 以 `resume_native` 啟動（接不回才開新對話），起來閒下來由佇列送出。
+- 本來就不影響：批次重啟／herdr 升級（`resume_native` 原地接回）、`autostart_revive`（只碰 autostart 且被 herdr 弄丟的，起回來）、`pane-gc.sh`（只關卡住的登入 pane）、
+  `bot_trash`／`remote_purge`（只處理已刪的）、config 投影移除（使用者自己從 config 拿掉）、AGM persona 第 19 條的閒置盤點（只清 AGM 自己的 child，文件另寫明分享用 bot 不清）。
 
 ## 附錄 A：herdr socket（0.8.2 / protocol 20）
 

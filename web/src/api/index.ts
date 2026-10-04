@@ -351,12 +351,12 @@ export async function setIdentityDisabled(host: string, kind: string, name: stri
 }
 
 /** bot 放進 `$AM_OUTBOX` 交給使用者的檔案（SPEC §6.5f）。`reason` 有值＝這顆沒有可列的（遠端）。
- *  `remainingSecs`：daemon 讀清單那一刻離被清掉還剩幾秒（放進去 1 小時後清）。 */
-export type OutboxFile = { name: string; size: number; modified: number; remainingSecs: number }
+ *  `remainingSecs`：daemon 讀清單那一刻離被清掉還剩幾秒（放進去 1 小時後清）；null＝不會被清（分享用 bot，SPEC §20）。 */
+export type OutboxFile = { name: string; size: number; modified: number; remainingSecs: number | null }
 
 export async function fetchOutbox(
   botId: string,
-): Promise<{ dir: string; reason: string | null; ttlSecs: number; files: OutboxFile[] }> {
+): Promise<{ dir: string; reason: string | null; ttlSecs: number; kept: boolean; files: OutboxFile[] }> {
   const raw = await transport.request('GET', `/bots/${encodeURIComponent(botId)}/outbox`)
   const o = isRec(raw) ? raw : {}
   const rows = pick(o, 'files')
@@ -365,13 +365,15 @@ export async function fetchOutbox(
         name: str(pick(r, 'name')),
         size: num(pick(r, 'size')),
         modified: num(pick(r, 'modified')),
-        remainingSecs: num(pick(r, 'remaining_secs')),
+        remainingSecs: typeof pick(r, 'remaining_secs') === 'number' ? num(pick(r, 'remaining_secs')) : null,
       }))
     : []
   return {
     dir: str(pick(o, 'dir')),
     reason: optStr(pick(o, 'reason')),
     ttlSecs: num(pick(o, 'ttl_secs')),
+    // 分享用 bot 的 outbox 不清（daemon 回 `kept:true`、`ttl_secs:null`）。
+    kept: pick(o, 'kept') === true,
     files: files.filter((f) => f.name),
   }
 }

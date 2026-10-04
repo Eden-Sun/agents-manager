@@ -212,6 +212,7 @@ pub(crate) async fn finish_restricted(app: &Arc<App>, bot_id: &str, workspace: &
             // 啟動時以 `shared_bots.workspace` 為準（`cage::prepare`），這裡寫不進去只影響側欄顯示的目錄。
             tracing::warn!(bot = bot_id, error = %e, "could not point the restricted bot's cwd at its folder");
         }
+        crate::outbox::mark_share_keep(&app.data_dir, bot_id);
         return;
     }
     if let Err(e) = store::delete_restricted(&app.db, bot_id).await {

@@ -40,6 +40,8 @@ pub(crate) enum Outcome {
     Unreadable,
     /// 專案已移交給另一台主機的 daemon（#708）：不退役，什麼都沒寫。
     HandedOff,
+    /// 分享用（受限）bot（SPEC §20）：外部 end user 隨時會來，自動清理一律不動它，什麼都沒寫。
+    ShareBot,
 }
 
 /// 退役 `bot_id` 這顆 child。DB 寫不進去回 `Err`（呼叫端各自決定重試或回滾）；守衛擋下、讀不到擁有關係不是錯誤。
@@ -57,6 +59,12 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
                 tracing::info!(bot = %bot.name, bot_id = %bot.id, why, handed_off_to = %to, "child not retired: the project was handed off");
                 return Ok(Outcome::HandedOff);
             }
+        }
+        // 2026-10-04 使用者：「let AGM 不清除這類 bot」。分享用 bot 不會是 child（建 bot 時才選、managed_by=user），
+        // 這裡是唯一入口上的保險：哪天有一條路誤把它當 child，也不會被隱式軟刪。讀不到＝不退役。
+        if mode == Mode::Implicit && !matches!(crate::share::store::is_restricted(&app.db, &bot.id).await, Ok(false)) {
+            tracing::info!(bot = %bot.name, bot_id = %bot.id, why, "bot not retired: it is a share bot (or that could not be read)");
+            return Ok(Outcome::ShareBot);
         }
         if mode == Mode::Implicit {
             match agm_guard(app, &bot, why).await {
@@ -293,6 +301,19 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    /// 分享用 bot 就算被誤當成 child，對帳／維護收尾的隱式退役也不軟刪它（2026-10-04 使用者：「let AGM 不清除這類 bot」）。
+    #[tokio::test]
+    async fn an_implicit_retirement_never_soft_deletes_a_share_bot() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let kid = a_child(&env).await;
+        crate::share::store::insert_restricted(&app.db, &kid, "/tmp/share-kid").await.unwrap();
+        for why in ["reconcile_agent_gone", "herdr_maintenance_closed"] {
+            assert_eq!(retire(&app, &kid, why, Mode::Implicit).await.unwrap(), Outcome::ShareBot, "{why}");
+        }
+        assert!(db::bot(&app.db, &kid).await.unwrap().unwrap().deleted_at.is_none(), "還在");
     }
 
     /// #554：退役跟 `deleted_at` 同一個交易寫一筆 `retire_child` intent（`done`），換版腳本才查得到；

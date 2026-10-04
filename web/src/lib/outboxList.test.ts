@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { downloadFailure, emptyReason, fileSize, isPreviewableImage, lastSettledTurnKey, orderFiles, previewPlacement, readOutbox, remainingLabel, remainingNow } from './outboxList'
 import { ApiError } from '../api/types'
 
-const file = (name: string, modified: number, remainingSecs = 3600) => ({ name, size: 1, modified, remainingSecs })
+const file = (name: string, modified: number, remainingSecs: number | null = 3600) => ({ name, size: 1, modified, remainingSecs })
 
 test('檔案大小講的是「下載會多大」，個位數才給小數', () => {
   assert.equal(fileSize(0), '0 B')
@@ -22,6 +22,13 @@ test('剩餘時間從讀清單那一刻往下扣，不看瀏覽器時鐘跟 daem
   assert.equal(remainingNow(f, fetchedAt, fetchedAt + 600_000), 2400, '十分鐘後')
   assert.equal(remainingNow(f, fetchedAt, fetchedAt + 4_000_000), 0, '過期不出現負數')
   assert.equal(remainingNow(f, fetchedAt, fetchedAt - 60_000), 3000, '時鐘往回跳不加時間')
+})
+
+test('分享用 bot 的檔案不會被清：沒有倒數，空清單也不講「1 小時後清掉」', () => {
+  assert.equal(remainingNow(file('a.pdf', 1, null), 1_789_600_000_000, 1_789_700_000_000), null)
+  assert.match(emptyReason(null, true, true), /不會自動清掉/)
+  assert.doesNotMatch(emptyReason(null, true, true), /1 小時/)
+  assert.match(emptyReason(null, true), /1 小時後會自動清掉/)
 })
 
 test('倒數以分鐘講、無條件進位，到期講即將清除', () => {

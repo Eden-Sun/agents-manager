@@ -492,6 +492,30 @@ async fn a_portal_message_starts_the_restricted_bot_in_its_cage() {
     assert!(args.contains(&"--restricted".into()), "{args:?}");
 }
 
+/// daemon 重啟、主機重開之後分享用 bot 停著：end user 送一則來，替它起來時接回原本那段對話（`--resume`），仍在籠子裡。
+#[tokio::test]
+async fn a_portal_message_to_a_stopped_share_bot_resumes_its_last_session() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    sqlx::query(
+        "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at)
+         VALUES (?,?,'exited','idle','share-previous','2026-10-03T00:00:00Z','2026-10-03T00:01:00Z')",
+    )
+    .bind(db::ulid())
+    .bind(&b.id)
+    .execute(&e.app.db)
+    .await
+    .unwrap();
+    let token = shared(&e.app, &b.id).await;
+    let base = serve(portal::router(e.app.clone())).await;
+    let r = client().post(format!("{base}/s/{token}/api/messages")).json(&json!({"text": "我昨天問的那件事", "client_request_id": "c1"})).send().await.unwrap();
+    assert_eq!(r.status(), 200, "{}", r.text().await.unwrap());
+    crate::lifecycle::start_send::start_for_waiting(&e.app, &b.id).await;
+    let (args, _) = started(&e);
+    assert!(args.windows(2).any(|w| w == ["--resume", "share-previous"]), "接回原本那段對話：{args:?}");
+    assert!(args.contains(&"--restricted".into()), "{args:?}");
+}
+
 // ───────────── 籠子 ─────────────
 
 fn started(e: &tt::Env) -> (Vec<String>, Value) {
@@ -943,6 +967,84 @@ async fn downloads_come_only_from_the_bots_outbox_as_attachments() {
         let r = c.get(format!("{base}/s/{token}/api/files/{bad}")).send().await.unwrap();
         assert_eq!(r.status(), 404, "{bad}");
     }
+}
+
+/// 分享用 bot 的 outbox 不給 AGM 的 gc 清（使用者 2026-10-04：end user 隔天才回來拿是常態）：建立時就放標記、開機補回、
+/// 刪掉才拿掉；主 UI 的清單與分享頁都不給倒數。一般 bot 照舊 1 小時。
+#[tokio::test]
+async fn a_share_bots_outbox_is_kept_by_the_gc_and_listed_without_a_countdown() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let plain = tt::claude_bot(&e.app, &e.project_id, "plain").await;
+    let outbox = crate::outbox::dir_for(&e.app.data_dir, &b.id).unwrap();
+    let mark = outbox.join(crate::outbox::SHARE_KEEP_MARK);
+    assert!(mark.exists(), "建立分享用 bot 時就放好標記");
+    std::fs::write(outbox.join("report.pdf"), "%PDF-1.4").unwrap();
+    let plain_outbox = crate::outbox::ensure(&e.app.data_dir, &plain.id).unwrap();
+    std::fs::write(plain_outbox.join("a.txt"), "a").unwrap();
+
+    let api = serve(crate::api::router(e.app.clone())).await;
+    let c = client();
+    let list = |id: String| {
+        let (c, api) = (c.clone(), api.clone());
+        async move { c.get(format!("{api}/api/bots/{id}/outbox")).header("X-AM-Token", "test-token").send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let v = list(b.id.clone()).await;
+    assert_eq!(v["ttl_secs"], Value::Null, "{v}");
+    assert_eq!(v["kept"], true);
+    assert_eq!(v["files"].as_array().unwrap().len(), 1, "標記檔不列：{v}");
+    assert_eq!(v["files"][0]["name"], "report.pdf");
+    assert_eq!(v["files"][0]["remaining_secs"], Value::Null, "不給倒數");
+    let p = list(plain.id.clone()).await;
+    assert_eq!(p["ttl_secs"], json!(crate::outbox::TTL_SECS), "一般 bot 照舊");
+    assert!(p["files"][0]["remaining_secs"].is_u64());
+    assert!(!plain_outbox.join(crate::outbox::SHARE_KEEP_MARK).exists());
+
+    let token = shared(&e.app, &b.id).await;
+    let portal_base = serve(portal::router(e.app.clone())).await;
+    let f: Value = c.get(format!("{portal_base}/s/{token}/api/files")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(f["files"][0]["name"], "report.pdf");
+    assert!(f["files"][0].get("remaining_secs").is_none(), "分享頁不給倒數：{f}");
+
+    std::fs::remove_file(&mark).unwrap();
+    crate::share::keep_share_outboxes(&e.app).await;
+    assert!(mark.exists(), "開機補回");
+    crate::share::revoke_bot_share(&e.app, &b.id).await.unwrap();
+    assert!(!mark.exists(), "bot 刪掉就拿掉標記，回到一般的 1 小時清");
+    assert!(outbox.join("report.pdf").exists(), "拿標記不刪檔");
+}
+
+/// AGM（登記的角色 bot，`UserOrAgm` 的路過得了）不能刪、停分享用 bot，也不能刪它所在的專案；重啟照准；使用者自己照常能停能刪。
+#[tokio::test]
+async fn agm_can_neither_stop_nor_delete_a_share_bot_but_the_user_can() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let agm = tt::claude_bot(&e.app, &e.project_id, "agm").await;
+    sqlx::query("UPDATE bots SET hook_token = 'agm-tok' WHERE id = ?").bind(&agm.id).execute(&e.app.db).await.unwrap();
+    crate::supervisor::store::get_or_init(&e.app.db).await.unwrap();
+    sqlx::query("UPDATE supervisors SET bot_id = ?").bind(&agm.id).execute(&e.app.db).await.unwrap();
+    let base = serve(crate::api::router(e.app.clone())).await;
+    let c = client();
+    let as_agm = |rb: reqwest::RequestBuilder| rb.header("X-AM-Bot-Id", &agm.id).header("X-AM-Bot-Token", "agm-tok");
+    // 停、刪 bot：AGM 本來就只碰得到自己 bot 樹裡的（`bot_resource_scope`），分享用 bot 不會在裡面。
+    for (m, url) in [(reqwest::Method::POST, format!("{base}/api/bots/{}/stop", b.id)), (reqwest::Method::DELETE, format!("{base}/api/bots/{}", b.id))] {
+        let r = as_agm(c.request(m.clone(), &url)).send().await.unwrap();
+        assert_eq!(r.status(), 403, "{m} {url}");
+    }
+    // 刪專案：AGM 自己就在這個專案裡（過得了範圍檢查），分享用 bot 也在——這條靠新守衛擋。
+    let r = as_agm(c.delete(format!("{base}/api/projects/{}", e.project_id))).send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.json::<Value>().await.unwrap()["reason"], "share_bot_protected");
+    // 守衛本身也認 bot 層級的停與刪（萬一哪天分享用 bot 落進 AGM 的範圍）。
+    for (m, p) in [("POST", format!("/api/bots/{}/stop", b.id)), ("DELETE", format!("/api/bots/{}", b.id))] {
+        assert_eq!(crate::share::guards_from_bot_principal(&e.app.db, m, &p).await, Some(b.id.clone()), "{m} {p}");
+    }
+    assert_eq!(crate::share::guards_from_bot_principal(&e.app.db, "POST", &format!("/api/bots/{}/restart", b.id)).await, None, "重啟照准");
+    assert!(db::bot(&e.app.db, &b.id).await.unwrap().unwrap().deleted_at.is_none(), "還在");
+    let plain = tt::claude_bot(&e.app, &e.project_id, "plain").await;
+    assert_eq!(crate::share::guards_from_bot_principal(&e.app.db, "DELETE", &format!("/api/bots/{}", plain.id)).await, None, "一般 bot 不受影響");
+    let r = c.post(format!("{base}/api/bots/{}/stop", b.id)).header("X-AM-Token", "test-token").send().await.unwrap();
+    assert!(r.status().is_success(), "使用者自己能停：{}", r.status());
 }
 
 #[tokio::test]

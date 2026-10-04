@@ -48,6 +48,43 @@ pub(crate) fn dir_for(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
     Some(data_dir.join("outbox").join(bot_id))
 }
 
+/// 分享用 bot（SPEC §20）的 outbox 標記檔：AGM 的 `outbox-gc.sh` 看到它就整個目錄不清（使用者 2026-10-04：end user 是外部的人，
+/// 隔天才回來拿檔是常態）。點開頭，清單本來就不列（[`withheld_name`]）。
+pub(crate) const SHARE_KEEP_MARK: &str = ".am-share-keep";
+
+/// 替分享用 bot 的 outbox 放 [`SHARE_KEEP_MARK`]（啟動、建立、daemon 開機時都補一次；bot 自己刪掉也會被補回）。
+/// 寫不起來只記 warning：少了標記只是檔案照一般的 1 小時清，不該讓 bot 起不來。
+pub(crate) fn mark_share_keep(data_dir: &Path, bot_id: &str) {
+    let Some(dir) = ensure(data_dir, bot_id) else { return };
+    let mark = dir.join(SHARE_KEEP_MARK);
+    if std::fs::symlink_metadata(&mark).is_ok() {
+        return;
+    }
+    if let Err(e) = std::fs::write(&mark, b"share bot outbox: kept by outbox-gc.sh (SPEC 20)\n") {
+        tracing::warn!(bot = bot_id, dir = %dir.display(), error = %e, "could not mark the share bot's outbox as kept");
+    }
+}
+
+/// bot 或專案刪掉了：拿掉標記，outbox 回到一般的 1 小時清（不然刪掉的分享用 bot 的檔永遠留著）。還原後啟動時再補。
+pub(crate) fn unmark_share_keep(data_dir: &Path, bot_id: &str) {
+    let Some(dir) = dir_for(data_dir, bot_id) else { return };
+    match std::fs::remove_file(dir.join(SHARE_KEEP_MARK)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(bot = bot_id, error = %e, "could not unmark a deleted share bot's outbox"),
+    }
+}
+
+/// 分享用 bot 的檔案不會被清：清單上不給 `expires_at`／`remaining_secs`（前端不畫倒數）。
+pub(crate) fn without_expiry(files: &mut [serde_json::Value]) {
+    for f in files {
+        if let Some(o) = f.as_object_mut() {
+            o.insert("expires_at".into(), serde_json::Value::Null);
+            o.insert("remaining_secs".into(), serde_json::Value::Null);
+        }
+    }
+}
+
 /// bot 啟動時把目錄建好。建不起來只記 warning：少一個目錄不該讓 bot 起不來，bot 寫之前本來就要 `mkdir -p`。
 pub(crate) fn ensure(data_dir: &Path, bot_id: &str) -> Option<PathBuf> {
     let dir = dir_for(data_dir, bot_id)?;
@@ -330,13 +367,18 @@ pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> 
     })
     .await
     .unwrap_or(Err(()));
-    let files = match outcome {
+    let mut files = match outcome {
         Ok(files) => files,
         Err(()) => {
             tracing::warn!(bot = %id, dir = %dir.display(), "outbox path is a symlink or not ours; not listing it");
             return Ok((StatusCode::OK, axum::Json(json!({"files": [], "ttl_secs": TTL_SECS, "reason": "outbox_untrusted"}))).into_response());
         }
     };
+    // 分享用 bot（SPEC §20）的 outbox 不清：`ttl_secs:null`、每個檔不帶到期。讀不到是不是分享用 bot 就照一般的報（只影響顯示）。
+    if matches!(crate::share::store::is_restricted(&app.db, &id).await, Ok(true)) {
+        without_expiry(&mut files);
+        return Ok((StatusCode::OK, axum::Json(json!({"dir": dir.to_string_lossy(), "ttl_secs": null, "kept": true, "files": files}))).into_response());
+    }
     Ok((StatusCode::OK, axum::Json(json!({"dir": dir.to_string_lossy(), "ttl_secs": TTL_SECS, "files": files}))).into_response())
 }
 

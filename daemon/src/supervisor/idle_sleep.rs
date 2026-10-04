@@ -19,6 +19,8 @@
 //!   不收自己，而且 watchdog 反正會把它們拉回來；
 //! * 主力 bot（`bots.is_primary`，側欄打星號的那幾顆）——2026-09-18 使用者：「主力 bot 超時也不先 kill」。
 //!   主力是使用者隨時會切回去的那幾顆，叫醒要等 `--resume` 起來，比省下的 RAM 更貴。
+//! * 分享用（受限）bot（`shared_bots` 有一列，SPEC §20）——2026-10-04 使用者：「let AGM 不清除這類 bot」。
+//!   它是給外部 end user 隨時來用的，對方不知道它被收起來，也沒有人在旁邊按啟動。
 //! * 它開的子 agent 還在跑——父 bot 分完工就結束回合等回報，看起來是閒著，但子 agent 做完要
 //!   `herdr agent prompt` 回報給它、卡住時 `child_alerts` 要通知它；收掉就沒人收（issue #172）。
 
@@ -61,6 +63,8 @@ pub struct Cand {
     pub is_supervisor: bool,
     /// 主力 bot（`bots.is_primary`）。
     pub is_primary: bool,
+    /// 分享用（受限）bot（`shared_bots` 有一列）：永遠不收。
+    pub is_share_bot: bool,
     /// `runs.state`。
     pub state: String,
     /// `runs.agent_status`：`idle` / `working` / `blocked` / `unknown`。
@@ -88,6 +92,7 @@ pub struct Cand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
     Supervisor,
+    ShareBot,
     Primary,
     TeamMember,
     Child,
@@ -108,6 +113,7 @@ impl Skip {
     pub fn code(self) -> &'static str {
         match self {
             Skip::Supervisor => "supervisor",
+            Skip::ShareBot => "share_bot",
             Skip::Primary => "primary",
             Skip::TeamMember => "team_member",
             Skip::Child => "child",
@@ -131,6 +137,9 @@ impl Skip {
 pub fn decide(c: &Cand, threshold: i64) -> Result<(), Skip> {
     if c.is_supervisor {
         return Err(Skip::Supervisor);
+    }
+    if c.is_share_bot {
+        return Err(Skip::ShareBot);
     }
     if c.is_primary {
         return Err(Skip::Primary);
@@ -290,6 +299,8 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
         managed_by: bot.managed_by.clone(),
         is_supervisor: sup.contains(&bot.id),
         is_primary: bot.is_primary != 0,
+        // 讀不到就回 Err（issue #123）：漏認的分享用 bot 會被當成一般 worker 收掉。
+        is_share_bot: crate::share::store::is_restricted(&app.db, &bot.id).await?,
         state: run.state.clone(),
         agent_status: run.agent_status.clone(),
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
@@ -932,6 +943,7 @@ mod tests {
             managed_by: "user".into(),
             is_supervisor: false,
             is_primary: false,
+            is_share_bot: false,
             state: "running".into(),
             agent_status: "idle".into(),
             turn_in_flight: false,
@@ -976,6 +988,44 @@ mod tests {
         assert_eq!(decide(&c, 90), Err(Skip::Primary));
         c.is_primary = false;
         assert_eq!(decide(&c, 90), Ok(()));
+    }
+
+    /// 分享用 bot 閒置再久也不收（2026-10-04 使用者：「let AGM 不清除這類 bot」）；理由排在主力之前。
+    #[test]
+    fn a_share_bot_is_never_put_to_sleep() {
+        let mut c = cand();
+        c.is_share_bot = true;
+        c.is_primary = true;
+        c.idle_minutes = 100_000;
+        assert_eq!(decide(&c, 90), Err(Skip::ShareBot));
+        assert_eq!(Skip::ShareBot.code(), "share_bot");
+        c.is_share_bot = false;
+        c.is_primary = false;
+        assert_eq!(decide(&c, 90), Ok(()));
+    }
+
+    /// 真的打到 DB：`shared_bots` 有一列的 bot 在候選名單裡被認成分享用 bot，閒置 180 分鐘、可續接也不收，
+    /// 整輪 sweep 跑完 run 還在、沒有 mark_asleep。
+    #[tokio::test]
+    async fn the_sweep_leaves_a_share_bot_running_and_awake() {
+        let _g = SWEEP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let b = crate::testing::claude_bot(&app, &env.project_id, "share-desk").await;
+        crate::share::store::insert_restricted(&app.db, &b.id, "/tmp/share-desk").await.unwrap();
+        let run = crate::testing::fake_run(&app, &b.id).await;
+        sqlx::query("UPDATE runs SET started_at=?, native_session_id='sid-1', agent_status='idle' WHERE id=?")
+            .bind((chrono::Utc::now() - chrono::Duration::minutes(180)).to_rfc3339())
+            .bind(&run)
+            .execute(&app.db)
+            .await
+            .unwrap();
+        let c = candidates(&app).await.unwrap().into_iter().find(|c| c.bot_id == b.id).expect("在名單裡");
+        assert!(c.is_share_bot);
+        assert_eq!(decide(&c, 90), Err(Skip::ShareBot));
+        sweep(&app, 90).await;
+        assert!(db::active_run(&app.db, &b.id).await.unwrap().is_some(), "分享用 bot 的 run 不能被收掉");
+        assert!(all_asleep(&app).await.get(&b.id).is_none(), "也不能被記成睡著");
     }
 
     /// 回合結束不等於工作結束：pane 底下還有背景 shell／建置在跑就不收。

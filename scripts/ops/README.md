@@ -520,7 +520,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agm.ci-watch.plist
 三支純機械的清理腳本，原本只存在 AGM 的 `bin/`，沒有版本控制也沒有測試，卻都是破壞性的（刪檔、殺行程、關 pane）。
 現在 repo 是來源，內容與已安裝的那份逐位元組相同（`cmp`），另附 `browser-gc-task.md`（browser-gc bot 的交辦正文）。
 
-- `outbox-gc.sh`：launchd `com.agm.outbox-gc` 每 10 分鐘；刪 outbox 底下（含 bot 子目錄）mtime 與 ctime 都超過 60 分鐘的檔（`mv`／`cp -p` 進來的舊檔從搬入起算）與空目錄；`OUTBOX_GC_NOW` 是測試用的時鐘接縫。護欄：`AM_OUTBOX_ROOT` 不在 `~/.config/agents-manager/outbox*` 就拒絕。
+- `outbox-gc.sh`：launchd `com.agm.outbox-gc` 每 10 分鐘；刪 outbox 底下（含 bot 子目錄）mtime 與 ctime 都超過 60 分鐘的檔（`mv`／`cp -p` 進來的舊檔從搬入起算）與空目錄；有 `.am-share-keep` 標記檔的 bot 目錄（分享用 bot，SPEC §20.5；daemon 放的）整個跳過；`OUTBOX_GC_NOW` 是測試用的時鐘接縫。護欄：`AM_OUTBOX_ROOT` 不在 `~/.config/agents-manager/outbox*` 就拒絕。
 - `pane-gc.sh`：關卡住超過 24 小時的 `claude auth login`／`gcloud auth login`／`codex login` pane；幽靈 pane 只記錄。由 `browser-gc-kick.sh` 呼叫。
 - `browser-gc-kick.sh`：launchd `com.agm.browser-gc`，**`StartInterval 1800`（30 分鐘）**；收孤兒、無 CDP 連線、活超過 2 分鐘的 headless Chrome，刪沒人用的 `/tmp/am-*` Chrome profile，跑 `pane-gc.sh`，再派 `browser-gc-task.md`。有鎖與殘留回收（issue #490）。
   （這裡原本寫「每 6 小時」，但實機一直是 1800 秒——是**文件寫錯**，不是排程跑錯；issue #487 把 plist 收進版控時照實機現值定案。）

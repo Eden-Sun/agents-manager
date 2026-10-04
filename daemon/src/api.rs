@@ -932,6 +932,10 @@ async fn auth(State(app): State<Arc<App>>, mut req: axum::extract::Request, next
         if let Err(e) = authorize_bot_path(&app, bot_id, method, path).await {
             return e.into_response();
         }
+        // 分享用 bot（SPEC §20）不給 AGM 刪、停（含刪它所在的專案）：只有使用者自己能。
+        if let Some(target) = crate::share::guards_from_bot_principal(&app.db, method, path).await {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden", "reason": "share_bot_protected", "bot_id": target}))).into_response();
+        }
     }
     req.extensions_mut().insert(principal.clone());
     // 會改東西的請求記下是誰發的：config.toml 的寫入 log 與刪除 intent 要引用（issue #406）。

@@ -1510,17 +1510,20 @@ export class MockTransport implements Transport {
     const bot = this.bot(botId)
     const ttl = 3600
     if (bot.kind === 'grok') return { files: [], ttl_secs: ttl, reason: 'outbox_remote' }
+    // 分享用 bot（SPEC §20）的 outbox 不清：`kept`、不帶到期。
+    const kept = bot.share_profile === 'restricted'
     const now = Math.floor(Date.now() / 1000)
     const file = (name: string, size: number, age: number) => ({
       name,
       size,
       modified: now - age,
-      expires_at: now - age + ttl,
-      remaining_secs: Math.max(0, ttl - age),
+      expires_at: kept ? null : now - age + ttl,
+      remaining_secs: kept ? null : Math.max(0, ttl - age),
     })
     return {
       dir: `/Users/me/.config/agents-manager/outbox/${botId}`,
-      ttl_secs: ttl,
+      ttl_secs: kept ? null : ttl,
+      ...(kept ? { kept: true } : {}),
       files: [
         ...(this.outboxAdded.get(botId) ?? []).map((name) => file(name, 141, 5)),
         file('tracking.tsv', 18_432, 120),

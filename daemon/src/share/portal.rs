@@ -946,12 +946,12 @@ async fn files(State(st): State<Portal>, Path(token): Path<String>) -> Response 
             return unavailable();
         }
     };
-    // 只給名字、大小、還剩多久；目錄路徑不給。
+    // 只給名字、大小、時間；目錄路徑不給。分享用 bot 的 outbox 不清（`outbox-gc.sh` 看 `.am-share-keep`），所以不給倒數。
     let out: Vec<Value> = listed
         .iter()
         .map(|f| {
             let modified_at = f["modified"].as_i64().and_then(|t| chrono::DateTime::from_timestamp(t, 0)).map(db::iso_at);
-            json!({"name": f["name"], "size": f["size"], "modified_at": modified_at, "remaining_secs": f["remaining_secs"]})
+            json!({"name": f["name"], "size": f["size"], "modified_at": modified_at})
         })
         .collect();
     Json(json!({"files": out})).into_response()
