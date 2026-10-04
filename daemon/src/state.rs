@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -154,6 +154,8 @@ pub struct App {
     /// Cancellable background work and its join barrier for daemon shutdown.
     pub shutdown: tokio_util::sync::CancellationToken,
     pub background_tasks: tokio_util::task::TaskTracker,
+    /// External relay turns whose composer delivery watcher is active, keyed by turn id.
+    pub(crate) relay_watchers: std::sync::Mutex<HashSet<String>>,
     /// Monotonic deadlines paired with the persisted supervisor watchdog UTC timestamps.
     pub watchdog_deadlines: std::sync::Mutex<crate::supervisor::watchdog::DeadlineCache>,
     /// How "which account is this pid running under" gets answered (SPEC §16.6). Empty in a
@@ -333,6 +335,7 @@ impl App {
             default_connected: std::sync::atomic::AtomicBool::new(false),
             shutdown: tokio_util::sync::CancellationToken::new(),
             background_tasks: tokio_util::task::TaskTracker::new(),
+            relay_watchers: std::sync::Mutex::new(HashSet::new()),
             watchdog_deadlines: std::sync::Mutex::new(Default::default()),
             proc_env: Default::default(),
             kind_probe: Default::default(),

@@ -670,6 +670,9 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                             false
                         }
                     };
+                    if reconciled {
+                        crate::lifecycle::relay_watch::rearm_host(&app, &conn.name).await;
+                    }
                     crate::events::spawn_global_for_host(app.clone(), conn.name.clone()).await;
                     crate::hookrecv::replay_host(&app, &conn.name).await;
                     crate::tools::spawn_detect(app.clone(), conn.name.clone());
