@@ -290,6 +290,11 @@ pub async fn window_closed(app: &Arc<App>, why: &str) -> u64 {
     }
 }
 
+/// 持有人帶憑證自己交還窗口時，被消耗那張核准的 `reason`。
+pub const RELEASED_REASON: &str = "lease released";
+/// 強制收掉（daemon 開機收上一輪殘留、AGM `--force`）時的 `reason`。
+pub const FORCE_RELEASED_REASON: &str = "lease force-released";
+
 /// Release a lease and consume its approval — one yes, one window. When it was a restart
 /// window, the holds it placed are lifted at once.
 pub async fn release(
@@ -326,7 +331,10 @@ pub async fn release(
                 if a.status == "approved" {
                     // 走有稽核的那支：`decide_approval` 是無條件 UPDATE，不寫 supervisor_notes，
                     // 而且會把 `decided_at` 覆寫成消耗時間——升級判定（§18.10）的計時就是看那一欄。
-                    let _ = store::decide_approval_from(&app.db, ap, "approved", "consumed", owner, Some("lease released"), None).await;
+                    // 理由分得出「持有人自己交還」與「強制收掉」（daemon 開機收殘留、AGM `--force`）：
+                    // 自動部署只接續前者的等待（`swap_window`，SPEC §18.10）。
+                    let why = if proof.is_forced() { FORCE_RELEASED_REASON } else { RELEASED_REASON };
+                    let _ = store::decide_approval_from(&app.db, ap, "approved", "consumed", owner, Some(why), None).await;
                 }
             }
         }

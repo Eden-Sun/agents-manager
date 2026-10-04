@@ -4222,6 +4222,12 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   （issue #840：以前複查不帶核准、放寬又只認「還在等」，acquire 剛給的放寬被複查推翻，只要隨時有人 working 就永遠換不上）。
   線上還是舊 daemon 時（它的放寬在拿到窗口後就不算、每輪交還又把計時歸零），複查**沿用 acquire 回應的 `safety.escalated`**——條件是它的
   `escalation_approval_id` 就是開窗口的那張核准——只再確認 `delivering`、`unreadable`、別人的 `held_leases` 都空；欄位缺任何一個就不沿用。
+  **拿到窗口又沒換成就交還，計時不歸零**（2026-10-04 08:41～09:22 實例）：交還照樣消耗那張核准（一次核准一個窗口），但持有人帶憑證自己交還的，
+  核准的 `reason` 記 `lease released`（強制收掉——daemon 開機收上一輪殘留、AGM `--force`——記 `lease force-released`）。下一輪 restart-window
+  找不到活的自動核准時，若同一個 owner 最近那張自動核准是 `lease released`、交還不到 15 分鐘（同一次部署）、而且線上跑的不是它要換的 commit，
+  新開的那張接過它的 `waiting_since`（換 commit 也接）——以前每輪都在瞬間閒置時拿到窗口、§3a 複查又看到有人 working 而交還，
+  `escalates_at` 每輪往後推 5 分鐘，忙碌的機群永遠等不到放寬。等滿門檻後 acquire 與 §3a 複查（同一張核准的 safety）一樣只剩送達臨界區、
+  別人的租約、讀不到狀態會擋。
   被擋的 bot 名字可以點，直接跳過去看它在忙什麼。AGM 看到 `deploy_waiting` 也要立刻轉告使用者、請使用者調度，不自己默默等（兩份 persona）。
 - 運維腳本在 `scripts/ops/`，附隔離測試（`scripts/ops/daemon-update-kick_test.sh`，假 CLI + 暫存 repo）。
 - 邊界：租約只約束走 API 與這些腳本的路徑，shell 仍可直接 kill daemon 或 `cargo build --release`。租約讓「問過 AGM」在執行期間持續成立，不取代它。
