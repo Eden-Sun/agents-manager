@@ -677,6 +677,7 @@ fn the_settings_are_a_whitelist_of_the_folder_and_the_outbox() {
     let pr = cage::system_prompt("/srv/support", Some("/data/outbox/B1"), Some("你是客服"), "\n\n## 資料夾的指示：CLAUDE.md\n\nPELICAN");
     assert!(pr.contains("/data/outbox/B1") && pr.contains("你是客服") && pr.contains("〔分享使用者〕") && pr.ends_with("PELICAN"), "{pr}");
     assert!(pr.contains("/srv/support/memory/"), "{pr}");
+    assert!(pr.contains(r#"<image href="inbox/"#) && pr.contains("clipPath") && pr.contains("Read"), "要寫照片怎麼放進 SVG：{pr}");
 }
 
 #[test]
@@ -1140,6 +1141,34 @@ async fn inline_only_serves_images_inline_and_sandboxed() {
     }
     let gone = c.get(format!("{base}/s/{token}/api/files/missing.svg?inline=1")).send().await.unwrap();
     assert_eq!(gone.status(), 404);
+}
+
+/// bot 的 SVG 用 `<image href="inbox/…">` 引用長輩上傳的照片：入口送出時嵌成 data URI（下載與 `?inline=1` 都是），原檔不改；
+/// 跳出資料夾的 href 整個拿掉。
+#[tokio::test]
+async fn svg_photo_refs_are_embedded_on_the_way_out() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "poster").await;
+    let token = shared(&e.app, &b.id).await;
+    let ws = std::path::PathBuf::from(store::workspace(&e.app.db, &b.id).await.unwrap().unwrap());
+    std::fs::create_dir_all(ws.join("inbox")).unwrap();
+    let mut photo = Vec::new();
+    image::DynamicImage::new_rgb8(2000, 1000).write_to(&mut std::io::Cursor::new(&mut photo), image::ImageFormat::Jpeg).unwrap();
+    std::fs::write(ws.join("inbox/01A-IMG_3801.jpeg"), &photo).unwrap();
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+    let src = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600"><image href="inbox/01A-IMG_3801.jpeg" x="0" y="0" width="800" height="400"/><image href="../../etc/passwd"/></svg>"#;
+    std::fs::write(outbox.join("poster.svg"), src).unwrap();
+    let base = serve(portal::router(e.app.clone())).await;
+    let c = client();
+    for q in ["?inline=1", ""] {
+        let r = c.get(format!("{base}/s/{token}/api/files/poster.svg{q}")).send().await.unwrap();
+        assert_eq!(r.status(), 200, "{q}");
+        let body = r.text().await.unwrap();
+        assert!(body.contains(r#"<image href="data:image/jpeg;base64,"#), "{q}: {}", &body[..body.len().min(200)]);
+        assert!(!body.contains("inbox/01A-IMG_3801.jpeg") && !body.contains("etc/passwd"), "{q}");
+        assert!(body.contains(r#"data-am-embed="not_relative""#), "{q}");
+    }
+    assert_eq!(std::fs::read_to_string(outbox.join("poster.svg")).unwrap(), src, "原檔不改");
 }
 
 #[tokio::test]

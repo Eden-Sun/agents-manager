@@ -70,7 +70,8 @@ export function imagesByMessage(
 /**
  * SVG 有沒有引用外部資源。`<img>` 裡的 SVG 根本不載外部資源（畫出來會缺一塊），`<foreignObject>` 在部分瀏覽器會
  * 汙染 canvas（`toBlob` 丟 SecurityError）。偵測到就只給 SVG 下載，不假裝能轉 PNG。寧可多擋：`#id` 與 `data:` 以外的
- * href／url()、`@import`、`<foreignObject>` 都算。
+ * href／url()、`@import`、`<foreignObject>` 都算。看的是入口送來的內容：bot 引用資料夾裡的照片（`inbox/…`）daemon 已經
+ * 嵌成 `data:`（SPEC §20.3），這裡只會看到嵌完仍留著的外部參照。
  */
 export function svgExternalRefs(text: string): boolean {
   for (const m of text.matchAll(/\b(?:xlink:)?href\s*=\s*(["'])([^"']*)\1/gi)) {

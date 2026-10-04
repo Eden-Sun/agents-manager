@@ -4828,6 +4828,16 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   送訊息時帶的附件 id 必須真的在 `inbox/`，路徑以固定的標記行附在給 bot 的文字後面（對話列表再拆回檔名）。
 - 下載：只有這顆 bot 的 outbox 第一層，沿用 outbox 的擋法（金鑰／DB／隱藏檔不列不給、fd-bound 開檔）與下載標頭（attachment、白名單外 octet-stream、nosniff）；不給目錄路徑。列表只有 outbox 尚未建立時回空清單；可信目錄、列舉、檔案讀取或背景工作失敗回一般 503，不把不完整結果當空清單。真正不存在或遭黑名單擋下的單檔下載仍回 404。
   `?inline=1` 只對圖片類（svg／png／jpg／jpeg／gif／webp）回 inline＋正確 MIME＋`nosniff`＋`sandbox` CSP（不帶 `allow-scripts`），給分享頁 `<img>` 預覽；其他種類一律照舊 attachment（測試 `inline_only_serves_images_inline_and_sandboxed` 釘住）。入口的頁面 CSP 只對這份 sandbox CSP 讓路，其餘回應一律覆蓋成頁面的。
+- **SVG 裡的照片**（使用者 2026-10-04：長輩上傳的照片要能合成進 bot 做的海報）：受限 bot 沒有 shell，只能寫 SVG，所以用相對路徑引用資料夾裡的照片（`<image href="inbox/<檔名>" …>`，也收 `xlink:href` 與資料夾內其他子路徑），
+  **由入口在送出 SVG 時嵌成 data URI**（`share/compose.rs`；下載與 `?inline=1` 都是，分享頁的縮圖、對話內嵌圖與轉點陣圖分享因此都是含照片的完整一張）。原始 SVG 檔不改；主 API 的 outbox 下載不嵌。
+  - 只解相對路徑：有 scheme（第一段帶 `:`，含 http／https／file／javascript）、`/` 開頭（含 `//host`）、`\`、`?`／`#`、`..`／`.`、`.` 開頭的段一律不解（開頭的 `./` 可以，`%XX` 解碼後同樣檢查）；
+    從 `shared_bots.workspace` 逐段 `O_NOFOLLOW` 打開（`trusted_open::open_bound_file`：符號連結、硬連結 >1 都擋）。
+  - 只收 JPEG／PNG／WebP／GIF（看檔頭不看副檔名，GIF 取第一格）。HEIC／HEIF 不解：要 libheif（C 函式庫）daemon 不帶；分享頁上傳時已在瀏覽器把 HEIC 轉成 JPEG（§20.4），會遇到的只剩從別處放進資料夾的。
+  - 不收的（找不到、跳出資料夾、不是圖、HEIC、太大、超過張數）：整個 href 拿掉，換成 `data-am-embed="<理由>"`（`not_relative`／`not_found`／`not_an_image`／`heic_unsupported`／`source_too_large`／`image_too_large`／`too_many_images`／`svg_too_large`／`decode_failed`），並記 info log。`#id` 與 `data:` 原樣不動；`<image>` 以外的元素、註解與 CDATA 不碰。
+  - 縮圖（`image` crate）：先依 EXIF 修正方向，長邊縮到 1600（小的不放大），JPEG 品質 85（有半透明像素才用 PNG）；重編碼也把 EXIF（含 GPS）拿掉。上限：原檔 40 MiB、解碼長寬 16384、嵌進去的一張 base64 後 4 MiB（超過先縮到 1200 再試）、一份 16 張、嵌完整份 24 MiB。
+  - 快取：每張的結果（含跳過理由）依「資料夾＋相對路徑＋inode＋大小＋mtime」記在記憶體（總量 64 MiB，先進先出）；照片換了就重算。SVG 本身每次照讀，改寫只是字串處理。
+  - 測試釘住：`share::compose::tests`（路徑跳脫／scheme／符號連結／硬連結被擋、非圖片與 HEIC 被擋、嵌完是 quick-xml 解得開的 XML、縮圖與 EXIF 方向、快取）與 `svg_photo_refs_are_embedded_on_the_way_out`（入口兩條路、原檔不改）。
+  - 受限 bot 的系統提示（`cage::system_prompt`）寫明這個用法：`<image href="inbox/檔名" …>`、先用 Read 看照片內容與長寬比、圓角／圓形框用 `<clipPath>`。
 - SSE：`status`（連上時先送一次）、`message`、`resync`（漏了，請重抓）；全部分享加起來同時 32 條，每顆 bot 同時最多 4 條；滿額時該分享回 429，其他分享仍可連線。每個送出的事件都在 bot 鎖內重驗 token；每 30 秒或被叫醒時也重新確認，關閉連線即歸還兩層名額。
 
 ### 20.4 前端
@@ -4851,7 +4861,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
   - 每張圖下面一顆大按鈕：手機（`pointer: coarse`）且 `navigator.canShare({files})` 時叫「**分享**」（Web Share API 帶圖片檔：傳 LINE、存相簿；使用者取消不算失敗），否則叫「**存到手機**」（直接存點陣圖）。點陣圖原樣交出；SVG 交出的是 `<同名>.png`。對話、「bot 給你的檔案」、放大檢視都是同一顆。
   - 「bot 給你的檔案」裡的圖：縮圖＋名稱（不顯示副檔名）＋同一顆按鈕，不給原檔連結；非圖片照舊是下載連結。
   - SVG 轉點陣圖：抓原檔 → 根 `<svg>` 沒有 width／height 就從 viewBox 補上 → 經 blob: 的 `<img>` 畫到 canvas，2x 解析度（單邊 ≤ 8192、總像素 ≤ 16M），背景照 SVG 原樣。每個檔（同版本）只轉一次、一出現就先轉好（點陣圖也先抓好），因為 `navigator.share` 要在點擊的同一個手勢裡呼叫。
-  - 安全：SVG 一律只經 `<img>`（blob: 或同源 `?inline=1`）或 canvas，**絕不**插進 DOM；引用外部資源（`#id`／`data:` 以外的 href、`url()`、`@import`）或 `<foreignObject>` 的 SVG 不轉（`<img>` 不載外部資源、canvas 可能被汙染），只顯示「這張圖沒辦法分享」。頁面 CSP 本來就有 `img-src 'self' data: blob:`，不必放寬。
+  - 安全：SVG 一律只經 `<img>`（blob: 或同源 `?inline=1`）或 canvas，**絕不**插進 DOM；引用外部資源（`#id`／`data:` 以外的 href、`url()`、`@import`）或 `<foreignObject>` 的 SVG 不轉——判斷的是入口嵌完照片之後拿到的內容（§20.3），所以引用資料夾照片的 SVG 照常能轉，只有嵌完仍留著的外部參照才算（`<img>` 不載外部資源、canvas 可能被汙染），只顯示「這張圖沒辦法分享」。頁面 CSP 本來就有 `img-src 'self' data: blob:`，不必放寬。
   - **載不出來≠不能分享**（使用者 2026-10-04：ai-cc 改圖把 `y="380"font-size` 寫壞，長輩看到「沒辦法分享」以為圖不能分享）：這一版載不出來（不是合法 XML——先用 `DOMParser`
     判、解碼失敗、抓檔失敗）只說「**這張圖還在修，請稍等**」，不給按鈕、縮圖顯示佔位；檔案換版（mtime／大小變了，SSE resync 或重新整理重抓清單）就重試。「沒辦法分享」只留給引用外部資源。
   - **壞掉的 SVG 自動提醒 bot**（`share::svg_check`）：分享頁讀檔案清單（`GET /s/{token}/api/files`）時，背景查清單上每個 `.svg` 的新版（同一版 mtime＋大小只查一次）——

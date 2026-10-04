@@ -11,6 +11,7 @@
 
 pub(crate) mod admin;
 pub(crate) mod cage;
+pub(crate) mod compose;
 pub(crate) mod folder;
 pub(crate) mod multipart;
 pub(crate) mod portal;
