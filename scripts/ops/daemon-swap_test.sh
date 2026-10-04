@@ -855,7 +855,7 @@ teardown
 check "agm 維運請求用 daemon-swap service principal" "AM_SERVICE_ID=daemon-swap" "$SCRIPT"
 check "自測送到固定 service route" "/api/services/daemon-swap/probe/" "$SCRIPT"
 check_no "自測不再自行宣告 relay_from" "relay_from" "$SCRIPT"
-check "舊 daemon bootstrap 自測使用 User session token" 'with urllib.request.urlopen(base + "/api/session")' "$SCRIPT"
+check "舊 daemon bootstrap 自測使用 User session token" 'with opener.open(base + "/api/session")' "$SCRIPT"
 
 # 16b. If the service credential disappeared, do not silently turn a newer daemon client back into User.
 setup 10 10
