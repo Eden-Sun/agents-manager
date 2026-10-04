@@ -1,0 +1,62 @@
+/* 「⏳ 部署等 N 分」（SPEC §18.10）：跟「⇪ 部署」同一列同一種外型，琥珀色＝在等你調度。 */
+.deploy-wait {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.deploy-wait-chip {
+  padding: 1px 5px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.deploy-wait-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  width: min(320px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: normal;
+}
+
+.deploy-wait-pop p {
+  margin: 0 0 8px;
+}
+
+.deploy-wait-pop code {
+  font-size: 12px;
+}
+
+.deploy-wait-bot {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-ink);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.deploy-wait-note {
+  color: var(--text-dim);
+}
+
+.deploy-wait-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

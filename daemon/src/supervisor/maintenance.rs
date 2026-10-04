@@ -100,7 +100,9 @@ pub async fn escalation_for(app: &Arc<App>, approval_id: Option<&str>) -> Result
     // 同一個申請者換 commit 接續的等待（`wait_since`）也算：main 一動核准就換一筆，計時不能跟著歸零。
     let Some(since) = a.waiting_since() else { return Ok(None) };
     let waited = waited_secs(since, &now);
-    Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated: waited >= escalate_after_secs() }))
+    // 使用者在 header 按了「現在換版」：只放寬這次部署的自動核准（`deploy_wait`，使用者 2026-10-04）。
+    let by_user = crate::deploy_wait::user_escalated_for(app, &a);
+    Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated: by_user || waited >= escalate_after_secs() }))
 }
 
 /// 還握著的租約。縮小封鎖面時這是**唯一**新增的阻擋條件：窗口一次只給一個人。

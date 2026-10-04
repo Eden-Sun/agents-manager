@@ -247,6 +247,8 @@ pub struct App {
     pub autostart_hosts: std::sync::Mutex<HashMap<String, AutostartHostStatus>>,
     /// 各主機首次 autostart pass 的時間；未完成／被取消的 pass 重試時沿用，保護期間手動停止的 bot。
     pub autostart_since: std::sync::Mutex<HashMap<String, String>>,
+    /// 正在等換版窗口的那一次部署（`deploy_wait`，SPEC §18.10）。
+    pub deploy_wait: std::sync::Mutex<Option<crate::deploy_wait::Wait>>,
     /// hook 收件匣有新列時叫醒 worker（`hook_inbox`）。commit 完才 notify，所以 worker 一醒來
     /// 一定看得到那一列；沒有它就只剩輪詢，本機 hook 的處理延遲會從「幾毫秒」變成「幾秒」。
     pub hook_inbox_wake: tokio::sync::Notify,
@@ -378,6 +380,7 @@ impl App {
             pane_probe: std::sync::Mutex::new(Arc::new(crate::pane_probe::Real)),
             autostart_hosts: Default::default(),
             autostart_since: Default::default(),
+            deploy_wait: Default::default(),
             hook_inbox_wake: tokio::sync::Notify::new(),
             build_slot_lock: Mutex::new(()),
         })
