@@ -156,16 +156,26 @@
   }
 }
 
-/* 燈上的背景執行環（StatusLamp 的 `background`）：idle 的綠點外圈一圈 accent 呼吸環，跟側欄的 `.bg-jobs-dot` 同一種語言。 */
+/* 燈上的背景執行環（StatusLamp 的 `background`）：idle 的綠點外圈轉一圈藍色的載入弧——「還在跑」一眼看得出來
+   （2026-10-04 使用者：原本那圈淡淡呼吸的細環「不夠明顯表達執行中」，看起來像靶心）。藍色＝跟 working 燈同一個「在動」的顏色。 */
 .lamp-bg::after {
   content: '';
   position: absolute;
-  inset: -3px;
+  inset: -4px;
   border-radius: 50%;
-  border: 1.5px solid var(--accent);
-  animation: bg-jobs-pulse 1.6s ease-in-out infinite;
+  border: 2px solid transparent;
+  border-top-color: var(--lamp-blue);
+  border-right-color: var(--lamp-blue);
+  animation: lamp-bg-spin 0.9s linear infinite;
 }
 
+@keyframes lamp-bg-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 不動畫時留一段靜止的弧：仍然看得出跟一般閒置不同。 */
 @media (prefers-reduced-motion: reduce) {
   .lamp-bg::after {
     animation: none;
