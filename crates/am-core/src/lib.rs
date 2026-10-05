@@ -11,6 +11,23 @@ pub type QuotaKey = String;
 pub type UnixMillis = i64;
 pub type EventSeq = u64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneReadSource {
+    Visible,
+    Recent,
+    RecentUnwrapped,
+}
+
+impl PaneReadSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Visible => "visible",
+            Self::Recent => "recent",
+            Self::RecentUnwrapped => "recent_unwrapped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostFence {
     pub host_id: HostId,

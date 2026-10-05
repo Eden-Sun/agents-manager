@@ -10,9 +10,9 @@ mod quota;
 mod turn;
 
 pub use am_core::{
-    BotId, EventEnvelope, EventSeq, HostFence, HostId, LimitHit, NoticeRequest, PortError,
-    PromptRequest, Quota, QuotaKey, QuotaSnapshot, RunId, SessionId, TurnError, TurnEvent, TurnId,
-    UnixMillis,
+    BotId, EventEnvelope, EventSeq, HostFence, HostId, LimitHit, NoticeRequest, PaneReadSource,
+    PortError, PromptRequest, Quota, QuotaKey, QuotaSnapshot, RunId, SessionId, TurnError,
+    TurnEvent, TurnId, UnixMillis,
 };
 pub use capture::CaptureParser;
 pub use clock::{Clock, IdSource};

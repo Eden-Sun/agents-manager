@@ -1,4 +1,4 @@
-use am_core::{BotId, HostFence, HostId, PortError, RunId, SessionId};
+use am_core::{BotId, HostFence, HostId, PaneReadSource, PortError, RunId, SessionId};
 use std::future::Future;
 
 pub trait HostRuntime: Send + Sync {
@@ -35,6 +35,14 @@ pub trait HerdrPort: Send + Sync {
         &'a self,
         fence: &'a HostFence,
         session: &'a SessionId,
+    ) -> impl Future<Output = Result<String, PortError>> + Send + 'a;
+
+    fn pane_read<'a>(
+        &'a self,
+        fence: &'a HostFence,
+        session: &'a SessionId,
+        source: PaneReadSource,
+        lines: u32,
     ) -> impl Future<Output = Result<String, PortError>> + Send + 'a;
 
     fn send_text<'a>(
