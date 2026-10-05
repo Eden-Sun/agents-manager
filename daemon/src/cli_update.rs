@@ -3564,6 +3564,17 @@ mod tests {
         assert_eq!(notice_of(&env.app, &run).await, Some(pending));
     }
 
+    /// `echo $! > file` creates the file before writing the PID, so wait for parseable content, not just existence.
+    async fn wait_for_pid_file(path: &std::path::Path) -> Option<u32> {
+        for _ in 0..200 {
+            if let Some(pid) = std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse().ok()) {
+                return Some(pid);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        None
+    }
+
     #[test]
     fn the_host_lock_path_keeps_home_expansion_in_the_remote_shell() {
         assert_eq!(shell_lock_path(CODEX_INSTALL_LOCK), "\"$HOME/.agents-manager-codex-install.lock\"");
@@ -3598,13 +3609,7 @@ mod tests {
         let mut input = control.stdin.take().unwrap();
         input.write_all(locked_script(&lock, &inner).as_bytes()).await.unwrap();
         drop(input);
-        for _ in 0..200 {
-            if installer_pid_file.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let installer_pid: u32 = std::fs::read_to_string(&installer_pid_file).expect("fake installer started").trim().parse().unwrap();
+        let installer_pid = wait_for_pid_file(&installer_pid_file).await.expect("fake installer started");
 
         control.start_kill().unwrap(); // Unix `start_kill` uses SIGKILL; do not run the wrapper's EXIT trap.
         control.wait().await.unwrap();
@@ -3664,15 +3669,10 @@ mod tests {
         let mut input = control.stdin.take().unwrap();
         input.write_all(locked_script(&lock, &inner).as_bytes()).await.unwrap();
         drop(input);
-        for _ in 0..200 {
-            if installer_pid_file.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let installer_pid: u32 = match std::fs::read_to_string(&installer_pid_file) {
-            Ok(pid) => pid.trim().parse().unwrap(),
-            Err(error) => {
+        let installer_pid = match wait_for_pid_file(&installer_pid_file).await {
+            Some(pid) => pid,
+            None => {
+                let error = std::fs::read_to_string(&installer_pid_file).map(|text| format!("pid file content {text:?}")).unwrap_or_else(|error| error.to_string());
                 let output = control.wait_with_output().await.unwrap();
                 panic!("fake installer did not start: {error}; stdout={:?}; stderr={:?}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
             }
@@ -3763,15 +3763,10 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        for _ in 0..200 {
-            if pid_file.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let unrelated_pid: i32 = match std::fs::read_to_string(&pid_file) {
-            Ok(pid) => pid.trim().parse().unwrap(),
-            Err(error) => {
+        let unrelated_pid = match wait_for_pid_file(&pid_file).await {
+            Some(pid) => pid as i32,
+            None => {
+                let error = std::fs::read_to_string(&pid_file).map(|text| format!("pid file content {text:?}")).unwrap_or_else(|error| error.to_string());
                 let _ = unrelated.start_kill();
                 let _ = unrelated.wait().await;
                 panic!("unrelated process group did not start: {error}");
