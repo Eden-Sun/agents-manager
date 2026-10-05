@@ -654,16 +654,24 @@ pub struct DangerousRm {
     pub target: String,
     /// 框上方 `Bash command` 裡的指令（逐行），讀不到是 `None`。
     pub command: Option<String>,
+    /// 指令很長、pane 又矮時，框的上緣（`Bash command` 標題與上面那條虛線）已經捲出畫面：`command` 只是畫面上看得到的後半段。
+    pub command_truncated: bool,
 }
 
 /// 警語、倒數、問句與兩個選項最多這麼高（倒數那句在窄 pane 會折兩行、警語也會折）。
 const RM_DIALOG_TAIL_LINES: usize = 16;
-/// 從警語往上找 `Bash command` 標題最多找這麼多行（長指令會折很多行）。
-const RM_COMMAND_LOOKBACK: usize = 24;
+/// 從警語往上找 `Bash command` 標題最多找這麼多行（長指令、heredoc 可以上百行；2.1.289 的 python heredoc 就超過舊值 24）。
+const RM_COMMAND_LOOKBACK: usize = 200;
 
 /// 框線、行首的 `│` 與前後空白拿掉，其餘原樣（大小寫與路徑要留著給人看）。
 fn strip_box(line: &str) -> String {
     line.trim().trim_start_matches(['│', '┃', '▎']).trim().trim_end_matches(['│', '┃']).trim().to_string()
+}
+
+/// 指令列：只拿掉行首的 `│` 欄與它後面那一個空白，指令自己的縮排（python heredoc 的縮排有意義）留著。
+fn strip_gutter(line: &str) -> String {
+    let t = line.trim_start().trim_start_matches(['│', '┃', '▎']);
+    t.strip_prefix(' ').unwrap_or(t).trim_end().to_string()
 }
 
 /// 2.1.286 起權限框夾住指令／內容的虛線（整行只有 `╌`）。
@@ -702,16 +710,36 @@ pub fn dangerous_rm_prompt(screen: &str) -> Option<DangerousRm> {
     // 有虛線就只取兩條虛線之間，不然單列指令會把說明當成指令。
     let abs_warn = start + warn;
     let from = abs_warn.saturating_sub(RM_COMMAND_LOOKBACK);
-    let command = raw[from..abs_warn].iter().rposition(|l| norm_line(l) == "bash command").map(|h| {
-        let mut block = &raw[from + h + 1..abs_warn];
+    let above = &raw[from..abs_warn];
+    let gutter_or_first = |block: &[&str]| -> String {
+        let gutter: Vec<String> = block.iter().filter(|l| l.trim_start().starts_with('│')).map(|l| strip_gutter(l)).collect();
+        if gutter.is_empty() { block.first().map(|l| strip_box(l)).unwrap_or_default() } else { gutter.join("\n") }
+    };
+    let mut command_truncated = false;
+    let mut command = above.iter().rposition(|l| norm_line(l) == "bash command").map(|h| {
+        let mut block = &above[h + 1..];
         let rules: Vec<usize> = block.iter().enumerate().filter(|(_, l)| is_dash_rule(l)).map(|(i, _)| i).collect();
         if let [open, close, ..] = rules[..] {
             block = &block[open + 1..close];
         }
-        let gutter: Vec<String> = block.iter().filter(|l| l.trim_start().starts_with('│')).map(|l| strip_box(l)).collect();
-        if gutter.is_empty() { block.first().map(|l| strip_box(l)).unwrap_or_default() } else { gutter.join("\n") }
+        gutter_or_first(block)
     });
-    Some(DangerousRm { warning, target, command: command.filter(|c| !c.is_empty()) })
+    if command.is_none() {
+        // 標題已經捲出畫面（長指令＋矮 pane）：只剩收尾那條虛線，它上面到畫面頂（或再上一條虛線）都是指令的後半段。
+        let rules: Vec<usize> = above.iter().enumerate().filter(|(_, l)| is_dash_rule(l)).map(|(i, _)| i).collect();
+        if let Some(&close) = rules.last() {
+            let open = rules.len().checked_sub(2).map(|i| rules[i] + 1);
+            command_truncated = open.is_none();
+            let block = &above[open.unwrap_or(0)..close];
+            // 標題都看不到了，沒有 `│` 的列可能是說明或別的東西，只收 `│` 開頭的列。
+            let gutter: Vec<String> = block.iter().filter(|l| l.trim_start().starts_with('│')).map(|l| strip_gutter(l)).collect();
+            if !gutter.is_empty() {
+                command = Some(gutter.join("\n"));
+            }
+        }
+    }
+    let command = command.filter(|c| !c.is_empty());
+    Some(DangerousRm { warning, target, command_truncated: command_truncated && command.is_some(), command })
 }
 
 /// Pure classifier for a screen that the caller has already read successfully.
@@ -977,6 +1005,13 @@ pub(crate) mod screens {
     /// 2.1.286 真畫面（2026-09-30，#746：拋棄式安裝＋拋棄式 herdr pane，60 欄，**沒有**帶 skip-permissions，`pane read --source visible`）。
     /// 指令改用兩條 `╌` 虛線夾住、說明移到虛線上方；單列指令一樣沒有 `│`，警語改成 `│` 開頭、沒有倒數。
     pub const DANGEROUS_RM_2286_ONE_ROW: &str = include_str!("lifecycle/fixtures/claude-2.1.286-dangerous-rm-one-row.txt");
+    /// 2.1.289 真畫面（2026-10-05，本機 claude 2.1.289＋假 Anthropic API 在 tmux 150x50 重現，拋棄式 HOME／`CLAUDE_CONFIG_DIR`，`--permission-mode default`）：
+    /// 14 列 python heredoc 的 Bash 指令＋`rm -f "$S"/{…}` 變數路徑。警語兩列都是 `│` 開頭，沒有倒數、警語與問句之間沒有空白列。
+    /// 指令（含標題與兩條虛線）超過舊的 24 列回看範圍。
+    pub const DANGEROUS_RM_2289_LONG_HEREDOC: &str = include_str!("lifecycle/fixtures/claude-2.1.289-dangerous-rm-long-heredoc.txt");
+    /// 同一個指令在 `--dangerously-skip-permissions`、30 列高的 pane（真畫面，同上方式）：多一行 `⚠ Claude Code will automatically deny …` 倒數，
+    /// 而且 pane 太矮，Bash 框的標題與上面那條虛線已經捲出畫面（畫面頂端就是指令中段）。
+    pub const DANGEROUS_RM_2289_COUNTDOWN_30ROWS: &str = include_str!("lifecycle/fixtures/claude-2.1.289-dangerous-rm-countdown-30rows.txt");
     /// 同一個 session：兩列指令，虛線之間是 `│` 開頭的指令列。
     pub const DANGEROUS_RM_2286_MULTILINE: &str = include_str!("lifecycle/fixtures/claude-2.1.286-dangerous-rm-multiline.txt");
     /// 同一個 session 的一般權限框：Bash（指令夾在虛線之間，上面多一段 auto mode 提示）、平行 Read 疊起來的
@@ -1630,6 +1665,44 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert_eq!(multi.command.as_deref(), Some("touch m1.txt\nrm -rf \"$(echo tmpdir3)\""));
 
         assert!(awaits_menu_choice(DANGEROUS_RM_2286_ONE_ROW) && awaits_menu_choice(DANGEROUS_RM_2286_MULTILINE));
+    }
+
+    /// 2.1.289（真畫面）：長 heredoc 指令不能因為超過回看範圍就讀不到；倒數那句不算警語也不算指令；標題捲出畫面時只拿虛線上方的後半段並標記被截。
+    #[test]
+    fn the_2_1_289_long_heredoc_command_and_countdown_are_read() {
+        use super::screens::{DANGEROUS_RM_2289_COUNTDOWN_30ROWS, DANGEROUS_RM_2289_LONG_HEREDOC};
+        let full = dangerous_rm_prompt(DANGEROUS_RM_2289_LONG_HEREDOC).expect("2.1.289 長 heredoc");
+        assert!(full.warning.starts_with(r#"Dangerous rm operation on possibly-empty variable path: "$S"/{gauth.url,gauth.log,glogin.mjs}"#), "{}", full.warning);
+        assert!(full.warning.ends_with("or use a literal path)"), "折行的第二列要接回：{}", full.warning);
+        let cmd = full.command.as_deref().expect("指令");
+        assert!(cmd.starts_with("S=$(mktemp -d)\npython3 - <<'EOF'\nimport json"), "{cmd}");
+        assert!(cmd.contains("\n    return json.load("), "指令自己的縮排要留著：{cmd}");
+        assert!(cmd.contains("\nEOF\nrm -f ") && cmd.lines().count() == 14, "{cmd}");
+        assert!(!full.command_truncated);
+
+        let cut = dangerous_rm_prompt(DANGEROUS_RM_2289_COUNTDOWN_30ROWS).expect("2.1.289 倒數＋矮 pane");
+        assert!(cut.warning.ends_with("or use a literal path)"), "倒數那句不能被接進警語：{}", cut.warning);
+        assert!(!cut.warning.contains("will automatically deny"));
+        let cmd = cut.command.as_deref().expect("標題捲出畫面時仍要拿到指令後半段");
+        assert!(cmd.ends_with("\nEOF\nrm -f \"$S\"/{gauth.url,gauth.log,glogin.mjs}"), "{cmd}");
+        assert!(!cmd.contains("will automatically deny") && !cmd.contains("Dangerous rm"), "{cmd}");
+        // 這張的標題與上緣虛線還在畫面裡（30 列剛好夠），所以沒有被截。
+        assert!(!cut.command_truncated);
+        // 再把畫面頂端削掉 6 列（標題、說明、虛線與頭幾列指令）：標題看不到，仍讀得到剩下的指令，並標記被截。
+        let mut seen = 0;
+        let top_cut: String = DANGEROUS_RM_2289_COUNTDOWN_30ROWS
+            .lines()
+            .filter(|l| {
+                let drop = !l.trim().is_empty() && seen < 6;
+                seen += usize::from(!l.trim().is_empty());
+                !drop
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rm = dangerous_rm_prompt(&top_cut).expect("頂端被截");
+        assert!(rm.command_truncated, "標題與上緣虛線沒了");
+        let cmd = rm.command.expect("後半段指令");
+        assert!(cmd.ends_with("rm -f \"$S\"/{gauth.url,gauth.log,glogin.mjs}") && !cmd.contains("mktemp"), "{cmd}");
     }
 
     /// 2.1.286 的一般權限框（虛線、`1 of 3` 計數、Read／Fetch 換成編輯框的外觀）：是等人選的選單，

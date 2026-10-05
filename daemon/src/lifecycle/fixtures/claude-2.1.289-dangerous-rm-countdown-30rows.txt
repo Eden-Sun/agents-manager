@@ -1,0 +1,30 @@
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Read the sheet and clean up temp files
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ S=$(mktemp -d)
+ │ python3 - <<'EOF'
+ │ import json, urllib.request, urllib.parse
+ │ def get(u):
+ │     return json.load(urllib.request.urlopen(u))
+ │ sid = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+ │ meta = get(f"https://sheets.googleapis.com/v4/spreadsheets/{sid}?fields=sheets.properties")
+ │ tgt = None
+ │ for p in [s["properties"] for s in meta["sheets"]]:
+ │     if p["sheetId"] == 1700853499: tgt = p["title"]
+ │ v = get(f"https://sheets.googleapis.com/v4/spreadsheets/{sid}/values/"+urllib.parse.quote(f"'{tgt}'!A1:Z60"))
+ │ for i,r in enumerate(v.get("values",[]),1): print(i,r)
+ │ EOF
+ │ rm -f "$S"/{gauth.url,gauth.log,glogin.mjs}
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ Dangerous rm operation on possibly-empty variable path: "$S"/{gauth.url,gauth.log,glogin.mjs} in `rm -f "$S"/{gauth.url,gauth.log,glogin.mjs}`
+ │ (rewrite it as "${S:?}"/{gauth.url,gauth.log,glogin.mjs} or use a literal path)
+ ⚠ Claude Code will automatically deny this request in 1:52, to avoid blocking progress on an unattended session
+
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend

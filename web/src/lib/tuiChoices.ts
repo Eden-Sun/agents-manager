@@ -41,6 +41,13 @@ export interface TuiChoiceMenu {
    */
   context: string[]
   /**
+   * 權限框夾在兩條 `╌` 虛線之間的指令（2.1.286 起；長 heredoc 可以上百行），逐行原樣、去掉 `│` 欄；沒有那種框是空陣列。
+   * 跟 `context`（說明與警語）分開，UI 才能把指令與「為什麼被攔」各自畫、各自折行。
+   */
+  command: string[]
+  /** 指令的標題與上緣虛線已經捲出 pane（pane 太矮、指令太長）：`command` 只是畫面上看得到的後半段。 */
+  commandCut: boolean
+  /**
    * 問句跟選項之間的條列說明（claude 2.1.280 `Try the new fullscreen renderer?` 底下那三行 `·`），逐行、去掉共同縮排。
    * 畫在問句下面；沒有是空陣列。
    */
@@ -63,13 +70,22 @@ export interface TuiChoiceMenu {
 }
 
 /** 只看畫面底下這麼多行，正文裡的編號清單不算。 */
-const SCAN_LINES = 60
+const SCAN_LINES = 200
 
 /** 最後一個選項到畫面底之間最多幾行有字的東西（腳註、輸入框、狀態列）。 */
 const TAIL_LIMIT = 10
 
 /** 問句上面最多再帶幾行（指令框＋警語）；再多就是把整個 transcript 搬進來了。 */
 const CONTEXT_LIMIT = 14
+
+/** 虛線之間的指令最多收這麼多行（長 heredoc）；再多多半是整個畫面都被當成指令了。 */
+const COMMAND_LIMIT = 160
+
+/** 2.1.286 起權限框夾住指令的虛線（整行只有 `╌`，同 daemon `is_dash_rule`）。 */
+function isDashRule(s: string): boolean {
+  const t = s.trim()
+  return t !== '' && /^╌+$/.test(t)
+}
 
 /** 兩個編號間最多夾幾行說明；再多就是別的東西混進來。 */
 const DETAIL_LIMIT = 8
@@ -308,6 +324,8 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     const s = lines[q]
     if (s.trim() === '' || isDivider(s) || TRANSCRIPT.test(s.trim()) || matchRow(q, s)) break
     if (parseTabs(s) || REVIEW_Q.test(s) || REVIEW_A.test(s)) break
+    // `⚠` 倒數／警示是問句上面的另一段，不是問句折下來的列（中間沒空白列時不能黏進題目）。
+    if (s.trim().startsWith('⚠')) break
     qs.unshift(s.trim())
     q--
   }
@@ -333,19 +351,41 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
     }
   }
 
-  // 4b. 問句上面那一段：權限框的指令與警語。空白行不算結束（指令框跟警語之間就隔著空白），
+  // 4b. 問句上面那一段：權限框的警語、倒數與說明。空白行不算結束（指令框跟警語之間就隔著空白），
   // 遇到 transcript 行首符號、分隔線、分頁列或選項才停——那些是上一輪的東西。
+  // 緊貼問句的空白不計（2.1.289 倒數那行後面有兩列空白，以前兩列就當成「上面是別的段落」，整段警語被丟掉）。
   const context: string[] = []
+  let command: string[] = []
+  let commandCut = false
   if (qs.length) {
     let c = q
     let blanks = 0
+    let lead = 0
     while (c >= 0 && context.length < CONTEXT_LIMIT) {
       const s2 = lines[c]
+      if (isDashRule(s2)) {
+        // 2.1.286 起指令夾在兩條 `╌` 虛線之間：收下來，單獨一塊給 UI（長 heredoc 不受 CONTEXT_LIMIT 限制）。
+        let o = c - 1
+        while (o >= 0 && command.length < COMMAND_LIMIT && !isDivider(lines[o])) {
+          command.unshift(lines[o].replace(/\s+$/, ''))
+          o--
+        }
+        // 走到畫面頂或超過上限都沒碰到上緣虛線（或框的實線）＝標題與上緣已經捲出畫面。
+        commandCut = o < 0 || !isDivider(lines[o])
+        while (command.length && command[command.length - 1].trim() === '') command.pop()
+        break
+      }
       if (isDivider(s2) || TRANSCRIPT.test(s2.trim()) || matchRow(c, s2) || parseTabs(s2)) break
       if (s2.trim() === '') {
+        if (!context.length) {
+          // 緊貼問句的空白列：最多略過幾列，不當成段落分界。
+          if (++lead > 4) break
+          c--
+          continue
+        }
         // 連兩個空白行＝上面是別的段落了。
         if (++blanks > 1) break
-        if (context.length) context.unshift('')
+        context.unshift('')
         c--
         continue
       }
@@ -397,6 +437,8 @@ export function parseChoiceMenu(text: string | null | undefined): TuiChoiceMenu 
   return {
     question: qs.length ? qs.reduce((a, b) => joinWrapped(a, b), '') : null,
     context,
+    command,
+    commandCut,
     notes,
     choices,
     cursor: rows.findIndex((r) => r.marker),

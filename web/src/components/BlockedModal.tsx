@@ -7,6 +7,7 @@ import { PendingQuestionCard } from './PendingQuestionCard'
 import { herdrKeyFromEvent, KEYPAD, usePaneKeys } from '../hooks/usePaneKeys'
 import { blockedKeyAction, passthroughLive } from '../lib/blockedKeys'
 import { isDangerousRmScreen } from '../lib/dangerousRm'
+import { fitRules } from '../lib/termRules'
 import { useTerminalSnapshot } from '../hooks/useTerminalSnapshot'
 import { useDialogFocus } from '../hooks/useDialogFocus'
 import { useStore } from '../store/store'
@@ -151,8 +152,8 @@ export function BlockedModal({ botId, onClose }: { botId: string; onClose: () =>
         ) : null}
 
         {showRaw ? (
-          <pre className="term blocked-modal-term" ref={termRef} tabIndex={0}>
-            {err ? `讀取終端失敗：${err}` : (snap?.text ?? '讀取中…')}
+          <pre className="term term-wrap blocked-modal-term" ref={termRef} tabIndex={0}>
+            {err ? `讀取終端失敗：${err}` : snap?.text ? fitRules(snap.text) : '讀取中…'}
           </pre>
         ) : null}
 

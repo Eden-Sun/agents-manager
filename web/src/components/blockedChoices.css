@@ -31,6 +31,28 @@
 /* 問句底下的條列說明是散文，手機上要折行，不像指令要逐字對齊。 */
 .bc-notes {
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 夾在虛線之間的指令：逐字對齊要留縮排（pre-wrap），但長行（URL、base64、一長串 rm 目標）要折，不橫捲（2026-10-05）。 */
+.bc-command {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.bc-cmd {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: hidden;
+}
+
+.bc-cmd-cut {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
 }
 
 .bc-question {
