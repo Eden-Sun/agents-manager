@@ -2900,7 +2900,7 @@ child 把長工作（遠端 cargo）丟到背景就結束回合：agent 真的 i
 完整契約在 `API.md`；這裡只記存取控制與 WS 語意。
 
 ### 7.1 存取控制
-- bind：開發版 bind `0.0.0.0`；打包成 macOS app 的執行檔（路徑在 `…app/Contents/MacOS/`）bind `127.0.0.1`；`AM_DEV_LAN` 可雙向覆寫（`main.rs::dev_lan_default`）。
+- bind：開發版 bind `0.0.0.0`；打包成 macOS app 的執行檔（路徑在 `…app/Contents/MacOS/`）bind `127.0.0.1`；`AM_DEV_LAN` 可雙向覆寫（`serve.rs::dev_lan_default`）。
 - 啟動時產生 UI token 寫 `~/.config/agents-manager/ui-token`，**權限一律 0600**（issue #512）：新檔走 `write_private`
   （先建 0600 的暫存檔再 rename，明文 token 不會先躺在一個 0644 的 inode 上），開機讀到既有檔時發現權限比 0600 寬就修回來、
   修不動記 WARN 但不擋開機。`GET /api/session`（**TCP 對端**須為 loopback，且 `Origin`、`Host`（若有）的主機都須是 `127.0.0.1`／`localhost`／`[::1]`：同源 GET 不帶 Origin，DNS rebinding 的頁面只有 Host 看得出來；`allow_lan` 開著一律放行）回 User token；帶 Bot 或 Service header 一律 403 `user_only`，不把共用 UI token 回給機器 principal；
@@ -4888,7 +4888,7 @@ daemon 要能在 Linux（目標：Ubuntu，外部編譯主機 192.168.1.46，#67
 | `stat` 權限、`readlink -f` 等 shell 片段 | BSD 旗標 | GNU 旗標先試、BSD 退回（原本就雙寫） | `trust.rs`、`lifecycle/start.rs` |
 | `PATH` 補 `/opt/homebrew/bin` | 需要 | 不存在的目錄留在 PATH 無害，不另分支 | `github.rs`、`git_sh.rs`、`release_triage/issue.rs` |
 | `/private/tmp` 正規化 | `/tmp` 是 `/private/tmp` 的 symlink | 沒有 `/private`，規則不會命中 | `pane_identity.rs` |
-| `.app` bundle 偵測 | `scripts/package-dmg.sh` 的 `Contents/MacOS` | 不會命中，照一般執行檔處理 | `main.rs` |
+| `.app` bundle 偵測 | `scripts/package-dmg.sh` 的 `Contents/MacOS` | 不會命中，照一般執行檔處理 | `serve.rs`（`in_app_bundle`） |
 | 5173 看門狗：誰在聽 port、worktree 與 node 位置（§18.1） | `lsof -Fpn`；以前寫死 `/Users/m4p/…` | `ss -Hltnp 'sport = :5173'`（取本地位址欄，IPv6 萬用 `[::]` 也算對外）；worktree＝`${AGM_REPO:-~/project/agents-manager}-main`、node＝`$HOME/.local/bin/node`，兩個平台同一套 | `scripts/ops/dev-server-kick.ts` |
 
 **不在這一節（別的子項）**：`立即部署` 的 `launchctl kickstart com.agm.daemon-update`（`deploy_now.rs`）、`daemon-swap.sh`、

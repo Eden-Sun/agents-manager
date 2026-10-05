@@ -44,8 +44,8 @@ const LISTED: &[&str] = &["claude", "codex", "grok", "agy", "node", "bash", "zsh
 /// Below this a row is noise; its bytes still count towards the parent's subtree.
 const MIN_SUBTREE: u64 = 8 * 1024 * 1024;
 
-/// 這支二進位自己的名字（`env!` 拿的是 crate 名＝執行檔名）。
-const DAEMON_EXE: &str = env!("CARGO_BIN_NAME");
+/// 這支二進位自己的名字（package 名＝執行檔名；lib 裡拿不到 `CARGO_BIN_NAME`）。
+const DAEMON_EXE: &str = env!("CARGO_PKG_NAME");
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct MemProcess {
