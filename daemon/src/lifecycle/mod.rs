@@ -1,5 +1,13 @@
 //! Bot / Run lifecycle (SPEC §6.2–§6.4, §4.3). Every public entry point takes the per-bot lock.
 
+// P4 composition adapter: App is the only layer that translates the narrow turn port into the
+// existing lifecycle entry points. Keep the adapter outside this directory while assigning it
+// to the lifecycle seam; App/state itself remains untouched.
+// P6 will be the first in-tree consumer; until then this crate-local adapter is intentionally unused.
+#[allow(dead_code)]
+#[path = "../app_ports_p4.rs"]
+pub mod app_ports_p4;
+
 use crate::capture::Capture;
 use crate::config::{valid_id, ID_RE, LOCAL_HOST};
 use crate::db;
