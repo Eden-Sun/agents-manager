@@ -190,6 +190,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/interrupt", post(interrupt_bot))
         .route("/bots/{id}/login", post(login_bot))
         .route("/bots/{id}/compact", post(compact_bot))
+        .route("/bots/{id}/keep-warm/skip", post(keep_warm_skip_bot))
         .route("/bots/{id}/pane/move-to-tab", post(move_bot_pane_to_tab))
         .route("/bots/{id}/prompt", post(prompt_bot))
         // 分享 bot（SPEC「分享 bot」）：只收 UI token，handler 自己再擋一次 principal。
@@ -820,6 +821,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/bots/{id}/interrupt", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/compact", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/bots/{id}/keep-warm/skip", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/abort", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/pane/move-to-tab", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/bots/{id}/restore", BotRoutePolicy::UserOrAgm),
@@ -5486,6 +5488,17 @@ async fn abort_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resul
 async fn login_bot(State(app): State<Arc<App>>, Path(id): Path<String>) -> Result<Response, LcError> {
     let out = lifecycle::login(&app, &id).await?;
     Ok((StatusCode::OK, Json(out)).into_response())
+}
+
+#[derive(Deserialize)]
+struct KeepWarmSkipIn {
+    skip: bool,
+}
+
+/// `POST /api/bots/{id}/keep-warm/skip`：「不用保溫」鈕（主力的 claude／codex；SPEC §6.5k）。body `{"skip": bool}`，回 `{"keep_warm_skip": bool}`。
+async fn keep_warm_skip_bot(State(app): State<Arc<App>>, Path(id): Path<String>, Json(body): Json<KeepWarmSkipIn>) -> Result<Response, LcError> {
+    let skip = crate::primary_keep_warm::skip_route(&app, &id, body.skip).await?;
+    Ok(Json(json!({"keep_warm_skip": skip})).into_response())
 }
 
 /// `POST /api/bots/{id}/compact`：對閒著的 bot 送 `/compact`（網頁 context 旁的「壓縮」鈕，2026-10-04 使用者）。

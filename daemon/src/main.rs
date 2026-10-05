@@ -107,7 +107,7 @@ mod models;
 mod pane_identity;
 mod preview;
 mod preview_bind;
-mod primary_keepalive;
+mod primary_keep_warm;
 mod primary_order;
 mod login_assist;
 mod login_prompt;

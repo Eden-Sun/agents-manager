@@ -953,6 +953,8 @@ async fn prompt_inner(
         check_same_text(app, &t, text).await?;
         return answer_for_turn(app, &t).await;
     }
+    // 新的（非保溫）回合＝真的活動：「不用保溫」到此為止。
+    crate::primary_keep_warm::note_prompt(app, bot_id, client_request_id).await;
 
     if queue_awaits_idle {
         // A queued turn can remain pending briefly after its predecessor ends; do not let a direct

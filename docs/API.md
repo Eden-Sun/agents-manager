@@ -257,6 +257,7 @@ A 組與 `git/push` 標「待裁示」的原因：這幾支唯一的呼叫端是
 | POST | `/api/bots/{id}/keys` | User-only；Bot 與 AGM role 均 → 403 `user_only`；Service 依明列 path scope（本路徑未授權） |
 | POST | `/api/bots/{id}/login` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/compact` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
+| POST | `/api/bots/{id}/keep-warm/skip` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/pane/move-to-tab` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/preview` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
 | POST | `/api/bots/{id}/promote` | User-only；一般 Bot → 403 `user_only`；已登記 AGM 角色略過共用 fence，仍受既有路由／資源權限限制 |
@@ -560,6 +561,7 @@ config.toml 裡沒有的 id（child、已刪）忽略。成功推 `project_chang
 | POST | `/api/turns/{id}/withdraw` | — | `200 {"text","attachments":[<attachment id>,…]}`；撤回一則還沒送出的 `queued`——標 `failed`＋一則 system 說明，不送，並回傳使用者原文與附件 ID 讓前端放回輸入框。只收三種：bot 沒在跑時送、還在等它起來的（`awaits_start:1`，issue #122）、回合中送出後等 bot 閒下來的 web prompt（`awaits_idle:1`，issue #733），以及 daemon 自己排的通知（`client_request_id` 前綴 `child-blocked:`／`resume-nudge:`，issue #562：擋在佇列頭時讓使用者的訊息先走）。其他（已被佇列領走、使用者排的訊息、AGM 的派工…）一律 `409 {"reason":"turn is not waiting for its bot to start","turn_id","status"}`、原樣不動（已經打進去的不能假裝沒送） |
 | POST | `/api/bots/{id}/login` | — | `200 {"run_id","kind","command":"/login"}`，見 §4.1 |
 | POST | `/api/bots/{id}/compact` | — | 對閒著的 bot 送 `/compact`（claude、codex；grok → 400 `compact_unsupported`）。`200 {"run_id","kind","command":"/compact"}`；沒在跑（`not_running`）、忙著（`agent_busy`）、回合在飛（`turn_in_flight`）、找不到 pane（`no_pane`）→ 409（同 `/login` 的 gate）。不等壓縮完成，新的 context 用量由 statusLine 回報（2026-10-04 使用者：context 旁的「壓縮」鈕） |
+| POST | `/api/bots/{id}/keep-warm/skip` | `{"skip":true|false}` | 「不用保溫」鈕（context 旁「壓縮」鈕旁邊，SPEC §6.5k）：`skip:true` 讓這顆主力**這一輪閒置**跳過保溫（58 分）與熱壓（110 分），`false` 取消。`200 {"keep_warm_skip":bool}`（回的是請求後的狀態；再按同值是 no-op）。不是主力、或 kind 不是 claude／codex → `400 {"error":"not_primary"}`；bot 不存在 404。狀態存在 DB（daemon 重啟不忘）；之後有真的活動（使用者或 bot 新回合，不含保溫／熱壓本身）daemon 自動清掉並推 `bot_status`。User-only（bot 身分 403 `user_only`） |
 
 - `keys` 的鍵名由 herdr 驗證，常用 `enter`、`esc`、`y`、`n`、`up`、`down`、`ctrl+c`。
 - **文字用 `/text` 不用 `/keys`**：`\n` 不是鍵名。`/text` 走 `pane.send_text`（herdr 眼中的貼上，換行保留），`enter`（預設 true）後另送 `enter` 鍵才是送出。
@@ -809,6 +811,7 @@ Bot principal 只能讀自己的 bot 與 descendant bots 的對話；讀到 ance
       "updated_at": null,
       "rewound_at": null,
       "sent_via": null | "send_now" | "supplement",
+      "keep_warm": false,
       "seq": 1234
     }
   ],
@@ -833,6 +836,8 @@ UI 標籤：`hook` 不標；`terminal_fallback` 或 `incomplete = 1` 標「終�
 `answer` 為 `null`＝沒有回答（取消／Esc／多題沒答這一題），`header`、`notes` 可省略；自訂文字照原文。`id` 是 `ask:<conversation_id>:<tool_use_id>`（同一提問重送也只有一則），`turn_id` 是當時的回合，
 `created_at` 是答完的時間。UI 畫成「Claude 問／你答」卡，不是使用者的 prompt；用 `message_added` 推送，不會開新回合。
 `rewound_at`：被對話倒回（§6.1）拿掉的時間，`null`＝還在 CLI 的對話脈絡裡。標記不刪，UI 收成淡色＋「已倒回」。
+`keep_warm`：boolean，這則訊息屬於保溫回合（主力 58 分那則 `any updates` 與 bot 的保溫回覆；回合的 `client_request_id` 以 `keep-warm:` 或舊的 `keepalive:` 開頭）。網頁淡化顯示；`unread` 與 `group_unread` 一律不計這些訊息。
+
 `sent_via`：user 訊息回合中送出的方式——`send_now`＝插隊送出且真的打斷了一個回合、`supplement`＝`/text` 帶 `record` 的補充；`null`＝一般送出。UI 在泡泡上標「插隊」「補充」。
 `seq`：訊息的插入順序（SQLite rowid，單調遞增整數；`before=` 分頁也照它切）。`created_at` 只有毫秒、`id`（ULID）的隨機段在同一毫秒內不單調，所以同一毫秒的訊息靠 `seq` 定先後。三處都帶：本端點、`GET /api/projects/{id}/messages`（§13.4）每一則、WS `message_added` 的 `message`。排序鍵是 `(created_at, seq)`；`seq` 只在同一個 daemon 資料庫內可比，缺（舊 daemon）或 0 視為未知，前端退回 `id`。
 
@@ -2325,7 +2330,9 @@ row（`local_path`／`agent_path`／`host` 都已經定案），再真的寫檔�
 | `prompt_suggestion` | claude 輸入框裡那句灰字「建議下一句」（字串），可以用 `POST /api/bots/{id}/suggestion/accept` 一鍵送出（Tab＋Enter）。**只在 run 現在 `agent_status:"idle"`、輸入框裡只有那句灰字時有值，其餘一律 `null`**（回合開始、使用者在終端打了字、不是 claude、讀不到樣式畫面、超過 500 字、daemon 還沒讀到）；idle 邊之後 1.5／3.5／7／14 秒補讀、之後跟著 30 秒的畫面巡邏，內容變了或消失才推 `bot_status`。記憶體帳、不在 DB；舊前端忽略這個欄位 |
 | `last_api_at` | 這顆 bot 最後一次 API 活動（ISO 8601，`db::iso_at` 格式），推算 prompt cache 還熱不熱（SPEC §6.5j）：最近一筆送出去的回合 `completed_at`、claude statusLine 的用量欄位（`cost.total_api_duration_ms`／`context_window`）真的變了的那一刻、`blocked` 的 `agent_status_since`，取最晚；回合進行中（`agent_status:"working"` 或有 in-flight 回合）＝投影當下的時間。沒有任何紀錄或 grok 為 `null`。回合收尾會另推一次 `bot_status` 讓它跟上 |
 | `cache_ttl_secs` | 這種 kind 的 prompt cache 存活秒數：claude、codex `3600`，grok `null`（不知道，網頁不畫倒數）。舊前端忽略這兩個欄位 |
-| `cache_kept_alive_at` | 主力 bot 的 prompt cache 續命（`primary_keepalive`，SPEC §6.5k）讓 cache 實際變熱的時間（ISO 8601）：最近一次成功的續命回合（`client_request_id` 以 `keepalive:` 開頭，完成時間，在飛中用建立時間）或到點壓縮的系統訊息，取最晚；沒做過是 `null`。續命回合**不算活動**，`last_api_at` 不因它重置（仍是真實年齡）；網頁用 `max(last_api_at, cache_kept_alive_at)` 算顏色。舊前端忽略 |
+| `cache_kept_warm_at` | 主力 bot 的 prompt cache 保溫（`primary_keep_warm`，SPEC §6.5k）讓 cache 實際變熱的時間（ISO 8601）：最近一次成功的保溫回合（`client_request_id` 以 `keep-warm:` 開頭，舊資料是 `keepalive:`；完成時間，在飛中用建立時間）或熱壓的系統訊息，取最晚；沒做過是 `null`。保溫回合**不算活動**，`last_api_at` 不因它重置（仍是真實年齡）；網頁用 `max(last_api_at, cache_kept_warm_at)` 算顏色。舊名 `cache_kept_alive_at` 已改名（語意不變） |
+| `keep_warm_skip` | boolean。使用者按了「不用保溫」（`POST /api/bots/{id}/keep-warm/skip`）且之後還沒有真的活動：true。持久；有真的活動時 daemon 清掉並推 `bot_status` |
+| `keep_warm_replied_at` | 最近一次**保溫回覆**完成的時間（ISO 8601）；使用者送出新的 prompt（保溫以外的新回合）就變 `null` 並隨 `bot_status` 廣播；沒有保溫過也是 `null`。網頁據此把主力晶片框上色 |
 | `prompt_cache` | 狀態列「快取」欄與輸入框冷時警示用的精簡欄位（SPEC §6.5j），只有 claude 與 codex 有，其餘與沒有資料一律 `null`。物件：`source`（`"statusline"`＝claude statusLine 的 `prompt_cache`（≥ 2.1.289），`status_json` 原文不外送；`"rollout_estimate"`＝codex 由 rollout 最近一筆 `token_count` 推算，到期時間是估計）、`warm`（投影當下熱不熱；codex 以 `expires_at` 對現在算）、`expires_at`（epoch 秒）、`ttl_secs`、`recache_tokens_if_cold`（冷了送出要重寫幾 token；codex 用最近一次 `input_tokens` 近似）、`hit_ratio`（0–1）、`last_miss_cause`（字串或 `null`，只有 claude）、`caching_observed`、`context_used_pct`／`context_used_tokens`／`context_size`（claude 取自 `context_window`，codex 是 `input_tokens`÷`model_context_window`）。codex 的讀數來自巡邏（30 秒）對 rollout 新增行的解析，記憶體帳、不在 DB；變了才推 `bot_status`。舊前端忽略這個欄位 |
 | `background_tasks` | 只有 `background_source:"hook"` 時是陣列，否則 `null`：`[{id, type, status, description, command?}]`（`type`：`shell`／`subagent`／`monitor`／`workflow`…；最多 20 筆，`description`／`command` 各截 200 字）。**空陣列＝hook 報過「沒有」**，不是 `null`。常駐服務（listen port 的背景 shell）仍在清單裡，但不計入 `background_jobs` |
 | `session_crons` | 同一則 Stop 報的 session 排程 `[{id, schedule, recurring, prompt}]`（/loop、ScheduleWakeup、CronCreate），`null` 規則同上。**不計入 `background_jobs`**，只是資訊 |
