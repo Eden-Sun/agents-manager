@@ -32,6 +32,9 @@ use std::time::{Duration, Instant};
 pub const KEEP_WARM_AFTER_SECS: i64 = 58 * 60;
 /// 年齡到這麼久才考慮壓縮；仍須確認 cache 熱度足夠。
 pub const WARM_COMPACT_AFTER_SECS: i64 = 110 * 60;
+/// 熱壓只在 context 用量**超過**這個百分比時才做（使用者 2026-10-05）：用量小的 context 重新建 cache 很便宜，不值得壓縮；
+/// ≤ 這個值（或讀不到用量）到 110 分就什麼都不做，讓它涼掉。
+pub const WARM_COMPACT_MIN_CONTEXT_PCT: f64 = 30.0;
 /// 壓縮至少要在 cache TTL 到期前留這麼多時間。
 const WARM_COMPACT_TTL_MARGIN_SECS: i64 = 2 * 60;
 /// 送進去的保溫 prompt。
@@ -109,17 +112,36 @@ pub fn is_warm_compact_echo(anchor: chrono::DateTime<chrono::Utc>, last_compact:
     last_compact.is_some_and(|c| anchor >= c - chrono::Duration::seconds(5) && anchor <= c + chrono::Duration::seconds(WARM_COMPACT_ECHO_SECS))
 }
 
+/// 這顆 run 現在的 context 用量百分比（0–100）。claude 讀 statusLine 的 `context_window.used_percentage`（`runs.status_json`），
+/// codex 讀 rollout 最近一筆 `token_count`（[`crate::prompt_cache::codex_context_pct`]）；讀不到回 `None`。
+pub fn context_used_pct(kind: &str, run_id: &str, status_json: Option<&str>) -> Option<f64> {
+    match kind {
+        "claude" => status_json
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())?
+            .pointer("/context_window/used_percentage")?
+            .as_f64(),
+        "codex" => crate::prompt_cache::codex_context_pct(run_id),
+        _ => None,
+    }
+}
+
 /// 純規則：活動年齡、cache 實際熱度年齡與「這個錨點之後做過沒」決定下一步。
-/// 保溫只能在 58 分至 TTL 之間送；壓縮要在 cache 到期前保留 [`WARM_COMPACT_TTL_MARGIN_SECS`] 餘裕。
+/// 保溫只能在 58 分至 TTL 之間送；壓縮要在 cache 到期前保留 [`WARM_COMPACT_TTL_MARGIN_SECS`] 餘裕，
+/// 而且 context 用量要超過 [`WARM_COMPACT_MIN_CONTEXT_PCT`]（讀不到用量保守不壓縮）。
+/// 110 分之後不再保溫：已經涼掉（或不值得壓縮）的就讓它涼，直到真的活動重新計時。
 pub fn decide(
     age_secs: i64,
     cache_age_secs: i64,
     ttl_secs: i64,
     kept_since_anchor: bool,
     compacted_since_anchor: bool,
+    context_pct: Option<f64>,
 ) -> Step {
-    if age_secs >= WARM_COMPACT_AFTER_SECS && !compacted_since_anchor {
-        if cache_age_secs < ttl_secs - WARM_COMPACT_TTL_MARGIN_SECS {
+    if age_secs >= WARM_COMPACT_AFTER_SECS {
+        if !compacted_since_anchor
+            && cache_age_secs < ttl_secs - WARM_COMPACT_TTL_MARGIN_SECS
+            && context_pct.is_some_and(|p| p > WARM_COMPACT_MIN_CONTEXT_PCT)
+        {
             Step::WarmCompact
         } else {
             Step::Wait
@@ -298,7 +320,7 @@ pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::Dat
         return Ok(None);
     }
     let compacted = last_compact.is_some_and(|t| t > anchor_t);
-    Ok(Some(Plan { step: decide(age_secs, cache_age_secs, cache_ttl_secs, kept, compacted), anchor, age_secs }))
+    Ok(Some(Plan { step: decide(age_secs, cache_age_secs, cache_ttl_secs, kept, compacted, context_used_pct(&bot.kind, &run.id, run.status_json.as_deref())), anchor, age_secs }))
 }
 
 /// 照 [`plan`] 做一步。送不出去（忙著、被擋）只記 log；下一輪重試仍須符合 cache 熱度條件。
@@ -424,17 +446,53 @@ mod tests {
         let ttl = cache_clock::ttl_secs("claude").unwrap();
         assert_eq!(ttl, m(60));
 
-        assert_eq!(decide(m(57), m(57), ttl, false, false), Step::Wait);
-        assert_eq!(decide(m(58), m(58), ttl, false, false), Step::KeepWarm);
-        assert_eq!(decide(m(59), m(59), ttl, false, false), Step::KeepWarm, "TTL 到期前仍可保溫");
-        assert_eq!(decide(m(60), m(60), ttl, false, false), Step::Wait, "超過保溫視窗後 cache 已冷，不補送");
-        assert_eq!(decide(m(80), m(80), ttl, false, false), Step::Wait, "冷 cache 不保溫");
+        let ctx = Some(45.0);
+        assert_eq!(decide(m(57), m(57), ttl, false, false, ctx), Step::Wait);
+        assert_eq!(decide(m(58), m(58), ttl, false, false, ctx), Step::KeepWarm);
+        assert_eq!(decide(m(59), m(59), ttl, false, false, ctx), Step::KeepWarm, "TTL 到期前仍可保溫");
+        assert_eq!(decide(m(60), m(60), ttl, false, false, ctx), Step::Wait, "超過保溫視窗後 cache 已冷，不補送");
+        assert_eq!(decide(m(80), m(80), ttl, false, false, ctx), Step::Wait, "冷 cache 不保溫");
 
-        assert_eq!(decide(m(110), m(110), ttl, true, false), Step::Wait, "冷 cache 不壓縮");
-        assert_eq!(decide(m(110), m(52), ttl, true, false), Step::WarmCompact, "58 分保溫後，110 分時 cache 仍熱就壓縮");
-        assert_eq!(decide(m(110), m(58), ttl, true, false), Step::Wait, "壓縮前留兩分鐘 TTL 餘裕");
-        assert_eq!(decide(m(24 * 60), m(24 * 60), ttl, false, false), Step::Wait, "daemon 重啟後發現年齡很大的 cache 不碰");
-        assert_eq!(decide(m(300), m(52), ttl, true, true), Step::Wait, "同一個錨點只壓縮一次");
+        assert_eq!(decide(m(110), m(110), ttl, true, false, ctx), Step::Wait, "冷 cache 不壓縮");
+        assert_eq!(decide(m(110), m(52), ttl, true, false, ctx), Step::WarmCompact, "58 分保溫後，110 分時 cache 仍熱就壓縮");
+        assert_eq!(decide(m(110), m(58), ttl, true, false, ctx), Step::Wait, "壓縮前留兩分鐘 TTL 餘裕");
+        assert_eq!(decide(m(24 * 60), m(24 * 60), ttl, false, false, ctx), Step::Wait, "daemon 重啟後發現年齡很大的 cache 不碰");
+        assert_eq!(decide(m(300), m(52), ttl, true, true, ctx), Step::Wait, "同一個錨點只壓縮一次");
+    }
+
+    /// 2026-10-05：熱壓只在 context 用量 > 30% 才做；≤ 30% 或讀不到用量就讓它涼掉（也不再保溫）。
+    #[test]
+    fn warm_compact_needs_more_than_30_percent_context() {
+        let m = |min: i64| min * 60;
+        let ttl = 3600;
+        assert_eq!(WARM_COMPACT_MIN_CONTEXT_PCT, 30.0);
+        let at = |pct: Option<f64>| decide(m(110), m(52), ttl, true, false, pct);
+        assert_eq!(at(Some(30.1)), Step::WarmCompact, "> 30% 照壓");
+        assert_eq!(at(Some(81.0)), Step::WarmCompact);
+        assert_eq!(at(Some(30.0)), Step::Wait, "剛好 30% 不壓（要超過）");
+        assert_eq!(at(Some(12.5)), Step::Wait, "≤ 30% 不壓縮");
+        assert_eq!(at(None), Step::Wait, "拿不到 context 保守不壓縮");
+        // 不壓縮之後也不保溫：110 分以後一律等，直到真的活動重新計時。
+        for min in [110, 115, 120, 200] {
+            assert_eq!(decide(m(min), m(min - 58), ttl, true, false, Some(10.0)), Step::Wait, "{min} 分");
+            assert_eq!(decide(m(min), m(min - 58), ttl, false, false, Some(10.0)), Step::Wait, "沒保溫過也不補保溫：{min} 分");
+        }
+        // 58 分的保溫不看 context。
+        assert_eq!(decide(m(58), m(58), ttl, false, false, Some(5.0)), Step::KeepWarm);
+        assert_eq!(decide(m(58), m(58), ttl, false, false, None), Step::KeepWarm);
+    }
+
+    #[test]
+    fn context_used_pct_comes_from_the_statusline_for_claude() {
+        let sj = |p: &str| format!(r#"{{"context_window":{{"used_percentage":{p},"context_window_size":1000000}}}}"#);
+        assert_eq!(context_used_pct("claude", "r1", Some(&sj("45"))), Some(45.0));
+        assert_eq!(context_used_pct("claude", "r1", Some(&sj("12.5"))), Some(12.5));
+        assert_eq!(context_used_pct("claude", "r1", Some(&sj("null"))), None, "剛開的 session 用量是 null");
+        assert_eq!(context_used_pct("claude", "r1", Some("{}")), None);
+        assert_eq!(context_used_pct("claude", "r1", Some("壞掉")), None);
+        assert_eq!(context_used_pct("claude", "r1", None), None);
+        assert_eq!(context_used_pct("grok", "r1", Some(&sj("90"))), None, "只有 claude／codex");
+        assert_eq!(context_used_pct("codex", "r-no-rollout", Some(&sj("90"))), None, "codex 不看 statusLine，沒讀到 rollout 就是 None");
     }
 
     #[test]
@@ -554,20 +612,49 @@ mod tests {
         assert_eq!(last.completed_at.as_deref(), Some(at(59, now).as_str()));
         assert_eq!(last.kept_warm_at.as_deref(), Some(kept_at.as_str()), "顏色用的「保溫時間」來自保溫回合");
 
-        // 同一錨點到 110 分鐘：壓縮；記號一寫就不再壓縮。
+        // 同一錨點到 110 分鐘：context 用量 > 30% 才壓縮（拿不到、≤ 30% 都不壓）；記號一寫就不再壓縮。
         let later = now + chrono::Duration::minutes(52);
         let p = plan(&env.app, &bot, &run, later).await.unwrap().unwrap();
-        assert_eq!((p.step, p.age_secs / 60), (Step::WarmCompact, 111));
+        assert_eq!((p.step, p.age_secs / 60), (Step::Wait, 111), "run 還沒有 context 用量：保守不壓縮");
+        let with_ctx = |pct: &str| format!(r#"{{"context_window":{{"used_percentage":{pct}}}}}"#);
+        let set_ctx = |pct: String| {
+            let (db, run_id) = (env.app.db.clone(), run.id.clone());
+            async move { sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(pct).bind(run_id).execute(&db).await.unwrap() }
+        };
+        set_ctx(with_ctx("30")).await;
+        let low = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(plan(&env.app, &bot, &low, later).await.unwrap().unwrap().step, Step::Wait, "30% 不壓縮，讓它涼掉");
+        set_ctx(with_ctx("45")).await;
+        let run = db::active_run(&env.app.db, &bot.id).await.unwrap().unwrap();
+        let p = plan(&env.app, &bot, &run, later).await.unwrap().unwrap();
+        assert_eq!((p.step, p.age_secs / 60), (Step::WarmCompact, 111), "> 30% 照壓");
         let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
         let note = format!("{WARM_COMPACT_NOTE_PREFIX}cache 年齡已 111 分鐘，自動送出 /compact");
         crate::lifecycle::insert_message(&env.app, &conv, None, "system", &note, "system", false, None).await.unwrap();
         let p = plan(&env.app, &bot, &run, later + chrono::Duration::seconds(5)).await.unwrap().unwrap();
         assert_eq!(p.step, Step::Wait, "壓縮記號比錨點晚，同一錨點不再壓縮");
+        // 熱壓後視為涼掉：不再保溫、也不再壓縮（錨點沒變、年齡繼續往上），而且熱壓不算讓 cache 變熱、熱壓前的保溫也不算。
+        for min in [10, 30, 60, 300] {
+            let t = later + chrono::Duration::minutes(min);
+            assert_eq!(plan(&env.app, &bot, &run, t).await.unwrap().map(|p| p.step), Some(Step::Wait), "熱壓後 {min} 分");
+        }
+        let last = cache_clock::last_turn_for_bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(last.kept_warm_at, None, "熱壓後 cache_kept_warm_at 不帶：晶片顯示涼");
+        let mut json = serde_json::json!({"id": run.id, "agent_status": "idle"});
+        cache_clock::annotate(&mut json, "claude", Some(&last));
+        assert!(json["cache_kept_warm_at"].is_null());
+        assert_eq!(json["last_api_at"], at(59, now), "真實年齡照舊；web 以 max(last_api_at, cache_kept_warm_at) 起算＝已超過 TTL＝涼");
 
-        // 真的新活動（使用者回合）→ 錨點更新、計數重來。
-        let fresh = later + chrono::Duration::seconds(10);
+        // 真的新活動（使用者回合）→ 錨點更新、計數重來：58 分後重新保溫，新的保溫時間又算讓 cache 變熱。
+        let fresh = later + chrono::Duration::minutes(20);
         turn(&env, &bot, "t-user", None, "completed", &db::iso_at(fresh), Some(&db::iso_at(fresh))).await;
         assert_eq!(plan(&env.app, &bot, &run, fresh + chrono::Duration::minutes(1)).await.unwrap(), None);
+        let p = plan(&env.app, &bot, &run, fresh + chrono::Duration::minutes(58)).await.unwrap().unwrap();
+        assert_eq!((p.step, p.anchor.as_str()), (Step::KeepWarm, db::iso_at(fresh).as_str()), "活動後重新計時");
+        let kw_at = fresh + chrono::Duration::minutes(58);
+        turn(&env, &bot, "t-kw2", Some(&keep_warm_crid(&p.anchor)), "completed", &db::iso_at(kw_at), Some(&db::iso_at(kw_at))).await;
+        let last = cache_clock::last_turn_for_bot(&env.app.db, &bot.id).await.unwrap().unwrap();
+        assert_eq!(last.kept_warm_at.as_deref(), Some(db::iso_at(kw_at).as_str()), "熱壓之後的新保溫又算");
     }
 
     #[tokio::test]

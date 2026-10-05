@@ -63,3 +63,12 @@ test('保溫：顏色從保溫時間起算，tooltip 仍講真實的上次活動
   assert.deepEqual(cacheState(at(20), 3600, T0, false, '壞掉'), cacheState(at(20), 3600, T0))
   assert.deepEqual(cacheState(at(20), 3600, T0, false, null), cacheState(at(20), 3600, T0))
 })
+
+test('熱壓後視為涼掉：daemon 不帶 cache_kept_warm_at（熱壓前的保溫也不算），111 分前的活動就是涼', () => {
+  // 58 分保溫過、110 分熱壓：保溫那筆在熱壓之後不再帶，熱壓本身也不算讓 cache 變熱。
+  assert.equal(cacheState(at(111), 3600, T0, false, null)!.level, 'cold')
+  // 對照：只保溫沒熱壓（還沒到 110 分，或 context ≤ 30% 沒壓）仍是熱的。
+  assert.equal(cacheState(at(111), 3600, T0, false, at(30))!.level, 'fresh')
+  // 熱壓之後真的活動重新計時：新的活動一出現就回到熱。
+  assert.equal(cacheState(at(2), 3600, T0, false, null)!.level, 'fresh')
+})

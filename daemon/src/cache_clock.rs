@@ -8,7 +8,7 @@
 //!
 //! 回合進行中（`agent_status == "working"` 或有 in-flight 回合）＝熱，`last_api_at` 給現在。
 //! 主力的保溫回合（[`crate::primary_keep_warm`]，`client_request_id` 以 `keep-warm:` 開頭，舊資料是 `keepalive:`）**不算活動**：回合時間、statusLine 指紋、
-//! 「進行中＝現在」都排除，`last_api_at` 照真實年齡往上數；保溫讓 cache 實際變熱的時間另放 `cache_kept_warm_at`，網頁用它算顏色。
+//! 「進行中＝現在」都排除，`last_api_at` 照真實年齡往上數；保溫讓 cache 實際變熱的時間另放 `cache_kept_warm_at`，網頁用它算顏色；熱壓之後視為涼掉，`cache_kept_warm_at` 不含熱壓、也不含熱壓之前的保溫。
 //! TTL 依 kind：claude／codex 3600 秒（量過：閒置 < 60 分 0–1% 冷、> 1 小時 81–91% 冷），grok 未知不帶。
 //! 兩個欄位都掛在 run JSON（`/api/state` 的 `bot.run` 與 `bot_status` 事件的 `run`）；daemon 重啟後記憶體帳歸零，
 //! 退回回合時間。
@@ -32,7 +32,7 @@ pub fn ttl_secs(kind: &str) -> Option<i64> {
 pub struct LastTurn {
     pub status: String,
     pub completed_at: Option<String>,
-    /// 最近一次主力保養（成功的保溫回合，或熱壓）讓 cache 變熱的時間；沒做過是 `None`。
+    /// 最近一次成功的保溫回合讓 cache 變熱的時間；沒做過、或之後熱壓過（視為涼掉）是 `None`。
     pub kept_warm_at: Option<String>,
     /// 使用者按了「不用保溫」：這顆主力這一輪閒置跳過保溫與熱壓（`keep_warm_skip` 表有它的列）。
     pub keep_warm_skip: bool,
@@ -158,8 +158,10 @@ pub fn warm_compact_note_sql(col: &str) -> String {
     format!("({col} LIKE '{WARM_COMPACT_NOTE_PREFIX}%' OR {col} LIKE '{LEGACY_WARM_COMPACT_NOTE_PREFIX}%')")
 }
 
-/// 最近一筆**不是保溫**的回合，加上最近一次讓 cache 變熱的主力保養（成功的保溫回合，完成時間，在飛中用建立時間；或熱壓的系統訊息）、
+/// 最近一筆**不是保溫**的回合，加上最近一次讓 cache 變熱的保溫（成功的保溫回合，完成時間，在飛中用建立時間）、
 /// 「不用保溫」旗標，以及最近一次保溫回覆（完成的保溫回合，且之後沒有非保溫回合）。
+/// **熱壓不算讓 cache 變熱**（使用者 2026-10-05）：熱壓之後視為涼掉，所以比最近一次熱壓訊息早的保溫不再算——
+/// 晶片從熱壓那刻起顯示涼，直到真的活動重新計時（新的保溫時間自然比熱壓晚）。
 static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
     let kw_k = keep_warm_crid_sql("k.client_request_id");
     let kw_u = keep_warm_crid_sql("u.client_request_id");
@@ -167,13 +169,11 @@ static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
     let note = warm_compact_note_sql("m.content");
     format!(
         "SELECT c.bot_id, t.status, t.completed_at,
-       NULLIF(MAX(
-         COALESCE((SELECT MAX(COALESCE(k.completed_at, k.created_at)) FROM turns k
-                    WHERE k.conversation_id = c.id AND {kw_k}
-                      AND k.status IN ('in_flight','completed','completed_fallback')), ''),
-         COALESCE((SELECT MAX(m.created_at) FROM messages m
-                    WHERE m.conversation_id = c.id AND m.role = 'system' AND {note}), '')
-       ), '') AS kept_warm_at,
+       NULLIF(COALESCE((SELECT MAX(COALESCE(k.completed_at, k.created_at)) FROM turns k
+                         WHERE k.conversation_id = c.id AND {kw_k}
+                           AND k.status IN ('in_flight','completed','completed_fallback')
+                           AND COALESCE(k.completed_at, k.created_at) > COALESCE((SELECT MAX(m.created_at) FROM messages m
+                                WHERE m.conversation_id = c.id AND m.role = 'system' AND {note}), '')), ''), '') AS kept_warm_at,
        EXISTS(SELECT 1 FROM keep_warm_skip s WHERE s.bot_id = c.bot_id) AS keep_warm_skip,
        (SELECT CASE WHEN r.v > COALESCE((SELECT MAX(u.created_at) FROM turns u
                                           WHERE u.conversation_id = c.id AND (u.client_request_id IS NULL OR NOT {kw_u})), '')
@@ -309,7 +309,7 @@ mod tests {
              CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
                                     content TEXT NOT NULL, created_at TEXT NOT NULL);
              CREATE TABLE keep_warm_skip (bot_id TEXT PRIMARY KEY, since TEXT NOT NULL);
-             INSERT INTO conversations VALUES ('c1','b1'),('c2','b2'),('c3','b3'),('c4','b4'),('c5','b5');
+             INSERT INTO conversations VALUES ('c1','b1'),('c2','b2'),('c3','b3'),('c4','b4'),('c5','b5'),('c6','b6');
              INSERT INTO keep_warm_skip VALUES ('b4','2026-10-04T11:30:00.000Z');
              INSERT INTO turns VALUES
                ('t1','c1','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
@@ -324,10 +324,15 @@ mod tests {
                ('k4','c4','completed','2026-10-04T11:20:00.000Z','2026-10-04T11:21:00.000Z','keep-warm:2026-10-04T10:05:00.000Z'),
                ('t7','c5','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
                ('k5','c5','completed','2026-10-04T11:20:00.000Z','2026-10-04T11:21:00.000Z','keep-warm:z'),
-               ('t8','c5','completed','2026-10-04T11:30:00.000Z','2026-10-04T11:31:00.000Z',NULL);
+               ('t8','c5','completed','2026-10-04T11:30:00.000Z','2026-10-04T11:31:00.000Z',NULL),
+               ('t9','c6','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
+               ('k6a','c6','completed','2026-10-04T10:58:00.000Z','2026-10-04T10:59:00.000Z','keep-warm:a'),
+               ('t10','c6','completed','2026-10-04T12:00:00.000Z','2026-10-04T12:01:00.000Z',NULL),
+               ('k6b','c6','completed','2026-10-04T12:58:00.000Z','2026-10-04T12:59:00.000Z','keep-warm:b');
              INSERT INTO messages VALUES ('m1','c2','system','主力 cache 到點壓縮：cache 年齡已 115 分鐘','2026-10-04T11:55:00.000Z'),
                                         ('m2','c1','assistant','主力熱壓：不是系統訊息','2026-10-04T11:59:00.000Z'),
-                                        ('m3','c5','system','主力熱壓：cache 年齡已 111 分鐘','2026-10-04T11:45:00.000Z');",
+                                        ('m3','c5','system','主力熱壓：cache 年齡已 111 分鐘','2026-10-04T11:45:00.000Z'),
+                                        ('m4','c6','system','主力熱壓：cache 年齡已 111 分鐘','2026-10-04T11:45:00.000Z');",
         )
         .execute(&pool)
         .await
@@ -336,8 +341,8 @@ mod tests {
         // 保溫回合（keep-warm: 前綴，舊資料 keepalive:）不算「最近一筆回合」，只留下「保溫時間」（失敗的不算）。
         let b1 = LastTurn { kept_warm_at: Some("2026-10-04T11:21:00.000Z".into()), ..done("2026-10-04T11:04:00.000Z") };
         assert_eq!(all.get("b1"), Some(&b1));
-        // 熱壓的系統訊息也算讓 cache 變熱；只有保溫回合在飛的 bot（b3）沒有「最近回合」可報。
-        assert_eq!(all.get("b2").map(|t| (t.status.as_str(), t.kept_warm_at.as_deref())), Some(("in_flight", Some("2026-10-04T11:55:00.000Z"))));
+        // 熱壓不算讓 cache 變熱（只有熱壓訊息的 b2 沒有保溫時間）；只有保溫回合在飛的 bot（b3）沒有「最近回合」可報。
+        assert_eq!(all.get("b2").map(|t| (t.status.as_str(), t.kept_warm_at.as_deref())), Some(("in_flight", None)));
         assert!(!all.contains_key("b3"));
         // 保溫回覆：保溫回合完成後還沒有非保溫回合（b4）才有；之後使用者又送了回合（b1 排隊中的 t3、b5 的 t8）就清成 None。
         assert_eq!(b1.keep_warm_replied_at, None);
@@ -347,7 +352,9 @@ mod tests {
         assert!(b4.keep_warm_skip && !b1.keep_warm_skip, "keep_warm_skip 表有列才算「不用保溫」");
         let b5 = all.get("b5").unwrap();
         assert_eq!((b5.keep_warm_replied_at.as_deref(), b5.completed_at.as_deref()), (None, Some("2026-10-04T11:31:00.000Z")));
-        assert_eq!(b5.kept_warm_at.as_deref(), Some("2026-10-04T11:45:00.000Z"), "新前綴的熱壓訊息也算");
+        assert_eq!(b5.kept_warm_at, None, "熱壓（11:45）比保溫（11:21）晚：熱壓後視為涼掉，保溫不再算");
+        // 熱壓之後真的活動（t10），新一輪的保溫（k6b）又算；熱壓之前的保溫（k6a）不算。
+        assert_eq!(all.get("b6").and_then(|t| t.kept_warm_at.as_deref()), Some("2026-10-04T12:59:00.000Z"));
         assert_eq!(last_turn_for_bot(&pool, "b1").await.unwrap(), Some(b1));
         assert_eq!(last_turn_for_bot(&pool, "b3").await.unwrap(), None);
     }
