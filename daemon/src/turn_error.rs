@@ -3,7 +3,10 @@
 
 use crate::db;
 use crate::lifecycle;
+use crate::lifecycle::app_ports_p4::{AppEventSink, AppHerdrPort, AppQuotaAccess, AppTurnEvents};
 use crate::state::App;
+use am_core::{EventEnvelope, LimitHit as PortLimitHit, PaneReadSource, QuotaSnapshot, Window as PortWindow};
+use am_ports::{DbContext, EventSink, QuotaAccess, TurnEvents};
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -163,14 +166,14 @@ fn agy_reset_until(line: &str, at: &str) -> Option<String> {
 /// （2026-09-19 `claude:cc1`：0%、−0.2h）。它說不出這次撞限什麼時候解除——拿來當到期，撞限一記下就過期、被
 /// `quota::set` 丟掉，派工照送（#236）。所以不拿它的時間：認不出桶名時改看下一個窗；明講的那一桶照樣標滿，
 /// 過期的重置時間丟掉，到期交給保底（[`fallback_until`]）。
-fn saturate_bucket(q: &mut crate::quota::Quota, lower: &str, at: &str) -> Option<String> {
+fn saturate_bucket(q: &mut QuotaSnapshot, lower: &str, at: &str) -> Option<String> {
     let hit_at = chrono::DateTime::parse_from_rfc3339(at).ok();
-    let stale = |w: &crate::quota::Window| {
+    let stale = |w: &PortWindow| {
         let reset = w.resets_at.as_deref().and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok());
         matches!((reset, hit_at), (Some(r), Some(a)) if r <= a)
     };
-    let current = |w: &Option<crate::quota::Window>| w.as_ref().is_some_and(|w| !stale(w));
-    let full = |w: &mut Option<crate::quota::Window>| {
+    let current = |w: &Option<PortWindow>| w.as_ref().is_some_and(|w| !stale(w));
+    let full = |w: &mut Option<PortWindow>| {
         w.as_mut().map(|w| {
             w.used_pct = 100.0;
             if stale(w) {
@@ -243,14 +246,14 @@ pub fn api_error_line(screen: &str) -> Option<String> {
 
 /// 呼叫端要持有 bot lock。回合已被 hook 收掉後也要跑——斷線回合正是 hook 照常送 Stop 的那種。
 pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Result<()> {
-    let Some(run) = db::active_run(&app.db, bot_id).await? else { return Ok(()) };
+    let db = DbContext::new(app.db.clone());
+    let Some(run) = db::active_run(db.pool(), bot_id).await? else { return Ok(()) };
     if run.id != expected_run_id {
         return Ok(());
     }
     let Some(pane_id) = run.pane_id.as_deref() else { return Ok(()) };
-    let Some(client) = app.herdr_for_run(&run).await else { return Ok(()) };
-    let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
-    let Some(line) = api_error_line(&read.text) else { return Ok(()) };
+    let Some(screen) = AppHerdrPort::new(app).read_run_pane(&run, pane_id, PaneReadSource::RecentUnwrapped, 200).await? else { return Ok(()) };
+    let Some(line) = api_error_line(&screen) else { return Ok(()) };
     // 同一則錯誤只記一次；`arm_progress` 開下一回合時清掉。
     if run.turn_error.as_deref() == Some(line.as_str()) {
         return Ok(());
@@ -258,15 +261,15 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     // 上面那個「只記一次」的標記（`turn_error`）、釘在那一回合上的訊息、收掉在飛的回合，**同一個交易**寫；要讀的全部先讀
     // （#198 同類）。以前標記先寫、後面讀寫一失敗就回錯：下一次擷取被「只記一次」擋掉，訊息沒釘、回合不收（輸入框鎖著），
     // 再也不重來。撞限要記在哪個身分也在這裡讀。
-    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(()) };
-    let conversation_id = db::conversation_id(&app.db, bot_id).await?;
-    let turn = last_turn(app, &run.id).await?;
+    let Some(bot) = db::bot(db.pool(), bot_id).await? else { return Ok(()) };
+    let conversation_id = db::conversation_id(db.pool(), bot_id).await?;
+    let turn = last_turn(&db, &run.id).await?;
     // Codex 0.156 flushes an interrupted/failed stream into its terminal transcript. Keep that
     // assistant content as a separate incomplete message beside the error notice.
     let partial = if bot.kind == "codex" {
         if let Some(t) = turn.as_ref() {
             match lifecycle::turn_echo_texts(app, &t.id).await {
-                Ok(sent) => lifecycle::codex_partial_reply(&read.text, &sent),
+                Ok(sent) => lifecycle::codex_partial_reply(&screen, &sent),
                 Err(e) => {
                     tracing::debug!(turn = %t.id, error = ?e, "partial Codex reply could not be matched to its prompt");
                     None
@@ -291,7 +294,7 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
         Ok(())
     };
 
-    let mut tx = app.db.begin().await?;
+    let mut tx = db.pool().begin().await?;
     sqlx::query("UPDATE runs SET turn_error = ? WHERE id = ?").bind(&line).bind(&run.id).execute(&mut *tx).await?;
     let mut messages = Vec::new();
     if let (Some(t), Some(reply)) = (turn.as_ref(), partial.as_deref()) {
@@ -309,7 +312,7 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
                     reply,
                     "terminal_fallback",
                     true,
-                    Some(&read.text),
+                    Some(&screen),
                 )
                 .await?,
             );
@@ -325,7 +328,7 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
             &line,
             "system",
             true,
-            Some(&read.text),
+            Some(&screen),
         )
         .await?,
     );
@@ -345,27 +348,33 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
     }
     tx.commit().await?;
     tracing::warn!(bot = %bot_id, run = %run.id, error = %line, "turn cut short by an API error");
+    let events = AppEventSink::new(app);
     for message in messages {
-        lifecycle::emit_message_added(app, bot_id, message).await;
+        events.emit(EventEnvelope {
+            kind: "message_added".into(),
+            bot_id: Some(bot_id.to_string()),
+            payload_json: serde_json::json!({ "bot_id": bot_id, "message": message }).to_string(),
+        }).await?;
     }
     if let Some(t) = failed {
-        lifecycle::emit_turn(app, &t).await;
+        AppTurnEvents::new(app).turn_changed(&t).await?;
     }
-    app.emit_bot_status(bot_id).await;
+    events.bot_status_changed(bot_id).await?;
     marked
 }
 
 /// 新回合開始：上一回合的錯誤是舊的了。寫不進去回錯（#193），呼叫端（progress poller）之後再清：留著的話，這一回合
 /// 斷在同一句錯誤上會被 [`capture`] 的「同一則只記一次」吞掉——回合不收、輸入框一直鎖著。
 pub async fn clear(app: &Arc<App>, run_id: &str, bot_id: &str) -> Result<()> {
+    let db = DbContext::new(app.db.clone());
     let res = sqlx::query("UPDATE runs SET turn_error = NULL WHERE id = ? AND turn_error IS NOT NULL")
         .bind(run_id)
-        .execute(&app.db)
+        .execute(db.pool())
         .await;
     match res {
         Ok(r) => {
             if r.rows_affected() > 0 {
-                app.emit_bot_status(bot_id).await;
+                AppEventSink::new(app).bot_status_changed(bot_id).await?;
             }
             Ok(())
         }
@@ -377,15 +386,16 @@ pub async fn clear(app: &Arc<App>, run_id: &str, bot_id: &str) -> Result<()> {
 }
 
 /// 不篩 status：斷線那回合可能已被 Stop hook 收成 `completed`。
-async fn last_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db::Turn>> {
+async fn last_turn(db: &DbContext<sqlx::SqlitePool>, run_id: &str) -> Result<Option<db::Turn>> {
     Ok(sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
         .bind(run_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(db.pool())
         .await?)
 }
 
 #[cfg(test)]
 mod tests {
+    use am_ports::DbContext;
     use super::{agy_reset_until, api_error_line, is_quota_exhaustion, is_quota_limit};
 
     /// 同一毫秒的兩個回合：「這個 run 的最後一回合」要看寫入順序，不是隨便一個（`created_at` 只到毫秒，id 的隨機段不遞增）。
@@ -404,7 +414,8 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let last = super::last_turn(&e.app, &run).await.unwrap().map(|t| t.id);
+        let db = DbContext::new(e.app.db.clone());
+        let last = super::last_turn(&db, &run).await.unwrap().map(|t| t.id);
         assert_eq!(last.as_deref(), Some("t-aaa-second"));
     }
 
@@ -670,120 +681,121 @@ impl Mark {
 
 /// 寫進那台主機、那個身分的 key，再蓋到這顆 bot 排著的每一則上。
 async fn record(app: &Arc<App>, bot_id: &str, m: &Mark) -> Result<()> {
-    let host = db::bot_host(&app.db, bot_id).await?;
+    let db = DbContext::new(app.db.clone());
+    let host = db::bot_host(db.pool(), bot_id).await?;
+    let quota = AppQuotaAccess::new(app);
     let hit = match &m.banner {
-        Banner::Claude => record_claude(app, &host, m).await?,
-        Banner::Agy => {
-            let base = crate::quota::resolve_quota_base(app, &host, "agy", m.identity.as_deref()).await?;
-            record_agy(app, &host, &base, m).await?
-        }
-        Banner::Codex { .. } => {
-            let base = crate::quota::resolve_quota_base(app, &host, "codex", m.identity.as_deref()).await?;
-            crate::lifecycle::apply_codex_limit_hit_quota(app, &host, &base, m.hit()).await
-        }
-        Banner::Grok { bucket, .. } => {
-            let base = crate::quota::resolve_quota_base(app, &host, "grok", m.identity.as_deref()).await?;
-            record_grok(app, &host, &base, m, *bucket).await
-        }
+        Banner::Claude => record_claude(&quota, &host, m).await?,
+        Banner::Agy => record_agy(&quota, &host, m).await?,
+        Banner::Codex { .. } => record_codex(&quota, &host, m).await?,
+        Banner::Grok { .. } => record_grok(&quota, &host, m).await?,
     };
     crate::lifecycle::quota_hold::stamp_queued(app, bot_id, m.identity.as_deref(), &hit).await
 }
 
 /// agy 撞 5h 限額：把已讀到的 5h 窗標滿；讀數尚未進來時建立一個 100% 窗。
-async fn record_agy(app: &Arc<App>, host: &str, base: &str, m: &Mark) -> Result<crate::quota::LimitHit> {
-    let key = crate::quota::quota_key(host, base);
-    let prev = app.quotas.lock().await.get(&key).cloned();
+async fn record_agy<A: QuotaAccess>(access: &A, host: &str, m: &Mark) -> Result<crate::quota::LimitHit> {
+    let key = access.resolve_key(host, "agy", m.identity.as_deref()).await?;
+    let previous = access.snapshot(&key).await?;
     let hit = m.hit();
-    if let Some(old) = prev.as_ref().and_then(|q| q.limit_hit.as_ref()).filter(|h| !crate::quota::limit_hit_expired(Some(h))) {
-        if old.message == hit.message {
-            return Ok(old.clone());
-        }
+    if let Some(old) = previous.as_ref().and_then(|q| q.limit_hit.as_ref()) {
+        let old = port_limit_to_daemon(old);
+        if !crate::quota::limit_hit_expired(Some(&old)) && old.message == hit.message { return Ok(old); }
     }
-    let mut q = prev.unwrap_or_else(|| crate::quota::Quota {
-        five_hour: None,
-        seven_day: None,
-        fable: None,
-        reset_credits: None,
-        limit_hit: None,
-        plan: None,
-        updated_at: db::now(),
-        source: "agy-limit-hit".into(),
-        account: m.identity.clone(),
-        host: host.to_string(),
-    });
-    let reading_reset = q.five_hour.as_ref().and_then(|w| w.resets_at.as_deref()).filter(|reset| {
-        chrono::DateTime::parse_from_rfc3339(reset).ok().is_some_and(|reset| {
-            chrono::DateTime::parse_from_rfc3339(&m.at).ok().is_some_and(|at| reset > at)
-        })
+    let reading_reset = previous.as_ref().and_then(|q| q.five_hour.as_ref()).and_then(|w| w.resets_at.as_deref()).filter(|reset| {
+        chrono::DateTime::parse_from_rfc3339(reset).ok().is_some_and(|reset| chrono::DateTime::parse_from_rfc3339(&m.at).ok().is_some_and(|at| reset > at))
     }).map(str::to_string);
     let has_reading_reset = reading_reset.is_some();
-    let until = reading_reset.or(hit.until.clone());
-    match q.five_hour.as_mut() {
-        Some(w) => {
-            w.used_pct = 100.0;
-            w.observed_at = Some(m.at.clone());
-            if !has_reading_reset {
-                w.resets_at = until.clone();
-            }
+    let mut hit = hit;
+    hit.until = reading_reset.or(hit.until.clone());
+    let mut quota = previous.unwrap_or_else(|| new_quota_snapshot(host, "agy-limit-hit", m.identity.clone()));
+    match quota.five_hour.as_mut() {
+        Some(window) => {
+            window.used_pct = 100.0;
+            window.observed_at = Some(m.at.clone());
+            if !has_reading_reset { window.resets_at = hit.until.clone(); }
         }
-        None => q.five_hour = Some(crate::quota::Window { observed_at: None, used_pct: 100.0, resets_at: until.clone() }),
+        None => quota.five_hour = Some(PortWindow { observed_at: None, used_pct: 100.0, resets_at: hit.until.clone() }),
     }
-    let hit = crate::quota::LimitHit { until, ..hit };
-    q.limit_hit = Some(hit.clone());
-    q.updated_at = db::now();
-    crate::quota::set(app, host, base, q).await;
+    quota.limit_hit = Some(daemon_limit_to_port(&hit));
+    quota.updated_at = db::now();
+    access.store_snapshot(&key, quota).await?;
     Ok(hit)
 }
 
-async fn record_claude(app: &Arc<App>, host: &str, m: &Mark) -> Result<crate::quota::LimitHit> {
-    // 落點只能有一份規則：手拼 `claude:{id}` 會讓「共用預設帳號」的身分（cc0）寫進一格沒有人查的
-    // key，`limit_hit_for_bot` 讀的是裸 `claude`，於是撞限對 AGM 完全隱形（review 2026-09-16）。
-    let base = crate::quota::resolve_quota_base(app, host, "claude", m.identity.as_deref()).await?;
-    let key = crate::quota::quota_key(host, &base);
-    let prev = app.quotas.lock().await.get(&key).cloned();
-    let mut q = prev.unwrap_or_else(|| crate::quota::Quota {
-        five_hour: None,
-        seven_day: None,
-        fable: None,
-        reset_credits: None,
-        limit_hit: None,
-        plan: None,
-        updated_at: db::now(),
-        source: "claude-limit-hit".into(),
-        account: m.identity.clone(),
-        host: host.to_string(),
-    });
+async fn record_claude<A: QuotaAccess>(access: &A, host: &str, m: &Mark) -> Result<crate::quota::LimitHit> {
+    let key = access.resolve_key(host, "claude", m.identity.as_deref()).await?;
+    let mut quota = access.snapshot(&key).await?.unwrap_or_else(|| new_quota_snapshot(host, "claude-limit-hit", m.identity.clone()));
     let lower = m.line.to_ascii_lowercase();
     // 那一桶還沒有讀數時 `saturate_bucket` 回 None，而 `None` 在 `limit_hit_expired` 是「永不過期」。
     // 給一個保底時間，撞限才有出口（review 2026-09-16）。
-    let until = saturate_bucket(&mut q, &lower, &m.at).or_else(|| fallback_until(&lower, &m.at));
+    let until = saturate_bucket(&mut quota, &lower, &m.at).or_else(|| fallback_until(&lower, &m.at));
     let hit = crate::quota::LimitHit { message: m.line.clone(), until, at: m.at.clone(), bucket: bucket_name(&lower) };
-    q.limit_hit = Some(hit.clone());
-    q.updated_at = db::now();
-    crate::quota::set(app, host, &base, q).await;
+    quota.limit_hit = Some(daemon_limit_to_port(&hit));
+    quota.updated_at = db::now();
+    access.store_snapshot(&key, quota).await?;
     Ok(hit)
 }
 
 /// grok 的一格（`grok`／`grok:<身分>`）：那個窗標成用完，撞限掛上去。窗沒有讀數時補一個 100% 的（重置時間留給
 /// `/usage` 探測），額度面板才看得到「用完了」。
-async fn record_grok(app: &Arc<App>, host: &str, base: &str, m: &Mark, bucket: Option<&'static str>) -> crate::quota::LimitHit {
-    let key = crate::quota::quota_key(host, base);
-    let prev = app.quotas.lock().await.get(&key).cloned();
+async fn record_codex<A: QuotaAccess>(access: &A, host: &str, m: &Mark) -> Result<crate::quota::LimitHit> {
+    let key = access.resolve_key(host, "codex", m.identity.as_deref()).await?;
+    let hit = m.hit();
+    let mut quota = access.snapshot(&key).await?.unwrap_or_else(|| new_quota_snapshot(host, "codex-limit-hit", None));
+    if let Some(previous) = quota.limit_hit.as_ref().filter(|previous| {
+        previous.message == hit.message && !crate::quota::limit_hit_expired(Some(&port_limit_to_daemon(previous)))
+    }) { return Ok(port_limit_to_daemon(previous)); }
+    if let Some(window) = quota.five_hour.as_mut() {
+        window.used_pct = 100.0;
+    } else if let Some(window) = quota.seven_day.as_mut() {
+        window.used_pct = 100.0;
+    } else {
+        quota.five_hour = Some(PortWindow { observed_at: None, used_pct: 100.0, resets_at: None });
+    }
+    quota.limit_hit = Some(daemon_limit_to_port(&hit));
+    quota.updated_at = db::now();
+    quota.source = "codex-limit-hit".into();
+    access.store_snapshot(&key, quota).await?;
+    Ok(hit)
+}
+
+async fn record_grok<A: QuotaAccess>(access: &A, host: &str, m: &Mark) -> Result<crate::quota::LimitHit> {
+    let key = access.resolve_key(host, "grok", m.identity.as_deref()).await?;
+    let previous = access.snapshot(&key).await?;
     let hit = m.hit();
     // 已經記著、還沒過期的撞限：同一句再看到不是新證據（撞的那一刻不往後推）；到期比較晚的也不被較短的蓋掉
     // （同一張畫面兩句：402 credits 用完只有 5 小時的保底，`You hit your weekly limit.` 是 7 天，後到的不能把週限縮短）。
     // 已經過期的不算：過期後真的又被擋一次。
-    if let Some(h) = prev.as_ref().and_then(|q| q.limit_hit.as_ref()).filter(|h| !crate::quota::limit_hit_expired(Some(h))) {
-        let later = |a: &Option<String>, b: &Option<String>| match (a, b) {
-            (Some(a), Some(b)) => chrono::DateTime::parse_from_rfc3339(a).ok() > chrono::DateTime::parse_from_rfc3339(b).ok(),
-            (None, Some(_)) => true,
-            _ => false,
-        };
-        if h.message == hit.message || !later(&hit.until, &h.until) {
-            return h.clone();
+    if let Some(h) = previous.as_ref().and_then(|q| q.limit_hit.as_ref()) {
+        let previous_hit = port_limit_to_daemon(h);
+        if !crate::quota::limit_hit_expired(Some(&previous_hit)) {
+            let later = |a: &Option<String>, b: &Option<String>| match (a, b) {
+                (Some(a), Some(b)) => chrono::DateTime::parse_from_rfc3339(a).ok() > chrono::DateTime::parse_from_rfc3339(b).ok(),
+                (None, Some(_)) => true,
+                _ => false,
+            };
+            if previous_hit.message == hit.message || !later(&hit.until, &previous_hit.until) { return Ok(previous_hit); }
         }
     }
-    let mut q = prev.unwrap_or_else(|| crate::quota::Quota {
+    let mut quota = previous.unwrap_or_else(|| new_quota_snapshot(host, "grok-limit-hit", m.identity.clone()));
+    let mark_full = |window: &mut Option<PortWindow>| match window {
+        Some(window) => window.used_pct = 100.0,
+        None => *window = Some(PortWindow { observed_at: None, used_pct: 100.0, resets_at: None }),
+    };
+    match hit.bucket.as_deref() {
+        Some("seven_day") => mark_full(&mut quota.seven_day),
+        Some("five_hour") => mark_full(&mut quota.five_hour),
+        _ => {}
+    }
+    quota.limit_hit = Some(daemon_limit_to_port(&hit));
+    quota.updated_at = db::now();
+    access.store_snapshot(&key, quota).await?;
+    Ok(hit)
+}
+
+fn new_quota_snapshot(host: &str, source: &str, account: Option<String>) -> QuotaSnapshot {
+    QuotaSnapshot {
         five_hour: None,
         seven_day: None,
         fable: None,
@@ -791,23 +803,18 @@ async fn record_grok(app: &Arc<App>, host: &str, base: &str, m: &Mark, bucket: O
         limit_hit: None,
         plan: None,
         updated_at: db::now(),
-        source: "grok-limit-hit".into(),
-        account: m.identity.clone(),
+        source: source.into(),
+        account,
         host: host.to_string(),
-    });
-    let full = |w: &mut Option<crate::quota::Window>| match w {
-        Some(w) => w.used_pct = 100.0,
-        None => *w = Some(crate::quota::Window { observed_at: None, used_pct: 100.0, resets_at: None }),
-    };
-    match bucket {
-        Some("seven_day") => full(&mut q.seven_day),
-        Some("five_hour") => full(&mut q.five_hour),
-        _ => {}
     }
-    q.limit_hit = Some(hit.clone());
-    q.updated_at = db::now();
-    crate::quota::set(app, host, base, q).await;
-    hit
+}
+
+fn daemon_limit_to_port(hit: &crate::quota::LimitHit) -> PortLimitHit {
+    PortLimitHit { message: hit.message.clone(), until: hit.until.clone(), at: hit.at.clone(), bucket: hit.bucket.clone() }
+}
+
+fn port_limit_to_daemon(hit: &PortLimitHit) -> crate::quota::LimitHit {
+    crate::quota::LimitHit { message: hit.message.clone(), until: hit.until.clone(), at: hit.at.clone(), bucket: hit.bucket.clone() }
 }
 
 /// bot → 欠著的那一筆撞限（只留最新的）。只在記憶體：daemon 在補上之前重啟就沒了——`StopFailure` 那條路回錯、
@@ -906,12 +913,12 @@ mod quota_limit_tests {
         assert!(!is_token_count("API error handling tokens"));
     }
 
-    fn window(pct: f64, resets: &str) -> Option<crate::quota::Window> {
-        Some(crate::quota::Window { observed_at: None, used_pct: pct, resets_at: Some(resets.into()) })
+    fn window(pct: f64, resets: &str) -> Option<PortWindow> {
+        Some(PortWindow { observed_at: None, used_pct: pct, resets_at: Some(resets.into()) })
     }
 
-    fn quota() -> crate::quota::Quota {
-        crate::quota::Quota {
+    fn quota() -> QuotaSnapshot {
+        QuotaSnapshot {
             five_hour: window(40.0, "5h-reset"),
             seven_day: window(60.0, "7d-reset"),
             fable: window(10.0, "fable-reset"),
@@ -941,8 +948,8 @@ mod quota_limit_tests {
         assert_eq!(fallback_until("session limit", "not-a-time"), None, "讀不懂時間就不要編一個出來");
 
         // 有讀數時照舊用那一桶自己的 resets_at，保底不會蓋掉它。
-        let mut q = crate::quota::Quota {
-            five_hour: Some(crate::quota::Window { observed_at: None, used_pct: 10.0, resets_at: Some("2026-09-16T12:00:00Z".into()) }),
+        let mut q = QuotaSnapshot {
+            five_hour: Some(PortWindow { observed_at: None, used_pct: 10.0, resets_at: Some("2026-09-16T12:00:00Z".into()) }),
             seven_day: None, fable: None, reset_credits: None, limit_hit: None, plan: None,
             updated_at: at.into(), source: "test".into(), account: None, host: "local".into(),
         };
@@ -964,7 +971,7 @@ mod quota_limit_tests {
             assert!(is_quota_limit(line), "{line}");
             let mut q = quota();
             assert_eq!(saturate_bucket(&mut q, &line.to_ascii_lowercase(), "2026-09-16T10:00:00Z").as_deref(), Some(until), "{line}");
-            let pct = |w: &Option<crate::quota::Window>| w.as_ref().unwrap().used_pct;
+            let pct = |w: &Option<PortWindow>| w.as_ref().unwrap().used_pct;
             let got = [("5h", pct(&q.five_hour)), ("7d", pct(&q.seven_day)), ("fable", pct(&q.fable))];
             for (name, p) in got {
                 assert_eq!(p == 100.0, name == bucket, "{line}: {name}={p}");
@@ -986,7 +993,7 @@ mod quota_limit_tests {
             let mut q = quota();
             // 重置時間借 7d 那格（`/usage` 的 weekly_scoped 與 weekly_all 同一個週期），但一格量表都不標。
             assert_eq!(saturate_bucket(&mut q, &lower, "2026-09-16T10:00:00Z").as_deref(), Some("7d-reset"), "{line}");
-            let pct = |w: &Option<crate::quota::Window>| w.as_ref().unwrap().used_pct;
+            let pct = |w: &Option<PortWindow>| w.as_ref().unwrap().used_pct;
             assert_eq!((pct(&q.five_hour), pct(&q.seven_day), pct(&q.fable)), (40.0, 60.0, 10.0), "{line}：量表不動");
             // 那一桶連 7d 都還沒有讀數時照舊給保底（一週），不會留下 until=None。
             let mut empty = quota();
