@@ -95,6 +95,11 @@ pub(crate) async fn caged_workspace(pool: &SqlitePool, bot_id: &str) -> Result<O
     sqlx::query_scalar("SELECT workspace FROM shared_bots WHERE bot_id = ? AND profile = ?").bind(bot_id).bind(PROFILE_RESTRICTED).fetch_optional(pool).await
 }
 
+/// 同 [`caged_workspace`]：受限分享 bot 的工作目錄（issue #828）。
+pub(crate) async fn restricted_workspace(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
+    caged_workspace(pool, bot_id).await
+}
+
 /// 受限的 bot（hook token 只准打自己的 hook）。
 pub(crate) async fn is_caged(pool: &SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
     Ok(caged_workspace(pool, bot_id).await?.is_some())

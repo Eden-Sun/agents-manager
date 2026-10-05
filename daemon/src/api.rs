@@ -3117,6 +3117,30 @@ pub(crate) async fn restore_bot(State(app): State<Arc<App>>, Path(id): Path<Stri
             Err(e) => tracing::warn!(bot = %id, error = %e, "could not restore bot attachments from bots-trash"),
         }
     }
+    // 受限分享用 bot 的工作目錄（issue #828）：刪除時也是收進回收區的。
+    // 還原時搬回；若已過期或被淘汰則重建乾淨的工作目錄與 inbox，舊檔案不再重現。
+    if let Ok(Some(ws)) = crate::share::store::restricted_workspace(&app.db, &id).await {
+        if let Some(ws_path) = crate::share::folder::validate_workspace_path(&app.data_dir, &ws) {
+            match crate::bot_trash::restore_kind(&app.data_dir, &id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
+                Ok(Some(from)) => tracing::info!(bot = %id, from = %from.display(), to = %ws, "restored restricted share workspace from bots-trash"),
+                Ok(None) => {
+                    if !ws_path.exists() {
+                        let mut b = std::fs::DirBuilder::new();
+                        b.recursive(true);
+                        std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+                        if let Err(e) = b.create(&ws_path) {
+                            tracing::warn!(bot = %id, dir = %ws, error = %e, "could not recreate clean share workspace folder");
+                        }
+                    }
+                    if ws_path.is_dir() {
+                        let _ = crate::share::folder::ensure_inbox(&ws_path);
+                        tracing::warn!(bot = %id, dir = %ws, "restricted share workspace expired or evicted from trash; recreated clean workspace");
+                    }
+                }
+                Err(e) => tracing::warn!(bot = %id, error = %e, "could not restore restricted share workspace from bots-trash"),
+            }
+        }
+    }
     crate::remote_trash::restore_for(&app, &id).await;
     app.emit("bot_changed", json!({"bot_id": id})).await;
     app.emit("project_changed", json!({"project_id": bot.project_id})).await;

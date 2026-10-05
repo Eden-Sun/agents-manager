@@ -182,6 +182,30 @@ pub(crate) fn instructions(folder: &Path) -> String {
     out
 }
 
+/// 驗證受限 bot 的 workspace 路徑是否合法（issue #828）。
+/// 必須是絕對路徑、不是根目錄的一級子目錄、通過 `unsafe_reason`、且原地若是 symlink 則拒絕。
+pub(crate) fn validate_workspace_path(data_dir: &Path, workspace: &str) -> Option<PathBuf> {
+    let p = Path::new(workspace.trim());
+    if !p.is_absolute() {
+        return None;
+    }
+    let parent = p.parent()?;
+    if parent.parent().is_none() {
+        return None;
+    }
+    let home_str = crate::share::cage::local_home();
+    let home = Path::new(&home_str);
+    if unsafe_reason(p, home, data_dir).is_some() {
+        return None;
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(p) {
+        if meta.file_type().is_symlink() {
+            return None;
+        }
+    }
+    Some(p.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
