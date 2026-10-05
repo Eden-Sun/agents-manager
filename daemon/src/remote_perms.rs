@@ -7,7 +7,7 @@
 //! 冪等、best-effort：失敗只記一行 debug（權限收不了不該擋任何事），每台每次連上跑一次就好——
 //! 掃描本身不會產生新的鬆權限檔案，新開的 bot 由安裝那一趟負責。
 
-use crate::state::App;
+use crate::hosts::{HostInstance, HostsAccess};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -22,14 +22,14 @@ fn owed() -> &'static Mutex<HashSet<String>> {
 const RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// 連上（含重連）之後在背景收一次。
-pub fn spawn_tighten(app: Arc<App>, host: String) {
+pub fn spawn_tighten<H: HostsAccess + HostInstance + 'static>(app: Arc<H>, host: String) {
     tokio::spawn(async move {
         run_once(&app, &host).await;
     });
 }
 
 /// 欠著的主機每 5 分鐘補跑一次，成功就不再欠。連上那次就成功的主機不會進這個迴圈。
-pub fn spawn_poller(app: Arc<App>) {
+pub fn spawn_poller<H: HostsAccess + HostInstance + 'static>(app: Arc<H>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(RETRY_EVERY).await;
@@ -41,7 +41,7 @@ pub fn spawn_poller(app: Arc<App>) {
     });
 }
 
-async fn run_once(app: &Arc<App>, host: &str) {
+async fn run_once(app: &(impl HostsAccess + HostInstance), host: &str) {
     match tighten(app, host).await {
         Ok(r) if r.failed > 0 => {
             // 有掃到、但有些 chmod 不成功：欠著下一輪再來。
@@ -70,8 +70,8 @@ pub(crate) struct Tightened {
     pub failed: usize,
 }
 
-pub(crate) async fn tighten(app: &Arc<App>, host: &str) -> anyhow::Result<Tightened> {
-    let Some(conn) = app.hosts.get(host).await else { return Ok(Tightened::default()) };
+pub(crate) async fn tighten(app: &(impl HostsAccess + HostInstance), host: &str) -> anyhow::Result<Tightened> {
+    let Some(conn) = app.hosts().get(host).await else { return Ok(Tightened::default()) };
     if conn.is_local() || !conn.is_connected() {
         return Ok(Tightened::default());
     }

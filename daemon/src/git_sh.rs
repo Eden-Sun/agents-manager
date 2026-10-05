@@ -3,9 +3,8 @@
 
 use crate::config::LOCAL_HOST;
 use crate::hosts::sh_quote;
-use crate::state::App;
+use crate::hosts::HostsAccess;
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
 use std::time::Duration;
 
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -57,7 +56,7 @@ export NO_COLOR=1\nunset CLICOLOR_FORCE FORCE_COLOR CLICOLOR 2>/dev/null\n";
 
 /// Run a POSIX `sh` script on `host` and return its exit code as data rather than an error:
 /// a failed git command is a normal outcome for the caller to report, not a transport error.
-pub async fn sh(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> Result<Out> {
+pub async fn sh(app: &impl HostsAccess, host: &str, script: &str, timeout: Duration) -> Result<Out> {
     let full = format!("{PATH_FIX}{script}");
     if host == LOCAL_HOST {
         // `sh_local` kills the whole process group on timeout, so a hung git does not keep
@@ -73,7 +72,7 @@ pub async fn sh(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> 
     }
     // Remote: ssh_exec_path already fails the whole call on a non-zero status, so the status
     // is carried back in stdout instead.
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     let wrapped = wrap_remote_script(&full);
     let raw = conn.ssh_exec_path_timeout(&wrapped, timeout).await?;
     let (body, code) = parse_remote_output(raw);
@@ -81,7 +80,7 @@ pub async fn sh(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> 
 }
 
 /// One `git -C <dir> …` invocation. `args` are shell-quoted here, never by the caller.
-pub async fn git(app: &Arc<App>, host: &str, dir: &str, args: &[&str], timeout: Duration) -> Result<Out> {
+pub async fn git(app: &impl HostsAccess, host: &str, dir: &str, args: &[&str], timeout: Duration) -> Result<Out> {
     let mut script = format!("git -C {}", sh_quote(dir));
     for a in args {
         script.push(' ');
@@ -95,6 +94,8 @@ pub async fn git(app: &Arc<App>, host: &str, dir: &str, args: &[&str], timeout: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
 
     async fn app_for(dir: &std::path::Path) -> Arc<App> {
         let pool = crate::db::open(&dir.join("db.sqlite3")).await.unwrap();

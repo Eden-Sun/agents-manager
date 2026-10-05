@@ -6,6 +6,18 @@
 
 use serde::Serialize;
 
+
+/// 基準檢查（偵測結果的一部分）需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表、最近一次結果快取、本機 herdr 連線狀態、
+/// 把差異推進 AGM inbox。
+pub trait BaselineEnv: crate::hosts::HostsAccess + 'static {
+    /// 每台主機最近一次的基準結果（`app.host_baseline`）。
+    fn baseline_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, BaselineReport>>;
+    /// 本機 herdr 現在連著嗎（本機沒有 ssh master，看這個）。
+    fn local_herdr_connected(&self) -> bool;
+    /// 推一則 `ops_alert`（`source=daemon`）進 AGM inbox：`Ok(true)`＝新推進去，`Ok(false)`＝同 key 已有。
+    fn push_ops_alert(&self, key: &str, payload: &serde_json::Value) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+}
+
 /// 缺了就不能好好用的：嚴重項。其餘是提醒。
 pub const CRITICAL: &str = "critical";
 pub const WARN: &str = "warn";
@@ -63,8 +75,8 @@ impl BaselineReport {
 
 /// 偵測失敗（ssh 逾時、連不上、探測腳本沒跑起來）：已經有舊結果就標上失敗時間與原因，結果本身與 `checked_at` 原封不動；
 /// 沒量過就什麼都不造（維持「尚未檢查」）。
-pub async fn note_failure(app: &std::sync::Arc<crate::state::App>, host: &str, err: &anyhow::Error) {
-    let mut map = app.host_baseline.lock().await;
+pub async fn note_failure(app: &impl BaselineEnv, host: &str, err: &anyhow::Error) {
+    let mut map = app.baseline_cache().lock().await;
     let Some(report) = map.get_mut(host) else { return };
     let first_line = format!("{err:#}").lines().next().unwrap_or_default().chars().take(200).collect::<String>();
     report.failed_at = Some(crate::db::now());
@@ -212,12 +224,24 @@ pub fn alert_for(host: &str, report: &BaselineReport) -> Option<(String, serde_j
 }
 
 /// 把 [`alert_for`] 推進 AGM inbox（`ops_alert`，`source=daemon`）。推不進去只記 log：檢查本身不能因此失敗。
-pub async fn notify(app: &std::sync::Arc<crate::state::App>, host: &str, report: &BaselineReport) {
+pub async fn notify(app: &impl BaselineEnv, host: &str, report: &BaselineReport) {
     let Some((key, payload)) = alert_for(host, report) else { return };
-    match crate::supervisor::store::push_inbox(&app.db, &key, "ops_alert", None, None, None, &payload).await {
-        Ok(Some(_)) => tracing::warn!(host, issues = report.issues.as_ref().map_or(0, Vec::len), "host baseline differs; ops_alert queued"),
-        Ok(None) => {}
+    match app.push_ops_alert(&key, &payload).await {
+        Ok(true) => tracing::warn!(host, issues = report.issues.as_ref().map_or(0, Vec::len), "host baseline differs; ops_alert queued"),
+        Ok(false) => {}
         Err(e) => tracing::error!(host, error = %e, "host baseline differs; ops_alert could not be queued"),
+    }
+}
+
+impl<T: BaselineEnv + ?Sized> BaselineEnv for std::sync::Arc<T> {
+    fn baseline_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, BaselineReport>> {
+        (**self).baseline_cache()
+    }
+    fn local_herdr_connected(&self) -> bool {
+        (**self).local_herdr_connected()
+    }
+    fn push_ops_alert(&self, key: &str, payload: &serde_json::Value) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send {
+        (**self).push_ops_alert(key, payload)
     }
 }
 
@@ -225,13 +249,13 @@ pub async fn notify(app: &std::sync::Arc<crate::state::App>, host: &str, report:
 pub const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 
 /// 每隔 [`RECHECK_EVERY`] 對每台連著的主機重跑一次偵測（含這份檢查）；啟動那一輪由開機偵測負責，所以先睡再做。
-pub fn spawn_poller(app: std::sync::Arc<crate::state::App>) {
+pub fn spawn_poller<H: crate::tools::ToolsEnv>(app: std::sync::Arc<H>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(RECHECK_EVERY).await;
-            for name in app.hosts.names().await {
-                let connected = match app.hosts.get(&name).await {
-                    Some(c) if c.is_local() => app.connected.load(std::sync::atomic::Ordering::SeqCst),
+            for name in app.hosts().names().await {
+                let connected = match app.hosts().get(&name).await {
+                    Some(c) if c.is_local() => app.local_herdr_connected(),
                     Some(c) => c.is_connected(),
                     None => false,
                 };

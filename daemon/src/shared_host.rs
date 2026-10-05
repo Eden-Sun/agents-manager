@@ -11,14 +11,38 @@
 //!
 //! 旗標讀**當下的設定**，不是連線建立時的快照：改了不必重連就生效。
 
-use crate::state::App;
 use anyhow::Result;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::future::Future;
+
+/// 共用主機判斷與 `owned` 需要的最小外部事實（`App` 在 `app_ports_p3` 實作）：設定旗標、DB 連線、自己開的 host shell、資料目錄。
+pub trait SharedHostEnv: Send + Sync {
+    /// `[[hosts]]` 裡這台有沒有設 `shared_session`（讀當下的設定）。
+    fn host_flagged_shared(&self, host: &str) -> impl Future<Output = bool> + Send;
+    fn db_pool(&self) -> &sqlx::SqlitePool;
+    /// 這顆 daemon 在 `host` 上自己開的 host shell：`(workspace_id, pane_id)`。
+    fn own_shell_panes(&self, host: &str) -> impl Future<Output = Vec<(String, String)>> + Send;
+    fn data_dir(&self) -> &std::path::Path;
+}
+
+impl<T: SharedHostEnv + ?Sized> SharedHostEnv for std::sync::Arc<T> {
+    fn host_flagged_shared(&self, host: &str) -> impl Future<Output = bool> + Send {
+        (**self).host_flagged_shared(host)
+    }
+    fn db_pool(&self) -> &sqlx::SqlitePool {
+        (**self).db_pool()
+    }
+    fn own_shell_panes(&self, host: &str) -> impl Future<Output = Vec<(String, String)>> + Send {
+        (**self).own_shell_panes(host)
+    }
+    fn data_dir(&self) -> &std::path::Path {
+        (**self).data_dir()
+    }
+}
 
 /// `host` 是不是跟別的 daemon 共用 session。本機與不在設定裡的主機都是 `false`。
-pub async fn is_shared(app: &Arc<App>, host: &str) -> bool {
-    host != crate::config::LOCAL_HOST && app.cfg.get().await.hosts.iter().any(|h| h.name == host && h.shared_session)
+pub async fn is_shared(app: &impl SharedHostEnv, host: &str) -> bool {
+    host != crate::config::LOCAL_HOST && app.host_flagged_shared(host).await
 }
 
 /// 這顆 daemon 在一台主機上擁有的 herdr 物件。
@@ -43,9 +67,9 @@ impl Owned {
     }
 }
 
-pub async fn owned(app: &Arc<App>, host: &str) -> Result<Owned> {
+pub async fn owned(app: &impl SharedHostEnv, host: &str) -> Result<Owned> {
     let mut o = Owned::default();
-    for p in crate::db::live_projects(&app.db).await? {
+    for p in crate::db::live_projects(app.db_pool()).await? {
         if p.host == host && p.handed_off_to.is_none() {
             o.workspaces.extend(p.workspace_id);
         }
@@ -56,7 +80,7 @@ pub async fn owned(app: &Arc<App>, host: &str) -> Result<Owned> {
             AND r.state IN ('starting','running','stopping')",
     )
     .bind(host)
-    .fetch_all(&app.db)
+    .fetch_all(app.db_pool())
     .await?;
     for (ws, tab, pane) in runs {
         o.workspaces.extend(ws);
@@ -72,7 +96,7 @@ pub async fn owned(app: &Arc<App>, host: &str) -> Result<Owned> {
     .bind(host)
     .bind(host)
     .bind(crate::spawn_hints::cutoff())
-    .fetch_all(&app.db)
+    .fetch_all(app.db_pool())
     .await?;
     o.panes.extend(hints);
     let previews: Vec<String> = sqlx::query_scalar(
@@ -83,12 +107,12 @@ pub async fn owned(app: &Arc<App>, host: &str) -> Result<Owned> {
     )
     .bind(host)
     .bind(host)
-    .fetch_all(&app.db)
+    .fetch_all(app.db_pool())
     .await?;
     o.panes.extend(previews);
-    for s in app.host_shells.lock().await.iter().filter(|s| s.host == host) {
-        o.workspaces.insert(s.workspace_id.clone());
-        o.panes.insert(s.pane_id.clone());
+    for (workspace_id, pane_id) in app.own_shell_panes(host).await {
+        o.workspaces.insert(workspace_id);
+        o.panes.insert(pane_id);
     }
     Ok(o)
 }
@@ -115,9 +139,9 @@ fn valid_tag(s: &str) -> bool {
 }
 
 /// 共用主機上探測 workspace 要帶的標記；一般主機 `None`（label 照舊）。
-pub async fn probe_tag(app: &Arc<App>, host: &str) -> Option<String> {
+pub async fn probe_tag(app: &impl SharedHostEnv, host: &str) -> Option<String> {
     if is_shared(app, host).await {
-        Some(daemon_tag(&app.data_dir))
+        Some(daemon_tag(app.data_dir()))
     } else {
         None
     }

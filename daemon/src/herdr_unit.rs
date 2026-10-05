@@ -89,8 +89,18 @@ pub fn start_server(session: &str, log_dir: &std::path::Path, unit: Option<&Unit
     // foreground process group.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-    crate::state::reap_in_background(cmd.spawn()?);
+    reap_in_background(cmd.spawn()?);
     Ok("spawn")
+}
+
+/// 丟掉 `Child` 不會 wait：行程結束後在 daemon 存活期間留 zombie（#287）。另起 thread 等它，結束就收掉。
+/// （跟 `state::reap_in_background` 同一招；這裡留一份自己的，herdr_unit 才不必依賴 `state`。）
+fn reap_in_background(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        if let Err(error) = child.wait() {
+            tracing::warn!(?error, "failed waiting for spawned child");
+        }
+    });
 }
 
 #[cfg(test)]
