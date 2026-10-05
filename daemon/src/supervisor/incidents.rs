@@ -479,7 +479,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // The phone entry point, but only when there is evidence it is *broken*. `unknown` with an
     // unsupported capability is a documented limit, not a fault: opening an incident for it
     // would mean a permanent red light nobody can clear.
-    let remote = super::remote::status(app).await;
+    let remote = super::remote::status(&app.db).await;
     let remote_status = remote.get("status").and_then(Value::as_str).unwrap_or("unknown");
     if super::remote::severity(remote_status) == "degraded" {
         out.push(Observation {
@@ -494,7 +494,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // 兩個角色都沒登入時換到誰手上都一樣，這時要喊的是人，而不是只留一行 log——2026-09-23 那天
     // 部署停了 9 小時，全程沒有任何東西告訴使用者「有一筆核准在等你」。
     // critical：這是一道閘門，卡住的是別人的部署，不是 AGM 自己的工作。
-    match super::failover::stalled_approvals(app, thresholds.approval_stalled_secs).await {
+    match super::failover::stalled_approvals(&app.db, thresholds.approval_stalled_secs).await {
         Ok(stalled) => {
             for (id, waiting_secs, requester) in stalled {
                 out.push(Observation {

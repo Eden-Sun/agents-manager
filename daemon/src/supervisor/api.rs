@@ -5,6 +5,8 @@
 
 use crate::lifecycle::LcError;
 use crate::state::App;
+use sqlx::SqlitePool;
+use super::ports::{MissionOps, TurnOps};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
@@ -262,7 +264,7 @@ pub async fn post_assignment(
     let mission = match (b.mission_id.as_deref().map(str::trim).filter(|s| !s.is_empty()), b.role.as_deref().map(str::trim)) {
         (None, None | Some("")) => None,
         (Some(mid), Some(role)) if crate::mission::pick::Role::parse(role).is_some() => {
-            let m = crate::mission::store::get(&app.db, mid).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
+            let m = app.mission(mid).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
             mission_gate(&m)?;
             Some((mid.to_string(), role.to_string()))
         }
@@ -478,12 +480,12 @@ pub async fn post_review(
         let target = b.followup_bot_id.clone().unwrap_or_else(|| a.target_bot_id.clone());
         // Validate the target before the transaction: a read, and a 400 for a bot that cannot
         // take work is more useful than a rolled-back transaction.
-        super::check_assignable(&app, &target).await?;
+        super::check_assignable(&app.db, &target).await?;
         // 續作會掛在同一個任務上開一件新的交辦：任務已經結案（完成／取消）就不能再開（issue #119）。這裡在
         // supervisor 鎖裡，跟 `mission cancel`／`complete` 關任務的那一步序列化。暫停不在這裡擋——那是既有的語意，
         // 換手的 followup 在 daemon 設的暫停底下本來就要走得通。
         if let Some(mid) = a.mission_id.as_deref() {
-            if let Some(m) = crate::mission::store::get(&app.db, mid).await.map_err(up)? {
+            if let Some(m) = app.mission(mid).await.map_err(up)? {
                 if m.completed_at.is_some() || m.cancelled_at.is_some() {
                     return Err(LcError::conflict("mission is closed", json!({"reason": "mission_closed", "mission_id": mid})));
                 }
@@ -558,7 +560,7 @@ pub async fn post_review(
             // 決定 commit 了、還沒撤的那一瞬（測試在這裡讓交辦讀不到）。
             #[cfg(test)]
             crate::lifecycle::race_point::hit("review_before_revoke", &updated.id).await;
-            let withdrawal = crate::lifecycle::assignment_withdrawal(&app, tid).await;
+            let withdrawal = app.assignment_withdrawal(tid).await;
             if let Err(e) = &withdrawal {
                 tracing::warn!(assignment = %updated.id, turn = tid, error = ?e, "讀不到交辦是否已撤回：排著的那一則這一刻撤不成，交給 flush");
                 // 還排著的才有得撤；已經送出去的不講待補。回合的狀態也讀不到時當成可能還排著。
@@ -572,7 +574,7 @@ pub async fn post_review(
                 }
             }
             if let Ok(Some(why)) = withdrawal {
-                match crate::lifecycle::revoke_queued_turn(&app, tid, &why).await {
+                match app.revoke_queued_turn(tid, &why).await {
                     Ok(true) => {
                         revoked_turn = Some(tid.to_string());
                         // 決定寫進稽核時還不知道撤不撤得回來；撤回了，「turn 還在跑」那句就不成立。
@@ -595,7 +597,7 @@ pub async fn post_review(
                 }
             }
             if revoke_pending.is_some() {
-                crate::lifecycle::schedule_flush_retry(&app, &updated.target_bot_id, REVOKE_RECHECK);
+                app.schedule_flush_retry(&updated.target_bot_id, REVOKE_RECHECK);
             }
         }
     }
@@ -634,7 +636,7 @@ pub async fn post_review(
     }
     // 群組任務的交辦：裁示之後任務的下一步由 daemon 推導（issue #74，`mission::flow`），一併回給裁示的人。
     if let Some(mid) = updated.mission_id.as_deref() {
-        out["mission_next"] = crate::mission::workflow::next_json(&app, mid).await;
+        out["mission_next"] = app.mission_next_json(mid).await;
     }
     Ok(Json(out))
 }
@@ -821,7 +823,7 @@ pub async fn post_ops_alert(State(app): State<Arc<App>>, Json(b): Json<OpsAlertI
 
 /// The phone entry point: what is claimed, on what evidence, and when it stops counting.
 pub async fn get_remote(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    Ok(Json(super::remote::status(&app).await))
+    Ok(Json(super::remote::status(&app.db).await))
 }
 
 #[derive(Deserialize)]
@@ -906,7 +908,7 @@ pub async fn post_remote_observation(
     .map_err(up)?;
     tracing::info!(status = %b.status, source = source.as_str(), actor = actor.unwrap_or(""), "remote entry observation recorded");
     app.emit("supervisor_changed", json!({"remote": true})).await;
-    Ok(Json(super::remote::status(&app).await))
+    Ok(Json(super::remote::status(&app.db).await))
 }
 
 /// 絕對的 http／https 網址：協定要在最前面（不收前導空白、Tab、換行這些瀏覽器會幫忙吃掉的變形）、有主機、沒有空白或控制字元。
@@ -920,7 +922,7 @@ fn is_http_url(u: &str) -> bool {
 
 /// Which copy is which, and what the running session can honestly be said to have.
 pub async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
-    let (text, _) = setup::effective_persona(&app).await?;
+    let (text, _) = setup::effective_persona(&app.db).await?;
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
     let embedded = setup::persona_body();
     let embedded_hash = super::persona::hash(&embedded);
@@ -996,7 +998,7 @@ pub(super) async fn persona_actor(app: &Arc<App>, headers: &HeaderMap) -> Result
 ///
 /// 沒帶身分的呼叫端照收，但「照收」不等於「沒發生過」——改的是總管之後照著做事的那份字，
 /// 而 `persona.rs` 自己說線上載入的那份不可觀測，不留痕跡的話改完不會有人發現。
-pub(super) async fn note_persona_change(app: &Arc<App>, actor: &str, old: Option<&str>, new: &str, version: i64, how: &str) {
+pub(super) async fn note_persona_change(db: &SqlitePool, actor: &str, old: Option<&str>, new: &str, version: i64, how: &str) {
     let lines = |t: &str| t.lines().count();
     let (old_len, new_len) = (old.map(str::len).unwrap_or(0), new.len());
     let summary = json!({
@@ -1021,7 +1023,7 @@ pub(super) async fn note_persona_change(app: &Arc<App>, actor: &str, old: Option
     );
     // 一個版本一則：同一版重送（修 projection）不該再叫醒巡檢一次。
     let key = format!("persona:{version}:changed");
-    if let Err(e) = store::push_inbox(&app.db, &key, "persona_changed", None, None, None, &summary).await {
+    if let Err(e) = store::push_inbox(db, &key, "persona_changed", None, None, None, &summary).await {
         tracing::warn!(error = ?e, "persona 換了，但通知寫不進 inbox");
     }
 }
@@ -1049,7 +1051,7 @@ pub async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b
     // 留痕擺在 `sync_persona` **之前**：DB 那一份才是權威，projection 寫不出去時文字已經生效了
     // （`sync_persona` 的說明就是這個意思）。把留痕放在後面的話，部分失敗＝改了卻沒人知道。
     if changed {
-        note_persona_change(&app, &actor, sup.persona_text.as_deref(), text, version, "api").await;
+        note_persona_change(&app.db, &actor, sup.persona_text.as_deref(), text, version, "api").await;
     }
     sync_persona(&app, text, version).await?;
     drop(_g);
@@ -1085,7 +1087,7 @@ pub async fn post_persona_adopt(
     }
     let previous = sup.persona_text.clone();
     let version = store::set_persona(&app.db, &embedded, "embedded", Some(&embedded_hash)).await.map_err(up)?;
-    note_persona_change(&app, &actor, previous.as_deref(), &embedded, version, "adopt_embedded").await;
+    note_persona_change(&app.db, &actor, previous.as_deref(), &embedded, version, "adopt_embedded").await;
     sync_persona(&app, &embedded, version).await?;
     drop(_g);
     // `actor` 從驗過的身分來，不是 body 自稱的（issue #463）：以前這裡是
@@ -1301,7 +1303,7 @@ pub async fn post_approval_decision(
     if status == "approved" {
         if let Some(caller) = super::bot_requests::verified_bot_id(&app, &headers).await? {
             // 讀不到就不敢放行（issue #436）：這裡的「解析不到」等於通過，所以 DB 出錯不能吞成「不是它」。
-            let owner = super::maintenance::try_requester_bot_id(&app, &current.requester).await.map_err(|e| {
+            let owner = super::maintenance::try_requester_bot_id(&app.db, &current.requester).await.map_err(|e| {
                 LcError::Unavailable(json!({
                     "error": "unavailable", "reason": "requester_lookup_failed", "retryable": true, "sent": false,
                     "message": format!("查不出這筆申請是誰送的，不敢就這樣核准：{e}"),
@@ -1676,7 +1678,7 @@ mod persona_sync_tests {
         store::get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id=? WHERE id=?")
             .bind(&bid).bind(store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
-        assert_eq!(setup::effective_persona(&app).await.unwrap().0, "existing custom persona");
+        assert_eq!(setup::effective_persona(&app.db).await.unwrap().0, "existing custom persona");
         let initial = store::get_or_init(&app.db).await.unwrap().persona_version;
         // persona.md cannot be created yet. A partial sync must be visible, while the new
         // authoritative text remains durable and recoverable using the exact same request.

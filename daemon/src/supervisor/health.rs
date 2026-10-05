@@ -2,6 +2,8 @@
 
 use crate::lifecycle::LcError;
 use crate::state::App;
+use sqlx::SqlitePool;
+use super::ports::{HostProbes, LocalAccountView, QuotaOps};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +18,7 @@ async fn release_triage_health(app: &Arc<App>) -> Value {
             return v.clone();
         }
     }
-    let v = crate::release_triage::issue::health_probe(&cfg).await.unwrap_or(Value::Null);
+    let v = app.release_triage_health_probe(&cfg).await.unwrap_or(Value::Null);
     *c = Some((std::time::Instant::now(), v.clone()));
     v
 }
@@ -193,10 +195,10 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         // issue #774：背景工作標著超過門檻（claude 2.1.288 起終端 session 的背景指令沒有時間上限）。只是露出，
         // 不進 `status`、不自動殺：可能是正常的長工作，要人或 AGM 去看。
         "background_stuck": background_stuck,
-        "quota": crate::quota::snapshot(app).await,
+        "quota": app.quota_snapshot_json().await,
         // 「接下來要做什麼、什麼一直做不成」。到期動作本來就都落在 DB 上（各自掛在自己那張表），
         // 只是以前要看得翻六張表；issue #75 驗收第 5 條。
-        "due_actions": crate::due_actions::snapshot(app).await,
+        "due_actions": app.due_actions_snapshot().await,
         // Two numbers, not one sum: an assignment still running and a notification nobody
         // acked are different kinds of "owed", and adding them hid a 464-event backlog.
         "pending_assignments": crate::supervisor::store::open_assignment_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
@@ -213,8 +215,8 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
 
 /// 一顆 bot 的背景工作標著「可能卡住」（`background_jobs::STUCK_AFTER_SECS`）時的一列；沒有就是 `None`。
 fn background_stuck_entry(app: &App, bot: &crate::db::Bot, run: &crate::db::Run) -> Option<Value> {
-    let n = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0)?;
-    let (since, secs, stuck) = crate::background_jobs::duration(app, &run.id)?;
+    let n = app.background_jobs_known(&run.id).filter(|n| *n > 0)?;
+    let (since, secs, stuck) = app.background_jobs_duration(&run.id)?;
     stuck.then(|| {
         let since = chrono::DateTime::from_timestamp_millis(since).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         json!({"bot_id": bot.id, "name": bot.name, "kind": bot.kind, "run_id": run.id, "background_jobs": n, "since": since, "secs": secs})
@@ -344,14 +346,14 @@ impl Debounce {
     }
 }
 
-async fn queue_health_change(app: &Arc<App>, debounce: &mut Debounce, snapshot: &Value, severity: &str, sup_status: &str) -> bool {
+async fn queue_health_change(db: &SqlitePool, debounce: &mut Debounce, snapshot: &Value, severity: &str, sup_status: &str) -> bool {
     if !debounce.observe(severity, sup_status) {
         return false;
     }
     let Some(key) = debounce.pending_event_key().map(str::to_owned) else { return false };
     let bot_id = snapshot.pointer("/supervisor/bot_id").and_then(Value::as_str);
     match crate::supervisor::store::push_inbox(
-        &app.db, &key, "health_changed", None, bot_id, None, snapshot,
+        db, &key, "health_changed", None, bot_id, None, snapshot,
     ).await {
         Ok(_) => {
             debounce.acknowledge();
@@ -371,7 +373,7 @@ async fn queue_health_change(app: &Arc<App>, debounce: &mut Debounce, snapshot: 
 /// so AGM can reason about it without `/loop` and without wading through counters.
 pub fn spawn(app: Arc<App>) {
     let loop_app = app.clone();
-    crate::background_loop::spawn_restartable(&app, "supervisor health", move || {
+    app.spawn_restartable("supervisor health", move || {
         let app = loop_app.clone();
         async move { health_loop(app).await }
     });
@@ -438,7 +440,7 @@ async fn health_loop(app: Arc<App>) {
             // durable incidents with their own one-event-per-transition rule; letting them move this
             // key too would tell the manager the same thing twice.
             let severity = inbox_severity(&snapshot);
-            queue_health_change(&app, &mut debounce, &snapshot, &severity, &sup_status).await;
+            queue_health_change(&app.db, &mut debounce, &snapshot, &severity, &sup_status).await;
         }
 }
 
@@ -612,16 +614,16 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        assert!(!queue_health_change(&app, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
+        assert!(!queue_health_change(&app.db, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
         let retry_key = debounce.pending_event_key().unwrap().to_owned();
         sqlx::query("DROP TRIGGER fail_health_changed").execute(&app.db).await.unwrap();
-        assert!(queue_health_change(&app, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
+        assert!(queue_health_change(&app.db, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
         let stored: Option<String> = sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE kind='health_changed'")
             .fetch_optional(&app.db)
             .await
             .unwrap();
         assert_eq!(stored.as_deref(), Some(retry_key.as_str()), "retry keeps the original idempotency key");
-        assert!(!queue_health_change(&app, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
+        assert!(!queue_health_change(&app.db, &mut debounce, &snapshot, "degraded/healthy", "idle").await);
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_inbox WHERE kind='health_changed'")
             .fetch_one(&app.db)
             .await

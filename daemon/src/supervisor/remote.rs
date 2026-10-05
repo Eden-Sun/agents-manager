@@ -19,9 +19,8 @@
 //! When a provider observation does become available, [`Source::Provider`] is where it goes and
 //! [`capability`] is the one place that has to change.
 
-use crate::state::App;
+use sqlx::SqlitePool;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 use super::store;
 
@@ -145,12 +144,12 @@ pub fn revocation(
 
 /// The remote entry point as it should be reported right now, applying expiry and session
 /// binding to whatever is stored.
-pub async fn status(app: &Arc<App>) -> Value {
-    let Ok(sup) = store::get_or_init(&app.db).await else {
+pub async fn status(db: &SqlitePool) -> Value {
+    let Ok(sup) = store::get_or_init(db).await else {
         return json!({"status": "unknown", "capability": capability()});
     };
     let run = match sup.bot_id.as_deref() {
-        Some(id) => crate::db::active_run(&app.db, id).await.ok().flatten(),
+        Some(id) => crate::db::active_run(db, id).await.ok().flatten(),
         None => None,
     };
     // The run id is the session identity we can actually see. `native_session_id` is carried

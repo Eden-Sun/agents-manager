@@ -23,6 +23,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::state::App;
+use sqlx::SqlitePool;
 
 use super::roles::{self, Role};
 use super::store;
@@ -107,7 +108,7 @@ pub async fn reassign_stale_approvals(app: &Arc<App>, unavailable: Option<&'stat
         if !should_reassign(age_secs(&e.created_at), &owner, Some(reason)) {
             continue;
         }
-        match reassign_one(app, e, reason, &now).await {
+        match reassign_one(&app.db, e, reason, &now).await {
             Ok(true) => {
                 moved += 1;
                 tracing::warn!(event = %e.id, reason, "approval reassigned to patrol: the responder is unavailable");
@@ -123,7 +124,7 @@ pub async fn reassign_stale_approvals(app: &Arc<App>, unavailable: Option<&'stat
 }
 
 /// 一則的改派。條件寫在 SQL 裡（`{owner}` 還是協調者才改），所以兩拍之間巡檢已經收走時不會重複寫。
-async fn reassign_one(app: &Arc<App>, e: &store::InboxEvent, reason: &str, now: &str) -> anyhow::Result<bool> {
+async fn reassign_one(db: &SqlitePool, e: &store::InboxEvent, reason: &str, now: &str) -> anyhow::Result<bool> {
     let mut payload: Value = serde_json::from_str(&e.payload_json).unwrap_or_else(|_| json!({}));
     if let Some(o) = payload.as_object_mut() {
         o.insert("reassigned_from".into(), json!(Role::Responder.as_str()));
@@ -146,7 +147,7 @@ async fn reassign_one(app: &Arc<App>, e: &store::InboxEvent, reason: &str, now: 
     .bind(payload.to_string())
     .bind(now)
     .bind(&e.id)
-    .execute(&app.db)
+    .execute(db)
     .await?
     .rows_affected();
     Ok(n > 0)
@@ -156,11 +157,11 @@ async fn reassign_one(app: &Arc<App>, e: &store::InboxEvent, reason: &str, now: 
 ///
 /// 不看在誰手上：改派之後巡檢也沒登入時，要喊的是人。`wait_since` 是被取代時接過來的等待起點，
 /// 有就用它——重申請接續的等待不能因為換了一筆 id 就從零開始算。
-pub async fn stalled_approvals(app: &Arc<App>, after_secs: i64) -> anyhow::Result<Vec<(String, i64, String)>> {
+pub async fn stalled_approvals(db: &SqlitePool, after_secs: i64) -> anyhow::Result<Vec<(String, i64, String)>> {
     let rows: Vec<(String, String, Option<String>, String)> =
         sqlx::query_as("SELECT id, created_at, wait_since, requester FROM supervisor_approvals WHERE supervisor_id=? AND status='pending'")
             .bind(store::SUPERVISOR_ID)
-            .fetch_all(&app.db)
+            .fetch_all(db)
             .await?;
     let mut out = vec![];
     for (id, created_at, wait_since, requester) in rows {
@@ -407,7 +408,7 @@ mod tests {
     async fn an_approval_nobody_decided_for_thirty_minutes_is_reported() {
         let app = app().await;
         let fresh = store::create_approval(&app.db, "kick", "rebuild", "s", Some("c1"), None, None).await.unwrap().approval.id;
-        assert!(stalled_approvals(&app, STALLED_AFTER_SECS).await.unwrap().is_empty(), "剛申請的不算");
+        assert!(stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap().is_empty(), "剛申請的不算");
 
         sqlx::query("UPDATE supervisor_approvals SET created_at=? WHERE id=?")
             .bind(crate::db::iso_in(-STALLED_AFTER_SECS - 60))
@@ -415,7 +416,7 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        let out = stalled_approvals(&app, STALLED_AFTER_SECS).await.unwrap();
+        let out = stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap();
         assert_eq!(out.len(), 1, "{out:?}");
         assert_eq!(out[0].0, fresh);
         assert!(out[0].1 >= STALLED_AFTER_SECS);
@@ -423,7 +424,7 @@ mod tests {
 
         // 裁示掉就不再報（incidents 那條路會自動 resolve）。
         store::decide_approval(&app.db, &fresh, "approved", "AGM", None, None).await.unwrap();
-        assert!(stalled_approvals(&app, STALLED_AFTER_SECS).await.unwrap().is_empty(), "裁示過的不算");
+        assert!(stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap().is_empty(), "裁示過的不算");
     }
 
     /// 接續的等待起點（`wait_since`）優先於新那筆的 `created_at`。
@@ -440,7 +441,7 @@ mod tests {
             .unwrap();
         // 重申請：自動取代掉上面那筆，並把等待起點接過來。
         let second = store::create_approval(&app.db, "kick", "rebuild", "s", Some("c2"), None, None).await.unwrap().approval.id;
-        let out = stalled_approvals(&app, STALLED_AFTER_SECS).await.unwrap();
+        let out = stalled_approvals(&app.db, STALLED_AFTER_SECS).await.unwrap();
         assert_eq!(out.iter().map(|(id, _, _)| id.as_str()).collect::<Vec<_>>(), vec![second.as_str()], "只剩新那筆 pending");
         assert!(out[0].1 >= 7200, "等待是接續的，不是從新 id 重新算：{}", out[0].1);
     }

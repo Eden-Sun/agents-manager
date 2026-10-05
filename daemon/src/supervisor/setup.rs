@@ -7,6 +7,8 @@
 use crate::config::{BotCfg, ProjectCfg};
 use crate::lifecycle::LcError;
 use crate::state::App;
+use sqlx::SqlitePool;
+use super::ports::{HostProbes};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,22 +52,22 @@ pub fn persona_body() -> String {
 
 /// The persona the manager actually runs on: stored if there is one, the embedded text only as
 /// a seed. Returns `(text, seeded)`.
-pub async fn effective_persona(app: &Arc<App>) -> Result<(String, bool), LcError> {
+pub async fn effective_persona(db: &SqlitePool) -> Result<(String, bool), LcError> {
     let embedded = persona_body();
-    let current = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let current = store::get_or_init(db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let legacy = if current.persona_text.as_deref().is_none_or(str::is_empty) {
         match current.bot_id.as_deref() {
-            Some(id) => crate::db::bot(&app.db, id).await
+            Some(id) => crate::db::bot(db, id).await
                 .map_err(|e| LcError::Upstream(e.to_string()))?
                 .and_then(|b| b.persona).filter(|t| !t.trim().is_empty()),
             None => None,
         }
     } else { None };
     let seeded = match legacy {
-        Some(ref text) => store::seed_persona_from(&app.db, text, "legacy_bot", &embedded).await,
-        None => store::seed_persona_if_empty(&app.db, &embedded).await,
+        Some(ref text) => store::seed_persona_from(db, text, "legacy_bot", &embedded).await,
+        None => store::seed_persona_if_empty(db, &embedded).await,
     }.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let sup = store::get_or_init(db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     Ok((sup.persona_text.filter(|t| !t.is_empty()).unwrap_or(embedded), seeded))
 }
 
@@ -182,7 +184,7 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
 
     // The identity has to exist already: silently running the manager under whatever account
     // happens to be default is exactly the kind of guess that produces a bot nobody can log in.
-    if crate::tools::identity_for_host(app, crate::config::LOCAL_HOST, &sup.identity).await.is_none() {
+    if app.identity_for_host(crate::config::LOCAL_HOST, &sup.identity).await.is_none() {
         return Err(LcError::conflict(
             "supervisor identity is not configured on this host",
             json!({"reason": "identity_missing", "identity": sup.identity}),
@@ -200,7 +202,7 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
     // Stored wins. An older binary running `setup` used to write its own compiled-in text back
     // over the bot, which is how a persona that had just been updated could be silently rolled
     // back; the embedded copy is now only ever a seed for an install that has none.
-    let (persona, seeded) = effective_persona(app).await?;
+    let (persona, seeded) = effective_persona(&app.db).await?;
     // The closure below moves its copy into the config update; `persona` itself is still needed
     // afterwards to write the readable copy.
     let persona_for_cfg = persona.clone();
