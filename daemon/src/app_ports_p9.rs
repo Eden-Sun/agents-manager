@@ -105,6 +105,20 @@ impl From<am_core::Quota> for crate::quota::Quota {
 }
 
 impl QuotaAccess for App {
+    fn resolve_key<'a>(
+        &'a self,
+        host: &'a str,
+        provider: &'a str,
+        identity: Option<&'a str>,
+    ) -> impl Future<Output = Result<QuotaKey, PortError>> + Send + 'a {
+        async move {
+            let base = crate::quota::resolve_quota_base(self, host, provider, identity)
+                .await
+                .map_err(|error| PortError::Unavailable(error.to_string()))?;
+            Ok(crate::quota::quota_key(host, &base))
+        }
+    }
+
     fn snapshot<'a>(
         &'a self,
         key: &'a QuotaKey,
@@ -112,6 +126,23 @@ impl QuotaAccess for App {
         async move {
             let quotas = self.quotas.lock().await;
             Ok(quotas.get(key).cloned().map(Into::into))
+        }
+    }
+
+    fn store_snapshot<'a>(
+        &'a self,
+        key: &'a QuotaKey,
+        snapshot: CoreQuotaSnapshot,
+    ) -> impl Future<Output = Result<(), PortError>> + Send + 'a {
+        async move {
+            let (host, base) = match key.split_once('/') {
+                Some((host, base)) if !host.is_empty() && !base.is_empty() => (host, base),
+                Some(_) => return Err(PortError::InvalidInput(format!("invalid quota key `{key}`"))),
+                None if !key.is_empty() => (crate::config::LOCAL_HOST, key.as_str()),
+                None => return Err(PortError::InvalidInput("quota key cannot be empty".into())),
+            };
+            crate::quota::set(self, host, base, snapshot.into()).await;
+            Ok(())
         }
     }
 
@@ -191,11 +222,28 @@ impl QuotaAccess for App {
 pub struct AppQuotaAccess<'a>(pub &'a App);
 
 impl<'a> QuotaAccess for AppQuotaAccess<'a> {
+    fn resolve_key<'b>(
+        &'b self,
+        host: &'b str,
+        provider: &'b str,
+        identity: Option<&'b str>,
+    ) -> impl Future<Output = Result<QuotaKey, PortError>> + Send + 'b {
+        self.0.resolve_key(host, provider, identity)
+    }
+
     fn snapshot<'b>(
         &'b self,
         key: &'b QuotaKey,
     ) -> impl Future<Output = Result<Option<CoreQuotaSnapshot>, PortError>> + Send + 'b {
         self.0.snapshot(key)
+    }
+
+    fn store_snapshot<'b>(
+        &'b self,
+        key: &'b QuotaKey,
+        snapshot: CoreQuotaSnapshot,
+    ) -> impl Future<Output = Result<(), PortError>> + Send + 'b {
+        self.0.store_snapshot(key, snapshot)
     }
 
     fn record_limit_hit<'b>(
@@ -236,6 +284,12 @@ mod tests {
         let app = env.app.clone();
 
         let key = "claude:cc1".to_string();
+        assert_eq!(
+            app.resolve_key(crate::config::LOCAL_HOST, "claude", None)
+                .await
+                .unwrap(),
+            "claude"
+        );
         // Initially no snapshot exists
         let snap = app.snapshot(&key).await.unwrap();
         assert_eq!(snap, None);
@@ -272,5 +326,33 @@ mod tests {
         let access = app_quota_access(&app);
         let snap2 = access.snapshot(&key).await.unwrap().unwrap();
         assert_eq!(snap2.limit_hit, None);
+        assert_eq!(
+            access
+                .resolve_key(crate::config::LOCAL_HOST, "claude", None)
+                .await
+                .unwrap(),
+            "claude"
+        );
+
+        let snapshot = CoreQuotaSnapshot {
+            five_hour: Some(am_core::Window {
+                used_pct: 23.0,
+                resets_at: None,
+                observed_at: Some(crate::db::now()),
+            }),
+            seven_day: None,
+            fable: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: Some("test-plan".into()),
+            updated_at: crate::db::now(),
+            source: "quota-port-test".into(),
+            account: None,
+            host: crate::config::LOCAL_HOST.into(),
+        };
+        app.store_snapshot(&key, snapshot.clone()).await.unwrap();
+        assert_eq!(app.snapshot(&key).await.unwrap(), Some(snapshot.clone()));
+        access.store_snapshot(&key, snapshot.clone()).await.unwrap();
+        assert_eq!(access.snapshot(&key).await.unwrap(), Some(snapshot));
     }
 }

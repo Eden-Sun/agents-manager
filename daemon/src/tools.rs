@@ -361,6 +361,11 @@ pub fn merge_identities(
 /// Hand-written `[[identities]]` win over a colliding `ccN` alias on the host they are written for
 /// (see [`merge_identities`]).
 pub async fn identities_for_host<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Vec<crate::config::IdentityCfg> {
+    identities_for_host_ref(app.as_ref(), host).await
+}
+
+/// Borrowed variant for adapters that implement ToolsEnv directly on their composition root.
+pub async fn identities_for_host_ref<H: ToolsEnv>(app: &H, host: &str) -> Vec<crate::config::IdentityCfg> {
     let identities = app.config_identities().await;
     let tools = app.tools_cache().lock().await;
     let shell = tools.get(host).map(|t| t.shell_identities.as_slice());
@@ -368,7 +373,12 @@ pub async fn identities_for_host<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Vec<c
 }
 
 pub async fn identity_for_host<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
-    identities_for_host(app, host).await.into_iter().find(|i| i.name == name)
+    identity_for_host_ref(app.as_ref(), host, name).await
+}
+
+/// Borrowed variant for callers whose ports do not need to retain the App allocation.
+pub async fn identity_for_host_ref<H: ToolsEnv>(app: &H, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
+    identities_for_host_ref(app, host).await.into_iter().find(|i| i.name == name)
 }
 
 /// Deliberately *not* a file check: a claude account can live in the Keychain with no `.credentials.json`.
