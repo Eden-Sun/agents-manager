@@ -5,6 +5,7 @@
 //! - 新釘選的排到最後（全表 `max + 1`）；取消釘選**不清**位置，再釘回來還在原位（位置已經有值就不動）。
 
 use crate::lifecycle::LcError;
+use am_ports::DbContext;
 use sqlx::SqlitePool;
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {
@@ -13,6 +14,15 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 
 /// `PATCH /api/bots/{id}` 的 `primary`：回受影響的列數（0＝沒有這顆 bot）。
 pub async fn set_pinned(db: &SqlitePool, bot_id: &str, pin: bool) -> Result<u64, sqlx::Error> {
+    set_pinned_with_context(&DbContext::new(db.clone()), bot_id, pin).await
+}
+
+/// DB-only implementation. The API-facing pool adapter stays here until its caller moves out of the daemon.
+pub(crate) async fn set_pinned_with_context(
+    db: &DbContext<SqlitePool>,
+    bot_id: &str,
+    pin: bool,
+) -> Result<u64, sqlx::Error> {
     // 只在第一次釘（位置還是 0）時排到最後；`max` 含已取消釘選的，所以新釘的一定在所有舊位置之後。
     let sql = if pin {
         "UPDATE bots SET is_primary = 1,
@@ -22,11 +32,22 @@ pub async fn set_pinned(db: &SqlitePool, bot_id: &str, pin: bool) -> Result<u64,
     } else {
         "UPDATE bots SET is_primary = 0 WHERE id = ? AND deleted_at IS NULL"
     };
-    Ok(sqlx::query(sql).bind(bot_id).execute(db).await?.rows_affected())
+    Ok(sqlx::query(sql)
+        .bind(bot_id)
+        .execute(db.pool())
+        .await?
+        .rows_affected())
 }
 
 /// 陣列有重複、或點名了不存在（含已刪除）的 bot 都回 400，一筆都不寫。
 pub async fn validate(db: &SqlitePool, ids: &[String]) -> Result<(), LcError> {
+    validate_with_context(&DbContext::new(db.clone()), ids).await
+}
+
+pub(crate) async fn validate_with_context(
+    db: &DbContext<SqlitePool>,
+    ids: &[String],
+) -> Result<(), LcError> {
     let mut seen = std::collections::HashSet::new();
     for id in ids {
         if !seen.insert(id.as_str()) {
@@ -34,11 +55,12 @@ pub async fn validate(db: &SqlitePool, ids: &[String]) -> Result<(), LcError> {
         }
     }
     for id in ids {
-        let live: Option<i64> = sqlx::query_scalar("SELECT 1 FROM bots WHERE id = ? AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_optional(db)
-            .await
-            .map_err(up)?;
+        let live: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM bots WHERE id = ? AND deleted_at IS NULL")
+                .bind(id)
+                .fetch_optional(db.pool())
+                .await
+                .map_err(up)?;
         if live.is_none() {
             return Err(LcError::Bad(format!("order: 未知的 bot `{id}`")));
         }
@@ -48,7 +70,14 @@ pub async fn validate(db: &SqlitePool, ids: &[String]) -> Result<(), LcError> {
 
 /// 陣列位置（1 起算）寫進 `primary_position`，同一個交易。呼叫前先 [`validate`]。
 pub async fn write(db: &SqlitePool, ids: &[String]) -> Result<(), LcError> {
-    let mut tx = db.begin().await.map_err(up)?;
+    write_with_context(&DbContext::new(db.clone()), ids).await
+}
+
+pub(crate) async fn write_with_context(
+    db: &DbContext<SqlitePool>,
+    ids: &[String],
+) -> Result<(), LcError> {
+    let mut tx = db.pool().begin().await.map_err(up)?;
     for (i, id) in ids.iter().enumerate() {
         let changed = sqlx::query("UPDATE bots SET primary_position = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(i as i64 + 1)
