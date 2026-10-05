@@ -544,6 +544,65 @@ async fn a_broken_svg_in_the_outbox_gets_one_backstage_reminder() {
 }
 
 #[tokio::test]
+async fn svg_checker_reminds_again_on_regression_after_repair() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let _token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+
+    let broken_svg = "<svg xmlns=\"http://www.w3.org/2000/svg\">\n<text x=\"540\" y=\"380\"font-size=\"100\">嗨</text>\n</svg>";
+    let valid_svg = "<svg xmlns=\"http://www.w3.org/2000/svg\">\n<text x=\"540\" y=\"380\" font-size=\"100\">嗨</text>\n</svg>";
+
+    // 1. 寫入 broken V1
+    std::fs::write(outbox.join("card.svg"), broken_svg).unwrap();
+
+    // 2. 跑 checker 兩次 → 剛好一則 reminder
+    for _ in 0..2 {
+        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("壞掉的檔");
+        assert_eq!((err.line, err.col), (2, 22));
+    }
+    let count_v1: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'")
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(count_v1, 1, "V1 只送一次提醒");
+
+    // 3. 寫入 valid V2 → 不送提醒
+    std::fs::write(outbox.join("card.svg"), valid_svg).unwrap();
+    assert_eq!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了無錯誤");
+    let count_v2: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE role = 'user' AND content LIKE '%card.svg%'")
+        .fetch_one(&e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(count_v2, 1, "修好後無新增提醒");
+
+    // 模擬 bot 結束了修復的那一回合（turn 結束，隊列清空）
+    sqlx::query("UPDATE turns SET status='failed' WHERE status='queued'").execute(&e.app.db).await.unwrap();
+
+    // 4. 寫入 broken V3（相同的語法錯誤 E，內容與 V1 相同）
+    std::fs::write(outbox.join("card.svg"), broken_svg).unwrap();
+
+    // 5. 跑 checker 兩次
+    for _ in 0..2 {
+        let err = super::svg_check::check_file(&e.app, &b.id, "card.svg").await.expect("壞掉的檔");
+        assert_eq!((err.line, err.col), (2, 22));
+    }
+
+    // 6. 驗證總提醒數剛好為 2：V1 一則、V3 一則，兩版本內均未重複（issue #845 regression）
+    let reminders: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT content, relay_from FROM messages WHERE role = 'user' AND content LIKE '%card.svg%' ORDER BY id ASC"
+    )
+    .fetch_all(&e.app.db)
+    .await
+    .unwrap();
+    assert_eq!(reminders.len(), 2, "總共提醒 2 次（V1 一次，V3 一次，同一版本不重複）：{reminders:?}");
+    assert!(reminders[0].0.contains("圖檔 card.svg 第 2 行第 22 欄格式壞了"));
+    assert!(reminders[1].0.contains("圖檔 card.svg 第 2 行第 22 欄格式壞了"));
+    assert_eq!(reminders[0].1.as_deref(), Some(crate::agent_relay::DAEMON_SENDER));
+    assert_eq!(reminders[1].1.as_deref(), Some(crate::agent_relay::DAEMON_SENDER));
+}
+
+#[tokio::test]
 async fn svg_check_exceeding_max_bytes_is_skipped_without_reading_or_reminder() {
     let e = tt::env().await;
     let b = restricted_bot(&e.app, &e.project_id, "pub").await;

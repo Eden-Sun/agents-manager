@@ -455,14 +455,24 @@ pub(crate) async fn share_file_bytes(app: &Arc<App>, bot_id: &str, requested: &s
     share_file_bytes_with_limit(app, bot_id, requested, MAX_BYTES).await
 }
 
+/// 同 [`share_file_bytes`]，但回傳包含 metadata（ino、mtime_ns、ctime_ns）。
+pub(crate) struct ShareFileRead {
+    pub name: String,
+    pub data: Vec<u8>,
+    pub ino: u64,
+    pub mtime_ns: i128,
+    pub ctime_ns: i128,
+}
+
 /// 同 [`share_file_bytes`]，但允許呼叫端指定讀取上限（例如 SVG 檢查只需 4 MiB）。
+/// 回傳包含 metadata（ino、mtime_ns、ctime_ns），方便做版本指紋檢查。
 /// 超過上限會在讀檔前由 fstat 拒絕，不進行記憶體配置與實際內容讀取。
-pub(crate) async fn share_file_bytes_with_limit(
+pub(crate) async fn share_file_read_with_limit(
     app: &Arc<App>,
     bot_id: &str,
     requested: &str,
     max_bytes: u64,
-) -> Result<(String, Vec<u8>), ShareFileError> {
+) -> Result<ShareFileRead, ShareFileError> {
     use std::os::unix::fs::MetadataExt as _;
 
     let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| ShareFileError::Unavailable)?.ok_or(ShareFileError::NotFound)?;
@@ -485,6 +495,9 @@ pub(crate) async fn share_file_bytes_with_limit(
     if metadata.len() > max_bytes {
         return Err(ShareFileError::TooLarge);
     }
+    let ino = metadata.ino();
+    let mtime_ns = metadata.mtime() as i128 * 1_000_000_000 + metadata.mtime_nsec() as i128;
+    let ctime_ns = metadata.ctime() as i128 * 1_000_000_000 + metadata.ctime_nsec() as i128;
     let data = tokio::task::spawn_blocking(move || trusted_open::read_limited(file, max_bytes))
         .await
         .map_err(|_| ShareFileError::Unavailable)?
@@ -495,7 +508,19 @@ pub(crate) async fn share_file_bytes_with_limit(
     if content_is_withheld(&data) {
         return Err(ShareFileError::NotFound);
     }
-    Ok((name, data))
+    Ok(ShareFileRead { name, data, ino, mtime_ns, ctime_ns })
+}
+
+/// 同 [`share_file_bytes`]，但允許呼叫端指定讀取上限（例如 SVG 檢查只需 4 MiB）。
+/// 超過上限會在讀檔前由 fstat 拒絕，不進行記憶體配置與實際內容讀取。
+pub(crate) async fn share_file_bytes_with_limit(
+    app: &Arc<App>,
+    bot_id: &str,
+    requested: &str,
+    max_bytes: u64,
+) -> Result<(String, Vec<u8>), ShareFileError> {
+    let read = share_file_read_with_limit(app, bot_id, requested, max_bytes).await?;
+    Ok((read.name, read.data))
 }
 
 /// 舊的 `/bots/{id}/scratchpad*`：scratchpad 不再給使用者（使用者 2026-09-16 裁示）。明確回 404，
