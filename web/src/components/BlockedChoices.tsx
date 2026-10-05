@@ -270,11 +270,28 @@ export function BlockedChoices({
       return '分頁沒有換。'
     })
 
+  /** 警語（`Dangerous rm …`）起算，它折下來的列與 `⚠` 倒數都跟著標紅。 */
+  const warnFrom = (() => {
+    const i = menu.context.findIndex((l) => /^\s*(dangerous|warning|⚠)/i.test(l))
+    return i < 0 ? Number.POSITIVE_INFINITY : i
+  })()
+
   /** review 列對應的分頁（送出頁不算一題）。 */
   const reviewTab = (i: number) => menu.tabs.findIndex((t, k) => !t.submit && menu.tabs.slice(0, k).filter((x) => !x.submit).length === i)
 
   return (
     <div className="blocked-choices">
+      {/* 夾在虛線之間的指令（長 heredoc 也完整給）：要核准的就是它，折行不橫捲；被 pane 高度截掉上半就照實說（2026-10-05 console-pm）。 */}
+      {menu.command.length ? (
+        <div className="bc-command">
+          <pre className="bc-context bc-cmd">{menu.command.join('\n')}</pre>
+          {menu.commandCut ? (
+            <p className="bc-cmd-cut" role="note">
+              指令很長、pane 太矮，上半段已捲出終端畫面：這裡只有看得到的後半段。完整指令看 agent 的對話紀錄。
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <div className="bc-top">
         {menu.tabs.length ? (
           <div className="bc-tabs" role="group" aria-label="這份問卷的各題">
@@ -345,12 +362,12 @@ export function BlockedChoices({
             </button>
           </div>
         ) : null}
-        {/* 問句上面的指令與警語：不給這段，`Do you want to proceed?` 根本看不出在核准什麼（2026-09-20 使用者）。 */}
+        {/* 問句上面的警語、倒數與說明：不給這段，`Do you want to proceed?` 根本看不出在核准什麼（2026-09-20 使用者）。 */}
         {menu.context.length ? (
-          <pre className="bc-context">
+          <pre className="bc-context bc-notes">
             {menu.context.map((l, i) => (
-              // 警語（`Dangerous rm …`）要看得出來：它常排在最後、又最容易被捲走。
-              <span key={`${i}-${l}`} className={/^\s*(dangerous|warning|⚠)/i.test(l) ? 'bc-ctx-warn' : undefined}>
+              // 警語（`Dangerous rm …`）與它折下來的列、`⚠` 倒數都要看得出來：它常排在最後、又最容易被捲走。
+              <span key={`${i}-${l}`} className={i >= warnFrom ? 'bc-ctx-warn' : undefined}>
                 {l}
                 {'\n'}
               </span>

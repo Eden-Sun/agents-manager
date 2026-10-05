@@ -336,6 +336,8 @@ React 前端 (Vite) ◄── REST + WebSocket ──► Rust daemon (axum) ◄�
   daemon **一個鍵都不按**，也不設 `CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT` 把它整批關掉；在 bot 的對話插一則系統訊息（警語、目標、指令），同一個框只寫一次；
   送達閘門（`pane_ready_for_prompt`，一般送出、排隊 flush、插隊送出共用）認到就回 409 `dangerous_rm_pending`，一個字都不打進框裡；
   子 agent 給父 agent 的通知加註「只有使用者本人能核准，不要替它按」。
+  2.1.289 畫面（`claude-2.1.289-dangerous-rm-*.txt`，本機 2.1.289＋假 API 在 tmux 重現）：指令夾在兩條 `╌` 虛線之間、長 heredoc 可上百行（回看範圍 200 列），
+  `⚠ …automatically deny…` 倒數在警語下面；pane 太矮、標題捲出畫面時 `DangerousRm.command_truncated`，指令只剩虛線上方看得到的後半段；指令列保留自己的縮排。
   **網頁這一側同一條線**（#545）：blocked 全畫面視窗的鍵盤直通預設**關**（那個視窗是 blocked 後自己彈的，
   人沒有要求它；直通開著時打字會一個字一個字送進 TUI，按到一個 `1` 就等於按下「1. Yes」），
   認到這個框時直通鎖死、開關不給開，只能按畫面上的選項；開關與說明每個模式都看得見。

@@ -507,3 +507,77 @@ test('Session paused 說明折成很多行：標題仍然是題目，不被擠�
   assert.equal(menu.question, 'Session paused')
   assert.equal(menu.notes.length, 5)
 })
+
+/**
+ * 2.1.289 真畫面（2026-10-05，本機 claude 2.1.289＋假 API、tmux 重現；console-pm 截圖同一種框）：
+ * 長 heredoc 指令夾在虛線之間，下面是警語兩列、`⚠` 倒數。以前網頁只剩 Yes／No，指令與原因都沒有。
+ */
+const dangerFixture = (name: string) =>
+  readFileSync(new URL(`../../../daemon/src/lifecycle/fixtures/${name}`, import.meta.url), 'utf8')
+
+test('2.1.289 防誤刪框：指令、警語、倒數各自帶出來', () => {
+  const menu = parseChoiceMenu(dangerFixture('claude-2.1.289-dangerous-rm-countdown-30rows.txt'))
+  assert.ok(menu)
+  assert.equal(menu.question, 'Do you want to proceed?')
+  assert.deepEqual(menu.choices.map((c) => c.title), ['Yes', 'No'])
+  assert.equal(menu.command[0], "S=$(mktemp -d)")
+  assert.equal(menu.command.length, 14)
+  assert.ok(menu.command[menu.command.length - 1].startsWith('rm -f "$S"/{gauth.url'))
+  assert.equal(menu.commandCut, false)
+  const ctx = menu.context.join('\n')
+  assert.ok(ctx.includes('Dangerous rm operation on possibly-empty variable path'), ctx)
+  assert.ok(ctx.includes('or use a literal path)'), '折下來的第二列：' + ctx)
+  assert.ok(/automatically deny this request in \d+:\d\d/.test(ctx), ctx)
+  assert.ok(!ctx.includes('mktemp') && !ctx.includes('╌'), '指令不重複塞進 context：' + ctx)
+})
+
+test('2.1.289 防誤刪框：沒有倒數的預設模式畫面也一樣（指令 14 行、連同標題與虛線超過舊的回看範圍）', () => {
+  const menu = parseChoiceMenu(dangerFixture('claude-2.1.289-dangerous-rm-long-heredoc.txt'))
+  assert.ok(menu)
+  assert.equal(menu.command.length, 14)
+  assert.equal(menu.commandCut, false)
+  assert.ok(menu.context.join('\n').includes('Dangerous rm operation'))
+})
+
+test('警語與問句之間隔著兩列空白（2.1.289 截圖）：警語照樣帶出來', () => {
+  const raw = dangerFixture('claude-2.1.289-dangerous-rm-countdown-30rows.txt')
+  const spaced = raw.replace(/(\n[^\n]*automatically deny[^\n]*\n)/, '$1\n\n')
+  const menu = parseChoiceMenu(spaced)
+  assert.ok(menu)
+  assert.ok(menu.context.join('\n').includes('automatically deny'))
+  assert.ok(menu.command.length > 0)
+})
+
+test('標題與上緣虛線已捲出 pane：只給看得到的後半段，並標記被截', () => {
+  // 前 6 列有字的（實線、標題、說明、上緣虛線、指令頭兩列）削掉，後面的空白列照舊。
+  const lines = dangerFixture('claude-2.1.289-dangerous-rm-countdown-30rows.txt').split('\n')
+  let seen = 0
+  const kept = lines.filter((l) => (l.trim() !== '' && seen++ < 6 ? false : true)).join('\n')
+  const menu = parseChoiceMenu(kept)
+  assert.ok(menu)
+  assert.equal(menu.commandCut, true)
+  assert.ok(menu.command[menu.command.length - 1].startsWith('rm -f "$S"/{gauth.url'))
+  assert.ok(!menu.command.join('\n').includes('mktemp'))
+  assert.ok(menu.context.join('\n').includes('Dangerous rm operation'))
+})
+
+test('沒有虛線的舊框（2.1.281）command 是空的、context 照舊', () => {
+  const menu = parseChoiceMenu(dangerFixture('claude-2.1.281-dangerous-rm.txt'))
+  assert.ok(menu)
+  assert.deepEqual(menu.command, [])
+  assert.equal(menu.commandCut, false)
+  assert.ok(menu.context.join('\n').includes('Dangerous rm operation'))
+  assert.ok(menu.context.join('\n').includes('automatically deny'))
+})
+
+test('警語與問句之間沒有空白列：⚠ 倒數不會黏進題目', () => {
+  const tight = dangerFixture('claude-2.1.289-dangerous-rm-countdown-30rows.txt')
+    .split('\n')
+    .filter((l) => l.trim() !== '')
+    .join('\n')
+  const menu = parseChoiceMenu(tight)
+  assert.ok(menu)
+  assert.equal(menu.question, 'Do you want to proceed?')
+  assert.ok(menu.context.join('\n').includes('automatically deny'))
+  assert.equal(menu.command.length, 14)
+})
