@@ -218,7 +218,8 @@ am_spawn_abort() {
     return 0
 }
 
-# `<name>` → `<AM_AGENT_NAME>-<name>`, unless it already carries the prefix. herdr agent names
+# The positional name after `herdr agent start` becomes `<AM_AGENT_NAME>-<name>`, unless it
+# already carries the prefix. herdr agent names
 # are `[a-z][a-z0-9_-]{0,31}` (32 chars). A blind `cut -c1-32` turns a 32-char parent into itself
 # and collapses every child of a 28–31 char parent onto one prefix (#665). When the readable
 # name does not fit, shorten the parent and append a 6-digit hash of the requested suffix.
@@ -1237,6 +1238,16 @@ mod tests {
             s.run(&[("AM_AGENT_NAME", "proj-abc123")], &["agent", "start", "review", "--kind", "claude"]);
         assert_eq!(out, ["agent", "start", "proj-abc123-review", "--kind", "claude"]);
         assert!(err.contains("proj-abc123-review"), "the rename is announced: {err}");
+    }
+
+    #[test]
+    fn agent_start_prefixes_the_supplied_project_agent_name_positionally() {
+        let s = Sandbox::new();
+        let (out, _) = s.run(
+            &[("AM_AGENT_NAME", "hub-kytpg9")],
+            &["agent", "start", "hub-dgs9j9-dev", "--kind", "claude"],
+        );
+        assert_eq!(out, ["agent", "start", "hub-kytpg9-hub-dgs9j9-dev", "--kind", "claude"]);
     }
 
     /// 回報 daemon 失敗（測試裡沒有 daemon）也不能擋住轉發。

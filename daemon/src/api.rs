@@ -1352,7 +1352,9 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
             bl.push(json!({
                 "id": b.id,
                 "project_id": b.project_id,
-                "name": b.name,
+                // Legacy child nicknames may contain a redundant generated project-agent prefix.
+                // Keep the stored value intact, but project the concise name through shared state.
+                "name": if b.managed_by == "child" { crate::config::short_child_name(&p.label, &b.name) } else { b.name.clone() },
                 "kind": b.kind,
                 "model": b.model,
                 "effort": b.effort,
@@ -13593,6 +13595,26 @@ mod state_query_count_tests {
         let lamp = |name: &str| state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["name"] == name).unwrap()["lamp"].clone();
         assert_eq!(lamp("running"), "disconnected", "herdr 斷線時燈是 disconnected");
         assert_eq!(lamp("idle"), "disconnected");
+    }
+
+    #[tokio::test]
+    async fn state_projects_a_short_name_for_legacy_children_without_rewriting_the_database() {
+        let env = crate::testing::env().await;
+        sqlx::query("UPDATE projects SET label='智選hub' WHERE id=?").bind(&env.project_id).execute(&env.app.db).await.unwrap();
+        let parent = crate::testing::claude_bot(&env.app, &env.project_id, "parent").await;
+        let child = crate::testing::claude_bot(&env.app, &env.project_id, "legacy").await;
+        sqlx::query("UPDATE bots SET name='hub-dgs9j9-sheet', managed_by='child', parent_bot_id=?, inject_hooks=0 WHERE id=?")
+            .bind(&parent.id)
+            .bind(&child.id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let state = state_json(&env.app).await.unwrap();
+        let projected = state["projects"][0]["bots"].as_array().unwrap().iter().find(|b| b["id"] == child.id).unwrap();
+        assert_eq!(projected["name"], "sheet");
+        let stored: String = sqlx::query_scalar("SELECT name FROM bots WHERE id=?").bind(&child.id).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(stored, "hub-dgs9j9-sheet", "display normalization must not rename a live row or risk a project name collision");
     }
 }
 
