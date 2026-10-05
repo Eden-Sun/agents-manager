@@ -40,6 +40,44 @@ fn suggestion_on(screen: &str) -> Option<String> {
     prompt_suggestion("claude", screen)
 }
 
+/// 為失敗標註 Tab 是否已按（`tab_sent`）以及終端建議草稿是否已清回空框（`suggestion_restored`）。
+fn annotate_cleanup(err: LcError, restored: bool) -> LcError {
+    match err {
+        LcError::Conflict(mut body) => {
+            if let Some(o) = body.as_object_mut() {
+                o.insert("tab_sent".into(), json!(true));
+                o.insert("suggestion_restored".into(), json!(restored));
+            }
+            LcError::Conflict(body)
+        }
+        LcError::Unprocessable(mut body) => {
+            if let Some(o) = body.as_object_mut() {
+                o.insert("tab_sent".into(), json!(true));
+                o.insert("suggestion_restored".into(), json!(restored));
+            }
+            LcError::Unprocessable(body)
+        }
+        LcError::Unavailable(mut body) => {
+            if let Some(o) = body.as_object_mut() {
+                o.insert("tab_sent".into(), json!(true));
+                o.insert("suggestion_restored".into(), json!(restored));
+            }
+            LcError::Unavailable(body)
+        }
+        LcError::Uncommitted(mut body) => {
+            if let Some(o) = body.as_object_mut() {
+                o.insert("tab_sent".into(), json!(true));
+                o.insert("suggestion_restored".into(), json!(restored));
+            }
+            LcError::Uncommitted(body)
+        }
+        LcError::Upstream(msg) => {
+            LcError::Upstream(format!("{msg} (tab_sent=true, suggestion_restored={restored})"))
+        }
+        other => other,
+    }
+}
+
 /// `expect_text`＝網頁看到的那句；`expect_run_id`＝網頁看到它的那個 run。
 pub async fn accept(
     app: &Arc<App>,
@@ -160,26 +198,38 @@ pub async fn accept(
         return Err(err);
     };
 
+
     // ---- Enter：框裡就是那一句，走「送出框裡那段」的既有流程 ----
     let token = composer_draft::draft_token(&run.id, &pane, &draft);
     match composer_draft::submit_locked(app, bot_id, &token, client_request_id).await {
         Ok(out) => Ok(out),
-        Err(LcError::Conflict(mut body)) if body.get("sent").and_then(Value::as_bool) != Some(true) => {
-            // 閘門在 Tab 之後才擋下：一個字都沒送出，那一句還在框裡。清掉還原成乾淨的空框（`clear` 自己再驗一次框裡就是這一句）。
-            let restored = match composer_draft::clear(app, &client, &run, &bot, &token, false).await {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!(bot = %bot_id, error = ?e, "accepted the suggestion with Tab but could not send it, and could not clear it either");
-                    false
-                }
-            };
-            if let Some(o) = body.as_object_mut() {
-                o.insert("tab_sent".into(), json!(true));
-                o.insert("suggestion_restored".into(), json!(restored));
-            }
-            Err(LcError::Conflict(body))
+        Err(composer_draft::SubmitDraftError::EnterMayHaveBeenSent(e)) => {
+            // Enter 已送或可能已送：絕不清理輸入框，避免打斷已送出的回合。
+            Err(e)
         }
-        Err(e) => Err(e),
+        Err(composer_draft::SubmitDraftError::NoKeySent(err)) => {
+            // Enter 確定尚未送出：若輸入框仍是原建議且無回合擁有它，清框還原。
+            let turn_owned = db::in_flight_turn(&app.db, &run.id).await.unwrap_or(None).is_some()
+                || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND client_request_id = ?")
+                    .bind(&conv)
+                    .bind(client_request_id)
+                    .fetch_one(&app.db)
+                    .await
+                    .unwrap_or(1)
+                    > 0;
+            let restored = if !turn_owned {
+                match composer_draft::clear(app, &client, &run, &bot, &token, false).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(bot = %bot_id, error = ?e, "accepted the suggestion with Tab but could not send it, and could not clear it either");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            Err(annotate_cleanup(err, restored))
+        }
     }
 }
 
