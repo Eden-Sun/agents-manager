@@ -21,6 +21,7 @@
 //! 卻沒有人會叫醒它時的接續（[`wake_stalled`]，daemon 重啟後也是靠這條接回去）。
 
 use super::flow;
+use super::ports::{MissionGateRules, SupervisorRepo};
 use crate::lifecycle::LcError;
 use crate::mission::store::MissionEvent;
 use crate::state::App;
@@ -34,7 +35,7 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 
 /// 推導要的兩份清單：這個任務的交辦與事件，都是寫入順序。
 pub async fn inputs(app: &Arc<App>, mission_id: &str) -> Result<(Vec<Assignment>, Vec<MissionEvent>), LcError> {
-    let assignments = crate::supervisor::store::mission_assignments(&app.db, mission_id).await.map_err(up)?;
+    let assignments = app.db.mission_assignments(mission_id).await.map_err(up)?;
     let events = crate::mission::store::events(&app.db, mission_id).await.map_err(up)?;
     Ok((assignments, events))
 }
@@ -49,7 +50,9 @@ pub async fn next_json(app: &Arc<App>, mission_id: &str) -> Value {
 
 /// 這個任務底下還開著的交辦（`OPEN_STATES`），照寫入順序。
 pub async fn open_assignments(app: &Arc<App>, mission_id: &str) -> Result<Vec<Assignment>, LcError> {
-    Ok(crate::supervisor::store::mission_assignments(&app.db, mission_id)
+    Ok(app
+        .db
+        .mission_assignments(mission_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .into_iter()
@@ -73,7 +76,7 @@ fn brief(a: &Assignment) -> serde_json::Value {
 /// 取消或結案——`mission cancel`／`complete` 關任務那一步也拿同一把鎖（issue #119）。
 pub async fn ensure_can_assign(app: &Arc<App>, mission_id: &str, role: &str) -> Result<(), LcError> {
     let m = crate::mission::store::get(&app.db, mission_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
-    crate::supervisor::api::mission_gate(&m)?;
+    <sqlx::SqlitePool as MissionGateRules>::mission_gate(&m)?;
     let (assignments, events) = inputs(app, mission_id).await?;
     let open: Vec<&Assignment> = assignments.iter().filter(|a| a.is_open()).collect();
     if let Some(a) = open.first() {
@@ -277,7 +280,7 @@ pub async fn wake_stalled_at(app: &Arc<App>, now: chrono::DateTime<chrono::Utc>)
             "idle_since": since,
             "idle_minutes": idle / 60,
         });
-        match crate::supervisor::store::push_inbox(&app.db, &key, "mission_next", None, None, None, &payload).await {
+        match app.db.push_inbox(&key, "mission_next", None, None, None, &payload).await {
             Ok(Some(_)) => woke.push(m.id.clone()),
             Ok(None) => {}
             Err(e) => tracing::warn!(mission = %m.id, error = %e, "could not queue mission_next"),
@@ -294,7 +297,7 @@ async fn outstanding_inbox(app: &Arc<App>, mission_id: &str) -> bool {
             AND (json_extract(payload_json, '$.mission_id') = ?
                  OR assignment_id IN (SELECT id FROM supervisor_assignments WHERE mission_id = ?))",
     )
-    .bind(crate::supervisor::store::SUPERVISOR_ID)
+    .bind(<sqlx::SqlitePool as SupervisorRepo>::SUPERVISOR_ID)
     .bind(mission_id)
     .bind(mission_id)
     .fetch_one(&app.db)

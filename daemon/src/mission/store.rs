@@ -7,6 +7,7 @@
 //! `mission_events` 是任務在群組時間軸上的那一串：使用者下的指示、AGM／bot 的回報、暫停與交付。
 //! 群組時間軸原本只合併成員 bot 的訊息，AGM 不是專案成員，它的回報沒有地方放——放這裡。
 
+use super::ports::{MissionGateRules, SupervisorRepo};
 use anyhow::Result;
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -722,7 +723,7 @@ async fn push_inbox_tx(
          VALUES (?,?,?,NULL,NULL,NULL,?,?, 'pending', ?, ?)",
     )
     .bind(crate::db::ulid())
-    .bind(crate::supervisor::store::SUPERVISOR_ID)
+    .bind(<SqlitePool as SupervisorRepo>::SUPERVISOR_ID)
     .bind(event_key)
     .bind(kind)
     .bind(payload.to_string())
@@ -867,7 +868,7 @@ async fn held_by_user(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, id: &str) ->
             .bind(id)
             .fetch_optional(&mut **tx)
             .await?;
-    Ok(current.flatten().is_some_and(|r| crate::supervisor::api::user_pause_reason(Some(&r)).is_some()))
+    Ok(current.flatten().is_some_and(|r| <SqlitePool as MissionGateRules>::user_pause_reason(Some(&r)).is_some()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1037,18 +1038,18 @@ pub async fn cancel_open_for_project(pool: &SqlitePool, project_id: &str, reason
         done += 1;
         // 任務關了才收交辦：順序跟 `mission cancel` 一樣，鎖外排隊的派工拿到鎖時會看到任務已關，
         // 不會在這之後又冒出一件新的。收不掉只記 log——任務已經取消了，不能因為某一件而回頭。
-        for a in crate::supervisor::store::mission_assignments(pool, &id).await?.into_iter().filter(|a| a.is_open()) {
-            match crate::supervisor::store::review(
-                pool,
-                &a.id,
-                "cancel",
-                crate::agent_relay::DAEMON_SENDER,
-                reason,
-                Some("專案已刪除，這筆任務與它的交辦一併取消"),
-                None,
-                None,
-            )
-            .await
+        for a in pool.mission_assignments(&id).await?.into_iter().filter(|a| a.is_open()) {
+            match pool
+                .review_assignment(
+                    &a.id,
+                    "cancel",
+                    crate::agent_relay::DAEMON_SENDER,
+                    reason,
+                    Some("專案已刪除，這筆任務與它的交辦一併取消"),
+                    None,
+                    None,
+                )
+                .await
             {
                 Ok(Some(_)) => {}
                 Ok(None) => tracing::info!(mission = %id, assignment = %a.id, "assignment was already closed while cancelling a deleted project's mission"),

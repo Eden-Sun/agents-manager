@@ -2,6 +2,7 @@
 //! 契約寫在 `docs/API.md` 的「群組任務」一節；這支檔案改了那一節要跟著改。
 
 use super::{deliver, flow, pick, store};
+use super::ports::{AgmRole, CallerOps, EventOps, SupervisorOps, SupervisorRepo};
 use crate::lifecycle::LcError;
 use crate::state::App;
 use axum::extract::{Path, Query, State};
@@ -17,7 +18,7 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 }
 
 async fn emit(app: &Arc<App>, m: &store::Mission) {
-    app.emit("mission_updated", json!({"mission_id": m.id, "project_id": m.project_id, "status": m.status()})).await;
+    app.emit_event("mission_updated", json!({"mission_id": m.id, "project_id": m.project_id, "status": m.status()})).await;
 }
 
 async fn load(app: &Arc<App>, id: &str) -> Result<store::Mission, LcError> {
@@ -112,7 +113,7 @@ async fn check_relay_from(app: &Arc<App>, headers: &HeaderMap, relay_from: Optio
 /// it has an assignment; the relay proof identifies the caller but does not make it a participant.
 async fn mission_access_bot(app: &Arc<App>, bot_id: Option<&str>) -> Result<Option<String>, LcError> {
     let Some(bot_id) = bot_id else { return Ok(None) };
-    if crate::supervisor::roles::role_of_bot(&app.db, bot_id).await.map_err(up)?.is_some() {
+    if app.role_of_bot(bot_id).await.map_err(up)?.is_some() {
         return Ok(None);
     }
     Ok(Some(bot_id.to_owned()))
@@ -149,7 +150,7 @@ async fn require_mission_participant(app: &Arc<App>, mission_id: &str, bot_id: O
 }
 
 async fn require_header_bot_mission_participant(app: &Arc<App>, mission_id: &str, headers: &HeaderMap) -> Result<(), LcError> {
-    let bot_id = crate::supervisor::bot_requests::verified_bot_id(app, headers).await?;
+    let bot_id = app.verified_bot_id(headers).await?;
     let access_bot = mission_access_bot(app, bot_id.as_deref()).await?;
     require_mission_participant(app, mission_id, access_bot.as_deref()).await
 }
@@ -261,8 +262,7 @@ pub async fn post_mission(
         }
         // 重送也補推一次：交易上線以前寫一半的舊列（任務在、通知不在）靠這裡補回來。
         // event_key 相同，已經有的（含已 ack 的）不會多一筆、不會再叫醒誰。
-        crate::supervisor::store::push_inbox(&app.db, &format!("mission:{}:created", m.id), "mission_created", None, None, None, &payload_of(&m))
-            .await
+        app.db.push_inbox(&format!("mission:{}:created", m.id), "mission_created", None, None, None, &payload_of(&m)).await
             .map_err(up)?;
     }
     let mut out = m.json();
@@ -602,15 +602,15 @@ fn is_current_mission_verifier(
 
 /// 先分清一般 Bot 與 User／AGM。一般 Bot 的 verifier 資格會交給 `add_event_checked` 在寫入交易的 snapshot 驗。
 async fn require_gatekeeper(app: &Arc<App>, headers: &HeaderMap, mission_id: &str, verifier_may: bool) -> Result<Option<String>, LcError> {
-    let Some(bot) = crate::supervisor::bot_requests::verified_bot_id(app, headers).await? else { return Ok(None) };
-    if crate::supervisor::bot_requests::actor_role(app, headers).await?.is_some() {
+    let Some(bot) = app.verified_bot_id(headers).await? else { return Ok(None) };
+    if app.actor_role(headers).await?.is_some() {
         return Ok(None);
     }
     if verifier_may {
         // Preserve the existing gatekeeper response for bots with no verifier assignment (or
         // that also executed work). The authoritative current-assignment check is repeated in
         // the write transaction below.
-        let assignments = crate::supervisor::store::mission_assignments(&app.db, mission_id).await.map_err(up)?;
+        let assignments = app.db.mission_assignments(mission_id).await.map_err(up)?;
         let is_verifier = assignments
             .iter()
             .any(|a| a.target_bot_id == bot && a.mission_role.as_deref().unwrap_or("executor") == "verifier");
@@ -723,18 +723,17 @@ pub struct PauseIn {
 /// 自己叫醒自己只是多一個空回合（同 `resume` 的防線）。有協調者時收件人是協調者；只有巡檢時是巡檢。
 /// 使用者（web）、巡檢代使用者操作時都要叫醒協調者。
 async fn called_by_mission_manager(app: &Arc<App>, headers: &HeaderMap) -> Result<bool, LcError> {
-    use crate::supervisor::roles::{self, Role};
     // 宣告了身分卻驗不過就是 403（issue #415）：不能默默當成「不是管理者」照常往下做。
-    Ok(match crate::supervisor::bot_requests::actor_role(app, headers).await? {
-        Some(Role::Responder) => true,
-        Some(Role::Patrol) => !roles::responder_configured(&app.db).await.unwrap_or(true),
+    Ok(match app.actor_role(headers).await? {
+        Some(AgmRole::Responder) => true,
+        Some(AgmRole::Patrol) => !app.responder_configured().await.unwrap_or(true),
         None => false,
     })
 }
 
 /// 這個任務底下還開著的交辦（`supervisor::store::OPEN_STATES`），給 AGM 看的精簡形狀。
 async fn open_assignments(app: &Arc<App>, mission_id: &str) -> Result<Vec<crate::supervisor::store::Assignment>, LcError> {
-    Ok(crate::supervisor::store::mission_assignments(&app.db, mission_id).await.map_err(up)?.into_iter().filter(|a| a.is_open()).collect())
+    Ok(app.db.mission_assignments(mission_id).await.map_err(up)?.into_iter().filter(|a| a.is_open()).collect())
 }
 
 fn assignment_brief(a: &crate::supervisor::store::Assignment) -> Value {
@@ -1043,7 +1042,7 @@ pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>, he
     // 重看任務關了沒，所以要嘛它先建好交辦、下面重讀收得到，要嘛它拿到鎖時任務已經關了、回 mission_closed。
     // 鎖只包這一步：底下逐件取消走 `post_review`，它自己會拿同一把鎖。
     let cancelled = {
-        let _g = crate::supervisor::lock().await;
+        let _g = app.supervisor_lock().await;
         store::cancel_announced(&app.db, &id, announce).await.map_err(up)?
     };
     if !cancelled {
@@ -1055,20 +1054,10 @@ pub async fn post_cancel(State(app): State<Arc<App>>, Path(id): Path<String>, he
     // 取消之後才重讀：鎖外排隊的派工拿到鎖時會看到任務已關，不會在這之後冒出新的交辦。
     let mut withdrawn = Vec::new();
     for a in open_assignments(&app, &id).await? {
-        let review = crate::supervisor::api::ReviewIn {
-            decision: "cancel".into(),
-            actor: Some(if by_manager { "agm".into() } else { "user".into() }),
-            source: Some("mission_cancel".into()),
-            reason: Some(format!("群組任務 {id} 已取消")),
-            evidence: None,
-            followup_text: None,
-            followup_request_id: None,
-            followup_bot_id: None,
-            ownership: Vec::new(),
-        };
         let mut row = assignment_brief(&a);
-        match crate::supervisor::api::post_review(State(app.clone()), Path(a.id.clone()), headers.clone(), Json(review)).await {
-            Ok(Json(v)) => {
+        let actor = if by_manager { "agm" } else { "user" };
+        match app.cancel_assignment(&a.id, &headers, actor, "mission_cancel", format!("群組任務 {id} 已取消")).await {
+            Ok(v) => {
                 row["cancelled"] = true.into();
                 row["revoked_turn_id"] = v.get("revoked_turn_id").cloned().unwrap_or(Value::Null);
                 row["may_still_be_running"] = v.get("may_still_be_running").cloned().unwrap_or(false.into());
@@ -1139,7 +1128,7 @@ pub async fn sweep_closed_mission_temp_bots(app: &Arc<App>) {
 }
 
 async fn cleanup_temp_bots_inner(app: &Arc<App>, m: &store::Mission, sweep: bool) -> Value {
-    let assignments = match crate::supervisor::store::mission_assignments(&app.db, &m.id).await {
+    let assignments = match app.db.mission_assignments(&m.id).await {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(mission = %m.id, error = %e, "could not read the mission's assignments; no temp bot was cleaned up");
@@ -1186,9 +1175,9 @@ async fn cleanup_temp_bots_inner(app: &Arc<App>, m: &store::Mission, sweep: bool
                 continue;
             }
         }
-        match crate::api::delete_bot(State(app.clone()), Path(bot.id.clone())).await {
-            Ok(_) => deleted.push(json!({"bot_id": bot.id, "name": bot.name})),
-            Err(e) => skipped.push(json!({"bot_id": bot.id, "name": bot.name, "reason": "delete_failed", "detail": format!("{e:?}")})),
+        match app.delete_bot(&bot.id).await {
+            Ok(()) => deleted.push(json!({"bot_id": bot.id, "name": bot.name})),
+            Err(e) => skipped.push(json!({"bot_id": bot.id, "name": bot.name, "reason": "delete_failed", "detail": e})),
         }
     }
     let out = json!({"deleted": deleted, "skipped": skipped});
@@ -1289,7 +1278,7 @@ pub async fn post_complete(
     {
         // 關任務這一步跟派工拿同一把 supervisor 鎖（issue #119）：上面的關卡（可能跑 git）是在鎖外做的，那段時間
         // 排隊的派工可能已經建了交辦。
-        let _g = crate::supervisor::lock().await;
+        let _g = app.supervisor_lock().await;
         // 但退回、驗證這些改變「代」的寫入不走這把鎖，所以結案的判定要在**寫入交易裡**重做（issue #74 重開）：
         // 開著的交辦與交付的要求都照 commit 當下的樣子重判，跟上面判的不是同一件事就不結（`recheck_complete`）。
         // 任務列與 `completed` 事件一次交易，任務已經被取消、或另一個結案先落地 → 照實 409，不補一則「完成」（issue #116）。
@@ -1607,7 +1596,7 @@ pub async fn put_identity_disabled(
     }
     let host = b.host.clone().unwrap_or_else(|| crate::config::LOCAL_HOST.to_string());
     store::set_identity_disabled(&app.db, &host, &b.kind, name.trim(), b.disabled).await.map_err(up)?;
-    app.emit("identity_prefs_changed", json!({"host": host, "kind": b.kind, "identity": name, "disabled": b.disabled})).await;
+    app.emit_event("identity_prefs_changed", json!({"host": host, "kind": b.kind, "identity": name, "disabled": b.disabled})).await;
     Ok(Json(json!({"host": host, "kind": b.kind, "identity": name, "disabled": b.disabled})))
 }
 

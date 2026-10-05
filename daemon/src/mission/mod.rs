@@ -9,12 +9,18 @@ pub mod api;
 pub mod deliver;
 pub mod flow;
 pub mod pick;
+pub mod ports;
 pub mod relay;
 pub mod store;
 pub mod workflow;
 
+use self::ports::IdentityOps;
 use crate::state::App;
 use std::sync::Arc;
+
+/// `App` 對 [`ports`] 的實作（P7 的 composition 側 adapter）；檔案放在 `daemon/src/app_ports_p7.rs`，不碰 `lib.rs`。
+#[path = "../app_ports_p7.rs"]
+mod app_ports_p7;
 
 /// D4：claude 身分的調度順序，用盡才往下一個。
 pub const CLAUDE_ORDER: [&str; 3] = ["cc2", "cc1", "cc0"];
@@ -32,7 +38,7 @@ pub const CLAUDE_ORDER: [&str; 3] = ["cc2", "cc1", "cc0"];
 /// 回 `None` ＝**查不出來**（這台主機的身分表還沒偵測完、或 kind 不是 claude）。呼叫端要把它當成
 /// 「不知道」，不是「沒有身分」：不知道就不要為了換身分丟掉一個 session。
 pub async fn billing_identity_named(app: &Arc<App>, host: &str, bot: &crate::db::Bot) -> anyhow::Result<Option<String>> {
-    if let Some(name) = crate::quota::billing_identity(app, bot).await? {
+    if let Some(name) = app.billing_identity(bot).await? {
         return Ok(Some(name));
     }
     Ok(default_identity_name(app, host, &bot.kind).await)
@@ -43,12 +49,9 @@ pub async fn default_identity_name(app: &Arc<App>, host: &str, kind: &str) -> Op
     if kind != "claude" {
         return None;
     }
-    let known = crate::tools::identities_for_host(app, host).await;
+    let known = app.known_identities(host).await;
     CLAUDE_ORDER.iter().find_map(|name| {
-        known
-            .iter()
-            .find(|i| i.kind == kind && i.name == *name && crate::quota::identity_shares_default(kind, &i.env))
-            .map(|i| i.name.clone())
+        known.iter().find(|i| i.kind == kind && i.name == *name && i.shares_default).map(|i| i.name.clone())
     })
 }
 
@@ -65,25 +68,24 @@ pub async fn default_identity_name(app: &Arc<App>, host: &str, kind: &str) -> Op
 pub async fn candidates(app: &Arc<App>, host: &str, kind: &str) -> anyhow::Result<Vec<(String, bool, Option<crate::quota::Quota>)>> {
     let disabled = store::disabled_identities(&app.db, host, kind).await?;
     if kind != "claude" {
-        let quotas = app.quotas.lock().await;
-        return Ok(vec![(String::new(), false, quotas.get(&crate::quota::quota_key(host, kind)).cloned())]);
+        let readings = app.quota_readings(host, &[kind.to_string()]).await;
+        return Ok(vec![(String::new(), false, readings.into_iter().next().flatten())]);
     }
     let known: Vec<String> =
-        crate::tools::identities_for_host(app, host).await.into_iter().filter(|i| i.kind == kind).map(|i| i.name).collect();
+        app.known_identities(host).await.into_iter().filter(|i| i.kind == kind).map(|i| i.name).collect();
     let missing_here = |name: &str| !known.is_empty() && !known.iter().any(|k| k == name);
     // 每個身分的讀數在哪一把 key，跟寫入端同一條規則（`quota::quota_base_for_host`）：沒有自己
     // CLAUDE_CONFIG_DIR 的身分落在裸 `claude`，有的只讀自己那把，不借預設帳號的數字。先把 key 算好再上鎖。
     let mut bases = Vec::with_capacity(CLAUDE_ORDER.len());
     for name in CLAUDE_ORDER {
-        bases.push((name, crate::quota::quota_base_for_host(app, host, "claude", Some(name)).await));
+        bases.push((name, app.quota_base_for_host(host, "claude", Some(name)).await));
     }
-    let quotas = app.quotas.lock().await;
+    let keys: Vec<String> = bases.iter().map(|(_, base)| base.clone()).collect();
+    let readings = app.quota_readings(host, &keys).await;
     Ok(bases
         .into_iter()
-        .map(|(name, base)| {
-            let q = quotas.get(&crate::quota::quota_key(host, &base)).cloned();
-            (name.to_string(), disabled.iter().any(|d| d == name) || missing_here(name), q)
-        })
+        .zip(readings)
+        .map(|((name, _), q)| (name.to_string(), disabled.iter().any(|d| d == name) || missing_here(name), q))
         .collect())
 }
 
