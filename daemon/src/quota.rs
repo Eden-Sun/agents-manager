@@ -515,12 +515,22 @@ impl Quota {
 
 /// DB 裡的額度讀數不是派工判準；它只在開機時先填回畫面，第一次新的探測成功後才變成 fresh。
 /// `Quota` 本身不帶 stale，避免把顯示用的狀態帶進 daemon 內部所有額度判斷。
+fn is_retired_agy_quota_key(key: &str) -> bool {
+    key == "agy:claude-gpt" || key.ends_with("/agy:claude-gpt")
+}
+
 pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
     let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT key, quota_json, updated_at FROM quota_cache")
         .fetch_all(&app.db)
         .await?;
     let mut restored = Vec::new();
+    let mut retired = Vec::new();
     for (key, raw, updated_at) in rows {
+        // agy 現在只提供 Gemini 額度。清除舊版保存的 Claude/GPT 子 key，避免重啟後又出現在快照。
+        if is_retired_agy_quota_key(&key) {
+            retired.push(key);
+            continue;
+        }
         let mut q: Quota = match serde_json::from_str(&raw) {
             Ok(q) => q,
             Err(e) => {
@@ -546,9 +556,18 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
     let count = restored.len();
     let mut quotas = app.quotas.lock().await;
     let mut stale = app.quota_stale.lock().await;
+    for key in &retired {
+        quotas.remove(key);
+        stale.remove(key);
+    }
     for (key, q) in restored {
         quotas.insert(key.clone(), q);
         stale.insert(key);
+    }
+    drop(stale);
+    drop(quotas);
+    for key in &retired {
+        delete_cache(app, key).await;
     }
     Ok(count)
 }
@@ -836,6 +855,16 @@ pub async fn set(app: &Arc<App>, host: &str, base: &str, q: Quota) {
 async fn set_inner(app: &Arc<App>, host: &str, base: &str, mut q: Quota, fence: Option<&crate::hosts::HostFence>) -> bool {
     q.host = host.to_string();
     let key = quota_key(host, base);
+    if is_retired_agy_quota_key(&key) {
+        if let Some(f) = fence {
+            if !app.hosts.is_current(f).await {
+                return false;
+            }
+        }
+        // Any stale caller is a chance to evict the retired value, never write it again.
+        forget(app, &key).await;
+        return true;
+    }
     sanitize_percentages(&mut q, &key);
     let stale = if base.contains(':') { Vec::new() } else { stale_split_keys(app, host, base).await };
     // 撞限校正只看**這份讀數自己帶來的**窗；下面沿用的舊窗不是新證據。

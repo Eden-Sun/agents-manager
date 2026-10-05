@@ -1006,12 +1006,12 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 
 ## 額度欄 agy 那格可以登出（2026-10-05 使用者）
 
-額度 popover 裡 agy 那格底下有「登出 agy」（已未登入就不畫）；手機點一格只看那一格時同一顆鈕照樣在。按下去先跳確認：說明會刪掉該主機 agy 的登入憑證，有 agy bot 在跑時多寫「不會被停掉，但憑證清掉後會失去授權」。確認後打 `POST /api/hosts/{name}/agy/logout`（daemon 直接刪憑證檔，不開 pane——agy 沒有 `logout` 子命令），成功後前端把該主機 `agy`、`agy:claude-gpt` 兩個桶清成 null、`tools.agy.logged_in=false`，那格立刻顯示「未登入」並出現原本的登入提示。確認框的開關放在 `QuotaStrip` 外層，不在 popover 裡：popover「點外面就關」會把裡面的元件卸掉，框會跟著消失。
+額度 popover 裡 agy 那格底下有「登出 agy」（已未登入就不畫）；手機點一格只看那一格時同一顆鈕照樣在。按下去先跳確認：說明會刪掉該主機 agy 的登入憑證，有 agy bot 在跑時多寫「不會被停掉，但憑證清掉後會失去授權」。確認後打 `POST /api/hosts/{name}/agy/logout`（daemon 直接刪憑證檔，不開 pane——agy 沒有 `logout` 子命令），成功後前端把該主機唯一的 Gemini `agy` 額度清成 null、`tools.agy.logged_in=false`，那格立刻顯示「未登入」並出現原本的登入提示。確認框的開關放在 `QuotaStrip` 外層，不在 popover 裡：popover「點外面就關」會把裡面的元件卸掉，框會跟著消失。
 
 ## 額度欄 agy 那格未登入時的登入入口（2026-10-05 使用者）
 
 agy 沒有 `login` 子命令也沒有 `/login`（`canLoginInSession('agy')` 是 false），所以未登入那格比照 Codex：`QuotaLoginShell` 在該主機開 shell、打 `cliLoginCommand('agy')`＝`agy` 並切過去。確認框的說明換成 agy 版：TUI 會引導登入（SSH 底下印授權網址，瀏覽器授權後把授權碼貼回），登好後輸入 `/quit` 離開。
-daemon 這一側：探測腳本（`tools::PROBE_SH`）多問一件事——憑證檔 `~/.gemini/antigravity-cli/antigravity-oauth-token` 在不在——印 `AM_LOGIN agy 1／0`，`tools.agy.logged_in` 才有值（以前永遠是 null，那格不會顯示「未登入」）。登出立刻寫 false 並推 `host_changed`；`quota_agy::spawn_agy_login_watcher` 每 20 秒對「裝了 agy、記成未登入」的主機看一次憑證檔（遠端是一個小 ssh），一出現就翻成已登入、清探測冷卻並探測一次額度，兩個桶就回到那一格，不必重啟、不必等 5 分鐘輪詢；已知未登入的主機輪詢不再跑 `agy -p /usage`（那會停在登入畫面等到逾時）。
+daemon 這一側：探測腳本（`tools::PROBE_SH`）多問一件事——憑證檔 `~/.gemini/antigravity-cli/antigravity-oauth-token` 在不在——印 `AM_LOGIN agy 1／0`，`tools.agy.logged_in` 才有值（以前永遠是 null，那格不會顯示「未登入」）。登出立刻寫 false 並推 `host_changed`；`quota_agy::spawn_agy_login_watcher` 每 20 秒對「裝了 agy、記成未登入」的主機看一次憑證檔（遠端是一個小 ssh），一出現就翻成已登入、清探測冷卻並探測一次 Gemini 的 5h／7d 額度，不必重啟、不必等 5 分鐘輪詢；已知未登入的主機輪詢不再跑 `agy -p /usage`（那會停在登入畫面等到逾時）。
 
 ## Bot 設定面板：儲存中不出「重啟後生效」橫幅（2026-10-05 使用者）
 
@@ -1019,4 +1019,4 @@ claude 改 effort／model 由 daemon 在跑著的 session 裡當場套用（`/ef
 
 ## agy 額度格顯示較緊的窗口（2026-10-05）
 
-agy 的 Gemini（`agy`）與 Claude+GPT（`agy:claude-gpt`）各有 5h 與週額度。主格維持兩條 `G`／`C+G`，每條顯示該組中 low／critical 等級較高者；等級相同時顯示剩餘比例較低者。標籤保留 `5h`／`週` 以便辨認。這讓 5h 緊張時能在額度列直接預警，又不把合併格擴為四條；popover 列出兩組四窗和撞限訊息。low／critical 仍由 daemon 的既有門檻計算。
+agy 額度格只顯示 Gemini 的 `agy` key：桌機完整列出 `5h` 與 `7d`，low／critical 沿用 daemon 旗標；手機和桌機空間不足時直接沿用 claude 格的窗口縮合規則。popover 顯示 Gemini 的 5h／7d 與撞限訊息，登出按鈕仍在。舊版 `agy:claude-gpt` 額度快照由 daemon 啟動時清除，不再投影到 UI。

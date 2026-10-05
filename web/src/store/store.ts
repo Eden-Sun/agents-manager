@@ -52,7 +52,7 @@ import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
-import { AGY_CLAUDE_GPT, quotaForIdentity, weeklyOnlyKind } from './quotaLookup'
+import { quotaForIdentity, weeklyOnlyKind } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
 import { paneReadOnly } from '../lib/shellAccess'
 import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
@@ -2428,8 +2428,8 @@ export const useStore = create<StoreState>((set, get) => {
     let ok = false
     await guarded(set, get, `agy-logout:${host || 'local'}`, async () => {
       const { removed } = await api.logoutAgy(host)
-      // daemon 也會廣播清掉額度快照；先自己落地，格子才不用等一個來回。兩個桶（Gemini、Claude+GPT）一起清。
-      const keys = [quotaKey(host, 'agy'), quotaKey(host, `agy:${AGY_CLAUDE_GPT}`)]
+      // daemon 也會廣播清掉 Gemini 額度快照；先自己落地，格子才不用等一個來回。
+      const keys = [quotaKey(host, 'agy')]
       const loggedOut = (t: ToolMap): ToolMap => ({ ...t, agy: { ...t.agy, logged_in: false } })
       set((s) => ({
         quota: { ...s.quota, ...Object.fromEntries(keys.map((k) => [k, null])) },

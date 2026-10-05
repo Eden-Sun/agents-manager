@@ -21,16 +21,20 @@ const it = (name: string, fn: () => Promise<void>) => test(name, { timeout: 30_0
 const btn = (root: ParentNode, text: string) => [...root.querySelectorAll('button')].find((b) => b.textContent?.includes(text))
 const sent = (requests: { method: string; path: string }[]) => requests.filter((r) => r.method === 'POST' && /\/hosts\/local\/agy\/logout$/.test(r.path))
 
-/** 共用的 mock 是行程單例，上一個測試登出過就留著；每次開頭放回「已登入、兩個桶都有讀數」。 */
+/** 共用的 mock 是行程單例，上一個測試登出過就留著；每次開頭放回「已登入、5h／7d 都有讀數」。 */
 function resetMockAgy() {
   const m = sharedMock as unknown as {
     localTools: { agy: { logged_in: boolean | null } }
     quota: Record<string, unknown>
   }
   m.localTools.agy.logged_in = true
-  const week = { seven_day: { used_pct: 22, resets_at: new Date(Date.now() + 120 * 3_600_000).toISOString() }, plan: 'Pro', updated_at: new Date().toISOString(), host: 'local' }
-  m.quota.agy = week
-  m.quota['agy:claude-gpt'] = week
+  m.quota.agy = {
+    five_hour: { used_pct: 18, resets_at: new Date(Date.now() + 4 * 3_600_000).toISOString() },
+    seven_day: { used_pct: 22, resets_at: new Date(Date.now() + 120 * 3_600_000).toISOString() },
+    plan: 'Pro',
+    updated_at: new Date().toISOString(),
+    host: 'local',
+  }
 }
 
 async function openAgyPopover(phone: boolean) {
@@ -71,7 +75,6 @@ for (const phone of [false, true]) {
       await until(() => sent(requests).length === 1, '送出 POST /hosts/local/agy/logout')
       await until(() => useStore.getState().localTools.agy.logged_in === false, '工具狀態變未登入')
       assert.equal(useStore.getState().quota.agy, null)
-      assert.equal(useStore.getState().quota['agy:claude-gpt'], null)
       await act(async () => {})
       assert.match(agyRow().textContent ?? '', /未登入/, '那格顯示未登入')
       assert.equal(btn(agyRow(), '登出 agy'), undefined, '已未登入就沒有登出鈕')
