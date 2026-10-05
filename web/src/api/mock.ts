@@ -82,6 +82,7 @@ const now = () => new Date().toISOString()
 const WORKSPACE_COLUMNS = 185
 
 /** mock 的 claude 登入網址（形狀同真的 `claude auth login`，state／challenge 是假值）。 */
+const MOCK_AGY_LOGIN_URL = 'https://accounts.example.test/o/oauth2/auth?client=agy-mock'
 const MOCK_LOGIN_URL =
   'https://claude.com/cai/oauth/authorize?code=true&client_id=00000000-0000-0000-0000-000000000000&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=FAKEchallengeFAKEchallengeFAKEchallenge00&code_challenge_method=S256&state=FAKEstateFAKEstateFAKEstateFAKEstate000'
 
@@ -1563,6 +1564,24 @@ export class MockTransport implements Transport {
     }
     this.emit('host_changed', { name: remote ? remote.name : 'local', connected: true, tools })
     return { removed }
+  }
+
+  /** 在哪個 shell pane 跑著 agy 登入 TUI（`<host>/<pane>`）。 */
+  private agyLoginPane: string | null = null
+
+  /** agy 登入完成：憑證回來，daemon 的 watcher 偵測到後翻已登入、補探額度，兩個桶回到那一格。 */
+  private finishAgyLogin(host: string) {
+    const remote = host && host !== 'local' ? this.host(host) : null
+    const tools = remote ? remote.tools : this.localTools
+    tools.agy = { ...tools.agy, logged_in: true }
+    const prefix = remote ? `${remote.name}/` : ''
+    const week = (used: number, h: number) => ({ seven_day: { used_pct: used, resets_at: inHours(h) }, plan: 'Pro', updated_at: now(), host: remote ? remote.name : 'local' })
+    this.quota[`${prefix}agy`] = week(2, 120)
+    this.quota[`${prefix}agy:claude-gpt`] = week(0, 96)
+    for (const base of ['agy', 'agy:claude-gpt']) {
+      this.emit('quota_updated', { kind: `${prefix}${base}`, host: remote ? remote.name : 'local', quota: this.quota[`${prefix}${base}`] })
+    }
+    this.emit('host_changed', { name: remote ? remote.name : 'local', connected: true, tools })
   }
 
   /** 登出：跟登入同一條路，只是指令與結果相反（帳號憑證被清掉）。 */
@@ -4049,6 +4068,13 @@ export class MockTransport implements Transport {
       s.lines.push(host === 'local' ? 'm1pro.local' : `${host}.local`)
     } else if (cmd.startsWith('ls')) {
       s.lines.push('Cargo.toml  daemon      docs        web')
+    } else if (cmd === 'agy') {
+      // agy 的 TUI 自己引導登入：SSH 底下印授權網址，授權碼貼回後登入完成（mock 直接當作下一步 `/quit` 時登好，見下）。
+      s.lines.push('Antigravity CLI — please sign in', 'Open this URL to authorize:', MOCK_AGY_LOGIN_URL, 'Paste the authorization code here, then /quit to leave.')
+      this.agyLoginPane = `${host}/${paneId}`
+    } else if (cmd === '/quit' && this.agyLoginPane === `${host}/${paneId}`) {
+      this.agyLoginPane = null
+      this.finishAgyLogin(host)
     } else if (cmd === 'gh auth status') {
       s.lines.push('github.com', '  ✓ Logged in to github.com account Eden-Sun (keyring)', '  - Active account: true')
     } else {
