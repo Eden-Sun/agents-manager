@@ -422,7 +422,7 @@ fn backoff_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
     M.get_or_init(Default::default)
 }
 
-fn cooling_down(key: &str) -> bool {
+pub(crate) fn cooling_down(key: &str) -> bool {
     let mut m = backoff_map().lock().unwrap();
     match m.get(key) {
         Some(t) if *t > std::time::Instant::now() => true,

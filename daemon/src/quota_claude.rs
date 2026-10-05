@@ -707,7 +707,7 @@ fn cooling_down_at(key: &str, reported_statusline: bool, has_live_run: bool, now
     false
 }
 
-fn cooling_down(key: &str, reported_statusline: bool, has_live_run: bool) -> bool {
+pub(crate) fn cooling_down(key: &str, reported_statusline: bool, has_live_run: bool) -> bool {
     cooling_down_at(key, reported_statusline, has_live_run, std::time::Instant::now())
 }
 
