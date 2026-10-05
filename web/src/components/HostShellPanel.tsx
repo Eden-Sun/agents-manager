@@ -13,6 +13,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { ServicePaneNote } from './ServicePaneNote'
 import { HostBadge } from './HostsPanel'
 import { linkifyTerm } from './termLinks'
+import { fitRules } from '../lib/termRules'
 import { splitAtCursor } from '../lib/termCursor'
 import { setTermWrap, useTermWrap } from './termWrap'
 import './hostShellPanel.css'
@@ -324,7 +325,7 @@ export function HostShellPanel({
           {linkifyTerm(before, snap.columns)}
           {gap}
           <span className={`term-cursor${typing ? ' is-live' : ''}`} aria-hidden="true" />
-          {after}
+          {fitRules(after)}
         </>
       )
     }
