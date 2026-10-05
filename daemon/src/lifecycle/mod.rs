@@ -235,6 +235,17 @@ impl LcError {
             "error": what, "run_id": run_id, "retryable": true, "message": message, "detail": detail.to_string(),
         }))
     }
+
+    #[allow(dead_code)]
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            LcError::Conflict(v) | LcError::Unavailable(v) | LcError::Uncommitted(v) | LcError::Unprocessable(v) => {
+                v.get("retryable").and_then(Value::as_bool).unwrap_or(false)
+            }
+            LcError::Upstream(_) => true,
+            _ => false,
+        }
+    }
 }
 
 pub type LcResult<T> = std::result::Result<T, LcError>;

@@ -319,12 +319,26 @@ async fn record_exact_text(app: &Arc<App>, turn_id: &str, msg_id: &str, text: &s
     Ok(())
 }
 
+#[derive(Debug)]
+pub(super) enum SubmitDraftError {
+    NoKeySent(LcError),
+    EnterMayHaveBeenSent(LcError),
+}
+
+impl From<SubmitDraftError> for LcError {
+    fn from(e: SubmitDraftError) -> Self {
+        match e {
+            SubmitDraftError::NoKeySent(err) | SubmitDraftError::EnterMayHaveBeenSent(err) => err,
+        }
+    }
+}
+
 /// Remove the provisional DB turn if the last pre-key fence decides nothing was submitted.
-async fn withdraw_unsubmitted(app: &Arc<App>, bot_id: &str, run: &db::Run, turn_id: &str, msg_id: &str, rejection: LcError) -> LcResult<PromptOut> {
+async fn withdraw_unsubmitted(app: &Arc<App>, bot_id: &str, run: &db::Run, turn_id: &str, msg_id: &str, rejection: LcError) -> Result<PromptOut, SubmitDraftError> {
     match retract_unsent_turn(app, bot_id, turn_id, msg_id).await {
-        Ok(Retraction::Withdrawn) => Err(rejection),
-        Ok(Retraction::AlreadySettled) => answer_for_turn_id(app, turn_id).await,
-        Err(u) => Err(u.answer(&run.id, turn_id, msg_id, "the draft was not submitted and its turn could not be withdrawn")),
+        Ok(Retraction::Withdrawn) => Err(SubmitDraftError::NoKeySent(rejection)),
+        Ok(Retraction::AlreadySettled) => answer_for_turn_id(app, turn_id).await.map_err(SubmitDraftError::EnterMayHaveBeenSent),
+        Err(u) => Err(SubmitDraftError::EnterMayHaveBeenSent(u.answer(&run.id, turn_id, msg_id, "the draft was not submitted and its turn could not be withdrawn"))),
     }
 }
 
@@ -369,11 +383,11 @@ pub(super) async fn submit_gates(app: &Arc<App>, bot_id: &str, bot: &db::Bot, co
 pub async fn submit(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> LcResult<PromptOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    submit_locked(app, bot_id, expect_token, client_request_id).await
+    submit_locked(app, bot_id, expect_token, client_request_id).await.map_err(Into::into)
 }
 
 /// [`submit`]，呼叫端已經握著這顆 bot 的鎖（接受建議下一句：先按 Tab、確認框裡就是那句，再在同一把鎖裡送出，`suggestion.rs`）。
-pub(super) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> LcResult<PromptOut> {
+pub(super) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &str, client_request_id: &str) -> Result<PromptOut, SubmitDraftError> {
     if let Err(e) = super::interruption::settle_locked(app, bot_id, super::interruption::Evidence::Nothing).await {
         tracing::warn!(bot = %bot_id, error = %e, "上一次打斷欠著的收尾還是寫不進去");
     }
@@ -381,49 +395,71 @@ pub(super) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &s
         tracing::warn!(bot = %bot_id, error = %e, "欠著的送達結果還是寫不進去");
     }
     if client_request_id.trim().is_empty() {
-        return Err(LcError::Bad("client_request_id must not be empty".into()));
+        return Err(SubmitDraftError::NoKeySent(LcError::Bad("client_request_id must not be empty".into())));
     }
     if expect_token.trim().is_empty() {
-        return Err(LcError::Bad("submit_draft needs the expect_draft_token the 409 showed".into()));
+        return Err(SubmitDraftError::NoKeySent(LcError::Bad("submit_draft needs the expect_draft_token the 409 showed".into())));
     }
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
+    let bot = db::bot(&app.db, bot_id)
+        .await
+        .map_err(up)
+        .map_err(SubmitDraftError::NoKeySent)?
+        .filter(|b| b.deleted_at.is_none())
+        .ok_or_else(|| SubmitDraftError::NoKeySent(LcError::NotFound("bot".into())))?;
+    let conv = db::conversation_id(&app.db, bot_id)
+        .await
+        .map_err(up)
+        .map_err(SubmitDraftError::NoKeySent)?;
     if let Some(t) = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE conversation_id=? AND client_request_id=?")
         .bind(&conv)
         .bind(client_request_id)
         .fetch_optional(&app.db)
         .await
-        .map_err(up)?
+        .map_err(up)
+        .map_err(SubmitDraftError::NoKeySent)?
     {
-        return answer_for_turn(app, &t).await;
+        return answer_for_turn(app, &t)
+            .await
+            .map_err(SubmitDraftError::EnterMayHaveBeenSent);
     }
-    let run = submit_gates(app, bot_id, &bot, &conv).await?;
-    let client = client_for_run(app, &run).await?;
+    let run = submit_gates(app, bot_id, &bot, &conv)
+        .await
+        .map_err(SubmitDraftError::NoKeySent)?;
+    let client = client_for_run(app, &run)
+        .await
+        .map_err(SubmitDraftError::NoKeySent)?;
     let Some(pane) = pane_of(&run) else {
-        return Err(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true }));
+        return Err(SubmitDraftError::NoKeySent(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "no_pane_to_type_into", retry: true })));
     };
-    let (state, now, authorized_revision) = read_draft(&client, &pane, &bot.kind).await.map_err(|_| unreadable(&run))?;
+    let (state, now, authorized_revision) = read_draft(&client, &pane, &bot.kind)
+        .await
+        .map_err(|_| SubmitDraftError::NoKeySent(unreadable(&run)))?;
     match state {
-        BoxState::Empty => return Err(refusal("draft_gone", &run, false, &bot.kind, None)),
-        BoxState::Unready => return Err(unreadable(&run)),
+        BoxState::Empty => return Err(SubmitDraftError::NoKeySent(refusal("draft_gone", &run, false, &bot.kind, None))),
+        BoxState::Unready => return Err(SubmitDraftError::NoKeySent(unreadable(&run))),
         BoxState::NonEmpty => {}
     }
     let Some(draft) = now.filter(|d| same_draft(expect_token, &run.id, &pane, d)) else {
         let fresh = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d, _)| d);
-        return Err(refusal("draft_changed", &run, true, &bot.kind, fresh.as_deref()));
+        return Err(SubmitDraftError::NoKeySent(refusal("draft_changed", &run, true, &bot.kind, fresh.as_deref())));
     };
-    let proof = draft_proof(app, &client, &run, &bot, &pane, &draft).await?;
+    let proof = draft_proof(app, &client, &run, &bot, &pane, &draft)
+        .await
+        .map_err(SubmitDraftError::NoKeySent)?;
     let offset = match &proof {
         Proof::Transcript { path, .. } => transcript_len(path)
-            .map_err(|_| not_attempted_error(&run.id, Delivered::NotAttempted { reason: "transcript_unreadable", retry: true }))?,
+            .map_err(|_| SubmitDraftError::NoKeySent(not_attempted_error(&run.id, Delivered::NotAttempted { reason: "transcript_unreadable", retry: true })))?,
         _ => 0,
     };
+
+    #[cfg(test)]
+    super::race_point::hit("draft_before_turn_tx", bot_id).await;
 
     // 回合＋使用者訊息在按鍵之前寫進 DB（跟一般 prompt 一樣，早到的 hook 才對得上）。`auto_resend=0`：框裡那段不是我們打的，
     // 不會有「再打一次」這回事。
     let turn_id = db::ulid();
     let msg_id = db::ulid();
-    let mut tx = app.db.begin().await.map_err(up)?;
+    let mut tx = app.db.begin().await.map_err(up).map_err(SubmitDraftError::NoKeySent)?;
     sqlx::query(
         "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, client_request_id, created_at, prompt_text, auto_resend)
          VALUES (?,?,?,'web','in_flight','pending',?,?,?,0)",
@@ -436,7 +472,8 @@ pub(super) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &s
     .bind(&draft)
     .execute(&mut *tx)
     .await
-    .map_err(up)?;
+    .map_err(up)
+    .map_err(SubmitDraftError::NoKeySent)?;
     sqlx::query("INSERT INTO messages (id, conversation_id, turn_id, role, content, source, created_at) VALUES (?,?,?,'user',?,'web',?)")
         .bind(&msg_id)
         .bind(&conv)
@@ -445,8 +482,9 @@ pub(super) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &s
         .bind(db::now())
         .execute(&mut *tx)
         .await
-        .map_err(up)?;
-    tx.commit().await.map_err(up)?;
+        .map_err(up)
+        .map_err(SubmitDraftError::NoKeySent)?;
+    tx.commit().await.map_err(up).map_err(SubmitDraftError::NoKeySent)?;
     emit_turn(app, &turn_id).await;
 
     // 打字前的那幾道閘門（維護窗口在 commit 之間被拿走、記不下「這個 pane 要打字」）：一個鍵都還沒按，撤回再回錯。
@@ -493,9 +531,9 @@ pub(super) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &s
             let still = read_draft(&client, &pane, &bot.kind).await.ok().and_then(|(_, d, _)| d);
             if still.as_deref() == Some(draft.as_str()) {
                 return match retract_unsent_turn(app, bot_id, &turn_id, &msg_id).await {
-                    Ok(Retraction::Withdrawn) => Err(LcError::Upstream(format!("herdr refused the Enter key; the draft is still in the composer: {e}"))),
-                    Ok(Retraction::AlreadySettled) => answer_for_turn_id(app, &turn_id).await,
-                    Err(u) => Err(u.answer(&run.id, &turn_id, &msg_id, "the draft was not submitted and its turn could not be withdrawn")),
+                    Ok(Retraction::Withdrawn) => Err(SubmitDraftError::EnterMayHaveBeenSent(LcError::Upstream(format!("herdr refused the Enter key; the draft is still in the composer: {e}")))),
+                    Ok(Retraction::AlreadySettled) => answer_for_turn_id(app, &turn_id).await.map_err(SubmitDraftError::EnterMayHaveBeenSent),
+                    Err(u) => Err(SubmitDraftError::EnterMayHaveBeenSent(u.answer(&run.id, &turn_id, &msg_id, "the draft was not submitted and its turn could not be withdrawn"))),
                 };
             }
             Err(e)
@@ -527,7 +565,7 @@ pub(super) async fn submit_locked(app: &Arc<App>, bot_id: &str, expect_token: &s
         arm_progress(app, &run.id, bot_id, &turn_id).await;
     }
     if let Err(e) = written {
-        return Err(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, delivery, Some(&e)));
+        return Err(SubmitDraftError::EnterMayHaveBeenSent(super::owed_delivery::uncommitted(Some(&run.id), &turn_id, &msg_id, delivery, Some(&e))));
     }
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: delivery.into(), send_now: None })
 }

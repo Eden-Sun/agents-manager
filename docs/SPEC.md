@@ -1072,8 +1072,8 @@ codex 0.159.3 的帳號安全提醒 inline banner（`› 1. Set up security`／`
   重讀樣式畫面，建議還在而且跟 body 的字相同（比對去掉空白）才按 Tab——否則 409 `suggestion_gone`／`suggestion_changed`，**一個鍵都不按**；Tab 之後等重畫再讀，框裡要變成那一句（真字、不再是灰字）；
   然後走「送出框裡那段」的既有流程（`composer_draft::submit_locked`：回合＋使用者訊息在 Enter **之前**寫進 DB、證明送達、掛 stall／progress）。**記錄**：`origin=web`、訊息 `source=web`、`sent_via` 空——跟網頁送出的 prompt 完全一樣
   （不新增 `sent_via` 值：那欄有 CHECK，加值要重建 messages 表，而且使用者要的就是「跟打字送出沒有兩樣」），所以不是外部回合、也不重複記兩則，對話窗、未讀、回合追蹤照舊；訊息內容換成 session log 的原文。同一個 `client_request_id` 重送回原本那一筆、不再按鍵。
-- **Tab 之後對不上時的還原**（Tab 已經把那句放進框裡，鍵收不回來）：框裡**還是**那一句、只是後面的閘門擋下（回合撤回、一個字都沒送出）→ 補一個 `ctrl+c` 清成乾淨的空框（`composer_draft::clear`，它自己再驗一次框裡就是那一句、沒有回合在跑才按），
-  回應帶 `suggestion_restored:true`；代價是 CLI 那句灰字沒了（下個回合結束才會再有）。框裡是**別的字**（使用者剛好在終端打字）→ 一個鍵都不按，409 `draft_changed` 帶那段草稿與 token，走既有的草稿流程。Tab 沒生效（兩次重讀框都還是空的）→ 409 `tab_not_accepted`，沒有東西要還原。
+- **Tab 之後對不上時的還原**（Tab 已經把那句放進框裡，鍵收不回來）：框裡**還是**那一句、且在 Enter 之前確定未送出（閘門擋下、DB 暫態失敗等 pre-Enter 錯誤，且無進行中回合擁有它）→ 補一個 `ctrl+c` 清成乾淨的空框（`composer_draft::clear`，它自己再驗一次框裡就是那一句、沒有回合在跑才按），
+  回應帶 `suggestion_restored:true`；Enter 已送出或送達不明路徑絕不清框。代價是 CLI 那句灰字沒了（下個回合結束才會再有）。框裡是**別的字**（使用者剛好在終端打字）→ 一個鍵都不按，409 `draft_changed` 帶那段草稿與 token，走既有的草稿流程。Tab 沒生效（兩次重讀框都還是空的）→ 409 `tab_not_accepted`，沒有東西要還原。
   Tab 之後讀不到畫面 → 409 `composer_unreadable`，不再按任何鍵。`suggestion_*`、`tab_not_accepted` 與 Tab 之後的 409 都帶 `sent:false` 與 `tab_sent`（有沒有按過 Tab）。
 **codex 的點字動畫**（v0.154.0／gpt-6-astra 起）：輸入列與上下各一列撒著會動的點字 `⠁⠂⠄⠈⠐⠠⢀`（U+2800–U+28FF），每顆都帶自己的前景色、不是 dim，而且蓋在空白格上——包括 `›` 後那一格、草稿字與字之間的空格。只有 **codex＋styled 讀法**時，帶前景色、非 dim 的點字視同原本那格空白：marker 列擦掉點字後只剩 dim 內容或空白就是空框，下一列只剩縮排與點字就算空白列。沒有顏色或 dim 的點字、任何一般字元照樣是內容；純文字讀法不放寬（分不出是不是打的）；claude／grok 不套這條。真畫面 fixture：`daemon/src/lifecycle/fixtures/codex_astra_particles_{empty,draft}.ansi`。
 

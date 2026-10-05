@@ -278,3 +278,69 @@ async fn the_restore_never_clears_text_that_is_not_the_accepted_suggestion() {
     assert_eq!(f.keys(), [json!(["tab"])], "沒有 Enter、沒有 ctrl+c");
     assert_eq!(f.pane().composer, ["別人剛打的字"]);
 }
+
+/// Tab 收下後、按 Enter 之前發生暫態 DB 錯誤（例如交易開始／INSERT 失敗）：
+/// 1. Tab 已送出；
+/// 2. Enter 確定從未送出；
+/// 3. API 回傳 retryable 錯誤；
+/// 4. 框裡確認還是原接受的建議字句，並以 ctrl+c 還原清成空框；
+/// 5. 沒有殘留的 active / in-flight turn；
+/// 6. 後續的一般 prompt 不會被殘留的草稿阻擋（composer_busy）。
+#[tokio::test]
+async fn pre_enter_db_failure_clears_accepted_draft_and_leaves_no_turn() {
+    let f = idle(Some(SUGGESTION)).await;
+    crate::prompt_suggestion::set(&f.run_id, Some(SUGGESTION.into()));
+    let app = f.env.app.clone();
+    super::super::race_point::arm("draft_before_turn_tx", &f.bot_id, move || async move {
+        sqlx::query("CREATE TRIGGER fault_turns BEFORE INSERT ON turns BEGIN SELECT RAISE(ABORT, 'transient db error'); END")
+            .execute(&app.db)
+            .await
+            .unwrap();
+    });
+
+    let res = f.accept(SUGGESTION, "c-fault").await;
+    // 3. API fails retryably
+    assert!(res.as_ref().is_err_and(|e| e.is_retryable()), "expected retryable error, got: {res:?}");
+
+    // 1. Tab was sent
+    assert!(f.keys().contains(&json!(["tab"])), "Tab 必須已送出");
+
+    // 2. Enter was never sent
+    assert!(!f.keys().contains(&json!(["Enter"])), "Enter 絕不可送出");
+
+    // 4. exact accepted suggestion is cleared (Ctrl+C only after revalidation)
+    assert!(f.keys().contains(&json!(["ctrl+c"])), "必須送出 ctrl+c 清框還原");
+    assert!(f.pane().composer.is_empty(), "輸入框必須已清空");
+
+    // 5. no active/in-flight turn remains
+    assert_eq!(f.count("turns").await, 0, "不可殘留任何 turn");
+    assert_eq!(f.count("messages").await, 0, "不可殘留任何 message");
+    assert!(db::in_flight_turn(&f.env.app.db, &f.run_id).await.unwrap().is_none());
+
+    // 6. next ordinary prompt is not blocked by a stale composer draft
+    sqlx::query("DROP TRIGGER fault_turns").execute(&f.env.app.db).await.unwrap();
+    let next = crate::lifecycle::prompt(&f.env.app, &f.bot_id, "下一則一般 prompt", "c-next").await;
+    assert!(next.is_ok(), "下一則一般 prompt 必須順利送出，不被草稿阻擋: {next:?}");
+}
+
+/// Enter 送出後（或可能已送出）的簿記失敗：絕不可清理輸入框或打斷已送出的回合。
+#[tokio::test]
+async fn post_enter_delivery_failure_never_clears_composer_or_interrupts_turn() {
+    let f = idle(Some(SUGGESTION)).await;
+    crate::prompt_suggestion::set(&f.run_id, Some(SUGGESTION.into()));
+    // 在 Enter 送達後的 delivery 寫回失敗
+    sqlx::query("CREATE TRIGGER lost_delivery_write BEFORE UPDATE OF delivery ON turns BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END")
+        .execute(&f.env.app.db)
+        .await
+        .unwrap();
+
+    let res = f.accept(SUGGESTION, "c-post-enter").await;
+    assert!(res.is_err(), "送達寫回失敗應回錯: {res:?}");
+
+    // Tab 與 Enter 均已送出
+    assert_eq!(f.keys(), [json!(["tab"]), json!(["Enter"])], "只有 Tab 與 Enter，絕無 ctrl+c");
+    assert!(!f.keys().contains(&json!(["ctrl+c"])), "post-enter 失敗絕不可送 ctrl+c");
+
+    // turn 已送出並留在 DB 中
+    assert_eq!(f.count("turns").await, 1, "回合必須保留在 DB 中");
+}
