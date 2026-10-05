@@ -33,8 +33,19 @@ pub const KEEP_WARM_AFTER_SECS: i64 = 58 * 60;
 /// 年齡到這麼久才考慮壓縮；仍須確認 cache 熱度足夠。
 pub const WARM_COMPACT_AFTER_SECS: i64 = 110 * 60;
 /// 熱壓只在 context 用量**超過**這個百分比時才做（使用者 2026-10-05）：用量小的 context 重新建 cache 很便宜，不值得壓縮；
-/// ≤ 這個值（或讀不到用量）到 110 分就什麼都不做，讓它涼掉。
-pub const WARM_COMPACT_MIN_CONTEXT_PCT: f64 = 30.0;
+/// ≤ 這個值（或讀不到用量）到 110 分就什麼都不做，讓它涼掉。claude 的門檻。
+pub const WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE: f64 = 30.0;
+/// codex 的門檻（使用者同意）：視窗 258K、涼掉後重讀沒有寫入加價，損益點約 35%，所以比 claude 高。
+pub const WARM_COMPACT_MIN_CONTEXT_PCT_CODEX: f64 = 50.0;
+
+/// 這個 kind 熱壓要超過的 context 用量百分比；沒有熱壓的 kind 回 `None`。
+pub fn warm_compact_min_context_pct(kind: &str) -> Option<f64> {
+    match kind {
+        "claude" => Some(WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE),
+        "codex" => Some(WARM_COMPACT_MIN_CONTEXT_PCT_CODEX),
+        _ => None,
+    }
+}
 /// 壓縮至少要在 cache TTL 到期前留這麼多時間。
 const WARM_COMPACT_TTL_MARGIN_SECS: i64 = 2 * 60;
 /// 送進去的保溫 prompt。
@@ -127,7 +138,7 @@ pub fn context_used_pct(kind: &str, run_id: &str, status_json: Option<&str>) -> 
 
 /// 純規則：活動年齡、cache 實際熱度年齡與「這個錨點之後做過沒」決定下一步。
 /// 保溫只能在 58 分至 TTL 之間送；壓縮要在 cache 到期前保留 [`WARM_COMPACT_TTL_MARGIN_SECS`] 餘裕，
-/// 而且 context 用量要超過 [`WARM_COMPACT_MIN_CONTEXT_PCT`]（讀不到用量保守不壓縮）。
+/// 而且 context 用量要超過 `min_context_pct`（[`warm_compact_min_context_pct`]，依 kind；讀不到用量保守不壓縮）。
 /// 110 分之後不再保溫：已經涼掉（或不值得壓縮）的就讓它涼，直到真的活動重新計時。
 pub fn decide(
     age_secs: i64,
@@ -136,11 +147,12 @@ pub fn decide(
     kept_since_anchor: bool,
     compacted_since_anchor: bool,
     context_pct: Option<f64>,
+    min_context_pct: f64,
 ) -> Step {
     if age_secs >= WARM_COMPACT_AFTER_SECS {
         if !compacted_since_anchor
             && cache_age_secs < ttl_secs - WARM_COMPACT_TTL_MARGIN_SECS
-            && context_pct.is_some_and(|p| p > WARM_COMPACT_MIN_CONTEXT_PCT)
+            && context_pct.is_some_and(|p| p > min_context_pct)
         {
             Step::WarmCompact
         } else {
@@ -320,7 +332,15 @@ pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::Dat
         return Ok(None);
     }
     let compacted = last_compact.is_some_and(|t| t > anchor_t);
-    Ok(Some(Plan { step: decide(age_secs, cache_age_secs, cache_ttl_secs, kept, compacted, context_used_pct(&bot.kind, &run.id, run.status_json.as_deref())), anchor, age_secs }))
+    Ok(Some(Plan { step: decide(
+            age_secs,
+            cache_age_secs,
+            cache_ttl_secs,
+            kept,
+            compacted,
+            context_used_pct(&bot.kind, &run.id, run.status_json.as_deref()),
+            warm_compact_min_context_pct(&bot.kind).unwrap_or(f64::INFINITY),
+        ), anchor, age_secs }))
 }
 
 /// 照 [`plan`] 做一步。送不出去（忙著、被擋）只記 log；下一輪重試仍須符合 cache 熱度條件。
@@ -447,26 +467,42 @@ mod tests {
         assert_eq!(ttl, m(60));
 
         let ctx = Some(45.0);
-        assert_eq!(decide(m(57), m(57), ttl, false, false, ctx), Step::Wait);
-        assert_eq!(decide(m(58), m(58), ttl, false, false, ctx), Step::KeepWarm);
-        assert_eq!(decide(m(59), m(59), ttl, false, false, ctx), Step::KeepWarm, "TTL 到期前仍可保溫");
-        assert_eq!(decide(m(60), m(60), ttl, false, false, ctx), Step::Wait, "超過保溫視窗後 cache 已冷，不補送");
-        assert_eq!(decide(m(80), m(80), ttl, false, false, ctx), Step::Wait, "冷 cache 不保溫");
+        assert_eq!(decide(m(57), m(57), ttl, false, false, ctx, 30.0), Step::Wait);
+        assert_eq!(decide(m(58), m(58), ttl, false, false, ctx, 30.0), Step::KeepWarm);
+        assert_eq!(decide(m(59), m(59), ttl, false, false, ctx, 30.0), Step::KeepWarm, "TTL 到期前仍可保溫");
+        assert_eq!(decide(m(60), m(60), ttl, false, false, ctx, 30.0), Step::Wait, "超過保溫視窗後 cache 已冷，不補送");
+        assert_eq!(decide(m(80), m(80), ttl, false, false, ctx, 30.0), Step::Wait, "冷 cache 不保溫");
 
-        assert_eq!(decide(m(110), m(110), ttl, true, false, ctx), Step::Wait, "冷 cache 不壓縮");
-        assert_eq!(decide(m(110), m(52), ttl, true, false, ctx), Step::WarmCompact, "58 分保溫後，110 分時 cache 仍熱就壓縮");
-        assert_eq!(decide(m(110), m(58), ttl, true, false, ctx), Step::Wait, "壓縮前留兩分鐘 TTL 餘裕");
-        assert_eq!(decide(m(24 * 60), m(24 * 60), ttl, false, false, ctx), Step::Wait, "daemon 重啟後發現年齡很大的 cache 不碰");
-        assert_eq!(decide(m(300), m(52), ttl, true, true, ctx), Step::Wait, "同一個錨點只壓縮一次");
+        assert_eq!(decide(m(110), m(110), ttl, true, false, ctx, 30.0), Step::Wait, "冷 cache 不壓縮");
+        assert_eq!(decide(m(110), m(52), ttl, true, false, ctx, 30.0), Step::WarmCompact, "58 分保溫後，110 分時 cache 仍熱就壓縮");
+        assert_eq!(decide(m(110), m(58), ttl, true, false, ctx, 30.0), Step::Wait, "壓縮前留兩分鐘 TTL 餘裕");
+        assert_eq!(decide(m(24 * 60), m(24 * 60), ttl, false, false, ctx, 30.0), Step::Wait, "daemon 重啟後發現年齡很大的 cache 不碰");
+        assert_eq!(decide(m(300), m(52), ttl, true, true, ctx, 30.0), Step::Wait, "同一個錨點只壓縮一次");
     }
 
-    /// 2026-10-05：熱壓只在 context 用量 > 30% 才做；≤ 30% 或讀不到用量就讓它涼掉（也不再保溫）。
+    /// 2026-10-05：熱壓只在 context 用量超過門檻時才做（claude 30%、codex 50%）；不到或讀不到用量就讓它涼掉（也不再保溫）。
     #[test]
-    fn warm_compact_needs_more_than_30_percent_context() {
+    fn warm_compact_needs_more_than_the_kinds_context_threshold() {
         let m = |min: i64| min * 60;
         let ttl = 3600;
-        assert_eq!(WARM_COMPACT_MIN_CONTEXT_PCT, 30.0);
-        let at = |pct: Option<f64>| decide(m(110), m(52), ttl, true, false, pct);
+        assert_eq!((WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE, WARM_COMPACT_MIN_CONTEXT_PCT_CODEX), (30.0, 50.0));
+        assert_eq!(warm_compact_min_context_pct("claude"), Some(30.0));
+        assert_eq!(warm_compact_min_context_pct("codex"), Some(50.0));
+        assert_eq!(warm_compact_min_context_pct("grok"), None);
+
+        // codex：> 50% 才壓；40%（claude 會壓）codex 不壓，剛好 50% 不壓，讀不到不壓。
+        let codex = |pct: Option<f64>| decide(m(110), m(52), ttl, true, false, pct, WARM_COMPACT_MIN_CONTEXT_PCT_CODEX);
+        assert_eq!(codex(Some(50.1)), Step::WarmCompact, "codex > 50% 照壓");
+        assert_eq!(codex(Some(90.0)), Step::WarmCompact);
+        assert_eq!(codex(Some(50.0)), Step::Wait, "剛好 50% 不壓（要超過）");
+        assert_eq!(codex(Some(40.0)), Step::Wait, "codex 40% 不壓縮（同樣的用量 claude 會壓）");
+        assert_eq!(codex(Some(30.1)), Step::Wait);
+        assert_eq!(codex(None), Step::Wait, "codex 拿不到 context 保守不壓縮");
+        assert_eq!(decide(m(110), m(52), ttl, true, false, Some(40.0), WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE), Step::WarmCompact, "claude 40% 照壓");
+        // codex 到 110 分以後也不再保溫。
+        assert_eq!(decide(m(115), m(57), ttl, false, false, Some(20.0), WARM_COMPACT_MIN_CONTEXT_PCT_CODEX), Step::Wait);
+
+        let at = |pct: Option<f64>| decide(m(110), m(52), ttl, true, false, pct, WARM_COMPACT_MIN_CONTEXT_PCT_CLAUDE);
         assert_eq!(at(Some(30.1)), Step::WarmCompact, "> 30% 照壓");
         assert_eq!(at(Some(81.0)), Step::WarmCompact);
         assert_eq!(at(Some(30.0)), Step::Wait, "剛好 30% 不壓（要超過）");
@@ -474,12 +510,12 @@ mod tests {
         assert_eq!(at(None), Step::Wait, "拿不到 context 保守不壓縮");
         // 不壓縮之後也不保溫：110 分以後一律等，直到真的活動重新計時。
         for min in [110, 115, 120, 200] {
-            assert_eq!(decide(m(min), m(min - 58), ttl, true, false, Some(10.0)), Step::Wait, "{min} 分");
-            assert_eq!(decide(m(min), m(min - 58), ttl, false, false, Some(10.0)), Step::Wait, "沒保溫過也不補保溫：{min} 分");
+            assert_eq!(decide(m(min), m(min - 58), ttl, true, false, Some(10.0), 30.0), Step::Wait, "{min} 分");
+            assert_eq!(decide(m(min), m(min - 58), ttl, false, false, Some(10.0), 30.0), Step::Wait, "沒保溫過也不補保溫：{min} 分");
         }
         // 58 分的保溫不看 context。
-        assert_eq!(decide(m(58), m(58), ttl, false, false, Some(5.0)), Step::KeepWarm);
-        assert_eq!(decide(m(58), m(58), ttl, false, false, None), Step::KeepWarm);
+        assert_eq!(decide(m(58), m(58), ttl, false, false, Some(5.0), 30.0), Step::KeepWarm);
+        assert_eq!(decide(m(58), m(58), ttl, false, false, None, 30.0), Step::KeepWarm);
     }
 
     #[test]
