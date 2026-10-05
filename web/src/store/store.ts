@@ -52,7 +52,7 @@ import { recoverLostCursor } from './pageCursor'
 import { type CapFloors, capFor, clearFloor, raiseFloor } from './messageCap'
 import { markRewound } from '../lib/rewind'
 import { acceptStateSeq, singleFlight } from './singleFlight'
-import { quotaForIdentity, weeklyOnlyKind } from './quotaLookup'
+import { AGY_CLAUDE_GPT, quotaForIdentity, weeklyOnlyKind } from './quotaLookup'
 import { botStatusConnTarget } from './botStatusConn'
 import { paneReadOnly } from '../lib/shellAccess'
 import { groupByProject, withPane, withoutPane } from '../lib/paneLists'
@@ -99,7 +99,7 @@ import {
 } from './unread'
 import { fetchSupervisor } from '../api/supervisor'
 import { writeShared } from './mobilePreview'
-import { BOT_KINDS, LOCAL_HOST } from '../api/types'
+import { BOT_KINDS, LOCAL_HOST, quotaKey } from '../api/types'
 import { supervisorOwnedAsk, type AgmDeleteAsk } from '../lib/agmDelete'
 import { handedOffReason, handedOffTo } from '../lib/handoff'
 
@@ -634,6 +634,8 @@ export interface StoreState {
   installTool: (host: string, kind: BotKind, viaBotId: string) => Promise<string | null>
   loginIdentity: (host: string, identity: string) => Promise<boolean>
   logoutIdentity: (host: string, identity: string) => Promise<boolean>
+  /** 額度欄 agy 那格的登出：刪該主機的 agy 憑證，成功後那格改顯示未登入。 */
+  logoutAgy: (host: string) => Promise<boolean>
   loadIdentityPrefs: () => Promise<void>
   setIdentityDisabled: (host: string, kind: string, name: string, disabled: boolean) => Promise<void>
   /** `''` / `local` = this machine. */
@@ -2419,6 +2421,25 @@ export const useStore = create<StoreState>((set, get) => {
 
   async logoutIdentity(host, identity) {
     return identityAuth(set, get, host, identity, 'logout')
+  },
+
+  async logoutAgy(host) {
+    let ok = false
+    await guarded(set, get, `agy-logout:${host || 'local'}`, async () => {
+      const { removed } = await api.logoutAgy(host)
+      // daemon 也會廣播清掉額度快照；先自己落地，格子才不用等一個來回。兩個桶（Gemini、Claude+GPT）一起清。
+      const keys = [quotaKey(host, 'agy'), quotaKey(host, `agy:${AGY_CLAUDE_GPT}`)]
+      const loggedOut = (t: ToolMap): ToolMap => ({ ...t, agy: { ...t.agy, logged_in: false } })
+      set((s) => ({
+        quota: { ...s.quota, ...Object.fromEntries(keys.map((k) => [k, null])) },
+        ...(!host || host === 'local'
+          ? { localTools: loggedOut(s.localTools) }
+          : { hosts: s.hosts.map((h) => (h.name === host ? { ...h, tools: loggedOut(h.tools) } : h)) }),
+      }))
+      get().notify('info', removed ? 'agy 已登出，憑證已清除' : 'agy 本來就沒有憑證（已是未登入）')
+      ok = true
+    })
+    return ok
   },
 
   async loadIdentityPrefs() {

@@ -1044,3 +1044,10 @@
     min-width: min-content;
   }
 }
+
+/* agy 那格的登出：popover 底下一顆小鈕；手機的 40px 觸控高度走全站 `.mini-btn`。 */
+.quota-pop-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
