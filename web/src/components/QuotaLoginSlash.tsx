@@ -5,6 +5,9 @@ import { canLoginInSession, cliLoginCommand, findLoginTargetId, identityEnv, sho
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { ConfirmDialog } from './ConfirmDialog'
 
+/** agy 登入的說明：它在 SSH 底下印授權網址（不是自己開瀏覽器），授權後要把授權碼貼回 TUI。 */
+const AGY_LOGIN_GUIDE = 'agy 的 TUI 會引導登入：SSH 底下它會印出一個授權網址，在瀏覽器完成授權後，把授權碼貼回那個終端。登好後輸入 /quit 離開。'
+
 /**
  * 額度 popover「未登入」列的登入鈕。命名身份走 daemon 的 host-aware 登入；預設 grok 有在跑的 bot 時送 `/login`，否則開主機 shell。
  */
@@ -34,6 +37,8 @@ export function QuotaLoginSlash({
   // 命名身份走 daemon（它照主機展開 `$HOME`）；前端 shell quoting 會把 config 裡的 `$HOME` 留成字面值。
   if (shouldUseIdentityLogin(identity)) return <IdentityCliLogin kind={kind} host={host} hostLabel={hostLabel} identity={identity} />
   if (kind === 'claude') return <QuotaLoginShell host={host} hostLabel={hostLabel} kind={kind} command={shellCommand} />
+  // agy 沒有 `login` 子命令也沒有 `/login`：開 shell 跑 `agy`，由它的 TUI 引導登入（AG Man 不代按）。
+  if (kind === 'agy') return <QuotaLoginShell host={host} hostLabel={hostLabel} kind={kind} command={shellCommand} guide={AGY_LOGIN_GUIDE} />
   // codex 沒有 `/login`，走 `QuotaLogin-codex`；這裡擋一下免得被誤用時給出壞按鈕。
   if (!canLoginInSession(kind)) return null
   // 沒有在跑的 Bot 就走 codex 那條路：開主機 shell 跑 `<cli> login`，登的是同一個身份。

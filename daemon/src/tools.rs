@@ -133,6 +133,7 @@ hp=$(am_abs herdr)
 case "$hp" in /*) printf 'AM_HERDR %s\n' "$( "$hp" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )" ;; esac
 GH="${GROK_HOME:-$HOME/.grok}"
 if [ -f "$GH/auth.json" ] || ls "$GH"/auth* >/dev/null 2>&1; then printf 'AM_LOGIN grok 1\n'; else printf 'AM_LOGIN grok 0\n'; fi
+if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]; then printf 'AM_LOGIN agy 1\n'; else printf 'AM_LOGIN agy 0\n'; fi
 "#, alias_sh!());
 
 /// `AM_TZ +0800` → 28800。不是 `±HHMM` 就是 None。
@@ -1280,6 +1281,17 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
             "AM_ALIAS cc1='CLAUDE_CONFIG_DIR=/a claude'\nAM_ALIAS cc1='CLAUDE_CONFIG_DIR=/b claude'",
         );
         assert_eq!(ids[0].env["CLAUDE_CONFIG_DIR"], "/b");
+    }
+
+    /// agy 沒有 `status` 指令，登入與否看憑證檔：探測腳本印 `AM_LOGIN agy 1／0`，解析要認得（額度那格的「未登入」靠它）。
+    #[test]
+    fn the_probe_script_asks_whether_agy_has_its_token_and_the_parser_reads_it() {
+        assert!(PROBE_SH.contains("antigravity-cli/antigravity-oauth-token") && PROBE_SH.contains("AM_LOGIN agy 1") && PROBE_SH.contains("AM_LOGIN agy 0"));
+        let m = parse_probe("AM_PATH agy /h/.local/bin/agy\nAM_VER agy 1.2.16\nAM_LOGIN agy 0\n");
+        assert_eq!(m["agy"].logged_in, Some(false));
+        let m = parse_probe("AM_PATH agy /h/.local/bin/agy\nAM_LOGIN agy 1\n");
+        assert_eq!(m["agy"].logged_in, Some(true));
+        assert_eq!(parse_probe("AM_PATH agy \nAM_LOGIN agy 0\n")["agy"].logged_in, None, "沒裝＋沒憑證＝不知道，不是未登入");
     }
 
     #[test]

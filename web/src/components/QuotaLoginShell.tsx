@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import type { BotKind } from '../api/types'
 import * as api from '../api'
 import { useStore } from '../store/store'
@@ -13,12 +13,15 @@ export function QuotaLoginShell({
   hostLabel,
   kind,
   command,
+  guide,
 }: {
   host: string
   /** 已經算好的主機顯示名（本機 / 主機名），免得這裡再抄一份規則。 */
   hostLabel: string
   kind: BotKind
   command: string
+  /** 這個 CLI 的登入過程跟「跳出瀏覽器」不一樣時，換掉確認框裡那段說明（agy：TUI 自己引導）。 */
+  guide?: ReactNode
 }) {
   const [open, setOpen] = useState(false)
   const [sent, setSent] = useState(false)
@@ -71,7 +74,8 @@ export function QuotaLoginShell({
         title={`開 shell 登入 ${kind}？`}
         body={
           <>
-            會在 <strong>{hostLabel}</strong> 開一個 shell，畫面切過去，並送出 <code>{command}</code>，通常會跳出瀏覽器要你在那邊完成登入。
+            會在 <strong>{hostLabel}</strong> 開一個 shell，畫面切過去，並送出 <code>{command}</code>，
+            {guide ?? '通常會跳出瀏覽器要你在那邊完成登入。'}
             <br />
             <strong>在你完成登入之前，這個身份的 {kind} 還是不能工作。</strong>
             <br />
