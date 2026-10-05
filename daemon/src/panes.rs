@@ -258,7 +258,7 @@ async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Resu
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
         let seen = match read_facts(client.as_ref(), dump.as_deref(), pane_id).await {
             // port 讀不到跟事實讀不到一樣：這一輪不改寫這顆。
-            Some(facts) => listen_ports(host, &facts.pids).await.map(|ports| Observed { facts, ports }),
+            Some(facts) => listen_ports(host, &facts.listen_pids).await.map(|ports| Observed { facts, ports }),
             None => None,
         };
         observed.insert(pane_id.to_string(), seen);
@@ -762,7 +762,7 @@ async fn close_if_still_idle(
         return Ok(false);
     }
     // port 讀不到也不關。
-    if listen_ports(host, &f.pids).await.is_none_or(|ports| !ports.is_empty()) {
+    if listen_ports(host, &f.listen_pids).await.is_none_or(|ports| !ports.is_empty()) {
         return Ok(false);
     }
     // 2. 關之前把畫面最後幾行記進 log：自動關不可逆，出事要說得出關掉的是什麼。
@@ -1053,6 +1053,7 @@ mod tests {
                 bot_ids: bot.map(|b| vec![b.to_string()]).unwrap_or_default(),
                 project_ids: project.map(|p| vec![p.to_string()]).unwrap_or_default(),
                 pids: vec![1],
+                listen_pids: vec![1],
                 shell_only: foreground.is_none(),
                 foreground: foreground.map(String::from),
                 env_seen: bot.is_some() || project.is_some(),
@@ -1877,7 +1878,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
     let probe = app.probe();
     let live = match (probe.dump(&app, &host).await, client.pane_shell(&pane_id).await) {
         (Ok(dump), Ok(shell)) => match facts_from(&shell, &dump, &pane_id) {
-            Some(f) => probe.listen_ports(&host, &f.pids).await.map(|ports| (f, ports)),
+            Some(f) => probe.listen_ports(&host, &f.listen_pids).await.map(|ports| (f, ports)),
             None => None,
         },
         _ => None,

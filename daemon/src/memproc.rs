@@ -402,6 +402,9 @@ pub struct PaneFacts {
     pub project_ids: Vec<String>,
     /// 這個 pane 底下所有行程的 pid（shell 自己在最前面），用來對 listen port。
     pub pids: Vec<i32>,
+    /// `pids` 去掉 agent CLI 自己（agy／claude／codex／grok）：拿去對 listen port 的那一份。agent CLI 會在 127.0.0.1 開自己的
+    /// port（agy 的登入 TUI 就開兩個），那不是 dev server；算進去，使用者在 shell 裡跑 agy 登入就被判成唯讀、打不了字（2026-10-05）。
+    pub listen_pids: Vec<i32>,
     /// 最有代表性的前景程式（shell 以外最上層的那個）；只有 shell 時是 `None`。
     pub foreground: Option<String>,
     /// 行程樹只有 shell 自己：沒有前景程式、沒有被 Ctrl-Z 丟到背景的 job、也沒有巢狀 shell。
@@ -414,6 +417,25 @@ pub struct PaneFacts {
 const SHELLS: &[&str] = &[
     "bash", "zsh", "sh", "fish", "dash", "ksh", "login", "-zsh", "-bash",
 ];
+
+/// 已知的 agent CLI 行程名；它們自己開的 port 不算伺服器 pane 的 port（見 [`PaneFacts::listen_pids`]）。
+const AGENT_CLIS: &[&str] = &["claude", "codex", "grok", "agy"];
+/// agent CLI 有些是 node／bun 腳本：`node /…/bin/claude` 的行程名是 `node`，要看第一個非旗標的參數。
+const SCRIPT_RUNNERS: &[&str] = &["node", "bun", "deno"];
+
+/// 這個行程是不是 agent CLI 本身（看行程名，不看 argv 子字串）。`node next dev`、`python -m http.server` 這類 dev server 不是。
+pub(crate) fn is_agent_cli(argv: &str) -> bool {
+    let name = |s: &str| {
+        let base = s.rsplit('/').next().unwrap_or(s);
+        base.strip_suffix(".js").or_else(|| base.strip_suffix(".mjs")).unwrap_or(base).to_string()
+    };
+    let exe = name(exe_name(argv));
+    if AGENT_CLIS.contains(&exe.as_str()) {
+        return true;
+    }
+    SCRIPT_RUNNERS.contains(&exe.as_str())
+        && argv.split_whitespace().skip(1).find(|a| !a.starts_with('-')).is_some_and(|script| AGENT_CLIS.contains(&name(script).as_str()))
+}
 
 /// 以 herdr 報的 shell pid 為根，沿 `ps -A` 的 ppid 樹把**全部子孫**算進這顆 pane（§6.5e 的 GC 守門）。
 ///
@@ -449,6 +471,9 @@ pub fn pane_facts_for_shell(out: &str, pane_id: &str, shell_pid: i32) -> Option<
     for pid in &order {
         let Some(p) = by_pid.get(pid) else { continue };
         f.pids.push(*pid);
+        if !is_agent_cli(&p.argv) {
+            f.listen_pids.push(*pid);
+        }
         let is_shell = SHELLS.contains(&exe_name(&p.argv));
         if f.foreground.is_none() && !is_herdr(p) && !is_shell {
             f.foreground = Some(p.argv.clone());
@@ -989,6 +1014,34 @@ mod tests {
             None,
             "不在樹裡就判不出來"
         );
+    }
+
+    /// 2026-10-05：agent CLI 自己開的 port 不算伺服器 pane——`listen_pids` 去掉它，dev server 的行程留著。
+    #[test]
+    fn listen_pids_leave_out_agent_clis_but_keep_dev_servers() {
+        let dump = "\
+  400     1  48000 /opt/homebrew/bin/herdr --session agents-manager
+  401   400  30000 -zsh
+  402   401  20000 /home/u/.local/bin/agy
+  403   401  20000 node /usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.js --resume
+  404   401  20000 node next dev --port 3010
+  405   401  20000 python3 -m http.server 8000
+  406   401  20000 codex exec
+---AM-ENV---
+";
+        let f = pane_facts_for_shell(dump, "w1:p1", 401).unwrap();
+        assert_eq!(f.pids, vec![401, 402, 403, 404, 405, 406]);
+        assert_eq!(f.listen_pids, vec![401, 404, 405]);
+    }
+
+    #[test]
+    fn agent_cli_is_recognised_by_executable_name_not_substring() {
+        for yes in ["agy", "/usr/bin/claude --resume", "node /x/bin/claude.js", "bun /x/codex", "/opt/grok"] {
+            assert!(is_agent_cli(yes), "{yes}");
+        }
+        for no in ["node next dev", "python3 -m http.server", "vim agy.txt", "node server.js --name claude", "-zsh", "/usr/bin/agyd", "node"] {
+            assert!(!is_agent_cli(no), "{no}");
+        }
     }
 
     #[test]
