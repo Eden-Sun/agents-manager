@@ -431,7 +431,12 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
       </div>
 
       {/* 剛存完的提示之外，daemon 從資料算出「跑的還是舊設定」（#353）也要顯示：開面板時、回應掉了、重整之後都看得到。 */}
-      {banner === 'restart' || (banner === null && bot.needs_restart) ? (
+      {/* 儲存中：daemon 先寫 config 推 `bot_changed`、再當場套用（claude `/effort` 之類），這段時間 state 的
+          `needs_restart` 暫時是真的；套用成功就清掉。等 PATCH 回應（daemon 的判斷）再決定要不要出重啟橫幅。 */}
+      {saving ? (
+        <div className="bs-banner ok" role="status">套用中…</div>
+      ) : null}
+      {!saving && (banner === 'restart' || (banner === null && bot.needs_restart)) ? (
         <div className="bs-banner warn" role="status">
           <span>已儲存，重啟 Bot 後生效（目前的 Run 仍跑在舊參數上）。</span>
           <button
@@ -464,7 +469,7 @@ export function BotSettingsPanel({ botId }: { botId: string }) {
           </span>
         </div>
       ) : null}
-      {banner === null && bot.live_apply_deferred ? (
+      {!saving && banner === null && bot.live_apply_deferred ? (
         <div className="bs-banner ok" role="status">已儲存，回合結束後自動套用。</div>
       ) : null}
 
