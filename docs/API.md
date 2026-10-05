@@ -2016,8 +2016,8 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
     "claude:cc1": { "…": "同上，account = \"cc1\"" },
     "m4p/claude": { "…": "m4p 上讀到的同一組欄位，host = \"m4p\"" },
     "grok": { "five_hour": null, "seven_day": {"used_pct": 14.0, "resets_at": "…", "low": false, "critical": false}, "plan": "SuperGrok", "updated_at": "…", "source": "grok-usage", "host": "local" },
-    "agy": { "five_hour": null, "seven_day": {"used_pct": 2.0, "resets_at": "…", "low": false, "critical": false}, "plan": null, "updated_at": "…", "source": "agy-usage", "host": "local" },
-    "agy:claude-gpt": { "…": "agy 的第二個每週桶（Claude 與 GPT-OSS）；`agy` 是 Gemini 那桶。`claude-gpt` 不是身分，只是這把 key 的子帳號名" }
+    "agy": { "five_hour": {"used_pct": 77.0, "resets_at": "…", "low": true, "critical": false}, "seven_day": {"used_pct": 2.0, "resets_at": "…", "low": false, "critical": false}, "plan": null, "updated_at": "…", "source": "agy-usage", "host": "local" },
+    "agy:claude-gpt": { "five_hour": {"used_pct": 33.0, "resets_at": "…", "low": false, "critical": false}, "seven_day": {"used_pct": 0.0, "resets_at": "…", "low": false, "critical": false}, "fable": null, "reset_credits": null, "limit_hit": null, "plan": null, "updated_at": "…", "stale": false, "source": "agy-usage", "account": null, "host": "local" }
 } }
 ```
 
@@ -2042,7 +2042,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
 - `fable`：Claude Max 方案的 Fable 週額度（`Current week (Fable)`），形狀同 `seven_day`；沒有這個桶一律 `null`，**UI 不畫也不佔位**。
 - `reset_credits`（只有 codex）：`account/rateLimits/read` 的 `rateLimitResetCredits`——`available` = 可用張數，`title`/`expires_at` 取第一張 available 的。daemon 只讀不用。
 - `limit_hit`：CLI 印的上限橫幅 `{"message","until": "…"|null,"at","bucket": "five_hour"|"seven_day"|"fable"|null}`。速率視窗可以顯示 0% 已用但 credits 用完，這一格是唯一說「現在收不了工作」的地方，所以**黏著**：
-  不帶這欄的輪詢沿用舊值，直到 `until` 過了、或 codex 下一回合真的答完（`quota::clear_limit_hit_for_bot`）。帶 `bucket`（`five_hour`／`seven_day`／`fable`，claude 橫幅與 grok 撞額度畫面才有；grok 的 `until` 是保底，見 SPEC §6 的撞限寫入）的撞限，
+  不帶這欄的輪詢沿用舊值，直到 `until` 過了、或 codex 下一回合真的答完（`quota::clear_limit_hit_for_bot`）。帶 `bucket`（`five_hour`／`seven_day`／`fable`；claude 橫幅、agy 個人額度橫幅與 grok 撞額度畫面會帶）的撞限，
   遇到那一桶的新讀數會校正：窗是撞限之後才開的就清掉，否則 `until` 取與該窗 `resets_at` 較早者。寫進該 bot 身份的 key。UI 標「被擋」並壓灰量表。
 - `low` / `critical`：daemon 算好的門檻（`quota.rs` 的 `LOW_REMAINING_PCT = 30`、`CRITICAL_REMAINING_PCT = 5`，以剩餘 % 判斷）。**前端只讀旗標，不寫死百分比。**
   `low` → 顯示剩餘數字；`critical` → 側欄 bot 列提示。
@@ -2061,7 +2061,7 @@ UI token 會取得 Project 底下所有存活 bot 的訊息合併。Bot token �
     （`Current session` / `Current week (all models)` / `Current week (Fable)`，其他 model 週列忽略）；`plan` 取 `subscriptionType`。
     每個有獨立 `CLAUDE_CONFIG_DIR` 的身份各探一次（該主機清單，含 shell `ccN`）；60 秒內剛被 statusLine 更新**且**登入狀態已知的跳過；沒登入的 park 30 分鐘、其他失敗 5 分鐘。
   - `grok-usage`：`am-quota` session 的 TUI `/usage` 探測，只有週額度（`seven_day`），`plan` 取 `Weekly limit (SuperGrok)` 括號。
-  - `agy-usage`：`agy -p "/usage" --output-format json`（唯讀、不開對話、不耗額度；拋棄式暫存 cwd、關自動更新、40 秒逾時、每 5 分鐘，失敗冷卻 15 分鐘），**兩個每週桶各一把 key**：`agy`＝Gemini、`agy:claude-gpt`＝Claude 與 GPT-OSS，都只填 `seven_day`（`five_hour`／`fable` 為 `null`），`plan` 為 `null`。`?refresh=1` 也會探測 agy。沒裝 agy 的主機（含遠端）不探測、不報錯，兩把 key 都是 `null`；探測失敗不覆蓋舊讀數（`stale` 自己會亮）。SPEC §12a.7。
+  - `agy-usage`：`agy -p "/usage" --output-format json`（唯讀、不開對話、不耗額度；拋棄式暫存 cwd、關自動更新、40 秒逾時、每 5 分鐘，失敗冷卻 15 分鐘），**兩個模型組各一把 key**：`agy`＝Gemini、`agy:claude-gpt`＝Claude 與 GPT-OSS，各填 `/usage` 回報的 `five_hour` 與 `seven_day` 窗口。新版讀 `command.data.groups[].buckets[]` 的 `remaining_fraction`／`reset_time`；舊版 tab 分隔 `response` 相容，只填 `seven_day`。`plan`／`fable` 為 `null`。撞限畫面／Stop hook 有 `Individual quota reached … Resets in …` 時，也會在對應 key 記 `limit_hit` 與滿額 5h 窗。`?refresh=1` 也會探測 agy。沒裝 agy 的主機（含遠端）不探測、不報錯，兩把 key 都是 `null`；探測失敗不覆蓋舊讀數（`stale` 自己會亮）。SPEC §12a.7。
 
 ### 12.5 WS `quota_updated`
 

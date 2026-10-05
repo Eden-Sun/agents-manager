@@ -602,9 +602,9 @@ export class MockTransport implements Transport {
       host: 'local',
     },
     grok: null,
-    // agy 兩個桶（SPEC §12a.7）：Gemini 與 Claude+GPT 各一條週窗；登出會把兩個都清成 null。
-    agy: { seven_day: { used_pct: 22, resets_at: inHours(120) }, plan: 'Pro', updated_at: now(), host: 'local' },
-    'agy:claude-gpt': { seven_day: { used_pct: 61, resets_at: inHours(96) }, plan: 'Pro', updated_at: now(), host: 'local' },
+    // agy 兩個模型桶（SPEC §12a.7）：各回報 5h 與週窗，登出會把兩個 key 都清成 null。
+    agy: { five_hour: { used_pct: 43, resets_at: inHours(3) }, seven_day: { used_pct: 22, resets_at: inHours(120) }, plan: 'Pro', updated_at: now(), host: 'local' },
+    'agy:claude-gpt': { five_hour: { used_pct: 12, resets_at: inHours(2) }, seven_day: { used_pct: 61, resets_at: inHours(96) }, plan: 'Pro', updated_at: now(), host: 'local' },
   }
   private identities: MockIdentity[] = [
     { name: 'cc0', kind: 'claude', env: {}, args: [] },

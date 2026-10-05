@@ -35,6 +35,7 @@ pub(crate) fn is_quota_exhaustion(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
     lower.contains("usage limit")
         || lower.contains("usage_limit")
+        || (lower.starts_with("individual quota reached") && lower.contains("resets in"))
         || ["you've hit your", "you've reached your"]
             .iter()
             .any(|p| lower.find(p).is_some_and(|i| is_quota_limit_lower(&lower[i..])))
@@ -42,11 +43,13 @@ pub(crate) fn is_quota_exhaustion(detail: &str) -> bool {
 
 fn is_quota_limit_lower(lower: &str) -> bool {
     let reached = lower.starts_with("you've reached your") && lower.contains("limit");
+    // agy TUI 的個人額度列：`Individual quota reached … Resets in 3h 12m`。
+    let agy = lower.starts_with("individual quota reached") && lower.contains("resets in");
     // 2.1.271 起速率上限也會寫成「You've hit your session／weekly／Opus limit」（CLI 的橫幅前綴清單同時有
     // hit 與 reached）。只認速率桶：`hit your monthly spend limit`、`fast limit`、團隊預算不是 5h／7d 用完，
     // 記成撞限會把量表釘成 100%（2026-09-15）。
     let hit = lower.starts_with("you've hit your") && limit_bucket(lower) != LimitBucket::Unknown;
-    reached || hit
+    reached || hit || agy
 }
 
 /// 橫幅說的是哪一桶。CLI 2.1.273 的字串表就是這幾種 rate limit：
@@ -72,7 +75,7 @@ fn limit_bucket(lower: &str) -> LimitBucket {
         LimitBucket::Model("sonnet")
     } else if lower.contains("weekly") {
         LimitBucket::Weekly
-    } else if lower.contains("session limit") || lower.contains("5-hour") || lower.contains("five-hour") {
+    } else if lower.contains("session limit") || lower.contains("5-hour") || lower.contains("five-hour") || lower.starts_with("individual quota reached") {
         LimitBucket::Session
     } else {
         LimitBucket::Unknown
@@ -108,6 +111,47 @@ fn fallback_until(lower: &str, at: &str) -> Option<String> {
     };
     let base = chrono::DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&chrono::Utc);
     Some(crate::db::iso_at(base + chrono::Duration::hours(hours)))
+}
+
+/// agy 的撞限列提供相對重置時間（例如 `Resets in 3h 12m`）；可讀時採用，否則由 5h 窗長保底。
+fn agy_reset_until(line: &str, at: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let tail = lower.split_once("resets in")?.1;
+    let tokens = tail.split(|c: char| !c.is_ascii_alphanumeric()).filter(|s| !s.is_empty()).collect::<Vec<_>>();
+    let mut seconds = 0i64;
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        let digits = token.chars().take_while(|c| c.is_ascii_digit()).collect::<String>();
+        if digits.is_empty() {
+            i += 1;
+            continue;
+        }
+        let value = digits.parse::<i64>().ok()?;
+        let mut unit = &token[digits.len()..];
+        if unit.is_empty() && i + 1 < tokens.len() {
+            unit = tokens[i + 1];
+            i += 1;
+        }
+        let multiplier = if unit.starts_with('d') || unit.starts_with("day") {
+            86_400
+        } else if unit.starts_with('h') || unit.starts_with("hour") {
+            3_600
+        } else if unit.starts_with('m') || unit.starts_with("minute") || unit.starts_with("min") {
+            60
+        } else if unit.starts_with('s') || unit.starts_with("second") || unit.starts_with("sec") {
+            1
+        } else {
+            0
+        };
+        seconds = seconds.saturating_add(value.saturating_mul(multiplier));
+        i += 1;
+    }
+    if seconds <= 0 {
+        return None;
+    }
+    let base = chrono::DateTime::parse_from_rfc3339(at).ok()?.with_timezone(&chrono::Utc);
+    Some(crate::db::iso_at(base + chrono::Duration::seconds(seconds)))
 }
 
 /// 把橫幅說的那一桶標成 100%，回傳它的重置時間（撞限到那時才解除）。認不出是哪一桶時照舊先 5h 再 7d。
@@ -237,7 +281,15 @@ pub async fn capture(app: &Arc<App>, bot_id: &str, expected_run_id: &str) -> Res
 
     // 額度格標成被擋，量表與標題列才對得上。撞限是外面已經發生的事：記不進去時欠著（排著的派工照欠著的那一筆擋），
     // 下面寫不寫得進去都一樣；錯誤留到最後回給呼叫端。
-    let marked = if is_quota_limit(&line) { mark_claude_limit_hit(app, &bot, &line).await } else { Ok(()) };
+    let marked = if is_quota_limit(&line) {
+        match bot.kind.as_str() {
+            "claude" => mark_claude_limit_hit(app, &bot, &line).await,
+            "agy" => mark_agy_limit_hit(app, &bot, &line).await,
+            _ => Ok(()),
+        }
+    } else {
+        Ok(())
+    };
 
     let mut tx = app.db.begin().await?;
     sqlx::query("UPDATE runs SET turn_error = ? WHERE id = ?").bind(&line).bind(&run.id).execute(&mut *tx).await?;
@@ -334,7 +386,7 @@ async fn last_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db::Turn>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{api_error_line, is_quota_exhaustion, is_quota_limit};
+    use super::{agy_reset_until, api_error_line, is_quota_exhaustion, is_quota_limit};
 
     /// 同一毫秒的兩個回合：「這個 run 的最後一回合」要看寫入順序，不是隨便一個（`created_at` 只到毫秒，id 的隨機段不遞增）。
     #[tokio::test]
@@ -459,6 +511,16 @@ mod tests {
             Some("API Error: Connection lost mid-response.")
         );
     }
+
+    #[test]
+    fn an_agy_individual_quota_banner_is_detected_from_the_screen() {
+        let line = "Individual quota reached for Gemini Pro. Resets in 1h 30m";
+        let screen = format!("❯ prompt\n{line}\n─────\n❯\n");
+        assert_eq!(api_error_line(&screen).as_deref(), Some(line));
+        assert!(is_quota_limit(line));
+        assert!(is_quota_exhaustion(line));
+        assert_eq!(agy_reset_until(line, "2026-10-05T10:00:00Z").as_deref(), Some("2026-10-05T11:30:00.000Z"));
+    }
 }
 
 /// 跟 codex 不同，**不**在下一回合成功時清掉：Fable 用盡後換 opus 照樣能跑，不代表 Fable 恢復；
@@ -473,6 +535,14 @@ pub(crate) async fn mark_claude_limit_hit(app: &Arc<App>, bot: &db::Bot, line: &
         return Ok(());
     }
     mark_limit_hit(app, bot, line, Banner::Claude).await
+}
+
+/// agy TUI 的 `Individual quota reached` 橫幅代表 5h 個人額度用盡，記在 agy 自己的 quota key。
+pub(crate) async fn mark_agy_limit_hit(app: &Arc<App>, bot: &db::Bot, line: &str) -> Result<()> {
+    if bot.kind != "agy" {
+        return Ok(());
+    }
+    mark_limit_hit(app, bot, line, Banner::Agy).await
 }
 
 /// codex 的撞限橫幅（#198），規則同 [`mark_claude_limit_hit`]：讀不到這顆 bot 在哪台主機（以前退回 `local`——撞限寫進
@@ -556,6 +626,8 @@ struct Mark {
 enum Banner {
     /// claude（`StopFailure`、畫面橫幅）：到期看那一桶的讀數，沒有就保底（[`fallback_until`]）。
     Claude,
+    /// agy 的個人額度橫幅：five-hour 窗，通常直接讀 `Resets in …`。
+    Agy,
     /// codex 的撞限橫幅：到期是橫幅上寫的時間，撞的當下解析（晚點補寫時裸鐘點可能已經過了）；沒寫就沒有
     /// （credits 用完，等下一個成功回合清）。
     Codex { until: Option<String> },
@@ -577,6 +649,12 @@ impl Mark {
                     bucket: bucket_name(&lower),
                 }
             }
+            Banner::Agy => crate::quota::LimitHit {
+                message: self.line.clone(),
+                until: agy_reset_until(&self.line, &self.at).or_else(|| fallback_until("individual quota reached", &self.at)),
+                at: self.at.clone(),
+                bucket: Some("five_hour".into()),
+            },
             Banner::Codex { until } => {
                 crate::quota::LimitHit { message: self.line.clone(), until: until.clone(), at: self.at.clone(), bucket: None }
             }
@@ -595,6 +673,10 @@ async fn record(app: &Arc<App>, bot_id: &str, m: &Mark) -> Result<()> {
     let host = db::bot_host(&app.db, bot_id).await?;
     let hit = match &m.banner {
         Banner::Claude => record_claude(app, &host, m).await?,
+        Banner::Agy => {
+            let base = crate::quota::resolve_quota_base(app, &host, "agy", m.identity.as_deref()).await?;
+            record_agy(app, &host, &base, m).await?
+        }
         Banner::Codex { .. } => {
             let base = crate::quota::resolve_quota_base(app, &host, "codex", m.identity.as_deref()).await?;
             crate::lifecycle::apply_codex_limit_hit_quota(app, &host, &base, m.hit()).await
@@ -605,6 +687,52 @@ async fn record(app: &Arc<App>, bot_id: &str, m: &Mark) -> Result<()> {
         }
     };
     crate::lifecycle::quota_hold::stamp_queued(app, bot_id, m.identity.as_deref(), &hit).await
+}
+
+/// agy 撞 5h 限額：把已讀到的 5h 窗標滿；讀數尚未進來時建立一個 100% 窗。
+async fn record_agy(app: &Arc<App>, host: &str, base: &str, m: &Mark) -> Result<crate::quota::LimitHit> {
+    let key = crate::quota::quota_key(host, base);
+    let prev = app.quotas.lock().await.get(&key).cloned();
+    let hit = m.hit();
+    if let Some(old) = prev.as_ref().and_then(|q| q.limit_hit.as_ref()).filter(|h| !crate::quota::limit_hit_expired(Some(h))) {
+        if old.message == hit.message {
+            return Ok(old.clone());
+        }
+    }
+    let mut q = prev.unwrap_or_else(|| crate::quota::Quota {
+        five_hour: None,
+        seven_day: None,
+        fable: None,
+        reset_credits: None,
+        limit_hit: None,
+        plan: None,
+        updated_at: db::now(),
+        source: "agy-limit-hit".into(),
+        account: m.identity.clone(),
+        host: host.to_string(),
+    });
+    let reading_reset = q.five_hour.as_ref().and_then(|w| w.resets_at.as_deref()).filter(|reset| {
+        chrono::DateTime::parse_from_rfc3339(reset).ok().is_some_and(|reset| {
+            chrono::DateTime::parse_from_rfc3339(&m.at).ok().is_some_and(|at| reset > at)
+        })
+    }).map(str::to_string);
+    let has_reading_reset = reading_reset.is_some();
+    let until = reading_reset.or(hit.until.clone());
+    match q.five_hour.as_mut() {
+        Some(w) => {
+            w.used_pct = 100.0;
+            w.observed_at = Some(m.at.clone());
+            if !has_reading_reset {
+                w.resets_at = until.clone();
+            }
+        }
+        None => q.five_hour = Some(crate::quota::Window { observed_at: None, used_pct: 100.0, resets_at: until.clone() }),
+    }
+    let hit = crate::quota::LimitHit { until, ..hit };
+    q.limit_hit = Some(hit.clone());
+    q.updated_at = db::now();
+    crate::quota::set(app, host, base, q).await;
+    Ok(hit)
 }
 
 async fn record_claude(app: &Arc<App>, host: &str, m: &Mark) -> Result<crate::quota::LimitHit> {
@@ -755,6 +883,7 @@ mod quota_limit_tests {
             "You've reached your usage limit",
             "usage_limit_exceeded",
             "Claude usage limit reached. Your limit will reset at 5pm",
+            "Individual quota reached for Gemini Pro. Resets in 1h 30m",
         ] {
             assert!(is_quota_exhaustion(yes), "{yes}");
         }
@@ -883,6 +1012,25 @@ mod quota_limit_tests {
     }
 
     const LIMIT: &str = "You've hit your session limit · resets 5pm";
+
+    #[tokio::test]
+    async fn an_agy_individual_quota_hit_marks_its_five_hour_window_full() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let (mut bot, _) = bot_with_a_queued_prompt(&env, crate::config::LOCAL_HOST, None).await;
+        // The helper creates the normal database fixture; this unit exercises the agy route.
+        bot.kind = "agy".into();
+        let line = "Individual quota reached for Gemini Pro. Resets in 1h 30m";
+        mark_agy_limit_hit(&app, &bot, line).await.unwrap();
+        let q = app.quotas.lock().await.get("agy").cloned().expect("agy quota row");
+        assert_eq!(q.five_hour.as_ref().map(|w| w.used_pct), Some(100.0));
+        assert!(q.seven_day.is_none());
+        let hit = q.limit_hit.expect("saved limit hit");
+        assert_eq!(hit.bucket.as_deref(), Some("five_hour"));
+        let at = chrono::DateTime::parse_from_rfc3339(&hit.at).unwrap();
+        let until = chrono::DateTime::parse_from_rfc3339(hit.until.as_deref().expect("relative reset captured")).unwrap();
+        assert_eq!((until - at).num_seconds(), 90 * 60);
+    }
 
     /// 一顆 bot，對話裡排著一則。`host` 不是本機時建一個那台主機的專案。
     async fn bot_with_a_queued_prompt(env: &crate::testing::Env, host: &str, identity: Option<&str>) -> (db::Bot, String) {

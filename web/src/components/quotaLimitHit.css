@@ -42,7 +42,8 @@
 .quota-hp.quota-blocked .quota-kind,
 .quota-hp.quota-blocked.claude .quota-kind,
 .quota-hp.quota-blocked.codex .quota-kind,
-.quota-hp.quota-blocked.grok .quota-kind {
+.quota-hp.quota-blocked.grok .quota-kind,
+.quota-hp.quota-blocked.agy .quota-kind {
   color: var(--text-dim);
 }
 

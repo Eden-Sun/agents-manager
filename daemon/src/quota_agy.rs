@@ -1,13 +1,9 @@
 //! agy（Antigravity CLI）額度（SPEC §12a.7）。數字來自 `agy -p "/usage" --output-format json`：唯讀指令，**不開對話、不耗額度**，
 //! 所以不必像 grok 那樣開一顆探測 pane——在拋棄式暫存目錄裡直接跑、有逾時、跑完刪目錄。
 //!
-//! 回應（2026-10-04 真機，1.2.16）的 `response` 是 tab 分隔的幾列：
-//! ```text
-//! Gemini Models\tWeekly Limit Remaining\t98%\t2026-10-11T15:39:29Z
-//! Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-11T15:56:55Z
-//! ```
-//! 兩個**每週**桶，各自是一把 key：`agy`（Gemini）與 `agy:claude-gpt`（Claude 與 GPT-OSS），都只填 `seven_day`（跟 grok 一樣，網頁標「週」）。
-//! 探測失敗**不覆蓋**舊值（讀數自己會變陳舊，`quota::STALE_AFTER`）；格式變了讀不懂就回 `None`，不編數字。
+//! 新版輸出在 `command.data.groups[].buckets[]`：各模型組有 weekly 與 five-hour 窗口，`remaining_fraction` 是剩餘比例，
+//! `reset_time` 是 RFC3339 重置時刻。兩個模型組各自是一把 key：`agy`（Gemini）與 `agy:claude-gpt`（Claude 與 GPT-OSS）。
+//! 舊版 tab 分隔 `response` 仍接受。探測失敗**不覆蓋**舊值（讀數自己會變陳舊，`quota::STALE_AFTER`）；格式讀不懂回 `None`，不編數字。
 
 use crate::config::LOCAL_HOST;
 use crate::quota::{Quota, Window};
@@ -17,7 +13,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// 每週桶變動很慢，而每次探測要起一個 200 MB 的執行檔。
+/// 每次探測要起一個約 200 MB 的執行檔。
 pub const AGY_POLL: Duration = Duration::from_secs(300);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(15 * 60);
@@ -50,12 +46,90 @@ fn parse_remaining(field: &str) -> Option<f64> {
     t.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
-/// `[(key, Quota)]`，一列一桶；認不得的列（桶名、窗名、百分比）略過，一列都讀不到回 `None`。
-/// 只收每週窗（`Weekly`）；別的窗名不猜它是 5h 還是 7d。
-pub fn parse_usage(stdout: &str) -> Option<Vec<(&'static str, Quota)>> {
-    let v: Value = serde_json::from_str(stdout.trim()).ok()?;
+fn reset_time(value: &Value) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()
+        .map(|d| d.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+fn quota_row(key: &'static str, now: &str) -> (&'static str, Quota) {
+    (
+        key,
+        Quota {
+            five_hour: None,
+            seven_day: None,
+            fable: None,
+            reset_credits: None,
+            limit_hit: None,
+            plan: None,
+            updated_at: now.to_string(),
+            source: "agy-usage".into(),
+            account: None,
+            host: LOCAL_HOST.into(),
+        },
+    )
+}
+
+fn text_field<'a>(value: &'a Value, fields: &[&str]) -> Option<&'a str> {
+    fields.iter().find_map(|field| value.get(*field).and_then(Value::as_str))
+}
+
+#[derive(Clone, Copy)]
+enum UsageWindow {
+    FiveHour,
+    SevenDay,
+}
+
+fn bucket_window(bucket: &Value) -> Option<UsageWindow> {
+    let window = text_field(bucket, &["window", "type"]).unwrap_or_default().to_ascii_lowercase();
+    let id = text_field(bucket, &["id", "name", "label", "title"]).unwrap_or_default().to_ascii_lowercase();
+    let description = format!("{window} {id}");
+    if description.contains("weekly") || description.contains("week") {
+        Some(UsageWindow::SevenDay)
+    } else if description.contains("five_hour")
+        || description.contains("five-hour")
+        || description.contains("five hour")
+        || description.contains("5h")
+    {
+        Some(UsageWindow::FiveHour)
+    } else {
+        None
+    }
+}
+
+/// `command.data.groups[].buckets[]`：依模型組與窗口填入兩個 quota key。
+fn parse_group_usage(v: &Value, now: &str) -> Option<Vec<(&'static str, Quota)>> {
+    let groups = v.get("command")?.get("data")?.get("groups")?.as_array()?;
+    let mut out: Vec<(&'static str, Quota)> = Vec::new();
+    for group in groups {
+        let group_name = text_field(group, &["name", "label", "title", "id", "model"]).unwrap_or_default();
+        let Some(buckets) = group.get("buckets").and_then(Value::as_array) else { continue };
+        for bucket in buckets {
+            let bucket_name = text_field(bucket, &["id", "name", "label", "title", "model"]).unwrap_or_default();
+            let Some(key) = bucket_key(group_name).or_else(|| bucket_key(bucket_name)) else { continue };
+            let Some(window) = bucket_window(bucket) else { continue };
+            let Some(left) = bucket.get("remaining_fraction").and_then(Value::as_f64).filter(|x| x.is_finite() && (0.0..=1.0).contains(x)) else {
+                continue;
+            };
+            let w = Window { observed_at: None, used_pct: ((1.0 - left) * 100.0).clamp(0.0, 100.0), resets_at: bucket.get("reset_time").and_then(reset_time) };
+            let row = if let Some(row) = out.iter_mut().find(|(k, _)| *k == key) {
+                row
+            } else {
+                out.push(quota_row(key, now));
+                out.last_mut().expect("just pushed")
+            };
+            match window {
+                UsageWindow::FiveHour => row.1.five_hour = Some(w),
+                UsageWindow::SevenDay => row.1.seven_day = Some(w),
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// 舊版 `response` 是 tab 分隔列；只提供 weekly 百分比，沒有 5h 資料。
+fn parse_legacy_usage(v: &Value, now: &str) -> Option<Vec<(&'static str, Quota)>> {
     let response = v.get("response")?.as_str()?;
-    let now = crate::db::now();
     let mut out: Vec<(&'static str, Quota)> = Vec::new();
     for line in response.lines() {
         let f: Vec<&str> = line.split('\t').map(str::trim).collect();
@@ -67,31 +141,26 @@ pub fn parse_usage(stdout: &str) -> Option<Vec<(&'static str, Quota)>> {
             continue;
         }
         let Some(left) = f[2..].iter().find_map(|x| parse_remaining(x)) else { continue };
-        // 重置時間讀不出來就 `None`（由窗長規則收尾），不拿別的欄位湊。
-        let resets_at = f[2..]
-            .iter()
-            .find_map(|x| chrono::DateTime::parse_from_rfc3339(x).ok())
-            .map(|d| d.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         if out.iter().any(|(k, _)| *k == key) {
             continue;
         }
-        out.push((
-            key,
-            Quota {
-                five_hour: None,
-                seven_day: Some(Window { observed_at: None, used_pct: (100.0 - left).clamp(0.0, 100.0), resets_at }),
-                fable: None,
-                reset_credits: None,
-                limit_hit: None,
-                plan: None,
-                updated_at: now.clone(),
-                source: "agy-usage".into(),
-                account: None,
-                host: LOCAL_HOST.into(),
-            },
-        ));
+        let mut row = quota_row(key, now);
+        row.1.seven_day = Some(Window {
+            observed_at: None,
+            used_pct: (100.0 - left).clamp(0.0, 100.0),
+            resets_at: f[2..].iter().find_map(|x| chrono::DateTime::parse_from_rfc3339(x).ok())
+                .map(|d| d.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        });
+        out.push(row);
     }
     (!out.is_empty()).then_some(out)
+}
+
+/// `[(key, Quota)]`，窗口或模型名認不得就略過；完全讀不到回 `None`。
+pub fn parse_usage(stdout: &str) -> Option<Vec<(&'static str, Quota)>> {
+    let v: Value = serde_json::from_str(stdout.trim()).ok()?;
+    let now = crate::db::now();
+    parse_group_usage(&v, &now).or_else(|| parse_legacy_usage(&v, &now))
 }
 
 /// `Ok(false)` ＝這台主機沒裝 agy（不探測、不報錯）。
@@ -112,7 +181,7 @@ pub async fn refresh_agy(app: &Arc<App>, host: &str) -> Result<bool> {
         fence.conn().ssh_exec_path_timeout(&script, PROBE_TIMEOUT).await?
     };
     let Some(buckets) = parse_usage(&stdout) else {
-        bail!("`agy -p /usage` on {host} printed no weekly limit row: {}", stdout.chars().take(200).collect::<String>());
+        bail!("`agy -p /usage` on {host} printed no readable quota window: {}", stdout.chars().take(200).collect::<String>());
     };
     for (key, q) in buckets {
         crate::quota::set_fenced(app, host, key, q, &fence).await?;
@@ -310,24 +379,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 2026-10-04 真機輸出（1.2.16，欄位原樣，其餘鍵略）。
+    /// 新版 command.data fixture：兩組模型各含 weekly 與 5h 桶。
     fn real() -> String {
-        json!({"conversation_id": "", "status": "SUCCESS",
-               "response": "Gemini Models\tWeekly Limit Remaining\t98%\t2026-10-11T15:39:29Z\nClaude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-11T15:56:55Z\n"})
+        json!({"conversation_id": "", "status": "SUCCESS", "command": {"data": {"groups": [
+            {"name": "Gemini Models", "buckets": [
+                {"id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.98, "reset_time": "2026-10-11T15:39:29Z"},
+                {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "five_hour", "remaining_fraction": 0.23, "reset_time": "2026-10-05T15:00:00Z"}
+            ]},
+            {"name": "Claude and GPT models", "buckets": [
+                {"id": "claude-gpt-weekly", "window": "weekly", "remaining_fraction": 1.0, "reset_time": "2026-10-11T15:56:55Z"},
+                {"id": "claude-gpt-5h", "name": "Five Hour Limit Remaining", "window": "five_hour", "remaining_fraction": 0.67, "reset_time": "2026-10-05T15:30:00Z"}
+            ]}
+        ]}}})
         .to_string()
     }
 
     #[test]
-    fn the_real_output_gives_two_weekly_buckets_keyed_gemini_and_claude_gpt() {
+    fn the_real_output_gives_weekly_and_five_hour_windows_for_both_model_groups() {
         let got = parse_usage(&real()).expect("parsed");
         assert_eq!(got.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["agy", "agy:claude-gpt"]);
         let (_, gemini) = &got[0];
-        let w = gemini.seven_day.as_ref().unwrap();
-        assert!((w.used_pct - 2.0).abs() < 1e-9, "98% remaining = 2% used");
-        assert_eq!(w.resets_at.as_deref(), Some("2026-10-11T15:39:29.000Z"));
-        assert!(gemini.five_hour.is_none() && gemini.fable.is_none(), "只有週窗");
+        let week = gemini.seven_day.as_ref().unwrap();
+        assert!((week.used_pct - 2.0).abs() < 1e-9, "98% remaining = 2% used");
+        assert_eq!(week.resets_at.as_deref(), Some("2026-10-11T15:39:29.000Z"));
+        let five = gemini.five_hour.as_ref().unwrap();
+        assert!((five.used_pct - 77.0).abs() < 1e-9, "remaining_fraction .23 = 77% used");
+        assert_eq!(five.resets_at.as_deref(), Some("2026-10-05T15:00:00.000Z"));
+        assert!(gemini.fable.is_none());
         assert_eq!(gemini.source, "agy-usage");
         assert_eq!(got[1].1.seven_day.as_ref().unwrap().used_pct, 0.0);
+        assert!((got[1].1.five_hour.as_ref().unwrap().used_pct - 33.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_legacy_response_format_still_populates_its_weekly_window() {
+        let legacy = json!({"response": "Gemini Models\tWeekly Limit Remaining\t98%\t2026-10-11T15:39:29Z\nClaude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-11T15:56:55Z\n"}).to_string();
+        let got = parse_usage(&legacy).expect("legacy output remains readable");
+        assert_eq!(got[0].1.seven_day.as_ref().unwrap().used_pct, 2.0);
+        assert!(got[0].1.five_hour.is_none());
     }
 
     #[test]
@@ -340,6 +429,7 @@ mod tests {
             r#"{"response": "nothing useful here\n"}"#,
             r#"{"response": "Gemini Models\tWeekly Limit Remaining\tunknown\t2026-10-11T15:39:29Z"}"#,
             r#"{"response": "Gemini Models\tDaily Limit Remaining\t90%\t2026-10-11T15:39:29Z"}"#,
+            r#"{"command":{"data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-5h","window":"five_hour","remaining_fraction":1.4}]}]}}}"#,
             r#"{"response": "Some Other Models\tWeekly Limit Remaining\t90%\t2026-10-11T15:39:29Z"}"#,
         ] {
             assert!(parse_usage(bad).is_none(), "{bad:?}");
@@ -659,4 +749,3 @@ mod login_tests {
         assert!(matches!(refresh_agy_if_due(&e.app, LOCAL_HOST).await, Ok(None)));
     }
 }
-

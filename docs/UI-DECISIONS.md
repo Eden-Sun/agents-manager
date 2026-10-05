@@ -1016,3 +1016,7 @@ daemon 這一側：探測腳本（`tools::PROBE_SH`）多問一件事——憑�
 ## Bot 設定面板：儲存中不出「重啟後生效」橫幅（2026-10-05 使用者）
 
 claude 改 effort／model 由 daemon 在跑著的 session 裡當場套用（`/effort`、`/model`），不用重啟。daemon 先寫 config 推 `bot_changed`、再套用，這段時間 state 的 `bot.needs_restart` 暫時是真的，面板以前一儲存就跳黃色「已儲存，重啟 Bot 後生效」。現在儲存中（PATCH 還沒回）只顯示「套用中…」，等 PATCH 回應：`needs_restart:false` → 「✓ 已套用，不用重啟」，`true`（要重啟的欄位或套用失敗）才出黃色橫幅與「立即重啟」。規則仍只在 daemon，前端不複製。
+
+## agy 額度格顯示較緊的窗口（2026-10-05）
+
+agy 的 Gemini（`agy`）與 Claude+GPT（`agy:claude-gpt`）各有 5h 與週額度。主格維持兩條 `G`／`C+G`，每條顯示該組中 low／critical 等級較高者；等級相同時顯示剩餘比例較低者。標籤保留 `5h`／`週` 以便辨認。這讓 5h 緊張時能在額度列直接預警，又不把合併格擴為四條；popover 列出兩組四窗和撞限訊息。low／critical 仍由 daemon 的既有門檻計算。
