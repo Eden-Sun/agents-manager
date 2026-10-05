@@ -6,9 +6,9 @@
 use am_core::{
     BotId, EventEnvelope, EventSeq, HostFence as PortHostFence, LimitHit as PortLimitHit,
     NoticeRequest, PaneReadSource, PortError, PromptRequest, QuotaKey, QuotaSnapshot, RunId,
-    TurnError, TurnEvent, TurnId, Window as PortWindow,
+    SessionId, TurnError, TurnEvent, TurnId, Window as PortWindow,
 };
-use am_ports::{EventSink, HerdrPort, QuotaAccess, TurnControl, TurnEvents};
+use am_ports::{EventSink, HerdrPort, QuotaAccess, RunPaneReader, TurnControl, TurnEvents};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -177,6 +177,59 @@ impl<'a> AppHerdrPort<'a> {
             })?;
         Ok((actual, client))
     }
+}
+
+/// App-side compatibility path for run-scoped pane reads that have not yet been given a host fence.
+impl RunPaneReader for AppHerdrPort<'_> {
+    fn read_run_pane<'a>(
+        &'a self,
+        bot: &'a BotId,
+        run_session: Option<&'a SessionId>,
+        pane_id: &'a str,
+        source: PaneReadSource,
+        lines: u32,
+    ) -> impl Future<Output = Result<Option<String>, PortError>> + Send + 'a {
+        async move {
+            // Keep `herdr_for_run`'s handoff guard and its run-session → bot-session fallback.
+            if !matches!(crate::handoff::bot_handed_off_to(&self.app.db, bot).await, Ok(None)) {
+                return Ok(None);
+            }
+            let Ok(host) = crate::db::bot_host(&self.app.db, bot).await else {
+                return Ok(None);
+            };
+            let session = if let Some(session) = run_session.filter(|session| !session.is_empty()) {
+                session.clone()
+            } else {
+                let Ok(Some(bot_row)) = crate::db::bot(&self.app.db, bot).await else {
+                    return Ok(None);
+                };
+                let Some(session) = self.app.session_for_bot(&bot_row, &host).await else {
+                    return Ok(None);
+                };
+                session
+            };
+            let Some(client) = self.app.herdr_for_session(&host, &session).await else {
+                return Ok(None);
+            };
+            client
+                .pane_read(pane_id, source.as_str(), lines)
+                .await
+                .map(|read| Some(read.text))
+                .map_err(|error| PortError::Unavailable(error.to_string()))
+        }
+    }
+}
+
+/// Compatibility entry point retained for non-P4 callers while the screen probe moves behind its port.
+pub async fn shows_login_problem(app: &Arc<App>, run: &crate::db::Run) -> Option<bool> {
+    let reader = AppHerdrPort::new(app);
+    crate::tui_prompts::shows_login_problem_with_reader(
+        &reader,
+        &run.bot_id,
+        run.herdr_session.as_ref(),
+        run.pane_id.as_deref(),
+    )
+    .await
 }
 
 impl HerdrPort for AppHerdrPort<'_> {

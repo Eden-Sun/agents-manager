@@ -9,8 +9,12 @@
 use crate::db;
 use crate::herdr::{HerdrClient, PaneRead};
 use crate::state::App;
+use am_core::{PaneReadSource, SessionId};
+use am_ports::RunPaneReader;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub use crate::lifecycle::app_ports_p4::shows_login_problem;
 
 const SWEEP: Duration = Duration::from_secs(10);
 
@@ -630,16 +634,23 @@ pub fn is_not_logged_in_reply(screen: &str) -> bool {
 const LATEST_REPLY_TAIL_LINES: usize = 20;
 
 /// `Some(true/false)` means the screen was read; `None` means it is unknown.
-pub async fn shows_login_problem(app: &Arc<App>, run: &db::Run) -> Option<bool> {
-    let pane = run.pane_id.as_deref()?.trim();
+pub async fn shows_login_problem_with_reader<R: RunPaneReader>(
+    reader: &R,
+    bot_id: &am_core::BotId,
+    run_session: Option<&SessionId>,
+    pane_id: Option<&str>,
+) -> Option<bool> {
+    let pane = pane_id?.trim();
     if pane.is_empty() {
         return None;
     }
-    let client = app.herdr_for_run(run).await?;
-    match client.pane_read(pane, "visible", 80).await {
-        Ok(r) => Some(is_login_menu(&r.text) || is_onboarding_theme(&r.text) || is_not_logged_in_reply(&r.text)),
-        Err(_) => None,
-    }
+    let Ok(Some(screen)) = reader
+        .read_run_pane(bot_id, run_session, pane, PaneReadSource::Visible, 80)
+        .await
+    else {
+        return None;
+    };
+    Some(is_login_menu(&screen) || is_onboarding_theme(&screen) || is_not_logged_in_reply(&screen))
 }
 
 /// Claude Code 2.1.281 起的「Dangerous rm operation」確認框（`rm -rf $(…)`、`$VAR`、頂層目錄這類目標）：
@@ -1087,6 +1098,65 @@ mod survey_revision_tests {
 
 #[cfg(test)]
 mod tests {
+    #[derive(Default)]
+    struct FakeRunPaneReader {
+        screen: Option<String>,
+        calls: std::sync::Mutex<Vec<(String, Option<String>, String, am_core::PaneReadSource, u32)>>,
+    }
+
+    impl am_ports::RunPaneReader for FakeRunPaneReader {
+        fn read_run_pane<'a>(
+            &'a self,
+            bot: &'a am_core::BotId,
+            run_session: Option<&'a am_core::SessionId>,
+            pane_id: &'a str,
+            source: am_core::PaneReadSource,
+            lines: u32,
+        ) -> impl std::future::Future<Output = Result<Option<String>, am_core::PortError>> + Send + 'a {
+            let call = (
+                bot.clone(),
+                run_session.cloned(),
+                pane_id.to_string(),
+                source,
+                lines,
+            );
+            async move {
+                self.calls.lock().unwrap().push(call);
+                Ok(self.screen.clone())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn login_problem_probe_uses_run_pane_reader_with_visible_tail() {
+        let reader = FakeRunPaneReader {
+            screen: Some(super::screens::NOT_LOGGED_IN.to_string()),
+            ..Default::default()
+        };
+        let bot = "bot-1".to_string();
+        let session = "session-1".to_string();
+
+        assert_eq!(
+            super::shows_login_problem_with_reader(&reader, &bot, Some(&session), Some(" pane-1 ")).await,
+            Some(true)
+        );
+        assert_eq!(
+            *reader.calls.lock().unwrap(),
+            vec![(bot, Some(session), "pane-1".to_string(), am_core::PaneReadSource::Visible, 80)]
+        );
+    }
+
+    #[tokio::test]
+    async fn login_problem_probe_keeps_unavailable_and_missing_panes_unknown() {
+        let reader = FakeRunPaneReader::default();
+        let bot = "bot-1".to_string();
+
+        assert_eq!(super::shows_login_problem_with_reader(&reader, &bot, None, None).await, None);
+        assert_eq!(super::shows_login_problem_with_reader(&reader, &bot, None, Some("  ")).await, None);
+        assert_eq!(super::shows_login_problem_with_reader(&reader, &bot, None, Some("pane-1")).await, None);
+        assert_eq!(reader.calls.lock().unwrap().len(), 1);
+    }
+
     /// issue #420：協調者停在「Not logged in」——輸入列空著、herdr 判 idle，但每個回合都只回這一行。
     /// 要認得出來；正文引用這句、或更早的回合出過這句而後面又答過話，都不算。
     #[test]
