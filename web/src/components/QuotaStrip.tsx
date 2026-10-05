@@ -23,8 +23,8 @@ import { carriedOverAt } from '../lib/quotaWindowAge'
 import './quotaStrip.css'
 
 /**
- * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`). Every kind stays visible;
- * only its windows collapse. Fill length carries the level so it survives greyscale.
+ * Remaining quota per kind (`GET /api/quota` + WS `quota_updated`). Desktop keeps every reported window visible;
+ * only compact phone chips choose a representative window. Fill length carries the level so it survives greyscale.
  * 桌機每個帳號都畫完整量表，不收進 `+N`（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
  * grok、agy 只有週窗（SPEC §12.6、§12a.7），每種 kind 只畫實際回報的窗口。agy 的兩個桶（Gemini／Claude+GPT）合成一格、
  * 兩條：`G`、`C+G`（2026-10-04 使用者：「兩種放一起顯示，不然佔空間」）。
@@ -105,7 +105,7 @@ function worst(q: KindQuota | null): Level {
   return 'ok'
 }
 
-/** The window closest to running out — what the collapsed pill shows. */
+/** The window closest to running out — what the compact phone pill shows without a weekly window. */
 function worstWindow(q: KindQuota | null): { name: WindowName; pct: number | null } {
   const cands: { name: WindowName; pct: number }[] = []
   const five = remaining(q?.five_hour)
@@ -436,7 +436,6 @@ function weekLabel(kind: BotKind): '7d' | '週' {
 function Gauge({
   entry,
   host,
-  collapsed,
   compact,
   focused,
   open,
@@ -444,7 +443,6 @@ function Gauge({
 }: {
   entry: QuotaEntry
   host: string
-  collapsed: boolean
   /** 手機：條子縮成 chip，剩餘量用數字寫。 */
   compact: boolean
   focused: boolean
@@ -471,7 +469,7 @@ function Gauge({
   const disabledMap = useDisabledQuota()
   let windows: WindowBar[]
   if (agy) {
-    // agy 兩個桶都只有週窗，手機與收合也兩條都寫：各自管不同模型，挑一條會藏掉另一邊用完。
+    // agy 兩個桶都只有週窗，手機也兩條都寫：各自管不同模型，挑一條會藏掉另一邊用完。
     windows = [windowBar('G', seven, q?.seven_day, q?.updated_at), windowBar('C+G', seven2, q2?.seven_day, q2?.updated_at)]
     if (seven2 === null && q2 == null) windows = windows.slice(0, 1)
   } else
@@ -488,11 +486,11 @@ function Gauge({
       rivals.push(windowBar('F', fable, q?.fable, q?.updated_at))
     }
     windows = [rivals.reduce((best, w) => (moreUrgent(w, best) ? w : best), shown)]
-  } else if (collapsed) {
+  } else if (compact) {
     const w = worstWindow(q)
     const src = w.name === '5h' ? q?.five_hour : w.name === 'F' ? q?.fable : q?.seven_day
     windows = [windowBar(w.name === '7d' ? weekLabel(entry.kind) : w.name, w.pct, src, q?.updated_at)]
-  } else if (five === null && seven === null) {
+  } else if (five === null && seven === null && fable === null) {
     windows = [windowBar(weeklyOnlyKind(entry.kind) ? '週' : '5h', null, null, q?.updated_at)]
   } else {
     windows = []
@@ -1000,15 +998,15 @@ export function QuotaStrip({
     .sort()
     .pop()
 
-  const collapsed = !phone && fit.level === 2
+  const stacked = !phone && fit.level === 2
   /** CSS 也是 640px 那條線。 */
   const compact = phone
   // 全部帳號都畫完整量表（2026-09-11 使用者：「額度顯示是很重要的訊息，不要去省他的空間」）。
   const shown = ordered
   return (
-    <div className="quota-strip" ref={wrap} aria-label={quotaTitle(host)}>
+    <div className={`quota-strip${stacked ? ' stacked' : ''}`} ref={wrap} aria-label={quotaTitle(host)}>
       {/* 容器而非 button：checkbox 不能塞在 button 裡。 */}
-      <div className={`quota-open${collapsed ? ' collapsed' : ''}`}>
+      <div className="quota-open">
         {/* 更新 chip 放最左邊，避免夾在兩個 kind 間被誤認（2026-09-11 使用者）。手機搬到標題列 ★ 左邊（ChatPanel，2026-09-19 使用者）。 */}
         {phone ? null : <UpdateQuotaChip />}
         {/* 不掛主機名牌（2026-09-29 使用者）：標題列左邊的 `@host` 已經說了是哪台；tooltip／popover 標題仍寫主機。 */}
@@ -1043,7 +1041,6 @@ export function QuotaStrip({
               <Gauge
                 entry={entry}
                 host={host}
-                collapsed={collapsed || compact}
                 compact={compact}
                 focused={focused}
                 open={open}
