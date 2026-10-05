@@ -6,12 +6,14 @@
 //! - **一次部署**＝同一個 owner（`daemon-update-kick`）連續在試的那段：每次試窗口都回報到這裡（[`observe`]），換 commit 或換核准
 //!   都算同一次；換版拿到窗口、換版完成、或 [`STALE_SECS`] 沒再試（kick 放棄、請求取消）才算結束。
 //! - 從開始等窗口（核准的 `waiting_since`）起滿 [`NOTIFY_AFTER_SECS`] 還沒拿到，就**通知一次**：WS `deploy_wait`（網頁 header＋toast）
-//!   與 supervisor inbox `deploy_waiting`（巡檢收、叫醒；它有使用者手機上的 Remote Control）。之後只有擋的人換了、拿到窗口、
-//!   換版完成或放棄才更新（同一個 `id`，`rev` 遞增），不每 15 秒洗一則。
+//!   與 supervisor inbox `deploy_waiting`（巡檢收、叫醒；它有使用者手機上的 Remote Control）。之後只有使用者操作、自動放寬生效、
+//!   拿到窗口、換版完成或放棄才推 inbox（同一個 `id`，`rev` 遞增）；擋住名單變動只推 WS，不每 15 秒洗 inbox。
+//!   「拿到窗口→§3a abort 交還」同一個 commit 最多每 [`SWAP_CYCLE_THROTTLE_SECS`] 推一次。
 //! - 使用者在 header 按「現在換版」＝這次部署直接放寬（[`user_escalated_for`]，等同等滿門檻：working 不擋，送達臨界區、
 //!   別人的租約、讀不到狀態照樣擋），只對這次部署的自動核准有效；「先等」＝收起通知。
 //! - 狀態存在 `<data_dir>/deploy-wait.json`：換版本身就是重啟 daemon，新 daemon 開機讀回來才報得出「換好了」或「回滾了」。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -25,6 +27,8 @@ use crate::state::App;
 pub const NOTIFY_AFTER_SECS: i64 = 180;
 /// 這麼久沒再試窗口＝這次部署不等了（kick 每 5 分鐘一輪，一輪試 3 分鐘；留三輪的餘裕）。
 pub const STALE_SECS: i64 = 15 * 60;
+/// 「拿到窗口→3a ABORT→交還」循環同一 sha 最多每 30 分鐘一則（issue #856）。
+pub const SWAP_CYCLE_THROTTLE_SECS: i64 = 30 * 60;
 /// 結束的那一則在 `/api/state` 再留這麼久，重整的網頁還對得上最後一次更新。
 const KEEP_ENDED_SECS: i64 = 10 * 60;
 pub const FILE: &str = "deploy-wait.json";
@@ -65,13 +69,19 @@ pub struct Wait {
     pub escalates_at: Option<String>,
     /// 使用者按了「現在換版」。
     pub user_escalated: bool,
+    /// 等滿門檻已自動放寬（issue #856）。
+    #[serde(default)]
+    pub auto_escalated: bool,
     pub notified_at: Option<String>,
     /// 使用者按了「先等」：header 收起來（狀態照樣更新）。
     pub dismissed: bool,
     pub phase: Phase,
-    /// 通知發出後每一次有意義的變化 +1。
+    /// 通知發出後每一次有意義的狀態轉換 +1。
     pub rev: u32,
     pub ended_at: Option<String>,
+    /// 各 commit 上一次發出「拿到換版窗口」的時間，節流 3a ABORT 循環用（issue #856）。
+    #[serde(default)]
+    pub swap_announced_at: BTreeMap<String, String>,
 }
 
 fn path(app: &App) -> PathBuf {
@@ -96,15 +106,19 @@ fn secs_between(a: &str, b: &str) -> i64 {
     crate::supervisor::maintenance::waited_secs(a, b)
 }
 
-/// 要對外說的那一次變化。
+/// 要對外說的那一次狀態轉換（issue #856：同一個部署 sha 只在狀態轉換時推）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Announce {
+pub(crate) enum Announce {
     First,
-    Update,
+    UserAction,
+    AutoEscalated,
+    Swapping,
+    Done,
+    Abandoned,
 }
 
-/// 門檻到了就標成已通知（回 `First`）；已經通知過、而且這次有意義的變化（`changed`）就 `Update`。純函式，好測。
-fn evaluate(w: &mut Wait, changed: bool, now: &str) -> Option<Announce> {
+/// 門檻到了就標成已通知（回 `First`）；已經通知過、而且這次有意義的狀態轉換（`transition`）就對應回傳。純函式，好測。
+fn evaluate(w: &mut Wait, transition: Option<Announce>, now: &str) -> Option<Announce> {
     if w.notified_at.is_none() {
         if w.phase == Phase::Waiting && secs_between(&w.since, now) >= NOTIFY_AFTER_SECS {
             w.notified_at = Some(now.to_string());
@@ -113,40 +127,39 @@ fn evaluate(w: &mut Wait, changed: bool, now: &str) -> Option<Announce> {
         }
         return None;
     }
-    changed.then(|| {
+    transition.map(|a| {
         w.rev += 1;
-        Announce::Update
+        a
     })
 }
 
-/// 從 restart-window 的拒絕裡讀出誰在擋。
-fn blockers_of(err: &LcError) -> Option<(Vec<Blocker>, Option<String>)> {
+/// 從 restart-window 的拒絕裡讀出誰在擋，以及是否已自動放寬。
+fn blockers_of(err: &LcError) -> Option<(Vec<Blocker>, Option<String>, bool)> {
     let LcError::Conflict(v) = err else { return None };
     let mut out = Vec::new();
-    let safety = v.get("safety").or_else(|| v.get("detail").and_then(|d| d.get("safety")));
-    if let Some(s) = safety {
-        for (key, why) in [("working", "working"), ("delivering", "delivering"), ("unreadable", "unreadable")] {
-            for b in s.get(key).and_then(Value::as_array).into_iter().flatten() {
-                let name = b.get("name").and_then(Value::as_str).unwrap_or("?").to_string();
-                let bot_id = b.get("bot_id").and_then(Value::as_str).map(String::from);
-                if !out.iter().any(|x: &Blocker| x.bot_id == bot_id && x.why == why) {
-                    out.push(Blocker { bot_id, name, why: why.into() });
-                }
-            }
-        }
-        for l in s.get("held_leases").and_then(Value::as_array).into_iter().flatten() {
-            if l.get("own") != Some(&Value::Bool(true)) {
-                let owner = l.get("owner").and_then(Value::as_str).unwrap_or("?");
-                out.push(Blocker { bot_id: None, name: owner.to_string(), why: "lease".into() });
+    let safety = v.get("safety").or_else(|| v.get("detail").and_then(|d| d.get("safety")))?;
+    for (key, why) in [("working", "working"), ("delivering", "delivering"), ("unreadable", "unreadable")] {
+        for b in safety.get(key).and_then(Value::as_array).into_iter().flatten() {
+            let name = b.get("name").and_then(Value::as_str).unwrap_or("?").to_string();
+            let bot_id = b.get("bot_id").and_then(Value::as_str).map(String::from);
+            if !out.iter().any(|x: &Blocker| x.bot_id == bot_id && x.why == why) {
+                out.push(Blocker { bot_id, name, why: why.into() });
             }
         }
     }
-    let eta = v.get("escalates_at").and_then(Value::as_str).map(String::from);
-    Some((out, eta))
+    for l in safety.get("held_leases").and_then(Value::as_array).into_iter().flatten() {
+        if l.get("own") != Some(&Value::Bool(true)) {
+            let owner = l.get("owner").and_then(Value::as_str).unwrap_or("?");
+            out.push(Blocker { bot_id: None, name: owner.to_string(), why: "lease".into() });
+        }
+    }
+    let eta = v.get("escalates_at").or_else(|| v.get("detail").and_then(|d| d.get("escalates_at"))).and_then(Value::as_str).map(String::from);
+    let escalated = safety.get("escalated").and_then(Value::as_bool).unwrap_or(false);
+    Some((out, eta, escalated))
 }
 
 /// 每次試 restart 窗口之後回報（`service_daemon_swap_restart_window`）。
-pub async fn observe(app: &Arc<App>, owner: &str, approval_id: &str, commit: &str, outcome: Result<(), &LcError>) {
+pub async fn observe(app: &Arc<App>, owner: &str, approval_id: &str, commit: &str, outcome: Result<bool, &LcError>) {
     let since = match crate::supervisor::store::approval(&app.db, approval_id).await {
         Ok(Some(a)) => a.waiting_since().map(String::from),
         _ => None,
@@ -154,7 +167,8 @@ pub async fn observe(app: &Arc<App>, owner: &str, approval_id: &str, commit: &st
     let now = crate::db::now();
     let since = since.unwrap_or_else(|| now.clone());
     let mut out = Vec::new();
-    {
+    let mut emit_ws = false;
+    let ws_wait = {
         let mut g = app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // 換版中又來試＝上一次拿到窗口卻沒換成（窗口逾時交還），還是同一次部署。
         let continuing = g.as_ref().is_some_and(|w| {
@@ -166,7 +180,7 @@ pub async fn observe(app: &Arc<App>, owner: &str, approval_id: &str, commit: &st
                     old.phase = Phase::Abandoned;
                     old.ended_at = Some(now.clone());
                     old.rev += 1;
-                    out.push((Announce::Update, old));
+                    out.push((Announce::Abandoned, old));
                 }
             }
             *g = Some(Wait {
@@ -179,55 +193,86 @@ pub async fn observe(app: &Arc<App>, owner: &str, approval_id: &str, commit: &st
                 blockers: Vec::new(),
                 escalates_at: None,
                 user_escalated: false,
+                auto_escalated: false,
                 notified_at: None,
                 dismissed: false,
                 phase: Phase::Waiting,
                 rev: 0,
                 ended_at: None,
+                swap_announced_at: BTreeMap::new(),
             });
         }
         let w = g.as_mut().expect("just set");
-        let mut changed = false;
         if crate::db::cmp_ts(&since, &w.since).is_lt() {
             w.since = since;
         }
         w.approval_id = approval_id.to_string();
         if w.commit != commit {
             w.commit = commit.to_string();
-            changed = true;
         }
         w.last_attempt_at = now.clone();
+        let mut transition = None;
         match outcome {
-            Ok(()) => {
+            Ok(auto_escalated) => {
+                let entering_swap = w.phase != Phase::Swapping;
                 w.phase = Phase::Swapping;
                 w.blockers.clear();
-                changed = true;
+                if auto_escalated && !w.user_escalated {
+                    w.auto_escalated = true;
+                }
+                if entering_swap && w.notified_at.is_some() {
+                    // 拿到窗口：同一個 sha 最多每 30 分鐘一則（issue #856）。
+                    w.swap_announced_at.retain(|_, at| secs_between(at, &now) < SWAP_CYCLE_THROTTLE_SECS);
+                    let throttle_ok = w.swap_announced_at.get(commit).is_none_or(|t| secs_between(t, &now) >= SWAP_CYCLE_THROTTLE_SECS);
+                    if throttle_ok {
+                        w.swap_announced_at.insert(commit.to_string(), now.clone());
+                        transition = Some(Announce::Swapping);
+                    } else {
+                        emit_ws = true;
+                    }
+                }
             }
             Err(e) => {
                 if w.phase == Phase::Swapping {
                     w.phase = Phase::Waiting;
-                    changed = true;
+                    // 3a ABORT 交還：回到 waiting，不推 inbox（循環同一 sha 最多 30 分鐘一則，issue #856），但發 WS
+                    emit_ws = true;
                 }
-                if let Some((blockers, eta)) = blockers_of(e) {
+                if let Some((blockers, eta, escalated)) = blockers_of(e) {
                     // 名單一樣、只是順序不同不算換人。
                     let key = |b: &[Blocker]| {
                         let mut k: Vec<String> = b.iter().map(|x| format!("{}|{:?}|{}", x.why, x.bot_id, x.name)).collect();
                         k.sort();
                         k
                     };
-                    if key(&blockers) != key(&w.blockers) {
-                        w.blockers = blockers;
-                        changed = true;
+                    let blockers_changed = key(&blockers) != key(&w.blockers);
+                    let auto_escalated_now = w.phase == Phase::Waiting
+                        && !w.user_escalated
+                        && !w.auto_escalated
+                        && escalated;
+                    w.blockers = blockers;
+                    w.escalates_at = if escalated { None } else { eta.or_else(|| w.escalates_at.clone()) };
+                    if auto_escalated_now {
+                        w.auto_escalated = true;
+                        transition = Some(Announce::AutoEscalated);
+                    } else if blockers_changed {
+                        // 擋住名單變動不單獨推 inbox（issue #856）；只發 WS 讓 web header 更新
+                        emit_ws = true;
                     }
-                    w.escalates_at = eta;
                 }
             }
         }
         // 還沒通知就拿到窗口的：不必讓使用者知道。
-        if let Some(a) = evaluate(w, changed, &now) {
+        if let Some(a) = evaluate(w, transition, &now) {
             out.push((a, w.clone()));
         }
+        let ws_w = (out.is_empty() && emit_ws && w.notified_at.is_some()).then(|| w.clone());
         save(app, g.as_ref());
+        ws_w
+    };
+    if let Some(w) = ws_wait {
+        let v = view_of(&w, &now);
+        app.emit("deploy_wait", json!({"wait": v, "first": false})).await;
     }
     for (a, w) in out {
         announce(app, a, &w).await;
@@ -247,14 +292,16 @@ pub async fn tick(app: &Arc<App>) {
                 w.ended_at = Some(now.clone());
                 if w.notified_at.is_some() {
                     w.rev += 1;
-                    out = Some((Announce::Update, w.clone()));
+                    out = Some((Announce::Abandoned, w.clone()));
                 }
                 save(app, g.as_ref());
             }
             Phase::Waiting => {
-                if let Some(a) = evaluate(w, false, &now) {
-                    out = Some((a, w.clone()));
-                    save(app, g.as_ref());
+                if w.notified_at.is_none() {
+                    if let Some(a) = evaluate(w, None, &now) {
+                        out = Some((a, w.clone()));
+                        save(app, g.as_ref());
+                    }
                 }
             }
             Phase::Done | Phase::Abandoned => {
@@ -270,7 +317,7 @@ pub async fn tick(app: &Arc<App>) {
                     w.ended_at = Some(now.clone());
                     if w.notified_at.is_some() {
                         w.rev += 1;
-                        out = Some((Announce::Update, w.clone()));
+                        out = Some((Announce::Abandoned, w.clone()));
                     }
                     save(app, g.as_ref());
                 }
@@ -294,17 +341,23 @@ async fn startup_as(app: &Arc<App>, running_sha: &str) {
     let mut out = None;
     if w.phase == Phase::Swapping {
         let same = !running_sha.is_empty() && (w.commit.starts_with(running_sha) || running_sha.starts_with(&w.commit));
-        w.phase = if same { Phase::Done } else { Phase::Abandoned };
+        let announce_type = if same {
+            w.phase = Phase::Done;
+            Announce::Done
+        } else {
+            w.phase = Phase::Abandoned;
+            Announce::Abandoned
+        };
         w.ended_at = Some(now);
         if w.notified_at.is_some() {
             w.rev += 1;
-            out = Some(w.clone());
+            out = Some((announce_type, w.clone()));
         }
     }
     save(app, Some(&w));
     *app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(w);
-    if let Some(w) = out {
-        announce(app, Announce::Update, &w).await;
+    if let Some((a, w)) = out {
+        announce(app, a, &w).await;
     }
 }
 
@@ -321,12 +374,19 @@ pub fn summary(w: &Wait, now: &str) -> String {
         Phase::Waiting => {
             let when = if w.user_escalated {
                 "使用者已按「現在換版」，working 不再擋".to_string()
+            } else if w.auto_escalated {
+                "已自動放寬，working 不再擋".to_string()
+            } else if w.dismissed {
+                "使用者已按「先等」，通知收起".to_string()
             } else {
                 w.escalates_at.as_deref().map(|t| format!("預計 {t} 自動放寬")).unwrap_or_else(|| "已放寬".into())
             };
             format!("部署 {short} 等換版窗口 {mins} 分鐘了，被 {who} 擋住；{when}。請使用者調度：網頁 header「現在換版」或「先等」。")
         }
-        Phase::Swapping => format!("部署 {short} 拿到換版窗口，換版中（等了 {mins} 分鐘）。"),
+        Phase::Swapping => {
+            let relaxed = if w.auto_escalated { "（已自動放寬）" } else { "" };
+            format!("部署 {short}{relaxed} 拿到換版窗口，換版中（等了 {mins} 分鐘）。")
+        }
         Phase::Done => format!("部署 {short} 換版完成（等了 {mins} 分鐘）。"),
         Phase::Abandoned => format!("部署 {short} 不等了（等了 {mins} 分鐘，沒拿到窗口或換版後回滾），之後的部署會重新計時。"),
     }
@@ -341,6 +401,7 @@ fn view_of(w: &Wait, now: &str) -> Value {
         "blockers": w.blockers,
         "escalates_at": w.escalates_at,
         "user_escalated": w.user_escalated,
+        "auto_escalated": w.auto_escalated,
         "dismissed": w.dismissed,
         "phase": w.phase,
         "rev": w.rev,
@@ -363,10 +424,22 @@ pub fn view(app: &App) -> Value {
 async fn announce(app: &Arc<App>, a: Announce, w: &Wait) {
     let now = crate::db::now();
     let v = view_of(w, &now);
-    tracing::info!(id = %w.id, rev = w.rev, phase = ?w.phase, first = (a == Announce::First), "{}", summary(w, &now));
-    app.emit("deploy_wait", json!({"wait": v, "first": a == Announce::First})).await;
+    let first = a == Announce::First;
+    let wake = first; // 只記錄類的 deploy_waiting 不設 wake（issue #856）
+    tracing::info!(id = %w.id, rev = w.rev, phase = ?w.phase, first, wake, "{}", summary(w, &now));
+    app.emit("deploy_wait", json!({"wait": v, "first": first})).await;
     let key = format!("deploy_waiting:{}:{}", w.id, w.rev);
-    if let Err(e) = crate::supervisor::store::push_inbox(&app.db, &key, "deploy_waiting", None, None, None, &json!({"deploy_wait": v, "text": summary(w, &now)})).await {
+    if let Err(e) = crate::supervisor::store::push_inbox(
+        &app.db,
+        &key,
+        "deploy_waiting",
+        None,
+        None,
+        None,
+        &json!({"deploy_wait": v, "text": summary(w, &now), "wake": wake}),
+    )
+    .await
+    {
         tracing::warn!(error = %e, "could not tell AGM about the deploy wait");
     }
 }
@@ -402,7 +475,7 @@ fn user_only(p: &crate::api::RequestPrincipal) -> Result<(), LcError> {
 
 /// 「現在換版」／「先等」共用：找到還在等的這一次部署，改完存檔、廣播。
 async fn act(app: &Arc<App>, id: &str, f: impl FnOnce(&mut Wait)) -> Result<Value, LcError> {
-    let w = {
+    let (w, announced) = {
         let mut g = app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(w) = g.as_mut().filter(|w| w.id == id) else {
             return Err(LcError::NotFound("deploy_wait".into()));
@@ -411,13 +484,23 @@ async fn act(app: &Arc<App>, id: &str, f: impl FnOnce(&mut Wait)) -> Result<Valu
             return Err(LcError::conflict("deploy_not_waiting", json!({"phase": w.phase})));
         }
         f(w);
+        let announced = if w.notified_at.is_some() {
+            w.rev += 1;
+            true
+        } else {
+            false
+        };
         let w = w.clone();
         save(app, Some(&w));
-        w
+        (w, announced)
     };
-    let v = view_of(&w, &crate::db::now());
-    app.emit("deploy_wait", json!({"wait": v, "first": false})).await;
-    Ok(v)
+    if announced {
+        announce(app, Announce::UserAction, &w).await;
+    } else {
+        let v = view_of(&w, &crate::db::now());
+        app.emit("deploy_wait", json!({"wait": v, "first": false})).await;
+    }
+    Ok(view_of(&w, &crate::db::now()))
 }
 
 /// 「現在換版」：這次部署直接放寬。核心（測試直接打這支，不碰排程器）。

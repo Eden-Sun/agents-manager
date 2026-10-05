@@ -4362,12 +4362,14 @@ incident 以資源為單位持久化（`supervisor_incidents`，`(kind, resource
   照核准的那顆建，HEAD 留到下一輪（issue #439：main 每 5 分鐘一動、kick 每 5 分鐘一輪，已核准的那張每輪被取代就永遠派不出去）。只有還在 pending 的才換成新 commit。
 - 例行更新腳本的順序是**先取回／申請自己的核准，再問 `lease safety --approval <id>`**：升級是綁在那筆核准等了多久，
   不帶就是用「最早那筆還活著的核准」判斷自己要不要繼續，升級在這條路上等於死碼（review 2026-09-16）。
-- **部署等太久就請使用者調度**（使用者 2026-10-04：「等待部署超過 3 分鐘，馬上通知 user 調度」，`daemon/src/deploy_wait.rs`）：
+- **部署等太久就請使用者調度**（使用者 2026-10-04：「等待部署超過 3 分鐘，馬上通知 user 調度」，`daemon/src/deploy_wait.rs`，issue #856）：
   例行自動部署與立即部署都走 daemon-swap → restart-window，每次試窗口都回報。**一次部署**＝同一個 owner 連續在試的那段（換 commit、換核准都算同一次；
   拿到窗口換好、15 分鐘沒再試、或換版後回滾才結束）。從開始等窗口（核准的 `waiting_since`）滿 **3 分鐘**還沒拿到就通知一次：WS `deploy_wait`（網頁側欄標題列
-  「⏳ 部署等 N 分」＋toast）與 inbox `deploy_waiting`（巡檢收、叫醒，由它經 Remote Control 告訴使用者）；內容是要上的 commit、等了多久、被誰擋
-  （working／送達中的 bot 名、讀不到狀態、別人的租約）、預計幾點自動放寬。之後只有擋的人換了、拿到窗口、換好（新 daemon 開機確認跑的是那顆）或放棄才更新同一則
-  （同一個 `id`、`rev` 遞增），不洗版；狀態存 `<data_dir>/deploy-wait.json`，跨過換版那次重啟。`GET /api/state` 的 `deploy_wait` 供重整對帳。
+  「⏳ 部署等 N 分」＋toast）與 inbox `deploy_waiting`（巡檢收、叫醒 `wake:true`，由它經 Remote Control 告訴使用者）；內容是要上的 commit、等了多久、被誰擋
+  （working／送達中的 bot 名、讀不到狀態、別人的租約）、預計幾點自動放寬。之後只在狀態轉換時推 inbox（同一個 `id`、`rev` 遞增）：使用者按鈕（現在換版／先等）、
+  自動放寬生效、拿到窗口、換好（新 daemon 開機確認跑的是那顆）或放棄才更新同一則；擋住名單變動不單獨推 inbox（WS frame 照常推送供網頁即時更新名單），
+  且「拿到窗口→§3a 複查 abort 退回交還」的循環同一 sha 最多每 30 分鐘推一則；`wait.auto_escalated` 表示等待門檻已自動放寬。除首次超過 3 分鐘設 `wake:true` 叫醒巡檢外，其餘轉換皆為 `wake:false` 僅做紀錄。
+  狀態存 `<data_dir>/deploy-wait.json`，跨過換版那次重啟。`GET /api/state` 的 `deploy_wait` 供重整對帳。
   使用者調度（只收 UI token）：「現在換版」＝這次部署的自動核准當成已等滿門檻（working 不擋，送達臨界區、別人的租約、讀不到狀態照樣擋），只認同一個 owner、
   `decided_by=service(daemon-swap)` 的核准，AGM 親手核的與下一次部署都不受影響，並順手叫排程器跑一輪；「先等」＝收起通知，到門檻照樣自動放寬。
   放寬持續到**這次部署結束**（換好或放棄），拿到窗口在換（`Swapping`）時仍算數；daemon-swap 拿到窗口後換 binary 前的複查（§3a）帶 restart-window 回應裡的

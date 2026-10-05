@@ -239,9 +239,12 @@ fn known_route(kind: &str, payload: &Value, review_role: Option<&str>) -> Option
         // `persona_changed`：總管的常駐指示被改寫了（issue #462）。沒帶身分的呼叫端也改得動
         // （共用 UI token 的界線留在 #447），所以至少要有人看見——巡檢收、叫醒。
         // `bot_lost`：herdr 掉了一顆 autostart bot 的 agent（重啟／斷線），對帳收成 exited 後 daemon 已照退避再起一次或放棄（`autostart_revive`）。
-        | "child_retire_refused" | "persona_changed" | "bot_lost"
-        // `deploy_waiting`：部署等換版窗口超過 3 分鐘（之後狀態變化同一個 id 更新），要立刻告訴使用者、請使用者調度（SPEC §18.10）。
-        | "deploy_waiting" => r(Role::Patrol, true),
+        | "child_retire_refused" | "persona_changed" | "bot_lost" => r(Role::Patrol, true),
+        // `deploy_waiting`：部署等換版窗口超過 3 分鐘要立刻告訴使用者、請使用者調度（SPEC §18.10）。只記錄類的更新不設 wake（issue #856）。
+        "deploy_waiting" => r(
+            Role::Patrol,
+            payload.get("wake").and_then(Value::as_bool).unwrap_or(true),
+        ),
         // 恢復不叫醒人：開的那一筆已經叫過，關掉只要記下來。
         "incident_resolved" => r(Role::Patrol, false),
         // 協調者那一半也算：它倒了或在等額度，能發現的只有巡檢（review 2026-09-16 #7）。
@@ -922,6 +925,9 @@ mod tests {
             Route { role: Role::Patrol, wake: false }
         );
         assert_eq!(route("bot_request", &json!({}), None), Route { role: Role::Responder, wake: true });
+        assert_eq!(route("deploy_waiting", &json!({"wake": true}), None), Route { role: Role::Patrol, wake: true });
+        assert_eq!(route("deploy_waiting", &json!({"wake": false}), None), Route { role: Role::Patrol, wake: false });
+        assert_eq!(route("deploy_waiting", &json!({}), None), Route { role: Role::Patrol, wake: true });
     }
 
     /// 從原始碼撈出「寫進 supervisor_inbox 的 kind」：`push_inbox(…)`／`push_inbox_tx(…)` 的第三個參數、
