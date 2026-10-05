@@ -174,7 +174,13 @@ pub async fn affected(app: &Arc<App>, host: &str) -> anyhow::Result<Affected> {
         }
         let parent = bot.parent_bot_id.clone().filter(|p| !p.is_empty());
         if bot.managed_by == "child" || parent.is_some() {
-            out.children.push(LostChild { bot_id: bot.id, name: bot.name, parent_bot_id: parent, title: run.agent_title.clone() });
+            let name = if bot.managed_by == "child" {
+                let project_label = crate::db::project(&app.db, &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
+                crate::config::short_child_name(&project_label, &bot.name)
+            } else {
+                bot.name
+            };
+            out.children.push(LostChild { bot_id: bot.id, name, parent_bot_id: parent, title: run.agent_title.clone() });
             continue;
         }
         let why = if run.agent_status == "working" {
@@ -1023,22 +1029,30 @@ mod tests {
     #[tokio::test]
     async fn upgrades_restarts_resumes_and_tells_the_parent_about_lost_children() {
         let env = tt::env().await;
+        sqlx::query("UPDATE projects SET label = ? WHERE id = ?")
+            .bind("智選hub")
+            .bind(&env.project_id)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
         let fake = Fake::new(&env, "0.9.1", "0.9.3");
         let parent = top(&env, "boss", "idle").await;
-        let kid = child_of(&env, &parent, "boss-fix", "修 events_lost").await;
+        let kid = child_of(&env, &parent, "hub-dgs9j9-dev", "修 events_lost").await;
         let mut rx = env.app.subscribe();
         let (accepted, done) = go(&env, &fake, "0.9.3").await;
 
         assert_eq!(accepted["started"], true);
         assert_eq!(accepted["will_resume"], json!([{"bot_id": parent, "name": "boss"}]));
-        assert_eq!(accepted["children_lost"], json!([{"bot_id": kid, "name": "boss-fix", "parent_bot_id": parent}]));
+        assert_eq!(accepted["children_lost"], json!([{"bot_id": kid, "name": "dev", "parent_bot_id": parent}]));
 
         assert_eq!(done["ok"], true, "{done}");
         assert_eq!(done["from"], "0.9.1");
         assert_eq!(done["to"], "0.9.3");
         assert_eq!(done["resumed"], json!([{"bot_id": parent, "name": "boss", "run_id": format!("run-{parent}")}]));
         assert_eq!(done["failed"], json!([]));
-        assert_eq!(done["children_lost"][0]["name"], "boss-fix");
+        assert_eq!(done["children_lost"][0]["name"], "dev");
+        let stored_name: String = sqlx::query_scalar("SELECT name FROM bots WHERE id = ?").bind(&kid).fetch_one(&env.app.db).await.unwrap();
+        assert_eq!(stored_name, "hub-dgs9j9-dev", "the API display projection does not rewrite the database row");
         assert!(done.get("reason").is_none());
 
         assert_eq!(fake.installed(), "herdr 0.9.3");
@@ -1049,7 +1063,7 @@ mod tests {
         let notes = fake.notified.lock().unwrap().clone();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].0, parent);
-        assert!(notes[0].1.contains("boss-fix") && notes[0].1.contains("修 events_lost"), "{}", notes[0].1);
+        assert!(notes[0].1.contains("dev") && notes[0].1.contains("修 events_lost"), "{}", notes[0].1);
         assert!(!window_open(&env.app).await, "結束時關窗口");
         assert!(running_list(&env.app).is_empty());
 

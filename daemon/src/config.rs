@@ -946,6 +946,45 @@ pub fn agent_name(project_label: &str, bot_id: &str) -> String {
     }
 }
 
+/// Drop redundant project bot identities from an adopted child's nickname.
+///
+/// A child command can itself pass a full `<project slug>-<bot id tail>` name as its suffix.
+/// Herdr still adds the actual parent's name, so the child then appears as
+/// `<actual parent>-<other project bot>-<short suffix>`. The second identity is not useful as
+/// the bot's display name. This only formats the nickname; it does not change herdr names.
+pub fn short_child_name(project_label: &str, name: &str) -> String {
+    const HERDR_NAME_MAX: usize = 24;
+    const BOT_ID_TAIL: usize = 6;
+
+    let mut slug = label_slug(project_label);
+    let room = HERDR_NAME_MAX.saturating_sub(BOT_ID_TAIL + 1);
+    if slug.len() > room {
+        slug.truncate(room);
+        slug = slug.trim_end_matches('-').to_string();
+    }
+    if slug.is_empty() {
+        slug = "b".to_string();
+    }
+    let prefix = format!("{slug}-");
+
+    let mut short = name;
+    loop {
+        let Some(after_slug) = short.strip_prefix(&prefix) else { break };
+        let Some(id_tail) = after_slug.get(..BOT_ID_TAIL) else { break };
+        if !id_tail.bytes().all(|c| c.is_ascii_alphanumeric()) {
+            break;
+        }
+        let Some(suffix) = after_slug.get(BOT_ID_TAIL + 1..).filter(|_| after_slug.as_bytes().get(BOT_ID_TAIL) == Some(&b'-')) else {
+            break;
+        };
+        if !valid_bot_name(suffix) || suffix.len() >= short.len() {
+            break;
+        }
+        short = suffix;
+    }
+    short.to_string()
+}
+
 pub fn valid_identity_name(name: &str) -> bool {
     valid_slug_name(name)
 }
@@ -1536,7 +1575,7 @@ mod v40_tests {
 
 #[cfg(test)]
 mod agent_name_tests {
-    use super::{agent_name, valid_bot_name};
+    use super::{agent_name, short_child_name, valid_bot_name};
 
     #[test]
     fn prefix_plus_id_tail() {
@@ -1548,6 +1587,21 @@ mod agent_name_tests {
         assert!(n.len() <= 24, "{n}");
         assert!(n.ends_with("-r963b9"));
         assert!(32 - n.len() >= 8, "子 agent 至少留得下 `-` 與 7 字尾碼：{n}");
+    }
+
+    #[test]
+    fn short_child_name_drops_redundant_project_agent_prefixes() {
+        assert_eq!(short_child_name("智選hub", "hub-dgs9j9-dev"), "dev");
+        assert_eq!(short_child_name("智選hub", "hub-dgs9j9-sheet"), "sheet");
+        assert_eq!(short_child_name("智選hub", "hub-dgs9j9-code-review"), "code-review");
+        assert_eq!(short_child_name("智選hub", "hub-dgs9j9-hub-kytpg9-sheet"), "sheet");
+        assert_eq!(short_child_name("智選hub", "hub-dgs9j9"), "hub-dgs9j9", "bare bot names are not shortened");
+        assert_eq!(short_child_name("智選hub", "feature-sheet"), "feature-sheet", "ordinary nicknames are unchanged");
+
+        let long_label = "a-very-long-project-label-indeed-and-more";
+        let prefix = agent_name(long_label, "01M1S2SQPSYMQ8B1VQ50R963B9");
+        let suffix = format!("{prefix}-sheet");
+        assert_eq!(short_child_name(long_label, &suffix), "sheet", "the generated label slug is truncated to herdr's parent-name budget");
     }
 
     #[test]

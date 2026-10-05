@@ -695,6 +695,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
         .unwrap_or_default();
 
     let projects: Vec<db::Project> = db::live_projects(&app.db).await?.into_iter().filter(|p| p.host == host).collect();
+    let project_labels: HashMap<String, String> = projects.iter().map(|p| (p.id.clone(), p.label.clone())).collect();
     // #708：移交出去的專案整個不碰——workspace 映射、run、child、pane 都歸接手的 daemon。
     let handed_off: std::collections::HashSet<&str> =
         projects.iter().filter(|p| p.handed_off_to.is_some()).map(|p| p.id.as_str()).collect();
@@ -1089,16 +1090,21 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
         let by_tab_named = by_tab.filter(|p| prefix_score(&p.agent_name, name) > 0);
         let Some(entry) = by_hint.or(by_tab_named).or(by_prefix).or(by_tab) else { continue };
         let (parent_name, parent) = (&entry.agent_name, &entry.bot);
-        let child_name = match prefix_score(parent_name, name) {
+        let raw_child_name = match prefix_score(parent_name, name) {
             0 => child_name_from_agent(name),
             n => {
                 let suffix = &name[n + 1..];
                 if crate::config::valid_bot_name(suffix) { suffix.to_string() } else { child_name_from_agent(name) }
             }
         };
+        // Herdr already stripped the actual parent prefix above. If the requested child suffix
+        // contains another full project bot identity (e.g. `hub-dgs9j9-sheet`), keep only the
+        // concise nickname; the actual herdr name written to `runs.agent_name` remains intact.
+        let project_label = project_labels.get(&parent.project_id).map(String::as_str).unwrap_or("");
+        let child_name = crate::config::short_child_name(project_label, &raw_child_name);
         let kind = child_kind(&client, agent, &parent.kind).await;
         // One failed child is logged and skipped; a `?` here aborted the whole host (review 2026-09-12 #2).
-        match adopt_child(app, host, &client, &session, agent, name, parent, &child_name, &kind).await {
+        match adopt_child(app, host, &client, &session, agent, name, parent, &child_name, &raw_child_name, &kind).await {
             Ok(bot_id) => {
                 claimed.insert(name.to_string());
                 if by_hint.is_some() {
@@ -1193,8 +1199,9 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
 }
 
 /// Returns the bot id. Lookup keyed on parent + name: name alone hit another parent's same-named
-/// child (review 2026-09-12 #2). A short name already taken in the project falls back to the full
-/// herdr agent name (unique); both spellings are looked up.
+/// child (review 2026-09-12 #2). `raw_child_name` also matches rows written before redundant
+/// project-agent prefixes were shortened. A short name already taken in the project falls back
+/// to the full herdr agent name (unique).
 #[allow(clippy::too_many_arguments)]
 async fn adopt_child(
     app: &Arc<App>,
@@ -1205,6 +1212,7 @@ async fn adopt_child(
     name: &str,
     parent: &db::Bot,
     child_name: &str,
+    raw_child_name: &str,
     kind: &str,
 ) -> anyhow::Result<String> {
     if app.isolated() {
@@ -1228,13 +1236,15 @@ async fn adopt_child(
     let full_name = child_name_from_agent(name);
     let existing: Option<String> = sqlx::query_scalar(
         "SELECT id FROM bots WHERE project_id = ? AND parent_bot_id = ? AND managed_by = 'child' AND deleted_at IS NULL
-         AND name IN (?, ?) ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END LIMIT 1",
+         AND name IN (?, ?, ?) ORDER BY CASE WHEN name = ? THEN 0 WHEN name = ? THEN 1 ELSE 2 END LIMIT 1",
     )
     .bind(&parent.project_id)
     .bind(&parent.id)
     .bind(child_name)
+    .bind(raw_child_name)
     .bind(&full_name)
     .bind(child_name)
+    .bind(raw_child_name)
     .fetch_optional(&app.db)
     .await?;
     let bot_id = match existing {
@@ -1696,7 +1706,7 @@ mod compat_tests {
         let guard = app.bot_lock(&parent.id).await.lock_owned().await;
         let (app2, client2, parent2, agent2) = (app.clone(), client.clone(), parent.clone(), agent.clone());
         let mut adoption = tokio::spawn(async move {
-            super::adopt_child(&app2, "local", &client2, "test", &agent2, "proj-adoption-parent-kid", &parent2, "kid", "claude").await
+            super::adopt_child(&app2, "local", &client2, "test", &agent2, "proj-adoption-parent-kid", &parent2, "kid", "kid", "claude").await
         });
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), &mut adoption).await.is_err(),
@@ -3840,6 +3850,57 @@ mod compat_tests {
             .await
             .expect("adopted under its short name");
         assert_eq!(sib.parent_bot_id.as_deref(), Some(parent.as_str()), "the name says the top bot opened it, not verify");
+    }
+
+    #[tokio::test]
+    async fn a_child_name_with_a_redundant_project_agent_prefix_is_stored_short() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let client = crate::herdr::HerdrClient::new(env.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let child_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let project_label: String = sqlx::query_scalar("SELECT label FROM projects WHERE id=?")
+            .bind(&env.project_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+
+        let parent = a_bot(&env, "ops-web").await;
+        let redundant_prefix_bot = a_bot(&env, "former-parent").await;
+        let parent_agent = crate::config::agent_name(&project_label, &parent);
+        let redundant_prefix = crate::config::agent_name(&project_label, &redundant_prefix_bot);
+        let herdr_child_name = format!("{parent_agent}-{redundant_prefix}-sheet");
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, tab_id, agent_name, herdr_session, started_at)
+             VALUES (?,?,'running','idle',?,?,?,?,'test',?)",
+        )
+        .bind(db::ulid())
+        .bind(&parent)
+        .bind(&ws.workspace_id)
+        .bind(&root.pane_id)
+        .bind(&root.tab_id)
+        .bind(&parent_agent)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *env.herdr.agents.lock().unwrap() = vec![
+            json!({"name": parent_agent.clone(), "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": root.tab_id, "pane_id": root.pane_id, "cwd": "/tmp/p"}),
+            json!({"name": herdr_child_name.clone(), "agent": "claude", "agent_status": "idle",
+                   "workspace_id": ws.workspace_id, "tab_id": child_pane.tab_id, "pane_id": child_pane.pane_id, "cwd": "/tmp/p"}),
+        ];
+
+        super::reconcile_host(&app, crate::config::LOCAL_HOST).await.unwrap();
+
+        let child = sqlx::query_as::<_, db::Bot>("SELECT * FROM bots WHERE parent_bot_id=? AND managed_by='child' AND deleted_at IS NULL")
+            .bind(&parent)
+            .fetch_one(&app.db)
+            .await
+            .expect("child row adopted");
+        assert_eq!(child.name, "sheet", "the embedded full project-agent prefix is redundant display text");
+        let run = run_of(&app, &child.id).await.unwrap();
+        assert_eq!(run.agent_name.as_deref(), Some(herdr_child_name.as_str()), "herdr's parent-prefixed agent name stays unchanged");
     }
 
     /// issue #82：native `SubagentStart`／`SubagentStop`（頂層 bot 自己行程內的 Task 工具呼叫，跟

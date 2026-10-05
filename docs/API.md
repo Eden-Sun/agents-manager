@@ -2238,7 +2238,7 @@ POST／PATCH 還收到這個欄位（舊網頁快取）時照收、直接忽略�
 
 - daemon 起的每個 agent 帶一段預設人設 `lifecycle::child_agent_rules`（接在 `bot.persona` 前面，三種 kind 同一份）；claude 另外拿到改寫過的 herdr skill。
 - 對帳時 herdr 裡沒被 bot 認領的 agent 會建成子 bot：`managed_by = "child"`、`parent_bot_id`、kind 取 herdr 偵測（偵測不到沿用父的）、不注入 hook，並建 `adopted = 1` 的 run。
-  認父線索血緣（同 tab）優先，其次名字前綴 `<父 agent_name>-<字尾>`。子 bot `name` 取字尾，否則 herdr agent 名。
+  認父線索血緣（同 tab）優先，其次名字前綴 `<父 agent_name>-<字尾>`。`herdr agent start` 的名稱是 `start` 後的位置參數，PATH shim 會在其前補實際 parent 名。子 bot `name` 取字尾；若字尾又以重複的 `<專案 slug>-<bot id 尾 6 碼>-` 開頭，會移除該前綴後儲存。herdr 的完整 agent 名與 32 字元限制不變；既有 child 的重複前綴在 `/api/state` 與 herdr 更新的 child-loss 清單投影時移除，不回寫 DB。沒有可識別前綴時沿用 herdr 名；短名撞到同專案 live bot 仍改存完整 herdr 名。
 - 身份從子 agent 行程的環境變數判定（SPEC §16.6）；`model` / `effort` 從 `pane.process_info` argv 反推（grok 可退回終端標題 `Grok 4.6 (xhigh)`），只補空值。
 - PATH 上的 herdr shim 自動補命名前綴、把帳號與 hook 環境帶進子 pane（SPEC §6.5b）。
 - `GET /api/state` 的 bot 物件：`parent_bot_id`（頂層 `null`）、`managed_by`。子 bot 不進 config.toml；pane 消失即 `deleted_at`（對話保留）。UI 側欄縮排掛在父 bot 底下。

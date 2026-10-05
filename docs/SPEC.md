@@ -1669,7 +1669,7 @@ hint 可用，退回規則 2／3——這條沒有、也不打算改掉子代 ho
 **hint 讀不到不等於沒有 hint**（#94 重開）：`spawn_hints` 這一輪 SELECT 失敗（busy／I/O）時，hint 可能好好地在表裡——退回規則 2、3
 正好會把新 tab 裡的一排子代理串回鏈。所以這一輪**一顆都不認領**，排一輪 15 秒後的補跑對帳（同 §6.5.2 第 2 條的延後機制）；
 讀到空的（`Ok`、沒有列）才是真的沒有，照舊退回規則 2、3。認領：`managed_by='child'`、`parent_bot_id`、`adopted=1` 的 run；同一父 bot 底下同名的 live child 直接重用。
-子 bot `name`：有前綴取字尾，否則用 herdr agent 名（去空白與 `@,:;`、截 32 字）。字尾在專案裡已被別人用掉時改存完整 herdr agent 名（herdr 保證唯一）。
+子 bot `name`：先去掉實際 parent 的 herdr 名稱前綴，再去掉 child suffix 中重複的專案 bot agent 前綴（`<專案 slug>-<bot id 尾 6 碼>-`），保存剩下的短名；herdr 名稱本身仍維持 `<parent>-<suffix>` 與 32 字元預算。沒有可識別前綴時沿用 herdr 名（去空白與 `@,:;`、截 32 字）。短名已被專案中的 live bot 使用時仍改存完整 herdr 名，以保持唯一。既有 child 列的重複前綴只在 `GET /api/state` 與 herdr 更新的 child-loss 清單顯示時移除，不改 DB，避免啟動時改名撞上專案唯一索引或改變歷史資料。
 每顆認領各自成敗：失敗只 log 跳過，不中止整台主機的對帳。
 
 **子 agent 退役**：子 agent 只活在它的 pane 裡，pane 沒了就退役（`bots.deleted_at`，對話保留）。**還原**走既有的 `POST /api/bots/{id}/restore`（API §10.4a；子 agent 不開 run；CLI `agm bot restore <id>`），不直接改 DB。還原後記十分鐘寬限期：這段期間 reconcile 不會只因沒有 active run 而退休，讓父 bot 有時間用 herdr 在原 pane 重開；寬限期到仍未回來就照原規則退休。寬限期存於 `supervisor_notes`，daemon 重啟後仍有效（#397）。退役寫入前會在同一個寫交易內重新檢查寬限期與 restart 保護，因此已經開始的 reconcile pass 也不能在還原提交後立即把 child 再退役。**子 agent 的 `start`／`restart` 一律 409 `child_restart_forbidden`**：pane 是父 bot 用 herdr 開的，daemon 不代開、也不原地重啟（對子 agent 下 restart 而 pane 已不在，反而讓 reconcile 把它退役）；一鍵重啟（§6.9）也跳過子 agent（`skipped` 理由 `child`，2026-09-22）。若內部原地重啟收到 herdr 的 `agent_name_taken`，回錯並記下永久保護原因；新 run 保持 active，reconcile 不會把它解讀成 bot 消失（#396）。兩條路都要接：reconcile 發現 run 在、agent 不見；
