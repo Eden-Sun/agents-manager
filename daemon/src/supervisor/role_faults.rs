@@ -15,6 +15,8 @@
 //! 還沒跑時 [`reason`] 回 `None`，`role_state` 就退回原本只看 DB 的行為（#421 的不變量）。
 
 use crate::state::App;
+use sqlx::SqlitePool;
+use super::ports::{QuotaOps};
 use crate::supervisor::roles::Role;
 use std::sync::Arc;
 
@@ -63,7 +65,7 @@ pub async fn refresh(app: &Arc<App>) {
     for role in WATCHED {
         // 沒建立的角色整個不留紀錄：留著會讓 `incidents::observe` 每一拍都把這個 kind 算成
         // 「探針沒跑」，另一顆角色已經開著的 incident 就再也關不掉（blind 會擋住 resolve）。
-        if !is_configured(app, role).await {
+        if !is_configured(&app.db, role).await {
             app.role_faults.lock().await.remove(role.as_str());
             continue;
         }
@@ -144,8 +146,8 @@ pub async fn note_notify_round(
 
 /// 這個角色建立過沒有（有登記的 bot_id）。讀不到就當成「有」——當成沒有會把已經開著的 incident
 /// 誤關掉，而 `role_state` 那邊讀不到 DB 本來就會回 `Unknown`。
-async fn is_configured(app: &Arc<App>, role: Role) -> bool {
-    match crate::supervisor::roles::bot_for(&app.db, role).await {
+async fn is_configured(db: &SqlitePool, role: Role) -> bool {
+    match crate::supervisor::roles::bot_for(db, role).await {
         Ok(bot_id) => bot_id.is_some(),
         Err(_) => true,
     }
@@ -196,7 +198,7 @@ async fn probe_role(app: &Arc<App>, role: Role) -> Option<bool> {
 /// 讀不到這顆 bot 在哪台主機就回 `None`（#243）：當成本機會拿 daemon 這台的讀數去判遠端 bot 登入失效。
 async fn quota_is_blank(app: &Arc<App>, bot: &crate::db::Bot) -> Option<bool> {
     let host = crate::db::bot_host(&app.db, &bot.id).await.ok()?;
-    let base = crate::quota::quota_base_for_host(app, &host, &bot.kind, bot.identity.as_deref()).await;
+    let base = app.quota_base_for_host(&host, &bot.kind, bot.identity.as_deref()).await;
     let key = crate::quota::quota_key(&host, &base);
     if app.quota_stale.lock().await.contains(&key) {
         return Some(true);

@@ -10,6 +10,7 @@
 
 use crate::lifecycle::LcError;
 use crate::state::App;
+use sqlx::SqlitePool;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -74,7 +75,7 @@ pub fn event_key(from: &str, crid: Option<&str>, fingerprint: &str, anchor_unix:
 /// （issue #442；那條 shim 的回歸測試因此約 6–7% 機率紅）。
 ///
 /// 讀不到就退回「現在」：這只是去重的錨點，讀失敗時寧可多一筆待辦，也不要讓申請整筆失敗。
-async fn window_anchor(app: &Arc<App>, from_bot_id: &str, fingerprint: &str, now_unix: i64) -> i64 {
+async fn window_anchor(db: &SqlitePool, from_bot_id: &str, fingerprint: &str, now_unix: i64) -> i64 {
     let since = crate::db::iso_at(chrono::DateTime::from_timestamp(now_unix - DEDUPE_BUCKET_SECS, 0).unwrap_or_else(chrono::Utc::now));
     let found: Result<Option<String>, _> = sqlx::query_scalar(
         "SELECT created_at FROM supervisor_inbox
@@ -86,7 +87,7 @@ async fn window_anchor(app: &Arc<App>, from_bot_id: &str, fingerprint: &str, now
     .bind(from_bot_id)
     .bind(fingerprint)
     .bind(&since)
-    .fetch_optional(&app.db)
+    .fetch_optional(db)
     .await;
     match found {
         Ok(Some(at)) => match chrono::DateTime::parse_from_rfc3339(&at) {
@@ -131,7 +132,7 @@ impl ReplyMark<'_> {
 /// * `reply_to` 對得上一則跟寄件者有關的 inbox 事件（寄給它的角色、它寄的、或收件角色寄來的），
 ///   或一件派給它的交辦 → `"reply"`。對不上（打錯、編的）就當新事件叫醒，寧可多一回合也不吞申請。
 async fn quiet_reason(
-    app: &Arc<App>,
+    db: &SqlitePool,
     from: &str,
     sender: Option<Role>,
     to_bot: Option<&str>,
@@ -155,7 +156,7 @@ async fn quiet_reason(
             .bind(to_bot.unwrap_or(""))
             .bind(sender.map(Role::as_str))
             .bind(sender.map(Role::as_str))
-            .fetch_one(&app.db)
+            .fetch_one(db)
             .await
             .map_err(up)?;
             let assignment: i64 = sqlx::query_scalar(
@@ -165,7 +166,7 @@ async fn quiet_reason(
             .bind(r)
             .bind(r)
             .bind(from)
-            .fetch_one(&app.db)
+            .fetch_one(db)
             .await
             .map_err(up)?;
             Some(event + assignment > 0)
@@ -182,11 +183,11 @@ async fn quiet_reason(
 }
 
 /// `X-AM-Bot-Token` 是寄件 bot 自己的 hook token 才算驗證過。沒有也照收，只是記下來。
-pub async fn sender_verified(app: &Arc<App>, token: Option<&str>, from: &str) -> bool {
+pub async fn sender_verified(db: &SqlitePool, token: Option<&str>, from: &str) -> bool {
     let Some(t) = token.filter(|t| !t.is_empty()) else { return false };
     // 常數時間比對，跟 `api.rs`／`hookrecv.rs`／`build_scheduler.rs`／`relay_auth.rs` 同一套；
     // 這裡以前是 `==`，是六處裡唯一的例外（issue #415）。
-    matches!(crate::db::bot(&app.db, from).await, Ok(Some(b)) if b.deleted_at.is_none() && crate::api::ct_eq(t, &b.hook_token))
+    matches!(crate::db::bot(db, from).await, Ok(Some(b)) if b.deleted_at.is_none() && crate::api::ct_eq(t, &b.hook_token))
 }
 
 /// 帶了 `X-AM-Bot-Id` 卻驗不過：整個請求 403，不降級。
@@ -232,7 +233,7 @@ pub async fn verified_bot_id(app: &Arc<App>, headers: &axum::http::HeaderMap) ->
     }
     let get = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty());
     let Some(id) = get("X-AM-Bot-Id") else { return Err(bad_proof()) };
-    if !sender_verified(app, get("X-AM-Bot-Token"), id).await {
+    if !sender_verified(&app.db, get("X-AM-Bot-Token"), id).await {
         tracing::warn!(claimed_bot = %id, "refused a request that claimed a bot identity it could not prove");
         return Err(bad_proof());
     }
@@ -344,7 +345,7 @@ pub async fn queue(
 ) -> Result<Value, LcError> {
     let to_bot = roles::bot_for(&app.db, to).await.map_err(up)?;
     let sender = roles::role_of_bot(&app.db, from_bot_id).await.map_err(up)?;
-    let (quiet, reply_matched) = quiet_reason(app, from_bot_id, sender, to_bot.as_deref(), mark).await?;
+    let (quiet, reply_matched) = quiet_reason(&app.db, from_bot_id, sender, to_bot.as_deref(), mark).await?;
     let from_bot = crate::db::bot(&app.db, from_bot_id).await.map_err(up)?;
     let fp = fingerprint(to, target_bot_id, text, attachments);
     // 錨點：還開著的同一句申請用它的 `created_at`，不然用現在（issue #442）。帶了 request id 時
@@ -352,7 +353,7 @@ pub async fn queue(
     let now_unix = chrono::Utc::now().timestamp();
     let anchor = match client_request_id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(_) => now_unix,
-        None => window_anchor(app, from_bot_id, &fp, now_unix).await,
+        None => window_anchor(&app.db, from_bot_id, &fp, now_unix).await,
     };
     let key = event_key(from_bot_id, client_request_id, &fp, anchor);
     let payload = json!({
@@ -559,7 +560,7 @@ mod dedupe_window_tests {
         open_request(&app, "w1", &fp, first_at, "pending").await;
 
         let now = BOUNDARY + 19; // 相隔 20 秒的重問，但跨過了邊界
-        let anchor = window_anchor(&app, "w1", &fp, now).await;
+        let anchor = window_anchor(&app.db, "w1", &fp, now).await;
         assert_eq!(anchor, first_at, "錨點是既有那筆的 created_at，不是現在");
         assert_eq!(
             event_key("w1", None, &fp, anchor),
@@ -581,7 +582,7 @@ mod dedupe_window_tests {
         let fp = fp_of("請核准重建 abc123");
         open_request(&app, "w1", &fp, BOUNDARY - 1, "handled").await;
         let now = BOUNDARY + 19;
-        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "結案的那筆不該把新申請吸回舊視窗");
+        assert_eq!(window_anchor(&app.db, "w1", &fp, now).await, now, "結案的那筆不該把新申請吸回舊視窗");
     }
 
     /// 超過視窗長度的舊申請也不當錨：視窗是「十分鐘」，不是「永遠」。
@@ -591,7 +592,7 @@ mod dedupe_window_tests {
         let fp = fp_of("請核准重建 abc123");
         let now = BOUNDARY + 19;
         open_request(&app, "w1", &fp, now - DEDUPE_BUCKET_SECS - 1, "pending").await;
-        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "超過十分鐘就是新的一件事");
+        assert_eq!(window_anchor(&app.db, "w1", &fp, now).await, now, "超過十分鐘就是新的一件事");
     }
 
     /// 視窗長度那一端也要釘住（i264 review）：SQL 是 `created_at >= now - 600`，所以**剛好 600 秒**
@@ -604,7 +605,7 @@ mod dedupe_window_tests {
 
         let exactly = now - DEDUPE_BUCKET_SECS;
         open_request(&app, "w1", &fp, exactly, "pending").await;
-        assert_eq!(window_anchor(&app, "w1", &fp, now).await, exactly, "剛好一個視窗長度：還算同一件");
+        assert_eq!(window_anchor(&app.db, "w1", &fp, now).await, exactly, "剛好一個視窗長度：還算同一件");
 
         // 再老一秒就不算了（把上面那筆往前挪一秒，避免兩筆互相干擾）。
         sqlx::query("UPDATE supervisor_inbox SET created_at=? WHERE bot_id='w1'")
@@ -612,7 +613,7 @@ mod dedupe_window_tests {
             .execute(&app.db)
             .await
             .unwrap();
-        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "超過一秒就是新的一件事");
+        assert_eq!(window_anchor(&app.db, "w1", &fp, now).await, now, "超過一秒就是新的一件事");
     }
 
     /// `gave_up` 不當錨：那種事件已經不再補送，把重問吸進去等於讓它跟著沉掉。
@@ -622,7 +623,7 @@ mod dedupe_window_tests {
         let fp = fp_of("請核准重建 abc123");
         open_request(&app, "w1", &fp, BOUNDARY - 1, "gave_up").await;
         let now = BOUNDARY + 19;
-        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "不再補送的那筆不該把重問吸走");
+        assert_eq!(window_anchor(&app.db, "w1", &fp, now).await, now, "不再補送的那筆不該把重問吸走");
     }
 
     /// `delivered`（送出去了、還沒 ack）仍然當錨：那是「同一件事還在進行中」。
@@ -632,7 +633,7 @@ mod dedupe_window_tests {
         let fp = fp_of("請核准重建 abc123");
         let at = BOUNDARY - 1;
         open_request(&app, "w1", &fp, at, "delivered").await;
-        assert_eq!(window_anchor(&app, "w1", &fp, BOUNDARY + 19).await, at);
+        assert_eq!(window_anchor(&app.db, "w1", &fp, BOUNDARY + 19).await, at);
     }
 
     /// `created_at` 的格式飄掉時退回「現在」，但**要留下訊號**（i264 review）：無聲退路會讓整個
@@ -644,7 +645,7 @@ mod dedupe_window_tests {
         open_request(&app, "w1", &fp, BOUNDARY - 1, "pending").await;
         sqlx::query("UPDATE supervisor_inbox SET created_at='not-a-timestamp' WHERE bot_id='w1'").execute(&app.db).await.unwrap();
         let now = BOUNDARY + 19;
-        assert_eq!(window_anchor(&app, "w1", &fp, now).await, now, "解不開就退回現在，不 panic");
+        assert_eq!(window_anchor(&app.db, "w1", &fp, now).await, now, "解不開就退回現在，不 panic");
     }
 
     /// 別人的申請、別的內容都不當錨。
@@ -656,7 +657,7 @@ mod dedupe_window_tests {
         let now = BOUNDARY + 19;
         open_request(&app, "w2", &mine, BOUNDARY - 1, "pending").await; // 別的寄件者
         open_request(&app, "w1", &other, BOUNDARY - 1, "pending").await; // 別的內容
-        assert_eq!(window_anchor(&app, "w1", &mine, now).await, now, "不是同一個寄件者＋同一句就不算重問");
+        assert_eq!(window_anchor(&app.db, "w1", &mine, now).await, now, "不是同一個寄件者＋同一句就不算重問");
     }
 
     /// 錨點只影響去重，讀不到不該讓申請失敗：查詢壞掉時退回「現在」。
@@ -665,7 +666,7 @@ mod dedupe_window_tests {
         let app = flow_tests::app().await;
         sqlx::query("DROP TABLE supervisor_inbox").execute(&app.db).await.unwrap();
         let now = BOUNDARY + 19;
-        assert_eq!(window_anchor(&app, "w1", &fp_of("x"), now).await, now);
+        assert_eq!(window_anchor(&app.db, "w1", &fp_of("x"), now).await, now);
     }
 }
 

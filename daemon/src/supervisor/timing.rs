@@ -15,6 +15,7 @@
 //!    **不多做任何 herdr RPC**；連「現在有幾顆 bot」都只在**真的要寫那一行 log 時**才去查一次 DB。
 
 use crate::state::App;
+use sqlx::SqlitePool;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -105,9 +106,9 @@ pub fn snapshot() -> Value {
 
 /// 要寫 log 了才去問「現在有幾顆 bot」——正常的一拍不會走到這裡，所以這一次查詢不算在常態開銷裡。
 /// 讀不到就回 `-1`（量測讀不到不該變成錯誤）。
-async fn bots_now(app: &Arc<App>) -> i64 {
+async fn bots_now(db: &SqlitePool) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM bots WHERE deleted_at IS NULL")
-        .fetch_one(&app.db)
+        .fetch_one(db)
         .await
         .unwrap_or(-1)
 }
@@ -126,7 +127,7 @@ pub async fn seg<T>(app: &Arc<App>, name: &'static str, fut: impl std::future::F
 pub async fn note_segment(app: &Arc<App>, name: &str, took: Duration) {
     record(&format!("tick:{name}"), took);
     if took >= SLOW_SEGMENT {
-        let bots = bots_now(app).await;
+        let bots = bots_now(&app.db).await;
         tracing::warn!(segment = name, bots, took_ms = took.as_millis() as u64, "supervisor tick segment was slow");
     }
 }
@@ -135,7 +136,7 @@ pub async fn note_segment(app: &Arc<App>, name: &str, took: Duration) {
 pub async fn note_tick(app: &Arc<App>, took: Duration) {
     record(TICK_TOTAL, took);
     if took >= SLOW_TICK {
-        let bots = bots_now(app).await;
+        let bots = bots_now(&app.db).await;
         tracing::warn!(
             bots,
             took_ms = took.as_millis() as u64,

@@ -31,8 +31,10 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::db;
-use crate::lifecycle::{self, LcError, StartOpts};
+use crate::lifecycle::{LcError, StartOpts};
 use crate::state::App;
+use sqlx::SqlitePool;
+use super::ports::{HostProbes, LocalAccountView, TurnOps};
 use serde_json::json;
 
 /// 幾分鐘沒動作就收起來。使用者指定 90 分鐘。
@@ -211,8 +213,8 @@ fn resumable(kind: &str, session: Option<&str>, transcript: Option<&str>, local:
 ///
 /// **讀不到就回 `Err`，不退回 `started_at`**（issue #123）：那個退路會讓一顆跑很久、剛剛才有訊息的 bot，
 /// 只因為這一次查詢失敗就被算成閒置 90 分鐘以上。收機器是破壞性動作，資料讀不到＝不知道，不是「閒很久」。
-async fn last_activity(app: &Arc<App>, bot_id: &str, run: &db::Run) -> anyhow::Result<String> {
-    let conv = db::conversation_id(&app.db, bot_id).await?;
+async fn last_activity(db: &SqlitePool, bot_id: &str, run: &db::Run) -> anyhow::Result<String> {
+    let conv = db::conversation_id(db, bot_id).await?;
     let latest: Option<String> = sqlx::query_scalar(
         "SELECT MAX(ts) FROM (
            SELECT MAX(COALESCE(completed_at, created_at)) AS ts FROM turns WHERE conversation_id = ?1
@@ -222,7 +224,7 @@ async fn last_activity(app: &Arc<App>, bot_id: &str, run: &db::Run) -> anyhow::R
     )
     .bind(&conv)
     .bind(&run.started_at)
-    .fetch_one(&app.db)
+    .fetch_one(db)
     .await?;
     // `SELECT ?2` 保證有值；真的拿到 NULL 代表查詢的形狀不對，一樣是「不知道」。
     latest.ok_or_else(|| anyhow::anyhow!("the activity query returned no timestamp"))
@@ -240,10 +242,10 @@ fn minutes_since(iso: &str, now: chrono::DateTime<chrono::Utc>) -> i64 {
 /// 直接讀 row，不用 `get_or_init`——那會在使用者沒設總管的機器上建一列出來。
 ///
 /// 任何一張讀不到就回 `Err`（issue #123）：漏掉的那幾個 id 會被當成一般 worker，總管自己就被收掉了。
-async fn supervisor_bot_ids(app: &Arc<App>) -> anyhow::Result<std::collections::HashSet<String>> {
+async fn supervisor_bot_ids(db: &SqlitePool) -> anyhow::Result<std::collections::HashSet<String>> {
     let mut out = std::collections::HashSet::new();
     for q in ["SELECT bot_id FROM supervisors", "SELECT bot_id FROM supervisor_roles"] {
-        let rows = sqlx::query_scalar::<_, Option<String>>(q).fetch_all(&app.db).await?;
+        let rows = sqlx::query_scalar::<_, Option<String>>(q).fetch_all(db).await?;
         out.extend(rows.into_iter().flatten().filter(|s| !s.is_empty()));
     }
     Ok(out)
@@ -254,7 +256,7 @@ async fn supervisor_bot_ids(app: &Arc<App>) -> anyhow::Result<std::collections::
 /// 擋不住回收，建置 child 被收掉之後 kick 每輪跳過那張未結案，部署停了 3.5 小時）。
 ///
 /// 查詢失敗回 `Err`，**不當成 0 筆**（issue #123）：資料庫讀不到不等於「沒有未結案交辦」。
-async fn has_open_assignment(app: &Arc<App>, bot_id: &str) -> anyhow::Result<bool> {
+async fn has_open_assignment(db: &SqlitePool, bot_id: &str) -> anyhow::Result<bool> {
     let open = open_assignment_statuses();
     let marks = vec!["?"; open.len()].join(",");
     let sql = format!("SELECT COUNT(*) FROM supervisor_assignments WHERE target_bot_id = ? AND status IN ({marks})");
@@ -262,19 +264,19 @@ async fn has_open_assignment(app: &Arc<App>, bot_id: &str) -> anyhow::Result<boo
     for st in &open {
         q = q.bind(*st);
     }
-    Ok(q.fetch_one(&app.db).await? > 0)
+    Ok(q.fetch_one(db).await? > 0)
 }
 
 /// 它開的子 agent 還有沒有活著的 run（`db::active_run` 同一組狀態）。子 agent 的 pane 是 herdr 另開的，不在這顆 bot 的
 /// 行程樹底下，背景工作那一項看不到它們（issue #172）。查詢失敗回 `Err`，不當成「沒有」（issue #123 同一個規矩）。
-async fn has_live_children(app: &Arc<App>, bot_id: &str) -> anyhow::Result<bool> {
+async fn has_live_children(db: &SqlitePool, bot_id: &str) -> anyhow::Result<bool> {
     let n: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM bots b JOIN runs r ON r.bot_id = b.id
           WHERE b.parent_bot_id = ? AND b.managed_by = 'child' AND b.deleted_at IS NULL
             AND r.state IN ('starting','running','stopping')",
     )
     .bind(bot_id)
-    .fetch_one(&app.db)
+    .fetch_one(db)
     .await?;
     Ok(n > 0)
 }
@@ -292,7 +294,7 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
         return Ok(None);
     }
     let host = db::bot_host(&app.db, &bot.id).await?;
-    let seen = last_activity(app, &bot.id, run).await?;
+    let seen = last_activity(&app.db, &bot.id, run).await?;
     Ok(Some(Cand {
         bot_id: bot.id.clone(),
         name: bot.name.clone(),
@@ -300,13 +302,13 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
         is_supervisor: sup.contains(&bot.id),
         is_primary: bot.is_primary != 0,
         // 讀不到就回 Err（issue #123）：漏認的分享用 bot 會被當成一般 worker 收掉。
-        is_share_bot: crate::share::store::is_share_bot(&app.db, &bot.id).await?,
+        is_share_bot: app.is_share_bot(&bot.id).await?,
         state: run.state.clone(),
         agent_status: run.agent_status.clone(),
         turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
         queued_turn: db::queued_turn_for_bot(&app.db, &bot.id).await?.is_some(),
-        open_assignment: has_open_assignment(app, &bot.id).await?,
-        live_children: has_live_children(app, &bot.id).await?,
+        open_assignment: has_open_assignment(&app.db, &bot.id).await?,
+        live_children: has_live_children(&app.db, &bot.id).await?,
         // 要問 herdr 與 ps，太貴；只有真的要收的那一顆才查（見 [`sweep`]）。
         background_shell: false,
         resumable: resumable(
@@ -324,7 +326,7 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
 /// [`sweep`] 自己先讀 supervisor id 再走 [`candidates_with`]（讀不到就整輪跳過），所以這個只剩測試在用。
 #[cfg(test)]
 pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
-    let sup = supervisor_bot_ids(app).await?;
+    let sup = supervisor_bot_ids(&app.db).await?;
     candidates_with(app, &sup).await
 }
 
@@ -454,7 +456,7 @@ async fn ps_tree(app: &Arc<App>, host: &str, _bot_id: &str) -> Result<String, St
     if let Some(injected) = test_ps::get(_bot_id) {
         return injected;
     }
-    crate::memproc::dump(app, host).await.map_err(|e| format!("{e:#}"))
+    app.process_dump(host).await.map_err(|e| format!("{e:#}"))
 }
 
 /// 測試用：按 bot id 注入 ps 行程樹（或讀不到的原因）。bot id 是每個測試自己的 ULID，平行測試互不干擾。
@@ -487,7 +489,7 @@ pub(crate) mod test_ps {
 /// 把這顆標成「AGM 收起來的」。**先寫再停**：中間死掉的話留下的是一列「它應該是睡著的」，
 /// 而 [`wake`] 對一顆其實還活著的 bot 只會把這列清掉，不會誤動它——反過來（停完才寫）
 /// 死在中間就變成一顆沒人知道要 `--resume` 叫醒的 bot。
-async fn mark_asleep(app: &Arc<App>, c: &Cand, session: Option<&str>) -> anyhow::Result<()> {
+async fn mark_asleep(db: &SqlitePool, c: &Cand, session: Option<&str>) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO bot_sleeps (bot_id, native_session_id, idle_minutes, reason, slept_at)
          VALUES (?,?,?,'idle',?)
@@ -500,26 +502,26 @@ async fn mark_asleep(app: &Arc<App>, c: &Cand, session: Option<&str>) -> anyhow:
     .bind(session)
     .bind(c.idle_minutes)
     .bind(db::now())
-    .execute(&app.db)
+    .execute(db)
     .await?;
     Ok(())
 }
 
-async fn clear_asleep(app: &Arc<App>, bot_id: &str) {
-    let _ = sqlx::query("DELETE FROM bot_sleeps WHERE bot_id = ?").bind(bot_id).execute(&app.db).await;
+async fn clear_asleep(db: &SqlitePool, bot_id: &str) {
+    let _ = sqlx::query("DELETE FROM bot_sleeps WHERE bot_id = ?").bind(bot_id).execute(db).await;
 }
 
 /// 這顆現在是被收起來的嗎（`(slept_at, idle_minutes)`）。讀不到當成「不是」，只給測試用；
 /// 決定要不要叫醒的 [`wake_locked`] 走 [`read_asleep`]，讀不到不能默默當成沒睡。
 #[cfg(test)]
 pub async fn asleep(app: &Arc<App>, bot_id: &str) -> Option<(String, i64)> {
-    read_asleep(app, bot_id).await.ok().flatten()
+    read_asleep(&app.db, bot_id).await.ok().flatten()
 }
 
-async fn read_asleep(app: &Arc<App>, bot_id: &str) -> anyhow::Result<Option<(String, i64)>> {
+async fn read_asleep(db: &SqlitePool, bot_id: &str) -> anyhow::Result<Option<(String, i64)>> {
     Ok(sqlx::query_as::<_, (String, i64)>("SELECT slept_at, idle_minutes FROM bot_sleeps WHERE bot_id = ?")
         .bind(bot_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(db)
         .await?)
 }
 
@@ -536,7 +538,7 @@ pub async fn all_asleep(app: &Arc<App>) -> std::collections::HashMap<String, (St
 
 async fn say(app: &Arc<App>, bot_id: &str, text: &str) {
     let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return };
-    let _ = lifecycle::insert_message(app, &conv, None, "system", text, "system", false, None).await;
+    let _ = app.insert_message(&conv, None, "system", text, "system", false, None).await;
 }
 
 /// 事件流最後一次說這個 run 在做什麼（`run_id -> (agent_status, 記下的時刻)`），`events::handle_status` 在寫 DB
@@ -609,7 +611,7 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
         Ok(None) => return,
         Err(e) => return unreadable(c, "active run", &e),
     };
-    let sup = match supervisor_bot_ids(app).await {
+    let sup = match supervisor_bot_ids(&app.db).await {
         Ok(sup) => sup,
         Err(e) => return unreadable(c, "supervisor ids", &e),
     };
@@ -630,11 +632,11 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
         tracing::info!(bot = %c.name, "idle sweep: the last status event said the bot is busy even though the DB says idle; leaving it running");
         return;
     }
-    if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
+    if let Some(n) = app.background_jobs_known(&run.id).filter(|n| *n > 0) {
         tracing::info!(bot = %c.name, background_jobs = n, "idle sweep: the background-work account changed before stopping; leaving the bot running");
         return;
     }
-    if let Err(e) = mark_asleep(app, &fresh, session.as_deref()).await {
+    if let Err(e) = mark_asleep(&app.db, &fresh, session.as_deref()).await {
         tracing::warn!(bot = %c.name, error = %e, "could not record the sleep; leaving the bot running");
         return;
     }
@@ -645,10 +647,10 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
     // （`stop_bot_locked_if_idle`，DB 裡同一句 UPDATE）做最後的排序（issue #144）。
     if observed_busy(&run) {
         tracing::info!(bot = %c.name, "idle sweep: the bot started working right before the stop; leaving it running");
-        clear_asleep(app, &c.bot_id).await;
+        clear_asleep(&app.db, &c.bot_id).await;
         return;
     }
-    match lifecycle::stop_bot_locked_if_idle(app, &c.bot_id).await {
+    match app.stop_bot_locked_if_idle(&c.bot_id).await {
         Ok(_) => {
             tracing::info!(bot = %c.name, idle_minutes = c.idle_minutes, "idle bot put to sleep; only its resumable session is kept");
             say(
@@ -676,7 +678,7 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
         Err(e) => match db::active_run(&app.db, &c.bot_id).await {
             Ok(Some(r)) if r.state == "running" => {
                 tracing::warn!(bot = %c.name, error = ?e, "could not stop the idle bot; it stays running");
-                clear_asleep(app, &c.bot_id).await;
+                clear_asleep(&app.db, &c.bot_id).await;
             }
             now => {
                 tracing::warn!(bot = %c.name, error = ?e, state = ?now.map(|r| r.map(|r| r.state)), "the idle stop could not be confirmed; keeping the bot marked asleep until the run settles");
@@ -705,23 +707,23 @@ pub async fn wake(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<boo
 /// [`wake`]，呼叫端已經握著這顆 bot 的鎖。`prompt` 用這個：叫醒與後面建回合在同一次持鎖裡，巡邏不會夾在
 /// 「叫醒檢查過了」與「拿到鎖」之間把剛檢查過的 bot 收掉（那樣 prompt 拿到鎖只會看到 409 `bot has no active run`）。
 pub async fn wake_locked(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<bool> {
-    let Some((_, mins)) = read_asleep(app, bot_id).await? else { return Ok(false) };
+    let Some((_, mins)) = read_asleep(&app.db, bot_id).await? else { return Ok(false) };
     if let Some(run) = db::active_run(&app.db, bot_id).await? {
         // 停在 `stopping`：巡邏停掉了它、`stopped` 還沒補記上（issue #152）。那是睡著的過程，不是「其實還活著」——
         // 標記留著，補記之後照 `--resume` 叫醒；現在拿一次 start 去撞它也只會撞上那筆還沒收掉的 run。
         if run.state == "stopping" {
             return Ok(false);
         }
-        clear_asleep(app, bot_id).await;
+        clear_asleep(&app.db, bot_id).await;
         return Ok(false);
     }
     // `resume_required`：接不回原本那段對話時**不要**默默開一段新的——「只留下 resume」是這個
     // 功能的全部前提，悄悄換成空白對話等於把使用者的脈絡弄丟還不說（上游 2026-09-17 的
     // `?resume=native` 用的是同一個旗標）。接不回就退回開新對話，但在那顆 bot 自己的對話裡講清楚。
     let resumed = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
-    match lifecycle::start_bot_locked_with(app, bot_id, resumed).await {
+    match app.start_bot_locked_with(bot_id, resumed).await {
         Ok(run_id) => {
-            clear_asleep(app, bot_id).await;
+            clear_asleep(&app.db, bot_id).await;
             tracing::info!(bot = %bot_id, run = %run_id, why, "woke a sleeping bot with --resume");
             say(
                 app,
@@ -736,9 +738,9 @@ pub async fn wake_locked(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Res
         // 這顆還是要回得來，所以改開新對話，但把「原本那段接不回來」寫進對話裡，不裝作沒事。
         Err(LcError::Conflict(v)) if v.get("reason").and_then(|r| r.as_str()) == Some("cannot_resume") => {
             let reason = v.get("resume_reason").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
-            match lifecycle::start_bot_locked_with(app, bot_id, StartOpts::default()).await {
+            match app.start_bot_locked_with(bot_id, StartOpts::default()).await {
                 Ok(run_id) => {
-                    clear_asleep(app, bot_id).await;
+                    clear_asleep(&app.db, bot_id).await;
                     tracing::warn!(bot = %bot_id, run = %run_id, why, reason, "woke a sleeping bot, but its old session could not be resumed");
                     say(
                         app,
@@ -853,7 +855,7 @@ async fn sweep(app: &Arc<App>, threshold: i64) {
     if app.shutdown.is_cancelled() {
         return;
     }
-    let sup = match supervisor_bot_ids(app).await {
+    let sup = match supervisor_bot_ids(&app.db).await {
         Ok(s) => s,
         Err(e) => {
             // 認不出誰是總管就不能收任何一顆：漏掉的那幾個會被當成一般 worker。
@@ -898,7 +900,7 @@ async fn sweep(app: &Arc<App>, threshold: i64) {
         // 網頁顯示的「背景執行中」同一本帳（claude Stop hook 的 `background_tasks`，沒有就是畫面判斷）：
         // subagent／monitor／workflow 不是 pane 底下的行程，行程樹看不到它們。帳上有就不收，也不必再為它跑一次 ps。
         // 只往保守的方向用：帳上說「沒有」不能放寬行程樹（沒登記在 claude 的行程照樣會在收機器時被殺）。
-        if let Some(n) = crate::background_jobs::known(app, &run.id).filter(|n| *n > 0) {
+        if let Some(n) = app.background_jobs_known(&run.id).filter(|n| *n > 0) {
             tracing::info!(bot = %run.bot_id, background_jobs = n, "idle sweep: the web shows background work for this bot; leaving it alone");
             continue;
         }
@@ -1245,7 +1247,7 @@ mod tests {
         .execute(&app.db)
         .await
         .unwrap();
-        assert!(!has_open_assignment(&app, &bot).await.unwrap(), "還沒有交辦");
+        assert!(!has_open_assignment(&app.db, &bot).await.unwrap(), "還沒有交辦");
 
         let insert = |status: &'static str| {
             let app = app.clone();
@@ -1271,18 +1273,18 @@ mod tests {
 
         // 事故當天那一張：AGM 還沒裁示，狀態是 blocked——舊的 SQL 看不到它。
         insert("blocked").await;
-        assert!(has_open_assignment(&app, &bot).await.unwrap(), "blocked 的交辦還沒結案，不能把它的 bot 收掉");
+        assert!(has_open_assignment(&app.db, &bot).await.unwrap(), "blocked 的交辦還沒結案，不能把它的 bot 收掉");
 
         sqlx::query("UPDATE supervisor_assignments SET status='completed' WHERE target_bot_id=?")
             .bind(&bot)
             .execute(&app.db)
             .await
             .unwrap();
-        assert!(!has_open_assignment(&app, &bot).await.unwrap(), "結案了就不該再擋著");
+        assert!(!has_open_assignment(&app.db, &bot).await.unwrap(), "結案了就不該再擋著");
 
         for st in ["awaiting_review", "quota_blocked", "unknown"] {
             insert(st).await;
-            assert!(has_open_assignment(&app, &bot).await.unwrap(), "{st} 還沒結案");
+            assert!(has_open_assignment(&app.db, &bot).await.unwrap(), "{st} 還沒結案");
             sqlx::query("UPDATE supervisor_assignments SET status='cancelled' WHERE status=?")
                 .bind(st)
                 .execute(&app.db)

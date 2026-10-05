@@ -160,7 +160,7 @@ pub async fn tick(app: &Arc<App>) {
     let Ok(sup) = store::get_or_init(&app.db).await else { return };
     let Some(bot_id) = sup.bot_id.clone() else { return };
     // 讀不到 liveness ＝ 不知道，不是「已停止」：不排程、不計次、不動任何 watchdog 狀態，下一個 tick 再看（#249）。
-    let liveness = match super::manager_liveness(app, &bot_id).await {
+    let liveness = match super::manager_liveness(&app.db, &bot_id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = ?e, "supervisor watchdog cannot read manager liveness; skipping this tick");
@@ -251,7 +251,7 @@ async fn start(app: &Arc<App>, bot_id: &str, failures: i64) {
     let _g = super::lock().await;
     // Re-read under the lock: `start`, `stop` or a bulk restart may have moved it meanwhile.
     let Ok(sup) = store::get_or_init(&app.db).await else { return };
-    let Ok(liveness) = super::manager_liveness(app, bot_id).await else { return };
+    let Ok(liveness) = super::manager_liveness(&app.db, bot_id).await else { return };
     if plan(&sup, liveness, |at: &str| scheduled_past(app, "patrol", at)) != Plan::Start {
         return;
     }

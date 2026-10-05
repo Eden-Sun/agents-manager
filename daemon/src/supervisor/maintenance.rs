@@ -34,6 +34,8 @@
 
 use crate::lifecycle::LcError;
 use crate::state::App;
+use sqlx::SqlitePool;
+use super::ports::{HostProbes, LocalAccountView};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -106,7 +108,7 @@ pub async fn escalation_for(app: &Arc<App>, approval_id: Option<&str>) -> Result
     let Some(since) = a.waiting_since() else { return Ok(None) };
     let waited = waited_secs(since, &now);
     // 使用者在 header 按了「現在換版」：只放寬這次部署的自動核准（`deploy_wait`，使用者 2026-10-04）。
-    let by_user = crate::deploy_wait::user_escalated_for(app, &a);
+    let by_user = app.deploy_user_escalated_for(&a);
     let escalated = by_user || waited >= escalate_after_secs() || behind_escalates(behind_code_commits(app).await);
     Ok(Some(Escalation { approval_id: a.id, waited_secs: waited, escalated }))
 }
@@ -129,8 +131,7 @@ async fn behind_code_commits(app: &Arc<App>) -> u64 {
             return n;
         }
     }
-    let ctx = crate::deploy_now::Ctx::of(app);
-    let n = match crate::deploy_now::behind(&ctx.repo, &ctx.live_sha).await {
+    let n = match app.deploy_behind().await {
         Ok(v) => v.get("code_commits").and_then(serde_json::Value::as_u64).unwrap_or(0),
         Err(_) => 0,
     };
@@ -143,11 +144,11 @@ async fn behind_code_commits(app: &Arc<App>) -> u64 {
 /// `own` 標出「就是發問的這個 owner 自己握的」（`owner` 給了才會是 true）。**自己的租約不擋自己**
 /// （AGM 2026-09-16，58d3587 的規格漏洞）：標準換版是同一人先拿 rebuild、build 完再拿 restart，
 /// 把自己手上的 rebuild 也算成「別人握著窗口」，restart 就會被卡到 rebuild 自己到期為止。
-async fn held_leases(app: &Arc<App>, owner: Option<&str>) -> Result<Vec<Value>, LcError> {
+async fn held_leases(db: &SqlitePool, owner: Option<&str>) -> Result<Vec<Value>, LcError> {
     let now = crate::db::now();
     let mut out = Vec::new();
     for resource in RESOURCES {
-        let l = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+        let l = store::lease(db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))?;
         if let Some(l) = l.filter(|l| l.held_at(&now)) {
             let own = owner.is_some_and(|o| l.owner.as_deref() == Some(o));
             out.push(json!({"resource": resource, "owner": l.owner, "own": own, "fence": l.fence, "expires_at": l.expires_at}));
@@ -308,8 +309,8 @@ pub async fn dispatch_paused(app: &Arc<App>) -> Result<Option<String>, WindowUnr
 /// A restart window is over: lift the holds it put on queued assignments so the next controller
 /// pass sends them, instead of each waiting out the deadline it was held to. No window is open
 /// any more when this runs, so there is nothing left to protect (SPEC §18.10: no grace period).
-pub async fn window_closed(app: &Arc<App>, why: &str) -> u64 {
-    match store::clear_restart_holds(&app.db).await {
+pub async fn window_closed(db: &SqlitePool, why: &str) -> u64 {
+    match store::clear_restart_holds(db).await {
         Ok(n) => {
             if n > 0 {
                 tracing::info!(released = n, why, "restart window closed; held assignments go out on the next pass");
@@ -372,7 +373,7 @@ pub async fn release(
             }
         }
         if EXCLUSIVE.contains(&resource) && matches!(dispatch_paused(app).await, Ok(None)) {
-            window_closed(app, "lease released").await;
+            window_closed(&app.db, "lease released").await;
         }
     }
     Ok(released)
@@ -405,7 +406,7 @@ pub async fn release_restart_on_startup(app: &Arc<App>) {
             Err(e) => tracing::warn!(resource, error = ?e, "daemon started: could not read the restart lease"),
         }
     }
-    window_closed(app, "daemon started").await;
+    window_closed(&app.db, "daemon started").await;
 }
 
 /// What is going on that a restart would interrupt.
@@ -480,7 +481,7 @@ pub async fn safety_as(
         }
     }
     let open = store::open_assignments(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let held = held_leases(app, owner).await?;
+    let held = held_leases(&app.db, owner).await?;
     // 擋人的只有別人的：同一個 owner 先拿 rebuild 再拿 restart 是標準換版流程，不是搶窗口。
     let held_by_others = held.iter().filter(|l| l.get("own") != Some(&Value::Bool(true))).count();
     let esc = escalation_for(app, approval_id).await?;
@@ -525,18 +526,18 @@ pub async fn safety_as(
 /// 這個 owner／requester 是哪一顆 bot（沒有對應的 bot——例如 `daemon-update-kick` 這種腳本
 /// 身分，或名字不唯一——就是 `None`）。先當成 bot id 查，查不到再用名字對。
 pub(crate) async fn requester_bot_id(app: &Arc<App>, owner: &str) -> Option<String> {
-    try_requester_bot_id(app, owner).await.unwrap_or(None)
+    try_requester_bot_id(&app.db, owner).await.unwrap_or(None)
 }
 
 /// [`requester_bot_id`] 的「讀不到就說讀不到」版（issue #436、#681）：DB 出錯或名字對到多顆 bot 時**不能**跟
 /// 「這個名字不是任何一顆 bot」回同一個 `None`。用它下**否決**類的判斷（自我核准的守衛）：那裡的 `None` 等於放行，
 /// 把讀取失敗或歧義吞成 `None` 就是 fail-open——這個模組其他地方讀不到是不下結論，只有這裡「不下結論」剛好等於通過。
-pub(crate) async fn try_requester_bot_id(app: &Arc<App>, owner: &str) -> anyhow::Result<Option<String>> {
+pub(crate) async fn try_requester_bot_id(db: &SqlitePool, owner: &str) -> anyhow::Result<Option<String>> {
     let owner = owner.trim();
     if owner.is_empty() {
         return Ok(None);
     }
-    if crate::db::bot(&app.db, owner).await?.is_some() {
+    if crate::db::bot(db, owner).await?.is_some() {
         return Ok(Some(owner.to_string()));
     }
     // Bot 名只在專案內唯一（issue #681）；同名時不能取排序第一顆，agent 名也不能撞到另一顆 bot 名。
@@ -549,7 +550,7 @@ pub(crate) async fn try_requester_bot_id(app: &Arc<App>, owner: &str) -> anyhow:
     )
     .bind(owner)
     .bind(owner)
-    .fetch_all(&app.db)
+    .fetch_all(db)
     .await?;
     match matches.len() {
         0 => Ok(None),
@@ -1392,15 +1393,15 @@ mod tests {
             sqlx::query("INSERT INTO runs (id,bot_id,state,agent_status,agent_name,started_at) VALUES (?,?,'running','idle',?,?)")
                 .bind(format!("run-{id}")).bind(id).bind(agent).bind(&now).execute(&app.db).await.unwrap();
         }
-        assert_eq!(try_requester_bot_id(app, "agent-a").await.unwrap().as_deref(), Some("fixer-a"), "唯一 agent 名仍可用");
+        assert_eq!(try_requester_bot_id(&app.db, "agent-a").await.unwrap().as_deref(), Some("fixer-a"), "唯一 agent 名仍可用");
         // 同一個 agent 名可能出現在不同 live bot 的 run 上，也必須拒絕猜第一筆。
         sqlx::query("UPDATE runs SET agent_name='shared-agent' WHERE bot_id IN ('fixer-a','fixer-b')")
             .execute(&app.db).await.unwrap();
 
-        assert_eq!(try_requester_bot_id(app, "fixer-a").await.unwrap().as_deref(), Some("fixer-a"), "bot id 無歧義");
-        assert!(try_requester_bot_id(app, "fixer").await.is_err(), "跨專案重名不可任選一顆");
+        assert_eq!(try_requester_bot_id(&app.db, "fixer-a").await.unwrap().as_deref(), Some("fixer-a"), "bot id 無歧義");
+        assert!(try_requester_bot_id(&app.db, "fixer").await.is_err(), "跨專案重名不可任選一顆");
         assert_eq!(requester_bot_id(app, "fixer").await, None, "舊呼叫端遇到歧義必須 fail closed");
-        assert!(try_requester_bot_id(app, "shared-agent").await.is_err(), "重複 agent 名不可任選一顆");
+        assert!(try_requester_bot_id(&app.db, "shared-agent").await.is_err(), "重複 agent 名不可任選一顆");
     }
 
     /// 拿不到窗口時要講得出「還要等多久」：只回 not_idle 會讓人以為沒有出路（2026-09-19 實測）。

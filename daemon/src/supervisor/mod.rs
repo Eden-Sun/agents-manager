@@ -17,6 +17,7 @@ pub mod incidents;
 pub mod maintenance;
 pub mod persona;
 pub mod policy;
+pub mod ports;
 pub mod remote;
 pub mod responder;
 pub mod responder_api;
@@ -26,6 +27,10 @@ pub mod setup;
 pub mod store;
 pub mod timing;
 pub mod watchdog;
+
+/// `App` 對 [`ports`] 的實作（P6 的 composition 側 adapter）；檔案放在 `daemon/src/app_ports_p6.rs`，不碰 `lib.rs`。
+#[path = "../app_ports_p6.rs"]
+mod app_ports_p6;
 
 /// 這一批通知的 `client_request_id`。同一組 id 與各自的 `notify_attempts` 重送要同一個 id
 /// （當機重送不該再打一次）；換了成員或某筆的 attempts 就必須是另一個 id。
@@ -62,6 +67,8 @@ mod notify_crid_tests {
 
 use crate::lifecycle::LcError;
 use crate::state::App;
+use sqlx::SqlitePool;
+use self::ports::{JudgeOps, MissionOps, TurnOps};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -147,7 +154,7 @@ pub async fn start_requested(app: &Arc<App>) -> Result<(), LcError> {
     }
     // `manager_bot` 建好那一列（`get_or_init`）之後才寫得進去，而且沒設定好就該回 not_configured，
     // 不是留下一個沒有 bot 的「要它跑」。
-    if manager_bot(app).await?.is_none() {
+    if manager_bot(&app.db).await?.is_none() {
         return Err(LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})));
     }
     store::set_desired_running(&app.db, true).await.map_err(persist_intent_failed)?;
@@ -159,11 +166,11 @@ pub async fn start_requested(app: &Arc<App>) -> Result<(), LcError> {
 /// 順序本來就對，但寫入失敗被吞掉，於是「停好了」會回 200，而看門狗讀到的還是「要它跑」，
 /// 下一個 tick 就把它拉回來——使用者看到的是自己停過的東西自己活過來（issue #84）。
 pub async fn stop_requested(app: &Arc<App>) -> Result<(), LcError> {
-    let bot = manager_bot(app)
+    let bot = manager_bot(&app.db)
         .await?
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
     store::set_desired_running(&app.db, false).await.map_err(persist_intent_failed)?;
-    crate::lifecycle::stop_bot(app, &bot.id).await?;
+    app.stop_bot(&bot.id).await?;
     // A stopped CLI takes its Remote Control session with it; claiming otherwise would send
     // the user to a dead URL on their phone.
     let _ = store::set_remote(&app.db, "unknown", None).await;
@@ -183,11 +190,11 @@ fn persist_intent_failed<E: std::fmt::Display>(e: E) -> LcError {
 /// 這裡**不動** `desired_running`：看門狗與換模型重啟都走這條，寫意圖會把看門狗的重試次數歸零
 /// （`set_desired_running` 的語意是「人做了新決定」），有界重試就變成永遠重試。
 pub async fn start_manager(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> {
-    let bot = manager_bot(app)
+    let bot = manager_bot(&app.db)
         .await?
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
     if crate::db::active_run(&app.db, &bot.id).await.map_err(up)?.is_none() {
-        crate::lifecycle::start_bot(app, &bot.id).await?;
+        app.start_bot(&bot.id).await?;
     }
     // A newly spawned CLI is intentionally idle until it receives a first turn. Send one
     // idempotent handshake so the user can immediately see how to use AGM; the stable request
@@ -196,14 +203,9 @@ pub async fn start_manager(app: &Arc<App>, detail: Option<&str>) -> Result<(), L
     // keeps showing which lines a person actually typed.
     // 控制面自己的送入：維護窗口不擋它，否則「把 AGM 重新起來」這件事會被自己開的窗口鎖在門外
     // （issue #86）。
-    if let Err(e) = crate::lifecycle::prompt_control_plane(
-        app,
-        &bot.id,
-        BOOTSTRAP_PROMPT,
-        BOOTSTRAP_REQUEST_ID,
-        Some(crate::agent_relay::DAEMON_SENDER),
-    )
-    .await
+    if let Err(e) = app
+        .prompt_control_plane(&bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID, Some(crate::agent_relay::DAEMON_SENDER))
+        .await
     {
         tracing::warn!(error = ?e, "AGM bootstrap prompt was not delivered");
     }
@@ -231,16 +233,16 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 }
 
 /// The manager's bot, if it is configured *and* still present (a user can delete it).
-pub async fn manager_bot(app: &Arc<App>) -> Result<Option<crate::db::Bot>, LcError> {
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+pub async fn manager_bot(db: &SqlitePool) -> Result<Option<crate::db::Bot>, LcError> {
+    let sup = store::get_or_init(db).await.map_err(up)?;
     let Some(id) = sup.bot_id else { return Ok(None) };
-    Ok(crate::db::bot(&app.db, &id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()))
+    Ok(crate::db::bot(db, &id).await.map_err(up)?.filter(|b| b.deleted_at.is_none()))
 }
 
 /// `idle` | `busy`: whether a prompt would be accepted right now. Anything else is not a
 /// state we may send work into.
-pub async fn manager_liveness(app: &Arc<App>, bot_id: &str) -> Result<&'static str, LcError> {
-    let Some(run) = crate::db::active_run(&app.db, bot_id).await.map_err(up)? else { return Ok("stopped") };
+pub async fn manager_liveness(db: &SqlitePool, bot_id: &str) -> Result<&'static str, LcError> {
+    let Some(run) = crate::db::active_run(db, bot_id).await.map_err(up)? else { return Ok("stopped") };
     if run.state == "starting" {
         return Ok("starting");
     }
@@ -250,7 +252,7 @@ pub async fn manager_liveness(app: &Arc<App>, bot_id: &str) -> Result<&'static s
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return Ok("busy");
     }
-    if crate::db::in_flight_turn(&app.db, &run.id).await.map_err(up)?.is_some() {
+    if crate::db::in_flight_turn(db, &run.id).await.map_err(up)?.is_some() {
         return Ok("busy");
     }
     Ok("idle")
@@ -259,7 +261,7 @@ pub async fn manager_liveness(app: &Arc<App>, bot_id: &str) -> Result<&'static s
 /// The `GET /api/supervisor` payload — the one shape the web UI and the `agm` CLI both read.
 pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
     let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    let bot = manager_bot(app).await?;
+    let bot = manager_bot(&app.db).await?;
     let configured = bot.is_some();
     let status = if !configured {
         "not_configured".to_string()
@@ -268,7 +270,7 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         // and simply unable to answer.
         sup.status.clone()
     } else {
-        manager_liveness(app, bot.as_ref().map(|b| b.id.as_str()).unwrap_or_default()).await?.to_string()
+        manager_liveness(&app.db, bot.as_ref().map(|b| b.id.as_str()).unwrap_or_default()).await?.to_string()
     };
     // 同 handoff：未結案的不能因為掉出最新 50 筆就從這個畫面消失（issue #515）。
     let assignments = store::list_assignments_with_open(&app.db, 50).await.map_err(up)?;
@@ -287,7 +289,7 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "quota_reset_at": sup.quota_reset_at,
         // Computed, not just read back: an observation that has expired or belongs to a session
         // that is gone reads as `unknown` here rather than as the word it was stored under.
-        "remote": remote::status(app).await,
+        "remote": remote::status(&app.db).await,
         "pending_count": store::pending_count(&app.db).await.map_err(up)?,
         "assignments": assignments.iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
         // 雙角色（SPEC §18.15）。上面那些欄位一直是巡檢的，舊的呼叫端照讀不受影響。
@@ -431,7 +433,7 @@ pub async fn assign(
 
     // The user's own words behind this assignment, with a stable id to dedupe on. A text hash
     // would not be one — two identical asks are two asks.
-    let (source, source_key, request_text) = source_of(app, &manager_id, source_turn_id, text, actor).await?;
+    let (source, source_key, request_text) = source_of(&app.db, &manager_id, source_turn_id, text, actor).await?;
     let request_id = store::upsert_request(&app.db, source, source_key.as_deref(), &request_text)
         .await
         .map_err(up)?;
@@ -439,13 +441,13 @@ pub async fn assign(
     // 一個任務同時只有一件開著的交辦（SPEC §18.14，issue #74）。跟下面的 ownership 衝突不同：
     // 那個是猜的（字串比對），這個是查得到的事實，所以這個擋、那個只回報。
     if let Some((mission_id, role)) = mission {
-        crate::mission::workflow::ensure_can_assign(app, mission_id, role).await?;
+        app.ensure_can_assign(mission_id, role).await?;
     }
 
     // Who else is already holding these files. Reported, never enforced: the daemon cannot
     // know that two modules are really independent, so this goes to AGM to arbitrate rather
     // than refusing work on a string match (SPEC §18.4).
-    let conflicts = ownership_conflicts(app, ownership, None).await?;
+    let conflicts = ownership_conflicts(&app.db, ownership, None).await?;
 
     // 任務連結與驗收角色跟列**同一句 INSERT**（issue #136）：派送當下撞到額度時 controller 要看得到這件屬於哪個
     // 任務、什麼角色，派工訊息標成哪個角色送的也看這一欄——分開寫的話，後一句失敗會留下一件沒掛任務、照樣被派出去的交辦。
@@ -469,7 +471,7 @@ pub async fn assign(
     // Best effort: a failure here leaves the row queued, which is the recoverable state.
     controller::dispatch(app, &a.id).await;
     // #557：路徑比對之後才問撞題。只 spawn，不等 Jev（#480）。答案不併進 ownership_conflicts，也不改這筆交辦。
-    crate::judge::collision::schedule_assignment(app, &a.id).await;
+    app.judge_schedule_assignment(&a.id).await;
     let a = store::assignment(&app.db, &a.id).await.map_err(up)?.unwrap_or(a);
     app.emit("supervisor_changed", json!({"assignment_id": a.id, "status": a.status})).await;
     let mut out = a.to_json();
@@ -484,7 +486,7 @@ pub async fn assign(
 /// only in the safe direction — it can report an overlap that is not one, which costs AGM a
 /// glance; it cannot quietly hand two bots the same file.
 pub async fn ownership_conflicts(
-    app: &Arc<App>,
+    db: &SqlitePool,
     paths: &[String],
     ignore_assignment: Option<&str>,
 ) -> Result<Vec<Value>, LcError> {
@@ -492,7 +494,7 @@ pub async fn ownership_conflicts(
         return Ok(vec![]);
     }
     let mut out = Vec::new();
-    for other in store::unsettled_assignments(&app.db).await.map_err(up)? {
+    for other in store::unsettled_assignments(db).await.map_err(up)? {
         if Some(other.id.as_str()) == ignore_assignment {
             continue;
         }
@@ -524,12 +526,12 @@ fn overlaps(a: &str, b: &str) -> bool {
 ///
 /// Shares its rules with [`assign`]: the manager may not assign to itself, the bot has to exist
 /// and not be deleted.
-pub async fn check_assignable(app: &Arc<App>, target_bot_id: &str) -> Result<(), LcError> {
+pub async fn check_assignable(db: &SqlitePool, target_bot_id: &str) -> Result<(), LcError> {
     // 角色 bot 不是工人：要跟另一個角色說話走 `assign` 的交接路徑（佇列），不是 followup。
-    if roles::role_of_bot(&app.db, target_bot_id).await.map_err(up)?.is_some() {
+    if roles::role_of_bot(db, target_bot_id).await.map_err(up)?.is_some() {
         return Err(LcError::Bad("an AGM role cannot be the target of an assignment; hand over through the role queue".into()));
     }
-    crate::db::bot(&app.db, target_bot_id)
+    crate::db::bot(db, target_bot_id)
         .await
         .map_err(up)?
         .filter(|b| b.deleted_at.is_none())
@@ -547,7 +549,7 @@ pub async fn check_assignable(app: &Arc<App>, target_bot_id: &str) -> Result<(),
 /// read back off that turn, the source is labelled `assignment_text_fallback` rather than
 /// pretending the assignment text is the user's own words.
 async fn source_of(
-    app: &Arc<App>,
+    db: &SqlitePool,
     manager_id: &str,
     source_turn_id: Option<&str>,
     text: &str,
@@ -556,10 +558,10 @@ async fn source_of(
     // 來源綁**呼叫者自己**（bot token 驗過的角色）。兩個角色同時在回合中時，若照固定順序先撿巡檢
     // 的回合，協調者派的工就會被記成「使用者對巡檢說的另一句話」——授權與稽核從此對不上人。
     let actor_bot = match actor {
-        Some(r) => roles::bot_for(&app.db, r).await.map_err(up)?,
+        Some(r) => roles::bot_for(db, r).await.map_err(up)?,
         None => None,
     };
-    let conv_of = |id: String| async move { crate::db::conversation_id(&app.db, &id).await.map_err(up) };
+    let conv_of = |id: String| async move { crate::db::conversation_id(db, &id).await.map_err(up) };
     let turn_id = match source_turn_id.map(str::trim).filter(|s| !s.is_empty()) {
         // 明講了是哪個回合：那是呼叫端拿得出來的證據。驗過的角色只能指自己的回合；沒驗過的
         // 呼叫端（UI、腳本）仍只能指兩個角色其中之一的回合。
@@ -568,9 +570,9 @@ async fn source_of(
             match actor_bot.clone() {
                 Some(id) => convs.push(conv_of(id).await?),
                 None => {
-                    convs.push(crate::db::conversation_id(&app.db, manager_id).await.map_err(up)?);
-                    if let Some(id) = roles::bot_for(&app.db, roles::Role::Responder).await.map_err(up)? {
-                        convs.push(crate::db::conversation_id(&app.db, &id).await.map_err(up)?);
+                    convs.push(crate::db::conversation_id(db, manager_id).await.map_err(up)?);
+                    if let Some(id) = roles::bot_for(db, roles::Role::Responder).await.map_err(up)? {
+                        convs.push(crate::db::conversation_id(db, &id).await.map_err(up)?);
                     }
                 }
             }
@@ -582,7 +584,7 @@ async fn source_of(
             for c in &convs {
                 q = q.bind(c);
             }
-            let owned: Option<String> = q.fetch_optional(&app.db).await.map_err(up)?;
+            let owned: Option<String> = q.fetch_optional(db).await.map_err(up)?;
             if owned.is_none() {
                 let whose = actor.map(roles::Role::as_str).unwrap_or("the supervisor");
                 return Err(LcError::Bad(format!("source_turn_id is not a turn of {whose}")));
@@ -592,8 +594,8 @@ async fn source_of(
         // 沒講：只認呼叫者自己現在跑的那一回合。認不出呼叫者就**不猜**別人的回合——
         // 記成 `assignment_text_fallback`（交辦文字就是交辦文字），不要替某個人編一句話。
         None => match actor_bot {
-            Some(id) => match crate::db::active_run(&app.db, &id).await.map_err(up)? {
-                Some(r) => crate::db::in_flight_turn(&app.db, &r.id).await.map_err(up)?.map(|t| t.id),
+            Some(id) => match crate::db::active_run(db, &id).await.map_err(up)? {
+                Some(r) => crate::db::in_flight_turn(db, &r.id).await.map_err(up)?.map(|t| t.id),
                 None => None,
             },
             None => None,
@@ -606,7 +608,7 @@ async fn source_of(
         "SELECT content FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at ASC LIMIT 1",
     )
     .bind(&turn_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(db)
     .await
     .map_err(up)?;
     match user_text.filter(|s| !s.trim().is_empty()) {

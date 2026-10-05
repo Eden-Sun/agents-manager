@@ -13,6 +13,8 @@
 use crate::config::{BotCfg, ProjectCfg};
 use crate::lifecycle::{self, LcError};
 use crate::state::App;
+use sqlx::SqlitePool;
+use super::ports::{HostProbes, QuotaOps, TurnOps};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,10 +59,10 @@ pub fn persona_body() -> String {
 }
 
 /// 存著的人設優先，內嵌那份只在第一次安裝時種進去——跟巡檢同一條規則（persona.rs）。
-pub async fn effective_persona(app: &Arc<App>) -> Result<String, LcError> {
+pub async fn effective_persona(db: &SqlitePool) -> Result<String, LcError> {
     let embedded = persona_body();
     let now = crate::db::now();
-    roles::get(&app.db, Role::Responder).await.map_err(up)?;
+    roles::get(db, Role::Responder).await.map_err(up)?;
     sqlx::query(
         "UPDATE supervisor_roles SET persona_text=?, persona_hash=?, persona_source='embedded', persona_updated_at=?,
                 persona_seed_hash=?, persona_version=persona_version+1, updated_at=?
@@ -71,16 +73,16 @@ pub async fn effective_persona(app: &Arc<App>) -> Result<String, LcError> {
     .bind(&now)
     .bind(super::persona::hash(&embedded))
     .bind(&now)
-    .execute(&app.db)
+    .execute(db)
     .await
     .map_err(up)?;
-    let row = roles::get(&app.db, Role::Responder).await.map_err(up)?;
+    let row = roles::get(db, Role::Responder).await.map_err(up)?;
     Ok(row.persona_text.filter(|t| !t.is_empty()).unwrap_or(embedded))
 }
 
 /// 寫入新的人設（API）。回傳新版本；內容一樣就不加版本。
-pub async fn set_persona(app: &Arc<App>, text: &str, expected_version: Option<i64>) -> Result<i64, LcError> {
-    let row = roles::get(&app.db, Role::Responder).await.map_err(up)?;
+pub async fn set_persona(db: &SqlitePool, text: &str, expected_version: Option<i64>) -> Result<i64, LcError> {
+    let row = roles::get(db, Role::Responder).await.map_err(up)?;
     if let Some(expected) = expected_version {
         if expected != row.persona_version && row.persona_text.as_deref() != Some(text) {
             return Err(LcError::conflict(
@@ -101,10 +103,10 @@ pub async fn set_persona(app: &Arc<App>, text: &str, expected_version: Option<i6
     .bind(super::persona::hash(text))
     .bind(&now)
     .bind(&now)
-    .execute(&app.db)
+    .execute(db)
     .await
     .map_err(up)?;
-    Ok(roles::get(&app.db, Role::Responder).await.map_err(up)?.persona_version)
+    Ok(roles::get(db, Role::Responder).await.map_err(up)?.persona_version)
 }
 
 fn claude_md(dir: &Path, bot_id: &str, port: u16) -> String {
@@ -193,7 +195,7 @@ pub async fn ensure_env(
     let effort = crate::config::normalize_effort("claude", Some(&effort))
         .map_err(LcError::Bad)?
         .ok_or_else(|| LcError::Bad("effort must not be empty".into()))?;
-    if crate::tools::identity_for_host(app, crate::config::LOCAL_HOST, &identity).await.is_none() {
+    if app.identity_for_host(crate::config::LOCAL_HOST, &identity).await.is_none() {
         return Err(LcError::conflict(
             "responder identity is not configured on this host",
             json!({"reason": "identity_missing", "identity": identity}),
@@ -202,7 +204,7 @@ pub async fn ensure_env(
     let d = dir(app);
     std::fs::create_dir_all(&d).map_err(|e| LcError::Bad(format!("{}: {e}", d.display())))?;
     let path = crate::config::canonical_path(&d.to_string_lossy()).map_err(|e| LcError::Bad(e.to_string()))?;
-    let persona = effective_persona(app).await?;
+    let persona = effective_persona(&app.db).await?;
     // 舊安裝的協調者自成一個專案；先搬進巡檢的專案，下面就是在同一個專案裡更新同一顆 bot。
     let adopted = match row.bot_id.as_deref() {
         Some(b) => adopt_into_manager_project(app, b).await?,
@@ -305,7 +307,7 @@ pub async fn ensure_env(
         }
     })?;
     // 專案只有一個 path，所以跟巡檢同專案之後，協調者自己的目錄改由 bot 記住。
-    set_cwd(app, &bot_id, &path).await?;
+    set_cwd(&app.db, &bot_id, &path).await?;
     let deployed = deploy_files(app, &bot_id, manager_id.as_deref(), &persona).map_err(up)?;
     // 巡檢的 runtime.json 也要知道協調者是誰：它目錄裡的 ops 腳本派工給協調者（巡檢不能對自己下交辦）。
     if let Some(m) = manager_id.as_deref() {
@@ -320,8 +322,8 @@ pub async fn ensure_env(
 
 /// 協調者的工作目錄記在 bot 自己身上（`bots.cwd`，`lifecycle::bot_cwd` 讀的就是這一欄）。
 /// 一個專案只有一個 path，所以兩個角色同專案時，目錄不能再靠專案表達。
-async fn set_cwd(app: &Arc<App>, bot_id: &str, cwd: &str) -> Result<(), LcError> {
-    sqlx::query("UPDATE bots SET cwd=? WHERE id=?").bind(cwd).bind(bot_id).execute(&app.db).await.map_err(up)?;
+async fn set_cwd(db: &SqlitePool, bot_id: &str, cwd: &str) -> Result<(), LcError> {
+    sqlx::query("UPDATE bots SET cwd=? WHERE id=?").bind(cwd).bind(bot_id).execute(db).await.map_err(up)?;
     Ok(())
 }
 
@@ -374,7 +376,7 @@ async fn adopt_into_manager_project(app: &Arc<App>, bot_id: &str) -> Result<Opti
         Err(e) if e.to_string() == "missing" => return Ok(None),
         Err(e) => return Err(up(e)),
     };
-    set_cwd(app, bot_id, &cwd).await?;
+    set_cwd(&app.db, bot_id, &cwd).await?;
     roles::set_env(&app.db, Role::Responder, bot_id, &manager_project, &cwd).await.map_err(up)?;
     if moved {
         tracing::info!(bot = bot_id, project = %manager_project, cwd = %cwd, "AGM 協調者併回巡檢的專案（工作目錄仍然分開）");
@@ -428,11 +430,11 @@ pub async fn start(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> 
         .map_err(up)?
         .ok_or_else(|| LcError::conflict("responder is not set up", json!({"reason": "responder_not_configured"})))?;
     if crate::db::active_run(&app.db, &bot.id).await.map_err(up)?.is_none() {
-        lifecycle::start_bot(app, &bot.id).await?;
+        app.start_bot(&bot.id).await?;
     }
     if let Err(e) =
         // 同 `super::start_manager`：控制面的握手不受維護窗口的閘門管（issue #86）。
-        lifecycle::prompt_control_plane(app, &bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID, Some(crate::agent_relay::DAEMON_SENDER)).await
+        app.prompt_control_plane(&bot.id, BOOTSTRAP_PROMPT, BOOTSTRAP_REQUEST_ID, Some(crate::agent_relay::DAEMON_SENDER)).await
     {
         tracing::warn!(error = ?e, "AGM responder bootstrap prompt was not delivered");
     }
@@ -456,7 +458,7 @@ pub async fn stop(app: &Arc<App>) -> Result<(), LcError> {
     roles::set_desired_running(&app.db, Role::Responder, false)
         .await
         .map_err(|e| LcError::Upstream(format!("could not persist desired_running (nothing was stopped): {e}")))?;
-    lifecycle::stop_bot(app, &bot.id).await?;
+    app.stop_bot(&bot.id).await?;
     app.emit("supervisor_changed", json!({"responder": "stopped"})).await;
     Ok(())
 }
@@ -483,12 +485,12 @@ pub async fn watchdog_tick(app: &Arc<App>) {
         // 登記過卻找不到那顆 bot（被刪掉）：看門狗沒有東西可以拉起來，交給巡檢。事件照樣留在
         // 協調者的佇列（SPEC §18.15）——只有等超過 5 分鐘的核准會被 `failover` 改派（issue #421）。
         if row.bot_id.is_some() {
-            report_missing(app, row.bot_id.as_deref().unwrap_or("")).await;
+            report_missing(&app.db, row.bot_id.as_deref().unwrap_or("")).await;
         }
         return;
     };
     // 讀不到 liveness ＝ 不知道，不是「已停止」：這個 tick 不動看門狗狀態（#249）。
-    let Ok(liveness) = super::manager_liveness(app, &bot.id).await else { return };
+    let Ok(liveness) = super::manager_liveness(&app.db, &bot.id).await else { return };
     // 等額度時看門狗不把它拉起來——除非我們其實**不知道**額度狀態（Unknown），而且排定的重試時間已經到了：
     // 那一次重試要有一個活著的協調者才發生得了。協調者在 `waiting_quota` 時 pane 掛掉或主機重開，而這個身分
     // 一直拿不到 5h＋7d 兩格讀數（探測壞掉、身分被停用、帳號本來就沒有那兩個窗）時，以前看門狗不重啟、
@@ -531,7 +533,7 @@ pub async fn watchdog_tick(app: &Arc<App>) {
             #[cfg(test)]
             crate::lifecycle::race_point::hit("responder_watchdog_start", &bot.id).await;
             let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
-            let Ok(liveness) = super::manager_liveness(app, &bot.id).await else { return };
+            let Ok(liveness) = super::manager_liveness(&app.db, &bot.id).await else { return };
             if watchdog::plan_for(watched(&row, quota_unknown_retry), liveness, |at: &str| watchdog::scheduled_past(app, "responder", at)) != watchdog::Plan::Start {
                 tracing::info!(liveness, wanted = row.desired_running, "協調者看門狗放掉這一次自動啟動：拿到鎖時狀態已經變了");
                 return;
@@ -568,15 +570,15 @@ pub async fn watchdog_tick(app: &Arc<App>) {
 /// 登記過的協調者 bot 不見了（被刪除）。說一次給巡檢聽，並把狀態寫清楚：它的事件仍留在它的
 /// 佇列裡等人把它建回來（等超過 5 分鐘的核准除外，那些會改派給巡檢，issue #421）。
 /// event_key 帶 bot id，所以刪掉再建一顆會是新的一則。
-async fn report_missing(app: &Arc<App>, bot_id: &str) {
+async fn report_missing(db: &SqlitePool, bot_id: &str) {
     let _ = roles::set_status_detail(
-        &app.db,
+        db,
         Role::Responder,
         Some("登記的協調者 bot 不存在（已刪除）；事件留在它的 inbox，請重新 `agm responder setup` 與 start"),
     )
     .await;
     let pushed = store::push_inbox(
-        &app.db,
+        db,
         // event_key 帶一個時間格：`push_inbox` 是 INSERT OR IGNORE，固定鍵的話這則一輩子只推一次，
         // 巡檢 ack 掉之後協調者不見了就再也沒有人會被提醒（review 2026-09-16）。
         &format!("responder_bot_missing:{bot_id}:{}", crate::db::now().get(..13).unwrap_or_default()),
@@ -663,11 +665,11 @@ pub enum QuotaState {
 /// 不知道自己撞限了。反過來，有自己 env 的身分（cc1／cc2）只讀自己那把，不借用 cc0 的數字。
 async fn quota_key_for(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
     // pane 裡實際的帳號（run 起來時的身分，issue #238）；讀不到 run 當 Unknown。
-    let identity = crate::quota::billing_identity(app, bot).await.ok().flatten()?;
+    let identity = app.billing_identity(bot).await.ok().flatten()?;
     // 主機要**確定**。`db::bot_host` 查不到專案或讀錯時退回本機，那對一般顯示是合理的預設，
     // 但拿來判斷額度就是借別台機器（本機）的數字——讀不到就回 `None`，由呼叫端當成 Unknown。
     let host = strict_bot_host(&app.db, &bot.id).await?;
-    let base = crate::quota::quota_base_for_host(app, &host, &bot.kind, Some(&identity)).await;
+    let base = app.quota_base_for_host(&host, &bot.kind, Some(&identity)).await;
     Some(crate::quota::quota_key(&host, &base))
 }
 
@@ -683,7 +685,7 @@ async fn strict_bot_host(pool: &sqlx::SqlitePool, bot_id: &str) -> Option<String
 
 pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
     let Some(key) = quota_key_for(app, bot).await else { return QuotaState::Unknown };
-    let model = crate::quota::running_model(app, bot).await;
+    let model = app.running_model(bot).await;
     let now = chrono::Utc::now();
     let q = app.quotas.lock().await;
     let Some(quota) = q.get(&key) else { return QuotaState::Unknown };
@@ -743,7 +745,7 @@ const CAPTURE_SETTLE_SECS: i64 = 15;
 /// * 回合結束已經超過 [`CAPTURE_SETTLE_SECS`]——不然擷取還沒來得及寫，撞限收場的回合會被讀成「答得動」，
 ///   於是對人宣告「額度已恢復」，下一刻又撞限，`responder_health` 在 degraded／healthy 之間來回跳
 ///   （review3 c3 L2）。
-async fn answered_since(app: &Arc<App>, bot_id: &str, since: Option<&str>) -> bool {
+async fn answered_since(db: &SqlitePool, bot_id: &str, since: Option<&str>) -> bool {
     let row: Option<(String, String, Option<String>, i64, i64)> = sqlx::query_as(
         "SELECT t.status, t.completed_at, r.turn_error,
                 EXISTS(SELECT 1 FROM turns n WHERE n.run_id = t.run_id AND n.id <> t.id
@@ -758,7 +760,7 @@ async fn answered_since(app: &Arc<App>, bot_id: &str, since: Option<&str>) -> bo
     .bind(bot_id)
     .bind(since)
     .bind(since)
-    .fetch_optional(&app.db)
+    .fetch_optional(db)
     .await
     .ok()
     .flatten();
@@ -830,7 +832,7 @@ pub async fn notify(app: &Arc<App>) {
     let Ok(bot) = roles::responder_bot(&app.db).await else { return };
     let Some(bot) = bot else {
         if row.bot_id.is_some() {
-            report_missing(app, row.bot_id.as_deref().unwrap_or("")).await;
+            report_missing(&app.db, row.bot_id.as_deref().unwrap_or("")).await;
         }
         return;
     };
@@ -873,7 +875,7 @@ pub async fn notify(app: &Arc<App>) {
         // 讀不到：不宣稱恢復、也不新增等待。唯一能解除的是協調者**答完**了一個沒出錯的回合
         // （`answered_since`）；已排定的重試時間到了照常試一次，但送出去不等於恢復。
         QuotaState::Unknown if waiting => {
-            if answered_since(app, &bot.id, row.waiting_since.as_deref()).await {
+            if answered_since(&app.db, &bot.id, row.waiting_since.as_deref()).await {
                 let _ = roles::set_status(&app.db, Role::Responder, "", Some("額度已恢復（協調者完成了一個回合）"), None).await;
                 let _ = roles::set_notify_next(&app.db, Role::Responder, None).await;
                 next_at = None;
@@ -897,7 +899,7 @@ pub async fn notify(app: &Arc<App>) {
     if !batch_due(&oldest.created_at, row.last_notify_at.as_deref(), batch, now) {
         return;
     }
-    if !matches!(super::manager_liveness(app, &bot.id).await, Ok("idle")) {
+    if !matches!(super::manager_liveness(&app.db, &bot.id).await, Ok("idle")) {
         return;
     }
     let ids: Vec<String> = due.iter().map(|e| e.id.clone()).collect();
@@ -910,7 +912,7 @@ pub async fn notify(app: &Arc<App>) {
         let _ = store::defer_notify(&app.db, &ids, &next, &why).await;
     };
     // 送出去了、結果還沒寫進 DB（#149）照 `unknown` 綁在那一筆回合上：換新的 crid 重送會讓協調者收到兩份。
-    match lifecycle::owed_as_unknown(lifecycle::prompt_relayed(app, &bot.id, &digest(&due), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await) {
+    match lifecycle::owed_as_unknown(app.prompt_relayed(&bot.id, &digest(&due), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await) {
         Ok(out) if out.delivery == "failed" => {
             defer("delivery failed".into()).await;
             note_login_problem(app, &bot, &row.status).await;
@@ -938,14 +940,14 @@ pub async fn notify(app: &Arc<App>) {
 /// 協調者 pane 現在看得出要人登入嗎（登入選單、onboarding、或回合只回 `Not logged in`）。沒有 run 就是不知道。
 async fn login_problem_on_screen(app: &Arc<App>, bot: &crate::db::Bot) -> Option<bool> {
     match crate::db::active_run(&app.db, &bot.id).await {
-        Ok(Some(run)) => crate::tui_prompts::shows_login_problem(app, &run).await,
+        Ok(Some(run)) => app.pane_shows_login_problem(&run).await,
         Ok(None) => Some(false),
         Err(_) => None,
     }
 }
 
 async fn login_recovered(app: &Arc<App>, bot: &crate::db::Bot, since: Option<&str>) -> bool {
-    answered_since(app, &bot.id, since).await || matches!(login_problem_on_screen(app, bot).await, Some(false))
+    answered_since(&app.db, &bot.id, since).await || matches!(login_problem_on_screen(app, bot).await, Some(false))
 }
 
 /// 送不出去的那一次順便看畫面（issue #420）：協調者的 CLI 沒登入時，送出只會一直 `composer_unreadable`／
@@ -975,7 +977,7 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         (None, false) => "not_configured".to_string(),
         (None, true) => "missing".to_string(),
         (Some(_), _) if !row.status.is_empty() => row.status.clone(),
-        (Some(b), _) => super::manager_liveness(app, &b.id).await?.to_string(),
+        (Some(b), _) => super::manager_liveness(&app.db, &b.id).await?.to_string(),
     };
     // #454：#427 判出來的不可用只存在記憶體（`App.role_faults`），而這支面板只讀 DB 的 `row.status`，
     // 於是「核准正在被默默改派、incident 已經開了，面板卻說 idle」——正是 #420 要消滅的症狀，
@@ -1736,24 +1738,24 @@ mod flow_tests {
             .bind(ago(120)).bind(ago(1)).execute(&app.db).await.unwrap();
 
         // 才剛收掉：擷取可能還沒寫進來，先不算證據。
-        assert!(!answered_since(&app, "resp", None).await, "回合剛結束的那幾秒不能當證據");
+        assert!(!answered_since(&app.db, "resp", None).await, "回合剛結束的那幾秒不能當證據");
 
         // 過了擷取的延遲、run 上也沒有錯誤：這才算答得動。
         sqlx::query("UPDATE turns SET completed_at=? WHERE id='t1'").bind(ago(60)).execute(&app.db).await.unwrap();
-        assert!(answered_since(&app, "resp", None).await);
+        assert!(answered_since(&app.db, "resp", None).await);
 
         // 擷取把橫幅釘在這一回合上：就算 `turn_error` 已經被下一回合清掉，也不算答得動。
         sqlx::query("INSERT INTO messages (id,conversation_id,turn_id,role,content,source,incomplete,created_at) VALUES ('m1','c-r','t1','system','You''ve hit your session limit','system',1,?)")
             .bind(&now).execute(&app.db).await.unwrap();
-        assert!(!answered_since(&app, "resp", None).await, "撞限收場的回合不是答得動");
+        assert!(!answered_since(&app.db, "resp", None).await, "撞限收場的回合不是答得動");
 
         // `turn_error` 屬於同 run 上更晚開始的回合時，不能算在這一回合頭上。
         sqlx::query("DELETE FROM messages WHERE id='m1'").execute(&app.db).await.unwrap();
         sqlx::query("UPDATE runs SET turn_error='You''ve hit your session limit' WHERE id='run-r'").execute(&app.db).await.unwrap();
-        assert!(!answered_since(&app, "resp", None).await, "那格還是這一回合的");
+        assert!(!answered_since(&app.db, "resp", None).await, "那格還是這一回合的");
         sqlx::query("INSERT INTO turns (id,conversation_id,run_id,origin,status,created_at) VALUES ('t2','c-r','run-r','web','in_flight',?)")
             .bind(crate::db::now()).execute(&app.db).await.unwrap();
-        assert!(answered_since(&app, "resp", None).await, "更晚開始的回合才是那格的主人");
+        assert!(answered_since(&app.db, "resp", None).await, "更晚開始的回合才是那格的主人");
     }
 
     /// 查不到協調者屬於哪台主機（專案列不見了）時，不能退回本機、拿本機帳號的數字來判斷。
