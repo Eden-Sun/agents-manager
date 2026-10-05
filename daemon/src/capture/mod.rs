@@ -6,14 +6,9 @@
 
 pub mod claude;
 
-/// Provider-specific terminal capture behavior.
-pub trait Capture {
-    fn still_busy(&self, screen: &str) -> bool;
-    fn awaits_input(&self, screen: &str) -> bool;
-    fn extract_reply(&self, screen: &str) -> Option<String>;
-    fn noise_line(&self, line: &str) -> bool;
-    fn activity(&self, screen: &str) -> Option<String>;
-}
+/// Provider-specific terminal capture behavior: the frozen am-ports parser boundary (pure text in, values out;
+/// no file, host or `App` access). Kept under its old name so `use crate::capture::Capture` call sites are unchanged.
+pub use am_ports::CaptureParser as Capture;
 
 pub(crate) const ACTIVITY_MAX: usize = 120;
 
