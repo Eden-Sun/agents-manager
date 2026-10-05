@@ -34,6 +34,7 @@ use axum::http::HeaderMap;
 use serde_json::json;
 
 use crate::lifecycle::LcError;
+use crate::mission::ports::CallerOps;
 use crate::state::App;
 
 /// 驗過之後的來源（bot id）。
@@ -100,7 +101,7 @@ async fn prove_bot(app: &Arc<App>, headers: &HeaderMap, claimed: &str) -> Result
         .filter(|b| b.deleted_at.is_none());
     match (presented, live) {
         // 有帶而且對得上：本人。
-        (Some(t), Some(b)) if !t.is_empty() && crate::api::ct_eq(&t, &b.hook_token) => Ok(Proof::Verified(b.id)),
+        (Some(t), Some(b)) if !t.is_empty() && app.ct_eq(&t, &b.hook_token) => Ok(Proof::Verified(b.id)),
         // 有帶但對不上（別顆的、空的、非 UTF-8），或指到不存在／已刪的 bot：同一個 403。
         // 不按「bot 存不存在」分成 400／403——那會讓狀態碼變成探測 bot id 的神諭。
         (Some(_), _) => Err(mismatch()),
@@ -141,7 +142,7 @@ pub async fn authenticate_mission(app: &Arc<App>, headers: &HeaderMap, claimed: 
     let Some(claimed) = claimed.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
     if claimed == crate::agent_relay::DAEMON_SENDER {
         // API middleware already rejected invalid Bot proof with 401; here `None` means a valid Bot that is not an AGM role.
-        if crate::supervisor::bot_requests::actor_role(app, headers).await?.is_some() {
+        if app.actor_role(headers).await?.is_some() {
             return Ok(Some(claimed.to_string()));
         }
         return Err(LcError::Forbidden(json!({

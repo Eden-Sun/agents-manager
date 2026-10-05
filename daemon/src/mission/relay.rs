@@ -8,6 +8,7 @@
 //! 帶 `assignment_id` 的 `supervisor_changed` 查一次那件交辦掛在哪個任務，有就補推。以後新增的交辦轉換
 //! 只要照慣例發 `supervisor_changed`，任務卡就跟得上。
 
+use super::ports::{EventOps, SupervisorRepo};
 use crate::state::{App, WsEvent};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 /// 開機時呼叫一次。訂閱在 spawn **之前**完成，之後發的事件一則都不會漏在「還沒訂上」的空窗裡。
 pub fn spawn(app: Arc<App>) {
-    let mut rx = app.subscribe();
+    let mut rx = app.subscribe_events();
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -36,10 +37,10 @@ pub async fn relay(app: &Arc<App>, ev: &WsEvent) -> bool {
         return false;
     }
     let Some(aid) = ev.data.get("assignment_id").and_then(Value::as_str) else { return false };
-    let Ok(Some(a)) = crate::supervisor::store::assignment(&app.db, aid).await else { return false };
+    let Ok(Some(a)) = app.db.assignment(aid).await else { return false };
     let Some(mid) = a.mission_id.as_deref() else { return false };
     let Ok(Some(m)) = super::store::get(&app.db, mid).await else { return false };
-    app.emit(
+    app.emit_event(
         "mission_updated",
         json!({"mission_id": m.id, "project_id": m.project_id, "status": m.status(), "assignment_id": aid}),
     )
@@ -91,7 +92,7 @@ mod tests {
         let loose = crate::supervisor::store::insert_assignment(&app.db, None, &y.id, "crid-loose", "別的事", &[], None, true).await.unwrap();
 
         spawn(app.clone());
-        let mut rx = app.subscribe();
+        let mut rx = app.subscribe_events();
 
         app.emit("supervisor_changed", json!({"assignment_id": loose.id, "status": "delivered"})).await;
         app.emit("supervisor_changed", json!({"responder": "woken"})).await;

@@ -2,7 +2,8 @@
 //! `lifecycle::prompt` Turn stamped with a shared `messages.group_id` the UI folds into one bubble.
 
 use crate::db;
-use crate::lifecycle::{self, LcError, LcResult};
+use crate::lifecycle::{LcError, LcResult};
+use crate::mission::ports::{EventOps, GroupTurnOps};
 use crate::state::App;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -280,8 +281,8 @@ pub async fn chat(
         let crid = format!("{client_request_id}:{}", t.id);
         // #167：字已經打進去、只是送達結果寫不進 DB（`Uncommitted`）——那是「結果不明」，不是「沒送」：放進 `sent`
         // （`delivery:"unknown"`，daemon 自己補），不插「未送達」。同一個 crid 重送走冪等分支，不會再打字。
-        let sent_now = lifecycle::owed_as_unknown(
-            lifecycle::prompt_grouped(app, &t.id, text, &crid, Some(&group_id), Some(&deliver), attachment_ids, None).await,
+        let sent_now = app.owed_as_unknown(
+            app.prompt_grouped(&t.id, text, &crid, Some(&group_id), Some(&deliver), attachment_ids, None).await,
         );
         match sent_now {
             Ok(out) => {
@@ -295,7 +296,7 @@ pub async fn chat(
                     {
                         // 刪掉的是一則前端已經收過的訊息：沒有事件的話群組時間軸會一直留著它（跟 `prompt.rs` 撤回 prompt 同一招）。
                         Ok(r) if r.rows_affected() > 0 => {
-                            app.emit("resync", json!({"reason": "group_note_retired", "bot_id": t.id, "group_id": group_id})).await;
+                            app.emit_event("resync", json!({"reason": "group_note_retired", "bot_id": t.id, "group_id": group_id})).await;
                         }
                         Ok(_) => {}
                         Err(e) => tracing::warn!(bot = %t.name, error = %e, "could not retire the stale skipped note"),
@@ -340,7 +341,7 @@ async fn note_skipped(app: &Arc<App>, bot: &Member, group_id: &str, code: &str, 
         "unknown_delivery" => format!("群組訊息未送達 {}：上一回合送達狀態未知，請先放棄該回合", bot.name),
         _ => format!("群組訊息未送達 {}：{human}", bot.name),
     };
-    lifecycle::insert_message_grouped(app, &conv, None, "system", &text, "system", false, None, Some(group_id)).await?;
+    app.insert_message_grouped(&conv, None, "system", &text, "system", false, None, Some(group_id)).await?;
     Ok(())
 }
 
@@ -407,9 +408,9 @@ async fn messages_scoped(
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?;
             match at {
-                None => return Err(crate::api::cursor_not_found("before_message_gone", message_id)),
+                None => return Err(app.cursor_not_found("before_message_gone", message_id)),
                 Some((_, p)) if p != project.id => {
-                    return Err(crate::api::cursor_not_found("before_message_not_in_conversation", message_id))
+                    return Err(app.cursor_not_found("before_message_not_in_conversation", message_id))
                 }
                 Some((rowid, _)) => Some(rowid),
             }
