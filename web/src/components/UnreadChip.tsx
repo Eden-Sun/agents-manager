@@ -12,7 +12,8 @@
  * 排除（2026-09-10 使用者）：AGM 總管專案不算（例行 loop 會洗版），但 ★ 釘選不受影響；
  * 認 `GET /api/supervisor` 的 `project_id` 不認名字（2026-09-13 已從 `AGM` 改名 `AGM-DM-GRUP`）。
  */
-import { chipStateText, kidsText } from '../lib/chipStateText'
+import { chipStateText, kidsText, KEEP_WARM_REPLIED_TEXT } from '../lib/chipStateText'
+import { keepWarmReplied } from '../lib/keepWarm'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react'
 import type { Bot } from '../api/types'
 import { useMediaQuery } from '../hooks/useMediaQuery'
@@ -31,6 +32,7 @@ import { ChipLegend } from './ChipLegend'
 import { BotStatusCard, type ChipHints } from './BotStatusCard'
 import './unreadChip.css'
 import './cacheClock.css'
+import './keepWarmChip.css'
 
 /** 與 `unreadChip.css` 斷點同值。 */
 const NARROW_QUERY = '(max-width: 720px)'
@@ -64,6 +66,8 @@ interface ChipItem {
   title: string
   /** 主力晶片的快取倒數（`lib/cacheClock.ts`）；grok、沒紀錄、非主力是 `null`。 */
   cache: CacheState | null
+  /** 主力：保溫回覆到了、使用者還沒送新 prompt → 晶片框換色（`keepWarmChip.css`）。 */
+  keepWarmReplied: boolean
 }
 
 /** 子 agent 在跑：分叉圖示（形狀跟燈／點不同）＋多顆時的數字；文字說明在 `title` 與 sr-only。 */
@@ -97,7 +101,7 @@ const canHover = () => typeof window !== 'undefined' && window.matchMedia?.('(ho
 const PEEK_DELAY_MS = 400
 
 function chipHints(it: ChipItem): ChipHints {
-  return { current: it.current, unread: it.unread, needsReply: it.needsReply, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.cache?.title ?? null }
+  return { current: it.current, unread: it.unread, needsReply: it.needsReply, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.cache?.title ?? null, keepWarmReplied: it.keepWarmReplied }
 }
 
 function Chip({ it, dnd, lamp, onPeek }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean; /** 主力晶片：hover 開狀態卡（`null`＝收起）。 */ onPeek?: (id: string | null, at?: DOMRect) => void }) {
@@ -113,9 +117,9 @@ function Chip({ it, dnd, lamp, onPeek }: { it: ChipItem; dnd?: PinnedDnd; lamp?:
   return (
     <button
       type="button"
-      className={`${chipClass(it)}${cache ? ` cache-${cache.level}` : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
+      className={`${chipClass(it)}${cache ? ` cache-${cache.level}` : ''}${it.keepWarmReplied ? ' keep-warm-replied' : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
       // 主力晶片在能 hover 的裝置上改用狀態卡，不再疊一個瀏覽器原生 tooltip。
-      title={onPeek && canHover() ? undefined : it.cache ? `${it.title}\n${it.cache.title}` : it.title}
+      title={onPeek && canHover() ? undefined : [it.title, it.cache?.title, it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
       onMouseEnter={
         onPeek
           ? (e) => {
@@ -160,6 +164,11 @@ function Chip({ it, dnd, lamp, onPeek }: { it: ChipItem; dnd?: PinnedDnd; lamp?:
         </span>
       ) : null}
       <span className="unread-chip-name">{it.name}</span>
+      {it.keepWarmReplied ? (
+        <span className="unread-chip-warm" aria-hidden="true">
+          ♨︎
+        </span>
+      ) : null}
       {it.unread > 0 ? <span className="unread-chip-n" aria-hidden="true">{it.unread > 99 ? '99+' : it.unread}</span> : null}
       {it.working || it.needsReply || it.waitsKids ? <span className="unread-chip-dot" aria-hidden="true" /> : null}
       {it.kidsRunning > 0 ? <KidsBadge n={it.kidsRunning} /> : null}
@@ -254,7 +263,8 @@ export function UnreadChip() {
         kidsRunning: nKids,
         working: status === 'working',
         title: botTitle(b.name, pinned, n, needsReply, kids, current) + (nKids > 0 ? `（${kidsText(nKids)}）` : ''),
-        cache: pinned ? cacheState(runs[b.id]?.last_api_at, runs[b.id]?.cache_ttl_secs, now, status === 'working', runs[b.id]?.cache_kept_alive_at) : null,
+        keepWarmReplied: pinned && keepWarmReplied(runs[b.id]),
+        cache: pinned ? cacheState(runs[b.id]?.last_api_at, runs[b.id]?.cache_ttl_secs, now, status === 'working', runs[b.id]?.cache_kept_warm_at) : null,
       })
     }
     return out

@@ -21,3 +21,16 @@
   opacity: 0.45;
   cursor: default;
 }
+
+/* 「不用保溫」開著：實心 accent 底，跟沒開時的外框鈕分得出來（文字也不同，不只靠顏色）。 */
+.keep-warm-skip-btn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.keep-warm-skip-btn.on:hover:not(:disabled) {
+  color: var(--accent-text);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 85%, var(--text));
+}

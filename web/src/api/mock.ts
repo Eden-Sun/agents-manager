@@ -121,7 +121,9 @@ interface MockRun {
   /** 快取倒數（SPEC §6.5j）：最後一次 API 活動；claude／codex 才有 TTL。 */
   last_api_at?: string | null
   cache_ttl_secs?: number | null
-  cache_kept_alive_at?: string | null
+  cache_kept_warm_at?: string | null
+  keep_warm_skip?: boolean
+  keep_warm_replied_at?: string | null
 }
 
 /** mock 的快取倒數：各顆 bot 錯開「上次活動」幾分鐘前，綠／黃／紅／已涼都演得到。 */
@@ -193,6 +195,8 @@ interface MockMessage {
   relay_from: string | null
   /** `send_now`＝插隊、`supplement`＝補充；沒有＝一般送出。 */
   sent_via?: 'send_now' | 'supplement' | null
+  /** 保溫回合的訊息（使用者那則與保溫回覆）：不算未讀。 */
+  keep_warm?: boolean
   created_at: string
 }
 
@@ -1073,6 +1077,7 @@ export class MockTransport implements Transport {
       if (method === 'PATCH' && !action) return this.patchBot(botId, b)
       if (method === 'DELETE' && !action) return this.deleteBot(botId)
       if (method === 'GET' && action === 'messages') return this.messagesOf(botId, q)
+      if (method === 'POST' && action === 'keep-warm' && seg[3] === 'skip' && seg.length === 4) return this.setKeepWarmSkip(botId, b)
       if (action === 'preview' && seg.length === 3) {
         if (method === 'GET') return this.previewOf(botId)
         if (method === 'POST') return this.startPreview(botId, b)
@@ -3295,6 +3300,12 @@ export class MockTransport implements Transport {
         : {}
       throw new ApiError(409, { error: 'conflict', reason: 'a turn is already in flight', turn_id: busy.id, ...why }, 'conflict')
     }
+    // 使用者送出新 prompt＝真的活動：保溫回覆的晶片框色與「不用保溫」都恢復（daemon 同樣清掉並廣播）。
+    if (run.keep_warm_replied_at || run.keep_warm_skip) {
+      run.keep_warm_replied_at = null
+      run.keep_warm_skip = false
+      this.emitBotStatus(botId)
+    }
     const interrupting = Boolean(busy && canSendNow)
     if (busy && interrupting) {
       this.updateTurn(busy, { status: 'failed', completed_at: now() })
@@ -3722,6 +3733,47 @@ export class MockTransport implements Transport {
 
   /** Enter 是分開的一顆鍵。 */
   /** 一鍵送出建議下一句（`POST /bots/:id/suggestion/accept`）：對不上就 409、不送；對上了照一般 prompt 開回合。 */
+  /** `POST /bots/:id/keep-warm/skip`（User-only）：只有主力的 claude／codex；沒有 run 時沒有地方記，照回請求值。 */
+  private setKeepWarmSkip(botId: string, b: Rec) {
+    const bot = this.bots.find((x) => x.id === botId)
+    if (!bot) throw new ApiError(404, { error: 'not_found', what: 'bot' }, 'not found')
+    if (bot.is_primary !== 1 || (bot.kind !== 'claude' && bot.kind !== 'codex')) {
+      throw new ApiError(400, { error: 'not_primary' }, 'bad request')
+    }
+    const skip = b.skip === true
+    const run = this.activeRun(botId)
+    if (run) {
+      run.keep_warm_skip = skip
+      this.emitBotStatus(botId)
+    }
+    return { keep_warm_skip: skip }
+  }
+
+  /** 演一輪保溫回覆（`__amMock.keepWarmReply`，測試與截圖用）：保溫那則、bot 的回覆、回合收尾，run 帶 `keep_warm_replied_at`。 */
+  simulateKeepWarmReply(botId: string) {
+    const run = this.activeRun(botId)
+    if (!run) return
+    const turn: MockTurn = {
+      id: ulid('turn'),
+      conversation_id: this.conv(botId),
+      run_id: run.id,
+      bot_id: botId,
+      origin: 'web',
+      status: 'completed',
+      delivery: 'ok',
+      client_request_id: `keep-warm:${ulid('anchor')}`,
+      created_at: now(),
+      completed_at: now(),
+    }
+    this.turns.push(turn)
+    this.addMessage({ conversation_id: turn.conversation_id, turn_id: turn.id, bot_id: botId, role: 'user', content: 'any updates', source: 'web', incomplete: 0, keep_warm: true })
+    this.addMessage({ conversation_id: turn.conversation_id, turn_id: turn.id, bot_id: botId, role: 'assistant', content: '目前沒有新進度。', source: 'hook', incomplete: 0, keep_warm: true })
+    this.emit('turn_updated', { bot_id: botId, turn })
+    run.cache_kept_warm_at = now()
+    run.keep_warm_replied_at = now()
+    this.emitBotStatus(botId)
+  }
+
   /** 快取倒數的「上次活動」改成幾分鐘前（`__amMock.cacheAge`，截圖用）；沒有 run 或 grok 不動。 */
   setCacheAge(botId: string, minutesAgo: number) {
     const run = this.activeRun(botId)
@@ -4301,6 +4353,8 @@ function installDevHelpers(mock: MockTransport) {
       mock.setRuntime(mock.botIdByName(botIdOrName) ?? botIdOrName, patch),
     // 截圖用：快取倒數的上次活動改成幾分鐘前（`__amMock.cacheAge('am-claude', 75)`＝已涼）。
     cacheAge: (botIdOrName: string, minutesAgo: number) => mock.setCacheAge(mock.botIdByName(botIdOrName) ?? botIdOrName, minutesAgo),
+    // 截圖用：演一輪保溫回覆（晶片框換色、不亮未讀）：`__amMock.keepWarmReply('am-claude')`。
+    keepWarmReply: (botIdOrName: string) => mock.simulateKeepWarmReply(mock.botIdByName(botIdOrName) ?? botIdOrName),
     // 截圖用：直接 PATCH 設定（`__amMock.patchBot('am-codex', {model: 'gpt-6-luna'})`），回 daemon 的回應。
     patchBot: (botIdOrName: string, body: Rec) =>
       mock.request('PATCH', `/bots/${encodeURIComponent(mock.botIdByName(botIdOrName) ?? botIdOrName)}`, body),

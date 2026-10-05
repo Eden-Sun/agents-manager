@@ -510,7 +510,9 @@ export function toRun(v: unknown, botId?: string): Run | null {
     ended_at: optStr(v.ended_at),
     agent_status_since: optStr(pick(v, 'agent_status_since')),
     last_api_at: optStr(pick(v, 'last_api_at')),
-    cache_kept_alive_at: optStr(pick(v, 'cache_kept_alive_at')),
+    cache_kept_warm_at: optStr(pick(v, 'cache_kept_warm_at')),
+    keep_warm_skip: bool(pick(v, 'keep_warm_skip')),
+    keep_warm_replied_at: optStr(pick(v, 'keep_warm_replied_at')),
     prompt_cache: toPromptCache(v.prompt_cache) ?? null,
     cache_ttl_secs: typeof v.cache_ttl_secs === 'number' && v.cache_ttl_secs > 0 ? v.cache_ttl_secs : null,
   }
@@ -590,6 +592,7 @@ export function toMessage(v: unknown, botId?: string): Message | null {
     rewound_at: optStr(pick(v, 'rewound_at')),
     sent_via: oneOf<'send_now' | 'supplement' | ''>(pick(v, 'sent_via'), SENT_VIA, '') || null,
     seq: num(pick(v, 'seq')) || undefined,
+    ...(pick(v, 'keep_warm') === true ? { keep_warm: true } : {}),
   }
 }
 

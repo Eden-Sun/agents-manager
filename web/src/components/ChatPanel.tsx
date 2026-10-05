@@ -1,5 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState, useId } from 'react'
 import { CompactButton } from './CompactButton'
+import { KeepWarmSkipButton } from './KeepWarmSkipButton'
 import type { ReactNode, RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { BotKind, KindQuota, Message, QuotaWindow, StatusInfo } from '../api/types'
@@ -1097,6 +1098,7 @@ function StatusLineBar({ botId, status, text }: { botId: string; status: StatusI
         <SlItem k="context" title={ctxDetail ? `已用 ${ctxDetail} tokens` : undefined}>
           {pct(status.context_used_pct)}{ctxDetail ? <span className="sl-dim"> · {ctxDetail}</span> : null}
           <CompactButton botId={botId} />
+          <KeepWarmSkipButton botId={botId} />
         </SlItem>
       ) : null}
       <StatusCache botId={botId} status={status} />

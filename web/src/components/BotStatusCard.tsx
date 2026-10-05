@@ -8,6 +8,7 @@ import { shortModel } from '../lib/shortModel'
 import { liveReplyOf, useStore } from '../store/store'
 import { cleanLiveActivity } from '../store/liveText'
 import { StatusLamp } from './StatusLamp'
+import { KEEP_WARM_REPLIED_TEXT } from '../lib/chipStateText'
 import './chipLegend.css'
 
 /** 晶片列給的這顆 bot 的提示狀態（跟晶片顏色同一份判斷，免得卡片跟顏色講不一樣）。 */
@@ -19,6 +20,8 @@ export interface ChipHints {
   kidsRunning: number
   /** 快取倒數的說明（`cacheClock`）；沒有是 null。 */
   cacheTitle: string | null
+  /** 保溫回覆到了、使用者還沒送新 prompt（晶片框是紫色）。 */
+  keepWarmReplied?: boolean
 }
 
 /** 先講「該不該去看」，跟晶片的顏色同一個優先序：要你回答 → 未讀 → 等子 agent → 在跑。 */
@@ -123,6 +126,12 @@ export function BotStatusCard({
           <>
             <dt>快取</dt>
             <dd>{hints.cacheTitle}</dd>
+          </>
+        ) : null}
+        {hints.keepWarmReplied ? (
+          <>
+            <dt>保溫</dt>
+            <dd>{KEEP_WARM_REPLIED_TEXT}</dd>
           </>
         ) : null}
       </dl>
