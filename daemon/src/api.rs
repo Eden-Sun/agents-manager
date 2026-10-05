@@ -230,6 +230,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/herdr-update", post(crate::herdr_upgrade::post_herdr_update))
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
         .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
+        .route("/hosts/{name}/agy/logout", post(logout_agy))
         .route("/hosts/{name}/gh", get(get_gh_status))
         .route("/hosts/{name}/gh/login", post(login_gh))
         .route("/hosts/{name}/gh/cancel", post(cancel_gh))
@@ -840,6 +841,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/tools/install", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/identities/{identity}/logout", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/agy/logout", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/gh/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/gh/cancel", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/identities", BotRoutePolicy::UserOrAgm),
@@ -3419,6 +3421,20 @@ async fn logout_identity(
     identity_auth(app, name, identity, true).await
 }
 
+/// agy 沒有 `logout` 子命令也沒有身分：直接刪那台主機的憑證檔、清額度快照（`quota_agy::logout`）。
+async fn logout_agy(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Json<Value>, LcError> {
+    require_user(&principal)?;
+    match crate::quota_agy::logout(&app, &name).await {
+        Ok(removed) => Ok(Json(json!({"removed": removed}))),
+        Err(crate::quota_agy::LogoutError::UnknownHost) => Err(LcError::NotFound("host".into())),
+        Err(crate::quota_agy::LogoutError::Failed(m)) => Err(LcError::Upstream(m)),
+    }
+}
+
 async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bool) -> Result<Response, LcError> {
     // 沒寫 host 的身分在遠端也生效：未知主機若先查 identity／PATH，會變成 409「CLI 不在 PATH」。
     // 開 pane 之前記下主機權威，watcher 只對這一條連線收尾（#347）。
@@ -3471,6 +3487,41 @@ async fn identity_auth(app: Arc<App>, name: String, identity: String, logout: bo
         .ok_or_else(|| LcError::Upstream(format!("host `{name}` changed before identity authentication started")))??;
     crate::tools::spawn_identity_login_watch(app, name, shell.pane_id.clone(), identity, idn.kind, logout, fence);
     Ok((StatusCode::OK, Json(json!(shell))).into_response())
+}
+
+#[cfg(test)]
+mod agy_logout_route_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    async fn call(app: &Arc<App>, host: &str, principal: RequestPrincipal) -> (StatusCode, Value) {
+        let resp = match logout_agy(State(app.clone()), Path(host.to_string()), Extension(principal)).await {
+            Ok(j) => j.into_response(),
+            Err(e) => e.into_response(),
+        };
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// 契約：User 才能呼叫（Bot 403 `user_only`）；沒有這台主機 404；檔案不在 `{"removed":false}`、在 `{"removed":true}`。
+    #[tokio::test]
+    async fn only_the_user_can_log_agy_out_and_the_answer_says_whether_a_file_was_removed() {
+        let _lock = crate::quota_agy::token_test_lock().await;
+        let e = crate::testing::env().await;
+        let (st, body) = call(&e.app, crate::config::LOCAL_HOST, RequestPrincipal::Bot("b1".into())).await;
+        assert_eq!((st, body["reason"].as_str()), (StatusCode::FORBIDDEN, Some("user_only")), "{body}");
+        let (st, _) = call(&e.app, "no-such-host", RequestPrincipal::User).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+
+        let tok = crate::home::dir().unwrap().join(crate::quota_agy::TOKEN_FILE);
+        std::fs::create_dir_all(tok.parent().unwrap()).unwrap();
+        std::fs::write(&tok, "secret").unwrap();
+        let (st, body) = call(&e.app, crate::config::LOCAL_HOST, RequestPrincipal::User).await;
+        assert_eq!((st, body["removed"].as_bool()), (StatusCode::OK, Some(true)), "{body}");
+        let (st, body) = call(&e.app, crate::config::LOCAL_HOST, RequestPrincipal::User).await;
+        assert_eq!((st, body["removed"].as_bool()), (StatusCode::OK, Some(false)), "{body}");
+    }
 }
 
 #[cfg(test)]

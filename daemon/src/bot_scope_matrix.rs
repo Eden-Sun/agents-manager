@@ -244,6 +244,7 @@ fn rules() -> Vec<Rule> {
         rule("POST", "/api/supervisor/persona/adopt-embedded", Expect::Forbidden, None),
         rule("POST", "/build-slots/acquire", Expect::Allow, None),
         rule("POST", "/api/hosts/{name}/identities/{identity}/logout", Expect::Forbidden, None),
+        rule("POST", "/api/hosts/{name}/agy/logout", Expect::Forbidden, None),
         rule("GET", "/api/projects/{id}/messages", Expect::Forbidden, None),
         rule("POST", "/api/projects/{id}/messages", Expect::Forbidden, None),
         rule("PUT", "/api/projects/{id}/messages", Expect::Forbidden, None),
