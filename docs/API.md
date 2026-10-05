@@ -480,7 +480,7 @@ daemon 重啟後就是空的（那次不會再推 `herdr_update_done`，前端�
 ```
 
 - `resume_session_id`／`resume_outcome`：`?resume=native` 起的 run 要接回哪個 session，與接回的結論（issue #92）。
-  `resume_session_id` 在 CLI 回報 session 之後清成 `null`；`resume_outcome` 是 `"verified"`（回報的就是那段）、
+  `resume_session_id` 在 CLI 回報 session 之後清成 `null`；`resume_outcome` 是 `"verified"`（回報的就是那段，並撤掉綁定該 session 的 `context_lost` 通知）、
   `"mismatch"`（CLI 開了新對話，對話裡有 system 說明）、`"unverified"`（claude 等滿 120 秒都沒回報，刻意放行並插說明；
   之後才到的回報會把它改成前兩者之一），沒要求接回或還在等是 `null`。還在等的 claude run 不收 prompt（SPEC §6.5.2 第 4 點）。
 - `agent_status_since`：`agent_status` 最後一次**真的改變**的時間（同值重寫不算），daemon 觀察到的，
