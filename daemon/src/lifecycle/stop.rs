@@ -437,49 +437,79 @@ pub async fn run_alive(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> bool {
 /// #61: one-time purge of `bots/<id>/` for soft-deleted bots with no live run. Dirs no bot row
 /// claims are left alone (rt-87's `bots-orphan-backup-2026-09-10/` is outside `bots/`).
 pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
-    let root = app.data_dir.join("bots");
-    let Ok(entries) = std::fs::read_dir(&root) else { return 0 };
     let mut removed = 0;
-    for entry in entries.flatten() {
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue };
-        // 只有「確定是軟刪」而且「確定沒有 active run」才有權刪：讀不到（DB 一時忙、I/O 錯）不等於沒有，留著、記一行，
-        // 下一次啟動再判斷（清理可重入）。刪掉還在跑的 bot 的目錄會拿走它的 hook／shim／spool，補不回來。
-        let deleted: Option<Option<String>> = match sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id = ?")
-            .bind(&id)
-            .fetch_optional(&app.db)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(bot = %id, error = %e, "could not read whether a bots/<id>/ directory's bot is deleted; leaving it for the next start");
+    let root = app.data_dir.join("bots");
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
                 continue;
             }
-        };
-        if !matches!(deleted, Some(Some(_))) {
-            continue;
+            let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue };
+            // 只有「確定是軟刪」而且「確定沒有 active run」才有權刪：讀不到（DB 一時忙、I/O 錯）不等於沒有，留著、記一行，
+            // 下一次啟動再判斷（清理可重入）。刪掉還在跑的 bot 的目錄會拿走它的 hook／shim／spool，補不回來。
+            let deleted: Option<Option<String>> = match sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(&app.db)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(bot = %id, error = %e, "could not read whether a bots/<id>/ directory's bot is deleted; leaving it for the next start");
+                    continue;
+                }
+            };
+            if !matches!(deleted, Some(Some(_))) {
+                continue;
+            }
+            // #708：移交出去的專案的 bot 目錄不刪（接手的 daemon 可能在用；讀不到也不刪）。
+            if !matches!(crate::handoff::bot_handed_off_to(&app.db, &id).await, Ok(None)) {
+                continue;
+            }
+            match db::active_run(&app.db, &id).await {
+                Ok(None) => {}
+                Ok(Some(_)) => continue,
+                Err(e) => {
+                    tracing::warn!(bot = %id, error = %e, "could not read whether a deleted bot still has a live run; leaving its directory for the next start");
+                    continue;
+                }
+            }
+            match crate::bot_trash::move_in(&app.data_dir, &id, &entry.path()) {
+                Ok(_) => removed += 1,
+                Err(e) => tracing::warn!(dir = %entry.path().display(), error = %e, "could not move a deleted bot's directory to bots-trash"),
+            }
         }
-        // #708：移交出去的專案的 bot 目錄不刪（接手的 daemon 可能在用；讀不到也不刪）。
+    }
+    if removed > 0 {
+        tracing::info!(removed, "moved bots/<id>/ directories left behind by deleted bots to bots-trash");
+    }
+    // 清理已軟刪受限 bot 殘留的 share workspace（issue #828，崩潰重啟後收斂）。
+    let restricted_deleted: Vec<(String, String)> = sqlx::query_as(
+        "SELECT s.bot_id, s.workspace FROM shared_bots s
+         JOIN bots b ON b.id = s.bot_id
+         WHERE b.deleted_at IS NOT NULL AND s.profile = 'restricted'",
+    )
+    .fetch_all(&app.db)
+    .await
+    .unwrap_or_default();
+
+    for (id, ws) in restricted_deleted {
         if !matches!(crate::handoff::bot_handed_off_to(&app.db, &id).await, Ok(None)) {
             continue;
         }
         match db::active_run(&app.db, &id).await {
             Ok(None) => {}
-            Ok(Some(_)) => continue,
-            Err(e) => {
-                tracing::warn!(bot = %id, error = %e, "could not read whether a deleted bot still has a live run; leaving its directory for the next start");
-                continue;
+            _ => continue,
+        }
+        if let Some(ws_path) = crate::share::folder::validate_workspace_path(&app.data_dir, &ws) {
+            match crate::bot_trash::move_in_kind(&app.data_dir, &id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
+                Ok(Some(to)) => {
+                    tracing::info!(bot = %id, dir = %ws_path.display(), trash = %to.display(), "moved leftover restricted share workspace to bots-trash");
+                    removed += 1;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(bot = %id, dir = %ws_path.display(), error = %e, "could not move leftover restricted share workspace to bots-trash"),
             }
         }
-        match crate::bot_trash::move_in(&app.data_dir, &id, &entry.path()) {
-            Ok(_) => removed += 1,
-            Err(e) => tracing::warn!(dir = %entry.path().display(), error = %e, "could not move a deleted bot's directory to bots-trash"),
-        }
-    }
-    if removed > 0 {
-        tracing::info!(removed, "moved bots/<id>/ directories left behind by deleted bots to bots-trash");
     }
     // 過期的與超出總量上限的一起收（review d77434c0 #2）；常駐的 daemon 另外由 `bot_trash::spawn_gc` 每天再跑一次。
     let (expired, evicted) = crate::bot_trash::gc_with_cap(&app.data_dir, crate::bot_trash::keep_duration(), crate::bot_trash::MAX_BYTES);
@@ -509,6 +539,17 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
         Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %att.display(), trash = %to.display(), "moved bot attachments to bots-trash"),
         Ok(None) => {}
         Err(e) => tracing::warn!(bot = %bot_id, dir = %att.display(), error = %e, "could not move bot attachments to bots-trash"),
+    }
+    // 受限分享用 bot 的工作目錄（`shared_bots.workspace`，issue #828）。
+    // 只有 restricted bot 的工作目錄才收進回收區；信任分享（trusted）的工作區是使用者既有目錄，不能動。
+    if let Ok(Some(ws)) = crate::share::store::restricted_workspace(&app.db, bot_id).await {
+        if let Some(ws_path) = crate::share::folder::validate_workspace_path(&app.data_dir, &ws) {
+            match crate::bot_trash::move_in_kind(&app.data_dir, bot_id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
+                Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %ws_path.display(), trash = %to.display(), "moved restricted share workspace to bots-trash"),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(bot = %bot_id, dir = %ws_path.display(), error = %e, "could not move restricted share workspace to bots-trash"),
+            }
+        }
     }
     if host == LOCAL_HOST {
         let Ok(dir) = app.bot_dir(bot_id) else { return false };

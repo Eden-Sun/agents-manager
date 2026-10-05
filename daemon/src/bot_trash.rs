@@ -42,15 +42,37 @@ fn create_root(data_dir: &Path) -> std::io::Result<File> {
 }
 
 fn path_parent(data_dir: &Path, path: &Path, create: bool) -> std::io::Result<(File, OsString)> {
-    let relative = path.strip_prefix(data_dir).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is outside the data directory"))?;
-    let components = crate::trusted_open::safe_relative_components(relative).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no safe entry name"))?;
-    let (name, parent) = components.split_last().expect("safe relative components are nonempty");
-    let dir = if parent.is_empty() {
-        crate::trusted_open::open_bound_dir(data_dir, &[], None)?
-    } else if create {
-        crate::trusted_open::create_bound_dirs(data_dir, parent)?
+    if let Ok(relative) = path.strip_prefix(data_dir) {
+        let components = crate::trusted_open::safe_relative_components(relative).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no safe entry name"))?;
+        let (name, parent) = components.split_last().expect("safe relative components are nonempty");
+        let dir = if parent.is_empty() {
+            crate::trusted_open::open_bound_dir(data_dir, &[], None)?
+        } else if create {
+            crate::trusted_open::create_bound_dirs(data_dir, parent)?
+        } else {
+            crate::trusted_open::open_bound_dir(data_dir, parent, None)?
+        };
+        return Ok((dir, name.to_os_string()));
+    }
+
+    if !path.is_absolute() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is outside data directory and not absolute"));
+    }
+    let parent = path.parent().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent"))?;
+    let name = path.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name"))?;
+    if name == "." || name == ".." {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid file name"));
+    }
+    let dir = if create {
+        if !parent.is_dir() {
+            let mut b = std::fs::DirBuilder::new();
+            b.recursive(true);
+            std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+            b.create(parent)?;
+        }
+        crate::trusted_open::open_dir(parent)?
     } else {
-        crate::trusted_open::open_bound_dir(data_dir, parent, None)?
+        crate::trusted_open::open_dir(parent)?
     };
     Ok((dir, name.to_os_string()))
 }
@@ -59,11 +81,12 @@ fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
 }
 
-/// 同一顆 bot 除了 `bots/<id>/` 之外還要收進回收區的目錄（issue #465）。回收區的項目名：
+/// 同一顆 bot 除了 `bots/<id>/` 之外還要收進回收區的目錄（issue #465、#828）。回收區的項目名：
 /// `<id>.<毫秒>` 是 `bots/<id>/`，`<id>.<kind>.<毫秒>` 是這裡的其他目錄。兩種的結尾都是毫秒，
 /// 所以 [`entries`]（過期與總量上限）一視同仁；[`latest`] 認的是前者，`<kind>` 那種 `parse::<u128>`
 /// 會失敗、不會被當成 bot 目錄還原回去。
 pub const ATTACHMENTS: &str = "attachments";
+pub const SHARE_WORKSPACE: &str = "share_workspace";
 
 /// 這顆 bot 在資料目錄裡的附件副本（`attach::local_copy_dir` 的同一條路）。
 pub fn attachments_dir(data_dir: &Path, bot_id: &str) -> PathBuf {
@@ -550,5 +573,51 @@ mod tests {
         std::fs::write(d.join("a/b/two"), vec![b'x'; 5]).unwrap();
         assert_eq!(dir_size(&d), 15);
         std::fs::remove_dir_all(&data).unwrap();
+    }
+
+    #[test]
+    fn share_workspace_can_be_moved_to_trash_restored_and_counts_toward_cap() {
+        let base = crate::testing::scratch_dir("am-trash-ws");
+        let data = base.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let ws_parent = base.join("shared-bots");
+        let ws = ws_parent.join("b1");
+        std::fs::create_dir_all(ws.join("inbox")).unwrap();
+        std::fs::write(ws.join("inbox/test.txt"), vec![b'a'; 100]).unwrap();
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        std::fs::write(ws.join("sub/doc.txt"), vec![b'b'; 200]).unwrap();
+
+        // 搬進 trash
+        let moved = move_in_kind(&data, "b1", Some(SHARE_WORKSPACE), &ws).unwrap().expect("moved to trash");
+        assert!(!ws.exists(), "original workspace is no longer live");
+        assert!(moved.join("inbox/test.txt").exists());
+        assert!(moved.join("sub/doc.txt").exists());
+
+        // 計算大小
+        let trash_entries = entries(&data);
+        assert_eq!(trash_entries.len(), 1);
+        assert_eq!(trash_entries[0].2, 300, "counts share workspace bytes");
+
+        // 還原
+        let restored = restore_kind(&data, "b1", Some(SHARE_WORKSPACE), &ws).unwrap().expect("restored");
+        assert_eq!(restored, moved);
+        assert!(ws.join("inbox/test.txt").exists());
+        assert!(ws.join("sub/doc.txt").exists());
+        assert_eq!(entries(&data).len(), 0);
+
+        // 再次刪除 + GC 淘汰
+        let moved2 = move_in_kind(&data, "b1", Some(SHARE_WORKSPACE), &ws).unwrap().expect("moved again");
+        assert!(!ws.exists());
+        assert_eq!(entries(&data).len(), 1);
+
+        // GC with zero keep
+        let (expired, _) = gc_with_cap(&data, Duration::ZERO, u64::MAX);
+        assert_eq!(expired, 1);
+        assert!(!moved2.exists());
+        assert_eq!(entries(&data).len(), 0);
+
+        // 過期後 restore 回傳 None
+        assert_eq!(restore_kind(&data, "b1", Some(SHARE_WORKSPACE), &ws).unwrap(), None);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -1838,6 +1838,7 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 
 - 流程：有 active Run 先 stop（host 連不上送不出去時 run 直接標 `exited` 照常刪）→ 從 config.toml 移除 → `bots.deleted_at`（**對話與訊息保留**，`GET /api/bots/{id}/messages` 仍讀得到）→
   把 `~/.config/agents-manager/bots/<bot_id>/` 搬進 `bots-trash/<bot_id>.<毫秒>/`（還原時搬回；本機放超過 7 天、或整個回收區超過 2 GB 就清掉最舊的，開機一次＋每天一次；
+  受限分享用 bot 的工作目錄（`shared_bots.workspace`）刪除時以 rename-first 搬進 `bots-trash/<id>.share_workspace.<毫秒>/`，計入 7 天與 2 GB 總量上限；信任分享（trusted）的工作區為既有專案目錄，刪除時不碰；
   遠端 ssh 搬進遠端的 `bots-trash/`，主機連上時清 7 天以上的，ssh 失敗記欠帳重試）。
 - **AGM 的 bot 要明講**（issue #406）：bot 是總管／角色本身、parent 是它們、或在總管／角色的專案裡，沒帶 `?confirm=supervisor` →
   `409 {"reason":"supervisor_owned","bot_id","name","role","message"}`（`role`：`AGM 總管（巡檢）`／`AGM 協調者`／`AGM 開出去的子 agent`／`AGM 專案裡的常駐工人`），什麼都不動，並推一筆 `ops_alert` 給巡檢。`DELETE /api/projects/{id}` 同一條（專案是總管的、或裡面有 AGM 的 bot），409 帶 `project_id`。
@@ -1848,7 +1849,7 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
   - `caller_self_reported=<X-AM-Caller>` 只是**自稱**：整個 API 都在同一把 UI token 後面，任何拿得到 token 的人都能寫 `X-AM-Caller: agm`。方便辨認腳本，不能當成證據。
 - **子 agent 一起刪**：`managed_by = "child"` 且 `parent_bot_id` 指到它的（含孫代），最深的先。每顆各推 `bot_changed`。
 - 找不到 404。
-- daemon 啟動時掃一次 `bots/`，只把 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄搬進 `bots-trash/`。
+- daemon 啟動時掃一次 `bots/`，只把 DB 裡已 `deleted_at` 且沒有 active Run 的 hook 材料目錄與受限分享工作區殘留目錄搬進 `bots-trash/`。
 
 ### 10.4b `GET /api/bots/deleted`
 嚴格 User-only；一般 Bot 與 AGM role Bot 都在 auth middleware 回 `403 user_only`。這是 UI 的軟刪 **user bot** 清單（#757），讓「復原」不只活在刪除當下那個分頁 15 秒的通知：`200 {"bots": [{id, name, kind, project_id, project_label, deleted_at, last_message_at}]}`，
@@ -1859,6 +1860,7 @@ WS：每顆兩次 `bots_restart_progress`（`restarting`，然後 `ok` / `failed
 ### 10.4a `POST /api/bots/{id}/restore`
 軟刪復原：`200 {"bot_id"}`，推 `bot_changed` / `project_changed`。child 直接清 `deleted_at`；user bot 把 config.toml 那一筆加回去再投影。
 刪除時搬進 `bots-trash/` 的 bot 目錄搬回來（本機直接搬；遠端 ssh 搬，最多等 10 秒）：`bots/<id>/` 已經是真的目錄或檔案（重新啟動過、重建了）就不動，免得蓋掉新的；原地若是 symlink，只拆掉連結本身（不刪它指到的東西）再把回收區搬回來；
+受限分享用 bot 的工作區若仍在回收區則還原回原路徑；已過期或被淘汰則重建乾淨工作區與 `inbox/`；
 回收區那份已經過期被清掉時，還原照樣成功，目錄下次啟動重新產生——搬不回來不擋還原、只記 warn。
 child 還原後不立即建立 run；daemon 給它十分鐘讓父 bot 在原 pane 重開。這段期間 reconcile 不會只因沒有 active run 而退休；寬限期過後仍未回來就照原規則退休。到期時間與 `agent_name_taken` 保護原因記在 `supervisor_notes`，daemon 重啟後仍有效。
 

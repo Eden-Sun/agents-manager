@@ -1734,5 +1734,114 @@ async fn interrupted_project_delete_recovery_revokes_all_share_capabilities() {
     assert_eq!(crate::intents::get(&app.db, &intent).await.unwrap().unwrap().status, "done");
 }
 
+#[tokio::test]
+async fn restricted_bot_share_workspace_follows_trash_and_restore_lifecycle() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "share-ws-lifecycle").await;
+    sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&b.id).execute(&e.app.db).await.unwrap();
+    let ws = std::path::PathBuf::from(store::workspace(&e.app.db, &b.id).await.unwrap().unwrap());
+    assert!(ws.is_dir());
+
+    // 1. 在 workspace/inbox 與另一個 workspace 目錄放入檔案
+    let inbox_file = ws.join("inbox").join("upload.txt");
+    std::fs::write(&inbox_file, vec![b'u'; 200]).unwrap();
+    let other_dir = ws.join("artifacts");
+    std::fs::create_dir_all(&other_dir).unwrap();
+    let work_file = other_dir.join("report.txt");
+    std::fs::write(&work_file, vec![b'r'; 300]).unwrap();
+
+    // 2. 軟刪 B
+    crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+
+    // 3. assert 原路徑不再 live，且 bots-trash 中有 share_workspace entry，計算大小
+    assert!(!ws.exists(), "original workspace is no longer live");
+    let trash_root = crate::bot_trash::root(&e.app.data_dir);
+    let mut ws_entries = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&trash_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&format!("{}.share_workspace.", b.id)) {
+                ws_entries.push(name);
+            }
+        }
+    }
+    assert_eq!(ws_entries.len(), 1, "exactly one share_workspace trash entry created");
+
+    // 4. retention 內 restore → 檔案還原
+    crate::api::restore_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+    assert!(ws.is_dir(), "workspace is restored");
+    assert_eq!(std::fs::read(&inbox_file).unwrap(), vec![b'u'; 200]);
+    assert_eq!(std::fs::read(&work_file).unwrap(), vec![b'r'; 300]);
+
+    // 5. 再次刪除 + zero keep GC → trash 被移除
+    crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+    assert!(!ws.exists());
+    let (expired, _) = crate::bot_trash::gc_with_cap(&e.app.data_dir, std::time::Duration::ZERO, u64::MAX);
+    assert!(expired >= 1, "workspace trash entry expired and removed");
+
+    // 6. 過期後 restore → 建立乾淨 workspace，舊檔案不再重現
+    crate::api::restore_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+    assert!(ws.is_dir(), "clean workspace created");
+    assert!(ws.join("inbox").is_dir(), "inbox directory recreated");
+    assert!(!inbox_file.exists(), "old inbox file does not reappear");
+    assert!(!work_file.exists(), "old artifact file does not reappear");
+}
+
+#[tokio::test]
+async fn restricted_bot_workspace_counts_towards_aggregate_size_cap() {
+    let e = tt::env().await;
+    let b1 = restricted_bot(&e.app, &e.project_id, "cap-ws-b1").await;
+    sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&b1.id).execute(&e.app.db).await.unwrap();
+    let ws1 = std::path::PathBuf::from(store::workspace(&e.app.db, &b1.id).await.unwrap().unwrap());
+    std::fs::write(ws1.join("inbox").join("b1.bin"), vec![b'1'; 10_000]).unwrap();
+
+    let b2 = restricted_bot(&e.app, &e.project_id, "cap-ws-b2").await;
+    sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&b2.id).execute(&e.app.db).await.unwrap();
+    let ws2 = std::path::PathBuf::from(store::workspace(&e.app.db, &b2.id).await.unwrap().unwrap());
+    std::fs::write(ws2.join("inbox").join("b2.bin"), vec![b'2'; 10_000]).unwrap();
+
+    // 依序刪除 b1、b2
+    crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b1.id.clone())).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    crate::api::delete_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b2.id.clone())).await.unwrap();
+
+    // 上限 12,000 bytes：b1+b2 超過上限，最舊的 b1 應被淘汰，較新的 b2 留著
+    let (expired, evicted) = crate::bot_trash::gc_with_cap(&e.app.data_dir, std::time::Duration::from_secs(3600), 12_000);
+    assert_eq!(expired, 0);
+    assert_eq!(evicted, 1, "oldest workspace entry evicted to stay within cap");
+
+    // 還原 b2 成功（仍在庫內）
+    crate::api::restore_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b2.id.clone())).await.unwrap();
+    assert_eq!(std::fs::read(ws2.join("inbox").join("b2.bin")).unwrap().len(), 10_000);
+
+    // 還原 b1 得到乾淨工作區（檔案已淘汰消失）
+    crate::api::restore_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b1.id.clone())).await.unwrap();
+    assert!(!ws1.join("inbox").join("b1.bin").exists());
+}
+
+#[tokio::test]
+async fn crashed_delete_converges_leftover_share_workspace_on_startup_purge() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "crash-ws-purge").await;
+    sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&b.id).execute(&e.app.db).await.unwrap();
+    let ws = std::path::PathBuf::from(store::workspace(&e.app.db, &b.id).await.unwrap().unwrap());
+    let file = ws.join("inbox").join("important.txt");
+    std::fs::write(&file, "precious data").unwrap();
+
+    // 模擬崩潰：deleted_at 已寫入 DB，但尚未呼叫 purge_bot_dir，workspace 仍在原位
+    sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&b.id).execute(&e.app.db).await.unwrap();
+    assert!(file.exists());
+
+    // 啟動開機清掃
+    let removed = crate::lifecycle::purge_deleted_bot_dirs(&e.app).await;
+    assert!(removed >= 1);
+    assert!(!ws.exists(), "startup purge converged and moved leftover workspace to trash");
+
+    // 還原驗證資料仍在 trash 中並可搬回
+    crate::api::restore_bot(axum::extract::State(e.app.clone()), axum::extract::Path(b.id.clone())).await.unwrap();
+    assert!(file.exists());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "precious data");
+}
+
 #[path = "trusted_tests.rs"]
 mod trusted;

@@ -194,7 +194,7 @@ pub(crate) fn remove_tree_in(dir: &File, name: &OsStr) -> io::Result<()> {
     if rc == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
-fn open_dir(path: &Path) -> io::Result<File> {
+pub(crate) fn open_dir(path: &Path) -> io::Result<File> {
     let c = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path has an embedded NUL"))?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
