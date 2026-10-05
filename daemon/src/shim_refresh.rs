@@ -279,7 +279,7 @@ pub(crate) async fn refresh_remote_host(app: &Arc<App>, host: &str) -> anyhow::R
     let bots = crate::db::live_bots_on_host(&app.db, host).await?;
     let mut dirs = Vec::new();
     for b in &bots {
-        dirs.push(crate::lifecycle::remote_bot_dir_for(&conn, &b.id, app.instance().as_deref()).await?.dir);
+        dirs.push(crate::herdr_maintenance::app_ports_p12::remote_bot_dir_for(&conn, &b.id, app.instance().as_deref()).await?);
     }
     if dirs.is_empty() {
         return Ok(RemoteSync::default());

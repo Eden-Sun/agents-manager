@@ -1476,7 +1476,7 @@ async fn mark_installed_with_fence(
                 return Ok(None);
             }
             #[cfg(test)]
-            crate::lifecycle::race_point::hit("cli_update_before_notice_cas", &run.id).await;
+            crate::herdr_maintenance::app_ports_p12::race_point::hit("cli_update_before_notice_cas", &run.id).await;
         }
         let write_notice = async {
             sqlx::query("UPDATE runs SET update_notice = ? WHERE id = ? AND update_notice = ?")
@@ -2529,7 +2529,7 @@ mod tests {
 
         let app_to_repoint = app.clone();
         let replacement = cfg("target-b");
-        crate::lifecycle::race_point::arm("cli_update_before_notice_cas", &run, move || async move {
+        crate::herdr_maintenance::app_ports_p12::race_point::arm("cli_update_before_notice_cas", &run, move || async move {
             app_to_repoint.hosts.replace_remote_for_test(&app_to_repoint, replacement).await;
         });
 
@@ -3863,7 +3863,7 @@ mod tests {
             }
         });
         let (release, gate) = tokio::sync::oneshot::channel::<()>();
-        crate::lifecycle::race_point::arm("bulk_restart_before_lookup", &cl.id, move || async move {
+        crate::herdr_maintenance::app_ports_p12::race_point::arm("bulk_restart_before_lookup", &cl.id, move || async move {
             gate.await.ok();
         });
         let first = crate::bulk_restart::spawn(&app).await.unwrap();
