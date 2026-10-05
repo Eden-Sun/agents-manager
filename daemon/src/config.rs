@@ -838,7 +838,7 @@ pub fn efforts_for_kind(kind: &str) -> &'static [&'static str] {
         "claude" => &["low", "medium", "high", "xhigh", "max"],
         "grok" => &["low", "medium", "high", "xhigh"],
         "codex" => &["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-        // agy：effort 已經包在模型 slug 裡（`gemini-3.1-pro-high`／`-low`…），`--effort` 旗標留到第二階段。
+        // agy：effort 已經包在模型 slug 裡（`gemini-3.8-flash-high`／`-low`…），`--effort` 旗標留到第二階段。
         "agy" => &[],
         _ => &[],
     }

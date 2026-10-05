@@ -163,8 +163,30 @@ pub fn codex_models_from_rpc(result: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// agy 的預設模型（清單第一個）；被拿掉的 agy 模型一律換成它。
+pub const AGY_DEFAULT_MODEL: &str = "gemini-3.8-flash-medium";
+
+/// agy 已經拿掉的模型（2026-10-05 使用者：「agy 的 model 只限 3.8」）：3.7／3.6 Flash（agy 公告即將下架）、3.1 Pro、
+/// claude-sonnet-4-6、claude-opus-4-6-thinking、gpt-oss-120b-medium。已存在的 bot 設了其中之一，啟動時與寫入設定時都換成 [`AGY_DEFAULT_MODEL`]。
+const AGY_RETIRED_MODELS: &[&str] = &[
+    "gemini-3.7-flash-high",
+    "gemini-3.7-flash-medium",
+    "gemini-3.7-flash-low",
+    "gemini-3.6-flash-high",
+    "gemini-3.6-flash-medium",
+    "gemini-3.6-flash-low",
+    "gemini-3.1-pro-high",
+    "gemini-3.1-pro-low",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6-thinking",
+    "gpt-oss-120b-medium",
+];
+
 /// Map only explicitly retired aliases. Full versioned model ids are user choices and stay intact.
 pub fn remap_deprecated_model(kind: &str, model: &str) -> Option<&'static str> {
+    if kind == "agy" && AGY_RETIRED_MODELS.contains(&model) {
+        return Some(AGY_DEFAULT_MODEL);
+    }
     match (kind, model) {
         ("codex", "gpt-5.6-sol" | "gpt-5.6-terra") => Some("gpt-6-sol"),
         ("codex", "gpt-5.6-luna") => Some("gpt-6-luna"),
@@ -391,24 +413,14 @@ pub fn claude_static_models(global: Option<&str>, per_model: &BTreeMap<String, S
         .collect()
 }
 
-/// agy 1.2.16 的模型 slug：2026-10-04 使用者登入（Google OAuth）後 `agy models` 的實際清單。effort 變體已經在 slug 裡，所以 `efforts` 是空的。
+/// agy 的模型 slug：只留 Gemini 3.8 Flash 三檔（2026-10-05 使用者：「agy 的 model 只限 3.8」；`agy models` 還列的 3.7／3.6 Flash 即將下架，
+/// 其餘 3.1 Pro、claude、gpt-oss 也不要，見 [`AGY_RETIRED_MODELS`]）。effort 變體已經在 slug 裡，所以 `efforts` 是空的。
 /// 寫死的原因：`agy models` 要登入才答、清單隨帳號不同；第二階段改成讀 `agy models --output-format json`。最前面那個是預設。
 pub fn agy_static_models() -> Vec<Value> {
     [
-        ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
+        (AGY_DEFAULT_MODEL, "Gemini 3.8 Flash (Medium)"),
         ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
         ("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
-        ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)"),
-        ("gemini-3.7-flash-medium", "Gemini 3.7 Flash (Medium)"),
-        ("gemini-3.7-flash-low", "Gemini 3.7 Flash (Low)"),
-        ("gemini-3.6-flash-high", "Gemini 3.6 Flash (High)"),
-        ("gemini-3.6-flash-medium", "Gemini 3.6 Flash (Medium)"),
-        ("gemini-3.6-flash-low", "Gemini 3.6 Flash (Low)"),
-        ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
-        ("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)"),
-        ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-        ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
-        ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
     ]
     .iter()
     .enumerate()
@@ -829,14 +841,34 @@ mod tests {
     #[test]
     fn agy_models_are_static_slugs_without_separate_efforts() {
         let models = agy_static_models();
-        assert!(models.len() >= 3);
         assert_eq!(models.iter().filter(|m| m["is_default"] == true).count(), 1);
         for m in &models {
-            let id = m["id"].as_str().unwrap();
-            assert!(id.starts_with("gemini-") || id.starts_with("claude-") || id.starts_with("gpt-oss-"), "{id}");
             assert_eq!(m["efforts"], json!([]));
         }
-        assert_eq!(model_effort_from_argv("agy", &["agy".into(), "--model".into(), "gemini-3.1-pro-high".into()]).0.as_deref(), Some("gemini-3.1-pro-high"));
+        assert_eq!(model_effort_from_argv("agy", &["agy".into(), "--model".into(), "gemini-3.8-flash-high".into()]).0.as_deref(), Some("gemini-3.8-flash-high"));
+    }
+
+    /// 2026-10-05：agy 只留 Gemini 3.8 Flash 三檔，預設還是 3.8 medium；拿掉的模型（3.7／3.6 Flash、3.1 Pro、claude、gpt-oss）一個都不在清單裡，
+    /// 已存在的 bot 設了它們就換成 3.8 medium（啟動、寫設定、adopted 的 argv 都是同一支 `canonical_model`）。
+    #[test]
+    fn agy_models_are_gemini_38_flash_only_and_retired_ones_fall_back_to_the_default() {
+        let ids: Vec<String> = agy_static_models().iter().map(|m| m["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(ids, ["gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-low"]);
+        assert_eq!(agy_static_models()[0]["is_default"], true, "預設維持 3.8 medium");
+        assert_eq!(AGY_DEFAULT_MODEL, ids[0]);
+        for retired in AGY_RETIRED_MODELS {
+            assert!(!ids.iter().any(|i| i == retired), "{retired} 不該還在清單裡");
+            assert_eq!(canonical_model("agy", retired), AGY_DEFAULT_MODEL, "{retired}");
+            assert_eq!(remap_deprecated_model("agy", retired), Some(AGY_DEFAULT_MODEL));
+        }
+        assert_eq!(AGY_RETIRED_MODELS.len(), 11, "3.7×3、3.6×3、3.1 Pro×2、claude×2、gpt-oss");
+        // 清單裡的三檔與別的 kind 的同名字串、沒見過的新 slug 都原樣。
+        for id in &ids {
+            assert_eq!(canonical_model("agy", id), id);
+        }
+        assert_eq!(canonical_model("agy", "gemini-3.9-flash-high"), "gemini-3.9-flash-high", "使用者自己的選擇不動");
+        assert_eq!(remap_deprecated_model("claude", "claude-sonnet-4-6"), None, "只對 agy");
+        assert_eq!(model_effort_from_argv("agy", &["agy".into(), "--model".into(), "gemini-3.1-pro-high".into()]).0.as_deref(), Some("gemini-3.8-flash-medium"));
     }
 
     /// `/effort` 之後對話裡還留著上一則 `Switched to … (low effort)`。回讀必須用框底，不能用上面那則。

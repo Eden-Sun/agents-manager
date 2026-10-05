@@ -1466,7 +1466,7 @@ pub(crate) fn model_args(bot: &db::Bot) -> Vec<String> {
         match bot.kind.as_str() {
             "claude" => out.extend(["--model".to_string(), m.to_string()]),
             "codex" | "grok" => out.extend(["-m".to_string(), m.to_string()]),
-            // agy：slug 已含 effort 變體（`gemini-3.1-pro-high`）；解析失敗時互動模式只警告、退回預設。
+            // agy：slug 已含 effort 變體（`gemini-3.8-flash-high`）；解析失敗時互動模式只警告、退回預設。拿掉的模型已由上面的 `canonical_model` 換成 3.8 medium。
             "agy" => out.extend(["--model".to_string(), m.to_string()]),
             _ => {}
         }
@@ -1786,7 +1786,11 @@ mod model_args_tests {
     fn agy_takes_its_permission_flag_and_a_model_slug_but_no_effort_or_fast() {
         assert_eq!(super::permission_args("agy", true), vec!["--dangerously-skip-permissions"]);
         assert!(super::permission_args("agy", false).is_empty(), "沒開 auto_approve 就不帶，agy 自己的 toolPermission 照預設");
-        assert_eq!(model_args(&bot("agy", Some("gemini-3.1-pro-high"), None, true)), vec!["--model", "gemini-3.1-pro-high"]);
+        assert_eq!(model_args(&bot("agy", Some("gemini-3.8-flash-high"), None, true)), vec!["--model", "gemini-3.8-flash-high"]);
+        // 已存在的 bot 設了拿掉的模型：啟動時改用 3.8 medium，不讓 agy 因為不認得而起不來。
+        for retired in ["gemini-3.1-pro-high", "gemini-3.7-flash-low", "claude-sonnet-4-6", "gpt-oss-120b-medium"] {
+            assert_eq!(model_args(&bot("agy", Some(retired), None, true)), vec!["--model", "gemini-3.8-flash-medium"], "{retired}");
+        }
         assert!(model_args(&bot("agy", None, None, false)).is_empty());
         assert!(super::persona_args(&bot("agy", None, None, false), "x", None, None).is_empty(), "agy 沒有 argv 的 persona 管道（第二階段）");
     }

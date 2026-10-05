@@ -802,22 +802,11 @@ export const MODEL_OPTIONS: Record<BotKind, readonly string[]> = {
   codex: ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'],
   // `grok models`（grok 1.0.40，2026-09-22）
   grok: ['grok-4.7', 'grok-4.7-build-fast', 'grok-4.6', 'grok-4.5'],
-  // agy 1.2.16：effort 變體已經在 slug 裡（`-high`／`-low`…），所以沒有獨立的強度檔。`agy models` 的實際清單（2026-10-04 使用者登入後），最前面是預設；daemon `agy_static_models` 同一份。
+  // agy：effort 變體已經在 slug 裡（`-high`／`-low`…），所以沒有獨立的強度檔。只留 Gemini 3.8 Flash 三檔（2026-10-05 使用者：「agy 的 model 只限 3.8」），最前面是預設；daemon `agy_static_models` 同一份。
   agy: [
     'gemini-3.8-flash-medium',
     'gemini-3.8-flash-high',
     'gemini-3.8-flash-low',
-    'gemini-3.7-flash-high',
-    'gemini-3.7-flash-medium',
-    'gemini-3.7-flash-low',
-    'gemini-3.6-flash-high',
-    'gemini-3.6-flash-medium',
-    'gemini-3.6-flash-low',
-    'gemini-3.1-pro-high',
-    'gemini-3.1-pro-low',
-    'claude-sonnet-4-6',
-    'claude-opus-4-6-thinking',
-    'gpt-oss-120b-medium',
   ],
 }
 
@@ -839,6 +828,22 @@ export const DEPRECATED_MODELS: Readonly<Record<string, string>> = {
   'codex:gpt-5.6-sol': 'gpt-6-sol',
   'codex:gpt-5.6-terra': 'gpt-6-sol',
   'codex:gpt-5.6-luna': 'gpt-6-luna',
+  // agy 拿掉的模型（2026-10-05）：3.7／3.6 Flash、3.1 Pro、claude、gpt-oss 一律換成 3.8 medium；daemon `AGY_RETIRED_MODELS` 同一份。
+  ...Object.fromEntries(
+    [
+      'gemini-3.7-flash-high',
+      'gemini-3.7-flash-medium',
+      'gemini-3.7-flash-low',
+      'gemini-3.6-flash-high',
+      'gemini-3.6-flash-medium',
+      'gemini-3.6-flash-low',
+      'gemini-3.1-pro-high',
+      'gemini-3.1-pro-low',
+      'claude-sonnet-4-6',
+      'claude-opus-4-6-thinking',
+      'gpt-oss-120b-medium',
+    ].map((id) => [`agy:${id}`, 'gemini-3.8-flash-medium']),
+  ),
 }
 
 /** 這個 kind 的這個 model id 的正式寫法（不是別名就原樣回）。 */
