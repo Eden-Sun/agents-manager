@@ -11,7 +11,8 @@
 //! - **誰要等**：claude、有注入 hook（`inject_hooks`，沒有 hook 就沒有驗證來源）、這個 run 是 `resume_native`
 //!   起的（`runs.resume_session_id` 還在），而且還沒有結論（`runs.resume_outcome` 是 NULL）。
 //!   codex／grok 本來就要等第一個回合結束才回報 session（`hookrecv` 的既有規則），不在這裡等——等下去
-//!   只會死結：沒有回合就沒有回報，沒有回報就不給回合。
+//!   只會死結：沒有回合就沒有回報，沒有回報就不給回合。agy 同理不等：對話是第一則 prompt 才建立，`PreInvocation` 才帶得出
+//!   conversationId（`hookrecv` 照樣比對，對不上＝`resume_mismatch`；沒有 hook 的子 agent 由 `agy_session` 讀 pane 開著的對話資料庫比對）。
 //! - **等到什麼時候**：`SessionStart` 來了就放行（對上或對不上都是結論，對不上的那則說明會先進聊天室）；
 //!   最多等 [`VERIFY_WINDOW`]，從 `runs.started_at` 算——但 pane 停在要人回答的提示（信任目錄）時那段不算，
 //!   人按掉之後還要再給 [`UNBLOCK_GRACE`]（遠端回報要走一輪 spool 掃描）。到期是**刻意的退路**：記 `resume_outcome='unverified'`、

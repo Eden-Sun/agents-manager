@@ -1017,7 +1017,7 @@ async fn replace_fallback_reply(
 
 /// Consume the one-shot `resume_native` request. Clearing the column before recording a mismatch
 /// makes retries idempotent.
-async fn consume_resume_session(
+pub(crate) async fn consume_resume_session(
     app: &Arc<App>,
     bot: &db::Bot,
     run: &db::Run,
@@ -1491,7 +1491,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
         HookKind::Identity { session_id, transcript_path } => {
             if let Some(r) = &run {
                 // Codex/Grok are checked on their first completed turn; don't consume the request early.
-                if provider == "claude" {
+                // agy 的對話是第一則 prompt 才建立，`SessionStart`／`PreInvocation` 帶的 conversationId 就是真正在用的那段：
+                // `--conversation=<不存在的 id>` 只警告、開新對話，靠這裡對不上才抓得到。
+                if provider == "claude" || provider == "agy" {
                     consume_resume_session(app, &bot, r, session_id.as_deref()).await?;
                 }
                 let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
@@ -6460,6 +6462,28 @@ mod agy_tests {
         let st: Value = serde_json::from_str(r.status_json.as_deref().expect("status_json")).unwrap();
         assert_eq!(st["model"]["id"], "gemini-3.8-flash-medium");
         assert_eq!(st["context_window"]["total_input_tokens"], 11824);
+    }
+
+    /// `--conversation=<id>` 接回：第一個 `PreInvocation` 的 conversationId 對得上＝verified；agy 對不存在的 id 只警告、
+    /// 開新對話（不報錯），回報的 id 對不上＝`resume_mismatch`，聊天室要看得見。
+    #[tokio::test]
+    async fn a_resumed_agy_conversation_is_verified_or_reported_as_a_mismatch() {
+        for (reported, outcome) in [("conv-expected", "verified"), ("conv-fresh", "mismatch")] {
+            let env = tt::env().await;
+            let app = env.app.clone();
+            let (bot_id, run_id, _turn) = agy_turn(&app, &env.project_id).await;
+            sqlx::query("UPDATE runs SET resume_session_id='conv-expected' WHERE id=?").bind(&run_id).execute(&app.db).await.unwrap();
+            let pre = json!({"hookEventName": "PreInvocation", "conversationId": reported, "transcriptPath": "/x/transcript_full.jsonl"});
+            process(&app, &body(&bot_id, pre)).await.unwrap();
+            let (got, native, requested): (Option<String>, Option<String>, Option<String>) =
+                sqlx::query_as("SELECT resume_outcome, native_session_id, resume_session_id FROM runs WHERE id=?").bind(&run_id).fetch_one(&app.db).await.unwrap();
+            assert_eq!(got.as_deref(), Some(outcome), "{reported}");
+            assert_eq!(native.as_deref(), Some(reported));
+            assert_eq!(requested, None, "一次性的要求標記清掉了");
+            let conv = db::conversation_id(&app.db, &bot_id).await.unwrap();
+            let notes: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system'").bind(&conv).fetch_all(&app.db).await.unwrap();
+            assert_eq!(notes.iter().any(|n| n.contains("不是同一個")), outcome == "mismatch", "{notes:?}");
+        }
     }
 
     #[tokio::test]

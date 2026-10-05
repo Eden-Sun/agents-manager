@@ -288,6 +288,8 @@ pub(crate) async fn sync_locked(app: &Arc<App>, run_id: &str) -> anyhow::Result<
     let (sid, exchanges) = if bot.kind == "agy" {
         // agy（SPEC §12a.9）：session 從 pane 裡行程開著的對話資料庫認，對話在 `transcript_full.jsonl`。
         let Some((sid, text)) = super::agy_session::load(app, &run, &host).await? else { return Ok(Synced::Unavailable) };
+        // 沒有 hook 的 agy 子 agent：pane 行程實際開著的對話就是回報；跟 `resume_native` 要接的不是同一段＝`resume_mismatch`。
+        crate::hookrecv::consume_resume_session(app, &bot, &run, Some(&sid)).await?;
         super::agy_session::record_status(app, &bot, &run, &text).await;
         let turns = crate::agy_support::parse_turns(&text)
             .into_iter()

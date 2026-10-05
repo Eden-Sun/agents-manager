@@ -13,7 +13,7 @@ use std::path::Path;
 
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
 
-fn valid_session_id(s: &str) -> bool {
+pub(crate) fn valid_session_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
