@@ -452,6 +452,17 @@ pub(crate) async fn share_file(app: &Arc<App>, bot_id: &str, requested: &str) ->
 
 /// [`share_file`] 的讀檔那一段（同一條 fd-bound 鏈、同樣的上限與黑名單），回（檔名, 內容）。分享頁下載與 `.svg` 檢查共用。
 pub(crate) async fn share_file_bytes(app: &Arc<App>, bot_id: &str, requested: &str) -> Result<(String, Vec<u8>), ShareFileError> {
+    share_file_bytes_with_limit(app, bot_id, requested, MAX_BYTES).await
+}
+
+/// 同 [`share_file_bytes`]，但允許呼叫端指定讀取上限（例如 SVG 檢查只需 4 MiB）。
+/// 超過上限會在讀檔前由 fstat 拒絕，不進行記憶體配置與實際內容讀取。
+pub(crate) async fn share_file_bytes_with_limit(
+    app: &Arc<App>,
+    bot_id: &str,
+    requested: &str,
+    max_bytes: u64,
+) -> Result<(String, Vec<u8>), ShareFileError> {
     use std::os::unix::fs::MetadataExt as _;
 
     let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| ShareFileError::Unavailable)?.ok_or(ShareFileError::NotFound)?;
@@ -471,10 +482,10 @@ pub(crate) async fn share_file_bytes(app: &Arc<App>, bot_id: &str, requested: &s
     .map_err(|_| ShareFileError::Unavailable)??;
 
     let metadata = file.metadata().map_err(|_| ShareFileError::Unavailable)?;
-    if metadata.len() > MAX_BYTES {
+    if metadata.len() > max_bytes {
         return Err(ShareFileError::TooLarge);
     }
-    let data = tokio::task::spawn_blocking(move || trusted_open::read_limited(file, MAX_BYTES))
+    let data = tokio::task::spawn_blocking(move || trusted_open::read_limited(file, max_bytes))
         .await
         .map_err(|_| ShareFileError::Unavailable)?
         .map_err(|e| match e {
@@ -789,5 +800,38 @@ mod tests {
         assert_eq!((v["files"].clone(), v["reason"].clone(), v["host"].clone()), (json!([]), json!("outbox_remote_unreachable"), json!("box")));
         assert_ne!(get_file(&env.app, &bot.id, "x.txt").await.0, StatusCode::OK);
         assert_eq!(get_file(&env.app, "nope", "x.txt").await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn share_file_bytes_with_limit_rejects_oversized_file_without_reading() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "alfa").await;
+        let outbox = ensure(&env.app.data_dir, &bot.id).unwrap();
+
+        // 建立 5 MiB 稀疏檔案，不佔硬碟空間
+        let f = std::fs::File::create(outbox.join("sparse.bin")).unwrap();
+        f.set_len(5 * 1024 * 1024).unwrap();
+        drop(f);
+
+        // 指定上限 4 MiB：stat 即擋下，回傳 TooLarge
+        let res = share_file_bytes_with_limit(&env.app, &bot.id, "sparse.bin", 4 * 1024 * 1024).await;
+        assert!(matches!(res, Err(ShareFileError::TooLarge)));
+
+        // 建立 100 bytes 檔案
+        std::fs::write(outbox.join("small.bin"), vec![b'a'; 100]).unwrap();
+        // 指定上限 50 bytes：回傳 TooLarge
+        let res_small_too_large = share_file_bytes_with_limit(&env.app, &bot.id, "small.bin", 50).await;
+        assert!(matches!(res_small_too_large, Err(ShareFileError::TooLarge)));
+        // 指定上限 200 bytes：回傳 Ok
+        let res_small_ok = share_file_bytes_with_limit(&env.app, &bot.id, "small.bin", 200).await;
+        assert!(res_small_ok.is_ok());
+        assert_eq!(res_small_ok.unwrap().1.len(), 100);
+
+        // 既有的 symlink 安全防護：指到外面的符號連結不可繞過（違反可信邊界回 Unavailable）
+        let secret = env.dir.join("secret.bin");
+        std::fs::write(&secret, b"secret").unwrap();
+        std::os::unix::fs::symlink(&secret, outbox.join("link_to_secret.bin")).unwrap();
+        let res_escape = share_file_bytes_with_limit(&env.app, &bot.id, "link_to_secret.bin", 4 * 1024 * 1024).await;
+        assert!(matches!(res_escape, Err(ShareFileError::Unavailable)));
     }
 }

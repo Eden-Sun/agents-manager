@@ -543,6 +543,59 @@ async fn a_broken_svg_in_the_outbox_gets_one_backstage_reminder() {
     assert_eq!(super::svg_check::check_file(&e.app, &b.id, "card.svg").await, None, "修好了就不再提醒");
 }
 
+#[tokio::test]
+async fn svg_check_exceeding_max_bytes_is_skipped_without_reading_or_reminder() {
+    let e = tt::env().await;
+    let b = restricted_bot(&e.app, &e.project_id, "pub").await;
+    let token = shared(&e.app, &b.id).await;
+    let outbox = crate::outbox::ensure(&e.app.data_dir, &b.id).unwrap();
+
+    // 1. 建立一個壞掉的 SVG，但透過 set_len 設定檔案大小為 5 MiB（超過 4 MiB MAX_CHECK_BYTES），
+    // 透過稀疏檔不實際在硬碟配置 64 MiB 內容。
+    let huge_file = outbox.join("huge_broken.svg");
+    let broken_svg = "<svg xmlns=\"http://www.w3.org/2000/svg\">\n<text x=\"540\" y=\"380\"font-size=\"100\">嗨</text>\n</svg>";
+    let f = std::fs::File::create(&huge_file).unwrap();
+    use std::io::Write as _;
+    let mut f = f;
+    f.write_all(broken_svg.as_bytes()).unwrap();
+    f.set_len(5 * 1024 * 1024).unwrap(); // 5 MiB
+    drop(f);
+
+    // 2. 建立一個在上限內（< 4 MiB）且壞掉的 SVG
+    let small_file = outbox.join("small_broken.svg");
+    std::fs::write(&small_file, broken_svg).unwrap();
+
+    // 3. 建立一個在上限內且合法的 SVG
+    let valid_file = outbox.join("valid.svg");
+    std::fs::write(&valid_file, "<svg xmlns=\"http://www.w3.org/2000/svg\"><text x=\"1\" y=\"1\">ok</text></svg>").unwrap();
+
+    // check_file 對超過 4 MiB 的檔案：因 fstat 大小直接略過不讀，回傳 None（若有讀取內容則會被 XML 解析器判定為壞檔）
+    let huge_res = super::svg_check::check_file(&e.app, &b.id, "huge_broken.svg").await;
+    assert_eq!(huge_res, None, "超過 4 MiB 的 SVG 直接略過不讀");
+
+    // check_file 對上限內的壞檔：照常讀取並回報語法錯誤
+    let small_res = super::svg_check::check_file(&e.app, &b.id, "small_broken.svg").await;
+    assert!(small_res.is_some(), "上限內的壞檔照常回報錯誤");
+
+    // check_file 對上限內的合法檔：照常讀取且無錯誤
+    let valid_res = super::svg_check::check_file(&e.app, &b.id, "valid.svg").await;
+    assert_eq!(valid_res, None, "上限內合法檔無錯誤");
+
+    // 驗證提醒訊息只發送給了 small_broken.svg，huge_broken.svg 未被提醒
+    let reminders: Vec<(String, Option<String>)> = sqlx::query_as("SELECT content, relay_from FROM messages WHERE role = 'user' AND content LIKE '%.svg%'")
+        .fetch_all(&e.app.db)
+        .await
+        .unwrap();
+    assert_eq!(reminders.len(), 1, "只發送一次提醒：{reminders:?}");
+    assert!(reminders[0].0.contains("small_broken.svg"));
+    assert!(!reminders[0].0.contains("huge_broken.svg"));
+
+    // 透過 GET /s/{token}/api/files 測試列檔：清單包含 5 MiB 檔與正常檔，spawn_check 不會將大檔送進待查清單
+    let base = serve(portal::router(e.app.clone())).await;
+    let listed = client().get(format!("{base}/s/{token}/api/files")).send().await.unwrap();
+    assert_eq!(listed.status(), 200);
+}
+
 /// daemon 重啟、主機重開之後分享用 bot 停著：end user 送一則來，替它起來時接回原本那段對話（`--resume`），仍在籠子裡。
 #[tokio::test]
 async fn a_portal_message_to_a_stopped_share_bot_resumes_its_last_session() {
