@@ -24,6 +24,8 @@ dependencies = [
 name = "agents-managerd"
 version = "0.1.0"
 dependencies = [
+ "am-core",
+ "am-ports",
  "anyhow",
  "axum",
  "base64 0.22.1",
@@ -84,6 +86,17 @@ name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "am-core"
+version = "0.1.0"
+
+[[package]]
+name = "am-ports"
+version = "0.1.0"
+dependencies = [
+ "am-core",
+]
 
 [[package]]
 name = "android_system_properties"
