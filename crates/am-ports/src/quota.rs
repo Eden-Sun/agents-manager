@@ -2,6 +2,13 @@ use am_core::{LimitHit, PortError, QuotaKey, QuotaSnapshot};
 use std::future::Future;
 
 pub trait QuotaAccess: Send + Sync {
+    fn resolve_key<'a>(
+        &'a self,
+        host: &'a str,
+        provider: &'a str,
+        identity: Option<&'a str>,
+    ) -> impl Future<Output = Result<QuotaKey, PortError>> + Send + 'a;
+
     fn snapshot<'a>(
         &'a self,
         key: &'a QuotaKey,
