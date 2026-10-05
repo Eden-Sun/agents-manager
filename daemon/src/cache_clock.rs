@@ -7,8 +7,8 @@
 //! * `blocked` 的 `agent_status_since`：停在提示上那一刻正是模型剛回完。
 //!
 //! 回合進行中（`agent_status == "working"` 或有 in-flight 回合）＝熱，`last_api_at` 給現在。
-//! 主力的續命回合（[`crate::primary_keepalive`]，`client_request_id` 以 `keepalive:` 開頭）**不算活動**：回合時間、statusLine 指紋、
-//! 「進行中＝現在」都排除，`last_api_at` 照真實年齡往上數；續命讓 cache 實際變熱的時間另放 `cache_kept_alive_at`，網頁用它算顏色。
+//! 主力的保溫回合（[`crate::primary_keep_warm`]，`client_request_id` 以 `keep-warm:` 開頭，舊資料是 `keepalive:`）**不算活動**：回合時間、statusLine 指紋、
+//! 「進行中＝現在」都排除，`last_api_at` 照真實年齡往上數；保溫讓 cache 實際變熱的時間另放 `cache_kept_warm_at`，網頁用它算顏色。
 //! TTL 依 kind：claude／codex 3600 秒（量過：閒置 < 60 分 0–1% 冷、> 1 小時 81–91% 冷），grok 未知不帶。
 //! 兩個欄位都掛在 run JSON（`/api/state` 的 `bot.run` 與 `bot_status` 事件的 `run`）；daemon 重啟後記憶體帳歸零，
 //! 退回回合時間。
@@ -17,7 +17,7 @@ use crate::db;
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 /// 這種 kind 的 prompt cache 存活秒數；`None`＝不知道，網頁不畫倒數。
 pub fn ttl_secs(kind: &str) -> Option<i64> {
@@ -32,8 +32,12 @@ pub fn ttl_secs(kind: &str) -> Option<i64> {
 pub struct LastTurn {
     pub status: String,
     pub completed_at: Option<String>,
-    /// 最近一次主力保養（成功的續命回合，或到點壓縮）讓 cache 變熱的時間；沒做過是 `None`。
-    pub kept_alive_at: Option<String>,
+    /// 最近一次主力保養（成功的保溫回合，或熱壓）讓 cache 變熱的時間；沒做過是 `None`。
+    pub kept_warm_at: Option<String>,
+    /// 使用者按了「不用保溫」：這顆主力這一輪閒置跳過保溫與熱壓（`keep_warm_skip` 表有它的列）。
+    pub keep_warm_skip: bool,
+    /// 最近一次保溫回覆完成的時間；比它晚的非保溫回合（使用者送了新 prompt）一出現就是 `None`。
+    pub keep_warm_replied_at: Option<String>,
 }
 
 fn store() -> &'static Mutex<HashMap<String, String>> {
@@ -58,8 +62,8 @@ fn api_fingerprint(status_json: &str) -> Option<String> {
 
 /// statusLine 換了內容：API 指紋前後都讀得到而且不同，才記下 `at`（閒置重繪、剛起來的第一份都不算）。
 pub fn on_statusline(run_id: &str, old: Option<&str>, new: Option<&str>, at: &str) -> bool {
-    // 續命回合造成的指紋變化不算活動，否則續命一次年齡就歸零（`primary_keepalive`）。
-    if crate::primary_keepalive::window_open(run_id) {
+    // 保溫回合造成的指紋變化不算活動，否則保溫一次年齡就歸零（`primary_keep_warm`）。
+    if crate::primary_keep_warm::window_open(run_id) {
         return false;
     }
     let (Some(old), Some(new)) = (old.and_then(api_fingerprint), new.and_then(api_fingerprint)) else {
@@ -81,7 +85,7 @@ pub fn statusline_at(run_id: &str) -> Option<String> {
 #[cfg_attr(test, allow(dead_code))]
 pub fn retain_runs(active: &[String]) {
     store().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
-    crate::primary_keepalive::retain_runs(active);
+    crate::primary_keep_warm::retain_runs(active);
 }
 
 /// 推算 `last_api_at`（純函式）：TTL 不明回 `None`；進行中回 `now`；否則各來源取最晚，一個都沒有回 `None`。
@@ -110,11 +114,11 @@ pub fn derive(
 pub fn annotate(run_json: &mut Value, kind: &str, last_turn: Option<&LastTurn>) {
     let Some(o) = run_json.as_object_mut() else { return };
     let mut status = o.get("agent_status").and_then(Value::as_str).map(str::to_owned);
-    // 續命回合在跑（沒有真的回合在飛）：它不算活動，年齡照樣往上數，不因 `working` 歸零。
+    // 保溫回合在跑（沒有真的回合在飛）：它不算活動，年齡照樣往上數，不因 `working` 歸零。
     let run_id = o.get("id").and_then(Value::as_str).map(str::to_owned);
     if status.as_deref() == Some("working")
         && last_turn.is_none_or(|t| t.status != "in_flight")
-        && run_id.as_deref().is_some_and(crate::primary_keepalive::window_open)
+        && run_id.as_deref().is_some_and(crate::primary_keep_warm::window_open)
     {
         status = Some("idle".into());
     }
@@ -123,39 +127,83 @@ pub fn annotate(run_json: &mut Value, kind: &str, last_turn: Option<&LastTurn>) 
     let at = derive(kind, status.as_deref(), since.as_deref(), last_turn, line.as_deref(), &db::now());
     o.insert("last_api_at".into(), at.into());
     o.insert("cache_ttl_secs".into(), ttl_secs(kind).into());
-    // 只有續命過的主力才帶（網頁拿它算顏色；數字仍是 `last_api_at` 的真實年齡）。
-    o.insert("cache_kept_alive_at".into(), last_turn.and_then(|t| t.kept_alive_at.clone()).into());
+    // 只有保溫過的主力才帶（網頁拿它算顏色；數字仍是 `last_api_at` 的真實年齡）。
+    o.insert("cache_kept_warm_at".into(), last_turn.and_then(|t| t.kept_warm_at.clone()).into());
+    o.insert("keep_warm_skip".into(), last_turn.is_some_and(|t| t.keep_warm_skip).into());
+    o.insert("keep_warm_replied_at".into(), last_turn.and_then(|t| t.keep_warm_replied_at.clone()).into());
     crate::prompt_cache::annotate(run_json, kind, chrono::Utc::now().timestamp_millis());
 }
 
-/// 續命回合的 `client_request_id` 前綴（後面接錨點時間，見 `primary_keepalive`）。不加欄位：這個前綴本身就持久、跨重啟認得出來。
-pub const KEEPALIVE_CRID_PREFIX: &str = "keepalive:";
+/// 保溫回合的 `client_request_id` 前綴（後面接錨點時間，見 `primary_keep_warm`）。不加欄位：這個前綴本身就持久、跨重啟認得出來。
+pub const KEEP_WARM_CRID_PREFIX: &str = "keep-warm:";
+/// 改名前（`keepalive:`）寫進 DB 的保溫回合；舊資料一律照樣認得（cache_clock、未讀、`messages.keep_warm` 標記）。
+pub const LEGACY_KEEP_WARM_CRID_PREFIX: &str = "keepalive:";
+/// 熱壓在聊天室留的系統訊息開頭，同時是「這個錨點之後熱壓過了」的持久記號。
+pub const WARM_COMPACT_NOTE_PREFIX: &str = "主力熱壓：";
+/// 改名前的熱壓訊息開頭；DB 裡的舊訊息照樣是記號。
+pub const LEGACY_WARM_COMPACT_NOTE_PREFIX: &str = "主力 cache 到點壓縮：";
 
-/// 最近一筆**不是續命**的回合，加上最近一次讓 cache 變熱的主力保養（成功的續命回合，完成時間，在飛中用建立時間；或到點壓縮的系統訊息）。
-const LAST_TURN_SQL: &str = "SELECT c.bot_id, t.status, t.completed_at,
+/// 這個 `client_request_id` 是不是保溫回合的（新舊前綴都算）。
+pub fn is_keep_warm_crid(crid: &str) -> bool {
+    crid.starts_with(KEEP_WARM_CRID_PREFIX) || crid.starts_with(LEGACY_KEEP_WARM_CRID_PREFIX)
+}
+
+/// SQL 條件：`col` 是保溫回合的 `client_request_id`（NULL 是 NULL，不是 true）。新舊前綴都收。
+pub fn keep_warm_crid_sql(col: &str) -> String {
+    format!("({col} LIKE '{KEEP_WARM_CRID_PREFIX}%' OR {col} LIKE '{LEGACY_KEEP_WARM_CRID_PREFIX}%')")
+}
+
+/// SQL 條件：`col` 是熱壓留下的系統訊息內容。
+pub fn warm_compact_note_sql(col: &str) -> String {
+    format!("({col} LIKE '{WARM_COMPACT_NOTE_PREFIX}%' OR {col} LIKE '{LEGACY_WARM_COMPACT_NOTE_PREFIX}%')")
+}
+
+/// 最近一筆**不是保溫**的回合，加上最近一次讓 cache 變熱的主力保養（成功的保溫回合，完成時間，在飛中用建立時間；或熱壓的系統訊息）、
+/// 「不用保溫」旗標，以及最近一次保溫回覆（完成的保溫回合，且之後沒有非保溫回合）。
+static LAST_TURN_SQL: LazyLock<String> = LazyLock::new(|| {
+    let kw_k = keep_warm_crid_sql("k.client_request_id");
+    let kw_u = keep_warm_crid_sql("u.client_request_id");
+    let kw_t = keep_warm_crid_sql("client_request_id");
+    let note = warm_compact_note_sql("m.content");
+    format!(
+        "SELECT c.bot_id, t.status, t.completed_at,
        NULLIF(MAX(
          COALESCE((SELECT MAX(COALESCE(k.completed_at, k.created_at)) FROM turns k
-                    WHERE k.conversation_id = c.id AND k.client_request_id LIKE 'keepalive:%'
+                    WHERE k.conversation_id = c.id AND {kw_k}
                       AND k.status IN ('in_flight','completed','completed_fallback')), ''),
          COALESCE((SELECT MAX(m.created_at) FROM messages m
-                    WHERE m.conversation_id = c.id AND m.role = 'system' AND m.content LIKE '主力 cache 到點壓縮：%'), '')
-       ), '') AS kept_alive_at
+                    WHERE m.conversation_id = c.id AND m.role = 'system' AND {note}), '')
+       ), '') AS kept_warm_at,
+       EXISTS(SELECT 1 FROM keep_warm_skip s WHERE s.bot_id = c.bot_id) AS keep_warm_skip,
+       (SELECT CASE WHEN r.v > COALESCE((SELECT MAX(u.created_at) FROM turns u
+                                          WHERE u.conversation_id = c.id AND (u.client_request_id IS NULL OR NOT {kw_u})), '')
+                    THEN r.v END
+          FROM (SELECT MAX(COALESCE(k.completed_at, k.created_at)) AS v FROM turns k
+                 WHERE k.conversation_id = c.id AND {kw_k} AND k.status IN ('completed','completed_fallback')) r) AS keep_warm_replied_at
      FROM conversations c
      JOIN turns t ON t.id = (SELECT id FROM turns WHERE conversation_id = c.id AND status != 'queued'
-                              AND (client_request_id IS NULL OR client_request_id NOT LIKE 'keepalive:%')
-                              ORDER BY created_at DESC, id DESC LIMIT 1)";
+                              AND (client_request_id IS NULL OR NOT {kw_t})
+                              ORDER BY created_at DESC, id DESC LIMIT 1)"
+    )
+});
+
+type LastTurnRow = (String, String, Option<String>, Option<String>, i64, Option<String>);
+
+fn last_turn_of(row: LastTurnRow) -> (String, LastTurn) {
+    let (bot, status, completed_at, kept_warm_at, skip, replied_at) = row;
+    (bot, LastTurn { status, completed_at, kept_warm_at, keep_warm_skip: skip != 0, keep_warm_replied_at: replied_at })
+}
 
 /// 每顆 bot 最近一筆送出去的回合，一次讀完（`/api/state` 用，免得逐顆查）。
 pub async fn last_turns_by_bot(pool: &SqlitePool) -> anyhow::Result<HashMap<String, LastTurn>> {
-    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(LAST_TURN_SQL).fetch_all(pool).await?;
-    Ok(rows.into_iter().map(|(bot, status, completed_at, kept_alive_at)| (bot, LastTurn { status, completed_at, kept_alive_at })).collect())
+    let rows: Vec<LastTurnRow> = sqlx::query_as(&LAST_TURN_SQL).fetch_all(pool).await?;
+    Ok(rows.into_iter().map(last_turn_of).collect())
 }
 
 /// 單顆 bot 的 [`last_turns_by_bot`]（`bot_status` 事件用）。
 pub async fn last_turn_for_bot(pool: &SqlitePool, bot_id: &str) -> anyhow::Result<Option<LastTurn>> {
-    let row: Option<(String, String, Option<String>, Option<String>)> =
-        sqlx::query_as(&format!("{LAST_TURN_SQL} WHERE c.bot_id = ?")).bind(bot_id).fetch_optional(pool).await?;
-    Ok(row.map(|(_, status, completed_at, kept_alive_at)| LastTurn { status, completed_at, kept_alive_at }))
+    let row: Option<LastTurnRow> = sqlx::query_as(&format!("{} WHERE c.bot_id = ?", &*LAST_TURN_SQL)).bind(bot_id).fetch_optional(pool).await?;
+    Ok(row.map(|r| last_turn_of(r).1))
 }
 
 #[cfg(test)]
@@ -165,7 +213,7 @@ mod tests {
     const NOW: &str = "2026-10-04T12:00:00.000Z";
 
     fn done(at: &str) -> LastTurn {
-        LastTurn { status: "completed".into(), completed_at: Some(at.into()), kept_alive_at: None }
+        LastTurn { status: "completed".into(), completed_at: Some(at.into()), kept_warm_at: None, ..Default::default() }
     }
 
     #[test]
@@ -200,7 +248,7 @@ mod tests {
     #[test]
     fn a_turn_in_progress_is_hot() {
         assert_eq!(derive("claude", Some("working"), None, Some(&done("2026-10-04T08:00:00.000Z")), None, NOW).as_deref(), Some(NOW));
-        let in_flight = LastTurn { status: "in_flight".into(), completed_at: None, kept_alive_at: None };
+        let in_flight = LastTurn { status: "in_flight".into(), completed_at: None, kept_warm_at: None, ..Default::default() };
         assert_eq!(derive("codex", Some("idle"), None, Some(&in_flight), None, NOW).as_deref(), Some(NOW));
     }
 
@@ -222,6 +270,17 @@ mod tests {
         annotate(&mut run, "claude", Some(&done("2026-10-04T11:00:00Z")));
         assert_eq!(run["last_api_at"], "2026-10-04T11:00:00.000Z");
         assert_eq!(run["cache_ttl_secs"], 3600);
+        assert_eq!((&run["keep_warm_skip"], &run["keep_warm_replied_at"], &run["cache_kept_warm_at"]), (&false.into(), &Value::Null, &Value::Null));
+        let t = LastTurn { keep_warm_skip: true, keep_warm_replied_at: Some("2026-10-04T11:30:00.000Z".into()), ..done("2026-10-04T11:00:00Z") };
+        annotate(&mut run, "claude", Some(&t));
+        assert_eq!((&run["keep_warm_skip"], &run["keep_warm_replied_at"]), (&true.into(), &"2026-10-04T11:30:00.000Z".into()));
+    }
+
+    #[test]
+    fn both_crid_prefixes_are_keep_warm() {
+        assert!(is_keep_warm_crid("keep-warm:2026-10-04T11:00:00.000Z"));
+        assert!(is_keep_warm_crid("keepalive:2026-10-04T11:00:00.000Z"), "改名前寫進 DB 的舊資料");
+        assert!(!is_keep_warm_crid("web-1234") && !is_keep_warm_crid(""));
     }
 
     #[test]
@@ -249,7 +308,9 @@ mod tests {
                                  created_at TEXT NOT NULL, completed_at TEXT, client_request_id TEXT);
              CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
                                     content TEXT NOT NULL, created_at TEXT NOT NULL);
-             INSERT INTO conversations VALUES ('c1','b1'),('c2','b2'),('c3','b3');
+             CREATE TABLE keep_warm_skip (bot_id TEXT PRIMARY KEY, since TEXT NOT NULL);
+             INSERT INTO conversations VALUES ('c1','b1'),('c2','b2'),('c3','b3'),('c4','b4'),('c5','b5');
+             INSERT INTO keep_warm_skip VALUES ('b4','2026-10-04T11:30:00.000Z');
              INSERT INTO turns VALUES
                ('t1','c1','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
                ('t2','c1','completed','2026-10-04T11:00:00.000Z','2026-10-04T11:04:00.000Z',NULL),
@@ -258,20 +319,35 @@ mod tests {
                ('t5','c3','queued','2026-10-04T11:50:00.000Z',NULL,NULL),
                ('k1','c1','completed','2026-10-04T11:20:00.000Z','2026-10-04T11:21:00.000Z','keepalive:2026-10-04T11:04:00.000Z'),
                ('k2','c1','failed','2026-10-04T11:40:00.000Z','2026-10-04T11:40:01.000Z','keepalive:x'),
-               ('k3','c3','in_flight','2026-10-04T11:50:00.000Z',NULL,'keepalive:y');
+               ('k3','c3','in_flight','2026-10-04T11:50:00.000Z',NULL,'keepalive:y'),
+               ('t6','c4','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
+               ('k4','c4','completed','2026-10-04T11:20:00.000Z','2026-10-04T11:21:00.000Z','keep-warm:2026-10-04T10:05:00.000Z'),
+               ('t7','c5','completed','2026-10-04T10:00:00.000Z','2026-10-04T10:05:00.000Z',NULL),
+               ('k5','c5','completed','2026-10-04T11:20:00.000Z','2026-10-04T11:21:00.000Z','keep-warm:z'),
+               ('t8','c5','completed','2026-10-04T11:30:00.000Z','2026-10-04T11:31:00.000Z',NULL);
              INSERT INTO messages VALUES ('m1','c2','system','主力 cache 到點壓縮：cache 年齡已 115 分鐘','2026-10-04T11:55:00.000Z'),
-                                        ('m2','c1','assistant','主力 cache 到點壓縮：不是系統訊息','2026-10-04T11:59:00.000Z');",
+                                        ('m2','c1','assistant','主力熱壓：不是系統訊息','2026-10-04T11:59:00.000Z'),
+                                        ('m3','c5','system','主力熱壓：cache 年齡已 111 分鐘','2026-10-04T11:45:00.000Z');",
         )
         .execute(&pool)
         .await
         .unwrap();
         let all = last_turns_by_bot(&pool).await.unwrap();
-        // 續命回合（keepalive: 前綴）不算「最近一筆回合」，只留下「續命時間」（失敗的不算）。
-        let b1 = LastTurn { kept_alive_at: Some("2026-10-04T11:21:00.000Z".into()), ..done("2026-10-04T11:04:00.000Z") };
+        // 保溫回合（keep-warm: 前綴，舊資料 keepalive:）不算「最近一筆回合」，只留下「保溫時間」（失敗的不算）。
+        let b1 = LastTurn { kept_warm_at: Some("2026-10-04T11:21:00.000Z".into()), ..done("2026-10-04T11:04:00.000Z") };
         assert_eq!(all.get("b1"), Some(&b1));
-        // 到點壓縮的系統訊息也算讓 cache 變熱；只有續命回合在飛的 bot（b3）沒有「最近回合」可報。
-        assert_eq!(all.get("b2").map(|t| (t.status.as_str(), t.kept_alive_at.as_deref())), Some(("in_flight", Some("2026-10-04T11:55:00.000Z"))));
+        // 熱壓的系統訊息也算讓 cache 變熱；只有保溫回合在飛的 bot（b3）沒有「最近回合」可報。
+        assert_eq!(all.get("b2").map(|t| (t.status.as_str(), t.kept_warm_at.as_deref())), Some(("in_flight", Some("2026-10-04T11:55:00.000Z"))));
         assert!(!all.contains_key("b3"));
+        // 保溫回覆：保溫回合完成後還沒有非保溫回合（b4）才有；之後使用者又送了回合（b1 排隊中的 t3、b5 的 t8）就清成 None。
+        assert_eq!(b1.keep_warm_replied_at, None);
+        let b4 = all.get("b4").unwrap();
+        assert_eq!(b4.keep_warm_replied_at.as_deref(), Some("2026-10-04T11:21:00.000Z"));
+        assert_eq!(b4.kept_warm_at.as_deref(), Some("2026-10-04T11:21:00.000Z"), "新前綴 keep-warm: 一樣算保溫時間");
+        assert!(b4.keep_warm_skip && !b1.keep_warm_skip, "keep_warm_skip 表有列才算「不用保溫」");
+        let b5 = all.get("b5").unwrap();
+        assert_eq!((b5.keep_warm_replied_at.as_deref(), b5.completed_at.as_deref()), (None, Some("2026-10-04T11:31:00.000Z")));
+        assert_eq!(b5.kept_warm_at.as_deref(), Some("2026-10-04T11:45:00.000Z"), "新前綴的熱壓訊息也算");
         assert_eq!(last_turn_for_bot(&pool, "b1").await.unwrap(), Some(b1));
         assert_eq!(last_turn_for_bot(&pool, "b3").await.unwrap(), None);
     }

@@ -2201,8 +2201,8 @@ async fn controller_loop(app: Arc<App>, generation: i64) {
                     // 閒置太久的 bot 收起來省 RAM（§6.11）。巡邏自己節流成每分鐘一次，
                     // 而且丟到背景跑——停一顆最久要等 agent 十秒，不能卡住這條迴圈。
                     super::timing::seg(&app, "idle_sleep", async { super::idle_sleep::tick(&app) }).await;
-                    // 主力 bot 的 prompt cache 續命（58 分）與到點壓縮（110 分），SPEC §6.5k。自己節流成 30 秒一次、丟背景跑。
-                    super::timing::seg(&app, "primary_keepalive", async { crate::primary_keepalive::tick(&app) }).await;
+                    // 主力 bot 的 prompt cache 保溫（58 分）與熱壓（110 分），SPEC §6.5k。自己節流成 30 秒一次、丟背景跑。
+                    super::timing::seg(&app, "primary_keep_warm", async { crate::primary_keep_warm::tick(&app) }).await;
                     super::timing::note_tick(&app, tick_started.elapsed()).await;
                 }
             }

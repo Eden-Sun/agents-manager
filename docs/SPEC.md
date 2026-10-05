@@ -2366,25 +2366,34 @@ pt-hub = ["~/project/pt/CLAUDE.md", "~/project/pt/AGENTS.md"]      # 多份照�
   網頁：有 `prompt_cache` 就一律用它判熱冷（`warm`＋`expires_at`，閒置時 `warm:true` 也以時間為準），冷了寫「送出這則會重寫約 N K」；
   沒有（舊版 claude、codex 還沒讀到 rollout、舊 daemon）才退回 `last_api_at`＋`cache_ttl_secs` 推算。回合進行中不顯示過期。只提示，不擋送出。
 
-### 6.5k 主力 bot 的 prompt cache 續命與到點壓縮（`primary_keepalive.rs`，使用者 2026-10-04）
+### 6.5k 主力 bot 的 prompt cache 保溫與熱壓（`primary_keep_warm.rs`，使用者 2026-10-04）
+
+名詞：58 分那則 `any updates` 叫**保溫**（keep-warm），bot 對它的回覆叫**保溫回覆**，110 分的壓縮叫**熱壓**（warm compact），過了 TTL 叫**涼掉**（cold）。
 
 使用者原話：「主力的規則如下：當 cache 至 58 分鐘時，下一個 prompt "any updates"，來讓 cache 延長，且 cache 時間照樣上數，達 110 分鐘時，強制做壓縮」。
 
 - **對象**：`bots.is_primary = 1`、kind 是 claude 或 codex（grok、agy 不做）、有 `running` 的 run、`agent_status == "idle"`、沒有在飛或排隊的回合。`blocked`（停在問題／權限提示）、`working`、`unknown` 絕不送——
   送字進去會變成回答那個問題。主力本來就不被 idle_sleep 收起來。
-- **cache 年齡**＝距離 §6.5j `last_api_at` 的推算（最後一次**真的**活動）。**續命回合本身不算活動**：續命回合的 `turns.client_request_id` 是 `keepalive:<錨點>`（不加欄位，這個前綴本身就持久、跨 daemon 重啟認得出來），
-  `cache_clock` 的最近回合 SQL 排除它；續命期間 claude statusLine 的 API 指紋變化與 `working` 也不算（`primary_keepalive::window_open`，送出前開、回合收尾後寬限 20 秒、最長 15 分鐘）。
-  所以送完續命年齡照樣往上數，直到使用者送真的 prompt 或 bot 自己有真的活動，錨點才更新、計數重來。
-- **58 分（`KEEPALIVE_AFTER_SECS`）**：年齡 ≥ 58 分且未滿該 kind 的 cache TTL（claude／codex 為 60 分）、這個錨點之後還沒續過（有沒有比錨點晚的 `keepalive:` 回合）：
-  走一般送 prompt 的路徑（`lifecycle::prompt`，聊天室看得到）送 `any updates`，`client_request_id = keepalive:<錨點>`（同一錨點冪等）。以 §6.5j 的
-  `last_api_at` 與 `cache_kept_alive_at` 判斷 cache 是否仍熱；若 60 分內沒續到，cache 冷了就不補送。
-- **110 分（`COMPACT_AFTER_SECS`）**：年齡 ≥ 110 分、這個錨點之後還沒壓縮過，且距離 §6.5j 的 `max(last_api_at, cache_kept_alive_at)` 未滿 58 分鐘
+- **cache 年齡**＝距離 §6.5j `last_api_at` 的推算（最後一次**真的**活動）。**保溫回合本身不算活動**：保溫回合的 `turns.client_request_id` 是 `keep-warm:<錨點>`（舊資料是改名前的 `keepalive:<錨點>`，兩個前綴一律認得；不加欄位，前綴本身就持久、跨 daemon 重啟認得出來），
+  `cache_clock` 的最近回合 SQL 排除它；保溫期間 claude statusLine 的 API 指紋變化與 `working` 也不算（`primary_keep_warm::window_open`，送出前開、回合收尾後寬限 20 秒、最長 15 分鐘）。
+  所以送完保溫年齡照樣往上數，直到使用者送真的 prompt 或 bot 自己有真的活動，錨點才更新、計數重來。
+- **58 分（`KEEP_WARM_AFTER_SECS`）**：年齡 ≥ 58 分且未滿該 kind 的 cache TTL（claude／codex 為 60 分）、這個錨點之後還沒保溫過（有沒有比錨點晚的保溫回合）：
+  走一般送 prompt 的路徑（`lifecycle::prompt`，聊天室看得到）送 `any updates`，`client_request_id = keep-warm:<錨點>`（同一錨點冪等）。以 §6.5j 的
+  `last_api_at` 與 `cache_kept_warm_at` 判斷 cache 是否仍熱；若 60 分內沒保溫到，cache 涼掉了就不補送。
+- **110 分（`WARM_COMPACT_AFTER_SECS`）**：年齡 ≥ 110 分、這個錨點之後還沒熱壓過，且距離 §6.5j 的 `max(last_api_at, cache_kept_warm_at)` 未滿 58 分鐘
   （cache TTL 到期前留 2 分鐘餘裕），才呼叫 `lifecycle::compact`（`/compact`，與 context 旁的壓縮鈕同一支）；成功後在對話裡記一則系統訊息
-  （「主力 cache 到點壓縮：…」，同時是持久的「這個錨點壓縮過了」記號）。cache 已冷就不壓縮；等真的活動更新 `last_api_at` 後重新計時。被拒（agent_busy 等）下一輪再試，但仍須符合熱度條件。
-  壓縮本身會讓 statusLine 變、hook 報 working：壓縮後 10 分鐘內（`COMPACT_ECHO_SECS`）冒出的錨點算壓縮的回音，不重新計時；否則閒置的主力每兩小時就續命＋壓縮一輪、停不下來。之後要有真的活動才重新開始計時。
-- **巡邏**：`supervisor::controller` 的控制迴圈每拍呼叫 `primary_keepalive::tick`，自己節流成 30 秒一次、丟背景跑（測試版不跑）。
-- **顯示**：`last_api_at` 因此是真實年齡（網頁 tooltip 的「上次活動」與數字照樣上數）；run JSON 另帶 `cache_kept_alive_at`（API.md）＝最近一次成功續命回合（或到點壓縮）讓 cache 實際變熱的時間，
-  網頁（`cacheState`）用 `max(last_api_at, cache_kept_alive_at)` 算顏色與剩餘，所以 60 分不會誤判變冷。
+  （「主力熱壓：…」，同時是持久的「這個錨點熱壓過了」記號；改名前的「主力 cache 到點壓縮：…」舊訊息一樣認得）。cache 已涼就不熱壓；等真的活動更新 `last_api_at` 後重新計時。被拒（agent_busy 等）下一輪再試，但仍須符合熱度條件。
+  熱壓本身會讓 statusLine 變、hook 報 working：熱壓後 10 分鐘內（`WARM_COMPACT_ECHO_SECS`）冒出的錨點算熱壓的回音，不重新計時；否則閒置的主力每兩小時就保溫＋熱壓一輪、停不下來。之後要有真的活動才重新開始計時。
+- **不用保溫**（使用者按鈕，`POST /api/bots/{id}/keep-warm/skip`，API.md）：只對主力的 claude／codex；按下後這顆 bot「這一輪閒置」跳過保溫與熱壓，再按一次取消。
+  狀態存在 `keep_warm_skip` 表（bot_id、按下的時間；daemon 重啟不忘）。**真的活動**＝使用者或 bot 的新回合（錨點晚於按下的時間；保溫／熱壓自己造成的不算）：
+  送 prompt 的入口（`primary_keep_warm::note_prompt`，非保溫的 `client_request_id`）立刻清掉，巡邏（`settle_skip`）再補抓 bot 自己的新回合與 statusLine 活動，清掉時推 `bot_status`。
+  `plan` 另外判斷「錨點不晚於按下的時間就不動」，所以即使清除晚一拍也不會在活動前誤送。
+- **保溫回覆與未讀**：保溫回合的訊息（`any updates` 與 bot 的回覆）帶 `messages.keep_warm = 1`（trigger `messages_keep_warm_mark` 在寫入時蓋，舊列開 DB 時回填），訊息 JSON 的 `keep_warm`；
+  daemon 算的未讀（`read_marks` 的 `unread`）一律不計這些回合。run JSON 的 `keep_warm_replied_at`＝最近一次保溫回覆完成時間，從回合紀錄推算：保溫回合完成後、還沒有任何非保溫回合才有值，
+  使用者送出新的 prompt（新回合出現）就是 `null`，隨 `bot_status` 廣播；網頁據此把主力晶片框上色。
+- **巡邏**：`supervisor::controller` 的控制迴圈每拍呼叫 `primary_keep_warm::tick`，自己節流成 30 秒一次、丟背景跑（測試版不跑）。
+- **顯示**：`last_api_at` 因此是真實年齡（網頁 tooltip 的「上次活動」與數字照樣上數）；run JSON 另帶 `cache_kept_warm_at`（API.md）＝最近一次成功保溫回合（或熱壓）讓 cache 實際變熱的時間，
+  網頁（`cacheState`）用 `max(last_api_at, cache_kept_warm_at)` 算顏色與剩餘，所以 60 分不會誤判變涼；另帶 `keep_warm_skip`、`keep_warm_replied_at`。
 
 ### 6.5.1 採用使用者的 Herdr `default` session
 

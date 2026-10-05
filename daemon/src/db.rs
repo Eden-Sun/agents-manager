@@ -133,6 +133,8 @@ CREATE INDEX IF NOT EXISTS messages_with_attachments ON messages(id) WHERE attac
 -- 未讀數（read_marks.rs `UNREAD_SQL`）只看 assistant 訊息的 conversation／時間／turn／id：partial covering 索引讓它不必撈整列
 -- （quoted `m.role = 'assistant'` 要跟查詢一字不差，partial index 才用得上）。
 CREATE INDEX IF NOT EXISTS messages_assistant_unread ON messages(conversation_id, created_at, turn_id, id) WHERE role = 'assistant';
+-- 主力「不用保溫」（`primary_keep_warm`）：有列＝這顆 bot 這一輪閒置跳過保溫與熱壓；since 之後有真的活動就刪掉。
+CREATE TABLE IF NOT EXISTS keep_warm_skip (bot_id TEXT PRIMARY KEY, since TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS attachments (
   id TEXT PRIMARY KEY, bot_id TEXT NOT NULL REFERENCES bots(id),
   name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL,
@@ -306,6 +308,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (41, "7891fefaecfdb8e0"),
     // agy（Antigravity CLI）：`bots.kind` 的 CHECK 收 'agy'（既有庫就地放寬，不重建 bots——十七張表指著它）。
     (42, "e3b7ca73b8056a33"),
+    // 主力保溫：`keep_warm_skip`（不用保溫）、`messages.keep_warm` 與蓋它的 trigger。
+    (43, "d554cdfaeba6efe4"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -527,6 +531,9 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
             "ALTER TABLE messages ADD COLUMN sent_via TEXT CHECK (sent_via IN ('send_now','supplement'))",
         ),
         ("runs", "live_rev", "ALTER TABLE runs ADD COLUMN live_rev TEXT"),
+        // 保溫回合（`client_request_id` 以 `keep-warm:`／舊的 `keepalive:` 開頭）留下的訊息＝1：網頁淡化、未讀不計。
+        // 新訊息由下面的 trigger 蓋，舊列由下面的回填補。
+        ("messages", "keep_warm", "ALTER TABLE messages ADD COLUMN keep_warm INTEGER NOT NULL DEFAULT 0"),
         // #708：專案已移交給另一台主機的 daemon；NULL＝本機管。
         ("projects", "handed_off_to", "ALTER TABLE projects ADD COLUMN handed_off_to TEXT"),
     ] {
@@ -566,6 +573,30 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     )
     .await
     .context("create runs_agent_status_since trigger")?;
+    // 保溫回合的訊息帶 `keep_warm = 1`。寫訊息的地方有好幾處（prompt、hook、transcript、terminal fallback…），
+    // 用 trigger 蓋而不是每一處補一行：漏一處，那條路徑的保溫回覆就會亮未讀。
+    sync_trigger(
+        &mut tx,
+        "messages_keep_warm_mark",
+        &format!(
+            "CREATE TRIGGER messages_keep_warm_mark AFTER INSERT ON messages
+               WHEN NEW.turn_id IS NOT NULL AND EXISTS (SELECT 1 FROM turns t WHERE t.id = NEW.turn_id AND {})
+             BEGIN
+               UPDATE messages SET keep_warm = 1 WHERE id = NEW.id;
+             END",
+            crate::cache_clock::keep_warm_crid_sql("t.client_request_id")
+        ),
+    )
+    .await
+    .context("create messages_keep_warm_mark trigger")?;
+    sqlx::query(&format!(
+        "UPDATE messages SET keep_warm = 1
+          WHERE keep_warm = 0 AND turn_id IN (SELECT t.id FROM turns t WHERE {})",
+        crate::cache_clock::keep_warm_crid_sql("t.client_request_id")
+    ))
+    .execute(&mut *tx)
+    .await
+    .context("backfill messages.keep_warm")?;
     // Data-only migration; exact comparisons preserve explicitly versioned model ids.
     sqlx::query(
         "UPDATE bots SET model = CASE model
@@ -1186,6 +1217,9 @@ pub struct Message {
     /// `send_now`＝插隊送出、`supplement`＝回合中補充的一句（`POST /bots/:id/text` 帶 `record`）；NULL＝一般送出。
     #[sqlx(default)]
     pub sent_via: Option<String>,
+    /// 1＝保溫回合的訊息（使用者那則 `any updates` 與 bot 的保溫回覆）；網頁淡化、未讀不計。trigger 蓋（`messages_keep_warm_mark`）。
+    #[sqlx(default)]
+    pub keep_warm: i64,
     /// 插入順序（SQLite rowid，單調遞增）：`created_at` 只有毫秒、ULID 的隨機段在同一毫秒內不單調，
     /// 同毫秒的訊息靠它定先後；`before=` 分頁也是照 rowid 切。查詢要寫 `SELECT *, rowid AS seq`，沒帶就是 0（＝未知）。
     #[sqlx(default)]
@@ -1212,6 +1246,7 @@ pub struct MessageWire {
     updated_at: Option<String>,
     rewound_at: Option<String>,
     sent_via: Option<String>,
+    keep_warm: bool,
     seq: i64,
 }
 
@@ -1235,6 +1270,7 @@ impl From<Message> for MessageWire {
             updated_at: m.updated_at,
             rewound_at: m.rewound_at,
             sent_via: m.sent_via,
+            keep_warm: m.keep_warm != 0,
             seq: m.seq,
         }
     }

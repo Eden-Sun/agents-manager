@@ -133,6 +133,7 @@ const UNREAD_SQL: &str = "SELECT c.bot_id, COUNT(DISTINCT COALESCE(m.turn_id, 'm
            LEFT JOIN messages read_m ON read_m.id = r.message_id AND read_m.created_at = r.read_at
             AND read_m.conversation_id = c.id
           WHERE m.conversation_id = c.id AND m.created_at >= COALESCE(r.read_at, '') AND m.role = 'assistant'
+            AND NOT EXISTS (SELECT 1 FROM turns kt WHERE kt.id = m.turn_id AND (kt.client_request_id LIKE 'keep-warm:%' OR kt.client_request_id LIKE 'keepalive:%'))
             AND (r.bot_id IS NULL OR m.created_at > r.read_at OR (m.created_at = r.read_at AND
                  CASE WHEN read_m.rowid IS NULL THEN m.id > r.message_id ELSE m.rowid > read_m.rowid END))
           GROUP BY c.bot_id";
