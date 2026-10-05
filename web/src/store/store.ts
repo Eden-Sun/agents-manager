@@ -74,6 +74,7 @@ export interface PatchBotOutcome {
   remappedModel: ModelRemap | null
 }
 import { laterMark, serverGroupUnread, serverUnread } from './sharedUnread'
+import { isKeepWarmRequestId } from '../lib/keepWarm'
 import { viewingBot, viewingGroup } from './viewing'
 import { confirmGroupTurn, noteGroupPrompt, noteGroupPrompts } from './groupUnread'
 import {
@@ -3248,7 +3249,7 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         const turnIds = Object.keys(map)
         const latest = turnIds.length > 0 ? turnIds.reduce((a2, b2) => (a2 > b2 ? a2 : b2)) : null
         const key = idleEdgeCompletionKey(botId, run.id, latest ? map[latest] : null)
-        if (key) {
+        if (key && !(latest && key === latest && isKeepWarmRequestId(map[latest]?.client_request_id))) {
           noteTurnDone(set, get, botId, key)
           // `run:` 開頭是終端直接輸入的新回合，latest 仍是上一筆（多半是群組回合）。
           // 拿那個舊 id 去記群組未讀，每個終端回合都會 +1（#650）。
@@ -3313,12 +3314,17 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
         return patch
       })
       // 記未讀要在 set 之後：`markBotRead` 的標記要從含這則訊息的清單推出。
-      if (completesTurn(msg)) {
+      // 訊息沒帶 `keep_warm`（舊 daemon）時，認得它的回合是保溫回合也一樣不記。
+      const keepWarmTurn = msg.keep_warm === true || (msg.turn_id != null && isKeepWarmRequestId(get().turns[botId]?.[msg.turn_id]?.client_request_id))
+      if (completesTurn(msg) && !keepWarmTurn) {
         // 沒 `turn_id` 也要跟 `turn_updated` 同 key，否則徽章跳兩下。
         const turnId = completionKey(msg, Object.keys(get().turns[botId] ?? {}))
         markHookCompletion(botId)
         noteTurnDone(set, get, botId, turnId)
         noteGroupCompletion(set, get, botId, msg.turn_id, turnId, get().turns[botId]?.[turnId])
+      } else if (msg.role === 'assistant' && keepWarmTurn) {
+        // 保溫回覆不亮未讀，但 hook 已經報過這次完成：接著的 idle 邊緣別再補記一次。
+        markHookCompletion(botId)
       }
       return
     }
@@ -3337,8 +3343,11 @@ export function handleFrame(set: SetFn, get: GetFn, frame: { seq?: number; type:
       if (turn.status !== 'in_flight' && turn.status !== 'queued') {
         // 沒有 assistant 訊息的回合（中止、只有終端輸出）也要算完成。
         markHookCompletion(botId)
-        noteTurnDone(set, get, botId, turn.id)
-        noteGroupCompletion(set, get, botId, turn.id, turn.id, turn)
+        // 保溫回合是 daemon 代送的，不算未讀（`lib/keepWarm.ts`）；hook 標記照記，免得 idle 邊緣補記一筆。
+        if (!isKeepWarmRequestId(turn.client_request_id)) {
+          noteTurnDone(set, get, botId, turn.id)
+          noteGroupCompletion(set, get, botId, turn.id, turn.id, turn)
+        }
       }
       return
     }

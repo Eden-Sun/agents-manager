@@ -1,0 +1,55 @@
+/* 保溫回覆提示（SPEC §6.5k，UI-DECISIONS「保溫回覆的晶片框色」）：保溫回覆到了、使用者還沒送新 prompt 前，主力晶片換**洋紅框**。
+   洋紅不跟這列任何既有顏色撞：綠＝快取新鮮／正在看、黃＝快取剩不多／等子 agent、紅＝快取快沒了／要回答、藍＝未讀（實心）。
+   只動框與 inset 環（2px，手機也看得出），不動底色與字，所以未讀的藍底、要回答的紅底、快取倒數的底色全部照舊疊在上面；
+   另有一顆 ♨ 當非顏色的記號（`.unread-chip-warm`）。放在 `unreadChip.css`、`cacheClock.css` 之後載入，同權重的規則才蓋得過。 */
+:root {
+  --keep-warm: #a21caf;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --keep-warm: #e879f9;
+  }
+}
+
+:root[data-theme="dark"] {
+  --keep-warm: #e879f9;
+}
+
+.unread-chip.pinned.keep-warm-replied {
+  border-color: var(--keep-warm);
+  box-shadow: inset 0 0 0 1px var(--keep-warm);
+}
+
+/* 正在看的那顆原本是「綠框＋左側 3px 條」：左條保留（你在這裡），框換洋紅。 */
+.unread-chip.pinned.keep-warm-replied.current {
+  border-color: var(--keep-warm);
+  box-shadow: inset 3px 0 0 var(--lamp-green), inset 0 0 0 1px var(--keep-warm);
+}
+
+.unread-chip.pinned.keep-warm-replied.current.unread {
+  border-color: var(--keep-warm);
+  box-shadow: inset 3px 0 0 var(--accent-text), inset 0 0 0 1px var(--keep-warm);
+}
+
+.unread-chip.pinned.keep-warm-replied.current.needs-reply {
+  border-color: var(--keep-warm);
+  box-shadow: inset 3px 0 0 var(--danger), inset 0 0 0 1px var(--keep-warm);
+}
+
+.unread-chip.pinned.keep-warm-replied:hover {
+  border-color: var(--keep-warm);
+}
+
+.unread-chip-warm {
+  flex: none;
+  color: var(--keep-warm);
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* 實心藍（未讀）、實心紅（要回答 hover）底上洋紅字會糊掉：反白。 */
+.unread-chip.unread .unread-chip-warm,
+.unread-chip.needs-reply:hover .unread-chip-warm {
+  color: #fff;
+}

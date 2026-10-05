@@ -50,15 +50,15 @@ test('daemon 時鐘比這台快：剩餘不超過 TTL', () => {
   assert.equal(cacheState(new Date(T0 + 60_000).toISOString(), 3600, T0)!.frac, 1)
 })
 
-test('續命：顏色從續命時間起算，tooltip 仍講真實的上次活動', () => {
-  // 70 分鐘前最後一次活動（單看已涼），10 分鐘前續命過：還剩 50 分、綠。
+test('保溫：顏色從保溫時間起算，tooltip 仍講真實的上次活動', () => {
+  // 70 分鐘前最後一次活動（單看已涼），10 分鐘前保溫過：還剩 50 分、綠。
   const s = cacheState(at(70), 3600, T0, false, at(10))!
   assert.equal(s.remainingSecs, 50 * 60)
   assert.equal(s.level, 'fresh')
-  assert.match(s.title, /^快取約 50 分後到期（上次活動 \d\d:\d\d，已續命 \d\d:\d\d）$/)
-  // 續命也過期了：已涼。
+  assert.match(s.title, /^快取約 50 分後到期（上次活動 \d\d:\d\d，已保溫 \d\d:\d\d）$/)
+  // 保溫也過期了：已涼。
   assert.equal(cacheState(at(130), 3600, T0, false, at(61))!.level, 'cold')
-  // 續命時間比上次活動早（舊資料）或壞掉：不影響。
+  // 保溫時間比上次活動早（舊資料）或壞掉：不影響。
   assert.deepEqual(cacheState(at(20), 3600, T0, false, at(30)), cacheState(at(20), 3600, T0))
   assert.deepEqual(cacheState(at(20), 3600, T0, false, '壞掉'), cacheState(at(20), 3600, T0))
   assert.deepEqual(cacheState(at(20), 3600, T0, false, null), cacheState(at(20), 3600, T0))

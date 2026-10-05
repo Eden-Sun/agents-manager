@@ -95,8 +95,9 @@ export function windowActive(): boolean {
   return typeof document.hasFocus === 'function' ? document.hasFocus() : true
 }
 
-export function completesTurn(msg: Pick<Message, 'role'>): boolean {
-  return msg.role === 'assistant'
+/** 保溫回覆（`keep_warm`，`lib/keepWarm.ts`）不算：它是 daemon 代送的，不該亮未讀。 */
+export function completesTurn(msg: Pick<Message, 'role' | 'keep_warm'>): boolean {
+  return msg.role === 'assistant' && !msg.keep_warm
 }
 
 /** 沒有標記 = 什麼都沒讀過。 */

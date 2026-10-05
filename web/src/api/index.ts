@@ -571,6 +571,16 @@ export async function compactBot(botId: string): Promise<{ command: string; kind
   return { command: str(pick(o, 'command'), '/compact'), kind: str(pick(o, 'kind')) }
 }
 
+/**
+ * 「不用保溫」鈕（主力、claude／codex；`POST /api/bots/:id/keep-warm/skip`）：`skip=true` 讓這顆 bot「這一輪閒置」跳過保溫與熱壓，
+ * 有真的活動（使用者或 bot 新回合，不含保溫／熱壓）daemon 就自動清掉；`false` 取消。非主力或非 claude／codex 回 400 `not_primary`。
+ */
+export async function setKeepWarmSkip(botId: string, skip: boolean): Promise<{ keep_warm_skip: boolean }> {
+  const raw = await transport.request('POST', `/bots/${encodeURIComponent(botId)}/keep-warm/skip`, { skip })
+  const o = isRec(raw) ? raw : {}
+  return { keep_warm_skip: pick(o, 'keep_warm_skip') === true }
+}
+
 /** `sendNow`＝插隊送出（issue #103）：對方回合中時打斷它，而不是回 409。只有 claude ≥ 2.1.275
  *  的 run 認得那顆鍵，其他情況 daemon 照舊 409，body 帶 `send_now_refused`。
  *  `startIfStopped`＝bot 沒在跑時 daemon 先收下（`delivery: queued`）再自己啟動它（issue #122）。 */

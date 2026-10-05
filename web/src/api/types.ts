@@ -368,8 +368,12 @@ export interface Run {
   last_api_at?: string | null
   /** 這種 kind 的 prompt cache 存活秒數（claude／codex 3600）；`null`＝不知道（grok），不畫倒數。 */
   cache_ttl_secs?: number | null
-  /** 主力的 cache 續命／到點壓縮讓 cache 實際變熱的時間（SPEC §6.5k）；網頁用它算顏色，`last_api_at` 仍是真實年齡。`null`＝沒做過。 */
-  cache_kept_alive_at?: string | null
+  /** 主力的「保溫」／「熱壓」讓 cache 實際變熱的時間（SPEC §6.5k）；網頁用它算顏色，`last_api_at` 仍是真實年齡。`null`＝沒做過。 */
+  cache_kept_warm_at?: string | null
+  /** 「不用保溫」開著：這顆主力這一輪閒置跳過保溫與熱壓；有真的活動後 daemon 自動清掉。 */
+  keep_warm_skip?: boolean
+  /** 最近一次「保溫回覆」完成的時間；使用者送出新 prompt 時 daemon 清成 `null`。非 `null`＝主力晶片框換色（`lib/keepWarm.ts`）。 */
+  keep_warm_replied_at?: string | null
   /** claude／codex 的快取與 context 精簡欄位；沒有資料（舊版 claude、grok、舊 daemon）為 null／未帶。 */
   prompt_cache?: PromptCacheInfo | null
 }
@@ -513,6 +517,8 @@ export interface Message {
   sent_via?: 'send_now' | 'supplement' | null
   /** daemon 的插入序（rowid，單調）：同毫秒的訊息靠它定先後；舊 daemon 沒有。 */
   seq?: number
+  /** 「保溫」那一回合的訊息（使用者那則與 bot 的保溫回覆）：不算未讀（`store/unread.ts`）。 */
+  keep_warm?: boolean
 }
 
 /** SPEC §13.4 `GET /api/projects/:id/messages` */

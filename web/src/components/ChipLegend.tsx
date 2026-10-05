@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { StatusLamp } from './StatusLamp'
 import './chipLegend.css'
+import './keepWarmChip.css'
 
 /**
  * 主力晶片的顏色說明（2026-10-04 使用者：「手機版主力長按說明顏色意義；電腦版你自己想」）。
@@ -39,6 +40,13 @@ export function ChipLegend({ onClose }: { onClose: () => void }) {
               <span className="unread-chip-n">2</span>
             </span>
             <span>做完了還沒看；數字是幾個回合</span>
+          </li>
+          <li>
+            <span className="unread-chip pinned keep-warm-replied" aria-hidden="true">
+              <span className="unread-chip-name">bot</span>
+              <span className="unread-chip-warm">♨︎</span>
+            </span>
+            <span>洋紅框＋♨：保溫回覆到了（cache 還熱），送出新 prompt 才恢復；不算未讀</span>
           </li>
           <li>
             <span className="unread-chip waits-kids" aria-hidden="true">

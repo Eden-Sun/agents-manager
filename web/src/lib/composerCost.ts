@@ -27,8 +27,8 @@ export interface CacheInput {
   promptCache?: PromptCacheInfo | null
   status: CostStatus | null | undefined
   lastApiAt: string | null | undefined
-  /** 主力 cache 續命讓 cache 變熱的時間（`run.cache_kept_alive_at`）；只影響退回 `last_api_at` 推算的那條路。 */
-  keptAliveAt?: string | null
+  /** 主力 cache 保溫讓 cache 變熱的時間（`run.cache_kept_warm_at`）；只影響退回 `last_api_at` 推算的那條路。 */
+  keptWarmAt?: string | null
   ttlSecs: number | null | undefined
   nowMs: number
   working: boolean
@@ -114,7 +114,7 @@ export function cacheView(input: CacheInput): CacheView | null {
   const tokens = contextTokens(status, pc)
   const viaPc = pc ? fromPromptCache(pc, input, tokens) : undefined
   if (viaPc !== undefined) return viaPc
-  const cs = cacheState(lastApiAt, ttlSecs, nowMs, working, input.keptAliveAt)
+  const cs = cacheState(lastApiAt, ttlSecs, nowMs, working, input.keptWarmAt)
   if (!cs) return null
   if (working) return { state: 'hot', mins: null, working: true, approx: false, rewriteTokens: null }
   if (cs.level === 'cold') return { state: 'cold', mins: null, working: false, approx: false, rewriteTokens: tokens }
