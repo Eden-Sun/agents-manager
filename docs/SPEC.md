@@ -1585,7 +1585,7 @@ herdr server 重啟會讓**所有** pane 同時消失。照 §6.5 的規則，�
    接不回（沒有 session、transcript 不在）才退回開新對話、不回 409；要開新對話明確帶 `?resume=fresh`（`bin/agm bot restart --resume fresh`）。
    **接回之後、驗證之前不送 prompt**（issue #92，`lifecycle::resume_gate`）：`--resume` 帶出去不等於接回了——要等 CLI 自己
    回報 session。claude 的 `SessionStart` hook 帶的 session 跟 `runs.resume_session_id` 一樣記 `runs.resume_outcome='verified'`，
-   不一樣記 `mismatch` 並插 `context_lost` 說明（CLI 默默開了新對話）；兩者都是結論，排隊的 prompt 隨即放行（hook 處理完就叫醒 flush）。
+   不一樣記 `mismatch` 並插 `context_lost` 說明（CLI 默默開了新對話）；兩者都是結論，排隊的 prompt 隨即放行（hook 處理完就叫醒 flush）。接回驗證為 `verified` 時，撤掉先前該 session 留下的 `context_lost` 說明（以通知 metadata 綁定 native session id，精確撤銷、不誤撤其他 session 仍屬實的警告；沒有 session 身分的舊通知保守保留；issue #852）。
    還沒結論時：排隊的 flush 留在佇列（不花重試額度、掛 timer 到期再來）；直接送入的 AGM 派工排進佇列，其他送入回
    `409 resume_unverified`（API §5）。最多等 120 秒（`VERIFY_WINDOW`，從 `runs.started_at` 算，涵蓋遠端 hook 走 spool 的 30 秒掃描）。
    **人擋著的時間不算**：pane 停在要人回答的提示時（`runs.agent_status='blocked'`，例如新的設定目錄還沒信任過專案目錄）

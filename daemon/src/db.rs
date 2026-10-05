@@ -210,6 +210,16 @@ CREATE TABLE IF NOT EXISTS rewind_anchors (
   transcript_len INTEGER NOT NULL,
   created_at TEXT NOT NULL
 );
+-- 原生對話接不回的警告紀錄（issue #852，retire_context_lost 依 session id 精確撤銷，不誤撤其他 session 仍有效的警告）。
+CREATE TABLE IF NOT EXISTS context_lost_notices (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL REFERENCES bots(id),
+  native_session_id TEXT,
+  message_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  retired_at TEXT
+);
+CREATE INDEX IF NOT EXISTS context_lost_notices_bot_session ON context_lost_notices(bot_id, native_session_id);
 "#;
 
 /// 這個 binary 認得的 schema 版本，存在 SQLite 內建的 `PRAGMA user_version`（跟資料庫檔案綁在一起，
@@ -310,6 +320,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (42, "e3b7ca73b8056a33"),
     // 主力保溫：`keep_warm_skip`（不用保溫）、`messages.keep_warm` 與蓋它的 trigger。
     (43, "d554cdfaeba6efe4"),
+    // issue #852：`context_lost_notices`（原生對話接不回的警告紀錄，依 session id 精確撤銷）。
+    (44, "0d15873cf9a77b83"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 

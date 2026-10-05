@@ -119,7 +119,7 @@ async fn start_bot_locked_with_host_fence(
     if opts.resume_native && opts.resume_required {
         let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
         if let Err(why) = native_resume_plan(app, &bot, &host, false, opts.resume_session.as_deref()).await? {
-            return Err(cannot_resume(bot_id, why));
+            return Err(cannot_resume(bot_id, why.reason));
         }
     }
     let project = db::project(&app.db, &bot.project_id)
@@ -277,8 +277,24 @@ fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'st
     }
 }
 
-/// 這顆 bot 接得回哪一段原生對話：`Ok((session id, argv))`，接不回就是原因代碼
-/// （`no_session_id`／`transcript_missing`／`unsupported_kind`）。`include_active`：重啟前查——
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeResumeFailure {
+    pub(crate) reason: &'static str,
+    pub(crate) session_id: Option<String>,
+}
+
+impl NativeResumeFailure {
+    fn without_session(reason: &'static str) -> Self {
+        Self { reason, session_id: None }
+    }
+
+    fn for_session(reason: &'static str, session_id: &str) -> Self {
+        Self { reason, session_id: Some(session_id.to_string()) }
+    }
+}
+
+/// 這顆 bot 接得回哪一段原生對話：`Ok((session id, argv))`；接不回時回原因代碼與已知的目標 session
+/// （`no_session_id` 沒有 session，其餘失敗保留實際嘗試的 id）。`include_active`：重啟前查——
 /// 那時現在這一個 run 還沒結束，它的 session 才是要接的那段。
 ///
 /// 換身分（`PATCH /bots/:id` 改 `identity`）後 `bot.identity` 已經是新的，但上一段對話的 jsonl
@@ -291,7 +307,7 @@ pub(crate) async fn native_resume_plan(
     host: &str,
     include_active: bool,
     override_session: Option<&str>,
-) -> LcResult<Result<(String, Vec<String>), &'static str>> {
+) -> LcResult<Result<(String, Vec<String>), NativeResumeFailure>> {
     let last = if let Some(sid) = override_session {
         // 指名的 session：transcript 路徑盡量從記過這段的 run 帶出來（換身分時要複製），沒有就讓 CLI 自己找。
         let transcript: Option<String> = sqlx::query_scalar(
@@ -321,9 +337,9 @@ pub(crate) async fn native_resume_plan(
     } else {
         db::last_native_session(&app.db, &bot.id).await.map_err(up)?
     };
-    let Some((session_id, transcript)) = last else { return Ok(Err("no_session_id")) };
+    let Some((session_id, transcript)) = last else { return Ok(Err(NativeResumeFailure::without_session("no_session_id"))) };
     if session_id.trim().is_empty() {
-        return Ok(Err("no_session_id"));
+        return Ok(Err(NativeResumeFailure::without_session("no_session_id")));
     }
     // 倒回過、之後沒有新回合：先把倒回點補進 transcript（換身分的話在複製之前），`--resume` 才不會接回舊分支（SPEC §6.13）。
     // 重啟前的檢查（`include_active`）那時 CLI 還開著，它結束時會蓋掉，不在那裡補。
@@ -336,10 +352,12 @@ pub(crate) async fn native_resume_plan(
     // remote used to skip this entirely and just hope `--resume` found the file on its own).
     if let Some(transcript) = transcript.filter(|t| !t.trim().is_empty()) {
         if let Err(why) = stage_cross_identity_transcript(app, bot, host, &transcript).await {
-            return Ok(Err(why));
+            return Ok(Err(NativeResumeFailure::for_session(why, &session_id)));
         }
     }
-    Ok(resume_args_by_kind(&bot.kind, &session_id).map(|a| (session_id, a)))
+    Ok(resume_args_by_kind(&bot.kind, &session_id)
+        .map(|a| (session_id.clone(), a))
+        .map_err(|why| NativeResumeFailure::for_session(why, &session_id)))
 }
 
 /// 這個身分實際用的 `CLAUDE_CONFIG_DIR`（沒設、或身分未知都算預設帳號 `~/.claude`）。
@@ -754,10 +772,10 @@ pub(crate) fn fork_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<Stri
 /// 這件事一定要在聊天室裡看得見：以前只寫一行 `tracing::info!`，使用者（或 AGM）看到的是
 /// 一顆重啟成功、狀態正常的 bot，實際上脈絡已經悄悄斷了，要等到回覆內容不對勁才會發現
 /// （issue #92：換身分接不回原對話那次，靠人工翻 log 才查到；`resume_mismatch`——hook 回報的
-/// session 跟預期的不是同一個——更隱蔽，CLI 自己開了新對話卻沒有任何錯誤）。插一則系統訊息，
-/// 跟别的系統通知（例如 CLI 沒裝）走同一條 `insert_message` 路，前端不用另外加邏輯就看得到。
-pub(crate) async fn context_lost(app: &Arc<App>, bot: &db::Bot, why: &str) -> LcResult<()> {
-    tracing::warn!(bot = %bot.name, why, "native session continuation unavailable; starting a new conversation");
+/// session 跟預期的不是同一個——更隱蔽，CLI 自己開了新對話卻沒有任何錯誤）。同一交易寫入系統訊息與
+/// 對應的 session metadata，前端仍直接顯示一般系統訊息。
+pub(crate) async fn context_lost(app: &Arc<App>, bot: &db::Bot, why: &str, failed_session: Option<&str>) -> LcResult<()> {
+    tracing::warn!(bot = %bot.name, why, failed_session = ?failed_session, "native session continuation unavailable; starting a new conversation");
     let reason = match why {
         "no_session_id" => "沒有記到上一段對話的 session id",
         "transcript_missing" => "上一段對話的紀錄檔不見了（換身分時可能沒搬過去，或檔案被清掉）",
@@ -766,8 +784,10 @@ pub(crate) async fn context_lost(app: &Arc<App>, bot: &db::Bot, why: &str) -> Lc
         other => other,
     };
     let conv = db::conversation_id(&app.db, &bot.id).await.map_err(up)?;
-    let _ = insert_message(
-        app,
+    let failed_session = failed_session.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+    let mut tx = db::begin_write(&app.db).await.map_err(up)?;
+    let msg = insert_message_tx(
+        &mut tx,
         &conv,
         None,
         "system",
@@ -776,52 +796,103 @@ pub(crate) async fn context_lost(app: &Arc<App>, bot: &db::Bot, why: &str) -> Lc
         false,
         None,
     )
-    .await;
+    .await
+    .map_err(up)?;
+    let notice_id = db::ulid();
+    let now = db::now();
+    sqlx::query(
+        "INSERT INTO context_lost_notices (id, bot_id, native_session_id, message_id, created_at, retired_at)
+         VALUES (?, ?, ?, ?, ?, NULL)",
+    )
+    .bind(&notice_id)
+    .bind(&bot.id)
+    .bind(&failed_session)
+    .bind(&msg.id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await
+    .map_err(up)?;
+    tx.commit().await.map_err(up)?;
+    emit_message_added(app, &bot.id, msg).await;
+
     Ok(())
 }
 
-/// [`context_lost`] 那則通知的開頭；[`retire_context_lost`] 靠它認出要撤的訊息。
+/// [`context_lost`] 給使用者看的通知開頭。
 pub(crate) const CONTEXT_LOST_PREFIX: &str = "⚠️ 接不回原本的對話";
 
 /// 之後真的接回了 `session_id` 那段對話（resume 驗證為 `verified`）：那段對話中斷後插的「接不回」通知已經不是事實，撤掉
-/// （2026-10-04 使用者：「接回之後不需要再提示原本的失敗」——m4p 十顆 bot 修好後接回，聊天室還掛著前一晚的警告）。
-/// 範圍是「最後一個用過這段 session 的**其他** run 結束之後」插的通知；從沒用過就不動。刪了就發 `resync`，前端重抓。
-pub(crate) async fn retire_context_lost(app: &Arc<App>, bot_id: &str, current_run: &str, session_id: &str) {
-    let ended: Option<String> = match sqlx::query_scalar(
-        "SELECT ended_at FROM runs WHERE bot_id = ? AND id <> ? AND native_session_id = ? AND ended_at IS NOT NULL
-          ORDER BY started_at DESC, rowid DESC LIMIT 1",
+/// （issue #852：依 session id 精確撤銷，避免撤掉其他 session 仍有效的 context-loss 警告）。
+pub(crate) async fn retire_context_lost(app: &Arc<App>, bot_id: &str, session_id: &str) {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return;
+    }
+    let mut tx = match db::begin_write(&app.db).await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::warn!(bot = %bot_id, error = %e, "could not begin tx to retire context-lost notes");
+            return;
+        }
+    };
+
+    let notes: Vec<(String, String)> = match sqlx::query_as(
+        "SELECT id, message_id FROM context_lost_notices
+          WHERE bot_id = ? AND native_session_id = ? AND retired_at IS NULL",
     )
     .bind(bot_id)
-    .bind(current_run)
     .bind(session_id)
-    .fetch_optional(&app.db)
+    .fetch_all(&mut *tx)
     .await
     {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(bot = %bot_id, error = %e, "could not look up the resumed session's last run");
+            let _ = tx.rollback().await;
+            tracing::warn!(bot = %bot_id, error = %e, "could not query context-lost notices");
             return;
         }
     };
-    let Some(ended) = ended else { return };
-    let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return };
-    let deleted = sqlx::query(
-        "DELETE FROM messages WHERE conversation_id = ? AND role = 'system' AND source = 'system' AND created_at >= ?
-            AND substr(content, 1, length(?)) = ?",
-    )
-    .bind(&conv)
-    .bind(&ended)
-    .bind(CONTEXT_LOST_PREFIX)
-    .bind(CONTEXT_LOST_PREFIX)
-    .execute(&app.db)
-    .await;
-    match deleted {
-        Ok(r) if r.rows_affected() > 0 => {
-            tracing::info!(bot = %bot_id, session = %session_id, n = r.rows_affected(), "resumed the lost conversation; retired its context-lost notes");
-            app.emit("resync", json!({"reason": "context_lost_retired", "bot_id": bot_id})).await;
+
+    if notes.is_empty() {
+        let _ = tx.rollback().await;
+        return;
+    }
+
+    let now = db::now();
+    let mut deleted = 0;
+    for (notice_id, message_id) in &notes {
+        if let Err(e) = sqlx::query("UPDATE context_lost_notices SET retired_at = ? WHERE id = ? AND retired_at IS NULL")
+            .bind(&now)
+            .bind(notice_id)
+            .execute(&mut *tx)
+            .await
+        {
+            let _ = tx.rollback().await;
+            tracing::warn!(bot = %bot_id, error = %e, "could not mark context-lost notice as retired");
+            return;
         }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(bot = %bot_id, error = %e, "could not retire context-lost notes"),
+        match sqlx::query("DELETE FROM messages WHERE id = ?")
+            .bind(message_id)
+            .execute(&mut *tx)
+            .await
+        {
+            Ok(result) => deleted += result.rows_affected(),
+            Err(e) => {
+                let _ = tx.rollback().await;
+                tracing::warn!(bot = %bot_id, error = %e, "could not remove context-lost message");
+                return;
+            }
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::warn!(bot = %bot_id, error = %e, "could not commit retirement of context-lost notes");
+        return;
+    }
+
+    tracing::info!(bot = %bot_id, session = %session_id, n = notes.len(), deleted, "resumed the lost conversation; retired its context-lost notes");
+    if deleted > 0 {
+        app.emit("resync", json!({"reason": "context_lost_retired", "bot_id": bot_id})).await;
     }
 }
 
@@ -1068,8 +1139,8 @@ async fn start_inner(
         match native_resume_plan(app, bot, &host, false, opts.resume_session.as_deref()).await? {
             Ok(plan) => Some(plan),
             // 預設退回開新對話；`resume_required` 的呼叫在前面就擋掉了。
-            Err(why) => {
-                context_lost(app, bot, why).await?;
+            Err(failure) => {
+                context_lost(app, bot, failure.reason, failure.session_id.as_deref()).await?;
                 None
             }
         }
@@ -1393,7 +1464,7 @@ async fn restart_bot_with_authority(
     if opts.resume_native && opts.resume_required {
         let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
         if let Err(why) = native_resume_plan(app, &bot, &host, true, opts.resume_session.as_deref()).await? {
-            return Err(cannot_resume(bot_id, why));
+            return Err(cannot_resume(bot_id, why.reason));
         }
     }
     let stopping = db::active_run(&app.db, bot_id).await.map_err(up)?.map(|r| r.id);
@@ -2355,7 +2426,9 @@ mod resume_args_tests {
 
             let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
             let plan = native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap();
-            assert_eq!(plan, Err("transcript_missing"));
+            let failure = plan.unwrap_err();
+            assert_eq!(failure.reason, "transcript_missing");
+            assert_eq!(failure.session_id.as_deref(), Some("sid-gone"), "失敗通知需要綁定本次實際接回的 session");
         }
 
         // ---- 對抗式審查（資料安全）：以下測的都是「換身分複製 transcript」的失敗與邊界 ----
@@ -2383,7 +2456,7 @@ mod resume_args_tests {
 
         async fn plan_of(e: &crate::testing::Env, bot: &db::Bot) -> Result<(String, Vec<String>), &'static str> {
             let bot = db::bot(&e.app.db, &bot.id).await.unwrap().unwrap();
-            native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap()
+            native_resume_plan(&e.app, &bot, LOCAL_HOST, false, None).await.unwrap().map_err(|failure| failure.reason)
         }
 
         fn files_under(dir: &std::path::Path) -> Vec<String> {
@@ -2894,7 +2967,7 @@ esac
 
             let bot = db::bot(&e.app.db, &pm.id).await.unwrap().unwrap();
             let plan = native_resume_plan(&e.app, &bot, "no-such-host", false, None).await.unwrap();
-            assert_eq!(plan, Err("transcript_missing"));
+            assert_eq!(plan.map_err(|failure| failure.reason), Err("transcript_missing"));
         }
 
         #[tokio::test]
@@ -2975,7 +3048,7 @@ esac
                 .await
                 .expect("連不上要快速失敗，不能卡住整個重啟流程")
                 .unwrap();
-            assert_eq!(plan, Err("transcript_missing"), "連不上遠端主機，不能假裝已經搬過去");
+            assert_eq!(plan.map_err(|failure| failure.reason), Err("transcript_missing"), "連不上遠端主機，不能假裝已經搬過去");
 
             e.app.hosts.remove(&e.app, "unreachable-box").await;
         }
@@ -4095,13 +4168,23 @@ mod retire_context_lost_tests {
             .unwrap()
     }
 
+    async fn active_notice_sessions(app: &Arc<App>, bot_id: &str) -> Vec<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT native_session_id FROM context_lost_notices WHERE bot_id = ? AND retired_at IS NULL ORDER BY created_at, rowid",
+        )
+        .bind(bot_id)
+        .fetch_all(&app.db)
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
-    async fn resuming_the_lost_session_retires_only_the_notes_written_after_it_ended() {
+    async fn resuming_a_session_retires_its_notice_and_keeps_legacy_notes() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
         let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
         let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
-        // 很久以前另一次失敗（別段 session）：不能被這次接回撤掉。
+        // 舊版通知沒有 session metadata；保守留下，不從文字或時間猜它屬於哪一段。
         let _ = insert_message(&app, &conv, None, "system", "⚠️ 接不回原本的對話（舊的），已經開了新的對話——前面的脈絡沒有帶過來。", "system", false, None).await;
         sqlx::query("UPDATE messages SET created_at = '2026-10-01T00:00:00.000Z' WHERE conversation_id = ?").bind(&conv).execute(&app.db).await.unwrap();
         // 用過 S 的那個 run 在 10-04 00:19:32 結束，緊接著插了失敗通知與一則一般系統訊息。
@@ -4113,20 +4196,149 @@ mod retire_context_lost_tests {
         .execute(&app.db)
         .await
         .unwrap();
-        context_lost(&app, &bot, "transcript_missing").await.unwrap();
+        context_lost(&app, &bot, "transcript_missing", Some("S")).await.unwrap();
         let _ = insert_message(&app, &conv, None, "system", "Claude Code 已更新到 2.1.290", "system", false, None).await;
-        let current = crate::testing::fake_run(&app, &bot.id).await;
         assert_eq!(notes(&app, &conv).await.len(), 3);
 
         // 接回別段 session：不動。
-        retire_context_lost(&app, &bot.id, &current, "OTHER").await;
+        retire_context_lost(&app, &bot.id, "OTHER").await;
         assert_eq!(notes(&app, &conv).await.len(), 3);
 
-        // 接回 S：只撤 S 結束之後那則「接不回」。
-        retire_context_lost(&app, &bot.id, &current, "S").await;
+        // 接回 S：只撤綁定 S 的通知，不解析舊通知文字或依時間刪除。
+        retire_context_lost(&app, &bot.id, "S").await;
         let left = notes(&app, &conv).await;
         assert_eq!(left.len(), 2, "{left:?}");
         assert!(left[0].contains("（舊的）"), "更早、別段的失敗通知留著");
         assert!(left[1].contains("已更新"), "不是失敗通知的系統訊息不動");
+    }
+
+    #[tokio::test]
+    async fn notice_without_a_failed_session_id_is_not_guessed_from_history() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at, ended_at, native_session_id)
+             VALUES ('run-old', ?, 'exited', 'idle', 'ws', 'p', 'a', 't', '2026-10-04T01:00:00.000Z', '2026-10-04T01:10:00.000Z', 'sess-A')",
+        )
+        .bind(&bot.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        context_lost(&app, &bot, "no_session_id", None).await.unwrap();
+        let stored_session: Option<String> = sqlx::query_scalar(
+            "SELECT native_session_id FROM context_lost_notices WHERE bot_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&bot.id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert_eq!(stored_session, None, "沒有目標 session 時不能猜舊 run 的 id");
+        assert_eq!(active_notice_sessions(&app, &bot.id).await, vec![None]);
+
+        retire_context_lost(&app, &bot.id, "sess-A").await;
+        assert_eq!(notes(&app, &conv).await.len(), 1, "無法證明身分的通知保守保留");
+    }
+
+    /// issue #852: 跨 session 接回不能誤撤其他 session 仍屬實的警告。
+    /// 1. A 失敗 -> WA
+    /// 2. B 失敗 -> WB
+    /// 3. 接回 A -> WA 撤銷，WB 留著
+    /// 4. 接回 B -> WB 撤銷
+    #[tokio::test]
+    async fn recovering_older_session_does_not_retire_newer_session_warning() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+
+        // Run A 結束，接著 context_lost(A)
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at, ended_at, native_session_id)
+             VALUES ('run-a', ?, 'exited', 'idle', 'ws', 'p', 'a', 't', '2026-10-04T01:00:00.000Z', '2026-10-04T01:10:00.000Z', 'sess-A')",
+        )
+        .bind(&bot.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        context_lost(&app, &bot, "transcript_missing", Some("sess-A")).await.unwrap();
+
+        // Run B 結束，接著 context_lost(B)
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, pane_id, agent_name, herdr_session, started_at, ended_at, native_session_id)
+             VALUES ('run-b', ?, 'exited', 'idle', 'ws', 'p', 'a', 't', '2026-10-04T02:00:00.000Z', '2026-10-04T02:10:00.000Z', 'sess-B')",
+        )
+        .bind(&bot.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+        context_lost(&app, &bot, "transcript_missing", Some("sess-B")).await.unwrap();
+
+        assert_eq!(notes(&app, &conv).await.len(), 2);
+        assert_eq!(active_notice_sessions(&app, &bot.id).await, vec![Some("sess-A".into()), Some("sess-B".into())]);
+
+        // 接回 A：只有 WA 被撤銷，WB 依然在
+        retire_context_lost(&app, &bot.id, "sess-A").await;
+        let left = notes(&app, &conv).await;
+        assert_eq!(left.len(), 1, "WA 撤銷後只剩 WB: {left:?}");
+        assert_eq!(active_notice_sessions(&app, &bot.id).await, vec![Some("sess-B".into())]);
+
+        // 接回 B：WB 被撤銷
+        retire_context_lost(&app, &bot.id, "sess-B").await;
+        let left = notes(&app, &conv).await;
+        assert_eq!(left.len(), 0, "全部接回後警告清空: {left:?}");
+        assert!(active_notice_sessions(&app, &bot.id).await.is_empty());
+    }
+
+    /// 倒序接回：後發生的 session B 先接回，先發生的 session A 警告不受影響。
+    #[tokio::test]
+    async fn recovery_in_reverse_chronological_order() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+
+        context_lost(&app, &bot, "transcript_missing", Some("sess-A")).await.unwrap();
+        context_lost(&app, &bot, "transcript_missing", Some("sess-B")).await.unwrap();
+        assert_eq!(notes(&app, &conv).await.len(), 2);
+
+        // 先接回 B
+        retire_context_lost(&app, &bot.id, "sess-B").await;
+        let left = notes(&app, &conv).await;
+        assert_eq!(left.len(), 1, "B 撤銷後只剩 A: {left:?}");
+        assert_eq!(active_notice_sessions(&app, &bot.id).await, vec![Some("sess-A".into())]);
+
+        // 再接回 A
+        retire_context_lost(&app, &bot.id, "sess-A").await;
+        let left = notes(&app, &conv).await;
+        assert_eq!(left.len(), 0, "A 也撤銷: {left:?}");
+        assert!(active_notice_sessions(&app, &bot.id).await.is_empty());
+    }
+
+    /// 同一個 session 重複失敗（多次 context_lost），接回時一次全數撤銷。
+    #[tokio::test]
+    async fn repeated_failures_for_same_session_retire_together() {
+        let env = crate::testing::env().await;
+        let app = env.app.clone();
+        let bot = crate::testing::claude_bot(&app, &env.project_id, "rpa").await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+
+        context_lost(&app, &bot, "transcript_missing", Some("sess-A")).await.unwrap();
+        context_lost(&app, &bot, "resume_mismatch", Some("sess-A")).await.unwrap();
+        context_lost(&app, &bot, "transcript_missing", Some("sess-B")).await.unwrap();
+        assert_eq!(notes(&app, &conv).await.len(), 3);
+
+        // 接回 A：A 的兩則警告都撤銷，B 仍留著
+        retire_context_lost(&app, &bot.id, "sess-A").await;
+        let left = notes(&app, &conv).await;
+        assert_eq!(left.len(), 1, "A 的重複警告撤銷，B 留著: {left:?}");
+        assert_eq!(active_notice_sessions(&app, &bot.id).await, vec![Some("sess-B".into())]);
+
+        // 接回 B
+        retire_context_lost(&app, &bot.id, "sess-B").await;
+        assert_eq!(notes(&app, &conv).await.len(), 0);
+        assert!(active_notice_sessions(&app, &bot.id).await.is_empty());
     }
 }
