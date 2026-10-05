@@ -2053,6 +2053,10 @@ inbox 的 key 是 `<kind>:<host>:<pane_id>:<first_seen>`：herdr 重開後 pane 
 `GET /api/panes?unowned=1` 列出對不到專案的那些（那顆固定的 `scratch` 也在裡面，標出來）。
 listen port 只在本機算（pane 行程樹的 pid 對 `lsof -nP -iTCP -sTCP:LISTEN`；Linux 讀 `/proc`，見 §19）；遠端主機這一欄留空並標明「遠端不判斷」，
 不要為了它多開 ssh 往返。
+**agent CLI 自己開的 port 不算**（2026-10-05，`memproc::PaneFacts::listen_pids`）：行程名（不看 argv 子字串；`node`／`bun`／`deno` 看第一個非旗標參數的腳本名）是 `agy`／`claude`／`codex`／`grok` 的行程，
+pid 不拿去對 listen port。agy 的登入 TUI 會在 127.0.0.1 自己開兩個 port，使用者在 AG Man 開的登入 shell 裡跑它，不能被判成伺服器 pane 而唯讀（人要選登入方式、貼授權碼）。
+同一顆 pane 裡的其他行程照算：`node next dev`、`python -m http.server` 這類 dev server 的 port 仍然唯讀；agent 旁邊另開 dev server 也一樣唯讀。
+`panes` 表、打字前的即時複查（`shell::live_verdict`）、GC 守門與 `POST /api/panes/{id}/close` 的 `read_only`／`listen_ports` 都用同一份 `listen_pids`。網頁沒有自己的規則，只顯示 daemon 回的 `read_only`。
 
 #### 邊界
 - 不動 agent pane 的 reconcile／run 配對／孤兒清掃（§6.9 附註的 09-11 教訓）。

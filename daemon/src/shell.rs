@@ -239,7 +239,7 @@ pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str, expe
     let dump = probe.dump(app, host).await.ok()?;
     let shell = client.pane_shell(pane_id).await.ok()?;
     let facts = crate::panes::facts_from(&shell, &dump, pane_id)?;
-    let ports = probe.listen_ports(host, &facts.pids).await?;
+    let ports = probe.listen_ports(host, &facts.listen_pids).await?;
     let verdict = if !ports.is_empty() { LiveVerdict::ReadOnly } else { LiveVerdict::Typeable };
     let mut cache = app.pane_live.lock().await;
     if verdict == LiveVerdict::ReadOnly {
@@ -892,6 +892,46 @@ mod tests {
         let result = send_keys(app, "local", &pane.pane_id, &["ctrl+c".to_string()]).await;
         assert!(matches!(result, Err(LcError::Forbidden(ref body)) if body["error"] == "read_only_pane"), "new listener must make typing read-only: {result:?}");
         assert!(env.herdr.calls_to("pane.send_keys").is_empty(), "a cached Typeable must not send after a listener appears");
+    }
+
+    /// 2026-10-05：在 shell 裡跑 agy 登入 TUI，agy 自己會在 127.0.0.1 開 port；那是 agent CLI 的 port、不是 dev server，照常可打字。
+    /// 真正的 dev server（node／python）開 port 仍然唯讀。
+    #[tokio::test]
+    async fn an_agent_cli_listening_in_a_login_shell_is_typeable_but_a_dev_server_is_not() {
+        let env = crate::testing::env().await;
+        let app = &env.app;
+        let session = app.session_for_host("local").await.unwrap();
+        let (_, pane) = app.herdr.workspace_create("/tmp", "shell", json!({})).await.unwrap();
+        *app.host_shells.lock().await = vec![HostShell {
+            host: "local".into(),
+            herdr_session: session,
+            workspace_id: pane.workspace_id.clone(),
+            tab_id: pane.tab_id.clone(),
+            pane_id: pane.pane_id.clone(),
+            cwd: "/tmp".into(),
+            created_at: crate::db::now(),
+        }];
+        env.herdr.set_shell_pid(&pane.pane_id, 43101);
+        let agent_tree = |argv: &'static str| crate::pane_probe::Fixed::tree(&[(43101, 1, "-zsh"), (43102, 43101, argv)]);
+
+        for agent in ["/home/u/.local/bin/agy", "claude --resume", "node /usr/lib/node_modules/@openai/codex/bin/codex.js", "grok"] {
+            *app.pane_probe.lock().unwrap() = Arc::new(agent_tree(agent).listening(43102, 39039).listening(43102, 38261));
+            registered(app, "local", &pane.pane_id, Access::Type).await.unwrap_or_else(|e| panic!("{agent} 開 port 的登入 shell 要能打字：{e:?}"));
+        }
+
+        for dev in ["node next dev --port 3010", "python3 -m http.server 8000", "/usr/bin/node server.js"] {
+            app.pane_live.lock().await.clear();
+            *app.pane_probe.lock().unwrap() = Arc::new(agent_tree(dev).listening(43102, 3010));
+            let result = registered(app, "local", &pane.pane_id, Access::Type).await;
+            assert!(matches!(result, Err(LcError::Forbidden(ref b)) if b["error"] == "read_only_pane"), "{dev} 仍唯讀：{result:?}");
+        }
+
+        // agent 旁邊另外有真正的 dev server（同一顆 pane）：dev server 的 port 照算。
+        app.pane_live.lock().await.clear();
+        *app.pane_probe.lock().unwrap() =
+            Arc::new(crate::pane_probe::Fixed::tree(&[(43101, 1, "-zsh"), (43102, 43101, "agy"), (43103, 43101, "node vite")]).listening(43102, 39039).listening(43103, 5173));
+        let result = registered(app, "local", &pane.pane_id, Access::Type).await;
+        assert!(matches!(result, Err(LcError::Forbidden(ref b)) if b["error"] == "read_only_pane"), "{result:?}");
     }
 
     /// 打字的量與鍵名：太大的一段字、一次幾百個鍵、帶換行／控制字元的鍵名，在送進 herdr 之前就擋掉。
