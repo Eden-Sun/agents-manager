@@ -1006,42 +1006,47 @@
   text-align: right;
 }
 
-/* 收合（寬度不夠放完整量表，`quotaCollapsed`）之後每格還是要放得下：條縮到 24px、格不再縮到比內容小，
-   放不下的尾巴直接裁掉（明細點開看）；`clip` 不是 `auto`——後者會把往下開的提示（停用方塊）一起裁掉。
-   以前收合只少一條窗口、寬度不變，百分比照樣疊到下一格的身分名（#314）。 */
+/* 桌機格子不縮到比內容小；放不下時由 `nextQuotaFit` 把完整額度列移到新行。 */
 @media (width > 640px) {
-  /* 完整量表的格子也不縮到比內容小（2026-09-28 使用者截圖：遠端主機時五格互相疊字）：放不下由
-     `nextQuotaFit` 量到後先收主機名牌、再收合，不再靠格子擠壓把字疊到下一格。 */
-  .main-head .quota-open:not(.collapsed) .quota-hp {
+  .main-head .quota-open .quota-hp {
     /* 不是 min-content：格內的 grid 項目是 `min-width: 0`，min-content 會算成比條加數字還窄（實測 90 vs 118px）。 */
     min-width: max-content;
   }
 
-  .main-head .quota-open.collapsed {
-    overflow-x: clip;
+  /* 第二階段把額度放到整行，導覽頁籤仍留在第一行。額度格很多時在自己的行內換行，不省略窗口。 */
+  .main-head:has(> .quota-strip.stacked) {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 60px;
   }
 
-  .main-head .quota-open.collapsed .quota-hp {
-    flex: 1 0 auto;
+  .main-head:has(> .quota-strip.stacked) > .spacer {
+    order: 1;
   }
 
-  .main-head .quota-open.collapsed .quota-bar-row {
+  .main-head:has(> .quota-strip.stacked) > .tabs {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .main-head:has(> .quota-strip.stacked) > .quota-strip.stacked {
+    order: 3;
+    flex: 0 0 100%;
+    width: 100%;
     min-width: 0;
+    justify-content: flex-start;
+    padding-bottom: 4px;
   }
 
-  .main-head .quota-open.collapsed .quota-bar-wrap {
-    flex: 0 0 24px;
-    min-width: 24px;
+  .main-head .quota-strip.stacked .quota-open {
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    width: 100%;
+    justify-content: flex-start;
   }
-}
 
-/* 桌機名字那塊固定寬（>1024）。沒收合時額度區不拿內容寬當基準（max-content 比完整量表寬，會把旁邊的
-   遠端記憶體白白擠掉），而是分剩下的、保底是完整量表的內容寬；不夠時遠端記憶體先讓（shrink 1000），還不夠才收合。
-   收合後照內容寬當基準，一樣是遠端記憶體先讓，裁掉的格子才會最少。 */
-@media (width > 1024px) {
-  .main-head > .quota-strip:has(> .quota-open:not(.collapsed)) {
-    flex-basis: 0;
-    min-width: min-content;
+  .main-head .quota-strip.stacked .quota-hp {
+    flex: 1 1 auto;
   }
 }
 
