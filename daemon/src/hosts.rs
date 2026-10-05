@@ -6,7 +6,6 @@
 
 use crate::config::{HostCfg, LOCAL_HOST};
 use crate::herdr::HerdrClient;
-use crate::state::App;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +16,53 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// 能拿到「主機表」就夠的呼叫端（git_sh、memstat、trust…）要的最小能力：不看 `App` 的其他欄位。
+/// `App` 在 composition 層（`app_ports_p3`）實作；`Arc<T>`／`HostManager` 本身也算，所以既有的 `(&app, …)` 呼叫不用改。
+pub trait HostsAccess: Send + Sync {
+    fn hosts(&self) -> &HostManager;
+}
+
+impl<T: HostsAccess + ?Sized> HostsAccess for Arc<T> {
+    fn hosts(&self) -> &HostManager {
+        (**self).hosts()
+    }
+}
+
+impl HostsAccess for HostManager {
+    fn hosts(&self) -> &HostManager {
+        self
+    }
+}
+
+/// daemon 實例的 slug（隔離測試用，決定 ssh master／轉發 socket 的路徑；`None`＝正式實例）。
+pub trait HostInstance: Send + Sync {
+    fn instance(&self) -> Option<String>;
+}
+
+impl<T: HostInstance + ?Sized> HostInstance for Arc<T> {
+    fn instance(&self) -> Option<String> {
+        (**self).instance()
+    }
+}
+
+/// `HostManager` 的 supervisor／設定套用要叫回去的事（SPEC §11.3.4）：連上之後的整串對帳、事件推送、觀測快取清除。
+/// 這些原本直接呼叫 reconcile、events、hookrecv、tools、quota… 一票 feature；現在 hosts 只認這個 trait，
+/// 順序與內容由 `app_ports_p3` 的 `App` 實作保持不變。
+pub trait HostHooks: HostsAccess + HostInstance + 'static {
+    /// 這台是不是共用一個 herdr session 的主機（`[[hosts]] shared_session`）。
+    fn is_shared_host(app: &Arc<Self>, host: &str) -> impl Future<Output = bool> + Send;
+    /// 這台的連線狀態變了（連上、斷線、連不上）：推 `host_changed`。
+    fn host_changed(app: &Arc<Self>, fence: &HostFence) -> impl Future<Output = ()> + Send;
+    /// 本機 herdr 的 ping 結果（`reconnect("local")`）。
+    fn set_local_herdr_connected(&self, ok: bool);
+    /// 連上之後（重連也一樣）要做的整串事：對帳、重掛 watcher、事件訂閱、spool 重播、偵測、purge、shim／權限補版、autostart。
+    fn host_connected(app: Arc<Self>, host: String) -> impl Future<Output = ()> + Send;
+    /// 以主機名為鍵、描述「那台機器」的快取全部丟掉（#347）。
+    fn forget_host_observations(app: &Arc<Self>, host: &str) -> impl Future<Output = ()> + Send;
+    /// 主機被移除之後：快取清掉、推 `host_changed`（removed）與 `daemon_status`。
+    fn host_removed(app: &Arc<Self>, host: &str) -> impl Future<Output = ()> + Send;
+}
 
 /// SPEC §11.3.4.
 const PING_INTERVAL: Duration = Duration::from_secs(10);
@@ -171,6 +217,13 @@ pub struct HostConn {
     instance: Option<String>,
 }
 
+/// 每條新連線（本機、設定換掉的同名遠端）的世代從不同的區間開始：am-ports 的 `HostFence` 只有 host id＋世代，沒有連線物件，
+/// 世代若每條連線都從 0 起算，換過的連線會跟舊 fence 的世代撞號，舊世代的操作就會送到新連線上。
+fn first_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1 << 24, Ordering::SeqCst)
+}
+
 impl HostConn {
     fn local(client: HerdrClient) -> Arc<Self> {
         Arc::new(Self {
@@ -183,7 +236,7 @@ impl HostConn {
             remote_home: Mutex::new(dirs::home_dir().map(|p| p.to_string_lossy().to_string())),
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
-            generation: std::sync::atomic::AtomicU64::new(0),
+            generation: std::sync::atomic::AtomicU64::new(first_generation()),
             retiring: AtomicBool::new(false),
             authority_gate: tokio::sync::RwLock::new(()),
             fence_tickets: std::sync::atomic::AtomicU64::new(0),
@@ -204,7 +257,7 @@ impl HostConn {
             remote_home: Mutex::new(None),
             master: Mutex::new(None),
             supervisor: Mutex::new(None),
-            generation: std::sync::atomic::AtomicU64::new(0),
+            generation: std::sync::atomic::AtomicU64::new(first_generation()),
             retiring: AtomicBool::new(false),
             authority_gate: tokio::sync::RwLock::new(()),
             fence_tickets: std::sync::atomic::AtomicU64::new(0),
@@ -644,16 +697,16 @@ async fn run_with_stdin(
 }
 
 /// SPEC §11.3.4.
-fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> tokio::task::JoinHandle<()> {
+fn spawn_supervisor<H: HostHooks>(app: Arc<H>, conn: Arc<HostConn>, generation: u64) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let Some(fence) = app.hosts.fence_for_generation(&conn, generation).await else { return };
+        let Some(fence) = app.hosts().fence_for_generation(&conn, generation).await else { return };
         let mut backoff = BACKOFF_MIN;
         loop {
             if conn.generation.load(Ordering::SeqCst) != generation {
                 return; // superseded by a reconnect / config change
             }
             let attempt = async {
-                let sock = conn.ensure_remote_session(crate::shared_host::is_shared(&app, &conn.name).await).await?;
+                let sock = conn.ensure_remote_session(H::is_shared_host(&app, &conn.name).await).await?;
                 conn.start_master(&sock).await?;
                 Ok::<_, anyhow::Error>(())
             }
@@ -665,30 +718,8 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     conn.mark_up();
                     conn.connected.store(true, Ordering::SeqCst);
                     *conn.error.lock().await = None;
-                    crate::state::emit_host_changed(&app, &fence).await;
-
-                    let reconciled = match crate::reconcile::reconcile_host(&app, &conn.name).await {
-                        Ok(()) => true,
-                        Err(e) => {
-                            tracing::error!(host = %conn.name, error = ?e, "reconcile after connect failed");
-                            false
-                        }
-                    };
-                    if reconciled {
-                        crate::lifecycle::relay_watch::rearm_host(&app, &conn.name).await;
-                    }
-                    crate::events::spawn_global_for_host(app.clone(), conn.name.clone()).await;
-                    crate::hookrecv::replay_host(&app, &conn.name).await;
-                    crate::tools::spawn_detect(app.clone(), conn.name.clone());
-                    // 刪除 handler 的一次性 ssh purge 若在送出前 daemon 就死了，這台的已刪 bot 目錄靠連上時再掃一次收掉（#349）。
-                    crate::remote_purge::spawn_sweep(app.clone(), conn.name.clone());
-                    // daemon 升級後，長跑的遠端 bot 手上還是舊 shim：連上（重連也一樣）就補版，背景做、不擋連線（issue #124）。
-                    crate::shim_refresh::spawn_remote_refresh(app.clone(), conn.name.clone());
-                    // 同一個道理的權限：#494 的收緊在「啟動 bot」那一趟，換版前就在跑的遠端 bot 要等重啟才收得到（issue #501）。
-                    crate::remote_perms::spawn_tighten(app.clone(), conn.name.clone());
-                    // 開機那一輪跑的時候這台還沒連上，它的 autostart bot 因此從來沒被起過（review 2026-09-16）。
-                    // 對帳成功才跑、每台一生一次：重連不能把使用者停掉的 bot 再開起來（core 5）。
-                    autostart_after_startup_ready(&app, &conn.name, reconciled).await;
+                    H::host_changed(&app, &fence).await;
+                    H::host_connected(app.clone(), conn.name.clone()).await;
 
                     loop {
                         tokio::time::sleep(PING_INTERVAL).await;
@@ -713,7 +744,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     conn.mark_down();
                     conn.connected.store(false, Ordering::SeqCst);
                     conn.kill_master().await;
-                    crate::state::emit_host_changed(&app, &fence).await;
+                    H::host_changed(&app, &fence).await;
                 }
                 Err(e) => {
                     let msg = format!("{e:#}");
@@ -724,7 +755,7 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
                     conn.mark_down();
                     conn.connected.store(false, Ordering::SeqCst);
                     *conn.error.lock().await = Some(msg);
-                    crate::state::emit_host_changed(&app, &fence).await;
+                    H::host_changed(&app, &fence).await;
                 }
             }
 
@@ -735,11 +766,6 @@ fn spawn_supervisor(app: Arc<App>, conn: Arc<HostConn>, generation: u64) -> toki
             backoff = (backoff * 2).min(BACKOFF_MAX);
         }
     })
-}
-
-async fn autostart_after_startup_ready(app: &Arc<App>, host: &str, reconciled: bool) -> bool {
-    app.wait_until_startup_ready().await;
-    crate::reconcile::autostart_after_reconcile(app, host, reconciled).await
 }
 
 /// Test seam: a fake "ssh" per host name, so remote-side effects (`rm -rf` of a bot dir …) can be observed without a network.
@@ -756,37 +782,6 @@ pub(crate) fn set_ssh_fake(host: &str, f: impl Fn(&str) -> Result<String> + Send
 #[cfg(test)]
 fn ssh_fake_for(host: &str) -> Option<SshFake> {
     SSH_FAKES.lock().unwrap().iter().find(|(h, _)| h == host).map(|(_, f)| f.clone())
-}
-
-/// 以主機名為鍵、描述「那台機器」的快取全部丟掉（#347）：偵測結果（`app.tools`，含身分與 herdr CLI 版本）、
-/// 額度（`<host>/…`，連重啟快取列）、模型清單（`<host>/<kind>/<identity>`）、這個 daemon 在那台開的 shell 清單。
-/// 移除主機與同名改設定都走這裡；新連線上線後由偵測／探測重新填。
-async fn forget_host_observations(app: &Arc<App>, name: &str) {
-    let prefix = format!("{name}/");
-    app.tools.lock().await.remove(name);
-    app.host_baseline.lock().await.remove(name);
-    app.remote_shim_stale.lock().await.remove(name);
-    let removed: Vec<String> = {
-        let mut quotas = app.quotas.lock().await;
-        let removed = quotas.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
-        quotas.retain(|k, _| !k.starts_with(&prefix));
-        removed
-    };
-    for key in removed {
-        crate::quota::forget(app, &key).await;
-        // 前端的額度條認 `quota_updated`：不告訴它，那台機器（或換連線前的那條）的數字會掛到下一次輪詢（形狀同 `identity_kind::cleanup_host`）。
-        app.emit("quota_updated", json!({"kind": key, "host": name, "quota": null})).await;
-    }
-    app.models_cache.lock().await.retain(|k, _| !k.starts_with(&prefix));
-    app.host_shells.lock().await.retain(|s| s.host != name);
-    crate::login_assist::forget_host(app, name);
-    // GitHub origin 跟 tools／額度一樣是這台機器的觀測（#830）。改指或刪除時清掉，舊連線的掃描不能再寫回來。
-    if let Ok(projects) = crate::db::live_projects(&app.db).await {
-        let mut github = app.github.lock().await;
-        for project in projects.into_iter().filter(|project| project.host == name) {
-            github.remove(&project.id);
-        }
-    }
 }
 
 /// Test seam: make every ssh leg to this host take that long *asynchronously* — a host that accepts the
@@ -881,6 +876,18 @@ impl HostManager {
         self.conns.lock().await.get(name).cloned()
     }
 
+    /// 窄介面（am-ports `HostFence`＝host id＋世代）用：這台目前的連線世代；不領 ticket。沒這台或正在退場＝`None`。
+    pub(crate) async fn current_generation(&self, name: &str) -> Option<u64> {
+        let conn = self.get(name).await?;
+        (!conn.retiring.load(Ordering::SeqCst)).then(|| conn.generation.load(Ordering::SeqCst))
+    }
+
+    /// 世代還對得上才回連線：重連／改設定之後舊世代拿到 `None`，操作不會被送到換過的那條連線上。
+    pub(crate) async fn conn_at_generation(&self, name: &str, generation: u64) -> Option<Arc<HostConn>> {
+        let conn = self.get(name).await?;
+        (!conn.retiring.load(Ordering::SeqCst) && conn.generation.load(Ordering::SeqCst) == generation).then_some(conn)
+    }
+
     /// Capture the current authority for `name` (see [`HostFence`]); `None` = no such host.
     pub async fn fence(&self, name: &str) -> Option<HostFence> {
         let conn = self.get(name).await?;
@@ -949,7 +956,7 @@ impl HostManager {
 
     /// Test seam: [`Self::apply_config`] 換掉同名連線的那一步（含快取失效），只是不起 supervisor、不真的連 ssh。
     #[cfg(test)]
-    pub(crate) async fn replace_remote_for_test(&self, app: &Arc<App>, cfg: HostCfg) -> Arc<HostConn> {
+    pub(crate) async fn replace_remote_for_test<H: HostHooks>(&self, app: &Arc<H>, cfg: HostCfg) -> Arc<HostConn> {
         let conn = HostConn::remote(cfg, app.instance());
         if let Some(old) = self.get(&conn.name).await {
             let _authority = old.authority_gate.write().await;
@@ -962,9 +969,9 @@ impl HostManager {
 
     /// Test seam: repoint a named remote while keeping both generations on distinct fake sockets.
     #[cfg(test)]
-    pub(crate) async fn replace_remote_with_client_for_test(
+    pub(crate) async fn replace_remote_with_client_for_test<H: HostHooks>(
         &self,
-        app: &Arc<App>,
+        app: &Arc<H>,
         cfg: HostCfg,
         client: HerdrClient,
     ) -> Arc<HostConn> {
@@ -980,10 +987,10 @@ impl HostManager {
 
     /// 把 `conn` 放上去當這個名字的權威。原本就有同名連線（設定改了、可能改指到另一台）時，舊連線量到的東西
     /// 一律作廢（#347）：先換連線、再清快取——順序反過來的話，清完到換上之間發布的舊觀測會通過權威檢查留下來。
-    async fn install_conn(&self, app: &Arc<App>, conn: Arc<HostConn>) {
+    async fn install_conn<H: HostHooks>(&self, app: &Arc<H>, conn: Arc<HostConn>) {
         let replaced = self.conns.lock().await.insert(conn.name.clone(), conn.clone()).is_some();
         if replaced {
-            forget_host_observations(app, &conn.name).await;
+            H::forget_host_observations(app, &conn.name).await;
         }
     }
 
@@ -1008,7 +1015,7 @@ impl HostManager {
     }
 
     /// Supervisors whose config is unchanged are left alone.
-    pub async fn apply_config(&self, app: &Arc<App>, hosts: &[HostCfg]) -> HashSet<String> {
+    pub async fn apply_config<H: HostHooks>(&self, app: &Arc<H>, hosts: &[HostCfg]) -> HashSet<String> {
         let wanted: HashMap<String, HostCfg> = hosts.iter().map(|h| (h.name.clone(), h.clone())).collect();
         let mut changed_hosts = HashSet::new();
 
@@ -1063,7 +1070,7 @@ impl HostManager {
         changed_hosts
     }
 
-    pub async fn remove(&self, app: &Arc<App>, name: &str) {
+    pub async fn remove<H: HostHooks>(&self, app: &Arc<H>, name: &str) {
         let Some(c) = self.get(name).await else { return };
         let _authority = c.authority_gate.write().await;
         let Some(c) = ({
@@ -1087,22 +1094,20 @@ impl HostManager {
         c.kill_master().await;
         c.connected.store(false, Ordering::SeqCst);
         // Stale `<gone>/claude` quota rows would read as local downstream — SPEC §14.
-        forget_host_observations(app, name).await;
-        app.emit("host_changed", json!({"name": name, "connected": false, "error": "removed"})).await;
-        crate::state::emit_daemon_status(app).await;
+        H::host_removed(app, name).await;
         tracing::info!(host = %name, "host removed");
     }
 
     /// Returns `(connected, error)`.
-    pub async fn reconnect(&self, app: &Arc<App>, name: &str) -> Option<(bool, Option<String>)> {
+    pub async fn reconnect<H: HostHooks>(&self, app: &Arc<H>, name: &str) -> Option<(bool, Option<String>)> {
         let fence = self.fence(name).await?;
         let conn = fence.conn().clone();
         if conn.is_local() {
             let ok = conn.client.ping().await.is_ok();
             conn.connected.store(ok, Ordering::SeqCst);
-            app.connected.store(ok, Ordering::SeqCst);
+            app.set_local_herdr_connected(ok);
             *conn.error.lock().await = if ok { None } else { Some("local herdr ping failed".into()) };
-            crate::state::emit_host_changed(app, &fence).await;
+            H::host_changed(&app, &fence).await;
             return Some((ok, conn.error_string().await));
         }
         let _authority = conn.authority_gate.write().await;
@@ -1295,7 +1300,8 @@ mod tests {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let pass = tokio::spawn(async move {
             let _ = started_tx.send(());
-            autostart_after_startup_ready(&pass_app, host, true).await
+            pass_app.wait_until_startup_ready().await;
+            crate::reconcile::autostart_after_reconcile(&pass_app, host, true).await
         });
 
         started_rx.await.unwrap();
@@ -1392,7 +1398,7 @@ mod tests {
             },
         );
         let mut events = env.app.subscribe();
-        forget_host_observations(&env.app, host).await;
+        <crate::state::App as HostHooks>::forget_host_observations(&env.app, host).await;
         assert!(env.app.quotas.lock().await.get(&key).is_none(), "前提：額度已丟掉");
         let mut seen = None;
         while let Ok(ev) = events.try_recv() {
@@ -1431,7 +1437,7 @@ mod tests {
             .await
             .insert("other-host".into(), "keep this other host".into());
 
-        forget_host_observations(&env.app, host).await;
+        <crate::state::App as HostHooks>::forget_host_observations(&env.app, host).await;
 
         assert!(
             !env.app.host_baseline.lock().await.contains_key(host),

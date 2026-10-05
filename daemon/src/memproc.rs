@@ -4,14 +4,14 @@
 //! not our bookkeeping, so it stays true for processes started before this daemon booted.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::memstat::{child_index, exe_name, herdr_roots, is_herdr, parse_ps, Proc};
-use crate::state::App;
+use crate::hosts::HostsAccess;
+use crate::memstat::MemEnv;
 
 /// Tree and environments in one round trip. macOS has `ps -E`; Linux needs `/proc/<pid>/environ`
 /// (same-user only, which is exactly the scope we want).
@@ -543,9 +543,9 @@ pub fn processes_from_dump(out: &str) -> Vec<MemProcess> {
     listed(&procs, &raws)
 }
 
-pub(crate) async fn dump(app: &Arc<App>, host: &str) -> anyhow::Result<String> {
+pub(crate) async fn dump(app: &impl HostsAccess, host: &str) -> anyhow::Result<String> {
     let conn = app
-        .hosts
+        .hosts()
         .get(host)
         .await
         .ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
@@ -563,13 +563,13 @@ pub(crate) async fn dump(app: &Arc<App>, host: &str) -> anyhow::Result<String> {
 }
 
 /// `GET /api/mem/processes?host=…`
-pub async fn processes(app: &Arc<App>, host: &str) -> anyhow::Result<Value> {
+pub async fn processes(app: &impl MemEnv, host: &str) -> anyhow::Result<Value> {
     let out = dump(app, host).await?;
     let mut rows = processes_from_dump(&out);
     for r in &mut rows {
         let Some(id) = r.bot_id.clone() else { continue };
         // A deleted bot still reads as a bot: stopping it is the bot's business, not a kill.
-        if let Ok(Some(b)) = crate::db::bot(&app.db, &id).await {
+        if let Some(b) = app.bot_ref(&id).await {
             r.bot_name = Some(b.name);
             r.project_id = Some(b.project_id);
         }
@@ -581,45 +581,8 @@ pub async fn processes(app: &Arc<App>, host: &str) -> anyhow::Result<Value> {
     }))
 }
 
-/// `GET /api/mem/processes/pane` (SPEC §15.2). Any pane herdr knows is readable (no registration
-/// check, unlike `shell::read`), but only the last `lines` visible rows as plain text — never keys or input.
-pub async fn pane_preview(
-    app: &Arc<App>,
-    host: &str,
-    pane_id: &str,
-    socket: Option<&str>,
-    lines: u32,
-) -> crate::lifecycle::LcResult<Value> {
-    use crate::lifecycle::LcError;
-    // Another local herdr session's socket: same user's socket, no wider than `herdr` in their shell.
-    let client = match socket.filter(|s| !s.is_empty()) {
-        Some(path) if host == crate::config::LOCAL_HOST => {
-            if !std::path::Path::new(path).exists() {
-                return Err(LcError::Upstream(format!("herdr socket `{path}` 不在了")));
-            }
-            crate::herdr::HerdrClient::new(path)
-        }
-        Some(_) => {
-            return Err(LcError::Bad(
-                "遠端主機只能讀它設定的那個 herdr session".into(),
-            ))
-        }
-        None => crate::api::shell::client_for(app, host).await?.0,
-    };
-    let read = client
-        .pane_read(pane_id, "visible", lines)
-        .await
-        .map_err(|e| LcError::Upstream(format!("{e:#}")))?;
-    let (columns, rows) = match client.pane_size(pane_id).await {
-        Ok(Some((w, h))) => (Some(w), Some(h)),
-        _ => (None, None),
-    };
-    Ok(json!({
-        "host": host, "pane_id": pane_id,
-        "source": read.source, "text": read.text, "revision": read.revision, "truncated": read.truncated,
-        "columns": columns, "rows": rows,
-    }))
-}
+// `pane_preview`（`GET /api/mem/processes/pane`）要用 api::shell 的 client 解析與 `LcError`，是 composition 層的 use case：住在 `app_ports_p3`，這裡保留舊名。
+pub(crate) use crate::app_ports_p3::pane_preview;
 
 /// `Bot` is a 409, not a 400: the request is fine, the better door is `POST /bots/{id}/stop`.
 #[derive(Debug)]
@@ -727,7 +690,7 @@ fn kill_script(target: &Target, sig: &str) -> String {
 /// Re-samples instead of trusting the caller's list: pids are recycled, and a stale row must
 /// never let a `kill` escape the herdr trees.
 pub async fn kill(
-    app: &Arc<App>,
+    app: &impl MemEnv,
     host: &str,
     pid: i32,
     signal: &str,
@@ -744,7 +707,7 @@ pub async fn kill(
     };
     let cmd = kill_script(&target, sig);
     let conn = app
-        .hosts
+        .hosts()
         .get(host)
         .await
         .ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
@@ -771,7 +734,7 @@ pub async fn kill(
 
     // Update the badge now rather than up to 15s later.
     let snap = crate::memstat::sample(app).await;
-    app.emit("mem_updated", json!(snap)).await;
+    app.emit_mem_updated(json!(snap)).await;
     Ok(Ok(
         json!({"host": host, "pid": pid, "signal": sig, "exe": exe, "freed_bytes": freed}),
     ))

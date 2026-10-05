@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
-use crate::state::App;
+use crate::hosts::HostsAccess;
 
 const SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -291,10 +291,33 @@ async fn sample_local(host: &str) -> HostMem {
     }
 }
 
+/// 一顆 bot 在記憶體報表裡要顯示的歸屬。
+pub struct BotRef {
+    pub name: String,
+    pub project_id: String,
+    /// 已刪除的 bot：進程列表照顯示（停掉它是 bot 的事），但專案合計不算。
+    pub deleted: bool,
+}
+
+/// memstat／memproc 需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表、bot 歸屬、`mem_updated` 事件。
+pub trait MemEnv: HostsAccess {
+    fn bot_ref(&self, bot_id: &str) -> impl std::future::Future<Output = Option<BotRef>> + Send;
+    fn emit_mem_updated(&self, snapshot: Value) -> impl std::future::Future<Output = ()> + Send;
+}
+
+impl<T: MemEnv + ?Sized> MemEnv for std::sync::Arc<T> {
+    fn bot_ref(&self, bot_id: &str) -> impl std::future::Future<Output = Option<BotRef>> + Send {
+        (**self).bot_ref(bot_id)
+    }
+    fn emit_mem_updated(&self, snapshot: Value) -> impl std::future::Future<Output = ()> + Send {
+        (**self).emit_mem_updated(snapshot)
+    }
+}
+
 /// A disconnected host gets an `error`, not dropped, so the UI doesn't silently show a smaller number.
-pub async fn sample(app: &Arc<App>) -> MemSnapshot {
+pub async fn sample(app: &impl MemEnv) -> MemSnapshot {
     let mut hosts = Vec::new();
-    for conn in app.hosts.list().await {
+    for conn in app.hosts().list().await {
         let name = conn.name.clone();
         if conn.is_local() {
             hosts.push(sample_local(&name).await);
@@ -341,14 +364,14 @@ pub async fn sample(app: &Arc<App>) -> MemSnapshot {
 
 /// Per-project totals for every host that sampled cleanly. The environment dump is a second round
 /// trip per host (the plain sample carries no env); a host that fails it just has no project rows.
-async fn project_totals(app: &Arc<App>, hosts: &[HostMem]) -> Vec<ProjectMem> {
+async fn project_totals(app: &impl MemEnv, hosts: &[HostMem]) -> Vec<ProjectMem> {
     let mut acc: HashMap<(String, String), (u64, std::collections::HashSet<String>)> = HashMap::new();
     let mut project_of: HashMap<String, Option<String>> = HashMap::new();
     for h in hosts.iter().filter(|h| h.error.is_none()) {
         let Ok(out) = crate::memproc::dump(app, &h.host).await else { continue };
         for (bot, (bytes, panes)) in crate::memproc::bot_totals_from_dump(&out) {
             if !project_of.contains_key(&bot) {
-                let pid = crate::db::bot(&app.db, &bot).await.ok().flatten().filter(|b| b.deleted_at.is_none()).map(|b| b.project_id);
+                let pid = app.bot_ref(&bot).await.filter(|b| !b.deleted).map(|b| b.project_id);
                 project_of.insert(bot.clone(), pid);
             }
             let Some(Some(pid)) = project_of.get(&bot) else { continue };
@@ -392,7 +415,7 @@ fn projects_changed(prev: &[ProjectMem], next: &[ProjectMem]) -> bool {
 }
 
 /// Only pushes changes (≥1 MiB drift): a frame per client every 15s for KiB jitter is noise.
-pub fn spawn_poller(app: Arc<App>) {
+pub fn spawn_poller<H: MemEnv + 'static>(app: Arc<H>) {
     tokio::spawn(async move {
         let mut last: Option<MemSnapshot> = None;
         loop {
@@ -410,7 +433,7 @@ pub fn spawn_poller(app: Arc<App>) {
                 None => true,
             };
             if changed {
-                app.emit("mem_updated", json!(snap)).await;
+                app.emit_mem_updated(json!(snap)).await;
                 last = Some(snap);
             }
             tokio::time::sleep(SAMPLE_EVERY).await;

@@ -54,6 +54,7 @@ mod codex_live;
 mod child_runtime;
 mod agy_screen;
 mod agy_support;
+mod app_ports_p3;
 mod app_ports_p5;
 mod grok_live;
 mod codex_model_migration;

@@ -2,9 +2,8 @@
 //! Executables are looked up through the user's *login* shell: the daemon / non-interactive ssh has a bare PATH.
 //! Login is asked per host under the identity's env — the credential may live in the Keychain, not a file.
 
-use crate::config::{valid_kind, LOCAL_HOST};
+use crate::config::LOCAL_HOST;
 use crate::hosts::sh_quote;
-use crate::state::App;
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -24,6 +23,26 @@ impl Default for ToolInfo {
     fn default() -> Self {
         Self { installed: false, path: None, version: None, logged_in: None }
     }
+}
+
+
+/// 偵測（`detect*`）、身分登入驗證、alias 輪詢需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：
+/// 主機表／連線事件（[`HostHooks`]）、偵測結果快取、config 身分表、登入提示與額度的連動，以及寫完偵測結果後的後續動作。
+pub trait ToolsEnv: crate::host_baseline::BaselineEnv + crate::hosts::HostHooks {
+    /// 每台主機的偵測結果（`app.tools`）。
+    fn tools_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, HostTools>>;
+    /// config 的 `[[identities]]`（讀當下的設定）。
+    fn config_identities(&self) -> impl std::future::Future<Output = Vec<crate::config::IdentityCfg>> + Send;
+    /// 這個身分登入成功了：清掉「請登入」提示。
+    fn clear_login_prompt(&self, host: &str, name: &str);
+    /// 同上，並把清掉之後的狀態推出去（`login_prompt::clear_and_push`）。
+    fn clear_login_prompt_and_push(app: &Arc<Self>, host: &str, name: &str) -> impl std::future::Future<Output = ()> + Send;
+    /// 驗證完登入的 claude 身分重新可用：解除它因為撞限／未登入而被停放的狀態。
+    fn unpark_claude_identity(&self, host: &str, name: &str, env: &std::collections::BTreeMap<String, String>);
+    /// 關掉為了登入／登出開的 shell pane。
+    fn close_login_shell(app: &Arc<Self>, host: &str, pane_id: &str) -> impl std::future::Future<Output = ()> + Send;
+    /// 偵測結果剛寫進快取之後一定要跟著做的事：清 kind 不符的身分、回補 quota 限制、排著的 prompt 撞限。
+    fn host_tools_installed(app: &Arc<Self>, host: &str) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// One identity as seen *from one host*.
@@ -172,11 +191,11 @@ pub fn login_abs_sh(name: &str) -> String {
 }
 
 /// 重探那台的 herdr CLI 版本；連不上或讀不到＝None（不沿用舊值）。
-pub async fn probe_herdr_cli(app: &Arc<App>, host: &str) -> Option<String> {
+pub async fn probe_herdr_cli<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Option<String> {
     let out = if host == LOCAL_HOST {
         run_local(HERDR_CLI_SH, PROBE_TIMEOUT).await.ok()?
     } else {
-        let conn = app.hosts.get(host).await?;
+        let conn = app.hosts().get(host).await?;
         if !conn.connected.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
@@ -341,14 +360,14 @@ pub fn merge_identities(
 
 /// Hand-written `[[identities]]` win over a colliding `ccN` alias on the host they are written for
 /// (see [`merge_identities`]).
-pub async fn identities_for_host(app: &Arc<App>, host: &str) -> Vec<crate::config::IdentityCfg> {
-    let cfg = app.cfg.get().await;
-    let tools = app.tools.lock().await;
+pub async fn identities_for_host<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Vec<crate::config::IdentityCfg> {
+    let identities = app.config_identities().await;
+    let tools = app.tools_cache().lock().await;
     let shell = tools.get(host).map(|t| t.shell_identities.as_slice());
-    merge_identities(&cfg.identities, host, shell).into_iter().map(|(i, _)| i).collect()
+    merge_identities(&identities, host, shell).into_iter().map(|(i, _)| i).collect()
 }
 
-pub async fn identity_for_host(app: &Arc<App>, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
+pub async fn identity_for_host<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str) -> Option<crate::config::IdentityCfg> {
     identities_for_host(app, host).await.into_iter().find(|i| i.name == name)
 }
 
@@ -416,8 +435,8 @@ fn with_identity_env(cmd: &str, env: &BTreeMap<String, String>) -> String {
 
 /// Returns whether anything changed, so the caller only pushes `host_changed` when needed.
 /// The authority must be captured before the observation that produced these values (#347).
-pub(crate) async fn record_identity_login_fenced(
-    app: &Arc<App>,
+pub(crate) async fn record_identity_login_fenced<H: ToolsEnv>(
+    app: &Arc<H>,
     host: &str,
     name: &str,
     fence: &crate::hosts::HostFence,
@@ -425,8 +444,8 @@ pub(crate) async fn record_identity_login_fenced(
     account: Option<String>,
     plan: Option<String>,
 ) -> bool {
-    let mut all = app.tools.lock().await;
-    if !app.hosts.is_current(fence).await {
+    let mut all = app.tools_cache().lock().await;
+    if !app.hosts().is_current(fence).await {
         return false;
     }
     let Some(ht) = all.get_mut(host) else { return false };
@@ -448,7 +467,7 @@ pub(crate) async fn record_identity_login_fenced(
     let changed = before != (info.logged_in, info.account.clone(), info.plan.clone());
     // 從非已登入變成已登入：回合授權失敗記下的「要重新登入」（`login_prompt`）到此為止。呼叫端因為 `changed` 會推快照。
     if info.logged_in == Some(true) && before.0 != Some(true) {
-        crate::login_prompt::clear(app, host, name);
+        app.clear_login_prompt(host, name);
     }
     changed
 }
@@ -473,9 +492,9 @@ pub(crate) fn logout_result(recheck: Option<bool>) -> Option<bool> {
 }
 
 /// 記下「這個身分已登出」：`account`／`plan` 一起清掉，否則列上會是「未登入」配著上一個帳號。
-async fn record_identity_logged_out(app: &Arc<App>, host: &str, name: &str, reason: &str, fence: &crate::hosts::HostFence) -> bool {
-    let mut all = app.tools.lock().await;
-    if !app.hosts.is_current(fence).await {
+async fn record_identity_logged_out<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str, reason: &str, fence: &crate::hosts::HostFence) -> bool {
+    let mut all = app.tools_cache().lock().await;
+    if !app.hosts().is_current(fence).await {
         return false;
     }
     let Some(ht) = all.get_mut(host) else { return false };
@@ -490,18 +509,18 @@ async fn record_identity_logged_out(app: &Arc<App>, host: &str, name: &str, reas
 
 /// The poller parks a logged-out identity for 30 min, so after a login the cache stays stale;
 /// `start_bot` rechecks before warning.
-pub async fn recheck_identity_login(app: &Arc<App>, host: &str, name: &str) -> Option<bool> {
-    let fence = app.hosts.fence(host).await?;
+pub async fn recheck_identity_login<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str) -> Option<bool> {
+    let fence = app.hosts().fence(host).await?;
     recheck_identity_login_fenced(app, host, name, &fence).await
 }
 
 /// The same host authority is used for the probe and its cache write (#347).
-async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, fence: &crate::hosts::HostFence) -> Option<bool> {
-    if !app.hosts.is_current(fence).await {
+async fn recheck_identity_login_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str, name: &str, fence: &crate::hosts::HostFence) -> Option<bool> {
+    if !app.hosts().is_current(fence).await {
         return None;
     }
     let idn = identity_for_host(app, host, name).await?;
-    if !app.hosts.is_current(fence).await {
+    if !app.hosts().is_current(fence).await {
         return None;
     }
     let args: Vec<&str> = match idn.kind.as_str() {
@@ -516,7 +535,7 @@ async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, f
             return None;
         }
     };
-    if !app.hosts.is_current(fence).await {
+    if !app.hosts().is_current(fence).await {
         return None;
     }
     let mut script = String::new();
@@ -535,13 +554,13 @@ async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, f
     let logged_in = logged_in?;
     let to_cache = login_answer_to_cache(host == LOCAL_HOST, &idn.kind, logged_in)?;
     if record_identity_login_fenced(app, host, name, fence, Some(to_cache), account, plan).await {
-        crate::state::emit_host_changed(app, fence).await;
+        H::host_changed(app, fence).await;
     }
-    if !app.hosts.is_current(fence).await {
+    if !app.hosts().is_current(fence).await {
         return None;
     }
     if logged_in && idn.kind == "claude" {
-        crate::quota_claude::unpark_identity(host, name, crate::quota::identity_shares_default("claude", &idn.env));
+        app.unpark_claude_identity(host, name, &idn.env);
     }
     Some(logged_in)
 }
@@ -554,8 +573,8 @@ async fn recheck_identity_login_fenced(app: &Arc<App>, host: &str, name: &str, f
 /// `fence` 是開 pane 之前記下的主機權威（#347）：watcher 最多活 15 分鐘、每一輪都用主機**名字**重新解析，
 /// 途中同名主機重連或改指到另一台，就不能再看新機器上同 id 的 pane、把答案記到新機器的身分、或關掉新機器的 pane——
 /// 一發現權威換了就整個放手（舊機器上的 pane 留著，連線已經不是它的了）。
-pub fn spawn_identity_login_watch(
-    app: Arc<App>,
+pub fn spawn_identity_login_watch<H: ToolsEnv>(
+    app: Arc<H>,
     host: String,
     pane_id: String,
     name: String,
@@ -568,13 +587,13 @@ pub fn spawn_identity_login_watch(
         let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(12);
         let mut saw_cli = false;
         let close = || async {
-            if app.hosts.is_current(&fence).await {
-                let _ = crate::api::shell::close(&app, &host, &pane_id).await;
+            if app.hosts().is_current(&fence).await {
+                H::close_login_shell(&app, &host, &pane_id).await;
             }
         };
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            if !app.hosts.is_current(&fence).await {
+            if !app.hosts().is_current(&fence).await {
                 tracing::info!(%host, %pane_id, identity = %name, "host was reconnected/reconfigured; login watcher gives up on the old connection");
                 return;
             }
@@ -596,13 +615,13 @@ pub fn spawn_identity_login_watch(
                 let after = recheck_identity_login_fenced(&app, &host, &name, &fence).await;
                 // 登入跑完、重驗說已登入：提示到此為止（快取原本就是已登入時 `record` 不會動它，這裡補清）。
                 if !logout && after == Some(true) {
-                    crate::login_prompt::clear_and_push(&app, &host, &name).await;
+                    H::clear_login_prompt_and_push(&app, &host, &name).await;
                 }
                 if logout && logout_result(after) == Some(false) {
                     let changed =
                         record_identity_logged_out(&app, &host, &name, "剛剛在這台主機登出（重驗問不出來時照登出算）", &fence).await;
                     if changed {
-                        crate::state::emit_host_changed(&app, &fence).await;
+                        H::host_changed(&app, &fence).await;
                     }
                 }
                 close().await;
@@ -792,23 +811,23 @@ pub fn parse_identity_probe(out: &str, kinds: &BTreeMap<String, String>) -> BTre
     m
 }
 
-pub(crate) async fn host_home(app: &Arc<App>, host: &str) -> Result<String> {
-    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+pub(crate) async fn host_home<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Result<String> {
+    let fence = app.hosts().fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     crate::hosts::home_for_fence(&fence).await
 }
 
 /// Never fails: a missing CLI or failed probe is reported as unknown.
-async fn detect_identities(
-    app: &Arc<App>,
+async fn detect_identities<H: ToolsEnv>(
+    app: &Arc<H>,
     host: &str,
     fence: &crate::hosts::HostFence,
     tools: &BTreeMap<String, ToolInfo>,
     shell: &[crate::config::IdentityCfg],
 ) -> BTreeMap<String, IdentityInfo> {
-    let cfg = app.cfg.get().await;
+    let identities = app.config_identities().await;
     // Same precedence as [`identities_for_host`], which is what actually starts the bots. 以前這裡把 config 裡
     // **每一台**的身分都列進來（包括明寫給別台的），用這台的 env 去問登入狀態。
-    let all = merge_identities(&cfg.identities, host, Some(shell));
+    let all = merge_identities(&identities, host, Some(shell));
     if all.is_empty() {
         return BTreeMap::new();
     }
@@ -817,7 +836,7 @@ async fn detect_identities(
         Err(e) => {
             let reason = format!("host HOME 讀取失敗：{e}");
             tracing::warn!(host, error = %e, "identity detection skipped because the host HOME is unreadable");
-            let known = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
+            let known = app.tools_cache().lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
             let mut out: BTreeMap<String, IdentityInfo> = all
                 .iter()
                 .map(|(i, src)| (i.name.clone(), IdentityInfo::unknown(&i.name, &i.kind, src, None)))
@@ -829,7 +848,7 @@ async fn detect_identities(
             return out;
         }
     };
-    if !app.hosts.is_current(fence).await {
+    if !app.hosts().is_current(fence).await {
         return BTreeMap::new();
     }
     let dir_of = |i: &crate::config::IdentityCfg| {
@@ -877,7 +896,7 @@ async fn detect_identities(
     };
     // 重新偵測會整張表重建：這一輪問不到的，沿用上一輪知道的答案，否則每次重探都會把 claude 身分
     // 打回「未知」，UI 看起來就像帳號自己登出了（2026-09-16 使用者）。
-    let known = app.tools.lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
+    let known = app.tools_cache().lock().await.get(host).map(|t| t.identities.clone()).unwrap_or_default();
     match res {
         Ok(o) => {
             for (name, mut info) in parse_identity_probe(&o, &kinds) {
@@ -931,13 +950,13 @@ async fn run_local(script: &str, budget: Duration) -> Result<String> {
 ///
 /// 偵測要花幾十秒，這中間同名主機可能已重連或改指到另一台（#347）：開頭先記下 [`crate::hosts::HostFence`]，
 /// 寫進 `app.tools` 前確認它還是這台主機的權威，不是就整個丟掉（[`Superseded`]）——舊機器的事實不能覆寫新機器的。
-pub async fn detect(app: &Arc<App>, host: &str) -> Result<HostTools> {
-    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+pub async fn detect<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Result<HostTools> {
+    let fence = app.hosts().fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     detect_with_fence(app, host, &fence).await
 }
 
 /// Run detection and retain the authority token so its caller can publish the matching snapshot.
-pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence) -> Result<HostTools> {
+pub(crate) async fn detect_with_fence<H: ToolsEnv>(app: &Arc<H>, host: &str, fence: &crate::hosts::HostFence) -> Result<HostTools> {
     if fence.conn().name != host {
         anyhow::bail!("host fence for `{}` cannot detect `{host}`", fence.conn().name);
     }
@@ -948,8 +967,8 @@ pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate:
         Ok(out) => out,
         Err(e) => {
             // 連不上／逾時：留著的舊 baseline 標上失敗（不能讓它看起來像剛量的），並推給網頁。
-            crate::host_baseline::note_failure(app, host, &e).await;
-            crate::state::emit_host_changed(app, fence).await;
+            crate::host_baseline::note_failure(&**app, host, &e).await;
+            H::host_changed(app, fence).await;
             return Err(e);
         }
     };
@@ -970,8 +989,8 @@ pub(crate) async fn detect_with_fence(app: &Arc<App>, host: &str, fence: &crate:
     if !install_host_tools_fenced(app, host, ht.clone(), fence).await {
         return Err(anyhow::Error::new(Superseded { host: host.to_string() }));
     }
-    app.host_baseline.lock().await.insert(host.to_string(), baseline.clone());
-    crate::host_baseline::notify(app, host, &baseline).await;
+    app.baseline_cache().lock().await.insert(host.to_string(), baseline.clone());
+    crate::host_baseline::notify(&**app, host, &baseline).await;
     tracing::info!(
         host,
         tools = ?ht.tools.iter().map(|(k, t)| (k.clone(), t.installed, t.logged_in)).collect::<Vec<_>>(),
@@ -997,10 +1016,10 @@ impl std::error::Error for Superseded {}
 
 /// [`install_host_tools`]，但只在 `fence` 仍是這台主機的權威、且沒有更新的偵測已經寫過時才寫；
 /// 檢查與寫入在同一把 `app.tools` 鎖裡，後續的身分清理／額度回填也只跟著成功的那次。回傳有沒有寫。
-pub(crate) async fn install_host_tools_fenced(app: &Arc<App>, host: &str, ht: HostTools, fence: &crate::hosts::HostFence) -> bool {
+pub(crate) async fn install_host_tools_fenced<H: ToolsEnv>(app: &Arc<H>, host: &str, ht: HostTools, fence: &crate::hosts::HostFence) -> bool {
     {
-        let mut tools = app.tools.lock().await;
-        if !app.hosts.is_current(fence).await || !fence.claim_publish() {
+        let mut tools = app.tools_cache().lock().await;
+        if !app.hosts().is_current(fence).await || !fence.claim_publish() {
             return false;
         }
         tools.insert(host.to_string(), ht);
@@ -1011,26 +1030,21 @@ pub(crate) async fn install_host_tools_fenced(app: &Arc<App>, host: &str, ht: Ho
 
 /// 偵測結果寫進 `app.tools`，以及寫完之後一定要跟著做的事（抽出來，測試不必真的跑 shell 探測）。
 #[cfg(test)]
-pub(crate) async fn install_host_tools(app: &Arc<App>, host: &str, ht: HostTools) {
-    app.tools.lock().await.insert(host.to_string(), ht);
+pub(crate) async fn install_host_tools<H: ToolsEnv>(app: &Arc<H>, host: &str, ht: HostTools) {
+    app.tools_cache().lock().await.insert(host.to_string(), ht);
     follow_up_host_tools(app, host).await;
 }
 
-async fn follow_up_host_tools(app: &Arc<App>, host: &str) {
-    // 身分表剛更新：清掉 kind 不符的 identity 與它留下的 quota key（`identity_kind::cleanup_host`）。
-    crate::identity_kind::cleanup_host(app, host).await;
-    // 身分表齊了，重啟前停下的交辦這時才算得出正確的 quota key（每台主機每個行程只跑一次，review 2026-09-16 M3）。
-    crate::supervisor::controller::backfill_quota_limits_once(app, host).await;
-    // 排著的 prompt 自己記下的撞限（issue #108）：同一個時機、同一個理由。
-    crate::lifecycle::quota_hold::backfill_once(app, host).await;
+async fn follow_up_host_tools<H: ToolsEnv>(app: &Arc<H>, host: &str) {
+    H::host_tools_installed(app, host).await;
 }
 
-pub fn spawn_detect(app: Arc<App>, host: String) {
+pub fn spawn_detect<H: ToolsEnv>(app: Arc<H>, host: String) {
     tokio::spawn(async move {
-        let Some(fence) = app.hosts.fence(&host).await else { return };
+        let Some(fence) = app.hosts().fence(&host).await else { return };
         match detect_with_fence(&app, &host, &fence).await {
             Ok(_) => {
-                crate::state::emit_host_changed(&app, &fence).await;
+                H::host_changed(&app, &fence).await;
             }
             Err(e) if e.is::<Superseded>() => tracing::info!(host, "{e}"),
             Err(e) => tracing::warn!(host, error = %e, "tool detection failed"),
@@ -1041,11 +1055,11 @@ pub fn spawn_detect(app: Arc<App>, host: String) {
 /// Cheap (one login shell, no CLI), so a new alias shows up within a minute, not at restart.
 const ALIAS_POLL_EVERY: Duration = Duration::from_secs(60);
 
-async fn poll_aliases(app: &Arc<App>, host: &str) -> Option<Vec<crate::config::IdentityCfg>> {
+async fn poll_aliases<H: ToolsEnv>(app: &Arc<H>, host: &str) -> Option<Vec<crate::config::IdentityCfg>> {
     let out = if host == LOCAL_HOST {
         run_local(ALIAS_SH, PROBE_TIMEOUT).await
     } else {
-        let conn = app.hosts.get(host).await?;
+        let conn = app.hosts().get(host).await?;
         if !conn.connected.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
@@ -1061,12 +1075,12 @@ async fn poll_aliases(app: &Arc<App>, host: &str) -> Option<Vec<crate::config::I
 }
 
 /// Full [`detect`] only when the alias set changed; uncached hosts wait for their on-connect detection.
-pub fn spawn_alias_poller(app: Arc<App>) {
+pub fn spawn_alias_poller<H: ToolsEnv>(app: Arc<H>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(ALIAS_POLL_EVERY).await;
-            for name in app.hosts.names().await {
-                let Some(cached) = app.tools.lock().await.get(&name).map(|t| t.shell_identities.clone()) else { continue };
+            for name in app.hosts().names().await {
+                let Some(cached) = app.tools_cache().lock().await.get(&name).map(|t| t.shell_identities.clone()) else { continue };
                 let Some(now) = poll_aliases(&app, &name).await else { continue };
                 if now == cached {
                     continue;
@@ -1079,8 +1093,8 @@ pub fn spawn_alias_poller(app: Arc<App>) {
     });
 }
 
-pub async fn cached_path(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
-    app.tools.lock().await.get(host).and_then(|h| h.tools.get(kind)).and_then(|t| t.path.clone())
+pub async fn cached_path<H: ToolsEnv>(app: &Arc<H>, host: &str, kind: &str) -> Option<String> {
+    app.tools_cache().lock().await.get(host).and_then(|h| h.tools.get(kind)).and_then(|t| t.path.clone())
 }
 
 pub fn install_prompt(kind: &str) -> Option<String> {
@@ -1103,40 +1117,11 @@ pub fn install_prompt(kind: &str) -> Option<String> {
     ))
 }
 
-/// `POST /api/hosts/:name/tools/install` — goes through the ordinary prompt path (lock, idempotency).
-pub async fn install_via_bot(
-    app: &Arc<App>,
-    host: &str,
-    kind: &str,
-    via_bot_id: &str,
-) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
-    use crate::lifecycle::LcError;
-    if !valid_kind(kind) {
-        return Err(LcError::Bad(format!("kind must be {}", crate::config::kinds_list())));
-    }
-    if app.hosts.get(host).await.is_none() {
-        return Err(LcError::NotFound("host".into()));
-    }
-    let bot = crate::db::bot(&app.db, via_bot_id)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?
-        .filter(|b| b.deleted_at.is_none())
-        .ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let project = crate::db::project(&app.db, &bot.project_id)
-        .await
-        .map_err(|e| LcError::Upstream(e.to_string()))?
-        .filter(|p| p.deleted_at.is_none())
-        .ok_or_else(|| LcError::NotFound("project".into()))?;
-    if project.host != host {
-        return Err(LcError::Bad(format!("bot `{}` lives on host `{}`, not `{host}`", bot.name, project.host)));
-    }
-    let text = install_prompt(kind).ok_or_else(|| LcError::Bad("unknown kind".into()))?;
-    let crid = format!("tools-install:{kind}:{}", crate::db::ulid());
-    crate::lifecycle::prompt(app, &bot.id, &text, &crid).await
-}
-
+// `install_via_bot`（`POST /api/hosts/:name/tools/install`）走一般 prompt 路徑（lifecycle＋DB），是 composition 層的 use case：住在 `app_ports_p3`，這裡保留舊名。
+pub use crate::app_ports_p3::install_via_bot;
 #[cfg(test)]
 mod tests {
+    use crate::state::App;
     /// 現行 config.toml 的形狀（`[[identities]]` 不寫 host）在**本機**的行為一個字都不能變，
     /// 但不能再遮蔽遠端同名的 `ccN`——本機 cc1 與 m4p 的 cc1 是不同帳號（SPEC §16.2、review 2026-09-16）。
     /// 也不能因此讓遠端用不到它：codex／grok 身分只可能寫在 config 裡（review 2026-09-16 M6）。

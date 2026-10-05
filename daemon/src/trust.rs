@@ -18,9 +18,17 @@ use std::sync::Arc;
 
 use crate::config::expand_home;
 use crate::db;
-use crate::state::App;
+use crate::hosts::HostsAccess;
 
 const CLAUDE_KEY: &str = "hasTrustDialogAccepted";
+
+/// 預先信任工作目錄需要從 `App` 拿的外部事實（`App` 在 `app_ports_p3` 實作）：主機表，以及某台主機上某個身分的環境變數
+/// （`[[identities]]` 加上那台 shell 偵測到的 `ccN`，SPEC §16）。
+pub trait TrustEnv: HostsAccess + 'static {
+    /// `host` 上名叫 `name` 的身分的 env（沒有這個身分＝`None`）。
+    fn identity_env(app: &Arc<Self>, host: &str, name: &str) -> impl std::future::Future<Output = Option<BTreeMap<String, String>>> + Send;
+}
+
 /// Second first-run dialog (2026-09-08): external CLAUDE.md `@imports`, cursor on *No*. Same fix.
 const CLAUDE_EXTERNAL_KEYS: [&str; 2] = ["hasClaudeMdExternalIncludesApproved", "hasClaudeMdExternalIncludesWarningShown"];
 const CODEX_KEY: &str = "trust_level";
@@ -235,13 +243,13 @@ pub(crate) fn update_file(store: &Path, merge: impl Fn(&str) -> Result<Option<St
 }
 
 /// Identity env then bot env (`lifecycle::pane_env` minus daemon vars, which name no config dir).
-async fn config_env(app: &Arc<App>, bot: &db::Bot, host: &str, home: &str) -> BTreeMap<String, String> {
+async fn config_env<T: TrustEnv>(app: &Arc<T>, bot: &db::Bot, host: &str, home: &str) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     // `identity_for_host`, not `cfg.identities`: shell-discovered `ccN` (SPEC §16) aren't in
     // config.toml, which once sent cc2's record to the wrong file (2026-09-08).
     if let Some(name) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
-        if let Some(id) = crate::tools::identity_for_host(app, host, name).await {
-            for (k, v) in &id.env {
+        if let Some(id_env) = T::identity_env(app, host, name).await {
+            for (k, v) in &id_env {
                 env.insert(k.clone(), expand_home(v, home));
             }
         }
@@ -254,7 +262,7 @@ async fn config_env(app: &Arc<App>, bot: &db::Bot, host: &str, home: &str) -> BT
 
 /// Best effort: returns one error per store rather than refusing the start.
 /// Local host; remote bots go through [`pretrust_bots_remote`].
-pub async fn pretrust_bots(app: &Arc<App>, bots: &[db::Bot]) -> Vec<String> {
+pub async fn pretrust_bots<T: TrustEnv>(app: &Arc<T>, bots: &[db::Bot]) -> Vec<String> {
     let Some(home) = crate::home::dir() else {
         return vec!["no home directory; cannot pre-trust the working directory".into()];
     };
@@ -280,7 +288,7 @@ pub async fn pretrust_bots(app: &Arc<App>, bots: &[db::Bot]) -> Vec<String> {
 }
 
 /// `start_inner` 在開 pane 之前呼叫：本機寫檔，遠端經 ssh（#407）。best effort，回傳每個失敗的說明。
-pub async fn pretrust_for_start(app: &Arc<App>, bot: &db::Bot, host: &str, cwd: &str) -> Vec<String> {
+pub async fn pretrust_for_start<T: TrustEnv>(app: &Arc<T>, bot: &db::Bot, host: &str, cwd: &str) -> Vec<String> {
     let mut b = bot.clone();
     b.cwd = Some(cwd.to_string());
     if host == crate::config::LOCAL_HOST {
@@ -299,21 +307,21 @@ const REMOTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 const REMOTE_RACE_ATTEMPTS: usize = 2;
 
 /// 同 [`pretrust_bots`]，檔案在遠端：經 ssh 讀、在這裡合併（規則只有一份）、再經 ssh 寫回（#407）。
-pub async fn pretrust_bots_remote(app: &Arc<App>, host: &str, bots: &[db::Bot]) -> Vec<String> {
+pub async fn pretrust_bots_remote<T: TrustEnv>(app: &Arc<T>, host: &str, bots: &[db::Bot]) -> Vec<String> {
     pretrust_bots_remote_within(app, host, bots, REMOTE_BUDGET).await
 }
 
 /// `budget` 拆出來是為了測得到上限：假 ssh 掛住時，呼叫端必須在上限內拿回警告。
 /// 逾時會把整個 future 丟掉，`ssh_exec` 的子行程是 `kill_on_drop`，所以不會留下跑著的 ssh。
-async fn pretrust_bots_remote_within(app: &Arc<App>, host: &str, bots: &[db::Bot], budget: std::time::Duration) -> Vec<String> {
+async fn pretrust_bots_remote_within<T: TrustEnv>(app: &Arc<T>, host: &str, bots: &[db::Bot], budget: std::time::Duration) -> Vec<String> {
     match tokio::time::timeout(budget, remote_jobs(app, host, bots)).await {
         Ok(errors) => errors,
         Err(_) => vec![format!("{host}: pre-trusting the working directory took longer than {}s; left to the trust dialog", budget.as_secs())],
     }
 }
 
-async fn remote_jobs(app: &Arc<App>, host: &str, bots: &[db::Bot]) -> Vec<String> {
-    let Some(conn) = app.hosts.get(host).await else { return vec![format!("unknown host `{host}`")] };
+async fn remote_jobs<T: TrustEnv>(app: &Arc<T>, host: &str, bots: &[db::Bot]) -> Vec<String> {
+    let Some(conn) = app.hosts().get(host).await else { return vec![format!("unknown host `{host}`")] };
     let home = match conn.home().await {
         Ok(h) => h,
         Err(e) => return vec![format!("{host}: cannot resolve the remote home: {e:#}")],
