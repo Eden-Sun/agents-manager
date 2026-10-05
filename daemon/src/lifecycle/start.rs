@@ -266,6 +266,9 @@ async fn start_bot_locked_with_host_fence(
 
 /// Native-session continuation args. codex `resume` is a subcommand (must come first).
 /// grok 1.0.34 起 `--resume <id>` 接得回（2026-09-17 herdr 0.9.0 隔離實測：server 重啟後記得先前的暗號）。
+/// agy 是單一 argv `--conversation=<id>`（1.2.17 實測：`-p`／TUI、同 cwd／跨 cwd 都接得回）；**不用 `-c`**——
+/// 它只認「這個 cwd 最近一段」（`cache/last_conversations.json` 一個 cwd 一格），同 cwd 的 bot 會互相搶，
+/// 沒用過的 cwd 還會退到別處的舊對話。id 不存在時 agy 只警告、exit 0、悄悄開新對話，由 `resume_mismatch` 抓。
 fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'static str> {
     if session_id.trim().is_empty() {
         return Err("no_session_id");
@@ -273,6 +276,9 @@ fn resume_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<String>, &'st
     match kind {
         "claude" | "grok" => Ok(vec!["--resume".into(), session_id.into()]),
         "codex" => Ok(vec!["resume".into(), session_id.into()]),
+        // id 來自 DB／hook，形狀不對就不拼進 argv（不是舊 id 的接續，是沒有可用的 id）。
+        "agy" if super::agy_session::valid_session_id(session_id.trim()) => Ok(vec![format!("--conversation={}", session_id.trim())]),
+        "agy" => Err("no_session_id"),
         _ => Err("unsupported_kind"),
     }
 }
@@ -1787,7 +1793,15 @@ pub async fn restart_child_in_pane_with(app: &Arc<App>, bot_id: &str, require_id
     args.extend(model_args(&effort_checked(app, &bot, &host).await));
     args.extend(bot.args());
     let resume = match db::last_native_session(&app.db, bot_id).await.map_err(up)? {
-        Some((sid, _)) => resume_args_by_kind(&bot.kind, &sid).ok().map(|a| (sid, a)),
+        Some((sid, _)) => match resume_args_by_kind(&bot.kind, &sid) {
+            Ok(a) => Some((sid, a)),
+            // 有記到上一段卻接不回：聊天室要看得見脈絡斷了（以前只有 tracing）。
+            // 失敗的 session id 一併記下（#852）：之後接回同一段時才撤得掉這則說明。
+            Err(why) => {
+                context_lost(app, &bot, why, Some(sid.as_str()).filter(|s| !s.trim().is_empty())).await?;
+                None
+            }
+        },
         None => None,
     };
     if let (Some((sid, _)), "claude") = (resume.as_ref(), bot.kind.as_str()) {
@@ -2083,11 +2097,17 @@ mod resume_args_tests {
         assert!(e.app.data_dir.join(crate::agy_support::DISPATCH_SH).is_file());
     }
 
-    /// 第一階段不做 resume／fork：agy 回 `unsupported_kind`，不是 panic、也不是亂帶旗標。
+    /// agy resume＝單一 argv `--conversation=<id>`，id 形狀不對（可能被拼進 argv）一律不接、沒 id 也不退到 `-c`；
+    /// fork 沒有旗標，維持 `unsupported_kind`。
     #[test]
-    fn agy_resume_and_fork_are_unsupported_not_a_panic() {
-        assert_eq!(resume_args_by_kind("agy", "c-1"), Err("unsupported_kind"));
-        assert_eq!(super::fork_args_by_kind("agy", "c-1"), Err("unsupported_kind"));
+    fn agy_resume_is_one_conversation_argv_and_fork_is_unsupported() {
+        let id = "5e69519d-5998-496d-aa7a-b7df4383520a";
+        assert_eq!(resume_args_by_kind("agy", id).unwrap(), vec![format!("--conversation={id}")]);
+        assert_eq!(resume_args_by_kind("agy", &format!(" {id}\n")).unwrap(), vec![format!("--conversation={id}")]);
+        for bad in ["", "  ", "a b", "x;rm -rf /", "../etc", &"a".repeat(65)] {
+            assert_eq!(resume_args_by_kind("agy", bad), Err("no_session_id"), "{bad:?}");
+        }
+        assert_eq!(super::fork_args_by_kind("agy", id), Err("unsupported_kind"));
     }
 
     /// codex 0.160.0 的 resume 會恢復上次存的權限，除非明確覆寫（issue #778）：auto_approve 0／1 ×
@@ -4340,5 +4360,133 @@ mod retire_context_lost_tests {
         retire_context_lost(&app, &bot.id, "sess-B").await;
         assert_eq!(notes(&app, &conv).await.len(), 0);
         assert!(active_notice_sessions(&app, &bot.id).await.is_empty());
+    }
+}
+
+/// agy 的 resume：`--conversation=<id>` 單一 argv，不用 `-c`；接不回要在聊天室看得見（本機、單一身分的第一版）。
+#[cfg(test)]
+mod agy_resume_tests {
+    use super::*;
+    use crate::testing::{claude_bot, env, Env};
+
+    const SID: &str = "5e69519d-5998-496d-aa7a-b7df4383520a";
+
+    fn last_args(e: &Env) -> Vec<String> {
+        let calls = e.herdr.calls_to("agent.start");
+        calls.last().unwrap()["args"].as_array().unwrap().iter().filter_map(|a| a.as_str().map(String::from)).collect()
+    }
+
+    async fn system_notes(app: &Arc<App>, bot_id: &str) -> Vec<String> {
+        let conv = db::conversation_id(&app.db, bot_id).await.unwrap();
+        sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at")
+            .bind(&conv)
+            .fetch_all(&app.db)
+            .await
+            .unwrap()
+    }
+
+    async fn ended_run(app: &Arc<App>, bot_id: &str, native: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, native_session_id, started_at, ended_at) VALUES (?,?,'stopped','idle',?,?,?)",
+        )
+        .bind(db::ulid())
+        .bind(bot_id)
+        .bind(native)
+        .bind("2026-10-05T00:00:00Z")
+        .bind("2026-10-05T00:01:00Z")
+        .execute(&app.db)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_resume_native_start_reopens_the_recorded_conversation_and_never_uses_dash_c() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "agy-resume").await;
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-low', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        ended_run(&e.app, &bot.id, Some(SID)).await;
+
+        start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+
+        let args = last_args(&e);
+        assert!(args.contains(&format!("--conversation={SID}")), "{args:?}");
+        assert!(!args.iter().any(|a| a == "-c" || a == "--continue"), "-c 只認 cwd 最近一段，同 cwd 的 bot 會互搶：{args:?}");
+        let requested: Option<String> = sqlx::query_scalar("SELECT resume_session_id FROM runs WHERE bot_id=? AND state IN ('starting','running') ")
+            .bind(&bot.id)
+            .fetch_one(&e.app.db)
+            .await
+            .unwrap();
+        assert_eq!(requested.as_deref(), Some(SID), "要接的 id 記進 run，hook 回報的才有東西可對");
+    }
+
+    #[tokio::test]
+    async fn without_a_recorded_conversation_agy_starts_fresh_with_a_visible_note() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "agy-fresh").await;
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-low', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        ended_run(&e.app, &bot.id, None).await;
+
+        start_bot_with(&e.app, &bot.id, StartOpts { resume_native: true, ..Default::default() }).await.unwrap();
+
+        let args = last_args(&e);
+        assert!(!args.iter().any(|a| a == "-c" || a == "--continue" || a.starts_with("--conversation")), "沒有 id 就開新對話，不退到 -c：{args:?}");
+        assert!(system_notes(&e.app, &bot.id).await.iter().any(|n| n.contains("接不回")));
+    }
+
+    /// 在原 pane 裡重啟的 agy 子 agent：接得回就帶 `--conversation=<id>`；記到的 id 形狀不對則開新對話、聊天室留說明（不只 tracing）。
+    async fn restart_agy_child(recorded: &str) -> (Env, String, Vec<String>) {
+        let e = env().await;
+        let app = e.app.clone();
+        let client = crate::herdr::HerdrClient::new(e.dir.join("data/herdr.sock"));
+        let (ws, root) = client.workspace_create("/tmp/p", "proj", json!({})).await.unwrap();
+        let kid_pane = client.pane_split(&root.pane_id, "right", "/tmp/p", json!({})).await.unwrap();
+        let parent = claude_bot(&app, &e.project_id, "alfa").await;
+        let kid = db::ulid();
+        sqlx::query(
+            "INSERT INTO bots (id, project_id, name, kind, model, args_json, autostart, inject_hooks, hook_token, auto_approve, managed_by, parent_bot_id, created_at)
+             VALUES (?,?,'ui','agy','gemini-3.8-flash-low','[]',0,0,'tok',1,'child',?,?)",
+        )
+        .bind(&kid)
+        .bind(&e.project_id)
+        .bind(&parent.id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        ended_run(&app, &kid, Some(recorded)).await;
+        sqlx::query(
+            "INSERT INTO runs (id, bot_id, state, agent_status, workspace_id, tab_id, pane_id, agent_name, herdr_session, adopted, started_at)
+             VALUES (?,?,'running','idle',?,?,?,'proj-alfa-ui','test',1,?)",
+        )
+        .bind(db::ulid())
+        .bind(&kid)
+        .bind(&ws.workspace_id)
+        .bind(&kid_pane.tab_id)
+        .bind(&kid_pane.pane_id)
+        .bind(db::now())
+        .execute(&app.db)
+        .await
+        .unwrap();
+        *e.herdr.agents.lock().unwrap() = vec![json!({
+            "name": "proj-alfa-ui", "agent": "agy", "agent_status": "idle",
+            "workspace_id": ws.workspace_id, "tab_id": kid_pane.tab_id, "pane_id": kid_pane.pane_id, "cwd": "/tmp/p"})];
+        restart_child_in_pane(&app, &kid).await.unwrap();
+        let args = last_args(&e);
+        (e, kid, args)
+    }
+
+    #[tokio::test]
+    async fn an_agy_child_restarted_in_its_pane_reopens_its_conversation() {
+        let (e, kid, args) = restart_agy_child(SID).await;
+        assert!(args.contains(&format!("--conversation={SID}")), "{args:?}");
+        assert!(!args.iter().any(|a| a == "-c"), "{args:?}");
+        assert!(system_notes(&e.app, &kid).await.is_empty(), "接回了就沒有說明");
+    }
+
+    #[tokio::test]
+    async fn an_agy_child_with_an_unusable_recorded_id_starts_fresh_and_says_so() {
+        let (e, kid, args) = restart_agy_child("not a valid id; rm -rf").await;
+        assert!(!args.iter().any(|a| a == "-c" || a.starts_with("--conversation")), "{args:?}");
+        assert!(system_notes(&e.app, &kid).await.iter().any(|n| n.contains("接不回")), "{:?}", system_notes(&e.app, &kid).await);
     }
 }

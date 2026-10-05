@@ -3394,7 +3394,7 @@ poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label �
 ## 12a. agy 支援（Google Antigravity CLI，使用者 2026-10-04）
 
 `kind = "agy"`：Antigravity CLI（`~/.local/bin/agy`，Go 單一執行檔；Google 自 2026-06-18 起對個人用戶停了 Gemini CLI，改用它）。herdr 內建 `agy` agent manifest，`agent.start {kind: "agy"}` 可用，但那份偵測規則是舊版（附錄 G.6），所以 daemon 自己認會停下來等人的畫面（§12a.4）。
-**第一階段（MVP）**：建立／啟動／送 prompt／讀回覆／狀態判讀，**本機、單一身分**（用使用者預設 `$HOME` 的 `~/.gemini`，沒有 per-bot HOME、沒有身分切換）。登入是 Google OAuth，**由使用者自己在 agy TUI 裡登入一次**，AG Man 不代按登入、不代答條款頁。resume／fork／自動更新／child agent／persona 屬第二階段（額度已做，§12a.7）（設計：`docs/design/agy-cli-support.md` §3.2），這幾條在 agy 上一律回 `unsupported_kind`（不 panic）。
+**第一階段（MVP）**：建立／啟動／送 prompt／讀回覆／狀態判讀，**本機、單一身分**（用使用者預設 `$HOME` 的 `~/.gemini`，沒有 per-bot HOME、沒有身分切換）。登入是 Google OAuth，**由使用者自己在 agy TUI 裡登入一次**，AG Man 不代按登入、不代答條款頁。resume 已做（§12a.10）；fork／自動更新／persona 屬第二階段（額度已做，§12a.7；子 agent 已做，§12a.9）（設計：`docs/design/agy-cli-support.md` §3.2），fork 在 agy 上回 `unsupported_kind`（不 panic）。
 
 ### 12a.1 啟動
 | 項目 | 注入 |
@@ -3404,7 +3404,8 @@ poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label �
 | pane env | `AGY_CLI_DISABLE_AUTO_UPDATE=true`（agy 預設背景自我更新；版本由 AG Man 管，每個 agy pane 都關，包括使用者手動在 bot pane 裡開的；bot env 可蓋掉）。`AM_*` 照舊 |
 | hooks／信任 | 無 argv，寫設定檔（§12a.2、§12a.5） |
 | persona／AG Man 指示 | **第一階段沒有**（agy 沒有 argv 的 system prompt 管道；repo 的 `AGENTS.md` 它會自己從 cwd 往上讀）。第二階段見設計 #15 |
-| resume／fork／`--effort` | 第二階段；`resume_args_by_kind`／`fork_args_by_kind` 回 `unsupported_kind` |
+| resume | `--conversation=<id>`（§12a.10） |
+| fork／`--effort` | 第二階段；`fork_args_by_kind` 回 `unsupported_kind` |
 
 `bots.kind` 的 CHECK 收 `'agy'`：舊庫就地放寬（`db::widen_bots_kind_check`——在交易裡改 `sqlite_master.sql` 並遞增 `schema_version`，不重建 `bots`，因為十七張表指著它；放寬後的定義跟全新 DB 一字不差），`SCHEMA_VERSION` 42。
 
@@ -3455,8 +3456,16 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 - 模型與 context：`runs.runtime_model` 在收編時補 `--model`（只補空的，`reconcile::sync_pane_model`）；`runs.status_json` 寫精簡版 `{"model":{"id"},"context_window":{"total_input_tokens":N}}`（N＝最後一筆回覆的 `input_tokens`，真機新對話第一問 11824）。**視窗大小沒有可靠來源，所以不填百分比**；網頁的 context 一行寫「約 Nk tokens」。AG Man 自己啟動的 agy bot 同樣的 `status_json` 由 `Stop` hook 帶的 `lastInputTokens` 寫。
 - **畫面備援**（transcript 讀不到時，`screen.rs`）：回音是 `> 原文`、輸入區是「分隔線、`>` 輸入列、分隔線」；回覆只取最後一個回音之後到輸入區上緣之間、去掉 `● 工具名(…)` 工具列、`▸ Thought for …` 與它底下那段思考內文；回音捲出畫面時從啟動 banner 之後算。shell 提示行、我們打進去的 `. /tmp/am-env.… && rm -f …` 與啟動指令、banner（logo、**帳號 email 與方案**、模型、cwd）、輸入區底下的 `? for shortcuts` 一律不進聊天紀錄。送出之後的 `> 原文` 單行回音也是第一則 prompt 的送達證據（`echo_markers("agy")`）。
 
+### 12a.10 resume（`--conversation=<id>`，2026-10-05）
+- **參數**：`start::resume_args_by_kind("agy", id)` ＝ 單一 argv `--conversation=<id>`（附加在 argv 尾端）。id 要過 `agy_session::valid_session_id`（只含英數與 `-`、≤64），形狀不對或空字串＝`no_session_id`，**不拼進 argv**。適用所有走 `native_resume_plan` 的路徑（重啟、`resume_native` 開機、bulk_restart、idle_sleep 叫醒）與子 agent 原 pane 重啟（`restart_child_in_pane`）。`fork_args_by_kind` 維持 `unsupported_kind`。
+- **不用 `-c`**：agy 實測（1.2.17）`-c` 只認「這個 cwd 最近一段」（`~/.gemini/antigravity-cli/cache/last_conversations.json` 一個 cwd 一格、後寫的蓋掉前面的），這台的 agy bot 全在同一個 cwd，會互搶；沒用過的 cwd 還會退到「newest free workspace conversation」＝別處的舊對話。沒有 id（上一段從沒送過 prompt）就開新對話。
+- **接不回要看得見**：`--conversation=<不存在的 id>` agy 只在 stderr 警告、exit 0、悄悄開新對話。所以 `runs.resume_session_id` 記下要接的 id，由第一個回報的實際 conversationId 比對（`hookrecv::consume_resume_session`）：agy bot 用 `SessionStart`／`PreInvocation` hook 的 `conversationId`；沒有 hook 的子 agent 用 `agy_session::load` 從 pane 行程開著的對話資料庫認出的 id（`grok_transcript::sync_locked`）。一致＝`resume_outcome='verified'`，不一致＝`mismatch`＋聊天室 `context_lost`（`resume_mismatch`）。
+- **閘門不等 agy**（`resume_gate`）：對話是第一則 prompt 才建立，送出之前不會有任何回報，等了只會死結（同 codex／grok）；因此第一則 prompt 可能在驗證前就送進一段新對話裡，事後才看到 `resume_mismatch`。
+- **子 agent 重啟**：有記到上一段卻接不回（任何 kind 的 `resume_args_by_kind` 回 `Err`）一律走 `context_lost` 在聊天室留說明，不只寫 log；從沒記過 id 的仍只寫 log（沒有脈絡可說斷了）。
+- **不做**：換身分（agy 沒有身分、HOME 不換）、遠端主機的 agy（§12a.9 只做本機）、跨 HOME 搬對話檔。
+
 ### 12a.8 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
-resume（`--conversation=<uuid>`／`-c`）與 `bulk_restart`／`idle_sleep`、`/fork`、遠端的子 agent（§12a.9 只做本機）、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
+`/fork`（現在 `fork_args_by_kind` 回 `unsupported_kind`）、resume 時換身分要搬的對話檔（`brain/<id>/`、`conversations/<id>.db`、`conversation_summaries.db`；換身分＝換 HOME 現在沒有，不做）、遠端的子 agent（§12a.9 只做本機）、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
 
 ## 13. 專案群組聊天
 
