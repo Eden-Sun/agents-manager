@@ -908,6 +908,15 @@ export async function logoutIdentity(host: string, identity: string): Promise<Ho
   return identityAuth(host, identity, 'logout')
 }
 
+/**
+ * 登出該主機的 agy 帳號：daemon 直接刪掉 agy 的 OAuth 憑證檔（不開 pane、不跑 TUI）。
+ * `removed:false`＝本來就沒有憑證，不算錯。正在跑的 agy bot 不會被停。
+ */
+export async function logoutAgy(host: string): Promise<{ removed: boolean }> {
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/agy/logout`)
+  return { removed: isRec(raw) && raw.removed === true }
+}
+
 async function identityAuth(host: string, identity: string, op: 'login' | 'logout'): Promise<HostShell> {
   const name = host || 'local'
   const raw = await transport.request(

@@ -554,7 +554,7 @@ export class MockTransport implements Transport {
     claude: { ...TOOLS_ALL_OK.claude },
     codex: { ...TOOLS_ALL_OK.codex, logged_in: false },
     grok: { installed: false, path: null, version: null, logged_in: null },
-    agy: { ...TOOLS_ALL_OK.agy },
+    agy: { ...TOOLS_ALL_OK.agy, logged_in: true },
   }
   /** cc1 未登入演「未登入」標記；cc2 來自 zshrc alias（SPEC §16），演兩種來源的差別。 */
   /** 停用名單，鍵是 `host|kind|name`（真 daemon 存在 `identity_prefs`）。 */
@@ -597,6 +597,9 @@ export class MockTransport implements Transport {
       host: 'local',
     },
     grok: null,
+    // agy 兩個桶（SPEC §12a.7）：Gemini 與 Claude+GPT 各一條週窗；登出會把兩個都清成 null。
+    agy: { seven_day: { used_pct: 22, resets_at: inHours(120) }, plan: 'Pro', updated_at: now(), host: 'local' },
+    'agy:claude-gpt': { seven_day: { used_pct: 61, resets_at: inHours(96) }, plan: 'Pro', updated_at: now(), host: 'local' },
   }
   private identities: MockIdentity[] = [
     { name: 'cc0', kind: 'claude', env: {}, args: [] },
@@ -996,6 +999,7 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'herdr-update' && seg.length === 3) return this.herdrUpdate.start(decodeURIComponent(seg[1]), b)
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'agy' && seg[3] === 'logout' && seg.length === 4) return this.logoutAgy(decodeURIComponent(seg[1]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'GET' && seg[0] === 'bots' && seg[2] === 'outbox' && seg.length === 3) {
       return this.outbox(decodeURIComponent(seg[1]))
@@ -1541,6 +1545,24 @@ export class MockTransport implements Transport {
     this.shells.delete(`${host}/${pane}`)
     this.loginPanes.delete(`${host}/${pane}`)
     return { sent: true, outcome: 'finished', message: null }
+  }
+
+  /**
+   * 額度欄 agy 那格的登出（`POST /api/hosts/{name}/agy/logout`）：daemon 刪掉 agy 的 OAuth 憑證檔，
+   * 清掉該主機 agy 與 agy:claude-gpt 的額度快照並廣播。`removed:false`＝本來就沒有憑證。
+   */
+  private logoutAgy(host: string) {
+    const remote = host && host !== 'local' ? this.host(host) : null
+    const tools = remote ? remote.tools : this.localTools
+    const removed = tools.agy.logged_in !== false
+    tools.agy = { ...tools.agy, logged_in: false }
+    const prefix = remote ? `${remote.name}/` : ''
+    for (const base of ['agy', 'agy:claude-gpt']) {
+      if (`${prefix}${base}` in this.quota) this.quota[`${prefix}${base}`] = null
+      this.emit('quota_updated', { kind: `${prefix}${base}`, host: remote ? remote.name : 'local', quota: null })
+    }
+    this.emit('host_changed', { name: remote ? remote.name : 'local', connected: true, tools })
+    return { removed }
   }
 
   /** 登出：跟登入同一條路，只是指令與結果相反（帳號憑證被清掉）。 */

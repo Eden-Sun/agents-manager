@@ -977,3 +977,7 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 ## shell 裡自己跑的 agent 照樣能打字（2026-10-04 使用者）
 
 使用者在本機 shell pane 手動跑 agy，面板變「正在跑 agent，請走 bot 對話」、鍵盤直通灰掉，登入選單、貼授權碼、選主題／條款都打不進去。現在 daemon 只對**屬於 bot 的 pane**（有 active run、或 bot 剛起出它的 spawn hint）回 403 `agent_pane`；使用者自己在 shell 裡跑起來的 agent（herdr 認得出來但沒有 bot 的 run）照常可打字、可開鍵盤直通。受管 bot 的 pane 維持「走 bot 對話」。前端不用改：它只照 daemon 的 403 鎖面板。
+
+## 額度欄 agy 那格可以登出（2026-10-05 使用者）
+
+額度 popover 裡 agy 那格底下有「登出 agy」（已未登入就不畫）；手機點一格只看那一格時同一顆鈕照樣在。按下去先跳確認：說明會刪掉該主機 agy 的登入憑證，有 agy bot 在跑時多寫「不會被停掉，但憑證清掉後會失去授權」。確認後打 `POST /api/hosts/{name}/agy/logout`（daemon 直接刪憑證檔，不開 pane——agy 沒有 `logout` 子命令），成功後前端把該主機 `agy`、`agy:claude-gpt` 兩個桶清成 null、`tools.agy.logged_in=false`，那格立刻顯示「未登入」並出現原本的登入提示。確認框的開關放在 `QuotaStrip` 外層，不在 popover 裡：popover「點外面就關」會把裡面的元件卸掉，框會跟著消失。

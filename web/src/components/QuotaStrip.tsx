@@ -15,6 +15,7 @@ import { KIND_LABEL } from './kindMeta'
 import { QuotaLoginShell } from './QuotaLoginShell'
 import { IdentityCliLogin, QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
+import { AgyLogoutButton, AgyLogoutDialog } from './AgyLogout'
 import { RULE_5H, RULE_WEEKLY, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
@@ -780,7 +781,7 @@ function PopWindow({
   )
 }
 
-function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
+function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string; onAgyLogout: () => void }) {
   const q = useEntryQuota(entry, host)
   const q2 = useAgyClaudeGpt(entry, host)
   const now = useMinuteNow()
@@ -790,6 +791,7 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
   })
   const supported = QUERYABLE.includes(entry.kind)
   const loggedOut = useLoggedOut(entry, host)
+  const agyLogoutBusy = useStore((s) => s.busy[`agy-logout:${host || 'local'}`] === true)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day) ?? remaining(q2?.seven_day)
   const disabledMap = useDisabledQuota()
@@ -853,6 +855,12 @@ function PopRow({ entry, host }: { entry: QuotaEntry; host: string }) {
         </>
         )
       )}
+      {/* agy 沒有 CLI 登出，daemon 直接清憑證；已經未登入就沒東西可清。 */}
+      {entry.kind === 'agy' && !loggedOut ? (
+        <div className="quota-pop-actions">
+          <AgyLogoutButton host={host} onOpen={onAgyLogout} busy={agyLogoutBusy} />
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -915,6 +923,8 @@ export function QuotaStrip({
   // 2026-09-11 分頁被推出畫面）。格子或主機一換就從頭量。
   const [fitState, setFitState] = useState<{ key: string; s: QuotaFitState }>({ key: '', s: QUOTA_FIT_START })
   const [open, setOpen] = useState(false)
+  /** agy 登出的確認框；開關放在這層（見 `AgyLogout.tsx`）。 */
+  const [agyLogoutOpen, setAgyLogoutOpen] = useState(false)
   // 手機點某一格只看那一格（2026-09-09 使用者）。
   const [only, setOnly] = useState<string | null>(null)
   const phone = useMediaQuery(PHONE_QUERY)
@@ -1047,7 +1057,7 @@ export function QuotaStrip({
         <div className="quota-pop" role="dialog" aria-label={`所有${quotaTitle(host)}`} style={popTop !== null ? { top: popTop } : undefined}>
           <div className="quota-pop-title">{quotaTitle(host)}</div>
           {(only ? popEntries.filter((e) => entryReactKey(e) === only) : popEntries).map((entry) => (
-            <PopRow key={entryReactKey(entry)} entry={entry} host={host} />
+            <PopRow key={entryReactKey(entry)} entry={entry} host={host} onAgyLogout={() => setAgyLogoutOpen(true)} />
           ))}
           {only && popEntries.length > 1 ? (
             <button type="button" className="mini-btn quota-pop-all" onClick={() => setOnly(null)}>
@@ -1057,6 +1067,7 @@ export function QuotaStrip({
           {freshest ? <p className="quota-pop-foot">更新於 {fmtTime(freshest)} · ↻ 是距離重置還有多久</p> : null}
         </div>
       ) : null}
+      <AgyLogoutDialog host={host} open={agyLogoutOpen} onClose={() => setAgyLogoutOpen(false)} />
     </div>
   )
 }
