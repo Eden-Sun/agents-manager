@@ -13,6 +13,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "app_ports_p9.rs"]
+pub(crate) mod app_ports_p9;
+#[allow(unused_imports)]
+pub use app_ports_p9::{app_quota_access, AppQuotaAccess};
+
 pub const CODEX_POLL: Duration = Duration::from_secs(300);
 /// 讀 pane 狀態列只是一個 `pane.read`，比 app-server RPC 便宜得多：這個頻率跟上 CLI 自己的數字
 /// （2026-09-15 使用者：pane 寫 5h 93% left、header 還是 100）。
@@ -515,7 +520,7 @@ impl Quota {
 
 /// DB 裡的額度讀數不是派工判準；它只在開機時先填回畫面，第一次新的探測成功後才變成 fresh。
 /// `Quota` 本身不帶 stale，避免把顯示用的狀態帶進 daemon 內部所有額度判斷。
-fn is_retired_agy_quota_key(key: &str) -> bool {
+pub(crate) fn is_retired_agy_quota_key(key: &str) -> bool {
     key == "agy:claude-gpt" || key.ends_with("/agy:claude-gpt")
 }
 
@@ -572,7 +577,7 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
     Ok(count)
 }
 
-pub(crate) async fn persist_cache(app: &Arc<App>, key: &str, q: &Quota) {
+pub(crate) async fn persist_cache(app: &App, key: &str, q: &Quota) {
     let raw = match serde_json::to_string(q) {
         Ok(raw) => raw,
         Err(e) => {
@@ -1172,7 +1177,7 @@ pub async fn limit_cleared_since(app: &Arc<App>, bot: &crate::db::Bot, since: ch
 ///
 /// 不管這一格當下有沒有撞限都記下時刻：成功回合本身就是「這個帳號收得下工作」的證據，
 /// 撞限可能在那之前已經自己過期、或是重啟後根本沒被回填。
-pub async fn clear_limit_hit(app: &Arc<App>, host: &str, base: &str) {
+pub async fn clear_limit_hit(app: &App, host: &str, base: &str) {
     let key = quota_key(host, base);
     cleared_at().lock().unwrap().insert(cleared_at_key(app, &key), chrono::Utc::now());
     let mut quotas = app.quotas.lock().await;
@@ -1252,7 +1257,7 @@ pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str,
 /// `at` 要是原本那一刻，讀數才校正得準（[`recalibrate_limit_hit`] 靠它判斷窗是不是撞限之後才開的）；
 /// 重啟之後、回填之前已經有新讀數進來的話，當場校正一次，不必等下一份。已經過期、被校正作廢、或這一格
 /// 已有更晚（或黏著）的撞限時不寫。回傳有沒有真的寫進去。
-pub async fn restore_limit_hit(app: &Arc<App>, host: &str, base: &str, hit: LimitHit) -> bool {
+pub async fn restore_limit_hit(app: &App, host: &str, base: &str, hit: LimitHit) -> bool {
     if limit_hit_expired(Some(&hit)) {
         return false;
     }
