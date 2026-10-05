@@ -9,8 +9,8 @@
 //! - **查什麼**：quick-xml 管標籤配對與重複屬性；它放過的幾種這裡自己補——屬性之間少空格、`&` 不是合法的實體（有 DOCTYPE 的不查）、
 //!   標籤到檔尾沒結束、根元素之後還有東西。
 //! - **怎麼講**：壞了就以 daemon 名義（`relay_from = daemon`，擁有者那一類）送一則**後台**訊息給那顆 bot：分享頁不顯示它，也不顯示
-//!   bot 對它的回覆（`share_reply_visible` 沒標）。同一個檔、同一個錯誤只送一次——`client_request_id` 由 bot＋檔名＋錯誤決定，
-//!   送過（有那一筆 turn）就不再送；bot 沒在跑就先起來再送（`start_send`）。
+//!   bot 對它的回覆（`share_reply_visible` 沒標）。同一個檔同一版（含錯誤與壞掉世代）只送一次——`client_request_id` 由 bot＋檔名＋版本指紋＋錯誤決定，
+//!   送過（有那一筆 turn）就不再送；修好後若再度改壞（新版本／新 episode）會重新提醒（SPEC §20，issue #845）；bot 沒在跑就先起來再送（`start_send`）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -189,9 +189,53 @@ pub(crate) fn reminder(name: &str, e: &SvgError) -> String {
     )
 }
 
-/// 同一個 bot、同一個檔、同一個錯誤 → 同一個 `client_request_id`：送過就不再送。
-pub(crate) fn request_id(bot_id: &str, name: &str, e: &SvgError) -> String {
-    let h = sha2::Sha256::digest(format!("{bot_id}\n{name}\n{}:{}:{}", e.line, e.col, e.message).as_bytes());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileHealth {
+    Healthy,
+    Broken,
+}
+
+#[derive(Default)]
+struct EpisodeTracker {
+    generation: u64,
+    health: Option<FileHealth>,
+}
+
+fn file_episodes() -> &'static Mutex<HashMap<(String, String), EpisodeTracker>> {
+    static M: OnceLock<Mutex<HashMap<(String, String), EpisodeTracker>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn mark_broken(bot_id: &str, name: &str) -> u64 {
+    let mut m = file_episodes().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tracker = m.entry((bot_id.to_string(), name.to_string())).or_default();
+    tracker.health = Some(FileHealth::Broken);
+    tracker.generation
+}
+
+fn mark_healthy(bot_id: &str, name: &str) {
+    let mut m = file_episodes().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tracker = m.entry((bot_id.to_string(), name.to_string())).or_default();
+    if tracker.health == Some(FileHealth::Broken) {
+        tracker.generation = tracker.generation.wrapping_add(1);
+    }
+    tracker.health = Some(FileHealth::Healthy);
+}
+
+pub(crate) fn version_fingerprint(ino: u64, mtime_ns: i128, ctime_ns: i128, gen: u64, data: &[u8]) -> String {
+    let mut h = sha2::Sha256::new();
+    h.update(ino.to_le_bytes());
+    h.update(mtime_ns.to_le_bytes());
+    h.update(ctime_ns.to_le_bytes());
+    h.update(gen.to_le_bytes());
+    h.update(data);
+    let digest = h.finalize();
+    digest.iter().take(12).map(|b| format!("{b:02x}")).collect()
+}
+
+/// 同一個 bot、同一個檔、同一版本（含壞掉世代）、同一個錯誤 → 同一個 `client_request_id`：同版本送過就不再送。
+pub(crate) fn request_id(bot_id: &str, name: &str, version: &str, e: &SvgError) -> String {
+    let h = sha2::Sha256::digest(format!("{bot_id}\n{name}\n{version}\n{}:{}:{}", e.line, e.col, e.message).as_bytes());
     let hex: String = h.iter().take(12).map(|b| format!("{b:02x}")).collect();
     format!("share-svg-check-{hex}")
 }
@@ -214,7 +258,9 @@ fn claim(bot_id: &str, name: &str, version: &(String, i64)) -> bool {
 }
 
 fn forget(bot_id: &str, name: &str) {
-    checked().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(bot_id.to_string(), name.to_string()));
+    let key = (bot_id.to_string(), name.to_string());
+    checked().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
+    file_episodes().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
 }
 
 /// 這一則送過了嗎（有那一筆 turn）。讀不到就當送過——寧可少提醒一次，不要每次讀清單都送。
@@ -225,10 +271,10 @@ async fn already_sent(app: &Arc<App>, crid: &str) -> bool {
     )
 }
 
-/// 查一個檔；壞了就提醒 bot（同一個錯誤只一次）。回傳查到的錯誤（測試用）。
+/// 查一個檔；壞了就提醒 bot（同一版本同一個錯誤只一次）。回傳查到的錯誤（測試用）。
 pub(crate) async fn check_file(app: &Arc<App>, bot_id: &str, name: &str) -> Option<SvgError> {
-    let data = match crate::outbox::share_file_bytes_with_limit(app, bot_id, name, MAX_CHECK_BYTES as u64).await {
-        Ok((_, d)) => d,
+    let read = match crate::outbox::share_file_read_with_limit(app, bot_id, name, MAX_CHECK_BYTES as u64).await {
+        Ok(r) => r,
         Err(crate::outbox::ShareFileError::TooLarge) => {
             // 超過 4 MiB 直接略過不查；不叫 forget，同一版本不重複排查。
             return None;
@@ -239,12 +285,20 @@ pub(crate) async fn check_file(app: &Arc<App>, bot_id: &str, name: &str) -> Opti
             return None;
         }
     };
-    if data.len() > MAX_CHECK_BYTES {
+    if read.data.len() > MAX_CHECK_BYTES {
         return None;
     }
-    let text = String::from_utf8_lossy(&data);
-    let e = check(&text).err()?;
-    let crid = request_id(bot_id, name, &e);
+    let text = String::from_utf8_lossy(&read.data);
+    let e = match check(&text) {
+        Ok(()) => {
+            mark_healthy(bot_id, name);
+            return None;
+        }
+        Err(e) => e,
+    };
+    let gen = mark_broken(bot_id, name);
+    let vfp = version_fingerprint(read.ino, read.mtime_ns, read.ctime_ns, gen, &read.data);
+    let crid = request_id(bot_id, name, &vfp, &e);
     if already_sent(app, &crid).await {
         return Some(e);
     }
@@ -332,9 +386,19 @@ mod tests {
     #[test]
     fn the_same_error_on_the_same_file_has_one_request_id() {
         let e = bad("<svg><g></svg>");
-        assert_eq!(request_id("B1", "a.svg", &e), request_id("B1", "a.svg", &e));
-        assert_ne!(request_id("B1", "a.svg", &e), request_id("B1", "b.svg", &e), "不同檔分開提醒");
+        assert_eq!(request_id("B1", "a.svg", "v1", &e), request_id("B1", "a.svg", "v1", &e));
+        assert_ne!(request_id("B1", "a.svg", "v1", &e), request_id("B1", "b.svg", "v1", &e), "不同檔分開提醒");
         let other = bad("<svg><g>");
-        assert_ne!(request_id("B1", "a.svg", &e), request_id("B1", "a.svg", &other), "同一個檔換了錯誤要再提醒");
+        assert_ne!(request_id("B1", "a.svg", "v1", &e), request_id("B1", "a.svg", "v1", &other), "同一個檔換了錯誤要再提醒");
+        assert_ne!(request_id("B1", "a.svg", "v1", &e), request_id("B1", "a.svg", "v2", &e), "同一個檔換了版本要再提醒");
+    }
+
+    #[test]
+    fn version_fingerprint_tracks_file_metadata_episode_and_contents() {
+        let base = version_fingerprint(1, 2, 3, 4, b"broken");
+        assert_eq!(base, version_fingerprint(1, 2, 3, 4, b"broken"));
+        assert_ne!(base, version_fingerprint(1, 2, 4, 4, b"broken"), "ctime 改變表示檔案曾被改寫");
+        assert_ne!(base, version_fingerprint(1, 2, 3, 5, b"broken"), "修好後的新壞掉 episode 要有新指紋");
+        assert_ne!(base, version_fingerprint(1, 2, 3, 4, b"other"), "內容改變要有新指紋");
     }
 }
