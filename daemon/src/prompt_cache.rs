@@ -211,6 +211,13 @@ pub fn from_codex_usage(u: &CodexUsage, ttl_secs: i64, now_ms: i64) -> Value {
     })
 }
 
+/// codex run 目前的 context 用量百分比（rollout 最近一筆 `token_count`：這次請求讀進去的 context ÷ 視窗）；還沒讀到／視窗不明回 `None`。
+/// 保溫的熱壓門檻用（`primary_keep_warm::context_used_pct`）。
+pub fn codex_context_pct(run_id: &str) -> Option<f64> {
+    let u = store().lock().unwrap_or_else(|e| e.into_inner()).get(run_id).and_then(|e| e.usage)?;
+    (u.window > 0).then(|| u.input as f64 / u.window as f64 * 100.0)
+}
+
 /// 在 run JSON 上補 `prompt_cache`（claude／codex；grok、沒有資料＝`null`）；沒有 run（`null`）不動。
 pub fn annotate(run_json: &mut Value, kind: &str, now_ms: i64) {
     let Some(o) = run_json.as_object_mut() else { return };
@@ -250,6 +257,20 @@ mod tests {
         assert!(last_token_count(r#"{"timestamp":"2026-09-28T14:35:13.100Z","type":"event_msg","payload":{"type":"token_count","info":null}}"#).is_none());
         assert!(parse_token_count(r#"{"timestamp":"2026-09-28T14:35:32.249Z","type":"event_msg","payload":{"type":"token_cou"#).is_none());
         assert!(last_token_count("").is_none());
+    }
+
+    /// 保溫的熱壓門檻讀它：codex 的 context 用量＝最近一筆 `token_count` 的 input ÷ 視窗。
+    #[test]
+    fn codex_context_pct_is_the_last_request_over_the_window() {
+        let run = "r-codex-ctx-pct";
+        assert_eq!(codex_context_pct(run), None, "還沒讀到 rollout");
+        let u = last_token_count(ROLLOUT).unwrap();
+        store().lock().unwrap().insert(run.into(), Entry { usage: Some(u), ..Default::default() });
+        let pct = codex_context_pct(run).unwrap();
+        assert!((pct - 17667.0 / 258400.0 * 100.0).abs() < 1e-9, "{pct}");
+        store().lock().unwrap().insert(run.into(), Entry { usage: Some(CodexUsage { window: 0, ..u }), ..Default::default() });
+        assert_eq!(codex_context_pct(run), None, "視窗大小不明不猜");
+        store().lock().unwrap().remove(run);
     }
 
     #[test]
