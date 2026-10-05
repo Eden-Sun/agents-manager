@@ -5409,7 +5409,8 @@ async fn service_daemon_swap_restart_window(
     let id = crate::swap_window::approval_for(&app, owner, commit, &actor).await.map_err(any_err)?;
     match crate::supervisor::maintenance::acquire(&app, "restart", owner, &id, Some(commit), ttl, true, &[]).await {
         Ok(v) => {
-            crate::deploy_wait::observe(&app, owner, &id, commit, Ok(())).await;
+            let auto_escalated = v.pointer("/safety/escalated").and_then(Value::as_bool).unwrap_or(false);
+            crate::deploy_wait::observe(&app, owner, &id, commit, Ok(auto_escalated)).await;
             Ok(Json(v))
         }
         Err(e) => {
@@ -10968,11 +10969,13 @@ mod per_principal_auth_tests {
             }],
             escalates_at: None,
             user_escalated: false,
+            auto_escalated: false,
             notified_at: Some(db::now()),
             dismissed: false,
             phase: crate::deploy_wait::Phase::Waiting,
             rev: 1,
             ended_at: None,
+            swap_announced_at: std::collections::BTreeMap::new(),
         });
 
         let bot_response = state(e.app.clone(), &[("X-AM-Bot-Id", &bot.id), ("X-AM-Bot-Token", &bot.hook_token)]).await;
@@ -11439,6 +11442,7 @@ mod per_principal_auth_tests {
         let Json(v) = service_daemon_swap_restart_window(State(e.app.clone()), svc(), Json(ask())).await.expect("等滿門檻後 working 不擋");
         assert_eq!(v["approval"]["id"], a2.as_str(), "同一張沿用");
         assert_eq!(v["safety"]["escalated"], true, "{v}");
+        assert!(e.app.deploy_wait.lock().unwrap().as_ref().unwrap().auto_escalated, "成功 acquire 的 safety 也要更新 deploy_wait");
         let s = recheck(&a2).await;
         assert_eq!(s["safe"], true, "3a 複查吃得到同一張核准的放寬：{s}");
         assert_eq!(s["escalated"], true, "{s}");
