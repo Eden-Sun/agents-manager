@@ -45,10 +45,27 @@ pub trait HerdrPort: Send + Sync {
         lines: u32,
     ) -> impl Future<Output = Result<String, PortError>> + Send + 'a;
 
+    fn read_pane<'a>(
+        &'a self,
+        fence: &'a HostFence,
+        session: &'a SessionId,
+        pane_id: &'a str,
+        source: PaneReadSource,
+        lines: u32,
+    ) -> impl Future<Output = Result<String, PortError>> + Send + 'a;
+
     fn send_text<'a>(
         &'a self,
         fence: &'a HostFence,
         session: &'a SessionId,
+        text: String,
+    ) -> impl Future<Output = Result<(), PortError>> + Send + 'a;
+
+    fn send_text_to_pane<'a>(
+        &'a self,
+        fence: &'a HostFence,
+        session: &'a SessionId,
+        pane_id: &'a str,
         text: String,
     ) -> impl Future<Output = Result<(), PortError>> + Send + 'a;
 }
