@@ -83,9 +83,9 @@ pub fn quota_base_default_aware(kind: &str, identity: Option<&str>, shares_defau
 /// codex statusline、撞限橫幅、claude statusLine、`limit_hit_for_bot`／`next_reset_for_bot`、
 /// supervisor 的額度判讀、mission 挑身分。查不到那個身分就當它有自己的帳號——寧可多開一格，
 /// 也不要把兩個帳號的數字疊在一起。
-pub async fn quota_base_for_host(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> String {
+pub async fn quota_base_for_host(app: &App, host: &str, kind: &str, identity: Option<&str>) -> String {
     let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) else { return kind.to_string() };
-    let found = crate::tools::identity_for_host(app, host, idn).await;
+    let found = crate::tools::identity_for_host_ref(app, host, idn).await;
     // 身分有 kind（`identity_kind`）：別的 kind 的身分（codex bot 身上的 claude `cc1`）根本不是這個 CLI 的
     // 帳號代號，一律寫裸 kind——codex 不該有任何 `codex:ccN`（2026-09-14 使用者指正）。
     // 同 kind 才看 home 變數那條保險；查不到那個身分（主機的身分還沒偵測完）維持分開，免得把兩個
@@ -101,9 +101,9 @@ pub async fn quota_base_for_host(app: &Arc<App>, host: &str, kind: &str, identit
 /// [`quota_base_for_host`]，但**算不準就回錯**：寫撞限要落在查詢端之後會讀的那一把 key（#108 重開）。
 /// 那台主機的身分表還沒偵測完（重啟後、`tools::detect` 之前）又不是手寫的 `[[identities]]` 時，共用預設帳號的
 /// `cc0` 會被算成 `claude:cc0`：偵測完之後查詢端讀裸 `claude`，那一格的撞限就沒人看得到。
-pub async fn resolve_quota_base(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Result<String> {
+pub async fn resolve_quota_base(app: &App, host: &str, kind: &str, identity: Option<&str>) -> Result<String> {
     if let Some(idn) = identity.map(str::trim).filter(|s| !s.is_empty()) {
-        if crate::tools::identity_for_host(app, host, idn).await.is_none() && !app.tools.lock().await.contains_key(host) {
+        if crate::tools::identity_for_host_ref(app, host, idn).await.is_none() && !app.tools.lock().await.contains_key(host) {
             anyhow::bail!("`{host}` 的身分表還沒偵測完，算不出身分 `{idn}` 的額度 key");
         }
     }
@@ -604,14 +604,14 @@ pub(crate) async fn persist_cache(app: &App, key: &str, q: &Quota) {
     }
 }
 
-async fn delete_cache(app: &Arc<App>, key: &str) {
+async fn delete_cache(app: &App, key: &str) {
     if let Err(e) = sqlx::query("DELETE FROM quota_cache WHERE key = ?").bind(key).execute(&app.db).await {
         tracing::warn!(key, error = %e, "cannot delete quota cache");
     }
 }
 
 /// Remove a quota key that no longer belongs to a live identity/host, including its restart cache.
-pub async fn forget(app: &Arc<App>, key: &str) {
+pub async fn forget(app: &App, key: &str) {
     app.quotas.lock().await.remove(key);
     app.quota_stale.lock().await.remove(key);
     delete_cache(app, key).await;
@@ -749,7 +749,7 @@ pub fn quota_from_statusline(payload: &Value, account: Option<&str>) -> Option<Q
 /// 身分偵測完之前寫進分開那一格、現在已經收斂到裸 `kind` 的 key（daemon 重啟那一秒最常見：第一筆 statusline
 /// 比身分偵測先到，[`quota_base_for_host`] 查不到身分就寧可分開）。之後的讀數都寫裸 key，那一格停在啟動當下、
 /// 沒有 Fable，留著就會被讀到（2026-09-16 使用者：「怎麼又看不見 Fable 的剩餘」）。查不到的身分照舊保留。
-async fn stale_split_keys(app: &Arc<App>, host: &str, kind: &str) -> Vec<String> {
+async fn stale_split_keys(app: &App, host: &str, kind: &str) -> Vec<String> {
     let prefix = quota_key(host, &format!("{kind}:"));
     let candidates: Vec<String> = app.quotas.lock().await.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
     let mut stale = Vec::new();
@@ -765,7 +765,7 @@ async fn stale_split_keys(app: &Arc<App>, host: &str, kind: &str) -> Vec<String>
 /// 另一台、或被移除，舊機器的額度就不能寫進新機器（或已移除主機）的 key。不是權威就回 `Err`、什麼都不寫。
 /// 檢查在 `app.quotas` 鎖裡做：主機換連線時會清掉 `<host>/…`（`hosts::forget_host_observations`），檢查放在鎖外的話，
 /// 通過檢查到寫入之間清掉的那份會被舊讀數種回來。
-pub async fn set_fenced(app: &Arc<App>, host: &str, base: &str, q: Quota, fence: &crate::hosts::HostFence) -> Result<()> {
+pub async fn set_fenced(app: &App, host: &str, base: &str, q: Quota, fence: &crate::hosts::HostFence) -> Result<()> {
     if !set_inner(app, host, base, q, Some(fence)).await {
         anyhow::bail!("host `{host}` was reconnected/reconfigured during the quota probe; stale reading discarded");
     }
@@ -852,12 +852,12 @@ pub fn reading_is_stale(q: &Quota, flagged: bool, now: chrono::DateTime<chrono::
     flagged || parse_utc(&q.updated_at).map_or(true, |at| now - at > STALE_AFTER)
 }
 
-pub async fn set(app: &Arc<App>, host: &str, base: &str, q: Quota) {
+pub async fn set(app: &App, host: &str, base: &str, q: Quota) {
     set_inner(app, host, base, q, None).await;
 }
 
 /// 回 `false`＝`fence` 已經不是這台主機的權威，什麼都沒寫。
-async fn set_inner(app: &Arc<App>, host: &str, base: &str, mut q: Quota, fence: Option<&crate::hosts::HostFence>) -> bool {
+async fn set_inner(app: &App, host: &str, base: &str, mut q: Quota, fence: Option<&crate::hosts::HostFence>) -> bool {
     q.host = host.to_string();
     let key = quota_key(host, base);
     if is_retired_agy_quota_key(&key) {
