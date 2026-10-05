@@ -21,7 +21,7 @@ use sha2::Digest as _;
 use crate::state::App;
 
 /// 單檔超過這麼大就不查（bot 畫的圖不會這麼大；查不完不如不查）。
-const MAX_CHECK_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_CHECK_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SvgError {
@@ -227,9 +227,13 @@ async fn already_sent(app: &Arc<App>, crid: &str) -> bool {
 
 /// 查一個檔；壞了就提醒 bot（同一個錯誤只一次）。回傳查到的錯誤（測試用）。
 pub(crate) async fn check_file(app: &Arc<App>, bot_id: &str, name: &str) -> Option<SvgError> {
-    let data = match crate::outbox::share_file_bytes(app, bot_id, name).await {
+    let data = match crate::outbox::share_file_bytes_with_limit(app, bot_id, name, MAX_CHECK_BYTES as u64).await {
         Ok((_, d)) => d,
-        // 讀不到（剛被刪、太大、暫時失敗）：下次讀清單再查。
+        Err(crate::outbox::ShareFileError::TooLarge) => {
+            // 超過 4 MiB 直接略過不查；不叫 forget，同一版本不重複排查。
+            return None;
+        }
+        // 讀不到（剛被刪、暫時失敗）：下次讀清單再查。
         Err(_) => {
             forget(bot_id, name);
             return None;
@@ -265,7 +269,12 @@ pub(crate) fn spawn_check(app: &Arc<App>, bot_id: &str, files: &[serde_json::Val
             if !name.to_ascii_lowercase().ends_with(".svg") {
                 return None;
             }
-            let version = (f.get("modified_at").and_then(|v| v.as_str()).unwrap_or("").to_string(), f.get("size").and_then(|v| v.as_i64()).unwrap_or(-1));
+            let size = f.get("size").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let version = (f.get("modified_at").and_then(|v| v.as_str()).unwrap_or("").to_string(), size);
+            if size > MAX_CHECK_BYTES as i64 {
+                claim(bot_id, name, &version);
+                return None;
+            }
             claim(bot_id, name, &version).then(|| name.to_string())
         })
         .collect();
