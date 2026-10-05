@@ -1024,6 +1024,18 @@ mod tests {
             for (k, v) in env {
                 cmd.env(k, v);
             }
+            // shim 的 `trap … INT TERM` 要有效，行程進來時 INT／TERM 不能是「忽略」：POSIX shell 不能 trap 開機時就被忽略的訊號。
+            // 測試被丟到背景跑（`cmd &`、nohup、ubuntu-ci／cron 之類非互動啟動）時，SIGINT 會被忽略並一路繼承到這裡，
+            // `an_interrupted_agent_start_releases_the_spawn_permit` 就收到 rc 1 而不是 130（跟負載無關，#flaky-spawn-permit）。
+            // 正式環境的 pane 沒有這個狀況，所以測試明講：每次跑 shim 前把兩個訊號還原成預設。
+            unsafe {
+                use std::os::unix::process::CommandExt as _;
+                cmd.pre_exec(|| {
+                    libc::signal(libc::SIGINT, libc::SIG_DFL);
+                    libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                    Ok(())
+                });
+            }
             let out = output_retrying(&mut cmd);
             let stdout = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
             (stdout, String::from_utf8_lossy(&out.stderr).into_owned(), out.status.code().unwrap_or(-1))
