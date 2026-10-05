@@ -1296,9 +1296,13 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 上一代的在圍籬就丟了；沒有 run 時說不準是哪個身分）；已經收過的同一則不再記，免得把撞限時刻往後推。
             // 記不進去（讀不到主機、身分表還沒進來、憑據寫不進去）就讓這一則失敗、由收件匣重試（#108 重開）：回合先不收、
             // 不推回合結束，排著的派工照欠著的那一筆擋（`turn_error::owed_limit_hit`），不能當作沒撞。
-            if bot.kind == "claude" && admitted.is_some() && seen.is_none() {
+            if admitted.is_some() && seen.is_none() {
                 if let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) {
-                    crate::turn_error::mark_claude_limit_hit(app, &bot, d).await?;
+                    match bot.kind.as_str() {
+                        "claude" => crate::turn_error::mark_claude_limit_hit(app, &bot, d).await?,
+                        "agy" => crate::turn_error::mark_agy_limit_hit(app, &bot, d).await?,
+                        _ => {}
+                    }
                 }
             }
             if let Some(r) = &run {

@@ -901,7 +901,7 @@ function toLimitHit(v: unknown): QuotaLimitHit | null {
   if (!isRec(v)) return null
   const message = str(pick(v, 'message'))
   if (!message) return null
-  return { message, until: optStr(pick(v, 'until')), at: str(pick(v, 'at')) }
+  return { message, until: optStr(pick(v, 'until')), at: str(pick(v, 'at')), bucket: optStr(pick(v, 'bucket')) }
 }
 
 /** `key` 只用來在缺 `host` 時從前綴推回。 */

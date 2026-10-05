@@ -1001,6 +1001,8 @@ export interface QuotaLimitHit {
   until: string | null
   /** ISO */
   at: string
+  /** 知道窗口時為 `five_hour`／`seven_day`／`fable`；舊紀錄可能沒有。 */
+  bucket: string | null
 }
 
 export interface InstallToolResult {
