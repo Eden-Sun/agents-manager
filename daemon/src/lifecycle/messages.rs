@@ -169,6 +169,10 @@ pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
     let t = row.turn;
     let bot_id = row.bot_id;
     let should_flush_queue = t.status != "in_flight" && t.status != "queued";
+    if matches!(t.status.as_str(), "completed" | "completed_fallback") {
+        // Hook and terminal-fallback completion both publish here, after their reply is committed.
+        crate::child_done::on_completed_turn(app, &t.id);
+    }
     app.emit("turn_updated", json!({ "bot_id": bot_id, "turn": t })).await;
     // Every path that takes a turn out of `in_flight` funnels through here: one subscription suffices.
     app.publish_turn(crate::state::TurnEvent {
