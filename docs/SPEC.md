@@ -1747,8 +1747,11 @@ child 轉成 `blocked` 並且**穩定 8 秒**（daemon 自己按掉的對話框�
 `relay_from` 是 child id）時略過自動通知。
 
 Stop hook 與終端備援提交回覆後都經 `lifecycle::messages::emit_turn` 觸發通知；每分鐘 sweep 另從最近一小時完成的 turn
-與 assistant message 補送漏掉的事件，避免部署後把較舊的未通知回合整批倒灌。`client_request_id` 使用 `child-done:<child bot id>:<turn id>`，同一 turn
-只建立一筆通知，並以 DB 唯一鍵處理即時事件與 sweep 競速。無回覆、failed turn、非 child、已刪 child、無 parent
+與 assistant message 補送漏掉的事件，避免部署後把較舊的未通知回合整批倒灌。若 child 的 run 已知仍有背景工作，完成回合先保留待 sweep；
+Claude Stop hook 的 `background_tasks`（含 Monitor、subagent、workflow）和既有畫面巡讀數都算訊號。daemon 重啟後帳上未知時會嘗試讀一次現有 pane；
+讀不到訊號就沿用即時通知行為。背景工作歸零後，sweep 優先處理最新完成回合；若它已通知，較舊的延後回合視為被取代，不再逐一補送。
+同一 child 在 5 分鐘內回覆文字正規化後編輯距離不超過 20% 時視為近似通知，只送一則。`client_request_id` 使用
+`child-done:<child bot id>:<turn id>`，同一 turn 只建立一筆通知，並以 DB 唯一鍵處理即時事件與 sweep 競速。無回覆、failed turn、非 child、已刪 child、無 parent
 或 child 已自行回報的 turn 都不通知。daemon 通知重試與撤回辨識也涵蓋 `child-done:` 前綴。
 
 ### 6.5b herdr PATH shim（命名規則做成機制）
