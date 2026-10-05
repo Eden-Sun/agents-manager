@@ -79,7 +79,7 @@ fn version_notice(disk: &str, running: &str) -> Option<String> {
 /// （每個模組的 `retain_*` 本身各有單元測試）。
 #[cfg(not(test))]
 async fn prune_process_state(app: &Arc<App>, active_runs: &[String]) {
-    crate::lifecycle::retain_pane_typed(active_runs);
+    crate::herdr_maintenance::app_ports_p12::retain_pane_typed(active_runs);
     crate::tui_prompts::retain_survey_runs(app, active_runs).await;
     crate::codex_model_migration::retain_runs(active_runs);
     crate::blocked_reason::retain_runs(active_runs);
@@ -92,7 +92,7 @@ async fn prune_process_state(app: &Arc<App>, active_runs: &[String]) {
         }
     };
     crate::pane_identity::retain_bots(&live_bots);
-    crate::lifecycle::retain_bot_state(&live_bots);
+    crate::herdr_maintenance::app_ports_p12::retain_bot_state(&live_bots);
     crate::child_alerts::retain_bots(&live_bots);
     app.retain_bot_locks(&live_bots).await;
 }

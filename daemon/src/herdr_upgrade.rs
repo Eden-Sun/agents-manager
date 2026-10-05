@@ -169,7 +169,7 @@ pub async fn affected(app: &Arc<App>, host: &str) -> anyhow::Result<Affected> {
         if bot.deleted_at.is_some() || crate::db::bot_host(&app.db, &bot.id).await? != host {
             continue;
         }
-        if crate::lifecycle::in_default_session(&run) || bot.herdr_session.as_deref() == Some("default") {
+        if crate::herdr_maintenance::app_ports_p12::in_default_session(&run) || bot.herdr_session.as_deref() == Some("default") {
             continue;
         }
         let parent = bot.parent_bot_id.clone().filter(|p| !p.is_empty());
@@ -824,23 +824,14 @@ impl Ops for Real {
 
     fn resume<'a>(&'a self, app: &'a Arc<App>, bot_id: &'a str) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
-            let opts = crate::lifecycle::StartOpts { resume_native: true, ..Default::default() };
-            crate::lifecycle::restart_bot_with(app, bot_id, opts).await.map_err(|e| format!("{e:?}"))
+            crate::herdr_maintenance::app_ports_p12::restart_bot_resume_native(app, bot_id).await
         })
     }
 
     /// 母 bot 剛被接回、多半還在啟動：走 AGM 派工那條會排隊的路，失敗再等一下重試（最多約 2 分鐘）。
     fn notify_parent<'a>(&'a self, app: &'a Arc<App>, parent_bot_id: &'a str, text: &'a str, request_id: &'a str) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            let mut last = String::new();
-            for _ in 0..12 {
-                match crate::lifecycle::prompt_relayed_queueable(app, parent_bot_id, text, request_id, Some(crate::agent_relay::DAEMON_SENDER)).await {
-                    Ok(_) => return Ok(()),
-                    Err(e) => last = format!("{e:?}"),
-                }
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
-            Err(last)
+            crate::herdr_maintenance::app_ports_p12::notify_parent_relayed(app, parent_bot_id, text, request_id).await
         })
     }
 }

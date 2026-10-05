@@ -413,7 +413,7 @@ async fn authenticate(app: &Arc<App>, headers: &HeaderMap, bot_id: Option<&str>)
             return Err(LcError::Forbidden(json!({"error":"unauthorized","message":"X-AM-Bot-Id must match body bot_id"})));
         }
         match crate::db::bot(&app.db, id).await.map_err(up)? {
-            Some(b) if b.deleted_at.is_none() && crate::api::ct_eq(token, &b.hook_token) => {
+            Some(b) if b.deleted_at.is_none() && crate::herdr_maintenance::app_ports_p12::ct_eq(token, &b.hook_token) => {
                 // 分享用的受限 bot 的 token 只能打自己的 hook（SPEC「分享 bot」）。
                 if crate::share::refuses_bot_principal(&app.db, id).await {
                     return Err(LcError::Forbidden(json!({"error": "forbidden", "reason": "restricted_bot"})));
@@ -424,7 +424,7 @@ async fn authenticate(app: &Arc<App>, headers: &HeaderMap, bot_id: Option<&str>)
         }
     }
     let ui_token = headers.get("X-AM-Token").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if !ui_token.is_empty() && crate::api::ct_eq(ui_token, &app.ui_token) {
+    if !ui_token.is_empty() && crate::herdr_maintenance::app_ports_p12::ct_eq(ui_token, &app.ui_token) {
         return Ok(None);
     }
     Err(LcError::Forbidden(json!({"error": "unauthorized", "message": "need a matching X-AM-Bot-Token+bot_id, or X-AM-Token"})))

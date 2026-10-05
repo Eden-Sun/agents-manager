@@ -20,6 +20,9 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
+#[path = "app_ports_p12.rs"]
+pub(crate) mod app_ports_p12;
+
 /// 維護窗口的上限（分鐘）。升級實測一輪不到 5 分鐘；30 分鐘給回滾留空間，又不會讓「忘了關」變成常態。
 pub const MAX_MINUTES: i64 = 30;
 
