@@ -120,6 +120,65 @@ pub async fn refresh_agy(app: &Arc<App>, host: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// agy 的登入憑證（Google OAuth token）：agm-host 實測就是這個檔（600，沒用 keyring；`agy` 沒有 `logout` 子命令，TUI 的 `/logout` 做的也是清它）。
+pub const TOKEN_FILE: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
+
+/// 遠端同一件事：只刪這個檔、不跑 agy。`AM_REMOVED`＝刪掉了，`AM_ABSENT`＝本來就沒有。
+const REMOTE_LOGOUT_SCRIPT: &str = "f=\"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\"; \
+if [ -e \"$f\" ] || [ -L \"$f\" ]; then rm -f \"$f\" && echo AM_REMOVED || echo AM_FAILED; else echo AM_ABSENT; fi";
+
+/// 測試行程共用一個假 HOME：碰憑證檔的測試（這裡與 `api::agy_logout_route_tests`）一個一個來。
+#[cfg(test)]
+pub(crate) async fn token_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static L: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    L.lock().await
+}
+
+#[derive(Debug)]
+pub enum LogoutError {
+    UnknownHost,
+    Failed(String),
+}
+
+/// `POST /api/hosts/{name}/agy/logout`：刪掉那台主機的 agy 憑證檔，再清掉那台 agy 的額度快照（`agy`、`agy:claude-gpt`）並廣播，
+/// 那一格立刻變成沒有讀數。回「檔案原本在不在」（不在不算錯）。不跑 agy、不動別的檔、不停正在跑的 agy bot（它們下次重啟才會停在登入畫面）。
+/// 拿探測的鎖：正在跑的探測不能在清掉之後又把讀數寫回來。
+pub async fn logout(app: &Arc<App>, host: &str) -> Result<bool, LogoutError> {
+    let fence = app.hosts.fence(host).await.ok_or(LogoutError::UnknownHost)?;
+    let _guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
+    let removed = if fence.conn().is_local() {
+        let home = crate::home::dir().ok_or_else(|| LogoutError::Failed("no home directory".into()))?;
+        match std::fs::remove_file(home.join(TOKEN_FILE)) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(LogoutError::Failed(format!("cannot remove the agy credentials: {e}"))),
+        }
+    } else {
+        if !fence.conn().is_connected() {
+            return Err(LogoutError::Failed(format!("host `{host}` is not connected")));
+        }
+        let out = fence.conn().ssh_exec_path_timeout(REMOTE_LOGOUT_SCRIPT, PROBE_TIMEOUT).await.map_err(|e| LogoutError::Failed(format!("{e:#}")))?;
+        match out.trim() {
+            "AM_REMOVED" => true,
+            "AM_ABSENT" => false,
+            other => return Err(LogoutError::Failed(format!("remote agy logout did not confirm: {other}"))),
+        }
+    };
+    if !app.hosts.is_current(&fence).await {
+        return Err(LogoutError::Failed(format!("host `{host}` changed during the agy logout")));
+    }
+    for base in ["agy", CLAUDE_GPT_KEY] {
+        let key = crate::quota::quota_key(host, base);
+        let had = app.quotas.lock().await.contains_key(&key);
+        crate::quota::forget(app, &key).await;
+        if had {
+            app.emit("quota_updated", serde_json::json!({"kind": key, "host": host, "quota": null})).await;
+        }
+    }
+    tracing::info!(host, removed, "agy logged out: credentials removed and quota snapshots cleared");
+    Ok(removed)
+}
+
 fn backoff() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
     static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
     M.get_or_init(Default::default)
@@ -308,5 +367,122 @@ mod tests {
         assert_eq!(app.quotas.lock().await["agy"].seven_day, before);
         let snap = crate::quota::snapshot(&app).await;
         assert!(snap["kinds"]["agy"]["seven_day"]["used_pct"].is_number() && snap["kinds"]["agy:claude-gpt"]["seven_day"]["used_pct"].is_number(), "{snap}");
+    }
+}
+
+#[cfg(test)]
+mod logout_tests {
+    use super::*;
+    use crate::testing as tt;
+
+    fn token_path() -> std::path::PathBuf {
+        crate::home::dir().unwrap().join(TOKEN_FILE)
+    }
+
+    async fn seed(app: &Arc<App>, host: &str) {
+        for (key, q) in parse_usage(&json!({"response": "Gemini Models\tWeekly Limit Remaining\t98%\t2026-10-11T15:39:29Z\nClaude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-11T15:56:55Z\n"}).to_string()).unwrap() {
+            crate::quota::set(app, host, key, q).await;
+        }
+    }
+
+    use serde_json::json;
+
+    /// 本機：刪假 HOME 底下的憑證檔、清兩把額度 key（連重啟快取）並各廣播一則 `quota:null`；別的檔不動。
+    #[tokio::test]
+    async fn logging_out_removes_only_the_token_clears_both_quota_keys_and_broadcasts() {
+        let _lock = token_test_lock().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let tok = token_path();
+        let other = tok.with_file_name("settings.json");
+        std::fs::create_dir_all(tok.parent().unwrap()).unwrap();
+        std::fs::write(&tok, "secret").unwrap();
+        std::fs::write(&other, "{}").unwrap();
+        seed(&app, LOCAL_HOST).await;
+        let mut rx = app.subscribe();
+
+        assert!(logout(&app, LOCAL_HOST).await.unwrap(), "檔案在 → removed");
+        assert!(!tok.exists(), "憑證檔被刪");
+        assert!(other.exists(), "不動別的檔");
+        let q = app.quotas.lock().await;
+        assert!(!q.contains_key("agy") && !q.contains_key("agy:claude-gpt"), "兩把快照都清掉");
+        drop(q);
+        let cached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quota_cache WHERE key IN ('agy','agy:claude-gpt')").fetch_one(&app.db).await.unwrap();
+        assert_eq!(cached, 0, "重啟快取也清掉，不然重開機又顯示舊數字");
+        let mut cleared = std::collections::BTreeSet::new();
+        while let Ok(ev) = rx.try_recv() {
+            if ev.kind == "quota_updated" && ev.data["quota"].is_null() {
+                cleared.insert(ev.data["kind"].as_str().unwrap().to_string());
+            }
+        }
+        assert_eq!(cleared, ["agy".to_string(), "agy:claude-gpt".to_string()].into(), "各推一則 quota:null");
+
+        // 檔案原本不在：false，不算錯。
+        assert!(!logout(&app, LOCAL_HOST).await.unwrap());
+        std::fs::remove_file(&other).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_host_is_unknown_and_other_hosts_quota_is_untouched() {
+        let _lock = token_test_lock().await;
+        let e = tt::env().await;
+        let app = e.app.clone();
+        assert!(matches!(logout(&app, "no-such-host").await, Err(LogoutError::UnknownHost)));
+        // 遠端那台的 agy 額度不受本機登出影響。
+        let host = format!("agy-lo-{}", crate::db::ulid().to_ascii_lowercase());
+        app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        seed(&app, &host).await;
+        seed(&app, LOCAL_HOST).await;
+        logout(&app, LOCAL_HOST).await.unwrap();
+        assert!(app.quotas.lock().await.contains_key(&format!("{host}/agy")), "別台的快照還在");
+    }
+
+    /// 遠端：走 ssh（同探測那條），只送一段刪檔的 script；回 `AM_REMOVED`／`AM_ABSENT`／其他（失敗、502）。
+    #[tokio::test]
+    async fn a_remote_logout_runs_one_rm_script_over_ssh_and_clears_that_hosts_keys() {
+        let e = tt::env().await;
+        let app = e.app.clone();
+        let host = format!("agy-lo-r-{}", crate::db::ulid().to_ascii_lowercase());
+        let conn = app.hosts.insert_remote_for_test(crate::config::HostCfg {
+            shared_session: false,
+            name: host.clone(),
+            ssh: "unused".into(),
+            ssh_port: 22,
+            ssh_opts: vec![],
+            herdr_session: "agents-manager".into(),
+            remote_path: String::new(),
+        }).await;
+        let replies = Arc::new(std::sync::Mutex::new(vec!["AM_REMOVED\n".to_string(), "AM_ABSENT\n".to_string(), "boom\n".to_string()]));
+        let scripts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (r2, s2) = (replies.clone(), scripts.clone());
+        crate::hosts::set_ssh_fake(&host, move |script| {
+            s2.lock().unwrap().push(script.to_string());
+            Ok(r2.lock().unwrap().remove(0))
+        });
+        // 沒連線：不送 ssh，回錯。
+        conn.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+        seed(&app, &host).await;
+        assert!(matches!(logout(&app, &host).await, Err(LogoutError::Failed(m)) if m.contains("not connected")));
+        assert!(scripts.lock().unwrap().is_empty());
+        assert!(app.quotas.lock().await.contains_key(&format!("{host}/agy")), "失敗不清快照");
+
+        conn.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(logout(&app, &host).await.unwrap());
+        let sent = scripts.lock().unwrap()[0].clone();
+        assert!(sent.contains(".gemini/antigravity-cli/antigravity-oauth-token") && sent.contains("rm -f") && !sent.contains("agy -p"), "{sent}");
+        assert!(!app.quotas.lock().await.contains_key(&format!("{host}/agy")));
+
+        assert!(!logout(&app, &host).await.unwrap(), "AM_ABSENT → false");
+        seed(&app, &host).await;
+        assert!(matches!(logout(&app, &host).await, Err(LogoutError::Failed(m)) if m.contains("did not confirm")), "認不得的回覆＝失敗，快照留著");
+        assert!(app.quotas.lock().await.contains_key(&format!("{host}/agy")));
     }
 }
