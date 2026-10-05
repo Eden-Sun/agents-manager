@@ -6,7 +6,11 @@
 //! - `POST /api/turns/{id}/withdraw` 可以撤回還在排的這一種（使用者訊息、AGM 派工照舊 409）。
 
 /// 這些 `client_request_id` 前綴的 turn 是 daemon 自己寫的。
-const PREFIXES: [&str; 2] = [crate::child_alerts::CRID_PREFIX, super::resume_nudge::CRID_PREFIX];
+const PREFIXES: [&str; 3] = [
+    crate::child_alerts::CRID_PREFIX,
+    crate::child_done::CRID_PREFIX,
+    super::resume_nudge::CRID_PREFIX,
+];
 
 pub(crate) fn is_daemon_notice(client_request_id: Option<&str>) -> bool {
     client_request_id.is_some_and(|c| PREFIXES.iter().any(|p| c.starts_with(p)))
@@ -136,6 +140,7 @@ mod tests {
     #[test]
     fn only_notices_the_daemon_writes_itself_count() {
         assert!(is_daemon_notice(Some("child-blocked:01A:3:ff")));
+        assert!(is_daemon_notice(Some("child-done:01A:01TURN")));
         assert!(is_daemon_notice(Some("resume-nudge:01RUN")));
         for other in [None, Some(""), Some("web-1234"), Some("agm-1"), Some("mission:1:question:x"), Some("tools-install:codex:1")] {
             assert!(!is_daemon_notice(other), "{other:?}");

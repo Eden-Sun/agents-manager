@@ -126,6 +126,8 @@ pub fn spawn_stuck_turn_sweeper(app: Arc<App>) {
             revoke_all_orphaned_queued_turns(&app).await;
             // 停在提問的子 agent 的通知不只靠那一條 blocked 邊（#192）。
             crate::child_alerts::sweep(&app).await;
+            // 完成通知也用持久 turn 記錄補上漏掉的事件或 daemon 中斷。
+            crate::child_done::sweep(&app).await;
         }
     });
 }

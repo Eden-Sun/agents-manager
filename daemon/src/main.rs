@@ -45,6 +45,7 @@ mod claude_review;
 mod cli_update;
 mod codex_update;
 mod child_alerts;
+mod child_done;
 mod child_reconcile_safety;
 mod child_retire;
 mod credential_spawn;
