@@ -1008,3 +1008,7 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 
 agy 沒有 `login` 子命令也沒有 `/login`（`canLoginInSession('agy')` 是 false），所以未登入那格比照 Codex：`QuotaLoginShell` 在該主機開 shell、打 `cliLoginCommand('agy')`＝`agy` 並切過去。確認框的說明換成 agy 版：TUI 會引導登入（SSH 底下印授權網址，瀏覽器授權後把授權碼貼回），登好後輸入 `/quit` 離開。
 daemon 這一側：探測腳本（`tools::PROBE_SH`）多問一件事——憑證檔 `~/.gemini/antigravity-cli/antigravity-oauth-token` 在不在——印 `AM_LOGIN agy 1／0`，`tools.agy.logged_in` 才有值（以前永遠是 null，那格不會顯示「未登入」）。登出立刻寫 false 並推 `host_changed`；`quota_agy::spawn_agy_login_watcher` 每 20 秒對「裝了 agy、記成未登入」的主機看一次憑證檔（遠端是一個小 ssh），一出現就翻成已登入、清探測冷卻並探測一次額度，兩個桶就回到那一格，不必重啟、不必等 5 分鐘輪詢；已知未登入的主機輪詢不再跑 `agy -p /usage`（那會停在登入畫面等到逾時）。
+
+## Bot 設定面板：儲存中不出「重啟後生效」橫幅（2026-10-05 使用者）
+
+claude 改 effort／model 由 daemon 在跑著的 session 裡當場套用（`/effort`、`/model`），不用重啟。daemon 先寫 config 推 `bot_changed`、再套用，這段時間 state 的 `bot.needs_restart` 暫時是真的，面板以前一儲存就跳黃色「已儲存，重啟 Bot 後生效」。現在儲存中（PATCH 還沒回）只顯示「套用中…」，等 PATCH 回應：`needs_restart:false` → 「✓ 已套用，不用重啟」，`true`（要重啟的欄位或套用失敗）才出黃色橫幅與「立即重啟」。規則仍只在 daemon，前端不複製。
