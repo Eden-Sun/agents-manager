@@ -11,8 +11,8 @@ test('agy 是第四種 kind：列舉、標籤、說明、圖示、模型清單�
   assert.equal(KIND_LABEL.agy, 'agy')
   assert.match(KIND_DESC.agy, /Antigravity/)
   assert.match(renderToStaticMarkup(<KindIcon kind="agy" />), /<svg/)
-  assert.equal(MODEL_OPTIONS.agy[0], 'gemini-3.8-flash-medium', '第一個是預設')
-  for (const slug of MODEL_OPTIONS.agy) assert.match(slug, /^(gemini|claude|gpt-oss)-.*(-high|-low|-medium|-thinking|-4-6)$/, '強度已經在 slug 裡')
+  assert.deepEqual(MODEL_OPTIONS.agy, ['gemini-3.8-flash-medium', 'gemini-3.8-flash-high', 'gemini-3.8-flash-low'], '只留 3.8 Flash 三檔，第一個是預設')
+  for (const slug of MODEL_OPTIONS.agy) assert.match(slug, /^gemini-3\.8-flash-(high|medium|low)$/, '強度已經在 slug 裡')
 })
 
 test('context 一行字：有百分比照舊；agy 只有 token 數時寫「約 Nk tokens」，不編百分比；都沒有就沒有這一行', () => {

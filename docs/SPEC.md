@@ -3400,7 +3400,7 @@ poller 啟動時 `sweep_stale()` 關掉 `am-quota` 與本機 session 裡 label �
 | 項目 | 注入 |
 |---|---|
 | `auto_approve` | `--dangerously-skip-permissions`；沒開就不帶（agy 的 `toolPermission` 照它自己的預設 `request-review`） |
-| `model` | `--model <slug>`（slug 含 effort 變體，如 `gemini-3.1-pro-high`；解析失敗互動模式只警告、退回預設）。`effort` 沒有獨立旗標（`efforts_for_kind("agy") = []`，帶了 400） |
+| `model` | `--model <slug>`（slug 含 effort 變體，如 `gemini-3.8-flash-high`；解析失敗互動模式只警告、退回預設）。**模型只限 Gemini 3.8 Flash 三檔**（`gemini-3.8-flash-{medium,high,low}`，預設 3.8 medium；使用者 2026-10-05：「agy 的 model 只限 3.8」；`agy_static_models`、web `MODEL_OPTIONS.agy` 同一份）：3.7／3.6 Flash（agy 公告即將下架）、3.1 Pro、claude-sonnet-4-6、claude-opus-4-6-thinking、gpt-oss-120b-medium 都拿掉（`models::AGY_RETIRED_MODELS`）。已存在的 bot 設了被拿掉的模型，走 `remap_deprecated_model`／`canonical_model`（寫設定、投影、啟動 `model_args`、adopted 的 argv 共用）一律換成 `gemini-3.8-flash-medium`，**啟動不失敗**；寫設定時回 `remapped_model`，網頁設定面板（`ModelPicker`）對存著的舊值寫「agy 已不提供，啟動時改用 gemini-3.8-flash-medium」並給一鍵改用。沒見過的新 slug 當使用者自己的選擇原樣帶。`effort` 沒有獨立旗標（`efforts_for_kind("agy") = []`，帶了 400） |
 | pane env | `AGY_CLI_DISABLE_AUTO_UPDATE=true`（agy 預設背景自我更新；版本由 AG Man 管，每個 agy pane 都關，包括使用者手動在 bot pane 裡開的；bot env 可蓋掉）。`AM_*` 照舊 |
 | hooks／信任 | 無 argv，寫設定檔（§12a.2、§12a.5） |
 | persona／AG Man 指示 | **第一階段沒有**（agy 沒有 argv 的 system prompt 管道；repo 的 `AGENTS.md` 它會自己從 cwd 往上讀）。第二階段見設計 #15 |

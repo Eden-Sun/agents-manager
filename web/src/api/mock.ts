@@ -414,17 +414,6 @@ const MODELS: Record<BotKind, Rec[]> = {
     { id: 'gemini-3.8-flash-medium', display_name: 'gemini-3.8-flash-medium', description: '', is_default: true, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'gemini-3.8-flash-high', display_name: 'gemini-3.8-flash-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
     { id: 'gemini-3.8-flash-low', display_name: 'gemini-3.8-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'gemini-3.7-flash-high', display_name: 'gemini-3.7-flash-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'gemini-3.7-flash-medium', display_name: 'gemini-3.7-flash-medium', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'gemini-3.7-flash-low', display_name: 'gemini-3.7-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'gemini-3.6-flash-high', display_name: 'gemini-3.6-flash-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'gemini-3.6-flash-medium', display_name: 'gemini-3.6-flash-medium', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'gemini-3.6-flash-low', display_name: 'gemini-3.6-flash-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'gemini-3.1-pro-high', display_name: 'gemini-3.1-pro-high', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'gemini-3.1-pro-low', display_name: 'gemini-3.1-pro-low', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'claude-sonnet-4-6', display_name: 'claude-sonnet-4-6', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'claude-opus-4-6-thinking', display_name: 'claude-opus-4-6-thinking', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
-    { id: 'gpt-oss-120b-medium', display_name: 'gpt-oss-120b-medium', description: '', is_default: false, default_effort: null, efforts: [], service_tiers: [] },
   ],
 }
 

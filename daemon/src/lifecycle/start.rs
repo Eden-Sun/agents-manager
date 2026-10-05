@@ -2067,19 +2067,33 @@ mod resume_args_tests {
         assert!(full_rules.contains(persona), "configured persona survives outside the shell argv");
     }
 
+    /// 2026-10-05：agy 只留 Gemini 3.8 Flash。已存在的 bot 設了拿掉的模型，啟動照常成功、argv 改用 3.8 medium（不讓它起不來）。
+    #[tokio::test]
+    async fn an_agy_bot_with_a_retired_model_starts_on_the_default_model() {
+        let e = env().await;
+        let bot = claude_bot(&e.app, &e.project_id, "agy-retired").await;
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.1-pro-high', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+
+        start_bot(&e.app, &bot.id).await.expect("拿掉的模型不能讓啟動失敗");
+
+        let args = started_args(&e).pop().unwrap();
+        assert!(args.windows(2).any(|w| w == ["--model", "gemini-3.8-flash-medium"]), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("3.1-pro")), "{args:?}");
+    }
+
     /// agy 啟動：`--dangerously-skip-permissions`（auto_approve）、`--model <slug>`、不帶 resume／persona 旗標；pane env 關掉自動更新；
     /// 信任框預寫進**假 HOME** 的 `settings.json`、hook 與 statusLine 裝在假 HOME（絕不碰真的 `~/.gemini`）。
     #[tokio::test]
     async fn agy_start_pins_permissions_model_env_trust_and_hooks_in_the_fake_home() {
         let e = env().await;
         let bot = claude_bot(&e.app, &e.project_id, "agy-start").await;
-        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.1-pro-high', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
+        sqlx::query("UPDATE bots SET kind='agy', model='gemini-3.8-flash-high', auto_approve=1 WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
 
         start_bot(&e.app, &bot.id).await.unwrap();
 
         let args = started_args(&e).pop().unwrap();
         assert!(args.contains(&"--dangerously-skip-permissions".into()), "{args:?}");
-        assert!(args.windows(2).any(|w| w == ["--model", "gemini-3.1-pro-high"]), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--model", "gemini-3.8-flash-high"]), "{args:?}");
         assert!(!args.iter().any(|a| a == "--rules" || a == "--resume" || a == "-c" || a == "--conversation"), "第一階段沒有 resume／persona 旗標：{args:?}");
         let started = e.herdr.calls_to("agent.start");
         assert_eq!(started.last().unwrap()["kind"], "agy");

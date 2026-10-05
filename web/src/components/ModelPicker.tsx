@@ -99,6 +99,10 @@ export function ApiModelFields({
   const effortUnsupported = fromApi && effort !== null && efforts.length > 0 && !efforts.includes(effort)
   const fastUnsupported = fromApi && fast && !hasFast
 
+  // agy 拿掉的模型（只留 3.8 Flash）：存著的值照舊標出來、daemon 啟動時換成 3.8 medium，這裡講清楚並給一鍵改掉。
+  const retiredTo = kind === 'agy' && model ? canonicalModel(kind, model) : null
+  const retiredModel = retiredTo !== null && retiredTo !== model ? { from: model as string, to: retiredTo } : null
+
   const pickModel = (id: string | null) => {
     onModel(id)
     const next = (id && models.find((m) => m.id === id)) || defaultModel
@@ -161,6 +165,14 @@ export function ApiModelFields({
         </div>
       ) : null}
 
+      {retiredModel ? (
+        <span className="hint field-note warn">
+          存著的模型「{retiredModel.from}」agy 已不提供，啟動時改用 {retiredModel.to}。
+          <button type="button" className="mini-btn" onClick={() => pickModel(retiredModel.to)}>
+            改用 {retiredModel.to}
+          </button>
+        </span>
+      ) : null}
       {effortUnsupported ? (
         <span className="hint field-note warn">
           存著的強度「{effortLabel(effort)}」{current ? `${current.display_name} ` : ''}沒有這一級，啟動時會被拒。
