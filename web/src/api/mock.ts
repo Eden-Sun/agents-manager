@@ -602,9 +602,8 @@ export class MockTransport implements Transport {
       host: 'local',
     },
     grok: null,
-    // agy 兩個模型桶（SPEC §12a.7）：各回報 5h 與週窗，登出會把兩個 key 都清成 null。
+    // agy 只回報 Gemini 組的 5h 與 7d 窗。
     agy: { five_hour: { used_pct: 43, resets_at: inHours(3) }, seven_day: { used_pct: 22, resets_at: inHours(120) }, plan: 'Pro', updated_at: now(), host: 'local' },
-    'agy:claude-gpt': { five_hour: { used_pct: 12, resets_at: inHours(2) }, seven_day: { used_pct: 61, resets_at: inHours(96) }, plan: 'Pro', updated_at: now(), host: 'local' },
   }
   private identities: MockIdentity[] = [
     { name: 'cc0', kind: 'claude', env: {}, args: [] },
@@ -1555,7 +1554,7 @@ export class MockTransport implements Transport {
 
   /**
    * 額度欄 agy 那格的登出（`POST /api/hosts/{name}/agy/logout`）：daemon 刪掉 agy 的 OAuth 憑證檔，
-   * 清掉該主機 agy 與 agy:claude-gpt 的額度快照並廣播。`removed:false`＝本來就沒有憑證。
+   * 清掉該主機 agy 的 Gemini 額度快照並廣播。`removed:false`＝本來就沒有憑證。
    */
   private logoutAgy(host: string) {
     const remote = host && host !== 'local' ? this.host(host) : null
@@ -1563,10 +1562,8 @@ export class MockTransport implements Transport {
     const removed = tools.agy.logged_in !== false
     tools.agy = { ...tools.agy, logged_in: false }
     const prefix = remote ? `${remote.name}/` : ''
-    for (const base of ['agy', 'agy:claude-gpt']) {
-      if (`${prefix}${base}` in this.quota) this.quota[`${prefix}${base}`] = null
-      this.emit('quota_updated', { kind: `${prefix}${base}`, host: remote ? remote.name : 'local', quota: null })
-    }
+    if (`${prefix}agy` in this.quota) this.quota[`${prefix}agy`] = null
+    this.emit('quota_updated', { kind: `${prefix}agy`, host: remote ? remote.name : 'local', quota: null })
     this.emit('host_changed', { name: remote ? remote.name : 'local', connected: true, tools })
     return { removed }
   }
@@ -1574,18 +1571,20 @@ export class MockTransport implements Transport {
   /** 在哪個 shell pane 跑著 agy 登入 TUI（`<host>/<pane>`）。 */
   private agyLoginPane: string | null = null
 
-  /** agy 登入完成：憑證回來，daemon 的 watcher 偵測到後翻已登入、補探額度，兩個桶回到那一格。 */
+  /** agy 登入完成：憑證回來，daemon 的 watcher 偵測到後翻已登入、補探 Gemini 的 5h／7d 額度。 */
   private finishAgyLogin(host: string) {
     const remote = host && host !== 'local' ? this.host(host) : null
     const tools = remote ? remote.tools : this.localTools
     tools.agy = { ...tools.agy, logged_in: true }
     const prefix = remote ? `${remote.name}/` : ''
-    const week = (used: number, h: number) => ({ seven_day: { used_pct: used, resets_at: inHours(h) }, plan: 'Pro', updated_at: now(), host: remote ? remote.name : 'local' })
-    this.quota[`${prefix}agy`] = week(2, 120)
-    this.quota[`${prefix}agy:claude-gpt`] = week(0, 96)
-    for (const base of ['agy', 'agy:claude-gpt']) {
-      this.emit('quota_updated', { kind: `${prefix}${base}`, host: remote ? remote.name : 'local', quota: this.quota[`${prefix}${base}`] })
+    this.quota[`${prefix}agy`] = {
+      five_hour: { used_pct: 3, resets_at: inHours(4) },
+      seven_day: { used_pct: 2, resets_at: inHours(120) },
+      plan: 'Pro',
+      updated_at: now(),
+      host: remote ? remote.name : 'local',
     }
+    this.emit('quota_updated', { kind: `${prefix}agy`, host: remote ? remote.name : 'local', quota: this.quota[`${prefix}agy`] })
     this.emit('host_changed', { name: remote ? remote.name : 'local', connected: true, tools })
   }
 

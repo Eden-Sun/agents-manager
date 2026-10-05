@@ -1,6 +1,6 @@
 /**
  * 額度欄 agy 那格的登入（使用者 2026-10-05）：未登入時 popover 出現「開 shell 登入」→ 確認框（TUI 引導登入的說明）
- * → 在該 host 開 shell、打 `agy` 並切過去。登好（TUI `/quit`）之後那格回到兩條額度。真的掛 `QuotaStrip` 進 happy-dom，後端是 mock。
+ * → 在該 host 開 shell、打 `agy` 並切過去。登好（TUI `/quit`）之後那格回到 5h／7d 額度。真的掛 `QuotaStrip` 進 happy-dom，後端是 mock。
  */
 import test, { after, afterEach, before } from 'node:test'
 import assert from 'node:assert/strict'
@@ -29,7 +29,6 @@ function mockLoggedOutAgy() {
   }
   m.localTools.agy.logged_in = false
   m.quota.agy = null
-  m.quota['agy:claude-gpt'] = null
 }
 
 async function openAgyPopover() {
@@ -61,7 +60,7 @@ it('未登入：agy 那格有「開 shell 登入」鈕，說明 TUI 會引導登
   assert.equal(btn(agyRow(), '開 shell 登入'), undefined)
 })
 
-it('點「開 shell 登入」→ 確認框寫明授權網址與 /quit → 確認後開 shell、送 agy，登好後那格回到兩條額度', async () => {
+it('點「開 shell 登入」→ 確認框寫明授權網址與 /quit → 確認後開 shell、送 agy，登好後那格回到 5h／7d 額度', async () => {
   const requests = await openAgyPopover()
   await click(btn(agyRow(), '開 shell 登入')!)
   await until(() => btn(document.body, '開 shell 並送出') !== undefined, '確認框出現')
@@ -91,7 +90,7 @@ it('點「開 shell 登入」→ 確認框寫明授權網址與 /quit → 確認
     await useStore.getState().loadQuota()
   })
   await until(() => useStore.getState().localTools.agy.logged_in === true, '翻成已登入')
-  await until(() => useStore.getState().quota['agy:claude-gpt'] != null && useStore.getState().quota.agy != null, '兩個桶的額度回來')
+  await until(() => useStore.getState().quota.agy?.five_hour != null && useStore.getState().quota.agy?.seven_day != null, 'Gemini 的 5h／7d 額度回來')
   await act(async () => {})
   assert.doesNotMatch(agyRow().textContent ?? '', /未登入/)
   assert.ok(btn(agyRow(), '登出 agy'), '已登入又有登出鈕')

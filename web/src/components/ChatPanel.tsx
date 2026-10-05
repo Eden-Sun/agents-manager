@@ -1152,7 +1152,7 @@ export function ChatPanel({ onOpenSidebar }: { onOpenSidebar: () => void }) {
       const b = s.bots.find((x) => x.id === s.selectedBotId)
       if (!b) return null
       const r = s.runs[b.id] ?? null
-      // agy 的 `run.status` 只有模型與 context token 數（daemon 的精簡版，沒有額度）：額度的週窗仍由下面推導，context 疊上去。
+      // agy 的 `run.status` 只有模型與 context token 數（daemon 的精簡版，沒有額度）：5h／7d 仍由下方額度快照推導，再疊上 context。
       if (r?.status && b.kind !== 'agy') return r.status
       if (b.kind === 'claude') return null
       // 額度按主機分（SPEC §14）：狀態列講的是這隻 bot，就看它那台的列。

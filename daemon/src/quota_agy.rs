@@ -1,9 +1,9 @@
 //! agy（Antigravity CLI）額度（SPEC §12a.7）。數字來自 `agy -p "/usage" --output-format json`：唯讀指令，**不開對話、不耗額度**，
 //! 所以不必像 grok 那樣開一顆探測 pane——在拋棄式暫存目錄裡直接跑、有逾時、跑完刪目錄。
 //!
-//! 新版輸出在 `command.data.groups[].buckets[]`：各模型組有 weekly 與 five-hour 窗口，`remaining_fraction` 是剩餘比例，
-//! `reset_time` 是 RFC3339 重置時刻。兩個模型組各自是一把 key：`agy`（Gemini）與 `agy:claude-gpt`（Claude 與 GPT-OSS）。
-//! 舊版 tab 分隔 `response` 仍接受。探測失敗**不覆蓋**舊值（讀數自己會變陳舊，`quota::STALE_AFTER`）；格式讀不懂回 `None`，不編數字。
+//! 新版輸出在 `command.data.groups[].buckets[]`：只讀 Gemini 組的 weekly 與 five-hour 窗口，`remaining_fraction` 是剩餘比例，
+//! `reset_time` 是 RFC3339 重置時刻。Claude/GPT 組不屬於 AG Man 的 agy 額度。舊版 tab 分隔 `response` 仍接受；
+//! 探測失敗**不覆蓋**舊值（讀數自己會變陳舊，`quota::STALE_AFTER`）；格式讀不懂回 `None`，不編數字。
 
 use crate::config::LOCAL_HOST;
 use crate::quota::{Quota, Window};
@@ -18,9 +18,6 @@ pub const AGY_POLL: Duration = Duration::from_secs(300);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(40);
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(15 * 60);
 
-/// Gemini 那一桶用裸 `agy`；Claude／GPT 那一桶的子帳號名。
-pub const CLAUDE_GPT_KEY: &str = "agy:claude-gpt";
-
 /// 探測指令（本機與遠端同一份）：拋棄式 cwd、不讀 stdin、關自動更新、跑完刪目錄。`exe` 是偵測到的絕對路徑，沒有就用 PATH 上的 `agy`。
 pub fn probe_script(exe: Option<&str>) -> String {
     let exe = crate::hosts::sh_quote(exe.unwrap_or("agy"));
@@ -34,8 +31,6 @@ fn bucket_key(name: &str) -> Option<&'static str> {
     let n = name.to_ascii_lowercase();
     if n.contains("gemini") {
         Some("agy")
-    } else if n.contains("claude") || n.contains("gpt") {
-        Some(CLAUDE_GPT_KEY)
     } else {
         None
     }
@@ -97,7 +92,7 @@ fn bucket_window(bucket: &Value) -> Option<UsageWindow> {
     }
 }
 
-/// `command.data.groups[].buckets[]`：依模型組與窗口填入兩個 quota key。
+/// `command.data.groups[].buckets[]`：只依 Gemini 組的窗口填入 `agy`。
 fn parse_group_usage(v: &Value, now: &str) -> Option<Vec<(&'static str, Quota)>> {
     let groups = v.get("command")?.get("data")?.get("groups")?.as_array()?;
     let mut out: Vec<(&'static str, Quota)> = Vec::new();
@@ -127,7 +122,7 @@ fn parse_group_usage(v: &Value, now: &str) -> Option<Vec<(&'static str, Quota)>>
     (!out.is_empty()).then_some(out)
 }
 
-/// 舊版 `response` 是 tab 分隔列；只提供 weekly 百分比，沒有 5h 資料。
+/// 舊版 `response` 是 tab 分隔列；只保留 Gemini weekly 百分比，沒有 5h 資料。
 fn parse_legacy_usage(v: &Value, now: &str) -> Option<Vec<(&'static str, Quota)>> {
     let response = v.get("response")?.as_str()?;
     let mut out: Vec<(&'static str, Quota)> = Vec::new();
@@ -255,7 +250,7 @@ pub enum LogoutError {
     Failed(String),
 }
 
-/// `POST /api/hosts/{name}/agy/logout`：刪掉那台主機的 agy 憑證檔，再清掉那台 agy 的額度快照（`agy`、`agy:claude-gpt`）並廣播，
+/// `POST /api/hosts/{name}/agy/logout`：刪掉那台主機的 agy 憑證檔，再清掉那台 agy 的額度快照（`agy`）並廣播，
 /// 那一格立刻變成沒有讀數。回「檔案原本在不在」（不在不算錯）。不跑 agy、不動別的檔、不停正在跑的 agy bot（它們下次重啟才會停在登入畫面）。
 /// 拿探測的鎖：正在跑的探測不能在清掉之後又把讀數寫回來。
 pub async fn logout(app: &Arc<App>, host: &str) -> Result<bool, LogoutError> {
@@ -282,13 +277,11 @@ pub async fn logout(app: &Arc<App>, host: &str) -> Result<bool, LogoutError> {
     if !app.hosts.is_current(&fence).await {
         return Err(LogoutError::Failed(format!("host `{host}` changed during the agy logout")));
     }
-    for base in ["agy", CLAUDE_GPT_KEY] {
-        let key = crate::quota::quota_key(host, base);
-        let had = app.quotas.lock().await.contains_key(&key);
-        crate::quota::forget(app, &key).await;
-        if had {
-            app.emit("quota_updated", serde_json::json!({"kind": key, "host": host, "quota": null})).await;
-        }
+    let key = crate::quota::quota_key(host, "agy");
+    let had = app.quotas.lock().await.contains_key(&key);
+    crate::quota::forget(app, &key).await;
+    if had {
+        app.emit("quota_updated", serde_json::json!({"kind": key, "host": host, "quota": null})).await;
     }
     // 額度那格要立刻變成「未登入」並出現登入鈕，不等下一輪偵測。
     set_logged_in(app, host, &fence, false).await;
@@ -379,7 +372,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 新版 command.data fixture：兩組模型各含 weekly 與 5h 桶。
+    /// 新版 command.data fixture：Gemini 與 Claude/GPT 組都有 weekly 與 5h 桶；只使用 Gemini。
     fn real() -> String {
         json!({"conversation_id": "", "status": "SUCCESS", "command": {"data": {"groups": [
             {"name": "Gemini Models", "buckets": [
@@ -395,9 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn the_real_output_gives_weekly_and_five_hour_windows_for_both_model_groups() {
+    fn the_real_output_keeps_both_gemini_windows_and_ignores_claude_gpt() {
         let got = parse_usage(&real()).expect("parsed");
-        assert_eq!(got.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["agy", "agy:claude-gpt"]);
+        assert_eq!(got.iter().map(|(k, _)| *k).collect::<Vec<_>>(), ["agy"]);
         let (_, gemini) = &got[0];
         let week = gemini.seven_day.as_ref().unwrap();
         assert!((week.used_pct - 2.0).abs() < 1e-9, "98% remaining = 2% used");
@@ -407,14 +400,13 @@ mod tests {
         assert_eq!(five.resets_at.as_deref(), Some("2026-10-05T15:00:00.000Z"));
         assert!(gemini.fable.is_none());
         assert_eq!(gemini.source, "agy-usage");
-        assert_eq!(got[1].1.seven_day.as_ref().unwrap().used_pct, 0.0);
-        assert!((got[1].1.five_hour.as_ref().unwrap().used_pct - 33.0).abs() < 1e-9);
     }
 
     #[test]
     fn the_legacy_response_format_still_populates_its_weekly_window() {
         let legacy = json!({"response": "Gemini Models\tWeekly Limit Remaining\t98%\t2026-10-11T15:39:29Z\nClaude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-11T15:56:55Z\n"}).to_string();
         let got = parse_usage(&legacy).expect("legacy output remains readable");
+        assert_eq!(got.len(), 1, "legacy Claude/GPT row is ignored");
         assert_eq!(got[0].1.seven_day.as_ref().unwrap().used_pct, 2.0);
         assert!(got[0].1.five_hour.is_none());
     }
@@ -430,6 +422,7 @@ mod tests {
             r#"{"response": "Gemini Models\tWeekly Limit Remaining\tunknown\t2026-10-11T15:39:29Z"}"#,
             r#"{"response": "Gemini Models\tDaily Limit Remaining\t90%\t2026-10-11T15:39:29Z"}"#,
             r#"{"command":{"data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-5h","window":"five_hour","remaining_fraction":1.4}]}]}}}"#,
+            r#"{"command":{"data":{"groups":[{"name":"Claude and GPT models","buckets":[{"id":"claude-gpt-5h","window":"five_hour","remaining_fraction":0.5}]}]}}}"#,
             r#"{"response": "Some Other Models\tWeekly Limit Remaining\t90%\t2026-10-11T15:39:29Z"}"#,
         ] {
             assert!(parse_usage(bad).is_none(), "{bad:?}");
@@ -442,9 +435,7 @@ mod tests {
         let got = parse_usage(&r).unwrap();
         let g = got[0].1.seven_day.as_ref().unwrap();
         assert_eq!((g.used_pct, g.resets_at.as_deref()), (0.0, None), "超過 100% 夾進範圍、沒有重置時間就是 None");
-        let c = got[1].1.seven_day.as_ref().unwrap();
-        assert!((c.used_pct - 60.0).abs() < 1e-9);
-        assert_eq!(c.resets_at.as_deref(), Some("2026-10-11T00:00:00.000Z"));
+        assert_eq!(got.len(), 1, "Claude/GPT weekly row is ignored");
         // 只有一桶也算（另一桶之後再說）。
         let one = json!({"response": "Gemini Models\tWeekly Limit Remaining\t50%\t2026-10-11T00:00:00Z"}).to_string();
         assert_eq!(parse_usage(&one).unwrap().len(), 1);
@@ -497,7 +488,7 @@ mod tests {
         assert!(!refresh_agy(&e.app, LOCAL_HOST).await.expect("no agy: Ok(false), no error"));
         assert!(e.app.quotas.lock().await.get("agy").is_none());
 
-        // 遠端：沒裝＝不碰 ssh；有裝＝跑同一段 script，兩桶都記在 `<host>/` 底下。
+        // 遠端：沒裝＝不碰 ssh；有裝＝跑同一段 script，Gemini 的兩個窗口記在 `<host>/agy`。
         let host = format!("agy-remote-{}", crate::db::ulid().to_ascii_lowercase());
         let conn = e.app.hosts.insert_remote_for_test(crate::config::HostCfg {
             shared_session: false,
@@ -522,28 +513,64 @@ mod tests {
         assert!(refresh_agy(&e.app, &host).await.unwrap());
         assert!(calls.lock().unwrap()[0].contains("'/opt/agy' -p /usage --output-format json"));
         let q = e.app.quotas.lock().await;
-        assert!(q.contains_key(&format!("{host}/agy")) && q.contains_key(&format!("{host}/agy:claude-gpt")), "{:?}", q.keys().collect::<Vec<_>>());
+        assert!(q.contains_key(&format!("{host}/agy")), "{:?}", q.keys().collect::<Vec<_>>());
+        assert!(!q.contains_key(&format!("{host}/agy:claude-gpt")), "Claude/GPT 額度不可另存");
         assert!(!q.contains_key("agy"), "遠端的讀數不能落在本機那格");
     }
 
     #[tokio::test]
-    async fn both_buckets_are_published_and_survive_each_other_and_a_failed_probe_keeps_the_old_reading() {
+    async fn gemini_five_hour_and_weekly_windows_share_one_key_and_failed_probe_keeps_the_old_reading() {
         let e = crate::testing::env().await;
         let app = e.app.clone();
         for (key, q) in parse_usage(&real()).unwrap() {
             crate::quota::set(&app, LOCAL_HOST, key, q).await;
         }
-        // 兩把 key 都在；`agy` 的寫入不會把 `agy:claude-gpt` 當成「收斂到裸 key 的分開那一格」清掉。
+        // 兩個窗口都落在唯一的 Gemini key 上。
         let again = parse_usage(&real()).unwrap().remove(0);
         crate::quota::set(&app, LOCAL_HOST, again.0, again.1).await;
         let q = app.quotas.lock().await.clone();
-        assert!(q.contains_key("agy") && q.contains_key("agy:claude-gpt"), "{:?}", q.keys().collect::<Vec<_>>());
+        assert!(q.contains_key("agy"), "{:?}", q.keys().collect::<Vec<_>>());
+        assert!(!q.contains_key("agy:claude-gpt"), "不建立舊的 Claude/GPT key");
         let before = q["agy"].seven_day.clone();
         // 探測壞掉（沒有 agy 輸出）：解析回 None，呼叫端不寫任何東西。
         assert!(parse_usage("garbage").is_none());
         assert_eq!(app.quotas.lock().await["agy"].seven_day, before);
         let snap = crate::quota::snapshot(&app).await;
-        assert!(snap["kinds"]["agy"]["seven_day"]["used_pct"].is_number() && snap["kinds"]["agy:claude-gpt"]["seven_day"]["used_pct"].is_number(), "{snap}");
+        assert!(snap["kinds"]["agy"]["five_hour"]["used_pct"].is_number() && snap["kinds"]["agy"]["seven_day"]["used_pct"].is_number(), "{snap}");
+        assert!(snap["kinds"].get("agy:claude-gpt").is_none(), "{snap}");
+    }
+
+    #[tokio::test]
+    async fn retired_agy_claude_gpt_cache_is_purged_on_load_and_cannot_be_saved_again() {
+        let e = crate::testing::env().await;
+        let app = e.app.clone();
+        let q = quota_row("agy", &crate::db::now()).1;
+        let raw = serde_json::to_string(&q).unwrap();
+        for key in ["agy:claude-gpt", "agy-remote/agy:claude-gpt"] {
+            sqlx::query("INSERT INTO quota_cache (key, quota_json, updated_at) VALUES (?, ?, ?)")
+                .bind(key)
+                .bind(&raw)
+                .bind(&q.updated_at)
+                .execute(&app.db)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(crate::quota::load_cache(&app).await.unwrap(), 0);
+        assert!(!app.quotas.lock().await.contains_key("agy:claude-gpt"));
+        let old_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quota_cache WHERE key LIKE '%agy:claude-gpt'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(old_rows, 0, "startup purges local and remote old snapshots");
+
+        crate::quota::set(&app, LOCAL_HOST, "agy:claude-gpt", q).await;
+        assert!(!app.quotas.lock().await.contains_key("agy:claude-gpt"));
+        let old_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quota_cache WHERE key LIKE '%agy:claude-gpt'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+        assert_eq!(old_rows, 0, "legacy callers cannot restore it");
     }
 }
 
@@ -564,9 +591,9 @@ mod logout_tests {
 
     use serde_json::json;
 
-    /// 本機：刪假 HOME 底下的憑證檔、清兩把額度 key（連重啟快取）並各廣播一則 `quota:null`；別的檔不動。
+    /// 本機：刪假 HOME 底下的憑證檔、清 Gemini 額度 key（連重啟快取）並廣播 `quota:null`；別的檔不動。
     #[tokio::test]
-    async fn logging_out_removes_only_the_token_clears_both_quota_keys_and_broadcasts() {
+    async fn logging_out_removes_only_the_token_clears_gemini_quota_and_broadcasts() {
         let _lock = token_test_lock().await;
         let e = tt::env().await;
         let app = e.app.clone();
@@ -582,9 +609,9 @@ mod logout_tests {
         assert!(!tok.exists(), "憑證檔被刪");
         assert!(other.exists(), "不動別的檔");
         let q = app.quotas.lock().await;
-        assert!(!q.contains_key("agy") && !q.contains_key("agy:claude-gpt"), "兩把快照都清掉");
+        assert!(!q.contains_key("agy"), "Gemini 額度快照清掉");
         drop(q);
-        let cached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quota_cache WHERE key IN ('agy','agy:claude-gpt')").fetch_one(&app.db).await.unwrap();
+        let cached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quota_cache WHERE key = 'agy'").fetch_one(&app.db).await.unwrap();
         assert_eq!(cached, 0, "重啟快取也清掉，不然重開機又顯示舊數字");
         let mut cleared = std::collections::BTreeSet::new();
         while let Ok(ev) = rx.try_recv() {
@@ -592,7 +619,7 @@ mod logout_tests {
                 cleared.insert(ev.data["kind"].as_str().unwrap().to_string());
             }
         }
-        assert_eq!(cleared, ["agy".to_string(), "agy:claude-gpt".to_string()].into(), "各推一則 quota:null");
+        assert_eq!(cleared, ["agy".to_string()].into(), "推一則 quota:null");
 
         // 檔案原本不在：false，不算錯。
         assert!(!logout(&app, LOCAL_HOST).await.unwrap());
