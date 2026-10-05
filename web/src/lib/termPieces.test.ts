@@ -116,3 +116,74 @@ test('URL 剛好在行尾結束、下一行是新的一行：不接（不是每�
   assert.deepEqual(urlsOf(rows), [[l1.slice(5), l1.slice(5)]])
   assert.equal(rows[2][0].text, 'm4p@m4p %')
 })
+
+/** 2026-10-05 實測：agy 登入的 OAuth 網址（213 欄 pane 折在 212），續列開頭是 agy 的 1 格邊界。`herdr pane read --source visible` 原樣。 */
+const AGY_SCREEN = [
+  " Your browser should open automatically. If not:",
+  "",
+  " https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com&code_challenge=j5VIs5EZlVJvtpQhu5QRYv3IRX_et4K4g7Giaav97gY&code_c",
+  " hallenge_method=S256&prompt=consent&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform+https%3A%2F%2Fwww.googleapis.c",
+  " om%2Fauth%2Fuserinfo.email+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.profile+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcclog+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fexperimentsandconfigs+https%3A%2F%2",
+  " Fwww.googleapis.com%2Fauth%2Faicode+openid&state=nyhyXCUTff-RW3SUqTgAMg",
+  "",
+  " Copy and paste the URL or click on the link below:"
+]
+const AGY_URL = AGY_SCREEN.slice(2, 6).map((l) => l.slice(1)).join('')
+const joined = (row: ReturnType<typeof termPieces>[number]) => row.map((p) => p.text).join('')
+
+test('agy 登入的長網址：續列開頭多一格空白也接回，每一段都指向完整網址', () => {
+  const rows = termPieces(AGY_SCREEN.join('\n'), 213)
+  const urls = rows.flat().filter((p) => p.url)
+  assert.equal(urls.length, 4, '四列各一段')
+  for (const p of urls) assert.equal(p.url, AGY_URL)
+  assert.match(AGY_URL, /^https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?.*code_challenge=.*&state=nyhyXCUTff-RW3SUqTgAMg$/)
+  assert.ok(AGY_URL.includes('code_challenge_method=S256'), '第一個接縫（code_c｜hallenge）')
+  assert.ok(AGY_URL.includes('www.googleapis.com%2Fauth%2Fuserinfo.email'), '第二個接縫（googleapis.c｜om）')
+  assert.ok(AGY_URL.includes('%3A%2F%2Fwww.googleapis.com%2Fauth%2Faicode'), '第三個接縫（%2F%2｜Fwww）')
+  // 版面不動：續列的開頭空白仍是純文字，前後文也沒被吃掉。
+  assert.equal(joined(rows[0]), AGY_SCREEN[0])
+  assert.equal(joined(rows[3]), AGY_SCREEN[3])
+  assert.equal(joined(rows[7]), AGY_SCREEN[7])
+  assert.equal(rows[7].some((p) => p.url), false, '「Copy and paste…」不是網址')
+})
+
+test('agy 的網址：欄寬不明也接回（續片同寬、最長行當證據）', () => {
+  const urls = termPieces(AGY_SCREEN.join('\n')).flat().filter((p) => p.url)
+  assert.equal(urls.length, 4)
+  assert.equal(urls[0].url, AGY_URL)
+})
+
+test('縮一格的續列：前一列沒塞滿寬度就不接（一般縮排文字不被誤接）', () => {
+  const rows = termPieces(['  see https://a.example/path', ' Done', ' Copy and paste the URL'].join('\n'), 80)
+  assert.deepEqual(urlsOf(rows), [['https://a.example/path', 'https://a.example/path']])
+  assert.equal(joined(rows[1]), ' Done')
+})
+
+test('縮一格的續列：有空白的整句不接，就算前一列塞滿了', () => {
+  const cols = 30
+  const l1 = ' https://a.example/'.padEnd(cols - 1, 'p')
+  const rows = termPieces([l1, ' Copy and paste the URL'].join('\n'), cols)
+  assert.deepEqual(urlsOf(rows), [[l1.slice(1), l1.slice(1)]])
+})
+
+test('縮一格的續列：續片要從網址字元開頭（空白後接右括號不接）', () => {
+  const cols = 30
+  const l1 = ' https://a.example/'.padEnd(cols - 1, 'p')
+  assert.deepEqual(urlsOf(termPieces([l1, ' ）oops'].join('\n'), cols)), [[l1.slice(1), l1.slice(1)]])
+})
+
+test('縮一格的續列：最後一列短，網址在那裡結束，後面的提示字不受影響', () => {
+  const cols = 30
+  const l1 = ' https://a.example/'.padEnd(cols - 1, 'p')
+  const l2 = ' ' + 'q'.repeat(cols - 2)
+  const rows = termPieces([l1, l2, ' tail', '', ' $ prompt'].join('\n'), cols)
+  const full = l1.slice(1) + l2.slice(1) + 'tail'
+  assert.deepEqual(urlsOf(rows), [[l1.slice(1), full], [l2.slice(1), full], ['tail', full]])
+  assert.equal(joined(rows[4]), ' $ prompt')
+})
+
+test('不縮排的折行照舊（不被縮一格的規則改壞）', () => {
+  const cols = 20
+  const l1 = 'https://a.example/'.padEnd(cols, 'p')
+  assert.equal(urlsOf(termPieces([l1, 'q'.repeat(cols), 'z end'].join('\n'), cols)).length, 3)
+})

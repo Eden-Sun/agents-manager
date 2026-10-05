@@ -21,6 +21,15 @@ function continuesUrl(line: string | undefined): boolean {
   return line !== undefined && line.length > 0 && !/^\s/.test(line) && URL_CHARS.test(line[0])
 }
 
+/**
+ * 帶一格縮排的續片：` ` 加一整段沒有空白的網址字元，整行就這樣。agy 登入畫面的長 OAuth 網址自己折行，每一列開頭都是它的 1 格邊界
+ * （2026-10-05 實測：213 欄的 pane 折在 212，續列是 ` hallenge_method=…`、` om%2F…`、` Fwww…`），
+ * 純文字的續列沒有空白，一般縮排的文字（` Copy and paste…`、` Done`）要嘛有空白、要嘛前一列不是塞滿寬度，不會被接上。
+ */
+function indentedTail(line: string | undefined): boolean {
+  return line !== undefined && /^ [^\s]+$/.test(line) && URL_CHARS.test(line[1])
+}
+
 /** 整行都是網址字元、一個空白都沒有——軟折行中段的長相。 */
 function isFullWrap(line: string | undefined, width: number): boolean {
   return line !== undefined && line.length === width && !/\s/.test(line) && continuesUrl(line)
@@ -33,9 +42,16 @@ function isFullWrap(line: string | undefined, width: number): boolean {
  */
 function wrapsToNextLine(lines: string[], i: number, columns: number | null | undefined, longest: number): boolean {
   const width = lines[i].length
-  if (width === 0 || !continuesUrl(lines[i + 1])) return false
+  if (width === 0) return false
   // 比終端還寬的一行不可能是折行的結果（多半是快照裡的裝飾線）。
   if (columns && columns > 0 && width > columns) return false
+  if (indentedTail(lines[i + 1])) {
+    // 縮一格的續片只有在這一列真的塞滿了才接：欄寬已知看是否到 `columns - 2`（agy 折在 columns - 1），
+    // 不知道就要這一列與續片同寬、或是畫面最長行。
+    if (columns && columns > 0) return width >= columns - 2
+    return width >= MIN_WRAP_WIDTH && (lines[i + 1].length === width || width === longest)
+  }
+  if (!continuesUrl(lines[i + 1])) return false
   if (isFullWrap(lines[i + 1], width)) return true
   if (columns && columns > 0 && width === columns) return true
   // 已知欄寬時，最長行這條後路只接「整行都沒有空白」的續片。有空白的下一行是新的提示字元（#659）。
@@ -58,11 +74,14 @@ export function termPieces(text: string, columns?: number | null): Piece[][] {
     const row: Piece[] = []
     let from = 0
     if (carry) {
-      const m = /^[^\s]+/.exec(line)
-      if (m && URL_CHARS.test(m[0][0])) {
-        const piece: Piece = { text: m[0], url: null }
+      const indented = indentedTail(line)
+      const m = indented ? /^ ([^\s]+)$/.exec(line) : /^[^\s]+/.exec(line)
+      const tail = indented ? m?.[1] : m?.[0]
+      if (m && tail && URL_CHARS.test(tail[0])) {
+        const piece: Piece = { text: tail, url: null }
         carry.frags.push(piece)
-        carry.url += m[0]
+        carry.url += tail
+        if (indented) row.push({ text: ' ', url: null })
         row.push(piece)
         from = m[0].length
         if (from !== line.length || line.length !== carry.width) {
