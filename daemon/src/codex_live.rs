@@ -51,21 +51,32 @@ fn context_percent(line: &str) -> bool {
     rest.trim_start().starts_with(|c: char| c.is_ascii_digit())
 }
 
-/// `<model> [<effort>] [fast] · <cwd> · Context …` — the only place codex states all three, so
-/// it is the read-back proving a live change landed (SPEC §4.4a).
+/// `<model> [<effort>] [fast] · <cwd> · <topic|Context …|quota>` — the only place codex states
+/// all three, so it is the read-back proving a live change landed (SPEC §4.4a).
 pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
     // Last match in the viewport tail wins: the startup banner and a quoted line higher up share
-    // the shape. A narrow pane wraps `Context N%` onto the next line; join that one line.
+    // the shape. A narrow pane wraps the line; join a continuation line.
     let lines: Vec<&str> = screen.lines().collect();
     let tail = &lines[lines.len().saturating_sub(STATUS_TAIL_LINES)..];
     let mut out = None;
     let mut i = 0;
     while i < tail.len() {
         let mut line = tail[i].trim().to_string();
-        if !context_percent(&line) && line.contains('·') {
+        if line.contains('·') {
             if let Some(next) = tail.get(i + 1) {
                 let next = next.trim();
-                if context_percent(next) {
+                let is_nav_or_prompt = next.starts_with('?')
+                    || next.starts_with('←')
+                    || next.starts_with('›')
+                    || next.starts_with('•')
+                    || next.contains("for shortcuts")
+                    || next.contains("to interrupt");
+                let is_continuation = !is_nav_or_prompt
+                    && (line.trim_end().ends_with('·')
+                        || next.starts_with('·')
+                        || context_percent(next)
+                        || next.contains("% left"));
+                if is_continuation {
                     line.push(' ');
                     line.push_str(next);
                     i += 1;
@@ -73,7 +84,12 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
             }
         }
         i += 1;
-        if !line.contains('·') || !context_percent(&line) {
+        if !line.contains('·') {
+            continue;
+        }
+        // 未開始回合的冷啟動 footer 只有兩段（`<model> <default> · <cwd>`），還沒有 Context／額度／主題，
+        // 尚未有 active session，不當成 runtime（保留 argv 預設值，SPEC §4.3）。
+        if line.matches('·').count() < 2 && !context_percent(&line) && !line.contains("% left") {
             continue;
         }
         let Some((head, _)) = line.split_once('·') else { continue };
@@ -85,7 +101,16 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
             continue;
         }
         let rest: Vec<&str> = parts.collect();
-        let fast = rest.iter().any(|w| *w == "fast");
+        // head 裡在 model 之後只能是 fast、default 或已知的 codex effort（避免把普通文字行誤認成狀態列）。
+        if !rest.iter().all(|w| {
+            let lower = w.to_ascii_lowercase();
+            lower == "fast"
+                || lower == "default"
+                || crate::config::efforts_for_kind("codex").contains(&lower.as_str())
+        }) {
+            continue;
+        }
+        let fast = rest.iter().any(|w| w.eq_ignore_ascii_case("fast"));
         let effort = rest
             .iter()
             .find(|w| crate::config::efforts_for_kind("codex").contains(&w.to_ascii_lowercase().as_str()))
@@ -860,6 +885,92 @@ mod tests {
         let screen = "  gpt-5.6-luna max fast · /tmp · Context 43% used · 5h 12% left\n";
         assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
         assert_eq!(fast_of(&env, &run).await, Some(1));
+    }
+
+    /// codex 子 agent l8 在 TUI 裡手動打 /fast 開了 fast，狀態列顯示主題段（無 Context）。
+    #[test]
+    fn status_line_with_session_topic_or_truncated_topic_parses_runtime() {
+        // codex 子 agent l8 的真實畫面
+        let screen = "• Compacting context (7s • esc to interrupt)\n  └ Making room to continue.\n\n› Ask Codex to do anything\n\n  GPT-6-Luna max fast · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n  ? for shortcuts                                                                                                                                                                          ⚠ 2 warnings · f2 to view\n";
+        let rt = parse_status_line(screen).expect("讀得到主題段的狀態列");
+        assert_eq!(
+            rt,
+            CodexRuntime {
+                model: "gpt-6-luna".into(),
+                effort: Some("max".into()),
+                fast: true,
+            }
+        );
+
+        // 截斷主題（…）
+        let truncated = "› Ask Codex to do anything\n\n  GPT-6-Luna max fast · ~/project/agents-manager · …\n";
+        let rt_trunc = parse_status_line(truncated).expect("讀得到 … 截斷主題的狀態列");
+        assert_eq!(
+            rt_trunc,
+            CodexRuntime {
+                model: "gpt-6-luna".into(),
+                effort: Some("max".into()),
+                fast: true,
+            }
+        );
+
+        // 手動打 /fast 關閉 fast
+        let fast_off = "› Ask Codex to do anything\n\n  GPT-6-Luna max · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n";
+        let rt_off = parse_status_line(fast_off).expect("讀得到關閉 fast 的狀態列");
+        assert_eq!(
+            rt_off,
+            CodexRuntime {
+                model: "gpt-6-luna".into(),
+                effort: Some("max".into()),
+                fast: false,
+            }
+        );
+
+        // 手動打 /model 切換模型與推理強度
+        let model_switched = "› Ask Codex to do anything\n\n  gpt-5.6-sol medium fast · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n";
+        let rt_switch = parse_status_line(model_switched).expect("讀得到換模型後的狀態列");
+        assert_eq!(
+            rt_switch,
+            CodexRuntime {
+                model: "gpt-5.6-sol".into(),
+                effort: Some("medium".into()),
+                fast: true,
+            }
+        );
+
+        // 窄 pane 折行主題
+        let wrapped_topic = "  GPT-6-Luna max fast · ~/project/agents-manager ·\n  修正主力 cache 冷 context 規則\n";
+        let rt_wrapped = parse_status_line(wrapped_topic).expect("折行的主題段仍能解析");
+        assert_eq!(
+            rt_wrapped,
+            CodexRuntime {
+                model: "gpt-6-luna".into(),
+                effort: Some("max".into()),
+                fast: true,
+            }
+        );
+    }
+
+    /// 收編時 runs.runtime_* 全為 NULL，狀態列帶主題段能正確填入 runtime_model、runtime_effort 與 runtime_fast。
+    #[tokio::test]
+    async fn a_status_line_with_topic_corrects_null_runtime_and_enables_fast() {
+        let env = crate::testing::env().await;
+        let bot = crate::testing::claude_bot(&env.app, &env.project_id, "payload").await;
+        let run = crate::testing::fake_run(&env.app, &bot.id).await;
+        // 初始狀態如 adopted child：runtime 皆為 NULL
+        sqlx::query("UPDATE runs SET runtime_model=NULL, runtime_effort=NULL, runtime_fast=NULL WHERE id=?")
+            .bind(&run)
+            .execute(&env.app.db)
+            .await
+            .unwrap();
+
+        let screen = "› Ask Codex to do anything\n\n  GPT-6-Luna max fast · ~/project/agents-manager · 修正主力 cache 冷 context 規則\n  ? for shortcuts\n";
+        assert!(correct_runtime_from_screen(&env.app, &run, screen).await);
+
+        let row = db::run(&env.app.db, &run).await.unwrap().unwrap();
+        assert_eq!(row.runtime_model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(row.runtime_effort.as_deref(), Some("max"));
+        assert_eq!(row.runtime_fast, Some(1));
     }
 
     /// 讀不到狀態列（選單開著、畫面被清）不能當成 fast=false。
