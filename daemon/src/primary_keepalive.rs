@@ -3,12 +3,14 @@
 //! 使用者原話：「主力的規則如下：當 cache 至 58 分鐘時，下一個 prompt "any updates"，來讓 cache 延長，且 cache 時間照樣上數，
 //! 達 110 分鐘時，強制做壓縮」。
 //!
-//! * **cache 年齡**＝距離 [`cache_clock`] 推算的最後一次**真的**活動（`last_api_at`）。續命回合本身不算活動
+//! * **活動年齡**＝距離 [`cache_clock`] 推算的最後一次**真的**活動（`last_api_at`）。續命回合本身不算活動
 //!   （`turns.client_request_id` 以 [`KEEPALIVE_CRID_PREFIX`] 開頭，`cache_clock` 的最近回合 SQL 排除它；續命期間的 statusLine 指紋變化
 //!   由 [`window_open`] 擋掉），所以送完續命年齡照樣往上數，直到下一次真的活動才歸零。
-//! * 年齡 ≥ [`KEEPALIVE_AFTER_SECS`]、這個錨點之後還沒續過：用一般送 prompt 的路徑（[`crate::lifecycle::prompt`]）送 [`KEEPALIVE_TEXT`]，
-//!   `client_request_id = keepalive:<錨點>`（同一錨點冪等）。
-//! * 年齡 ≥ [`COMPACT_AFTER_SECS`]、這個錨點之後還沒壓縮過：呼叫 [`crate::lifecycle::compact`]（`/compact`）。被拒（忙著等）下一輪再試。
+//!   cache 熱度則以 `max(last_api_at, cache_kept_alive_at)` 計算；時間來源沿用 [`cache_clock`]。
+//! * 年齡 ≥ [`KEEPALIVE_AFTER_SECS`]、cache 未過 TTL、這個錨點之後還沒續過：用一般送 prompt 的路徑（[`crate::lifecycle::prompt`]）送
+//!   [`KEEPALIVE_TEXT`]，`client_request_id = keepalive:<錨點>`（同一錨點冪等）。續命錯過 TTL 就不補送。
+//! * 年齡 ≥ [`COMPACT_AFTER_SECS`]、cache 最近一次變熱未滿 TTL 並保留 2 分鐘餘裕、這個錨點之後還沒壓縮過：呼叫
+//!   [`crate::lifecycle::compact`]（`/compact`）。cache 冷了就不壓縮，等真的活動重新計時。
 //! * 對象只有主力（`bots.is_primary`）的 claude／codex，run 在跑、`agent_status == idle`、沒有在飛或排隊的回合。`blocked`（停在問題／
 //!   權限提示）絕不送——打進去的字會變成回答那個問題。
 //!
@@ -23,10 +25,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// 閒置到這麼久（cache 年齡，秒）就送一次續命。TTL 是 60 分鐘，留 2 分鐘餘裕。
+/// 閒置到這麼久（活動年齡，秒）就考慮續命。TTL 是 60 分鐘，留 2 分鐘餘裕。
 pub const KEEPALIVE_AFTER_SECS: i64 = 58 * 60;
-/// 年齡到這麼久就強制壓縮（續命過一次後 cache 還熱，壓縮讀得便宜）。
+/// 年齡到這麼久才考慮壓縮；仍須確認 cache 熱度足夠。
 pub const COMPACT_AFTER_SECS: i64 = 110 * 60;
+/// 壓縮至少要在 cache TTL 到期前留這麼多時間。
+const COMPACT_TTL_MARGIN_SECS: i64 = 2 * 60;
 /// 送進去的續命 prompt。
 pub const KEEPALIVE_TEXT: &str = "any updates";
 /// 聊天室系統訊息的開頭，同時是「這個錨點之後壓縮過了」的持久記號。
@@ -104,11 +108,26 @@ pub fn is_compact_echo(anchor: chrono::DateTime<chrono::Utc>, last_compact: Opti
     last_compact.is_some_and(|c| anchor >= c - chrono::Duration::seconds(5) && anchor <= c + chrono::Duration::seconds(COMPACT_ECHO_SECS))
 }
 
-/// 純規則：年齡（秒）與「這個錨點之後做過沒」決定下一步。壓縮優先（年齡到了 110 分，續命已經沒有意義）。
-pub fn decide(age_secs: i64, kept_since_anchor: bool, compacted_since_anchor: bool) -> Step {
+/// 純規則：活動年齡、cache 實際熱度年齡與「這個錨點之後做過沒」決定下一步。
+/// 續命只能在 58 分至 TTL 之間送；壓縮要在 cache 到期前保留 [`COMPACT_TTL_MARGIN_SECS`] 餘裕。
+pub fn decide(
+    age_secs: i64,
+    cache_age_secs: i64,
+    ttl_secs: i64,
+    kept_since_anchor: bool,
+    compacted_since_anchor: bool,
+) -> Step {
     if age_secs >= COMPACT_AFTER_SECS && !compacted_since_anchor {
-        Step::Compact
-    } else if age_secs >= KEEPALIVE_AFTER_SECS && age_secs < COMPACT_AFTER_SECS && !kept_since_anchor {
+        if cache_age_secs < ttl_secs - COMPACT_TTL_MARGIN_SECS {
+            Step::Compact
+        } else {
+            Step::Wait
+        }
+    } else if age_secs >= KEEPALIVE_AFTER_SECS
+        && age_secs < ttl_secs
+        && cache_age_secs < ttl_secs
+        && !kept_since_anchor
+    {
         Step::KeepAlive
     } else {
         Step::Wait
@@ -162,6 +181,13 @@ pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::Dat
     if age_secs < KEEPALIVE_AFTER_SECS {
         return Ok(None);
     }
+    let Some(cache_ttl_secs) = cache_clock::ttl_secs(&bot.kind) else { return Ok(None) };
+    let cache_kept_alive_at = last_turn
+        .as_ref()
+        .and_then(|turn| turn.kept_alive_at.as_deref())
+        .and_then(db::parse_ts);
+    let cache_warm_at = cache_kept_alive_at.map_or(anchor_t, |kept_at| kept_at.max(anchor_t));
+    let cache_age_secs = (now - cache_warm_at).num_seconds();
     let kept = latest(
         &app.db,
         "SELECT MAX(t.created_at) FROM turns t JOIN conversations c ON c.id = t.conversation_id
@@ -183,10 +209,10 @@ pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::Dat
         return Ok(None);
     }
     let compacted = last_compact.is_some_and(|t| t > anchor_t);
-    Ok(Some(Plan { step: decide(age_secs, kept, compacted), anchor, age_secs }))
+    Ok(Some(Plan { step: decide(age_secs, cache_age_secs, cache_ttl_secs, kept, compacted), anchor, age_secs }))
 }
 
-/// 照 [`plan`] 做一步。送不出去（忙著、被擋）只記 log，下一輪再試。
+/// 照 [`plan`] 做一步。送不出去（忙著、被擋）只記 log；下一輪重試仍須符合 cache 熱度條件。
 async fn act(app: &Arc<App>, bot: &db::Bot, run: &db::Run, plan: &Plan) {
     match plan.step {
         Step::Wait => {}
@@ -303,16 +329,22 @@ mod tests {
     }
 
     #[test]
-    fn decide_keeps_alive_once_then_compacts_once() {
+    fn cold_cache_is_skipped_and_hot_cache_is_compacted_with_margin() {
         let m = |min: i64| min * 60;
-        assert_eq!(decide(m(57), false, false), Step::Wait);
-        assert_eq!(decide(m(58), false, false), Step::KeepAlive);
-        assert_eq!(decide(m(80), false, false), Step::KeepAlive);
-        assert_eq!(decide(m(80), true, false), Step::Wait, "同一個錨點只續命一次");
-        assert_eq!(decide(m(109), true, false), Step::Wait);
-        assert_eq!(decide(m(110), true, false), Step::Compact);
-        assert_eq!(decide(m(110), false, false), Step::Compact, "續命沒做成（daemon 停機等）也不補了，直接壓縮");
-        assert_eq!(decide(m(300), true, true), Step::Wait, "同一個錨點只壓縮一次");
+        let ttl = cache_clock::ttl_secs("claude").unwrap();
+        assert_eq!(ttl, m(60));
+
+        assert_eq!(decide(m(57), m(57), ttl, false, false), Step::Wait);
+        assert_eq!(decide(m(58), m(58), ttl, false, false), Step::KeepAlive);
+        assert_eq!(decide(m(59), m(59), ttl, false, false), Step::KeepAlive, "TTL 到期前仍可續命");
+        assert_eq!(decide(m(60), m(60), ttl, false, false), Step::Wait, "超過續命視窗後 cache 已冷，不補送");
+        assert_eq!(decide(m(80), m(80), ttl, false, false), Step::Wait, "冷 cache 不續命");
+
+        assert_eq!(decide(m(110), m(110), ttl, true, false), Step::Wait, "冷 cache 不壓縮");
+        assert_eq!(decide(m(110), m(52), ttl, true, false), Step::Compact, "58 分續命後，110 分時 cache 仍熱就壓縮");
+        assert_eq!(decide(m(110), m(58), ttl, true, false), Step::Wait, "壓縮前留兩分鐘 TTL 餘裕");
+        assert_eq!(decide(m(24 * 60), m(24 * 60), ttl, false, false), Step::Wait, "daemon 重啟後發現年齡很大的 cache 不碰");
+        assert_eq!(decide(m(300), m(52), ttl, true, true), Step::Wait, "同一個錨點只壓縮一次");
     }
 
     #[test]
@@ -417,26 +449,27 @@ mod tests {
         // 沒有任何活動紀錄：不編時間。
         assert_eq!(plan(&env.app, &bot, &run, now).await.unwrap(), None);
 
-        // 70 分鐘前的真回合 → 該續命。
-        turn(&env, &bot, "t-real", None, "completed", &at(75, now), Some(&at(70, now))).await;
+        // 59 分鐘前的真回合 → cache 還熱，該續命。
+        turn(&env, &bot, "t-real", None, "completed", &at(64, now), Some(&at(59, now))).await;
         let p = plan(&env.app, &bot, &run, now).await.unwrap().unwrap();
-        assert_eq!((p.step, p.anchor.as_str()), (Step::KeepAlive, at(70, now).as_str()));
-        assert_eq!(keepalive_crid(&p.anchor), format!("keepalive:{}", at(70, now)));
+        assert_eq!((p.step, p.anchor.as_str()), (Step::KeepAlive, at(59, now).as_str()));
+        assert_eq!(keepalive_crid(&p.anchor), format!("keepalive:{}", at(59, now)));
 
         // 續命回合剛跑完：年齡仍從真回合算（不被重置），而且不再續。
-        turn(&env, &bot, "t-keep", Some(&keepalive_crid(&p.anchor)), "completed", &at(10, now), Some(&at(9, now))).await;
+        let kept_at = db::iso_at(now);
+        turn(&env, &bot, "t-keep", Some(&keepalive_crid(&p.anchor)), "completed", &kept_at, Some(&kept_at)).await;
         let after = plan(&env.app, &bot, &run, now).await.unwrap().unwrap();
-        assert_eq!((after.step, after.anchor.as_str()), (Step::Wait, at(70, now).as_str()), "續命回合不算活動，且同錨點只續一次");
+        assert_eq!((after.step, after.anchor.as_str()), (Step::Wait, at(59, now).as_str()), "續命回合不算活動，且同錨點只續一次");
         let last = cache_clock::last_turn_for_bot(&env.app.db, &bot.id).await.unwrap().unwrap();
-        assert_eq!(last.completed_at.as_deref(), Some(at(70, now).as_str()));
-        assert_eq!(last.kept_alive_at.as_deref(), Some(at(9, now).as_str()), "顏色用的「續命時間」來自續命回合");
+        assert_eq!(last.completed_at.as_deref(), Some(at(59, now).as_str()));
+        assert_eq!(last.kept_alive_at.as_deref(), Some(kept_at.as_str()), "顏色用的「續命時間」來自續命回合");
 
         // 同一錨點到 110 分鐘：壓縮；記號一寫就不再壓縮。
-        let later = now + chrono::Duration::minutes(45);
+        let later = now + chrono::Duration::minutes(52);
         let p = plan(&env.app, &bot, &run, later).await.unwrap().unwrap();
-        assert_eq!((p.step, p.age_secs / 60), (Step::Compact, 115));
+        assert_eq!((p.step, p.age_secs / 60), (Step::Compact, 111));
         let conv = db::conversation_id(&env.app.db, &bot.id).await.unwrap();
-        let note = format!("{COMPACT_NOTE_PREFIX}cache 年齡已 115 分鐘，自動送出 /compact");
+        let note = format!("{COMPACT_NOTE_PREFIX}cache 年齡已 111 分鐘，自動送出 /compact");
         crate::lifecycle::insert_message(&env.app, &conv, None, "system", &note, "system", false, None).await.unwrap();
         let p = plan(&env.app, &bot, &run, later + chrono::Duration::seconds(5)).await.unwrap().unwrap();
         assert_eq!(p.step, Step::Wait, "壓縮記號比錨點晚，同一錨點不再壓縮");
