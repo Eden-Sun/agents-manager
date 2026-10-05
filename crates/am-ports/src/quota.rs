@@ -14,6 +14,12 @@ pub trait QuotaAccess: Send + Sync {
         key: &'a QuotaKey,
     ) -> impl Future<Output = Result<Option<QuotaSnapshot>, PortError>> + Send + 'a;
 
+    fn store_snapshot<'a>(
+        &'a self,
+        key: &'a QuotaKey,
+        snapshot: QuotaSnapshot,
+    ) -> impl Future<Output = Result<(), PortError>> + Send + 'a;
+
     fn record_limit_hit<'a>(
         &'a self,
         key: &'a QuotaKey,
