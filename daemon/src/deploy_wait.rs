@@ -159,8 +159,8 @@ fn blockers_of(err: &LcError) -> Option<(Vec<Blocker>, Option<String>, bool)> {
 }
 
 /// 每次試 restart 窗口之後回報（`service_daemon_swap_restart_window`）。
-pub async fn observe(app: &Arc<App>, owner: &str, approval_id: &str, commit: &str, outcome: Result<bool, &LcError>) {
-    let since = match crate::supervisor::store::approval(&app.db, approval_id).await {
+pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState), owner: &str, approval_id: &str, commit: &str, outcome: Result<bool, &LcError>) {
+    let since = match crate::supervisor::store::approval(app.db(), approval_id).await {
         Ok(Some(a)) => a.waiting_since().map(String::from),
         _ => None,
     };
@@ -169,7 +169,7 @@ pub async fn observe(app: &Arc<App>, owner: &str, approval_id: &str, commit: &st
     let mut out = Vec::new();
     let mut emit_ws = false;
     let ws_wait = {
-        let mut g = app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // 換版中又來試＝上一次拿到窗口卻沒換成（窗口逾時交還），還是同一次部署。
         let continuing = g.as_ref().is_some_and(|w| {
             w.owner == owner && matches!(w.phase, Phase::Waiting | Phase::Swapping) && secs_between(&w.last_attempt_at, &now) < STALE_SECS
@@ -280,11 +280,11 @@ pub async fn observe(app: &Arc<App>, owner: &str, approval_id: &str, commit: &st
 }
 
 /// 背景每 15 秒：門檻到了就通知；太久沒再試就收掉；結束的過一陣子清掉。
-pub async fn tick(app: &Arc<App>) {
+pub async fn tick(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState)) {
     let now = crate::db::now();
     let mut out = None;
     {
-        let mut g = app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(w) = g.as_mut() else { return };
         match w.phase {
             Phase::Waiting if secs_between(&w.last_attempt_at, &now) >= STALE_SECS => {
@@ -330,11 +330,11 @@ pub async fn tick(app: &Arc<App>) {
 }
 
 /// daemon 開機：讀回上一顆 daemon 留下的。換版中的那一則，看這顆跑的是不是要上的 commit：是＝換好了，不是＝回滾了。
-pub async fn startup(app: &Arc<App>) {
+pub async fn startup(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState)) {
     startup_as(app, crate::build_info::BUILD_SHA).await
 }
 
-async fn startup_as(app: &Arc<App>, running_sha: &str) {
+async fn startup_as(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState), running_sha: &str) {
     let loaded: Option<Wait> = std::fs::read(path(app)).ok().and_then(|b| serde_json::from_slice(&b).ok());
     let Some(mut w) = loaded else { return };
     let now = crate::db::now();
@@ -355,7 +355,7 @@ async fn startup_as(app: &Arc<App>, running_sha: &str) {
         }
     }
     save(app, Some(&w));
-    *app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(w);
+    *app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(w);
     if let Some((a, w)) = out {
         announce(app, a, &w).await;
     }
@@ -412,8 +412,8 @@ fn view_of(w: &Wait, now: &str) -> Value {
 }
 
 /// `GET /api/state` 的 `deploy_wait`：已經通知過的那一次部署（結束的再留 10 分鐘），其他時候 null。
-pub fn view(app: &App) -> Value {
-    let g = app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+pub fn view(app: &impl crate::deploy_wait::DeployWaitState) -> Value {
+    let g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = crate::db::now();
     match g.as_ref().filter(|w| w.notified_at.is_some()) {
         Some(w) => view_of(w, &now),
@@ -450,8 +450,8 @@ async fn announce(app: &(impl crate::capabilities::Db + crate::capabilities::Emi
 /// 拿到窗口（`Swapping`）之後還要算數（issue #840）：daemon-swap 換 binary 前會用同一張核准再問一次 safety（§3a），
 /// 以前只認 `Waiting`，複查時放寬已經不見，working 又把 acquire 剛給的窗口推翻，只要隨時有人 working 就永遠換不上。
 /// 這次部署結束（`Done`／`Abandoned`）放寬才跟著結束。
-pub fn user_escalated_for(app: &App, a: &crate::supervisor::store::Approval) -> bool {
-    let g = app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+pub fn user_escalated_for(app: &impl crate::deploy_wait::DeployWaitState, a: &crate::supervisor::store::Approval) -> bool {
+    let g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let auto = format!("service({})", crate::service_auth::DAEMON_SWAP);
     g.as_ref().is_some_and(|w| {
         w.user_escalated
@@ -474,9 +474,9 @@ fn user_only(p: &crate::api::RequestPrincipal) -> Result<(), LcError> {
 }
 
 /// 「現在換版」／「先等」共用：找到還在等的這一次部署，改完存檔、廣播。
-async fn act(app: &Arc<App>, id: &str, f: impl FnOnce(&mut Wait)) -> Result<Value, LcError> {
+async fn act(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState), id: &str, f: impl FnOnce(&mut Wait)) -> Result<Value, LcError> {
     let (w, announced) = {
-        let mut g = app.deploy_wait.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut g = app.deploy_wait().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(w) = g.as_mut().filter(|w| w.id == id) else {
             return Err(LcError::NotFound("deploy_wait".into()));
         };
@@ -504,7 +504,7 @@ async fn act(app: &Arc<App>, id: &str, f: impl FnOnce(&mut Wait)) -> Result<Valu
 }
 
 /// 「現在換版」：這次部署直接放寬。核心（測試直接打這支，不碰排程器）。
-pub async fn escalate(app: &Arc<App>, id: &str) -> Result<Value, LcError> {
+pub async fn escalate(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::deploy_wait::DeployWaitState), id: &str) -> Result<Value, LcError> {
     act(app, id, |w| {
         w.user_escalated = true;
         w.escalates_at = None;
@@ -552,3 +552,8 @@ pub fn spawn_ticker(app: &Arc<App>) {
 
 #[cfg(test)]
 mod tests;
+
+/// 換版等待窗口的記憶體狀態。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait DeployWaitState: Send + Sync {
+    fn deploy_wait(&self) -> &std::sync::Mutex<Option<crate::deploy_wait::Wait>>;
+}

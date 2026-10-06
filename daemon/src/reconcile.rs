@@ -348,7 +348,7 @@ async fn rearm_run(app: &Arc<App>, run: &db::Run) -> bool {
 /// 也走這裡（#149）：不自動重送，送出時間最晚就是現在——閒置 watchdog 才不會把剛送出的看成排隊那時一樣老。
 ///
 /// 寫不進去回 `false`（#75）：那一筆還是 pending，不能照樣掛 poller 當成收好了，留給開機恢復的下一輪。
-async fn adopt_orphan_delivery(app: &Arc<App>, turn: &db::Turn) -> bool {
+async fn adopt_orphan_delivery(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), turn: &db::Turn) -> bool {
     if turn.delivery != "pending" {
         return true;
     }
@@ -358,7 +358,7 @@ async fn adopt_orphan_delivery(app: &Arc<App>, turn: &db::Turn) -> bool {
     )
     .bind(crate::db::now())
     .bind(&turn.id)
-    .execute(&app.db)
+    .execute(app.db())
     .await
     {
         Ok(r) => r.rows_affected(),
@@ -1348,7 +1348,7 @@ async fn adopt_child(
 
 /// `runs.runtime_*` for adopted codex runs (SPEC §4.4a: no silently unapplied values; `/fast` is
 /// a toggle). Only fills NULLs — a start or live apply already wrote the truth.
-async fn fill_codex_runtime(app: &Arc<App>, host: &str, client: &crate::herdr::HerdrClient) {
+async fn fill_codex_runtime(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), host: &str, client: &crate::herdr::HerdrClient) {
     let rows: Vec<(String, String)> = match sqlx::query_as(
         "SELECT r.id, r.pane_id FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
          WHERE p.host = ? AND b.kind = 'codex' AND r.state = 'running' AND r.pane_id IS NOT NULL
@@ -1356,7 +1356,7 @@ async fn fill_codex_runtime(app: &Arc<App>, host: &str, client: &crate::herdr::H
          AND r.runtime_model IS NULL AND r.runtime_effort IS NULL AND r.runtime_fast IS NULL",
     )
     .bind(host)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     {
         Ok(v) => v,

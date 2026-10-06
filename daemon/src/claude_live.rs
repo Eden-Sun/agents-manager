@@ -21,9 +21,8 @@
 //! 沒有這個保證，維持「第一次看到只當基準」。
 
 use crate::db;
-use crate::state::App;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Switch {
@@ -145,7 +144,7 @@ pub async fn adopt_statusline_model(app: &(impl crate::capabilities::BotStatusEm
 }
 
 /// 巡邏讀到一份 claude 畫面：有切換而且跟記著的不一樣才寫、才推 `bot_status`。
-pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
+pub async fn observe(app: &(impl crate::capabilities::BotLocks + crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes), run: &db::Run, screen: &str) {
     let seen = parse(screen);
     if seen == Switch::default() {
         return;
@@ -159,7 +158,7 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
     if seen == Switch::default() {
         return;
     }
-    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return };
+    let Ok(Some(bot)) = db::bot(app.db(), &run.bot_id).await else { return };
     let child = bot.managed_by == "child";
     if !child {
         let mut b = baselines().lock().unwrap_or_else(|e| e.into_inner());
@@ -174,7 +173,7 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
             }
         }
     }
-    let Ok(Some(run)) = db::run(&app.db, &run.id).await else { return };
+    let Ok(Some(run)) = db::run(app.db(), &run.id).await else { return };
     // run 的落差（跟 runtime 比）與 bot 設定的落差（跟 bots.* 比）分開算（#743）：bot 的 UPDATE 失敗時 runtime 已經對了，
     // 下一輪只剩 bot 落後，仍要補寫，不能因為 runtime 已收斂就當作完成。
     // 只跟 run 自己記的比，不退回 `bots.*`：child 的模型跟設定一樣、強度不一樣時，以前只寫了 runtime_effort，
@@ -191,7 +190,7 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
             .bind(&model)
             .bind(&effort)
             .bind(&run.id)
-            .execute(&app.db)
+            .execute(app.db())
             .await;
         if let Err(e) = wrote {
             tracing::warn!(run = %run.id, bot = %bot.name, error = %e, "could not record the claude runtime switch, retrying next sweep");
@@ -205,7 +204,7 @@ pub async fn observe(app: &Arc<App>, run: &db::Run, screen: &str) {
             .bind(&bot_model)
             .bind(&bot_effort)
             .bind(&bot.id)
-            .execute(&app.db)
+            .execute(app.db())
             .await;
         match wrote {
             Ok(_) => {

@@ -110,7 +110,7 @@ pub async fn codex_home(app: &Arc<App>, bot: &crate::db::Bot) -> Option<std::pat
 
 /// Follows a runtime change into child bot settings.
 pub async fn child_runtime_follow(
-    app: &App,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     bot_id: &str,
     model: Option<&str>,
     effort: Option<&str>,

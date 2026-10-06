@@ -24,10 +24,8 @@ use super::flow;
 use super::ports::{MissionGateRules, SupervisorRepo};
 use crate::lifecycle::LcError;
 use crate::mission::store::MissionEvent;
-use crate::state::App;
 use crate::supervisor::store::Assignment;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
@@ -49,9 +47,9 @@ pub async fn next_json(app: &impl crate::capabilities::Db, mission_id: &str) -> 
 }
 
 /// 這個任務底下還開著的交辦（`OPEN_STATES`），照寫入順序。
-pub async fn open_assignments(app: &Arc<App>, mission_id: &str) -> Result<Vec<Assignment>, LcError> {
+pub async fn open_assignments(app: &impl crate::capabilities::Db, mission_id: &str) -> Result<Vec<Assignment>, LcError> {
     Ok(app
-        .db
+        .db()
         .mission_assignments(mission_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
@@ -121,7 +119,7 @@ pub async fn ensure_can_assign(app: &impl crate::capabilities::Db, mission_id: &
 ///
 /// 取消那條路本來就會把底下的交辦逐件 `cancel`（§18.14 第 8 條），結案卻不會；這裡把兩邊對齊成
 /// 「要嘛先收乾淨，要嘛走取消」。
-pub async fn ensure_can_complete(app: &Arc<App>, mission_id: &str) -> Result<(), LcError> {
+pub async fn ensure_can_complete(app: &impl crate::capabilities::Db, mission_id: &str) -> Result<(), LcError> {
     none_open(mission_id, &open_assignments(app, mission_id).await?)
 }
 
@@ -310,6 +308,8 @@ async fn outstanding_inbox(app: &impl crate::capabilities::Db, mission_id: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
     use crate::supervisor::store;
     use crate::testing as tt;
 

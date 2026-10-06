@@ -6,7 +6,6 @@
 //! existing local Project are imported. Ordinary shell panes and panes from other directories
 //! remain entirely outside the manager's ownership.
 
-use crate::events::ports::{HostSidePort, IngressCommands, TurnCommands};
 use crate::config::{self, LOCAL_HOST};
 use crate::db;
 use crate::herdr::AgentInfo;
@@ -17,6 +16,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use crate::events::ports::{IngressCommands, TurnCommands};
 
 pub const SESSION: &str = "default";
 const POLL_INTERVAL: Duration = Duration::from_secs(8);
@@ -175,7 +175,7 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
     Ok(())
 }
 
-async fn set_connected(app: &Arc<App>, connected: bool) {
+async fn set_connected(app: &impl crate::events::ports::HostSidePort, connected: bool) {
     app.set_default_connected(connected).await;
 }
 

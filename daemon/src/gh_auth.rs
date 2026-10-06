@@ -381,9 +381,9 @@ async fn local_token(app: &impl crate::hosts::HostsAccess) -> Result<String, LcE
     Ok(token)
 }
 
-async fn overlay_json(app: &Arc<App>, host: &str, st: &GhStatus, mode: Option<&str>) -> Value {
+async fn overlay_json(app: &impl crate::gh_auth::GhDevice, host: &str, st: &GhStatus, mode: Option<&str>) -> Value {
     let (pending, error) = {
-        let g = app.gh_device.lock().await;
+        let g = app.gh_device().lock().await;
         match g.get(host) {
             Some(s) if s.error.is_some() => (None, s.error.clone()),
             Some(s) if Instant::now() < s.expires_at && !st.logged_in() => (Some(s.pending_json()), None),
@@ -393,7 +393,7 @@ async fn overlay_json(app: &Arc<App>, host: &str, st: &GhStatus, mode: Option<&s
     st.to_json(host, mode, pending, error.as_deref())
 }
 
-pub async fn status(app: &Arc<App>, host: &str) -> Result<Value, LcError> {
+pub async fn status(app: &(impl crate::gh_auth::GhDevice + crate::hosts::HostsAccess), host: &str) -> Result<Value, LcError> {
     ensure_host(app, host).await?;
     let st = read_status(app, host).await?;
     if st.logged_in() {
@@ -409,8 +409,8 @@ async fn ensure_host(app: &impl crate::hosts::HostsAccess, host: &str) -> Result
     Ok(())
 }
 
-async fn abort_device(app: &Arc<App>, host: &str) {
-    let mut g = app.gh_device.lock().await;
+async fn abort_device(app: &impl crate::gh_auth::GhDevice, host: &str) {
+    let mut g = app.gh_device().lock().await;
     if let Some(mut s) = g.remove(host) {
         if let Some(h) = s.poll.take() {
             h.abort();
@@ -418,7 +418,7 @@ async fn abort_device(app: &Arc<App>, host: &str) {
     }
 }
 
-pub async fn cancel(app: &Arc<App>, host: &str) -> Result<Value, LcError> {
+pub async fn cancel(app: &(impl crate::gh_auth::GhDevice + crate::hosts::HostsAccess), host: &str) -> Result<Value, LcError> {
     ensure_host(app, host).await?;
     abort_device(app, host).await;
     let st = read_status(app, host).await?;
@@ -483,7 +483,7 @@ fn should_auto_copy(host: &str, remote_status_known: bool, local_logged_in: bool
     host != LOCAL_HOST && remote_status_known && local_logged_in
 }
 
-async fn login_switch(app: &Arc<App>, host: &str, user: Option<&str>) -> Result<Value, LcError> {
+async fn login_switch(app: &(impl crate::gh_auth::GhDevice + crate::hosts::HostsAccess), host: &str, user: Option<&str>) -> Result<Value, LcError> {
     let st = read_status(app, host).await?;
     let user = match user.map(str::trim).filter(|s| !s.is_empty()) {
         Some(u) => u.to_string(),
@@ -500,7 +500,7 @@ async fn login_switch(app: &Arc<App>, host: &str, user: Option<&str>) -> Result<
     Ok(st.to_json(host, Some("switch"), None, None))
 }
 
-async fn login_copy(app: &Arc<App>, host: &str) -> Result<Value, LcError> {
+async fn login_copy(app: &(impl crate::gh_auth::GhDevice + crate::hosts::HostsAccess), host: &str) -> Result<Value, LcError> {
     if host == LOCAL_HOST {
         return Err(LcError::Bad("copy 只適用遠端主機（本機請用裝置碼）".into()));
     }
@@ -727,8 +727,8 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-async fn set_device_error(app: &Arc<App>, host: &str, device_code: &str, msg: String) {
-    let mut g = app.gh_device.lock().await;
+async fn set_device_error(app: &impl crate::gh_auth::GhDevice, host: &str, device_code: &str, msg: String) {
+    let mut g = app.gh_device().lock().await;
     if let Some(s) = g.get_mut(host) {
         if s.device_code == device_code {
             s.error = Some(redact_secrets(&msg));
@@ -744,7 +744,7 @@ fn exchange_token_owned(device_code: String) -> ExchangeFuture {
 }
 
 async fn poll_device(
-    app: Arc<App>,
+    app: Arc<impl crate::gh_auth::GhDevice + crate::hosts::HostsAccess + 'static>,
     host: String,
     device_code: String,
     expires_at: Instant,
@@ -762,7 +762,7 @@ async fn poll_device(
 }
 
 async fn poll_device_with_exchange<F>(
-    app: Arc<App>,
+    app: Arc<impl crate::gh_auth::GhDevice + crate::hosts::HostsAccess + 'static>,
     host: String,
     device_code: String,
     expires_at: Instant,
@@ -797,7 +797,7 @@ async fn poll_device_with_exchange<F>(
             return;
         }
         {
-            let g = app.gh_device.lock().await;
+            let g = app.gh_device().lock().await;
             match g.get(&host) {
                 Some(s) if s.device_code == device_code && s.error.is_none() => {}
                 _ => return,
@@ -829,7 +829,7 @@ async fn poll_device_with_exchange<F>(
                 match apply {
                     Ok(()) => {
                         // Drop the session without aborting this task — we *are* the poller.
-                        let mut g = app.gh_device.lock().await;
+                        let mut g = app.gh_device().lock().await;
                         if g.get(&host).is_some_and(|s| s.device_code == device_code) {
                             g.remove(&host);
                         }
@@ -1102,4 +1102,9 @@ mod tests {
             Some("unsupported_grant_type")
         );
     }
+}
+
+/// GitHub device flow 進行中的 session。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait GhDevice: Send + Sync {
+    fn gh_device(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::gh_auth::DeviceSession>>;
 }

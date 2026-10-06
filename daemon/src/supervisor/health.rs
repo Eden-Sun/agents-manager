@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// `gh auth status` 要打網路，health 又常被輪詢：60 秒內沿用上一次的結果。
-async fn release_triage_health(app: &Arc<App>) -> Value {
+async fn release_triage_health(app: &(impl crate::capabilities::Cfg + crate::supervisor::ports::HostProbes)) -> Value {
     static CACHE: tokio::sync::Mutex<Option<(std::time::Instant, Value)>> = tokio::sync::Mutex::const_new(None);
-    let cfg = app.cfg.get().await.release_triage;
+    let cfg = app.cfg().get().await.release_triage;
     let mut c = CACHE.lock().await;
     if let Some((at, v)) = c.as_ref() {
         if at.elapsed() < std::time::Duration::from_secs(60) {

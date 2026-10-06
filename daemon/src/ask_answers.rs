@@ -25,7 +25,6 @@
 //! 網頁認 `type`，畫成「Claude 問／你答」；它不是使用者打的 prompt，也不進任何送出或排隊的邏輯。
 //! `created_at` 用答完的時間（transcript 的時間戳），排在回合中間而不是 Stop 才補進去的那一刻。
 
-use crate::events::ports::{TurnCommands};
 use crate::db;
 use crate::state::App;
 use anyhow::Result;
@@ -209,7 +208,7 @@ fn normalize(at: &str) -> Option<String> {
 }
 
 async fn record_on_turn(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
     bot_id: &str,
     conversation_id: &str,
     turn_id: &str,
@@ -240,13 +239,13 @@ async fn record_on_turn(
         .bind(turn_id)
         .bind(rec.content())
         .bind(&created_at)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
         if done.rows_affected() == 0 {
             continue;
         }
         added += 1;
-        let m = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&id).fetch_one(&app.db).await?;
+        let m = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&id).fetch_one(app.db()).await?;
         app.emit_message_added(bot_id, m).await;
     }
     Ok(added)
@@ -255,12 +254,12 @@ async fn record_on_turn(
 /// 把回合已結束時讀到的提問記進對話裡最新已開始的回合。回傳新增了幾則。
 ///
 /// Stop 也可能替終端手打的外部回合剛建立新 turn，因此這條路要在 `hookrecv::process` 收尾時才挑回合。
-pub(crate) async fn record(app: &Arc<App>, bot_id: &str, conversation_id: &str, records: Vec<AskRecord>) -> Result<usize> {
+pub(crate) async fn record(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), bot_id: &str, conversation_id: &str, records: Vec<AskRecord>) -> Result<usize> {
     let Some((turn_id, turn_started)) = sqlx::query_as::<_, (String, String)>(
         "SELECT id, created_at FROM turns WHERE conversation_id = ? AND status <> 'queued' ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(conversation_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?
     else {
         return Ok(0);
@@ -271,7 +270,7 @@ pub(crate) async fn record(app: &Arc<App>, bot_id: &str, conversation_id: &str, 
 /// PostToolUse arrives before Stop creates a terminal-typed external turn. Attach its early copy only
 /// to a turn that is actually in flight; if there is none, Stop will record it from the transcript.
 pub(crate) async fn record_in_flight(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
     bot_id: &str,
     conversation_id: &str,
     records: Vec<AskRecord>,
@@ -280,7 +279,7 @@ pub(crate) async fn record_in_flight(
         "SELECT id, created_at FROM turns WHERE conversation_id = ? AND status = 'in_flight' ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(conversation_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?
     else {
         return Ok(0);

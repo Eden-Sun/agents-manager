@@ -524,9 +524,9 @@ pub(crate) fn is_retired_agy_quota_key(key: &str) -> bool {
     key == "agy:claude-gpt" || key.ends_with("/agy:claude-gpt")
 }
 
-pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
+pub async fn load_cache(app: &(impl crate::capabilities::Db + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables)) -> Result<usize> {
     let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT key, quota_json, updated_at FROM quota_cache")
-        .fetch_all(&app.db)
+        .fetch_all(app.db())
         .await?;
     let mut restored = Vec::new();
     let mut retired = Vec::new();
@@ -559,8 +559,8 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
     }
 
     let count = restored.len();
-    let mut quotas = app.quotas.lock().await;
-    let mut stale = app.quota_stale.lock().await;
+    let mut quotas = app.quotas().lock().await;
+    let mut stale = app.quota_stale().lock().await;
     for key in &retired {
         quotas.remove(key);
         stale.remove(key);
@@ -611,9 +611,9 @@ async fn delete_cache(app: &impl crate::capabilities::Db, key: &str) {
 }
 
 /// Remove a quota key that no longer belongs to a live identity/host, including its restart cache.
-pub async fn forget(app: &App, key: &str) {
-    app.quotas.lock().await.remove(key);
-    app.quota_stale.lock().await.remove(key);
+pub async fn forget(app: &(impl crate::capabilities::Db + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), key: &str) {
+    app.quotas().lock().await.remove(key);
+    app.quota_stale().lock().await.remove(key);
     delete_cache(app, key).await;
 }
 
@@ -1177,10 +1177,10 @@ pub async fn limit_cleared_since(app: &Arc<App>, bot: &crate::db::Bot, since: ch
 ///
 /// 不管這一格當下有沒有撞限都記下時刻：成功回合本身就是「這個帳號收得下工作」的證據，
 /// 撞限可能在那之前已經自己過期、或是重啟後根本沒被回填。
-pub async fn clear_limit_hit(app: &App, host: &str, base: &str) {
+pub async fn clear_limit_hit(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), host: &str, base: &str) {
     let key = quota_key(host, base);
     cleared_at().lock().unwrap().insert(cleared_at_key(app, &key), chrono::Utc::now());
-    let mut quotas = app.quotas.lock().await;
+    let mut quotas = app.quotas().lock().await;
     let Some(q) = quotas.get_mut(&key) else { return };
     if q.limit_hit.is_none() {
         return;
@@ -1188,7 +1188,7 @@ pub async fn clear_limit_hit(app: &App, host: &str, base: &str) {
     q.limit_hit = None;
     let out = q.clone();
     drop(quotas);
-    let stale = app.quota_stale.lock().await.contains(&key);
+    let stale = app.quota_stale().lock().await.contains(&key);
     persist_cache(app, &key, &out).await;
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
 }
@@ -1207,13 +1207,13 @@ pub const HELD_SOURCE: &str = "queued-prompt-hold";
 /// 只寫 `limit_hit`，不動任何量表或重置時間（那是橫幅／app-server／statusLine 的事）。已經過期的
 /// 時間不寫；同一格已經有**更晚**（或沒寫時間＝黏著）的撞限時也不覆蓋，所以呼叫端可以照順序把
 /// 每一張交辦餵進來，最晚的那個自然會留下。回傳有沒有真的寫進去。
-pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str, message: &str, bucket: Option<String>) -> bool {
+pub async fn seed_limit_hit(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), host: &str, base: &str, until: &str, message: &str, bucket: Option<String>) -> bool {
     let Some(t) = parse_utc(until) else { return false };
     if t <= chrono::Utc::now() {
         return false;
     }
     let key = quota_key(host, base);
-    let mut quotas = app.quotas.lock().await;
+    let mut quotas = app.quotas().lock().await;
     if let Some(hit) = quotas.get(&key).and_then(|q| q.limit_hit.as_ref()) {
         if !limit_hit_expired(Some(hit)) {
             // 沒寫時間的撞限永不過期（`limit_hit_expired`），一定比任何時間都「晚」。
@@ -1245,7 +1245,7 @@ pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str,
     let out = q.clone();
     quotas.insert(key.clone(), q);
     drop(quotas);
-    let stale = app.quota_stale.lock().await.contains(&key);
+    let stale = app.quota_stale().lock().await.contains(&key);
     persist_cache(app, &key, &out).await;
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
     true
@@ -1257,12 +1257,12 @@ pub async fn seed_limit_hit(app: &Arc<App>, host: &str, base: &str, until: &str,
 /// `at` 要是原本那一刻，讀數才校正得準（[`recalibrate_limit_hit`] 靠它判斷窗是不是撞限之後才開的）；
 /// 重啟之後、回填之前已經有新讀數進來的話，當場校正一次，不必等下一份。已經過期、被校正作廢、或這一格
 /// 已有更晚（或黏著）的撞限時不寫。回傳有沒有真的寫進去。
-pub async fn restore_limit_hit(app: &App, host: &str, base: &str, hit: LimitHit) -> bool {
+pub async fn restore_limit_hit(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), host: &str, base: &str, hit: LimitHit) -> bool {
     if limit_hit_expired(Some(&hit)) {
         return false;
     }
     let key = quota_key(host, base);
-    let mut quotas = app.quotas.lock().await;
+    let mut quotas = app.quotas().lock().await;
     let hit = match quotas.get(&key) {
         Some(q) => match recalibrate_limit_hit(hit, q) {
             Some(h) => h,
@@ -1298,17 +1298,17 @@ pub async fn restore_limit_hit(app: &App, host: &str, base: &str, hit: LimitHit)
     let out = q.clone();
     quotas.insert(key.clone(), q);
     drop(quotas);
-    let stale = app.quota_stale.lock().await.contains(&key);
+    let stale = app.quota_stale().lock().await.contains(&key);
     persist_cache(app, &key, &out).await;
     app.emit("quota_updated", json!({"kind": key, "host": host, "quota": quota_value(&out, stale)})).await;
     true
 }
 
 /// Base kinds always present per host (empty bars before first report); orphan-host keys dropped.
-pub async fn snapshot(app: &Arc<App>) -> Value {
-    let hosts = app.hosts.names().await;
-    let q = app.quotas.lock().await.clone();
-    let stale = app.quota_stale.lock().await.clone();
+pub async fn snapshot(app: &(impl crate::hosts::HostsAccess + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables)) -> Value {
+    let hosts = app.hosts().names().await;
+    let q = app.quotas().lock().await.clone();
+    let stale = app.quota_stale().lock().await.clone();
     let now = chrono::Utc::now();
     let is_stale = |key: &str, x: &Quota| reading_is_stale(x, stale.contains(key), now);
     let mut m = serde_json::Map::new();
@@ -3257,4 +3257,14 @@ mod tests {
         assert_eq!(snap["kinds"]["claude:cc1"]["stale"], json!(false), "剛寫的");
         assert_eq!(snap["kinds"]["claude:cc2"]["stale"], json!(false), "29 分鐘還在健康節奏的容忍內");
     }
+}
+
+/// 每個 quota key 的最新額度快照。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait QuotaTables: Send + Sync {
+    fn quotas(&self) -> &tokio::sync::Mutex<std::collections::BTreeMap<String, crate::quota::Quota>>;
+}
+
+/// 讀數已過期（stale）的 quota key。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait QuotaStaleKeys: Send + Sync {
+    fn quota_stale(&self) -> &tokio::sync::Mutex<std::collections::BTreeSet<String>>;
 }

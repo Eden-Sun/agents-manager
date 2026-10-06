@@ -8,12 +8,16 @@
 //! 之後抽出獨立 crate 時，這些 trait 會跟著 `am-ports` 一起搬下去；現在先在 daemon 內把依賴方向理清。
 
 use crate::config::ConfigStore;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use crate::herdr::HerdrClient;
 use crate::state::App;
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 
 /// SQLite 連線池。
@@ -34,6 +38,11 @@ pub trait DataDir: Send + Sync {
 /// 設定檔（`config.toml`）的讀寫。
 pub trait Cfg: Send + Sync {
     fn cfg(&self) -> &ConfigStore;
+}
+
+/// 每顆 bot 一把的互斥鎖。
+pub trait BotLocks: Send + Sync {
+    fn bot_lock(&self, bot_id: &str) -> impl Future<Output = Arc<Mutex<()>>> + Send;
 }
 
 /// 重算並推出一顆 bot 的狀態（`bot_status` 事件）。
@@ -64,6 +73,11 @@ impl DataDir for App {
 impl Cfg for App {
     fn cfg(&self) -> &ConfigStore {
         &self.cfg
+    }
+}
+impl BotLocks for App {
+    fn bot_lock(&self, bot_id: &str) -> impl Future<Output = Arc<Mutex<()>>> + Send {
+        App::bot_lock(self, bot_id)
     }
 }
 impl BotStatusEmit for App {
@@ -97,6 +111,11 @@ impl<T: Cfg + ?Sized> Cfg for Arc<T> {
         (**self).cfg()
     }
 }
+impl<T: BotLocks + ?Sized> BotLocks for Arc<T> {
+    fn bot_lock(&self, bot_id: &str) -> impl Future<Output = Arc<Mutex<()>>> + Send {
+        (**self).bot_lock(bot_id)
+    }
+}
 impl<T: BotStatusEmit + ?Sized> BotStatusEmit for Arc<T> {
     fn emit_bot_status(&self, bot_id: &str) -> impl Future<Output = ()> + Send {
         (**self).emit_bot_status(bot_id)
@@ -107,6 +126,90 @@ impl<T: BootId + ?Sized> BootId for Arc<T> {
         (**self).boot_id()
     }
 }
+
+/// 「這個 host／bot／run 現在該連哪個 herdr session、哪條 client、連著沒有」。
+pub trait HerdrRoutes: Send + Sync {
+    fn session_for_host(&self, host: &str) -> impl Future<Output = Option<String>> + Send;
+    fn herdr_for_session(&self, host: &str, session: &str) -> impl Future<Output = Option<HerdrClient>> + Send;
+    fn session_connected(&self, host: &str, session: &str) -> impl Future<Output = bool> + Send;
+    fn bot_connected(&self, bot_id: &str) -> impl Future<Output = bool> + Send;
+    fn session_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<String>> + Send;
+    fn herdr_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<HerdrClient>> + Send;
+    fn host_connected(&self, host: &str) -> impl Future<Output = bool> + Send;
+}
+
+impl HerdrRoutes for App {
+    fn session_for_host(&self, host: &str) -> impl Future<Output = Option<String>> + Send {
+        App::session_for_host(self, host)
+    }
+    fn herdr_for_session(&self, host: &str, session: &str) -> impl Future<Output = Option<HerdrClient>> + Send {
+        App::herdr_for_session(self, host, session)
+    }
+    fn session_connected(&self, host: &str, session: &str) -> impl Future<Output = bool> + Send {
+        App::session_connected(self, host, session)
+    }
+    fn bot_connected(&self, bot_id: &str) -> impl Future<Output = bool> + Send {
+        App::bot_connected(self, bot_id)
+    }
+    fn session_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<String>> + Send {
+        App::session_for_run(self, run)
+    }
+    fn herdr_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<HerdrClient>> + Send {
+        App::herdr_for_run(self, run)
+    }
+    fn host_connected(&self, host: &str) -> impl Future<Output = bool> + Send {
+        App::host_connected(self, host)
+    }
+}
+
+impl<T: HerdrRoutes + ?Sized> HerdrRoutes for Arc<T> {
+    fn session_for_host(&self, host: &str) -> impl Future<Output = Option<String>> + Send {
+        (**self).session_for_host(host)
+    }
+    fn herdr_for_session(&self, host: &str, session: &str) -> impl Future<Output = Option<HerdrClient>> + Send {
+        (**self).herdr_for_session(host, session)
+    }
+    fn session_connected(&self, host: &str, session: &str) -> impl Future<Output = bool> + Send {
+        (**self).session_connected(host, session)
+    }
+    fn bot_connected(&self, bot_id: &str) -> impl Future<Output = bool> + Send {
+        (**self).bot_connected(bot_id)
+    }
+    fn session_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<String>> + Send {
+        (**self).session_for_run(run)
+    }
+    fn herdr_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<HerdrClient>> + Send {
+        (**self).herdr_for_run(run)
+    }
+    fn host_connected(&self, host: &str) -> impl Future<Output = bool> + Send {
+        (**self).host_connected(host)
+    }
+}
+
+/// 關機訊號：背景迴圈用它收尾。
+pub trait Shutdown: Send + Sync {
+    fn shutdown(&self) -> &CancellationToken;
+}
+/// 追蹤背景任務，關機時等它們收完。
+pub trait BgTasks: Send + Sync {
+    fn background_tasks(&self) -> &TaskTracker;
+}
+/// 這顆 daemon 執行檔的路徑。
+pub trait ExePath: Send + Sync {
+    fn exe(&self) -> &Path;
+}
+/// 管理 API 的 port。
+pub trait ListenPort: Send + Sync {
+    fn port(&self) -> u16;
+}
+impl Shutdown for App { fn shutdown(&self) -> &CancellationToken { &self.shutdown } }
+impl BgTasks for App { fn background_tasks(&self) -> &TaskTracker { &self.background_tasks } }
+impl ExePath for App { fn exe(&self) -> &Path { &self.exe } }
+impl ListenPort for App { fn port(&self) -> u16 { self.port } }
+impl<T: Shutdown + ?Sized> Shutdown for Arc<T> { fn shutdown(&self) -> &CancellationToken { (**self).shutdown() } }
+impl<T: BgTasks + ?Sized> BgTasks for Arc<T> { fn background_tasks(&self) -> &TaskTracker { (**self).background_tasks() } }
+impl<T: ExePath + ?Sized> ExePath for Arc<T> { fn exe(&self) -> &Path { (**self).exe() } }
+impl<T: ListenPort + ?Sized> ListenPort for Arc<T> { fn port(&self) -> u16 { (**self).port() } }
 
 #[cfg(test)]
 mod tests {

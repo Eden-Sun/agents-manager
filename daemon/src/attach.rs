@@ -21,9 +21,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::db;
+#[cfg(test)]
+use crate::state::App;
 use crate::config::{valid_id, ID_RE};
 use crate::hosts::{sh_quote, HostConn};
-use crate::state::App;
 
 /// 單檔上限 50 MiB（2026-09-24 使用者：「網頁上傳最大 50mb 而不是 12」）；前端 `store/shelf.ts::MAX_BYTES` 必須同值。
 pub const MAX_BYTES: usize = 50 * 1024 * 1024;
@@ -121,18 +122,18 @@ pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[
 static WRITE_THREADS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, std::thread::ThreadId>>> = std::sync::LazyLock::new(Default::default);
 
 /// 同 [`save`]，但 body 已經是 `Bytes`（上傳 handler）：寫檔放到 blocking pool 時只複製參考、不複製最多 50 MiB。
-pub async fn save_bytes(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: Bytes) -> Result<Attachment> {
+pub async fn save_bytes(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess), bot_id: &str, name: &str, mime: &str, data: Bytes) -> Result<Attachment> {
     if data.is_empty() {
         bail!("attachment is empty");
     }
     if data.len() > MAX_BYTES {
         bail!("attachment is {} bytes; the limit is {}", data.len(), MAX_BYTES);
     }
-    let bot = db::bot(&app.db, bot_id)
+    let bot = db::bot(app.db(), bot_id)
         .await?
         .filter(|bot| bot.deleted_at.is_none())
         .ok_or_else(|| anyhow::anyhow!("no such bot"))?;
-    let project = db::project(&app.db, &bot.project_id)
+    let project = db::project(app.db(), &bot.project_id)
         .await?
         .filter(|project| project.deleted_at.is_none())
         .ok_or_else(|| anyhow::anyhow!("no such project"))?;
@@ -145,7 +146,7 @@ pub async fn save_bytes(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, da
     let agent_path = format!("{dir}/{file}");
 
     let host = app
-        .hosts
+        .hosts()
         .get(&project.host)
         .await
         .ok_or_else(|| anyhow::anyhow!("host `{}` is not configured", project.host))?;
@@ -168,18 +169,18 @@ pub async fn save_bytes(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, da
     .bind(&agent_path)
     .bind(&project.host)
     .bind(db::now())
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
 
     if let Err(e) = write_bytes(&host, &project.host, project.path.trim_end_matches('/'), &dir, &file, &agent_path, &local_path, &data).await {
         best_effort_cleanup(&host, &local_path, &agent_path).await;
-        let _ = sqlx::query("UPDATE attachments SET state = 'failed' WHERE id = ?").bind(&id).execute(&app.db).await;
+        let _ = sqlx::query("UPDATE attachments SET state = 'failed' WHERE id = ?").bind(&id).execute(app.db()).await;
         return Err(e);
     }
     // Bytes are down; the row still says 'staging' until this commits. A crash or DB error right
     // here leaves exactly that — `reconcile_orphans` picks it up next startup and cleans the files
     // it just wrote, since nothing else can ever know they belong to a message.
-    sqlx::query("UPDATE attachments SET state = 'ready' WHERE id = ?").bind(&id).execute(&app.db).await?;
+    sqlx::query("UPDATE attachments SET state = 'ready' WHERE id = ?").bind(&id).execute(app.db()).await?;
 
     Ok(Attachment { id, name: name.to_string(), mime: mime.to_string(), size: data.len() as i64, path: agent_path })
 }
@@ -572,6 +573,8 @@ pub fn to_json(a: &Attachment) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
     use crate::testing as tt;
 
     /// 清附件問「有沒有訊息點名它」時，只能看帶附件的那幾則（局部索引），不能對每個候選附件把 messages 全表 LIKE 一遍。

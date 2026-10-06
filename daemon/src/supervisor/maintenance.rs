@@ -35,11 +35,11 @@
 use crate::lifecycle::LcError;
 use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::{HostProbes, LocalAccountView};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::store;
+use super::ports::LocalAccountView;
 
 /// Resources a lease can be taken on. Anything else is refused: a typo must not silently create
 /// a private lock that protects nothing.
@@ -119,7 +119,7 @@ pub fn behind_escalates(code_commits: u64) -> bool {
     code_commits >= ESCALATE_BEHIND_COMMITS
 }
 
-async fn behind_code_commits(app: &Arc<App>) -> u64 {
+async fn behind_code_commits(app: &impl crate::supervisor::ports::HostProbes) -> u64 {
     // 單元測試不看測試 checkout 落後 origin/main 多少（那跟受測行為無關、而且會讓結果隨 repo 狀態飄）；規則本身由
     // `behind_escalates` 的純函式測試釘住。
     if cfg!(test) {

@@ -2,7 +2,6 @@
 //! 契約寫在 `docs/API.md` 的「群組任務」一節；這支檔案改了那一節要跟著改。
 
 use super::{deliver, flow, pick, store};
-use super::ports::{AgmRole, CallerOps, EventOps, SupervisorOps, SupervisorRepo};
 use crate::lifecycle::LcError;
 use crate::state::App;
 use axum::extract::{Path, Query, State};
@@ -12,12 +11,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+use super::ports::{AgmRole, EventOps, SupervisorOps, SupervisorRepo};
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
-async fn emit(app: &Arc<App>, m: &store::Mission) {
+async fn emit(app: &impl crate::mission::ports::EventOps, m: &store::Mission) {
     app.emit_event("mission_updated", json!({"mission_id": m.id, "project_id": m.project_id, "status": m.status()})).await;
 }
 
@@ -111,7 +111,7 @@ async fn check_relay_from(app: &Arc<App>, headers: &HeaderMap, relay_from: Optio
 
 /// A User or AGM role can manage every mission. An ordinary Bot may mutate only a mission where
 /// it has an assignment; the relay proof identifies the caller but does not make it a participant.
-async fn mission_access_bot(app: &Arc<App>, bot_id: Option<&str>) -> Result<Option<String>, LcError> {
+async fn mission_access_bot(app: &impl crate::mission::ports::CallerOps, bot_id: Option<&str>) -> Result<Option<String>, LcError> {
     let Some(bot_id) = bot_id else { return Ok(None) };
     if app.role_of_bot(bot_id).await.map_err(up)?.is_some() {
         return Ok(None);
@@ -149,7 +149,7 @@ async fn require_mission_participant(app: &impl crate::capabilities::Db, mission
     })))
 }
 
-async fn require_header_bot_mission_participant(app: &Arc<App>, mission_id: &str, headers: &HeaderMap) -> Result<(), LcError> {
+async fn require_header_bot_mission_participant(app: &(impl crate::capabilities::Db + crate::mission::ports::CallerOps), mission_id: &str, headers: &HeaderMap) -> Result<(), LcError> {
     let bot_id = app.verified_bot_id(headers).await?;
     let access_bot = mission_access_bot(app, bot_id.as_deref()).await?;
     require_mission_participant(app, mission_id, access_bot.as_deref()).await
@@ -601,7 +601,7 @@ fn is_current_mission_verifier(
 }
 
 /// 先分清一般 Bot 與 User／AGM。一般 Bot 的 verifier 資格會交給 `add_event_checked` 在寫入交易的 snapshot 驗。
-async fn require_gatekeeper(app: &Arc<App>, headers: &HeaderMap, mission_id: &str, verifier_may: bool) -> Result<Option<String>, LcError> {
+async fn require_gatekeeper(app: &(impl crate::capabilities::Db + crate::mission::ports::CallerOps), headers: &HeaderMap, mission_id: &str, verifier_may: bool) -> Result<Option<String>, LcError> {
     let Some(bot) = app.verified_bot_id(headers).await? else { return Ok(None) };
     if app.actor_role(headers).await?.is_some() {
         return Ok(None);
@@ -610,7 +610,7 @@ async fn require_gatekeeper(app: &Arc<App>, headers: &HeaderMap, mission_id: &st
         // Preserve the existing gatekeeper response for bots with no verifier assignment (or
         // that also executed work). The authoritative current-assignment check is repeated in
         // the write transaction below.
-        let assignments = app.db.mission_assignments(mission_id).await.map_err(up)?;
+        let assignments = app.db().mission_assignments(mission_id).await.map_err(up)?;
         let is_verifier = assignments
             .iter()
             .any(|a| a.target_bot_id == bot && a.mission_role.as_deref().unwrap_or("executor") == "verifier");
@@ -722,7 +722,7 @@ pub struct PauseIn {
 /// 呼叫的是不是**收 mission 事件的那個 AGM 角色**自己（bot token 驗過）。是的話就不推 inbox——
 /// 自己叫醒自己只是多一個空回合（同 `resume` 的防線）。有協調者時收件人是協調者；只有巡檢時是巡檢。
 /// 使用者（web）、巡檢代使用者操作時都要叫醒協調者。
-async fn called_by_mission_manager(app: &Arc<App>, headers: &HeaderMap) -> Result<bool, LcError> {
+async fn called_by_mission_manager(app: &impl crate::mission::ports::CallerOps, headers: &HeaderMap) -> Result<bool, LcError> {
     // 宣告了身分卻驗不過就是 403（issue #415）：不能默默當成「不是管理者」照常往下做。
     Ok(match app.actor_role(headers).await? {
         Some(AgmRole::Responder) => true,
@@ -1106,7 +1106,7 @@ pub fn is_temp_bot_name(mission_id: &str, name: &str) -> bool {
     (5..=6).contains(&tail.len()) && id.ends_with(&tail) && !role.is_empty()
 }
 
-async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
+async fn cleanup_temp_bots(app: &(impl crate::capabilities::Db + crate::mission::ports::SupervisorOps), m: &store::Mission) -> Value {
     cleanup_temp_bots_inner(app, m, false).await
 }
 
@@ -1114,8 +1114,8 @@ async fn cleanup_temp_bots(app: &Arc<App>, m: &store::Mission) -> Value {
 /// 由 supervisor 的 tick 呼叫：從持久狀態找出「已結案卻還有活的臨時 bot」的任務，再走同一條 `cleanup_temp_bots`
 /// （同樣的歸屬三條件、同樣 fail-closed，冪等）。補收只在真的刪掉東西時寫時間軸事件——
 /// 還在跑或讀不到的每次都會再看一次，不能每 10 秒就寫一筆。
-pub async fn sweep_closed_mission_temp_bots(app: &Arc<App>) {
-    let missions = match store::closed_with_live_temp_bots(&app.db).await {
+pub async fn sweep_closed_mission_temp_bots(app: &(impl crate::capabilities::Db + crate::mission::ports::SupervisorOps)) {
+    let missions = match store::closed_with_live_temp_bots(app.db()).await {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(error = %e, "could not list closed missions with leftover temp bots");
@@ -1127,8 +1127,8 @@ pub async fn sweep_closed_mission_temp_bots(app: &Arc<App>) {
     }
 }
 
-async fn cleanup_temp_bots_inner(app: &Arc<App>, m: &store::Mission, sweep: bool) -> Value {
-    let assignments = match app.db.mission_assignments(&m.id).await {
+async fn cleanup_temp_bots_inner(app: &(impl crate::capabilities::Db + crate::mission::ports::SupervisorOps), m: &store::Mission, sweep: bool) -> Value {
+    let assignments = match app.db().mission_assignments(&m.id).await {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(mission = %m.id, error = %e, "could not read the mission's assignments; no temp bot was cleaned up");
@@ -1141,7 +1141,7 @@ async fn cleanup_temp_bots_inner(app: &Arc<App>, m: &store::Mission, sweep: bool
         if !seen.insert(a.target_bot_id.clone()) {
             continue;
         }
-        let bot = match crate::db::bot(&app.db, &a.target_bot_id).await {
+        let bot = match crate::db::bot(app.db(), &a.target_bot_id).await {
             Ok(Some(bot)) => bot,
             Ok(None) => continue,
             Err(e) => {
@@ -1160,7 +1160,7 @@ async fn cleanup_temp_bots_inner(app: &Arc<App>, m: &store::Mission, sweep: bool
         }
         #[cfg(test)]
         crate::lifecycle::race_point::hit("mission_cleanup_before_active_run", &bot.id).await;
-        let running = crate::db::active_run(&app.db, &bot.id).await;
+        let running = crate::db::active_run(app.db(), &bot.id).await;
         #[cfg(test)]
         crate::lifecycle::race_point::hit("mission_cleanup_after_active_run", &bot.id).await;
         match running {
@@ -1184,7 +1184,7 @@ async fn cleanup_temp_bots_inner(app: &Arc<App>, m: &store::Mission, sweep: bool
     if sweep {
         if !deleted.is_empty() {
             let names = deleted.iter().filter_map(|x| x["name"].as_str()).collect::<Vec<_>>().join("、");
-            let _ = store::add_event(&app.db, &m.id, "note", &format!("已補收臨時 bot：{names}"), Some(crate::agent_relay::DAEMON_SENDER), &out).await;
+            let _ = store::add_event(app.db(), &m.id, "note", &format!("已補收臨時 bot：{names}"), Some(crate::agent_relay::DAEMON_SENDER), &out).await;
         }
     } else if !deleted.is_empty() || !skipped.is_empty() {
         let names = |v: &[Value]| v.iter().filter_map(|x| x["name"].as_str()).collect::<Vec<_>>().join("、");
@@ -1205,7 +1205,7 @@ async fn cleanup_temp_bots_inner(app: &Arc<App>, m: &store::Mission, sweep: bool
             }
             text.push_str(&format!("未刪除：{}", why(&skipped)));
         }
-        let _ = store::add_event(&app.db, &m.id, "note", &text, Some(crate::agent_relay::DAEMON_SENDER), &out).await;
+        let _ = store::add_event(app.db(), &m.id, "note", &text, Some(crate::agent_relay::DAEMON_SENDER), &out).await;
     }
     out
 }

@@ -106,15 +106,15 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    pub fn of(app: &Arc<App>) -> Self {
+    pub fn of(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath)) -> Self {
         Ctx { repo: repo_dir(app), agm_dir: crate::supervisor::setup::agm_dir(app), live_sha: crate::build_info::BUILD_SHA.to_string() }
     }
 }
 
 /// daemon 從哪個 repo 建出來的：`<repo>/target/release/agents-managerd` 往上找第一個同時有 `.git`
 /// 與 `daemon/Cargo.toml` 的目錄。找不到（binary 被搬走）才退回 kick 的預設 `~/project/agents-manager`。
-pub fn repo_dir(app: &Arc<App>) -> PathBuf {
-    if let Some(found) = app.exe.ancestors().find(|d| d.join(".git").exists() && d.join("daemon/Cargo.toml").is_file()) {
+pub fn repo_dir(app: &impl crate::capabilities::ExePath) -> PathBuf {
+    if let Some(found) = app.exe().ancestors().find(|d| d.join(".git").exists() && d.join("daemon/Cargo.toml").is_file()) {
         return found.to_path_buf();
     }
     PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("project/agents-manager")

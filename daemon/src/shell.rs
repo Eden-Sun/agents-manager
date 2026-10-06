@@ -72,8 +72,8 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 
 /// The host's **manager** session only: the local `default` session is the user's own and the
 /// daemon never puts things into it. A down host fails here, before a pane reaches the registry.
-pub(crate) async fn client_for(app: &Arc<App>, host: &str) -> LcResult<(HerdrClient, String)> {
-    if app.hosts.get(host).await.is_none() {
+pub(crate) async fn client_for(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), host: &str) -> LcResult<(HerdrClient, String)> {
+    if app.hosts().get(host).await.is_none() {
         return Err(LcError::NotFound("host".into()));
     }
     let session = app
@@ -252,9 +252,9 @@ pub(crate) async fn live_verdict(app: &Arc<App>, host: &str, pane_id: &str, expe
 
 /// 這顆 pane 現在歸某顆 bot：有 active run，或 bot 剛用 `herdr pane split`／`agent start` 起出它、還沒被收編成 run
 /// （spawn hint，§6.5a）。受管 pane 的輸入走 bot 對話，不從 shell 面板打進去（§6.5.1／§6.9）。
-async fn pane_is_bot_managed(app: &Arc<App>, host: &str, pane_id: &str) -> anyhow::Result<bool> {
+async fn pane_is_bot_managed(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), host: &str, pane_id: &str) -> anyhow::Result<bool> {
     let session = app.session_for_host(host).await.unwrap_or_default();
-    if !db::active_runs_for_pane(&app.db, host, pane_id, &session, &session).await?.is_empty() {
+    if !db::active_runs_for_pane(app.db(), host, pane_id, &session, &session).await?.is_empty() {
         return Ok(true);
     }
     Ok(crate::spawn_hints::for_host(app, host).await?.contains_key(pane_id))
@@ -1066,4 +1066,9 @@ mod tests {
         }
         drop(listener);
     }
+}
+
+/// 這顆 daemon 開的 host shell 清單。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait HostShells: Send + Sync {
+    fn host_shells(&self) -> &crate::api::shell::Registry;
 }

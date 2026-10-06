@@ -142,18 +142,18 @@ pub async fn on_stop(app: &Arc<App>, run: &db::Run, payload: &Value) {
     }
 }
 
-async fn refine_services(app: &Arc<App>, run: &db::Run, at: Instant) {
+async fn refine_services(app: &(impl crate::background_hook::HookSnapshots + crate::background_jobs::JobCounts + crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run, at: Instant) {
     let Some(pane) = run.pane_id.as_deref() else { return };
     let Some(client) = app.herdr_for_run(run).await else { return };
     let services = crate::background_jobs::services(app, run, &client, pane).await;
     let n = {
-        let mut hook = app.background_hook.lock().unwrap_or_else(|e| e.into_inner());
+        let mut hook = app.background_hook().lock().unwrap_or_else(|e| e.into_inner());
         // 這段時間裡來了新的 Stop（或被丟掉）：這份查詢結果不屬於它了。
         let Some(snap) = hook.get_mut(&run.id).filter(|s| s.at == at) else { return };
         snap.services = Some(services);
         snap.jobs()
     };
-    let changed = crate::background_jobs::record(&mut app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()), &run.id, n);
+    let changed = crate::background_jobs::record(&mut app.background_jobs().lock().unwrap_or_else(|e| e.into_inner()), &run.id, n);
     if changed {
         tracing::info!(run = %run.id, bot = %run.bot_id, background_jobs = n, services, "background jobs changed (resident services deducted)");
         app.emit_bot_status(&run.bot_id).await;
@@ -161,8 +161,8 @@ async fn refine_services(app: &Arc<App>, run: &db::Run, at: Instant) {
 }
 
 /// 巡邏讀到畫面時的取捨：回傳要記的數字，必要時丟掉過期的 hook 帳。`screen` 是畫面判斷的結果（已扣常駐服務）。
-pub fn reconcile(app: &App, run_id: &str, screen: u32) -> u32 {
-    let mut hook = app.background_hook.lock().unwrap_or_else(|e| e.into_inner());
+pub fn reconcile(app: &impl crate::background_hook::HookSnapshots, run_id: &str, screen: u32) -> u32 {
+    let mut hook = app.background_hook().lock().unwrap_or_else(|e| e.into_inner());
     let Some(snap) = hook.get(run_id) else { return screen };
     let jobs = snap.jobs();
     if snap.at.elapsed() < GRACE {
@@ -173,8 +173,8 @@ pub fn reconcile(app: &App, run_id: &str, screen: u32) -> u32 {
 }
 
 /// 有 hook 帳的 run 的 API 欄位（`background_tasks`／`session_crons`）；沒有就是 `null`。
-pub fn details(app: &App, run_id: &str) -> (Value, Value) {
-    let hook = app.background_hook.lock().unwrap_or_else(|e| e.into_inner());
+pub fn details(app: &impl crate::background_hook::HookSnapshots, run_id: &str) -> (Value, Value) {
+    let hook = app.background_hook().lock().unwrap_or_else(|e| e.into_inner());
     let Some(snap) = hook.get(run_id) else { return (Value::Null, Value::Null) };
     let tasks: Vec<Value> = snap
         .reported
@@ -199,8 +199,8 @@ pub fn details(app: &App, run_id: &str) -> (Value, Value) {
     (json!(tasks), json!(crons))
 }
 
-pub fn retain_runs(app: &App, active: &[String]) {
-    app.background_hook.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+pub fn retain_runs(app: &impl crate::background_hook::HookSnapshots, active: &[String]) {
+    app.background_hook().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
 }
 
 #[cfg(test)]
@@ -391,4 +391,9 @@ mod tests {
         let state = crate::api::state_json(&app).await.unwrap();
         assert_eq!(state["projects"][0]["bots"][0]["run"]["background_tasks"][1]["description"], "dev server");
     }
+}
+
+/// 背景 hook 快照。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait HookSnapshots: Send + Sync {
+    fn background_hook(&self) -> &crate::background_hook::Snapshots;
 }

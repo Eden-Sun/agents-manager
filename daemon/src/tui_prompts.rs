@@ -796,20 +796,20 @@ fn same_survey_run(expected: &db::Run, current: &db::Run) -> bool {
         && current.transcript_path == expected.transcript_path
 }
 
-async fn current_survey_target(app: &Arc<App>, expected: &db::Run) -> Option<SurveyTarget> {
-    let current = db::active_run(&app.db, &expected.bot_id).await.ok()??;
+async fn current_survey_target(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), expected: &db::Run) -> Option<SurveyTarget> {
+    let current = db::active_run(app.db(), &expected.bot_id).await.ok()??;
     if !same_survey_run(expected, &current) {
         return None;
     }
     let pane = current.pane_id.clone()?;
-    let host = db::bot_host(&app.db, &current.bot_id).await.ok()?;
+    let host = db::bot_host(app.db(), &current.bot_id).await.ok()?;
     let session = app.session_for_run(&current).await?;
     let client = app.herdr_for_session(&host, &session).await?;
     let socket_path = client.socket_path().to_path_buf();
     Some(SurveyTarget { run: current, pane, host, session, socket_path, client })
 }
 
-async fn survey_target_is_current(app: &Arc<App>, target: &SurveyTarget) -> bool {
+async fn survey_target_is_current(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), target: &SurveyTarget) -> bool {
     let Some(current) = current_survey_target(app, &target.run).await else { return false };
     current.host == target.host
         && current.session == target.session

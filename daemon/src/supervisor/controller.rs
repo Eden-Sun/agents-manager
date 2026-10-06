@@ -415,7 +415,7 @@ fn event_key(kind: &str, a: &store::Assignment) -> String {
 /// 回 `true` ＝ 這一次真的把交辦從在途收掉了。`false`（別的路徑先裁示／收掉，或寫入失敗）時，
 /// 呼叫端接在收成後面的副作用（換手通知、暫停任務…）一律不做（issue #110）。
 async fn settle(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::JudgeOps),
     a: &store::Assignment,
     turn_status: &str,
     evidence_complete: bool,
@@ -424,7 +424,7 @@ async fn settle(
 ) -> bool {
     let (kind, payload) = settle_event(a, turn_status, evidence_complete, result, error);
     match store::settle_and_notify(
-        &app.db,
+        app.db(),
         &a.id,
         turn_status,
         evidence_complete,
@@ -552,21 +552,21 @@ const POLICY_RETRY_SECS: i64 = 10;
 /// 會改變派工身分、reviewer 的獨立性、任務要不要停下來的讀取一律三態（issue #160）：以前任務／bot 讀錯回「不適用」
 /// （退回一般等待），主機讀錯退回 `local`（遠端任務用本機的身分與額度），停用清單讀錯當「沒有停用」，執行者的身分讀錯
 /// 就拿掉 reviewer 的排除條件——「不知道政策」被當成政策允許。現在讀不到就 [`MissionQuota::Unavailable`]。
-async fn mission_quota(app: &Arc<App>, a: &store::Assignment, mission_id: &str, hit: &crate::quota::LimitHit, where_seen: &str) -> MissionQuota {
+async fn mission_quota(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::MissionOps), a: &store::Assignment, mission_id: &str, hit: &crate::quota::LimitHit, where_seen: &str) -> MissionQuota {
     match mission_quota_inner(app, a, mission_id, hit, where_seen).await {
         Ok(outcome) | Err(outcome) => outcome,
     }
 }
 
-async fn mission_quota_inner(app: &Arc<App>, a: &store::Assignment, mission_id: &str, hit: &crate::quota::LimitHit, where_seen: &str) -> Result<MissionQuota, MissionQuota> {
+async fn mission_quota_inner(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::MissionOps), a: &store::Assignment, mission_id: &str, hit: &crate::quota::LimitHit, where_seen: &str) -> Result<MissionQuota, MissionQuota> {
     use crate::mission::{pick, store as mstore};
-    let Some(m) = unavailable("mission", mstore::get(&app.db, mission_id).await)? else { return Ok(MissionQuota::NotApplicable) };
+    let Some(m) = unavailable("mission", mstore::get(app.db(), mission_id).await)? else { return Ok(MissionQuota::NotApplicable) };
     if m.completed_at.is_some() || m.cancelled_at.is_some() {
         return Ok(MissionQuota::NotApplicable);
     }
     let Some(role) = a.mission_role.as_deref().and_then(pick::Role::parse) else { return Ok(MissionQuota::NotApplicable) };
-    let Some(bot) = unavailable("target bot", crate::db::bot(&app.db, &a.target_bot_id).await)? else { return Ok(MissionQuota::NotApplicable) };
-    let host = unavailable("bot host", crate::db::bot_host(&app.db, &bot.id).await)?;
+    let Some(bot) = unavailable("target bot", crate::db::bot(app.db(), &a.target_bot_id).await)? else { return Ok(MissionQuota::NotApplicable) };
+    let host = unavailable("bot host", crate::db::bot_host(app.db(), &bot.id).await)?;
     let kind = if role == pick::Role::Verifier { "claude" } else { m.executor_kind.as_str() };
     let raw = unavailable("identity candidates", app.mission_candidates(&host, kind).await)?;
     let cands: Vec<pick::Candidate> = raw.iter().map(|(n, d, q)| pick::Candidate { name: n, disabled: *d, quota: q.as_ref() }).collect();
@@ -607,7 +607,7 @@ async fn mission_quota_inner(app: &Arc<App>, a: &store::Assignment, mission_id: 
             // 交辦收成 `identity_switch` 與叫醒 AGM 的通知同一個交易（#305）：通知寫不進去就整組不成立，下一輪再判。
             // 交辦已經不在途中（讀完之後被裁示掉）：沒有換手可言，通知與時間軸一句都不寫（issue #110）。
             let (skind, spayload) = settle_event(a, "identity_switch", true, None, Some(&why));
-            let mut tx = unavailable("settle identity switch", app.db.begin().await.map_err(anyhow::Error::from))?;
+            let mut tx = unavailable("settle identity switch", app.db().begin().await.map_err(anyhow::Error::from))?;
             let s = unavailable(
                 "settle identity switch",
                 store::settle_and_notify_on(&mut tx, &a.id, "identity_switch", true, None, Some(&why), &event_key(skind, a), skind, &spayload).await,
@@ -648,9 +648,9 @@ async fn mission_quota_inner(app: &Arc<App>, a: &store::Assignment, mission_id: 
 /// 驗證者挑不到 Fable：交辦收成 `quota_exhausted`（推驗收通知）＋任務停成 `no_fable_for_verifier`＋`paused` 事件，**同一個交易**。
 /// `Ok(None)` ＝ 交辦已經不在途中（別的路徑先裁示了），什麼都沒寫；`Ok(Some(paused))` ＝ 寫下了，`paused=false` 是任務這中間已經
 /// 關掉（只收交辦）。任務本來就停在同一個原因（`already`）就不再記一則暫停。
-async fn settle_and_pause(app: &Arc<App>, a: &store::Assignment, mission_id: &str, already: bool, reason: &str) -> anyhow::Result<Option<bool>> {
+async fn settle_and_pause(app: &(impl crate::capabilities::Db + crate::supervisor::ports::MissionOps), a: &store::Assignment, mission_id: &str, already: bool, reason: &str) -> anyhow::Result<Option<bool>> {
     let (kind, payload) = settle_event(a, "quota_exhausted", true, None, Some(reason));
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     let s = store::settle_and_notify_on(&mut tx, &a.id, "quota_exhausted", true, None, Some(reason), &event_key(kind, a), kind, &payload).await?;
     if !s.moved {
         return Ok(None);
@@ -844,14 +844,14 @@ fn retry_backfill_quota_limits(app: &Arc<App>, host: &str) {
 ///
 /// `Ok(None)` ＝ 確定沒有（沒派過執行者、那顆 bot 不在了、它沒設身分）；讀不到回 `Err`（issue #160）——以前 `.ok()?` 讓讀錯
 /// 變成 `None`，排除條件跟著消失，reviewer 可能被換到執行者自己的帳號上。
-async fn executor_identity(app: &Arc<App>, mission_id: &str) -> anyhow::Result<Option<String>> {
-    let rows = store::mission_assignments(&app.db, mission_id).await?;
+async fn executor_identity(app: &(impl crate::capabilities::Db + crate::supervisor::ports::MissionOps), mission_id: &str) -> anyhow::Result<Option<String>> {
+    let rows = store::mission_assignments(app.db(), mission_id).await?;
     let Some(executor) = rows.iter().rev().find(|x| x.mission_role.as_deref() == Some("executor")) else { return Ok(None) };
-    let Some(bot) = crate::db::bot(&app.db, &executor.target_bot_id).await? else { return Ok(None) };
+    let Some(bot) = crate::db::bot(app.db(), &executor.target_bot_id).await? else { return Ok(None) };
     // 實際在跑的帳號（issue #238），預設帳號要解析成候選清單裡的名字（issue #468）——不解析的話
     // 執行者跑預設帳號時這裡回 `None`，`pick` 的 `exclude` 就是空的，reviewer 可能被挑成執行者
     // 正在用的那個帳號，「reviewer 必須是另一個身分」被悄悄打破（同 review3 c1 L11 要擋的那件事）。
-    let host = crate::db::bot_host(&app.db, &bot.id).await?;
+    let host = crate::db::bot_host(app.db(), &bot.id).await?;
     app.mission_billing_identity(&host, &bot).await
 }
 
@@ -863,7 +863,7 @@ async fn executor_identity(app: &Arc<App>, mission_id: &str) -> anyhow::Result<O
 ///
 /// 讀不到任務回 `Err`（issue #160）：使用者的暫停是存在 DB 裡的意圖，DB 暫時讀不到不等於解除暫停——以前 `Err` 當成 `false`，
 /// 等額度的交辦就被放回 queued 重送。
-async fn mission_paused(app: &Arc<App>, a: &store::Assignment) -> anyhow::Result<bool> {
+async fn mission_paused(app: &impl crate::supervisor::ports::MissionOps, a: &store::Assignment) -> anyhow::Result<bool> {
     let Some(mission_id) = a.mission_id.as_deref() else { return Ok(false) };
     let Some(m) = app.mission(mission_id).await? else { return Ok(false) };
     // 任務已經結案／取消：這件交辦不該再被叫醒（issue #498 的複看）。以前這裡要求
@@ -917,7 +917,7 @@ mod mission_closed_tests {
 
 /// 這件交辦 park 時撞的是模型專屬的桶（`error` 裡記的 claude 橫幅，例如 Fable），而這顆 bot 現在跑的模型
 /// 不歸那一桶管（[`crate::quota::bucket_blocks_model`]）。5h／7d／認不出桶名的一律 `false`。
-async fn parked_on_another_models_bucket(app: &Arc<App>, a: &store::Assignment, bot: &crate::db::Bot) -> bool {
+async fn parked_on_another_models_bucket(app: &impl crate::supervisor::ports::QuotaOps, a: &store::Assignment, bot: &crate::db::Bot) -> bool {
     if bot.kind != "claude" {
         return false;
     }
@@ -1043,30 +1043,30 @@ async fn last_reply(db: &SqlitePool, turn_id: &str) -> anyhow::Result<Option<Str
 /// 這裡把回覆寫回去：`turn_status` 升成 `completed`、`evidence_complete=1`、`result` 補上；交辦原本沒有 result 的
 /// 才另推一則事件告訴驗收者「結果到了」（同一個交易，事件鍵每筆交辦＋回合一次，重跑不會再推）。
 /// 兩種順序都收得到：hook 先補、controller 才結算的話，結算時 `last_reply` 已經讀到回覆，這裡只升 `turn_status`，不再推。
-pub(crate) async fn late_reply_for_turn(app: &Arc<App>, turn_id: &str, status: &str) {
+pub(crate) async fn late_reply_for_turn(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::JudgeOps), turn_id: &str, status: &str) {
     if !matches!(status, "completed" | "completed_fallback") {
         return;
     }
     // 讀不到不等於沒掛交辦（#200）：這一次寫不回去，每一輪對帳的 `sweep_late_replies` 照 DB 再找一次。
-    match store::assignment_by_turn(&app.db, turn_id).await {
+    match store::assignment_by_turn(app.db(), turn_id).await {
         Ok(Some(a)) => late_reply(app, &a, turn_id).await,
         Ok(None) => {}
         Err(e) => tracing::warn!(turn = turn_id, error = ?e, "讀不到這一回合掛的交辦：遲到的回覆這一次寫不回去，下一輪對帳再找"),
     }
 }
 
-async fn late_reply(app: &Arc<App>, a: &store::Assignment, turn_id: &str) {
+async fn late_reply(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::JudgeOps), a: &store::Assignment, turn_id: &str) {
     // `quota_blocked` 會自己重送，不是「結算過、回覆沒到」的那種（撞限收場歸 park_quota 管）。
     if a.is_executing() || a.status == "quota_blocked" || a.turn_status.as_deref() != Some("completed_fallback") {
         return;
     }
     // 讀不到就這一次不寫（#200）：不寫就沒有收不回來的東西，每一輪對帳的 `sweep_late_replies` 照 DB 再找一次。
     let read = async {
-        let now_status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await?;
+        let now_status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id=?").bind(turn_id).fetch_optional(app.db()).await?;
         if now_status.as_deref() != Some("completed") {
             return anyhow::Ok(None);
         }
-        last_reply(&app.db, turn_id).await
+        last_reply(app.db(), turn_id).await
     };
     let reply = match read.await {
         Ok(r) => r,
@@ -1081,7 +1081,7 @@ async fn late_reply(app: &Arc<App>, a: &store::Assignment, turn_id: &str) {
     let res = async {
         let now = crate::db::now();
         // 先讀交辦再寫：deferred 的話讀完之後別的 writer 一 commit 就 517，遲到的回覆這一輪寫不回去（#831）。
-        let mut tx = crate::db::begin_write(&app.db).await?;
+        let mut tx = crate::db::begin_write(app.db()).await?;
         let (had_result, status, expects_review): (Option<String>, String, i64) =
             sqlx::query_as("SELECT result, status, expects_review FROM supervisor_assignments WHERE id=?")
                 .bind(&a.id)
@@ -1334,7 +1334,7 @@ async fn collect_cancelled_missions(app: &Arc<App>) {
 /// 已經結算過、但回合後來被遲到的 hook 補上回覆的交辦（`open_assignments` 只列執行中的，掃不到它們）。
 /// 事件漏掉（Lagged）、daemon 在 hook 與事件之間重啟時，這裡補做 [`late_reply`]；寫回之後 `turn_status`
 /// 就是 `completed`，下一輪不會再撈到。
-async fn sweep_late_replies(app: &Arc<App>) {
+async fn sweep_late_replies(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::JudgeOps)) {
     let rows = sqlx::query_as::<_, store::Assignment>(
         "SELECT a.* FROM supervisor_assignments a JOIN turns t ON t.id = a.turn_id
           WHERE a.supervisor_id=? AND a.turn_status='completed_fallback' AND t.status='completed'
@@ -1342,7 +1342,7 @@ async fn sweep_late_replies(app: &Arc<App>) {
           ORDER BY a.updated_at DESC LIMIT 50",
     )
     .bind(store::SUPERVISOR_ID)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await;
     let Ok(rows) = rows else { return };
     for a in rows {
@@ -1391,9 +1391,9 @@ async fn sweep_missing_events(db: &SqlitePool) {
 ///
 /// 只看「turn 還停在 `queued`」的那些：一旦 queue flush 送出去，turn 會變成 in_flight／完成，
 /// 這條就不再管它。等待上限 `[supervisor] assignment_queue_wait_secs`（預設 30 分鐘）。
-async fn block_stale_queues(app: &Arc<App>) {
-    let limit = app.cfg.get().await.supervisor.assignment_queue_wait_secs as i64;
-    let Ok(open) = store::open_assignments(&app.db).await else { return };
+async fn block_stale_queues(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::TurnOps)) {
+    let limit = app.cfg().get().await.supervisor.assignment_queue_wait_secs as i64;
+    let Ok(open) = store::open_assignments(app.db()).await else { return };
     for a in open {
         if a.status != "delivered" || a.delivery.as_deref() != Some("queued") {
             continue;
@@ -1401,7 +1401,7 @@ async fn block_stale_queues(app: &Arc<App>) {
         let Some(turn_id) = a.turn_id.clone() else { continue };
         let Ok(Some((status, created_at))) = sqlx::query_as::<_, (String, String)>("SELECT status, created_at FROM turns WHERE id=?")
             .bind(&turn_id)
-            .fetch_optional(&app.db)
+            .fetch_optional(app.db())
             .await
         else {
             continue;
@@ -1424,7 +1424,7 @@ async fn block_stale_queues(app: &Arc<App>) {
         // 而 `None` 會退回只看記憶體的 `recently_held`——重啟後那張表是空的，所以「剛重啟那一拍剛好讀不到 DB」
         // 就把一則只是在等額度的派工撤掉，理由還寫成「對方一直沒有回合結束的空檔」。讀不到就跳過這一拍：
         // 保險絲本來就週期性跑，晚一拍沒有代價；當成擋著則會讓真的沒有 bot 的那種永遠撤不掉。
-        let hit = match crate::db::bot(&app.db, &a.target_bot_id).await {
+        let hit = match crate::db::bot(app.db(), &a.target_bot_id).await {
             Ok(Some(bot)) => app.blocking_quota_hit(&bot, &turn_id).await,
             Ok(None) => None,
             Err(e) => {
@@ -1455,7 +1455,7 @@ async fn block_stale_queues(app: &Arc<App>) {
             "hint": "排著的那則已撤回，不會再送。等那顆 bot 空下來再派一次（followup），或改派給別人。"});
         let key = format!("queue_blocked:{}:{}", a.id, turn_id);
         // 撤 turn、標 blocked、通知 AGM 同一個交易（#283）：通知寫不進去整組回滾，下一輪重來。
-        match revoke_and_block(&app.db, &a.id, &turn_id, &why, &text, Some((&key, &payload))).await {
+        match revoke_and_block(app.db(), &a.id, &turn_id, &why, &text, Some((&key, &payload))).await {
             Ok(Some(revoked)) => {
                 tracing::warn!(assignment = %a.id, bot = %a.target_bot_id, waited_s = waited, "排隊太久：撤回排著的 prompt，交辦停在 blocked");
                 // 先 commit 再推：turn 事件到 `on_turn_done` 時交辦已經是 blocked，不會被當成回合失敗結案。
@@ -1580,23 +1580,23 @@ fn notify_due(last: Option<&str>, interval: u64, now: chrono::DateTime<chrono::U
 /// A busy manager keeps its notifications in the inbox instead of fighting the user's phone
 /// turn for the one queue slot; and delivery is not the same as handled, so a notify that
 /// fails leaves every event pending for the next tick.
-async fn notify(app: &Arc<App>) {
-    let Ok(sup) = store::get_or_init(&app.db).await else { return };
+async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::supervisor::ports::TurnOps)) {
+    let Ok(sup) = store::get_or_init(app.db()).await else { return };
     let Some(manager) = sup.bot_id.clone() else { return };
-    let cfg = app.cfg.get().await;
+    let cfg = app.cfg().get().await;
     let max_attempts = cfg.supervisor.notify_max_attempts.max(1);
     let now = crate::db::now();
     // 「建立過」而不是「現在活著」：協調者停了或被刪，它的事件仍歸它（SPEC §18.15）。
     // 讀不到＝不知道，不是「單角色」：unwrap_or(false) 會讓巡檢撿走協調者的事件、mark_delivered 還把
     // claimed_by 改成 patrol，永久改寫歸屬。這輪不送，事件留 pending（#250）。
-    let responder_configured = match super::roles::responder_configured(&app.db).await {
+    let responder_configured = match super::roles::responder_configured(app.db()).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = ?e, "supervisor notify cannot read whether the responder is configured; skipping this tick");
             return;
         }
     };
-    let Ok(pending) = super::roles::due_for(&app.db, super::roles::Role::Patrol, responder_configured, &now, max_attempts).await
+    let Ok(pending) = super::roles::due_for(app.db(), super::roles::Role::Patrol, responder_configured, &now, max_attempts).await
     else {
         return;
     };
@@ -1614,7 +1614,7 @@ async fn notify(app: &Arc<App>) {
         return;
     }
     // 讀不到 liveness 時不送（不知道它有沒有空），事件留 pending 下一輪再送。
-    if !matches!(super::manager_liveness(&app.db, &manager).await, Ok("idle")) {
+    if !matches!(super::manager_liveness(app.db(), &manager).await, Ok("idle")) {
         return;
     }
     let ids: Vec<String> = pending.iter().map(|e| e.id.clone()).collect();
@@ -1636,23 +1636,23 @@ async fn notify(app: &Arc<App>) {
         // missing with the row saying it had been handed over.
         Ok(out) if out.delivery == "failed" => {
             let wait = notify_backoff(attempt).as_secs() as i64;
-            let _ = store::defer_notify(&app.db, &ids, &iso_in(wait), "delivery failed").await;
+            let _ = store::defer_notify(app.db(), &ids, &iso_in(wait), "delivery failed").await;
             tracing::warn!(attempt, "supervisor notify reported a failed delivery; events stay pending");
         }
         Ok(out) => {
             // `unknown` is recorded as unknown. The events are marked delivered against this
             // turn so the recovery pass reconciles *that turn* rather than sending a second
             // copy of the same digest.
-            let n = super::roles::mark_delivered(&app.db, &ids, super::roles::Role::Patrol, &out.turn_id, &out.delivery)
+            let n = super::roles::mark_delivered(app.db(), &ids, super::roles::Role::Patrol, &out.turn_id, &out.delivery)
                 .await
                 .unwrap_or(0);
             // Only a wake that actually went out opens the next window.
-            let _ = store::set_last_notify(&app.db, &crate::db::now()).await;
-            let _ = super::roles::record_wake(&app.db, super::roles::Role::Patrol, n, &super::roles::wake_reason(&pending)).await;
+            let _ = store::set_last_notify(app.db(), &crate::db::now()).await;
+            let _ = super::roles::record_wake(app.db(), super::roles::Role::Patrol, n, &super::roles::wake_reason(&pending)).await;
         }
         Err(e) => {
             let wait = notify_backoff(attempt).as_secs() as i64;
-            let _ = store::defer_notify(&app.db, &ids, &iso_in(wait), &format!("{e:?}")).await;
+            let _ = store::defer_notify(app.db(), &ids, &iso_in(wait), &format!("{e:?}")).await;
             tracing::debug!(error = ?e, "supervisor notify deferred; events stay pending");
         }
     }
