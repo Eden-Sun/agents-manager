@@ -516,7 +516,7 @@ pub(crate) async fn plan_delivery(
     let transcript_path = if let Some(path) = run.transcript_path.as_deref() {
         if matches!(bot.kind.as_str(), "claude" | "agy")
             && host_is_local
-            && !crate::transcript_read::local_transcript_allowed(app, bot, path).await
+            && !crate::app_ports_p5::local_transcript_allowed(app, bot, path).await
         {
             None
         } else {

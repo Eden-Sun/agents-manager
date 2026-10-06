@@ -428,3 +428,93 @@ impl<T: crate::api::shell::HostShellOpenLocks + ?Sized> crate::api::shell::HostS
     }
 }
 
+impl crate::capabilities::Db for App {
+    fn db(&self) -> &sqlx::SqlitePool {
+        &self.db
+    }
+}
+impl crate::capabilities::Emit for App {
+    fn emit(&self, kind: &str, data: serde_json::Value) -> impl std::future::Future<Output = ()> + Send {
+        App::emit(self, kind, data)
+    }
+    fn current_seq(&self) -> u64 {
+        App::current_seq(self)
+    }
+}
+impl crate::capabilities::DataDir for App {
+    fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+}
+impl crate::capabilities::Cfg for App {
+    fn cfg(&self) -> &crate::config::ConfigStore {
+        &self.cfg
+    }
+}
+impl crate::capabilities::BotLocks for App {
+    fn bot_lock(&self, bot_id: &str) -> impl std::future::Future<Output = Arc<tokio::sync::Mutex<()>>> + Send {
+        App::bot_lock(self, bot_id)
+    }
+}
+impl crate::capabilities::BotStatusEmit for App {
+    fn emit_bot_status(&self, bot_id: &str) -> impl std::future::Future<Output = ()> + Send {
+        App::emit_bot_status(self, bot_id)
+    }
+}
+impl crate::capabilities::BootId for App {
+    fn boot_id(&self) -> &str {
+        &self.boot_id
+    }
+}
+impl crate::capabilities::HerdrRoutes for App {
+    fn session_for_host(&self, host: &str) -> impl std::future::Future<Output = Option<String>> + Send {
+        App::session_for_host(self, host)
+    }
+    fn herdr_for_session(&self, host: &str, session: &str) -> impl std::future::Future<Output = Option<crate::herdr::HerdrClient>> + Send {
+        App::herdr_for_session(self, host, session)
+    }
+    fn session_connected(&self, host: &str, session: &str) -> impl std::future::Future<Output = bool> + Send {
+        App::session_connected(self, host, session)
+    }
+    fn bot_connected(&self, bot_id: &str) -> impl std::future::Future<Output = bool> + Send {
+        App::bot_connected(self, bot_id)
+    }
+    fn session_for_run(&self, run: &crate::db::Run) -> impl std::future::Future<Output = Option<String>> + Send {
+        App::session_for_run(self, run)
+    }
+    fn herdr_for_run(&self, run: &crate::db::Run) -> impl std::future::Future<Output = Option<crate::herdr::HerdrClient>> + Send {
+        App::herdr_for_run(self, run)
+    }
+    fn host_connected(&self, host: &str) -> impl std::future::Future<Output = bool> + Send {
+        App::host_connected(self, host)
+    }
+    fn herdr_for(&self, host: &str) -> impl std::future::Future<Output = Option<crate::herdr::HerdrClient>> + Send {
+        App::herdr_for(self, host)
+    }
+    fn session_for_bot_with_host_fence(
+        &self,
+        bot: &crate::db::Bot,
+        host: &str,
+        fence: &crate::hosts::HostFence,
+    ) -> impl std::future::Future<Output = Option<String>> + Send {
+        App::session_for_bot_with_host_fence(self, bot, host, fence)
+    }
+    fn herdr_for_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> impl std::future::Future<Output = Option<crate::herdr::HerdrClient>> + Send {
+        App::herdr_for_host_fence(self, fence, session)
+    }
+}
+impl crate::capabilities::Shutdown for App { fn shutdown(&self) -> &tokio_util::sync::CancellationToken { &self.shutdown } }
+impl crate::capabilities::BgTasks for App { fn background_tasks(&self) -> &tokio_util::task::TaskTracker { &self.background_tasks } }
+impl crate::capabilities::ExePath for App { fn exe(&self) -> &std::path::Path { &self.exe } }
+impl crate::capabilities::ListenPort for App { fn port(&self) -> u16 { self.port } }
+impl crate::capabilities::Isolation for App {
+    fn isolated(&self) -> bool {
+        App::isolated(self)
+    }
+}
+impl crate::capabilities::UiToken for App {
+    fn ui_token(&self) -> &String {
+        &self.ui_token
+    }
+}
+

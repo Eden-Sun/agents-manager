@@ -1134,7 +1134,7 @@ async fn native_evidence<'a>(
 /// 不然 daemon 之後每次輪詢都會去讀一個任意的檔（別顆 bot 的對話、`/etc/passwd`…）。不合就當沒帶（沿用原本的值）。
 async fn vetted_transcript(app: &Arc<App>, bot: &db::Bot, path: Option<&str>) -> Option<String> {
     let path = path.filter(|p| !p.trim().is_empty())?;
-    if crate::transcript_read::transcript_allowed(app, bot, path).await {
+    if crate::app_ports_p5::transcript_allowed(app, bot, path).await {
         Some(path.to_string())
     } else {
         tracing::warn!(bot = %bot.name, path, "ignoring a hook transcript_path outside the bot's own transcript directory");
@@ -1516,7 +1516,7 @@ async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&s
             let transcript_path = vetted_transcript(app, &bot, transcript_path.as_deref()).await;
             // Remote paths are retained for SSH-side transcript transfer, never opened on this host.
             let transcript_read_path = if let Some(path) = transcript_path.as_deref() {
-                if crate::transcript_read::local_transcript_allowed(app, &bot, path).await { Some(path.to_string()) } else { None }
+                if crate::app_ports_p5::local_transcript_allowed(app, &bot, path).await { Some(path.to_string()) } else { None }
             } else {
                 None
             };

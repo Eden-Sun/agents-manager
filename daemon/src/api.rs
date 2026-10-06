@@ -187,10 +187,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/messages", get(get_messages))
         .route("/bots/{id}/terminal", get(get_terminal))
         .route("/bots/{id}/pending-question", get(crate::pending_question::get_pending_question))
-        .route("/bots/{id}/local-image", get(crate::local_image::get))
+        .route("/bots/{id}/local-image", get(crate::app_ports_p10::get))
         // bot 交給使用者的檔案（§6.5f）：只讀 outbox。scratchpad 不再給使用者，舊路徑明確 404。
-        .route("/bots/{id}/outbox", get(crate::outbox::list))
-        .route("/bots/{id}/outbox/file", get(crate::outbox::file))
+        .route("/bots/{id}/outbox", get(crate::app_ports_p10::list))
+        .route("/bots/{id}/outbox/file", get(crate::app_ports_p10::file))
         .route("/bots/{id}/scratchpad", get(crate::outbox::scratchpad_gone))
         .route("/bots/{id}/scratchpad/file", get(crate::outbox::scratchpad_gone))
         .route("/bots/{id}/read", post(crate::read_marks::post))
@@ -3403,7 +3403,7 @@ async fn install_tool(
     Json(b): Json<InstallTool>,
 ) -> Result<Response, LcError> {
     require_user(&principal)?;
-    let out = crate::tools::install_via_bot(&app, &name, &b.kind, &b.via_bot_id).await?;
+    let out = crate::app_ports_p3::install_via_bot(&app, &name, &b.kind, &b.via_bot_id).await?;
     Ok((StatusCode::OK, Json(json!({"turn_id": out.turn_id, "message_id": out.message_id, "delivery": out.delivery})))
         .into_response())
 }

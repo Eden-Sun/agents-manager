@@ -307,7 +307,7 @@ async fn logged_reply(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[Stri
     match bot.kind.as_str() {
         "claude" => {
             let raw_path = run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?;
-            if !crate::transcript_read::local_transcript_allowed(app, bot, raw_path).await {
+            if !crate::app_ports_p5::local_transcript_allowed(app, bot, raw_path).await {
                 return None;
             }
             let path = std::path::PathBuf::from(raw_path);

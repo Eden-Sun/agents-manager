@@ -193,7 +193,7 @@ async fn the_agy_transcript_root_is_the_brain_dir_under_the_home() {
     let bot = tt::claude_bot(&e.app, &e.project_id, "agy-roots").await;
     sqlx::query("UPDATE bots SET kind='agy' WHERE id=?").bind(&bot.id).execute(&e.app.db).await.unwrap();
     let bot = crate::db::bot(&e.app.db, &bot.id).await.unwrap().unwrap();
-    let roots = crate::transcript_read::trusted_roots(&e.app, &bot).await;
+    let roots = crate::app_ports_p5::trusted_roots(&e.app, &bot).await;
     assert_eq!(roots, [crate::home::dir().unwrap().join(".gemini/antigravity-cli/brain")]);
 }
 

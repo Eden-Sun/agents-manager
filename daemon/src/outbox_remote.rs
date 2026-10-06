@@ -45,7 +45,7 @@ pub(crate) fn remote_dir(home: &str, instance: Option<&str>, bot_id: &str) -> Op
     }
     let normalized_home = if parts.is_empty() { "/".to_string() } else { format!("/{}", parts.join("/")) };
     let prefix = if normalized_home == "/" { "" } else { &normalized_home };
-    Some(format!("{prefix}/{}/outbox/{bot_id}", crate::startup::remote_root_for(instance)))
+    Some(format!("{prefix}/{}/outbox/{bot_id}", crate::hosts::remote_root_for(instance)))
 }
 
 pub(crate) struct Target {
@@ -439,18 +439,18 @@ mod tests {
                 "AM_OUTBOX_OK\n7 2000\t89504e4700ff10\tshot.png\nAM_OUTBOX_DONE\n".into()
             })
         });
-        let resp = crate::outbox::list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap();
+        let resp = crate::app_ports_p10::list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["host"], json!(host));
         assert_eq!(v["files"][0]["name"], json!("shot.png"));
         let q = Query([("path".to_string(), "shot.png".to_string())].into_iter().collect());
-        let resp = crate::outbox::file(State(env.app.clone()), UrlPath(bot.id.clone()), q).await.unwrap();
+        let resp = crate::app_ports_p10::file(State(env.app.clone()), UrlPath(bot.id.clone()), q).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(resp.headers()[header::CONTENT_TYPE], "image/png");
         assert_eq!(axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec(), png);
         let q = Query([("path".to_string(), "../etc/passwd".to_string())].into_iter().collect());
-        assert!(matches!(crate::outbox::file(State(env.app.clone()), UrlPath(bot.id.clone()), q).await, Err(LcError::NotFound(_))));
+        assert!(matches!(crate::app_ports_p10::file(State(env.app.clone()), UrlPath(bot.id.clone()), q).await, Err(LcError::NotFound(_))));
     }
 
     /// 主機睡著／tailscale 斷線：這台已知連不上時，網頁開「檔案暫存」不能再去等一趟 ssh（列表 30 秒、下載 180 秒才逾時），
@@ -475,13 +475,13 @@ mod tests {
         crate::hosts::set_ssh_delay(host, Duration::from_secs(3));
 
         let started = std::time::Instant::now();
-        let resp = crate::outbox::list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap();
+        let resp = crate::app_ports_p10::list(State(env.app.clone()), UrlPath(bot.id.clone())).await.unwrap();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["reason"], json!("outbox_remote_unreachable"), "{v}");
         assert_eq!(v["host"], json!(host));
         let q = Query([("path".to_string(), "shot.png".to_string())].into_iter().collect());
-        match crate::outbox::file(State(env.app.clone()), UrlPath(bot.id.clone()), q).await {
+        match crate::app_ports_p10::file(State(env.app.clone()), UrlPath(bot.id.clone()), q).await {
             Err(LcError::Conflict(d)) => assert_eq!(d["reason"], json!("outbox_remote_unreachable")),
             other => panic!("下載要回 409 outbox_remote_unreachable：{:?}", other.map(|r| r.status())),
         }

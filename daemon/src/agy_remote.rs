@@ -143,7 +143,7 @@ fn write_dispatcher_script(path: &str, text: &str) -> String {
 /// （少的只是 hook 回報，畫面判讀還在——跟本機一樣）。
 pub async fn install_remote(conn: &HostConn, instance: Option<&str>) -> Result<bool> {
     let home = conn.home().await?;
-    let root = crate::startup::remote_root_for(instance);
+    let root = crate::hosts::remote_root_for(instance);
     let dispatcher = format!("{home}/{root}/{}", cfg::DISPATCH_SH);
     let text = dispatch_sh(&root, instance);
     let out = conn.ssh_exec(&write_dispatcher_script(&dispatcher, &text)).await?;

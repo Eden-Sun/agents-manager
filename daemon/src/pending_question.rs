@@ -61,7 +61,7 @@ pub async fn get_pending_question(State(app): State<Arc<App>>, Path(id): Path<St
     let Some(path) = run.transcript_path.clone().filter(|p| !p.trim().is_empty()) else {
         return Ok(Json(json!({"questions": null})));
     };
-    if !crate::transcript_read::local_transcript_allowed(&app, &bot, &path).await {
+    if !crate::app_ports_p5::local_transcript_allowed(&app, &bot, &path).await {
         return Ok(Json(json!({"questions": null})));
     }
     let input = tokio::task::spawn_blocking(move || read_tail(std::path::Path::new(&path), TAIL_BYTES).and_then(|log| pending_ask(&log)))

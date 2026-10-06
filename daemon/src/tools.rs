@@ -1127,11 +1127,9 @@ pub fn install_prompt(kind: &str) -> Option<String> {
          4. 登入完成後再執行一次 `{kind} --version` 確認，並回報「{kind} 已安裝並登入」。",
     ))
 }
-
-// `install_via_bot`（`POST /api/hosts/:name/tools/install`）走一般 prompt 路徑（lifecycle＋DB），是 composition 層的 use case：住在 `app_ports_p3`，這裡保留舊名。
-pub use crate::app_ports_p3::install_via_bot;
 #[cfg(test)]
 mod tests {
+    use crate::app_ports_p3::install_via_bot;
     use crate::state::App;
     /// 現行 config.toml 的形狀（`[[identities]]` 不寫 host）在**本機**的行為一個字都不能變，
     /// 但不能再遮蔽遠端同名的 `ccN`——本機 cc1 與 m4p 的 cc1 是不同帳號（SPEC §16.2、review 2026-09-16）。
