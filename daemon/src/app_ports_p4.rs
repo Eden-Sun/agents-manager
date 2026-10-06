@@ -8,7 +8,7 @@ use am_core::{
     NoticeRequest, PaneReadSource, PortError, PromptRequest, QuotaKey, QuotaSnapshot, RunId,
     SessionId, TurnError, TurnEvent, TurnId, Window as PortWindow,
 };
-use am_ports::{EventSink, HerdrPort, QuotaAccess, RunPaneReader, TurnControl, TurnEvents};
+use am_ports::{EventSink, HerdrPort, QuotaAccess, RunPaneReader, SystemMessageWriter, TurnControl, TurnEvents};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -58,6 +58,15 @@ impl TurnControl for AppTurnControl<'_> {
                 .await
                 .map(|out| out.turn_id)
                 .map_err(|err| map_error(&request.bot_id, err))
+        }
+    }
+
+    fn compact_bot(&self, bot: BotId) -> impl Future<Output = Result<(), TurnError>> + Send + '_ {
+        async move {
+            lifecycle::compact(self.app, &bot)
+                .await
+                .map(|_| ())
+                .map_err(|err| map_error(&bot, err))
         }
     }
 
@@ -693,6 +702,54 @@ impl<'a> AppTurnEvents<'a> {
             });
         }
         Ok(())
+    }
+}
+
+/// App-side adapter for the keep-warm system note. It uses the regular lifecycle message path so
+/// insertion, ownership validation, and `message_added` publication retain their existing rules.
+pub struct AppSystemMessageWriter<'a> {
+    app: &'a Arc<App>,
+}
+
+impl<'a> AppSystemMessageWriter<'a> {
+    pub fn new(app: &'a Arc<App>) -> Self {
+        Self { app }
+    }
+}
+
+impl SystemMessageWriter for AppSystemMessageWriter<'_> {
+    fn append_system_message(
+        &self,
+        bot: BotId,
+        content: String,
+    ) -> impl Future<Output = Result<(), PortError>> + Send + '_ {
+        async move {
+            let conversation = crate::db::conversation_id(&self.app.db, &bot)
+                .await
+                .map_err(|error| PortError::Unavailable(error.to_string()))?;
+            crate::lifecycle::insert_message(
+                self.app,
+                &conversation,
+                None,
+                "system",
+                &content,
+                "system",
+                false,
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| PortError::Unavailable(error.to_string()))
+        }
+    }
+}
+
+/// Wall-clock adapter. Monotonic throttling stays inside the feature; this clock supplies UTC time.
+pub struct AppClock;
+
+impl am_ports::Clock for AppClock {
+    fn now_unix_ms(&self) -> am_core::UnixMillis {
+        chrono::Utc::now().timestamp_millis()
     }
 }
 

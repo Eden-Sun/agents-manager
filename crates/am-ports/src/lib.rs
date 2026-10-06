@@ -8,6 +8,7 @@ mod host;
 mod lock;
 mod quota;
 mod run_pane;
+mod system_message;
 mod turn;
 
 pub use am_core::{
@@ -23,6 +24,7 @@ pub use host::{HerdrPort, HostRuntime};
 pub use lock::{BotLock, BotLockGuard};
 pub use quota::QuotaAccess;
 pub use run_pane::RunPaneReader;
+pub use system_message::SystemMessageWriter;
 pub use turn::TurnControl;
 
 pub type PortResult<T> = Result<T, PortError>;
