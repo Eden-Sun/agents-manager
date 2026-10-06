@@ -43,7 +43,8 @@ impl Capture for ClaudeCapture {
         // 回覆收到輸入框上緣為止。框的位置用真畫面：規則線夾著 `❯`（`claude-2.1.281-feedback-survey.txt`）。
         // 緊貼上緣的那幾行是狀態列（spinner／done），不是回覆。框以上的 `│`、`---`、⚠ 都是內容。
         let found_cut = composer_top(&lines).filter(|i| *i > start);
-        let cut = found_cut.unwrap_or(lines.len());
+        // 打 slash 指令時框上緣貼著建議清單（2.1.290 起選中列是 `  ❯ /cmd  說明`，#875）：不是回覆，跟狀態列一樣切掉。
+        let cut = found_cut.map_or(lines.len(), |c| suggestion_list_top(&lines, c).max(start + 1));
         let keep_until = status_zone_start(&lines, cut);
         for (i, line) in lines.iter().enumerate().take(keep_until).skip(start) {
             let t = line.trim_end();
@@ -202,6 +203,23 @@ fn is_full_rule(s: &str) -> bool {
     s.chars().count() >= 3
         && s.chars()
             .all(|c| c == '─' || c == '━' || c == '-' || c == '=' || c == '_')
+}
+
+/// 緊貼輸入框上緣 `cut` 的 `/` 建議清單從哪一列開始；沒有清單就是 `cut`。
+/// 真畫面（`claude-2.1.290-slash-*-suggestions.ansi`）：選中列縮排兩格 `  ❯ /rewind      說明`，其餘列縮排四格
+/// `    /mobile      說明`，說明太長折到下一列（縮排更深）。只認整塊都是這個形狀、而且有選中列的——
+/// 回覆裡縮排的文字不會剛好貼著框、又帶 `  ❯ /` 開頭的列。
+fn suggestion_list_top(lines: &[&str], cut: usize) -> usize {
+    let entry = |rest: &str| {
+        rest.starts_with('/') && rest.split_once("  ").is_some_and(|(cmd, desc)| !cmd.contains(' ') && !desc.trim().is_empty())
+    };
+    let selected = |l: &str| l.strip_prefix("  ❯ ").is_some_and(entry);
+    let other = |l: &str| l.strip_prefix("    ").is_some_and(|r| entry(r) || (r.starts_with("  ") && !r.trim().is_empty()));
+    let mut top = cut;
+    while top > 0 && (selected(lines[top - 1]) || other(lines[top - 1])) {
+        top -= 1;
+    }
+    if lines[top..cut].iter().any(|l| selected(l)) { top } else { cut }
 }
 
 /// 緊貼輸入框上緣、中間沒有空行的狀態列。空行以上是回覆，不掃。
