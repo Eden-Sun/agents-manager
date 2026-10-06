@@ -177,28 +177,11 @@ pub(crate) fn is_slash_command(text: &str) -> bool {
 }
 
 async fn host_sh(app: &Arc<App>, host: &str, script: &str) -> anyhow::Result<String> {
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
-    if conn.is_local() {
-        let o = crate::local_sh::output(script).await?;
-        if !o.status.success() {
-            anyhow::bail!("sh exited {}", o.status);
-        }
-        return Ok(String::from_utf8_lossy(&o.stdout).into_owned());
-    }
-    if !conn.is_connected() {
-        anyhow::bail!("host `{host}` is not connected");
-    }
-    conn.ssh_exec_path(script).await
+    super::poller::app_ports_p4obs::host_sh(app, host, script).await
 }
 
 async fn grok_home_for(app: &Arc<App>, bot: &db::Bot, host: &str) -> anyhow::Result<String> {
-    let env: Value = serde_json::from_str(&bot.env_json).unwrap_or_else(|_| json!({}));
-    let home = if host == LOCAL_HOST {
-        crate::home::dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default()
-    } else {
-        app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?.home().await?
-    };
-    Ok(super::setup::grok_home(&env, &home))
+    super::poller::app_ports_p4obs::grok_home_for(app, bot, host).await
 }
 
 async fn read_active(app: &Arc<App>, host: &str, grok_home: &str) -> anyhow::Result<Vec<ActiveSession>> {
@@ -232,13 +215,7 @@ async fn session_for(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, g
         }
     }
     let Some(pane) = run.pane_id.as_deref() else { return Ok(known) };
-    let pids = match crate::memproc::dump(app, host).await {
-        Ok(out) => crate::memproc::pids_in_pane(&out, pane, run.herdr_session.as_deref()),
-        Err(e) => {
-            tracing::debug!(run = %run.id, error = ?e, "grok transcript: process dump failed; matching the session by cwd");
-            Vec::new()
-        }
-    };
+    let pids = super::poller::app_ports_p4obs::pids_in_pane(app, host, pane, run.herdr_session.as_deref()).await;
     let taken: HashSet<String> = sqlx::query_scalar::<_, String>(
         "SELECT native_session_id FROM runs WHERE state = 'running' AND id <> ? AND native_session_id IS NOT NULL",
     )
@@ -287,10 +264,10 @@ pub(crate) async fn sync_locked(app: &Arc<App>, run_id: &str) -> anyhow::Result<
     let host = db::bot_host(&app.db, &bot.id).await?;
     let (sid, exchanges) = if bot.kind == "agy" {
         // agy（SPEC §12a.9）：session 從 pane 裡行程開著的對話資料庫認，對話在 `transcript_full.jsonl`。
-        let Some((sid, text)) = super::agy_session::load(app, &run, &host).await? else { return Ok(Synced::Unavailable) };
+        let Some((sid, text)) = super::poller::app_ports_p4obs::agy_session_load(app, &run, &host).await? else { return Ok(Synced::Unavailable) };
         // 沒有 hook 的 agy 子 agent：pane 行程實際開著的對話就是回報；跟 `resume_native` 要接的不是同一段＝`resume_mismatch`。
-        crate::hookrecv::consume_resume_session(app, &bot, &run, Some(&sid)).await?;
-        super::agy_session::record_status(app, &bot, &run, &text).await;
+        super::poller::app_ports_p4obs::consume_resume_session(app, &bot, &run, Some(&sid)).await?;
+        super::poller::app_ports_p4obs::agy_session_record_status(app, &bot, &run, &text).await;
         let turns = crate::agy_support::parse_turns(&text)
             .into_iter()
             .map(|t| Exchange { prompt: t.prompt, prompt_index: Some(t.step_index), reply: t.reply, closed: t.closed })
