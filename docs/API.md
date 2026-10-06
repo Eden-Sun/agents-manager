@@ -1700,7 +1700,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 |---|---|---|
 | `name` | string | 暱稱：1–32 字、允許 CJK，不可含 `@ , : ;`；空白只能是單一個半形空白、夾在中間（頭尾、連續、tab／換行不行，2026-09-19）；專案內唯一（重複 409 `bot name already in use in this project`）。執行中也可改，不影響 herdr |
 | `agent_name` | string（唯讀） | herdr 內的 agent 名：有 active Run 時是實際啟動的名稱，否則是下次會用的 `<project slug>-<bot id 尾 6 碼>` |
-| `kind` | `claude` \| `codex` \| `grok` \| `agy` | 其他值 400 `kind must be claude, codex, grok or agy`。`agy`＝Google Antigravity CLI（SPEC §12a），第一階段只跑本機、單一身分 |
+| `kind` | `claude` \| `codex` \| `grok` \| `agy` | 其他值 400 `kind must be claude, codex, grok or agy`。`agy`＝Google Antigravity CLI（SPEC §12a），單一身分；本機與遠端主機都能跑（遠端見 SPEC §12a.12，主機沒裝 agy 時啟動回 400 並指向安裝入口） |
 | `model` | string \| null | `null` = CLI 自己決定；不做白名單驗證，空白字串正規化成 `null` |
 | `effort` | string \| null | 依 kind 驗證，其他值 400。claude `low\|medium\|high\|xhigh\|max`；grok `low\|medium\|high\|xhigh`；**agy 沒有獨立的強度**（強度包在模型 slug 裡，`gemini-3.1-pro-high`／`-low`；帶 `effort` 一律 400）；codex `none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra` |
 | `fast` | bool | §12.2 |

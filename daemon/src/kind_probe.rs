@@ -52,6 +52,12 @@ pub fn verdict(host: &str, kind: &str, found: Option<String>) -> Result<(), Stri
     match found {
         Some(path) if path.is_empty() || !path.starts_with('/') => {
             let where_ = if host == crate::config::LOCAL_HOST { "本機".to_string() } else { format!("主機 {host}") };
+            if kind == "agy" {
+                // agy 沒有套件管理器，也不能跑官方 install.sh：AG Man 自己從官方 manifest 裝（SPEC §12a.11）。講清楚去哪裡按，不要只說「請先安裝」。
+                return Err(format!(
+                    "{where_}尚未安裝 agy。請在額度欄的 agy 格（或新增 bot 的 kind 選單）按「安裝 agy」，由 AG Man 從官方下載並驗 sha512 後裝到 ~/.local/bin/agy（不跑官方 install.sh）；裝好、登入後再啟動這顆 bot。"
+                ));
+            }
             Err(format!(
                 "{where_}上找不到 `{kind}` 執行檔（用登入 shell 檢查 `command -v {kind}` 沒有結果）。請先在該主機安裝 {kind}，或確認它在登入 shell 的 PATH 中；遠端主機也可在主機設定的 remote_path 補上路徑。"
             ))

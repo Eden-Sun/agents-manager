@@ -504,6 +504,13 @@ try:
                 print("session")
             elif event=="stop" and p.get("reason","end_turn")=="end_turn" and p.get("stopHookActive",p.get("stop_hook_active")) is not True:
                 print("idle")
+    elif provider=="agy":
+        # agy 的 payload 沒有事件名：遠端 dispatcher（`agy_remote`）先放進 `hookEventName`。
+        event=p.get("hookEventName")
+        if event in ("SessionStart","PreInvocation"):
+            print("session")
+        elif event=="Stop" and p.get("fullyIdle") is not False:
+            print("idle")
 except Exception:
     pass' "$PROVIDER" 2>/dev/null)
   case "$EVENT" in
@@ -515,6 +522,7 @@ fi
 SID=$(am_str session_id)
 [ -n "$SID" ] || SID=$(am_str sessionId)
 [ -n "$SID" ] || SID=$(am_str thread-id)
+[ -n "$SID" ] || SID=$(am_str conversationId)
 TP=$(am_str transcript_path)
 [ -n "$TP" ] || TP=$(am_str transcriptPath)
 SEQ=$(am_seq)
@@ -837,10 +845,6 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
             .get(&project.host)
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
-        // agy 第一階段只做本機（設定檔、hook dispatcher、transcript 都在本機讀寫）。
-        if bot.kind == "agy" {
-            anyhow::bail!("agy bots run on the local host only for now (remote hosts are phase two)");
-        }
         let paths = install_remote_hook(&conn, bot, app.instance().as_deref()).await?;
         let hook_args: Vec<String> = match bot.kind.as_str() {
             // Trial: `--verbose` expands tool output in the pane so the 終端 preview shows what ran.
@@ -853,6 +857,14 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
             // SPEC §12: global hooks file + dispatcher on the remote; nothing on the argv.
             "grok" => {
                 install_remote_grok_hook(&conn, env, app.instance().as_deref()).await?;
+                vec![]
+            }
+            // SPEC §12a.12：遠端的 `~/.gemini` 裝 dispatcher＋hooks.json＋statusLine，事件經上面那支 `hook.sh agy …` 進 spool。
+            // 跟本機一樣，裝不成不擋啟動：少的只是 hook 回報，畫面判讀還在。
+            "agy" => {
+                if let Err(e) = crate::agy_remote::install_remote(&conn, app.instance().as_deref()).await {
+                    tracing::warn!(bot = %bot.name, host = %project.host, error = %format!("{e:#}"), "could not install the remote agy hooks; the bot starts without them");
+                }
                 vec![]
             }
             other => anyhow::bail!("unknown bot kind {other}"),

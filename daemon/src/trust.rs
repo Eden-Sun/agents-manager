@@ -418,6 +418,44 @@ async fn mark_trusted_remote(conn: &crate::hosts::HostConn, kind: &str, store: &
     bail!("{store} kept changing while pre-trusting it")
 }
 
+/// 遠端任一個 JSON／設定檔的「讀 → 合併 → 寫回」，規則同 [`mark_trusted_remote`]（cksum 圍欄、暫存檔＋`mv`、權限照原檔、新檔 0600、
+/// 讀到寫之間被改過就重讀）：`merge` 收現有內容（沒有檔＝空字串）回新內容，`None`＝已經是對的、不寫。回「有沒有寫」。
+/// 讀不懂（`merge` 回錯）就整個放棄、不碰檔案。給 agy 的遠端 `hooks.json`／`settings.json`（使用者與 agy 自己也在寫）。
+pub(crate) async fn update_remote_file(
+    conn: &crate::hosts::HostConn,
+    store: &str,
+    merge: impl Fn(&str) -> Result<Option<String>>,
+) -> Result<bool> {
+    use crate::hosts::sh_quote;
+    let f = sh_quote(store);
+    for _ in 0..REMOTE_RACE_ATTEMPTS {
+        let out = conn.ssh_exec(&remote_read_script(&f, &[])).await?;
+        let (_, sum, existing) = parse_remote_read(&out, 0).with_context(|| format!("reading {store}"))?;
+        let Some(next) = merge(&existing).with_context(|| format!("merging into {store}"))? else { return Ok(false) };
+        let body = next.strip_suffix('\n').unwrap_or(&next);
+        let mut delim = String::from("AM_UPDATE_EOF");
+        while body.contains(&delim) {
+            delim.push('_');
+        }
+        let write = format!(
+            "set -e\nF={f}\nD=$(dirname \"$F\")\nmkdir -p \"$D\"\ncur=missing\nif [ -f \"$F\" ]; then cur=$(cksum < \"$F\"); fi\n\
+             if [ \"$cur\" != {sum} ]; then printf 'AM_UPDATE_CHANGED\\n'; exit 0; fi\n\
+             T=\"$D/.$(basename \"$F\").am-update.$$.tmp\"\ntrap 'rm -f \"$T\"' EXIT\numask 077\ncat > \"$T\" <<'{delim}'\n{body}\n{delim}\n\
+             if [ -f \"$F\" ]; then chmod \"$(stat -c %a \"$F\" 2>/dev/null || stat -f %Lp \"$F\")\" \"$T\" 2>/dev/null || true; fi\n\
+             mv -f \"$T\" \"$F\"\nprintf 'AM_UPDATE_OK\\n'\n",
+            sum = sh_quote(&sum),
+        );
+        let out = conn.ssh_exec(&write).await?;
+        if out.contains("AM_UPDATE_OK") {
+            return Ok(true);
+        }
+        if !out.contains("AM_UPDATE_CHANGED") {
+            bail!("writing {store} did not confirm: {}", out.trim());
+        }
+    }
+    bail!("{store} kept changing while updating it")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
