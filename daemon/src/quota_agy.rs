@@ -510,8 +510,11 @@ mod tests {
                 s = state.display()
             ),
         );
+        // macOS 的 /usr/bin 有真的 `security`（會去問真的 Keychain）：沒有 security 的情境 PATH 只放一個空目錄，sh 內建的 `[`、`command` 夠用。
+        let empty = dir.join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
         let run = |script: &str, with_security: bool| {
-            let path = if with_security { format!("{}:/usr/bin:/bin", bin.display()) } else { "/usr/bin:/bin".to_string() };
+            let path = if with_security { format!("{}:/usr/bin:/bin", bin.display()) } else { empty.display().to_string() };
             let out = crate::exec_retry::output(std::process::Command::new("/bin/sh").arg("-c").arg(script).env("HOME", &home).env("PATH", path)).unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
