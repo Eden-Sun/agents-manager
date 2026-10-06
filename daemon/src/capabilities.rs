@@ -11,7 +11,6 @@ use crate::config::ConfigStore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use crate::herdr::HerdrClient;
-use crate::state::App;
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::future::Future;
@@ -64,44 +63,6 @@ pub trait BootId: Send + Sync {
     fn boot_id(&self) -> &str;
 }
 
-impl Db for App {
-    fn db(&self) -> &SqlitePool {
-        &self.db
-    }
-}
-impl Emit for App {
-    fn emit(&self, kind: &str, data: Value) -> impl Future<Output = ()> + Send {
-        App::emit(self, kind, data)
-    }
-    fn current_seq(&self) -> u64 {
-        App::current_seq(self)
-    }
-}
-impl DataDir for App {
-    fn data_dir(&self) -> &Path {
-        &self.data_dir
-    }
-}
-impl Cfg for App {
-    fn cfg(&self) -> &ConfigStore {
-        &self.cfg
-    }
-}
-impl BotLocks for App {
-    fn bot_lock(&self, bot_id: &str) -> impl Future<Output = Arc<Mutex<()>>> + Send {
-        App::bot_lock(self, bot_id)
-    }
-}
-impl BotStatusEmit for App {
-    fn emit_bot_status(&self, bot_id: &str) -> impl Future<Output = ()> + Send {
-        App::emit_bot_status(self, bot_id)
-    }
-}
-impl BootId for App {
-    fn boot_id(&self) -> &str {
-        &self.boot_id
-    }
-}
 
 impl<T: Db + ?Sized> Db for Arc<T> {
     fn db(&self) -> &SqlitePool {
@@ -161,43 +122,6 @@ pub trait HerdrRoutes: Send + Sync {
     fn herdr_for_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> impl Future<Output = Option<HerdrClient>> + Send;
 }
 
-impl HerdrRoutes for App {
-    fn session_for_host(&self, host: &str) -> impl Future<Output = Option<String>> + Send {
-        App::session_for_host(self, host)
-    }
-    fn herdr_for_session(&self, host: &str, session: &str) -> impl Future<Output = Option<HerdrClient>> + Send {
-        App::herdr_for_session(self, host, session)
-    }
-    fn session_connected(&self, host: &str, session: &str) -> impl Future<Output = bool> + Send {
-        App::session_connected(self, host, session)
-    }
-    fn bot_connected(&self, bot_id: &str) -> impl Future<Output = bool> + Send {
-        App::bot_connected(self, bot_id)
-    }
-    fn session_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<String>> + Send {
-        App::session_for_run(self, run)
-    }
-    fn herdr_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<HerdrClient>> + Send {
-        App::herdr_for_run(self, run)
-    }
-    fn host_connected(&self, host: &str) -> impl Future<Output = bool> + Send {
-        App::host_connected(self, host)
-    }
-    fn herdr_for(&self, host: &str) -> impl Future<Output = Option<HerdrClient>> + Send {
-        App::herdr_for(self, host)
-    }
-    fn session_for_bot_with_host_fence(
-        &self,
-        bot: &crate::db::Bot,
-        host: &str,
-        fence: &crate::hosts::HostFence,
-    ) -> impl Future<Output = Option<String>> + Send {
-        App::session_for_bot_with_host_fence(self, bot, host, fence)
-    }
-    fn herdr_for_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> impl Future<Output = Option<HerdrClient>> + Send {
-        App::herdr_for_host_fence(self, fence, session)
-    }
-}
 
 impl<T: HerdrRoutes + ?Sized> HerdrRoutes for Arc<T> {
     fn session_for_host(&self, host: &str) -> impl Future<Output = Option<String>> + Send {
@@ -253,10 +177,6 @@ pub trait ExePath: Send + Sync {
 pub trait ListenPort: Send + Sync {
     fn port(&self) -> u16;
 }
-impl Shutdown for App { fn shutdown(&self) -> &CancellationToken { &self.shutdown } }
-impl BgTasks for App { fn background_tasks(&self) -> &TaskTracker { &self.background_tasks } }
-impl ExePath for App { fn exe(&self) -> &Path { &self.exe } }
-impl ListenPort for App { fn port(&self) -> u16 { self.port } }
 impl<T: Shutdown + ?Sized> Shutdown for Arc<T> { fn shutdown(&self) -> &CancellationToken { (**self).shutdown() } }
 impl<T: BgTasks + ?Sized> BgTasks for Arc<T> { fn background_tasks(&self) -> &TaskTracker { (**self).background_tasks() } }
 impl<T: ExePath + ?Sized> ExePath for Arc<T> { fn exe(&self) -> &Path { (**self).exe() } }
@@ -291,11 +211,6 @@ mod tests {
 pub trait Isolation: Send + Sync {
     fn isolated(&self) -> bool;
 }
-impl Isolation for App {
-    fn isolated(&self) -> bool {
-        App::isolated(self)
-    }
-}
 impl<T: Isolation + ?Sized> Isolation for Arc<T> {
     fn isolated(&self) -> bool {
         (**self).isolated()
@@ -305,11 +220,6 @@ impl<T: Isolation + ?Sized> Isolation for Arc<T> {
 /// 管理 API 的 UI token（`X-AM-Token`）。
 pub trait UiToken: Send + Sync {
     fn ui_token(&self) -> &String;
-}
-impl UiToken for App {
-    fn ui_token(&self) -> &String {
-        &self.ui_token
-    }
 }
 impl<T: UiToken + ?Sized> UiToken for Arc<T> {
     fn ui_token(&self) -> &String {

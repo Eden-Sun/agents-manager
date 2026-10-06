@@ -314,7 +314,7 @@ pub async fn queue_put_back(
 
 // 7. Transcript & Codex History
 pub async fn local_transcript_allowed(app: &Arc<App>, bot: &crate::db::Bot, raw_path: &str) -> bool {
-    crate::transcript_read::local_transcript_allowed(app, bot, raw_path).await
+    crate::app_ports_p5::local_transcript_allowed(app, bot, raw_path).await
 }
 
 pub async fn codex_home(app: &Arc<impl crate::tools::ToolsEnv + 'static>, bot: &crate::db::Bot) -> Option<std::path::PathBuf> {

@@ -46,6 +46,16 @@ impl<T: HostInstance + ?Sized> HostInstance for Arc<T> {
     }
 }
 
+pub const REMOTE_ROOT: &str = ".config/agents-manager";
+
+/// 遠端主機上這顆實例的根目錄（`$HOME` 之下的相對路徑）。
+pub fn remote_root_for(slug: Option<&str>) -> String {
+    match slug {
+        Some(s) => format!("{REMOTE_ROOT}/instances/{s}"),
+        None => REMOTE_ROOT.to_string(),
+    }
+}
+
 /// `HostManager` 的 supervisor／設定套用要叫回去的事（SPEC §11.3.4）：連上之後的整串對帳、事件推送、觀測快取清除。
 /// 這些原本直接呼叫 reconcile、events、hookrecv、tools、quota… 一票 feature；現在 hosts 只認這個 trait，
 /// 順序與內容由 `app_ports_p3` 的 `App` 實作保持不變。

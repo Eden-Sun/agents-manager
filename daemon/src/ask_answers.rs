@@ -311,7 +311,7 @@ pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hook_body::Hook
             .or_else(|| run.as_ref().and_then(|r| r.transcript_path.clone()))
             .filter(|p| !p.trim().is_empty());
         if let (true, Some(path)) = (local, path) {
-            if crate::transcript_read::local_transcript_allowed(app, &bot, &path).await {
+            if crate::app_ports_p5::local_transcript_allowed(app, &bot, &path).await {
                 records = from_local_transcript(&path).await;
             }
         }

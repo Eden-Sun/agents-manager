@@ -163,11 +163,6 @@ pub(crate) async fn local_transcript_allowed_for(src: &impl TranscriptRoots, pat
     path_within_roots(path, &trusted_roots_for(src).await)
 }
 
-// 過渡：既有呼叫端（hookrecv、lifecycle、pending_question…）仍用 `transcript_read::{…}(&app, &bot, …)` 這三個名字。
-// App 版本住在 composition 層（`app_ports_p5`）；呼叫端改 import 之後把這行刪掉，這個檔就不再碰 `App`。
-pub(crate) use crate::app_ports_p5::{local_transcript_allowed, transcript_allowed};
-#[cfg(test)]
-pub(crate) use crate::app_ports_p5::trusted_roots;
 
 #[cfg(test)]
 mod tests {

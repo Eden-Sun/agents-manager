@@ -221,7 +221,7 @@ async fn probe_client() -> Result<HerdrClient> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| anyhow!("could not start the `{PROBE_SESSION}` herdr session: {e}"))?;
-    crate::state::reap_in_background(child);
+    reap_in_background(child);
     for _ in 0..30 {
         tokio::time::sleep(Duration::from_millis(500)).await;
         if client.ping().await.is_ok() {
@@ -229,6 +229,12 @@ async fn probe_client() -> Result<HerdrClient> {
         }
     }
     Err(anyhow!("the `{PROBE_SESSION}` herdr session did not come up"))
+}
+
+fn reap_in_background(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// Probe workspaces orphaned by a daemon that died mid-probe still hold a live grok process.

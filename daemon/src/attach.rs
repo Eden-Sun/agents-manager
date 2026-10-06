@@ -21,8 +21,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::db;
-#[cfg(test)]
-use crate::state::App;
 use crate::config::{valid_id, ID_RE};
 use crate::hosts::{sh_quote, HostConn};
 
@@ -113,7 +111,7 @@ fn local_copy_dir(app: &impl crate::capabilities::DataDir, bot_id: &str) -> Resu
 }
 
 #[cfg(test)]
-pub async fn save(app: &Arc<App>, bot_id: &str, name: &str, mime: &str, data: &[u8]) -> Result<Attachment> {
+pub async fn save(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess), bot_id: &str, name: &str, mime: &str, data: &[u8]) -> Result<Attachment> {
     save_bytes(app, bot_id, name, mime, Bytes::copy_from_slice(data)).await
 }
 

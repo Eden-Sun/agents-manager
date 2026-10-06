@@ -187,8 +187,8 @@ pub fn confirm_data_dir(prepared: &Prepared, loaded: Option<&str>, config_given:
     Ok(())
 }
 
-/// 遠端主機上的預設根（正式實例）。
-pub const REMOTE_ROOT: &str = ".config/agents-manager";
+#[allow(unused_imports)]
+pub use crate::hosts::{remote_root_for, REMOTE_ROOT};
 
 /// 這顆 daemon 的「實例名」：預設資料目錄＝`None`（正式），其他＝資料目錄的短雜湊。
 /// 遠端主機上只看得到 `$HOME`，兩顆 daemon 管同一台遠端、bot id 又相同時會共用 spool 檔，
@@ -204,14 +204,6 @@ pub fn instance_slug(data_dir: &Path) -> Result<Option<String>> {
         hash = hash.wrapping_mul(0x100_0000_01b3);
     }
     Ok(Some(format!("{hash:016x}")))
-}
-
-/// 遠端主機上這顆實例的根目錄（`$HOME` 之下的相對路徑）。
-pub fn remote_root_for(slug: Option<&str>) -> String {
-    match slug {
-        Some(s) => format!("{REMOTE_ROOT}/instances/{s}"),
-        None => REMOTE_ROOT.to_string(),
-    }
 }
 
 static INSTANCE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();

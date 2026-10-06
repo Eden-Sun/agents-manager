@@ -150,9 +150,6 @@ pub async fn get_for(app: &impl crate::outbox::OutboxEnv, id: String, q: std::co
     Ok((StatusCode::OK, [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, no-cache")], data).into_response())
 }
 
-// 路由用的 axum handler 住在 composition 層（`app_ports_p10`），這裡保留舊名給 `api` 的路由表。
-pub use crate::app_ports_p10::get;
-
 #[cfg(test)]
 mod tests {
     use super::*;

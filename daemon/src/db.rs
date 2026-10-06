@@ -21,9 +21,15 @@ pub(crate) type FeatureMigrations = &'static [(&'static str, FeatureMigration)];
 /// 測試用：db 自己的測試（與 `schema_guard` 的測試）要整份 schema，清單取 composition 層那份。正式程式碼不經過這裡——
 /// `startup` 明確把清單傳給 [`open_with`]，db 不認得任何 feature。
 #[cfg(test)]
-fn composition_features() -> FeatureMigrations {
-    crate::app_ports_p1::FEATURE_MIGRATIONS
+mod test_helpers {
+    use super::FeatureMigrations;
+
+    pub(super) fn composition_features() -> FeatureMigrations {
+        crate::app_ports_p1::FEATURE_MIGRATIONS
+    }
 }
+#[cfg(test)]
+use test_helpers::composition_features;
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS projects (

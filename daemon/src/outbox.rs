@@ -572,11 +572,9 @@ pub async fn scratchpad_gone() -> LcError {
     LcError::NotFound("scratchpad".into())
 }
 
-// 路由用的 axum handler（`State<Arc<App>>`）住在 composition 層（`app_ports_p10`），這裡保留舊名給 `api` 的路由表與測試。
-pub use crate::app_ports_p10::{file, list};
-
 #[cfg(test)]
 mod tests {
+    use crate::app_ports_p10::{file, list};
     use crate::state::App;
     use axum::extract::{Path as UrlPath, Query, State};
     use super::*;
