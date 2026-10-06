@@ -3766,7 +3766,9 @@ export class MockTransport implements Transport {
   setCacheAge(botId: string, minutesAgo: number) {
     const run = this.activeRun(botId)
     if (!run?.cache_ttl_secs) return
-    run.last_api_at = new Date(Date.now() - minutesAgo * 60_000).toISOString()
+    const at = new Date(Date.now() - minutesAgo * 60_000).toISOString()
+    run.last_api_at = at
+    if (run.cache_kept_warm_at) run.cache_kept_warm_at = at
     this.emitBotStatus(botId)
   }
 

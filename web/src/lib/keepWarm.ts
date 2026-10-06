@@ -5,6 +5,7 @@
  * 兩者都不算未讀（`store/unread.ts`、`store/store.ts`）。
  */
 import type { Bot, Run } from '../api/types'
+import { cacheState } from './cacheClock'
 
 const KEEP_WARM_REQUEST_PREFIXES = ['keep-warm:', 'keepalive:']
 
@@ -18,7 +19,23 @@ export function keepWarmSkippable(bot: Pick<Bot, 'primary' | 'kind'> | undefined
   return Boolean(bot?.primary) && (bot?.kind === 'claude' || bot?.kind === 'codex')
 }
 
-/** 保溫回覆到了、使用者還沒送新 prompt：主力晶片框換色（`keepWarmChip.css`）。 */
-export function keepWarmReplied(run: Pick<Run, 'keep_warm_replied_at'> | null | undefined): boolean {
-  return Boolean(run?.keep_warm_replied_at)
+/**
+ * 保溫回覆到了且快取尚未涼掉、使用者還沒送新 prompt：主力晶片框換色（`keepWarmChip.css`）。
+ * 保溫的效果只有一個 cache TTL（照 cacheClock 既有的 TTL 與 cache_kept_warm_at／last_api_at 判斷），
+ * cache 一涼掉框與 ♨ 就消失；使用者送 prompt（keep_warm_replied_at 清為 null）仍照舊立即清除。
+ */
+export function keepWarmReplied(
+  run: Partial<Pick<Run, 'keep_warm_replied_at' | 'last_api_at' | 'cache_ttl_secs' | 'cache_kept_warm_at' | 'agent_status'>> | null | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  if (!run?.keep_warm_replied_at) return false
+  const cache = cacheState(
+    run.last_api_at ?? run.keep_warm_replied_at,
+    run.cache_ttl_secs,
+    nowMs,
+    run.agent_status === 'working',
+    run.cache_kept_warm_at ?? run.keep_warm_replied_at,
+  )
+  return Boolean(cache && cache.level !== 'cold')
 }
+

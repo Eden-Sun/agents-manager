@@ -73,17 +73,18 @@ test('「不用保溫」：沒釘成主力就不畫；daemon 對非主力回 400
   await mock.request('PATCH', `/bots/${id}`, { primary: true })
 })
 
-test('保溫回覆：主力晶片框換色且不亮未讀；使用者送出新 prompt 才恢復', async () => {
+test('保溫回覆：TTL 內有框、過 TTL 沒框、送 prompt 立即沒框', async () => {
   const { id } = await running('am-claude')
   await act(() => useStore.getState().refreshState())
   await act(() => useStore.setState({ botUnread: {}, selectedBotId: null }))
   await mount(<UnreadChip />)
   assert.ok(chip(id), '主力一定有晶片')
-  assert.ok(!chip(id)!.classList.contains('keep-warm-replied'))
+  assert.ok(!chip(id)!.classList.contains('keep-warm-replied'), '一開始沒框')
 
+  // 1) 保溫後 TTL 內有框：晶片框換洋紅且帶 ♨ 符號，不亮未讀
   mock.simulateKeepWarmReply(id)
   await act(() => useStore.getState().refreshState())
-  await until(() => chip(id)!.classList.contains('keep-warm-replied'), '晶片框換色')
+  await until(() => chip(id)!.classList.contains('keep-warm-replied'), '保溫後 TTL 內晶片框換色')
   assert.ok(chip(id)!.querySelector('.unread-chip-warm'), '另有一個非顏色的 ♨ 記號')
   assert.match(chip(id)!.querySelector('.sr-only')!.textContent ?? '', /保溫回覆已到/)
   assert.equal(chip(id)!.classList.contains('unread'), false, '保溫回覆不亮未讀')
@@ -91,8 +92,22 @@ test('保溫回覆：主力晶片框換色且不亮未讀；使用者送出新 p
   // 顏色不跟快取倒數的底色 class、未讀、要回答撞：它是獨立的 class，倒數底色照樣在。
   assert.ok(![...chip(id)!.classList].some((c) => c === 'unread' || c === 'needs-reply'))
 
+  // 2) 過 TTL 沒框：快取已涼（65 分鐘前，超過 3600 秒 TTL），即使 keep_warm_replied_at 仍在，框與 ♨ 也消失
+  mock.setCacheAge(id, 65)
+  await act(() => useStore.getState().refreshState())
+  await until(() => !chip(id)!.classList.contains('keep-warm-replied'), '過 TTL 後框色恢復')
+  assert.equal(chip(id)!.querySelector('.unread-chip-warm'), null, '過 TTL 後 ♨ 消失')
+
+  // 重新演一輪保溫回覆，讓框再次出現
+  mock.simulateKeepWarmReply(id)
+  await act(() => useStore.getState().refreshState())
+  await until(() => chip(id)!.classList.contains('keep-warm-replied'), '再次保溫後有框')
+  assert.ok(chip(id)!.querySelector('.unread-chip-warm'), '再次保溫後有 ♨')
+
+  // 3) 送 prompt 立即沒框：使用者送 prompt 後 daemon 把 keep_warm_replied_at 清為 null
   await mock.request('POST', `/bots/${id}/prompt`, { text: '真的 prompt', client_request_id: `real-${Date.now()}` })
   await act(() => useStore.getState().refreshState())
-  await until(() => !chip(id)!.classList.contains('keep-warm-replied'), '送 prompt 後框色恢復')
-  assert.equal(chip(id)!.querySelector('.unread-chip-warm'), null)
+  await until(() => !chip(id)!.classList.contains('keep-warm-replied'), '送 prompt 後框色立即恢復')
+  assert.equal(chip(id)!.querySelector('.unread-chip-warm'), null, '送 prompt 後 ♨ 消失')
 })
+

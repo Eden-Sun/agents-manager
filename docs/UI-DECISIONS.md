@@ -972,7 +972,8 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 - **「不用保溫」鈕**（`KeepWarmSkipButton`）：緊貼在「壓縮」鈕右邊，只主力（`primary`）的 claude／codex 畫，非主力、grok、沒有 run 都不畫。
   按下＝這顆 bot「這一輪閒置」跳過保溫與熱壓（`POST /api/bots/{id}/keep-warm/skip`，`run.keep_warm_skip`）；有真的活動（使用者或 bot 新回合，不含保溫／熱壓）daemon 自動清掉，鈕跟著回復。再按一次取消。
   **狀態用文字＋樣式講，不只靠顏色**：沒開是外框鈕「不用保溫」；開著是實心 accent 底「不保溫中・取消」（`aria-pressed`）。按完先在本機套一份，不等廣播。
-- **保溫回覆到了，主力晶片框換洋紅（`keep-warm-replied`，`keepWarmChip.css`），直到使用者送出新 prompt 才恢復**：依 `run.keep_warm_replied_at` 非 null，daemon 在使用者 prompt（user origin 的回合）時清成 null 並廣播；
+- **保溫回覆到了，主力晶片框換洋紅（`keep-warm-replied`，`keepWarmChip.css`），維持一個快取 TTL 或直到使用者送出新 prompt 才恢復（2026-10-06 使用者）**：
+  原本一直掛到使用者送出新 prompt（實例 ops-web 掛了 18 小時）。改成保溫的效果只有一個 cache TTL（照 `cacheClock` 既有的 TTL 與 `cache_kept_warm_at`／`last_api_at` 判斷）：快取一涼掉（`level === 'cold'`）洋紅框與 ♨ 記號隨之消失；使用者若在 TTL 內送出新 prompt，仍照舊由 daemon 在使用者 prompt 時將 `run.keep_warm_replied_at` 清成 null 立即清除恢復。
   只動框（邊框＋2px inset 環），不動底色與字，所以快取倒數的底色、未讀實心藍、要回答的紅底全部照舊疊在上面。
 - **為什麼是洋紅**：這列已經用掉綠（快取新鮮／正在看）、黃（快取剩不多／等子 agent）、紅（快取快沒了／要回答）、藍（未讀），洋紅（`--keep-warm`，淺 `#a21caf`／深 `#e879f9`）離它們色相都夠遠，淺色深色模式對白底、深底都在 4.5:1 以上。
   藍（未讀）與洋紅在實心藍底上相鄰時，靠 ♨ 記號與框形分得出來。
