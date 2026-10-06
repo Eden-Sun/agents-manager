@@ -90,7 +90,7 @@ actor 沒有提供第三個選項。
 
 現況：11 個檔案（`api.rs`、`hookrecv.rs`、`lifecycle/{poller,prompt,queue,screen,slash,start,stop,
 stuck_turns}.rs`、`reconcile.rs`、`default_session.rs`）各自直接讀寫 `app.db`，需要序列化時各自
-`bot_lock().await`。這些呼叫端沒有共同的「訊息」概念——hook 收到的是 JSON payload、HTTP 是解析過
+`bot_lock().await`（`lifecycle/prompt.rs` 自 P4send 起經 am-ports 的 `BotLock::lock_bot`，adapter `AppBotLock` 取同一把 `App::bot_lock`）。這些呼叫端沒有共同的「訊息」概念——hook 收到的是 JSON payload、HTTP 是解析過
 的請求體、poller／reconcile 是週期性掃描的結果、scheduler 到期動作是 DB 裡的一列。要接進 actor，
 這 11 個檔案的每一個呼叫點都要改寫成「組一個訊息、送進對應 bot 的 channel」，而且送出之後原本
 「這次操作完成了嗎」的同步語意（HTTP handler 要回應使用者、hook 要回 200）要嘛變成等 actor 回覆

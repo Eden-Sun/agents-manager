@@ -117,7 +117,6 @@ mod tests {
             ("default_session.rs", include_str!("../default_session.rs")),
             ("reconcile.rs", include_str!("../reconcile.rs")),
             ("lifecycle/poller.rs", include_str!("poller.rs")),
-            ("lifecycle/prompt.rs", include_str!("prompt.rs")),
             ("lifecycle/queue.rs", include_str!("queue.rs")),
             ("lifecycle/screen.rs", include_str!("screen.rs")),
             ("lifecycle/slash.rs", include_str!("slash.rs")),
@@ -128,6 +127,16 @@ mod tests {
         for (name, src) in sources {
             assert!(src.contains("bot_lock("), "設計文件說 {name} 有呼叫 bot_lock，現在沒有了——評估的『ingress 分散在 N 個檔案』這個說法要重算");
         }
+        // `lifecycle/prompt.rs`（文件列的第 11 個檔案）自 P4send 起不直接呼叫 `bot_lock(`：它走 am-ports 的 `BotLock`（`lock_bot(`），
+        // 真正的 `App::bot_lock` 呼叫搬到 `AppBotLock` adapter。同一個 ingress、同一把鎖，只是多一層窄介面——兩邊都釘住。
+        assert!(
+            include_str!("prompt.rs").contains("lock_bot("),
+            "設計文件說 lifecycle/prompt.rs 持有 bot 鎖（P4send 後經 `BotLock::lock_bot`），現在沒有了——評估的『ingress 分散在 N 個檔案』這個說法要重算"
+        );
+        assert!(
+            include_str!("../app_ports_p4send.rs").contains("self.app.bot_lock("),
+            "`BotLock` 的 App adapter 不再呼叫 `App::bot_lock`——prompt.rs 的鎖不再是 per-bot 那把，docs/ACTOR-RUNTIME-EVAL.md 的 lock ordering 說法要重看"
+        );
         assert!(
             include_str!("../api.rs").contains("依 id 排序、一次拿齊"),
             "lock_bots_in_order 排序說明的措辭變了——docs/ACTOR-RUNTIME-EVAL.md 的『actor 換不掉 lock ordering』一節引用的就是這句"
