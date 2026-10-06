@@ -25,6 +25,6 @@ pub use lock::{BotLock, BotLockGuard};
 pub use quota::QuotaAccess;
 pub use run_pane::{RunPaneReader, StyledRunPaneReader};
 pub use system_message::SystemMessageWriter;
-pub use turn::TurnControl;
+pub use turn::{CodexRolloutAccess, TurnControl};
 
 pub type PortResult<T> = Result<T, PortError>;
