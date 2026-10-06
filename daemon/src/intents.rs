@@ -141,7 +141,7 @@ pub async fn prepare_restart(
     .await?;
     // 讀完舊 intent、還沒寫的那一瞬（測試在這裡讓另一個 writer 插進來）。
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("restart_intent_after_read", subject_id).await;
+    crate::bot_trash::app_ports_p11::race_point::hit("restart_intent_after_read", subject_id).await;
     let now = crate::db::now();
     let expires = (chrono::Utc::now() + chrono::Duration::seconds(ttl_secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let id = match existing {
@@ -264,7 +264,7 @@ pub async fn fail_and_notify(pool: &SqlitePool, id: &str, err: &str) -> Result<b
         .await?
         .rows_affected();
     if n == 1 {
-        crate::supervisor::store::push_inbox_tx(
+        crate::bot_trash::app_ports_p11::push_inbox_tx(
             &mut tx,
             &format!("intent_failed:{id}"),
             "intent_failed",
@@ -514,7 +514,7 @@ mod tests {
         let subject = format!("bot-814-{}", crate::db::ulid());
         let other_wrote = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
         let (url, seen) = (format!("sqlite://{}", dir.join("t.sqlite").display()), other_wrote.clone());
-        crate::lifecycle::race_point::arm("restart_intent_after_read", &subject, move || async move {
+        crate::bot_trash::app_ports_p11::race_point::arm("restart_intent_after_read", &subject, move || async move {
             // 另一條連線、不等鎖：拿得到寫鎖就當場 commit（deferred 時正是這樣），拿不到＝被重啟的交易擋著。
             let mut other = SqliteConnectOptions::from_str(&url).unwrap().busy_timeout(std::time::Duration::ZERO).connect().await.unwrap();
             let wrote = insert_pending_on(&mut other, "restart", "another-bot", "local", &json!({}), 900).await.is_ok();

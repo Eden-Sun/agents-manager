@@ -60,7 +60,7 @@ T=.
 
 /// 把遠端的 `bots/<id>/` 搬進回收區。回搬到哪裡；目錄本來就不在回 `None`。
 pub async fn move_in(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
-    let dir = crate::lifecycle::remote_bot_dir(conn, bot_id).await?.dir;
+    let dir = crate::bot_trash::app_ports_p11::remote_bot_dir(conn, bot_id).await?.dir;
     let dest = format!("{}/{bot_id}.{}", trash_dir(conn).await?, now_ms());
     let script = format!(
         "set -e\nD={d}\nif [ -e \"$D\" ]; then\n  mkdir -p \"$(dirname {t})\"\n  mv \"$D\" {t}\n  printf 'AM_TRASHED\\n'\nelse\n  printf 'AM_NOTHING\\n'\nfi\n",
@@ -79,7 +79,7 @@ pub async fn move_in(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
 
 /// 還原：遠端 `bots/<id>/` 還不在時，把回收區裡這顆最新的那份搬回去。symlink 只拆連結再搬回；真目錄或檔案已在回 `None`。
 pub async fn restore(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
-    let dir = crate::lifecycle::remote_bot_dir(conn, bot_id).await?.dir;
+    let dir = crate::bot_trash::app_ports_p11::remote_bot_dir(conn, bot_id).await?.dir;
     let home = conn.home().await?;
     let trash_dir = trash_dir_for(&home);
     let guard = trash_root_guard(&home, "printf 'AM_NONE\\n'");
@@ -262,7 +262,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("spool")).unwrap();
         std::fs::write(dir.join("spool/ev.json"), "pending").unwrap();
 
-        assert!(crate::lifecycle::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
+        assert!(crate::bot_trash::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
         assert!(!dir.exists(), "搬走了");
         let trashed = entries(&root.join("bots-trash"));
         assert_eq!(trashed.len(), 1, "{trashed:?}");
@@ -271,14 +271,14 @@ mod tests {
         assert!(purged.is_some(), "照舊記下已處理");
 
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
-        crate::api::restore_bot(axum::extract::State(app.clone()), axum::extract::Path(bot.id.clone())).await.unwrap();
+        crate::bot_trash::app_ports_p11::test_helpers::restore_bot(app.clone(), bot.id.clone()).await.unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("spool/ev.json")).unwrap(), "pending", "還原 API 把 spool 裡的東西拿回來");
         assert!(entries(&root.join("bots-trash")).is_empty());
         let row: Option<String> = sqlx::query_scalar("SELECT bot_id FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_optional(&app.db).await.unwrap();
         assert!(row.is_none(), "還原後忘掉記號：再刪一次，掃描才會再搬");
 
         // 還原時目錄已經在（重建過）就不動回收區那份。
-        assert!(crate::lifecycle::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
+        assert!(crate::bot_trash::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
         std::fs::create_dir_all(&dir).unwrap();
         restore_for(&app, &bot.id).await;
         assert_eq!(entries(&root.join("bots-trash")).len(), 1, "不蓋掉已經在的目錄");
@@ -286,7 +286,7 @@ mod tests {
 
         // 目錄本來就不在：什麼都不搬，照樣算處理完。
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(crate::lifecycle::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
+        assert!(crate::bot_trash::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
         assert_eq!(entries(&root.join("bots-trash")).len(), 1);
     }
 
@@ -535,7 +535,7 @@ mod tests {
         let dir = root.join("bots").join(&bot.id);
         std::fs::create_dir_all(&dir).unwrap();
         crate::hosts::set_ssh_fake("trashbox-down", |_| bail!("ssh: connect to host: Connection refused"));
-        assert!(!crate::lifecycle::purge_bot_dir(&app, &bot.id, "trashbox-down").await);
+        assert!(!crate::bot_trash::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-down").await);
         assert!(dir.exists());
         let (purged, attempts): (Option<String>, i64) =
             sqlx::query_as("SELECT purged_at, attempts FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_one(&app.db).await.unwrap();

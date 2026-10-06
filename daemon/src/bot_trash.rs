@@ -10,6 +10,9 @@
 //! daemon 常駐好幾天很常見，回收區會一路長（review d77434c0 #2）。
 
 use crate::state::App;
+
+#[path = "app_ports_p11.rs"]
+pub(crate) mod app_ports_p11;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::path::{Path, PathBuf};

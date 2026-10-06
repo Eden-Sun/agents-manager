@@ -252,7 +252,7 @@ async fn scan_host(app: &Arc<App>, host: &str, snapshot_panes: &[Value]) -> Resu
             None
         }
     };
-    let client = crate::api::shell::client_for(app, host).await.ok().map(|(c, _)| c);
+    let client = crate::bot_trash::app_ports_p11::client_for(app, host).await.ok().map(|(c, _)| c);
     let mut observed: HashMap<String, Option<Observed>> = HashMap::new();
     for p in &non_agent {
         let Some(pane_id) = p.get("pane_id").and_then(Value::as_str) else { continue };
@@ -281,7 +281,7 @@ const RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 單獨重掃一台主機的 pane（不動 agent pane 的對帳、不跑 GC 與通知——那兩件事仍跟著對帳）。
 pub async fn rescan(app: &Arc<App>, host: &str) -> Result<ScanOutcome> {
-    let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let (client, _) = crate::bot_trash::app_ports_p11::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let snapshot = client.snapshot().await?;
     // 同 reconcile 的規則：連 key 都沒有＝不認得的形狀，當成空的會把整台的列清光。
     if !snapshot.get("panes").is_some_and(Value::is_array) {
@@ -753,7 +753,7 @@ async fn close_if_still_idle(
 ) -> Result<bool> {
     // 1. 重新取前景／行程樹：**讀不到就不關**（讀不到不等於是空的）。
     let dump = crate::memproc::dump(app, host).await?;
-    let (client, _) = crate::api::shell::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let (client, _) = crate::bot_trash::app_ports_p11::client_for(app, host).await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let Some(f) = read_facts(Some(&client), Some(&dump), pane_id).await else {
         tracing::info!(host, pane_id, "GC 前讀不到這顆 pane 的行程樹，這一輪不關");
         return Ok(false);
@@ -772,7 +772,7 @@ async fn close_if_still_idle(
         .map(|r| r.text.lines().rev().take(log_lines as usize).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
         .unwrap_or_else(|e| format!("（讀不到畫面：{e}）"));
     tracing::info!(host, pane_id, workspace_id, tab_id, screen_tail = %tail, "pane GC：閒置太久，關掉這顆 shell pane");
-    crate::lifecycle::close_pane_and_tab(&client, workspace_id, tab_id, pane_id).await;
+    crate::bot_trash::app_ports_p11::close_pane_and_tab(&client, workspace_id, tab_id, pane_id).await;
     sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(host).bind(pane_id).execute(&app.db).await?;
     Ok(true)
 }
@@ -811,7 +811,7 @@ pub async fn notify_unowned_and_orphans(app: &Arc<App>, host: &str) -> Result<us
             "message": message,
         });
         let key = format!("{event}:{host}:{pane_id}:{first_seen}");
-        if crate::supervisor::store::push_inbox(&app.db, &key, event, None, None, None, &payload).await?.is_some() {
+        if crate::bot_trash::app_ports_p11::push_inbox(&app.db, &key, event, None, None, None, &payload).await?.is_some() {
             sent += 1;
         }
         sqlx::query(&format!("UPDATE panes SET {column}=? WHERE host=? AND pane_id=?"))
@@ -1865,7 +1865,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
     if !crate::db::active_runs_for_pane(&app.db, &host, &pane_id, &session, &session).await.map_err(up)?.is_empty() {
         return Err(agent_pane());
     }
-    let (client, _) = crate::api::shell::client_for(&app, &host).await?;
+    let (client, _) = crate::bot_trash::app_ports_p11::client_for(&app, &host).await?;
     match client.pane_get(&pane_id).await.map_err(up)? {
         None => {
             sqlx::query("DELETE FROM panes WHERE host=? AND pane_id=?").bind(&host).bind(&pane_id).execute(&app.db).await.map_err(sql)?;
@@ -1901,7 +1901,7 @@ pub(crate) async fn close_tracked(app: &Arc<App>, host: &str, pane_id: &str, con
             json!({"reason": "service_pane", "pane": info, "unverified": live.is_none()}),
         ));
     }
-    crate::lifecycle::close_pane_and_tab(
+    crate::bot_trash::app_ports_p11::close_pane_and_tab(
         &client,
         info["workspace_id"].as_str(),
         info["tab_id"].as_str(),

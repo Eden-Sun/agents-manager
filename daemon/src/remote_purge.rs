@@ -119,7 +119,7 @@ pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
     };
     // 讀完「誰欠著」、還沒拿任何一把鎖的那一瞬（測試在這裡把其中一顆還原掉）。
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("remote_sweep_after_pending", host).await;
+    crate::bot_trash::app_ports_p11::race_point::hit("remote_sweep_after_pending", host).await;
     let (mut purged, mut kept) = (0, 0);
     for id in ids {
         // `restore_bot` 拿的是同一把：拿到之後看到的 `deleted_at` 就是最終的答案。
@@ -156,7 +156,7 @@ pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
             }
         }
         // purge_bot_dir 自己把結果記進 remote_bot_dir_purges。
-        if crate::lifecycle::purge_bot_dir(app, &id, host).await {
+        if crate::bot_trash::app_ports_p11::purge_bot_dir(app, &id, host).await {
             purged += 1;
         } else {
             kept += 1;
@@ -333,8 +333,8 @@ mod tests {
         sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&id).execute(&app.db).await.unwrap();
 
         let (a2, i2) = (app.clone(), id.clone());
-        crate::lifecycle::race_point::arm("remote_sweep_after_pending", &r.host, move || async move {
-            crate::api::restore_bot(axum::extract::State(a2), axum::extract::Path(i2)).await.unwrap();
+        crate::bot_trash::app_ports_p11::race_point::arm("remote_sweep_after_pending", &r.host, move || async move {
+            crate::bot_trash::app_ports_p11::test_helpers::restore_bot(a2, i2).await.unwrap();
         });
 
         assert_eq!(sweep(&app, &r.host).await, (0, 0), "還原掉的那顆既沒清也不算欠著");

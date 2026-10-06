@@ -10,10 +10,10 @@
 //! 補不成（軟刪寫不進去…）最多試 [`crate::intents::MAX_ATTEMPTS`] 次，用完 `failed` 並同交易推 AGM inbox。目錄清不掉（ssh 失敗、run 還在）不算補不成：
 //! 那條路本來就有自己的帳（`kept_dirs`、開機清掃、`remote_purge`）。
 
-use crate::api::{lock_bots_in_order, soft_delete_child, stop_for_delete_locked};
+use crate::bot_trash::app_ports_p11 as ports;
+use crate::bot_trash::app_ports_p11::{lock_bots_in_order, soft_delete_child, stop_for_delete_locked};
 use crate::db;
 use crate::intents::{self, Inserted, Intent};
-use crate::lifecycle;
 use crate::restart_intents::Outcome;
 use crate::state::App;
 use serde_json::{json, Value};
@@ -65,7 +65,7 @@ pub fn spawn_retry(app: Arc<App>, id: String, why: String) {
 
 async fn retry_loop(app: &Arc<App>, id: &str) {
     for attempt in 0.. {
-        tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
+        tokio::time::sleep(ports::recovery_retry_delay(attempt)).await;
         if drive_once(app, id).await == Outcome::Finished {
             return;
         }
@@ -168,11 +168,11 @@ async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
-    crate::share::revoke_bot_share(app, &parent).await.map_err(|e| format!("cannot revoke bot share {parent}: {e}"))?;
+    ports::revoke_bot_share(app, &parent).await.map_err(|e| format!("cannot revoke bot share {parent}: {e}"))?;
     let host = intent.host.clone();
     // 快照裡的 child（深的先）：停、軟刪、清目錄。
     for (cid, _) in &children {
-        crate::share::revoke_bot_share(app, cid).await.map_err(|e| format!("cannot revoke child share {cid}: {e}"))?;
+        ports::revoke_bot_share(app, cid).await.map_err(|e| format!("cannot revoke child share {cid}: {e}"))?;
         let Some(c) = db::bot(&app.db, cid).await.map_err(db_err)? else { continue };
         let settled = stop_for_delete_locked(app, cid).await;
         if c.deleted_at.is_none() {
@@ -180,12 +180,12 @@ async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         if settled.is_ok() {
             let child_host = db::bot_host(&app.db, cid).await.unwrap_or_else(|_| host.clone());
-            lifecycle::purge_bot_dir(app, cid, &child_host).await;
+            ports::purge_bot_dir(app, cid, &child_host).await;
         }
         app.emit("bot_changed", json!({"bot_id": cid})).await;
     }
     if stop_for_delete_locked(app, &parent).await.is_ok() {
-        lifecycle::purge_bot_dir(app, &parent, &host).await;
+        ports::purge_bot_dir(app, &parent, &host).await;
     }
     app.emit("bot_changed", json!({"bot_id": parent})).await;
     intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
@@ -210,7 +210,7 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
         }
         _ => {}
     }
-    crate::share::revoke_project_shares(app, &project_id).await.map_err(|e| format!("cannot revoke project shares: {e}"))?;
+    ports::revoke_project_shares(app, &project_id).await.map_err(|e| format!("cannot revoke project shares: {e}"))?;
     let host = intent.host.clone();
     for (bid, managed_by) in &bots {
         let Some(b) = db::bot(&app.db, bid).await.map_err(db_err)? else { continue };
@@ -221,7 +221,7 @@ async fn resume_project(app: &Arc<App>, intent: &Intent) -> Result<(), String> {
             soft_delete_child(app, bid).await.map_err(|e| format!("cannot soft-delete child {bid}: {e}"))?;
         }
         // 目錄清不掉不算補不成：本機留給開機清掃、遠端有 `remote_purge` 的帳。
-        lifecycle::purge_bot_dir(app, bid, &host).await;
+        ports::purge_bot_dir(app, bid, &host).await;
     }
     app.emit("project_changed", json!({"project_id": project_id})).await;
     intents::complete(&app.db, &intent.id).await.map_err(|e| format!("{e:#}"))?;
