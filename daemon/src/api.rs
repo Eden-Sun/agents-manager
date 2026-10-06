@@ -232,6 +232,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/hosts/{name}/identities/{identity}/login", post(login_identity))
         .route("/hosts/{name}/identities/{identity}/logout", post(logout_identity))
         .route("/hosts/{name}/agy/logout", post(logout_agy))
+        .route("/hosts/{name}/agy/install", post(install_agy))
         .route("/hosts/{name}/gh", get(get_gh_status))
         .route("/hosts/{name}/gh/login", post(login_gh))
         .route("/hosts/{name}/gh/cancel", post(cancel_gh))
@@ -844,6 +845,7 @@ const BOT_ROUTE_POLICIES: &[(&str, &str, BotRoutePolicy)] = &[
     ("POST", "/api/hosts/{name}/identities/{identity}/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/identities/{identity}/logout", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/agy/logout", BotRoutePolicy::UserOrAgm),
+    ("POST", "/api/hosts/{name}/agy/install", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/gh/login", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/hosts/{name}/gh/cancel", BotRoutePolicy::UserOrAgm),
     ("POST", "/api/identities", BotRoutePolicy::UserOrAgm),
@@ -3460,6 +3462,26 @@ async fn logout_agy(
         Ok(removed) => Ok(Json(json!({"removed": removed}))),
         Err(crate::quota_agy::LogoutError::UnknownHost) => Err(LcError::NotFound("host".into())),
         Err(crate::quota_agy::LogoutError::Failed(m)) => Err(LcError::Upstream(m)),
+    }
+}
+
+/// 裝／更新那台主機的 agy（官方 manifest ＋ sha512，不跑官方 `install.sh`；`agy_install::install`）。
+async fn install_agy(
+    State(app): State<Arc<App>>,
+    Path(name): Path<String>,
+    Extension(principal): Extension<RequestPrincipal>,
+) -> Result<Json<Value>, LcError> {
+    require_user(&principal)?;
+    match crate::agy_install::install(&app, &name).await {
+        Ok(done) => Ok(Json(serde_json::to_value(done).unwrap_or(Value::Null))),
+        Err(crate::agy_install::InstallError::UnknownHost) => Err(LcError::NotFound("host".into())),
+        Err(crate::agy_install::InstallError::Busy(m)) => {
+            Err(LcError::conflict("agy_install_in_progress", json!({"host": name, "message": m})))
+        }
+        Err(crate::agy_install::InstallError::Failed { reason, message }) => {
+            tracing::warn!(host = %name, reason, %message, "agy install failed");
+            Err(LcError::Upstream(format!("{reason}: {message}")))
+        }
     }
 }
 

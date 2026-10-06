@@ -16,6 +16,7 @@ import { QuotaLoginShell } from './QuotaLoginShell'
 import { IdentityCliLogin, QuotaLoginSlash } from './QuotaLoginSlash'
 import { UpdateQuotaChip } from './UpdateQuotaChip'
 import { AgyLogoutButton, AgyLogoutDialog } from './AgyLogout'
+import { useAgyMissing } from './agyInstallState'
 import { RULE_5H, RULE_WEEKLY, resetBadge } from '../lib/quotaReset'
 import { cliLoginCommand, identityEnv, shouldUseIdentityLogin } from '../lib/quotaLogin'
 import './quotaLimitHit.css'
@@ -749,6 +750,8 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
   })
   const supported = QUERYABLE.includes(entry.kind)
   const loggedOut = useLoggedOut(entry, host)
+  // 這台沒裝 agy：額度永遠不會有讀數，不要一直寫「背景查詢中」，給安裝鈕。
+  const agyMissing = useAgyMissing(host) && entry.kind === 'agy' && !entry.identity
   const agyLogoutBusy = useStore((s) => s.busy[`agy-logout:${host || 'local'}`] === true)
   const five = remaining(q?.five_hour)
   const seven = remaining(q?.seven_day)
@@ -779,6 +782,11 @@ function PopRow({ entry, host, onAgyLogout }: { entry: QuotaEntry; host: string;
       {q?.stale ? <p className="quota-stale-note">{staleSuffix(q, now)}，新的探測回來後會更新</p> : null}
       {!supported ? (
         <p className="quota-pop-note">CLI 不支援額度查詢</p>
+      ) : agyMissing ? (
+        <>
+          <p className="quota-pop-note warn">{hostLabel(host)} 尚未安裝 agy，要自動安裝嗎？</p>
+          <QuotaLoginSlash kind="agy" host={host} hostLabel={hostLabel(host)} identity={null} />
+        </>
       ) : !known || (five === null && seven === null) ? (
         <>
           <p className={`quota-pop-note${loggedOut ? ' warn' : ''}`}>

@@ -993,6 +993,7 @@ export class MockTransport implements Transport {
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'tools' && seg[3] === 'refresh') return this.refreshTools(seg[1])
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'login') return this.loginIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'agy' && seg[3] === 'logout' && seg.length === 4) return this.logoutAgy(decodeURIComponent(seg[1]))
+    if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'agy' && seg[3] === 'install' && seg.length === 4) return this.installAgy(decodeURIComponent(seg[1]))
     if (method === 'POST' && seg[0] === 'hosts' && seg[2] === 'identities' && seg[4] === 'logout') return this.logoutIdentity(seg[1], decodeURIComponent(seg[3]))
     if (method === 'GET' && seg[0] === 'bots' && seg[2] === 'outbox' && seg.length === 3) {
       return this.outbox(decodeURIComponent(seg[1]))
@@ -1555,6 +1556,18 @@ export class MockTransport implements Transport {
     this.emit('quota_updated', { kind: `${prefix}agy`, host: remote ? remote.name : 'local', quota: null })
     this.emit('host_changed', { name: remote ? remote.name : 'local', connected: true, tools })
     return { removed }
+  }
+
+  /** 裝／更新 agy（`POST /api/hosts/{name}/agy/install`）：裝好後那台的 agy 變已安裝、未登入，daemon 推 `host_changed`。 */
+  private installAgy(host: string) {
+    const remote = host && host !== 'local' ? this.host(host) : null
+    const tools = remote ? remote.tools : this.localTools
+    const from = tools.agy.installed ? tools.agy.version : null
+    const to = '1.3.0'
+    const already = from === to
+    if (!already) tools.agy = { installed: true, path: '/Users/mock/.local/bin/agy', version: to, logged_in: tools.agy.installed ? tools.agy.logged_in : false }
+    this.emit('host_changed', { name: remote ? remote.name : 'local', connected: true, tools })
+    return { host: remote ? remote.name : 'local', platform: 'darwin_arm64', from, to, path: tools.agy.path, already_latest: already }
   }
 
   /** 在哪個 shell pane 跑著 agy 登入 TUI（`<host>/<pane>`）。 */
@@ -4110,7 +4123,7 @@ export class MockTransport implements Transport {
       s.lines.push(host === 'local' ? 'm1pro.local' : `${host}.local`)
     } else if (cmd.startsWith('ls')) {
       s.lines.push('Cargo.toml  daemon      docs        web')
-    } else if (cmd === 'agy') {
+    } else if (cmd === 'agy' || cmd === 'AGY_CLI_DISABLE_AUTO_UPDATE=true agy') {
       // agy 的 TUI 自己引導登入：SSH 底下印授權網址，授權碼貼回後登入完成（mock 直接當作下一步 `/quit` 時登好，見下）。
       s.lines.push('Antigravity CLI — please sign in', 'Open this URL to authorize:', MOCK_AGY_LOGIN_URL, 'Paste the authorization code here, then /quit to leave.')
       this.agyLoginPane = `${host}/${paneId}`

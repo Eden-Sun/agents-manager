@@ -52,7 +52,7 @@ const TAIL_CHARS: usize = 1500;
 /// 不分實例：換掉的是同一顆 codex。
 
 const LOCKED_EXIT: i32 = 75;
-const LOCKED_MARK: &str = "AM_CODEX_INSTALL_LOCKED";
+pub(crate) const LOCKED_MARK: &str = "AM_CODEX_INSTALL_LOCKED";
 
 /// 識別新式 `process-group-id:nonce` owner；舊版單 PID symlink 沒有足夠資料驗明身份，視為過期。
 /// 比對 command line 上的 nonce，因為 macOS 的 `ps` 不會用 Linux 的 `ps e` 方式輸出環境變數。
@@ -81,7 +81,7 @@ fn shell_lock_path(lock: &str) -> String {
 
 /// 把 `inner` 包進主機端的安裝鎖（POSIX sh：遠端是 `ssh … /bin/sh -s`，本機是 `/bin/sh -c`）。
 /// 鎖被佔走的訊息寫到 stderr：遠端失敗時 `ssh_exec` 只帶 stderr 回來。
-fn locked_script(lock: &str, inner: &str) -> String {
+pub(crate) fn locked_script(lock: &str, inner: &str) -> String {
     let nonce = crate::db::ulid();
     let lock = shell_lock_path(lock);
     let inner = crate::hosts::sh_quote(inner);

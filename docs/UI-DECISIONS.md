@@ -1012,12 +1012,17 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 
 ## 額度欄 agy 那格未登入時的登入入口（2026-10-05 使用者）
 
-agy 沒有 `login` 子命令也沒有 `/login`（`canLoginInSession('agy')` 是 false），所以未登入那格比照 Codex：`QuotaLoginShell` 在該主機開 shell、打 `cliLoginCommand('agy')`＝`agy` 並切過去。確認框的說明換成 agy 版：TUI 會引導登入（SSH 底下印授權網址，瀏覽器授權後把授權碼貼回），登好後輸入 `/quit` 離開。
+agy 沒有 `login` 子命令也沒有 `/login`（`canLoginInSession('agy')` 是 false），所以未登入那格比照 Codex：`QuotaLoginShell` 在該主機開 shell、打 `cliLoginCommand('agy')`＝`AGY_CLI_DISABLE_AUTO_UPDATE=true agy` 並切過去。確認框的說明換成 agy 版：TUI 會引導登入（SSH 底下印授權網址，瀏覽器授權後把授權碼貼回），登好後輸入 `/quit` 離開。
 daemon 這一側：探測腳本（`tools::PROBE_SH`）多問一件事——憑證檔 `~/.gemini/antigravity-cli/antigravity-oauth-token` 在不在——印 `AM_LOGIN agy 1／0`，`tools.agy.logged_in` 才有值（以前永遠是 null，那格不會顯示「未登入」）。登出立刻寫 false 並推 `host_changed`；`quota_agy::spawn_agy_login_watcher` 每 20 秒對「裝了 agy、記成未登入」的主機看一次憑證檔（遠端是一個小 ssh），一出現就翻成已登入、清探測冷卻並探測一次 Gemini 的 5h／7d 額度，不必重啟、不必等 5 分鐘輪詢；已知未登入的主機輪詢不再跑 `agy -p /usage`（那會停在登入畫面等到逾時）。
 
 ## Bot 設定面板：儲存中不出「重啟後生效」橫幅（2026-10-05 使用者）
 
 claude 改 effort／model 由 daemon 在跑著的 session 裡當場套用（`/effort`、`/model`），不用重啟。daemon 先寫 config 推 `bot_changed`、再套用，這段時間 state 的 `bot.needs_restart` 暫時是真的，面板以前一儲存就跳黃色「已儲存，重啟 Bot 後生效」。現在儲存中（PATCH 還沒回）只顯示「套用中…」，等 PATCH 回應：`needs_restart:false` → 「✓ 已套用，不用重啟」，`true`（要重啟的欄位或套用失敗）才出黃色橫幅與「立即重啟」。規則仍只在 daemon，前端不複製。
+
+## 沒裝 agy 的主機：先問要不要自動安裝，再登入（2026-10-06 使用者）
+
+遠端主機（例如 m4p）沒裝 agy 時，額度 popover 的 agy 格不再永遠寫「背景查詢中」、也**不開 shell 打 agy**（那只會得到 `zsh: command not found: agy`）：改寫「<主機> 尚未安裝 agy，要自動安裝嗎？」，入口鈕叫「安裝 agy 並登入」（`QuotaLoginShell` 發現 `tools.agy.installed === false` 時換成這個版本）。按下去跳確認框（說明：從官方下載約 50 MB、驗 sha512、放到 `~/.local/bin/agy`、不跑官方 install.sh、不改 shell 設定、裝好後接著開 shell 登入），**使用者按確認才打** `POST /api/hosts/{name}/agy/install`；成功後才開 shell 送 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`，失敗只出錯誤通知、不開 shell。取消什麼都不做。
+新 bot 的 kind 選單（`NewBotForm`，缺的 kind 灰掉並帶 `InstallToolButton`）、缺少 CLI 提示與主機徽章的 agy 安裝鈕是同一個 `AgyInstallButton`：按了先跳同一個確認框，確認才裝（不需要先有一顆在跑的 bot，跟其他 CLI 的「用現有 agent 安裝」不同）；裝好後 daemon 重新偵測並推 `host_changed`，kind 鈕自己解鎖、安裝鈕消失。已經裝了就走原本的「開 shell 登入」。登入指令固定帶 `AGY_CLI_DISABLE_AUTO_UPDATE=true`（版本由 AG Man 管）。
 
 ## agy 額度格顯示較緊的窗口（2026-10-05）
 

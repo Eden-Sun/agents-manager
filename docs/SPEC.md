@@ -3464,7 +3464,14 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 - **接不回要看得見**：`--conversation=<不存在的 id>` agy 只在 stderr 警告、exit 0、悄悄開新對話。所以 `runs.resume_session_id` 記下要接的 id，由第一個回報的實際 conversationId 比對（`hookrecv::consume_resume_session`）：agy bot 用 `SessionStart`／`PreInvocation` hook 的 `conversationId`；沒有 hook 的子 agent 用 `agy_session::load` 從 pane 行程開著的對話資料庫認出的 id（`grok_transcript::sync_locked`）。一致＝`resume_outcome='verified'`，不一致＝`mismatch`＋聊天室 `context_lost`（`resume_mismatch`）。
 - **閘門不等 agy**（`resume_gate`）：對話是第一則 prompt 才建立，送出之前不會有任何回報，等了只會死結（同 codex／grok）；因此第一則 prompt 可能在驗證前就送進一段新對話裡，事後才看到 `resume_mismatch`。
 - **子 agent 重啟**：有記到上一段卻接不回（任何 kind 的 `resume_args_by_kind` 回 `Err`）一律走 `context_lost` 在聊天室留說明，不只寫 log；從沒記過 id 的仍只寫 log（沒有脈絡可說斷了）。
-- **不做**：換身分（agy 沒有身分、HOME 不換）、遠端主機的 agy（§12a.9 只做本機）、跨 HOME 搬對話檔。
+- **不做**：換身分（agy 沒有身分、HOME 不換）、遠端主機的 agy 子 agent（§12a.9 只做本機；遠端的安裝／登入／額度見 §12a.11）、跨 HOME 搬對話檔。
+
+### 12a.11 遠端主機：安裝、登入、額度（`agy_install.rs`，2026-10-06）
+遠端主機（第一個目標 m4p：macOS arm64）的 agy 分三件事，**安裝、登入偵測、額度探測已做**；**在遠端啟動 agy bot 還沒做**（`lifecycle/setup.rs::injected_args` 對遠端 agy 仍回 `agy bots run on the local host only`：遠端要補的是 hooks.json／statusLine／dispatcher 的遠端安裝、遠端信任清單、遠端 transcript 讀取，見 §12a.8）。
+- **安裝／更新**：`POST /api/hosts/{name}/agy/install`（API §10 前的 agy 一節）。不走 `cli_update`（那條是「有新版通知時升級已裝的 claude／codex」，要先讀得到舊版、綁通知目標）；agy 沒有新版通知，沒裝也要能裝，所以獨立一個小模組。daemon 讀官方 manifest（附錄 G.1）、驗過 url（只收官方儲存桶）與 sha512 的形狀，把它們當資料交給主機端寫死的 POSIX sh：下載 → 驗 sha512 → 只解出 `antigravity` → 對暫存檔跑 `--version`（關自動更新，版本要吻合）→ 同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。**絕不執行官方 `install.sh`／`agy install`**（會改 shell profile、purge alias）。沒驗過 sha512 的東西不會被執行；驗證沒過不碰既有的 agy。同一台同時只裝一次（行程內名額＋主機端 process-group 鎖 `~/.agents-manager-agy-install.lock`）。裝完重新偵測，版本吻合才算成功（`~/.local/bin` 不在那台 PATH 時回 `not_on_path`）。已是官方最新版就不下載（`already_latest`）。
+- **登入**：額度欄 agy 格未登入時「開 shell 登入」本來就帶 host，遠端會在那台開 host shell 打 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`（登入用的這一次也關背景自我更新）；憑證檔 `~/.gemini/antigravity-cli/antigravity-oauth-token` 出現後，`spawn_agy_login_watcher`（每 20 秒、遠端一個小 ssh）翻成已登入並立刻探測額度。
+- **額度**：`refresh_agy` 對遠端經 `ssh_exec_path` 跑同一段 `agy -p /usage`，讀數記在 `<host>/agy`。
+- **網頁**：沒裝 agy 的主機（tools 探測已知 `installed:false`），額度 popover 的 agy 格寫「尚未安裝 agy，要自動安裝嗎？」，入口是「安裝 agy 並登入」：使用者在確認框按確認才安裝，成功後才開 shell 登入（不再開 shell 打 `agy` 得到 `command not found`）；新 bot 的 kind 選單、缺少 CLI 提示與主機徽章的 agy 安裝鈕同樣先問再裝（細節見 UI-DECISIONS）。
 
 ### 12a.8 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
 `/fork`（現在 `fork_args_by_kind` 回 `unsupported_kind`）、resume 時換身分要搬的對話檔（`brain/<id>/`、`conversations/<id>.db`、`conversation_summaries.db`；換身分＝換 HOME 現在沒有，不做）、遠端的子 agent（§12a.9 只做本機）、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。
