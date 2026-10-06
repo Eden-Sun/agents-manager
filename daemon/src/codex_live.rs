@@ -137,7 +137,7 @@ pub async fn correct_runtime_from_screen(app: &crate::state::App, run_id: &str, 
     // 都不寫，下一輪仍不同才會再試。
     let model_moved = run.runtime_model.as_deref() != Some(seen.model.as_str());
     let effort_moved = seen.effort.is_some() && run.runtime_effort != seen.effort;
-    if let Err(e) = crate::child_runtime::follow(
+    if let Err(e) = crate::models::app_ports_p13::child_runtime_follow(
         app,
         &run.bot_id,
         Some(seen.model.as_str()).filter(|_| model_moved),
@@ -374,7 +374,7 @@ async fn close_picker_checked(client: &HerdrClient, pane_id: &str) -> Result<boo
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("codex_picker_before_final_read", pane_id).await;
+    crate::models::app_ports_p13::race_point::hit("codex_picker_before_final_read", pane_id).await;
     Ok(!picker_open(&read(client, pane_id).await?))
 }
 
@@ -422,7 +422,7 @@ async fn apply_model_and_effort(
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("codex_apply_before_model_picker_read", pane_id).await;
+    crate::models::app_ports_p13::race_point::hit("codex_apply_before_model_picker_read", pane_id).await;
     let screen = read(client, pane_id).await?;
     if !screen.contains("Select Model") {
         let _ = close_picker_checked(client, pane_id).await;
@@ -438,7 +438,7 @@ async fn apply_model_and_effort(
     }
 
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("codex_apply_before_effort_picker_read", pane_id).await;
+    crate::models::app_ports_p13::race_point::hit("codex_apply_before_effort_picker_read", pane_id).await;
     let screen = read(client, pane_id).await?;
     if !screen.contains("Select Reasoning Level") {
         let _ = close_picker_checked(client, pane_id).await;
@@ -482,7 +482,7 @@ async fn toggle_fast(client: &HerdrClient, pane_id: &str) -> bool {
         return false;
     }
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("codex_after_fast_toggle", pane_id).await;
+    crate::models::app_ports_p13::race_point::hit("codex_after_fast_toggle", pane_id).await;
     tokio::time::sleep(Duration::from_millis(1000)).await;
     true
 }
@@ -530,8 +530,8 @@ pub async fn apply(
     }
     // 輸入框裡有使用者的草稿：`/model`、`/fast` 會接在後面，Enter 把整段當 prompt 送出（回合中那條 #712 早有這道檢查）。
     // herdr 不給帶樣式的讀法時分不出灰色佔位字與草稿，不擋（維持原行為）。
-    if let Ok(r) = crate::lifecycle::read_styled_snapshot(client, pane_id, "visible", 60).await {
-        if r.format == "ansi" && crate::lifecycle::box_state("codex", &r.text) == crate::lifecycle::BoxState::NonEmpty {
+    if let Ok(r) = crate::models::app_ports_p13::read_styled_snapshot(client, pane_id, "visible", 60).await {
+        if r.format == "ansi" && crate::models::app_ports_p13::box_state("codex", &r.text) == crate::models::app_ports_p13::BoxState::NonEmpty {
             return Err("composer_not_empty");
         }
     }
@@ -610,7 +610,7 @@ pub fn verify(seen: &CodexRuntime, bot: &db::Bot, fields: &[&str]) -> Result<(),
 /// 回合中不能碰這個畫面（[`apply_fast_during_turn`]）：選單／選擇畫面開著，或輸入框不是空的（使用者的草稿——打 `/fast`
 /// 會接在它後面，Enter 就把整段送出去）。輸入框要用**帶樣式**的讀法判：純文字分不出 codex 的灰色佔位字與打的字。
 pub fn busy_fast_blocked(plain: &str, styled: &str) -> bool {
-    picker_open(plain) || crate::lifecycle::box_state("codex", styled) != crate::lifecycle::BoxState::Empty
+    picker_open(plain) || crate::models::app_ports_p13::box_state("codex", styled) != crate::models::app_ports_p13::BoxState::Empty
 }
 
 /// 回合中只切 fast（#712）。codex 0.157.1 的 service tier 指令（`/fast`）是 `available_during_task`：回合跑著照樣
@@ -624,7 +624,7 @@ pub async fn apply_fast_during_turn(
     was_fast: Option<bool>,
 ) -> Result<CodexRuntime, &'static str> {
     let plain = read(client, pane_id).await.map_err(|_| "pane_read_failed")?;
-    let styled = crate::lifecycle::read_styled(client, pane_id, "visible", 60)
+    let styled = crate::models::app_ports_p13::read_styled(client, pane_id, "visible", 60)
         .await
         .map_err(|_| "pane_read_failed")?;
     if busy_fast_blocked(&plain, &styled) {
@@ -782,7 +782,7 @@ mod tests {
         env.herdr.set_screen(pane, EMPTY_BOX_ANSI);
         let screens = env.herdr.screens.clone();
         let fail = env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
+        crate::models::app_ports_p13::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
             screens.lock().unwrap().insert(pane.into(), MODEL_MENU.into());
             fail("pane.read", crate::testing::Fault::Refuse);
         });
@@ -806,7 +806,7 @@ mod tests {
         let pane = "pane-codex-final-picker-read";
         env.herdr.set_screen(pane, MODEL_MENU);
         let fail = env.herdr.fail_later();
-        crate::lifecycle::race_point::arm("codex_picker_before_final_read", pane, move || async move {
+        crate::models::app_ports_p13::race_point::arm("codex_picker_before_final_read", pane, move || async move {
             fail("pane.read", crate::testing::Fault::Refuse);
         });
 
@@ -832,14 +832,14 @@ mod tests {
         let screens = env.herdr.screens.clone();
         env.herdr.set_screen(pane, EMPTY_BOX_ANSI);
         let model_screens = screens.clone();
-        crate::lifecycle::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
+        crate::models::app_ports_p13::race_point::arm("codex_apply_before_model_picker_read", pane, move || async move {
             model_screens.lock().unwrap().insert(pane.into(), MODEL_MENU.into());
         });
         let effort_screens = screens.clone();
-        crate::lifecycle::race_point::arm("codex_apply_before_effort_picker_read", pane, move || async move {
+        crate::models::app_ports_p13::race_point::arm("codex_apply_before_effort_picker_read", pane, move || async move {
             effort_screens.lock().unwrap().insert(pane.into(), EFFORT_MENU.into());
         });
-        crate::lifecycle::race_point::arm("codex_picker_before_final_read", pane, move || async move {
+        crate::models::app_ports_p13::race_point::arm("codex_picker_before_final_read", pane, move || async move {
             screens.lock().unwrap().insert(pane.into(), COMPOSER.into());
         });
 

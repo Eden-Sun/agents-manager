@@ -81,7 +81,7 @@ pub fn is_not_logged_in_line(text: &str) -> bool {
 
 async fn push_host(app: &Arc<App>, host: &str) {
     if let Some(fence) = app.hosts.fence(host).await {
-        crate::state::emit_host_changed(app, &fence).await;
+        crate::models::app_ports_p13::emit_host_changed(app, &fence).await;
     }
 }
 

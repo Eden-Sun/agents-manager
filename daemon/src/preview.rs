@@ -10,7 +10,7 @@
 
 use crate::db;
 use crate::herdr::HerdrClient;
-use crate::lifecycle::{LcError, LcResult};
+use crate::models::app_ports_p13::{LcError, LcResult};
 use crate::state::App;
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -172,7 +172,7 @@ impl PreviewEnv for RealEnv {
                 Err(_) => false,
                 Ok(None) => true,
                 Ok(Some(p)) => {
-                    crate::lifecycle::close_pane_and_tab(&self.client, Some(&p.workspace_id), Some(&p.tab_id), pane_id).await;
+                    crate::models::app_ports_p13::close_pane_and_tab(&self.client, Some(&p.workspace_id), Some(&p.tab_id), pane_id).await;
                     // 關指令的結果被吞掉了：再問一次，確定不在才算關掉。
                     matches!(self.client.pane_get(pane_id).await, Ok(None))
                 }
@@ -823,7 +823,7 @@ pub async fn start(app: &Arc<App>, bot_id: &str, req: StartReq) -> LcResult<Valu
     if bot.parent_bot_id.is_some() || bot.managed_by != "user" {
         return Err(LcError::conflict("not_top_level", json!({"bot_id": bot_id})));
     }
-    crate::lifecycle::refuse_default_session(&bot)?;
+    crate::models::app_ports_p13::refuse_default_session(&bot)?;
     let host = db::bot_host(&app.db, bot_id).await.map_err(up)?;
     if host != crate::config::LOCAL_HOST {
         // iframe 連的是瀏覽器所在那台的 port；遠端主機上的 vite 連不到。
