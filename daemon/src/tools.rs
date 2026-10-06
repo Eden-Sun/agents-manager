@@ -152,7 +152,8 @@ hp=$(am_abs herdr)
 case "$hp" in /*) printf 'AM_HERDR %s\n' "$( "$hp" --version 2>/dev/null </dev/null | head -1 | tr -d '\r' )" ;; esac
 GH="${GROK_HOME:-$HOME/.grok}"
 if [ -f "$GH/auth.json" ] || ls "$GH"/auth* >/dev/null 2>&1; then printf 'AM_LOGIN grok 1\n'; else printf 'AM_LOGIN grok 0\n'; fi
-if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]; then printf 'AM_LOGIN agy 1\n'; else printf 'AM_LOGIN agy 0\n'; fi
+# agy 的憑證：Linux 是 600 的檔案；macOS 放 login Keychain（service `gemini`、account `antigravity`），沒有那個檔。
+if [ -s "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ] || { command -v security >/dev/null 2>&1 && security find-generic-password -s gemini -a antigravity >/dev/null 2>&1; }; then printf 'AM_LOGIN agy 1\n'; else printf 'AM_LOGIN agy 0\n'; fi
 "#, alias_sh!());
 
 /// `AM_TZ +0800` → 28800。不是 `±HHMM` 就是 None。
@@ -1282,6 +1283,7 @@ AM_ALIAS cc2='CLAUDE_CONFIG_DIR=$HOME/.claude-cc2 claude --dangerously-skip-perm
     #[test]
     fn the_probe_script_asks_whether_agy_has_its_token_and_the_parser_reads_it() {
         assert!(PROBE_SH.contains("antigravity-cli/antigravity-oauth-token") && PROBE_SH.contains("AM_LOGIN agy 1") && PROBE_SH.contains("AM_LOGIN agy 0"));
+        assert!(PROBE_SH.contains("security find-generic-password -s gemini -a antigravity"), "macOS 的 agy 憑證在 Keychain，不在檔案");
         let m = parse_probe("AM_PATH agy /h/.local/bin/agy\nAM_VER agy 1.2.16\nAM_LOGIN agy 0\n");
         assert_eq!(m["agy"].logged_in, Some(false));
         let m = parse_probe("AM_PATH agy /h/.local/bin/agy\nAM_LOGIN agy 1\n");

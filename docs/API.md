@@ -1682,7 +1682,7 @@ env 前綴跟登入是同一段程式算出來的——少帶 `CLAUDE_CONFIG_DIR
 登入／登出重驗改變身份快取時推標準 `host_changed` 主機快照（含 `name` 與更新後的 `identities`）；前端收到只帶 `host` 的舊版通知時重讀 `/api/state`。
 
 ### `POST /api/hosts/{name}/agy/logout`
-登出那台主機的 agy 帳號（agy 沒有 `logout` 子命令也沒有身分）：直接刪 `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`（本機用 daemon 的家目錄、遠端經 ssh；不跑 agy、不動別的檔），再清掉那台唯一的 Gemini `agy` 額度快照（含重啟快取）並推一則 `quota_updated`（`quota:null`），額度欄那格立刻變沒有讀數。舊版 `agy:claude-gpt` 快照在 daemon 載入 cache 時會刪掉。拿 agy 額度探測的鎖，進行中的探測不會在清掉之後又寫回來。
+登出那台主機的 agy 帳號（agy 沒有 `logout` 子命令也沒有身分）：直接刪 `$HOME/.gemini/antigravity-cli/antigravity-oauth-token`（macOS 另刪 Keychain 項目 `gemini`／`antigravity`；本機用 daemon 的家目錄、遠端經 ssh；不跑 agy、不動別的檔），再清掉那台唯一的 Gemini `agy` 額度快照（含重啟快取）並推一則 `quota_updated`（`quota:null`），額度欄那格立刻變沒有讀數。舊版 `agy:claude-gpt` 快照在 daemon 載入 cache 時會刪掉。拿 agy 額度探測的鎖，進行中的探測不會在清掉之後又寫回來。
 **不停正在跑的 agy bot**：它們不受影響，下次重啟才會停在登入畫面。
 `200 {"removed": true|false}`——`false`＝憑證檔原本就不在（不算錯，快照照樣清）；主機不存在 `404 {"what":"host"}`；遠端沒連線、ssh 失敗、刪檔失敗或換了連線 `502` 帶訊息。User-only。SPEC §12a.7。
 
