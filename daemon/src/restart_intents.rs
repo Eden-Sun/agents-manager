@@ -89,7 +89,7 @@ pub async fn recover_host(app: &Arc<App>, host: &str) {
             tokio::spawn(async move {
                 let mut attempt = 0usize;
                 loop {
-                    tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
+                    tokio::time::sleep(crate::bot_trash::app_ports_p11::recovery_retry_delay(attempt)).await;
                     match intents::open(&app.db).await {
                         Ok(open) => {
                             recover_open(&app, &host, open).await;
@@ -128,7 +128,7 @@ async fn recover_open(app: &Arc<App>, host: &str, open: Vec<Intent>) {
 
 async fn retry_loop(app: &Arc<App>, id: &str) {
     for attempt in 0.. {
-        tokio::time::sleep(crate::reconcile::recovery_retry_delay(attempt)).await;
+        tokio::time::sleep(crate::bot_trash::app_ports_p11::recovery_retry_delay(attempt)).await;
         match drive_once(app, id).await {
             Outcome::Finished => {
                 lifecycle::restart_hold::release_intent(app, id);
@@ -490,8 +490,8 @@ mod tests {
 
         let app2 = tt::restart_app(&e).await;
         lifecycle::restart_hold::adopt_open_intents(&app2).await;
-        crate::reconcile::reconcile_host(&app2, LOCAL_HOST).await.unwrap();
-        crate::reconcile::autostart_after_reconcile(&app2, LOCAL_HOST, true).await;
+        crate::bot_trash::app_ports_p11::test_helpers::reconcile_host(&app2, LOCAL_HOST).await.unwrap();
+        crate::bot_trash::app_ports_p11::test_helpers::autostart_after_reconcile(&app2, LOCAL_HOST, true).await;
         let run2 = db::active_run(&app2.db, &bot.id).await.unwrap().expect("補完之後 bot 回來");
         assert_ne!(run2.id, run1);
         assert_eq!(run_state(&app2, &run1).await, "exited");
@@ -771,7 +771,7 @@ mod tests {
         // In tests, discovery uses the same 20 ms delay as other recovery loops. Keep the table
         // unreadable past the old five-attempt window (100 ms), then restore it with this daemon
         // still running and without another reconcile or herdr event.
-        tokio::time::sleep(crate::reconcile::recovery_retry_delay(intents::MAX_ATTEMPTS as usize) * 7).await;
+        tokio::time::sleep(crate::bot_trash::app_ports_p11::recovery_retry_delay(intents::MAX_ATTEMPTS as usize) * 7).await;
         tt::make_table_readable(&app2, "intents").await;
 
         // The deadline is only the failure bound (success returns as soon as the intent is done). It
