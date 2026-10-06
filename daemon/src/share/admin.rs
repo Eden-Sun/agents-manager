@@ -9,39 +9,13 @@ use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::{Extension, Json};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::api::RequestPrincipal;
 use crate::lifecycle::LcError;
 use crate::share::store;
 use crate::state::App;
-
-/// `[share]`：`listen` 是分享入口的獨立 listener（Tailscale Funnel 指過來的那個 port），`base_url` 是對外網址。
-/// 兩個都可以不寫：沒 `listen` 就不開入口，沒 `base_url` 就不能開分享連結（409 `share_not_configured`）。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShareCfg {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listen: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// 受限 bot「新資料夾」的根目錄（可用 `~/`）；沒設＝`~/shared-bots`。要在 daemon 資料目錄之外。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub folders_root: Option<String>,
-}
-
-impl ShareCfg {
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
-    /// `https://…`／`http://…`，去掉結尾的 `/`；其他形狀當沒設。
-    pub fn base(&self) -> Option<String> {
-        let b = self.base_url.as_deref()?.trim().trim_end_matches('/');
-        let rest = b.strip_prefix("https://").or_else(|| b.strip_prefix("http://"))?;
-        (!rest.is_empty() && !rest.contains(char::is_whitespace)).then(|| b.to_string())
-    }
-}
 
 #[derive(Deserialize)]
 pub struct ShareIn {

@@ -11,6 +11,20 @@ use sqlx::SqlitePool;
 use std::collections::HashSet;
 use std::panic::Location;
 
+/// config／projection 的組裝側 adapter（P2，crate 拆分第 3 步）；檔案放在 `daemon/src/app_ports_p2.rs`，不碰 `lib.rs`。
+#[path = "app_ports_p2.rs"]
+mod app_ports_p2;
+
+/// 投影對 AGM 自己的 bot／專案（`supervisor_owned`）的窄介面：讀「哪些列是 AGM 的」與推一則 `ops_alert`。
+/// 實作在 `SqlitePool` 上（repo context），委派在 `app_ports_p2.rs`，projection 不直接呼叫 supervisor。
+#[allow(async_fn_in_trait)]
+pub trait SupervisorOwnedSource {
+    /// `supervisor_owned::load`。
+    async fn load_owned(&self) -> Result<crate::supervisor_owned::Owned>;
+    /// `supervisor_owned::alert`：推 `ops_alert` 給巡檢（同一批同一小時收斂成一則）。
+    async fn ops_alert(&self, reason: &str, subject: &str, detail: &str);
+}
+
 pub fn new_token() -> String {
     let mut rng = rand::thread_rng();
     (0..32).map(|_| std::char::from_digit(rng.gen_range(0..16), 16).unwrap()).collect()
@@ -349,7 +363,7 @@ where
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
-    let owned = crate::supervisor_owned::load(pool).await?;
+    let owned = pool.load_owned().await?;
     let recent = recently_removed_bots(pool).await?;
     let out = store
         .update_guarded_at(at, f, |next| {
@@ -403,7 +417,7 @@ async fn project_inner(
     let db_bots: Vec<db::Bot> =
         db::live_bots(pool).await?.into_iter().filter(|b| b.managed_by == "user").collect();
     let db_projects = db::live_projects(pool).await?;
-    let owned = if allow.is_none() { crate::supervisor_owned::load(pool).await? } else { Default::default() };
+    let owned = if allow.is_none() { pool.load_owned().await? } else { Default::default() };
     let recent = if allow.is_none() { recently_removed_bots(pool).await? } else { 0 };
     let changed = store
         .update_guarded_at(
@@ -632,8 +646,7 @@ async fn alert_on_refusal(pool: &SqlitePool, e: &anyhow::Error) {
     let reason = if r.supervisor_children.is_empty() { "projection_removal_refused" } else { "supervisor_bot_removal_refused" };
     // dedupe 的 subject＝這次要被拿掉的那幾顆（review d77434c0 #4）：換一批 bot 就是另一則，同一批連續投影才收斂。
     let subject = if r.supervisor_children.is_empty() { r.bots.join("+") } else { r.supervisor_children.join("+") };
-    crate::supervisor_owned::alert(pool, reason, &subject, &format!("{}（呼叫端：{}）", r.detail, crate::config_audit::http_caller()))
-        .await;
+    pool.ops_alert(reason, &subject, &format!("{}（呼叫端：{}）", r.detail, crate::config_audit::http_caller())).await;
 }
 
 /// 大量軟刪閘門的純判斷（2026-09-14 事故）：`next` 的活列相對於 DB 快照，是不是「config 空了但 DB 還有列」
@@ -724,7 +737,7 @@ async fn guard_removals(
         return Err(anyhow::Error::new(DeleteRefused(detail)));
     }
 
-    let owned = crate::supervisor_owned::load(pool).await?;
+    let owned = pool.load_owned().await?;
     let recent = recently_removed_bots(pool).await?;
     match bulk_removal_check(&db_bots, &db_projects, live_projects, live_bots, &owned, recent) {
         Ok(()) => Ok(()),

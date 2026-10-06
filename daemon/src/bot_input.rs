@@ -12,10 +12,7 @@ const MAX_ENV_VALUE_BYTES: usize = 8 * 1024;
 const MAX_MODEL_BYTES: usize = 128;
 const MAX_LABEL_CHARS: usize = 64;
 
-/// 看不見或會改變顯示方向的字元：零寬、方向控制、BOM。放進名稱或標籤，畫面上看起來一樣、實際是另一個字串（或把後面的字倒過來）。
-pub fn is_invisible_format_char(c: char) -> bool {
-    matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
-}
+pub use crate::config::is_invisible_format_char;
 
 /// model 會原樣進 `--model <值>`／`-m <值>`：開頭是 `-` 的值會被 CLI 當成旗標，空白或控制字元會把一個值拆成好幾個 argv。
 pub fn check_model(model: &str) -> Result<(), LcError> {
