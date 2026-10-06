@@ -11,6 +11,10 @@
 //! - `Err(_)`：DB 寫不進去。狀態沒變；不做後續不可逆的動作，錯誤往上傳。外面的副作用已經發生的，
 //!   用 [`schedule_settle`] 排重試，讓狀態照證據收斂，不留一顆永遠卡住的 run。
 
+#[path = "../app_ports_p4state.rs"]
+pub(crate) mod app_ports_p4state;
+
+use am_ports::{BotLock, EventSink};
 use super::*;
 
 /// active run 的三個狀態（`db::active_run` 與 active-run 唯一索引的定義）。
@@ -172,26 +176,28 @@ pub(crate) async fn settle_once(app: &Arc<App>, run_id: &str, how: &Settle) -> b
     match how {
         Settle::Reconcile { .. } => {
             let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { return false };
-            if let Err(e) = crate::reconcile::reconcile_host(app, &host).await {
+            if let Err(e) = app_ports_p4state::reconcile_host(app, &host).await {
                 tracing::warn!(run = run_id, host, error = %e, "reconcile retry failed");
             }
         }
-        Settle::FinishStop => super::finish_stop(app, run_id).await,
+        Settle::FinishStop => {
+            app_ports_p4state::finish_stop(app, run_id).await;
+        }
         Settle::BackToRunning => {
-            let lock = app.bot_lock(&run.bot_id).await;
-            let _g = lock.lock().await;
+            let bot_lock = app_ports_p4state::AppBotLock::new(app);
+            let _g = bot_lock.lock_bot(&run.bot_id).await;
             if transition(&app.db, run_id, &["stopping"], "running", None).await.is_ok() {
-                app.emit_bot_status(&run.bot_id).await;
+                let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&run.bot_id).await;
             }
         }
         // CAS 輸了（已經不是 `from`、或 bot 有了新的 active run）也算收斂：這一筆已經沒有要改的標籤。
         Settle::Relabel { from, to } => {
-            let lock = app.bot_lock(&run.bot_id).await;
-            let _g = lock.lock().await;
+            let bot_lock = app_ports_p4state::AppBotLock::new(app);
+            let _g = bot_lock.lock_bot(&run.bot_id).await;
             return match relabel(&app.db, run_id, from, to).await {
                 Ok(Moved::Applied) => {
                     tracing::info!(run = run_id, from, to, "a run's terminal label is now recorded");
-                    app.emit_bot_status(&run.bot_id).await;
+                    let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&run.bot_id).await;
                     true
                 }
                 Ok(Moved::Lost) => true,

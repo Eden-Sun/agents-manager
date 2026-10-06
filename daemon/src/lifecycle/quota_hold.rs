@@ -31,6 +31,7 @@
 //! 圍籬做完：記憶體照擋，很快再寫一次。回填讀不到就不算回填過，回填時**憑據解不開**的那顆 bot 也不算
 //! （issue #522）——它的撞限沒被種回記憶體，「記憶體說不擋」對它不是證據，照舊問那一列自己的憑據。
 
+use super::run_state::app_ports_p4state;
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -66,7 +67,7 @@ impl Held {
             at: hit.at.clone(),
             bucket: hit.bucket.clone(),
             held_at: db::now(),
-            boot: app.boot_id.clone(),
+            boot: app_ports_p4state::boot_id(app),
         }
     }
 
@@ -100,7 +101,7 @@ fn unverified(bot: &db::Bot, e: &anyhow::Error) -> crate::quota::LimitHit {
 /// 而這一列帶著**上一輪開機**的憑據、這台主機的開機回填還沒跑完（重啟後記憶體是空的）時不算數，改看憑據。
 /// 任何一步讀不到都照擋（[`unverified`]），不當作「沒撞限」。
 pub(crate) async fn blocking_hit(app: &Arc<App>, bot: &db::Bot, turn_id: &str) -> Option<crate::quota::LimitHit> {
-    match crate::quota::try_limit_hit_for_bot(app, bot).await {
+    match app_ports_p4state::try_limit_hit_for_bot(app, bot).await {
         Ok(Some(hit)) => {
             // 這一輪靠記憶體擋著，憑據卻沒落地：圍籬還沒做完，很快再寫一次（`arm_queue_retry` 留較早的那個 timer）。
             // 寫成之前 daemon 重啟的話，只剩撞限當下蓋上的那一份（`stamp_queued`）。
@@ -139,18 +140,18 @@ async fn held_on_turn(app: &Arc<App>, bot: &db::Bot, turn_id: &str) -> anyhow::R
     let raw: Option<Option<String>> = sqlx::query_scalar("SELECT quota_hold FROM turns WHERE id=?").bind(turn_id).fetch_optional(&app.db).await?;
     let Some(raw) = raw.flatten() else { return Ok(None) };
     let held: Held = serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("the quota hold on turn {turn_id} is unreadable: {e}"))?;
-    if held.boot == app.boot_id || !still_holds(app, bot, &held).await? {
+    if held.boot == app_ports_p4state::boot_id(app) || !still_holds(app, bot, &held).await? {
         return Ok(None);
     }
     let hit = held.hit();
-    let model = crate::quota::running_model(app, bot).await;
+    let model = app_ports_p4state::running_model(app, bot).await;
     Ok(crate::quota::limit_hit_blocks_model(&hit, model.as_deref()).then_some(hit))
 }
 
 /// 憑據還算數：身分沒換、還沒到期、寫下之後同一把 key 沒有被成功回合清過撞限。身分是這顆 bot 現在實際跑的那個
 /// （[`crate::quota::billing_identity`]，issue #238）；讀不到回錯（呼叫端照擋）。
 async fn still_holds(app: &Arc<App>, bot: &db::Bot, held: &Held) -> anyhow::Result<bool> {
-    if held.identity != crate::quota::billing_identity(app, bot).await? || crate::quota::limit_hit_expired(Some(&held.hit())) {
+    if held.identity != app_ports_p4state::billing_identity(app, bot).await? || crate::quota::limit_hit_expired(Some(&held.hit())) {
         return Ok(false);
     }
     // 寫下之後這個主機名改指到另一台（#347）：那是另一台機器上的帳號，撞限不跟過去。主機不在設定裡不算「換了」——
@@ -162,7 +163,7 @@ async fn still_holds(app: &Arc<App>, bot: &db::Bot, held: &Held) -> anyhow::Resu
         }
     }
     Ok(match chrono::DateTime::parse_from_rfc3339(&held.held_at) {
-        Ok(t) => !crate::quota::limit_cleared_since(app, bot, t.with_timezone(&chrono::Utc)).await,
+        Ok(t) => !app_ports_p4state::limit_cleared_since(app, bot, t.with_timezone(&chrono::Utc)).await,
         Err(_) => true,
     })
 }
@@ -170,16 +171,11 @@ async fn still_holds(app: &Arc<App>, bot: &db::Bot, held: &Held) -> anyhow::Resu
 /// 這個主機名**現在**指到哪台機器：本機是 `local`；遠端是 ssh 目標、port、herdr session（同 `api::repoints_host` 認的三項）。
 /// 不在設定裡回 `None`。
 async fn host_target(app: &App, host: &str) -> Option<String> {
-    if host == crate::config::LOCAL_HOST {
-        return Some(host.to_string());
-    }
-    let conn = app.hosts.get(host).await?;
-    let cfg = conn.cfg.as_ref()?;
-    Some(format!("{}:{}/{}", cfg.ssh, cfg.ssh_port, cfg.herdr_session))
+    app_ports_p4state::host_target(app, host).await
 }
 
 async fn remember(app: &Arc<App>, turn_id: &str, bot: &db::Bot, hit: &crate::quota::LimitHit) -> anyhow::Result<()> {
-    let identity = crate::quota::billing_identity(app, bot).await?;
+    let identity = app_ports_p4state::billing_identity(app, bot).await?;
     let target = host_target(app, &db::bot_host(&app.db, &bot.id).await?).await;
     let json = serde_json::to_string(&Held::new(app, identity.as_deref(), target, hit))?;
     sqlx::query("UPDATE turns SET quota_hold=? WHERE id=? AND status='queued'").bind(&json).bind(turn_id).execute(&app.db).await?;
@@ -219,7 +215,7 @@ fn backfill_state() -> &'static Mutex<HashMap<String, bool>> {
 }
 
 fn backfill_key(app: &App, host: &str) -> String {
-    format!("{}\u{0}{host}", app.boot_id)
+    format!("{}\u{0}{host}", app_ports_p4state::boot_id(app))
 }
 
 /// 回填時憑據解不開的 bot（鍵同樣帶 `boot_id`）：對它們而言「這台回填完了」不成立，`blocking_hit` 照舊
@@ -320,12 +316,12 @@ async fn backfill(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<String>> {
             }
         };
         woken.push(bot.id.clone());
-        if held.boot == app.boot_id || !still_holds(app, &bot, &held).await? {
+        if held.boot == app_ports_p4state::boot_id(app) || !still_holds(app, &bot, &held).await? {
             continue;
         }
         // 種回撞到的那個帳號（憑據上記的身分；`still_holds` 已經確認它就是這顆 bot 現在實際跑的，issue #238）。
-        let base = crate::quota::quota_base_for_host(app, host, &bot.kind, held.identity.as_deref()).await;
-        if crate::quota::restore_limit_hit(app, host, &base, held.hit()).await {
+        let base = app_ports_p4state::quota_base_for_host(app, host, &bot.kind, held.identity.as_deref()).await;
+        if app_ports_p4state::restore_limit_hit(app, host, &base, held.hit()).await {
             tracing::info!(host, bot = %bot.id, until = ?held.until, "重啟回填：排著的 prompt 記下的撞限補回記憶體");
         }
     }

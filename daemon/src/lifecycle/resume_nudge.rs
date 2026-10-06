@@ -30,6 +30,8 @@
 //! （transcript 在那台機器上，這裡讀不到尾巴，跟 `stuck_turns` 一樣只讀本機）。同一個 run 只補一次
 //! （`client_request_id = resume-nudge:<run_id>`）。等待記在這個行程的記憶體裡，daemon 在這段時間重啟就不補。
 
+use super::run_state::app_ports_p4state;
+use am_ports::BotLock;
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -212,8 +214,8 @@ fn schedule(app: &Arc<App>, bot_id: &str, delay: Duration) {
         } else {
             tokio::time::sleep(delay).await;
         }
-        let lock = app.bot_lock(&bot_id).await;
-        let _g = lock.lock().await;
+        let bot_lock = app_ports_p4state::AppBotLock::new(&app);
+        let _g = bot_lock.lock_bot(&bot_id).await;
         check_at(&app, &bot_id, Instant::now()).await;
     });
 }
@@ -333,7 +335,7 @@ async fn transcript_ends_mid_tool(app: &Arc<App>, bot: &db::Bot, run: &db::Run) 
     .await
     .map_err(|e| e.to_string())?;
     let recorded = recorded.ok_or("no transcript path was ever recorded for this session")?;
-    let config = super::start::identity_config_dir(app, &host, bot.identity.as_deref()).await.map_err(|e| e.to_string())?;
+    let config = app_ports_p4state::identity_config_dir(app, &host, bot.identity.as_deref()).await.map_err(|e| e.to_string())?;
     let path = account_transcript(&config, &recorded, &session).ok_or("the recorded transcript path has no cwd directory")?;
     let shown = path.display().to_string();
     let log = tokio::task::spawn_blocking(move || super::transcript_origin::read_tail(&path)).await.ok().flatten();
@@ -351,11 +353,11 @@ async fn queue(app: &Arc<App>, bot: &db::Bot, run_id: &str) -> bool {
     };
     let relay = super::prompt::RelaySrc::trusted(Some(crate::agent_relay::DAEMON_SENDER));
     let crid = format!("{CRID_PREFIX}{run_id}");
-    match super::prompt::queue_for_next_turn(app, &conv, &bot.id, NUDGE_TEXT, NUDGE_TEXT, &crid, None, relay).await {
+    match app_ports_p4state::queue_for_next_turn(app, &conv, &bot.id, NUDGE_TEXT, NUDGE_TEXT, &crid, None, relay).await {
         Ok(out) => {
             tracing::info!(bot = %bot.name, run = run_id, turn = %out.turn_id,
                            "resumed a claude that was killed mid-tool; queued a nudge to continue (2.1.281 no longer adds a hidden Continue)");
-            super::queue::schedule_flush_queued(app, &bot.id);
+            app_ports_p4state::schedule_flush_queued(app, &bot.id);
             true
         }
         Err(e) => {

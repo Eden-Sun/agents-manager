@@ -3,7 +3,9 @@
 //! A retry here only writes the observed snapshot to SQLite. It never sends a slash command or
 //! picker key, and every write stays bound to the run that produced the readback.
 
-use crate::{launch_rev, state::App};
+use super::run_state::app_ports_p4state;
+use am_ports::EventSink;
+use crate::state::App;
 use sqlx::{FromRow, SqlitePool};
 use std::{
     collections::{HashMap, HashSet},
@@ -45,7 +47,7 @@ pub(crate) async fn persist_and_commit(app: &Arc<App>, debt: RuntimeDebt) -> Res
 
     match commit_debt(&app.db, &debt.run_id).await {
         Ok(Some(_)) | Ok(None) => {
-            if let Err(error) = launch_rev::stamp_live_revision(&app.db, &debt.run_id).await {
+            if let Err(error) = app_ports_p4state::stamp_live_revision(&app.db, &debt.run_id).await {
                 tracing::warn!(run_id = %debt.run_id, error = %error, "live runtime was stored; launch revision stamp remains retryable");
                 schedule_retry(app, &debt.run_id);
             }
@@ -135,14 +137,14 @@ pub(crate) async fn retry_once(app: &Arc<App>, run_id: &str) -> Result<bool, sql
 
     let committed = commit_debt(&app.db, run_id).await?;
     if let Some(committed) = committed {
-        launch_rev::stamp_live_revision(&app.db, run_id).await?;
-        app.emit_bot_status(&committed.bot_id).await;
+        app_ports_p4state::stamp_live_revision(&app.db, run_id).await?;
+        let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&committed.bot_id).await;
         return Ok(true);
     }
-    let stamped = launch_rev::stamp_live_revision(&app.db, run_id).await?;
+    let stamped = app_ports_p4state::stamp_live_revision(&app.db, run_id).await?;
     if stamped {
         if let Ok(Some(run)) = crate::db::run(&app.db, run_id).await {
-            app.emit_bot_status(&run.bot_id).await;
+            let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&run.bot_id).await;
         }
     }
     Ok(stamped)
@@ -203,6 +205,7 @@ pub(crate) async fn recover(app: &Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launch_rev;
     use crate::testing as tt;
 
     /// #723：補寫帳時另一個 writer 正拿著寫入鎖（背景重試與手動重試同時跑就是這樣）。先讀後寫的 deferred 交易升級寫鎖時

@@ -16,6 +16,8 @@
 //! 那一句寫不進去時，不回普通的 `failed`／`Ok`，也不讓那一筆停在 in_flight＋pending 沒人收（擋住之後每一則、佔住維護窗口的
 //! 送達臨界區）。記成欠著、照上面同一套補；補的時候同樣從不送。
 
+use super::run_state::app_ports_p4state;
+use am_ports::BotLock;
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -167,8 +169,9 @@ pub(crate) async fn settle_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Resul
 
 /// [`settle_locked`]，自己拿 bot 鎖（定時重試用）。
 async fn settle(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    let bot_lock = app_ports_p4state::AppBotLock::new(app);
+    let bot_key = bot_id.to_string();
+    let _g = bot_lock.lock_bot(&bot_key).await;
     settle_locked(app, bot_id).await
 }
 
@@ -177,33 +180,33 @@ async fn settle(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
 async fn write(app: &Arc<App>, bot_id: &str, o: &Owed) -> anyhow::Result<bool> {
     let applied = match &o.write {
         Write::Delivered { rec, at } => {
-            mark_delivery(app, &o.turn_id, *rec, at).await?;
+            app_ports_p4state::mark_delivery(app, &o.turn_id, *rec, at).await?;
             true
         }
         Write::Closed { delivery, note } => {
             let mut tx = app.db.begin().await?;
-            let out = super::turn_controller::fail_on(&mut tx, &o.turn_id, super::turn_controller::DeliveryOnFail::Keep, note).await?;
+            let out = app_ports_p4state::turn_fail_on(&mut tx, &o.turn_id, super::turn_controller::DeliveryOnFail::Keep, note).await?;
             let applied = out == super::turn_controller::Outcome::Applied;
             let only_pending = if applied { "" } else { " AND delivery='pending'" };
             sqlx::query(&format!("UPDATE turns SET delivery=? WHERE id=?{only_pending}")).bind(*delivery).bind(&o.turn_id).execute(&mut *tx).await?;
             let m = if applied {
                 let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&o.turn_id).fetch_one(&mut *tx).await?;
-                Some(insert_message_tx(&mut tx, &conv, Some(&o.turn_id), "system", note, "system", false, None).await?)
+                Some(app_ports_p4state::insert_message_tx(&mut tx, &conv, Some(&o.turn_id), "system", note, "system", false, None).await?)
             } else {
                 None
             };
             tx.commit().await?;
             if let Some(m) = m {
-                emit_message_added(app, bot_id, m).await;
+                app_ports_p4state::emit_message_added(app, bot_id, m).await;
             }
             applied
         }
         Write::PutBack { conv, reason, wait_key } => {
-            super::queue::put_back(app, bot_id, conv, &o.turn_id, reason, wait_key).await?;
+            app_ports_p4state::queue_put_back(app, bot_id, conv, &o.turn_id, reason, wait_key).await?;
             true
         }
     };
-    emit_turn(app, &o.turn_id).await;
+    app_ports_p4state::emit_turn(app, &o.turn_id).await;
     Ok(applied)
 }
 
