@@ -46,6 +46,7 @@ pub(crate) trait TurnCommands {
     async fn cancel_stall(&self, run_id: &str);
     async fn arm_fallback(&self, run_id: &str, bot_id: &str);
     async fn arm_progress(&self, run_id: &str, bot_id: &str, turn_id: &str);
+    async fn has_progress_poller(&self, run_id: &str) -> bool;
     async fn arm_stall(&self, run_id: &str, bot_id: &str, turn_id: &str);
     async fn begin_external_turn(&self, run: &db::Run);
     /// `mark_run_exited`：結束 run 的唯一寫入；四種結果（記成／早已結束／沒寫進去／欠著的收尾）呼叫端要分得開。
@@ -63,6 +64,9 @@ pub(crate) trait TurnCommands {
     ) -> Result<bool>;
     async fn start_bot(&self, bot_id: &str) -> LcResult<String>;
     async fn start_bot_locked_with(&self, bot_id: &str, opts: StartOpts) -> LcResult<String>;
+    async fn start_bot_locked(&self, bot_id: &str) -> LcResult<String> {
+        self.start_bot_locked_with(bot_id, StartOpts::default()).await
+    }
     async fn resume_after_boot(&self, host: &str) -> usize;
     async fn adopt_unbound_send_nows(&self, boot: &str) -> bool;
     async fn rearm_queue_retries(&self) -> Result<usize>;

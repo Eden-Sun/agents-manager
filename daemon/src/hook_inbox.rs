@@ -25,6 +25,7 @@
 
 use crate::db;
 use crate::hook_body::HookBody;
+use crate::app_ports_r2a9::HookProcessor;
 use crate::state::App;
 use anyhow::Result;
 use sqlx::SqlitePool;
@@ -332,7 +333,7 @@ pub async fn drain_once(app: &Arc<App>) -> Result<usize> {
         let batch = rows.len();
         for row in rows {
             match serde_json::from_str::<HookBody>(&row.body_json) {
-                Ok(body) => match crate::hookrecv::process_for(app, &body, Some(&row.id)).await {
+                Ok(body) => match app.process_hook(&body, Some(&row.id)).await {
                     Ok(()) => {
                         mark_done(&app.db, &row.id).await?;
                         done += 1;

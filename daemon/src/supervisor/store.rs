@@ -2805,19 +2805,7 @@ pub async fn decide_approval_from(
 }
 
 
-/// 一筆 append-only 的稽核紀錄。強制釋放這種「可以做、但要留下是誰為什麼」的動作走這裡。
-pub async fn add_note(pool: &SqlitePool, kind: &str, body: &Value) -> Result<String> {
-    let id = crate::db::ulid();
-    sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
-        .bind(&id)
-        .bind(SUPERVISOR_ID)
-        .bind(kind)
-        .bind(body.to_string())
-        .bind(crate::db::now())
-        .execute(pool)
-        .await?;
-    Ok(id)
-}
+pub use crate::supervisor_inbox::add_note;
 
 /// 每筆核准的決定歷程，最舊在前。一次查完再分組：核准筆數不多，但一筆一次查詢會變 N+1。
 pub async fn approval_decisions(pool: &SqlitePool) -> Result<std::collections::HashMap<String, Vec<Value>>> {

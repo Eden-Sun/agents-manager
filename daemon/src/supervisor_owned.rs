@@ -77,7 +77,7 @@ pub async fn alert(pool: &SqlitePool, reason: &str, subject: &str, detail: &str)
         "detail": detail,
         "action": "有東西要刪 AGM 的 bot，daemon 已擋下、什麼都沒刪：查 detail 裡的呼叫端與 config.toml 寫入紀錄（daemon.log 搜 `config.toml written`），確認是不是該刪；真的要刪就 `agm bot delete <id> --confirm-supervisor`",
     });
-    match crate::supervisor::store::push_inbox(pool, &key, "ops_alert", None, None, None, &payload).await {
+    match crate::supervisor_inbox::push_inbox(pool, &key, "ops_alert", None, None, None, &payload).await {
         Ok(_) => tracing::warn!(reason, subject, detail, "refused to delete an AGM bot; ops_alert queued"),
         Err(e) => tracing::error!(reason, subject, detail, error = %e, "refused to delete an AGM bot; ops_alert could not be queued"),
     }

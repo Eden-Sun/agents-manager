@@ -132,7 +132,7 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         return Ok(());
     }
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("autostart_revive_before_start", &l.bot_id).await;
+    crate::race_point::hit("autostart_revive_before_start", &l.bot_id).await;
 
     let lock = app.bot_lock(&l.bot_id).await;
     let guard = lock.lock_owned().await;
@@ -148,7 +148,7 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         let (start_app, bot_id) = (app.clone(), bot.id.clone());
         match tokio::spawn(async move {
             let _guard = guard;
-            start_app.start_bot_locked_with(&bot_id, crate::lifecycle::StartOpts::default()).await
+            start_app.start_bot_locked(&bot_id).await
         })
         .await
         {

@@ -17,6 +17,7 @@ mod build_scheduler;
 mod exec_retry;
 mod cargo_shim;
 mod agent_relay;
+mod app_ports_r2a9;
 mod api;
 #[cfg(test)]
 mod bot_read_scope_tests;

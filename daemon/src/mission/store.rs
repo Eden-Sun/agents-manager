@@ -1254,13 +1254,7 @@ fn round_is_due(s: &Snapshot) -> bool {
     }
 }
 
-pub async fn disabled_identities(pool: &SqlitePool, host: &str, kind: &str) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar("SELECT identity FROM identity_prefs WHERE host = ? AND kind = ? AND disabled = 1")
-        .bind(host)
-        .bind(kind)
-        .fetch_all(pool)
-        .await?)
-}
+pub use crate::db::disabled_identities;
 
 pub async fn set_identity_disabled(pool: &SqlitePool, host: &str, kind: &str, identity: &str, disabled: bool) -> Result<()> {
     sqlx::query(

@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use crate::app_ports_r2a9::OwedLimitHitProbe;
 
 #[path = "app_ports_p9.rs"]
 pub(crate) mod app_ports_p9;
@@ -192,7 +193,7 @@ pub async fn running_model(app: &impl crate::capabilities::Db, bot: &crate::db::
 /// 就被放行。撞限記不進正確那把 key 而欠著的那一筆（`turn_error::owed_limit_hit`）先算。
 pub async fn try_limit_hit_for_bot(app: &Arc<App>, bot: &crate::db::Bot) -> Result<Option<LimitHit>> {
     let identity = billing_identity(app, bot).await?;
-    if let Some(hit) = crate::turn_error::owed_limit_hit(app, bot, identity.as_deref()).await {
+    if let Some(hit) = app.owed_limit_hit(bot, identity.as_deref()).await {
         return Ok(Some(hit));
     }
     let host = crate::db::bot_host(&app.db, &bot.id).await?;
@@ -1466,7 +1467,7 @@ pub async fn refresh_codex_from_panes(app: &Arc<App>, host: &str) -> usize {
         let status = crate::codex_live::CodexStatusQuota { five_hour_left: five.map(|u| 100.0 - u), weekly_left: weekly.map(|u| 100.0 - u) };
         let Some(q) = quota_from_codex_status(&status, identity.as_deref()) else { continue };
         #[cfg(test)]
-        crate::lifecycle::race_point::hit("codex_panes_before_set", host).await;
+        crate::race_point::hit("codex_panes_before_set", host).await;
         if let Err(e) = set_fenced(app, host, &base, q, &fence).await {
             tracing::debug!(host, error = %e, "codex statusline quota: host superseded; dropping this round");
             break;

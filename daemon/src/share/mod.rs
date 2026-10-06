@@ -21,9 +21,7 @@ pub(crate) mod svg_check;
 #[cfg(test)]
 mod tests;
 
-/// 分享頁 end user 送進來的訊息記在 `messages.relay_from` 的哨符（跟 `daemon` 同一類：不是 bot id）。
-/// 輸出時 `source` 改報 `share`（`db::Message` 的序列化），UI 標「🔗 分享使用者」。
-pub(crate) const SHARE_SENDER: &str = "share";
+pub(crate) use crate::agent_relay::SHARE_SENDER;
 
 /// daemon 開機時替每顆分享用 bot 的 outbox 補上不清的標記（`outbox-gc.sh` 看它）：開機前就在跑、這次沒重起的那幾顆也算。
 /// 遠端的不管（分享用 bot 只給本機）。讀不到就記 warning，下次啟動那顆 bot 時 `cage::prepare` 會補。
@@ -86,8 +84,4 @@ pub(crate) async fn guards_from_bot_principal(db: &sqlx::SqlitePool, method: &st
     }
 }
 
-/// 受限 bot 的 hook token 只用來打自己的 hook（信任分享不算）：其他任何拿 bot 身分進來的路一律擋。讀不到 DB 也擋（fail closed）。
-pub(crate) async fn refuses_bot_principal(db: &sqlx::SqlitePool, bot_id: &str) -> bool {
-    // 信任分享（trusted）是一般 bot 的權限：bot 身分照常能用；只有受限的關在籠子裡。
-    !matches!(store::is_caged(db, bot_id).await, Ok(false))
-}
+pub(crate) use crate::db::refuses_bot_principal;

@@ -866,7 +866,7 @@ pub async fn refresh_claude(app: &Arc<App>, host: &str) -> Result<bool> {
     // DB-backed so a daemon restart doesn't lose the proof.
     let live = crate::db::live_identities_on_host(&app.db, host).await.unwrap_or_default();
     // 停用的身份不上額度條（使用者 2026-09-16），所以也不必再花探測去問它。
-    let off = crate::mission::store::disabled_identities(&app.db, host, "claude").await.unwrap_or_default();
+    let off = crate::db::disabled_identities(&app.db, host, "claude").await.unwrap_or_default();
     let unnamed_running = unnamed_claude_running(app, host).await;
     let statusline_keys: std::collections::BTreeSet<String> =
         app.quotas.lock().await.iter().filter(|(_, q)| q.source == "statusline").map(|(k, _)| k.clone()).collect();

@@ -1,3 +1,5 @@
+#![allow(async_fn_in_trait)]
+
 //! `POST /api/bots/{id}/prompt` 的 `relay_from` 是來源標記，不是 principal（issue #339、#556）。
 //!
 //! `/api` 認證中介層先選定 User（共用 UI token）、Bot（成對 Bot headers）或 service principal。
@@ -34,6 +36,16 @@ use serde_json::json;
 
 use crate::lc_error::LcError;
 
+/// 驗證 token 需要的常數時間比較能力。
+pub trait RelayTokenVerify: Send + Sync {
+    fn ct_eq(&self, a: &str, b: &str) -> bool;
+}
+
+/// 驗證 mission 端點 relay 身分需要的 AGM 角色檢查能力。
+pub trait RelayAuthOps: RelayTokenVerify {
+    async fn is_agm_role(&self, headers: &HeaderMap) -> Result<bool, LcError>;
+}
+
 /// 驗過之後的來源（bot id）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relay {
@@ -43,7 +55,7 @@ pub struct Relay {
 /// 省略 effective claim＝`Ok(None)`（User principal 本人）。Bot route handlers derive an omitted claim from the authenticated header first.
 /// `target` 是這一則要送給誰（`POST /api/bots/{id}` 的 id）。
 pub async fn authenticate(
-    app: &(impl crate::capabilities::Db + crate::mission::ports::CallerOps),
+    app: &(impl crate::capabilities::Db + RelayTokenVerify),
     headers: &HeaderMap,
     claimed: Option<&str>,
     target: &str,
@@ -80,7 +92,7 @@ enum Proof {
 
 /// 一顆 bot 的 id 配上 `X-AM-Bot-Token`：`/prompt` 與 mission 端點共用的那一段（issue #409）。
 /// `claimed` 已 trim、非空、不是 `daemon`。
-async fn prove_bot(app: &(impl crate::capabilities::Db + crate::mission::ports::CallerOps), headers: &HeaderMap, claimed: &str) -> Result<Proof, LcError> {
+async fn prove_bot(app: &(impl crate::capabilities::Db + RelayTokenVerify), headers: &HeaderMap, claimed: &str) -> Result<Proof, LcError> {
     // A Bot principal (the `/api` middleware already proved `X-AM-Bot-Id` + its token) may only
     // claim itself. Compared by id, not only by token, so the rule does not lean on tokens being
     // unique (issue #556: relay_from never overrides the authenticated identity).
@@ -135,11 +147,11 @@ fn mismatch() -> LcError {
 ///
 /// 沒有相容期：唯一帶 `relay_from` 的呼叫端是 `bin/agm`，它在角色自己的 pane 裡一律帶那顆的 token
 /// （`scripts/agm.py` `bot_auth_headers`）；web 從不帶。照收就得在 `mission_events` 另記「未驗證」。
-pub async fn authenticate_mission(app: &(impl crate::capabilities::Db + crate::mission::ports::CallerOps), headers: &HeaderMap, claimed: Option<&str>) -> Result<Option<String>, LcError> {
+pub async fn authenticate_mission(app: &(impl crate::capabilities::Db + RelayAuthOps), headers: &HeaderMap, claimed: Option<&str>) -> Result<Option<String>, LcError> {
     let Some(claimed) = claimed.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
     if claimed == crate::agent_relay::DAEMON_SENDER {
         // API middleware already rejected invalid Bot proof with 401; here `None` means a valid Bot that is not an AGM role.
-        if app.actor_role(headers).await?.is_some() {
+        if app.is_agm_role(headers).await? {
             return Ok(Some(claimed.to_string()));
         }
         return Err(LcError::Forbidden(json!({

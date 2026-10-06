@@ -119,6 +119,16 @@ pub mod race_point {
     }
 }
 
+/// Derives the authenticated caller's AGM role name (if any).
+pub async fn actor_role_name(
+    app: &Arc<App>,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<&'static str>, crate::lc_error::LcError> {
+    crate::supervisor::bot_requests::actor_role(app, headers)
+        .await
+        .map(|opt| opt.map(|r| r.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

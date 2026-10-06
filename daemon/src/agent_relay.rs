@@ -5,6 +5,9 @@
 /// daemon 自發訊息的 `relay_from` 哨符（`NULL` 只代表使用者）；launchd 例行腳本送進總管的話也用它。
 pub const DAEMON_SENDER: &str = "daemon";
 
+/// 分享頁面來源的 `relay_from` 哨符。
+pub const SHARE_SENDER: &str = "share";
+
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 

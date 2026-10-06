@@ -10,7 +10,6 @@
 
 use crate::lc_error::LcError;
 use crate::state::App;
-use crate::supervisor::store;
 use anyhow::Result;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -75,7 +74,7 @@ async fn close(app: &Arc<App>, w: &Window, kind: &str, actor: &str, reason: Opti
         return Ok(vec![]); // 別人先關了
     }
     let retired = retire_unreturned_children(app, &w.opened_at).await?;
-    store::add_note(
+    crate::supervisor_inbox::add_note(
         &app.db,
         kind,
         &json!({"opened_at": w.opened_at, "until": w.until, "opened_by": w.opened_by, "closed_by": actor,
@@ -192,7 +191,7 @@ pub async fn get(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
 }
 
 pub async fn open(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<Json<OpenIn>>) -> Result<Json<Value>, LcError> {
-    let role = crate::supervisor::bot_requests::actor_role(&app, &headers).await?.ok_or_else(forbidden)?;
+    let role = app_ports_p12::actor_role_name(&app, &headers).await?.ok_or_else(forbidden)?;
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let minutes = b.minutes.unwrap_or(MAX_MINUTES);
     if !(1..=MAX_MINUTES).contains(&minutes) {
@@ -202,7 +201,7 @@ pub async fn open(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<
     if let Some(w) = active(&app).await.map_err(up)? {
         return Err(LcError::conflict("herdr maintenance is already open", json!({"window": w})));
     }
-    let Some(w) = open_as(&app, minutes, role.as_str(), reason).await.map_err(up)? else {
+    let Some(w) = open_as(&app, minutes, role, reason).await.map_err(up)? else {
         return Err(LcError::conflict("herdr maintenance is already open", json!({})));
     };
     Ok(Json(json!({"active": true, "window": w})))
@@ -223,7 +222,7 @@ pub async fn open_as(app: &Arc<App>, minutes: i64, actor: &str, reason: &str) ->
     if inserted == 0 {
         return Ok(None);
     }
-    store::add_note(&app.db, "herdr_maintenance_start", &json!({"opened_at": opened_at, "until": until, "opened_by": actor, "reason": reason})).await?;
+    crate::supervisor_inbox::add_note(&app.db, "herdr_maintenance_start", &json!({"opened_at": opened_at, "until": until, "opened_by": actor, "reason": reason})).await?;
     arm_expiry(app, &until);
     tracing::info!(actor, until, reason, "herdr maintenance opened");
     row(&app.db).await
@@ -235,18 +234,19 @@ pub async fn close_as(app: &Arc<App>, w: &Window, actor: &str, reason: Option<&s
 }
 
 pub async fn end(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<Json<CloseIn>>) -> Result<Json<Value>, LcError> {
-    let role = crate::supervisor::bot_requests::actor_role(&app, &headers).await?.ok_or_else(forbidden)?;
+    let role = app_ports_p12::actor_role_name(&app, &headers).await?.ok_or_else(forbidden)?;
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let Some(w) = active(&app).await.map_err(up)? else {
         return Ok(Json(json!({"active": false, "closed": false})));
     };
-    let retired = close(&app, &w, "herdr_maintenance_end", role.as_str(), b.reason.as_deref()).await.map_err(up)?;
+    let retired = close(&app, &w, "herdr_maintenance_end", role, b.reason.as_deref()).await.map_err(up)?;
     Ok(Json(json!({"active": false, "closed": true, "retired_children": retired})))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supervisor::store;
     use crate::testing as tt;
 
     async fn agm_headers(app: &Arc<App>) -> HeaderMap {
