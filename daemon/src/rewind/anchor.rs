@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::db;
-use crate::lifecycle::pasted_content;
+use crate::pasted_content;
 
 use super::{same_first_line, squash};
 

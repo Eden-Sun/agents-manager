@@ -5,7 +5,7 @@
 //! 早就結束了。使用者只好手動打一句「你 child 又問了，回答他阿」。
 //!
 //! 所以：child 轉成 `blocked` 並且**穩定**幾秒之後，daemon 用 `relay_from = <child bot id>` 送一則
-//! 進父 agent 的對話。走既有的 [`crate::lifecycle::prompt_relayed_queueable`]：父 agent 正在回合中
+//! 進父 agent 的對話。走既有的 [`crate::events::ports::TurnCommands::prompt_relayed_queueable`]：父 agent 正在回合中
 //! 就排隊，不插隊、不打斷。
 //!
 //! 幾條「不吵人」的界線：
@@ -428,7 +428,7 @@ pub async fn deliver(
     child_id: &str,
     child_name: &str,
     question: &str,
-) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
+) -> crate::lc_error::LcResult<crate::lc_error::PromptOut> {
     deliver_attempt(app, parent_id, child_id, child_name, question, 0).await
 }
 
@@ -440,7 +440,7 @@ async fn deliver_attempt(
     child_name: &str,
     question: &str,
     attempt: u32,
-) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
+) -> crate::lc_error::LcResult<crate::lc_error::PromptOut> {
     let crid = attempt_crid(&crid_base(child_id, question), attempt);
     app.prompt_relayed_queueable(parent_id, &message_for(child_name, question), &crid, Some(child_id)).await
 }
@@ -510,7 +510,7 @@ async fn last_sent(app: &impl crate::capabilities::Db, parent_id: &str, base: &s
           ORDER BY t.created_at DESC, t.rowid DESC
           LIMIT 1",
     )
-    .bind(crate::lifecycle::daemon_notice::WITHDRAWN_WHY)
+    .bind(crate::daemon_notice::WITHDRAWN_WHY)
     .bind(&conv)
     .bind(base)
     .bind(retry_prefix.chars().count() as i64)

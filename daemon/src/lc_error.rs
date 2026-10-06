@@ -98,3 +98,12 @@ pub enum RunExit {
     /// （`interruption` 的帳：定時重試、這顆 bot 的下一則 hook／prompt；daemon 重啟則由 `rearm_progress` 補收）。
     TurnOwed,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PromptOut {
+    pub turn_id: String,
+    pub message_id: String,
+    pub delivery: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_now: Option<&'static str>,
+}

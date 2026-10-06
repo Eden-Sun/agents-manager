@@ -309,7 +309,7 @@ pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hos
     };
     #[cfg(test)]
     if let Some((id, _, _, _)) = rows.first() {
-        crate::lifecycle::race_point::hit("attachment_sweep_after_candidates", id).await;
+        crate::race_point::hit("attachment_sweep_after_candidates", id).await;
     }
     let mut swept = 0;
     for (id, local_path, agent_path, host_name) in rows {

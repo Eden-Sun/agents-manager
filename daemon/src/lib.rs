@@ -60,7 +60,14 @@ mod capabilities;
 mod app_ports_p10;
 mod app_ports_p3;
 mod app_ports_p5;
+mod app_ports_r2a8;
+pub mod composer_parse;
+pub mod daemon_notice;
 mod grok_live;
+pub mod hook_body;
+pub mod pasted_content;
+#[cfg(test)]
+pub mod race_point;
 mod codex_model_migration;
 use am_config as config;
 mod config_audit;

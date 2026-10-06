@@ -331,17 +331,7 @@ pub(super) async fn answer_for_turn_id(app: &impl crate::capabilities::Db, turn_
     answer_for_turn(app, &t).await
 }
 
-#[derive(Debug, serde::Serialize)]
-pub struct PromptOut {
-    pub turn_id: String,
-    pub message_id: String,
-    pub delivery: String,
-    /// 只有請求帶 `send_now` 時才有（issue #103）。`"interrupted"`＝真的打斷了一個進行中的回合並按了
-    /// send-now 鍵；`"steered"`＝codex（#748）把字打進忙碌的 TUI、併進同一個進行中的回合（沒有打斷，`turn_id` 是被 steer 的那一回合）；`"idle"`＝當下沒有回合在飛，照一般 Enter 送出，不需要插隊；其他值是
-    /// [`send_now::Refusal::code`]，也就是**沒有**插隊的原因。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub send_now: Option<&'static str>,
-}
+pub use crate::lc_error::PromptOut;
 
 /// 插隊送出成功時，被打斷的那一回合會收到的系統說明。
 pub(crate) const SEND_NOW_NOTE: &str = "被插隊送出打斷（claude send-now）";

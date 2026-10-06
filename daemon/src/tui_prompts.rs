@@ -14,7 +14,6 @@ use am_ports::RunPaneReader;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use crate::lifecycle::app_ports_p4::shows_login_problem;
 
 const SWEEP: Duration = Duration::from_secs(10);
 
@@ -886,7 +885,7 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
     }
     tracing::info!(run = %run.id, bot = %run.bot_id, "claude 滿意度問卷：自動選 0（Dismiss）");
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("survey_before_first_key", &run.id).await;
+    crate::race_point::hit("survey_before_first_key", &run.id).await;
     // The classification read only authorizes this exact pane revision and content, under the
     // same run/session authority. There is no conditional send_keys CAS in Herdr yet.
     let still_current = survey_target_is_current(app, &target).await;
@@ -902,14 +901,14 @@ pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capa
         return false;
     }
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("survey_after_zero", &run.id).await;
+    crate::race_point::hit("survey_after_zero", &run.id).await;
     tokio::time::sleep(SETTLE).await;
     // The post-0 read is a new authorization basis for versions that also need Enter.
     if survey_target_is_current(app, &target).await {
         if let Some(second_stage) = read_actionable_survey(&target, None).await {
             app.survey_revisions().lock().await.insert(run.id.clone(), second_stage.revision);
             #[cfg(test)]
-            crate::lifecycle::race_point::hit("survey_before_enter", &run.id).await;
+            crate::race_point::hit("survey_before_enter", &run.id).await;
             let still_current = survey_target_is_current(app, &target).await;
             let final_read = if still_current {
                 read_actionable_survey(&target, Some(&second_stage)).await
