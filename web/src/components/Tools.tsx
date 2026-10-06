@@ -4,14 +4,21 @@ import type { BotKind, ToolMap } from '../api/types'
 import { BOT_KINDS } from '../api/types'
 import { useMenuKeys } from '../hooks/useMenuKeys'
 import { missingTools, projectHostName, runningBotsOnHost, useStore } from '../store/store'
+import { AgyInstallButton } from './AgyInstall'
 import { KindTag } from './KindTag'
+import { KIND_LABEL } from './kindMeta'
 import './tools.css'
 
 import { hostLabel, relevantMissing } from './toolsHelpers'
 /** v4.0 agent-CLI detection and "install via a running bot": the daemon prompts that bot to install + log in inside its own pane. */
 
-/** The install button: picks a running bot on that host. */
+/** agy 由 daemon 直接裝（官方 manifest ＋ sha512）；其他 CLI 請那台上一顆在跑的 bot 裝。 */
 export function InstallToolButton({ host, kind, small }: { host: string; kind: BotKind; small?: boolean }) {
+  return kind === 'agy' ? <AgyInstallButton host={host} small={small} /> : <InstallViaBotButton host={host} kind={kind} small={small} />
+}
+
+/** The install button: picks a running bot on that host. */
+function InstallViaBotButton({ host, kind, small }: { host: string; kind: BotKind; small?: boolean }) {
   const candidates = useStore(useShallow((s) => runningBotsOnHost(s, host)))
   const busy = useStore((s) => Boolean(s.busy[`install:${host}:${kind}`]))
   const installTool = useStore((s) => s.installTool)
@@ -118,7 +125,7 @@ function summarizeMissing(byHost: Map<string, BotKind[]>): string {
   const entries = [...byHost.entries()]
   if (entries.length === 1 && entries[0][1].length === 1) {
     const [host, kinds] = entries[0]
-    const kindLabel = kinds[0] === 'claude' ? 'Claude' : kinds[0] === 'codex' ? 'Codex' : 'Grok'
+    const kindLabel = kinds[0] === 'claude' ? 'Claude' : kinds[0] === 'codex' ? 'Codex' : kinds[0] === 'grok' ? 'Grok' : KIND_LABEL[kinds[0]]
     return `${hostLabel(host)} 缺少 ${kindLabel} CLI`
   }
   const hostCount = entries.length

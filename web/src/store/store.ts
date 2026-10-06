@@ -637,6 +637,8 @@ export interface StoreState {
   logoutIdentity: (host: string, identity: string) => Promise<boolean>
   /** 額度欄 agy 那格的登出：刪該主機的 agy 憑證，成功後那格改顯示未登入。 */
   logoutAgy: (host: string) => Promise<boolean>
+  /** 裝／更新該主機的 agy（官方 manifest ＋ sha512，不跑官方 install.sh）；裝好後 daemon 重新偵測並推 `host_changed`。 */
+  installAgy: (host: string) => Promise<boolean>
   loadIdentityPrefs: () => Promise<void>
   setIdentityDisabled: (host: string, kind: string, name: string, disabled: boolean) => Promise<void>
   /** `''` / `local` = this machine. */
@@ -2440,6 +2442,24 @@ export const useStore = create<StoreState>((set, get) => {
       get().notify('info', removed ? 'agy 已登出，憑證已清除' : 'agy 本來就沒有憑證（已是未登入）')
       ok = true
     })
+    return ok
+  },
+
+  async installAgy(host) {
+    let ok = false
+    await guarded(
+      set,
+      get,
+      `agy-install:${host || 'local'}`,
+      async () => {
+        const where = !host || host === 'local' ? '本機' : host
+        get().notify('info', `開始在 ${where} 安裝 agy（下載約 50 MB 並驗 sha512）…`)
+        const r = await api.installAgy(host)
+        get().notify('info', r.already_latest ? `${where} 的 agy 已是官方最新版 ${r.to}` : `${where} 已安裝 agy ${r.to}${r.path ? `（${r.path}）` : ''}；要登入請到額度欄開 shell 登入`)
+        ok = true
+      },
+      (e) => `安裝 agy 失敗：${errText(e)}`,
+    )
     return ok
   },
 

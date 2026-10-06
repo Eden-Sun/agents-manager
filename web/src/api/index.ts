@@ -927,6 +927,33 @@ export async function logoutAgy(host: string): Promise<{ removed: boolean }> {
   return { removed: isRec(raw) && raw.removed === true }
 }
 
+/** `POST /api/hosts/{name}/agy/install` 的回覆：裝好（或已是官方最新版）的結果。 */
+export interface AgyInstallResult {
+  host: string
+  platform: string
+  from: string | null
+  to: string
+  path: string | null
+  already_latest: boolean
+}
+
+/**
+ * 裝／更新該主機的 agy 到官方最新版：daemon 讀官方 manifest、驗 sha512 後放到 `~/.local/bin/agy`（不跑官方 install.sh）。
+ * 要等下載與驗證（幾十秒）；同一台已經在裝 → 409 `agy_install_in_progress`。
+ */
+export async function installAgy(host: string): Promise<AgyInstallResult> {
+  const raw = await transport.request('POST', `/hosts/${encodeURIComponent(host || 'local')}/agy/install`)
+  const r = isRec(raw) ? raw : {}
+  return {
+    host: typeof r.host === 'string' ? r.host : host,
+    platform: typeof r.platform === 'string' ? r.platform : '',
+    from: typeof r.from === 'string' ? r.from : null,
+    to: typeof r.to === 'string' ? r.to : '',
+    path: typeof r.path === 'string' ? r.path : null,
+    already_latest: r.already_latest === true,
+  }
+}
+
 async function identityAuth(host: string, identity: string, op: 'login' | 'logout'): Promise<HostShell> {
   const name = host || 'local'
   const raw = await transport.request(

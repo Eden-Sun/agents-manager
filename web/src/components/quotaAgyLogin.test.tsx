@@ -51,7 +51,7 @@ it('未登入：agy 那格有「開 shell 登入」鈕，說明 TUI 會引導登
   assert.match(agyRow().textContent ?? '', /未登入/)
   const login = btn(agyRow(), '開 shell 登入')
   assert.ok(login, '未登入的 agy 要有登入入口')
-  assert.equal(login.title, '在 本機 開一個 shell 並輸入 agy')
+  assert.equal(login.title, '在 本機 開一個 shell 並輸入 AGY_CLI_DISABLE_AUTO_UPDATE=true agy')
   assert.equal(btn(agyRow(), '登出 agy'), undefined, '未登入沒有登出鈕')
   // 登入狀態翻成已登入（例如 daemon 偵測到憑證檔）→ 登入鈕消失。
   await act(async () => {
@@ -76,7 +76,7 @@ it('點「開 shell 登入」→ 確認框寫明授權網址與 /quit → 確認
   const isText = (r: { method: string; path: string }) => r.method === 'POST' && /\/hosts\/local\/shells\/[^/]+\/text$/.test(r.path)
   await until(() => requests.some(isText), '往 shell 送字')
   const text = requests.find(isText)!
-  assert.deepEqual(text.body, { text: 'agy', enter: true })
+  assert.deepEqual(text.body, { text: 'AGY_CLI_DISABLE_AUTO_UPDATE=true agy', enter: true })
   const view = useStore.getState().shellView
   assert.ok(view, '畫面切到那個 shell')
   assert.equal(useStore.getState().localTools.agy.logged_in, false, '還沒登好')

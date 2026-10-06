@@ -3,6 +3,8 @@ import type { BotKind } from '../api/types'
 import * as api from '../api'
 import { useStore } from '../store/store'
 import { ConfirmDialog } from './ConfirmDialog'
+import { AgyInstallDialog } from './AgyInstall'
+import { useAgyMissing } from './agyInstallState'
 
 /**
  * 額度 popover「未登入」列的開 shell 登入：codex 沒有 `/login`，或 claude / grok 沒有在跑的 Bot。
@@ -30,6 +32,10 @@ export function QuotaLoginShell({
   const notify = useStore((s) => s.notify)
   const shellBusy = useStore((s) => s.busy[`shell:${host}`] === true)
   const toolsBusy = useStore((s) => s.busy[`tools:${host || 'local'}`] === true)
+  const installAgy = useStore((s) => s.installAgy)
+  const installBusy = useStore((s) => s.busy[`agy-install:${host || 'local'}`] === true)
+  // 這台沒有 agy：開 shell 只會得到 `command not found`，先問要不要自動安裝，裝好才接著登入（使用者 2026-10-06）。
+  const agyMissing = useAgyMissing(host) && kind === 'agy'
 
   async function run() {
     if (!(await openHostShell(host))) return
@@ -51,11 +57,11 @@ export function QuotaLoginShell({
       <button
         type="button"
         className="btn"
-        disabled={shellBusy}
-        title={`在 ${hostLabel} 開一個 shell 並輸入 ${command}`}
+        disabled={shellBusy || installBusy}
+        title={agyMissing ? `${hostLabel} 尚未安裝 agy：先自動安裝，再開 shell 登入` : `在 ${hostLabel} 開一個 shell 並輸入 ${command}`}
         onClick={() => setOpen(true)}
       >
-        {shellBusy ? '開 shell 中…' : '開 shell 登入'}
+        {installBusy ? '安裝中…' : shellBusy ? '開 shell 中…' : agyMissing ? '安裝 agy 並登入' : '開 shell 登入'}
       </button>
       {sent ? (
         <button
@@ -69,8 +75,21 @@ export function QuotaLoginShell({
         </button>
       ) : null}
 
+      <AgyInstallDialog
+        host={host}
+        open={open && agyMissing}
+        confirmLabel="安裝並登入"
+        extra={<>裝好後會接著在 {hostLabel} 開 shell 並送出 <code>{command}</code> 讓你登入。</>}
+        onCancel={() => setOpen(false)}
+        onConfirm={() => {
+          setOpen(false)
+          void installAgy(host).then((ok) => {
+            if (ok) void run()
+          })
+        }}
+      />
       <ConfirmDialog
-        open={open}
+        open={open && !agyMissing}
         title={`開 shell 登入 ${kind}？`}
         body={
           <>
