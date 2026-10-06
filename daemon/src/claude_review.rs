@@ -181,7 +181,7 @@ fn task_head(app: &impl crate::capabilities::DataDir, kind: &str) -> Option<Stri
 
 /// 沒指定新版時要解析哪一版。claude 是磁碟上那一版（自動更新已經下載好）；codex 的新版**還沒安裝**，
 /// 磁碟上是舊的，所以先看分診帳本裡最新的正式版（跟 `codex_update::decide` 同一個來源），帳本空才退回磁碟。
-async fn default_to(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
+async fn default_to(app: &(impl crate::capabilities::Db + crate::changelog::ChangelogState + crate::hosts::HostsAccess + crate::upstream_update::UpstreamWatch), host: &str, kind: &str) -> Option<String> {
     // herdr 同理：新版還沒裝，看上游快照裡這台落後時的目標版本。
     if kind == "herdr" {
         if let Some(v) = crate::upstream_update::behind_target_for_host(app, kind, host).await {
@@ -189,7 +189,7 @@ async fn default_to(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
         }
     }
     if kind == "codex" {
-        if let Ok(Some(v)) = crate::release_triage::ledger::max_version(&app.db, kind).await {
+        if let Ok(Some(v)) = crate::release_triage::ledger::max_version(app.db(), kind).await {
             return Some(v);
         }
     }

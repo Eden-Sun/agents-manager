@@ -85,11 +85,11 @@ fn stopped_on_purpose(bot_id: &str, started_at: &str, turn_error: Option<&str>) 
 }
 
 /// 重啟的那一半：停之前讀，呼叫端持 bot 鎖。讀不到就不補（寧可少補一句，也不在不知道的時候對 bot 說它被中斷了）。
-pub(crate) async fn busy_before_restart(app: &Arc<App>, bot: &db::Bot, opts: &StartOpts) -> Option<&'static str> {
+pub(crate) async fn busy_before_restart(app: &impl crate::capabilities::Db, bot: &db::Bot, opts: &StartOpts) -> Option<&'static str> {
     if !wants_nudge(&bot.kind, opts.resume_native, Some("working")) {
         return None;
     }
-    let run = match db::active_run(&app.db, &bot.id).await {
+    let run = match db::active_run(app.db(), &bot.id).await {
         Ok(Some(run)) => run,
         Ok(None) => return None,
         Err(e) => {
@@ -101,7 +101,7 @@ pub(crate) async fn busy_before_restart(app: &Arc<App>, bot: &db::Bot, opts: &St
         "working" => Some("working"),
         // 在等人：不催，也不再看有沒有回合沒收（那一回合就是卡在等人）。
         "blocked" => None,
-        _ => match db::in_flight_turn(&app.db, &run.id).await {
+        _ => match db::in_flight_turn(app.db(), &run.id).await {
             Ok(t) => t.map(|_| "turn_in_flight"),
             Err(e) => {
                 tracing::warn!(bot = %bot.name, error = %e, "could not read the in-flight turn before the restart; no resume nudge");
@@ -119,7 +119,7 @@ pub(crate) async fn busy_before_restart(app: &Arc<App>, bot: &db::Bot, opts: &St
 
 /// 啟動的那一半：在新 run 寫進去之前讀這顆 bot 的上一個 run。只認被外力收掉的（`exited`），最後記的是 working、
 /// 而且不是有人或有原因叫它停的（[`stopped_on_purpose`]）。
-pub(crate) async fn prior_run_ended_busy(app: &Arc<App>, bot: &db::Bot, opts: &StartOpts) -> Option<&'static str> {
+pub(crate) async fn prior_run_ended_busy(app: &impl crate::capabilities::Db, bot: &db::Bot, opts: &StartOpts) -> Option<&'static str> {
     if !wants_nudge(&bot.kind, opts.resume_native, Some("working")) {
         return None;
     }
@@ -127,7 +127,7 @@ pub(crate) async fn prior_run_ended_busy(app: &Arc<App>, bot: &db::Bot, opts: &S
     let last: Option<(String, String, String, Option<String>)> =
         match sqlx::query_as("SELECT state, agent_status, started_at, turn_error FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
             .bind(&bot.id)
-            .fetch_optional(&app.db)
+            .fetch_optional(app.db())
             .await
         {
             Ok(v) => v,
@@ -229,8 +229,8 @@ enum Verdict {
     Idle,
 }
 
-async fn verdict(app: &Arc<App>, bot_id: &str, run_id: &str) -> Verdict {
-    let run = match db::run(&app.db, run_id).await {
+async fn verdict(app: &impl crate::capabilities::Db, bot_id: &str, run_id: &str) -> Verdict {
+    let run = match db::run(app.db(), run_id).await {
         Ok(Some(run)) => run,
         Ok(None) => return Verdict::Cancel("the run is gone"),
         Err(_) => return Verdict::Wait,
@@ -254,14 +254,14 @@ async fn verdict(app: &Arc<App>, bot_id: &str, run_id: &str) -> Verdict {
         "working" | "blocked" => return Verdict::Cancel("the bot did not sit idle after the resume"),
         _ => return Verdict::Wait,
     }
-    let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return Verdict::Wait };
+    let Ok(conv) = db::conversation_id(app.db(), bot_id).await else { return Verdict::Wait };
     let counts: Result<(i64, i64), _> = sqlx::query_as(
         "SELECT (SELECT COUNT(*) FROM turns WHERE conversation_id = ? AND status = 'queued'),
                 (SELECT COUNT(*) FROM turns WHERE run_id = ?)",
     )
     .bind(&conv)
     .bind(run_id)
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await;
     match counts {
         Ok((0, 0)) => Verdict::Idle,
@@ -319,8 +319,8 @@ fn account_transcript(config_dir: &str, recorded: &str, session: &str) -> Option
 }
 
 /// 接回的那段 transcript 尾巴是不是被砍的工具（[`ends_mid_tool`]）。只讀本機（同 `stuck_turns`）；`Err`＝讀不到。
-async fn transcript_ends_mid_tool(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Result<bool, String> {
-    let host = db::bot_host(&app.db, &bot.id).await.map_err(|e| e.to_string())?;
+async fn transcript_ends_mid_tool(app: &Arc<impl crate::capabilities::Db + crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, run: &db::Run) -> Result<bool, String> {
+    let host = db::bot_host(app.db(), &bot.id).await.map_err(|e| e.to_string())?;
     if host != LOCAL_HOST {
         return Err(format!("the transcript is on {host}, not readable from here"));
     }
@@ -331,7 +331,7 @@ async fn transcript_ends_mid_tool(app: &Arc<App>, bot: &db::Bot, run: &db::Run) 
     )
     .bind(&bot.id)
     .bind(&session)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await
     .map_err(|e| e.to_string())?;
     let recorded = recorded.ok_or("no transcript path was ever recorded for this session")?;

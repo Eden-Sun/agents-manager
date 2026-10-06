@@ -14,9 +14,6 @@ pub mod relay;
 pub mod store;
 pub mod workflow;
 
-use self::ports::IdentityOps;
-use crate::state::App;
-use std::sync::Arc;
 
 /// `App` 對 [`ports`] 的實作（P7 的 composition 側 adapter）；檔案放在 `daemon/src/app_ports_p7.rs`，不碰 `lib.rs`。
 #[path = "../app_ports_p7.rs"]
@@ -37,7 +34,7 @@ pub const CLAUDE_ORDER: [&str; 3] = ["cc2", "cc1", "cc0"];
 ///
 /// 回 `None` ＝**查不出來**（這台主機的身分表還沒偵測完、或 kind 不是 claude）。呼叫端要把它當成
 /// 「不知道」，不是「沒有身分」：不知道就不要為了換身分丟掉一個 session。
-pub async fn billing_identity_named(app: &Arc<App>, host: &str, bot: &crate::db::Bot) -> anyhow::Result<Option<String>> {
+pub async fn billing_identity_named(app: &impl crate::mission::ports::IdentityOps, host: &str, bot: &crate::db::Bot) -> anyhow::Result<Option<String>> {
     if let Some(name) = app.billing_identity(bot).await? {
         return Ok(Some(name));
     }
@@ -65,8 +62,8 @@ pub async fn default_identity_name(app: &impl crate::mission::ports::IdentityOps
 ///
 /// 使用者停用的清單讀不到就回 `Err`（issue #160）：以前 `unwrap_or_default()` 當成「沒有停用」，被停用的身分又成了候選。
 /// 這是會改變派工身分的政策，讀不到＝不知道，呼叫端要停下來下一次再判，不是照「都可用」挑。
-pub async fn candidates(app: &Arc<App>, host: &str, kind: &str) -> anyhow::Result<Vec<(String, bool, Option<crate::quota::Quota>)>> {
-    let disabled = store::disabled_identities(&app.db, host, kind).await?;
+pub async fn candidates(app: &(impl crate::capabilities::Db + crate::mission::ports::IdentityOps), host: &str, kind: &str) -> anyhow::Result<Vec<(String, bool, Option<crate::quota::Quota>)>> {
+    let disabled = store::disabled_identities(app.db(), host, kind).await?;
     if kind != "claude" {
         let readings = app.quota_readings(host, &[kind.to_string()]).await;
         return Ok(vec![(String::new(), false, readings.into_iter().next().flatten())]);
@@ -92,6 +89,8 @@ pub async fn candidates(app: &Arc<App>, host: &str, kind: &str) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
 
     fn identity(name: &str, kind: &str) -> crate::config::IdentityCfg {
         crate::config::IdentityCfg { name: name.into(), kind: kind.into(), host: None, env: Default::default(), args: Vec::new() }

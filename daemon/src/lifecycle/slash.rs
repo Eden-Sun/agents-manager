@@ -2,11 +2,11 @@
 
 use super::*;
 
-pub async fn send_keys(app: &Arc<App>, bot_id: &str, keys: Vec<String>, expect_run_id: Option<String>) -> LcResult<()> {
+pub async fn send_keys(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str, keys: Vec<String>, expect_run_id: Option<String>) -> LcResult<()> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     if let Some(exp) = expect_run_id {
         if exp != run.id {
             return Err(LcError::conflict("run mismatch", json!({"run_id": run.id})));
@@ -29,7 +29,7 @@ pub async fn send_text(app: &Arc<App>, bot_id: &str, text: &str, enter: bool, ex
 /// 'supplement'`，網頁的「補充」）。沒有進行中的回合就不記：那一句 CLI 會當成新的一輪，hook 開外部回合時自己記。
 /// 打字失敗一個字都不記；打完了才寫不進去只記 log、回 `None`——字已經進 pane，回錯會讓使用者再補一次。
 pub async fn send_text_recorded(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
     bot_id: &str,
     text: &str,
     enter: bool,
@@ -38,7 +38,7 @@ pub async fn send_text_recorded(
 ) -> LcResult<Option<db::Message>> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     if let Some(exp) = expect_run_id {
         if exp != run.id {
             return Err(LcError::conflict("run mismatch", json!({"run_id": run.id})));
@@ -81,13 +81,13 @@ pub async fn send_text_recorded(
     }
 }
 
-async fn record_supplement(app: &Arc<App>, bot_id: &str, run_id: &str, text: &str) -> anyhow::Result<Option<db::Message>> {
-    let Some(turn) = db::in_flight_turn(&app.db, run_id).await? else { return Ok(None) };
+async fn record_supplement(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot_id: &str, run_id: &str, text: &str) -> anyhow::Result<Option<db::Message>> {
+    let Some(turn) = db::in_flight_turn(app.db(), run_id).await? else { return Ok(None) };
     insert_supplement(app, bot_id, &turn, text).await.map(Some)
 }
 
 /// 把 `text` 記成 `turn` 的補充（`sent_via = 'supplement'`）並推 `message_added`。codex steer（#748）也用這一支。
-pub(super) async fn insert_supplement(app: &Arc<App>, bot_id: &str, turn: &db::Turn, text: &str) -> anyhow::Result<db::Message> {
+pub(super) async fn insert_supplement(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot_id: &str, turn: &db::Turn, text: &str) -> anyhow::Result<db::Message> {
     let id = db::ulid();
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, turn_id, role, content, source, sent_via, created_at)
@@ -98,9 +98,9 @@ pub(super) async fn insert_supplement(app: &Arc<App>, bot_id: &str, turn: &db::T
     .bind(&turn.id)
     .bind(text)
     .bind(db::now())
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
-    let m = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&id).fetch_one(&app.db).await?;
+    let m = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&id).fetch_one(app.db()).await?;
     emit_message_added(app, bot_id, m.clone()).await;
     Ok(m)
 }
@@ -257,21 +257,21 @@ async fn apply_live_setting_locked(
 }
 
 async fn apply_live_setting_inner(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
     bot_id: &str,
     fields: &[&str],
     target_rev: &str,
 ) -> Result<LiveApplyReceipt, String> {
-    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else {
+    let Ok(Some(bot)) = db::bot(app.db(), bot_id).await else {
         return Err("bot_missing".into());
     };
     if crate::launch_rev::of(&bot) != target_rev {
         return Err("live_target_revision_changed".into());
     }
-    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else {
+    let Ok(Some(run)) = db::active_run(app.db(), bot_id).await else {
         return Err("no_active_run".into());
     };
-    let in_flight = !matches!(db::in_flight_turn(&app.db, &run.id).await, Ok(None));
+    let in_flight = !matches!(db::in_flight_turn(app.db(), &run.id).await, Ok(None));
     let (pane_id, during_turn) = match live_gate(&run, in_flight, &bot.kind, fields) {
         Ok(gate) => gate,
         Err(why) => return Err(format!("slash_gate: {}", why.reason())),
@@ -538,9 +538,9 @@ async fn send_slash_line(client: &HerdrClient, pane_id: &str, line: &str) -> LcR
 /// 第一則又走回已知會失效的那條路（sol review 2026-09-14 #3）。
 /// 打字之前先把記號寫進 DB；寫不進去就**不要打**——打完卻沒記住，下一則與重啟後又會走回會吞訊息的
 /// `agent.prompt`（sol review 第三輪 #2）。行程內的備份記號同時記上，這次啟動內不會忘。
-pub(crate) async fn mark_pane_typed(app: &Arc<App>, run_id: &str) -> Result<(), String> {
+pub(crate) async fn mark_pane_typed(app: &impl crate::capabilities::Db, run_id: &str) -> Result<(), String> {
     crate::lifecycle::remember_pane_typed(run_id);
-    db::set_pane_typed(&app.db, run_id).await.map_err(|e| {
+    db::set_pane_typed(app.db(), run_id).await.map_err(|e| {
         tracing::warn!(run = run_id, error = %e, "could not record that the daemon types into this pane; not typing");
         format!("pane_typed_not_persisted: {e}")
     })
@@ -607,10 +607,10 @@ pub struct LoginOut {
 
 /// 對正在跑的 bot 送登入指令。同 `apply_live_setting` 的 gate 與打字節奏，但使用者明確按了按鈕，
 /// 送不出去要說明理由。daemon 不等登入完成；由 `POST /hosts/:name/tools/refresh` 重新偵測。
-pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
+pub async fn login(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str) -> LcResult<LoginOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let Some(line) = login_slash_command(&bot.kind) else {
         return Err(LcError::BadValue(json!({
             "error": "login_unsupported",
@@ -618,10 +618,10 @@ pub async fn login(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
             "message": format!("{} has no in-session login command", bot.kind),
         })));
     };
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| {
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
         LcError::conflict(SlashBlocked::NotRunning.reason(), json!({ "bot_id": bot_id }))
     })?;
-    let in_flight = db::in_flight_turn(&app.db, &run.id).await.map_err(up)?.is_some();
+    let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?.is_some();
     let pane_id = slash_gate(&run, in_flight)
         .map_err(|b| LcError::conflict(b.reason(), json!({"bot_id": bot_id, "run_id": run.id})))?;
     let client = client_for_run(app, &run).await?;
@@ -642,10 +642,10 @@ pub fn compact_slash_command(kind: &str) -> Option<&'static str> {
 
 /// 對正在跑、閒著的 bot 送 `/compact`。跟 [`login`] 同一個 gate（沒在跑、忙著、回合在飛、找不到 pane 都不送，回 409 說理由）
 /// 與打字節奏；daemon 不等壓縮做完——之後的 statusLine 會回報新的 context 用量。
-pub async fn compact(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
+pub async fn compact(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str) -> LcResult<LoginOut> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let Some(line) = compact_slash_command(&bot.kind) else {
         return Err(LcError::BadValue(json!({
             "error": "compact_unsupported",
@@ -653,10 +653,10 @@ pub async fn compact(app: &Arc<App>, bot_id: &str) -> LcResult<LoginOut> {
             "message": format!("{} has no /compact command", bot.kind),
         })));
     };
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| {
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| {
         LcError::conflict(SlashBlocked::NotRunning.reason(), json!({ "bot_id": bot_id }))
     })?;
-    let in_flight = db::in_flight_turn(&app.db, &run.id).await.map_err(up)?.is_some();
+    let in_flight = db::in_flight_turn(app.db(), &run.id).await.map_err(up)?.is_some();
     let pane_id = slash_gate(&run, in_flight)
         .map_err(|b| LcError::conflict(b.reason(), json!({"bot_id": bot_id, "run_id": run.id})))?;
     let client = client_for_run(app, &run).await?;

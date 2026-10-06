@@ -121,29 +121,29 @@ async fn commit_debt(pool: &SqlitePool, run_id: &str) -> Result<Option<RuntimeDe
 
 /// One DB-only retry step. It is also used by deterministic tests to release an injected SQL fault
 /// without waiting on the background backoff loop.
-pub(crate) async fn retry_once(app: &Arc<App>, run_id: &str) -> Result<bool, sqlx::Error> {
+pub(crate) async fn retry_once(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), run_id: &str) -> Result<bool, sqlx::Error> {
     let memory = memory_debts()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(run_id)
         .cloned();
     if let Some(debt) = memory {
-        store_debt(&app.db, &debt).await?;
+        store_debt(app.db(), &debt).await?;
         memory_debts()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(run_id);
     }
 
-    let committed = commit_debt(&app.db, run_id).await?;
+    let committed = commit_debt(app.db(), run_id).await?;
     if let Some(committed) = committed {
-        app_ports_p4state::stamp_live_revision(&app.db, run_id).await?;
+        app_ports_p4state::stamp_live_revision(app.db(), run_id).await?;
         let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&committed.bot_id).await;
         return Ok(true);
     }
-    let stamped = app_ports_p4state::stamp_live_revision(&app.db, run_id).await?;
+    let stamped = app_ports_p4state::stamp_live_revision(app.db(), run_id).await?;
     if stamped {
-        if let Ok(Some(run)) = crate::db::run(&app.db, run_id).await {
+        if let Ok(Some(run)) = crate::db::run(app.db(), run_id).await {
             let _ = app_ports_p4state::AppEventSink::new(app).bot_status_changed(&run.bot_id).await;
         }
     }

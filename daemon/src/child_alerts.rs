@@ -21,7 +21,6 @@
 //! 還有定時的 [`sweep`]——掃一遍「活著、blocked 的子 agent」，沒有通知工作在跑的就補一個。已經講過的問題照上面的指紋
 //! 與 episode 不重講，已經不 blocked 的不補。
 
-use crate::events::ports::{TurnCommands};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -314,7 +313,7 @@ const RETRY: [Duration; 6] = [
 
 /// 8 秒之後的那一段：告訴 parent；這一刻收不下就照 `retry` 的間隔再試。每一次都從頭判斷（child 還卡著嗎、parent
 /// 還在嗎、畫面上是什麼問題），child 被回答、parent 走了就自己停；同一次 blocked 的冪等鍵不變，重試不會變成兩則。
-pub(crate) async fn keep_telling(app: &Arc<App>, run: &db::Run, retry: &[Duration]) {
+pub(crate) async fn keep_telling(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::events::ports::TurnCommands), run: &db::Run, retry: &[Duration]) {
     let mut waits = retry.iter();
     loop {
         let why = match tell_parent(app, run).await {
@@ -365,9 +364,9 @@ pub async fn parent_to_tell(app: &impl crate::capabilities::Db, bot_id: &str) ->
     Ok(Some((parent_id, child)))
 }
 
-async fn tell_parent(app: &Arc<App>, run: &db::Run) -> anyhow::Result<Told> {
+async fn tell_parent(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::events::ports::TurnCommands), run: &db::Run) -> anyhow::Result<Told> {
     let Some((parent_id, child)) = parent_to_tell(app, &run.bot_id).await? else { return Ok(Told::Settled) };
-    let Some(fresh) = db::active_run(&app.db, &run.bot_id).await? else { return Ok(Told::Settled) };
+    let Some(fresh) = db::active_run(app.db(), &run.bot_id).await? else { return Ok(Told::Settled) };
     let Some(pane) = fresh.pane_id.clone().filter(|p| !p.trim().is_empty()) else { return Ok(Told::Settled) };
     let Some(client) = app.herdr_for_run(&fresh).await else { return Ok(Told::Settled) };
     let screen = client.pane_read(&pane, "visible", 60).await?.text;
@@ -435,7 +434,7 @@ pub async fn deliver(
 
 /// 同一次 blocked、同一個問題的第 `attempt` 次（從 0 起算，[`next_attempt`] 決定）。
 async fn deliver_attempt(
-    app: &Arc<App>,
+    app: &impl crate::events::ports::TurnCommands,
     parent_id: &str,
     child_id: &str,
     child_name: &str,

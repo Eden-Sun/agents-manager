@@ -16,7 +16,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::events::ports::{IngressCommands, TurnCommands};
 
 pub const SESSION: &str = "default";
 const POLL_INTERVAL: Duration = Duration::from_secs(8);
@@ -45,13 +44,13 @@ pub fn spawn_poller(app: Arc<App>) {
 ///
 /// This function intentionally does not create/close workspaces or panes. A default-session
 /// agent is adopted as an already-running Run and its pane remains user-owned.
-pub async fn sync(app: &Arc<App>) -> Result<()> {
+pub async fn sync(app: &(impl crate::capabilities::BotLocks + crate::capabilities::BotStatusEmit + crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Isolation + crate::default_session::DefaultSyncLock + crate::events::ports::HostSidePort + crate::events::ports::IngressCommands + crate::events::ports::TurnCommands + crate::herdr::LocalHerdr)) -> Result<()> {
     // 使用者的 default session 屬於正式那顆 daemon；隔離實例收編它等於兩顆搶同一批 pane。
     if app.isolated() {
         return Ok(());
     }
-    let _guard = app.default_sync_lock.lock().await;
-    let client = app.default_herdr.clone();
+    let _guard = app.default_sync_lock().lock().await;
+    let client = app.default_herdr().clone();
 
     if let Err(e) = client.ping().await {
         set_connected(app, false).await;
@@ -63,7 +62,7 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
         .agent_list()
         .await
         .map_err(|e| anyhow::anyhow!("default session agent.list failed: {e}"))?;
-    let projects: Vec<db::Project> = db::live_projects(&app.db)
+    let projects: Vec<db::Project> = db::live_projects(app.db())
         .await?
         .into_iter()
         .filter(|p| p.host == LOCAL_HOST)
@@ -84,7 +83,7 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
         let lock = app.bot_lock(&bot_id).await;
         let _bot_guard = lock.lock().await;
         let status = agent.agent_status.normalized().as_str().to_string();
-        let active = db::active_run(&app.db, &bot_id).await?;
+        let active = db::active_run(app.db(), &bot_id).await?;
 
         if let Some(run) = active {
             // An imported bot can only have a default-session run. Keep an unexpected active
@@ -104,7 +103,7 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
             .bind(agent_name)
             .bind(SESSION)
             .bind(&run.id)
-            .execute(&app.db)
+            .execute(app.db())
             .await?;
             if run.pane_id.as_deref() != Some(agent.pane_id.as_str()) {
                 if let Some(old) = run.pane_id.as_deref() {
@@ -130,7 +129,7 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
             .bind(agent_name)
             .bind(SESSION)
             .bind(db::now())
-            .execute(&app.db)
+            .execute(app.db())
             .await?;
             app.watch_pane_on_session(LOCAL_HOST, SESSION, &agent.pane_id).await;
             if bot.kind == "codex" {
@@ -149,11 +148,11 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
     // closed. The next sync can still observe a newly detected agent in that pane.
     // `agent.list` 空陣列不是失敗：herdr 重啟中清單還沒填好時，list 空、get 還找得到。
     // 沒再問就標 exited，等於把還在跑的 default-session bot 收掉（之後可能再 import 成另一顆）。
-    for bot in db::live_bots(&app.db).await?.into_iter().filter(|b| b.herdr_session.as_deref() == Some(SESSION)) {
+    for bot in db::live_bots(app.db()).await?.into_iter().filter(|b| b.herdr_session.as_deref() == Some(SESSION)) {
         if seen_bots.contains(&bot.id) {
             continue;
         }
-        if let Some(run) = db::active_run(&app.db, &bot.id).await? {
+        if let Some(run) = db::active_run(app.db(), &bot.id).await? {
             let target = run.pane_id.as_deref().filter(|p| !p.is_empty()).map(str::to_string).or_else(|| run.agent_name.clone());
             let still_there = match target.as_deref() {
                 Some(t) => match client.agent_get(t).await {
@@ -402,4 +401,9 @@ mod tests {
         let state: String = sqlx::query_scalar("SELECT state FROM runs WHERE id=?").bind(&run).fetch_one(&app.db).await.unwrap();
         assert_eq!(state, "exited");
     }
+}
+
+/// default session 同步的互斥鎖。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait DefaultSyncLock: Send + Sync {
+    fn default_sync_lock(&self) -> &tokio::sync::Mutex<()>;
 }

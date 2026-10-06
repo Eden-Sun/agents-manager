@@ -103,10 +103,10 @@ struct Sample {
 }
 
 /// 問、記帳、必要時標旗。回 `Ok(None)`＝這次沒問（問過、沒有 bot）。失敗寫進帳本的 `error`，不標旗。
-async fn observe(app: &Arc<App>, s: &Sample) -> Result<Option<Flag>> {
-    let cfg = app.cfg.get().await.judge;
-    let Some(bot) = crate::db::bot(&app.db, &s.bot_id).await? else { return Ok(None) };
-    let label = crate::db::project(&app.db, &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
+async fn observe(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse), s: &Sample) -> Result<Option<Flag>> {
+    let cfg = app.cfg().get().await.judge;
+    let Some(bot) = crate::db::bot(app.db(), &s.bot_id).await? else { return Ok(None) };
+    let label = crate::db::project(app.db(), &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
     if let Some(skip @ (super::Skip::Disabled | super::Skip::ProjectNotListed)) = super::gate(&cfg, &bot.project_id, &label, 0) {
         return Err(anyhow!("{skip:?}"));
     }
@@ -115,7 +115,7 @@ async fn observe(app: &Arc<App>, s: &Sample) -> Result<Option<Flag>> {
     )
     .bind(&s.assignment_id)
     .bind(VERDICT)
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await?;
     if seen > 0 {
         return Ok(None);
@@ -139,7 +139,7 @@ async fn observe(app: &Arc<App>, s: &Sample) -> Result<Option<Flag>> {
     sqlx::query("UPDATE judge_shadow SET assignment_id = ? WHERE id = ?")
         .bind(&s.assignment_id)
         .bind(&slot)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
 
     let body = request_body(&cfg.model, &report);
@@ -212,7 +212,7 @@ async fn settle_pair(
     Ok(())
 }
 
-async fn raise(app: &Arc<App>, s: &Sample, bot: &crate::db::Bot, flag: &Flag, claims: f64, asks: f64) -> Result<()> {
+async fn raise(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), s: &Sample, bot: &crate::db::Bot, flag: &Flag, claims: f64, asks: f64) -> Result<()> {
     let action = action_text(flag, claims, asks);
     let key = format!("judge_report_evidence:{}", s.assignment_id);
     let payload = json!({
@@ -227,7 +227,7 @@ async fn raise(app: &Arc<App>, s: &Sample, bot: &crate::db::Bot, flag: &Flag, cl
         "action": action,
     });
     let id = crate::supervisor::store::push_inbox(
-        &app.db,
+        app.db(),
         &key,
         "judge_report_evidence",
         Some(&s.assignment_id),
@@ -241,7 +241,7 @@ async fn raise(app: &Arc<App>, s: &Sample, bot: &crate::db::Bot, flag: &Flag, cl
         app.emit("supervisor_changed", json!({"judge_report_evidence": key})).await;
     }
     if let Some(parent) = bot.parent_bot_id.as_deref() {
-        if let Ok(conv) = crate::db::conversation_id(&app.db, parent).await {
+        if let Ok(conv) = crate::db::conversation_id(app.db(), parent).await {
             let note = format!("交辦 {}（{}）的{action}", s.assignment_id, bot.name);
             let _ = crate::herdr_maintenance::app_ports_p12::insert_system_message(app, &conv, &note).await;
         }

@@ -195,11 +195,11 @@ fn parse_grok_usage_remote(screen: &str, now: DateTime<chrono::Utc>, offset_secs
 }
 
 /// Local grok = the daemon's own zone; a remote one = that host's detected offset.
-async fn parse_probe_screen(app: &Arc<App>, host: &str, screen: &str, now: DateTime<chrono::Utc>) -> Option<Quota> {
+async fn parse_probe_screen(app: &impl crate::tools::ToolsTable, host: &str, screen: &str, now: DateTime<chrono::Utc>) -> Option<Quota> {
     if host == LOCAL_HOST {
         return parse_grok_usage(screen, now.with_timezone(&Local));
     }
-    let offset = app.tools.lock().await.get(host).and_then(|t| t.utc_offset_secs);
+    let offset = app.tools().lock().await.get(host).and_then(|t| t.utc_offset_secs);
     parse_grok_usage_remote(screen, now, offset)
 }
 
@@ -232,7 +232,7 @@ async fn probe_client() -> Result<HerdrClient> {
 }
 
 /// Probe workspaces orphaned by a daemon that died mid-probe still hold a live grok process.
-pub async fn sweep_stale(app: &Arc<App>) {
+pub async fn sweep_stale(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
     if let Ok(c) = probe_client().await {
         sweep_probes(&c, None).await;
     }
@@ -240,7 +240,7 @@ pub async fn sweep_stale(app: &Arc<App>) {
 }
 
 /// Remote probes live in the remote session by design — see [`client_for`]. 共用 session 的主機只清帶本 daemon 標記的（#709）。
-async fn sweep_stale_on_hosts(app: &Arc<App>) {
+async fn sweep_stale_on_hosts(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
     for host in crate::quota::pollable_hosts(app).await {
         if let Some(c) = app.herdr_for(&host).await {
             sweep_probes(&c, crate::shared_host::probe_tag(app, &host).await.as_deref()).await;
@@ -259,7 +259,7 @@ async fn sweep_probes(c: &HerdrClient, own_tag: Option<&str>) {
 }
 
 /// 共用 session 的主機上 label 帶本 daemon 的標記（#709）。
-async fn probe_label(app: &Arc<App>, host: &str) -> String {
+async fn probe_label(app: &impl crate::shared_host::SharedHostEnv, host: &str) -> String {
     match crate::shared_host::probe_tag(app, host).await {
         Some(tag) => crate::shared_host::tagged_label(PROBE_LABEL, &tag),
         None => PROBE_LABEL.to_string(),
@@ -286,7 +286,7 @@ impl Drop for Probe {
 }
 
 /// Remote hosts borrow the forwarded session — see [`crate::quota_claude::client_for`].
-async fn client_for_fence(app: &Arc<App>, fence: &crate::hosts::HostFence) -> Result<HerdrClient> {
+async fn client_for_fence(app: &impl crate::capabilities::HerdrRoutes, fence: &crate::hosts::HostFence) -> Result<HerdrClient> {
     if fence.conn().is_local() {
         return probe_client().await;
     }

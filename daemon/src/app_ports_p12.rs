@@ -58,7 +58,7 @@ pub async fn notify_parent_relayed(
 
 /// Inserts a system notification message into a conversation.
 pub async fn insert_system_message(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     conv_id: &str,
     note: &str,
 ) -> anyhow::Result<crate::db::Message> {

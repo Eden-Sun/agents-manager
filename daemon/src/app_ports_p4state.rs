@@ -20,17 +20,17 @@ use am_ports::{BotLock, BotLockGuard, DbContext, EventSink, TurnEvents};
 // ============================================================================
 
 /// Database context helper for SqlitePool.
-pub fn db_context(app: &App) -> DbContext<sqlx::SqlitePool> {
-    DbContext::new(app.db.clone())
+pub fn db_context(app: &impl crate::capabilities::Db) -> DbContext<sqlx::SqlitePool> {
+    DbContext::new(app.db().clone())
 }
 
 /// App-side adapter implementing `am_ports::BotLock`.
-pub struct AppBotLock<'a> {
-    app: &'a Arc<App>,
+pub struct AppBotLock<'a, A> {
+    app: &'a A,
 }
 
-impl<'a> AppBotLock<'a> {
-    pub fn new(app: &'a Arc<App>) -> Self {
+impl<'a, A: crate::capabilities::BotLocks> AppBotLock<'a, A> {
+    pub fn new(app: &'a A) -> Self {
         Self { app }
     }
 }
@@ -38,7 +38,7 @@ impl<'a> AppBotLock<'a> {
 struct ConcreteBotLockGuard(tokio::sync::OwnedMutexGuard<()>);
 impl BotLockGuard for ConcreteBotLockGuard {}
 
-impl BotLock for AppBotLock<'_> {
+impl<A: crate::capabilities::BotLocks> BotLock for AppBotLock<'_, A> {
     fn lock_bot<'a>(
         &'a self,
         bot: &'a BotId,
@@ -52,17 +52,17 @@ impl BotLock for AppBotLock<'_> {
 }
 
 /// App-side adapter implementing `am_ports::EventSink`.
-pub struct AppEventSink<'a> {
-    app: &'a Arc<App>,
+pub struct AppEventSink<'a, A> {
+    app: &'a A,
 }
 
-impl<'a> AppEventSink<'a> {
-    pub fn new(app: &'a Arc<App>) -> Self {
+impl<'a, A: crate::capabilities::Emit + crate::capabilities::BotStatusEmit> AppEventSink<'a, A> {
+    pub fn new(app: &'a A) -> Self {
         Self { app }
     }
 }
 
-impl EventSink for AppEventSink<'_> {
+impl<A: crate::capabilities::Emit + crate::capabilities::BotStatusEmit> EventSink for AppEventSink<'_, A> {
     fn emit<'a>(
         &'a self,
         event: EventEnvelope,
@@ -190,12 +190,12 @@ pub async fn try_limit_hit_for_bot(
     crate::quota::try_limit_hit_for_bot(app, bot).await
 }
 
-pub async fn running_model(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
+pub async fn running_model(app: &impl crate::capabilities::Db, bot: &crate::db::Bot) -> Option<String> {
     crate::quota::running_model(app, bot).await
 }
 
 pub async fn billing_identity(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     bot: &crate::db::Bot,
 ) -> anyhow::Result<Option<String>> {
     crate::quota::billing_identity(app, bot).await
@@ -219,7 +219,7 @@ pub async fn quota_base_for_host(
 }
 
 pub async fn restore_limit_hit(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables),
     host: &str,
     base: &str,
     hit: crate::quota::LimitHit,
@@ -227,17 +227,17 @@ pub async fn restore_limit_hit(
     crate::quota::restore_limit_hit(app, host, base, hit).await
 }
 
-pub async fn host_target(app: &App, host: &str) -> Option<String> {
+pub async fn host_target(app: &impl crate::hosts::HostsAccess, host: &str) -> Option<String> {
     if host == crate::config::LOCAL_HOST {
         return Some(host.to_string());
     }
-    let conn = app.hosts.get(host).await?;
+    let conn = app.hosts().get(host).await?;
     let cfg = conn.cfg.as_ref()?;
     Some(format!("{}:{}/{}", cfg.ssh, cfg.ssh_port, cfg.herdr_session))
 }
 
-pub fn boot_id(app: &App) -> String {
-    app.boot_id.clone()
+pub fn boot_id(app: &impl crate::capabilities::BootId) -> String {
+    app.boot_id().to_string()
 }
 
 // 4. Deferred Live / Live Apply
@@ -251,7 +251,7 @@ pub async fn apply_live_setting_with_revision(
     crate::lifecycle::apply_live_setting_with_revision(app, bot_id, fields, baseline_rev, target_rev).await
 }
 
-pub async fn emit_bot_changed(app: &Arc<App>, bot_id: &str) {
+pub async fn emit_bot_changed(app: &impl crate::capabilities::Emit, bot_id: &str) {
     app.emit("bot_changed", serde_json::json!({ "bot_id": bot_id })).await;
 }
 
@@ -284,7 +284,7 @@ pub async fn insert_message_tx(
     crate::lifecycle::insert_message_tx(tx, conv_id, turn_id, role, content, origin, incomplete, sender).await
 }
 
-pub async fn emit_message_added(app: &Arc<App>, bot_id: &str, message: crate::db::Message) {
+pub async fn emit_message_added(app: &impl crate::capabilities::Emit, bot_id: &str, message: crate::db::Message) {
     crate::lifecycle::emit_message_added(app, bot_id, message).await
 }
 
@@ -293,7 +293,7 @@ pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
 }
 
 pub async fn mark_delivery(
-    app: &Arc<App>,
+    app: &Arc<impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + 'static>,
     turn_id: &str,
     rec: crate::lifecycle::DeliveryRecord,
     delivered_at: &str,
@@ -317,7 +317,7 @@ pub async fn local_transcript_allowed(app: &Arc<App>, bot: &crate::db::Bot, raw_
     crate::transcript_read::local_transcript_allowed(app, bot, raw_path).await
 }
 
-pub async fn codex_home(app: &Arc<App>, bot: &crate::db::Bot) -> Option<std::path::PathBuf> {
+pub async fn codex_home(app: &Arc<impl crate::tools::ToolsEnv + 'static>, bot: &crate::db::Bot) -> Option<std::path::PathBuf> {
     crate::lifecycle::codex_home(app, bot).await
 }
 
@@ -331,7 +331,7 @@ pub async fn codex_interrupted_after(
 }
 
 // 8. Herdr client for run
-pub async fn herdr_client_for_run(app: &Arc<App>, run: &crate::db::Run) -> Option<crate::herdr::HerdrClient> {
+pub async fn herdr_client_for_run(app: &impl crate::capabilities::HerdrRoutes, run: &crate::db::Run) -> Option<crate::herdr::HerdrClient> {
     app.herdr_for_run(run).await
 }
 
@@ -348,8 +348,8 @@ pub async fn open_restart_intents(pool: &sqlx::SqlitePool) -> anyhow::Result<Vec
     crate::intents::open(pool).await
 }
 
-pub fn owner_id(app: &App) -> String {
-    app.data_dir.display().to_string()
+pub fn owner_id(app: &impl crate::capabilities::DataDir) -> String {
+    app.data_dir().display().to_string()
 }
 
 // 11. Resume nudge helpers
@@ -371,6 +371,6 @@ pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
     crate::lifecycle::schedule_flush_queued(app, bot_id);
 }
 
-pub async fn identity_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> anyhow::Result<String> {
+pub async fn identity_config_dir(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>) -> anyhow::Result<String> {
     crate::lifecycle::start::identity_config_dir(app, host, identity).await
 }

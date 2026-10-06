@@ -1,15 +1,15 @@
 //! Delivering a prompt: the turn row, the pane write, and the queued path.
 
 use super::*;
-use super::send_now::ports::{AttachConnPort, AttachSendPort, CodexSendPort, HandoffSendRepo, IdleSleepPort, MaintenancePort, SendEnvPort, ShareSendRepo, emit_object, turn_changed};
+use super::send_now::ports::{AttachConnPort, AttachSendPort, CodexSendPort, HandoffSendRepo, IdleSleepPort, SendEnvPort, ShareSendRepo, emit_object, turn_changed};
 use super::app_ports_p4::{AppEventSink, AppTurnEvents};
 use super::send_now::app_ports_p4send::AppBotLock;
 use am_ports::BotLock;
 
-pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
+pub(super) async fn emit_prompt_message(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, message_id: &str) {
     if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id=?")
         .bind(message_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
     {
         emit_object(&AppEventSink::new(app), "message_added", None, json!({"bot_id": bot_id, "message": m})).await;
@@ -20,13 +20,13 @@ pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id
 /// 記下一則送達：`delivery`（CHECK 只認四種）＋ `delivery_verified`（有沒有證據）＋ `auto_resend`
 /// （能不能自動重送）。後兩者是兩件事，見 [`crate::lifecycle::delivery::DeliveryRecord`]。`at` 是送出的那一刻。
 /// 寫不進去回 `Err`，不吞（#149）：送出之後的呼叫端走 [`super::owed_delivery`]，記成欠著、不回普通的成功。
-pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
+pub(crate) async fn mark_delivery(app: &Arc<impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + 'static>, turn_id: &str, rec: DeliveryRecord, at: &str) -> anyhow::Result<()> {
     let verified = i64::from(rec.verified);
     let auto = i64::from(rec.auto_resend);
     #[cfg(test)]
     super::race_point::hit("mark_delivery_before_claim", turn_id).await;
 
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     // 只有將 delivered_at 從 NULL 原子改寫成功的呼叫者建立 restamp debt；回合內保存的時間是重試唯一依據。
     let first_delivery = sqlx::query("UPDATE turns SET delivered_at=?, restamp_pending=1 WHERE id=? AND delivered_at IS NULL")
     .bind(at)
@@ -68,11 +68,11 @@ pub(crate) async fn mark_delivery(app: &Arc<App>, turn_id: &str, rec: DeliveryRe
 /// Finish the durable side effect for a first-delivered prompt. All required reads and timestamp
 /// writes stay in one transaction, so any SQLite failure leaves `restamp_pending` set. The event
 /// carries the loaded row directly; there is no fallible post-commit lookup that can lose it.
-async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str) -> anyhow::Result<()> {
+async fn restamp_queued_prompt(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), turn_id: &str) -> anyhow::Result<()> {
     // `BEGIN IMMEDIATE`：這個交易先讀後寫，一般（deferred）交易讀完才升級成寫入時，別的寫入者正拿著鎖，SQLite 會直接回
     // `database is locked`（code 5／517），完全不等 busy_timeout——daemon 剛起來撞上前一顆還沒收乾淨的寫入就是這樣（正式環境
     // 一天 10 次）。一開始就要寫入鎖，才會等。
-    let mut tx = db::begin_write(&app.db).await?;
+    let mut tx = db::begin_write(app.db()).await?;
     let target: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT created_at, delivered_at FROM turns WHERE id=? AND restamp_pending=1",
     )
@@ -150,14 +150,14 @@ async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str) -> anyhow::Result<
     sqlx::query("UPDATE turns SET restamp_pending=0 WHERE id=? AND delivered_at=? AND restamp_pending=1")
         .bind(turn_id)
         .bind(first_at)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
     Ok(())
 }
 
-pub(crate) async fn rearm_queued_prompt_restamps(app: &Arc<App>) -> anyhow::Result<()> {
+pub(crate) async fn rearm_queued_prompt_restamps(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit)) -> anyhow::Result<()> {
     let turns: Vec<String> = sqlx::query_scalar("SELECT id FROM turns WHERE restamp_pending=1 ORDER BY created_at, id")
-        .fetch_all(&app.db)
+        .fetch_all(app.db())
         .await?;
     let mut failed = None;
     for turn_id in turns {
@@ -169,7 +169,7 @@ pub(crate) async fn rearm_queued_prompt_restamps(app: &Arc<App>) -> anyhow::Resu
     failed.map_or(Ok(()), Err)
 }
 
-fn schedule_restamp_retry(app: &Arc<App>, turn_id: &str) {
+fn schedule_restamp_retry(app: &Arc<impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + 'static>, turn_id: &str) {
     let app = app.clone();
     let turn_id = turn_id.to_string();
     tokio::spawn(async move {
@@ -296,11 +296,11 @@ pub(super) async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &
 
 /// 這筆 turn 現在的樣子，換成給呼叫端的答覆。冪等重送（同一個 `client_request_id`）與「撤回時發現
 /// turn 已經被別的路徑收掉」都走這裡，同一筆 turn 才不會因為問法不同而拿到兩種答案（review3 L4）。
-pub(super) async fn answer_for_turn(app: &Arc<App>, t: &db::Turn) -> LcResult<PromptOut> {
+pub(super) async fn answer_for_turn(app: &impl crate::capabilities::Db, t: &db::Turn) -> LcResult<PromptOut> {
     // 第一則才是這一回合的 prompt；之後的可能是回合中補充的（`sent_via = 'supplement'`）。
     let message_id = sqlx::query_scalar::<_, String>("SELECT id FROM messages WHERE turn_id=? AND role='user' ORDER BY created_at, rowid LIMIT 1")
         .bind(&t.id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)?
         .unwrap_or_default();
@@ -321,10 +321,10 @@ pub(super) async fn answer_for_turn(app: &Arc<App>, t: &db::Turn) -> LcResult<Pr
 }
 
 /// [`answer_for_turn`]，但 turn 要先從 id 讀回來（撤回撤不掉時，手上只有 id）。
-pub(super) async fn answer_for_turn_id(app: &Arc<App>, turn_id: &str) -> LcResult<PromptOut> {
+pub(super) async fn answer_for_turn_id(app: &impl crate::capabilities::Db, turn_id: &str) -> LcResult<PromptOut> {
     let t = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?")
         .bind(turn_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::Upstream("the prompt was not sent and its turn is gone".into()))?;
@@ -359,7 +359,7 @@ pub(crate) enum Admission {
 
 /// 窗口握著就回 `Some(那個 409)`；**讀不到窗口狀態也擋**，回 503 `maintenance_state_unavailable`（issue #127：
 /// 觀測不到租約不等於沒有租約）。`ControlPlane` 一律放行。
-pub(super) async fn maintenance_refusal(app: &Arc<App>, admission: Admission) -> Option<LcError> {
+pub(super) async fn maintenance_refusal(app: &impl crate::lifecycle::send_now::ports::MaintenancePort, admission: Admission) -> Option<LcError> {
     if admission == Admission::ControlPlane {
         return None;
     }
@@ -3578,10 +3578,10 @@ mod send_now_tests {
 
 /// 同一個 client_request_id 換了內容不能回第一則的結果（#337）：呼叫端會以為新的那則送達了，其實一個字都沒打。
 /// 只有內容完全一樣的重送才是冪等；讀不到原本的內容也不敢說「一樣」，回錯讓呼叫端重試。
-pub(crate) async fn check_same_text(app: &Arc<App>, turn: &db::Turn, text: &str) -> LcResult<()> {
+pub(crate) async fn check_same_text(app: &impl crate::capabilities::Db, turn: &db::Turn, text: &str) -> LcResult<()> {
     let stored: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at LIMIT 1")
         .bind(&turn.id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)?;
     match stored {

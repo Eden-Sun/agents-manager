@@ -21,12 +21,12 @@ use std::sync::Arc;
 
 /// `am_ports::BotLock` 的 App 實作：就是 `App::bot_lock` 那把 per-bot 互斥鎖（同一格 `Arc<Mutex<()>>`）。
 /// 守衛持有 `OwnedMutexGuard`，所以 `App::retain_bot_locks` 看到的 `Arc` 計數跟原本握著 `lock` 的寫法一樣（有人握著或等著就不清）。
-pub(crate) struct AppBotLock<'a> {
-    app: &'a Arc<App>,
+pub(crate) struct AppBotLock<'a, A> {
+    app: &'a A,
 }
 
-impl<'a> AppBotLock<'a> {
-    pub(crate) fn new(app: &'a Arc<App>) -> Self {
+impl<'a, A: crate::capabilities::BotLocks> AppBotLock<'a, A> {
+    pub(crate) fn new(app: &'a A) -> Self {
         Self { app }
     }
 }
@@ -34,7 +34,7 @@ impl<'a> AppBotLock<'a> {
 struct Held(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>);
 impl BotLockGuard for Held {}
 
-impl BotLock for AppBotLock<'_> {
+impl<A: crate::capabilities::BotLocks> BotLock for AppBotLock<'_, A> {
     fn lock_bot<'a>(&'a self, bot: &'a BotId) -> impl Future<Output = std::result::Result<Box<dyn BotLockGuard + 'a>, PortError>> + Send + 'a {
         async move {
             let lock = self.app.bot_lock(bot).await;

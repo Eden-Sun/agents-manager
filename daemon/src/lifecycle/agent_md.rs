@@ -5,12 +5,10 @@
 //! （`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`、codex `project_doc_max_bytes=0`），內容只有一個來源：設定指到的檔，
 //! 接在 AG Man 規則後面注入。子 agent 經 herdr shim 拿同一份（`AM_INSTRUCTIONS_FILE`）。
 
-use std::sync::Arc;
 
 use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::hosts::sh_quote;
-use crate::state::App;
 
 /// bot 目錄裡給子 agent 讀的那份（AG Man 規則 + agent md，不含母 bot 自己的 persona）。
 pub const CHILD_FILE: &str = "instructions.md";
@@ -28,13 +26,13 @@ pub struct AgentMd {
 
 /// 依 `[agents]` 讀這個專案的 agent md（全域在前、專案在後）。全域那份在 daemon 這台機器上讀；
 /// 專案那份跟 repo 放在一起，在專案所在的主機上讀（遠端走 ssh）。
-pub async fn load(app: &App, project: &db::Project) -> AgentMd {
-    let agents = app.cfg.agents_fresh().await;
+pub async fn load(app: &(impl crate::capabilities::Cfg + crate::hosts::HostsAccess), project: &db::Project) -> AgentMd {
+    let agents = app.cfg().agents_fresh().await;
     let mut reads: Vec<Result<String, String>> = Vec::new();
     if let Some(f) = agents.global_file() {
         reads.push(read_local(f).await);
     }
-    let conn = if project.host == LOCAL_HOST { None } else { app.hosts.get(&project.host).await };
+    let conn = if project.host == LOCAL_HOST { None } else { app.hosts().get(&project.host).await };
     for f in agents.project_files(&project.id, &project.label) {
         reads.push(if project.host == LOCAL_HOST {
             read_local(f).await
@@ -90,13 +88,13 @@ pub fn compose(rules: &str, md: &str) -> String {
 
 /// 把子 agent 讀的那份寫進 bot 目錄（`<shim_dir>/..`），回傳路徑給 pane env 的 `AM_INSTRUCTIONS_FILE`。
 /// 寫不進去只警告：子 agent 少了這份，母 bot 照開。
-pub async fn install(app: &Arc<App>, bot: &db::Bot, project: &db::Project, shim_dir: Option<&str>, text: &str) -> Option<String> {
+pub async fn install(app: &impl crate::hosts::HostsAccess, bot: &db::Bot, project: &db::Project, shim_dir: Option<&str>, text: &str) -> Option<String> {
     install_named(app, bot, project, shim_dir, CHILD_FILE, text).await
 }
 
 /// grok has no rules-file flag. Stage the full startup instructions here and pass only this short path through `--rules`.
 pub async fn install_grok_rules(
-    app: &Arc<App>,
+    app: &impl crate::hosts::HostsAccess,
     bot: &db::Bot,
     project: &db::Project,
     shim_dir: Option<&str>,
@@ -106,7 +104,7 @@ pub async fn install_grok_rules(
 }
 
 async fn install_named(
-    app: &Arc<App>,
+    app: &impl crate::hosts::HostsAccess,
     bot: &db::Bot,
     project: &db::Project,
     shim_dir: Option<&str>,
@@ -118,7 +116,7 @@ async fn install_named(
     let result = if project.host == LOCAL_HOST {
         crate::shim_refresh::write_atomic(std::path::Path::new(&path), text).map(|_| ()).map_err(anyhow::Error::from)
     } else {
-        match app.hosts.get(&project.host).await {
+        match app.hosts().get(&project.host).await {
             Some(conn) => install_remote(&conn, &path, text).await,
             None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),
         }

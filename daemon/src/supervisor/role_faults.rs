@@ -14,11 +14,8 @@
 //! 已經修好的協調者因為陳舊的旗標被繼續當成壞的。同理，**空表不是故障**：daemon 剛起來、第一拍
 //! 還沒跑時 [`reason`] 回 `None`，`role_state` 就退回原本只看 DB 的行為（#421 的不變量）。
 
-use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::{QuotaOps};
 use crate::supervisor::roles::Role;
-use std::sync::Arc;
 
 /// 停在登入失效。契約字串的正本在 [`crate::supervisor::health`]（#421 原樣寫進 inbox payload），
 /// 這裡不另外定義一份——同一個字串兩個來源，哪天漂掉沒有人會發現。
@@ -61,16 +58,16 @@ pub struct RoleFault {
 /// 由 health 的 30 秒 tick 在 `incidents::sweep` **之前**呼叫：incident 與同一拍的 health 讀數要講
 /// 同一件事（沿用那個 tick 原本的註解「a fault and the health reading that mentions it never
 /// disagree by one tick」）。
-pub async fn refresh(app: &Arc<App>) {
+pub async fn refresh(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::supervisor::ports::QuotaOps + crate::supervisor::role_faults::RoleFaultTable)) {
     for role in WATCHED {
         // 沒建立的角色整個不留紀錄：留著會讓 `incidents::observe` 每一拍都把這個 kind 算成
         // 「探針沒跑」，另一顆角色已經開著的 incident 就再也關不掉（blind 會擋住 resolve）。
-        if !is_configured(&app.db, role).await {
-            app.role_faults.lock().await.remove(role.as_str());
+        if !is_configured(app.db(), role).await {
+            app.role_faults().lock().await.remove(role.as_str());
             continue;
         }
         let probe = probe_role(app, role).await;
-        let mut faults = app.role_faults.lock().await;
+        let mut faults = app.role_faults().lock().await;
         let entry = faults.entry(role.as_str().to_string()).or_default();
         entry.probe_failed = probe.is_none();
         // 兩個訊號各自算，不要混在同一個 match 裡：**只有畫面那一半**在讀不到時要維持上一拍的結論
@@ -101,13 +98,13 @@ pub async fn refresh(app: &Arc<App>) {
 }
 
 /// 這一拍的結論：不可用的原因，沒看到問題（或表還沒被填過）就是 `None`。
-pub async fn reason(app: &Arc<App>, role: Role) -> Option<&'static str> {
-    app.role_faults.lock().await.get(role.as_str()).and_then(|f| f.reason)
+pub async fn reason(app: &impl crate::supervisor::role_faults::RoleFaultTable, role: Role) -> Option<&'static str> {
+    app.role_faults().lock().await.get(role.as_str()).and_then(|f| f.reason)
 }
 
 /// incident 那邊要的整份（`probe_failed`／`since`／`failed_turns` 都要，不只 `reason`）。
-pub async fn snapshot(app: &Arc<App>, role: Role) -> Option<RoleFault> {
-    app.role_faults.lock().await.get(role.as_str()).cloned()
+pub async fn snapshot(app: &impl crate::supervisor::role_faults::RoleFaultTable, role: Role) -> Option<RoleFault> {
+    app.role_faults().lock().await.get(role.as_str()).cloned()
 }
 
 /// 記一**輪** `recover_unacked` 對某個角色看到的 notify 結果：`failed` 是這一輪掃到、回合是 `failed`
@@ -119,7 +116,7 @@ pub async fn snapshot(app: &Arc<App>, role: Role) -> Option<RoleFault> {
 ///
 /// 只累計，不在這裡下結論：`reason` 一律由 [`refresh`] 在同一拍統一算，免得兩個地方各寫各的。
 pub async fn note_notify_round(
-    app: &Arc<App>,
+    app: &impl crate::supervisor::role_faults::RoleFaultTable,
     role: &str,
     failed: std::collections::BTreeSet<String>,
     any_completed: bool,
@@ -131,7 +128,7 @@ pub async fn note_notify_round(
     if failed.is_empty() && !any_completed {
         return;
     }
-    let mut faults = app.role_faults.lock().await;
+    let mut faults = app.role_faults().lock().await;
     let entry = faults.entry(role.to_string()).or_default();
     if any_completed {
         entry.failed_turns.clear();
@@ -167,14 +164,14 @@ async fn is_configured(db: &SqlitePool, role: Role) -> bool {
 /// 認它的字面（`5h:-`）等於把偵測綁在一支外部腳本的格式上，換一台沒有那支腳本的機器就永遠不成立，
 /// 於是真的登出也偵測不到，而且測試照不出來（i407 review 2026-09-24）。daemon 自己那份是 claude 的
 /// StatusLine hook 送進來的 `rate_limits`（`/api/quota` 同一個來源），登入不了就不會有新的讀數。
-async fn probe_role(app: &Arc<App>, role: Role) -> Option<bool> {
-    let bot_id = crate::supervisor::roles::bot_for(&app.db, role).await.ok()??;
+async fn probe_role(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::supervisor::ports::QuotaOps), role: Role) -> Option<bool> {
+    let bot_id = crate::supervisor::roles::bot_for(app.db(), role).await.ok()??;
     // claude 以外的 CLI 沒有這個畫面，不要拿別人的版面去猜——但那不是「讀不到」，是「不是這個問題」。
-    let bot = crate::db::bot(&app.db, &bot_id).await.ok().flatten()?;
+    let bot = crate::db::bot(app.db(), &bot_id).await.ok().flatten()?;
     if bot.kind != "claude" {
         return Some(false);
     }
-    let run = crate::db::active_run(&app.db, &bot_id).await.ok()?;
+    let run = crate::db::active_run(app.db(), &bot_id).await.ok()?;
     let Some(run) = run else {
         // `role_state` 已明確回報 no_run；已成功查到沒有 run，不是探針讀取失敗。
         return Some(false);
@@ -196,14 +193,14 @@ async fn probe_role(app: &Arc<App>, role: Role) -> Option<bool> {
 /// 這正是兩者的差別，而且完全不依賴畫面上印了什麼。
 ///
 /// 讀不到這顆 bot 在哪台主機就回 `None`（#243）：當成本機會拿 daemon 這台的讀數去判遠端 bot 登入失效。
-async fn quota_is_blank(app: &Arc<App>, bot: &crate::db::Bot) -> Option<bool> {
-    let host = crate::db::bot_host(&app.db, &bot.id).await.ok()?;
+async fn quota_is_blank(app: &(impl crate::capabilities::Db + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::supervisor::ports::QuotaOps), bot: &crate::db::Bot) -> Option<bool> {
+    let host = crate::db::bot_host(app.db(), &bot.id).await.ok()?;
     let base = app.quota_base_for_host(&host, &bot.kind, bot.identity.as_deref()).await;
     let key = crate::quota::quota_key(&host, &base);
-    if app.quota_stale.lock().await.contains(&key) {
+    if app.quota_stale().lock().await.contains(&key) {
         return Some(true);
     }
-    Some(match app.quotas.lock().await.get(&key) {
+    Some(match app.quotas().lock().await.get(&key) {
         None => true,
         Some(q) => q.five_hour.is_none() && q.seven_day.is_none(),
     })
@@ -212,6 +209,8 @@ async fn quota_is_blank(app: &Arc<App>, bot: &crate::db::Bot) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
 
     const RESPONDER: Role = Role::Responder;
 
@@ -419,4 +418,9 @@ mod tests {
         assert_eq!(seen, None, "讀不到主機不是「額度空的」");
         assert_eq!(quota_is_blank(&app, &bot).await, Some(true), "讀得到之後照常判（遠端這把 key 沒有讀數）");
     }
+}
+
+/// AGM 角色的故障帳。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait RoleFaultTable: Send + Sync {
+    fn role_faults(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::supervisor::role_faults::RoleFault>>;
 }

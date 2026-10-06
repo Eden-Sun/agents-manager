@@ -241,7 +241,7 @@ impl Recovery {
     }
 
     /// 補一輪；回 `true`＝什麼都不欠了。
-    async fn pass(&mut self, app: &Arc<App>) -> bool {
+    async fn pass(&mut self, app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::events::ports::TurnCommands + crate::lifecycle::poller::ProgressPollers)) -> bool {
         // 插隊送出途中停掉、還沒掛上 run 的那一則（#120）。排在接回 poller 之前：鍵其實生效了的那一則會在這裡掛上 run（#229），
         // 接回的才是它、不是已經被它打斷的那一筆。
         if self.send_nows {
@@ -268,11 +268,11 @@ impl Recovery {
         self.runs.as_ref().is_some_and(|r| r.is_empty()) && !self.queue && !self.send_nows && !self.ended_runs && !self.queued_prompt_restamps
     }
 
-    async fn rearm_in_flight(&mut self, app: &Arc<App>) {
+    async fn rearm_in_flight(&mut self, app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::events::ports::TurnCommands + crate::lifecycle::poller::ProgressPollers)) {
         if self.runs.as_ref().is_some_and(|r| r.is_empty()) {
             return;
         }
-        let runs = match crate::db::all_active_runs(&app.db).await {
+        let runs = match crate::db::all_active_runs(app.db()).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = ?e, "cannot re-arm progress pollers yet");
@@ -295,7 +295,7 @@ impl Recovery {
 }
 
 /// 一個 run 在飛的那一筆接回 poller（剛送出的再補 stall watchdog）。`false`＝這一輪讀寫不到，之後再補。
-async fn rearm_run(app: &Arc<App>, run: &db::Run) -> bool {
+async fn rearm_run(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::events::ports::TurnCommands + crate::lifecycle::poller::ProgressPollers), run: &db::Run) -> bool {
     // 跟送出同一把鎖：這個行程送到一半的那一筆不會被當成重啟前的孤兒。
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
@@ -305,10 +305,10 @@ async fn rearm_run(app: &Arc<App>, run: &db::Run) -> bool {
         return false;
     }
     // 已經有人盯著這個 run（重試期間這個行程自己送出的回合掛了 poller）：不再掛一次。
-    if app.progress_pollers.lock().await.contains_key(&run.id) {
+    if app.progress_pollers().lock().await.contains_key(&run.id) {
         return true;
     }
-    let turn = match crate::db::in_flight_turn(&app.db, &run.id).await {
+    let turn = match crate::db::in_flight_turn(app.db(), &run.id).await {
         Ok(Some(t)) => t,
         Ok(None) => return true,
         Err(e) => {

@@ -692,17 +692,17 @@ fn daemon_window_to_port(window: &crate::quota::Window) -> PortWindow {
 }
 
 /// App-side adapters preserve the existing projection and event ordering behavior.
-pub struct AppEventSink<'a> {
-    app: &'a Arc<App>,
+pub struct AppEventSink<'a, A> {
+    app: &'a A,
 }
 
-impl<'a> AppEventSink<'a> {
-    pub fn new(app: &'a Arc<App>) -> Self {
+impl<'a, A: crate::capabilities::Emit + crate::capabilities::BotStatusEmit> AppEventSink<'a, A> {
+    pub fn new(app: &'a A) -> Self {
         Self { app }
     }
 }
 
-impl EventSink for AppEventSink<'_> {
+impl<A: crate::capabilities::Emit + crate::capabilities::BotStatusEmit> EventSink for AppEventSink<'_, A> {
     fn emit<'a>(
         &'a self,
         event: EventEnvelope,

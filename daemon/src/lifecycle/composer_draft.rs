@@ -98,8 +98,8 @@ pub(super) async fn read_draft(client: &HerdrClient, pane: &str, kind: &str) -> 
 }
 
 /// Recheck that the action still targets the active run, pane and native session it planned against.
-async fn planned_authority_matches(app: &Arc<App>, run: &db::Run, proof: Option<&Proof>) -> bool {
-    let Ok(Some(current)) = db::active_run(&app.db, &run.bot_id).await else { return false };
+async fn planned_authority_matches(app: &impl crate::capabilities::Db, run: &db::Run, proof: Option<&Proof>) -> bool {
+    let Ok(Some(current)) = db::active_run(app.db(), &run.bot_id).await else { return false };
     let same_binding = current.id == run.id
         && current.state == "running"
         && current.pane_id == run.pane_id
@@ -147,7 +147,7 @@ pub(crate) async fn with_draft(client: &HerdrClient, run: &db::Run, bot: &db::Bo
 /// 清掉框裡使用者確認過的那段（`expect_token`），**重讀畫面確認框是空的**才回 `Ok`；清不掉就回錯，呼叫端一個字都不打。
 /// 框本來就空了＝token 已失效，合併的「清掉再送」不能退化成一般送出。`busy`＝有回合在跑（插隊送出）：`ctrl+c` 會打斷它，不按。
 pub(crate) async fn clear(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     client: &HerdrClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -265,7 +265,7 @@ fn new_user_entries(format: LogFormat, path: &std::path::Path, offset: u64) -> s
 /// 第二個值是 session log 裡那一則的原文（只有一則新的時候）：對話裡記它，不記畫面讀來的字。
 #[allow(clippy::too_many_arguments)]
 async fn confirm(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     client: &HerdrClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -311,8 +311,8 @@ async fn confirm(
 }
 
 /// 對話裡記 session log 的原文（畫面讀來的草稿可能是摺起來的 `[Pasted text …]`、少了空白）。
-async fn record_exact_text(app: &Arc<App>, turn_id: &str, msg_id: &str, text: &str) -> anyhow::Result<()> {
-    let mut tx = app.db.begin().await?;
+async fn record_exact_text(app: &impl crate::capabilities::Db, turn_id: &str, msg_id: &str, text: &str) -> anyhow::Result<()> {
+    let mut tx = app.db().begin().await?;
     sqlx::query("UPDATE messages SET content = ? WHERE id = ?").bind(text).bind(msg_id).execute(&mut *tx).await?;
     sqlx::query("UPDATE turns SET prompt_text = ? WHERE id = ?").bind(text).bind(turn_id).execute(&mut *tx).await?;
     tx.commit().await?;

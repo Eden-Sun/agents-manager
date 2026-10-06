@@ -218,7 +218,7 @@ fn read_request(agm_dir: &Path) -> Option<Value> {
 }
 
 /// 正在 `working` 的 bot（確認框列出來：換 binary 要等它們，不是按了就砍）。
-async fn working_bots(app: &Arc<App>) -> Vec<Value> {
+async fn working_bots(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView)) -> Vec<Value> {
     match crate::supervisor::maintenance::safety(app, &[]).await {
         Ok(v) => v.get("working").and_then(Value::as_array).cloned().unwrap_or_default(),
         Err(_) => Vec::new(),
@@ -259,7 +259,7 @@ fn maybe_fetch(repo: &Path) {
     });
 }
 
-pub async fn status(app: &Arc<App>, ctx: &Ctx) -> Result<Value, LcError> {
+pub async fn status(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView), ctx: &Ctx) -> Result<Value, LcError> {
     let diff = behind(&ctx.repo, &ctx.live_sha).await;
     let running = in_progress(app, &ctx.agm_dir).await?;
     let mut out = match diff {

@@ -14,7 +14,6 @@
 //! 開著的框記在記憶體（`run_id` → 這一次的警語、補標前的狀態）：daemon 重啟後最多重講一次通知；
 //! 重啟當下若是由這裡補標的 `blocked`，交給 herdr 下一次狀態事件或 reconcile 更正。
 
-use crate::events::ports::{TurnCommands};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -76,7 +75,7 @@ pub const CLOSED_NOTE: &str =
     "防誤刪確認框已經關掉（有人回答了，或 2 分鐘到了 claude 自動拒絕——拒絕的話那個 rm 沒有執行）。排著要送的訊息照常送。";
 
 /// 這一次框（同一句警語＋同一個指令）只講一次；送達閘門與巡邏共用。回傳這次有沒有真的寫。
-pub(crate) async fn notify_once(app: &Arc<App>, run: &db::Run, rm: &DangerousRm) -> bool {
+pub(crate) async fn notify_once(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), run: &db::Run, rm: &DangerousRm) -> bool {
     {
         let mut m = open().lock().unwrap();
         match m.get(&run.id) {
@@ -89,7 +88,7 @@ pub(crate) async fn notify_once(app: &Arc<App>, run: &db::Run, rm: &DangerousRm)
         }
     }
     tracing::warn!(run = %run.id, bot = %run.bot_id, target = %rm.target, "claude 停在 Dangerous rm 確認框，等使用者本人核准（不自動按）");
-    match db::conversation_id(&app.db, &run.bot_id).await {
+    match db::conversation_id(app.db(), &run.bot_id).await {
         Ok(conv) => {
             let _ = app.insert_message(&conv, None, "system", &notice(rm), "system", false, None).await;
         }
@@ -140,7 +139,7 @@ pub async fn forget_ended(app: &impl crate::capabilities::Db, active: &[db::Run]
     }
 }
 
-pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) {
+pub(crate) async fn observe_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit + crate::events::ports::TurnCommands), run: &db::Run, screen: &str) {
     match crate::tui_prompts::dangerous_rm_prompt(screen) {
         Some(rm) => {
             notify_once(app, run, &rm).await;
@@ -152,7 +151,7 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
             let marked = sqlx::query("UPDATE runs SET agent_status='blocked' WHERE id=? AND agent_status=?")
                 .bind(&run.id)
                 .bind(&prev)
-                .execute(&app.db)
+                .execute(app.db())
                 .await
                 .map(|r| r.rows_affected() == 1)
                 .unwrap_or(false);
@@ -178,13 +177,13 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
                 match sqlx::query("UPDATE runs SET agent_status=? WHERE id=? AND state='running' AND agent_status='blocked'")
                     .bind(previous)
                     .bind(&run.id)
-                    .execute(&app.db)
+                    .execute(app.db())
                     .await
                 {
                     Ok(result) if result.rows_affected() == 1 => (true, true),
                     Ok(_) => match sqlx::query_as::<_, (String, String)>("SELECT state, agent_status FROM runs WHERE id=?")
                         .bind(&run.id)
-                        .fetch_optional(&app.db)
+                        .fetch_optional(app.db())
                         .await
                     {
                         Ok(Some((state, status))) => (state != "running" || status != "blocked", false),
@@ -210,7 +209,7 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
             }
             open().lock().unwrap().remove(&run.id);
             tracing::info!(run = %run.id, bot = %run.bot_id, "Dangerous rm 確認框關掉了（回答或自動拒絕）");
-            if let Ok(conv) = db::conversation_id(&app.db, &run.bot_id).await {
+            if let Ok(conv) = db::conversation_id(app.db(), &run.bot_id).await {
                 let _ = app.insert_message(&conv, None, "system", CLOSED_NOTE, "system", false, None).await;
             }
             if status_changed {

@@ -33,13 +33,10 @@
 //! and the operational scripts in `scripts/ops/`; it is not an OS-level mutex.
 
 use crate::lifecycle::LcError;
-use crate::state::App;
 use sqlx::SqlitePool;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 use super::store;
-use super::ports::LocalAccountView;
 
 /// Resources a lease can be taken on. Anything else is refused: a typo must not silently create
 /// a private lock that protects nothing.
@@ -92,16 +89,16 @@ pub struct Escalation {
 
 /// 誰等太久就放寬誰（AGM 裁示 2026-09-16）：`approval_id` 給了就只看**那一筆**核准等了多久，
 /// 別人放著沒用掉的核准不算數。沒給（唯讀查詢，還不知道會用哪一筆）才退回最早那筆還活著的。
-pub async fn escalation_for(app: &Arc<App>, approval_id: Option<&str>) -> Result<Option<Escalation>, LcError> {
+pub async fn escalation_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView), approval_id: Option<&str>) -> Result<Option<Escalation>, LcError> {
     let now = crate::db::now();
     let found = match approval_id {
-        Some(id) => store::approval(&app.db, id)
+        Some(id) => store::approval(app.db(), id)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?
             // 只有「還能用來開窗口」的核准才有資格計時：已消耗、被撤、過期的都不算。
             .filter(|a| a.status == "approved" && RESOURCES.contains(&a.purpose.as_str()))
             .filter(|a| !a.effective_expiry().as_deref().is_some_and(|t| crate::db::cmp_ts(t, &now).is_le())),
-        None => store::oldest_live_window_approval(&app.db, &now).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        None => store::oldest_live_window_approval(app.db(), &now).await.map_err(|e| LcError::Upstream(e.to_string()))?,
     };
     let Some(a) = found else { return Ok(None) };
     // 同一個申請者換 commit 接續的等待（`wait_since`）也算：main 一動核准就換一筆，計時不能跟著歸零。
@@ -381,9 +378,9 @@ pub async fn release(
 
 /// The daemon answering again *is* the end of the restart it was restarted for: a restart lease
 /// still held from before the restart is released here, and every hold it placed is lifted.
-pub async fn release_restart_on_startup(app: &Arc<App>) {
+pub async fn release_restart_on_startup(app: &(impl crate::build_scheduler::BuildSlotLock + crate::capabilities::Db + crate::capabilities::Emit + crate::credential_spawn::CredentialSpawnGate)) {
     for resource in EXCLUSIVE {
-        match store::lease(&app.db, resource).await {
+        match store::lease(app.db(), resource).await {
             Ok(Some(l)) if l.released_at.is_none() => {
                 let owner = l.owner.clone().unwrap_or_default();
                 let escalated = serde_json::from_str::<Value>(&l.detail_json)
@@ -396,7 +393,7 @@ pub async fn release_restart_on_startup(app: &Arc<App>) {
                         if escalated {
                             tracing::warn!(resource, owner, "上一次換版是升級後（縮小封鎖面）才拿到窗口的，不是等到全靜止");
                         }
-                        app.emit("supervisor_changed", json!({"lease": store::lease(&app.db, resource).await.ok().flatten().map(|l| l.to_json())})).await;
+                        app.emit("supervisor_changed", json!({"lease": store::lease(app.db(), resource).await.ok().flatten().map(|l| l.to_json())})).await;
                     }
                     Ok(false) => {}
                     Err(e) => tracing::warn!(resource, error = ?e, "daemon started: could not release the restart lease"),
@@ -406,7 +403,7 @@ pub async fn release_restart_on_startup(app: &Arc<App>) {
             Err(e) => tracing::warn!(resource, error = ?e, "daemon started: could not read the restart lease"),
         }
     }
-    window_closed(&app.db, "daemon started").await;
+    window_closed(app.db(), "daemon started").await;
 }
 
 /// What is going on that a restart would interrupt.
@@ -414,25 +411,25 @@ pub async fn release_restart_on_startup(app: &Arc<App>) {
 /// `blocked` panes are counted but are *not* a reason to refuse: a pane waiting for a human can
 /// wait for hours, and the restart path skips blocked panes anyway. What blocks a window is work
 /// actually running.
-pub async fn safety(app: &Arc<App>, exclude: &[String]) -> Result<Value, LcError> {
+pub async fn safety(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView), exclude: &[String]) -> Result<Value, LcError> {
     safety_for(app, exclude, None).await
 }
 
 /// 同一份檢查，但升級的計時綁在 `approval_id` 那一筆核准上（見 [`escalation_for`]）。
-pub async fn safety_for(app: &Arc<App>, exclude: &[String], approval_id: Option<&str>) -> Result<Value, LcError> {
+pub async fn safety_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView), exclude: &[String], approval_id: Option<&str>) -> Result<Value, LcError> {
     safety_as(app, exclude, approval_id, None).await
 }
 
 /// 再多一個 `owner`：以這個人的身分問，**他自己握的租約不算擋**（只在縮小封鎖面時有差，
 /// 全靜止模式本來就不看租約）。不給 `owner` 就是舊行為：每一把租約都算擋。
 pub async fn safety_as(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView),
     exclude: &[String],
     approval_id: Option<&str>,
     owner: Option<&str>,
 ) -> Result<Value, LcError> {
-    let bots = crate::db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let bots = crate::db::live_bots(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let sup = store::get_or_init(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let mut working = Vec::new();
     let mut blocked = Vec::new();
     let mut in_flight = Vec::new();
@@ -447,7 +444,7 @@ pub async fn safety_as(
             continue;
         }
         // 在看 run 之前先問：沒有 active run 的 bot 也可能有一筆排隊中的 prompt。
-        match delivery_critical(&app.db, &b.id).await {
+        match delivery_critical(app.db(), &b.id).await {
             Ok(Some(turn_id)) => delivering.push(json!({"bot_id": b.id, "name": b.name, "turn_id": turn_id})),
             Ok(None) => {}
             Err(e) => {
@@ -455,7 +452,7 @@ pub async fn safety_as(
                 unreadable.push(json!({"bot_id": b.id, "name": b.name}));
             }
         }
-        let run = match crate::db::active_run(&app.db, &b.id).await {
+        let run = match crate::db::active_run(app.db(), &b.id).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(bot = %b.id, error = ?e, "safety probe could not read this bot's run");
@@ -471,7 +468,7 @@ pub async fn safety_as(
         } else if run.agent_status == "blocked" {
             blocked.push(json!({"bot_id": b.id, "name": b.name}));
         }
-        match crate::db::in_flight_turn(&app.db, &run.id).await {
+        match crate::db::in_flight_turn(app.db(), &run.id).await {
             Ok(Some(t)) => in_flight.push(json!({"bot_id": b.id, "turn_id": t.id})),
             Ok(None) => {}
             Err(e) => {
@@ -480,8 +477,8 @@ pub async fn safety_as(
             }
         }
     }
-    let open = store::open_assignments(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let held = held_leases(&app.db, owner).await?;
+    let open = store::open_assignments(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+    let held = held_leases(app.db(), owner).await?;
     // 擋人的只有別人的：同一個 owner 先拿 rebuild 再拿 restart 是標準換版流程，不是搶窗口。
     let held_by_others = held.iter().filter(|l| l.get("own") != Some(&Value::Bool(true))).count();
     let esc = escalation_for(app, approval_id).await?;
@@ -569,7 +566,7 @@ fn exclude_from_quiet(exclude: &[String], self_bot: Option<&str>) -> Option<Stri
 
 /// supervisor lock so nothing changes between the check and the hold.
 pub async fn acquire(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView),
     resource: &str,
     owner: &str,
     approval_id: &str,
@@ -596,7 +593,7 @@ fn request_hash(request_id: &str) -> String {
 /// 就原樣回同一張（同 fence、同 token、不延長、不重驗 idle），回應多一個 `replayed: true`。
 /// 沒帶、換一個、租約已經還掉或過期，都照舊走完整的 acquire——request_id 只是「拿回」，不是另一條開窗口的路。
 pub async fn acquire_with_request(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView),
     resource: &str,
     owner: &str,
     approval_id: &str,
@@ -627,7 +624,7 @@ pub async fn acquire_with_request(
     let ttl = ttl_secs.clamp(30, MAX_TTL_SECS);
     let _g = super::lock().await;
 
-    let approval = store::approval(&app.db, approval_id)
+    let approval = store::approval(app.db(), approval_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .ok_or_else(|| LcError::NotFound("approval".into()))?;
@@ -648,12 +645,12 @@ pub async fn acquire_with_request(
     }
     // 一次核准一個窗口：這張已經開過一個、那個窗口過期沒 release（執行端掛了）時，**同一張**不能再開一次。
     // 接手過期租約時只消耗「別張」核准（store::acquire_lease），同一張會被放過去（review2 sup #6）。
-    if let Some(l) = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+    if let Some(l) = store::lease(app.db(), resource).await.map_err(|e| LcError::Upstream(e.to_string()))? {
         // 窗口已經 release 掉、核准卻還是 `approved`＝release 那一步的「消耗」沒寫成（DB 出錯，或兩步之間 daemon 死了）：
         // 一樣算用掉了，不然同一張核准能再開第二個窗口。
         let used = l.released_at.is_some() || !l.held_at(&crate::db::now());
         if used && l.approval_id.as_deref() == Some(approval.id.as_str()) {
-            let _ = store::decide_approval_from(&app.db, &approval.id, "approved", "consumed", "daemon", Some("lease expired"), None).await;
+            let _ = store::decide_approval_from(app.db(), &approval.id, "approved", "consumed", "daemon", Some("lease expired"), None).await;
             return Err(LcError::conflict(
                 "this approval already opened a window that expired without being released",
                 json!({"reason": "approval_already_used", "approval_id": approval.id, "fence": l.fence,
@@ -663,7 +660,7 @@ pub async fn acquire_with_request(
     }
     // 重送：同一個 request_id 開的、還握著的那一張，原樣拿回（見 [`acquire_with_request`]）。
     if let Some(rid) = request_id {
-        if let Some(l) = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+        if let Some(l) = store::lease(app.db(), resource).await.map_err(|e| LcError::Upstream(e.to_string()))? {
             let detail: Value = serde_json::from_str(&l.detail_json).unwrap_or(Value::Null);
             let same = l.held_at(&crate::db::now())
                 && l.owner.as_deref() == Some(owner)
@@ -732,7 +729,7 @@ pub async fn acquire_with_request(
     // 背景再結束回合」一條路——那正是規則 6a 禁止的（2026-09-18 AM-m3 連試 30 次都 raced=true）。
     let exclude_self = quiet_delivery.then(|| exclude_from_quiet(exclude, self_bot.as_deref())).flatten();
     let taken = store::acquire_lease(
-        &app.db,
+        app.db(),
         resource,
         owner,
         Some(&approval.id),
@@ -747,12 +744,12 @@ pub async fn acquire_with_request(
     .map_err(|e| LcError::Upstream(e.to_string()))?;
 
     let Some(lease) = taken else {
-        let held = store::lease(&app.db, resource).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+        let held = store::lease(app.db(), resource).await.map_err(|e| LcError::Upstream(e.to_string()))?;
         // 分得出是哪一種輸法：窗口被別人搶走，還是「就在這一瞬有 prompt 進了送達臨界區」。
         // 後者說成 `lease_held` 的話，呼叫端會去找一個根本不存在的持有者。
         if held.as_ref().is_none_or(|l| !l.held_at(&crate::db::now())) {
             let now = crate::db::now();
-            let racing = store::delivery_critical_anywhere(&app.db).await.unwrap_or(true);
+            let racing = store::delivery_critical_anywhere(app.db()).await.unwrap_or(true);
             if racing {
                 return Err(LcError::conflict(
                     "a prompt entered the delivery critical section while this window was being taken",
@@ -834,6 +831,8 @@ pub(crate) mod fault {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
     use crate::supervisor::store::Approval;
 
     /// 升級門檻的環境變數：只有「正整數」算數，其他一律回預設 30 分鐘。

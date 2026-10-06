@@ -94,7 +94,7 @@ fn ensure_open(m: &store::Mission) -> Result<(), LcError> {
 }
 
 /// 寫入交易發現任務已經關了（`store::Guarded::Closed`／`store::Round::Closed`）：照實回它現在的樣子。
-async fn closed_now(app: &Arc<App>, id: &str) -> LcError {
+async fn closed_now(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::hosts::HostsAccess), id: &str) -> LcError {
     match load(app, id).await {
         Ok(m) => ensure_open(&m).err().unwrap_or_else(|| LcError::conflict("already_closed", json!({"mission_id": id}))),
         Err(e) => e,
@@ -104,7 +104,7 @@ async fn closed_now(app: &Arc<App>, id: &str) -> LcError {
 /// `relay_from` is metadata, not authentication: when a Bot id is present and the claim is omitted,
 /// use that authenticated id. Bot tokens are checked by API middleware and `relay_auth` (issue #409).
 /// 規則在 `relay_auth::authenticate_mission`，跟 `POST /api/bots/{id}/prompt` 共用同一段 token 比對。
-async fn check_relay_from(app: &Arc<App>, headers: &HeaderMap, relay_from: Option<&str>) -> Result<Option<String>, LcError> {
+async fn check_relay_from(app: &(impl crate::capabilities::Db + crate::mission::ports::CallerOps), headers: &HeaderMap, relay_from: Option<&str>) -> Result<Option<String>, LcError> {
     let effective = effective_relay_claim(headers, relay_from);
     crate::relay_auth::authenticate_mission(app, headers, effective).await
 }

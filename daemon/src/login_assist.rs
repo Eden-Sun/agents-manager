@@ -110,10 +110,10 @@ fn identity_login_in_progress(host: &str, identity: &str) -> LcError {
 }
 
 /// Host reconfiguration invalidates the old pane authority and any opening login reservation.
-pub fn forget_host(app: &App, host: &str) {
-    let mut reservations = app.login_reservations.lock().unwrap_or_else(|e| e.into_inner());
+pub fn forget_host(app: &(impl crate::login_assist::LoginPanes + crate::login_assist::LoginReservations), host: &str) {
+    let mut reservations = app.login_reservations().lock().unwrap_or_else(|e| e.into_inner());
     reservations.retain(|(entry_host, _)| entry_host != host);
-    app.login_panes.lock().unwrap_or_else(|e| e.into_inner()).retain(|(entry_host, _), _| entry_host != host);
+    app.login_panes().lock().unwrap_or_else(|e| e.into_inner()).retain(|(entry_host, _), _| entry_host != host);
 }
 
 /// pane 關了（watcher 收尾、手動關）。
@@ -323,4 +323,9 @@ mod tests;
 /// 登入輔助開出的 pane。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait LoginPanes: Send + Sync {
     fn login_panes(&self) -> &crate::login_assist::Registry;
+}
+
+/// 登入殼的保留名單。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait LoginReservations: Send + Sync {
+    fn login_reservations(&self) -> &crate::login_assist::Reservations;
 }

@@ -33,7 +33,7 @@ pub(crate) fn pick_conversation(
 }
 
 /// `Some((對話 id, 紀錄檔尾巴))`；本機以外、找不到對話、讀不到檔＝`None`（照舊看畫面）。
-pub(crate) async fn load(app: &Arc<App>, run: &db::Run, host: &str) -> anyhow::Result<Option<(String, String)>> {
+pub(crate) async fn load(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess), run: &db::Run, host: &str) -> anyhow::Result<Option<(String, String)>> {
     if host != LOCAL_HOST {
         return Ok(None);
     }
@@ -53,7 +53,7 @@ pub(crate) async fn load(app: &Arc<App>, run: &db::Run, host: &str) -> anyhow::R
         "SELECT native_session_id FROM runs WHERE state = 'running' AND id <> ? AND native_session_id IS NOT NULL",
     )
     .bind(&run.id)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?
     .into_iter()
     .collect();
@@ -64,7 +64,7 @@ pub(crate) async fn load(app: &Arc<App>, run: &db::Run, host: &str) -> anyhow::R
     let path = path_of(&sid);
     let path_s = path.to_string_lossy().into_owned();
     if known.as_deref() != Some(sid.as_str()) || run.transcript_path.as_deref() != Some(path_s.as_str()) {
-        sqlx::query("UPDATE runs SET native_session_id = ?, transcript_path = ? WHERE id = ?").bind(&sid).bind(&path_s).bind(&run.id).execute(&app.db).await?;
+        sqlx::query("UPDATE runs SET native_session_id = ?, transcript_path = ? WHERE id = ?").bind(&sid).bind(&path_s).bind(&run.id).execute(app.db()).await?;
         tracing::info!(run = %run.id, session = %sid, "agy transcript: bound the pane to its conversation");
     }
     let Some(text) = crate::transcript_read::read_tail(&path, MAX_READ_BYTES) else { return Ok(None) };
@@ -72,13 +72,13 @@ pub(crate) async fn load(app: &Arc<App>, run: &db::Run, host: &str) -> anyhow::R
 }
 
 /// 讀到紀錄之後順手補網頁的 `status_json`（模型與 context token 數）。沒變就不寫。
-pub(crate) async fn record_status(app: &Arc<App>, bot: &db::Bot, run: &db::Run, text: &str) {
+pub(crate) async fn record_status(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot: &db::Bot, run: &db::Run, text: &str) {
     let model = run.runtime_model.as_deref().or(bot.model.as_deref());
     let Some(json) = crate::agy_support::status_json(model, crate::agy_support::last_input_tokens(text)) else { return };
     if run.status_json.as_deref() == Some(json.as_str()) {
         return;
     }
-    if sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&json).bind(&run.id).execute(&app.db).await.is_ok() {
+    if sqlx::query("UPDATE runs SET status_json = ? WHERE id = ?").bind(&json).bind(&run.id).execute(app.db()).await.is_ok() {
         bot_status(&AppEventSink::new(app), &bot.id).await;
     }
 }

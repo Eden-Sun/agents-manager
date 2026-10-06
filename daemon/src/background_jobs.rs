@@ -222,8 +222,8 @@ pub async fn refresh(app: &Arc<App>, run: &db::Run, kind: &str) {
 }
 
 /// 這一輪沒看到的 run（結束了）不留帳。
-pub fn retain_runs(app: &App, active: &[String]) {
-    app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
+pub fn retain_runs(app: &(impl crate::background_hook::HookSnapshots + crate::background_jobs::JobCounts), active: &[String]) {
+    app.background_jobs().lock().unwrap_or_else(|e| e.into_inner()).retain(|id, _| active.contains(id));
     crate::background_hook::retain_runs(app, active);
 }
 

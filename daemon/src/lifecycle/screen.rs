@@ -113,18 +113,18 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
 }
 
 
-pub(crate) async fn conversation_message_count(app: &Arc<App>, conversation_id: &str) -> anyhow::Result<i64> {
+pub(crate) async fn conversation_message_count(app: &impl crate::capabilities::Db, conversation_id: &str) -> anyhow::Result<i64> {
     super::poller::app_ports_p4obs::conversation_message_count(app, conversation_id).await
 }
 
 /// Newest assistant message: duplicate guard for re-reading an unchanged screen. 讀不到回錯（#193）：
 /// 當成「還沒有回覆」，同一份回覆就存第二次。
-pub(crate) async fn last_assistant_content(app: &Arc<App>, conversation_id: &str) -> anyhow::Result<Option<String>> {
+pub(crate) async fn last_assistant_content(app: &impl crate::capabilities::Db, conversation_id: &str) -> anyhow::Result<Option<String>> {
     super::poller::app_ports_p4obs::last_assistant_content(app, conversation_id).await
 }
 
 /// Record how far into the pane we have read, so the next capture starts after it.
-pub(crate) async fn remember_pane_cursor(app: &Arc<App>, run_id: &str, read: &crate::herdr::PaneRead) -> anyhow::Result<()> {
+pub(crate) async fn remember_pane_cursor(app: &impl crate::capabilities::Db, run_id: &str, read: &crate::herdr::PaneRead) -> anyhow::Result<()> {
     super::poller::app_ports_p4obs::remember_pane_cursor(app, run_id, read.revision as i64, &tail_hash(&read.text)).await
 }
 

@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use super::setup::{grok_hooks_file, grok_home, local_grok_dispatch_sh, GROK_DISPATCH_SH};
-use crate::state::App;
 
 const EVENTS: [&str; 2] = ["SessionStart", "Stop"];
 
@@ -139,8 +138,8 @@ fn mode_for(path: &Path) -> u32 {
     }
 }
 
-fn dispatcher_text(app: &App) -> String {
-    local_grok_dispatch_sh(&app.exe.to_string_lossy(), &app.data_dir.to_string_lossy(), app.instance().as_deref())
+fn dispatcher_text(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance)) -> String {
+    local_grok_dispatch_sh(&app.exe().to_string_lossy(), &app.data_dir().to_string_lossy(), app.instance().as_deref())
 }
 
 fn read_hook_file(path: &Path) -> anyhow::Result<Option<String>> {
@@ -165,8 +164,8 @@ fn read_hook_file(path: &Path) -> anyhow::Result<Option<String>> {
 }
 
 /// dispatcher 腳本與 hook 檔都對了就不動。回「有沒有改到東西」。
-fn ensure(app: &App, hooks_path: &Path) -> anyhow::Result<bool> {
-    let dispatcher = app.data_dir.join(GROK_DISPATCH_SH);
+fn ensure(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance), hooks_path: &Path) -> anyhow::Result<bool> {
+    let dispatcher = app.data_dir().join(GROK_DISPATCH_SH);
     let want_script = dispatcher_text(app);
     use std::os::unix::fs::PermissionsExt as _;
     let mode_ok = std::fs::symlink_metadata(&dispatcher).is_ok_and(|m| {
@@ -195,7 +194,7 @@ fn ensure(app: &App, hooks_path: &Path) -> anyhow::Result<bool> {
     Ok(changed)
 }
 
-fn hooks_path(app: &App, grok_home: &str) -> PathBuf {
+fn hooks_path(app: &impl crate::hosts::HostInstance, grok_home: &str) -> PathBuf {
     PathBuf::from(grok_home).join("hooks").join(grok_hooks_file(app.instance().as_deref()))
 }
 
@@ -208,18 +207,18 @@ pub(super) fn selected_grok_home(env: &Value, home: Option<&Path>) -> Option<Str
 }
 
 /// grok bot 啟動（本機）：裝／修這顆 bot 的 `GROK_HOME`（身分可以指到別的目錄）底下的 hook 檔。
-pub fn install_local(app: &App, env: &Value) -> anyhow::Result<bool> {
+pub fn install_local(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::hosts::HostInstance), env: &Value) -> anyhow::Result<bool> {
     let root = selected_grok_home(env, crate::home::dir().as_deref()).ok_or_else(|| anyhow::anyhow!("no home dir or GROK_HOME"))?;
     let path = hooks_path(app, &root);
     let changed = ensure(app, &path)?;
     if changed {
-        tracing::info!(dispatcher = %app.data_dir.join(GROK_DISPATCH_SH).display(), hooks = %path.display(), "grok hook installed");
+        tracing::info!(dispatcher = %app.data_dir().join(GROK_DISPATCH_SH).display(), hooks = %path.display(), "grok hook installed");
     }
     Ok(changed)
 }
 
 /// daemon 開機：預設位置（`grok_home` 沒給就看行程的 `GROK_HOME`，再退 `~/.grok`）的 hook 檔**存在**才檢查／修；不存在不建。
-pub fn heal_at_startup(app: &App, grok_home_override: Option<&str>) -> anyhow::Result<bool> {
+pub fn heal_at_startup(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::hosts::HostInstance), grok_home_override: Option<&str>) -> anyhow::Result<bool> {
     let env = match grok_home_override.map(str::to_string).or_else(|| std::env::var("GROK_HOME").ok()) {
         Some(g) => json!({"GROK_HOME": g}),
         None => json!({}),

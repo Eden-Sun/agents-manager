@@ -736,8 +736,8 @@ async fn park_quota(app: &Arc<App>, a: &store::Assignment, hit: &crate::quota::L
 /// 讀不到（交辦清單、bot、bot 在哪台主機）不當成沒有、也不退回 `local`（#197）：退回 `local` 的話，遠端 bot 停下的撞限會種進
 /// 本機同名的 key，把本機那個健康的帳號擋住。那一件跳過、回 `Err`，這台主機這一輪不算回填完（[`backfill_quota_limits_once`]
 /// 拿掉標記、稍後重跑）；已經種回去的留著（`seed_limit_hit` 只留最晚的，重來不會疊）。
-async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option<chrono::DateTime<chrono::Utc>>) -> anyhow::Result<()> {
-    let rows = store::quota_blocked_all(&app.db).await?;
+async fn backfill_quota_limits(app: &(impl crate::capabilities::Db + crate::supervisor::ports::QuotaOps), host: &str, parked_before: Option<chrono::DateTime<chrono::Utc>>) -> anyhow::Result<()> {
+    let rows = store::quota_blocked_all(app.db()).await?;
     let mut seeded = 0usize;
     let mut unreadable = None;
     for a in rows {
@@ -751,7 +751,7 @@ async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option
                 _ => continue,
             }
         }
-        let bot = match crate::db::bot(&app.db, &a.target_bot_id).await {
+        let bot = match crate::db::bot(app.db(), &a.target_bot_id).await {
             Ok(Some(bot)) => bot,
             Ok(None) => continue,
             Err(e) => {
@@ -759,7 +759,7 @@ async fn backfill_quota_limits(app: &Arc<App>, host: &str, parked_before: Option
                 continue;
             }
         };
-        let bot_host = match crate::db::bot_host(&app.db, &bot.id).await {
+        let bot_host = match crate::db::bot_host(app.db(), &bot.id).await {
             Ok(h) => h,
             Err(e) => {
                 unreadable.get_or_insert(e);
@@ -2026,7 +2026,7 @@ pub async fn apply_quota_policy(app: &Arc<App>) -> Result<bool, LcError> {
 /// 以前手拼 `claude:{identity}`、查不到就借裸 `claude`：cc0 若有自己的 `CLAUDE_CONFIG_DIR`，讀到的是
 /// **預設帳號**的數字，AGM 會因為別的帳號見底而換模型或停下來等（review2 quota L3）。查不到就是沒有讀數，
 /// `policy::decide` 把 `None` 當 Keep。key 在拿 `app.quotas` 鎖之前算好。
-async fn manager_quota(app: &Arc<App>, identity: &str) -> Option<crate::quota::Quota> {
+async fn manager_quota(app: &impl crate::supervisor::ports::QuotaOps, identity: &str) -> Option<crate::quota::Quota> {
     let host = crate::config::LOCAL_HOST;
     let key = crate::quota::quota_key(host, &app.quota_base_for_host(host, "claude", Some(identity)).await);
     app.quota_reading(&key).await
@@ -2034,7 +2034,7 @@ async fn manager_quota(app: &Arc<App>, identity: &str) -> Option<crate::quota::Q
 
 /// The soonest window reset this identity is known to have. `None` = we have no reading, and
 /// the plan is explicit that an unknown quota must not be treated as a full one.
-async fn quota_reset_at(app: &Arc<App>, identity: &str) -> Option<String> {
+async fn quota_reset_at(app: &impl crate::supervisor::ports::QuotaOps, identity: &str) -> Option<String> {
     let quota = manager_quota(app, identity).await?;
     [&quota.five_hour, &quota.seven_day, &quota.fable]
         .into_iter()
@@ -2220,14 +2220,14 @@ async fn controller_loop(app: Arc<App>, generation: i64) {
 ///
 /// 計數放記憶體（`App`，重啟重算，同 SPEC §18.9 的原則），連續到
 /// [`crate::supervisor::incidents::CLASSIFY_FAILURE_LIMIT`] 拍就由 incident 探針開票。
-fn note_classify_result(app: &Arc<App>, result: anyhow::Result<usize>) {
+fn note_classify_result(app: &impl crate::hookrecv::ClassifyFailures, result: anyhow::Result<usize>) {
     use std::sync::atomic::Ordering;
     match result {
         Ok(_) => {
-            app.classify_failures.store(0, Ordering::Relaxed);
+            app.classify_failures().store(0, Ordering::Relaxed);
         }
         Err(e) => {
-            let n = app.classify_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            let n = app.classify_failures().fetch_add(1, Ordering::Relaxed) + 1;
             tracing::warn!(
                 error = ?e,
                 consecutive = n,

@@ -26,9 +26,9 @@ const REMOTE_RPC_HOLD_SECS: u32 = 6;
 const CLIENT_INFO: &str = r#"{"name":"agents-manager","title":"agents-manager","version":"0.1"}"#;
 
 /// Read a fresh snapshot without turning an ordinary Bot request into a CLI probe.
-pub async fn cached(app: &Arc<App>, host: &str, kind: &str, identity: Option<&str>) -> Option<Value> {
+pub async fn cached(app: &impl crate::models::ModelsCache, host: &str, kind: &str, identity: Option<&str>) -> Option<Value> {
     let key = format!("{host}/{kind}/{}", identity.unwrap_or(""));
-    app.models_cache
+    app.models_cache()
         .lock()
         .await
         .get(&key)
@@ -334,7 +334,7 @@ pub fn parse_claude_effort_settings(text: &str) -> (Option<String>, BTreeMap<Str
 }
 
 /// `None` = `~/.claude`; an unknown or non-claude identity silently falls back to that too.
-async fn claude_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> Result<Option<String>> {
+async fn claude_config_dir(app: &Arc<impl crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>) -> Result<Option<String>> {
     let Some(name) = identity else { return Ok(None) };
     let Some(idn) = crate::tools::identity_for_host(app, host, name).await else { return Ok(None) };
     if idn.kind != "claude" {
@@ -387,7 +387,7 @@ const CLAUDE_BUILTIN_DEFAULT_EFFORT: &str = "high";
 
 /// What "不帶 `--effort`" resolves to; fills a spawned child's effort, since its argv never says.
 /// 讀不到設定檔回 `Err`（不是內建預設）：呼叫端會把這個值記進 bot，記錯了沒有人會再來讀一次。
-pub async fn claude_default_effort(app: &Arc<App>, host: &str, identity: Option<&str>, alias: &str) -> Result<String> {
+pub async fn claude_default_effort(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>, alias: &str) -> Result<String> {
     let dir = claude_config_dir(app, host, identity).await?;
     let (global, per_model) = read_claude_effort_settings(app, host, dir.as_deref()).await?;
     let alias = alias.to_ascii_lowercase();
@@ -1053,4 +1053,9 @@ mod tests {
         let err = "{\"id\":2,\"error\":{\"code\":-1,\"message\":\"nope\"}}";
         assert!(find_response(err, 2).unwrap().is_err());
     }
+}
+
+/// 模型清單快取。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait ModelsCache: Send + Sync {
+    fn models_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>>;
 }

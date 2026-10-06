@@ -14,38 +14,38 @@ use anyhow::Result;
 // --- Screen & Cursor Bookkeeping ---
 
 /// 更新 runs 表的 pane cursor。
-pub async fn remember_pane_cursor(app: &Arc<App>, run_id: &str, revision: i64, tail_hash: &str) -> Result<()> {
+pub async fn remember_pane_cursor(app: &impl crate::capabilities::Db, run_id: &str, revision: i64, tail_hash: &str) -> Result<()> {
     sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
         .bind(revision)
         .bind(tail_hash)
         .bind(run_id)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
     Ok(())
 }
 
 /// 查詢對話訊息總數。
-pub async fn conversation_message_count(app: &Arc<App>, conversation_id: &str) -> Result<i64> {
+pub async fn conversation_message_count(app: &impl crate::capabilities::Db, conversation_id: &str) -> Result<i64> {
     Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE conversation_id = ?")
         .bind(conversation_id)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await?)
 }
 
 /// 查詢最新 assistant 訊息內容。
-pub async fn last_assistant_content(app: &Arc<App>, conversation_id: &str) -> Result<Option<String>> {
+pub async fn last_assistant_content(app: &impl crate::capabilities::Db, conversation_id: &str) -> Result<Option<String>> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'
          ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(conversation_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?)
 }
 
 /// 讀取 pane recent unwrapped 文字。
 pub async fn read_pane_recent_unwrapped(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::HerdrRoutes,
     run: &db::Run,
     pane_id: &str,
     lines: u32,
@@ -56,7 +56,7 @@ pub async fn read_pane_recent_unwrapped(
 }
 
 /// 將 system notice 存入 messages 表。
-pub async fn insert_system_message(app: &Arc<App>, conversation_id: &str, content: &str) -> Result<()> {
+pub async fn insert_system_message(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), conversation_id: &str, content: &str) -> Result<()> {
     crate::lifecycle::insert_message(app, conversation_id, None, "system", content, "system", false, None).await?;
     Ok(())
 }
@@ -127,8 +127,8 @@ pub async fn apply_codex_limit_hit_quota(
 // --- Codex Banner Adapter ---
 
 /// 發送 codex 安全提醒通知訊息至聊天室。
-pub async fn post_codex_security_banner_notice(app: &Arc<App>, run: &db::Run, notice: &str) {
-    match db::conversation_id(&app.db, &run.bot_id).await {
+pub async fn post_codex_security_banner_notice(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, notice: &str) {
+    match db::conversation_id(app.db(), &run.bot_id).await {
         Ok(conv) => {
             if let Err(e) = crate::lifecycle::insert_message(app, &conv, None, "system", notice, "system", false, None).await {
                 tracing::warn!(run = %run.id, error = ?e, "could not post the codex security banner notice");
@@ -139,8 +139,8 @@ pub async fn post_codex_security_banner_notice(app: &Arc<App>, run: &db::Run, no
 }
 
 /// 推送 codex 安全提醒 ops_alert 到 supervisor inbox。
-pub async fn push_codex_security_banner_alert(app: &Arc<App>, run: &db::Run, reason: &str) {
-    let name = match db::bot(&app.db, &run.bot_id).await {
+pub async fn push_codex_security_banner_alert(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, reason: &str) {
+    let name = match db::bot(app.db(), &run.bot_id).await {
         Ok(Some(b)) => b.name,
         _ => String::new(),
     };
@@ -159,7 +159,7 @@ pub async fn push_codex_security_banner_alert(app: &Arc<App>, run: &db::Run, rea
         ),
         "action": "請人到這顆 bot 的「終端」pane 處理橫幅（選一個選項，或按 Esc 關掉），再重送；排隊的訊息會在橫幅關掉後自動重試。daemon 不會替你按 Esc 或任何鍵。同一次橫幅只推這一則，關掉後又出現才再推。",
     });
-    match crate::supervisor::store::push_inbox(&app.db, &key, "ops_alert", None, Some(&run.bot_id), None, &payload).await {
+    match crate::supervisor::store::push_inbox(app.db(), &key, "ops_alert", None, Some(&run.bot_id), None, &payload).await {
         Ok(Some(_)) => app.emit("supervisor_changed", serde_json::json!({ "ops_alert": key })).await,
         Ok(None) => {}
         Err(e) => tracing::warn!(run = %run.id, error = %e, "could not queue the codex security banner ops_alert"),
@@ -210,7 +210,7 @@ pub async fn started_by_the_cli_itself(app: &Arc<App>, bot: &db::Bot, transcript
 // --- Poller & Turn Error Adapters ---
 
 /// 清除 turn error。
-pub async fn clear_turn_error(app: &Arc<App>, run_id: &str, bot_id: &str) -> Result<()> {
+pub async fn clear_turn_error(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + crate::login_prompt::LoginNeeded), run_id: &str, bot_id: &str) -> Result<()> {
     crate::turn_error::clear(app, run_id, bot_id).await
 }
 
@@ -225,12 +225,12 @@ pub async fn repeats_answered_prompt(
 }
 
 /// 重建或讀取 turn 的 prompt texts 與 attachment 衍生交付文字。
-pub async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Result<Vec<String>> {
-    let rows = db::turn_user_messages_with_attachments(&app.db, turn_id).await?;
+pub async fn turn_echo_texts(app: &impl crate::capabilities::Db, turn_id: &str) -> Result<Vec<String>> {
+    let rows = db::turn_user_messages_with_attachments(app.db(), turn_id).await?;
     let mut out = Vec::new();
     let delivered: Option<String> = sqlx::query_scalar("SELECT prompt_text FROM turns WHERE id = ?")
         .bind(turn_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await?
         .flatten();
     if let Some(p) = delivered.filter(|p| !p.trim().is_empty()) {
@@ -255,8 +255,8 @@ pub async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> Result<Vec<String
 // --- Grok Transcript Host & Process Adapters ---
 
 /// 在 host 上執行 script。
-pub async fn host_sh(app: &Arc<App>, host: &str, script: &str) -> Result<String> {
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+pub async fn host_sh(app: &impl crate::hosts::HostsAccess, host: &str, script: &str) -> Result<String> {
+    let conn = app.hosts().get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     if conn.is_local() {
         let o = crate::local_sh::output(script).await?;
         if !o.status.success() {
@@ -271,18 +271,18 @@ pub async fn host_sh(app: &Arc<App>, host: &str, script: &str) -> Result<String>
 }
 
 /// 解析 grok home 路徑。
-pub async fn grok_home_for(app: &Arc<App>, bot: &db::Bot, host: &str) -> Result<String> {
+pub async fn grok_home_for(app: &impl crate::hosts::HostsAccess, bot: &db::Bot, host: &str) -> Result<String> {
     let env: serde_json::Value = serde_json::from_str(&bot.env_json).unwrap_or_else(|_| serde_json::json!({}));
     let home = if host == crate::config::LOCAL_HOST {
         crate::home::dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default()
     } else {
-        app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?.home().await?
+        app.hosts().get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?.home().await?
     };
     Ok(crate::lifecycle::setup::grok_home(&env, &home))
 }
 
 /// 透過行程探測取得 pane 中的 grok pids。
-pub async fn pids_in_pane(app: &Arc<App>, host: &str, pane: &str, herdr_session: Option<&str>) -> Vec<i32> {
+pub async fn pids_in_pane(app: &impl crate::hosts::HostsAccess, host: &str, pane: &str, herdr_session: Option<&str>) -> Vec<i32> {
     match crate::memproc::dump(app, host).await {
         Ok(out) => crate::memproc::pids_in_pane(&out, pane, herdr_session),
         Err(e) => {
@@ -294,7 +294,7 @@ pub async fn pids_in_pane(app: &Arc<App>, host: &str, pane: &str, herdr_session:
 
 /// 載入 agy session。
 pub async fn agy_session_load(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::hosts::HostsAccess),
     run: &db::Run,
     host: &str,
 ) -> Result<Option<(String, String)>> {
@@ -302,13 +302,13 @@ pub async fn agy_session_load(
 }
 
 /// 記錄 agy status。
-pub async fn agy_session_record_status(app: &Arc<App>, bot: &db::Bot, run: &db::Run, text: &str) {
+pub async fn agy_session_record_status(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot: &db::Bot, run: &db::Run, text: &str) {
     crate::lifecycle::agy_session::record_status(app, bot, run, text).await;
 }
 
 /// 處理 agy resume native 對話比對與 consume。
 pub async fn consume_resume_session(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
     bot: &db::Bot,
     run: &db::Run,
     session_id: Option<&str>,

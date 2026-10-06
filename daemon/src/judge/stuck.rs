@@ -150,16 +150,16 @@ pub(crate) async fn sweep_once(app: &Arc<App>) {
 }
 
 /// 讀畫面、問 Jev、記帳本、必要時推通知。回 `Ok(Some(p))`＝問了，`Ok(None)`＝這一輪沒問（開關、保險絲、同畫面問過）。
-pub async fn inspect(app: &Arc<App>, c: &Stuck) -> Result<Option<f64>> {
-    let cfg = app.cfg.get().await.judge;
-    let Some(bot) = crate::db::bot(&app.db, &c.bot_id).await? else { return Ok(None) };
-    let label = crate::db::project(&app.db, &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
+pub async fn inspect(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::judge::JudgeFuse), c: &Stuck) -> Result<Option<f64>> {
+    let cfg = app.cfg().get().await.judge;
+    let Some(bot) = crate::db::bot(app.db(), &c.bot_id).await? else { return Ok(None) };
+    let label = crate::db::project(app.db(), &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
     // 便宜的早退：開關與專案名單在讀畫面之前就看得出來。真正的名額是等到要問之前才占
     // （`reserve_slot`），否則占了卻因為「輸入列空著」「同畫面問過」而沒問，名額就白燒了。
     if let Some(skip @ (super::Skip::Disabled | super::Skip::ProjectNotListed)) = super::gate(&cfg, &bot.project_id, &label, 0) {
         return Err(anyhow!("{skip:?}"));
     }
-    let Some(run) = crate::db::active_run(&app.db, &c.bot_id).await? else { return Ok(None) };
+    let Some(run) = crate::db::active_run(app.db(), &c.bot_id).await? else { return Ok(None) };
     if run.id != c.run_id {
         return Ok(None);
     }
@@ -177,7 +177,7 @@ pub async fn inspect(app: &Arc<App>, c: &Stuck) -> Result<Option<f64>> {
     let seen: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE run_id = ? AND regex_verdict = 'stuck_queued' AND matched_line = ?")
         .bind(&c.run_id)
         .bind(&digest)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await?;
     if seen > 0 {
         return Ok(None);
@@ -205,7 +205,7 @@ pub async fn inspect(app: &Arc<App>, c: &Stuck) -> Result<Option<f64>> {
             "screen_tail": tail,
             "action": "這顆 bot 有 prompt 排著送不出去，畫面底部看起來有一個 daemon 不認得的選單／確認框在等人選。到「終端」分頁看一眼、替它選完；認得的框請開票讓 daemon 學會。daemon 沒有按任何鍵。",
         });
-        let id = crate::supervisor::store::push_inbox(&app.db, &key, "judge_stuck_screen", None, Some(&c.bot_id), Some(&c.turn_id), &payload).await?;
+        let id = crate::supervisor::store::push_inbox(app.db(), &key, "judge_stuck_screen", None, Some(&c.bot_id), Some(&c.turn_id), &payload).await?;
         if id.is_some() {
             tracing::warn!(bot = %bot.name, run = %c.run_id, p, "judge: a queued prompt looks blocked by a dialog the daemon does not recognise");
             app.emit("supervisor_changed", json!({"judge_stuck_screen": key})).await;

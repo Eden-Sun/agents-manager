@@ -7,7 +7,7 @@
 use super::*;
 
 /// 這顆 run 的 pane herdr 明確說不在。讀不到（沒 pane id、沒 client、RPC 失敗）＝不知道，回 `false`。
-pub(crate) async fn pane_gone(app: &Arc<App>, run: &db::Run) -> bool {
+pub(crate) async fn pane_gone(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> bool {
     let Some(pane) = run.pane_id.as_deref() else { return false };
     let Ok(client) = client_for_run(app, run).await else { return false };
     match client.pane_get(pane).await {

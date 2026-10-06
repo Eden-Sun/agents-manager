@@ -336,8 +336,8 @@ impl Watch {
 }
 
 /// 有 Claude 安裝需要處理時，回傳這份快照允許安裝的共同目標。
-pub async fn latest_target_for_host(app: &App, kind: &str, host: &str) -> Option<String> {
-    let snapshots = app.upstream_watch.snapshot.lock().await;
+pub async fn latest_target_for_host(app: &impl crate::upstream_update::UpstreamWatch, kind: &str, host: &str) -> Option<String> {
+    let snapshots = app.upstream_watch().snapshot.lock().await;
     let status = snapshots.get(kind)?;
     (status.has_update && status.hosts.iter().any(|h| h.host == host))
         .then(|| status.target_version.clone())
@@ -345,8 +345,8 @@ pub async fn latest_target_for_host(app: &App, kind: &str, host: &str) -> Option
 }
 
 /// 快照裡這台落後時的目標版本（codex：沒有 run 帶「需安裝」通知時，安裝 API 用它核對確認框寫的那一版）。
-pub async fn behind_target_for_host(app: &App, kind: &str, host: &str) -> Option<String> {
-    let snapshots = app.upstream_watch.snapshot.lock().await;
+pub async fn behind_target_for_host(app: &impl crate::upstream_update::UpstreamWatch, kind: &str, host: &str) -> Option<String> {
+    let snapshots = app.upstream_watch().snapshot.lock().await;
     let status = snapshots.get(kind)?;
     (status.has_update && status.hosts.iter().any(|h| h.host == host && h.behind))
         .then(|| status.target_version.clone().or_else(|| status.latest_version.clone()))
@@ -354,9 +354,9 @@ pub async fn behind_target_for_host(app: &App, kind: &str, host: &str) -> Option
 }
 
 /// CLI 安裝成功後立即修正快照，讓 header 不必等下一輪 10 分鐘巡邏才收起警示。
-pub async fn note_installed(app: &App, kind: &str, host: &str, version: &str) {
+pub async fn note_installed(app: &(impl crate::capabilities::Emit + crate::upstream_update::UpstreamWatch), kind: &str, host: &str, version: &str) {
     let updated = {
-        let mut snapshots = app.upstream_watch.snapshot.lock().await;
+        let mut snapshots = app.upstream_watch().snapshot.lock().await;
         let Some(status) = snapshots.get_mut(kind) else {
             return;
         };
@@ -941,4 +941,9 @@ mod tests {
         assert_eq!(behind_target_for_host(&e.app, "codex-behind-test", "bt-missing").await, None);
         assert_eq!(behind_target_for_host(&e.app, "no-such-kind", "bt-old").await, None);
     }
+}
+
+/// 上游更新的觀察狀態。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait UpstreamWatch: Send + Sync {
+    fn upstream_watch(&self) -> &crate::upstream_update::Watch;
 }

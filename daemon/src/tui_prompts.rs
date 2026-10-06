@@ -840,24 +840,24 @@ async fn read_actionable_survey(target: &SurveyTarget, expected: Option<&PaneRea
 }
 
 /// 不在 `active` 裡的 run（結束了）不留問卷去重記錄：每個出現過問卷的 run 一格，只記不清的話只增不減。
-pub(crate) async fn retain_survey_runs(app: &Arc<App>, active: &[String]) {
-    app.survey_revisions.lock().await.retain(|id, _| active.contains(id));
+pub(crate) async fn retain_survey_runs(app: &impl crate::tui_prompts::SurveyRevisions, active: &[String]) {
+    app.survey_revisions().lock().await.retain(|id, _| active.contains(id));
 }
 
-async fn release_survey_revision(app: &Arc<App>, run_id: &str, revision: u64) {
-    let mut revisions = app.survey_revisions.lock().await;
+async fn release_survey_revision(app: &impl crate::tui_prompts::SurveyRevisions, run_id: &str, revision: u64) {
+    let mut revisions = app.survey_revisions().lock().await;
     if revisions.get(run_id) == Some(&revision) {
         revisions.remove(run_id);
     }
 }
 
 /// 停在問卷上就按 `0`；回傳是否真的按了。[`PRESS_KEYS_ON_SURVEY`] 關著時只記一行 warn 就回 `false`。
-pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
+pub async fn dismiss_if_survey(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::tui_prompts::SurveyRevisions), run: &db::Run) -> bool {
     let Some(target) = current_survey_target(app, run).await else { return false };
     let Some(read) = read_actionable_survey(&target, None).await else { return false };
     let pane = target.pane.as_str();
     let first_for_this_run = {
-        let mut revisions = app.survey_revisions.lock().await;
+        let mut revisions = app.survey_revisions().lock().await;
         if revisions.get(&run.id) == Some(&read.revision) {
             return false;
         }
@@ -907,7 +907,7 @@ pub async fn dismiss_if_survey(app: &Arc<App>, run: &db::Run) -> bool {
     // The post-0 read is a new authorization basis for versions that also need Enter.
     if survey_target_is_current(app, &target).await {
         if let Some(second_stage) = read_actionable_survey(&target, None).await {
-            app.survey_revisions.lock().await.insert(run.id.clone(), second_stage.revision);
+            app.survey_revisions().lock().await.insert(run.id.clone(), second_stage.revision);
             #[cfg(test)]
             crate::lifecycle::race_point::hit("survey_before_enter", &run.id).await;
             let still_current = survey_target_is_current(app, &target).await;
@@ -2015,4 +2015,9 @@ pub fn is_feedback_survey(screen: &str) -> bool {
         assert!(!awaits_menu_choice(&list), "回覆裡的編號清單");
         assert!(!awaits_menu_choice(DANGEROUS_RM_AUTO_DENIED) && !awaits_menu_choice(IDLE_CLAUDE));
     }
+}
+
+/// 各 run 的意見調查畫面版本。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait SurveyRevisions: Send + Sync {
+    fn survey_revisions(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>>;
 }

@@ -88,9 +88,9 @@ pub(crate) async fn steer(
 }
 
 /// 字已經打進去了：把它記成進行中回合的補充訊息（補過的不重記）。寫不進去回 503、記憶體帳留著，同一個 request id 重送只重寫訊息。
-async fn finish(app: &Arc<App>, bot: &db::Bot, key: (String, String), mut state: Steered) -> LcResult<PromptOut> {
+async fn finish(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot: &db::Bot, key: (String, String), mut state: Steered) -> LcResult<PromptOut> {
     if state.message_id.is_none() {
-        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?").bind(&state.turn_id).fetch_optional(&app.db).await;
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id = ?").bind(&state.turn_id).fetch_optional(app.db()).await;
         let inserted = match turn {
             Ok(Some(t)) => super::slash::insert_supplement(app, &bot.id, &t, &state.text).await,
             Ok(None) => Err(anyhow::anyhow!("the steered turn is gone")),

@@ -70,9 +70,9 @@ fn prune<V>(map: &mut HashMap<String, V>, active: &[String]) {
 }
 
 /// 巡邏每輪把已經不 active 的 run 的行程級帳（idle 計時、閒置回收看的最後狀態）帶走。讀不到 DB 就這輪不清。
-async fn forget_ended_runs(app: &Arc<App>) {
+async fn forget_ended_runs(app: &impl crate::capabilities::Db) {
     let ids: Result<Vec<String>, _> =
-        sqlx::query_scalar(&format!("SELECT id FROM runs WHERE state IN {}", db::ACTIVE_STATES)).fetch_all(&app.db).await;
+        sqlx::query_scalar(&format!("SELECT id FROM runs WHERE state IN {}", db::ACTIVE_STATES)).fetch_all(app.db()).await;
     match ids {
         Ok(ids) => {
             retain_runs(&ids);

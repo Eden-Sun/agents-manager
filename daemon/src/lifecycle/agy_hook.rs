@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 
 use crate::hosts::sh_quote;
 use crate::agy_support as cfg;
-use crate::state::App;
 
 /// dispatcher 的內容。`$1` 是事件名（`SessionStart`／`PreInvocation`／`Stop`／`state`）。
 ///
@@ -38,18 +37,18 @@ pub(super) fn dispatch_sh(exe: &str, data_dir: &str, instance: Option<&str>) -> 
     )
 }
 
-fn dispatcher_text(app: &App) -> String {
-    dispatch_sh(&app.exe.to_string_lossy(), &app.data_dir.to_string_lossy(), app.instance().as_deref())
+fn dispatcher_text(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance)) -> String {
+    dispatch_sh(&app.exe().to_string_lossy(), &app.data_dir().to_string_lossy(), app.instance().as_deref())
 }
 
 /// bot 啟動（本機）：裝／修 dispatcher 與兩個設定檔。回「有沒有改到東西」。
-pub fn install_local(app: &App) -> anyhow::Result<bool> {
+pub fn install_local(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance)) -> anyhow::Result<bool> {
     let home = crate::home::dir().ok_or_else(|| anyhow::anyhow!("no home dir; cannot install the agy hooks"))?;
     install_at(app, &home)
 }
 
-pub(crate) fn install_at(app: &App, home: &Path) -> anyhow::Result<bool> {
-    let dispatcher: PathBuf = app.data_dir.join(cfg::DISPATCH_SH);
+pub(crate) fn install_at(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::hosts::HostInstance), home: &Path) -> anyhow::Result<bool> {
+    let dispatcher: PathBuf = app.data_dir().join(cfg::DISPATCH_SH);
     let text = dispatcher_text(app);
     let mut changed = false;
     if std::fs::read_to_string(&dispatcher).ok().as_deref() != Some(text.as_str()) {

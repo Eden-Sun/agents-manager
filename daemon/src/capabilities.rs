@@ -28,11 +28,20 @@ pub trait Db: Send + Sync {
 /// 推一個事件給 WS 客戶端（序號、重播環、敏感欄位清理都在實作那一側）。
 pub trait Emit: Send + Sync {
     fn emit(&self, kind: &str, data: Value) -> impl Future<Output = ()> + Send;
+    /// 目前事件序號（最近一則 `emit` 取到的）。
+    fn current_seq(&self) -> u64;
 }
 
 /// daemon 的資料目錄。
 pub trait DataDir: Send + Sync {
     fn data_dir(&self) -> &Path;
+    /// 這顆 bot 在資料目錄底下的專屬目錄（id 不合法回 `Err`）。跟 `App::bot_dir` 同一條規則。
+    fn bot_dir(&self, bot_id: &str) -> anyhow::Result<std::path::PathBuf> {
+        if !crate::config::valid_id(bot_id) {
+            anyhow::bail!("invalid bot id `{bot_id}` (must match {})", crate::config::ID_RE);
+        }
+        Ok(self.data_dir().join("bots").join(bot_id))
+    }
 }
 
 /// 設定檔（`config.toml`）的讀寫。
@@ -63,6 +72,9 @@ impl Db for App {
 impl Emit for App {
     fn emit(&self, kind: &str, data: Value) -> impl Future<Output = ()> + Send {
         App::emit(self, kind, data)
+    }
+    fn current_seq(&self) -> u64 {
+        App::current_seq(self)
     }
 }
 impl DataDir for App {
@@ -100,6 +112,9 @@ impl<T: Emit + ?Sized> Emit for Arc<T> {
     fn emit(&self, kind: &str, data: Value) -> impl Future<Output = ()> + Send {
         (**self).emit(kind, data)
     }
+    fn current_seq(&self) -> u64 {
+        (**self).current_seq()
+    }
 }
 impl<T: DataDir + ?Sized> DataDir for Arc<T> {
     fn data_dir(&self) -> &Path {
@@ -136,6 +151,14 @@ pub trait HerdrRoutes: Send + Sync {
     fn session_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<String>> + Send;
     fn herdr_for_run(&self, run: &crate::db::Run) -> impl Future<Output = Option<HerdrClient>> + Send;
     fn host_connected(&self, host: &str) -> impl Future<Output = bool> + Send;
+    fn herdr_for(&self, host: &str) -> impl Future<Output = Option<HerdrClient>> + Send;
+    fn session_for_bot_with_host_fence(
+        &self,
+        bot: &crate::db::Bot,
+        host: &str,
+        fence: &crate::hosts::HostFence,
+    ) -> impl Future<Output = Option<String>> + Send;
+    fn herdr_for_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> impl Future<Output = Option<HerdrClient>> + Send;
 }
 
 impl HerdrRoutes for App {
@@ -160,6 +183,20 @@ impl HerdrRoutes for App {
     fn host_connected(&self, host: &str) -> impl Future<Output = bool> + Send {
         App::host_connected(self, host)
     }
+    fn herdr_for(&self, host: &str) -> impl Future<Output = Option<HerdrClient>> + Send {
+        App::herdr_for(self, host)
+    }
+    fn session_for_bot_with_host_fence(
+        &self,
+        bot: &crate::db::Bot,
+        host: &str,
+        fence: &crate::hosts::HostFence,
+    ) -> impl Future<Output = Option<String>> + Send {
+        App::session_for_bot_with_host_fence(self, bot, host, fence)
+    }
+    fn herdr_for_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> impl Future<Output = Option<HerdrClient>> + Send {
+        App::herdr_for_host_fence(self, fence, session)
+    }
 }
 
 impl<T: HerdrRoutes + ?Sized> HerdrRoutes for Arc<T> {
@@ -183,6 +220,20 @@ impl<T: HerdrRoutes + ?Sized> HerdrRoutes for Arc<T> {
     }
     fn host_connected(&self, host: &str) -> impl Future<Output = bool> + Send {
         (**self).host_connected(host)
+    }
+    fn herdr_for(&self, host: &str) -> impl Future<Output = Option<HerdrClient>> + Send {
+        (**self).herdr_for(host)
+    }
+    fn session_for_bot_with_host_fence(
+        &self,
+        bot: &crate::db::Bot,
+        host: &str,
+        fence: &crate::hosts::HostFence,
+    ) -> impl Future<Output = Option<String>> + Send {
+        (**self).session_for_bot_with_host_fence(bot, host, fence)
+    }
+    fn herdr_for_host_fence(&self, fence: &crate::hosts::HostFence, session: &str) -> impl Future<Output = Option<HerdrClient>> + Send {
+        (**self).herdr_for_host_fence(fence, session)
     }
 }
 
@@ -233,5 +284,35 @@ mod tests {
         assert!(ok2);
         let ev = rx.recv().await.unwrap();
         assert_eq!(ev.kind, "capability_probe");
+    }
+}
+
+/// 這個 `App` 是不是隔離模式（不碰真的 herdr）。
+pub trait Isolation: Send + Sync {
+    fn isolated(&self) -> bool;
+}
+impl Isolation for App {
+    fn isolated(&self) -> bool {
+        App::isolated(self)
+    }
+}
+impl<T: Isolation + ?Sized> Isolation for Arc<T> {
+    fn isolated(&self) -> bool {
+        (**self).isolated()
+    }
+}
+
+/// 管理 API 的 UI token（`X-AM-Token`）。
+pub trait UiToken: Send + Sync {
+    fn ui_token(&self) -> &String;
+}
+impl UiToken for App {
+    fn ui_token(&self) -> &String {
+        &self.ui_token
+    }
+}
+impl<T: UiToken + ?Sized> UiToken for Arc<T> {
+    fn ui_token(&self) -> &String {
+        (**self).ui_token()
     }
 }

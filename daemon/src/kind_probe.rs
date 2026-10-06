@@ -178,3 +178,8 @@ mod tests {
         start_bot(&e.app, &bot.id).await.expect("預設就過 preflight");
     }
 }
+
+/// kind 預檢的接線點。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait KindProbeState: Send + Sync {
+    fn kind_probe(&self) -> &crate::kind_probe::KindProbeHook;
+}

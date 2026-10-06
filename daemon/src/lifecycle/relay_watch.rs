@@ -49,14 +49,14 @@ pub(crate) enum Step {
 
 /// Resolve a herdr target only among runs on the sender's host and session. Pane IDs are local to
 /// a herdr server/session, so an ambiguous target is ignored instead of guessed by start time.
-pub(crate) async fn resolve(app: &Arc<App>, from_bot: &str, to_agent: &str) -> anyhow::Result<Option<db::Run>> {
+pub(crate) async fn resolve(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), from_bot: &str, to_agent: &str) -> anyhow::Result<Option<db::Run>> {
     let to = to_agent.trim();
     if to.is_empty() {
         return Ok(None);
     }
-    let host = db::bot_host(&app.db, from_bot).await?;
+    let host = db::bot_host(app.db(), from_bot).await?;
     let Some(fallback_session) = app.session_for_host(&host).await else { return Ok(None) };
-    let sender_run = db::active_run(&app.db, from_bot).await?;
+    let sender_run = db::active_run(app.db(), from_bot).await?;
     let session = sender_run
         .as_ref()
         .and_then(|run| run.herdr_session.as_deref())
@@ -72,13 +72,13 @@ pub(crate) async fn resolve(app: &Arc<App>, from_bot: &str, to_agent: &str) -> a
     .bind(&fallback_session)
     .bind(session)
     .bind(to)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     if ids.len() != 1 {
         return Ok(None);
     }
     let id = &ids[0];
-    db::run(&app.db, id).await
+    db::run(app.db(), id).await
 }
 
 /// 開進行中的回合。已經有回合在飛（收件方正忙，字會排在它後面）就不開，UI 本來就看得到。寫不進去只記 log，不擋補 Enter。
@@ -271,7 +271,7 @@ pub(crate) async fn rearm_host(app: &Arc<App>, host: &str) {
     }
 }
 
-async fn restore_open_watches(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<Watch>> {
+async fn restore_open_watches(app: &impl crate::capabilities::Db, host: &str) -> anyhow::Result<Vec<Watch>> {
     let rows: Vec<(String, String, String, String)> = sqlx::query_as(
         "SELECT t.id, r.id, r.bot_id, m.content
            FROM turns t
@@ -283,7 +283,7 @@ async fn restore_open_watches(app: &Arc<App>, host: &str) -> anyhow::Result<Vec<
             AND r.state = 'running' AND b.deleted_at IS NULL AND p.host = ?1",
     )
     .bind(host)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     Ok(rows
         .into_iter()

@@ -58,7 +58,7 @@ struct Held {
 }
 
 impl Held {
-    fn new(app: &App, identity: Option<&str>, target: Option<String>, hit: &crate::quota::LimitHit) -> Self {
+    fn new(app: &impl crate::capabilities::BootId, identity: Option<&str>, target: Option<String>, hit: &crate::quota::LimitHit) -> Self {
         Held {
             target,
             identity: identity.map(String::from),
@@ -170,7 +170,7 @@ async fn still_holds(app: &Arc<App>, bot: &db::Bot, held: &Held) -> anyhow::Resu
 
 /// 這個主機名**現在**指到哪台機器：本機是 `local`；遠端是 ssh 目標、port、herdr session（同 `api::repoints_host` 認的三項）。
 /// 不在設定裡回 `None`。
-async fn host_target(app: &App, host: &str) -> Option<String> {
+async fn host_target(app: &impl crate::hosts::HostsAccess, host: &str) -> Option<String> {
     app_ports_p4state::host_target(app, host).await
 }
 
@@ -201,8 +201,8 @@ pub(crate) async fn stamp_queued(app: &Arc<App>, bot_id: &str, identity: Option<
 
 /// 閘門放行：清掉那一列的憑據。清不掉照樣放行（判準已經說不擋），留下的舊憑據只會讓重啟之後多擋到它自己的判準
 /// （[`still_holds`]）說不擋為止。
-async fn forget(app: &Arc<App>, turn_id: &str) {
-    if let Err(e) = sqlx::query("UPDATE turns SET quota_hold=NULL WHERE id=? AND quota_hold IS NOT NULL").bind(turn_id).execute(&app.db).await {
+async fn forget(app: &impl crate::capabilities::Db, turn_id: &str) {
+    if let Err(e) = sqlx::query("UPDATE turns SET quota_hold=NULL WHERE id=? AND quota_hold IS NOT NULL").bind(turn_id).execute(app.db()).await {
         tracing::warn!(turn = %turn_id, error = %e, "could not clear the quota hold of a released prompt");
     }
 }
@@ -214,7 +214,7 @@ fn backfill_state() -> &'static Mutex<HashMap<String, bool>> {
     M.get_or_init(Default::default)
 }
 
-fn backfill_key(app: &App, host: &str) -> String {
+fn backfill_key(app: &impl crate::capabilities::BootId, host: &str) -> String {
     format!("{}\u{0}{host}", app_ports_p4state::boot_id(app))
 }
 
@@ -225,17 +225,17 @@ fn unresolved_holds() -> &'static Mutex<std::collections::HashSet<String>> {
     M.get_or_init(Default::default)
 }
 
-fn mark_unresolved(app: &App, bot_id: &str) {
+fn mark_unresolved(app: &impl crate::capabilities::BootId, bot_id: &str) {
     if let Ok(mut m) = unresolved_holds().lock() {
         m.insert(backfill_key(app, bot_id));
     }
 }
 
-fn unresolved(app: &App, bot_id: &str) -> bool {
+fn unresolved(app: &impl crate::capabilities::BootId, bot_id: &str) -> bool {
     unresolved_holds().lock().ok().is_some_and(|m| m.contains(&backfill_key(app, bot_id)))
 }
 
-fn backfilled(app: &App, host: &str) -> bool {
+fn backfilled(app: &impl crate::capabilities::BootId, host: &str) -> bool {
     backfill_state().lock().ok().and_then(|m| m.get(&backfill_key(app, host)).copied()).unwrap_or(false)
 }
 

@@ -91,7 +91,7 @@ fn remaining(from: &str, window: Duration, now: chrono::DateTime<chrono::Utc>) -
 
 /// 呼叫端用這支：`Expired` 在這裡落地（CAS 寫 `resume_outcome='unverified'`＋系統訊息，同一個交易、只寫一次），
 /// 然後當成 `Open` 回去。呼叫端持 bot 鎖。
-pub(crate) async fn check(app: &Arc<App>, bot: &db::Bot, run: &db::Run, conv: &str) -> Gate {
+pub(crate) async fn check(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot: &db::Bot, run: &db::Run, conv: &str) -> Gate {
     let now = chrono::Utc::now();
     match decide(bot, run, now) {
         Gate::Expired { expected } => {
@@ -115,14 +115,14 @@ fn waited_secs(started_at: &str, now: chrono::DateTime<chrono::Utc>) -> u64 {
 }
 
 async fn give_up_waiting(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     bot: &db::Bot,
     run: &db::Run,
     conv: &str,
     expected: &str,
     waited: u64,
 ) -> anyhow::Result<()> {
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     let marked = sqlx::query(
         "UPDATE runs SET resume_outcome = 'unverified'
           WHERE id = ? AND resume_outcome IS NULL AND resume_session_id IS NOT NULL",

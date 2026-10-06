@@ -208,7 +208,7 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
     crate::models::app_ports_p13::schedule_flush_queued(app, &run.bot_id);
 }
 
-async fn notify_once(app: &Arc<App>, run: &db::Run, dialog: Dialog) {
+async fn notify_once(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, dialog: Dialog) {
     {
         let mut episodes = open().lock().unwrap();
         if episodes.contains_key(&run.id) {
@@ -217,7 +217,7 @@ async fn notify_once(app: &Arc<App>, run: &db::Run, dialog: Dialog) {
         episodes.insert(run.id.clone(), Episode { forced_from: None, closing: false, dialog });
     }
     tracing::warn!(run = %run.id, bot = %run.bot_id, ?dialog, "Codex dialog is waiting for a user choice");
-    match db::conversation_id(&app.db, &run.bot_id).await {
+    match db::conversation_id(app.db(), &run.bot_id).await {
         Ok(conversation) => {
             let _ = crate::models::app_ports_p13::insert_message(
                 app,

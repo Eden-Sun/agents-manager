@@ -848,12 +848,12 @@ async fn supervisor_still_wanted(app: &impl crate::capabilities::Db, bot_id: &st
     }
 }
 
-async fn supervisor_is_back(app: &Arc<App>, bot_id: &str) -> bool {
-    let Ok(Some(run)) = db::active_run(&app.db, bot_id).await else { return false };
+async fn supervisor_is_back(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str) -> bool {
+    let Ok(Some(run)) = db::active_run(app.db(), bot_id).await else { return false };
     if run.state != "running" {
         return false;
     }
-    let Ok(Some(bot)) = db::bot(&app.db, bot_id).await else { return false };
+    let Ok(Some(bot)) = db::bot(app.db(), bot_id).await else { return false };
     lifecycle::run_alive(app, &run, &bot).await
 }
 

@@ -35,7 +35,7 @@ pub(crate) fn blocks_typing(screen: &str) -> bool {
 
 /// 送字前看到橫幅：第一次寫一則通知（`message_added` 事件推給網頁），也推一則 inbox 事件給巡檢（[`alert`]）。
 /// 之後同一次橫幅不再講；看到橫幅不在了就忘掉，下次再出現會再講一次。寫不進去只記 log：擋住派送本身不受影響。
-pub(crate) async fn observe(app: &Arc<App>, run: &db::Run, shown: bool) {
+pub(crate) async fn observe(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, shown: bool) {
     if !shown {
         open().lock().unwrap().remove(&run.id);
         return;

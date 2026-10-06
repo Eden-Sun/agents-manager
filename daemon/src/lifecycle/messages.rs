@@ -8,7 +8,7 @@ use std::sync::{Mutex, OnceLock};
 
 
 pub async fn insert_message(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     conversation_id: &str,
     turn_id: Option<&str>,
     role: &str,
@@ -71,14 +71,14 @@ pub(crate) async fn insert_message_relayed_tx(
         .await?)
 }
 
-pub(crate) async fn emit_message_added(app: &Arc<App>, bot_id: &str, message: db::Message) {
+pub(crate) async fn emit_message_added(app: &impl crate::capabilities::Emit, bot_id: &str, message: db::Message) {
     app.emit("message_added", json!({ "bot_id": bot_id, "message": message })).await;
 }
 
 /// `insert_message` with a SPEC §13 `group_id` (project group chat).
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_message_grouped(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     conversation_id: &str,
     turn_id: Option<&str>,
     role: &str,
@@ -95,7 +95,7 @@ pub async fn insert_message_grouped(
 /// 當下就推出去，事後 UPDATE 的話泡泡要重新載入才會變「AGM →」。
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_message_full(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     conversation_id: &str,
     turn_id: Option<&str>,
     role: &str,
@@ -108,7 +108,7 @@ pub async fn insert_message_full(
 ) -> anyhow::Result<db::Message> {
     // 先讀 owner 再寫訊息（#613 要它們同一個交易）：deferred 的話讀完之後別的 writer 一 commit，INSERT 就 517，
     // `let _ =` 的呼叫端連說明訊息都默默丟了（#822）。
-    let mut tx = db::begin_write(&app.db).await?;
+    let mut tx = db::begin_write(app.db()).await?;
     let bot_id = sqlx::query_scalar::<_, String>("SELECT bot_id FROM conversations WHERE id = ?")
         .bind(conversation_id)
         .fetch_optional(&mut *tx)
