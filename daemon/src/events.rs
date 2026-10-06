@@ -241,7 +241,7 @@ async fn end_runs_for_pane_try(app: &Arc<App>, host: &str, session: &str, pane_i
     let mut ended_a_child = false;
     let mut converged = true;
     for r in runs {
-        if matches!(app.mark_run_exited(&r.id, "pane exited").await, crate::lifecycle::RunExit::NotRecorded) {
+        if matches!(app.mark_run_exited(&r.id, "pane exited").await, crate::lc_error::RunExit::NotRecorded) {
             converged = false;
             continue;
         }
@@ -282,7 +282,7 @@ async fn close_workspace_try(app: &Arc<App>, host: &str, session: &str, ws: &str
                     Ok(Some(r)) => {
                         if r.workspace_id.as_deref() == Some(ws)
                             && app.session_for_run(&r).await.as_deref() == Some(session)
-                            && matches!(app.mark_run_exited(&r.id, "workspace closed").await, crate::lifecycle::RunExit::NotRecorded)
+                            && matches!(app.mark_run_exited(&r.id, "workspace closed").await, crate::lc_error::RunExit::NotRecorded)
                         {
                             converged = false;
                         }

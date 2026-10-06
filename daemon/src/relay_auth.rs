@@ -32,7 +32,7 @@
 use axum::http::HeaderMap;
 use serde_json::json;
 
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 
 /// 驗過之後的來源（bot id）。
 #[derive(Debug, Clone, PartialEq, Eq)]

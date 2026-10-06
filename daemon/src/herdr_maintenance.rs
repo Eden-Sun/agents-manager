@@ -8,7 +8,7 @@
 //! 開／關／逾時都寫 `supervisor_notes`。期間 reconcile 照樣把 run 標成 exited，只是不刪子 bot；
 //! 維護結束（或逾時）時，這段期間被標 exited、到現在仍沒接回的子 agent 才照原規則退休。
 
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 use crate::state::App;
 use crate::supervisor::store;
 use anyhow::Result;

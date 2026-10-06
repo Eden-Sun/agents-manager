@@ -932,12 +932,12 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                 // 維護結束時仍沒接回的，由 `herdr_maintenance` 照同一條規則退休。
                 // run 的結束沒寫進去（#191）：DB 裡它還在跑，這時退休就是一顆刪掉的 bot 掛著活的 run。這一輪不動，
                 // 晚一點再對一次帳：結束寫得進去之後，子 agent 走下面的 `(None, None)` 退休。
-                if exit == crate::lifecycle::RunExit::NotRecorded {
+                if exit == crate::lc_error::RunExit::NotRecorded {
                     tracing::warn!(host, bot = %bot.name, run = %run.id, "reconcile: the run's exit was not recorded; bot left as is, will look again");
                     schedule_deferred_pass(app, host);
                 } else if bot.managed_by != "child"
                     && bot.autostart == 1
-                    && matches!(exit, crate::lifecycle::RunExit::Recorded | crate::lifecycle::RunExit::TurnOwed)
+                    && matches!(exit, crate::lc_error::RunExit::Recorded | crate::lc_error::RunExit::TurnOwed)
                 {
                     // 不是使用者停的（那是 `stopped`）：herdr 掉了這個 agent。pass 結束後由 `autostart_revive` 決定要不要再起。
                     // 只有**這一輪自己**把它收成 exited 才算：`AlreadyEnded`＝別的路先收了（使用者的 stop、pane-exited 事件＝使用者在 herdr 裡關了 pane），

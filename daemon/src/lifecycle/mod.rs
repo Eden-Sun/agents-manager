@@ -202,63 +202,7 @@ pub(crate) use owed_delivery::{owed_as_unknown, settle_locked as settle_owed_del
 pub(crate) use interrupt_grace::{expect_interrupt_echo, note_user_interrupt, InterruptedTurn};
 pub(crate) use stuck_turns::{close_after_session_paused, observe as observe_agent_status, spawn_stuck_turn_sweeper, sweep as sweep_stuck_turns};
 
-#[derive(Debug)]
-pub enum LcError {
-    NotFound(String),
-    Conflict(Value),
-    Upstream(String),
-    Bad(String),
-    /// A 404 whose body is machine-readable (`{"error":"not_found","reason":…}`) instead of a bare `what`.
-    NotFoundValue(Value),
-    /// A 400 whose body is machine-readable rather than a message, e.g.
-    /// `{"error":"remote_not_supported","host":"m4p"}`.
-    BadValue(Value),
-    /// 422: the request is well-formed and allowed, but this one can never be carried out as asked
-    /// (e.g. a prompt too long to prove delivered). Machine-readable body; callers treat it as final.
-    Unprocessable(Value),
-    /// 403：請求本身沒問題，但**你不是可以做這件事的人**（目前只有租約的憑證比對）。
-    /// 跟 409 分開：409 是「狀態不對，等一下再來」，403 重試一百次也一樣。
-    Forbidden(Value),
-    /// 503：我們自己需要的一份狀態暫時讀不到（目前只有維護窗口的租約，issue #127），所以**不敢**往下做——
-    /// 不是「herdr／DB 出錯」的統稱 502。body 是機器可讀的，帶 `retryable:true`、`sent:false`（一個字都沒送）。
-    Unavailable(Value),
-    /// 503：跟 `Unavailable` 相反——外面的副作用**已經做了**（agent 起來了、pane 關了），run 的狀態卻寫不進 DB
-    /// （#145／#146）。不是「沒做」也不是「做好了」：重試已經排了，run 會照 herdr 的證據收斂。body 見 [`LcError::uncommitted`]。
-    Uncommitted(Value),
-}
-
-impl LcError {
-    pub fn conflict(reason: &str, extra: Value) -> Self {
-        let mut o = json!({ "error": "conflict", "reason": reason });
-        if let (Some(a), Some(b)) = (o.as_object_mut(), extra.as_object()) {
-            for (k, v) in b {
-                a.insert(k.clone(), v.clone());
-            }
-        }
-        LcError::Conflict(o)
-    }
-
-    /// `{"error": what, "run_id", "retryable": true, "message", "detail"}`；`what` 是
-    /// `start_state_uncommitted`／`stop_state_uncommitted`。
-    pub(crate) fn uncommitted(what: &str, run_id: &str, message: &str, detail: impl std::fmt::Display) -> Self {
-        LcError::Uncommitted(json!({
-            "error": what, "run_id": run_id, "retryable": true, "message": message, "detail": detail.to_string(),
-        }))
-    }
-
-    #[allow(dead_code)]
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            LcError::Conflict(v) | LcError::Unavailable(v) | LcError::Uncommitted(v) | LcError::Unprocessable(v) => {
-                v.get("retryable").and_then(Value::as_bool).unwrap_or(false)
-            }
-            LcError::Upstream(_) => true,
-            _ => false,
-        }
-    }
-}
-
-pub type LcResult<T> = std::result::Result<T, LcError>;
+pub use crate::lc_error::{LcError, LcResult, RunExit};
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())

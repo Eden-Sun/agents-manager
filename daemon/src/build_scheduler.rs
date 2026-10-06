@@ -21,7 +21,7 @@
 //! 賴著不放：TTL 到了、沒有人 renew，下一次 acquire（或背景 sweep）就收回。真的想要「daemon 重啟＝
 //! 全部歸零」可以砍這張表，但目前沒有理由這麼做。
 
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 use crate::state::App;
 use anyhow::Result;
 use axum::extract::{Form, State};

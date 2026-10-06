@@ -17,7 +17,7 @@ use base64::Engine as _;
 use serde_json::json;
 
 use crate::hosts::{sh_quote, HostConn};
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 use crate::outbox::{content_is_withheld, content_disposition, mime_of, withheld_name, MAX_BYTES, MAX_ENTRIES, TTL_SECS};
 
 /// 下載大檔走 base64 會比較久；列表很快。
