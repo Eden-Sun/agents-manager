@@ -49,6 +49,8 @@ mod agy_tests;
 pub(crate) mod grok_transcript;
 #[cfg(test)]
 mod grok_hook_tests;
+#[cfg(test)]
+mod suggestion_list_tests;
 mod start;
 mod stop;
 mod deferred_live;
