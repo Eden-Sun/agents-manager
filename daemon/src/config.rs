@@ -313,8 +313,34 @@ pub struct ConfigFile {
     #[serde(default, skip_serializing_if = "CodexHistoryCfg::is_default")]
     pub codex_history: CodexHistoryCfg,
     /// 分享 bot 的對外入口（SPEC「分享 bot」）。沒寫＝不開那個 listener、也不能開分享連結。
-    #[serde(default, skip_serializing_if = "crate::share::admin::ShareCfg::is_default")]
-    pub share: crate::share::admin::ShareCfg,
+    #[serde(default, skip_serializing_if = "ShareCfg::is_default")]
+    pub share: ShareCfg,
+}
+
+/// `[share]`：`listen` 是分享入口的獨立 listener（Tailscale Funnel 指過來的那個 port），`base_url` 是對外網址。
+/// 兩個都可以不寫：沒 `listen` 就不開入口，沒 `base_url` 就不能開分享連結（409 `share_not_configured`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareCfg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// 受限 bot「新資料夾」的根目錄（可用 `~/`）；沒設＝`~/shared-bots`。要在 daemon 資料目錄之外。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folders_root: Option<String>,
+}
+
+impl ShareCfg {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `https://…`／`http://…`，去掉結尾的 `/`；其他形狀當沒設。
+    pub fn base(&self) -> Option<String> {
+        let b = self.base_url.as_deref()?.trim().trim_end_matches('/');
+        let rest = b.strip_prefix("https://").or_else(|| b.strip_prefix("http://"))?;
+        (!rest.is_empty() && !rest.contains(char::is_whitespace)).then(|| b.to_string())
+    }
 }
 
 /// `[codex]`（issue #748，SPEC §6.3 第 9 點）：`instant_interrupt = true` 才讓 `send_now` 對 codex（>= 0.159.0）生效——
@@ -892,13 +918,19 @@ pub fn valid_id(id: &str) -> bool {
 /// 名字中間可以有單一個半形空白（2026-09-19 使用者：「bot name should be able to include space」）；
 /// 頭尾空白、連續空白、tab／換行照樣不行。herdr 的 agent 名字是另外從 bot id 算的（`agent_name`），不受影響；
 /// 群組 `@` 靠 `group::spaced_member_at` 認整個名字。
+/// 看不見或會改變顯示方向的字元：零寬、方向控制、BOM。放進名稱或標籤，畫面上看起來一樣、實際是另一個字串（或把後面的字倒過來）。
+/// 純字元規則，住在 `config`（`bot_input` 的檢查與 bot 名稱規則共用這一份）。
+pub fn is_invisible_format_char(c: char) -> bool {
+    matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+}
+
 pub fn valid_bot_name(name: &str) -> bool {
     let n = name.chars().count();
     (1..=32).contains(&n)
         && !name.starts_with(' ')
         && !name.ends_with(' ')
         && !name.contains("  ")
-        && !name.chars().any(|c| (c.is_whitespace() && c != ' ') || c.is_control() || crate::bot_input::is_invisible_format_char(c) || matches!(c, '@' | ',' | ':' | ';'))
+        && !name.chars().any(|c| (c.is_whitespace() && c != ' ') || c.is_control() || is_invisible_format_char(c) || matches!(c, '@' | ',' | ':' | ';'))
 }
 
 /// Into herdr's `[a-z][a-z0-9_-]*` alphabet; empty when nothing usable is left.
@@ -1116,9 +1148,26 @@ pub fn canonical_path(p: &str) -> Result<String> {
     Ok(c.to_string_lossy().to_string())
 }
 
+/// `ConfigStore` 寫入流程裡「不屬於設定本身」的那幾步：落盤前的投影驗證、與寫入／外部改動的稽核。
+/// ConfigStore 只做 parse／atomic write，順序與錯誤處理在它這裡，**內容**由注入的實作決定
+/// （`projection::validate`、`config_audit::log_*` 在 `app_ports_p2.rs` 組起來），所以 config 不依賴它們。
+///
+/// 全是同步方法：投影驗證是純函式、稽核只寫 log，都不碰 DB，也就不在持鎖期間 await 別的東西。
+pub trait ConfigChangeHooks: Send + Sync {
+    /// 落盤**之前**驗整份 `next` 投影出去會不會被擋（issue #73）；失敗的原因原樣往外傳。
+    fn validate_projection(&self, next: &ConfigFile) -> Result<()>;
+    /// 重讀時發現檔案內容跟記憶體那份不同＝別人改的（issue #406）。
+    fn audit_external_change(&self, at: &'static std::panic::Location<'static>, path: &Path, old: &ConfigFile, new: &ConfigFile);
+    /// 重讀時 mtime 變了、內容沒變。
+    fn audit_reload_unchanged(&self, at: &'static std::panic::Location<'static>, path: &Path);
+    /// daemon 自己寫了檔（`old` 是寫之前記憶體裡的那份）。
+    fn audit_write(&self, at: &'static std::panic::Location<'static>, path: &Path, old: &ConfigFile, new: &ConfigFile);
+}
+
 pub struct ConfigStore {
     pub path: PathBuf,
     inner: tokio::sync::Mutex<Loaded>,
+    hooks: std::sync::Arc<dyn ConfigChangeHooks>,
 }
 
 struct Loaded {
@@ -1129,12 +1178,18 @@ struct Loaded {
 }
 
 impl ConfigStore {
-    pub async fn load(path: PathBuf) -> Result<Self> {
+    /// 帶著注入的 [`ConfigChangeHooks`] 載入。daemon 一律用 `ConfigStore::load(path)`（`app_ports_p2.rs` 補上的，
+    /// 掛 daemon 自己的投影驗證與稽核）。
+    pub async fn load_with_hooks(path: PathBuf, hooks: std::sync::Arc<dyn ConfigChangeHooks>) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).ok();
         }
         let (cfg, mtime, hot_fingerprint) = read_file(&path)?;
-        Ok(Self { path, inner: tokio::sync::Mutex::new(Loaded { cfg, mtime, hot_fingerprint: Some(hot_fingerprint), hot_read_error: None }) })
+        Ok(Self {
+            path,
+            inner: tokio::sync::Mutex::new(Loaded { cfg, mtime, hot_fingerprint: Some(hot_fingerprint), hot_read_error: None }),
+            hooks,
+        })
     }
 
     pub async fn get(&self) -> ConfigFile {
@@ -1249,9 +1304,9 @@ impl ConfigStore {
                 .context("config.toml changed on disk and could not be re-read")?;
             // daemon 自己寫完會把記憶體那份換成寫出去的內容，所以內容對不上＝別人改的（issue #406）。
             if cfg != g.cfg {
-                crate::config_audit::log_external_change(at, &self.path, &g.cfg, &cfg);
+                self.hooks.audit_external_change(at, &self.path, &g.cfg, &cfg);
             } else if mtime != g.mtime {
-                crate::config_audit::log_reload_unchanged(at, &self.path);
+                self.hooks.audit_reload_unchanged(at, &self.path);
             }
             g.cfg = cfg;
             g.mtime = mtime;
@@ -1267,7 +1322,7 @@ impl ConfigStore {
         // 不論這次改了什麼都驗整份：一來每個 mutation 走的都是這支，規則只有一份；二來 config 已經壞掉時
         // 本來就不該再往上疊寫。
         // 失敗是 `ConfigInvalid`：原因留在最前面（呼叫端與測試都在看它），型別讓 API 分得出這不是上游壞掉。
-        crate::projection::validate(&next)?;
+        self.hooks.validate_projection(&next)?;
         // 純驗證過了才問需要 DB 的那一類（同一條理由：驗不過就不寫，guard 也不例外）。
         guard(&next)?;
         // 沒變就不寫（issue #38）；有變的話 `write_atomic` 就地改、保留註解與未知鍵。
@@ -1276,7 +1331,7 @@ impl ConfigStore {
             g.mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
             g.hot_fingerprint = std::fs::read_to_string(&self.path).ok().map(|text| config_fingerprint(&text));
             g.hot_read_error = None;
-            crate::config_audit::log_write(at, &self.path, &g.cfg, &next);
+            self.hooks.audit_write(at, &self.path, &g.cfg, &next);
         }
         g.cfg = next;
         Ok(out)
