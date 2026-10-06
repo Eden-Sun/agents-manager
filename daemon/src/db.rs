@@ -337,6 +337,8 @@ const SCHEMA_HISTORY: &[(i64, &str)] = &[
     (43, "d554cdfaeba6efe4"),
     // issue #852：`context_lost_notices`（原生對話接不回的警告紀錄，依 session id 精確撤銷）。
     (44, "0d15873cf9a77b83"),
+    // l8 審查發現 2：`turns.source_event_id`（收這筆回合的 hook 在收件匣的 id）＋唯一索引，重播同一則 hook 不再開第二個外部回合。
+    (45, "e88ca2badecc5381"),
 ];
 pub const SCHEMA_VERSION: i64 = SCHEMA_HISTORY[SCHEMA_HISTORY.len() - 1].0;
 
@@ -578,11 +580,20 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
         ("messages", "keep_warm", "ALTER TABLE messages ADD COLUMN keep_warm INTEGER NOT NULL DEFAULT 0"),
         // #708：專案已移交給另一台主機的 daemon；NULL＝本機管。
         ("projects", "handed_off_to", "ALTER TABLE projects ADD COLUMN handed_off_to TEXT"),
+        // 收這一筆回合的那則 hook 在收件匣的 `hook_events.id`（發現 2，l8 審查）：收件匣的「處理完」標記是 `process()` 返回後才另寫，
+        // 兩者之間 daemon 重啟，重播的同一則 hook 沒有 native turn id 可去重，會再開一個外部回合與訊息。回合與這把鑰匙同一個交易寫，
+        // 重播先查它（見 `hookrecv::process_for`）。NULL＝不是 hook 收件匣收的（網頁送出的、備援抓的、舊列）。
+        ("turns", "source_event_id", "ALTER TABLE turns ADD COLUMN source_event_id TEXT"),
     ] {
         if !has_column(&mut *tx, table, col).await? {
             sqlx::query(ddl).execute(&mut *tx).await.with_context(|| format!("add {table}.{col}"))?;
         }
     }
+    // 一則 hook 最多收成一個回合：唯一鍵讓重播（收件匣 at-least-once）命中既有結果，而不是再開一個。
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS turns_source_event ON turns(source_event_id) WHERE source_event_id IS NOT NULL")
+        .execute(&mut *tx)
+        .await
+        .context("index turns.source_event_id")?;
     // Recover queued prompts delivered before #738 whose old timestamp proves the previous post-delivery
     // update was lost. The predicate matches the original five-second restamp rule.
     sqlx::query(

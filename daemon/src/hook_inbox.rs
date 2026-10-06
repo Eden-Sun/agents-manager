@@ -332,7 +332,7 @@ pub async fn drain_once(app: &Arc<App>) -> Result<usize> {
         let batch = rows.len();
         for row in rows {
             match serde_json::from_str::<HookBody>(&row.body_json) {
-                Ok(body) => match crate::hookrecv::process(app, &body).await {
+                Ok(body) => match crate::hookrecv::process_for(app, &body, Some(&row.id)).await {
                     Ok(()) => {
                         mark_done(&app.db, &row.id).await?;
                         done += 1;
