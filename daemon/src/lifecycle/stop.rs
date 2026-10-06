@@ -18,18 +18,7 @@ pub fn in_default_session(run: &db::Run) -> bool {
     run.herdr_session.as_deref() == Some("default")
 }
 
-/// SPEC §6.5.1: a bot from the user's `default` session is observed, never driven — start
-/// would create a workspace in their session, restart would close their pane (review 2026-09-12 #4).
-pub(crate) fn refuse_default_session(bot: &db::Bot) -> LcResult<()> {
-    if bot.herdr_session.as_deref() == Some("default") {
-        return Err(LcError::conflict(
-            "default_session",
-            json!({"bot_id": bot.id,
-                   "message": "這顆是從你自己的 herdr default session 匯入的，daemon 只觀察、不替它開或關 pane：要重啟請在那個終端裡自己做。"}),
-        ));
-    }
-    Ok(())
-}
+pub(crate) use crate::default_session::refuse_default_session;
 
 /// [`stop_bot`] with the lock already held, so a restart stops and starts under one guard.
 pub async fn stop_bot_locked(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {

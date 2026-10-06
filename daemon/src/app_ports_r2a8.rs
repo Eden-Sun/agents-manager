@@ -31,3 +31,21 @@ pub async fn refresh_codex(app: &Arc<App>, run: &crate::db::Run) {
     let events = crate::lifecycle::app_ports_p4::AppEventSink::new(app);
     crate::prompt_cache::refresh_codex_with_ports(&database, &rollout, &events, run).await;
 }
+
+pub async fn mark_pane_typed(app: &Arc<App>, run_id: &str) -> Result<(), String> {
+    crate::lifecycle::mark_pane_typed(app.as_ref(), run_id).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_message(
+    app: &Arc<App>,
+    conversation_id: &str,
+    turn_id: Option<&str>,
+    role: &str,
+    content: &str,
+    author: &str,
+    incomplete: bool,
+    snapshot: Option<&str>,
+) -> anyhow::Result<crate::db::Message> {
+    crate::lifecycle::insert_message(app.as_ref(), conversation_id, turn_id, role, content, author, incomplete, snapshot).await
+}

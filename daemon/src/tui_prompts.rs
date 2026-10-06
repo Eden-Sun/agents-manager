@@ -193,7 +193,7 @@ pub fn is_feedback_survey(screen: &str) -> bool {
 }
 
 /// Claude Code 開場登入選單（`CLAUDE_CONFIG_DIR` 未登入）。herdr 看起來是活的，prompt 卻只打在
-/// 選單上、回合永遠掛著，所以 [`crate::lifecycle`] 送前先看，中了回 409 `needs_login`。
+/// 選單上、回合永遠掛著，所以生命週期控制送前先看，中了回 409 `needs_login`。
 pub fn is_login_menu(screen: &str) -> bool {
     // 標題允許窄 pane 折行（`Select login` / ` method:`），但選項一定要自己成行——句子裡提到
     // 「select login method」的正文不算（[`norm_line`]）。只看最底 [`MENU_TAIL_LINES`] 行、而且輸入列不能空著：

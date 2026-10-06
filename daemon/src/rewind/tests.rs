@@ -3,6 +3,7 @@
 //! - 狀態機：[`FakeTui`] 照實機的樣子畫選單／確認頁、照實機的規則處理按鍵，可以注入各種壞掉的情況；不碰真 herdr、真 claude。
 
 use super::*;
+use crate::lifecycle;
 use crate::testing as tt;
 use std::sync::Mutex as StdMutex;
 
