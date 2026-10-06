@@ -186,12 +186,27 @@ pub async fn refresh_agy(app: &Arc<App>, host: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// agy 的登入憑證（Google OAuth token）：agm-host 實測就是這個檔（600，沒用 keyring；`agy` 沒有 `logout` 子命令，TUI 的 `/logout` 做的也是清它）。
+/// agy 的登入憑證（Google OAuth token）：Linux（agm-host 實測）是這個檔（600）；**macOS 沒有檔，放 login Keychain**
+/// （service `gemini`、account `antigravity`，agy log 寫 `authenticated via keyring`；2026-10-06 在 m4p 實測）。`agy` 沒有 `logout` 子命令，TUI 的 `/logout` 做的也是清憑證。
 pub const TOKEN_FILE: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
 
-/// 遠端同一件事：只刪這個檔、不跑 agy。`AM_REMOVED`＝刪掉了，`AM_ABSENT`＝本來就沒有。
-const REMOTE_LOGOUT_SCRIPT: &str = "f=\"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\"; \
-if [ -e \"$f\" ] || [ -L \"$f\" ]; then rm -f \"$f\" && echo AM_REMOVED || echo AM_FAILED; else echo AM_ABSENT; fi";
+/// 遠端同一件事：只刪憑證（檔案、macOS 的 Keychain 項目）、不跑 agy。`AM_REMOVED`＝刪掉了，`AM_ABSENT`＝本來就沒有，`AM_FAILED`＝想刪沒刪成。
+const REMOTE_LOGOUT_SCRIPT: &str = "f=\"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\"; r=0; \
+if [ -e \"$f\" ] || [ -L \"$f\" ]; then rm -f \"$f\" && r=1 || { echo AM_FAILED; exit 0; }; fi; \
+if command -v security >/dev/null 2>&1 && security find-generic-password -s gemini -a antigravity >/dev/null 2>&1; then \
+security delete-generic-password -s gemini -a antigravity >/dev/null 2>&1 && r=1 || { echo AM_FAILED; exit 0; }; fi; \
+[ $r = 1 ] && echo AM_REMOVED || echo AM_ABSENT";
+
+/// 本機 macOS 的 Keychain 項目在不在／刪掉。測試的假 HOME 不會換 Keychain，所以 `cfg(test)` 一律當不存在、不碰——不然測試會讀到（甚至刪掉）真的登入。
+#[cfg(all(target_os = "macos", not(test)))]
+async fn local_keychain(args: &[&str]) -> bool {
+    let run = tokio::process::Command::new("security").args(args).args(["-s", "gemini", "-a", "antigravity"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    matches!(tokio::time::timeout(Duration::from_secs(10), run).await, Ok(Ok(s)) if s.success())
+}
+#[cfg(not(all(target_os = "macos", not(test))))]
+async fn local_keychain(_args: &[&str]) -> bool {
+    false
+}
 
 /// 測試行程共用一個假 HOME：碰憑證檔的測試（這裡與 `api::agy_logout_route_tests`）一個一個來。
 #[cfg(test)]
@@ -200,11 +215,14 @@ pub(crate) async fn token_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
     L.lock().await
 }
 
-/// 憑證檔在不在（非空）。遠端跑一小段 `[ -s ]`，本機直接 stat；問不出來是 `None`（不改現有的判斷）。
+/// 憑證在不在：檔案（非空）或 macOS 的 Keychain 項目。遠端跑一小段 sh，本機直接 stat（macOS 再問 `security`）；問不出來是 `None`（不改現有的判斷）。
 async fn token_present(fence: &crate::hosts::HostFence) -> Option<bool> {
     if fence.conn().is_local() {
         let home = crate::home::dir()?;
-        return Some(std::fs::metadata(home.join(TOKEN_FILE)).map(|m| m.len() > 0).unwrap_or(false));
+        if std::fs::metadata(home.join(TOKEN_FILE)).map(|m| m.len() > 0).unwrap_or(false) {
+            return Some(true);
+        }
+        return Some(local_keychain(&["find-generic-password"]).await);
     }
     if !fence.conn().is_connected() {
         return None;
@@ -217,7 +235,7 @@ async fn token_present(fence: &crate::hosts::HostFence) -> Option<bool> {
     }
 }
 
-const REMOTE_PRESENT_SCRIPT: &str = "[ -s \"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\" ] && echo AM_YES || echo AM_NO";
+const REMOTE_PRESENT_SCRIPT: &str = "if [ -s \"$HOME/.gemini/antigravity-cli/antigravity-oauth-token\" ] || { command -v security >/dev/null 2>&1 && security find-generic-password -s gemini -a antigravity >/dev/null 2>&1; }; then echo AM_YES; else echo AM_NO; fi";
 
 /// 把 `tools.agy.logged_in` 寫成 `logged_in`（已知有裝 agy 才寫），有變就推 `host_changed`。額度那格的「未登入」與登入鈕吃這個旗標（網頁 `useLoggedOut`）。
 async fn set_logged_in(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFence, logged_in: bool) -> bool {
@@ -258,11 +276,16 @@ pub async fn logout(app: &Arc<App>, host: &str) -> Result<bool, LogoutError> {
     let _guard = crate::quota::probe_lock(&format!("{host}#agy")).await;
     let removed = if fence.conn().is_local() {
         let home = crate::home::dir().ok_or_else(|| LogoutError::Failed("no home directory".into()))?;
-        match std::fs::remove_file(home.join(TOKEN_FILE)) {
+        let file = match std::fs::remove_file(home.join(TOKEN_FILE)) {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => return Err(LogoutError::Failed(format!("cannot remove the agy credentials: {e}"))),
+        };
+        let keychain = local_keychain(&["find-generic-password"]).await;
+        if keychain && !local_keychain(&["delete-generic-password"]).await {
+            return Err(LogoutError::Failed("cannot remove the agy credentials from the Keychain".into()));
         }
+        file || keychain
     } else {
         if !fence.conn().is_connected() {
             return Err(LogoutError::Failed(format!("host `{host}` is not connected")));
@@ -468,6 +491,46 @@ mod tests {
         let cwd = lines.next().unwrap();
         assert!(!cwd.starts_with(dir.to_str().unwrap()) && !std::path::Path::new(cwd).exists(), "拋棄式 cwd 用完刪掉：{cwd}");
         assert_eq!(lines.next().unwrap(), "true -p /usage --output-format json");
+    }
+
+    /// macOS 的 agy 憑證在 Keychain、沒有檔案（m4p 實測）：用假 `security`（PATH 前面）跑真的 sh，確認「有 Keychain 項目」算已登入、
+    /// 登出會刪它；沒有 `security`（Linux）時只看檔案。假 HOME 底下沒有憑證檔。
+    #[test]
+    fn a_keychain_item_counts_as_logged_in_and_logout_deletes_it() {
+        let dir = crate::testing::scratch_dir("am-agy-keychain");
+        let home = dir.join("home");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let state = dir.join("item");
+        crate::testing::write_exec(
+            &bin.join("security"),
+            format!(
+                "#!/bin/sh\ncase \"$1 $2 $3 $4 $5\" in\n\"find-generic-password -s gemini -a antigravity\"*) [ -e {s} ] ;;\n\"delete-generic-password -s gemini -a antigravity\"*) rm -f {s} ;;\n*) exit 9 ;;\nesac\n",
+                s = state.display()
+            ),
+        );
+        let run = |script: &str, with_security: bool| {
+            let path = if with_security { format!("{}:/usr/bin:/bin", bin.display()) } else { "/usr/bin:/bin".to_string() };
+            let out = crate::exec_retry::output(std::process::Command::new("/bin/sh").arg("-c").arg(script).env("HOME", &home).env("PATH", path)).unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(run(REMOTE_PRESENT_SCRIPT, true), "AM_NO", "沒檔也沒 Keychain 項目");
+        std::fs::write(&state, "x").unwrap();
+        assert_eq!(run(REMOTE_PRESENT_SCRIPT, true), "AM_YES", "只有 Keychain 項目也算已登入");
+        assert_eq!(run(REMOTE_PRESENT_SCRIPT, false), "AM_NO", "沒有 security（Linux）時不猜");
+        assert_eq!(run(REMOTE_LOGOUT_SCRIPT, true), "AM_REMOVED");
+        assert!(!state.exists(), "Keychain 項目被刪");
+        assert_eq!(run(REMOTE_LOGOUT_SCRIPT, true), "AM_ABSENT");
+        // 檔案與 Keychain 都在：兩個都清。
+        let tok = home.join(TOKEN_FILE);
+        std::fs::create_dir_all(tok.parent().unwrap()).unwrap();
+        std::fs::write(&tok, "t").unwrap();
+        std::fs::write(&state, "x").unwrap();
+        assert_eq!(run(REMOTE_PRESENT_SCRIPT, false), "AM_YES", "檔案照舊算");
+        assert_eq!(run(REMOTE_LOGOUT_SCRIPT, true), "AM_REMOVED");
+        assert!(!tok.exists() && !state.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

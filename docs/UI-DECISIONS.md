@@ -1013,7 +1013,7 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 ## 額度欄 agy 那格未登入時的登入入口（2026-10-05 使用者）
 
 agy 沒有 `login` 子命令也沒有 `/login`（`canLoginInSession('agy')` 是 false），所以未登入那格比照 Codex：`QuotaLoginShell` 在該主機開 shell、打 `cliLoginCommand('agy')`＝`AGY_CLI_DISABLE_AUTO_UPDATE=true agy` 並切過去。確認框的說明換成 agy 版：TUI 會引導登入（SSH 底下印授權網址，瀏覽器授權後把授權碼貼回），登好後輸入 `/quit` 離開。
-daemon 這一側：探測腳本（`tools::PROBE_SH`）多問一件事——憑證檔 `~/.gemini/antigravity-cli/antigravity-oauth-token` 在不在——印 `AM_LOGIN agy 1／0`，`tools.agy.logged_in` 才有值（以前永遠是 null，那格不會顯示「未登入」）。登出立刻寫 false 並推 `host_changed`；`quota_agy::spawn_agy_login_watcher` 每 20 秒對「裝了 agy、記成未登入」的主機看一次憑證檔（遠端是一個小 ssh），一出現就翻成已登入、清探測冷卻並探測一次 Gemini 的 5h／7d 額度，不必重啟、不必等 5 分鐘輪詢；已知未登入的主機輪詢不再跑 `agy -p /usage`（那會停在登入畫面等到逾時）。
+daemon 這一側：探測腳本（`tools::PROBE_SH`）多問一件事——憑證在不在（檔案 `~/.gemini/antigravity-cli/antigravity-oauth-token`，或 macOS 的 Keychain 項目 `gemini`／`antigravity`——macOS 沒有那個檔）——印 `AM_LOGIN agy 1／0`，`tools.agy.logged_in` 才有值（以前永遠是 null，那格不會顯示「未登入」）。登出立刻寫 false 並推 `host_changed`；`quota_agy::spawn_agy_login_watcher` 每 20 秒對「裝了 agy、記成未登入」的主機看一次憑證檔（遠端是一個小 ssh），一出現就翻成已登入、清探測冷卻並探測一次 Gemini 的 5h／7d 額度，不必重啟、不必等 5 分鐘輪詢；已知未登入的主機輪詢不再跑 `agy -p /usage`（那會停在登入畫面等到逾時）。
 
 ## Bot 設定面板：儲存中不出「重啟後生效」橫幅（2026-10-05 使用者）
 

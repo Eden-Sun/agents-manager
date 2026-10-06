@@ -3448,7 +3448,7 @@ agy 沒有每次啟動指定 hook 的旗標，設定又是使用者（和 Gemini
 新版回應在 `command.data.groups[].buckets[]`；只讀 Gemini 組的 weekly 與 five-hour 桶，欄位含 `id`／`window`、`remaining_fraction`（0–1 的剩餘比例）與 `reset_time`（RFC3339）。Claude/GPT 組略過；兩個 Gemini 窗口都寫進唯一的 `agy` key，`window`／桶名辨認 weekly 與 5h 後分別填 `seven_day`／`five_hour`；`used_pct = (1 − remaining_fraction) × 100`，超出範圍或讀不懂就略過該桶，重置時間讀不出來就 `None`。舊版 tab 分隔 `response` 仍相容，只能填 Gemini 的 `seven_day`。`fable`／`plan` 仍為 `None`，`source = "agy-usage"`。不是 JSON 或沒有可讀 Gemini 窗口→解析回 `None`、呼叫端回錯、**不寫任何東西**，舊讀數留著（過 `STALE_AFTER` 自己標陳舊）。舊版保存的 `agy:claude-gpt` 本機與遠端快照在載入 cache 時刪除，之後也不接受寫入。
 輪詢每 5 分鐘（`AGY_POLL`，每次探測要起一個約 200 MB 的執行檔），失敗冷卻 15 分鐘；`GET /api/quota?refresh=1` 不走冷卻、一律真的探測。`quota::set` 對 agy 只寫 Gemini 的裸 `agy` key。
 agy 畫面／Stop hook 若回報 `Individual quota reached … Resets in …`，daemon 會把該 key 的 `five_hour` 標為 100% 並記 `limit_hit.bucket = five_hour`；讀數已有未來重置時間就沿用，否則解析橫幅相對時間，仍讀不出來時以 5 小時保底。
-登出（`POST /api/hosts/{name}/agy/logout`，`quota_agy::logout`）：刪那台主機的 `~/.gemini/antigravity-cli/antigravity-oauth-token`（agy 沒有 `logout` 子命令，憑證就是這個檔）、清該主機唯一的 `agy` 快照並廣播，不跑 agy、不停正在跑的 agy bot（它們下次重啟才停在登入畫面）；拿探測的鎖，進行中的探測不會寫回。
+登出（`POST /api/hosts/{name}/agy/logout`，`quota_agy::logout`）：刪那台主機的 `~/.gemini/antigravity-cli/antigravity-oauth-token`（agy 沒有 `logout` 子命令，憑證就是這個檔；**macOS 沒有檔、放 login Keychain `gemini`／`antigravity`，一併 `security delete-generic-password`**）、清該主機唯一的 `agy` 快照並廣播，不跑 agy、不停正在跑的 agy bot（它們下次重啟才停在登入畫面）；拿探測的鎖，進行中的探測不會寫回。
 網頁（`QuotaStrip`）：agy 格只顯示 Gemini 的 `agy` key，桌機完整顯示 `5h` 與 `7d` 兩條，low／critical 照 daemon 既有旗標；手機及桌機空間不足時沿用 claude 格的縮合規則，popover 顯示 Gemini 的 5h／7d 與 `limit_hit`。登出按鈕保留。agy bot 在側欄的反灰／黃燈看 `agy` 這組額度。
 
 ### 12a.9 子 agent（`herdr agent start --kind agy`，沒有 hook，2026-10-04 a1）
@@ -3469,7 +3469,7 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 ### 12a.11 遠端主機：安裝、登入、額度（`agy_install.rs`，2026-10-06）
 遠端主機（第一個目標 m4p：macOS arm64）的 agy 分四件事，**安裝、登入偵測、額度探測、啟動 bot 都做了**（啟動見 §12a.12）：
 - **安裝／更新**：`POST /api/hosts/{name}/agy/install`（API §10 前的 agy 一節）。不走 `cli_update`（那條是「有新版通知時升級已裝的 claude／codex」，要先讀得到舊版、綁通知目標）；agy 沒有新版通知，沒裝也要能裝，所以獨立一個小模組。daemon 讀官方 manifest（附錄 G.1）、驗過 url（只收官方儲存桶）與 sha512 的形狀，把它們當資料交給主機端寫死的 POSIX sh：下載 → 驗 sha512 → 只解出 `antigravity` → 對暫存檔跑 `--version`（關自動更新，版本要吻合）→ 同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。**絕不執行官方 `install.sh`／`agy install`**（會改 shell profile、purge alias）。沒驗過 sha512 的東西不會被執行；驗證沒過不碰既有的 agy。同一台同時只裝一次（行程內名額＋主機端 process-group 鎖 `~/.agents-manager-agy-install.lock`）。裝完重新偵測，版本吻合才算成功（`~/.local/bin` 不在那台 PATH 時回 `not_on_path`）。已是官方最新版就不下載（`already_latest`）。
-- **登入**：額度欄 agy 格未登入時「開 shell 登入」本來就帶 host，遠端會在那台開 host shell 打 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`（登入用的這一次也關背景自我更新）；憑證檔 `~/.gemini/antigravity-cli/antigravity-oauth-token` 出現後，`spawn_agy_login_watcher`（每 20 秒、遠端一個小 ssh）翻成已登入並立刻探測額度。
+- **登入**：額度欄 agy 格未登入時「開 shell 登入」本來就帶 host，遠端會在那台開 host shell 打 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`（登入用的這一次也關背景自我更新）；憑證出現後（Linux 是檔案 `~/.gemini/antigravity-cli/antigravity-oauth-token`；**macOS 是 login Keychain 項目 `security find-generic-password -s gemini -a antigravity`，沒有那個檔**——只看檔案會讓 m4p 登入完仍顯示未登入，2026-10-06），`spawn_agy_login_watcher`（每 20 秒、遠端一個小 ssh）翻成已登入並立刻探測額度。
 - **額度**：`refresh_agy` 對遠端經 `ssh_exec_path` 跑同一段 `agy -p /usage`，讀數記在 `<host>/agy`。
 - **網頁**：沒裝 agy 的主機（tools 探測已知 `installed:false`），額度 popover 的 agy 格寫「尚未安裝 agy，要自動安裝嗎？」，入口是「安裝 agy 並登入」：使用者在確認框按確認才安裝，成功後才開 shell 登入（不再開 shell 打 `agy` 得到 `command not found`）；新 bot 的 kind 選單、缺少 CLI 提示與主機徽章的 agy 安裝鈕同樣先問再裝（細節見 UI-DECISIONS）。
 
