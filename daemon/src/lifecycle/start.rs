@@ -2,6 +2,16 @@
 
 use super::*;
 
+/// am-turn-session（P4sess）對其他 feature 的窄介面與 `App` 端實作（crate 拆分第 3 步）；檔案在 `daemon/src/`，不碰 `lifecycle/mod.rs`。
+#[path = "../session_ports.rs"]
+pub(crate) mod ports;
+#[path = "../app_ports_p4sess.rs"]
+pub(crate) mod app_ports_p4sess;
+use self::ports::{HandoffSessionRepo, RestartIntentRepo, SessionProviderPort, emit_object, bot_status};
+use super::app_ports_p4::{AppEventSink};
+use self::app_ports_p4sess::AppBotLock;
+use am_ports::BotLock;
+
 /// Identity CLI args on `host`. Discovered `ccN` identities carry none: alias flags are the user's shell habit.
 async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String> {
     let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) else { return vec![] };
@@ -84,8 +94,9 @@ pub async fn start_bot(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
 }
 
 pub async fn start_bot_with(app: &Arc<App>, bot_id: &str, opts: StartOpts) -> LcResult<String> {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    let locks = AppBotLock::new(app);
+    let locked_bot = bot_id.to_string();
+    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     start_bot_locked_with(app, bot_id, opts).await
 }
 
@@ -111,7 +122,7 @@ async fn start_bot_locked_with_host_fence(
         ));
     }
     refuse_default_session(&bot)?;
-    crate::handoff::refuse(&app.db, bot_id).await?;
+    app.db.refuse_handed_off(bot_id).await?;
     if let Some(existing) = db::active_run(&app.db, bot_id).await.map_err(up)? {
         return Err(LcError::conflict("active run already exists", json!({"run_id": existing.id})));
     }
@@ -236,7 +247,7 @@ async fn start_bot_locked_with_host_fence(
         }
         return Err(up(e));
     }
-    app.emit_bot_status(bot_id).await;
+    bot_status(&AppEventSink::new(app), bot_id).await;
 
     match start_inner(app, &bot, &project, &run_id, &session, opts.clone(), fence).await {
         Ok(()) => {
@@ -248,7 +259,7 @@ async fn start_bot_locked_with_host_fence(
         // agent 已經在跑，只差 `running` 沒記下（#145）：收成 exited 會留下一顆沒有 run 的活 agent，
         // 交給 `start_inner` 排好的重試照證據收斂。
         Err(e @ LcError::Uncommitted(_)) => {
-            app.emit_bot_status(bot_id).await;
+            bot_status(&AppEventSink::new(app), bot_id).await;
             Err(e)
         }
         Err(e) => {
@@ -258,7 +269,7 @@ async fn start_bot_locked_with_host_fence(
                 tracing::warn!(bot = %bot.name, run = %run_id, error = %db_err, "failed start could not be recorded as exited");
                 super::run_state::schedule_settle(app, &run_id, super::run_state::Settle::Reconcile { stuck: "starting".into() });
             }
-            app.emit_bot_status(bot_id).await;
+            bot_status(&AppEventSink::new(app), bot_id).await;
             Err(e)
         }
     }
@@ -819,7 +830,7 @@ pub(crate) async fn context_lost(app: &Arc<App>, bot: &db::Bot, why: &str, faile
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
-    emit_message_added(app, &bot.id, msg).await;
+    emit_object(&AppEventSink::new(app), "message_added", Some(&bot.id), json!({ "bot_id": bot.id, "message": msg })).await;
 
     Ok(())
 }
@@ -898,7 +909,7 @@ pub(crate) async fn retire_context_lost(app: &Arc<App>, bot_id: &str, session_id
 
     tracing::info!(bot = %bot_id, session = %session_id, n = notes.len(), deleted, "resumed the lost conversation; retired its context-lost notes");
     if deleted > 0 {
-        app.emit("resync", json!({"reason": "context_lost_retired", "bot_id": bot_id})).await;
+        emit_object(&AppEventSink::new(app), "resync", None, json!({"reason": "context_lost_retired", "bot_id": bot_id})).await;
     }
 }
 
@@ -1265,7 +1276,7 @@ async fn start_inner(
     // #742：全新對話起的 claude run 畫面上不會有舊的 `/model`、`/effort` 確認，第一輪巡邏前使用者真的切了也要採用。
     // 接回、分支（argv 帶 `--resume`／`--continue`）會把舊對話印回來，那種維持「第一次看到只當基準」。
     if bot.kind == "claude" && !args.iter().any(|a| matches!(a.as_str(), "--resume" | "-r" | "--continue" | "-c")) {
-        crate::claude_live::start_fresh(run_id);
+        app.claude_live_start_fresh(run_id);
     }
     // A fresh pane answers `agent_pane_busy: … is not an available shell` until its shell settles
     // (2026-09-06: one of six back-to-back starts lost, 300 ms in); hence the retry.
@@ -1380,7 +1391,7 @@ async fn start_inner(
     // 不補 `/effort`：grok 1.0.46 會把該 slash 寫進 config.toml 的 default_reasoning_effort。
     // 這一輪的等級只靠上面 argv 的 `--reasoning-effort`。
     let _ = super::apply_grok_startup_effort(app, &bot, run_id, &pane_id, &client).await;
-    app.emit_bot_status(&bot.id).await;
+    bot_status(&AppEventSink::new(app), &bot.id).await;
     Ok(())
 }
 
@@ -1442,8 +1453,9 @@ async fn restart_bot_with_authority(
     opts: StartOpts,
     fence: Option<&crate::hosts::HostFence>,
 ) -> LcResult<String> {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    let locks = AppBotLock::new(app);
+    let locked_bot = bot_id.to_string();
+    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     if let Some(fence) = fence {
         ensure_current_host_fence(app, bot_id, fence).await?;
     }
@@ -1482,7 +1494,7 @@ async fn restart_bot_with_authority(
         ensure_current_host_fence(app, bot_id, fence).await?;
     }
     let payload = json!({"opts": opts, "from_run_id": stopping, "bot_name": bot.name});
-    let intent_id = crate::intents::prepare_restart(&app.db, bot_id, &host, &payload, RESTART_INTENT_TTL_SECS, &app.boot_id)
+    let intent_id = app.db.prepare_restart_intent(bot_id, &host, &payload, RESTART_INTENT_TTL_SECS, &app.boot_id)
         .await
         .map_err(|e| LcError::Upstream(format!("cannot record the restart intent: {e:#}")))?;
     #[cfg(test)]
@@ -1514,13 +1526,13 @@ const RESTART_INTENT_TTL_SECS: i64 = 15 * 60;
 /// 標不成也不影響結果：intent 留著開機時會被驗證世界後收掉（bot 已經在跑就 `done`）。
 async fn settle_restart_intent(app: &Arc<App>, intent_id: &str, res: &LcResult<String>) {
     let out = match res {
-        Ok(_) => crate::intents::complete(&app.db, intent_id).await,
+        Ok(_) => app.db.complete_intent(intent_id).await,
         // 新 agent 起來了、只是 `running` 還沒記下（#145）：bot 回來了。
-        Err(LcError::Uncommitted(v)) if v.get("start_error").is_none() => crate::intents::complete(&app.db, intent_id).await,
+        Err(LcError::Uncommitted(v)) if v.get("start_error").is_none() => app.db.complete_intent(intent_id).await,
         Err(LcError::Conflict(v)) if matches!(v.get("reason").and_then(|r| r.as_str()), Some("not_idle" | "no_longer_idle")) => {
-            crate::intents::abandon(&app.db, intent_id, "refused before anything was stopped").await
+            app.db.abandon_intent(intent_id, "refused before anything was stopped").await
         }
-        Err(e) => crate::intents::fail(&app.db, intent_id, &format!("{e:?}")).await,
+        Err(e) => app.db.fail_intent(intent_id, &format!("{e:?}")).await,
     };
     if let Err(e) = out {
         tracing::warn!(intent = intent_id, error = %e, "could not settle the restart intent; boot recovery will verify it");
@@ -1612,7 +1624,7 @@ pub(crate) async fn left_down_by_restart(app: &Arc<App>, bot_id: &str, run_id: &
     match super::run_state::relabel(&app.db, run_id, "stopped", "exited").await {
         Ok(super::run_state::Moved::Applied) => {
             tracing::warn!(bot = bot_id, run = run_id, "restart stopped the bot but could not start it again; recorded as exited, not as a user stop");
-            app.emit_bot_status(bot_id).await;
+            bot_status(&AppEventSink::new(app), bot_id).await;
             Ok(())
         }
         Ok(super::run_state::Moved::Lost) => Ok(()),
