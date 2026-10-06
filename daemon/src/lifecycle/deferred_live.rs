@@ -7,6 +7,7 @@
 //! 尚未套用的 TUI 工作只記在記憶體；readback 成功後會先把 runtime snapshot 寫進 durable
 //! bookkeeping debt，因此 daemon 重啟只需補 DB，不會重送 slash 或 picker 操作。
 
+use super::run_state::app_ports_p4state;
 use crate::state::App;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -95,7 +96,7 @@ pub(crate) async fn apply_deferred_once(
 ) -> Option<super::LiveApplyOutcome> {
     let queued = take(bot_id)?;
     let fields = queued.fields.to_vec();
-    let outcome = super::apply_live_setting_with_revision(
+    let outcome = app_ports_p4state::apply_live_setting_with_revision(
         app,
         bot_id,
         &fields,
@@ -123,7 +124,7 @@ pub(crate) async fn apply_deferred_once(
             tracing::info!(bot = %bot_id, ?fields, reason = %why, "deferred live apply failed; the restart badge stays")
         }
     }
-    app.emit("bot_changed", serde_json::json!({"bot_id": bot_id})).await;
+    app_ports_p4state::emit_bot_changed(app, bot_id).await;
     Some(outcome)
 }
 

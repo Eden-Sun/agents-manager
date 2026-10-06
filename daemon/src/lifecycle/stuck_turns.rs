@@ -17,6 +17,8 @@
 //!
 //! idle 計時放記憶體：daemon 重啟後從第一次看到 idle 重新算，寧可晚收，不要誤收。
 
+use super::run_state::app_ports_p4state;
+use am_ports::BotLock;
 use super::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -165,8 +167,8 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
         if !idle_for(&run_id, now).is_some_and(|d| d >= threshold) {
             continue;
         }
-        let lock = app.bot_lock(&bot_id).await;
-        let _g = lock.lock().await;
+        let bot_lock = app_ports_p4state::AppBotLock::new(app);
+        let _g = bot_lock.lock_bot(&bot_id).await;
         // 等鎖的時候狀態可能變了：鎖內重讀，run 不是 idle、turn 已經不是那一筆就不動。
         let Ok(Some(run)) = db::run(&app.db, &run_id).await else { continue };
         observe_at(&run_id, &run.agent_status, now);
@@ -187,7 +189,7 @@ pub(crate) async fn sweep_at(app: &Arc<App>, host: Option<&str>, now: Instant, t
             Ok(true) => {
                 closed.push(turn.id.clone());
                 // 卡住的就是排在後面的那一筆：同一把鎖裡馬上送，不等下一次喚醒。
-                if let Err(e) = flush_queued_locked(app, &bot_id).await {
+                if let Err(e) = app_ports_p4state::flush_queued_locked(app, &bot_id).await {
                     tracing::warn!(bot = %bot_id, error = ?e, "queued prompt flush after closing a stuck turn failed");
                 }
             }
@@ -211,8 +213,8 @@ pub(crate) enum CloseWhy {
 /// 回傳收掉的 turn id。
 pub(crate) async fn close_after_session_paused(app: &Arc<App>, run_id: &str, expected_turn_id: &str) -> Option<String> {
     let run = db::run(&app.db, run_id).await.ok()??;
-    let lock = app.bot_lock(&run.bot_id).await;
-    let _g = lock.lock().await;
+    let bot_lock = app_ports_p4state::AppBotLock::new(app);
+    let _g = bot_lock.lock_bot(&run.bot_id).await;
     let run = db::run(&app.db, run_id).await.ok()??;
     if run.state != "running" || run.agent_status != "idle" {
         return None;
@@ -223,7 +225,7 @@ pub(crate) async fn close_after_session_paused(app: &Arc<App>, run_id: &str, exp
     }
     match close_locked(app, &run, &turn, CloseWhy::SessionPaused).await {
         Ok(true) => {
-            if let Err(e) = flush_queued_locked(app, &run.bot_id).await {
+            if let Err(e) = app_ports_p4state::flush_queued_locked(app, &run.bot_id).await {
                 tracing::warn!(bot = %run.bot_id, error = ?e, "queued prompt flush after a session-paused close failed");
             }
             Some(turn.id)
@@ -262,7 +264,7 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, why: Close
     let message = match reply.as_deref() {
         // 回覆已經有一份（例如 hook 寫了訊息卻沒收掉 turn）：不再寫第二份。
         Some(_) if already_answered => None,
-        Some(text) => Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", text, "transcript", false, None).await?),
+        Some(text) => Some(app_ports_p4state::insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", text, "transcript", false, None).await?),
         None => {
             let why = match why {
                 CloseWhy::SessionPaused => "claude 的 Session paused 選單關掉了、這個回合沒有回覆（被暫停），直接收尾，不再顯示等待中。".to_string(),
@@ -271,15 +273,15 @@ async fn close_locked(app: &Arc<App>, run: &db::Run, turn: &db::Turn, why: Close
                      transcript 證不出這則 prompt 之後有完整回覆，所以標成 completed_fallback（不是失敗）。"
                 ),
             };
-            Some(insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "system", &why, "system", false, None).await?)
+            Some(app_ports_p4state::insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "system", &why, "system", false, None).await?)
         }
     };
     tx.commit().await?;
     tracing::warn!(turn = %turn.id, bot = %bot.name, status, idle_mins = mins, "closed a turn stuck in flight after the agent went idle");
     if let Some(m) = message {
-        emit_message_added(app, &bot.id, m).await;
+        app_ports_p4state::emit_message_added(app, &bot.id, m).await;
     }
-    emit_turn(app, &turn.id).await;
+    app_ports_p4state::emit_turn(app, &turn.id).await;
     Ok(true)
 }
 

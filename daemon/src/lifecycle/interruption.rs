@@ -20,6 +20,8 @@
 //! 帳只在記憶體：daemon 重啟就沒了。重啟後還 in_flight 的那一筆照舊由 hook 或閒置 watchdog（`stuck_turns`）收，
 //! 跟記帳之前一樣——不會永遠卡住，只是慢。
 
+use super::run_state::app_ports_p4state;
+use am_ports::BotLock;
 use super::*;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -314,8 +316,9 @@ async fn settle_one(app: &Arc<App>, bot_id: &str, p: &Pending, evidence: Evidenc
 
 /// [`settle_locked`]，自己拿 bot 鎖（定時重試用）。
 async fn settle(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    let bot_lock = app_ports_p4state::AppBotLock::new(app);
+    let bot_key = bot_id.to_string();
+    let _g = bot_lock.lock_bot(&bot_key).await;
     settle_locked(app, bot_id, Evidence::Nothing).await
 }
 
@@ -351,7 +354,7 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
         }
     };
     let mut tx = app.db.begin().await?;
-    let outcome = super::turn_controller::fail_on(&mut tx, &p.turn_id, super::turn_controller::DeliveryOnFail::Keep, &p.note).await?;
+    let outcome = app_ports_p4state::turn_fail_on(&mut tx, &p.turn_id, super::turn_controller::DeliveryOnFail::Keep, &p.note).await?;
     let mut notes = Vec::new();
     if outcome == super::turn_controller::Outcome::Applied {
         let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&p.turn_id).fetch_one(&mut *tx).await?;
@@ -363,7 +366,7 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
                     .await?;
             if !already_answered {
                 notes.push(
-                    insert_message_tx(
+                    app_ports_p4state::insert_message_tx(
                         &mut tx,
                         &conv,
                         Some(&p.turn_id),
@@ -377,7 +380,7 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
                 );
             }
         }
-        notes.push(insert_message_tx(&mut tx, &conv, Some(&p.turn_id), "system", &p.note, "system", false, None).await?);
+        notes.push(app_ports_p4state::insert_message_tx(&mut tx, &conv, Some(&p.turn_id), "system", &p.note, "system", false, None).await?);
     }
     if let Some(n) = &p.new_turn {
         let bound = sqlx::query(
@@ -395,17 +398,17 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
             > 0;
         if !bound {
             let why = "插隊送出的鍵生效了，但這個 run 已經不在（或另有回合在飛），這一則接不上去。";
-            if super::turn_controller::fail_on(&mut tx, &n.id, super::turn_controller::DeliveryOnFail::Keep, why).await?
+            if app_ports_p4state::turn_fail_on(&mut tx, &n.id, super::turn_controller::DeliveryOnFail::Keep, why).await?
                 == super::turn_controller::Outcome::Applied
             {
                 let conv: String = sqlx::query_scalar("SELECT conversation_id FROM turns WHERE id=?").bind(&n.id).fetch_one(&mut *tx).await?;
-                notes.push(insert_message_tx(&mut tx, &conv, Some(&n.id), "system", why, "system", false, None).await?);
+                notes.push(app_ports_p4state::insert_message_tx(&mut tx, &conv, Some(&n.id), "system", why, "system", false, None).await?);
             }
         }
     }
     tx.commit().await?;
     for m in notes {
-        emit_message_added(app, bot_id, m).await;
+        app_ports_p4state::emit_message_added(app, bot_id, m).await;
     }
     if let Some(n) = &p.new_turn {
         // 掛不上 run、收成 failed 的那一則也要寫（#163）：送出鍵生效過，字送出去了——送達與回合成敗是兩件事（§4.4a）。
@@ -413,10 +416,10 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
             // 寫不進去就記在送達結果的帳上（#149，`owed_delivery` 自己重試）：這個交易已經 commit，打斷這一半不重來。
             let _ = super::owed_delivery::delivered_at(app, bot_id, &n.id, *rec, at).await;
         }
-        emit_turn(app, &n.id).await;
+        app_ports_p4state::emit_turn(app, &n.id).await;
     }
     // 推回合結束：排著的派工由它叫醒（`fail_in_flight` 一樣靠這個）。
-    emit_turn(app, &p.turn_id).await;
+    app_ports_p4state::emit_turn(app, &p.turn_id).await;
     Ok(())
 }
 
@@ -429,7 +432,7 @@ async fn codex_partial_for_interruption(app: &Arc<App>, bot_id: &str, p: &Pendin
     }
     let Some(run) = db::run(&app.db, &p.run_id).await? else { return Ok(None) };
     let Some(pane_id) = run.pane_id.as_deref() else { return Ok(None) };
-    let Some(client) = app.herdr_for_run(&run).await else { return Ok(None) };
+    let Some(client) = app_ports_p4state::herdr_client_for_run(app, &run).await else { return Ok(None) };
     let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
     let sent = super::turn_echo_texts(app, &p.turn_id).await?;
     Ok(super::codex_partial_reply(&read.text, &sent).map(|reply| (reply, read.text)))
@@ -478,8 +481,8 @@ pub(crate) async fn adopt_turns_of_ended_runs(app: &Arc<App>, boot: &str) -> boo
     };
     let mut done = true;
     for (turn, run, bot, state) in rows {
-        let lock = app.bot_lock(&bot).await;
-        let _g = lock.lock().await;
+        let bot_lock = app_ports_p4state::AppBotLock::new(app);
+        let _g = bot_lock.lock_bot(&bot).await;
         let note = format!("這一回合的 run 已經結束（{state}），當時沒能把回合收掉；daemon 重啟時補收。");
         match close_turn(app, &bot, &run, &turn, &note).await {
             Ok(()) => tracing::warn!(turn = %turn, run = %run, %state, "closed a turn left in flight on an ended run"),
@@ -516,8 +519,8 @@ pub(crate) async fn adopt_unbound_send_nows(app: &Arc<App>, boot: &str) -> bool 
     let mut done = true;
     let why = "插隊送出途中 daemon 停了：送出鍵有沒有生效不知道。正在跑的那一回合沒有被收掉；這一句若真的送出去了，回覆會以外部回合出現。";
     for (turn, conv, bot) in rows {
-        let lock = app.bot_lock(&bot).await;
-        let _g = lock.lock().await;
+        let bot_lock = app_ports_p4state::AppBotLock::new(app);
+        let _g = bot_lock.lock_bot(&bot).await;
         // 送出鍵其實生效了（#229）：照平常的收尾做，不收成 unknown——不然 claude 替它送的 Stop 會認領被插隊的那一筆。
         match adopt_landed_send_now(app, &bot, &turn).await {
             Ok(true) => {

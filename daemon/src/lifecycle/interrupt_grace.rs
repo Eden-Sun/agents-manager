@@ -20,6 +20,7 @@
 //! 同一個時刻另記一筆**被中斷的是哪一回合**（[`InterruptedTurn`]），給 `StopFailure` 認 Esc 的回聲用
 //! （#117）。兩筆各自清：回聲到了只結清回聲那筆，排隊寬限照舊。
 
+use super::run_state::app_ports_p4state;
 use super::stuck_turns::{idle_for, observe_at};
 use super::*;
 use chrono::{DateTime, Utc};
@@ -251,7 +252,7 @@ async fn claude_prompt_id(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Optio
         return None;
     }
     let raw_path = run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?;
-    if !crate::transcript_read::local_transcript_allowed(app, bot, raw_path).await {
+    if !app_ports_p4state::local_transcript_allowed(app, bot, raw_path).await {
         return None;
     }
     let path = std::path::PathBuf::from(raw_path);
@@ -370,14 +371,14 @@ async fn session_log(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<Str
     match bot.kind.as_str() {
         "claude" => {
             let raw_path = run.transcript_path.as_deref().filter(|p| !p.trim().is_empty())?;
-            if !crate::transcript_read::local_transcript_allowed(app, bot, raw_path).await {
+            if !app_ports_p4state::local_transcript_allowed(app, bot, raw_path).await {
                 return None;
             }
             let path = std::path::PathBuf::from(raw_path);
             tokio::task::spawn_blocking(move || read_tail(&path)).await.ok()?
         }
         "codex" => {
-            let home = codex_home(app, bot).await?;
+            let home = app_ports_p4state::codex_home(app, bot).await?;
             let session = run.native_session_id.clone().filter(|s| !s.trim().is_empty())?;
             tokio::task::spawn_blocking(move || read_tail(&codex_session_log(&home, &session)?)).await.ok()?
         }
@@ -435,7 +436,7 @@ pub(crate) fn codex_interrupted_after(log: &str, sent: &[String]) -> bool {
 /// 這一筆（`sent`）在這顆 bot 的 session log 裡是不是已經被使用者按停了（#235，重啟時用）。讀不到＝不知道＝`false`。
 pub(crate) async fn log_interrupted_after(app: &Arc<App>, bot: &db::Bot, run: &db::Run, sent: &[String]) -> bool {
     // #749：codex 先看 thread 歷史裡那個 turn 的狀態；只有明說 interrupted 才算數，其餘照舊讀 rollout。
-    if bot.kind == "codex" && crate::codex_history::interrupted_after(app, bot, run, sent).await {
+    if bot.kind == "codex" && app_ports_p4state::codex_interrupted_after(app, bot, run, sent).await {
         return true;
     }
     let Some(log) = session_log(app, bot, run).await else { return false };
