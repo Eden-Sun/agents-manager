@@ -283,9 +283,9 @@ fn fail(status: StatusCode, reason: &str, message: &str) -> (StatusCode, Json<Va
 
 async fn authenticated_bot(app: &impl crate::capabilities::Db, bot_id: &str, token: &str) -> Result<crate::db::Bot, (StatusCode, Json<Value>)> {
     match crate::db::bot(app.db(), bot_id).await {
-        Ok(Some(bot)) if bot.deleted_at.is_none() && !token.is_empty() && crate::models::app_ports_p13::ct_eq(token, &bot.hook_token) => {
+        Ok(Some(bot)) if bot.deleted_at.is_none() && !token.is_empty() && crate::agent_relay::ct_eq(token, &bot.hook_token) => {
             // 分享用的受限 bot 不能開子 agent（SPEC「分享 bot」）。
-            if crate::models::app_ports_p13::refuses_bot_principal(app.db(), &bot.id).await {
+            if crate::db::refuses_bot_principal(app.db(), &bot.id).await {
                 return Err(fail(StatusCode::FORBIDDEN, "restricted_bot", "a restricted share bot cannot spawn panes"));
             }
             Ok(bot)
@@ -359,7 +359,7 @@ pub async fn finish(
         }
     };
     if parent_pane.as_deref() != Some(pane_id) {
-        if let Err(e) = crate::models::app_ports_p13::note_purpose(&app, &host, pane_id, &bot, body.purpose.trim()).await {
+        if let Err(e) = crate::panes::note_purpose(&app, &host, pane_id, &bot, body.purpose.trim()).await {
             tracing::warn!(bot = %bot.id, pane = %pane_id, error = %e, "credential-bearing pane could not be registered");
             return fail(StatusCode::SERVICE_UNAVAILABLE, "pane_registration_failed", "created pane could not be registered; spawn remains fenced");
         }

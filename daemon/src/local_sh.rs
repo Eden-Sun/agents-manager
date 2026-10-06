@@ -27,6 +27,15 @@ async fn output_within(script: &str, limit: Duration) -> std::io::Result<Output>
     }
 }
 
+/// 丟掉 `Child` 不會 wait：行程結束後在 daemon 存活期間留 zombie（#287）。另起 thread 等它，結束就收掉。
+pub fn reap_in_background(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        if let Err(error) = child.wait() {
+            tracing::warn!(?error, "failed waiting for spawned child");
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

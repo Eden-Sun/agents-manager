@@ -165,7 +165,7 @@ pub async fn inspect(app: &(impl crate::capabilities::Cfg + crate::capabilities:
     }
     let Some(client) = app.herdr_for_run(&run).await else { return Ok(None) };
     // 樣式讀：輸入框裡只有 claude 的「建議下一句」（dim）時是空輸入列，不是框在擋（`plain_without_hints`）。
-    let text = crate::herdr_maintenance::app_ports_p12::read_pane_plain_text(&client, &c.pane_id, &bot.kind).await?;
+    let text = crate::app_ports_p12::read_pane_plain_text(&client, &c.pane_id, &bot.kind).await?;
     let lines: Vec<&str> = text.lines().collect();
     // 輸入列空著＝沒有框在擋；那是別的問題（例如 flush 沒被叫醒），不是這裡要看的。
     if crate::tui_prompts::composer_is_idle(&lines) {

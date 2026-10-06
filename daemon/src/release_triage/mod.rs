@@ -316,7 +316,7 @@ async fn fetch_feed(kind: &str) -> Result<String> {
 
 /// 帳本所在的 SQLite：`--db` > `AM_DATA_DIR`／預設資料目錄底下的 `agents-manager.sqlite3`。
 pub fn default_db_path() -> Result<std::path::PathBuf> {
-    let dir = crate::startup::env_dir()?.unwrap_or_else(crate::startup::default_dir);
+    let dir = crate::home::env_dir()?.unwrap_or_else(crate::home::default_dir);
     Ok(dir.join("agents-manager.sqlite3"))
 }
 

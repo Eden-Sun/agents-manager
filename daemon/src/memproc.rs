@@ -581,8 +581,7 @@ pub async fn processes(app: &impl MemEnv, host: &str) -> anyhow::Result<Value> {
     }))
 }
 
-// `pane_preview`（`GET /api/mem/processes/pane`）要用 api::shell 的 client 解析與 `LcError`，是 composition 層的 use case：住在 `app_ports_p3`，這裡保留舊名。
-pub(crate) use crate::app_ports_p3::pane_preview;
+
 
 /// `Bot` is a 409, not a 400: the request is fine, the better door is `POST /bots/{id}/stop`.
 #[derive(Debug)]

@@ -19,19 +19,7 @@ where
     work(listener).await
 }
 
-/// 沒有 `--config` 也沒有 `AM_DATA_DIR` 時的資料目錄。
-pub fn default_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".config/agents-manager")
-}
-
-/// `AM_DATA_DIR`（空字串當沒設）。`hook_cmd.rs` 的 spool 也讀同一個變數。
-pub fn env_dir() -> Result<Option<PathBuf>> {
-    std::env::var_os("AM_DATA_DIR")
-        .map(PathBuf::from)
-        .filter(|d| !d.as_os_str().is_empty())
-        .map(|d| normalize(&d).context("AM_DATA_DIR"))
-        .transpose()
-}
+pub use crate::home::{default_dir, env_dir};
 
 /// 設定檔位置：`--config` 給了就用它，否則是資料目錄底下那一份。
 pub fn config_path(config_arg: Option<PathBuf>, env_dir: Option<PathBuf>) -> Result<PathBuf> {

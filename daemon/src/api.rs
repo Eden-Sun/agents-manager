@@ -4568,7 +4568,7 @@ async fn get_mem_pane(State(app): State<Arc<App>>, Query(q): Query<HashMap<Strin
         return Err(LcError::NotFound(format!("unknown host `{host}`")));
     }
     let socket = q.get("socket").map(String::as_str);
-    Ok(Json(crate::memproc::pane_preview(&app, &host, pane_id, socket, lines).await?))
+    Ok(Json(crate::app_ports_p3::pane_preview(&app, &host, pane_id, socket, lines).await?))
 }
 
 /// SPEC §15.4. Guard rails (in the tree, never herdr／daemon, never a bot) live in `memproc::kill`,

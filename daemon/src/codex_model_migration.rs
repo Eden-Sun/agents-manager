@@ -189,7 +189,7 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
     open().lock().unwrap().remove(&run.id);
     tracing::info!(run = %run.id, bot = %run.bot_id, "Codex 擋住輸入列的提示已關閉");
     if let Ok(conversation) = db::conversation_id(&app.db, &run.bot_id).await {
-        let _ = crate::models::app_ports_p13::insert_message(
+        let _ = crate::app_ports_p13::insert_message(
             app,
             &conversation,
             None,
@@ -204,8 +204,8 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
     if status_changed {
         app.emit_bot_status(&run.bot_id).await;
     }
-    crate::models::app_ports_p13::child_alerts_forget(&run.bot_id);
-    crate::models::app_ports_p13::schedule_flush_queued(app, &run.bot_id);
+    crate::app_ports_p13::child_alerts_forget(&run.bot_id);
+    crate::app_ports_p13::schedule_flush_queued(app, &run.bot_id);
 }
 
 async fn notify_once(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), run: &db::Run, dialog: Dialog) {
@@ -219,7 +219,7 @@ async fn notify_once(app: &(impl crate::capabilities::Db + crate::capabilities::
     tracing::warn!(run = %run.id, bot = %run.bot_id, ?dialog, "Codex dialog is waiting for a user choice");
     match db::conversation_id(app.db(), &run.bot_id).await {
         Ok(conversation) => {
-            let _ = crate::models::app_ports_p13::insert_message(
+            let _ = crate::app_ports_p13::insert_message(
                 app,
                 &conversation,
                 None,
@@ -365,14 +365,14 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        crate::models::app_ports_p13::take_scheduled_flush_count(&bot.id);
+        crate::app_ports_p13::take_scheduled_flush_count(&bot.id);
 
         observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
 
         assert_eq!(run_of(&app, &run_id).await.agent_status, "working", "do not overwrite herdr's newer state");
         assert!(!is_open(&run_id), "the newer status authoritatively superseded our marker");
         assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
-        assert_eq!(crate::models::app_ports_p13::take_scheduled_flush_count(&bot.id), 1);
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 1);
     }
 
     #[tokio::test]
@@ -393,7 +393,7 @@ mod tests {
             .execute(&app.db)
             .await
             .unwrap();
-        crate::models::app_ports_p13::take_scheduled_flush_count(&bot.id);
+        crate::app_ports_p13::take_scheduled_flush_count(&bot.id);
 
         observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
 
@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(run.agent_status, "blocked", "don't rewrite an ended run");
         assert!(!is_open(&run_id), "the ended run authoritatively resolves the restore debt");
         assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
-        assert_eq!(crate::models::app_ports_p13::take_scheduled_flush_count(&bot.id), 1);
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 1);
     }
 
     /// The restore marker is owed until SQLite commits it. A later patrol must retry before it
@@ -431,7 +431,7 @@ mod tests {
         .execute(&app.db)
         .await
         .unwrap();
-        crate::models::app_ports_p13::take_scheduled_flush_count(&bot.id);
+        crate::app_ports_p13::take_scheduled_flush_count(&bot.id);
         sqlx::query(
             "CREATE TRIGGER refuse_codex_migration_restore BEFORE UPDATE OF agent_status ON runs
              WHEN OLD.agent_status='blocked' AND NEW.agent_status='idle' BEGIN SELECT RAISE(ABORT, 'database is locked'); END",
@@ -444,7 +444,7 @@ mod tests {
         assert_eq!(run_of(&app, &run_id).await.agent_status, "blocked", "restore did not commit");
         assert!(is_open(&run_id), "the patrol needs the retained episode to retry");
         assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT]);
-        assert_eq!(crate::models::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "don't wake the queue yet");
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "don't wake the queue yet");
 
         sqlx::query("DROP TRIGGER refuse_codex_migration_restore")
             .execute(&app.db)
@@ -454,10 +454,10 @@ mod tests {
         assert_eq!(run_of(&app, &run_id).await.agent_status, "idle");
         assert!(!is_open(&run_id));
         assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE]);
-        assert_eq!(crate::models::app_ports_p13::take_scheduled_flush_count(&bot.id), 1);
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 1);
 
         observe_screen(&app, &run_of(&app, &run_id).await, "› Ask Codex to do anything\n").await;
         assert_eq!(system_messages(&app, &bot.id).await, [WAITING_HINT, CLOSED_NOTE], "closure note is written once");
-        assert_eq!(crate::models::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "resolved episode wakes the queue once");
+        assert_eq!(crate::app_ports_p13::take_scheduled_flush_count(&bot.id), 0, "resolved episode wakes the queue once");
     }
 }
