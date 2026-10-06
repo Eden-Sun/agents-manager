@@ -8,6 +8,21 @@ use std::path::Path;
 use std::str::FromStr;
 
 mod schema_guard;
+pub(crate) mod predicates;
+pub(crate) mod turn_guard;
+
+/// 各 feature 自己那幾張表的 migration（`supervisor::store`、`read_marks`、`panes`…）：db 只建共用的 schema，這些由 composition 層
+/// 以明確的順序提供（[`open_with`]）。失敗語意不變：任何一步回錯，整個 `open` 就回錯，版本戳記不蓋（見 [`migrate`]）。
+pub(crate) type MigrationFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+pub(crate) type FeatureMigration = for<'a> fn(&'a SqlitePool) -> MigrationFuture<'a>;
+/// `(名字, migrate)`，名字只給 log／測試看。順序就是執行順序。
+pub(crate) type FeatureMigrations = &'static [(&'static str, FeatureMigration)];
+
+/// 過渡 shim：既有呼叫端（含大量測試）還用 `db::open(path)`／`apply_migrations(pool)`，不帶 feature 清單。清單由 composition 層
+/// （`app_ports_p1`）持有；等 `startup` 改呼叫 [`open_with`] 之後，這支與 [`open`] 一起刪掉，db 就完全不認得任何 feature。
+fn composition_features() -> FeatureMigrations {
+    crate::app_ports_p1::FEATURE_MIGRATIONS
+}
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS projects (
@@ -348,7 +363,7 @@ pub(crate) async fn file_key(conn: &mut sqlx::SqliteConnection) -> String {
 
 /// 裝一個 trigger，DB 裡那一份跟 `ddl` 不同就換掉（issue #186）。
 ///
-/// 守衛的內容是由轉移表產生的（`turn_controller::guard_ddl`、`assignment_state::guard_ddl`）。以前用
+/// 守衛的內容是由轉移表產生的（`turn_guard::guard_ddl`、`assignment_state::guard_ddl`）。以前用
 /// `CREATE TRIGGER IF NOT EXISTS`：只有第一次建得進去，之後轉移表改了（新增或拿掉一條合法邊），舊 DB 裡那一份已經存在，
 /// 守衛就永遠停在舊規則——新的合法轉移被擋下、拿掉的照樣放行。這裡每次開 DB 都拿 `sqlite_master.sql`（SQLite 存的是去掉
 /// `IF NOT EXISTS` 的原文）跟現在的 DDL 比，不同才 DROP 再建，舊 DB 不必等人手動重建。呼叫端要在同一個交易裡：
@@ -371,6 +386,11 @@ pub(crate) async fn sync_trigger(conn: &mut sqlx::SqliteConnection, name: &str, 
 }
 
 pub async fn open(path: &Path) -> Result<SqlitePool> {
+    open_with(path, composition_features()).await
+}
+
+/// [`open`]，feature 的 migration 清單由呼叫端給（順序即執行順序）。
+pub(crate) async fn open_with(path: &Path, features: FeatureMigrations) -> Result<SqlitePool> {
     let url = format!("sqlite://{}", path.display());
     let opts = SqliteConnectOptions::from_str(&url)?
         .create_if_missing(true)
@@ -384,7 +404,7 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
             .connect_with(opts.clone())
             .await
             .with_context(|| format!("open sqlite {}", path.display()))?;
-        migrate(&mpool).await?;
+        migrate_with(&mpool, features).await?;
         mpool.close().await;
     }
     let pool = SqlitePoolOptions::new()
@@ -396,9 +416,14 @@ pub async fn open(path: &Path) -> Result<SqlitePool> {
 }
 
 /// 套用全部 schema，最後對一次帳（[`schema_guard::check_drift`]）。
+#[allow(dead_code)]
 async fn migrate(pool: &SqlitePool) -> Result<()> {
-    apply_migrations(pool).await?;
-    schema_guard::check_drift(pool).await?;
+    migrate_with(pool, composition_features()).await
+}
+
+async fn migrate_with(pool: &SqlitePool, features: FeatureMigrations) -> Result<()> {
+    apply_migrations_with(pool, features).await?;
+    schema_guard::check_drift_with(pool, features).await?;
     // 版本戳記最後才蓋（#289）：子模組 migrate 或漂移核對失敗時 daemon 起不來，這時 DB 不能已經宣稱是新版，
     // 否則回滾用的舊 binary 會被版本閘（#72）擋在門外。
     let stored: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(pool).await?;
@@ -428,16 +453,21 @@ async fn migrate(pool: &SqlitePool) -> Result<()> {
 /// 版本號維持原樣，不能宣稱「已經是這個版本」卻沒有真的套用成功。
 ///
 /// 不含最後的漂移核對：`schema_guard` 拿它在全新的 in-memory DB 上跑一次，當 schema 的標準答案。
+#[cfg(test)]
 async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
-    apply_migrations_inner(pool, false).await
+    apply_migrations_with(pool, composition_features()).await
+}
+
+async fn apply_migrations_with(pool: &SqlitePool, features: FeatureMigrations) -> Result<()> {
+    apply_migrations_inner(pool, false, features).await
 }
 
 #[cfg(test)]
 async fn apply_migrations_failing_after_spawn_hints_drop(pool: &SqlitePool) -> Result<()> {
-    apply_migrations_inner(pool, true).await
+    apply_migrations_inner(pool, true, composition_features()).await
 }
 
-async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: bool) -> Result<()> {
+async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: bool, features: FeatureMigrations) -> Result<()> {
     // 先讀版本再套 schema：deferred 的話讀完之後別的 writer（換版時還沒收完的舊 daemon）一 commit，第一句 DDL 就 517，
     // daemon 起不來（#831）。
     let mut tx = begin_write(pool).await?;
@@ -596,7 +626,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
              BEGIN
                UPDATE messages SET keep_warm = 1 WHERE id = NEW.id;
              END",
-            crate::cache_clock::keep_warm_crid_sql("t.client_request_id")
+            predicates::keep_warm_crid_sql("t.client_request_id")
         ),
     )
     .await
@@ -604,7 +634,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     sqlx::query(&format!(
         "UPDATE messages SET keep_warm = 1
           WHERE keep_warm = 0 AND turn_id IN (SELECT t.id FROM turns t WHERE {})",
-        crate::cache_clock::keep_warm_crid_sql("t.client_request_id")
+        predicates::keep_warm_crid_sql("t.client_request_id")
     ))
     .execute(&mut *tx)
     .await
@@ -623,25 +653,15 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     .context("remap retired Codex models")?;
     sqlx::query("UPDATE bots SET model='claude-opus-5-5' WHERE kind='claude' AND model='opus'")
         .execute(&mut *tx).await.context("remap retired Claude alias")?;
-    // Turn 狀態轉移的單一權威（issue #68）：合法邊只定義在 `lifecycle::turn_controller::LEGAL_EDGES`，
+    // Turn 狀態轉移的單一權威（issue #68）：合法邊只定義在 `db::turn_guard::LEGAL_EDGES`（`lifecycle::turn_controller` re-export），
     // trigger 由它生成。二十來處 `UPDATE turns SET status` 各自帶的 CAS guard 照舊，這是它們的下限，
     // 而且未來新寫的路徑繞不過去——終局的回合不可能被改回進行中。
-    crate::lifecycle::turn_controller::install_guard(&mut tx).await.context("create turns_status_transition trigger")?;
+    turn_guard::install_guard(&mut tx).await.context("create turns_status_transition trigger")?;
     widen_bots_kind_check(&mut tx).await?;
     tx.commit().await?;
-    crate::supervisor::store::migrate(pool).await?;
-    crate::read_marks::migrate(pool).await?;
-    crate::fork_ops::migrate(pool).await?;
-    crate::remote_purge::migrate(pool).await?;
-    crate::panes::migrate(pool).await?;
-    crate::herdr_maintenance::migrate(pool).await?;
-    crate::mission::store::migrate(pool).await?;
-    crate::hook_inbox::migrate(pool).await?;
-    crate::build_scheduler::migrate(pool).await?;
-    crate::release_triage::ledger::migrate(pool).await?;
-    crate::judge::migrate(pool).await?;
-    crate::cli_update::migrate(pool).await?;
-    crate::share::store::migrate(pool).await?;
+    for (_name, feature_migrate) in features {
+        feature_migrate(pool).await?;
+    }
     Ok(())
 }
 
@@ -1101,7 +1121,7 @@ pub struct Run {
     pub status_line: Option<String>,
     /// statusLine payload verbatim (minus transcript path).
     pub status_json: Option<String>,
-    /// Kept in step by [`crate::update_watch`].
+    /// Kept in step by `update_watch`.
     pub update_notice: Option<String>,
     /// SPEC §4.4a: parsed back from the start argv, updated by live slash commands. `None` on
     /// adopted runs (argv unknown).
@@ -1112,7 +1132,7 @@ pub struct Run {
     pub runtime_fast: Option<i64>,
     /// 啟動時的身分（issue #238），解讀見 [`Run::started_identity`]。
     pub runtime_identity: Option<String>,
-    /// `API Error: …` that cut the last turn short; cleared when the next turn opens ([`crate::turn_error`]).
+    /// `API Error: …` that cut the last turn short; cleared when the next turn opens (`turn_error`).
     pub turn_error: Option<String>,
     pub native_session_id: Option<String>,
     pub transcript_path: Option<String>,
@@ -1442,7 +1462,7 @@ pub async fn bot_host(pool: &SqlitePool, bot_id: &str) -> Result<String> {
 }
 
 /// A live run under an identity proves that account is logged in on `host`, whatever
-/// `claude auth status` said ([`crate::quota_claude`]); survives a daemon restart.
+/// `claude auth status` said (`quota_claude`); survives a daemon restart.
 pub async fn live_identities_on_host(pool: &SqlitePool, host: &str) -> Result<BTreeSet<String>> {
     // run 實際的身分（issue #238）：記了就用它，沒記才用 bot 設定的。
     let rows = sqlx::query_scalar::<_, String>(
@@ -2675,7 +2695,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// See [`crate::quota_claude::should_probe_identity`].
+    /// See `quota_claude::should_probe_identity`.
     #[tokio::test]
     async fn live_identities_are_per_host_and_only_count_active_runs() {
         let dir = tmp_dir();

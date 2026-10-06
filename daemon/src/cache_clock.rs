@@ -134,29 +134,11 @@ pub fn annotate(run_json: &mut Value, kind: &str, last_turn: Option<&LastTurn>) 
     crate::prompt_cache::annotate(run_json, kind, chrono::Utc::now().timestamp_millis());
 }
 
-/// 保溫回合的 `client_request_id` 前綴（後面接錨點時間，見 `primary_keep_warm`）。不加欄位：這個前綴本身就持久、跨重啟認得出來。
-pub const KEEP_WARM_CRID_PREFIX: &str = "keep-warm:";
-/// 改名前（`keepalive:`）寫進 DB 的保溫回合；舊資料一律照樣認得（cache_clock、未讀、`messages.keep_warm` 標記）。
-pub const LEGACY_KEEP_WARM_CRID_PREFIX: &str = "keepalive:";
-/// 熱壓在聊天室留的系統訊息開頭，同時是「這個錨點之後熱壓過了」的持久記號。
-pub const WARM_COMPACT_NOTE_PREFIX: &str = "主力熱壓：";
-/// 改名前的熱壓訊息開頭；DB 裡的舊訊息照樣是記號。
-pub const LEGACY_WARM_COMPACT_NOTE_PREFIX: &str = "主力 cache 到點壓縮：";
-
-/// 這個 `client_request_id` 是不是保溫回合的（新舊前綴都算）。
-pub fn is_keep_warm_crid(crid: &str) -> bool {
-    crid.starts_with(KEEP_WARM_CRID_PREFIX) || crid.starts_with(LEGACY_KEEP_WARM_CRID_PREFIX)
-}
-
-/// SQL 條件：`col` 是保溫回合的 `client_request_id`（NULL 是 NULL，不是 true）。新舊前綴都收。
-pub fn keep_warm_crid_sql(col: &str) -> String {
-    format!("({col} LIKE '{KEEP_WARM_CRID_PREFIX}%' OR {col} LIKE '{LEGACY_KEEP_WARM_CRID_PREFIX}%')")
-}
-
-/// SQL 條件：`col` 是熱壓留下的系統訊息內容。
-pub fn warm_compact_note_sql(col: &str) -> String {
-    format!("({col} LIKE '{WARM_COMPACT_NOTE_PREFIX}%' OR {col} LIKE '{LEGACY_WARM_COMPACT_NOTE_PREFIX}%')")
-}
+#[allow(unused_imports)]
+pub use crate::db::predicates::{
+    is_keep_warm_crid, keep_warm_crid_sql, warm_compact_note_sql, KEEP_WARM_CRID_PREFIX, LEGACY_KEEP_WARM_CRID_PREFIX,
+    LEGACY_WARM_COMPACT_NOTE_PREFIX, WARM_COMPACT_NOTE_PREFIX,
+};
 
 /// 最近一筆**不是保溫**的回合，加上最近一次讓 cache 變熱的保溫（成功的保溫回合，完成時間，在飛中用建立時間）、
 /// 「不用保溫」旗標，以及最近一次保溫回覆（完成的保溫回合，且之後沒有非保溫回合）。
