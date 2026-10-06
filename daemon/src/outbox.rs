@@ -420,7 +420,7 @@ pub async fn list_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: Stri
         }
     };
     // 分享用 bot（SPEC §20）的 outbox 不清：`ttl_secs:null`、每個檔不帶到期。讀不到是不是分享用 bot 就照一般的報（只影響顯示）。
-    if matches!(crate::share::store::is_share_bot(app.db_pool(), &id).await, Ok(true)) {
+    if matches!(crate::db::is_share_bot(app.db_pool(), &id).await, Ok(true)) {
         without_expiry(&mut files);
         return Ok((StatusCode::OK, axum::Json(json!({"dir": dir.to_string_lossy(), "ttl_secs": null, "kept": true, "files": files}))).into_response());
     }

@@ -179,6 +179,18 @@ impl GroupTurnOps for Arc<App> {
     }
 }
 
+impl<T: crate::mission::ports::CallerOps + Send + Sync> crate::relay_auth::RelayTokenVerify for T {
+    fn ct_eq(&self, a: &str, b: &str) -> bool {
+        crate::mission::ports::CallerOps::ct_eq(self, a, b)
+    }
+}
+
+impl<T: crate::mission::ports::CallerOps + Send + Sync> crate::relay_auth::RelayAuthOps for T {
+    async fn is_agm_role(&self, headers: &axum::http::HeaderMap) -> Result<bool, LcError> {
+        Ok(crate::mission::ports::CallerOps::actor_role(self, headers).await?.is_some())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

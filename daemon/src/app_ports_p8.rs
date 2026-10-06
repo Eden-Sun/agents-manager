@@ -53,6 +53,9 @@ impl TurnCommands for Arc<App> {
     async fn arm_progress(&self, run_id: &str, bot_id: &str, turn_id: &str) {
         lifecycle::arm_progress(self, run_id, bot_id, turn_id).await
     }
+    async fn has_progress_poller(&self, run_id: &str) -> bool {
+        self.progress_pollers.lock().await.contains_key(run_id)
+    }
     async fn arm_stall(&self, run_id: &str, bot_id: &str, turn_id: &str) {
         lifecycle::arm_stall(self, run_id, bot_id, turn_id).await
     }

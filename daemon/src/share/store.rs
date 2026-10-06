@@ -80,29 +80,12 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-/// 分享用 bot（受限或信任分享）。
-pub(crate) async fn is_share_bot(pool: &SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
-    Ok(workspace(pool, bot_id).await?.is_some())
-}
-
-/// 分享用 bot 的工作目錄（上傳的 `inbox/` 在這裡）；不是分享用 bot＝`None`。
-pub(crate) async fn workspace(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT workspace FROM shared_bots WHERE bot_id = ?").bind(bot_id).fetch_optional(pool).await
-}
-
-/// 要關進籠子的（受限）bot 的工作目錄；信任分享與一般 bot＝`None`。
-pub(crate) async fn caged_workspace(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT workspace FROM shared_bots WHERE bot_id = ? AND profile = ?").bind(bot_id).bind(PROFILE_RESTRICTED).fetch_optional(pool).await
-}
+#[allow(unused_imports)]
+pub(crate) use crate::db::{caged_workspace, is_caged, is_share_bot, share_workspace as workspace};
 
 /// 同 [`caged_workspace`]：受限分享 bot 的工作目錄（issue #828）。
 pub(crate) async fn restricted_workspace(pool: &SqlitePool, bot_id: &str) -> Result<Option<String>, sqlx::Error> {
     caged_workspace(pool, bot_id).await
-}
-
-/// 受限的 bot（hook token 只准打自己的 hook）。
-pub(crate) async fn is_caged(pool: &SqlitePool, bot_id: &str) -> Result<bool, sqlx::Error> {
-    Ok(caged_workspace(pool, bot_id).await?.is_some())
 }
 
 /// 每顆分享用 bot 的種類（`restricted`／`trusted`）；投影給主 UI 的 `share_profile`。

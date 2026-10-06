@@ -379,7 +379,7 @@ pub(crate) async fn sync_trigger(conn: &mut sqlx::SqliteConnection, name: &str, 
         .fetch_optional(&mut *conn)
         .await?;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("sync_trigger_after_read", &file_key(&mut *conn).await).await;
+    crate::race_point::hit("sync_trigger_after_read", &file_key(&mut *conn).await).await;
     if have.flatten().as_deref() == Some(want.as_str()) {
         return Ok(());
     }
@@ -477,7 +477,7 @@ async fn apply_migrations_inner(pool: &SqlitePool, fail_after_spawn_hints_drop: 
     let mut tx = begin_write(pool).await?;
     let stored_version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&mut *tx).await?;
     #[cfg(test)]
-    crate::lifecycle::race_point::hit("schema_after_version_read", &file_key(&mut tx).await).await;
+    crate::race_point::hit("schema_after_version_read", &file_key(&mut tx).await).await;
     anyhow::ensure!(
         stored_version <= SCHEMA_VERSION,
         "資料庫的 schema 版本是 {stored_version}，這顆 daemon 只認得到 {SCHEMA_VERSION}（比較舊）。\
@@ -1271,7 +1271,7 @@ pub struct Message {
     pub seq: i64,
 }
 
-/// [`Message`] 對外的樣子：只差在 `source`。分享頁 end user 送來的（`relay_from` = [`crate::share::SHARE_SENDER`]）報
+/// [`Message`] 對外的樣子：只差在 `source`。分享頁 end user 送來的（`relay_from` = [`crate::agent_relay::SHARE_SENDER`]）報
 /// `share`——`messages.source` 的 CHECK 不收新值（要重建整張表），所以 DB 照存 `web`，只在輸出時改（SPEC「分享 bot」）。
 #[derive(serde::Serialize)]
 pub struct MessageWire {
@@ -1297,7 +1297,7 @@ pub struct MessageWire {
 
 impl From<Message> for MessageWire {
     fn from(m: Message) -> Self {
-        let source = if m.role == "user" && m.relay_from.as_deref() == Some(crate::share::SHARE_SENDER) { "share".to_string() } else { m.source };
+        let source = if m.role == "user" && m.relay_from.as_deref() == Some(crate::agent_relay::SHARE_SENDER) { "share".to_string() } else { m.source };
         Self {
             id: m.id,
             conversation_id: m.conversation_id,
@@ -1492,6 +1492,40 @@ pub async fn live_identities_on_host(pool: &SqlitePool, host: &str) -> Result<BT
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().collect())
+}
+
+/// 停用的身份（不上額度條、不花探測詢問）。
+pub async fn disabled_identities(pool: &SqlitePool, host: &str, kind: &str) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar("SELECT identity FROM identity_prefs WHERE host = ? AND kind = ? AND disabled = 1")
+        .bind(host)
+        .bind(kind)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// 分享用 bot 的工作目錄（上傳的 `inbox/` 在這裡）；不是分享用 bot＝`None`。
+pub async fn share_workspace(pool: &SqlitePool, bot_id: &str) -> std::result::Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT workspace FROM shared_bots WHERE bot_id = ?").bind(bot_id).fetch_optional(pool).await
+}
+
+/// 分享用 bot（受限或信任分享）。
+pub async fn is_share_bot(pool: &SqlitePool, bot_id: &str) -> std::result::Result<bool, sqlx::Error> {
+    Ok(share_workspace(pool, bot_id).await?.is_some())
+}
+
+/// 要關進籠子的（受限）bot 的工作目錄；信任分享與一般 bot＝`None`。
+pub async fn caged_workspace(pool: &SqlitePool, bot_id: &str) -> std::result::Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT workspace FROM shared_bots WHERE bot_id = ? AND profile = 'restricted'").bind(bot_id).fetch_optional(pool).await
+}
+
+/// 受限的 bot（hook token 只准打自己的 hook）。
+pub async fn is_caged(pool: &SqlitePool, bot_id: &str) -> std::result::Result<bool, sqlx::Error> {
+    Ok(caged_workspace(pool, bot_id).await?.is_some())
+}
+
+/// 受限 bot 的 hook token 只用來打自己的 hook（信任分享不算）：其他任何拿 bot 身分進來的路一律擋。讀不到 DB 也擋（fail closed）。
+pub async fn refuses_bot_principal(db: &SqlitePool, bot_id: &str) -> bool {
+    !matches!(is_caged(db, bot_id).await, Ok(false))
 }
 
 /// `fallback_session` covers old rows without a stored session.

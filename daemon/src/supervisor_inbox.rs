@@ -272,6 +272,20 @@ pub async fn push_inbox(
     Ok((res.rows_affected() > 0).then_some(id))
 }
 
+/// 一筆 append-only 的稽核紀錄。強制釋放這種「可以做、但要留下是誰為什麼」的動作走這裡。
+pub async fn add_note(pool: &SqlitePool, kind: &str, body: &Value) -> Result<String> {
+    let id = crate::db::ulid();
+    sqlx::query("INSERT INTO supervisor_notes (id, supervisor_id, kind, body, version, created_at) VALUES (?,?,?,?,1,?)")
+        .bind(&id)
+        .bind(SUPERVISOR_ID)
+        .bind(kind)
+        .bind(body.to_string())
+        .bind(crate::db::now())
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
