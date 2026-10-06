@@ -44,48 +44,8 @@ pub(crate) async fn observe(app: &Arc<App>, run: &db::Run, shown: bool) {
         return;
     }
     tracing::warn!(run = %run.id, bot = %run.bot_id, "codex 帳號安全提醒橫幅擋住派送，等人處理（不自動關）");
-    match db::conversation_id(&app.db, &run.bot_id).await {
-        Ok(conv) => {
-            if let Err(e) = insert_message(app, &conv, None, "system", NOTICE, "system", false, None).await {
-                tracing::warn!(run = %run.id, error = ?e, "could not post the codex security banner notice");
-            }
-        }
-        Err(e) => tracing::warn!(run = %run.id, error = ?e, "could not post the codex security banner notice"),
-    }
-    alert(app, run).await;
-}
-
-/// 同一次橫幅推一則 `ops_alert`（`source=daemon`、`reason=codex_security_banner`）進 AGM inbox：巡檢收、叫醒（#789）。
-/// 只寫進 bot 對話的話，沒人開著那顆 bot 的頁面就不會知道它整條佇列卡住。
-///
-/// 「同一次」由 [`observe`] 判斷（只在橫幅剛出現時叫到這裡），event_key 帶 run 與這一次的 id：
-/// 消失又出現是新的一次、新的 key；`push_inbox` 的 `INSERT OR IGNORE` 擋重送。daemon 重啟後記憶清空，
-/// 還開著的橫幅會再推一則——寧可多一則，不要漏。
-async fn alert(app: &Arc<App>, run: &db::Run) {
-    let name = match db::bot(&app.db, &run.bot_id).await {
-        Ok(Some(b)) => b.name,
-        _ => String::new(),
-    };
-    let subject = if name.is_empty() { run.bot_id.as_str() } else { name.as_str() };
-    let key = format!("ops_alert:daemon:{REASON}:{}:{}", run.id, db::ulid());
-    let payload = json!({
-        "source": "daemon",
-        "reason": REASON,
-        "subject": subject,
-        "bot_id": run.bot_id,
-        "bot_name": name,
-        "run_id": run.id,
-        "detail": format!(
-            "codex bot `{name}`（{}）畫面上有帳號安全提醒橫幅（`Press a number to choose`）：橫幅開著時打字，開頭的數字會被當成選項吃掉，daemon 已擋下派送（一個字都沒打）",
-            run.bot_id
-        ),
-        "action": "請人到這顆 bot 的「終端」pane 處理橫幅（選一個選項，或按 Esc 關掉），再重送；排隊的訊息會在橫幅關掉後自動重試。daemon 不會替你按 Esc 或任何鍵。同一次橫幅只推這一則，關掉後又出現才再推。",
-    });
-    match crate::supervisor::store::push_inbox(&app.db, &key, "ops_alert", None, Some(&run.bot_id), None, &payload).await {
-        Ok(Some(_)) => app.emit("supervisor_changed", json!({ "ops_alert": key })).await,
-        Ok(None) => {}
-        Err(e) => tracing::warn!(run = %run.id, error = %e, "could not queue the codex security banner ops_alert"),
-    }
+    super::poller::app_ports_p4obs::post_codex_security_banner_notice(app, run, NOTICE).await;
+    super::poller::app_ports_p4obs::push_codex_security_banner_alert(app, run, REASON).await;
 }
 
 #[cfg(test)]

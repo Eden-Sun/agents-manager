@@ -4,6 +4,9 @@
 //! one chain with `hookrecv`'s late-hook write-back (a turn closed here with no reply must still be
 //! fillable by a hook that arrives afterwards); they are kept together on purpose.
 
+#[path = "../app_ports_p4obs.rs"]
+pub(crate) mod app_ports_p4obs;
+
 use super::*;
 
 
@@ -105,7 +108,7 @@ fn poll_unreadable(turn_id: &str, failures: u32, e: &anyhow::Error) -> u32 {
 pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &str) {
     // A new turn is starting: whatever cut the *previous* one short is history (§4.3a). 清不掉就在 poller 裡
     // 再清：留著的話，這一回合斷在同一句錯誤上會被「同一則只記一次」吞掉（#193）。
-    let mut error_cleared = crate::turn_error::clear(app, run_id, bot_id).await.is_ok();
+    let mut error_cleared = app_ports_p4obs::clear_turn_error(app, run_id, bot_id).await.is_ok();
     let mut pollers = app.progress_pollers.lock().await;
     if let Some(h) = pollers.remove(run_id) {
         h.abort();
@@ -147,7 +150,7 @@ pub async fn arm_progress(app: &Arc<App>, run_id: &str, bot_id: &str, turn_id: &
             // `still_ours` 讀到了才回 `Some`：兩個都已經有了。
             let (Some(bot), Some(sent)) = (bot.as_ref(), sent.as_deref()) else { continue };
             if !error_cleared {
-                error_cleared = crate::turn_error::clear(&app2, &run_id, &bot_id).await.is_ok();
+                error_cleared = app_ports_p4obs::clear_turn_error(&app2, &run_id, &bot_id).await.is_ok();
             }
             let Some(pane) = run.pane_id.clone() else { continue };
             let Ok(client) = client_for_run(&app2, &run).await else { continue };
@@ -282,7 +285,7 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     // 已經回答過的 prompt（2026-10-01 wits-ops-web：「去我的ego 開新身份」又出現一次）。跟它一樣就不存。
     let echo = match echo {
         Some(text) => match app.db.acquire().await {
-            Ok(mut conn) => match crate::hookrecv::repeats_answered_prompt(&mut conn, &conv, &tid, &text).await {
+            Ok(mut conn) => match app_ports_p4obs::repeats_answered_prompt(&mut conn, &conv, &tid, &text).await {
                 Ok(true) => {
                     tracing::info!(turn = %tid, "external turn: the echo on screen is the previous, answered prompt; not storing it again");
                     None
@@ -362,30 +365,7 @@ pub(crate) fn idle_threshold(said_something: bool, agent_status: &str) -> u32 {
 /// 讀不到回錯（#193），不是「什麼都沒送」：空的清單會讓備援把我們自己的 prompt 當成 agent 的回覆存下來、
 /// stall watchdog 找不到框裡的字也不重送，接著判失敗。
 pub(crate) async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Vec<String>> {
-    let rows = db::turn_user_messages_with_attachments(&app.db, turn_id).await?;
-    let mut out = Vec::new();
-    let delivered: Option<String> = sqlx::query_scalar("SELECT prompt_text FROM turns WHERE id = ?")
-        .bind(turn_id)
-        .fetch_optional(&app.db)
-        .await?
-        .flatten();
-    if let Some(p) = delivered.filter(|p| !p.trim().is_empty()) {
-        out.push(p);
-    }
-    for (content, attachments) in rows {
-        if let Some(json) = attachments.as_deref() {
-            if let Ok(items) = serde_json::from_str::<Vec<crate::attach::Attachment>>(json) {
-                let delivered = crate::attach::deliver_text(&content, &items);
-                if delivered != content && !out.contains(&delivered) {
-                    out.push(delivered);
-                }
-            }
-        }
-        if !out.contains(&content) {
-            out.push(content);
-        }
-    }
-    Ok(out)
+    app_ports_p4obs::turn_echo_texts(app, turn_id).await
 }
 
 /// The reply in this snapshot with our prompt echo removed, or `None`. The three strippers only
@@ -3423,7 +3403,7 @@ mod codex_limit_fallback_tests {
         assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap(), "回合照樣收");
         assert_eq!(crate::lifecycle::run_state::turn_status(&app, &turn).await, "failed");
         assert!(app.quotas.lock().await.values().all(|q| q.limit_hit.is_none()), "身分表還沒偵測完：沒有猜一格 `codex:cx0` 寫下去");
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
+        assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
     }
 }
 
@@ -3874,7 +3854,7 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
             assert!(grok.limit_hit.is_some(), "grok 那一格要標成撞限");
             assert_eq!(grok.seven_day.as_ref().map(|w| w.used_pct), Some(100.0), "grok 只有週窗，存在 seven_day");
             drop(quotas);
-            assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "派工看得到 grok 已用完");
+            assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "派工看得到 grok 已用完");
         }
     }
 
@@ -3889,7 +3869,7 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
             assert_eq!(status(&app, &turn).await, "failed", "撞限是失敗的回合，不是 completed_fallback");
             let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'").bind(&turn).fetch_one(&app.db).await.unwrap();
             assert_eq!(replies, 0, "選單的字不是 agent 的回覆");
-            assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "派工看得到 grok 已用完");
+            assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "派工看得到 grok 已用完");
             no_keys(&env);
         }
     }
@@ -3900,9 +3880,9 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         for screen in [TICKET_SCREEN, PB7_SCREEN] {
             let (env, bot, _run, turn) = grok_turn(screen).await;
             let app = env.app.clone();
-            crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &blocked_event(&bot.id)).await;
+            app_ports_p4obs::handle_status(&app, crate::config::LOCAL_HOST, "test", &blocked_event(&bot.id)).await;
             assert_eq!(wait_failed(&app, &turn).await, "failed", "blocked 那條邊要看畫面");
-            assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
+            assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
             no_keys(&env);
         }
     }
@@ -3915,7 +3895,7 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         sqlx::query("UPDATE runs SET agent_status='blocked' WHERE id=?").bind(&run).execute(&app.db).await.unwrap();
         arm_progress(&app, &run, &bot.id, &turn).await;
         assert_eq!(wait_failed(&app, &turn).await, "failed");
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
+        assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some());
         no_keys(&env);
     }
 
@@ -3933,14 +3913,14 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
             for line in order {
                 crate::turn_error::mark_codex_limit_hit(&app, &bot, line).await.unwrap();
             }
-            let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().unwrap();
+            let hit = app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().unwrap();
             assert_eq!(hit.bucket.as_deref(), Some("seven_day"), "{order:?}");
             assert_eq!(hit.message, WEEKLY, "{order:?}");
             assert!(at(&hit.until) > chrono::Utc::now() + chrono::Duration::days(6), "{order:?}：7 天保底，不是 5 小時");
             assert_eq!(app.quotas.lock().await.get("grok").and_then(|q| q.seven_day.as_ref()).map(|w| w.used_pct), Some(100.0));
 
             crate::turn_error::mark_codex_limit_hit(&app, &bot, WEEKLY).await.unwrap();
-            let again = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().unwrap();
+            let again = app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().unwrap();
             assert_eq!((again.at, again.until), (hit.at, hit.until), "同一句再看到不重算");
         }
     }
@@ -3951,7 +3931,7 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         let (env, bot, _run, _turn) = grok_turn(TICKET_SCREEN).await;
         let app = env.app.clone();
         crate::turn_error::mark_codex_limit_hit(&app, &bot, BALANCE).await.unwrap();
-        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("擋派工");
+        let hit = app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("擋派工");
         assert_eq!(hit.bucket, None);
         let until = chrono::DateTime::parse_from_rfc3339(hit.until.as_deref().unwrap()).unwrap();
         assert!(until < chrono::Utc::now() + chrono::Duration::hours(6), "沒有窗：保底只有 5 小時，不擋七天");
@@ -3971,7 +3951,7 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         assert!(capture_codex_usage_notices(&app, &bot.id, &run).await.is_err(), "記不進去回錯");
         assert_eq!(status(&app, &turn).await, "failed", "回合照樣收");
         assert!(app.quotas.lock().await.values().all(|q| q.limit_hit.is_none()), "沒有猜一格寫下去");
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
+        assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_some(), "欠著照擋");
     }
 
     /// 別的 CLI 的 bot 停在 blocked、畫面上剛好有同一句：不動（這是 grok 的畫面）。
@@ -3980,7 +3960,7 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         let (env, bot, _run, turn) = grok_turn(TICKET_SCREEN).await;
         let app = env.app.clone();
         sqlx::query("UPDATE bots SET kind='claude' WHERE id=?").bind(&bot.id).execute(&app.db).await.unwrap();
-        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &blocked_event(&bot.id)).await;
+        app_ports_p4obs::handle_status(&app, crate::config::LOCAL_HOST, "test", &blocked_event(&bot.id)).await;
         tokio::time::sleep(Duration::from_millis(900)).await;
         assert_eq!(status(&app, &turn).await, "in_flight");
         assert!(app.quotas.lock().await.is_empty());
@@ -4050,12 +4030,12 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         let app = env.app.clone();
         assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
         assert_eq!(status(&app, &turn).await, "completed_fallback", "正常做完，不是撞限");
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none());
+        assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none());
         assert!(app.quotas.lock().await.is_empty(), "額度沒被標");
 
         let (env, bot, _run, turn) = grok_turn(&quoted).await;
         let app = env.app.clone();
-        crate::events::handle_status(&app, crate::config::LOCAL_HOST, "test", &blocked_event(&bot.id)).await;
+        app_ports_p4obs::handle_status(&app, crate::config::LOCAL_HOST, "test", &blocked_event(&bot.id)).await;
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert_eq!(status(&app, &turn).await, "in_flight", "blocked 邊掃了也不動");
         assert!(app.quotas.lock().await.is_empty());
@@ -4100,7 +4080,7 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
         let (env, bot, run, _turn) = grok_turn(TICKET_SCREEN).await;
         let app = env.app.clone();
         capture_codex_usage_notices(&app, &bot.id, &run).await.unwrap();
-        let hit = crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("前提：撞限記下了（6d5e74ab 的掃描）");
+        let hit = app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().expect("前提：撞限記下了（6d5e74ab 的掃描）");
         assert_eq!(hit.bucket.as_deref(), Some("seven_day"), "撞限帶額度窗，`/usage` 探測才校正得到");
         let reading = crate::quota::Quota {
             five_hour: None,
@@ -4114,8 +4094,8 @@ Tab:next answer  |  Esc:scrollback  |  Shift+x:dismiss
             account: None,
             host: crate::config::LOCAL_HOST.into(),
         };
-        crate::quota::set(&app, crate::config::LOCAL_HOST, "grok", reading).await;
-        assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none(), "窗已經重置：撞限作廢");
+        app_ports_p4obs::set_quota(&app, crate::config::LOCAL_HOST, "grok", reading).await;
+        assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none(), "窗已經重置：撞限作廢");
     }
 }
 
@@ -4173,7 +4153,7 @@ mod codex_limit_quote_tests {
                 capture_codex_usage_notices(&app, &bot.id, &run).await.unwrap();
                 let status = crate::lifecycle::run_state::turn_status(&app, &turn).await;
                 assert_eq!(status, "in_flight", "{kind}／{footer}：掃描不動這一回合");
-                assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none(), "{kind}／{footer}：額度不標");
+                assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none(), "{kind}／{footer}：額度不標");
 
                 assert!(try_fallback(&app, &run, Some(&turn)).await.unwrap());
                 assert_eq!(
@@ -4181,7 +4161,7 @@ mod codex_limit_quote_tests {
                     "completed_fallback",
                     "{kind}／{footer}：備援照一般回覆收，不是撞限"
                 );
-                assert!(crate::quota::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none(), "{kind}／{footer}");
+                assert!(app_ports_p4obs::try_limit_hit_for_bot(&app, &bot).await.unwrap().is_none(), "{kind}／{footer}");
             }
         }
     }

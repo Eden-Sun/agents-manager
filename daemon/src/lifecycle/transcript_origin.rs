@@ -37,17 +37,25 @@ pub(crate) fn read_tail(path: &std::path::Path) -> Option<String> {
 
 /// 這個 claude run 目前這一回合是不是 CLI 自己起頭的（`origin.kind` 有寫、而且不是 `human`）。
 /// 讀不到 transcript、舊版沒有 `origin`、不是 claude ＝ `false`：照舊當成使用者在 pane 裡打的。
-pub(crate) async fn started_by_the_cli_itself(app: &std::sync::Arc<crate::state::App>, bot: &crate::db::Bot, transcript_path: Option<&str>) -> bool {
-    if bot.kind != "claude" {
+pub(crate) async fn started_by_the_cli_itself_with(
+    roots: &impl crate::transcript_read::TranscriptRoots,
+    kind: &str,
+    transcript_path: Option<&str>,
+) -> bool {
+    if kind != "claude" {
         return false;
     }
     let Some(path) = transcript_path.filter(|p| !p.is_empty()) else { return false };
-    if !crate::transcript_read::local_transcript_allowed(app, bot, path).await {
+    if !crate::transcript_read::local_transcript_allowed_for(roots, path).await {
         return false;
     }
     let path = std::path::PathBuf::from(path);
-    let kind = tokio::task::spawn_blocking(move || read_tail(&path).and_then(|log| starter_origin_kind(&log))).await.ok().flatten();
-    matches!(kind.as_deref(), Some(k) if k != "human")
+    let origin_kind = tokio::task::spawn_blocking(move || read_tail(&path).and_then(|log| starter_origin_kind(&log))).await.ok().flatten();
+    matches!(origin_kind.as_deref(), Some(k) if k != "human")
+}
+
+pub(crate) async fn started_by_the_cli_itself(app: &std::sync::Arc<crate::state::App>, bot: &crate::db::Bot, transcript_path: Option<&str>) -> bool {
+    super::poller::app_ports_p4obs::started_by_the_cli_itself(app, bot, transcript_path).await
 }
 
 #[cfg(test)]

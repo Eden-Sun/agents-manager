@@ -34,8 +34,7 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
         return Ok(());
     }
     let Some(pane_id) = run.pane_id.as_deref() else { return Ok(()) };
-    let Some(client) = app.herdr_for_run(&run).await else { return Ok(()) };
-    let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;
+    let Some(read) = super::poller::app_ports_p4obs::read_pane_recent_unwrapped(app, &run, pane_id, 200).await? else { return Ok(()) };
     let conversation_id = db::conversation_id(&app.db, bot_id).await?;
 
     let grok = bot.kind == "grok";
@@ -75,7 +74,7 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
         let fresh = exists == 0;
         if fresh {
             // No pane snapshot: the idle splash is a boxed TUI, not a failed cut of a reply.
-            insert_message(app, &conversation_id, None, "system", &notice, "system", false, None).await?;
+            super::poller::app_ports_p4obs::insert_system_message(app, &conversation_id, &notice).await?;
             tracing::info!(bot = %bot.name, kind = %bot.kind, notice = %notice, "CLI account notice captured");
         }
         #[cfg(test)]
@@ -89,7 +88,7 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
             // 記在這顆 bot 的主機與身分那一格；讀不到主機不退回 `local`（那會把本機帳號標成用盡，遠端那個用盡的身分
             // 反而沒擋），記不進去就欠著，派送前與 flush 照欠著的那一筆擋（#198）。
             // 第二意見只記錄（#240）：鎖外去問，回合與額度照下面的收。
-            crate::judge::shadow_limit_hit(
+            super::poller::app_ports_p4obs::shadow_limit_hit(
                 app,
                 crate::judge::Sample {
                     bot_id: bot.id.clone(),
@@ -101,15 +100,12 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
                 },
             )
             .await;
-            if let Err(e) = crate::turn_error::mark_codex_limit_hit(app, &bot, &notice).await {
+            if let Err(e) = super::poller::app_ports_p4obs::mark_codex_limit_hit(app, &bot, &notice).await {
                 marked = Err(e);
             }
             // Unlock the composer: a limit hit is a failed turn, not a silent idle.
             if let Some(turn) = in_flight {
-                let res = super::turn_controller::fail(&app.db, &turn.id, super::turn_controller::DeliveryOnFail::Keep, "撞限橫幅").await?;
-                if res == super::turn_controller::Outcome::Applied {
-                    emit_turn(app, &turn.id).await;
-                }
+                super::poller::app_ports_p4obs::fail_in_flight_turn(app, &turn.id, "撞限橫幅").await?;
             }
         }
     }
@@ -118,33 +114,18 @@ pub async fn capture_codex_usage_notices(app: &Arc<App>, bot_id: &str, expected_
 
 
 pub(crate) async fn conversation_message_count(app: &Arc<App>, conversation_id: &str) -> anyhow::Result<i64> {
-    Ok(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE conversation_id = ?")
-        .bind(conversation_id)
-        .fetch_one(&app.db)
-        .await?)
+    super::poller::app_ports_p4obs::conversation_message_count(app, conversation_id).await
 }
 
 /// Newest assistant message: duplicate guard for re-reading an unchanged screen. 讀不到回錯（#193）：
 /// 當成「還沒有回覆」，同一份回覆就存第二次。
 pub(crate) async fn last_assistant_content(app: &Arc<App>, conversation_id: &str) -> anyhow::Result<Option<String>> {
-    Ok(sqlx::query_scalar::<_, String>(
-        "SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'
-         ORDER BY created_at DESC, rowid DESC LIMIT 1",
-    )
-    .bind(conversation_id)
-    .fetch_optional(&app.db)
-    .await?)
+    super::poller::app_ports_p4obs::last_assistant_content(app, conversation_id).await
 }
 
 /// Record how far into the pane we have read, so the next capture starts after it.
 pub(crate) async fn remember_pane_cursor(app: &Arc<App>, run_id: &str, read: &crate::herdr::PaneRead) -> anyhow::Result<()> {
-    sqlx::query("UPDATE runs SET last_read_revision=?, last_read_tail_hash=? WHERE id=?")
-        .bind(read.revision as i64)
-        .bind(tail_hash(&read.text))
-        .bind(run_id)
-        .execute(&app.db)
-        .await?;
-    Ok(())
+    super::poller::app_ports_p4obs::remember_pane_cursor(app, run_id, read.revision as i64, &tail_hash(&read.text)).await
 }
 
 pub(crate) async fn remember_pane_cursor_tx(
@@ -980,48 +961,9 @@ pub(crate) fn codex_limit_hit(notice: &str, at: String) -> crate::quota::LimitHi
 ///
 /// `base` 由呼叫端算（[`crate::turn_error::mark_codex_limit_hit`]）：寫進這顆 bot 身分的 key——查詢端先查
 /// `codex:<identity>`，以前寫裸 `codex` 對不上（2026-09-13 AGM）；讀不到主機、身分表還沒偵測完都不猜（#198）。
+#[allow(dead_code)]
 pub(crate) async fn apply_codex_limit_hit_quota(app: &Arc<App>, host: &str, base: &str, hit: crate::quota::LimitHit) -> crate::quota::LimitHit {
-    let key = crate::quota::quota_key(host, base);
-    let mut q = app
-        .quotas
-        .lock()
-        .await
-        .get(&key)
-        .cloned()
-        .unwrap_or_else(|| crate::quota::Quota {
-            five_hour: None,
-            seven_day: None,
-            fable: None,
-            reset_credits: None,
-            limit_hit: None,
-            plan: None,
-            updated_at: crate::db::now(),
-            source: "codex-limit-hit".into(),
-            account: None,
-            host: host.to_string(),
-        });
-    // 同一張橫幅再看到不是新證據（2026-09-13：掃到 22:15 的舊橫幅卻把 `at` 蓋成現在、量表打回 100%）。
-    // 但**已經過期**的那張不算數：`until` 到了、交辦重送、CLI 回同一句橫幅——這是真的又被擋一次，
-    // 略過的話 `on_turn_done` 查不到撞限，交辦會被結成 failed 送去驗收（review3 c2 M1）。
-    if let Some(h) = q.limit_hit.as_ref().filter(|h| h.message == hit.message && !crate::quota::limit_hit_expired(Some(h))) {
-        return h.clone();
-    }
-    // 量表標成用完，但重置時間不從橫幅寫：橫幅時間會舊會歪（同日解析成隔天，交辦等 24 小時）。
-    // 只記在 `limit_hit.until`；`resets_at` 留給 app-server／statusLine。
-    let win = crate::quota::Window { observed_at: None, used_pct: 100.0, resets_at: None };
-    if let Some(existing) = q.five_hour.as_mut() {
-        existing.used_pct = 100.0;
-    } else if let Some(existing) = q.seven_day.as_mut() {
-        existing.used_pct = 100.0;
-    } else {
-        q.five_hour = Some(win);
-    }
-    // 黏著走，直到 `until` 過了、下一回合成功、或更新的結構化讀數說還有額度（`quota::set`）。
-    q.limit_hit = Some(hit.clone());
-    q.updated_at = crate::db::now();
-    q.source = "codex-limit-hit".into();
-    crate::quota::set(app, host, base, q).await;
-    hit
+    super::poller::app_ports_p4obs::apply_codex_limit_hit_quota(app, host, base, hit).await
 }
 
 /// No reply marker: keep what follows the last prompt echo minus chrome. `⎿` lines stay — they
