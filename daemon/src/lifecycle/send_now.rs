@@ -11,6 +11,12 @@
 
 use super::*;
 
+/// am-turn-send（P4send）對其他 feature 的窄介面與 `App` 端實作（crate 拆分第 3 步）；檔案在 `daemon/src/`，不碰 `lifecycle/mod.rs`。
+#[path = "../send_ports.rs"]
+pub(crate) mod ports;
+#[path = "../app_ports_p4send.rs"]
+pub(crate) mod app_ports_p4send;
+
 /// 有 send-now 鍵的最低 claude 版本。低於它的 run 照舊排隊／409。
 pub(crate) const MIN_VERSION: &str = "2.1.275";
 

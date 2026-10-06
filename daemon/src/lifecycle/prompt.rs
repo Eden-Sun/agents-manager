@@ -1,6 +1,10 @@
 //! Delivering a prompt: the turn row, the pane write, and the queued path.
 
 use super::*;
+use super::send_now::ports::{AttachConnPort, AttachSendPort, CodexSendPort, HandoffSendRepo, IdleSleepPort, MaintenancePort, SendEnvPort, ShareSendRepo, emit_object, turn_changed};
+use super::app_ports_p4::{AppEventSink, AppTurnEvents};
+use super::send_now::app_ports_p4send::AppBotLock;
+use am_ports::BotLock;
 
 pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id: &str) {
     if let Ok(Some(m)) = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id=?")
@@ -8,7 +12,7 @@ pub(super) async fn emit_prompt_message(app: &Arc<App>, bot_id: &str, message_id
         .fetch_optional(&app.db)
         .await
     {
-        app.emit("message_added", json!({"bot_id": bot_id, "message": m})).await;
+        emit_object(&AppEventSink::new(app), "message_added", None, json!({"bot_id": bot_id, "message": m})).await;
     }
 }
 
@@ -139,7 +143,7 @@ async fn restamp_queued_prompt(app: &Arc<App>, turn_id: &str) -> anyhow::Result<
     tx.commit().await?;
 
     for message in messages {
-        app.emit("message_added", json!({"bot_id": bot_id, "message": message})).await;
+        emit_object(&AppEventSink::new(app), "message_added", None, json!({"bot_id": bot_id, "message": message})).await;
     }
     // Keep the marker through emission. A crash before this write replays the same id and first
     // timestamp on recovery; clients upsert by message id.
@@ -252,7 +256,7 @@ pub(super) async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &
         // 刪不到就 rollback，連訊息那句一起退掉——效果就是「turn 不是 in_flight 時一個字都不刪」。
         // 附件的 message_id 指著這則訊息、沒有 ON DELETE。先解開再刪，不然帶圖的撤回會外鍵失敗，
         // 可重試的 409 變成 502，回合被收成假的 failed、crid 也燒掉（#646）。
-        crate::attach::unbind_message(&mut tx, msg_id, turn_id).await?;
+        tx.unbind_attachment_message(msg_id, turn_id).await?;
         sqlx::query("DELETE FROM messages WHERE id = ? OR turn_id = ?").bind(msg_id).bind(turn_id).execute(&mut *tx).await?;
         let gone = sqlx::query("DELETE FROM turns WHERE id = ? AND status = 'in_flight'").bind(turn_id).execute(&mut *tx).await?;
         if gone.rows_affected() == 0 {
@@ -279,13 +283,13 @@ pub(super) async fn retract_unsent_turn(app: &Arc<App>, bot_id: &str, turn_id: &
             Err(Unretracted { cause: e, owed })
         }
     };
-    emit_turn(app, turn_id).await;
+    turn_changed(&AppTurnEvents::new(app), turn_id).await;
     if out.as_ref().map(|r| *r == Retraction::Withdrawn).unwrap_or(false) {
         // 事件模型只有「新增／更新」，沒有「刪除」：`message_added` 與 `turn_updated` 已經廣播出去了，
         // 每個客戶端都收下了那顆泡泡與那筆進行中的回合，而 `emit_turn` 對已刪除的列是 no-op。
         // 不補一次重讀的話，畫面會留著一顆送不出去的幽靈泡泡與一個永遠不會結束的回合（review 2026-09-16）。
         // 沒刪成的兩條路沒有幽靈列要收，`emit_turn` 就夠了。
-        app.emit("resync", json!({"reason": "turn_retracted", "turn_id": turn_id})).await;
+        emit_object(&AppEventSink::new(app), "resync", None, json!({"reason": "turn_retracted", "turn_id": turn_id})).await;
     }
     out
 }
@@ -359,7 +363,7 @@ pub(super) async fn maintenance_refusal(app: &Arc<App>, admission: Admission) ->
     if admission == Admission::ControlPlane {
         return None;
     }
-    match crate::supervisor::maintenance::window_held(app).await {
+    match app.window_held().await {
         Ok(None) => None,
         Ok(Some(w)) => Some(w.refusal()),
         Err(unreadable) => Some(unreadable.refusal()),
@@ -562,7 +566,7 @@ pub(super) async fn queue_for_next_turn(
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
     emit_prompt_message(app, bot_id, &msg_id).await;
-    emit_turn(app, &turn_id).await;
+    turn_changed(&AppTurnEvents::new(app), &turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, "對方回合中：prompt 排進佇列，等回合結束再送");
     Ok(PromptOut { turn_id, message_id: msg_id, delivery: "queued".into(), send_now: None })
 }
@@ -685,7 +689,7 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
         if let (Some(pane), Some(client)) = (pane, client.as_ref()) {
             // 2.1.281 的防誤刪框只由使用者核准。不按任何鍵、不打字進去，通知後回 409。
             if let Some(rm) = crate::tui_prompts::dangerous_rm_prompt(&screen) {
-                crate::dangerous_rm::notify_once(app, run, &rm).await;
+                app.dangerous_rm_notify_once(run, &rm).await;
                 return Err(LcError::conflict(
                     "dangerous_rm_pending",
                     json!({"run_id": run.id, "target": rm.target, "warning": rm.warning,
@@ -793,24 +797,24 @@ pub(crate) async fn pane_ready_for_prompt(app: &Arc<App>, bot: &db::Bot, run: &d
     if bot.kind == "codex" {
         if let (Some(pane), Some(client)) = (pane, client.as_ref()) {
             if crate::tui_prompts::is_codex_model_migration_prompt(&screen) {
-                crate::codex_model_migration::observe_screen(app, run, &screen).await;
+                app.observe_codex_screen(run, &screen).await;
                 return Err(LcError::conflict(
                     "dialog_open",
                     json!({"run_id": run.id, "message": crate::codex_model_migration::WAITING_HINT}),
                 ));
             }
             if crate::codex_live::rate_limit_switch_prompt_open(&screen) {
-                crate::codex_model_migration::observe_screen(app, run, &screen).await;
+                app.observe_codex_screen(run, &screen).await;
                 let hint = "codex 正在問要不要為了降低額度消耗切換模型；請到「終端」選擇，daemon 不會替你選，也不會把訊息打進選單。";
                 return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": hint})));
             }
             // 啟動時的更新選單：不替使用者選更新、不把 prompt 打進去（Enter 會選到預設的 Update now）。
             // 補標 blocked 並在對話裡講一次原因（`observe_screen` 每個選單只講一次）；這裡的 409 不另寫訊息，排隊的 prompt 重試也不洗版。
             if crate::codex_update::update_menu_open(&screen) {
-                crate::codex_model_migration::observe_screen(app, run, &screen).await;
+                app.observe_codex_screen(run, &screen).await;
                 return Err(LcError::conflict("dialog_open", json!({"run_id": run.id, "message": crate::codex_update::MENU_HINT})));
             }
-            if !crate::codex_live::close_picker(client, pane).await {
+            if !app.close_codex_picker(client, pane).await {
                 let hint = "codex 的 /model 選單擋在輸入列前面或畫面讀取失敗。請到「終端」分頁確認後再送一次。";
                 let _ = insert_message(app, conv, None, "system", hint, "system", false, None).await;
                 return Err(LcError::conflict("picker_open", json!({"run_id": run.id, "message": hint})));
@@ -890,22 +894,23 @@ async fn prompt_inner(
     let deliver = deliver.unwrap_or(text);
     #[cfg(test)]
     super::race_point::hit("prompt_before_bot_lock", bot_id).await;
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    let locks = AppBotLock::new(app);
+    let locked_bot = bot_id.to_string();
+    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     if let Some(token) = share_token {
-        let valid = crate::share::store::resolve(&app.db, token).await.map_err(up)?;
+        let valid = app.db.resolve_share_token(token).await.map_err(up)?;
         if valid.as_deref() != Some(bot_id) {
             return Err(LcError::NotFound("bot".into()));
         }
-        crate::share::store::touch(&app.db, bot_id).await;
+        app.db.touch_share(bot_id).await;
     }
     // #708：移交出去的專案不收 prompt（也不排隊）：送到了也是另一顆 daemon 的回合。
-    crate::handoff::refuse(&app.db, bot_id).await?;
+    app.db.refuse_handed_off(bot_id).await?;
     // 這顆如果是 AGM 因為閒置收起來的（§6.11），先用 `--resume` 把它叫醒再送——「下次要用再叫醒」
     // 的那個「下次要用」就是這裡。**在鎖裡**做（issue #123）：巡邏收機器也在同一把鎖裡判斷＋寫標記＋停機，
     // 叫醒放在鎖外的話，會夾在「叫醒檢查過、沒睡」與「拿到鎖」之間被收掉，接著只會看到 409 沒有 active run。
     // 不是睡著的 bot 只多一次索引查詢，路徑照舊。
-    if let Err(e) = crate::supervisor::idle_sleep::wake_locked(app, bot_id, "有新的訊息要送進來").await {
+    if let Err(e) = app.idle_sleep_wake_locked(bot_id, "有新的訊息要送進來").await {
         tracing::warn!(bot = %bot_id, error = %e, "could not wake a sleeping bot for a prompt");
     }
     // 上一次打斷欠著的收尾先補（#147）：不然那筆已經被 Esc 停掉、只是狀態沒寫成的回合，會把這一則擋成
@@ -933,7 +938,7 @@ async fn prompt_inner(
         .ok_or_else(|| LcError::NotFound("project".into()))?;
     let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
     // Resolve first so an unknown id is a plain 400, not an undelivered turn.
-    let files = crate::attach::resolve(app, bot_id, attachment_ids)
+    let files = app.resolve_attachments(bot_id, attachment_ids)
         .await
         .map_err(|e| LcError::Bad(e.to_string()))?;
     // 打進 pane 的字先清成 CLI 會原樣收下的樣子（#205，`pane_text`）：`prompt_text` 存清過的字，泡泡（`text`）留原文。
@@ -954,7 +959,7 @@ async fn prompt_inner(
         return answer_for_turn(app, &t).await;
     }
     // 新的（非保溫）回合＝真的活動：「不用保溫」到此為止。
-    crate::primary_keep_warm::note_prompt(app, bot_id, client_request_id).await;
+    app.note_keep_warm_prompt(bot_id, client_request_id).await;
 
     if queue_awaits_idle {
         // A queued turn can remain pending briefly after its predecessor ends; do not let a direct
@@ -989,7 +994,7 @@ async fn prompt_inner(
     // issue #748：codex 另有一條 steer（`[codex] instant_interrupt` 旗標＋跑著的版本 >= 0.159.0），旗標預設關。
     let codex_on = want_send_now && bot.kind == "codex" && app.cfg.get().await.codex.instant_interrupt;
     let gate = want_send_now.then(|| {
-        let codex_running = crate::codex_update::running_version_of(&run.id);
+        let codex_running = app.codex_running_version(&run.id);
         send_now::gate(&bot.kind, run.status_json.as_deref(), codex_running.as_deref(), codex_on)
     });
     let (refused, send_now_mode) = match gate {
@@ -1154,7 +1159,7 @@ async fn prompt_inner(
     .await
     .map_err(up)?;
     tx.commit().await.map_err(up)?;
-    if let Err(e) = crate::attach::bind(app, &msg_id, &files).await {
+    if let Err(e) = app.bind_attachments(&msg_id, &files).await {
         emit_prompt_message(app, bot_id, &msg_id).await;
         // 一個字都沒送：收成 failed＋說明（同一個交易），前端最後看到的不能是 `pending`。收不成就記成欠著、回 503（#158）——
         // DB 還是 in_flight＋pending 時不回普通的 `failed`。
@@ -1166,7 +1171,7 @@ async fn prompt_inner(
         };
     }
     emit_prompt_message(app, bot_id, &msg_id).await;
-    emit_turn(app, &turn_id).await;
+    turn_changed(&AppTurnEvents::new(app), &turn_id).await;
 
     // 窄窗：閘門讀完之後、這一筆 commit 之前，窗口才被拿走。一個字都還沒打，所以撤回這一筆再回 409。
     // 另一邊（`store::acquire_lease`）的條件式寫入保證它看不到已經 commit 的 turn，兩句都是單句寫入、
