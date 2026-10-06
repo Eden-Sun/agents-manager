@@ -8,10 +8,10 @@
 //!   （`turns.client_request_id` 以 [`KEEP_WARM_CRID_PREFIX`] 開頭，`cache_clock` 的最近回合 SQL 排除它；保溫期間的 statusLine 指紋變化
 //!   由 [`window_open`] 擋掉），所以送完保溫年齡照樣往上數，直到下一次真的活動才歸零。
 //!   cache 熱度則以 `max(last_api_at, cache_kept_warm_at)` 計算；時間來源沿用 [`cache_clock`]。
-//! * 年齡 ≥ [`KEEP_WARM_AFTER_SECS`]、cache 未過 TTL、這個錨點之後還沒保溫過：用一般送 prompt 的路徑（[`crate::lifecycle::prompt`]）送
+//! * 年齡 ≥ [`KEEP_WARM_AFTER_SECS`]、cache 未過 TTL、這個錨點之後還沒保溫過：透過 `TurnControl` 送
 //!   [`KEEP_WARM_TEXT`]，`client_request_id = keep-warm:<錨點>`（同一錨點冪等）。保溫錯過 TTL 就不補送。
-//! * 年齡 ≥ [`WARM_COMPACT_AFTER_SECS`]、cache 最近一次變熱未滿 TTL 並保留 2 分鐘餘裕、這個錨點之後還沒壓縮過：呼叫
-//!   [`crate::lifecycle::compact`]（`/compact`）。cache 冷了就不壓縮，等真的活動重新計時。
+//! * 年齡 ≥ [`WARM_COMPACT_AFTER_SECS`]、cache 最近一次變熱未滿 TTL 並保留 2 分鐘餘裕、這個錨點之後還沒壓縮過：透過
+//!   `TurnControl` 呼叫 `/compact`，並以 `SystemMessageWriter` 記下聊天室說明。cache 冷了就不壓縮，等真的活動重新計時。
 //! * 對象只有主力（`bots.is_primary`）的 claude／codex，run 在跑、`agent_status == idle`、沒有在飛或排隊的回合。`blocked`（停在問題／
 //!   權限提示）絕不送——打進去的字會變成回答那個問題。
 //! * **不用保溫**（`keep_warm_skip` 表，使用者按鈕）：這顆主力「這一輪閒置」跳過保溫與熱壓；錨點（真的活動）晚於按下的時間就自動恢復，
@@ -22,7 +22,11 @@
 
 use crate::cache_clock::{self, KEEP_WARM_CRID_PREFIX, WARM_COMPACT_NOTE_PREFIX};
 use crate::db;
+use crate::lifecycle::app_ports_p4::{AppClock, AppEventSink, AppSystemMessageWriter, AppTurnControl};
 use crate::state::App;
+use am_core::PromptRequest;
+use am_ports::{Clock, DbContext, EventSink, SystemMessageWriter, TurnControl};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -187,19 +191,19 @@ pub struct Plan {
     pub age_secs: i64,
 }
 
-async fn latest(pool: &sqlx::SqlitePool, sql: &str, bot_id: &str) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
-    let at: Option<String> = sqlx::query_scalar(sql).bind(bot_id).fetch_one(pool).await?;
+async fn latest(db: &DbContext<SqlitePool>, sql: &str, bot_id: &str) -> anyhow::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let at: Option<String> = sqlx::query_scalar(sql).bind(bot_id).fetch_one(db.pool()).await?;
     Ok(at.as_deref().and_then(db::parse_ts))
 }
 
-/// 最後一次**真的**活動（錨點，[`cache_clock::derive`]）與最近回合。`plan` 和 [`settle_skip`] 共用。
+/// 最後一次**真的**活動（錨點，[`cache_clock::derive`]）與最近回合。計畫與跳過狀態收斂共用。
 async fn anchor_of(
-    app: &Arc<App>,
+    db: &DbContext<SqlitePool>,
     bot: &db::Bot,
     run: &db::Run,
     now: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<(Option<String>, Option<cache_clock::LastTurn>)> {
-    let last_turn = cache_clock::last_turn_for_bot(&app.db, &bot.id).await?;
+    let last_turn = cache_clock::last_turn_for_bot(db.pool(), &bot.id).await?;
     let line = cache_clock::statusline_at(&run.id);
     let anchor = cache_clock::derive(
         &bot.kind,
@@ -234,20 +238,31 @@ pub async fn set_skip(pool: &sqlx::SqlitePool, bot_id: &str, skip: bool) -> anyh
 }
 
 /// 真的活動（錨點晚於按下的時間）→ 自動恢復保溫並廣播。保溫／熱壓自己造成的活動（視窗開著）不算。
-async fn settle_skip(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) {
-    let Ok(Some(since)) = skip_since(&app.db, &bot.id).await else { return };
+async fn settle_skip_with<E: EventSink>(db: &DbContext<SqlitePool>, events: &E, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) {
+    let Ok(Some(since)) = skip_since(db.pool(), &bot.id).await else { return };
     if window_open(&run.id) {
         return;
     }
-    let Ok((Some(anchor), _)) = anchor_of(app, bot, run, now).await else { return };
+    let Ok((Some(anchor), _)) = anchor_of(db, bot, run, now).await else { return };
     if db::parse_ts(&anchor).is_some_and(|a| a > since) {
-        clear_skip(app, &bot.id).await;
+        clear_skip_with(db, events, &bot.id).await;
     }
 }
 
-async fn clear_skip(app: &Arc<App>, bot_id: &str) {
-    match set_skip(&app.db, bot_id, false).await {
-        Ok(true) => app.emit_bot_status(bot_id).await,
+#[cfg(test)]
+async fn settle_skip(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) {
+    let db = DbContext::new(app.db.clone());
+    let events = AppEventSink::new(app);
+    settle_skip_with(&db, &events, bot, run, now).await;
+}
+
+async fn clear_skip_with<E: EventSink>(db: &DbContext<SqlitePool>, events: &E, bot_id: &str) {
+    match set_skip(db.pool(), bot_id, false).await {
+        Ok(true) => {
+            if let Err(e) = events.bot_status_changed(bot_id).await {
+                tracing::warn!(bot_id, error = ?e, "keep-warm skip: could not publish status after activity");
+            }
+        }
         Ok(false) => {}
         Err(e) => tracing::warn!(bot_id, error = ?e, "keep-warm skip: could not clear after activity"),
     }
@@ -257,7 +272,9 @@ async fn clear_skip(app: &Arc<App>, bot_id: &str) {
 /// 保溫回覆旗標（`keep_warm_replied_at`）不用清：它從回合紀錄推算，新回合一出現就是 `null`，下一次 `bot_status` 帶出去。
 pub async fn note_prompt(app: &Arc<App>, bot_id: &str, client_request_id: &str) {
     if !cache_clock::is_keep_warm_crid(client_request_id) {
-        clear_skip(app, bot_id).await;
+        let db = DbContext::new(app.db.clone());
+        let events = AppEventSink::new(app);
+        clear_skip_with(&db, &events, bot_id).await;
     }
 }
 
@@ -265,7 +282,8 @@ pub async fn note_prompt(app: &Arc<App>, bot_id: &str, client_request_id: &str) 
 /// 只有主力的 claude／codex 有保溫；其他回 400 `not_primary`。
 pub async fn skip_route(app: &Arc<App>, bot_id: &str, skip: bool) -> Result<bool, crate::lifecycle::LcError> {
     use crate::lifecycle::LcError;
-    let bot = db::bot(&app.db, bot_id)
+    let db = DbContext::new(app.db.clone());
+    let bot = db::bot(db.pool(), bot_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|b| b.deleted_at.is_none())
@@ -276,24 +294,25 @@ pub async fn skip_route(app: &Arc<App>, bot_id: &str, skip: bool) -> Result<bool
             "message": "keep-warm only applies to a primary claude or codex bot",
         })));
     }
-    if set_skip(&app.db, bot_id, skip).await.map_err(|e| LcError::Upstream(e.to_string()))? {
-        app.emit_bot_status(bot_id).await;
+    if set_skip(db.pool(), bot_id, skip).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+        let events = AppEventSink::new(app);
+        events.bot_status_changed(bot_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     }
     Ok(skip)
 }
 
 /// 判斷這顆主力現在要不要動。`None`＝不對象（不是主力、忙著、沒有任何活動紀錄…）。只讀，不送任何東西。
-pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<Plan>> {
-    let in_flight = db::in_flight_turn(&app.db, &run.id).await?.is_some();
-    let queued = db::queued_turn_for_bot(&app.db, &bot.id).await?.is_some();
+async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<Plan>> {
+    let in_flight = db::in_flight_turn(db.pool(), &run.id).await?.is_some();
+    let queued = db::queued_turn_for_bot(db.pool(), &bot.id).await?.is_some();
     if !eligible(&bot.kind, bot.is_primary != 0, &run.state, &run.agent_status, in_flight, queued) {
         return Ok(None);
     }
-    let (anchor, last_turn) = anchor_of(app, bot, run, now).await?;
+    let (anchor, last_turn) = anchor_of(db, bot, run, now).await?;
     let Some(anchor) = anchor else { return Ok(None) };
     let Some(anchor_t) = db::parse_ts(&anchor) else { return Ok(None) };
     // 「不用保溫」：按下之後沒有真的活動（錨點不晚於按下的時間）就跳過這一輪，不保溫也不熱壓。
-    if skip_since(&app.db, &bot.id).await?.is_some_and(|since| anchor_t <= since) {
+    if skip_since(db.pool(), &bot.id).await?.is_some_and(|since| anchor_t <= since) {
         return Ok(None);
     }
     let age_secs = (now - anchor_t).num_seconds();
@@ -308,7 +327,7 @@ pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::Dat
     let cache_warm_at = cache_kept_warm_at.map_or(anchor_t, |kept_at| kept_at.max(anchor_t));
     let cache_age_secs = (now - cache_warm_at).num_seconds();
     let kept = latest(
-        &app.db,
+        db,
         &format!(
             "SELECT MAX(t.created_at) FROM turns t JOIN conversations c ON c.id = t.conversation_id
               WHERE c.bot_id = ? AND {}",
@@ -319,7 +338,7 @@ pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::Dat
     .await?
     .is_some_and(|t| t > anchor_t);
     let last_compact = latest(
-        &app.db,
+        db,
         &format!(
             "SELECT MAX(m.created_at) FROM messages m JOIN conversations c ON c.id = m.conversation_id
               WHERE c.bot_id = ? AND m.role = 'system' AND {}",
@@ -340,18 +359,27 @@ pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::Dat
             compacted,
             context_used_pct(&bot.kind, &run.id, run.status_json.as_deref()),
             warm_compact_min_context_pct(&bot.kind).unwrap_or(f64::INFINITY),
-        ), anchor, age_secs }))
+    ), anchor, age_secs }))
 }
 
-/// 照 [`plan`] 做一步。送不出去（忙著、被擋）只記 log；下一輪重試仍須符合 cache 熱度條件。
-async fn act(app: &Arc<App>, bot: &db::Bot, run: &db::Run, plan: &Plan) {
+#[cfg(test)]
+pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<Plan>> {
+    plan_with_db(&DbContext::new(app.db.clone()), bot, run, now).await
+}
+
+/// 照計畫做一步。送不出去（忙著、被擋）只記 log；下一輪重試仍須符合 cache 熱度條件。
+async fn act<T: TurnControl, M: SystemMessageWriter>(turns: &T, messages: &M, bot: &db::Bot, run: &db::Run, plan: &Plan) {
     match plan.step {
         Step::Wait => {}
         Step::KeepWarm => {
             // 先開視窗再送：送出後 statusLine 馬上會動，不能把這次當成活動。送不出去就撤回。
             open_window(&run.id);
-            match crate::lifecycle::prompt(app, &bot.id, KEEP_WARM_TEXT, &keep_warm_crid(&plan.anchor)).await {
-                Ok(out) => tracing::info!(bot = %bot.name, turn = %out.turn_id, age_min = plan.age_secs / 60,
+            match turns.send_prompt(PromptRequest {
+                bot_id: bot.id.clone(),
+                text: KEEP_WARM_TEXT.to_string(),
+                client_request_id: Some(keep_warm_crid(&plan.anchor)),
+            }).await {
+                Ok(turn_id) => tracing::info!(bot = %bot.name, turn = %turn_id, age_min = plan.age_secs / 60,
                                           "primary keep-warm: sent {KEEP_WARM_TEXT:?}"),
                 Err(e) => {
                     drop_window(&run.id);
@@ -362,15 +390,13 @@ async fn act(app: &Arc<App>, bot: &db::Bot, run: &db::Run, plan: &Plan) {
         Step::WarmCompact => match {
             // 同保溫：壓縮造成的 statusLine 變化與 working 不算活動（另見 `is_warm_compact_echo`）。
             open_window(&run.id);
-            crate::lifecycle::compact(app, &bot.id).await
+            turns.compact_bot(bot.id.clone()).await
         } {
             Ok(_) => {
                 tracing::info!(bot = %bot.name, age_min = plan.age_secs / 60, "primary cache age reached the limit: sent /compact");
                 let note = format!("{WARM_COMPACT_NOTE_PREFIX}cache 年齡已 {} 分鐘，自動送出 /compact（熱壓）", plan.age_secs / 60);
-                if let Ok(conv) = db::conversation_id(&app.db, &bot.id).await {
-                    if let Err(e) = crate::lifecycle::insert_message(app, &conv, None, "system", &note, "system", false, None).await {
-                        tracing::warn!(bot = %bot.name, error = ?e, "could not record the compaction note; it may be sent again");
-                    }
+                if let Err(e) = messages.append_system_message(bot.id.clone(), note).await {
+                    tracing::warn!(bot = %bot.name, error = ?e, "could not record the compaction note; it may be sent again");
                 }
             }
             Err(e) => {
@@ -382,30 +408,37 @@ async fn act(app: &Arc<App>, bot: &db::Bot, run: &db::Run, plan: &Plan) {
 }
 
 /// 巡一輪。序列處理（每顆都要拿 per-bot 鎖）。
-async fn sweep(app: &Arc<App>) {
-    let runs = match db::all_active_runs(&app.db).await {
+async fn sweep_with<T: TurnControl, M: SystemMessageWriter, E: EventSink, C: Clock>(
+    db: &DbContext<SqlitePool>,
+    turns: &T,
+    messages: &M,
+    events: &E,
+    clock: &C,
+    shutdown: &tokio_util::sync::CancellationToken,
+) {
+    let runs = match db::all_active_runs(db.pool()).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "primary keep-warm: could not list active runs");
             return;
         }
     };
-    let now = chrono::Utc::now();
+    let now = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(clock.now_unix_ms()).unwrap_or_else(chrono::Utc::now);
     for run in runs.into_iter().filter(|r| r.state == "running") {
-        if app.shutdown.is_cancelled() {
+        if shutdown.is_cancelled() {
             return;
         }
-        let bot = match db::bot(&app.db, &run.bot_id).await {
+        let bot = match db::bot(db.pool(), &run.bot_id).await {
             Ok(Some(b)) if b.is_primary != 0 && b.deleted_at.is_none() => b,
             _ => continue,
         };
         if windows().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&run.id) {
-            let quiet = run.agent_status == "idle" && db::in_flight_turn(&app.db, &run.id).await.ok().flatten().is_none();
+            let quiet = run.agent_status == "idle" && db::in_flight_turn(db.pool(), &run.id).await.ok().flatten().is_none();
             settle_window(&run.id, quiet);
         }
-        settle_skip(app, &bot, &run, now).await;
-        match plan(app, &bot, &run, now).await {
-            Ok(Some(p)) if p.step != Step::Wait => act(app, &bot, &run, &p).await,
+        settle_skip_with(db, events, &bot, &run, now).await;
+        match plan_with_db(db, &bot, &run, now).await {
+            Ok(Some(p)) if p.step != Step::Wait => act(turns, messages, &bot, &run, &p).await,
             Ok(_) => {}
             Err(e) => tracing::warn!(bot = %bot.name, error = %format!("{e:#}"), "primary keep-warm: could not read this bot's state"),
         }
@@ -434,7 +467,12 @@ pub fn tick(app: &Arc<App>) {
     let app = app.clone();
     let tasks = app.background_tasks.clone();
     tasks.spawn(async move {
-        sweep(&app).await;
+        let db = DbContext::new(app.db.clone());
+        let turns = AppTurnControl::new(&app);
+        let messages = AppSystemMessageWriter::new(&app);
+        let events = AppEventSink::new(&app);
+        let clock = AppClock;
+        sweep_with(&db, &turns, &messages, &events, &clock, &app.shutdown).await;
         SWEEPING.store(false, Ordering::SeqCst);
     });
 }
