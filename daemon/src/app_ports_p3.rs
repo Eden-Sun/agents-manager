@@ -335,8 +335,7 @@ impl App {
     }
 }
 
-/// 指定 pane 的讀／寫：合約 v1.2 的 `HerdrPort::read_pane`／`send_text_to_pane` 還沒進主幹的 `am-ports`（只有不帶 pane 的方法），
-/// 所以先放成 `App` 的方法；v1.2 進來之後這兩段原樣搬成 trait 方法。
+/// App 對指定 pane 的讀／寫實作；trait adapter 透過這裡沿用既有 fence 與 herdr client 路徑。
 #[allow(dead_code)]
 impl App {
     pub(crate) async fn port_read_pane(
@@ -358,7 +357,7 @@ impl App {
 }
 
 fn pane_less(op: &str) -> PortError {
-    PortError::InvalidInput(format!("{op} 沒有指定 pane（session 本身不是 pane）；請用帶 pane_id 的 `App::port_read_pane`／`port_send_text_to_pane`（合約 v1.2 進來後成為 trait 方法）"))
+    PortError::InvalidInput(format!("{op} 沒有指定 pane（session 本身不是 pane）；請使用帶 pane_id 的 pane read／send 方法"))
 }
 
 impl am_ports::HostRuntime for App {
@@ -414,8 +413,29 @@ impl am_ports::HerdrPort for App {
         async move { Err(pane_less("pane_read")) }
     }
 
+    fn read_pane<'a>(
+        &'a self,
+        fence: &'a PortFence,
+        session: &'a SessionId,
+        pane_id: &'a str,
+        source: PaneReadSource,
+        lines: u32,
+    ) -> impl Future<Output = Result<String, PortError>> + Send + 'a {
+        async move { self.port_read_pane(fence, session, pane_id, source, lines).await }
+    }
+
     fn send_text<'a>(&'a self, _fence: &'a PortFence, _session: &'a SessionId, _text: String) -> impl Future<Output = Result<(), PortError>> + Send + 'a {
         async move { Err(pane_less("send_text")) }
+    }
+
+    fn send_text_to_pane<'a>(
+        &'a self,
+        fence: &'a PortFence,
+        session: &'a SessionId,
+        pane_id: &'a str,
+        text: String,
+    ) -> impl Future<Output = Result<(), PortError>> + Send + 'a {
+        async move { self.port_send_text_to_pane(fence, session, pane_id, &text).await }
     }
 }
 
