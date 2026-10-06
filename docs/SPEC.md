@@ -3467,11 +3467,19 @@ hook 與 statusLine 只有 AG Man 自己啟動的 agy bot 才有（dispatcher �
 - **不做**：換身分（agy 沒有身分、HOME 不換）、遠端主機的 agy 子 agent（§12a.9 只做本機；遠端的安裝／登入／額度見 §12a.11）、跨 HOME 搬對話檔。
 
 ### 12a.11 遠端主機：安裝、登入、額度（`agy_install.rs`，2026-10-06）
-遠端主機（第一個目標 m4p：macOS arm64）的 agy 分三件事，**安裝、登入偵測、額度探測已做**；**在遠端啟動 agy bot 還沒做**（`lifecycle/setup.rs::injected_args` 對遠端 agy 仍回 `agy bots run on the local host only`：遠端要補的是 hooks.json／statusLine／dispatcher 的遠端安裝、遠端信任清單、遠端 transcript 讀取，見 §12a.8）。
+遠端主機（第一個目標 m4p：macOS arm64）的 agy 分四件事，**安裝、登入偵測、額度探測、啟動 bot 都做了**（啟動見 §12a.12）：
 - **安裝／更新**：`POST /api/hosts/{name}/agy/install`（API §10 前的 agy 一節）。不走 `cli_update`（那條是「有新版通知時升級已裝的 claude／codex」，要先讀得到舊版、綁通知目標）；agy 沒有新版通知，沒裝也要能裝，所以獨立一個小模組。daemon 讀官方 manifest（附錄 G.1）、驗過 url（只收官方儲存桶）與 sha512 的形狀，把它們當資料交給主機端寫死的 POSIX sh：下載 → 驗 sha512 → 只解出 `antigravity` → 對暫存檔跑 `--version`（關自動更新，版本要吻合）→ 同目錄複製後 `mv` 蓋過 `~/.local/bin/agy`。**絕不執行官方 `install.sh`／`agy install`**（會改 shell profile、purge alias）。沒驗過 sha512 的東西不會被執行；驗證沒過不碰既有的 agy。同一台同時只裝一次（行程內名額＋主機端 process-group 鎖 `~/.agents-manager-agy-install.lock`）。裝完重新偵測，版本吻合才算成功（`~/.local/bin` 不在那台 PATH 時回 `not_on_path`）。已是官方最新版就不下載（`already_latest`）。
 - **登入**：額度欄 agy 格未登入時「開 shell 登入」本來就帶 host，遠端會在那台開 host shell 打 `AGY_CLI_DISABLE_AUTO_UPDATE=true agy`（登入用的這一次也關背景自我更新）；憑證檔 `~/.gemini/antigravity-cli/antigravity-oauth-token` 出現後，`spawn_agy_login_watcher`（每 20 秒、遠端一個小 ssh）翻成已登入並立刻探測額度。
 - **額度**：`refresh_agy` 對遠端經 `ssh_exec_path` 跑同一段 `agy -p /usage`，讀數記在 `<host>/agy`。
 - **網頁**：沒裝 agy 的主機（tools 探測已知 `installed:false`），額度 popover 的 agy 格寫「尚未安裝 agy，要自動安裝嗎？」，入口是「安裝 agy 並登入」：使用者在確認框按確認才安裝，成功後才開 shell 登入（不再開 shell 打 `agy` 得到 `command not found`）；新 bot 的 kind 選單、缺少 CLI 提示與主機徽章的 agy 安裝鈕同樣先問再裝（細節見 UI-DECISIONS）。
+
+### 12a.12 遠端主機上啟動 agy bot（`agy_remote.rs`，2026-10-06）
+`lifecycle::setup::injected_args` 不再擋遠端 agy。遠端 agy bot 的啟動跟 grok 同一個形狀：argv 只帶權限旗標（沒有 hook 旗標），hook 靠全域設定＋dispatcher。
+- **安裝（每次啟動、冪等）**：除了每顆 bot 都裝的 `~/<遠端根>/bots/<bot>/hook.sh`（遠端 spool，§11.4），再經 ssh 在那台的**絕對家目錄**裝：`~/<遠端根>/agy-hook.sh`（dispatcher；同目錄暫存檔＋`mv`，0700）、`~/.gemini/config/hooks.json` 的具名 hook `agents-manager[-<實例>]`、`~/.gemini/antigravity-cli/settings.json` 的 `statusLine`（沒設或本來就是我們的才寫）。兩個設定檔走 `trust::update_remote_file`：讀 → 合併（`agy_support` 同一批純函式）→ 比對 cksum 後 `mv`，只動我們那一項、讀不懂就不覆寫、讀到寫之間被改過就重讀。裝不成只記 warn、bot 照常啟動（跟本機一樣，少的只是 hook 回報，畫面判讀還在）。
+- **dispatcher**：pane env 沒有 `AM_BOT_ID`／`AM_HOOK_TOKEN`、`AM_INSTANCE` 不符、或那顆 bot 的 `hook.sh` 不在，就什麼都不做；hook 事件永遠只印 `{}`、statusLine 什麼都不印、exit 0。否則把 payload 補上 `hookEventName`（事件名只留英文字母），`Stop` 另外用 python3 讀 `transcriptPath` 尾端 2 MiB 補 `lastUserMessage`／`lastAssistantMessage`／`lastInputTokens`（本機 `hook_cmd::enrich_agy_payload` 同一份語意，測試把兩邊餵同一份 transcript 對照；沒有 python3 就只補事件名，回合照收、沒有回覆文字），再交給 `hook.sh agy <bot> -`。`hook.sh` 的 python 提示新增 agy（`SessionStart`／`PreInvocation`→回報 session、`Stop`→idle）並認 `conversationId`，herdr 才會馬上叫醒 daemon 去收 spool，不必等 30 秒的掃描。
+- **其餘本來就通**：`AGY_CLI_DISABLE_AUTO_UPDATE=true` 是 pane env（不分主機）；信任清單 `trustedWorkspaces` 是 `trust::pretrust_bots_remote`（agy 的 store 就是遠端 `~/.gemini/antigravity-cli/settings.json`）；resume 參數 `--conversation=<id>` 與 `resume_outcome` 驗證是 hook 回報的 conversationId，不靠本機 `/proc`；`transcript_path` 對遠端 bot 只收形狀（絕對路徑、`.jsonl`），daemon 不在本機打開它。**送達證據**只有本機走 transcript，遠端第一則起都是 `unverified`（照打照送、標「請人工確認」）。
+- **沒裝 agy**：`kind_probe::verdict` 對 agy 的訊息改成指路——「<主機> 尚未安裝 agy。請在額度欄的 agy 格（或新增 bot 的 kind 選單）按『安裝 agy』…」（400，同時寫進該 bot 的對話），不是通用的「請先安裝」。安裝入口見 §12a.11。
+- **不做**：遠端 agy 子 agent（§12a.9，要在那台讀 `/proc` 與對話檔）、遠端的 `lastAssistantMessage` 以外的 transcript 讀取（daemon 端不開遠端檔）。
 
 ### 12a.8 第二階段（不得在 agy 上 panic，現在都回 `unsupported_kind`／不顯示）
 `/fork`（現在 `fork_args_by_kind` 回 `unsupported_kind`）、resume 時換身分要搬的對話檔（`brain/<id>/`、`conversations/<id>.db`、`conversation_summaries.db`；換身分＝換 HOME 現在沒有，不做）、遠端的子 agent（§12a.9 只做本機）、額度改讀 statusLine 的 `quota`（現在用 `/usage` 探測，§12a.7）、自動更新（manifest JSON＋sha512，**不跑 `agy install`**）、`agy models` 清單與 `--effort`、persona（per-bot HOME 全域規則檔或首個 `PreInvocation` 的 `injectSteps`）、per-bot HOME 身分切換、遠端主機、權限框／`tool_confirmation_pending` 的信標判讀。細節與風險見設計文件。

@@ -128,6 +128,7 @@ mod quota_claude;
 pub mod release_triage;
 mod quota_agy;
 mod agy_install;
+mod agy_remote;
 mod quota_grok;
 mod read_marks;
 mod rewind;
