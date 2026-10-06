@@ -197,14 +197,14 @@ pub async fn behind(repo: &Path, live: &str) -> Result<Value, String> {
 /// 現在有沒有部署在跑；有就回是哪一種、誰。兩種都算：
 /// * 使用者上一下的請求檔還在（kick 還沒吃到、正在建置，或在等安全窗口）；
 /// * 有人握著 rebuild／restart 租約（kick 正在換版，或別顆 bot 自己在重建）。
-pub async fn in_progress(app: &Arc<App>, agm_dir: &Path) -> Result<Option<Value>, LcError> {
+pub async fn in_progress(app: &impl crate::capabilities::Db, agm_dir: &Path) -> Result<Option<Value>, LcError> {
     let up = |e: anyhow::Error| LcError::Upstream(e.to_string());
     if let Some(req) = read_request(agm_dir) {
         return Ok(Some(json!({"kind": "requested", "sha": req.get("sha"), "requested_at": req.get("requested_at")})));
     }
     let now = crate::db::now();
     for resource in crate::supervisor::maintenance::RESOURCES {
-        if let Some(l) = store::lease(&app.db, resource).await.map_err(up)?.filter(|l| l.held_at(&now)) {
+        if let Some(l) = store::lease(app.db(), resource).await.map_err(up)?.filter(|l| l.held_at(&now)) {
             return Ok(Some(json!({"kind": "lease", "resource": resource, "owner": l.owner, "expires_at": l.expires_at})));
         }
     }
@@ -306,7 +306,7 @@ pub async fn post_now(State(app): State<Arc<App>>, headers: HeaderMap, body: Opt
     Ok(Json(start(&app, &Ctx::of(&app), b.sha.as_deref(), &SchedulerKick::for_this_host()).await?))
 }
 
-pub async fn start(app: &Arc<App>, ctx: &Ctx, sha: Option<&str>, launcher: &dyn KickLauncher) -> Result<Value, LcError> {
+pub async fn start(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), ctx: &Ctx, sha: Option<&str>, launcher: &dyn KickLauncher) -> Result<Value, LcError> {
     let _g = START_LOCK.lock().await;
     if let Some(running) = in_progress(app, &ctx.agm_dir).await? {
         return Err(LcError::conflict("deploy_in_progress", json!({"running": running,
@@ -357,7 +357,7 @@ pub async fn start(app: &Arc<App>, ctx: &Ctx, sha: Option<&str>, launcher: &dyn 
         return Err(LcError::Unavailable(json!({"reason": "kick_start_failed", "message": format!("叫不起例行更新（{LAUNCHD_LABEL}）：{e}"),
             "retryable": true})));
     }
-    let _ = store::add_note(&app.db, "deploy_now", &json!({"sha": target, "live_sha": ctx.live_sha})).await;
+    let _ = store::add_note(app.db(), "deploy_now", &json!({"sha": target, "live_sha": ctx.live_sha})).await;
     app.emit("supervisor_changed", json!({"deploy_now": {"sha": target}})).await;
     tracing::info!(sha = %target, live = %ctx.live_sha, "deploy now requested from the UI");
     Ok(json!({

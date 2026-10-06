@@ -763,7 +763,7 @@ pub fn spawn_title_poller(app: Arc<App>) {
     });
 }
 
-async fn poll_titles(app: &Arc<App>, host: &str, session: &str, fallback_session: &str, client: &crate::herdr::HerdrClient) {
+async fn poll_titles(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db), host: &str, session: &str, fallback_session: &str, client: &crate::herdr::HerdrClient) {
     let Ok(agents) = client.agent_list().await else { return };
     for a in agents {
         let (Some(name), Some(raw)) = (a.name.as_deref(), a.terminal_title_stripped.as_deref()) else {
@@ -781,7 +781,7 @@ async fn poll_titles(app: &Arc<App>, host: &str, session: &str, fallback_session
         .bind(name)
         .bind(fallback_session)
         .bind(session)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await;
         let Ok(Some((run_id, bot_id, current))) = row else { continue };
         if current.as_deref() == Some(title) {
@@ -790,7 +790,7 @@ async fn poll_titles(app: &Arc<App>, host: &str, session: &str, fallback_session
         let _ = sqlx::query("UPDATE runs SET agent_title = ? WHERE id = ?")
             .bind(title)
             .bind(&run_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await;
         app.emit_bot_status(&bot_id).await;
     }

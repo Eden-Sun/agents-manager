@@ -29,7 +29,7 @@ pub struct Stuck {
 }
 
 /// 排了超過 `after_secs` 的 queued turn，且它的 bot 有一個 `running`／`idle` 的 run（有 pane）。
-pub async fn candidates(app: &Arc<App>, after_secs: i64) -> Result<Vec<Stuck>> {
+pub async fn candidates(app: &impl crate::capabilities::Db, after_secs: i64) -> Result<Vec<Stuck>> {
     let cutoff = crate::db::iso_in(-after_secs);
     Ok(sqlx::query_as::<_, Stuck>(
         "SELECT b.id AS bot_id, r.id AS run_id, r.pane_id AS pane_id, t.id AS turn_id,
@@ -43,7 +43,7 @@ pub async fn candidates(app: &Arc<App>, after_secs: i64) -> Result<Vec<Stuck>> {
     )
     .bind(cutoff)
     .bind(MAX_CANDIDATES)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?)
 }
 

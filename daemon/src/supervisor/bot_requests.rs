@@ -213,11 +213,11 @@ fn bad_proof() -> LcError {
 ///
 /// 最後一列以前也是 `None`。而 `None` 在下游不是「沒有權限」而是「使用者本人」
 /// （`roles::ack` 的 `1=1`），所以把自己的 token 打壞反而比帶對還多權限——降級同時是提權。
-pub async fn actor_role(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<Option<Role>, LcError> {
+pub async fn actor_role(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<Option<Role>, LcError> {
     let Some(id) = verified_bot_id(app, headers).await? else { return Ok(None) };
     #[cfg(test)]
     crate::lifecycle::race_point::hit("actor_role_before_lookup", &id).await;
-    let result = roles::role_of_bot(&app.db, &id).await;
+    let result = roles::role_of_bot(app.db(), &id).await;
     #[cfg(test)]
     crate::lifecycle::race_point::hit("actor_role_after_lookup", &id).await;
     result.map_err(|e| LcError::Upstream(e.to_string()))
@@ -226,14 +226,14 @@ pub async fn actor_role(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Resu
 /// 呼叫端是**哪一顆 bot**（issue #436）。三態跟 [`actor_role`] 一模一樣（這一支就是它的前半段），
 /// 只是回 bot id 而不是角色：申請重建／重啟窗口的是一般的修正 bot，沒有角色，`actor_role` 對它回的
 /// `None` 跟「沒宣告身分」分不出來——而「這筆申請是誰送的」正是要分出來的東西。
-pub async fn verified_bot_id(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<Option<String>, LcError> {
+pub async fn verified_bot_id(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<Option<String>, LcError> {
     // 「有這個標頭但讀不出值」也算宣告了身分：空字串與非 UTF-8 都要驗，不能當沒帶。
     if !headers.contains_key("X-AM-Bot-Id") {
         return Ok(None);
     }
     let get = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty());
     let Some(id) = get("X-AM-Bot-Id") else { return Err(bad_proof()) };
-    if !sender_verified(&app.db, get("X-AM-Bot-Token"), id).await {
+    if !sender_verified(app.db(), get("X-AM-Bot-Token"), id).await {
         tracing::warn!(claimed_bot = %id, "refused a request that claimed a bot identity it could not prove");
         return Err(bad_proof());
     }
@@ -253,7 +253,7 @@ pub const ROLE_SETUP_MARK_PREFIX_RESPONDER: &str = "agm-role-setup:responder";
 /// 沒帶身分的（使用者的網頁、一般 shell）照舊放行（共用 UI token 的既有取捨）；證明不了身分的由 [`verified_bot_id`] 回 403。
 /// 跟 `persona_actor`（人設）、`require_role`（approve／ack／herdr 維護窗口）同一個角色判斷（`roles::role_of_bot`，每次讀 DB，
 /// 角色換人之後舊 bot 立刻失效）。
-pub async fn forbid_plain_bot(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<(), LcError> {
+pub async fn forbid_plain_bot(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<(), LcError> {
     match declared_plain_bot(app, headers).await? {
         None => Ok(()),
         Some(id) => Err(plain_bot_forbidden(&id, "這支只給 AGM 角色（巡檢／協調者）或沒有 bot 身分的使用者：這顆 bot 證明得了自己，但它不是巡檢也不是協調者")),
@@ -261,9 +261,9 @@ pub async fn forbid_plain_bot(app: &Arc<App>, headers: &axum::http::HeaderMap) -
 }
 
 /// 呼叫端是被證明身分、但不是任何 AGM 角色的一般 bot 就回它的 id；使用者（沒帶 bot 標頭）與角色 bot 回 `None`。
-pub async fn declared_plain_bot(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<Option<String>, LcError> {
+pub async fn declared_plain_bot(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<Option<String>, LcError> {
     let Some(id) = verified_bot_id(app, headers).await? else { return Ok(None) };
-    match roles::role_of_bot(&app.db, &id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+    match roles::role_of_bot(app.db(), &id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
         Some(_) => Ok(None),
         None => Ok(Some(id)),
     }
@@ -294,7 +294,7 @@ pub async fn gate_plain_bots(
 ///
 /// 代價寫在票上：人在一般 shell 裡跑 `bin/agm ack` 會 403，要在角色自己的 pane 裡跑。
 /// 共用 UI token 的前提下 daemon 分不出人與 bot，這是取捨、不是把洞補乾淨了。
-pub async fn require_role(app: &Arc<App>, headers: &axum::http::HeaderMap) -> Result<Role, LcError> {
+pub async fn require_role(app: &impl crate::capabilities::Db, headers: &axum::http::HeaderMap) -> Result<Role, LcError> {
     actor_role(app, headers).await?.ok_or_else(|| {
         LcError::Forbidden(json!({
             "error": "forbidden",
@@ -332,7 +332,7 @@ pub async fn intercept(
 /// （`supervisor::assign` 的角色目標）共用這一條路，所以批次、節流、quiet 規則只有一份。
 #[allow(clippy::too_many_arguments)]
 pub async fn queue(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     to: Role,
     from_bot_id: &str,
     target_bot_id: &str,
@@ -343,17 +343,17 @@ pub async fn queue(
     via: &str,
     mark: ReplyMark<'_>,
 ) -> Result<Value, LcError> {
-    let to_bot = roles::bot_for(&app.db, to).await.map_err(up)?;
-    let sender = roles::role_of_bot(&app.db, from_bot_id).await.map_err(up)?;
-    let (quiet, reply_matched) = quiet_reason(&app.db, from_bot_id, sender, to_bot.as_deref(), mark).await?;
-    let from_bot = crate::db::bot(&app.db, from_bot_id).await.map_err(up)?;
+    let to_bot = roles::bot_for(app.db(), to).await.map_err(up)?;
+    let sender = roles::role_of_bot(app.db(), from_bot_id).await.map_err(up)?;
+    let (quiet, reply_matched) = quiet_reason(app.db(), from_bot_id, sender, to_bot.as_deref(), mark).await?;
+    let from_bot = crate::db::bot(app.db(), from_bot_id).await.map_err(up)?;
     let fp = fingerprint(to, target_bot_id, text, attachments);
     // 錨點：還開著的同一句申請用它的 `created_at`，不然用現在（issue #442）。帶了 request id 時
     // 錨點用不到（鍵就是那個 id），所以不必多查一次 DB。
     let now_unix = chrono::Utc::now().timestamp();
     let anchor = match client_request_id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(_) => now_unix,
-        None => window_anchor(&app.db, from_bot_id, &fp, now_unix).await,
+        None => window_anchor(app.db(), from_bot_id, &fp, now_unix).await,
     };
     let key = event_key(from_bot_id, client_request_id, &fp, anchor);
     let payload = json!({
@@ -380,7 +380,7 @@ pub async fn queue(
     let mut key = key;
     let mut round = 1;
     let (id, duplicate) = loop {
-        let new_id = store::push_inbox(&app.db, &key, "bot_request", None, Some(from_bot_id), None, &payload).await.map_err(up)?;
+        let new_id = store::push_inbox(app.db(), &key, "bot_request", None, Some(from_bot_id), None, &payload).await.map_err(up)?;
         if let Some(id) = new_id {
             // 寫入就分類，不等下一個 tick：去重與角色從這一刻起就是確定的。
             let rt = roles::route("bot_request", &payload, None);
@@ -388,7 +388,7 @@ pub async fn queue(
                 .bind(rt.role.as_str())
                 .bind(i64::from(rt.wake))
                 .bind(&id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await
                 .map_err(up)?;
             break (id, false);
@@ -399,7 +399,7 @@ pub async fn queue(
             sqlx::query_as("SELECT id, payload_json, state FROM supervisor_inbox WHERE supervisor_id=? AND event_key=?")
                 .bind(store::SUPERVISOR_ID)
                 .bind(&key)
-                .fetch_one(&app.db)
+                .fetch_one(app.db())
                 .await
                 .map_err(up)?;
         let old: Value = serde_json::from_str(&existing).unwrap_or_else(|_| json!({}));
@@ -423,10 +423,10 @@ pub async fn queue(
             key = format!("{}#{round}", key.split('#').next().unwrap_or(&key));
             continue;
         }
-        let _ = roles::count_duplicate(&app.db, to).await;
+        let _ = roles::count_duplicate(app.db(), to).await;
         break (id, true);
     };
-    let state: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE id=?").bind(&id).fetch_one(&app.db).await.map_err(up)?;
+    let state: String = sqlx::query_scalar("SELECT state FROM supervisor_inbox WHERE id=?").bind(&id).fetch_one(app.db()).await.map_err(up)?;
     if !duplicate {
         app.emit("supervisor_changed", json!({"bot_request": id, "to_role": to.as_str()})).await;
     }
@@ -448,16 +448,16 @@ pub async fn queue(
 }
 
 /// shim 的 `to_agent` 是 herdr 的 agent 名字（或原名、pane id）：對回兩個角色 bot 之一。
-pub async fn role_bot_by_agent(app: &Arc<App>, agent: &str) -> Result<Option<String>, LcError> {
+pub async fn role_bot_by_agent(app: &impl crate::capabilities::Db, agent: &str) -> Result<Option<String>, LcError> {
     let agent = agent.trim();
     if agent.is_empty() {
         return Ok(None);
     }
     for role in [Role::Patrol, Role::Responder] {
-        let Some(id) = roles::bot_for(&app.db, role).await.map_err(up)? else { continue };
-        let Some(bot) = crate::db::bot(&app.db, &id).await.map_err(up)? else { continue };
-        let run = crate::db::active_run(&app.db, &id).await.map_err(up)?;
-        let mut names = vec![bot.name.clone(), crate::db::agent_name_for_bot(&app.db, &bot).await.map_err(up)?];
+        let Some(id) = roles::bot_for(app.db(), role).await.map_err(up)? else { continue };
+        let Some(bot) = crate::db::bot(app.db(), &id).await.map_err(up)? else { continue };
+        let run = crate::db::active_run(app.db(), &id).await.map_err(up)?;
+        let mut names = vec![bot.name.clone(), crate::db::agent_name_for_bot(app.db(), &bot).await.map_err(up)?];
         if let Some(r) = run {
             names.push(crate::db::run_target(&r, &bot));
             if let Some(p) = r.pane_id {
@@ -676,7 +676,7 @@ pub(crate) mod flow_tests {
 
     pub(crate) async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-bot-requests");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);

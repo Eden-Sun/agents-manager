@@ -164,9 +164,9 @@ pub async fn correct_runtime_from_screen(app: &crate::state::App, run_id: &str, 
     wrote
 }
 
-async fn hint_moves_runtime(app: &crate::state::App, run_id: &str, screen: &str) -> bool {
+async fn hint_moves_runtime(app: &impl crate::capabilities::Db, run_id: &str, screen: &str) -> bool {
     let Some(seen) = parse_status_line(screen) else { return false };
-    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return true };
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return true };
     run.runtime_model.as_deref() != Some(seen.model.as_str())
         || run.runtime_effort != seen.effort
         || run.runtime_fast != Some(i64::from(seen.fast))

@@ -95,8 +95,8 @@ fn running() -> &'static Mutex<HashMap<PathBuf, Progress>> {
 }
 
 /// 這台 daemon 眼中是否有 herdr 更新在跑（cli_update 開工前問）。
-pub fn is_running(app: &App) -> bool {
-    running().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&app.data_dir)
+pub fn is_running(app: &impl crate::capabilities::DataDir) -> bool {
+    running().lock().unwrap_or_else(|e| e.into_inner()).contains_key(app.data_dir())
 }
 
 /// 測試用：佔住這顆 App 的更新位置，掉了就放。
@@ -116,22 +116,22 @@ pub(crate) fn hold_slot_for_test(app: &App) -> impl Drop + '_ {
 }
 
 /// `GET /api/state` 的 `herdr_updates`：進行中的那一筆（沒有就空陣列）。
-pub fn running_list(app: &App) -> Vec<Progress> {
-    running().lock().unwrap_or_else(|e| e.into_inner()).get(&app.data_dir).cloned().into_iter().collect()
+pub fn running_list(app: &impl crate::capabilities::DataDir) -> Vec<Progress> {
+    running().lock().unwrap_or_else(|e| e.into_inner()).get(app.data_dir()).cloned().into_iter().collect()
 }
 
-fn set_phase(app: &App, update_id: &str, phase: &str) {
-    if let Some(p) = running().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&app.data_dir) {
+fn set_phase(app: &impl crate::capabilities::DataDir, update_id: &str, phase: &str) {
+    if let Some(p) = running().lock().unwrap_or_else(|e| e.into_inner()).get_mut(app.data_dir()) {
         if p.update_id == update_id {
             p.phase = phase.to_string();
         }
     }
 }
 
-fn release_slot(app: &App, update_id: &str) {
+fn release_slot(app: &impl crate::capabilities::DataDir, update_id: &str) {
     let mut g = running().lock().unwrap_or_else(|e| e.into_inner());
-    if g.get(&app.data_dir).is_some_and(|p| p.update_id == update_id) {
-        g.remove(&app.data_dir);
+    if g.get(app.data_dir()).is_some_and(|p| p.update_id == update_id) {
+        g.remove(app.data_dir());
     }
 }
 
@@ -162,11 +162,11 @@ pub struct Affected {
 }
 
 /// 這台（local）上會被 server 重啟打斷的 bot。使用者自己的 `default` session 不在這個 server 上，不算。
-pub async fn affected(app: &Arc<App>, host: &str) -> anyhow::Result<Affected> {
+pub async fn affected(app: &impl crate::capabilities::Db, host: &str) -> anyhow::Result<Affected> {
     let mut out = Affected::default();
-    for run in crate::db::all_active_runs(&app.db).await? {
-        let Some(bot) = crate::db::bot(&app.db, &run.bot_id).await? else { continue };
-        if bot.deleted_at.is_some() || crate::db::bot_host(&app.db, &bot.id).await? != host {
+    for run in crate::db::all_active_runs(app.db()).await? {
+        let Some(bot) = crate::db::bot(app.db(), &run.bot_id).await? else { continue };
+        if bot.deleted_at.is_some() || crate::db::bot_host(app.db(), &bot.id).await? != host {
             continue;
         }
         if crate::herdr_maintenance::app_ports_p12::in_default_session(&run) || bot.herdr_session.as_deref() == Some("default") {
@@ -175,7 +175,7 @@ pub async fn affected(app: &Arc<App>, host: &str) -> anyhow::Result<Affected> {
         let parent = bot.parent_bot_id.clone().filter(|p| !p.is_empty());
         if bot.managed_by == "child" || parent.is_some() {
             let name = if bot.managed_by == "child" {
-                let project_label = crate::db::project(&app.db, &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
+                let project_label = crate::db::project(app.db(), &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
                 crate::config::short_child_name(&project_label, &bot.name)
             } else {
                 bot.name
@@ -187,7 +187,7 @@ pub async fn affected(app: &Arc<App>, host: &str) -> anyhow::Result<Affected> {
             Some("working")
         } else if run.agent_status == "blocked" {
             Some("blocked")
-        } else if crate::db::in_flight_turn(&app.db, &run.id).await?.is_some() {
+        } else if crate::db::in_flight_turn(app.db(), &run.id).await?.is_some() {
             Some("turn_in_flight")
         } else {
             None
@@ -198,7 +198,7 @@ pub async fn affected(app: &Arc<App>, host: &str) -> anyhow::Result<Affected> {
         out.resume.push(Resumable { bot_id: bot.id, name: bot.name });
     }
     let supervisor: Option<String> = sqlx::query_scalar::<_, Option<String>>("SELECT bot_id FROM supervisors LIMIT 1")
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await?
         .flatten()
         .filter(|s| !s.is_empty());
@@ -347,16 +347,16 @@ impl Outcome {
     }
 }
 
-fn log_line(app: &App, ctx: &Ctx, phase: &str, msg: &str) {
+fn log_line(app: &impl crate::capabilities::DataDir, ctx: &Ctx, phase: &str, msg: &str) {
     tracing::info!(update = %ctx.update_id, phase, "herdr update: {msg}");
     let line = format!("{} {} {} {} {}\n", crate::db::now(), ctx.update_id, ctx.target, phase, msg.replace('\n', " "));
-    let path = app.data_dir.join(LOG_FILE);
+    let path = app.data_dir().join(LOG_FILE);
     if let Err(e) = std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut f| f.write_all(line.as_bytes())) {
         tracing::warn!(path = %path.display(), error = %e, "cannot append to herdr-update.log");
     }
 }
 
-async fn phase(app: &Arc<App>, ctx: &Ctx, phase: &str, msg: &str) {
+async fn phase(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit), ctx: &Ctx, phase: &str, msg: &str) {
     set_phase(app, &ctx.update_id, phase);
     log_line(app, ctx, phase, msg);
     app.emit("herdr_update_progress", json!({"update_id": ctx.update_id, "host": ctx.host, "target_version": ctx.target, "phase": phase}))
@@ -531,7 +531,7 @@ async fn steps(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Outc
 }
 
 /// 等 local 的 herdr ping 回來且版本＝`expected`，回讀到的版本。
-async fn wait_server(app: &Arc<App>, expected: &str, timing: Timing) -> Result<String, String> {
+async fn wait_server(app: &impl crate::hosts::HostsAccess, expected: &str, timing: Timing) -> Result<String, String> {
     let deadline = Instant::now() + timing.restart_max;
     loop {
         let last = match ping_version(app).await {
@@ -551,7 +551,7 @@ async fn wait_server(app: &Arc<App>, expected: &str, timing: Timing) -> Result<S
 }
 
 /// 舊版讀不到版本時，換回之後只要 server 回來就算。
-async fn wait_server_any(app: &Arc<App>, timing: Timing) -> Result<String, String> {
+async fn wait_server_any(app: &impl crate::hosts::HostsAccess, timing: Timing) -> Result<String, String> {
     let deadline = Instant::now() + timing.restart_max;
     loop {
         match ping_version(app).await {
@@ -562,8 +562,8 @@ async fn wait_server_any(app: &Arc<App>, timing: Timing) -> Result<String, Strin
     }
 }
 
-async fn ping_version(app: &Arc<App>) -> Result<(String, u32), String> {
-    let conn = app.hosts.get(crate::config::LOCAL_HOST).await.ok_or("沒有 local 主機")?;
+async fn ping_version(app: &impl crate::hosts::HostsAccess) -> Result<(String, u32), String> {
+    let conn = app.hosts().get(crate::config::LOCAL_HOST).await.ok_or("沒有 local 主機")?;
     let pong = conn.client.ping().await.map_err(|e| format!("ping：{e:#}"))?;
     let protocol = pong.protocol;
     Ok((cli_version_string(&pong.version).or_else(|| version_string(&pong.version)).unwrap_or(pong.version), protocol))

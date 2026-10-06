@@ -240,7 +240,7 @@ async fn check_candidate(app: &Arc<App>, cand: &Candidate) -> Result<()> {
 }
 
 async fn settle_same_work(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     id: &str,
     p: Option<f64>,
     model: Option<String>,
@@ -255,30 +255,30 @@ async fn settle_same_work(
         .bind(tokens)
         .bind(error)
         .bind(id)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
     Ok(())
 }
 
 /// 候選是交辦、而那筆已經不在 [`STARTABLE`] 裡：回它現在的狀態（讀不到＝被刪了，也算）。開票那條沒有交辦，永遠 `None`。
-async fn gone(app: &Arc<App>, cand: &Candidate) -> Result<Option<String>> {
+async fn gone(app: &impl crate::capabilities::Db, cand: &Candidate) -> Result<Option<String>> {
     let Some(id) = cand.assignment_id.as_deref() else { return Ok(None) };
-    let status = crate::supervisor::store::assignment(&app.db, id).await?.map(|a| a.status).unwrap_or_else(|| "missing".into());
+    let status = crate::supervisor::store::assignment(app.db(), id).await?.map(|a| a.status).unwrap_or_else(|| "missing".into());
     Ok((!STARTABLE.contains(&status.as_str())).then_some(status))
 }
 
 /// 帳本上這一對的 JSON 加 `stale`＝答案回來時交辦的狀態。觀察留著（`jev_same_work` 照填），事後算誤報率時要排除它：
 /// 候選根本沒開始，「後來有沒有被併掉」對它沒有意義。
-async fn mark_stale(app: &Arc<App>, id: &str, status: &str) -> Result<()> {
+async fn mark_stale(app: &impl crate::capabilities::Db, id: &str, status: &str) -> Result<()> {
     sqlx::query("UPDATE judge_shadow SET matched_line = json_set(matched_line, '$.stale', ?) WHERE id=?")
         .bind(status)
         .bind(id)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
     Ok(())
 }
 
-async fn push_hint(app: &Arc<App>, cand: &Candidate, other: &Card, p: f64, pair: &str) -> Result<()> {
+async fn push_hint(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), cand: &Candidate, other: &Card, p: f64, pair: &str) -> Result<()> {
     let parent = cand.parent_bot_id.clone().unwrap_or_else(|| cand.bot_id.clone());
     let existing = other.issue_ref.clone().unwrap_or_else(|| other.key.clone());
     let action = format!(
@@ -300,7 +300,7 @@ async fn push_hint(app: &Arc<App>, cand: &Candidate, other: &Card, p: f64, pair:
     });
     let event_key = format!("judge_same_work:{pair}");
     let id = crate::supervisor::store::push_inbox(
-        &app.db,
+        app.db(),
         &event_key,
         "judge_same_work",
         cand.assignment_id.as_deref(),
@@ -327,22 +327,22 @@ fn snapshot(pair: &str, cand: &Card, other: &Card) -> String {
     .to_string()
 }
 
-async fn asked(app: &Arc<App>, pair: &str) -> Result<bool> {
+async fn asked(app: &impl crate::capabilities::Db, pair: &str) -> Result<bool> {
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE regex_verdict = 'same_work' AND run_id = ?")
         .bind(pair)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await?;
     Ok(n > 0)
 }
 
 /// release-triage 開的票屬於 `[release_triage] repo`（`owner/name`）。專案 label 或路徑最後一段等於 `name`
 /// 的才算「同專案」；對不上就不問——拿別的專案在跑的工作來比只會是雜訊。
-async fn repo_projects(app: &Arc<App>) -> Result<Vec<String>> {
-    let repo = app.cfg.get().await.release_triage.repo.unwrap_or_default();
+async fn repo_projects(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db)) -> Result<Vec<String>> {
+    let repo = app.cfg().get().await.release_triage.repo.unwrap_or_default();
     let Some(name) = repo.trim().trim_end_matches('/').rsplit('/').next().filter(|n| !n.is_empty()).map(str::to_string) else {
         return Ok(Vec::new());
     };
-    let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT id, label, path FROM projects WHERE deleted_at IS NULL").fetch_all(&app.db).await?;
+    let rows: Vec<(String, String, String)> = sqlx::query_as("SELECT id, label, path FROM projects WHERE deleted_at IS NULL").fetch_all(app.db()).await?;
     Ok(rows
         .into_iter()
         .filter(|(_, label, path)| *label == name || path.trim_end_matches('/').rsplit('/').next() == Some(name.as_str()))
@@ -350,9 +350,9 @@ async fn repo_projects(app: &Arc<App>) -> Result<Vec<String>> {
         .collect())
 }
 
-async fn running_cards(app: &Arc<App>, project_id: &str, skip_key: &str, skip_bot: &str) -> Result<Vec<Card>> {
+async fn running_cards(app: &impl crate::capabilities::Db, project_id: &str, skip_key: &str, skip_bot: &str) -> Result<Vec<Card>> {
     let mut cards = Vec::new();
-    for a in crate::supervisor::store::unsettled_assignments(&app.db).await? {
+    for a in crate::supervisor::store::unsettled_assignments(app.db()).await? {
         if a.expects_review == 0 {
             continue;
         }
@@ -360,7 +360,7 @@ async fn running_cards(app: &Arc<App>, project_id: &str, skip_key: &str, skip_bo
         if key == skip_key {
             continue;
         }
-        let Some(bot) = crate::db::bot(&app.db, &a.target_bot_id).await? else { continue };
+        let Some(bot) = crate::db::bot(app.db(), &a.target_bot_id).await? else { continue };
         if bot.deleted_at.is_some() || bot.project_id != project_id || bot.id == skip_bot {
             continue;
         }
@@ -376,7 +376,7 @@ async fn running_cards(app: &Arc<App>, project_id: &str, skip_key: &str, skip_bo
           WHERE b.project_id = ? AND b.deleted_at IS NULL AND b.parent_bot_id IS NOT NULL",
     )
     .bind(project_id)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     let mut by_bot: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
     for (id, cwd, title) in rows {

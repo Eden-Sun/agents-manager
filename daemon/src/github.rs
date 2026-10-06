@@ -160,7 +160,7 @@ pub fn parse_github_remote(url: &str) -> Option<GithubInfo> {
     Some(GithubInfo { owner: owner.into(), repo: repo.into(), url: format!("https://github.com/{owner}/{repo}") })
 }
 
-async fn run_on_host(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> Result<String> {
+async fn run_on_host(app: &impl crate::hosts::HostsAccess, host: &str, script: &str, timeout: Duration) -> Result<String> {
     if host == LOCAL_HOST {
         let o = crate::hosts::sh_local(script, timeout).await?.ok_or_else(|| anyhow!("command timed out"))?;
         if !o.status.success() {
@@ -170,7 +170,7 @@ async fn run_on_host(app: &Arc<App>, host: &str, script: &str, timeout: Duration
         }
         return Ok(String::from_utf8_lossy(&o.stdout).to_string());
     }
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     conn.ssh_exec_path_timeout(script, timeout).await
 }
 
@@ -269,21 +269,21 @@ enum Probe {
 }
 
 /// 在抓住的那條連線上跑 `git remote`。回來時世代變了就整筆作廢，不把舊機器的 origin 寫進快取。
-async fn probe_fenced(app: &Arc<App>, fence: &crate::hosts::HostFence, path: &str) -> Probe {
-    if !app.hosts.is_current(fence).await {
+async fn probe_fenced(app: &impl crate::hosts::HostsAccess, fence: &crate::hosts::HostFence, path: &str) -> Probe {
+    if !app.hosts().is_current(fence).await {
         return Probe::Stale;
     }
     let out = match fence.conn().ssh_exec_path_timeout(&origin_script(path), GIT_TIMEOUT).await {
         Ok(o) => o,
         Err(e) => {
-            if !app.hosts.is_current(fence).await {
+            if !app.hosts().is_current(fence).await {
                 return Probe::Stale;
             }
             tracing::debug!(host = %fence.conn().name, error = %e, "git remote lookup failed");
             return Probe::Done(None);
         }
     };
-    if !app.hosts.is_current(fence).await {
+    if !app.hosts().is_current(fence).await {
         return Probe::Stale;
     }
     Probe::Done(info_from_origin(&out))

@@ -121,8 +121,8 @@ pub fn identity_for_run(bot: &crate::db::Bot, run: Option<&crate::db::Run>) -> O
 }
 
 /// [`identity_for_run`]，run 用這顆 bot 現在的 active run。讀不到 run 回錯：不能拿設定的身分猜（那正是會記錯格的那一個）。
-pub async fn billing_identity(app: &Arc<App>, bot: &crate::db::Bot) -> Result<Option<String>> {
-    let run = crate::db::active_run(&app.db, &bot.id).await?;
+pub async fn billing_identity(app: &impl crate::capabilities::Db, bot: &crate::db::Bot) -> Result<Option<String>> {
+    let run = crate::db::active_run(app.db(), &bot.id).await?;
     Ok(identity_for_run(bot, run.as_ref()))
 }
 
@@ -175,8 +175,8 @@ pub fn limit_hit_blocks_model(hit: &LimitHit, model: Option<&str>) -> bool {
 ///
 /// 讀不到 run 就是「不知道」（`None`，[`bucket_blocks_model`] 照舊擋），不退回設定值：`/model` 換過的話設定值是錯的，
 /// 撞的是模型專屬的桶時會把正在跑那個模型的 bot 放行（#108 重開）。
-pub async fn running_model(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
-    let runtime = match crate::db::active_run(&app.db, &bot.id).await {
+pub async fn running_model(app: &impl crate::capabilities::Db, bot: &crate::db::Bot) -> Option<String> {
+    let runtime = match crate::db::active_run(app.db(), &bot.id).await {
         Ok(run) => run.and_then(|r| r.runtime_model),
         Err(e) => {
             tracing::warn!(bot = %bot.id, error = %e, "cannot read the running model; treating it as unknown");
@@ -284,8 +284,8 @@ where
     }
 }
 
-pub async fn pollable_hosts(app: &Arc<App>) -> Vec<String> {
-    app.hosts
+pub async fn pollable_hosts(app: &impl crate::hosts::HostsAccess) -> Vec<String> {
+    app.hosts()
         .list()
         .await
         .into_iter()
@@ -577,7 +577,7 @@ pub async fn load_cache(app: &Arc<App>) -> Result<usize> {
     Ok(count)
 }
 
-pub(crate) async fn persist_cache(app: &App, key: &str, q: &Quota) {
+pub(crate) async fn persist_cache(app: &impl crate::capabilities::Db, key: &str, q: &Quota) {
     let raw = match serde_json::to_string(q) {
         Ok(raw) => raw,
         Err(e) => {
@@ -597,15 +597,15 @@ pub(crate) async fn persist_cache(app: &App, key: &str, q: &Quota) {
     .bind(key)
     .bind(raw)
     .bind(&q.updated_at)
-    .execute(&app.db)
+    .execute(app.db())
     .await
     {
         tracing::warn!(key, error = %e, "cannot persist quota cache");
     }
 }
 
-async fn delete_cache(app: &App, key: &str) {
-    if let Err(e) = sqlx::query("DELETE FROM quota_cache WHERE key = ?").bind(key).execute(&app.db).await {
+async fn delete_cache(app: &impl crate::capabilities::Db, key: &str) {
+    if let Err(e) = sqlx::query("DELETE FROM quota_cache WHERE key = ?").bind(key).execute(app.db()).await {
         tracing::warn!(key, error = %e, "cannot delete quota cache");
     }
 }
@@ -1146,8 +1146,8 @@ fn cleared_at() -> &'static std::sync::Mutex<HashMap<String, chrono::DateTime<ch
     M.get_or_init(Default::default)
 }
 
-fn cleared_at_key(app: &App, key: &str) -> String {
-    format!("{}\u{0}{key}", app.data_dir.display())
+fn cleared_at_key(app: &impl crate::capabilities::DataDir, key: &str) -> String {
+    format!("{}\u{0}{key}", app.data_dir().display())
 }
 
 /// 這顆 bot 的帳號在 `since` 之後有沒有被成功回合清過撞限。`resume_quota_blocked` 用它分辨
@@ -2932,7 +2932,7 @@ mod tests {
     async fn snapshot_covers_live_hosts_only() {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-quota-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
-        let pool = crate::db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
         let app = App::new(

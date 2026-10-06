@@ -115,7 +115,7 @@ pub fn retain_runs(active: &[String]) {
 /// 呼叫端已過世代圍籬（舊 run／舊 hook 進不來）。沒有 `model.id`（不從顯示名猜）、空字串、DB 讀寫失敗都保留舊值。
 /// 啟動時記的是別名（`opus`、`fable` 這類只有家族名）而 statusLine 回同家族的完整 id：別名本來就由 server 決定指到哪一版，
 /// 兩者不算分歧，不改寫（也避免畫面上憑空多出一條「模型」drift；模型專屬額度是以家族判斷的）。
-pub async fn adopt_statusline_model(app: &Arc<App>, run: &db::Run, payload: &serde_json::Value) {
+pub async fn adopt_statusline_model(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db), run: &db::Run, payload: &serde_json::Value) {
     let Some(id) = payload.pointer("/model/id").and_then(|v| v.as_str()).map(str::trim).filter(|m| !m.is_empty()) else {
         return;
     };
@@ -132,7 +132,7 @@ pub async fn adopt_statusline_model(app: &Arc<App>, run: &db::Run, payload: &ser
     .bind(id)
     .bind(&run.id)
     .bind(id)
-    .execute(&app.db)
+    .execute(app.db())
     .await;
     match wrote {
         Ok(r) if r.rows_affected() > 0 => {

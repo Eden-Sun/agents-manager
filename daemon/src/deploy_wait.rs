@@ -84,11 +84,11 @@ pub struct Wait {
     pub swap_announced_at: BTreeMap<String, String>,
 }
 
-fn path(app: &App) -> PathBuf {
-    app.data_dir.join(FILE)
+fn path(app: &impl crate::capabilities::DataDir) -> PathBuf {
+    app.data_dir().join(FILE)
 }
 
-fn save(app: &App, w: Option<&Wait>) {
+fn save(app: &impl crate::capabilities::DataDir, w: Option<&Wait>) {
     let p = path(app);
     let res = match w {
         Some(w) => serde_json::to_vec(w).map_err(std::io::Error::other).and_then(|b| std::fs::write(&p, b)),
@@ -421,7 +421,7 @@ pub fn view(app: &App) -> Value {
     }
 }
 
-async fn announce(app: &Arc<App>, a: Announce, w: &Wait) {
+async fn announce(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), a: Announce, w: &Wait) {
     let now = crate::db::now();
     let v = view_of(w, &now);
     let first = a == Announce::First;
@@ -430,7 +430,7 @@ async fn announce(app: &Arc<App>, a: Announce, w: &Wait) {
     app.emit("deploy_wait", json!({"wait": v, "first": first})).await;
     let key = format!("deploy_waiting:{}:{}", w.id, w.rev);
     if let Err(e) = crate::supervisor::store::push_inbox(
-        &app.db,
+        app.db(),
         &key,
         "deploy_waiting",
         None,

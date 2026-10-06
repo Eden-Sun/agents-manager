@@ -21,13 +21,13 @@ async fn emit(app: &Arc<App>, m: &store::Mission) {
     app.emit_event("mission_updated", json!({"mission_id": m.id, "project_id": m.project_id, "status": m.status()})).await;
 }
 
-async fn load(app: &Arc<App>, id: &str) -> Result<store::Mission, LcError> {
-    store::get(&app.db, id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))
+async fn load(app: &impl crate::capabilities::Db, id: &str) -> Result<store::Mission, LcError> {
+    store::get(app.db(), id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))
 }
 
 /// 放行之後的那一步（不看暫停）。放進 `mission_resumed`／`mission_answered`，AGM 被叫醒時就知道
 /// 從哪裡接續，不必回頭翻 runbook 對「停下之前做到哪」（§18.14 第 8 步）。
-async fn resume_step(app: &Arc<App>, id: &str) -> Result<Value, LcError> {
+async fn resume_step(app: &impl crate::capabilities::Db, id: &str) -> Result<Value, LcError> {
     let (assignments, events) = super::workflow::inputs(app, id).await?;
     Ok(json!(flow::derive(&assignments, &events).step()))
 }
@@ -57,7 +57,7 @@ pub fn phase(m: &store::Mission, assignments: &[crate::supervisor::store::Assign
     }
 }
 
-async fn with_phase(app: &Arc<App>, m: &store::Mission) -> Result<Value, LcError> {
+async fn with_phase(app: &impl crate::capabilities::Db, m: &store::Mission) -> Result<Value, LcError> {
     let (assignments, events) = super::workflow::inputs(app, &m.id).await?;
     let mut out = m.json();
     out["phase"] = phase(m, &assignments).into();
@@ -119,7 +119,7 @@ async fn mission_access_bot(app: &Arc<App>, bot_id: Option<&str>) -> Result<Opti
     Ok(Some(bot_id.to_owned()))
 }
 
-async fn require_mission_participant(app: &Arc<App>, mission_id: &str, bot_id: Option<&str>) -> Result<(), LcError> {
+async fn require_mission_participant(app: &impl crate::capabilities::Db, mission_id: &str, bot_id: Option<&str>) -> Result<(), LcError> {
     let Some(bot_id) = bot_id else { return Ok(()) };
     // Match the shared API path policy: a Bot can act for work assigned to itself or a child.
     let assigned: i64 = sqlx::query_scalar(
@@ -135,7 +135,7 @@ async fn require_mission_participant(app: &Arc<App>, mission_id: &str, bot_id: O
     )
     .bind(bot_id)
     .bind(mission_id)
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await
     .map_err(up)?;
     if assigned != 0 {
@@ -522,13 +522,13 @@ pub struct EventIn {
 }
 
 /// 這個專案的本機路徑（交付與驗證都只收同一個 repo 的工作樹）。
-async fn project_repo(app: &Arc<App>, m: &store::Mission) -> Result<std::path::PathBuf, LcError> {
-    let p = crate::db::project(&app.db, &m.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
+async fn project_repo(app: &impl crate::capabilities::Db, m: &store::Mission) -> Result<std::path::PathBuf, LcError> {
+    let p = crate::db::project(app.db(), &m.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
     Ok(std::path::PathBuf::from(p.path))
 }
 
 /// 呼叫端給的工作樹：本機絕對路徑、存在、而且跟任務的專案是同一個 repo。
-async fn mission_worktree(app: &Arc<App>, m: &store::Mission, raw: &str) -> Result<std::path::PathBuf, LcError> {
+async fn mission_worktree(app: &impl crate::capabilities::Db, m: &store::Mission, raw: &str) -> Result<std::path::PathBuf, LcError> {
     let dir = std::path::PathBuf::from(raw.trim());
     if !dir.is_absolute() || !dir.is_dir() {
         return Err(LcError::Bad("worktree must be an existing absolute path".into()));
@@ -544,7 +544,7 @@ async fn mission_worktree(app: &Arc<App>, m: &store::Mission, raw: &str) -> Resu
 ///
 /// 以前只要有任何一則 `verified` 就放行：驗證者在 A 上驗過，執行者 rebase 成 B（可能含衝突解法），
 /// B 沒經過驗證者就被推上 main。回傳完整 sha，與給了的話那個工作樹（交付的下一步會提到它）。
-async fn verified_commit(app: &Arc<App>, m: &store::Mission, b: &EventIn) -> Result<(String, Option<String>), LcError> {
+async fn verified_commit(app: &impl crate::capabilities::Db, m: &store::Mission, b: &EventIn) -> Result<(String, Option<String>), LcError> {
     let given = b
         .sha
         .as_deref()
@@ -732,8 +732,8 @@ async fn called_by_mission_manager(app: &Arc<App>, headers: &HeaderMap) -> Resul
 }
 
 /// 這個任務底下還開著的交辦（`supervisor::store::OPEN_STATES`），給 AGM 看的精簡形狀。
-async fn open_assignments(app: &Arc<App>, mission_id: &str) -> Result<Vec<crate::supervisor::store::Assignment>, LcError> {
-    Ok(app.db.mission_assignments(mission_id).await.map_err(up)?.into_iter().filter(|a| a.is_open()).collect())
+async fn open_assignments(app: &impl crate::capabilities::Db, mission_id: &str) -> Result<Vec<crate::supervisor::store::Assignment>, LcError> {
+    Ok(app.db().mission_assignments(mission_id).await.map_err(up)?.into_iter().filter(|a| a.is_open()).collect())
 }
 
 fn assignment_brief(a: &crate::supervisor::store::Assignment) -> Value {

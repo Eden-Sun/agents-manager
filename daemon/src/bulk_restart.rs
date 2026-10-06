@@ -204,9 +204,9 @@ fn same_authority(left: &ScopedRestart, right: &ScopedRestart) -> bool {
         }
 }
 
-async fn authority_is_current(app: &Arc<App>, request: &ScopedRestart) -> bool {
+async fn authority_is_current(app: &impl crate::hosts::HostsAccess, request: &ScopedRestart) -> bool {
     match request.fence.as_ref() {
-        Some(fence) => fence.conn().name == request.scope.host && app.hosts.is_current(fence).await,
+        Some(fence) => fence.conn().name == request.scope.host && app.hosts().is_current(fence).await,
         None => true,
     }
 }
@@ -349,8 +349,8 @@ fn run_followups(app: Arc<App>, followups: Vec<ScopedRestart>) -> futures::futur
 }
 
 /// 這一批輪到 `bot_id` 了：不再算它「還排著」。
-fn mark_reached(app: &App, batch_id: &str, bot_id: &str) {
-    if let Some(r) = running_batches().lock().unwrap().get_mut(&app.data_dir.display().to_string()) {
+fn mark_reached(app: &impl crate::capabilities::DataDir, batch_id: &str, bot_id: &str) {
+    if let Some(r) = running_batches().lock().unwrap().get_mut(&app.data_dir().display().to_string()) {
         if r.batch_id == batch_id {
             r.remaining.remove(bot_id);
         }
@@ -746,9 +746,9 @@ fn busy_skip(e: &LcError) -> Option<Skip> {
 
 /// Read straight off the row: `get_or_init` would create a supervisor the user never asked for.
 /// 讀不到是錯誤，不是「沒有總管」：不知道誰是總管，就排不出「它最後重啟」，也不會替它排回來的檢查（#188）。
-async fn supervisor_bot_id(app: &Arc<App>) -> anyhow::Result<Option<String>> {
+async fn supervisor_bot_id(app: &impl crate::capabilities::Db) -> anyhow::Result<Option<String>> {
     Ok(sqlx::query_scalar::<_, Option<String>>("SELECT bot_id FROM supervisors LIMIT 1")
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await?
         .flatten()
         .filter(|s| !s.is_empty()))
@@ -837,8 +837,8 @@ async fn verify_supervisor_back_with(app: Arc<App>, bot_id: String, name: String
 
 /// 這顆現在還是「該跑著的總管」嗎：`supervisors` 列仍指著它、而且 `desired_running != 0`。讀不到當成不是（不確定就不啟動：
 /// 這是延遲補啟動，讀不到時寧可少啟動一次——看門狗本來就會照同一個意圖處理）。
-async fn supervisor_still_wanted(app: &Arc<App>, bot_id: &str) -> bool {
-    match sqlx::query_scalar::<_, i64>("SELECT desired_running FROM supervisors WHERE bot_id = ? LIMIT 1").bind(bot_id).fetch_optional(&app.db).await {
+async fn supervisor_still_wanted(app: &impl crate::capabilities::Db, bot_id: &str) -> bool {
+    match sqlx::query_scalar::<_, i64>("SELECT desired_running FROM supervisors WHERE bot_id = ? LIMIT 1").bind(bot_id).fetch_optional(app.db()).await {
         Ok(Some(d)) => d != 0,
         Ok(None) => false,
         Err(e) => {

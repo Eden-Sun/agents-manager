@@ -74,10 +74,10 @@ pub async fn correct_runtime_from_screen(app: &App, run_id: &str, screen: &str) 
 }
 
 /// 這份畫面會不會改到 runtime。讀不到框底、或跟記著的一樣，就不必再讀、也不必拿 bot 鎖。
-async fn hint_moves_runtime(app: &App, run_id: &str, screen: &str) -> bool {
+async fn hint_moves_runtime(app: &impl crate::capabilities::Db, run_id: &str, screen: &str) -> bool {
     let Some(seen) = parse_footer(screen) else { return false };
-    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return true };
-    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return true };
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return true };
+    let Ok(Some(bot)) = db::bot(app.db(), &run.bot_id).await else { return true };
     let child = bot.managed_by == "child";
     let moved = |seen: Option<String>, cur: Option<&str>| seen.filter(|v| (child || cur.is_some()) && cur != Some(v.as_str()));
     moved(seen.model, run.runtime_model.as_deref()).is_some() || moved(seen.effort, run.runtime_effort.as_deref()).is_some()

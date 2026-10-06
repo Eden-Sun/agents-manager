@@ -60,8 +60,8 @@ pub(super) async fn read_objects(pool: &SqlitePool) -> Result<Vec<SchemaObject>>
     Ok(out)
 }
 
-/// 沿用舊名的入口（測試與過渡期的呼叫端）：feature 清單取 composition 層那份。
-#[allow(dead_code)]
+/// 沿用舊名的入口（只給測試）：feature 清單取 composition 層那份。
+#[cfg(test)]
 pub(super) async fn check_drift(pool: &SqlitePool) -> Result<()> {
     check_drift_with(pool, super::composition_features()).await
 }

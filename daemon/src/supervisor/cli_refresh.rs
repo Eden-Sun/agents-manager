@@ -105,14 +105,14 @@ pub fn refresh_cli(dir: &Path, embedded: &str) -> std::io::Result<Outcome> {
 }
 
 /// 已設定的角色與它的工作目錄。沒設定（沒有 bot）就不在清單裡。
-async fn configured_dirs(app: &Arc<App>) -> Vec<(Role, PathBuf)> {
+async fn configured_dirs(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) -> Vec<(Role, PathBuf)> {
     let mut out = Vec::new();
-    if let Ok(sup) = store::get_or_init(&app.db).await {
+    if let Ok(sup) = store::get_or_init(app.db()).await {
         if sup.bot_id.is_some() {
             out.push((Role::Patrol, sup.cwd.map(PathBuf::from).unwrap_or_else(|| super::setup::agm_dir(app))));
         }
     }
-    if let Ok(r) = roles::get(&app.db, Role::Responder).await {
+    if let Ok(r) = roles::get(app.db(), Role::Responder).await {
         if r.bot_id.is_some() {
             out.push((Role::Responder, r.cwd.map(PathBuf::from).unwrap_or_else(|| super::responder::dir(app))));
         }
@@ -120,7 +120,7 @@ async fn configured_dirs(app: &Arc<App>) -> Vec<(Role, PathBuf)> {
     out
 }
 
-pub async fn refresh_on_startup(app: &Arc<App>) {
+pub async fn refresh_on_startup(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) {
     refresh_with(app, super::setup::AGM_CLI).await
 }
 
@@ -130,7 +130,7 @@ pub async fn refresh_on_startup(app: &Arc<App>) {
 /// （`install-manifest.tsv` 明寫「bin/agm 由 daemon 部署，不在這裡」）。於是「腳本比 CLI 新」
 /// 這個組合一律回報 ok，而它正是最會痛的那一種：`daemon-update-kick.sh` 派出的正文用
 /// `--lease-token-file`，舊的 `bin/agm` 不認得就 argparse rc 2，rebuild 窗口沒交還、握到 TTL。
-async fn status(app: &Arc<App>, embedded: &str) -> Value {
+async fn status(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), embedded: &str) -> Value {
     let embedded_hash = short_hash(embedded.as_bytes());
     let mut roles = Vec::new();
     for (role, dir) in configured_dirs(app).await {
@@ -170,7 +170,7 @@ pub async fn post_cli_refresh(State(app): State<Arc<App>>) -> Json<Value> {
     Json(status(&app, super::setup::AGM_CLI).await)
 }
 
-async fn refresh_with(app: &Arc<App>, embedded: &str) {
+async fn refresh_with(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), embedded: &str) {
     for (role, dir) in configured_dirs(app).await {
         match refresh_cli(&dir, embedded) {
             Ok(Outcome::Refreshed { old_hash, new_hash, backup }) => tracing::info!(
@@ -185,7 +185,7 @@ async fn refresh_with(app: &Arc<App>, embedded: &str) {
                 let new_hash = short_hash(embedded.as_bytes());
                 tracing::warn!(role = role.as_str(), dir = %dir.display(), error = %e, "daemon started: could not refresh bin/agm; the installed CLI is stale");
                 let _ = store::push_inbox(
-                    &app.db,
+                    app.db(),
                     &format!("agm_cli_stale:{}:{new_hash}", role.as_str()),
                     "agm_cli_stale",
                     None,

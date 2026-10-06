@@ -238,8 +238,8 @@ fn skip_reason(app_err: &LcError) -> (&'static str, String) {
     }
 }
 
-pub async fn members(app: &Arc<App>, project_id: &str) -> LcResult<Vec<db::Bot>> {
-    let bots = db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+pub async fn members(app: &impl crate::capabilities::Db, project_id: &str) -> LcResult<Vec<db::Bot>> {
+    let bots = db::live_bots(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     Ok(bots.into_iter().filter(|b| b.project_id == project_id).collect())
 }
 
@@ -549,7 +549,7 @@ mod message_tests {
     async fn messages_page_by_rowid_when_ids_are_out_of_order() {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-group-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
         let app = App::new(

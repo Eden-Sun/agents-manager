@@ -121,7 +121,7 @@ pub async fn observe(app: &Arc<App>, run: &db::Run) {
 /// 巡邏收尾：開著框的 run 已經結束或被刪（不在 active 名單上、DB 也確認不是進行中）就把那筆記錄拿掉。
 /// 巡邏只看 active run，結束的 run 不會再被 [`observe`] 讀到「框關了」，記錄不拿掉就只增不減。
 /// 以重讀 DB 為準；讀不到就留著等下一輪。
-pub async fn forget_ended(app: &Arc<App>, active: &[db::Run]) {
+pub async fn forget_ended(app: &impl crate::capabilities::Db, active: &[db::Run]) {
     let candidates: Vec<String> = open()
         .lock()
         .unwrap()
@@ -130,7 +130,7 @@ pub async fn forget_ended(app: &Arc<App>, active: &[db::Run]) {
         .cloned()
         .collect();
     for id in candidates {
-        match db::run(&app.db, &id).await {
+        match db::run(app.db(), &id).await {
             Ok(Some(r)) if matches!(r.state.as_str(), "starting" | "running" | "stopping") => {}
             Ok(_) => {
                 open().lock().unwrap().remove(&id);

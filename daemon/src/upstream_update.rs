@@ -416,12 +416,12 @@ pub(crate) async fn set_snapshot_for_test(app: &App, status: UpstreamStatus) {
         .insert(status.kind.clone(), status);
 }
 
-pub fn last_path(app: &App) -> PathBuf {
-    app.data_dir.join(LAST_FILE)
+pub fn last_path(app: &impl crate::capabilities::DataDir) -> PathBuf {
+    app.data_dir().join(LAST_FILE)
 }
 
 /// 一輪：每個 kind 比一次，快照有變或要通知才推 `upstream_update`。回傳推出去的事件（測試用）。
-pub async fn tick(app: &Arc<App>, watch: &Watch, src: &dyn Sources, last_file: &Path) -> Vec<Value> {
+pub async fn tick(app: &impl crate::capabilities::Emit, watch: &Watch, src: &dyn Sources, last_file: &Path) -> Vec<Value> {
     let mut emitted = Vec::new();
     for kind in KINDS {
         let (upstream, checked_at) = watch.upstream(src, kind).await;

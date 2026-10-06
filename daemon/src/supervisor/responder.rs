@@ -47,8 +47,8 @@ pub fn valid_model(m: &str) -> bool {
     m.len() <= 40 && m.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
-pub fn dir(app: &Arc<App>) -> PathBuf {
-    app.data_dir.join("supervisor").join(BOT_NAME)
+pub fn dir(app: &impl crate::capabilities::DataDir) -> PathBuf {
+    app.data_dir().join("supervisor").join(BOT_NAME)
 }
 
 pub fn persona_body() -> String {
@@ -334,22 +334,22 @@ async fn set_cwd(db: &SqlitePool, bot_id: &str, cwd: &str) -> Result<(), LcError
 /// 對方的 session、覆寫對方的 `persona.md`——只是改由 `bots.cwd` 記，不再自成一個專案。
 ///
 /// 可重入：已經在同一個專案就只補 cwd 與角色欄位。回傳協調者現在的 project id（沒設定過就 `None`）。
-pub async fn merge_into_manager_project(app: &Arc<App>) -> Result<Option<String>, LcError> {
-    let Some(bot_id) = roles::get(&app.db, Role::Responder).await.map_err(up)?.bot_id else {
+pub async fn merge_into_manager_project(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit)) -> Result<Option<String>, LcError> {
+    let Some(bot_id) = roles::get(app.db(), Role::Responder).await.map_err(up)?.bot_id else {
         return Ok(None);
     };
     adopt_into_manager_project(app, &bot_id).await
 }
 
-async fn adopt_into_manager_project(app: &Arc<App>, bot_id: &str) -> Result<Option<String>, LcError> {
+async fn adopt_into_manager_project(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit), bot_id: &str) -> Result<Option<String>, LcError> {
     // 巡檢還沒設定就沒有可以搬進去的專案：什麼都不動。
-    let Some(manager_project) = store::get_or_init(&app.db).await.map_err(up)?.project_id else {
+    let Some(manager_project) = store::get_or_init(app.db()).await.map_err(up)?.project_id else {
         return Ok(None);
     };
     let d = dir(app);
     let cwd = crate::config::canonical_path(&d.to_string_lossy()).unwrap_or_else(|_| d.to_string_lossy().into_owned());
     let (mp, bid, c2) = (manager_project.clone(), bot_id.to_string(), cwd.clone());
-    let moved = crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+    let moved = crate::projection::update_and_project(app.cfg(), app.db(), move |cfg| {
         let Some(from) = cfg.projects.iter().position(|p| p.bots.iter().any(|b| b.id.as_deref() == Some(bid.as_str()))) else {
             anyhow::bail!("missing");
         };
@@ -376,8 +376,8 @@ async fn adopt_into_manager_project(app: &Arc<App>, bot_id: &str) -> Result<Opti
         Err(e) if e.to_string() == "missing" => return Ok(None),
         Err(e) => return Err(up(e)),
     };
-    set_cwd(&app.db, bot_id, &cwd).await?;
-    roles::set_env(&app.db, Role::Responder, bot_id, &manager_project, &cwd).await.map_err(up)?;
+    set_cwd(app.db(), bot_id, &cwd).await?;
+    roles::set_env(app.db(), Role::Responder, bot_id, &manager_project, &cwd).await.map_err(up)?;
     if moved {
         tracing::info!(bot = bot_id, project = %manager_project, cwd = %cwd, "AGM 協調者併回巡檢的專案（工作目錄仍然分開）");
         app.emit("bot_changed", json!({"bot_id": bot_id})).await;
@@ -386,10 +386,10 @@ async fn adopt_into_manager_project(app: &Arc<App>, bot_id: &str) -> Result<Opti
 }
 
 /// 人設寫回衍生副本（config 的 bot persona、`persona.md`）。
-pub async fn apply_persona(app: &Arc<App>, text: &str) -> Result<(), LcError> {
-    let Some(bot_id) = roles::get(&app.db, Role::Responder).await.map_err(up)?.bot_id else { return Ok(()) };
+pub async fn apply_persona(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db), text: &str) -> Result<(), LcError> {
+    let Some(bot_id) = roles::get(app.db(), Role::Responder).await.map_err(up)?.bot_id else { return Ok(()) };
     let t = text.to_string();
-    crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+    crate::projection::update_and_project(app.cfg(), app.db(), move |cfg| {
         let mut found = false;
         for p in cfg.projects.iter_mut() {
             if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bot_id.as_str())) {
@@ -595,13 +595,13 @@ async fn report_missing(db: &SqlitePool, bot_id: &str) {
 }
 
 /// 協調者的故障交給**巡檢**：它就是負責發現「有東西倒了」的那一個，而倒下的正是協調者自己。
-async fn report_gave_up(app: &Arc<App>, why: &str) {
+async fn report_gave_up(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), why: &str) {
     // 標記＝「欠一則通知」，不是「已通知」（#251）：每個 GaveUp tick 都補一次，事件以標記時間為 key、
     // INSERT OR IGNORE，所以補到成功為止、每一輪放棄只會有一則。
-    let _ = roles::mark_watchdog_gave_up(&app.db, Role::Responder, why).await;
-    let Some(at) = roles::get(&app.db, Role::Responder).await.ok().and_then(|r| r.watchdog_gave_up_at) else { return };
+    let _ = roles::mark_watchdog_gave_up(app.db(), Role::Responder, why).await;
+    let Some(at) = roles::get(app.db(), Role::Responder).await.ok().and_then(|r| r.watchdog_gave_up_at) else { return };
     let pushed = store::push_inbox(
-        &app.db,
+        app.db(),
         &format!("responder_watchdog:gave_up:{at}"),
         "responder_watchdog_gave_up",
         None,
@@ -612,7 +612,7 @@ async fn report_gave_up(app: &Arc<App>, why: &str) {
     .await;
     let Ok(Some(_)) = pushed else { return };
     tracing::error!(why, "AGM responder watchdog gave up");
-    let _ = roles::set_status_detail(&app.db, Role::Responder, Some(&format!("watchdog 已停止重試；請手動 responder-start。原因：{why}"))).await;
+    let _ = roles::set_status_detail(app.db(), Role::Responder, Some(&format!("watchdog 已停止重試；請手動 responder-start。原因：{why}"))).await;
     app.emit("supervisor_changed", json!({"responder": "watchdog_gave_up"})).await;
 }
 
@@ -1869,7 +1869,7 @@ mod flow_tests {
         crate::testing::release_scratch(&data_dir);
         drop(app);
 
-        let db = crate::db::open(&db_path).await.unwrap();
+        let db = crate::app_ports_p1::open(&db_path).await.unwrap();
         let due = roles::due_for(&db, Role::Responder, true, "2999-01-01T00:00:00Z", 0).await.unwrap();
         assert_eq!(due.len(), 1, "重啟之後還在，下一次協調者起來就收得到");
         assert_eq!(due[0].state, "pending");

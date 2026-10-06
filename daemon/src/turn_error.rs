@@ -825,21 +825,21 @@ fn owed_marks() -> &'static std::sync::Mutex<std::collections::HashMap<String, M
     M.get_or_init(Default::default)
 }
 
-fn owed_key(app: &App, bot_id: &str) -> String {
-    format!("{}\u{0}{bot_id}", app.boot_id)
+fn owed_key(app: &impl crate::capabilities::BootId, bot_id: &str) -> String {
+    format!("{}\u{0}{bot_id}", app.boot_id())
 }
 
-fn owed(app: &App, bot_id: &str) -> Option<Mark> {
+fn owed(app: &impl crate::capabilities::BootId, bot_id: &str) -> Option<Mark> {
     owed_marks().lock().unwrap_or_else(|e| e.into_inner()).get(&owed_key(app, bot_id)).cloned()
 }
 
-fn owe(app: &App, bot_id: &str, m: Mark) {
+fn owe(app: &impl crate::capabilities::BootId, bot_id: &str, m: Mark) {
     owed_marks().lock().unwrap_or_else(|e| e.into_inner()).insert(owed_key(app, bot_id), m);
 }
 
 /// `recorded` 寫進去了：同一個身分、不比它新的那一筆欠帳一併結清（寫進的是同一把 key、同一刻或更晚的撞限）。
 /// 補的過程中又欠了一筆更新的、或欠的是換身分之前那個身分的，留著。
-fn settled(app: &App, bot_id: &str, recorded: &Mark) {
+fn settled(app: &impl crate::capabilities::BootId, bot_id: &str, recorded: &Mark) {
     let key = owed_key(app, bot_id);
     let mut m = owed_marks().lock().unwrap_or_else(|e| e.into_inner());
     if m.get(&key).is_some_and(|x| x.identity == recorded.identity && x.at <= recorded.at) {

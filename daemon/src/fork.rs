@@ -32,14 +32,14 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 }
 
 /// 來源 bot 最近一次有 native session 的 run（跑著的也算：fork 讀的是 CLI 自己的對話檔，不打擾原本那顆）。
-async fn source_session(app: &Arc<App>, bot_id: &str) -> Result<Option<(String, Option<String>)>, LcError> {
+async fn source_session(app: &impl crate::capabilities::Db, bot_id: &str) -> Result<Option<(String, Option<String>)>, LcError> {
     sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT native_session_id, transcript_path FROM runs
           WHERE bot_id = ? AND native_session_id IS NOT NULL AND native_session_id != ''
           ORDER BY started_at DESC, rowid DESC LIMIT 1",
     )
     .bind(bot_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await
     .map_err(up)
 }

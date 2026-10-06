@@ -228,7 +228,7 @@ fn imported_name(raw: &str, used: &HashSet<String>) -> String {
 }
 
 async fn ensure_imported_bot(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db),
     project: &db::Project,
     agent_name: &str,
     kind: &str,
@@ -249,15 +249,15 @@ async fn ensure_imported_bot(
     .bind(agent_name)
     .bind(SESSION)
     .bind(agent_name)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?;
     if let Some(id) = existing_id {
-        let bot = db::bot(&app.db, &id).await?.ok_or_else(|| anyhow::anyhow!("imported bot disappeared"))?;
+        let bot = db::bot(app.db(), &id).await?.ok_or_else(|| anyhow::anyhow!("imported bot disappeared"))?;
         return Ok((bot, false));
     }
 
     let bot_id = db::ulid();
-    let name = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
+    let name = crate::projection::update_and_project(app.cfg(), app.db(), |cfg| {
         let p = cfg
             .projects
             .iter_mut()
@@ -288,7 +288,7 @@ async fn ensure_imported_bot(
         Ok(name)
     })
     .await?;
-    let bot = db::bot(&app.db, &bot_id).await?.ok_or_else(|| anyhow::anyhow!("imported bot was not projected"))?;
+    let bot = db::bot(app.db(), &bot_id).await?.ok_or_else(|| anyhow::anyhow!("imported bot was not projected"))?;
     tracing::debug!(bot = %name, agent = agent_name, "default-session bot config created");
     Ok((bot, true))
 }

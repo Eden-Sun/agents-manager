@@ -446,11 +446,11 @@ async fn child_kind(client: &crate::herdr::HerdrClient, agent: &crate::herdr::Ag
 /// A child can be adopted one pass before Herdr has filled `agent`.  Once the real kind is
 /// visible, correct the persisted row even though it is already a claimed child.  Reset all
 /// kind-dependent observations so the next pane probe uses the new CLI's env and argv rules.
-async fn refresh_child_kind(app: &Arc<App>, bot: &mut db::Bot, pane_id: &str, kind: &str) -> anyhow::Result<()> {
+async fn refresh_child_kind(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot: &mut db::Bot, pane_id: &str, kind: &str) -> anyhow::Result<()> {
     if bot.managed_by != "child" || bot.kind == kind {
         return Ok(());
     }
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     let changed = sqlx::query(
         "UPDATE bots SET kind = ?, identity = NULL, model = NULL, effort = NULL, fast = 0
          WHERE id = ? AND managed_by = 'child'",
@@ -526,7 +526,7 @@ async fn may_retire_child(app: &Arc<App>, host: &str, bot: &db::Bot) -> bool {
 /// herdr lists an unclaimed successor that the normal child-adoption pass will attribute to it.
 /// A hint naming a different parent is authoritative and blocks the weaker tab/name fallbacks.
 async fn parent_replaced_child(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     host: &str,
     session: &str,
     client: &crate::herdr::HerdrClient,
@@ -536,7 +536,7 @@ async fn parent_replaced_child(
     let ParentReplacementEvidence { agents, by_name, hints, claimed } = evidence;
     let Some(parent_id) = child.parent_bot_id.as_deref() else { return Ok(false) };
     let child_run: Option<db::Run> =
-        sqlx::query_as("SELECT * FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1").bind(&child.id).fetch_optional(&app.db).await?;
+        sqlx::query_as("SELECT * FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1").bind(&child.id).fetch_optional(app.db()).await?;
     let Some(child_pane) = child_run.and_then(|run| run.pane_id) else { return Ok(false) };
     // A listed successor alone does not prove a replacement if the old child's pane is still live.
     // When Herdr cannot confirm the old pane is gone, keep the retirement unconfirmed.
@@ -550,20 +550,20 @@ async fn parent_replaced_child(
     )
     .bind(parent_id)
     .bind(host)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?;
     let Some(parent) = parent else { return Ok(false) };
     if parent.herdr_session.as_deref().is_some_and(|s| s != session) {
         return Ok(false);
     }
-    let Some(run) = db::active_run(&app.db, &parent.id).await? else { return Ok(false) };
+    let Some(run) = db::active_run(app.db(), &parent.id).await? else { return Ok(false) };
     if run.herdr_session.as_deref().is_some_and(|s| s != session) {
         return Ok(false);
     }
 
     let mut parent_agent_name = run.agent_name.filter(|name| !name.is_empty() && by_name.contains_key(name));
     if parent_agent_name.is_none() && parent.managed_by != "child" {
-        let computed = db::agent_name_for_bot(&app.db, &parent).await?;
+        let computed = db::agent_name_for_bot(app.db(), &parent).await?;
         if by_name.contains_key(&computed) {
             parent_agent_name = Some(computed);
         }
@@ -621,9 +621,9 @@ pub(crate) fn schedule_deferred_pass(app: &Arc<App>, host: &str) {
 /// 同一台主機的對帳**一輪一輪來**：事件驅動的一輪與延後補跑的一輪（`schedule_deferred_pass`）在負載高時會重疊，後到的那一輪
 /// `claimed` 讀在前一輪認領之前、spawn hint 卻讀在前一輪 `consume` 之後，就退回同 tab 推斷——已經認領的子 agent 又掛到別顆底下、
 /// 因為短名字被占用長出重複 bot（`proj-xxxx-k2`）。key 帶資料目錄：測試共用同一個行程，不同的 App 不能互相排隊。
-async fn host_pass_lock(app: &Arc<App>, host: &str) -> Arc<tokio::sync::Mutex<()>> {
+async fn host_pass_lock(app: &impl crate::capabilities::DataDir, host: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
-    let key = format!("{}\u{0}{host}", app.data_dir.display());
+    let key = format!("{}\u{0}{host}", app.data_dir().display());
     LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_default().clone()
 }
 
@@ -1467,8 +1467,8 @@ fn within_fresh_window(started_at: &str, now: chrono::DateTime<chrono::Utc>) -> 
         .unwrap_or(false)
 }
 
-async fn fresh_adoption(app: &Arc<App>, bot_id: &str) -> bool {
-    match db::active_run(&app.db, bot_id).await {
+async fn fresh_adoption(app: &impl crate::capabilities::Db, bot_id: &str) -> bool {
+    match db::active_run(app.db(), bot_id).await {
         Ok(Some(run)) => within_fresh_window(&run.started_at, chrono::Utc::now()),
         _ => false,
     }

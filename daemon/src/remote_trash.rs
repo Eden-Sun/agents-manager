@@ -188,8 +188,8 @@ pub async fn restore_for(app: &Arc<App>, bot_id: &str) {
 }
 
 /// 主機連上時清一次過期的。
-pub async fn gc_host(app: &Arc<App>, host: &str) {
-    let Some(conn) = app.hosts.get(host).await else { return };
+pub async fn gc_host(app: &impl crate::hosts::HostsAccess, host: &str) {
+    let Some(conn) = app.hosts().get(host).await else { return };
     if conn.is_local() {
         return;
     }

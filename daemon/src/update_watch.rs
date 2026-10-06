@@ -106,7 +106,7 @@ const RETIRED_KEEP_SECS: i64 = 30 * 60;
 /// - **軟刪了但還有 active run** 的：`delete_bot` 先定案 `deleted_at`、再停機，停機那幾秒 bot 還在用這些帳（欠著的收尾寫入、中斷標記…），
 ///   run 結束後下一輪才清；
 /// - 剛軟刪／退役不久（[`RETIRED_KEEP_SECS`]）的：可能馬上復原。
-pub(crate) async fn live_bot_ids(app: &Arc<App>) -> anyhow::Result<Vec<String>> {
+pub(crate) async fn live_bot_ids(app: &impl crate::capabilities::Db) -> anyhow::Result<Vec<String>> {
     Ok(sqlx::query_scalar(
         "SELECT id FROM bots
           WHERE deleted_at IS NULL
@@ -114,7 +114,7 @@ pub(crate) async fn live_bot_ids(app: &Arc<App>) -> anyhow::Result<Vec<String>> 
              OR EXISTS (SELECT 1 FROM runs r WHERE r.bot_id = bots.id AND r.state IN ('starting','running','stopping'))",
     )
     .bind(db::iso_in(-RETIRED_KEEP_SECS))
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?)
 }
 

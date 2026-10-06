@@ -165,10 +165,10 @@ const PS_ARGS: &str = "ps -Awwo pid=,ppid=,args= 2>/dev/null";
 const LISTEN_MARK: &str = "---AM-LISTEN---";
 
 /// 這個 run 的 pane 底下有幾個背景 shell 是常駐服務。讀不到任何一塊都回 0。
-pub(crate) async fn services(app: &Arc<App>, run: &db::Run, client: &crate::herdr::HerdrClient, pane: &str) -> u32 {
+pub(crate) async fn services(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess), run: &db::Run, client: &crate::herdr::HerdrClient, pane: &str) -> u32 {
     let Some(shell) = client.pane_shell(pane).await.ok().and_then(|s| s.shell_pid) else { return 0 };
-    let Ok(host) = db::bot_host(&app.db, &run.bot_id).await else { return 0 };
-    let Some(conn) = app.hosts.get(&host).await else { return 0 };
+    let Ok(host) = db::bot_host(app.db(), &run.bot_id).await else { return 0 };
+    let Some(conn) = app.hosts().get(&host).await else { return 0 };
     let t = Duration::from_secs(10);
     let (ps, listen) = if conn.is_local() {
         let Ok(o) = crate::local_sh::output(PS_ARGS).await else { return 0 };

@@ -263,7 +263,7 @@ pub async fn sync_child_identity(
 
 /// Fills only an unrecorded run: a run the daemon started already carries the identity it was
 /// launched with (`lifecycle::start`). A kind change clears it (`reconcile::refresh_child_kind`).
-async fn stamp_run_identity(app: &Arc<App>, bot: &crate::db::Bot, pane_id: &str, name: &str) {
+async fn stamp_run_identity(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db), bot: &crate::db::Bot, pane_id: &str, name: &str) {
     let stamped = sqlx::query(
         "UPDATE runs SET runtime_identity = ?
           WHERE bot_id = ? AND pane_id = ? AND state IN ('starting','running','stopping') AND runtime_identity IS NULL",
@@ -271,7 +271,7 @@ async fn stamp_run_identity(app: &Arc<App>, bot: &crate::db::Bot, pane_id: &str,
     .bind(name)
     .bind(&bot.id)
     .bind(pane_id)
-    .execute(&app.db)
+    .execute(app.db())
     .await;
     match stamped {
         Ok(r) if r.rows_affected() > 0 => app.emit_bot_status(&bot.id).await,

@@ -637,27 +637,27 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
 }
 
 /// 回合失敗、而且一則 assistant 回覆都沒有：claude 沒留下它（見 [`rewind_dropped`]）。
-async fn turn_dropped(app: &Arc<App>, turn_id: &str) -> anyhow::Result<bool> {
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_optional(&app.db).await?;
+async fn turn_dropped(app: &impl crate::capabilities::Db, turn_id: &str) -> anyhow::Result<bool> {
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM turns WHERE id = ?").bind(turn_id).fetch_optional(app.db()).await?;
     if status.as_deref() != Some("failed") {
         return Ok(false);
     }
     let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'assistant'")
         .bind(turn_id)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await?;
     Ok(replies == 0)
 }
 
 /// `message_id` 之後第一則還在 context 裡的使用者訊息（沒倒回、不是被丟掉的），連同它在選單上要跳過幾則同樣開頭的較新訊息。
-async fn next_in_context(app: &Arc<App>, conv: &str, message_id: &str) -> anyhow::Result<Option<(String, usize)>> {
+async fn next_in_context(app: &impl crate::capabilities::Db, conv: &str, message_id: &str) -> anyhow::Result<Option<(String, usize)>> {
     let later: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT content, turn_id FROM messages WHERE conversation_id = ? AND role = 'user' AND rewound_at IS NULL
            AND rowid > (SELECT rowid FROM messages WHERE id = ?) ORDER BY rowid",
     )
     .bind(conv)
     .bind(message_id)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     for (i, (content, turn)) in later.iter().enumerate() {
         if let Some(t) = turn {
@@ -692,7 +692,7 @@ async fn rewind_failed(bot: &str, pane: &dyn Pane, f: Fail) -> LcError {
 }
 
 /// 這一則與之後的都標成倒回（標記不刪）。回標了幾則。
-async fn mark_rewound(app: &Arc<App>, conv: &str, message_id: &str, now: &str) -> anyhow::Result<u64> {
+async fn mark_rewound(app: &impl crate::capabilities::Db, conv: &str, message_id: &str, now: &str) -> anyhow::Result<u64> {
     Ok(sqlx::query(
         "UPDATE messages SET rewound_at = ?
           WHERE conversation_id = ? AND rewound_at IS NULL
@@ -701,13 +701,13 @@ async fn mark_rewound(app: &Arc<App>, conv: &str, message_id: &str, now: &str) -
     .bind(now)
     .bind(conv)
     .bind(message_id)
-    .execute(&app.db)
+    .execute(app.db())
     .await?
     .rows_affected())
 }
 
 /// 鎖裡查：要閒著。排著的也算忙：鎖一放就會送進倒回後的對話，那不一定是使用者要的。
-async fn busy_reason(app: &Arc<App>, bot_id: &str, run: &db::Run) -> LcResult<Option<&'static str>> {
+async fn busy_reason(app: &impl crate::capabilities::Db, bot_id: &str, run: &db::Run) -> LcResult<Option<&'static str>> {
     Ok(if run.state != "running" {
         Some("not_running")
     } else if run.agent_status != "idle" {
@@ -716,9 +716,9 @@ async fn busy_reason(app: &Arc<App>, bot_id: &str, run: &db::Run) -> LcResult<Op
             "blocked" => "blocked",
             _ => "unknown_status",
         })
-    } else if db::in_flight_turn(&app.db, &run.id).await.map_err(up)?.is_some() {
+    } else if db::in_flight_turn(app.db(), &run.id).await.map_err(up)?.is_some() {
         Some("turn_in_flight")
-    } else if db::queued_turn_for_bot(&app.db, bot_id).await.map_err(up)?.is_some() {
+    } else if db::queued_turn_for_bot(app.db(), bot_id).await.map_err(up)?.is_some() {
         Some("queued_turn")
     } else {
         None

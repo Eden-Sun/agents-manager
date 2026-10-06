@@ -34,8 +34,8 @@ pub fn other_candidate(candidate: &str) -> &'static str {
     }
 }
 
-pub fn agm_dir(app: &Arc<App>) -> PathBuf {
-    app.data_dir.join("supervisor").join(BOT_NAME)
+pub fn agm_dir(app: &impl crate::capabilities::DataDir) -> PathBuf {
+    app.data_dir().join("supervisor").join(BOT_NAME)
 }
 
 /// Everything after the `---` separator: the header above it is guidance for humans reading

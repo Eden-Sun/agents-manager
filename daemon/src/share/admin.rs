@@ -34,13 +34,13 @@ fn db_err(e: sqlx::Error) -> LcError {
 }
 
 /// 活著、而且是分享用 bot（受限或信任分享）。不存在 404；不是分享用 bot 409 `not_shareable`。
-async fn shareable_bot(app: &Arc<App>, id: &str) -> Result<bool, LcError> {
-    let bot = crate::db::bot(&app.db, id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+async fn shareable_bot(app: &impl crate::capabilities::Db, id: &str) -> Result<bool, LcError> {
+    let bot = crate::db::bot(app.db(), id).await.map_err(|e| LcError::Upstream(e.to_string()))?.filter(|b| b.deleted_at.is_none()).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let project = crate::db::project(app.db(), &bot.project_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     if project.is_none_or(|p| p.deleted_at.is_some()) {
         return Err(LcError::NotFound("bot".into()));
     }
-    store::is_share_bot(&app.db, id).await.map_err(db_err)
+    store::is_share_bot(app.db(), id).await.map_err(db_err)
 }
 
 fn not_shareable(id: &str) -> LcError {
@@ -50,8 +50,8 @@ fn not_shareable(id: &str) -> LcError {
     )
 }
 
-async fn base_url(app: &Arc<App>) -> Result<String, LcError> {
-    app.cfg.get().await.share.base().ok_or_else(|| {
+async fn base_url(app: &impl crate::capabilities::Cfg) -> Result<String, LcError> {
+    app.cfg().get().await.share.base().ok_or_else(|| {
         LcError::conflict(
             "share_not_configured",
             json!({"message": "config.toml 的 [share] base_url（Tailscale Funnel 的 https 網址）還沒設定"}),
@@ -60,9 +60,9 @@ async fn base_url(app: &Arc<App>) -> Result<String, LcError> {
 }
 
 /// 目前的分享狀態。開著就從 DB 存的 token 組完整網址；`base_url` 沒設時 `url:null`（開不了新的，但舊列照樣報狀態）。
-async fn state(app: &Arc<App>, id: &str) -> Result<Value, LcError> {
-    let row = store::share(&app.db, id).await.map_err(db_err)?;
-    let base = app.cfg.get().await.share.base();
+async fn state(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db), id: &str) -> Result<Value, LcError> {
+    let row = store::share(app.db(), id).await.map_err(db_err)?;
+    let base = app.cfg().get().await.share.base();
     let url = row.as_ref().and_then(|r| r.token.as_deref()).zip(base).map(|(t, b)| format!("{b}/s/{t}"));
     Ok(json!({
         "shareable": true,
@@ -143,7 +143,7 @@ pub async fn post_rotate(
 /// 建分享用 bot（受限或信任分享）的前半：決定資料夾（新資料夾就建出來）、`shared_bots` 記下來（在寫 config 之前）。
 /// 回 `(資料夾, 是不是這次建的)`；`replay`＝config 裡已經有同一個 `client_request_id` 的 bot：新資料夾已經在了就照用，不回 409。
 pub(crate) async fn reserve_share_bot(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db),
     bot_id: &str,
     profile: &str,
     folder: &crate::share::folder::ShareFolderIn,
@@ -153,10 +153,10 @@ pub(crate) async fn reserve_share_bot(
     let home = crate::share::cage::local_home();
     let home_p = std::path::Path::new(&home);
     let (dir, created) = match folder {
-        folder::ShareFolderIn::Existing { path } => (folder::check_existing(path, home_p, &app.data_dir)?, false),
+        folder::ShareFolderIn::Existing { path } => (folder::check_existing(path, home_p, app.data_dir())?, false),
         folder::ShareFolderIn::New { name } => {
-            let root = folder::root(app.cfg.get().await.share.folders_root.as_deref(), &home);
-            match folder::create_new(&root, name, home_p, &app.data_dir) {
+            let root = folder::root(app.cfg().get().await.share.folders_root.as_deref(), &home);
+            match folder::create_new(&root, name, home_p, app.data_dir()) {
                 Ok(d) => (d, true),
                 Err(LcError::Conflict(_)) if replay => (std::fs::canonicalize(root.join(name)).unwrap_or_else(|_| root.join(name)), false),
                 Err(e) => return Err(e),
@@ -170,7 +170,7 @@ pub(crate) async fn reserve_share_bot(
         return Err(LcError::Upstream(format!("share folder inbox: {e}")));
     }
     let ws = dir.to_string_lossy().into_owned();
-    if let Err(e) = store::insert_share_bot(&app.db, bot_id, profile, &ws).await {
+    if let Err(e) = store::insert_share_bot(app.db(), bot_id, profile, &ws).await {
         if created {
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -186,16 +186,16 @@ pub(crate) async fn reserve_restricted(app: &Arc<App>, bot_id: &str, folder: &cr
 
 /// 建受限 bot 的後半：建成了就把 `bots.cwd` 指到資料夾；沒建成（失敗、重送拿回舊的那顆）就把前半收回。
 /// 資料夾只有「這次新建的」才刪：既有資料夾、重送時已經在的，一律不動。
-pub(crate) async fn finish_restricted(app: &Arc<App>, bot_id: &str, workspace: &str, created_folder: bool, created: bool) {
+pub(crate) async fn finish_restricted(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), bot_id: &str, workspace: &str, created_folder: bool, created: bool) {
     if created {
-        if let Err(e) = sqlx::query("UPDATE bots SET cwd = ? WHERE id = ?").bind(workspace).bind(bot_id).execute(&app.db).await {
+        if let Err(e) = sqlx::query("UPDATE bots SET cwd = ? WHERE id = ?").bind(workspace).bind(bot_id).execute(app.db()).await {
             // 啟動時以 `shared_bots.workspace` 為準（`cage::prepare`），這裡寫不進去只影響側欄顯示的目錄。
             tracing::warn!(bot = bot_id, error = %e, "could not point the restricted bot's cwd at its folder");
         }
-        crate::outbox::mark_share_keep(&app.data_dir, bot_id);
+        crate::outbox::mark_share_keep(app.data_dir(), bot_id);
         return;
     }
-    if let Err(e) = store::delete_restricted(&app.db, bot_id).await {
+    if let Err(e) = store::delete_restricted(app.db(), bot_id).await {
         tracing::warn!(bot = bot_id, error = %e, "could not roll back a restricted bot reservation");
     }
     if created_folder {

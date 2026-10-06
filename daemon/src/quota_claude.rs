@@ -762,7 +762,7 @@ fn skip_disabled_default(
 }
 
 /// 這台主機上有沒有不帶身分、正在跑的 claude bot（它們用的就是預設帳號）。
-async fn unnamed_claude_running(app: &Arc<App>, host: &str) -> bool {
+async fn unnamed_claude_running(app: &impl crate::capabilities::Db, host: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
         // run 實際的身分（issue #238）：記了就用它，沒記才用 bot 設定的。
         "SELECT COUNT(*) FROM runs r JOIN bots b ON b.id = r.bot_id JOIN projects p ON p.id = b.project_id
@@ -771,7 +771,7 @@ async fn unnamed_claude_running(app: &Arc<App>, host: &str) -> bool {
             AND TRIM(COALESCE(CASE WHEN r.runtime_identity IS NULL THEN b.identity ELSE r.runtime_identity END, '')) = ''",
     )
     .bind(host)
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await
     .map(|n| n > 0)
     // 讀不到就當有：寧可多探一次，也不要把正在用的預設帳號弄瞎。

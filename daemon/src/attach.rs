@@ -104,11 +104,11 @@ pub fn is_image(mime: &str) -> bool {
     mime.starts_with("image/")
 }
 
-fn local_copy_dir(app: &Arc<App>, bot_id: &str) -> Result<PathBuf> {
+fn local_copy_dir(app: &impl crate::capabilities::DataDir, bot_id: &str) -> Result<PathBuf> {
     if !valid_id(bot_id) {
         bail!("invalid bot id `{bot_id}` (must match {ID_RE})");
     }
-    Ok(app.data_dir.join("attachments").join(bot_id))
+    Ok(app.data_dir().join("attachments").join(bot_id))
 }
 
 #[cfg(test)]
@@ -233,11 +233,11 @@ async fn best_effort_cleanup(host: &Arc<HostConn>, local_path: &str, agent_path:
 /// (issue #88); `'failed'` rows are ones `save()` already gave up on, whose best-effort cleanup may
 /// not have finished. Both are unrecoverable as attachments (bytes may be partial or absent) —
 /// clean up the file(s) and drop the row. Idempotent: nothing to do once already cleaned.
-pub async fn reconcile_orphans(app: &Arc<App>) -> usize {
+pub async fn reconcile_orphans(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess)) -> usize {
     let rows: Vec<(String, String, String, String)> = match sqlx::query_as(
         "SELECT id, local_path, agent_path, host FROM attachments WHERE state IN ('staging','failed')",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     {
         Ok(r) => r,
@@ -249,7 +249,7 @@ pub async fn reconcile_orphans(app: &Arc<App>) -> usize {
     let mut cleaned = 0;
     for (id, local_path, agent_path, host_name) in rows {
         remove_files(app, &local_path, &agent_path, &host_name).await;
-        match sqlx::query("DELETE FROM attachments WHERE id = ?").bind(&id).execute(&app.db).await {
+        match sqlx::query("DELETE FROM attachments WHERE id = ?").bind(&id).execute(app.db()).await {
             Ok(_) => cleaned += 1,
             Err(e) => tracing::warn!(id = %id, error = %e, "could not remove an orphaned attachment row"),
         }
@@ -262,9 +262,9 @@ pub async fn reconcile_orphans(app: &Arc<App>) -> usize {
 
 /// 刪一個附件的位元組：daemon 能讀的那份（本機 bot 就是專案裡那份、遠端 bot 是資料目錄裡的副本），遠端再 best-effort
 /// ssh 刪 agent 讀的那份。冪等，失敗只是留下一個沒有 row 的檔，不影響呼叫端。
-async fn remove_files(app: &Arc<App>, local_path: &str, agent_path: &str, host_name: &str) {
+async fn remove_files(app: &impl crate::hosts::HostsAccess, local_path: &str, agent_path: &str, host_name: &str) {
     let _ = std::fs::remove_file(local_path);
-    if let Some(host) = app.hosts.get(host_name).await {
+    if let Some(host) = app.hosts().get(host_name).await {
         if !host.is_local() {
             let _ = host.ssh_exec(&format!("rm -f {}", sh_quote(agent_path))).await;
         }
@@ -288,7 +288,7 @@ const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600
 ///
 /// 先刪 row 才刪檔：那一句 DELETE 自己帶同樣的條件，跟 [`bind`] 搶同一列——bind 先贏，這裡 0 rows、什麼檔都不動；
 /// 這裡先贏，才刪檔。檔案刪不掉只留下一個沒有 row 的檔（沒有人引用它），不會有「row 在、檔沒了」。
-pub async fn sweep_unreferenced(app: &Arc<App>, keep_secs: i64) -> usize {
+pub async fn sweep_unreferenced(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess), keep_secs: i64) -> usize {
     let cutoff = db::iso_in(-keep_secs);
     let created = db::ts_sql("a.created_at");
     let named = NAMED_BY_A_MESSAGE;
@@ -297,7 +297,7 @@ pub async fn sweep_unreferenced(app: &Arc<App>, keep_secs: i64) -> usize {
           WHERE a.state = 'ready' AND a.message_id IS NULL AND {created} <= ? AND {named}"
     ))
     .bind(&cutoff)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     {
         Ok(r) => r,
@@ -317,7 +317,7 @@ pub async fn sweep_unreferenced(app: &Arc<App>, keep_secs: i64) -> usize {
         ))
         .bind(&id)
         .bind(&cutoff)
-        .execute(&app.db)
+        .execute(app.db())
         .await;
         match won {
             Ok(r) if r.rows_affected() == 1 => {
@@ -335,7 +335,7 @@ pub async fn sweep_unreferenced(app: &Arc<App>, keep_secs: i64) -> usize {
 }
 
 /// 開機跑一次、之後每 6 小時一次：常駐好幾天的 daemon 也要收。
-pub fn spawn_sweep(app: Arc<App>) {
+pub fn spawn_sweep(app: Arc<impl crate::capabilities::Db + crate::hosts::HostsAccess + 'static>) {
     tokio::spawn(async move {
         loop {
             sweep_unreferenced(&app, UNREFERENCED_KEEP_SECS).await;
@@ -347,14 +347,14 @@ pub fn spawn_sweep(app: Arc<App>) {
 
 /// Restricted to the recipient's **project**: an unrelated chat's id must not become a path here.
 /// Project (not bot) scope lets one group send share an upload with every recipient.
-pub async fn resolve(app: &Arc<App>, bot_id: &str, ids: &[String]) -> Result<Vec<Attachment>> {
+pub async fn resolve(app: &impl crate::capabilities::Db, bot_id: &str, ids: &[String]) -> Result<Vec<Attachment>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let bot = db::bot(&app.db, bot_id).await?.ok_or_else(|| anyhow::anyhow!("no such bot"))?;
+    let bot = db::bot(app.db(), bot_id).await?.ok_or_else(|| anyhow::anyhow!("no such bot"))?;
     // Serialize lookup+refresh against the orphan sweeper. If the sweep wins first, the row is
     // gone before this lookup; if resolve wins, refreshing created_at fences its stale candidate.
-    let mut tx = db::begin_write(&app.db).await?;
+    let mut tx = db::begin_write(app.db()).await?;
     let mut out = Vec::new();
     for id in ids {
         let row = sqlx::query_as::<_, (String, String, String, i64, String)>(
@@ -389,11 +389,11 @@ pub async fn resolve(app: &Arc<App>, bot_id: &str, ids: &[String]) -> Result<Vec
 /// whose own `message_id` was never set. Any failure — including an attachment `UPDATE` matching
 /// zero rows, checked via `rows_affected` — rolls back everything; nothing here is visible until
 /// `commit()` succeeds.
-pub async fn bind(app: &Arc<App>, message_id: &str, items: &[Attachment]) -> Result<()> {
+pub async fn bind(app: &impl crate::capabilities::Db, message_id: &str, items: &[Attachment]) -> Result<()> {
     if items.is_empty() {
         return Ok(());
     }
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     bind_tx(&mut tx, message_id, items).await?;
     tx.commit().await?;
     Ok(())
@@ -470,21 +470,21 @@ pub fn deliver_text(text: &str, items: &[Attachment]) -> String {
 /// 本機 bot 的附件放在專案目錄裡（agent 寫得到的地方），所以讀取跟 [`crate::outbox`]／[`crate::local_image`] 一樣走
 /// [`crate::trusted_open`]：從信任邊界逐層 `openat(O_NOFOLLOW)`、拿 fd 讀，並設大小上限。被換成符號連結（指到私鑰、別的 bot 的檔案、
 /// `/dev/zero`）一律讀不到。以前是 `std::fs::read(local_path)`：跟著連結走、沒有上限。
-pub async fn read(app: &Arc<App>, id: &str) -> Result<(String, Vec<u8>)> {
+pub async fn read(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), id: &str) -> Result<(String, Vec<u8>)> {
     let row = sqlx::query_as::<_, (String, String, String)>(
         "SELECT mime, local_path, bot_id FROM attachments WHERE id = ? AND state = 'ready'",
     )
     .bind(id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?;
     let Some((mime, path, bot_id)) = row else { bail!("unknown attachment") };
-    let data = match read_contained(&app.data_dir, Path::new(&path)).await {
+    let data = match read_contained(app.data_dir(), Path::new(&path)).await {
         Ok(d) => d,
         // 刪 bot 會把 `attachments/<id>/` 搬進 `bots-trash`（#465），但已刪 bot 的對話仍讀得到
         // （API.md §10.4），前端照樣會來抓縮圖——原地讀不到就去回收區裡那一份找同一個檔名。
         // 只有遠端 bot 的 `local_path` 在資料目錄底下；本機 bot 指的是專案裡那份，不受影響。
         Err(e) => match trashed_copy(app, &bot_id, &path) {
-            Some(alt) => read_contained(&app.data_dir, &alt).await.with_context(|| format!("read {} (trashed)", alt.display()))?,
+            Some(alt) => read_contained(app.data_dir(), &alt).await.with_context(|| format!("read {} (trashed)", alt.display()))?,
             None => return Err(e).with_context(|| format!("read {path}")),
         },
     };
@@ -518,10 +518,10 @@ async fn read_contained(data_dir: &Path, path: &Path) -> Result<Vec<u8>> {
 
 /// `local_path` 原地不在時，回收區裡對應的那一份（`bots-trash/<id>.attachments.<毫秒>/<檔名>`）。
 /// 只認「本來就在 `<資料目錄>/attachments/<bot_id>/` 底下」的路徑，其他一律不找。
-fn trashed_copy(app: &Arc<App>, bot_id: &str, local_path: &str) -> Option<PathBuf> {
-    let under = crate::bot_trash::attachments_dir(&app.data_dir, bot_id);
+fn trashed_copy(app: &impl crate::capabilities::DataDir, bot_id: &str, local_path: &str) -> Option<PathBuf> {
+    let under = crate::bot_trash::attachments_dir(app.data_dir(), bot_id);
     let name = Path::new(local_path).strip_prefix(&under).ok()?;
-    let dir = crate::bot_trash::latest_kind(&app.data_dir, bot_id, Some(crate::bot_trash::ATTACHMENTS))?;
+    let dir = crate::bot_trash::latest_kind(app.data_dir(), bot_id, Some(crate::bot_trash::ATTACHMENTS))?;
     let candidate = dir.join(name);
     candidate.is_file().then_some(candidate)
 }

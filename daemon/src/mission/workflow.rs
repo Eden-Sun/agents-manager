@@ -34,15 +34,15 @@ fn up<E: std::fmt::Display>(e: E) -> LcError {
 }
 
 /// 推導要的兩份清單：這個任務的交辦與事件，都是寫入順序。
-pub async fn inputs(app: &Arc<App>, mission_id: &str) -> Result<(Vec<Assignment>, Vec<MissionEvent>), LcError> {
-    let assignments = app.db.mission_assignments(mission_id).await.map_err(up)?;
-    let events = crate::mission::store::events(&app.db, mission_id).await.map_err(up)?;
+pub async fn inputs(app: &impl crate::capabilities::Db, mission_id: &str) -> Result<(Vec<Assignment>, Vec<MissionEvent>), LcError> {
+    let assignments = app.db().mission_assignments(mission_id).await.map_err(up)?;
+    let events = crate::mission::store::events(app.db(), mission_id).await.map_err(up)?;
     Ok((assignments, events))
 }
 
 /// 任務的下一步與流程摘要（`mission get`、裁示回應用）。讀不到任務就是 `null`。
-pub async fn next_json(app: &Arc<App>, mission_id: &str) -> Value {
-    let Ok(Some(m)) = crate::mission::store::get(&app.db, mission_id).await else { return Value::Null };
+pub async fn next_json(app: &impl crate::capabilities::Db, mission_id: &str) -> Value {
+    let Ok(Some(m)) = crate::mission::store::get(app.db(), mission_id).await else { return Value::Null };
     let Ok((assignments, events)) = inputs(app, mission_id).await else { return Value::Null };
     let f = flow::derive(&assignments, &events);
     json!({"mission_id": m.id, "next": f.next(&m), "flow": f.summary()})
@@ -74,8 +74,8 @@ fn brief(a: &Assignment) -> serde_json::Value {
 /// 呼叫端（`supervisor::assign`）握著 supervisor 鎖，所以這裡也是「任務還收不收新交辦」算數的那一次
 /// （[`crate::supervisor::api::mission_gate`]）：`post_assignment` 在鎖外查過，但排隊等鎖的時候任務可能已經被
 /// 取消或結案——`mission cancel`／`complete` 關任務那一步也拿同一把鎖（issue #119）。
-pub async fn ensure_can_assign(app: &Arc<App>, mission_id: &str, role: &str) -> Result<(), LcError> {
-    let m = crate::mission::store::get(&app.db, mission_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
+pub async fn ensure_can_assign(app: &impl crate::capabilities::Db, mission_id: &str, role: &str) -> Result<(), LcError> {
+    let m = crate::mission::store::get(app.db(), mission_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("mission".into()))?;
     <sqlx::SqlitePool as MissionGateRules>::mission_gate(&m)?;
     let (assignments, events) = inputs(app, mission_id).await?;
     let open: Vec<&Assignment> = assignments.iter().filter(|a| a.is_open()).collect();
@@ -143,7 +143,7 @@ fn none_open(mission_id: &str, assignments: &[Assignment]) -> Result<(), LcError
 
 /// 結案對交付的要求（規則在 [`flow::delivery_requirement`]）。回傳要寫進 `completed` 事件的記錄，以及
 /// `no_changes` 要不要再附執行者的工作樹來證明（git 的檢查在 api 那一側做，這裡只判事件）。
-pub async fn delivery_record(app: &Arc<App>, mission_id: &str, waiver: Option<flow::Waiver>) -> Result<(Value, bool), LcError> {
+pub async fn delivery_record(app: &impl crate::capabilities::Db, mission_id: &str, waiver: Option<flow::Waiver>) -> Result<(Value, bool), LcError> {
     let (assignments, events) = inputs(app, mission_id).await?;
     delivery_record_of(mission_id, &assignments, &events, waiver)
 }
@@ -218,7 +218,7 @@ pub const STALL_SECS: i64 = 600;
 static LAST_SWEEP: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// controller 每個 tick 呼叫；自己節流成一分鐘一次。
-pub async fn wake_stalled(app: &Arc<App>) {
+pub async fn wake_stalled(app: &impl crate::capabilities::Db) {
     let now = chrono::Utc::now();
     let last = LAST_SWEEP.load(std::sync::atomic::Ordering::Relaxed);
     if now.timestamp() - last < 60 {
@@ -238,12 +238,12 @@ pub async fn wake_stalled(app: &Arc<App>) {
 /// `assignment_completed` 與 `assignment_stalled`）、這個任務還有沒處理完的 inbox（例如 `mission_created`
 /// 還沒被看到——再推一則只是重複）。同一步只叫一次：event_key 是那一步的簽名，全部來自持久狀態，重啟後
 /// 算出來也一樣，所以 AGM 看過不理，不會每分鐘再叫一次。回傳這次叫醒了哪些任務。
-pub async fn wake_stalled_at(app: &Arc<App>, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+pub async fn wake_stalled_at(app: &impl crate::capabilities::Db, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
     // 專案已刪的任務先收掉再掃（#498 的收斂版）：不叫醒 AGM 去推一個專案不在的任務。
-    match crate::mission::store::deleted_projects_with_open_missions(&app.db).await {
+    match crate::mission::store::deleted_projects_with_open_missions(app.db()).await {
         Ok(projects) => {
             for project_id in projects {
-                match crate::mission::store::cancel_open_for_project(&app.db, &project_id, "project_deleted").await {
+                match crate::mission::store::cancel_open_for_project(app.db(), &project_id, "project_deleted").await {
                     Ok(0) => {}
                     Ok(n) => tracing::info!(project = %project_id, missions = n, "project is gone; its open missions were cancelled by the sweep"),
                     Err(e) => tracing::warn!(project = %project_id, error = ?e, "could not cancel the open missions of a deleted project"),
@@ -252,7 +252,7 @@ pub async fn wake_stalled_at(app: &Arc<App>, now: chrono::DateTime<chrono::Utc>)
         }
         Err(e) => tracing::warn!(error = ?e, "could not look for open missions of deleted projects"),
     }
-    let Ok(missions) = crate::mission::store::open_unpaused(&app.db).await else { return Vec::new() };
+    let Ok(missions) = crate::mission::store::open_unpaused(app.db()).await else { return Vec::new() };
     let mut woke = Vec::new();
     for m in missions {
         let Ok((assignments, events)) = inputs(app, &m.id).await else { continue };
@@ -280,7 +280,7 @@ pub async fn wake_stalled_at(app: &Arc<App>, now: chrono::DateTime<chrono::Utc>)
             "idle_since": since,
             "idle_minutes": idle / 60,
         });
-        match app.db.push_inbox(&key, "mission_next", None, None, None, &payload).await {
+        match app.db().push_inbox(&key, "mission_next", None, None, None, &payload).await {
             Ok(Some(_)) => woke.push(m.id.clone()),
             Ok(None) => {}
             Err(e) => tracing::warn!(mission = %m.id, error = %e, "could not queue mission_next"),
@@ -290,7 +290,7 @@ pub async fn wake_stalled_at(app: &Arc<App>, now: chrono::DateTime<chrono::Utc>)
 }
 
 /// 這個任務還有沒處理完（不是 `handled`）的 inbox：任務自己的通知，或它底下交辦的通知。
-async fn outstanding_inbox(app: &Arc<App>, mission_id: &str) -> bool {
+async fn outstanding_inbox(app: &impl crate::capabilities::Db, mission_id: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM supervisor_inbox
           WHERE supervisor_id = ? AND state != 'handled'
@@ -300,7 +300,7 @@ async fn outstanding_inbox(app: &Arc<App>, mission_id: &str) -> bool {
     .bind(<sqlx::SqlitePool as SupervisorRepo>::SUPERVISOR_ID)
     .bind(mission_id)
     .bind(mission_id)
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await
     .map(|n| n > 0)
     // 查不到就當有：寧可少叫一次（下一分鐘再看），不要在資料庫出狀況時亂叫。

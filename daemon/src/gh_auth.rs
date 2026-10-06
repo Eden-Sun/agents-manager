@@ -249,7 +249,7 @@ pub fn parse_accounts(raw: &str) -> Option<Vec<GhAccount>> {
 
 // ---------------------------------------------------------------- run on host
 
-async fn run_script(app: &Arc<App>, host: &str, script: &str, timeout: Duration) -> Result<String> {
+async fn run_script(app: &impl crate::hosts::HostsAccess, host: &str, script: &str, timeout: Duration) -> Result<String> {
     if host == LOCAL_HOST {
         let o = crate::hosts::sh_local(script, timeout).await?.ok_or_else(|| anyhow!("command timed out"))?;
         if !o.status.success() {
@@ -259,11 +259,11 @@ async fn run_script(app: &Arc<App>, host: &str, script: &str, timeout: Duration)
         }
         return Ok(String::from_utf8_lossy(&o.stdout).to_string());
     }
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     conn.ssh_exec_path_timeout(script, timeout).await
 }
 
-async fn run_script_stdin(app: &Arc<App>, host: &str, script: &str, data: &[u8], timeout: Duration) -> Result<String> {
+async fn run_script_stdin(app: &impl crate::hosts::HostsAccess, host: &str, script: &str, data: &[u8], timeout: Duration) -> Result<String> {
     if host == LOCAL_HOST {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(script);
@@ -284,7 +284,7 @@ async fn run_script_stdin(app: &Arc<App>, host: &str, script: &str, data: &[u8],
         }
         return Ok(String::from_utf8_lossy(&o.stdout).to_string());
     }
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+    let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
     conn.ssh_exec_path_stdin(script, data, timeout).await
 }
 
@@ -305,12 +305,12 @@ fn status_script() -> String {
     )
 }
 
-async fn read_status(app: &Arc<App>, host: &str) -> Result<GhStatus, LcError> {
+async fn read_status(app: &impl crate::hosts::HostsAccess, host: &str) -> Result<GhStatus, LcError> {
     let out = run_script(app, host, &status_script(), GH_TIMEOUT).await.map_err(up)?;
     Ok(parse_probe(&out))
 }
 
-async fn switch_user(app: &Arc<App>, host: &str, user: &str) -> Result<(), LcError> {
+async fn switch_user(app: &impl crate::hosts::HostsAccess, host: &str, user: &str) -> Result<(), LcError> {
     let script = format!(
         "{PATH_FIX}gh auth switch --hostname github.com --user {}",
         sh_quote(user)
@@ -319,7 +319,7 @@ async fn switch_user(app: &Arc<App>, host: &str, user: &str) -> Result<(), LcErr
     Ok(())
 }
 
-async fn logout_user(app: &Arc<App>, host: &str, user: &str) -> Result<(), LcError> {
+async fn logout_user(app: &impl crate::hosts::HostsAccess, host: &str, user: &str) -> Result<(), LcError> {
     let script = format!(
         "{PATH_FIX}gh auth logout --hostname github.com --user {}",
         sh_quote(user)
@@ -331,7 +331,7 @@ async fn logout_user(app: &Arc<App>, host: &str, user: &str) -> Result<(), LcErr
 /// Keyring `default` vs `hosts.yml` on macOS: `gh auth switch` refuses, and the dead
 /// active token keeps winning. Dropping only an *invalid* active account lets the
 /// remaining valid one become active. Never logs out a working account.
-async fn drop_invalid_active(app: &Arc<App>, host: &str, st: &GhStatus) -> Result<bool, LcError> {
+async fn drop_invalid_active(app: &impl crate::hosts::HostsAccess, host: &str, st: &GhStatus) -> Result<bool, LcError> {
     let bad = st.accounts.iter().find(|a| a.active && !a.ok).map(|a| a.login.clone());
     let good = st.accounts.iter().find(|a| a.ok).map(|a| a.login.clone());
     let (Some(bad), Some(good)) = (bad, good) else {
@@ -344,7 +344,7 @@ async fn drop_invalid_active(app: &Arc<App>, host: &str, st: &GhStatus) -> Resul
 
 /// Feed a token to `gh auth login --with-token`. `data` is the only place the token exists
 /// on the wire; the script does not interpolate it.
-async fn apply_token(app: &Arc<App>, host: &str, token: &str) -> Result<(), LcError> {
+async fn apply_token(app: &impl crate::hosts::HostsAccess, host: &str, token: &str) -> Result<(), LcError> {
     let token = token.trim();
     if token.is_empty() {
         return Err(LcError::Bad("empty github token".into()));
@@ -361,7 +361,7 @@ async fn apply_token(app: &Arc<App>, host: &str, token: &str) -> Result<(), LcEr
 }
 
 /// Local `gh auth token`. Stdout is the secret; callers must not log it.
-async fn local_token(app: &Arc<App>) -> Result<String, LcError> {
+async fn local_token(app: &impl crate::hosts::HostsAccess) -> Result<String, LcError> {
     let script = format!("{PATH_FIX}gh auth token --hostname github.com");
     let out = run_script(app, LOCAL_HOST, &script, TOKEN_TIMEOUT).await.map_err(|_| {
         LcError::Conflict(json!({
@@ -402,8 +402,8 @@ pub async fn status(app: &Arc<App>, host: &str) -> Result<Value, LcError> {
     Ok(overlay_json(app, host, &st, None).await)
 }
 
-async fn ensure_host(app: &Arc<App>, host: &str) -> Result<(), LcError> {
-    if app.hosts.get(host).await.is_none() {
+async fn ensure_host(app: &impl crate::hosts::HostsAccess, host: &str) -> Result<(), LcError> {
+    if app.hosts().get(host).await.is_none() {
         return Err(LcError::NotFound("host".into()));
     }
     Ok(())

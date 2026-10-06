@@ -377,11 +377,11 @@ fn host_target_for_conn(conn: &crate::hosts::HostConn) -> String {
 
 /// `GET /api/state` 的 `cli_updates`：還沒收尾的安裝（含重啟後正在接手的那筆，帶 `recovered:true`）。
 /// 進度只走 WS，`cli_update_done` 收不到時前端靠這一格對帳（同 #492 的 `restart_batch`）。讀不到 DB 回空清單。
-pub async fn running_list(app: &App) -> Vec<Value> {
+pub async fn running_list(app: &impl crate::capabilities::Db) -> Vec<Value> {
     let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
         "SELECT id, host, kind, target_version, phase, boot FROM cli_updates WHERE status = 'running' ORDER BY started_at",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     .unwrap_or_default();
     rows.into_iter()
@@ -391,7 +391,7 @@ pub async fn running_list(app: &App) -> Vec<Value> {
         .collect()
 }
 
-async fn set_phase(app: &App, id: &str, phase: &str, from: Option<&str>) {
+async fn set_phase(app: &impl crate::capabilities::Db, id: &str, phase: &str, from: Option<&str>) {
     let res = sqlx::query(
         "UPDATE cli_updates SET phase = ?, from_version = COALESCE(?, from_version), updated_at = ? WHERE id = ? AND status = 'running'",
     )
@@ -399,7 +399,7 @@ async fn set_phase(app: &App, id: &str, phase: &str, from: Option<&str>) {
     .bind(from)
     .bind(crate::db::now())
     .bind(id)
-    .execute(&app.db)
+    .execute(app.db())
     .await;
     if let Err(e) = res {
         tracing::warn!(update_id = id, error = %e, "could not record the cli-update phase");
@@ -408,7 +408,7 @@ async fn set_phase(app: &App, id: &str, phase: &str, from: Option<&str>) {
 
 /// 結果寫進那一列（`running` → `done`／`failed`），之後這台才能再開一次。
 /// DB 暫時不可寫時保持 `running`／`finishing` 並在本行程內退避重試；不會先發終態事件或放掉 host slot。
-async fn finish_row(app: &App, id: &str, v: &Value) -> Option<Value> {
+async fn finish_row(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db), id: &str, v: &Value) -> Option<Value> {
     let status = if v["ok"] == json!(true) { "done" } else { "failed" };
     let serialized = v.to_string();
     let mut retry = FINISH_RETRY_INITIAL;
@@ -423,7 +423,7 @@ async fn finish_row(app: &App, id: &str, v: &Value) -> Option<Value> {
         .bind(&now)
         .bind(&now)
         .bind(id)
-        .execute(&app.db)
+        .execute(app.db())
         .await;
         match res {
             Ok(result) if result.rows_affected() == 1 => return Some(v.clone()),
@@ -432,7 +432,7 @@ async fn finish_row(app: &App, id: &str, v: &Value) -> Option<Value> {
                     "SELECT status, result FROM cli_updates WHERE id = ?",
                 )
                 .bind(id)
-                .fetch_optional(&app.db)
+                .fetch_optional(app.db())
                 .await;
                 match stored {
                     Ok(Some((stored_status, Some(stored_result)))) if stored_status == "done" || stored_status == "failed" => {
@@ -659,10 +659,10 @@ async fn run_with_fence(
     run_with_kind_result(app, runner, host, update_id, target, expected_kind, stored_kind, fence).await
 }
 
-async fn read_durable_kind(app: &App, update_id: &str) -> Result<Option<String>, sqlx::Error> {
+async fn read_durable_kind(app: &impl crate::capabilities::Db, update_id: &str) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar::<_, String>("SELECT kind FROM cli_updates WHERE id=?")
         .bind(update_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
 }
 
@@ -990,10 +990,10 @@ fn spawn_recovery_worker(app: &Arc<App>, runner: &Arc<dyn Runner>, row: Recovery
     true
 }
 
-async fn unfinished_updates(app: &App) -> Result<Vec<RecoveryRow>, sqlx::Error> {
+async fn unfinished_updates(app: &impl crate::capabilities::Db) -> Result<Vec<RecoveryRow>, sqlx::Error> {
     sqlx::query_as("SELECT id, host, kind, target_version, from_version, host_target FROM cli_updates WHERE status = 'running' AND boot != ?")
         .bind(boot())
-        .fetch_all(&app.db)
+        .fetch_all(app.db())
         .await
 }
 
@@ -1271,9 +1271,9 @@ fn pending_notice_target(kind: &str, notice: &str) -> Option<String> {
     }
 }
 
-async fn pending_runs(app: &Arc<App>, host: &str, kind: &str) -> anyhow::Result<Vec<(crate::db::Run, String)>> {
+async fn pending_runs(app: &impl crate::capabilities::Db, host: &str, kind: &str) -> anyhow::Result<Vec<(crate::db::Run, String)>> {
     let mut out = Vec::new();
-    let runs = crate::db::all_active_runs(&app.db)
+    let runs = crate::db::all_active_runs(app.db())
         .await
         .map_err(|error| anyhow::anyhow!("enumerate active runs: {error:#}"))?;
     for run in runs {
@@ -1284,7 +1284,7 @@ async fn pending_runs(app: &Arc<App>, host: &str, kind: &str) -> anyhow::Result<
         else {
             continue;
         };
-        let Some(bot) = crate::db::bot(&app.db, &run.bot_id)
+        let Some(bot) = crate::db::bot(app.db(), &run.bot_id)
             .await
             .map_err(|error| anyhow::anyhow!("read bot {}: {error:#}", run.bot_id))?
         else {
@@ -1293,7 +1293,7 @@ async fn pending_runs(app: &Arc<App>, host: &str, kind: &str) -> anyhow::Result<
         if bot.kind != kind {
             continue;
         }
-        let bot_host = crate::db::bot_host(&app.db, &run.bot_id)
+        let bot_host = crate::db::bot_host(app.db(), &run.bot_id)
             .await
             .map_err(|error| anyhow::anyhow!("read host for bot {}: {error:#}", run.bot_id))?;
         if bot_host != host {
@@ -1305,7 +1305,7 @@ async fn pending_runs(app: &Arc<App>, host: &str, kind: &str) -> anyhow::Result<
 }
 
 /// daemon 眼中那台現在要裝的版本。Claude 以 fleet 上游快照綁定共同目標，Codex 沿用 run 通知。
-async fn pending_target(app: &Arc<App>, host: &str) -> anyhow::Result<Option<String>> {
+async fn pending_target(app: &impl crate::capabilities::Db, host: &str) -> anyhow::Result<Option<String>> {
     Ok(pending_runs(app, host, "codex")
         .await?
         .iter()
@@ -1324,8 +1324,8 @@ fn normalized(raw: &str) -> Option<String> {
     cli_version_string(raw).or_else(|| version_string(raw.trim()))
 }
 
-fn log_line(app: &App, line: &str) {
-    let path = app.data_dir.join(LOG_FILE);
+fn log_line(app: &impl crate::capabilities::DataDir, line: &str) {
+    let path = app.data_dir().join(LOG_FILE);
     let res = std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut f| writeln!(f, "{} {line}", crate::db::now()));
     if let Err(e) = res {
         tracing::warn!(path = %path.display(), error = %e, "could not write the cli-update log");
@@ -1364,18 +1364,18 @@ fn notice_needs_this_install(kind: &str, notice: &str, after: &str) -> bool {
     false
 }
 
-async fn mark_installed_change_is_already_durable(app: &Arc<App>, host: &str,
+async fn mark_installed_change_is_already_durable(app: &impl crate::capabilities::Db, host: &str,
     kind: &str, run_id: &str, after: &str) -> anyhow::Result<bool> {
-    let Some(run) = crate::db::run(&app.db, run_id).await? else {
+    let Some(run) = crate::db::run(app.db(), run_id).await? else {
         return Ok(true);
     };
     if !matches!(run.state.as_str(), "starting" | "running" | "stopping") {
         return Ok(true);
     }
-    let Some(bot) = crate::db::bot(&app.db, &run.bot_id).await? else {
+    let Some(bot) = crate::db::bot(app.db(), &run.bot_id).await? else {
         return Ok(true);
     };
-    if bot.kind != kind || crate::db::bot_host(&app.db, &run.bot_id).await? != host {
+    if bot.kind != kind || crate::db::bot_host(app.db(), &run.bot_id).await? != host {
         return Ok(true);
     }
     let Some(notice) = run.update_notice.as_deref() else {
@@ -1414,7 +1414,7 @@ async fn mark_installed_change_is_already_durable(app: &Arc<App>, host: &str,
 /// 確認沒有 relevant row 時回 `Ok(0)`，只有這個成功證明的空結果可視為無操作。
 /// 跑著的版本：記憶體裡看過的 → 通知寫的起點 → 安裝前的磁碟版本（這個 process 是裝之前起的，不會比它新）。
 async fn mark_installed_with_fence(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::hosts::HostsAccess),
     host: &str,
     kind: &str,
     before: &str,
@@ -1422,9 +1422,9 @@ async fn mark_installed_with_fence(
     fence: Option<&HostFence>,
 ) -> anyhow::Result<Option<usize>> {
     let mut n = 0;
-    for run in crate::db::all_active_runs(&app.db).await? {
+    for run in crate::db::all_active_runs(app.db()).await? {
         if let Some(fence) = fence {
-            if !app.hosts.is_current(fence).await {
+            if !app.hosts().is_current(fence).await {
                 return Ok(None);
             }
         }
@@ -1432,13 +1432,13 @@ async fn mark_installed_with_fence(
         if !notice_needs_this_install(kind, notice, after) {
             continue;
         }
-        let Some(bot) = crate::db::bot(&app.db, &run.bot_id).await? else { continue };
-        let bot_host = crate::db::bot_host(&app.db, &run.bot_id).await?;
+        let Some(bot) = crate::db::bot(app.db(), &run.bot_id).await? else { continue };
+        let bot_host = crate::db::bot_host(app.db(), &run.bot_id).await?;
         if bot.kind != kind || bot_host != host {
             continue;
         }
         if let Some(fence) = fence {
-            if !app.hosts.is_current(fence).await {
+            if !app.hosts().is_current(fence).await {
                 return Ok(None);
             }
         }
@@ -1472,7 +1472,7 @@ async fn mark_installed_with_fence(
                 "could not prove {kind} run {} no longer needs install notice transition", run.id);
         }
         if let Some(fence) = fence {
-            if !app.hosts.is_current(fence).await {
+            if !app.hosts().is_current(fence).await {
                 return Ok(None);
             }
             #[cfg(test)]
@@ -1483,14 +1483,14 @@ async fn mark_installed_with_fence(
                 .bind(text.as_deref())
                 .bind(&run.id)
                 .bind(notice)
-                .execute(&app.db)
+                .execute(app.db())
                 .await
         };
         // Host replacement takes the same connection's write gate. Validate under its read side
         // and keep that gate through the durable CAS, so repoint either wins first and refuses
         // this write or waits until the notice transition has committed on its captured authority.
         let result = match fence {
-            Some(fence) => match app.hosts.run_if_current(fence, write_notice).await {
+            Some(fence) => match app.hosts().run_if_current(fence, write_notice).await {
                 Some(result) => result?,
                 None => return Ok(None),
             },
@@ -1501,7 +1501,7 @@ async fn mark_installed_with_fence(
             app.emit_bot_status(&run.bot_id).await;
         } else {
             if let Some(fence) = fence {
-                if !app.hosts.is_current(fence).await {
+                if !app.hosts().is_current(fence).await {
                     return Ok(None);
                 }
             }
@@ -1510,7 +1510,7 @@ async fn mark_installed_with_fence(
                     "{kind} run {} still needs the installed notice transition after a lost CAS", run.id);
             }
             if let Some(fence) = fence {
-                if !app.hosts.is_current(fence).await {
+                if !app.hosts().is_current(fence).await {
                     return Ok(None);
                 }
             }
@@ -1522,7 +1522,7 @@ async fn mark_installed_with_fence(
 /// DB 錯誤時維持 cli_updates 的 running 列並退避重試；run/recover 都要等通知轉換可證明持久化後才收尾。
 /// fence 失效就停止重試並拒絕發布成功，防止重試期間改寫同名新主機的通知。
 async fn mark_installed_until_durable(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess),
     host: &str,
     kind: &str,
     before: &str,
@@ -1531,14 +1531,14 @@ async fn mark_installed_until_durable(
 ) -> Option<usize> {
     let mut retry = MARK_INSTALLED_RETRY_INITIAL;
     loop {
-        if !app.hosts.is_current(fence).await {
+        if !app.hosts().is_current(fence).await {
             return None;
         }
         match mark_installed_with_fence(app, host, kind, before, after, Some(fence)).await {
             Ok(Some(n)) => return Some(n),
             Ok(None) => return None,
             Err(error) => {
-                if !app.hosts.is_current(fence).await {
+                if !app.hosts().is_current(fence).await {
                     return None;
                 }
                 tracing::warn!(host, kind,error = %error, "could not durably mark CLI update notices installed; keeping update running and retrying");

@@ -69,8 +69,8 @@ pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     }
 }
 
-async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
-    match intents::record_failure(&app.db, id, &why).await {
+async fn fail_attempt(app: &impl crate::capabilities::Db, id: &str, why: String) -> Outcome {
+    match intents::record_failure(app.db(), id, &why).await {
         Ok(true) => {
             tracing::error!(intent = id, error = %why, "interrupted promote could not be completed; gave up and told AGM");
             Outcome::Finished

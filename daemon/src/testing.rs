@@ -996,7 +996,7 @@ pub async fn env() -> Env {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
     git::init_repo(&repo);
-    let pool = db::open(&data.join("db.sqlite3")).await.unwrap();
+    let pool = crate::app_ports_p1::open(&data.join("db.sqlite3")).await.unwrap();
     let cfg = crate::config::ConfigStore::load(data.join("config.toml")).await.unwrap();
     // 出貨預設是關的（#749 審查）；測試 build 的 hook 本來就是空的，要用的測試換上 stub，所以這裡先把旗標打開，
     // 「預設關」由 config 與 delivery 各自的測試把設定還原成預設再驗。
@@ -1043,7 +1043,7 @@ pub async fn restart_app(env: &Env) -> Arc<App> {
 /// Same as [`restart_app`] with `allow_lan` chosen (the packaged app has it off; dev/LAN daemons turn it on).
 pub async fn restart_app_lan(env: &Env, allow_lan: bool) -> Arc<App> {
     let data = env.dir.join("data");
-    let pool = db::open(&data.join("db.sqlite3")).await.unwrap();
+    let pool = crate::app_ports_p1::open(&data.join("db.sqlite3")).await.unwrap();
     let cfg = crate::config::ConfigStore::load(data.join("config.toml")).await.unwrap();
     let client = crate::herdr::HerdrClient::new(data.join("herdr.sock"));
     let app = App::new(

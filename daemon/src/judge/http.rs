@@ -58,8 +58,8 @@ async fn get_shadow(State(app): State<Arc<App>>, Query(q): Query<ShadowQuery>) -
     Ok(Json(json!({"enabled": cfg.enabled, "projects": cfg.projects, "model": cfg.model, "rows": rows})))
 }
 
-async fn settings_json(app: &Arc<App>) -> Value {
-    let cfg = app.cfg.get().await.judge;
+async fn settings_json(app: &impl crate::capabilities::Cfg) -> Value {
+    let cfg = app.cfg().get().await.judge;
     let key = super::key_status(&cfg.key_file);
     // key 永遠不回：只說有沒有、不能用的話為什麼。
     json!({"enabled": cfg.enabled, "projects": cfg.projects, "model": cfg.model, "key_present": key.is_ok(), "key_error": key.err()})

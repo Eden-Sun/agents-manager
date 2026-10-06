@@ -132,8 +132,8 @@ pub fn refresh_all(data_dir: &Path) -> LocalRefresh {
 pub const SHIM_STALE_KIND: &str = "bot_shim_stale";
 
 /// 開機時跑一次：換掉的記一行 info，換不動的每一支推一則 inbox 給巡檢。
-pub async fn refresh_at_startup(app: &Arc<App>) {
-    let out = refresh_all(&app.data_dir);
+pub async fn refresh_at_startup(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) {
+    let out = refresh_all(app.data_dir());
     if out.changed.is_empty() {
         tracing::debug!("every bot shim is already the version this binary carries");
     } else {
@@ -146,7 +146,7 @@ pub async fn refresh_at_startup(app: &Arc<App>) {
         // 下一顆 binary 帶了新 shim 又失敗才是新的一則。
         let key = format!("{SHIM_STALE_KIND}:{who}:{}", crate::supervisor::cli_refresh::short_hash(wanted.as_bytes()));
         let _ = crate::supervisor::store::push_inbox(
-            &app.db,
+            app.db(),
             &key,
             SHIM_STALE_KIND,
             None,
@@ -155,7 +155,7 @@ pub async fn refresh_at_startup(app: &Arc<App>) {
             &json!({
                 "bot_id": bot_id,
                 "shim": shim,
-                "path": app.data_dir.join("bots").join(bot_id).join("bin").join(shim).to_string_lossy(),
+                "path": app.data_dir().join("bots").join(bot_id).join("bin").join(shim).to_string_lossy(),
                 "embedded_hash": crate::supervisor::cli_refresh::short_hash(wanted.as_bytes()),
                 "error": error,
                 "action": "這顆 bot 手上還是舊 shim（舊 cargo shim ＝ 工作不會被轉到外部編譯主機，還可能跟 build shim 互相當成真 cargo 而卡住）：修好那個檔案的權限／磁碟，下一次 daemon 重啟會再換一次；急的話重啟這顆 bot 的 pane 也會重寫",
@@ -268,15 +268,15 @@ pub(crate) async fn sync_remote(
 /// `herdr`／`cargo` shim 換成這顆 binary 帶的版本，不必重啟任何 pane。回傳換了什麼。
 ///
 /// 從沒 setup 過的 bot（沒有 `bin/` 或沒有那支 shim）不會被生出新檔案——那是啟動時 `install_shim` 的事。
-pub(crate) async fn refresh_remote_host(app: &Arc<App>, host: &str) -> anyhow::Result<RemoteSync> {
-    let conn = app.hosts.get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+pub(crate) async fn refresh_remote_host(app: &(impl crate::capabilities::Db + crate::hosts::HostInstance + crate::hosts::HostsAccess), host: &str) -> anyhow::Result<RemoteSync> {
+    let conn = app.hosts().get(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     if conn.is_local() {
         return Ok(RemoteSync::default());
     }
     if !conn.is_connected() {
         anyhow::bail!("host `{host}` is not connected");
     }
-    let bots = crate::db::live_bots_on_host(&app.db, host).await?;
+    let bots = crate::db::live_bots_on_host(app.db(), host).await?;
     let mut dirs = Vec::new();
     for b in &bots {
         dirs.push(crate::herdr_maintenance::app_ports_p12::remote_bot_dir_for(&conn, &b.id, app.instance().as_deref()).await?);

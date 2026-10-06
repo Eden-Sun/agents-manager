@@ -526,9 +526,9 @@ async fn read_asleep(db: &SqlitePool, bot_id: &str) -> anyhow::Result<Option<(St
 }
 
 /// 所有被收起來的 bot：`bot_id -> (slept_at, idle_minutes)`。狀態 JSON 一次讀完，不必每顆問一次。
-pub async fn all_asleep(app: &Arc<App>) -> std::collections::HashMap<String, (String, i64)> {
+pub async fn all_asleep(app: &impl crate::capabilities::Db) -> std::collections::HashMap<String, (String, i64)> {
     sqlx::query_as::<_, (String, String, i64)>("SELECT bot_id, slept_at, idle_minutes FROM bot_sleeps")
-        .fetch_all(&app.db)
+        .fetch_all(app.db())
         .await
         .unwrap_or_default()
         .into_iter()
@@ -1717,7 +1717,7 @@ mod tests {
     /// 同一個 app，但 herdr 那條 socket 不存在：任何 herdr 呼叫都會失敗。
     async fn app_with_dead_herdr(env: &crate::testing::Env) -> Arc<App> {
         let data = env.dir.join("data");
-        let pool = db::open(&data.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&data.join("db.sqlite3")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(data.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(data.join("no-such-herdr.sock"));
         let app = App::new(pool, client.clone(), client, cfg, data.clone(), data.join("agents-managerd"), 7799, "test-token".into(), "test".into(), false);

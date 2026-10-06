@@ -34,7 +34,7 @@ const MAX_RESTARTS: usize = 3;
 const WINDOW: Duration = Duration::from_secs(30 * 60);
 
 /// 30 分鐘內的啟動嘗試記在 durable `bot_lost` inbox 事件裡；daemon 重啟不能把退避額度歸零。
-async fn take_slot(app: &App, bot_id: &str) -> anyhow::Result<bool> {
+async fn take_slot(app: &impl crate::capabilities::Db, bot_id: &str) -> anyhow::Result<bool> {
     let cutoff = db::iso_in(-(WINDOW.as_secs() as i64));
     let hits: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM supervisor_inbox
@@ -43,7 +43,7 @@ async fn take_slot(app: &App, bot_id: &str) -> anyhow::Result<bool> {
     )
     .bind(bot_id)
     .bind(cutoff)
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await?;
     Ok(hits < MAX_RESTARTS as i64)
 }

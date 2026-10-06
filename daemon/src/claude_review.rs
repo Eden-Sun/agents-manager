@@ -98,7 +98,7 @@ fn truncate(s: &str, n: usize) -> String {
 /// 派給誰：`AGM_RELEASE_BOT` ＞ `runtime.json` 的 `release_bot_id` ＞ `responder_bot_id`。
 ///
 /// **絕不派給巡檢**：daemon 擋「總管對自己下交辦」，派過去每一輪都 400（kick 踩過這個坑）。
-async fn pick_target(app: &Arc<App>) -> Option<crate::db::Bot> {
+async fn pick_target(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) -> Option<crate::db::Bot> {
     let mut ids: Vec<String> = Vec::new();
     if let Ok(v) = std::env::var("AGM_RELEASE_BOT") {
         ids.push(v);
@@ -112,15 +112,15 @@ async fn pick_target(app: &Arc<App>) -> Option<crate::db::Bot> {
             }
         }
     }
-    if let Ok(Some(b)) = app_ports_p13::responder_bot(&app.db).await {
+    if let Ok(Some(b)) = app_ports_p13::responder_bot(app.db()).await {
         ids.push(b.id);
     }
-    let patrol = app_ports_p13::supervisor_get_or_init(&app.db).await.ok().and_then(|s| s.bot_id);
+    let patrol = app_ports_p13::supervisor_get_or_init(app.db()).await.ok().and_then(|s| s.bot_id);
     for id in ids.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
         if patrol.as_deref() == Some(id.as_str()) {
             continue;
         }
-        if let Ok(Some(bot)) = crate::db::bot(&app.db, &id).await {
+        if let Ok(Some(bot)) = crate::db::bot(app.db(), &id).await {
             if bot.deleted_at.is_none() {
                 return Some(bot);
             }
@@ -129,8 +129,8 @@ async fn pick_target(app: &Arc<App>) -> Option<crate::db::Bot> {
     None
 }
 
-fn agm_dir(app: &Arc<App>) -> std::path::PathBuf {
-    app.data_dir.join("supervisor").join("AGM")
+fn agm_dir(app: &impl crate::capabilities::DataDir) -> std::path::PathBuf {
+    app.data_dir().join("supervisor").join("AGM")
 }
 
 /// 這個 kind 的任務檔名：`claude-release-task.md`／`codex-release-task.md`。
@@ -139,7 +139,7 @@ pub fn task_file(kind: &str) -> String {
 }
 
 /// 派工正文的來源檔：AGM 目錄裝好的那份優先（kick 讀的就是它），其次 repo 的 `scripts/ops/`。
-fn task_template(app: &Arc<App>, kind: &str) -> Option<String> {
+fn task_template(app: &impl crate::capabilities::DataDir, kind: &str) -> Option<String> {
     let installed = agm_dir(app).join(task_file(kind));
     if let Ok(t) = std::fs::read_to_string(&installed) {
         if !t.trim().is_empty() {
@@ -172,7 +172,7 @@ fn parse_kind(kind: Option<&str>) -> Result<&'static str, LcError> {
 }
 
 /// 派工正文開頭的規則：claude／codex 讀任務檔；herdr 沒有任務檔，用跟排程交辦同一段 [`crate::herdr_update::AGM_ASK`]。
-fn task_head(app: &Arc<App>, kind: &str) -> Option<String> {
+fn task_head(app: &impl crate::capabilities::DataDir, kind: &str) -> Option<String> {
     if kind == "herdr" {
         return Some(format!("AGM 交辦：herdr 出新版了，請解析這一版對 agents-manager 的影響。\n\n{}", crate::herdr_update::AGM_ASK));
     }
@@ -231,9 +231,9 @@ pub fn request_id(kind: &str, to: &str) -> String {
 /// 等於什麼都沒送出去（issue #394 的重按沒反應）。這時候：①換一個沒人用過的 crid（`-r2`、`-r3`…）；
 /// ②把新的一筆接在死路的鏈尾之後（`follow_up_of`）——不這樣接的話，下次 [`review_state`] 沿舊 crid 找
 /// 還是只會走到那條死路，看不到新派的這筆（換 crid 不等於換得到「查得到」）。
-async fn redispatch_target(app: &Arc<App>, kind: &str, to: &str) -> Result<(String, Option<String>), LcError> {
+async fn redispatch_target(app: &impl crate::capabilities::Db, kind: &str, to: &str) -> Result<(String, Option<String>), LcError> {
     let base = ui_request_id(kind, to);
-    let head = app_ports_p13::assignment_by_crid(&app.db, &base)
+    let head = app_ports_p13::assignment_by_crid(app.db(), &base)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
     let Some(head) = head else {
@@ -242,7 +242,7 @@ async fn redispatch_target(app: &Arc<App>, kind: &str, to: &str) -> Result<(Stri
     let tail = latest_in_chain(app, head).await?;
     for n in 2..1000 {
         let candidate = format!("{base}-r{n}");
-        let existing = app_ports_p13::assignment_by_crid(&app.db, &candidate)
+        let existing = app_ports_p13::assignment_by_crid(app.db(), &candidate)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?;
         if existing.is_none() {
@@ -285,14 +285,14 @@ pub struct ReviewState {
 /// 都是同一個 `client_request_id` 建一筆新的、把舊的標成 `superseded` 並用這個欄位指過去
 /// （`supervisor::store::review_with_followup`）；鏈可能好幾層（`-ui` → `-ui-f1` → `-ui-f2`…）。
 async fn latest_in_chain(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     a: app_ports_p13::Assignment,
 ) -> Result<app_ports_p13::Assignment, LcError> {
     let mut cur = a;
     // 鏈本身沒有理論上限，用個保守的圈數擋掉萬一寫壞的環（不讓這支請求掛住）。
     for _ in 0..50 {
         let Some(next_id) = cur.followup_assignment_id.clone() else { break };
-        match app_ports_p13::assignment(&app.db, &next_id)
+        match app_ports_p13::assignment(app.db(), &next_id)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?
         {
@@ -306,8 +306,8 @@ async fn latest_in_chain(
 /// assignment 這條路能不能給出一個 [`ReviewState`]：`completed` → `done`；還活著（`OPEN_STATES`）→
 /// `pending`；其餘（`superseded`／`failed`／`cancelled`…鏈尾走到這裡就是真的死路）→ `None`，
 /// 呼叫端當「這一版還沒有能用的交辦」，允許重派。
-async fn state_from_assignment(app: &Arc<App>, a: &app_ports_p13::Assignment) -> Result<Option<ReviewState>, LcError> {
-    let target_bot_name = crate::db::bot(&app.db, &a.target_bot_id)
+async fn state_from_assignment(app: &impl crate::capabilities::Db, a: &app_ports_p13::Assignment) -> Result<Option<ReviewState>, LcError> {
+    let target_bot_name = crate::db::bot(app.db(), &a.target_bot_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .map(|x| x.name);
@@ -341,9 +341,9 @@ async fn state_from_assignment(app: &Arc<App>, a: &app_ports_p13::Assignment) ->
 /// AGM 角色）根本不會有那則事件，永遠回 `none`；重按也被舊的（已 superseded）那筆擋住冪等，
 /// 派不出新的（issue #394）。assignment 找不到能用的（都是 superseded／failed，或整個沒派過）
 /// 才退回收件匣那條路：派給 AGM 角色的工作走交接佇列，沒有 assignment，結論在那個回合的訊息裡。
-pub async fn review_state(app: &Arc<App>, kind: &str, to: &str) -> Result<ReviewState, LcError> {
+pub async fn review_state(app: &impl crate::capabilities::Db, kind: &str, to: &str) -> Result<ReviewState, LcError> {
     for crid in [ui_request_id(kind, to), request_id(kind, to)] {
-        let Some(a) = app_ports_p13::assignment_by_crid(&app.db, &crid)
+        let Some(a) = app_ports_p13::assignment_by_crid(app.db(), &crid)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?
         else {
@@ -362,7 +362,7 @@ pub async fn review_state(app: &Arc<App>, kind: &str, to: &str) -> Result<Review
               WHERE event_key LIKE ? ORDER BY created_at DESC LIMIT 1",
         )
         .bind(format!("%:crid:{crid}"))
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
         if row.is_some() {
@@ -373,7 +373,7 @@ pub async fn review_state(app: &Arc<App>, kind: &str, to: &str) -> Result<Review
         return Ok(ReviewState { state: "none", assignment_id: None, target_bot_name: None, asked_at: None, answered_at: None, result: None });
     };
     let target_bot_name = match bot_id.as_deref() {
-        Some(b) => crate::db::bot(&app.db, b).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|x| x.name),
+        Some(b) => crate::db::bot(app.db(), b).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|x| x.name),
         None => None,
     };
     let answer = match notify_turn_id.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
@@ -401,13 +401,13 @@ pub async fn review_state(app: &Arc<App>, kind: &str, to: &str) -> Result<Review
 }
 
 /// 那個回合裡對方講的話（最後一則 assistant 訊息）。空白或還沒講就是 `None`。
-async fn answer_of_turn(app: &Arc<App>, turn_id: &str) -> Result<Option<(String, String)>, LcError> {
+async fn answer_of_turn(app: &impl crate::capabilities::Db, turn_id: &str) -> Result<Option<(String, String)>, LcError> {
     let row = sqlx::query_as::<_, (String, String)>(
         "SELECT content, created_at FROM messages
           WHERE turn_id = ? AND role = 'assistant' ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .bind(turn_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await
     .map_err(|e| LcError::Upstream(e.to_string()))?;
     let Some(row) = row else { return Ok(None) };

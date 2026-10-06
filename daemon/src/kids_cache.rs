@@ -7,8 +7,6 @@
 
 use crate::cache_clock::{self, LastTurn};
 use crate::db;
-use crate::state::App;
-use std::sync::Arc;
 
 /// 一顆子 agent 的 cache 狀態（純資料，方便測排序與文字）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,10 +86,10 @@ pub fn kid(
 }
 
 /// `bot_id` 底下（`parent_bot_id`）每顆活著的子 agent。
-pub async fn text_for(app: &Arc<App>, bot_id: &str) -> anyhow::Result<String> {
-    let bots = db::live_bots(&app.db).await?;
-    let mut runs = db::active_runs_by_bot(&app.db).await?;
-    let last_turns = cache_clock::last_turns_by_bot(&app.db).await?;
+pub async fn text_for(app: &impl crate::capabilities::Db, bot_id: &str) -> anyhow::Result<String> {
+    let bots = db::live_bots(app.db()).await?;
+    let mut runs = db::active_runs_by_bot(app.db()).await?;
+    let last_turns = cache_clock::last_turns_by_bot(app.db()).await?;
     let now = chrono::Utc::now();
     let kids = bots
         .iter()

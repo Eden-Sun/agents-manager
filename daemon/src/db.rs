@@ -18,8 +18,9 @@ pub(crate) type FeatureMigration = for<'a> fn(&'a SqlitePool) -> MigrationFuture
 /// `(名字, migrate)`，名字只給 log／測試看。順序就是執行順序。
 pub(crate) type FeatureMigrations = &'static [(&'static str, FeatureMigration)];
 
-/// 過渡 shim：既有呼叫端（含大量測試）還用 `db::open(path)`／`apply_migrations(pool)`，不帶 feature 清單。清單由 composition 層
-/// （`app_ports_p1`）持有；等 `startup` 改呼叫 [`open_with`] 之後，這支與 [`open`] 一起刪掉，db 就完全不認得任何 feature。
+/// 測試用：db 自己的測試（與 `schema_guard` 的測試）要整份 schema，清單取 composition 層那份。正式程式碼不經過這裡——
+/// `startup` 明確把清單傳給 [`open_with`]，db 不認得任何 feature。
+#[cfg(test)]
 fn composition_features() -> FeatureMigrations {
     crate::app_ports_p1::FEATURE_MIGRATIONS
 }
@@ -387,6 +388,7 @@ pub(crate) async fn sync_trigger(conn: &mut sqlx::SqliteConnection, name: &str, 
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn open(path: &Path) -> Result<SqlitePool> {
     open_with(path, composition_features()).await
 }
@@ -418,7 +420,7 @@ pub(crate) async fn open_with(path: &Path, features: FeatureMigrations) -> Resul
 }
 
 /// 套用全部 schema，最後對一次帳（[`schema_guard::check_drift`]）。
-#[allow(dead_code)]
+#[cfg(test)]
 async fn migrate(pool: &SqlitePool) -> Result<()> {
     migrate_with(pool, composition_features()).await
 }

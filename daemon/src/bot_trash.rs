@@ -9,7 +9,6 @@
 //! 清理跑兩處：開機的清掃（`purge_deleted_bot_dirs`）與 [`spawn_gc`] 每天一次。只靠開機那一次不夠——
 //! daemon 常駐好幾天很常見，回收區會一路長（review d77434c0 #2）。
 
-use crate::state::App;
 
 #[path = "app_ports_p11.rs"]
 pub(crate) mod app_ports_p11;
@@ -331,11 +330,11 @@ pub fn gc_with_cap(data_dir: &Path, keep: Duration, max_bytes: u64) -> (usize, u
 }
 
 /// 每天清一次：開機那一次之外，常駐好幾天的 daemon 也要收（review d77434c0 #2）。
-pub fn spawn_gc(app: Arc<App>) {
+pub fn spawn_gc(app: Arc<impl crate::capabilities::DataDir + 'static>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(GC_EVERY).await;
-            let (expired, evicted) = gc_with_cap(&app.data_dir, keep_duration(), MAX_BYTES);
+            let (expired, evicted) = gc_with_cap(app.data_dir(), keep_duration(), MAX_BYTES);
             if expired > 0 || evicted > 0 {
                 tracing::info!(expired, evicted, days = KEEP_DAYS, "daily bots-trash sweep");
             }

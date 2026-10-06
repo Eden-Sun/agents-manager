@@ -36,7 +36,7 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
 
 /// 記下一次 purge 的結果（`purge_bot_dir` 的遠端分支呼叫，刪除 handler 與掃描共用）。寫不進去只是少一筆記號：
 /// 下一輪從 DB 重新推導、再搬一次（冪等）。
-pub async fn record(app: &Arc<App>, bot_id: &str, host: &str, ok: bool, error: Option<&str>) {
+pub async fn record(app: &impl crate::capabilities::Db, bot_id: &str, host: &str, ok: bool, error: Option<&str>) {
     let now = crate::db::now();
     let res = if ok {
         sqlx::query(
@@ -49,7 +49,7 @@ pub async fn record(app: &Arc<App>, bot_id: &str, host: &str, ok: bool, error: O
         .bind(host)
         .bind(&now)
         .bind(&now)
-        .execute(&app.db)
+        .execute(app.db())
         .await
     } else {
         sqlx::query(
@@ -64,7 +64,7 @@ pub async fn record(app: &Arc<App>, bot_id: &str, host: &str, ok: bool, error: O
         .bind(error.unwrap_or("purge failed"))
         .bind(crate::db::iso_in(POLL_EVERY.as_secs() as i64))
         .bind(&now)
-        .execute(&app.db)
+        .execute(app.db())
         .await
     };
     if let Err(e) = res {
@@ -169,8 +169,8 @@ pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
 }
 
 /// 還原的 bot 忘掉「已清掉」的記號（issue #411）：之後再被刪一次，掃描才會再搬它的目錄。寫不進去只記 log。
-pub async fn forget(app: &Arc<App>, bot_id: &str) {
-    if let Err(e) = sqlx::query("DELETE FROM remote_bot_dir_purges WHERE bot_id = ?").bind(bot_id).execute(&app.db).await {
+pub async fn forget(app: &impl crate::capabilities::Db, bot_id: &str) {
+    if let Err(e) = sqlx::query("DELETE FROM remote_bot_dir_purges WHERE bot_id = ?").bind(bot_id).execute(app.db()).await {
         tracing::warn!(bot = %bot_id, error = %e, "could not clear the remote bot dir purge mark of a restored bot");
     }
 }

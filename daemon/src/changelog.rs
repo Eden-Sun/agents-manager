@@ -124,7 +124,7 @@ pub fn pick_sections(all: &[Section], from: Option<&str>, to: &str) -> Vec<Secti
 }
 
 /// **磁碟上**的版本；跑著的 process 可能還是舊的，`update_watch` 靠這個差判斷有更新。
-pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result<String> {
+pub async fn installed_version(app: &impl crate::hosts::HostsAccess, host: &str, kind: &str) -> Result<String> {
     let script = format!(
         "{}; [ -n \"$p\" ] && \"$p\" --version 2>/dev/null </dev/null | head -1 | tr -d '\\r'",
         crate::tools::login_abs_sh(kind).trim_end()
@@ -132,7 +132,7 @@ pub async fn installed_version(app: &Arc<App>, host: &str, kind: &str) -> Result
     let out = if host == LOCAL_HOST {
         crate::hosts::sh_local_stdout(&script, VERSION_TIMEOUT, &format!("`{kind} --version`")).await?
     } else {
-        let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+        let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
         // 睡著／斷線的主機：巡邏串行讀每台，不能每台都等滿 ssh 逾時（30 秒）才說讀不到。
         if !conn.is_connected() {
             return Err(anyhow!("host `{host}` 未連線，讀不到磁碟上的 `{kind}` 版本"));

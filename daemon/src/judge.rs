@@ -170,7 +170,7 @@ pub(crate) async fn reserve_slot(
 /// 送出去過一次（花費與「畫面離開這台機器」都已經發生）；失敗就退名額的話，一個壞掉的端點
 /// 會讓保險絲永遠跳不了——那正好是最需要它跳的時候。
 pub(crate) async fn settle_slot(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     id: &str,
     p: Option<f64>,
     model: Option<String>,
@@ -185,7 +185,7 @@ pub(crate) async fn settle_slot(
         .bind(tokens)
         .bind(error)
         .bind(id)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
     Ok(())
 }
@@ -195,9 +195,9 @@ pub(crate) async fn settle_slot(
 /// 不刪掉——那一次很可能真的送出去過（花費與畫面外流已經發生），刪了帳本就對不上。
 /// 改成一個**終態**：`error='interrupted'`，帳本與 `GET /api/judge/shadow` 上看得出來是
 /// 「daemon 中途被收掉、答案沒回來」，而不是永遠顯示「在飛」。
-pub async fn settle_interrupted(app: &Arc<App>) -> Result<u64> {
+pub async fn settle_interrupted(app: &impl crate::capabilities::Db) -> Result<u64> {
     let n = sqlx::query("UPDATE judge_shadow SET error='interrupted' WHERE error='pending'")
-        .execute(&app.db)
+        .execute(app.db())
         .await?
         .rows_affected();
     if n > 0 {
@@ -855,7 +855,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
-        let db = crate::db::open(&dir.join("t.sqlite3")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
         let store = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let judge = JudgeCfg { key_file: key.to_string_lossy().into_owned(), endpoint: endpoint.into(), ..cfg(enabled, projects) };
         store
@@ -880,8 +880,8 @@ mod tests {
         }
     }
 
-    async fn rows(app: &Arc<App>) -> Vec<(String, Option<f64>, Option<String>, Option<String>, bool)> {
-        sqlx::query_as("SELECT matched_line, jev_is_live_ui, error, cleared_at, composer_idle FROM judge_shadow").fetch_all(&app.db).await.unwrap()
+    async fn rows(app: &impl crate::capabilities::Db) -> Vec<(String, Option<f64>, Option<String>, Option<String>, bool)> {
+        sqlx::query_as("SELECT matched_line, jev_is_live_ui, error, cleared_at, composer_idle FROM judge_shadow").fetch_all(app.db()).await.unwrap()
     }
 
     /// #481：保險絲在**並行**時也要是真的上限。

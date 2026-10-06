@@ -13689,7 +13689,7 @@ mod state_cost_tests {
     use std::time::Instant;
 
     async fn app_over(dir: &std::path::Path) -> Option<Arc<App>> {
-        let pool = db::open(&dir.join("db.sqlite3")).await.ok()?;
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.ok()?;
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.ok()?;
         let client = crate::herdr::HerdrClient::new(dir.join("herdr.sock"));
         let app = App::new(pool, client.clone(), client, cfg, dir.to_path_buf(), dir.join("agents-managerd"), 7799, "t".into(), "test".into(), false);

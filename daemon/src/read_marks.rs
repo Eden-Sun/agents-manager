@@ -371,7 +371,7 @@ mod tests {
     async fn pool() -> (SqlitePool, std::path::PathBuf) {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-read-marks-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
-        (crate::db::open(&dir.join("t.sqlite3")).await.unwrap(), dir)
+        (crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap(), dir)
     }
 
     /// #831：migrate 看完 `bot_reads` 在不在、還沒建的那一瞬，另一個 writer commit 了一筆。deferred 交易這時 CREATE 直接
