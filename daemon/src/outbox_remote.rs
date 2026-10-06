@@ -19,7 +19,6 @@ use serde_json::json;
 use crate::hosts::{sh_quote, HostConn};
 use crate::lifecycle::LcError;
 use crate::outbox::{content_is_withheld, content_disposition, mime_of, withheld_name, MAX_BYTES, MAX_ENTRIES, TTL_SECS};
-use crate::state::App;
 
 /// 下載大檔走 base64 會比較久；列表很快。
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -62,21 +61,35 @@ fn unreachable(host: &str) -> LcError {
     LcError::conflict("outbox_remote_unreachable", unreachable_body(host))
 }
 
+/// 遠端 outbox 還要：那台的連線、這顆 daemon 的實例 slug（`App` 在 `app_ports_p10` 實作）。
+pub trait OutboxRemoteEnv: crate::outbox::OutboxEnv {
+    fn host_conn(&self, host: &str) -> impl std::future::Future<Output = Option<Arc<HostConn>>> + Send;
+    fn instance(&self) -> Option<String>;
+}
+
+impl<T: OutboxRemoteEnv + ?Sized> OutboxRemoteEnv for Arc<T> {
+    fn host_conn(&self, host: &str) -> impl std::future::Future<Output = Option<Arc<HostConn>>> + Send {
+        (**self).host_conn(host)
+    }
+    fn instance(&self) -> Option<String> {
+        (**self).instance()
+    }
+}
+
 /// 這顆 bot 在遠端主機上就回它的 outbox；本機 bot 回 `None`（照舊走 [`crate::outbox`]）。
-pub(crate) async fn target(app: &Arc<App>, bot_id: &str) -> Result<Option<Target>, LcError> {
-    let bot = crate::db::bot(&app.db, bot_id).await.ok().flatten().ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let project = crate::db::project(&app.db, &bot.project_id).await.ok().flatten().ok_or_else(|| LcError::NotFound("bot".into()))?;
+pub(crate) async fn target(app: &impl OutboxRemoteEnv, bot_id: &str) -> Result<Option<Target>, LcError> {
+    let project = app.bot_place(bot_id).await.map_err(|_| LcError::NotFound("bot".into()))?;
     if project.host == crate::config::LOCAL_HOST {
         return Ok(None);
     }
-    let conn = app.hosts.get(&project.host).await.ok_or_else(|| unreachable(&project.host))?;
+    let conn = app.host_conn(&project.host).await.ok_or_else(|| unreachable(&project.host))?;
     // 已知連不上（睡著、tailscale 斷線）就直接說連不上：不去等一趟 ssh（列表 30 秒、下載 180 秒才逾時），
     // 網頁每開一次也不會多養一條卡住的 ssh 行程。
     if !conn.is_connected() {
         return Err(unreachable(&project.host));
     }
     let home = conn.home().await.map_err(|_| unreachable(&project.host))?;
-    let dir = remote_dir(&home, app.instance().as_deref(), &bot.id).ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let dir = remote_dir(&home, app.instance().as_deref(), bot_id).ok_or_else(|| LcError::NotFound("bot".into()))?;
     Ok(Some(Target { conn, dir }))
 }
 

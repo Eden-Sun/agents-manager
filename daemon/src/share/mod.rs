@@ -27,39 +27,39 @@ pub(crate) const SHARE_SENDER: &str = "share";
 
 /// daemon 開機時替每顆分享用 bot 的 outbox 補上不清的標記（`outbox-gc.sh` 看它）：開機前就在跑、這次沒重起的那幾顆也算。
 /// 遠端的不管（分享用 bot 只給本機）。讀不到就記 warning，下次啟動那顆 bot 時 `cage::prepare` 會補。
-pub(crate) async fn keep_share_outboxes(app: &std::sync::Arc<crate::state::App>) {
+pub(crate) async fn keep_share_outboxes(app: &impl crate::outbox::ShareStorage) {
     let live = sqlx::query_scalar::<_, String>(
         "SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
            JOIN projects p ON p.id = b.project_id AND p.deleted_at IS NULL AND p.host = 'local'",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db_pool())
     .await;
     match live {
-        Ok(ids) => ids.iter().for_each(|id| crate::outbox::mark_share_keep(&app.data_dir, id)),
+        Ok(ids) => ids.iter().for_each(|id| crate::outbox::mark_share_keep(app.data_dir(), id)),
         Err(e) => tracing::warn!(error = %e, "could not list share bots to keep their outboxes"),
     }
 }
 
 /// Revoke a bot's public share link after its lifecycle has been decided.
-pub(crate) async fn revoke_bot_share(app: &std::sync::Arc<crate::state::App>, bot_id: &str) -> Result<(), sqlx::Error> {
+pub(crate) async fn revoke_bot_share(app: &impl crate::outbox::ShareStorage, bot_id: &str) -> Result<(), sqlx::Error> {
     portal::kick(bot_id);
-    crate::outbox::unmark_share_keep(&app.data_dir, bot_id);
-    store::revoke_bot(&app.db, bot_id).await
+    crate::outbox::unmark_share_keep(app.data_dir(), bot_id);
+    store::revoke_bot(app.db_pool(), bot_id).await
 }
 
 /// Revoke all share links in a deleted project and close their active event streams.
-pub(crate) async fn revoke_project_shares(app: &std::sync::Arc<crate::state::App>, project_id: &str) -> Result<(), sqlx::Error> {
-    let ids = store::project_share_ids(&app.db, project_id).await?;
+pub(crate) async fn revoke_project_shares(app: &impl crate::outbox::ShareStorage, project_id: &str) -> Result<(), sqlx::Error> {
+    let ids = store::project_share_ids(app.db_pool(), project_id).await?;
     for bot_id in ids {
         portal::kick(&bot_id);
     }
     // 分享關著的分享用 bot 也有標記：專案底下每一顆都拿掉。
     let restricted: Vec<String> =
-        sqlx::query_scalar("SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id WHERE b.project_id = ?").bind(project_id).fetch_all(&app.db).await?;
+        sqlx::query_scalar("SELECT r.bot_id FROM shared_bots r JOIN bots b ON b.id = r.bot_id WHERE b.project_id = ?").bind(project_id).fetch_all(app.db_pool()).await?;
     for bot_id in restricted {
-        crate::outbox::unmark_share_keep(&app.data_dir, &bot_id);
+        crate::outbox::unmark_share_keep(app.data_dir(), &bot_id);
     }
-    store::revoke_project(&app.db, project_id).await
+    store::revoke_project(app.db_pool(), project_id).await
 }
 
 /// 拿 bot 身分打 API 的（實際上只有 AGM 角色過得了 `UserOrAgm` 那道）不能刪、不能停分享用 bot，也不能刪裝著它的專案

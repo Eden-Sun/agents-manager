@@ -19,14 +19,25 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde_json::{json, Value};
 
 use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::lifecycle::LcError;
-use crate::state::App;
+use crate::outbox::ShareStorage;
+
+/// 受限 bot 啟動／建立要從 `App` 拿的外部事實（`App` 在 `app_ports_p10` 實作）：本機身分的 env、bot 目錄、claude 模型清單。
+///
+/// 實作者是 `Arc<App>`（不是 `App`）：身分表與模型清單的既有函式要的是 `&Arc<App>`。
+pub trait CageEnv: ShareStorage {
+    /// 本機名叫 `identity` 的身分的 env（沒有＝空）。
+    fn local_identity_env(&self, identity: &str) -> impl std::future::Future<Output = BTreeMap<String, String>> + Send;
+    /// 這顆 bot 在 daemon 資料目錄底下的目錄（id 不合法＝錯誤）。
+    fn bot_dir(&self, bot_id: &str) -> anyhow::Result<PathBuf>;
+    /// `/api/models?kind=claude` 當下的清單（`{"models":[{"id":…}]}`）；列不出來回錯誤字串。
+    fn claude_models(&self, identity: Option<&str>) -> impl std::future::Future<Output = Result<Value, String>> + Send;
+}
 
 /// 受限 bot 目前只做 claude、只在本機（工作目錄在這台的 data dir 底下）。
 pub(crate) fn check_profile(kind: &str, host: &str) -> Result<(), LcError> {
@@ -47,15 +58,15 @@ pub(crate) fn check_profile(kind: &str, host: &str) -> Result<(), LcError> {
 
 /// 啟動前：這顆是不是受限 bot。是的話回它的工作目錄（順手補建），而且 kind／host 不合就不准起來。
 /// 讀不到 `shared_bots` 一律不啟動——寧可起不來，也不要把受限 bot 當一般 bot 起（fail closed）。
-pub(crate) async fn prepare(app: &Arc<App>, bot: &db::Bot, host: &str) -> Result<Option<String>, LcError> {
-    let ws = crate::share::store::caged_workspace(&app.db, &bot.id)
+pub(crate) async fn prepare(app: &impl ShareStorage, bot: &db::Bot, host: &str) -> Result<Option<String>, LcError> {
+    let ws = crate::share::store::caged_workspace(app.db_pool(), &bot.id)
         .await
         .map_err(|e| LcError::Upstream(format!("cannot tell whether bot {} is a restricted share bot: {e}", bot.id)))?;
     let Some(ws) = ws else {
         // 信任分享（trusted）不進籠子，照一般 bot 起；但 outbox 一樣不給 gc 清、上傳的 inbox 一樣要在。
-        if let Ok(Some(dir)) = crate::share::store::workspace(&app.db, &bot.id).await {
+        if let Ok(Some(dir)) = crate::share::store::workspace(app.db_pool(), &bot.id).await {
             let _ = crate::share::folder::ensure_inbox(Path::new(&dir));
-            crate::outbox::mark_share_keep(&app.data_dir, &bot.id);
+            crate::outbox::mark_share_keep(app.data_dir(), &bot.id);
         }
         return Ok(None);
     };
@@ -63,7 +74,7 @@ pub(crate) async fn prepare(app: &Arc<App>, bot: &db::Bot, host: &str) -> Result
     // 資料夾不見了就不起來（不替使用者重建一個空的）；inbox 不存在就建。
     crate::share::folder::ensure_inbox(Path::new(&ws)).map_err(|e| LcError::Upstream(format!("restricted bot folder {ws}: {e}")))?;
     // outbox 不給 AGM 的 gc 清（使用者 2026-10-04）：每次啟動補一次標記，bot 自己刪掉也回得來。
-    crate::outbox::mark_share_keep(&app.data_dir, &bot.id);
+    crate::outbox::mark_share_keep(app.data_dir(), &bot.id);
     Ok(Some(ws))
 }
 
@@ -109,9 +120,9 @@ pub(crate) fn cage_env(env: &mut Value, identity_env: &BTreeMap<String, String>,
 }
 
 /// 啟動時重算 [`cage_env`] 要的身分 env（本機）。
-pub(crate) async fn identity_env(app: &Arc<App>, bot: &db::Bot) -> BTreeMap<String, String> {
+pub(crate) async fn identity_env(app: &impl CageEnv, bot: &db::Bot) -> BTreeMap<String, String> {
     match bot.identity.as_deref().filter(|s| !s.trim().is_empty()) {
-        Some(idn) => crate::tools::identity_for_host(app, LOCAL_HOST, idn).await.map(|i| i.env).unwrap_or_default(),
+        Some(idn) => app.local_identity_env(idn).await,
         None => BTreeMap::new(),
     }
 }
@@ -200,7 +211,7 @@ pub(crate) fn launch_args(env: &Value, prompt_file: &Path) -> Vec<String> {
 }
 
 /// 把受限 bot 的系統提示寫進它自己的 bot 目錄（0600；它的檔案工具碰不到 `bots/`，CLI 啟動時自己讀）。
-pub(crate) fn install_prompt(app: &App, bot: &db::Bot, workspace: &str, env: &Value) -> anyhow::Result<PathBuf> {
+pub(crate) fn install_prompt(app: &impl CageEnv, bot: &db::Bot, workspace: &str, env: &Value) -> anyhow::Result<PathBuf> {
     let outbox = env.get("AM_OUTBOX").and_then(Value::as_str).filter(|s| !s.is_empty());
     let dir = app.bot_dir(&bot.id)?;
     crate::private_files::create_private_dir(&dir)?;
@@ -264,8 +275,8 @@ pub(crate) fn check_create(kind: &str, host: &str, args: &[String], env: Option<
 /// 受限 bot 沒指定模型時用的：`/api/models?kind=claude` 當下列出的最新 Opus。清單有完整 id（`claude-opus-X-Y`）就挑版本最大的，
 /// 只有別名就用 `opus`（claude 自己把它解析成當版最新的 Opus，2.1.288 實測是 claude-opus-5-5）。清單抓不到也退回 `opus`：
 /// 不寫死版本號，也不落回帳號預設（線上那顆就是這樣跑成舊版的）。
-pub(crate) async fn latest_opus(app: &Arc<App>, identity: Option<&str>) -> String {
-    match crate::models::list(app, LOCAL_HOST, "claude", identity, false).await {
+pub(crate) async fn latest_opus(app: &impl CageEnv, identity: Option<&str>) -> String {
+    match app.claude_models(identity).await {
         Ok(v) => latest_opus_in(&v).unwrap_or_else(|| "opus".into()),
         Err(e) => {
             tracing::warn!(error = %e, "cannot list claude models for the restricted bot; using the `opus` alias");

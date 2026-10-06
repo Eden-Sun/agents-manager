@@ -9,12 +9,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::*;
 use crate::testing as tt;
 
-async fn fixture() -> (tt::Env, String, Portal, SocketAddr, reqwest::Client) {
+async fn fixture() -> (tt::Env, String, Portal<crate::state::App>, SocketAddr, reqwest::Client) {
     fixture_with(UPLOAD_QUEUE_WAIT).await
 }
 
 /// `upload_wait`：名額滿了排隊等多久。
-async fn fixture_with(upload_wait: Duration) -> (tt::Env, String, Portal, SocketAddr, reqwest::Client) {
+async fn fixture_with(upload_wait: Duration) -> (tt::Env, String, Portal<crate::state::App>, SocketAddr, reqwest::Client) {
     let e = tt::env().await;
     let b = tt::claude_bot(&e.app, &e.project_id, "share-upload-tests").await;
     let root = tt::scratch_dir("am-share-upload-root");

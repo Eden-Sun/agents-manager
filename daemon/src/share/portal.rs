@@ -34,9 +34,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, OwnedMutexGuard, Semaphore};
 
 use crate::db;
-use crate::lifecycle::{self, LcError};
 use crate::share::{multipart, store, SHARE_SENDER};
-use crate::state::App;
 
 /// 一則訊息的字數上限。
 pub(crate) const MAX_TEXT_CHARS: usize = 8000;
@@ -85,9 +83,40 @@ const INLINE_IMAGE_CSP: &str = "sandbox; default-src 'none'; img-src data:; styl
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; \
                    font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
 
-#[derive(Clone)]
-pub(crate) struct Portal {
-    app: Arc<App>,
+/// 分享入口從 `App` 拿的外部事實（`App` 在 `app_ports_p10` 實作）：資料目錄與 DB（[`ShareStorage`]）、讀分享檔、SVG 提醒（[`SvgCheckEnv`]），
+/// 加上 `[share]` 設定、bot 互斥鎖、狀態燈、事件匯流排與「把分享使用者的訊息送給 bot」。授權檢查（token 解析、權威鎖、撞號後重驗）全在這個檔，不經過 trait。
+pub(crate) trait PortalEnv: crate::share::svg_check::SvgCheckEnv {
+    /// `[share] base_url`（讀當下的設定）。
+    fn share_base_url(&self) -> impl std::future::Future<Output = Option<String>> + Send;
+    /// `[share] listen`（讀當下的設定）。
+    fn share_listen(&self) -> impl std::future::Future<Output = Option<String>> + Send;
+    /// 跟 token 輪替、停用、刪 bot 共用的那把 per-bot 互斥鎖。
+    fn bot_mutex(&self, bot_id: &str) -> impl std::future::Future<Output = Arc<tokio::sync::Mutex<()>>> + Send;
+    /// 狀態燈（working／idle／starting／offline／blocked／unknown）。
+    fn share_status(&self, bot_id: &str) -> impl std::future::Future<Output = &'static str> + Send;
+    /// 訂閱 daemon 的事件匯流排。
+    fn subscribe_events(&self) -> broadcast::Receiver<crate::state::WsEvent>;
+    /// 把分享使用者的訊息送給 bot（走一般的 prompt／排隊路徑，並在 bot 鎖底下再驗一次 token）。
+    fn send_share_message(
+        app: &Arc<Self>,
+        bot_id: &str,
+        composed: &str,
+        crid: &str,
+        token: &str,
+    ) -> impl std::future::Future<Output = SendOutcome> + Send;
+}
+
+/// [`PortalEnv::send_share_message`] 的結果；細節（pane、run、herdr）不給外面看。
+pub(crate) enum SendOutcome {
+    Accepted { message_id: String, delivery: String },
+    NotFound,
+    /// 現在收不下（例如上一則還在等回覆）；`Value` 只進 log。
+    Conflict(Value),
+    Failed(String),
+}
+
+pub(crate) struct Portal<H: PortalEnv> {
+    app: Arc<H>,
     limits: Arc<Limits>,
     uploads: Arc<Semaphore>,
     /// 排隊等 [`Portal::uploads`] 的名額（[`UPLOAD_QUEUE_MAX`]）。
@@ -97,6 +126,21 @@ pub(crate) struct Portal {
     streams: Arc<Semaphore>,
     share_streams: Arc<ShareStreamLimits>,
     token_lookups: Arc<Semaphore>,
+}
+
+impl<H: PortalEnv> Clone for Portal<H> {
+    fn clone(&self) -> Self {
+        Self {
+            app: self.app.clone(),
+            limits: self.limits.clone(),
+            uploads: self.uploads.clone(),
+            upload_queue: self.upload_queue.clone(),
+            upload_wait: self.upload_wait,
+            streams: self.streams.clone(),
+            share_streams: self.share_streams.clone(),
+            token_lookups: self.token_lookups.clone(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -187,8 +231,8 @@ pub(crate) fn kick(bot_id: &str) {
     let _ = kicks().send(bot_id.to_string());
 }
 
-pub fn router(app: Arc<App>) -> Router {
-    let st = Portal {
+pub fn router<H: PortalEnv>(app: Arc<H>) -> Router {
+    let st = Portal::<H> {
         app,
         limits: Arc::new(Limits::default()),
         uploads: Arc::new(Semaphore::new(UPLOAD_SLOTS)),
@@ -201,24 +245,24 @@ pub fn router(app: Arc<App>) -> Router {
     router_with_state(st)
 }
 
-fn router_with_state(st: Portal) -> Router {
+fn router_with_state<H: PortalEnv>(st: Portal<H>) -> Router {
     Router::new()
-        .route("/s/{token}", get(page))
-        .route("/s/{token}/api/info", get(info))
-        .route("/s/{token}/api/messages", get(list_messages).post(send_message).layer(DefaultBodyLimit::max(64 * 1024)))
-        .route("/s/{token}/api/events", get(events))
+        .route("/s/{token}", get(page::<H>))
+        .route("/s/{token}/api/info", get(info::<H>))
+        .route("/s/{token}/api/messages", get(list_messages::<H>).post(send_message::<H>).layer(DefaultBodyLimit::max(64 * 1024)))
+        .route("/s/{token}/api/events", get(events::<H>))
         // multipart 的邊界與標頭另外留 64 KiB；檔案本身照樣 ≤ MAX_UPLOAD（解開之後再量）。
         .route(
             "/s/{token}/api/upload",
-            post(upload)
+            post(upload::<H>)
                 .layer(DefaultBodyLimit::max(MAX_UPLOAD + 64 * 1024))
-                .layer(middleware::from_fn_with_state(st.clone(), upload_admission)),
+                .layer(middleware::from_fn_with_state(st.clone(), upload_admission::<H>)),
         )
-        .route("/s/{token}/api/files", get(files))
-        .route("/s/{token}/api/files/{name}", get(file))
+        .route("/s/{token}/api/files", get(files::<H>))
+        .route("/s/{token}/api/files/{name}", get(file::<H>))
         .route("/assets/{*path}", get(asset))
         .fallback(fallback)
-        .layer(middleware::from_fn_with_state(st.clone(), security_headers))
+        .layer(middleware::from_fn_with_state(st.clone(), security_headers::<H>))
         .with_state(st)
 }
 
@@ -256,8 +300,8 @@ fn configured_share_host(base: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
-async fn security_headers(State(st): State<Portal>, uri: Uri, req: axum::extract::Request, next: Next) -> Response {
-    let configured = st.app.cfg.get().await.share.base().as_deref().and_then(configured_share_host);
+async fn security_headers<H: PortalEnv>(State(st): State<Portal<H>>, uri: Uri, req: axum::extract::Request, next: Next) -> Response {
+    let configured = st.app.share_base_url().await.as_deref().and_then(configured_share_host);
     let headers = req.headers();
     let mut bad_host = false;
     if let Some(host) = headers.get(header::HOST) {
@@ -319,8 +363,8 @@ fn bad(reason: &str, message: &str) -> Response {
 
 /// token → bot id；不對就是 404。
 #[allow(clippy::result_large_err)]
-async fn bot_for(st: &Portal, token: &str) -> Result<String, Response> {
-    match resolve_token(&st.app.db, &st.token_lookups, token).await {
+async fn bot_for<H: PortalEnv>(st: &Portal<H>, token: &str) -> Result<String, Response> {
+    match resolve_token(st.app.db_pool(), &st.token_lookups, token).await {
         Ok(Some(id)) => {
             touch_share_if_stale(&st.app, &st.limits, &id).await;
             Ok(id)
@@ -334,7 +378,7 @@ async fn bot_for(st: &Portal, token: &str) -> Result<String, Response> {
     }
 }
 
-async fn touch_share_if_stale(app: &Arc<App>, limits: &Arc<Limits>, bot_id: &str) {
+async fn touch_share_if_stale<H: PortalEnv>(app: &Arc<H>, limits: &Arc<Limits>, bot_id: &str) {
     let window = Duration::from_secs(60);
     if limits.take(bot_id, "touch", 1, window).is_some() {
         return;
@@ -342,26 +386,26 @@ async fn touch_share_if_stale(app: &Arc<App>, limits: &Arc<Limits>, bot_id: &str
     let fresh = sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM bot_shares WHERE bot_id = ? AND last_used_at >= ?)")
         .bind(bot_id)
         .bind(db::iso_in(-60))
-        .fetch_one(&app.db)
+        .fetch_one(app.db_pool())
         .await;
     match fresh {
-        Ok(0) => store::touch(&app.db, bot_id).await,
+        Ok(0) => store::touch(app.db_pool(), bot_id).await,
         Ok(_) => {}
         Err(e) => tracing::warn!(bot = %bot_id, error = %e, "share last-used telemetry check failed"),
     }
 }
 
 /// Serialize capability validation with token rotation, disable, and bot deletion.
-async fn authority_lock_app(
-    app: &Arc<App>,
+async fn authority_lock_app<H: PortalEnv>(
+    app: &Arc<H>,
     token_lookups: &Arc<Semaphore>,
     limits: &Arc<Limits>,
     token: &str,
     bot_id: &str,
 ) -> Result<OwnedMutexGuard<()>, Response> {
-    let lock = app.bot_lock(bot_id).await;
+    let lock = app.bot_mutex(bot_id).await;
     let guard = lock.lock_owned().await;
-    match resolve_token(&app.db, token_lookups, token).await {
+    match resolve_token(app.db_pool(), token_lookups, token).await {
         Ok(Some(id)) if id == bot_id => {
             touch_share_if_stale(app, limits, bot_id).await;
             Ok(guard)
@@ -375,11 +419,11 @@ async fn authority_lock_app(
     }
 }
 
-async fn authority_lock(st: &Portal, token: &str, bot_id: &str) -> Result<OwnedMutexGuard<()>, Response> {
+async fn authority_lock<H: PortalEnv>(st: &Portal<H>, token: &str, bot_id: &str) -> Result<OwnedMutexGuard<()>, Response> {
     authority_lock_app(&st.app, &st.token_lookups, &st.limits, token, bot_id).await
 }
 
-async fn authorized_bot(st: &Portal, token: &str) -> Result<(String, OwnedMutexGuard<()>), Response> {
+async fn authorized_bot<H: PortalEnv>(st: &Portal<H>, token: &str) -> Result<(String, OwnedMutexGuard<()>), Response> {
     let bot_id = bot_for(st, token).await?;
     let guard = authority_lock(st, token, &bot_id).await?;
     Ok((bot_id, guard))
@@ -387,7 +431,7 @@ async fn authorized_bot(st: &Portal, token: &str) -> Result<(String, OwnedMutexG
 
 /// 上傳入口先驗 token、占名額，占到了才扣嘗試額度，再把 request 交給會讀取 Bytes 的 handler。
 /// `_permit` 活到 `next.run` 回應結束，慢速 body 也會占著同一個名額。
-async fn upload_admission(State(st): State<Portal>, Path(token): Path<String>, mut req: axum::extract::Request, next: Next) -> Response {
+async fn upload_admission<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>, mut req: axum::extract::Request, next: Next) -> Response {
     let bot_id = match bot_for(&st, &token).await {
         Ok(id) => id,
         Err(response) => return response,
@@ -419,7 +463,7 @@ const PLACEHOLDER_PAGE: &str = "<!doctype html><html lang=\"zh-Hant\"><head><met
 <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>分享</title></head>\
 <body><p>分享頁還沒打包進這個版本（web/dist/share.html）。</p></body></html>";
 
-async fn page(State(st): State<Portal>, Path(token): Path<String>) -> Response {
+async fn page<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>) -> Response {
     let (_bot_id, _authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
@@ -444,19 +488,16 @@ async fn asset(Path(path): Path<String>) -> Response {
 }
 
 /// 狀態燈（跟主 UI 的 `lamp` 同一套字：working／idle／starting／offline／blocked／unknown）。
-async fn status_of(app: &Arc<App>, bot_id: &str) -> &'static str {
-    match db::active_run(&app.db, bot_id).await {
-        Ok(run) => crate::api::lamp(app.bot_connected(bot_id).await, run.as_ref()),
-        Err(_) => "unknown",
-    }
+async fn status_of<H: PortalEnv>(app: &Arc<H>, bot_id: &str) -> &'static str {
+    app.share_status(bot_id).await
 }
 
-async fn info(State(st): State<Portal>, Path(token): Path<String>) -> Response {
+async fn info<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>) -> Response {
     let (bot_id, _authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    let name = match db::bot(&st.app.db, &bot_id).await {
+    let name = match db::bot(st.app.db_pool(), &bot_id).await {
         Ok(Some(b)) => b.name,
         Ok(None) => return not_found(),
         Err(_) => return unavailable(),
@@ -545,12 +586,12 @@ struct PageQuery {
     limit: Option<i64>,
 }
 
-async fn list_messages(State(st): State<Portal>, Path(token): Path<String>, Query(q): Query<PageQuery>) -> Response {
+async fn list_messages<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>, Query(q): Query<PageQuery>) -> Response {
     let (bot_id, _authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    let db = &st.app.db;
+    let db = st.app.db_pool();
     let Ok(conv) = db::conversation_id(db, &bot_id).await else { return unavailable() };
     let limit = q.limit.unwrap_or(100).clamp(1, 200);
     let before = match q.before.as_deref().filter(|s| !s.is_empty()) {
@@ -611,7 +652,7 @@ pub(crate) fn stored_name_ok(name: &str) -> bool {
         && display_name(name) != name
 }
 
-async fn send_message(State(st): State<Portal>, Path(token): Path<String>, Json(b): Json<SendIn>) -> Response {
+async fn send_message<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>, Json(b): Json<SendIn>) -> Response {
     let bot_id = match bot_for(&st, &token).await {
         Ok(id) => id,
         Err(r) => return r,
@@ -654,29 +695,28 @@ async fn send_message(State(st): State<Portal>, Path(token): Path<String>, Json(
     }
     // 跟主 UI 的冪等鍵分開一個命名空間。
     let crid = format!("share:{crid}");
-    let src = lifecycle::RelaySrc::trusted(Some(SHARE_SENDER));
     drop(authority);
-    match lifecycle::prompt_starting_or_queue_with_share_token(&st.app, &bot_id, &composed, &crid, &[], src, true, &token).await {
-        Ok(out) => Json(json!({"accepted": true, "message_id": out.message_id, "delivery": out.delivery})).into_response(),
-        Err(LcError::NotFound(_)) => not_found(),
+    match H::send_share_message(&st.app, &bot_id, &composed, &crid, &token).await {
+        SendOutcome::Accepted { message_id, delivery } => Json(json!({"accepted": true, "message_id": message_id, "delivery": delivery})).into_response(),
+        SendOutcome::NotFound => not_found(),
         // 細節（pane、run、herdr）不給外面看：只說現在收不下，等一下再試。
-        Err(LcError::Conflict(v)) => {
+        SendOutcome::Conflict(v) => {
             tracing::info!(bot = %bot_id, detail = %v, "share message not accepted");
             (StatusCode::CONFLICT, Json(json!({"error": "not_accepted", "message": "上一則還在等回覆，等它回完再送"}))).into_response()
         }
-        Err(e) => {
-            tracing::warn!(bot = %bot_id, error = ?e, "share message failed");
+        SendOutcome::Failed(e) => {
+            tracing::warn!(bot = %bot_id, error = %e, "share message failed");
             unavailable()
         }
     }
 }
 
 /// 這顆受限 bot 的資料夾（`shared_bots.workspace`）：上傳放它底下的 `inbox/`。讀不到就當沒有（fail closed）。
-async fn folder_of(app: &Arc<App>, bot_id: &str) -> Option<std::path::PathBuf> {
-    crate::share::store::workspace(&app.db, bot_id).await.ok().flatten().map(std::path::PathBuf::from)
+async fn folder_of<H: PortalEnv>(app: &Arc<H>, bot_id: &str) -> Option<std::path::PathBuf> {
+    crate::share::store::workspace(app.db_pool(), bot_id).await.ok().flatten().map(std::path::PathBuf::from)
 }
 
-async fn inbox_has(app: &Arc<App>, bot_id: &str, name: &str) -> bool {
+async fn inbox_has<H: PortalEnv>(app: &Arc<H>, bot_id: &str, name: &str) -> bool {
     let Some(folder) = folder_of(app, bot_id).await else { return false };
     let name = name.to_string();
     tokio::task::spawn_blocking(move || crate::trusted_open::open_bound_file(&folder, &[OsStr::new("inbox"), OsStr::new(&name)], None).is_ok())
@@ -684,7 +724,7 @@ async fn inbox_has(app: &Arc<App>, bot_id: &str, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn events(State(st): State<Portal>, Path(token): Path<String>) -> Response {
+async fn events<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>) -> Response {
     let (bot_id, authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
@@ -704,7 +744,7 @@ async fn events(State(st): State<Portal>, Path(token): Path<String>) -> Response
         bot_id,
         token_lookups: st.token_lookups.clone(),
         limits: st.limits.clone(),
-        rx: st.app.subscribe(),
+        rx: st.app.subscribe_events(),
         kicks: kicks().subscribe(),
         _slot: slot,
         _share_slot: share_slot,
@@ -716,8 +756,8 @@ async fn events(State(st): State<Portal>, Path(token): Path<String>) -> Response
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(20))).into_response()
 }
 
-pub(crate) struct Stream {
-    app: Arc<App>,
+pub(crate) struct Stream<H: PortalEnv> {
+    app: Arc<H>,
     token: String,
     bot_id: String,
     token_lookups: Arc<Semaphore>,
@@ -731,7 +771,7 @@ pub(crate) struct Stream {
     revoked: bool,
 }
 
-impl Stream {
+impl<H: PortalEnv> Stream<H> {
     async fn still_valid(&self) -> bool {
         authority_lock_app(&self.app, &self.token_lookups, &self.limits, &self.token, &self.bot_id).await.is_ok()
     }
@@ -811,7 +851,7 @@ impl Stream {
                     "assistant" => match s("id") {
                         Some(id) => sqlx::query_scalar::<_, bool>(&format!("SELECT EXISTS(SELECT 1 FROM messages m WHERE m.id = ? AND {VISIBLE_SQL})"))
                             .bind(id)
-                            .fetch_one(&self.app.db)
+                            .fetch_one(self.app.db_pool())
                             .await
                             .unwrap_or(false),
                         None => false,
@@ -837,14 +877,14 @@ impl Stream {
 }
 
 #[cfg(test)]
-pub(crate) fn stream_for_test(app: &Arc<App>, token: &str, bot_id: &str, pending: Option<Value>) -> Stream {
+pub(crate) fn stream_for_test<H: PortalEnv>(app: &Arc<H>, token: &str, bot_id: &str, pending: Option<Value>) -> Stream<H> {
     Stream {
         app: app.clone(),
         token: token.to_string(),
         bot_id: bot_id.to_string(),
         token_lookups: Arc::new(Semaphore::new(MAX_TOKEN_LOOKUPS)),
         limits: Arc::new(Limits::default()),
-        rx: app.subscribe(),
+        rx: app.subscribe_events(),
         kicks: kicks().subscribe(),
         _slot: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
         _share_slot: Arc::new(ShareStreamLimits::default()).try_acquire(bot_id).unwrap(),
@@ -855,12 +895,12 @@ pub(crate) fn stream_for_test(app: &Arc<App>, token: &str, bot_id: &str, pending
 }
 
 #[cfg(test)]
-pub(crate) async fn next_for_test(stream: &mut Stream) -> Option<Event> {
+pub(crate) async fn next_for_test<H: PortalEnv>(stream: &mut Stream<H>) -> Option<Event> {
     stream.next().await
 }
 
 #[cfg(test)]
-pub(crate) async fn map_for_test(stream: &mut Stream, ev: &crate::state::WsEvent) -> Option<Event> {
+pub(crate) async fn map_for_test<H: PortalEnv>(stream: &mut Stream<H>, ev: &crate::state::WsEvent) -> Option<Event> {
     stream.map(ev).await
 }
 
@@ -903,8 +943,8 @@ pub(crate) fn clean_upload_name(raw: &str) -> Option<String> {
     Some(cleaned)
 }
 
-async fn upload(
-    State(st): State<Portal>,
+async fn upload<H: PortalEnv>(
+    State(st): State<Portal<H>>,
     Path(token): Path<String>,
     Extension(bot_id): Extension<String>,
     Query(q): Query<HashMap<String, String>>,
@@ -971,13 +1011,13 @@ async fn upload(
     }
 }
 
-async fn files(State(st): State<Portal>, Path(token): Path<String>) -> Response {
+async fn files<H: PortalEnv>(State(st): State<Portal<H>>, Path(token): Path<String>) -> Response {
     let (bot_id, _authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
     };
-    let Some(dir) = crate::outbox::dir_for(&st.app.data_dir, &bot_id) else { return not_found() };
-    let data_dir = st.app.data_dir.clone();
+    let Some(dir) = crate::outbox::dir_for(&st.app.data_dir(), &bot_id) else { return not_found() };
+    let data_dir = st.app.data_dir().to_path_buf();
     #[cfg(test)]
     let fail_scan = take_fail_files_scan_task_for_test(&bot_id);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -1045,7 +1085,7 @@ pub(crate) fn inline_image(name: &str) -> Option<&'static str> {
     })
 }
 
-async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, String)>, Query(q): Query<FileQuery>) -> Response {
+async fn file<H: PortalEnv>(State(st): State<Portal<H>>, Path((token, name)): Path<(String, String)>, Query(q): Query<FileQuery>) -> Response {
     let (bot_id, _authority) = match authorized_bot(&st, &token).await {
         Ok(v) => v,
         Err(r) => return r,
@@ -1081,7 +1121,7 @@ async fn file(State(st): State<Portal>, Path((token, name)): Path<(String, Strin
 
 /// bot 做的 SVG 用相對路徑引用資料夾裡的照片（`<image href="inbox/…">`）：送出前嵌成 data URI（[`crate::share::compose`]）。
 /// 原檔不改；資料夾讀不到或沒有要嵌的就原樣送。
-async fn embed_photos(app: &Arc<App>, bot_id: &str, res: Response) -> Response {
+async fn embed_photos<H: PortalEnv>(app: &Arc<H>, bot_id: &str, res: Response) -> Response {
     let (mut parts, body) = res.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, crate::outbox::MAX_BYTES as usize).await else { return unavailable() };
     if !crate::share::compose::wants_embed(&bytes) {
@@ -1101,8 +1141,8 @@ async fn embed_photos(app: &Arc<App>, bot_id: &str, res: Response) -> Response {
 
 /// `[share] listen` 有設就開分享入口。只准 loopback（Tailscale Funnel 從本機轉進來），不能跟管理 API 同一個 port；
 /// 開不起來只記 error，不擋 daemon 開機（管理介面照常）。設定改了要重啟 daemon 才生效。
-pub(crate) async fn spawn_listener(app: &Arc<App>, main_port: u16) {
-    let Some(listen) = app.cfg.get().await.share.listen.clone().filter(|s| !s.trim().is_empty()) else { return };
+pub(crate) async fn spawn_listener<H: PortalEnv>(app: &Arc<H>, main_port: u16) {
+    let Some(listen) = app.share_listen().await.filter(|s| !s.trim().is_empty()) else { return };
     let addr = match check_listen(&listen, main_port) {
         Ok(a) => a,
         Err(why) => {
