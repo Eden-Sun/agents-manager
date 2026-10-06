@@ -243,7 +243,7 @@ async fn raise(app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     if let Some(parent) = bot.parent_bot_id.as_deref() {
         if let Ok(conv) = crate::db::conversation_id(app.db(), parent).await {
             let note = format!("交辦 {}（{}）的{action}", s.assignment_id, bot.name);
-            let _ = crate::herdr_maintenance::app_ports_p12::insert_system_message(app, &conv, &note).await;
+            let _ = crate::app_ports_p12::insert_system_message(app, &conv, &note).await;
         }
     }
     Ok(())

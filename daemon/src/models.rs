@@ -9,8 +9,6 @@ use crate::config::{expand_home, LOCAL_HOST};
 use crate::hosts::sh_quote;
 use crate::state::App;
 
-#[path = "app_ports_p13.rs"]
-pub(crate) mod app_ports_p13;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;

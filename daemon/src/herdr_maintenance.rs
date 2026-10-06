@@ -19,9 +19,6 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
-#[path = "app_ports_p12.rs"]
-pub(crate) mod app_ports_p12;
-
 /// 維護窗口的上限（分鐘）。升級實測一輪不到 5 分鐘；30 分鐘給回滾留空間，又不會讓「忘了關」變成常態。
 pub const MAX_MINUTES: i64 = 30;
 
@@ -191,7 +188,7 @@ pub async fn get(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
 }
 
 pub async fn open(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<Json<OpenIn>>) -> Result<Json<Value>, LcError> {
-    let role = app_ports_p12::actor_role_name(&app, &headers).await?.ok_or_else(forbidden)?;
+    let role = crate::app_ports_p12::actor_role_name(&app, &headers).await?.ok_or_else(forbidden)?;
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let minutes = b.minutes.unwrap_or(MAX_MINUTES);
     if !(1..=MAX_MINUTES).contains(&minutes) {
@@ -234,7 +231,7 @@ pub async fn close_as(app: &Arc<App>, w: &Window, actor: &str, reason: Option<&s
 }
 
 pub async fn end(State(app): State<Arc<App>>, headers: HeaderMap, body: Option<Json<CloseIn>>) -> Result<Json<Value>, LcError> {
-    let role = app_ports_p12::actor_role_name(&app, &headers).await?.ok_or_else(forbidden)?;
+    let role = crate::app_ports_p12::actor_role_name(&app, &headers).await?.ok_or_else(forbidden)?;
     let b = body.map(|Json(b)| b).unwrap_or_default();
     let Some(w) = active(&app).await.map_err(up)? else {
         return Ok(Json(json!({"active": false, "closed": false})));

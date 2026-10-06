@@ -299,7 +299,7 @@ pub async fn eligible(app: &Arc<impl crate::capabilities::Cfg + crate::capabilit
     if !source.supports(&host) {
         return None;
     }
-    let codex_home = if host == LOCAL_HOST { crate::models::app_ports_p13::codex_home(app, bot).await } else { None };
+    let codex_home = if host == LOCAL_HOST { crate::app_ports_p13::codex_home(app, bot).await } else { None };
     Some((source, Binding { host, codex_home, thread_id: thread_id.to_string() }))
 }
 

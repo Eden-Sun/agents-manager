@@ -8,6 +8,15 @@ pub const DAEMON_SENDER: &str = "daemon";
 /// 分享頁面來源的 `relay_from` 哨符。
 pub const SHARE_SENDER: &str = "share";
 
+/// 常數時間字串比較。
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 

@@ -789,14 +789,7 @@ pub async fn emit_host_changed(app: &Arc<App>, fence: &crate::hosts::HostFence) 
     published
 }
 
-/// 丟掉 `Child` 不會 wait：行程結束後在 daemon 存活期間留 zombie（#287）。另起 thread 等它，結束就收掉。
-pub fn reap_in_background(mut child: std::process::Child) {
-    std::thread::spawn(move || {
-        if let Err(error) = child.wait() {
-            tracing::warn!(?error, "failed waiting for spawned child");
-        }
-    });
-}
+pub use crate::local_sh::reap_in_background;
 
 /// Ensure the named herdr session's socket is reachable, spawning a headless server if not.
 pub async fn ensure_session(session: &str, log_dir: &PathBuf) -> Result<HerdrClient> {
