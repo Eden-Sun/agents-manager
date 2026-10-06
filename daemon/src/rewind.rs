@@ -25,7 +25,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::db;
-use crate::lifecycle::{self, LcError, LcResult};
+use crate::lc_error::{LcError, LcResult};
+use crate::lifecycle;
 use crate::state::App;
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {

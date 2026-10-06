@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 use crate::trusted_open;
 
 /// 截圖等級的圖片就夠了；太大的檔不該塞進一則對話。

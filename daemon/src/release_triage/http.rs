@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use super::issue::{self, Outcome};
 use super::ledger::{self, Row, Status};
 use super::verdict::{self, Submission};
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 use crate::state::App;
 
 pub fn routes() -> Router<Arc<App>> {

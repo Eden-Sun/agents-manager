@@ -24,28 +24,6 @@ use std::sync::Arc;
 #[path = "shell.rs"]
 pub mod shell;
 
-impl IntoResponse for LcError {
-    fn into_response(self) -> Response {
-        match self {
-            LcError::NotFound(what) => (StatusCode::NOT_FOUND, Json(json!({"error": "not_found", "what": what}))).into_response(),
-            LcError::NotFoundValue(v) => (StatusCode::NOT_FOUND, Json(v)).into_response(),
-            LcError::Conflict(v) => (StatusCode::CONFLICT, Json(v)).into_response(),
-            LcError::Bad(m) => (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "message": m}))).into_response(),
-            LcError::BadValue(v) => (StatusCode::BAD_REQUEST, Json(v)).into_response(),
-            LcError::Unprocessable(v) => (StatusCode::UNPROCESSABLE_ENTITY, Json(v)).into_response(),
-            LcError::Forbidden(v) => (StatusCode::FORBIDDEN, Json(v)).into_response(),
-            LcError::Unavailable(v) => {
-                let retry = v.get("retry_after_secs").and_then(Value::as_i64).unwrap_or(10).max(1);
-                (StatusCode::SERVICE_UNAVAILABLE, [(axum::http::header::RETRY_AFTER, retry.to_string())], Json(v)).into_response()
-            }
-            LcError::Uncommitted(v) => (StatusCode::SERVICE_UNAVAILABLE, Json(v)).into_response(),
-            LcError::Upstream(m) => {
-                (StatusCode::BAD_GATEWAY, Json(json!({"error": "upstream", "message": m}))).into_response()
-            }
-        }
-    }
-}
-
 fn any_err<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }

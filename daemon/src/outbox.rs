@@ -28,7 +28,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 use crate::trusted_open;
 
 

@@ -3,7 +3,7 @@
 //! 這些值最後會變成別的東西：model 是 CLI 的 argv、`env` 是 pane 的環境變數、專案路徑是 bot 的工作目錄、名稱與標籤會出現在
 //! herdr 的 pane 標題與終端機畫面。只擋「一定會出事」的形狀，不替使用者決定什麼名字好看。
 
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 use std::collections::BTreeMap;
 
 /// 一個 bot 的 env 最多幾個、單一值最長幾個位元組（擋住一次塞進幾 MB 的請求）。

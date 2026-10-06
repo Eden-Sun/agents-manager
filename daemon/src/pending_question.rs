@@ -5,7 +5,7 @@
 //! 這裡找「最後一個還沒被回答的 `AskUserQuestion`」：有 `tool_use`、之後沒有對應 `tool_use_id` 的 `tool_result`。
 
 use crate::db;
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 use crate::state::App;
 use axum::extract::{Path, State};
 use axum::Json;

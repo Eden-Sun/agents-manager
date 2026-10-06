@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 
-use crate::lifecycle::LcError;
+use crate::lc_error::LcError;
 use crate::state::App;
 
 pub fn routes() -> Router<Arc<App>> {

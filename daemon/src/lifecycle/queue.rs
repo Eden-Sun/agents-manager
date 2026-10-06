@@ -691,19 +691,7 @@ pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
 }
 
 
-/// [`mark_run_exited`] 做成了什麼。呼叫端多半不看，但「寫不進去」與「別的路徑先收了」要分得開（#135）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunExit {
-    /// 記成 `exited`，收尾（in-flight、孤兒佇列、watcher）做完了。
-    Recorded,
-    /// 這顆 run 已經不是 active（讀到時就不是，或 CAS 輸給先收掉它的路徑）：收尾歸那條路，這裡一樣都不做。
-    AlreadyEnded,
-    /// DB 讀寫失敗：什麼都沒動，run 照舊是 active；寫入失敗的排了對帳重試。
-    NotRecorded,
-    /// 記成 `exited`、孤兒佇列與 watcher 收了，但 in-flight 那一筆寫不進 failed（#156）：記成欠著的收尾，之後補上
-    /// （`interruption` 的帳：定時重試、這顆 bot 的下一則 hook／prompt；daemon 重啟則由 `rearm_progress` 補收）。
-    TurnOwed,
-}
+pub use crate::lc_error::RunExit;
 
 /// Terminate a run: state `exited`, fail its in-flight turn, drop the pane watcher.
 ///

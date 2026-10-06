@@ -99,6 +99,7 @@ mod judge;
 mod hookrecv;
 mod hosts;
 mod kind_probe;
+pub mod lc_error;
 mod lifecycle;
 mod linux_proc;
 mod local_image;

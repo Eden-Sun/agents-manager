@@ -85,8 +85,8 @@ pub async fn alert(pool: &SqlitePool, reason: &str, subject: &str, detail: &str)
 
 /// 刪除 API 的閘門：要刪的 bot 是 AGM 的，而且沒有帶 `confirm=supervisor` → 409 `supervisor_owned`＋`ops_alert`，什麼都不動。
 /// bot 不存在就放過（交給刪除本身回 404）。
-pub async fn guard_bot_delete(pool: &SqlitePool, bot_id: &str, confirm: Option<&str>) -> Result<(), crate::lifecycle::LcError> {
-    let up = |e: anyhow::Error| crate::lifecycle::LcError::Upstream(format!("{e:#}"));
+pub async fn guard_bot_delete(pool: &SqlitePool, bot_id: &str, confirm: Option<&str>) -> Result<(), crate::lc_error::LcError> {
+    let up = |e: anyhow::Error| crate::lc_error::LcError::Upstream(format!("{e:#}"));
     let Some(bot) = db::bot(pool, bot_id).await.map_err(up)? else { return Ok(()) };
     let owned = load(pool).await.map_err(up)?;
     if bot.deleted_at.is_some() || !owned.owns(&bot) {
@@ -104,8 +104,8 @@ pub async fn guard_bot_delete(pool: &SqlitePool, bot_id: &str, confirm: Option<&
 }
 
 /// 刪整個專案：專案本身是總管／角色的專案，或裡面有任何一顆 AGM 的 bot。
-pub async fn guard_project_delete(pool: &SqlitePool, project_id: &str, confirm: Option<&str>) -> Result<(), crate::lifecycle::LcError> {
-    let up = |e: anyhow::Error| crate::lifecycle::LcError::Upstream(format!("{e:#}"));
+pub async fn guard_project_delete(pool: &SqlitePool, project_id: &str, confirm: Option<&str>) -> Result<(), crate::lc_error::LcError> {
+    let up = |e: anyhow::Error| crate::lc_error::LcError::Upstream(format!("{e:#}"));
     let owned = load(pool).await.map_err(up)?;
     let bots = db::live_bots(pool).await.map_err(up)?;
     if !owned.project_ids.contains(project_id) && !bots.iter().any(|b| b.project_id == project_id && owned.owns(b)) {
@@ -120,7 +120,7 @@ async fn refuse_unless_confirmed(
     subject: &str,
     what: &str,
     extra: serde_json::Value,
-) -> Result<(), crate::lifecycle::LcError> {
+) -> Result<(), crate::lc_error::LcError> {
     let by = crate::config_audit::http_caller();
     if confirm == Some(CONFIRM) {
         tracing::warn!(what = %what, http = %by, "deleting an AGM bot/project with confirm=supervisor");
@@ -130,7 +130,7 @@ async fn refuse_unless_confirmed(
         .await;
     let mut body = extra;
     body["message"] = json!(format!("{what} 屬於 AGM（總管／角色本身、它們的 child、或在總管專案裡）；確定要刪請帶 ?confirm={CONFIRM}"));
-    Err(crate::lifecycle::LcError::conflict("supervisor_owned", body))
+    Err(crate::lc_error::LcError::conflict("supervisor_owned", body))
 }
 
 /// 刪除 API 放行 AGM bot 的 query 值。

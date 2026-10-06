@@ -8,7 +8,7 @@
 //! 唯一寫入）、`client_for_run`／`App::herdr_for_run`（pane RPC）、start／stop／restart／prompt 的入口、
 //! `flush_queued_locked`、`hookrecv::process_locked`、對帳的逐 bot 迴圈與子 agent 認領、`panes::scan_snapshot`。
 
-use crate::lifecycle::{LcError, LcResult};
+use crate::lc_error::{LcError, LcResult};
 use anyhow::Result;
 use serde_json::json;
 use sqlx::{SqliteConnection, SqlitePool};
