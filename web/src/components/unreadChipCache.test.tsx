@@ -84,3 +84,24 @@ test('不多加元素：有倒數與已涼的晶片子元素結構一樣', async
   const shape = (el: HTMLElement) => [...el.children].map((c) => c.className).join('|')
   assert.equal(shape(chip('fresh')), shape(chip('cold')))
 })
+
+test('不用保溫（keep_warm_skip）：晶片不畫倒數底色、tooltip 講不保溫中；取消後即時恢復', async () => {
+  seed()
+  await mount(<UnreadChip />)
+  assert.ok(chip('fresh').classList.contains('cache-fresh'))
+  const setSkip = (skip: boolean) =>
+    act(async () => {
+      const s = useStore.getState()
+      useStore.setState({ runs: { ...s.runs, fresh: { ...s.runs.fresh, keep_warm_skip: skip } } } as never)
+    })
+  await setSkip(true)
+  assert.ok(![...chip('fresh').classList].some((c) => c.startsWith('cache-')), '沒有 cache- class')
+  assert.equal(chip('fresh').style.getPropertyValue('--cache-fill'), '')
+  const text = await hoverText('fresh')
+  assert.match(text, /不保溫中/)
+  assert.doesNotMatch(text, /快取約/)
+  await setSkip(false)
+  assert.ok(chip('fresh').classList.contains('cache-fresh'))
+  assert.equal(chip('fresh').style.getPropertyValue('--cache-fill'), '75.0%')
+  assert.match(await hoverText('fresh'), /快取約 45 分後到期/)
+})

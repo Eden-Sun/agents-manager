@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { cacheLevel, cacheState } from './cacheClock.ts'
+import { cacheLevel, cacheState, chipCache } from './cacheClock.ts'
 
 const T0 = Date.parse('2026-10-04T12:00:00.000Z')
 const at = (minAgo: number) => new Date(T0 - minAgo * 60_000).toISOString()
@@ -71,4 +71,14 @@ test('熱壓後視為涼掉：daemon 不帶 cache_kept_warm_at（熱壓前的保
   assert.equal(cacheState(at(111), 3600, T0, false, at(30))!.level, 'fresh')
   // 熱壓之後真的活動重新計時：新的活動一出現就回到熱。
   assert.equal(cacheState(at(2), 3600, T0, false, null)!.level, 'fresh')
+})
+
+test('chipCache：keep_warm_skip=true 無倒數、false／未帶照常倒數、切換即時生效', () => {
+  const run = { last_api_at: at(15), cache_ttl_secs: 3600, cache_kept_warm_at: null as string | null, keep_warm_skip: true }
+  assert.equal(chipCache(run, T0), null)
+  assert.equal(chipCache(run, T0, true), null, '回合進行中也不畫')
+  assert.equal(chipCache({ ...run, keep_warm_skip: false }, T0)!.level, 'fresh')
+  assert.equal(chipCache({ ...run, keep_warm_skip: undefined }, T0)!.frac, 0.75)
+  assert.equal(chipCache(undefined, T0), null)
+  assert.deepEqual(chipCache({ ...run, keep_warm_skip: false }, T0), cacheState(run.last_api_at, 3600, T0, false, null))
 })

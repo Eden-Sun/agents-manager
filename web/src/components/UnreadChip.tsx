@@ -26,7 +26,7 @@ import { useBotLamp } from '../hooks/useBotLamp'
 import { StatusLamp } from './StatusLamp'
 import type { Lamp } from '../api/types'
 import { usePinnedDrag, type PinnedDnd } from './usePinnedDrag'
-import { cacheState, type CacheState } from '../lib/cacheClock'
+import { chipCache, NO_WARM_TEXT, type CacheState } from '../lib/cacheClock'
 import { useCacheTick } from '../hooks/useCacheTick'
 import { ChipLegend } from './ChipLegend'
 import { BotStatusCard, type ChipHints } from './BotStatusCard'
@@ -68,6 +68,8 @@ interface ChipItem {
   cache: CacheState | null
   /** 主力：保溫回覆到了、使用者還沒送新 prompt → 晶片框換色（`keepWarmChip.css`）。 */
   keepWarmReplied: boolean
+  /** 主力：已按「不用保溫」→ 不畫倒數底色，tooltip 講「不保溫中」。 */
+  noWarm: boolean
 }
 
 /** 子 agent 在跑：分叉圖示（形狀跟燈／點不同）＋多顆時的數字；文字說明在 `title` 與 sr-only。 */
@@ -101,7 +103,7 @@ const canHover = () => typeof window !== 'undefined' && window.matchMedia?.('(ho
 const PEEK_DELAY_MS = 400
 
 function chipHints(it: ChipItem): ChipHints {
-  return { current: it.current, unread: it.unread, needsReply: it.needsReply, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.cache?.title ?? null, keepWarmReplied: it.keepWarmReplied }
+  return { current: it.current, unread: it.unread, needsReply: it.needsReply, waitsKids: it.waitsKids, kidsRunning: it.kidsRunning, cacheTitle: it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), keepWarmReplied: it.keepWarmReplied }
 }
 
 function Chip({ it, dnd, lamp, onPeek }: { it: ChipItem; dnd?: PinnedDnd; lamp?: boolean; /** 主力晶片：hover 開狀態卡（`null`＝收起）。 */ onPeek?: (id: string | null, at?: DOMRect) => void }) {
@@ -119,7 +121,7 @@ function Chip({ it, dnd, lamp, onPeek }: { it: ChipItem; dnd?: PinnedDnd; lamp?:
       type="button"
       className={`${chipClass(it)}${cache ? ` cache-${cache.level}` : ''}${it.keepWarmReplied ? ' keep-warm-replied' : ''}${drag?.dragId === it.id ? ' dragging' : ''}${shifted ? ' shifted' : ''}${mark}`}
       // 主力晶片在能 hover 的裝置上改用狀態卡，不再疊一個瀏覽器原生 tooltip。
-      title={onPeek && canHover() ? undefined : [it.title, it.cache?.title, it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
+      title={onPeek && canHover() ? undefined : [it.title, it.cache?.title ?? (it.noWarm ? NO_WARM_TEXT : null), it.keepWarmReplied ? KEEP_WARM_REPLIED_TEXT : null].filter(Boolean).join('\n')}
       onMouseEnter={
         onPeek
           ? (e) => {
@@ -264,7 +266,8 @@ export function UnreadChip() {
         working: status === 'working',
         title: botTitle(b.name, pinned, n, needsReply, kids, current) + (nKids > 0 ? `（${kidsText(nKids)}）` : ''),
         keepWarmReplied: pinned && keepWarmReplied(runs[b.id], now),
-        cache: pinned ? cacheState(runs[b.id]?.last_api_at, runs[b.id]?.cache_ttl_secs, now, status === 'working', runs[b.id]?.cache_kept_warm_at) : null,
+        cache: pinned ? chipCache(runs[b.id], now, status === 'working') : null,
+        noWarm: pinned && runs[b.id]?.keep_warm_skip === true,
       })
     }
     return out
