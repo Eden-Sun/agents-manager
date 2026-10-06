@@ -12,14 +12,11 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use crate::lifecycle::LcError;
-use crate::state::App;
 use crate::trusted_open;
 
 /// 截圖等級的圖片就夠了；太大的檔不該塞進一則對話。
@@ -122,20 +119,19 @@ where
     tokio::task::spawn_blocking(work).await.ok()
 }
 
-pub async fn get(
-    State(app): State<Arc<App>>,
-    UrlPath(id): UrlPath<String>,
-    Query(q): Query<std::collections::HashMap<String, String>>,
-) -> Result<Response, LcError> {
+pub async fn get_for(app: &impl crate::outbox::OutboxEnv, id: String, q: std::collections::HashMap<String, String>) -> Result<Response, LcError> {
     let not_found = || LcError::NotFound("image".into());
     let requested = q.get("path").ok_or_else(|| LcError::Bad("path required".into()))?;
-    let bot = crate::db::bot(&app.db, &id).await.ok().flatten().ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let project = crate::db::project(&app.db, &bot.project_id).await.ok().flatten().ok_or_else(not_found)?;
-    if project.host != crate::config::LOCAL_HOST {
+    let place = app.bot_place(&id).await.map_err(|e| match e {
+        // bot 不在與專案不在，對外講法不同（原本的行為）：前者 bot，後者 image；DB 出錯照「不在」處理。
+        crate::outbox::BotLookup::BotMissing | crate::outbox::BotLookup::BotUnavailable => LcError::NotFound("bot".into()),
+        crate::outbox::BotLookup::ProjectMissing | crate::outbox::BotLookup::ProjectUnavailable => not_found(),
+    })?;
+    if place.host != crate::config::LOCAL_HOST {
         return Err(not_found());
     }
-    let cwd = bot.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(Path::new);
-    let root = PathBuf::from(project.path);
+    let cwd = place.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()).map(Path::new);
+    let root = PathBuf::from(place.project_path);
     let cwd = cwd.map(Path::to_path_buf);
     let requested = requested.clone();
     let (file, mime) = run_in_blocking_pool(move || resolve(&root, cwd.as_deref(), &requested))
@@ -153,6 +149,9 @@ pub async fn get(
     };
     Ok((StatusCode::OK, [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, no-cache")], data).into_response())
 }
+
+// 路由用的 axum handler 住在 composition 層（`app_ports_p10`），這裡保留舊名給 `api` 的路由表。
+pub use crate::app_ports_p10::get;
 
 #[cfg(test)]
 mod tests {

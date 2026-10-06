@@ -18,7 +18,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use quick_xml::events::Event;
 use sha2::Digest as _;
 
-use crate::state::App;
 
 /// 單檔超過這麼大就不查（bot 畫的圖不會這麼大；查不完不如不查）。
 pub(crate) const MAX_CHECK_BYTES: usize = 4 * 1024 * 1024;
@@ -263,16 +262,22 @@ fn forget(bot_id: &str, name: &str) {
     file_episodes().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
 }
 
+/// SVG 檢查要從 `App` 拿的：能讀分享檔（[`crate::outbox::OutboxEnv`]），以及「提醒 bot 修檔案」這一步（走一般的 prompt／排隊路徑）。
+pub trait SvgCheckEnv: crate::outbox::OutboxEnv {
+    /// 以 daemon 的名義把 `text` 送給 bot（bot 起不來就排隊）；`crid` 是冪等鍵。失敗回錯誤說明（記 log 用）。
+    fn remind_bot(app: &Arc<Self>, bot_id: &str, text: &str, crid: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
+}
+
 /// 這一則送過了嗎（有那一筆 turn）。讀不到就當送過——寧可少提醒一次，不要每次讀清單都送。
-async fn already_sent(app: &Arc<App>, crid: &str) -> bool {
+async fn already_sent(app: &impl crate::outbox::ShareStorage, crid: &str) -> bool {
     !matches!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE client_request_id = ?").bind(crid).fetch_one(&app.db).await,
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE client_request_id = ?").bind(crid).fetch_one(app.db_pool()).await,
         Ok(0)
     )
 }
 
 /// 查一個檔；壞了就提醒 bot（同一版本同一個錯誤只一次）。回傳查到的錯誤（測試用）。
-pub(crate) async fn check_file(app: &Arc<App>, bot_id: &str, name: &str) -> Option<SvgError> {
+pub(crate) async fn check_file<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, name: &str) -> Option<SvgError> {
     let read = match crate::outbox::share_file_read_with_limit(app, bot_id, name, MAX_CHECK_BYTES as u64).await {
         Ok(r) => r,
         Err(crate::outbox::ShareFileError::TooLarge) => {
@@ -302,8 +307,7 @@ pub(crate) async fn check_file(app: &Arc<App>, bot_id: &str, name: &str) -> Opti
     if already_sent(app, &crid).await {
         return Some(e);
     }
-    let src = crate::lifecycle::RelaySrc { from: Some(crate::agent_relay::DAEMON_SENDER), unverified: false };
-    match crate::lifecycle::start_send::prompt_starting_or_queue(app, bot_id, &reminder(name, &e), &crid, &[], src, true).await {
+    match H::remind_bot(app, bot_id, &reminder(name, &e), &crid).await {
         Ok(_) => tracing::info!(bot = bot_id, file = name, line = e.line, col = e.col, error = %e.message, "share bot svg is broken; told the bot to fix it"),
         Err(err) => {
             // 沒送成（例如分享使用者的訊息正排著）：下次讀清單再試。
@@ -315,7 +319,7 @@ pub(crate) async fn check_file(app: &Arc<App>, bot_id: &str, name: &str) -> Opti
 }
 
 /// 分享頁讀清單時叫：清單上每個 `.svg`（`files` 是 portal 回的 `{name, size, modified_at}`），沒查過的這一版在背景查。
-pub(crate) fn spawn_check(app: &Arc<App>, bot_id: &str, files: &[serde_json::Value]) {
+pub(crate) fn spawn_check<H: SvgCheckEnv>(app: &Arc<H>, bot_id: &str, files: &[serde_json::Value]) {
     let todo: Vec<String> = files
         .iter()
         .filter_map(|f| {

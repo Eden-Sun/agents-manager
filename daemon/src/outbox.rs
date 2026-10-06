@@ -24,14 +24,60 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use crate::lifecycle::LcError;
-use crate::state::App;
 use crate::trusted_open;
+
+
+/// 分享／outbox 幾乎所有動作只需要的兩樣：資料目錄與 DB 連線（`App` 在 `app_ports_p10` 實作）。
+pub trait ShareStorage: Send + Sync + 'static {
+    fn data_dir(&self) -> &Path;
+    fn db_pool(&self) -> &sqlx::SqlitePool;
+}
+
+impl<T: ShareStorage + ?Sized> ShareStorage for Arc<T> {
+    fn data_dir(&self) -> &Path {
+        (**self).data_dir()
+    }
+    fn db_pool(&self) -> &sqlx::SqlitePool {
+        (**self).db_pool()
+    }
+}
+
+/// 查不到一顆 bot 的位置：確實沒有（bot 或專案不在）／查詢本身失敗；分 bot 與專案兩步，呼叫端各自決定對外怎麼講（原本各處的講法不同）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BotLookup {
+    /// bot 不在。
+    BotMissing,
+    /// 查 bot 的那一步 DB 出錯。
+    BotUnavailable,
+    /// bot 在、專案不在。
+    ProjectMissing,
+    /// 查專案的那一步 DB 出錯。
+    ProjectUnavailable,
+}
+
+/// 一顆 bot 住在哪：專案所在主機、專案路徑、bot 自己的工作目錄。
+#[derive(Debug, Clone)]
+pub struct BotPlace {
+    pub host: String,
+    pub project_path: String,
+    pub cwd: Option<String>,
+}
+
+/// outbox／本機圖片下載要先確認「這顆 bot 在本機嗎」所需的查詢（`App` 在 `app_ports_p10` 實作，底層是 `db::bot`＋`db::project`）。
+pub trait OutboxEnv: ShareStorage {
+    fn bot_place(&self, bot_id: &str) -> impl std::future::Future<Output = Result<BotPlace, BotLookup>> + Send;
+}
+
+impl<T: OutboxEnv + ?Sized> OutboxEnv for Arc<T> {
+    fn bot_place(&self, bot_id: &str) -> impl std::future::Future<Output = Result<BotPlace, BotLookup>> + Send {
+        (**self).bot_place(bot_id)
+    }
+}
 
 /// 檔案在 outbox 裡保留多久（AGM 清理的門檻，跟 `outbox-gc.sh` 的 `MAX_AGE_MIN=60` 同一個數）。
 pub(crate) const TTL_SECS: u64 = 3600;
@@ -325,20 +371,19 @@ fn now_secs() -> u64 {
 }
 
 /// 這顆 bot 的 outbox。遠端主機的 bot 沒有（檔案在那台機器上）。
-async fn outbox_of(app: &Arc<App>, bot_id: &str) -> Result<PathBuf, LcError> {
-    let bot = crate::db::bot(&app.db, bot_id).await.ok().flatten().ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let project = crate::db::project(&app.db, &bot.project_id).await.ok().flatten().ok_or_else(|| LcError::NotFound("bot".into()))?;
-    if project.host != crate::config::LOCAL_HOST {
-        return Err(LcError::conflict("outbox_remote", json!({"reason": "outbox_remote", "host": project.host})));
+async fn outbox_of(app: &impl OutboxEnv, bot_id: &str) -> Result<PathBuf, LcError> {
+    let place = app.bot_place(bot_id).await.map_err(|_| LcError::NotFound("bot".into()))?;
+    if place.host != crate::config::LOCAL_HOST {
+        return Err(LcError::conflict("outbox_remote", json!({"reason": "outbox_remote", "host": place.host})));
     }
-    dir_for(&app.data_dir, &bot.id).ok_or_else(|| LcError::NotFound("bot".into()))
+    dir_for(app.data_dir(), bot_id).ok_or_else(|| LcError::NotFound("bot".into()))
 }
 
 /// `GET /api/bots/{id}/outbox` — 這顆 bot 交給使用者的檔案（新的排前面），各自還剩多久被清掉。
-pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> Result<Response, LcError> {
+pub async fn list_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: String) -> Result<Response, LcError> {
     // 遠端主機的 bot：outbox 在那台機器上，走 ssh 列（`outbox_remote`）。
     // 連不上那台不是錯誤：回空清單並講原因（下載才回 409）。
-    match crate::outbox_remote::target(&app, &id).await {
+    match crate::outbox_remote::target(app, &id).await {
         Ok(Some(t)) => return crate::outbox_remote::list(t, now_secs()).await,
         Ok(None) => {}
         Err(LcError::Conflict(detail)) => {
@@ -346,7 +391,7 @@ pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> 
         }
         Err(e) => return Err(e),
     }
-    let dir = match outbox_of(&app, &id).await {
+    let dir = match outbox_of(app, &id).await {
         Ok(d) => d,
         // 遠端不是錯誤，是常態：回空清單並說明原因，前端不用畫成紅字。
         Err(LcError::Conflict(detail)) => {
@@ -357,7 +402,7 @@ pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> 
     // 可信檢查（拿到目錄 fd）跟真正列舉擺進同一個 blocking closure、共用同一個 fd：中間沒有
     // `.await`，也沒有「查完路徑 → 之後再用路徑重新 open 去列」這一步，這顆 bot 自己把目錄整個換成
     // 符號連結也換不掉已經拿在手上的 fd（issue #96）。
-    let data_dir = app.data_dir.clone();
+    let data_dir = app.data_dir().to_path_buf();
     let scan_dir = dir.clone();
     let now = now_secs();
     let outcome = tokio::task::spawn_blocking(move || match open_trusted_dir(&data_dir, &scan_dir) {
@@ -375,7 +420,7 @@ pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> 
         }
     };
     // 分享用 bot（SPEC §20）的 outbox 不清：`ttl_secs:null`、每個檔不帶到期。讀不到是不是分享用 bot 就照一般的報（只影響顯示）。
-    if matches!(crate::share::store::is_share_bot(&app.db, &id).await, Ok(true)) {
+    if matches!(crate::share::store::is_share_bot(app.db_pool(), &id).await, Ok(true)) {
         without_expiry(&mut files);
         return Ok((StatusCode::OK, axum::Json(json!({"dir": dir.to_string_lossy(), "ttl_secs": null, "kept": true, "files": files}))).into_response());
     }
@@ -384,19 +429,15 @@ pub async fn list(State(app): State<Arc<App>>, UrlPath(id): UrlPath<String>) -> 
 
 /// `GET /api/bots/{id}/outbox/file?path=…` — 一律當附件下載。整段路徑驗證＋open＋fstat＋讀內容都走
 /// [`open_outbox_entry`] 那條 fd-bound 的鏈，不再分開「驗證路徑」與「用路徑重新讀」兩步（issue #89）。
-pub async fn file(
-    State(app): State<Arc<App>>,
-    UrlPath(id): UrlPath<String>,
-    Query(q): Query<std::collections::HashMap<String, String>>,
-) -> Result<Response, LcError> {
+pub async fn file_for(app: &impl crate::outbox_remote::OutboxRemoteEnv, id: String, q: std::collections::HashMap<String, String>) -> Result<Response, LcError> {
     use std::os::unix::fs::MetadataExt as _;
     let not_found = || LcError::NotFound("file".into());
     let requested = q.get("path").ok_or_else(|| LcError::Bad("path required".into()))?.clone();
-    if let Some(t) = crate::outbox_remote::target(&app, &id).await? {
+    if let Some(t) = crate::outbox_remote::target(app, &id).await? {
         return crate::outbox_remote::file(t, &requested).await;
     }
-    outbox_of(&app, &id).await?; // 確認本機、bot 存在；拿到的路徑只是拿來確認，不再用它重新 open。
-    let data_dir = app.data_dir.clone();
+    outbox_of(app, &id).await?; // 確認本機、bot 存在；拿到的路徑只是拿來確認，不再用它重新 open。
+    let data_dir = app.data_dir().to_path_buf();
     let bot_id = id.clone();
     let opened = tokio::task::spawn_blocking(move || {
         let owner = std::fs::metadata(&data_dir).ok()?.uid();
@@ -435,7 +476,7 @@ pub async fn file(
 }
 
 /// 分享入口用的下載分類：確實不存在／遭黑名單擋下回 NotFound；可信邊界、DB、讀取或工作失敗保留成 Unavailable。
-pub(crate) async fn share_file(app: &Arc<App>, bot_id: &str, requested: &str) -> Result<Response, ShareFileError> {
+pub(crate) async fn share_file(app: &impl OutboxEnv, bot_id: &str, requested: &str) -> Result<Response, ShareFileError> {
     let (name, data) = share_file_bytes(app, bot_id, requested).await?;
     Ok((
         StatusCode::OK,
@@ -451,7 +492,7 @@ pub(crate) async fn share_file(app: &Arc<App>, bot_id: &str, requested: &str) ->
 }
 
 /// [`share_file`] 的讀檔那一段（同一條 fd-bound 鏈、同樣的上限與黑名單），回（檔名, 內容）。分享頁下載與 `.svg` 檢查共用。
-pub(crate) async fn share_file_bytes(app: &Arc<App>, bot_id: &str, requested: &str) -> Result<(String, Vec<u8>), ShareFileError> {
+pub(crate) async fn share_file_bytes(app: &impl OutboxEnv, bot_id: &str, requested: &str) -> Result<(String, Vec<u8>), ShareFileError> {
     share_file_bytes_with_limit(app, bot_id, requested, MAX_BYTES).await
 }
 
@@ -468,21 +509,23 @@ pub(crate) struct ShareFileRead {
 /// 回傳包含 metadata（ino、mtime_ns、ctime_ns），方便做版本指紋檢查。
 /// 超過上限會在讀檔前由 fstat 拒絕，不進行記憶體配置與實際內容讀取。
 pub(crate) async fn share_file_read_with_limit(
-    app: &Arc<App>,
+    app: &impl OutboxEnv,
     bot_id: &str,
     requested: &str,
     max_bytes: u64,
 ) -> Result<ShareFileRead, ShareFileError> {
     use std::os::unix::fs::MetadataExt as _;
 
-    let bot = crate::db::bot(&app.db, bot_id).await.map_err(|_| ShareFileError::Unavailable)?.ok_or(ShareFileError::NotFound)?;
-    let project = crate::db::project(&app.db, &bot.project_id).await.map_err(|_| ShareFileError::Unavailable)?.ok_or(ShareFileError::NotFound)?;
-    if project.host != crate::config::LOCAL_HOST {
+    let place = app.bot_place(bot_id).await.map_err(|e| match e {
+        BotLookup::BotMissing | BotLookup::ProjectMissing => ShareFileError::NotFound,
+        BotLookup::BotUnavailable | BotLookup::ProjectUnavailable => ShareFileError::Unavailable,
+    })?;
+    if place.host != crate::config::LOCAL_HOST {
         return Err(ShareFileError::NotFound);
     }
 
-    let data_dir = app.data_dir.clone();
-    let file_bot = bot.id;
+    let data_dir = app.data_dir().to_path_buf();
+    let file_bot = bot_id.to_string();
     let requested = requested.to_string();
     let (file, name) = tokio::task::spawn_blocking(move || {
         let owner = std::fs::metadata(&data_dir).map_err(|_| ShareFileError::Unavailable)?.uid();
@@ -514,7 +557,7 @@ pub(crate) async fn share_file_read_with_limit(
 /// 同 [`share_file_bytes`]，但允許呼叫端指定讀取上限（例如 SVG 檢查只需 4 MiB）。
 /// 超過上限會在讀檔前由 fstat 拒絕，不進行記憶體配置與實際內容讀取。
 pub(crate) async fn share_file_bytes_with_limit(
-    app: &Arc<App>,
+    app: &impl OutboxEnv,
     bot_id: &str,
     requested: &str,
     max_bytes: u64,
@@ -529,8 +572,13 @@ pub async fn scratchpad_gone() -> LcError {
     LcError::NotFound("scratchpad".into())
 }
 
+// 路由用的 axum handler（`State<Arc<App>>`）住在 composition 層（`app_ports_p10`），這裡保留舊名給 `api` 的路由表與測試。
+pub use crate::app_ports_p10::{file, list};
+
 #[cfg(test)]
 mod tests {
+    use crate::state::App;
+    use axum::extract::{Path as UrlPath, Query, State};
     use super::*;
 
     #[test]
