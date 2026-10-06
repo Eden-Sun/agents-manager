@@ -975,6 +975,7 @@ tooltip 寫最後一次失敗的原因。主機一直離線時沒有任何事件
 - **保溫回覆到了，主力晶片框換洋紅（`keep-warm-replied`，`keepWarmChip.css`），維持一個快取 TTL 或直到使用者送出新 prompt 才恢復（2026-10-06 使用者）**：
   原本一直掛到使用者送出新 prompt（實例 ops-web 掛了 18 小時）。改成保溫的效果只有一個 cache TTL（照 `cacheClock` 既有的 TTL 與 `cache_kept_warm_at`／`last_api_at` 判斷）：快取一涼掉（`level === 'cold'`）洋紅框與 ♨ 記號隨之消失；使用者若在 TTL 內送出新 prompt，仍照舊由 daemon 在使用者 prompt 時將 `run.keep_warm_replied_at` 清成 null 立即清除恢復。
   只動框（邊框＋2px inset 環），不動底色與字，所以快取倒數的底色、未讀實心藍、要回答的紅底全部照舊疊在上面。
+- **按了「不用保溫」就不畫快取倒數（2026-10-06 使用者）**：主力 `run.keep_warm_skip === true` 時晶片不加 `cache-*` class、不填底色（回一般樣式），hover 狀態卡／tooltip 的快取那行改寫「不保溫中（不顯示快取倒數）」；取消（daemon 廣播 `keep_warm_skip=false`）或有新活動讓 daemon 自動清掉後立即恢復倒數。判斷在 `cacheClock.chipCache`（其餘照既有 `cacheState`），網頁不另有規則；不影響輸入框旁的快取欄位。
 - **為什麼是洋紅**：這列已經用掉綠（快取新鮮／正在看）、黃（快取剩不多／等子 agent）、紅（快取快沒了／要回答）、藍（未讀），洋紅（`--keep-warm`，淺 `#a21caf`／深 `#e879f9`）離它們色相都夠遠，淺色深色模式對白底、深底都在 4.5:1 以上。
   藍（未讀）與洋紅在實心藍底上相鄰時，靠 ♨ 記號與框形分得出來。
 - **手機也看得出**：2px 框在手機主力格（無星號、只有燈）一樣畫；另有一顆非顏色的 `♨` 記號放在名字後面，sr-only 另寫「保溫回覆已到，送出新 prompt 前維持這個框色」，狀態卡（hover／長按）多一行「保溫」，顏色說明（`ChipLegend`）多一列。

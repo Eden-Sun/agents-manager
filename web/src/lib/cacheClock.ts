@@ -64,3 +64,19 @@ export function cacheState(
   const title = level === 'cold' ? `快取已涼（${last}）` : `快取約 ${Math.max(1, Math.ceil(remainingSecs / 60))} 分後到期（${last}）`
   return { level, remainingSecs, frac: remainingSecs / ttlSecs, title }
 }
+
+/** 「不保溫中」時晶片 tooltip／狀態卡講的一句話（不顯示快取倒數）。 */
+export const NO_WARM_TEXT = '不保溫中（不顯示快取倒數）'
+
+/**
+ * 主力晶片用的快取狀態：使用者已按「不用保溫」（`run.keep_warm_skip`）就不畫倒數底色（回 `null`、晶片回一般樣式），
+ * 取消後（daemon 廣播 `keep_warm_skip=false`）恢復；其餘照 `cacheState`。
+ */
+export function chipCache(
+  run: { last_api_at?: string | null; cache_ttl_secs?: number | null; cache_kept_warm_at?: string | null; keep_warm_skip?: boolean } | null | undefined,
+  nowMs: number,
+  working = false,
+): CacheState | null {
+  if (run?.keep_warm_skip === true) return null
+  return cacheState(run?.last_api_at, run?.cache_ttl_secs, nowMs, working, run?.cache_kept_warm_at)
+}
