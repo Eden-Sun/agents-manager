@@ -13,6 +13,7 @@
 //!   哪一顆 daemon、最後一個 run 怎麼結束與 herdr 對 pane 的回答（#554）。換版腳本靠它分辨「父 bot 收掉的」與
 //!   「換版弄丟的」，判斷見 [`cause`]。
 
+use crate::events::ports::{BotOpsRepo, HandoffConnRepo, HandoffRepo, IntentConnRepo, SupervisorRepo};
 use crate::{db, state::App};
 use serde_json::json;
 use std::future::Future;
@@ -57,14 +58,14 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
         }
         // #708：移交出去的專案，child 在不在歸接手的 daemon 判斷；這裡不退役。
         if mode == Mode::Implicit {
-            if let Some(to) = crate::handoff::bot_handed_off_to(&app.db, &bot.id).await? {
+            if let Some(to) = app.db.bot_handed_off_to(&bot.id).await? {
                 tracing::info!(bot = %bot.name, bot_id = %bot.id, why, handed_off_to = %to, "child not retired: the project was handed off");
                 return Ok(Outcome::HandedOff);
             }
         }
         // 2026-10-04 使用者：「let AGM 不清除這類 bot」。分享用 bot 不會是 child（建 bot 時才選、managed_by=user），
         // 這裡是唯一入口上的保險：哪天有一條路誤把它當 child，也不會被隱式軟刪。讀不到＝不退役。
-        if mode == Mode::Implicit && !matches!(crate::share::store::is_share_bot(&app.db, &bot.id).await, Ok(false)) {
+        if mode == Mode::Implicit && !matches!(app.db.is_share_bot(&bot.id).await, Ok(false)) {
             tracing::info!(bot = %bot.name, bot_id = %bot.id, why, "bot not retired: it is a share bot (or that could not be read)");
             return Ok(Outcome::ShareBot);
         }
@@ -82,7 +83,7 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
         // 也不讓資料庫 trigger 或讀者先看見 child 消失、稍後才有原因。
         let mut tx = db::begin_write(&app.db).await?;
         if mode == Mode::Implicit {
-            match crate::handoff::bot_handed_off_to_on(&mut *tx, &bot.id).await {
+            match tx.bot_handed_off_to_on(&bot.id).await {
                 Ok(Some(to)) => {
                     tx.rollback().await?;
                     tracing::info!(bot = %bot.name, bot_id = %bot.id, why, handed_off_to = %to, "child not retired: handoff was committed during reconcile");
@@ -109,7 +110,7 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
                 }
             }
         }
-        crate::intents::record_done(&mut tx, RECORD_KIND, &bot.id, &host, &record).await?;
+        tx.record_done_intent(RECORD_KIND, &bot.id, &host, &record).await?;
         let n = sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL")
             .bind(db::now())
             .bind(&bot.id)
@@ -227,7 +228,7 @@ async fn pane_state(app: &Arc<App>, run: &db::Run) -> Pane {
 
 /// 隱式退役前的 AGM 判斷。`Retired`＝放行（不是 AGM 的）。
 async fn agm_guard(app: &Arc<App>, bot: &db::Bot, why: &str) -> Outcome {
-    let owned = match crate::supervisor_owned::load(&app.db).await {
+    let owned = match app.db.load_owned().await {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(bot = %bot.name, why, error = ?e, "cannot read which bots are AGM's; child kept this pass");
@@ -257,7 +258,7 @@ async fn agm_guard(app: &Arc<App>, bot: &db::Bot, why: &str) -> Outcome {
     });
     // 同一顆、一小時最多一則（跟 `supervisor_owned::alert` 同一個慣例）：擋下來本身已經做完了。
     let key = notice_key(app, &bot.id, chrono::Utc::now()).await;
-    match crate::supervisor::store::push_inbox(&app.db, &key, "child_retire_refused", None, Some(&bot.id), None, &payload).await {
+    match app.db.push_inbox(&key, "child_retire_refused", None, Some(&bot.id), None, &payload).await {
         Ok(_) => tracing::warn!(bot = %bot.name, role, why, "refused to retire an AGM child; patrol notified"),
         Err(e) => tracing::error!(bot = %bot.name, role, why, error = %e, "refused to retire an AGM child; the inbox row could not be written"),
     }
@@ -290,7 +291,7 @@ async fn notice_key(app: &Arc<App>, bot_id: &str, now: chrono::DateTime<chrono::
           WHERE supervisor_id=? AND kind='child_retire_refused' AND bot_id=? AND created_at >= ?
           ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
-    .bind(crate::supervisor::store::SUPERVISOR_ID)
+    .bind(<sqlx::SqlitePool as SupervisorRepo>::SUPERVISOR_ID)
     .bind(bot_id)
     .bind(&since)
     .fetch_optional(&app.db)
@@ -566,6 +567,25 @@ mod tests {
         assert!(line.contains(&format!("caller={}:{here}:", file!())), "呼叫位置是呼叫端那一行：{line}");
         assert!(line.contains("http=-"), "{line}");
         assert_eq!(retire(&app, &kid, "again", Mode::Explicit).await.unwrap(), Outcome::AlreadyGone, "已退役的不再寫一次");
+    }
+
+    /// 對帳走 `IngressCommands::retire_child`（不直接呼叫 `retire`）：退役 log 的 `caller=` 仍是**呼叫端那一行**，
+    /// 不是 adapter 的行——`#[track_caller]` 要能穿過 trait 方法（issue #406）。
+    #[tokio::test]
+    async fn retirement_through_the_ingress_port_keeps_the_callers_line() {
+        use crate::events::ports::IngressCommands;
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let kid = a_child(&env).await;
+        let (buf, _guard) = crate::config_audit::capture::start();
+
+        let here = line!() + 1;
+        let out = app.retire_child(&kid, "test_reason", Mode::Explicit).await.unwrap();
+
+        assert_eq!(out, Outcome::Retired);
+        let log = buf.text();
+        let line = log.lines().find(|l| l.contains("child retired")).unwrap_or_else(|| panic!("no retire line: {log}"));
+        assert!(line.contains(&format!("caller={}:{here}:", file!())), "呼叫位置要是呼叫端那一行：{line}");
     }
 
     fn at(iso: &str) -> chrono::DateTime<chrono::Utc> {

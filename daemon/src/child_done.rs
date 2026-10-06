@@ -5,6 +5,7 @@
 //! catches a missed event or a recent daemon restart. The parent must have an active run, and
 //! relay notices are queueable so they never interrupt it.
 
+use crate::events::ports::{TurnCommands};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
@@ -263,14 +264,9 @@ async fn notify_turn(app: &Arc<App>, turn_id: &str) -> anyhow::Result<()> {
     }
 
     let message = message_for(&turn.child_name, &quoted_reply);
-    match crate::lifecycle::prompt_relayed_queueable(
-        app,
-        &turn.parent_id,
-        &message,
-        &client_request_id,
-        Some(&turn.child_id),
-    )
-    .await
+    match app
+        .prompt_relayed_queueable(&turn.parent_id, &message, &client_request_id, Some(&turn.child_id))
+        .await
     {
         Ok(out) => {
             tracing::info!(child = %turn.child_name, parent = %turn.parent_id, turn = %turn.id, delivery = %out.delivery, "notified parent about completed child turn");

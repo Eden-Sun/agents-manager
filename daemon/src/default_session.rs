@@ -6,6 +6,7 @@
 //! existing local Project are imported. Ordinary shell panes and panes from other directories
 //! remain entirely outside the manager's ownership.
 
+use crate::events::ports::{HostSidePort, IngressCommands, TurnCommands};
 use crate::config::{self, LOCAL_HOST};
 use crate::db;
 use crate::herdr::AgentInfo;
@@ -107,12 +108,12 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
             .await?;
             if run.pane_id.as_deref() != Some(agent.pane_id.as_str()) {
                 if let Some(old) = run.pane_id.as_deref() {
-                    crate::events::unwatch_pane_on_session(app, LOCAL_HOST, SESSION, old).await;
+                    app.unwatch_pane_on_session(LOCAL_HOST, SESSION, old).await;
                 }
             }
-            crate::events::watch_pane_on_session(app, LOCAL_HOST, SESSION, &agent.pane_id).await;
+            app.watch_pane_on_session(LOCAL_HOST, SESSION, &agent.pane_id).await;
             if bot.kind == "codex" {
-                crate::lifecycle::schedule_codex_notice_capture(app, &bot.id, &run.id);
+                app.schedule_codex_notice_capture(&bot.id, &run.id);
             }
         } else {
             let run_id = db::ulid();
@@ -131,9 +132,9 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
             .bind(db::now())
             .execute(&app.db)
             .await?;
-            crate::events::watch_pane_on_session(app, LOCAL_HOST, SESSION, &agent.pane_id).await;
+            app.watch_pane_on_session(LOCAL_HOST, SESSION, &agent.pane_id).await;
             if bot.kind == "codex" {
-                crate::lifecycle::schedule_codex_notice_capture(app, &bot.id, &run_id);
+                app.schedule_codex_notice_capture(&bot.id, &run_id);
             }
         }
         if created {
@@ -168,14 +169,14 @@ pub async fn sync(app: &Arc<App>) -> Result<()> {
             if still_there {
                 continue;
             }
-            crate::lifecycle::mark_run_exited(app, &run.id, "agent not found in default session").await;
+            app.mark_run_exited(&run.id, "agent not found in default session").await;
         }
     }
     Ok(())
 }
 
 async fn set_connected(app: &Arc<App>, connected: bool) {
-    crate::state::set_default_connected(app, connected).await;
+    app.set_default_connected(connected).await;
 }
 
 fn agent_kind(agent: &AgentInfo) -> Option<&'static str> {

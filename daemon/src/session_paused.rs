@@ -13,6 +13,7 @@
 //! 補標記是巡邏回頭看這個 run 的唯一理由（它已經不是 `idle`），所以**還原寫進 DB 之後才拿掉**（#565）：寫失敗就留著，
 //! 下一輪巡邏重試；CAS 沒命中（herdr 或別的路徑已經改掉 `blocked`）算被取代，拿掉；run 不在或已結束也拿掉。
 
+use crate::events::ports::{TurnCommands};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -149,7 +150,7 @@ async fn observe_with(app: &Arc<App>, run: &db::Run, open: bool, label: Option<&
         Ok(r) if r.rows_affected() == 1 => {
             retire(&run.id, epoch);
             app.emit_bot_status(&run.bot_id).await;
-            crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
+            app.schedule_flush_queued(&run.bot_id);
             if let Some(turn) = paused_turn {
                 close_paused_turn_later(app, &run.id, &turn.id);
             }
@@ -169,7 +170,7 @@ fn close_paused_turn_later(app: &Arc<App>, run_id: &str, turn_id: &str) {
     let (app, run_id, turn_id) = (app.clone(), run_id.to_string(), turn_id.to_string());
     tokio::spawn(async move {
         tokio::time::sleep(AFTER_CLOSE).await;
-        if let Some(turn) = crate::lifecycle::close_after_session_paused(&app, &run_id, &turn_id).await {
+        if let Some(turn) = app.close_after_session_paused(&run_id, &turn_id).await {
             tracing::info!(run = %run_id, turn = %turn, "Session paused 選單關掉、沒有回覆：直接收掉這個回合");
         }
     });

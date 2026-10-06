@@ -3,12 +3,19 @@
 //! pane id 只在一個 herdr session 內唯一，所以查表一律以 `(host, session, pane_id)` 為鍵。
 //! herdr 的事件名稱點號／底線兩種寫法都有，比對前先正規化。
 
+use self::ports::{HandoffRepo, HostSidePort, ProviderPort, ReconcileCommands, SupervisorSignals, TurnCommands};
 use crate::config::LOCAL_HOST;
 use crate::state::App;
 use serde_json::json;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// P8（hook／事件／對帳）對其他 feature 的窄介面與 `App` 端實作（crate 拆分第 3 步）；檔案在 `daemon/src/`，不碰 `lib.rs`。
+#[path = "ingress_ports.rs"]
+pub(crate) mod ports;
+#[path = "app_ports_p8.rs"]
+mod app_ports_p8;
 
 /// How long `handle_status` waits for a remote drain before letting the fallback arm (§11.4.3).
 const DRAIN_BUDGET: Duration = Duration::from_secs(4);
@@ -78,20 +85,20 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
             Ok(mut rx) => {
                 if is_local_main {
                     app.connected.store(true, Ordering::SeqCst);
-                    crate::state::emit_daemon_status(&app).await;
+                    app.emit_daemon_status().await;
                 }
                 if is_local_default {
-                    crate::state::set_default_connected(&app, true).await;
+                    app.set_default_connected(true).await;
                 }
                 tracing::info!(host = %host, session = %session, "global herdr event subscription established");
                 // herdr live-handoff 後訂閱重建：server 版本／protocol 可能換了，重問一次（#254）。
                 if is_local_main || host != LOCAL_HOST {
                     let (app2, host2) = (app.clone(), host.clone());
-                    tokio::spawn(async move { crate::herdr_version::refresh(&app2, &host2).await });
+                    tokio::spawn(async move { app2.refresh_herdr_version(&host2).await });
                 }
                 // Reconcile after every (re)connect.
                 if is_local_default {
-                    if let Err(e) = crate::default_session::sync(&app).await {
+                    if let Err(e) = app.sync_default_session().await {
                         tracing::debug!(host = %host, session = %session, error = ?e, "default session sync failed");
                     }
                 } else {
@@ -105,10 +112,10 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                 connected_for = Some(connected_at.elapsed());
                 if is_local_main {
                     app.connected.store(false, Ordering::SeqCst);
-                    crate::state::emit_daemon_status(&app).await;
+                    app.emit_daemon_status().await;
                 }
                 if is_local_default {
-                    crate::state::set_default_connected(&app, false).await;
+                    app.set_default_connected(false).await;
                 }
                 tracing::warn!(host = %host, session = %session, "global herdr event subscription dropped");
             }
@@ -116,10 +123,10 @@ async fn global_loop(app: Arc<App>, host: String, session: String) {
                 if is_local_main {
                     app.connected.store(false, Ordering::SeqCst);
                     // 馬上讓 UI 知道，不然燈號會一直綠到下次連上為止。
-                    crate::state::emit_daemon_status(&app).await;
+                    app.emit_daemon_status().await;
                 }
                 if is_local_default {
-                    crate::state::set_default_connected(&app, false).await;
+                    app.set_default_connected(false).await;
                 }
                 tracing::debug!(host = %host, session = %session, error = %e, "herdr subscribe failed");
             }
@@ -151,7 +158,7 @@ pub(crate) async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev:
         "pane_agent_detected" => {
             tracing::debug!(host, session, data = %ev.data, "pane.agent_detected");
             if host == LOCAL_HOST && session == "default" {
-                if let Err(e) = crate::default_session::sync(app).await {
+                if let Err(e) = app.sync_default_session().await {
                     tracing::debug!(host, session, error = ?e, "default session sync after agent detection failed");
                 }
             } else if app.session_for_host(host).await.as_deref() == Some(session) && detection_wants_reconcile(app, host, session, &ev.data).await {
@@ -161,7 +168,7 @@ pub(crate) async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev:
                 let host = host.to_string();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    if let Err(e) = crate::reconcile::reconcile_host(&app, &host).await {
+                    if let Err(e) = app.reconcile_host(&host).await {
                         tracing::debug!(host = %host, error = ?e, "reconcile after agent detection failed");
                     }
                 });
@@ -182,17 +189,17 @@ async fn detection_wants_reconcile(app: &Arc<App>, host: &str, session: &str, da
 /// 訂閱（重）建後的對帳；成功且 `autostart` 才補跑欠著的 autostart（#259）。`autostart_hosts` 保證每台主機只完成一次 autostart pass：
 /// 之後的重連不會把使用者停掉的 bot 再開起來。
 async fn reconcile_and_autostart(app: &Arc<App>, host: &str, autostart: bool) -> bool {
-    match crate::reconcile::reconcile_host(app, host).await {
+    match app.reconcile_host(host).await {
         Ok(()) => {
             if autostart {
-                crate::reconcile::autostart_after_reconcile(app, host, true).await;
+                app.autostart_after_reconcile(host, true).await;
             }
             true
         }
         Err(e) => {
             tracing::error!(host, error = ?e, "reconcile failed");
             // 事件驅動的對帳失敗不會有下一個觸發點：斷線那段漏掉的 pane.closed 等不到補，排一輪晚一點的補跑（它失敗會自己再排）。
-            crate::reconcile::schedule_deferred_pass(app, host);
+            app.schedule_deferred_pass(host);
             false
         }
     }
@@ -234,7 +241,7 @@ async fn end_runs_for_pane_try(app: &Arc<App>, host: &str, session: &str, pane_i
     let mut ended_a_child = false;
     let mut converged = true;
     for r in runs {
-        if matches!(crate::lifecycle::mark_run_exited(app, &r.id, "pane exited").await, crate::lifecycle::RunExit::NotRecorded) {
+        if matches!(app.mark_run_exited(&r.id, "pane exited").await, crate::lifecycle::RunExit::NotRecorded) {
             converged = false;
             continue;
         }
@@ -257,7 +264,7 @@ async fn end_runs_for_pane_try(app: &Arc<App>, host: &str, session: &str, pane_i
         let host = host.to_string();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if let Err(e) = crate::reconcile::reconcile_host(&app, &host).await {
+            if let Err(e) = app.reconcile_host(&host).await {
                 tracing::debug!(host = %host, error = ?e, "reconcile after a child's pane closed failed");
             }
         });
@@ -275,7 +282,7 @@ async fn close_workspace_try(app: &Arc<App>, host: &str, session: &str, ws: &str
                     Ok(Some(r)) => {
                         if r.workspace_id.as_deref() == Some(ws)
                             && app.session_for_run(&r).await.as_deref() == Some(session)
-                            && matches!(crate::lifecycle::mark_run_exited(app, &r.id, "workspace closed").await, crate::lifecycle::RunExit::NotRecorded)
+                            && matches!(app.mark_run_exited(&r.id, "workspace closed").await, crate::lifecycle::RunExit::NotRecorded)
                         {
                             converged = false;
                         }
@@ -594,7 +601,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         reported_status
     };
     // #708：移交出去的專案，狀態、外部回合、備援、通知 parent 都歸接手的 daemon。讀不到就照「讀不到 run」重放。
-    match crate::handoff::bot_handed_off_to(&app.db, &run.bot_id).await {
+    match app.db.bot_handed_off_to(&run.bot_id).await {
         Ok(None) => {}
         Ok(Some(_)) => return,
         Err(e) => {
@@ -607,9 +614,9 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     crate::dangerous_rm::on_herdr_status(&run.id);
     let prev = run.agent_status.clone();
     // 卡住的 turn 要「持續」idle 才收：每個狀態事件都記，閃一下 working 就重算。
-    crate::lifecycle::observe_agent_status(&run.id, &status);
+    app.observe_agent_status(&run.id, &status);
     // 閒置回收收機前會對這一份（issue #144）：DB 寫不進去時，DB 的 idle 不能被當成閒著的證據。
-    crate::supervisor::idle_sleep::observe_status(&run.id, &status);
+    app.observe_idle_status(&run.id, &status);
     if prev != status {
         if let Err(e) = sqlx::query("UPDATE runs SET agent_status = ? WHERE id = ?")
             .bind(&status)
@@ -625,23 +632,23 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
 
     // The agent reacted to the prompt: the stall watchdog is no longer needed.
     if status == "working" || status == "blocked" {
-        crate::lifecycle::cancel_stall(app, &run.id).await;
+        app.cancel_stall(&run.id).await;
     }
     // 續行提示的 10 秒從「驗證過且 idle」起算；變成 working／blocked 就取消（#424）。
     if matches!(status.as_str(), "idle" | "working" | "blocked") {
-        crate::lifecycle::poke_resume_nudge(app, &run.bot_id);
+        app.poke_resume_nudge(&run.bot_id);
     }
 
     // 停下來等人回答時先看是不是 claude 的滿意度問卷——是就自己按 0（§3.1）。其他 blocked 不動。
     if prev != "blocked" && status == "blocked" {
         let (app2, run2) = (app.clone(), run.clone());
         tokio::spawn(async move {
-            crate::tui_prompts::dismiss_if_survey(&app2, &run2).await;
+            app2.dismiss_survey_if_shown(&run2).await;
         });
         // grok 撞週限的畫面（#222）：herdr 把它判成 `blocked`、沒有 working->idle 那條邊，畫面掃描不會自己跑。
         // 不是 grok 的 bot、或畫面上沒有那兩句，掃描什麼都不做；一個鍵都不按（選項 1、2 是付費）。
         if crate::db::bot(&app.db, &run.bot_id).await.ok().flatten().is_some_and(|b| b.kind == "grok") {
-            crate::lifecycle::schedule_codex_notice_capture(app, &run.bot_id, &run.id);
+            app.schedule_codex_notice_capture(&run.bot_id, &run.id);
         }
         // 子 agent 停在提問時，它的父 agent 不會自己知道（`child_alerts`）：UI 的徽章是給人看的，
         // 父 agent 是一顆 CLI 行程，沒有人打字進去就什麼都收不到。
@@ -649,7 +656,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         // claude 2.1.281 的防誤刪框：通知使用者（帶目標），一個鍵都不按。
         crate::dangerous_rm::on_blocked(app, &run);
         // Codex 的模型遷移提示也等使用者本人選擇，不把後續訊息送進選單。
-        crate::codex_model_migration::on_blocked(app, &run);
+        app.codex_migration_on_blocked(&run);
         // claude 一般權限確認選單：等畫面畫完讀一次，結構化原因（`blocked_reason`）寫「等待權限確認：<工具>」。只看、不按鍵。
         {
             let (app2, run2) = (app.clone(), run.clone());
@@ -669,7 +676,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     }
     // claude 2.1.281 的 Session paused 選單 herdr 判成 idle：看一眼畫面，是就補標 blocked（不按鍵）。
     if prev != "idle" && status == "idle" {
-        crate::session_paused::on_idle(app, &run);
+        app.session_paused_on_idle(&run);
     }
     // 不再 blocked：同一個問題下次再出現時才要再講一次。
     if prev == "blocked" && status != "blocked" {
@@ -679,7 +686,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     // 沒有 in-flight turn 卻開始 working＝有人在 pane 裡打字：現在就開 external turn，UI 才串得到；
     // 等 Stop hook 的話整段回合對話都是空的。
     if prev != "working" && status == "working" && matches!(crate::db::in_flight_turn(&app.db, &run.id).await, Ok(None)) {
-        crate::lifecycle::begin_external_turn(app, &run).await;
+        app.begin_external_turn(&run).await;
     }
 
     // §11.4.3：遠端 run 的內容留在那台的 spool，先 drain 再 arm 備援，終端快照才只在 hook 真的沒來時贏。
@@ -697,21 +704,21 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     if status != "idle" {
         crate::prompt_suggestion::forget(&run.id);
     } else if prev != "idle" {
-        crate::prompt_suggestion::on_idle(app, &run);
+        app.prompt_suggestion_on_idle(&run);
     }
 
     // §4.3: working -> idle arms the terminal fallback. `blocked` never does.
     if prev == "working" && status == "idle" {
-        crate::lifecycle::arm_fallback(app, &run.id, &run.bot_id).await;
+        app.arm_fallback(&run.id, &run.bot_id).await;
         // A prompt queued while the agent was still working waits for exactly this edge.
-        crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
+        app.schedule_flush_queued(&run.bot_id);
         // 忙的時候改的 codex fast 等的就是這條邊（#393）。
-        crate::lifecycle::schedule_deferred_live(app, &run.bot_id);
+        app.schedule_deferred_live(&run.bot_id);
     } else if prev != "idle" && status == "idle" {
         // 剛起來（`unknown`）或對話框剛關掉（`blocked`）就閒下來：排著的也該送了——bot 沒在跑時收下的那一則
         // （issue #122）正是等這一刻，不然要等退避的 timer（最少 15 秒）。flush 自己的閘門照舊把關。
-        crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
-        crate::lifecycle::schedule_deferred_live(app, &run.bot_id);
+        app.schedule_flush_queued(&run.bot_id);
+        app.schedule_deferred_live(&run.bot_id);
     }
 }
 

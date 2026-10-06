@@ -21,6 +21,7 @@
 //! 還有定時的 [`sweep`]——掃一遍「活著、blocked 的子 agent」，沒有通知工作在跑的就補一個。已經講過的問題照上面的指紋
 //! 與 episode 不重講，已經不 blocked 的不補。
 
+use crate::events::ports::{TurnCommands};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -442,7 +443,7 @@ async fn deliver_attempt(
     attempt: u32,
 ) -> crate::lifecycle::LcResult<crate::lifecycle::PromptOut> {
     let crid = attempt_crid(&crid_base(child_id, question), attempt);
-    crate::lifecycle::prompt_relayed_queueable(app, parent_id, &message_for(child_name, question), &crid, Some(child_id)).await
+    app.prompt_relayed_queueable(parent_id, &message_for(child_name, question), &crid, Some(child_id)).await
 }
 
 /// 冪等鍵＝這一次 blocked（episode）＋問題：同一次的重試不 fan-out，解除後再卡住是新的一則（issue #134）。

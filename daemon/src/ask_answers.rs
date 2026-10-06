@@ -25,6 +25,7 @@
 //! 網頁認 `type`，畫成「Claude 問／你答」；它不是使用者打的 prompt，也不進任何送出或排隊的邏輯。
 //! `created_at` 用答完的時間（transcript 的時間戳），排在回合中間而不是 Stop 才補進去的那一刻。
 
+use crate::events::ports::{TurnCommands};
 use crate::db;
 use crate::state::App;
 use anyhow::Result;
@@ -246,7 +247,7 @@ async fn record_on_turn(
         }
         added += 1;
         let m = sqlx::query_as::<_, db::Message>("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&id).fetch_one(&app.db).await?;
-        crate::lifecycle::emit_message_added(app, bot_id, m).await;
+        app.emit_message_added(bot_id, m).await;
     }
     Ok(added)
 }

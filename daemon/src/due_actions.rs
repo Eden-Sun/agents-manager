@@ -14,6 +14,7 @@
 //!
 //! 所以這個模組只統一**讀取端**：把六處讀成同一份摘要。
 
+use crate::events::ports::SupervisorRepo;
 use crate::state::App;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -160,7 +161,7 @@ impl Source {
     fn filter_sql(&self) -> String {
         self.filter.replace(
             "{open}",
-            &crate::supervisor::store::sql_list(&crate::supervisor::store::OPEN_STATES),
+            &<sqlx::SqlitePool as SupervisorRepo>::open_states_sql(),
         )
     }
 
