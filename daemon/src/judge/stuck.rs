@@ -205,7 +205,7 @@ pub async fn inspect(app: &(impl crate::capabilities::Cfg + crate::capabilities:
             "screen_tail": tail,
             "action": "這顆 bot 有 prompt 排著送不出去，畫面底部看起來有一個 daemon 不認得的選單／確認框在等人選。到「終端」分頁看一眼、替它選完；認得的框請開票讓 daemon 學會。daemon 沒有按任何鍵。",
         });
-        let id = crate::supervisor::store::push_inbox(app.db(), &key, "judge_stuck_screen", None, Some(&c.bot_id), Some(&c.turn_id), &payload).await?;
+        let id = crate::supervisor_inbox::push_inbox(app.db(), &key, "judge_stuck_screen", None, Some(&c.bot_id), Some(&c.turn_id), &payload).await?;
         if id.is_some() {
             tracing::warn!(bot = %bot.name, run = %c.run_id, p, "judge: a queued prompt looks blocked by a dialog the daemon does not recognise");
             app.emit("supervisor_changed", json!({"judge_stuck_screen": key})).await;

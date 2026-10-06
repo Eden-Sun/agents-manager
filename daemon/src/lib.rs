@@ -144,6 +144,7 @@ mod state;
 mod supervisor;
 mod supervisor_owned;
 mod supervisor_evidence;
+pub mod supervisor_inbox;
 mod startup;
 pub mod statusline_cmd;
 mod service_auth;

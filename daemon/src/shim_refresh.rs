@@ -143,8 +143,8 @@ pub async fn refresh_at_startup(app: &(impl crate::capabilities::DataDir + crate
         let wanted = shims().iter().find(|(n, _)| *n == shim).map(|(_, c)| *c).unwrap_or_default();
         // event_key 帶內容雜湊：同一個版本換不動只會有一則（`push_inbox` 是 INSERT OR IGNORE），
         // 下一顆 binary 帶了新 shim 又失敗才是新的一則。
-        let key = format!("{SHIM_STALE_KIND}:{who}:{}", crate::supervisor::cli_refresh::short_hash(wanted.as_bytes()));
-        let _ = crate::supervisor::store::push_inbox(
+        let key = format!("{SHIM_STALE_KIND}:{who}:{}", crate::supervisor_inbox::short_hash(wanted.as_bytes()));
+        let _ = crate::supervisor_inbox::push_inbox(
             app.db(),
             &key,
             SHIM_STALE_KIND,
@@ -155,7 +155,7 @@ pub async fn refresh_at_startup(app: &(impl crate::capabilities::DataDir + crate
                 "bot_id": bot_id,
                 "shim": shim,
                 "path": app.data_dir().join("bots").join(bot_id).join("bin").join(shim).to_string_lossy(),
-                "embedded_hash": crate::supervisor::cli_refresh::short_hash(wanted.as_bytes()),
+                "embedded_hash": crate::supervisor_inbox::short_hash(wanted.as_bytes()),
                 "error": error,
                 "action": "這顆 bot 手上還是舊 shim（舊 cargo shim ＝ 工作不會被轉到外部編譯主機，還可能跟 build shim 互相當成真 cargo 而卡住）：修好那個檔案的權限／磁碟，下一次 daemon 重啟會再換一次；急的話重啟這顆 bot 的 pane 也會重寫",
             }),
