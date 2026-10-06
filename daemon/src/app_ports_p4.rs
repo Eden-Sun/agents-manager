@@ -9,7 +9,8 @@ use am_core::{
     SessionId, TurnError, TurnEvent, TurnId, Window as PortWindow,
 };
 use am_ports::{
-    EventSink, HerdrPort, QuotaAccess, RunPaneReader, StyledRunPaneReader, SystemMessageWriter,
+    CodexRolloutAccess, EventSink, HerdrPort, QuotaAccess, RunPaneReader, StyledRunPaneReader,
+    SystemMessageWriter,
     TurnControl, TurnEvents,
 };
 use std::future::Future;
@@ -380,6 +381,32 @@ impl HerdrPort for AppHerdrPort<'_> {
                     PortError::Conflict(format!("host `{}` fence expired", fence.host_id))
                 })?;
             result.map_err(|error| PortError::Unavailable(error.to_string()))
+        }
+    }
+}
+
+/// App-side source for local Codex rollout paths. It preserves the existing bot lookup, identity
+/// environment resolution, and session log search in the lifecycle helpers.
+pub struct AppCodexRolloutAccess<'a> {
+    app: &'a Arc<App>,
+}
+
+impl<'a> AppCodexRolloutAccess<'a> {
+    pub fn new(app: &'a Arc<App>) -> Self {
+        Self { app }
+    }
+}
+
+impl CodexRolloutAccess for AppCodexRolloutAccess<'_> {
+    fn local_rollout_path<'a>(
+        &'a self,
+        bot: &'a BotId,
+        session: &'a SessionId,
+    ) -> impl Future<Output = Option<std::path::PathBuf>> + Send + 'a {
+        async move {
+            let bot = crate::db::bot(&self.app.db, bot).await.ok().flatten()?;
+            let home = crate::lifecycle::codex_home(self.app, &bot).await?;
+            crate::lifecycle::codex_session_log_async(home, session.clone()).await
         }
     }
 }

@@ -12,12 +12,15 @@
 //! [`TAIL_BYTES`]。記憶體帳，daemon 重啟後第一輪重讀檔尾即可補回；run 結束由巡邏清掉（[`retain_runs`]）。
 
 use crate::db;
+use crate::lifecycle::app_ports_p4::{AppCodexRolloutAccess, AppEventSink};
 use crate::state::App;
+use am_ports::{CodexRolloutAccess, DbContext, EventSink};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use sqlx::SqlitePool;
 
 /// 第一次（或一輪新增太多）時只讀檔尾這麼多；rollout 一輪 token_count 約幾 KB，256 KB 足夠找到最後一筆。
 const TAIL_BYTES: u64 = 256 * 1024;
@@ -98,25 +101,41 @@ fn read_new(path: &Path, offset: u64) -> std::io::Result<(String, u64)> {
 /// 巡邏每輪對每顆 codex run 叫一次：讀 rollout 新增的部分，最後一筆 `token_count` 變了就推 `bot_status`。
 /// 找不到 session／rollout、遠端主機、讀失敗都靜靜跳過（提示而已，不影響任何流程）。
 pub async fn refresh_codex(app: &Arc<App>, run: &db::Run) {
+    let database = DbContext::new(app.db.clone());
+    let rollout = AppCodexRolloutAccess::new(app);
+    let events = AppEventSink::new(app);
+    refresh_codex_with_ports(&database, &rollout, &events, run).await;
+}
+
+/// Run-scoped Codex cache observation. The App wrapper supplies only the database, local rollout
+/// resolver, and bot-status event capability; parsing and incremental file reads stay here.
+pub(crate) async fn refresh_codex_with_ports<R, E>(
+    database: &DbContext<SqlitePool>,
+    rollout: &R,
+    events: &E,
+    run: &db::Run,
+) where
+    R: CodexRolloutAccess,
+    E: EventSink,
+{
     let Some(session) = run.native_session_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return };
-    if !matches!(db::bot_host(&app.db, &run.bot_id).await.as_deref(), Ok(h) if h == crate::config::LOCAL_HOST) {
+    let session_id = session.to_owned();
+    if !matches!(db::bot_host(database.pool(), &run.bot_id).await.as_deref(), Ok(host) if host == crate::config::LOCAL_HOST) {
         return;
     }
     let (known_path, offset) = {
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
         let e = s.entry(run.id.clone()).or_default();
-        if e.session_id != session {
+        if e.session_id != session_id {
             // 換了 session（/new、resume）：位移與路徑都作廢，舊讀數不留。
-            *e = Entry { session_id: session.to_string(), ..Default::default() };
+            *e = Entry { session_id: session_id.clone(), ..Default::default() };
         }
         (e.path.clone(), e.offset)
     };
     let path = match known_path {
         Some(p) => p,
         None => {
-            let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return };
-            let Some(home) = crate::lifecycle::codex_home(app, &bot).await else { return };
-            let Some(p) = crate::lifecycle::codex_session_log_async(home, session.to_string()).await else { return };
+            let Some(p) = rollout.local_rollout_path(&run.bot_id, &session_id).await else { return };
             p
         }
     };
@@ -125,7 +144,7 @@ pub async fn refresh_codex(app: &Arc<App>, run: &db::Run) {
     let latest = last_token_count(&text);
     let changed = {
         let mut s = store().lock().unwrap_or_else(|e| e.into_inner());
-        let Some(e) = s.get_mut(&run.id).filter(|e| e.session_id == session) else { return };
+        let Some(e) = s.get_mut(&run.id).filter(|e| e.session_id == session_id) else { return };
         e.path = Some(path);
         e.offset = new_offset;
         let changed = latest.is_some() && latest != e.usage;
@@ -135,7 +154,13 @@ pub async fn refresh_codex(app: &Arc<App>, run: &db::Run) {
         changed
     };
     if changed {
-        app.emit_bot_status(&run.bot_id).await;
+        emit_bot_status(events, &run.bot_id).await;
+    }
+}
+
+async fn emit_bot_status<E: EventSink>(events: &E, bot_id: &str) {
+    if let Err(error) = events.bot_status_changed(bot_id).await {
+        tracing::warn!(bot = %bot_id, error = ?error, "prompt cache bot-status projection failed");
     }
 }
 
