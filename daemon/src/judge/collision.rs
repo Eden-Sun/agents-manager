@@ -119,7 +119,7 @@ pub(crate) async fn check_assignment(app: &(impl crate::capabilities::Cfg + crat
     if !app.cfg().get().await.judge.enabled {
         return Ok(());
     }
-    let Some(a) = crate::supervisor::store::assignment(app.db(), assignment_id).await? else {
+    let Some(a) = crate::supervisor_inbox::assignment(app.db(), assignment_id).await? else {
         return Ok(());
     };
     // 通知不是新的工作；已經不會開始的交辦（派送當場失敗、被取消／收掉）也不是（#568）。
@@ -262,7 +262,7 @@ async fn settle_same_work(
 /// 候選是交辦、而那筆已經不在 [`STARTABLE`] 裡：回它現在的狀態（讀不到＝被刪了，也算）。開票那條沒有交辦，永遠 `None`。
 async fn gone(app: &impl crate::capabilities::Db, cand: &Candidate) -> Result<Option<String>> {
     let Some(id) = cand.assignment_id.as_deref() else { return Ok(None) };
-    let status = crate::supervisor::store::assignment(app.db(), id).await?.map(|a| a.status).unwrap_or_else(|| "missing".into());
+    let status = crate::supervisor_inbox::assignment(app.db(), id).await?.map(|a| a.status).unwrap_or_else(|| "missing".into());
     Ok((!STARTABLE.contains(&status.as_str())).then_some(status))
 }
 
@@ -298,7 +298,7 @@ async fn push_hint(app: &(impl crate::capabilities::Db + crate::capabilities::Em
         "action": action,
     });
     let event_key = format!("judge_same_work:{pair}");
-    let id = crate::supervisor::store::push_inbox(
+    let id = crate::supervisor_inbox::push_inbox(
         app.db(),
         &event_key,
         "judge_same_work",
@@ -351,7 +351,7 @@ async fn repo_projects(app: &(impl crate::capabilities::Cfg + crate::capabilitie
 
 async fn running_cards(app: &impl crate::capabilities::Db, project_id: &str, skip_key: &str, skip_bot: &str) -> Result<Vec<Card>> {
     let mut cards = Vec::new();
-    for a in crate::supervisor::store::unsettled_assignments(app.db()).await? {
+    for a in crate::supervisor_inbox::unsettled_assignments(app.db()).await? {
         if a.expects_review == 0 {
             continue;
         }

@@ -9,8 +9,12 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use sqlx::{FromRow, SqlitePool};
 
-/// There is exactly one supervisor, and its id is stable across restarts and model switches.
-pub const SUPERVISOR_ID: &str = "AGM";
+#[allow(unused_imports)]
+pub use crate::supervisor_inbox::{
+    assignment, assignment_by_crid, assignment_by_turn, push_inbox, push_inbox_tx, sql_list,
+    unsettled_assignments, Assignment, EXECUTING_STATES, OPEN_STATES, STALLED_STATES,
+    SUPERVISOR_ID,
+};
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS supervisors (
@@ -515,171 +519,7 @@ impl Supervisor {
     }
 }
 
-/// Mirrors the row: `FromRow` needs every column, and not all of them have a
-/// reader yet (the front end reads several straight out of the JSON).
-#[allow(dead_code)]
-#[derive(Debug, Clone, FromRow)]
-pub struct Assignment {
-    pub id: String,
-    pub supervisor_id: String,
-    pub request_id: Option<String>,
-    pub target_bot_id: String,
-    pub client_request_id: String,
-    pub turn_id: Option<String>,
-    pub text: String,
-    pub status: String,
-    pub delivery: Option<String>,
-    pub result: Option<String>,
-    pub error: Option<String>,
-    pub attempts: i64,
-    pub next_attempt_at: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub completed_at: Option<String>,
-    pub turn_status: Option<String>,
-    pub evidence_complete: Option<i64>,
-    pub reviewed_at: Option<String>,
-    pub reviewed_by: Option<String>,
-    pub review_decision: Option<String>,
-    pub review_reason: Option<String>,
-    pub followup_assignment_id: Option<String>,
-    pub follow_up_of: Option<String>,
-    pub legacy_closed: i64,
-    pub ownership_json: Option<String>,
-    /// 0 = 通知，不等回覆也不驗收（見 SCHEMA）。
-    pub expects_review: i64,
-    /// `quota_blocked` 時：額度預計什麼時候回來。
-    pub resume_at: Option<String>,
-    /// 因額度自動重送過幾次。
-    pub quota_retries: i64,
-    /// 群組任務：所屬任務與角色（見 migrate 的欄位註解）。
-    pub mission_id: Option<String>,
-    pub mission_role: Option<String>,
-    /// 回合結束時 run 上的 `turn_error`。
-    pub turn_error: Option<String>,
-    /// 回報給哪個 AGM 角色驗收（`patrol` | `responder`；NULL = 協調者）。見 roles.rs。
-    #[sqlx(default)]
-    pub review_role: Option<String>,
-    /// 這一輪第一次撞 409 的時間（見 migrate 的欄位註解）。
-    #[sqlx(default)]
-    pub conflict_since: Option<String>,
-    /// 排不進去幾輪（409）。跟 `attempts` 分開，見 SCHEMA 的欄位註解與 issue #528。
-    #[sqlx(default)]
-    pub busy_rounds: i64,
-}
 
-/// Lifecycle states an assignment can still move out of on its own.
-pub const EXECUTING_STATES: [&str; 3] = ["queued", "delivered", "unknown"];
-/// Everything AGM still owes attention to: in flight, waiting to be accepted, or blocked.
-/// `quota_blocked` 也在裡面——工作還沒做完，只是在等額度回來；controller 會自己重送。
-pub const OPEN_STATES: [&str; 6] =
-    ["queued", "delivered", "unknown", "awaiting_review", "blocked", "quota_blocked"];
-
-/// `'a','b',…` 給 SQL 的 `IN (…)` 用。以前四個查詢各自把清單硬寫進字串，三種答案：
-/// `quota_blocked` 因此從 ownership 衝突與未結案計數裡消失——AGM 查過衝突、回報「沒有人握著這塊」，
-/// 然後把同一個模組派給第二顆 bot（review 2026-09-16）。清單只准有一份。
-pub(crate) fn sql_list(states: &[&str]) -> String {
-    states.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(",")
-}
-
-/// 「卡住了沒人管」只看這些：`quota_blocked` 在等一個已知的時間點（SPEC §18.9 明講不算卡住），
-/// `blocked` 在等人回答——兩個都不是沒人管，所以刻意不進這張表。其餘的未結案都算。
-pub const STALLED_STATES: [&str; 4] = ["queued", "delivered", "unknown", "awaiting_review"];
-
-impl Assignment {
-    /// The wire shape the front end and the `agm` CLI agreed on.
-    pub fn to_json(&self) -> Value {
-        json!({
-            "id": self.id,
-            "target_bot_id": self.target_bot_id,
-            "client_request_id": self.client_request_id,
-            "turn_id": self.turn_id,
-            "status": self.status,
-            "text": self.text,
-            "delivery": self.delivery,
-            "result": self.result,
-            "error": self.error,
-            "attempts": self.attempts,
-            // 排不進去幾輪（409）。`attempts` 是上游錯誤的重試次數，兩者不是同一件事（issue #528）。
-            "busy_rounds": self.busy_rounds,
-            // When the next retry is due. Without it "attempts: 37" is a number with no story:
-            // you cannot tell a job that is retrying on schedule from one that is wedged.
-            "next_attempt_at": self.next_attempt_at,
-            "request_id": self.request_id,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "completed_at": self.completed_at,
-            // The raw transport facts, kept next to the lifecycle state rather than folded
-            // into it: what the turn itself ended as, and whether we saw all of the reply.
-            "turn_status": self.turn_status,
-            "evidence_complete": self.evidence_complete.map(|v| v != 0),
-            "open": self.is_open(),
-            "awaiting_review": self.status == "awaiting_review",
-            "review": {
-                "decision": self.review_decision,
-                "by": self.reviewed_by,
-                "at": self.reviewed_at,
-                "reason": self.review_reason,
-                "followup_assignment_id": self.followup_assignment_id,
-            },
-            "follow_up_of": self.follow_up_of,
-            // True for rows closed before acceptance existed: closed, but never accepted by
-            // anyone. Not a claim that the work was verified.
-            "legacy_closed": self.legacy_closed != 0,
-            "ownership": self.ownership(),
-            "review_role": self.review_role.as_deref().unwrap_or("responder"),
-            // `notice` = AGM 只是把話說給 bot 聽：送到、回合結束就結案，沒有驗收這一段。
-            "kind": if self.is_notice() { "notice" } else { "task" },
-            "expects_review": !self.is_notice(),
-            // 只有 `quota_blocked` 用得到：額度什麼時候回來、已經自動重送幾次。
-            "resume_at": self.resume_at,
-            "quota_retries": self.quota_retries,
-            // 群組任務（沒有就是 null）。
-            "mission_id": self.mission_id,
-            "role": self.mission_role,
-            "turn_error": self.turn_error,
-            // 一直 409 送不進去的這一輪從什麼時候開始；保險絲從這裡計時（SPEC §18.8）。
-            "conflict_since": self.conflict_since,
-        })
-    }
-
-    /// 通知型（不等回覆、不驗收）。
-    pub fn is_notice(&self) -> bool {
-        self.expects_review == 0
-    }
-
-    /// 這一次要送出去用的 `client_request_id`。
-    ///
-    /// 第一次就是 assignment 自己的那個；被額度擋下重送時加上 `#r<n>`——`lifecycle::prompt`
-    /// 的冪等是「同一個 crid 回同一個 turn」，不換 id 的話重送會直接拿回上一個**撞到上限的**
-    /// turn，等於什麼都沒送。加了序號之後：同一次重送重跑幾遍仍然只有一個 turn（冪等還在），
-    /// 但跟上一次分得開。
-    pub fn dispatch_crid(&self) -> String {
-        if self.quota_retries <= 0 {
-            self.client_request_id.clone()
-        } else {
-            format!("{}#r{}", self.client_request_id, self.quota_retries)
-        }
-    }
-
-    /// Files / modules this assignment was handed.
-    pub fn ownership(&self) -> Vec<String> {
-        self.ownership_json
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-            .unwrap_or_default()
-    }
-
-    /// Still owed to AGM: in flight, waiting for acceptance, or explicitly blocked.
-    pub fn is_open(&self) -> bool {
-        OPEN_STATES.contains(&self.status.as_str())
-    }
-
-    /// The daemon can still move this one on its own (retry, reconcile, close the turn).
-    pub fn is_executing(&self) -> bool {
-        EXECUTING_STATES.contains(&self.status.as_str())
-    }
-}
 
 /// Mirrors the row: `FromRow` needs every column, and not all of them have a
 /// reader yet (the front end reads several straight out of the JSON).
@@ -1128,30 +968,6 @@ pub async fn requests(pool: &SqlitePool, limit: i64) -> Result<Vec<Value>> {
 
 // ---------------------------------------------------------------- assignments
 
-pub async fn assignment(pool: &SqlitePool, id: &str) -> Result<Option<Assignment>> {
-    Ok(sqlx::query_as::<_, Assignment>("SELECT * FROM supervisor_assignments WHERE id=?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?)
-}
-
-pub async fn assignment_by_crid(pool: &SqlitePool, crid: &str) -> Result<Option<Assignment>> {
-    Ok(sqlx::query_as::<_, Assignment>(
-        "SELECT * FROM supervisor_assignments WHERE supervisor_id=? AND client_request_id=?",
-    )
-    .bind(SUPERVISOR_ID)
-    .bind(crid)
-    .fetch_optional(pool)
-    .await?)
-}
-
-pub async fn assignment_by_turn(pool: &SqlitePool, turn_id: &str) -> Result<Option<Assignment>> {
-    Ok(sqlx::query_as::<_, Assignment>("SELECT * FROM supervisor_assignments WHERE turn_id=? LIMIT 1")
-        .bind(turn_id)
-        .fetch_optional(pool)
-        .await?)
-}
-
 /// Write the assignment down *before* anything is sent. A crash between here and the prompt
 /// leaves a `queued` row the controller picks up again with the same client_request_id.
 ///
@@ -1349,20 +1165,7 @@ pub async fn open_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>> {
     .await?)
 }
 
-/// Everything still owed to AGM: in flight, waiting for acceptance, or blocked. This is the
-/// list the handoff, the open count and the dispatch UI read — a job whose turn happens to have
-/// ended is still on it until somebody accepts it.
-pub async fn unsettled_assignments(pool: &SqlitePool) -> Result<Vec<Assignment>> {
-    Ok(sqlx::query_as::<_, Assignment>(&format!(
-        "SELECT * FROM supervisor_assignments WHERE supervisor_id=?
-           AND status IN ({})
-          ORDER BY created_at ASC, rowid ASC",
-        sql_list(&OPEN_STATES)
-    ))
-    .bind(SUPERVISOR_ID)
-    .fetch_all(pool)
-    .await?)
-}
+
 
 /// Work that has never reached anybody: still `queued`, first created before `cutoff`.
 ///
@@ -2157,71 +1960,6 @@ pub async fn link_followup(pool: &SqlitePool, id: &str, followup_id: &str) -> Re
 }
 
 // ---------------------------------------------------------------- inbox
-
-/// Insert an event unless its `event_key` is already known. `Ok(None)` = a duplicate, which is
-/// the normal outcome for a replayed turn event or a restart rescan.
-/// [`push_inbox`] 寫在呼叫端的交易裡：狀態轉移與它要通知的那件事同生共死（#283）。
-pub async fn push_inbox_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    event_key: &str,
-    kind: &str,
-    assignment_id: Option<&str>,
-    bot_id: Option<&str>,
-    turn_id: Option<&str>,
-    payload: &Value,
-) -> Result<Option<String>> {
-    let id = crate::db::ulid();
-    let now = crate::db::now();
-    let res = sqlx::query(
-        "INSERT OR IGNORE INTO supervisor_inbox
-           (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?)",
-    )
-    .bind(&id)
-    .bind(SUPERVISOR_ID)
-    .bind(event_key)
-    .bind(assignment_id)
-    .bind(bot_id)
-    .bind(turn_id)
-    .bind(kind)
-    .bind(payload.to_string())
-    .bind(&now)
-    .bind(&now)
-    .execute(&mut **tx)
-    .await?;
-    Ok((res.rows_affected() > 0).then_some(id))
-}
-
-pub async fn push_inbox(
-    pool: &SqlitePool,
-    event_key: &str,
-    kind: &str,
-    assignment_id: Option<&str>,
-    bot_id: Option<&str>,
-    turn_id: Option<&str>,
-    payload: &Value,
-) -> Result<Option<String>> {
-    let id = crate::db::ulid();
-    let now = crate::db::now();
-    let res = sqlx::query(
-        "INSERT OR IGNORE INTO supervisor_inbox
-           (id, supervisor_id, event_key, assignment_id, bot_id, turn_id, kind, payload_json, state, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?)",
-    )
-    .bind(&id)
-    .bind(SUPERVISOR_ID)
-    .bind(event_key)
-    .bind(assignment_id)
-    .bind(bot_id)
-    .bind(turn_id)
-    .bind(kind)
-    .bind(payload.to_string())
-    .bind(&now)
-    .bind(&now)
-    .execute(pool)
-    .await?;
-    Ok((res.rows_affected() > 0).then_some(id))
-}
 
 /// 處理完（`handled`）多久之後，過大的 payload 才被換成標記。
 pub const COMPACT_HANDLED_AFTER_SECS: i64 = 24 * 3600;

@@ -226,7 +226,7 @@ async fn raise(app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
         "reasons": flag.reasons(),
         "action": action,
     });
-    let id = crate::supervisor::store::push_inbox(
+    let id = crate::supervisor_inbox::push_inbox(
         app.db(),
         &key,
         "judge_report_evidence",

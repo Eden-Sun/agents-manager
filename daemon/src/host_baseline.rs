@@ -208,7 +208,7 @@ pub fn alert_for(host: &str, report: &BaselineReport) -> Option<(String, serde_j
     let issues = report.issues.as_ref().filter(|i| !i.is_empty())?;
     let mut ids: Vec<&str> = issues.iter().map(|i| i.id.as_str()).collect();
     ids.sort_unstable();
-    let key = format!("ops_alert:daemon:host_baseline:{host}:{}", crate::supervisor::cli_refresh::short_hash(ids.join("\n").as_bytes()));
+    let key = format!("ops_alert:daemon:host_baseline:{host}:{}", crate::supervisor_inbox::short_hash(ids.join("\n").as_bytes()));
     let critical = issues.iter().filter(|i| i.severity == CRITICAL).count();
     let payload = serde_json::json!({
         "source": "daemon",

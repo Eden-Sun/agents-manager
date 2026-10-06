@@ -19,16 +19,7 @@ use std::sync::Arc;
 use super::roles::{self, Role};
 use super::store;
 
-/// 內容指紋：FNV-1a 64，取 12 碼十六進位。不能用 `DefaultHasher`——它不保證跨版本穩定，
-/// 備份檔名會變，「同一個雜湊只留一份」就失效了。
-pub fn short_hash(content: &[u8]) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in content {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("{h:016x}")[..12].to_string()
-}
+pub use crate::supervisor_inbox::short_hash;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
