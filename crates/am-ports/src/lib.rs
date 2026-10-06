@@ -23,7 +23,7 @@ pub use events::{EventSink, TurnEvents};
 pub use host::{HerdrPort, HostRuntime};
 pub use lock::{BotLock, BotLockGuard};
 pub use quota::QuotaAccess;
-pub use run_pane::RunPaneReader;
+pub use run_pane::{RunPaneReader, StyledRunPaneReader};
 pub use system_message::SystemMessageWriter;
 pub use turn::TurnControl;
 
