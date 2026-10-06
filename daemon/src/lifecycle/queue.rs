@@ -1,6 +1,12 @@
 //! The queued-prompt flush and the run/turn bookkeeping that frees a slot.
 
 use super::*;
+use super::send_now::ports::{HandoffSendRepo, MaintenancePort, PaneWatchPort, SupervisorSendRepo, emit_object, bot_status, turn_changed};
+use super::app_ports_p4::{AppEventSink, AppTurnEvents};
+#[cfg(not(test))]
+use super::send_now::app_ports_p4send::AppBotLock;
+#[cfg(not(test))]
+use am_ports::BotLock;
 
 /// Hand the oldest queued prompt to the agent, if it can take one now. Caller holds the bot lock
 /// (the one-in-flight / one-queued unique indexes make a lost race an error). Early returns leave
@@ -8,7 +14,7 @@ use super::*;
 /// `delivery='pending'` has no other way out. 那一句寫不進去就記成欠著（`owed_delivery`），回 `Err`（#158）。
 pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow::Result<()> {
     // #708：移交出去的專案，佇列原樣留著（收回後照常送），這裡一則都不送。讀不到也留在佇列（不認領、不花重試），稍後再看。
-    match crate::handoff::bot_handed_off_to(&app.db, bot_id).await {
+    match app.db.bot_handed_off_to(bot_id).await {
         Ok(None) => {}
         Ok(Some(to)) => {
             tracing::info!(bot = %bot_id, handed_off_to = %to, "queued prompts held: the project was handed off");
@@ -16,7 +22,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         }
         Err(e) => {
             tracing::warn!(bot = %bot_id, error = %e, "讀不到專案是否已移交：排著的 prompt 留在佇列，稍後重新判斷");
-            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(crate::supervisor::maintenance::UNREADABLE_RETRY_SECS as u64));
+            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(<Arc<App> as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
             return Ok(());
         }
     }
@@ -92,7 +98,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
     // 這個 timer 就是底線（租約到期即自動失效，不會鎖死）。
     // 讀不到窗口狀態也一樣留在佇列（issue #127）：觀測不到租約不等於沒有租約，這一筆不 claim、不花重試，
     // 過幾秒再判斷一次；DB 一恢復就照常往下走，不會永久卡住。
-    match crate::supervisor::maintenance::window_held(app).await {
+    match app.window_held().await {
         Ok(None) => {}
         Ok(Some(w)) => {
             let left = w.retry_after_secs(&db::now()).max(1) as u64;
@@ -103,7 +109,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
         }
         Err(_) => {
             tracing::warn!(bot = %bot_id, turn = %turn.id, "維護窗口狀態讀不到：排隊的 prompt 留在佇列，稍後重新判斷");
-            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(crate::supervisor::maintenance::UNREADABLE_RETRY_SECS as u64));
+            schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(<Arc<App> as MaintenancePort>::UNREADABLE_RETRY_SECS as u64));
             return Ok(());
         }
     }
@@ -154,7 +160,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
             schedule_flush_retry(app, bot_id, std::time::Duration::from_secs(QUEUE_RETRY_BASE_SECS));
             return Err(e.context("空的 prompt 收不成 failed：留在佇列，稍後再收"));
         }
-        emit_turn(app, &turn.id).await;
+        turn_changed(&AppTurnEvents::new(app), &turn.id).await;
         return Ok(());
     }
 
@@ -176,7 +182,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
             return Ok(());
         }
     }
-    emit_turn(app, &turn.id).await;
+    turn_changed(&AppTurnEvents::new(app), &turn.id).await;
 
     let wait_key = rollout_wait_key(&run);
     // Refused by a screen check → back on the queue **with a timed retry**: a bot left idle on a
@@ -393,7 +399,7 @@ async fn defer_queued_turn(
 }
 
 /// 讀不到交辦、或排著的那一則撤不掉時，flush 多久之後再判斷一次（同維護窗口讀不到的那一條，#127）。
-const WITHDRAWAL_RECHECK: std::time::Duration = std::time::Duration::from_secs(crate::supervisor::maintenance::UNREADABLE_RETRY_SECS as u64);
+const WITHDRAWAL_RECHECK: std::time::Duration = std::time::Duration::from_secs(<Arc<App> as MaintenancePort>::UNREADABLE_RETRY_SECS as u64);
 
 /// 掛著這些狀態的交辦，它排著的那一則不送（[`assignment_withdrawal`]；`turn_controller::claim_queued` 認領時也看這張表）。
 pub(crate) const WITHDRAWN_ASSIGNMENT: [&str; 5] = ["cancelled", "superseded", "failed", "blocked", "quota_blocked"];
@@ -402,7 +408,7 @@ pub(crate) const WITHDRAWN_ASSIGNMENT: [&str; 5] = ["cancelled", "superseded", "
 /// 還要、或沒掛交辦 → `Ok(None)`。blocked 的交辦不在執行中，就算送出去，結果也沒有地方收（AGM 會以為沒送出而重派）。
 /// **讀不到是錯誤，不是「還要」**（#159）：不知道交辦還要不要，就不能送。
 pub(crate) async fn assignment_withdrawal(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<String>> {
-    let Some(a) = crate::supervisor::store::assignment_by_turn(&app.db, turn_id).await? else { return Ok(None) };
+    let Some(a) = app.db.assignment_by_turn(turn_id).await? else { return Ok(None) };
     let (what, detail) = match a.status.as_str() {
         "cancelled" => ("已取消", a.review_reason.as_deref()),
         "superseded" => ("已被後續交辦取代", a.review_reason.as_deref()),
@@ -455,8 +461,8 @@ pub(crate) async fn revoke_queued_turn_tx(
 
 pub(crate) async fn announce_revoked(app: &Arc<App>, turn_id: &str, revoked: Revoked) {
     tracing::info!(turn = turn_id, bot = %revoked.bot_id, "revoked a queued prompt that will not be sent");
-    emit_message_added(app, &revoked.bot_id, revoked.message).await;
-    emit_turn(app, turn_id).await;
+    emit_object(&AppEventSink::new(app), "message_added", Some(&revoked.bot_id), json!({ "bot_id": revoked.bot_id, "message": revoked.message })).await;
+    turn_changed(&AppTurnEvents::new(app), turn_id).await;
 }
 
 /// 這顆 bot 已經沒有活著的 run：它排著的 queued turn 沒有人會送，收掉（AGM 2026-09-16）。
@@ -675,8 +681,8 @@ pub fn schedule_flush_queued(app: &Arc<App>, bot_id: &str) {
         tokio::spawn(async move {
             // Let the caller finish its current event / status write before taking the same lock.
             tokio::task::yield_now().await;
-            let lock = app.bot_lock(&bot_id).await;
-            let _g = lock.lock().await;
+            let locks = AppBotLock::new(&app);
+            let Ok(_g) = locks.lock_bot(&bot_id).await else { return };
             if let Err(e) = flush_queued_locked(&app, &bot_id).await {
                 tracing::warn!(bot = %bot_id, error = ?e, "queued prompt flush failed");
             }
@@ -716,7 +722,7 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
         return RunExit::AlreadyEnded;
     }
     // #708：專案移交出去了，run 的結束歸接手的 daemon 記；這裡一樣都不寫（讀不到就不動）。
-    match crate::handoff::bot_handed_off_to(&app.db, &run.bot_id).await {
+    match app.db.bot_handed_off_to(&run.bot_id).await {
         Ok(None) => {}
         Ok(Some(to)) => {
             tracing::info!(run = run_id, reason, handed_off_to = %to, "run exit ignored: the project was handed off");
@@ -769,13 +775,13 @@ pub async fn mark_run_exited(app: &Arc<App>, run_id: &str, reason: &str) -> RunE
         match db::bot_host(&app.db, &run.bot_id).await {
             Ok(host) => {
                 if let Some(session) = app.session_for_run(&run).await {
-                    crate::events::unwatch_pane_on_session(app, &host, &session, p).await;
+                    app.unwatch_pane_on_session(&host, &session, p).await;
                 }
             }
             Err(e) => tracing::warn!(run = run_id, error = %e, "cannot read the host of an exited run; its pane watcher is left in place"),
         }
     }
-    app.emit_bot_status(&run.bot_id).await;
+    bot_status(&AppEventSink::new(app), &run.bot_id).await;
     if turn_owed {
         RunExit::TurnOwed
     } else {

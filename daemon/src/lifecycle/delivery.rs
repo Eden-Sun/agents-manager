@@ -19,6 +19,7 @@
 //! `Unproven` — keys were sent and the result cannot be proven, which is what `unknown` means.
 
 use super::*;
+use super::send_now::ports::{CodexSendPort};
 use std::time::Duration;
 
 /// What the composer holds right now. Ownership is never inferred from text.
@@ -1171,7 +1172,7 @@ pub(crate) async fn prepare_delivery(
         }
     };
     // 結構化歷史的基準（#749）：送出前 thread 最新那筆 item。取不到＝沒有這條證據，不影響送達。
-    let structured = crate::codex_history::mark(app, bot, run).await;
+    let structured = app.codex_history_mark(bot, run).await;
     Ok(Ready::Type { pane, proof, submit, offset, baseline, structured })
 }
 
@@ -1361,7 +1362,7 @@ pub(crate) async fn confirm_submitted(
         // 歷史讀不到、沒看到都照舊往下走，不當成「沒送到」。
         if state == BoxState::Empty && evidence(&bot.kind, proof, offset, &now, text)? <= baseline {
             if let Some(mark) = structured {
-                if crate::codex_history::prompt_landed(app, mark, &mut history_conn, text).await {
+                if app.codex_prompt_landed(mark, &mut history_conn, text).await {
                     tracing::info!(run = %run.id, bot = %bot.name, "prompt proven submitted by the codex thread history");
                     crate::codex_history::note("delivery", crate::codex_history::Evidence::Structured);
                     return Ok(Delivered::Submitted);
@@ -1401,7 +1402,7 @@ pub(crate) async fn confirm_submitted(
         BoxState::Empty => {
             // 最後再問一次歷史：rollout 還沒 flush 時，這是唯一的 positive evidence（#749）。
             if let Some(mark) = structured {
-                if crate::codex_history::prompt_landed(app, mark, &mut history_conn, text).await {
+                if app.codex_prompt_landed(mark, &mut history_conn, text).await {
                     tracing::info!(run = %run.id, bot = %bot.name, "prompt proven submitted by the codex thread history");
                     crate::codex_history::note("delivery", crate::codex_history::Evidence::Structured);
                     return Ok(Delivered::Submitted);

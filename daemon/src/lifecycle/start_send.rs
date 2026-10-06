@@ -21,6 +21,10 @@
 //!   （重啟前那次可能根本沒做完、或起不來的原因已經排除）。每次開機最多一次，失敗照樣只記原因。
 
 use super::*;
+use super::send_now::ports::{AttachSendPort, AttachTxPort, IdleSleepPort, ShareSendRepo, turn_changed};
+use super::app_ports_p4::{AppTurnEvents};
+use super::send_now::app_ports_p4send::AppBotLock;
+use am_ports::BotLock;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
@@ -84,14 +88,15 @@ async fn prompt_starting_or_queue_authorized(
     share_token: Option<&str>,
 ) -> LcResult<PromptOut> {
     let accepted = {
-        let lock = app.bot_lock(bot_id).await;
-        let _g = lock.lock().await;
+        let locks = AppBotLock::new(app);
+        let locked_bot = bot_id.to_string();
+        let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
         if let Some(token) = share_token {
-            let valid = crate::share::store::resolve(&app.db, token).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+            let valid = app.db.resolve_share_token(token).await.map_err(|e| LcError::Upstream(e.to_string()))?;
             if valid.as_deref() != Some(bot_id) {
                 return Err(LcError::NotFound("bot".into()));
             }
-            crate::share::store::touch(&app.db, bot_id).await;
+            app.db.touch_share(bot_id).await;
         }
         accept_locked(app, bot_id, text, client_request_id, attachment_ids, relay).await?
     };
@@ -155,7 +160,7 @@ async fn accept_locked(
     if let Some(refusal) = super::prompt::maintenance_refusal(app, Admission::Gated).await {
         return Err(refusal);
     }
-    let files = crate::attach::resolve(app, bot_id, attachment_ids).await.map_err(|e| LcError::Bad(e.to_string()))?;
+    let files = app.resolve_attachments(bot_id, attachment_ids).await.map_err(|e| LcError::Bad(e.to_string()))?;
     // 同 `prompt_inner`：起來後打進 pane 的是清過的字（#205），泡泡留原文。
     let deliver = super::pane_text::for_pane(&bot.kind, &crate::attach::deliver_text(text, &files));
     if super::pane_text::nothing_left(text, &deliver) {
@@ -193,10 +198,10 @@ async fn accept_locked(
     .await
     .map_err(up)?;
     // 附件跟訊息同一個交易：要嘛整則（含附件）都收下，要嘛什麼都沒有，不會有一則指著沒綁上的附件在排隊。
-    crate::attach::bind_tx(&mut tx, &msg_id, &files).await.map_err(|e| LcError::Bad(e.to_string()))?;
+    tx.bind_attachments_tx(&msg_id, &files).await.map_err(|e| LcError::Bad(e.to_string()))?;
     tx.commit().await.map_err(up)?;
     super::prompt::emit_prompt_message(app, bot_id, &msg_id).await;
-    emit_turn(app, &turn_id).await;
+    turn_changed(&AppTurnEvents::new(app), &turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, run = ?run.as_ref().map(|r| &r.id), "bot 沒在跑：先收下這一則，再替它啟動");
     let out = PromptOut { turn_id, message_id: msg_id, delivery: "queued".into(), send_now: None };
     Ok(Accepted::Queued(out, mark))
@@ -256,7 +261,7 @@ pub(crate) async fn start_for_waiting(app: &Arc<App>, bot_id: &str) {
 /// 成功 → 叫醒 flush（起來、閒下來就送）；失敗 → 留在佇列，`start_error` 寫原因。`mark` 在啟動做完時放掉。
 async fn start_with(app: &Arc<App>, bot_id: &str, mark: Starting) {
     set_start_error(app, bot_id, None, false).await;
-    let res = match crate::supervisor::idle_sleep::wake(app, bot_id, "有一則訊息等著它起來送").await {
+    let res = match app.idle_sleep_wake(bot_id, "有一則訊息等著它起來送").await {
         Ok(true) => Started::Yes,
         Ok(false) => match start_stopped(app, bot_id).await {
             Ok(_) => Started::Yes,
@@ -294,7 +299,7 @@ async fn start_with(app: &Arc<App>, bot_id: &str, mark: Starting) {
 /// 它停過，要接回原本那段對話再送（`resume_native`；接不回照舊開新對話，訊息不能卡住）。讀不到是不是分享用 bot 也接回：
 /// 對一般 bot 只差在「先試著接回」，對分享用 bot 開新對話就是把對方的脈絡丟掉。其他 bot 照舊開新對話。
 async fn start_stopped(app: &Arc<App>, bot_id: &str) -> LcResult<String> {
-    let opts = if matches!(crate::share::store::is_share_bot(&app.db, bot_id).await, Ok(false)) {
+    let opts = if matches!(app.db.is_share_bot(bot_id).await, Ok(false)) {
         StartOpts::default()
     } else {
         StartOpts { resume_native: true, ..Default::default() }
@@ -400,7 +405,7 @@ async fn set_start_error(app: &Arc<App>, bot_id: &str, why: Option<&str>, keep_f
                 .await
         };
         if matches!(changed, Ok(r) if r.rows_affected() > 0) {
-            emit_turn(app, &id).await;
+            turn_changed(&AppTurnEvents::new(app), &id).await;
         }
     }
 }
@@ -458,8 +463,8 @@ pub async fn withdraw_turn(app: &Arc<App>, turn_id: &str) -> LcResult<WithdrawnP
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::NotFound("turn".into()))?;
-    let lock = app.bot_lock(&bot_id).await;
-    let _g = lock.lock().await;
+    let locks = AppBotLock::new(app);
+    let _g = locks.lock_bot(&bot_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let (status, awaits_start, awaits_idle, origin, crid): (String, i64, i64, String, Option<String>) = sqlx::query_as(
         "SELECT status, awaits_start, awaits_idle, origin, client_request_id FROM turns WHERE id=?",
     )

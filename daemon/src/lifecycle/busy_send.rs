@@ -1,6 +1,8 @@
 //! Persist user prompts accepted while a running agent is busy (#733).
 
 use super::{prompt, *};
+use super::send_now::ports::{AttachTxPort, SupervisorSendRepo, turn_changed};
+use super::app_ports_p4::{AppTurnEvents};
 use crate::attach::Attachment;
 
 /// 409 `queue_slot_taken`：唯一的 queued 槽被 `turn_id` 那一筆佔著，`holder` 說是誰（web 才講得出人話）。
@@ -39,7 +41,7 @@ async fn slot_holder(app: &Arc<App>, turn_id: &str) -> Value {
             return json!({"kind": "bot"});
         }
         if let Ok(Some(bot)) = db::bot(&app.db, &from).await {
-            let agm = match crate::supervisor_owned::load(&app.db).await {
+            let agm = match app.db.load_owned().await {
                 Ok(owned) => owned.owns(&bot),
                 Err(_) => false,
             };
@@ -144,13 +146,13 @@ pub(super) async fn queue_awaiting_idle(
     .execute(&mut *tx)
     .await
     .map_err(up)?;
-    crate::attach::bind_tx(&mut tx, &message_id, files)
+    tx.bind_attachments_tx(&message_id, files)
         .await
         .map_err(up)?;
 
     tx.commit().await.map_err(up)?;
     prompt::emit_prompt_message(app, bot_id, &message_id).await;
-    super::messages::emit_turn(app, &turn_id).await;
+    turn_changed(&AppTurnEvents::new(app), &turn_id).await;
     tracing::info!(bot = %bot_id, turn = %turn_id, "使用者 prompt 已持久排入忙碌 bot 的佇列");
     Ok(prompt::PromptOut {
         turn_id,
