@@ -1,6 +1,7 @@
 //! What a pane needs before an agent starts: hooks, shims, skills, persona and argv.
 
 use super::*;
+use super::start::ports::{SessionProviderPort, ShareSessionRepo, ShimInstallPort};
 
 /// The hook / statusLine command line for a *local* bot. The token is deliberately **not**
 /// on the argv (issue #43: `ps` shows every user the full command line, and the statusLine
@@ -760,8 +761,8 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
 pub(crate) async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Project) -> Option<String> {
     let installed = if project.host == LOCAL_HOST {
         app.bot_dir(&bot.id).and_then(|dir| {
-            let bin = crate::herdr_shim::install_local(&dir)?;
-            if let Err(e) = crate::cargo_shim::install_local(&dir) {
+            let bin = app.install_local_herdr_shim(&dir)?;
+            if let Err(e) = app.install_local_cargo_shim(&dir) {
                 tracing::warn!(bot = %bot.name, error = ?e, "could not install the cargo build-slot shim");
             }
             Ok::<_, anyhow::Error>(bin.to_string_lossy().into_owned())
@@ -770,9 +771,9 @@ pub(crate) async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Pr
         match app.hosts.get(&project.host).await {
             Some(conn) => match remote_bot_dir_for(&conn, &bot.id, app.instance().as_deref()).await {
                 Ok(p) => {
-                    let dir = crate::herdr_shim::install_remote(&conn, &p.dir).await;
+                    let dir = app.install_remote_herdr_shim(&conn, &p.dir).await;
                     if dir.is_ok() {
-                        if let Err(e) = crate::cargo_shim::install_remote(&conn, &p.dir).await {
+                        if let Err(e) = app.install_remote_cargo_shim(&conn, &p.dir).await {
                             tracing::warn!(bot = %bot.name, host = %project.host, error = ?e, "could not install the remote cargo build-slot shim");
                         }
                     }
@@ -820,7 +821,7 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
     }
     // 分享用的受限 bot：權限參數由 `share::cage` 決定（絕不帶 bypass），settings 一律寫（裡面是它的權限規則）。
     // 信任分享（trusted）不算：照一般 bot 的權限參數。
-    let restricted = crate::share::store::caged_workspace(&app.db, &bot.id).await?;
+    let restricted = app.db.caged_workspace(&bot.id).await?;
     let mut out = if restricted.is_some() { Vec::new() } else { permission_args(&bot.kind, bot.auto_approve != 0) };
     if bot.inject_hooks == 0 && restricted.is_none() {
         return Ok(out);
@@ -1441,7 +1442,7 @@ pub(crate) async fn effort_checked(app: &Arc<App>, bot: &db::Bot, host: &str) ->
     let Some(effort) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
     let Some(model) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
     // `efforts` does not depend on identity, so no identity is passed.
-    let Ok(list) = crate::models::list(app, host, &bot.kind, None, false).await else { return bot.clone() };
+    let Ok(list) = app.models_list(host, &bot.kind, None, false).await else { return bot.clone() };
     let Some(entry) = list
         .get("models")
         .and_then(|m| m.as_array())

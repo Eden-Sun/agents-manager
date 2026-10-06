@@ -1,10 +1,15 @@
 //! Stopping, interrupting and aborting: the ways a run or a turn ends on purpose.
 
 use super::*;
+use super::start::ports::{HandoffSessionRepo, PaneWatchPort, PreviewPort, RemoteCleanupPort, ShareSessionRepo, emit_object, bot_status, turn_changed};
+use super::app_ports_p4::{AppEventSink, AppTurnEvents};
+use super::start::app_ports_p4sess::AppBotLock;
+use am_ports::BotLock;
 
 pub async fn stop_bot(app: &Arc<App>, bot_id: &str) -> LcResult<bool> {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    let locks = AppBotLock::new(app);
+    let locked_bot = bot_id.to_string();
+    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     stop_bot_locked(app, bot_id).await
 }
 
@@ -94,20 +99,20 @@ async fn stop_locked(
 ) -> LcResult<bool> {
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     // #708：移交出去的 bot 不停（閒置回收、批次重啟、codex 升級後的重啟都走這裡）。
-    crate::handoff::refuse(&app.db, bot_id).await?;
+    app.db.refuse_handed_off(bot_id).await?;
     let Some(run) = db::active_run(&app.db, bot_id).await.map_err(up)? else {
         // agent 自己退了、預覽還掛著的話也一併收（§6.12）。
         match host_fence {
             Some(fence) => {
                 #[cfg(test)]
                 super::race_point::hit("restart_before_no_run_preview_cleanup", bot_id).await;
-                if app.hosts.run_if_current(fence, crate::preview::stop_for_bot(app, bot_id)).await.is_none() {
+                if app.hosts.run_if_current(fence, app.stop_preview_for_bot(bot_id)).await.is_none() {
                     tracing::warn!(bot = %bot.name, host = %fence.conn().name, reason = "superseded", "skipped preview cleanup because the scoped host authority changed");
                     return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": fence.conn().name})));
                 }
             }
             None => {
-                crate::preview::stop_for_bot(app, bot_id).await;
+                app.stop_preview_for_bot(bot_id).await;
             }
         }
         return Ok(false);
@@ -154,16 +159,16 @@ async fn stop_locked(
         super::run_state::Moved::Applied => {}
         // 閒置回收的許可沒過：它不再閒著（或已經被別的路停掉）。外面一步都沒動。
         super::run_state::Moved::Lost if only_if_idle => {
-            app.emit_bot_status(bot_id).await;
+            bot_status(&AppEventSink::new(app), bot_id).await;
             return Err(LcError::conflict("no_longer_idle", json!({"bot_id": bot_id, "run_id": run.id})));
         }
         super::run_state::Moved::Lost => {
             tracing::info!(bot = %bot.name, run = %run.id, "stop: another path ended the run first; nothing left to stop");
-            app.emit_bot_status(bot_id).await;
+            bot_status(&AppEventSink::new(app), bot_id).await;
             return Ok(false);
         }
     }
-    app.emit_bot_status(bot_id).await;
+    bot_status(&AppEventSink::new(app), bot_id).await;
     let target = db::run_target(&run, &bot);
     // Close the in-flight turn and send ctrl+c as one fenced external handoff. Config replacement
     // uses the same per-host authority gate: it either wins first and this does nothing, or waits
@@ -187,7 +192,7 @@ async fn stop_locked(
         Some(Err(e)) => return Err(e),
         None => {
             back_to_running(app, &run.id).await;
-            app.emit_bot_status(bot_id).await;
+            bot_status(&AppEventSink::new(app), bot_id).await;
             return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": host_fence.unwrap().conn().name})));
         }
     }
@@ -196,12 +201,12 @@ async fn stop_locked(
     // while it closes its pane; a repoint cannot turn this into cleanup on B.
     match host_fence {
         Some(fence) => {
-            if app.hosts.run_if_current(fence, crate::preview::stop_for_bot(app, bot_id)).await.is_none() {
+            if app.hosts.run_if_current(fence, app.stop_preview_for_bot(bot_id)).await.is_none() {
                 tracing::info!(bot = %bot.name, host = %host, "skipped preview cleanup after the scoped host authority was superseded");
             }
         }
         None => {
-            crate::preview::stop_for_bot(app, bot_id).await;
+            app.stop_preview_for_bot(bot_id).await;
         }
     }
     // 只認 herdr 明確說「不在」：RPC 失敗不是退出的證據。
@@ -252,7 +257,7 @@ async fn stop_locked(
         } else {
             super::run_state::schedule_settle(app, &run.id, super::run_state::Settle::Reconcile { stuck: "stopping".into() });
         }
-        app.emit_bot_status(bot_id).await;
+        bot_status(&AppEventSink::new(app), bot_id).await;
         return Err(LcError::Upstream(format!(
             "stop_not_confirmed: agent `{target}` did not exit ({outcome:?}); the run is not recorded as stopped"
         )));
@@ -278,7 +283,7 @@ async fn stop_locked(
                 super::run_state::Settle::FinishStop
             };
             super::run_state::schedule_settle(app, &run.id, how);
-            app.emit_bot_status(bot_id).await;
+            bot_status(&AppEventSink::new(app), bot_id).await;
             return Err(LcError::uncommitted(
                 "stop_state_uncommitted",
                 &run.id,
@@ -287,7 +292,7 @@ async fn stop_locked(
             ));
         }
     }
-    app.emit_bot_status(bot_id).await;
+    bot_status(&AppEventSink::new(app), bot_id).await;
     Ok(true)
 }
 
@@ -370,7 +375,7 @@ async fn after_stop(app: &Arc<App>, bot_id: &str, run: &db::Run, host: &str) {
     revoke_orphaned_queued_turns(app, bot_id, "bot 已被停止").await;
     if let Some(p) = run.pane_id.as_deref() {
         if let Some(session) = app.session_for_run(run).await {
-            crate::events::unwatch_pane_on_session(app, host, &session, p).await;
+            app.unwatch_pane_on_session(host, &session, p).await;
         }
     }
 }
@@ -382,7 +387,7 @@ async fn after_stop(app: &Arc<App>, bot_id: &str, run: &db::Run, host: &str) {
 pub(crate) async fn turn_unwritable(app: &Arc<App>, bot_id: &str, run_id: &str, what: &str, e: anyhow::Error) -> LcError {
     tracing::warn!(bot = bot_id, run = run_id, error = %e, "the in-flight turn could not be closed; not touching the agent");
     back_to_running(app, run_id).await;
-    app.emit_bot_status(bot_id).await;
+    bot_status(&AppEventSink::new(app), bot_id).await;
     let turn = db::in_flight_turn(&app.db, run_id).await.ok().flatten().map(|t| t.id);
     LcError::Unavailable(json!({
         "error": "turn_state_unwritable", "run_id": run_id, "turn_id": turn, "retryable": true, "retry_after_secs": 5,
@@ -402,8 +407,8 @@ pub(crate) async fn back_to_running(app: &Arc<App>, run_id: &str) {
 /// 在 bot 鎖裡做；只動仍停在 `stopping`（或被 pane-exit 收成 `exited`、還沒改標）的這一顆。
 pub(crate) async fn finish_stop(app: &Arc<App>, run_id: &str) {
     let Ok(Some(run)) = db::run(&app.db, run_id).await else { return };
-    let lock = app.bot_lock(&run.bot_id).await;
-    let _g = lock.lock().await;
+    let locks = AppBotLock::new(app);
+    let Ok(_g) = locks.lock_bot(&run.bot_id).await else { return };
     // 收尾要拆那台主機上的 watcher：讀不到主機就這一輪什麼都不寫，下一輪重試（不退回 local——拆錯台，這台的 watcher 就留著）。
     let host = match db::bot_host(&app.db, &run.bot_id).await {
         Ok(h) => h,
@@ -417,7 +422,7 @@ pub(crate) async fn finish_stop(app: &Arc<App>, run_id: &str) {
         Ok(StopCommit::Relabelled | StopCommit::Lost) => {}
         Err(e) => tracing::warn!(run = run_id, error = %e, "retrying the stopped record failed"),
     }
-    app.emit_bot_status(&run.bot_id).await;
+    bot_status(&AppEventSink::new(app), &run.bot_id).await;
 }
 
 /// stop (if running) + start. Used to make edited `model` / `args` / `identity` / `env` take effect.
@@ -462,7 +467,7 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
                 continue;
             }
             // #708：移交出去的專案的 bot 目錄不刪（接手的 daemon 可能在用；讀不到也不刪）。
-            if !matches!(crate::handoff::bot_handed_off_to(&app.db, &id).await, Ok(None)) {
+            if !matches!(app.db.bot_handed_off_to(&id).await, Ok(None)) {
                 continue;
             }
             match db::active_run(&app.db, &id).await {
@@ -493,7 +498,7 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
     .unwrap_or_default();
 
     for (id, ws) in restricted_deleted {
-        if !matches!(crate::handoff::bot_handed_off_to(&app.db, &id).await, Ok(None)) {
+        if !matches!(app.db.bot_handed_off_to(&id).await, Ok(None)) {
             continue;
         }
         match db::active_run(&app.db, &id).await {
@@ -526,7 +531,7 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
         return false;
     }
     // #708／#709：移交出去的專案，bot 目錄是接手那顆 daemon 在用的（遠端資料目錄可能就是這裡）：兩邊都不刪。讀不到也不刪。
-    if !matches!(crate::handoff::bot_handed_off_to(&app.db, bot_id).await, Ok(None)) {
+    if !matches!(app.db.bot_handed_off_to(bot_id).await, Ok(None)) {
         tracing::info!(host, bot = %bot_id, "bot of a handed-off project (or unreadable); bot config dir left in place");
         return false;
     }
@@ -542,7 +547,7 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     }
     // 受限分享用 bot 的工作目錄（`shared_bots.workspace`，issue #828）。
     // 只有 restricted bot 的工作目錄才收進回收區；信任分享（trusted）的工作區是使用者既有目錄，不能動。
-    if let Ok(Some(ws)) = crate::share::store::restricted_workspace(&app.db, bot_id).await {
+    if let Ok(Some(ws)) = app.db.restricted_workspace(bot_id).await {
         if let Some(ws_path) = crate::share::folder::validate_workspace_path(&app.data_dir, &ws) {
             match crate::bot_trash::move_in_kind(&app.data_dir, bot_id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
                 Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %ws_path.display(), trash = %to.display(), "moved restricted share workspace to bots-trash"),
@@ -573,20 +578,20 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     }
     let Some(conn) = app.hosts.get(host).await else {
         tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir left in place");
-        crate::remote_purge::record(app, bot_id, host, false, Some("unknown host")).await;
+        app.record_remote_purge(bot_id, host, false, Some("unknown host")).await;
         return false;
     };
     // 遠端也搬進回收區而不是 `rm -rf`（issue #411）：restore 時 ssh 搬得回來。
-    match crate::remote_trash::move_in(&conn, bot_id).await {
+    match app.move_remote_bot_dir_to_trash(&conn, bot_id).await {
         Ok(to) => {
             tracing::info!(host, bot = %bot_id, trash = ?to, "moved remote bot config dir to bots-trash");
-            crate::remote_purge::record(app, bot_id, host, true, None).await;
+            app.record_remote_purge(bot_id, host, true, None).await;
             true
         }
         Err(e) => {
             let msg = format!("{e:#}");
             tracing::warn!(host, bot = %bot_id, error = %msg, "could not move remote bot config dir to bots-trash");
-            crate::remote_purge::record(app, bot_id, host, false, Some(&msg)).await;
+            app.record_remote_purge(bot_id, host, false, Some(&msg)).await;
             false
         }
     }
@@ -624,8 +629,9 @@ pub async fn interrupt_bot(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
 /// 回 503 `interrupt_state_uncommitted`（不是普通的成功），欠著的收尾之後補——同一筆的重試**不再按** Esc；
 /// 不知道 Esc 進了沒有，回合留在 in_flight，等它的回聲。
 pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&str>) -> LcResult<()> {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    let locks = AppBotLock::new(app);
+    let locked_bot = bot_id.to_string();
+    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     // 上一次打斷欠著的收尾先補：補完之後還在飛的，才是真的還在跑的那一筆。
@@ -787,8 +793,9 @@ fn abort_note(count: usize) -> String {
 /// 送 `esc` 只是盡力（`keys_sent`）：in-flight 標 failed、`delivery = unknown` 也一併收（§6.3，
 /// 同樣鎖輸入框）。沒有 active run 不算錯——那正是最需要這支的情況。
 pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    let locks = AppBotLock::new(app);
+    let locked_bot = bot_id.to_string();
+    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?;
     // 上一次打斷欠著的先補（#147）；補不上也照樣往下收——強制中止本來就是先保證 DB 解開。
@@ -894,11 +901,11 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
         };
         tx.commit().await.map_err(up)?;
         if let Some(m) = note {
-            emit_message_added(app, bot_id, m).await;
+            emit_object(&AppEventSink::new(app), "message_added", Some(bot_id), json!({ "bot_id": bot_id, "message": m })).await;
         }
         aborted.extend(fresh.iter().map(|t| t.id.clone()));
         for t in &turns {
-            emit_turn(app, &t.id).await;
+            turn_changed(&AppTurnEvents::new(app), &t.id).await;
         }
     }
 
@@ -910,8 +917,9 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
 /// `pane_id` across `pane.move` (0.8.2), so mapping, poller and in-flight turn carry on.
 /// Idempotent: re-moving a solo pane would rebuild a tab and renumber the user's tab bar.
 pub async fn move_pane_to_own_tab(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
-    let lock = app.bot_lock(bot_id).await;
-    let _g = lock.lock().await;
+    let locks = AppBotLock::new(app);
+    let locked_bot = bot_id.to_string();
+    let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     let pane_id = run
@@ -952,7 +960,7 @@ pub async fn move_pane_to_own_tab(app: &Arc<App>, bot_id: &str) -> LcResult<()> 
         .execute(&app.db)
         .await
         .map_err(up)?;
-    app.emit_bot_status(bot_id).await;
+    bot_status(&AppEventSink::new(app), bot_id).await;
     Ok(())
 }
 
