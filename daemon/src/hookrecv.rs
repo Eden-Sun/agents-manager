@@ -651,9 +651,19 @@ mod classify_tests {
 
 /// SPEC §6.7, executed under the per-bot lock.
 pub async fn process(app: &Arc<App>, body: &HookBody) -> Result<()> {
+    process_for(app, body, None).await
+}
+
+/// 同 [`process`]，多帶這則 hook 在收件匣的 `hook_events.id`（只有 `hook_inbox` 的 worker 有）。
+///
+/// 收件匣是 at-least-once：回合與訊息 commit 之後、worker 標 `processed_at` 之前 daemon 重啟，同一列會再處理一次。
+/// 帶得到 native turn id 的 hook 靠 `(native_session_id, native_turn_id)` 去重；沒有的（遠端、舊版、手寫 body）以前沒有任何
+/// 穩定的鑰匙，重播就再開一個外部回合與訊息。這把 id 跟回合同一個交易寫進 `turns.source_event_id`（唯一索引），
+/// 重播先查它：命中就只把 commit 後才發的通知補發一次（`message_added` 靠 id 去重、回合事件本來就是 at-least-once）。
+pub async fn process_for(app: &Arc<App>, body: &HookBody, event_id: Option<&str>) -> Result<()> {
     let lock = app.bot_lock(&body.bot_id).await;
     let _g = lock.lock().await;
-    process_locked(app, body).await?;
+    process_locked_for(app, body, event_id).await?;
     // 回合收完（含終端打字開的外部回合）之後才補：這時候「這一回合」才一定存在。
     ask_answers::after_turn_end(app, body).await;
     Ok(())
@@ -1151,6 +1161,10 @@ async fn vetted_transcript(app: &Arc<App>, bot: &db::Bot, path: Option<&str>) ->
 }
 
 pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
+    process_locked_for(app, body, None).await
+}
+
+async fn process_locked_for(app: &Arc<App>, body: &HookBody, event_id: Option<&str>) -> Result<()> {
     let Some(bot) = db::bot(&app.db, &body.bot_id).await? else { return Ok(()) };
     // A3: also guards the spool-replay path, where nothing checked the token.
     if bot.deleted_at.is_some() {
@@ -1554,6 +1568,15 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 .await?;
             }
 
+            // 3a. 收件匣重播：這一則已經收成回合了（commit 之後、標 processed_at 之前重啟）。不再開第二個，只補發通知。
+            if let Some(event) = event_id {
+                if let Some(turn) = turn_of_event(&app.db, event).await? {
+                    tracing::info!(turn = %turn, event, "inbox replay of an already-applied hook ignored; re-announcing");
+                    reannounce_turn(app, &bot.id, &turn).await;
+                    return Ok(());
+                }
+            }
+
             // 3. dedup on (native_session_id, native_turn_id)
             if let (Some(sid), Some(tid)) = (&session_id, &turn_id) {
                 let dup: Option<String> =
@@ -1623,7 +1646,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
                 let claimed = tx.complete_with_native_evidence(&t.id, admitted, native).await?;
                 match &claimed {
-                    lifecycle::turn_controller::Outcome::Applied => {}
+                    lifecycle::turn_controller::Outcome::Applied => {
+                        stamp_source_event(&mut tx, &t.id, event_id).await?;
+                    }
                     // 不是圍籬放行那一代的回合：一個字都不掛上去。
                     lifecycle::turn_controller::Outcome::Fenced(why) => {
                         tracing::warn!(turn = %t.id, why, "hook 收尾：回合不屬於放行的那一代，不動");
@@ -1705,8 +1730,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
             let mut tx = app.db.begin().await?;
             sqlx::query(
-                "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, native_session_id, native_turn_id, created_at, completed_at)
-                 VALUES (?,?,?,'external','completed','ok',?,?,?,?)",
+                "INSERT INTO turns (id, conversation_id, run_id, origin, status, delivery, native_session_id, native_turn_id, created_at, completed_at, source_event_id)
+                 VALUES (?,?,?,'external','completed','ok',?,?,?,?,?)",
             )
             .bind(&tid)
             .bind(&conv)
@@ -1715,6 +1740,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             .bind(native.turn_id)
             .bind(db::now())
             .bind(db::now())
+            .bind(event_id)
             .execute(&mut *tx)
             .await?;
             let mut added = Vec::new();
@@ -1735,6 +1761,40 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// 這則收件匣事件已經收成哪個回合（`turns.source_event_id`）；沒有＝還沒處理過。
+async fn turn_of_event(pool: &sqlx::SqlitePool, event_id: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar("SELECT id FROM turns WHERE source_event_id = ?").bind(event_id).fetch_optional(pool).await?)
+}
+
+/// 收掉回合的那個交易裡順手記下是哪則 hook 收的（跟回合同生共死）。沒有收件匣 id（直接 `process`）就什麼都不寫。
+async fn stamp_source_event(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, turn_id: &str, event_id: Option<&str>) -> Result<()> {
+    if let Some(event) = event_id {
+        sqlx::query("UPDATE turns SET source_event_id = ? WHERE id = ? AND source_event_id IS NULL")
+            .bind(event)
+            .bind(turn_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+/// 重播命中既有回合：把原本 commit 之後才發的通知補發一次。`message_added` 前端靠訊息 id 去重；回合事件有重試與冪等的消費者。
+async fn reannounce_turn(app: &Arc<App>, bot_id: &str, turn_id: &str) {
+    match sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE turn_id = ? AND source = 'hook' ORDER BY created_at, rowid")
+        .bind(turn_id)
+        .fetch_all(&app.db)
+        .await
+    {
+        Ok(messages) => {
+            for m in messages {
+                app.emit_message_added(bot_id, m).await;
+            }
+        }
+        Err(e) => tracing::warn!(turn = turn_id, error = ?e, "could not re-announce hook messages of a replayed event"),
+    }
+    app.emit_turn(turn_id).await;
 }
 
 // Remote drain: see SPEC §11.4.3–§11.4.5.
@@ -3063,6 +3123,101 @@ mod external_claim_tests {
         .unwrap();
         assert_eq!(external.len(), 1, "答案記在一筆外部回合上");
         assert_eq!(external[0].1, "echo ab");
+    }
+
+    /// 沒有任何 native id 的 claude Stop（遠端、舊版 hook、手寫 body）：回合沒有去重用的 `(session, turn)` 鑰匙。
+    fn stop_without_native_ids(bot_id: &str, reply: &str) -> HookBody {
+        HookBody {
+            bot_id: bot_id.to_string(),
+            provider: "claude".into(),
+            payload: json!({"hook_event_name": "Stop", "last_assistant_message": reply}),
+            received_at: None,
+            truncated: false,
+            run_id: None,
+        }
+    }
+
+    async fn turn_count(app: &Arc<App>, conv: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE conversation_id=?").bind(conv).fetch_one(&app.db).await.unwrap()
+    }
+
+    async fn hook_message_count(app: &Arc<App>, conv: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id=? AND source='hook'").bind(conv).fetch_one(&app.db).await.unwrap()
+    }
+
+    /// 發現 2（l8 審查）：外部回合 commit 了、daemon 在收件匣標 `processed_at` 之前重啟，重播同一列不能再開第二個回合與訊息——
+    /// 沒有 native turn id 時，過去沒有任何穩定的鑰匙擋它。重播只補發 commit 後才發的通知。
+    #[tokio::test]
+    async fn an_inbox_row_replayed_after_the_external_turn_committed_opens_no_second_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "inbox-replay").await;
+        tt::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        let body = stop_without_native_ids(&bot.id, "外部回合的回覆");
+        assert!(crate::hook_inbox::accept(&app.db, &body, crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        let row = crate::hook_inbox::pending(&app.db, &db::now(), 10).await.unwrap().remove(0);
+
+        // 第一輪：回合與訊息已 commit，但 worker 還沒標 processed_at 就「重啟」了。
+        process_for(&app, &body, Some(&row.id)).await.unwrap();
+        assert_eq!(turn_count(&app, &conv).await, 1);
+        assert_eq!(hook_message_count(&app, &conv).await, 1);
+        let stamped: Option<String> = sqlx::query_scalar("SELECT source_event_id FROM turns WHERE conversation_id=?").bind(&conv).fetch_one(&app.db).await.unwrap();
+        assert_eq!(stamped.as_deref(), Some(row.id.as_str()), "回合記著是哪則收件匣事件收的");
+        let unprocessed: Option<String> = sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?").bind(&row.id).fetch_one(&app.db).await.unwrap();
+        assert!(unprocessed.is_none(), "還沒標處理完：模擬重啟在 commit 與 mark_done 之間");
+
+        // 重啟後 worker 把這列再處理一次。
+        let mut events = app.subscribe();
+        assert_eq!(crate::hook_inbox::drain_once(&app).await.unwrap(), 1);
+
+        assert_eq!(turn_count(&app, &conv).await, 1, "沒有第二個回合");
+        assert_eq!(hook_message_count(&app, &conv).await, 1, "沒有第二則訊息");
+        let done: Option<String> = sqlx::query_scalar("SELECT processed_at FROM hook_events WHERE id=?").bind(&row.id).fetch_one(&app.db).await.unwrap();
+        assert!(done.is_some(), "重播後這列標成處理完");
+        // commit 後才發的通知補發了一次（前端靠訊息 id 去重）。
+        let mut kinds = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            kinds.push(ev.kind);
+        }
+        assert!(kinds.iter().any(|k| k == "message_added"), "補發 message_added：{kinds:?}");
+    }
+
+    /// 同一個洞的另一條路：Stop 收掉的是 in-flight 的網頁回合，沒有 native id 時重播也不能多開一個外部回合。
+    #[tokio::test]
+    async fn an_inbox_row_replayed_after_an_in_flight_turn_was_completed_opens_no_external_turn() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let (bot_id, conv, turn_id) = unknown_turn(&app, &env.project_id, "claude", "跑一次測試").await;
+        let body = stop_without_native_ids(&bot_id, "跑完了");
+        assert!(crate::hook_inbox::accept(&app.db, &body, crate::hook_inbox::Source::Http).await.unwrap().is_new());
+        let row = crate::hook_inbox::pending(&app.db, &db::now(), 10).await.unwrap().remove(0);
+
+        process_for(&app, &body, Some(&row.id)).await.unwrap();
+        let turn = sqlx::query_as::<_, db::Turn>("SELECT * FROM turns WHERE id=?").bind(&turn_id).fetch_one(&app.db).await.unwrap();
+        assert_eq!(turn.status, "completed");
+        let before = turn_count(&app, &conv).await;
+        let messages_before = hook_message_count(&app, &conv).await;
+
+        assert_eq!(crate::hook_inbox::drain_once(&app).await.unwrap(), 1);
+
+        assert_eq!(turn_count(&app, &conv).await, before, "重播不開外部回合");
+        assert_eq!(hook_message_count(&app, &conv).await, messages_before, "也不多一則訊息");
+    }
+
+    /// 沒有收件匣 id（直接 `process`）時行為跟以前一樣：兩次獨立的、沒有身分的事件各是一個回合。
+    #[tokio::test]
+    async fn without_an_inbox_event_id_nothing_is_deduplicated_by_the_new_key() {
+        let env = tt::env().await;
+        let app = env.app.clone();
+        let bot = tt::claude_bot(&app, &env.project_id, "no-event-id").await;
+        tt::fake_run(&app, &bot.id).await;
+        let conv = db::conversation_id(&app.db, &bot.id).await.unwrap();
+        process(&app, &stop_without_native_ids(&bot.id, "一")).await.unwrap();
+        process(&app, &stop_without_native_ids(&bot.id, "二")).await.unwrap();
+        assert_eq!(turn_count(&app, &conv).await, 2);
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE source_event_id IS NOT NULL").fetch_one(&app.db).await.unwrap();
+        assert_eq!(n, 0);
     }
 
     /// 同一句（折疊排版空白後相同）就照舊認領並把 unknown 升成 ok。
