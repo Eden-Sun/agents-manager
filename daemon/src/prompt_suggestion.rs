@@ -14,11 +14,15 @@
 //! 讀不到畫面什麼都不動：讀不到不等於建議消失了。
 
 use crate::db;
+use crate::lifecycle::app_ports_p4::{AppEventSink, AppHerdrPort};
 use crate::state::App;
+use am_core::PaneReadSource;
+use am_ports::{DbContext, EventSink, StyledRunPaneReader};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use sqlx::SqlitePool;
 
 /// idle 邊之後第幾毫秒補讀一次：建議句的產生要一點時間（另一次模型呼叫），畫面也要畫完。
 const BURST: [u64; 4] = [1500, 3500, 7000, 14000];
@@ -62,28 +66,54 @@ pub fn json(run_id: &str, agent_status: Option<&str>) -> Value {
 
 /// 讀一次樣式畫面、照結果記下或清掉建議（idle 邊補讀用）。回傳現在有沒有建議；讀不到回 `None`（什麼都不動）。
 pub async fn observe(app: &Arc<App>, run: &db::Run) -> Option<bool> {
+    let db = DbContext::new(app.db.clone());
+    let reader = AppHerdrPort::new(app);
+    let events = AppEventSink::new(app);
+    observe_with_ports(&db, &reader, &events, run).await
+}
+
+/// Run-scoped suggestion observation. The App wrapper only assembles the DB, styled pane reader,
+/// and status event capabilities; this path does not select a host or call App methods directly.
+pub(crate) async fn observe_with_ports<R, E>(
+    db: &DbContext<SqlitePool>,
+    reader: &R,
+    events: &E,
+    run: &db::Run,
+) -> Option<bool>
+where
+    R: StyledRunPaneReader,
+    E: EventSink,
+{
     if run.state != "running" || run.agent_status != "idle" {
         if forget(&run.id) {
-            app.emit_bot_status(&run.bot_id).await;
+            emit_bot_status(events, &run.bot_id).await;
         }
         return Some(false);
     }
-    if !matches!(db::bot(&app.db, &run.bot_id).await, Ok(Some(b)) if b.kind == "claude") {
+    if !matches!(db::bot(db.pool(), &run.bot_id).await, Ok(Some(b)) if b.kind == "claude") {
         return Some(false);
     }
     let pane = run.pane_id.as_deref().filter(|p| !p.trim().is_empty())?;
-    let client = app.herdr_for_run(run).await?;
-    let text = crate::lifecycle::read_styled(&client, pane, "visible", 80).await.ok()?;
-    Some(record(app, run, &text).await)
+    let text = reader
+        .read_styled_run_pane(&run.bot_id, run.herdr_session.as_ref(), pane, PaneReadSource::Visible, 80)
+        .await
+        .ok()??;
+    Some(record(events, run, &text).await)
+}
+
+async fn emit_bot_status<E: EventSink>(events: &E, bot_id: &str) {
+    if let Err(error) = events.bot_status_changed(bot_id).await {
+        tracing::warn!(bot = %bot_id, error = ?error, "prompt suggestion bot-status projection failed");
+    }
 }
 
 /// 把一份樣式畫面的結果記進帳；變了就推 `bot_status`。回傳現在有沒有建議。
-async fn record(app: &Arc<App>, run: &db::Run, styled: &str) -> bool {
+async fn record<E: EventSink>(events: &E, run: &db::Run, styled: &str) -> bool {
     let found = crate::lifecycle::prompt_suggestion("claude", styled);
     let has = found.is_some();
     if set(&run.id, found) {
         tracing::info!(run = %run.id, bot = %run.bot_id, suggestion = has, "prompt suggestion changed");
-        app.emit_bot_status(&run.bot_id).await;
+        emit_bot_status(events, &run.bot_id).await;
     }
     has
 }
@@ -93,12 +123,13 @@ async fn record(app: &Arc<App>, run: &db::Run, styled: &str) -> bool {
 pub fn on_idle(app: &Arc<App>, run: &db::Run) {
     let (app, run_id) = (app.clone(), run.id.clone());
     tokio::spawn(async move {
+        let db = DbContext::new(app.db.clone());
         let mut waited = 0;
         for at in BURST {
             tokio::time::sleep(Duration::from_millis(at - waited)).await;
             waited = at;
             // 事件帶來的 Run 是更新前的複本：每次重讀，狀態才是現在的。
-            let Ok(Some(run)) = db::run(&app.db, &run_id).await else { return };
+            let Ok(Some(run)) = db::run(db.pool(), &run_id).await else { return };
             match observe(&app, &run).await {
                 Some(true) => return,
                 _ if run.state != "running" || run.agent_status != "idle" => return,
@@ -110,21 +141,22 @@ pub fn on_idle(app: &Arc<App>, run: &db::Run) {
 
 /// 30 秒畫面巡邏的一個 claude run：`plain` 是巡邏已經讀到的純文字畫面。
 pub async fn observe_sweep(app: &Arc<App>, run: &db::Run, plain: &str, client: &crate::herdr::HerdrClient, pane: &str) {
+    let events = AppEventSink::new(app);
     if run.state != "running" || run.agent_status != "idle" {
         if forget(&run.id) {
-            app.emit_bot_status(&run.bot_id).await;
+            emit_bot_status(&events, &run.bot_id).await;
         }
         return;
     }
     // 輸入列是空的：沒有建議可言，不必再讀。
     if crate::lifecycle::composer_text("claude", plain).is_none() {
         if forget(&run.id) {
-            app.emit_bot_status(&run.bot_id).await;
+            emit_bot_status(&events, &run.bot_id).await;
         }
         return;
     }
     let Ok(styled) = crate::lifecycle::read_styled(client, pane, "visible", 80).await else { return };
-    record(app, run, &styled).await;
+    record(&events, run, &styled).await;
 }
 
 #[cfg(test)]

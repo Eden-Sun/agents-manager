@@ -8,7 +8,10 @@ use am_core::{
     NoticeRequest, PaneReadSource, PortError, PromptRequest, QuotaKey, QuotaSnapshot, RunId,
     SessionId, TurnError, TurnEvent, TurnId, Window as PortWindow,
 };
-use am_ports::{EventSink, HerdrPort, QuotaAccess, RunPaneReader, SystemMessageWriter, TurnControl, TurnEvents};
+use am_ports::{
+    EventSink, HerdrPort, QuotaAccess, RunPaneReader, StyledRunPaneReader, SystemMessageWriter,
+    TurnControl, TurnEvents,
+};
 use std::future::Future;
 use std::sync::Arc;
 
@@ -134,6 +137,30 @@ impl<'a> AppHerdrPort<'a> {
         Self { app }
     }
 
+    /// Keep run-scoped reads on the same handoff/session selection path for plain and styled
+    /// readers. Unavailable DB/session state has historically meant "nothing to read" here.
+    async fn run_pane_client(
+        &self,
+        bot: &str,
+        run_session: Option<&str>,
+    ) -> Option<crate::herdr::HerdrClient> {
+        if !matches!(crate::handoff::bot_handed_off_to(&self.app.db, bot).await, Ok(None)) {
+            return None;
+        }
+        let Ok(host) = crate::db::bot_host(&self.app.db, bot).await else {
+            return None;
+        };
+        let session = if let Some(session) = run_session.filter(|session| !session.is_empty()) {
+            session.to_string()
+        } else {
+            let Ok(Some(bot_row)) = crate::db::bot(&self.app.db, bot).await else {
+                return None;
+            };
+            self.app.session_for_bot(&bot_row, &host).await?
+        };
+        self.app.herdr_for_session(&host, &session).await
+    }
+
     /// Compatibility entry for existing run-based callers until HostRuntime owns minting the
     /// core fence. It keeps App's existing run/session selection and uses the same pane.read RPC.
     pub async fn read_run_pane(
@@ -199,31 +226,40 @@ impl RunPaneReader for AppHerdrPort<'_> {
         lines: u32,
     ) -> impl Future<Output = Result<Option<String>, PortError>> + Send + 'a {
         async move {
-            // Keep `herdr_for_run`'s handoff guard and its run-session → bot-session fallback.
-            if !matches!(crate::handoff::bot_handed_off_to(&self.app.db, bot).await, Ok(None)) {
-                return Ok(None);
-            }
-            let Ok(host) = crate::db::bot_host(&self.app.db, bot).await else {
-                return Ok(None);
-            };
-            let session = if let Some(session) = run_session.filter(|session| !session.is_empty()) {
-                session.clone()
-            } else {
-                let Ok(Some(bot_row)) = crate::db::bot(&self.app.db, bot).await else {
-                    return Ok(None);
-                };
-                let Some(session) = self.app.session_for_bot(&bot_row, &host).await else {
-                    return Ok(None);
-                };
-                session
-            };
-            let Some(client) = self.app.herdr_for_session(&host, &session).await else {
+            let Some(client) = self
+                .run_pane_client(bot, run_session.map(String::as_str))
+                .await
+            else {
                 return Ok(None);
             };
             client
                 .pane_read(pane_id, source.as_str(), lines)
                 .await
                 .map(|read| Some(read.text))
+                .map_err(|error| PortError::Unavailable(error.to_string()))
+        }
+    }
+}
+
+impl StyledRunPaneReader for AppHerdrPort<'_> {
+    fn read_styled_run_pane<'a>(
+        &'a self,
+        bot: &'a BotId,
+        run_session: Option<&'a SessionId>,
+        pane_id: &'a str,
+        source: PaneReadSource,
+        lines: u32,
+    ) -> impl Future<Output = Result<Option<String>, PortError>> + Send + 'a {
+        async move {
+            let Some(client) = self
+                .run_pane_client(bot, run_session.map(String::as_str))
+                .await
+            else {
+                return Ok(None);
+            };
+            crate::lifecycle::read_styled(&client, pane_id, source.as_str(), lines)
+                .await
+                .map(Some)
                 .map_err(|error| PortError::Unavailable(error.to_string()))
         }
     }
