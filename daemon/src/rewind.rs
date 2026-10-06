@@ -26,7 +26,6 @@ use serde_json::{json, Value};
 
 use crate::db;
 use crate::lc_error::{LcError, LcResult};
-use crate::lifecycle;
 use crate::state::App;
 
 fn up<E: std::fmt::Display>(e: E) -> LcError {
@@ -244,7 +243,7 @@ impl Pane for HerdrPane {
     /// 帶樣式讀（`format: ansi`）：跟其他看輸入列的地方同一支（7178806b）。純文字分不出 claude 2.1.280 輸入列裡 dim 的
     /// 「建議下一句」和使用者打的字，會把建議句當成有字、擋成 `composer_busy`。
     fn read(&self) -> BoxFuture<'_, anyhow::Result<String>> {
-        Box::pin(async move { lifecycle::read_styled(&self.client, &self.pane_id, "visible", 80).await })
+        Box::pin(async move { crate::composer_parse::read_styled(&self.client, &self.pane_id, "visible", 80).await })
     }
     fn send_text<'a>(&'a self, text: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move { self.client.pane_send_text(&self.pane_id, text).await })
@@ -313,7 +312,7 @@ pub struct Done {
 /// 讀到的畫面（可能帶樣式）→ 下面所有判讀用的純文字：去掉樣式，輸入列裡只有 dim 建議句時把它抹掉
 /// （`delivery::plain_without_hints`，跟送達、補 Enter、清框同一套）。有真的字就原樣留著。
 pub fn screen_text(raw: &str) -> String {
-    lifecycle::plain_without_hints("claude", raw)
+    crate::composer_parse::plain_without_hints("claude", raw)
 }
 
 async fn read(pane: &dyn Pane) -> Result<String, Fail> {
@@ -360,7 +359,7 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
     if in_rewind_ui(&s) {
         return Err(Fail::UiBusy);
     }
-    if lifecycle::composer_text_whole("claude", &s).is_some() {
+    if crate::composer_parse::composer_text_whole("claude", &s).is_some() {
         return Err(Fail::ComposerBusy);
     }
     pane.send_text("/rewind").await.map_err(|e| Fail::Pane(e.to_string()))?;
@@ -372,7 +371,7 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
         let s = read(pane).await?;
         if in_rewind_ui(&s) {
             back_out(pane).await;
-        } else if lifecycle::composer_text_whole("claude", &s).is_some() {
+        } else if crate::composer_parse::composer_text_whole("claude", &s).is_some() {
             let _ = keys(pane, &["ctrl+c"]).await;
         }
         return Err(Fail::MenuNotShown);
@@ -405,7 +404,7 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
         return Err(Fail::ConfirmNotShown);
     };
     #[cfg(test)]
-    lifecycle::race_point::hit("rewind_before_restore", &pane.race_key()).await;
+    crate::race_point::hit("rewind_before_restore", &pane.race_key()).await;
     let latest = read(pane).await?;
     let Some(confirm) = parse_confirm(&latest) else {
         back_out(pane).await;
@@ -417,7 +416,7 @@ pub async fn drive(pane: &dyn Pane, target: &str, skip: usize) -> Result<Done, F
     }
     // 對過字才選。按 `1` 而不是 Enter：選項是編號的，`1` 直接選 Restore，不靠游標位置，也不用看得到選項（矮 pane 會被擠掉）。
     keys(pane, &["1"]).await?;
-    let Some(refill) = wait_for(pane, RESTORE_WAIT_MS, |s| (!in_rewind_ui(s)).then(|| lifecycle::composer_text_whole("claude", s))).await? else {
+    let Some(refill) = wait_for(pane, RESTORE_WAIT_MS, |s| (!in_rewind_ui(s)).then(|| crate::composer_parse::composer_text_whole("claude", s))).await? else {
         return Err(Fail::Unconfirmed);
     };
     Ok(Done { pane_cleared: clear_refill(pane, refill, target).await? })
@@ -430,7 +429,7 @@ async fn clear_refill(pane: &dyn Pane, refill: Option<String>, target: &str) -> 
         None => true,
         Some(text) if is_refill_of(&text, target) => {
             keys(pane, &["ctrl+c"]).await?;
-            let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| lifecycle::composer_text_whole("claude", s).is_none().then_some(())).await?.is_some();
+            let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| crate::composer_parse::composer_text_whole("claude", s).is_none().then_some(())).await?.is_some();
             // 清掉之後 claude 會顯示幾秒「Press Ctrl-C again to exit」：這段時間再來一個 ctrl+c（停機、中斷）就把它關掉了。
             // 握著 bot 鎖等提示消失才放手（2026-09-23 實機：約 3 秒）。
             let _ = wait_for(pane, HINT_WAIT_MS, |s| (!s.contains(CTRL_C_HINT)).then_some(())).await?;
@@ -459,7 +458,7 @@ async fn rewind_dropped(pane: &dyn Pane, target: &str, next: Option<(String, usi
     if in_rewind_ui(&s) {
         return Err(Fail::UiBusy);
     }
-    let cleared = clear_refill(pane, lifecycle::composer_text_whole("claude", &s), target).await?;
+    let cleared = clear_refill(pane, crate::composer_parse::composer_text_whole("claude", &s), target).await?;
     match next {
         Some((later, skip)) if cleared => drive(pane, &later, skip).await,
         Some(_) => Err(Fail::ComposerBusy),
@@ -511,7 +510,7 @@ async fn clear_composer(pane: &dyn Pane, expect: &str) -> LcResult<()> {
     if in_rewind_ui(&s) {
         return Err(conflict(Fail::UiBusy.reason(), &Fail::UiBusy.message()));
     }
-    let Some(text) = lifecycle::composer_text_whole("claude", &s) else { return Ok(()) };
+    let Some(text) = crate::composer_parse::composer_text_whole("claude", &s) else { return Ok(()) };
     if !same_composer(&text, expect) {
         return Err(LcError::conflict(
             "composer_changed",
@@ -519,7 +518,7 @@ async fn clear_composer(pane: &dyn Pane, expect: &str) -> LcResult<()> {
         ));
     }
     keys(pane, &["ctrl+c"]).await.map_err(|f| up(f.message()))?;
-    let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| lifecycle::composer_text_whole("claude", s).is_none().then_some(())).await.map_err(|f| up(f.message()))?;
+    let cleared = wait_for(pane, CLEAR_WAIT_MS, |s| crate::composer_parse::composer_text_whole("claude", s).is_none().then_some(())).await.map_err(|f| up(f.message()))?;
     if cleared.is_none() {
         return Err(conflict(Fail::ComposerBusy.reason(), "按了 ctrl+c，終端輸入列還是有字，沒有倒回。"));
     }
@@ -534,18 +533,18 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
         return Err(conflict("unsupported_kind", "只有 claude 能倒回：codex／grok 沒有對應的 /rewind。"));
     }
     // 使用者自己 default session 的 pane 只觀察、不代打（SPEC §6.5.1）。
-    lifecycle::refuse_default_session(&bot)?;
+    crate::default_session::refuse_default_session(&bot)?;
     let conv = db::conversation_id(&app.db, bot_id).await.map_err(up)?;
 
     // 持 bot 鎖到打完字：`prompt` 拿同一把，期間不會有新的 prompt 打進這個 pane。
     // already_rewound 與 skip 都在鎖裡重讀。鎖外算過的話，第二次請求會在第一次標記之前
     // 就決定要倒，進鎖後照樣再按一次 Restore（#656）。
     #[cfg(test)]
-    lifecycle::race_point::hit("rewind_before_lock", bot_id).await;
+    crate::race_point::hit("rewind_before_lock", bot_id).await;
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     #[cfg(test)]
-    lifecycle::race_point::hit("rewind_locked", bot_id).await;
+    crate::race_point::hit("rewind_locked", bot_id).await;
     let msg: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE id = ? AND conversation_id = ?")
         .bind(message_id)
         .bind(&conv)
@@ -590,7 +589,7 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
         }
     };
     // 直接對 pane 打過字：之後的 prompt 改走打字路線（`slash::mark_pane_typed` 的理由）。記不下來就不打。
-    lifecycle::mark_pane_typed(app, &run.id).await.map_err(up)?;
+    crate::app_ports_r2a8::mark_pane_typed(app, &run.id).await.map_err(up)?;
     if let Some(expect) = clear.as_deref() {
         clear_composer(pane.as_ref(), expect).await?;
     }
@@ -621,7 +620,7 @@ pub async fn rewind_with(app: &Arc<App>, bot_id: &str, message_id: &str, pane: O
         LcError::uncommitted("rewind_marks_uncommitted", &run.id, "已經倒回了，但對話紀錄沒標記成功；重新整理後被倒掉的訊息可能還顯示著", e)
     })?;
     let note = format!("已倒回到這則之前：「{}」。之後的 {hidden} 則不在對話脈絡裡了（紀錄保留）。", preview(&msg.content, 40));
-    let _ = lifecycle::insert_message(app, &conv, None, "system", &note, "system", false, None).await;
+    let _ = crate::app_ports_r2a8::insert_message(app, &conv, None, "system", &note, "system", false, None).await;
     app.emit("messages_rewound", json!({"bot_id": bot_id, "message_id": msg.id, "rewound_at": now})).await;
     tracing::info!(bot = %bot.name, hidden, pane_cleared = done.pane_cleared, "rewound the conversation");
     // 還握著鎖：下一則還沒打進去，transcript 的長度就是「倒回當時」。
@@ -675,7 +674,7 @@ async fn next_in_context(app: &impl crate::capabilities::Db, conv: &str, message
 /// 倒回沒做成：記 log、轉成 API 錯誤。輸入列有字時把那段字帶回去（`draft`），網頁才能讓人看過再選「清掉再倒回」。
 async fn rewind_failed(bot: &str, pane: &dyn Pane, f: Fail) -> LcError {
     let draft = if f == Fail::ComposerBusy {
-        read(pane).await.ok().and_then(|s| lifecycle::composer_text_whole("claude", &s))
+        read(pane).await.ok().and_then(|s| crate::composer_parse::composer_text_whole("claude", &s))
     } else {
         None
     };

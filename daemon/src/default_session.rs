@@ -407,3 +407,16 @@ mod tests {
 pub trait DefaultSyncLock: Send + Sync {
     fn default_sync_lock(&self) -> &tokio::sync::Mutex<()>;
 }
+
+/// SPEC §6.5.1: a bot from the user's `default` session is observed, never driven — start
+/// would create a workspace in their session, restart would close their pane (review 2026-09-12 #4).
+pub fn refuse_default_session(bot: &db::Bot) -> crate::lc_error::LcResult<()> {
+    if bot.herdr_session.as_deref() == Some(SESSION) {
+        return Err(crate::lc_error::LcError::conflict(
+            "default_session",
+            json!({"bot_id": bot.id,
+                   "message": "這顆是從你自己的 herdr default session 匯入的，daemon 只觀察、不替它開或關 pane：要重啟請在那個終端裡自己做。"}),
+        ));
+    }
+    Ok(())
+}

@@ -248,13 +248,6 @@ async fn settle_skip_with<E: EventSink>(db: &DbContext<SqlitePool>, events: &E, 
     }
 }
 
-#[cfg(test)]
-async fn settle_skip(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) {
-    let db = DbContext::new(app.db.clone());
-    let events = crate::lifecycle::app_ports_p4::AppEventSink::new(app);
-    settle_skip_with(&db, &events, bot, run, now).await;
-}
-
 async fn clear_skip_with<E: EventSink>(db: &DbContext<SqlitePool>, events: &E, bot_id: &str) {
     match set_skip(db.pool(), bot_id, false).await {
         Ok(true) => {
@@ -479,6 +472,12 @@ pub fn tick(app: &Arc<App>) {
 mod tests {
     use super::*;
     use crate::testing as tt;
+
+    async fn settle_skip(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) {
+        let db = DbContext::new(app.db.clone());
+        let events = crate::lifecycle::app_ports_p4::AppEventSink::new(app);
+        settle_skip_with(&db, &events, bot, run, now).await;
+    }
 
     #[test]
     fn thresholds_are_58_and_110_minutes() {
