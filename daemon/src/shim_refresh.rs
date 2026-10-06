@@ -15,7 +15,6 @@
 //! 所以寫入一律「暫存檔 + rename」（[`write_atomic`]），而且**內容一樣就不重寫**：每次重啟都重寫
 //! 會把 mtime 洗掉，之後沒人分得出哪些 shim 真的換過版。內容一樣但權限掉了（0644）的，只 chmod 回 0755。
 
-use crate::state::App;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -296,26 +295,26 @@ pub(crate) async fn refresh_remote_host(app: &(impl crate::capabilities::Db + cr
 pub(crate) const REMOTE_RETRY_WAITS: [u64; 4] = [0, 300, 900, 3600];
 
 /// 補版沒成的原因記在 `app.remote_shim_stale`，由 `supervisor::incidents` 開票（issue #534）。
-async fn note_stale(app: &Arc<App>, host: &str, why: String) {
-    app.remote_shim_stale.lock().await.insert(host.to_string(), why);
+async fn note_stale(app: &impl crate::shim_refresh::RemoteShimStale, host: &str, why: String) {
+    app.remote_shim_stale().lock().await.insert(host.to_string(), why);
 }
 
-async fn clear_stale(app: &Arc<App>, host: &str) {
-    app.remote_shim_stale.lock().await.remove(host);
+async fn clear_stale(app: &impl crate::shim_refresh::RemoteShimStale, host: &str) {
+    app.remote_shim_stale().lock().await.remove(host);
 }
 
 /// host 連上之後在背景補版：**不擋連線、不擋 daemon 啟動**。失敗（ssh 抖了、host 在重開機）就按
 /// [`REMOTE_RETRY_WAITS`] 退避重試；host 那時已不在線就放棄——下一次 supervisor 連上會再叫一次
 /// （補版是冪等的）。**重試用完、或有檔案換不動就開 incident**：這台上的遠端 bot 手上還是舊 shim，
 /// 而它不會自己好，也沒有別的探針會發現（`resource` 是 host 名）。
-pub(crate) fn spawn_remote_refresh(app: Arc<App>, host: String) {
+pub(crate) fn spawn_remote_refresh(app: Arc<impl crate::capabilities::Db + crate::hosts::HostInstance + crate::hosts::HostsAccess + crate::shim_refresh::RemoteShimStale + 'static>, host: String) {
     tokio::spawn(async move {
         let mut last_err = String::new();
         for (i, wait) in REMOTE_RETRY_WAITS.iter().enumerate() {
             if *wait > 0 {
                 tokio::time::sleep(std::time::Duration::from_secs(*wait)).await;
             }
-            match app.hosts.get(&host).await {
+            match app.hosts().get(&host).await {
                 Some(c) if c.is_connected() => {}
                 // 掉線了：這一輪不算數，也不開票——連上時會再叫一次。
                 _ => return,
@@ -840,4 +839,9 @@ mod tests {
         assert!(parse_remote_sync("AM_SHIM_SYNC_FAILED truncated herdr\n").is_err());
         assert_eq!(parse_remote_sync("AM_SHIM_UPDATED /b herdr\nAM_SHIM_FAILED /c cargo\nAM_SHIM_SYNC_DONE\n").unwrap(), RemoteSync { updated: vec!["/b herdr".into()], failed: vec!["/c cargo".into()] });
     }
+}
+
+/// 遠端 shim 過期的主機帳。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait RemoteShimStale: Send + Sync {
+    fn remote_shim_stale(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, String>>;
 }

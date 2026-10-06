@@ -14,7 +14,7 @@ use crate::config::{BotCfg, ProjectCfg};
 use crate::lifecycle::{self, LcError};
 use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::{QuotaOps, TurnOps};
+use super::ports::TurnOps;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -663,12 +663,12 @@ pub enum QuotaState {
 /// `quota_base_for_host`：身分的 env 是空的（`cc0` 這種「就是預設帳號」的 alias）時，讀數其實寫在
 /// **裸 `claude`** 那一把——所以固定拼 `claude:<identity>` 的協調者永遠讀不到自己的額度，也就永遠
 /// 不知道自己撞限了。反過來，有自己 env 的身分（cc1／cc2）只讀自己那把，不借用 cc0 的數字。
-async fn quota_key_for(app: &Arc<App>, bot: &crate::db::Bot) -> Option<String> {
+async fn quota_key_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports::QuotaOps), bot: &crate::db::Bot) -> Option<String> {
     // pane 裡實際的帳號（run 起來時的身分，issue #238）；讀不到 run 當 Unknown。
     let identity = app.billing_identity(bot).await.ok().flatten()?;
     // 主機要**確定**。`db::bot_host` 查不到專案或讀錯時退回本機，那對一般顯示是合理的預設，
     // 但拿來判斷額度就是借別台機器（本機）的數字——讀不到就回 `None`，由呼叫端當成 Unknown。
-    let host = strict_bot_host(&app.db, &bot.id).await?;
+    let host = strict_bot_host(app.db(), &bot.id).await?;
     let base = app.quota_base_for_host(&host, &bot.kind, Some(&identity)).await;
     Some(crate::quota::quota_key(&host, &base))
 }
@@ -683,11 +683,11 @@ async fn strict_bot_host(pool: &sqlx::SqlitePool, bot_id: &str) -> Option<String
         .filter(|h| !h.trim().is_empty())
 }
 
-pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
+pub async fn quota_state(app: &(impl crate::capabilities::Db + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::supervisor::ports::QuotaOps), bot: &crate::db::Bot) -> QuotaState {
     let Some(key) = quota_key_for(app, bot).await else { return QuotaState::Unknown };
     let model = app.running_model(bot).await;
     let now = chrono::Utc::now();
-    let q = app.quotas.lock().await;
+    let q = app.quotas().lock().await;
     let Some(quota) = q.get(&key) else { return QuotaState::Unknown };
     // CLI 明說被擋住（還沒過期）：等它說的時間，沒說就等最近的視窗重置。撞的是模型專屬的桶（Fable）而協調者
     // 跑的是別的模型，就不是它的撞限——跟 `limit_hit_for_bot` 同一條規則（review3 c3 H2）。
@@ -718,7 +718,7 @@ pub async fn quota_state(app: &Arc<App>, bot: &crate::db::Bot) -> QuotaState {
     // issue #475：「有讀數」要是**說得出話**的讀數——一筆比窗長還舊、又沒有重置時間的，
     // 不能拿來宣稱恢復（那正是「少的那一格可能就是見底的那一格」的情形）。
     // 讀數本身也要新鮮：開機從快取回填的、或執行中探測壞掉而太久沒人更新的，不是「現在可以用」的證據（見底的照舊擋，寧可多擋）。
-    let flagged = app.quota_stale.lock().await.contains(&key);
+    let flagged = app.quota_stale().lock().await.contains(&key);
     if crate::quota::reading_is_stale(quota, flagged, now) {
         return QuotaState::Unknown;
     }
@@ -827,16 +827,16 @@ fn quota_retry_at(reset: Option<&str>, retry: String) -> String {
 }
 
 /// 喚醒協調者。每個 controller tick 一次；沒事的 tick 只讀 DB。
-pub async fn notify(app: &Arc<App>) {
-    let Ok(row) = roles::get(&app.db, Role::Responder).await else { return };
-    let Ok(bot) = roles::responder_bot(&app.db).await else { return };
+pub async fn notify(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::supervisor::ports::HostProbes + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::TurnOps)) {
+    let Ok(row) = roles::get(app.db(), Role::Responder).await else { return };
+    let Ok(bot) = roles::responder_bot(app.db()).await else { return };
     let Some(bot) = bot else {
         if row.bot_id.is_some() {
-            report_missing(&app.db, row.bot_id.as_deref().unwrap_or("")).await;
+            report_missing(app.db(), row.bot_id.as_deref().unwrap_or("")).await;
         }
         return;
     };
-    let cfg = app.cfg.get().await;
+    let cfg = app.cfg().get().await;
     let (batch, cap) = (cfg.supervisor.responder_batch_secs, cfg.supervisor.responder_max_backoff_secs);
     let now = chrono::Utc::now();
     let now_iso = crate::db::now();
@@ -861,23 +861,23 @@ pub async fn notify(app: &Arc<App>) {
                 "{} 的額度見底；{next} 再試。bot 申請與 mission 事件留在協調者佇列等它回來；等超過 5 分鐘的核准會改派給巡檢裁示",
                 bot.identity.as_deref().unwrap_or("(身分不明)")
             );
-            let _ = roles::set_status(&app.db, Role::Responder, "waiting_quota", Some(&detail), reset.as_deref()).await;
-            let _ = roles::set_notify_next(&app.db, Role::Responder, Some(&next)).await;
+            let _ = roles::set_status(app.db(), Role::Responder, "waiting_quota", Some(&detail), reset.as_deref()).await;
+            let _ = roles::set_notify_next(app.db(), Role::Responder, Some(&next)).await;
             app.emit("supervisor_changed", json!({"responder": "waiting_quota", "retry_at": next})).await;
             return;
         }
         QuotaState::Available if waiting => {
-            let _ = roles::set_status(&app.db, Role::Responder, "", Some("額度已恢復"), None).await;
-            let _ = roles::set_notify_next(&app.db, Role::Responder, None).await;
+            let _ = roles::set_status(app.db(), Role::Responder, "", Some("額度已恢復"), None).await;
+            let _ = roles::set_notify_next(app.db(), Role::Responder, None).await;
             next_at = None;
             app.emit("supervisor_changed", json!({"responder": "quota_resumed"})).await;
         }
         // 讀不到：不宣稱恢復、也不新增等待。唯一能解除的是協調者**答完**了一個沒出錯的回合
         // （`answered_since`）；已排定的重試時間到了照常試一次，但送出去不等於恢復。
         QuotaState::Unknown if waiting => {
-            if answered_since(&app.db, &bot.id, row.waiting_since.as_deref()).await {
-                let _ = roles::set_status(&app.db, Role::Responder, "", Some("額度已恢復（協調者完成了一個回合）"), None).await;
-                let _ = roles::set_notify_next(&app.db, Role::Responder, None).await;
+            if answered_since(app.db(), &bot.id, row.waiting_since.as_deref()).await {
+                let _ = roles::set_status(app.db(), Role::Responder, "", Some("額度已恢復（協調者完成了一個回合）"), None).await;
+                let _ = roles::set_notify_next(app.db(), Role::Responder, None).await;
                 next_at = None;
                 app.emit("supervisor_changed", json!({"responder": "quota_resumed"})).await;
             }
@@ -887,19 +887,19 @@ pub async fn notify(app: &Arc<App>) {
     // 停在登入（#420）：答完一個沒出錯的回合、或畫面上已經看不到登入問題，才算恢復。送還是照退避繼續試——
     // 人從別的終端 unlock-keychain 之後畫面不會變，擋住不送就永遠等不到那個「答完」。
     if row.status == "needs_login" && login_recovered(app, &bot, row.waiting_since.as_deref()).await {
-        let _ = roles::set_status(&app.db, Role::Responder, "", Some("登入已恢復"), None).await;
+        let _ = roles::set_status(app.db(), Role::Responder, "", Some("登入已恢復"), None).await;
         app.emit("supervisor_changed", json!({"responder": "login_resumed"})).await;
     }
     // 還沒到下一次可以試的時間（上一次送不出去的退避，或讀不到額度時仍在等的那個點）。
     if next_at.as_deref().is_some_and(|t| !watchdog::past(t)) {
         return;
     }
-    let Ok(due) = roles::due_for(&app.db, Role::Responder, true, &now_iso, 0).await else { return };
+    let Ok(due) = roles::due_for(app.db(), Role::Responder, true, &now_iso, 0).await else { return };
     let Some(oldest) = due.iter().find(|e| e.wake != Some(0)) else { return };
     if !batch_due(&oldest.created_at, row.last_notify_at.as_deref(), batch, now) {
         return;
     }
-    if !matches!(super::manager_liveness(&app.db, &bot.id).await, Ok("idle")) {
+    if !matches!(super::manager_liveness(app.db(), &bot.id).await, Ok("idle")) {
         return;
     }
     let ids: Vec<String> = due.iter().map(|e| e.id.clone()).collect();
@@ -909,7 +909,7 @@ pub async fn notify(app: &Arc<App>) {
     let defer = |why: String| async move {
         let wait = backoff_secs(attempt, cap) as i64;
         let next = crate::db::iso_in(wait);
-        let _ = store::defer_notify(&app.db, &ids, &next, &why).await;
+        let _ = store::defer_notify(app.db(), &ids, &next, &why).await;
     };
     // 送出去了、結果還沒寫進 DB（#149）照 `unknown` 綁在那一筆回合上：換新的 crid 重送會讓協調者收到兩份。
     match lifecycle::owed_as_unknown(app.prompt_relayed(&bot.id, &digest(&due), &crid, &[], Some(crate::agent_relay::DAEMON_SENDER)).await) {
@@ -918,15 +918,15 @@ pub async fn notify(app: &Arc<App>) {
             note_login_problem(app, &bot, &row.status).await;
         }
         Ok(out) => {
-            let n = roles::mark_delivered(&app.db, &due.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), Role::Responder, &out.turn_id, &out.delivery)
+            let n = roles::mark_delivered(app.db(), &due.iter().map(|e| e.id.clone()).collect::<Vec<_>>(), Role::Responder, &out.turn_id, &out.delivery)
                 .await
                 .unwrap_or(0);
-            let _ = roles::record_wake(&app.db, Role::Responder, n, &roles::wake_reason(&due)).await;
+            let _ = roles::record_wake(app.db(), Role::Responder, n, &roles::wake_reason(&due)).await;
             // **送達不是恢復**：`ok`／`unknown` 只代表字進了 pane 或佇列，CLI 可能下一刻才報撞限。
             // 還在等額度時不動狀態，只把下一次重試推到有界的間隔之後（不然每個批次窗都再送一次）；
             // 解除要等可信讀數或協調者真的答完一個回合。
             if waiting {
-                let _ = roles::set_notify_next(&app.db, Role::Responder, Some(&watchdog::iso_in(cap))).await;
+                let _ = roles::set_notify_next(app.db(), Role::Responder, Some(&watchdog::iso_in(cap))).await;
             }
             app.emit("supervisor_changed", json!({"responder": "woken", "events": n})).await;
         }
@@ -968,16 +968,16 @@ async fn note_login_problem(app: &(impl crate::capabilities::Db + crate::capabil
 }
 
 /// `GET /api/supervisor` 裡的 `responder` 區塊。
-pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
-    let row = roles::get(&app.db, Role::Responder).await.map_err(up)?;
-    let bot = roles::responder_bot(&app.db).await.map_err(up)?;
+pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor::role_faults::RoleFaultTable)) -> Result<Value, LcError> {
+    let row = roles::get(app.db(), Role::Responder).await.map_err(up)?;
+    let bot = roles::responder_bot(app.db()).await.map_err(up)?;
     // 「登記過」與「那顆 bot 還在」分開講：登記過但 bot 被刪掉是 `missing`，不是 `not_configured`——
     // 後者會讓人以為事件回到巡檢了，而它們還在協調者的佇列裡。
     let status = match (&bot, row.bot_id.is_some()) {
         (None, false) => "not_configured".to_string(),
         (None, true) => "missing".to_string(),
         (Some(_), _) if !row.status.is_empty() => row.status.clone(),
-        (Some(b), _) => super::manager_liveness(&app.db, &b.id).await?.to_string(),
+        (Some(b), _) => super::manager_liveness(app.db(), &b.id).await?.to_string(),
     };
     // #454：#427 判出來的不可用只存在記憶體（`App.role_faults`），而這支面板只讀 DB 的 `row.status`，
     // 於是「核准正在被默默改派、incident 已經開了，面板卻說 idle」——正是 #420 要消滅的症狀，
@@ -997,7 +997,7 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         None => status,
     };
     let run = match bot.as_ref() {
-        Some(b) => crate::db::active_run(&app.db, &b.id).await.map_err(up)?,
+        Some(b) => crate::db::active_run(app.db(), &b.id).await.map_err(up)?,
         None => None,
     };
     let runtime = json!({
@@ -1009,7 +1009,7 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "SELECT COUNT(*) FROM supervisor_inbox WHERE {owner}='responder' AND state!='handled'",
         owner = roles::OWNER
     ))
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await
     .map_err(up)?;
     // 還沒送出、會叫醒它的事件。協調者沒在跑時這個數字就是「有人在等、而沒有人會被叫醒」（health.rs）。
@@ -1017,7 +1017,7 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "SELECT COUNT(*) FROM supervisor_inbox WHERE {owner}='responder' AND state='pending' AND COALESCE(wake, 1)=1",
         owner = roles::OWNER
     ))
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await
     .map_err(up)?;
     Ok(json!({

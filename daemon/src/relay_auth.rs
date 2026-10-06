@@ -28,14 +28,11 @@
 //! （repo 內與維運腳本改走 service principal、persona 慣例帶 token、daemon.log 連續 7 天零 warn）都成立。
 //! 歷史訊息的 `relay_unverified = 1` 仍保留，UI 照舊在來源旁寫「未驗證」。
 
-use std::sync::Arc;
 
 use axum::http::HeaderMap;
 use serde_json::json;
 
 use crate::lifecycle::LcError;
-use crate::mission::ports::CallerOps;
-use crate::state::App;
 
 /// 驗過之後的來源（bot id）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +43,7 @@ pub struct Relay {
 /// 省略 effective claim＝`Ok(None)`（User principal 本人）。Bot route handlers derive an omitted claim from the authenticated header first.
 /// `target` 是這一則要送給誰（`POST /api/bots/{id}` 的 id）。
 pub async fn authenticate(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::mission::ports::CallerOps),
     headers: &HeaderMap,
     claimed: Option<&str>,
     target: &str,
@@ -83,7 +80,7 @@ enum Proof {
 
 /// 一顆 bot 的 id 配上 `X-AM-Bot-Token`：`/prompt` 與 mission 端點共用的那一段（issue #409）。
 /// `claimed` 已 trim、非空、不是 `daemon`。
-async fn prove_bot(app: &Arc<App>, headers: &HeaderMap, claimed: &str) -> Result<Proof, LcError> {
+async fn prove_bot(app: &(impl crate::capabilities::Db + crate::mission::ports::CallerOps), headers: &HeaderMap, claimed: &str) -> Result<Proof, LcError> {
     // A Bot principal (the `/api` middleware already proved `X-AM-Bot-Id` + its token) may only
     // claim itself. Compared by id, not only by token, so the rule does not lean on tokens being
     // unique (issue #556: relay_from never overrides the authenticated identity).
@@ -95,7 +92,7 @@ async fn prove_bot(app: &Arc<App>, headers: &HeaderMap, claimed: &str) -> Result
     // **header 在不在**才是分歧點，值長什麼樣都不算「沒帶」：空字串與非 UTF-8 以前都掉進相容期，
     // 等於送一個壞掉的 header 就能冒名放行。
     let presented = headers.get("X-AM-Bot-Token").map(|v| v.to_str().unwrap_or_default().trim().to_string());
-    let live = crate::db::bot(&app.db, claimed)
+    let live = crate::db::bot(app.db(), claimed)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|b| b.deleted_at.is_none());
@@ -138,7 +135,7 @@ fn mismatch() -> LcError {
 ///
 /// 沒有相容期：唯一帶 `relay_from` 的呼叫端是 `bin/agm`，它在角色自己的 pane 裡一律帶那顆的 token
 /// （`scripts/agm.py` `bot_auth_headers`）；web 從不帶。照收就得在 `mission_events` 另記「未驗證」。
-pub async fn authenticate_mission(app: &Arc<App>, headers: &HeaderMap, claimed: Option<&str>) -> Result<Option<String>, LcError> {
+pub async fn authenticate_mission(app: &(impl crate::capabilities::Db + crate::mission::ports::CallerOps), headers: &HeaderMap, claimed: Option<&str>) -> Result<Option<String>, LcError> {
     let Some(claimed) = claimed.map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
     if claimed == crate::agent_relay::DAEMON_SENDER {
         // API middleware already rejected invalid Bot proof with 401; here `None` means a valid Bot that is not an AGM role.

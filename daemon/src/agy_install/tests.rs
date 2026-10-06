@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::App;
 use crate::testing as tt;
 use sha2::{Digest, Sha512};
 use std::os::unix::fs::PermissionsExt as _;

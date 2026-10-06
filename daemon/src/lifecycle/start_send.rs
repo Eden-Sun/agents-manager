@@ -376,13 +376,13 @@ fn failure_text(e: &LcError) -> String {
 }
 
 /// 這顆 bot 還在等它起來的那幾則（`queued`＋`awaits_start`）。
-async fn waiting_turns(app: &Arc<App>, bot_id: &str) -> Vec<String> {
+async fn waiting_turns(app: &impl crate::capabilities::Db, bot_id: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT t.id FROM turns t JOIN conversations c ON c.id = t.conversation_id
           WHERE c.bot_id = ? AND t.status = 'queued' AND t.awaits_start = 1",
     )
     .bind(bot_id)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     .unwrap_or_default()
 }

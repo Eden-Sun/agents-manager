@@ -259,9 +259,9 @@ pub async fn manager_liveness(db: &SqlitePool, bot_id: &str) -> Result<&'static 
 }
 
 /// The `GET /api/supervisor` payload — the one shape the web UI and the `agm` CLI both read.
-pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    let bot = manager_bot(&app.db).await?;
+pub async fn status_json(app: &(impl crate::capabilities::Db + crate::supervisor::role_faults::RoleFaultTable)) -> Result<Value, LcError> {
+    let sup = store::get_or_init(app.db()).await.map_err(up)?;
+    let bot = manager_bot(app.db()).await?;
     let configured = bot.is_some();
     let status = if !configured {
         "not_configured".to_string()
@@ -270,10 +270,10 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         // and simply unable to answer.
         sup.status.clone()
     } else {
-        manager_liveness(&app.db, bot.as_ref().map(|b| b.id.as_str()).unwrap_or_default()).await?.to_string()
+        manager_liveness(app.db(), bot.as_ref().map(|b| b.id.as_str()).unwrap_or_default()).await?.to_string()
     };
     // 同 handoff：未結案的不能因為掉出最新 50 筆就從這個畫面消失（issue #515）。
-    let assignments = store::list_assignments_with_open(&app.db, 50).await.map_err(up)?;
+    let assignments = store::list_assignments_with_open(app.db(), 50).await.map_err(up)?;
     Ok(json!({
         "configured": configured,
         "bot_id": bot.as_ref().map(|b| b.id.clone()),
@@ -289,13 +289,13 @@ pub async fn status_json(app: &Arc<App>) -> Result<Value, LcError> {
         "quota_reset_at": sup.quota_reset_at,
         // Computed, not just read back: an observation that has expired or belongs to a session
         // that is gone reads as `unknown` here rather than as the word it was stored under.
-        "remote": remote::status(&app.db).await,
-        "pending_count": store::pending_count(&app.db).await.map_err(up)?,
+        "remote": remote::status(app.db()).await,
+        "pending_count": store::pending_count(app.db()).await.map_err(up)?,
         "assignments": assignments.iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
         // 雙角色（SPEC §18.15）。上面那些欄位一直是巡檢的，舊的呼叫端照讀不受影響。
         "role": roles::Role::Patrol.as_str(),
         "remote_provider": roles::Role::Patrol.as_str(),
-        "stats": roles::get(&app.db, roles::Role::Patrol).await.map_err(up)?.stats_json(),
+        "stats": roles::get(app.db(), roles::Role::Patrol).await.map_err(up)?.stats_json(),
         "responder": responder::status_json(app).await?,
         // 上次成功上線：現在跑的這顆 binary 的 commit 與它起來的時間。前端用它排掉上線以前的
         // 舊申請，AGM 用它判斷「origin/main 動了」跟「已經上線了」是不是同一件事。

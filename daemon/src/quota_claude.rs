@@ -284,7 +284,7 @@ async fn probe_client() -> Result<HerdrClient> {
     Err(anyhow!("the `{PROBE_SESSION}` herdr session did not come up"))
 }
 
-pub async fn sweep_stale(app: &Arc<App>) {
+pub async fn sweep_stale(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
     if let Ok(c) = probe_client().await {
         sweep_probes(&c, None, "stale").await;
     }
@@ -292,7 +292,7 @@ pub async fn sweep_stale(app: &Arc<App>) {
 }
 
 /// 主 session 上的探測殘留（遠端主機的探測借它開）。共用 session 的主機只清帶本 daemon 標記的（#709）。
-async fn sweep_stale_on_hosts(app: &Arc<App>) {
+async fn sweep_stale_on_hosts(app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess + crate::shared_host::SharedHostEnv)) {
     for host in crate::quota::pollable_hosts(app).await {
         if let Some(c) = app.herdr_for(&host).await {
             sweep_probes(&c, crate::shared_host::probe_tag(app, &host).await.as_deref(), "stale").await;
@@ -346,7 +346,7 @@ pub(crate) struct ProbeOutcome {
 }
 
 async fn record_probe_identity(
-    app: &Arc<App>,
+    app: &Arc<impl crate::tools::ToolsEnv + 'static>,
     host: &str,
     name: &str,
     outcome: &ProbeOutcome,
@@ -476,7 +476,7 @@ async fn sweep_probes(client: &HerdrClient, own_tag: Option<&str>, what: &str) {
 }
 
 /// 探測 workspace 的 label；共用 session 的主機上帶本 daemon 的標記（#709），清殘留時才分得出是誰的。
-async fn probe_label(app: &Arc<App>, host: &str, account: Option<&str>) -> String {
+async fn probe_label(app: &impl crate::shared_host::SharedHostEnv, host: &str, account: Option<&str>) -> String {
     let base = match account {
         Some(a) if !a.is_empty() => format!("{PROBE_LABEL_PREFIX}-{a}"),
         _ => PROBE_LABEL_PREFIX.to_string(),

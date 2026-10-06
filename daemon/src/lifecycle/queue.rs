@@ -266,7 +266,7 @@ pub(crate) async fn flush_queued_locked(app: &Arc<App>, bot_id: &str) -> anyhow:
 
 /// 排著的這一則是使用者自己從網頁送的：User /prompt 排的（`awaits_idle = 1`、`origin = web`），而且它的使用者訊息沒有
 /// 轉寄來源（`relay_from` 空）。AGM 派工排的是 `awaits_idle = 0`。讀不到就當不是（照舊受寬限擋，跟改之前一樣）。
-async fn queued_from_the_user(app: &Arc<App>, turn: &db::Turn) -> bool {
+async fn queued_from_the_user(app: &impl crate::capabilities::Db, turn: &db::Turn) -> bool {
     if turn.origin != "web" || turn.awaits_idle != 1 {
         return false;
     }
@@ -274,11 +274,11 @@ async fn queued_from_the_user(app: &Arc<App>, turn: &db::Turn) -> bool {
         "SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user' AND relay_from IS NOT NULL",
     )
     .bind(&turn.id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await;
     let users: Result<Option<i64>, _> = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id = ? AND role = 'user'")
         .bind(&turn.id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await;
     matches!((relayed, users), (Ok(Some(0)), Ok(Some(n))) if n > 0)
 }
@@ -340,7 +340,7 @@ enum Deferred {
 /// Put a claimed turn back on the queue with its retry count and next attempt time, or — past the
 /// limit — fail it with an explanation. One transaction either way.
 async fn defer_queued_turn(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     conv: &str,
     turn_id: &str,
     reason: &str,
@@ -352,7 +352,7 @@ async fn defer_queued_turn(
         super::race_point::hit("defer_before_return", turn_id).await;
     }
     // 先讀重試次數再寫：deferred 的話讀完之後別的 writer 一 commit 就 517，這一筆放不回佇列、只能記成欠著（#831）。
-    let mut tx = db::begin_write(&app.db).await?;
+    let mut tx = db::begin_write(app.db()).await?;
     let (retries, crid): (i64, Option<String>) =
         sqlx::query_as("SELECT flush_retries, client_request_id FROM turns WHERE id = ?").bind(turn_id).fetch_one(&mut *tx).await?;
     #[cfg(test)]
@@ -407,8 +407,8 @@ pub(crate) const WITHDRAWN_ASSIGNMENT: [&str; 5] = ["cancelled", "superseded", "
 /// 這筆 queued turn 掛的交辦已經不要了（cancelled／superseded／failed，或被保險絲停在 blocked）→ 寫進對話的撤銷理由；
 /// 還要、或沒掛交辦 → `Ok(None)`。blocked 的交辦不在執行中，就算送出去，結果也沒有地方收（AGM 會以為沒送出而重派）。
 /// **讀不到是錯誤，不是「還要」**（#159）：不知道交辦還要不要，就不能送。
-pub(crate) async fn assignment_withdrawal(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Option<String>> {
-    let Some(a) = app.db.assignment_by_turn(turn_id).await? else { return Ok(None) };
+pub(crate) async fn assignment_withdrawal(app: &impl crate::capabilities::Db, turn_id: &str) -> anyhow::Result<Option<String>> {
+    let Some(a) = app.db().assignment_by_turn(turn_id).await? else { return Ok(None) };
     let (what, detail) = match a.status.as_str() {
         "cancelled" => ("已取消", a.review_reason.as_deref()),
         "superseded" => ("已被後續交辦取代", a.review_reason.as_deref()),
@@ -576,7 +576,7 @@ where
 }
 
 /// Queued prompts waiting out a backoff, one entry per bot (its soonest), with the time left.
-pub(crate) async fn pending_queue_retries(app: &Arc<App>) -> anyhow::Result<Vec<(String, std::time::Duration)>> {
+pub(crate) async fn pending_queue_retries(app: &impl crate::capabilities::Db) -> anyhow::Result<Vec<(String, std::time::Duration)>> {
     // `next_flush_at IS NULL` 的也要收：AGM 派工排進來的 queued turn 沒有退避時間，靠回合結束的事件送出；
     // daemon 重啟時那個事件早就過去了，不補一次就變成永遠不會送的孤兒（AGM 2026-09-16）。
     let rows: Vec<(String, String)> = sqlx::query_as(
@@ -584,7 +584,7 @@ pub(crate) async fn pending_queue_retries(app: &Arc<App>) -> anyhow::Result<Vec<
            FROM turns t JOIN conversations c ON c.id = t.conversation_id
           WHERE t.status = 'queued'",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     let now = chrono::Utc::now();
     let mut soonest: std::collections::BTreeMap<String, std::time::Duration> = std::collections::BTreeMap::new();
@@ -602,7 +602,7 @@ pub(crate) async fn pending_queue_retries(app: &Arc<App>) -> anyhow::Result<Vec<
 /// bot again at `max(now, next_flush_at)` (sol review round nine #3). `fire` is what the timer does.
 ///
 /// 讀不到回 `Err`，不是「沒有排著的」（#75 重開）：開機恢復把它記成欠著、之後再掃。
-pub(crate) async fn rearm_queue_retries_with<F>(app: &Arc<App>, fire: F) -> anyhow::Result<usize>
+pub(crate) async fn rearm_queue_retries_with<F>(app: &impl crate::capabilities::Db, fire: F) -> anyhow::Result<usize>
 where
     F: Fn(String) + Clone + Send + 'static,
 {
@@ -810,12 +810,12 @@ pub async fn fail_in_flight_or_owe(app: &Arc<App>, run_id: &str, note: &str) -> 
 }
 
 /// 這個 run 在飛的那一筆與它的 bot。讀不到是錯誤，不是「沒有」。
-async fn in_flight_of(app: &Arc<App>, run_id: &str) -> anyhow::Result<Option<(String, String)>> {
+async fn in_flight_of(app: &impl crate::capabilities::Db, run_id: &str) -> anyhow::Result<Option<(String, String)>> {
     Ok(sqlx::query_as(
         "SELECT t.id, c.bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.run_id = ? AND t.status = 'in_flight'",
     )
     .bind(run_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?)
 }
 

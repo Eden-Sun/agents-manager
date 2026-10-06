@@ -120,15 +120,15 @@ async fn acquire_pane(
 }
 
 /// `POST /api/hosts/:name/shells`
-pub async fn open(app: &Arc<App>, host: &str, cwd: Option<&str>) -> LcResult<HostShell> {
+pub async fn open(app: &(impl crate::api::shell::HostShellOpenLocks + crate::api::shell::HostShells + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), host: &str, cwd: Option<&str>) -> LcResult<HostShell> {
     let (client, session) = client_for(app, host).await?;
     let host_lock = {
-        let mut locks = app.host_shell_open_locks.lock().await;
+        let mut locks = app.host_shell_open_locks().lock().await;
         locks.entry(host.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     };
     // Keep this host's quota exclusive through creation and registration. Other hosts can still open shells.
     let _opening = host_lock.lock().await;
-    let live = app.host_shells.lock().await.iter().filter(|s| s.host == host).count();
+    let live = app.host_shells().lock().await.iter().filter(|s| s.host == host).count();
     if live >= MAX_PER_HOST {
         return Err(LcError::conflict("too_many_shells", json!({"host": host, "max": MAX_PER_HOST})));
     }
@@ -149,15 +149,15 @@ pub async fn open(app: &Arc<App>, host: &str, cwd: Option<&str>) -> LcResult<Hos
         cwd: pane.cwd.clone().unwrap_or(cwd),
         created_at: db::now(),
     };
-    app.host_shells.lock().await.push(shell.clone());
+    app.host_shells().lock().await.push(shell.clone());
     tracing::info!(host, pane_id = %shell.pane_id, cwd = %shell.cwd, "opened a host shell");
     Ok(shell)
 }
 
 /// `GET /api/hosts/:name/shells` — sweeps out panes closed by hand in herdr.
-pub async fn list(app: &Arc<App>, host: &str) -> LcResult<Vec<HostShell>> {
+pub async fn list(app: &(impl crate::api::shell::HostShells + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), host: &str) -> LcResult<Vec<HostShell>> {
     let (client, _) = client_for(app, host).await?;
-    let mine: Vec<HostShell> = app.host_shells.lock().await.iter().filter(|s| s.host == host).cloned().collect();
+    let mine: Vec<HostShell> = app.host_shells().lock().await.iter().filter(|s| s.host == host).cloned().collect();
     let mut alive = Vec::with_capacity(mine.len());
     let mut dead = Vec::new();
     for s in mine {
@@ -168,7 +168,7 @@ pub async fn list(app: &Arc<App>, host: &str) -> LcResult<Vec<HostShell>> {
         }
     }
     if !dead.is_empty() {
-        app.host_shells.lock().await.retain(|s| s.host != host || !dead.contains(&s.pane_id));
+        app.host_shells().lock().await.retain(|s| s.host != host || !dead.contains(&s.pane_id));
     }
     Ok(alive)
 }
@@ -1071,4 +1071,9 @@ mod tests {
 /// 這顆 daemon 開的 host shell 清單。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
 pub trait HostShells: Send + Sync {
     fn host_shells(&self) -> &crate::api::shell::Registry;
+}
+
+/// 開 host shell 的每台互斥鎖。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait HostShellOpenLocks: Send + Sync {
+    fn host_shell_open_locks(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>;
 }

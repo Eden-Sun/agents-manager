@@ -13,7 +13,6 @@
 //! 3. [`cleanup_host`]：每次偵測完一台主機的身分，清掉既有 bot 身上 kind 不符的 identity，以及
 //!    quota 表裡因此留下的殘留 key。
 
-use crate::state::App;
 use std::sync::Arc;
 
 /// 子 agent 從母 bot 繼承的 identity：同 kind 才繼承，不同 kind 一律不帶（由 CLI 自己的預設帳號跑，
@@ -32,7 +31,7 @@ pub fn child_identity(parent_identity: Option<&str>, parent_kind: &str, child_ki
 /// 拿不完整的表去判「不符」會誤殺。使用者自己建的 bot（`managed_by = 'user'`）的 identity 是
 /// `config.toml` 的設定、會被投影寫回，daemon 不從這裡改它，只記 warn——那種組合本來就過不了
 /// API 的檢查，出現了代表有人手改設定檔。
-pub async fn cleanup_host(app: &Arc<App>, host: &str) -> (usize, usize) {
+pub async fn cleanup_host(app: &Arc<impl crate::capabilities::Db + crate::capabilities::Emit + crate::login_assist::LoginPanes + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::tools::ToolsEnv + 'static>, host: &str) -> (usize, usize) {
     let identities = crate::tools::identities_for_host(app, host).await;
     if identities.is_empty() {
         return (0, 0);
@@ -44,7 +43,7 @@ pub async fn cleanup_host(app: &Arc<App>, host: &str) -> (usize, usize) {
           WHERE p.host = ? AND b.deleted_at IS NULL AND b.identity IS NOT NULL AND b.identity != ''",
     )
     .bind(host)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     .unwrap_or_default();
     let mut cleared = 0;
@@ -61,7 +60,7 @@ pub async fn cleanup_host(app: &Arc<App>, host: &str) -> (usize, usize) {
         let res = sqlx::query("UPDATE bots SET identity = NULL WHERE id = ? AND identity = ? AND managed_by != 'user'")
             .bind(&id)
             .bind(&identity)
-            .execute(&app.db)
+            .execute(app.db())
             .await;
         if matches!(res, Ok(r) if r.rows_affected() > 0) {
             cleared += 1;
@@ -74,7 +73,7 @@ pub async fn cleanup_host(app: &Arc<App>, host: &str) -> (usize, usize) {
     // quota 表：`<host>/<kind>:<name>`（或本機的 `<kind>:<name>`），name 是別的 kind 的身分 → 殘留。
     let mut removed = Vec::new();
     {
-        let mut quotas = app.quotas.lock().await;
+        let mut quotas = app.quotas().lock().await;
         let prefix = if host == crate::config::LOCAL_HOST { String::new() } else { format!("{host}/") };
         let stale: Vec<String> = quotas
             .keys()

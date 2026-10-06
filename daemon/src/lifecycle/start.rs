@@ -13,7 +13,7 @@ use self::app_ports_p4sess::AppBotLock;
 use am_ports::BotLock;
 
 /// Identity CLI args on `host`. Discovered `ccN` identities carry none: alias flags are the user's shell habit.
-async fn identity_args(app: &Arc<App>, bot: &db::Bot, host: &str) -> Vec<String> {
+async fn identity_args(app: &Arc<impl crate::tools::ToolsEnv + 'static>, bot: &db::Bot, host: &str) -> Vec<String> {
     let Some(idn) = bot.identity.as_deref().filter(|s| !s.is_empty()) else { return vec![] };
     crate::tools::identity_for_host(app, host, idn).await.map(|i| i.args).unwrap_or_default()
 }
@@ -319,7 +319,7 @@ impl NativeResumeFailure {
 /// `--resume` 在新身分下找不到檔案。先把檔案複製過去再放行，複製不了就回退開新對話，不硬失敗
 /// （2026-09-17 AGM 手動搶救的兩顆 bot：`resume_session_id` 一直是空的）。
 pub(crate) async fn native_resume_plan(
-    app: &Arc<App>,
+    app: &Arc<impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::hosts::HostInstance + crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>,
     bot: &db::Bot,
     host: &str,
     include_active: bool,
@@ -336,7 +336,7 @@ pub(crate) async fn native_resume_plan(
         )
         .bind(&bot.id)
         .bind(sid)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)?;
         Some((sid.to_string(), transcript))
@@ -348,11 +348,11 @@ pub(crate) async fn native_resume_plan(
               WHERE bot_id = ? AND native_session_id IS NOT NULL ORDER BY started_at DESC, rowid DESC LIMIT 1",
         )
         .bind(&bot.id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(up)?
     } else {
-        db::last_native_session(&app.db, &bot.id).await.map_err(up)?
+        db::last_native_session(app.db(), &bot.id).await.map_err(up)?
     };
     let Some((session_id, transcript)) = last else { return Ok(Err(NativeResumeFailure::without_session("no_session_id"))) };
     if session_id.trim().is_empty() {
@@ -378,19 +378,19 @@ pub(crate) async fn native_resume_plan(
 }
 
 /// 這個身分實際用的 `CLAUDE_CONFIG_DIR`（沒設、或身分未知都算預設帳號 `~/.claude`）。
-pub(crate) async fn identity_config_dir(app: &Arc<App>, host: &str, identity: Option<&str>) -> anyhow::Result<String> {
-    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+pub(crate) async fn identity_config_dir(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, host: &str, identity: Option<&str>) -> anyhow::Result<String> {
+    let fence = app.hosts().fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     identity_config_dir_for_fence(app, host, identity, &fence).await
 }
 
 pub(crate) async fn identity_config_dir_for_fence(
-    app: &Arc<App>,
+    app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>,
     host: &str,
     identity: Option<&str>,
     fence: &crate::hosts::HostFence,
 ) -> anyhow::Result<String> {
     let home = crate::hosts::home_for_fence(fence).await?;
-    if !app.hosts.is_current(fence).await {
+    if !app.hosts().is_current(fence).await {
         anyhow::bail!("host `{host}` changed while resolving HOME");
     }
     let dir = match identity.map(str::trim).filter(|s| !s.is_empty()) {
@@ -406,7 +406,7 @@ pub(crate) async fn identity_config_dir_for_fence(
 /// 底下找得到。本機與遠端分開實作：遠端主機上舊/新 `projects/` 都在**那台機器**上，是同機複製，
 /// 透過 ssh 執行一段 shell script，不是本機↔遠端搬檔（issue #95：以前只做本機這半，遠端完全跳過，
 /// 換身分後 `--resume` 在遠端主機上一樣找不到檔案，只是要等 CLI 真的跑起來才會發現）。
-async fn stage_cross_identity_transcript(app: &Arc<App>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
+async fn stage_cross_identity_transcript(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
     // 只有 claude 的 session 檔住在 `<CLAUDE_CONFIG_DIR>/projects/` 底下。codex／grok 的對話檔不歸這個目錄管：
     // 以前照樣複製，把 codex 的 rollout 整份丟進 `<claude 身分>/projects/<日>/`（資料安全審查）。
     if bot.kind != "claude" {
@@ -421,7 +421,7 @@ async fn stage_cross_identity_transcript(app: &Arc<App>, bot: &db::Bot, host: &s
 
 /// 兩邊 `projects/`（canonicalize 後）本來就是同一份（例如 symlink）時什麼都不做。來源檔不在了，
 /// 或建目錄／複製失敗，都回傳 `transcript_missing` 讓呼叫端退回開新對話，不 panic、不硬擋重啟。
-async fn stage_cross_identity_transcript_local(app: &Arc<App>, bot: &db::Bot, transcript: &str) -> Result<(), &'static str> {
+async fn stage_cross_identity_transcript_local(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, transcript: &str) -> Result<(), &'static str> {
     let src = std::path::Path::new(transcript);
     if !src.exists() {
         return Err("transcript_missing");
@@ -500,7 +500,7 @@ fn stage_cross_identity_transcript_local_fs(
 /// 跟 local 版做同一件事，但舊／新 `projects/` 都在**那台遠端主機**上：是同機複製，透過 ssh
 /// 執行一段 shell script，不是本機↔遠端搬檔。主機沒連線／ssh 指令本身失敗都回 `transcript_missing`
 /// ——連不上就假裝已經搬過去，比直接開新對話更糟（會讓 `--resume` 帶著錯的期待送出去）。
-async fn stage_cross_identity_transcript_remote(app: &Arc<App>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
+async fn stage_cross_identity_transcript_remote(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, host: &str, transcript: &str) -> Result<(), &'static str> {
     // 形狀不對（不是 projects/<key>/<id>.jsonl）就不碰 ssh：路徑是 DB 記的字串，不能拿來叫遠端複製任意檔案。
     if !super::transcript_stage::has_claude_transcript_shape(transcript) {
         tracing::warn!(bot = %bot.name, host, transcript, "identity switch：遠端來源不是 projects/<cwd>/<id>.jsonl，不複製，改開新對話");
@@ -510,7 +510,7 @@ async fn stage_cross_identity_transcript_remote(app: &Arc<App>, bot: &db::Bot, h
     let (Some(cwd_dir), Some(fname)) = (src.parent(), src.file_name()) else { return Err("transcript_missing") };
     let Some(old_projects) = cwd_dir.parent() else { return Err("transcript_missing") };
     let Some(cwd_key) = cwd_dir.file_name() else { return Err("transcript_missing") };
-    let Some(fence) = app.hosts.fence(host).await else {
+    let Some(fence) = app.hosts().fence(host).await else {
         tracing::warn!(bot = %bot.name, host, "identity switch：主機沒連線，改開新對話");
         return Err("transcript_missing");
     };
@@ -529,7 +529,7 @@ async fn stage_cross_identity_transcript_remote(app: &Arc<App>, bot: &db::Bot, h
         &fname.to_string_lossy(),
         src.file_stem().map(|s| s.to_string_lossy().into_owned()).as_deref(),
     );
-    let Some(result) = app.hosts.run_if_current(&fence, fence.conn().ssh_exec(&script)).await else {
+    let Some(result) = app.hosts().run_if_current(&fence, fence.conn().ssh_exec(&script)).await else {
         tracing::warn!(bot = %bot.name, host, "identity switch：搬檔前主機權威已變更，改開新對話");
         return Err("transcript_missing");
     };
@@ -791,7 +791,7 @@ pub(crate) fn fork_args_by_kind(kind: &str, session_id: &str) -> Result<Vec<Stri
 /// （issue #92：換身分接不回原對話那次，靠人工翻 log 才查到；`resume_mismatch`——hook 回報的
 /// session 跟預期的不是同一個——更隱蔽，CLI 自己開了新對話卻沒有任何錯誤）。同一交易寫入系統訊息與
 /// 對應的 session metadata，前端仍直接顯示一般系統訊息。
-pub(crate) async fn context_lost(app: &Arc<App>, bot: &db::Bot, why: &str, failed_session: Option<&str>) -> LcResult<()> {
+pub(crate) async fn context_lost(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot: &db::Bot, why: &str, failed_session: Option<&str>) -> LcResult<()> {
     tracing::warn!(bot = %bot.name, why, failed_session = ?failed_session, "native session continuation unavailable; starting a new conversation");
     let reason = match why {
         "no_session_id" => "沒有記到上一段對話的 session id",
@@ -800,9 +800,9 @@ pub(crate) async fn context_lost(app: &Arc<App>, bot: &db::Bot, why: &str, faile
         "unsupported_kind" => "這個 CLI 種類不支援接續原生對話",
         other => other,
     };
-    let conv = db::conversation_id(&app.db, &bot.id).await.map_err(up)?;
+    let conv = db::conversation_id(app.db(), &bot.id).await.map_err(up)?;
     let failed_session = failed_session.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
-    let mut tx = db::begin_write(&app.db).await.map_err(up)?;
+    let mut tx = db::begin_write(app.db()).await.map_err(up)?;
     let msg = insert_message_tx(
         &mut tx,
         &conv,
@@ -840,12 +840,12 @@ pub(crate) const CONTEXT_LOST_PREFIX: &str = "⚠️ 接不回原本的對話";
 
 /// 之後真的接回了 `session_id` 那段對話（resume 驗證為 `verified`）：那段對話中斷後插的「接不回」通知已經不是事實，撤掉
 /// （issue #852：依 session id 精確撤銷，避免撤掉其他 session 仍有效的 context-loss 警告）。
-pub(crate) async fn retire_context_lost(app: &Arc<App>, bot_id: &str, session_id: &str) {
+pub(crate) async fn retire_context_lost(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, session_id: &str) {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return;
     }
-    let mut tx = match db::begin_write(&app.db).await {
+    let mut tx = match db::begin_write(app.db()).await {
         Ok(tx) => tx,
         Err(e) => {
             tracing::warn!(bot = %bot_id, error = %e, "could not begin tx to retire context-lost notes");
@@ -1398,18 +1398,18 @@ async fn start_inner(
 /// Find the kind's executable via the user's login shell (`$SHELL -lic`), else PATH. Returns a
 /// user-facing reason when missing; a lookup that itself fails passes. 「怎麼去問」測試可以換掉
 /// （`App.kind_probe`，見 `kind_probe.rs`）；指令與判讀是同一份。
-async fn ensure_kind_installed(app: &Arc<App>, host: &str, kind: &str) -> Result<(), String> {
+async fn ensure_kind_installed(app: &(impl crate::hosts::HostsAccess + crate::kind_probe::KindProbeState), host: &str, kind: &str) -> Result<(), String> {
     if !crate::config::valid_kind(kind) {
         return Err(format!("未知的 bot kind `{kind}`"));
     }
     let probe = crate::kind_probe::probe_command(kind);
-    let found: Option<String> = if let Some(run) = app.kind_probe.get() {
+    let found: Option<String> = if let Some(run) = app.kind_probe().get() {
         run(host, kind, &probe)
     } else if host == LOCAL_HOST {
         // could not probe → do not block the start
         crate::hosts::sh_local_stdout(&probe, Duration::from_secs(10), "kind preflight").await.ok().map(|o| o.trim().to_string())
     } else {
-        match app.hosts.get(host).await {
+        match app.hosts().get(host).await {
             Some(conn) => match conn.ssh_exec_path(&probe).await {
                 Ok(o) => Some(o.trim().to_string()),
                 Err(e) => {
@@ -1508,12 +1508,12 @@ async fn restart_bot_with_authority(
     res
 }
 
-async fn ensure_current_host_fence(app: &Arc<App>, bot_id: &str, fence: &crate::hosts::HostFence) -> LcResult<()> {
+async fn ensure_current_host_fence(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess), bot_id: &str, fence: &crate::hosts::HostFence) -> LcResult<()> {
     let host = fence.conn().name.as_str();
-    if !app.hosts.is_current(fence).await {
+    if !app.hosts().is_current(fence).await {
         return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": host})));
     }
-    if db::bot_host(&app.db, bot_id).await.map_err(up)? != host || !app.hosts.is_current(fence).await {
+    if db::bot_host(app.db(), bot_id).await.map_err(up)? != host || !app.hosts().is_current(fence).await {
         return Err(LcError::conflict("host_superseded", json!({"bot_id": bot_id, "host": host})));
     }
     Ok(())
@@ -1524,15 +1524,15 @@ const RESTART_INTENT_TTL_SECS: i64 = 15 * 60;
 
 /// handler 還活著時的收尾：成功／bot 回來了＝`done`；什麼都沒動的拒絕＝`abandoned`；其他失敗＝`failed`（**不推 AGM**：呼叫端已經拿到錯誤）。
 /// 標不成也不影響結果：intent 留著開機時會被驗證世界後收掉（bot 已經在跑就 `done`）。
-async fn settle_restart_intent(app: &Arc<App>, intent_id: &str, res: &LcResult<String>) {
+async fn settle_restart_intent(app: &impl crate::capabilities::Db, intent_id: &str, res: &LcResult<String>) {
     let out = match res {
-        Ok(_) => app.db.complete_intent(intent_id).await,
+        Ok(_) => app.db().complete_intent(intent_id).await,
         // 新 agent 起來了、只是 `running` 還沒記下（#145）：bot 回來了。
-        Err(LcError::Uncommitted(v)) if v.get("start_error").is_none() => app.db.complete_intent(intent_id).await,
+        Err(LcError::Uncommitted(v)) if v.get("start_error").is_none() => app.db().complete_intent(intent_id).await,
         Err(LcError::Conflict(v)) if matches!(v.get("reason").and_then(|r| r.as_str()), Some("not_idle" | "no_longer_idle")) => {
-            app.db.abandon_intent(intent_id, "refused before anything was stopped").await
+            app.db().abandon_intent(intent_id, "refused before anything was stopped").await
         }
-        Err(e) => app.db.fail_intent(intent_id, &format!("{e:?}")).await,
+        Err(e) => app.db().fail_intent(intent_id, &format!("{e:?}")).await,
     };
     if let Err(e) = out {
         tracing::warn!(intent = intent_id, error = %e, "could not settle the restart intent; boot recovery will verify it");

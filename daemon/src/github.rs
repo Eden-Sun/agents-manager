@@ -225,8 +225,8 @@ fn info_from_origin(out: &str) -> Option<GithubInfo> {
     parse_github_remote(out.lines().next().unwrap_or(""))
 }
 
-async fn publish_github(app: &Arc<App>, id: &str, info: &Option<GithubInfo>) -> bool {
-    let mut cache = app.github.lock().await;
+async fn publish_github(app: &impl crate::github::GithubCache, id: &str, info: &Option<GithubInfo>) -> bool {
+    let mut cache = app.github().lock().await;
     let before = cache.get(id).cloned();
     let changed = before.as_ref() != Some(info);
     cache.insert(id.to_string(), info.clone());
@@ -234,7 +234,7 @@ async fn publish_github(app: &Arc<App>, id: &str, info: &Option<GithubInfo>) -> 
 }
 
 /// 本機沒有改指。遠端把 `HostFence` 記在探測之前，寫快取前再確認還是這一帶（#830、#347）。
-pub async fn detect_project(app: &Arc<App>, p: &db::Project) -> Option<GithubInfo> {
+pub async fn detect_project(app: &(impl crate::github::GithubCache + crate::hosts::HostsAccess), p: &db::Project) -> Option<GithubInfo> {
     if p.host == LOCAL_HOST {
         let out = match run_on_host(app, &p.host, &origin_script(&p.path), GIT_TIMEOUT).await {
             Ok(o) => o,
@@ -247,7 +247,7 @@ pub async fn detect_project(app: &Arc<App>, p: &db::Project) -> Option<GithubInf
         publish_github(app, &p.id, &info).await;
         return info;
     }
-    let Some(fence) = app.hosts.fence(&p.host).await else {
+    let Some(fence) = app.hosts().fence(&p.host).await else {
         return None;
     };
     match probe_fenced(app, &fence, &p.path).await {
@@ -290,8 +290,8 @@ async fn probe_fenced(app: &impl crate::hosts::HostsAccess, fence: &crate::hosts
 }
 
 /// 整批一起寫。序號被較新的掃描用掉，或寫之前權威換了，就一筆都不寫。`Some` 是有沒有跟快取不同。
-async fn commit_fenced(app: &Arc<App>, fence: &crate::hosts::HostFence, rows: &[(String, Option<GithubInfo>)]) -> Option<bool> {
-    if !app.hosts.is_current(fence).await || !fence.claim_publish() || !app.hosts.is_current(fence).await {
+async fn commit_fenced(app: &(impl crate::github::GithubCache + crate::hosts::HostsAccess), fence: &crate::hosts::HostFence, rows: &[(String, Option<GithubInfo>)]) -> Option<bool> {
+    if !app.hosts().is_current(fence).await || !fence.claim_publish() || !app.hosts().is_current(fence).await {
         return None;
     }
     let mut changed = false;
@@ -303,12 +303,12 @@ async fn commit_fenced(app: &Arc<App>, fence: &crate::hosts::HostFence, rows: &[
     Some(changed)
 }
 
-async fn detect_host_once(app: &Arc<App>, host: &str) {
-    let projects = db::live_projects(&app.db).await.unwrap_or_default().into_iter().filter(|p| p.host == host).collect::<Vec<_>>();
+async fn detect_host_once(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::github::GithubCache + crate::hosts::HostsAccess), host: &str) {
+    let projects = db::live_projects(app.db()).await.unwrap_or_default().into_iter().filter(|p| p.host == host).collect::<Vec<_>>();
     if host == LOCAL_HOST {
         let mut changed = false;
         for p in projects {
-            let before = app.github.lock().await.get(&p.id).cloned();
+            let before = app.github().lock().await.get(&p.id).cloned();
             let after = detect_project(app, &p).await;
             if before.as_ref() != Some(&after) {
                 changed = true;
@@ -319,7 +319,7 @@ async fn detect_host_once(app: &Arc<App>, host: &str) {
         }
         return;
     }
-    let Some(fence) = app.hosts.fence(host).await else {
+    let Some(fence) = app.hosts().fence(host).await else {
         return;
     };
     let mut rows = Vec::with_capacity(projects.len());
@@ -357,9 +357,9 @@ pub fn spawn_detect_all(app: Arc<App>) {
 }
 
 /// `GET /api/projects/:id/submodules`
-pub async fn list_submodules(app: &Arc<App>, p: &db::Project, refresh: bool) -> Result<Vec<Submodule>, LcError> {
+pub async fn list_submodules(app: &(impl crate::github::SubmodulesCache + crate::hosts::HostsAccess), p: &db::Project, refresh: bool) -> Result<Vec<Submodule>, LcError> {
     if !refresh {
-        if let Some((at, v)) = app.submodules_cache.lock().await.get(&p.id) {
+        if let Some((at, v)) = app.submodules_cache().lock().await.get(&p.id) {
             if at.elapsed() < ISSUES_TTL {
                 return Ok(v.clone());
             }
@@ -385,12 +385,12 @@ pub async fn list_submodules(app: &Arc<App>, p: &db::Project, refresh: bool) -> 
         subs.push(Submodule { path, github: parse_github_remote(url) });
     }
     subs.sort_by(|a, b| a.path.cmp(&b.path));
-    app.submodules_cache.lock().await.insert(p.id.clone(), (Instant::now(), subs.clone()));
+    app.submodules_cache().lock().await.insert(p.id.clone(), (Instant::now(), subs.clone()));
     Ok(subs)
 }
 
-pub async fn cached(app: &Arc<App>, project_id: &str) -> Option<GithubInfo> {
-    app.github.lock().await.get(project_id).cloned().flatten()
+pub async fn cached(app: &impl crate::github::GithubCache, project_id: &str) -> Option<GithubInfo> {
+    app.github().lock().await.get(project_id).cloned().flatten()
 }
 
 
@@ -452,8 +452,8 @@ pub fn issue_summary(v: &Value) -> Value {
 
 /// A `repo` that is not a listed submodule is a 400: the list is the only thing that turns a
 /// user-supplied path into a directory git runs in.
-async fn project_with_github(app: &Arc<App>, project_id: &str, repo: &str) -> Result<(db::Project, GithubInfo), LcError> {
-    let p = db::project(&app.db, project_id)
+async fn project_with_github(app: &(impl crate::capabilities::Db + crate::github::GithubCache + crate::github::SubmodulesCache + crate::hosts::HostsAccess + crate::models::ModelsCache), project_id: &str, repo: &str) -> Result<(db::Project, GithubInfo), LcError> {
+    let p = db::project(app.db(), project_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|p| p.deleted_at.is_none())
@@ -480,7 +480,7 @@ async fn project_with_github(app: &Arc<App>, project_id: &str, repo: &str) -> Re
 
 /// `GET /api/projects/:id/issues`
 pub async fn list_issues(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::github::GithubCache + crate::github::IssuesCache + crate::github::SubmodulesCache + crate::hosts::HostsAccess + crate::models::ModelsCache),
     project_id: &str,
     repo: &str,
     state: &str,
@@ -497,7 +497,7 @@ pub async fn list_issues(
     let (p, gh) = project_with_github(app, project_id, repo).await?;
     let key = format!("{}|{repo}|{state}|{limit}|{}", p.id, q.unwrap_or(""));
     if !refresh {
-        if let Some((at, v)) = app.issues_cache.lock().await.get(&key) {
+        if let Some((at, v)) = app.issues_cache().lock().await.get(&key) {
             if at.elapsed() < ISSUES_TTL {
                 return Ok(v.clone());
             }
@@ -523,7 +523,7 @@ pub async fn list_issues(
         "fetched_at": db::now(),
         "issues": arr.iter().map(issue_summary).collect::<Vec<_>>(),
     });
-    remember_issues(&mut *app.issues_cache.lock().await, key, v.clone());
+    remember_issues(&mut *app.issues_cache().lock().await, key, v.clone());
     Ok(v)
 }
 
@@ -535,7 +535,7 @@ fn remember_issues(cache: &mut HashMap<String, (Instant, Value)>, key: String, v
 }
 
 /// `GET /api/projects/:id/issues/:number` — uncached.
-pub async fn get_issue(app: &Arc<App>, project_id: &str, repo: &str, number: u64) -> Result<Value, LcError> {
+pub async fn get_issue(app: &(impl crate::capabilities::Db + crate::github::GithubCache + crate::github::SubmodulesCache + crate::hosts::HostsAccess + crate::models::ModelsCache), project_id: &str, repo: &str, number: u64) -> Result<Value, LcError> {
     let (p, gh) = project_with_github(app, project_id, repo).await?;
     let cmd = format!(
         "{PATH_FIX}gh issue view {number} --repo {} --json number,title,state,labels,url,updatedAt,author,body",
@@ -868,4 +868,19 @@ mod tests {
         let cached = app.github.lock().await.get(&id).cloned();
         assert!(cached.as_ref().and_then(|g| g.as_ref()).is_none(), "舊連線回來也不能寫回：{cached:?}");
     }
+}
+
+/// 每台主機偵測到的 GitHub 專案資訊。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait GithubCache: Send + Sync {
+    fn github(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, Option<crate::github::GithubInfo>>>;
+}
+
+/// git submodule 清單快取。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait SubmodulesCache: Send + Sync {
+    fn submodules_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<crate::github::Submodule>)>>;
+}
+
+/// GitHub issue 快取。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait IssuesCache: Send + Sync {
+    fn issues_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>>;
 }

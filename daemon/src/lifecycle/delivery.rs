@@ -787,7 +787,7 @@ pub(crate) fn codex_session_log(codex_home: &std::path::Path, session_id: &str) 
 }
 
 /// `CODEX_HOME` for this bot on the local host: identity env, then the bot's own env, else `~/.codex`.
-pub(crate) async fn codex_home(app: &Arc<App>, bot: &db::Bot) -> Option<std::path::PathBuf> {
+pub(crate) async fn codex_home(app: &Arc<impl crate::tools::ToolsEnv + 'static>, bot: &db::Bot) -> Option<std::path::PathBuf> {
     let home = dirs::home_dir()?.to_string_lossy().into_owned();
     let mut value: Option<String> = None;
     if let Some(name) = bot.identity.as_deref().filter(|s| !s.is_empty()) {
@@ -1074,9 +1074,9 @@ fn should_repaste(proof: &Proof, box_empty: bool, evidence_grew: bool) -> bool {
 }
 
 /// Is the run still on the session the transcript proof was taken from?
-pub(crate) async fn same_session(app: &Arc<App>, run_id: &str, proof: &Proof) -> bool {
+pub(crate) async fn same_session(app: &impl crate::capabilities::Db, run_id: &str, proof: &Proof) -> bool {
     let Proof::Transcript { format, path, session_id } = proof else { return true };
-    match db::run(&app.db, run_id).await {
+    match db::run(app.db(), run_id).await {
         Ok(Some(r)) => {
             let same_id = r.native_session_id.as_deref() == Some(session_id.as_str());
             // codex has no transcript_path column value; its log is named for the session id.
@@ -1338,7 +1338,7 @@ pub(crate) async fn press_submit(client: &HerdrClient, t: &Typed) -> anyhow::Res
 
 /// 送出鍵按下去之後：等證據，字還留在框裡就再按一次。
 pub(crate) async fn confirm_submitted(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::lifecycle::send_now::ports::CodexSendPort),
     client: &HerdrClient,
     run: &db::Run,
     bot: &db::Bot,
@@ -1434,7 +1434,7 @@ pub(crate) enum Landed {
 }
 
 /// [`Landed`]：只看、**不按任何鍵**。transcript 是無損證據，出現這一則就是送出去了，不必看畫面。
-pub(crate) async fn submit_landed(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &db::Bot, text: &str, t: &Typed) -> Landed {
+pub(crate) async fn submit_landed(app: &impl crate::capabilities::Db, client: &HerdrClient, run: &db::Run, bot: &db::Bot, text: &str, t: &Typed) -> Landed {
     for _ in 0..SUBMIT_CHECKS {
         tokio::time::sleep(Duration::from_millis(SUBMIT_SETTLE_MS)).await;
         if matches!(t.proof, Proof::Transcript { .. })

@@ -286,16 +286,16 @@ async fn items_since(conn: &mut dyn HistoryConn, after: Option<&str>) -> Result<
 
 /// 這顆 bot 現在能不能用結構化歷史：開著、是 codex、有 session、source 支援這台主機。
 /// 回 `(source, binding)`；任何一項不成立＝`None`（照舊走 rollout／畫面）。
-pub async fn eligible(app: &Arc<App>, bot: &db::Bot, run: &db::Run) -> Option<(Arc<dyn HistorySource>, Binding)> {
-    if bot.kind != "codex" || !app.cfg.get().await.codex_history.enabled {
+pub async fn eligible(app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::codex_history::CodexHistoryState + crate::tools::ToolsEnv + 'static>, bot: &db::Bot, run: &db::Run) -> Option<(Arc<dyn HistorySource>, Binding)> {
+    if bot.kind != "codex" || !app.cfg().get().await.codex_history.enabled {
         return None;
     }
-    let source = app.codex_history.get()?;
+    let source = app.codex_history().get()?;
     let thread_id = run.native_session_id.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
     if !thread_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
-    let host = db::bot_host(&app.db, &bot.id).await.ok()?;
+    let host = db::bot_host(app.db(), &bot.id).await.ok()?;
     if !source.supports(&host) {
         return None;
     }
@@ -976,4 +976,9 @@ done
         assert!(after.rollout_fallback > before.rollout_fallback);
         assert!(after.screen_fallback > before.screen_fallback);
     }
+}
+
+/// codex 歷史讀取的接線點。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait CodexHistoryState: Send + Sync {
+    fn codex_history(&self) -> &crate::codex_history::HistoryHook;
 }

@@ -2007,3 +2007,8 @@ mod alias_path_tests {
         let _ = std::fs::remove_dir_all(&bare);
     }
 }
+
+/// 每台主機的 CLI／身分偵測結果。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait ToolsTable: Send + Sync {
+    fn tools(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::tools::HostTools>>;
+}

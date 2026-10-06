@@ -24,7 +24,6 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::release_triage::ledger::{self, IssueRef, Row};
-use crate::state::App;
 
 /// #264 量過的門檻。低於的只記帳本。
 pub const SAME_WORK_THRESHOLD: f64 = 0.5;
@@ -86,8 +85,8 @@ impl Candidate {
 }
 
 /// 派工之後呼叫。關著連 task 都不起。開著也只等 spawn，不等 Jev。
-pub async fn schedule_assignment(app: &Arc<App>, assignment_id: &str) {
-    if !app.cfg.get().await.judge.enabled {
+pub async fn schedule_assignment(app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + 'static>, assignment_id: &str) {
+    if !app.cfg().get().await.judge.enabled {
         return;
     }
     let app = app.clone();
@@ -100,11 +99,11 @@ pub async fn schedule_assignment(app: &Arc<App>, assignment_id: &str) {
 }
 
 /// 開票成功之後呼叫（release-triage publish）。`created == 0` 或關著就立刻回來。
-pub async fn hint_after_publish(app: &Arc<App>, before: &[IssueRef], kind: &str, version: &str, created: usize) {
-    if created == 0 || !app.cfg.get().await.judge.enabled {
+pub async fn hint_after_publish(app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + 'static>, before: &[IssueRef], kind: &str, version: &str, created: usize) {
+    if created == 0 || !app.cfg().get().await.judge.enabled {
         return;
     }
-    let Ok(Some(after)) = ledger::get(&app.db, kind, version).await else {
+    let Ok(Some(after)) = ledger::get(app.db(), kind, version).await else {
         return;
     };
     let app = app.clone();
@@ -116,18 +115,18 @@ pub async fn hint_after_publish(app: &Arc<App>, before: &[IssueRef], kind: &str,
     });
 }
 
-pub(crate) async fn check_assignment(app: &Arc<App>, assignment_id: &str) -> Result<()> {
-    if !app.cfg.get().await.judge.enabled {
+pub(crate) async fn check_assignment(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse), assignment_id: &str) -> Result<()> {
+    if !app.cfg().get().await.judge.enabled {
         return Ok(());
     }
-    let Some(a) = crate::supervisor::store::assignment(&app.db, assignment_id).await? else {
+    let Some(a) = crate::supervisor::store::assignment(app.db(), assignment_id).await? else {
         return Ok(());
     };
     // 通知不是新的工作；已經不會開始的交辦（派送當場失敗、被取消／收掉）也不是（#568）。
     if a.expects_review == 0 || !STARTABLE.contains(&a.status.as_str()) {
         return Ok(());
     }
-    let Some(bot) = crate::db::bot(&app.db, &a.target_bot_id).await? else {
+    let Some(bot) = crate::db::bot(app.db(), &a.target_bot_id).await? else {
         return Ok(());
     };
     if bot.deleted_at.is_some() {
@@ -152,8 +151,8 @@ pub(crate) async fn check_assignment(app: &Arc<App>, assignment_id: &str) -> Res
     .await
 }
 
-pub(crate) async fn check_opened(app: &Arc<App>, before: &[IssueRef], after: &Row) -> Result<()> {
-    if !app.cfg.get().await.judge.enabled {
+pub(crate) async fn check_opened(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse), before: &[IssueRef], after: &Row) -> Result<()> {
+    if !app.cfg().get().await.judge.enabled {
         return Ok(());
     }
     for cand in opened_candidates(before, after) {
@@ -162,8 +161,8 @@ pub(crate) async fn check_opened(app: &Arc<App>, before: &[IssueRef], after: &Ro
     Ok(())
 }
 
-async fn check_candidate(app: &Arc<App>, cand: &Candidate) -> Result<()> {
-    let cfg = app.cfg.get().await.judge;
+async fn check_candidate(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse), cand: &Candidate) -> Result<()> {
+    let cfg = app.cfg().get().await.judge;
     if !cfg.enabled {
         return Ok(());
     }
@@ -178,7 +177,7 @@ async fn check_candidate(app: &Arc<App>, cand: &Candidate) -> Result<()> {
     };
     let mine = cand.as_card();
     for pid in projects {
-        let label = crate::db::project(&app.db, &pid).await?.map(|p| p.label).unwrap_or_default();
+        let label = crate::db::project(app.db(), &pid).await?.map(|p| p.label).unwrap_or_default();
         if matches!(super::gate(&cfg, &pid, &label, 0), Some(super::Skip::Disabled | super::Skip::ProjectNotListed)) {
             continue;
         }
@@ -681,6 +680,8 @@ fn worktree_dirname(cwd: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
     use crate::db;
     use crate::release_triage::ledger::{IssueRef, Row, Status};
     use crate::release_triage::{Bucket, Entry};

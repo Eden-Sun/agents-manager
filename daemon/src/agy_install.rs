@@ -13,7 +13,6 @@
 //! - 會動到機器的兩件事（在主機跑腳本、讀 manifest）走 [`Env`]，測試換成假的；腳本本身另有真跑 `/bin/sh` 的測試（假 HOME、`file://` 來源）。
 
 use crate::hosts::HostFence;
-use crate::state::App;
 use futures::future::BoxFuture;
 use serde::Serialize;
 use serde_json::Value;
@@ -226,8 +225,8 @@ fn has_version(output: &str, want: &str) -> bool {
     output.split_whitespace().any(|t| t.trim_start_matches('v') == want)
 }
 
-async fn cached_version(app: &Arc<App>, host: &str) -> Option<String> {
-    app.tools.lock().await.get(host).and_then(|h| h.tools.get("agy")).filter(|t| t.installed).and_then(|t| t.version.clone())
+async fn cached_version(app: &impl crate::tools::ToolsTable, host: &str) -> Option<String> {
+    app.tools().lock().await.get(host).and_then(|h| h.tools.get("agy")).filter(|t| t.installed).and_then(|t| t.version.clone())
 }
 
 fn installed_marker(out: &str) -> Option<(String, String)> {
@@ -237,12 +236,12 @@ fn installed_marker(out: &str) -> Option<(String, String)> {
 }
 
 /// `POST /api/hosts/{name}/agy/install`：裝／更新那台主機的 agy 到官方最新版。
-pub async fn install(app: &Arc<App>, host: &str) -> Result<Installed, InstallError> {
+pub async fn install(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + crate::tools::ToolsTable + 'static>, host: &str) -> Result<Installed, InstallError> {
     install_with(app, host, &Real).await
 }
 
-pub async fn install_with(app: &Arc<App>, host: &str, env: &dyn Env) -> Result<Installed, InstallError> {
-    let fence = app.hosts.fence(host).await.ok_or(InstallError::UnknownHost)?;
+pub async fn install_with(app: &Arc<impl crate::hosts::HostsAccess + crate::tools::ToolsEnv + crate::tools::ToolsTable + 'static>, host: &str, env: &dyn Env) -> Result<Installed, InstallError> {
+    let fence = app.hosts().fence(host).await.ok_or(InstallError::UnknownHost)?;
     let Some(_slot) = Slot::take(host) else {
         return Err(InstallError::Busy(format!("{host} 已經在安裝 agy，這一下沒有再開一次")));
     };
@@ -255,7 +254,7 @@ pub async fn install_with(app: &Arc<App>, host: &str, env: &dyn Env) -> Result<I
     let platform = platform_of(&probe).ok_or_else(|| failed("unsupported_platform", format!("{host} 的平台 agy 沒有官方安裝包（{}）", probe.trim().replace('\n', " "))))?;
     let manifest = env.manifest(platform).await.map_err(|e| failed("manifest_unavailable", e))?;
     let manifest = parse_manifest(&manifest).map_err(|e| failed("manifest_invalid", e))?;
-    if !app.hosts.is_current(&fence).await {
+    if !app.hosts().is_current(&fence).await {
         return Err(gone("讀官方版本"));
     }
 
@@ -281,7 +280,7 @@ pub async fn install_with(app: &Arc<App>, host: &str, env: &dyn Env) -> Result<I
             failed("install_failed", format!("在 {host} 安裝 agy 失敗：{e}"))
         }
     })?;
-    if !app.hosts.is_current(&fence).await {
+    if !app.hosts().is_current(&fence).await {
         return Err(gone("安裝"));
     }
     let (path, version) = installed_marker(&out).ok_or_else(|| failed("install_failed", format!("安裝腳本跑完了但沒有成功標記：{}", tail(&out))))?;

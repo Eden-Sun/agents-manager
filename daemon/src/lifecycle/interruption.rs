@@ -425,12 +425,12 @@ async fn close(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<()> 
 
 /// Read Codex's finalized TUI stream after a confirmed interruption. The captured message carries
 /// `incomplete = 1`; failure to read a pane must never keep an already-sent Esc from closing the turn.
-async fn codex_partial_for_interruption(app: &Arc<App>, bot_id: &str, p: &Pending) -> anyhow::Result<Option<(String, String)>> {
-    let Some(bot) = db::bot(&app.db, bot_id).await? else { return Ok(None) };
+async fn codex_partial_for_interruption(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), bot_id: &str, p: &Pending) -> anyhow::Result<Option<(String, String)>> {
+    let Some(bot) = db::bot(app.db(), bot_id).await? else { return Ok(None) };
     if bot.kind != "codex" {
         return Ok(None);
     }
-    let Some(run) = db::run(&app.db, &p.run_id).await? else { return Ok(None) };
+    let Some(run) = db::run(app.db(), &p.run_id).await? else { return Ok(None) };
     let Some(pane_id) = run.pane_id.as_deref() else { return Ok(None) };
     let Some(client) = app_ports_p4state::herdr_client_for_run(app, &run).await else { return Ok(None) };
     let read = client.pane_read(pane_id, "recent_unwrapped", 200).await?;

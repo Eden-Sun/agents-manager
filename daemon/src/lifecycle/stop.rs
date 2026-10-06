@@ -1,7 +1,7 @@
 //! Stopping, interrupting and aborting: the ways a run or a turn ends on purpose.
 
 use super::*;
-use super::start::ports::{HandoffSessionRepo, PaneWatchPort, PreviewPort, RemoteCleanupPort, ShareSessionRepo, emit_object, bot_status, turn_changed};
+use super::start::ports::{HandoffSessionRepo, PaneWatchPort, PreviewPort, ShareSessionRepo, emit_object, bot_status, turn_changed};
 use super::app_ports_p4::{AppEventSink, AppTurnEvents};
 use super::start::app_ports_p4sess::AppBotLock;
 use am_ports::BotLock;
@@ -313,12 +313,12 @@ enum StopCommit {
 /// daemon 重啟的話，開機對帳把它收成 `exited`，`start_send::resume_after_boot` 看到沒有 run 就替它啟動——那一則照樣送出去。
 /// 跟著第一個 durable 的「使用者要它停」一起落地，之後不管怎麼收斂都送不出去。CAS 輸了什麼都不寫。
 async fn begin_stop(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     run_id: &str,
     bot_id: &str,
     withdraw: bool,
 ) -> anyhow::Result<(super::run_state::Moved, Vec<(String, Revoked)>)> {
-    let mut tx = app.db.begin().await?;
+    let mut tx = app.db().begin().await?;
     let moved = super::run_state::transition_on(&mut tx, run_id, super::run_state::LIVE, "stopping", None).await?;
     if moved == super::run_state::Moved::Lost {
         return Ok((moved, Vec::new()));
@@ -358,11 +358,11 @@ pub(crate) async fn admit_idle_stop(db: &sqlx::SqlitePool, run_id: &str, bot_id:
 ///
 /// 重啟那一半（`for_restart`）不改標：重啟不是「使用者要它停」——開不回來時要的正是 `exited`（同 `left_down_by_restart`），
 /// 開回來了舊 run 的標籤也不再代表 bot。
-async fn commit_stopped(app: &Arc<App>, run_id: &str, for_restart: bool) -> Result<StopCommit, sqlx::Error> {
-    match super::run_state::transition(&app.db, run_id, &["stopping"], "stopped", None).await? {
+async fn commit_stopped(app: &impl crate::capabilities::Db, run_id: &str, for_restart: bool) -> Result<StopCommit, sqlx::Error> {
+    match super::run_state::transition(app.db(), run_id, &["stopping"], "stopped", None).await? {
         super::run_state::Moved::Applied => Ok(StopCommit::Applied),
         super::run_state::Moved::Lost if for_restart => Ok(StopCommit::Lost),
-        super::run_state::Moved::Lost => match super::run_state::relabel(&app.db, run_id, "exited", "stopped").await? {
+        super::run_state::Moved::Lost => match super::run_state::relabel(app.db(), run_id, "exited", "stopped").await? {
             super::run_state::Moved::Applied => Ok(StopCommit::Relabelled),
             super::run_state::Moved::Lost => Ok(StopCommit::Lost),
         },
@@ -426,7 +426,7 @@ pub(crate) async fn finish_stop(app: &Arc<App>, run_id: &str) {
 }
 
 /// stop (if running) + start. Used to make edited `model` / `args` / `identity` / `env` take effect.
-pub async fn run_alive(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> bool {
+pub async fn run_alive(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run, bot: &db::Bot) -> bool {
     let Some(pane) = run.pane_id.as_deref() else { return false };
     let Ok(client) = client_for_run(app, run).await else { return true };
     match client.pane_get(pane).await {
@@ -441,9 +441,9 @@ pub async fn run_alive(app: &Arc<App>, run: &db::Run, bot: &db::Bot) -> bool {
 
 /// #61: one-time purge of `bots/<id>/` for soft-deleted bots with no live run. Dirs no bot row
 /// claims are left alone (rt-87's `bots-orphan-backup-2026-09-10/` is outside `bots/`).
-pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
+pub async fn purge_deleted_bot_dirs(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) -> usize {
     let mut removed = 0;
-    let root = app.data_dir.join("bots");
+    let root = app.data_dir().join("bots");
     if let Ok(entries) = std::fs::read_dir(&root) {
         for entry in entries.flatten() {
             if !entry.path().is_dir() {
@@ -454,7 +454,7 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
             // 下一次啟動再判斷（清理可重入）。刪掉還在跑的 bot 的目錄會拿走它的 hook／shim／spool，補不回來。
             let deleted: Option<Option<String>> = match sqlx::query_scalar("SELECT deleted_at FROM bots WHERE id = ?")
                 .bind(&id)
-                .fetch_optional(&app.db)
+                .fetch_optional(app.db())
                 .await
             {
                 Ok(v) => v,
@@ -467,10 +467,10 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
                 continue;
             }
             // #708：移交出去的專案的 bot 目錄不刪（接手的 daemon 可能在用；讀不到也不刪）。
-            if !matches!(app.db.bot_handed_off_to(&id).await, Ok(None)) {
+            if !matches!(app.db().bot_handed_off_to(&id).await, Ok(None)) {
                 continue;
             }
-            match db::active_run(&app.db, &id).await {
+            match db::active_run(app.db(), &id).await {
                 Ok(None) => {}
                 Ok(Some(_)) => continue,
                 Err(e) => {
@@ -478,7 +478,7 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
                     continue;
                 }
             }
-            match crate::bot_trash::move_in(&app.data_dir, &id, &entry.path()) {
+            match crate::bot_trash::move_in(app.data_dir(), &id, &entry.path()) {
                 Ok(_) => removed += 1,
                 Err(e) => tracing::warn!(dir = %entry.path().display(), error = %e, "could not move a deleted bot's directory to bots-trash"),
             }
@@ -493,20 +493,20 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
          JOIN bots b ON b.id = s.bot_id
          WHERE b.deleted_at IS NOT NULL AND s.profile = 'restricted'",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     .unwrap_or_default();
 
     for (id, ws) in restricted_deleted {
-        if !matches!(app.db.bot_handed_off_to(&id).await, Ok(None)) {
+        if !matches!(app.db().bot_handed_off_to(&id).await, Ok(None)) {
             continue;
         }
-        match db::active_run(&app.db, &id).await {
+        match db::active_run(app.db(), &id).await {
             Ok(None) => {}
             _ => continue,
         }
-        if let Some(ws_path) = crate::share::folder::validate_workspace_path(&app.data_dir, &ws) {
-            match crate::bot_trash::move_in_kind(&app.data_dir, &id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
+        if let Some(ws_path) = crate::share::folder::validate_workspace_path(app.data_dir(), &ws) {
+            match crate::bot_trash::move_in_kind(app.data_dir(), &id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
                 Ok(Some(to)) => {
                     tracing::info!(bot = %id, dir = %ws_path.display(), trash = %to.display(), "moved leftover restricted share workspace to bots-trash");
                     removed += 1;
@@ -517,7 +517,7 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
         }
     }
     // 過期的與超出總量上限的一起收（review d77434c0 #2）；常駐的 daemon 另外由 `bot_trash::spawn_gc` 每天再跑一次。
-    let (expired, evicted) = crate::bot_trash::gc_with_cap(&app.data_dir, crate::bot_trash::keep_duration(), crate::bot_trash::MAX_BYTES);
+    let (expired, evicted) = crate::bot_trash::gc_with_cap(app.data_dir(), crate::bot_trash::keep_duration(), crate::bot_trash::MAX_BYTES);
     if expired > 0 || evicted > 0 {
         tracing::info!(expired, evicted, days = crate::bot_trash::KEEP_DAYS, "removed expired or over-cap bots-trash entries");
     }
@@ -525,13 +525,13 @@ pub async fn purge_deleted_bot_dirs(app: &Arc<App>) -> usize {
 }
 
 /// 回 `true`＝目錄確定沒了（含本來就不在）；`false`＝沒清成（id 不合法、主機不明、ssh 失敗、I/O 錯），呼叫端不能當成清掉了。
-pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
+pub async fn purge_bot_dir(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess + crate::lifecycle::start::ports::RemoteCleanupPort + crate::shared_host::SharedHostEnv), bot_id: &str, host: &str) -> bool {
     if !valid_id(bot_id) {
         tracing::warn!(host, bot = %bot_id, "invalid bot id; bot config dir left in place");
         return false;
     }
     // #708／#709：移交出去的專案，bot 目錄是接手那顆 daemon 在用的（遠端資料目錄可能就是這裡）：兩邊都不刪。讀不到也不刪。
-    if !matches!(app.db.bot_handed_off_to(bot_id).await, Ok(None)) {
+    if !matches!(app.db().bot_handed_off_to(bot_id).await, Ok(None)) {
         tracing::info!(host, bot = %bot_id, "bot of a handed-off project (or unreadable); bot config dir left in place");
         return false;
     }
@@ -539,17 +539,17 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     // 以前刪 bot 完全沒人動它：沒有 TTL、沒有總量上限、也沒有任何程式碼路徑會再看它一眼（#465）。
     // 一起搬進 `bots-trash`，就跟 `bots/<id>/` 受同一套 7 天＋總量上限，restore 也搬得回來。
     // 搬不動只記 warning：這支的回傳值講的是「bot 設定目錄清掉了沒」，不改那個語意。
-    let att = crate::bot_trash::attachments_dir(&app.data_dir, bot_id);
-    match crate::bot_trash::move_in_kind(&app.data_dir, bot_id, Some(crate::bot_trash::ATTACHMENTS), &att) {
+    let att = crate::bot_trash::attachments_dir(crate::capabilities::DataDir::data_dir(app), bot_id);
+    match crate::bot_trash::move_in_kind(crate::capabilities::DataDir::data_dir(app), bot_id, Some(crate::bot_trash::ATTACHMENTS), &att) {
         Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %att.display(), trash = %to.display(), "moved bot attachments to bots-trash"),
         Ok(None) => {}
         Err(e) => tracing::warn!(bot = %bot_id, dir = %att.display(), error = %e, "could not move bot attachments to bots-trash"),
     }
     // 受限分享用 bot 的工作目錄（`shared_bots.workspace`，issue #828）。
     // 只有 restricted bot 的工作目錄才收進回收區；信任分享（trusted）的工作區是使用者既有目錄，不能動。
-    if let Ok(Some(ws)) = app.db.restricted_workspace(bot_id).await {
-        if let Some(ws_path) = crate::share::folder::validate_workspace_path(&app.data_dir, &ws) {
-            match crate::bot_trash::move_in_kind(&app.data_dir, bot_id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
+    if let Ok(Some(ws)) = app.db().restricted_workspace(bot_id).await {
+        if let Some(ws_path) = crate::share::folder::validate_workspace_path(crate::capabilities::DataDir::data_dir(app), &ws) {
+            match crate::bot_trash::move_in_kind(crate::capabilities::DataDir::data_dir(app), bot_id, Some(crate::bot_trash::SHARE_WORKSPACE), &ws_path) {
                 Ok(Some(to)) => tracing::info!(bot = %bot_id, dir = %ws_path.display(), trash = %to.display(), "moved restricted share workspace to bots-trash"),
                 Ok(None) => {}
                 Err(e) => tracing::warn!(bot = %bot_id, dir = %ws_path.display(), error = %e, "could not move restricted share workspace to bots-trash"),
@@ -559,7 +559,7 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
     if host == LOCAL_HOST {
         let Ok(dir) = app.bot_dir(bot_id) else { return false };
         // 搬進回收區而不是刪（issue #406）：restore 時搬得回來。
-        return match crate::bot_trash::move_in(&app.data_dir, bot_id, &dir) {
+        return match crate::bot_trash::move_in(crate::capabilities::DataDir::data_dir(app), bot_id, &dir) {
             Ok(Some(to)) => {
                 tracing::info!(dir = %dir.display(), trash = %to.display(), "moved bot config dir to bots-trash");
                 true
@@ -576,7 +576,7 @@ pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
         tracing::info!(host, bot = %bot_id, "shared-session host; remote bot dir left in place");
         return false;
     }
-    let Some(conn) = app.hosts.get(host).await else {
+    let Some(conn) = app.hosts().get(host).await else {
         tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir left in place");
         app.record_remote_purge(bot_id, host, false, Some("unknown host")).await;
         return false;
@@ -711,7 +711,7 @@ pub async fn interrupt_turn(app: &Arc<App>, bot_id: &str, expect_turn: Option<&s
 ///
 /// 讀法跟送出前的檢查一樣（#581）：以前讀 `visible` 80 列、放回來的長 prompt 撐高的框找不到框頂，
 /// 判成「框是空的」沒按，框就一直卡著那段字。按完重讀一次，框沒空就留一筆 log（不再按：空框的 `ctrl+c` 是「再按一次離開」）。
-async fn clear_restored_prompt(app: &Arc<App>, client: &HerdrClient, run: &db::Run, bot: &db::Bot, expected_prompt: Option<&str>) {
+async fn clear_restored_prompt(app: &impl crate::capabilities::Db, client: &HerdrClient, run: &db::Run, bot: &db::Bot, expected_prompt: Option<&str>) {
     use super::delivery::{box_state, read_styled, read_styled_snapshot, BoxState, DELIVER_SCAN_LINES, SCAN_SOURCE};
     if bot.kind != "claude" {
         return;
@@ -770,8 +770,8 @@ fn same_restored_prompt(actual: &str, expected: &str) -> bool {
     expected.contains('\t') && actual == expected.replace('\t', "")
 }
 
-async fn abort_binding_is_current(app: &Arc<App>, run: &db::Run) -> bool {
-    let Ok(Some(current)) = db::active_run(&app.db, &run.bot_id).await else { return false };
+async fn abort_binding_is_current(app: &impl crate::capabilities::Db, run: &db::Run) -> bool {
+    let Ok(Some(current)) = db::active_run(app.db(), &run.bot_id).await else { return false };
     current.id == run.id
         && current.state == "running"
         && current.pane_id == run.pane_id
@@ -916,12 +916,12 @@ pub async fn abort_turns(app: &Arc<App>, bot_id: &str) -> LcResult<Value> {
 /// Give a running pre one-bot-one-tab bot its own tab. A move, not a restart: herdr keeps
 /// `pane_id` across `pane.move` (0.8.2), so mapping, poller and in-flight turn carry on.
 /// Idempotent: re-moving a solo pane would rebuild a tab and renumber the user's tab bar.
-pub async fn move_pane_to_own_tab(app: &Arc<App>, bot_id: &str) -> LcResult<()> {
+pub async fn move_pane_to_own_tab(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), bot_id: &str) -> LcResult<()> {
     let locks = AppBotLock::new(app);
     let locked_bot = bot_id.to_string();
     let _g = locks.lock_bot(&locked_bot).await.map_err(|e| LcError::Upstream(e.to_string()))?;
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
-    let run = db::active_run(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+    let run = db::active_run(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("run".into()))?;
     let pane_id = run
         .pane_id
         .clone()
@@ -957,7 +957,7 @@ pub async fn move_pane_to_own_tab(app: &Arc<App>, bot_id: &str) -> LcResult<()> 
         .bind(&workspace_id)
         .bind(&tab_id)
         .bind(&run.id)
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .map_err(up)?;
     bot_status(&AppEventSink::new(app), bot_id).await;

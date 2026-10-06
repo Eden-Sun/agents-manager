@@ -3,7 +3,7 @@
 use crate::lifecycle::LcError;
 use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::{HostProbes, LocalAccountView, QuotaOps};
+use super::ports::{HostProbes, QuotaOps};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,7 +52,7 @@ pub const REASON_WAITING_QUOTA: &str = "waiting_quota";
 pub const REASON_NO_RUN: &str = "no_run";
 
 /// 協調者能不能用。
-pub async fn responder_state(app: &Arc<App>) -> RoleState {
+pub async fn responder_state(app: &(impl crate::capabilities::Db + crate::supervisor::role_faults::RoleFaultTable)) -> RoleState {
     role_state(app, crate::supervisor::roles::Role::Responder).await
 }
 
@@ -62,8 +62,8 @@ pub async fn responder_state(app: &Arc<App>) -> RoleState {
 /// 都會被 UI 高頻輪詢，每次都去抓一次 pane 會把 herdr 打爆。畫面有兩條路看：`responder::notify`
 /// 在**送不出去時**看一次（結論落在 `supervisor_roles.status`，#420），以及 health 的 30 秒 tick
 /// 對兩個角色各看一次（結論落在 `App.role_faults`，#427——巡檢只有這一條路看得到）。
-pub async fn role_state(app: &Arc<App>, role: crate::supervisor::roles::Role) -> RoleState {
-    let row = match crate::supervisor::roles::record(&app.db, role).await {
+pub async fn role_state(app: &(impl crate::capabilities::Db + crate::supervisor::role_faults::RoleFaultTable), role: crate::supervisor::roles::Role) -> RoleState {
+    let row = match crate::supervisor::roles::record(app.db(), role).await {
         Ok(row) => row,
         // 讀不到不是「它好了」，也不是「它壞了」。
         Err(e) => {
@@ -80,7 +80,7 @@ pub async fn role_state(app: &Arc<App>, role: crate::supervisor::roles::Role) ->
     // 登記過、但那顆 bot 已經被軟刪：`db::active_run` 只看 `runs`，不看 bot 還在不在，
     // 所以「bot 已軟刪、run 那一列還掛著 running」的窗口會被讀成還活著（#421 指出）。
     // 那正是這支函式要擋的那種錯：閘門說「它可以裁示」，而它根本不存在，核准就靜靜躺著。
-    match crate::db::bot(&app.db, &bot_id).await {
+    match crate::db::bot(app.db(), &bot_id).await {
         Ok(Some(bot)) if bot.deleted_at.is_none() => {}
         // 登記過卻找不到（或已軟刪）＝沒有東西在跑。沿用 `no_run`，不新增原因字串：
         // 那幾個字是對外契約（#421 已經接線、SPEC 與 persona 都列舉了）。
@@ -92,7 +92,7 @@ pub async fn role_state(app: &Arc<App>, role: crate::supervisor::roles::Role) ->
     }
     // 要它跑卻沒有 active run。`desired_running=0`（使用者自己停的）不是系統故障，
     // 但對「核准該給誰」來說一樣是不可用——沒有在跑的協調者不會裁示任何東西。
-    match crate::db::active_run(&app.db, &bot_id).await {
+    match crate::db::active_run(app.db(), &bot_id).await {
         Ok(Some(_)) => {}
         Ok(None) => return RoleState::Unavailable(REASON_NO_RUN),
         Err(e) => {
@@ -214,7 +214,7 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
 }
 
 /// 一顆 bot 的背景工作標著「可能卡住」（`background_jobs::STUCK_AFTER_SECS`）時的一列；沒有就是 `None`。
-fn background_stuck_entry(app: &App, bot: &crate::db::Bot, run: &crate::db::Run) -> Option<Value> {
+fn background_stuck_entry(app: &impl crate::supervisor::ports::LocalAccountView, bot: &crate::db::Bot, run: &crate::db::Run) -> Option<Value> {
     let n = app.background_jobs_known(&run.id).filter(|n| *n > 0)?;
     let (since, secs, stuck) = app.background_jobs_duration(&run.id)?;
     stuck.then(|| {

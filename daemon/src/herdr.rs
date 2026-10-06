@@ -1314,3 +1314,10 @@ mod nbsp_tests {
         assert_eq!(crate::lifecycle::echo_row_hits("claude", &r.text, "ui 審查你自己做"), 1, "回音列認得出來");
     }
 }
+
+/// 本機 herdr 的 client、session 名與連線旗標。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait LocalHerdr: Send + Sync {
+    fn default_herdr(&self) -> &HerdrClient;
+    fn herdr_session(&self) -> &String;
+    fn default_connected(&self) -> &std::sync::atomic::AtomicBool;
+}

@@ -270,9 +270,9 @@ async fn clear_skip_with<E: EventSink>(db: &DbContext<SqlitePool>, events: &E, b
 
 /// 送 prompt 的入口呼叫：不是保溫本身的 prompt＝使用者或 bot 的新回合，就是真的活動，立刻恢復保溫（不等巡邏）。
 /// 保溫回覆旗標（`keep_warm_replied_at`）不用清：它從回合紀錄推算，新回合一出現就是 `null`，下一次 `bot_status` 帶出去。
-pub async fn note_prompt(app: &Arc<App>, bot_id: &str, client_request_id: &str) {
+pub async fn note_prompt(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, client_request_id: &str) {
     if !cache_clock::is_keep_warm_crid(client_request_id) {
-        let db = DbContext::new(app.db.clone());
+        let db = DbContext::new(app.db().clone());
         let events = AppEventSink::new(app);
         clear_skip_with(&db, &events, bot_id).await;
     }
@@ -280,9 +280,9 @@ pub async fn note_prompt(app: &Arc<App>, bot_id: &str, client_request_id: &str) 
 
 /// `POST /api/bots/{id}/keep-warm/skip`（使用者專用）body `{"skip": bool}` → `{"keep_warm_skip": bool}`。
 /// 只有主力的 claude／codex 有保溫；其他回 400 `not_primary`。
-pub async fn skip_route(app: &Arc<App>, bot_id: &str, skip: bool) -> Result<bool, crate::lifecycle::LcError> {
+pub async fn skip_route(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, skip: bool) -> Result<bool, crate::lifecycle::LcError> {
     use crate::lifecycle::LcError;
-    let db = DbContext::new(app.db.clone());
+    let db = DbContext::new(app.db().clone());
     let bot = db::bot(db.pool(), bot_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?

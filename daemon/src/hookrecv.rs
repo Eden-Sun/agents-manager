@@ -338,8 +338,8 @@ fn claude_account_from_tools(
     }
 }
 
-async fn claude_account(app: &Arc<App>, host: &str, identity: Option<&str>) -> (Option<String>, Option<String>) {
-    let tools = app.tools.lock().await;
+async fn claude_account(app: &impl crate::tools::ToolsTable, host: &str, identity: Option<&str>) -> (Option<String>, Option<String>) {
+    let tools = app.tools().lock().await;
     claude_account_from_tools(&tools, host, identity)
 }
 
@@ -1781,10 +1781,10 @@ async fn stamp_source_event(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, turn_i
 }
 
 /// 重播命中既有回合：把原本 commit 之後才發的通知補發一次。`message_added` 前端靠訊息 id 去重；回合事件有重試與冪等的消費者。
-async fn reannounce_turn(app: &Arc<App>, bot_id: &str, turn_id: &str) {
+async fn reannounce_turn(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), bot_id: &str, turn_id: &str) {
     match sqlx::query_as::<_, db::Message>("SELECT * FROM messages WHERE turn_id = ? AND source = 'hook' ORDER BY created_at, rowid")
         .bind(turn_id)
-        .fetch_all(&app.db)
+        .fetch_all(app.db())
         .await
     {
         Ok(messages) => {
@@ -1942,9 +1942,9 @@ pub async fn drain_remote(app: &Arc<App>, host: &str, bot_id: &str) -> Result<us
 
 /// #500 複看：`.claim` 卡住要有人知道。每輪更新一顆 bot 的連續次數，`supervisor::incidents` 的探針拿它開票。
 /// 計數在記憶體、重啟重算（SPEC §18.9）——重啟之後第一輪 drain 就會重新看到標記。
-async fn note_fold_stuck(app: &Arc<App>, host: &str, bot_id: &str, bytes: Option<i64>) {
+async fn note_fold_stuck(app: &impl crate::hookrecv::SpoolFoldStuck, host: &str, bot_id: &str, bytes: Option<i64>) {
     let key = format!("{host}/{bot_id}");
-    let mut g = app.spool_fold_stuck.lock().await;
+    let mut g = app.spool_fold_stuck().lock().await;
     match bytes {
         Some(bytes) => {
             let e = g.entry(key).or_insert((0, bytes));
@@ -6699,4 +6699,14 @@ mod agy_tests {
         assert!(provider_matches_kind("agy", "agy"));
         assert!(!provider_matches_kind("claude", "agy") && !provider_matches_kind("agy", "claude"));
     }
+}
+
+/// 遠端 spool 折疊卡住的帳。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait SpoolFoldStuck: Send + Sync {
+    fn spool_fold_stuck(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, (u32, i64)>>;
+}
+
+/// hook 失敗分類的計數。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait ClassifyFailures: Send + Sync {
+    fn classify_failures(&self) -> &std::sync::atomic::AtomicU32;
 }

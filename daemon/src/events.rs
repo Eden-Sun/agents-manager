@@ -450,8 +450,8 @@ async fn resync_pane_status(app: &Arc<App>, client: &crate::herdr::HerdrClient, 
 
 /// Drop a watcher's own registration, on every path out of its loop. `run_ended`：離開是因為證明了這個 pane 已經沒有 active run
 /// （不是拿不到 client）——只有這時才把 pane 的狀態序號與鎖一起帶走。
-async fn forget_watcher(app: &Arc<App>, key: PaneKey, generation: u64, run_ended: bool) {
-    let mut watchers = app.pane_watchers.lock().await;
+async fn forget_watcher(app: &impl crate::events::PaneWatchers, key: PaneKey, generation: u64, run_ended: bool) {
+    let mut watchers = app.pane_watchers().lock().await;
     let mut gens = watcher_gens().lock().unwrap();
     if gens.get(&key) == Some(&generation) {
         gens.remove(&key);
@@ -464,9 +464,9 @@ async fn forget_watcher(app: &Arc<App>, key: PaneKey, generation: u64, run_ended
     }
 }
 
-pub async fn unwatch_pane_on_session(app: &Arc<App>, host: &str, session: &str, pane_id: &str) {
+pub async fn unwatch_pane_on_session(app: &impl crate::events::PaneWatchers, host: &str, session: &str, pane_id: &str) {
     let key = (host.to_string(), session.to_string(), pane_id.to_string());
-    let mut watchers = app.pane_watchers.lock().await;
+    let mut watchers = app.pane_watchers().lock().await;
     watcher_gens().lock().unwrap().remove(&key);
     if let Some(h) = watchers.remove(&key) {
         h.abort();
@@ -741,11 +741,11 @@ fn clean_title(raw: &str) -> Option<String> {
 }
 
 /// 讓 `runs.agent_title` 跟上 agent 自己現在的標題（claude 會寫成它正在做的事）。
-pub fn spawn_title_poller(app: Arc<App>) {
+pub fn spawn_title_poller(app: Arc<impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::herdr::LocalHerdr + crate::hosts::HostsAccess + 'static>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(TITLE_POLL).await;
-            for conn in app.hosts.list().await {
+            for conn in app.hosts().list().await {
                 if !conn.is_local() && !conn.is_connected() {
                     continue;
                 }
@@ -754,9 +754,9 @@ pub fn spawn_title_poller(app: Arc<App>) {
                 poll_titles(&app, &conn.name, &session, &session, &client).await;
             }
             // default session 不在 HostManager 裡，但可能有被採用的 agent，標題也要跟。
-            if app.herdr_session != "default" && app.default_connected.load(Ordering::SeqCst) {
-                let fallback = app.herdr_session.clone();
-                let client = app.default_herdr.clone();
+            if app.herdr_session() != "default" && app.default_connected().load(Ordering::SeqCst) {
+                let fallback = app.herdr_session().clone();
+                let client = app.default_herdr().clone();
                 poll_titles(&app, LOCAL_HOST, "default", &fallback, &client).await;
             }
         }
@@ -1179,4 +1179,9 @@ mod tests {
         assert!(!status_seq().lock().unwrap().contains_key(&key), "pane 收掉之後 status_seq 不該還留著它");
         assert!(!pane_status_locks().lock().unwrap().contains_key(&key), "pane 收掉之後 pane_status_lock 不該還留著它");
     }
+}
+
+/// 每個 pane 的事件 watcher 任務。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait PaneWatchers: Send + Sync {
+    fn pane_watchers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<(String, String, String), tokio::task::JoinHandle<()>>>;
 }

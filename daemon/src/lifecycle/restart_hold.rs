@@ -58,8 +58,8 @@ fn adopted() -> &'static Mutex<HashMap<(String, String), Hold>> {
 
 /// 開機（**對帳之前**）把還開著的 `restart` intent 各灌一個 hold。讀不到 DB 只能記 log（此時什麼都撤不了以外的事無從判斷），
 /// 之後 `recover_host` 照樣會補完，只是這段視窗沒有保護。
-pub(crate) async fn adopt_open_intents(app: &crate::state::App) {
-    match app_ports_p4state::open_restart_intents(&app.db).await {
+pub(crate) async fn adopt_open_intents(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) {
+    match app_ports_p4state::open_restart_intents(app.db()).await {
         Ok(open) => {
             for i in open.into_iter().filter(|i| i.kind == "restart") {
                 let hold = begin(&i.subject_id);
@@ -73,17 +73,17 @@ pub(crate) async fn adopt_open_intents(app: &crate::state::App) {
 }
 
 /// 那件 intent 已經收尾：放掉它的 hold（沒有就什麼都不做）。
-pub(crate) fn release_intent(app: &crate::state::App, intent_id: &str) {
+pub(crate) fn release_intent(app: &impl crate::capabilities::DataDir, intent_id: &str) {
     let hold = adopted().lock().ok().and_then(|mut m| m.remove(&(owner(app), intent_id.to_string())));
     drop(hold);
 }
 
-fn owner(app: &crate::state::App) -> String {
+fn owner(app: &impl crate::capabilities::DataDir) -> String {
     app_ports_p4state::owner_id(app)
 }
 
 /// 只留還開著的 intent 的 hold；其餘（例如過期被收掉的）放掉。
-pub(crate) fn retain_open(app: &crate::state::App, open_ids: &std::collections::HashSet<String>) {
+pub(crate) fn retain_open(app: &impl crate::capabilities::DataDir, open_ids: &std::collections::HashSet<String>) {
     let me = owner(app);
     let gone: Vec<Hold> = match adopted().lock() {
         Ok(mut m) => {

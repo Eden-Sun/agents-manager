@@ -195,6 +195,18 @@ impl HostProbes for Arc<App> {
     }
 }
 
+impl<T: LocalAccountView + ?Sized> LocalAccountView for Arc<T> {
+    fn background_jobs_known(&self, run_id: &str) -> Option<u32> {
+        (**self).background_jobs_known(run_id)
+    }
+    fn background_jobs_duration(&self, run_id: &str) -> Option<(i64, i64, bool)> {
+        (**self).background_jobs_duration(run_id)
+    }
+    fn deploy_user_escalated_for(&self, approval: &crate::supervisor::store::Approval) -> bool {
+        (**self).deploy_user_escalated_for(approval)
+    }
+}
+
 impl LocalAccountView for App {
     fn background_jobs_known(&self, run_id: &str) -> Option<u32> {
         crate::background_jobs::known(self, run_id)

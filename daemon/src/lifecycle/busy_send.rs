@@ -6,14 +6,14 @@ use super::app_ports_p4::{AppTurnEvents};
 use crate::attach::Attachment;
 
 /// 409 `queue_slot_taken`：唯一的 queued 槽被 `turn_id` 那一筆佔著，`holder` 說是誰（web 才講得出人話）。
-async fn slot_taken(app: &Arc<App>, turn_id: &str) -> LcError {
+async fn slot_taken(app: &impl crate::capabilities::Db, turn_id: &str) -> LcError {
     LcError::conflict("queue_slot_taken", json!({"turn_id": turn_id, "holder": slot_holder(app, turn_id).await}))
 }
 
 /// 佔槽的是誰：`{"kind": "user"｜"start"｜"daemon"｜"agm"｜"bot"｜"unknown", "bot_id"?, "bot_name"?}`。
 /// `user`＝使用者自己（可能是另一個分頁）排的 `awaits_idle`；`start`＝在等 bot 起來的那一則（#122）；`daemon`＝daemon 的通知；
 /// `agm`／`bot`＝別人派來的（`relay_from` 是 bot id；是 AGM 的 bot 算 `agm`；**自稱**的 `relay_from`〔沒帶 bot token，`relay_unverified`〕只說 `bot`，不帶名字與 id）。讀不到就是 `unknown`，不猜。
-async fn slot_holder(app: &Arc<App>, turn_id: &str) -> Value {
+async fn slot_holder(app: &impl crate::capabilities::Db, turn_id: &str) -> Value {
     let row: Option<(i64, i64, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
         "SELECT t.awaits_idle, t.awaits_start, t.client_request_id,
                 (SELECT m.relay_from FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' ORDER BY m.created_at, m.rowid LIMIT 1),
@@ -21,7 +21,7 @@ async fn slot_holder(app: &Arc<App>, turn_id: &str) -> Value {
            FROM turns t WHERE t.id = ?",
     )
     .bind(turn_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await
     .ok()
     .flatten();
@@ -40,8 +40,8 @@ async fn slot_holder(app: &Arc<App>, turn_id: &str) -> Value {
         if relay_unverified.unwrap_or(1) != 0 {
             return json!({"kind": "bot"});
         }
-        if let Ok(Some(bot)) = db::bot(&app.db, &from).await {
-            let agm = match app.db.load_owned().await {
+        if let Ok(Some(bot)) = db::bot(app.db(), &from).await {
+            let agm = match app.db().load_owned().await {
                 Ok(owned) => owned.owns(&bot),
                 Err(_) => false,
             };
@@ -54,12 +54,12 @@ async fn slot_holder(app: &Arc<App>, turn_id: &str) -> Value {
 
 /// Enforce the single `awaits_idle` slot before taking the direct-send path too. A queued send
 /// can still be waiting for the queue worker after its predecessor has ended.
-pub(super) async fn refuse_if_slot_taken(app: &Arc<App>, conversation_id: &str) -> LcResult<()> {
+pub(super) async fn refuse_if_slot_taken(app: &impl crate::capabilities::Db, conversation_id: &str) -> LcResult<()> {
     let existing: Option<String> = sqlx::query_scalar(
         "SELECT id FROM turns WHERE conversation_id=? AND status='queued' AND awaits_idle=1 ORDER BY created_at, id LIMIT 1",
     )
     .bind(conversation_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await
     .map_err(up)?;
     match existing {

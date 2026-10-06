@@ -129,7 +129,7 @@ pub fn gate(cfg: &JudgeCfg, project_id: &str, project_label: &str, asked_last_ho
 /// 占位列先寫 `error='pending'`，答案由呼叫端問完再 [`settle_slot`] 補上。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn reserve_slot(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::judge::JudgeFuse),
     cfg: &JudgeCfg,
     project_id: &str,
     project_label: &str,
@@ -141,10 +141,10 @@ pub(crate) async fn reserve_slot(
     regex_verdict: &str,
 ) -> Result<String> {
     let id = crate::db::ulid();
-    let _g = app.judge_fuse.lock().await;
+    let _g = app.judge_fuse().lock().await;
     let asked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM judge_shadow WHERE at >= ?")
         .bind(crate::db::iso_in(-3600))
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await?;
     if let Some(skip) = gate(cfg, project_id, project_label, asked) {
         return Err(anyhow!("{skip:?}"));
@@ -161,7 +161,7 @@ pub(crate) async fn reserve_slot(
     .bind(matched_line)
     .bind(composer_idle)
     .bind(regex_verdict)
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     Ok(id)
 }
@@ -206,12 +206,12 @@ pub async fn settle_interrupted(app: &impl crate::capabilities::Db) -> Result<u6
     Ok(n)
 }
 
-pub async fn observe(app: &Arc<App>, s: Sample) -> Result<()> {
-    let cfg = app.cfg.get().await.judge;
+pub async fn observe(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::judge::JudgeFuse), s: Sample) -> Result<()> {
+    let cfg = app.cfg().get().await.judge;
     if !cfg.enabled {
         return Ok(());
     }
-    let label = crate::db::project(&app.db, &s.project_id).await?.map(|p| p.label).unwrap_or_default();
+    let label = crate::db::project(app.db(), &s.project_id).await?.map(|p| p.label).unwrap_or_default();
     let lines: Vec<&str> = s.screen.lines().collect();
     let composer_idle = crate::tui_prompts::composer_is_idle(&lines);
     let matched = mask(&s.matched_line);
@@ -1109,4 +1109,9 @@ mod tests {
         assert_eq!(read_key(p).unwrap(), "k-new");
         std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+/// judge 的「一次只放一個影子判斷」保險絲。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait JudgeFuse: Send + Sync {
+    fn judge_fuse(&self) -> &tokio::sync::Mutex<()>;
 }

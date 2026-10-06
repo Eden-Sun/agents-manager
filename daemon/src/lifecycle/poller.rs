@@ -34,9 +34,9 @@ fn progress_due(last: Option<&std::time::Instant>, force: bool) -> bool {
 
 /// Ship the held frame if the 4/s budget allows. Frames merge (newest wins); `force` flushes the
 /// final state once the poller is done.
-async fn flush_progress(app: &Arc<App>, run_id: &str, pending: &mut Option<Value>, force: bool) {
+async fn flush_progress(app: &(impl crate::capabilities::Emit + crate::lifecycle::poller::ProgressEmitted), run_id: &str, pending: &mut Option<Value>, force: bool) {
     let Some(frame) = pending.take() else { return };
-    let mut emitted = app.progress_emitted.lock().await;
+    let mut emitted = app.progress_emitted().lock().await;
     if !progress_due(emitted.get(run_id), force) {
         *pending = Some(frame);
         return;
@@ -71,20 +71,20 @@ fn progress_interval(run_id: &str) -> Duration {
 /// 這一輪還是不是這一回合的 poller：讀到了、確定不是（回合收掉或換了一筆、run 或 bot 沒了）回 `Ok(None)`；
 /// 讀不到回錯（#193）。bot 與送了什麼讀到一次就留著。
 async fn still_ours(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     run_id: &str,
     bot_id: &str,
     turn_id: &str,
     bot: &mut Option<db::Bot>,
     sent: &mut Option<Vec<String>>,
 ) -> anyhow::Result<Option<db::Run>> {
-    match db::in_flight_turn(&app.db, run_id).await? {
+    match db::in_flight_turn(app.db(), run_id).await? {
         Some(t) if t.id == turn_id => {}
         _ => return Ok(None),
     }
-    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(None) };
+    let Some(run) = db::run(app.db(), run_id).await? else { return Ok(None) };
     if bot.is_none() {
-        let Some(b) = db::bot(&app.db, bot_id).await? else { return Ok(None) };
+        let Some(b) = db::bot(app.db(), bot_id).await? else { return Ok(None) };
         *bot = Some(b);
     }
     if sent.is_none() {
@@ -305,8 +305,8 @@ pub async fn begin_external_turn(app: &Arc<App>, run: &db::Run) {
     arm_progress(app, &run.id, &run.bot_id, &tid).await;
 }
 
-async fn pane_prompt_echo(app: &Arc<App>, run: &db::Run) -> Option<String> {
-    let bot = db::bot(&app.db, &run.bot_id).await.ok().flatten()?;
+async fn pane_prompt_echo(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> Option<String> {
+    let bot = db::bot(app.db(), &run.bot_id).await.ok().flatten()?;
     let pane = run.pane_id.clone()?;
     let client = client_for_run(app, run).await.ok()?;
     let read = client.pane_read(&pane, "recent_unwrapped", 160).await.ok()?;
@@ -364,7 +364,7 @@ pub(crate) fn idle_threshold(said_something: bool, agent_status: &str) -> u32 {
 ///
 /// 讀不到回錯（#193），不是「什麼都沒送」：空的清單會讓備援把我們自己的 prompt 當成 agent 的回覆存下來、
 /// stall watchdog 找不到框裡的字也不重送，接著判失敗。
-pub(crate) async fn turn_echo_texts(app: &Arc<App>, turn_id: &str) -> anyhow::Result<Vec<String>> {
+pub(crate) async fn turn_echo_texts(app: &impl crate::capabilities::Db, turn_id: &str) -> anyhow::Result<Vec<String>> {
     app_ports_p4obs::turn_echo_texts(app, turn_id).await
 }
 
@@ -499,7 +499,7 @@ fn strip_echoed_prompt_squashed(text: &str, prompt: &str) -> Option<String> {
 }
 
 /// Pane width for the "too narrow" message; best effort, failure only means less detail.
-async fn pane_columns(app: &Arc<App>, run: &db::Run) -> Option<u32> {
+async fn pane_columns(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> Option<u32> {
     let pane = run.pane_id.clone()?;
     let ws = run.workspace_id.clone()?;
     let client = client_for_run(app, run).await.ok()?;
@@ -770,15 +770,15 @@ const STALL_RECHECK: Duration = Duration::from_secs(10);
 /// Press Enter if our prompt is still in the box and the agent idle. Every reason to do nothing is
 /// `Ok(false)`. The DB unreadable is an error (#193): whether the text is still in the box is then
 /// unknown, and the watchdog must not go on to fail the turn as if it weren't.
-async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &[String]) -> anyhow::Result<bool> {
-    let Some(run) = db::run(&app.db, run_id).await? else { return Ok(false) };
+async fn nudge_unsent_prompt(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run_id: &str, turn_id: &str, sent: &[String]) -> anyhow::Result<bool> {
+    let Some(run) = db::run(app.db(), run_id).await? else { return Ok(false) };
     if run.agent_status == "working" || run.agent_status == "blocked" {
         return Ok(false);
     }
-    if !matches!(db::in_flight_turn(&app.db, run_id).await?, Some(t) if t.id == turn_id && t.delivery == "ok") {
+    if !matches!(db::in_flight_turn(app.db(), run_id).await?, Some(t) if t.id == turn_id && t.delivery == "ok") {
         return Ok(false);
     }
-    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(false) };
+    let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(false) };
     let Some(pane) = run.pane_id.clone() else { return Ok(false) };
     let Ok(client) = client_for_run(app, &run).await else { return Ok(false) };
     let Ok(screen) = super::delivery::read_styled(&client, &pane, "visible", 80).await else { return Ok(false) };
@@ -794,7 +794,7 @@ async fn nudge_unsent_prompt(app: &Arc<App>, run_id: &str, turn_id: &str, sent: 
 }
 
 /// [`nudge_unsent_prompt`]，送了什麼先讀（讀到一次就留在 `sent`）。讀不到回錯（#193）。
-async fn nudge_if_unsent(app: &Arc<App>, run_id: &str, turn_id: &str, sent: &mut Option<Vec<String>>) -> anyhow::Result<bool> {
+async fn nudge_if_unsent(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run_id: &str, turn_id: &str, sent: &mut Option<Vec<String>>) -> anyhow::Result<bool> {
     if sent.is_none() {
         *sent = Some(turn_echo_texts(app, turn_id).await?);
     }
@@ -1183,8 +1183,8 @@ async fn stall_round(
     StallRound::Done
 }
 
-pub async fn cancel_stall(app: &Arc<App>, run_id: &str) {
-    app.stall_timers.lock().await.remove(run_id);
+pub async fn cancel_stall(app: &impl crate::lifecycle::poller::StallTimers, run_id: &str) {
+    app.stall_timers().lock().await.remove(run_id);
 }
 
 async fn fail_stalled_turn(
@@ -4212,4 +4212,19 @@ mod codex_limit_quote_tests {
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("hit your usage limit") && lines[0].contains("2099 6:43 PM"), "{lines:?}");
     }
+}
+
+/// 每個 run 的進度輪詢任務。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait ProgressPollers: Send + Sync {
+    fn progress_pollers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>;
+}
+
+/// run 的卡住計時器。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait StallTimers: Send + Sync {
+    fn stall_timers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>>;
+}
+
+/// run 最近一次推進度的時間。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait ProgressEmitted: Send + Sync {
+    fn progress_emitted(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>;
 }

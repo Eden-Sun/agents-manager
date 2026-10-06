@@ -35,7 +35,6 @@ use crate::lifecycle::{LcError, StartOpts};
 use crate::state::App;
 use sqlx::SqlitePool;
 use serde_json::json;
-use super::ports::{LocalAccountView, TurnOps};
 
 /// 幾分鐘沒動作就收起來。使用者指定 90 分鐘。
 pub const DEFAULT_IDLE_MINUTES: i64 = 90;
@@ -536,8 +535,8 @@ pub async fn all_asleep(app: &impl crate::capabilities::Db) -> std::collections:
         .collect()
 }
 
-async fn say(app: &Arc<App>, bot_id: &str, text: &str) {
-    let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return };
+async fn say(app: &(impl crate::capabilities::Db + crate::supervisor::ports::TurnOps), bot_id: &str, text: &str) {
+    let Ok(conv) = db::conversation_id(app.db(), bot_id).await else { return };
     let _ = app.insert_message(&conv, None, "system", text, "system", false, None).await;
 }
 
@@ -602,16 +601,16 @@ fn unreadable(c: &Cand, what: &str, e: &anyhow::Error) {
 /// 這把鎖從最後一次判斷一路握到 `stop_bot_locked` 結束（issue #123）：最後的 admission check、寫標記、停機是同一個
 /// 序列化邊界，[`wake`] 與 `prompt` 的叫醒也在這把鎖裡，看不到「已標記、還沒停」的中間狀態。
 /// 鎖裡重讀的證據只要有一項**讀不到**就不收——跟背景工作那一項同一個規矩：只有 affirmative 的安全證據才能收。
-async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold: i64) {
+async fn sleep_one(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView + crate::supervisor::ports::TurnOps), c: &Cand, session: Option<String>, threshold: i64) {
     let lock = app.bot_lock(&c.bot_id).await;
     let _g = lock.lock().await;
-    let run = match db::active_run(&app.db, &c.bot_id).await {
+    let run = match db::active_run(app.db(), &c.bot_id).await {
         Ok(Some(run)) => run,
         // 已經不在跑了（別人先停掉了它）：沒什麼好收的。
         Ok(None) => return,
         Err(e) => return unreadable(c, "active run", &e),
     };
-    let sup = match supervisor_bot_ids(&app.db).await {
+    let sup = match supervisor_bot_ids(app.db()).await {
         Ok(sup) => sup,
         Err(e) => return unreadable(c, "supervisor ids", &e),
     };
@@ -636,7 +635,7 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
         tracing::info!(bot = %c.name, background_jobs = n, "idle sweep: the background-work account changed before stopping; leaving the bot running");
         return;
     }
-    if let Err(e) = mark_asleep(&app.db, &fresh, session.as_deref()).await {
+    if let Err(e) = mark_asleep(app.db(), &fresh, session.as_deref()).await {
         tracing::warn!(bot = %c.name, error = %e, "could not record the sleep; leaving the bot running");
         return;
     }
@@ -647,7 +646,7 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
     // （`stop_bot_locked_if_idle`，DB 裡同一句 UPDATE）做最後的排序（issue #144）。
     if observed_busy(&run) {
         tracing::info!(bot = %c.name, "idle sweep: the bot started working right before the stop; leaving it running");
-        clear_asleep(&app.db, &c.bot_id).await;
+        clear_asleep(app.db(), &c.bot_id).await;
         return;
     }
     match app.stop_bot_locked_if_idle(&c.bot_id).await {
@@ -675,10 +674,10 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
         // 標記。問不到 herdr 證實 agent 不在（`stop_not_confirmed`／`Unknown`：pane 已經關了）時 run 留在 `stopping` 交給
         // 對帳——收成 `exited` 的話它就是睡著的，標記收回去就叫不醒原本的對話（issue #170）；對帳看到 agent 放回
         // `running` 的話，`wake` 看到活著的 run 本來就會把標記清掉。讀不到 run 也不算「確定還在跑」。
-        Err(e) => match db::active_run(&app.db, &c.bot_id).await {
+        Err(e) => match db::active_run(app.db(), &c.bot_id).await {
             Ok(Some(r)) if r.state == "running" => {
                 tracing::warn!(bot = %c.name, error = ?e, "could not stop the idle bot; it stays running");
-                clear_asleep(&app.db, &c.bot_id).await;
+                clear_asleep(app.db(), &c.bot_id).await;
             }
             now => {
                 tracing::warn!(bot = %c.name, error = ?e, state = ?now.map(|r| r.map(|r| r.state)), "the idle stop could not be confirmed; keeping the bot marked asleep until the run settles");
@@ -698,7 +697,7 @@ async fn sleep_one(app: &Arc<App>, c: &Cand, session: Option<String>, threshold:
 /// **整段在 bot 鎖裡**（issue #123）：巡邏的 [`sleep_one`] 從寫標記握到停機結束都持著這把鎖。以前這裡先不拿鎖
 /// 讀標記，剛好落在「已標記、還沒停」的中間就會看到「標記在、run 還活著」，把標記清掉回 `false`——接著巡邏把
 /// 它停掉，留下一顆停著、沒有標記、再也沒人知道要 `--resume` 叫醒的 bot。
-pub async fn wake(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<bool> {
+pub async fn wake(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::TurnOps), bot_id: &str, why: &str) -> anyhow::Result<bool> {
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
     wake_locked(app, bot_id, why).await
@@ -706,15 +705,15 @@ pub async fn wake(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<boo
 
 /// [`wake`]，呼叫端已經握著這顆 bot 的鎖。`prompt` 用這個：叫醒與後面建回合在同一次持鎖裡，巡邏不會夾在
 /// 「叫醒檢查過了」與「拿到鎖」之間把剛檢查過的 bot 收掉（那樣 prompt 拿到鎖只會看到 409 `bot has no active run`）。
-pub async fn wake_locked(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Result<bool> {
-    let Some((_, mins)) = read_asleep(&app.db, bot_id).await? else { return Ok(false) };
-    if let Some(run) = db::active_run(&app.db, bot_id).await? {
+pub async fn wake_locked(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::TurnOps), bot_id: &str, why: &str) -> anyhow::Result<bool> {
+    let Some((_, mins)) = read_asleep(app.db(), bot_id).await? else { return Ok(false) };
+    if let Some(run) = db::active_run(app.db(), bot_id).await? {
         // 停在 `stopping`：巡邏停掉了它、`stopped` 還沒補記上（issue #152）。那是睡著的過程，不是「其實還活著」——
         // 標記留著，補記之後照 `--resume` 叫醒；現在拿一次 start 去撞它也只會撞上那筆還沒收掉的 run。
         if run.state == "stopping" {
             return Ok(false);
         }
-        clear_asleep(&app.db, bot_id).await;
+        clear_asleep(app.db(), bot_id).await;
         return Ok(false);
     }
     // `resume_required`：接不回原本那段對話時**不要**默默開一段新的——「只留下 resume」是這個
@@ -723,7 +722,7 @@ pub async fn wake_locked(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Res
     let resumed = StartOpts { resume_native: true, resume_required: true, ..Default::default() };
     match app.start_bot_locked_with(bot_id, resumed).await {
         Ok(run_id) => {
-            clear_asleep(&app.db, bot_id).await;
+            clear_asleep(app.db(), bot_id).await;
             tracing::info!(bot = %bot_id, run = %run_id, why, "woke a sleeping bot with --resume");
             say(
                 app,
@@ -740,7 +739,7 @@ pub async fn wake_locked(app: &Arc<App>, bot_id: &str, why: &str) -> anyhow::Res
             let reason = v.get("resume_reason").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
             match app.start_bot_locked_with(bot_id, StartOpts::default()).await {
                 Ok(run_id) => {
-                    clear_asleep(&app.db, bot_id).await;
+                    clear_asleep(app.db(), bot_id).await;
                     tracing::warn!(bot = %bot_id, run = %run_id, why, reason, "woke a sleeping bot, but its old session could not be resumed");
                     say(
                         app,
@@ -851,11 +850,11 @@ pub fn tick(app: &Arc<App>) {
 
 /// 巡一輪，一顆一顆收。序列而不是並行，理由跟 §6.9 的批次一樣：herdr 的 pane 版面與 per-bot 鎖
 /// 都假設一次一顆。
-async fn sweep(app: &Arc<App>, threshold: i64) {
-    if app.shutdown.is_cancelled() {
+async fn sweep(app: &(impl crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::capabilities::Shutdown + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView + crate::supervisor::ports::TurnOps), threshold: i64) {
+    if app.shutdown().is_cancelled() {
         return;
     }
-    let sup = match supervisor_bot_ids(&app.db).await {
+    let sup = match supervisor_bot_ids(app.db()).await {
         Ok(s) => s,
         Err(e) => {
             // 認不出誰是總管就不能收任何一顆：漏掉的那幾個會被當成一般 worker。
@@ -871,12 +870,12 @@ async fn sweep(app: &Arc<App>, threshold: i64) {
         }
     };
     for c in cands.iter().filter(|c| decide(c, threshold).is_ok()) {
-        if app.shutdown.is_cancelled() {
+        if app.shutdown().is_cancelled() {
             return;
         }
         // 收之前再確認一次：湊完清單到輪到這顆，中間隔了前面每一顆的停機時間（一顆最久十秒），
         // 這段時間裡它可能已經被派了工作。
-        let run = match db::active_run(&app.db, &c.bot_id).await {
+        let run = match db::active_run(app.db(), &c.bot_id).await {
             Ok(Some(run)) => run,
             Ok(None) => continue,
             Err(e) => {

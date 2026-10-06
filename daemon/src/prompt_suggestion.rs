@@ -140,7 +140,7 @@ pub fn on_idle(app: &Arc<App>, run: &db::Run) {
 }
 
 /// 30 秒畫面巡邏的一個 claude run：`plain` 是巡邏已經讀到的純文字畫面。
-pub async fn observe_sweep(app: &Arc<App>, run: &db::Run, plain: &str, client: &crate::herdr::HerdrClient, pane: &str) {
+pub async fn observe_sweep(app: &(impl crate::capabilities::Emit + crate::capabilities::BotStatusEmit), run: &db::Run, plain: &str, client: &crate::herdr::HerdrClient, pane: &str) {
     let events = AppEventSink::new(app);
     if run.state != "running" || run.agent_status != "idle" {
         if forget(&run.id) {

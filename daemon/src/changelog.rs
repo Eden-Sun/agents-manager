@@ -2,7 +2,6 @@
 //! claude 更新提示不說版本：磁碟上的 `--version` 就是即將套用的版本，再切 CHANGELOG 的 from..to 段落。
 //! 抓不到要明講（`found: false` + `error`），UI 不能靜默略過。版本探測不快取（要拿最新的）。
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -10,7 +9,6 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::config::LOCAL_HOST;
-use crate::state::App;
 
 pub const CHANGELOG_URL: &str = "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md";
 /// codex 沒有真正的 CHANGELOG.md，改抓 releases；它在 TUI 當場問更新、新版未進磁碟，`to` 由呼叫端帶。
@@ -186,9 +184,9 @@ pub(crate) fn codex_releases_to_md(json: &str) -> Result<String> {
     Ok(out)
 }
 
-pub(crate) async fn fetch_changelog(app: &Arc<App>, kind: &str) -> Result<String> {
+pub(crate) async fn fetch_changelog(app: &impl crate::changelog::ChangelogState, kind: &str) -> Result<String> {
     {
-        let g = app.changelog.inner.lock().await;
+        let g = app.changelog().inner.lock().await;
         if let Some((at, text)) = g.get(kind) {
             if at.elapsed() < CACHE_TTL {
                 return Ok(text.clone());
@@ -208,12 +206,12 @@ pub(crate) async fn fetch_changelog(app: &Arc<App>, kind: &str) -> Result<String
     }
     let raw = resp.text().await.map_err(|e| anyhow!("讀 CHANGELOG 失敗：{e}"))?;
     let text = if is_codex { codex_releases_to_md(&raw)? } else { raw };
-    app.changelog.inner.lock().await.insert(kind.to_string(), (Instant::now(), text.clone()));
+    app.changelog().inner.lock().await.insert(kind.to_string(), (Instant::now(), text.clone()));
     Ok(text)
 }
 
 /// 失敗都寫進回應不 panic。給了 `to` 就不探磁碟——codex 被問的當下新版還沒裝。
-pub async fn lookup(app: &Arc<App>, host: &str, kind: &str, from: Option<&str>, to: Option<&str>) -> ChangelogReply {
+pub async fn lookup(app: &(impl crate::changelog::ChangelogState + crate::hosts::HostsAccess), host: &str, kind: &str, from: Option<&str>, to: Option<&str>) -> ChangelogReply {
     let mut reply = ChangelogReply {
         kind: kind.to_string(),
         host: host.to_string(),
@@ -359,4 +357,9 @@ mod tests {
         assert_eq!(r.source_url, HERDR_CHANGELOG_URL);
         assert!(lookup(&e.app, "local", "grok", None, Some("1.0.0")).await.error.unwrap().contains("沒有 changelog 來源"));
     }
+}
+
+/// changelog 快取。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait ChangelogState: Send + Sync {
+    fn changelog(&self) -> &crate::changelog::ChangelogCache;
 }

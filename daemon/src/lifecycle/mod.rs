@@ -51,7 +51,7 @@ pub(crate) mod grok_transcript;
 mod grok_hook_tests;
 #[cfg(test)]
 mod suggestion_list_tests;
-mod start;
+pub(crate) mod start;
 mod stop;
 mod deferred_live;
 mod live_apply_debt;
@@ -64,11 +64,11 @@ mod busy_send;
 /// 「輸入框有沒有字」的同一支判斷，給 lifecycle 以外的地方（judge 的卡住畫面）用。
 pub(crate) use delivery::{plain_without_hints, read_styled};
 mod prompt;
-pub(crate) async fn rearm_queued_prompt_restamps(app: &Arc<App>) -> anyhow::Result<()> {
+pub(crate) async fn rearm_queued_prompt_restamps(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit)) -> anyhow::Result<()> {
     prompt::rearm_queued_prompt_restamps(app).await
 }
 mod pane_text;
-mod poller;
+pub(crate) mod poller;
 pub(crate) mod transcript_origin;
 pub(crate) use transcript_origin::starter_origin_kind_at;
 mod screen;
@@ -91,7 +91,7 @@ pub(crate) mod restart_hold;
 mod run_state;
 pub(crate) mod quota_hold;
 pub(crate) mod start_send;
-mod send_now;
+pub(crate) mod send_now;
 /// codex 的 send_now：steer 進進行中的回合（issue #748，預設關的 canary）。
 mod codex_steer;
 mod interruption;
@@ -276,7 +276,7 @@ fn pane_not_ready(e: &anyhow::Error) -> bool {
     s.contains("agent_pane_busy") || s.contains("not an available shell")
 }
 
-async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<RunClient> {
+async fn client_for_run(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess), run: &db::Run) -> LcResult<RunClient> {
     let no_client = || {
         LcError::Upstream(format!(
             "no Herdr session is available for run `{}`",
@@ -284,9 +284,9 @@ async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<RunClient> {
         ))
     };
     // #708：移交出去的專案一個 pane RPC 都不打（keys／text／interrupt／login／搬 tab……都經過這裡）。
-    crate::handoff::refuse(&app.db, &run.bot_id).await?;
-    let host = db::bot_host(&app.db, &run.bot_id).await.map_err(up)?;
-    let fence = app.hosts.fence(&host).await.ok_or_else(no_client)?;
+    crate::handoff::refuse(app.db(), &run.bot_id).await?;
+    let host = db::bot_host(app.db(), &run.bot_id).await.map_err(up)?;
+    let fence = app.hosts().fence(&host).await.ok_or_else(no_client)?;
     // Reuse #594's exact-fence resolver: it verifies the run still names this host before and after
     // session selection and gets the client from the captured HostConn. Do not look it up again by name.
     let client = client_for_run_with_host_fence(app, run, &fence)
@@ -306,24 +306,24 @@ async fn client_for_run(app: &Arc<App>, run: &db::Run) -> LcResult<RunClient> {
 }
 
 async fn client_for_run_with_host_fence(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
     run: &db::Run,
     fence: &crate::hosts::HostFence,
 ) -> LcResult<HerdrClient> {
-    let host = db::bot_host(&app.db, &run.bot_id).await.map_err(up)?;
+    let host = db::bot_host(app.db(), &run.bot_id).await.map_err(up)?;
     let stale = || {
         LcError::conflict(
             "host_superseded",
             json!({"bot_id": run.bot_id, "host": fence.conn().name}),
         )
     };
-    if host != fence.conn().name || !app.hosts.is_current(fence).await {
+    if host != fence.conn().name || !app.hosts().is_current(fence).await {
         return Err(stale());
     }
     let session = if let Some(session) = run.herdr_session.as_deref().filter(|s| !s.is_empty()) {
         session.to_string()
     } else {
-        let bot = db::bot(&app.db, &run.bot_id)
+        let bot = db::bot(app.db(), &run.bot_id)
             .await
             .map_err(up)?
             .ok_or_else(|| LcError::NotFound("bot".into()))?;
@@ -337,8 +337,8 @@ async fn client_for_run_with_host_fence(
             // A configured fence with an unusable run session is the old upstream failure, not
             // evidence that this host generation was superseded. Recheck authority so a stale
             // fence still wins when the client lookup raced a reconnect or repoint.
-            if db::bot_host(&app.db, &run.bot_id).await.map_err(up)? == host
-                && app.hosts.is_current(fence).await
+            if db::bot_host(app.db(), &run.bot_id).await.map_err(up)? == host
+                && app.hosts().is_current(fence).await
             {
                 return Err(LcError::Upstream(format!(
                     "no Herdr session is available for run `{}`",
@@ -348,8 +348,8 @@ async fn client_for_run_with_host_fence(
             return Err(stale());
         }
     };
-    if db::bot_host(&app.db, &run.bot_id).await.map_err(up)? != host
-        || !app.hosts.is_current(fence).await
+    if db::bot_host(app.db(), &run.bot_id).await.map_err(up)? != host
+        || !app.hosts().is_current(fence).await
     {
         return Err(stale());
     }

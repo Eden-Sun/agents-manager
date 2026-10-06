@@ -1,13 +1,13 @@
 //! What a pane needs before an agent starts: hooks, shims, skills, persona and argv.
 
 use super::*;
-use super::start::ports::{SessionProviderPort, ShareSessionRepo, ShimInstallPort};
+use super::start::ports::ShareSessionRepo;
 
 /// The hook / statusLine command line for a *local* bot. The token is deliberately **not**
 /// on the argv (issue #43: `ps` shows every user the full command line, and the statusLine
 /// runs on every redraw); the subcommands read `AM_HOOK_TOKEN` from the pane env instead.
-fn hook_cmd_parts(app: &App, bot: &db::Bot, provider: &str) -> Vec<String> {
-    hook_cmd_parts_for(&app.exe.to_string_lossy(), app.port, &bot.id, provider, &app.data_dir.to_string_lossy())
+fn hook_cmd_parts(app: &(impl crate::capabilities::DataDir + crate::capabilities::ExePath + crate::capabilities::ListenPort), bot: &db::Bot, provider: &str) -> Vec<String> {
+    hook_cmd_parts_for(&app.exe().to_string_lossy(), app.port(), &bot.id, provider, &app.data_dir().to_string_lossy())
 }
 
 /// `--data-dir` 寫死在 argv 裡：pane env 只保護這顆 daemon 新開的 pane，舊 pane 的 env 換不掉，
@@ -607,7 +607,7 @@ pub(super) fn grok_home(env: &Value, home: &str) -> String {
     }
 }
 
-fn install_local_grok_hook(app: &App, env: &Value) -> anyhow::Result<()> {
+fn install_local_grok_hook(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::hosts::HostInstance), env: &Value) -> anyhow::Result<()> {
     super::grok_hook::install_local(app, env).map(|_| ())
 }
 
@@ -766,7 +766,7 @@ async fn install_remote_hook(conn: &HostConn, bot: &db::Bot, instance: Option<&s
 /// prepend covers both. Its own install is best-effort and never blocks the bot on failure: a bot
 /// that cannot get a scheduled `cargo` still gets a working `herdr`, which is what actually gates
 /// starting at all.
-pub(crate) async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Project) -> Option<String> {
+pub(crate) async fn install_shim(app: &(impl crate::capabilities::DataDir + crate::hosts::HostInstance + crate::hosts::HostsAccess + crate::lifecycle::start::ports::ShimInstallPort), bot: &db::Bot, project: &db::Project) -> Option<String> {
     let installed = if project.host == LOCAL_HOST {
         app.bot_dir(&bot.id).and_then(|dir| {
             let bin = app.install_local_herdr_shim(&dir)?;
@@ -776,7 +776,7 @@ pub(crate) async fn install_shim(app: &Arc<App>, bot: &db::Bot, project: &db::Pr
             Ok::<_, anyhow::Error>(bin.to_string_lossy().into_owned())
         })
     } else {
-        match app.hosts.get(&project.host).await {
+        match app.hosts().get(&project.host).await {
             Some(conn) => match remote_bot_dir_for(&conn, &bot.id, app.instance().as_deref()).await {
                 Ok(p) => {
                     let dir = app.install_remote_herdr_shim(&conn, &p.dir).await;
@@ -823,13 +823,13 @@ pub(crate) fn permission_args(kind: &str, auto_approve: bool) -> Vec<String> {
 }
 
 /// Daemon-injected CLI args that go *before* the bot's own; remote projects also upload the hook (§11.4).
-pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
+pub(crate) async fn injected_args(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess), bot: &db::Bot, project: &db::Project, env: &Value) -> anyhow::Result<Vec<String>> {
     if !matches!(bot.kind.as_str(), "claude" | "codex" | "grok" | "agy") {
         anyhow::bail!("unknown bot kind {}", bot.kind);
     }
     // 分享用的受限 bot：權限參數由 `share::cage` 決定（絕不帶 bypass），settings 一律寫（裡面是它的權限規則）。
     // 信任分享（trusted）不算：照一般 bot 的權限參數。
-    let restricted = app.db.caged_workspace(&bot.id).await?;
+    let restricted = app.db().caged_workspace(&bot.id).await?;
     let mut out = if restricted.is_some() { Vec::new() } else { permission_args(&bot.kind, bot.auto_approve != 0) };
     if bot.inject_hooks == 0 && restricted.is_none() {
         return Ok(out);
@@ -841,7 +841,7 @@ pub(crate) async fn injected_args(app: &App, bot: &db::Bot, project: &db::Projec
     // remote project: POSIX sh hook via that host's own herdr (§11.4)
     if project.host != LOCAL_HOST {
         let conn = app
-            .hosts
+            .hosts()
             .get(&project.host)
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown host `{}`", project.host))?;
@@ -1030,19 +1030,19 @@ fn shell_join(parts: &[String]) -> String {
 
 /// Pane env = daemon-injected ∪ identity.env ∪ bot.env (later wins); `$HOME` / `~` expand against that host's home.
 pub(crate) async fn pane_env(
-    app: &Arc<App>,
+    app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>,
     bot: &db::Bot,
     host: &str,
     run_id: &str,
     agent_name: &str,
     shim_dir: Option<&str>,
 ) -> anyhow::Result<Value> {
-    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
+    let fence = app.hosts().fence(host).await.ok_or_else(|| anyhow::anyhow!("unknown host `{host}`"))?;
     pane_env_for_fence(app, bot, host, run_id, agent_name, shim_dir, &fence).await
 }
 
 pub(crate) async fn pane_env_for_fence(
-    app: &Arc<App>,
+    app: &Arc<impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ExePath + crate::capabilities::ListenPort + crate::hosts::HostInstance + crate::hosts::HostsAccess + crate::tools::ToolsEnv + 'static>,
     bot: &db::Bot,
     host: &str,
     run_id: &str,
@@ -1054,7 +1054,7 @@ pub(crate) async fn pane_env_for_fence(
         anyhow::bail!("host fence `{}` does not match `{host}`", fence.conn().name);
     }
     let home = crate::hosts::home_for_fence(fence).await?;
-    if !app.hosts.is_current(fence).await {
+    if !app.hosts().is_current(fence).await {
         anyhow::bail!("host `{host}` changed while resolving HOME");
     }
     let mut env = serde_json::Map::new();
@@ -1067,7 +1067,7 @@ pub(crate) async fn pane_env_for_fence(
     // workspace，問不到才補這個值——它是 workspace 決定**之前**的舊映射，第一次啟動沒有、映射失效時是死的（review core 7）。
     // `pane split` 以母 pane 為基準，本來就同 workspace。
     env.insert("AM_PROJECT_ID".into(), json!(bot.project_id));
-    if let Ok(Some(p)) = crate::db::project(&app.db, &bot.project_id).await {
+    if let Ok(Some(p)) = crate::db::project(app.db(), &bot.project_id).await {
         if let Some(ws) = p.workspace_id.filter(|w| !w.trim().is_empty()) {
             env.insert("AM_WORKSPACE_ID".into(), json!(ws));
         }
@@ -1100,10 +1100,10 @@ pub(crate) async fn pane_env_for_fence(
     env.insert("AM_RUN_ID".into(), json!(run_id));
     // Only local hook commands call home over HTTP; remote panes have no port since v4.3 (§11.4.6).
     if host == LOCAL_HOST {
-        env.insert("AM_PORT".into(), json!(app.port.to_string()));
+        env.insert("AM_PORT".into(), json!(app.port().to_string()));
         // issue #104：cargo shim 只拿到 helper/config 的位置與是否啟用；SSH 密碼永遠不進 pane env。
-        env.insert("AM_DAEMON_EXE".into(), json!(app.exe.to_string_lossy()));
-        env.insert("AM_CONFIG_PATH".into(), json!(app.cfg.path.to_string_lossy()));
+        env.insert("AM_DAEMON_EXE".into(), json!(app.exe().to_string_lossy()));
+        env.insert("AM_CONFIG_PATH".into(), json!(app.cfg().path.to_string_lossy()));
     }
     env.insert("CLAUDE_CODE_CHILD_SESSION".into(), json!(""));
     env.insert("CLAUDECODE".into(), json!(""));
@@ -1129,12 +1129,12 @@ pub(crate) async fn pane_env_for_fence(
         env.insert(k, json!(crate::config::expand_home(&v, &home)));
     }
     reserve_bot_auth_env(&mut env, bot, bot.inject_hooks != 0);
-    let local_data_dir = (host == LOCAL_HOST).then(|| app.data_dir.to_string_lossy().into_owned());
+    let local_data_dir = (host == LOCAL_HOST).then(|| app.data_dir().to_string_lossy().into_owned());
     reserve_instance_env(&mut env, app.instance().as_deref(), local_data_dir.as_deref());
     // §6.5f：給使用者的檔案放這裡（不是 scratchpad）。跟 AM_DATA_DIR 一樣在自訂 env 合併之後才由 daemon 蓋回去：
     // 被改掉的話 bot 寫到別處，使用者在網頁上看不到。遠端主機給**那台上**的目錄，網頁走 ssh 列與下載（`outbox_remote`）。
     let outbox = if host == LOCAL_HOST {
-        crate::outbox::ensure(&app.data_dir, &bot.id).map(|d| d.to_string_lossy().into_owned())
+        crate::outbox::ensure(app.data_dir(), &bot.id).map(|d| d.to_string_lossy().into_owned())
     } else {
         crate::outbox_remote::remote_dir(&home, app.instance().as_deref(), &bot.id)
     };
@@ -1321,7 +1321,7 @@ fn herdr_skill_doc(raw: &str, agent_name: &str) -> String {
 
 /// Install herdr's skill (with `child_agent_rules` on top) into `$CLAUDE_CONFIG_DIR/skills/`.
 /// Per identity; idempotent because the file is in the user's own claude config (backup noise).
-pub(crate) async fn install_herdr_skill(app: &Arc<App>, bot: &db::Bot, project: &db::Project, env: &Value, agent_name: &str) {
+pub(crate) async fn install_herdr_skill(app: &impl crate::hosts::HostsAccess, bot: &db::Bot, project: &db::Project, env: &Value, agent_name: &str) {
     if bot.kind != "claude" {
         return;
     }
@@ -1333,7 +1333,7 @@ pub(crate) async fn install_herdr_skill(app: &Arc<App>, bot: &db::Bot, project: 
     let result = if project.host == LOCAL_HOST {
         install_herdr_skill_local(cfg_dir, agent_name).await
     } else {
-        match app.hosts.get(&project.host).await {
+        match app.hosts().get(&project.host).await {
             Some(conn) => install_herdr_skill_remote(&conn, cfg_dir, agent_name).await,
             None => Err(anyhow::anyhow!("unknown host `{}`", project.host)),
         }
@@ -1450,7 +1450,7 @@ pub(crate) fn persona_args(bot: &db::Bot, agent_name: &str, agent_md: Option<&st
 /// `400 unsupported_value` on every turn (codex `max` on `gpt-5.5`), so it is dropped — but only
 /// when the model's list is readable and lacks it; uncertain paths keep it (dropping a valid one
 /// silently downgrades the agent).
-pub(crate) async fn effort_checked(app: &Arc<App>, bot: &db::Bot, host: &str) -> db::Bot {
+pub(crate) async fn effort_checked(app: &impl crate::lifecycle::start::ports::SessionProviderPort, bot: &db::Bot, host: &str) -> db::Bot {
     let Some(effort) = bot.effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
     let Some(model) = bot.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) else { return bot.clone() };
     // `efforts` does not depend on identity, so no identity is passed.

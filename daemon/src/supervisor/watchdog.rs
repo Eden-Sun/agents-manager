@@ -134,22 +134,22 @@ impl DeadlineCache {
     }
 }
 
-pub fn scheduled_past(app: &Arc<App>, lane: &'static str, at: &str) -> bool {
-    app.watchdog_deadlines
+pub fn scheduled_past(app: &impl crate::supervisor::watchdog::WatchdogDeadlines, lane: &'static str, at: &str) -> bool {
+    app.watchdog_deadlines()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .past_at(lane, at, chrono::Utc::now(), Instant::now())
 }
 
-pub fn remember_schedule(app: &Arc<App>, lane: &'static str, at: &str, delay: Duration) {
-    app.watchdog_deadlines
+pub fn remember_schedule(app: &impl crate::supervisor::watchdog::WatchdogDeadlines, lane: &'static str, at: &str, delay: Duration) {
+    app.watchdog_deadlines()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .schedule(lane, at, Instant::now() + delay);
 }
 
-pub fn clear_schedule(app: &Arc<App>, lane: &'static str) {
-    app.watchdog_deadlines
+pub fn clear_schedule(app: &impl crate::supervisor::watchdog::WatchdogDeadlines, lane: &'static str) {
+    app.watchdog_deadlines()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear(lane);
@@ -462,4 +462,9 @@ mod tests {
             sqlx::query_scalar("SELECT event_key FROM supervisor_inbox WHERE kind='watchdog_gave_up'").fetch_all(&app.db).await.unwrap();
         assert_eq!(keys, vec![format!("watchdog:gave_up:{}", s.watchdog_gave_up_at.unwrap())]);
     }
+}
+
+/// 總管看門狗的到期快取。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait WatchdogDeadlines: Send + Sync {
+    fn watchdog_deadlines(&self) -> &std::sync::Mutex<crate::supervisor::watchdog::DeadlineCache>;
 }

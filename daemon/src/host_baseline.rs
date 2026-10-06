@@ -371,3 +371,8 @@ pub fn evaluate(out: &str) -> Option<Vec<BaselineIssue>> {
 
 #[cfg(test)]
 mod tests;
+
+/// 每台主機的基線報告。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait HostBaselineTable: Send + Sync {
+    fn host_baseline(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, crate::host_baseline::BaselineReport>>;
+}

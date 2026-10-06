@@ -88,13 +88,13 @@ impl HostHooks for App {
 /// 以主機名為鍵、描述「那台機器」的快取全部丟掉（#347）：偵測結果（`app.tools`，含身分與 herdr CLI 版本）、
 /// 額度（`<host>/…`，連重啟快取列）、模型清單（`<host>/<kind>/<identity>`）、這個 daemon 在那台開的 shell 清單。
 /// 移除主機與同名改設定都走這裡；新連線上線後由偵測／探測重新填。
-async fn forget_host_observations(app: &Arc<App>, name: &str) {
+async fn forget_host_observations(app: &(impl crate::api::shell::HostShells + crate::capabilities::Db + crate::capabilities::Emit + crate::github::GithubCache + crate::host_baseline::HostBaselineTable + crate::login_assist::LoginPanes + crate::login_assist::LoginReservations + crate::models::ModelsCache + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::shim_refresh::RemoteShimStale + crate::tools::ToolsTable), name: &str) {
     let prefix = format!("{name}/");
-    app.tools.lock().await.remove(name);
-    app.host_baseline.lock().await.remove(name);
-    app.remote_shim_stale.lock().await.remove(name);
+    app.tools().lock().await.remove(name);
+    app.host_baseline().lock().await.remove(name);
+    app.remote_shim_stale().lock().await.remove(name);
     let removed: Vec<String> = {
-        let mut quotas = app.quotas.lock().await;
+        let mut quotas = app.quotas().lock().await;
         let removed = quotas.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
         quotas.retain(|k, _| !k.starts_with(&prefix));
         removed
@@ -104,12 +104,12 @@ async fn forget_host_observations(app: &Arc<App>, name: &str) {
         // 前端的額度條認 `quota_updated`：不告訴它，那台機器（或換連線前的那條）的數字會掛到下一次輪詢（形狀同 `identity_kind::cleanup_host`）。
         app.emit("quota_updated", json!({"kind": key, "host": name, "quota": null})).await;
     }
-    app.models_cache.lock().await.retain(|k, _| !k.starts_with(&prefix));
-    app.host_shells.lock().await.retain(|s| s.host != name);
+    app.models_cache().lock().await.retain(|k, _| !k.starts_with(&prefix));
+    app.host_shells().lock().await.retain(|s| s.host != name);
     crate::login_assist::forget_host(app, name);
     // GitHub origin 跟 tools／額度一樣是這台機器的觀測（#830）。改指或刪除時清掉，舊連線的掃描不能再寫回來。
-    if let Ok(projects) = crate::db::live_projects(&app.db).await {
-        let mut github = app.github.lock().await;
+    if let Ok(projects) = crate::db::live_projects(app.db()).await {
+        let mut github = app.github().lock().await;
         for project in projects.into_iter().filter(|project| project.host == name) {
             github.remove(&project.id);
         }
@@ -156,7 +156,7 @@ impl MemEnv for App {
 /// `GET /api/mem/processes/pane` (SPEC §15.2). Any pane herdr knows is readable (no registration
 /// check, unlike `shell::read`), but only the last `lines` visible rows as plain text — never keys or input.
 pub async fn pane_preview(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
     host: &str,
     pane_id: &str,
     socket: Option<&str>,

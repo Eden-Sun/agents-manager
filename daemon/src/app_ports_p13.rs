@@ -21,7 +21,7 @@ pub async fn refuses_bot_principal(pool: &sqlx::SqlitePool, bot_id: &str) -> boo
 
 /// Notes the purpose of a created pane on the host.
 pub async fn note_purpose(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     host: &str,
     pane_id: &str,
     bot: &crate::db::Bot,
@@ -75,7 +75,7 @@ pub fn refuse_default_session(bot: &crate::db::Bot) -> LcResult<()> {
 /// Inserts a message into a conversation.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_message(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     conversation_id: &str,
     turn_id: Option<&str>,
     role: &str,
@@ -104,7 +104,7 @@ pub fn take_scheduled_flush_count(bot_id: &str) -> usize {
 }
 
 /// Resolves the local Codex home directory.
-pub async fn codex_home(app: &Arc<App>, bot: &crate::db::Bot) -> Option<std::path::PathBuf> {
+pub async fn codex_home(app: &Arc<impl crate::tools::ToolsEnv + 'static>, bot: &crate::db::Bot) -> Option<std::path::PathBuf> {
     crate::lifecycle::codex_home(app, bot).await
 }
 

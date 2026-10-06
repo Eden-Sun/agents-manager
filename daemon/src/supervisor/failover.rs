@@ -18,11 +18,9 @@
 //! 「這一拍不判斷」。把核准從一顆其實健康的協調者手上搬走，比晚 5 分鐘糟得多——兩個角色都以為
 //! 對方在處理，就沒有人在處理。
 
-use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::state::App;
 use sqlx::SqlitePool;
 
 use super::roles::{self, Role};
@@ -54,7 +52,7 @@ const REASSIGNABLE: &str = "approval_requested";
 /// 照 reason 自己 match 很容易手滑把 `Unknown` 算進去。把核准從一顆其實健康的協調者手上搬走，
 /// 比晚 5 分鐘糟得多——兩個角色都以為對方在處理，就沒有人在處理。
 /// `reason()` 只用來當寫進 payload 的標籤，字串是對外契約（`health::REASON_*`）。
-pub async fn responder_unavailable(app: &Arc<App>) -> Option<&'static str> {
+pub async fn responder_unavailable(app: &(impl crate::capabilities::Db + crate::supervisor::role_faults::RoleFaultTable)) -> Option<&'static str> {
     let state = super::health::responder_state(app).await;
     if !state.is_unavailable() {
         return None;
@@ -192,6 +190,8 @@ pub async fn owner_of(pool: &sqlx::SqlitePool, event_id: &str) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
 
     /// `should_reassign` 的組合表。它**就是**生產路徑用的那一份判斷（`reassign_stale_approvals`
     /// 逐則呼叫它），所以這裡的邊界斷言不再是死碼；真實路徑另有

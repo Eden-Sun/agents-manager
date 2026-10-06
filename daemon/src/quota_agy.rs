@@ -240,8 +240,8 @@ async fn set_logged_in(app: &Arc<App>, host: &str, fence: &crate::hosts::HostFen
     changed
 }
 
-async fn agy_state(app: &Arc<App>, host: &str) -> Option<(bool, Option<bool>)> {
-    app.tools.lock().await.get(host).and_then(|h| h.tools.get("agy")).map(|t| (t.installed, t.logged_in))
+async fn agy_state(app: &impl crate::tools::ToolsTable, host: &str) -> Option<(bool, Option<bool>)> {
+    app.tools().lock().await.get(host).and_then(|h| h.tools.get("agy")).map(|t| (t.installed, t.logged_in))
 }
 
 #[derive(Debug)]

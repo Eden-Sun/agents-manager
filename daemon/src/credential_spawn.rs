@@ -245,13 +245,13 @@ impl Drop for RotationFence {
     }
 }
 
-fn reserve(app: &Arc<App>, bot_id: &str, permit_id: &str, ttl: Duration) -> Result<(), ()> {
-    let mut gate = app.credential_spawn_gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+fn reserve(app: &impl crate::credential_spawn::CredentialSpawnGate, bot_id: &str, permit_id: &str, ttl: Duration) -> Result<(), ()> {
+    let mut gate = app.credential_spawn_gate().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     gate.reserve(bot_id, permit_id, ttl)
 }
 
-fn release(app: &Arc<App>, bot_id: &str, permit_id: &str) -> bool {
-    app.credential_spawn_gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).release(bot_id, permit_id)
+fn release(app: &impl crate::credential_spawn::CredentialSpawnGate, bot_id: &str, permit_id: &str) -> bool {
+    app.credential_spawn_gate().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).release(bot_id, permit_id)
 }
 
 #[derive(Deserialize)]
@@ -482,4 +482,9 @@ mod tests {
         assert_eq!(permit_ttl("120000"), Duration::from_secs(150));
         assert_eq!(permit_ttl("999999999999"), MAX_PERMIT_TTL);
     }
+}
+
+/// 開登入殼的閘門。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait CredentialSpawnGate: Send + Sync {
+    fn credential_spawn_gate(&self) -> &std::sync::Mutex<crate::credential_spawn::Gate>;
 }

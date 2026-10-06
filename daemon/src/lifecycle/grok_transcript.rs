@@ -176,21 +176,21 @@ pub(crate) fn is_slash_command(text: &str) -> bool {
         })
 }
 
-async fn host_sh(app: &Arc<App>, host: &str, script: &str) -> anyhow::Result<String> {
+async fn host_sh(app: &impl crate::hosts::HostsAccess, host: &str, script: &str) -> anyhow::Result<String> {
     super::poller::app_ports_p4obs::host_sh(app, host, script).await
 }
 
-async fn grok_home_for(app: &Arc<App>, bot: &db::Bot, host: &str) -> anyhow::Result<String> {
+async fn grok_home_for(app: &impl crate::hosts::HostsAccess, bot: &db::Bot, host: &str) -> anyhow::Result<String> {
     super::poller::app_ports_p4obs::grok_home_for(app, bot, host).await
 }
 
-async fn read_active(app: &Arc<App>, host: &str, grok_home: &str) -> anyhow::Result<Vec<ActiveSession>> {
+async fn read_active(app: &impl crate::hosts::HostsAccess, host: &str, grok_home: &str) -> anyhow::Result<Vec<ActiveSession>> {
     let out = host_sh(app, host, &format!("cat {}/active_sessions.json 2>/dev/null; :", sh_quote(grok_home))).await?;
     Ok(parse_active(&out))
 }
 
 /// `None`＝這個 session 沒有對話檔（還沒開始、被刪了、不是一般檔）。
-async fn read_history(app: &Arc<App>, host: &str, grok_home: &str, session_id: &str) -> anyhow::Result<Option<String>> {
+async fn read_history(app: &impl crate::hosts::HostsAccess, host: &str, grok_home: &str, session_id: &str) -> anyhow::Result<Option<String>> {
     if !valid_session_id(session_id) {
         return Ok(None);
     }
@@ -206,7 +206,7 @@ async fn read_history(app: &Arc<App>, host: &str, grok_home: &str, session_id: &
 }
 
 /// 這個 run 的 grok session：記過的優先（還開著、或已經找不到更新的）；沒記過就從行程環境找 pane。
-async fn session_for(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, grok_home: &str) -> anyhow::Result<Option<String>> {
+async fn session_for(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess), bot: &db::Bot, run: &db::Run, host: &str, grok_home: &str) -> anyhow::Result<Option<String>> {
     let known = run.native_session_id.clone().filter(|s| valid_session_id(s));
     let active = read_active(app, host, grok_home).await?;
     if let Some(sid) = &known {
@@ -220,18 +220,18 @@ async fn session_for(app: &Arc<App>, bot: &db::Bot, run: &db::Run, host: &str, g
         "SELECT native_session_id FROM runs WHERE state = 'running' AND id <> ? AND native_session_id IS NOT NULL",
     )
     .bind(&run.id)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?
     .into_iter()
     .collect();
     let cwd = match bot.cwd.clone().filter(|c| !c.trim().is_empty()) {
         Some(c) => Some(c),
-        None => sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?").bind(&bot.project_id).fetch_optional(&app.db).await?,
+        None => sqlx::query_scalar::<_, String>("SELECT path FROM projects WHERE id = ?").bind(&bot.project_id).fetch_optional(app.db()).await?,
     };
     let picked = pick_session(&active, &pids, cwd.as_deref(), &taken);
     if let Some(sid) = &picked {
         if known.as_deref() != Some(sid.as_str()) {
-            sqlx::query("UPDATE runs SET native_session_id = ? WHERE id = ?").bind(sid).bind(&run.id).execute(&app.db).await?;
+            sqlx::query("UPDATE runs SET native_session_id = ? WHERE id = ?").bind(sid).bind(&run.id).execute(app.db()).await?;
             tracing::info!(run = %run.id, session = %sid, "grok transcript: bound the pane to its grok session");
         }
     }
@@ -313,20 +313,20 @@ pub(crate) async fn sync_locked(app: &Arc<App>, run_id: &str) -> anyhow::Result<
 }
 
 /// 這個 run 裡還沒綁 native id 的回合，依建立順序，帶著它的使用者訊息。
-async fn unbound_turns(app: &Arc<App>, run_id: &str) -> anyhow::Result<Vec<(db::Turn, Vec<(String, String, String)>)>> {
+async fn unbound_turns(app: &impl crate::capabilities::Db, run_id: &str) -> anyhow::Result<Vec<(db::Turn, Vec<(String, String, String)>)>> {
     let turns: Vec<db::Turn> = sqlx::query_as(
         "SELECT * FROM turns WHERE run_id = ? AND native_turn_id IS NULL AND status IN ('in_flight','completed','completed_fallback')
           ORDER BY created_at, rowid",
     )
     .bind(run_id)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     let mut out = Vec::new();
     for t in turns {
         let users: Vec<(String, String, String)> =
             sqlx::query_as("SELECT id, content, source FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at, rowid")
                 .bind(&t.id)
-                .fetch_all(&app.db)
+                .fetch_all(app.db())
                 .await?;
         out.push((t, users));
     }
@@ -334,7 +334,7 @@ async fn unbound_turns(app: &Arc<App>, run_id: &str) -> anyhow::Result<Vec<(db::
 }
 
 /// 這把鑰匙底下已存的使用者原文。對不上代表 `prompt_index` 被重用。
-async fn recorded_prompt_matches(app: &Arc<App>, sid: &str, key: &str, prompt: &str) -> anyhow::Result<bool> {
+async fn recorded_prompt_matches(app: &impl crate::capabilities::Db, sid: &str, key: &str, prompt: &str) -> anyhow::Result<bool> {
     let stored: Option<String> = sqlx::query_scalar(
         "SELECT m.content FROM messages m JOIN turns t ON t.id = m.turn_id
           WHERE t.native_session_id = ? AND t.native_turn_id = ? AND m.role = 'user'
@@ -342,7 +342,7 @@ async fn recorded_prompt_matches(app: &Arc<App>, sid: &str, key: &str, prompt: &
     )
     .bind(sid)
     .bind(key)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?;
     Ok(stored.as_deref().is_some_and(|s| s.trim() == prompt.trim()))
 }

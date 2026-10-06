@@ -51,7 +51,7 @@ pub async fn close_pane_and_tab(
 }
 
 /// Purges bot directory (local or remote).
-pub async fn purge_bot_dir(app: &Arc<App>, bot_id: &str, host: &str) -> bool {
+pub async fn purge_bot_dir(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess + crate::lifecycle::start::ports::RemoteCleanupPort + crate::shared_host::SharedHostEnv), bot_id: &str, host: &str) -> bool {
     lifecycle::purge_bot_dir(app, bot_id, host).await
 }
 
@@ -102,7 +102,7 @@ pub fn next_free_name(wanted: &str, taken: &dyn Fn(&str) -> bool) -> String {
 
 /// Gets shell client for a host.
 pub async fn client_for(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::HerdrRoutes + crate::hosts::HostsAccess),
     host: &str,
 ) -> Result<(crate::herdr::HerdrClient, String), LcError> {
     crate::api::shell::client_for(app, host).await
