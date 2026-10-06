@@ -1,7 +1,7 @@
 //! P2 config／projection 的窄介面在 daemon 裡組起來的地方（crate 拆分第 3 步）。每個方法逐行委派給原本被呼叫的函式，
-//! 不加任何邏輯，所以行為與錯誤型別不變。介面本身在 `config.rs`（`ConfigChangeHooks`）與 `projection.rs`
+//! 不加任何邏輯，所以行為與錯誤型別不變。介面本身在 `am-config`（`ConfigChangeHooks`）與 `projection.rs`
 //! （`SupervisorOwnedSource`）；這個檔案是 config 唯一還知道 projection／config_audit／supervisor_owned 的地方
-//! （composition root 側的 adapter，不屬於未來的 am-config）。
+//! （composition root 側的 adapter，不屬於 am-config）。
 //!
 //! 模組掛在 `projection.rs`（`#[path]`），不碰 `lib.rs`。
 
@@ -32,14 +32,10 @@ impl ConfigChangeHooks for DaemonConfigHooks {
     }
 }
 
-impl ConfigStore {
-    /// daemon 的入口：帶 [`DaemonConfigHooks`] 載入。放在 adapter 檔而不是 `config.rs`，這樣 config 本身不認識
-    /// projection／config_audit；既有的 `ConfigStore::load(path)` 呼叫端一行不用改。
-    ///
-    /// （am-config 拆成獨立 crate 時，inherent impl 不能留在 daemon：第 4 步改成這裡的一個自由函式。）
-    pub async fn load(path: PathBuf) -> Result<Self> {
-        Self::load_with_hooks(path, Arc::new(DaemonConfigHooks)).await
-    }
+/// daemon 的入口：帶 [`DaemonConfigHooks`] 載入。放在 adapter 檔而不是 `am-config`，這樣 config 本身不認識
+/// projection／config_audit（`am-config` 是獨立 crate，inherent impl 不能留在 daemon，所以是自由函式）。
+pub async fn load_config(path: PathBuf) -> Result<ConfigStore> {
+    ConfigStore::load_with_hooks(path, Arc::new(DaemonConfigHooks)).await
 }
 
 impl SupervisorOwnedSource for SqlitePool {
@@ -100,14 +96,17 @@ mod tests {
         out
     }
 
+    /// 埠 0 不是合法的 ssh 埠：手改進 `[[hosts]]`／`[build.remote]` 要在寫入前就被擋，而不是等到連線才失敗。
+    /// （原在 `config.rs` 的測試；`projection::validate` 在 daemon，所以搬到這裡。）
     #[test]
-    fn config_production_code_does_not_reach_projection_audit_share_or_bot_input() {
-        let found = offenders(
-            "config.rs",
-            include_str!("config.rs"),
-            &["crate::config_audit", "crate::projection", "crate::bot_input", "crate::share", "app_ports_p2"],
-        );
-        assert!(found.is_empty(), "config 要走 ConfigChangeHooks／自己擁有的型別：\n{}", found.join("\n"));
+    fn a_zero_ssh_port_is_refused_before_it_can_be_written() {
+        let mut cfg = ConfigFile::default();
+        cfg.hosts.push(crate::config::HostCfg { shared_session: false, name: "m4p".into(), ssh: "m4p@host".into(), ssh_port: 0, ssh_opts: vec![], herdr_session: "s".into(), remote_path: String::new() });
+        let err = crate::projection::validate(&cfg).unwrap_err().to_string();
+        assert!(err.contains("ssh_port"), "{err}");
+        let mut cfg = ConfigFile::default();
+        cfg.build.remote.ssh_port = 0;
+        assert!(crate::projection::validate(&cfg).unwrap_err().to_string().contains("ssh_port"));
     }
 
     #[test]

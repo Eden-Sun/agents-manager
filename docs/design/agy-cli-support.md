@@ -136,7 +136,7 @@
 
 | # | 整合點 | agy 設計 | 風險／待驗 |
 |---|---|---|---|
-| 1 | kind 列舉：`config.rs KINDS`、`db.rs` CHECK 重建＋升 `SCHEMA_VERSION`、`mission/api.rs`、`reconcile.rs`、`default_session.rs`、`update_watch.rs`、web `BotKind` | 同，kind＝`agy` | 與別人同時升 schema 要合流 |
+| 1 | kind 列舉：`crates/am-config/src/lib.rs KINDS`、`db.rs` CHECK 重建＋升 `SCHEMA_VERSION`、`mission/api.rs`、`reconcile.rs`、`default_session.rs`、`update_watch.rs`、web `BotKind` | 同，kind＝`agy` | 與別人同時升 schema 要合流 |
 | 2 | 權限參數：`setup.rs permission_args` | `auto_approve` → `--dangerously-skip-permissions`；否則不帶。`toolPermission` 留預設 `request-review` | 使用者 settings 若寫 `always-proceed` 會繞過 AG Man 的 auto_approve 開關（只讀、不改） |
 | 3 | model／effort：`model_args`、`efforts_for_kind`、`models.rs`、`ModelPicker` | `--model <slug>`；**effort 已包含在 slug**（`-high`／`-low`…），MVP `efforts_for_kind("agy")=[]`；清單用 `agy models --output-format json`（在 bot 的 HOME 下跑、需登入）。第二階段才加 `--effort` | 清單隨帳號／憑證不同（API key 只有 Gemini）；slug 命名會變；`--model` 解析失敗互動模式只警告→要從橫幅或 statusLine `model.id` 回讀驗證 |
 | 4 | 啟動前置與 hook 注入：`setup.rs`、`lifecycle/*_hook.rs` | 寫（merge）`<HOME>/.gemini/config/hooks.json` 的 **`agents-manager`** 具名 hook：`SessionStart`／`PreInvocation`／`Stop`（`timeout:5`）→ 指令 `agents-managerd hook agy --event <名>`（遠端用 `hook.sh agy <bot> <event>`）；分派靠 env（`AM_BOT_ID` 空就 no-op，仿 grok 的 env 分派腳本，這樣預設身分共用真 HOME 時別的 agy 也不誤報）。hook 一律印 `{}`、exit 0 | ① 形狀（扁平 vs matcher 包）寫錯整檔失效→要有單元測試釘形狀；② 與別的工具共用同一個 `hooks.json`→merge 只動 `agents-manager` 鍵並原子寫；③ hook 同步卡 loop→hook 程式必須亞秒級、失敗也吞掉；④ `SessionStart` 無文件 |

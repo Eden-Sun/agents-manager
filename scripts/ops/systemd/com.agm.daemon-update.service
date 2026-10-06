@@ -7,7 +7,7 @@ Description=AGM daemon-update：正式 daemon 落後最新一顆 ubuntu-ci 綠�
 Type=oneshot
 Environment=PATH=%h/.local/bin:%h/.bun/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # 排程沒有 pane 環境：不指定的話 herdr 找的是 default session 的 socket，daemon-swap 的 `herdr pane list`
-# 會回 server_not_running。指向 daemon 用的 session（`config.rs` 的 DEFAULT_HERDR_SESSION）。
+# 會回 server_not_running。指向 daemon 用的 session（`crates/am-config` 的 DEFAULT_HERDR_SESSION）。
 Environment=HERDR_SESSION=agents-manager
 ExecStart=/bin/bash %h/.config/agents-manager/supervisor/AGM/bin/daemon-update-kick.sh
 StandardOutput=append:%h/.config/agents-manager/supervisor/AGM/daemon-update.systemd.log

@@ -106,6 +106,13 @@ check_daemon() {
     fi
     step "daemon: cargo test -p agents-managerd"
     run_daemon_tests
+    # 從 daemon 抽出去的 crate（crates/*）各自的測試：-p agents-managerd 不含它們。
+    local d
+    for d in crates/*/; do
+        d="${d%/}"
+        step "crate: cargo test -p ${d##*/}"
+        env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${d##*/}" --locked
+    done
 }
 
 check_macos_local() {
@@ -313,6 +320,11 @@ check_changed() {
         fi
         step "daemon: cargo check --all-targets"
         env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo check -p agents-managerd --all-targets --locked
+        # 從 daemon 抽出去的 crate（crates/am-*）自己的測試：改到哪個就跑哪個（不受 CHECK_TESTS 過濾字串影響）。
+        for f in $(printf '%s\n' "$files" | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u); do
+            step "crate: cargo test -p ${f}"
+            env -u AM_MODEL -u AM_EFFORT -u AM_DATA_DIR cargo test -p "${f}" --locked
+        done
         if [ -n "${CHECK_TESTS:-}" ]; then
             if [ "${CHECK_TESTS}" = none ]; then
                 echo "daemon: CHECK_TESTS=none：不跑測試"
