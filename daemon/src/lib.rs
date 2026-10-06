@@ -62,7 +62,7 @@ mod app_ports_p3;
 mod app_ports_p5;
 mod grok_live;
 mod codex_model_migration;
-mod config;
+use am_config as config;
 mod config_audit;
 mod capture;
 mod dangerous_rm;

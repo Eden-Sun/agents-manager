@@ -13,6 +13,7 @@
 
 ## 專案長相
 - `daemon/`：Rust（axum + sqlx/SQLite），唯一狀態源；透過 herdr socket 管 pane，hook 為主、終端快照為備援。
+- `crates/`：從 daemon 抽出去的獨立 crate（crate 拆分專案）：`am-core`／`am-ports`（值型別與窄介面）、`am-config`（設定檔 `ConfigStore`；與 daemon 的連結在 `projection::app_ports_p2`）。這些 crate 的測試由 `scripts/check.sh` 的 `-p <crate>` 另跑。
 - `web/`：React + Vite（SPA，沒有 Next.js）＋ zustand，只做投影；dev 版 `agm:5173` 由 `com.agm.dev-server` 維持（`bun run dev`，代理到真 daemon），mock 用 `VITE_MOCK=1`。
 - 正式 UI 嵌在 daemon 二進位裡：前端改完要 `bun run build` **再** `cargo build --release -p agents-managerd` 才會進到 7788。
 

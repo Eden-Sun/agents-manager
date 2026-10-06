@@ -2614,7 +2614,7 @@ exec /bin/sh -c "$inner"
     #[tokio::test]
     async fn password_file_is_private_and_metadata_does_not_echo_the_secret() {
         let dir = secret_dir();
-        let store = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let store = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let remote = commit_remote(&store, &dir, Some("super-secret"), |_| {}).await.unwrap();
         assert!(password_is_set(&dir, &remote));
         let files = password_files(&dir);
@@ -2632,7 +2632,7 @@ exec /bin/sh -c "$inner"
     #[tokio::test]
     async fn saving_settings_keeps_clears_or_replaces_the_password_as_asked() {
         let dir = secret_dir();
-        let store = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let store = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         std::fs::write(dir.join(PASSWORD_FILE), "legacy-pw\n").unwrap();
         let legacy = store.get().await.build.remote;
         assert_eq!(legacy.password_id, None);
@@ -2679,7 +2679,7 @@ exec /bin/sh -c "$inner"
             for how in [Fault::Fail, Fault::Crash] {
                 let dir = secret_dir();
                 let cfg_path = dir.join("config.toml");
-                let store = crate::config::ConfigStore::load(cfg_path.clone()).await.unwrap();
+                let store = crate::projection::app_ports_p2::load_config(cfg_path.clone()).await.unwrap();
                 store.update(|c| {
                     c.build.remote.host = "old-host".into();
                     Ok(())
@@ -2696,7 +2696,7 @@ exec /bin/sh -c "$inner"
                 let why = format!("{step}/{how:?}: {res:?}");
 
                 // 重開 daemon：只看磁碟上的東西。
-                let fresh = crate::config::ConfigStore::load(cfg_path.clone()).await.unwrap().get().await.build.remote;
+                let fresh = crate::projection::app_ports_p2::load_config(cfg_path.clone()).await.unwrap().get().await.build.remote;
                 let pair = (fresh.host.clone(), secret(&dir, &fresh).unwrap());
                 if step == "cleanup" {
                     assert_eq!(pair, ("new-host".to_string(), Some("new-pw".to_string())), "已經提交：{why}");
@@ -2711,7 +2711,7 @@ exec /bin/sh -c "$inner"
                 }
 
                 // 下一次成功的儲存把殘骸（沒人指到的暫存檔、舊檔）收掉。
-                let store = crate::config::ConfigStore::load(cfg_path.clone()).await.unwrap();
+                let store = crate::projection::app_ports_p2::load_config(cfg_path.clone()).await.unwrap();
                 let r = commit_remote(&store, &dir, Some("newer-pw"), |r| r.host = "newer-host".into()).await.unwrap();
                 assert_eq!(secret(&dir, &r).unwrap().as_deref(), Some("newer-pw"), "{why}");
                 let id = r.password_id.clone().unwrap();

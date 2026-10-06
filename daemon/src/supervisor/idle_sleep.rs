@@ -1717,7 +1717,7 @@ mod tests {
     async fn app_with_dead_herdr(env: &crate::testing::Env) -> Arc<App> {
         let data = env.dir.join("data");
         let pool = crate::app_ports_p1::open(&data.join("db.sqlite3")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(data.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(data.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(data.join("no-such-herdr.sock"));
         let app = App::new(pool, client.clone(), client, cfg, data.clone(), data.join("agents-managerd"), 7799, "test-token".into(), "test".into(), false);
         app.connected.store(true, std::sync::atomic::Ordering::SeqCst);

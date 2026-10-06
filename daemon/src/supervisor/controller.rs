@@ -3112,7 +3112,7 @@ mod conflict_fuse_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-conflict-fuse");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
         store::get_or_init(&app.db).await.unwrap();
@@ -3309,7 +3309,7 @@ mod mission_quota_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-mission-quota");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
         store::get_or_init(&app.db).await.unwrap();
@@ -3793,7 +3793,7 @@ mod no_grace_period_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-no-grace");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
         store::get_or_init(&app.db).await.unwrap();
@@ -3883,7 +3883,7 @@ mod window_unreadable_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-window-unreadable");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
         store::get_or_init(&app.db).await.unwrap();
@@ -3979,7 +3979,7 @@ mod queue_dispatch_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-queue-dispatch");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
         store::get_or_init(&app.db).await.unwrap();
@@ -4386,7 +4386,7 @@ mod quota_restart_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-quota-restart");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
         store::get_or_init(&app.db).await.unwrap();
@@ -4902,7 +4902,7 @@ mod late_reply_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-late-reply");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
         store::get_or_init(&app.db).await.unwrap();
@@ -5056,7 +5056,7 @@ mod turn_done_quota_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-turn-done-quota");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
         store::get_or_init(&app.db).await.unwrap();

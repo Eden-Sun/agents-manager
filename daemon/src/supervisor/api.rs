@@ -1670,7 +1670,7 @@ mod persona_sync_tests {
             "[[projects]]\nid = '{pid}'\npath = '{}'\nlabel = 'AGM'\n[[projects.bots]]\nid = '{bid}'\nname = 'AGM'\nkind = 'claude'\npersona = 'existing custom persona'\n", dir.display()
         )).unwrap();
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         crate::projection::project_config(&cfg, &db).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"),
@@ -1711,7 +1711,7 @@ mod approval_decision_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-approval");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
         store::get_or_init(&app.db).await.unwrap();
@@ -2605,7 +2605,7 @@ mod review_boundary_tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-review-boundary");
         let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
-        let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"),
                            7799, "test".into(), "test".into(), false);

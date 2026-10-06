@@ -29,7 +29,7 @@ while IFS= read -r f; do
         docs/SPEC.md) specs=1 ;;
         docs/* | *.md | LICENSE | .gitignore | .github/ISSUE_TEMPLATE/*) ;;
         web/*) web=1 ;;
-        daemon/* | Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/*) daemon=1 ;;
+        daemon/* | crates/* | Cargo.toml | Cargo.lock | rust-toolchain* | .cargo/*) daemon=1 ;;
         # agm.py 與 herdr shim 等腳本由 daemon include_str! 編進去，改了兩邊都要看。
         scripts/agm.py | scripts/agm_test.py) ops=1; daemon=1 ;;
         # chatgpt-consult.sh 同時是 scripts/ 底下的 shell：變數寫法 lint 與 canary 在 ops。
