@@ -19,7 +19,6 @@
 
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
-use tokio::sync::OnceCell;
 
 /// `sqlite_master` 裡一個由程式建出來的物件（表、索引、trigger、view）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,18 +60,27 @@ pub(super) async fn read_objects(pool: &SqlitePool) -> Result<Vec<SchemaObject>>
     Ok(out)
 }
 
-/// 標準答案：全新的 in-memory DB 跑完 `db::apply_migrations` 之後的樣子。一個行程只算一次。
-async fn expected() -> Result<&'static [SchemaObject]> {
-    static EXPECTED: OnceCell<Vec<SchemaObject>> = OnceCell::const_new();
-    let objects = EXPECTED
-        .get_or_try_init(|| async {
-            let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await?;
-            super::apply_migrations(&pool).await.context("在全新的 in-memory DB 上跑 migrate（schema 的標準答案）")?;
-            let objects = read_objects(&pool).await;
-            pool.close().await;
-            objects
-        })
-        .await?;
+/// 沿用舊名的入口（測試與過渡期的呼叫端）：feature 清單取 composition 層那份。
+#[allow(dead_code)]
+pub(super) async fn check_drift(pool: &SqlitePool) -> Result<()> {
+    check_drift_with(pool, super::composition_features()).await
+}
+
+/// 標準答案：全新的 in-memory DB 跑完 `db::apply_migrations_with` 之後的樣子。同一份 feature 清單（以名字串起來當鍵）一個行程只算一次：
+/// 正式行程只有 composition 層那一份，所以跟以前「整個行程只算一次」一樣；測試拿別的清單開庫時各有各的標準答案。
+async fn expected(features: super::FeatureMigrations) -> Result<&'static [SchemaObject]> {
+    static EXPECTED: tokio::sync::Mutex<Vec<(String, &'static [SchemaObject])>> = tokio::sync::Mutex::const_new(Vec::new());
+    let key = features.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(",");
+    let mut cache = EXPECTED.lock().await;
+    if let Some((_, objects)) = cache.iter().find(|(k, _)| *k == key) {
+        return Ok(objects);
+    }
+    let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await?;
+    super::apply_migrations_with(&pool, features).await.context("在全新的 in-memory DB 上跑 migrate（schema 的標準答案）")?;
+    let objects = read_objects(&pool).await;
+    pool.close().await;
+    let objects: &'static [SchemaObject] = Box::leak(objects?.into_boxed_slice());
+    cache.push((key, objects));
     Ok(objects)
 }
 
@@ -85,8 +93,8 @@ async fn expected() -> Result<&'static [SchemaObject]> {
 ///   改了定義卻沒寫升級步驟，舊 DB 就一直是舊的。
 ///
 /// 標準答案裡沒有的（已移除功能留下的 `teams`、`team_*`，測試自己裝的故障 trigger）不管。
-pub(super) async fn check_drift(pool: &SqlitePool) -> Result<()> {
-    let problems = drift(expected().await?, &read_objects(pool).await?);
+pub(super) async fn check_drift_with(pool: &SqlitePool, features: super::FeatureMigrations) -> Result<()> {
+    let problems = drift(expected(features).await?, &read_objects(pool).await?);
     anyhow::ensure!(problems.is_empty(), "schema drift：{}", problems.join("\n"));
     Ok(())
 }
@@ -332,7 +340,7 @@ mod tests {
     /// `SCHEMA_HISTORY` 最後加一行，不要改既有那一行。
     #[tokio::test]
     async fn the_schema_migrate_builds_is_pinned_to_schema_version() {
-        let objects = expected().await.unwrap();
+        let objects = expected(super::super::composition_features()).await.unwrap();
         let fp = fingerprint(objects);
         if let Err(e) = check_pinned(&fp, SCHEMA_HISTORY) {
             panic!("{e}\n\n現在的 schema（全新 DB）：\n{}", dump(objects));
