@@ -15,6 +15,8 @@ pub trait TurnControl: Send + Sync {
         request: PromptRequest,
     ) -> impl Future<Output = Result<TurnId, TurnError>> + Send + '_;
 
+    fn compact_bot(&self, bot: BotId) -> impl Future<Output = Result<(), TurnError>> + Send + '_;
+
     fn interrupt(
         &self,
         bot: BotId,
