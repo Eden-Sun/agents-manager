@@ -12,6 +12,7 @@
 //! * 對帳那頭只有「這一輪自己記下 exited」才算遺失（`AlreadyEnded`＝別的路先收了，不是 herdr 掉的）；補開丟到背景一顆一顆做，不卡對帳。
 //! * 退避：同一顆 bot 30 分鐘內最多重開 3 次；herdr 一直掛時只通知、不再開（避免無限重開）。
 //! * 每次遺失都推一則 supervisor inbox `bot_lost`（巡檢收、叫醒），帶 `outcome`：`restarted`／`failed`／`backoff`，不等探針。
+use crate::events::ports::{HostSidePort, SupervisorRepo, TurnCommands};
 use crate::db;
 use crate::state::{App, AutostartHostStatus};
 use serde_json::json;
@@ -109,7 +110,7 @@ pub(crate) async fn revive(app: &Arc<App>, host: &str, lost: Vec<Lost>) {
     if !boot_pass_done {
         return;
     }
-    match crate::herdr_maintenance::active(app).await {
+    match app.herdr_maintenance_active().await {
         Ok(None) => {}
         Ok(Some(_)) => return,
         Err(e) => {
@@ -147,7 +148,7 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         let (start_app, bot_id) = (app.clone(), bot.id.clone());
         match tokio::spawn(async move {
             let _guard = guard;
-            crate::lifecycle::start_bot_locked_with(&start_app, &bot_id, crate::lifecycle::StartOpts::default()).await
+            start_app.start_bot_locked_with(&bot_id, crate::lifecycle::StartOpts::default()).await
         })
         .await
         {
@@ -160,7 +161,7 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
         "bot_id": bot.id, "name": bot.name, "host": host, "lost_run_id": l.run_id,
         "reason": "agent_not_found_during_reconcile", "outcome": outcome, "error": error,
     });
-    if let Err(e) = crate::supervisor::store::push_inbox(&app.db, &format!("bot_lost:{}:{}", bot.id, l.run_id), "bot_lost", None, Some(&bot.id), None, &payload).await {
+    if let Err(e) = app.db.push_inbox(&format!("bot_lost:{}:{}", bot.id, l.run_id), "bot_lost", None, Some(&bot.id), None, &payload).await {
         tracing::warn!(bot = %bot.name, error = ?e, "autostart revive: could not write the bot_lost inbox event");
     }
     Ok(())

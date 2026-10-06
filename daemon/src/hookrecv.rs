@@ -1,5 +1,6 @@
 //! Hook receiver: `POST /hook/{provider}` plus Turn matching (SPEC §6.7) and spool replay (§4.4.6).
 
+use crate::events::ports::{ApiPort, HandoffRepo, MessageTxOps, ProviderPort, QuotaCommands, TurnCommands, TurnConnOps, TurnFenceOps};
 use crate::ask_answers;
 use crate::db;
 use crate::config::{valid_id, ID_RE};
@@ -58,7 +59,7 @@ pub async fn receive(
         Ok(Some(b)) => b,
         _ => return unauthorized(),
     };
-    if token.is_empty() || !crate::api::ct_eq(token, &bot.hook_token) {
+    if token.is_empty() || !app.ct_eq(token, &bot.hook_token) {
         return unauthorized();
     }
     // A3: a deleted bot's surviving agent must not be able to create turns / messages.
@@ -170,7 +171,7 @@ async fn relay_backfill(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &s
     let _ = crate::agent_relay::claim(&host, to_agent, &content);
     let message: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&msg_id).fetch_one(&app.db).await?;
     tracing::info!(from = %from_bot, to = %to_agent, msg = %msg_id, "relay announce arrived after the echo; attributed it");
-    lifecycle::emit_message_added(app, &to_bot, message).await;
+    app.emit_message_added(&to_bot, message).await;
     Ok(())
 }
 
@@ -772,7 +773,7 @@ async fn store_resent_prompt_tx(
     }
     tracing::info!(turn = %turn.id, "external turn: the Stop proves a person typed this prompt again; storing it");
     let from = relay_source(app, run, text).await;
-    Ok(Some(lifecycle::insert_message_relayed_tx(tx, conv, Some(&turn.id), "user", text, "hook", false, None, from.as_deref()).await?))
+    Ok(Some(tx.insert_message_relayed_tx(conv, Some(&turn.id), "user", text, "hook", false, None, from.as_deref()).await?))
 }
 
 /// [`store_resent_prompt_tx`] 給「回合已被備援收掉、遲到的 Stop 才到」的路徑：自己開交易、補完就發事件。
@@ -786,7 +787,7 @@ async fn store_resent_prompt(app: &Arc<App>, bot_id: &str, conv: &str, turn: &db
     let added = store_resent_prompt_tx(app, &mut tx, conv, turn, run, &text).await?;
     tx.commit().await?;
     if let Some(m) = added {
-        lifecycle::emit_message_added(app, bot_id, m).await;
+        app.emit_message_added(bot_id, m).await;
     }
     Ok(())
 }
@@ -948,7 +949,7 @@ async fn fill_or_drop_late_hook(
         .ok_or_else(|| anyhow::anyhow!("conversation {} has no owner", turn.conversation_id))?;
     // 這一筆是備援關掉的（`completed_fallback`），遲到的 hook 把回覆補上才升級成 `completed`。
     // 以前這句沒有 guard（`WHERE id=?`）：中間若有別的路徑動過它，這裡會無聲蓋過去（issue #68）。
-    if lifecycle::turn_controller::set_status_on(&mut tx, &turn.id, "completed_fallback", "completed", "遲到的 hook 補上回覆").await?
+    if tx.set_status_on(&turn.id, "completed_fallback", "completed", "遲到的 hook 補上回覆").await?
         != lifecycle::turn_controller::Outcome::Applied
     {
         tx.commit().await?;
@@ -956,11 +957,11 @@ async fn fill_or_drop_late_hook(
     }
     stamp_native_ids(&mut tx, &turn.id, session_id, native_turn_id).await?;
     let message =
-        lifecycle::insert_message_tx(&mut tx, &turn.conversation_id, Some(&turn.id), "assistant", body_text, "hook", false, None).await?;
+        tx.insert_message_tx(&turn.conversation_id, Some(&turn.id), "assistant", body_text, "hook", false, None).await?;
     tx.commit().await?;
-    lifecycle::emit_message_added(app, &bot_id, message).await;
+    app.emit_message_added(&bot_id, message).await;
     tracing::info!(turn = %turn.id, "late hook filled a fallback-closed turn that had no reply");
-    lifecycle::emit_turn(app, &turn.id).await;
+    app.emit_turn(&turn.id).await;
     Ok(())
 }
 
@@ -987,7 +988,7 @@ async fn replace_fallback_reply(
         return Ok(());
     };
     let latest = latest.clone();
-    if lifecycle::turn_controller::set_status_on(&mut tx, &turn.id, "completed_fallback", "completed", "遲到的 hook 以原文取代備援回覆").await?
+    if tx.set_status_on(&turn.id, "completed_fallback", "completed", "遲到的 hook 以原文取代備援回覆").await?
         != lifecycle::turn_controller::Outcome::Applied
     {
         tx.commit().await?;
@@ -1009,9 +1010,9 @@ async fn replace_fallback_reply(
     tracing::info!(turn = %turn.id, msg = %latest, "late hook replaced the terminal-fallback reply with the transcript's");
     if let Some(bot_id) = bot_id {
         // 同一個 id 再推一次：前端遇到內容不同的同 id 訊息會換掉（`store/lists.ts` 的 `upsertSorted`）。
-        lifecycle::emit_message_added(app, &bot_id, message).await;
+        app.emit_message_added(&bot_id, message).await;
     }
-    lifecycle::emit_turn(app, &turn.id).await;
+    app.emit_turn(&turn.id).await;
     Ok(())
 }
 
@@ -1044,17 +1045,17 @@ pub(crate) async fn consume_resume_session(
         return Ok(());
     }
     if mismatch {
-        lifecycle::context_lost(app, bot, "resume_mismatch", Some(expected))
+        app.context_lost(bot, "resume_mismatch", Some(expected))
             .await
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     }
     if !mismatch {
-        lifecycle::retire_context_lost(app, &bot.id, expected).await;
+        app.retire_context_lost(&bot.id, expected).await;
     }
     // 閘門在等的就是這一則：排著的 prompt 現在可以送了（對不上的話，上面那則說明已經先進聊天室）。
-    lifecycle::schedule_flush_queued(app, &bot.id);
+    app.schedule_flush_queued(&bot.id);
     // 續行提示從接回驗過、畫面閒置起算 10 秒；對不上的就地取消（#424）。
-    lifecycle::poke_resume_nudge(app, &bot.id);
+    app.poke_resume_nudge(&bot.id);
     Ok(())
 }
 
@@ -1158,7 +1159,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     }
     // #708：移交出去的專案，hook 的事歸接手的 daemon；記一行就丟（spool 重播、spawn hint 也一樣）。
     // 讀不到＝`projects` 那一列讀不到：往下走，後面讀主機的那幾步照它們自己的規則 fail closed（欠著的撞限、收件匣重試）。
-    match crate::handoff::bot_handed_off_to(&app.db, &bot.id).await {
+    match app.db.bot_handed_off_to(&bot.id).await {
         Ok(None) => {}
         Ok(Some(to)) => {
             tracing::info!(bot = %bot.name, provider = %body.provider, handed_off_to = %to, "hook for a handed-off project; ignored");
@@ -1189,7 +1190,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     let mut admitted = None;
     if let Some(r) = &run {
         let ev = crate::lifecycle::fence::EventIdentity { run_id: body.run_id.as_deref(), session_id: hook_session_id(&body.payload) };
-        let owner = crate::lifecycle::fence::classify(&app.db, &bot.id, r, ev).await;
+        let owner = app.db.classify_event_owner(&bot.id, r, ev).await;
         if !owner.may_mutate() {
             let (prior_run_id, why) = match &owner {
                 crate::lifecycle::fence::Ownership::Stale { prior_run_id, why } => (prior_run_id.as_str(), *why),
@@ -1229,9 +1230,9 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     if provider == "claude" && admitted.is_some() {
         if let HookKind::TurnComplete { assistant: Some(a), .. } = &kind {
             if crate::login_prompt::is_not_logged_in_line(a) {
-                crate::login_prompt::on_auth_failure(app, &bot).await;
+                app.login_on_auth_failure(&bot).await;
             } else if !a.trim().is_empty() {
-                crate::login_prompt::on_turn_ok(app, &bot).await;
+                app.login_on_turn_ok(&bot).await;
             }
         }
     }
@@ -1239,20 +1240,20 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
     // Codex's usage-reset hint is a TUI row, not in the payload; give the pane a moment to render it.
     if provider == "codex" && matches!(&kind, HookKind::TurnComplete { .. }) {
         if let Some(r) = run.as_ref() {
-            lifecycle::schedule_codex_notice_capture(app, &bot.id, &r.id);
+            app.schedule_codex_notice_capture(&bot.id, &r.id);
         }
         // 真的答完一回合＝帳號又能跑了，不必等橫幅寫的重置時間。
         if matches!(&kind, HookKind::TurnComplete { assistant: Some(a), .. } if !a.trim().is_empty()) {
-            crate::quota::clear_limit_hit_for_bot(app, &bot).await;
+            app.clear_limit_hit_for_bot(&bot).await;
         }
     }
 
     // 上一次打斷欠著的收尾先補（#147）：鍵已經生效、DB 那一半沒寫成的那一筆，要在這一則被對到任何回合之前收掉。
     // 寫不進去就讓這一則失敗、由收件匣重試，順序不亂。
     if matches!(kind, HookKind::TurnComplete { .. } | HookKind::TurnFailed { .. }) {
-        lifecycle::settle_interruption(app, &bot.id, lifecycle::InterruptEvidence::Nothing).await?;
+        app.settle_interruption(&bot.id, lifecycle::InterruptEvidence::Nothing).await?;
         // 送達結果欠著的同理（#149）：herdr 拒收、還沒收成 failed 的那一筆不能被這一則的回覆認領。
-        lifecycle::settle_owed_deliveries(app, &bot.id).await?;
+        app.settle_owed_deliveries(&bot.id).await?;
     }
 
     match kind {
@@ -1269,13 +1270,13 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 的話，Esc 之後馬上開的新回合撞額度也會被吞掉（#117）。
             if reason == FailureReason::Interrupted {
                 // 回聲證明打斷的鍵生效了：還在等證據的那一筆在這裡收（#147）。
-                lifecycle::settle_interruption(app, &bot.id, lifecycle::InterruptEvidence::Echo).await?;
+                app.settle_interruption(&bot.id, lifecycle::InterruptEvidence::Echo).await?;
                 tracing::info!(bot = %bot.name, ?reason, "StopFailure 是使用者中斷的回聲：不算失敗");
                 return Ok(());
             }
             // 登入失效：記下這個身分要重新登入、立刻重探它（網頁會跳提示，`login_prompt.rs`）。同一則重送只記一次。
             if reason == FailureReason::Auth && provider == "claude" && admitted.is_some() {
-                crate::login_prompt::on_auth_failure(app, &bot).await;
+                app.login_on_auth_failure(&bot).await;
             }
             // 同一筆送兩次（重試、spool 重播）：已經收過的那一回合。
             let seen = match (&session_id, &turn_id) {
@@ -1299,8 +1300,8 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             if admitted.is_some() && seen.is_none() {
                 if let Some(d) = detail.as_deref().filter(|d| crate::turn_error::is_quota_exhaustion(d)) {
                     match bot.kind.as_str() {
-                        "claude" => crate::turn_error::mark_claude_limit_hit(app, &bot, d).await?,
-                        "agy" => crate::turn_error::mark_agy_limit_hit(app, &bot, d).await?,
+                        "claude" => app.mark_claude_limit_hit(&bot, d).await?,
+                        "agy" => app.mark_agy_limit_hit(&bot, d).await?,
                         _ => {}
                     }
                 }
@@ -1316,7 +1317,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
                         .map(|t| t.with_timezone(&chrono::Utc)),
                 };
-                if lifecycle::settle_interrupt_echo(app, &bot.id, &r.id, &ev, in_flight.as_ref()).await? {
+                if app.settle_interrupt_echo(&bot.id, &r.id, &ev, in_flight.as_ref()).await? {
                     tracing::info!(bot = %bot.name, ?reason, "StopFailure 是被中斷那一回合的回聲：不算失敗");
                     return Ok(());
                 }
@@ -1352,7 +1353,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             // 收件匣的重試才不會被去重擋掉、留下一筆沒有原因的失敗回合。
             let mut tx = app.db.begin().await?;
             let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
-            let claimed = lifecycle::turn_controller::fail_with_native_evidence(&mut tx, &t.id, admitted, native).await?;
+            let claimed = tx.fail_with_native_evidence(&t.id, admitted, native).await?;
             if claimed != lifecycle::turn_controller::Outcome::Applied {
                 tracing::info!(turn = %t.id, ?claimed, "StopFailure 來晚了：這一筆已經被別的路徑收掉，不重複收尾");
                 return Ok(());
@@ -1361,11 +1362,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 Some(d) => format!("這一回合失敗收尾（{}）：{d}", reason.label()),
                 None => format!("這一回合失敗收尾（{}）：agent 沒有給原因。", reason.label()),
             };
-            let message = lifecycle::insert_message_tx(&mut tx, &conv, Some(&t.id), "system", &note, "hook", false, None).await?;
+            let message = tx.insert_message_tx(&conv, Some(&t.id), "system", &note, "hook", false, None).await?;
             tx.commit().await?;
             // 撞限在上面（進這一支之前）就記好了：畫面那條路（`turn_error::capture`）要等讀 pane 才記得到，常常比 flush 晚。
-            lifecycle::emit_message_added(app, &bot.id, message).await;
-            lifecycle::emit_turn(app, &t.id).await;
+            app.emit_message_added(&bot.id, message).await;
+            app.emit_turn(&t.id).await;
             tracing::warn!(bot = %bot.name, turn = %t.id, ?reason, "StopFailure：回合收成失敗");
             Ok(())
         }
@@ -1426,7 +1427,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 }
                 // #750：server fallback 後實際在跑的模型（statusLine 是權威），校正 runtime_model、不碰 bots.model。
                 if provider == "claude" {
-                    crate::claude_live::adopt_statusline_model(app, r, &body.payload).await;
+                    app.adopt_statusline_model(r, &body.payload).await;
                 }
             }
             // Always keyed under the bot's **host**: remote limits must not land on the local row (SPEC §14).
@@ -1434,11 +1435,11 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 if let Some(q) = crate::quota::quota_from_statusline(&body.payload, Some(idn)) {
                     // 對 claude 共用預設帳號的身分（沒設 CLAUDE_CONFIG_DIR）寫裸 `claude`：另開 `claude:cc0` 會少掉
                     // `/usage` 探測的 Fable 週窗。規則跟 codex 同一支（`quota::quota_base_for_host`）。
-                    let key = crate::quota::quota_base_for_host(app, &host, "claude", Some(idn)).await;
-                    crate::quota::set(app, &host, &key, q).await;
+                    let key = app.quota_base_for_host(&host, "claude", Some(idn)).await;
+                    app.set_quota(&host, &key, q).await;
                 }
             } else if let Some(q) = crate::quota::quota_from_statusline(&body.payload, None) {
-                crate::quota::set(app, &host, "claude", q).await;
+                app.set_quota(&host, "claude", q).await;
             }
             if let (Some(r), Some(sid)) = (&run, body.payload.get("session_id").and_then(|v| v.as_str())) {
                 let _ = sqlx::query("UPDATE runs SET native_session_id = COALESCE(native_session_id, ?) WHERE id = ?")
@@ -1620,7 +1621,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                 // 收件匣重試時才不會被去重擋掉、留下一筆沒有回覆的 completed 回合。
                 let mut tx = app.db.begin().await?;
                 let native = native_evidence(app, &bot.id, session_id.as_deref(), turn_id.as_deref()).await?;
-                let claimed = lifecycle::turn_controller::complete_with_native_evidence(&mut tx, &t.id, admitted, native).await?;
+                let claimed = tx.complete_with_native_evidence(&t.id, admitted, native).await?;
                 match &claimed {
                     lifecycle::turn_controller::Outcome::Applied => {}
                     // 不是圍籬放行那一代的回合：一個字都不掛上去。
@@ -1652,7 +1653,7 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                         if hook_user_is_new(&have, u) && !repeats_answered_prompt(&mut tx, &conv, &t.id, u).await? {
                             let from = relay_source(app, run.as_ref(), u).await;
                             added.push(
-                                lifecycle::insert_message_relayed_tx(&mut tx, &conv, Some(&t.id), "user", u, "hook", false, None, from.as_deref())
+                                tx.insert_message_relayed_tx(&conv, Some(&t.id), "user", u, "hook", false, None, from.as_deref())
                                     .await?,
                             );
                         } else {
@@ -1664,13 +1665,13 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
                     }
                 }
                 if !body_text.is_empty() {
-                    added.push(lifecycle::insert_message_tx(&mut tx, &conv, Some(&t.id), "assistant", &body_text, "hook", false, None).await?);
+                    added.push(tx.insert_message_tx(&conv, Some(&t.id), "assistant", &body_text, "hook", false, None).await?);
                 }
                 tx.commit().await?;
                 for m in added {
-                    lifecycle::emit_message_added(app, &bot.id, m).await;
+                    app.emit_message_added(&bot.id, m).await;
                 }
-                lifecycle::emit_turn(app, &t.id).await;
+                app.emit_turn(&t.id).await;
                 return Ok(());
             }
 
@@ -1720,17 +1721,17 @@ pub async fn process_locked(app: &Arc<App>, body: &HookBody) -> Result<()> {
             if let Some(u) = user.filter(|s| !s.is_empty()) {
                 let from = relay_source(app, run.as_ref(), &u).await;
                 added.push(
-                    lifecycle::insert_message_relayed_tx(&mut tx, &conv, Some(&tid), "user", &u, "hook", false, None, from.as_deref()).await?,
+                    tx.insert_message_relayed_tx(&conv, Some(&tid), "user", &u, "hook", false, None, from.as_deref()).await?,
                 );
             }
             if !body_text.is_empty() {
-                added.push(lifecycle::insert_message_tx(&mut tx, &conv, Some(&tid), "assistant", &body_text, "hook", false, None).await?);
+                added.push(tx.insert_message_tx(&conv, Some(&tid), "assistant", &body_text, "hook", false, None).await?);
             }
             tx.commit().await?;
             for m in added {
-                lifecycle::emit_message_added(app, &bot.id, m).await;
+                app.emit_message_added(&bot.id, m).await;
             }
-            lifecycle::emit_turn(app, &tid).await;
+            app.emit_turn(&tid).await;
             Ok(())
         }
     }

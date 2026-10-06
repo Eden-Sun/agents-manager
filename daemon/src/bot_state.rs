@@ -1,5 +1,6 @@
 //! Principal-scoped view of `/api/state` for Bot callers.
 
+use crate::events::ports::{ApiPort};
 use crate::{lifecycle::LcError, state::App};
 use serde_json::Value;
 use std::{collections::HashSet, sync::Arc};
@@ -22,7 +23,7 @@ pub async fn view_for_bot(app: &Arc<App>, caller: &str) -> Result<Value, LcError
     .into_iter()
     .collect();
 
-    let mut state = crate::api::state_json(app).await?;
+    let mut state = app.state_json().await?;
     let Some(object) = state.as_object_mut() else {
         return Err(LcError::Upstream("state snapshot is not an object".into()));
     };

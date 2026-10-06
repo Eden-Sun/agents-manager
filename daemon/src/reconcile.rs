@@ -1,6 +1,7 @@
 //! Reconciliation (SPEC §6.5, §11.3.4). Always scoped to **one host**: pane / workspace /
 //! agent ids are only unique within a host's herdr session.
 
+use crate::events::ports::{BotOpsPort, BotOpsRepo, HandoffRepo, HostSidePort, IngressCommands, TurnCommands};
 use crate::config::LOCAL_HOST;
 use crate::db;
 use crate::state::{App, AutostartHostStatus};
@@ -84,7 +85,7 @@ async fn autostart_one(app: &Arc<App>, host: &str, bot: &db::Bot, since: &str) -
     // start_bot is between inserting its `starting` run and completing setup would strand it.
     let start_app = app.clone();
     let bot_id = bot.id.clone();
-    match tokio::spawn(async move { crate::lifecycle::start_bot(&start_app, &bot_id).await }).await {
+    match tokio::spawn(async move { start_app.start_bot(&bot_id).await }).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             tracing::error!(bot = %bot.name, error = ?e, "autostart failed");
@@ -156,9 +157,9 @@ pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: b
     }
     // 被打斷的重啟先補完（#355 P2）：要在下面 autostart 判斷「使用者停掉的」之前——不然剛停掉的那顆會被當成使用者要它停。
     // 每次對帳成功都做（重啟 intent 隨時可能產生），不受下面「每台主機一生一次」限制。
-    crate::restart_intents::recover_host(app, host).await;
-    crate::delete_intents::recover_host(app, host).await;
-    crate::promote_intents::recover_host(app, host).await;
+    app.recover_restart_intents(host).await;
+    app.recover_delete_intents(host).await;
+    app.recover_promote_intents(host).await;
     let Some(claim) = AutostartClaim::begin(app, host) else {
         tracing::info!(host, "autostart already ran for this host in this daemon's lifetime; not restarting stopped bots");
         return false;
@@ -184,7 +185,7 @@ pub async fn autostart_after_reconcile(app: &Arc<App>, host: &str, reconciled: b
         claim.complete();
     }
     // bot 沒在跑時收下、還在等它起來的訊息（issue #122）：重啟前那次啟動可能沒做完，這裡再替它起一次。
-    crate::lifecycle::start_send::resume_after_boot(app, host).await;
+    app.resume_after_boot(host).await;
     true
 }
 
@@ -244,22 +245,22 @@ impl Recovery {
         // 插隊送出途中停掉、還沒掛上 run 的那一則（#120）。排在接回 poller 之前：鍵其實生效了的那一則會在這裡掛上 run（#229），
         // 接回的才是它、不是已經被它打斷的那一筆。
         if self.send_nows {
-            self.send_nows = !crate::lifecycle::adopt_unbound_send_nows(app, &self.boot).await;
+            self.send_nows = !app.adopt_unbound_send_nows(&self.boot).await;
         }
         self.rearm_in_flight(app).await;
         // Queued prompts in a backoff lost their timers with the old process (SPEC §4.4a).
         if self.queue {
-            match crate::lifecycle::rearm_queue_retries(app).await {
+            match app.rearm_queue_retries().await {
                 Ok(_) => self.queue = false,
                 Err(e) => tracing::warn!(error = %e, "cannot re-arm queued prompt retries yet"),
             }
         }
         // run 已經結束、收尾卻欠著（帳只在記憶體，重啟就沒了）的那一筆（#156）。
         if self.ended_runs {
-            self.ended_runs = !crate::lifecycle::adopt_turns_of_ended_runs(app, &self.boot).await;
+            self.ended_runs = !app.adopt_turns_of_ended_runs(&self.boot).await;
         }
         if self.queued_prompt_restamps {
-            match crate::lifecycle::rearm_queued_prompt_restamps(app).await {
+            match app.rearm_queued_prompt_restamps().await {
                 Ok(()) => self.queued_prompt_restamps = false,
                 Err(e) => tracing::warn!(error = %e, "cannot re-arm queued prompt restamps yet"),
             }
@@ -299,7 +300,7 @@ async fn rearm_run(app: &Arc<App>, run: &db::Run) -> bool {
     let lock = app.bot_lock(&run.bot_id).await;
     let _g = lock.lock().await;
     // 這個行程欠著的送達結果先結清：DB 裡那一筆還是 pending，不能被當成重啟前送到一半的收成 unknown（#149 的帳）。
-    if let Err(e) = crate::lifecycle::settle_owed_deliveries(app, &run.bot_id).await {
+    if let Err(e) = app.settle_owed_deliveries(&run.bot_id).await {
         tracing::warn!(run = %run.id, error = %e, "cannot settle this bot's owed delivery results yet; its in-flight turn waits");
         return false;
     }
@@ -320,7 +321,7 @@ async fn rearm_run(app: &Arc<App>, run: &db::Run) -> bool {
         return false;
     }
     // 重啟前就被按停的（打斷的帳只在記憶體；claude 2.1.276+ 按 Esc 不送 hook）：照 Esc 收，不接回（#235）。
-    match crate::lifecycle::adopt_interrupted_on_restart(app, run, &turn).await {
+    match app.adopt_interrupted_on_restart(run, &turn).await {
         Ok(true) => return true,
         Ok(false) => {}
         Err(e) => {
@@ -328,12 +329,12 @@ async fn rearm_run(app: &Arc<App>, run: &db::Run) -> bool {
             return false;
         }
     }
-    crate::lifecycle::arm_progress(app, &run.id, &run.bot_id, &turn.id).await;
+    app.arm_progress(&run.id, &run.bot_id, &turn.id).await;
     // 送出後幾秒內被重啟：補 Enter 與「畫面上找不到就重送」這兩層網都只活在上一個行程裡
     // （review 2026-09-16）。只對**剛送出**的補，不然會把幾小時前的 prompt 重送一次。
     // 「剛送出」看送出的時間：排隊的 turn 的 created_at 是排進佇列的時間，flush 可能晚了半小時（deliv L3）。
     if turn.delivery == "ok" && fresh_enough(turn.delivered_at.as_deref().unwrap_or(&turn.created_at)) {
-        crate::lifecycle::arm_stall(app, &run.id, &run.bot_id, &turn.id).await;
+        app.arm_stall(&run.id, &run.bot_id, &turn.id).await;
     }
     true
 }
@@ -368,7 +369,7 @@ async fn adopt_orphan_delivery(app: &Arc<App>, turn: &db::Turn) -> bool {
     };
     if n > 0 {
         tracing::warn!(turn = %turn.id, "a prompt was mid-delivery when the daemon stopped; marked unknown so somebody can decide");
-        crate::lifecycle::emit_turn(app, &turn.id).await;
+        app.emit_turn(&turn.id).await;
     }
     true
 }
@@ -483,7 +484,7 @@ async fn refresh_child_kind(app: &Arc<App>, bot: &mut db::Bot, pane_id: &str, ki
 /// 兩條退休路徑真正寫 `deleted_at` 的地方：走 `child_retire` 的唯一入口（#413：記呼叫端；AGM 的 child 不隱式退役）。
 /// 讀不到誰是 AGM 的就排延後那一輪再看。
 async fn retire_child(app: &Arc<App>, host: &str, bot: &db::Bot, why: &'static str) -> Result<()> {
-    if crate::child_retire::retire(app, &bot.id, why, crate::child_retire::Mode::Implicit).await? == crate::child_retire::Outcome::Unreadable {
+    if app.retire_child(&bot.id, why, crate::child_retire::Mode::Implicit).await? == crate::child_retire::Outcome::Unreadable {
         schedule_deferred_pass(app, host);
     }
     Ok(())
@@ -494,7 +495,7 @@ async fn retire_child(app: &Arc<App>, host: &str, bot: &db::Bot, why: &'static s
 /// 只有**確定沒在維護**才可以：herdr 重啟的那幾分鐘正是所有 pane 同時消失的時候，這時讀不到維護狀態就當成
 /// 「沒在維護」，子 bot 被軟刪，pane 回來之後也接不回原對話與血緣。讀不到＝這一輪留著、晚一點再看。
 async fn may_retire_child(app: &Arc<App>, host: &str, bot: &db::Bot) -> bool {
-    match crate::child_reconcile_safety::retirement_block(&app.db, &bot.id).await {
+    match app.retirement_block(&bot.id).await {
         Ok(Some(reason)) => {
             tracing::info!(host, bot = %bot.name, reason, "reconcile: child kept by a persisted restore/restart guard");
             return false;
@@ -506,7 +507,7 @@ async fn may_retire_child(app: &Arc<App>, host: &str, bot: &db::Bot) -> bool {
             return false;
         }
     }
-    match crate::herdr_maintenance::active(app).await {
+    match app.herdr_maintenance_active().await {
         Ok(None) => true,
         Ok(Some(_)) => {
             tracing::info!(host, bot = %bot.name, "reconcile: herdr maintenance in progress, child kept");
@@ -644,7 +645,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
     let Some(client) = app.herdr_for_session(host, &session).await else {
         anyhow::bail!("unknown host `{host}`");
     };
-    crate::github::spawn_detect_host(app.clone(), host.to_string());
+    app.spawn_detect_github_host(host.to_string());
     let mut lost_autostart: Vec<crate::autostart_revive::Lost> = Vec::new();
     let snapshot = client.snapshot().await?;
     // A1 的同一條規則也要套在 snapshot 上：`panes`／`workspaces` 這兩個 key 不在（不是「陣列是空的」，
@@ -699,7 +700,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
     // #708：移交出去的專案整個不碰——workspace 映射、run、child、pane 都歸接手的 daemon。
     let handed_off: std::collections::HashSet<&str> =
         projects.iter().filter(|p| p.handed_off_to.is_some()).map(|p| p.id.as_str()).collect();
-    let handed_off_footprint = crate::handoff::footprint(&app.db, host).await?;
+    let handed_off_footprint = app.db.handoff_footprint(host).await?;
     for p in projects.iter().filter(|p| p.handed_off_to.is_none()) {
         if let Some(ws) = p.workspace_id.as_deref() {
             if !live_ws.contains(&ws.to_string()) {
@@ -713,8 +714,8 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
     // Read hints before retiring missing children: a fresh hint is the direct evidence that the
     // still-running parent launched the pane which this same pass will adopt as its successor.
     // Keep read failure distinct from an empty result; adoption is already fail-closed below.
-    crate::spawn_hints::prune_stale(app).await;
-    let spawn_hints = crate::spawn_hints::for_host(app, host).await;
+    app.prune_stale_spawn_hints().await;
+    let spawn_hints = app.spawn_hints_for_host(host).await;
     // Unclaimed agent names are strangers, candidates for someone's child (below).
     let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut parents: Vec<Parent> = Vec::new();
@@ -740,7 +741,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
         }
         let computed = db::agent_name_for_bot(&app.db, &bot).await?;
         let preserve_stopping = match &active {
-            Some(run) if run.state == "stopping" => crate::restart_intents::has_open_restart_for_run(&app.db, host, &bot.id, &run.id).await?,
+            Some(run) if run.state == "stopping" => app.db.has_open_restart_for_run(host, &bot.id, &run.id).await?,
             _ => false,
         };
         let mut candidates: Vec<String> = Vec::new();
@@ -871,15 +872,15 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                     .await?;
                 if run.pane_id.as_deref() != Some(agent.pane_id.as_str()) {
                     if let Some(old) = run.pane_id.as_deref() {
-                        crate::events::unwatch_pane_on_session(app, host, &session, old).await;
+                        app.unwatch_pane_on_session(host, &session, old).await;
                     }
                 }
-                crate::events::watch_pane_on_session(app, host, &session, &agent.pane_id).await;
+                app.watch_pane_on_session(host, &session, &agent.pane_id).await;
                 if bot.kind == "codex" {
-                    crate::lifecycle::schedule_codex_notice_capture(app, &bot.id, &run.id);
+                    app.schedule_codex_notice_capture(&bot.id, &run.id);
                 }
                 // Hookless runs (children) only have their pane, unwatched while the daemon was down.
-                crate::lifecycle::spawn_adopted_capture(app, &run.id, &bot.id);
+                app.spawn_adopted_capture(&run.id, &bot.id);
                 sync_pane_model(app, host, &client, &bot, agent).await;
                 tracing::info!(host, bot = %bot.name, run = %run.id, pane = %agent.pane_id, "reconcile: kept active run");
             }
@@ -925,7 +926,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                     }
                 }
                 tracing::info!(host, bot = %bot.name, run = %run.id, "reconcile: agent gone, marking run exited");
-                let exit = crate::lifecycle::mark_run_exited(app, &run.id, "agent not found during reconcile").await;
+                let exit = app.mark_run_exited(&run.id, "agent not found during reconcile").await;
                 // A child exists only as long as its pane; its conversation is kept.
                 // 計畫中的 herdr 重啟期間不算：所有 pane 同時消失不是子 agent 做完了（§6.5.2）。
                 // 維護結束時仍沒接回的，由 `herdr_maintenance` 照同一條規則退休。
@@ -993,11 +994,11 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
                     .bind(&bot.project_id)
                     .execute(&app.db)
                     .await?;
-                crate::events::watch_pane_on_session(app, host, &session, &agent.pane_id).await;
+                app.watch_pane_on_session(host, &session, &agent.pane_id).await;
                 if bot.kind == "codex" {
-                    crate::lifecycle::schedule_codex_notice_capture(app, &bot.id, &run_id);
+                    app.schedule_codex_notice_capture(&bot.id, &run_id);
                 }
-                crate::lifecycle::spawn_adopted_capture(app, &run_id, &bot.id);
+                app.spawn_adopted_capture(&run_id, &bot.id);
                 sync_pane_model(app, host, &client, &bot, agent).await;
                 tracing::info!(host, bot = %bot.name, run = %run_id, pane = %agent.pane_id, "reconcile: adopted existing agent");
             }
@@ -1108,7 +1109,7 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
             Ok(bot_id) => {
                 claimed.insert(name.to_string());
                 if by_hint.is_some() {
-                    crate::spawn_hints::consume(app, host, &agent.pane_id).await;
+                    app.consume_spawn_hint(host, &agent.pane_id).await;
                 }
                 app.emit("bot_changed", json!({"bot_id": bot_id})).await;
                 app.emit_bot_status(&bot_id).await;
@@ -1168,13 +1169,13 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
     for (pane, tab, ws) in dead {
         if live_panes.contains(&pane) && !panes_with_agent.contains(&pane) && !not_ours(&pane) {
             tracing::info!(host, pane_id = %pane, "reconcile: closing orphan pane");
-            crate::lifecycle::close_pane_and_tab(&client, ws.as_deref(), tab.as_deref(), &pane).await;
+            app.close_pane_and_tab(&client, ws.as_deref(), tab.as_deref(), &pane).await;
         }
     }
     // SPEC §4.4a: adopted runs have NULL `runtime_*`; codex's status line has all three.
     fill_codex_runtime(app, host, &client).await;
     // §6.5e：非 agent 的 shell／服務 pane 收進 `panes`。與上面 agent pane 的邏輯完全分開，失敗只記 warn。
-    match crate::panes::scan_snapshot(app, host, &snapshot).await {
+    match app.scan_panes_snapshot(host, &snapshot).await {
         Ok(scan) if !scan.complete => {
             // 有 pane 的事實這一輪讀不到：那幾列沿用上一輪，GC 與通知等下一輪讀得到再說（§6.5e）。
             tracing::info!(host, panes = scan.panes, "pane 事實不完整，這一輪不跑 pane GC 與通知");
@@ -1182,19 +1183,19 @@ async fn reconcile_host_locked(app: &Arc<App>, host: &str) -> Result<Vec<crate::
         Ok(scan) => {
             tracing::debug!(host, panes = scan.panes, "scanned non-agent panes");
             // 掃完才 GC：同一輪先有最新的歸屬與 last_output_at，再決定關誰（§6.5e）。
-            match crate::panes::gc_host(app, host).await {
+            match app.gc_panes(host).await {
                 Ok(0) => {}
                 Ok(k) => tracing::info!(host, closed = k, "pane GC 關掉了閒置的 shell pane"),
                 Err(e) => tracing::warn!(host, error = ?e, "pane GC failed"),
             }
-            if let Err(e) = crate::panes::notify_unowned_and_orphans(app, host).await {
+            if let Err(e) = app.notify_unowned_and_orphans(host).await {
                 tracing::warn!(host, error = ?e, "pane 通知失敗");
             }
         }
         Err(e) => tracing::warn!(host, error = ?e, "non-agent pane scan failed"),
     }
     // agent 早就 idle、turn 還停在 in_flight：收尾並放行排在後面的 queued（AGM 2026-09-16）。
-    crate::lifecycle::sweep_stuck_turns(app, Some(host)).await;
+    app.sweep_stuck_turns(Some(host)).await;
     Ok(lost_autostart)
 }
 
@@ -1336,9 +1337,9 @@ async fn adopt_child(
     .bind(&now)
     .execute(&app.db)
     .await?;
-    crate::events::watch_pane_on_session(app, host, session, &agent.pane_id).await;
+    app.watch_pane_on_session(host, session, &agent.pane_id).await;
     // The pane is the only source for both its conversation (§4.3) and its model (argv).
-    crate::lifecycle::spawn_adopted_capture(app, &run_id, &bot_id);
+    app.spawn_adopted_capture(&run_id, &bot_id);
     if let Ok(Some(child)) = db::bot(&app.db, &bot_id).await {
         sync_pane_model(app, host, client, &child, agent).await;
     }

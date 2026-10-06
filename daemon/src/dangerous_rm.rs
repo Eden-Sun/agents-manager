@@ -14,6 +14,7 @@
 //! 開著的框記在記憶體（`run_id` → 這一次的警語、補標前的狀態）：daemon 重啟後最多重講一次通知；
 //! 重啟當下若是由這裡補標的 `blocked`，交給 herdr 下一次狀態事件或 reconcile 更正。
 
+use crate::events::ports::{TurnCommands};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -90,7 +91,7 @@ pub(crate) async fn notify_once(app: &Arc<App>, run: &db::Run, rm: &DangerousRm)
     tracing::warn!(run = %run.id, bot = %run.bot_id, target = %rm.target, "claude 停在 Dangerous rm 確認框，等使用者本人核准（不自動按）");
     match db::conversation_id(&app.db, &run.bot_id).await {
         Ok(conv) => {
-            let _ = crate::lifecycle::insert_message(app, &conv, None, "system", &notice(rm), "system", false, None).await;
+            let _ = app.insert_message(&conv, None, "system", &notice(rm), "system", false, None).await;
         }
         Err(e) => tracing::warn!(run = %run.id, error = ?e, "could not post the dangerous-rm notice"),
     }
@@ -210,12 +211,12 @@ pub(crate) async fn observe_screen(app: &Arc<App>, run: &db::Run, screen: &str) 
             open().lock().unwrap().remove(&run.id);
             tracing::info!(run = %run.id, bot = %run.bot_id, "Dangerous rm 確認框關掉了（回答或自動拒絕）");
             if let Ok(conv) = db::conversation_id(&app.db, &run.bot_id).await {
-                let _ = crate::lifecycle::insert_message(app, &conv, None, "system", CLOSED_NOTE, "system", false, None).await;
+                let _ = app.insert_message(&conv, None, "system", CLOSED_NOTE, "system", false, None).await;
             }
             if status_changed {
                 app.emit_bot_status(&run.bot_id).await;
             }
-            crate::lifecycle::schedule_flush_queued(app, &run.bot_id);
+            app.schedule_flush_queued(&run.bot_id);
         }
     }
 }
