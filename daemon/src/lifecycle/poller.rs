@@ -667,65 +667,10 @@ const COMPOSER_HEAD: usize = 12;
 
 /// Never match on a fragment this short — a two-character prompt is in every screen.
 const COMPOSER_HEAD_MIN: usize = 4;
-
-pub(crate) fn undecorate_row(line: &str) -> String {
-    let s = strip_grok_decor(line);
-    s.trim().trim_start_matches('│').trim_end_matches('│').trim().to_string()
-}
-
-pub(crate) fn is_rule_row(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| "─━-=_╭╮╰╯".contains(c))
-}
-
-/// Text in the input box, or `None` when empty / no known marker. Searched from the bottom; an
-/// empty box is `pane_awaits_input`'s job, else we'd walk back to an accepted prompt's echo.
-///
-/// A styled (`format: ansi`) read is judged through `delivery::plain_without_hints` first: a box
-/// holding only the TUI's own hint (claude 2.1.280's dim suggested next prompt) is an empty box here
-/// too, the same verdict the delivery check gives.
-pub(crate) fn composer_text(kind: &str, screen: &str) -> Option<String> {
-    composer_text_rows(kind, screen, false)
-}
-
-/// [`composer_text`]，但草稿裡的空白列算草稿（讀到下緣分隔線為止）：給「要拿整段草稿比對、清掉」的地方用（rewind 的 CAS）。
-/// `composer_text` 碰到空白列就停，兩段之間空一行的草稿只讀得到前半段——使用者只看得到、同意的是前半段，ctrl+c 卻清掉整段。
-/// 只有 claude 的框有下緣分隔線可以當終點；codex／grok 框外的頁尾列不能被吃進草稿，維持 `composer_text`。
-pub(crate) fn composer_text_whole(kind: &str, screen: &str) -> Option<String> {
-    composer_text_rows(kind, screen, kind == "claude")
-}
-
-fn composer_text_rows(kind: &str, screen: &str, keep_blank_rows: bool) -> Option<String> {
-    let plain = super::delivery::plain_without_hints(kind, screen);
-    let screen = plain.as_str();
-    let marker = prompt_echo_prefix(kind)?.trim_end();
-    if pane_awaits_input(kind, screen) {
-        return None;
-    }
-    let lines: Vec<&str> = screen.lines().collect();
-    // claude 的框高過預設範圍時看到框頂（#581）：不然放回框裡的長 prompt 讀不到，中止後的清框就不按。
-    let from = lines.len().saturating_sub(super::delivery::composer_tail(kind, &lines));
-    let tail = &lines[from..];
-    let idx = tail.iter().rposition(|l| {
-        let t = undecorate_row(l);
-        t.starts_with(marker) && !t[marker.len()..].trim().is_empty()
-    })?;
-    let mut out: Vec<String> = Vec::new();
-    for (n, line) in tail[idx..].iter().enumerate() {
-        let row = undecorate_row(line);
-        let body = if n == 0 { row[marker.len()..].trim().to_string() } else { row };
-        // grok 的框底 `╰── Grok 4.7 (high) · … ─╯` 寫著字，不是純線條：一樣是框的下緣，不是草稿的一列。
-        if n > 0 && ((body.is_empty() && !keep_blank_rows) || is_rule_row(&body) || super::delivery::is_box_bottom(&body)) {
-            break;
-        }
-        out.push(body);
-    }
-    let joined = out.join("\n").trim().to_string();
-    if joined.is_empty() {
-        None
-    } else {
-        Some(joined)
-    }
-}
+#[allow(unused_imports)]
+pub(crate) use crate::composer_parse::{
+    composer_text, composer_text_whole, is_rule_row, undecorate_row,
+};
 
 /// Is our prompt still unsent in the box? 2026-09-07 11:21: claude swallowed the Enter while
 /// compacting; the turn failed as a stall with the message one keystroke from sent.

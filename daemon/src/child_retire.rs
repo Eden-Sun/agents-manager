@@ -78,7 +78,7 @@ pub(crate) fn retire<'a>(app: &'a Arc<App>, bot_id: &'a str, why: &'static str, 
         let host = db::bot_host(&app.db, &bot.id).await?;
         let record = record_payload(app, &bot, why, mode, &at.to_string()).await?;
         #[cfg(test)]
-        crate::lifecycle::race_point::hit("child_retire_before_transaction", bot_id).await;
+        crate::race_point::hit("child_retire_before_transaction", bot_id).await;
         // `deleted_at` 與紀錄同生共死（#554）：同一筆交易先寫紀錄再退役，寫不進紀錄就不退役，
         // 也不讓資料庫 trigger 或讀者先看見 child 消失、稍後才有原因。
         let mut tx = db::begin_write(&app.db).await?;

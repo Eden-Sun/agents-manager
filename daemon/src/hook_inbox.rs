@@ -24,7 +24,7 @@
 //! 只會換來大量寫入，換不到任何保證——掉一格的代價就是晚一次重繪。
 
 use crate::db;
-use crate::hookrecv::HookBody;
+use crate::hook_body::HookBody;
 use crate::state::App;
 use anyhow::Result;
 use sqlx::SqlitePool;

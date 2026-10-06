@@ -202,6 +202,7 @@ pub(crate) trait HostSidePort {
     fn spawn_detect_github_host(&self, host: String);
     async fn emit_daemon_status(&self);
     async fn set_default_connected(&self, connected: bool);
+    async fn drain_remote_coalesced(&self, host: &str, bot_id: &str) -> Result<usize>;
 }
 
 /// provider／登入／預覽的觀察點（原 `claude_live`、`login_prompt`、`codex_model_migration`、`prompt_suggestion`、`tui_prompts`）。

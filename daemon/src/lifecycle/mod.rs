@@ -63,6 +63,8 @@ mod suggestion;
 mod busy_send;
 /// 「輸入框有沒有字」的同一支判斷，給 lifecycle 以外的地方（judge 的卡住畫面）用。
 pub(crate) use delivery::{plain_without_hints, read_styled};
+#[allow(unused_imports)]
+pub(crate) use crate::composer_parse::{composer_text, composer_text_whole, prompt_suggestion};
 mod prompt;
 pub(crate) async fn rearm_queued_prompt_restamps(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::Emit + crate::capabilities::BotStatusEmit)) -> anyhow::Result<()> {
     prompt::rearm_queued_prompt_restamps(app).await
@@ -84,7 +86,7 @@ pub(crate) mod resume_gate;
 /// 忙到一半被重啟的 claude 接回後補一句續行提示（claude 2.1.281 不再補隱藏的 Continue）。
 mod resume_nudge;
 /// daemon 自己排進佇列的通知：較短的重試上限、可以撤回（#562）。
-pub(crate) mod daemon_notice;
+pub(crate) use crate::daemon_notice;
 pub(crate) use resume_nudge::poke as poke_resume_nudge;
 pub(crate) mod restart_hold;
 /// `runs.state` 轉移的唯一寫法，與寫不進去之後的重試（#135／#145／#146）。
@@ -98,7 +100,7 @@ mod interruption;
 /// 送達結果寫不回 DB 時欠著的那一筆（#149）。
 mod owed_delivery;
 /// claude 把貼上的 prompt 包成 `<pasted_content>` 寫進 transcript（#218）。
-pub(crate) mod pasted_content;
+pub(crate) use crate::pasted_content;
 pub(crate) mod paste_check;
 mod transitions;
 /// issue #81 探索用的原型；`#[cfg(test)]` 整個檔案只在 `cargo test` 底下編，不進正式二進位
@@ -114,7 +116,7 @@ mod actor_runtime_eval_prototype;
 mod identity_switch_tests;
 /// 競態的注入點，只在 `cargo test` 底下存在（見檔案頂端的說明）。
 #[cfg(test)]
-pub(crate) mod race_point;
+pub(crate) use crate::race_point;
 /// #187：`purge_deleted_bot_dirs` 讀不到 run 的狀態時不刪目錄。
 #[cfg(test)]
 mod purge_dirs_tests;

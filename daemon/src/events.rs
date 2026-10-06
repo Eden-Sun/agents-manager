@@ -692,7 +692,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
     // §11.4.3：遠端 run 的內容留在那台的 spool，先 drain 再 arm 備援，終端快照才只在 hook 真的沒來時贏。
     // 有預算上限（下一個事件排在它後面），逾時就讓備援接手，CAS 保證不雙寫。
     if host != LOCAL_HOST && ((prev == "working" && status == "idle") || (prev != "blocked" && status == "blocked")) {
-        let drain = crate::hookrecv::drain_remote_coalesced(app, host, &run.bot_id);
+        let drain = app.drain_remote_coalesced(host, &run.bot_id);
         match tokio::time::timeout(DRAIN_BUDGET, drain).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => tracing::warn!(host, bot_id = %run.bot_id, error = ?e, "remote drain failed"),

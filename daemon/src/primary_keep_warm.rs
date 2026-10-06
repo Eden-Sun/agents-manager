@@ -22,7 +22,6 @@
 
 use crate::cache_clock::{self, KEEP_WARM_CRID_PREFIX, WARM_COMPACT_NOTE_PREFIX};
 use crate::db;
-use crate::lifecycle::app_ports_p4::{AppClock, AppEventSink, AppSystemMessageWriter, AppTurnControl};
 use crate::state::App;
 use am_core::PromptRequest;
 use am_ports::{Clock, DbContext, EventSink, SystemMessageWriter, TurnControl};
@@ -252,7 +251,7 @@ async fn settle_skip_with<E: EventSink>(db: &DbContext<SqlitePool>, events: &E, 
 #[cfg(test)]
 async fn settle_skip(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) {
     let db = DbContext::new(app.db.clone());
-    let events = AppEventSink::new(app);
+    let events = crate::lifecycle::app_ports_p4::AppEventSink::new(app);
     settle_skip_with(&db, &events, bot, run, now).await;
 }
 
@@ -273,15 +272,20 @@ async fn clear_skip_with<E: EventSink>(db: &DbContext<SqlitePool>, events: &E, b
 pub async fn note_prompt(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, client_request_id: &str) {
     if !cache_clock::is_keep_warm_crid(client_request_id) {
         let db = DbContext::new(app.db().clone());
-        let events = AppEventSink::new(app);
-        clear_skip_with(&db, &events, bot_id).await;
+        match set_skip(db.pool(), bot_id, false).await {
+            Ok(true) => {
+                app.emit_bot_status(bot_id).await;
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(bot_id, error = ?e, "keep-warm skip: could not clear after activity"),
+        }
     }
 }
 
 /// `POST /api/bots/{id}/keep-warm/skip`（使用者專用）body `{"skip": bool}` → `{"keep_warm_skip": bool}`。
 /// 只有主力的 claude／codex 有保溫；其他回 400 `not_primary`。
-pub async fn skip_route(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, skip: bool) -> Result<bool, crate::lifecycle::LcError> {
-    use crate::lifecycle::LcError;
+pub async fn skip_route(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::BotStatusEmit), bot_id: &str, skip: bool) -> Result<bool, crate::lc_error::LcError> {
+    use crate::lc_error::LcError;
     let db = DbContext::new(app.db().clone());
     let bot = db::bot(db.pool(), bot_id)
         .await
@@ -295,8 +299,7 @@ pub async fn skip_route(app: &(impl crate::capabilities::Db + crate::capabilitie
         })));
     }
     if set_skip(db.pool(), bot_id, skip).await.map_err(|e| LcError::Upstream(e.to_string()))? {
-        let events = AppEventSink::new(app);
-        events.bot_status_changed(bot_id).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+        app.emit_bot_status(bot_id).await;
     }
     Ok(skip)
 }
@@ -408,7 +411,7 @@ async fn act<T: TurnControl, M: SystemMessageWriter>(turns: &T, messages: &M, bo
 }
 
 /// 巡一輪。序列處理（每顆都要拿 per-bot 鎖）。
-async fn sweep_with<T: TurnControl, M: SystemMessageWriter, E: EventSink, C: Clock>(
+pub(crate) async fn sweep_with<T: TurnControl, M: SystemMessageWriter, E: EventSink, C: Clock>(
     db: &DbContext<SqlitePool>,
     turns: &T,
     messages: &M,
@@ -467,12 +470,7 @@ pub fn tick(app: &Arc<App>) {
     let app = app.clone();
     let tasks = app.background_tasks.clone();
     tasks.spawn(async move {
-        let db = DbContext::new(app.db.clone());
-        let turns = AppTurnControl::new(&app);
-        let messages = AppSystemMessageWriter::new(&app);
-        let events = AppEventSink::new(&app);
-        let clock = AppClock;
-        sweep_with(&db, &turns, &messages, &events, &clock, &app.shutdown).await;
+        crate::app_ports_r2a8::primary_keep_warm_sweep(&app).await;
         SWEEPING.store(false, Ordering::SeqCst);
     });
 }

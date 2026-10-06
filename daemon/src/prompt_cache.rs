@@ -12,7 +12,6 @@
 //! [`TAIL_BYTES`]。記憶體帳，daemon 重啟後第一輪重讀檔尾即可補回；run 結束由巡邏清掉（[`retain_runs`]）。
 
 use crate::db;
-use crate::lifecycle::app_ports_p4::{AppCodexRolloutAccess, AppEventSink};
 use crate::state::App;
 use am_ports::{CodexRolloutAccess, DbContext, EventSink};
 use serde_json::{json, Value};
@@ -101,10 +100,7 @@ fn read_new(path: &Path, offset: u64) -> std::io::Result<(String, u64)> {
 /// 巡邏每輪對每顆 codex run 叫一次：讀 rollout 新增的部分，最後一筆 `token_count` 變了就推 `bot_status`。
 /// 找不到 session／rollout、遠端主機、讀失敗都靜靜跳過（提示而已，不影響任何流程）。
 pub async fn refresh_codex(app: &Arc<App>, run: &db::Run) {
-    let database = DbContext::new(app.db.clone());
-    let rollout = AppCodexRolloutAccess::new(app);
-    let events = AppEventSink::new(app);
-    refresh_codex_with_ports(&database, &rollout, &events, run).await;
+    crate::app_ports_r2a8::refresh_codex(app, run).await;
 }
 
 /// Run-scoped Codex cache observation. The App wrapper supplies only the database, local rollout

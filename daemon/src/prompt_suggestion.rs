@@ -4,7 +4,7 @@
 //! 一樣記在記憶體（run id → 文字），跟著 run 一起出現在 `/api/state` 與 `bot_status` 事件（`run.prompt_suggestion`），
 //! 只在 `agent_status == "idle"` 時帶、其他一律 `null`；內容變了或消失才推 `bot_status`。
 //!
-//! 怎麼讀（只有樣式讀 `format: ansi` 分得出灰字，純文字讀一律 `null`，見 [`crate::lifecycle::prompt_suggestion`]）：
+//! 怎麼讀（只有樣式讀 `format: ansi` 分得出灰字，純文字讀一律 `null`，見 [`crate::composer_parse::prompt_suggestion`]）：
 //! * **idle 邊之後的幾次補讀**（[`on_idle`]）：建議是回合結束後 claude 另外算出來的，Stop 的當下通常還沒畫，
 //!   所以在 idle 之後 [`BURST`] 的幾個時間點各看一次，看到就停。每個 idle 邊最多 4 次讀。
 //! * **既有的 30 秒畫面巡邏**（[`observe_sweep`]，`update_watch`）：已經讀了一份純文字畫面，輸入列是空的就不必再讀（沒有建議可言）；
@@ -14,7 +14,6 @@
 //! 讀不到畫面什麼都不動：讀不到不等於建議消失了。
 
 use crate::db;
-use crate::lifecycle::app_ports_p4::{AppEventSink, AppHerdrPort};
 use crate::state::App;
 use am_core::PaneReadSource;
 use am_ports::{DbContext, EventSink, StyledRunPaneReader};
@@ -66,10 +65,7 @@ pub fn json(run_id: &str, agent_status: Option<&str>) -> Value {
 
 /// 讀一次樣式畫面、照結果記下或清掉建議（idle 邊補讀用）。回傳現在有沒有建議；讀不到回 `None`（什麼都不動）。
 pub async fn observe(app: &Arc<App>, run: &db::Run) -> Option<bool> {
-    let db = DbContext::new(app.db.clone());
-    let reader = AppHerdrPort::new(app);
-    let events = AppEventSink::new(app);
-    observe_with_ports(&db, &reader, &events, run).await
+    crate::app_ports_r2a8::prompt_suggestion_observe(app, run).await
 }
 
 /// Run-scoped suggestion observation. The App wrapper only assembles the DB, styled pane reader,
@@ -109,7 +105,7 @@ async fn emit_bot_status<E: EventSink>(events: &E, bot_id: &str) {
 
 /// 把一份樣式畫面的結果記進帳；變了就推 `bot_status`。回傳現在有沒有建議。
 async fn record<E: EventSink>(events: &E, run: &db::Run, styled: &str) -> bool {
-    let found = crate::lifecycle::prompt_suggestion("claude", styled);
+    let found = crate::composer_parse::prompt_suggestion("claude", styled);
     let has = found.is_some();
     if set(&run.id, found) {
         tracing::info!(run = %run.id, bot = %run.bot_id, suggestion = has, "prompt suggestion changed");
@@ -141,22 +137,31 @@ pub fn on_idle(app: &Arc<App>, run: &db::Run) {
 
 /// 30 秒畫面巡邏的一個 claude run：`plain` 是巡邏已經讀到的純文字畫面。
 pub async fn observe_sweep(app: &(impl crate::capabilities::Emit + crate::capabilities::BotStatusEmit), run: &db::Run, plain: &str, client: &crate::herdr::HerdrClient, pane: &str) {
-    let events = AppEventSink::new(app);
     if run.state != "running" || run.agent_status != "idle" {
         if forget(&run.id) {
-            emit_bot_status(&events, &run.bot_id).await;
+            let _ = app.emit_bot_status(&run.bot_id).await;
         }
         return;
     }
     // 輸入列是空的：沒有建議可言，不必再讀。
-    if crate::lifecycle::composer_text("claude", plain).is_none() {
+    if crate::composer_parse::composer_text("claude", plain).is_none() {
         if forget(&run.id) {
-            emit_bot_status(&events, &run.bot_id).await;
+            let _ = app.emit_bot_status(&run.bot_id).await;
         }
         return;
     }
-    let Ok(styled) = crate::lifecycle::read_styled(client, pane, "visible", 80).await else { return };
-    record(&events, run, &styled).await;
+    let Ok(styled) = crate::composer_parse::read_styled(client, pane, "visible", 80).await else { return };
+    record_status_emitter(app, run, &styled).await;
+}
+
+async fn record_status_emitter(app: &impl crate::capabilities::BotStatusEmit, run: &db::Run, styled: &str) -> bool {
+    let found = crate::composer_parse::prompt_suggestion("claude", styled);
+    let has = found.is_some();
+    if set(&run.id, found) {
+        tracing::info!(run = %run.id, bot = %run.bot_id, suggestion = has, "prompt suggestion changed");
+        let _ = app.emit_bot_status(&run.bot_id).await;
+    }
+    has
 }
 
 #[cfg(test)]

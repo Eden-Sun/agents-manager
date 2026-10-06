@@ -292,7 +292,7 @@ pub(crate) async fn record_in_flight(
 /// 放在 `hookrecv::process` 收尾而不是 hook 處理中間：終端打字開的外部回合要等 Stop 才建立，這時候「最新的回合」才是對的那一個。
 /// 遠端 bot 用 `hook.sh` 帶來的 `agm_asks`；本機 bot 讀自己這台的 transcript（payload 的路徑，沒有就用 run 記的）。
 /// 記不成不能害這則 hook 失敗：回合收尾比對話裡多一則紀錄重要，所以只記 warn（下一則 hook 或重送會再補）。
-pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hookrecv::HookBody) {
+pub(crate) async fn after_turn_end(app: &Arc<App>, body: &crate::hook_body::HookBody) {
     let p = &body.payload;
     if !body.provider.eq_ignore_ascii_case("claude") || !matches!(p.get("hook_event_name").and_then(Value::as_str), Some("Stop" | "StopFailure")) {
         return;

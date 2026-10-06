@@ -1,15 +1,17 @@
 //! daemon 自己產生、排進佇列的通知（#562）：子 agent 停在 blocked（`child_alerts`）、重啟後的續行提示（`resume_nudge`）。
 //!
 //! 它們不是使用者送的、也不是 AGM 派工，卻跟那些共用同一條佇列（每個對話最多一筆 queued）。一則通知送不進去時，
-//! 照一般 prompt 的 [`super::QUEUE_RETRY_LIMIT`] 要擋約 40 分鐘，後面的使用者訊息一直排不到。所以：
+//! 照一般 prompt 的 [`crate::lifecycle::QUEUE_RETRY_LIMIT`] 要擋約 40 分鐘，後面的使用者訊息一直排不到。所以：
 //! - 放回佇列的上限短得多（[`RETRY_LIMIT`]），用完就收成 failed＋一則 system 說明，讓佇列往下走；
 //! - `POST /api/turns/{id}/withdraw` 可以撤回還在排的這一種（使用者訊息、AGM 派工照舊 409）。
+
+pub(crate) const RESUME_NUDGE_CRID_PREFIX: &str = "resume-nudge:";
 
 /// 這些 `client_request_id` 前綴的 turn 是 daemon 自己寫的。
 const PREFIXES: [&str; 3] = [
     crate::child_alerts::CRID_PREFIX,
     crate::child_done::CRID_PREFIX,
-    super::resume_nudge::CRID_PREFIX,
+    RESUME_NUDGE_CRID_PREFIX,
 ];
 
 pub(crate) fn is_daemon_notice(client_request_id: Option<&str>) -> bool {
@@ -31,9 +33,13 @@ pub(crate) const WITHDRAWN_WHY: &str = "使用者撤回了這則 daemon 自動�
 
 #[cfg(test)]
 mod tests {
-    use super::super::*;
-    use super::{is_daemon_notice, RETRY_LIMIT};
+    use super::*;
+    use crate::db;
+    use crate::lc_error::LcError;
+    use crate::lifecycle::{flush_queued_locked, withdraw_turn};
+    use crate::state::App;
     use crate::testing as tt;
+    use std::sync::Arc;
 
     /// 一顆閒著的 grok，框裡一直有使用者的草稿（打不進去＝`composer_busy`），佇列頭排著一則 `crid` 的 turn。
     async fn stuck_head(crid: Option<&str>) -> (tt::Env, String, String, String) {
