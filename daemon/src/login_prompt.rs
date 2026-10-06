@@ -37,8 +37,8 @@ fn key(host: &str, identity: &str) -> (String, String) {
 }
 
 /// 記一筆（已經有就保留最早的 `since`）；回傳有沒有新增。
-pub fn mark(app: &App, host: &str, identity: &str, via: &'static str) -> bool {
-    let mut m = app.login_needed.lock().unwrap_or_else(|e| e.into_inner());
+pub fn mark(app: &impl crate::login_prompt::LoginNeeded, host: &str, identity: &str, via: &'static str) -> bool {
+    let mut m = app.login_needed().lock().unwrap_or_else(|e| e.into_inner());
     if m.contains_key(&key(host, identity)) {
         return false;
     }
@@ -47,19 +47,19 @@ pub fn mark(app: &App, host: &str, identity: &str, via: &'static str) -> bool {
 }
 
 /// 拿掉一筆；回傳有沒有拿掉。
-pub fn clear(app: &App, host: &str, identity: &str) -> bool {
-    app.login_needed.lock().unwrap_or_else(|e| e.into_inner()).remove(&key(host, identity)).is_some()
+pub fn clear(app: &impl crate::login_prompt::LoginNeeded, host: &str, identity: &str) -> bool {
+    app.login_needed().lock().unwrap_or_else(|e| e.into_inner()).remove(&key(host, identity)).is_some()
 }
 
-pub fn get(app: &App, host: &str, identity: &str) -> Option<Needed> {
-    app.login_needed.lock().unwrap_or_else(|e| e.into_inner()).get(&key(host, identity)).cloned()
+pub fn get(app: &impl crate::login_prompt::LoginNeeded, host: &str, identity: &str) -> Option<Needed> {
+    app.login_needed().lock().unwrap_or_else(|e| e.into_inner()).get(&key(host, identity)).cloned()
 }
 
 /// 把這台主機的 `identities`（序列化出去的那份）加上 `login_needed: {since, via}`；沒有帳的身分照舊。
-pub fn identities_json(app: &App, host: &str, identities: &BTreeMap<String, crate::tools::IdentityInfo>) -> Value {
+pub fn identities_json(app: &impl crate::login_prompt::LoginNeeded, host: &str, identities: &BTreeMap<String, crate::tools::IdentityInfo>) -> Value {
     let mut v = json!(identities);
     if let Some(o) = v.as_object_mut() {
-        let m = app.login_needed.lock().unwrap_or_else(|e| e.into_inner());
+        let m = app.login_needed().lock().unwrap_or_else(|e| e.into_inner());
         for (name, entry) in o.iter_mut() {
             if let (Some(n), Some(e)) = (m.get(&key(host, name)), entry.as_object_mut()) {
                 e.insert("login_needed".into(), json!({"since": n.since, "via": n.via}));
@@ -132,3 +132,8 @@ pub async fn on_turn_ok(app: &Arc<App>, bot: &db::Bot) {
 
 #[cfg(test)]
 mod tests;
+
+/// 「請登入」提示。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait LoginNeeded: Send + Sync {
+    fn login_needed(&self) -> &crate::login_prompt::Registry;
+}

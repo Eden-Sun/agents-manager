@@ -34,8 +34,8 @@ use crate::db;
 use crate::lifecycle::{LcError, StartOpts};
 use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::{HostProbes, LocalAccountView, TurnOps};
 use serde_json::json;
+use super::ports::{LocalAccountView, TurnOps};
 
 /// 幾分鐘沒動作就收起來。使用者指定 90 分鐘。
 pub const DEFAULT_IDLE_MINUTES: i64 = 90;
@@ -288,13 +288,13 @@ pub fn open_assignment_statuses() -> Vec<&'static str> {
 
 /// 一顆 bot 此刻的判斷素材。`sup` 是總管的 bot id。
 /// 任何一項證據讀不到就回 `Err`（issue #123）——呼叫端一律跳過這顆、下一輪再看，不拿預設值頂替。
-async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet<String>) -> anyhow::Result<Option<Cand>> {
-    let Some(bot) = db::bot(&app.db, &run.bot_id).await? else { return Ok(None) };
+async fn cand_for(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes), run: &db::Run, sup: &std::collections::HashSet<String>) -> anyhow::Result<Option<Cand>> {
+    let Some(bot) = db::bot(app.db(), &run.bot_id).await? else { return Ok(None) };
     if bot.deleted_at.is_some() {
         return Ok(None);
     }
-    let host = db::bot_host(&app.db, &bot.id).await?;
-    let seen = last_activity(&app.db, &bot.id, run).await?;
+    let host = db::bot_host(app.db(), &bot.id).await?;
+    let seen = last_activity(app.db(), &bot.id, run).await?;
     Ok(Some(Cand {
         bot_id: bot.id.clone(),
         name: bot.name.clone(),
@@ -305,10 +305,10 @@ async fn cand_for(app: &Arc<App>, run: &db::Run, sup: &std::collections::HashSet
         is_share_bot: app.is_share_bot(&bot.id).await?,
         state: run.state.clone(),
         agent_status: run.agent_status.clone(),
-        turn_in_flight: db::in_flight_turn(&app.db, &run.id).await?.is_some(),
-        queued_turn: db::queued_turn_for_bot(&app.db, &bot.id).await?.is_some(),
-        open_assignment: has_open_assignment(&app.db, &bot.id).await?,
-        live_children: has_live_children(&app.db, &bot.id).await?,
+        turn_in_flight: db::in_flight_turn(app.db(), &run.id).await?.is_some(),
+        queued_turn: db::queued_turn_for_bot(app.db(), &bot.id).await?.is_some(),
+        open_assignment: has_open_assignment(app.db(), &bot.id).await?,
+        live_children: has_live_children(app.db(), &bot.id).await?,
         // 要問 herdr 與 ps，太貴；只有真的要收的那一顆才查（見 [`sweep`]）。
         background_shell: false,
         resumable: resumable(
@@ -330,9 +330,9 @@ pub async fn candidates(app: &Arc<App>) -> anyhow::Result<Vec<Cand>> {
     candidates_with(app, &sup).await
 }
 
-async fn candidates_with(app: &Arc<App>, sup: &std::collections::HashSet<String>) -> anyhow::Result<Vec<Cand>> {
+async fn candidates_with(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes), sup: &std::collections::HashSet<String>) -> anyhow::Result<Vec<Cand>> {
     let mut out = Vec::new();
-    for run in db::all_active_runs(&app.db).await? {
+    for run in db::all_active_runs(app.db()).await? {
         match cand_for(app, &run, sup).await {
             Ok(Some(c)) => out.push(c),
             Ok(None) => {}
@@ -424,14 +424,14 @@ fn judge_background(ps_tree: Result<String, String>, shell_pid: i32) -> Backgrou
     }
 }
 
-async fn inspect_background(app: &Arc<App>, run: &db::Run) -> BackgroundWork {
+async fn inspect_background(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::supervisor::ports::HostProbes), run: &db::Run) -> BackgroundWork {
     match tokio::time::timeout(INSPECT_TIMEOUT, inspect_background_inner(app, run)).await {
         Ok(w) => w,
         Err(_) => BackgroundWork::Unknown(format!("問 herdr／ps 超過 {} 秒沒有回應", INSPECT_TIMEOUT.as_secs())),
     }
 }
 
-async fn inspect_background_inner(app: &Arc<App>, run: &db::Run) -> BackgroundWork {
+async fn inspect_background_inner(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes + crate::supervisor::ports::HostProbes), run: &db::Run) -> BackgroundWork {
     use BackgroundWork::Unknown;
     let Some(pane) = run.pane_id.clone().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) else {
         return Unknown("這個 run 沒有 pane id".into());
@@ -442,7 +442,7 @@ async fn inspect_background_inner(app: &Arc<App>, run: &db::Run) -> BackgroundWo
         Err(e) => return Unknown(format!("herdr pane.process_info 失敗：{e:#}")),
     };
     let Some(pid) = shell.shell_pid else { return Unknown(format!("herdr 沒有回 pane {pane} 的 shell_pid")) };
-    let host = match db::bot_host(&app.db, &run.bot_id).await {
+    let host = match db::bot_host(app.db(), &run.bot_id).await {
         Ok(h) => h,
         Err(e) => return Unknown(format!("讀不到這顆 bot 所在的主機：{e:#}")),
     };
@@ -451,7 +451,7 @@ async fn inspect_background_inner(app: &Arc<App>, run: &db::Run) -> BackgroundWo
 
 /// 行程樹的來源。正式路徑就是 `memproc::dump`；測試可以照 bot 注入一份決定性的答案（見 `test_ps`），
 /// 不然「證明沒有背景工作」要靠本機真的有一個 `sleep` 行程、而且 runner 上的 ps 讀得到它。
-async fn ps_tree(app: &Arc<App>, host: &str, _bot_id: &str) -> Result<String, String> {
+async fn ps_tree(app: &impl crate::supervisor::ports::HostProbes, host: &str, _bot_id: &str) -> Result<String, String> {
     #[cfg(test)]
     if let Some(injected) = test_ps::get(_bot_id) {
         return injected;

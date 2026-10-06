@@ -105,13 +105,13 @@ pub fn get(app: &App, run_id: &str) -> u32 {
 
 /// 巡邏看過這個 run 之後的數字；`None`＝還沒看過（daemon 剛重啟、新 run、畫面讀不到）。**沒有證據**：
 /// 一鍵重啟不拿它擋人，確認框標「背景狀態未知」（#767）。
-pub fn known(app: &App, run_id: &str) -> Option<u32> {
-    app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).get(run_id).map(|e| e.n)
+pub fn known(app: &impl crate::background_jobs::JobCounts, run_id: &str) -> Option<u32> {
+    app.background_jobs().lock().unwrap_or_else(|e| e.into_inner()).get(run_id).map(|e| e.n)
 }
 
 /// 這一段背景跑了多久（#774）：`(開始時間 unix 毫秒, 已持續秒數, 可能卡住)`；沒有背景工作或沒看過是 `None`。
-pub fn duration(app: &App, run_id: &str) -> Option<(i64, i64, bool)> {
-    let since = app.background_jobs.lock().unwrap_or_else(|e| e.into_inner()).get(run_id)?.since?;
+pub fn duration(app: &impl crate::background_jobs::JobCounts, run_id: &str) -> Option<(i64, i64, bool)> {
+    let since = app.background_jobs().lock().unwrap_or_else(|e| e.into_inner()).get(run_id)?.since?;
     let now = now_ms();
     Some((since, (now - since).max(0) / 1000, stuck_at(Some(since), now)))
 }
@@ -228,7 +228,7 @@ pub fn retain_runs(app: &App, active: &[String]) {
 }
 
 /// API 的 run 物件加上 `background_jobs`（`GET /api/state` 與 `bot_status` 共用）。
-pub fn run_json<T: serde::Serialize>(app: &App, run: &Option<T>, run_id: Option<&str>) -> Value {
+pub fn run_json<T: serde::Serialize>(app: &(impl crate::background_hook::HookSnapshots + crate::background_jobs::JobCounts), run: &Option<T>, run_id: Option<&str>) -> Value {
     let mut v = serde_json::to_value(run).unwrap_or(Value::Null);
     if let (Some(o), Some(id)) = (v.as_object_mut(), run_id) {
         // 沒觀察過是 `null`，不是 0（#767）。
@@ -397,4 +397,9 @@ mod tests {
         retain_runs(&app, &[]);
         assert_eq!(get(&app, &run_id), 0, "結束的 run 不留帳");
     }
+}
+
+/// 背景工作計數。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait JobCounts: Send + Sync {
+    fn background_jobs(&self) -> &crate::background_jobs::Counts;
 }

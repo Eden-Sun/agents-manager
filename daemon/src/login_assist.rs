@@ -117,8 +117,8 @@ pub fn forget_host(app: &App, host: &str) {
 }
 
 /// pane 關了（watcher 收尾、手動關）。
-pub fn forget(app: &App, host: &str, pane_id: &str) {
-    app.login_panes.lock().unwrap_or_else(|e| e.into_inner()).remove(&(host.to_string(), pane_id.to_string()));
+pub fn forget(app: &impl crate::login_assist::LoginPanes, host: &str, pane_id: &str) {
+    app.login_panes().lock().unwrap_or_else(|e| e.into_inner()).remove(&(host.to_string(), pane_id.to_string()));
 }
 
 #[cfg(test)]
@@ -199,14 +199,14 @@ struct Target {
 }
 
 /// 帳上有、而且就是現在這顆 shell（pane id 被重用、shell 已被收掉都算沒有）。
-async fn target(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<Target> {
+async fn target(app: &(impl crate::capabilities::Db + crate::login_assist::LoginPanes + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables + crate::api::shell::HostShells), host: &str, pane_id: &str) -> LcResult<Target> {
     let key = (host.to_string(), pane_id.to_string());
     let (identity, created, code_sent) = {
-        let m = app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
+        let m = app.login_panes().lock().unwrap_or_else(|e| e.into_inner());
         let e = m.get(&key).filter(|e| e.opened.elapsed() < MAX_AGE).ok_or_else(|| LcError::NotFound("login pane".into()))?;
         (e.identity.clone(), e.shell_created_at.clone(), e.code_sent)
     };
-    let live = app.host_shells.lock().await.iter().any(|s| s.host == host && s.pane_id == pane_id && s.created_at == created);
+    let live = app.host_shells().lock().await.iter().any(|s| s.host == host && s.pane_id == pane_id && s.created_at == created);
     if !live {
         forget(app, host, pane_id);
         return Err(LcError::NotFound("login pane".into()));
@@ -249,9 +249,9 @@ fn code_already_sent() -> LcError {
     )
 }
 
-fn claim_code_send(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<()> {
+fn claim_code_send(app: &impl crate::login_assist::LoginPanes, host: &str, pane_id: &str) -> LcResult<()> {
     let key = (host.to_string(), pane_id.to_string());
-    let mut panes = app.login_panes.lock().unwrap_or_else(|e| e.into_inner());
+    let mut panes = app.login_panes().lock().unwrap_or_else(|e| e.into_inner());
     let entry = panes
         .get_mut(&key)
         .filter(|e| e.opened.elapsed() < MAX_AGE)
@@ -319,3 +319,8 @@ async fn finished(app: &Arc<App>, host: &str, identity: &str) -> Value {
 
 #[cfg(test)]
 mod tests;
+
+/// 登入輔助開出的 pane。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+pub trait LoginPanes: Send + Sync {
+    fn login_panes(&self) -> &crate::login_assist::Registry;
+}

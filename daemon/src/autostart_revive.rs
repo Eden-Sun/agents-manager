@@ -169,18 +169,18 @@ async fn revive_one(app: &Arc<App>, host: &str, l: &Lost) -> anyhow::Result<()> 
 
 /// Only the run reconcile just lost, still on the same host, is eligible for revival. Call before
 /// and after acquiring the bot lock.
-async fn eligible_lost_bot(app: &App, host: &str, l: &Lost) -> anyhow::Result<Option<db::Bot>> {
-    let Some(bot) = db::bot(&app.db, &l.bot_id).await? else { return Ok(None) };
+async fn eligible_lost_bot(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes), host: &str, l: &Lost) -> anyhow::Result<Option<db::Bot>> {
+    let Some(bot) = db::bot(app.db(), &l.bot_id).await? else { return Ok(None) };
     if bot.deleted_at.is_some() || bot.autostart != 1 || bot.managed_by == "child" {
         return Ok(None);
     }
-    if db::bot_host(&app.db, &bot.id).await? != host || !app.host_connected(host).await || db::active_run(&app.db, &bot.id).await?.is_some() {
+    if db::bot_host(app.db(), &bot.id).await? != host || !app.host_connected(host).await || db::active_run(app.db(), &bot.id).await?.is_some() {
         return Ok(None);
     }
     let last: Option<(String, String, Option<String>)> =
         sqlx::query_as("SELECT id, state, exit_reason FROM runs WHERE bot_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1")
             .bind(&bot.id)
-            .fetch_optional(&app.db)
+            .fetch_optional(app.db())
             .await?;
     // 使用者關 pane 或其他路徑收掉的 run，都不是這次對帳發現的遺失。
     if last.as_ref().map(|(id, state, why)| (id.as_str(), state.as_str(), why.as_deref())) != Some((l.run_id.as_str(), "exited", Some(LOST_REASON))) {

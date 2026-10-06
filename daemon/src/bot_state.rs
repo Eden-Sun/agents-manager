@@ -1,13 +1,12 @@
 //! Principal-scoped view of `/api/state` for Bot callers.
 
-use crate::events::ports::{ApiPort};
-use crate::{lifecycle::LcError, state::App};
 use serde_json::Value;
-use std::{collections::HashSet, sync::Arc};
+use crate::lifecycle::LcError;
+use std::collections::HashSet;
 
 /// Keep `/api/state` useful to a worker without returning the browser's global snapshot.
 /// Resource visibility follows the same self-and-descendants rule as `authorize_bot_path`.
-pub async fn view_for_bot(app: &Arc<App>, caller: &str) -> Result<Value, LcError> {
+pub async fn view_for_bot(app: &(impl crate::capabilities::Db + crate::events::ports::ApiPort), caller: &str) -> Result<Value, LcError> {
     let visible_bots: HashSet<String> = sqlx::query_scalar(
         "WITH RECURSIVE owned(id) AS (
              SELECT id FROM bots WHERE id = ?
@@ -17,7 +16,7 @@ pub async fn view_for_bot(app: &Arc<App>, caller: &str) -> Result<Value, LcError
          SELECT id FROM owned",
     )
     .bind(caller)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     .map_err(|e| LcError::Upstream(e.to_string()))?
     .into_iter()

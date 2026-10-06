@@ -180,7 +180,7 @@ pub(crate) async fn handle_global(app: &Arc<App>, host: &str, session: &str, ev:
 
 /// 偵測到的 agent 可能是 bot 剛開的子 pane，值得對帳；daemon 自己開的探測 workspace（額度探測，[`crate::probe_ws`]）不是——
 /// 它們每 30～60 秒就來一個，每個都對整台主機對帳一輪是白做。
-async fn detection_wants_reconcile(app: &Arc<App>, host: &str, session: &str, data: &serde_json::Value) -> bool {
+async fn detection_wants_reconcile(app: &impl crate::capabilities::HerdrRoutes, host: &str, session: &str, data: &serde_json::Value) -> bool {
     let Some(ws) = data.get("workspace_id").and_then(|v| v.as_str()) else { return true };
     let Some(client) = app.herdr_for_session(host, session).await else { return true };
     !crate::probe_ws::is_probe(client.socket_path(), ws)
@@ -188,7 +188,7 @@ async fn detection_wants_reconcile(app: &Arc<App>, host: &str, session: &str, da
 
 /// 訂閱（重）建後的對帳；成功且 `autostart` 才補跑欠著的 autostart（#259）。`autostart_hosts` 保證每台主機只完成一次 autostart pass：
 /// 之後的重連不會把使用者停掉的 bot 再開起來。
-async fn reconcile_and_autostart(app: &Arc<App>, host: &str, autostart: bool) -> bool {
+async fn reconcile_and_autostart(app: &impl crate::events::ports::ReconcileCommands, host: &str, autostart: bool) -> bool {
     match app.reconcile_host(host).await {
         Ok(()) => {
             if autostart {

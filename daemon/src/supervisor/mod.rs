@@ -165,15 +165,15 @@ pub async fn start_requested(app: &Arc<App>) -> Result<(), LcError> {
 ///
 /// 順序本來就對，但寫入失敗被吞掉，於是「停好了」會回 200，而看門狗讀到的還是「要它跑」，
 /// 下一個 tick 就把它拉回來——使用者看到的是自己停過的東西自己活過來（issue #84）。
-pub async fn stop_requested(app: &Arc<App>) -> Result<(), LcError> {
-    let bot = manager_bot(&app.db)
+pub async fn stop_requested(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::TurnOps)) -> Result<(), LcError> {
+    let bot = manager_bot(app.db())
         .await?
         .ok_or_else(|| LcError::conflict("supervisor is not set up", json!({"reason": "not_configured"})))?;
-    store::set_desired_running(&app.db, false).await.map_err(persist_intent_failed)?;
+    store::set_desired_running(app.db(), false).await.map_err(persist_intent_failed)?;
     app.stop_bot(&bot.id).await?;
     // A stopped CLI takes its Remote Control session with it; claiming otherwise would send
     // the user to a dead URL on their phone.
-    let _ = store::set_remote(&app.db, "unknown", None).await;
+    let _ = store::set_remote(app.db(), "unknown", None).await;
     app.emit("supervisor_changed", json!({"stopped": true})).await;
     Ok(())
 }
@@ -623,11 +623,11 @@ async fn source_of(
 ///
 /// Sanitized on purpose: no env, no hook tokens, no args (an identity's args can name config
 /// directories), no persona text. Enough to pick a bot; nothing that helps exfiltrate an account.
-pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
-    let projects = crate::db::live_projects(&app.db).await.map_err(up)?;
-    let bots = crate::db::live_bots(&app.db).await.map_err(up)?;
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
-    let responder_id = roles::get(&app.db, roles::Role::Responder).await.map_err(up)?.bot_id;
+pub async fn sanitized_state(app: &(impl crate::capabilities::Db + crate::capabilities::HerdrRoutes)) -> Result<Value, LcError> {
+    let projects = crate::db::live_projects(app.db()).await.map_err(up)?;
+    let bots = crate::db::live_bots(app.db()).await.map_err(up)?;
+    let sup = store::get_or_init(app.db()).await.map_err(up)?;
+    let responder_id = roles::get(app.db(), roles::Role::Responder).await.map_err(up)?.bot_id;
     let hosts: std::collections::HashMap<String, String> =
         projects.iter().map(|p| (p.id.clone(), p.host.clone())).collect();
     let mut connected: std::collections::HashSet<String> = Default::default();
@@ -640,14 +640,14 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
     let asleep = idle_sleep::all_asleep(app).await;
     let mut out = Vec::new();
     for b in &bots {
-        let run = crate::db::active_run(&app.db, &b.id).await.map_err(up)?;
+        let run = crate::db::active_run(app.db(), &b.id).await.map_err(up)?;
         // Work already waiting on this bot: a bot with a queue is available, but not free.
         let queued: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM turns WHERE conversation_id=(SELECT id FROM conversations WHERE bot_id=?)
                AND status='queued'",
         )
         .bind(&b.id)
-        .fetch_one(&app.db)
+        .fetch_one(app.db())
         .await
         .map_err(up)?;
         out.push(json!({
@@ -697,11 +697,11 @@ pub async fn sanitized_state(app: &Arc<App>) -> Result<Value, LcError> {
         "bots": out,
         // Everything still owed, `awaiting_review` included: the point of the acceptance state
         // is that a finished turn stays in front of the manager until it decides.
-        "open_assignments": store::unsettled_assignments(&app.db).await.map_err(up)?
+        "open_assignments": store::unsettled_assignments(app.db()).await.map_err(up)?
             .iter().map(store::Assignment::to_json).collect::<Vec<_>>(),
-        "pending_inbox": store::pending_inbox(&app.db).await.map_err(up)?
+        "pending_inbox": store::pending_inbox(app.db()).await.map_err(up)?
             .iter().map(store::InboxEvent::to_json).collect::<Vec<_>>(),
-        "open_incidents": store::open_incidents(&app.db).await.map_err(up)?
+        "open_incidents": store::open_incidents(app.db()).await.map_err(up)?
             .iter().map(store::Incident::to_json).collect::<Vec<_>>(),
     }))
 }

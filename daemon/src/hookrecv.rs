@@ -140,8 +140,8 @@ pub(crate) const RELAY_ANNOUNCE_EVENT: &str = "AmRelayAnnounce";
 
 /// 報備比收件方的回音晚到時補標：寄件者那台主機上、`agent_name` 是 `to_agent` 的在跑 run，它的對話裡
 /// 五分鐘內、還沒標來源、內容對得上的最新一則使用者訊息。補上就用掉那筆報備（同一句不標兩次）。
-async fn relay_backfill(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &str) -> Result<()> {
-    let host = db::bot_host(&app.db, from_bot).await?;
+async fn relay_backfill(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), from_bot: &str, to_agent: &str, text: &str) -> Result<()> {
+    let host = db::bot_host(app.db(), from_bot).await?;
     let since = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT m.id, m.content, b.id FROM messages m
@@ -157,7 +157,7 @@ async fn relay_backfill(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &s
     .bind(&host)
     .bind(from_bot)
     .bind(&since)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     let Some((msg_id, content, to_bot)) = rows.into_iter().find(|(_, c, _)| crate::agent_relay::same_prompt(text, c)) else {
         return Ok(());
@@ -166,10 +166,10 @@ async fn relay_backfill(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &s
         .bind(from_bot)
         .bind(db::now())
         .bind(&msg_id)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
     let _ = crate::agent_relay::claim(&host, to_agent, &content);
-    let message: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&msg_id).fetch_one(&app.db).await?;
+    let message: db::Message = sqlx::query_as("SELECT *, rowid AS seq FROM messages WHERE id = ?").bind(&msg_id).fetch_one(app.db()).await?;
     tracing::info!(from = %from_bot, to = %to_agent, msg = %msg_id, "relay announce arrived after the echo; attributed it");
     app.emit_message_added(&to_bot, message).await;
     Ok(())
@@ -787,13 +787,13 @@ async fn store_resent_prompt_tx(
 }
 
 /// [`store_resent_prompt_tx`] 給「回合已被備援收掉、遲到的 Stop 才到」的路徑：自己開交易、補完就發事件。
-async fn store_resent_prompt(app: &Arc<App>, bot_id: &str, conv: &str, turn: &db::Turn, run: Option<&db::Run>, payload: &Value, transcript_path: Option<&str>) -> Result<()> {
+async fn store_resent_prompt(app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands), bot_id: &str, conv: &str, turn: &db::Turn, run: Option<&db::Run>, payload: &Value, transcript_path: Option<&str>) -> Result<()> {
     if turn.origin != "external" {
         return Ok(());
     }
     let Some(text) = human_started_prompt(payload, transcript_path).await else { return Ok(()) };
     // 先數有沒有使用者訊息再寫：deferred 的話數完之後別的 writer 一 commit，INSERT 就 517，那一句補不上（#831）。
-    let mut tx = db::begin_write(&app.db).await?;
+    let mut tx = db::begin_write(app.db()).await?;
     let added = store_resent_prompt_tx(app, &mut tx, conv, turn, run, &text).await?;
     tx.commit().await?;
     if let Some(m) = added {
@@ -921,7 +921,7 @@ async fn stamp_native_ids(
 /// native id、升級、回覆寫在同一個交易裡（#115）：native id 是去重的鑰匙，先寫它再寫回覆的話，
 /// 回覆那句失敗時收件匣的重試會被去重擋掉，回覆就永遠補不上了。
 async fn fill_or_drop_late_hook(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
     turn: &db::Turn,
     body_text: &str,
     session_id: &Option<String>,
@@ -929,7 +929,7 @@ async fn fill_or_drop_late_hook(
     same_turn: bool,
 ) -> Result<()> {
     // 先數有沒有回覆再寫：deferred 的話數完之後別的 writer（對帳每一輪都在寫）一 commit 就 517，遲到的回覆補不上（#831）。
-    let mut tx = db::begin_write(&app.db).await?;
+    let mut tx = db::begin_write(app.db()).await?;
     let has_reply: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE turn_id=? AND role='assistant'")
             .bind(&turn.id)
@@ -978,7 +978,7 @@ async fn fill_or_drop_late_hook(
 /// `fill_or_drop_late_hook` 的 `same_turn` 分支：這回合的 assistant 訊息全是 `terminal_fallback` 才蓋（有 hook 寫的就不動），
 /// 蓋最新那則、其餘備援那幾則留著（通常只有一則）。回合 `completed_fallback → completed`（合法邊）；CAS 沒過就不蓋。
 async fn replace_fallback_reply(
-    app: &Arc<App>,
+    app: &impl crate::events::ports::TurnCommands,
     mut tx: sqlx::Transaction<'_, sqlx::Sqlite>,
     turn: &db::Turn,
     body_text: &str,
@@ -1029,7 +1029,7 @@ async fn replace_fallback_reply(
 /// Consume the one-shot `resume_native` request. Clearing the column before recording a mismatch
 /// makes retries idempotent.
 pub(crate) async fn consume_resume_session(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::events::ports::TurnCommands),
     bot: &db::Bot,
     run: &db::Run,
     reported_session_id: Option<&str>,
@@ -1048,7 +1048,7 @@ pub(crate) async fn consume_resume_session(
     .bind(if mismatch { "mismatch" } else { "verified" })
     .bind(reported)
     .bind(&run.id)
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     // A second hook may hold a stale `Run` snapshot; only the one that cleared the marker records a mismatch.
     if consumed.rows_affected() == 0 {

@@ -124,9 +124,9 @@ pub fn parse_status_line(screen: &str) -> Option<CodexRuntime> {
 /// * 讀不到狀態列（選單開著、畫面被清、CLI 剛啟動）什麼都不動：讀不到不是 fast=false。
 /// * 讀得到就一律以它為準：狀態列有 `fast` 字樣 = 開，**整行讀得到卻沒有 = 關**（tier 關掉時 codex 省略那個字）。
 ///   使用者在 TUI 手打 `/fast`、`/model`，或當場套用中途失敗，都會讓啟動時記下的值過期。
-pub async fn correct_runtime_from_screen(app: &crate::state::App, run_id: &str, screen: &str) -> bool {
+pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), run_id: &str, screen: &str) -> bool {
     let Some(seen) = parse_status_line(screen) else { return false };
-    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return false };
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
     let same = run.runtime_model.as_deref() == Some(seen.model.as_str())
         && run.runtime_effort == seen.effort
         && run.runtime_fast == Some(i64::from(seen.fast));
@@ -153,7 +153,7 @@ pub async fn correct_runtime_from_screen(app: &crate::state::App, run_id: &str, 
         .bind(&seen.effort)
         .bind(i64::from(seen.fast))
         .bind(run_id)
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .is_ok();
     if wrote {

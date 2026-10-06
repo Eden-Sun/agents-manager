@@ -3,10 +3,7 @@
 
 use crate::db;
 use crate::lifecycle::{LcError, LcResult};
-use crate::mission::ports::{EventOps, GroupTurnOps};
-use crate::state::App;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Member {
@@ -246,13 +243,13 @@ pub async fn members(app: &impl crate::capabilities::Db, project_id: &str) -> Lc
 /// `POST /api/projects/:id/chat` (SPEC §13.4). The group id **is** the client request id, so a
 /// retry reaches the same per-bot Turns and adds no second "skipped" note.
 pub async fn chat(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::mission::ports::EventOps + crate::mission::ports::GroupTurnOps),
     project_id: &str,
     text: &str,
     client_request_id: &str,
     attachment_ids: &[String],
 ) -> Result<Value, Response400> {
-    let project = db::project(&app.db, project_id)
+    let project = db::project(app.db(), project_id)
         .await
         .map_err(|e| Response400::Lc(LcError::Upstream(e.to_string())))?
         .filter(|p| p.deleted_at.is_none())
@@ -287,11 +284,11 @@ pub async fn chat(
         match sent_now {
             Ok(out) => {
                 // 同一個 crid 之前對這顆寫過「未送達」note（當時沒在跑），這次送到了：note 已經不是事實，撤掉（#340）。
-                if let Ok(conv) = db::conversation_id(&app.db, &t.id).await {
+                if let Ok(conv) = db::conversation_id(app.db(), &t.id).await {
                     match sqlx::query("DELETE FROM messages WHERE conversation_id = ? AND group_id = ? AND role = 'system'")
                         .bind(&conv)
                         .bind(&group_id)
-                        .execute(&app.db)
+                        .execute(app.db())
                         .await
                     {
                         // 刪掉的是一則前端已經收過的訊息：沒有事件的話群組時間軸會一直留著它（跟 `prompt.rs` 撤回 prompt 同一招）。
@@ -322,14 +319,14 @@ pub async fn chat(
     Ok(json!({"group_id": group_id, "project_id": project.id, "delivered": !sent.is_empty(), "sent": sent, "skipped": skipped}))
 }
 
-async fn note_skipped(app: &Arc<App>, bot: &Member, group_id: &str, code: &str, human: &str) -> anyhow::Result<()> {
-    let conv = db::conversation_id(&app.db, &bot.id).await?;
+async fn note_skipped(app: &(impl crate::capabilities::Db + crate::mission::ports::GroupTurnOps), bot: &Member, group_id: &str, code: &str, human: &str) -> anyhow::Result<()> {
+    let conv = db::conversation_id(app.db(), &bot.id).await?;
     let dup: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND group_id = ? AND role = 'system'",
     )
     .bind(&conv)
     .bind(group_id)
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await?;
     if dup > 0 {
         return Ok(());
@@ -352,14 +349,14 @@ pub enum Response400 {
 }
 
 /// `GET /api/projects/:id/messages?before=&limit=` (SPEC §13.4), paginated by SQLite rowid.
-pub async fn messages(app: &Arc<App>, project_id: &str, before: Option<&str>, limit: i64) -> LcResult<Value> {
+pub async fn messages(app: &(impl crate::capabilities::Db + crate::mission::ports::GroupTurnOps), project_id: &str, before: Option<&str>, limit: i64) -> LcResult<Value> {
     messages_scoped(app, project_id, before, limit, None).await
 }
 
 /// Bot principals may read the same group timeline shape, but only for themselves and their
 /// descendants. Project membership alone must not turn the collection route into sibling access.
 pub async fn messages_for_bot_tree(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::mission::ports::GroupTurnOps),
     project_id: &str,
     before: Option<&str>,
     limit: i64,
@@ -369,13 +366,13 @@ pub async fn messages_for_bot_tree(
 }
 
 async fn messages_scoped(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::mission::ports::GroupTurnOps),
     project_id: &str,
     before: Option<&str>,
     limit: i64,
     root_bot_id: Option<&str>,
 ) -> LcResult<Value> {
-    let project = db::project(&app.db, project_id)
+    let project = db::project(app.db(), project_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|p| p.deleted_at.is_none())
@@ -404,7 +401,7 @@ async fn messages_scoped(
             .bind(tree_root)
             .bind(message_id)
             .bind(scoped)
-            .fetch_optional(&app.db)
+            .fetch_optional(app.db())
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?;
             match at {
@@ -424,14 +421,14 @@ async fn messages_scoped(
             .bind(scoped)
             .bind(rowid)
             .bind(limit + 1)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await,
         None => sqlx::query_as::<_, db::GroupMessage>(&format!("{TREE}{BASE} ORDER BY m.rowid DESC LIMIT ?"))
             .bind(tree_root)
             .bind(&project.id)
             .bind(scoped)
             .bind(limit + 1)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await,
     }
     .map_err(|e| LcError::Upstream(e.to_string()))?;
@@ -544,6 +541,7 @@ mod strip_tests {
 #[cfg(test)]
 mod message_tests {
     use super::*;
+    use crate::state::App;
 
     #[tokio::test]
     async fn messages_page_by_rowid_when_ids_are_out_of_order() {
@@ -627,6 +625,8 @@ mod message_tests {
 #[cfg(test)]
 mod uncommitted_tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
     use crate::testing as tt;
 
     /// 一顆閒著、打字進 pane 的 claude（同 `owed_delivery::tests::idle_bot`）。

@@ -32,14 +32,14 @@ pub fn spawn(app: Arc<App>) {
 }
 
 /// 這則事件是某個任務的交辦改了狀態 → 推 `mission_updated`，回傳推了沒有。
-pub async fn relay(app: &Arc<App>, ev: &WsEvent) -> bool {
+pub async fn relay(app: &(impl crate::capabilities::Db + crate::mission::ports::EventOps), ev: &WsEvent) -> bool {
     if ev.kind != "supervisor_changed" {
         return false;
     }
     let Some(aid) = ev.data.get("assignment_id").and_then(Value::as_str) else { return false };
-    let Ok(Some(a)) = app.db.assignment(aid).await else { return false };
+    let Ok(Some(a)) = app.db().assignment(aid).await else { return false };
     let Some(mid) = a.mission_id.as_deref() else { return false };
-    let Ok(Some(m)) = super::store::get(&app.db, mid).await else { return false };
+    let Ok(Some(m)) = super::store::get(app.db(), mid).await else { return false };
     app.emit_event(
         "mission_updated",
         json!({"mission_id": m.id, "project_id": m.project_id, "status": m.status(), "assignment_id": aid}),

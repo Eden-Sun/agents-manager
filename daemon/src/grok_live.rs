@@ -15,8 +15,6 @@
 
 use crate::db;
 use crate::herdr::HerdrClient;
-use crate::state::App;
-use std::sync::Arc;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GrokRuntime {
@@ -41,10 +39,10 @@ pub fn parse_footer(screen: &str) -> Option<GrokRuntime> {
 /// * 只寫讀到、而且跟記著的不一樣的欄位；讀不到的欄位沿用。
 /// * 一般 bot 只校正**已知**的 runtime：`NULL`＝啟動時沒指定（CLI 預設），拿畫面補上會多一條重啟也改不掉的假 drift。
 ///   child 沒有這個問題（設定會跟著 runtime），未知也補。
-pub async fn correct_runtime_from_screen(app: &App, run_id: &str, screen: &str) -> bool {
+pub async fn correct_runtime_from_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), run_id: &str, screen: &str) -> bool {
     let Some(seen) = parse_footer(screen) else { return false };
-    let Ok(Some(run)) = db::run(&app.db, run_id).await else { return false };
-    let Ok(Some(bot)) = db::bot(&app.db, &run.bot_id).await else { return false };
+    let Ok(Some(run)) = db::run(app.db(), run_id).await else { return false };
+    let Ok(Some(bot)) = db::bot(app.db(), &run.bot_id).await else { return false };
     let child = bot.managed_by == "child";
     let moved = |seen: Option<String>, cur: Option<&str>| seen.filter(|v| (child || cur.is_some()) && cur != Some(v.as_str()));
     let model = moved(seen.model, run.runtime_model.as_deref());
@@ -62,7 +60,7 @@ pub async fn correct_runtime_from_screen(app: &App, run_id: &str, screen: &str) 
         .bind(&model)
         .bind(&effort)
         .bind(run_id)
-        .execute(&app.db)
+        .execute(app.db())
         .await;
     if let Err(e) = wrote {
         tracing::warn!(run = %run_id, bot = %bot.name, error = %e, "could not record the grok runtime switch, retrying next sweep");
@@ -85,7 +83,7 @@ async fn hint_moves_runtime(app: &impl crate::capabilities::Db, run_id: &str, sc
 
 /// 巡邏用。`hint` 是鎖外已經讀過的畫面：跟 runtime 一樣就停（多顆 bot 每 30 秒不各加一次讀、也不握著鎖等 herdr）。
 /// 不一樣才拿 bot 鎖（啟動補 `/effort`、當場套用握著同一把）重讀再校正，避免把套用前的舊框寫回去。
-pub async fn sync_runtime(app: &Arc<App>, client: &HerdrClient, bot_id: &str, run_id: &str, pane_id: &str, hint: Option<&str>) {
+pub async fn sync_runtime(app: &(impl crate::capabilities::BotLocks + crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit), client: &HerdrClient, bot_id: &str, run_id: &str, pane_id: &str, hint: Option<&str>) {
     if let Some(text) = hint {
         if !hint_moves_runtime(app, run_id, text).await {
             return;
@@ -93,7 +91,7 @@ pub async fn sync_runtime(app: &Arc<App>, client: &HerdrClient, bot_id: &str, ru
     }
     let lock = app.bot_lock(bot_id).await;
     let _g = lock.lock().await;
-    if !matches!(db::active_run(&app.db, bot_id).await, Ok(Some(r)) if r.id == run_id) {
+    if !matches!(db::active_run(app.db(), bot_id).await, Ok(Some(r)) if r.id == run_id) {
         return;
     }
     let Ok(read) = client.pane_read(pane_id, "visible", 60).await else { return };

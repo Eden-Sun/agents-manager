@@ -79,16 +79,16 @@ pub fn sweep(app: &Arc<App>) {
     spawn_sweep_task(app, guard, async move { sweep_once(&round_app).await });
 }
 
-fn spawn_sweep_task<F>(app: &Arc<App>, guard: SweepGuard, round: F)
+fn spawn_sweep_task<F>(app: &(impl crate::capabilities::BgTasks + crate::capabilities::Shutdown), guard: SweepGuard, round: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    if app.shutdown.is_cancelled() {
+    if app.shutdown().is_cancelled() {
         drop(guard);
         return;
     }
-    let shutdown = app.shutdown.clone();
-    let tasks = app.background_tasks.clone();
+    let shutdown = app.shutdown().clone();
+    let tasks = app.background_tasks().clone();
     tasks.spawn(async move {
         // guard 在這個 task 結束時才放掉，包含 panic 與取消；不會讓後續 sweep 永久卡住。
         let _guard = guard;

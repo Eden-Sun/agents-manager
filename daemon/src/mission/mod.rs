@@ -45,7 +45,7 @@ pub async fn billing_identity_named(app: &Arc<App>, host: &str, bot: &crate::db:
 }
 
 /// 這台主機上，哪個身分就是這個 kind 的預設帳號（沒有自己的 home 變數那個）。查不到回 `None`。
-pub async fn default_identity_name(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
+pub async fn default_identity_name(app: &impl crate::mission::ports::IdentityOps, host: &str, kind: &str) -> Option<String> {
     if kind != "claude" {
         return None;
     }

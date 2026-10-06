@@ -1,6 +1,5 @@
 //! Supervision for long-lived daemon background loops.
 
-use crate::state::App;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,16 +19,16 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 /// Start a loop under the App task tracker. Panics restart with bounded backoff; shutdown gives
 /// the current pass time to leave at its next cancellation check before aborting it as a last resort.
-pub fn spawn_restartable<F, Fut>(app: &Arc<App>, name: &'static str, factory: F)
+pub fn spawn_restartable<F, Fut>(app: &(impl crate::capabilities::BgTasks + crate::capabilities::Shutdown), name: &'static str, factory: F)
 where
     F: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    if app.shutdown.is_cancelled() {
+    if app.shutdown().is_cancelled() {
         return;
     }
-    let shutdown = app.shutdown.clone();
-    app.background_tasks.spawn(async move {
+    let shutdown = app.shutdown().clone();
+    app.background_tasks().spawn(async move {
         restart_loop(shutdown, name, factory).await;
     });
 }

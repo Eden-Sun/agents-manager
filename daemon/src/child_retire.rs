@@ -187,12 +187,12 @@ pub(crate) fn cause(why: &str, exit_reason: Option<&str>, pane: Pane) -> &'stati
 }
 
 /// 退役紀錄的 payload：原因、呼叫端、哪一顆 daemon（`boot_id`）、最後一個 run 怎麼結束、herdr 對 pane 的回答，與據此算出的 [`cause`]。
-async fn record_payload(app: &Arc<App>, bot: &db::Bot, why: &str, mode: Mode, call_site: &str) -> anyhow::Result<serde_json::Value> {
+async fn record_payload(app: &(impl crate::capabilities::BootId + crate::capabilities::Db + crate::capabilities::HerdrRoutes), bot: &db::Bot, why: &str, mode: Mode, call_site: &str) -> anyhow::Result<serde_json::Value> {
     // ULID 同毫秒會翻（#100），世代序用 rowid。
     let run: Option<db::Run> =
-        sqlx::query_as("SELECT * FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1").bind(&bot.id).fetch_optional(&app.db).await?;
+        sqlx::query_as("SELECT * FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1").bind(&bot.id).fetch_optional(app.db()).await?;
     let exit_reason: Option<String> = match &run {
-        Some(r) => sqlx::query_scalar("SELECT exit_reason FROM runs WHERE id = ?").bind(&r.id).fetch_one(&app.db).await?,
+        Some(r) => sqlx::query_scalar("SELECT exit_reason FROM runs WHERE id = ?").bind(&r.id).fetch_one(app.db()).await?,
         None => None,
     };
     let pane = match &run {
@@ -205,7 +205,7 @@ async fn record_payload(app: &Arc<App>, bot: &db::Bot, why: &str, mode: Mode, ca
         "mode": if mode == Mode::Implicit { "implicit" } else { "explicit" },
         "call_site": call_site,
         "requested_by": crate::config_audit::http_caller(),
-        "boot_id": app.boot_id,
+        "boot_id": app.boot_id(),
         "name": bot.name,
         "project_id": bot.project_id,
         "parent_bot_id": bot.parent_bot_id,
@@ -216,7 +216,7 @@ async fn record_payload(app: &Arc<App>, bot: &db::Bot, why: &str, mode: Mode, ca
     }))
 }
 
-async fn pane_state(app: &Arc<App>, run: &db::Run) -> Pane {
+async fn pane_state(app: &impl crate::capabilities::HerdrRoutes, run: &db::Run) -> Pane {
     let Some(pane) = run.pane_id.as_deref() else { return Pane::Unknown };
     let Some(client) = app.herdr_for_run(run).await else { return Pane::Unknown };
     match client.pane_get(pane).await {

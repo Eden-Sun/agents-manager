@@ -14,7 +14,7 @@ use crate::config::{BotCfg, ProjectCfg};
 use crate::lifecycle::{self, LcError};
 use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::{HostProbes, QuotaOps, TurnOps};
+use super::ports::{QuotaOps, TurnOps};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -149,14 +149,14 @@ pub fn runtime_json(port: u16, self_id: &str, manager_id: Option<&str>, data_dir
     })
 }
 
-fn deploy_files(app: &Arc<App>, bot_id: &str, manager_id: Option<&str>, persona: &str) -> std::io::Result<super::setup::Deployed> {
+fn deploy_files(app: &(impl crate::capabilities::DataDir + crate::capabilities::ListenPort), bot_id: &str, manager_id: Option<&str>, persona: &str) -> std::io::Result<super::setup::Deployed> {
     let dir = dir(app);
     std::fs::create_dir_all(dir.join("bin"))?;
-    std::fs::write(dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port))?;
+    std::fs::write(dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port()))?;
     std::fs::write(dir.join("persona.md"), persona)?;
     std::fs::write(
         dir.join("runtime.json"),
-        serde_json::to_string_pretty(&runtime_json(app.port, bot_id, manager_id, &app.data_dir.to_string_lossy()))?,
+        serde_json::to_string_pretty(&runtime_json(app.port(), bot_id, manager_id, &app.data_dir().to_string_lossy()))?,
     )?;
     if !dir.join("handoff.md").exists() {
         std::fs::write(dir.join("handoff.md"), "# AGM 協調者管理摘要\n\n（尚未寫入。權威紀錄在 AG Man 資料庫。）\n")?;
@@ -175,12 +175,12 @@ fn deploy_files(app: &Arc<App>, bot_id: &str, manager_id: Option<&str>, persona:
 ///
 /// `identity/model/effort` 省略時沿用已存的設定（第一次是 cc0/opus/high）。
 pub async fn ensure_env(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::ListenPort + crate::supervisor::ports::HostProbes),
     identity: Option<&str>,
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<(String, String, super::setup::Deployed), LcError> {
-    let row = roles::get(&app.db, Role::Responder).await.map_err(up)?;
+    let row = roles::get(app.db(), Role::Responder).await.map_err(up)?;
     let identity = identity.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.identity).to_string();
     let model = model.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&row.model);
     let model = crate::models::canonical_model("claude", model).to_string();
@@ -204,13 +204,13 @@ pub async fn ensure_env(
     let d = dir(app);
     std::fs::create_dir_all(&d).map_err(|e| LcError::Bad(format!("{}: {e}", d.display())))?;
     let path = crate::config::canonical_path(&d.to_string_lossy()).map_err(|e| LcError::Bad(e.to_string()))?;
-    let persona = effective_persona(&app.db).await?;
+    let persona = effective_persona(app.db()).await?;
     // 舊安裝的協調者自成一個專案；先搬進巡檢的專案，下面就是在同一個專案裡更新同一顆 bot。
     let adopted = match row.bot_id.as_deref() {
         Some(b) => adopt_into_manager_project(app, b).await?,
         None => None,
     };
-    let manager = store::get_or_init(&app.db).await.map_err(up)?;
+    let manager = store::get_or_init(app.db()).await.map_err(up)?;
     let manager_id = manager.bot_id.clone();
     let manager_project = manager.project_id.clone();
 
@@ -219,7 +219,7 @@ pub async fn ensure_env(
     let fresh_project = crate::db::ulid();
     let fresh_bot = crate::db::ulid();
     let (m2, e2, i2, p2, persona2) = (model.clone(), effort.clone(), identity.clone(), path.clone(), persona.clone());
-    let (project_id, bot_id) = crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+    let (project_id, bot_id) = crate::projection::update_and_project(app.cfg(), app.db(), move |cfg| {
             // 巡檢的專案優先：協調者是同一顆總管的另一個角色，側欄不該分成兩個專案（使用者 2026-09-16）。
             let pidx = cfg
                 .projects
@@ -307,7 +307,7 @@ pub async fn ensure_env(
         }
     })?;
     // 專案只有一個 path，所以跟巡檢同專案之後，協調者自己的目錄改由 bot 記住。
-    set_cwd(&app.db, &bot_id, &path).await?;
+    set_cwd(app.db(), &bot_id, &path).await?;
     let deployed = deploy_files(app, &bot_id, manager_id.as_deref(), &persona).map_err(up)?;
     // 巡檢的 runtime.json 也要知道協調者是誰：它目錄裡的 ops 腳本派工給協調者（巡檢不能對自己下交辦）。
     if let Some(m) = manager_id.as_deref() {
@@ -315,8 +315,8 @@ pub async fn ensure_env(
             tracing::warn!(error = %e, "could not record the responder in the patrol runtime.json");
         }
     }
-    roles::set_env(&app.db, Role::Responder, &bot_id, &project_id, &deployed.cwd).await.map_err(up)?;
-    roles::set_runtime(&app.db, Role::Responder, &identity, &model, &effort).await.map_err(up)?;
+    roles::set_env(app.db(), Role::Responder, &bot_id, &project_id, &deployed.cwd).await.map_err(up)?;
+    roles::set_runtime(app.db(), Role::Responder, &identity, &model, &effort).await.map_err(up)?;
     Ok((project_id, bot_id, deployed))
 }
 
@@ -448,14 +448,14 @@ pub async fn start(app: &Arc<App>, detail: Option<&str>) -> Result<(), LcError> 
     Ok(())
 }
 
-pub async fn stop(app: &Arc<App>) -> Result<(), LcError> {
-    let bot = roles::responder_bot(&app.db)
+pub async fn stop(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::TurnOps)) -> Result<(), LcError> {
+    let bot = roles::responder_bot(app.db())
         .await
         .map_err(up)?
         .ok_or_else(|| LcError::conflict("responder is not set up", json!({"reason": "responder_not_configured"})))?;
     // 先寫「不要它跑」，看門狗才不會在兩步之間把它拉回來；寫不進去就不要停——停了也會被拉回來，
     // 而使用者拿到的是 200（issue #84）。
-    roles::set_desired_running(&app.db, Role::Responder, false)
+    roles::set_desired_running(app.db(), Role::Responder, false)
         .await
         .map_err(|e| LcError::Upstream(format!("could not persist desired_running (nothing was stopped): {e}")))?;
     app.stop_bot(&bot.id).await?;
@@ -938,22 +938,22 @@ pub async fn notify(app: &Arc<App>) {
 }
 
 /// 協調者 pane 現在看得出要人登入嗎（登入選單、onboarding、或回合只回 `Not logged in`）。沒有 run 就是不知道。
-async fn login_problem_on_screen(app: &Arc<App>, bot: &crate::db::Bot) -> Option<bool> {
-    match crate::db::active_run(&app.db, &bot.id).await {
+async fn login_problem_on_screen(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes), bot: &crate::db::Bot) -> Option<bool> {
+    match crate::db::active_run(app.db(), &bot.id).await {
         Ok(Some(run)) => app.pane_shows_login_problem(&run).await,
         Ok(None) => Some(false),
         Err(_) => None,
     }
 }
 
-async fn login_recovered(app: &Arc<App>, bot: &crate::db::Bot, since: Option<&str>) -> bool {
-    answered_since(&app.db, &bot.id, since).await || matches!(login_problem_on_screen(app, bot).await, Some(false))
+async fn login_recovered(app: &(impl crate::capabilities::Db + crate::supervisor::ports::HostProbes), bot: &crate::db::Bot, since: Option<&str>) -> bool {
+    answered_since(app.db(), &bot.id, since).await || matches!(login_problem_on_screen(app, bot).await, Some(false))
 }
 
 /// 送不出去的那一次順便看畫面（issue #420）：協調者的 CLI 沒登入時，送出只會一直 `composer_unreadable`／
 /// 回合失敗，而 liveness 照樣是 idle、health 照樣 healthy，申請與核准靜默過期了 9 小時。看得出是登入問題就把
 /// 狀態標成 `needs_login`：health 轉 critical（#454），incident 探針開 `role_unavailable` 叫醒巡檢去找人。
-async fn note_login_problem(app: &Arc<App>, bot: &crate::db::Bot, status: &str) {
+async fn note_login_problem(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + crate::supervisor::ports::HostProbes), bot: &crate::db::Bot, status: &str) {
     if status == "needs_login" || login_problem_on_screen(app, bot).await != Some(true) {
         return;
     }
@@ -961,7 +961,7 @@ async fn note_login_problem(app: &Arc<App>, bot: &crate::db::Bot, status: &str) 
     let detail = format!(
         "{who} 的 CLI 沒登入（畫面要求 /login）：協調事件送不出去、留在 inbox。請在協調者的 pane 跑 /login（Keychain 鎖住時先在另一個終端 security unlock-keychain）"
     );
-    if roles::set_status(&app.db, Role::Responder, "needs_login", Some(&detail), None).await.is_ok() {
+    if roles::set_status(app.db(), Role::Responder, "needs_login", Some(&detail), None).await.is_ok() {
         tracing::error!(bot = %bot.id, identity = who, "responder CLI is not logged in; coordination events cannot be delivered");
         app.emit("supervisor_changed", json!({"responder": "needs_login"})).await;
     }

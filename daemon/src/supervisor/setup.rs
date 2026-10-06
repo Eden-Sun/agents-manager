@@ -6,12 +6,9 @@
 
 use crate::config::{BotCfg, ProjectCfg};
 use crate::lifecycle::LcError;
-use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::{HostProbes};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use super::store;
 
@@ -144,10 +141,10 @@ fn runtime_json(port: u16, bot_id: &str, responder_id: Option<&str>, data_dir: &
 /// `persona` is the **stored** text, passed in rather than read from the binary: `persona.md`
 /// is a readable copy of what the manager is actually running on, and regenerating it from the
 /// embedded default would make the copy disagree with the original.
-pub fn deploy_files(app: &Arc<App>, bot_id: &str, responder_id: Option<&str>, persona: &str) -> std::io::Result<Deployed> {
+pub fn deploy_files(app: &(impl crate::capabilities::DataDir + crate::capabilities::ListenPort), bot_id: &str, responder_id: Option<&str>, persona: &str) -> std::io::Result<Deployed> {
     let dir = agm_dir(app);
     std::fs::create_dir_all(dir.join("bin"))?;
-    std::fs::write(dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port))?;
+    std::fs::write(dir.join("CLAUDE.md"), claude_md(&dir, bot_id, app.port()))?;
     std::fs::write(dir.join("persona.md"), persona)?;
     write_runtime_json(app, bot_id, responder_id)?;
     if !dir.join("handoff.md").exists() {
@@ -163,21 +160,21 @@ pub fn deploy_files(app: &Arc<App>, bot_id: &str, responder_id: Option<&str>, pe
 
 /// 只重寫巡檢目錄的 `runtime.json`。協調者在巡檢之後才建立時由 `responder::ensure_env` 呼叫，
 /// 巡檢目錄還不存在（沒 setup 過）就什麼都不做。
-pub fn write_runtime_json(app: &Arc<App>, bot_id: &str, responder_id: Option<&str>) -> std::io::Result<()> {
+pub fn write_runtime_json(app: &(impl crate::capabilities::DataDir + crate::capabilities::ListenPort), bot_id: &str, responder_id: Option<&str>) -> std::io::Result<()> {
     let dir = agm_dir(app);
     if !dir.is_dir() {
         return Ok(());
     }
     std::fs::write(
         dir.join("runtime.json"),
-        serde_json::to_string_pretty(&runtime_json(app.port, bot_id, responder_id, &app.data_dir.to_string_lossy()))?,
+        serde_json::to_string_pretty(&runtime_json(app.port(), bot_id, responder_id, &app.data_dir().to_string_lossy()))?,
     )
 }
 
 /// Create (or find) the AGM project and bot in config.toml, then project it into SQLite.
 /// Never starts anything — `POST /api/supervisor/start` is a separate, explicit step.
-pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), LcError> {
-    let sup = store::get_or_init(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+pub async fn ensure_env(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::ListenPort + crate::supervisor::ports::HostProbes)) -> Result<(String, String, Deployed), LcError> {
+    let sup = store::get_or_init(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let dir = agm_dir(app);
     std::fs::create_dir_all(&dir).map_err(|e| LcError::Bad(format!("{}: {e}", dir.display())))?;
     let path = crate::config::canonical_path(&dir.to_string_lossy()).map_err(|e| LcError::Bad(e.to_string()))?;
@@ -202,7 +199,7 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
     // Stored wins. An older binary running `setup` used to write its own compiled-in text back
     // over the bot, which is how a persona that had just been updated could be silently rolled
     // back; the embedded copy is now only ever a seed for an install that has none.
-    let (persona, seeded) = effective_persona(&app.db).await?;
+    let (persona, seeded) = effective_persona(app.db()).await?;
     // The closure below moves its copy into the config update; `persona` itself is still needed
     // afterwards to write the readable copy.
     let persona_for_cfg = persona.clone();
@@ -213,7 +210,7 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
     let identity = sup.identity.clone();
     let p2 = path.clone();
 
-    let (project_id, bot_id) = crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+    let (project_id, bot_id) = crate::projection::update_and_project(app.cfg(), app.db(), move |cfg| {
             // Project: persisted id first, then the directory, then a new one.
             let pidx = cfg
                 .projects
@@ -307,9 +304,9 @@ pub async fn ensure_env(app: &Arc<App>) -> Result<(String, String, Deployed), Lc
         }
     })?;
 
-    let responder = super::roles::responder_bot(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|b| b.id);
+    let responder = super::roles::responder_bot(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?.map(|b| b.id);
     let deployed = deploy_files(app, &bot_id, responder.as_deref(), &persona).map_err(|e| LcError::Upstream(e.to_string()))?;
-    store::set_env(&app.db, &bot_id, &project_id, &deployed.cwd)
+    store::set_env(app.db(), &bot_id, &project_id, &deployed.cwd)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
     Ok((project_id, bot_id, deployed))

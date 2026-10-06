@@ -8,10 +8,9 @@
 //! `code` 是給程式認的短代碼（穩定），`text` 是給人看的一句話（可能改字）。
 
 use crate::db;
-use crate::state::App;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 /// 一個 run 現在停住的原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +37,8 @@ pub fn forget(run_id: &str) {
 
 /// 讀一次畫面，判斷 blocked 的 claude run 是不是停在一般權限確認選單（[`crate::tui_prompts::permission_prompt`]）：是就記下工具名，
 /// 不是就清掉。**只看、一個鍵都不按**；讀不到畫面什麼都不動（讀不到不等於選單關了）。只看 claude：codex 有自己的對話框偵測。
-pub async fn observe(app: &Arc<App>, run: &db::Run) {
-    if !matches!(db::bot(&app.db, &run.bot_id).await, Ok(Some(b)) if b.kind == "claude") {
+pub async fn observe(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::HerdrRoutes), run: &db::Run) {
+    if !matches!(db::bot(app.db(), &run.bot_id).await, Ok(Some(b)) if b.kind == "claude") {
         return;
     }
     let Some(pane) = run.pane_id.as_deref().filter(|p| !p.trim().is_empty()) else { return };

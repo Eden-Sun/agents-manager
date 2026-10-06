@@ -8,9 +8,7 @@
 //! ssh 失敗照 `remote_purge` 既有的補帳：`purge_bot_dir` 記失敗，下一輪掃描再搬一次（冪等：已經不在就什麼都不做）。
 
 use crate::hosts::{sh_quote, HostConn};
-use crate::state::App;
 use anyhow::{bail, Result};
-use std::sync::Arc;
 use std::time::Duration;
 
 /// 還原時等 ssh 多久：在 bot 鎖裡、擋著 HTTP 回應，不用 `ssh_exec` 預設的 30 秒。
@@ -166,8 +164,8 @@ pub async fn gc(conn: &HostConn, keep: Duration, max_bytes: u64) -> Result<(usiz
 
 /// `restore_bot` 用：bot 在遠端就把目錄搬回來，並忘掉「已清掉」的記號——之後再刪一次，掃描才會再搬它。
 /// 搬不回來不擋還原（下次啟動會重建需要的檔；回收區那份留到過期），只記 log。
-pub async fn restore_for(app: &Arc<App>, bot_id: &str) {
-    let host = match crate::db::bot_host(&app.db, bot_id).await {
+pub async fn restore_for(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess + crate::login_assist::LoginPanes + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), bot_id: &str) {
+    let host = match crate::db::bot_host(app.db(), bot_id).await {
         Ok(h) if h != crate::config::LOCAL_HOST => h,
         Ok(_) => return,
         Err(e) => {
@@ -176,7 +174,7 @@ pub async fn restore_for(app: &Arc<App>, bot_id: &str) {
         }
     };
     crate::remote_purge::forget(app, bot_id).await;
-    let Some(conn) = app.hosts.get(&host).await else {
+    let Some(conn) = app.hosts().get(&host).await else {
         tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir not restored from bots-trash");
         return;
     };
