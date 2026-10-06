@@ -105,14 +105,14 @@ async fn locate_live(app: &Arc<App>, run: &db::Run) -> Result<Located, LcError> 
 }
 
 /// 上一次升級做到一半留下的紀錄（步驟 4 之前寫在 child 最後一個 run 上）。
-async fn locate_recorded(app: &Arc<App>, bot_id: &str) -> Result<Located, LcError> {
+async fn locate_recorded(app: &impl crate::capabilities::Db, bot_id: &str) -> Result<Located, LcError> {
     let last = sqlx::query_as::<_, (String, Option<String>)>(
         "SELECT native_session_id, transcript_path FROM runs
           WHERE bot_id = ? AND native_session_id IS NOT NULL AND native_session_id != '' AND transcript_path IS NOT NULL
           ORDER BY started_at DESC, rowid DESC LIMIT 1",
     )
     .bind(bot_id)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await
     .map_err(up)?;
     match last {
@@ -216,12 +216,12 @@ fn stage_transcript(src: &FsPath, dest_dir: &FsPath, session_id: &str) -> Result
 }
 
 /// 把 session 記在 child 的 run 上。已經有記錄就必須是同一段 session、transcript 還在；否則不放行。
-async fn checkpoint_session(app: &Arc<App>, r: &db::Run, located: &Located) -> Result<(), String> {
+async fn checkpoint_session(app: &impl crate::capabilities::Db, r: &db::Run, located: &Located) -> Result<(), String> {
     let res = sqlx::query("UPDATE runs SET native_session_id = ?, transcript_path = ? WHERE id = ? AND (native_session_id IS NULL OR native_session_id = '')")
         .bind(&located.session_id)
         .bind(located.src.to_string_lossy().to_string())
         .bind(&r.id)
-        .execute(&app.db)
+        .execute(app.db())
         .await
         .map_err(|e| e.to_string())?;
     if res.rows_affected() > 0 {
@@ -230,7 +230,7 @@ async fn checkpoint_session(app: &Arc<App>, r: &db::Run, located: &Located) -> R
     // 沒更新到任何列：只有這個 run 早就記著同一段 session 才算數。
     let (sid, path) = sqlx::query_as::<_, (Option<String>, Option<String>)>("SELECT native_session_id, transcript_path FROM runs WHERE id = ?")
         .bind(&r.id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "run 不見了".to_string())?;

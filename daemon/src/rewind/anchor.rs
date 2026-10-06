@@ -16,14 +16,12 @@
 //! 只做本機 bot（遠端的 transcript 在別台）；找不到那一則、讀不到檔都只記 log，照舊重啟（等於修之前的行為）。
 
 use std::path::Path;
-use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::db;
 use crate::lifecycle::pasted_content;
-use crate::state::App;
 
 use super::{same_first_line, squash};
 
@@ -161,12 +159,12 @@ pub fn need(tail: &str, leaf: &Leaf) -> Need {
 
 /// 倒回成功之後、還握著 bot 鎖時呼叫：找出倒回點記進 `rewind_anchors`（同一段 session 只留最新的一筆）。
 /// `text`／`skip`：真的按了 Restore 的那一則與它在選單上跳過幾則。失敗只記 log，不影響倒回本身。
-pub async fn record(app: &Arc<App>, bot: &db::Bot, run: &db::Run, text: &str, skip: usize) {
+pub async fn record(app: &impl crate::capabilities::Db, bot: &db::Bot, run: &db::Run, text: &str, skip: usize) {
     let (Some(sid), Some(path)) = (run.native_session_id.clone(), run.transcript_path.clone()) else {
         tracing::warn!(bot = %bot.name, "rewind: the run has no session/transcript on record; the next resume may bring the rewound turns back");
         return;
     };
-    match db::bot_host(&app.db, &bot.id).await {
+    match db::bot_host(app.db(), &bot.id).await {
         Ok(h) if h == crate::config::LOCAL_HOST => {}
         Ok(_) => {
             tracing::info!(bot = %bot.name, "rewind: remote bot; the rewind point is not pinned for the next resume");
@@ -209,7 +207,7 @@ pub async fn record(app: &Arc<App>, bot: &db::Bot, run: &db::Run, text: &str, sk
     .bind(leaf.as_deref())
     .bind(len as i64)
     .bind(db::now())
-    .execute(&app.db)
+    .execute(app.db())
     .await;
     match res {
         Ok(_) => tracing::info!(bot = %bot.name, session = %sid, leaf = ?leaf, "rewind: pinned the rewind point for the next resume"),
@@ -219,11 +217,11 @@ pub async fn record(app: &Arc<App>, bot: &db::Bot, run: &db::Run, text: &str, sk
 
 /// 照 `session_id` `--resume`／fork 之前呼叫：倒回後沒有新回合就把錨點補在 transcript 檔尾。
 /// 呼叫端保證這段 session 的 CLI 已經結束（fork 例外：來源還開著也無妨，它結束時蓋掉的話下一次 resume 會再補）。
-pub async fn ensure(app: &Arc<App>, session_id: &str) {
+pub async fn ensure(app: &impl crate::capabilities::Db, session_id: &str) {
     let row: Option<(String, Option<String>, i64)> =
         match sqlx::query_as("SELECT transcript_path, leaf_uuid, transcript_len FROM rewind_anchors WHERE session_id = ?")
             .bind(session_id)
-            .fetch_optional(&app.db)
+            .fetch_optional(app.db())
             .await
         {
             Ok(r) => r,
@@ -239,7 +237,7 @@ pub async fn ensure(app: &Arc<App>, session_id: &str) {
         Ok(Ok(Need::Append)) => tracing::info!(session = %session_id, "rewind: wrote the rewind point into the transcript before resuming"),
         Ok(Ok(Need::AlreadyThere)) => {}
         Ok(Ok(Need::Obsolete)) => {
-            let _ = sqlx::query("DELETE FROM rewind_anchors WHERE session_id = ?").bind(session_id).execute(&app.db).await;
+            let _ = sqlx::query("DELETE FROM rewind_anchors WHERE session_id = ?").bind(session_id).execute(app.db()).await;
         }
         Ok(Err(e)) => tracing::warn!(session = %session_id, error = %e, "rewind: could not write the rewind point; resuming may bring the rewound turns back"),
         Err(e) => tracing::warn!(session = %session_id, error = %e, "rewind: writing the rewind point panicked"),

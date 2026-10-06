@@ -289,7 +289,7 @@ async fn background_work_running(app: &Arc<App>, run_id: Option<&str>, kind: &st
 }
 
 async fn has_recent_near_duplicate(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     parent_conversation: &str,
     child_prefix: &str,
     current_client_request_id: &str,
@@ -311,7 +311,7 @@ async fn has_recent_near_duplicate(
     .bind(child_prefix)
     .bind(current_client_request_id)
     .bind(format!("-{NEAR_DUPLICATE_MINUTES} minutes"))
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     Ok(recent
         .iter()

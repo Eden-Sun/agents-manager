@@ -4,12 +4,11 @@
 //!
 //! 只跟**這一輪 runtime 真的變了**的欄位：網頁改了 child 設定、還沒套用時，狀態列沒變，不能把設定蓋回去。
 
-use crate::state::App;
 use serde_json::json;
 
 /// runtime 剛從畫面讀到 `model`／`effort`（只傳變了的欄位）：bot 是 child 就把設定改成同一個值。
 /// 回 `Err` = 寫不進去：呼叫端這輪不要寫 runtime，下一輪 runtime 仍不同才會再試（不然 runtime 收斂了、設定永遠落後，#743）。
-pub async fn follow(app: &App, bot_id: &str, model: Option<&str>, effort: Option<&str>) -> Result<(), sqlx::Error> {
+pub async fn follow(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), bot_id: &str, model: Option<&str>, effort: Option<&str>) -> Result<(), sqlx::Error> {
     if model.is_none() && effort.is_none() {
         return Ok(());
     }
@@ -23,7 +22,7 @@ pub async fn follow(app: &App, bot_id: &str, model: Option<&str>, effort: Option
     .bind(bot_id)
     .bind(model)
     .bind(effort)
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     if r.rows_affected() > 0 {
         tracing::info!(bot = bot_id, ?model, ?effort, "child settings follow a switch made in its TUI");

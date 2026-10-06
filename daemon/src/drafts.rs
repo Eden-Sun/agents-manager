@@ -127,15 +127,15 @@ pub async fn put_http(State(app): State<Arc<App>>, Path(key): Path<String>, Json
 }
 
 /// host shell pane 被關：清掉它的指令草稿（#758），其他瀏覽器也跟著清。
-pub async fn clear_shell(app: &Arc<App>, host: &str, pane_id: &str) {
+pub async fn clear_shell(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), host: &str, pane_id: &str) {
     clear_keys(app, &[shell_key(host, pane_id)]).await;
 }
 
 /// bot／專案被刪：把它的草稿清成空字串（留墓碑，rev 照加）並通知其他瀏覽器。盡力而為，失敗只記 log（刪除本身已經定案，不回頭）。
 /// 不整列刪：bot 從垃圾桶復原後 key 會再出現，rev 從 1 重來的話網頁手上記著舊的大 rev，會把新草稿當晚到的舊事件丟掉。
-pub async fn clear_keys(app: &Arc<App>, keys: &[String]) {
+pub async fn clear_keys(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), keys: &[String]) {
     for key in keys {
-        match put(&app.db, key, "").await {
+        match put(app.db(), key, "").await {
             Ok((Some(d), true)) => app.emit("draft_updated", event(&d, "")).await,
             Ok(_) => {}
             Err(e) => tracing::warn!(key = %key, error = ?e, "could not clear the draft of a deleted bot or project"),
@@ -149,7 +149,7 @@ mod tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-drafts");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false)

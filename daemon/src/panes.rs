@@ -313,7 +313,7 @@ pub fn spawn_scanner(app: Arc<App>) {
 /// 一顆剛開的 pane 可能在 snapshot 拍下之後、這裡收尾之前才被回報進來，它的 `last_seen` 會晚於
 /// `scanned_at`，不是這份 snapshot 判定「不在了」的對象。
 pub(crate) async fn record_scan(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Cfg + crate::capabilities::Db),
     host: &str,
     snapshot_panes: &[Value],
     observed: &HashMap<String, Option<Observed>>,
@@ -322,12 +322,12 @@ pub(crate) async fn record_scan(
     let non_agent: Vec<&Value> = snapshot_panes.iter().filter(|p| !is_agent_pane(p)).collect();
     if non_agent.is_empty() {
         // 這台沒有非 agent pane：把舊的收乾淨（pane 已經關了），但別清掉比這份 snapshot 還新的列。
-        sqlx::query("DELETE FROM panes WHERE host=? AND last_seen < ?").bind(host).bind(scanned_at).execute(&app.db).await?;
+        sqlx::query("DELETE FROM panes WHERE host=? AND last_seen < ?").bind(host).bind(scanned_at).execute(app.db()).await?;
         return Ok(ScanOutcome { panes: 0, complete: true, rename_scratch: None });
     }
     let now = crate::db::now();
     // canonical path 比對用（§6.5e 的 cwd 回退）。
-    let project_paths: Vec<(String, String)> = crate::db::live_projects(&app.db)
+    let project_paths: Vec<(String, String)> = crate::db::live_projects(app.db())
         .await?
         .into_iter()
         .filter(|p| p.host == host)
@@ -346,7 +346,7 @@ pub(crate) async fn record_scan(
         )
         .bind(host)
         .bind(pane_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await?;
         // revision 變了才算「有輸出」；第一次看到就以 first_seen 當基準（§6.5e）。
         let (last_output_at, first_seen) = match &prev {
@@ -376,7 +376,7 @@ pub(crate) async fn record_scan(
                 .bind(&now)
                 .bind(host)
                 .bind(pane_id)
-                .execute(&app.db)
+                .execute(app.db())
                 .await?;
             } else {
                 let project = project_for_cwd(cwd, &project_paths);
@@ -397,7 +397,7 @@ pub(crate) async fn record_scan(
                 .bind(&first_seen)
                 .bind(&now)
                 .bind(if project.is_some() { "user" } else { "none" })
-                .execute(&app.db)
+                .execute(app.db())
                 .await?;
             }
             continue;
@@ -417,7 +417,7 @@ pub(crate) async fn record_scan(
         let env_project = if f.env_seen { f.project_ids.iter().find(|id| !id.trim().is_empty()).cloned() } else { None };
         let bot_project = if f.env_seen && env_project.is_none() {
             match &env_bot {
-                Some(b) => match crate::db::bot(&app.db, b).await {
+                Some(b) => match crate::db::bot(app.db(), b).await {
                     Ok(bot) => bot.map(|bot| bot.project_id),
                     Err(e) => {
                         // An unreadable authority lookup is not evidence that this pane is unbound.
@@ -439,7 +439,7 @@ pub(crate) async fn record_scan(
                             .bind(&now)
                             .bind(host)
                             .bind(pane_id)
-                            .execute(&app.db)
+                            .execute(app.db())
                             .await?;
                         } else {
                             sqlx::query(
@@ -458,7 +458,7 @@ pub(crate) async fn record_scan(
                             .bind(&last_output_at)
                             .bind(&first_seen)
                             .bind(&now)
-                            .execute(&app.db)
+                            .execute(app.db())
                             .await?;
                         }
                         continue;
@@ -474,7 +474,7 @@ pub(crate) async fn record_scan(
         // 擁有它的 bot 被刪（或根本不在這顆 DB）也是孤兒。DB 讀不到就不下結論。
         let owner_bot = if f.env_seen { env_bot.clone() } else { prev_owner };
         let bot_gone = match &owner_bot {
-            Some(b) => matches!(crate::db::bot(&app.db, b).await, Ok(None) | Ok(Some(crate::db::Bot { deleted_at: Some(_), .. }))),
+            Some(b) => matches!(crate::db::bot(app.db(), b).await, Ok(None) | Ok(Some(crate::db::Bot { deleted_at: Some(_), .. }))),
             None => false,
         };
         let live = |id: &str| project_paths.iter().any(|(pid, _)| pid == id);
@@ -529,7 +529,7 @@ pub(crate) async fn record_scan(
         .bind(owned_by)
         .bind(bound.as_deref())
         .bind(orphaned)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
     }
     // 不見了的 pane：herdr 說它不在了，就從表裡拿掉（下次再出現會重新記 first_seen）；
@@ -538,24 +538,24 @@ pub(crate) async fn record_scan(
     sqlx::query(&format!("DELETE FROM panes WHERE host=? AND pane_id NOT IN ({keep}) AND last_seen < ?"))
         .bind(host)
         .bind(scanned_at)
-        .execute(&app.db)
+        .execute(app.db())
         .await?;
     // scratch 只在完整的一輪重選：不完整時 kind／歸屬是上一輪的，拿來選會讓它來回跳。
     let mut rename_scratch = None;
     if complete {
-        let name = app.cfg.get().await.panes.scratch_name.clone();
+        let name = app.cfg().get().await.panes.scratch_name.clone();
         let cands: Vec<ScratchCandidate> = sqlx::query_as(
             "SELECT pane_id, kind, owned_by, orphaned, label, scratch, first_seen FROM panes WHERE host=?",
         )
         .bind(host)
-        .fetch_all(&app.db)
+        .fetch_all(app.db())
         .await?;
         let name_in_use = !name.is_empty() && snapshot_panes.iter().any(|p| label_of(p) == Some(name.as_str()));
         let pick = pick_scratch(&cands, &name, name_in_use);
         sqlx::query("UPDATE panes SET scratch = CASE WHEN pane_id = ? THEN 1 ELSE 0 END WHERE host=?")
             .bind(pick.map(|c| c.pane_id.as_str()).unwrap_or(""))
             .bind(host)
-            .execute(&app.db)
+            .execute(app.db())
             .await?;
         rename_scratch = pick.filter(|c| !name.is_empty() && c.label.as_deref() != Some(name.as_str())).map(|c| c.pane_id.clone());
     }
@@ -605,7 +605,7 @@ static ANNOUNCED: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mu
 
 /// `panes` 表（側欄「其他 pane」的來源）被掃描、用途回報、adopt、關閉、GC 各自改寫，以前沒有任何事件：別的裝置要等 30 秒
 /// 輪詢。這裡把這台主機的列算成指紋，**真的變了**才發 `panes_changed {host}`（定期掃描每分鐘跑一次，沒變不會灌事件）。
-pub async fn announce_if_changed(app: &Arc<App>, host: &str) {
+pub async fn announce_if_changed(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), host: &str) {
     let rows: Vec<String> = match sqlx::query_scalar(
         "SELECT pane_id || '|' || kind || '|' || COALESCE(owner_bot_id,'') || '|' || COALESCE(project_id,'') || '|' || COALESCE(bound_project_id,'')
                 || '|' || COALESCE(purpose,'') || '|' || COALESCE(foreground,'') || '|' || COALESCE(listen_ports,'') || '|' || scratch || '|' || orphaned
@@ -613,7 +613,7 @@ pub async fn announce_if_changed(app: &Arc<App>, host: &str) {
            FROM panes WHERE host = ? ORDER BY pane_id",
     )
     .bind(host)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     {
         Ok(r) => r,
@@ -637,7 +637,7 @@ pub async fn announce_if_changed(app: &Arc<App>, host: &str) {
 /// shim 回報的用途：pane 還沒被掃到就先建一列（`kind` 先當 shell，下一輪掃描會修正）。
 /// owner 只在這一列還沒有 owner 時才寫——回報不能改寫別人的 pane；之後掃描讀到的 `AM_BOT_ID` 會蓋過它。
 /// 綁定（`bound_project_id`）同樣只補空的：讀不到那顆 pane 環境的輪次（macOS 閒著的 -zsh）才靠它知道是 bot 開的。
-pub async fn note_purpose(app: &Arc<App>, host: &str, pane_id: &str, bot: &crate::db::Bot, purpose: &str) -> Result<()> {
+pub async fn note_purpose(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), host: &str, pane_id: &str, bot: &crate::db::Bot, purpose: &str) -> Result<()> {
     if pane_id.trim().is_empty() {
         return Ok(());
     }
@@ -660,7 +660,7 @@ pub async fn note_purpose(app: &Arc<App>, host: &str, pane_id: &str, bot: &crate
     .bind(&now)
     .bind(&now)
     .bind(&now)
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     tracing::info!(host, pane_id, bot = %bot.id, purpose, "pane purpose reported by the shim");
     announce_if_changed(app, host).await;
@@ -784,7 +784,7 @@ async fn close_if_still_idle(
 ///   shell 照 GC）。
 ///
 /// inbox 的 key 帶 `first_seen`：herdr 重開後 pane id 會重用，不能讓舊 pane 用掉的 key 擋住新 pane 的通知。
-pub async fn notify_unowned_and_orphans(app: &Arc<App>, host: &str) -> Result<usize> {
+pub async fn notify_unowned_and_orphans(app: &impl crate::capabilities::Db, host: &str) -> Result<usize> {
     type NotifyRow = (String, String, Option<String>, Option<String>, Option<String>, String, String, Option<String>, Option<String>, bool);
     let rows = sqlx::query_as::<_, NotifyRow>(
         "SELECT pane_id, kind, workspace_id, foreground, listen_ports, last_output_at, first_seen,
@@ -795,7 +795,7 @@ pub async fn notify_unowned_and_orphans(app: &Arc<App>, host: &str) -> Result<us
               OR (orphaned=0 AND owned_by='none' AND unowned_notified_at IS NULL))",
     )
     .bind(host)
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     let mut sent = 0;
     for (pane_id, kind, ws, fg, ports, last_output_at, first_seen, owner, bound, orphaned) in rows {
@@ -811,14 +811,14 @@ pub async fn notify_unowned_and_orphans(app: &Arc<App>, host: &str) -> Result<us
             "message": message,
         });
         let key = format!("{event}:{host}:{pane_id}:{first_seen}");
-        if crate::bot_trash::app_ports_p11::push_inbox(&app.db, &key, event, None, None, None, &payload).await?.is_some() {
+        if crate::bot_trash::app_ports_p11::push_inbox(app.db(), &key, event, None, None, None, &payload).await?.is_some() {
             sent += 1;
         }
         sqlx::query(&format!("UPDATE panes SET {column}=? WHERE host=? AND pane_id=?"))
             .bind(crate::db::now())
             .bind(host)
             .bind(&pane_id)
-            .execute(&app.db)
+            .execute(app.db())
             .await?;
     }
     Ok(sent)
@@ -960,7 +960,7 @@ mod tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-panes-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = crate::db::open(&dir.join("t.sqlite3")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         Arc::new(App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false))

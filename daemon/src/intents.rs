@@ -374,7 +374,7 @@ mod tests {
     async fn pool() -> (SqlitePool, std::path::PathBuf) {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-intents-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
-        (crate::db::open(&dir.join("t.sqlite")).await.unwrap(), dir)
+        (crate::app_ports_p1::open(&dir.join("t.sqlite")).await.unwrap(), dir)
     }
 
     #[tokio::test]

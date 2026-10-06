@@ -185,7 +185,7 @@ async fn ask_pair(cfg: &crate::config::JudgeCfg, key: &str, body: &Value) -> Res
 }
 
 async fn settle_pair(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     id: &str,
     pair: Option<(f64, f64)>,
     model: Option<String>,
@@ -207,7 +207,7 @@ async fn settle_pair(
     .bind(tokens)
     .bind(error)
     .bind(id)
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     Ok(())
 }
@@ -310,11 +310,11 @@ fn fingerprint(text: &str) -> String {
     format!("{h:016x}")
 }
 
-async fn run_of(app: &Arc<App>, turn_id: Option<&str>) -> Option<String> {
+async fn run_of(app: &impl crate::capabilities::Db, turn_id: Option<&str>) -> Option<String> {
     let turn_id = turn_id?;
     sqlx::query_scalar::<_, Option<String>>("SELECT run_id FROM turns WHERE id = ?")
         .bind(turn_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await
         .ok()
         .flatten()

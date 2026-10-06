@@ -367,7 +367,7 @@ fn conflict_reason(v: &serde_json::Value) -> String {
 /// user believes is running must not disappear from the list on the daemon's own say-so.
 /// 一直送不進去：標成 `blocked` 並推一則 inbox 事件——**不能只寫 log**，那等於沒人知道。
 /// 不判 `dispatch_failed`：工作沒失敗，是進不去那顆 bot（它一直在回合中），該由 AGM 決定怎麼辦。
-async fn undeliverable(app: &Arc<App>, a: &store::Assignment, since: &str, why: &str, fuse: &str) {
+async fn undeliverable(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), a: &store::Assignment, since: &str, why: &str, fuse: &str) {
     let mins = env_i64(CONFLICT_GIVE_UP_ENV, CONFLICT_GIVE_UP_MINS);
     // 照實寫：哪一條保險絲燒掉的、最後一次 409 說了什麼（不是一律「對方在回合中」），
     // 以及排不進去幾輪（`busy_rounds`）與累計派送嘗試幾次（`attempts`）——兩個數字不是同一件事。
@@ -378,7 +378,7 @@ async fn undeliverable(app: &Arc<App>, a: &store::Assignment, since: &str, why: 
                 // 不能叫人用同一個 request id 再 `assign`：那是冪等查詢，只會拿回這筆 blocked（review2 deliv M1）。
                 "hint": UNDELIVERABLE_HINT});
     // blocked 與通知同一個交易（#283）：寫不進去就不標，下一輪重來。
-    match store::mark_undeliverable(&app.db, &a.id, &note, &event_key("assignment_undeliverable", a), &payload).await {
+    match store::mark_undeliverable(app.db(), &a.id, &note, &event_key("assignment_undeliverable", a), &payload).await {
         Ok(true) => {}
         Ok(false) => return, // 這一輪已經被別的路徑改掉了（結案、取消…）：不要蓋回去
         Err(e) => {
@@ -1826,7 +1826,7 @@ fn age_secs(iso: &str) -> i64 {
 ///
 /// 三個管道，跟看門狗放棄時同一套：事件本身改成 `gave_up`（不再補送、但仍算未處理，人照樣 ack 得掉）、
 /// 一則 durable inbox 事件叫醒另一個角色、一行 error log。`event_key` 綁事件 id，所以只會喊一次。
-async fn give_up_on(app: &Arc<App>, e: &store::InboxEvent, why: &str, age: i64) {
+async fn give_up_on(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), e: &store::InboxEvent, why: &str, age: i64) {
     let owner = super::roles::owner_or_default(e.claimed_by.as_deref(), e.role.as_deref());
     let to = match super::roles::Role::parse(&owner) {
         Some(super::roles::Role::Responder) => super::roles::Role::Patrol,
@@ -1854,7 +1854,7 @@ async fn give_up_on(app: &Arc<App>, e: &store::InboxEvent, why: &str, age: i64) 
         ),
     });
     // 放棄補送與喊另一個角色同一個交易（#310）：寫不進去事件就留在 delivered，下一輪再判。
-    match store::give_up_inbox_and_notify(&app.db, &e.id, why, &format!("inbox_gave_up:{}", e.id), e.assignment_id.as_deref(), e.bot_id.as_deref(), &notice).await {
+    match store::give_up_inbox_and_notify(app.db(), &e.id, why, &format!("inbox_gave_up:{}", e.id), e.assignment_id.as_deref(), e.bot_id.as_deref(), &notice).await {
         Ok(true) => {}
         Ok(false) => return,
         Err(err) => {
@@ -3111,7 +3111,7 @@ mod conflict_fuse_tests {
     /// 一顆沒有 run 的 bot：`dispatch` 每次都拿到真的 409（`bot has no active run`）。
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-conflict-fuse");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
@@ -3308,7 +3308,7 @@ mod mission_quota_tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-mission-quota");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
@@ -3792,7 +3792,7 @@ mod no_grace_period_tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-no-grace");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
@@ -3882,7 +3882,7 @@ mod window_unreadable_tests {
     /// 那正是「閘門放行了」的可觀察證據。
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-window-unreadable");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
@@ -3978,7 +3978,7 @@ mod queue_dispatch_tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-queue-dispatch");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
@@ -4385,7 +4385,7 @@ mod quota_restart_tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-quota-restart");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
@@ -4901,7 +4901,7 @@ mod late_reply_tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-late-reply");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
@@ -5055,7 +5055,7 @@ mod turn_done_quota_tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-turn-done-quota");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);

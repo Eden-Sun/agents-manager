@@ -24,29 +24,29 @@ const DELETE_INTENT_TTL_SECS: i64 = 60 * 60;
 
 /// handler 在定案**之前**呼叫：寫 intent 並立刻認領（這個行程自己在做，同一個 boot 的 recovery 不會來搶）。
 /// 寫不進去＝什麼都還沒動，呼叫端不能繼續（fail closed）。
-pub async fn begin(app: &Arc<App>, kind: &str, subject: &str, host: &str, payload: &Value) -> Result<String, crate::lifecycle::LcError> {
-    let id = match intents::insert(&app.db, kind, subject, host, payload, DELETE_INTENT_TTL_SECS).await {
+pub async fn begin(app: &(impl crate::capabilities::BootId + crate::capabilities::Db), kind: &str, subject: &str, host: &str, payload: &Value) -> Result<String, crate::lifecycle::LcError> {
+    let id = match intents::insert(app.db(), kind, subject, host, payload, DELETE_INTENT_TTL_SECS).await {
         // 已經有一件開著：上一個行程留下的（我們持著鎖、這次自己來做），沿用它。
         Ok(Inserted::New(i)) | Ok(Inserted::AlreadyOpen(i)) => i.id,
         Err(e) => return Err(crate::lifecycle::LcError::Upstream(format!("cannot record the {kind} intent: {e:#}"))),
     };
     // 認領失敗（讀不到）不擋刪除：intent 已經在，最壞是開機時由 recovery 驗證世界後收掉。
-    if let Err(e) = intents::claim(&app.db, &id, &app.boot_id).await {
+    if let Err(e) = intents::claim(app.db(), &id, app.boot_id()).await {
         tracing::warn!(intent = %id, error = %e, "could not claim the delete intent");
     }
     Ok(id)
 }
 
 /// 定案沒成（世界沒變）：收成 `abandoned`。
-pub async fn abandon(app: &Arc<App>, id: &str, why: &str) {
-    if let Err(e) = intents::abandon(&app.db, id, why).await {
+pub async fn abandon(app: &impl crate::capabilities::Db, id: &str, why: &str) {
+    if let Err(e) = intents::abandon(app.db(), id, why).await {
         tracing::warn!(intent = id, error = %e, "could not abandon the delete intent");
     }
 }
 
 /// 做完了：收成 `done`。標不成不影響結果（開機驗證世界後會收）。
-pub async fn complete(app: &Arc<App>, id: &str) {
-    if let Err(e) = intents::complete(&app.db, id).await {
+pub async fn complete(app: &impl crate::capabilities::Db, id: &str) {
+    if let Err(e) = intents::complete(app.db(), id).await {
         tracing::warn!(intent = id, error = %e, "could not complete the delete intent; boot recovery will verify it");
     }
 }
@@ -114,8 +114,8 @@ pub async fn drive_once(app: &Arc<App>, id: &str) -> Outcome {
     }
 }
 
-async fn fail_attempt(app: &Arc<App>, id: &str, why: String) -> Outcome {
-    match intents::record_failure(&app.db, id, &why).await {
+async fn fail_attempt(app: &impl crate::capabilities::Db, id: &str, why: String) -> Outcome {
+    match intents::record_failure(app.db(), id, &why).await {
         Ok(true) => {
             tracing::error!(intent = id, error = %why, "interrupted delete could not be completed; gave up and told AGM");
             Outcome::Finished
@@ -139,12 +139,12 @@ fn snapshot(intent: &Intent) -> Vec<(String, String)> {
 }
 
 /// 鎖住整批之後再確認這件還是我們認領的（等鎖的時間裡活著的 handler 可能已經收尾）。
-async fn still_ours(app: &Arc<App>, intent: &Intent) -> Result<bool, String> {
-    Ok(matches!(intents::get(&app.db, &intent.id).await.map_err(|e| format!("db: {e:#}"))?, Some(c) if c.status == "running"))
+async fn still_ours(app: &impl crate::capabilities::Db, intent: &Intent) -> Result<bool, String> {
+    Ok(matches!(intents::get(app.db(), &intent.id).await.map_err(|e| format!("db: {e:#}"))?, Some(c) if c.status == "running"))
 }
 
-async fn in_config_bot(app: &Arc<App>, id: &str) -> bool {
-    app.cfg.get().await.projects.iter().any(|p| p.bots.iter().any(|b| b.id.as_deref() == Some(id)))
+async fn in_config_bot(app: &impl crate::capabilities::Cfg, id: &str) -> bool {
+    app.cfg().get().await.projects.iter().any(|p| p.bots.iter().any(|b| b.id.as_deref() == Some(id)))
 }
 
 async fn resume_bot(app: &Arc<App>, intent: &Intent) -> Result<(), String> {

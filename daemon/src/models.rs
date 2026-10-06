@@ -352,7 +352,7 @@ fn optional_cat_script(path_expr: &str) -> String {
 /// 讀那台主機上的一個選用設定檔。**缺檔是答案（回空字串），讀不到是錯誤**：以前兩者都變成 `""`，
 /// ssh 逾時／連不上就被當成「沒設定」，接下來拿內建預設值當成事實記下去（#268）。
 /// 遠端 `ssh_exec` 看 exit code，所以缺檔那條要自己收成 0（`|| true`），不然缺檔也是 Err。
-async fn read_optional_text(app: &Arc<App>, host: &str, path_expr: &str) -> Result<String> {
+async fn read_optional_text(app: &impl crate::hosts::HostsAccess, host: &str, path_expr: &str) -> Result<String> {
     let script = optional_cat_script(path_expr);
     if host == LOCAL_HOST {
         let o = tokio::process::Command::new("/bin/sh")
@@ -364,13 +364,13 @@ async fn read_optional_text(app: &Arc<App>, host: &str, path_expr: &str) -> Resu
             .with_context(|| format!("read {path_expr}"))?;
         Ok(String::from_utf8_lossy(&o.stdout).to_string())
     } else {
-        let conn = app.hosts.get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
+        let conn = app.hosts().get(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
         conn.ssh_exec(&format!("{script}\n")).await.with_context(|| format!("read {path_expr} on {host}"))
     }
 }
 
 async fn read_claude_effort_settings(
-    app: &Arc<App>,
+    app: &impl crate::hosts::HostsAccess,
     host: &str,
     config_dir: Option<&str>,
 ) -> Result<(Option<String>, BTreeMap<String, String>)> {

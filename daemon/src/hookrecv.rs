@@ -175,11 +175,11 @@ async fn relay_backfill(app: &Arc<App>, from_bot: &str, to_agent: &str, text: &s
     Ok(())
 }
 
-async fn relay_source(app: &Arc<App>, run: Option<&db::Run>, echo: &str) -> Option<String> {
+async fn relay_source(app: &impl crate::capabilities::Db, run: Option<&db::Run>, echo: &str) -> Option<String> {
     let run = run?;
     let agent = run.agent_name.as_deref()?;
     // 讀不到主機＝認不出來就不標（寧可少標，不要錯標）。
-    let host = db::bot_host(&app.db, &run.bot_id).await.ok()?;
+    let host = db::bot_host(app.db(), &run.bot_id).await.ok()?;
     crate::agent_relay::claim(&host, agent, echo)
 }
 
@@ -762,7 +762,7 @@ async fn human_started_prompt(payload: &Value, transcript_path: Option<&str>) ->
 /// 一樣時不存（為了擋背景工作喚醒那一輪，見 [`repeats_answered_prompt`]）；使用者真的重送同一句時這裡補回來。
 /// 回合上已有使用者訊息就不動。
 async fn store_resent_prompt_tx(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     conv: &str,
     turn: &db::Turn,
@@ -832,10 +832,10 @@ fn answers_none_of(prompts: Option<&[String]>, hook_user: Option<&str>) -> bool 
 
 /// 這一回合送出去的字：`prompt` 再加上回合中補充進去的每一句（使用者 2026-09-28）。補充之後 transcript 最後一則
 /// 使用者訊息是補充的那句，只拿 prompt 比就會被當成「回答的是別句」、開外部回合。沒有 prompt 就是 `None`，照舊不下判斷。
-async fn with_supplements(app: &Arc<App>, turn_id: &str, prompt: Option<&str>) -> Result<Option<Vec<String>>> {
+async fn with_supplements(app: &impl crate::capabilities::Db, turn_id: &str, prompt: Option<&str>) -> Result<Option<Vec<String>>> {
     let Some(p) = prompt.filter(|p| !p.trim().is_empty()) else { return Ok(None) };
     let mut all = vec![p.to_string()];
-    all.extend(db::turn_supplements(&app.db, turn_id).await?);
+    all.extend(db::turn_supplements(app.db(), turn_id).await?);
     Ok(Some(all))
 }
 
@@ -1070,7 +1070,7 @@ pub(crate) async fn consume_resume_session(
 }
 
 /// 120 秒內被終端備援關掉、還沒收到過 native id 的最近一筆回合（遲到的 hook 可能是它的真回覆，§4.3）。
-async fn recent_fallback_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db::Turn>> {
+async fn recent_fallback_turn(app: &impl crate::capabilities::Db, run_id: &str) -> Result<Option<db::Turn>> {
     // Fixed-width RFC3339 UTC, so lexicographic comparison is chronological.
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     Ok(sqlx::query_as::<_, db::Turn>(
@@ -1083,13 +1083,13 @@ async fn recent_fallback_turn(app: &Arc<App>, run_id: &str) -> Result<Option<db:
     )
     .bind(run_id)
     .bind(&cutoff)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?)
 }
 
 /// hook 在 agent 那台觸發的時間（`received_at`，遠端 `hook.sh` 記的 UTC 秒）落在 `t` 開始之後，而且同一個對話在這段時間
 /// 沒開過別的回合：這則 hook 收的就是 `t`。時間讀不懂就是沒有證據。兩台機器的時鐘只比到秒。
-async fn fired_within(app: &Arc<App>, t: &db::Turn, received_at: Option<&str>) -> Result<bool> {
+async fn fired_within(app: &impl crate::capabilities::Db, t: &db::Turn, received_at: Option<&str>) -> Result<bool> {
     let Some(fired) = received_at.and_then(|r| chrono::DateTime::parse_from_rfc3339(r).ok()) else { return Ok(false) };
     let Ok(started) = chrono::DateTime::parse_from_rfc3339(&t.created_at) else { return Ok(false) };
     if fired.timestamp() < started.timestamp() {
@@ -1108,16 +1108,16 @@ async fn fired_within(app: &Arc<App>, t: &db::Turn, received_at: Option<&str>) -
     .bind(&t.created_at)
     .bind(&t.id)
     .bind(&fired_at)
-    .fetch_one(&app.db)
+    .fetch_one(app.db())
     .await?;
     Ok(between == 0)
 }
 
 /// 那一回合被問了什麼：`prompt_text`，沒有就取第一則使用者訊息。
-async fn turn_prompt(app: &Arc<App>, t: &db::Turn) -> Result<Option<String>> {
+async fn turn_prompt(app: &impl crate::capabilities::Db, t: &db::Turn) -> Result<Option<String>> {
     match t.prompt_text.clone().filter(|p| !p.trim().is_empty()) {
         Some(p) => Ok(Some(p)),
-        None => Ok(db::turn_user_messages(&app.db, &t.id).await?.into_iter().next()),
+        None => Ok(db::turn_user_messages(app.db(), &t.id).await?.into_iter().next()),
     }
 }
 
@@ -1125,7 +1125,7 @@ async fn turn_prompt(app: &Arc<App>, t: &db::Turn) -> Result<Option<String>> {
 /// 這組 id 若已經記在**別顆 bot** 的回合上（別顆 bot 先送了同樣的 id、或兩顆 bot 接回同一段 session），照寫會撞唯一索引，
 /// 這顆 bot 的收尾就一直失敗、卡在收件匣重試，回合掛著等備援。撞到別人的就不寫 turn id（回合照常收尾），只留 session。
 async fn native_evidence<'a>(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     bot_id: &str,
     session_id: Option<&'a str>,
     turn_id: Option<&'a str>,
@@ -1138,7 +1138,7 @@ async fn native_evidence<'a>(
         .bind(bot_id)
         .bind(sid)
         .bind(tid)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await?;
         if taken.is_some() {
             tracing::warn!(bot = bot_id, session = sid, turn = tid, "native turn id already belongs to another bot's turn; not recorded on this one");
@@ -2592,7 +2592,7 @@ mod external_claim_tests {
     async fn fixture() -> (TmpDb, sqlx::SqlitePool, String, String) {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-hookrecv-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
-        let pool = db::open(&dir.join("t.db")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("t.db")).await.unwrap();
         let now = db::now();
         for q in [
             "INSERT INTO projects (id,path,label,created_at) VALUES ('p','/tmp/p','p',?)",

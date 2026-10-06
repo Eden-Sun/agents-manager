@@ -78,7 +78,7 @@ pub fn should_reassign(age_secs: i64, owner: &str, unavailable: Option<&str>) ->
 ///
 /// `unavailable` = `health::responder_state` 回 `Unavailable(reason)` 時的那個原因字串；
 /// 可用、不知道、沒建立協調者都傳 `None`（那時這個函式什麼都不做）。
-pub async fn reassign_stale_approvals(app: &Arc<App>, unavailable: Option<&'static str>) -> usize {
+pub async fn reassign_stale_approvals(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), unavailable: Option<&'static str>) -> usize {
     let Some(reason) = unavailable else { return 0 };
     let now = crate::db::now();
     // 查詢只縮小範圍，不判門檻（見 `should_reassign`）：開著的、還在協調者手上的核准，一次本來就一兩則。
@@ -91,7 +91,7 @@ pub async fn reassign_stale_approvals(app: &Arc<App>, unavailable: Option<&'stat
     .bind(store::SUPERVISOR_ID)
     .bind(REASSIGNABLE)
     .bind(Role::Responder.as_str())
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await
     {
         Ok(v) => v,
@@ -108,7 +108,7 @@ pub async fn reassign_stale_approvals(app: &Arc<App>, unavailable: Option<&'stat
         if !should_reassign(age_secs(&e.created_at), &owner, Some(reason)) {
             continue;
         }
-        match reassign_one(&app.db, e, reason, &now).await {
+        match reassign_one(app.db(), e, reason, &now).await {
             Ok(true) => {
                 moved += 1;
                 tracing::warn!(event = %e.id, reason, "approval reassigned to patrol: the responder is unavailable");
@@ -257,7 +257,7 @@ mod tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-failover");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);

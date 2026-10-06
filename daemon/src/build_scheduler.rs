@@ -132,7 +132,7 @@ async fn reap_stale_waiting(pool: &SqlitePool) -> Result<u64> {
 }
 
 /// 插一列（或覆寫既有的同名列）成 `waiting`；`since` 是排隊起點，呼叫端負責決定（保留舊的、還是這一刻）。
-async fn mark_waiting(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpose: &str, host: &str, since: &str, now: &str) -> Result<()> {
+async fn mark_waiting(app: &impl crate::capabilities::Db, holder: &str, bot_id: Option<&str>, purpose: &str, host: &str, since: &str, now: &str) -> Result<()> {
     sqlx::query(
         "INSERT INTO build_slots (holder, token, bot_id, purpose, host, status, since, last_seen, expires_at)
          VALUES (?,'',?,?,?, 'waiting', ?, ?, NULL)
@@ -146,7 +146,7 @@ async fn mark_waiting(app: &Arc<App>, holder: &str, bot_id: Option<&str>, purpos
     .bind(host)
     .bind(since)
     .bind(now)
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     Ok(())
 }
@@ -318,13 +318,13 @@ struct StatusRow {
     expires_at: Option<String>,
 }
 
-pub async fn status(app: &Arc<App>) -> Result<Value> {
-    let cfg = app.cfg.build_fresh().await;
-    reap_expired_held(&app.db, &now_str()).await?;
+pub async fn status(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db)) -> Result<Value> {
+    let cfg = app.cfg().build_fresh().await;
+    reap_expired_held(app.db(), &now_str()).await?;
     let rows: Vec<StatusRow> = sqlx::query_as(
         "SELECT holder, status, bot_id, purpose, host, since, last_seen, expires_at FROM build_slots ORDER BY since",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?;
     let slots: Vec<Value> = rows
         .into_iter()
@@ -341,7 +341,7 @@ pub async fn status(app: &Arc<App>) -> Result<Value> {
         "lease_ttl_secs": cfg.lease_ttl().map_err(anyhow::Error::msg)?,
         "active": active,
         "slots": slots,
-        "remote": remote_json(&cfg.remote, &app.data_dir),
+        "remote": remote_json(&cfg.remote, app.data_dir()),
     }))
 }
 

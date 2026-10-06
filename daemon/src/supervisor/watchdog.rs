@@ -212,15 +212,15 @@ pub async fn tick(app: &Arc<App>) {
 /// `INSERT OR IGNORE`, so retrying each tick until it lands costs nothing and yields exactly one
 /// event per give-up episode. `status_detail`, the log line and the SSE event are best-effort and
 /// ride along with the tick that actually inserts the event.
-async fn report_gave_up(app: &Arc<App>, why: &str) {
-    let _ = store::mark_watchdog_gave_up(&app.db, why).await;
+async fn report_gave_up(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), why: &str) {
+    let _ = store::mark_watchdog_gave_up(app.db(), why).await;
     // The key comes from the persisted marker, never from a degraded read: no marker or an
     // unreadable row means "try again next tick", not an empty-key event.
-    let Some(at) = store::get_or_init(&app.db).await.ok().and_then(|s| s.watchdog_gave_up_at) else { return };
+    let Some(at) = store::get_or_init(app.db()).await.ok().and_then(|s| s.watchdog_gave_up_at) else { return };
     // One durable event per give-up. The key is the moment it happened, so a later outage
     // (after a recovery clears the marker) is a new event rather than a silenced duplicate.
     let pushed = store::push_inbox(
-        &app.db,
+        app.db(),
         &format!("watchdog:gave_up:{at}"),
         "watchdog_gave_up",
         None,
@@ -238,7 +238,7 @@ async fn report_gave_up(app: &Arc<App>, why: &str) {
     let Ok(Some(_)) = pushed else { return };
     tracing::error!(attempts = MAX_ATTEMPTS, why, "supervisor watchdog gave up; the manager stays down");
     let _ = store::set_status_detail(
-        &app.db,
+        app.db(),
         Some(&format!(
             "watchdog 連續 {MAX_ATTEMPTS} 次自動啟動後仍沒有活著，已停止重試；請手動 supervisor-start。原因：{why}"
         )),

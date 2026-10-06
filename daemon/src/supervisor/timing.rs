@@ -14,11 +14,9 @@
 //! 3. **開銷可忽略**：記一筆是兩次 `Instant::now()` ＋ 一次 `Vec::push`（`std::sync::Mutex`，不跨 await）。
 //!    **不多做任何 herdr RPC**；連「現在有幾顆 bot」都只在**真的要寫那一行 log 時**才去查一次 DB。
 
-use crate::state::App;
 use sqlx::SqlitePool;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -115,7 +113,7 @@ async fn bots_now(db: &SqlitePool) -> i64 {
 
 /// 包一段 tick：原樣 `await` 那個 future（順序、鎖的範圍都不變），只在前後各取一次時間。
 /// 超過 [`SLOW_SEGMENT`] 才寫一行 warn。
-pub async fn seg<T>(app: &Arc<App>, name: &'static str, fut: impl std::future::Future<Output = T>) -> T {
+pub async fn seg<T>(app: &impl crate::capabilities::Db, name: &'static str, fut: impl std::future::Future<Output = T>) -> T {
     let started = Instant::now();
     let out = fut.await;
     note_segment(app, name, started.elapsed()).await;
@@ -124,19 +122,19 @@ pub async fn seg<T>(app: &Arc<App>, name: &'static str, fut: impl std::future::F
 
 /// [`seg`] 量完之後的那一半：進統計，超標才寫 log。時間由呼叫端給，所以門檻測得動
 /// （`tokio::time::pause` 只停得了 tokio 的時鐘，`std::time::Instant` 照走）。
-pub async fn note_segment(app: &Arc<App>, name: &str, took: Duration) {
+pub async fn note_segment(app: &impl crate::capabilities::Db, name: &str, took: Duration) {
     record(&format!("tick:{name}"), took);
     if took >= SLOW_SEGMENT {
-        let bots = bots_now(&app.db).await;
+        let bots = bots_now(app.db()).await;
         tracing::warn!(segment = name, bots, took_ms = took.as_millis() as u64, "supervisor tick segment was slow");
     }
 }
 
 /// 一拍做完了。超過 [`SLOW_TICK`]（＝心跳間隔）才寫：那表示這一拍已經開始落後。
-pub async fn note_tick(app: &Arc<App>, took: Duration) {
+pub async fn note_tick(app: &impl crate::capabilities::Db, took: Duration) {
     record(TICK_TOTAL, took);
     if took >= SLOW_TICK {
-        let bots = bots_now(&app.db).await;
+        let bots = bots_now(app.db()).await;
         tracing::warn!(
             bots,
             took_ms = took.as_millis() as u64,
@@ -208,6 +206,7 @@ fn site(at: &'static std::panic::Location<'static>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// 這張表是**行程共用**的，而且測試是平行跑的：所以每個測試只用自己的 key、**不清表**
     /// （清表會洗掉別的測試正在量的東西，就是典型的整樹偶發紅）。

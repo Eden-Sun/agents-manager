@@ -268,10 +268,10 @@ impl WindowUnreadable {
 ///
 /// **過期不會鎖死**：判斷走 `held_at`，`expires_at` 一到就自動不再擋，不需要任何人來收尾
 /// （租約本身 TTL 上限 1 小時，預設 15 分鐘）；daemon 重啟時 `release_restart_on_startup` 再收一次。
-pub async fn window_held(app: &Arc<App>) -> Result<Option<WindowHeld>, WindowUnreadable> {
+pub async fn window_held(app: &impl crate::capabilities::Db) -> Result<Option<WindowHeld>, WindowUnreadable> {
     let now = crate::db::now();
     for resource in EXCLUSIVE {
-        let lease = match store::lease(&app.db, resource).await {
+        let lease = match store::lease(app.db(), resource).await {
             Ok(l) => l,
             Err(e) => return Err(unreadable(resource, e)),
         };
@@ -302,7 +302,7 @@ fn unreadable(resource: &'static str, error: impl std::fmt::Display) -> WindowUn
 
 /// Is a restart window currently held by someone? Used by the dispatcher to hold work back.
 /// 讀不到回 `Err`：呼叫端要**當作還握著**，不能拿去解除 hold。
-pub async fn dispatch_paused(app: &Arc<App>) -> Result<Option<String>, WindowUnreadable> {
+pub async fn dispatch_paused(app: &impl crate::capabilities::Db) -> Result<Option<String>, WindowUnreadable> {
     Ok(window_held(app).await?.map(|w| w.expires_at))
 }
 
@@ -332,7 +332,7 @@ pub const FORCE_RELEASED_REASON: &str = "lease force-released";
 /// Release a lease and consume its approval — one yes, one window. When it was a restart
 /// window, the holds it placed are lifted at once.
 pub async fn release(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     resource: &str,
     owner: &str,
     fence: i64,
@@ -343,7 +343,7 @@ pub async fn release(
     // Keep the exact row whose token was proved and whose approval this call may consume. Looking
     // it up again after marking it released can race a new acquire and consume the next holder's
     // approval instead.
-    let Some(held) = store::lease(&app.db, resource).await? else { return Ok(false) };
+    let Some(held) = store::lease(app.db(), resource).await? else { return Ok(false) };
     if !proof.allows(held.lease_token.as_deref()) {
         anyhow::bail!("lease_token_mismatch");
     }
@@ -351,9 +351,9 @@ pub async fn release(
         tracing::warn!(resource, owner, "released a lease created before lease tokens existed; no proof was possible");
     }
     let released = if proof.is_forced() {
-        store::force_release_lease(&app.db, resource, held.fence).await?
+        store::force_release_lease(app.db(), resource, held.fence).await?
     } else {
-        store::release_lease(&app.db, resource, owner, fence).await?
+        store::release_lease(app.db(), resource, owner, fence).await?
     };
     #[cfg(test)]
     if released {
@@ -361,19 +361,19 @@ pub async fn release(
     }
     if released {
         if let Some(ap) = held.approval_id.as_deref() {
-            if let Ok(Some(a)) = store::approval(&app.db, ap).await {
+            if let Ok(Some(a)) = store::approval(app.db(), ap).await {
                 if a.status == "approved" {
                     // 走有稽核的那支：`decide_approval` 是無條件 UPDATE，不寫 supervisor_notes，
                     // 而且會把 `decided_at` 覆寫成消耗時間——升級判定（§18.10）的計時就是看那一欄。
                     // 理由分得出「持有人自己交還」與「強制收掉」（daemon 開機收殘留、AGM `--force`）：
                     // 自動部署只接續前者的等待（`swap_window`，SPEC §18.10）。
                     let why = if proof.is_forced() { FORCE_RELEASED_REASON } else { RELEASED_REASON };
-                    let _ = store::decide_approval_from(&app.db, ap, "approved", "consumed", owner, Some(why), None).await;
+                    let _ = store::decide_approval_from(app.db(), ap, "approved", "consumed", owner, Some(why), None).await;
                 }
             }
         }
         if EXCLUSIVE.contains(&resource) && matches!(dispatch_paused(app).await, Ok(None)) {
-            window_closed(&app.db, "lease released").await;
+            window_closed(app.db(), "lease released").await;
         }
     }
     Ok(released)
@@ -525,8 +525,8 @@ pub async fn safety_as(
 /// Take a window: approval checked, safety re-checked and the lease taken, all under the
 /// 這個 owner／requester 是哪一顆 bot（沒有對應的 bot——例如 `daemon-update-kick` 這種腳本
 /// 身分，或名字不唯一——就是 `None`）。先當成 bot id 查，查不到再用名字對。
-pub(crate) async fn requester_bot_id(app: &Arc<App>, owner: &str) -> Option<String> {
-    try_requester_bot_id(&app.db, owner).await.unwrap_or(None)
+pub(crate) async fn requester_bot_id(app: &impl crate::capabilities::Db, owner: &str) -> Option<String> {
+    try_requester_bot_id(app.db(), owner).await.unwrap_or(None)
 }
 
 /// [`requester_bot_id`] 的「讀不到就說讀不到」版（issue #436、#681）：DB 出錯或名字對到多顆 bot 時**不能**跟

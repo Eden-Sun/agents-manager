@@ -17,6 +17,13 @@ macro_rules! feature {
     }};
 }
 
+/// 開 DB 並套上全部 migration（共用 schema＋這份 feature 清單）。正式啟動走 `startup::open_instance`（明確傳這份清單給 `db::open_with`）；
+/// 測試與工具路徑用這支，省得每個呼叫端都帶清單。
+#[cfg(test)]
+pub(crate) async fn open(path: &std::path::Path) -> anyhow::Result<SqlitePool> {
+    crate::db::open_with(path, FEATURE_MIGRATIONS).await
+}
+
 /// 順序即執行順序：先動 `supervisor::store`（它建的表別的 migration 可能引用），最後 `share::store`。
 pub(crate) static FEATURE_MIGRATIONS: FeatureMigrations = &[
     feature!("supervisor::store", crate::supervisor::store::migrate),
@@ -86,7 +93,7 @@ mod tests {
             assert!(!core_tables.iter().any(|n| n == t), "db 單獨不該建 feature 的表 {t}");
         }
 
-        let full = db::open(&tmp_db("full")).await.unwrap();
+        let full = crate::app_ports_p1::open(&tmp_db("full")).await.unwrap();
         let names = tables(&full).await;
         for t in ["bots", "turns", "shared_bots", "panes", "bot_reads"] {
             assert!(names.iter().any(|n| n == t), "{t} 缺：{names:?}");

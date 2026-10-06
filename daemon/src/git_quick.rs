@@ -28,8 +28,8 @@ pub struct GitSummary {
     pub deletions: i64,
 }
 
-async fn project(app: &Arc<App>, id: &str) -> Result<db::Project, LcError> {
-    db::project(&app.db, id)
+async fn project(app: &impl crate::capabilities::Db, id: &str) -> Result<db::Project, LcError> {
+    db::project(app.db(), id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
         .filter(|p| p.deleted_at.is_none())

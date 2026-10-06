@@ -80,8 +80,8 @@ pub const ALERT_MARK: &str = "[daemon 自動通知，不是 bot_request]";
 ///
 /// 只認已經送達的回合（不是 `queued`），而且先看還在跑的那一回合（issue #134）：以前看的是對話裡最後一則 user
 /// message，排在佇列裡、還沒讀到的通知也算——mid 其實是被自己的回合卡住，top 卻收不到它的提問。
-async fn last_inbound_is_our_alert(app: &Arc<App>, bot_id: &str) -> bool {
-    let Ok(conv) = db::conversation_id(&app.db, bot_id).await else { return false };
+async fn last_inbound_is_our_alert(app: &impl crate::capabilities::Db, bot_id: &str) -> bool {
+    let Ok(conv) = db::conversation_id(app.db(), bot_id).await else { return false };
     let started_by: Option<String> = sqlx::query_scalar(
         "SELECT (SELECT m.content FROM messages m WHERE m.turn_id = t.id AND m.role = 'user' ORDER BY m.created_at, m.rowid LIMIT 1)
            FROM turns t
@@ -90,7 +90,7 @@ async fn last_inbound_is_our_alert(app: &Arc<App>, bot_id: &str) -> bool {
           LIMIT 1",
     )
     .bind(&conv)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await
     .ok()
     .flatten()
@@ -257,13 +257,13 @@ impl Drop for Working {
 }
 
 /// 活著、停在 blocked、有 parent 的子 agent（[`parent_to_tell`] 之後會再逐條確認）。
-async fn blocked_children(app: &Arc<App>) -> anyhow::Result<Vec<db::Run>> {
+async fn blocked_children(app: &impl crate::capabilities::Db) -> anyhow::Result<Vec<db::Run>> {
     Ok(sqlx::query_as::<_, db::Run>(
         "SELECT r.* FROM runs r JOIN bots b ON b.id = r.bot_id
           WHERE r.state IN ('starting','running','stopping') AND r.agent_status = 'blocked'
             AND b.managed_by = 'child' AND b.deleted_at IS NULL AND TRIM(COALESCE(b.parent_bot_id, '')) <> ''",
     )
-    .fetch_all(&app.db)
+    .fetch_all(app.db())
     .await?)
 }
 
@@ -343,19 +343,19 @@ enum Told {
 ///
 /// 每一條界線都從 DB 讀，所以測得到：狀態已經不是 blocked（被回答／被按掉／停掉）、不是子 agent、
 /// 已刪、沒有父、父沒有活著的 run（沒有 pane 收這則，UI 徽章仍在）。
-pub async fn parent_to_tell(app: &Arc<App>, bot_id: &str) -> anyhow::Result<Option<(String, db::Bot)>> {
-    let Some(fresh) = db::active_run(&app.db, bot_id).await? else { return Ok(None) };
+pub async fn parent_to_tell(app: &impl crate::capabilities::Db, bot_id: &str) -> anyhow::Result<Option<(String, db::Bot)>> {
+    let Some(fresh) = db::active_run(app.db(), bot_id).await? else { return Ok(None) };
     if fresh.agent_status != "blocked" {
         return Ok(None);
     }
-    let Some(child) = db::bot(&app.db, bot_id).await? else { return Ok(None) };
+    let Some(child) = db::bot(app.db(), bot_id).await? else { return Ok(None) };
     if child.managed_by != "child" || child.deleted_at.is_some() {
         return Ok(None);
     }
     let Some(parent_id) = child.parent_bot_id.clone().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) else {
         return Ok(None);
     };
-    if db::active_run(&app.db, &parent_id).await?.is_none() {
+    if db::active_run(app.db(), &parent_id).await?.is_none() {
         return Ok(None);
     }
     // 只往上送一層：這顆 child 自己就是因為讀了一則 child 通知才停下來的話，不要再往上轉。
@@ -499,8 +499,8 @@ fn next_attempt(last: Sent, now: chrono::DateTime<chrono::Utc>) -> Option<u32> {
 }
 
 /// 從 parent 的對話讀 `base` 這一串（第 0 次＋`:r<n>`）最新的一則。
-async fn last_sent(app: &Arc<App>, parent_id: &str, base: &str) -> anyhow::Result<Sent> {
-    let conv = db::conversation_id(&app.db, parent_id).await?;
+async fn last_sent(app: &impl crate::capabilities::Db, parent_id: &str, base: &str) -> anyhow::Result<Sent> {
+    let conv = db::conversation_id(app.db(), parent_id).await?;
     let retry_prefix = format!("{base}:r");
     let row: Option<(String, String, String, String, bool)> = sqlx::query_as(
         "SELECT t.client_request_id, t.status, t.delivery, COALESCE(t.completed_at, t.created_at),
@@ -516,7 +516,7 @@ async fn last_sent(app: &Arc<App>, parent_id: &str, base: &str) -> anyhow::Resul
     .bind(base)
     .bind(retry_prefix.chars().count() as i64)
     .bind(&retry_prefix)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?;
     let Some((crid, status, delivery, at, withdrawn)) = row else { return Ok(Sent::Never) };
     Ok(match status.as_str() {

@@ -671,7 +671,7 @@ pub async fn state_map(pool: &SqlitePool) -> anyhow::Result<HashMap<String, Valu
     Ok(rows.into_iter().map(|r| (r.bot_id.clone(), json!({"status": r.status, "port": r.port, "source": r.source}))).collect())
 }
 
-async fn emit_changed(app: &Arc<App>, r: &Row) {
+async fn emit_changed(app: &impl crate::capabilities::Emit, r: &Row) {
     app.emit("preview_changed", json!({"bot_id": r.bot_id, "status": r.status, "port": r.port, "source": r.source})).await;
 }
 
@@ -694,8 +694,8 @@ fn elapsed_secs(started_at: Option<&str>) -> i64 {
         .unwrap_or(0)
 }
 
-async fn top_level_bot(app: &Arc<App>, bot_id: &str) -> LcResult<db::Bot> {
-    let bot = db::bot(&app.db, bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
+async fn top_level_bot(app: &impl crate::capabilities::Db, bot_id: &str) -> LcResult<db::Bot> {
+    let bot = db::bot(app.db(), bot_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("bot".into()))?;
     if bot.deleted_at.is_some() {
         return Err(LcError::NotFound("bot".into()));
     }
@@ -704,12 +704,12 @@ async fn top_level_bot(app: &Arc<App>, bot_id: &str) -> LcResult<db::Bot> {
 
 /// 這顆 bot 的 vite 候選目錄（[`detect_dirs`] 對真的檔案系統）。
 /// 這顆 bot 的工作目錄：`bots.cwd`，沒有就是專案路徑。找 vite 與判 repo 都從這裡出發。
-async fn base_dir(app: &Arc<App>, bot: &db::Bot) -> LcResult<String> {
-    let project = db::project(&app.db, &bot.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
+async fn base_dir(app: &impl crate::capabilities::Db, bot: &db::Bot) -> LcResult<String> {
+    let project = db::project(app.db(), &bot.project_id).await.map_err(up)?.ok_or_else(|| LcError::NotFound("project".into()))?;
     Ok(bot.cwd.clone().filter(|c| !c.trim().is_empty()).unwrap_or(project.path))
 }
 
-async fn candidates_of(app: &Arc<App>, bot: &db::Bot) -> LcResult<Result<Vec<PathBuf>, Vec<String>>> {
+async fn candidates_of(app: &impl crate::capabilities::Db, bot: &db::Bot) -> LcResult<Result<Vec<PathBuf>, Vec<String>>> {
     let cwd = base_dir(app, bot).await?;
     // 不跟 symlink：免得繞圈。
     let subdirs = |d: &Path| -> Vec<PathBuf> {
@@ -721,8 +721,8 @@ async fn candidates_of(app: &Arc<App>, bot: &db::Bot) -> LcResult<Result<Vec<Pat
 }
 
 /// AG Man 認得的本機專案路徑：行程 cwd 落在其中一個底下就算「跟專案有關」。
-async fn local_project_roots(app: &Arc<App>) -> Vec<String> {
-    db::live_projects(&app.db)
+async fn local_project_roots(app: &impl crate::capabilities::Db) -> Vec<String> {
+    db::live_projects(app.db())
         .await
         .map(|ps| ps.into_iter().filter(|p| p.host == crate::config::LOCAL_HOST).map(|p| p.path).collect())
         .unwrap_or_default()
@@ -1279,7 +1279,7 @@ enum Identity {
     Unknown,
 }
 
-async fn attached_identity(app: &Arc<App>, env: &dyn PreviewEnv, r: &Row, port: u16) -> Identity {
+async fn attached_identity(app: &impl crate::capabilities::Db, env: &dyn PreviewEnv, r: &Row, port: u16) -> Identity {
     let (Some(pid), Some(dir)) = (r.pid, r.dir.as_deref()) else { return Identity::Unknown };
     let Some(all) = env.scan_servers(&local_project_roots(app).await).await else { return Identity::Unknown };
     match all.iter().find(|p| p.port == port) {

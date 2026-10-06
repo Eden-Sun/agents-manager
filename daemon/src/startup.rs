@@ -167,7 +167,7 @@ pub async fn open_instance(
     confirm_data_dir(&prepared, data_dir_in_cfg.as_deref(), config_given)?;
     // 只算不設：行程層級的 `set_instance` 由 `serve` 自己叫（測試不該汙染整個行程）。
     let slug = instance_slug(&prepared.dir)?;
-    let pool = crate::db::open(&prepared.dir.join("agents-manager.sqlite3")).await?;
+    let pool = crate::db::open_with(&prepared.dir.join("agents-manager.sqlite3"), crate::app_ports_p1::FEATURE_MIGRATIONS).await?;
     let Prepared { cfg_path, dir, lock, .. } = prepared;
     Ok(Instance { dir, cfg_path, store, pool, lock, slug })
 }

@@ -14,12 +14,10 @@
 //! the same blood-line path this issue does not touch.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::db;
-use crate::state::App;
 
 /// Hints older than this are certainly stale — reconcile runs far more often than this, so a hint
 /// still unconsumed after this long either already got adopted through another path or never
@@ -99,8 +97,8 @@ pub(crate) fn extract_pane_ids(payload: &Value) -> Vec<String> {
 /// within a host, so a later insert for the same `(host, pane_id)` is either a retry (harmless
 /// overwrite) or that id being recycled for a new pane later (the newer claim is the one that is
 /// actually true now). An identical ID on another host is a separate hint.
-pub(crate) async fn record(app: &Arc<App>, bot_id: &str, pane_id: &str) -> anyhow::Result<()> {
-    let host = db::bot_host(&app.db, bot_id).await?;
+pub(crate) async fn record(app: &impl crate::capabilities::Db, bot_id: &str, pane_id: &str) -> anyhow::Result<()> {
+    let host = db::bot_host(app.db(), bot_id).await?;
     sqlx::query(
         "INSERT INTO spawn_hints (pane_id, host, bot_id, created_at) VALUES (?,?,?,?)
          ON CONFLICT(host, pane_id) DO UPDATE SET bot_id=excluded.bot_id, created_at=excluded.created_at",
@@ -109,37 +107,37 @@ pub(crate) async fn record(app: &Arc<App>, bot_id: &str, pane_id: &str) -> anyho
     .bind(&host)
     .bind(bot_id)
     .bind(db::now())
-    .execute(&app.db)
+    .execute(app.db())
     .await?;
     Ok(())
 }
 
 /// Every still-fresh hint for this host, as `pane_id -> bot_id`. Called once per `reconcile_host`
 /// pass; the caller looks up at most one entry per unclaimed agent.
-pub(crate) async fn for_host(app: &Arc<App>, host: &str) -> anyhow::Result<HashMap<String, String>> {
+pub(crate) async fn for_host(app: &impl crate::capabilities::Db, host: &str) -> anyhow::Result<HashMap<String, String>> {
     let rows: Vec<(String, String)> =
         sqlx::query_as("SELECT pane_id, bot_id FROM spawn_hints WHERE host = ? AND created_at >= ?")
             .bind(host)
             .bind(cutoff())
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await?;
     Ok(rows.into_iter().collect())
 }
 
 /// A hint that actually decided an adoption is spent — not required for correctness (the pane's
 /// agent is `claimed` either way, so nothing looks at this host's hint again), just hygiene.
-pub(crate) async fn consume(app: &Arc<App>, host: &str, pane_id: &str) {
+pub(crate) async fn consume(app: &impl crate::capabilities::Db, host: &str, pane_id: &str) {
     let _ = sqlx::query("DELETE FROM spawn_hints WHERE host = ? AND pane_id = ?")
         .bind(host)
         .bind(pane_id)
-        .execute(&app.db)
+        .execute(app.db())
         .await;
 }
 
 /// Hints nobody ever consumed (the spawn failed, or reconcile never got to it in time). Run once
 /// per `reconcile_host` pass — cheap, keeps the table from growing unbounded.
-pub(crate) async fn prune_stale(app: &Arc<App>) {
-    let _ = sqlx::query("DELETE FROM spawn_hints WHERE created_at < ?").bind(cutoff()).execute(&app.db).await;
+pub(crate) async fn prune_stale(app: &impl crate::capabilities::Db) {
+    let _ = sqlx::query("DELETE FROM spawn_hints WHERE created_at < ?").bind(cutoff()).execute(app.db()).await;
 }
 
 #[cfg(test)]

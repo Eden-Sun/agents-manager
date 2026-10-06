@@ -821,7 +821,7 @@ mod tests {
         turn(&env, &bot, "t-real", None, "completed", &at(64, now), Some(&at(59, now))).await;
         set_skip(&env.app.db, &bot.id, true).await.unwrap();
         drop_window(&run.id);
-        let reopened = db::open(&env.dir.join("data").join("db.sqlite3")).await.unwrap();
+        let reopened = crate::app_ports_p1::open(&env.dir.join("data").join("db.sqlite3")).await.unwrap();
         assert!(skip_since(&reopened, &bot.id).await.unwrap().is_some(), "重開 DB 後還在");
         assert_eq!(plan(&env.app, &bot, &run, now).await.unwrap(), None);
         let last = cache_clock::last_turn_for_bot(&reopened, &bot.id).await.unwrap().unwrap();
@@ -905,7 +905,7 @@ mod tests {
         assert_eq!(unread.get(&bot.id), Some(&1), "只有一般回合的回覆算未讀");
         // 新增的 migrate 會把舊列補上標記。
         sqlx::query("UPDATE messages SET keep_warm = 0").execute(&env.app.db).await.unwrap();
-        let reopened = db::open(&env.dir.join("data").join("db.sqlite3")).await.unwrap();
+        let reopened = crate::app_ports_p1::open(&env.dir.join("data").join("db.sqlite3")).await.unwrap();
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE keep_warm = 1").fetch_one(&reopened).await.unwrap();
         assert_eq!(n, 4, "舊資料回填");
     }

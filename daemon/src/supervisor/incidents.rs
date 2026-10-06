@@ -221,17 +221,17 @@ fn blind_probes() -> &'static std::sync::Mutex<HashMap<std::path::PathBuf, Vec<&
     BLIND.get_or_init(Default::default)
 }
 
-pub fn note_blind(app: &Arc<App>, failed: &[&'static str]) {
+pub fn note_blind(app: &impl crate::capabilities::DataDir, failed: &[&'static str]) {
     let mut failed = failed.to_vec();
     failed.sort_unstable();
     failed.dedup();
     if let Ok(mut m) = blind_probes().lock() {
-        m.insert(app.data_dir.clone(), failed);
+        m.insert(app.data_dir().to_path_buf(), failed);
     }
 }
 
-fn blind_now(app: &Arc<App>) -> Vec<&'static str> {
-    blind_probes().lock().ok().and_then(|m| m.get(&app.data_dir).cloned()).unwrap_or_default()
+fn blind_now(app: &impl crate::capabilities::DataDir) -> Vec<&'static str> {
+    blind_probes().lock().ok().and_then(|m| m.get(app.data_dir()).cloned()).unwrap_or_default()
 }
 
 /// Read every cheap probe. No LLM, no process is killed to find out how it is doing: this runs
@@ -704,11 +704,11 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
 }
 
 /// The system half of the health summary: severity, and the incidents behind it.
-pub async fn system_health(app: &Arc<App>) -> Value {
+pub async fn system_health(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db)) -> Value {
     // `unwrap_or_default()` here used to turn a failed query into an empty list, and an empty
     // list into `healthy` — the summary claimed the system was fine on the strength of a read
     // that never happened.
-    let open = match store::open_incidents(&app.db).await {
+    let open = match store::open_incidents(app.db()).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = ?e, "could not read open incidents");

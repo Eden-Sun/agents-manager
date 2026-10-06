@@ -178,7 +178,7 @@ fn close_paused_turn_later(app: &Arc<App>, run_id: &str, turn_id: &str) {
 
 /// 巡邏收尾：補標記的 run 已經不在 active 名單上（結束或被刪）就拿掉，巡邏再也不會看它。
 /// 以重讀 DB 為準；讀不到（DB 錯）就留著等下一輪。
-pub async fn forget_ended(app: &Arc<App>, active: &[db::Run]) {
+pub async fn forget_ended(app: &impl crate::capabilities::Db, active: &[db::Run]) {
     let marked: Vec<(String, u64)> = forced()
         .lock()
         .unwrap()
@@ -187,7 +187,7 @@ pub async fn forget_ended(app: &Arc<App>, active: &[db::Run]) {
         .map(|(id, f)| (id.clone(), f.epoch))
         .collect();
     for (id, epoch) in marked {
-        match db::run(&app.db, &id).await {
+        match db::run(app.db(), &id).await {
             Ok(Some(r)) if matches!(r.state.as_str(), "starting" | "running" | "stopping") => {}
             Ok(_) => retire(&id, epoch),
             Err(_) => {}

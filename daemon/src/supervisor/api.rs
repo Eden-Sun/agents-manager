@@ -979,11 +979,11 @@ pub struct PersonaIn {
 /// 第三列是這張票的重點：人設就是總管跑的那份角色前導詞（`persona.rs`、`setup.rs`），
 /// 一顆普通 bot 沒有理由改寫它；而它本來連 `HeaderMap` 都不收。
 /// 界線（沒帶身分仍然過得去）留在 #447 等 per-bot token。
-pub(super) async fn persona_actor(app: &Arc<App>, headers: &HeaderMap) -> Result<String, LcError> {
+pub(super) async fn persona_actor(app: &impl crate::capabilities::Db, headers: &HeaderMap) -> Result<String, LcError> {
     let Some(id) = super::bot_requests::verified_bot_id(app, headers).await? else {
         return Ok("user".to_string());
     };
-    match super::roles::role_of_bot(&app.db, &id).await.map_err(up)? {
+    match super::roles::role_of_bot(app.db(), &id).await.map_err(up)? {
         Some(r) => Ok(format!("{}:{}", store::SUPERVISOR_ID, r.as_str())),
         None => Err(LcError::Forbidden(json!({
             "error": "forbidden",
@@ -1100,7 +1100,7 @@ pub async fn post_persona_adopt(
 /// A DB write is durable even if a derived file cannot be written. Return that fact instead
 /// of silently reporting success; repeating the identical PUT repairs projections without
 /// incrementing the version or being rejected by the old expected_version.
-async fn sync_persona(app: &Arc<App>, text: &str, version: i64) -> Result<(), LcError> {
+async fn sync_persona(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db), text: &str, version: i64) -> Result<(), LcError> {
     apply_persona(app, text).await.map_err(|e| LcError::conflict(
         "persona stored but projection sync is incomplete; retry the same text to repair",
         json!({"reason": "persona_sync_incomplete", "stored": true, "version": version,
@@ -1110,12 +1110,12 @@ async fn sync_persona(app: &Arc<App>, text: &str, version: i64) -> Result<(), Lc
 
 /// Push the stored persona into the derived copies: the bot's config entry and `persona.md`.
 /// Neither is authoritative; both are rewritten from the stored text so they cannot drift.
-async fn apply_persona(app: &Arc<App>, text: &str) -> Result<(), LcError> {
-    let sup = store::get_or_init(&app.db).await.map_err(up)?;
+async fn apply_persona(app: &(impl crate::capabilities::Cfg + crate::capabilities::DataDir + crate::capabilities::Db), text: &str) -> Result<(), LcError> {
+    let sup = store::get_or_init(app.db()).await.map_err(up)?;
     let Some(bot_id) = sup.bot_id.clone() else { return Ok(()) };
     let t = text.to_string();
     let bid = bot_id.clone();
-    crate::projection::update_and_project(&app.cfg, &app.db, move |cfg| {
+    crate::projection::update_and_project(app.cfg(), app.db(), move |cfg| {
         let mut found = false;
         for p in cfg.projects.iter_mut() {
             if let Some(b) = p.bots.iter_mut().find(|b| b.id.as_deref() == Some(bid.as_str())) {
@@ -1189,7 +1189,7 @@ fn approval_expires(secs: Option<i64>) -> Result<Option<String>, LcError> {
 /// 我們改寫＝讓它後面開不了窗口，還很難查。
 ///
 /// 沒帶身分的照收（`daemon-update-kick.sh` 這類 launchd 腳本就是這樣申請的），只是記成沒驗過。
-async fn requester_claim(app: &Arc<App>, headers: &HeaderMap, requester: &str) -> Result<bool, LcError> {
+async fn requester_claim(app: &impl crate::capabilities::Db, headers: &HeaderMap, requester: &str) -> Result<bool, LcError> {
     let Some(caller) = super::bot_requests::verified_bot_id(app, headers).await? else { return Ok(true) };
     if super::maintenance::requester_bot_id(app, requester).await.as_deref() == Some(caller.as_str()) {
         return Ok(false);
@@ -1669,7 +1669,7 @@ mod persona_sync_tests {
         std::fs::write(dir.join("config.toml"), format!(
             "[[projects]]\nid = '{pid}'\npath = '{}'\nlabel = 'AGM'\n[[projects.bots]]\nid = '{bid}'\nname = 'AGM'\nkind = 'claude'\npersona = 'existing custom persona'\n", dir.display()
         )).unwrap();
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         crate::projection::project_config(&cfg, &db).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
@@ -1710,7 +1710,7 @@ mod approval_decision_tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-approval");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false);
@@ -2604,7 +2604,7 @@ mod review_boundary_tests {
 
     async fn app() -> Arc<App> {
         let dir = crate::testing::scratch_dir("agm-review-boundary");
-        let db = crate::db::open(&dir.join("test.sqlite")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("test.sqlite")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = crate::herdr::HerdrClient::new(dir.join("absent.sock"));
         let app = App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"),

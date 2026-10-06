@@ -13,17 +13,15 @@
 //! （一次核准一個窗口），下一輪只能開新的。這張新的**接續**被交還那張的等待（[`given_back_wait`]），計時不歸零——
 //! 2026-10-04 08:41～09:22 每輪都在瞬間閒置時拿到租約、3a 又看到人在忙而交還，`escalates_at` 每輪往後推 5 分鐘，忙碌的機群永遠等不到放寬。
 
-use std::sync::Arc;
 
 use crate::lifecycle::LcError;
-use crate::state::App;
 use crate::supervisor::store;
 
 /// 自動核准活多久：遠長於 30 分的升級門檻，讓一直在忙的機群也等得到放寬。
 pub const APPROVAL_TTL_SECS: i64 = 6 * 3600;
 
 /// 這個 owner 現在可以拿去開窗口的核准 id：沿用同 commit 的活核准，或開一張新的（接續舊的等待）。
-pub async fn approval_for(app: &Arc<App>, owner: &str, commit: &str, actor: &str) -> anyhow::Result<String> {
+pub async fn approval_for(app: &impl crate::capabilities::Db, owner: &str, commit: &str, actor: &str) -> anyhow::Result<String> {
     let now = crate::db::now();
     let expires_at = crate::db::ts_sql("expires_at");
     let live: Option<store::Approval> = sqlx::query_as(&format!(
@@ -36,7 +34,7 @@ pub async fn approval_for(app: &Arc<App>, owner: &str, commit: &str, actor: &str
     .bind(owner)
     .bind(actor)
     .bind(&now)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?;
     if let Some(a) = live.as_ref().filter(|a| a.target_commit.as_deref() == Some(commit)) {
         return Ok(a.id.clone());
@@ -47,7 +45,7 @@ pub async fn approval_for(app: &Arc<App>, owner: &str, commit: &str, actor: &str
         None => given_back_wait(app, owner, actor, &now).await?,
     };
     let created = store::create_approval_superseding(
-        &app.db,
+        app.db(),
         owner,
         "restart",
         &format!("例行自動部署換版 {commit}（daemon-swap 自動核准）"),
@@ -60,9 +58,9 @@ pub async fn approval_for(app: &Arc<App>, owner: &str, commit: &str, actor: &str
     .await?;
     let id = created.approval.id;
     if let Some(since) = carried.as_deref() {
-        sqlx::query("UPDATE supervisor_approvals SET wait_since=? WHERE id=? AND status='pending'").bind(since).bind(&id).execute(&app.db).await?;
+        sqlx::query("UPDATE supervisor_approvals SET wait_since=? WHERE id=? AND status='pending'").bind(since).bind(&id).execute(app.db()).await?;
     }
-    store::decide_approval_from(&app.db, &id, "pending", "approved", actor, Some("例行自動部署：建置與整樹測試在推 main 前後已由 ubuntu-ci 驗過"), None).await?;
+    store::decide_approval_from(app.db(), &id, "pending", "approved", actor, Some("例行自動部署：建置與整樹測試在推 main 前後已由 ubuntu-ci 驗過"), None).await?;
     Ok(id)
 }
 
@@ -73,7 +71,7 @@ pub async fn approval_for(app: &Arc<App>, owner: &str, commit: &str, actor: &str
 /// 而且線上跑的不是它要換的 commit（換成了之後才交還的不是「沒換成」）。
 ///
 /// [`RELEASED_REASON`]: crate::supervisor::maintenance::RELEASED_REASON
-async fn given_back_wait(app: &Arc<App>, owner: &str, actor: &str, now: &str) -> anyhow::Result<Option<String>> {
+async fn given_back_wait(app: &impl crate::capabilities::Db, owner: &str, actor: &str, now: &str) -> anyhow::Result<Option<String>> {
     let last: Option<store::Approval> = sqlx::query_as(
         "SELECT * FROM supervisor_approvals
           WHERE supervisor_id=? AND requester=? AND purpose='restart' AND decided_by=?
@@ -82,7 +80,7 @@ async fn given_back_wait(app: &Arc<App>, owner: &str, actor: &str, now: &str) ->
     .bind(store::SUPERVISOR_ID)
     .bind(owner)
     .bind(actor)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await?;
     let Some(a) = last else { return Ok(None) };
     let given_back = a.status == "consumed" && a.reason.as_deref() == Some(crate::bot_trash::app_ports_p11::RELEASED_REASON);

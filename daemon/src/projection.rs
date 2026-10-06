@@ -770,7 +770,7 @@ mod tests {
         );
         std::fs::write(&path, text).unwrap();
         let store = ConfigStore::load(path).await.unwrap();
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         let error = project_config(&store, &pool).await.unwrap_err().to_string();
         pool.close().await;
         std::fs::remove_dir_all(&dir).unwrap();
@@ -792,7 +792,7 @@ mod tests {
         )
         .unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_config(&store, &pool).await.unwrap();
 
         let before_text = std::fs::read_to_string(&path).unwrap();
@@ -900,7 +900,7 @@ mod tests {
         let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'local'\nssh = 'me@10.0.0.2'\n";
         std::fs::write(&path, text).unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         let err = project_config_at_startup(&store, &pool, false).await.unwrap_err().to_string();
         assert!(err.contains("reserved"), "{err}");
@@ -919,7 +919,7 @@ mod tests {
         let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'm4p'\nssh = '-oProxyCommand=true'\n";
         std::fs::write(&path, text).unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         let err = project_config_at_startup(&store, &pool, false).await.unwrap_err().to_string();
         assert!(err.contains("ssh target"), "{err}");
@@ -942,7 +942,7 @@ mod tests {
         )
         .unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         project_config_at_startup(&store, &pool, false).await.expect("空白不該擋開機");
 
@@ -977,7 +977,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         let text = "[server]\nlisten='127.0.0.1:7788'\n[[projects]]\nid='p1'\npath='/tmp'\nlabel='p'\nhost='local'\n[[projects.bots]]\nid='c'\nname='c'\nkind='codex'\nmodel='gpt-5.6-luna'\n[[projects.bots]]\nid='a'\nname='a'\nkind='claude'\nmodel='claude-opus-4-1'\n[[projects.bots]]\nid='alias'\nname='alias'\nkind='claude'\nmodel='opus'\n";
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_text(&path, &pool, text).await.unwrap();
         let models: Vec<(String, Option<String>)> = sqlx::query_as("SELECT id,model FROM bots ORDER BY id").fetch_all(&pool).await.unwrap();
         assert_eq!(models, vec![("a".into(), Some("claude-opus-4-1".into())), ("alias".into(), Some("claude-opus-5-5".into())), ("c".into(), Some("gpt-6-luna".into()))]);
@@ -1003,7 +1003,7 @@ mod tests {
         };
         std::fs::write(&path, text("codex")).unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_config(&store, &pool).await.expect("m4p 的 work 是 codex，跟 bot 一致");
 
         // 在 m4p 上綁 claude：那台的 work 是 codex，照樣擋（不會去拿本機那份 claude 放行）。
@@ -1023,7 +1023,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-bulk-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         project_text(&path, &pool, &config_text(&["b1", "b2", "b3", "b4"])).await.unwrap();
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 4);
@@ -1056,7 +1056,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-once-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         std::fs::write(&path, config_text(&["b1"])).unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
         project_config(&store, &pool).await.unwrap();
@@ -1094,7 +1094,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-reload-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         std::fs::write(&path, config_text(&["b1", "b2", "b3", "b4"])).unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
@@ -1125,7 +1125,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-uap-refuse-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_text(&path, &pool, &config_text(&["b1", "b2", "b3", "b4"])).await.unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
 
@@ -1150,7 +1150,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-two-missing-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         let all = ["b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "b10"];
         project_text(&path, &pool, &config_text(&all)).await.unwrap();
 
@@ -1167,7 +1167,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-supervisor-child-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_text(&path, &pool, &config_text(&["supervisor", "build"])).await.unwrap();
         sqlx::query("UPDATE bots SET parent_bot_id = 'supervisor' WHERE id = 'build'").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO supervisors (id, bot_id, created_at, updated_at) VALUES ('sup', 'supervisor', 't', 't')")
@@ -1192,7 +1192,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-uap-ok-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_text(&path, &pool, &config_text(&["b1", "b2"])).await.unwrap();
         let store = ConfigStore::load(path.clone()).await.unwrap();
 
@@ -1216,7 +1216,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-uap-child-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_text(&path, &pool, &config_text(&["alfa"])).await.unwrap();
         sqlx::query(
             "INSERT INTO bots (id, project_id, name, kind, args_json, autostart, inject_hooks, hook_token, managed_by, created_at)
@@ -1270,7 +1270,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-{name}-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_text(&path, &pool, &config_text(bots)).await.unwrap();
         (dir, ConfigStore::load(path).await.unwrap(), pool)
     }
@@ -1364,7 +1364,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-projection-one-{}", db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        let pool = db::open(&dir.join("db.sqlite3")).await.unwrap();
+        let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         project_text(&path, &pool, &config_text(&["b1", "b2", "b3", "b4"])).await.unwrap();
         project_text(&path, &pool, &config_text(&["b1", "b2", "b3"])).await.unwrap();

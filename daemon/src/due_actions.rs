@@ -15,11 +15,9 @@
 //! 所以這個模組只統一**讀取端**：把六處讀成同一份摘要。
 
 use crate::events::ports::SupervisorRepo;
-use crate::state::App;
 use anyhow::Result;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use std::sync::Arc;
 
 /// 一件還沒發生的事。`due_at` 是 RFC3339；`None` ＝「下一個事件來就做」，沒有排定時間。
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -299,11 +297,11 @@ pub async fn pending(pool: &SqlitePool) -> Result<Vec<DueAction>> {
 }
 
 /// 給健康快照的那一段。讀不到就回 `null` 而不是讓整份快照失敗：這是觀測用的，不該變成新的故障點。
-pub async fn snapshot(app: &Arc<App>) -> Value {
+pub async fn snapshot(app: &impl crate::capabilities::Db) -> Value {
     let (by_kind, soon, items) = match tokio::try_join!(
-        counts(&app.db),
-        soonest(&app.db),
-        failing_sample(&app.db, SAMPLE)
+        counts(app.db()),
+        soonest(app.db()),
+        failing_sample(app.db(), SAMPLE)
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -334,6 +332,8 @@ pub async fn snapshot(app: &Arc<App>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::App;
+    use std::sync::Arc;
     use crate::testing as tt;
 
     async fn assignment(app: &Arc<App>, id: &str, status: &str, next: Option<&str>, resume: Option<&str>, attempts: i64) {

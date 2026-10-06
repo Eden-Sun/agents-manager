@@ -227,8 +227,8 @@ async fn pane_state(app: &Arc<App>, run: &db::Run) -> Pane {
 }
 
 /// 隱式退役前的 AGM 判斷。`Retired`＝放行（不是 AGM 的）。
-async fn agm_guard(app: &Arc<App>, bot: &db::Bot, why: &str) -> Outcome {
-    let owned = match app.db.load_owned().await {
+async fn agm_guard(app: &impl crate::capabilities::Db, bot: &db::Bot, why: &str) -> Outcome {
+    let owned = match app.db().load_owned().await {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!(bot = %bot.name, why, error = ?e, "cannot read which bots are AGM's; child kept this pass");
@@ -243,7 +243,7 @@ async fn agm_guard(app: &Arc<App>, bot: &db::Bot, why: &str) -> Outcome {
     let last: Option<(String, String, Option<String>)> =
         sqlx::query_as("SELECT state, agent_status, pane_id FROM runs WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
             .bind(&bot.id)
-            .fetch_optional(&app.db)
+            .fetch_optional(app.db())
             .await
             .unwrap_or(None);
     let payload = json!({
@@ -258,7 +258,7 @@ async fn agm_guard(app: &Arc<App>, bot: &db::Bot, why: &str) -> Outcome {
     });
     // 同一顆、一小時最多一則（跟 `supervisor_owned::alert` 同一個慣例）：擋下來本身已經做完了。
     let key = notice_key(app, &bot.id, chrono::Utc::now()).await;
-    match app.db.push_inbox(&key, "child_retire_refused", None, Some(&bot.id), None, &payload).await {
+    match app.db().push_inbox(&key, "child_retire_refused", None, Some(&bot.id), None, &payload).await {
         Ok(_) => tracing::warn!(bot = %bot.name, role, why, "refused to retire an AGM child; patrol notified"),
         Err(e) => tracing::error!(bot = %bot.name, role, why, error = %e, "refused to retire an AGM child; the inbox row could not be written"),
     }
@@ -283,7 +283,7 @@ const NOTICE_WINDOW_SECS: i64 = 3600;
 /// 意思「一小時最多一則」，只把那一小時改成從上一則算起。
 ///
 /// 讀不到就開新的一把：這只是去重，寧可讓巡檢多看到一則，也不要讓通知整筆消失。
-async fn notice_key(app: &Arc<App>, bot_id: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+async fn notice_key(app: &impl crate::capabilities::Db, bot_id: &str, now: chrono::DateTime<chrono::Utc>) -> String {
     let since = db::iso_at(now - chrono::Duration::seconds(NOTICE_WINDOW_SECS));
     // `supervisor_inbox.created_at` 只由 `db::now()` 寫（同一種毫秒格式），所以字串比較就是照時刻比。
     let found: Result<Option<String>, _> = sqlx::query_scalar(
@@ -294,7 +294,7 @@ async fn notice_key(app: &Arc<App>, bot_id: &str, now: chrono::DateTime<chrono::
     .bind(<sqlx::SqlitePool as SupervisorRepo>::SUPERVISOR_ID)
     .bind(bot_id)
     .bind(&since)
-    .fetch_optional(&app.db)
+    .fetch_optional(app.db())
     .await;
     match found {
         Ok(Some(key)) => key,

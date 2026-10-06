@@ -91,24 +91,24 @@ pub(crate) async fn client_for(app: &Arc<App>, host: &str) -> LcResult<(HerdrCli
 }
 
 /// A project on that host (where the jobs actually happen), else its `$HOME`.
-async fn default_cwd(app: &Arc<App>, host: &str) -> LcResult<String> {
-    let projects = db::live_projects(&app.db).await.map_err(up)?;
+async fn default_cwd(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess), host: &str) -> LcResult<String> {
+    let projects = db::live_projects(app.db()).await.map_err(up)?;
     if let Some(p) = projects.iter().find(|p| p.host == host) {
         return Ok(p.path.clone());
     }
-    let conn = app.hosts.get(host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
+    let conn = app.hosts().get(host).await.ok_or_else(|| LcError::NotFound("host".into()))?;
     conn.home().await.map_err(up)
 }
 
 /// A fresh workspace's root pane is already its own tab, so it is used as-is. It is deliberately
 /// **not** written back to `projects.workspace_id`, or the next bot would land in a `shell` workspace.
 async fn acquire_pane(
-    app: &Arc<App>,
+    app: &impl crate::capabilities::Db,
     client: &HerdrClient,
     host: &str,
     cwd: &str,
 ) -> LcResult<crate::herdr::PaneInfo> {
-    let projects = db::live_projects(&app.db).await.map_err(up)?;
+    let projects = db::live_projects(app.db()).await.map_err(up)?;
     for p in projects.iter().filter(|p| p.host == host) {
         let Some(ws) = p.workspace_id.as_deref().filter(|w| !w.trim().is_empty()) else { continue };
         if client.workspace_get(ws).await.map_err(up)?.is_some() {
@@ -526,7 +526,7 @@ mod tests {
     async fn app() -> Arc<App> {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-shell-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = crate::db::open(&dir.join("t.sqlite3")).await.unwrap();
+        let db = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
         let cfg = crate::config::ConfigStore::load(dir.join("config.toml")).await.unwrap();
         let client = HerdrClient::new(dir.join("absent.sock"));
         App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false)
