@@ -25,7 +25,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::lifecycle::LcError;
+use crate::models::app_ports_p13::{self, LcError};
 use crate::state::App;
 
 #[derive(Debug, Deserialize)]
@@ -112,10 +112,10 @@ async fn pick_target(app: &Arc<App>) -> Option<crate::db::Bot> {
             }
         }
     }
-    if let Ok(Some(b)) = crate::supervisor::roles::responder_bot(&app.db).await {
+    if let Ok(Some(b)) = app_ports_p13::responder_bot(&app.db).await {
         ids.push(b.id);
     }
-    let patrol = crate::supervisor::store::get_or_init(&app.db).await.ok().and_then(|s| s.bot_id);
+    let patrol = app_ports_p13::supervisor_get_or_init(&app.db).await.ok().and_then(|s| s.bot_id);
     for id in ids.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
         if patrol.as_deref() == Some(id.as_str()) {
             continue;
@@ -198,8 +198,8 @@ async fn default_to(app: &Arc<App>, host: &str, kind: &str) -> Option<String> {
 
 /// 這一版已經有交辦了嗎（使用者按過，或 kick 先派了——兩邊用同一個 `client_request_id`）。
 #[cfg(test)]
-pub async fn existing_for(app: &Arc<App>, kind: &str, to: &str) -> anyhow::Result<Option<crate::supervisor::store::Assignment>> {
-    crate::supervisor::store::assignment_by_crid(&app.db, &request_id(kind, to)).await
+pub async fn existing_for(app: &Arc<App>, kind: &str, to: &str) -> anyhow::Result<Option<app_ports_p13::Assignment>> {
+    app_ports_p13::assignment_by_crid(&app.db, &request_id(kind, to)).await
 }
 
 /// 同一個 `client_request_id` 已經進過 AGM 的收件匣了嗎（kick 是**透過協調者的收件匣**派的，
@@ -233,7 +233,7 @@ pub fn request_id(kind: &str, to: &str) -> String {
 /// 還是只會走到那條死路，看不到新派的這筆（換 crid 不等於換得到「查得到」）。
 async fn redispatch_target(app: &Arc<App>, kind: &str, to: &str) -> Result<(String, Option<String>), LcError> {
     let base = ui_request_id(kind, to);
-    let head = crate::supervisor::store::assignment_by_crid(&app.db, &base)
+    let head = app_ports_p13::assignment_by_crid(&app.db, &base)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?;
     let Some(head) = head else {
@@ -242,7 +242,7 @@ async fn redispatch_target(app: &Arc<App>, kind: &str, to: &str) -> Result<(Stri
     let tail = latest_in_chain(app, head).await?;
     for n in 2..1000 {
         let candidate = format!("{base}-r{n}");
-        let existing = crate::supervisor::store::assignment_by_crid(&app.db, &candidate)
+        let existing = app_ports_p13::assignment_by_crid(&app.db, &candidate)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?;
         if existing.is_none() {
@@ -286,13 +286,13 @@ pub struct ReviewState {
 /// （`supervisor::store::review_with_followup`）；鏈可能好幾層（`-ui` → `-ui-f1` → `-ui-f2`…）。
 async fn latest_in_chain(
     app: &Arc<App>,
-    a: crate::supervisor::store::Assignment,
-) -> Result<crate::supervisor::store::Assignment, LcError> {
+    a: app_ports_p13::Assignment,
+) -> Result<app_ports_p13::Assignment, LcError> {
     let mut cur = a;
     // 鏈本身沒有理論上限，用個保守的圈數擋掉萬一寫壞的環（不讓這支請求掛住）。
     for _ in 0..50 {
         let Some(next_id) = cur.followup_assignment_id.clone() else { break };
-        match crate::supervisor::store::assignment(&app.db, &next_id)
+        match app_ports_p13::assignment(&app.db, &next_id)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?
         {
@@ -306,7 +306,7 @@ async fn latest_in_chain(
 /// assignment 這條路能不能給出一個 [`ReviewState`]：`completed` → `done`；還活著（`OPEN_STATES`）→
 /// `pending`；其餘（`superseded`／`failed`／`cancelled`…鏈尾走到這裡就是真的死路）→ `None`，
 /// 呼叫端當「這一版還沒有能用的交辦」，允許重派。
-async fn state_from_assignment(app: &Arc<App>, a: &crate::supervisor::store::Assignment) -> Result<Option<ReviewState>, LcError> {
+async fn state_from_assignment(app: &Arc<App>, a: &app_ports_p13::Assignment) -> Result<Option<ReviewState>, LcError> {
     let target_bot_name = crate::db::bot(&app.db, &a.target_bot_id)
         .await
         .map_err(|e| LcError::Upstream(e.to_string()))?
@@ -321,7 +321,7 @@ async fn state_from_assignment(app: &Arc<App>, a: &crate::supervisor::store::Ass
             result: a.result.clone(),
         }));
     }
-    if crate::supervisor::store::OPEN_STATES.contains(&a.status.as_str()) {
+    if app_ports_p13::OPEN_STATES.contains(&a.status.as_str()) {
         return Ok(Some(ReviewState {
             state: "pending",
             assignment_id: Some(a.id.clone()),
@@ -343,7 +343,7 @@ async fn state_from_assignment(app: &Arc<App>, a: &crate::supervisor::store::Ass
 /// 才退回收件匣那條路：派給 AGM 角色的工作走交接佇列，沒有 assignment，結論在那個回合的訊息裡。
 pub async fn review_state(app: &Arc<App>, kind: &str, to: &str) -> Result<ReviewState, LcError> {
     for crid in [ui_request_id(kind, to), request_id(kind, to)] {
-        let Some(a) = crate::supervisor::store::assignment_by_crid(&app.db, &crid)
+        let Some(a) = app_ports_p13::assignment_by_crid(&app.db, &crid)
             .await
             .map_err(|e| LcError::Upstream(e.to_string()))?
         else {
@@ -499,7 +499,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
     // 直接走 `supervisor::assign`（不是 `post_assignment` 那層 HTTP handler）：重派時要把新的一筆接在
     // 死路的鏈尾之後（`follow_up_of`），`AssignIn` 沒有這個欄位——那是給外部呼叫端用的，這個接續是
     // daemon 自己內部判斷出來的，不該讓使用者也塞得進去。
-    crate::supervisor::assign(
+    app_ports_p13::supervisor_assign(
         &app,
         &target.id,
         &text,
@@ -511,7 +511,7 @@ pub async fn post_review(State(app): State<Arc<App>>, Json(b): Json<ReviewIn>) -
         None,
         None,
         None,
-        crate::supervisor::bot_requests::ReplyMark::default(),
+        app_ports_p13::ReplyMark::default(),
     )
     .await?;
     Ok(Json(json!({
@@ -611,17 +611,17 @@ mod tests {
             .bind(id).bind(&e.project_id).bind(id).bind(format!("tok-{id}")).bind(&now)
             .execute(&app.db).await.unwrap();
         }
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
-            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+            .bind(app_ports_p13::SUPERVISOR_ID).execute(&app.db).await.unwrap();
 
         assert!(existing_for(&app, "claude", "2.1.277").await.unwrap().is_none(), "還沒派過");
 
         // kick 派的那一筆（正文是它自己的版本）。
         let kick_text = format!("{TASK}\n---\n本次：舊版 2.1.276 → 新版 2.1.277\n");
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", &kick_text, &request_id("claude", "2.1.277"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .expect("kick 派得出去");
@@ -635,9 +635,9 @@ mod tests {
         assert!(existing_for(&app, "claude", "2.1.278").await.unwrap().is_none());
 
         // 直接用不同正文重送同一個 crid 會被擋成 409（所以上面那條短路是必要的）。
-        let err = crate::supervisor::assign(
+        let err = app_ports_p13::supervisor_assign(
             &app, "resp1", "完全不同的正文", &request_id("claude", "2.1.277"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap_err();
@@ -671,8 +671,8 @@ mod tests {
         assert_eq!(review_state(&app, "claude", "2.1.278").await.unwrap().state, "none", "還沒派");
 
         // 派出去了：收件匣有這筆，還沒有回合。
-        let key = crate::supervisor::bot_requests::event_key("AGM", Some(&ui_request_id("claude", "2.1.278")), "fp", 0);
-        crate::supervisor::store::push_inbox(&app.db, &key, "bot_request", None, Some("resp1"), None, &json!({"fingerprint": "fp"}))
+        let key = app_ports_p13::supervisor_event_key("AGM", Some(&ui_request_id("claude", "2.1.278")), "fp", 0);
+        app_ports_p13::supervisor_push_inbox(&app.db, &key, "bot_request", None, Some("resp1"), None, &json!({"fingerprint": "fp"}))
             .await
             .unwrap()
             .expect("收件匣要有這一筆");
@@ -699,8 +699,8 @@ mod tests {
         assert_eq!(review_state(&app, "claude", "2.1.278").await.unwrap().state, "pending");
 
         // kick 派的那筆（不帶 -ui）也讀得到：同一版的結論一樣算數。
-        let kick_key = crate::supervisor::bot_requests::event_key("AGM", Some(&request_id("claude", "2.1.279")), "fp2", 0);
-        crate::supervisor::store::push_inbox(&app.db, &kick_key, "bot_request", None, Some("resp1"), None, &json!({}))
+        let kick_key = app_ports_p13::supervisor_event_key("AGM", Some(&request_id("claude", "2.1.279")), "fp2", 0);
+        app_ports_p13::supervisor_push_inbox(&app.db, &kick_key, "bot_request", None, Some("resp1"), None, &json!({}))
             .await
             .unwrap()
             .unwrap();
@@ -720,8 +720,8 @@ mod tests {
         let app = e.app.clone();
         assert!(inbox_event_for(&app, "claude", "2.1.277").await.unwrap().is_none(), "還沒派過");
 
-        let key = crate::supervisor::bot_requests::event_key("kick", Some(&request_id("claude", "2.1.277")), "fp-1", 0);
-        let id = crate::supervisor::store::push_inbox(&app.db, &key, "bot_request", None, Some("kick"), None, &json!({"fingerprint": "fp-1"}))
+        let key = app_ports_p13::supervisor_event_key("kick", Some(&request_id("claude", "2.1.277")), "fp-1", 0);
+        let id = app_ports_p13::supervisor_push_inbox(&app.db, &key, "bot_request", None, Some("kick"), None, &json!({"fingerprint": "fp-1"}))
             .await
             .unwrap()
             .expect("收件匣裡要有這一筆");
@@ -748,15 +748,15 @@ mod tests {
         let app = e.app.clone();
         a_bot(&app, &e.project_id, "resp1").await;
         a_bot(&app, &e.project_id, "patrol1").await;
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
-            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+            .bind(app_ports_p13::SUPERVISOR_ID).execute(&app.db).await.unwrap();
 
         assert_eq!(review_state(&app, "claude", "2.1.280").await.unwrap().state, "none");
 
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -767,7 +767,7 @@ mod tests {
 
         let a = existing_for(&app, "claude", "2.1.280").await.unwrap();
         assert!(a.is_none(), "existing_for 只查 kick 那個 crid，這筆是按鈕自己的 -ui");
-        let mine = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.280")).await.unwrap().unwrap();
+        let mine = app_ports_p13::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.280")).await.unwrap().unwrap();
         sqlx::query("UPDATE supervisor_assignments SET status='completed', result=?, completed_at=? WHERE id=?")
             .bind("2.1.280 沒有值得跟進的東西。").bind(crate::db::now()).bind(&mine.id)
             .execute(&app.db).await.unwrap();
@@ -783,15 +783,15 @@ mod tests {
         let app = e.app.clone();
         a_bot(&app, &e.project_id, "resp1").await;
         a_bot(&app, &e.project_id, "patrol1").await;
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
-            .bind(crate::supervisor::store::SUPERVISOR_ID)
+            .bind(app_ports_p13::SUPERVISOR_ID)
             .execute(&app.db)
             .await
             .unwrap();
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.281"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -826,9 +826,9 @@ mod tests {
     async fn review_fixture(app: &Arc<App>, project_id: &str) {
         a_bot(app, project_id, "resp1").await;
         a_bot(app, project_id, "patrol1").await;
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
-            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+            .bind(app_ports_p13::SUPERVISOR_ID).execute(&app.db).await.unwrap();
         let dir = agm_dir(app);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("runtime.json"), r#"{"release_bot_id":"resp1"}"#).unwrap();
@@ -862,13 +862,13 @@ mod tests {
         let e = crate::testing::env().await;
         let app = e.app.clone();
         review_fixture(&app, &e.project_id).await;
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.282"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
-        let live = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.282")).await.unwrap().unwrap();
+        let live = app_ports_p13::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.282")).await.unwrap().unwrap();
         let before = counts(&app).await;
         let dispatch_calls_before = e.herdr.methods().len();
 
@@ -892,22 +892,22 @@ mod tests {
         let app = e.app.clone();
         review_fixture(&app, &e.project_id).await;
         let base = ui_request_id("claude", "2.1.282");
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析一下", &base, None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
-        let head = crate::supervisor::store::assignment_by_crid(&app.db, &base).await.unwrap().unwrap();
+        let head = app_ports_p13::assignment_by_crid(&app.db, &base).await.unwrap().unwrap();
         sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?").bind(&head.id).execute(&app.db).await.unwrap();
         let r2 = format!("{base}-r2");
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "重新解析", &r2, None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
-        let r2_row = crate::supervisor::store::assignment_by_crid(&app.db, &r2).await.unwrap().unwrap();
+        let r2_row = app_ports_p13::assignment_by_crid(&app.db, &r2).await.unwrap().unwrap();
         sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?").bind(&r2_row.id).execute(&app.db).await.unwrap();
 
         corrupt(&app, &r2_row.id).await;
@@ -922,21 +922,21 @@ mod tests {
         let app = e.app.clone();
         review_fixture(&app, &e.project_id).await;
         let base = ui_request_id("claude", "2.1.282");
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析一下", &base, None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
-        let head = crate::supervisor::store::assignment_by_crid(&app.db, &base).await.unwrap().unwrap();
+        let head = app_ports_p13::assignment_by_crid(&app.db, &base).await.unwrap().unwrap();
         let leaf_crid = format!("{base}-f1");
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析一下（接續）", &leaf_crid, None, &[], Some(&head.id), true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
-        let leaf = crate::supervisor::store::assignment_by_crid(&app.db, &leaf_crid).await.unwrap().unwrap();
+        let leaf = app_ports_p13::assignment_by_crid(&app.db, &leaf_crid).await.unwrap().unwrap();
         sqlx::query("UPDATE supervisor_assignments SET status='superseded', followup_assignment_id=? WHERE id=?")
             .bind(&leaf.id).bind(&head.id).execute(&app.db).await.unwrap();
 
@@ -957,26 +957,26 @@ mod tests {
         let app = e.app.clone();
         a_bot(&app, &e.project_id, "resp1").await;
         a_bot(&app, &e.project_id, "patrol1").await;
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
-            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+            .bind(app_ports_p13::SUPERVISOR_ID).execute(&app.db).await.unwrap();
 
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
-        let head = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.280")).await.unwrap().unwrap();
+        let head = app_ports_p13::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.280")).await.unwrap().unwrap();
 
         let leaf_crid = format!("{}-f1", ui_request_id("claude", "2.1.280"));
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析一下（接續）", &leaf_crid, None, &[], Some(&head.id), true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
-        let leaf = crate::supervisor::store::assignment_by_crid(&app.db, &leaf_crid).await.unwrap().unwrap();
+        let leaf = app_ports_p13::assignment_by_crid(&app.db, &leaf_crid).await.unwrap().unwrap();
         assert_ne!(leaf.id, head.id, "不同 crid、不同 assignment，靠 followup_assignment_id 串");
 
         sqlx::query("UPDATE supervisor_assignments SET status='superseded', followup_assignment_id=? WHERE id=?")
@@ -1000,17 +1000,17 @@ mod tests {
         let app = e.app.clone();
         a_bot(&app, &e.project_id, "resp1").await;
         a_bot(&app, &e.project_id, "patrol1").await;
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
-            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+            .bind(app_ports_p13::SUPERVISOR_ID).execute(&app.db).await.unwrap();
 
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析一下", &ui_request_id("claude", "2.1.280"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
-        let head = crate::supervisor::store::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.280")).await.unwrap().unwrap();
+        let head = app_ports_p13::assignment_by_crid(&app.db, &ui_request_id("claude", "2.1.280")).await.unwrap().unwrap();
         // 鏈尾是 failed（不是 completed）：整條路都死了，不是「還活著」也不是「有結論」。
         sqlx::query("UPDATE supervisor_assignments SET status='failed' WHERE id=?").bind(&head.id).execute(&app.db).await.unwrap();
 
@@ -1024,17 +1024,17 @@ mod tests {
         assert_ne!(crid, ui_request_id("claude", "2.1.280"));
         assert_eq!(crid, format!("{}-r2", ui_request_id("claude", "2.1.280")));
         assert_eq!(follow_up_of.as_deref(), Some(head.id.as_str()), "接在死路的鏈尾之後");
-        assert!(crate::supervisor::store::assignment_by_crid(&app.db, &crid).await.unwrap().is_none(), "確實是沒人用過的 crid");
+        assert!(app_ports_p13::assignment_by_crid(&app.db, &crid).await.unwrap().is_none(), "確實是沒人用過的 crid");
 
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "重新解析一下", &crid, None, &[], follow_up_of.as_deref(), true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .expect("要能真的派出新的一筆");
         let after = review_state(&app, "claude", "2.1.280").await.unwrap();
         assert_eq!(after.state, "pending", "沿著原本的 crid 就找得到新派的這筆（接在鏈尾之後）");
-        assert_eq!(after.assignment_id.as_deref(), Some(crate::supervisor::store::assignment_by_crid(&app.db, &crid).await.unwrap().unwrap().id.as_str()));
+        assert_eq!(after.assignment_id.as_deref(), Some(app_ports_p13::assignment_by_crid(&app.db, &crid).await.unwrap().unwrap().id.as_str()));
     }
 
     /// issue #561：codex 跟 claude 同一套，只是識別碼帶自己的 kind——claude 的字串一個字都不能變
@@ -1071,9 +1071,9 @@ mod tests {
         let app = e.app.clone();
         review_fixture(&app, &e.project_id).await;
         app.changelog.seed("herdr", herdr_md).await;
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "排程交辦的正文", &request_id("herdr", "0.9.3"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -1091,13 +1091,13 @@ mod tests {
         let Json(v) = post_review(State(app.clone()), Json(body("0.9.1"))).await.unwrap();
         assert_eq!(v["duplicate"], json!(false), "{v}");
         assert_eq!(v["sections"], 2, "{v}");
-        let a = crate::supervisor::store::assignment_by_crid(&app.db, "agm-herdr-update-0.9.3").await.unwrap().expect("用 kick 的 id 派");
+        let a = app_ports_p13::assignment_by_crid(&app.db, "agm-herdr-update-0.9.3").await.unwrap().expect("用 kick 的 id 派");
         assert!(a.text.contains("請判斷並回報") && a.text.contains("本次：舊版 0.9.1 → 新版 0.9.3") && a.text.contains("events_lost"), "{}", a.text);
         let again = post_review(State(app.clone()), Json(body("0.9.1"))).await.unwrap();
         assert_eq!(again.0["duplicate"], json!(true), "重按回同一筆");
-        let kick = crate::supervisor::assign(
+        let kick = app_ports_p13::supervisor_assign(
             &app, "resp1", "排程交辦的正文", &request_id("herdr", "0.9.3"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap_err();
@@ -1133,13 +1133,13 @@ mod tests {
         let app = e.app.clone();
         a_bot(&app, &e.project_id, "resp1").await;
         a_bot(&app, &e.project_id, "patrol1").await;
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id='patrol1' WHERE id=?")
-            .bind(crate::supervisor::store::SUPERVISOR_ID).execute(&app.db).await.unwrap();
+            .bind(app_ports_p13::SUPERVISOR_ID).execute(&app.db).await.unwrap();
 
-        crate::supervisor::assign(
+        app_ports_p13::supervisor_assign(
             &app, "resp1", "解析 codex", &ui_request_id("codex", "0.157.0"), None, &[], None, true, None, None, None,
-            crate::supervisor::bot_requests::ReplyMark::default(),
+            app_ports_p13::ReplyMark::default(),
         )
         .await
         .unwrap();
@@ -1166,10 +1166,10 @@ mod tests {
             .execute(&app.db).await.unwrap();
         }
         // 只有巡檢：不能派給它自己，所以還是「沒有目標」。
-        crate::supervisor::store::get_or_init(&app.db).await.unwrap();
+        app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap();
         sqlx::query("UPDATE supervisors SET bot_id='patrol1'").execute(&app.db).await.unwrap();
         assert_eq!(
-            crate::supervisor::store::get_or_init(&app.db).await.unwrap().bot_id.as_deref(),
+            app_ports_p13::supervisor_get_or_init(&app.db).await.unwrap().bot_id.as_deref(),
             Some("patrol1"),
             "測試前提：巡檢就是 patrol1"
         );

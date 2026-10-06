@@ -53,7 +53,7 @@ pub async fn correct_runtime_from_screen(app: &App, run_id: &str, screen: &str) 
         return false;
     }
     if child {
-        if let Err(e) = crate::child_runtime::follow(app, &bot.id, model.as_deref(), effort.as_deref()).await {
+        if let Err(e) = crate::models::app_ports_p13::child_runtime_follow(app, &bot.id, model.as_deref(), effort.as_deref()).await {
             tracing::warn!(run = %run_id, bot = %bot.name, error = %e, "could not follow the grok switch in the child's settings, retrying next sweep");
             return false;
         }

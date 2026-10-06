@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::lifecycle::{LcError, LcResult};
+use crate::models::app_ports_p13::{LcError, LcResult};
 
 /// 等 code 的提示整行。claude 2.1.289 實測；之後改字就會變成「不在等 code」——fail closed，終端照樣能貼。
 pub const PROMPT: &str = "Paste code here if prompted >";
@@ -215,7 +215,7 @@ async fn target(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<Target> {
 }
 
 async fn read_screen(app: &Arc<App>, host: &str, pane_id: &str) -> LcResult<LoginScreen> {
-    let v = crate::api::shell::read(app, host, pane_id, "recent_unwrapped", READ_LINES).await?;
+    let v = crate::models::app_ports_p13::shell_read(app, host, pane_id, "recent_unwrapped", READ_LINES).await?;
     Ok(parse_screen(v.get("text").and_then(Value::as_str).unwrap_or("")))
 }
 
@@ -292,7 +292,7 @@ pub async fn submit_code(app: &Arc<App>, host: &str, pane_id: &str, code: &str) 
         return Err(not_awaiting("claude 已經不在這個終端裡跑了"));
     }
     claim_code_send(app, host, pane_id)?;
-    crate::api::shell::send_text(app, host, pane_id, code, true).await?;
+    crate::models::app_ports_p13::shell_send_text(app, host, pane_id, code, true).await?;
     tracing::info!(host, pane_id, identity = %t.identity, "a login code was typed into the login pane");
     // 等 CLI 的反應：`Login failed` 要在 pane 被收掉之前讀走。
     let deadline = Instant::now() + OUTCOME_WAIT;
