@@ -52,6 +52,7 @@ pub mod share_admin;
 pub(crate) mod s6_l;
 pub mod mission;
 pub mod supervisor;
+pub(crate) mod s6_l2;
 pub mod tui_prompts;
 pub mod update_watch;
 pub mod upstream_update;

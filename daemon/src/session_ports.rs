@@ -61,15 +61,23 @@ pub(crate) trait PreviewPort {
 pub(crate) trait SessionProviderPort {
     /// run 起了一個新的 claude 行程：清掉上一個行程的即時狀態。
     fn claude_live_start_fresh(&self, run_id: &str);
-    async fn models_list(&self, host: &str, kind: &str, identity: Option<&str>, refresh: bool) -> Result<Value>;
+    fn models_list<'a>(&'a self, host: &'a str, kind: &'a str, identity: Option<&'a str>, refresh: bool) -> impl std::future::Future<Output = Result<Value>> + Send + 'a;
 }
 
 /// 啟動時裝 shim（原 `herdr_shim`、`cargo_shim`）。
 pub(crate) trait ShimInstallPort {
     fn install_local_herdr_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf>;
     fn install_local_cargo_shim(&self, bot_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf>;
-    async fn install_remote_herdr_shim(&self, conn: &crate::hosts::HostConn, remote_bot_dir: &str) -> Result<String>;
-    async fn install_remote_cargo_shim(&self, conn: &crate::hosts::HostConn, remote_bot_dir: &str) -> Result<String>;
+    fn install_remote_herdr_shim<'a>(
+        &'a self,
+        conn: &'a crate::hosts::HostConn,
+        remote_bot_dir: &'a str,
+    ) -> impl std::future::Future<Output = Result<String>> + Send + 'a;
+    fn install_remote_cargo_shim<'a>(
+        &'a self,
+        conn: &'a crate::hosts::HostConn,
+        remote_bot_dir: &'a str,
+    ) -> impl std::future::Future<Output = Result<String>> + Send + 'a;
 }
 
 /// 發一則 JSON object 事件（原 `app.emit(kind, json!(…))`）。`payload` 一定是 object，失敗只記 log（原本的 emit 沒有失敗路徑）。

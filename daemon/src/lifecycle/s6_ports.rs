@@ -624,6 +624,31 @@ impl<T> RelayWatchContext for T where
         + 'static
 {}
 
+pub(crate) trait TurnEventHostServices: Send + Sync {
+    fn child_done_after_completed_turn(&self, turn_id: &str);
+    fn publish_lifecycle_turn(&self, bot_id: &str, turn_id: &str, status: &str, delivery: &str);
+}
+
+pub(crate) trait InterruptGraceHostServices: Send + Sync {
+    fn codex_interrupted_after<'a>(
+        &'a self,
+        bot: &'a db::Bot,
+        run: &'a db::Run,
+        sent: &'a [String],
+    ) -> impl Future<Output = bool> + Send + 'a;
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OpenRestartIntent {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) subject_id: String,
+}
+
+pub(crate) trait RestartHoldHostServices: Send + Sync {
+    fn open_restart_intents(&self) -> impl Future<Output = anyhow::Result<Vec<OpenRestartIntent>>> + Send;
+}
+
 impl<T> QueueContext for T where
     T: crate::capabilities::Db
         + crate::capabilities::HerdrRoutes

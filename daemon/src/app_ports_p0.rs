@@ -231,6 +231,17 @@ impl<T: crate::lifecycle::poller::ProgressEmitted + ?Sized> crate::lifecycle::po
     }
 }
 
+impl crate::lifecycle::poller::FallbackTimers for App {
+    fn fallback_timers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>> {
+        &self.fallback_timers
+    }
+}
+impl<T: crate::lifecycle::poller::FallbackTimers + ?Sized> crate::lifecycle::poller::FallbackTimers for Arc<T> {
+    fn fallback_timers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, u64>> {
+        (**self).fallback_timers()
+    }
+}
+
 impl crate::models::ModelsCache for App {
     fn models_cache(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>> {
         &self.models_cache
@@ -456,6 +467,5 @@ impl crate::reconcile::PaneIdentitySync for Arc<App> {
         crate::models::claude_default_effort(self, host, identity, alias).await
     }
 }
-
 
 

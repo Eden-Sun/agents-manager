@@ -1,5 +1,6 @@
 //! Message and turn rows: insert, group, and the events they emit.
 
+#[cfg(test)]
 use crate::state::App;
 use super::*;
 use std::collections::HashMap;
@@ -145,12 +146,12 @@ pub async fn insert_message_full(
     Ok(m)
 }
 
-pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
+pub async fn emit_turn(app: &impl LcHost, turn_id: &str) {
     let row = sqlx::query_as::<_, TurnEventRow>(
         "SELECT t.*, c.bot_id AS bot_id FROM turns t JOIN conversations c ON c.id = t.conversation_id WHERE t.id = ?",
     )
         .bind(turn_id)
-        .fetch_optional(&app.db)
+        .fetch_optional(app.db())
         .await;
     let row = match row {
         Ok(Some(row)) => {
@@ -172,16 +173,17 @@ pub async fn emit_turn(app: &Arc<App>, turn_id: &str) {
     let should_flush_queue = t.status != "in_flight" && t.status != "queued";
     if matches!(t.status.as_str(), "completed" | "completed_fallback") {
         // Hook and terminal-fallback completion both publish here, after their reply is committed.
-        crate::runners::child_done::on_completed_turn(app, &t.id);
+        crate::lifecycle::s6_ports::TurnEventHostServices::child_done_after_completed_turn(app, &t.id);
     }
     app.emit("turn_updated", json!({ "bot_id": bot_id, "turn": t })).await;
     // Every path that takes a turn out of `in_flight` funnels through here: one subscription suffices.
-    app.publish_turn(crate::state::TurnEvent {
-        bot_id: bot_id.clone(),
-        turn_id: t.id.clone(),
-        status: t.status.clone(),
-        delivery: t.delivery.clone(),
-    });
+    crate::lifecycle::s6_ports::TurnEventHostServices::publish_lifecycle_turn(
+        app,
+        &bot_id,
+        &t.id,
+        &t.status,
+        &t.delivery,
+    );
     // Schedule after publishing so the next prompt cannot race the completion event.
     if should_flush_queue {
         // 快取倒數（`cache_clock`）：`run.last_api_at` 取自回合的 `completed_at`，agent 先 idle、回合後收時要再推一次。
@@ -220,7 +222,7 @@ fn forget_turn_event_retry(turn_id: &str) {
     clear_turn_event_retry(turn_id);
 }
 
-fn schedule_turn_event_retry(app: &Arc<App>, turn_id: &str) {
+fn schedule_turn_event_retry(app: &impl LcHost, turn_id: &str) {
     const BACKOFF_SECONDS: [u64; 5] = [2, 5, 15, 30, 60];
     const TEST_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
 
@@ -241,7 +243,7 @@ fn schedule_turn_event_retry(app: &Arc<App>, turn_id: &str) {
         (generation, delay)
     };
 
-    let (app, turn_id) = (app.clone(), turn_id.to_string());
+    let (app, turn_id) = ((*app).clone(), turn_id.to_string());
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         let should_retry = TURN_EVENT_RETRIES.get_or_init(Default::default).lock().map(|mut retries| {

@@ -24,7 +24,6 @@
 //!   沒了也不用另外接：`rearm_queue_retries` 開機時本來就把每一筆 queued 叫醒一次，flush 走到這裡會照原本的
 //!   到期時間重新掛上（SPEC「到期動作不靠行程內的 timer 當唯一真相」）。
 
-use crate::app_ports_p4state;
 use super::*;
 
 /// 從 run 開始到 `SessionStart` 進到 daemon 最多等多久。本機通常幾秒；遠端 hook 寫在那台的 spool，
@@ -138,9 +137,9 @@ async fn give_up_waiting(
         "⚠️ 用 `--resume` 接回原本的對話（session `{expected}`）之後，{waited} 秒內沒有收到 claude 回報的 session，\
          確認不了接回的是不是同一段。排隊的訊息照常送出；之後如果回報的 session 對不上，會再另外提醒。"
     );
-    let msg = app_ports_p4state::insert_message_tx(&mut tx, conv, None, "system", &note, "system", false, None).await?;
+    let msg = super::messages::insert_message_tx(&mut tx, conv, None, "system", &note, "system", false, None).await?;
     tx.commit().await?;
-    app_ports_p4state::emit_message_added(app, &bot.id, msg).await;
+    super::messages::emit_message_added(app, &bot.id, msg).await;
     tracing::warn!(bot = %bot.name, run = %run.id, expected, "resume was never confirmed; released the prompt gate as a deliberate fallback");
     Ok(())
 }
