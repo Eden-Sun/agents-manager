@@ -4160,6 +4160,7 @@ mod codex_limit_quote_tests {
 }
 
 /// 每個 run 的進度輪詢任務。（欄位在 `App`，由 composition 層 `app_ports_p0` 實作這個窄能力。）
+#[allow(dead_code)]
 pub trait ProgressPollers: Send + Sync {
     fn progress_pollers(&self) -> &tokio::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>;
 }

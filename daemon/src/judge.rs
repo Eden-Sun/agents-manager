@@ -8,7 +8,6 @@
 //! 畫面會離開這台機器，所以閘門有兩層、預設全關：`[judge] enabled` 與 `projects` 名單；送出前逐行
 //! 遮罩（[`mask`]）。key 只存檔案路徑，每次呼叫才讀，不進 DB／log／API。
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -16,10 +15,8 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 use crate::config::JudgeCfg;
-use crate::state::App;
 
 pub mod collision;
-pub mod http;
 pub mod report;
 pub mod stuck;
 
@@ -77,22 +74,6 @@ pub async fn migrate(pool: &SqlitePool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// 鎖外去問：問答本身丟背景，呼叫端（畫面處理）不等它。
-///
-/// **關著的時候連 task 都不起**（issue #480）：以前是無條件 spawn、進到 `observe` 才看開關，
-/// 跟這句註解說的相反。多讀一次設定就能省掉那個 task，而呼叫端本來就在 async 裡。
-pub async fn shadow_limit_hit(app: &Arc<App>, sample: Sample) {
-    if !app.cfg.get().await.judge.enabled {
-        return;
-    }
-    let app = app.clone();
-    tokio::spawn(async move {
-        if let Err(e) = observe(&app, sample).await {
-            tracing::debug!(error = %e, "judge shadow skipped");
-        }
-    });
 }
 
 /// 為什麼這一筆不問。都不寫帳本：關著的東西不該留痕跡。
@@ -665,6 +646,8 @@ fn looks_random(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use crate::state::App;
 
     fn cfg(enabled: bool, projects: &[&str]) -> JudgeCfg {
         JudgeCfg { enabled, projects: projects.iter().map(|s| s.to_string()).collect(), ..JudgeCfg::default() }
@@ -1050,8 +1033,8 @@ mod tests {
         let (app, dir) = app_with(false, &[], "http://127.0.0.1:9/unused").await;
         std::fs::remove_file(dir.join("key")).unwrap();
         let put = |enabled, projects: Option<Vec<&str>>, token: Option<&str>| {
-            let body = http::SettingsBody { enabled, projects: projects.map(|p| p.iter().map(|s| s.to_string()).collect()), token: token.map(str::to_string) };
-            http::put_settings(State(app.clone()), axum::Json(body))
+            let body = crate::runners::judge::SettingsBody { enabled, projects: projects.map(|p| p.iter().map(|s| s.to_string()).collect()), token: token.map(str::to_string) };
+            crate::runners::judge::put_settings(State(app.clone()), axum::Json(body))
         };
         let refused = put(Some(true), None, None).await;
         assert!(matches!(refused, Err(crate::lifecycle::LcError::Conflict(ref v)) if v["error"] == "needs_key"), "沒 key 不給開");
@@ -1062,7 +1045,7 @@ mod tests {
         assert_eq!(saved["projects"], json!(["agents-manager"]));
         assert_eq!(saved["key_present"], true);
         assert!(!saved.to_string().contains("k-test-0004"));
-        assert!(!http::get_settings(State(app.clone())).await.0.to_string().contains("k-test-0004"));
+        assert!(!crate::runners::judge::get_settings(State(app.clone())).await.0.to_string().contains("k-test-0004"));
         assert!(!std::fs::read_to_string(dir.join("config.toml")).unwrap().contains("k-test-0004"), "key 不進 config.toml");
 
         // 空 token＝不動現有的 key；只關開關。
@@ -1084,8 +1067,8 @@ mod tests {
         // mtime 一定要跟 store 記的不同，否則不會重讀（時間解析度粗時會假綠／偶發紅）
         let f = std::fs::OpenOptions::new().write(true).open(dir.join("config.toml")).unwrap();
         f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap();
-        let body = http::SettingsBody { enabled: Some(true), projects: Some(vec!["p".into()]), token: Some("k-test-0009".into()) };
-        let err = http::put_settings(State(app.clone()), axum::Json(body)).await;
+        let body = crate::runners::judge::SettingsBody { enabled: Some(true), projects: Some(vec!["p".into()]), token: Some("k-test-0009".into()) };
+        let err = crate::runners::judge::put_settings(State(app.clone()), axum::Json(body)).await;
         assert!(matches!(err, Err(crate::lifecycle::LcError::Upstream(_))), "config 失敗要回錯");
         assert_eq!(read_key(keys).unwrap(), "k-test-0001", "config 失敗不可讓新 key 生效");
         assert_eq!(std::fs::read_dir(&dir).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp")).count(), 0, "暫存 key 要清掉");

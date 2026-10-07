@@ -9,14 +9,14 @@ const MERGED_ROUTE_SOURCES: &[(&str, &str)] = &[
         include_str!("../src/supervisor/responder_api.rs"),
     ),
     (
-        "crate::release_triage::http",
-        include_str!("../src/release_triage/http.rs"),
+        "crate::runners::release_triage",
+        include_str!("../src/runners/release_triage.rs"),
     ),
     (
         "crate::upstream_update",
         include_str!("../src/upstream_update.rs"),
     ),
-    ("crate::judge::http", include_str!("../src/judge/http.rs")),
+    ("crate::runners::judge", include_str!("../src/runners/judge.rs")),
     (
         "crate::deleted_bots",
         include_str!("../src/deleted_bots.rs"),

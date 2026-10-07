@@ -2,7 +2,10 @@
 //! （`lifecycle/fixtures/claude-2.1.289-auth-login-*`；state／code_challenge 換成等長的假值）。
 
 use super::*;
+use std::sync::Arc;
+use crate::runners::login_assist::{reserve, status, submit_code};
 use crate::testing as tt;
+use serde_json::Value;
 
 const UNWRAPPED: &str = include_str!("../lifecycle/fixtures/claude-2.1.289-auth-login-unwrapped.txt");
 const WRAPPED: &str = include_str!("../lifecycle/fixtures/claude-2.1.289-auth-login-wrapped.txt");

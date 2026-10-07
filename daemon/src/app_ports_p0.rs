@@ -518,3 +518,36 @@ impl crate::capabilities::UiToken for App {
     }
 }
 
+impl crate::judge::stuck::StuckPaneReader for App {
+    async fn read_pane_plain_text(&self, client: &crate::herdr::HerdrClient, pane_id: &str, kind: &str) -> anyhow::Result<String> {
+        crate::app_ports_p12::read_pane_plain_text(client, pane_id, kind).await
+    }
+}
+impl<T: crate::judge::stuck::StuckPaneReader + ?Sized> crate::judge::stuck::StuckPaneReader for Arc<T> {
+    async fn read_pane_plain_text(&self, client: &crate::herdr::HerdrClient, pane_id: &str, kind: &str) -> anyhow::Result<String> {
+        (**self).read_pane_plain_text(client, pane_id, kind).await
+    }
+}
+
+impl crate::judge::report::ReportNotifier for App {
+    async fn insert_system_message(&self, conv_id: &str, note: &str) -> anyhow::Result<crate::db::Message> {
+        crate::app_ports_p12::insert_system_message(self, conv_id, note).await
+    }
+}
+impl<T: crate::judge::report::ReportNotifier + ?Sized> crate::judge::report::ReportNotifier for Arc<T> {
+    async fn insert_system_message(&self, conv_id: &str, note: &str) -> anyhow::Result<crate::db::Message> {
+        (**self).insert_system_message(conv_id, note).await
+    }
+}
+
+impl crate::reconcile::PaneIdentitySync for Arc<App> {
+    async fn sync_child_identity(&self, host: &str, bot: &crate::db::Bot, pane_id: &str, pid: Option<i64>) {
+        crate::pane_identity::sync_child_identity(self, host, bot, pane_id, pid).await;
+    }
+    async fn claude_default_effort(&self, host: &str, identity: Option<&str>, alias: &str) -> anyhow::Result<String> {
+        crate::models::claude_default_effort(self, host, identity, alias).await
+    }
+}
+
+
+

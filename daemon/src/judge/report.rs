@@ -12,13 +12,10 @@
 //! `reports/jev-spike/report-evidence/build_cases.py` 量過的那兩題；state 只放遮罩後的回報，
 //! 不放交辦原文、bot id、專案 id。
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-
-use crate::state::App;
 
 /// #263 在這個門檻上記的 precision：`claims_verified` 0.95、`asks_parent_action` 1.00。
 pub const FLAG_THRESHOLD: f64 = 0.8;
@@ -61,49 +58,19 @@ pub fn decide(claims_verified: f64, asks_parent_action: f64) -> Flag {
     }
 }
 
-/// 結案寫進 `result` 之後呼叫。**先看開關再丟背景**（#480）：HTTP 不在 tick 裡等。
-/// 失敗、沒回報、不是完成回合，都直接回來，結案那條路不受影響。
-///
-/// 只問 `completed`：`completed_fallback` 的 `result` 是從終端機刮下來的，會混進交辦原文與額度橫幅——
-/// #263 的 F34 就是這種，兩題都判錯。真正的回覆遲到補上時（`late_reply`）會以 `completed` 再進來一次。
-pub async fn shadow_settled(
-    app: &Arc<App>,
-    assignment_id: &str,
-    bot_id: &str,
-    turn_id: Option<&str>,
-    turn_status: &str,
-    result: Option<&str>,
-) {
-    if turn_status != "completed" {
-        return;
-    }
-    let Some(report) = result.map(str::trim).filter(|s| !s.is_empty()) else { return };
-    if !app.cfg.get().await.judge.enabled {
-        return;
-    }
-    let sample = Sample {
-        assignment_id: assignment_id.to_string(),
-        bot_id: bot_id.to_string(),
-        turn_id: turn_id.map(str::to_string),
-        report: report.to_string(),
-    };
-    let app = app.clone();
-    tokio::spawn(async move {
-        if let Err(e) = observe(&app, &sample).await {
-            tracing::debug!(error = %e, assignment = %sample.assignment_id, "judge report shadow skipped");
-        }
-    });
+pub trait ReportNotifier: Send + Sync {
+    fn insert_system_message(&self, conv_id: &str, note: &str) -> impl std::future::Future<Output = Result<crate::db::Message>> + Send;
 }
 
-struct Sample {
-    assignment_id: String,
-    bot_id: String,
-    turn_id: Option<String>,
-    report: String,
+pub(crate) struct Sample {
+    pub(crate) assignment_id: String,
+    pub(crate) bot_id: String,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) report: String,
 }
 
 /// 問、記帳、必要時標旗。回 `Ok(None)`＝這次沒問（問過、沒有 bot）。失敗寫進帳本的 `error`，不標旗。
-async fn observe(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse), s: &Sample) -> Result<Option<Flag>> {
+pub(crate) async fn observe(app: &(impl crate::capabilities::Cfg + crate::capabilities::Db + crate::capabilities::Emit + crate::judge::JudgeFuse + ReportNotifier), s: &Sample) -> Result<Option<Flag>> {
     let cfg = app.cfg().get().await.judge;
     let Some(bot) = crate::db::bot(app.db(), &s.bot_id).await? else { return Ok(None) };
     let label = crate::db::project(app.db(), &bot.project_id).await?.map(|p| p.label).unwrap_or_default();
@@ -212,7 +179,7 @@ async fn settle_pair(
     Ok(())
 }
 
-async fn raise(app: &(impl crate::capabilities::Db + crate::capabilities::Emit), s: &Sample, bot: &crate::db::Bot, flag: &Flag, claims: f64, asks: f64) -> Result<()> {
+async fn raise(app: &(impl crate::capabilities::Db + crate::capabilities::Emit + ReportNotifier), s: &Sample, bot: &crate::db::Bot, flag: &Flag, claims: f64, asks: f64) -> Result<()> {
     let action = action_text(flag, claims, asks);
     let key = format!("judge_report_evidence:{}", s.assignment_id);
     let payload = json!({
@@ -243,7 +210,7 @@ async fn raise(app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     if let Some(parent) = bot.parent_bot_id.as_deref() {
         if let Ok(conv) = crate::db::conversation_id(app.db(), parent).await {
             let note = format!("交辦 {}（{}）的{action}", s.assignment_id, bot.name);
-            let _ = crate::app_ports_p12::insert_system_message(app, &conv, &note).await;
+            let _ = app.insert_system_message(&conv, &note).await;
         }
     }
     Ok(())
@@ -324,7 +291,10 @@ async fn run_of(app: &impl crate::capabilities::Db, turn_id: Option<&str>) -> Op
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::db;
+    use crate::runners::judge::shadow_settled;
+    use crate::state::App;
     use crate::testing as tt;
     use std::time::Duration;
 

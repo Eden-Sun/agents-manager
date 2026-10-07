@@ -22,13 +22,11 @@
 
 use crate::cache_clock::{self, KEEP_WARM_CRID_PREFIX, WARM_COMPACT_NOTE_PREFIX};
 use crate::db;
-use crate::state::App;
 use am_core::PromptRequest;
 use am_ports::{Clock, DbContext, EventSink, SystemMessageWriter, TurnControl};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// 閒置到這麼久（活動年齡，秒）就考慮保溫。TTL 是 60 分鐘，留 2 分鐘餘裕。
@@ -53,8 +51,6 @@ pub fn warm_compact_min_context_pct(kind: &str) -> Option<f64> {
 const WARM_COMPACT_TTL_MARGIN_SECS: i64 = 2 * 60;
 /// 送進去的保溫 prompt。
 pub const KEEP_WARM_TEXT: &str = "any updates";
-/// 巡邏最多這麼久跑一輪。
-const TICK_EVERY: Duration = Duration::from_secs(30);
 /// 保溫視窗至少開這麼久才允許被關（送出到 hook 回報 working 之間有空窗）。
 const WINDOW_MIN: Duration = Duration::from_secs(60);
 /// 視窗最多開這麼久（保險：回合沒收尾也不能永遠擋住 statusLine 活動）。
@@ -359,8 +355,8 @@ async fn plan_with_db(db: &DbContext<SqlitePool>, bot: &db::Bot, run: &db::Run, 
 }
 
 #[cfg(test)]
-pub async fn plan(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<Plan>> {
-    plan_with_db(&DbContext::new(app.db.clone()), bot, run, now).await
+pub async fn plan(app: &impl crate::capabilities::Db, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<Option<Plan>> {
+    plan_with_db(&DbContext::new(app.db().clone()), bot, run, now).await
 }
 
 /// 照計畫做一步。送不出去（忙著、被擋）只記 log；下一輪重試仍須符合 cache 熱度條件。
@@ -441,41 +437,14 @@ pub(crate) async fn sweep_with<T: TurnControl, M: SystemMessageWriter, E: EventS
     }
 }
 
-static SWEEPING: AtomicBool = AtomicBool::new(false);
-static LAST_SWEEP: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-
-/// 控制迴圈每一拍呼叫一次；真正的巡邏最多每 [`TICK_EVERY`] 一次，丟到背景跑（送 prompt 要等 pane，不卡住迴圈）。
-pub fn tick(app: &Arc<App>) {
-    if cfg!(test) || app.shutdown.is_cancelled() {
-        return;
-    }
-    let now = Instant::now();
-    {
-        let mut last = LAST_SWEEP.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-        if last.is_some_and(|l| now.checked_duration_since(l).is_some_and(|d| d < TICK_EVERY)) {
-            return;
-        }
-        if SWEEPING.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        *last = Some(now);
-    }
-    let app = app.clone();
-    let tasks = app.background_tasks.clone();
-    tasks.spawn(async move {
-        crate::app_ports_r2a8::primary_keep_warm_sweep(&app).await;
-        SWEEPING.store(false, Ordering::SeqCst);
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testing as tt;
 
-    async fn settle_skip(app: &Arc<App>, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) {
-        let db = DbContext::new(app.db.clone());
-        let events = crate::lifecycle::app_ports_p4::AppEventSink::new(app);
+    async fn settle_skip(env: &tt::Env, bot: &db::Bot, run: &db::Run, now: chrono::DateTime<chrono::Utc>) {
+        let db = DbContext::new(env.app.db.clone());
+        let events = crate::lifecycle::app_ports_p4::AppEventSink::new(&env.app);
         settle_skip_with(&db, &events, bot, run, now).await;
     }
 
@@ -778,19 +747,19 @@ mod tests {
         let later = now + chrono::Duration::minutes(55);
         assert_eq!(plan(&env.app, &bot, &run, later).await.unwrap(), None, "也不熱壓");
         // 沒有活動：巡邏不會把它清掉。
-        settle_skip(&env.app, &bot, &run, later).await;
+        settle_skip(&env, &bot, &run, later).await;
         assert!(skip_since(&env.app.db, &bot.id).await.unwrap().is_some());
         // 保溫自己的回合（視窗開著）不算活動。
         open_window(&run.id);
         let fresh = now + chrono::Duration::minutes(1);
         turn(&env, &bot, "t-kw-self", Some(&keep_warm_crid("x")), "completed", &db::iso_at(fresh), Some(&db::iso_at(fresh))).await;
-        settle_skip(&env.app, &bot, &run, later).await;
+        settle_skip(&env, &bot, &run, later).await;
         assert!(skip_since(&env.app.db, &bot.id).await.unwrap().is_some());
         drop_window(&run.id);
 
         // 真的活動：使用者回合在按下之後完成 → 巡邏恢復。
         turn(&env, &bot, "t-user", None, "completed", &db::iso_at(fresh), Some(&db::iso_at(fresh))).await;
-        settle_skip(&env.app, &bot, &run, later).await;
+        settle_skip(&env, &bot, &run, later).await;
         assert!(skip_since(&env.app.db, &bot.id).await.unwrap().is_none(), "活動後自動恢復");
         let p = plan(&env.app, &bot, &run, fresh + chrono::Duration::minutes(59)).await.unwrap().unwrap();
         assert_eq!(p.step, Step::KeepWarm, "新的錨點照樣到 58 分才保溫");

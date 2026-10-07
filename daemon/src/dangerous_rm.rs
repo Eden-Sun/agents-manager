@@ -15,15 +15,10 @@
 //! 重啟當下若是由這裡補標的 `blocked`，交給 herdr 下一次狀態事件或 reconcile 更正。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
 
 use crate::db;
-use crate::state::App;
 use crate::tui_prompts::DangerousRm;
-
-/// herdr 轉成 `blocked` 之後等一下再讀畫面：框還在畫的那一瞬間讀到的是半張。
-const SETTLE: Duration = Duration::from_millis(800);
 
 struct Episode {
     warning: String,
@@ -97,26 +92,6 @@ pub(crate) async fn notify_once(app: &(impl crate::capabilities::Db + crate::eve
     true
 }
 
-/// herdr 轉成 `blocked` 那一刻（[`crate::events`]）：等畫面畫完再看。自己開背景工作，不擋事件迴圈。
-pub fn on_blocked(app: &Arc<App>, run: &db::Run) {
-    let (app, run) = (app.clone(), run.clone());
-    tokio::spawn(async move {
-        tokio::time::sleep(SETTLE).await;
-        observe(&app, &run).await;
-    });
-}
-
-/// 讀一次畫面、照結果開或收（巡邏與 `blocked` 邊共用）。只看 claude；讀不到畫面什麼都不動——讀不到不等於框關了。
-pub async fn observe(app: &Arc<App>, run: &db::Run) {
-    if !matches!(db::bot(&app.db, &run.bot_id).await, Ok(Some(b)) if b.kind == "claude") {
-        return;
-    }
-    let Some(pane) = run.pane_id.as_deref().filter(|p| !p.trim().is_empty()) else { return };
-    let Some(client) = app.herdr_for_run(run).await else { return };
-    let Ok(read) = client.pane_read(pane, "visible", 80).await else { return };
-    observe_screen(app, run, &read.text).await;
-}
-
 /// 巡邏收尾：開著框的 run 已經結束或被刪（不在 active 名單上、DB 也確認不是進行中）就把那筆記錄拿掉。
 /// 巡邏只看 active run，結束的 run 不會再被 [`observe`] 讀到「框關了」，記錄不拿掉就只增不減。
 /// 以重讀 DB 為準；讀不到就留著等下一輪。
@@ -139,7 +114,7 @@ pub async fn forget_ended(app: &impl crate::capabilities::Db, active: &[db::Run]
     }
 }
 
-pub(crate) async fn observe_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit + crate::events::ports::TurnCommands), run: &db::Run, screen: &str) {
+pub async fn observe_screen(app: &(impl crate::capabilities::BotStatusEmit + crate::capabilities::Db + crate::capabilities::Emit + crate::events::ports::TurnCommands), run: &db::Run, screen: &str) {
     match crate::tui_prompts::dangerous_rm_prompt(screen) {
         Some(rm) => {
             notify_once(app, run, &rm).await;
@@ -232,15 +207,15 @@ mod tests {
         L.lock().await
     }
 
-    async fn run_of(app: &Arc<App>, run_id: &str) -> db::Run {
-        sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE id=?").bind(run_id).fetch_one(&app.db).await.unwrap()
+    async fn run_of(app: &impl crate::capabilities::Db, run_id: &str) -> db::Run {
+        sqlx::query_as::<_, db::Run>("SELECT * FROM runs WHERE id=?").bind(run_id).fetch_one(app.db()).await.unwrap()
     }
 
-    async fn system_messages(app: &Arc<App>, bot_id: &str) -> Vec<String> {
-        let conv = db::conversation_id(&app.db, bot_id).await.unwrap();
+    async fn system_messages(app: &impl crate::capabilities::Db, bot_id: &str) -> Vec<String> {
+        let conv = db::conversation_id(app.db(), bot_id).await.unwrap();
         sqlx::query_scalar("SELECT content FROM messages WHERE conversation_id=? AND role='system' ORDER BY created_at, rowid")
             .bind(conv)
-            .fetch_all(&app.db)
+            .fetch_all(app.db())
             .await
             .unwrap()
     }

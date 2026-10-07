@@ -1,6 +1,4 @@
 //! `/api/release-triage/*`（issue #204 B）：verdict 進來、帳本查詢、派出標記、publish 重試。docs/API.md。
-//!
-//! 放在自己的檔案、以 [`routes`] 併進主路由，`api.rs` 只多一行 `.merge`。
 
 use std::sync::Arc;
 
@@ -10,10 +8,10 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::issue::{self, Outcome};
-use super::ledger::{self, Row, Status};
-use super::verdict::{self, Submission};
 use crate::lc_error::LcError;
+use crate::release_triage::issue::{self, Outcome};
+use crate::release_triage::ledger::{self, Row, Status};
+use crate::release_triage::verdict::{self, Submission};
 use crate::state::App;
 
 pub fn routes() -> Router<Arc<App>> {
@@ -64,7 +62,7 @@ async fn get_ledger(State(app): State<Arc<App>>, Query(q): Query<LedgerQuery>) -
 
 /// 模型（經 `bin/agm release-triage submit`）交回逐條 verdict 與 issue 提案。整份驗過才收，不合格整份退回。
 async fn post_verdicts(State(app): State<Arc<App>>, Json(sub): Json<Submission>) -> Result<Json<Value>, LcError> {
-    if !super::rules::supported(&sub.kind) {
+    if !crate::release_triage::rules::supported(&sub.kind) {
         return Err(LcError::Bad(format!("kind `{}` 沒有分診規則（claude｜codex）", sub.kind)));
     }
     let version = crate::changelog::version_string(&sub.version).ok_or_else(|| LcError::Bad(format!("version `{}` 看不出版本", sub.version)))?;
@@ -123,7 +121,7 @@ struct DispatchedIn {
 
 /// kick 派出交辦後標記：`pending` → `dispatched`（CAS）。同一版不會被下一輪再派。
 async fn post_dispatched(State(app): State<Arc<App>>, Json(b): Json<DispatchedIn>) -> Result<Json<Value>, LcError> {
-    if !super::rules::supported(&b.kind) {
+    if !crate::release_triage::rules::supported(&b.kind) {
         return Err(LcError::Bad(format!("kind `{}` 沒有分診規則", b.kind)));
     }
     let versions: Vec<String> = b.versions.iter().filter_map(|v| crate::changelog::version_string(v)).collect();
@@ -150,7 +148,7 @@ async fn post_publish(State(app): State<Arc<App>>, body: Option<Json<PublishIn>>
     // 「沒事要做」，跟「這一版真的沒東西要開」在輸出上分不出來——而乾跑的數字正是打開
     // `publish` 之前的依據。
     if let Some(kind) = b.kind.as_deref() {
-        if !super::rules::supported(kind) {
+        if !crate::release_triage::rules::supported(kind) {
             return Err(LcError::Bad(format!("kind `{kind}` 沒有分診規則（claude｜codex）")));
         }
     }
@@ -186,7 +184,7 @@ mod tests {
     async fn verdicts_flow_through_the_real_db_and_stay_ledger_only_by_default() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        let sections = source_sections("claude", include_str!("fixtures/claude_2.1.276-278.md"));
+        let sections = source_sections("claude", include_str!("../release_triage/fixtures/claude_2.1.276-278.md"));
         let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
         ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
 
@@ -237,7 +235,7 @@ mod tests {
     async fn the_publish_filters_are_normalised_and_a_bad_kind_is_rejected() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        let sections = source_sections("claude", include_str!("fixtures/claude_2.1.276-278.md"));
+        let sections = source_sections("claude", include_str!("../release_triage/fixtures/claude_2.1.276-278.md"));
         let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
         ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
         let vs: Vec<EntryVerdict> = entries
@@ -279,7 +277,7 @@ mod tests {
     async fn duplicate_of_must_name_a_release_triage_issue_the_ledger_knows() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        let sections = source_sections("claude", include_str!("fixtures/claude_2.1.276-278.md"));
+        let sections = source_sections("claude", include_str!("../release_triage/fixtures/claude_2.1.276-278.md"));
         let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
         ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
         let vs: Vec<EntryVerdict> = entries
@@ -340,7 +338,7 @@ mod tests {
     async fn a_state_change_during_validation_is_still_the_documented_409() {
         let env = crate::testing::env().await;
         let app = env.app.clone();
-        let sections = source_sections("claude", include_str!("fixtures/claude_2.1.276-278.md"));
+        let sections = source_sections("claude", include_str!("../release_triage/fixtures/claude_2.1.276-278.md"));
         let entries = build_entries("claude", sections.iter().find(|s| s.version == "2.1.277").unwrap()).unwrap();
         ledger::insert_version(&app.db, "claude", "2.1.277", &entries).await.unwrap();
         let vs: Vec<EntryVerdict> = entries

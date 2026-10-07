@@ -492,7 +492,7 @@ async fn reconcile_confirmed_creates(pool: &SqlitePool, gh: &Gh, remote: &Remote
 const MARKER_PREFIX: &str = "release-triage:";
 
 /// 帳本裡所有版本開過（或認領過）的 issue 號碼：`duplicate_of` 的合法目標之一（另一個是遠端的 release-triage 清單）。
-pub(super) async fn ledger_issue_numbers(pool: &SqlitePool) -> Result<std::collections::HashSet<i64>> {
+pub(crate) async fn ledger_issue_numbers(pool: &SqlitePool) -> Result<std::collections::HashSet<i64>> {
     Ok(ledger::list(pool, None, None)
         .await?
         .iter()

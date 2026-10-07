@@ -25,12 +25,9 @@
 
 use crate::db;
 use crate::hook_body::HookBody;
-use crate::app_ports_r2a9::HookProcessor;
-use crate::state::App;
 use anyhow::Result;
 use sqlx::SqlitePool;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 use std::time::Duration;
 
 /// 這一列是從哪條路收下的（只作診斷用，不影響處理）。
@@ -262,7 +259,7 @@ pub async fn mark_failed(pool: &SqlitePool, id: &str, attempts: i64, err: &str) 
 }
 
 /// 再試幾次都不會變好的列（body 根本解不開）：記下原因收掉，不要無限重試佔住佇列前面。
-async fn mark_dead(pool: &SqlitePool, id: &str, err: &str) -> Result<()> {
+pub(crate) async fn mark_dead(pool: &SqlitePool, id: &str, err: &str) -> Result<()> {
     sqlx::query("UPDATE hook_events SET processed_at = ?, last_error = ? WHERE id = ?")
         .bind(db::now())
         .bind(clip(err))
@@ -284,7 +281,7 @@ fn clip(s: &str) -> String {
     s[..end].to_string()
 }
 
-fn unparseable_body_reason() -> &'static str {
+pub(crate) fn unparseable_body_reason() -> &'static str {
     "unparseable hook body"
 }
 
@@ -297,67 +294,8 @@ fn backoff(attempts: i64) -> Duration {
 
 /// 處理完的列留多久。留著是為了「這則到底進來過沒有」查得到；久了沒人看，而且 hook 量很大。
 const KEEP_PROCESSED: Duration = Duration::from_secs(24 * 3600);
-const POLL_EVERY: Duration = Duration::from_secs(5);
-const BATCH: i64 = 64;
 
-/// 唯一的消費者。`receive` / drain 只負責 commit 之後叫醒它，不自己處理——單一消費者才不必為
-/// 「同一列被兩邊同時處理」另外加 claim 欄位。
-pub fn spawn_worker(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            // 先做一輪再等：daemon 重啟後把上一輪沒處理完的補回來，就是這一行。
-            match drain_once(&app).await {
-                Ok(n) if n > 0 => tracing::info!(processed = n, "hook inbox drained"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = ?e, "hook inbox drain failed"),
-            }
-            if let Err(e) = prune(&app.db).await {
-                tracing::debug!(error = ?e, "hook inbox prune failed");
-            }
-            tokio::select! {
-                _ = app.hook_inbox_wake.notified() => {}
-                _ = tokio::time::sleep(POLL_EVERY) => {}
-            }
-        }
-    });
-}
-
-/// 處理一批。回傳這一輪真的處理完幾列。
-pub async fn drain_once(app: &Arc<App>) -> Result<usize> {
-    let mut done = 0usize;
-    loop {
-        let rows = pending(&app.db, &db::now(), BATCH).await?;
-        if rows.is_empty() {
-            return Ok(done);
-        }
-        let batch = rows.len();
-        for row in rows {
-            match serde_json::from_str::<HookBody>(&row.body_json) {
-                Ok(body) => match app.process_hook(&body, Some(&row.id)).await {
-                    Ok(()) => {
-                        mark_done(&app.db, &row.id).await?;
-                        done += 1;
-                    }
-                    Err(e) => {
-                        let attempts = row.attempts + 1;
-                        tracing::warn!(id = %row.id, attempts, error = ?e, "hook event failed; will retry");
-                        mark_failed(&app.db, &row.id, attempts, &format!("{e:#}")).await?;
-                    }
-                },
-                Err(_) => {
-                    tracing::error!(id = %row.id, "hook event body unparseable; dropped");
-                    mark_dead(&app.db, &row.id, unparseable_body_reason()).await?;
-                }
-            }
-        }
-        // 這一批沒滿就沒有下一批了；滿了就繼續，避免一次喚醒只吃 BATCH 列。
-        if batch < BATCH as usize {
-            return Ok(done);
-        }
-    }
-}
-
-async fn prune(pool: &SqlitePool) -> Result<()> {
+pub(crate) async fn prune(pool: &SqlitePool) -> Result<()> {
     let cutoff = chrono::Utc::now() - chrono::Duration::from_std(KEEP_PROCESSED).unwrap_or_default();
     sqlx::query("DELETE FROM hook_events WHERE processed_at IS NOT NULL AND processed_at < ?")
         .bind(cutoff.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))

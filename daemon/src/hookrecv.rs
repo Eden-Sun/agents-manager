@@ -632,6 +632,7 @@ mod classify_tests {
 }
 
 /// SPEC §6.7, executed under the per-bot lock.
+#[allow(dead_code)]
 pub async fn process(app: &Arc<App>, body: &HookBody) -> Result<()> {
     process_for(app, body, None).await
 }
@@ -647,7 +648,7 @@ pub async fn process_for(app: &Arc<App>, body: &HookBody, event_id: Option<&str>
     let _g = lock.lock().await;
     process_locked_for(app, body, event_id).await?;
     // 回合收完（含終端打字開的外部回合）之後才補：這時候「這一回合」才一定存在。
-    ask_answers::after_turn_end(app, body).await;
+    crate::runners::ask_answers::after_turn_end(app, body).await;
     Ok(())
 }
 
@@ -3151,7 +3152,7 @@ mod external_claim_tests {
 
         // 重啟後 worker 把這列再處理一次。
         let mut events = app.subscribe();
-        assert_eq!(crate::hook_inbox::drain_once(&app).await.unwrap(), 1);
+        assert_eq!(crate::runners::hook_inbox::drain_once(&app).await.unwrap(), 1);
 
         assert_eq!(turn_count(&app, &conv).await, 1, "沒有第二個回合");
         assert_eq!(hook_message_count(&app, &conv).await, 1, "沒有第二則訊息");
@@ -3181,7 +3182,7 @@ mod external_claim_tests {
         let before = turn_count(&app, &conv).await;
         let messages_before = hook_message_count(&app, &conv).await;
 
-        assert_eq!(crate::hook_inbox::drain_once(&app).await.unwrap(), 1);
+        assert_eq!(crate::runners::hook_inbox::drain_once(&app).await.unwrap(), 1);
 
         assert_eq!(turn_count(&app, &conv).await, before, "重播不開外部回合");
         assert_eq!(hook_message_count(&app, &conv).await, messages_before, "也不多一則訊息");
@@ -5771,7 +5772,7 @@ mod durable_handoff_tests {
         assert_eq!(inbox_rows(&e).await, 1, "三次重送只有一列");
 
         // 處理過一輪之後再重送，也不會多出一列（去重看的是事件身分，不是有沒有處理過）。
-        crate::hook_inbox::drain_once(&e.app).await.unwrap();
+        crate::runners::hook_inbox::drain_once(&e.app).await.unwrap();
         let (code, _) =
             receive(State(e.app.clone()), Path("claude".into()), headers("tok"), Json(stop_body(&bot.id, "p1"))).await;
         assert_eq!(code, StatusCode::OK);
@@ -5813,7 +5814,7 @@ mod durable_handoff_tests {
         assert_eq!(crate::hook_inbox::pending(&e.app.db, &db::now(), 10).await.unwrap().len(), 1);
 
         let restarted = restart_app(&e).await;
-        let done = crate::hook_inbox::drain_once(&restarted).await.unwrap();
+        let done = crate::runners::hook_inbox::drain_once(&restarted).await.unwrap();
         assert_eq!(done, 1, "重啟後補處理");
         assert!(
             crate::hook_inbox::pending(&restarted.db, &db::now(), 10).await.unwrap().is_empty(),

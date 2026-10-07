@@ -13,17 +13,14 @@
 use crate::config::LOCAL_HOST;
 use crate::herdr::{AgentStatus, HerdrClient};
 use crate::quota::{Quota, Window};
-use crate::state::App;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
-use serde_json::json;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// User-specified cadence ("30s is ok"), even though a probe holds grok for ~10 s.
 pub const GROK_POLL: Duration = Duration::from_secs(30);
 
-const DIALOG_TIMEOUT: Duration = Duration::from_secs(25);
+pub(crate) const DIALOG_TIMEOUT: Duration = Duration::from_secs(25);
 
 fn clean(line: &str) -> String {
     let s: String = line
@@ -195,7 +192,7 @@ fn parse_grok_usage_remote(screen: &str, now: DateTime<chrono::Utc>, offset_secs
 }
 
 /// Local grok = the daemon's own zone; a remote one = that host's detected offset.
-async fn parse_probe_screen(app: &impl crate::tools::ToolsTable, host: &str, screen: &str, now: DateTime<chrono::Utc>) -> Option<Quota> {
+pub(crate) async fn parse_probe_screen(app: &impl crate::tools::ToolsTable, host: &str, screen: &str, now: DateTime<chrono::Utc>) -> Option<Quota> {
     if host == LOCAL_HOST {
         return parse_grok_usage(screen, now.with_timezone(&Local));
     }
@@ -265,7 +262,7 @@ async fn sweep_probes(c: &HerdrClient, own_tag: Option<&str>) {
 }
 
 /// 共用 session 的主機上 label 帶本 daemon 的標記（#709）。
-async fn probe_label(app: &impl crate::shared_host::SharedHostEnv, host: &str) -> String {
+pub(crate) async fn probe_label(app: &impl crate::shared_host::SharedHostEnv, host: &str) -> String {
     match crate::shared_host::probe_tag(app, host).await {
         Some(tag) => crate::shared_host::tagged_label(PROBE_LABEL, &tag),
         None => PROBE_LABEL.to_string(),
@@ -273,11 +270,21 @@ async fn probe_label(app: &impl crate::shared_host::SharedHostEnv, host: &str) -
 }
 
 /// Closes the probe workspace on every exit path, including the error ones.
-struct Probe {
+pub(crate) struct Probe {
     client: HerdrClient,
     workspace_id: String,
     /// 登記期間 `pane.agent_detected` 不觸發整台主機的對帳（[`crate::probe_ws`]）。
     _registered: crate::probe_ws::ProbeWorkspace,
+}
+
+impl Probe {
+    pub(crate) fn new(client: HerdrClient, workspace_id: String) -> Self {
+        Self {
+            _registered: crate::probe_ws::ProbeWorkspace::register(client.socket_path(), &workspace_id),
+            client,
+            workspace_id,
+        }
+    }
 }
 
 impl Drop for Probe {
@@ -292,7 +299,7 @@ impl Drop for Probe {
 }
 
 /// Remote hosts borrow the forwarded session — see [`crate::quota_claude::client_for`].
-async fn client_for_fence(app: &impl crate::capabilities::HerdrRoutes, fence: &crate::hosts::HostFence) -> Result<HerdrClient> {
+pub(crate) async fn client_for_fence(app: &impl crate::capabilities::HerdrRoutes, fence: &crate::hosts::HostFence) -> Result<HerdrClient> {
     if fence.conn().is_local() {
         return probe_client().await;
     }
@@ -305,69 +312,6 @@ async fn client_for_fence(app: &impl crate::capabilities::HerdrRoutes, fence: &c
         .ok_or_else(|| anyhow!("host `{}` changed or has no herdr client", fence.conn().name))
 }
 
-/// `Ok(false)` = grok is not installed there (quota stays null).
-pub async fn refresh_grok(app: &Arc<App>, host: &str) -> Result<bool> {
-    let _guard = crate::quota::probe_lock(host).await;
-    let fence = app.hosts.fence(host).await.ok_or_else(|| anyhow!("unknown host `{host}`"))?;
-    let cwd = crate::hosts::home_for_fence(&fence).await?;
-    if !app.hosts.is_current(&fence).await {
-        bail!("host `{host}` changed while resolving HOME");
-    }
-    // The start-up poller can beat detection; empty cache = unknown, not missing.
-    if !app.tools.lock().await.contains_key(host) {
-        crate::tools::detect(app, host).await?;
-    }
-    if !app.hosts.is_current(&fence).await {
-        bail!("host `{host}` changed before its Grok quota probe");
-    }
-    if crate::tools::cached_path(app, host, "grok").await.is_none() {
-        return Ok(false);
-    }
-    let client = client_for_fence(app, &fence).await?;
-    let (ws, pane) = client.workspace_create(&cwd, &probe_label(app, host).await, json!({})).await?;
-    let probe = Probe {
-        client: client.clone(),
-        workspace_id: ws.workspace_id.clone(),
-        _registered: crate::probe_ws::ProbeWorkspace::register(client.socket_path(), &ws.workspace_id),
-    };
-    let pane_id = pane.pane_id.clone();
-
-    // A distinct name so reconcile and the bot list can never confuse it with a real bot.
-    let name = format!("amquota{}", ulid::Ulid::new().to_string()[20..].to_ascii_lowercase());
-    // grok 1.0.41 起 herdr 常在啟動當下就把名字從 pane 上拿掉（`agent_name_not_found`：named agent … no longer owns
-    // the target terminal），之後用名字 `agent_wait` 回 `agent_not_running`——grok 其實好好開著，額度卻從 09-23 起
-    // 大多數輪都讀不到（2026-09-28 使用者：「grok children 跑了一陣子，usage 沒更新」）。探測只需要 pane：
-    // 名字掉了不算失敗，改看 pane 自己的 agent／狀態。
-    if let Err(e) = start_when_shell_ready(&client, &name, &pane_id).await {
-        if !name_lost(&e) {
-            return Err(e);
-        }
-        tracing::debug!(host, pane = %pane_id, "grok probe: herdr dropped the agent name at start; waiting on the pane instead");
-    }
-    wait_for_grok_pane(&client, &pane_id, Duration::from_secs(60)).await?;
-    // The TUI accepts a slash command only once its input line is drawn.
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    client.pane_send_text(&pane_id, "/usage").await?;
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    client.pane_send_keys(&pane_id, &["Enter"]).await?;
-
-    let deadline = tokio::time::Instant::now() + DIALOG_TIMEOUT;
-    let mut last = String::new();
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        last = client.pane_read(&pane_id, "visible", 120).await.map(|r| r.text).unwrap_or_default();
-        if let Some(q) = parse_probe_screen(app, host, &last, chrono::Utc::now()).await {
-            let published = crate::quota::set_fenced(app, host, "grok", q, &fence).await;
-            drop(probe);
-            published?;
-            return Ok(true);
-        }
-    }
-    drop(probe);
-    tracing::debug!(host, screen = %last, "grok /usage did not render a limit row");
-    Err(anyhow!("grok `/usage` on {host} did not report a limit within {DIALOG_TIMEOUT:?}"))
-}
-
 /// `workspace.create` 回來時 pane 的 shell 常常還沒就緒（claude 探測也因此先睡 700 ms 才打字）：這時 `agent.start`
 /// 回 `agent_pane_busy`（`agent target pane … is not an available shell`），以前整輪額度探測就此失敗、停放五分鐘——
 /// 本機的 grok 額度從 09-28 起每天幾十到一百多次這樣失敗。這個錯誤只代表 shell 還沒好：等一下重試，有上限。
@@ -378,7 +322,7 @@ fn pane_busy(e: &anyhow::Error) -> bool {
     e.downcast_ref::<crate::herdr::HerdrError>().is_some_and(|h| h.code == "agent_pane_busy")
 }
 
-async fn start_when_shell_ready(client: &HerdrClient, name: &str, pane_id: &str) -> Result<crate::herdr::AgentInfo> {
+pub(crate) async fn start_when_shell_ready(client: &HerdrClient, name: &str, pane_id: &str) -> Result<crate::herdr::AgentInfo> {
     let mut attempt = 1;
     loop {
         match client.agent_start(name, "grok", pane_id, &[], 60_000).await {
@@ -393,7 +337,7 @@ async fn start_when_shell_ready(client: &HerdrClient, name: &str, pane_id: &str)
 }
 
 /// herdr 回的是「名字已經不在那個 pane 上」——agent 本身可能好好的。
-fn name_lost(e: &anyhow::Error) -> bool {
+pub(crate) fn name_lost(e: &anyhow::Error) -> bool {
     e.downcast_ref::<crate::herdr::HerdrError>().is_some_and(|h| h.code == "agent_name_not_found")
 }
 
@@ -405,7 +349,7 @@ fn grok_pane_ready(info: Option<&crate::herdr::PaneInfo>) -> bool {
     })
 }
 
-async fn wait_for_grok_pane(client: &HerdrClient, pane_id: &str, limit: Duration) -> Result<()> {
+pub(crate) async fn wait_for_grok_pane(client: &HerdrClient, pane_id: &str, limit: Duration) -> Result<()> {
     let deadline = tokio::time::Instant::now() + limit;
     loop {
         if grok_pane_ready(client.pane_get(pane_id).await?.as_ref()) {
@@ -419,7 +363,7 @@ async fn wait_for_grok_pane(client: &HerdrClient, pane_id: &str, limit: Duration
 }
 
 /// Backoff (SPEC §16.4): a grok that can't draw `/usage` otherwise costs a full probe every 30 s forever.
-const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(5 * 60);
+pub(crate) const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(5 * 60);
 
 /// In memory only: a restart costs one extra probe, the safe direction to err in.
 fn backoff_map() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>> {
@@ -440,7 +384,7 @@ pub(crate) fn cooling_down(key: &str) -> bool {
     }
 }
 
-fn park(key: &str, how_long: Duration) {
+pub(crate) fn park(key: &str, how_long: Duration) {
     backoff_map().lock().unwrap().insert(key.to_string(), std::time::Instant::now() + how_long);
 }
 
@@ -449,46 +393,12 @@ pub(crate) fn should_probe_grok(logged_in: Option<bool>, cooling: bool) -> bool 
     logged_in != Some(false) && !cooling
 }
 
-/// `None` = skipped this cycle. `GET /api/quota?refresh=1` bypasses this and always really probes.
-pub async fn refresh_grok_if_due(app: &Arc<App>, host: &str) -> Result<Option<bool>> {
-    let key = crate::quota::quota_key(host, "grok");
-    let logged_in = app.tools.lock().await.get(host).and_then(|t| t.tools.get("grok")).and_then(|t| t.logged_in);
-    if !should_probe_grok(logged_in, cooling_down(&key)) {
-        return Ok(None);
-    }
-    match refresh_grok(app, host).await {
-        Ok(v) => Ok(Some(v)),
-        Err(e) => {
-            park(&key, RETRY_AFTER_FAILURE);
-            Err(e)
-        }
-    }
-}
-
-pub fn spawn_grok_poller(app: Arc<App>) {
-    tokio::spawn(async move {
-        sweep_stale(&app).await;
-        loop {
-            crate::quota::for_each_host(crate::quota::pollable_hosts(&app).await, |host| {
-                let app = app.clone();
-                async move {
-                    match refresh_grok_if_due(&app, &host).await {
-                        Ok(Some(true)) => {}
-                        Ok(Some(false)) => tracing::info!(host = %host, "grok not installed; grok quota stays null"),
-                        Ok(None) => tracing::debug!(host = %host, "grok probe skipped (logged out or cooling down)"),
-                        Err(e) => tracing::warn!(host = %host, error = %e, retry_in_s = RETRY_AFTER_FAILURE.as_secs(), "grok quota refresh failed; parking this host"),
-                    }
-                }
-            })
-            .await;
-            tokio::time::sleep(GROK_POLL).await;
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use crate::runners::quota_grok::refresh_grok;
+    use serde_json::json;
 
     /// 剛開的 pane 的 shell 還沒好：`agent.start` 回 `agent_pane_busy` 不能讓整輪探測失敗，等一下重試；
     /// 一直 busy 就在上限後照實回錯（不無限等）。

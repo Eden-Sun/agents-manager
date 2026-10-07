@@ -103,7 +103,7 @@ async fn retire_unreturned_children(app: &Arc<App>, since: &str) -> Result<Vec<S
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(host = %host, bot = %name, error = ?e, "herdr maintenance: cannot read child retirement guard; child kept and reconciliation deferred");
-                crate::reconcile::schedule_deferred_pass(app, &host);
+                crate::runners::reconcile::schedule_deferred_pass(app, &host);
                 continue;
             }
         }

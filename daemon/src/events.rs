@@ -654,7 +654,7 @@ async fn handle_status_try(app: &Arc<App>, host: &str, session: &str, ev: &crate
         // 父 agent 是一顆 CLI 行程，沒有人打字進去就什麼都收不到。
         crate::child_alerts::on_child_blocked(app, &run);
         // claude 2.1.281 的防誤刪框：通知使用者（帶目標），一個鍵都不按。
-        crate::dangerous_rm::on_blocked(app, &run);
+        crate::runners::dangerous_rm::on_blocked(app, &run);
         // Codex 的模型遷移提示也等使用者本人選擇，不把後續訊息送進選單。
         app.codex_migration_on_blocked(&run);
         // claude 一般權限確認選單：等畫面畫完讀一次，結構化原因（`blocked_reason`）寫「等待權限確認：<工具>」。只看、不按鍵。
