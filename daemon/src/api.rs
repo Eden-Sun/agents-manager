@@ -28,6 +28,16 @@ fn any_err<E: std::fmt::Display>(e: E) -> LcError {
     LcError::Upstream(e.to_string())
 }
 
+impl From<crate::github::GithubError> for LcError {
+    fn from(error: crate::github::GithubError) -> Self {
+        match error {
+            crate::github::GithubError::NotFound(what) => LcError::NotFound(what),
+            crate::github::GithubError::Bad(message) => LcError::Bad(message),
+            crate::github::GithubError::Upstream(message) => LcError::Upstream(message),
+        }
+    }
+}
+
 /// 寫設定的路徑專用：`ConfigStore::update` 在落盤前驗不過時回 **400 `config_invalid`**，而不是 502。
 ///
 /// 502 的定義是「herdr／DB 出錯」（SPEC §3.1）；設定不合法是**請求的問題**，混成同一個碼，呼叫端分不出
@@ -1394,7 +1404,7 @@ pub async fn state_json(app: &Arc<App>) -> Result<Value, LcError> {
     Ok(json!({
         "daemon_seq": app.current_seq(),
         // 現在有沒有一批一鍵重啟在跑（issue #492）：進度只走 WS，`bots_restart_done` 收不到時前端要有地方對帳。
-        "restart_batch": crate::bulk_restart::running_batch(&app.data_dir),
+        "restart_batch": crate::runners::bulk_restart::running_batch(&app.data_dir),
         // 還沒收尾的 codex 升級（同一個理由：`cli_update_done` 收不到時的對帳來源）；存在 DB，daemon 重啟後也還在（#564）。
         "cli_updates": crate::cli_update::running_list(app).await,
         "herdr_updates": crate::herdr_upgrade::running_list(app),
@@ -3511,7 +3521,7 @@ async fn logout_agy(
     Extension(principal): Extension<RequestPrincipal>,
 ) -> Result<Json<Value>, LcError> {
     require_user(&principal)?;
-    match crate::quota_agy::logout(&app, &name).await {
+    match crate::runners::quota_agy::logout(&app, &name).await {
         Ok(removed) => Ok(Json(json!({"removed": removed}))),
         Err(crate::quota_agy::LogoutError::UnknownHost) => Err(LcError::NotFound("host".into())),
         Err(crate::quota_agy::LogoutError::Failed(m)) => Err(LcError::Upstream(m)),
@@ -4705,7 +4715,7 @@ async fn get_quota(State(app): State<Arc<App>>, Query(q): Query<HashMap<String, 
                         crate::runners::quota::refresh_codex(&app, &host),
                         crate::runners::quota_claude::refresh_claude(&app, &host),
                         crate::runners::quota_grok::refresh_grok(&app, &host),
-                        crate::quota_agy::refresh_agy(&app, &host),
+                        crate::runners::quota_agy::refresh_agy(&app, &host),
                     );
                     for (kind, res) in [("codex", codex), ("claude", claude), ("grok", grok), ("agy", agy)] {
                         if let Err(e) = res {
@@ -5163,7 +5173,7 @@ async fn get_capabilities() -> Json<Value> {
 
 /// SPEC §6.9。立刻回計畫、進度走 WS：一顆 `stop_bot` 最久十秒，同步做完會拖死 HTTP 連線。
 async fn restart_idle_bots(State(app): State<Arc<App>>) -> Result<Response, LcError> {
-    let plan = crate::bulk_restart::spawn(&app).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
+    let plan = crate::runners::bulk_restart::spawn(&app).await.map_err(|e| LcError::Upstream(format!("{e:#}")))?;
     Ok((StatusCode::ACCEPTED, Json(plan)).into_response())
 }
 

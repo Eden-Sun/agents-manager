@@ -297,7 +297,7 @@ impl Runner for Real {
     }
 
     fn restart<'a>(&'a self, app: &'a Arc<App>, scope: Scope, fence: &'a HostFence) -> BoxFuture<'a, anyhow::Result<Value>> {
-        Box::pin(async move { crate::bulk_restart::spawn_scoped_fenced(app, &scope, fence).await })
+        Box::pin(async move { crate::runners::bulk_restart::spawn_scoped_fenced(app, &scope, fence).await })
     }
 }
 
@@ -1657,7 +1657,7 @@ mod tests {
                     gate.await.ok();
                 }
                 if self.real_restart {
-                    return crate::bulk_restart::spawn_scoped_fenced(app, &scope, fence).await;
+                    return crate::runners::bulk_restart::spawn_scoped_fenced(app, &scope, fence).await;
                 }
                 Ok(json!({"batch_id": "b-1", "total": 1, "planned": [{"bot_id": "x", "name": "cx"}], "skipped": []}))
             })
@@ -1770,7 +1770,7 @@ mod tests {
             &[(host.to_string(), Ok("codex-cli 0.158.0".to_string()))],
             None,
         );
-        crate::upstream_update::set_snapshot_for_test(&env.app, status).await;
+        crate::upstream_update::set_snapshot_for_test(&env.app.upstream_watch, status).await;
         (bot, run)
     }
 
@@ -1858,7 +1858,7 @@ mod tests {
             &[(host.to_string(), Ok("codex-cli 0.158.0".to_string()))],
             None,
         );
-        crate::upstream_update::set_snapshot_for_test(&env.app, status).await;
+        crate::upstream_update::set_snapshot_for_test(&env.app.upstream_watch, status).await;
         let fake = Fake::new(&["codex-cli 0.158.0", "codex-cli 0.159.0"], Ok("ok"));
 
         let result = start(
@@ -2589,7 +2589,7 @@ mod tests {
             .execute(&env.app.db)
             .await
             .unwrap();
-        crate::upstream_update::set_snapshot_for_test(&env.app, crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&env.app.upstream_watch, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.281 (Claude Code)".into()))], None,
@@ -2646,7 +2646,7 @@ mod tests {
             .execute(&env.app.db)
             .await
             .unwrap();
-        crate::upstream_update::set_snapshot_for_test(&env.app, crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&env.app.upstream_watch, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.281".into()))],
@@ -2731,7 +2731,7 @@ mod tests {
             .execute(&env.app.db)
             .await
             .unwrap();
-        crate::upstream_update::set_snapshot_for_test(&env.app, crate::upstream_update::build_status(
+        crate::upstream_update::set_snapshot_for_test(&env.app.upstream_watch, crate::upstream_update::build_status(
             "claude",
             &Ok("2.1.284".into()),
             &[("local".into(), Ok("2.1.281".into()))],
@@ -3866,7 +3866,7 @@ mod tests {
         crate::app_ports_p12::race_point::arm("bulk_restart_before_lookup", &cl.id, move || async move {
             gate.await.ok();
         });
-        let first = crate::bulk_restart::spawn(&app).await.unwrap();
+        let first = crate::runners::bulk_restart::spawn(&app).await.unwrap();
         assert_eq!(first["planned"].as_array().unwrap().len(), 1, "第一批只有 claude（codex 還是「需安裝」）：{first}");
 
         let fake = Arc::new(Fake { real_restart: true, ..Arc::try_unwrap(Fake::new(&["codex-cli 0.155.1", "codex-cli 0.157.0"], Ok("ok"))).ok().unwrap() });

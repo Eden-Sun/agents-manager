@@ -376,7 +376,7 @@ async fn run(app: &Arc<App>, ops: &dyn Ops, timing: Timing, ctx: &Ctx) -> Value 
     }
     // 版本快取（hosts[].herdr）不等下一輪 60 秒巡邏。測試不跑：它會去執行本機真的 `herdr --version`。
     if !cfg!(test) {
-        crate::herdr_version::refresh(app, &ctx.host).await;
+        crate::runners::herdr_version::refresh(app, &ctx.host).await;
     }
     let mut v = json!({
         "update_id": ctx.update_id, "host": ctx.host, "ok": ok, "from": out.from, "to": ctx.target,
