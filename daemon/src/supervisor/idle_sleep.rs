@@ -26,12 +26,14 @@
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::db;
 use crate::lifecycle::{LcError, StartOpts};
+#[cfg(test)]
 use crate::state::App;
 use sqlx::SqlitePool;
 use serde_json::json;
@@ -816,8 +818,8 @@ where
 
 /// 控制迴圈每一拍呼叫一次。真正的巡邏最多每分鐘一次，而且丟到背景跑——一顆 `stop_bot` 最久要等
 /// agent 十秒，二十顆就是三分多鐘，同步做完會把 dispatch／notify 這些也一起卡住。
-pub fn tick(app: &Arc<App>) {
-    if cfg!(test) || app.shutdown.is_cancelled() {
+pub fn tick(app: &(impl crate::capabilities::BgTasks + crate::capabilities::Shutdown + crate::capabilities::BotLocks + crate::capabilities::Db + crate::capabilities::Emit + crate::capabilities::HerdrRoutes + crate::supervisor::ports::HostProbes + crate::supervisor::ports::LocalAccountView + crate::supervisor::ports::TurnOps + Clone + Send + Sync + 'static)) {
+    if cfg!(test) || app.shutdown().is_cancelled() {
         return;
     }
     let threshold = idle_minutes();
@@ -836,9 +838,9 @@ pub fn tick(app: &Arc<App>) {
     *last = Some(now);
     drop(last);
     let app = app.clone();
-    let tasks = app.background_tasks.clone();
+    let tasks = app.background_tasks().clone();
     tasks.spawn(async move {
-        let shutdown = app.shutdown.clone();
+        let shutdown = app.shutdown().clone();
         run_sweep_task(
             guard,
             async move { sweep(&app, threshold).await },

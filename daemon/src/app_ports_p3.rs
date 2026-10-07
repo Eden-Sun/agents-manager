@@ -249,7 +249,7 @@ impl crate::tools::ToolsEnv for App {
     // 身分表剛更新：清掉 kind 不符的 identity 與它留下的 quota key（`identity_kind::cleanup_host`）。
     crate::identity_kind::cleanup_host(app, host).await;
     // 身分表齊了，重啟前停下的交辦這時才算得出正確的 quota key（每台主機每個行程只跑一次，review 2026-09-16 M3）。
-    crate::supervisor::controller::backfill_quota_limits_once(app, host).await;
+    crate::runners::supervisor::runtime::backfill_quota_limits_once(app, host).await;
     // 排著的 prompt 自己記下的撞限（issue #108）：同一個時機、同一個理由。
     crate::lifecycle::quota_hold::backfill_once(app, host).await;
         }

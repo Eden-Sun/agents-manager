@@ -1,12 +1,8 @@
 //! Cheap, deterministic health summary for AGM and the UI.
 
 use crate::lifecycle::LcError;
-use crate::state::App;
 use sqlx::SqlitePool;
-use super::ports::{HostProbes, QuotaOps};
 use serde_json::{json, Value};
-use std::sync::Arc;
-use std::time::Duration;
 
 /// `gh auth status` 要打網路，health 又常被輪詢：60 秒內沿用上一次的結果。
 async fn release_triage_health(app: &(impl crate::capabilities::Cfg + crate::supervisor::ports::HostProbes)) -> Value {
@@ -130,14 +126,14 @@ impl RoleState {
     }
 }
 
-pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
-    let bots = crate::db::live_bots(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?;
+pub async fn snapshot(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Cfg + crate::hosts::HostsAccess + crate::supervisor::ports::HostProbes + crate::supervisor::ports::QuotaOps + crate::supervisor::ports::LocalAccountView + crate::supervisor::role_faults::RoleFaultTable + crate::supervisor::ports::DaemonConnection)) -> Result<Value, LcError> {
+    let bots = crate::db::live_bots(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?;
     let mut running = 0usize;
     let mut busy = 0usize;
     let mut stopped = 0usize;
     let mut background_stuck = Vec::new();
     for bot in &bots {
-        match crate::db::active_run(&app.db, &bot.id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
+        match crate::db::active_run(app.db(), &bot.id).await.map_err(|e| LcError::Upstream(e.to_string()))? {
             Some(run) => {
                 running += 1;
                 if run.agent_status == "working" || run.agent_status == "blocked" { busy += 1; }
@@ -150,14 +146,14 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
     let supervisor_status = supervisor.get("status").and_then(Value::as_str).unwrap_or("unknown");
     let manager_severity = if supervisor_status == "failed" || supervisor_status == "waiting_quota" {
         "critical"
-    } else if supervisor_status == "not_configured" || supervisor_status == "stopped" || !app.connected.load(std::sync::atomic::Ordering::SeqCst) {
+    } else if supervisor_status == "not_configured" || supervisor_status == "stopped" || !app.daemon_connected() {
         "degraded"
     } else { "healthy" };
     // 協調者自己一格，跟巡檢分開：協調者等額度或倒了，不是「AGM 不能用」——使用者入口還在。
     let responder = supervisor.get("responder").cloned().unwrap_or(Value::Null);
     let responder_status = responder.get("status").and_then(Value::as_str).unwrap_or("not_configured");
     let responder_severity = responder_severity(&responder);
-    let hosts = app.hosts.list().await;
+    let hosts = app.hosts().list().await;
     let disconnected_hosts = hosts.iter().filter(|h| !h.is_connected()).count();
     let system = crate::supervisor::incidents::system_health(app).await;
     let system_severity = system.get("status").and_then(Value::as_str).unwrap_or("unknown");
@@ -177,7 +173,7 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         "manager_health": {
             "status": manager_severity,
             "supervisor_status": supervisor_status,
-            "daemon_connected": app.connected.load(std::sync::atomic::Ordering::SeqCst),
+            "daemon_connected": app.daemon_connected(),
         },
         "system_health": system,
         "responder_health": {
@@ -189,7 +185,7 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
             "wake_pending": responder.get("wake_pending"),
             "retry_at": responder.pointer("/stats/notify_next_at"),
         },
-        "daemon": {"connected": app.connected.load(std::sync::atomic::Ordering::SeqCst)},
+        "daemon": {"connected": app.daemon_connected()},
         "supervisor": supervisor,
         "bots": {"total": bots.len(), "running": running, "busy": busy, "stopped": stopped},
         // issue #774：背景工作標著超過門檻（claude 2.1.288 起終端 session 的背景指令沒有時間上限）。只是露出，
@@ -201,9 +197,9 @@ pub async fn snapshot(app: &Arc<App>) -> Result<Value, LcError> {
         "due_actions": app.due_actions_snapshot().await,
         // Two numbers, not one sum: an assignment still running and a notification nobody
         // acked are different kinds of "owed", and adding them hid a 464-event backlog.
-        "pending_assignments": crate::supervisor::store::open_assignment_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
-        "awaiting_review": crate::supervisor::store::awaiting_review_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
-        "inbox_open": crate::supervisor::store::open_inbox_count(&app.db).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        "pending_assignments": crate::supervisor::store::open_assignment_count(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        "awaiting_review": crate::supervisor::store::awaiting_review_count(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?,
+        "inbox_open": crate::supervisor::store::open_inbox_count(app.db()).await.map_err(|e| LcError::Upstream(e.to_string()))?,
         "hosts": {"total": hosts.len(), "disconnected": disconnected_hosts},
         // issue #204：`[release_triage] publish = true` 時 gh 沒登入要在這裡看得到（publish = false 為 null）。
         "release_triage": release_triage_health(app).await,
@@ -346,7 +342,7 @@ impl Debounce {
     }
 }
 
-async fn queue_health_change(db: &SqlitePool, debounce: &mut Debounce, snapshot: &Value, severity: &str, sup_status: &str) -> bool {
+pub(crate) async fn queue_health_change(db: &SqlitePool, debounce: &mut Debounce, snapshot: &Value, severity: &str, sup_status: &str) -> bool {
     if !debounce.observe(severity, sup_status) {
         return false;
     }
@@ -368,81 +364,7 @@ async fn queue_health_change(db: &SqlitePool, debounce: &mut Debounce, snapshot:
     }
 }
 
-/// Poll health outside the assignment controller. The daemon emits every fingerprint change to
-/// the UI, and queues a durable inbox event only when the *state* changes (see [`Debounce`]),
-/// so AGM can reason about it without `/loop` and without wading through counters.
-pub fn spawn(app: Arc<App>) {
-    let loop_app = app.clone();
-    app.spawn_restartable("supervisor health", move || {
-        let app = loop_app.clone();
-        async move { health_loop(app).await }
-    });
-}
-
-async fn health_loop(app: Arc<App>) {
-        let mut tick = tokio::time::interval(Duration::from_secs(30));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut previous = String::new();
-        let mut debounce = Debounce::default();
-        let mut detector = crate::supervisor::incidents::Detector::default();
-        // 處理完的 inbox 列的大 payload 每小時收一次（第一次在開機後的第一拍）：見 `store::compact_handled_payloads`。
-        let mut last_compact: Option<std::time::Instant> = None;
-        loop {
-            tokio::select! {
-                _ = app.shutdown.cancelled() => return,
-                _ = tick.tick() => {}
-            }
-            if last_compact.is_none_or(|t| t.elapsed() >= Duration::from_secs(3600)) {
-                last_compact = Some(std::time::Instant::now());
-                match crate::supervisor::store::compact_handled_payloads(
-                    &app.db,
-                    crate::supervisor::store::COMPACT_HANDLED_AFTER_SECS,
-                    crate::supervisor::store::COMPACT_HANDLED_MIN_BYTES,
-                )
-                .await
-                {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!(compacted = n, "compacted old handled inbox payloads"),
-                    Err(e) => tracing::warn!(error = ?e, "could not compact old handled inbox payloads"),
-                }
-                // 小的流水帳事件不會被壓縮，表只增不減：處理完放了 60 天的整列刪掉（只限不靠 event_key 去重的種類）。
-                match crate::supervisor::store::prune_handled_events(&app.db, crate::supervisor::store::PRUNE_HANDLED_AFTER_SECS).await {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!(pruned = n, "pruned old handled log events from the inbox"),
-                    Err(e) => tracing::warn!(error = ?e, "could not prune old handled inbox events"),
-                }
-            }
-            // #427 第 2 項：先看兩顆角色 bot 的畫面（巡檢也看），結論放記憶體。
-            // 要排在 `sweep` **之前**——incident 與同一拍的 health 讀數要講同一件事，理由同下一行。
-            crate::supervisor::role_faults::refresh(&app).await;
-            // Incidents first: the snapshot below reports what this pass decided, so a fault
-            // and the health reading that mentions it never disagree by one tick.
-            crate::supervisor::incidents::sweep(&app, &mut detector).await;
-            let Ok(snapshot) = snapshot(&app).await else { continue };
-            let status = snapshot.get("status").and_then(Value::as_str).unwrap_or("unknown").to_string();
-            let sup_status = snapshot.pointer("/supervisor/status").and_then(Value::as_str).unwrap_or("unknown").to_string();
-            let fingerprint = serde_json::json!({
-                "status": status,
-                "supervisor": sup_status,
-                "running": snapshot.pointer("/bots/running"),
-                "busy": snapshot.pointer("/bots/busy"),
-                "pending": snapshot.get("pending_assignments"),
-                "awaiting_review": snapshot.get("awaiting_review"),
-                "inbox_open": snapshot.get("inbox_open"),
-                "disconnected": snapshot.pointer("/hosts/disconnected"),
-                "incidents": snapshot.pointer("/system_health/open_incidents"),
-            }).to_string();
-            if fingerprint != previous {
-                previous = fingerprint;
-                let _ = app.emit("supervisor_health", snapshot.clone()).await;
-            }
-            // Keyed on the manager's and the responder's halves. System faults have their own
-            // durable incidents with their own one-event-per-transition rule; letting them move this
-            // key too would tell the manager the same thing twice.
-            let severity = inbox_severity(&snapshot);
-            queue_health_change(&app.db, &mut debounce, &snapshot, &severity, &sup_status).await;
-        }
-}
+/// The polling loop is composed in `runners::supervisor::health`.
 
 #[cfg(test)]
 mod tests {

@@ -16,10 +16,8 @@
 //! an answer, a queue that is merely busy, and the manager's own idle/busy churn. An unknown
 //! reading is reported as `unknown`, never folded into `healthy`.
 
-use crate::state::App;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use super::store;
 
@@ -236,12 +234,12 @@ fn blind_now(app: &impl crate::capabilities::DataDir) -> Vec<&'static str> {
 
 /// Read every cheap probe. No LLM, no process is killed to find out how it is doing: this runs
 /// on the 30-second health tick and may not cost more than a few queries.
-pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
+pub async fn observe(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::hosts::HostsAccess + super::role_faults::RoleFaultTable + super::ports::IncidentState), thresholds: &Thresholds) -> Probed {
     let mut probed = Probed::default();
     let out = &mut probed.seen;
 
     // A host the daemon cannot reach takes every bot on it with it, and nothing else notices.
-    for host in app.hosts.list().await {
+    for host in app.hosts().list().await {
         if !host.is_connected() {
             out.push(Observation {
                 kind: "host_disconnected".into(),
@@ -254,13 +252,13 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
 
     // "Expected running" is the user's own `autostart`, not a guess: a bot somebody stopped on
     // purpose is not a fault, and treating it as one is how a health page becomes noise.
-    match crate::db::live_bots(&app.db).await {
+    match crate::db::live_bots(app.db()).await {
         Ok(bots) => {
             for bot in bots {
                 if bot.autostart == 0 {
                     continue;
                 }
-                match crate::db::active_run(&app.db, &bot.id).await {
+                match crate::db::active_run(app.db(), &bot.id).await {
                     Ok(None) => {
                         // autostart is a launch preference, not a perpetual desired-state flag.
                         // stop_bot records `stopped` and leaves autostart unchanged, so an
@@ -271,7 +269,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
                         // 挑到的若不是真的最後一個 run，使用者主動停的（`stopped`）會被誤判成 outage。
                         let last = sqlx::query_scalar::<_, String>(
                             "SELECT state FROM runs WHERE bot_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1",
-                        ).bind(&bot.id).fetch_optional(&app.db).await;
+                        ).bind(&bot.id).fetch_optional(app.db()).await;
                         match last {
                             Ok(Some(state)) if state == "stopped" => {}
                             Ok(_) => out.push(Observation {
@@ -303,7 +301,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // nobody has accepted, which is the case the review found in production.
     let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(thresholds.assignment_stalled_secs))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    match store::assignments_idle_since(&app.db, &cutoff).await {
+    match store::assignments_idle_since(app.db(), &cutoff).await {
         Err(e) => {
             tracing::warn!(error = ?e, "assignment_stalled probe failed");
             probed.failed.push("assignment_stalled");
@@ -330,7 +328,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // is blind to it: every retry moves `updated_at`, so an assignment bouncing off a stopped
     // bot every five minutes looks busy forever. The detail carries the retry count and the
     // last refusal, which is what makes it actionable instead of just red.
-    match store::assignments_undelivered_since(&app.db, &cutoff).await {
+    match store::assignments_undelivered_since(app.db(), &cutoff).await {
         Err(e) => {
             tracing::warn!(error = ?e, "assignment_undelivered probe failed");
             probed.failed.push("assignment_undelivered");
@@ -361,7 +359,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // 一個巡檢一筆，不是一則事件一筆（issue #504 審核）：巡檢停在登入失效時整個佇列會一起用盡額度，
     // 逐則開等於把一則送不出去的通知變成 N 張 critical incident，而每一張又各推一則 inbox 事件給協調者。
     // 隔壁 `responder_undeliverable` 為了同一個理由早就是聚合的；兩邊現在形狀一致（`events` 是真正的總數）。
-    match store::exhausted_inbox(&app.db, thresholds.notify_max_attempts).await {
+    match store::exhausted_inbox(app.db(), thresholds.notify_max_attempts).await {
         Err(e) => {
             tracing::warn!(error = ?e, "notify_exhausted probe failed");
             probed.failed.push("notify_exhausted");
@@ -399,7 +397,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // 判定在 `role_faults::refresh`（同一拍、`sweep` 之前跑），這裡只把結論變成 incident。
     // `resource` 從 bot_id 換成角色名：兩顆各自一筆，而且換 bot 不會留下關不掉的孤兒。
     for role in super::role_faults::WATCHED {
-        let row = match super::roles::record(&app.db, role).await {
+        let row = match super::roles::record(app.db(), role).await {
             Err(e) => {
                 tracing::warn!(role = role.as_str(), error = ?e, "role unavailable probe failed");
                 probed.failed.push(ROLE_UNAVAILABLE_KIND);
@@ -451,7 +449,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
             .to_string(),
         });
     }
-    match store::responder_undelivered(&app.db, RESPONDER_UNDELIVERED_ATTEMPTS).await {
+    match store::responder_undelivered(app.db(), RESPONDER_UNDELIVERED_ATTEMPTS).await {
         Err(e) => {
             tracing::warn!(error = ?e, "responder_undeliverable probe failed");
             probed.failed.push("responder_undeliverable");
@@ -479,7 +477,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // The phone entry point, but only when there is evidence it is *broken*. `unknown` with an
     // unsupported capability is a documented limit, not a fault: opening an incident for it
     // would mean a permanent red light nobody can clear.
-    let remote = super::remote::status(&app.db).await;
+    let remote = super::remote::status(app.db()).await;
     let remote_status = remote.get("status").and_then(Value::as_str).unwrap_or("unknown");
     if super::remote::severity(remote_status) == "degraded" {
         out.push(Observation {
@@ -494,7 +492,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // 兩個角色都沒登入時換到誰手上都一樣，這時要喊的是人，而不是只留一行 log——2026-09-23 那天
     // 部署停了 9 小時，全程沒有任何東西告訴使用者「有一筆核准在等你」。
     // critical：這是一道閘門，卡住的是別人的部署，不是 AGM 自己的工作。
-    match super::failover::stalled_approvals(&app.db, thresholds.approval_stalled_secs).await {
+    match super::failover::stalled_approvals(app.db(), thresholds.approval_stalled_secs).await {
         Ok(stalled) => {
             for (id, waiting_secs, requester) in stalled {
                 out.push(Observation {
@@ -518,7 +516,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // 沒有任何其他探針會發現（那些事件根本沒被選中，所以連 `notify_exhausted` 都不會觸發）。
     // 計數在 `App`（記憶體、重啟重算，同 SPEC §18.9 的原則），tick 每拍更新。
     {
-        let failures = app.classify_failures.load(std::sync::atomic::Ordering::Relaxed);
+        let failures = app.classify_failure_count().load(std::sync::atomic::Ordering::Relaxed);
         if failures >= thresholds.classify_failures {
             out.push(Observation {
                 kind: CLASSIFY_FAILING_KIND.into(),
@@ -538,7 +536,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // 事件還在遠端的 `.claim` 裡，本機的 `hook_events` 從頭到尾沒看過它們，
     // 而「hook 不再進來」跟「這顆 bot 很閒」在 daemon 這邊長得一模一樣。
     {
-        let stuck = app.spool_fold_stuck.lock().await;
+        let stuck = app.spool_fold_stuck().lock().await;
         for (resource, (rounds, bytes)) in stuck.iter() {
             if *rounds < thresholds.spool_fold_stuck_rounds {
                 continue;
@@ -562,7 +560,7 @@ pub async fn observe(app: &Arc<App>, thresholds: &Thresholds) -> Probed {
     // 那台上的 bot 都還在跑、hook 照進來，只是它們手上的 cargo／herdr 是舊版，
     // 表現出來的是「工作沒被轉到外部編譯主機」「cargo 卡住」這種看起來像慢、不像壞的症狀。
     {
-        let stale = app.remote_shim_stale.lock().await;
+        let stale = app.remote_shim_stale().lock().await;
         for (host, why) in stale.iter() {
             out.push(Observation {
                 kind: REMOTE_SHIM_STALE_KIND.into(),
@@ -637,12 +635,12 @@ fn notifiable(kind: &str, resource: &str, responder_configured: bool) -> bool {
 }
 
 /// Apply one pass: write what changed, and queue one inbox event per transition.
-pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
-    let cfg = app.cfg.get().await;
+pub async fn sweep(app: &(impl crate::capabilities::DataDir + crate::capabilities::Db + crate::capabilities::Cfg + crate::capabilities::Emit + crate::hosts::HostsAccess + super::role_faults::RoleFaultTable + super::ports::IncidentState), detector: &mut Detector) {
+    let cfg = app.cfg().get().await;
     let thresholds = Thresholds::from_cfg(&cfg.supervisor);
     let probed = observe(app, &thresholds).await;
     // Cannot read what is already open: do nothing at all rather than guess in either direction.
-    let Ok(open) = store::open_incidents(&app.db).await else {
+    let Ok(open) = store::open_incidents(app.db()).await else {
         tracing::warn!("incident sweep skipped: could not read the open incidents");
         return;
     };
@@ -653,7 +651,7 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
     note_blind(app, &probed.failed);
     // 讀不到＝不知道：當成「沒有協調者」會讓 notify_exhausted 的事件被吞掉（incident 已開、通知不再補），
     // 所以整輪不做，跟上面讀不到 open incidents 同一個原則（#250）。
-    let responder_configured = match super::roles::responder_configured(&app.db).await {
+    let responder_configured = match super::roles::responder_configured(app.db()).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = ?e, "incident sweep skipped: could not read whether the responder is configured");
@@ -672,7 +670,7 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
         let detail: Value = serde_json::from_str(&obs.detail).unwrap_or_else(|_| json!({}));
         // incident 與通知同一個交易（#319）：寫不進去就不開，下一輪 detector 重來。
         let (incident, opened) = match store::open_incident_notifying(
-            &app.db,
+            app.db(),
             &obs.kind,
             &obs.resource,
             &obs.severity,
@@ -697,7 +695,7 @@ pub async fn sweep(app: &Arc<App>, detector: &mut Detector) {
     }
 
     for (kind, resource) in plan.resolve {
-        let Ok(Some(incident)) = store::resolve_incident_notifying(&app.db, &kind, &resource, notifiable(&kind, &resource, responder_configured)).await else { continue };
+        let Ok(Some(incident)) = store::resolve_incident_notifying(app.db(), &kind, &resource, notifiable(&kind, &resource, responder_configured)).await else { continue };
         tracing::info!(kind = %kind, resource = %resource, "system incident resolved");
         app.emit("supervisor_changed", json!({"incident": incident.to_json()})).await;
     }

@@ -102,7 +102,7 @@ async fn upload_slot(State(slots): State<Arc<tokio::sync::Semaphore>>, req: axum
 /// AGM 的管理面 route layer：被證明身分的一般 bot 403（`supervisor::bot_requests::forbid_plain_bot`）。
 macro_rules! agm_gate {
     ($app:expr) => {
-        axum::middleware::from_fn_with_state($app.clone(), crate::supervisor::bot_requests::gate_plain_bots)
+        axum::middleware::from_fn_with_state($app.clone(), crate::runners::supervisor::gate_plain_bots)
     };
 }
 
@@ -129,23 +129,23 @@ pub fn router(app: Arc<App>) -> Router {
         // 群組任務（docs/goals/agm-missions.md）。
         .route(
             "/projects/{id}/missions",
-            get(crate::mission::api::get_missions).post(crate::mission::api::post_mission),
+            get(crate::runners::mission::api::get_missions).post(crate::runners::mission::api::post_mission),
         )
-        .route("/missions/{id}", get(crate::mission::api::get_mission))
-        .route("/missions/{id}/events", post(crate::mission::api::post_event))
-        .route("/missions/{id}/pause", post(crate::mission::api::post_pause))
-        .route("/missions/{id}/resume", post(crate::mission::api::post_resume))
+        .route("/missions/{id}", get(crate::runners::mission::api::get_mission))
+        .route("/missions/{id}/events", post(crate::runners::mission::api::post_event))
+        .route("/missions/{id}/pause", post(crate::runners::mission::api::post_pause))
+        .route("/missions/{id}/resume", post(crate::runners::mission::api::post_resume))
         // 完成後的追問／回覆／追加修改（AGM 裁示 01M2D18PQZSJ4Z5BJC21TF9Q77）。
-        .route("/missions/{id}/question", post(crate::mission::api::post_question))
-        .route("/missions/{id}/answer", post(crate::mission::api::post_answer))
-        .route("/missions/{id}/revise", post(crate::mission::api::post_revise))
-        .route("/missions/{id}/cancel", post(crate::mission::api::post_cancel))
-        .route("/missions/{id}/complete", post(crate::mission::api::post_complete))
-        .route("/missions/{id}/round", post(crate::mission::api::post_round).layer(agm_gate!(app)))
-        .route("/missions/{id}/pick", get(crate::mission::api::get_pick))
-        .route("/missions/{id}/deliver", post(crate::mission::api::post_deliver))
-        .route("/identity-prefs", get(crate::mission::api::get_identity_prefs))
-        .route("/identities/{name}/disabled", axum::routing::put(crate::mission::api::put_identity_disabled))
+        .route("/missions/{id}/question", post(crate::runners::mission::api::post_question))
+        .route("/missions/{id}/answer", post(crate::runners::mission::api::post_answer))
+        .route("/missions/{id}/revise", post(crate::runners::mission::api::post_revise))
+        .route("/missions/{id}/cancel", post(crate::runners::mission::api::post_cancel))
+        .route("/missions/{id}/complete", post(crate::runners::mission::api::post_complete))
+        .route("/missions/{id}/round", post(crate::runners::mission::api::post_round).layer(agm_gate!(app)))
+        .route("/missions/{id}/pick", get(crate::runners::mission::api::get_pick))
+        .route("/missions/{id}/deliver", post(crate::runners::mission::api::post_deliver))
+        .route("/identity-prefs", get(crate::runners::mission::api::get_identity_prefs))
+        .route("/identities/{name}/disabled", axum::routing::put(crate::runners::mission::api::put_identity_disabled))
         .route("/projects/{id}/github/refresh", post(refresh_github))
         .route("/projects/{id}/submodules", get(get_submodules))
         .route("/projects/{id}/git", get(get_git))
@@ -241,39 +241,39 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/mem/processes/pane", get(get_mem_pane))
         .route("/search/messages", get(search_messages).layer(agm_gate!(app)))
         // AGM 總管（docs/goals/agm-supervisor-environment-plan-2026-09-09.md）。
-        .route("/supervisor", get(crate::supervisor::api::get_supervisor).layer(agm_gate!(app)))
-        .route("/supervisor/health", get(crate::supervisor::api::get_health).layer(agm_gate!(app)))
+        .route("/supervisor", get(crate::runners::supervisor::api::get_supervisor).layer(agm_gate!(app)))
+        .route("/supervisor/health", get(crate::runners::supervisor::api::get_health).layer(agm_gate!(app)))
         // AGM 的管理面：被證明身分的一般 bot 一律 403 `role_required`（`bot_requests::forbid_plain_bot`）。
-        .route("/supervisor/setup", post(crate::supervisor::api::post_setup).layer(agm_gate!(app)))
-        .route("/supervisor/start", post(crate::supervisor::api::post_start).layer(agm_gate!(app)))
-        .route("/supervisor/stop", post(crate::supervisor::api::post_stop).layer(agm_gate!(app)))
-        .route("/supervisor/fallback", post(crate::supervisor::api::post_fallback).layer(agm_gate!(app)))
+        .route("/supervisor/setup", post(crate::runners::supervisor::api::post_setup).layer(agm_gate!(app)))
+        .route("/supervisor/start", post(crate::runners::supervisor::api::post_start).layer(agm_gate!(app)))
+        .route("/supervisor/stop", post(crate::runners::supervisor::api::post_stop).layer(agm_gate!(app)))
+        .route("/supervisor/fallback", post(crate::runners::supervisor::api::post_fallback).layer(agm_gate!(app)))
         .route(
             "/supervisor/assignments",
             // POST 不掛整條 gate：一般 bot 可以對 AGM 角色 bot 送 `notice`（release／herdr 更新任務的 `agm assign --notice --bot <巡檢>`），
             // 其餘由 handler 自己判斷（`supervisor::api::post_assignment`）。
-            get(crate::supervisor::api::get_assignments).layer(agm_gate!(app)).post(crate::supervisor::api::post_assignment),
+            get(crate::runners::supervisor::api::get_assignments).layer(agm_gate!(app)).post(crate::runners::supervisor::api::post_assignment),
         )
         .route(
             "/supervisor/handoff",
-            get(crate::supervisor::api::get_handoff).layer(agm_gate!(app)).merge(axum::routing::put(crate::supervisor::api::put_handoff).layer(agm_gate!(app))),
+            get(crate::runners::supervisor::api::get_handoff).layer(agm_gate!(app)).merge(axum::routing::put(crate::runners::supervisor::api::put_handoff).layer(agm_gate!(app))),
         )
-        .route("/supervisor/assignments/{id}", get(crate::supervisor::api::get_assignment).layer(agm_gate!(app)))
+        .route("/supervisor/assignments/{id}", get(crate::runners::supervisor::api::get_assignment).layer(agm_gate!(app)))
         // 回合結束只到 awaiting_review；驗收／阻塞／續作／取消都走這支（SPEC §18.3）。
-        .route("/supervisor/assignments/{id}/review", post(crate::supervisor::api::post_review).layer(agm_gate!(app)))
+        .route("/supervisor/assignments/{id}/review", post(crate::runners::supervisor::api::post_review).layer(agm_gate!(app)))
         // 使用者在更新提示上按「請 AGM 解析」：把這一版的 changelog 派給協調者判讀（唯讀）。
         .route(
             "/claude-update/review",
             get(crate::claude_review::get_review).post(crate::claude_review::post_review),
         )
-        .route("/supervisor/incidents", get(crate::supervisor::api::get_incidents).layer(agm_gate!(app)))
+        .route("/supervisor/incidents", get(crate::runners::supervisor::api::get_incidents).layer(agm_gate!(app)))
         // 人設：持久版本是權威，內嵌版只在首次安裝當種子（SPEC §18.11）。
         .route(
             "/supervisor/persona",
-            get(crate::supervisor::api::get_persona).layer(agm_gate!(app)).put(crate::supervisor::api::put_persona),
+            get(crate::runners::supervisor::api::get_persona).layer(agm_gate!(app)).put(crate::runners::supervisor::api::put_persona),
         )
-        .route("/supervisor/persona/adopt-embedded", post(crate::supervisor::api::post_persona_adopt))
-        .route("/supervisor/build-inputs", get(crate::supervisor::api::get_build_inputs).layer(agm_gate!(app)))
+        .route("/supervisor/persona/adopt-embedded", post(crate::runners::supervisor::api::post_persona_adopt))
+        .route("/supervisor/build-inputs", get(crate::runners::supervisor::api::get_build_inputs).layer(agm_gate!(app)))
         // 左上角「立即部署」：落後多少、有沒有在跑；按下去交給既有的 daemon-update-kick（SPEC §18.2）。
         .route("/deploy/status", get(crate::deploy_now::get_status))
         .route("/deploy/now", post(crate::deploy_now::post_now))
@@ -282,36 +282,36 @@ pub fn router(app: Arc<App>) -> Router {
         // 遠端入口：argv 只算 requested，宣稱通了要有帶 actor 的觀測（SPEC §18.12）。
         .route(
             "/supervisor/remote",
-            get(crate::supervisor::api::get_remote).layer(agm_gate!(app))
-                .merge(post(crate::supervisor::api::post_remote_observation).layer(agm_gate!(app))),
+            get(crate::runners::supervisor::api::get_remote).layer(agm_gate!(app))
+                .merge(post(crate::runners::supervisor::api::post_remote_observation).layer(agm_gate!(app))),
         )
         // 重建／重啟的核准與執行租約（SPEC §18.10）。
         .route(
             "/supervisor/approvals",
-            get(crate::supervisor::api::get_approvals).layer(agm_gate!(app)).post(crate::supervisor::api::post_approval),
+            get(crate::runners::supervisor::api::get_approvals).layer(agm_gate!(app)).post(crate::runners::supervisor::api::post_approval),
         )
         .route(
             "/supervisor/approvals/{id}/decide",
-            post(crate::supervisor::api::post_approval_decision).layer(agm_gate!(app)),
+            post(crate::runners::supervisor::api::post_approval_decision).layer(agm_gate!(app)),
         )
-        .route("/supervisor/maintenance/safety", get(crate::supervisor::api::get_maintenance_safety).layer(agm_gate!(app)))
-        .route("/supervisor/leases", get(crate::supervisor::api::get_leases).layer(agm_gate!(app)))
-        .route("/supervisor/leases/{resource}/acquire", post(crate::supervisor::api::post_lease_acquire))
-        .route("/supervisor/leases/{resource}/renew", post(crate::supervisor::api::post_lease_renew))
-        .route("/supervisor/leases/{resource}/release", post(crate::supervisor::api::post_lease_release))
-        .route("/supervisor/inbox", get(crate::supervisor::api::get_inbox).layer(agm_gate!(app)))
-        .route("/supervisor/inbox/{id}/ack", post(crate::supervisor::api::post_inbox_ack))
-        .route("/supervisor/state", get(crate::supervisor::api::get_sanitized_state).layer(agm_gate!(app)))
+        .route("/supervisor/maintenance/safety", get(crate::runners::supervisor::api::get_maintenance_safety).layer(agm_gate!(app)))
+        .route("/supervisor/leases", get(crate::runners::supervisor::api::get_leases).layer(agm_gate!(app)))
+        .route("/supervisor/leases/{resource}/acquire", post(crate::runners::supervisor::api::post_lease_acquire))
+        .route("/supervisor/leases/{resource}/renew", post(crate::runners::supervisor::api::post_lease_renew))
+        .route("/supervisor/leases/{resource}/release", post(crate::runners::supervisor::api::post_lease_release))
+        .route("/supervisor/inbox", get(crate::runners::supervisor::api::get_inbox).layer(agm_gate!(app)))
+        .route("/supervisor/inbox/{id}/ack", post(crate::runners::supervisor::api::post_inbox_ack))
+        .route("/supervisor/state", get(crate::runners::supervisor::api::get_sanitized_state).layer(agm_gate!(app)))
         // 已安裝的 bin/agm vs 這顆 binary 內嵌的那份（SPEC §18.2a）：GET 比對、POST 就地換版，
         // 不必等下一次開機（issue #532）。
         .route(
             "/supervisor/cli",
-            get(crate::supervisor::cli_refresh::get_cli).layer(agm_gate!(app)).merge(post(crate::supervisor::cli_refresh::post_cli_refresh).layer(agm_gate!(app))),
+            get(crate::runners::supervisor::cli::get_cli).layer(agm_gate!(app)).merge(post(crate::runners::supervisor::cli::post_cli_refresh).layer(agm_gate!(app))),
         )
         // 排程腳本卡住時喊人（SPEC §18.9）：只寫一則 durable inbox 事件。
-        .route("/supervisor/ops-alerts", post(crate::supervisor::api::post_ops_alert).layer(agm_gate!(app)))
+        .route("/supervisor/ops-alerts", post(crate::runners::supervisor::api::post_ops_alert).layer(agm_gate!(app)))
         .route("/supervisor/evidence", get(crate::supervisor_evidence::search).layer(agm_gate!(app)))
-        .merge(crate::supervisor::responder_api::routes(app.clone()))
+        .merge(crate::runners::supervisor::responder_api::routes(app.clone()))
         .merge(crate::runners::release_triage::routes())
         .merge(crate::runners::upstream_update::routes())
         .merge(crate::runners::judge::routes())
@@ -11552,10 +11552,10 @@ mod per_principal_auth_tests {
         let e = crate::testing::env().await;
         let bad = ["main", "abc12", "abc1234; rm -rf /", "abc1234\n--force"];
         for commit in bad {
-            let r = crate::supervisor::api::post_approval(
+            let r = crate::runners::supervisor::api::post_approval(
                 State(e.app.clone()),
                 HeaderMap::new(),
-                Json(crate::supervisor::api::ApprovalIn {
+                Json(crate::runners::supervisor::api::ApprovalIn {
                     requester: "ops".into(), purpose: "rebuild".into(), scope: "x".into(), target_commit: Some(commit.into()),
                     expires_in_secs: None, request_id: None, supersedes: None, reason: None,
                 }),
@@ -11572,10 +11572,10 @@ mod per_principal_auth_tests {
         }
         let approvals: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM supervisor_approvals").fetch_one(&e.app.db).await.unwrap();
         assert_eq!(approvals, 0, "被擋的申請不留列");
-        let good = crate::supervisor::api::post_approval(
+        let good = crate::runners::supervisor::api::post_approval(
             State(e.app.clone()),
             HeaderMap::new(),
-            Json(crate::supervisor::api::ApprovalIn {
+            Json(crate::runners::supervisor::api::ApprovalIn {
                 requester: "ops".into(), purpose: "rebuild".into(), scope: "x".into(), target_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
                 expires_in_secs: None, request_id: None, supersedes: None, reason: None,
             }),

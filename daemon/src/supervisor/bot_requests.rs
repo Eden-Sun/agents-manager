@@ -9,9 +9,11 @@
 //! 舊部署、以及目標不是兩個角色 bot 的一般 prompt。
 
 use crate::lifecycle::LcError;
-use crate::state::App;
 use sqlx::SqlitePool;
 use serde_json::{json, Value};
+#[cfg(test)]
+use crate::state::App;
+#[cfg(test)]
 use std::sync::Arc;
 
 use super::roles::{self, Role};
@@ -185,9 +187,18 @@ async fn quiet_reason(
 /// `X-AM-Bot-Token` 是寄件 bot 自己的 hook token 才算驗證過。沒有也照收，只是記下來。
 pub async fn sender_verified(db: &SqlitePool, token: Option<&str>, from: &str) -> bool {
     let Some(t) = token.filter(|t| !t.is_empty()) else { return false };
-    // 常數時間比對，跟 `api.rs`／`hookrecv.rs`／`build_scheduler.rs`／`relay_auth.rs` 同一套；
+    // 常數時間比對，跟其他 token 驗證入口同一套；
     // 這裡以前是 `==`，是六處裡唯一的例外（issue #415）。
-    matches!(crate::db::bot(db, from).await, Ok(Some(b)) if b.deleted_at.is_none() && crate::api::ct_eq(t, &b.hook_token))
+    matches!(crate::db::bot(db, from).await, Ok(Some(b)) if b.deleted_at.is_none() && ct_eq(t, &b.hook_token))
+}
+
+/// 固定長度後逐位元累積差異，避免 token 比對在第一個不同位元組就提早結束。
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// 帶了 `X-AM-Bot-Id` 卻驗不過：整個請求 403，不降級。
@@ -273,19 +284,6 @@ pub fn plain_bot_forbidden(bot_id: &str, message: &str) -> LcError {
     LcError::Forbidden(json!({"error": "forbidden", "reason": "role_required", "message": message, "bot_id": bot_id}))
 }
 
-/// [`forbid_plain_bot`] 當 route layer 用：掛在 `post(handler).layer(…)` 上，不必改 handler 的簽名。
-pub async fn gate_plain_bots(
-    axum::extract::State(app): axum::extract::State<Arc<App>>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    match forbid_plain_bot(&app, req.headers()).await {
-        Ok(()) => next.run(req).await,
-        Err(e) => e.into_response(),
-    }
-}
-
 /// 角色端點專用：一定要證明得了身分，而且那顆要是角色 bot。
 ///
 /// `actor_role` 的 `Ok(None)`（＝完全沒宣告身分）在這裡**不是**「使用者，什麼都能做」而是 403。
@@ -307,7 +305,7 @@ pub async fn require_role(app: &impl crate::capabilities::Db, headers: &axum::ht
 /// 這一句要不要攔下來排進 inbox。`Ok(None)` = 照原本的路送。
 #[allow(clippy::too_many_arguments)]
 pub async fn intercept(
-    app: &Arc<App>,
+    app: &(impl crate::capabilities::Db + crate::capabilities::Emit),
     target_bot_id: &str,
     from_bot_id: &str,
     text: &str,
@@ -319,11 +317,11 @@ pub async fn intercept(
 ) -> Result<Option<Value>, LcError> {
     // 協調者「建立過」就一直攔：它停了、沒額度、bot 被刪掉，申請都排進它的佇列等，
     // 不會因為它不在就倒回巡檢（SPEC §18.15）。
-    if from_bot_id == crate::agent_relay::DAEMON_SENDER || !roles::responder_configured(&app.db).await.map_err(up)? {
+    if from_bot_id == crate::agent_relay::DAEMON_SENDER || !roles::responder_configured(app.db()).await.map_err(up)? {
         return Ok(None);
     }
-    let Some(target) = roles::role_of_bot(&app.db, target_bot_id).await.map_err(up)? else { return Ok(None) };
-    let sender = roles::role_of_bot(&app.db, from_bot_id).await.map_err(up)?;
+    let Some(target) = roles::role_of_bot(app.db(), target_bot_id).await.map_err(up)? else { return Ok(None) };
+    let sender = roles::role_of_bot(app.db(), from_bot_id).await.map_err(up)?;
     let Some(to) = recipient(target, sender) else { return Ok(None) };
     Ok(Some(queue(app, to, from_bot_id, target_bot_id, text, client_request_id, attachments, verified, via, mark).await?))
 }

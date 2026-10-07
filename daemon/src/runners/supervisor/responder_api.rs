@@ -1,0 +1,184 @@
+//! `/api/supervisor/responder/*`：協調者的建立、啟停與人設。docs/API.md。
+//!
+//! 放在自己的檔案、以 [`routes`] 併進主路由，巡檢的 `/api/supervisor/*` 完全不動。
+
+use crate::lifecycle::LcError;
+use crate::state::App;
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::sync::Arc;
+
+use super::responder;
+use super::roles::{self, Role};
+
+fn up<E: std::fmt::Display>(e: E) -> LcError {
+    LcError::Upstream(e.to_string())
+}
+
+/// 掛在 `/api` 底下、auth layer 之內。setup／start／stop 是 AGM 的管理面：被證明身分的一般 bot 403（`forbid_plain_bot`）。
+pub fn routes(app: Arc<App>) -> Router<Arc<App>> {
+    Router::new()
+        .route(
+            "/supervisor/responder",
+            get(get_responder).layer(axum::middleware::from_fn_with_state(app.clone(), super::gate_plain_bots)),
+        )
+        .route("/supervisor/responder/setup", post(post_setup).layer(axum::middleware::from_fn_with_state(app.clone(), super::gate_plain_bots)))
+        .route("/supervisor/responder/start", post(post_start).layer(axum::middleware::from_fn_with_state(app.clone(), super::gate_plain_bots)))
+        .route("/supervisor/responder/stop", post(post_stop).layer(axum::middleware::from_fn_with_state(app.clone(), super::gate_plain_bots)))
+        .route(
+            "/supervisor/responder/persona",
+            get(get_persona).layer(axum::middleware::from_fn_with_state(app, super::gate_plain_bots)).put(put_persona),
+        )
+}
+
+async fn get_responder(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    Ok(Json(responder::status_json(&app).await?))
+}
+
+#[derive(Deserialize, Default)]
+struct SetupIn {
+    #[serde(default)]
+    identity: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+}
+
+/// 建立環境。冪等、不啟動：跟巡檢的 setup 一樣，要人明確 start 一次。
+async fn post_setup(State(app): State<Arc<App>>, body: Option<Json<SetupIn>>) -> Result<Json<Value>, LcError> {
+    let b = body.map(|Json(b)| b).unwrap_or_default();
+    let _g = super::lock().await;
+    let (_project, bot_id, deployed) =
+        responder::ensure_env(&app, b.identity.as_deref(), b.model.as_deref(), b.effort.as_deref()).await?;
+    app.emit("supervisor_changed", json!({"responder_bot_id": bot_id})).await;
+    let mut out = responder::status_json(&app).await?;
+    out["deployed"] = serde_json::to_value(&deployed).unwrap_or(Value::Null);
+    Ok(Json(out))
+}
+
+/// 先寫「要它跑」再啟動（review 2026-09-16 c3 M1）：start 失敗的話 desired 還是 0，看門狗不管、
+/// 健康也說 healthy，而 bot 的申請已經排給它——沒有任何人會再試。失敗交給看門狗的有界重試。
+/// 順序與「寫不進去就什麼都不做」住在 `responder::start_requested`，不由這裡維護（issue #84）。
+async fn post_start(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    let _g = super::lock().await;
+    responder::start_requested(&app).await?;
+    Ok(Json(responder::status_json(&app).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// start 失敗（這裡是 herdr socket 不存在）時「要它跑」已經記下，看門狗會接手重試。
+    #[tokio::test]
+    async fn a_failed_start_still_leaves_the_responder_wanted() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        assert!(post_start(State(app.clone())).await.is_err(), "測試環境沒有 herdr，start 一定失敗");
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().desired_running, 1);
+    }
+
+    /// 還沒 setup 就 start：回 not_configured，不留下一個沒有 bot 可以對應的「要它跑」（issue #84）。
+    #[tokio::test]
+    async fn a_start_without_a_configured_responder_leaves_no_dangling_intent() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        let err = post_start(State(app.clone())).await.unwrap_err();
+        assert!(format!("{err:?}").contains("responder_not_configured"), "{err:?}");
+        assert_eq!(roles::get(&app.db, Role::Responder).await.unwrap().desired_running, 0);
+    }
+
+    /// stop：意圖寫不進去就**不要停**，也不要回成功——停了也會被看門狗拉回來（issue #84）。
+    #[tokio::test]
+    async fn a_stop_whose_intent_write_fails_neither_stops_nor_reports_success() {
+        let app = super::super::bot_requests::flow_tests::app().await;
+        super::super::bot_requests::flow_tests::configure_responder(&app).await;
+        roles::set_desired_running(&app.db, Role::Responder, true).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER role_desired_running_unwritable BEFORE UPDATE OF desired_running ON supervisor_roles
+             BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END",
+        )
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+        let err = post_stop(State(app.clone())).await.unwrap_err();
+
+        assert!(format!("{err:?}").contains("could not persist desired_running"), "{err:?}");
+        assert_eq!(
+            roles::get(&app.db, Role::Responder).await.unwrap().desired_running,
+            1,
+            "意圖沒動：看門狗讀到的還是使用者上一次的決定",
+        );
+    }
+}
+
+async fn post_stop(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    let _g = super::lock().await;
+    responder::stop(&app).await?;
+    Ok(Json(responder::status_json(&app).await?))
+}
+
+async fn get_persona(State(app): State<Arc<App>>) -> Result<Json<Value>, LcError> {
+    let text = responder::effective_persona(&app.db).await?;
+    let row = roles::get(&app.db, Role::Responder).await.map_err(up)?;
+    let embedded = responder::persona_body();
+    let embedded_hash = super::persona::hash(&embedded);
+    let run_started = match row.bot_id.as_deref() {
+        Some(id) => crate::db::active_run(&app.db, id).await.map_err(up)?.map(|r| r.started_at),
+        None => None,
+    };
+    let loaded = super::persona::loaded_state(run_started.as_deref(), row.persona_updated_at.as_deref());
+    Ok(Json(json!({
+        "role": Role::Responder.as_str(),
+        "stored": {
+            "version": row.persona_version,
+            "hash": row.persona_hash,
+            "source": row.persona_source,
+            "updated_at": row.persona_updated_at,
+            "seeded_from": row.persona_seed_hash,
+            "length": text.chars().count(),
+            "text": text,
+        },
+        "embedded": {"hash": embedded_hash, "length": embedded.chars().count()},
+        "loaded": {"status": loaded.as_str(), "run_started_at": run_started},
+        "upgrade_available": row.persona_seed_hash.as_deref().is_some_and(|h| h != embedded_hash),
+        "needs_restart": loaded.needs_restart(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct PersonaIn {
+    text: String,
+    #[serde(default)]
+    expected_version: Option<i64>,
+}
+
+/// 協調者的人設跟總管那份同一個形狀、同一個問題（issue #462）：以前連 `HeaderMap` 都不收，
+/// 任何拿得到 UI token 的本機呼叫端都能改寫協調者的常駐指示。守衛與留痕都用 `api` 那兩支共用的。
+async fn put_persona(State(app): State<Arc<App>>, headers: HeaderMap, Json(b): Json<PersonaIn>) -> Result<Json<Value>, LcError> {
+    let actor = super::api::persona_actor(&app, &headers).await?;
+    let text = b.text.trim();
+    if text.is_empty() {
+        return Err(LcError::Bad("persona text must not be empty".into()));
+    }
+    let _g = super::lock().await;
+    let previous = roles::get(&app.db, Role::Responder).await.map_err(up)?.persona_text;
+    let version = responder::set_persona(&app.db, text, b.expected_version).await?;
+    responder::apply_persona(&app, text).await.map_err(|e| {
+        LcError::conflict(
+            "persona stored but projection sync is incomplete; retry the same text to repair",
+            json!({"reason": "persona_sync_incomplete", "stored": true, "version": version, "sync_error": format!("{e:?}")}),
+        )
+    })?;
+    drop(_g);
+    if previous.as_deref() != Some(text) {
+        super::api::note_persona_change(&app.db, &actor, previous.as_deref(), text, version, "responder_api").await;
+    }
+    app.emit("supervisor_changed", json!({"responder_persona_version": version})).await;
+    Ok(Json(get_persona(State(app.clone())).await?.0))
+}

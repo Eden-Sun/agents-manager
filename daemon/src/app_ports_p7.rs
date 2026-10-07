@@ -10,7 +10,7 @@ use crate::mission::ports::{
     AgmRole, CallerOps, EventOps, GroupTurnOps, IdentityOps, KnownIdentity, MissionGateRules, SupervisorOps, SupervisorRepo,
 };
 use crate::quota::{self, Quota};
-use crate::state::{App, WsEvent};
+use crate::state::App;
 use crate::supervisor::roles::{self, Role};
 use crate::supervisor::store as supervisor_store;
 use axum::extract::{Path, State};
@@ -20,7 +20,6 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 
 fn agm_role(r: Role) -> AgmRole {
     match r {
@@ -74,7 +73,7 @@ impl SupervisorOps for Arc<App> {
         crate::supervisor::lock()
     }
     async fn cancel_assignment(&self, assignment_id: &str, headers: &HeaderMap, actor: &str, source: &str, reason: String) -> Result<Value, LcError> {
-        let review = crate::supervisor::api::ReviewIn {
+        let review = crate::runners::supervisor::api::ReviewIn {
             decision: "cancel".into(),
             actor: Some(actor.into()),
             source: Some(source.into()),
@@ -85,7 +84,7 @@ impl SupervisorOps for Arc<App> {
             followup_bot_id: None,
             ownership: Vec::new(),
         };
-        crate::supervisor::api::post_review(State(self.clone()), Path(assignment_id.to_string()), headers.clone(), Json(review))
+        crate::runners::supervisor::api::post_review(State(self.clone()), Path(assignment_id.to_string()), headers.clone(), Json(review))
             .await
             .map(|Json(v)| v)
     }
@@ -139,9 +138,6 @@ impl MissionGateRules for SqlitePool {
 impl EventOps for Arc<App> {
     async fn emit_event(&self, kind: &str, data: Value) {
         self.emit(kind, data).await
-    }
-    fn subscribe_events(&self) -> broadcast::Receiver<WsEvent> {
-        self.subscribe()
     }
 }
 
