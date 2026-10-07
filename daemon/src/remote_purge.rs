@@ -6,14 +6,12 @@
 //! 所以刪除 commit 與 purge 之間任何時刻死掉都不會忘記；主機連上（含重連）與定期輪詢時掃一次，ssh 失敗就留著下次再試。
 //! `remote_bot_dir_purges` 只記結果：清掉了（`purged_at`）、或欠著的失敗次數／原因（給 `due_actions` 看）。
 //! 原則跟本機一樣 fail closed：DB 讀不到、run 讀不到或還活著就不刪；host 一律取自專案列，**不明就不動，不退回本機**。
-use crate::state::App;
 use anyhow::Result;
 use sqlx::SqlitePool;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// 主機連著時的重試節奏；連上那一刻另外掃一次。
-const POLL_EVERY: Duration = Duration::from_secs(5 * 60);
+pub(crate) const POLL_EVERY: Duration = Duration::from_secs(5 * 60);
 /// 一輪最多處理幾顆：舊的軟刪 bot 一次全清會佔住連線很久，剩下的下一輪接著做。
 const PER_SWEEP: i64 = 100;
 
@@ -86,88 +84,6 @@ pub async fn pending(pool: &SqlitePool, host: &str) -> Result<Vec<String>> {
     .await?)
 }
 
-/// 掃一台遠端主機：回 `(清掉, 留著)`。只有「確定軟刪」而且「確定沒有 active run」的才搬進遠端回收區（#411）。
-///
-/// 順便清掉回收區裡放過 [`crate::bot_trash::KEEP_DAYS`] 的（#431）。掛在這裡而不是只掛在「主機連上」那一次：
-/// 連上只發生在開機與重連，常駐連線的主機因此從來不清，`KEEP_DAYS` 等於沒生效——回收區放的是整個 bot 目錄
-/// （hook spool、shim），而遠端同時是外部編譯主機，磁碟已經被 #141／#196 塞爆過兩次。
-/// 清理跟「還欠著誰的目錄」是兩件事，所以排在 `pending` 之前：那一段讀不到也要清。
-/// 代價是每輪多一次 ssh（腳本很短，走既有的 ControlMaster）。
-///
-/// **每顆都在它自己的 per-bot 鎖裡重讀一次 `deleted_at`**（issue #511）：`pending` 讀完到真的
-/// `mv` 之間隔著一次 `active_run` 與一整段 ssh，一輪最多 100 顆、可以是好幾分鐘。這段時間裡使用者按
-/// 「復原」（`restore_bot`，拿的就是這把鎖）的話，以前照樣會把**剛還原的活 bot** 的遠端目錄搬進回收區、
-/// 連本機的 `attachments/<id>/` 一起帶走，還補回一列 `purged_at`——那列會讓這顆之後真的被刪時
-/// 被 [`pending`] 的 `NOT EXISTS` 排除，遠端目錄從此沒有人回收（#349／#411 的帳被消掉）。
-/// `delete_intents::resume_bot`／`resume_project` 與開機清掃本來就是先拿鎖／先重讀，只有這條漏掉。
-pub async fn sweep(app: &Arc<App>, host: &str) -> (usize, usize) {
-    if host == crate::config::LOCAL_HOST {
-        return (0, 0);
-    }
-    // #709：共用 session 的主機上，遠端資料目錄可能就是另一顆 daemon 自己的：回收區與 bot 目錄一律不動。
-    if crate::shared_host::is_shared(app, host).await {
-        tracing::debug!(host, "shared-session host: remote bot directories and trash left alone");
-        return (0, 0);
-    }
-    crate::remote_trash::gc_host(app, host).await;
-    let ids = match pending(&app.db, host).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(host, error = %e, "could not read which deleted bots still owe a remote directory purge; nothing removed");
-            return (0, 0);
-        }
-    };
-    // 讀完「誰欠著」、還沒拿任何一把鎖的那一瞬（測試在這裡把其中一顆還原掉）。
-    #[cfg(test)]
-    crate::bot_trash::app_ports_p11::race_point::hit("remote_sweep_after_pending", host).await;
-    let (mut purged, mut kept) = (0, 0);
-    for id in ids {
-        // `restore_bot` 拿的是同一把：拿到之後看到的 `deleted_at` 就是最終的答案。
-        let _guard = app.bot_lock(&id).await.lock_owned().await;
-        match crate::db::bot(&app.db, &id).await {
-            // 這一輪開始之後被還原了：它是活的，一個檔都不准動，也不准補那列 `purged_at`。
-            Ok(Some(b)) if b.deleted_at.is_none() => {
-                tracing::info!(bot = %id, host, "the bot was restored while this sweep was running; leaving its directory alone");
-                continue;
-            }
-            Ok(Some(_)) => {}
-            // 列不見了（硬刪）或讀不到：fail closed，留著下一輪再說。
-            Ok(None) => {
-                kept += 1;
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(bot = %id, host, error = %e, "could not re-read whether a bot is still deleted; leaving its directory");
-                kept += 1;
-                continue;
-            }
-        }
-        match crate::db::active_run(&app.db, &id).await {
-            Ok(None) => {}
-            Ok(Some(_)) => {
-                record(app, &id, host, false, Some("run_still_active")).await;
-                kept += 1;
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(bot = %id, host, error = %e, "could not read whether a deleted remote bot still has a live run; leaving its directory");
-                kept += 1;
-                continue;
-            }
-        }
-        // purge_bot_dir 自己把結果記進 remote_bot_dir_purges。
-        if crate::bot_trash::app_ports_p11::purge_bot_dir(app, &id, host).await {
-            purged += 1;
-        } else {
-            kept += 1;
-        }
-    }
-    if purged + kept > 0 {
-        tracing::info!(host, purged, kept, "swept remote directories of deleted bots");
-    }
-    (purged, kept)
-}
-
 /// 還原的 bot 忘掉「已清掉」的記號（issue #411）：之後再被刪一次，掃描才會再搬它的目錄。寫不進去只記 log。
 pub async fn forget(app: &impl crate::capabilities::Db, bot_id: &str) {
     if let Err(e) = sqlx::query("DELETE FROM remote_bot_dir_purges WHERE bot_id = ?").bind(bot_id).execute(app.db()).await {
@@ -175,34 +91,11 @@ pub async fn forget(app: &impl crate::capabilities::Db, bot_id: &str) {
     }
 }
 
-/// 主機連上（含重連）那一刻背景掃一次（回收區的過期清理在 `sweep` 裡，#431）。
-pub fn spawn_sweep(app: Arc<App>, host: String) {
-    tokio::spawn(async move {
-        sweep(&app, &host).await;
-    });
-}
-
-/// 連著的遠端主機定期再掃：ssh 一時失敗、run 剛結束的那些不必等下一次重連，
-/// 回收區裡過期的也在這一輪清掉（#431：不重連的主機以前永遠不清）。
-pub fn spawn_poller(app: Arc<App>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(POLL_EVERY).await;
-            for name in app.hosts.names().await {
-                let Some(conn) = app.hosts.get(&name).await else { continue };
-                if !conn.is_local() && conn.is_connected() {
-                    sweep(&app, &name).await;
-                }
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::testing as tt;
-    use std::sync::Mutex;
+    use crate::runners::remote_purge::sweep;
+    use std::sync::{Arc, Mutex};
 
     struct Remote {
         env: tt::Env,
@@ -333,8 +226,8 @@ mod tests {
         sqlx::query("UPDATE bots SET managed_by = 'child' WHERE id = ?").bind(&id).execute(&app.db).await.unwrap();
 
         let (a2, i2) = (app.clone(), id.clone());
-        crate::bot_trash::app_ports_p11::race_point::arm("remote_sweep_after_pending", &r.host, move || async move {
-            crate::bot_trash::app_ports_p11::test_helpers::restore_bot(a2, i2).await.unwrap();
+        crate::runners::app_ports_p11::race_point::arm("remote_sweep_after_pending", &r.host, move || async move {
+            crate::runners::app_ports_p11::test_helpers::restore_bot(a2, i2).await.unwrap();
         });
 
         assert_eq!(sweep(&app, &r.host).await, (0, 0), "還原掉的那顆既沒清也不算欠著");

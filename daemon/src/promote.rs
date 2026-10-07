@@ -303,7 +303,7 @@ pub async fn promote_bot(
     if project.host != LOCAL_HOST {
         return Err(refuse("remote_not_supported", json!({"host": project.host})));
     }
-    if !crate::bot_trash::app_ports_p11::descendant_children(&app, &id).await.map_err(up)?.is_empty() {
+    if !crate::runners::app_ports_p11::descendant_children(&app, &id).await.map_err(up)?.is_empty() {
         return Err(refuse("has_children", json!({"message": "它自己還有子 agent；先處理掉孫 agent 再升級。"})));
     }
 
@@ -330,7 +330,7 @@ pub async fn promote_bot(
         return Err(refuse("bot name already in use", json!({"name": wanted})));
     } else {
         // 預設沿用 child 的名字，而它自己還占著這個名字（同專案 live 唯一），所以退到 `-N`。
-        crate::bot_trash::app_ports_p11::next_free_name(&wanted, &taken)
+        crate::runners::app_ports_p11::next_free_name(&wanted, &taken)
     };
     let requested_model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).or(child.model.as_deref());
     let remapped_model = requested_model.and_then(|m| crate::models::remap_deprecated_model("claude", m).map(|to| (m.to_string(), to.to_string())));

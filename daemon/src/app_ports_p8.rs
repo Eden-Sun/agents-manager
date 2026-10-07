@@ -15,7 +15,7 @@ use crate::events::ports::{
 use crate::lifecycle::fence::{Admitted, EventIdentity, Ownership};
 use crate::lifecycle::turn_controller::{self, NativeEvidence, Outcome};
 use crate::lifecycle::{self, InterruptEvidence, InterruptFailureEvidence, LcError, LcResult, PromptOut, RunExit, StartOpts};
-use crate::panes::ScanOutcome;
+use crate::panes::{PaneOwnership, PaneRuntime, ScanOutcome};
 use crate::quota::{self, Quota};
 use crate::state::App;
 use anyhow::Result;
@@ -142,6 +142,46 @@ impl TurnCommands for Arc<App> {
     }
 }
 
+impl PaneRuntime for App {
+    fn pane_host_ownership<'a>(&'a self, host: &'a str) -> impl Future<Output = Result<Option<PaneOwnership>>> + Send + 'a {
+        async move {
+            if !crate::shared_host::is_shared(self, host).await {
+                return Ok(None);
+            }
+            let owned = crate::shared_host::owned(self, host).await?;
+            Ok(Some(PaneOwnership { workspaces: owned.workspaces, tabs: owned.tabs, panes: owned.panes }))
+        }
+    }
+
+    fn pane_shell_client<'a>(&'a self, host: &'a str) -> impl Future<Output = Result<crate::herdr::HerdrClient>> + Send + 'a {
+        async move {
+            crate::api::shell::client_for(self, host)
+                .await
+                .map(|(client, _)| client)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))
+        }
+    }
+
+    fn close_pane_and_tab<'a>(
+        &'a self,
+        client: &'a crate::herdr::HerdrClient,
+        workspace_id: Option<&'a str>,
+        tab_id: Option<&'a str>,
+        pane_id: &'a str,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        crate::lifecycle::close_pane_and_tab(client, workspace_id, tab_id, pane_id)
+    }
+
+    fn push_pane_inbox<'a>(
+        &'a self,
+        key: &'a str,
+        event: &'a str,
+        payload: &'a Value,
+    ) -> impl Future<Output = Result<Option<String>>> + Send + 'a {
+        crate::supervisor::store::push_inbox(&self.db, key, event, None, None, None, payload)
+    }
+}
+
 impl TurnConnOps for SqliteConnection {
     async fn set_status_on(&mut self, turn_id: &str, from: &str, to: &str, why: &str) -> Result<Outcome> {
         turn_controller::set_status_on(self, turn_id, from, to, why).await
@@ -219,7 +259,7 @@ impl SupervisorRepo for SqlitePool {
     ) -> Result<Option<String>> {
         crate::supervisor::store::push_inbox(self, event_key, kind, assignment_id, bot_id, turn_id, payload).await
     }
-    async fn load_owned(&self) -> Result<crate::supervisor_owned::Owned> {
+    async fn load_owned(&self) -> Result<crate::projection::Owned> {
         crate::supervisor_owned::load(self).await
     }
     fn open_states_sql() -> String {
@@ -250,7 +290,7 @@ impl HandoffConnRepo for SqliteConnection {
 
 impl BotOpsPort for Arc<App> {
     async fn recover_restart_intents(&self, host: &str) {
-        crate::restart_intents::recover_host(self, host).await
+        crate::runners::restart_intents::recover_host(self, host).await
     }
     async fn recover_delete_intents(&self, host: &str) {
         crate::delete_intents::recover_host(self, host).await

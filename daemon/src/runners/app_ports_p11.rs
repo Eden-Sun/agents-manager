@@ -12,6 +12,7 @@ use crate::state::App;
 use crate::db;
 use crate::lifecycle::{self, LcError};
 use serde_json::Value;
+use std::future::Future;
 
 // ============================================================================
 // Reconcile Ports
@@ -150,6 +151,33 @@ pub async fn push_inbox_tx(
     payload: &Value,
 ) -> anyhow::Result<Option<String>> {
     crate::supervisor::store::push_inbox_tx(tx, key, event, assignment_id, bot_id, run_id, payload).await
+}
+
+impl crate::intents::IntentFailureInbox for sqlx::SqlitePool {
+    fn push_failed<'a>(
+        &'a self,
+        tx: &'a mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        intent: &'a crate::intents::Intent,
+        err: &'a str,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send + 'a {
+        async move {
+            push_inbox_tx(
+                tx,
+                &format!("intent_failed:{}", intent.id),
+                "intent_failed",
+                None,
+                Some(&intent.subject_id),
+                None,
+                &serde_json::json!({
+                    "intent_id": intent.id, "kind": intent.kind, "subject_id": intent.subject_id, "host": intent.host,
+                    "attempts": intent.attempts, "last_error": err,
+                    "message": format!("{} 沒能補完（已試 {} 次）：{err}。請人工確認 {} 的狀態。", intent.kind, intent.attempts, intent.subject_id),
+                }),
+            )
+            .await?;
+            Ok(())
+        }
+    }
 }
 
 // ============================================================================

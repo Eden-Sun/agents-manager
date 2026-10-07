@@ -56,7 +56,7 @@ impl HostHooks for App {
             crate::hookrecv::replay_host(&app, &host).await;
             crate::tools::spawn_detect(app.clone(), host.clone());
             // 刪除 handler 的一次性 ssh purge 若在送出前 daemon 就死了，這台的已刪 bot 目錄靠連上時再掃一次收掉（#349）。
-            crate::remote_purge::spawn_sweep(app.clone(), host.clone());
+            crate::runners::remote_purge::spawn_sweep(app.clone(), host.clone());
             // daemon 升級後，長跑的遠端 bot 手上還是舊 shim：連上（重連也一樣）就補版，背景做、不擋連線（issue #124）。
             crate::shim_refresh::spawn_remote_refresh(app.clone(), host.clone());
             // 同一個道理的權限：#494 的收緊在「啟動 bot」那一趟，換版前就在跑的遠端 bot 要等重啟才收得到（issue #501）。

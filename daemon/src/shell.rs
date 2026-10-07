@@ -527,7 +527,7 @@ mod tests {
         let dir = crate::testing::track(std::env::temp_dir().join(format!("am-shell-{}", crate::db::ulid())));
         std::fs::create_dir_all(&dir).unwrap();
         let db = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
-        let cfg = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
+        let cfg = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let client = HerdrClient::new(dir.join("absent.sock"));
         App::new(db, client.clone(), client, cfg, dir.clone(), dir.join("daemon"), 7799, "test".into(), "test".into(), false)
     }

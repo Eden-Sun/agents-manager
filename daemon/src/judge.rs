@@ -839,7 +839,7 @@ mod tests {
             std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let db = crate::app_ports_p1::open(&dir.join("t.sqlite3")).await.unwrap();
-        let store = crate::projection::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(dir.join("config.toml")).await.unwrap();
         let judge = JudgeCfg { key_file: key.to_string_lossy().into_owned(), endpoint: endpoint.into(), ..cfg(enabled, projects) };
         store
             .update(move |c| {

@@ -11,10 +11,21 @@
 
 use anyhow::Result;
 use serde_json::Value;
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
+use std::future::Future;
 
 /// 補做失敗最多試幾次就放棄（使用者 2026-09-20 裁示：重試幾次就放棄、不無限重試）。
 pub const MAX_ATTEMPTS: i64 = 5;
+
+/// Narrow composition port for atomically notifying the supervisor when an intent fails.
+pub trait IntentFailureInbox: Send + Sync {
+    fn push_failed<'a>(
+        &'a self,
+        tx: &'a mut Transaction<'_, Sqlite>,
+        intent: &'a Intent,
+        err: &'a str,
+    ) -> impl Future<Output = Result<()>> + Send + 'a;
+}
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct Intent {
@@ -141,7 +152,7 @@ pub async fn prepare_restart(
     .await?;
     // 讀完舊 intent、還沒寫的那一瞬（測試在這裡讓另一個 writer 插進來）。
     #[cfg(test)]
-    crate::bot_trash::app_ports_p11::race_point::hit("restart_intent_after_read", subject_id).await;
+    restart_intent_after_read(subject_id).await;
     let now = crate::db::now();
     let expires = (chrono::Utc::now() + chrono::Duration::seconds(ttl_secs)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let id = match existing {
@@ -264,23 +275,15 @@ pub async fn fail_and_notify(pool: &SqlitePool, id: &str, err: &str) -> Result<b
         .await?
         .rows_affected();
     if n == 1 {
-        crate::bot_trash::app_ports_p11::push_inbox_tx(
-            &mut tx,
-            &format!("intent_failed:{id}"),
-            "intent_failed",
-            None,
-            Some(&i.subject_id),
-            None,
-            &serde_json::json!({
-                "intent_id": i.id, "kind": i.kind, "subject_id": i.subject_id, "host": i.host,
-                "attempts": i.attempts, "last_error": err,
-                "message": format!("{} 沒能補完（已試 {} 次）：{err}。請人工確認 {} 的狀態。", i.kind, i.attempts, i.subject_id),
-            }),
-        )
-        .await?;
+        pool.push_failed(&mut tx, &i, err).await?;
     }
     tx.commit().await?;
     Ok(n == 1)
+}
+
+#[cfg(test)]
+fn restart_intent_after_read(subject_id: &str) -> impl Future<Output = ()> + '_ {
+    crate::runners::app_ports_p11::race_point::hit("restart_intent_after_read", subject_id)
 }
 
 /// 這一次補做失敗了：記下原因、放回 `pending`（下一輪 recovery 再認領）；用完 [`MAX_ATTEMPTS`] 就直接 `failed`。
@@ -514,7 +517,7 @@ mod tests {
         let subject = format!("bot-814-{}", crate::db::ulid());
         let other_wrote = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
         let (url, seen) = (format!("sqlite://{}", dir.join("t.sqlite").display()), other_wrote.clone());
-        crate::bot_trash::app_ports_p11::race_point::arm("restart_intent_after_read", &subject, move || async move {
+        crate::runners::app_ports_p11::race_point::arm("restart_intent_after_read", &subject, move || async move {
             // 另一條連線、不等鎖：拿得到寫鎖就當場 commit（deferred 時正是這樣），拿不到＝被重啟的交易擋著。
             let mut other = SqliteConnectOptions::from_str(&url).unwrap().busy_timeout(std::time::Duration::ZERO).connect().await.unwrap();
             let wrote = insert_pending_on(&mut other, "restart", "another-bot", "local", &json!({}), 900).await.is_ok();

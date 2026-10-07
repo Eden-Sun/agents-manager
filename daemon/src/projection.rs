@@ -8,19 +8,53 @@ use crate::db;
 use anyhow::{bail, Result};
 use rand::Rng;
 use sqlx::SqlitePool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::panic::Location;
 
-/// config／projection 的組裝側 adapter（P2，crate 拆分第 3 步）；檔案放在 `daemon/src/app_ports_p2.rs`，不碰 `lib.rs`。
-#[path = "app_ports_p2.rs"]
-pub(crate) mod app_ports_p2;
+#[derive(Debug, Default, Clone)]
+pub struct Owned {
+    bot_ids: HashSet<String>,
+    project_ids: HashSet<String>,
+    roles: HashMap<String, &'static str>,
+}
+
+impl Owned {
+    pub fn owns(&self, b: &db::Bot) -> bool {
+        self.bot_ids.contains(&b.id)
+            || b.parent_bot_id.as_ref().is_some_and(|p| self.bot_ids.contains(p))
+            || self.project_ids.contains(&b.project_id)
+    }
+
+    pub fn role(&self, b: &db::Bot) -> &'static str {
+        if let Some(r) = self.roles.get(&b.id) {
+            r
+        } else if b.parent_bot_id.as_ref().is_some_and(|p| self.bot_ids.contains(p)) {
+            "AGM 開出去的子 agent"
+        } else {
+            "AGM 專案裡的常駐工人"
+        }
+    }
+
+    pub(crate) fn add_bot(&mut self, id: String, role: &'static str) {
+        self.roles.entry(id.clone()).or_insert(role);
+        self.bot_ids.insert(id);
+    }
+
+    pub(crate) fn add_project(&mut self, id: String) {
+        self.project_ids.insert(id);
+    }
+
+    pub(crate) fn owns_project_id(&self, id: &str) -> bool {
+        self.project_ids.contains(id)
+    }
+}
 
 /// 投影對 AGM 自己的 bot／專案（`supervisor_owned`）的窄介面：讀「哪些列是 AGM 的」與推一則 `ops_alert`。
 /// 實作在 `SqlitePool` 上（repo context），委派在 `app_ports_p2.rs`，projection 不直接呼叫 supervisor。
 #[allow(async_fn_in_trait)]
 pub trait SupervisorOwnedSource {
     /// `supervisor_owned::load`。
-    async fn load_owned(&self) -> Result<crate::supervisor_owned::Owned>;
+    async fn load_owned(&self) -> Result<Owned>;
     /// `supervisor_owned::alert`：推 `ops_alert` 給巡檢（同一批同一小時收斂成一則）。
     async fn ops_alert(&self, reason: &str, subject: &str, detail: &str);
 }
@@ -657,7 +691,7 @@ fn bulk_removal_check(
     db_projects: &[db::Project],
     live_projects: &HashSet<String>,
     live_bots: &HashSet<String>,
-    owned: &crate::supervisor_owned::Owned,
+    owned: &Owned,
     recently_removed: usize,
 ) -> Result<(), ProjectionRefused> {
     let (gone_bots, gone_projects) = removals(db_bots, db_projects, live_projects, live_bots, None);
@@ -769,7 +803,7 @@ mod tests {
             "[server]\nlisten = '127.0.0.1:7788'\n\n[[projects]]\nid = '{project_id}'\npath = '/tmp'\nlabel = 'demo'\nhost = 'remote'\n\n[[projects.bots]]\nid = '{bot_id}'\nname = 'worker'\nkind = 'claude'\n"
         );
         std::fs::write(&path, text).unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path).await.unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         let error = project_config(&store, &pool).await.unwrap_err().to_string();
         pool.close().await;
@@ -791,7 +825,7 @@ mod tests {
             "[server]\nlisten = '127.0.0.1:7788'\n\n             [[identities]]\nname = 'work'\nkind = 'claude'\n\n             [[projects]]\nid = 'p1'\npath = '/tmp'\nlabel = 'demo'\nhost = 'remote'\n\n             [[projects.bots]]\nid = 'b1'\nname = 'worker'\nkind = 'claude'\nidentity = 'work'\n",
         )
         .unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_config(&store, &pool).await.unwrap();
 
@@ -899,7 +933,7 @@ mod tests {
         let path = dir.join("config.toml");
         let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'local'\nssh = 'me@10.0.0.2'\n";
         std::fs::write(&path, text).unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         let err = project_config_at_startup(&store, &pool, false).await.unwrap_err().to_string();
@@ -918,7 +952,7 @@ mod tests {
         let path = dir.join("config.toml");
         let text = "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'm4p'\nssh = '-oProxyCommand=true'\n";
         std::fs::write(&path, text).unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         let err = project_config_at_startup(&store, &pool, false).await.unwrap_err().to_string();
@@ -941,7 +975,7 @@ mod tests {
             "[server]\nlisten = '127.0.0.1:7788'\n\n[[hosts]]\nname = 'm4p'\nssh = '  me@10.0.0.2  '\nherdr_session = '  '\n",
         )
         .unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         project_config_at_startup(&store, &pool, false).await.expect("空白不該擋開機");
@@ -968,7 +1002,7 @@ mod tests {
 
     async fn project_text(path: &std::path::Path, pool: &SqlitePool, text: &str) -> Result<()> {
         std::fs::write(path, text).unwrap();
-        project_config(&crate::projection::app_ports_p2::load_config(path.to_path_buf()).await.unwrap(), pool).await
+        project_config(&crate::runners::app_ports_p2::load_config(path.to_path_buf()).await.unwrap(), pool).await
     }
 
     #[tokio::test]
@@ -1002,7 +1036,7 @@ mod tests {
             )
         };
         std::fs::write(&path, text("codex")).unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_config(&store, &pool).await.expect("m4p 的 work 是 codex，跟 bot 一致");
 
@@ -1037,7 +1071,7 @@ mod tests {
         assert_eq!(db::live_projects(&pool).await.unwrap().len(), 1);
 
         // 人確認過、帶 env 重啟也不能一次軟刪多顆 bot。
-        let err = project_config_at_startup(&crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap(), &pool, true)
+        let err = project_config_at_startup(&crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap(), &pool, true)
             .await
             .unwrap_err()
             .to_string();
@@ -1058,12 +1092,12 @@ mod tests {
         let path = dir.join("config.toml");
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         std::fs::write(&path, config_text(&["b1"])).unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         project_config(&store, &pool).await.unwrap();
 
         // 使用者清空 config，帶 env 重啟：空設定的舊式明確覆寫仍放行一顆 bot。
         std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         std::env::set_var(ALLOW_BULK_ENV, "1");
         assert!(bulk_delete_allowed_by_env());
         let started = project_config_at_startup(&store, &pool, bulk_delete_allowed_by_env()).await;
@@ -1072,7 +1106,7 @@ mod tests {
 
         // DB 有一顆 bot 時，外部清空後 runtime 重投不能靠 process env 放行。
         std::fs::write(&path, config_text(&["b1"])).unwrap();
-        project_config_at_startup(&crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap(), &pool, false).await.unwrap();
+        project_config_at_startup(&crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap(), &pool, false).await.unwrap();
         std::fs::write(&path, "[server]\nlisten = '127.0.0.1:7788'\n").unwrap();
         store.update(|_| Ok(())).await.unwrap();
         let out = project_config(&store, &pool).await;
@@ -1097,7 +1131,7 @@ mod tests {
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
 
         std::fs::write(&path, config_text(&["b1", "b2", "b3", "b4"])).unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         project_config(&store, &pool).await.unwrap();
 
         // daemon 還活著、store 還在手上，檔案被外面換成另一份（這裡是空的）。
@@ -1127,7 +1161,7 @@ mod tests {
         let path = dir.join("config.toml");
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_text(&path, &pool, &config_text(&["b1", "b2", "b3", "b4"])).await.unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
 
         let before_text = std::fs::read_to_string(&path).unwrap();
         let err = update_and_project(&store, &pool, |cfg| {
@@ -1176,7 +1210,7 @@ mod tests {
             .unwrap();
 
         std::fs::write(&path, config_text(&["supervisor"])).unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
         let err = project_config_at_startup(&store, &pool, true).await.unwrap_err().to_string();
         assert!(err.contains("supervisor child") && err.contains("build"), "{err}");
         assert_eq!(db::live_bots(&pool).await.unwrap().len(), 2, "明確 bulk override 也不能刪 supervisor child");
@@ -1194,7 +1228,7 @@ mod tests {
         let path = dir.join("config.toml");
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_text(&path, &pool, &config_text(&["b1", "b2"])).await.unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
 
         update_and_project(&store, &pool, |cfg| {
             cfg.projects[0].label = "renamed".into();
@@ -1226,7 +1260,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let store = crate::projection::app_ports_p2::load_config(path.clone()).await.unwrap();
+        let store = crate::runners::app_ports_p2::load_config(path.clone()).await.unwrap();
 
         let err = update_and_project(&store, &pool, |cfg| {
             let mut bot = cfg.projects[0].bots[0].clone();
@@ -1272,7 +1306,7 @@ mod tests {
         let path = dir.join("config.toml");
         let pool = crate::app_ports_p1::open(&dir.join("db.sqlite3")).await.unwrap();
         project_text(&path, &pool, &config_text(bots)).await.unwrap();
-        (dir, crate::projection::app_ports_p2::load_config(path).await.unwrap(), pool)
+        (dir, crate::runners::app_ports_p2::load_config(path).await.unwrap(), pool)
     }
 
     /// 刪掉一個含多顆 bot 的專案仍是正常操作：授權範圍從當下的 TOML 算出來。

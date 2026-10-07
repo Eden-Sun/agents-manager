@@ -18,13 +18,13 @@ fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
 }
 
-/// 這台主機、這個實例的回收區（`<home>/<root>/bots-trash`），跟 `remote_bot_dir` 同一個根。
-async fn trash_dir(conn: &HostConn) -> Result<String> {
-    Ok(trash_dir_for(&conn.home().await?))
+/// 這台主機、這個實例的回收區（`<home>/<root>/bots-trash`），跟 bot 目錄使用同一個根。
+async fn trash_dir(conn: &HostConn, remote_root: &str) -> Result<String> {
+    Ok(trash_dir_for(&conn.home().await?, remote_root))
 }
 
-fn trash_dir_for(home: &str) -> String {
-    format!("{home}/{}/bots-trash", crate::startup::remote_root_for(crate::startup::instance().as_deref()))
+fn trash_dir_for(home: &str, remote_root: &str) -> String {
+    format!("{home}/{remote_root}/bots-trash")
 }
 
 /// Check every component below the trusted home and pin later GC/restore paths to the opened directory.
@@ -57,9 +57,8 @@ T=.
 }
 
 /// 把遠端的 `bots/<id>/` 搬進回收區。回搬到哪裡；目錄本來就不在回 `None`。
-pub async fn move_in(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
-    let dir = crate::bot_trash::app_ports_p11::remote_bot_dir(conn, bot_id).await?.dir;
-    let dest = format!("{}/{bot_id}.{}", trash_dir(conn).await?, now_ms());
+pub async fn move_in(conn: &HostConn, bot_id: &str, dir: &str, remote_root: &str) -> Result<Option<String>> {
+    let dest = format!("{}/{bot_id}.{}", trash_dir(conn, remote_root).await?, now_ms());
     let script = format!(
         "set -e\nD={d}\nif [ -e \"$D\" ]; then\n  mkdir -p \"$(dirname {t})\"\n  mv \"$D\" {t}\n  printf 'AM_TRASHED\\n'\nelse\n  printf 'AM_NOTHING\\n'\nfi\n",
         d = sh_quote(&dir),
@@ -76,10 +75,9 @@ pub async fn move_in(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
 }
 
 /// 還原：遠端 `bots/<id>/` 還不在時，把回收區裡這顆最新的那份搬回去。symlink 只拆連結再搬回；真目錄或檔案已在回 `None`。
-pub async fn restore(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
-    let dir = crate::bot_trash::app_ports_p11::remote_bot_dir(conn, bot_id).await?.dir;
+pub async fn restore(conn: &HostConn, bot_id: &str, dir: &str, remote_root: &str) -> Result<Option<String>> {
     let home = conn.home().await?;
-    let trash_dir = trash_dir_for(&home);
+    let trash_dir = trash_dir_for(&home, remote_root);
     let guard = trash_root_guard(&home, "printf 'AM_NONE\\n'");
     let script = format!(
         "set -e\nD={d}\nT={t}\ntrash=$T\n{guard}if [ -L \"$D\" ]; then rm \"$D\"; fi\nif [ -e \"$D\" ] || [ -L \"$D\" ]; then printf 'AM_KEPT\\n'; exit 0; fi\nbest=\nbm=0\nfor e in {id}.*; do\n  [ -d \"$e\" ] || continue\n  ms=${{e##*.}}\n  case \"$ms\" in ''|*[!0-9]*) continue;; esac\n  if [ \"$ms\" -gt \"$bm\" ]; then bm=$ms; best=$e; fi\ndone\nif [ -z \"$best\" ]; then printf 'AM_NONE\\n'; exit 0; fi\nmkdir -p \"$(dirname \"$D\")\"\nmv \"$best\" \"$D\"\nprintf 'AM_RESTORED %s/%s\\n' \"$trash\" \"$best\"\n",
@@ -108,11 +106,11 @@ pub async fn restore(conn: &HostConn, bot_id: &str) -> Result<Option<String>> {
 /// **跟 [`restore`] 不互斥**：`restore` 挑中一份剛好跨過期限的、而這裡在它 `mv` 之前就 `rm -rf` 掉，
 /// `restore` 的 `set -e` 會讓腳本失敗、[`restore_for`] 記一行 warn 不擋還原。窗口極窄（那一份本來下一輪
 /// 也要過期），代價是那個目錄拿不回來，不值得為它加鎖。
-pub async fn gc(conn: &HostConn, keep: Duration, max_bytes: u64) -> Result<(usize, usize)> {
+pub async fn gc(conn: &HostConn, remote_root: &str, keep: Duration, max_bytes: u64) -> Result<(usize, usize)> {
     let cutoff = now_ms().saturating_sub(keep.as_millis());
     let max_kb = max_bytes / 1024;
     let home = conn.home().await?;
-    let trash_dir = trash_dir_for(&home);
+    let trash_dir = trash_dir_for(&home, remote_root);
     let guard = trash_root_guard(&home, "printf 'AM_TRASH_GC 0 0\\n'");
     // basename 是 `move_in` 造的 `<bot_id>.<毫秒>`（ULID，不含空白），所以第二道可以用行為單位排序；
     // 不是這個形狀的一律不動——那不是我們放的。`$T` 本身有空白也沒關係，只有 basename 進 sort。
@@ -162,52 +160,10 @@ pub async fn gc(conn: &HostConn, keep: Duration, max_bytes: u64) -> Result<(usiz
         .ok_or_else(|| anyhow::anyhow!("remote bots-trash gc did not confirm: {}", out.trim()))
 }
 
-/// `restore_bot` 用：bot 在遠端就把目錄搬回來，並忘掉「已清掉」的記號——之後再刪一次，掃描才會再搬它。
-/// 搬不回來不擋還原（下次啟動會重建需要的檔；回收區那份留到過期），只記 log。
-pub async fn restore_for(app: &(impl crate::capabilities::Db + crate::hosts::HostsAccess + crate::login_assist::LoginPanes + crate::quota::QuotaStaleKeys + crate::quota::QuotaTables), bot_id: &str) {
-    let host = match crate::db::bot_host(app.db(), bot_id).await {
-        Ok(h) if h != crate::config::LOCAL_HOST => h,
-        Ok(_) => return,
-        Err(e) => {
-            tracing::warn!(bot = %bot_id, error = %e, "could not read the bot's host; remote bots-trash not restored");
-            return;
-        }
-    };
-    crate::remote_purge::forget(app, bot_id).await;
-    let Some(conn) = app.hosts().get(&host).await else {
-        tracing::warn!(host, bot = %bot_id, "unknown host; remote bot dir not restored from bots-trash");
-        return;
-    };
-    match restore(&conn, bot_id).await {
-        Ok(Some(from)) => tracing::info!(host, bot = %bot_id, %from, "restored remote bot config dir from bots-trash"),
-        Ok(None) => {}
-        Err(e) => tracing::warn!(host, bot = %bot_id, error = %format!("{e:#}"), "could not restore remote bot config dir from bots-trash"),
-    }
-}
-
-/// 主機連上時清一次過期的。
-pub async fn gc_host(app: &impl crate::hosts::HostsAccess, host: &str) {
-    let Some(conn) = app.hosts().get(host).await else { return };
-    if conn.is_local() {
-        return;
-    }
-    // 保留期與總量上限都跟本機同一個值（#441）：同一套政策，兩邊不必分開記。
-    match gc(&conn, Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400), crate::bot_trash::MAX_BYTES).await {
-        Ok((0, 0)) => {}
-        Ok((expired, evicted)) => {
-            if evicted > 0 {
-                tracing::warn!(host, expired, evicted, "remote bots-trash is over its size cap; removed the oldest entries");
-            } else {
-                tracing::info!(host, expired, "removed expired remote bots-trash entries");
-            }
-        }
-        Err(e) => tracing::warn!(host, error = %format!("{e:#}"), "could not clean the remote bots-trash"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runners::remote_trash::restore_for;
     use crate::testing as tt;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -242,6 +198,10 @@ mod tests {
         (env, root)
     }
 
+    fn test_remote_root() -> String {
+        crate::startup::remote_root_for(crate::startup::instance().as_deref())
+    }
+
     fn entries(dir: &Path) -> Vec<String> {
         let mut v: Vec<String> = std::fs::read_dir(dir).map(|r| r.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
         v.sort();
@@ -260,7 +220,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("spool")).unwrap();
         std::fs::write(dir.join("spool/ev.json"), "pending").unwrap();
 
-        assert!(crate::bot_trash::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
+        assert!(crate::runners::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
         assert!(!dir.exists(), "搬走了");
         let trashed = entries(&root.join("bots-trash"));
         assert_eq!(trashed.len(), 1, "{trashed:?}");
@@ -269,14 +229,14 @@ mod tests {
         assert!(purged.is_some(), "照舊記下已處理");
 
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(crate::db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
-        crate::bot_trash::app_ports_p11::test_helpers::restore_bot(app.clone(), bot.id.clone()).await.unwrap();
+        crate::runners::app_ports_p11::test_helpers::restore_bot(app.clone(), bot.id.clone()).await.unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("spool/ev.json")).unwrap(), "pending", "還原 API 把 spool 裡的東西拿回來");
         assert!(entries(&root.join("bots-trash")).is_empty());
         let row: Option<String> = sqlx::query_scalar("SELECT bot_id FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_optional(&app.db).await.unwrap();
         assert!(row.is_none(), "還原後忘掉記號：再刪一次，掃描才會再搬");
 
         // 還原時目錄已經在（重建過）就不動回收區那份。
-        assert!(crate::bot_trash::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
+        assert!(crate::runners::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
         std::fs::create_dir_all(&dir).unwrap();
         restore_for(&app, &bot.id).await;
         assert_eq!(entries(&root.join("bots-trash")).len(), 1, "不蓋掉已經在的目錄");
@@ -284,7 +244,7 @@ mod tests {
 
         // 目錄本來就不在：什麼都不搬，照樣算處理完。
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(crate::bot_trash::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
+        assert!(crate::runners::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-roundtrip").await);
         assert_eq!(entries(&root.join("bots-trash")).len(), 1);
     }
 
@@ -345,9 +305,9 @@ mod tests {
         for name in [format!("aaa.{old}"), format!("bbb.{fresh}"), "notes.txt.bak".into(), "ccc".into()] {
             std::fs::create_dir_all(trash.join(name)).unwrap();
         }
-        assert_eq!(gc(&conn, Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400), crate::bot_trash::MAX_BYTES).await.unwrap(), (1, 0));
+        assert_eq!(gc(&conn, &test_remote_root(), Duration::from_secs(crate::bot_trash::KEEP_DAYS * 86_400), crate::bot_trash::MAX_BYTES).await.unwrap(), (1, 0));
         assert_eq!(entries(&trash), vec!["bbb.".to_string() + &fresh.to_string(), "ccc".into(), "notes.txt.bak".into()]);
-        gc_host(&env.app, "trashbox-gc").await;
+        crate::runners::remote_trash::gc_host(&env.app, "trashbox-gc").await;
         assert_eq!(entries(&trash).len(), 3, "沒有過期的就不動");
     }
 
@@ -372,11 +332,11 @@ mod tests {
         let (old, mid, new) = (seed(&trash, "b1", now - 3_000, 64), seed(&trash, "b2", now - 2_000, 64), seed(&trash, "b3", now - 1_000, 64));
 
         // 沒超量、也沒過期：一個都不動。
-        assert_eq!(gc(&conn, keep_long, 100 * 1024 * 1024).await.unwrap(), (0, 0));
+        assert_eq!(gc(&conn, &test_remote_root(), keep_long, 100 * 1024 * 1024).await.unwrap(), (0, 0));
         assert!(old.exists() && mid.exists() && new.exists());
 
         // 上限只容得下一份：最舊的兩份走，最新那份留著。
-        assert_eq!(gc(&conn, keep_long, 100 * 1024).await.unwrap(), (0, 2));
+        assert_eq!(gc(&conn, &test_remote_root(), keep_long, 100 * 1024).await.unwrap(), (0, 2));
         assert!(!old.exists() && !mid.exists(), "最舊的先清");
         assert!(new.exists(), "最新那一份永遠留著");
     }
@@ -392,7 +352,7 @@ mod tests {
         let mid = seed(&trash, "b2", now - 2_000, 64);
         let new = seed(&trash, "b3", now - 1_000, 64);
 
-        assert_eq!(gc(&conn, Duration::from_millis(5_000), 100 * 1024).await.unwrap(), (1, 1));
+        assert_eq!(gc(&conn, &test_remote_root(), Duration::from_millis(5_000), 100 * 1024).await.unwrap(), (1, 1));
         assert!(!mid.exists() && new.exists());
         assert_eq!(entries(&trash), vec![new.file_name().unwrap().to_string_lossy().into_owned()]);
     }
@@ -407,7 +367,7 @@ mod tests {
         std::fs::create_dir_all(trash.join("not-a-trash-entry")).unwrap();
         std::fs::write(trash.join("README"), "x").unwrap();
 
-        assert_eq!(gc(&conn, Duration::ZERO, 0).await.unwrap(), (0, 0));
+        assert_eq!(gc(&conn, &test_remote_root(), Duration::ZERO, 0).await.unwrap(), (0, 0));
         assert_eq!(entries(&trash), vec!["README".to_string(), "not-a-trash-entry".into()]);
     }
 
@@ -424,7 +384,7 @@ mod tests {
         std::fs::write(victim.join("keep.txt"), "outside data").unwrap();
         symlink(&outside, root.join("bots-trash")).unwrap();
 
-        gc(&conn, Duration::ZERO, 0).await.unwrap();
+        gc(&conn, &test_remote_root(), Duration::ZERO, 0).await.unwrap();
 
         assert!(victim.join("keep.txt").exists(), "remote GC must never traverse the trash-root symlink");
     }
@@ -443,7 +403,7 @@ mod tests {
         std::fs::write(victim.join("keep.txt"), "outside data").unwrap();
         symlink(&outside_config, home.join(".config")).unwrap();
 
-        gc(&conn, Duration::ZERO, 0).await.unwrap();
+        gc(&conn, &test_remote_root(), Duration::ZERO, 0).await.unwrap();
 
         assert!(victim.join("keep.txt").exists(), "remote GC must never traverse a parent symlink");
     }
@@ -461,7 +421,7 @@ mod tests {
         std::fs::write(external.join("keep.txt"), "outside data").unwrap();
         symlink(&outside, root.join("bots-trash")).unwrap();
 
-        assert_eq!(restore(&conn, "b1").await.unwrap(), None);
+        assert_eq!(restore(&conn, "b1", &format!("{}/bots/b1", root.display()), &test_remote_root()).await.unwrap(), None);
 
         assert!(external.join("keep.txt").exists(), "restore must not move an entry reached through the trash-root symlink");
         assert!(!root.join("bots/b1").exists(), "an outside entry must not be restored as a bot directory");
@@ -481,7 +441,7 @@ mod tests {
         std::fs::write(external.join("keep.txt"), "outside data").unwrap();
         symlink(&outside_config, home.join(".config")).unwrap();
 
-        assert_eq!(restore(&conn, "b1").await.unwrap(), None);
+        assert_eq!(restore(&conn, "b1", &format!("{}/bots/b1", root.display()), &test_remote_root()).await.unwrap(), None);
 
         assert!(external.join("keep.txt").exists(), "restore must not move an entry through a parent symlink");
         assert!(!outside_config.join("agents-manager/bots/b1").exists(), "outside entries must not be restored as bots");
@@ -502,7 +462,7 @@ mod tests {
         let ours = seed(&trash, "b1", now - 1_000, 64);
 
         // 上限 0：我們自己的只剩最新那一份（永遠留著），帶空白的那個一個位元組都沒被動到。
-        assert_eq!(gc(&conn, Duration::from_secs(3600), 0).await.unwrap(), (0, 0));
+        assert_eq!(gc(&conn, &test_remote_root(), Duration::from_secs(3600), 0).await.unwrap(), (0, 0));
         assert!(spaced.exists() && ours.exists());
     }
 
@@ -519,7 +479,7 @@ mod tests {
         std::fs::create_dir_all(trash.join(format!("bbb.{fresh}"))).unwrap();
 
         // 5 分鐘那一輪對每台已連線的遠端主機做的事，就是這一行（`remote_purge::spawn_poller`）。
-        assert_eq!(crate::remote_purge::sweep(&env.app, "trashbox-poll").await, (0, 0), "沒有欠著的目錄");
+        assert_eq!(crate::runners::remote_purge::sweep(&env.app, "trashbox-poll").await, (0, 0), "沒有欠著的目錄");
 
         assert_eq!(entries(&trash), vec!["bbb.".to_string() + &fresh.to_string()], "過期的清掉、沒過期的留著");
     }
@@ -533,7 +493,7 @@ mod tests {
         let dir = root.join("bots").join(&bot.id);
         std::fs::create_dir_all(&dir).unwrap();
         crate::hosts::set_ssh_fake("trashbox-down", |_| bail!("ssh: connect to host: Connection refused"));
-        assert!(!crate::bot_trash::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-down").await);
+        assert!(!crate::runners::app_ports_p11::purge_bot_dir(&app, &bot.id, "trashbox-down").await);
         assert!(dir.exists());
         let (purged, attempts): (Option<String>, i64) =
             sqlx::query_as("SELECT purged_at, attempts FROM remote_bot_dir_purges WHERE bot_id = ?").bind(&bot.id).fetch_one(&app.db).await.unwrap();

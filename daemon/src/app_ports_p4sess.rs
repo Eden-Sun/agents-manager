@@ -88,7 +88,7 @@ impl RemoteCleanupPort for Arc<App> {
         crate::remote_purge::record(self, bot_id, host, ok, error).await
     }
     async fn move_remote_bot_dir_to_trash(&self, conn: &crate::hosts::HostConn, bot_id: &str) -> Result<Option<String>> {
-        crate::remote_trash::move_in(conn, bot_id).await
+        crate::runners::remote_trash::move_in(conn, bot_id).await
     }
 }
 

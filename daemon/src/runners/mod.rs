@@ -4,6 +4,8 @@
 //! 下層模組只保留核心邏輯。
 
 pub mod ask_answers;
+pub(crate) mod app_ports_p11;
+pub(crate) mod app_ports_p2;
 pub mod autostart_revive;
 pub mod background_hook;
 pub mod background_jobs;
@@ -34,6 +36,9 @@ pub mod quota_claude;
 pub mod quota_grok;
 pub mod reconcile;
 pub mod release_triage;
+pub mod remote_purge;
+pub mod remote_trash;
+pub mod restart_intents;
 pub mod rewind;
 pub mod session_paused;
 pub mod tui_prompts;

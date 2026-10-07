@@ -144,7 +144,7 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
     if op.state == "planned" {
         let used_name = std::sync::Mutex::new(op.name.clone());
         let wanted = op.name.clone();
-        let db_names = crate::bot_trash::app_ports_p11::live_bot_names(&app.db, &source.project_id).await.map_err(up)?;
+        let db_names = crate::runners::app_ports_p11::live_bot_names(&app.db, &source.project_id).await.map_err(up)?;
         let res = crate::projection::update_and_project(&app.cfg, &app.db, |cfg| {
             let p = cfg
                 .projects
@@ -164,7 +164,7 @@ async fn finish(app: &Arc<App>, mut op: ForkOp) -> Result<Response, LcError> {
             let mut src: BotCfg = p.bots[at].clone();
             src.model = src.model.as_deref().map(|m| crate::models::canonical_model(&src.kind, m).to_string());
             let taken = |n: &str| db_names.iter().any(|x| x == n) || p.bots.iter().any(|x| x.name == n);
-            let name = if taken(&wanted) { crate::bot_trash::app_ports_p11::next_free_name(&wanted, &taken) } else { wanted.clone() };
+            let name = if taken(&wanted) { crate::runners::app_ports_p11::next_free_name(&wanted, &taken) } else { wanted.clone() };
             *used_name.lock().unwrap() = name.clone();
             // 設定照抄（模型、強度、身份、env、人設、args）：同一個帳號目錄才找得到那段對話。
             // autostart 不抄——fork 是一次性的分岔，不該每次開 daemon 都多一顆。

@@ -340,7 +340,7 @@ pub(crate) mod tests {
         let bot = tt::claude_bot(&app, &sh.project_id, "alfa").await;
         sqlx::query("UPDATE bots SET deleted_at = ? WHERE id = ?").bind(db::now()).bind(&bot.id).execute(&app.db).await.unwrap();
 
-        assert_eq!(crate::remote_purge::sweep(&app, HOST).await, (0, 0));
+        assert_eq!(crate::runners::remote_purge::sweep(&app, HOST).await, (0, 0));
         assert!(!crate::lifecycle::purge_bot_dir(&app, &bot.id, HOST).await);
         let marks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM remote_bot_dir_purges").fetch_one(&app.db).await.unwrap();
         assert_eq!(marks, 0, "沒去碰，也不記成欠著");
