@@ -172,8 +172,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/bots/{id}/pane/move-to-tab", post(move_bot_pane_to_tab))
         .route("/bots/{id}/prompt", post(prompt_bot))
         // 分享 bot（SPEC「分享 bot」）：只收 UI token，handler 自己再擋一次 principal。
-        .route("/bots/{id}/share", get(crate::share::admin::get_share).post(crate::share::admin::post_share))
-        .route("/bots/{id}/share/rotate", post(crate::share::admin::post_rotate))
+        .route("/bots/{id}/share", get(crate::runners::share_admin::get_share).post(crate::runners::share_admin::post_share))
+        .route("/bots/{id}/share/rotate", post(crate::runners::share_admin::post_rotate))
         .route(
             "/bots/{id}/attachments",
             post(upload_attachment)
@@ -336,7 +336,7 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .nest("/api", api)
         .route("/ws", get(ws_handler))
-        .route("/hook/{provider}", post(crate::hookrecv::receive))
+        .route("/hook/{provider}", post(crate::runners::hookrecv::receive))
         .route("/relay/announce", post(relay_announce))
         // Credential-bearing pane creation is fenced against concurrent credential rotation.
         .route("/relay/spawn/begin", post(crate::runners::credential_spawn::begin))

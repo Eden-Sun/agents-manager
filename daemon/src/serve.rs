@@ -238,7 +238,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
         }
     }
 
-    hookrecv::replay_host(&app, config::LOCAL_HOST).await;
+    runners::hookrecv::replay_host(&app, config::LOCAL_HOST).await;
 
     tools::spawn_detect(app.clone(), config::LOCAL_HOST.to_string());
     // 這顆 binary 是哪一版、什麼時候**上線**的（`GET /api/supervisor` 的 `last_deploy`）。
@@ -277,7 +277,7 @@ pub async fn serve(config_path: Option<PathBuf>, dev_watch_all_panes: bool) -> R
     crate::runners::upstream_update::spawn(app.clone());
     // SPEC §11.4.4: remote hook spools whose status event never arrived (one ssh per host, 30s).
     runners::hook_inbox::spawn_worker(app.clone());
-    hookrecv::spawn_spool_scanner(app.clone());
+    runners::hookrecv::spawn_spool_scanner(app.clone());
     // §6.5e：pane 裡開始跑 dev server 沒有任何 herdr 事件，對帳又不定期跑；表上的 kind／port 靠這個跟上。
     panes::spawn_scanner(app.clone());
     // issue #90：名額持有者沒續約（掛了、被砍）就收回，不必等下一個人來要才發現。
